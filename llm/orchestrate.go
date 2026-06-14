@@ -340,6 +340,11 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			totalUsage.Add(&stepUsage)
 
+			// If context was cancelled during streaming, stop immediately.
+			if ctx.Err() != nil {
+				break
+			}
+
 			// No tool calls or not a tool-calls finish → done
 			if lastFinishReason != FinishReasonToolCalls || len(stepToolCalls) == 0 || !hasExecutableTools(stepToolCalls, toolMap) {
 				stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, nil, &stepUsage)

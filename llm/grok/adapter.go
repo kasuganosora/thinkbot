@@ -74,7 +74,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			usage            llm.Usage
 			responseID       string
 			responseModel    string
-			pendingToolCalls = map[string]*grokStreamingToolCall{}
+			pendingToolCalls = map[int]*grokStreamingToolCall{}
 		)
 
 		flush := func() {
@@ -122,13 +122,12 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 				}
 
 				// Tool calls
-				for tcIdx, tc := range choice.Delta.ToolCalls {
+				for _, tc := range choice.Delta.ToolCalls {
 					flush()
 					// Use index-based key for reliability across streaming deltas.
 					// Subsequent delta frames for the same tool call share the same index
 					// but may omit id and function.name.
-					key := fmt.Sprintf("%d", tcIdx)
-					stc, exists := pendingToolCalls[key]
+					stc, exists := pendingToolCalls[tc.Index]
 					if !exists {
 						id := tc.ID
 						name := tc.Function.Name
@@ -136,7 +135,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 							id = name
 						}
 						stc = &grokStreamingToolCall{id: id, name: name}
-						pendingToolCalls[key] = stc
+						pendingToolCalls[tc.Index] = stc
 						send(&llm.ToolInputStartPart{ID: stc.id, ToolName: stc.name})
 					}
 					// Update id/name if this frame carries them (first frame usually does)

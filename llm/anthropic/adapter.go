@@ -189,6 +189,10 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					usage.CachedInputTokens = event.Usage.CacheReadTokens
 					usage.InputTokenDetails.CacheReadTokens = event.Usage.CacheReadTokens
 					usage.InputTokenDetails.CacheWriteTokens = event.Usage.CacheCreationTokens
+					if event.Usage.CacheCreation != nil {
+						usage.InputTokenDetails.CacheWrite5mTokens = event.Usage.CacheCreation.Ephemeral5mTokens
+						usage.InputTokenDetails.CacheWrite1hTokens = event.Usage.CacheCreation.Ephemeral1hTokens
+					}
 				}
 
 			case EventMessageStop:
@@ -476,8 +480,14 @@ func anthropicResponseToResult(resp *MessageResponse) *llm.GenerateResult {
 		InputTokenDetails: llm.InputTokenDetail{
 			CacheReadTokens:  resp.Usage.CacheReadTokens,
 			CacheWriteTokens: resp.Usage.CacheCreationTokens,
-			NoCacheTokens:    resp.Usage.InputTokens - resp.Usage.CacheReadTokens,
+			NoCacheTokens:    max(0, resp.Usage.InputTokens-resp.Usage.CacheReadTokens),
 		},
+	}
+
+	// Propagate TTL-specific cache creation breakdown if available.
+	if resp.Usage.CacheCreation != nil {
+		result.Usage.InputTokenDetails.CacheWrite5mTokens = resp.Usage.CacheCreation.Ephemeral5mTokens
+		result.Usage.InputTokenDetails.CacheWrite1hTokens = resp.Usage.CacheCreation.Ephemeral1hTokens
 	}
 
 	var hasToolCall bool

@@ -127,6 +127,7 @@ type ImageURL struct {
 
 // ToolCall 工具调用。
 type ToolCall struct {
+	Index    int          `json:"index,omitempty"` // 流式 delta 中的索引
 	ID       string       `json:"id"`
 	Type     string       `json:"type"` // "function"
 	Function FunctionCall `json:"function"`
