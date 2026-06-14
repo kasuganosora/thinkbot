@@ -1,27 +1,119 @@
-package grok
+package openai
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	httputil "github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
 // ============================================================================
-// Provider 接口适配器
+// Chat Completions — 同步（非流式）
 // ============================================================================
 
-// Name 实现 llm.Provider。
-func (c *Client) Name() string { return "grok" }
-
-// DoGenerate 将统一 GenerateParams 转换为 xAI Chat Completions 请求并返回统一 GenerateResult。
-func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
-	if params.Model == nil {
-		return nil, fmt.Errorf("grok: model is required")
+// DoChatCompletion 发送同步 Chat Completions 请求并返回完整响应。
+func (c *Client) DoChatCompletion(ctx context.Context, req ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	if req.Model == "" {
+		return nil, fmt.Errorf("openai: model is required")
+	}
+	if len(req.Messages) == 0 {
+		return nil, fmt.Errorf("openai: messages must not be empty")
 	}
 
-	req, err := paramsToGrokRequest(&params)
+	req.Stream = false
+
+	resp, err := c.newRequest("POST", c.chatPath).
+		SetContext(ctx).
+		SetJSONBody(req).
+		Do()
+	if err != nil {
+		return nil, parseAPIError(resp, err)
+	}
+
+	var result ChatCompletionResponse
+	if err := resp.JSON(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ============================================================================
+// Chat Completions — 流式（SSE）
+// ============================================================================
+
+// ChatStreamConfig 流式请求的额外配置。
+type ChatStreamConfig struct {
+	WatchdogTimeout time.Duration
+	RetryConfig     *retry.Config
+}
+
+// DoStreamChatCompletion 发送流式 Chat Completions 请求，通过回调处理每个 chunk。
+func (c *Client) DoStreamChatCompletion(
+	ctx context.Context,
+	req ChatCompletionRequest,
+	cfg ChatStreamConfig,
+	onChunk func(ChatCompletionResponse) error,
+) error {
+	if req.Model == "" {
+		return fmt.Errorf("openai: model is required")
+	}
+	if len(req.Messages) == 0 {
+		return fmt.Errorf("openai: messages must not be empty")
+	}
+
+	req.Stream = true
+	req.StreamOptions = &ChatStreamOptions{IncludeUsage: true}
+
+	sseCfg := httputil.SSEConfig{
+		OnEvent: func(event httputil.SSEEvent) error {
+			if strings.TrimSpace(event.Data) == "[DONE]" {
+				return nil
+			}
+			var chunk ChatCompletionResponse
+			if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
+				return err
+			}
+			return onChunk(chunk)
+		},
+		OnError: func(err error) {
+			log.Logger.Debugw("openai chat stream error", "err", err)
+		},
+	}
+
+	if cfg.WatchdogTimeout > 0 {
+		sseCfg.WatchdogTimeout = cfg.WatchdogTimeout
+	}
+	if cfg.RetryConfig != nil {
+		sseCfg.RetryConfig = cfg.RetryConfig
+	}
+
+	r := c.newRequest("POST", c.chatPath).
+		SetContext(ctx).
+		SetJSONBody(req)
+
+	return r.DoSSE(sseCfg)
+}
+
+// ============================================================================
+// Chat Completions — 统一 Provider 接口适配
+// ============================================================================
+
+type chatStreamingToolCall struct {
+	id       string
+	name     string
+	args     string
+	finished bool
+}
+
+// doGenerateChat 通过 Chat Completions API 执行 DoGenerate。
+func (c *Client) doGenerateChat(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	req, err := paramsToChatRequest(&params)
 	if err != nil {
 		return nil, err
 	}
@@ -31,16 +123,12 @@ func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*ll
 		return nil, err
 	}
 
-	return grokResponseToResult(resp), nil
+	return chatResponseToResult(resp), nil
 }
 
-// DoStream 将统一 GenerateParams 转换为 xAI 流式请求并返回统一 StreamResult。
-func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
-	if params.Model == nil {
-		return nil, fmt.Errorf("grok: model is required")
-	}
-
-	req, err := paramsToGrokRequest(&params)
+// doStreamChat 通过 Chat Completions API 执行 DoStream。
+func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
+	req, err := paramsToChatRequest(&params)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +162,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			usage            llm.Usage
 			responseID       string
 			responseModel    string
-			pendingToolCalls = map[int]*grokStreamingToolCall{}
+			pendingToolCalls = map[int]*chatStreamingToolCall{}
 		)
 
 		flush := func() {
@@ -88,7 +176,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			}
 		}
 
-		streamErr := c.DoStreamChatCompletion(ctx, *req, StreamConfig{}, func(chunk ChatCompletionResponse) error {
+		streamErr := c.DoStreamChatCompletion(ctx, *req, ChatStreamConfig{}, func(chunk ChatCompletionResponse) error {
 			responseID = chunk.ID
 			responseModel = chunk.Model
 
@@ -124,9 +212,6 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 				// Tool calls
 				for _, tc := range choice.Delta.ToolCalls {
 					flush()
-					// Use index-based key for reliability across streaming deltas.
-					// Subsequent delta frames for the same tool call share the same index
-					// but may omit id and function.name.
 					stc, exists := pendingToolCalls[tc.Index]
 					if !exists {
 						id := tc.ID
@@ -134,11 +219,10 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 						if id == "" {
 							id = name
 						}
-						stc = &grokStreamingToolCall{id: id, name: name}
+						stc = &chatStreamingToolCall{id: id, name: name}
 						pendingToolCalls[tc.Index] = stc
 						send(&llm.ToolInputStartPart{ID: stc.id, ToolName: stc.name})
 					}
-					// Update id/name if this frame carries them (first frame usually does)
 					if tc.ID != "" && stc.id == "" {
 						stc.id = tc.ID
 					}
@@ -153,8 +237,8 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 
 				// Finish reason
 				if choice.FinishReason != "" {
-					rawFinishReason = string(choice.FinishReason)
-					finishReason = mapGrokFinishReason(choice.FinishReason)
+					rawFinishReason = choice.FinishReason
+					finishReason = mapChatFinishReason(choice.FinishReason)
 				}
 			}
 			return nil
@@ -194,7 +278,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: fmt.Errorf("grok: stream failed: %w", streamErr)})
+			send(&llm.ErrorPart{Error: fmt.Errorf("openai: chat stream failed: %w", streamErr)})
 		}
 
 		send(&llm.FinishPart{
@@ -208,23 +292,18 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 }
 
 // ============================================================================
-// 类型转换
+// Chat Completions — 类型转换
 // ============================================================================
 
-type grokStreamingToolCall struct {
-	id       string
-	name     string
-	args     string
-	finished bool
-}
-
-func paramsToGrokRequest(params *llm.GenerateParams) (*ChatCompletionRequest, error) {
+func paramsToChatRequest(params *llm.GenerateParams) (*ChatCompletionRequest, error) {
 	req := &ChatCompletionRequest{
-		Model:       params.Model.ID,
-		Temperature: params.Temperature,
-		TopP:        params.TopP,
-		MaxTokens:   params.MaxTokens,
-		Seed:        params.Seed,
+		Model:            params.Model.ID,
+		Temperature:      params.Temperature,
+		TopP:             params.TopP,
+		MaxTokens:        params.MaxTokens,
+		Seed:             params.Seed,
+		FrequencyPenalty: params.FrequencyPenalty,
+		PresencePenalty:  params.PresencePenalty,
 	}
 
 	if len(params.StopSequences) > 0 {
@@ -232,15 +311,8 @@ func paramsToGrokRequest(params *llm.GenerateParams) (*ChatCompletionRequest, er
 		req.Stop = data
 	}
 
-	if params.FrequencyPenalty != nil {
-		req.FrequencyPenalty = params.FrequencyPenalty
-	}
-	if params.PresencePenalty != nil {
-		req.PresencePenalty = params.PresencePenalty
-	}
-
-	// 消息转换
-	messages, err := convertUnifiedToGrokMessages(params.System, params.Messages)
+	// 消息转换（含 system）
+	messages, err := convertUnifiedToChatMessages(params.System, params.Messages)
 	if err != nil {
 		return nil, err
 	}
@@ -248,30 +320,25 @@ func paramsToGrokRequest(params *llm.GenerateParams) (*ChatCompletionRequest, er
 
 	// 工具转换
 	if len(params.Tools) > 0 {
-		req.Tools = convertUnifiedToGrokTools(params.Tools)
+		req.Tools = convertUnifiedToChatTools(params.Tools)
 		if params.ToolChoice != nil {
-			req.ToolChoice = toJSONRaw(params.ToolChoice)
+			req.ToolChoice = toJSONRawMessage(params.ToolChoice)
 		}
 	}
 
 	// 响应格式
 	if params.ResponseFormat != nil {
-		req.ResponseFormat = convertUnifiedToGrokFormat(params.ResponseFormat)
-	}
-
-	// 推理配置
-	if params.ReasoningEffort != nil {
-		req.ReasoningEffort = ReasoningEffort(*params.ReasoningEffort)
+		req.ResponseFormat = convertUnifiedToChatFormat(params.ResponseFormat)
 	}
 
 	return req, nil
 }
 
-func convertUnifiedToGrokMessages(system string, messages []llm.Message) ([]Message, error) {
-	var out []Message
+func convertUnifiedToChatMessages(system string, messages []llm.Message) ([]ChatMessage, error) {
+	var out []ChatMessage
 
 	if system != "" {
-		out = append(out, Message{
+		out = append(out, ChatMessage{
 			Role:    RoleSystem,
 			Content: json.RawMessage(quoteJSONString(system)),
 		})
@@ -281,33 +348,33 @@ func convertUnifiedToGrokMessages(system string, messages []llm.Message) ([]Mess
 		switch msg.Role {
 		case llm.MessageRoleSystem:
 			text := llm.TextFromParts(msg.Content)
-			out = append(out, Message{
+			out = append(out, ChatMessage{
 				Role:    RoleSystem,
 				Content: json.RawMessage(quoteJSONString(text)),
 			})
 
 		case llm.MessageRoleUser:
 			var hasImage bool
-			var parts []ContentPart
+			var parts []ChatContentPart
 			for _, p := range msg.Content {
 				switch pp := p.(type) {
 				case llm.TextPart:
-					parts = append(parts, ContentPart{Type: ContentTypeText, Text: pp.Text})
+					parts = append(parts, ChatContentPart{Type: "text", Text: pp.Text})
 				case llm.ImagePart:
-					parts = append(parts, ContentPart{Type: ContentTypeImageURL, ImageURL: &ImageURL{URL: pp.Image}})
+					parts = append(parts, ChatContentPart{Type: "image_url", ImageURL: &ChatImageURL{URL: pp.Image}})
 					hasImage = true
 				}
 			}
 			if hasImage && len(parts) > 0 {
 				data, _ := json.Marshal(parts)
-				out = append(out, Message{Role: RoleUser, Content: data})
+				out = append(out, ChatMessage{Role: RoleUser, Content: data})
 			} else {
 				text := llm.TextFromParts(msg.Content)
-				out = append(out, Message{Role: RoleUser, Content: json.RawMessage(quoteJSONString(text))})
+				out = append(out, ChatMessage{Role: RoleUser, Content: json.RawMessage(quoteJSONString(text))})
 			}
 
 		case llm.MessageRoleAssistant:
-			m := Message{Role: RoleAssistant}
+			m := ChatMessage{Role: RoleAssistant}
 			var textContent string
 			for _, p := range msg.Content {
 				switch pp := p.(type) {
@@ -315,25 +382,29 @@ func convertUnifiedToGrokMessages(system string, messages []llm.Message) ([]Mess
 					textContent += pp.Text
 				case llm.ToolCallPart:
 					args, _ := json.Marshal(pp.Input)
-					m.ToolCalls = append(m.ToolCalls, ToolCall{
+					m.ToolCalls = append(m.ToolCalls, ChatToolCall{
 						ID:   pp.ToolCallID,
 						Type: "function",
-						Function: FunctionCall{
+						Function: ChatFunctionCall{
 							Name:      pp.ToolName,
 							Arguments: string(args),
 						},
 					})
 				}
 			}
-			m.Content = json.RawMessage(quoteJSONString(textContent))
+			// 当有 tool_calls 且无文本内容时，content 应为 null（BigModel 等供应商要求）
+			if len(m.ToolCalls) > 0 && textContent == "" {
+				m.Content = json.RawMessage("null")
+			} else {
+				m.Content = json.RawMessage(quoteJSONString(textContent))
+			}
 			out = append(out, m)
 
 		case llm.MessageRoleTool:
 			for _, p := range msg.Content {
 				if trp, ok := p.(llm.ToolResultPart); ok {
 					resultStr, _ := json.Marshal(trp.Result)
-					// API 要求 tool 消息的 content 是 JSON 字符串而非原始对象
-					out = append(out, Message{
+					out = append(out, ChatMessage{
 						Role:       RoleTool,
 						ToolCallID: trp.ToolCallID,
 						Content:    json.RawMessage(quoteJSONString(string(resultStr))),
@@ -345,13 +416,13 @@ func convertUnifiedToGrokMessages(system string, messages []llm.Message) ([]Mess
 	return out, nil
 }
 
-func convertUnifiedToGrokTools(tools []llm.Tool) []Tool {
-	out := make([]Tool, 0, len(tools))
+func convertUnifiedToChatTools(tools []llm.Tool) []ChatTool {
+	out := make([]ChatTool, 0, len(tools))
 	for _, t := range tools {
 		params, _ := json.Marshal(t.Parameters)
-		out = append(out, Tool{
+		out = append(out, ChatTool{
 			Type: "function",
-			Function: ToolFunction{
+			Function: ChatToolFunction{
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  params,
@@ -361,29 +432,29 @@ func convertUnifiedToGrokTools(tools []llm.Tool) []Tool {
 	return out
 }
 
-func convertUnifiedToGrokFormat(rf *llm.ResponseFormat) *ResponseFormat {
+func convertUnifiedToChatFormat(rf *llm.ResponseFormat) *ChatResponseFormat {
 	switch rf.Type {
 	case llm.ResponseFormatJSONObject:
-		return &ResponseFormat{Type: ResponseFormatJSONObject}
+		return &ChatResponseFormat{Type: "json_object"}
 	case llm.ResponseFormatJSONSchema:
 		if m, ok := rf.JSONSchema.(map[string]any); ok {
 			name, _ := m["name"].(string)
 			schema, _ := json.Marshal(m["schema"])
-			return &ResponseFormat{
-				Type: ResponseFormatJSONSchema,
-				JSONSchema: &JSONSchemaConfig{
+			return &ChatResponseFormat{
+				Type: "json_schema",
+				JSONSchema: &ChatJSONSchemaConfig{
 					Name:   name,
 					Schema: schema,
 				},
 			}
 		}
-		return &ResponseFormat{Type: ResponseFormatJSONObject}
+		return &ChatResponseFormat{Type: "json_object"}
 	default:
-		return &ResponseFormat{Type: ResponseFormatText}
+		return &ChatResponseFormat{Type: "text"}
 	}
 }
 
-func grokResponseToResult(resp *ChatCompletionResponse) *llm.GenerateResult {
+func chatResponseToResult(resp *ChatCompletionResponse) *llm.GenerateResult {
 	result := &llm.GenerateResult{
 		Response: llm.ResponseMetadata{
 			ID:      resp.ID,
@@ -403,9 +474,8 @@ func grokResponseToResult(resp *ChatCompletionResponse) *llm.GenerateResult {
 		choice := resp.Choices[0]
 		result.Text = choice.Message.ContentStr()
 		result.Reasoning = choice.Message.ReasoningContent
-
-		result.FinishReason = mapGrokFinishReason(choice.FinishReason)
-		result.RawFinishReason = string(choice.FinishReason)
+		result.FinishReason = mapChatFinishReason(choice.FinishReason)
+		result.RawFinishReason = choice.FinishReason
 
 		for _, tc := range choice.Message.ToolCalls {
 			var input any
@@ -423,34 +493,17 @@ func grokResponseToResult(resp *ChatCompletionResponse) *llm.GenerateResult {
 	return result
 }
 
-func mapGrokFinishReason(reason FinishReason) llm.FinishReason {
+func mapChatFinishReason(reason string) llm.FinishReason {
 	switch reason {
-	case FinishReasonStop:
+	case "stop":
 		return llm.FinishReasonStop
-	case FinishReasonLength:
+	case "length":
 		return llm.FinishReasonLength
-	case FinishReasonToolCalls:
+	case "tool_calls":
 		return llm.FinishReasonToolCalls
-	case FinishReasonContentFilter:
+	case "content_filter":
 		return llm.FinishReasonContentFilter
 	default:
 		return llm.FinishReasonOther
 	}
-}
-
-// ContentStr 返回 Message.Content 的字符串形式。
-func (m Message) ContentStr() string {
-	var s string
-	if json.Unmarshal(m.Content, &s) == nil {
-		return s
-	}
-	return string(m.Content)
-}
-
-func toJSONRaw(v any) json.RawMessage {
-	if v == nil {
-		return nil
-	}
-	data, _ := json.Marshal(v)
-	return data
 }

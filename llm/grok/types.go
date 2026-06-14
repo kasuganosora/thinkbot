@@ -23,18 +23,19 @@ const (
 // 模型名称。
 const (
 	// 文本模型
-	ModelGrok43      = "grok-4.3"
-	ModelGrok4Fast   = "grok-4-fast"
-	ModelGrok3       = "grok-3"
-	ModelGrok3Mini   = "grok-3-mini"
-	ModelGrok2Vision = "grok-2-vision"
+	ModelGrok43              = "grok-4.3"
+	ModelGrok420NonReasoning = "grok-4.20-0309-non-reasoning"
+	ModelGrok420Reasoning    = "grok-4.20-0309-reasoning"
+	ModelGrok420MultiAgent   = "grok-4.20-multi-agent-0309"
+	ModelGrokBuild           = "grok-build-0.1"
 
 	// 图像模型
+	ModelGrokImage        = "grok-imagine-image"
 	ModelGrokImageQuality = "grok-imagine-image-quality"
-	ModelGrokImagePro     = "grok-imagine-image-pro"
 
 	// 视频模型
-	ModelGrokVideo = "grok-imagine-video"
+	ModelGrokVideo          = "grok-imagine-video"
+	ModelGrokVideo15Preview = "grok-imagine-video-1.5-preview"
 )
 
 // ReasoningEffort 推理努力程度。
