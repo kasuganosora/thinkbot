@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +12,27 @@ import (
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/watchdog"
 )
+
+// streamErrorBodyLimit 限制错误响应体读取的最大字节数。
+const streamErrorBodyLimit = 64 * 1024 // 64KB
+
+// StreamHTTPError 表示流式连接在建立阶段遇到的 HTTP 错误（非 200）。
+//
+// 与普通的 errs.Error 不同，此类型保留了错误响应体的原始字节，
+// 便于上层 SDK 解析为具体的 API 错误（如 Anthropic APIError）。
+//
+// 可通过 errors.As(err, &streamErr) 提取。
+type StreamHTTPError struct {
+	StatusCode int
+	Body       []byte
+	Headers    http.Header
+	URL        string
+}
+
+func (e *StreamHTTPError) Error() string {
+	msg := truncate(string(e.Body), 500)
+	return fmt.Sprintf("stream HTTP error %d on %s: %s", e.StatusCode, e.URL, msg)
+}
 
 // streamConnResult 封装流式连接建立后的结果。
 type streamConnResult struct {
@@ -111,6 +134,7 @@ func (r *Request) streamConnect(
 	// --- 状态码检查 ---
 	if requireOK {
 		if resp.StatusCode != http.StatusOK {
+			body := readErrorBody(resp)
 			resp.Body.Close()
 			r.ctx = origCtx
 			if wdOwned {
@@ -119,11 +143,16 @@ func (r *Request) streamConnect(
 			log.Logger.Warnw(kind+" unexpected status",
 				"method", r.method, "url", reqURL,
 				"status", resp.StatusCode, "elapsed", time.Since(start))
-			return nil, errs.HTTPErrorf(resp.StatusCode,
-				"%s connection to %s returned status %d", kind, reqURL, resp.StatusCode)
+			return nil, &StreamHTTPError{
+				StatusCode: resp.StatusCode,
+				Body:       body,
+				Headers:    resp.Header,
+				URL:        reqURL,
+			}
 		}
 	} else {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body := readErrorBody(resp)
 			resp.Body.Close()
 			r.ctx = origCtx
 			if wdOwned {
@@ -132,8 +161,12 @@ func (r *Request) streamConnect(
 			log.Logger.Warnw(kind+" unexpected status",
 				"method", r.method, "url", reqURL,
 				"status", resp.StatusCode, "elapsed", time.Since(start))
-			return nil, errs.HTTPErrorf(resp.StatusCode,
-				"%s connection to %s returned status %d", kind, reqURL, resp.StatusCode)
+			return nil, &StreamHTTPError{
+				StatusCode: resp.StatusCode,
+				Body:       body,
+				Headers:    resp.Header,
+				URL:        reqURL,
+			}
 		}
 	}
 
@@ -157,6 +190,16 @@ func (c *Client) newStreamClient() *http.Client {
 	*sc = *c.httpClient
 	sc.Timeout = 0
 	return sc
+}
+
+// readErrorBody 读取错误响应体（限制大小），用于解析 API 错误。
+func readErrorBody(resp *http.Response) []byte {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, streamErrorBodyLimit))
+	if err != nil {
+		log.Logger.Warnw("failed to read stream error body", "url", resp.Request.URL.String(), "err", err)
+		return nil
+	}
+	return body
 }
 
 // classifyStreamError 在流读取遇到错误时，判断具体原因。
