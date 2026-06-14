@@ -9,14 +9,28 @@ import (
 )
 
 func main() {
-	if err := log.Init(); err != nil {
+	if err := log.InitWithConfig(log.Config{
+		Level: "debug",
+		Outputs: []log.Output{
+			// stdout：全级别，console 格式
+			log.Stdout(),
+			// stderr：仅 warn 及以上，console 格式
+			{Type: log.OutputStderr, Level: "warn", Format: log.FormatConsole},
+			// 文件：全级别，JSONL 格式，滚动
+			log.File("./logs", "thinkbot"),
+		},
+	}); err != nil {
 		panic(err)
 	}
 	defer log.Logger.Sync()
 
 	log.Logger.Infow("starting thinkbot")
 
-	database, err := db.OpenSQLite("thinkbot.db")
+	database, err := db.OpenSQLiteWithLogger("thinkbot.db", log.NewGormLogger(log.GormConfig{
+		Level:                     log.GormInfo,
+		SlowThreshold:             200_000_000, // 200ms in ns
+		IgnoreRecordNotFoundError: true,
+	}))
 	if err != nil {
 		log.Logger.Fatalw("failed to open database", "error", err)
 	}
