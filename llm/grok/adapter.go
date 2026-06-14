@@ -332,10 +332,11 @@ func convertUnifiedToGrokMessages(system string, messages []llm.Message) ([]Mess
 			for _, p := range msg.Content {
 				if trp, ok := p.(llm.ToolResultPart); ok {
 					resultStr, _ := json.Marshal(trp.Result)
+					// API 要求 tool 消息的 content 是 JSON 字符串而非原始对象
 					out = append(out, Message{
 						Role:       RoleTool,
 						ToolCallID: trp.ToolCallID,
-						Content:    json.RawMessage(resultStr),
+						Content:    json.RawMessage(quoteJSONString(string(resultStr))),
 					})
 				}
 			}

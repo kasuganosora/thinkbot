@@ -15,10 +15,15 @@ import (
 // Name 实现 llm.Provider。
 func (c *Client) Name() string { return "openai" }
 
-// DoGenerate 将统一 GenerateParams 转换为 OpenAI Responses API 请求并返回统一 GenerateResult。
+// DoGenerate 将统一 GenerateParams 转换为 OpenAI 请求并返回统一 GenerateResult。
+// 根据 chatMode 选择 Chat Completions API 或 Responses API。
 func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
 	if params.Model == nil {
 		return nil, fmt.Errorf("openai: model is required")
+	}
+
+	if c.chatMode {
+		return c.doGenerateChat(ctx, params)
 	}
 
 	req, err := paramsToOpenAIRequest(&params)
@@ -35,9 +40,14 @@ func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*ll
 }
 
 // DoStream 将统一 GenerateParams 转换为 OpenAI 流式请求并返回统一 StreamResult。
+// 根据 chatMode 选择 Chat Completions API 或 Responses API。
 func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
 	if params.Model == nil {
 		return nil, fmt.Errorf("openai: model is required")
+	}
+
+	if c.chatMode {
+		return c.doStreamChat(ctx, params)
 	}
 
 	req, err := paramsToOpenAIRequest(&params)

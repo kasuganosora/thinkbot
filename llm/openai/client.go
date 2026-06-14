@@ -14,9 +14,11 @@ import (
 
 // Client 是 OpenAI API 客户端，封装 util/http.Client。
 type Client struct {
-	http    *httputil.Client
-	apiKey  string
-	baseURL string
+	http     *httputil.Client
+	apiKey   string
+	baseURL  string
+	chatMode bool   // true = 使用 Chat Completions API（/v1/chat/completions）
+	chatPath string // Chat Completions 端点路径
 }
 
 // Option 配置 Client。
@@ -33,6 +35,8 @@ type config struct {
 	httpClient   *http.Client
 	sharedClient *httputil.Client
 	dump         bool
+	chatMode     bool
+	chatPath     string
 }
 
 // WithAPIKey 设置 API Key。
@@ -87,6 +91,21 @@ func WithDump() Option {
 	return func(c *config) { c.dump = true }
 }
 
+// WithChatMode 启用 Chat Completions 模式。
+// 启用后 DoGenerate/DoStream 将使用 /chat/completions 端点，
+// 而非默认的 Responses API（/v1/responses）。
+// 适用于仅兼容 Chat Completions API 的供应商（如智谱 BigModel、DeepSeek 等）。
+func WithChatMode() Option {
+	return func(c *config) { c.chatMode = true }
+}
+
+// WithChatPath 设置 Chat Completions 端点路径。
+// 默认为 "/v1/chat/completions"（标准 OpenAI 路径）。
+// 对于自定义路径的供应商，可覆盖此值。
+func WithChatPath(path string) Option {
+	return func(c *config) { c.chatPath = path }
+}
+
 // New 创建一个新的 OpenAI API Client。
 func New(opts ...Option) *Client {
 	cfg := &config{
@@ -133,10 +152,17 @@ func New(opts ...Option) *Client {
 		opt(httpClient)
 	}
 
+	// 默认 Chat Completions 路径
+	if cfg.chatPath == "" {
+		cfg.chatPath = "/v1/chat/completions"
+	}
+
 	return &Client{
-		http:    httpClient,
-		apiKey:  cfg.apiKey,
-		baseURL: cfg.baseURL,
+		http:     httpClient,
+		apiKey:   cfg.apiKey,
+		baseURL:  cfg.baseURL,
+		chatMode: cfg.chatMode,
+		chatPath: cfg.chatPath,
 	}
 }
 
