@@ -312,6 +312,7 @@ type StreamAccumulator struct {
 	model   string
 	created int64
 	choices map[int]*accChoice
+	order   []int // deterministic choice ordering
 	usage   *Usage
 	finish  map[int]FinishReason
 }
@@ -320,7 +321,8 @@ type accChoice struct {
 	role      string
 	content   strings.Builder
 	reasoning strings.Builder
-	toolCalls []ToolCall
+	toolCalls map[int]*ToolCall // indexed by tool_calls[].index for delta merging
+	toolOrder []int             // deterministic tool call ordering
 }
 
 // NewStreamAccumulator 创建累积器。
@@ -344,16 +346,36 @@ func (a *StreamAccumulator) OnChunk(chunk ChatCompletionResponse) error {
 	for _, choice := range chunk.Choices {
 		ac, ok := a.choices[choice.Index]
 		if !ok {
-			ac = &accChoice{}
+			ac = &accChoice{toolCalls: make(map[int]*ToolCall)}
 			a.choices[choice.Index] = ac
+			a.order = append(a.order, choice.Index)
 		}
 		if choice.Delta.Role != "" {
 			ac.role = choice.Delta.Role
 		}
 		ac.content.WriteString(choice.Delta.Content)
 		ac.reasoning.WriteString(choice.Delta.ReasoningContent)
-		if len(choice.Delta.ToolCalls) > 0 {
-			ac.toolCalls = append(ac.toolCalls, choice.Delta.ToolCalls...)
+		// Merge tool call deltas by index — streaming frames for the same tool
+		// call share the same index but may carry partial arguments.
+		for _, tc := range choice.Delta.ToolCalls {
+			existing, exists := ac.toolCalls[tc.Index]
+			if !exists {
+				existing = &ToolCall{}
+				ac.toolCalls[tc.Index] = existing
+				ac.toolOrder = append(ac.toolOrder, tc.Index)
+			}
+			if tc.ID != "" {
+				existing.ID = tc.ID
+			}
+			if tc.Type != "" {
+				existing.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				existing.Function.Name = tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				existing.Function.Arguments += tc.Function.Arguments
+			}
 		}
 		if choice.FinishReason != "" {
 			a.finish[choice.Index] = choice.FinishReason
@@ -364,9 +386,9 @@ func (a *StreamAccumulator) OnChunk(chunk ChatCompletionResponse) error {
 
 // Result 返回组装好的完整 ChatCompletionResponse。
 func (a *StreamAccumulator) Result() *ChatCompletionResponse {
-	choices := make([]Choice, 0, len(a.choices))
-	for idx, ac := range a.choices {
-		content, _ := json.RawMessage(quoteJSONString(ac.content.String())).MarshalJSON()
+	choices := make([]Choice, 0, len(a.order))
+	for _, idx := range a.order {
+		ac := a.choices[idx]
 		msg := Message{
 			Role:    ac.role,
 			Content: json.RawMessage(quoteJSONString(ac.content.String())),
@@ -374,16 +396,17 @@ func (a *StreamAccumulator) Result() *ChatCompletionResponse {
 		if ac.reasoning.Len() > 0 {
 			msg.ReasoningContent = ac.reasoning.String()
 		}
-		if len(ac.toolCalls) > 0 {
-			msg.ToolCalls = ac.toolCalls
+		if len(ac.toolOrder) > 0 {
+			msg.ToolCalls = make([]ToolCall, 0, len(ac.toolOrder))
+			for _, tcIdx := range ac.toolOrder {
+				msg.ToolCalls = append(msg.ToolCalls, *ac.toolCalls[tcIdx])
+			}
 		}
-		c := Choice{
+		choices = append(choices, Choice{
 			Index:        idx,
 			Message:      msg,
 			FinishReason: a.finish[idx],
-		}
-		_ = content
-		choices = append(choices, c)
+		})
 	}
 
 	return &ChatCompletionResponse{
