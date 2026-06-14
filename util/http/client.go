@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,6 +107,36 @@ func WithDump() Option {
 	}
 }
 
+// WithProxy 设置 HTTP/HTTPS/SOCKS5 代理。
+//
+// 支持的 URL 格式：
+//   - http://host:port
+//   - https://host:port
+//   - socks5://host:port
+//   - socks5h://host:port（DNS 也走代理）
+//
+// 如果 proxyURL 为空则不做任何操作。如果 proxyURL 解析失败会记录警告日志并忽略。
+func WithProxy(proxyURL string) Option {
+	return func(c *Client) {
+		if proxyURL == "" {
+			return
+		}
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			log.Logger.Warnw("invalid proxy URL, ignoring", "proxy", proxyURL, "err", err)
+			return
+		}
+		c.ensureTransport().Proxy = http.ProxyURL(u)
+	}
+}
+
+// WithProxyFromEnv 从环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY）读取代理配置。
+func WithProxyFromEnv() Option {
+	return func(c *Client) {
+		c.ensureTransport().Proxy = http.ProxyFromEnvironment
+	}
+}
+
 // New 创建一个新的 Client。
 func New(opts ...Option) *Client {
 	c := &Client{
@@ -123,6 +154,37 @@ func New(opts ...Option) *Client {
 // DefaultClient 返回一个使用默认配置的 Client。
 func DefaultClient() *Client {
 	return New()
+}
+
+// Clone 创建 Client 的浅拷贝。
+//
+// 底层的 *http.Client（含 Transport、连接池、TLS 配置）被共享，
+// 但 headers、baseURL、retryCfg 等字段拥有独立的副本，可安全修改而不影响原 Client。
+// 适用于多个 Provider 共享同一 HTTP Transport 的场景。
+func (c *Client) Clone() *Client {
+	clone := &Client{
+		httpClient:  c.httpClient, // 共享 Transport / 连接池
+		baseURL:     c.baseURL,
+		headers:     make(map[string]string, len(c.headers)),
+		retryCfg:    c.retryCfg,
+		maxBodySize: c.maxBodySize,
+		dumpEnabled: c.dumpEnabled,
+	}
+	for k, v := range c.headers {
+		clone.headers[k] = v
+	}
+	return clone
+}
+
+// ensureTransport 确保 httpClient 有一个 *http.Transport，如果没有则创建。
+// 如果 Transport 已被设置为非 *http.Transport 类型，则替换为新的 Transport。
+func (c *Client) ensureTransport() *http.Transport {
+	if t, ok := c.httpClient.Transport.(*http.Transport); ok {
+		return t
+	}
+	t := &http.Transport{}
+	c.httpClient.Transport = t
+	return t
 }
 
 // ============================================================================
@@ -225,6 +287,15 @@ func (r *Request) SetJSONBody(body any) *Request {
 // SetBody 设置原始请求体。
 func (r *Request) SetBody(body io.Reader) *Request {
 	r.body = body
+	return r
+}
+
+// SetMultipart 设置 multipart/form-data 请求体。
+// 会自动关闭表单写入器并设置正确的 Content-Type（含 boundary）。
+func (r *Request) SetMultipart(form *MultipartForm) *Request {
+	form.close()
+	r.body = form.bytes()
+	r.headers["Content-Type"] = form.ContentType()
 	return r
 }
 
@@ -387,11 +458,23 @@ func (r *Request) doWithRetry() (*Response, error) {
 		}
 	}
 
+	// 捕获最近一次 429 响应的 Retry-After，用于覆盖退避时间
+	var lastRetryAfter time.Duration
+	cfg.GetRetryDelay = func(_ error) time.Duration {
+		return lastRetryAfter
+	}
+
 	var result *Response
 	res := retry.Do(r.ctx, name, cfg, func(ctx context.Context) error {
 		r.ctx = ctx
+		// 重置上次记录的 Retry-After
+		lastRetryAfter = 0
 		resp, err := r.doOnce()
 		if err != nil {
+			// 从 429 响应中提取 Retry-After
+			if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+				lastRetryAfter = parseRetryAfter(resp.Headers.Get("Retry-After"))
+			}
 			return err
 		}
 		result = resp
@@ -495,6 +578,33 @@ func isRetryableCode(code int) bool {
 	default:
 		return code >= 500
 	}
+}
+
+// parseRetryAfter 解析 HTTP Retry-After 响应头。
+// 支持两种格式：
+//   - 秒数（如 "120"）
+//   - HTTP-date（如 "Wed, 21 Oct 2025 07:28:00 GMT"）
+//
+// 返回 0 表示无法解析或值无效。
+func parseRetryAfter(val string) time.Duration {
+	if val == "" {
+		return 0
+	}
+	// 尝试解析为秒数
+	if seconds, err := strconv.Atoi(val); err == nil {
+		if seconds >= 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	// 尝试解析为 HTTP-date
+	if t, err := http.ParseTime(val); err == nil {
+		d := time.Until(t)
+		if d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // basicAuth 生成 Basic 认证字符串（base64 编码）。

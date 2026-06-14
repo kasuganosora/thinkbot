@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1455,5 +1456,226 @@ func TestDefaultStreamShouldRetryWithWrappedError(t *testing.T) {
 	plain := fmt.Errorf("some other error")
 	if DefaultStreamShouldRetry(1, plain) {
 		t.Error("expected false for non-watchdog error")
+	}
+}
+
+// ============================================================================
+// Multipart/form-data 测试
+// ============================================================================
+
+func TestMultipartBasic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			t.Errorf("expected multipart/form-data, got %s", r.Header.Get("Content-Type"))
+		}
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Fatalf("parse multipart: %v", err)
+		}
+
+		// 验证文件字段
+		file, header, err := r.FormFile("upload")
+		if err != nil {
+			t.Fatalf("form file: %v", err)
+		}
+		defer file.Close()
+		if header.Filename != "test.txt" {
+			t.Errorf("expected filename=test.txt, got %s", header.Filename)
+		}
+		content, _ := io.ReadAll(file)
+		if string(content) != "hello multipart" {
+			t.Errorf("unexpected content: %q", content)
+		}
+
+		// 验证文本字段
+		if r.FormValue("purpose") != "testing" {
+			t.Errorf("expected purpose=testing, got %s", r.FormValue("purpose"))
+		}
+
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithBaseURL(srv.URL))
+	form := NewMultipartForm().
+		AddFile("upload", "test.txt", strings.NewReader("hello multipart")).
+		AddField("purpose", "testing")
+
+	resp, err := c.Post("/upload").SetMultipart(form).Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestMultipartWithMIME(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Fatalf("parse multipart: %v", err)
+		}
+		_, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("form file: %v", err)
+		}
+		if header.Header.Get("Content-Type") != "application/pdf" {
+			t.Errorf("expected Content-Type=application/pdf, got %s", header.Header.Get("Content-Type"))
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(WithBaseURL(srv.URL))
+	form := NewMultipartForm().
+		AddFileWithMIME("file", "doc.pdf", "application/pdf", strings.NewReader("%PDF-1.4"))
+
+	resp, err := c.Post("/upload-pdf").SetMultipart(form).Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestMultipartDefaultMIME(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Fatalf("parse multipart: %v", err)
+		}
+		_, header, err := r.FormFile("f")
+		if err != nil {
+			t.Fatalf("form file: %v", err)
+		}
+		if header.Header.Get("Content-Type") != "application/octet-stream" {
+			t.Errorf("expected application/octet-stream, got %s", header.Header.Get("Content-Type"))
+		}
+		w.Write([]byte(`ok`))
+	}))
+	defer srv.Close()
+
+	c := New(WithBaseURL(srv.URL))
+	form := NewMultipartForm().
+		AddFile("f", "blob.bin", strings.NewReader("data"))
+
+	resp, err := c.Post("/upload-blob").SetMultipart(form).Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestMultipartMultipleFiles(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Fatalf("parse multipart: %v", err)
+		}
+
+		// 检查多文件
+		f1, h1, _ := r.FormFile("file1")
+		if h1.Filename != "a.txt" {
+			t.Errorf("expected a.txt, got %s", h1.Filename)
+		}
+		c1, _ := io.ReadAll(f1)
+		f1.Close()
+		if string(c1) != "AAA" {
+			t.Errorf("expected AAA, got %q", c1)
+		}
+
+		f2, h2, _ := r.FormFile("file2")
+		if h2.Filename != "b.txt" {
+			t.Errorf("expected b.txt, got %s", h2.Filename)
+		}
+		c2, _ := io.ReadAll(f2)
+		f2.Close()
+		if string(c2) != "BBB" {
+			t.Errorf("expected BBB, got %q", c2)
+		}
+
+		// 文本字段也应该存在
+		if r.FormValue("meta") != "batch" {
+			t.Errorf("expected meta=batch, got %s", r.FormValue("meta"))
+		}
+
+		w.Write([]byte(`ok`))
+	}))
+	defer srv.Close()
+
+	c := New(WithBaseURL(srv.URL))
+	form := NewMultipartForm().
+		AddFile("file1", "a.txt", strings.NewReader("AAA")).
+		AddFile("file2", "b.txt", strings.NewReader("BBB")).
+		AddField("meta", "batch")
+
+	resp, err := c.Post("/multi").SetMultipart(form).Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ============================================================================
+// HTTP Proxy 测试
+// ============================================================================
+
+func TestWithProxy(t *testing.T) {
+	// 使用 httptest 创建代理服务器
+	var proxiedRequest *http.Request
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxiedRequest = r.Clone(r.Context())
+		// 简单代理：转发到目标（这里直接返回 OK 模拟成功）
+		w.WriteHeader(200)
+		w.Write([]byte(`{"via":"proxy"}`))
+	}))
+	defer proxySrv.Close()
+
+	c := New(WithProxy(proxySrv.URL))
+	resp, err := c.Get("http://example.com/test").Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	if proxiedRequest == nil {
+		t.Error("expected request to go through proxy")
+	}
+}
+
+func TestWithProxyInvalidURL(t *testing.T) {
+	// 无效 URL 不应 panic，应正常发请求（无代理）
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`ok`))
+	}))
+	defer srv.Close()
+
+	c := New(WithProxy("://bad-url"))
+	resp, err := c.Get(srv.URL).Do()
+	if err != nil {
+		t.Fatalf("unexpected error with invalid proxy: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestWithProxyEmpty(t *testing.T) {
+	// 空字符串应不做任何事，正常请求
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`ok`))
+	}))
+	defer srv.Close()
+
+	c := New(WithProxy(""))
+	resp, err := c.Get(srv.URL).Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 }

@@ -43,6 +43,12 @@ type Config struct {
 	// OnRetry 每次重试前的回调（不包含首次执行）。
 	OnRetry func(attempt int, err error, wait time.Duration)
 
+	// GetRetryDelay 返回服务端建议的重试延迟（可选）。
+	// 在每次 fn 返回错误后、计算退避时间时调用。
+	// 如果返回值 > 计算出的退避时间，则使用返回值作为等待时间。
+	// 典型用途：解析 HTTP 429 响应中的 Retry-After 头。
+	GetRetryDelay func(err error) time.Duration
+
 	// OnPanic 捕获到 panic 时的回调（可选）。
 	OnPanic func(attempt int, r interface{}, stack []byte)
 }
@@ -165,6 +171,13 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 			wait = cfg.FixedInterval
 			if wait <= 0 {
 				wait = 200 * time.Millisecond
+			}
+		}
+
+		// 如果服务端建议了更长的延迟（如 Retry-After），取较大值
+		if cfg.GetRetryDelay != nil {
+			if serverDelay := cfg.GetRetryDelay(err); serverDelay > wait {
+				wait = serverDelay
 			}
 		}
 
