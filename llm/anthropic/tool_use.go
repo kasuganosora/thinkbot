@@ -112,11 +112,14 @@ func (b *SchemaBuilder) PropArray(name, desc, itemType string, required bool) *S
 
 // Build 生成 JSON Schema 的 map[string]any。
 func (b *SchemaBuilder) Build() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"type":       "object",
 		"properties": b.properties,
-		"required":   b.required,
 	}
+	if len(b.required) > 0 {
+		m["required"] = b.required
+	}
+	return m
 }
 
 // ============================================================================

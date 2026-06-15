@@ -133,14 +133,10 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					send(&llm.ToolInputStartPart{ID: callID, ToolName: part.FunctionCall.Name})
 					send(&llm.ToolInputDeltaPart{ID: callID, Delta: string(args)})
 					send(&llm.ToolInputEndPart{ID: callID})
-					var input any
-					if len(args) > 0 {
-						_ = json.Unmarshal(args, &input)
-					}
 					send(&llm.StreamToolCallPart{
 						ToolCallID: callID,
 						ToolName:   part.FunctionCall.Name,
-						Input:      input,
+						Input:      part.FunctionCall.Args,
 					})
 				}
 			}

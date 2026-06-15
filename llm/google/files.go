@@ -193,6 +193,5 @@ func (c *Client) DeleteFile(ctx context.Context, name string) error {
 	if err != nil {
 		return parseAPIError(resp, err)
 	}
-	_ = resp
 	return nil
 }
