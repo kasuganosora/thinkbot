@@ -24,3 +24,6 @@ go.work
 .vscode/
 logs/
 *.db
+
+# Integration test files (contain API keys, do not commit)
+*_integration_test.go

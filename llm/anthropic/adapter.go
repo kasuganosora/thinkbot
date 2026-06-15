@@ -364,7 +364,7 @@ func convertUnifiedMessages(messages []llm.Message) ([]Message, error) {
 						Content: MessageContent{{
 							Type:          ContentTypeToolResult,
 							ToolUseID:     trp.ToolCallID,
-							ResultContent: toJSONRaw(trp.Result),
+							ResultContent: toolResultToContent(trp.Result),
 							IsError:       trp.IsError,
 						}},
 					})
@@ -536,4 +536,22 @@ func toJSONRaw(v any) json.RawMessage {
 	}
 	data, _ := json.Marshal(v)
 	return data
+}
+
+// toolResultToContent converts a tool result value into the JSON format expected
+// by the Anthropic API for tool_result content blocks.
+//
+// The API requires content to be either a string or an array of content blocks.
+// - If the result is already a string, it is used directly.
+// - Otherwise, the value is JSON-encoded and wrapped as a string so the API
+//   never receives a raw JSON object in the content field.
+func toolResultToContent(result any) json.RawMessage {
+	if result == nil {
+		return nil
+	}
+	if s, ok := result.(string); ok {
+		return toJSONRaw(s)
+	}
+	data, _ := json.Marshal(result)
+	return toJSONRaw(string(data))
 }
