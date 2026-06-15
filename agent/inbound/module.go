@@ -9,25 +9,16 @@ import (
 // ============================================================================
 
 // Module 是 inbound 子系统的 fx 模块。
-// 它将所有注册的 Source 收集到 "inbound_sources" 分组中。
+// 它提供 Ingress（消息入口网关）作为 Pipeline 的输入端。
+//
+// 各 channel 输入端（webhook、websocket 等）通过 fx 注入 *Ingress，
+// 然后调用 ingress.Receive(ctx, msg) 注入消息。
 var Module = fx.Module("inbound",
-	// 默认提供 MemorySource（开发/测试用）
-	fx.Provide(
-		fx.Annotate(
-			func() *MemorySource { return NewMemorySource("memory", 64) },
-			fx.ResultTags(`group:"inbound_sources"`),
-			fx.As(new(Source)),
-		),
-	),
-)
+	// 提供默认 IngressConfig
+	fx.Provide(func() IngressConfig {
+		return DefaultIngressConfig()
+	}),
 
-// ProvideSource 将 Source 构造器注册到 fx 的 "inbound_sources" 分组。
-func ProvideSource(constructor any) fx.Option {
-	return fx.Provide(
-		fx.Annotate(
-			constructor,
-			fx.ResultTags(`group:"inbound_sources"`),
-			fx.As(new(Source)),
-		),
-	)
-}
+	// 提供 Ingress
+	fx.Provide(NewIngress),
+)

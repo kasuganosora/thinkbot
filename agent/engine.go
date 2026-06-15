@@ -25,8 +25,6 @@ import (
 type EngineConfig struct {
 	// Workers 并发 worker 数量（默认 4）。
 	Workers int
-	// InboundBuffer 共享输入通道缓冲区大小（默认 128）。
-	InboundBuffer int
 	// ShutdownTimeout 优雅关闭超时时间（默认 10s）。
 	ShutdownTimeout time.Duration
 }
@@ -35,33 +33,36 @@ type EngineConfig struct {
 func DefaultEngineConfig() EngineConfig {
 	return EngineConfig{
 		Workers:         4,
-		InboundBuffer:   128,
 		ShutdownTimeout: 10 * time.Second,
 	}
 }
 
 // Engine 是消息处理的顶层编排器。
-// 它串联 Inbound Sources → Pipeline → Outbound Dispatcher 的完整生命周期：
-//  1. 启动所有 Source，消息统一写入共享 inCh
-//  2. N 个 worker goroutine 从 inCh 取 Envelope，执行 Pipeline
+// 它从 Ingress 消费 Envelope，经过 Pipeline 加工，最后由 Dispatcher 派发。
+//
+// Engine 不管理输入端的生命周期。各 channel（webhook handler、ws handler 等）
+// 自行管理启停，只需调用 Ingress.Receive() 注入消息即可。
+//
+// 处理流程：
+//  1. N 个 worker goroutine 从 Ingress.C() 取 Envelope
+//  2. 每个 Envelope 经过 Pipeline Stage 链加工
 //  3. Pipeline 产出的 Action 交给 Dispatcher 派发
-//  4. ctx 取消时优雅关闭：停止 Source → 排空 inCh → 等待 worker 退出
+//  4. ctx 取消时优雅关闭：关闭 Ingress → 排空 → 等待 worker 退出
 type Engine struct {
-	sources    []inbound.Source
+	ingress    *inbound.Ingress
 	pipeline   *pipeline.Pipeline
 	dispatcher outbound.Dispatcher
 	config     EngineConfig
 	logger     *zap.SugaredLogger
 	tracer     trace.Tracer
 
-	inCh   chan *core.Envelope
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
 // NewEngine 创建 Engine 实例。
 func NewEngine(
-	sources []inbound.Source,
+	ingress *inbound.Ingress,
 	p *pipeline.Pipeline,
 	d outbound.Dispatcher,
 	cfg EngineConfig,
@@ -71,15 +72,12 @@ func NewEngine(
 	if cfg.Workers <= 0 {
 		cfg.Workers = DefaultEngineConfig().Workers
 	}
-	if cfg.InboundBuffer <= 0 {
-		cfg.InboundBuffer = DefaultEngineConfig().InboundBuffer
-	}
 	if cfg.ShutdownTimeout <= 0 {
 		cfg.ShutdownTimeout = DefaultEngineConfig().ShutdownTimeout
 	}
 
 	return &Engine{
-		sources:    sources,
+		ingress:    ingress,
 		pipeline:   p,
 		dispatcher: d,
 		config:     cfg,
@@ -92,27 +90,12 @@ func NewEngine(
 // 该方法会阻塞直到 ctx 被取消或 Stop 被调用。
 func (e *Engine) Run(ctx context.Context) error {
 	ctx, e.cancel = context.WithCancel(ctx)
-	e.inCh = make(chan *core.Envelope, e.config.InboundBuffer)
 
 	e.logger.Infow("engine starting",
-		"sources", len(e.sources),
 		"workers", e.config.Workers,
-		"buffer", e.config.InboundBuffer,
 		"stages", e.pipeline.StageNames())
 
-	// 1. 启动所有 Source
-	for _, src := range e.sources {
-		if err := src.Start(ctx, e.inCh); err != nil {
-			// Source 启动失败 → 回滚已启动的 Source
-			e.logger.Errorw("source start failed, rolling back",
-				"source", src.Name(), "err", err)
-			e.stopSources(ctx)
-			return fmt.Errorf("engine: start source %q: %w", src.Name(), err)
-		}
-		e.logger.Infow("source started", "source", src.Name())
-	}
-
-	// 2. 启动 worker goroutine
+	// 启动 worker goroutine
 	for i := 0; i < e.config.Workers; i++ {
 		e.wg.Add(1)
 		go e.worker(ctx, i)
@@ -120,26 +103,23 @@ func (e *Engine) Run(ctx context.Context) error {
 
 	e.logger.Infow("engine running")
 
-	// 3. 阻塞直到 ctx 取消
+	// 阻塞直到 ctx 取消
 	<-ctx.Done()
 
 	e.logger.Infow("engine shutting down", "reason", ctx.Err())
 
-	// 4. 停止所有 Source
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
-	defer shutdownCancel()
+	// 关闭 Ingress，停止接收新消息
+	e.ingress.Close()
 
-	e.stopSources(shutdownCtx)
-
-	// 5. 关闭 inCh，让 worker 排空后退出
-	close(e.inCh)
-
-	// 6. 等待所有 worker 退出
+	// 等待所有 worker 排空并退出
 	done := make(chan struct{})
 	go func() {
 		e.wg.Wait()
 		close(done)
 	}()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), e.config.ShutdownTimeout)
+	defer shutdownCancel()
 
 	select {
 	case <-done:
@@ -158,14 +138,20 @@ func (e *Engine) Stop() {
 	}
 }
 
+// Ingress 返回 Engine 使用的 Ingress 实例。
+// 外部 channel 可通过此方法获取 Ingress 来注入消息。
+func (e *Engine) Ingress() *inbound.Ingress {
+	return e.ingress
+}
+
 // worker 是消息处理 goroutine。
-// 每个 worker 从 inCh 取 Envelope → Pipeline.Execute → Dispatcher.Dispatch。
+// 每个 worker 从 Ingress.C() 取 Envelope → Pipeline.Execute → Dispatcher.Dispatch。
 func (e *Engine) worker(ctx context.Context, id int) {
 	defer e.wg.Done()
 
 	e.logger.Debugw("worker started", "worker_id", id)
 
-	for env := range e.inCh {
+	for env := range e.ingress.C() {
 		e.processEnvelope(ctx, id, env)
 	}
 
@@ -195,7 +181,6 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 			"message_id", env.Message.ID,
 			"err", err,
 			"duration", time.Since(start))
-		// AbortError 等已由 Pipeline 处理，这里不再重复
 		return
 	}
 
@@ -237,17 +222,4 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 		"message_id", env.Message.ID,
 		"actions", len(actions),
 		"duration", time.Since(start))
-}
-
-// stopSources 停止所有已启动的 Source。
-func (e *Engine) stopSources(ctx context.Context) {
-	for _, src := range e.sources {
-		if err := src.Stop(ctx); err != nil {
-			e.logger.Warnw("source stop error",
-				"source", src.Name(),
-				"err", err)
-		} else {
-			e.logger.Infow("source stopped", "source", src.Name())
-		}
-	}
 }
