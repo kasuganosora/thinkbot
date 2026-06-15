@@ -5,127 +5,248 @@ import (
 	"testing"
 	"time"
 
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
+
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
 
-func TestMemorySource_SendReceive(t *testing.T) {
-	src := NewMemorySource("test", 10)
-	ch := make(chan *core.Envelope, 10)
+// testIngress 创建测试用 Ingress。
+func testIngress(bufSize int) *Ingress {
+	return NewIngress(
+		IngressConfig{BufferSize: bufSize},
+		zap.NewNop().Sugar(),
+		noop_trace.NewTracerProvider(),
+	)
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// ============================================================================
+// Ingress 测试
+// ============================================================================
 
-	if err := src.Start(ctx, ch); err != nil {
-		t.Fatalf("failed to start: %v", err)
+func TestIngress_ReceiveAndConsume(t *testing.T) {
+	g := testIngress(16)
+
+	ctx := context.Background()
+	err := g.Receive(ctx, core.Message{
+		ID:     "msg-1",
+		Source: "test",
+		Text:   "hello",
+	})
+	if err != nil {
+		t.Fatalf("Receive failed: %v", err)
 	}
 
-	// 发送消息
-	src.Send(core.Message{
-		ID:   "msg-1",
-		Text: "hello",
-	})
-
-	// 接收
 	select {
-	case env := <-ch:
+	case env := <-g.C():
 		if env.Message.ID != "msg-1" {
 			t.Errorf("expected msg-1, got %s", env.Message.ID)
 		}
 		if env.Message.Text != "hello" {
 			t.Errorf("expected hello, got %s", env.Message.Text)
 		}
-		if env.Message.Source != "test" {
-			t.Errorf("expected source test, got %s", env.Message.Source)
-		}
 		if env.Message.CreatedAt.IsZero() {
 			t.Error("expected non-zero CreatedAt")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for message")
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
 	}
 }
 
-func TestMemorySource_MultipleMessages(t *testing.T) {
-	src := NewMemorySource("test", 10)
-	ch := make(chan *core.Envelope, 10)
+func TestIngress_TryReceive(t *testing.T) {
+	// 缓冲区大小 1
+	g := testIngress(1)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := src.Start(ctx, ch); err != nil {
-		t.Fatalf("failed to start: %v", err)
+	// 第一条应该成功
+	ok := g.TryReceive(core.Message{ID: "msg-1"})
+	if !ok {
+		t.Fatal("first TryReceive should succeed")
 	}
 
-	for i := 0; i < 5; i++ {
-		src.Send(core.Message{ID: "msg-" + string(rune('0'+i)), Text: "hello"})
+	// 第二条缓冲区满，应该失败
+	ok = g.TryReceive(core.Message{ID: "msg-2"})
+	if ok {
+		t.Fatal("second TryReceive should fail when buffer full")
+	}
+}
+
+func TestIngress_ReceiveCancelled(t *testing.T) {
+	// 缓冲区满 + ctx 取消
+	g := testIngress(1)
+	g.TryReceive(core.Message{ID: "fill"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+
+	err := g.Receive(ctx, core.Message{ID: "msg-blocked"})
+	if err == nil {
+		t.Fatal("expected error on cancelled context")
+	}
+}
+
+func TestIngress_Close(t *testing.T) {
+	g := testIngress(16)
+
+	// 先放一条消息
+	g.TryReceive(core.Message{ID: "msg-before-close"})
+
+	g.Close()
+
+	// 关闭后 Receive 应返回错误
+	err := g.Receive(context.Background(), core.Message{ID: "msg-after-close"})
+	if err == nil {
+		t.Fatal("expected error after close")
+	}
+
+	// 关闭后 TryReceive 应返回 false
+	ok := g.TryReceive(core.Message{ID: "msg-after-close-2"})
+	if ok {
+		t.Fatal("TryReceive should fail after close")
+	}
+
+	// 已缓冲的消息仍可消费
+	env, ok := <-g.C()
+	if !ok || env.Message.ID != "msg-before-close" {
+		t.Fatalf("expected buffered message, got ok=%v env=%v", ok, env)
+	}
+
+	// channel 排空后应关闭
+	_, ok = <-g.C()
+	if ok {
+		t.Fatal("channel should be closed after drain")
+	}
+
+	// 二次 Close 不应 panic
+	g.Close()
+}
+
+func TestIngress_Len(t *testing.T) {
+	g := testIngress(16)
+
+	if g.Len() != 0 {
+		t.Errorf("expected 0 length, got %d", g.Len())
+	}
+
+	g.TryReceive(core.Message{ID: "1"})
+	g.TryReceive(core.Message{ID: "2"})
+
+	if g.Len() != 2 {
+		t.Errorf("expected 2 length, got %d", g.Len())
+	}
+}
+
+func TestIngress_DefaultConfig(t *testing.T) {
+	cfg := DefaultIngressConfig()
+	if cfg.BufferSize != 256 {
+		t.Errorf("expected 256, got %d", cfg.BufferSize)
+	}
+}
+
+func TestIngress_MultipleMessages(t *testing.T) {
+	g := testIngress(32)
+	ctx := context.Background()
+
+	for i := 0; i < 10; i++ {
+		if err := g.Receive(ctx, core.Message{
+			ID:   "msg-" + string(rune('0'+i)),
+			Text: "hello",
+		}); err != nil {
+			t.Fatalf("Receive %d failed: %v", i, err)
+		}
 	}
 
 	received := 0
-	timeout := time.After(2 * time.Second)
-	for received < 5 {
+	timeout := time.After(time.Second)
+	for received < 10 {
 		select {
-		case <-ch:
+		case <-g.C():
 			received++
 		case <-timeout:
-			t.Fatalf("timeout: received %d/5 messages", received)
+			t.Fatalf("timeout: received %d/10", received)
 		}
 	}
 }
 
-func TestMemorySource_Stop(t *testing.T) {
-	src := NewMemorySource("test", 10)
-	ch := make(chan *core.Envelope, 10)
+// ============================================================================
+// MemoryChannel 测试
+// ============================================================================
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func TestMemoryChannel_SendReceive(t *testing.T) {
+	g := testIngress(16)
+	mem := NewMemoryChannel("test", g)
 
-	if err := src.Start(ctx, ch); err != nil {
-		t.Fatalf("failed to start: %v", err)
+	ctx := context.Background()
+	if err := mem.Send(ctx, core.Message{ID: "msg-1", Text: "hello"}); err != nil {
+		t.Fatalf("Send failed: %v", err)
 	}
 
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer stopCancel()
-
-	if err := src.Stop(stopCtx); err != nil {
-		t.Fatalf("failed to stop: %v", err)
+	select {
+	case env := <-g.C():
+		if env.Message.ID != "msg-1" {
+			t.Errorf("expected msg-1, got %s", env.Message.ID)
+		}
+		if env.Message.Source != "test" {
+			t.Errorf("expected source test, got %s", env.Message.Source)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
 	}
 }
 
-func TestMemorySource_TrySend(t *testing.T) {
-	// 使用无缓冲通道测试 TrySend
-	src := NewMemorySource("test", 0)
+func TestMemoryChannel_TrySend(t *testing.T) {
+	g := testIngress(1)
+	mem := NewMemoryChannel("test", g)
 
-	// 未启动时，TrySend 到无缓冲 channel 应该失败
-	ok := src.TrySend(core.Message{ID: "msg-1"})
+	ok := mem.TrySend(core.Message{ID: "1"})
+	if !ok {
+		t.Fatal("first TrySend should succeed")
+	}
+
+	ok = mem.TrySend(core.Message{ID: "2"})
 	if ok {
-		t.Error("TrySend should fail on unbuffered channel when not reading")
+		t.Fatal("second TrySend should fail when buffer full")
 	}
 }
 
-func TestMemorySource_Name(t *testing.T) {
-	src1 := NewMemorySource("custom", 0)
-	if src1.Name() != "custom" {
-		t.Errorf("expected custom, got %s", src1.Name())
+func TestMemoryChannel_Name(t *testing.T) {
+	g := testIngress(1)
+
+	m1 := NewMemoryChannel("custom", g)
+	if m1.Name() != "custom" {
+		t.Errorf("expected custom, got %s", m1.Name())
+	}
+	if m1.Type() != "memory" {
+		t.Errorf("expected memory, got %s", m1.Type())
 	}
 
-	src2 := NewMemorySource("", 0)
-	if src2.Name() != "memory" {
-		t.Errorf("expected memory, got %s", src2.Name())
+	m2 := NewMemoryChannel("", g)
+	if m2.Name() != "memory" {
+		t.Errorf("expected default memory, got %s", m2.Name())
 	}
 }
 
-func TestMemorySource_DoubleStart(t *testing.T) {
-	src := NewMemorySource("test", 10)
-	ch := make(chan *core.Envelope, 10)
+func TestMemoryChannel_DefaultSource(t *testing.T) {
+	g := testIngress(16)
+	mem := NewMemoryChannel("my-source", g)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := src.Start(ctx, ch); err != nil {
-		t.Fatalf("first start failed: %v", err)
+	ctx := context.Background()
+	// 不设置 Source，Send 应自动填充
+	if err := mem.Send(ctx, core.Message{ID: "msg-1", Text: "hi"}); err != nil {
+		t.Fatalf("Send failed: %v", err)
 	}
-	// Second start should be no-op
-	if err := src.Start(ctx, ch); err != nil {
-		t.Fatalf("second start should be no-op: %v", err)
+
+	env := <-g.C()
+	if env.Message.Source != "my-source" {
+		t.Errorf("expected source my-source, got %s", env.Message.Source)
+	}
+
+	// 设置了 Source，应该保留
+	if err := mem.Send(ctx, core.Message{ID: "msg-2", Source: "override", Text: "hi"}); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	env = <-g.C()
+	if env.Message.Source != "override" {
+		t.Errorf("expected source override, got %s", env.Message.Source)
 	}
 }

@@ -1,27 +1,24 @@
 package inbound
 
-import (
-	"context"
-
-	"github.com/kasuganosora/thinkbot/agent/core"
-)
-
 // ============================================================================
-// Source — 消息输入源接口
+// Channel — 输入端适配器接口（可选）
 // ============================================================================
 
-// Source 定义消息输入源的统一接口。
-// 每种消息来源（Webhook、WebSocket、Polling 等）都实现此接口。
-type Source interface {
-	// Name 返回输入源标识名称。
+// Channel 定义输入端适配器的可选接口。
+// 各输入端（Webhook handler、WebSocket 连接、Polling goroutine 等）
+// 可以实现此接口来提供统一的元信息，但这不是必须的。
+//
+// 输入端的核心职责只有一个：调用 Ingress.Receive(ctx, msg) 注入消息。
+// 输入端自行管理自己的生命周期（启停、重连等），Ingress 不关心。
+//
+// 此接口主要用于 Engine 可选地做统一注册和日志：
+//
+//	type MyWebhookChannel struct { ... }
+//	func (c *MyWebhookChannel) Name() string { return "webhook" }
+//	func (c *MyWebhookChannel) Type() string { return "http" }
+type Channel interface {
+	// Name 返回输入端标识名称（如 "misskey-ws"、"telegram-webhook"）。
 	Name() string
-
-	// Start 启动消息源，接收到的消息通过 ch 发送给 Pipeline。
-	// 实现应在 ctx 取消时优雅退出。
-	// ch 由 Engine 创建和关闭，Source 只负责向其写入。
-	Start(ctx context.Context, ch chan<- *core.Envelope) error
-
-	// Stop 优雅关闭消息源。
-	// ctx 提供关闭超时控制。
-	Stop(ctx context.Context) error
+	// Type 返回传输类型（如 "webhook"、"websocket"、"polling"、"memory"）。
+	Type() string
 }

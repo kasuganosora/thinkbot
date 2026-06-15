@@ -2,134 +2,66 @@ package inbound
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
 
 // ============================================================================
-// MemorySource — 内存消息源（用于测试和开发）
+// MemoryChannel — 内存输入端（用于测试和开发）
 // ============================================================================
 
-// MemorySource 是一个基于内存的消息源。
-// 消息通过 Send() 方法注入，适用于单元测试和开发调试。
-type MemorySource struct {
+// MemoryChannel 是一个基于内存的输入端适配器。
+// 它通过 Send() / TrySend() 方法注入消息到 Ingress，
+// 适用于单元测试、集成测试和开发调试。
+//
+// 使用示例：
+//
+//	ingress := inbound.NewIngress(cfg, logger, tp)
+//	mem := inbound.NewMemoryChannel("test", ingress)
+//	mem.Send(ctx, core.Message{ID: "1", Text: "hello"})
+type MemoryChannel struct {
 	name    string
-	inCh    chan core.Message
-	outCh   chan<- *core.Envelope
-	mu      sync.Mutex
-	running bool
-	cancel  context.CancelFunc
-	done    chan struct{}
+	ingress *Ingress
 }
 
-// NewMemorySource 创建内存消息源。
-// bufSize 控制内部缓冲区大小，0 为无缓冲。
-func NewMemorySource(name string, bufSize int) *MemorySource {
-	if bufSize < 0 {
-		bufSize = 0
+// NewMemoryChannel 创建内存输入端。
+func NewMemoryChannel(name string, ingress *Ingress) *MemoryChannel {
+	if name == "" {
+		name = "memory"
 	}
-	return &MemorySource{
-		name: name,
-		inCh: make(chan core.Message, bufSize),
-		done: make(chan struct{}),
+	return &MemoryChannel{
+		name:    name,
+		ingress: ingress,
 	}
 }
 
-// Name 返回 "memory" 或自定义名称。
-func (m *MemorySource) Name() string {
-	if m.name == "" {
-		return "memory"
-	}
-	return m.name
-}
+// Name 返回输入端名称。
+func (m *MemoryChannel) Name() string { return m.name }
 
-// Start 启动内存源，将收到的消息转发到 Pipeline 输入通道。
-func (m *MemorySource) Start(ctx context.Context, ch chan<- *core.Envelope) error {
-	m.mu.Lock()
-	if m.running {
-		m.mu.Unlock()
-		return nil
-	}
-	m.running = true
-	m.outCh = ch
-	ctx, m.cancel = context.WithCancel(ctx)
-	m.mu.Unlock()
+// Type 返回 "memory"。
+func (m *MemoryChannel) Type() string { return "memory" }
 
-	go m.loop(ctx)
-	return nil
-}
-
-// Stop 优雅关闭内存源。
-func (m *MemorySource) Stop(ctx context.Context) error {
-	m.mu.Lock()
-	if !m.running {
-		m.mu.Unlock()
-		return nil
-	}
-	m.running = false
-	if m.cancel != nil {
-		m.cancel()
-	}
-	m.mu.Unlock()
-
-	// 等待 loop 退出或超时
-	select {
-	case <-m.done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// Send 向内存源注入一条消息。
-// 如果源未启动或缓冲已满，Send 会阻塞。
-func (m *MemorySource) Send(msg core.Message) {
-	// 填充默认值
+// Send 注入一条消息到 Ingress（阻塞式）。
+// 自动填充 Source 和 CreatedAt。
+func (m *MemoryChannel) Send(ctx context.Context, msg core.Message) error {
 	if msg.Source == "" {
-		msg.Source = m.Name()
+		msg.Source = m.name
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
-	m.inCh <- msg
+	return m.ingress.Receive(ctx, msg)
 }
 
-// TrySend 尝试发送消息，如果缓冲已满则返回 false。
-func (m *MemorySource) TrySend(msg core.Message) bool {
+// TrySend 尝试非阻塞地注入消息。
+// 如果 Ingress 缓冲区已满，返回 false。
+func (m *MemoryChannel) TrySend(msg core.Message) bool {
 	if msg.Source == "" {
-		msg.Source = m.Name()
+		msg.Source = m.name
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
-	select {
-	case m.inCh <- msg:
-		return true
-	default:
-		return false
-	}
-}
-
-// loop 内部消息转发循环。
-func (m *MemorySource) loop(ctx context.Context) {
-	defer close(m.done)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg, ok := <-m.inCh:
-			if !ok {
-				return
-			}
-			env := core.NewEnvelope(msg)
-			select {
-			case m.outCh <- env:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}
+	return m.ingress.TryReceive(msg)
 }
