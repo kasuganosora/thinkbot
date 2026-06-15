@@ -49,6 +49,11 @@ func (a *apiClient) getSelf(ctx context.Context) (*User, error) {
 
 // createNote 发布帖子。
 func (a *apiClient) createNote(ctx context.Context, text, replyID, visibility string) (string, error) {
+	return a.createNoteFull(ctx, text, replyID, "", visibility, "", nil)
+}
+
+// createNoteFull 发布帖子，支持 replyID、renoteID、CW 和文件附件。
+func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID, visibility, cw string, fileIDs []string) (string, error) {
 	if visibility == "" {
 		visibility = VisibilityPublic
 	}
@@ -58,7 +63,10 @@ func (a *apiClient) createNote(ctx context.Context, text, replyID, visibility st
 			I:          a.token,
 			Text:       text,
 			ReplyID:    replyID,
+			RenoteID:   renoteID,
 			Visibility: visibility,
+			CW:         cw,
+			FileIDs:    fileIDs,
 		}).
 		Do()
 	if err != nil {
@@ -70,4 +78,38 @@ func (a *apiClient) createNote(ctx context.Context, text, replyID, visibility st
 		return "", fmt.Errorf("misskey createNote parse: %w", err)
 	}
 	return wrapper.CreatedNote.ID, nil
+}
+
+// createReaction 对帖子添加 emoji 反应。
+func (a *apiClient) createReaction(ctx context.Context, noteID, reaction string) error {
+	resp, err := a.client.Post("notes/reactions/create").
+		SetContext(ctx).
+		SetJSONBody(reactionRequest{
+			I:        a.token,
+			NoteID:   noteID,
+			Reaction: reaction,
+		}).
+		Do()
+	if err != nil {
+		return fmt.Errorf("misskey createReaction: %w", err)
+	}
+	// Misskey 返回 204 No Content 或 JSON
+	_ = resp
+	return nil
+}
+
+// deleteReaction 移除对帖子的反应。
+func (a *apiClient) deleteReaction(ctx context.Context, noteID string) error {
+	resp, err := a.client.Post("notes/reactions/delete").
+		SetContext(ctx).
+		SetJSONBody(reactionRequest{
+			I:      a.token,
+			NoteID: noteID,
+		}).
+		Do()
+	if err != nil {
+		return fmt.Errorf("misskey deleteReaction: %w", err)
+	}
+	_ = resp
+	return nil
 }

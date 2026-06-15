@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
@@ -26,7 +27,18 @@ type Config struct {
 
 	// AllowedUpdates 限制接收的更新类型（为空则接收所有）。
 	AllowedUpdates []string
+
+	// APIBaseURL Telegram API 基础地址。用于反向代理或中国大陆等无法直连 api.telegram.org 的场景。
+	// 默认 "https://api.telegram.org"。
+	APIBaseURL string
+
+	// ParseMode 发送消息时使用的格式化模式："HTML" / "MarkdownV2" / ""（纯文本）。
+	// 默认 ""。
+	ParseMode string
 }
+
+// telegramMaxMessageLength Telegram 单条消息最大长度。
+const telegramMaxMessageLength = 4096
 
 // TelegramChannel 是 Telegram 平台的输入端实现。
 //
@@ -68,11 +80,14 @@ func NewChannel(name, botID string, cfg Config) *TelegramChannel {
 	if cfg.PollTimeout <= 0 {
 		cfg.PollTimeout = 30
 	}
+	if cfg.APIBaseURL == "" {
+		cfg.APIBaseURL = apiURL
+	}
 	return &TelegramChannel{
 		name:  name,
 		botID: botID,
 		cfg:   cfg,
-		api:   newAPIClient(cfg.Token, cfg.PollTimeout),
+		api:   newAPIClient(cfg.Token, cfg.PollTimeout, cfg.APIBaseURL),
 	}
 }
 
@@ -174,10 +189,35 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		return // 忽略非消息更新
 	}
 
-	// 只处理文本消息
-	if msg.Text == "" {
+	// 提取文本：优先 Text，其次 Caption（图片/文件附带的文字）
+	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
+
+	// 如果没有文本但有附件，构造描述性文本
+	if text == "" {
+		if msg.Photo != nil {
+			text = "[图片]"
+		} else if msg.Document != nil {
+			text = fmt.Sprintf("[文件: %s]", msg.Document.FileName)
+		} else if msg.Sticker != nil {
+			text = fmt.Sprintf("[贴纸: %s]", msg.Sticker.Emoji)
+		}
+	}
+
+	// 仍然无内容则跳过
+	if text == "" {
 		return
 	}
+
+	// 发送"正在输入..."状态（fire-and-forget）
+	go func() {
+		if err := c.api.sendChatAction(ctx, msg.Chat.ID, "typing"); err != nil {
+			log.Logger.Debugw("telegram: sendChatAction failed",
+				"channel", c.name, "err", err)
+		}
+	}()
 
 	// 转换 chat ID 为字符串 channel
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)
@@ -242,6 +282,20 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		metadata["reply_to_message_id"] = msg.ReplyToMessage.MessageID
 		metadata["reply_to_text"] = msg.ReplyToMessage.Text
 	}
+	// 附件信息
+	if msg.Photo != nil {
+		metadata["has_photo"] = true
+	}
+	if msg.Document != nil {
+		metadata["has_document"] = true
+		metadata["document_name"] = msg.Document.FileName
+	}
+	if msg.Sticker != nil {
+		metadata["has_sticker"] = true
+	}
+	if msg.MediaGroupID != "" {
+		metadata["media_group_id"] = msg.MediaGroupID
+	}
 
 	coreMsg := core.Message{
 		ID:        fmt.Sprintf("%d", msg.MessageID),
@@ -250,7 +304,7 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		Channel:   chatID,
 		ChatType:  chatType,
 		UserID:    userID,
-		Text:      msg.Text,
+		Text:      text,
 		Mentioned: mentioned,
 		MediaType: "text/plain",
 		Metadata:  metadata,
@@ -321,8 +375,70 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 	}
 }
 
-// Reply 向指定聊天回复消息。这是一个便捷方法，供 Pipeline Action 处理器调用。
+// Reply 向指定聊天回复消息。便捷方法，供 Pipeline Action 处理器调用。
+// 如果文本超过 4096 字符，自动拆分为多条消息发送。
 func (c *TelegramChannel) Reply(ctx context.Context, chatID int64, text string, replyToMessageID int64) error {
-	_, err := c.api.sendMessage(ctx, chatID, text, replyToMessageID)
-	return err
+	return c.ReplyWithMode(ctx, chatID, text, c.cfg.ParseMode, replyToMessageID)
+}
+
+// ReplyWithMode 向指定聊天回复消息，指定 parseMode。
+func (c *TelegramChannel) ReplyWithMode(ctx context.Context, chatID int64, text, parseMode string, replyToMessageID int64) error {
+	chunks := splitMessage(text, telegramMaxMessageLength)
+	for i, chunk := range chunks {
+		// 只有第一条消息引用 replyToMessageID
+		var replyTo int64
+		if i == 0 {
+			replyTo = replyToMessageID
+		}
+		_, err := c.api.sendMessageFull(ctx, chatID, chunk, parseMode, replyTo)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EditMessage 编辑已发送的文本消息。用于流式输出场景。
+func (c *TelegramChannel) EditMessage(ctx context.Context, chatID, messageID int64, text string) error {
+	return c.api.editMessageText(ctx, chatID, messageID, text, c.cfg.ParseMode)
+}
+
+// SendTyping 发送"正在输入..."状态指示。
+func (c *TelegramChannel) SendTyping(ctx context.Context, chatID int64) error {
+	return c.api.sendChatAction(ctx, chatID, "typing")
+}
+
+// splitMessage 将长文本按 maxLen 拆分为多条消息。
+// 优先在换行符处拆分，其次按 rune 边界拆分。
+func splitMessage(text string, maxLen int) []string {
+	if utf8.RuneCountInString(text) <= maxLen {
+		return []string{text}
+	}
+
+	var chunks []string
+	runes := []rune(text)
+	for len(runes) > 0 {
+		end := maxLen
+		if end > len(runes) {
+			end = len(runes)
+		}
+
+		// 尝试在换行符处拆分
+		if end < len(runes) {
+			bestSplit := -1
+			for i := end - 1; i > end/2; i-- {
+				if runes[i] == '\n' {
+					bestSplit = i + 1
+					break
+				}
+			}
+			if bestSplit > 0 {
+				end = bestSplit
+			}
+		}
+
+		chunks = append(chunks, string(runes[:end]))
+		runes = runes[end:]
+	}
+	return chunks
 }
