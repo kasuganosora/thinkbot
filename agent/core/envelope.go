@@ -23,10 +23,18 @@ type Message struct {
 	Source string `json:"source"`
 	// Channel 频道或会话 ID。
 	Channel string `json:"channel"`
+	// ChatType 会话类型（"private" / "group" / "channel" / "supergroup"）。
+	// Pipeline 可据此判断是否需要在群聊中 @mention 才回复等策略。
+	// 空字符串表示未知类型，调用方应做容错处理。
+	ChatType string `json:"chatType,omitempty"`
 	// UserID 发送者 ID。
 	UserID string `json:"userId"`
 	// Text 消息文本内容。
 	Text string `json:"text"`
+	// Mentioned 表示此消息是否显式 @提及了 Bot。
+	// 在群聊中，Pipeline 可据此决定是否只处理被 @ 的消息。
+	// 私聊中通常恒为 true。
+	Mentioned bool `json:"mentioned"`
 	// MediaType 媒体类型（text/plain, image/png, ...）。
 	MediaType string `json:"mediaType,omitempty"`
 	// RawData 原始载荷（可选）。
@@ -36,6 +44,19 @@ type Message struct {
 	// CreatedAt 消息创建时间。
 	CreatedAt time.Time `json:"createdAt"`
 }
+
+// ChatType 常量定义。各 Channel 应尽量映射到这些标准值。
+// 平台特有类型可放在 Metadata 中补充。
+const (
+	// ChatPrivate 一对一私聊。
+	ChatPrivate string = "private"
+	// ChatGroup 群组聊天（成员可发言）。
+	ChatGroup string = "group"
+	// ChatSupergroup 超级群组（Telegram 特有，成员上限更大）。
+	ChatSupergroup string = "supergroup"
+	// ChatChannel 频道/公告板（仅管理员可发言）。
+	ChatChannel string = "channel"
+)
 
 // ============================================================================
 // Action — 输出动作
