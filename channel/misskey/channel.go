@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
@@ -18,6 +19,17 @@ import (
 // ============================================================================
 // MisskeyChannel — Misskey 平台输入端适配器
 // ============================================================================
+
+const (
+	// misskeyMaxNoteLength 单条帖子最大长度（rune 数）。
+	misskeyMaxNoteLength = 3000
+	// 指数退避重连参数。
+	misskeyReconnectDelayMin = 5 * time.Second
+	misskeyReconnectDelayMax = 5 * time.Minute
+	// 去重缓存 TTL 和清理间隔。
+	misskeyDedupTTL          = 2 * time.Minute
+	misskeyDedupCleanupEvery = 30 * time.Second
+)
 
 // Config 配置 MisskeyChannel。
 type Config struct {
@@ -70,8 +82,14 @@ type MisskeyChannel struct {
 	// botUserID 是 Bot 自身的 Misskey User ID，在 Start 时通过 getSelf 获取。
 	// 用于在 timeline 模式下过滤自己发的帖。
 	botUserID string
+	// botUsername 是 Bot 的用户名，用于从文本中剥离 @bot 提及。
+	botUsername string
 
 	ingress *inbound.Ingress
+
+	// 去重缓存：noteID -> 入时间。防止 mention+timeline 同时投递同一条帖子。
+	dedupMu sync.Mutex
+	dedup   map[string]time.Time
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -128,10 +146,16 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 		"channel", c.name, "username", me.Username, "host", c.cfg.Host)
 
 	c.botUserID = me.ID
+	c.botUsername = me.Username
+	c.dedup = make(map[string]time.Time)
 
 	// 派生可取消的 context
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
+
+	// 启动去重缓存清理 goroutine
+	c.wg.Add(1)
+	go c.dedupCleanupLoop(runCtx)
 
 	// 启动 streaming goroutine
 	c.wg.Add(1)
@@ -140,13 +164,14 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 	return nil
 }
 
-// streamLoop 维护 WebSocket 连接，断线自动重连。
+// streamLoop 维护 WebSocket 连接，断线自动重连（指数退避）。
 func (c *MisskeyChannel) streamLoop(ctx context.Context) {
 	defer c.wg.Done()
 
-	connID := "main-1"        // main 通道连接 ID
-	timelineConnID := "tl-1"  // timeline 通道连接 ID（可选）
+	connID := "main-1"       // main 通道连接 ID
+	timelineConnID := "tl-1" // timeline 通道连接 ID（可选）
 
+	delay := misskeyReconnectDelayMin
 	for {
 		select {
 		case <-ctx.Done():
@@ -154,6 +179,7 @@ func (c *MisskeyChannel) streamLoop(ctx context.Context) {
 		default:
 		}
 
+		start := time.Now()
 		err := c.connectAndServe(ctx, connID, timelineConnID)
 		if ctx.Err() != nil {
 			return // 主动关闭
@@ -161,16 +187,66 @@ func (c *MisskeyChannel) streamLoop(ctx context.Context) {
 
 		if err != nil {
 			log.Logger.Warnw("misskey stream disconnected",
-				"channel", c.name, "err", err)
+				"channel", c.name, "err", err, "reconnect_delay", delay)
+		}
+
+		// 如果连接存活时间超过最大退避窗口，重置退避（可能是临时断线）。
+		if time.Since(start) > misskeyReconnectDelayMax {
+			delay = misskeyReconnectDelayMin
+		} else if err == nil {
+			// 干净断开（context 取消）无需退避。
+			delay = misskeyReconnectDelayMin
 		}
 
 		// 重连前等待
 		select {
-		case <-time.After(c.cfg.ReconnectDelay):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return
 		}
+
+		// 指数退避：翻倍直到上限。
+		delay *= 2
+		if delay > misskeyReconnectDelayMax {
+			delay = misskeyReconnectDelayMax
+		}
 	}
+}
+
+// dedupCleanupLoop 定期清理过期的去重缓存。
+func (c *MisskeyChannel) dedupCleanupLoop(ctx context.Context) {
+	defer c.wg.Done()
+	ticker := time.NewTicker(misskeyDedupCleanupEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.dedupMu.Lock()
+			now := time.Now()
+			for id, ts := range c.dedup {
+				if now.Sub(ts) > misskeyDedupTTL {
+					delete(c.dedup, id)
+				}
+			}
+			c.dedupMu.Unlock()
+		}
+	}
+}
+
+// dedupSeen 检查 noteID 是否在去重窗口内已处理过，如果未处理则标记为已处理。
+func (c *MisskeyChannel) dedupSeen(noteID string) bool {
+	if noteID == "" {
+		return false
+	}
+	c.dedupMu.Lock()
+	defer c.dedupMu.Unlock()
+	if ts, seen := c.dedup[noteID]; seen && time.Since(ts) < misskeyDedupTTL {
+		return true
+	}
+	c.dedup[noteID] = time.Now()
+	return false
 }
 
 // connectAndServe 建立 WebSocket 连接并持续处理消息。
@@ -272,6 +348,14 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 					"channel", c.name, "type", chMsg.Type, "err", err)
 				return nil
 			}
+			// 去重：防止 timeline 先投递了同一条帖子
+			if c.dedupSeen(note.ID) {
+				return nil
+			}
+			// 忽略 Bot 自己发的帖
+			if note.UserID == c.botUserID || (note.UserID == "" && note.User.ID == c.botUserID) {
+				return nil
+			}
 			c.handleNote(ctx, note, chMsg.Type, true) // Mentioned = true
 		default:
 			// 忽略其他 main 事件（follow, renote 等）
@@ -289,12 +373,20 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 					"channel", c.name, "err", err)
 				return nil
 			}
-			// 忽略 Bot 自己发的帖
-			if note.User.ID == c.botUserID {
+			// 去重
+			if c.dedupSeen(note.ID) {
 				return nil
 			}
-			// 忽略没有文本的帖（纯图片、Renote 等）
-			if note.Text == "" {
+			// 忽略 Bot 自己发的帖
+			if note.UserID == c.botUserID || (note.UserID == "" && note.User.ID == c.botUserID) {
+				return nil
+			}
+			// 忽略 DM（timeline 不处理私聊）
+			if note.Visibility == VisibilitySpecified {
+				return nil
+			}
+			// 忽略没有文本且没有文件和 renote 的帖
+			if note.Text == "" && len(note.Files) == 0 && note.Renote == nil {
 				return nil
 			}
 			c.handleNote(ctx, note, "timeline", false) // Mentioned = false
@@ -310,9 +402,42 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 // handleNote 将一条 Misskey Note 转换为 core.Message 并注入 Ingress。
 // mentioned 参数指示此 Note 是否明确 @提及了 Bot。
 func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType string, mentioned bool) {
-	if note.Text == "" {
+	text := strings.TrimSpace(note.Text)
+
+	// 如果是纯 Renote（无自己的文字），回退到被 Renote 的帖子文本
+	renoteFallback := false
+	if text == "" && note.Renote != nil {
+		if rt := strings.TrimSpace(note.Renote.Text); rt != "" {
+			text = rt
+			renoteFallback = true
+		}
+	}
+
+	// 没有文本也没有附件，跳过
+	if text == "" && len(note.Files) == 0 {
 		return
 	}
+
+	// 从文本中剥离 @bot 提及（Bot 不需要看到自己被 @）
+	if c.botUsername != "" {
+		text = strings.TrimSpace(strings.Replace(text, "@"+c.botUsername, "", 1))
+	}
+
+	// 剥离后如果为空但原来是 renote，再次回退
+	if text == "" && note.Renote != nil {
+		if rt := strings.TrimSpace(note.Renote.Text); rt != "" {
+			text = rt
+			renoteFallback = true
+		}
+	}
+
+	// 如果仍然为空且没有附件，跳过
+	if text == "" && len(note.Files) == 0 {
+		return
+	}
+
+	// 构建回复/转发上下文，让 Bot 能看到用户回复了什么或转发了什么
+	text = noteContext(note, text, renoteFallback)
 
 	// 构建用户全名（@username@host 或 @username）
 	username := "@" + note.User.Username
@@ -331,6 +456,9 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		createdAt = t
 	}
 
+	// 分类帖子类型
+	noteType := classifyNoteType(note)
+
 	metadata := map[string]any{
 		"note_id":      note.ID,
 		"username":     note.User.Username,
@@ -341,6 +469,14 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		"renote_id":    note.RenoteID,
 		"display_name": displayName,
 		"acct":         username,
+		"note_type":    noteType,
+	}
+	if len(note.Files) > 0 {
+		metadata["file_count"] = len(note.Files)
+		for i, f := range note.Files {
+			metadata[fmt.Sprintf("file_%d_url", i)] = f.URL
+			metadata[fmt.Sprintf("file_%d_name", i)] = f.Name
+		}
 	}
 
 	// Mentioned 由调用方传入：mention/reply 事件为 true，timeline 事件为 false。
@@ -354,6 +490,11 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		chatType = core.ChatPrivate
 	}
 
+	// timeline 消息加上来源前缀
+	if eventType == "timeline" {
+		text = fmt.Sprintf("[Timeline] @%s: %s", note.User.Username, text)
+	}
+
 	coreMsg := core.Message{
 		ID:        note.ID,
 		BotID:     c.botID,
@@ -361,7 +502,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		Channel:   note.ID,
 		ChatType:  chatType,
 		UserID:    note.User.ID,
-		Text:      note.Text,
+		Text:      text,
 		Mentioned: mentioned,
 		MediaType: "text/plain",
 		Metadata:  metadata,
@@ -372,6 +513,67 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		log.Logger.Warnw("misskey ingress receive failed",
 			"channel", c.name, "note_id", note.ID, "err", err)
 	}
+}
+
+// classifyNoteType 判断帖子交互类型："note"（原创）/ "reply"（回复）/ "renote"（纯转发）/ "quote"（引用转发）。
+func classifyNoteType(note Note) string {
+	if note.RenoteID != "" {
+		if strings.TrimSpace(note.Text) == "" && len(note.Files) == 0 {
+			return "renote" // 纯转发
+		}
+		return "quote" // 引用转发（带评论）
+	}
+	if note.ReplyID != "" {
+		return "reply"
+	}
+	return "note"
+}
+
+// noteContext 为帖子文本添加回复和转发上下文，让 Bot 能看到用户回复了什么或引用了什么。
+// 回复/转发原文截断到 200 rune 以保持 prompt 简洁。
+func noteContext(note Note, text string, skipRenote bool) string {
+	// 回复上下文
+	if note.Reply != nil && note.Reply.Text != "" {
+		quoted := truncateRunes(strings.TrimSpace(note.Reply.Text), 200)
+		sender := note.Reply.User.Name
+		if sender == "" {
+			sender = note.Reply.User.Username
+		}
+		if sender != "" && quoted != "" {
+			if text == "" {
+				text = fmt.Sprintf("[Reply to %s: %s]", sender, quoted)
+			} else {
+				text = fmt.Sprintf("[Reply to %s: %s]\n%s", sender, quoted, text)
+			}
+		}
+	}
+
+	// 转发上下文（如果 skipRenote 则跳过，因为转发文本已被用作主文本）
+	if !skipRenote && note.Renote != nil && note.Renote.Text != "" {
+		quoted := truncateRunes(strings.TrimSpace(note.Renote.Text), 200)
+		sender := note.Renote.User.Name
+		if sender == "" {
+			sender = note.Renote.User.Username
+		}
+		if sender != "" && quoted != "" {
+			if text == "" {
+				text = fmt.Sprintf("[Renote from %s: %s]", sender, quoted)
+			} else {
+				text = fmt.Sprintf("[Renote from %s: %s]\n%s", sender, quoted, text)
+			}
+		}
+	}
+
+	return text
+}
+
+// truncateRunes 将字符串截断到 maxRunes 个 rune，超长时追加 suffix。
+func truncateRunes(s string, maxRunes int) string {
+	if utf8.RuneCountInString(s) <= maxRunes {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxRunes]) + "..."
 }
 
 // Stop 优雅停止 streaming。
@@ -400,7 +602,44 @@ func (c *MisskeyChannel) Stop(ctx context.Context) error {
 }
 
 // Reply 向指定帖子回复。便捷方法，供 Pipeline Action 处理器调用。
+// 文本超长时自动截断到 3000 rune。回复使用 home 可见性。
+// 如果回复目标帖子已被删除，放弃回复。
 func (c *MisskeyChannel) Reply(ctx context.Context, noteID, text string) error {
-	_, err := c.api.createNote(ctx, text, noteID, VisibilityPublic)
+	return c.ReplyWithVisibility(ctx, noteID, text, VisibilityHome)
+}
+
+// ReplyWithVisibility 向指定帖子回复，使用指定可见性。
+func (c *MisskeyChannel) ReplyWithVisibility(ctx context.Context, noteID, text, visibility string) error {
+	text = truncateRunes(strings.TrimSpace(text), misskeyMaxNoteLength)
+
+	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, "", nil)
+	if err != nil {
+		log.Logger.Warnw("misskey: reply failed, target note may be deleted",
+			"channel", c.name, "note_id", noteID, "err", err)
+	}
 	return err
+}
+
+// React 对帖子添加 emoji 反应。
+func (c *MisskeyChannel) React(ctx context.Context, noteID, emoji string) error {
+	// Misskey 反应格式：自定义 emoji 用 :name:，unicode emoji 直接使用
+	if !strings.HasPrefix(emoji, ":") && !isUnicodeEmoji(emoji) {
+		emoji = ":" + emoji + ":"
+	}
+	return c.api.createReaction(ctx, noteID, emoji)
+}
+
+// Unreact 移除对帖子的反应。
+func (c *MisskeyChannel) Unreact(ctx context.Context, noteID string) error {
+	return c.api.deleteReaction(ctx, noteID)
+}
+
+// isUnicodeEmoji 粗略判断字符串是否为 unicode emoji（非 ASCII 字符）。
+func isUnicodeEmoji(s string) bool {
+	for _, r := range s {
+		if r > 0x2B00 { // CJK 及 emoji 范围
+			return true
+		}
+	}
+	return false
 }

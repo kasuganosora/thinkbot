@@ -23,15 +23,19 @@ type apiClient struct {
 
 // newAPIClient 创建一个 Telegram Bot API 客户端。
 // pollTimeout 是 long polling 超时秒数，用于将 HTTP 客户端超时设为足够大的值。
-func newAPIClient(token string, pollTimeout int, opts ...http.Option) *apiClient {
+// baseURL 是 API 基础地址（默认 https://api.telegram.org）。
+func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Option) *apiClient {
 	// HTTP 客户端超时需要覆盖 long polling 等待时间 + 网络余量。
 	// 设为 0（无超时）让 context 级别的超时来控制。
 	httpTimeout := 0
 	if pollTimeout > 0 {
 		httpTimeout = pollTimeout + 15 // pollTimeout + 15s 余量
 	}
+	if baseURL == "" {
+		baseURL = apiURL
+	}
 	defaultOpts := []http.Option{
-		http.WithBaseURL(fmt.Sprintf("%s/bot%s", apiURL, token)),
+		http.WithBaseURL(fmt.Sprintf("%s/bot%s", baseURL, token)),
 		http.WithTimeout(time.Duration(httpTimeout) * time.Second),
 	}
 	opts = append(defaultOpts, opts...)
@@ -85,11 +89,17 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 
 // sendMessage 发送文本消息到指定聊天。
 func (a *apiClient) sendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
+	return a.sendMessageFull(ctx, chatID, text, "", replyTo)
+}
+
+// sendMessageFull 发送文本消息，支持 parseMode。
+func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, parseMode string, replyTo int64) (int64, error) {
 	req := a.client.Post("sendMessage").
 		SetContext(ctx).
 		SetJSONBody(sendMessageRequest{
 			ChatID:           chatID,
 			Text:             text,
+			ParseMode:        parseMode,
 			ReplyToMessageID: replyTo,
 		})
 
@@ -106,6 +116,56 @@ func (a *apiClient) sendMessage(ctx context.Context, chatID int64, text string, 
 		return 0, fmt.Errorf("telegram sendMessage failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
 	}
 	return apiResp.Result.MessageID, nil
+}
+
+// sendChatAction 发送聊天状态（如"正在输入..."）。
+func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action string) error {
+	req := a.client.Post("sendChatAction").
+		SetContext(ctx).
+		SetJSONBody(sendChatActionRequest{
+			ChatID: chatID,
+			Action: action,
+		})
+
+	resp, err := req.Do()
+	if err != nil {
+		return fmt.Errorf("telegram sendChatAction: %w", err)
+	}
+
+	var apiResp apiResponse[any]
+	if err := resp.JSON(&apiResp); err != nil {
+		return fmt.Errorf("telegram sendChatAction parse: %w", err)
+	}
+	if !apiResp.OK {
+		return fmt.Errorf("telegram sendChatAction failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
+	}
+	return nil
+}
+
+// editMessageText 编辑已发送的文本消息。
+func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64, text, parseMode string) error {
+	req := a.client.Post("editMessageText").
+		SetContext(ctx).
+		SetJSONBody(editMessageTextRequest{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Text:      text,
+			ParseMode: parseMode,
+		})
+
+	resp, err := req.Do()
+	if err != nil {
+		return fmt.Errorf("telegram editMessageText: %w", err)
+	}
+
+	var apiResp apiResponse[any]
+	if err := resp.JSON(&apiResp); err != nil {
+		return fmt.Errorf("telegram editMessageText parse: %w", err)
+	}
+	if !apiResp.OK {
+		return fmt.Errorf("telegram editMessageText failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
+	}
+	return nil
 }
 
 // apiTimeoutMultiplier 将秒级 timeout 转为 context 超时时的缓冲余量。

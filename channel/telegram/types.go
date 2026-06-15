@@ -21,10 +21,51 @@ type Message struct {
 	Chat      Chat   `json:"chat"`
 	Date      int64  `json:"date"`
 	Text      string `json:"text,omitempty"`
+	// Caption 图片/文件的附带文字。
+	Caption string `json:"caption,omitempty"`
 	// Entities 消息中的格式化实体（@提及、/命令、链接等）。
 	Entities []MessageEntity `json:"entities,omitempty"`
+	// CaptionEntities caption 文本中的格式化实体。
+	CaptionEntities []MessageEntity `json:"caption_entities,omitempty"`
+	// Photo 图片消息中包含的缩略图（取最大尺寸）。
+	Photo []PhotoSize `json:"photo,omitempty"`
+	// Document 文件附件。
+	Document *Document `json:"document,omitempty"`
+	// Sticker 贴纸。
+	Sticker *Sticker `json:"sticker,omitempty"`
+	// MediaGroupID 相册组 ID（多张图片合并发送时共享）。
+	MediaGroupID string `json:"media_group_id,omitempty"`
 	// 回复相关
 	ReplyToMessage *Message `json:"reply_to_message,omitempty"`
+}
+
+// PhotoSize 表示一张图片的某个尺寸。
+type PhotoSize struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+// Document 表示一个文件附件。
+type Document struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+// Sticker 表示一个贴纸。
+type Sticker struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	IsAnimated   bool   `json:"is_animated,omitempty"`
+	IsVideo      bool   `json:"is_video,omitempty"`
+	Emoji        string `json:"emoji,omitempty"`
 }
 
 // MessageEntity 表示消息文本中的一个格式化实体。
@@ -104,4 +145,16 @@ type sendMessageResult struct {
 	MessageID int64 `json:"message_id"`
 }
 
+// sendChatActionRequest 对应 sendChatAction 方法（发送"正在输入..."等状态）。
+type sendChatActionRequest struct {
+	ChatID int64  `json:"chat_id"`
+	Action string `json:"action"` // "typing", "upload_photo", "record_video", ...
+}
 
+// editMessageTextRequest 对应 editMessageText 方法。
+type editMessageTextRequest struct {
+	ChatID    int64  `json:"chat_id"`
+	MessageID int64  `json:"message_id"`
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode,omitempty"`
+}
