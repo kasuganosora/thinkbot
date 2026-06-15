@@ -2,8 +2,6 @@ package grok
 
 import (
 	"context"
-
-	httputil "github.com/kasuganosora/thinkbot/util/http"
 )
 
 // ============================================================================
@@ -127,6 +125,3 @@ func (r *ImageResponse) FirstImageBase64() string {
 	}
 	return ""
 }
-
-// 确保引用 httputil（供 dump 等功能在将来扩展时使用）。
-var _ = httputil.DefaultClient

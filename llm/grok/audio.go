@@ -1,9 +1,9 @@
 package grok
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
-	"strings"
+	"strconv"
 
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 )
@@ -226,7 +226,7 @@ func (c *Client) DoSpeechToText(ctx context.Context, params STTRequest) (*STTRes
 
 	// file 字段必须是最后一个
 	if len(params.File) > 0 {
-		form.AddFile("file", params.Filename, strings.NewReader(string(params.File)))
+		form.AddFile("file", params.Filename, bytes.NewReader(params.File))
 	}
 
 	resp, err := c.newRequest("POST", "/v1/stt").
@@ -244,34 +244,7 @@ func (c *Client) DoSpeechToText(ctx context.Context, params STTRequest) (*STTRes
 	return &result, nil
 }
 
-// 确保 json 引用（用于将来扩展）。
-var _ = json.Marshal
-
 // intStr 将整数转为字符串。
 func intStr(n int) string {
-	return strings.TrimSpace(itoa(n))
-}
-
-// itoa 轻量整数转字符串。
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return strconv.Itoa(n)
 }
