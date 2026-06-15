@@ -1,0 +1,75 @@
+package bot
+
+// ============================================================================
+// BotConfig — Bot 级别配置
+// ============================================================================
+
+// BotConfig 是单个 Bot 的配置。
+// 它携带 Bot 运行所需的所有参数，包括 LLM 配置、行为参数、扩展元数据等。
+type BotConfig struct {
+	// Workers 并发处理 worker 数量（默认 4）。
+	// 每个 Bot 拥有独立的 worker pool。
+	Workers int `json:"workers" yaml:"workers"`
+
+	// IngressBufferSize Ingress 缓冲区大小（默认 256）。
+	IngressBufferSize int `json:"ingressBufferSize" yaml:"ingressBufferSize"`
+
+	// SystemPrompt Bot 的系统提示词（传给 LLM Stage）。
+	SystemPrompt string `json:"systemPrompt" yaml:"systemPrompt"`
+
+	// Model LLM 模型标识（如 "gpt-4o"、"claude-3.5-sonnet"）。
+	Model string `json:"model" yaml:"model"`
+
+	// Temperature LLM 温度参数。
+	Temperature float64 `json:"temperature" yaml:"temperature"`
+
+	// MaxTokens LLM 最大输出 token 数。
+	MaxTokens int `json:"maxTokens" yaml:"maxTokens"`
+
+	// Extra 扩展配置（Stage 自定义参数等）。
+	// Stage 可通过 Envelope.Get("bot.config") 访问整个 BotConfig，
+	// 或通过此字段访问自定义参数。
+	Extra map[string]any `json:"extra,omitempty" yaml:"extra,omitempty"`
+}
+
+// DefaultBotConfig 返回合理的默认配置。
+func DefaultBotConfig() BotConfig {
+	return BotConfig{
+		Workers:           4,
+		IngressBufferSize: 256,
+		Temperature:       0.7,
+		MaxTokens:         4096,
+	}
+}
+
+// Merge 将 other 中的非零值合并到当前配置中。
+// 用于配置覆盖场景（如从文件加载后覆盖默认值）。
+func (c BotConfig) Merge(other BotConfig) BotConfig {
+	if other.Workers > 0 {
+		c.Workers = other.Workers
+	}
+	if other.IngressBufferSize > 0 {
+		c.IngressBufferSize = other.IngressBufferSize
+	}
+	if other.SystemPrompt != "" {
+		c.SystemPrompt = other.SystemPrompt
+	}
+	if other.Model != "" {
+		c.Model = other.Model
+	}
+	if other.Temperature != 0 {
+		c.Temperature = other.Temperature
+	}
+	if other.MaxTokens > 0 {
+		c.MaxTokens = other.MaxTokens
+	}
+	if other.Extra != nil {
+		if c.Extra == nil {
+			c.Extra = make(map[string]any)
+		}
+		for k, v := range other.Extra {
+			c.Extra[k] = v
+		}
+	}
+	return c
+}

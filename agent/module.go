@@ -16,14 +16,12 @@ import (
 // fx Module — 顶层 Agent 依赖注入
 // ============================================================================
 
-// Module 是 Agent 的顶层 fx 模块。
-// 组装 Pipeline + Inbound(Ingress) + Outbound + Engine，
-// 并通过 Lifecycle hooks 管理 Engine 启停。
+// Module 是 Agent 的单 Bot 模式 fx 模块（向后兼容）。
+// 适用于只有一个 Bot 的简单场景。
 //
-// 各 channel 输入端通过 fx 注入 *inbound.Ingress（或 *Engine）获取消息入口，
-// 调用 ingress.Receive(ctx, msg) 即可将消息送入 Pipeline。
+// 对于多 Bot 场景，请使用 bot.Module + bot.BotManager。
 //
-// 使用示例：
+// 单 Bot 模式：
 //
 //	app := fx.New(
 //	    agent.Module,
@@ -31,13 +29,28 @@ import (
 //	    fx.Provide(func(l *zap.Logger) *zap.SugaredLogger { return l.Sugar() }),
 //	    pipeline.ProvideStage(stages.NewLoggerStage, 10),
 //	    pipeline.ProvideStage(stages.NewLLMStage, 100),
-//	    // channel 输入端通过注入 *inbound.Ingress 来发送消息
 //	    fx.Invoke(func(ingress *inbound.Ingress) {
-//	        // 启动你的 webhook server / ws 连接 / polling loop
-//	        // 在收到消息时调用 ingress.Receive(ctx, msg)
+//	        ingress.Receive(ctx, msg)
 //	    }),
 //	)
-//	app.Run()
+//
+// 多 Bot 模式：
+//
+//	app := fx.New(
+//	    bot.Module,
+//	    fx.Invoke(func(mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider) {
+//	        botA, _ := bot.New(bot.BotParams{
+//	            ID:         "customer-service",
+//	            Config:     bot.BotConfig{SystemPrompt: "你是客服"},
+//	            Pipeline:   pipelineA,
+//	            Dispatcher: dispatcherA,
+//	            Channels:   []bot.Channel{misskeyChA, telegramChA},
+//	            Logger:     logger,
+//	            TP:         tp,
+//	        })
+//	        mgr.Register(botA)
+//	    }),
+//	)
 var Module = fx.Module("agent",
 	// 引入子模块
 	pipeline.Module,
