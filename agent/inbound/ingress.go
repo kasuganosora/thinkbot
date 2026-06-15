@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -86,12 +87,27 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 		msg.CreatedAt = time.Now()
 	}
 
+	// 自动分配 Trace ID —— 这是全链路可观测性的起点。
+	// 如果调用方已设置（如从 HTTP 请求头传入），则保留；否则生成新 ID。
+	if msg.TraceID == "" {
+		// 优先从 context 中提取（上游 HTTP Middleware 可能已注入）
+		if ctxTraceID := traceid.FromContext(ctx); ctxTraceID != "" {
+			msg.TraceID = ctxTraceID
+		} else {
+			msg.TraceID = traceid.New()
+		}
+	}
+
+	// 将 trace ID 注入 context，供下游 OTel span 和日志使用
+	ctx = traceid.WithTraceID(ctx, msg.TraceID)
+
 	// 封装 Envelope
 	env := core.NewEnvelope(msg)
 
 	// 追踪
 	_, span := g.tracer.Start(ctx, "ingress.receive",
 		trace.WithAttributes(
+			attribute.String("trace.id", msg.TraceID),
 			attribute.String("message.id", msg.ID),
 			attribute.String("message.source", msg.Source),
 			attribute.String("message.channel", msg.Channel),
@@ -102,6 +118,7 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 	select {
 	case g.ch <- env:
 		g.logger.Debugw("message received",
+			"trace_id", msg.TraceID,
 			"message_id", msg.ID,
 			"source", msg.Source,
 			"channel", msg.Channel)
@@ -120,6 +137,11 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
+	}
+
+	// 自动分配 Trace ID
+	if msg.TraceID == "" {
+		msg.TraceID = traceid.New()
 	}
 
 	env := core.NewEnvelope(msg)

@@ -15,6 +15,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -160,8 +161,16 @@ func (e *Engine) worker(ctx context.Context, id int) {
 
 // processEnvelope 处理单个消息信封的完整生命周期。
 func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.Envelope) {
+	// 将 Envelope 的 Trace ID 注入 context —— 全链路日志和 span 的基础
+	traceID := env.Message.TraceID
+	ctx = traceid.WithTraceID(ctx, traceID)
+
+	// 创建携带 trace_id 的 logger，后续本方法内所有日志自动带上
+	logger := e.logger.With("trace_id", traceID)
+
 	ctx, span := e.tracer.Start(ctx, "engine.process",
 		trace.WithAttributes(
+			attribute.String("trace.id", traceID),
 			attribute.Int("worker.id", workerID),
 			attribute.String("message.id", env.Message.ID),
 			attribute.String("message.source", env.Message.Source),
@@ -176,7 +185,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-		e.logger.Errorw("pipeline execution failed",
+		logger.Errorw("pipeline execution failed",
 			"worker_id", workerID,
 			"message_id", env.Message.ID,
 			"err", err,
@@ -187,7 +196,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 	// Pipeline 返回 nil → 消息被丢弃
 	if result == nil {
 		span.SetAttributes(attribute.Bool("message.dropped", true))
-		e.logger.Debugw("message dropped by pipeline",
+		logger.Debugw("message dropped by pipeline",
 			"worker_id", workerID,
 			"message_id", env.Message.ID)
 		return
@@ -197,7 +206,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 	actions := result.Actions()
 	if len(actions) == 0 {
 		span.SetAttributes(attribute.Bool("message.no_actions", true))
-		e.logger.Debugw("no actions to dispatch",
+		logger.Debugw("no actions to dispatch",
 			"worker_id", workerID,
 			"message_id", env.Message.ID)
 		return
@@ -208,7 +217,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 	if dispErr := e.dispatcher.Dispatch(ctx, actions); dispErr != nil {
 		span.SetStatus(codes.Error, "dispatch failed")
 		span.RecordError(dispErr)
-		e.logger.Errorw("dispatch failed",
+		logger.Errorw("dispatch failed",
 			"worker_id", workerID,
 			"message_id", env.Message.ID,
 			"actions", len(actions),
@@ -217,7 +226,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 		return
 	}
 
-	e.logger.Debugw("message processed",
+	logger.Debugw("message processed",
 		"worker_id", workerID,
 		"message_id", env.Message.ID,
 		"actions", len(actions),

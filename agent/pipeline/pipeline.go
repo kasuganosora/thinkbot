@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -92,8 +93,12 @@ func New(stages []core.StageInfo, tp trace.TracerProvider, mp metric.MeterProvid
 //   - Stage 返回其他 error → 记录错误后 Pipeline 继续
 //   - Envelope.Aborted() == true → Pipeline 终止
 func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	// 从 context 中提取 trace ID，用于日志关联
+	logger := traceid.WithLoggerFrom(ctx, p.logger)
+
 	ctx, span := p.tracer.Start(ctx, "pipeline.execute",
 		trace.WithAttributes(
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 			attribute.String("message.id", env.Message.ID),
 			attribute.String("message.source", env.Message.Source),
 			attribute.String("message.channel", env.Message.Channel),
@@ -104,7 +109,7 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 	pipelineStart := time.Now()
 	messageID := env.Message.ID // 保存，防止 Stage 返回 nil 后无法访问
 
-	p.logger.Debugw("pipeline started",
+	logger.Debugw("pipeline started",
 		"message_id", env.Message.ID,
 		"source", env.Message.Source,
 		"stages", len(p.stages))
@@ -114,7 +119,7 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 			continue
 		}
 		if env.Aborted() {
-			p.logger.Infow("pipeline aborted by envelope",
+			logger.Infow("pipeline aborted by envelope",
 				"message_id", env.Message.ID,
 				"err", env.Err())
 			break
@@ -127,21 +132,21 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 				span.SetStatus(codes.Error, "aborted")
 				span.RecordError(err)
 				p.msgErrors.Add(ctx, 1)
-				p.logger.Errorw("pipeline aborted",
+				logger.Errorw("pipeline aborted",
 					"message_id", env.Message.ID,
 					"stage", si.Stage.Name(),
 					"err", err)
 				return env, err
 			}
 			if core.IsSkipError(err) {
-				p.logger.Debugw("stage skipped",
+				logger.Debugw("stage skipped",
 					"message_id", env.Message.ID,
 					"stage", si.Stage.Name(),
 					"reason", err.Error())
 				continue
 			}
 			// 非致命错误：记录后继续
-			p.logger.Warnw("stage error (continuing)",
+			logger.Warnw("stage error (continuing)",
 				"message_id", env.Message.ID,
 				"stage", si.Stage.Name(),
 				"err", err)
@@ -149,7 +154,7 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 		if env == nil {
 			// Stage 返回 nil → 消息被丢弃
 			p.msgDropped.Add(ctx, 1)
-			p.logger.Infow("message dropped by stage",
+			logger.Infow("message dropped by stage",
 				"message_id", messageID,
 				"stage", si.Stage.Name())
 			span.SetAttributes(attribute.String("pipeline.dropped_by", si.Stage.Name()))
@@ -166,7 +171,7 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 		attribute.Float64("pipeline.duration_seconds", totalDuration),
 	)
 
-	p.logger.Debugw("pipeline completed",
+	logger.Debugw("pipeline completed",
 		"message_id", env.Message.ID,
 		"actions", len(env.Actions()),
 		"duration_s", totalDuration)
@@ -176,8 +181,11 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 
 // executeStage 执行单个 Stage，包装 OTel span 和 panic recovery。
 func (p *Pipeline) executeStage(ctx context.Context, s core.Stage, env *core.Envelope) (result *core.Envelope, retErr error) {
+	logger := traceid.WithLoggerFrom(ctx, p.logger)
+
 	ctx, span := p.tracer.Start(ctx, "stage."+s.Name(),
 		trace.WithAttributes(
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 			attribute.String("stage.name", s.Name()),
 			attribute.String("message.id", env.Message.ID),
 		))
@@ -199,7 +207,7 @@ func (p *Pipeline) executeStage(ctx context.Context, s core.Stage, env *core.Env
 			span.SetStatus(codes.Error, "panic")
 			span.RecordError(panicErr)
 			p.msgErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("stage", s.Name())))
-			p.logger.Errorw("stage panic recovered",
+			logger.Errorw("stage panic recovered",
 				"stage", s.Name(),
 				"message_id", env.Message.ID,
 				"panic", r)

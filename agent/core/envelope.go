@@ -13,6 +13,9 @@ import (
 type Message struct {
 	// ID 消息唯一标识。
 	ID string `json:"id"`
+	// TraceID 请求追踪 ID，用于贯穿整个消息生命周期的可观测性。
+	// 在 Ingress 入口自动生成（如果未设置），格式为 128-bit hex（与 OTel 兼容）。
+	TraceID string `json:"traceId"`
 	// Source 来源标识（"webhook" / "websocket" / "polling" / "memory" 等）。
 	Source string `json:"source"`
 	// Channel 频道或会话 ID。
