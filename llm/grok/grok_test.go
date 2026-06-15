@@ -810,10 +810,10 @@ func TestListFilesResponseParsing(t *testing.T) {
 }
 
 // ============================================================================
-// intStr / itoa 测试
+// intStr 测试
 // ============================================================================
 
-func TestItoa(t *testing.T) {
+func TestIntStr(t *testing.T) {
 	tests := []struct {
 		input    int
 		expected string
@@ -826,18 +826,9 @@ func TestItoa(t *testing.T) {
 		{16000, "16000"},
 	}
 	for _, tt := range tests {
-		if got := itoa(tt.input); got != tt.expected {
-			t.Errorf("itoa(%d) = %q, want %q", tt.input, got, tt.expected)
+		if got := intStr(tt.input); got != tt.expected {
+			t.Errorf("intStr(%d) = %q, want %q", tt.input, got, tt.expected)
 		}
-	}
-}
-
-func TestIntStr(t *testing.T) {
-	if intStr(8000) != "8000" {
-		t.Error("unexpected intStr")
-	}
-	if intStr(16000) != "16000" {
-		t.Error("unexpected intStr")
 	}
 }
 

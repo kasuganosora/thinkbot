@@ -18,7 +18,7 @@ import (
 // StreamConfig 流式请求的额外配置。
 type StreamConfig struct {
 	// WatchdogTimeout 看门狗超时。
-	WatchdogTimeout int64 // seconds, 0 = no watchdog
+	WatchdogTimeout time.Duration
 	// RetryConfig 看门狗超时时的重试配置。
 	RetryConfig *retry.Config
 }
@@ -88,7 +88,7 @@ func (c *Client) DoStreamResponse(
 	}
 
 	if cfg.WatchdogTimeout > 0 {
-		sseCfg.WatchdogTimeout = fromSeconds(cfg.WatchdogTimeout)
+		sseCfg.WatchdogTimeout = cfg.WatchdogTimeout
 	}
 	if cfg.RetryConfig != nil {
 		sseCfg.RetryConfig = cfg.RetryConfig
@@ -321,12 +321,4 @@ func (c *Client) StreamTextChannel(
 	}()
 
 	return deltaCh, finalCh, errCh
-}
-
-// ============================================================================
-// 内部工具
-// ============================================================================
-
-func fromSeconds(s int64) time.Duration {
-	return time.Duration(s) * time.Second
 }

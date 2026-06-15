@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"strconv"
 	"strings"
@@ -154,9 +155,9 @@ func (c *Client) DoTranslate(ctx context.Context, params TranslationRequest) (*T
 	// file 字段必须是最后一个
 	mimeType := guessAudioMIME(params.Filename)
 	if mimeType != "" {
-		form.AddFileWithMIME("file", params.Filename, mimeType, strings.NewReader(string(params.File)))
+		form.AddFileWithMIME("file", params.Filename, mimeType, bytes.NewReader(params.File))
 	} else {
-		form.AddFile("file", params.Filename, strings.NewReader(string(params.File)))
+		form.AddFile("file", params.Filename, bytes.NewReader(params.File))
 	}
 
 	resp, err := c.newRequest("POST", "/v1/audio/translations").
@@ -213,9 +214,9 @@ func (c *Client) CreateVoice(ctx context.Context, params VoiceCreateRequest) (*V
 		mimeType = guessAudioMIME(params.Filename)
 	}
 	if mimeType != "" {
-		form.AddFileWithMIME("audio_sample", params.Filename, mimeType, strings.NewReader(string(params.AudioSample)))
+		form.AddFileWithMIME("audio_sample", params.Filename, mimeType, bytes.NewReader(params.AudioSample))
 	} else {
-		form.AddFile("audio_sample", params.Filename, strings.NewReader(string(params.AudioSample)))
+		form.AddFile("audio_sample", params.Filename, bytes.NewReader(params.AudioSample))
 	}
 
 	resp, err := c.newRequest("POST", "/v1/audio/voices").

@@ -2,7 +2,6 @@ package grok
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -216,6 +215,3 @@ func (c *Client) ExtendVideo(ctx context.Context, model, prompt, videoURL string
 	}
 	return &result, nil
 }
-
-// 确保 json 包被引用（用于将来可能的内联序列化辅助函数）。
-var _ = json.Marshal
