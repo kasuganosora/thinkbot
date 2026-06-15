@@ -57,7 +57,7 @@ func (f *MultipartForm) AddFile(name, filename string, reader io.Reader) *Multip
 func (f *MultipartForm) AddFileWithMIME(name, filename, mimeType string, reader io.Reader) *MultipartForm {
 	h := make(textproto.MIMEHeader)
 	h.Set("Content-Disposition",
-		fmt.Sprintf(`form-data; name=%q; filename=%q`,
+		fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
 			escapeMultipartQuotes(name), escapeMultipartQuotes(filename)))
 	if mimeType != "" {
 		h.Set("Content-Type", mimeType)
