@@ -2,7 +2,7 @@ package google
 
 import (
 	"context"
-	"net/url"
+	"errors"
 	"strconv"
 )
 
@@ -53,14 +53,14 @@ func (c *Client) ListModels(ctx context.Context, opts *ListModelsOptions) (*List
 // modelID 可以是 "gemini-2.5-flash" 或 "models/gemini-2.5-flash"。
 func (c *Client) GetModel(ctx context.Context, modelID string) (*Model, error) {
 	if modelID == "" {
-		return nil, nil
+		return nil, errors.New("google: model ID is required")
 	}
 	// 规范化：确保以 models/ 开头
 	if len(modelID) < 7 || modelID[:7] != "models/" {
 		modelID = "models/" + modelID
 	}
 
-	resp, err := c.newRequest("GET", "/v1beta/"+url.PathEscape(modelID)).
+	resp, err := c.newRequest("GET", "/v1beta/"+modelID).
 		SetContext(ctx).
 		Do()
 	if err != nil {
