@@ -3,7 +3,14 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/kasuganosora/thinkbot/util/log"
 )
+
+func TestMain(m *testing.M) {
+	_ = log.Init()
+	m.Run()
+}
 
 // ============================================================================
 // 输入构造辅助函数测试

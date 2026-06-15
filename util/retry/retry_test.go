@@ -379,6 +379,7 @@ func TestOnRetryCallback(t *testing.T) {
 	}
 	var records []record
 
+	var callCount atomic.Int32
 	Do(context.Background(), "test", Config{
 		MaxRetries:    2,
 		FixedInterval: 10 * time.Millisecond,
@@ -386,7 +387,8 @@ func TestOnRetryCallback(t *testing.T) {
 			records = append(records, record{attempt, wait})
 		},
 	}, func(ctx context.Context) error {
-		return fmt.Errorf("err-%d", attempt(ctx))
+		n := callCount.Add(1)
+		return fmt.Errorf("err-%d", n)
 	})
 
 	if len(records) != 2 {
@@ -399,9 +401,6 @@ func TestOnRetryCallback(t *testing.T) {
 		t.Errorf("unexpected wait: %v", records[0].wait)
 	}
 }
-
-// attempt 辅助：从 ctx 提取 attempt（这里仅用于生成不同错误消息，不影响逻辑）
-func attempt(ctx context.Context) int { return 0 }
 
 // --- DoSimple ---
 
