@@ -162,11 +162,11 @@ func TestBotManager_RunAll_StopAll(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 验证可以通过 MemoryChannel 发送消息
-	if err := ch1.Send(context.Background(), core.Message{ID: "1", Text: "hello bot-1"}); err != nil {
-		t.Fatalf("Send to bot-1 failed: %v", err)
+	if err := ch1.Inject(context.Background(), core.Message{ID: "1", Text: "hello bot-1"}); err != nil {
+		t.Fatalf("Inject to bot-1 failed: %v", err)
 	}
-	if err := ch2.Send(context.Background(), core.Message{ID: "2", Text: "hello bot-2"}); err != nil {
-		t.Fatalf("Send to bot-2 failed: %v", err)
+	if err := ch2.Inject(context.Background(), core.Message{ID: "2", Text: "hello bot-2"}); err != nil {
+		t.Fatalf("Inject to bot-2 failed: %v", err)
 	}
 
 	time.Sleep(200 * time.Millisecond)

@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 )
 
@@ -54,4 +55,36 @@ type Channel interface {
 	// Stop 优雅关闭 Channel。
 	// 应停止接受新消息，等待正在处理的消息完成，然后释放资源。
 	Stop(ctx context.Context) error
+}
+
+// ============================================================================
+// Sender — 输出端接口（Channel 的回写能力）
+// ============================================================================
+
+// Sender 定义了 Channel 的输出端能力。
+// 一个 Channel 如果同时实现了 Channel（输入端）和 Sender（输出端），
+// 就具备双向通信能力：既能接收消息又能回写消息。
+//
+// Sender 由 outbound.ChannelReplyHandler 调用，桥接 Dispatcher → Channel 的回写路径。
+//
+// Action 参数约定：
+//   - Action.Type：动作类型（reply/forward/broadcast），Sender 可据此决定行为。
+//   - Action.Channel：目标标识符，语义由各平台定义：
+//     Telegram → chatID（字符串形式的 int64）
+//     Misskey → noteID（回复目标帖子的 ID）
+//   - Action.Payload：发送内容，通常是 string（文本消息）。
+//   - Action.Metadata：平台特有参数，各 Sender 自行解析：
+//     Telegram → "reply_to_message_id"（int64）, "parse_mode"（string）
+//     Misskey → "visibility"（string）, "cw"（string）
+//   - Action.UserID：目标用户（Forward/DM 场景使用）。
+//
+// 实现须知：
+//   - Send 应该是同步的，在消息发送完成后才返回。
+//   - 对于长文本，Sender 应负责拆分（如 Telegram 4096 字符限制）。
+//   - Sender 应处理平台级别的错误（如频率限制），必要时重试。
+type Sender interface {
+	// Send 执行一个输出动作。
+	// 根据 action.Type 决定行为（回复/转发/广播），根据 action.Channel 定位目标，
+	// 根据 action.Payload 发送内容，根据 action.Metadata 应用平台特有参数。
+	Send(ctx context.Context, action core.Action) error
 }

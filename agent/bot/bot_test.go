@@ -175,7 +175,7 @@ func TestBot_EndToEnd(t *testing.T) {
 
 	// 注入 3 条消息
 	for i := 0; i < 3; i++ {
-		if err := memCh.Send(context.Background(), core.Message{
+		if err := memCh.Inject(context.Background(), core.Message{
 			ID:      fmt.Sprintf("msg-%d", i),
 			Channel: "ch-1",
 			UserID:  "user-1",
@@ -252,7 +252,7 @@ func TestBot_BotIDInMessage(t *testing.T) {
 	go bot.Run(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	memCh.Send(context.Background(), core.Message{
+	memCh.Inject(context.Background(), core.Message{
 		ID:   "msg-1",
 		Text: "test bot id",
 	})
@@ -308,7 +308,7 @@ func TestBot_BotConfigInEnvelope(t *testing.T) {
 	go bot.Run(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	memCh.Send(context.Background(), core.Message{ID: "1", Text: "hi"})
+	memCh.Inject(context.Background(), core.Message{ID: "1", Text: "hi"})
 	time.Sleep(200 * time.Millisecond)
 
 	if capturedBotID != "cfg-bot" {
@@ -352,8 +352,8 @@ func TestBot_MultipleChannels(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// 两个 Channel 各发一条
-	ch1.Send(context.Background(), core.Message{ID: "mk-1", Channel: "mk-ch", Text: "from misskey"})
-	ch2.Send(context.Background(), core.Message{ID: "tg-1", Channel: "tg-ch", Text: "from telegram"})
+	ch1.Inject(context.Background(), core.Message{ID: "mk-1", Channel: "mk-ch", Text: "from misskey"})
+	ch2.Inject(context.Background(), core.Message{ID: "tg-1", Channel: "tg-ch", Text: "from telegram"})
 
 	if !waitForActions(disp, 2, 3*time.Second) {
 		t.Fatalf("timeout, got %d actions", len(disp.collected()))
@@ -488,4 +488,243 @@ func TestMemoryChannel_DefaultName(t *testing.T) {
 	if ch.Name() != "memory" {
 		t.Errorf("default Name: got %q, want memory", ch.Name())
 	}
+}
+
+func TestMemoryChannel_SenderInterface(t *testing.T) {
+	ch := NewMemoryChannel("test-sender", "bot-1")
+
+	// MemoryChannel 应该同时实现 Channel 和 Sender
+	var _ Channel = ch
+	var _ Sender = ch
+
+	// Send 应该记录 action
+	err := ch.Send(context.Background(), core.Action{
+		Type:    core.ActionReply,
+		Channel: "chat-1",
+		Payload: "hello",
+	})
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	actions := ch.SentActions()
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	if actions[0].Payload != "hello" {
+		t.Errorf("payload: got %v, want hello", actions[0].Payload)
+	}
+
+	// LastSentAction
+	last := ch.LastSentAction()
+	if last == nil {
+		t.Fatal("LastSentAction returned nil")
+	}
+	if last.Channel != "chat-1" {
+		t.Errorf("last action channel: got %q, want chat-1", last.Channel)
+	}
+
+	// ClearSentActions
+	ch.ClearSentActions()
+	if len(ch.SentActions()) != 0 {
+		t.Error("expected 0 actions after clear")
+	}
+	if ch.LastSentAction() != nil {
+		t.Error("expected nil after clear")
+	}
+}
+
+// ============================================================================
+// Outbound 全链路测试：Pipeline → Dispatcher → ChannelReplyHandler → Sender
+// ============================================================================
+
+// replyWithSourceStage 生成带 source_channel 的 reply Action。
+// 这是 Outbound 全链路所需的：Pipeline Stage 必须在 Action.Metadata 中设置 source_channel，
+// ChannelReplyHandler 才能路由到正确的 Channel Sender。
+type replyWithSourceStage struct{}
+
+func (s *replyWithSourceStage) Name() string { return "reply-with-source" }
+func (s *replyWithSourceStage) Process(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+	env.AddAction(core.Action{
+		Type:    core.ActionReply,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: "echo: " + env.Message.Text,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source, // Pipeline Stage 应该从 Message.Source 获取来源 Channel
+		},
+	})
+	return env, nil
+}
+
+func TestBot_OutboundFullPipeline(t *testing.T) {
+	// 测试完整的双向链路：
+	// MemoryChannel.Inject → Ingress → Pipeline(replyWithSource) → MultiDispatcher
+	//   → ChannelReplyHandler → MemoryChannel.Send
+
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	// 使用 MultiDispatcher（Bot.New 会自动注册 ChannelReplyHandler）
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &replyWithSourceStage{}, Order: 10, Enabled: true},
+	)
+
+	memCh := NewMemoryChannel("test-outbound", "outbound-bot")
+
+	bot, err := New(BotParams{
+		ID:         "outbound-bot",
+		Config:     BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:   p,
+		Dispatcher: multiDisp,
+		Channels:   []Channel{memCh},
+		Logger:     logger,
+		TP:         tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bot.Run(ctx)
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	// 注入消息
+	err = memCh.Inject(context.Background(), core.Message{
+		ID:      "msg-1",
+		Channel: "chat-42",
+		UserID:  "user-1",
+		Text:    "hello world",
+	})
+	if err != nil {
+		t.Fatalf("Inject failed: %v", err)
+	}
+
+	// 等待 Sender 收到 action
+	deadline := time.After(3 * time.Second)
+	for {
+		if len(memCh.SentActions()) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for sent action, got %d", len(memCh.SentActions()))
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// 验证 Sender 收到的 action
+	actions := memCh.SentActions()
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 sent action, got %d", len(actions))
+	}
+
+	a := actions[0]
+	if a.Type != core.ActionReply {
+		t.Errorf("action type: got %s, want reply", a.Type)
+	}
+	if a.Channel != "chat-42" {
+		t.Errorf("action channel: got %q, want chat-42", a.Channel)
+	}
+	if a.Payload != "echo: hello world" {
+		t.Errorf("action payload: got %v, want echo: hello world", a.Payload)
+	}
+	if a.Metadata["source_channel"] != "test-outbound" {
+		t.Errorf("source_channel: got %v, want test-outbound", a.Metadata["source_channel"])
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("bot error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bot did not stop in time")
+	}
+}
+
+func TestBot_OutboundMultipleChannels(t *testing.T) {
+	// 测试多个 Channel 的消息各自路由到正确的 Sender
+
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &replyWithSourceStage{}, Order: 10, Enabled: true},
+	)
+
+	ch1 := NewMemoryChannel("ch-misskey", "multi-out-bot")
+	ch2 := NewMemoryChannel("ch-telegram", "multi-out-bot")
+
+	bot, err := New(BotParams{
+		ID:         "multi-out-bot",
+		Config:     BotConfig{Workers: 2, IngressBufferSize: 16},
+		Pipeline:   p,
+		Dispatcher: multiDisp,
+		Channels:   []Channel{ch1, ch2},
+		Logger:     logger,
+		TP:         tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bot.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// ch1 注入一条消息
+	ch1.Inject(context.Background(), core.Message{
+		ID: "mk-1", Channel: "note-1", Text: "from misskey",
+	})
+	// ch2 注入一条消息
+	ch2.Inject(context.Background(), core.Message{
+		ID: "tg-1", Channel: "chat-2", Text: "from telegram",
+	})
+
+	// 等待两个 sender 各收到一条
+	deadline := time.After(3 * time.Second)
+	for {
+		if len(ch1.SentActions()) >= 1 && len(ch2.SentActions()) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout: ch1=%d, ch2=%d", len(ch1.SentActions()), len(ch2.SentActions()))
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// ch1 的 sender 应该收到 misskey 的回复
+	a1 := ch1.SentActions()[0]
+	if a1.Channel != "note-1" {
+		t.Errorf("ch1 action channel: got %q, want note-1", a1.Channel)
+	}
+	if a1.Payload != "echo: from misskey" {
+		t.Errorf("ch1 action payload: got %v", a1.Payload)
+	}
+
+	// ch2 的 sender 应该收到 telegram 的回复
+	a2 := ch2.SentActions()[0]
+	if a2.Channel != "chat-2" {
+		t.Errorf("ch2 action channel: got %q, want chat-2", a2.Channel)
+	}
+	if a2.Payload != "echo: from telegram" {
+		t.Errorf("ch2 action payload: got %v", a2.Payload)
+	}
+
+	cancel()
 }

@@ -29,20 +29,26 @@ import (
 //   - 独立的 Ingress（消息入口网关）
 //   - 独立的 Pipeline（Stage 链）
 //   - 独立的 Dispatcher（输出派发器）
-//   - 自己的 Channel 实例（输入端）
+//   - 自己的 Channel 实例（输入端 + 可选的输出端 Sender）
 //   - 独立的 worker pool
+//   - 内建 ChannelReplyHandler（自动桥接 Dispatcher → Channel 回写）
 //
 // 一个应用可以运行多个 Bot，每个 Bot 处理自己 Channel 收到的消息，
 // 互不干扰。
 //
-// 消息流转路径：
+// 消息流转路径（完整双向）：
 //
-//	Channel.onMessage()
-//	  → msg.BotID = channel.BotID()  // Channel 天然知道所属 Bot
+//	[Inbound] Channel.onMessage()
+//	  → msg.BotID = channel.BotID()
 //	  → bot.ingress.Receive(ctx, msg)
 //	  → bot worker 从 ingress.C() 消费
 //	  → bot.pipeline.Execute(ctx, env)
 //	  → bot.dispatcher.Dispatch(ctx, actions)
+//
+//	[Outbound] Dispatcher → ChannelReplyHandler
+//	  → 根据 action.Metadata["source_channel"] 找到 Channel 的 Sender
+//	  → Sender.Send(ctx, action)
+//	  → Channel 调用平台 API 回写消息
 type Bot struct {
 	// ID Bot 唯一标识（如 "customer-service"、"code-review"）。
 	ID string
@@ -51,12 +57,13 @@ type Bot struct {
 	// Config Bot 级别配置。
 	Config BotConfig
 
-	ingress    *inbound.Ingress
-	pipeline   *pipeline.Pipeline
-	dispatcher outbound.Dispatcher
-	channels   []Channel
-	logger     *zap.SugaredLogger
-	tracer     trace.Tracer
+	ingress      *inbound.Ingress
+	pipeline     *pipeline.Pipeline
+	dispatcher   outbound.Dispatcher
+	replyHandler *outbound.ChannelReplyHandler // 内建的 Channel 回写处理器
+	channels     []Channel
+	logger       *zap.SugaredLogger
+	tracer       trace.Tracer
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -76,6 +83,10 @@ type BotParams struct {
 
 // New 创建一个 Bot 实例。
 // 创建后需要调用 Run 启动消息处理循环。
+//
+// 如果 Dispatcher 是 MultiDispatcher，Bot 会自动创建 ChannelReplyHandler
+// 并注册到 MultiDispatcher 上（处理 ActionReply 和 ActionForward）。
+// Channel 启动后，实现了 Sender 接口的 Channel 会被自动注册到 ChannelReplyHandler。
 func New(params BotParams) (*Bot, error) {
 	if params.ID == "" {
 		return nil, fmt.Errorf("bot: ID is required")
@@ -106,25 +117,40 @@ func New(params BotParams) (*Bot, error) {
 		params.TP,
 	)
 
+	// 创建 ChannelReplyHandler
+	replyHandler := outbound.NewChannelReplyHandler(
+		params.Logger.With("bot_id", params.ID),
+		params.TP,
+	)
+
+	// 如果 Dispatcher 是 MultiDispatcher，自动注册 ChannelReplyHandler
+	// 处理 ActionReply 和 ActionForward
+	if multiDisp, ok := params.Dispatcher.(*outbound.MultiDispatcher); ok {
+		multiDisp.Register(core.ActionReply, replyHandler)
+		multiDisp.Register(core.ActionForward, replyHandler)
+	}
+
 	return &Bot{
-		ID:         params.ID,
-		Name:       params.Name,
-		Config:     cfg,
-		ingress:    ingress,
-		pipeline:   params.Pipeline,
-		dispatcher: params.Dispatcher,
-		channels:   params.Channels,
-		logger:     params.Logger.With("bot_id", params.ID),
-		tracer:     params.TP.Tracer("github.com/kasuganosora/thinkbot/agent/bot/" + params.ID),
+		ID:           params.ID,
+		Name:         params.Name,
+		Config:       cfg,
+		ingress:      ingress,
+		pipeline:     params.Pipeline,
+		dispatcher:   params.Dispatcher,
+		replyHandler: replyHandler,
+		channels:     params.Channels,
+		logger:       params.Logger.With("bot_id", params.ID),
+		tracer:       params.TP.Tracer("github.com/kasuganosora/thinkbot/agent/bot/" + params.ID),
 	}, nil
 }
 
 // Run 启动 Bot 的消息处理循环。
 // 它会：
 //  1. 启动所有 Channel（Channel.Start 拿到 Ingress）
-//  2. 启动 N 个 worker goroutine 从 Ingress 消费 → Pipeline → Dispatch
-//  3. 阻塞直到 ctx 取消
-//  4. 优雅关闭：停止 Channel → 关闭 Ingress → 排空 worker
+//  2. 将实现了 Sender 接口的 Channel 注册到 ChannelReplyHandler（桥接 Outbound 回写）
+//  3. 启动 N 个 worker goroutine 从 Ingress 消费 → Pipeline → Dispatch
+//  4. 阻塞直到 ctx 取消
+//  5. 优雅关闭：停止 Channel → 关闭 Ingress → 排空 worker
 func (b *Bot) Run(ctx context.Context) error {
 	ctx, b.cancel = context.WithCancel(ctx)
 
@@ -148,6 +174,14 @@ func (b *Bot) Run(ctx context.Context) error {
 			b.stopChannels(ctx)
 			return fmt.Errorf("bot %q: channel %q start failed: %w", b.ID, ch.Name(), err)
 		}
+
+		// 如果 Channel 实现了 Sender 接口，注册到 ChannelReplyHandler
+		if sender, ok := ch.(Sender); ok {
+			b.replyHandler.Register(ch.Name(), sender)
+			b.logger.Infow("channel registered as sender",
+				"channel_name", ch.Name(),
+				"channel_type", ch.Type())
+		}
 	}
 
 	// 启动 worker goroutine
@@ -156,14 +190,18 @@ func (b *Bot) Run(ctx context.Context) error {
 		go b.worker(ctx, i)
 	}
 
-	b.logger.Infow("bot running")
+	b.logger.Infow("bot running",
+		"senders_registered", b.replyHandler.RegisteredCount())
 
 	// 阻塞直到 ctx 取消
 	<-ctx.Done()
 
 	b.logger.Infow("bot shutting down", "reason", ctx.Err())
 
-	// 停止所有 Channel
+	// 停止所有 Channel 并注销 Sender
+	for _, ch := range b.channels {
+		b.replyHandler.Unregister(ch.Name())
+	}
 	b.stopChannels(context.Background())
 
 	// 关闭 Ingress，worker 会排空后退出
