@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,9 @@ type MisskeyChannel struct {
 	botUserID string
 	// botUsername 是 Bot 的用户名，用于从文本中剥离 @bot 提及。
 	botUsername string
+	// mentionRe 匹配 @botUsername 或 @botUsername@host 的正则表达式。
+	// 确保不会误匹配更长的用户名（如 @botuser 不会匹配 @bot）。
+	mentionRe *regexp.Regexp
 
 	ingress *inbound.Ingress
 
@@ -148,6 +152,9 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 	c.botUserID = me.ID
 	c.botUsername = me.Username
 	c.dedup = make(map[string]time.Time)
+
+	// 编译 @bot 正则：匹配 @username 或 @username@host，确保后面不跟字母数字或下划线
+	c.mentionRe = regexp.MustCompile(`@` + regexp.QuoteMeta(me.Username) + `(?:@[\w.-]+)?\b`)
 
 	// 派生可取消的 context
 	runCtx, cancel := context.WithCancel(ctx)
@@ -419,8 +426,9 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	}
 
 	// 从文本中剥离 @bot 提及（Bot 不需要看到自己被 @）
-	if c.botUsername != "" {
-		text = strings.TrimSpace(strings.Replace(text, "@"+c.botUsername, "", 1))
+	// 使用正则确保精确匹配 @username 或 @username@host，不误匹配更长的用户名
+	if c.mentionRe != nil {
+		text = strings.TrimSpace(c.mentionRe.ReplaceAllString(text, ""))
 	}
 
 	// 剥离后如果为空但原来是 renote，再次回退
