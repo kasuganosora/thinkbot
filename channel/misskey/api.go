@@ -39,6 +39,9 @@ func (a *apiClient) getSelf(ctx context.Context) (*User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("misskey getSelf: %w", err)
 	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("misskey getSelf: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
 
 	var user User
 	if err := resp.JSON(&user); err != nil {
@@ -72,6 +75,9 @@ func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID,
 	if err != nil {
 		return "", fmt.Errorf("misskey createNote: %w", err)
 	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("misskey createNote: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
 
 	var wrapper createNoteAPIResponse
 	if err := resp.JSON(&wrapper); err != nil {
@@ -93,8 +99,9 @@ func (a *apiClient) createReaction(ctx context.Context, noteID, reaction string)
 	if err != nil {
 		return fmt.Errorf("misskey createReaction: %w", err)
 	}
-	// Misskey 返回 204 No Content 或 JSON
-	_ = resp
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("misskey createReaction: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
 	return nil
 }
 
@@ -110,6 +117,8 @@ func (a *apiClient) deleteReaction(ctx context.Context, noteID string) error {
 	if err != nil {
 		return fmt.Errorf("misskey deleteReaction: %w", err)
 	}
-	_ = resp
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("misskey deleteReaction: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
 	return nil
 }

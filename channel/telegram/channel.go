@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -211,9 +212,11 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		return
 	}
 
-	// 发送"正在输入..."状态（fire-and-forget）
+	// 发送"正在输入..."状态（fire-and-forget，使用独立超时避免被主 ctx 取消影响）
 	go func() {
-		if err := c.api.sendChatAction(ctx, msg.Chat.ID, "typing"); err != nil {
+		actionCtx, actionCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer actionCancel()
+		if err := c.api.sendChatAction(actionCtx, msg.Chat.ID, "typing"); err != nil {
 			log.Logger.Debugw("telegram: sendChatAction failed",
 				"channel", c.name, "err", err)
 		}
@@ -323,13 +326,16 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 //   - mention: 文本含 @botUsername（如 "@mybot hello"）
 //   - text_mention: entity 中 User.ID == botUserID（无 username 的用户提及）
 //   - bot_command: offset=0 的 /command（群聊中命令视为直接对话 Bot）
+//
+// 注意：Telegram API 中 entity 的 Offset/Length 使用 UTF-16 code unit 计量，
+// 而非 Go 字符串的字节偏移，因此需要通过 utf16Extract 转换。
 func (c *TelegramChannel) detectMention(msg *Message) bool {
 	for _, ent := range msg.Entities {
 		switch ent.Type {
 		case "mention":
 			// 提取实体文本，判断是否 @botUsername
-			if c.botUsername != "" && ent.Offset+ent.Length <= len(msg.Text) {
-				mentionText := msg.Text[ent.Offset : ent.Offset+ent.Length] // 含 @ 前缀
+			if c.botUsername != "" {
+				mentionText := utf16Extract(msg.Text, ent.Offset, ent.Length)
 				if mentionText == "@"+c.botUsername {
 					return true
 				}
@@ -347,6 +353,22 @@ func (c *TelegramChannel) detectMention(msg *Message) bool {
 		}
 	}
 	return false
+}
+
+// utf16Extract 从 Go 字符串中按 UTF-16 code unit 偏移和长度提取子串。
+// Telegram Bot API 中所有 entity 的 offset/length 都是 UTF-16 code unit 计量。
+// 对于 BMP 字符（U+0000~U+FFFF），1 个 code unit = 1 个 rune。
+// 对于补充平面字符（如 emoji 😀），1 个 rune = 2 个 UTF-16 code unit（surrogate pair）。
+func utf16Extract(s string, offset, length int) string {
+	// 将 Go 字符串转为 UTF-16 code units
+	utf16Units := utf16.Encode([]rune(s))
+	end := offset + length
+	if offset < 0 || end > len(utf16Units) {
+		return "" // 越界保护
+	}
+	// 提取 UTF-16 子片段并解码回字符串
+	sub := utf16Units[offset:end]
+	return string(utf16.Decode(sub))
 }
 
 // Stop 优雅停止 polling。

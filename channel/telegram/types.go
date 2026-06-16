@@ -71,8 +71,8 @@ type Sticker struct {
 // MessageEntity 表示消息文本中的一个格式化实体。
 type MessageEntity struct {
 	Type   string `json:"type"`           // "mention", "text_mention", "bot_command", "url", ...
-	Offset int    `json:"offset"`         // 在 Text 中的字节偏移
-	Length int    `json:"length"`         // 实体长度（字节）
+	Offset int    `json:"offset"`         // 在 Text 中的 UTF-16 code unit 偏移
+	Length int    `json:"length"`         // 实体长度（UTF-16 code units）
 	User   *User  `json:"user,omitempty"` // 仅 text_mention 有效
 }
 
