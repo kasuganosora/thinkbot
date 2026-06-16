@@ -642,6 +642,64 @@ func (c *MisskeyChannel) Unreact(ctx context.Context, noteID string) error {
 	return c.api.deleteReaction(ctx, noteID)
 }
 
+// Send 实现 bot.Sender / outbound.ChannelSender 接口。
+// 根据 Action 的内容回写消息到 Misskey。
+//
+// Action 字段约定：
+//   - Action.Channel：回复目标的 noteID（来源于 Inbound 的 msg.Channel）
+//   - Action.Payload：发送内容（string 类型的文本消息）
+//   - Action.Metadata["visibility"]：帖子可见性（"public"/"home"/"followers"/"specified"，可选，默认 "home"）
+//   - Action.Metadata["cw"]：CW 折叠文本（可选）
+//
+// 行为：
+//   - ActionReply：回复目标帖子（文本超长自动截断到 3000 rune）
+//   - 其他 ActionType：当前也按回复处理（后续扩展）
+func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
+	noteID := action.Channel
+	if noteID == "" {
+		return fmt.Errorf("misskey send: empty noteID in action.Channel")
+	}
+
+	// 提取文本
+	text, ok := action.Payload.(string)
+	if !ok {
+		return fmt.Errorf("misskey send: payload is %T, expected string", action.Payload)
+	}
+	if text == "" {
+		return nil // 空消息不发送
+	}
+
+	// 解析可选的 Metadata 参数
+	visibility := VisibilityHome
+	cw := ""
+
+	if action.Metadata != nil {
+		if v, ok := action.Metadata["visibility"]; ok {
+			if vis, ok := v.(string); ok && vis != "" {
+				visibility = vis
+			}
+		}
+		if v, ok := action.Metadata["cw"]; ok {
+			if cwText, ok := v.(string); ok {
+				cw = cwText
+			}
+		}
+	}
+
+	// 截断长文本
+	text = truncateRunes(strings.TrimSpace(text), misskeyMaxNoteLength)
+
+	// 构建回复
+	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, cw, nil)
+	if err != nil {
+		log.Logger.Warnw("misskey send: reply failed",
+			"channel", c.name, "note_id", noteID, "err", err)
+		return fmt.Errorf("misskey send: reply to %q failed: %w", noteID, err)
+	}
+
+	return nil
+}
+
 // isUnicodeEmoji 粗略判断字符串是否为 unicode emoji（非 ASCII 字符）。
 func isUnicodeEmoji(s string) bool {
 	for _, r := range s {

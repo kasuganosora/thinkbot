@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 	"unicode/utf16"
@@ -428,6 +429,63 @@ func (c *TelegramChannel) EditMessage(ctx context.Context, chatID, messageID int
 // SendTyping 发送"正在输入..."状态指示。
 func (c *TelegramChannel) SendTyping(ctx context.Context, chatID int64) error {
 	return c.api.sendChatAction(ctx, chatID, "typing")
+}
+
+// Send 实现 bot.Sender / outbound.ChannelSender 接口。
+// 根据 Action 的内容回写消息到 Telegram。
+//
+// Action 字段约定：
+//   - Action.Channel：目标 chatID（字符串形式的 int64，来源于 Inbound 的 msg.Channel）
+//   - Action.Payload：发送内容（string 类型的文本消息）
+//   - Action.Metadata["reply_to_message_id"]：回复目标消息 ID（int64 或 float64，可选）
+//   - Action.Metadata["parse_mode"]：格式化模式（"HTML"/"MarkdownV2"，可选，默认用 Config 中的值）
+//
+// 行为：
+//   - ActionReply：回复消息（支持 reply_to_message_id 引用、自动拆分长文本）
+//   - 其他 ActionType：当前也按回复处理（后续扩展 Forward/Broadcast）
+func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
+	// 解析 chatID
+	chatID, err := strconv.ParseInt(action.Channel, 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram send: invalid chatID %q: %w", action.Channel, err)
+	}
+
+	// 提取文本
+	text, ok := action.Payload.(string)
+	if !ok {
+		return fmt.Errorf("telegram send: payload is %T, expected string", action.Payload)
+	}
+	if text == "" {
+		return nil // 空消息不发送
+	}
+
+	// 解析可选的 Metadata 参数
+	var replyToMessageID int64
+	parseMode := c.cfg.ParseMode
+
+	if action.Metadata != nil {
+		// reply_to_message_id: 支持 int64、float64（JSON unmarshal 的数字默认类型）
+		if v, ok := action.Metadata["reply_to_message_id"]; ok {
+			switch id := v.(type) {
+			case int64:
+				replyToMessageID = id
+			case float64:
+				replyToMessageID = int64(id)
+			case int:
+				replyToMessageID = int64(id)
+			}
+		}
+
+		// parse_mode: 覆盖 Config 默认值
+		if v, ok := action.Metadata["parse_mode"]; ok {
+			if pm, ok := v.(string); ok {
+				parseMode = pm
+			}
+		}
+	}
+
+	// 执行发送
+	return c.ReplyWithMode(ctx, chatID, text, parseMode, replyToMessageID)
 }
 
 // splitMessage 将长文本按 maxLen 拆分为多条消息。
