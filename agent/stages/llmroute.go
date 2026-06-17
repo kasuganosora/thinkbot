@@ -126,16 +126,27 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"finish_reason", result.FinishReason)
 
 	// 将回复添加为 Action
+	// 使用 reply_target 作为 outbound 回复目标（由 Channel 在 Inbound 时设置）
+	replyTarget := env.Message.Channel // 默认使用 Channel（向后兼容）
+	if env.Message.Metadata != nil {
+		if rt, ok := env.Message.Metadata["reply_target"]; ok {
+			if s, ok := rt.(string); ok && s != "" {
+				replyTarget = s
+			}
+		}
+	}
+
 	env.AddAction(core.Action{
 		Type:    core.ActionReply,
-		Channel: env.Message.Channel,
+		Channel: replyTarget,
 		UserID:  env.Message.UserID,
 		Payload: result.Text,
 		Metadata: map[string]any{
-			"finish_reason": string(result.FinishReason),
-			"usage":         result.Usage,
-			"tool_calls":    result.ToolCalls,
-			"steps":         len(result.Steps),
+			"source_channel": env.Message.Source, // ChannelReplyHandler 路由必需
+			"finish_reason":  string(result.FinishReason),
+			"usage":          result.Usage,
+			"tool_calls":     result.ToolCalls,
+			"steps":          len(result.Steps),
 		},
 	})
 

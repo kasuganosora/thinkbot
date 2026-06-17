@@ -69,11 +69,14 @@ type Channel interface {
 //
 // Action 参数约定：
 //   - Action.Type：动作类型（reply/forward/broadcast），Sender 可据此决定行为。
-//   - Action.Channel：目标标识符，语义由各平台定义：
+//   - Action.Channel：outbound 回复目标标识符。
+//     Stage 应从 env.Message.Metadata["reply_target"] 传递到 Action.Channel。
+//     各平台语义：
 //     Telegram → chatID（字符串形式的 int64）
 //     Misskey → noteID（回复目标帖子的 ID）
 //   - Action.Payload：发送内容，通常是 string（文本消息）。
-//   - Action.Metadata：平台特有参数，各 Sender 自行解析：
+//   - Action.Metadata：平台特有参数 + 路由参数，各 Sender 自行解析：
+//     通用 → "source_channel"（必需，ChannelReplyHandler 路由用）
 //     Telegram → "reply_to_message_id"（int64）, "parse_mode"（string）
 //     Misskey → "visibility"（string）, "cw"（string）
 //   - Action.UserID：目标用户（Forward/DM 场景使用）。

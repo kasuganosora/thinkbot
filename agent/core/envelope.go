@@ -21,7 +21,15 @@ type Message struct {
 	BotID string `json:"botId"`
 	// Source 来源标识（"webhook" / "websocket" / "polling" / "memory" 等）。
 	Source string `json:"source"`
-	// Channel 频道或会话 ID。
+	// Channel 会话空间标识，代表消息所在的"对话流"。
+	// 同一会话空间中的多条消息共享同一 Channel 值，可用于关联对话上下文和记忆。
+	//
+	// 各平台语义：
+	//   - Telegram: chatID（同一 chat 中所有消息共享）
+	//   - Misskey: userID（同一用户的帖子视为一个对话流）
+	//   - Memory: channel name
+	//
+	// 注意：Channel 不等于"outbound 回复目标"。回复目标由 Metadata["reply_target"] 指定。
 	Channel string `json:"channel"`
 	// ChatType 会话类型（"private" / "group" / "channel" / "supergroup"）。
 	// Pipeline 可据此判断是否需要在群聊中 @mention 才回复等策略。
@@ -72,6 +80,11 @@ const (
 	ActionForward ActionType = "forward"
 	// ActionBroadcast 广播到多个频道。
 	ActionBroadcast ActionType = "broadcast"
+	// ActionNote 写入备注/内部笔记，不输出到 Channel。
+	// 用于 Bot 自主决定"不回复但记住此信息"的场景。
+	// Payload 为备注文本（string），Metadata 可包含关联上下文。
+	// NoteHandler 处理此类型，将备注持久化供记忆模块使用。
+	ActionNote ActionType = "note"
 	// ActionDrop 丢弃消息，不做任何输出。
 	ActionDrop ActionType = "drop"
 )

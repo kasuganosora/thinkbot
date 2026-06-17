@@ -269,9 +269,10 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 
 	// 构建 Metadata
 	metadata := map[string]any{
-		"chat_id":    msg.Chat.ID,
-		"message_id": msg.MessageID,
-		"date":       msg.Date,
+		"chat_id":      msg.Chat.ID,
+		"message_id":   msg.MessageID,
+		"reply_target": chatID, // outbound 回写目标（Telegram: chatID）
+		"date":         msg.Date,
 	}
 	if displayName != "" {
 		metadata["user_display_name"] = displayName
