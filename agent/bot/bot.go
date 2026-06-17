@@ -332,10 +332,28 @@ func (b *Bot) worker(ctx context.Context, id int) {
 	b.logger.Debugw("worker started", "worker_id", id)
 
 	for env := range b.ingress.C() {
-		b.processEnvelope(ctx, id, env)
+		b.safeProcessEnvelope(ctx, id, env)
 	}
 
 	b.logger.Debugw("worker stopped", "worker_id", id)
+}
+
+// safeProcessEnvelope 包装 processEnvelope 并添加 panic recovery。
+// 单条消息的 panic 不会导致整个 worker goroutine 退出。
+func (b *Bot) safeProcessEnvelope(ctx context.Context, workerID int, env *core.Envelope) {
+	defer func() {
+		if r := recover(); r != nil {
+			b.logger.Errorw("worker panic recovered",
+				"worker_id", workerID,
+				"message_id", env.Message.ID,
+				"trace_id", env.Message.TraceID,
+				"panic", r)
+			// 旁路事件：panic 错误
+			b.emitter.EmitMessageError(ctx, env.Message.TraceID,
+				fmt.Errorf("worker panic: %v", r))
+		}
+	}()
+	b.processEnvelope(ctx, workerID, env)
 }
 
 // processEnvelope 处理单个消息信封的完整生命周期。

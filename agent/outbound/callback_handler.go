@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -56,22 +57,91 @@ type CallbackRegistry interface {
 var ErrCallbackNotFound = fmt.Errorf("callback not found")
 
 // ============================================================================
-// MemoryCallbackRegistry — 内存实现
+// MemoryCallbackRegistry — 内存实现（带 TTL 过期清理）
 // ============================================================================
+
+// callbackEntry 是注册表中的单个回调条目。
+type callbackEntry struct {
+	fn        CallbackFunc
+	createdAt time.Time
+}
 
 // MemoryCallbackRegistry 是 CallbackRegistry 的内存实现。
 // 适用于单进程场景；分布式场景需要外部实现（如 Redis + pub/sub）。
+// 支持 TTL：超过 DefaultCallbackTTL 未被调用的回调会被自动清理。
 type MemoryCallbackRegistry struct {
-	mu        sync.RWMutex
-	callbacks map[string]CallbackFunc
+	mu        sync.Mutex
+	callbacks map[string]callbackEntry
 	counter   int
+	ttl       time.Duration
+	stopOnce  sync.Once
+	stopCh    chan struct{}
 }
 
+// DefaultCallbackTTL 是回调的默认过期时间（30 分钟）。
+const DefaultCallbackTTL = 30 * time.Minute
+
 // NewMemoryCallbackRegistry 创建内存回调注册表。
-func NewMemoryCallbackRegistry() *MemoryCallbackRegistry {
-	return &MemoryCallbackRegistry{
-		callbacks: make(map[string]CallbackFunc),
+// 默认 TTL 为 30 分钟，可通过 WithCallbackTTL 覆盖。
+func NewMemoryCallbackRegistry(opts ...CallbackRegistryOption) *MemoryCallbackRegistry {
+	r := &MemoryCallbackRegistry{
+		callbacks: make(map[string]callbackEntry),
+		ttl:       DefaultCallbackTTL,
+		stopCh:    make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	// 启动后台清理 goroutine
+	go r.cleanupLoop()
+	return r
+}
+
+// CallbackRegistryOption 是 MemoryCallbackRegistry 的配置选项。
+type CallbackRegistryOption func(*MemoryCallbackRegistry)
+
+// WithCallbackTTL 设置回调过期时间。
+func WithCallbackTTL(ttl time.Duration) CallbackRegistryOption {
+	return func(r *MemoryCallbackRegistry) {
+		if ttl > 0 {
+			r.ttl = ttl
+		}
+	}
+}
+
+// cleanupLoop 定期清理过期回调。
+func (r *MemoryCallbackRegistry) cleanupLoop() {
+	ticker := time.NewTicker(r.ttl / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			r.cleanup()
+		case <-r.stopCh:
+			return
+		}
+	}
+}
+
+// cleanup 清理所有过期的回调。
+func (r *MemoryCallbackRegistry) cleanup() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	for id, entry := range r.callbacks {
+		if now.Sub(entry.createdAt) > r.ttl {
+			delete(r.callbacks, id)
+		}
+	}
+}
+
+// Close 停止后台清理 goroutine。
+func (r *MemoryCallbackRegistry) Close() {
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+	})
 }
 
 func (r *MemoryCallbackRegistry) Register(id string, fn CallbackFunc) string {
@@ -82,19 +152,23 @@ func (r *MemoryCallbackRegistry) Register(id string, fn CallbackFunc) string {
 		r.counter++
 		id = fmt.Sprintf("cb_%d", r.counter)
 	}
-	r.callbacks[id] = fn
+	r.callbacks[id] = callbackEntry{fn: fn, createdAt: time.Now()}
 	return id
 }
 
 func (r *MemoryCallbackRegistry) Invoke(ctx context.Context, id string, result CallbackResult) error {
-	r.mu.RLock()
-	fn, ok := r.callbacks[id]
-	r.mu.RUnlock()
+	r.mu.Lock()
+	entry, ok := r.callbacks[id]
+	if ok {
+		// 一次性语义：调用后自动移除，防止并发重复调用
+		delete(r.callbacks, id)
+	}
+	r.mu.Unlock()
 
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrCallbackNotFound, id)
 	}
-	return fn(ctx, result)
+	return entry.fn(ctx, result)
 }
 
 func (r *MemoryCallbackRegistry) Unregister(id string) {
@@ -104,15 +178,15 @@ func (r *MemoryCallbackRegistry) Unregister(id string) {
 }
 
 func (r *MemoryCallbackRegistry) Has(id string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	_, ok := r.callbacks[id]
 	return ok
 }
 
 func (r *MemoryCallbackRegistry) Count() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return len(r.callbacks)
 }
 
