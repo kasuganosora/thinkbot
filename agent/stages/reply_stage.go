@@ -277,16 +277,16 @@ func (s *ReplyStage) addCallbackAction(env *core.Envelope, sourceChannel, payloa
 	callbackID := ""
 	if env.Message.Metadata != nil {
 		if id, ok := env.Message.Metadata["callback_id"]; ok {
-			if s, ok := id.(string); ok {
-				callbackID = s
+			if idStr, ok := id.(string); ok {
+				callbackID = idStr
 			}
 		}
 	}
 	// 也尝试从 Envelope values 中取（Pipeline 中间 Stage 可能设置）
 	if callbackID == "" {
 		if v, ok := env.Get("callback_id"); ok {
-			if s, ok := v.(string); ok {
-				callbackID = s
+			if idStr, ok := v.(string); ok {
+				callbackID = idStr
 			}
 		}
 	}

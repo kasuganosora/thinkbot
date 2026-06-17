@@ -132,22 +132,27 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 				span.SetStatus(codes.Error, "aborted")
 				span.RecordError(err)
 				p.msgErrors.Add(ctx, 1)
+				// 防御 nil env：AbortError 时 Stage 可能返回 nil envelope
+				abortedMsgID := messageID
+				if env != nil {
+					abortedMsgID = env.Message.ID
+				}
 				logger.Errorw("pipeline aborted",
-					"message_id", env.Message.ID,
+					"message_id", abortedMsgID,
 					"stage", si.Stage.Name(),
 					"err", err)
 				return env, err
 			}
 			if core.IsSkipError(err) {
 				logger.Debugw("stage skipped",
-					"message_id", env.Message.ID,
+					"message_id", messageID,
 					"stage", si.Stage.Name(),
 					"reason", err.Error())
 				continue
 			}
 			// 非致命错误：记录后继续
 			logger.Warnw("stage error (continuing)",
-				"message_id", env.Message.ID,
+				"message_id", messageID,
 				"stage", si.Stage.Name(),
 				"err", err)
 		}
