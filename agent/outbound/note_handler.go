@@ -2,6 +2,8 @@ package outbound
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -57,22 +59,66 @@ type NoteStore interface {
 // MemoryNoteStore — 内存备注存储（测试/开发用）
 // ============================================================================
 
+// MemoryNoteStoreConfig 配置内存备注存储。
+type MemoryNoteStoreConfig struct {
+	// MaxNotes 最大备注数量（默认 10000）。超过时删除最旧的备注。
+	MaxNotes int
+	// TTL 备注存活时间（默认 0 = 不过期）。
+	// 非零时，Save 操作会自动清理已过期的备注。
+	TTL time.Duration
+}
+
 // MemoryNoteStore 将备注存储在内存中，适用于测试和开发。
+// 支持容量限制和可选的 TTL 过期机制。
 type MemoryNoteStore struct {
-	mu    sync.Mutex
-	notes []Note
+	mu       sync.Mutex
+	notes    []Note
+	maxNotes int
+	ttl      time.Duration
 }
 
 // NewMemoryNoteStore 创建内存备注存储。
-func NewMemoryNoteStore() *MemoryNoteStore {
-	return &MemoryNoteStore{}
+func NewMemoryNoteStore(opts ...MemoryNoteStoreConfig) *MemoryNoteStore {
+	maxNotes := 10000
+	var ttl time.Duration
+	if len(opts) > 0 {
+		if opts[0].MaxNotes > 0 {
+			maxNotes = opts[0].MaxNotes
+		}
+		ttl = opts[0].TTL
+	}
+	return &MemoryNoteStore{
+		maxNotes: maxNotes,
+		ttl:      ttl,
+	}
 }
 
 // Save 将备注追加到内存列表。
+// 自动清理过期备注和超过容量的旧备注。
 func (s *MemoryNoteStore) Save(_ context.Context, note Note) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// TTL 清理
+	if s.ttl > 0 {
+		cutoff := time.Now().Add(-s.ttl)
+		start := 0
+		for start < len(s.notes) && s.notes[start].CreatedAt.Before(cutoff) {
+			start++
+		}
+		if start > 0 {
+			s.notes = s.notes[start:]
+		}
+	}
+
 	s.notes = append(s.notes, note)
+
+	// 容量限制：超过时删除最旧的
+	if len(s.notes) > s.maxNotes {
+		excess := len(s.notes) - s.maxNotes
+		s.notes = s.notes[excess:]
+	}
+
 	return nil
 }
 
@@ -134,10 +180,6 @@ type NoteHandler struct {
 	store  NoteStore
 	logger *zap.SugaredLogger
 	tracer trace.Tracer
-
-	// noteCounter 用于生成简单 ID（生产环境应使用 UUID）
-	mu          sync.Mutex
-	noteCounter int64
 }
 
 // NewNoteHandler 创建备注处理器。
@@ -193,14 +235,11 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 		}
 	}
 
-	// 生成 ID
-	h.mu.Lock()
-	h.noteCounter++
-	noteID := h.noteCounter
-	h.mu.Unlock()
+	// 生成唯一 ID（基于 crypto/rand，多实例安全）
+	noteID := generateNoteID()
 
 	note := Note{
-		ID:        fmt.Sprintf("note-%d", noteID),
+		ID:        noteID,
 		BotID:     botID,
 		Channel:   action.Channel,
 		UserID:    action.UserID,
@@ -232,4 +271,16 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	}
 
 	return nil
+}
+
+// generateNoteID 生成一个唯一的 Note ID。
+// 使用 crypto/rand 生成 16 字节随机数并编码为 hex（32 字符），
+// 确保多实例部署下不会冲突。
+func generateNoteID() string {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand 失败极其罕见，回退到时间戳
+		return fmt.Sprintf("note-%d", time.Now().UnixNano())
+	}
+	return "note-" + hex.EncodeToString(buf[:])
 }

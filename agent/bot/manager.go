@@ -106,8 +106,8 @@ func (m *BotManager) Count() int {
 
 // RunAll 启动所有已注册的 Bot。
 // 每个 Bot 在独立 goroutine 中运行。
-// 如果任何 Bot 启动失败（Channel 启动失败等），返回第一个错误，
-// 但已启动的 Bot 不会被回滚（调用者应调用 StopAll）。
+// RunAll 等待所有 Bot 完成初始化（Channel 启动、worker 就绪）后返回。
+// 如果任何 Bot 的 Run 方法在初始化阶段返回错误，RunAll 返回该错误。
 func (m *BotManager) RunAll(ctx context.Context) error {
 	m.mu.RLock()
 	bots := make([]*Bot, 0, len(m.bots))
@@ -119,29 +119,34 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 	m.logger.Infow("starting all bots", "count", len(bots))
 
 	errCh := make(chan error, len(bots))
-	startedCh := make(chan string, len(bots))
 
 	for _, b := range bots {
 		go func(bot *Bot) {
-			startedCh <- bot.ID
 			if err := bot.Run(ctx); err != nil {
 				errCh <- fmt.Errorf("bot %q: %w", bot.ID, err)
 			}
 		}(b)
 	}
 
-	// 等待所有 Bot 发出 "已启动" 信号
-	for range bots {
-		botID := <-startedCh
-		m.logger.Debugw("bot goroutine started", "bot_id", botID)
+	// 等待所有 Bot 就绪或出错
+	for _, b := range bots {
+		select {
+		case <-b.Ready():
+			m.logger.Debugw("bot ready", "bot_id", b.ID)
+		case err := <-errCh:
+			// 某个 Bot 在初始化阶段失败
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("bot_manager: context cancelled while waiting for bots: %w", ctx.Err())
+		}
 	}
 
-	// 非阻塞检查是否有立即失败的
+	// 非阻塞检查是否有在就绪后立即失败的
 	select {
 	case err := <-errCh:
 		return err
 	default:
-		m.logger.Infow("all bots started", "count", len(bots))
+		m.logger.Infow("all bots started and ready", "count", len(bots))
 		return nil
 	}
 }

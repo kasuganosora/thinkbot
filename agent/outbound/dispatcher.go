@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -78,6 +79,11 @@ type MultiDispatcher struct {
 	fallback ActionHandler
 	logger   *zap.SugaredLogger
 	tracer   trace.Tracer
+
+	// metrics（原子计数器，无需额外同步）
+	actionsDispatched atomic.Int64 // 成功派发的 Action 总数
+	actionsErrors     atomic.Int64 // 派发失败的 Action 总数
+	actionsNoHandler  atomic.Int64 // 无 handler 的 Action 总数
 }
 
 // ActionHandler 处理单个 Action。
@@ -106,9 +112,41 @@ func (d *MultiDispatcher) Register(actionType core.ActionType, handler ActionHan
 	d.handlers[actionType] = handler
 }
 
+// MustRegister 注册特定 ActionType 的处理器。
+// 如果相同 ActionType 已有处理器注册，panic。
+// 适用于启动阶段的强制校验。
+func (d *MultiDispatcher) MustRegister(actionType core.ActionType, handler ActionHandler) {
+	if _, exists := d.handlers[actionType]; exists {
+		panic(fmt.Sprintf("multi_dispatcher: handler already registered for action type %q", actionType))
+	}
+	d.handlers[actionType] = handler
+}
+
 // SetFallback 设置兜底处理器（无对应 handler 时使用）。
 func (d *MultiDispatcher) SetFallback(handler ActionHandler) {
 	d.fallback = handler
+}
+
+// Validate 验证指定的 ActionType 是否都已注册了处理器。
+// 通常在启动阶段调用，确保不会在运行时因缺少 handler 而静默丢弃 Action。
+// 返回未注册的 ActionType 列表，空切片表示全部通过。
+func (d *MultiDispatcher) Validate(requiredTypes ...core.ActionType) []core.ActionType {
+	var missing []core.ActionType
+	for _, t := range requiredTypes {
+		if _, ok := d.handlers[t]; !ok {
+			missing = append(missing, t)
+		}
+	}
+	return missing
+}
+
+// RegisteredTypes 返回所有已注册的 ActionType 列表。
+func (d *MultiDispatcher) RegisteredTypes() []core.ActionType {
+	types := make([]core.ActionType, 0, len(d.handlers))
+	for t := range d.handlers {
+		types = append(types, t)
+	}
+	return types
 }
 
 // Dispatch 按 ActionType 路由到对应处理器。
@@ -126,6 +164,7 @@ func (d *MultiDispatcher) Dispatch(ctx context.Context, actions []core.Action) e
 			handler = d.fallback
 		}
 		if handler == nil {
+			d.actionsNoHandler.Add(1)
 			d.logger.Warnw("no handler for action type",
 				"type", string(a.Type),
 				"channel", a.Channel)
@@ -133,11 +172,14 @@ func (d *MultiDispatcher) Dispatch(ctx context.Context, actions []core.Action) e
 		}
 
 		if err := handler.Handle(ctx, a); err != nil {
+			d.actionsErrors.Add(1)
 			errs = append(errs, fmt.Errorf("dispatch %s to %s: %w", a.Type, a.Channel, err))
 			d.logger.Errorw("action dispatch failed",
 				"type", string(a.Type),
 				"channel", a.Channel,
 				"err", err)
+		} else {
+			d.actionsDispatched.Add(1)
 		}
 	}
 
@@ -145,4 +187,22 @@ func (d *MultiDispatcher) Dispatch(ctx context.Context, actions []core.Action) e
 		return fmt.Errorf("dispatch errors: %d/%d actions failed", len(errs), len(actions))
 	}
 	return nil
+}
+
+// DispatcherMetrics 是 MultiDispatcher 的运行指标快照。
+type DispatcherMetrics struct {
+	ActionsDispatched int64 `json:"actions_dispatched"`
+	ActionsErrors     int64 `json:"actions_errors"`
+	ActionsNoHandler  int64 `json:"actions_no_handler"`
+	RegisteredTypes   int   `json:"registered_types"`
+}
+
+// Metrics 返回当前指标快照。
+func (d *MultiDispatcher) Metrics() DispatcherMetrics {
+	return DispatcherMetrics{
+		ActionsDispatched: d.actionsDispatched.Load(),
+		ActionsErrors:     d.actionsErrors.Load(),
+		ActionsNoHandler:  d.actionsNoHandler.Load(),
+		RegisteredTypes:   len(d.handlers),
+	}
 }

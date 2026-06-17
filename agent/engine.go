@@ -20,6 +20,12 @@ import (
 
 // ============================================================================
 // Engine — 消息处理生命周期引擎
+//
+// Deprecated: Engine 是早期原型实现，功能已被 bot.Bot 完全覆盖。
+// Bot 在 Engine 基础上增加了 EventBus 旁路事件、NoteHandler、CallbackHandler、
+// SilentHandler、多 Channel 管理、panic recovery 等能力。
+// 新代码应直接使用 bot.Bot + bot.BotManager。
+// 此类型将在未来版本中移除。
 // ============================================================================
 
 // EngineConfig 控制 Engine 行为参数。
@@ -39,6 +45,10 @@ func DefaultEngineConfig() EngineConfig {
 }
 
 // Engine 是消息处理的顶层编排器。
+//
+// Deprecated: 请使用 bot.Bot 替代。Engine 将在未来版本中移除。
+// 详见 bot.Bot 的文档了解完整功能。
+//
 // 它从 Ingress 消费 Envelope，经过 Pipeline 加工，最后由 Dispatcher 派发。
 //
 // Engine 不管理输入端的生命周期。各 channel（webhook handler、ws handler 等）
@@ -62,6 +72,8 @@ type Engine struct {
 }
 
 // NewEngine 创建 Engine 实例。
+//
+// Deprecated: 请使用 bot.New 替代。
 func NewEngine(
 	ingress *inbound.Ingress,
 	p *pipeline.Pipeline,

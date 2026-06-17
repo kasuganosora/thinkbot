@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -125,17 +126,19 @@ func (s *Subscription) C() <-chan Event {
 	return s.ch
 }
 
-// send 非阻塞发送事件。channel 满时丢弃。
-func (s *Subscription) send(event Event) {
+// send 非阻塞发送事件。channel 满时丢弃并返回 false。
+func (s *Subscription) send(event Event) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return
+		return false
 	}
 	select {
 	case s.ch <- event:
+		return true
 	default:
 		// channel 满，丢弃事件（旁路不应影响主流程）
+		return false
 	}
 }
 
@@ -179,6 +182,10 @@ type MemoryEventBus struct {
 	subscribers map[string]*Subscription // id -> subscription
 	nextID      uint64
 	closed      bool
+
+	// metrics（原子计数器，无需加锁）
+	eventsPublished atomic.Int64 // 成功投递的事件总数（每个订阅者一计）
+	eventsDropped   atomic.Int64 // 因 channel 满而丢弃的事件总数
 }
 
 // NewMemoryEventBus 创建内存事件总线。
@@ -211,7 +218,15 @@ func (b *MemoryEventBus) Publish(_ context.Context, event Event) {
 
 	for _, sub := range b.subscribers {
 		if b.matches(sub, event) {
-			sub.send(event)
+			if sub.send(event) {
+				b.eventsPublished.Add(1)
+			} else {
+				b.eventsDropped.Add(1)
+				b.logger.Debugw("eventbus: event dropped (channel full)",
+					"sub_id", sub.ID,
+					"trace_id", event.TraceID,
+					"event_type", string(event.Type))
+			}
 		}
 	}
 }
@@ -320,6 +335,23 @@ func (b *MemoryEventBus) ActiveSubscriptions() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return len(b.subscribers)
+}
+
+// Metrics 返回 EventBus 的运行指标快照。
+// 可用于接入 OTel metric callback 或健康检查端点。
+type EventBusMetrics struct {
+	ActiveSubscriptions int   `json:"active_subscriptions"`
+	EventsPublished     int64 `json:"events_published"`
+	EventsDropped       int64 `json:"events_dropped"`
+}
+
+// Metrics 返回当前指标快照。
+func (b *MemoryEventBus) Metrics() EventBusMetrics {
+	return EventBusMetrics{
+		ActiveSubscriptions: b.ActiveSubscriptions(),
+		EventsPublished:     b.eventsPublished.Load(),
+		EventsDropped:       b.eventsDropped.Load(),
+	}
 }
 
 // matches 判断事件是否匹配订阅。

@@ -111,7 +111,14 @@ const (
 type Action struct {
 	// Type 动作类型。
 	Type ActionType `json:"type"`
-	// Channel 目标频道 ID。
+	// Channel 目标频道/会话标识。
+	// 该字段的具体含义由 Outbound Sender 实现解释，不同平台语义不同：
+	//   - Telegram: chatID（群组/私聊 ID）
+	//   - Misskey: noteID 或 userID
+	//   - Webhook: 回调 URL 或 endpoint 标识
+	//   - Memory: channel name
+	//
+	// 设置方通常从 Message.Metadata["reply_target"] 或 Message.Channel 获取。
 	Channel string `json:"channel,omitempty"`
 	// UserID 目标用户 ID。
 	UserID string `json:"userId,omitempty"`
