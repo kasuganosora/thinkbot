@@ -469,6 +469,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 
 	metadata := map[string]any{
 		"note_id":      note.ID,
+		"reply_target": note.ID, // outbound 回写时使用的精确目标（noteID）
 		"username":     note.User.Username,
 		"host":         note.User.Host,
 		"visibility":   note.Visibility,
@@ -507,7 +508,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		ID:        note.ID,
 		BotID:     c.botID,
 		Source:    c.name,
-		Channel:   note.ID,
+		Channel:   note.User.ID, // 会话空间标识：用户 ID（同一用户的帖子视为一个对话流）
 		ChatType:  chatType,
 		UserID:    note.User.ID,
 		Text:      text,

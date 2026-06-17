@@ -728,3 +728,229 @@ func TestBot_OutboundMultipleChannels(t *testing.T) {
 
 	cancel()
 }
+
+// ============================================================================
+// Outbound NoteHandler 测试：Pipeline → Dispatcher → NoteHandler → NoteStore
+// ============================================================================
+
+// noteOnlyStage 只产出 ActionNote，不回复用户。
+type noteOnlyStage struct{}
+
+func (s *noteOnlyStage) Name() string { return "note-only" }
+func (s *noteOnlyStage) Process(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+	env.AddAction(core.Action{
+		Type:    core.ActionNote,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: "observed: " + env.Message.Text,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+			"category":       "observation",
+		},
+	})
+	return env, nil
+}
+
+// replyAndNoteStage 同时产出 ActionReply 和 ActionNote。
+type replyAndNoteStage struct{}
+
+func (s *replyAndNoteStage) Name() string { return "reply-and-note" }
+func (s *replyAndNoteStage) Process(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+	// Reply 回写到 Channel
+	env.AddAction(core.Action{
+		Type:    core.ActionReply,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: "reply: " + env.Message.Text,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+		},
+	})
+	// Note 记录备忘
+	env.AddAction(core.Action{
+		Type:    core.ActionNote,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: "memo: user said " + env.Message.Text,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+			"category":       "insight",
+		},
+	})
+	return env, nil
+}
+
+func TestBot_NoteOnlyPipeline(t *testing.T) {
+	// 测试"只备注不回复"的完整链路：
+	// Inject → Pipeline(noteOnly) → MultiDispatcher → NoteHandler → NoteStore
+	// Channel Sender 不应收到任何 action（不回复）
+
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	noteStore := outbound.NewMemoryNoteStore()
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &noteOnlyStage{}, Order: 10, Enabled: true},
+	)
+
+	memCh := NewMemoryChannel("test-note", "note-bot")
+
+	bot, err := New(BotParams{
+		ID:         "note-bot",
+		Config:     BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:   p,
+		Dispatcher: multiDisp,
+		Channels:   []Channel{memCh},
+		NoteStore:  noteStore,
+		Logger:     logger,
+		TP:         tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bot.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// 注入消息
+	memCh.Inject(context.Background(), core.Message{
+		ID:      "msg-1",
+		Channel: "user-1",
+		UserID:  "u1",
+		Text:    "interesting observation",
+	})
+
+	// 等待 NoteStore 收到备注
+	deadline := time.After(3 * time.Second)
+	for {
+		if noteStore.Count() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for note, got %d", noteStore.Count())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// 验证备注内容
+	notes := noteStore.Notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+	n := notes[0]
+	if n.Text != "observed: interesting observation" {
+		t.Errorf("note text = %q", n.Text)
+	}
+	if n.Channel != "user-1" {
+		t.Errorf("note channel = %q, want user-1", n.Channel)
+	}
+	if n.UserID != "u1" {
+		t.Errorf("note userID = %q, want u1", n.UserID)
+	}
+	if n.Category != "observation" {
+		t.Errorf("note category = %q, want observation", n.Category)
+	}
+
+	// Channel Sender 不应收到任何消息（只备注不回复）
+	if len(memCh.SentActions()) != 0 {
+		t.Errorf("Sender should not receive actions in note-only mode, got %d", len(memCh.SentActions()))
+	}
+
+	cancel()
+}
+
+func TestBot_ReplyAndNotePipeline(t *testing.T) {
+	// 测试"回复 + 备注"的完整链路：
+	// Inject → Pipeline(replyAndNote) → MultiDispatcher
+	//   → ChannelReplyHandler → Sender（回复）
+	//   → NoteHandler → NoteStore（备注）
+
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	noteStore := outbound.NewMemoryNoteStore()
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &replyAndNoteStage{}, Order: 10, Enabled: true},
+	)
+
+	memCh := NewMemoryChannel("test-both", "both-bot")
+
+	bot, err := New(BotParams{
+		ID:         "both-bot",
+		Config:     BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:   p,
+		Dispatcher: multiDisp,
+		Channels:   []Channel{memCh},
+		NoteStore:  noteStore,
+		Logger:     logger,
+		TP:         tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bot.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// 注入消息
+	memCh.Inject(context.Background(), core.Message{
+		ID:      "msg-1",
+		Channel: "chat-99",
+		UserID:  "u1",
+		Text:    "deploy failed again",
+	})
+
+	// 等待 Sender 和 NoteStore 都收到数据
+	deadline := time.After(3 * time.Second)
+	for {
+		if len(memCh.SentActions()) >= 1 && noteStore.Count() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout: sent=%d, notes=%d", len(memCh.SentActions()), noteStore.Count())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// 验证回复
+	sentActions := memCh.SentActions()
+	if len(sentActions) != 1 {
+		t.Fatalf("expected 1 sent action, got %d", len(sentActions))
+	}
+	if sentActions[0].Payload != "reply: deploy failed again" {
+		t.Errorf("sent payload = %v", sentActions[0].Payload)
+	}
+	if sentActions[0].Channel != "chat-99" {
+		t.Errorf("sent channel = %q, want chat-99", sentActions[0].Channel)
+	}
+
+	// 验证备注
+	notes := noteStore.Notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(notes))
+	}
+	if notes[0].Text != "memo: user said deploy failed again" {
+		t.Errorf("note text = %q", notes[0].Text)
+	}
+	if notes[0].Category != "insight" {
+		t.Errorf("note category = %q, want insight", notes[0].Category)
+	}
+
+	cancel()
+}
