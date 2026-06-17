@@ -75,6 +75,7 @@ type Bot struct {
 	noteHandler     *outbound.NoteHandler         // 内建的备注处理器
 	callbackHandler *outbound.CallbackHandler     // 内建的回调处理器
 	silentHandler   *outbound.SilentHandler       // 内建的静默处理器
+	emitter         *outbound.EventEmitter        // 旁路事件发射器（可选，nil=禁用）
 	channels        []Channel
 	logger          *zap.SugaredLogger
 	tracer          trace.Tracer
@@ -93,6 +94,7 @@ type BotParams struct {
 	Channels         []Channel
 	NoteStore        outbound.NoteStore        // 可选：备注存储后端。nil 时使用 MemoryNoteStore。
 	CallbackRegistry outbound.CallbackRegistry // 可选：回调注册表。nil 时使用 MemoryCallbackRegistry。
+	EventBus         outbound.EventBus         // 可选：旁路事件总线。nil 时禁用 SSE 事件推送。
 	Logger           *zap.SugaredLogger
 	TP               trace.TracerProvider
 }
@@ -180,6 +182,10 @@ func New(params BotParams) (*Bot, error) {
 		multiDisp.Register(core.ActionSilent, silentHandler)
 	}
 
+	// 创建 EventEmitter（旁路事件发射器）
+	// EventBus 为 nil 时 emitter 以 NoOp 模式运行，不产生任何开销。
+	emitter := outbound.NewEventEmitter(params.EventBus, params.ID)
+
 	return &Bot{
 		ID:              params.ID,
 		Name:            params.Name,
@@ -191,6 +197,7 @@ func New(params BotParams) (*Bot, error) {
 		noteHandler:     noteHandler,
 		callbackHandler: callbackHandler,
 		silentHandler:   silentHandler,
+		emitter:         emitter,
 		channels:        params.Channels,
 		logger:          params.Logger.With("bot_id", params.ID),
 		tracer:          params.TP.Tracer("github.com/kasuganosora/thinkbot/agent/bot/" + params.ID),
@@ -301,6 +308,12 @@ func (b *Bot) CallbackRegistry() outbound.CallbackRegistry {
 	return b.callbackHandler.Registry()
 }
 
+// Emitter 返回 Bot 的事件发射器。
+// 外部 Stage 或中间件可通过此发射自定义事件。
+func (b *Bot) Emitter() *outbound.EventEmitter {
+	return b.emitter
+}
+
 // stopChannels 停止所有 Channel（尽力而为，不因单个失败中止其他）。
 func (b *Bot) stopChannels(ctx context.Context) {
 	for _, ch := range b.channels {
@@ -330,6 +343,9 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 	traceID := env.Message.TraceID
 	ctx = traceid.WithTraceID(ctx, traceID)
 
+	// 将 EventEmitter 注入 context，供 Pipeline Stage（如 ObservableStage）使用
+	ctx = outbound.ContextWithEmitter(ctx, b.emitter)
+
 	logger := b.logger.With("trace_id", traceID)
 
 	ctx, span := b.tracer.Start(ctx, "bot.process",
@@ -350,6 +366,9 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 
 	start := time.Now()
 
+	// 旁路事件：消息接收
+	b.emitter.EmitMessageReceived(ctx, env.Message)
+
 	// Pipeline 执行
 	result, err := b.pipeline.Execute(ctx, env)
 	if err != nil {
@@ -360,6 +379,8 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 			"message_id", env.Message.ID,
 			"err", err,
 			"duration", time.Since(start))
+		// 旁路事件：Pipeline 错误
+		b.emitter.EmitMessageError(ctx, traceID, err)
 		return
 	}
 
@@ -368,6 +389,8 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 		logger.Debugw("message dropped by pipeline",
 			"worker_id", workerID,
 			"message_id", env.Message.ID)
+		// 旁路事件：消息丢弃
+		b.emitter.EmitMessageDropped(ctx, traceID, "pipeline")
 		return
 	}
 
@@ -377,11 +400,17 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 		logger.Debugw("no actions to dispatch",
 			"worker_id", workerID,
 			"message_id", env.Message.ID)
+		// 旁路事件：消息完成（0 个 action）
+		b.emitter.EmitMessageDone(ctx, traceID, 0, time.Since(start))
 		return
 	}
 
 	span.SetAttributes(attribute.Int("actions.count", len(actions)))
 
+	// 旁路事件：开始派发
+	b.emitter.EmitDispatchStart(ctx, traceID, len(actions))
+
+	dispStart := time.Now()
 	if dispErr := b.dispatcher.Dispatch(ctx, actions); dispErr != nil {
 		span.SetStatus(codes.Error, "dispatch failed")
 		span.RecordError(dispErr)
@@ -391,12 +420,21 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 			"actions", len(actions),
 			"err", dispErr,
 			"duration", time.Since(start))
+		// 旁路事件：派发错误
+		b.emitter.EmitDispatchError(ctx, traceID, dispErr)
 		return
 	}
 
+	// 旁路事件：派发完成
+	b.emitter.EmitDispatchDone(ctx, traceID, len(actions), time.Since(dispStart))
+
+	duration := time.Since(start)
 	logger.Debugw("message processed",
 		"worker_id", workerID,
 		"message_id", env.Message.ID,
 		"actions", len(actions),
-		"duration", time.Since(start))
+		"duration", duration)
+
+	// 旁路事件：消息处理完成
+	b.emitter.EmitMessageDone(ctx, traceID, len(actions), duration)
 }
