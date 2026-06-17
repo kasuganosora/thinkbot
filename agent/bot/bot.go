@@ -33,6 +33,8 @@ import (
 //   - 独立的 worker pool
 //   - 内建 ChannelReplyHandler（自动桥接 Dispatcher → Channel 回写）
 //   - 内建 NoteHandler（处理 ActionNote，备注不回复用户）
+//   - 内建 CallbackHandler（处理 ActionCallback，sub-agent 回调）
+//   - 内建 SilentHandler（处理 ActionSilent，主动静默）
 //
 // 一个应用可以运行多个 Bot，每个 Bot 处理自己 Channel 收到的消息，
 // 互不干扰。
@@ -49,11 +51,15 @@ import (
 //	[Outbound] Dispatcher 路由 Action 到对应 Handler：
 //	  ActionReply/ActionForward → ChannelReplyHandler → Sender.Send() → 回写到平台
 //	  ActionNote → NoteHandler → NoteStore.Save() → 持久化备注（不回复用户）
+//	  ActionCallback → CallbackHandler → CallbackRegistry.Invoke() → 回传给调用方
+//	  ActionSilent → SilentHandler → 仅记录 trace/log（无任何输出）
 //
-//	[Output 决策模式]
-//	  1. 正常回复：Pipeline 产出 ActionReply → 发送到 Channel
-//	  2. 回复 + 备注：Pipeline 产出 ActionReply + ActionNote → 发送 + 记录
-//	  3. 只备注不回复：Pipeline 只产出 ActionNote → 只记录，不发送任何消息
+//	[Output 决策模式]（Pipeline Stage 可组合产出以下 Action）
+//	  1. 正常回复：ActionReply → 发送到 Channel
+//	  2. 回复 + 备注：ActionReply + ActionNote → 发送 + 记录
+//	  3. 只备注不回复：ActionNote → 只记录，不发送任何消息
+//	  4. 执行回调：ActionCallback → 将结果回传给父 Agent/任务发起方
+//	  5. 主动静默：ActionSilent → 什么都不做，仅记录决策（表达"我知道了但不需要回应"）
 type Bot struct {
 	// ID Bot 唯一标识（如 "customer-service"、"code-review"）。
 	ID string
@@ -62,14 +68,16 @@ type Bot struct {
 	// Config Bot 级别配置。
 	Config BotConfig
 
-	ingress      *inbound.Ingress
-	pipeline     *pipeline.Pipeline
-	dispatcher   outbound.Dispatcher
-	replyHandler *outbound.ChannelReplyHandler // 内建的 Channel 回写处理器
-	noteHandler  *outbound.NoteHandler         // 内建的备注处理器
-	channels     []Channel
-	logger       *zap.SugaredLogger
-	tracer       trace.Tracer
+	ingress         *inbound.Ingress
+	pipeline        *pipeline.Pipeline
+	dispatcher      outbound.Dispatcher
+	replyHandler    *outbound.ChannelReplyHandler // 内建的 Channel 回写处理器
+	noteHandler     *outbound.NoteHandler         // 内建的备注处理器
+	callbackHandler *outbound.CallbackHandler     // 内建的回调处理器
+	silentHandler   *outbound.SilentHandler       // 内建的静默处理器
+	channels        []Channel
+	logger          *zap.SugaredLogger
+	tracer          trace.Tracer
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -77,15 +85,16 @@ type Bot struct {
 
 // BotParams 是 Bot 构造参数。
 type BotParams struct {
-	ID         string
-	Name       string
-	Config     BotConfig
-	Pipeline   *pipeline.Pipeline
-	Dispatcher outbound.Dispatcher
-	Channels   []Channel
-	NoteStore  outbound.NoteStore // 可选：备注存储后端。nil 时使用 MemoryNoteStore。
-	Logger     *zap.SugaredLogger
-	TP         trace.TracerProvider
+	ID               string
+	Name             string
+	Config           BotConfig
+	Pipeline         *pipeline.Pipeline
+	Dispatcher       outbound.Dispatcher
+	Channels         []Channel
+	NoteStore        outbound.NoteStore        // 可选：备注存储后端。nil 时使用 MemoryNoteStore。
+	CallbackRegistry outbound.CallbackRegistry // 可选：回调注册表。nil 时使用 MemoryCallbackRegistry。
+	Logger           *zap.SugaredLogger
+	TP               trace.TracerProvider
 }
 
 // New 创建一个 Bot 实例。
@@ -141,27 +150,50 @@ func New(params BotParams) (*Bot, error) {
 		params.TP,
 	)
 
-	// 如果 Dispatcher 是 MultiDispatcher，自动注册 ChannelReplyHandler 和 NoteHandler
+	// 创建 CallbackHandler（回调处理器）
+	callbackRegistry := params.CallbackRegistry
+	if callbackRegistry == nil {
+		callbackRegistry = outbound.NewMemoryCallbackRegistry()
+	}
+	callbackHandler := outbound.NewCallbackHandler(
+		callbackRegistry,
+		params.Logger.With("bot_id", params.ID),
+		params.TP,
+	)
+
+	// 创建 SilentHandler（静默处理器）
+	silentHandler := outbound.NewSilentHandler(
+		params.Logger.With("bot_id", params.ID),
+		params.TP,
+	)
+
+	// 如果 Dispatcher 是 MultiDispatcher，自动注册所有 Handler
 	// - ChannelReplyHandler 处理 ActionReply 和 ActionForward
 	// - NoteHandler 处理 ActionNote
+	// - CallbackHandler 处理 ActionCallback
+	// - SilentHandler 处理 ActionSilent
 	if multiDisp, ok := params.Dispatcher.(*outbound.MultiDispatcher); ok {
 		multiDisp.Register(core.ActionReply, replyHandler)
 		multiDisp.Register(core.ActionForward, replyHandler)
 		multiDisp.Register(core.ActionNote, noteHandler)
+		multiDisp.Register(core.ActionCallback, callbackHandler)
+		multiDisp.Register(core.ActionSilent, silentHandler)
 	}
 
 	return &Bot{
-		ID:           params.ID,
-		Name:         params.Name,
-		Config:       cfg,
-		ingress:      ingress,
-		pipeline:     params.Pipeline,
-		dispatcher:   params.Dispatcher,
-		replyHandler: replyHandler,
-		noteHandler:  noteHandler,
-		channels:     params.Channels,
-		logger:       params.Logger.With("bot_id", params.ID),
-		tracer:       params.TP.Tracer("github.com/kasuganosora/thinkbot/agent/bot/" + params.ID),
+		ID:              params.ID,
+		Name:            params.Name,
+		Config:          cfg,
+		ingress:         ingress,
+		pipeline:        params.Pipeline,
+		dispatcher:      params.Dispatcher,
+		replyHandler:    replyHandler,
+		noteHandler:     noteHandler,
+		callbackHandler: callbackHandler,
+		silentHandler:   silentHandler,
+		channels:        params.Channels,
+		logger:          params.Logger.With("bot_id", params.ID),
+		tracer:          params.TP.Tracer("github.com/kasuganosora/thinkbot/agent/bot/" + params.ID),
 	}, nil
 }
 
@@ -261,6 +293,12 @@ func (b *Bot) Ingress() *inbound.Ingress {
 // Channels 返回 Bot 拥有的所有 Channel 列表。
 func (b *Bot) Channels() []Channel {
 	return b.channels
+}
+
+// CallbackRegistry 返回 Bot 的回调注册表。
+// 外部可通过此注册回调函数，供 sub-agent 通过 ActionCallback 回传结果。
+func (b *Bot) CallbackRegistry() outbound.CallbackRegistry {
+	return b.callbackHandler.Registry()
 }
 
 // stopChannels 停止所有 Channel（尽力而为，不因单个失败中止其他）。
