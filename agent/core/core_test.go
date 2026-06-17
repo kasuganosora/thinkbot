@@ -211,11 +211,22 @@ func TestSkipError(t *testing.T) {
 // ============================================================================
 
 func TestActionTypes(t *testing.T) {
-	types := []ActionType{ActionReply, ActionForward, ActionBroadcast, ActionDrop}
-	expected := []string{"reply", "forward", "broadcast", "drop"}
+	types := []ActionType{
+		ActionReply, ActionForward, ActionBroadcast,
+		ActionNote, ActionCallback, ActionSilent, ActionDrop,
+	}
+	expected := []string{
+		"reply", "forward", "broadcast",
+		"note", "callback", "silent", "drop",
+	}
 	for i, at := range types {
 		if string(at) != expected[i] {
 			t.Errorf("action type %d: expected %s, got %s", i, expected[i], at)
 		}
+	}
+
+	// 确保所有 ActionType 常量都被测试覆盖
+	if len(types) != 7 {
+		t.Errorf("expected 7 action types, got %d — if you added a new ActionType, update this test", len(types))
 	}
 }

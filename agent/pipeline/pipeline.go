@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"time"
 
@@ -208,14 +209,20 @@ func (p *Pipeline) executeStage(ctx context.Context, s core.Stage, env *core.Env
 	// panic recovery
 	defer func() {
 		if r := recover(); r != nil {
-			panicErr := fmt.Errorf("panic in stage %s: %v", s.Name(), r)
+			// 捕获完整 stack trace
+			stack := make([]byte, 4096)
+			n := runtime.Stack(stack, false)
+			stack = stack[:n]
+
+			panicErr := fmt.Errorf("panic in stage %s: %v\n\nstack trace:\n%s", s.Name(), r, string(stack))
 			span.SetStatus(codes.Error, "panic")
 			span.RecordError(panicErr)
 			p.msgErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("stage", s.Name())))
 			logger.Errorw("stage panic recovered",
 				"stage", s.Name(),
 				"message_id", env.Message.ID,
-				"panic", r)
+				"panic", r,
+				"stack", string(stack))
 			result = env
 			retErr = &core.PipelineError{
 				Stage:   s.Name(),

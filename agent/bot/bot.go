@@ -3,7 +3,9 @@ package bot
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -80,8 +82,13 @@ type Bot struct {
 	logger          *zap.SugaredLogger
 	tracer          trace.Tracer
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	readyCh chan struct{} // close 后表示 Bot 已完成初始化（Channel 已启动、worker 已启动）
+
+	// metrics（原子计数器）
+	messagesProcessed atomic.Int64 // 成功处理的消息总数
+	messagesErrors    atomic.Int64 // 处理失败的消息总数
 }
 
 // BotParams 是 Bot 构造参数。
@@ -170,13 +177,14 @@ func New(params BotParams) (*Bot, error) {
 	)
 
 	// 如果 Dispatcher 是 MultiDispatcher，自动注册所有 Handler
-	// - ChannelReplyHandler 处理 ActionReply 和 ActionForward
+	// - ChannelReplyHandler 处理 ActionReply、ActionForward 和 ActionBroadcast
 	// - NoteHandler 处理 ActionNote
 	// - CallbackHandler 处理 ActionCallback
 	// - SilentHandler 处理 ActionSilent
 	if multiDisp, ok := params.Dispatcher.(*outbound.MultiDispatcher); ok {
 		multiDisp.Register(core.ActionReply, replyHandler)
 		multiDisp.Register(core.ActionForward, replyHandler)
+		multiDisp.Register(core.ActionBroadcast, replyHandler)
 		multiDisp.Register(core.ActionNote, noteHandler)
 		multiDisp.Register(core.ActionCallback, callbackHandler)
 		multiDisp.Register(core.ActionSilent, silentHandler)
@@ -201,6 +209,7 @@ func New(params BotParams) (*Bot, error) {
 		channels:        params.Channels,
 		logger:          params.Logger.With("bot_id", params.ID),
 		tracer:          params.TP.Tracer("github.com/kasuganosora/thinkbot/agent/bot/" + params.ID),
+		readyCh:         make(chan struct{}),
 	}, nil
 }
 
@@ -253,6 +262,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.logger.Infow("bot running",
 		"senders_registered", b.replyHandler.RegisteredCount())
 
+	// 标记 Bot 已就绪（Channel 已启动、worker 已启动）
+	close(b.readyCh)
+
 	// 阻塞直到 ctx 取消
 	<-ctx.Done()
 
@@ -291,6 +303,14 @@ func (b *Bot) Stop() {
 	}
 }
 
+// Ready 返回一个 channel，该 channel 在 Bot 完成初始化（Channel 已启动、worker 已启动）后关闭。
+// 可用于等待 Bot 真正就绪：
+//
+//	<-bot.Ready()
+func (b *Bot) Ready() <-chan struct{} {
+	return b.readyCh
+}
+
 // Ingress 返回 Bot 私有的 Ingress 实例。
 // Channel 实现通过此方法获取 Ingress（或直接通过 Start 参数）。
 func (b *Bot) Ingress() *inbound.Ingress {
@@ -312,6 +332,20 @@ func (b *Bot) CallbackRegistry() outbound.CallbackRegistry {
 // 外部 Stage 或中间件可通过此发射自定义事件。
 func (b *Bot) Emitter() *outbound.EventEmitter {
 	return b.emitter
+}
+
+// BotMetrics 是 Bot 的运行指标快照。
+type BotMetrics struct {
+	MessagesProcessed int64 `json:"messages_processed"`
+	MessagesErrors    int64 `json:"messages_errors"`
+}
+
+// Metrics 返回 Bot 当前运行指标。
+func (b *Bot) Metrics() BotMetrics {
+	return BotMetrics{
+		MessagesProcessed: b.messagesProcessed.Load(),
+		MessagesErrors:    b.messagesErrors.Load(),
+	}
 }
 
 // stopChannels 停止所有 Channel（尽力而为，不因单个失败中止其他）。
@@ -343,11 +377,17 @@ func (b *Bot) worker(ctx context.Context, id int) {
 func (b *Bot) safeProcessEnvelope(ctx context.Context, workerID int, env *core.Envelope) {
 	defer func() {
 		if r := recover(); r != nil {
+			// 捕获完整 stack trace
+			stack := make([]byte, 4096)
+			n := runtime.Stack(stack, false)
+			stack = stack[:n]
+
 			b.logger.Errorw("worker panic recovered",
 				"worker_id", workerID,
 				"message_id", env.Message.ID,
 				"trace_id", env.Message.TraceID,
-				"panic", r)
+				"panic", r,
+				"stack", string(stack))
 			// 旁路事件：panic 错误
 			b.emitter.EmitMessageError(ctx, env.Message.TraceID,
 				fmt.Errorf("worker panic: %v", r))
@@ -390,6 +430,7 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 	// Pipeline 执行
 	result, err := b.pipeline.Execute(ctx, env)
 	if err != nil {
+		b.messagesErrors.Add(1)
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
 		logger.Errorw("pipeline execution failed",
@@ -447,6 +488,7 @@ func (b *Bot) processEnvelope(ctx context.Context, workerID int, env *core.Envel
 	b.emitter.EmitDispatchDone(ctx, traceID, len(actions), time.Since(dispStart))
 
 	duration := time.Since(start)
+	b.messagesProcessed.Add(1)
 	logger.Debugw("message processed",
 		"worker_id", workerID,
 		"message_id", env.Message.ID,
