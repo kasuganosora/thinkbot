@@ -954,3 +954,231 @@ func TestBot_ReplyAndNotePipeline(t *testing.T) {
 
 	cancel()
 }
+
+// ============================================================================
+// Outbound CallbackHandler + SilentHandler 测试
+// ============================================================================
+
+// callbackStage 产出 ActionCallback。
+type callbackStage struct{}
+
+func (s *callbackStage) Name() string { return "callback" }
+func (s *callbackStage) Process(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+	env.AddAction(core.Action{
+		Type:    core.ActionCallback,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: "task result: " + env.Message.Text,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+			"callback_id":    "parent-task-1",
+			"status":         "success",
+		},
+	})
+	return env, nil
+}
+
+// silentStage 产出 ActionSilent。
+type silentStage struct{}
+
+func (s *silentStage) Name() string { return "silent" }
+func (s *silentStage) Process(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+	env.AddAction(core.Action{
+		Type:    core.ActionSilent,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+			"reason":         "irrelevant chatter",
+		},
+	})
+	return env, nil
+}
+
+func TestBot_CallbackPipeline(t *testing.T) {
+	// 测试回调全链路：
+	// Inject → Pipeline(callback) → MultiDispatcher → CallbackHandler → CallbackRegistry.Invoke
+
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	callbackRegistry := outbound.NewMemoryCallbackRegistry()
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &callbackStage{}, Order: 10, Enabled: true},
+	)
+
+	memCh := NewMemoryChannel("test-callback", "cb-bot")
+
+	_, err := New(BotParams{
+		ID:               "cb-bot",
+		Config:           BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:         p,
+		Dispatcher:       multiDisp,
+		Channels:         []Channel{memCh},
+		CallbackRegistry: callbackRegistry,
+		Logger:           logger,
+		TP:               tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// 注册回调
+	var callbackResult outbound.CallbackResult
+	var callbackCalled bool
+	callbackRegistry.Register("parent-task-1", func(ctx context.Context, result outbound.CallbackResult) error {
+		callbackResult = result
+		callbackCalled = true
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Re-create bot (to pick up the callback registered above)
+	bot, err := New(BotParams{
+		ID:               "cb-bot-2",
+		Config:           BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:         p,
+		Dispatcher:       multiDisp,
+		Channels:         []Channel{memCh},
+		CallbackRegistry: callbackRegistry,
+		Logger:           logger,
+		TP:               tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	go bot.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// 注入消息
+	memCh.Inject(context.Background(), core.Message{
+		ID:      "msg-cb",
+		Channel: "conv-1",
+		UserID:  "u1",
+		Text:    "analysis complete",
+	})
+
+	// 等待回调被调用
+	deadline := time.After(3 * time.Second)
+	for {
+		if callbackCalled {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for callback")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// 验证回调结果
+	if callbackResult.CallbackID != "parent-task-1" {
+		t.Errorf("callback_id = %q", callbackResult.CallbackID)
+	}
+	if callbackResult.Payload != "task result: analysis complete" {
+		t.Errorf("payload = %v", callbackResult.Payload)
+	}
+	if callbackResult.Status != "success" {
+		t.Errorf("status = %q", callbackResult.Status)
+	}
+
+	// Channel Sender 不应收到任何消息（回调不走 Channel 输出）
+	if len(memCh.SentActions()) != 0 {
+		t.Errorf("Sender should not receive actions in callback mode, got %d", len(memCh.SentActions()))
+	}
+
+	cancel()
+}
+
+func TestBot_SilentPipeline(t *testing.T) {
+	// 测试静默全链路：
+	// Inject → Pipeline(silent) → MultiDispatcher → SilentHandler → 仅 trace/log
+
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &silentStage{}, Order: 10, Enabled: true},
+	)
+
+	memCh := NewMemoryChannel("test-silent", "silent-bot")
+
+	bot, err := New(BotParams{
+		ID:         "silent-bot",
+		Config:     BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:   p,
+		Dispatcher: multiDisp,
+		Channels:   []Channel{memCh},
+		Logger:     logger,
+		TP:         tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bot.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// 注入消息
+	memCh.Inject(context.Background(), core.Message{
+		ID:      "msg-silent",
+		Channel: "chat-group",
+		UserID:  "u2",
+		Text:    "random chatter",
+	})
+
+	// 等待一小段时间，确认没有任何输出
+	time.Sleep(500 * time.Millisecond)
+
+	// Channel Sender 不应收到任何消息
+	if len(memCh.SentActions()) != 0 {
+		t.Errorf("Sender should not receive actions in silent mode, got %d", len(memCh.SentActions()))
+	}
+
+	cancel()
+}
+
+func TestBot_CallbackRegistry_Access(t *testing.T) {
+	// 测试 Bot.CallbackRegistry() 返回正确的 registry
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+
+	reg := outbound.NewMemoryCallbackRegistry()
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: &echoStage{}, Order: 10, Enabled: true},
+	)
+
+	bot, err := New(BotParams{
+		ID:               "access-bot",
+		Config:           BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:         p,
+		Dispatcher:       multiDisp,
+		Channels:         []Channel{},
+		CallbackRegistry: reg,
+		Logger:           logger,
+		TP:               tp,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	// 通过 Bot.CallbackRegistry() 注册回调
+	botReg := bot.CallbackRegistry()
+	botReg.Register("test-cb", func(ctx context.Context, result outbound.CallbackResult) error { return nil })
+
+	// 验证 registry 是同一个实例
+	if !reg.Has("test-cb") {
+		t.Error("expected callback registered via Bot.CallbackRegistry() to be in the original registry")
+	}
+}

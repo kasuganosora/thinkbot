@@ -85,6 +85,24 @@ const (
 	// Payload 为备注文本（string），Metadata 可包含关联上下文。
 	// NoteHandler 处理此类型，将备注持久化供记忆模块使用。
 	ActionNote ActionType = "note"
+	// ActionCallback 执行回调，将结果回传给任务发起方。
+	// 用于 sub-agent/子任务场景：父 Agent 创建子任务时注册回调 ID，
+	// 子任务完成后通过 ActionCallback 将结果回传。
+	//
+	// 约定：
+	//   - Metadata["callback_id"]：回调标识（必需），用于路由到正确的回调函数
+	//   - Payload：回调结果数据（any 类型，由回调双方约定结构）
+	//   - Metadata["status"]：任务状态（"success" / "error" / "partial"，可选）
+	//   - Metadata["error"]：错误描述（status=error 时使用，可选）
+	ActionCallback ActionType = "callback"
+	// ActionSilent 表示 Bot 已处理消息但主动选择不做任何外部输出。
+	// 与 ActionDrop 的区别：
+	//   - ActionDrop = 异常/过滤导致的丢弃（被拦截）
+	//   - ActionSilent = 正常决策后的主动静默（已知晓但无需回应）
+	//
+	// SilentHandler 仅记录 trace/log，不执行任何 I/O。
+	// 典型场景：LLM 判定此消息不需要回应（如群聊中的闲聊、重复问题等）。
+	ActionSilent ActionType = "silent"
 	// ActionDrop 丢弃消息，不做任何输出。
 	ActionDrop ActionType = "drop"
 )

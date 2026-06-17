@@ -28,6 +28,10 @@ const (
 	// 适用于场景：群聊中 Bot 被 @ 但 LLM 判断不适合回复（如闲聊、无关话题），
 	// 或者 Bot 观察到有价值的信息但不需要参与对话。
 	DecisionNoteOnly OutputDecision = "note_only"
+	// DecisionCallback 执行回调：将结果回传给任务发起方（sub-agent 场景）。
+	DecisionCallback OutputDecision = "callback"
+	// DecisionSilent 主动静默：什么都不做，仅记录 trace 表达"已知晓但不回应"。
+	DecisionSilent OutputDecision = "silent"
 	// DecisionDrop 完全跳过：既不回复也不备注。
 	DecisionDrop OutputDecision = "drop"
 )
@@ -195,6 +199,12 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 	case DecisionNoteOnly:
 		s.addNoteAction(env, sourceChannel, noteText, noteCategory)
 
+	case DecisionCallback:
+		s.addCallbackAction(env, sourceChannel, replyText, noteCategory)
+
+	case DecisionSilent:
+		s.addSilentAction(env, sourceChannel, noteText)
+
 	case DecisionDrop:
 		s.logger.Debugw("reply stage: decision is drop, no actions",
 			"message_id", env.Message.ID)
@@ -256,6 +266,65 @@ func (s *ReplyStage) addNoteAction(env *core.Envelope, sourceChannel, text, cate
 			"bot_id":         env.Message.BotID,
 			"message_id":     env.Message.ID,
 			"category":       category,
+		},
+	})
+}
+
+// addCallbackAction 添加回调 Action 到 Envelope。
+// payload 作为回调结果数据，category 作为回调状态使用。
+func (s *ReplyStage) addCallbackAction(env *core.Envelope, sourceChannel, payload, status string) {
+	// 从 Envelope KV 或 Metadata 中查找 callback_id
+	callbackID := ""
+	if env.Message.Metadata != nil {
+		if id, ok := env.Message.Metadata["callback_id"]; ok {
+			if s, ok := id.(string); ok {
+				callbackID = s
+			}
+		}
+	}
+	// 也尝试从 Envelope values 中取（Pipeline 中间 Stage 可能设置）
+	if callbackID == "" {
+		if v, ok := env.Get("callback_id"); ok {
+			if s, ok := v.(string); ok {
+				callbackID = s
+			}
+		}
+	}
+
+	if status == "" {
+		status = "success"
+	}
+
+	env.AddAction(core.Action{
+		Type:    core.ActionCallback,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: payload,
+		Metadata: map[string]any{
+			"source_channel": sourceChannel,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+			"callback_id":    callbackID,
+			"status":         status,
+		},
+	})
+}
+
+// addSilentAction 添加静默 Action 到 Envelope。
+// reason 记录静默原因（供 trace/分析使用）。
+func (s *ReplyStage) addSilentAction(env *core.Envelope, sourceChannel, reason string) {
+	if reason == "" {
+		reason = "llm_decision"
+	}
+	env.AddAction(core.Action{
+		Type:    core.ActionSilent,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Metadata: map[string]any{
+			"source_channel": sourceChannel,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+			"reason":         reason,
 		},
 	})
 }
