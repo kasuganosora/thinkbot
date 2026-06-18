@@ -1,7 +1,7 @@
 // Package storage 提供 agent 模块的持久化层实现（SQLite/GORM）。
 //
 // 设计原则：
-//   - 基础设施层：只依赖领域接口（memory.Repository, outbound.NoteStore），不反向依赖
+//   - 基础设施层：只依赖领域接口（memory.Repository），不反向依赖
 //   - DDD 端口-适配器模式：本包是适配器，领域层定义端口（接口）
 //   - 一个 DB 连接服务所有持久化需求，减少资源开销
 //   - 所有 model 使用 GORM 约定，通过 AutoMigrate 自动建表
@@ -20,6 +20,8 @@ import (
 
 // EntryModel 记忆条目表。
 // 对应领域模型 memory.Entry。
+// 统一存储所有来源的记忆：对话提取（source="conversation"）、
+// Bot 自主备注（source="note"）、系统注入（source="system"）等。
 type EntryModel struct {
 	ID        string `gorm:"primaryKey;size:64"`
 	ScopeKind string `gorm:"size:32;not null;index:idx_scope"`
@@ -27,7 +29,7 @@ type EntryModel struct {
 
 	Content    string  `gorm:"type:text;not null"`
 	Category   string  `gorm:"size:64;index:idx_category"`
-	Source     string  `gorm:"size:64"`
+	Source     string  `gorm:"size:64;index:idx_source"`
 	Importance float64 `gorm:"default:0"`
 
 	// Metadata 以 JSON 文本存储。
@@ -48,29 +50,6 @@ func (m *EntryModel) ScopeKey() string {
 		return m.ScopeKind
 	}
 	return m.ScopeKind + ":" + m.ScopeID
-}
-
-// NoteModel 备注表。
-// 对应领域模型 outbound.Note。
-type NoteModel struct {
-	ID        string `gorm:"primaryKey;size:64"`
-	BotID     string `gorm:"size:128;index:idx_note_bot"`
-	Channel   string `gorm:"size:256;index:idx_note_channel"`
-	UserID    string `gorm:"size:128"`
-	MessageID string `gorm:"size:128"`
-
-	Text     string `gorm:"type:text;not null"`
-	Category string `gorm:"size:64;index:idx_note_category"`
-
-	// Metadata 以 JSON 文本存储。
-	MetadataJSON string `gorm:"type:text"`
-
-	CreatedAt time.Time `gorm:"not null;index:idx_note_created"`
-}
-
-// TableName 指定表名。
-func (NoteModel) TableName() string {
-	return "notes"
 }
 
 // WindowStateModel 上下文窗口状态表。
@@ -100,7 +79,6 @@ func (WindowStateModel) TableName() string {
 func Migrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&EntryModel{},
-		&NoteModel{},
 		&WindowStateModel{},
 	)
 }

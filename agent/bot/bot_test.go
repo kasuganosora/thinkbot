@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 )
@@ -786,13 +787,13 @@ func (s *replyAndNoteStage) Process(_ context.Context, env *core.Envelope) (*cor
 
 func TestBot_NoteOnlyPipeline(t *testing.T) {
 	// 测试"只备注不回复"的完整链路：
-	// Inject → Pipeline(noteOnly) → MultiDispatcher → NoteHandler → NoteStore
+	// Inject → Pipeline(noteOnly) → MultiDispatcher → NoteHandler → memory.Store
 	// Channel Sender 不应收到任何 action（不回复）
 
 	tp := noop_trace.NewTracerProvider()
 	logger := zap.NewNop().Sugar()
 
-	noteStore := outbound.NewMemoryNoteStore()
+	memRepo := memory.NewMemoryRepository()
 	multiDisp := outbound.NewMultiDispatcher(logger, tp)
 
 	p := buildTestPipeline(t,
@@ -802,14 +803,14 @@ func TestBot_NoteOnlyPipeline(t *testing.T) {
 	memCh := NewMemoryChannel("test-note", "note-bot")
 
 	bot, err := New(BotParams{
-		ID:         "note-bot",
-		Config:     BotConfig{Workers: 1, IngressBufferSize: 8},
-		Pipeline:   p,
-		Dispatcher: multiDisp,
-		Channels:   []Channel{memCh},
-		NoteStore:  noteStore,
-		Logger:     logger,
-		TP:         tp,
+		ID:          "note-bot",
+		Config:      BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:    p,
+		Dispatcher:  multiDisp,
+		Channels:    []Channel{memCh},
+		MemoryStore: memRepo,
+		Logger:      logger,
+		TP:          tp,
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -828,37 +829,39 @@ func TestBot_NoteOnlyPipeline(t *testing.T) {
 		Text:    "interesting observation",
 	})
 
-	// 等待 NoteStore 收到备注
+	// 等待记忆仓储收到备注
 	deadline := time.After(3 * time.Second)
 	for {
-		if noteStore.Count() >= 1 {
+		count, _ := memRepo.Count(context.Background(), memory.ChannelScope("user-1"))
+		if count >= 1 {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timeout waiting for note, got %d", noteStore.Count())
+			c, _ := memRepo.Count(context.Background(), memory.ChannelScope("user-1"))
+			t.Fatalf("timeout waiting for note, got %d", c)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
-	// 验证备注内容
-	notes := noteStore.Notes()
-	if len(notes) != 1 {
-		t.Fatalf("expected 1 note, got %d", len(notes))
+	// 验证备注内容（现在是 memory.Entry）
+	entries, _ := memRepo.Recent(context.Background(), memory.ChannelScope("user-1"), 10)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	n := notes[0]
-	if n.Text != "observed: interesting observation" {
-		t.Errorf("note text = %q", n.Text)
+	e := entries[0]
+	if e.Content != "observed: interesting observation" {
+		t.Errorf("entry content = %q", e.Content)
 	}
-	if n.Channel != "user-1" {
-		t.Errorf("note channel = %q, want user-1", n.Channel)
+	if e.Source != "note" {
+		t.Errorf("entry source = %q, want note", e.Source)
 	}
-	if n.UserID != "u1" {
-		t.Errorf("note userID = %q, want u1", n.UserID)
+	if e.Scope.ID != "user-1" {
+		t.Errorf("entry scope.ID = %q, want user-1", e.Scope.ID)
 	}
-	if n.Category != "observation" {
-		t.Errorf("note category = %q, want observation", n.Category)
+	if e.Category != "observation" {
+		t.Errorf("entry category = %q, want observation", e.Category)
 	}
 
 	// Channel Sender 不应收到任何消息（只备注不回复）
@@ -873,12 +876,12 @@ func TestBot_ReplyAndNotePipeline(t *testing.T) {
 	// 测试"回复 + 备注"的完整链路：
 	// Inject → Pipeline(replyAndNote) → MultiDispatcher
 	//   → ChannelReplyHandler → Sender（回复）
-	//   → NoteHandler → NoteStore（备注）
+	//   → NoteHandler → memory.Store（备注纳入记忆）
 
 	tp := noop_trace.NewTracerProvider()
 	logger := zap.NewNop().Sugar()
 
-	noteStore := outbound.NewMemoryNoteStore()
+	memRepo := memory.NewMemoryRepository()
 	multiDisp := outbound.NewMultiDispatcher(logger, tp)
 
 	p := buildTestPipeline(t,
@@ -888,14 +891,14 @@ func TestBot_ReplyAndNotePipeline(t *testing.T) {
 	memCh := NewMemoryChannel("test-both", "both-bot")
 
 	bot, err := New(BotParams{
-		ID:         "both-bot",
-		Config:     BotConfig{Workers: 1, IngressBufferSize: 8},
-		Pipeline:   p,
-		Dispatcher: multiDisp,
-		Channels:   []Channel{memCh},
-		NoteStore:  noteStore,
-		Logger:     logger,
-		TP:         tp,
+		ID:          "both-bot",
+		Config:      BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:    p,
+		Dispatcher:  multiDisp,
+		Channels:    []Channel{memCh},
+		MemoryStore: memRepo,
+		Logger:      logger,
+		TP:          tp,
 	})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -914,15 +917,17 @@ func TestBot_ReplyAndNotePipeline(t *testing.T) {
 		Text:    "deploy failed again",
 	})
 
-	// 等待 Sender 和 NoteStore 都收到数据
+	// 等待 Sender 和 MemoryStore 都收到数据
 	deadline := time.After(3 * time.Second)
 	for {
-		if len(memCh.SentActions()) >= 1 && noteStore.Count() >= 1 {
+		count, _ := memRepo.Count(context.Background(), memory.ChannelScope("chat-99"))
+		if len(memCh.SentActions()) >= 1 && count >= 1 {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("timeout: sent=%d, notes=%d", len(memCh.SentActions()), noteStore.Count())
+			c, _ := memRepo.Count(context.Background(), memory.ChannelScope("chat-99"))
+			t.Fatalf("timeout: sent=%d, entries=%d", len(memCh.SentActions()), c)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -940,16 +945,19 @@ func TestBot_ReplyAndNotePipeline(t *testing.T) {
 		t.Errorf("sent channel = %q, want chat-99", sentActions[0].Channel)
 	}
 
-	// 验证备注
-	notes := noteStore.Notes()
-	if len(notes) != 1 {
-		t.Fatalf("expected 1 note, got %d", len(notes))
+	// 验证备注（现在是 memory.Entry）
+	entries, _ := memRepo.Recent(context.Background(), memory.ChannelScope("chat-99"), 10)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	if notes[0].Text != "memo: user said deploy failed again" {
-		t.Errorf("note text = %q", notes[0].Text)
+	if entries[0].Content != "memo: user said deploy failed again" {
+		t.Errorf("entry content = %q", entries[0].Content)
 	}
-	if notes[0].Category != "insight" {
-		t.Errorf("note category = %q, want insight", notes[0].Category)
+	if entries[0].Category != "insight" {
+		t.Errorf("entry category = %q, want insight", entries[0].Category)
+	}
+	if entries[0].Source != "note" {
+		t.Errorf("entry source = %q, want note", entries[0].Source)
 	}
 
 	cancel()

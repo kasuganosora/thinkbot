@@ -11,7 +11,6 @@ import (
 	"gorm.io/gorm/logger"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
-	"github.com/kasuganosora/thinkbot/agent/outbound"
 )
 
 // testDB 创建一个临时文件 SQLite 数据库用于测试。
@@ -44,10 +43,10 @@ func TestSQLiteRepository_Append(t *testing.T) {
 	ctx := context.Background()
 
 	entry := memory.Entry{
-		Scope:   memory.ChannelScope("ch-1"),
-		Content: "Hello World",
-		Category: "fact",
-		Source:   "conversation",
+		Scope:      memory.ChannelScope("ch-1"),
+		Content:    "Hello World",
+		Category:   "fact",
+		Source:     "conversation",
 		Importance: 0.8,
 	}
 
@@ -75,6 +74,42 @@ func TestSQLiteRepository_Append(t *testing.T) {
 	}
 	if entries[0].CreatedAt.IsZero() {
 		t.Error("expected CreatedAt to be set")
+	}
+}
+
+func TestSQLiteRepository_NoteSource(t *testing.T) {
+	db := testDB(t)
+	repo := NewSQLiteRepository(db)
+	ctx := context.Background()
+
+	// 模拟 NoteHandler 写入的 Entry
+	entry := memory.Entry{
+		Scope:      memory.ChannelScope("ch-1"),
+		Content:    "User seems frustrated with deploy issues",
+		Category:   "observation",
+		Source:     "note",
+		Importance: 0.5,
+		Metadata: map[string]any{
+			"bot_id":  "bot-1",
+			"user_id": "u1",
+		},
+	}
+
+	err := repo.Append(ctx, entry)
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// 可以通过 Source 过滤（使用 Retrieve + Text 或 Category）
+	entries, _ := repo.Recent(ctx, memory.ChannelScope("ch-1"), 10)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Source != "note" {
+		t.Errorf("source = %q, want %q", entries[0].Source, "note")
+	}
+	if entries[0].Category != "observation" {
+		t.Errorf("category = %q, want %q", entries[0].Category, "observation")
 	}
 }
 
@@ -245,6 +280,40 @@ func TestSQLiteRepository_Retrieve_ImportanceFilter(t *testing.T) {
 	}
 }
 
+func TestSQLiteRepository_Retrieve_SourceFilter(t *testing.T) {
+	db := testDB(t)
+	repo := NewSQLiteRepository(db)
+	ctx := context.Background()
+	scope := memory.ChannelScope("ch-src")
+
+	repo.Append(ctx, memory.Entry{Scope: scope, Content: "from chat", Source: "conversation"})
+	repo.Append(ctx, memory.Entry{Scope: scope, Content: "bot thought", Source: "note"})
+	repo.Append(ctx, memory.Entry{Scope: scope, Content: "another chat", Source: "conversation"})
+
+	// LLM 搜索记忆时会同时检索到对话记忆和 Bot 自主笔记
+	entries, err := repo.Retrieve(ctx, memory.Query{
+		Scopes: []memory.Scope{scope},
+	})
+	if err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("expected 3 entries (all sources), got %d", len(entries))
+	}
+
+	// 按文本搜索也能找到 note 来源的记忆
+	entries, err = repo.Retrieve(ctx, memory.Query{
+		Scopes: []memory.Scope{scope},
+		Text:   "bot thought",
+	})
+	if err != nil {
+		t.Fatalf("Retrieve text: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Source != "note" {
+		t.Errorf("expected 1 note-source entry, got %d", len(entries))
+	}
+}
+
 func TestSQLiteRepository_Metrics(t *testing.T) {
 	db := testDB(t)
 	repo := NewSQLiteRepository(db)
@@ -291,143 +360,6 @@ func TestSQLiteRepository_Metadata(t *testing.T) {
 	}
 	if entries[0].Metadata["source_msg"] != "msg-123" {
 		t.Errorf("metadata source_msg = %v, want msg-123", entries[0].Metadata["source_msg"])
-	}
-}
-
-// ============================================================================
-// SQLiteNoteStore 测试
-// ============================================================================
-
-func TestSQLiteNoteStore_Save(t *testing.T) {
-	db := testDB(t)
-	store := NewSQLiteNoteStore(db)
-	ctx := context.Background()
-
-	note := outbound.Note{
-		ID:        "note-001",
-		BotID:     "bot-1",
-		Channel:   "ch-1",
-		UserID:    "user-1",
-		Text:      "This is a note",
-		Category:  "observation",
-		CreatedAt: time.Now(),
-	}
-
-	err := store.Save(ctx, note)
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	count, _ := store.Count(ctx)
-	if count != 1 {
-		t.Errorf("expected count=1, got %d", count)
-	}
-}
-
-func TestSQLiteNoteStore_NotesByBot(t *testing.T) {
-	db := testDB(t)
-	store := NewSQLiteNoteStore(db)
-	ctx := context.Background()
-
-	store.Save(ctx, outbound.Note{ID: "n1", BotID: "bot-1", Text: "A", CreatedAt: time.Now()})
-	store.Save(ctx, outbound.Note{ID: "n2", BotID: "bot-2", Text: "B", CreatedAt: time.Now()})
-	store.Save(ctx, outbound.Note{ID: "n3", BotID: "bot-1", Text: "C", CreatedAt: time.Now()})
-
-	notes, err := store.NotesByBot(ctx, "bot-1", 10)
-	if err != nil {
-		t.Fatalf("NotesByBot: %v", err)
-	}
-	if len(notes) != 2 {
-		t.Errorf("expected 2 notes for bot-1, got %d", len(notes))
-	}
-}
-
-func TestSQLiteNoteStore_NotesByChannel(t *testing.T) {
-	db := testDB(t)
-	store := NewSQLiteNoteStore(db)
-	ctx := context.Background()
-
-	store.Save(ctx, outbound.Note{ID: "n1", Channel: "ch-1", Text: "A", CreatedAt: time.Now()})
-	store.Save(ctx, outbound.Note{ID: "n2", Channel: "ch-2", Text: "B", CreatedAt: time.Now()})
-
-	notes, err := store.NotesByChannel(ctx, "ch-1", 10)
-	if err != nil {
-		t.Fatalf("NotesByChannel: %v", err)
-	}
-	if len(notes) != 1 {
-		t.Errorf("expected 1 note for ch-1, got %d", len(notes))
-	}
-}
-
-func TestSQLiteNoteStore_TTL(t *testing.T) {
-	db := testDB(t)
-	store := NewSQLiteNoteStore(db, SQLiteNoteStoreConfig{
-		TTL: 100 * time.Millisecond,
-	})
-	ctx := context.Background()
-
-	// 写入一条过期的记录
-	store.Save(ctx, outbound.Note{
-		ID:        "old",
-		Text:      "expired",
-		CreatedAt: time.Now().Add(-200 * time.Millisecond),
-	})
-
-	// 等待 TTL 过期
-	time.Sleep(150 * time.Millisecond)
-
-	// 再写入一条新记录，触发 TTL 清理
-	store.Save(ctx, outbound.Note{
-		ID:        "new",
-		Text:      "fresh",
-		CreatedAt: time.Now(),
-	})
-
-	count, _ := store.Count(ctx)
-	if count > 1 {
-		// TTL 清理可能是异步的，宽松检查
-		t.Logf("note: TTL cleanup may be async, count=%d (expected <=1)", count)
-	}
-}
-
-func TestSQLiteNoteStore_Eviction(t *testing.T) {
-	db := testDB(t)
-	store := NewSQLiteNoteStore(db, SQLiteNoteStoreConfig{MaxNotes: 3})
-	ctx := context.Background()
-
-	for i := 0; i < 5; i++ {
-		store.Save(ctx, outbound.Note{
-			ID:        generateID("note"),
-			Text:      string(rune('A' + i)),
-			CreatedAt: time.Now().Add(time.Duration(i) * time.Millisecond),
-		})
-		time.Sleep(50 * time.Millisecond) // 等待异步 eviction
-	}
-
-	time.Sleep(200 * time.Millisecond)
-
-	count, _ := store.Count(ctx)
-	if count > 3 {
-		t.Errorf("expected <= 3 notes after eviction, got %d", count)
-	}
-}
-
-func TestSQLiteNoteStore_Clear(t *testing.T) {
-	db := testDB(t)
-	store := NewSQLiteNoteStore(db)
-	ctx := context.Background()
-
-	store.Save(ctx, outbound.Note{ID: "n1", Text: "A", CreatedAt: time.Now()})
-	store.Save(ctx, outbound.Note{ID: "n2", Text: "B", CreatedAt: time.Now()})
-
-	err := store.Clear(ctx)
-	if err != nil {
-		t.Fatalf("Clear: %v", err)
-	}
-
-	count, _ := store.Count(ctx)
-	if count != 0 {
-		t.Errorf("expected 0 after clear, got %d", count)
 	}
 }
 
@@ -593,4 +525,3 @@ func TestWindow_SnapshotRestore(t *testing.T) {
 		t.Errorf("Restored RoundCount = %d, want 2", metrics.RoundCount)
 	}
 }
-
