@@ -273,16 +273,16 @@ func TestContextManager_AssembleContext(t *testing.T) {
 	repo.Append(ctx, Entry{Scope: scope, Content: "User is a Go developer"})
 
 	builder := NewContextBuilder()
-	mgr := NewContextManager(repo, builder)
+	mgr := NewContextManager(repo, builder, nil, nil)
 
-	result, err := mgr.AssembleContext(ctx, "chat-ctx", "user-1", "")
+	assembleResult, err := mgr.AssembleContext(ctx, "chat-ctx", "user-1", "")
 	if err != nil {
 		t.Fatalf("assemble failed: %v", err)
 	}
-	if result == "" {
+	if assembleResult.ContextText == "" {
 		t.Fatal("expected non-empty context")
 	}
-	if !containsIgnoreCase(result, "Luna") {
+	if !containsIgnoreCase(assembleResult.ContextText, "Luna") {
 		t.Error("expected context to contain 'Luna'")
 	}
 }
@@ -297,14 +297,14 @@ func TestContextManager_AssembleContext_WithRelevance(t *testing.T) {
 	repo.Append(ctx, Entry{Scope: scope, Content: "Golang project uses Bazel build"})
 
 	builder := NewContextBuilder()
-	mgr := NewContextManager(repo, builder)
+	mgr := NewContextManager(repo, builder, nil, nil)
 
 	// 搜索与 "Golang" 相关的
-	result, err := mgr.AssembleContext(ctx, "chat-rel", "user-1", "golang")
+	assembleResult, err := mgr.AssembleContext(ctx, "chat-rel", "user-1", "golang")
 	if err != nil {
 		t.Fatalf("assemble failed: %v", err)
 	}
-	if !containsIgnoreCase(result, "Bazel") {
+	if !containsIgnoreCase(assembleResult.ContextText, "Bazel") {
 		t.Error("expected relevant memory about Golang/Bazel to be in context")
 	}
 }
@@ -312,14 +312,14 @@ func TestContextManager_AssembleContext_WithRelevance(t *testing.T) {
 func TestContextManager_EmptyMemory(t *testing.T) {
 	repo := NewMemoryRepository()
 	builder := NewContextBuilder()
-	mgr := NewContextManager(repo, builder)
+	mgr := NewContextManager(repo, builder, nil, nil)
 
-	result, err := mgr.AssembleContext(context.Background(), "empty-channel", "user-1", "hello")
+	assembleResult, err := mgr.AssembleContext(context.Background(), "empty-channel", "user-1", "hello")
 	if err != nil {
 		t.Fatalf("assemble failed: %v", err)
 	}
-	if result != "" {
-		t.Errorf("expected empty context for empty memory, got %q", result)
+	if assembleResult.ContextText != "" {
+		t.Errorf("expected empty context for empty memory, got %q", assembleResult.ContextText)
 	}
 }
 
@@ -342,6 +342,221 @@ func TestScope_Key(t *testing.T) {
 		got := tt.scope.Key()
 		if got != tt.expected {
 			t.Errorf("Scope.Key() = %q, want %q", got, tt.expected)
+		}
+	}
+}
+
+// ============================================================================
+// Window Tests
+// ============================================================================
+
+func TestWindow_Available(t *testing.T) {
+	w := NewWindow(WindowConfig{
+		MaxContextTokens:  10000,
+		ReservedTokens:    1000,
+		OutputReserve:     2000,
+		MemoryBudgetRatio: 0.3,
+	})
+
+	// 初始状态：(10000 - 1000 - 2000 - 0) * 0.3 = 2100
+	available := w.Available()
+	if available != 2100 {
+		t.Errorf("expected 2100 available, got %d", available)
+	}
+
+	// 记录用量后：(10000 - 1000 - 2000 - 3000) * 0.3 = 1200
+	w.RecordUsage(3000, 500)
+	available = w.Available()
+	if available != 1200 {
+		t.Errorf("expected 1200 available after usage, got %d", available)
+	}
+}
+
+func TestWindow_ShouldCompress(t *testing.T) {
+	w := NewWindow(WindowConfig{
+		MaxContextTokens:  10000,
+		ReservedTokens:    1000,
+		OutputReserve:     2000,
+		MemoryBudgetRatio: 0.3,
+		CompressThreshold: 0.8,
+	})
+
+	// Available = 2100, threshold = 2100 * 0.8 = 1680
+	if w.ShouldCompress(1000) {
+		t.Error("1000 tokens should not trigger compression")
+	}
+	if !w.ShouldCompress(1700) {
+		t.Error("1700 tokens should trigger compression")
+	}
+}
+
+func TestWindow_NeedsTruncation(t *testing.T) {
+	w := NewWindow(WindowConfig{
+		MaxContextTokens:  10000,
+		ReservedTokens:    1000,
+		OutputReserve:     2000,
+		MemoryBudgetRatio: 0.3,
+	})
+
+	// Available = 2100
+	if w.NeedsTruncation(2000) {
+		t.Error("2000 tokens should not need truncation (available=2100)")
+	}
+	if !w.NeedsTruncation(2200) {
+		t.Error("2200 tokens should need truncation (available=2100)")
+	}
+}
+
+func TestWindow_Reset(t *testing.T) {
+	w := NewWindow()
+	w.RecordUsage(5000, 1000)
+	w.Reset()
+
+	m := w.Metrics()
+	if m.UsedTokens != 0 {
+		t.Errorf("expected 0 used after reset, got %d", m.UsedTokens)
+	}
+	if m.RoundCount != 0 {
+		t.Errorf("expected 0 rounds after reset, got %d", m.RoundCount)
+	}
+}
+
+// ============================================================================
+// Compressor Tests (NoopCompressor)
+// ============================================================================
+
+func TestNoopCompressor_Compress(t *testing.T) {
+	c := &NoopCompressor{}
+	ctx := context.Background()
+
+	entries := []Entry{
+		{ID: "mem-1", Content: "first memory"},
+		{ID: "mem-2", Content: "second memory"},
+	}
+
+	block, err := c.Compress(ctx, entries)
+	if err != nil {
+		t.Fatalf("noop compress failed: %v", err)
+	}
+	if len(block.EntryIDs) != 2 {
+		t.Errorf("expected 2 entry IDs, got %d", len(block.EntryIDs))
+	}
+	if block.EntryIDs[0] != "mem-1" || block.EntryIDs[1] != "mem-2" {
+		t.Errorf("unexpected entry IDs: %v", block.EntryIDs)
+	}
+	if block.Summary == "" {
+		t.Error("expected non-empty summary")
+	}
+}
+
+// ============================================================================
+// Expander Tests
+// ============================================================================
+
+func TestExtractRefIDs(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{
+			input:    "用户偏好Go语言 [ref:mem-abc123] 使用Bazel [ref:mem-def456]",
+			expected: []string{"mem-abc123", "mem-def456"},
+		},
+		{
+			input:    "no refs here",
+			expected: nil,
+		},
+		{
+			input:    "[ref:mem-111] duplicate [ref:mem-111]",
+			expected: []string{"mem-111"},
+		},
+		{
+			input:    "[ref:mem-aaa, ref:mem-bbb] mixed",
+			expected: []string{"mem-aaa"},
+		},
+	}
+
+	for _, tt := range tests {
+		got := ExtractRefIDs(tt.input)
+		if len(got) != len(tt.expected) {
+			t.Errorf("ExtractRefIDs(%q): got %v, want %v", tt.input, got, tt.expected)
+			continue
+		}
+		for i, id := range got {
+			if id != tt.expected[i] {
+				t.Errorf("ExtractRefIDs(%q)[%d]: got %q, want %q", tt.input, i, id, tt.expected[i])
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Integration: ContextManager with Window + Compression
+// ============================================================================
+
+func TestContextManager_WithWindow_NoCompress(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+
+	scope := ChannelScope("win-test")
+	repo.Append(ctx, Entry{Scope: scope, Content: "short memory"})
+
+	builder := NewContextBuilder()
+	window := NewWindow(WindowConfig{
+		MaxContextTokens:  100000,
+		ReservedTokens:    1000,
+		OutputReserve:     2000,
+		MemoryBudgetRatio: 0.5,
+	})
+	mgr := NewContextManager(repo, builder, window, nil)
+
+	result, err := mgr.AssembleContext(ctx, "win-test", "user-1", "")
+	if err != nil {
+		t.Fatalf("assemble failed: %v", err)
+	}
+	if result.Compressed {
+		t.Error("should not compress with large window")
+	}
+	if result.ContextText == "" {
+		t.Error("expected non-empty context")
+	}
+}
+
+func TestContextManager_UpdateUsage(t *testing.T) {
+	repo := NewMemoryRepository()
+	builder := NewContextBuilder()
+	window := NewWindow(WindowConfig{
+		MaxContextTokens:  10000,
+		ReservedTokens:    1000,
+		OutputReserve:     2000,
+		MemoryBudgetRatio: 0.3,
+	})
+	mgr := NewContextManager(repo, builder, window, nil)
+
+	before := mgr.Available()
+	mgr.UpdateUsage(5000, 1000)
+	after := mgr.Available()
+
+	if after >= before {
+		t.Errorf("expected available to decrease after usage, before=%d, after=%d", before, after)
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	tests := []struct {
+		text     string
+		minToken int
+		maxToken int
+	}{
+		{"", 0, 0},
+		{"hello", 1, 5},
+		{"这是一段中文文本", 2, 10},
+	}
+
+	for _, tt := range tests {
+		got := estimateTokens(tt.text)
+		if got < tt.minToken || got > tt.maxToken {
+			t.Errorf("estimateTokens(%q) = %d, want in [%d, %d]", tt.text, got, tt.minToken, tt.maxToken)
 		}
 	}
 }
