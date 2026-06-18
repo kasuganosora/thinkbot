@@ -203,3 +203,46 @@ func (w *Window) Metrics() WindowMetrics {
 		Compressions:       w.compressions.Load(),
 	}
 }
+
+// ============================================================================
+// Snapshot / Restore — 持久化支持
+// ============================================================================
+
+// WindowState 是 Window 的可序列化状态快照。
+// 用于持久化到外部存储（SQLite、文件等）并在重启后恢复。
+type WindowState struct {
+	UsedTokens        int   `json:"used_tokens"`
+	RoundCount        int   `json:"round_count"`
+	TotalInputTokens  int64 `json:"total_input_tokens"`
+	TotalOutputTokens int64 `json:"total_output_tokens"`
+	Compressions      int64 `json:"compressions"`
+}
+
+// Snapshot 导出当前窗口状态的快照（用于持久化）。
+func (w *Window) Snapshot() WindowState {
+	w.mu.RLock()
+	used := w.usedTokens
+	rounds := w.roundCount
+	w.mu.RUnlock()
+
+	return WindowState{
+		UsedTokens:        used,
+		RoundCount:        rounds,
+		TotalInputTokens:  w.totalInputTokens.Load(),
+		TotalOutputTokens: w.totalOutputTokens.Load(),
+		Compressions:      w.compressions.Load(),
+	}
+}
+
+// Restore 从持久化快照恢复窗口状态。
+// 通常在 Bot 启动时调用，从存储层加载上次状态。
+func (w *Window) Restore(state WindowState) {
+	w.mu.Lock()
+	w.usedTokens = state.UsedTokens
+	w.roundCount = state.RoundCount
+	w.mu.Unlock()
+
+	w.totalInputTokens.Store(state.TotalInputTokens)
+	w.totalOutputTokens.Store(state.TotalOutputTokens)
+	w.compressions.Store(state.Compressions)
+}
