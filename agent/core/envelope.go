@@ -184,12 +184,22 @@ func (e *Envelope) AddAction(a Action) {
 	e.actions = append(e.actions, a)
 }
 
-// Actions 返回累积的所有输出动作的副本。
+// Actions 返回累积的所有输出动作的深拷贝。
+// Metadata map 也会被复制，防止调用方修改返回值影响 Envelope 内部状态。
 func (e *Envelope) Actions() []Action {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	out := make([]Action, len(e.actions))
-	copy(out, e.actions)
+	for i, a := range e.actions {
+		out[i] = a
+		if a.Metadata != nil {
+			meta := make(map[string]any, len(a.Metadata))
+			for k, v := range a.Metadata {
+				meta[k] = v
+			}
+			out[i].Metadata = meta
+		}
+	}
 	return out
 }
 

@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -82,7 +83,10 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 		return fmt.Errorf("ingress: closed")
 	}
 
-	// 归一化
+	// 归一化：填充缺失的默认字段
+	if msg.ID == "" {
+		msg.ID = idgen.New("msg")
+	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
@@ -135,6 +139,9 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 		return false
 	}
 
+	if msg.ID == "" {
+		msg.ID = idgen.New("msg")
+	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}

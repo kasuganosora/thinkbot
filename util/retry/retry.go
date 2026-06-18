@@ -98,7 +98,6 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 		recoverPanic = *cfg.RecoverPanic
 	}
 
-	var lastErr error //nolint:staticcheck // 保留以供未来扩展
 	attempts := 0
 	panics := 0
 
@@ -107,8 +106,6 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 
 		// --- 执行 fn（带 panic recovery）---
 		err := safeExec(ctx, name, recoverPanic, fn, attempts, cfg.OnPanic, &panics)
-		lastErr = err
-		_ = lastErr
 
 		if err == nil {
 			// 成功

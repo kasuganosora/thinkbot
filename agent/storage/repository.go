@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -74,7 +75,7 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error {
 	// 自动填充默认值
 	if entry.ID == "" {
-		entry.ID = generateID("mem")
+		entry.ID = idgen.New("mem")
 	}
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now()

@@ -80,7 +80,6 @@ func (r *Request) DoStream(cfg StreamConfig) error {
 // 注意：channel 模式不支持自动重试。如果需要重试，请使用 DoStream + OnChunk 回调。
 func (r *Request) DoStreamChunks(cfg StreamConfig) (<-chan []byte, error) {
 	ch := make(chan []byte, 64)
-	errCh := make(chan error, 1)
 
 	cfg.OnChunk = func(data []byte) error {
 		select {
@@ -93,11 +92,8 @@ func (r *Request) DoStreamChunks(cfg StreamConfig) (<-chan []byte, error) {
 
 	go func() {
 		defer close(ch)
-		defer close(errCh)
-		err := r.doStreamInternal(cfg)
-		if err != nil {
-			errCh <- err
-		}
+		// 错误静默丢弃（此变体不返回 error channel）
+		_ = r.doStreamInternal(cfg)
 	}()
 
 	return ch, nil
@@ -133,7 +129,6 @@ func (r *Request) DoStreamChunksWithErr(cfg StreamConfig) (<-chan []byte, <-chan
 // 注意：channel 模式不支持自动重试。
 func (r *Request) DoStreamLines(cfg StreamConfig) (<-chan string, error) {
 	ch := make(chan string, 64)
-	errCh := make(chan error, 1)
 
 	cfg.LineMode = true
 	cfg.OnLine = func(line string) error {
@@ -147,11 +142,8 @@ func (r *Request) DoStreamLines(cfg StreamConfig) (<-chan string, error) {
 
 	go func() {
 		defer close(ch)
-		defer close(errCh)
-		err := r.doStreamInternal(cfg)
-		if err != nil {
-			errCh <- err
-		}
+		// 错误静默丢弃（此变体不返回 error channel）
+		_ = r.doStreamInternal(cfg)
 	}()
 
 	return ch, nil

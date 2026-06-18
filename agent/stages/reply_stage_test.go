@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -162,9 +163,9 @@ func TestTrimSpace(t *testing.T) {
 		{"   ", ""},
 	}
 	for _, tc := range tests {
-		got := trimSpace(tc.input)
+		got := strings.TrimSpace(tc.input)
 		if got != tc.expected {
-			t.Errorf("trimSpace(%q) = %q, want %q", tc.input, got, tc.expected)
+			t.Errorf("strings.TrimSpace(%q) = %q, want %q", tc.input, got, tc.expected)
 		}
 	}
 }
@@ -180,9 +181,9 @@ func TestIndexOf(t *testing.T) {
 		{"end[---]", "[---]", 3},
 	}
 	for _, tc := range tests {
-		got := indexOf(tc.s, tc.sub)
+		got := strings.Index(tc.s, tc.sub)
 		if got != tc.want {
-			t.Errorf("indexOf(%q, %q) = %d, want %d", tc.s, tc.sub, got, tc.want)
+			t.Errorf("strings.Index(%q, %q) = %d, want %d", tc.s, tc.sub, got, tc.want)
 		}
 	}
 }

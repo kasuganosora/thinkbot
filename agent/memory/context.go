@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -383,6 +384,11 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 		allEntries = append(allEntries, recent...)
 	}
 
+	// 多 scope 拼接后按时间统一排序（降序），确保全局最近的记忆排在前面
+	if len(allEntries) > 1 {
+		sortEntriesByTimeDesc(allEntries)
+	}
+
 	// 3. 如果有消息文本，做相关性检索（与 recent 去重）
 	if text != "" {
 		relevant, err := m.retriever.Retrieve(ctx, Query{
@@ -545,4 +551,11 @@ func dedup(existing, additional []Entry) []Entry {
 		}
 	}
 	return result
+}
+
+// sortEntriesByTimeDesc 按 CreatedAt 降序排列。
+func sortEntriesByTimeDesc(entries []Entry) {
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].CreatedAt.After(entries[j].CreatedAt)
+	})
 }

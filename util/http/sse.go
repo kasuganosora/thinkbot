@@ -105,7 +105,6 @@ func (r *Request) DoSSE(cfg SSEConfig) error {
 // 如果需要重试，请使用 DoSSE + OnEvent 回调。
 func (r *Request) DoSSEStream(cfg SSEConfig) (<-chan SSEEvent, error) {
 	ch := make(chan SSEEvent, 64)
-	errCh := make(chan error, 1)
 
 	cfg.OnEvent = func(event SSEEvent) error {
 		select {
@@ -118,11 +117,8 @@ func (r *Request) DoSSEStream(cfg SSEConfig) (<-chan SSEEvent, error) {
 
 	go func() {
 		defer close(ch)
-		defer close(errCh)
-		err := r.doSSEInternal(cfg)
-		if err != nil {
-			errCh <- err
-		}
+		// 错误静默丢弃（此变体不返回 error channel）
+		_ = r.doSSEInternal(cfg)
 	}()
 
 	return ch, nil

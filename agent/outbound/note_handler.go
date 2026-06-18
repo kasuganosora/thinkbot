@@ -2,8 +2,6 @@ package outbound
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -12,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -147,7 +146,7 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	}
 
 	// 生成唯一 ID
-	noteID := generateNoteID()
+	noteID := idgen.New("note")
 
 	// 构建 metadata（保留原始信息便于溯源）
 	entryMeta := map[string]any{
@@ -206,14 +205,4 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	return nil
 }
 
-// generateNoteID 生成一个唯一的 Note ID。
-// 使用 crypto/rand 生成 16 字节随机数并编码为 hex（32 字符），
-// 确保多实例部署下不会冲突。
-func generateNoteID() string {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		// crypto/rand 失败极其罕见，回退到时间戳
-		return fmt.Sprintf("note-%d", time.Now().UnixNano())
-	}
-	return "note-" + hex.EncodeToString(buf[:])
-}
+

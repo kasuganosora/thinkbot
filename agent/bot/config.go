@@ -32,6 +32,12 @@ type BotConfig struct {
 	Extra map[string]any `json:"extra,omitempty" yaml:"extra,omitempty"`
 }
 
+// GetSystemPrompt 返回 Bot 的系统提示词。
+// 此方法使 BotConfig 满足 prompt.Stage 中 fallbackPrompt 的 duck-type 接口。
+func (c BotConfig) GetSystemPrompt() string {
+	return c.SystemPrompt
+}
+
 // DefaultBotConfig 返回合理的默认配置。
 func DefaultBotConfig() BotConfig {
 	return BotConfig{

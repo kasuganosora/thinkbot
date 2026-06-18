@@ -294,7 +294,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 	traceID := env.Message.TraceID
 	ctx = traceid.WithTraceID(ctx, traceID)
 
-	logger := e.logger.With("trace_id", traceID)
+	logger := traceid.WithLoggerFrom(ctx, e.logger)
 
 	ctx, span := e.tracer.Start(ctx, "engine.process",
 		trace.WithAttributes(

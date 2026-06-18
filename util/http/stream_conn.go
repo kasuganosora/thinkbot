@@ -132,41 +132,23 @@ func (r *Request) streamConnect(
 	}
 
 	// --- 状态码检查 ---
-	if requireOK {
-		if resp.StatusCode != http.StatusOK {
-			body := readErrorBody(resp)
-			resp.Body.Close()
-			r.ctx = origCtx
-			if wdOwned {
-				wd.Stop(true)
-			}
-			log.Logger.Warnw(kind+" unexpected status",
-				"method", r.method, "url", reqURL,
-				"status", resp.StatusCode, "elapsed", time.Since(start))
-			return nil, &StreamHTTPError{
-				StatusCode: resp.StatusCode,
-				Body:       body,
-				Headers:    resp.Header,
-				URL:        reqURL,
-			}
+	statusOK := requireOK && resp.StatusCode == http.StatusOK ||
+		!requireOK && resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !statusOK {
+		body := readErrorBody(resp)
+		resp.Body.Close()
+		r.ctx = origCtx
+		if wdOwned {
+			wd.Stop(true)
 		}
-	} else {
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body := readErrorBody(resp)
-			resp.Body.Close()
-			r.ctx = origCtx
-			if wdOwned {
-				wd.Stop(true)
-			}
-			log.Logger.Warnw(kind+" unexpected status",
-				"method", r.method, "url", reqURL,
-				"status", resp.StatusCode, "elapsed", time.Since(start))
-			return nil, &StreamHTTPError{
-				StatusCode: resp.StatusCode,
-				Body:       body,
-				Headers:    resp.Header,
-				URL:        reqURL,
-			}
+		log.Logger.Warnw(kind+" unexpected status",
+			"method", r.method, "url", reqURL,
+			"status", resp.StatusCode, "elapsed", time.Since(start))
+		return nil, &StreamHTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       body,
+			Headers:    resp.Header,
+			URL:        reqURL,
 		}
 	}
 

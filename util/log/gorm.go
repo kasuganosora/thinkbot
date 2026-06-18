@@ -59,56 +59,42 @@ func NewGormLogger(cfg GormConfig) gormlogger.Interface {
 	if Logger != nil {
 		zl = Logger.Desugar().With(zap.String("module", "gorm"))
 	}
-
-	level := gormlogger.Warn
-	switch cfg.Level {
-	case GormSilent:
-		level = gormlogger.Silent
-	case GormError:
-		level = gormlogger.Error
-	case GormWarn:
-		level = gormlogger.Warn
-	case GormInfo:
-		level = gormlogger.Info
-	}
-
-	slowThreshold := cfg.SlowThreshold
-	if slowThreshold <= 0 {
-		slowThreshold = 200 * time.Millisecond
-	}
-
-	return &gormLogger{
-		zl:                       zl,
-		level:                    level,
-		slowThreshold:            slowThreshold,
-		ignoreRecordNotFoundError: cfg.IgnoreRecordNotFoundError,
-	}
+	return newGormLogger(zl, cfg)
 }
 
 // NewGormLoggerWithZap 使用指定的 zap.Logger 创建 GORM logger（不依赖全局变量）。
 func NewGormLoggerWithZap(zl *zap.Logger, cfg GormConfig) gormlogger.Interface {
-	level := gormlogger.Warn
-	switch cfg.Level {
-	case GormSilent:
-		level = gormlogger.Silent
-	case GormError:
-		level = gormlogger.Error
-	case GormWarn:
-		level = gormlogger.Warn
-	case GormInfo:
-		level = gormlogger.Info
-	}
+	return newGormLogger(zl.With(zap.String("module", "gorm")), cfg)
+}
 
+// newGormLogger 内部构造 gormLogger，复用公共逻辑。
+func newGormLogger(zl *zap.Logger, cfg GormConfig) *gormLogger {
 	slowThreshold := cfg.SlowThreshold
 	if slowThreshold <= 0 {
 		slowThreshold = 200 * time.Millisecond
 	}
 
 	return &gormLogger{
-		zl:                       zl.With(zap.String("module", "gorm")),
-		level:                    level,
-		slowThreshold:            slowThreshold,
+		zl:                        zl,
+		level:                     parseGormLogLevel(cfg.Level),
+		slowThreshold:             slowThreshold,
 		ignoreRecordNotFoundError: cfg.IgnoreRecordNotFoundError,
+	}
+}
+
+// parseGormLogLevel 将 GormLogLevel 映射为 gormlogger.LogLevel。
+func parseGormLogLevel(level GormLogLevel) gormlogger.LogLevel {
+	switch level {
+	case GormSilent:
+		return gormlogger.Silent
+	case GormError:
+		return gormlogger.Error
+	case GormWarn:
+		return gormlogger.Warn
+	case GormInfo:
+		return gormlogger.Info
+	default:
+		return gormlogger.Warn
 	}
 }
 

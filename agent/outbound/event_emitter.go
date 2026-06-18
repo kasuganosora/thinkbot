@@ -387,13 +387,16 @@ func ContextWithEmitter(ctx context.Context, emitter *EventEmitter) context.Cont
 	return context.WithValue(ctx, eventEmitterKey{}, emitter)
 }
 
+// noopEmitter 是一个包级别的 NoOp emitter，避免每次调用 EmitterFromContext 时分配新对象。
+var noopEmitter = &EventEmitter{}
+
 // EmitterFromContext 从 context 获取 EventEmitter。
 // 如果 context 中没有 emitter，返回一个 NoOp emitter（bus=nil）。
 func EmitterFromContext(ctx context.Context) *EventEmitter {
 	if e, ok := ctx.Value(eventEmitterKey{}).(*EventEmitter); ok {
 		return e
 	}
-	return &EventEmitter{} // NoOp
+	return noopEmitter
 }
 
 // TraceIDFromContext 从 context 获取 trace ID（复用 traceid 包）。

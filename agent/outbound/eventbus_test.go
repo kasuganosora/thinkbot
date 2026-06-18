@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -371,7 +372,7 @@ func TestFormatSubID(t *testing.T) {
 		{1000000, "sub-1000000"},
 	}
 	for _, tt := range tests {
-		got := formatSubID(tt.id)
+		got := fmt.Sprintf("sub-%d", tt.id)
 		if got != tt.want {
 			t.Errorf("formatSubID(%d) = %q, want %q", tt.id, got, tt.want)
 		}

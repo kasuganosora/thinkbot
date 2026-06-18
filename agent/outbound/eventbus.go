@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -275,7 +276,7 @@ func (b *MemoryEventBus) subscribe(traceID, botID string) *Subscription {
 	}
 
 	b.nextID++
-	id := formatSubID(b.nextID)
+	id := fmt.Sprintf("sub-%d", b.nextID)
 
 	sub := &Subscription{
 		ID:      id,
@@ -367,25 +368,4 @@ func (b *MemoryEventBus) matches(sub *Subscription, event Event) bool {
 	return true
 }
 
-// formatSubID 格式化订阅 ID。
-func formatSubID(id uint64) string {
-	// 使用简单的数字格式，避免引入 fmt 的性能开销
-	const digits = "0123456789"
-	if id == 0 {
-		return "sub-0"
-	}
-	buf := make([]byte, 0, 20)
-	buf = append(buf, "sub-"...)
-	// 反转数字
-	var tmp [20]byte
-	i := 0
-	for id > 0 {
-		tmp[i] = digits[id%10]
-		id /= 10
-		i++
-	}
-	for i--; i >= 0; i-- {
-		buf = append(buf, tmp[i])
-	}
-	return string(buf)
-}
+
