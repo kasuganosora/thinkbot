@@ -52,6 +52,10 @@ type MemoryStageConfig struct {
 	Context ContextManagerConfig
 	// Builder 上下文格式化配置。
 	Builder ContextBuilderConfig
+	// Window 动态窗口管理器（可选，nil 使用静态 token 限制）。
+	Window *Window
+	// Compressor 压缩器（可选，nil 时超限直接截断）。
+	Compressor Compressor
 }
 
 // NewMemoryStage 创建记忆 Pipeline Stage。
@@ -63,7 +67,7 @@ func NewMemoryStage(
 	logger *zap.SugaredLogger,
 ) *MemoryStage {
 	builder := NewContextBuilder(config.Builder)
-	mgr := NewContextManager(repo, builder, config.Context)
+	mgr := NewContextManager(repo, builder, config.Window, config.Compressor, config.Context)
 
 	return &MemoryStage{
 		name:   name,
@@ -91,7 +95,7 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	start := time.Now()
 
 	// 组装记忆上下文
-	contextText, err := s.mgr.AssembleContext(
+	result, err := s.mgr.AssembleContext(
 		ctx,
 		env.Message.Channel,
 		env.Message.UserID,
@@ -109,15 +113,29 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	duration := time.Since(start)
 
 	// 注入到 Envelope KV
-	if contextText != "" {
-		env.Set("memory.context", contextText)
+	if result.ContextText != "" {
+		env.Set("memory.context", result.ContextText)
+		env.Set("memory.entries_used", result.EntriesUsed)
+		env.Set("memory.compressed", result.Compressed)
+
+		// 如果有压缩块，存储引用 ID（供 Expander 使用）
+		if result.CompressedBlock != nil {
+			env.Set("memory.compressed_block", result.CompressedBlock)
+		}
+
 		span.SetAttributes(
-			attribute.Int("memory.context_len", len(contextText)),
+			attribute.Int("memory.context_len", len(result.ContextText)),
+			attribute.Int("memory.token_estimate", result.TokenEstimate),
+			attribute.Int("memory.entries_used", result.EntriesUsed),
+			attribute.Bool("memory.compressed", result.Compressed),
 			attribute.Int64("memory.duration_ms", duration.Milliseconds()),
 		)
 		s.logger.Debugw("memory context injected",
 			"message_id", env.Message.ID,
-			"context_len", len(contextText),
+			"context_len", len(result.ContextText),
+			"tokens_est", result.TokenEstimate,
+			"entries", result.EntriesUsed,
+			"compressed", result.Compressed,
 			"duration", duration)
 	} else {
 		span.SetAttributes(attribute.Bool("memory.empty", true))
@@ -126,12 +144,21 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	// 旁路事件：记忆检索完成
 	emitter := outbound.EmitterFromContext(ctx)
 	emitter.Emit(ctx, "memory.retrieved", env.Message.TraceID, map[string]any{
-		"context_len": len(contextText),
-		"duration_ms": duration.Milliseconds(),
-		"has_context": contextText != "",
+		"context_len":    len(result.ContextText),
+		"token_estimate": result.TokenEstimate,
+		"entries_used":   result.EntriesUsed,
+		"compressed":     result.Compressed,
+		"duration_ms":    duration.Milliseconds(),
+		"has_context":    result.ContextText != "",
 	})
 
 	return env, nil
+}
+
+// ContextManager 返回 Stage 内部的上下文管理器。
+// 外部可调用 mgr.UpdateUsage() 来反馈 LLM token 消耗。
+func (s *MemoryStage) ContextManager() *ContextManager {
+	return s.mgr
 }
 
 // ============================================================================
