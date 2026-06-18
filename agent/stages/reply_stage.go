@@ -133,10 +133,19 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		messages = []llm.Message{llm.UserMessage(env.Message.Text)}
 	}
 
+	// 解析 system prompt：优先从 Envelope KV 读取动态组装的 prompt（PromptStage 注入），
+	// 回退到 LLMConfig.SystemPrompt 静态配置（向后兼容）。
+	systemPrompt := s.config.LLM.SystemPrompt
+	if v, ok := env.Get("system.prompt"); ok {
+		if sp, ok := v.(string); ok && sp != "" {
+			systemPrompt = sp
+		}
+	}
+
 	// 调用 LLM
 	params := llm.GenerateParams{
 		Model:       s.config.LLM.Model,
-		System:      s.config.LLM.SystemPrompt,
+		System:      systemPrompt,
 		Messages:    messages,
 		Tools:       s.config.LLM.Tools,
 		Temperature: s.config.LLM.Temperature,
