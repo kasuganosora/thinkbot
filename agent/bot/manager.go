@@ -27,6 +27,7 @@ type BotManager struct {
 	bots   map[string]*Bot
 	logger *zap.SugaredLogger
 	tracer trace.Tracer
+	errCh  chan error // 后续错误通道（RunAll 就绪后的崩溃错误）
 }
 
 // NewBotManager 创建 Bot 管理器。
@@ -70,6 +71,7 @@ func (m *BotManager) Unregister(id string) bool {
 	}
 
 	bot.Stop()
+	bot.Close()
 	delete(m.bots, id)
 	m.logger.Infow("bot unregistered", "bot_id", id)
 
@@ -102,6 +104,15 @@ func (m *BotManager) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.bots)
+}
+
+// ErrCh 返回一个只读错误通道，用于持续监听 Bot 启动后的崩溃错误。
+// 调用方应在 RunAll 返回后开始监听此通道。
+// 如果尚未调用 RunAll，返回 nil。
+func (m *BotManager) ErrCh() <-chan error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.errCh
 }
 
 // RunAll 启动所有已注册的 Bot。
@@ -146,12 +157,41 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	default:
-		m.logger.Infow("all bots started and ready", "count", len(bots))
-		return nil
 	}
+
+	// 所有 Bot 就绪后，启动后台 goroutine 监听后续错误并记录日志
+	// （调用方可通过 ErrCh() 方法获取持续错误流）
+	m.mu.Lock()
+	if m.errCh == nil {
+		m.errCh = make(chan error, len(bots))
+	}
+	errChForMonitor := m.errCh
+	m.mu.Unlock()
+
+	go func() {
+		for {
+			select {
+			case err := <-errCh:
+				if err != nil {
+					m.logger.Errorw("bot crashed after startup",
+						"err", err)
+					select {
+					case errChForMonitor <- err:
+					default:
+						// errCh 满了，丢弃（调用方未消费）
+					}
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	m.logger.Infow("all bots started and ready", "count", len(bots))
+	return nil
 }
 
-// StopAll 停止所有已注册的 Bot。
+// StopAll 停止所有已注册的 Bot 并释放资源。
 func (m *BotManager) StopAll() {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -160,6 +200,7 @@ func (m *BotManager) StopAll() {
 
 	for _, b := range m.bots {
 		b.Stop()
+		b.Close()
 	}
 
 	m.logger.Infow("all bots stop signal sent")

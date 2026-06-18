@@ -460,7 +460,14 @@ func (r *Request) doWithRetry() (*Response, error) {
 
 	// 捕获最近一次 429 响应的 Retry-After，用于覆盖退避时间
 	var lastRetryAfter time.Duration
-	cfg.GetRetryDelay = func(_ error) time.Duration {
+	userGetRetryDelay := cfg.GetRetryDelay // 保存用户已有的回调（可能为 nil）
+	cfg.GetRetryDelay = func(err error) time.Duration {
+		// 优先使用用户自定义的 GetRetryDelay
+		if userGetRetryDelay != nil {
+			if d := userGetRetryDelay(err); d > lastRetryAfter {
+				return d
+			}
+		}
 		return lastRetryAfter
 	}
 
@@ -612,12 +619,13 @@ func basicAuth(username, password string) string {
 	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }
 
-// truncate 截断字符串到 maxLen。
+// truncate 截断字符串到 maxLen 个 rune（避免截断多字节 UTF-8 字符中间）。
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxLen]) + "..."
 }
 
 // ============================================================================

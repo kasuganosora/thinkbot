@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
@@ -35,7 +36,7 @@ type TextContains struct {
 }
 
 func (p *TextContains) Match(env *core.Envelope) bool {
-	return contains(env.Message.Text, p.Substring)
+	return strings.Contains(env.Message.Text, p.Substring)
 }
 
 // TextHasPrefix 当消息文本以指定前缀开头时匹配。
@@ -188,26 +189,6 @@ func MatchSource(source string) Predicate {
 // MatchChannel 便捷构造 ChannelEquals。
 func MatchChannel(ch string) Predicate {
 	return &ChannelEquals{Channel: ch}
-}
-
-// ============================================================================
-// 内部工具
-// ============================================================================
-
-// contains 是简单的字符串包含检查（避免导入 strings 包）。
-func contains(s, substr string) bool {
-	if len(substr) == 0 {
-		return true
-	}
-	if len(s) < len(substr) {
-		return false
-	}
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // ============================================================================

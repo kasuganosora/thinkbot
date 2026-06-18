@@ -56,9 +56,11 @@ func (e *Error) StackTrace() string {
 	return e.stack.String()
 }
 
-// Context 返回结构化上下文字段。
+// Context 返回结构化上下文字段的副本（防止调用方修改影响内部状态）。
 func (e *Error) Context() []ctxField {
-	return e.context
+	out := make([]ctxField, len(e.context))
+	copy(out, e.context)
+	return out
 }
 
 // With 添加结构化上下文字段，返回新实例（不改原对象）。

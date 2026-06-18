@@ -2,13 +2,13 @@ package memory
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -75,7 +75,7 @@ func NewMemoryRepository(opts ...MemoryRepositoryConfig) *MemoryRepository {
 func (r *MemoryRepository) Append(_ context.Context, entry Entry) error {
 	// 自动填充默认值
 	if entry.ID == "" {
-		entry.ID = generateEntryID()
+		entry.ID = idgen.New("mem")
 	}
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now()
@@ -93,9 +93,12 @@ func (r *MemoryRepository) Append(_ context.Context, entry Entry) error {
 	bucket = append(bucket, entry)
 
 	// 容量限制：淘汰最旧条目
+	// 使用 copy 释放底层 array 前段，避免内存泄漏
 	if len(bucket) > r.config.MaxEntriesPerScope {
 		excess := len(bucket) - r.config.MaxEntriesPerScope
-		bucket = bucket[excess:]
+		newBucket := make([]Entry, r.config.MaxEntriesPerScope)
+		copy(newBucket, bucket[excess:])
+		bucket = newBucket
 	}
 
 	r.buckets[key] = bucket
@@ -283,15 +286,6 @@ func (r *MemoryRepository) Metrics() RepositoryMetrics {
 // Helpers
 // ============================================================================
 
-// generateEntryID 生成唯一记忆条目 ID。
-func generateEntryID() string {
-	var buf [12]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Sprintf("mem-%d", time.Now().UnixNano())
-	}
-	return "mem-" + hex.EncodeToString(buf[:])
-}
-
 // containsIgnoreCase 判断 s 中是否包含 substr（不区分大小写）。
 func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
@@ -299,13 +293,7 @@ func containsIgnoreCase(s, substr string) bool {
 
 // sortByTimeDesc 按 CreatedAt 降序排列。
 func sortByTimeDesc(entries []Entry) {
-	// 简单冒泡排序（记忆条目通常不多，避免引入 sort 包的复杂度）
-	n := len(entries)
-	for i := 0; i < n-1; i++ {
-		for j := 0; j < n-i-1; j++ {
-			if entries[j].CreatedAt.Before(entries[j+1].CreatedAt) {
-				entries[j], entries[j+1] = entries[j+1], entries[j]
-			}
-		}
-	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].CreatedAt.After(entries[j].CreatedAt)
+	})
 }

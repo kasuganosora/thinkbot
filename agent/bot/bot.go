@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -68,6 +69,11 @@ type Bot struct {
 	emitter         *outbound.EventEmitter        // 旁路事件发射器（可选，nil=禁用）
 	channels        []Channel
 	logger          *zap.SugaredLogger
+
+	// 资源管理（Close 时释放）
+	ownRegistry bool  // Bot 是否创建了 CallbackRegistry（外部传入的不关）
+	ownEventBus bool  // Bot 是否创建了 EventBus（外部传入的不关）
+	closerOnce  sync.Once // 确保 Close 只执行一次
 
 	// botMetrics 是 Bot 层额外的指标（Engine 层有自己的基础指标）
 	dispatchErrors atomic.Int64
@@ -142,8 +148,10 @@ func New(params BotParams) (*Bot, error) {
 
 	// 创建 CallbackHandler
 	callbackRegistry := params.CallbackRegistry
+	ownRegistry := false
 	if callbackRegistry == nil {
 		callbackRegistry = outbound.NewMemoryCallbackRegistry()
+		ownRegistry = true
 	}
 	callbackHandler := outbound.NewCallbackHandler(callbackRegistry, botLogger, params.TP)
 
@@ -164,9 +172,9 @@ func New(params BotParams) (*Bot, error) {
 	emitter := outbound.NewEventEmitter(params.EventBus, params.ID)
 
 	bot := &Bot{
-		ID:              params.ID,
-		Name:            params.Name,
-		Config:          cfg,
+		ID:           params.ID,
+		Name:         params.Name,
+		Config:       cfg,
 		replyHandler:    replyHandler,
 		noteHandler:     noteHandler,
 		callbackHandler: callbackHandler,
@@ -174,6 +182,7 @@ func New(params BotParams) (*Bot, error) {
 		emitter:         emitter,
 		channels:        params.Channels,
 		logger:          botLogger,
+		ownRegistry:     ownRegistry,
 	}
 
 	// 创建 Engine，注入 Bot 的 hook
@@ -240,12 +249,35 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	b.stopChannels(context.Background())
 
+	// 释放 Bot 拥有的后台资源（CallbackRegistry 的 cleanup goroutine 等）
+	b.Close()
+
 	return err
 }
 
 // Stop 触发 Bot 优雅关闭。
+// 停止 Engine 后，Run 方法会自动调用 Close 释放资源。
 func (b *Bot) Stop() {
 	b.engine.Stop()
+}
+
+// Close 释放 Bot 拥有的后台资源（如 CallbackRegistry 的 cleanup goroutine）。
+// 此方法是幂等的，可安全多次调用。
+// 如果 CallbackRegistry 或 EventBus 是外部传入的（Bot 不拥有），则不会关闭它们。
+func (b *Bot) Close() {
+	b.closerOnce.Do(func() {
+		if b.ownRegistry {
+			if r, ok := b.callbackHandler.Registry().(interface{ Close() }); ok {
+				r.Close()
+			}
+		}
+		if b.ownEventBus {
+			if b.emitter.Enabled() {
+				// EventEmitter 不直接持有 bus 引用暴露给 Close，
+				// 但如果 ownEventBus=true 说明 Bot 创建了 bus，此处由外部管理
+			}
+		}
+	})
 }
 
 // Ready 返回一个 channel，该 channel 在 Bot 完成初始化（Channel 已启动、Engine 已就绪）后关闭。

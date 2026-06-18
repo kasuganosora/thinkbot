@@ -159,6 +159,8 @@ func (w *Watchdog) resetCtx() {
 	if w.cancel != nil {
 		w.cancel()
 	}
+	// 重置超时标志：重建 context 后视为"重新开始"
+	w.timedOut.Store(false)
 	ctx, cancel := context.WithCancel(w.parent)
 	w.ctx = ctx
 	w.cancel = cancel

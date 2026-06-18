@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -75,6 +76,7 @@ func (d *LogDispatcher) Dispatch(ctx context.Context, actions []core.Action) err
 
 // MultiDispatcher 根据 ActionType 路由到不同的处理器。
 type MultiDispatcher struct {
+	mu       sync.RWMutex
 	handlers map[core.ActionType]ActionHandler
 	fallback ActionHandler
 	logger   *zap.SugaredLogger
@@ -108,7 +110,10 @@ func NewMultiDispatcher(logger *zap.SugaredLogger, tp trace.TracerProvider) *Mul
 }
 
 // Register 注册特定 ActionType 的处理器。
+// 线程安全：可在运行时调用（如 Bot.Run 中动态注册 Channel Sender）。
 func (d *MultiDispatcher) Register(actionType core.ActionType, handler ActionHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.handlers[actionType] = handler
 }
 
@@ -116,6 +121,8 @@ func (d *MultiDispatcher) Register(actionType core.ActionType, handler ActionHan
 // 如果相同 ActionType 已有处理器注册，panic。
 // 适用于启动阶段的强制校验。
 func (d *MultiDispatcher) MustRegister(actionType core.ActionType, handler ActionHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if _, exists := d.handlers[actionType]; exists {
 		panic(fmt.Sprintf("multi_dispatcher: handler already registered for action type %q", actionType))
 	}
@@ -124,6 +131,8 @@ func (d *MultiDispatcher) MustRegister(actionType core.ActionType, handler Actio
 
 // SetFallback 设置兜底处理器（无对应 handler 时使用）。
 func (d *MultiDispatcher) SetFallback(handler ActionHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.fallback = handler
 }
 
@@ -131,6 +140,8 @@ func (d *MultiDispatcher) SetFallback(handler ActionHandler) {
 // 通常在启动阶段调用，确保不会在运行时因缺少 handler 而静默丢弃 Action。
 // 返回未注册的 ActionType 列表，空切片表示全部通过。
 func (d *MultiDispatcher) Validate(requiredTypes ...core.ActionType) []core.ActionType {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	var missing []core.ActionType
 	for _, t := range requiredTypes {
 		if _, ok := d.handlers[t]; !ok {
@@ -142,6 +153,8 @@ func (d *MultiDispatcher) Validate(requiredTypes ...core.ActionType) []core.Acti
 
 // RegisteredTypes 返回所有已注册的 ActionType 列表。
 func (d *MultiDispatcher) RegisteredTypes() []core.ActionType {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	types := make([]core.ActionType, 0, len(d.handlers))
 	for t := range d.handlers {
 		types = append(types, t)
@@ -159,10 +172,12 @@ func (d *MultiDispatcher) Dispatch(ctx context.Context, actions []core.Action) e
 
 	var errs []error
 	for _, a := range actions {
+		d.mu.RLock()
 		handler, ok := d.handlers[a.Type]
 		if !ok {
 			handler = d.fallback
 		}
+		d.mu.RUnlock()
 		if handler == nil {
 			d.actionsNoHandler.Add(1)
 			d.logger.Warnw("no handler for action type",
@@ -199,10 +214,13 @@ type DispatcherMetrics struct {
 
 // Metrics 返回当前指标快照。
 func (d *MultiDispatcher) Metrics() DispatcherMetrics {
+	d.mu.RLock()
+	registeredTypes := len(d.handlers)
+	d.mu.RUnlock()
 	return DispatcherMetrics{
 		ActionsDispatched: d.actionsDispatched.Load(),
 		ActionsErrors:     d.actionsErrors.Load(),
 		ActionsNoHandler:  d.actionsNoHandler.Load(),
-		RegisteredTypes:   len(d.handlers),
+		RegisteredTypes:   registeredTypes,
 	}
 }

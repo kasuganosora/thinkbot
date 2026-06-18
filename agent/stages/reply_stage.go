@@ -3,6 +3,7 @@ package stages
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -236,6 +237,9 @@ func (s *ReplyStage) decide(ctx context.Context, msg core.Message, result *llm.G
 // addReplyAction 添加回复 Action 到 Envelope。
 func (s *ReplyStage) addReplyAction(env *core.Envelope, replyTarget, sourceChannel, text string, result *llm.GenerateResult) {
 	if text == "" {
+		s.logger.Warnw("reply stage: empty reply text, skipping reply action",
+			"message_id", env.Message.ID,
+			"finish_reason", string(result.FinishReason))
 		return
 	}
 	env.AddAction(core.Action{
@@ -373,62 +377,38 @@ func PrefixDecider(_ context.Context, _ core.Message, result *llm.GenerateResult
 	}
 
 	// [SKIP] 不做任何事
-	if len(text) >= 6 && text[:6] == "[SKIP]" {
+	if strings.HasPrefix(text, "[SKIP]") {
 		return DecisionDrop, "", "", ""
 	}
 
 	// [NOTE] 只备注
-	if len(text) >= 6 && text[:6] == "[NOTE]" {
-		noteText := text[6:]
+	if strings.HasPrefix(text, "[NOTE]") {
+		noteText := strings.TrimPrefix(text, "[NOTE]")
 		category := "observation"
-		return DecisionNoteOnly, "", trimSpace(noteText), category
+		return DecisionNoteOnly, "", strings.TrimSpace(noteText), category
 	}
 
 	// [REPLY+NOTE] 回复 + 备注（用 [---] 分割）
-	if len(text) >= 12 && text[:12] == "[REPLY+NOTE]" {
-		body := text[12:]
+	if strings.HasPrefix(text, "[REPLY+NOTE]") {
+		body := strings.TrimPrefix(text, "[REPLY+NOTE]")
 		// 查找分隔符
-		sepIdx := indexOf(body, "[---]")
+		sepIdx := strings.Index(body, "[---]")
 		if sepIdx >= 0 {
 			replyText := body[:sepIdx]
 			noteText := body[sepIdx+5:]
-			return DecisionReplyWithNote, trimSpace(replyText), trimSpace(noteText), "insight"
+			return DecisionReplyWithNote, strings.TrimSpace(replyText), strings.TrimSpace(noteText), "insight"
 		}
 		// 没有分隔符，全文作为回复
-		return DecisionReply, trimSpace(body), "", ""
+		return DecisionReply, strings.TrimSpace(body), "", ""
 	}
 
 	// [REPLY] 正常回复
-	if len(text) >= 7 && text[:7] == "[REPLY]" {
-		return DecisionReply, trimSpace(text[7:]), "", ""
+	if strings.HasPrefix(text, "[REPLY]") {
+		return DecisionReply, strings.TrimSpace(strings.TrimPrefix(text, "[REPLY]")), "", ""
 	}
 
 	// 无前缀：默认回复
 	return DecisionReply, text, "", ""
-}
-
-// trimSpace 去除首尾空白。
-func trimSpace(s string) string {
-	// 内联避免导入 strings 包
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
-		end--
-	}
-	return s[start:end]
-}
-
-// indexOf 查找子串位置。
-func indexOf(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // SystemPromptWithDecision 是一个辅助函数，将决策指令附加到 system prompt 末尾。
