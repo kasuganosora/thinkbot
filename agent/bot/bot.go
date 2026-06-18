@@ -12,6 +12,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 )
@@ -41,7 +42,7 @@ import (
 //
 //	[Outbound] Dispatcher 路由 Action 到对应 Handler：
 //	  ActionReply/ActionForward/ActionBroadcast → ChannelReplyHandler → Sender.Send()
-//	  ActionNote → NoteHandler → NoteStore.Save()
+//	  ActionNote → NoteHandler → memory.Store.Append()
 //	  ActionCallback → CallbackHandler → CallbackRegistry.Invoke()
 //	  ActionSilent → SilentHandler → 仅记录 trace/log
 //
@@ -80,7 +81,7 @@ type BotParams struct {
 	Pipeline         *pipeline.Pipeline
 	Dispatcher       outbound.Dispatcher
 	Channels         []Channel
-	NoteStore        outbound.NoteStore        // 可选：备注存储后端。nil 时使用 MemoryNoteStore。
+	MemoryStore      memory.Store              // 可选：记忆写入后端（供 NoteHandler 使用）。nil 时使用内存仓储。
 	CallbackRegistry outbound.CallbackRegistry // 可选：回调注册表。nil 时使用 MemoryCallbackRegistry。
 	EventBus         outbound.EventBus         // 可选：旁路事件总线。nil 时禁用 SSE 事件推送。
 	Logger           *zap.SugaredLogger
@@ -131,12 +132,13 @@ func New(params BotParams) (*Bot, error) {
 	// 创建 ChannelReplyHandler
 	replyHandler := outbound.NewChannelReplyHandler(botLogger, params.TP)
 
-	// 创建 NoteHandler
-	noteStore := params.NoteStore
-	if noteStore == nil {
-		noteStore = outbound.NewMemoryNoteStore()
+	// 创建 NoteHandler（写入统一记忆仓储）
+	memStore := params.MemoryStore
+	if memStore == nil {
+		memStore = memory.NewMemoryRepository()
 	}
-	noteHandler := outbound.NewNoteHandler(noteStore, botLogger, params.TP)
+	noteWriter := memory.NewNoteWriterAdapter(memStore)
+	noteHandler := outbound.NewNoteHandler(noteWriter, botLogger, params.TP)
 
 	// 创建 CallbackHandler
 	callbackRegistry := params.CallbackRegistry

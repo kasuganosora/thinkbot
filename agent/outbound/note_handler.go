@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -16,144 +15,32 @@ import (
 )
 
 // ============================================================================
-// Note — 备注/内部笔记数据结构
+// NoteEntry — NoteHandler 写入的记忆条目（本地定义避免循环依赖）
 // ============================================================================
 
-// Note 表示 Bot 的一条内部备注记录。
-// 当 LLM 判定不需要回复用户但需要记住某些信息时，产出 ActionNote。
-// NoteHandler 将其收集为 Note 结构，供后续记忆模块消费。
-type Note struct {
-	// ID 备注唯一标识（由 NoteHandler 自动生成）。
-	ID string `json:"id"`
-	// BotID 所属 Bot。
-	BotID string `json:"botId"`
-	// Channel 关联的会话空间标识。
-	Channel string `json:"channel"`
-	// UserID 关联的用户 ID。
-	UserID string `json:"userId,omitempty"`
-	// MessageID 触发此备注的原始消息 ID。
-	MessageID string `json:"messageId,omitempty"`
-	// Text 备注文本。
-	Text string `json:"text"`
-	// Category 备注分类（"observation" / "summary" / "todo" / "insight" 等）。
-	Category string `json:"category,omitempty"`
-	// Metadata 附加上下文。
-	Metadata map[string]any `json:"metadata,omitempty"`
-	// CreatedAt 创建时间。
-	CreatedAt time.Time `json:"createdAt"`
+// NoteEntry 表示 NoteHandler 要写入的一条记忆。
+// 与 memory.Entry 字段一一对应，由 memory.Store 隐式满足 NoteWriter 接口。
+type NoteEntry struct {
+	ID             string
+	ScopeKind      string // "channel" / "bot" / "user" / "global"
+	ScopeID        string
+	Content        string
+	Category       string
+	Source         string
+	Importance     float64
+	Metadata       map[string]any
+	CreatedAt      time.Time
+	LastAccessedAt time.Time
 }
 
-// ============================================================================
-// NoteStore — 备注持久化接口
-// ============================================================================
-
-// NoteStore 定义备注的持久化能力。
-// 实现此接口可以对接不同的后端：内存、文件、数据库等。
-// NoteHandler 收到 ActionNote 后调用 NoteStore.Save 持久化。
-type NoteStore interface {
-	// Save 持久化一条备注。
-	Save(ctx context.Context, note Note) error
-}
-
-// ============================================================================
-// MemoryNoteStore — 内存备注存储（测试/开发用）
-// ============================================================================
-
-// MemoryNoteStoreConfig 配置内存备注存储。
-type MemoryNoteStoreConfig struct {
-	// MaxNotes 最大备注数量（默认 10000）。超过时删除最旧的备注。
-	MaxNotes int
-	// TTL 备注存活时间（默认 0 = 不过期）。
-	// 非零时，Save 操作会自动清理已过期的备注。
-	TTL time.Duration
-}
-
-// MemoryNoteStore 将备注存储在内存中，适用于测试和开发。
-// 支持容量限制和可选的 TTL 过期机制。
-type MemoryNoteStore struct {
-	mu       sync.Mutex
-	notes    []Note
-	maxNotes int
-	ttl      time.Duration
-}
-
-// NewMemoryNoteStore 创建内存备注存储。
-func NewMemoryNoteStore(opts ...MemoryNoteStoreConfig) *MemoryNoteStore {
-	maxNotes := 10000
-	var ttl time.Duration
-	if len(opts) > 0 {
-		if opts[0].MaxNotes > 0 {
-			maxNotes = opts[0].MaxNotes
-		}
-		ttl = opts[0].TTL
-	}
-	return &MemoryNoteStore{
-		maxNotes: maxNotes,
-		ttl:      ttl,
-	}
-}
-
-// Save 将备注追加到内存列表。
-// 自动清理过期备注和超过容量的旧备注。
-func (s *MemoryNoteStore) Save(_ context.Context, note Note) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// TTL 清理
-	if s.ttl > 0 {
-		cutoff := time.Now().Add(-s.ttl)
-		start := 0
-		for start < len(s.notes) && s.notes[start].CreatedAt.Before(cutoff) {
-			start++
-		}
-		if start > 0 {
-			s.notes = s.notes[start:]
-		}
-	}
-
-	s.notes = append(s.notes, note)
-
-	// 容量限制：超过时删除最旧的
-	if len(s.notes) > s.maxNotes {
-		excess := len(s.notes) - s.maxNotes
-		s.notes = s.notes[excess:]
-	}
-
-	return nil
-}
-
-// Notes 返回所有已存储备注的副本。
-func (s *MemoryNoteStore) Notes() []Note {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Note, len(s.notes))
-	copy(out, s.notes)
-	return out
-}
-
-// LastNote 返回最后一条备注，没有则返回 nil。
-func (s *MemoryNoteStore) LastNote() *Note {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.notes) == 0 {
-		return nil
-	}
-	n := s.notes[len(s.notes)-1]
-	return &n
-}
-
-// Clear 清空所有备注。
-func (s *MemoryNoteStore) Clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.notes = nil
-}
-
-// Count 返回备注数量。
-func (s *MemoryNoteStore) Count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.notes)
+// NoteWriter 定义备注写入能力（最小接口，避免循环依赖 memory 包）。
+// memory.Store (memory.MemoryRepository / storage.SQLiteRepository) 均隐式满足此接口。
+//
+// Go 接口隐式满足机制：memory.Store.Append(ctx, Entry) 签名需与此匹配。
+// 由于 Entry 类型不同（不同包），我们使用适配器模式桥接。
+type NoteWriter interface {
+	// WriteNote 将一条备注写入记忆仓储。
+	WriteNote(ctx context.Context, entry NoteEntry) error
 }
 
 // ============================================================================
@@ -161,11 +48,13 @@ func (s *MemoryNoteStore) Count() int {
 // ============================================================================
 
 // NoteHandler 处理 ActionNote 类型的 Action。
-// 它从 Action 中提取备注信息，构建 Note 结构，然后通过 NoteStore 持久化。
+// 它从 Action 中提取备注信息，转换为 NoteEntry 通过 NoteWriter 写入记忆仓储。
+// 这样 Bot 的自主思考/观察/备注统一纳入记忆体系，
+// 后续 LLM 搜索记忆时可以回忆起自己曾经在想什么。
 //
 // 注册到 MultiDispatcher 后处理 ActionNote：
 //
-//	noteHandler := outbound.NewNoteHandler(store, logger, tp)
+//	noteHandler := outbound.NewNoteHandler(writer, logger, tp)
 //	dispatcher.Register(core.ActionNote, noteHandler)
 //
 // Action 字段约定（ActionNote）：
@@ -174,24 +63,27 @@ func (s *MemoryNoteStore) Count() int {
 //   - Action.UserID：关联的用户 ID
 //   - Action.Metadata["source_channel"]：来源 Channel（通用路由字段）
 //   - Action.Metadata["message_id"]：触发此备注的原始消息 ID
-//   - Action.Metadata["category"]：备注分类（可选）
+//   - Action.Metadata["category"]：备注分类（可选，默认 "observation"）
 //   - Action.Metadata["bot_id"]：所属 Bot ID
+//   - Action.Metadata["importance"]：重要程度 float64（可选，默认 0.5）
 type NoteHandler struct {
-	store  NoteStore
+	writer NoteWriter
 	logger *zap.SugaredLogger
 	tracer trace.Tracer
 }
 
 // NewNoteHandler 创建备注处理器。
-func NewNoteHandler(store NoteStore, logger *zap.SugaredLogger, tp trace.TracerProvider) *NoteHandler {
+// writer 是记忆写入接口，备注将作为 Entry（Source="note"）写入统一记忆仓储。
+func NewNoteHandler(writer NoteWriter, logger *zap.SugaredLogger, tp trace.TracerProvider) *NoteHandler {
 	return &NoteHandler{
-		store:  store,
+		writer: writer,
 		logger: logger.With("component", "note_handler"),
 		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/agent/outbound/note"),
 	}
 }
 
 // Handle 处理 ActionNote 类型的 Action。
+// 将备注转换为 memory.Entry 写入统一记忆仓储。
 // 实现 ActionHandler 接口。
 func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	ctx, span := h.tracer.Start(ctx, "note.handle",
@@ -216,7 +108,8 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	// 从 Metadata 提取关联信息
 	botID := ""
 	messageID := ""
-	category := ""
+	category := "observation" // 默认分类
+	importance := 0.5         // 默认重要度
 	if action.Metadata != nil {
 		if v, ok := action.Metadata["bot_id"]; ok {
 			if s, ok := v.(string); ok {
@@ -229,44 +122,84 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 			}
 		}
 		if v, ok := action.Metadata["category"]; ok {
-			if s, ok := v.(string); ok {
+			if s, ok := v.(string); ok && s != "" {
 				category = s
+			}
+		}
+		if v, ok := action.Metadata["importance"]; ok {
+			if f, ok := v.(float64); ok {
+				importance = f
 			}
 		}
 	}
 
-	// 生成唯一 ID（基于 crypto/rand，多实例安全）
+	// 确定 Scope
+	scopeKind := "channel"
+	scopeID := action.Channel
+	if action.Channel == "" {
+		if botID != "" {
+			scopeKind = "bot"
+			scopeID = botID
+		} else {
+			scopeKind = "global"
+			scopeID = ""
+		}
+	}
+
+	// 生成唯一 ID
 	noteID := generateNoteID()
 
-	note := Note{
-		ID:        noteID,
-		BotID:     botID,
-		Channel:   action.Channel,
-		UserID:    action.UserID,
-		MessageID: messageID,
-		Text:      text,
-		Category:  category,
-		Metadata:  action.Metadata,
-		CreatedAt: time.Now(),
+	// 构建 metadata（保留原始信息便于溯源）
+	entryMeta := map[string]any{
+		"user_id": action.UserID,
+	}
+	if messageID != "" {
+		entryMeta["message_id"] = messageID
+	}
+	if botID != "" {
+		entryMeta["bot_id"] = botID
+	}
+	// 保留 action 中的其他 metadata
+	if action.Metadata != nil {
+		for k, v := range action.Metadata {
+			if k != "bot_id" && k != "message_id" && k != "category" && k != "importance" {
+				entryMeta[k] = v
+			}
+		}
+	}
+
+	entry := NoteEntry{
+		ID:         noteID,
+		ScopeKind:  scopeKind,
+		ScopeID:    scopeID,
+		Content:    text,
+		Category:   category,
+		Source:     "note",
+		Importance: importance,
+		Metadata:   entryMeta,
+		CreatedAt:  time.Now(),
 	}
 
 	span.SetAttributes(
-		attribute.String("note.id", note.ID),
-		attribute.String("note.bot_id", note.BotID),
-		attribute.String("note.category", note.Category),
+		attribute.String("entry.id", entry.ID),
+		attribute.String("entry.scope_kind", scopeKind),
+		attribute.String("entry.scope_id", scopeID),
+		attribute.String("entry.category", entry.Category),
+		attribute.String("entry.source", entry.Source),
 	)
 
-	h.logger.Infow("saving note",
-		"note_id", note.ID,
-		"bot_id", note.BotID,
-		"channel", note.Channel,
-		"user_id", note.UserID,
-		"category", note.Category,
+	h.logger.Infow("saving note as memory entry",
+		"entry_id", entry.ID,
+		"scope", scopeKind+":"+scopeID,
+		"bot_id", botID,
+		"channel", action.Channel,
+		"user_id", action.UserID,
+		"category", entry.Category,
 		"text_len", len(text))
 
-	if err := h.store.Save(ctx, note); err != nil {
+	if err := h.writer.WriteNote(ctx, entry); err != nil {
 		h.logger.Errorw("note save failed",
-			"note_id", note.ID, "err", err)
+			"entry_id", entry.ID, "err", err)
 		return fmt.Errorf("note_handler: save failed: %w", err)
 	}
 
