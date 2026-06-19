@@ -136,3 +136,50 @@ result, err := wfMgr.Recover(context.Background())
 - **已完成的节点保留**：`completed`/`failed`/`skipped` 节点状态不变，避免重复执行
 - **中间状态重置**：被中断的 `running`/`reviewing` 节点清零 retry/iteration 计数，重置为 `pending` 等待重新调度
 - **幂等安全**：重复调用 `Recover()` 会跳过已经在运行中的工作流
+
+## 实时进度事件（旁路输出集成）
+
+Workflow 引擎通过 `EventBus` 发布实时进度事件，Web 端可通过 SSE 订阅指定 `workflow_id` 的事件流。
+
+### 接入方式
+
+```go
+// Setup 时传入 EventBus（来自 Pipeline 主流程）
+wfMgr, saMgr := workflow.Setup(workflow.WireConfig{
+    // ...
+    EventBus: bus,  // outbound.EventBus 实例（可为 nil）
+})
+```
+
+### 事件类型
+
+| 事件类型 | 触发时机 | Data 字段 |
+|---------|---------|-----------|
+| `workflow.submitted` | 工作流已提交 | `requirement` |
+| `workflow.analyzed` | DAG 分析完成 | `node_count`, `nodes[]` |
+| `workflow.completed` | 工作流全部成功 | `node_count` |
+| `workflow.failed` | 工作流失败 | `error` |
+| `workflow.terminated` | 工作流被终止 | — |
+| `workflow.node.started` | 节点开始执行 | `node_id`, `node_name`, `task` |
+| `workflow.node.completed` | 节点完成 | `node_id`, `retry_count`, `iteration_count`, `result_preview` |
+| `workflow.node.failed` | 节点失败 | `node_id`, `retry_count`, `error` |
+| `workflow.node.reviewing` | 节点进入 Review | `node_id`, `iteration` |
+| `workflow.node.retrying` | 节点执行重试 | `node_id`, `attempt`, `error` |
+
+> 所有事件的 `trace_id` 字段 = `workflow_id`，Web SSE 端通过 `bus.Subscribe(workflowID)` 筛选。
+
+### Web SSE 订阅示例
+
+```go
+// SSE Handler
+sub := bus.Subscribe(workflowID)
+defer bus.Unsubscribe(sub)
+for event := range sub.C() {
+    // event.Type = "workflow.node.completed"
+    // event.Data["node_id"] = "n1"
+    // 序列化为 SSE 推送给前端
+    writeSSE(event)
+}
+```
+
+前端收到事件后，可以实时更新 DAG 图中各节点的状态颜色和进度条。

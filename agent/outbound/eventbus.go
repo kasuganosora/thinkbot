@@ -47,6 +47,20 @@ const (
 	EventDispatchStart EventType = "dispatch.start" // 开始派发 Actions
 	EventDispatchDone  EventType = "dispatch.done"  // 派发完成
 	EventDispatchError EventType = "dispatch.error" // 派发出错
+
+	// Workflow 事件（DAG 工作流引擎）
+	EventWorkflowSubmitted EventType = "workflow.submitted"       // 工作流已提交（正在分析）
+	EventWorkflowAnalyzed  EventType = "workflow.analyzed"        // 分析完成，DAG 已生成
+	EventWorkflowCompleted EventType = "workflow.completed"       // 工作流全部完成
+	EventWorkflowFailed    EventType = "workflow.failed"          // 工作流失败
+	EventWorkflowTerminated EventType = "workflow.terminated"     // 工作流被终止
+	EventWorkflowRecovered EventType = "workflow.recovered"       // 工作流崩溃恢复
+
+	EventWorkflowNodeStarted   EventType = "workflow.node.started"    // 节点开始执行
+	EventWorkflowNodeCompleted EventType = "workflow.node.completed"  // 节点完成
+	EventWorkflowNodeFailed    EventType = "workflow.node.failed"     // 节点失败
+	EventWorkflowNodeReviewing EventType = "workflow.node.reviewing"  // 节点进入审查
+	EventWorkflowNodeRetrying  EventType = "workflow.node.retrying"   // 节点重试
 )
 
 // Event 是旁路事件总线中传递的事件。
