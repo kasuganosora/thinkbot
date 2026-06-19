@@ -79,6 +79,10 @@ type Event struct {
 	Stage string `json:"stage,omitempty"`
 	// Data 事件载荷（各事件类型不同）。
 	Data map[string]any `json:"data,omitempty"`
+	// Seq 全局单调递增序列号，由 EventBus 在 Publish 时自动赋值。
+	// 用于 SSE 断线重连：客户端在 Last-Event-ID 中携带上次收到的 Seq，
+	// 服务端据此回放后续事件。
+	Seq uint64 `json:"seq"`
 }
 
 // ============================================================================
@@ -113,6 +117,16 @@ type EventBus interface {
 	// SubscribeBot 订阅指定 Bot 的所有事件。
 	// 返回的 Subscription 必须在使用完毕后调用 Unsubscribe 释放。
 	SubscribeBot(botID string) *Subscription
+
+	// SubscribeWithReplay 订阅事件流，并先回放 sinceSeq 之后的历史事件。
+	// 用于 SSE 断线重连：客户端携带上次收到的 Seq 值，
+	// 服务端先回放该 Seq 之后的事件，再转入实时推送。
+	// sinceSeq=0 表示回放 EventStore 中存储的全部事件。
+	SubscribeWithReplay(traceID string, sinceSeq uint64) *Subscription
+
+	// LatestSeq 返回当前最新的 Seq 序列号。
+	// 客户端可在建立 SSE 连接前调用，作为后续断线重连的 sinceSeq 基准。
+	LatestSeq() uint64
 
 	// Unsubscribe 取消订阅并关闭 channel。
 	Unsubscribe(sub *Subscription)
@@ -168,6 +182,78 @@ func (s *Subscription) close() {
 }
 
 // ============================================================================
+// eventStore — 环形缓冲事件存储（用于 SSE 断线重连回放）
+// ============================================================================
+
+// eventStore 是一个固定容量的环形缓冲区，保存最近的事件用于回放。
+// 超过 TTL 的事件在回放时被跳过（惰性淘汰，无需后台 goroutine）。
+type eventStore struct {
+	mu       sync.RWMutex
+	buf      []Event // 环形缓冲
+	head     int     // 下一个写入位置
+	count    int     // 当前元素数（<= capacity）
+	capacity int
+	ttl      time.Duration
+}
+
+func newEventStore(capacity int, ttl time.Duration) *eventStore {
+	if capacity <= 0 {
+		capacity = 10000
+	}
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	return &eventStore{
+		buf:      make([]Event, capacity),
+		capacity: capacity,
+		ttl:      ttl,
+	}
+}
+
+// append 追加事件到环形缓冲。
+func (s *eventStore) append(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf[s.head] = event
+	s.head = (s.head + 1) % s.capacity
+	if s.count < s.capacity {
+		s.count++
+	}
+}
+
+// replay 返回匹配 traceID 且 Seq > sinceSeq 且未过期的事件。
+// traceID 为空时匹配所有事件。按 Seq 升序返回。
+func (s *eventStore) replay(traceID string, sinceSeq uint64) []Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cutoff := time.Now().Add(-s.ttl)
+	var result []Event
+
+	// 计算最旧元素的位置
+	start := 0
+	if s.count == s.capacity {
+		start = s.head // 满了，head 指向最旧
+	}
+
+	for i := 0; i < s.count; i++ {
+		idx := (start + i) % s.capacity
+		e := s.buf[idx]
+		if e.Seq <= sinceSeq {
+			continue
+		}
+		if e.Timestamp.Before(cutoff) {
+			continue
+		}
+		if traceID != "" && e.TraceID != traceID {
+			continue
+		}
+		result = append(result, e)
+	}
+	return result
+}
+
+// ============================================================================
 // MemoryEventBus — 内存实现
 // ============================================================================
 
@@ -177,6 +263,13 @@ type MemoryEventBusConfig struct {
 	SubscriptionBufferSize int
 	// MaxSubscriptions 最大订阅数量（防止泄漏，默认 1000）。
 	MaxSubscriptions int
+	// StoreCapacity EventStore 最大保留事件数（默认 10000）。
+	// 超出后最旧的事件被环形覆盖。设为 0 禁用 EventStore（不推荐，
+	// 会导致 SSE 断线重连后无法回放历史事件）。
+	StoreCapacity int
+	// StoreTTL EventStore 事件保留时长（默认 30 分钟）。
+	// 超过此时间的事件在回放时被跳过。
+	StoreTTL time.Duration
 }
 
 // DefaultMemoryEventBusConfig 返回默认配置。
@@ -184,6 +277,8 @@ func DefaultMemoryEventBusConfig() MemoryEventBusConfig {
 	return MemoryEventBusConfig{
 		SubscriptionBufferSize: 64,
 		MaxSubscriptions:       1000,
+		StoreCapacity:          10000,
+		StoreTTL:               30 * time.Minute,
 	}
 }
 
@@ -198,6 +293,10 @@ type MemoryEventBus struct {
 	nextID      uint64
 	closed      bool
 
+	// event store for replay（SSE 断线重连）
+	store *eventStore
+	seq   atomic.Uint64 // 全局事件序列号
+
 	// metrics（原子计数器，无需加锁）
 	eventsPublished atomic.Int64 // 成功投递的事件总数（每个订阅者一计）
 	eventsDropped   atomic.Int64 // 因 channel 满而丢弃的事件总数
@@ -211,17 +310,33 @@ func NewMemoryEventBus(config MemoryEventBusConfig, logger *zap.SugaredLogger) *
 	if config.MaxSubscriptions <= 0 {
 		config.MaxSubscriptions = DefaultMemoryEventBusConfig().MaxSubscriptions
 	}
-	return &MemoryEventBus{
+	if config.StoreTTL <= 0 {
+		config.StoreTTL = DefaultMemoryEventBusConfig().StoreTTL
+	}
+
+	bus := &MemoryEventBus{
 		config:      config,
 		logger:      logger,
 		subscribers: make(map[string]*Subscription),
 	}
+
+	if config.StoreCapacity > 0 {
+		bus.store = newEventStore(config.StoreCapacity, config.StoreTTL)
+	}
+
+	return bus
 }
 
 // Publish 发布事件到所有匹配的订阅者。
 func (b *MemoryEventBus) Publish(_ context.Context, event Event) {
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
+	}
+	event.Seq = b.seq.Add(1)
+
+	// 存入 EventStore 供后续回放
+	if b.store != nil {
+		b.store.append(event)
 	}
 
 	b.mu.RLock()
@@ -248,15 +363,28 @@ func (b *MemoryEventBus) Publish(_ context.Context, event Event) {
 
 // Subscribe 订阅指定 trace_id 的事件（空字符串 = 全部事件）。
 func (b *MemoryEventBus) Subscribe(traceID string) *Subscription {
-	return b.subscribe(traceID, "")
+	return b.subscribe(traceID, "", 0, false)
 }
 
 // SubscribeBot 订阅指定 Bot 的所有事件。
 func (b *MemoryEventBus) SubscribeBot(botID string) *Subscription {
-	return b.subscribe("", botID)
+	return b.subscribe("", botID, 0, false)
 }
 
-func (b *MemoryEventBus) subscribe(traceID, botID string) *Subscription {
+// SubscribeWithReplay 订阅事件流，并先回放 sinceSeq 之后的历史事件。
+// 用于 SSE 断线重连场景。
+func (b *MemoryEventBus) SubscribeWithReplay(traceID string, sinceSeq uint64) *Subscription {
+	return b.subscribe(traceID, "", sinceSeq, true)
+}
+
+// LatestSeq 返回当前最新的 Seq 序列号。
+func (b *MemoryEventBus) LatestSeq() uint64 {
+	return b.seq.Load()
+}
+
+// subscribe 内部创建订阅。replay=true 时先回放历史事件到订阅 channel。
+// 关键：回放在写锁保护下执行，确保回放与实时推送之间无间隙、无重复。
+func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, replay bool) *Subscription {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -292,19 +420,45 @@ func (b *MemoryEventBus) subscribe(traceID, botID string) *Subscription {
 	b.nextID++
 	id := fmt.Sprintf("sub-%d", b.nextID)
 
+	// 回放场景使用更大的 buffer 以容纳历史事件
+	bufSize := b.config.SubscriptionBufferSize
+	if replay && b.store != nil {
+		bufSize = min(b.config.StoreCapacity, 4096)
+	}
+
 	sub := &Subscription{
 		ID:      id,
 		TraceID: traceID,
 		BotID:   botID,
-		ch:      make(chan Event, b.config.SubscriptionBufferSize),
+		ch:      make(chan Event, bufSize),
 	}
 
 	b.subscribers[id] = sub
+
+	// 在写锁下回放历史事件——保证与后续实时事件无间隙、无重复
+	if replay && b.store != nil {
+		events := b.store.replay(traceID, sinceSeq)
+		replayed := 0
+		for _, e := range events {
+			// botID 过滤（store 只按 traceID 过滤）
+			if botID != "" && e.BotID != botID {
+				continue
+			}
+			sub.send(e)
+			replayed++
+		}
+		b.logger.Debugw("eventbus: replayed events to new subscription",
+			"sub_id", id,
+			"trace_id", traceID,
+			"since_seq", sinceSeq,
+			"replayed", replayed)
+	}
 
 	b.logger.Debugw("eventbus: new subscription",
 		"sub_id", id,
 		"trace_id", traceID,
 		"bot_id", botID,
+		"replay", replay,
 		"active_subs", len(b.subscribers))
 
 	return sub

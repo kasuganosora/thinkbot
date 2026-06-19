@@ -378,3 +378,272 @@ func TestFormatSubID(t *testing.T) {
 		}
 	}
 }
+
+// ============================================================================
+// EventStore / 回放测试
+// ============================================================================
+
+func TestEventStore_AppendAndReplay(t *testing.T) {
+	s := newEventStore(100, 5*time.Minute)
+
+	// 写入 5 个事件
+	for i := 0; i < 5; i++ {
+		s.append(Event{
+			Type:      EventStageEnter,
+			TraceID:   "trace-1",
+			Timestamp: time.Now(),
+			Seq:       uint64(i + 1),
+		})
+	}
+
+	// 回放全部 (sinceSeq=0)
+	events := s.replay("trace-1", 0)
+	if len(events) != 5 {
+		t.Fatalf("expected 5 replayed events, got %d", len(events))
+	}
+	for i, e := range events {
+		if e.Seq != uint64(i+1) {
+			t.Errorf("event[%d] Seq=%d, want %d", i, e.Seq, i+1)
+		}
+	}
+}
+
+func TestEventStore_ReplaySinceSeq(t *testing.T) {
+	s := newEventStore(100, 5*time.Minute)
+
+	for i := 0; i < 10; i++ {
+		s.append(Event{
+			TraceID:   "trace-1",
+			Timestamp: time.Now(),
+			Seq:       uint64(i + 1),
+		})
+	}
+
+	// sinceSeq=5 → 只回放 Seq>5 的事件
+	events := s.replay("trace-1", 5)
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events (Seq 6-10), got %d", len(events))
+	}
+	if events[0].Seq != 6 || events[4].Seq != 10 {
+		t.Errorf("expected Seq 6-10, got %d-%d", events[0].Seq, events[4].Seq)
+	}
+}
+
+func TestEventStore_RingBuffer(t *testing.T) {
+	s := newEventStore(3, 5*time.Minute) // 只保留 3 个
+
+	for i := 0; i < 10; i++ {
+		s.append(Event{
+			TraceID:   "trace-1",
+			Timestamp: time.Now(),
+			Seq:       uint64(i + 1),
+		})
+	}
+
+	// 只应保留最后 3 个事件 (Seq 8, 9, 10)
+	events := s.replay("trace-1", 0)
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events (ring buffer), got %d", len(events))
+	}
+	if events[0].Seq != 8 || events[2].Seq != 10 {
+		t.Errorf("expected Seq 8-10, got %d-%d", events[0].Seq, events[2].Seq)
+	}
+}
+
+func TestEventStore_TTLExpiry(t *testing.T) {
+	s := newEventStore(100, 50*time.Millisecond)
+
+	// 写入旧事件
+	s.append(Event{
+		TraceID:   "trace-1",
+		Timestamp: time.Now(),
+		Seq:       1,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 写入新事件
+	s.append(Event{
+		TraceID:   "trace-1",
+		Timestamp: time.Now(),
+		Seq:       2,
+	})
+
+	events := s.replay("trace-1", 0)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event (TTL expired), got %d", len(events))
+	}
+	if events[0].Seq != 2 {
+		t.Errorf("expected Seq=2, got %d", events[0].Seq)
+	}
+}
+
+func TestMemoryEventBus_SubscribeWithReplay(t *testing.T) {
+	bus := NewMemoryEventBus(DefaultMemoryEventBusConfig(), testLogger())
+	defer bus.Close()
+
+	// 先发布 5 个事件（此时还没有订阅者）
+	for i := 0; i < 5; i++ {
+		bus.Publish(context.Background(), Event{
+			Type:    EventStageEnter,
+			TraceID: "trace-1",
+			Stage:   fmt.Sprintf("stage-%d", i),
+		})
+	}
+
+	// 用 SubscribeWithReplay 订阅，回放全部
+	sub := bus.SubscribeWithReplay("trace-1", 0)
+	defer bus.Unsubscribe(sub)
+
+	// 应该收到 5 个回放事件
+	for i := 0; i < 5; i++ {
+		select {
+		case event := <-sub.C():
+			if event.Stage != fmt.Sprintf("stage-%d", i) {
+				t.Errorf("event[%d] stage=%s, want stage-%d", i, event.Stage, i)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("timeout waiting for replayed event %d", i)
+		}
+	}
+}
+
+func TestMemoryEventBus_ReplayThenLive(t *testing.T) {
+	bus := NewMemoryEventBus(DefaultMemoryEventBusConfig(), testLogger())
+	defer bus.Close()
+
+	// 发布历史事件
+	bus.Publish(context.Background(), Event{
+		Type:    EventWorkflowSubmitted,
+		TraceID: "wf-1",
+	})
+
+	// 用 replay 订阅
+	sub := bus.SubscribeWithReplay("wf-1", 0)
+	defer bus.Unsubscribe(sub)
+
+	// 读取回放事件
+	select {
+	case event := <-sub.C():
+		if event.Type != EventWorkflowSubmitted {
+			t.Errorf("expected workflow.submitted, got %s", event.Type)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for replayed event")
+	}
+
+	// 发布新事件——应该实时收到
+	bus.Publish(context.Background(), Event{
+		Type:    EventWorkflowAnalyzed,
+		TraceID: "wf-1",
+	})
+
+	select {
+	case event := <-sub.C():
+		if event.Type != EventWorkflowAnalyzed {
+			t.Errorf("expected workflow.analyzed, got %s", event.Type)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timeout waiting for live event")
+	}
+}
+
+func TestMemoryEventBus_ReplaySinceSeq(t *testing.T) {
+	bus := NewMemoryEventBus(DefaultMemoryEventBusConfig(), testLogger())
+	defer bus.Close()
+
+	// 发布 3 个事件
+	bus.Publish(context.Background(), Event{Type: EventStageEnter, TraceID: "t1"})
+	bus.Publish(context.Background(), Event{Type: EventStageExit, TraceID: "t1"})
+	lastSeq := bus.LatestSeq() // = 2
+
+	bus.Publish(context.Background(), Event{Type: EventLLMStart, TraceID: "t1"})
+	bus.Publish(context.Background(), Event{Type: EventLLMDone, TraceID: "t1"})
+
+	// 只回放 Seq > lastSeq 的事件
+	sub := bus.SubscribeWithReplay("t1", lastSeq)
+	defer bus.Unsubscribe(sub)
+
+	count := 0
+	for {
+		select {
+		case event := <-sub.C():
+			count++
+			if event.Seq <= lastSeq {
+				t.Errorf("received event with Seq=%d, should be > %d", event.Seq, lastSeq)
+			}
+		case <-time.After(100 * time.Millisecond):
+			goto done
+		}
+	}
+done:
+	if count != 2 {
+		t.Errorf("expected 2 replayed events, got %d", count)
+	}
+}
+
+func TestMemoryEventBus_ReplayNoGapNoDup(t *testing.T) {
+	// 验证回放和实时之间无间隙、无重复
+	cfg := DefaultMemoryEventBusConfig()
+	cfg.SubscriptionBufferSize = 256
+	bus := NewMemoryEventBus(cfg, testLogger())
+	defer bus.Close()
+
+	// 发布一些历史事件
+	for i := 0; i < 10; i++ {
+		bus.Publish(context.Background(), Event{
+			Type:    EventLLMTextDelta,
+			TraceID: "trace-x",
+			Data:    map[string]any{"i": i},
+		})
+	}
+
+	// 并发：一边用 replay 订阅，一边继续发布
+	sub := bus.SubscribeWithReplay("trace-x", 0)
+	defer bus.Unsubscribe(sub)
+
+	// 继续发布新事件
+	for i := 10; i < 20; i++ {
+		bus.Publish(context.Background(), Event{
+			Type:    EventLLMTextDelta,
+			TraceID: "trace-x",
+			Data:    map[string]any{"i": i},
+		})
+	}
+
+	// 收集所有事件，检查 Seq 无重复、连续
+	seen := make(map[uint64]bool)
+	maxSeq := uint64(0)
+	minSeq := uint64(0)
+	for {
+		select {
+		case event, ok := <-sub.C():
+			if !ok {
+				goto check
+			}
+			if seen[event.Seq] {
+				t.Errorf("duplicate Seq=%d", event.Seq)
+			}
+			seen[event.Seq] = true
+			if minSeq == 0 || event.Seq < minSeq {
+				minSeq = event.Seq
+			}
+			if event.Seq > maxSeq {
+				maxSeq = event.Seq
+			}
+		case <-time.After(200 * time.Millisecond):
+			goto check
+		}
+	}
+check:
+	// 应该收到全部 20 个事件，Seq 从 1 到 20
+	if len(seen) != 20 {
+		t.Errorf("expected 20 unique events, got %d", len(seen))
+	}
+	if minSeq != 1 {
+		t.Errorf("expected min Seq=1, got %d", minSeq)
+	}
+	if maxSeq != 20 {
+		t.Errorf("expected max Seq=20, got %d", maxSeq)
+	}
+}

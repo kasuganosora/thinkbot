@@ -171,15 +171,42 @@ wfMgr, saMgr := workflow.Setup(workflow.WireConfig{
 ### Web SSE 订阅示例
 
 ```go
-// SSE Handler
-sub := bus.Subscribe(workflowID)
+// SSE Handler — 支持断线重连
+// 前端在 Last-Event-ID 中携带上次收到的 Seq，首次连接传 0
+sinceSeq := parseLastEventID(r) // 从请求头解析，默认 0
+sub := bus.SubscribeWithReplay(workflowID, sinceSeq)
 defer bus.Unsubscribe(sub)
 for event := range sub.C() {
+    // event.Seq 为全局单调递增序列号
     // event.Type = "workflow.node.completed"
     // event.Data["node_id"] = "n1"
-    // 序列化为 SSE 推送给前端
-    writeSSE(event)
+    // 将 Seq 作为 SSE id 字段发送，前端用于下次重连
+    writeSSE(event.Seq, event)
 }
 ```
 
-前端收到事件后，可以实时更新 DAG 图中各节点的状态颜色和进度条。
+### 断线重连机制
+
+用户关闭页面再打开时，之前的 SSE 连接已断开，期间的实时事件会丢失。
+EventBus 内置了 **EventStore（环形缓冲 + TTL）** 解决此问题：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `StoreCapacity` | 10000 | 环形缓冲最大事件数，超出后最旧事件被覆盖 |
+| `StoreTTL` | 30 min | 超过此时间的事件在回放时被跳过 |
+
+**工作流程**：
+1. 每次 `Publish` 时，事件自动写入 EventStore 并分配 `Seq` 序列号
+2. 前端建立/重连 SSE 时，携带 `Last-Event-ID`（即上次收到的 `Seq`）
+3. 后端调用 `SubscribeWithReplay(traceID, sinceSeq)`：
+   - 先回放 `Seq > sinceSeq` 的历史事件（写锁保护，与实时推送无间隙、无重复）
+   - 再转入实时事件推送
+4. 事件 JSON 中包含 `seq` 字段，前端保存最新 `seq` 用于下次重连
+
+```go
+// 在 SSE handler 中使用
+sub := bus.SubscribeWithReplay(workflowID, lastSeq)
+// sub.C() 先输出历史事件，再输出实时事件，全程无间隙
+```
+
+> `StoreCapacity` 设为 0 可禁用 EventStore（回退为纯 fire-and-forget 模式）。
