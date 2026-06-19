@@ -63,16 +63,17 @@ func (m *BotManager) Register(bot *Bot) error {
 // 如果 ID 不存在，返回 false。
 func (m *BotManager) Unregister(id string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	bot, exists := m.bots[id]
 	if !exists {
+		m.mu.Unlock()
 		return false
 	}
+	delete(m.bots, id)
+	m.mu.Unlock()
 
+	// 在锁外执行 Stop/Close，避免阻塞其他 Manager 操作
 	bot.Stop()
 	bot.Close()
-	delete(m.bots, id)
 	m.logger.Infow("bot unregistered", "bot_id", id)
 
 	return true

@@ -6,9 +6,12 @@
 //   - 接口面向扩展：当前为内存实现，未来可替换为持久化后端（SQLite/Redis/向量DB）
 //   - 可观测性内建：所有操作支持 tracing + metrics
 //   - Scope 分层隔离：记忆按 channel/bot/user/global 分桶，互不干扰
+//   - Think 标签过滤：写入前自动移除 LLM 深度思考标签，节省存储空间和 token
 //
 // 与 agent 模块的集成点：
 //   - MemoryStage（Pipeline Stage）：在消息处理前检索上下文，处理后写入新记忆
+//   - MemoryWriteStage：写入前自动调用 StripThinking 清理 <think> 标签
+//   - ThinkFilterStore：Store 装饰器，可包装任意 Store 实现自动过滤
 //   - NoteHandler 产出的 Note → 可选自动转存为 Memory Entry
 //   - ContextBuilder 将记忆格式化为 LLM 可消费的 context 文本
 //   - EventBus 旁路发射 memory.* 事件（检索命中、写入、淘汰等）
