@@ -277,6 +277,79 @@ func (b *Builder) GetLogLevel() string {
 	return b.store.GetString(KeyLogLevel, "info")
 }
 
+// --- Workflow 配置 ---
+
+// WorkflowConfig 描述工作流引擎的全部可调参数。
+// 未配置的字段自动使用 DefaultWorkflowConfig() 的值。
+type WorkflowConfig struct {
+	// MaxParallel 同一工作流中最大并行执行的节点数。
+	MaxParallel int `json:"maxParallel"`
+
+	// MaxRetries 单个节点执行出错时的最大重试次数。
+	MaxRetries int `json:"maxRetries"`
+
+	// MaxIterations Review 不通过时的最大迭代轮数。
+	MaxIterations int `json:"maxIterations"`
+
+	// RetryInitialMS 重试指数退避的初始等待毫秒。
+	RetryInitialMS int `json:"retryInitialMs"`
+
+	// RetryMaxMS 重试指数退避的最大等待毫秒。
+	RetryMaxMS int `json:"retryMaxMs"`
+
+	// ScheduleIntervalMS 调度器主循环轮询间隔毫秒。
+	ScheduleIntervalMS int `json:"scheduleIntervalMs"`
+
+	// AnalyzerTemperature 需求分析器 LLM 温度。
+	AnalyzerTemperature float64 `json:"analyzerTemperature"`
+
+	// AnalyzerMaxTokens 需求分析器 LLM 最大 token 数。
+	AnalyzerMaxTokens int `json:"analyzerMaxTokens"`
+}
+
+// DefaultWorkflowConfig 返回引擎默认配置值。
+func DefaultWorkflowConfig() WorkflowConfig {
+	return WorkflowConfig{
+		MaxParallel:        3,
+		MaxRetries:         2,
+		MaxIterations:      3,
+		RetryInitialMS:     500,
+		RetryMaxMS:         10000,
+		ScheduleIntervalMS: 200,
+		AnalyzerTemperature: 0.3,
+		AnalyzerMaxTokens:   4096,
+	}
+}
+
+// GetWorkflowConfig 从 Store 读取工作流配置，未设置的字段自动填充默认值。
+func (b *Builder) GetWorkflowConfig() WorkflowConfig {
+	d := DefaultWorkflowConfig()
+	return WorkflowConfig{
+		MaxParallel:        b.store.GetInt(KeyWorkflowMaxParallel, d.MaxParallel),
+		MaxRetries:         b.store.GetInt(KeyWorkflowMaxRetries, d.MaxRetries),
+		MaxIterations:      b.store.GetInt(KeyWorkflowMaxIterations, d.MaxIterations),
+		RetryInitialMS:     b.store.GetInt(KeyWorkflowRetryInitialMS, d.RetryInitialMS),
+		RetryMaxMS:         b.store.GetInt(KeyWorkflowRetryMaxMS, d.RetryMaxMS),
+		ScheduleIntervalMS: b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
+		AnalyzerTemperature: b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
+		AnalyzerMaxTokens:   b.store.GetInt(KeyWorkflowAnalyzerMaxTokens, d.AnalyzerMaxTokens),
+	}
+}
+
+// WorkflowMetaSpecs 返回工作流配置项的元数据，用于 RegisterMany 注册到前端设置界面。
+func WorkflowMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyWorkflowMaxParallel, Category: "Workflow", Description: "同一工作流中最大并行执行的子任务数（默认 3）"},
+		{Key: KeyWorkflowMaxRetries, Category: "Workflow", Description: "子任务执行出错时的最大重试次数（默认 2）"},
+		{Key: KeyWorkflowMaxIterations, Category: "Workflow", Description: "审查不通过时的最大迭代轮数（默认 3）"},
+		{Key: KeyWorkflowRetryInitialMS, Category: "Workflow", Description: "重试指数退避的初始等待毫秒（默认 500）"},
+		{Key: KeyWorkflowRetryMaxMS, Category: "Workflow", Description: "重试指数退避的最大等待毫秒（默认 10000）"},
+		{Key: KeyWorkflowScheduleInterval, Category: "Workflow", Description: "调度器主循环轮询间隔毫秒（默认 200）"},
+		{Key: KeyWorkflowAnalyzerTemp, Category: "Workflow", Description: "需求分析器 LLM 温度（默认 0.3）"},
+		{Key: KeyWorkflowAnalyzerMaxTokens, Category: "Workflow", Description: "需求分析器 LLM 最大 token 数（默认 4096）"},
+	}
+}
+
 // splitFirst 以 sep 分割，仅在第一个 sep 处分割。
 func splitFirst(s, sep string) []string {
 	before, after, found := strings.Cut(s, sep)

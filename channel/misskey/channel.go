@@ -9,13 +9,13 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -577,13 +577,9 @@ func noteContext(note Note, text string, skipRenote bool) string {
 	return text
 }
 
-// truncateRunes 将字符串截断到 maxRunes 个 rune，超长时追加 suffix。
+// truncateRunes 委托给 strutil.Truncate，保持包内调用简洁。
 func truncateRunes(s string, maxRunes int) string {
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
-	}
-	runes := []rune(s)
-	return string(runes[:maxRunes]) + "..."
+	return strutil.Truncate(s, maxRunes)
 }
 
 // Stop 优雅停止 streaming。

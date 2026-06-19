@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/util/strutil"
+
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
@@ -619,13 +621,9 @@ func basicAuth(username, password string) string {
 	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }
 
-// truncate 截断字符串到 maxLen 个 rune（避免截断多字节 UTF-8 字符中间）。
+// truncate 委托给 strutil.Truncate，保持包内调用简洁。
 func truncate(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen]) + "..."
+	return strutil.Truncate(s, maxLen)
 }
 
 // ============================================================================

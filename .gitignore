@@ -32,6 +32,8 @@ agent/bot/functioncall_integration_test.go
 agent/bot/subagent_integration_test.go
 agent/memory/integration_test.go
 agent/stages/functioncall_integration_test.go
+workflow/integration_test.go
 
 # CodeBuddy
 .codebuddy/
+.skills/
