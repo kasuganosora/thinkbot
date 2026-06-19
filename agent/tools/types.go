@@ -142,6 +142,22 @@ type ToolPromptSection struct {
 	Enabled bool
 }
 
+// ============================================================================
+// ToolInfo — 工具详情快照（只读）
+// ============================================================================
+
+// ToolInfo 是某个已注册工具的只读详情快照，
+// 供调试、列表展示、自省（introspection）等场景使用。
+type ToolInfo struct {
+	Name            string         `json:"name"`
+	Description     string         `json:"description"`
+	Category        string         `json:"category"`
+	Scopes          []string       `json:"scopes,omitempty"`
+	RequireApproval bool           `json:"requireApproval"`
+	HasPromptSection bool          `json:"hasPromptSection"`
+	Parameters      any            `json:"parameters,omitempty"`
+}
+
 // appliesTo 检查工具是否适用于给定场景。
 func (d *ToolDef) appliesTo(sctx *ToolSessionContext) bool {
 	if len(d.Scopes) == 0 {
