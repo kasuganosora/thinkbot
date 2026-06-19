@@ -421,7 +421,7 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 
 func newTestToolManager(t *testing.T) *tools.ToolManager {
 	t.Helper()
-	return tools.NewToolManager(prompt.NewRegistry(), nil)
+	return tools.NewToolManager(prompt.NewRegistry(), nil, nil)
 }
 
 // ============================================================================
