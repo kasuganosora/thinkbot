@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 // ============================================================================
@@ -173,9 +175,9 @@ func TestBuildTriggerPrompt(t *testing.T) {
 	if contains(prompt, "disabled-skill") {
 		t.Error("trigger prompt should not contain disabled skill")
 	}
-	// 应该包含触发指令
-	if !contains(prompt, "<use_skill:") {
-		t.Error("trigger prompt should contain '<use_skill:' instruction")
+	// 应该包含触发指令（use_skill 工具调用方式）
+	if !contains(prompt, "use_skill") {
+		t.Error("trigger prompt should contain 'use_skill' instruction")
 	}
 }
 
@@ -206,6 +208,143 @@ func TestTriggerIfNeeded(t *testing.T) {
 	if name3 != "xlsx" {
 		t.Errorf("expected 'xlsx', got %q", name3)
 	}
+}
+
+// ============================================================================
+// UseSkill / BuildUseSkillTool 测试（对齐 CodeBuddy use_skill 工具）
+// ============================================================================
+
+func TestUseSkill(t *testing.T) {
+	mgr := NewSkillManager(nil, nil, nil)
+	mgr.Register(&Skill{
+		Name:        "pdf",
+		Description: "PDF processing",
+		Content:     "# PDF Skill\nProcess PDF files.",
+		Enabled:     true,
+	})
+	mgr.Register(&Skill{
+		Name:        "disabled-one",
+		Description: "Disabled skill",
+		Content:     "should not be accessible",
+		Enabled:     false,
+	})
+
+	// 正常调用
+	s, err := mgr.UseSkill("pdf")
+	if err != nil {
+		t.Fatalf("UseSkill('pdf'): %v", err)
+	}
+	if s.Name != "pdf" {
+		t.Errorf("expected skill name 'pdf', got %q", s.Name)
+	}
+	if s.Content == "" {
+		t.Error("returned skill should have content")
+	}
+
+	// 不存在的技能
+	_, err = mgr.UseSkill("nonexistent")
+	if err == nil {
+		t.Error("UseSkill('nonexistent') should return error")
+	}
+
+	// 禁用的技能
+	_, err = mgr.UseSkill("disabled-one")
+	if err == nil {
+		t.Error("UseSkill('disabled-one') should return error")
+	}
+}
+
+func TestBuildUseSkillTool(t *testing.T) {
+	mgr := NewSkillManager(nil, nil, nil)
+	mgr.Register(&Skill{
+		Name:        "pdf",
+		Description: "PDF processing",
+		Content:     "# PDF Skill\nProcess PDF files.",
+		Enabled:     true,
+	})
+
+	tool := mgr.BuildUseSkillTool()
+	if tool.Name != "use_skill" {
+		t.Errorf("expected tool name 'use_skill', got %q", tool.Name)
+	}
+	if tool.Description == "" {
+		t.Error("tool should have description")
+	}
+	if tool.Execute == nil {
+		t.Error("tool should have Execute function")
+	}
+	if tool.Parameters == nil {
+		t.Error("tool should have Parameters schema")
+	}
+}
+
+func TestUseSkillTool_Execute(t *testing.T) {
+	mgr := NewSkillRegistryForTest(t) // helper
+	tool := mgr.BuildUseSkillTool()
+
+	// 模拟 LLM 调用 use_skill
+	result, err := tool.Execute(
+		&llm.ToolExecContext{},
+		UseSkillInput{Command: "pdf"},
+	)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("result should be map[string]any, got %T", result)
+	}
+	if m["status"] != "loaded" {
+		t.Errorf("expected status 'loaded', got %v", m["status"])
+	}
+	if m["skill"] != "pdf" {
+		t.Errorf("expected skill 'pdf', got %v", m["skill"])
+	}
+	content, _ := m["content"].(string)
+	if content == "" {
+		t.Error("result should contain skill content")
+	}
+}
+
+func TestHasEnabledSkills(t *testing.T) {
+	mgr := NewSkillManager(nil, nil, nil)
+	if mgr.HasEnabledSkills() {
+		t.Error("empty manager should not have enabled skills")
+	}
+
+	mgr.Register(&Skill{
+		Name:    "pdf",
+		Content: "test",
+		Enabled: true,
+	})
+	if !mgr.HasEnabledSkills() {
+		t.Error("should have enabled skills after registration")
+	}
+
+	mgr.Disable("pdf")
+	if mgr.HasEnabledSkills() {
+		t.Error("should not have enabled skills after disable")
+	}
+}
+
+// NewSkillRegistryForTest creates a SkillManager with test data.
+func NewSkillRegistryForTest(t *testing.T) *SkillManager {
+	t.Helper()
+	mgr := NewSkillManager(nil, nil, nil)
+	mgr.Register(&Skill{
+		Name:        "pdf",
+		Description: "PDF processing skill",
+		Content:     "# PDF Skill\n\nProcess PDF files.",
+		Enabled:     true,
+	})
+	mgr.Register(&Skill{
+		Name:        "xlsx",
+		Description: "Excel processing skill",
+		Content:     "# XLSX Skill\n\nProcess Excel files.",
+		Enabled:     true,
+	})
+	return mgr
 }
 
 // ============================================================================

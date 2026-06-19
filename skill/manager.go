@@ -316,24 +316,26 @@ func (m *SkillManager) skillSectionName(name string) string {
 	return "skill_" + name
 }
 
-// BuildTriggerPrompt 构建触发判断段落（包含所有已启用 Skill 的 name + description）。
-// 返回的字符串应作为 system prompt 的一个固定 Section（Order 建议在 150 左右），
-// 让 LLM 根据用户输入自行判断是否需要加载某个 Skill 的完整指令。
+// BuildTriggerPrompt 构建可用技能列表段落（包含所有已启用 Skill 的 name + description）。
+// 返回的字符串应作为 system prompt 的一个固定 Section（Order 建议在 150 左右）。
+//
+// LLM 通过调用 use_skill 工具（function calling）来加载技能指令，
+// 而非通过文本标签。这与 CodeBuddy 的 use_skill 设计对齐。
 //
 // 格式：
 //
 //	## 可用技能
-//	当你判断用户请求需要特定技能时，在回复前输出 `<use_skill: skill_name>`。
-//	- pdf：处理 PDF 文件（提取文本、合并、拆分等）。当用户提到 PDF、需要提取 PDF 内容时使用。
-//	- xlsx：处理 Excel 表格。当用户提到表格、xlsx、数据处理时使用。
+//	当用户请求需要特定技能时，调用 use_skill 工具加载技能指令。
+//	- pdf：处理 PDF 文件（提取文本、合并、拆分等）。
+//	- xlsx：处理 Excel 表格。
 func (m *SkillManager) BuildTriggerPrompt() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var buf strings.Builder
 	buf.WriteString("## 可用技能\n\n")
-	buf.WriteString("当你判断用户请求需要特定技能时，在回复前输出 `<use_skill: skill_name>`。\n")
-	buf.WriteString("我会加载该技能的完整指令到上下文中。\n\n")
+	buf.WriteString("当用户请求涉及以下技能领域时，调用 `use_skill` 工具（传入技能名称）加载完整指令。\n")
+	buf.WriteString("加载后必须严格遵循技能指令。如果用户请求涉及某个技能领域，应立即调用，不要先尝试其他方式。\n\n")
 
 	enabled := make([]*Skill, 0, len(m.skills))
 	for _, s := range m.skills {
@@ -376,6 +378,9 @@ type PromptSection struct {
 // TriggerIfNeeded 解析 LLM 输出，判断是否请求了某个 Skill。
 // 匹配格式：<use_skill: skill_name>
 // 返回请求的 Skill 名称，若无匹配返回空字符串。
+//
+// Deprecated: 使用 use_skill 工具（function calling）替代。
+// 保留是为了向后兼容旧的文本标签协议。
 func (m *SkillManager) TriggerIfNeeded(llmOutput string) string {
 	idx := strings.Index(llmOutput, "<use_skill:")
 	if idx < 0 {
@@ -391,7 +396,8 @@ func (m *SkillManager) TriggerIfNeeded(llmOutput string) string {
 }
 
 // InjectSkillContent 手动触发将指定 Skill 的 Content 注入 prompt Registry。
-// 由 Pipeline Stage 在解析到 <use_skill: xxx> 标签后调用。
+//
+// Deprecated: 使用 UseSkill 方法替代，它会同时返回 Content 并注入 Registry。
 func (m *SkillManager) InjectSkillContent(name string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
