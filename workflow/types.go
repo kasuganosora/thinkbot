@@ -32,11 +32,12 @@ const (
 type WorkflowStatus string
 
 const (
-	WorkflowAnalyzing  WorkflowStatus = "analyzing"  // 正在分析需求、构建 DAG
-	WorkflowRunning    WorkflowStatus = "running"    // DAG 正在执行
-	WorkflowCompleted  WorkflowStatus = "completed"  // 全部节点成功
-	WorkflowFailed     WorkflowStatus = "failed"     // 存在失败节点
-	WorkflowTerminated WorkflowStatus = "terminated" // 被手动终止
+	WorkflowAnalyzing   WorkflowStatus = "analyzing"   // 正在分析需求、构建 DAG
+	WorkflowRunning     WorkflowStatus = "running"     // DAG 正在执行
+	WorkflowInterrupted WorkflowStatus = "interrupted" // 进程崩溃中断（等待恢复）
+	WorkflowCompleted   WorkflowStatus = "completed"   // 全部节点成功
+	WorkflowFailed      WorkflowStatus = "failed"      // 存在失败节点
+	WorkflowTerminated  WorkflowStatus = "terminated"  // 被手动终止
 )
 
 // ============================================================================
@@ -145,6 +146,11 @@ func (s NodeStatus) IsTerminal() bool {
 // IsTerminal 判断工作流状态是否为终态。
 func (s WorkflowStatus) IsTerminal() bool {
 	return s == WorkflowCompleted || s == WorkflowFailed || s == WorkflowTerminated
+}
+
+// IsRecoverable 判断工作流状态是否可恢复（非终态）。
+func (s WorkflowStatus) IsRecoverable() bool {
+	return s == WorkflowAnalyzing || s == WorkflowRunning || s == WorkflowInterrupted
 }
 
 // ============================================================================
