@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -50,7 +51,7 @@ func (a *apiClient) getMe(ctx context.Context) (*User, error) {
 	var resp apiResponse[User]
 	err := a.client.GetJSON(ctx, "getMe", &resp)
 	if err != nil {
-		return nil, fmt.Errorf("telegram getMe: %w", err)
+		return nil, errs.Wrap(err, "telegram getMe")
 	}
 	if !resp.OK {
 		return nil, fmt.Errorf("telegram getMe failed: [%d] %s", resp.ErrorCode, resp.Description)
@@ -74,12 +75,12 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 
 	resp, err := req.Do()
 	if err != nil {
-		return nil, fmt.Errorf("telegram getUpdates: %w", err)
+		return nil, errs.Wrap(err, "telegram getUpdates")
 	}
 
 	var apiResp apiResponse[[]Update]
 	if err := resp.JSON(&apiResp); err != nil {
-		return nil, fmt.Errorf("telegram getUpdates parse: %w", err)
+		return nil, errs.Wrap(err, "telegram getUpdates parse")
 	}
 	if !apiResp.OK {
 		return nil, fmt.Errorf("telegram getUpdates failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -105,12 +106,12 @@ func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, par
 
 	resp, err := req.Do()
 	if err != nil {
-		return 0, fmt.Errorf("telegram sendMessage: %w", err)
+		return 0, errs.Wrap(err, "telegram sendMessage")
 	}
 
 	var apiResp apiResponse[sendMessageResult]
 	if err := resp.JSON(&apiResp); err != nil {
-		return 0, fmt.Errorf("telegram sendMessage parse: %w", err)
+		return 0, errs.Wrap(err, "telegram sendMessage parse")
 	}
 	if !apiResp.OK {
 		return 0, fmt.Errorf("telegram sendMessage failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -129,12 +130,12 @@ func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action str
 
 	resp, err := req.Do()
 	if err != nil {
-		return fmt.Errorf("telegram sendChatAction: %w", err)
+		return errs.Wrap(err, "telegram sendChatAction")
 	}
 
 	var apiResp apiResponse[any]
 	if err := resp.JSON(&apiResp); err != nil {
-		return fmt.Errorf("telegram sendChatAction parse: %w", err)
+		return errs.Wrap(err, "telegram sendChatAction parse")
 	}
 	if !apiResp.OK {
 		return fmt.Errorf("telegram sendChatAction failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -155,12 +156,12 @@ func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64
 
 	resp, err := req.Do()
 	if err != nil {
-		return fmt.Errorf("telegram editMessageText: %w", err)
+		return errs.Wrap(err, "telegram editMessageText")
 	}
 
 	var apiResp apiResponse[any]
 	if err := resp.JSON(&apiResp); err != nil {
-		return fmt.Errorf("telegram editMessageText parse: %w", err)
+		return errs.Wrap(err, "telegram editMessageText parse")
 	}
 	if !apiResp.OK {
 		return fmt.Errorf("telegram editMessageText failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)

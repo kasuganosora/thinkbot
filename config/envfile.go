@@ -2,9 +2,9 @@ package config
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"strings"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ParseEnvFile 解析 .env 文件内容，返回 key→value 映射。
@@ -110,7 +110,7 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("config: read .env file %q: %w", path, err)
+		return nil, errs.Wrapf(err, "config: read .env file %q", path)
 	}
 	return ParseEnvFile(string(data)), nil
 }

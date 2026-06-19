@@ -9,6 +9,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -95,8 +96,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		trace.WithAttributes(
 			attribute.String("llm.provider", s.provider.Name()),
 			attribute.String("message.id", env.Message.ID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 		))
 	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
 	// 构建消息
 	var messages []llm.Message
@@ -133,7 +137,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		MaxSteps: s.config.MaxSteps,
 	}
 
-	s.logger.Debugw("llm stage: starting orchestrate",
+	logger.Debugw("llm stage: starting orchestrate",
 		"message_id", env.Message.ID,
 		"provider", s.provider.Name(),
 		"max_steps", s.config.MaxSteps)
@@ -141,7 +145,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	result, err := llm.OrchestrateGenerate(ctx, s.provider, cfg)
 	if err != nil {
 		span.RecordError(err)
-		s.logger.Errorw("llm stage: orchestrate failed",
+		logger.Errorw("llm stage: orchestrate failed",
 			"message_id", env.Message.ID,
 			"err", err)
 		return env, &core.PipelineError{
@@ -160,7 +164,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		attribute.String("llm.finish_reason", string(result.FinishReason)),
 	)
 
-	s.logger.Infow("llm stage: generation complete",
+	logger.Infow("llm stage: generation complete",
 		"message_id", env.Message.ID,
 		"steps", len(result.Steps),
 		"tokens", result.Usage.TotalTokens,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -528,7 +529,7 @@ func RunToolLoop(
 		req.Messages = messages
 		resp, err := client.CreateMessage(ctx, req)
 		if err != nil {
-			return nil, fmt.Errorf("round %d: %w", round+1, err)
+			return nil, errs.Wrapf(err, "round %d", round+1)
 		}
 		lastResp = resp
 
@@ -543,7 +544,7 @@ func RunToolLoop(
 			entry := entries[i]
 			if opts != nil && opts.OnToolUse != nil {
 				if err := opts.OnToolUse(&entry); err != nil {
-					return resp, fmt.Errorf("on_tool_use %s: %w", entry.Name, err)
+					return resp, errs.Wrapf(err, "on_tool_use %s", entry.Name)
 				}
 			}
 		}

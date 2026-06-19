@@ -13,6 +13,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -116,7 +117,7 @@ func (c *TelegramChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 	// 验证 Token
 	me, err := c.api.getMe(ctx)
 	if err != nil {
-		return fmt.Errorf("telegram channel: token validation failed: %w", err)
+		return errs.Wrap(err, "telegram channel: token validation failed")
 	}
 	log.Logger.Infow("telegram channel started",
 		"channel", c.name, "bot_username", me.Username, "bot_id", me.ID)
@@ -448,7 +449,7 @@ func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
 	// 解析 chatID
 	chatID, err := strconv.ParseInt(action.Channel, 10, 64)
 	if err != nil {
-		return fmt.Errorf("telegram send: invalid chatID %q: %w", action.Channel, err)
+		return errs.Wrapf(err, "telegram send: invalid chatID %q", action.Channel)
 	}
 
 	// 提取文本

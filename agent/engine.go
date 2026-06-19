@@ -18,6 +18,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/util/traceid"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -207,7 +208,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		return nil
 	case <-shutdownCtx.Done():
 		e.logger.Warnw("engine shutdown timed out, some workers may not have finished")
-		return fmt.Errorf("engine: shutdown timeout: %w", shutdownCtx.Err())
+		return errs.Wrap(shutdownCtx.Err(), "engine: shutdown timeout")
 	}
 }
 

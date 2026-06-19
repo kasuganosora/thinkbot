@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -107,7 +108,7 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 
 	result, err := sa.provider.DoGenerate(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("subagent %q: LLM generate failed: %w", sa.name, err)
+		return nil, errs.Wrapf(err, "subagent %q: LLM generate failed", sa.name)
 	}
 
 	// 更新上下文
@@ -140,7 +141,7 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 
 	result, err := sa.provider.DoStream(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("subagent %q: LLM stream failed: %w", sa.name, err)
+		return nil, errs.Wrapf(err, "subagent %q: LLM stream failed", sa.name)
 	}
 
 	// 包装原始 channel，在流结束时更新上下文

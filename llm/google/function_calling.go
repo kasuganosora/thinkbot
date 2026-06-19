@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -445,7 +446,7 @@ func RunFunctionCallLoop(
 		req.Contents = contents
 		resp, err := client.GenerateContent(ctx, model, req)
 		if err != nil {
-			return nil, fmt.Errorf("round %d: %w", round+1, err)
+			return nil, errs.Wrapf(err, "round %d", round+1)
 		}
 		lastResp = resp
 
@@ -459,7 +460,7 @@ func RunFunctionCallLoop(
 		for _, fc := range calls {
 			if opts != nil && opts.OnFunctionCall != nil {
 				if err := opts.OnFunctionCall(fc); err != nil {
-					return resp, fmt.Errorf("on_function_call %s: %w", fc.Name, err)
+					return resp, errs.Wrapf(err, "on_function_call %s", fc.Name)
 				}
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -58,7 +59,8 @@ func (s *LoggerStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		fields = append(fields, "metadata_keys", metadataKeys(env.Message.Metadata))
 	}
 
-	s.logger.Infow("message received", fields...)
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
+	logger.Infow("message received", fields...)
 
 	return env, nil
 }

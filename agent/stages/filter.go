@@ -7,6 +7,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -54,18 +55,19 @@ func (s *FilterStage) Name() string { return s.name }
 // Process 执行过滤逻辑。
 func (s *FilterStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
 	matched := s.predicate.Match(env)
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
 	switch s.action {
 	case FilterPass:
 		if !matched {
-			s.logger.Debugw("filter: message dropped (no match)",
+			logger.Debugw("filter: message dropped (no match)",
 				"filter", s.name,
 				"message_id", env.Message.ID)
 			return nil, nil // 丢弃
 		}
 	case FilterDrop:
 		if matched {
-			s.logger.Debugw("filter: message dropped (matched drop rule)",
+			logger.Debugw("filter: message dropped (matched drop rule)",
 				"filter", s.name,
 				"message_id", env.Message.ID)
 			return nil, nil // 丢弃

@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -87,7 +87,7 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 	model := entryToModel(entry)
 
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
-		return fmt.Errorf("sqlite_repository: append failed: %w", err)
+		return errs.Wrap(err, "sqlite_repository: append failed")
 	}
 
 	r.entriesAppended.Add(1)
@@ -105,7 +105,7 @@ func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entry
 		Delete(&EntryModel{})
 
 	if result.Error != nil {
-		return fmt.Errorf("sqlite_repository: delete failed: %w", result.Error)
+		return errs.Wrap(result.Error, "sqlite_repository: delete failed")
 	}
 	if result.RowsAffected > 0 {
 		r.entriesDeleted.Add(result.RowsAffected)
@@ -120,7 +120,7 @@ func (r *SQLiteRepository) Clear(ctx context.Context, scope memory.Scope) error 
 		Delete(&EntryModel{})
 
 	if result.Error != nil {
-		return fmt.Errorf("sqlite_repository: clear failed: %w", result.Error)
+		return errs.Wrap(result.Error, "sqlite_repository: clear failed")
 	}
 	if result.RowsAffected > 0 {
 		r.entriesDeleted.Add(result.RowsAffected)
@@ -170,7 +170,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 	// 按时间倒序 + limit
 	var models []EntryModel
 	if err := tx.Order("created_at DESC").Limit(limit).Find(&models).Error; err != nil {
-		return nil, fmt.Errorf("sqlite_repository: retrieve failed: %w", err)
+		return nil, errs.Wrap(err, "sqlite_repository: retrieve failed")
 	}
 
 	// 更新 LastAccessedAt（批量）
@@ -204,7 +204,7 @@ func (r *SQLiteRepository) Recent(ctx context.Context, scope memory.Scope, limit
 		Find(&models).Error
 
 	if err != nil {
-		return nil, fmt.Errorf("sqlite_repository: recent failed: %w", err)
+		return nil, errs.Wrap(err, "sqlite_repository: recent failed")
 	}
 
 	return modelsToEntries(models), nil
@@ -218,7 +218,7 @@ func (r *SQLiteRepository) Count(ctx context.Context, scope memory.Scope) (int, 
 		Count(&count).Error
 
 	if err != nil {
-		return 0, fmt.Errorf("sqlite_repository: count failed: %w", err)
+		return 0, errs.Wrap(err, "sqlite_repository: count failed")
 	}
 	return int(count), nil
 }
@@ -323,7 +323,7 @@ func (s *WindowStateStore) Save(ctx context.Context, snap WindowSnapshot) error 
 		Create(&model).Error
 
 	if err != nil {
-		return fmt.Errorf("window_state_store: save failed: %w", err)
+		return errs.Wrap(err, "window_state_store: save failed")
 	}
 	return nil
 }
@@ -336,7 +336,7 @@ func (s *WindowStateStore) Load(ctx context.Context, scopeKey string) (*WindowSn
 		if err == gorm.ErrRecordNotFound {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("window_state_store: load failed: %w", err)
+		return nil, errs.Wrap(err, "window_state_store: load failed")
 	}
 	return &WindowSnapshot{
 		ScopeKey:          model.ScopeKey,
@@ -352,7 +352,7 @@ func (s *WindowStateStore) Load(ctx context.Context, scopeKey string) (*WindowSn
 func (s *WindowStateStore) Delete(ctx context.Context, scopeKey string) error {
 	err := s.db.WithContext(ctx).Where("scope_key = ?", scopeKey).Delete(&WindowStateModel{}).Error
 	if err != nil {
-		return fmt.Errorf("window_state_store: delete failed: %w", err)
+		return errs.Wrap(err, "window_state_store: delete failed")
 	}
 	return nil
 }

@@ -516,7 +516,7 @@ func (r *Request) buildHTTPRequest() (*http.Request, error) {
 			// JSON 序列化
 			data, err := json.Marshal(v)
 			if err != nil {
-				return nil, fmt.Errorf("marshal json body: %w", err)
+				return nil, errs.Wrap(err, "marshal json body")
 			}
 			bodyReader = bytes.NewReader(data)
 		}

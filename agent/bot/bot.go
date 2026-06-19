@@ -16,6 +16,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -224,7 +225,7 @@ func (b *Bot) Run(ctx context.Context) error {
 				"channel_name", ch.Name(),
 				"err", err)
 			b.stopChannels(ctx)
-			return fmt.Errorf("bot %q: channel %q start failed: %w", b.ID, ch.Name(), err)
+			return errs.Wrapf(err, "bot %q: channel %q start failed", b.ID, ch.Name())
 		}
 
 		// 如果 Channel 实现了 Sender 接口，注册到 ChannelReplyHandler

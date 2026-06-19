@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // MarshalJSON serializes a Message to JSON. When the message has exactly one
@@ -58,7 +59,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	if len(raw.Content) > 0 && raw.Content[0] == '"' {
 		var s string
 		if err := json.Unmarshal(raw.Content, &s); err != nil {
-			return fmt.Errorf("unmarshal string content: %w", err)
+			return errs.Wrap(err, "unmarshal string content")
 		}
 		m.Content = []MessagePart{TextPart{Text: s}}
 		return nil
@@ -66,7 +67,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 
 	var parts []json.RawMessage
 	if err := json.Unmarshal(raw.Content, &parts); err != nil {
-		return fmt.Errorf("unmarshal content array: %w", err)
+		return errs.Wrap(err, "unmarshal content array")
 	}
 	m.Content = make([]MessagePart, 0, len(parts))
 	for _, r := range parts {
@@ -105,7 +106,7 @@ func unmarshalPart(data json.RawMessage) (MessagePart, error) {
 		Type MessagePartType `json:"type"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, fmt.Errorf("unmarshal message part type: %w", err)
+		return nil, errs.Wrap(err, "unmarshal message part type")
 	}
 	switch probe.Type {
 	case PartTypeText:

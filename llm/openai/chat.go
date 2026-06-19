@@ -11,6 +11,7 @@ import (
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -278,7 +279,7 @@ func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: fmt.Errorf("openai: chat stream failed: %w", streamErr)})
+			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "openai: chat stream failed")})
 		}
 
 		send(&llm.FinishPart{

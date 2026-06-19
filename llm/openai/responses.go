@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	httputil "github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -429,7 +429,7 @@ func setInput(req *CreateResponseRequest, input any) error {
 	case []InputItem:
 		data, err := json.Marshal(v)
 		if err != nil {
-			return fmt.Errorf("openai: failed to marshal input items: %w", err)
+			return errs.Wrap(err, "openai: failed to marshal input items")
 		}
 		req.Input = data
 	case json.RawMessage:
@@ -437,7 +437,7 @@ func setInput(req *CreateResponseRequest, input any) error {
 	default:
 		data, err := json.Marshal(v)
 		if err != nil {
-			return fmt.Errorf("openai: failed to marshal input: %w", err)
+			return errs.Wrap(err, "openai: failed to marshal input")
 		}
 		req.Input = data
 	}

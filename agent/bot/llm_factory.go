@@ -9,6 +9,7 @@ import (
 	"github.com/kasuganosora/thinkbot/llm/google"
 	"github.com/kasuganosora/thinkbot/llm/grok"
 	"github.com/kasuganosora/thinkbot/llm/openai"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -98,7 +99,7 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	}
 	mainProvider, err := CreateProvider(mainDef)
 	if err != nil {
-		return nil, fmt.Errorf("bot %q: create main LLM: %w", botID, err)
+		return nil, errs.Wrapf(err, "bot %q: create main LLM", botID)
 	}
 
 	bundle := &LLMBundle{
@@ -112,7 +113,7 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 		if ok {
 			lightProvider, err := CreateProvider(lightDef)
 			if err != nil {
-				return nil, fmt.Errorf("bot %q: create light LLM: %w", botID, err)
+				return nil, errs.Wrapf(err, "bot %q: create light LLM", botID)
 			}
 			bundle.Light = lightProvider
 			bundle.LightDef = lightDef

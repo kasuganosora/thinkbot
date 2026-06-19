@@ -16,6 +16,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/traceid"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -52,26 +53,26 @@ func New(stages []core.StageInfo, tp trace.TracerProvider, mp metric.MeterProvid
 	processed, err := meter.Int64Counter("pipeline.messages.processed",
 		metric.WithDescription("Total messages entering the pipeline"))
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: create processed counter: %w", err)
+		return nil, errs.Wrap(err, "pipeline: create processed counter")
 	}
 
 	errCounter, err := meter.Int64Counter("pipeline.messages.errors",
 		metric.WithDescription("Total message processing errors"))
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: create error counter: %w", err)
+		return nil, errs.Wrap(err, "pipeline: create error counter")
 	}
 
 	dropped, err := meter.Int64Counter("pipeline.messages.dropped",
 		metric.WithDescription("Total messages dropped by stages"))
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: create dropped counter: %w", err)
+		return nil, errs.Wrap(err, "pipeline: create dropped counter")
 	}
 
 	latency, err := meter.Float64Histogram("pipeline.stage.duration_seconds",
 		metric.WithDescription("Stage processing duration in seconds"),
 		metric.WithUnit("s"))
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: create latency histogram: %w", err)
+		return nil, errs.Wrap(err, "pipeline: create latency histogram")
 	}
 
 	return &Pipeline{

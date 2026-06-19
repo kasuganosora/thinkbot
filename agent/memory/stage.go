@@ -10,6 +10,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -89,8 +90,11 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 			attribute.String("message.id", env.Message.ID),
 			attribute.String("message.channel", env.Message.Channel),
 			attribute.String("message.user_id", env.Message.UserID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 		))
 	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
 	start := time.Now()
 
@@ -103,7 +107,7 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	)
 	if err != nil {
 		// 记忆检索失败不应阻塞消息处理，降级为无记忆继续
-		s.logger.Warnw("memory retrieval failed, proceeding without context",
+		logger.Warnw("memory retrieval failed, proceeding without context",
 			"message_id", env.Message.ID,
 			"err", err)
 		span.RecordError(err)
@@ -130,7 +134,7 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 			attribute.Bool("memory.compressed", result.Compressed),
 			attribute.Int64("memory.duration_ms", duration.Milliseconds()),
 		)
-		s.logger.Debugw("memory context injected",
+		logger.Debugw("memory context injected",
 			"message_id", env.Message.ID,
 			"context_len", len(result.ContextText),
 			"tokens_est", result.TokenEstimate,
@@ -211,8 +215,11 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 	ctx, span := s.tracer.Start(ctx, "stage.memory_write.process",
 		trace.WithAttributes(
 			attribute.String("message.id", env.Message.ID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 		))
 	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
 	// 提取 ActionNote 类型的 action
 	actions := env.Actions()
@@ -258,7 +265,7 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 		}
 
 		if err := s.store.Append(ctx, entry); err != nil {
-			s.logger.Warnw("memory write failed",
+			logger.Warnw("memory write failed",
 				"message_id", env.Message.ID,
 				"err", err)
 			span.RecordError(err)
@@ -273,7 +280,7 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 		env.Set("memory.written", written)
 		span.SetAttributes(attribute.Int("memory.written", written))
 
-		s.logger.Debugw("memory entries written",
+		logger.Debugw("memory entries written",
 			"message_id", env.Message.ID,
 			"count", written)
 

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -398,7 +399,7 @@ func (a *Assembler) Assemble(ctx *AssemblyContext, extraSections ...Section) (*A
 		rendered, resolved, failed, err := a.renderSection(ctx, &sec)
 		if err != nil {
 			a.errors.Add(1)
-			return nil, fmt.Errorf("prompt assembler: section %q: %w", sec.Name, err)
+			return nil, errs.Wrapf(err, "prompt assembler: section %q", sec.Name)
 		}
 
 		result.VariablesResolved += resolved

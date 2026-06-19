@@ -13,6 +13,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/traceid"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -128,7 +129,7 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 			"channel", msg.Channel)
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("ingress: context cancelled: %w", ctx.Err())
+		return errs.Wrap(ctx.Err(), "ingress: context cancelled")
 	}
 }
 

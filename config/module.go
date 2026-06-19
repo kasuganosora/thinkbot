@@ -3,13 +3,13 @@ package config
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"strings"
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -67,7 +67,7 @@ func registerConfigLifecycle(lc fx.Lifecycle, store *Store, logger *zap.SugaredL
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			if err := store.Migrate(); err != nil {
-				return fmt.Errorf("config: migrate: %w", err)
+				return errs.Wrap(err, "config: migrate")
 			}
 			if err := store.Reload(ctx); err != nil {
 				logger.Warnw("config: failed to load from database", "err", err)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -108,8 +109,11 @@ func (s *PromptStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		trace.WithAttributes(
 			attribute.String("message.id", env.Message.ID),
 			attribute.String("message.channel", env.Message.Channel),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 		))
 	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
 	// 构建 AssemblyContext
 	asmCtx := s.buildAssemblyContext(env)
@@ -121,7 +125,7 @@ func (s *PromptStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	result, err := s.assembler.Assemble(asmCtx, extraSections...)
 	if err != nil {
 		span.RecordError(err)
-		s.logger.Errorw("prompt assembly failed",
+		logger.Errorw("prompt assembly failed",
 			"message_id", env.Message.ID,
 			"err", err)
 		// 尝试 fallback
@@ -130,8 +134,8 @@ func (s *PromptStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 			if fallback != "" {
 				env.Set("system.prompt", fallback)
 				span.SetAttributes(attribute.Bool("prompt.fallback", true))
-				s.logger.Warnw("using fallback prompt from BotConfig",
-					"message_id", env.Message.ID)
+			logger.Warnw("using fallback prompt from BotConfig",
+				"message_id", env.Message.ID)
 				return env, nil
 			}
 		}
@@ -156,7 +160,7 @@ func (s *PromptStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		attribute.Bool("prompt.truncated", result.Truncated),
 	)
 
-	s.logger.Debugw("system prompt assembled",
+	logger.Debugw("system prompt assembled",
 		"message_id", env.Message.ID,
 		"length", result.PromptLength,
 		"sections_used", result.SectionsUsed,
