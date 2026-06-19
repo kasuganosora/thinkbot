@@ -12,6 +12,30 @@ import (
 )
 
 // ============================================================================
+// ToolResolver — 动态工具解析接口
+// ============================================================================
+
+// ToolResolver 根据请求上下文动态解析可用工具列表。
+// 如果 LLMConfig.ToolResolver 非 nil，Stage 在构建 GenerateParams 时自动调用，
+// 解析出的工具会注入到 GenerateParams.Tools（provider 支持则自动 function calling）。
+//
+// ToolManager.ResolveForEnvelope 自然满足此接口，无需额外适配。
+type ToolResolver interface {
+	ResolveForEnvelope(ctx context.Context, env *core.Envelope) ([]llm.Tool, error)
+}
+
+// resolveTools 解析工具列表：优先用 ToolResolver 动态解析，回退到静态 Tools。
+func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.Tool {
+	if cfg.ToolResolver != nil {
+		tools, err := cfg.ToolResolver.ResolveForEnvelope(ctx, env)
+		if err == nil && len(tools) > 0 {
+			return tools
+		}
+	}
+	return cfg.Tools
+}
+
+// ============================================================================
 // LLMStage — 调用 LLM Provider 生成回复
 // ============================================================================
 
@@ -21,8 +45,13 @@ type LLMConfig struct {
 	SystemPrompt string
 	// MaxSteps Orchestrate 最大执行步数（0=单次, >0=多步, -1=无限）。
 	MaxSteps int
-	// Tools 可用工具列表。
+	// Tools 静态工具列表。
+	// 如果 ToolResolver 为 nil，直接使用此列表。
 	Tools []llm.Tool
+	// ToolResolver 动态工具解析器。
+	// 非 nil 时，每次请求自动按上下文解析工具（覆盖 Tools）。
+	// 通常传入 *tools.ToolManager 实例。
+	ToolResolver ToolResolver
 	// Model 指定使用的模型。
 	Model *llm.Model
 	// Temperature 采样温度。
@@ -34,7 +63,7 @@ type LLMConfig struct {
 	MessageBuilder func(msg core.Message) []llm.Message
 }
 
-// LLMStage 将消息发送给 LLM Provider 并将回复添加为 Reply Action。
+// ============================================================================
 type LLMStage struct {
 	name     string
 	provider llm.Provider
@@ -86,12 +115,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
+	// 解析工具列表
+	tools := resolveTools(ctx, s.config, env)
+
 	// 构建参数
 	params := llm.GenerateParams{
 		Model:       s.config.Model,
 		System:      systemPrompt,
 		Messages:    messages,
-		Tools:       s.config.Tools,
+		Tools:       tools,
 		Temperature: s.config.Temperature,
 		MaxTokens:   s.config.MaxTokens,
 	}
