@@ -530,3 +530,42 @@ func SoulMetaSpecs() []MetaSpec {
 		{Key: KeySoulPromptDir, Category: "Soul", Description: "额外 prompt 段落目录（可选，存放 {order}_{name}.md 文件）"},
 	}
 }
+
+// --- Tools 工具权限策略配置 ---
+
+// ToolPolicyConfig 是从 config.Store 读取工具权限策略的桥接类型。
+// 策略以 JSON 形式存储在 tools.<botID>.policy 键中。
+//
+// 使用方式：
+//
+//	policyJSON := builder.GetToolPolicyJSON("mybot")
+//	policy := tools.ParseToolPolicy(policyJSON)
+type ToolPolicyConfig struct {
+	// BotID bot 标识符。
+	BotID string
+
+	// PolicyJSON 策略的 JSON 字符串（tools.<botID>.policy 的值）。
+	PolicyJSON string
+}
+
+// GetToolPolicy 读取指定 bot 的工具权限策略 JSON。
+// 如果未配置，返回空字符串（表示全部放行）。
+func (b *Builder) GetToolPolicy(botID string) ToolPolicyConfig {
+	return ToolPolicyConfig{
+		BotID:      botID,
+		PolicyJSON: b.store.GetString(ToolPolicyKey(botID), ""),
+	}
+}
+
+// SetToolPolicy 将工具权限策略 JSON 持久化到数据库。
+func (b *Builder) SetToolPolicy(ctx context.Context, botID, policyJSON string) error {
+	return b.store.Set(ctx, ToolPolicyKey(botID), policyJSON)
+}
+
+// ToolPolicyMetaSpecs 返回工具权限策略的元数据说明。
+// 注意：实际键名包含 botID（动态），这里仅注册说明性的元数据。
+func ToolPolicyMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: "tools.policy", Category: "Tools", Description: "工具黑名单权限策略（JSON）。键格式 tools.<botID>.policy。支持按 channel+chatType 禁用工具，并为特定用户开放白名单。"},
+	}
+}

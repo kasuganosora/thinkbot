@@ -17,6 +17,7 @@ const (
 	PrefixWorkflow   = "workflow"
 	PrefixEngagement = "engagement"
 	PrefixSoul       = "soul"
+	PrefixTools      = "tools"
 )
 
 // Bot 键。
@@ -83,6 +84,13 @@ const (
 	// KeySoulPromptDir 额外 prompt 段落目录（可选，存放 {order}_{name}.md 文件）。
 	KeySoulPromptDir = "soul.prompt_dir"
 )
+
+// ToolPolicyKey 返回指定 bot 的工具权限策略 JSON 的数据库键。
+// 格式：tools.<bot_id>.policy
+// 值为 ToolPolicy 的 JSON 字符串。
+func ToolPolicyKey(botID string) string {
+	return "tools." + botID + ".policy"
+}
 
 // LLMConfigKey 返回存储 LLM 配置 JSON 的数据库键。
 // 格式：llm.<llm_id>

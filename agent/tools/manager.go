@@ -32,6 +32,9 @@ type ToolManager struct {
 	headerSec   *ToolPromptSection
 	rulesSec    *ToolPromptSection
 
+	// policyProvider 动态工具权限策略提供者（nil 表示不做策略过滤）。
+	policyProvider ToolPolicyProvider
+
 	// 是否在注册工具时自动生成描述段落
 	autoDescribe bool
 }
@@ -153,10 +156,34 @@ func (m *ToolManager) EnableAutoDescribe(enabled bool) {
 	m.autoDescribe = enabled
 }
 
+// SetPolicyProvider 设置工具权限策略提供者。
+// 设置后，ResolveTools 会根据策略过滤掉被禁用的工具。
+// 传入 nil 可取消策略过滤。
+func (m *ToolManager) SetPolicyProvider(pp ToolPolicyProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policyProvider = pp
+}
+
 // ResolveTools 解析当前会话上下文下的工具列表。
 // 返回可供 LLM 使用的 []llm.Tool。
+// 如果设置了 ToolPolicyProvider，会根据策略过滤掉被禁用的工具。
 func (m *ToolManager) ResolveTools(ctx context.Context, sctx *ToolSessionContext) ([]llm.Tool, error) {
-	return m.registry.Resolve(ctx, sctx)
+	tools, err := m.registry.Resolve(ctx, sctx)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	pp := m.policyProvider
+	m.mu.RUnlock()
+
+	if pp != nil && len(tools) > 0 {
+		policy := pp.GetPolicy(sctx.BotID)
+		tools = policy.FilterTools(tools, sctx)
+	}
+
+	return tools, nil
 }
 
 // ResolveForEnvelope 从 Envelope 构建会话上下文并解析工具。
