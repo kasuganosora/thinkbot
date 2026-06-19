@@ -13,8 +13,10 @@ const (
 	PrefixChannel  = "channel"
 	PrefixLog      = "log"
 	PrefixMemory   = "memory"
-	PrefixTracing  = "tracing"
-	PrefixWorkflow = "workflow"
+	PrefixTracing    = "tracing"
+	PrefixWorkflow   = "workflow"
+	PrefixEngagement = "engagement"
+	PrefixSoul       = "soul"
 )
 
 // Bot 键。
@@ -46,6 +48,40 @@ const (
 	KeyWorkflowScheduleInterval  = "workflow.schedule_interval_ms"
 	KeyWorkflowAnalyzerTemp      = "workflow.analyzer_temperature"
 	KeyWorkflowAnalyzerMaxTokens = "workflow.analyzer_max_tokens"
+)
+
+// Engagement 键。
+const (
+	KeyEngagementEnabled            = "engagement.enabled"
+	KeyEngagementChannels           = "engagement.channels"
+	KeyEngagementReplyProbability   = "engagement.reply_probability"
+	KeyEngagementCooldown           = "engagement.cooldown"
+	KeyEngagementRateLimitCapacity  = "engagement.rate_limit_capacity"
+	KeyEngagementRateLimitInterval  = "engagement.rate_limit_interval"
+	KeyEngagementKeywords           = "engagement.keywords"
+	KeyEngagementLLMJudgeEnabled    = "engagement.llm_judge_enabled"
+	KeyEngagementBlockedUsers       = "engagement.blocked_users"
+	KeyEngagementBlockedSources     = "engagement.blocked_sources"
+	KeyEngagementMinLength          = "engagement.min_length"
+	KeyEngagementMaxLength          = "engagement.max_length"
+	KeyEngagementBackoffBaseSeconds = "engagement.backoff_base_seconds"
+	KeyEngagementBackoffCapSeconds  = "engagement.backoff_cap_seconds"
+	KeyEngagementBackoffStartCount  = "engagement.backoff_start_count"
+	KeyEngagementBurstInterval      = "engagement.burst_interval_seconds"
+	KeyEngagementWaitTimeout        = "engagement.wait_timeout_seconds"
+	KeyEngagementBackoffBypass      = "engagement.backoff_bypass_pending"
+)
+
+// Soul 键。
+//
+// 约定优于配置：SOUL.md 默认从二进制目录自动加载，文件存在即生效，
+// 无需 enabled 开关。以下配置项仅用于可选的运行时调整。
+const (
+	// KeySoulReloadInterval 文件变更检测轮询间隔（默认 5s，0=禁用热重载）。
+	KeySoulReloadInterval = "soul.reload_interval"
+
+	// KeySoulPromptDir 额外 prompt 段落目录（可选，存放 {order}_{name}.md 文件）。
+	KeySoulPromptDir = "soul.prompt_dir"
 )
 
 // LLMConfigKey 返回存储 LLM 配置 JSON 的数据库键。

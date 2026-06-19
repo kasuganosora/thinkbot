@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"time"
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -357,4 +358,175 @@ func splitFirst(s, sep string) []string {
 		return []string{s}
 	}
 	return []string{before, after}
+}
+
+// --- Engagement 配置 ---
+
+// EngagementConfig 描述主动参与模块的全部可调参数。
+// 未配置的字段自动使用 DefaultEngagementConfig() 的值。
+type EngagementConfig struct {
+	// Enabled 是否启用主动参与（总开关）。false 时所有时间线消息都不会被评估。
+	Enabled bool `json:"enabled"`
+
+	// Channels 允许主动参与的渠道列表（逗号分隔的 source 标识）。
+	// 为空时禁用所有渠道。
+	Channels []string `json:"channels"`
+
+	// ReplyProbability 主动参与概率（0.0~1.0，默认 0.15）。
+	ReplyProbability float64 `json:"replyProbability"`
+
+	// Cooldown 同一用户冷却时间（默认 0，不限制）。
+	Cooldown time.Duration `json:"cooldown"`
+
+	// RateLimitCapacity 令牌桶容量——每小时最多主动参与次数（默认 3）。
+	RateLimitCapacity int `json:"rateLimitCapacity"`
+
+	// RateLimitInterval 令牌桶补充间隔（默认 1h）。
+	RateLimitInterval time.Duration `json:"rateLimitInterval"`
+
+	// Keywords 关键词列表——消息文本包含任一关键词才通过 Tier 1。
+	// 为空时不做关键词过滤。
+	Keywords []string `json:"keywords"`
+
+	// LLMJudgeEnabled 是否启用 Tier 2 LLM 快判（默认 false）。
+	LLMJudgeEnabled bool `json:"llmJudgeEnabled"`
+
+	// BlockedUsers 被排除的用户 ID 列表。
+	BlockedUsers []string `json:"blockedUsers"`
+
+	// BlockedSources 被排除的消息来源列表。
+	BlockedSources []string `json:"blockedSources"`
+
+	// MinLength 消息最小长度（rune），0 表示无限制。
+	MinLength int `json:"minLength"`
+
+	// MaxLength 消息最大长度（rune），0 表示无限制。
+	MaxLength int `json:"maxLength"`
+
+	// BackoffBaseSeconds no_action 退避基准秒数（默认 10.0）。
+	BackoffBaseSeconds float64 `json:"backoffBaseSeconds"`
+
+	// BackoffCapSeconds 退避上限秒数（默认 300.0）。
+	BackoffCapSeconds float64 `json:"backoffCapSeconds"`
+
+	// BackoffStartCount 从第几次连续 decline 开始退避（默认 3）。
+	BackoffStartCount int `json:"backoffStartCount"`
+
+	// BurstIntervalSeconds 消息突发检测窗口秒数（默认 5.0）。
+	BurstIntervalSeconds float64 `json:"burstIntervalSeconds"`
+
+	// WaitTimeoutSeconds ActionWait 超时秒数（默认 30.0）。
+	WaitTimeoutSeconds float64 `json:"waitTimeoutSeconds"`
+
+	// BackoffBypassPendingCount 退避绕过阈值（默认 0=禁用）。
+	BackoffBypassPendingCount int `json:"backoffBypassPendingCount"`
+}
+
+// DefaultEngagementConfig 返回主动参与模块的默认配置值。
+func DefaultEngagementConfig() EngagementConfig {
+	return EngagementConfig{
+		Enabled:               false,
+		ReplyProbability:      0.15,
+		Cooldown:              0,
+		RateLimitCapacity:     3,
+		RateLimitInterval:     1 * time.Hour,
+		BackoffBaseSeconds:    10.0,
+		BackoffCapSeconds:     300.0,
+		BackoffStartCount:     3,
+		BurstIntervalSeconds:  5.0,
+		WaitTimeoutSeconds:    30.0,
+		BackoffBypassPendingCount: 0,
+	}
+}
+
+// GetEngagementConfig 从 Store 读取主动参与配置，未设置的字段自动填充默认值。
+func (b *Builder) GetEngagementConfig() EngagementConfig {
+	d := DefaultEngagementConfig()
+	return EngagementConfig{
+		Enabled:                   b.store.GetBool(KeyEngagementEnabled, d.Enabled),
+		Channels:                  b.store.GetStringSlice(KeyEngagementChannels, d.Channels),
+		ReplyProbability:          b.store.GetFloat64(KeyEngagementReplyProbability, d.ReplyProbability),
+		Cooldown:                  b.store.GetDuration(KeyEngagementCooldown, d.Cooldown),
+		RateLimitCapacity:         b.store.GetInt(KeyEngagementRateLimitCapacity, d.RateLimitCapacity),
+		RateLimitInterval:         b.store.GetDuration(KeyEngagementRateLimitInterval, d.RateLimitInterval),
+		Keywords:                  b.store.GetStringSlice(KeyEngagementKeywords, d.Keywords),
+		LLMJudgeEnabled:           b.store.GetBool(KeyEngagementLLMJudgeEnabled, d.LLMJudgeEnabled),
+		BlockedUsers:              b.store.GetStringSlice(KeyEngagementBlockedUsers, d.BlockedUsers),
+		BlockedSources:            b.store.GetStringSlice(KeyEngagementBlockedSources, d.BlockedSources),
+		MinLength:                 b.store.GetInt(KeyEngagementMinLength, d.MinLength),
+		MaxLength:                 b.store.GetInt(KeyEngagementMaxLength, d.MaxLength),
+		BackoffBaseSeconds:        b.store.GetFloat64(KeyEngagementBackoffBaseSeconds, d.BackoffBaseSeconds),
+		BackoffCapSeconds:         b.store.GetFloat64(KeyEngagementBackoffCapSeconds, d.BackoffCapSeconds),
+		BackoffStartCount:         b.store.GetInt(KeyEngagementBackoffStartCount, d.BackoffStartCount),
+		BurstIntervalSeconds:      b.store.GetFloat64(KeyEngagementBurstInterval, d.BurstIntervalSeconds),
+		WaitTimeoutSeconds:        b.store.GetFloat64(KeyEngagementWaitTimeout, d.WaitTimeoutSeconds),
+		BackoffBypassPendingCount: b.store.GetInt(KeyEngagementBackoffBypass, d.BackoffBypassPendingCount),
+	}
+}
+
+// EngagementMetaSpecs 返回主动参与配置项的元数据，用于 RegisterMany 注册到前端设置界面。
+func EngagementMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyEngagementEnabled, Category: "Engagement", Description: "是否启用主动参与功能（总开关，默认关闭）"},
+		{Key: KeyEngagementChannels, Category: "Engagement", Description: "允许主动参与的渠道列表（逗号分隔，如 misskey,telegram）"},
+		{Key: KeyEngagementReplyProbability, Category: "Engagement", Description: "主动参与概率 0.0~1.0（默认 0.15）"},
+		{Key: KeyEngagementCooldown, Category: "Engagement", Description: "同一用户冷却时间（如 10m，默认 0=不限制）"},
+		{Key: KeyEngagementRateLimitCapacity, Category: "Engagement", Description: "令牌桶容量——最多主动参与次数（默认 3）"},
+		{Key: KeyEngagementRateLimitInterval, Category: "Engagement", Description: "令牌桶补充间隔（如 1h，默认 1小时）"},
+		{Key: KeyEngagementKeywords, Category: "Engagement", Description: "兴趣关键词列表（逗号分隔，为空则不做关键词过滤）"},
+		{Key: KeyEngagementLLMJudgeEnabled, Category: "Engagement", Description: "是否启用 Tier 2 LLM 快判（默认关闭）"},
+		{Key: KeyEngagementBlockedUsers, Category: "Engagement", Description: "被排除的用户 ID 列表（逗号分隔）"},
+		{Key: KeyEngagementBlockedSources, Category: "Engagement", Description: "被排除的消息来源列表（逗号分隔）"},
+		{Key: KeyEngagementMinLength, Category: "Engagement", Description: "消息最小长度 rune 数（默认 0=不限制）"},
+		{Key: KeyEngagementMaxLength, Category: "Engagement", Description: "消息最大长度 rune 数（默认 0=不限制）"},
+		{Key: KeyEngagementBackoffBaseSeconds, Category: "Engagement", Description: "no_action 退避基准秒数（默认 10.0）"},
+		{Key: KeyEngagementBackoffCapSeconds, Category: "Engagement", Description: "退避上限秒数（默认 300.0）"},
+		{Key: KeyEngagementBackoffStartCount, Category: "Engagement", Description: "从第几次连续不参与开始退避（默认 3）"},
+		{Key: KeyEngagementBurstInterval, Category: "Engagement", Description: "消息突发检测窗口秒数（默认 5.0）"},
+		{Key: KeyEngagementWaitTimeout, Category: "Engagement", Description: "ActionWait 超时秒数（默认 30.0）"},
+		{Key: KeyEngagementBackoffBypass, Category: "Engagement", Description: "退避绕过阈值——待处理消息数（默认 0=禁用）"},
+	}
+}
+
+// --- Soul 配置 ---
+
+// SoulConfig 描述 SOUL.md 人格文件的配置。
+//
+// 约定优于配置：SOUL.md 默认从二进制所在目录自动加载（文件存在即生效），
+// 不需要任何开关。此配置仅用于可选的运行时调整。
+type SoulConfig struct {
+	// ReloadInterval 文件变更检测的轮询间隔。
+	// 0 表示禁用热重载（仅在启动时加载一次）。
+	// 推荐值：5s ~ 30s。
+	ReloadInterval time.Duration `json:"reloadInterval"`
+
+	// PromptDir 额外 prompt 段落目录（可选）。
+	// 目录中的 {order}_{name}.md 文件会被加载为额外的 Section。
+	// 为空时不加载额外段落。
+	PromptDir string `json:"promptDir"`
+}
+
+// DefaultSoulConfig 返回 SOUL.md 模块的默认配置值。
+func DefaultSoulConfig() SoulConfig {
+	return SoulConfig{
+		ReloadInterval: 5 * time.Second,
+		PromptDir:      "",
+	}
+}
+
+// GetSoulConfig 从 Store 读取 SOUL.md 配置，未设置的字段自动填充默认值。
+func (b *Builder) GetSoulConfig() SoulConfig {
+	d := DefaultSoulConfig()
+	return SoulConfig{
+		ReloadInterval: b.store.GetDuration(KeySoulReloadInterval, d.ReloadInterval),
+		PromptDir:      b.store.GetString(KeySoulPromptDir, d.PromptDir),
+	}
+}
+
+// SoulMetaSpecs 返回 SOUL.md 配置项的元数据，用于 RegisterMany 注册到前端设置界面。
+func SoulMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeySoulReloadInterval, Category: "Soul", Description: "SOUL.md 文件变更检测轮询间隔（如 5s，0=禁用热重载）。文件位于二进制目录下，存在即生效。"},
+		{Key: KeySoulPromptDir, Category: "Soul", Description: "额外 prompt 段落目录（可选，存放 {order}_{name}.md 文件）"},
+	}
 }
