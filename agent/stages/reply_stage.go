@@ -143,12 +143,15 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		}
 	}
 
+	// 解析工具列表
+	tools := resolveTools(ctx, s.config.LLM, env)
+
 	// 调用 LLM
 	params := llm.GenerateParams{
 		Model:       s.config.LLM.Model,
 		System:      systemPrompt,
 		Messages:    messages,
-		Tools:       s.config.LLM.Tools,
+		Tools:       tools,
 		Temperature: s.config.LLM.Temperature,
 		MaxTokens:   s.config.LLM.MaxTokens,
 	}
