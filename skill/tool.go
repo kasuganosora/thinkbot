@@ -1,9 +1,11 @@
 package skill
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
+	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
@@ -118,16 +120,32 @@ func (m *SkillManager) availableNamesLocked() []string {
 }
 
 // ============================================================================
-// ToolProvider 适配器
+// SkillToolProvider — 将 SkillManager 适配为 tools.ToolProvider
 //
-// SkillToolProvider 将 SkillManager 适配为动态工具提供者。
-// 当存在已启用的技能时，自动注册 use_skill 工具。
+// 实现 tools.ToolProvider 接口，在每次 Resolve 时根据当前技能状态
+// 动态决定是否提供 use_skill 工具。
 //
-// 用法：
-//
-//	mgr := skill.NewSkillManager(...)
-//	toolManager.AddProvider(&skill.SkillToolProvider{Manager: mgr})
+// 行为：
+//   - 存在已启用技能 → 返回 [use_skill] 工具
+//   - 无已启用技能   → 返回 nil（LLM 不会看到 use_skill）
+//   - SubAgent 场景  → 返回 nil（不暴露技能工具给子 Agent）
 // ============================================================================
+
+// SkillToolProvider 将 SkillManager 适配为动态工具提供者。
+type SkillToolProvider struct {
+	Manager *SkillManager
+}
+
+// Tools 实现 tools.ToolProvider 接口。
+func (p *SkillToolProvider) Tools(ctx context.Context, sctx *tools.ToolSessionContext) ([]llm.Tool, error) {
+	if sctx != nil && sctx.IsSubagent {
+		return nil, nil
+	}
+	if !p.Manager.HasEnabledSkills() {
+		return nil, nil
+	}
+	return []llm.Tool{p.Manager.BuildUseSkillTool()}, nil
+}
 
 // HasEnabledSkills 返回是否存在已启用的技能。
 func (m *SkillManager) HasEnabledSkills() bool {
@@ -139,4 +157,22 @@ func (m *SkillManager) HasEnabledSkills() bool {
 		}
 	}
 	return false
+}
+
+// ============================================================================
+// RegisterTools — 便捷注册函数（对齐 mcp.RegisterTools 模式）
+// ============================================================================
+
+// RegisterTools 将 SkillManager 的 use_skill 工具注册到 ToolManager。
+//
+// 注册后，ToolManager 在每次解析工具列表时，
+// 会通过 SkillToolProvider 动态判断是否提供 use_skill 工具。
+//
+// 如果 mgr 为 nil，直接返回（no-op）。
+func RegisterTools(toolMgr *tools.ToolManager, mgr *SkillManager) error {
+	if mgr == nil {
+		return nil
+	}
+	toolMgr.AddProvider(&SkillToolProvider{Manager: mgr})
+	return nil
 }
