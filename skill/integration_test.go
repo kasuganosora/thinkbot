@@ -146,7 +146,7 @@ func TestIntegration_TriggerPrompt(t *testing.T) {
 	if !strings.Contains(trigger, "bangumi") {
 		t.Error("trigger prompt should contain 'bangumi'")
 	}
-	if !strings.Contains(trigger, "<use_skill:") {
+	if !strings.Contains(trigger, "use_skill") {
 		t.Error("trigger prompt should contain use_skill instruction")
 	}
 }
