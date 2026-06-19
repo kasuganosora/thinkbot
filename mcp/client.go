@@ -8,6 +8,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"go.uber.org/zap"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -48,12 +49,12 @@ func (c *Client) Initialize(ctx context.Context) (*serverInfo, error) {
 
 	resp, err := c.call(ctx, "initialize", params)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: initialize server %q: %w", c.name, err)
+		return nil, errs.Wrapf(err, "mcp: initialize server %q", c.name)
 	}
 
 	var result initializeResult
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, fmt.Errorf("mcp: parse initialize result: %w", err)
+		return nil, errs.Wrap(err, "mcp: parse initialize result")
 	}
 
 	// 发送 initialized 通知（不需要响应）
@@ -69,12 +70,12 @@ func (c *Client) ListTools(ctx context.Context) ([]mcpTool, error) {
 	for {
 		resp, err := c.call(ctx, "tools/list", listToolsParams{Cursor: cursor})
 		if err != nil {
-			return nil, fmt.Errorf("mcp: list tools from %q: %w", c.name, err)
+			return nil, errs.Wrapf(err, "mcp: list tools from %q", c.name)
 		}
 
 		var result listToolsResult
 		if err := json.Unmarshal(resp, &result); err != nil {
-			return nil, fmt.Errorf("mcp: parse tools/list result: %w", err)
+			return nil, errs.Wrap(err, "mcp: parse tools/list result")
 		}
 
 		allTools = append(allTools, result.Tools...)
@@ -94,12 +95,12 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		Arguments: args,
 	})
 	if err != nil {
-		return "", fmt.Errorf("mcp: call tool %q on %q: %w", name, c.name, err)
+		return "", errs.Wrapf(err, "mcp: call tool %q on %q", name, c.name)
 	}
 
 	var result callToolResult
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("mcp: parse tools/call result: %w", err)
+		return "", errs.Wrap(err, "mcp: parse tools/call result")
 	}
 
 	if result.IsError {
@@ -133,7 +134,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	if params != nil {
 		b, err := json.Marshal(params)
 		if err != nil {
-			return nil, fmt.Errorf("mcp: marshal params: %w", err)
+			return nil, errs.Wrap(err, "mcp: marshal params")
 		}
 		paramsRaw = b
 	}
@@ -147,7 +148,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 
 	data, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: marshal request: %w", err)
+		return nil, errs.Wrap(err, "mcp: marshal request")
 	}
 
 	respData, err := c.transport.RoundTrip(ctx, data)

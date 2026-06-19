@@ -12,6 +12,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -64,15 +65,18 @@ func (s *ToolsStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 	ctx, span := s.tracer.Start(ctx, "stage.tools.resolve",
 		trace.WithAttributes(
 			attribute.String("message.id", env.Message.ID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 		))
 	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
 	sctx := envelopeToSessionContext(env)
 
 	tools, err := s.manager.ResolveTools(ctx, sctx)
 	if err != nil {
 		span.RecordError(err)
-		s.logger.Errorw("tool resolution failed",
+		logger.Errorw("tool resolution failed",
 			"message_id", env.Message.ID,
 			"err", err)
 		return env, nil
@@ -80,7 +84,7 @@ func (s *ToolsStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 
 	span.SetAttributes(attribute.Int("tools.count", len(tools)))
 
-	s.logger.Debugw("tools resolved",
+	logger.Debugw("tools resolved",
 		"message_id", env.Message.ID,
 		"count", len(tools),
 	)
@@ -97,7 +101,7 @@ func CurrentTimeTool() ToolDef {
 	return ToolDef{
 		Category: "utility",
 		Scopes:   []string{}, // 全场景
-		Tool: buildTool(
+		Tool: BuildTool(
 			"current_time",
 			"获取当前的日期和时间。当用户询问时间相关问题时使用此工具。",
 			map[string]any{
@@ -135,7 +139,7 @@ func CurrentTimeTool() ToolDef {
 func EchoTool() ToolDef {
 	return ToolDef{
 		Category: "utility",
-		Tool: buildTool(
+		Tool: BuildTool(
 			"echo",
 			"回显输入内容。主要用于测试工具调用是否正常工作。",
 			map[string]any{
@@ -163,8 +167,8 @@ func EchoTool() ToolDef {
 	}
 }
 
-// buildTool 是一个辅助函数，快速构建 llm.Tool。
-func buildTool(name, description string, params map[string]any, exec func(ctx *llm.ToolExecContext, input any) (any, error)) llm.Tool {
+// BuildTool 是一个辅助函数，快速构建 llm.Tool。
+func BuildTool(name, description string, params map[string]any, exec func(ctx *llm.ToolExecContext, input any) (any, error)) llm.Tool {
 	return llm.Tool{
 		Name:        name,
 		Description: description,

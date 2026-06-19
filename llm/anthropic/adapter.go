@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -240,7 +241,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: fmt.Errorf("anthropic: stream failed: %w", streamErr)})
+			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "anthropic: stream failed")})
 		}
 
 		send(&llm.FinishPart{

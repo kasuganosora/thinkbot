@@ -11,6 +11,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -123,10 +124,11 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 			attribute.String("llm.provider", s.provider.Name()),
 			attribute.String("message.id", env.Message.ID),
 			attribute.String("message.source", env.Message.Source),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
 		))
 	defer span.End()
 
-	// 构建 LLM 消息
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
 	var messages []llm.Message
 	if s.config.LLM.MessageBuilder != nil {
 		messages = s.config.LLM.MessageBuilder(env.Message)
@@ -161,14 +163,14 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		MaxSteps: s.config.LLM.MaxSteps,
 	}
 
-	s.logger.Debugw("reply stage: calling LLM",
+	logger.Debugw("reply stage: calling LLM",
 		"message_id", env.Message.ID,
 		"provider", s.provider.Name())
 
 	result, err := llm.OrchestrateGenerate(ctx, s.provider, cfg)
 	if err != nil {
 		span.RecordError(err)
-		s.logger.Errorw("reply stage: LLM failed",
+		logger.Errorw("reply stage: LLM failed",
 			"message_id", env.Message.ID, "err", err)
 		return env, &core.PipelineError{
 			Stage:   s.name,
@@ -190,7 +192,7 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 	decision, replyText, noteText, noteCategory := s.decide(ctx, env.Message, result)
 	span.SetAttributes(attribute.String("output.decision", string(decision)))
 
-	s.logger.Infow("reply stage: decision made",
+	logger.Infow("reply stage: decision made",
 		"message_id", env.Message.ID,
 		"decision", decision,
 		"reply_len", len(replyText),
@@ -219,7 +221,7 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		s.addSilentAction(env, sourceChannel, noteText)
 
 	case DecisionDrop:
-		s.logger.Debugw("reply stage: decision is drop, no actions",
+		logger.Debugw("reply stage: decision is drop, no actions",
 			"message_id", env.Message.ID)
 	}
 

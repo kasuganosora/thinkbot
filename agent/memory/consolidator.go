@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -142,7 +143,7 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 	})
 	if err != nil {
 		span.RecordError(err)
-		return nil, fmt.Errorf("consolidator: LLM call failed: %w", err)
+		return nil, errs.Wrap(err, "consolidator: LLM call failed")
 	}
 
 	// 解析结果
@@ -492,7 +493,7 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 	// 获取未处理的 L0 条目
 	l0Entries, err := m.store.GetUnprocessed(ctx, scope, 50)
 	if err != nil {
-		return 0, fmt.Errorf("get unprocessed L0: %w", err)
+		return 0, errs.Wrap(err, "get unprocessed L0")
 	}
 	if len(l0Entries) == 0 {
 		return 0, nil
@@ -509,7 +510,7 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 	decisions, err := m.consolidator.Consolidate(ctx, l0Entries, existing)
 	if err != nil {
 		span.RecordError(err)
-		return 0, fmt.Errorf("consolidator failed: %w", err)
+		return 0, errs.Wrap(err, "consolidator failed")
 	}
 
 	// 应用决策
@@ -715,7 +716,7 @@ func (m *TieredManager) Aggregate(ctx context.Context, scope Scope) (int, error)
 
 	l1Entries, err := m.store.Retrieve(ctx, Tier1LongTerm, []Scope{scope}, 100)
 	if err != nil {
-		return 0, fmt.Errorf("aggregate: get L1 entries: %w", err)
+		return 0, errs.Wrap(err, "aggregate: get L1 entries")
 	}
 	if len(l1Entries) == 0 {
 		return 0, nil
@@ -723,7 +724,7 @@ func (m *TieredManager) Aggregate(ctx context.Context, scope Scope) (int, error)
 
 	scenes, err := m.aggregator.Aggregate(ctx, l1Entries)
 	if err != nil {
-		return 0, fmt.Errorf("aggregate: aggregator failed: %w", err)
+		return 0, errs.Wrap(err, "aggregate: aggregator failed")
 	}
 
 	for _, scene := range scenes {
@@ -752,11 +753,11 @@ func (m *TieredManager) ExtractProfile(ctx context.Context, scope Scope) (int, e
 
 	l1Entries, err := m.store.Retrieve(ctx, Tier1LongTerm, []Scope{scope}, 50)
 	if err != nil {
-		return 0, fmt.Errorf("extract profile: get L1 entries: %w", err)
+		return 0, errs.Wrap(err, "extract profile: get L1 entries")
 	}
 	l2Entries, err := m.store.Retrieve(ctx, Tier2Episodic, []Scope{scope}, 20)
 	if err != nil {
-		return 0, fmt.Errorf("extract profile: get L2 entries: %w", err)
+		return 0, errs.Wrap(err, "extract profile: get L2 entries")
 	}
 	if len(l1Entries) == 0 && len(l2Entries) == 0 {
 		return 0, nil
@@ -770,7 +771,7 @@ func (m *TieredManager) ExtractProfile(ctx context.Context, scope Scope) (int, e
 
 	items, err := m.profiler.ExtractProfile(ctx, l1Entries, l2Entries, existing)
 	if err != nil {
-		return 0, fmt.Errorf("extract profile: profiler failed: %w", err)
+		return 0, errs.Wrap(err, "extract profile: profiler failed")
 	}
 
 	for _, item := range items {

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -48,18 +49,18 @@ func newStdioTransport(ctx context.Context, command string, args []string, env [
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("mcp: create stdin pipe: %w", err)
+		return nil, errs.Wrap(err, "mcp: create stdin pipe")
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("mcp: create stdout pipe: %w", err)
+		return nil, errs.Wrap(err, "mcp: create stdout pipe")
 	}
 	cmd.Stderr = nil
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("mcp: start command %q: %w", command, err)
+		return nil, errs.Wrapf(err, "mcp: start command %q", command)
 	}
 
 	t := &stdioTransport{
@@ -81,7 +82,7 @@ func (t *stdioTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, er
 	defer t.mu.Unlock()
 
 	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
-		return nil, fmt.Errorf("mcp: write to stdin: %w", err)
+		return nil, errs.Wrap(err, "mcp: write to stdin")
 	}
 
 	type result struct {
@@ -99,7 +100,7 @@ func (t *stdioTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, er
 		return nil, ctx.Err()
 	case r := <-ch:
 		if r.err != nil {
-			return nil, fmt.Errorf("mcp: read from stdout: %w", r.err)
+			return nil, errs.Wrap(r.err, "mcp: read from stdout")
 		}
 		return bytes.TrimSpace(r.line), nil
 	}
@@ -135,7 +136,7 @@ func newHTTPTransport(url string, headers map[string]string) *httpTransport {
 func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", t.url, bytes.NewReader(data))
 	if err != nil {
-		return nil, fmt.Errorf("mcp: create http request: %w", err)
+		return nil, errs.Wrap(err, "mcp: create http request")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -152,7 +153,7 @@ func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, err
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: http request: %w", err)
+		return nil, errs.Wrap(err, "mcp: http request")
 	}
 	defer resp.Body.Close()
 

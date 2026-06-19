@@ -2,8 +2,8 @@ package llm
 
 import (
 	"encoding/json"
-	"fmt"
 	"reflect"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // resolveSchema converts a Tool's Parameters value into a standard JSON Schema
@@ -25,11 +25,11 @@ func resolveSchema(v any) (any, error) {
 	}
 	data, err := json.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal tool schema: %w", err)
+		return nil, errs.Wrap(err, "llm: marshal tool schema")
 	}
 	var m map[string]any
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("llm: unmarshal tool schema: %w", err)
+		return nil, errs.Wrap(err, "llm: unmarshal tool schema")
 	}
 	return m, nil
 }
@@ -166,11 +166,11 @@ func NewTool[T any](name, description string, execute func(ctx *ToolExecContext,
 		Execute: func(ctx *ToolExecContext, input any) (any, error) {
 			data, err := json.Marshal(input)
 			if err != nil {
-				return nil, fmt.Errorf("llm: marshal tool input: %w", err)
+				return nil, errs.Wrap(err, "llm: marshal tool input")
 			}
 			var typed T
 			if err := json.Unmarshal(data, &typed); err != nil {
-				return nil, fmt.Errorf("llm: unmarshal tool input to %T: %w", typed, err)
+				return nil, errs.Wrapf(err, "llm: unmarshal tool input to %T", typed)
 			}
 			return execute(ctx, typed)
 		},

@@ -1,12 +1,12 @@
 package prompt
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -51,7 +51,7 @@ func (l *FileLoader) LoadAll() (int, error) {
 		if os.IsNotExist(err) {
 			return 0, nil // 目录不存在时静默跳过
 		}
-		return 0, fmt.Errorf("prompt file_loader: read dir %q: %w", l.dir, err)
+		return 0, errs.Wrapf(err, "prompt file_loader: read dir %q", l.dir)
 	}
 
 	var mdFiles []os.DirEntry
@@ -73,7 +73,7 @@ func (l *FileLoader) LoadAll() (int, error) {
 	for _, f := range mdFiles {
 		section, err := l.parseFile(f.Name())
 		if err != nil {
-			return loaded, fmt.Errorf("prompt file_loader: parse %q: %w", f.Name(), err)
+			return loaded, errs.Wrapf(err, "prompt file_loader: parse %q", f.Name())
 		}
 		l.registry.Register(*section)
 		loaded++
@@ -97,7 +97,7 @@ func (l *FileLoader) parseFile(filename string) (*Section, error) {
 	path := filepath.Join(l.dir, filename)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read file: %w", err)
+		return nil, errs.Wrap(err, "read file")
 	}
 
 	content := string(data)

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -379,7 +380,7 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 	for _, scope := range scopes {
 		recent, err := m.retriever.Recent(ctx, scope, m.config.RecentLimit)
 		if err != nil {
-			return nil, fmt.Errorf("memory context: recent retrieval failed for scope %s: %w", scope.Key(), err)
+			return nil, errs.Wrapf(err, "memory context: recent retrieval failed for scope %s", scope.Key())
 		}
 		allEntries = append(allEntries, recent...)
 	}
@@ -397,7 +398,7 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 			Limit:  m.config.RelevantLimit,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("memory context: relevant retrieval failed: %w", err)
+			return nil, errs.Wrap(err, "memory context: relevant retrieval failed")
 		}
 		allEntries = dedup(allEntries, relevant)
 	}

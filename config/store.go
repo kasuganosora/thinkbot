@@ -13,6 +13,7 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================\
@@ -279,7 +280,7 @@ func (s *Store) Set(ctx context.Context, key, value string) error {
 		Columns:   []clause.Column{{Name: "key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 	}).Create(&setting).Error; err != nil {
-		return fmt.Errorf("config: persist setting %q: %w", key, err)
+		return errs.Wrapf(err, "config: persist setting %q", key)
 	}
 
 	// 更新缓存
@@ -315,7 +316,7 @@ func (s *Store) SetWithMeta(ctx context.Context, key, value, category, descripti
 		Columns:   []clause.Column{{Name: "key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"value", "category", "description", "updated_at"}),
 	}).Create(&setting).Error; err != nil {
-		return fmt.Errorf("config: persist setting %q with meta: %w", key, err)
+		return errs.Wrapf(err, "config: persist setting %q with meta", key)
 	}
 
 	oldVal, _ := s.Get(key)
@@ -348,7 +349,7 @@ func (s *Store) RegisterMeta(ctx context.Context, key, category, description str
 		Columns:   []clause.Column{{Name: "key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"category", "description", "updated_at"}),
 	}).Create(&setting).Error; err != nil {
-		return fmt.Errorf("config: register meta for %q: %w", key, err)
+		return errs.Wrapf(err, "config: register meta for %q", key)
 	}
 	return nil
 }
@@ -400,12 +401,12 @@ func (s *Store) SetMany(ctx context.Context, kv map[string]string) error {
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 		}).Create(&setting).Error; err != nil {
 			tx.Rollback()
-			return fmt.Errorf("config: persist setting %q: %w", key, err)
+			return errs.Wrapf(err, "config: persist setting %q", key)
 		}
 	}
 
 	if err := tx.Commit().Error; err != nil {
-		return fmt.Errorf("config: commit settings batch: %w", err)
+		return errs.Wrap(err, "config: commit settings batch")
 	}
 
 	// 更新缓存
@@ -431,7 +432,7 @@ func (s *Store) SetTemporary(key, value string) {
 func (s *Store) Delete(ctx context.Context, key string) error {
 	if s.db != nil {
 		if err := s.db.WithContext(ctx).Where("key = ?", key).Delete(&Setting{}).Error; err != nil {
-			return fmt.Errorf("config: delete setting %q: %w", key, err)
+			return errs.Wrapf(err, "config: delete setting %q", key)
 		}
 	}
 
@@ -455,7 +456,7 @@ func (s *Store) GetSetting(ctx context.Context, key string) (*Setting, error) {
 	var setting Setting
 	err := s.db.WithContext(ctx).Where("key = ?", key).First(&setting).Error
 	if err != nil {
-		return nil, fmt.Errorf("config: get setting %q: %w", key, err)
+		return nil, errs.Wrapf(err, "config: get setting %q", key)
 	}
 	return &setting, nil
 }
@@ -471,7 +472,7 @@ func (s *Store) ListSettings(ctx context.Context) ([]Setting, error) {
 		Order("category ASC, key ASC").
 		Find(&settings).Error
 	if err != nil {
-		return nil, fmt.Errorf("config: list settings: %w", err)
+		return nil, errs.Wrap(err, "config: list settings")
 	}
 	return settings, nil
 }
@@ -487,7 +488,7 @@ func (s *Store) ListByCategory(ctx context.Context, category string) ([]Setting,
 		Order("key ASC").
 		Find(&settings).Error
 	if err != nil {
-		return nil, fmt.Errorf("config: list settings by category %q: %w", category, err)
+		return nil, errs.Wrapf(err, "config: list settings by category %q", category)
 	}
 	return settings, nil
 }
@@ -505,7 +506,7 @@ func (s *Store) ListCategories(ctx context.Context) ([]string, error) {
 		Order("category ASC").
 		Pluck("category", &categories).Error
 	if err != nil {
-		return nil, fmt.Errorf("config: list categories: %w", err)
+		return nil, errs.Wrap(err, "config: list categories")
 	}
 	return categories, nil
 }
@@ -552,7 +553,7 @@ func (s *Store) Reload(ctx context.Context) error {
 
 	var settings []Setting
 	if err := s.db.WithContext(ctx).Find(&settings).Error; err != nil {
-		return fmt.Errorf("config: reload from database: %w", err)
+		return errs.Wrap(err, "config: reload from database")
 	}
 
 	newCache := make(map[string]string, len(settings))
@@ -626,11 +627,11 @@ func (s *Store) unmarshalStruct(prefix string, target any) error {
 	jsonMap := buildNestedMap(all)
 	jsonBytes, err := json.Marshal(jsonMap)
 	if err != nil {
-		return fmt.Errorf("config: marshal for unmarshal: %w", err)
+		return errs.Wrap(err, "config: marshal for unmarshal")
 	}
 
 	if err := json.Unmarshal(jsonBytes, target); err != nil {
-		return fmt.Errorf("config: unmarshal into target: %w", err)
+		return errs.Wrap(err, "config: unmarshal into target")
 	}
 
 	return nil

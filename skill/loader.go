@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -70,7 +71,7 @@ func (l *Loader) LoadAll(registerFn func(*Skill)) (int, error) {
 		if os.IsNotExist(err) {
 			return 0, nil // 目录不存在时静默跳过
 		}
-		return 0, fmt.Errorf("skill loader: read dir %q: %w", l.Dir, err)
+		return 0, errs.Wrapf(err, "skill loader: read dir %q", l.Dir)
 	}
 
 	// 按目录名排序
@@ -107,7 +108,7 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 	skillMdPath := filepath.Join(skillDir, "SKILL.md")
 	data, err := os.ReadFile(skillMdPath)
 	if err != nil {
-		return nil, fmt.Errorf("read SKILL.md: %w", err)
+		return nil, errs.Wrap(err, "read SKILL.md")
 	}
 
 	content := string(data)
@@ -152,7 +153,7 @@ func (l *Loader) LoadAndRegister(mgr *SkillManager) (int, error) {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("skill loader: read dir %q: %w", l.Dir, err)
+		return 0, errs.Wrapf(err, "skill loader: read dir %q", l.Dir)
 	}
 
 	// 按目录名排序，确保加载顺序确定

@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -135,7 +136,7 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 	for _, b := range bots {
 		go func(bot *Bot) {
 			if err := bot.Run(ctx); err != nil {
-				errCh <- fmt.Errorf("bot %q: %w", bot.ID, err)
+				errCh <- errs.Wrapf(err, "bot %q", bot.ID)
 			}
 		}(b)
 	}
@@ -149,7 +150,7 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 			// 某个 Bot 在初始化阶段失败
 			return err
 		case <-ctx.Done():
-			return fmt.Errorf("bot_manager: context cancelled while waiting for bots: %w", ctx.Err())
+			return errs.Wrap(ctx.Err(), "bot_manager: context cancelled while waiting for bots")
 		}
 	}
 

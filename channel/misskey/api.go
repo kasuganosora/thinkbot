@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -37,7 +38,7 @@ func (a *apiClient) getSelf(ctx context.Context) (*User, error) {
 		SetJSONBody(getSelfRequest{I: a.token}).
 		Do()
 	if err != nil {
-		return nil, fmt.Errorf("misskey getSelf: %w", err)
+		return nil, errs.Wrap(err, "misskey getSelf")
 	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("misskey getSelf: HTTP %d: %s", resp.StatusCode, resp.String())
@@ -45,7 +46,7 @@ func (a *apiClient) getSelf(ctx context.Context) (*User, error) {
 
 	var user User
 	if err := resp.JSON(&user); err != nil {
-		return nil, fmt.Errorf("misskey getSelf parse: %w", err)
+		return nil, errs.Wrap(err, "misskey getSelf parse")
 	}
 	return &user, nil
 }
@@ -73,7 +74,7 @@ func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID,
 		}).
 		Do()
 	if err != nil {
-		return "", fmt.Errorf("misskey createNote: %w", err)
+		return "", errs.Wrap(err, "misskey createNote")
 	}
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("misskey createNote: HTTP %d: %s", resp.StatusCode, resp.String())
@@ -81,7 +82,7 @@ func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID,
 
 	var wrapper createNoteAPIResponse
 	if err := resp.JSON(&wrapper); err != nil {
-		return "", fmt.Errorf("misskey createNote parse: %w", err)
+		return "", errs.Wrap(err, "misskey createNote parse")
 	}
 	return wrapper.CreatedNote.ID, nil
 }
@@ -97,7 +98,7 @@ func (a *apiClient) createReaction(ctx context.Context, noteID, reaction string)
 		}).
 		Do()
 	if err != nil {
-		return fmt.Errorf("misskey createReaction: %w", err)
+		return errs.Wrap(err, "misskey createReaction")
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("misskey createReaction: HTTP %d: %s", resp.StatusCode, resp.String())
@@ -115,7 +116,7 @@ func (a *apiClient) deleteReaction(ctx context.Context, noteID string) error {
 		}).
 		Do()
 	if err != nil {
-		return fmt.Errorf("misskey deleteReaction: %w", err)
+		return errs.Wrap(err, "misskey deleteReaction")
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("misskey deleteReaction: HTTP %d: %s", resp.StatusCode, resp.String())

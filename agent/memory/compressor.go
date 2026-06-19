@@ -12,6 +12,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -149,7 +150,7 @@ func (c *LLMCompressor) Compress(ctx context.Context, entries []Entry) (*Compres
 	if err != nil {
 		span.RecordError(err)
 		c.logger.Errorw("compression LLM call failed", "err", err)
-		return nil, fmt.Errorf("compressor: LLM generation failed: %w", err)
+		return nil, errs.Wrap(err, "compressor: LLM generation failed")
 	}
 
 	summary := strings.TrimSpace(result.Text)

@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -133,7 +134,7 @@ func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) er
 			"action_type", action.Type,
 			"action_channel", action.Channel,
 			"err", err)
-		return fmt.Errorf("channel_reply: send via %q failed: %w", sourceChannel, err)
+		return errs.Wrapf(err, "channel_reply: send via %q failed", sourceChannel)
 	}
 
 	span.SetStatus(codes.Ok, "sent")

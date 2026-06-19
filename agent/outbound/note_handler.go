@@ -2,7 +2,6 @@ package outbound
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -199,7 +199,7 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	if err := h.writer.WriteNote(ctx, entry); err != nil {
 		h.logger.Errorw("note save failed",
 			"entry_id", entry.ID, "err", err)
-		return fmt.Errorf("note_handler: save failed: %w", err)
+		return errs.Wrap(err, "note_handler: save failed")
 	}
 
 	return nil

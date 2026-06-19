@@ -3,12 +3,12 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/config"
 	"go.uber.org/zap"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -105,7 +105,7 @@ func SetupFromConfig(ctx context.Context, store *config.Store, toolMgr *tools.To
 	}
 
 	if err := RegisterTools(toolMgr, mgr); err != nil {
-		return nil, fmt.Errorf("mcp: register tools: %w", err)
+		return nil, errs.Wrap(err, "mcp: register tools")
 	}
 
 	logger.Infow("mcp: setup complete",

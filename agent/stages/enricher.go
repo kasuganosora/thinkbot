@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -41,7 +42,7 @@ func (s *EnricherStage) Name() string { return s.name }
 // Process 执行富化逻辑。
 func (s *EnricherStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
 	if err := s.enrichFn(ctx, env); err != nil {
-		s.logger.Warnw("enricher failed",
+		traceid.WithLoggerFrom(ctx, s.logger).Warnw("enricher failed",
 			"enricher", s.name,
 			"message_id", env.Message.ID,
 			"err", err)

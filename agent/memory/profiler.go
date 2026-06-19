@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -99,7 +100,7 @@ func (p *LLMProfiler) ExtractProfile(ctx context.Context, l1Entries, l2Entries [
 	})
 	if err != nil {
 		span.RecordError(err)
-		return nil, fmt.Errorf("profiler: LLM call failed: %w", err)
+		return nil, errs.Wrap(err, "profiler: LLM call failed")
 	}
 
 	items := p.parseResult(result.Text)

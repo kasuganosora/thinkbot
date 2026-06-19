@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // Config 重试配置。
@@ -153,7 +154,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 			log.Logger.Errorw("retry exhausted",
 				"name", name, "attempts", attempts, "panics", panics, "elapsed", elapsed, "err", err)
 			return Result{
-				Err:          fmt.Errorf("retry exhausted after %d attempts: %w", attempts, err),
+				Err:          errs.Wrapf(err, "retry exhausted after %d attempts", attempts),
 				Attempts:     attempts,
 				Panics:       panics,
 				TotalElapsed: elapsed,

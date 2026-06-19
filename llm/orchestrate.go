@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -98,7 +99,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	for i := range cfg.Params.Tools {
 		schema, err := resolveSchema(cfg.Params.Tools[i].Parameters)
 		if err != nil {
-			return nil, fmt.Errorf("llm: tool %q: %w", cfg.Params.Tools[i].Name, err)
+			return nil, errs.Wrapf(err, "llm: tool %q", cfg.Params.Tools[i].Name)
 		}
 		cfg.Params.Tools[i].Parameters = schema
 	}
@@ -250,7 +251,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 	for i := range cfg.Params.Tools {
 		schema, err := resolveSchema(cfg.Params.Tools[i].Parameters)
 		if err != nil {
-			return nil, fmt.Errorf("llm: tool %q: %w", cfg.Params.Tools[i].Name, err)
+			return nil, errs.Wrapf(err, "llm: tool %q", cfg.Params.Tools[i].Name)
 		}
 		cfg.Params.Tools[i].Parameters = schema
 	}
@@ -293,7 +294,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			provSR, err := prov.DoStream(ctx, params)
 			if err != nil {
-				send(&ErrorPart{Error: fmt.Errorf("llm: stream step %d: %w", step, err)})
+				send(&ErrorPart{Error: errs.Wrapf(err, "llm: stream step %d", step)})
 				break
 			}
 
@@ -582,7 +583,7 @@ func executeTools(
 
 			approval, err := approvalHandler(ctx, tc)
 			if err != nil {
-				return nil, fmt.Errorf("llm: approval handler for %q: %w", tc.ToolName, err)
+				return nil, errs.Wrapf(err, "llm: approval handler for %q", tc.ToolName)
 			}
 			switch approval.Decision {
 			case "", ToolApprovalApproved:

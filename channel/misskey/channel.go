@@ -15,6 +15,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -144,7 +145,7 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 	// 验证 Token
 	me, err := c.api.getSelf(ctx)
 	if err != nil {
-		return fmt.Errorf("misskey channel: token validation failed: %w", err)
+		return errs.Wrap(err, "misskey channel: token validation failed")
 	}
 	log.Logger.Infow("misskey channel started",
 		"channel", c.name, "username", me.Username, "host", c.cfg.Host)
@@ -695,7 +696,7 @@ func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 	if err != nil {
 		log.Logger.Warnw("misskey send: reply failed",
 			"channel", c.name, "note_id", noteID, "err", err)
-		return fmt.Errorf("misskey send: reply to %q failed: %w", noteID, err)
+		return errs.Wrapf(err, "misskey send: reply to %q failed", noteID)
 	}
 
 	return nil
