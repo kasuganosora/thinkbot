@@ -183,6 +183,29 @@ func (m *ToolManager) ProviderCount() int {
 	return m.registry.ProviderCount()
 }
 
+// ListTools 返回所有已注册静态工具的详情快照（按名称排序）。
+//
+// 返回的 ToolInfo 包含名称、描述、分类、适用场景等元数据，
+// 适合用于调试输出、工具列表展示或自省。
+// 仅包含静态注册的工具，不包括动态 ToolProvider 在运行时提供的工具。
+func (m *ToolManager) ListTools() []ToolInfo {
+	defs := m.registry.ListStatic()
+	result := make([]ToolInfo, 0, len(defs))
+	for i := range defs {
+		d := &defs[i]
+		result = append(result, ToolInfo{
+			Name:             d.Name,
+			Description:      d.Description,
+			Category:         d.Category,
+			Scopes:           d.Scopes,
+			RequireApproval:  d.RequireApproval,
+			HasPromptSection: d.PromptSection != nil,
+			Parameters:       d.Parameters,
+		})
+	}
+	return result
+}
+
 // envelopeToSessionContext 从 Pipeline Envelope 构建工具会话上下文。
 func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 	sctx := &ToolSessionContext{
