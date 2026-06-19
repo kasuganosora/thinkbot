@@ -7,13 +7,14 @@ import (
 
 // 标准配置键前缀。
 const (
-	PrefixDB      = "db"
-	PrefixLLM     = "llm"
-	PrefixBot     = "bot"
-	PrefixChannel = "channel"
-	PrefixLog     = "log"
-	PrefixMemory  = "memory"
-	PrefixTracing = "tracing"
+	PrefixDB       = "db"
+	PrefixLLM      = "llm"
+	PrefixBot      = "bot"
+	PrefixChannel  = "channel"
+	PrefixLog      = "log"
+	PrefixMemory   = "memory"
+	PrefixTracing  = "tracing"
+	PrefixWorkflow = "workflow"
 )
 
 // Bot 键。
@@ -33,6 +34,18 @@ const (
 // 日志键。
 const (
 	KeyLogLevel = "log.level"
+)
+
+// Workflow 键。
+const (
+	KeyWorkflowMaxParallel       = "workflow.max_parallel"
+	KeyWorkflowMaxRetries        = "workflow.max_retries"
+	KeyWorkflowMaxIterations     = "workflow.max_iterations"
+	KeyWorkflowRetryInitialMS    = "workflow.retry_initial_ms"
+	KeyWorkflowRetryMaxMS        = "workflow.retry_max_ms"
+	KeyWorkflowScheduleInterval  = "workflow.schedule_interval_ms"
+	KeyWorkflowAnalyzerTemp      = "workflow.analyzer_temperature"
+	KeyWorkflowAnalyzerMaxTokens = "workflow.analyzer_max_tokens"
 )
 
 // LLMConfigKey 返回存储 LLM 配置 JSON 的数据库键。
