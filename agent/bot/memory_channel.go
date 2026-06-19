@@ -67,13 +67,17 @@ func (c *MemoryChannel) BotID() string { return c.botID }
 
 // Start 启动 Channel（保存 Ingress 引用）。
 func (c *MemoryChannel) Start(_ context.Context, ingress *inbound.Ingress) error {
+	c.mu.Lock()
 	c.ingress = ingress
+	c.mu.Unlock()
 	return nil
 }
 
 // Stop 停止 Channel（无需清理）。
 func (c *MemoryChannel) Stop(_ context.Context) error {
+	c.mu.Lock()
 	c.ingress = nil
+	c.mu.Unlock()
 	return nil
 }
 
@@ -83,7 +87,14 @@ func (c *MemoryChannel) Stop(_ context.Context) error {
 
 // Inject 向 Bot 注入一条消息（阻塞式）。
 // 自动填充 BotID、Source 和 CreatedAt。
+// 如果 Channel 尚未启动（ingress 为 nil），返回错误。
 func (c *MemoryChannel) Inject(ctx context.Context, msg core.Message) error {
+	c.mu.Lock()
+	ingress := c.ingress
+	c.mu.Unlock()
+	if ingress == nil {
+		return fmt.Errorf("memory channel %q: not started, ingress is nil", c.name)
+	}
 	if msg.BotID == "" {
 		msg.BotID = c.botID
 	}
@@ -93,12 +104,15 @@ func (c *MemoryChannel) Inject(ctx context.Context, msg core.Message) error {
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
-	return c.ingress.Receive(ctx, msg)
+	return ingress.Receive(ctx, msg)
 }
 
 // TryInject 非阻塞式注入消息。缓冲区满时返回 false。
 func (c *MemoryChannel) TryInject(msg core.Message) bool {
-	if c.ingress == nil {
+	c.mu.Lock()
+	ingress := c.ingress
+	c.mu.Unlock()
+	if ingress == nil {
 		return false
 	}
 	if msg.BotID == "" {
@@ -110,7 +124,7 @@ func (c *MemoryChannel) TryInject(msg core.Message) bool {
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
-	return c.ingress.TryReceive(msg)
+	return ingress.TryReceive(msg)
 }
 
 // ============================================================================

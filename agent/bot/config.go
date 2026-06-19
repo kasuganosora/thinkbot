@@ -1,5 +1,7 @@
 package bot
 
+import "maps"
+
 // ============================================================================
 // BotConfig — Bot 级别配置
 // ============================================================================
@@ -25,6 +27,15 @@ type BotConfig struct {
 
 	// MaxTokens LLM 最大输出 token 数。
 	MaxTokens int `json:"maxTokens" yaml:"maxTokens"`
+
+	// LLMMain 主力 LLM 模型 ID（对应 config 中 llm.models.<id>）。
+	// 用于深度对话、工具调用等核心任务。
+	LLMMain string `json:"llmMain,omitempty" yaml:"llmMain,omitempty"`
+
+	// LLMLight 低成本 LLM 模型 ID（对应 config 中 llm.models.<id>）。
+	// 用于标题提取、简单分类等不需要深度思考的任务。
+	// 为空时回退到 LLMMain。
+	LLMLight string `json:"llmLight,omitempty" yaml:"llmLight,omitempty"`
 
 	// Extra 扩展配置（Stage 自定义参数等）。
 	// Stage 可通过 Envelope.Get("bot.config") 访问整个 BotConfig，
@@ -69,13 +80,17 @@ func (c BotConfig) Merge(other BotConfig) BotConfig {
 	if other.MaxTokens > 0 {
 		c.MaxTokens = other.MaxTokens
 	}
+	if other.LLMMain != "" {
+		c.LLMMain = other.LLMMain
+	}
+	if other.LLMLight != "" {
+		c.LLMLight = other.LLMLight
+	}
 	if other.Extra != nil {
 		if c.Extra == nil {
 			c.Extra = make(map[string]any)
 		}
-		for k, v := range other.Extra {
-			c.Extra[k] = v
-		}
+		maps.Copy(c.Extra, other.Extra)
 	}
 	return c
 }

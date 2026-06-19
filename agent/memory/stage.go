@@ -246,7 +246,7 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 
 		entry := Entry{
 			Scope:      scope,
-			Content:    text,
+			Content:    StripThinking(text),
 			Category:   category,
 			Source:     "note",
 			Importance: 0.5, // 默认中等重要度

@@ -25,5 +25,7 @@ go.work
 logs/
 *.db
 
-# Integration test files (contain API keys, do not commit)
-*_integration_test.go
+# Integration test files (contain real API keys, do not commit)
+agent/bot/integration_test.go
+agent/bot/multiturn_test.go
+agent/memory/integration_test.go

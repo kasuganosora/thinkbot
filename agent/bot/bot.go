@@ -71,8 +71,7 @@ type Bot struct {
 	logger          *zap.SugaredLogger
 
 	// 资源管理（Close 时释放）
-	ownRegistry bool  // Bot 是否创建了 CallbackRegistry（外部传入的不关）
-	ownEventBus bool  // Bot 是否创建了 EventBus（外部传入的不关）
+	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
 	closerOnce  sync.Once // 确保 Close 只执行一次
 
 	// botMetrics 是 Bot 层额外的指标（Engine 层有自己的基础指标）
@@ -269,12 +268,6 @@ func (b *Bot) Close() {
 		if b.ownRegistry {
 			if r, ok := b.callbackHandler.Registry().(interface{ Close() }); ok {
 				r.Close()
-			}
-		}
-		if b.ownEventBus {
-			if b.emitter.Enabled() {
-				// EventEmitter 不直接持有 bus 引用暴露给 Close，
-				// 但如果 ownEventBus=true 说明 Bot 创建了 bus，此处由外部管理
 			}
 		}
 	})
