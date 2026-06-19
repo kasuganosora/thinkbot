@@ -90,6 +90,44 @@ func (r *Repository) Get(id string) (*Workflow, error) {
 	return nil, errs.Newf("workflow %s not found", id)
 }
 
+// FindNonTerminal 从 DB 中查找所有非终态工作流（analyzing/running/interrupted）。
+// 纯内存模式下扫描缓存。
+// 用于启动时崩溃恢复。
+func (r *Repository) FindNonTerminal() ([]*Workflow, error) {
+	if r.db != nil {
+		var models []WorkflowModel
+		// GORM 无法在 JSON 内查询，所以取出全部然后内存过滤
+		if err := r.db.Find(&models).Error; err != nil {
+			return nil, errs.Wrap(err, "failed to query workflows from DB")
+		}
+
+		var result []*Workflow
+		for i := range models {
+			wf, err := FromModel(&models[i])
+			if err != nil {
+				r.logger.Warnw("failed to deserialize workflow during recovery scan",
+					"workflow_id", models[i].ID, "error", err)
+				continue
+			}
+			if wf.Status.IsRecoverable() {
+				result = append(result, wf)
+			}
+		}
+		return result, nil
+	}
+
+	// 纯内存模式
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []*Workflow
+	for _, wf := range r.cache {
+		if wf.Status.IsRecoverable() {
+			result = append(result, wf)
+		}
+	}
+	return result, nil
+}
+
 // List 列出最近的工作流（按创建时间降序，最多 limit 条）。
 func (r *Repository) List(limit int) ([]*Workflow, error) {
 	if limit <= 0 {

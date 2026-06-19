@@ -174,6 +174,12 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	}
 
 	// Phase 2: 调度执行
+	m.runScheduler(ctx, wf, maxParallel)
+}
+
+// runScheduler 创建并运行 Scheduler，更新指标。
+// 被 analyzeAndRun（新工作流）和 Recover（恢复工作流）共用。
+func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel int) {
 	cfg := SchedulerConfig{MaxParallel: maxParallel}
 	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger)
 
@@ -186,7 +192,6 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	finalStatus := scheduler.Run(ctx)
 	m.logger.Infow("workflow finished", "workflow_id", wf.ID, "status", finalStatus)
 
-	// 更新指标
 	switch finalStatus {
 	case WorkflowCompleted:
 		m.metrics.Completed.Add(1)
@@ -197,6 +202,140 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	}
 
 	m.cleanupRunning(wf.ID)
+}
+
+// ============================================================================
+// Recover — 崩溃恢复
+// ============================================================================
+
+// RecoveryResult 记录崩溃恢复的结果。
+type RecoveryResult struct {
+	Total       int      `json:"total"`       // 发现的非终态工作流总数
+	Resumed     int      `json:"resumed"`     // 成功恢复调度的工作流数
+	Reanalyzed  int      `json:"reanalyzed"`  // 需要重新分析的工作流数
+	Failed      int      `json:"failed"`      // 恢复失败的工作流数
+	WorkflowIDs []string `json:"workflowIds"` // 涉及的工作流 ID
+}
+
+// Recover 扫描数据库中所有非终态工作流（analyzing/running/interrupted），
+// 并根据状态执行恢复策略：
+//
+//   - analyzing 且无节点：重新提交分析（Phase 1 从头开始）
+//   - analyzing 且有节点 / running / interrupted：重置中断节点的中间状态，
+//     直接从 Phase 2（调度执行）恢复
+//
+// 应在服务启动时调用一次。
+func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
+	workflows, err := m.repo.FindNonTerminal()
+	if err != nil {
+		return nil, errs.Wrap(err, "failed to find non-terminal workflows")
+	}
+
+	result := &RecoveryResult{Total: len(workflows)}
+	m.logger.Infow("starting crash recovery", "non_terminal_count", len(workflows))
+
+	for _, wf := range workflows {
+		result.WorkflowIDs = append(result.WorkflowIDs, wf.ID)
+
+		// 跳过正在运行中的工作流（可能是 Recover 被重复调用）
+		m.mu.RLock()
+		_, isRunning := m.running[wf.ID]
+		m.mu.RUnlock()
+		if isRunning {
+			m.logger.Infow("workflow already running, skipping recovery",
+				"workflow_id", wf.ID)
+			continue
+		}
+
+		// 标记为 interrupted（恢复前的中间态）
+		prevStatus := wf.Status
+		wf.Status = WorkflowInterrupted
+		m.repo.Save(wf)
+
+		if len(wf.Nodes) == 0 {
+			// 无节点 = 分析阶段崩溃，重新分析
+			m.logger.Infow("recovering: re-analyzing workflow (no nodes)",
+				"workflow_id", wf.ID, "prev_status", prevStatus)
+
+			wf.Status = WorkflowAnalyzing
+			m.repo.Save(wf)
+
+			bgCtx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+
+			go m.analyzeAndRun(bgCtx, wf, 0, done)
+
+			m.mu.Lock()
+			m.running[wf.ID] = &runningInstance{
+				wf:     wf,
+				cancel: cancel,
+				done:   done,
+			}
+			m.mu.Unlock()
+
+			result.Reanalyzed++
+			continue
+		}
+
+		// 有节点 = 调度阶段中断，重置中间状态后恢复调度
+		m.logger.Infow("recovering: resuming workflow scheduling",
+			"workflow_id", wf.ID, "prev_status", prevStatus,
+			"node_count", len(wf.Nodes))
+
+		wf.EnsureIndex()
+		resetCount := 0
+		for _, n := range wf.Nodes {
+			if !n.Status.IsTerminal() && n.Status != NodePending {
+				// running/reviewing/ready → pending（执行被中断）
+				n.Status = NodePending
+				n.Error = ""
+				n.RetryCount = 0
+				n.StartedAt = nil
+				resetCount++
+			}
+		}
+
+		m.logger.Infow("reset interrupted nodes to pending",
+			"workflow_id", wf.ID, "reset_count", resetCount)
+
+		wf.Status = WorkflowRunning
+		if err := m.repo.Save(wf); err != nil {
+			m.logger.Errorw("failed to save recovered workflow",
+				"workflow_id", wf.ID, "error", err)
+			result.Failed++
+			continue
+		}
+
+		// 恢复调度执行
+		bgCtx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+
+		m.mu.Lock()
+		m.running[wf.ID] = &runningInstance{
+			wf:     wf,
+			cancel: cancel,
+			done:   done,
+		}
+		m.mu.Unlock()
+
+		go func(wf *Workflow) {
+			defer close(done)
+			m.metrics.Running.Add(1)
+			defer m.metrics.Running.Add(-1)
+
+			m.runScheduler(bgCtx, wf, 0)
+		}(wf)
+
+		result.Resumed++
+	}
+
+	m.logger.Infow("crash recovery complete",
+		"total", result.Total,
+		"resumed", result.Resumed,
+		"reanalyzed", result.Reanalyzed,
+		"failed", result.Failed)
+
+	return result, nil
 }
 
 // ============================================================================

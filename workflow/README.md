@@ -112,3 +112,27 @@ Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中
 ## 持久化
 
 采用 JSON 全量序列化策略：整个 `Workflow` 对象序列化为 `WorkflowModel.Data` 字段。读操作优先从内存缓存获取（O(1)），写操作同时更新内存和 DB。表名 `workflow_workflows`。
+
+## 崩溃恢复
+
+进程因发布、OOM 或 Kill 中断后，数据库中会残留 `analyzing` / `running` 状态的工作流。`Manager.Recover()` 在启动时扫描并自动恢复：
+
+```go
+// 3. 启动时恢复中断的工作流
+result, err := wfMgr.Recover(context.Background())
+// result.Resumed:    从调度阶段恢复的工作流数
+// result.Reanalyzed: 需要重新分析的工作流数
+```
+
+恢复策略：
+
+| 中断时状态 | 节点情况 | 恢复动作 |
+|-----------|---------|---------|
+| `analyzing` | 无节点 | 重新提交 Analyzer 分析（Phase 1 从头开始） |
+| `analyzing` / `running` | 已有节点 | 重置 `running`/`reviewing`/`ready` 节点为 `pending`，直接恢复调度（Phase 2 续跑） |
+| `interrupted` | 已有节点 | 同上 |
+
+关键设计：
+- **已完成的节点保留**：`completed`/`failed`/`skipped` 节点状态不变，避免重复执行
+- **中间状态重置**：被中断的 `running`/`reviewing` 节点清零 retry/iteration 计数，重置为 `pending` 等待重新调度
+- **幂等安全**：重复调用 `Recover()` 会跳过已经在运行中的工作流
