@@ -71,14 +71,29 @@ type LLMBundle struct {
 	// 为 nil 时表示与 Main 相同，调用方应回退到 Main。
 	Light llm.Provider
 
-	// MainDef / LightDef 对应的 ModelDef。
-	MainDef  config.ModelDef
-	LightDef config.ModelDef
+	// Vision 多模态辅助 Provider（图片/音频/视频转文字）。
+	// 为 nil 时表示未配置多模态辅助。
+	Vision llm.Provider
+
+	// MainDef / LightDef / VisionDef 对应的 ModelDef。
+	MainDef   config.ModelDef
+	LightDef  config.ModelDef
+	VisionDef config.ModelDef
 }
 
 // HasLight 返回是否有独立的低成本 LLM。
 func (b *LLMBundle) HasLight() bool {
 	return b.Light != nil
+}
+
+// HasVision 返回是否有独立的多模态辅助 LLM。
+func (b *LLMBundle) HasVision() bool {
+	return b.Vision != nil
+}
+
+// MainSupportsMultimodal 返回主力模型是否支持多模态输入。
+func (b *LLMBundle) MainSupportsMultimodal() bool {
+	return b.MainDef.Multimodal
 }
 
 // CreateLLMBundle 从 config Store 为指定 Bot 构建 LLM 实例集。
@@ -117,11 +132,30 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 			}
 			bundle.Light = lightProvider
 			bundle.LightDef = lightDef
-			return bundle, nil
+			return bundle.withVision(b, botID, assignment), nil
 		}
 	}
 
 	// Light 回退到 Main
 	bundle.LightDef = mainDef
-	return bundle, nil
+	return bundle.withVision(b, botID, assignment), nil
+}
+
+// withVision 尝试创建多模态辅助 Provider。
+// 如果未配置 Vision 或配置无效，返回原 bundle 不变。
+func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment config.BotLLMAssignment) *LLMBundle {
+	if assignment.Vision == "" {
+		return b
+	}
+	visionDef, ok := builder.GetLLMModel(assignment.Vision)
+	if !ok {
+		return b
+	}
+	visionProvider, err := CreateProvider(visionDef)
+	if err != nil {
+		return b
+	}
+	b.Vision = visionProvider
+	b.VisionDef = visionDef
+	return b
 }
