@@ -8,6 +8,7 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"
@@ -47,6 +48,10 @@ type WireConfig struct {
 
 	// Store 全局配置中心（可为 nil，则使用 config.DefaultWorkflowConfig()）。
 	Store *config.Store
+
+	// EventBus 旁路事件总线（可为 nil，则不发布事件）。
+	// Web SSE 订阅端通过 workflow_id 订阅实时进度事件。
+	EventBus outbound.EventBus
 }
 
 // EngineConfig 是从 config.Store 解析出的引擎运行时配置。
@@ -108,7 +113,7 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	executor := NewExecutor(saMgr, tp, cfg.Logger)
 
 	// 5. 工作流管理器
-	manager := NewManager(repo, analyzer, executor, tp, ec, cfg.Logger)
+	manager := NewManager(repo, analyzer, executor, tp, ec, cfg.Logger, cfg.EventBus)
 
 	return manager, saMgr
 }

@@ -10,7 +10,9 @@ import (
 	"go.uber.org/zap"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -40,6 +42,7 @@ type Manager struct {
 	tracer   trace.Tracer
 	tp       trace.TracerProvider
 	logger   *zap.SugaredLogger
+	emitter  *outbound.EventEmitter // 可为 nil（NoOp 模式）
 
 	mu      sync.RWMutex
 	running map[string]*runningInstance
@@ -58,7 +61,7 @@ type ManagerMetrics struct {
 }
 
 // NewManager 创建工作流管理器。
-func NewManager(repo *Repository, analyzer *Analyzer, executor *Executor, tp trace.TracerProvider, ec EngineConfig, logger *zap.SugaredLogger) *Manager {
+func NewManager(repo *Repository, analyzer *Analyzer, executor *Executor, tp trace.TracerProvider, ec EngineConfig, logger *zap.SugaredLogger, bus outbound.EventBus) *Manager {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
@@ -73,6 +76,7 @@ func NewManager(repo *Repository, analyzer *Analyzer, executor *Executor, tp tra
 		tracer:   tp.Tracer("github.com/kasuganosora/thinkbot/workflow/manager"),
 		tp:       tp,
 		logger:   logger.With("component", "workflow_manager"),
+		emitter:  outbound.NewEventEmitter(bus, ""),
 		running:  make(map[string]*runningInstance),
 	}
 }
@@ -121,6 +125,11 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 		return nil, errs.Wrap(err, "failed to save initial workflow")
 	}
 
+	// 发布提交事件
+	m.emitWorkflowEvent(wfID, outbound.EventWorkflowSubmitted, map[string]any{
+		"requirement": strutil.Truncate(req.Requirement, 200),
+	})
+
 	// 启动后台 goroutine
 	bgCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -144,6 +153,11 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	}, nil
 }
 
+// emitWorkflowEvent 发布工作流级事件（workflow_id 作为 TraceID，供 SSE 订阅端筛选）。
+func (m *Manager) emitWorkflowEvent(wfID string, eventType outbound.EventType, data map[string]any) {
+	m.emitter.Emit(context.Background(), eventType, wfID, data)
+}
+
 // analyzeAndRun 后台执行：分析需求 → 构建 DAG → 调度执行。
 func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel int, done chan struct{}) {
 	defer close(done)
@@ -159,6 +173,9 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 		wf.Error = fmt.Sprintf("需求分析失败: %s", err.Error())
 		m.repo.Save(wf)
 		m.metrics.Failed.Add(1)
+		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowFailed, map[string]any{
+			"error": wf.Error,
+		})
 		m.cleanupRunning(wf.ID)
 		return
 	}
@@ -173,6 +190,12 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 		m.logger.Errorw("failed to save analyzed workflow", "error", err)
 	}
 
+	// 发布分析完成事件
+	m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowAnalyzed, map[string]any{
+		"node_count": len(nodes),
+		"nodes":      nodeSummaries(nodes),
+	})
+
 	// Phase 2: 调度执行
 	m.runScheduler(ctx, wf, maxParallel)
 }
@@ -181,7 +204,7 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 // 被 analyzeAndRun（新工作流）和 Recover（恢复工作流）共用。
 func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel int) {
 	cfg := SchedulerConfig{MaxParallel: maxParallel}
-	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger)
+	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger, m.emitter)
 
 	m.mu.Lock()
 	if inst, ok := m.running[wf.ID]; ok {
@@ -191,6 +214,20 @@ func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel in
 
 	finalStatus := scheduler.Run(ctx)
 	m.logger.Infow("workflow finished", "workflow_id", wf.ID, "status", finalStatus)
+
+	// 发布终态事件
+	switch finalStatus {
+	case WorkflowCompleted:
+		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowCompleted, map[string]any{
+			"node_count": len(wf.Nodes),
+		})
+	case WorkflowFailed:
+		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowFailed, map[string]any{
+			"error": wf.Error,
+		})
+	case WorkflowTerminated:
+		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowTerminated, nil)
+	}
 
 	switch finalStatus {
 	case WorkflowCompleted:
@@ -543,6 +580,20 @@ func (m *Manager) cleanupRunning(wfID string) {
 // GetWorkflow 获取工作流领域对象（内部使用）。
 func (m *Manager) GetWorkflow(wfID string) (*Workflow, error) {
 	return m.repo.Get(wfID)
+}
+
+// nodeSummaries 生成节点的摘要信息（用于事件 payload）。
+func nodeSummaries(nodes []*DAGNode) []map[string]any {
+	result := make([]map[string]any, len(nodes))
+	for i, n := range nodes {
+		result[i] = map[string]any{
+			"id":           n.ID,
+			"name":         n.Name,
+			"dependencies": n.Dependencies,
+			"review":       n.Review,
+		}
+	}
+	return result
 }
 
 // WaitDone 阻塞等待指定工作流执行完成（主要用于测试）。

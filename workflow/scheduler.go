@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/retry"
 	"github.com/kasuganosora/thinkbot/util/strutil"
@@ -31,13 +32,14 @@ import (
 
 // Scheduler 执行单个工作流的 DAG 调度。
 type Scheduler struct {
-	wf          *Workflow
-	executor    *Executor
-	repo        *Repository
-	ec          EngineConfig
+	wf       *Workflow
+	executor *Executor
+	repo     *Repository
+	ec       EngineConfig
 	maxParallel int
-	tracer      trace.Tracer
-	logger      *zap.SugaredLogger
+	tracer   trace.Tracer
+	logger   *zap.SugaredLogger
+	emitter  *outbound.EventEmitter // 可为 nil
 
 	mu         sync.Mutex     // 保护 wf.Nodes 状态读写
 	sem        chan struct{}  // 并发限流 semaphore
@@ -56,12 +58,15 @@ type SchedulerConfig struct {
 }
 
 // NewScheduler 创建调度器。
-func NewScheduler(wf *Workflow, executor *Executor, repo *Repository, cfg SchedulerConfig, ec EngineConfig, tp trace.TracerProvider, logger *zap.SugaredLogger) *Scheduler {
+func NewScheduler(wf *Workflow, executor *Executor, repo *Repository, cfg SchedulerConfig, ec EngineConfig, tp trace.TracerProvider, logger *zap.SugaredLogger, emitter *outbound.EventEmitter) *Scheduler {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
+	}
+	if emitter == nil {
+		emitter = &outbound.EventEmitter{}
 	}
 	maxParallel := cfg.MaxParallel
 	if maxParallel <= 0 {
@@ -78,6 +83,7 @@ func NewScheduler(wf *Workflow, executor *Executor, repo *Repository, cfg Schedu
 		maxParallel:   maxParallel,
 		tracer:        tp.Tracer("github.com/kasuganosora/thinkbot/workflow/scheduler"),
 		logger:        logger.With("component", "workflow_scheduler", "workflow_id", wf.ID),
+		emitter:       emitter,
 		sem:           make(chan struct{}, maxParallel),
 		terminate:     make(chan struct{}),
 		retryRequests: make(chan string, 16),
@@ -214,6 +220,12 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	s.mu.Unlock()
 	s.persist()
 
+	s.emitNodeEvent(outbound.EventWorkflowNodeStarted, map[string]any{
+		"node_id":   node.ID,
+		"node_name": node.Name,
+		"task":      strutil.Truncate(node.Task, 200),
+	})
+
 	// ================================================================
 	// Phase 1: 执行 + 错误重试（使用 util/retry，指数退避 + panic recovery）
 	// ================================================================
@@ -241,6 +253,13 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 			node.Error = err.Error()
 			s.mu.Unlock()
 			s.persist()
+
+			s.emitNodeEvent(outbound.EventWorkflowNodeRetrying, map[string]any{
+				"node_id":   node.ID,
+				"attempt":   attempt,
+				"max_retries": maxRetries,
+				"error":     err.Error(),
+			})
 
 			logger.Warnw("node execution failed, retrying",
 				"node_id", node.ID,
@@ -281,6 +300,12 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		node.CompletedAt = &completedAt
 		s.mu.Unlock()
 		s.persist()
+
+		s.emitNodeEvent(outbound.EventWorkflowNodeFailed, map[string]any{
+			"node_id":      node.ID,
+			"retry_count":  node.RetryCount,
+			"error":        lastErr.Error(),
+		})
 
 		// 级联跳过下游节点
 		s.mu.Lock()
@@ -334,6 +359,13 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	s.mu.Unlock()
 	s.persist()
 
+	s.emitNodeEvent(outbound.EventWorkflowNodeCompleted, map[string]any{
+		"node_id":         node.ID,
+		"retry_count":     node.RetryCount,
+		"iteration_count": node.IterationCount,
+		"result_preview":  strutil.Truncate(result, 500),
+	})
+
 	logger.Infow("node completed", "node_id", node.ID,
 		"retries", node.RetryCount, "iterations", node.IterationCount)
 }
@@ -370,6 +402,11 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 		node.Status = NodeReviewing
 		s.mu.Unlock()
 		s.persist()
+
+		s.emitNodeEvent(outbound.EventWorkflowNodeReviewing, map[string]any{
+			"node_id":   node.ID,
+			"iteration": iter + 1,
+		})
 
 		// 执行 Review
 		reviewResult, err := s.executor.Review(ctx, node, result)
@@ -534,6 +571,11 @@ func (s *Scheduler) persist() {
 			s.logger.Errorw("failed to persist workflow state", "error", err)
 		}
 	}
+}
+
+// emitNodeEvent 发布节点级事件（workflow_id 作为 TraceID）。
+func (s *Scheduler) emitNodeEvent(eventType outbound.EventType, data map[string]any) {
+	s.emitter.Emit(context.Background(), eventType, s.wf.ID, data)
 }
 
 func (s *Scheduler) computeFinalStatus() WorkflowStatus {
