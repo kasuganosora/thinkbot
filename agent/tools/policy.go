@@ -128,6 +128,24 @@ func ParseToolPolicy(jsonStr string) ToolPolicy {
 }
 
 // ============================================================================
+// PolicyStore — 策略配置读取接口（最小依赖）
+// ============================================================================
+
+// PolicyStore 是 ToolManager 读取工具策略所需的最小配置存储接口。
+// 通常由 *config.Store 满足（config.Store.GetString 签名兼容）。
+// 使用接口而非直接依赖 config 包，保持 tools 包的独立性。
+type PolicyStore interface {
+	// GetString 返回指定键的字符串值，不存在时返回 def。
+	GetString(key, def string) string
+}
+
+// toolPolicyKey 构造指定 botID 的工具策略数据库键。
+// 格式：tools.<botID>.policy
+func toolPolicyKey(botID string) string {
+	return "tools." + botID + ".policy"
+}
+
+// ============================================================================
 // ToolPolicyProvider — 策略提供者接口（运行时动态获取策略）
 // ============================================================================
 
@@ -143,6 +161,17 @@ type ToolPolicyFunc func(botID string) ToolPolicy
 
 func (f ToolPolicyFunc) GetPolicy(botID string) ToolPolicy {
 	return f(botID)
+}
+
+// NewStorePolicyProvider 从 PolicyStore 创建策略提供者。
+// 每次调用 GetPolicy 时实时读取最新配置，支持运行时热更新。
+func NewStorePolicyProvider(store PolicyStore) ToolPolicyProvider {
+	return ToolPolicyFunc(func(botID string) ToolPolicy {
+		if store == nil {
+			return ToolPolicy{}
+		}
+		return ParseToolPolicy(store.GetString(toolPolicyKey(botID), ""))
+	})
 }
 
 // ============================================================================

@@ -1,9 +1,12 @@
 package tools
 
 import (
+	"context"
 	"testing"
 
+	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/llm"
+	"go.uber.org/zap"
 )
 
 func makeTool(name string) llm.Tool {
@@ -250,5 +253,125 @@ func TestToolPolicyFunc(t *testing.T) {
 	}
 	if !provider.GetPolicy("bot-002").IsAllowed("blocked", "", "", "") {
 		t.Error("expected allowed for bot-002")
+	}
+}
+
+// ============================================================================
+// 自动接入策略测试 — 构造时就生效，无需手动 SetPolicyProvider
+// ============================================================================
+
+// mockPolicyStore 模拟 config.Store 的策略存储。
+type mockPolicyStore struct {
+	data map[string]string
+}
+
+func (m *mockPolicyStore) GetString(key, def string) string {
+	if v, ok := m.data[key]; ok {
+		return v
+	}
+	return def
+}
+
+func TestNewStorePolicyProvider(t *testing.T) {
+	store := &mockPolicyStore{
+		data: map[string]string{
+			"tools.bot-001.policy": `{"rules":[{"disabled":["dangerous_tool"]}]}`,
+		},
+	}
+
+	provider := NewStorePolicyProvider(store)
+
+	// bot-001 有策略，dangerous_tool 应被禁用
+	p1 := provider.GetPolicy("bot-001")
+	if p1.IsAllowed("dangerous_tool", "", "", "") {
+		t.Error("expected dangerous_tool blocked for bot-001")
+	}
+	if !p1.IsAllowed("safe_tool", "", "", "") {
+		t.Error("expected safe_tool allowed for bot-001")
+	}
+
+	// bot-002 没有配置策略，全部放行
+	p2 := provider.GetPolicy("bot-002")
+	if !p2.IsAllowed("dangerous_tool", "", "", "") {
+		t.Error("expected dangerous_tool allowed for bot-002 (no policy)")
+	}
+}
+
+func TestToolManager_AutoWiredPolicy(t *testing.T) {
+	store := &mockPolicyStore{
+		data: map[string]string{
+			"tools.bot-001.policy": `{"rules":[{"disabled":["blocked_tool"]}]}`,
+		},
+	}
+
+	// 构造时传入 store，策略应自动接入，无需手动调用 SetPolicyProvider
+	mgr := NewToolManager(prompt.NewRegistry(), store, zap.NewNop().Sugar())
+
+	mgr.Register(ToolDef{
+		Tool: llm.Tool{Name: "blocked_tool", Description: "should be filtered"},
+	})
+	mgr.Register(ToolDef{
+		Tool: llm.Tool{Name: "allowed_tool", Description: "should pass"},
+	})
+
+	sctx := &ToolSessionContext{
+		BotID:    "bot-001",
+		Channel:  "test",
+		ChatType: "private",
+		UserID:   "user1",
+	}
+
+	tools, err := mgr.ResolveTools(context.Background(), sctx)
+	if err != nil {
+		t.Fatalf("ResolveTools failed: %v", err)
+	}
+
+	// blocked_tool 应被过滤掉
+	for _, tl := range tools {
+		if tl.Name == "blocked_tool" {
+			t.Error("expected blocked_tool to be filtered by auto-wired policy")
+		}
+	}
+	if len(tools) != 1 || tools[0].Name != "allowed_tool" {
+		t.Errorf("expected only allowed_tool, got %v", tools)
+	}
+
+	// bot-002 没有策略，两个工具都应可用
+	sctx2 := &ToolSessionContext{
+		BotID:    "bot-002",
+		Channel:  "test",
+		ChatType: "private",
+		UserID:   "user1",
+	}
+	tools2, err := mgr.ResolveTools(context.Background(), sctx2)
+	if err != nil {
+		t.Fatalf("ResolveTools(bot-002) failed: %v", err)
+	}
+	if len(tools2) != 2 {
+		t.Errorf("expected 2 tools for bot-002 (no policy), got %d", len(tools2))
+	}
+}
+
+func TestToolManager_NilStoreNoPolicy(t *testing.T) {
+	// store 为 nil 时不做策略过滤
+	mgr := NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
+
+	mgr.Register(ToolDef{
+		Tool: llm.Tool{Name: "any_tool", Description: "should always pass"},
+	})
+
+	sctx := &ToolSessionContext{
+		BotID:    "any-bot",
+		Channel:  "test",
+		ChatType: "group",
+		UserID:   "user1",
+	}
+
+	tools, err := mgr.ResolveTools(context.Background(), sctx)
+	if err != nil {
+		t.Fatalf("ResolveTools failed: %v", err)
+	}
+	if len(tools) != 1 {
+		t.Errorf("expected 1 tool (no policy), got %d", len(tools))
 	}
 }

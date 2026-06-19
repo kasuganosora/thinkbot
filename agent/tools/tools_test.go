@@ -205,7 +205,7 @@ func TestToolRegistry_ResolveDynamicError(t *testing.T) {
 
 func TestToolManager_RegisterAndPrompt(t *testing.T) {
 	promptReg := prompt.NewRegistry()
-	mgr := NewToolManager(promptReg, nil)
+	mgr := NewToolManager(promptReg, nil, nil)
 
 	tool := ToolDef{
 		Category: "test",
@@ -259,7 +259,7 @@ func TestToolManager_RegisterAndPrompt(t *testing.T) {
 
 func TestToolManager_UnregisterRemovesPrompt(t *testing.T) {
 	promptReg := prompt.NewRegistry()
-	mgr := NewToolManager(promptReg, nil)
+	mgr := NewToolManager(promptReg, nil, nil)
 
 	mgr.Register(ToolDef{
 		Tool:         llm.Tool{Name: "temp_tool", Description: "Temporary"},
@@ -284,7 +284,7 @@ func TestToolManager_UnregisterRemovesPrompt(t *testing.T) {
 
 func TestToolManager_SetHeaderAndRules(t *testing.T) {
 	promptReg := prompt.NewRegistry()
-	mgr := NewToolManager(promptReg, nil)
+	mgr := NewToolManager(promptReg, nil, nil)
 
 	mgr.SetHeaderSection(DefaultToolHeaderSection([]string{"tool_a", "tool_b"}))
 	mgr.SetRulesSection(DefaultToolRulesSection())
@@ -311,7 +311,7 @@ func TestToolManager_SetHeaderAndRules(t *testing.T) {
 
 func TestToolManager_ResolveForEnvelope(t *testing.T) {
 	promptReg := prompt.NewRegistry()
-	mgr := NewToolManager(promptReg, nil)
+	mgr := NewToolManager(promptReg, nil, nil)
 
 	mgr.Register(ToolDef{
 		Tool:   llm.Tool{Name: "env_tool", Description: "Env"},

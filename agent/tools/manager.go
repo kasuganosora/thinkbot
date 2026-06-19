@@ -32,7 +32,8 @@ type ToolManager struct {
 	headerSec   *ToolPromptSection
 	rulesSec    *ToolPromptSection
 
-	// policyProvider 动态工具权限策略提供者（nil 表示不做策略过滤）。
+	// policyProvider 工具权限策略提供者（nil 表示不做策略过滤）。
+	// 构造时从 PolicyStore 自动接入，运行时实时读取。
 	policyProvider ToolPolicyProvider
 
 	// 是否在注册工具时自动生成描述段落
@@ -42,17 +43,26 @@ type ToolManager struct {
 // NewToolManager 创建工具管理器。
 //
 // promptReg 是 prompt 模块的 Registry，工具提示词段落会注册到这里。
-func NewToolManager(promptReg *prompt.Registry, logger *zap.SugaredLogger) *ToolManager {
+// store 是配置存储（通常 *config.Store），用于自动加载工具权限策略。
+// 传 nil 则不做策略过滤（全部工具可用）。
+func NewToolManager(promptReg *prompt.Registry, store PolicyStore, logger *zap.SugaredLogger) *ToolManager {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
-	return &ToolManager{
-		registry:    NewToolRegistry(),
-		promptMgr:   NewToolPromptManager(promptReg, "tool_"),
-		promptReg:   promptReg,
-		logger:      logger.With("component", "tool_manager"),
+	m := &ToolManager{
+		registry:     NewToolRegistry(),
+		promptMgr:    NewToolPromptManager(promptReg, "tool_"),
+		promptReg:    promptReg,
+		logger:       logger.With("component", "tool_manager"),
 		autoDescribe: true,
 	}
+
+	// 自动接入策略：从 store 实时读取，无需手动调用 SetPolicyProvider
+	if store != nil {
+		m.policyProvider = NewStorePolicyProvider(store)
+	}
+
+	return m
 }
 
 // Registry 返回内部 ToolRegistry（高级用法）。
@@ -156,8 +166,9 @@ func (m *ToolManager) EnableAutoDescribe(enabled bool) {
 	m.autoDescribe = enabled
 }
 
-// SetPolicyProvider 设置工具权限策略提供者。
-// 设置后，ResolveTools 会根据策略过滤掉被禁用的工具。
+// SetPolicyProvider 设置工具权限策略提供者（高级覆盖）。
+// 通常构造时已从 PolicyStore 自动接入，无需手动调用。
+// 仅在需要自定义策略来源（非 config.Store）时使用。
 // 传入 nil 可取消策略过滤。
 func (m *ToolManager) SetPolicyProvider(pp ToolPolicyProvider) {
 	m.mu.Lock()

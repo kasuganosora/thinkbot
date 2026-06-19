@@ -10,7 +10,7 @@ import (
 )
 
 func TestListTools_Empty(t *testing.T) {
-	mgr := NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	mgr := NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	tools := mgr.ListTools()
 	if len(tools) != 0 {
 		t.Fatalf("expected 0 tools, got %d", len(tools))
@@ -18,7 +18,7 @@ func TestListTools_Empty(t *testing.T) {
 }
 
 func TestListTools_Details(t *testing.T) {
-	mgr := NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	mgr := NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 
 	err := mgr.RegisterMany(
 		ToolDef{
@@ -85,7 +85,7 @@ func TestListTools_Details(t *testing.T) {
 }
 
 func TestListTools_AfterUnregister(t *testing.T) {
-	mgr := NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	mgr := NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	_ = mgr.Register(ToolDef{
 		Tool:     llm.Tool{Name: "temp_tool", Description: "Temporary tool"},
 		Category: "test",
