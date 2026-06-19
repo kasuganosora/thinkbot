@@ -128,6 +128,10 @@ type ModelDef struct {
 
 	// MaxTokens 最大输出 token 数（默认 4096）。
 	MaxTokens int `json:"max_tokens,omitempty"`
+
+	// Multimodal 标记此模型是否支持多模态输入（图片/音频/视频）。
+	// 为 true 时，MultimodalStage 不会对此 bot 的消息做辅助转写。
+	Multimodal bool `json:"multimodal,omitempty"`
 }
 
 // GetLLMModel 从数据库读取单个 LLM 配置（JSON）。
@@ -185,14 +189,20 @@ type BotLLMAssignment struct {
 	// Light 低成本 LLM ID（标题提取、简单分类）。
 	// 为空时回退到 Main。
 	Light string `json:"light"`
+
+	// Vision 多模态辅助 LLM ID。
+	// 当 Main 模型不支持多模态时，用此模型将图片/音频/视频转为文字描述。
+	// 为空时表示不启用多模态转写。
+	Vision string `json:"vision"`
 }
 
 // GetBotLLMAssignment 读取指定 Bot 的 LLM 角色分配。
 // 键格式：bot.<bot_id>.main、bot.<bot_id>.light
 func (b *Builder) GetBotLLMAssignment(botID string) BotLLMAssignment {
 	a := BotLLMAssignment{
-		Main:  b.store.GetString(BotLLMKey(botID, "main"), ""),
-		Light: b.store.GetString(BotLLMKey(botID, "light"), ""),
+		Main:   b.store.GetString(BotLLMKey(botID, "main"), ""),
+		Light:  b.store.GetString(BotLLMKey(botID, "light"), ""),
+		Vision: b.store.GetString(BotLLMKey(botID, "vision"), ""),
 	}
 	if a.Light == "" {
 		a.Light = a.Main
