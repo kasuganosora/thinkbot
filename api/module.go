@@ -16,6 +16,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/skill"
 )
 
@@ -114,8 +115,9 @@ func newAPIServer(
 	logger *zap.SugaredLogger,
 	workflowSvc *WorkflowService,
 	skillMgr *skill.SkillManager,
+	bindSvc *identity.BindService,
 ) *Server {
-	return NewServer(authSvc, botSvc, cookie, chatHistory, store, db, logger, workflowSvc, skillMgr)
+	return NewServer(authSvc, botSvc, cookie, chatHistory, store, db, logger, workflowSvc, skillMgr, bindSvc)
 }
 
 // registerAPILifecycle 绑定 Server 和 BotService 的生命周期。
