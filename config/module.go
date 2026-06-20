@@ -656,3 +656,57 @@ func ToolPolicyMetaSpecs() []MetaSpec {
 		{Key: "tools.policy", Category: "Tools", Description: "工具黑名单权限策略（JSON）。键格式 tools.<botID>.policy。支持按 channel+chatType 禁用工具，并为特定用户开放白名单。"},
 	}
 }
+
+// --- Dreaming 配置 ---
+
+// DreamingConfig 描述 per-bot 梦境巩固系统的配置。
+type DreamingConfig struct {
+	// Enabled 是否启用梦境巩固。
+	Enabled bool `json:"enabled"`
+	// Schedule cron 调度表达式（默认 "0 3 * * *"，即每天凌晨 3 点）。
+	Schedule string `json:"schedule"`
+}
+
+// DefaultDreamingConfig 返回梦境巩固的默认配置。
+func DefaultDreamingConfig() DreamingConfig {
+	return DreamingConfig{
+		Enabled:  false,
+		Schedule: "0 3 * * *",
+	}
+}
+
+// GetDreamingConfig 读取指定 Bot 的梦境巩固配置。
+// 键格式：bot.<bot_id>.dreaming.enabled / bot.<bot_id>.dreaming.schedule
+func (b *Builder) GetDreamingConfig(botID string) DreamingConfig {
+	d := DefaultDreamingConfig()
+	return DreamingConfig{
+		Enabled:  b.store.GetBool(BotDreamingKey(botID, "enabled"), d.Enabled),
+		Schedule: b.store.GetString(BotDreamingKey(botID, "schedule"), d.Schedule),
+	}
+}
+
+// SetDreamingConfig 持久化指定 Bot 的梦境巩固配置。
+func (b *Builder) SetDreamingConfig(ctx context.Context, botID string, cfg DreamingConfig) error {
+	if err := b.store.Set(ctx, BotDreamingKey(botID, "enabled"), boolStr(cfg.Enabled)); err != nil {
+		return err
+	}
+	if cfg.Schedule != "" {
+		return b.store.Set(ctx, BotDreamingKey(botID, "schedule"), cfg.Schedule)
+	}
+	return nil
+}
+
+// DreamingMetaSpecs 返回梦境巩固配置项的元数据。
+func DreamingMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: "bot.dreaming.enabled", Category: "Dreaming", Description: "是否启用梦境巩固（后台记忆整理，默认关闭）。键格式 bot.<botID>.dreaming.enabled"},
+		{Key: "bot.dreaming.schedule", Category: "Dreaming", Description: "梦境巩固的 cron 调度表达式（默认 0 3 * * *，即每天凌晨 3 点）。键格式 bot.<botID>.dreaming.schedule"},
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}

@@ -127,6 +127,14 @@ func ToolPolicyKey(botID string) string {
 	return "tools." + botID + ".policy"
 }
 
+// BotDreamingKey 返回指定 bot 的梦境巩固配置键。
+// sub 为具体配置项名称（如 "enabled"、"schedule"）。
+// 格式：bot.<bot_id>.dreaming.<sub>
+// 例如：bot.mybot.dreaming.enabled → "true"
+func BotDreamingKey(botID, sub string) string {
+	return "bot." + botID + ".dreaming." + sub
+}
+
 // LLMConfigKey 返回存储 LLM 配置 JSON 的数据库键。
 // 格式：llm.<llm_id>
 // 例如：llm.main、llm.light、llm.claude
