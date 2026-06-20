@@ -87,7 +87,7 @@ type localWorkspace struct {
 	logger *zap.SugaredLogger
 }
 
-func (w *localWorkspace) ID() string     { return w.id }
+func (w *localWorkspace) ID() string      { return w.id }
 func (w *localWorkspace) WorkDir() string { return w.root }
 
 func (w *localWorkspace) HealthCheck(ctx context.Context) HealthStatus {

@@ -47,9 +47,9 @@ func NewRecorderModule(p StatsParams) (*Recorder, llm.UsageRecorder) {
 type LifecycleParams struct {
 	fx.In
 
-	Recorder *Recorder
+	Recorder  *Recorder
 	Lifecycle fx.Lifecycle
-	Logger   *zap.SugaredLogger
+	Logger    *zap.SugaredLogger
 }
 
 // RegisterLifecycle 在 fx.Module 中通过 Invoke 调用。

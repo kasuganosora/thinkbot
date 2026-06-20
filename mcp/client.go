@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/kasuganosora/thinkbot/llm"
-	"go.uber.org/zap"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"go.uber.org/zap"
 )
 
 // ============================================================================

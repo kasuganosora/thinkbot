@@ -3,10 +3,10 @@ package memory
 import (
 	"context"
 	"fmt"
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"sort"
 	"strings"
 	"time"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================

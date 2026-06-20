@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
@@ -427,10 +429,45 @@ func parseAPIError(resp *httputil.Response, httpErr error) error {
 	if resp != nil && resp.StatusCode >= 400 {
 		var errResp ErrorResponse
 		if err := json.Unmarshal(resp.Body, &errResp); err == nil && errResp.Error.Message != "" {
-			return &errResp.Error
+			return grokErrorToLLMError(&errResp.Error, resp.StatusCode)
 		}
+		return llm.NewLLMError(
+			grokHttpStatusToReason(resp.StatusCode),
+			"grok",
+			fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(resp.Body)),
+			llm.WithCause(httpErr),
+		)
+	}
+	if httpErr != nil {
+		return llm.NewLLMError(llm.ErrorReasonTransport, "grok", httpErr.Error(), llm.WithCause(httpErr))
 	}
 	return httpErr
+}
+
+func grokErrorToLLMError(apiErr *APIError, statusCode int) *llm.LLMError {
+	return llm.NewLLMError(
+		grokHttpStatusToReason(statusCode),
+		"grok",
+		apiErr.Message,
+		llm.WithCause(apiErr),
+	)
+}
+
+func grokHttpStatusToReason(statusCode int) llm.ErrorReason {
+	switch {
+	case statusCode == 429:
+		return llm.ErrorReasonRateLimit
+	case statusCode == 401 || statusCode == 403:
+		return llm.ErrorReasonAuthentication
+	case statusCode == 402:
+		return llm.ErrorReasonQuotaExceeded
+	case statusCode >= 500:
+		return llm.ErrorReasonProviderInternal
+	case statusCode >= 400:
+		return llm.ErrorReasonInvalidRequest
+	default:
+		return llm.ErrorReasonTransport
+	}
 }
 
 func validateRequest(req *ChatCompletionRequest) error {

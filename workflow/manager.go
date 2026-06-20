@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -53,11 +53,11 @@ type Manager struct {
 
 // ManagerMetrics 是工作流管理器的运行时指标（原子计数器快照）。
 type ManagerMetrics struct {
-	Submitted atomic.Int64 // 累计提交
-	Completed atomic.Int64 // 累计成功完成
-	Failed    atomic.Int64 // 累计失败
+	Submitted  atomic.Int64 // 累计提交
+	Completed  atomic.Int64 // 累计成功完成
+	Failed     atomic.Int64 // 累计失败
 	Terminated atomic.Int64 // 累计终止
-	Running   atomic.Int64 // 当前运行中
+	Running    atomic.Int64 // 当前运行中
 }
 
 // NewManager 创建工作流管理器。
@@ -171,7 +171,7 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 		m.logger.Errorw("analysis failed", "workflow_id", wf.ID, "error", err)
 		wf.Status = WorkflowFailed
 		wf.Error = fmt.Sprintf("需求分析失败: %s", err.Error())
-		m.repo.Save(wf)
+		_ = m.repo.Save(wf)
 		m.metrics.Failed.Add(1)
 		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowFailed, map[string]any{
 			"error": wf.Error,
@@ -287,7 +287,7 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 		// 标记为 interrupted（恢复前的中间态）
 		prevStatus := wf.Status
 		wf.Status = WorkflowInterrupted
-		m.repo.Save(wf)
+		_ = m.repo.Save(wf)
 
 		if len(wf.Nodes) == 0 {
 			// 无节点 = 分析阶段崩溃，重新分析
@@ -295,7 +295,7 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 				"workflow_id", wf.ID, "prev_status", prevStatus)
 
 			wf.Status = WorkflowAnalyzing
-			m.repo.Save(wf)
+			_ = m.repo.Save(wf)
 
 			bgCtx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -381,13 +381,13 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 
 // StatusResult 是工作流状态查询结果。
 type StatusResult struct {
-	ID          string          `json:"id"`
-	Status      WorkflowStatus  `json:"status"`
-	Requirement string          `json:"requirement"`
-	NodeCount   int             `json:"nodeCount"`
-	Progress    ProgressInfo    `json:"progress"`
-	CreatedAt   string          `json:"createdAt"`
-	Error       string          `json:"error,omitempty"`
+	ID          string         `json:"id"`
+	Status      WorkflowStatus `json:"status"`
+	Requirement string         `json:"requirement"`
+	NodeCount   int            `json:"nodeCount"`
+	Progress    ProgressInfo   `json:"progress"`
+	CreatedAt   string         `json:"createdAt"`
+	Error       string         `json:"error,omitempty"`
 }
 
 // ProgressInfo 是工作流进度信息。
@@ -449,11 +449,11 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 
 // ListNodesResult 是节点列表查询结果。
 type ListNodesResult struct {
-	WorkflowID string      `json:"workflowId"`
+	WorkflowID string         `json:"workflowId"`
 	Status     WorkflowStatus `json:"status"`
-	Format     string      `json:"format"` // "flat" or "tree"
-	Flat       []NodeFlat  `json:"flat,omitempty"`
-	Tree       []*TreeNode `json:"tree,omitempty"`
+	Format     string         `json:"format"` // "flat" or "tree"
+	Flat       []NodeFlat     `json:"flat,omitempty"`
+	Tree       []*TreeNode    `json:"tree,omitempty"`
 }
 
 // ListNodes 查询工作流节点列表。
@@ -500,7 +500,7 @@ const (
 
 // ControlRequest 是控制操作请求。
 type ControlRequest struct {
-	Action ControlAction `json:"action"` // "retry" or "terminate"
+	Action ControlAction `json:"action"`           // "retry" or "terminate"
 	NodeID string        `json:"nodeId,omitempty"` // retry 时指定节点 ID
 }
 

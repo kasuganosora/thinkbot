@@ -29,7 +29,7 @@ func testDB(t *testing.T) *gorm.DB {
 	}
 	t.Cleanup(func() {
 		sqlDB, _ := db.DB()
-		sqlDB.Close()
+		_ = sqlDB.Close()
 	})
 	return db
 }
@@ -120,9 +120,9 @@ func TestSQLiteRepository_ScopeIsolation(t *testing.T) {
 	ctx := context.Background()
 
 	// 写入不同 scope
-	repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-1"), Content: "A"})
-	repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-2"), Content: "B"})
-	repo.Append(ctx, memory.Entry{Scope: memory.UserScope("user-1"), Content: "C"})
+	_ = repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-1"), Content: "A"})
+	_ = repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-2"), Content: "B"})
+	_ = repo.Append(ctx, memory.Entry{Scope: memory.UserScope("user-1"), Content: "C"})
 
 	// 验证隔离
 	entries, _ := repo.Recent(ctx, memory.ChannelScope("ch-1"), 10)
@@ -152,7 +152,7 @@ func TestSQLiteRepository_Eviction(t *testing.T) {
 
 	// 写入 5 条
 	for i := 0; i < 5; i++ {
-		repo.Append(ctx, memory.Entry{
+		_ = repo.Append(ctx, memory.Entry{
 			Scope:     scope,
 			Content:   string(rune('A' + i)),
 			CreatedAt: time.Now().Add(time.Duration(i) * time.Second),
@@ -181,7 +181,7 @@ func TestSQLiteRepository_Delete(t *testing.T) {
 		Scope:   scope,
 		Content: "to be deleted",
 	}
-	repo.Append(ctx, entry)
+	_ = repo.Append(ctx, entry)
 
 	err := repo.Delete(ctx, scope, "del-001")
 	if err != nil {
@@ -200,9 +200,9 @@ func TestSQLiteRepository_Clear(t *testing.T) {
 	ctx := context.Background()
 	scope := memory.ChannelScope("ch-clear")
 
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "A"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "B"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "C"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "A"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "B"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "C"})
 
 	err := repo.Clear(ctx, scope)
 	if err != nil {
@@ -221,9 +221,9 @@ func TestSQLiteRepository_Retrieve_TextFilter(t *testing.T) {
 	ctx := context.Background()
 	scope := memory.ChannelScope("ch-search")
 
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "Go is a programming language"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "Python is popular for ML"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "Go has great concurrency"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "Go is a programming language"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "Python is popular for ML"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "Go has great concurrency"})
 
 	entries, err := repo.Retrieve(ctx, memory.Query{
 		Scopes: []memory.Scope{scope},
@@ -243,9 +243,9 @@ func TestSQLiteRepository_Retrieve_CategoryFilter(t *testing.T) {
 	ctx := context.Background()
 	scope := memory.ChannelScope("ch-cat")
 
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "A", Category: "fact"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "B", Category: "preference"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "C", Category: "fact"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "A", Category: "fact"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "B", Category: "preference"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "C", Category: "fact"})
 
 	entries, err := repo.Retrieve(ctx, memory.Query{
 		Scopes:   []memory.Scope{scope},
@@ -265,9 +265,9 @@ func TestSQLiteRepository_Retrieve_ImportanceFilter(t *testing.T) {
 	ctx := context.Background()
 	scope := memory.ChannelScope("ch-imp")
 
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "low", Importance: 0.2})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "high", Importance: 0.9})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "mid", Importance: 0.5})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "low", Importance: 0.2})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "high", Importance: 0.9})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "mid", Importance: 0.5})
 
 	entries, err := repo.Retrieve(ctx, memory.Query{
 		Scopes:        []memory.Scope{scope},
@@ -287,9 +287,9 @@ func TestSQLiteRepository_Retrieve_SourceFilter(t *testing.T) {
 	ctx := context.Background()
 	scope := memory.ChannelScope("ch-src")
 
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "from chat", Source: "conversation"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "bot thought", Source: "note"})
-	repo.Append(ctx, memory.Entry{Scope: scope, Content: "another chat", Source: "conversation"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "from chat", Source: "conversation"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "bot thought", Source: "note"})
+	_ = repo.Append(ctx, memory.Entry{Scope: scope, Content: "another chat", Source: "conversation"})
 
 	// LLM 搜索记忆时会同时检索到对话记忆和 Bot 自主笔记
 	entries, err := repo.Retrieve(ctx, memory.Query{
@@ -320,9 +320,9 @@ func TestSQLiteRepository_Metrics(t *testing.T) {
 	repo := NewSQLiteRepository(db)
 	ctx := context.Background()
 
-	repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-m"), Content: "A"})
-	repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-m"), Content: "B"})
-	repo.Recent(ctx, memory.ChannelScope("ch-m"), 10)
+	_ = repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-m"), Content: "A"})
+	_ = repo.Append(ctx, memory.Entry{Scope: memory.ChannelScope("ch-m"), Content: "B"})
+	_, _ = repo.Recent(ctx, memory.ChannelScope("ch-m"), 10)
 
 	m := repo.Metrics()
 	if m.EntriesAppended != 2 {
@@ -350,7 +350,7 @@ func TestSQLiteRepository_Metadata(t *testing.T) {
 			"tags":       []string{"important", "todo"},
 		},
 	}
-	repo.Append(ctx, entry)
+	_ = repo.Append(ctx, entry)
 
 	entries, _ := repo.Recent(ctx, scope, 1)
 	if len(entries) != 1 {
@@ -422,7 +422,7 @@ func TestWindowStateStore_Upsert(t *testing.T) {
 		UsedTokens: 1000,
 		RoundCount: 1,
 	}
-	store.Save(ctx, snap)
+	_ = store.Save(ctx, snap)
 
 	// 更新同一 scope
 	snap.UsedTokens = 3000
@@ -460,7 +460,7 @@ func TestWindowStateStore_Delete(t *testing.T) {
 	store := NewWindowStateStore(db)
 	ctx := context.Background()
 
-	store.Save(ctx, WindowSnapshot{ScopeKey: "del-scope", UsedTokens: 100})
+	_ = store.Save(ctx, WindowSnapshot{ScopeKey: "del-scope", UsedTokens: 100})
 
 	err := store.Delete(ctx, "del-scope")
 	if err != nil {

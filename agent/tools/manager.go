@@ -24,13 +24,13 @@ import (
 //   - 为 Pipeline Stage 提供工具列表解析能力
 //   - 管理工具提示词的全局段落（header + rules）
 type ToolManager struct {
-	mu          sync.RWMutex
-	registry    *ToolRegistry
-	promptMgr   *ToolPromptManager
-	promptReg   *prompt.Registry
-	logger      *zap.SugaredLogger
-	headerSec   *ToolPromptSection
-	rulesSec    *ToolPromptSection
+	mu        sync.RWMutex
+	registry  *ToolRegistry
+	promptMgr *ToolPromptManager
+	promptReg *prompt.Registry
+	logger    *zap.SugaredLogger
+	headerSec *ToolPromptSection
+	rulesSec  *ToolPromptSection
 
 	// policyProvider 工具权限策略提供者（nil 表示不做策略过滤）。
 	// 构造时从 PolicyStore 自动接入，运行时实时读取。
@@ -268,5 +268,3 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 
 	return sctx
 }
-
-

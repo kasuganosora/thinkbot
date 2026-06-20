@@ -29,9 +29,9 @@ import (
 type Window struct {
 	config WindowConfig
 
-	mu          sync.RWMutex
-	usedTokens  int // 累计已消耗的 input tokens
-	roundCount  int // LLM 调用轮数
+	mu         sync.RWMutex
+	usedTokens int // 累计已消耗的 input tokens
+	roundCount int // LLM 调用轮数
 
 	// metrics
 	totalInputTokens  atomic.Int64
@@ -115,7 +115,8 @@ func (w *Window) RecordUsage(inputTokens, outputTokens int) {
 
 // Available 返回当前 memory 可用的 token 预算。
 // 计算公式：
-//   available = (MaxContext - Reserved - OutputReserve - usedTokens) * MemoryBudgetRatio
+//
+//	available = (MaxContext - Reserved - OutputReserve - usedTokens) * MemoryBudgetRatio
 //
 // 返回值 <= 0 表示无剩余空间，应触发压缩或跳过 memory 注入。
 func (w *Window) Available() int {
@@ -177,13 +178,13 @@ func (w *Window) Reset() {
 
 // WindowMetrics 是窗口管理器的运行指标快照。
 type WindowMetrics struct {
-	MaxContextTokens  int   `json:"max_context_tokens"`
-	UsedTokens        int   `json:"used_tokens"`
-	AvailableForMemory int  `json:"available_for_memory"`
-	RoundCount        int   `json:"round_count"`
-	TotalInputTokens  int64 `json:"total_input_tokens"`
-	TotalOutputTokens int64 `json:"total_output_tokens"`
-	Compressions      int64 `json:"compressions"`
+	MaxContextTokens   int   `json:"max_context_tokens"`
+	UsedTokens         int   `json:"used_tokens"`
+	AvailableForMemory int   `json:"available_for_memory"`
+	RoundCount         int   `json:"round_count"`
+	TotalInputTokens   int64 `json:"total_input_tokens"`
+	TotalOutputTokens  int64 `json:"total_output_tokens"`
+	Compressions       int64 `json:"compressions"`
 }
 
 // Metrics 返回当前窗口指标快照。

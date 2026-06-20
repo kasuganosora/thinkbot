@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -344,12 +344,12 @@ type WorkflowConfig struct {
 // DefaultWorkflowConfig 返回引擎默认配置值。
 func DefaultWorkflowConfig() WorkflowConfig {
 	return WorkflowConfig{
-		MaxParallel:        3,
-		MaxRetries:         2,
-		MaxIterations:      3,
-		RetryInitialMS:     500,
-		RetryMaxMS:         10000,
-		ScheduleIntervalMS: 200,
+		MaxParallel:         3,
+		MaxRetries:          2,
+		MaxIterations:       3,
+		RetryInitialMS:      500,
+		RetryMaxMS:          10000,
+		ScheduleIntervalMS:  200,
 		AnalyzerTemperature: 0.3,
 		AnalyzerMaxTokens:   4096,
 	}
@@ -359,12 +359,12 @@ func DefaultWorkflowConfig() WorkflowConfig {
 func (b *Builder) GetWorkflowConfig() WorkflowConfig {
 	d := DefaultWorkflowConfig()
 	return WorkflowConfig{
-		MaxParallel:        b.store.GetInt(KeyWorkflowMaxParallel, d.MaxParallel),
-		MaxRetries:         b.store.GetInt(KeyWorkflowMaxRetries, d.MaxRetries),
-		MaxIterations:      b.store.GetInt(KeyWorkflowMaxIterations, d.MaxIterations),
-		RetryInitialMS:     b.store.GetInt(KeyWorkflowRetryInitialMS, d.RetryInitialMS),
-		RetryMaxMS:         b.store.GetInt(KeyWorkflowRetryMaxMS, d.RetryMaxMS),
-		ScheduleIntervalMS: b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
+		MaxParallel:         b.store.GetInt(KeyWorkflowMaxParallel, d.MaxParallel),
+		MaxRetries:          b.store.GetInt(KeyWorkflowMaxRetries, d.MaxRetries),
+		MaxIterations:       b.store.GetInt(KeyWorkflowMaxIterations, d.MaxIterations),
+		RetryInitialMS:      b.store.GetInt(KeyWorkflowRetryInitialMS, d.RetryInitialMS),
+		RetryMaxMS:          b.store.GetInt(KeyWorkflowRetryMaxMS, d.RetryMaxMS),
+		ScheduleIntervalMS:  b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
 		AnalyzerTemperature: b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
 		AnalyzerMaxTokens:   b.store.GetInt(KeyWorkflowAnalyzerMaxTokens, d.AnalyzerMaxTokens),
 	}
@@ -458,16 +458,16 @@ type EngagementConfig struct {
 // DefaultEngagementConfig 返回主动参与模块的默认配置值。
 func DefaultEngagementConfig() EngagementConfig {
 	return EngagementConfig{
-		Enabled:               false,
-		ReplyProbability:      0.15,
-		Cooldown:              0,
-		RateLimitCapacity:     3,
-		RateLimitInterval:     1 * time.Hour,
-		BackoffBaseSeconds:    10.0,
-		BackoffCapSeconds:     300.0,
-		BackoffStartCount:     3,
-		BurstIntervalSeconds:  5.0,
-		WaitTimeoutSeconds:    30.0,
+		Enabled:                   false,
+		ReplyProbability:          0.15,
+		Cooldown:                  0,
+		RateLimitCapacity:         3,
+		RateLimitInterval:         1 * time.Hour,
+		BackoffBaseSeconds:        10.0,
+		BackoffCapSeconds:         300.0,
+		BackoffStartCount:         3,
+		BurstIntervalSeconds:      5.0,
+		WaitTimeoutSeconds:        30.0,
 		BackoffBypassPendingCount: 0,
 	}
 }

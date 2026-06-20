@@ -45,15 +45,15 @@ func TestTools_NilRepoReturnsNil(t *testing.T) {
 
 func TestMemoryTool_Search(t *testing.T) {
 	repo := NewMemoryRepository()
-	repo.Append(context.Background(), Entry{
+	_ = repo.Append(context.Background(), Entry{
 		Scope:   ChannelScope("ch1"),
 		Content: "用户喜欢 Go 语言",
 	})
-	repo.Append(context.Background(), Entry{
+	_ = repo.Append(context.Background(), Entry{
 		Scope:   ChannelScope("ch1"),
 		Content: "用户喜欢 Python",
 	})
-	repo.Append(context.Background(), Entry{
+	_ = repo.Append(context.Background(), Entry{
 		Scope:   ChannelScope("ch2"),
 		Content: "另一个频道的记忆",
 	})
@@ -118,11 +118,11 @@ func TestMemoryTool_Write(t *testing.T) {
 	result, err := writeDef.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
-			"content":     "用户是一名后端工程师，擅长 Go 和 Rust",
-			"category":    "fact",
-			"importance":  0.8,
-			"scope_kind":  "user",
-			"scope_id":    "user123",
+			"content":    "用户是一名后端工程师，擅长 Go 和 Rust",
+			"category":   "fact",
+			"importance": 0.8,
+			"scope_kind": "user",
+			"scope_id":   "user123",
 		},
 	)
 	if err != nil {
@@ -155,7 +155,7 @@ func TestMemoryTool_Write_StripsThinkingAndToolOutput(t *testing.T) {
 	defs := Tools(ToolConfig{Repo: repo})
 	writeDef := findMemoryTool(defs, "memory_write")
 
-	writeDef.Execute(
+	_, _ = writeDef.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
 			"content": `<think>分析一下</think><tool_call>{"name":"x"}</tool_call>用户喜欢咖啡`,
@@ -198,7 +198,7 @@ func TestMemoryTool_Write_EmptyContentError(t *testing.T) {
 
 func TestMemoryTool_Delete(t *testing.T) {
 	repo := NewMemoryRepository()
-	repo.Append(context.Background(), Entry{
+	_ = repo.Append(context.Background(), Entry{
 		Scope:   ChannelScope("ch1"),
 		Content: "要删除的记忆",
 	})
@@ -244,7 +244,7 @@ func TestMemoryTool_Delete(t *testing.T) {
 func TestMemoryTool_Recent(t *testing.T) {
 	repo := NewMemoryRepository()
 	for i := 0; i < 5; i++ {
-		repo.Append(context.Background(), Entry{
+		_ = repo.Append(context.Background(), Entry{
 			Scope:   ChannelScope("ch1"),
 			Content: "记忆-" + string(rune('A'+i)),
 		})
@@ -301,9 +301,9 @@ func TestMemoryTool_Recent_EmptyScope(t *testing.T) {
 
 func TestMemoryTool_Count(t *testing.T) {
 	repo := NewMemoryRepository()
-	repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "a"})
-	repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "b"})
-	repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "c"})
+	_ = repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "a"})
+	_ = repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "b"})
+	_ = repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "c"})
 
 	defs := Tools(ToolConfig{Repo: repo})
 	countDef := findMemoryTool(defs, "memory_count")
@@ -364,13 +364,13 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 	deleteDef := findMemoryTool(defs, "memory_delete")
 
 	// Step 1: 写入
-	writeDef.Execute(ctx, map[string]any{
+	_, _ = writeDef.Execute(ctx, map[string]any{
 		"content":    "用户偏好深色主题",
 		"category":   "preference",
 		"scope_kind": "user",
 		"scope_id":   "u1",
 	})
-	writeDef.Execute(ctx, map[string]any{
+	_, _ = writeDef.Execute(ctx, map[string]any{
 		"content":    "用户在用 MacBook Pro",
 		"category":   "fact",
 		"scope_kind": "user",
@@ -390,7 +390,7 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 	entryID := m["entries"].([]EntryResult)[0].ID
 
 	// Step 3: 删除
-	deleteDef.Execute(ctx, map[string]any{
+	_, _ = deleteDef.Execute(ctx, map[string]any{
 		"memory_id":  entryID,
 		"scope_kind": "user",
 		"scope_id":   "u1",

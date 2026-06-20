@@ -1,12 +1,12 @@
 package prompt
 
 import (
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================

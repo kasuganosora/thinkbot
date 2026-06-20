@@ -49,8 +49,8 @@ func (s *Server) handleGetBot(c *gin.Context) {
 	// 尝试获取运行时信息
 	type botDetail struct {
 		dao.BotDefinition
-		Running bool     `json:"running"`
-		Info    *any     `json:"info,omitempty"`
+		Running bool `json:"running"`
+		Info    *any `json:"info,omitempty"`
 	}
 
 	detail := botDetail{

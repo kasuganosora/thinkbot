@@ -105,6 +105,19 @@ type ChatCompletionRequest struct {
 	ToolChoice       json.RawMessage     `json:"tool_choice,omitempty"` // string 或 object
 	Seed             *int                `json:"seed,omitempty"`
 	User             string              `json:"user,omitempty"`
+
+	// PromptCacheKey is a cache key hint for OpenAI's implicit prefix caching.
+	// Typically set to the session ID to improve cache hit rates across
+	// requests in the same conversation.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
+
+	// Store controls whether the response is stored. Set to false when
+	// leveraging implicit prefix caching to avoid unnecessary storage.
+	Store *bool `json:"store,omitempty"`
+
+	// ReasoningEffort controls reasoning depth for models that support it
+	// (o1, o3, o4-mini, etc.). Values: "minimal", "low", "medium", "high".
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // ChatCompletionResponse Chat Completions 响应体。
@@ -121,7 +134,7 @@ type ChatCompletionResponse struct {
 type ChatChoice struct {
 	Index        int         `json:"index"`
 	Message      ChatMessage `json:"message"`
-	Delta        ChatDelta   `json:"delta,omitempty"` // 流式增量
+	Delta        *ChatDelta  `json:"delta,omitempty"` // 流式增量
 	FinishReason string      `json:"finish_reason,omitempty"`
 }
 
@@ -138,6 +151,15 @@ type ChatUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+
+	PromptTokensDetails     *ChatTokenDetails `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *ChatTokenDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// ChatTokenDetails breaks down token counts by category.
+type ChatTokenDetails struct {
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // ContentStr 返回 ChatMessage.Content 的字符串形式。

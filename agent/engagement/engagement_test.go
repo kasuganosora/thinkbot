@@ -156,9 +156,9 @@ func TestLengthRule(t *testing.T) {
 		want bool
 	}{
 		{"hello world", true},
-		{"hi", false},      // too short (2 < 3)
-		{"你好世界", true},  // 4 runes >= 3
-		{"好", false},      // too short (1 < 3)
+		{"hi", false},  // too short (2 < 3)
+		{"你好世界", true}, // 4 runes >= 3
+		{"好", false},   // too short (1 < 3)
 	}
 
 	for _, tt := range tests {
@@ -284,7 +284,7 @@ func TestRuleEngine_AllPass(t *testing.T) {
 func TestRuleEngine_OneFails(t *testing.T) {
 	engine := NewRuleEngine(
 		NewLengthRule(1, 1000),
-		NewKeywordRule("rust"),  // 不匹配
+		NewKeywordRule("rust"), // 不匹配
 	)
 
 	msg := timelineMsg("I love golang", "user1", "misskey")
@@ -299,7 +299,7 @@ func TestRuleEngine_OneFails(t *testing.T) {
 func TestRuleEngine_ShortCircuit(t *testing.T) {
 	called := false
 	engine := NewRuleEngine(
-		NewLengthRule(1, 5),  // 先失败
+		NewLengthRule(1, 5), // 先失败
 		RuleFunc(func(msg *core.Message) (bool, string) {
 			called = true
 			return true, ""
@@ -379,8 +379,8 @@ func (m *mockLLMClient) Chat(_ context.Context, _, _ string) (string, error) {
 
 func TestParseJudgeResponse(t *testing.T) {
 	tests := []struct {
-		input     string
-		engage    bool
+		input  string
+		engage bool
 	}{
 		{"YES I find this interesting", true},
 		{"yes that's relevant", true},

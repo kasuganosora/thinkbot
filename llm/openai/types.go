@@ -206,6 +206,10 @@ type CreateResponseRequest struct {
 	User               string            `json:"user,omitempty"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	Include            []string          `json:"include,omitempty"`
+
+	// PromptCacheKey is a cache key hint for implicit prefix caching.
+	// Typically set to the session ID.
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
 // InputItem 表示 Responses API 输入中的一个项。

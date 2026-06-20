@@ -66,8 +66,8 @@ func (m *SkillManager) UseSkill(name string) (*Skill, error) {
 //
 // 该工具注册到 LLM function calling 后，LLM 可通过调用 use_skill 来加载技能指令。
 // 工具 Execute 函数会：
-//   1. 调用 SkillManager.UseSkill 激活技能
-//   2. 返回技能 Content + 资源路径信息作为 tool_result
+//  1. 调用 SkillManager.UseSkill 激活技能
+//  2. 返回技能 Content + 资源路径信息作为 tool_result
 func (m *SkillManager) BuildUseSkillTool() llm.Tool {
 	mgr := m
 	return llm.NewTool("use_skill",

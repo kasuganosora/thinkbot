@@ -2,8 +2,8 @@ package llm
 
 import (
 	"encoding/json"
-	"reflect"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"reflect"
 )
 
 // resolveSchema converts a Tool's Parameters value into a standard JSON Schema

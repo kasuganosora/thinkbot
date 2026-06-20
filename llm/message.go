@@ -42,7 +42,11 @@ func (p TextPart) PartType() MessagePartType { return PartTypeText }
 
 // ReasoningPart carries a reasoning/thinking segment from a model.
 type ReasoningPart struct {
-	Text             string         `json:"text"`
+	Text string `json:"text"`
+	// Signature holds the encrypted signature returned by Anthropic during
+	// extended thinking. It MUST be sent back in subsequent requests that
+	// include this thinking block, otherwise the API rejects the request.
+	Signature        string         `json:"signature,omitempty"`
 	ProviderMetadata map[string]any `json:"providerMetadata,omitempty"`
 }
 

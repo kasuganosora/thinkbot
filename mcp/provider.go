@@ -21,9 +21,9 @@ type Provider struct {
 	logger  *zap.SugaredLogger
 
 	// 工具列表缓存（避免每次 Resolve 都重新请求 MCP 服务器）
-	mu          sync.RWMutex
-	cache       []llm.Tool
-	cacheDirty  bool
+	mu         sync.RWMutex
+	cache      []llm.Tool
+	cacheDirty bool
 }
 
 // NewProvider 从 MCP Manager 创建一个 ToolProvider。

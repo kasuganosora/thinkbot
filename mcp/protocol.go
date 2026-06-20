@@ -9,7 +9,7 @@ import "encoding/json"
 // rpcRequest 是 JSON-RPC 2.0 请求/通知。
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      *int64          `json:"id,omitempty"`       // nil = notification
+	ID      *int64          `json:"id,omitempty"` // nil = notification
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }

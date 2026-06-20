@@ -15,7 +15,7 @@ import (
 
 // Action 是 Timing Gate 的三状态决策。
 //
-// 参考 MaiBot 的 Timing Gate 设计：
+// Timing Gate 设计：
 //   - Continue: 参与交互，进入完整 Pipeline
 //   - NoAction: 保持静默，等待新消息（本条不值得回应）
 //   - Wait: 刻意暂停，设定一个延时后重新评估（对话还在进行，但此刻插嘴不合适）
@@ -52,8 +52,8 @@ type TimingGate struct {
 	// onWaitExpired 在 wait 超时后被调用（可选）。
 	// 调用方可在此重新投递一条合成消息触发重新评估。
 	// 参考 MaiBot 的 _schedule_wait_timeout 回调。
-	onWaitExpired  func(channelKey string)
-	waitTimers     map[string]*time.Timer
+	onWaitExpired func(channelKey string)
+	waitTimers    map[string]*time.Timer
 }
 
 type channelTimingState struct {
@@ -239,9 +239,9 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 	if !state.waitUntil.IsZero() && now.Before(state.waitUntil) {
 		g.mu.Unlock()
 		return false, TimingDecision{
-			Action:  ActionWait,
-			Reason:  "in wait state, will re-evaluate after timeout",
-			IsBurst: false,
+			Action:       ActionWait,
+			Reason:       "in wait state, will re-evaluate after timeout",
+			IsBurst:      false,
 			WaitDuration: state.waitUntil.Sub(now),
 		}
 	}

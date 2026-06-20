@@ -47,14 +47,14 @@ func TestBuildWritableChecker_SourceAllowlist(t *testing.T) {
 
 func TestBuildRuleEngine(t *testing.T) {
 	cfg := config.EngagementConfig{
-		Keywords:           []string{"猫", "cat"},
-		BlockedUsers:       []string{"spammer"},
-		BlockedSources:     []string{"rss"},
-		MinLength:          2,
-		MaxLength:          500,
-		Cooldown:           10 * time.Minute,
-		RateLimitCapacity:  3,
-		RateLimitInterval:  1 * time.Hour,
+		Keywords:          []string{"猫", "cat"},
+		BlockedUsers:      []string{"spammer"},
+		BlockedSources:    []string{"rss"},
+		MinLength:         2,
+		MaxLength:         500,
+		Cooldown:          10 * time.Minute,
+		RateLimitCapacity: 3,
+		RateLimitInterval: 1 * time.Hour,
 	}
 
 	engine, rateLimit := BuildRuleEngine(cfg, "bot-user-id")
@@ -143,12 +143,12 @@ func TestBuildTimingGateConfig(t *testing.T) {
 
 func TestBuildFromConfig_FullPipeline(t *testing.T) {
 	cfg := config.EngagementConfig{
-		Enabled:               true,
-		Channels:              []string{"misskey"},
-		Keywords:              []string{"AI"},
-		RateLimitCapacity:     5,
-		RateLimitInterval:     30 * time.Minute,
-		ReplyProbability:      0.5,
+		Enabled:           true,
+		Channels:          []string{"misskey"},
+		Keywords:          []string{"AI"},
+		RateLimitCapacity: 5,
+		RateLimitInterval: 30 * time.Minute,
+		ReplyProbability:  0.5,
 	}
 
 	result := BuildFromConfig(cfg, "bot-123", nil)

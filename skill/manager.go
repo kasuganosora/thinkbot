@@ -52,15 +52,15 @@ type noopLogger struct{}
 func (noopLogger) Debugw(msg string, keysAndValues ...interface{}) {}
 func (noopLogger) Infow(msg string, keysAndValues ...interface{})  {}
 func (noopLogger) Warnw(msg string, keysAndValues ...interface{})  {}
-func (noopLogger) Errorw(msg string, keysAndValues ...interface{})  {}
+func (noopLogger) Errorw(msg string, keysAndValues ...interface{}) {}
 
 // SkillManager 管理所有 Skill 的注册、启用/禁用、触发注入。
 type SkillManager struct {
-	mu        sync.RWMutex
-	skills   map[string]*Skill
+	mu     sync.RWMutex
+	skills map[string]*Skill
 
 	registry RegistryAdapter // prompt Section 注入适配器（可为 nil）
-	store    StoreAdapter   // 配置持久化适配器（可为 nil）
+	store    StoreAdapter    // 配置持久化适配器（可为 nil）
 	logger   Logger
 }
 
@@ -429,15 +429,15 @@ func (m *SkillManager) RemoveSkillContent(name string) {
 
 func newSkillInfo(s *Skill) SkillInfo {
 	return SkillInfo{
-		Name:         s.Name,
-		Description:  s.Description,
+		Name:          s.Name,
+		Description:   s.Description,
 		Compatibility: s.Compatibility,
-		Enabled:      s.Enabled,
-		Source:       s.Source,
-		HasContent:   s.Content != "",
-		HasScripts:   len(s.Resources.Scripts) > 0,
+		Enabled:       s.Enabled,
+		Source:        s.Source,
+		HasContent:    s.Content != "",
+		HasScripts:    len(s.Resources.Scripts) > 0,
 		HasReferences: len(s.Resources.References) > 0,
-		HasAssets:    len(s.Resources.Assets) > 0,
+		HasAssets:     len(s.Resources.Assets) > 0,
 	}
 }
 

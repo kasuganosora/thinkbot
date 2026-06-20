@@ -471,7 +471,7 @@ func (r *Request) DoWS(cfg WSConfig) error {
 // 同时返回 *WSConn 供调用方写入（线程安全）。
 //
 // 消息 channel 在连接关闭后关闭。*WSConn 的生命周期由调用方管理
-//（channel 关闭后应调用 conn.Close()）。
+// （channel 关闭后应调用 conn.Close()）。
 func (r *Request) DoWSMessages(cfg WSConfig) (<-chan WSMessage, *WSConn, error) {
 	conn, err := r.DialWS(cfg)
 	if err != nil {

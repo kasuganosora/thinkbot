@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -429,9 +429,9 @@ func TestAssembler_DefaultValue(t *testing.T) {
 func TestAssembler_MaxPromptLength_Truncation(t *testing.T) {
 	reg := NewRegistry()
 	reg.RegisterMany(
-		Section{Name: "a", Order: 0, Content: "AAAAAAAAAA", Enabled: true},     // 10 chars
-		Section{Name: "b", Order: 100, Content: "BBBBBBBBBB", Enabled: true},   // 10 chars
-		Section{Name: "c", Order: 200, Content: "CCCCCCCCCC", Enabled: true},   // 10 chars
+		Section{Name: "a", Order: 0, Content: "AAAAAAAAAA", Enabled: true},   // 10 chars
+		Section{Name: "b", Order: 100, Content: "BBBBBBBBBB", Enabled: true}, // 10 chars
+		Section{Name: "c", Order: 200, Content: "CCCCCCCCCC", Enabled: true}, // 10 chars
 	)
 
 	config := DefaultAssemblerConfig()

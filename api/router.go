@@ -87,9 +87,9 @@ func (s *Server) registerRoutes() {
 		chat := authed.Group("/chat")
 		chat.Use(requirePermission(auth.PermBotUse))
 		{
-			chat.GET("/bots", s.handleChatBots)  // 可聊天的 Bot 列表
+			chat.GET("/bots", s.handleChatBots)       // 可聊天的 Bot 列表
 			chat.GET("/history", s.handleChatHistory) // 聊天历史（游标分页）
-			chat.POST("/send", s.handleChatSend) // SSE 流式聊天
+			chat.POST("/send", s.handleChatSend)      // SSE 流式聊天
 		}
 
 		// --- 系统配置（admin） ---

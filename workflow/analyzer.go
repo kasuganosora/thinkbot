@@ -7,8 +7,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )

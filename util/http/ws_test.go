@@ -766,7 +766,7 @@ func TestWSHeaders(t *testing.T) {
 func TestWSSubprotocol(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
+			CheckOrigin:  func(r *http.Request) bool { return true },
 			Subprotocols: []string{"chat", "echo"},
 		}
 		conn, err := upgrader.Upgrade(w, r, nil)

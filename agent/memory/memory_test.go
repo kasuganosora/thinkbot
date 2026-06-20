@@ -49,9 +49,9 @@ func TestMemoryRepository_Retrieve_TextFilter(t *testing.T) {
 	ctx := context.Background()
 	scope := ChannelScope("chat-456")
 
-	repo.Append(ctx, Entry{Scope: scope, Content: "The user prefers dark mode"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "Meeting scheduled for Friday"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "User likes Go programming"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "The user prefers dark mode"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "Meeting scheduled for Friday"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "User likes Go programming"})
 
 	// 搜索包含 "user" 的记忆
 	results, err := repo.Retrieve(ctx, Query{
@@ -72,9 +72,9 @@ func TestMemoryRepository_Retrieve_CategoryFilter(t *testing.T) {
 	ctx := context.Background()
 	scope := UserScope("user-1")
 
-	repo.Append(ctx, Entry{Scope: scope, Content: "fact 1", Category: "fact"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "preference 1", Category: "preference"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "fact 2", Category: "fact"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "fact 1", Category: "fact"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "preference 1", Category: "preference"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "fact 2", Category: "fact"})
 
 	results, err := repo.Retrieve(ctx, Query{
 		Scopes:   []Scope{scope},
@@ -98,7 +98,7 @@ func TestMemoryRepository_CapacityLimit(t *testing.T) {
 
 	// 写入 5 条
 	for i := 0; i < 5; i++ {
-		repo.Append(ctx, Entry{
+		_ = repo.Append(ctx, Entry{
 			Scope:   scope,
 			Content: string(rune('A' + i)),
 		})
@@ -121,8 +121,8 @@ func TestMemoryRepository_Delete(t *testing.T) {
 	ctx := context.Background()
 	scope := ChannelScope("chat-del")
 
-	repo.Append(ctx, Entry{ID: "id-1", Scope: scope, Content: "keep"})
-	repo.Append(ctx, Entry{ID: "id-2", Scope: scope, Content: "delete me"})
+	_ = repo.Append(ctx, Entry{ID: "id-1", Scope: scope, Content: "keep"})
+	_ = repo.Append(ctx, Entry{ID: "id-2", Scope: scope, Content: "delete me"})
 
 	err := repo.Delete(ctx, scope, "id-2")
 	if err != nil {
@@ -140,8 +140,8 @@ func TestMemoryRepository_Clear(t *testing.T) {
 	ctx := context.Background()
 	scope := ChannelScope("chat-clear")
 
-	repo.Append(ctx, Entry{Scope: scope, Content: "one"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "two"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "one"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "two"})
 
 	err := repo.Clear(ctx, scope)
 	if err != nil {
@@ -161,8 +161,8 @@ func TestMemoryRepository_MultiScope(t *testing.T) {
 	scope1 := ChannelScope("chat-1")
 	scope2 := UserScope("user-1")
 
-	repo.Append(ctx, Entry{Scope: scope1, Content: "channel memory"})
-	repo.Append(ctx, Entry{Scope: scope2, Content: "user memory"})
+	_ = repo.Append(ctx, Entry{Scope: scope1, Content: "channel memory"})
+	_ = repo.Append(ctx, Entry{Scope: scope2, Content: "user memory"})
 
 	// 各 scope 独立
 	c1, _ := repo.Count(ctx, scope1)
@@ -187,9 +187,9 @@ func TestMemoryRepository_Metrics(t *testing.T) {
 	ctx := context.Background()
 	scope := ChannelScope("metrics-test")
 
-	repo.Append(ctx, Entry{Scope: scope, Content: "one"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "two"})
-	repo.Recent(ctx, scope, 5)
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "one"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "two"})
+	_, _ = repo.Recent(ctx, scope, 5)
 
 	m := repo.Metrics()
 	if m.EntriesAppended != 2 {
@@ -269,8 +269,8 @@ func TestContextManager_AssembleContext(t *testing.T) {
 
 	// 写入一些记忆
 	scope := ChannelScope("chat-ctx")
-	repo.Append(ctx, Entry{Scope: scope, Content: "User name is Luna"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "User is a Go developer"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "User name is Luna"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "User is a Go developer"})
 
 	builder := NewContextBuilder()
 	mgr := NewContextManager(repo, builder, nil, nil)
@@ -292,9 +292,9 @@ func TestContextManager_AssembleContext_WithRelevance(t *testing.T) {
 	ctx := context.Background()
 
 	scope := ChannelScope("chat-rel")
-	repo.Append(ctx, Entry{Scope: scope, Content: "Meeting with team at 3pm"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "User prefers dark mode"})
-	repo.Append(ctx, Entry{Scope: scope, Content: "Golang project uses Bazel build"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "Meeting with team at 3pm"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "User prefers dark mode"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "Golang project uses Bazel build"})
 
 	builder := NewContextBuilder()
 	mgr := NewContextManager(repo, builder, nil, nil)
@@ -499,7 +499,7 @@ func TestContextManager_WithWindow_NoCompress(t *testing.T) {
 	ctx := context.Background()
 
 	scope := ChannelScope("win-test")
-	repo.Append(ctx, Entry{Scope: scope, Content: "short memory"})
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "short memory"})
 
 	builder := NewContextBuilder()
 	window := NewWindow(WindowConfig{

@@ -95,10 +95,10 @@ func (b *TokenBucket) refill() {
 // SlidingWindow 实现滑动窗口限流。
 // 在 window 时间窗口内最多允许 limit 次操作。
 type SlidingWindow struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
-	events  []time.Time
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	events []time.Time
 }
 
 // NewSlidingWindow 创建滑动窗口限流器。

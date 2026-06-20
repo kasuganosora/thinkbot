@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/http"
 )
 
 // ============================================================================

@@ -118,20 +118,20 @@ func (p *LLMProfiler) buildPrompt(l1, l2, existing []TieredEntry) string {
 
 	sb.WriteString("## 长期记忆（L1）\n\n")
 	for _, e := range l1 {
-		sb.WriteString(fmt.Sprintf("- (%s) %s\n", e.Category, e.Content))
+		fmt.Fprintf(&sb, "- (%s) %s\n", e.Category, e.Content)
 	}
 
 	if len(l2) > 0 {
 		sb.WriteString("\n## 场景记忆（L2）\n\n")
 		for _, e := range l2 {
-			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
 	if len(existing) > 0 {
 		sb.WriteString("\n## 已有画像（供参考，不要重复）\n\n")
 		for _, e := range existing {
-			sb.WriteString(fmt.Sprintf("- %s\n", e.Content))
+			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
@@ -179,7 +179,7 @@ func BuildProfilePrompt(profileEntries []TieredEntry) string {
 	for _, e := range profileEntries {
 		sb.WriteString("- ")
 		if e.Category != "" {
-			sb.WriteString(fmt.Sprintf("(%s) ", e.Category))
+			fmt.Fprintf(&sb, "(%s) ", e.Category)
 		}
 		sb.WriteString(e.Content)
 		sb.WriteByte('\n')

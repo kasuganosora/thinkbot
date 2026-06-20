@@ -73,10 +73,10 @@ type PromptStageConfig struct {
 // DefaultPromptStageConfig 返回默认配置。
 func DefaultPromptStageConfig() PromptStageConfig {
 	return PromptStageConfig{
-		BaseSectionName:    "identity",
+		BaseSectionName:     "identity",
 		InjectMemoryContext: true,
-		MemorySectionOrder: 200,
-		FallbackToConfig:   true,
+		MemorySectionOrder:  200,
+		FallbackToConfig:    true,
 	}
 }
 
@@ -134,8 +134,8 @@ func (s *PromptStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 			if fallback != "" {
 				env.Set("system.prompt", fallback)
 				span.SetAttributes(attribute.Bool("prompt.fallback", true))
-			logger.Warnw("using fallback prompt from BotConfig",
-				"message_id", env.Message.ID)
+				logger.Warnw("using fallback prompt from BotConfig",
+					"message_id", env.Message.ID)
 				return env, nil
 			}
 		}

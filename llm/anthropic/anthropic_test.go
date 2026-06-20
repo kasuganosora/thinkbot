@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/log"
 )
 
@@ -133,15 +134,15 @@ func TestAPIError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := llm.AsLLMError(err)
 	if !ok {
-		t.Fatalf("expected *APIError, got %T: %v", err, err)
+		t.Fatalf("expected *llm.LLMError, got %T: %v", err, err)
 	}
-	if apiErr.Type != "invalid_request_error" {
-		t.Errorf("expected type=invalid_request_error, got %s", apiErr.Type)
+	if apiErr.Reason != llm.ErrorReasonInvalidRequest {
+		t.Errorf("expected reason=invalid_request, got %s", apiErr.Reason)
 	}
-	if apiErr.Message != "model not found" {
-		t.Errorf("expected message='model not found', got %s", apiErr.Message)
+	if !strings.Contains(apiErr.Message, "model not found") {
+		t.Errorf("expected message to contain 'model not found', got %s", apiErr.Message)
 	}
 }
 
@@ -1743,14 +1744,14 @@ func TestStreamAPIError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := llm.AsLLMError(err)
 	if !ok {
-		t.Fatalf("expected *APIError, got %T: %v", err, err)
+		t.Fatalf("expected *llm.LLMError, got %T: %v", err, err)
 	}
-	if apiErr.Type != "invalid_request_error" {
-		t.Errorf("expected type=invalid_request_error, got %s", apiErr.Type)
+	if apiErr.Reason != llm.ErrorReasonInvalidRequest {
+		t.Errorf("expected reason=invalid_request, got %s", apiErr.Reason)
 	}
-	if apiErr.Message != "max_tokens must be <= 128000" {
+	if !strings.Contains(apiErr.Message, "max_tokens") {
 		t.Errorf("unexpected message: %s", apiErr.Message)
 	}
 }

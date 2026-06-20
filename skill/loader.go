@@ -3,11 +3,11 @@ package skill
 import (
 	"bufio"
 	"fmt"
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -115,13 +115,13 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 	meta, body := parseFrontMatter(content)
 
 	skill := &Skill{
-		Name:         meta.Name,
-		Description:  meta.Description,
+		Name:          meta.Name,
+		Description:   meta.Description,
 		Compatibility: meta.Compatibility,
-		Content:      strings.TrimSpace(body),
+		Content:       strings.TrimSpace(body),
 		Enabled:       meta.Enabled == nil || *meta.Enabled, // nil 或 true → 默认启用
-		Source:       "fs",
-		Dir:          skillDir,
+		Source:        "fs",
+		Dir:           skillDir,
 	}
 
 	// 校验必填字段

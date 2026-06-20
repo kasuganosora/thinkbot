@@ -24,11 +24,11 @@ const (
 
 // 领域错误。
 var (
-	ErrUserNotFound      = errors.New("auth: user not found")
-	ErrUserExists        = errors.New("auth: user already exists")
+	ErrUserNotFound       = errors.New("auth: user not found")
+	ErrUserExists         = errors.New("auth: user already exists")
 	ErrInvalidCredentials = errors.New("auth: invalid credentials")
-	ErrUserDisabled      = errors.New("auth: user is disabled")
-	ErrInvalidRole       = errors.New("auth: invalid role")
+	ErrUserDisabled       = errors.New("auth: user is disabled")
+	ErrInvalidRole        = errors.New("auth: invalid role")
 )
 
 // AuthService 提供用户 CRUD 和认证能力。

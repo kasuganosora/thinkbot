@@ -41,17 +41,17 @@ import (
 
 // BotService 管理 Bot 定义和运行时实例。
 type BotService struct {
-	db        *gorm.DB
-	store     *config.Store
-	mgr       *bot.BotManager
-	logger    *zap.SugaredLogger
-	tp        trace.TracerProvider
-	mp        metric.MeterProvider
-	eventBus  outbound.EventBus
+	db       *gorm.DB
+	store    *config.Store
+	mgr      *bot.BotManager
+	logger   *zap.SugaredLogger
+	tp       trace.TracerProvider
+	mp       metric.MeterProvider
+	eventBus outbound.EventBus
 
 	mu           sync.RWMutex
 	channels     map[string]*WebChannel // botID → WebChannel
-	botInstances map[string]*bot.Bot   // botID → running Bot
+	botInstances map[string]*bot.Bot    // botID → running Bot
 }
 
 // NewBotService 创建 BotService。
@@ -197,9 +197,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if history, ok := msg.Metadata["chat_history"]; ok {
 			if msgs, ok := history.([]dao.ChatMessage); ok {
 				for _, m := range msgs {
-					if m.Role == dao.ChatRoleUser {
+					switch m.Role {
+					case dao.ChatRoleUser:
 						messages = append(messages, llm.UserMessage(m.Content))
-					} else if m.Role == dao.ChatRoleAssistant {
+					case dao.ChatRoleAssistant:
 						messages = append(messages, llm.AssistantMessage(m.Content))
 					}
 				}
@@ -264,9 +265,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建 Bot
 	botCfg := bot.BotConfig{
-		Workers:    def.Workers,
+		Workers:      def.Workers,
 		SystemPrompt: def.SystemPrompt,
-		Model:      def.Model,
+		Model:        def.Model,
 	}
 	if def.Temperature > 0 {
 		botCfg.Temperature = def.Temperature

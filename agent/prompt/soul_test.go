@@ -76,8 +76,8 @@ func TestSoulLoader_FileNotFound(t *testing.T) {
 
 	reg := NewRegistry()
 	loader := NewSoulLoader(SoulLoaderConfig{
-		Path:          missingPath,
-		SectionName:   "identity",
+		Path:        missingPath,
+		SectionName: "identity",
 	}, reg)
 
 	// Should not return error — should auto-create default file

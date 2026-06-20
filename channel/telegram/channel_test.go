@@ -84,7 +84,7 @@ func TestUtf16Extract(t *testing.T) {
 func TestDetectMention(t *testing.T) {
 	ch := &TelegramChannel{
 		botUsername: "mybot",
-		botUserID:  12345,
+		botUserID:   12345,
 	}
 
 	tests := []struct {

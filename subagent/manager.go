@@ -57,12 +57,12 @@ type TaskResult struct {
 // defaultOpts 是所有 SubAgent 默认继承的配置（如温度、滑动窗口大小）。
 func NewSubAgentManager(provider llm.Provider, model string, defaultOpts ...Option) *SubAgentManager {
 	return &SubAgentManager{
-		provider:       provider,
-		model:          model,
-		subagents:      make(map[string]*SubAgent),
-		defaultOpts:    defaultOpts,
+		provider:        provider,
+		model:           model,
+		subagents:       make(map[string]*SubAgent),
+		defaultOpts:     defaultOpts,
 		delegateTimeout: 120 * time.Second,
-		maxConcurrency: 2,
+		maxConcurrency:  2,
 	}
 }
 

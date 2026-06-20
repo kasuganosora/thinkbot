@@ -439,8 +439,8 @@ func TestLoader_LoadAndRegister(t *testing.T) {
 
 	// 创建 pdf skill
 	pdfDir := filepath.Join(tmpDir, "pdf")
-	os.MkdirAll(pdfDir, 0755)
-	os.WriteFile(filepath.Join(pdfDir, "SKILL.md"), []byte(`---
+	_ = os.MkdirAll(pdfDir, 0755)
+	_ = os.WriteFile(filepath.Join(pdfDir, "SKILL.md"), []byte(`---
 name: pdf
 description: 处理 PDF 文件。
 ---
@@ -449,8 +449,8 @@ description: 处理 PDF 文件。
 
 	// 创建 xlsx skill
 	xlsxDir := filepath.Join(tmpDir, "xlsx")
-	os.MkdirAll(xlsxDir, 0755)
-	os.WriteFile(filepath.Join(xlsxDir, "SKILL.md"), []byte(`---
+	_ = os.MkdirAll(xlsxDir, 0755)
+	_ = os.WriteFile(filepath.Join(xlsxDir, "SKILL.md"), []byte(`---
 name: xlsx
 description: 处理 Excel 表格。
 ---

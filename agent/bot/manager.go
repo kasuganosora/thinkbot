@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================

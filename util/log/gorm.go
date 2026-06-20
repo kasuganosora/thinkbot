@@ -46,9 +46,9 @@ func DefaultGormConfig() GormConfig {
 
 // gormLogger 实现 gorm.io/gorm/logger.Interface，将日志转发到 zap。
 type gormLogger struct {
-	zl                       *zap.Logger
-	level                    gormlogger.LogLevel
-	slowThreshold            time.Duration
+	zl                        *zap.Logger
+	level                     gormlogger.LogLevel
+	slowThreshold             time.Duration
 	ignoreRecordNotFoundError bool
 }
 

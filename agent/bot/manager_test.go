@@ -66,7 +66,7 @@ func TestBotManager_Get(t *testing.T) {
 	mgr := NewBotManager(logger, tp)
 
 	bot := createTestBot(t, "bot-1")
-	mgr.Register(bot)
+	_ = mgr.Register(bot)
 
 	got, ok := mgr.Get("bot-1")
 	if !ok {
@@ -88,7 +88,7 @@ func TestBotManager_Unregister(t *testing.T) {
 	mgr := NewBotManager(logger, tp)
 
 	bot := createTestBot(t, "bot-1")
-	mgr.Register(bot)
+	_ = mgr.Register(bot)
 
 	if !mgr.Unregister("bot-1") {
 		t.Error("Unregister should return true for existing bot")
@@ -109,7 +109,7 @@ func TestBotManager_List(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		bot := createTestBot(t, fmt.Sprintf("bot-%d", i))
-		mgr.Register(bot)
+		_ = mgr.Register(bot)
 	}
 
 	list := mgr.List()
@@ -125,7 +125,7 @@ func TestBotManager_Info(t *testing.T) {
 
 	ch := NewMemoryChannel("misskey", "bot-1")
 	bot := createTestBot(t, "bot-1", ch)
-	mgr.Register(bot)
+	_ = mgr.Register(bot)
 
 	infos := mgr.Info()
 	if len(infos) != 1 {
@@ -149,8 +149,8 @@ func TestBotManager_RunAll_StopAll(t *testing.T) {
 	ch2 := NewMemoryChannel("ch-2", "bot-2")
 	bot1 := createTestBot(t, "bot-1", ch1)
 	bot2 := createTestBot(t, "bot-2", ch2)
-	mgr.Register(bot1)
-	mgr.Register(bot2)
+	_ = mgr.Register(bot1)
+	_ = mgr.Register(bot2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

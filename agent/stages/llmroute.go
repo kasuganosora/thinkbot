@@ -193,7 +193,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		UserID:  env.Message.UserID,
 		Payload: result.Text,
 		Metadata: map[string]any{
-			"source_channel": env.Message.Source, // ChannelReplyHandler 路由必需
+			"source_channel": env.Message.Source,  // ChannelReplyHandler 路由必需
 			"trace_id":       env.Message.TraceID, // WebChannel 路由必需
 			"finish_reason":  string(result.FinishReason),
 			"usage":          result.Usage,
@@ -230,11 +230,11 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 		toolCalls += len(step.ToolCalls)
 	}
 	recorder.RecordUsage(ctx, llm.UsageMetric{
-		BotID:    botID,
-		Model:    modelID,
-		Feature:  feature,
-		Usage:    result.Usage,
+		BotID:     botID,
+		Model:     modelID,
+		Feature:   feature,
+		Usage:     result.Usage,
 		ToolCalls: toolCalls,
-		Steps:    steps,
+		Steps:     steps,
 	})
 }

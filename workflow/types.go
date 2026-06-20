@@ -54,13 +54,13 @@ const (
 type DAGNode struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
-	Task          string   `json:"task"`                    // SubAgent 执行的任务描述
-	SystemPrompt  string   `json:"systemPrompt,omitempty"`  // SubAgent 角色 prompt
-	Dependencies  []string `json:"dependencies,omitempty"`  // 依赖节点 ID（AND 依赖）
-	Review        bool     `json:"review"`                  // 是否需要结果审查
-	ReviewPrompt  string   `json:"reviewPrompt,omitempty"`  // 审查 SubAgent 的自定义 prompt
-	MaxRetries    int      `json:"maxRetries"`              // 执行错误最大重试次数（默认 2）
-	MaxIterations int      `json:"maxIterations"`           // Review 迭代上限（默认 3）
+	Task          string   `json:"task"`                   // SubAgent 执行的任务描述
+	SystemPrompt  string   `json:"systemPrompt,omitempty"` // SubAgent 角色 prompt
+	Dependencies  []string `json:"dependencies,omitempty"` // 依赖节点 ID（AND 依赖）
+	Review        bool     `json:"review"`                 // 是否需要结果审查
+	ReviewPrompt  string   `json:"reviewPrompt,omitempty"` // 审查 SubAgent 的自定义 prompt
+	MaxRetries    int      `json:"maxRetries"`             // 执行错误最大重试次数（默认 2）
+	MaxIterations int      `json:"maxIterations"`          // Review 迭代上限（默认 3）
 
 	// 运行时状态（非 Analyzer 生成，由 Scheduler 更新）
 	Status         NodeStatus     `json:"status"`
@@ -83,14 +83,14 @@ type ReviewRecord struct {
 
 // Workflow 是一个完整的工作流实例。
 type Workflow struct {
-	ID          string          `json:"id"`
-	Status      WorkflowStatus  `json:"status"`
-	Requirement string          `json:"requirement"`
-	Nodes       []*DAGNode      `json:"nodes"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	StartedAt   *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt  *time.Time      `json:"finishedAt,omitempty"`
-	Error       string          `json:"error,omitempty"`
+	ID          string         `json:"id"`
+	Status      WorkflowStatus `json:"status"`
+	Requirement string         `json:"requirement"`
+	Nodes       []*DAGNode     `json:"nodes"`
+	CreatedAt   time.Time      `json:"createdAt"`
+	StartedAt   *time.Time     `json:"startedAt,omitempty"`
+	FinishedAt  *time.Time     `json:"finishedAt,omitempty"`
+	Error       string         `json:"error,omitempty"`
 
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
@@ -159,24 +159,24 @@ func (s WorkflowStatus) IsRecoverable() bool {
 
 // TreeNode 用于树状展示节点依赖关系。
 type TreeNode struct {
-	Node     *DAGNode   `json:"node"`
+	Node     *DAGNode    `json:"node"`
 	Children []*TreeNode `json:"children,omitempty"`
 }
 
 // NodeFlat 用于平铺展示节点列表。
 type NodeFlat struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Status        NodeStatus `json:"status"`
-	Task          string     `json:"task"`
-	Result        string     `json:"result,omitempty"`
-	Error         string     `json:"error,omitempty"`
-	Dependencies  []string   `json:"dependencies,omitempty"`
-	Review        bool       `json:"review"`
-	RetryCount    int        `json:"retryCount"`
-	IterationCount int       `json:"iterationCount"`
-	StartedAt     *time.Time `json:"startedAt,omitempty"`
-	CompletedAt   *time.Time `json:"completedAt,omitempty"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	Status         NodeStatus `json:"status"`
+	Task           string     `json:"task"`
+	Result         string     `json:"result,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	Dependencies   []string   `json:"dependencies,omitempty"`
+	Review         bool       `json:"review"`
+	RetryCount     int        `json:"retryCount"`
+	IterationCount int        `json:"iterationCount"`
+	StartedAt      *time.Time `json:"startedAt,omitempty"`
+	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 }
 
 // ToFlat 将 DAGNode 转为精简的 NodeFlat 视图。

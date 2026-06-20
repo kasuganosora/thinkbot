@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -182,12 +182,13 @@ func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*
 			responseModel = chunk.Model
 
 			if chunk.Usage != nil {
-				usage.InputTokens = chunk.Usage.PromptTokens
-				usage.OutputTokens = chunk.Usage.CompletionTokens
-				usage.TotalTokens = chunk.Usage.TotalTokens
+				usage = convertChatUsage(chunk.Usage)
 			}
 
 			for _, choice := range chunk.Choices {
+				if choice.Delta == nil {
+					continue
+				}
 				// Reasoning content
 				if choice.Delta.ReasoningContent != "" {
 					if !reasoningStarted {
@@ -305,6 +306,21 @@ func paramsToChatRequest(params *llm.GenerateParams) (*ChatCompletionRequest, er
 		Seed:             params.Seed,
 		FrequencyPenalty: params.FrequencyPenalty,
 		PresencePenalty:  params.PresencePenalty,
+	}
+
+	// OpenAI does implicit prefix caching; a cache key hint helps cross-request
+	// cache hits within the same conversation/session.
+	if params.CacheKey != "" {
+		req.PromptCacheKey = params.CacheKey
+	}
+
+	// store=false to avoid storing conversations server-side.
+	store := false
+	req.Store = &store
+
+	// Reasoning effort for models that support it.
+	if params.ReasoningEffort != nil {
+		req.ReasoningEffort = *params.ReasoningEffort
 	}
 
 	if len(params.StopSequences) > 0 {
@@ -464,11 +480,7 @@ func chatResponseToResult(resp *ChatCompletionResponse) *llm.GenerateResult {
 	}
 
 	if resp.Usage != nil {
-		result.Usage = llm.Usage{
-			InputTokens:  resp.Usage.PromptTokens,
-			OutputTokens: resp.Usage.CompletionTokens,
-			TotalTokens:  resp.Usage.TotalTokens,
-		}
+		result.Usage = convertChatUsage(resp.Usage)
 	}
 
 	if len(resp.Choices) > 0 {
@@ -506,5 +518,37 @@ func mapChatFinishReason(reason string) llm.FinishReason {
 		return llm.FinishReasonContentFilter
 	default:
 		return llm.FinishReasonOther
+	}
+}
+
+// convertChatUsage converts a ChatUsage into the unified llm.Usage, extracting
+// cached/reasoning token details.
+func convertChatUsage(u *ChatUsage) llm.Usage {
+	inputTokens := u.PromptTokens
+	outputTokens := u.CompletionTokens
+
+	cachedTokens := 0
+	reasoningTokens := 0
+	if u.PromptTokensDetails != nil {
+		cachedTokens = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		reasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+
+	return llm.Usage{
+		InputTokens:       inputTokens,
+		OutputTokens:      outputTokens,
+		TotalTokens:       u.TotalTokens,
+		ReasoningTokens:   reasoningTokens,
+		CachedInputTokens: cachedTokens,
+		InputTokenDetails: llm.InputTokenDetail{
+			CacheReadTokens: cachedTokens,
+			NoCacheTokens:   max(0, inputTokens-cachedTokens),
+		},
+		OutputTokenDetails: llm.OutputTokenDetail{
+			ReasoningTokens: reasoningTokens,
+			TextTokens:      max(0, outputTokens-reasoningTokens),
+		},
 	}
 }

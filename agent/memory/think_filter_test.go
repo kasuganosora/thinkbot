@@ -212,11 +212,11 @@ func TestThinkFilterStore_StripsReasoningArray(t *testing.T) {
 	store := NewThinkFilterStore(repo)
 
 	entry := Entry{
-		Scope: ChannelScope("test"),
+		Scope:   ChannelScope("test"),
 		Content: `[{"text":"reasoning","type":"reasoning"},{"text":"clean content","type":"text"}]`,
 	}
 
-	store.Append(context.Background(), entry)
+	_ = store.Append(context.Background(), entry)
 
 	results, _ := repo.Recent(context.Background(), ChannelScope("test"), 1)
 	if len(results) != 1 {
@@ -231,7 +231,7 @@ func TestThinkFilterStore_PassthroughDelete(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewThinkFilterStore(repo)
 
-	store.Append(context.Background(), Entry{
+	_ = store.Append(context.Background(), Entry{
 		Scope:   ChannelScope("test"),
 		Content: "hello",
 	})
@@ -241,7 +241,7 @@ func TestThinkFilterStore_PassthroughDelete(t *testing.T) {
 		t.Fatalf("expected 1 entry before delete, got %d", len(results))
 	}
 
-	store.Delete(context.Background(), ChannelScope("test"), results[0].ID)
+	_ = store.Delete(context.Background(), ChannelScope("test"), results[0].ID)
 
 	results, _ = repo.Recent(context.Background(), ChannelScope("test"), 1)
 	if len(results) != 0 {
@@ -253,10 +253,10 @@ func TestThinkFilterStore_PassthroughClear(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewThinkFilterStore(repo)
 
-	store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "a"})
-	store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "b"})
+	_ = store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "a"})
+	_ = store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "b"})
 
-	store.Clear(context.Background(), ChannelScope("test"))
+	_ = store.Clear(context.Background(), ChannelScope("test"))
 
 	results, _ := repo.Recent(context.Background(), ChannelScope("test"), 10)
 	if len(results) != 0 {
@@ -269,7 +269,7 @@ func TestThinkFilterStore_EmptyAfterStrip(t *testing.T) {
 	store := NewThinkFilterStore(repo)
 
 	// Content is entirely think tags → after stripping it's empty
-	store.Append(context.Background(), Entry{
+	_ = store.Append(context.Background(), Entry{
 		Scope:   ChannelScope("test"),
 		Content: "<think>only reasoning, nothing useful</think>",
 	})

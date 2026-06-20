@@ -44,8 +44,8 @@ const (
 	integMCPAuthToken  = "Bearer bb38b92431b14dafab606e46c18279e8.E8pQRkp2Qlk3IFp2"
 
 	// LLM API（复用 agent/bot 集成测试相同的凭据）
-	integLLMAPIKey  = "8f58d5ad12d7409d85cd540f5f229453.8pG7VnMIM18Aarc4"
-	integLLMBaseURL = "https://open.bigmodel.cn/api/coding/paas"
+	integLLMAPIKey   = "8f58d5ad12d7409d85cd540f5f229453.8pG7VnMIM18Aarc4"
+	integLLMBaseURL  = "https://open.bigmodel.cn/api/coding/paas"
 	integLLMChatPath = "/v4/chat/completions"
 	integLLMModel    = "glm-5.2"
 )
@@ -303,8 +303,8 @@ func TestIntegration_MCP_LLMOrchestration(t *testing.T) {
 	result, err := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
 		MaxSteps: 5,
 		Params: llm.GenerateParams{
-			Model:    llm.ChatModel(integLLMModel),
-			System:   "你是一个助手，可以搜索互联网获取最新信息。当用户询问时事或你不确定的问题时，请使用搜索工具。",
+			Model:  llm.ChatModel(integLLMModel),
+			System: "你是一个助手，可以搜索互联网获取最新信息。当用户询问时事或你不确定的问题时，请使用搜索工具。",
 			Messages: []llm.Message{
 				llm.UserMessage("2025年最新的Go语言版本是什么？有哪些主要变化？"),
 			},

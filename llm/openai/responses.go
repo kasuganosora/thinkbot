@@ -4,9 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
-	httputil "github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	httputil "github.com/kasuganosora/thinkbot/util/http"
 )
 
 // ============================================================================
@@ -406,10 +412,96 @@ func parseAPIError(resp *httputil.Response, httpErr error) error {
 	if resp != nil && resp.StatusCode >= 400 {
 		var errResp ErrorResponse
 		if err := json.Unmarshal(resp.Body, &errResp); err == nil && errResp.Error.Message != "" {
-			return &errResp.Error
+			return openAIErrorToLLMError(&errResp.Error, resp.StatusCode, resp.Headers)
 		}
+		// Body wasn't parseable — fall back with status code.
+		return llm.NewLLMError(
+			openaiHttpStatusToReason(resp.StatusCode),
+			"openai",
+			fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(resp.Body)),
+			llm.WithCause(httpErr),
+		)
+	}
+	if httpErr != nil {
+		return llm.NewLLMError(llm.ErrorReasonTransport, "openai", httpErr.Error(), llm.WithCause(httpErr))
 	}
 	return httpErr
+}
+
+// openAIErrorToLLMError converts an OpenAI APIError into a unified llm.LLMError.
+func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header) *llm.LLMError {
+	reason := openaiErrorTypeToReason(apiErr.Type, apiErr.Code, statusCode)
+	opts := []llm.LLMErrorOpt{llm.WithCause(apiErr)}
+
+	if delay := parseOpenAIRetryAfter(headers); delay > 0 {
+		opts = append(opts, llm.WithRetryAfter(delay))
+	}
+
+	return llm.NewLLMError(reason, "openai", apiErr.Message, opts...)
+}
+
+func openaiErrorTypeToReason(errType, code string, statusCode int) llm.ErrorReason {
+	switch errType {
+	case "invalid_request_error":
+		if code == "model_not_found" {
+			return llm.ErrorReasonNoRoute
+		}
+		return llm.ErrorReasonInvalidRequest
+	case "authentication_error":
+		return llm.ErrorReasonAuthentication
+	case "rate_limit_exceeded", "tokens":
+		return llm.ErrorReasonRateLimit
+	case "insufficient_quota", "billing":
+		return llm.ErrorReasonQuotaExceeded
+	case "content_policy_violation":
+		return llm.ErrorReasonContentPolicy
+	case "server_error":
+		return llm.ErrorReasonProviderInternal
+	case "api_error":
+		return llm.ErrorReasonProviderInternal
+	}
+	// Fallback to status code mapping.
+	if code == "insufficient_quota" {
+		return llm.ErrorReasonQuotaExceeded
+	}
+	return openaiHttpStatusToReason(statusCode)
+}
+
+func openaiHttpStatusToReason(statusCode int) llm.ErrorReason {
+	switch {
+	case statusCode == 429:
+		return llm.ErrorReasonRateLimit
+	case statusCode == 401 || statusCode == 403:
+		return llm.ErrorReasonAuthentication
+	case statusCode == 402:
+		return llm.ErrorReasonQuotaExceeded
+	case statusCode >= 500:
+		return llm.ErrorReasonProviderInternal
+	case statusCode >= 400:
+		return llm.ErrorReasonInvalidRequest
+	default:
+		return llm.ErrorReasonTransport
+	}
+}
+
+func parseOpenAIRetryAfter(headers http.Header) time.Duration {
+	if headers == nil {
+		return 0
+	}
+	if raStr := strings.TrimSpace(headers.Get("Retry-After")); raStr != "" {
+		if secs, err := strconv.Atoi(raStr); err == nil {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 0
+}
+
+func truncateBody(body []byte) string {
+	const max = 500
+	if len(body) <= max {
+		return string(body)
+	}
+	return string(body[:max]) + "..."
 }
 
 func validateRequest(req *CreateResponseRequest) error {

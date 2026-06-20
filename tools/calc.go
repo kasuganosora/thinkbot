@@ -53,9 +53,9 @@ func calculateToolDef() agenttools.ToolDef {
 				}
 
 				return map[string]any{
-					"result":      formatResult(result),
-					"expression":  expr,
-					"isInteger":   result == math.Trunc(result) && !math.IsInf(result, 0),
+					"result":     formatResult(result),
+					"expression": expr,
+					"isInteger":  result == math.Trunc(result) && !math.IsInf(result, 0),
 				}, nil
 			}),
 		},
@@ -482,8 +482,8 @@ func randomToolDef() agenttools.ToolDef {
 					idx := mrand.Intn(len(choices))
 					pick := choices[idx]
 					return map[string]any{
-						"result":   pick,
-						"index":    idx,
+						"result":    pick,
+						"index":     idx,
 						"fromCount": len(choices),
 					}, nil
 				}

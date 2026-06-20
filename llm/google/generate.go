@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
@@ -265,27 +267,64 @@ func parseStreamChunk(event httputil.SSEEvent) (GenerateContentResponse, error) 
 	return resp, nil
 }
 
-// parseAPIError 尝试从 HTTP 响应中提取 Google API 错误。
+// parseAPIError 尝试从 HTTP 响应中提取 Google API 错误，并包装为 llm.LLMError。
 func parseAPIError(resp *httputil.Response, httpErr error) error {
 	if resp != nil && resp.StatusCode >= 400 {
 		var errResp ErrorResponse
-		if err := json.Unmarshal(resp.Body, &errResp); err == nil && errResp.Error != nil && errResp.Error.Message != "" {
-			return errResp.Error
+		if json.Unmarshal(resp.Body, &errResp) == nil && errResp.Error != nil && errResp.Error.Message != "" {
+			return googleErrorToLLMError(errResp.Error)
 		}
+		return llm.NewLLMError(
+			googleStatusToReason(""),
+			"google",
+			fmt.Sprintf("HTTP %d", resp.StatusCode),
+			llm.WithCause(httpErr),
+		)
+	}
+	if httpErr != nil {
+		return llm.NewLLMError(llm.ErrorReasonTransport, "google", httpErr.Error(), llm.WithCause(httpErr))
 	}
 	return httpErr
 }
 
-// parseStreamAPIError 尝试从流式 HTTP 错误中提取 Google API 错误。
+// parseStreamAPIError 尝试从流式 HTTP 错误中提取 Google API 错误，并包装为 llm.LLMError。
 func parseStreamAPIError(err error) error {
 	var streamErr *httputil.StreamHTTPError
 	if errors.As(err, &streamErr) && streamErr.StatusCode >= 400 {
 		var errResp ErrorResponse
 		if jsonErr := json.Unmarshal(streamErr.Body, &errResp); jsonErr == nil && errResp.Error != nil && errResp.Error.Message != "" {
-			return errResp.Error
+			return googleErrorToLLMError(errResp.Error)
 		}
 	}
 	return err
+}
+
+func googleErrorToLLMError(apiErr *APIError) *llm.LLMError {
+	return llm.NewLLMError(
+		googleStatusToReason(apiErr.Status),
+		"google",
+		apiErr.Message,
+		llm.WithCause(apiErr),
+	)
+}
+
+func googleStatusToReason(status string) llm.ErrorReason {
+	switch status {
+	case "INVALID_ARGUMENT":
+		return llm.ErrorReasonInvalidRequest
+	case "PERMISSION_DENIED", "UNAUTHENTICATED":
+		return llm.ErrorReasonAuthentication
+	case "RESOURCE_EXHAUSTED":
+		return llm.ErrorReasonRateLimit
+	case "FAILED_PRECONDITION":
+		return llm.ErrorReasonQuotaExceeded
+	case "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED":
+		return llm.ErrorReasonProviderInternal
+	case "NOT_FOUND":
+		return llm.ErrorReasonNoRoute
+	default:
+		return llm.ErrorReasonProviderInternal
+	}
 }
 
 // validateGenerateRequest 校验 GenerateContentRequest 必要字段。

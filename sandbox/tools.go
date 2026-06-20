@@ -29,29 +29,46 @@ var botWorkspaceToolPromptSection = &tools.ToolPromptSection{
 ## 可用工具
 
 ### 命令执行
-- **sandbox_exec** — 执行 shell 命令，返回 stdout/stderr/exitCode
+- **exec** — 执行 shell 命令，返回 stdout/stderr/exitCode
 
 ### 文件操作
-- **sandbox_read_file** — 读取文件内容（支持 offset/limit 分段读取，返回带行号的内容）
-- **sandbox_write_file** — 写入文件（纯文本内容，自动创建父目录）
-- **sandbox_replace_in_file** — 精确替换文件中的字符串片段（old_str → new_str，要求唯一匹配）
-- **sandbox_delete_file** — 删除文件或目录
-- **sandbox_move_file** — 移动/重命名文件或目录
-- **sandbox_list_dir** — 列出目录内容
+- **read_file** — 读取文件内容（支持 offset/limit 分段读取，返回带行号的内容）
+- **write_file** — 写入文件（纯文本内容，自动创建父目录）
+- **replace_in_file** — 精确替换文件中的字符串片段（old_str → new_str，要求唯一匹配）
+- **delete_file** — 删除文件或目录
+- **move_file** — 移动/重命名文件或目录
+- **list_dir** — 列出目录内容
 
 ### 搜索
-- **sandbox_search_content** — 在文件中搜索内容（类似 grep -rn）
+- **search_content** — 在文件中搜索内容（类似 grep -rn）
 
 ### 诊断
-- **sandbox_health** — 检查工作空间的健康状态（容器是否存活、目录是否可用、Docker 是否可用）
+- **health** — 检查工作空间的健康状态（容器是否存活、目录是否可用、Docker 是否可用）
 
 ## 使用原则
 
-- 优先使用 sandbox_replace_in_file 做小修改，避免重写整个文件
-- 读取大文件时使用 offset/limit 参数分段读取
+### 文件操作
+- **优先使用 replace_in_file 做小修改**，避免重写整个文件
+- 读取大文件时使用 offset/limit 参数分段读取，避免一次性读取过多
+- 如果不确定文件路径，先用 list_dir 列出目录内容
 - 路径相对于工作空间根目录，禁止使用 .. 目录遍历
+- 你可以在一次回复中并行调用多个工具来提高效率
+
+### 命令执行
+- exec 用于终端操作（如构建、测试、git 等）
+- **不要用 exec 做文件操作**（读写、搜索文件），使用专用工具
 - 命令有超时限制（默认 30 秒）
-- 工作空间是持久化的，重要数据（笔记、配置等）可以保存到文件中`,
+- 如果命令执行失败或行为异常，先用 health 工具诊断
+
+### 搜索
+- search_content 支持正则表达式，类似 grep -rn
+- 使用更精确的搜索模式可以获得更聚焦的结果
+- 如果结果太多，缩小搜索范围或使用更具体的 pattern
+
+### 通用
+- 工作空间是持久化的，重要数据（笔记、配置等）可以保存到文件中
+- 不要编造工具结果，只使用实际返回的数据
+- 工具调用失败时，说明失败原因并尝试替代方案`,
 	Enabled: true,
 }
 
@@ -106,9 +123,10 @@ func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
 func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_exec",
-		Description: "在 bot 工作空间中执行 shell 命令。" +
-			"返回 stdout、stderr 和 exitCode。" +
-			"工作空间是持久化的，文件在其中保存。",
+		Description: "在工作空间中执行 shell 命令，返回 stdout、stderr 和 exitCode。" +
+			"用于终端操作（如构建、测试、git、包管理等）。" +
+			"不要用它做文件操作（读写、搜索文件），应使用专用工具。" +
+			"命令有超时限制（默认 30 秒），可配置 timeout 参数。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -173,9 +191,12 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildReadFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_read_file",
-		Description: "读取 bot 工作空间中的文件内容（返回纯文本）。" +
+		Description: "读取工作空间中的文件内容，返回带行号的纯文本。" +
 			"支持通过 offset（起始行号，从 1 开始）和 limit（读取行数）分段读取大文件。" +
-			"如果省略 offset/limit，则读取整个文件。",
+			"如果省略 offset/limit，则读取整个文件。" +
+			"在需要读取多个文件时，可以并行调用此工具。" +
+			"避免读取过小的片段（如 30 行），需要更多上下文时读取更大的范围。" +
+			"如果需要在大文件中查找特定内容，使用 search_content 工具更高效。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -265,8 +286,9 @@ func buildReadFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_write_file",
-		Description: "向 bot 工作空间写入文件（纯文本内容）。" +
-			"如果父目录不存在会自动创建。会覆盖已有文件。",
+		Description: "向工作空间写入文件（纯文本内容）。" +
+			"如果父目录不存在会自动创建。会覆盖已有文件。" +
+			"优先使用 replace_in_file 做小修改，只有创建新文件或需要完全重写时才用此工具。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -325,9 +347,11 @@ func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_replace_in_file",
-		Description: "在 bot 工作空间的文件中进行精确字符串替换。" +
-			"将文件中的 old_str 替换为 new_str。old_str 必须在文件中唯一存在。" +
-			"适合做小范围修改，避免重写整个文件。",
+		Description: "在文件中进行精确字符串替换。" +
+			"将文件中的 old_str 替换为 new_str。" +
+			"默认 old_str 必须在文件中唯一存在；设置 replace_all=true 可替换所有匹配。" +
+			"这是做小范围修改的首选方式，避免重写整个文件。" +
+			"注意：确保 old_str 精确匹配文件内容（包括空白和缩进）。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -337,11 +361,15 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				},
 				"old_str": map[string]any{
 					"type":        "string",
-					"description": "要替换的原始字符串（必须精确匹配，包括空白和缩进）。在文件中必须唯一。",
+					"description": "要替换的原始字符串（必须精确匹配，包括空白和缩进）。默认必须在文件中唯一。",
 				},
 				"new_str": map[string]any{
 					"type":        "string",
 					"description": "替换后的新字符串。传入空字符串表示删除 old_str。",
+				},
+				"replace_all": map[string]any{
+					"type":        "boolean",
+					"description": "是否替换所有匹配项（而非仅唯一匹配）。默认 false。用于批量替换如变量重命名。",
 				},
 			},
 			"required": []string{"path", "old_str", "new_str"},
@@ -361,6 +389,15 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			}
 			newStr, _ := m["new_str"].(string)
 
+			// normalize line endings (CRLF → LF) for cross-platform compatibility
+			oldStr = strings.ReplaceAll(oldStr, "\r\n", "\n")
+			newStr = strings.ReplaceAll(newStr, "\r\n", "\n")
+
+			replaceAll := false
+			if v, ok := m["replace_all"].(bool); ok {
+				replaceAll = v
+			}
+
 			ws, err := mgr.GetOrCreate(botID)
 			if err != nil {
 				return nil, err
@@ -373,18 +410,28 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			}
 
 			content := string(data)
+			// normalize file line endings too
+			content = strings.ReplaceAll(content, "\r\n", "\n")
 
 			// 检查 old_str 是否存在
 			count := strings.Count(content, oldStr)
 			if count == 0 {
 				return nil, fmt.Errorf("old_str not found in file %q", path)
 			}
-			if count > 1 {
-				return nil, fmt.Errorf("old_str appears %d times in file %q — must be unique. Provide a longer string with more surrounding context", count, path)
+			if count > 1 && !replaceAll {
+				return nil, fmt.Errorf("old_str appears %d times in file %q — must be unique. Set replace_all=true to replace all, or provide a longer string with more surrounding context", count, path)
 			}
 
 			// 执行替换
-			newContent := strings.Replace(content, oldStr, newStr, 1)
+			var newContent string
+			replacedCount := 0
+			if replaceAll {
+				newContent = strings.ReplaceAll(content, oldStr, newStr)
+				replacedCount = count
+			} else {
+				newContent = strings.Replace(content, oldStr, newStr, 1)
+				replacedCount = 1
+			}
 
 			// 写回
 			if err := ws.WriteFile(ctx, path, []byte(newContent)); err != nil {
@@ -396,7 +443,7 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				"path":     path,
 				"oldSize":  len(data),
 				"newSize":  len(newContent),
-				"replaced": 1,
+				"replaced": replacedCount,
 			}, nil
 		}),
 	}
@@ -520,8 +567,10 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 
 func buildListDirTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
-		Name:        "sandbox_list_dir",
-		Description: "列出 bot 工作空间中指定目录的内容。",
+		Name: "sandbox_list_dir",
+		Description: "列出工作空间中指定目录的内容，返回文件和子目录列表。" +
+			"如果不确定文件路径，先用此工具查看目录结构。" +
+			"默认列出根目录。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -573,9 +622,11 @@ func buildListDirTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_search_content",
-		Description: "在 bot 工作空间的文件中搜索内容（类似 grep -rn）。" +
-			"支持正则表达式和递归搜索目录。" +
-			"返回匹配的文件名、行号和匹配行内容。",
+		Description: "在工作空间的文件中搜索内容（类似 grep -rn）。" +
+			"支持正则表达式（如 \"log.*Error\"、\"function\\s+\\w+\"）和递归搜索目录。" +
+			"返回匹配的文件名、行号和匹配行内容。" +
+			"使用更精确的 pattern 可以获得更聚焦的结果。" +
+			"如果需要按文件名查找文件，先用 list_dir 列出目录。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

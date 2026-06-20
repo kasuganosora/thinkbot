@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Setting 是 dao.Setting 的类型别名。
@@ -388,9 +388,9 @@ func (s *Store) SetMany(ctx context.Context, kv map[string]string) error {
 	}
 
 	if s.db == nil {
-	s.mu.Lock()
-	maps.Copy(s.overrides, kv)
-	s.mu.Unlock()
+		s.mu.Lock()
+		maps.Copy(s.overrides, kv)
+		s.mu.Unlock()
 		return nil
 	}
 
