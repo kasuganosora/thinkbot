@@ -152,9 +152,13 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 		defer close(wrappedCh)
 		var textBuf string
 		for part := range originalCh {
-			wrappedCh <- part
-			if tp, ok := part.(*llm.TextDeltaPart); ok {
-				textBuf += tp.Text
+			select {
+			case wrappedCh <- part:
+				if tp, ok := part.(*llm.TextDeltaPart); ok {
+					textBuf += tp.Text
+				}
+			case <-ctx.Done():
+				return // context 取消，退出避免 goroutine 泄漏
 			}
 		}
 		// 流结束后更新上下文
@@ -236,6 +240,9 @@ func (sa *SubAgent) Close() {
 
 // buildParams 根据当前配置和消息构建 GenerateParams。
 func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+
 	temp := sa.temp
 	maxTokens := sa.maxTokens
 

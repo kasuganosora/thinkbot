@@ -161,7 +161,9 @@ func (s *BindService) ConsumeCode(ctx context.Context, rawCode, platform, platfo
 			// 同一用户 → 幂等返回
 			// 仍标记码为已使用
 			now := time.Now()
-			s.db.WithContext(ctx).Model(&bindCode).Update("used_at", &now)
+			if err := s.db.WithContext(ctx).Model(&bindCode).Update("used_at", &now).Error; err != nil {
+				return nil, errs.Wrapf(err, "identity: failed to mark bind code as used")
+			}
 			return &ConsumeResult{Mapping: existing, Username: s.getUsername(ctx, bindCode.UserID)}, nil
 		}
 		// 不同用户 → 拒绝
