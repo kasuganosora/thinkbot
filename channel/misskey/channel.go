@@ -154,6 +154,11 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 	c.botUsername = me.Username
 	c.dedup = make(map[string]time.Time)
 
+	// 注册 Bot 自身用户 ID 到 Ingress，作为防止自回复循环的第二道防线。
+	// （第一道防线是本 channel 在 streaming 中过滤自帖，第 364、389 行）
+	// 注册时机：在 streamLoop 启动前，确保零竞态。
+	ingress.RegisterSelfUserID(me.ID)
+
 	// 编译 @bot 正则：匹配 @username 或 @username@host，确保后面不跟字母数字或下划线
 	c.mentionRe = regexp.MustCompile(`@` + regexp.QuoteMeta(me.Username) + `(?:@[\w.-]+)?\b`)
 

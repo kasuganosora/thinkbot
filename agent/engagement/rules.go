@@ -165,18 +165,39 @@ func (r *LengthRule) Allow(msg *core.Message) (bool, string) {
 
 // --- SelfExclusionRule: 排除 Bot 自己的消息 ---
 
+// SelfCheckerFunc 是判断用户 ID 是否属于 Bot 自身的函数类型。
+// 通常绑定到 inbound.Ingress.IsSelfMessage 或 SelfIDSet.Contains。
+type SelfCheckerFunc func(userID string) bool
+
 // SelfExclusionRule 排除 Bot 自己发送的消息。
+//
+// 支持两种模式：
+//   - 静态模式：通过 NewSelfExclusionRule(botUserID) 传入固定 ID（向后兼容）
+//   - 动态模式：通过 NewSelfExclusionRuleFunc(checker) 传入检查函数，
+//     与 Ingress 的 SelfIDSet 共享，能实时感知 Channel 注册的新 ID
 type SelfExclusionRule struct {
 	botUserID string
+	checker   SelfCheckerFunc // 动态检查器（优先于 botUserID）
 }
 
-// NewSelfExclusionRule 创建自我排除规则。
+// NewSelfExclusionRule 创建自我排除规则（静态模式）。
 func NewSelfExclusionRule(botUserID string) *SelfExclusionRule {
 	return &SelfExclusionRule{botUserID: botUserID}
 }
 
+// NewSelfExclusionRuleFunc 创建自我排除规则（动态模式）。
+// checker 通常为 inbound.Ingress.IsSelfMessage 或 SelfIDSet.Contains。
+func NewSelfExclusionRuleFunc(checker SelfCheckerFunc) *SelfExclusionRule {
+	return &SelfExclusionRule{checker: checker}
+}
+
 // Allow 实现 Rule。
 func (r *SelfExclusionRule) Allow(msg *core.Message) (bool, string) {
+	// 动态检查器优先
+	if r.checker != nil && r.checker(msg.UserID) {
+		return false, "self message"
+	}
+	// 静态 ID 回退
 	if r.botUserID != "" && msg.UserID == r.botUserID {
 		return false, "self message"
 	}

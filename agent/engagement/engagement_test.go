@@ -184,6 +184,51 @@ func TestSelfExclusionRule(t *testing.T) {
 	if allow {
 		t.Error("should block self message")
 	}
+
+	// 空 botUserID 不应阻止任何消息
+	emptyRule := NewSelfExclusionRule("")
+	msg = timelineMsg("anything", "anyone", "misskey")
+	allow, _ = emptyRule.Allow(msg)
+	if !allow {
+		t.Error("empty botUserID should allow all messages")
+	}
+}
+
+func TestSelfExclusionRuleFunc(t *testing.T) {
+	// 模拟共享 SelfIDSet 的行为
+	knownIDs := map[string]bool{"bot-123": true, "bot-tg": true}
+	checker := func(userID string) bool { return knownIDs[userID] }
+
+	rule := NewSelfExclusionRuleFunc(checker)
+
+	// 非 bot 用户 → 放行
+	msg := timelineMsg("hello", "user-1", "misskey")
+	allow, _ := rule.Allow(msg)
+	if !allow {
+		t.Error("should allow non-self message")
+	}
+
+	// bot 用户 → 阻止
+	msg = timelineMsg("self post", "bot-123", "misskey")
+	allow, _ = rule.Allow(msg)
+	if allow {
+		t.Error("should block self message (bot-123)")
+	}
+
+	// 另一个已注册 bot ID → 阻止
+	msg = timelineMsg("tg post", "bot-tg", "telegram")
+	allow, _ = rule.Allow(msg)
+	if allow {
+		t.Error("should block self message (bot-tg)")
+	}
+
+	// 运行时动态注册新 ID（模拟 Channel Start 后注册）
+	knownIDs["bot-new"] = true
+	msg = timelineMsg("new bot", "bot-new", "misskey")
+	allow, _ = rule.Allow(msg)
+	if allow {
+		t.Error("should block dynamically registered self message")
+	}
 }
 
 func TestRenoteExclusionRule(t *testing.T) {

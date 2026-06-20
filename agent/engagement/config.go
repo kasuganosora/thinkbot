@@ -55,6 +55,28 @@ func BuildRuleEngine(cfg config.EngagementConfig, botUserID string) (engine *Rul
 		rules = append(rules, NewSelfExclusionRule(botUserID))
 	}
 
+	return buildRuleEngineTail(cfg, rules)
+}
+
+// BuildRuleEngineSelfChecker 类似 BuildRuleEngine，但使用动态检查函数
+// 来排除 Bot 自身消息。checker 通常绑定到 Ingress 的 SelfIDSet，
+// 使得 Channel 运行时注册的 ID 能实时被 Engagement 层感知。
+//
+// checker 为 nil 时不添加 SelfExclusionRule。
+func BuildRuleEngineSelfChecker(cfg config.EngagementConfig, checker SelfCheckerFunc) (engine *RuleEngine, rateLimit *RateLimitRule) {
+	rules := make([]Rule, 0, 8)
+
+	// 自我排除（动态检查）
+	if checker != nil {
+		rules = append(rules, NewSelfExclusionRuleFunc(checker))
+	}
+
+	return buildRuleEngineTail(cfg, rules)
+}
+
+// buildRuleEngineTail 组装 SelfExclusion 之后的公共规则。
+func buildRuleEngineTail(cfg config.EngagementConfig, rules []Rule) (engine *RuleEngine, rateLimit *RateLimitRule) {
+
 	// 纯转发排除
 	rules = append(rules, NewRenoteExclusionRule())
 
@@ -147,6 +169,30 @@ func BuildFromConfig(cfg config.EngagementConfig, botUserID string, judge LLMJud
 
 	checker := BuildWritableChecker(cfg)
 	rules, rateLimit := BuildRuleEngine(cfg, botUserID)
+
+	return buildPolicyTail(cfg, checker, rules, rateLimit, judge)
+}
+
+// BuildFromConfigSelfChecker 类似 BuildFromConfig，但使用动态检查函数
+// 来排除 Bot 自身消息。checker 通常绑定到 Ingress 的 SelfIDSet，
+// 使得 Channel 运行时注册的 ID 能实时被 Engagement 层感知。
+//
+// 这是推荐的生产用法：在 botservice 中创建共享的 SelfIDSet，
+// 同时传递给 Ingress 和此函数，确保两层防线引用同一份数据。
+func BuildFromConfigSelfChecker(cfg config.EngagementConfig, checker SelfCheckerFunc, judge LLMJudge) PolicyBuildResult {
+	// 应用预设角色（覆盖相关参数）
+	if cfg.Profile != "" {
+		ApplyProfile(&cfg, cfg.Profile)
+	}
+
+	writable := BuildWritableChecker(cfg)
+	rules, rateLimit := BuildRuleEngineSelfChecker(cfg, checker)
+
+	return buildPolicyTail(cfg, writable, rules, rateLimit, judge)
+}
+
+// buildPolicyTail 是 BuildFromConfig / BuildFromConfigSelfChecker 的公共尾部逻辑。
+func buildPolicyTail(cfg config.EngagementConfig, checker WritableChecker, rules *RuleEngine, rateLimit *RateLimitRule, judge LLMJudge) PolicyBuildResult {
 
 	opts := []PolicyOption{WithRules(rules)}
 	if cfg.LLMJudgeEnabled && judge != nil {

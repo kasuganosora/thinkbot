@@ -129,6 +129,13 @@ type BotParams struct {
 	// DreamScheduler 梦境巩固的 cron 调度器（可选，nil=不启用梦境巩固）。
 	// 调度器需要在调用方创建并注入，Bot.Run 会自动 Start 它，Bot.Close 会自动 Stop。
 	DreamScheduler *cron.Scheduler
+
+	// SelfIDSet Bot 自身用户 ID 的共享集合（可选）。
+	// 如果提供，Bot 内部的 Ingress 会使用它来存储和检查自消息，
+	// 同时调用方可以将同一个集合传递给 Engagement 层的 SelfExclusionRule，
+	// 使两层防线共享同一份数据，无需时序协调。
+	// 如果为 nil，Ingress 会创建一个内部的 SelfIDSet。
+	SelfIDSet *inbound.SelfIDSet
 }
 
 // New 创建一个 Bot 实例。
@@ -166,8 +173,12 @@ func New(params BotParams) (*Bot, error) {
 	botLogger := params.Logger.With("bot_id", params.ID)
 
 	// 创建 Ingress（每个 Bot 独立）
+	ingressCfg := inbound.IngressConfig{
+		BufferSize: cfg.IngressBufferSize,
+		SelfIDSet:  params.SelfIDSet,
+	}
 	ingress := inbound.NewIngress(
-		inbound.IngressConfig{BufferSize: cfg.IngressBufferSize},
+		ingressCfg,
 		botLogger.With("component", "ingress"),
 		params.TP,
 	)

@@ -36,6 +36,15 @@ type Ingress struct {
 	tracer trace.Tracer
 	logger *zap.SugaredLogger
 	closed atomic.Bool
+
+	// selfIDs 记录 Bot 在各平台上的自身用户 ID。
+	// Channel 在 Start() 时通过 RegisterSelfUserID 注册，
+	// Ingress 在 Receive 时检查并丢弃 Bot 自己发出的消息，
+	// 防止 Bot 回复自己形成无限循环。
+	//
+	// selfIDs 是一个 *SelfIDSet，可与 Engagement 层的 SelfExclusionRule 共享，
+	// 确保两层防线引用同一份数据，无需时序协调。
+	selfIDs *SelfIDSet
 }
 
 // IngressConfig 控制 Ingress 行为参数。
@@ -43,6 +52,12 @@ type IngressConfig struct {
 	// BufferSize 内部缓冲区大小（默认 256）。
 	// 控制输入端和 Pipeline worker 之间的背压。
 	BufferSize int
+
+	// SelfIDSet 可选的外部 SelfIDSet。
+	// 如果提供，Ingress 将使用它来存储和检查 Bot 自身用户 ID，
+	// 允许 Engagement 层等外部组件共享同一份数据。
+	// 如果为 nil，Ingress 会创建一个内部的 SelfIDSet。
+	SelfIDSet *SelfIDSet
 }
 
 // DefaultIngressConfig 返回合理的默认配置。
@@ -63,9 +78,10 @@ func NewIngress(
 	}
 
 	return &Ingress{
-		ch:     make(chan *core.Envelope, cfg.BufferSize),
-		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/agent/inbound"),
-		logger: logger,
+		ch:      make(chan *core.Envelope, cfg.BufferSize),
+		tracer:  tp.Tracer("github.com/kasuganosora/thinkbot/agent/inbound"),
+		logger:  logger,
+		selfIDs: cfg.SelfIDSet,
 	}
 }
 
@@ -82,6 +98,13 @@ func NewIngress(
 func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 	if g.closed.Load() {
 		return fmt.Errorf("ingress: closed")
+	}
+
+	// 自消息过滤——防止 Bot 回复自己的消息形成无限循环。
+	// Channel 层通常已有过滤（如 Misskey 在 streaming 中排除自帖），
+	// 这里是中央化的第二道防线，确保即使新增 Channel 也不会遗漏。
+	if g.isSelfMessage(msg.UserID) {
+		return nil
 	}
 
 	// 归一化：填充缺失的默认字段
@@ -140,6 +163,11 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 		return false
 	}
 
+	// 自消息过滤（同 Receive）
+	if g.isSelfMessage(msg.UserID) {
+		return true // 静默丢弃，返回 true 表示"已处理"
+	}
+
 	if msg.ID == "" {
 		msg.ID = idgen.New("msg")
 	}
@@ -180,4 +208,60 @@ func (g *Ingress) Close() {
 // Len 返回当前缓冲区中待处理的消息数量。
 func (g *Ingress) Len() int {
 	return len(g.ch)
+}
+
+// ============================================================================
+// 自消息过滤——防止 Bot 回复自己
+// ============================================================================
+
+// RegisterSelfUserID 注册 Bot 在某平台上的自身用户 ID。
+//
+// Channel 在 Start() 中发现自身身份后（如 Misskey 的 getSelf、Telegram 的 getMe）
+// 应立即调用此方法注册，然后才开始接收消息。
+//
+// 注册后，任何 UserID 匹配的入站消息都会被 Ingress 静默丢弃，
+// 确保即使 Channel 层的过滤逻辑有遗漏，也不会形成 Bot 回复自己的无限循环。
+//
+// userID 为空时忽略（安全无操作）。
+func (g *Ingress) RegisterSelfUserID(userID string) {
+	g.lazyInitSelfIDs()
+	g.selfIDs.Add(userID)
+}
+
+// UnregisterSelfUserID 移除已注册的自身用户 ID。
+// Channel 在 Stop() 时可调用以清理状态。
+func (g *Ingress) UnregisterSelfUserID(userID string) {
+	if g.selfIDs != nil {
+		g.selfIDs.Remove(userID)
+	}
+}
+
+// IsSelfMessage 检查消息发送者是否是 Bot 自身。
+// 这是公开方法，供 Engagement 层等外部组件共享使用。
+func (g *Ingress) IsSelfMessage(userID string) bool {
+	g.lazyInitSelfIDs()
+	return g.selfIDs.Contains(userID)
+}
+
+// SelfIDs 返回内部 SelfIDSet 的引用。
+// 调用方可以在 Ingress 创建后获取此引用并传递给 Engagement 层，
+// 使两层共享同一份自消息过滤数据。
+func (g *Ingress) SelfIDs() *SelfIDSet {
+	g.lazyInitSelfIDs()
+	return g.selfIDs
+}
+
+// lazyInitSelfIDs 在首次使用时创建 SelfIDSet（如果未通过 IngressConfig 注入）。
+func (g *Ingress) lazyInitSelfIDs() {
+	if g.selfIDs == nil {
+		g.selfIDs = NewSelfIDSet()
+	}
+}
+
+// isSelfMessage 检查消息发送者是否是 Bot 自身。
+func (g *Ingress) isSelfMessage(userID string) bool {
+	if g.selfIDs == nil {
+		return false
+	}
+	return g.selfIDs.Contains(userID)
 }
