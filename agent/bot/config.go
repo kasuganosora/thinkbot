@@ -1,6 +1,9 @@
 package bot
 
-import "maps"
+import (
+	"maps"
+	"time"
+)
 
 // ============================================================================
 // BotConfig — Bot 级别配置
@@ -37,6 +40,12 @@ type BotConfig struct {
 	// 为空时回退到 LLMMain。
 	LLMLight string `json:"llmLight,omitempty" yaml:"llmLight,omitempty"`
 
+	// Timezone Bot 的时区（如 "Asia/Shanghai"、"UTC"、"America/New_York"）。
+	// 用于 Cron 定时任务、时间相关工具等。
+	// 空字符串表示使用系统本地时区。
+	// 无效时区名称会安全回退到 UTC。
+	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+
 	// Extra 扩展配置（Stage 自定义参数等）。
 	// Stage 可通过 Envelope.Get("bot.config") 访问整个 BotConfig，
 	// 或通过此字段访问自定义参数。
@@ -47,6 +56,20 @@ type BotConfig struct {
 // 此方法使 BotConfig 满足 prompt.Stage 中 fallbackPrompt 的 duck-type 接口。
 func (c BotConfig) GetSystemPrompt() string {
 	return c.SystemPrompt
+}
+
+// Location 解析 Timezone 字段为 *time.Location。
+// 空字符串 → 系统本地时区。
+// 无效名称 → UTC（安全回退）。
+func (c BotConfig) Location() *time.Location {
+	if c.Timezone == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(c.Timezone)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
 }
 
 // DefaultBotConfig 返回合理的默认配置。
@@ -85,6 +108,9 @@ func (c BotConfig) Merge(other BotConfig) BotConfig {
 	}
 	if other.LLMLight != "" {
 		c.LLMLight = other.LLMLight
+	}
+	if other.Timezone != "" {
+		c.Timezone = other.Timezone
 	}
 	if other.Extra != nil {
 		if c.Extra == nil {
