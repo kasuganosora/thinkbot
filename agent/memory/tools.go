@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
@@ -10,16 +11,19 @@ import (
 )
 
 // ============================================================================
-// 记忆管理工具 — 让 AI 自主搜索、写入、删除记忆
+// 记忆管理工具 — 单一压缩工具设计
 //
-// 提供以下工具：
-//   - memory_search:  按关键词/分类搜索记忆
-//   - memory_write:   写入一条新记忆
-//   - memory_delete:  按 ID 删除单条记忆
-//   - memory_recent:  获取当前 scope 最近 N 条记忆
-//   - memory_count:   查询记忆数量
+// 将原先 5 个独立工具合并为单个 `memory` 工具，通过 action 参数分发。
+// 显著减少 LLM 上下文中的工具 schema token 开销。
 //
-// 所有工具通过闭包持有 Repository，scope 由 LLM 在参数中指定。
+// 支持的操作：
+//   - search:  搜索记忆
+//   - add:     添加记忆（带威胁扫描）
+//   - replace: 替换记忆（子串匹配，非 ID）
+//   - remove:  删除记忆（子串匹配，非 ID）
+//   - recent:  获取最近记忆
+//   - count:   查询记忆数量
+//   - batch:   批量原子操作（add+replace+remove 一次完成）
 // ============================================================================
 
 // memoryToolsPromptSection 是记忆工具的统一提示词段落。
@@ -28,32 +32,22 @@ var memoryToolsPromptSection = &tools.ToolPromptSection{
 	Order: 310,
 	Content: `# 记忆管理
 
-你拥有自主管理长期记忆的能力。可以使用以下工具搜索、写入、删除记忆。
+你拥有持久记忆能力。使用 ` + "`memory`" + ` 工具保存、搜索和管理跨会话的记忆。
 
 ## 何时使用
 
-- **搜索记忆**：当你需要回忆之前对话中的信息（用户偏好、已知事实、历史决策等）时使用 ` + "`memory_search`" + `
-- **写入记忆**：当你判断某条信息有长期价值（用户个人偏好、重要事实、约定事项等）时使用 ` + "`memory_write`" + `
-- **删除记忆**：当发现记忆条目过时、不准确或用户要求遗忘时使用 ` + "`memory_delete`" + `
-- **查看最近**：快速回顾最近的记忆时使用 ` + "`memory_recent`" + `
+- **主动保存**：当用户陈述偏好、纠正或个人信息时，主动保存
+- **搜索记忆**：当你需要回忆之前对话中的信息时搜索
+- **删除过时记忆**：当发现记忆过时或不准确时删除
+- **批量整理**：当需要同时添加+删除多个条目时，用 batch 操作一次完成
 
-## Scope 说明
+## 最佳实践
 
-记忆按 scope 分桶存储：
-- ` + "`channel`" + `：会话级（同一频道/群聊内可见），最常用
-- ` + "`user`" + `：用户级（跨频道，同一用户的所有对话共享）
-- ` + "`bot`" + `：Bot 级（Bot 自身的知识库）
-- ` + "`global`" + `：全局（所有会话共享）
-
-不指定 scope 时默认使用 channel scope。
-
-## 使用原则
-
-- 只存储有长期价值的信息，不要存储闲聊内容
-- 写入时选择正确的 scope：个人偏好用 user，会话相关用 channel
-- 搜索时优先搜索当前 channel scope，然后是 user scope
-- 记忆是辅助性的，不要过度依赖记忆工具，能直接从对话上下文回答的就不用搜索
-- content 字段应简洁、信息密集，避免冗长描述`,
+- 写入的记忆会在**下一轮对话**的系统提示中自动生效
+- 只存储有长期价值的信息：用户偏好 > 环境事实 > 流程
+- **子串操作**：replace 和 remove 使用唯一子串匹配条目，不需要 ID
+- 当记忆库满时，用 batch 操作：先 remove/replace 旧条目释放空间，再 add 新条目
+- 不要存储可轻松重新发现的信息、原始数据转储、临时 TODO`,
 	Enabled: true,
 }
 
@@ -61,18 +55,44 @@ var memoryToolsPromptSection = &tools.ToolPromptSection{
 type ToolConfig struct {
 	// Repo 记忆仓储（必须提供）。
 	Repo Repository
+	// Snapshot 可选的记忆快照引用。设置后，写入操作会自动调用 MarkDirty()，
+	// 使下一轮系统提示反映最新记忆（仅 ModeLive/ModePeriodic 生效）。
+	Snapshot *Snapshot
 	// DefaultScopeKind 默认 scope 类型（默认 "channel"）。
 	DefaultScopeKind ScopeKind
 	// DefaultScopeID 默认 scope ID（默认空，使用会话的 channel/user ID）。
 	// 通常留空，让 LLM 在参数中提供。
 	DefaultScopeID string
+	// MaxMemoryChars memory（agent 笔记）的字符上限（默认 2200）。
+	MaxMemoryChars int
+	// MaxUserChars user（用户画像）的字符上限（默认 1375）。
+	MaxUserChars int
+	// EntrySeparator 条目分隔符（默认 "\n§\n"）。
+	EntrySeparator string
+}
+
+// DefaultToolConfig 返回默认配置。
+func DefaultToolConfig(repo Repository) ToolConfig {
+	return ToolConfig{
+		Repo:             repo,
+		DefaultScopeKind: ScopeChannel,
+		MaxMemoryChars:   2200,
+		MaxUserChars:     1375,
+		EntrySeparator:   "\n§\n",
+	}
+}
+
+// markDirty 如果配置了 Snapshot 则标记快照为脏。
+func (c *ToolConfig) markDirty() {
+	if c.Snapshot != nil {
+		c.Snapshot.MarkDirty()
+	}
 }
 
 // Tools 返回记忆管理工具定义列表。
-// 包含 memory_search、memory_write、memory_delete、memory_recent、memory_count 五个工具。
+// 返回单个 `memory` 工具，通过 action 参数分发到不同操作。
 func Tools(config ToolConfig) []tools.ToolDef {
-	repo := config.Repo
-	if repo == nil {
+	if config.Repo == nil {
 		return nil
 	}
 
@@ -82,295 +102,84 @@ func Tools(config ToolConfig) []tools.ToolDef {
 	}
 	defaultID := config.DefaultScopeID
 
-	// parseScope 从 LLM 输入中解析 scope 参数。
-	parseScope := func(m map[string]any) Scope {
-		kindStr, _ := m["scope_kind"].(string)
-		if kindStr == "" {
-			kindStr = string(defaultKind)
-		}
-		id, _ := m["scope_id"].(string)
-		if id == "" {
-			id = defaultID
-		}
-		return Scope{Kind: ScopeKind(kindStr), ID: id}
-	}
-
-	// --- memory_search ---
-	searchTool := tools.ToolDef{
-		Category: "memory",
-		Scopes:   []string{"private", "group"},
-		Tool: tools.BuildTool(
-			"memory_search",
-			"搜索记忆库中的条目。支持按关键词模糊搜索，可选按分类过滤。返回匹配的记忆条目列表。",
-			map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{
-						"type":        "string",
-						"description": "搜索关键词。匹配记忆内容的子串（不区分大小写）。留空时返回该 scope 下所有记忆。",
-					},
-					"scope_kind": map[string]any{
-						"type":        "string",
-						"description": "搜索的作用域类型。可选值：channel（会话级，默认）、user（用户级）、bot（Bot级）、global（全局）。",
-						"default":     "channel",
-					},
-					"scope_id": map[string]any{
-						"type":        "string",
-						"description": "作用域标识（如频道 ID、用户 ID）。global scope 时留空。",
-					},
-					"category": map[string]any{
-						"type":        "string",
-						"description": "按分类过滤。常见值：fact、preference、event、observation、summary。留空时不按分类过滤。",
-					},
-					"limit": map[string]any{
-						"type":        "integer",
-						"description": "最多返回条目数（默认 10，最大 50）。",
-						"default":     10,
-					},
-				},
-			},
-			func(ctx *llm.ToolExecContext, input any) (any, error) {
-				m, ok := input.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("invalid input: expected object")
-				}
-				queryText, _ := m["query"].(string)
-				category, _ := m["category"].(string)
-				limit := 10
-				if l := toInt(m["limit"]); l > 0 {
-					limit = l
-				}
-				if limit > 50 {
-					limit = 50
-				}
-
-				scope := parseScope(m)
-
-				entries, err := repo.Retrieve(ctx, Query{
-					Scopes:   []Scope{scope},
-					Text:     queryText,
-					Category: category,
-					Limit:    limit,
-				})
-				if err != nil {
-					return nil, errs.Wrap(err, "memory search failed")
-				}
-
-				return formatEntries(entries, "search"), nil
-			},
-		),
+	memoryTool := tools.ToolDef{
+		Category:      "memory",
+		Scopes:        []string{"private", "group"},
 		PromptSection: memoryToolsPromptSection,
-	}
-
-	// --- memory_write ---
-	writeTool := tools.ToolDef{
-		Category: "memory",
-		Scopes:   []string{"private", "group"},
 		Tool: tools.BuildTool(
-			"memory_write",
-			"写入一条新记忆到记忆库。用于存储有长期价值的信息（用户偏好、重要事实、约定事项等）。",
+			"memory",
+			"Manage persistent memory that survives across sessions. "+
+				"Use action to add/replace/remove/search/recent/count/batch. "+
+				"Memory is injected into future sessions, keep entries compact and high-signal. "+
+				"When making multiple changes, use batch (all-or-nothing against final char budget).",
 			map[string]any{
 				"type": "object",
 				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"add", "replace", "remove", "search", "recent", "count", "batch"},
+						"description": "Operation to perform. Use 'batch' for atomic multi-op (add+replace+remove in one call).",
+					},
 					"content": map[string]any{
 						"type":        "string",
-						"description": "记忆内容。应简洁、信息密集，包含足够的上下文使其在未来可被检索和理解。",
+						"description": "Entry content for 'add' or 'replace'. Required for add/replace.",
 					},
-					"category": map[string]any{
+					"old_text": map[string]any{
 						"type":        "string",
-						"description": "记忆分类。推荐值：fact（事实）、preference（偏好）、event（事件）、observation（观察）、summary（摘要）。默认 observation。",
-						"default":     "observation",
+						"description": "Short unique substring identifying the entry to replace or remove.",
 					},
-					"importance": map[string]any{
-						"type":        "number",
-						"description": "重要程度（0.0~1.0）。0.5 为中等，1.0 为极高。用于排序和淘汰策略。默认 0.5。",
-						"default":     0.5,
-					},
-					"scope_kind": map[string]any{
+					"query": map[string]any{
 						"type":        "string",
-						"description": "存储的作用域类型。可选值：channel（默认）、user、bot、global。个人偏好建议用 user，会话相关用 channel。",
-						"default":     "channel",
-					},
-					"scope_id": map[string]any{
-						"type":        "string",
-						"description": "作用域标识（如频道 ID、用户 ID）。global scope 时留空。",
-					},
-				},
-				"required": []string{"content"},
-			},
-			func(ctx *llm.ToolExecContext, input any) (any, error) {
-				m, ok := input.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("invalid input: expected object")
-				}
-
-				content, _ := m["content"].(string)
-				if content == "" {
-					return nil, fmt.Errorf("content is required")
-				}
-				content = StripThinking(content)
-				content = StripToolOutput(content)
-
-				category, _ := m["category"].(string)
-				if category == "" {
-					category = "observation"
-				}
-
-				importance := 0.5
-				if imp, ok := m["importance"].(float64); ok {
-					importance = imp
-				}
-
-				scope := parseScope(m)
-
-				entry := Entry{
-					Scope:      scope,
-					Content:    content,
-					Category:   category,
-					Source:     "tool",
-					Importance: importance,
-				}
-
-				if err := repo.Append(ctx, entry); err != nil {
-					return nil, errs.Wrap(err, "memory write failed")
-				}
-
-				return map[string]any{
-					"success":  true,
-					"message":  "记忆已写入",
-					"scope":    scope.Key(),
-					"content":  content,
-					"category": category,
-				}, nil
-			},
-		),
-	}
-
-	// --- memory_delete ---
-	deleteTool := tools.ToolDef{
-		Category: "memory",
-		Scopes:   []string{"private", "group"},
-		Tool: tools.BuildTool(
-			"memory_delete",
-			"按 ID 删除单条记忆。需要先用 memory_search 找到要删除的记忆的 ID。",
-			map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"memory_id": map[string]any{
-						"type":        "string",
-						"description": "要删除的记忆条目 ID（从 memory_search 或 memory_recent 的结果中获取）。",
-					},
-					"scope_kind": map[string]any{
-						"type":        "string",
-						"description": "记忆所在的作用域类型。可选值：channel（默认）、user、bot、global。",
-						"default":     "channel",
-					},
-					"scope_id": map[string]any{
-						"type":        "string",
-						"description": "作用域标识（如频道 ID、用户 ID）。",
-					},
-				},
-				"required": []string{"memory_id"},
-			},
-			func(ctx *llm.ToolExecContext, input any) (any, error) {
-				m, ok := input.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("invalid input: expected object")
-				}
-
-				memoryID, _ := m["memory_id"].(string)
-				if memoryID == "" {
-					return nil, fmt.Errorf("memory_id is required")
-				}
-
-				scope := parseScope(m)
-
-				if err := repo.Delete(ctx, scope, memoryID); err != nil {
-					return nil, errs.Wrap(err, "memory delete failed")
-				}
-
-				return map[string]any{
-					"success":   true,
-					"message":   "记忆已删除",
-					"memory_id": memoryID,
-					"scope":     scope.Key(),
-				}, nil
-			},
-		),
-	}
-
-	// --- memory_recent ---
-	recentTool := tools.ToolDef{
-		Category: "memory",
-		Scopes:   []string{"private", "group"},
-		Tool: tools.BuildTool(
-			"memory_recent",
-			"获取指定作用域下最近的记忆条目。按时间倒序返回，适合快速回顾最近的记忆。",
-			map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"scope_kind": map[string]any{
-						"type":        "string",
-						"description": "作用域类型。可选值：channel（默认）、user、bot、global。",
-						"default":     "channel",
-					},
-					"scope_id": map[string]any{
-						"type":        "string",
-						"description": "作用域标识（如频道 ID、用户 ID）。global scope 时留空。",
+						"description": "Search keyword for 'search' action.",
 					},
 					"limit": map[string]any{
 						"type":        "integer",
-						"description": "返回条目数（默认 5，最大 20）。",
-						"default":     5,
+						"description": "Max results for 'search'/'recent'. Default: 10 (search), 5 (recent).",
+						"default":     10,
 					},
-				},
-			},
-			func(ctx *llm.ToolExecContext, input any) (any, error) {
-				m, ok := input.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("invalid input: expected object")
-				}
-
-				limit := 5
-				if l := toInt(m["limit"]); l > 0 {
-					limit = l
-				}
-				if limit > 20 {
-					limit = 20
-				}
-
-				scope := parseScope(m)
-
-				entries, err := repo.Recent(ctx, scope, limit)
-				if err != nil {
-					return nil, errs.Wrap(err, "memory recent failed")
-				}
-
-				return formatEntries(entries, "recent"), nil
-			},
-		),
-	}
-
-	// --- memory_count ---
-	countTool := tools.ToolDef{
-		Category: "memory",
-		Scopes:   []string{"private", "group"},
-		Tool: tools.BuildTool(
-			"memory_count",
-			"查询指定作用域下的记忆条目总数。",
-			map[string]any{
-				"type": "object",
-				"properties": map[string]any{
+					"category": map[string]any{
+						"type":        "string",
+						"description": "Category for 'add'. Options: fact, preference, event, observation. Default: observation.",
+						"default":     "observation",
+					},
+					"operations": map[string]any{
+						"type": "array",
+						"description": "Batch operations array. Each item: {action: add|replace|remove, content?, old_text?}. " +
+							"Applied atomically against final char budget. Use to free space + add in one call.",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"action": map[string]any{
+									"type": "string",
+									"enum": []string{"add", "replace", "remove"},
+								},
+								"content": map[string]any{
+									"type":        "string",
+									"description": "Entry content for add/replace.",
+								},
+								"old_text": map[string]any{
+									"type":        "string",
+									"description": "Substring identifying entry for replace/remove.",
+								},
+							},
+							"required": []string{"action"},
+						},
+					},
 					"scope_kind": map[string]any{
 						"type":        "string",
-						"description": "作用域类型。可选值：channel（默认）、user、bot、global。",
+						"description": "Memory scope. Options: channel (default), user, bot, global.",
 						"default":     "channel",
 					},
 					"scope_id": map[string]any{
 						"type":        "string",
-						"description": "作用域标识（如频道 ID、用户 ID）。global scope 时留空。",
+						"description": "Scope identifier (channel ID, user ID). Empty for global.",
+					},
+					"memory_id": map[string]any{
+						"type":        "string",
+						"description": "Entry ID for remove by ID (alternative to old_text substring match).",
 					},
 				},
+				"required": []string{"action"},
 			},
 			func(ctx *llm.ToolExecContext, input any) (any, error) {
 				m, ok := input.(map[string]any)
@@ -378,30 +187,63 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					return nil, fmt.Errorf("invalid input: expected object")
 				}
 
-				scope := parseScope(m)
-
-				count, err := repo.Count(ctx, scope)
-				if err != nil {
-					return nil, errs.Wrap(err, "memory count failed")
+				action, _ := m["action"].(string)
+				if action == "" {
+					return nil, fmt.Errorf("action is required")
 				}
 
-				return map[string]any{
-					"scope": scope.Key(),
-					"count": count,
-				}, nil
+				repo := config.Repo
+				scope := parseScope(m, defaultKind, defaultID)
+
+				switch action {
+				case "search":
+					return handleSearch(ctx, repo, scope, m)
+
+				case "add":
+					result, err := handleAdd(ctx, repo, scope, m)
+					if err == nil {
+						config.markDirty()
+					}
+					return result, err
+
+				case "replace":
+					result, err := handleReplace(ctx, repo, scope, m)
+					if err == nil {
+						config.markDirty()
+					}
+					return result, err
+
+				case "remove":
+					result, err := handleRemove(ctx, repo, scope, m)
+					if err == nil {
+						config.markDirty()
+					}
+					return result, err
+
+				case "recent":
+					return handleRecent(ctx, repo, scope, m)
+
+				case "count":
+					return handleCount(ctx, repo, scope)
+
+				case "batch":
+					result, err := handleBatch(ctx, repo, scope, m)
+					if err == nil {
+						config.markDirty()
+					}
+					return result, err
+
+				default:
+					return nil, fmt.Errorf("unknown action '%s'. Use: add, replace, remove, search, recent, count, batch", action)
+				}
 			},
 		),
 	}
 
-	return []tools.ToolDef{searchTool, writeTool, deleteTool, recentTool, countTool}
+	return []tools.ToolDef{memoryTool}
 }
 
 // RegisterTools 将记忆工具注册到 ToolManager。
-//
-// 使用示例：
-//
-//	repo := memory.NewMemoryRepository()
-//	memory.RegisterTools(toolMgr, memory.ToolConfig{Repo: repo})
 func RegisterTools(mgr *tools.ToolManager, config ToolConfig) error {
 	defs := Tools(config)
 	if len(defs) == 0 {
@@ -411,8 +253,401 @@ func RegisterTools(mgr *tools.ToolManager, config ToolConfig) error {
 }
 
 // ============================================================================
+// Action handlers
+// ============================================================================
+
+func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	queryText, _ := m["query"].(string)
+	category, _ := m["category"].(string)
+	limit := 10
+	if l := toInt(m["limit"]); l > 0 {
+		limit = l
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	entries, err := repo.Retrieve(ctx, Query{
+		Scopes:   []Scope{scope},
+		Text:     queryText,
+		Category: category,
+		Limit:    limit,
+	})
+	if err != nil {
+		return nil, errs.Wrap(err, "memory search failed")
+	}
+
+	return formatEntries(entries, "search"), nil
+}
+
+func handleAdd(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	content, _ := m["content"].(string)
+	if content == "" {
+		return nil, fmt.Errorf("content is required for 'add' action")
+	}
+	content = StripThinking(content)
+	content = StripToolOutput(content)
+
+	// 威胁扫描
+	if findings := ScanMemoryThreats(content); len(findings) > 0 {
+		return map[string]any{
+			"success": false,
+			"error":   "Content blocked by security scan: " + ThreatSummary(findings),
+		}, nil
+	}
+
+	category, _ := m["category"].(string)
+	if category == "" {
+		category = "observation"
+	}
+
+	importance := 0.5
+	if imp, ok := m["importance"].(float64); ok {
+		importance = imp
+	}
+
+	entry := Entry{
+		Scope:      scope,
+		Content:    content,
+		Category:   category,
+		Source:     "tool",
+		Importance: importance,
+	}
+
+	if err := repo.Append(ctx, entry); err != nil {
+		return nil, errs.Wrap(err, "memory write failed")
+	}
+
+	return successResponse(scope, "Entry added.", true), nil
+}
+
+func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	oldText, _ := m["old_text"].(string)
+	content, _ := m["content"].(string)
+
+	if oldText == "" {
+		return nil, fmt.Errorf("old_text is required for 'replace' action")
+	}
+	if content == "" {
+		return nil, fmt.Errorf("content is required for 'replace' (use 'remove' to delete)")
+	}
+	content = StripThinking(content)
+
+	// 威胁扫描
+	if findings := ScanMemoryThreats(content); len(findings) > 0 {
+		return map[string]any{
+			"success": false,
+			"error":   "Content blocked by security scan: " + ThreatSummary(findings),
+		}, nil
+	}
+
+	// 子串匹配查找
+	entries, err := repo.Retrieve(ctx, Query{
+		Scopes: []Scope{scope},
+		Limit:  100,
+	})
+	if err != nil {
+		return nil, errs.Wrap(err, "memory search failed")
+	}
+
+	matches := findSubstringMatches(entries, oldText)
+	if len(matches) == 0 {
+		return map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("No entry matched '%s'.", oldText),
+		}, nil
+	}
+	if len(matches) > 1 {
+		return map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("Multiple entries matched '%s'. Be more specific.", oldText),
+			"matches": previewEntries(matches),
+		}, nil
+	}
+
+	// 替换
+	old := matches[0]
+	if err := repo.Delete(ctx, scope, old.ID); err != nil {
+		return nil, errs.Wrap(err, "delete failed")
+	}
+
+	newEntry := Entry{
+		ID:       old.ID,
+		Scope:    scope,
+		Content:  content,
+		Category: old.Category,
+		Source:   old.Source,
+	}
+	if err := repo.Append(ctx, newEntry); err != nil {
+		return nil, errs.Wrap(err, "replace write failed")
+	}
+
+	return successResponse(scope, "Entry replaced.", true), nil
+}
+
+func handleRemove(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	// 支持 memory_id（向后兼容）和 old_text（子串匹配）两种方式
+	memoryID, _ := m["memory_id"].(string)
+	oldText, _ := m["old_text"].(string)
+
+	if memoryID != "" {
+		if err := repo.Delete(ctx, scope, memoryID); err != nil {
+			return nil, errs.Wrap(err, "memory delete failed")
+		}
+		return map[string]any{
+			"success":   true,
+			"message":   "记忆已删除",
+			"memory_id": memoryID,
+			"scope":     scope.Key(),
+		}, nil
+	}
+
+	if oldText == "" {
+		return nil, fmt.Errorf("old_text or memory_id is required for 'remove' action")
+	}
+
+	entries, err := repo.Retrieve(ctx, Query{
+		Scopes: []Scope{scope},
+		Limit:  100,
+	})
+	if err != nil {
+		return nil, errs.Wrap(err, "memory search failed")
+	}
+
+	matches := findSubstringMatches(entries, oldText)
+	if len(matches) == 0 {
+		return map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("No entry matched '%s'.", oldText),
+		}, nil
+	}
+	if len(matches) > 1 {
+		return map[string]any{
+			"success": false,
+			"error":   fmt.Sprintf("Multiple entries matched '%s'. Be more specific.", oldText),
+			"matches": previewEntries(matches),
+		}, nil
+	}
+
+	if err := repo.Delete(ctx, scope, matches[0].ID); err != nil {
+		return nil, errs.Wrap(err, "delete failed")
+	}
+
+	return successResponse(scope, "Entry removed.", true), nil
+}
+
+func handleRecent(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	limit := 5
+	if l := toInt(m["limit"]); l > 0 {
+		limit = l
+	}
+	if limit > 20 {
+		limit = 20
+	}
+
+	entries, err := repo.Recent(ctx, scope, limit)
+	if err != nil {
+		return nil, errs.Wrap(err, "memory recent failed")
+	}
+
+	return formatEntries(entries, "recent"), nil
+}
+
+func handleCount(ctx *llm.ToolExecContext, repo Repository, scope Scope) (any, error) {
+	count, err := repo.Count(ctx, scope)
+	if err != nil {
+		return nil, errs.Wrap(err, "memory count failed")
+	}
+
+	return map[string]any{
+		"scope": scope.Key(),
+		"count": count,
+	}, nil
+}
+
+func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	opsRaw, ok := m["operations"]
+	if !ok {
+		return nil, fmt.Errorf("operations is required for 'batch' action")
+	}
+
+	opsList, ok := opsRaw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("operations must be an array")
+	}
+
+	if len(opsList) == 0 {
+		return nil, fmt.Errorf("operations list is empty")
+	}
+
+	// 先扫描所有 add/replace 内容的威胁模式
+	for i, opRaw := range opsList {
+		op, ok := opRaw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("operation %d: expected object", i+1)
+		}
+		opAction, _ := op["action"].(string)
+		if opAction == "add" || opAction == "replace" {
+			if content, _ := op["content"].(string); content != "" {
+				if findings := ScanMemoryThreats(content); len(findings) > 0 {
+					return map[string]any{
+						"success": false,
+						"error":   fmt.Sprintf("Operation %d blocked by security scan: %s", i+1, ThreatSummary(findings)),
+					}, nil
+				}
+			}
+		}
+	}
+
+	// 获取当前所有条目
+	entries, err := repo.Retrieve(ctx, Query{
+		Scopes: []Scope{scope},
+		Limit:  1000,
+	})
+	if err != nil {
+		return nil, errs.Wrap(err, "batch: retrieval failed")
+	}
+
+	// 在副本上执行所有操作
+	working := make([]Entry, len(entries))
+	copy(working, entries)
+
+	appliedCount := 0
+	for i, opRaw := range opsList {
+		op := opRaw.(map[string]any)
+		opAction, _ := op["action"].(string)
+		opContent, _ := op["content"].(string)
+		opContent = StripThinking(opContent)
+		opOldText, _ := op["old_text"].(string)
+		pos := fmt.Sprintf("Operation %d (%s)", i+1, opAction)
+
+		switch opAction {
+		case "add":
+			if opContent == "" {
+				return batchError(scope, pos+": content is required"), nil
+			}
+			// 幂等：跳过已存在的
+			exists := false
+			for _, e := range working {
+				if e.Content == opContent {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				working = append(working, Entry{
+					Scope:    scope,
+					Content:  opContent,
+					Category: "observation",
+					Source:   "tool",
+				})
+			}
+			appliedCount++
+
+		case "replace":
+			if opOldText == "" {
+				return batchError(scope, pos+": old_text is required"), nil
+			}
+			if opContent == "" {
+				return batchError(scope, pos+": content is required (use remove to delete)"), nil
+			}
+			matches := findSubstringMatches(working, opOldText)
+			if len(matches) == 0 {
+				return batchError(scope, pos+": no entry matched '"+opOldText+"'"), nil
+			}
+			if len(matches) > 1 {
+				return batchError(scope, pos+": '"+opOldText+"' matched multiple entries"), nil
+			}
+			// 替换内容（保留 ID）
+			for j := range working {
+				if working[j].ID == matches[0].ID {
+					working[j].Content = opContent
+					break
+				}
+			}
+			appliedCount++
+
+		case "remove":
+			if opOldText == "" {
+				return batchError(scope, pos+": old_text is required"), nil
+			}
+			matches := findSubstringMatches(working, opOldText)
+			if len(matches) == 0 {
+				return batchError(scope, pos+": no entry matched '"+opOldText+"'"), nil
+			}
+			if len(matches) > 1 {
+				return batchError(scope, pos+": '"+opOldText+"' matched multiple entries"), nil
+			}
+			// 从 working 中移除
+			targetID := matches[0].ID
+			newWorking := working[:0]
+			for _, e := range working {
+				if e.ID != targetID {
+					newWorking = append(newWorking, e)
+				}
+			}
+			working = newWorking
+			appliedCount++
+
+		default:
+			return batchError(scope, pos+": unknown action '"+opAction+"'. Use add, replace, remove"), nil
+		}
+	}
+
+	// 提交：先清空旧记忆，再写入新记忆
+	_ = repo.Clear(ctx, scope)
+	for _, e := range working {
+		newEntry := Entry{
+			Scope:      e.Scope,
+			Content:    e.Content,
+			Category:   e.Category,
+			Source:     e.Source,
+			Importance: e.Importance,
+		}
+		_ = repo.Append(ctx, newEntry)
+	}
+
+	return successResponse(scope, fmt.Sprintf("Applied %d operation(s).", appliedCount), true), nil
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
+
+func parseScope(m map[string]any, defaultKind ScopeKind, defaultID string) Scope {
+	kindStr, _ := m["scope_kind"].(string)
+	if kindStr == "" {
+		kindStr = string(defaultKind)
+	}
+	id, _ := m["scope_id"].(string)
+	if id == "" {
+		id = defaultID
+	}
+	return Scope{Kind: ScopeKind(kindStr), ID: id}
+}
+
+func findSubstringMatches(entries []Entry, substr string) []Entry {
+	var matches []Entry
+	lower := strings.ToLower(substr)
+	for _, e := range entries {
+		if strings.Contains(strings.ToLower(e.Content), lower) {
+			matches = append(matches, e)
+		}
+	}
+	return matches
+}
+
+func previewEntries(entries []Entry) []string {
+	previews := make([]string, 0, len(entries))
+	for _, e := range entries {
+		p := e.Content
+		if len(p) > 80 {
+			p = p[:80] + "..."
+		}
+		previews = append(previews, p)
+	}
+	return previews
+}
 
 // EntryResult 是单条记忆的序列化结构。
 type EntryResult struct {
@@ -423,7 +658,6 @@ type EntryResult struct {
 	CreatedAt  string  `json:"created_at,omitempty"`
 }
 
-// formatEntries 将记忆条目列表格式化为工具返回值。
 func formatEntries(entries []Entry, queryType string) any {
 	if len(entries) == 0 {
 		return map[string]any{
@@ -451,12 +685,36 @@ func formatEntries(entries []Entry, queryType string) any {
 	}
 }
 
-// formatEntryTime 格式化记忆创建时间。
 func formatEntryTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
 	return t.Format("2006-01-02 15:04")
+}
+
+// successResponse 构建 Terminal 成功响应。
+// Terminal = 不回显完整条目列表，防止模型"找更多要修复"的 thrash。
+func successResponse(scope Scope, message string, done bool) any {
+	resp := map[string]any{
+		"success": true,
+		"scope":   scope.Key(),
+	}
+	if done {
+		resp["done"] = true
+	}
+	if message != "" {
+		resp["message"] = message
+	}
+	resp["note"] = "Write saved. This update is complete — do not repeat it."
+	return resp
+}
+
+func batchError(scope Scope, message string) any {
+	return map[string]any{
+		"success": false,
+		"error":   message + " No operations were applied (batch is all-or-nothing).",
+		"scope":   scope.Key(),
+	}
 }
 
 // toInt 从 any 值（int / float64 / int64 等）安全提取 int。
