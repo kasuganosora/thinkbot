@@ -18,6 +18,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/engagement"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
@@ -228,11 +229,73 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger,
 	)
 
+	// 创建 Engagement Stage（主动参与）
+	engCfg := builder.GetEngagementConfig()
+	var engagementStage *engagement.EngagementStage
+	var burstBuf *engagement.BurstBuffer
+	if engCfg.Enabled {
+		// 构建 LLM Judge（Tier 2 快判）
+		var judge engagement.LLMJudge
+		if engCfg.LLMJudgeEnabled {
+			// 优先使用 Light LLM 做快判（更便宜、更快）
+			judgeProvider := bundle.Main
+			modelID := bundle.MainDef.Model
+			if bundle.Light != nil {
+				judgeProvider = bundle.Light
+				modelID = bundle.LightDef.Model
+			}
+			adapter := newLLMJudgeAdapter(judgeProvider, modelID)
+
+			promptCfg := engagement.PromptConfig{
+				BotName:    def.Name,
+				BotPersona: truncatePersona(def.SystemPrompt, 200),
+				Interests:  engCfg.Keywords,
+			}
+
+			if engCfg.EngagementThreshold > 0 {
+				judge = engagement.NewScoredSimpleJudge(adapter, promptCfg)
+			} else {
+				judge = engagement.NewSimpleJudge(adapter, promptCfg)
+			}
+		}
+
+		// 构建全部 engagement 组件（policy + gate + rateLimit）
+		result := engagement.BuildFromConfig(engCfg, "", judge)
+		stageCfg := engagement.BuildStageConfig(engCfg)
+		engagementStage = engagement.NewEngagementStage(
+			"engagement", result.Policy, stageCfg,
+			s.tp, s.logger,
+		)
+		if result.Gate != nil {
+			engagementStage = engagementStage.WithTimingGate(result.Gate)
+		}
+		if engCfg.BurstIntervalSeconds > 0 {
+			burstBuf = engagement.NewBurstBuffer(
+				time.Duration(engCfg.BurstIntervalSeconds * float64(time.Second)),
+			)
+		}
+
+		s.logger.Infow("engagement stage enabled",
+			"bot_id", id,
+			"profile", engCfg.Profile,
+			"reply_probability", engCfg.ReplyProbability,
+			"llm_judge", engCfg.LLMJudgeEnabled,
+			"threshold", engCfg.EngagementThreshold,
+			"auto_adjust_freq", engCfg.AutoAdjustFrequency)
+	}
+
 	// 创建 Pipeline
+	stages := []core.StageInfo{
+		{Stage: llmStage, Order: 100, Enabled: true},
+	}
+	if engagementStage != nil {
+		// Engagement 放在 LLM 之前——先决定是否参与，再生成回复
+		stages = append([]core.StageInfo{
+			{Stage: engagementStage, Order: 40, Enabled: true},
+		}, stages...)
+	}
 	p, err := pipeline.New(
-		[]core.StageInfo{
-			{Stage: llmStage, Order: 100, Enabled: true},
-		},
+		stages,
 		s.tp,
 		s.mp,
 		s.logger,
@@ -326,6 +389,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if err != nil {
 		rollback()
 		return errs.Wrap(err, "bot_service: create bot")
+	}
+
+	// Wire BurstBuffer reenqueue——需要 bot 创建后才能访问 Ingress
+	if engagementStage != nil && burstBuf != nil {
+		engagementStage.WithBurstBuffer(burstBuf, func(env *core.Envelope) {
+			if err := b.Ingress().Receive(context.Background(), env.Message); err != nil {
+				s.logger.Warnw("engagement: burst buffer reenqueue failed",
+					"message_id", env.Message.ID, "err", err)
+			}
+		})
 	}
 
 	// 注册到 BotManager
