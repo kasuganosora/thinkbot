@@ -38,6 +38,7 @@ package engagement
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
@@ -160,10 +161,12 @@ func (DenyAll) IsWritable(_ *core.Message) bool { return false }
 //   - checker: 渠道可写性检查（必需）
 //   - rules: Tier 1 规则引擎（可选，nil 则跳过）
 //   - judge: Tier 2 LLM 快判（可选，nil 则跳过）
+//   - engagementThreshold: 评分阈值（可选，0=禁用评分模式）
 type CompositePolicy struct {
-	checker WritableChecker
-	rules   *RuleEngine
-	judge   LLMJudge
+	checker             WritableChecker
+	rules               *RuleEngine
+	judge               LLMJudge
+	engagementThreshold int // 0=禁用，>0 时启用评分模式
 }
 
 // PolicyOption 配置 CompositePolicy。
@@ -177,6 +180,13 @@ func WithRules(rules *RuleEngine) PolicyOption {
 // WithJudge 设置 Tier 2 LLM 快判。
 func WithJudge(judge LLMJudge) PolicyOption {
 	return func(p *CompositePolicy) { p.judge = judge }
+}
+
+// WithEngagementThreshold 设置 Tier 2 评分阈值（0-100）。
+// 当 > 0 且 judge 返回 Score > 0 时，只有 Score ≥ threshold 才通过。
+// 参考 Houde et al. (2025)：评分阈值是群组中控制 AI 参与度最有效的方式。
+func WithEngagementThreshold(threshold int) PolicyOption {
+	return func(p *CompositePolicy) { p.engagementThreshold = threshold }
 }
 
 // NewCompositePolicy 创建组合策略。
@@ -215,7 +225,7 @@ func (p *CompositePolicy) Evaluate(ctx context.Context, msg *core.Message) Decis
 
 	// Tier 2: LLM 快判（可选）
 	if p.judge != nil {
-		decision, err := p.judge.Judge(ctx, msg)
+		judgeResult, err := p.judge.Judge(ctx, msg)
 		if err != nil {
 			return p.deriveAction(Decision{
 				Engage: false,
@@ -223,10 +233,27 @@ func (p *CompositePolicy) Evaluate(ctx context.Context, msg *core.Message) Decis
 				Tier:   TierLLM,
 			})
 		}
-		if !decision.Engage {
+
+		// 评分模式：使用 engagementThreshold 做阈值判断
+		// 参考 Houde et al. (2025)：评分制 + 可配置阈值比二元判断更受用户认可
+		if p.engagementThreshold > 0 && judgeResult.Score > 0 {
+			if judgeResult.Score < p.engagementThreshold {
+				return p.deriveAction(Decision{
+					Engage: false,
+					Reason: fmt.Sprintf("score %d < threshold %d: %s", judgeResult.Score, p.engagementThreshold, judgeResult.Reason),
+					Tier:   TierLLM,
+					Metadata: map[string]any{
+						"score":     judgeResult.Score,
+						"threshold": p.engagementThreshold,
+					},
+				})
+			}
+			// 分数通过阈值，继续到 all-pass
+		} else if !judgeResult.Engage {
+			// 传统二元模式
 			return p.deriveAction(Decision{
 				Engage: false,
-				Reason: "llm judge declined: " + decision.Reason,
+				Reason: "llm judge declined: " + judgeResult.Reason,
 				Tier:   TierLLM,
 			})
 		}

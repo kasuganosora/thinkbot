@@ -453,6 +453,22 @@ type EngagementConfig struct {
 
 	// BackoffBypassPendingCount 退避绕过阈值（默认 0=禁用）。
 	BackoffBypassPendingCount int `json:"backoffBypassPendingCount"`
+
+	// Profile 参与预设角色名（observer/lurker/active/moderator）。
+	// 设置后会覆盖 ReplyProbability、EngagementThreshold、BackoffStartCount、RateLimitCapacity。
+	// 空字符串表示不使用预设角色。
+	Profile string `json:"profile"`
+
+	// EngagementThreshold Tier 2 LLM 快判评分阈值（0-100，0=禁用评分模式）。
+	// 启用时，LLM 返回 0-100 分数，仅分数 ≥ 阈值才参与。
+	// 更高 = 更挑剔。论文研究二中实测 HIGH(90)/MEDIUM(75)/LOW(50) 三档有效。
+	// 0 表示使用传统 YES/NO 模式。
+	EngagementThreshold int `json:"engagementThreshold"`
+
+	// AutoAdjustFrequency 是否根据群组活跃度自动调整参与频率。
+	// 启用后 TimingGate 会基于观察到的消息间隔动态调整 FrequencyMultiplier，
+	// 使 Bot 在活跃群组更积极、在安静群组更低调。
+	AutoAdjustFrequency bool `json:"autoAdjustFrequency"`
 }
 
 // DefaultEngagementConfig 返回主动参与模块的默认配置值。
@@ -469,6 +485,9 @@ func DefaultEngagementConfig() EngagementConfig {
 		BurstIntervalSeconds:      5.0,
 		WaitTimeoutSeconds:        30.0,
 		BackoffBypassPendingCount: 0,
+		Profile:                   "",
+		EngagementThreshold:       0,
+		AutoAdjustFrequency:       false,
 	}
 }
 
@@ -494,6 +513,9 @@ func (b *Builder) GetEngagementConfig() EngagementConfig {
 		BurstIntervalSeconds:      b.store.GetFloat64(KeyEngagementBurstInterval, d.BurstIntervalSeconds),
 		WaitTimeoutSeconds:        b.store.GetFloat64(KeyEngagementWaitTimeout, d.WaitTimeoutSeconds),
 		BackoffBypassPendingCount: b.store.GetInt(KeyEngagementBackoffBypass, d.BackoffBypassPendingCount),
+		Profile:                   b.store.GetString(KeyEngagementProfile, d.Profile),
+		EngagementThreshold:       b.store.GetInt(KeyEngagementThreshold, d.EngagementThreshold),
+		AutoAdjustFrequency:       b.store.GetBool(KeyEngagementAutoAdjustFreq, d.AutoAdjustFrequency),
 	}
 }
 
@@ -518,6 +540,9 @@ func EngagementMetaSpecs() []MetaSpec {
 		{Key: KeyEngagementBurstInterval, Category: "Engagement", Description: "消息突发检测窗口秒数（默认 5.0）"},
 		{Key: KeyEngagementWaitTimeout, Category: "Engagement", Description: "ActionWait 超时秒数（默认 30.0）"},
 		{Key: KeyEngagementBackoffBypass, Category: "Engagement", Description: "退避绕过阈值——待处理消息数（默认 0=禁用）"},
+		{Key: KeyEngagementProfile, Category: "Engagement", Description: "参与预设角色名（observer/lurker/active/moderator，空=不自定义角色）"},
+		{Key: KeyEngagementThreshold, Category: "Engagement", Description: "LLM 快判评分阈值 0-100（默认 0=传统 YES/NO 模式，更高=更挑剔）"},
+		{Key: KeyEngagementAutoAdjustFreq, Category: "Engagement", Description: "是否自动根据群组活跃度调整参与频率（默认 false）"},
 	}
 }
 
