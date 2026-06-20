@@ -210,6 +210,29 @@ func (b *Builder) GetBotLLMAssignment(botID string) BotLLMAssignment {
 	return a
 }
 
+// GetBotTimezone 返回指定 Bot 的时区标识符。
+// 优先级：bot.<bot_id>.timezone → system.timezone → $TZ 环境变量 → 服务器本地时区。
+// 即每个 Bot 可独立设置时区，未设置时继承全局 system.timezone。
+func (b *Builder) GetBotTimezone(botID string) string {
+	// 1. per-bot 覆盖
+	if tz := b.store.GetString(BotTimezoneKey(botID), ""); tz != "" {
+		return tz
+	}
+	// 2. 全局 system.timezone（含 $TZ / 本地降级）
+	return b.GetTimezone()
+}
+
+// GetBotTimezoneLocation 返回指定 Bot 的时区 *time.Location。
+// 如果配置的时区无效，降级到 time.Local。
+func (b *Builder) GetBotTimezoneLocation(botID string) *time.Location {
+	tz := b.GetBotTimezone(botID)
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
 // --- Channel 配置 ---
 
 // --- Channel 配置 ---
@@ -495,6 +518,60 @@ func EngagementMetaSpecs() []MetaSpec {
 		{Key: KeyEngagementBurstInterval, Category: "Engagement", Description: "消息突发检测窗口秒数（默认 5.0）"},
 		{Key: KeyEngagementWaitTimeout, Category: "Engagement", Description: "ActionWait 超时秒数（默认 30.0）"},
 		{Key: KeyEngagementBackoffBypass, Category: "Engagement", Description: "退避绕过阈值——待处理消息数（默认 0=禁用）"},
+	}
+}
+
+// --- Workspace 配置 ---
+
+// GetWorkspaceDir 返回 bot 工作空间根目录的物理路径。
+// 默认 "data/workspaces"，每个 Bot 拥有独立子目录 {dir}/{botID}/。
+func (b *Builder) GetWorkspaceDir() string {
+	return b.store.GetString(KeyWorkspaceDir, "data/workspaces")
+}
+
+// WorkspaceMetaSpecs 返回工作空间配置项的元数据。
+func WorkspaceMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyWorkspaceDir, Category: "Workspace", Description: "Bot 工作空间根目录的物理路径（默认 data/workspaces）。每个 Bot 拥有独立子目录，文件持久化保存。"},
+	}
+}
+
+// --- System 配置 ---
+
+// GetTimezone 返回系统时区标识符（IANA 格式，如 "Asia/Shanghai"）。
+// 如果配置未设置，返回服务器本地时区的名称。
+// 用于 bot 时间感知和 Docker 沙箱容器的 TZ 环境变量。
+func (b *Builder) GetTimezone() string {
+	if tz := b.store.GetString(KeySystemTimezone, ""); tz != "" {
+		return tz
+	}
+	// 降级到服务器本地时区
+	if name, err := time.LoadLocation(""); err == nil {
+		_ = name // time.LoadLocation("") 返回 time.Local，无法直接拿到名称
+	}
+	// 尝试从 TZ 环境变量获取
+	if tz := os.Getenv("TZ"); tz != "" {
+		return tz
+	}
+	// 最终降级到 Local 的字符串表示
+	return time.Local.String()
+}
+
+// GetTimezoneLocation 返回解析后的 *time.Location。
+// 如果配置的时区无效，降级到 time.Local（服务器本地时区）。
+func (b *Builder) GetTimezoneLocation() *time.Location {
+	tz := b.GetTimezone()
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}
+
+// SystemMetaSpecs 返回系统配置项的元数据。
+func SystemMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeySystemTimezone, Category: "System", Description: "系统时区（IANA 标识符，如 Asia/Shanghai、UTC）。为空时使用服务器本地时区。影响 bot 时间感知和 Docker 沙箱容器时区。"},
 	}
 }
 

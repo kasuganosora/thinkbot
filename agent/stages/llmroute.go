@@ -62,6 +62,9 @@ type LLMConfig struct {
 	// MessageBuilder 自定义消息构造函数。
 	// 如果为 nil，默认将 Message.Text 作为 user message。
 	MessageBuilder func(msg core.Message) []llm.Message
+	// UsageRecorder 可选的使用统计记录器。
+	// 非 nil 时，每次 LLM 调用后自动记录 bot/model/feature 维度的用量。
+	UsageRecorder llm.UsageRecorder
 }
 
 // ============================================================================
@@ -170,6 +173,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"tokens", result.Usage.TotalTokens,
 		"finish_reason", result.FinishReason)
 
+	// 记录使用统计
+	recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, result)
+
 	// 将回复添加为 Action
 	// 使用 reply_target 作为 outbound 回复目标（由 Channel 在 Inbound 时设置）
 	replyTarget := env.Message.Channel // 默认使用 Channel（向后兼容）
@@ -199,4 +205,35 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	env.Set("llm.result", result)
 
 	return env, nil
+}
+
+// recordUsage 从 Envelope 提取 bot_id，构建 UsageMetric 并异步记录。
+// recorder 为 nil 时跳过。
+func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Envelope, model *llm.Model, feature string, result *llm.GenerateResult) {
+	if recorder == nil {
+		return
+	}
+	botID := ""
+	if v, ok := env.Get("bot.id"); ok {
+		if s, ok := v.(string); ok {
+			botID = s
+		}
+	}
+	modelID := ""
+	if model != nil {
+		modelID = model.ID
+	}
+	toolCalls := 0
+	steps := len(result.Steps)
+	for _, step := range result.Steps {
+		toolCalls += len(step.ToolCalls)
+	}
+	recorder.RecordUsage(ctx, llm.UsageMetric{
+		BotID:    botID,
+		Model:    modelID,
+		Feature:  feature,
+		Usage:    result.Usage,
+		ToolCalls: toolCalls,
+		Steps:    steps,
+	})
 }

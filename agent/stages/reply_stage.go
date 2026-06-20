@@ -188,6 +188,9 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 	// 存储 LLM 结果到 Envelope KV
 	env.Set("llm.result", result)
 
+	// 记录使用统计
+	recordUsage(ctx, s.config.LLM.UsageRecorder, env, s.config.LLM.Model, s.name, result)
+
 	// 执行决策
 	decision, replyText, noteText, noteCategory := s.decide(ctx, env.Message, result)
 	span.SetAttributes(attribute.String("output.decision", string(decision)))

@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,9 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
+	"github.com/kasuganosora/thinkbot/agent/prompt"
+	"github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -71,6 +75,11 @@ type Bot struct {
 	channels        []Channel
 	logger          *zap.SugaredLogger
 
+	// 持久化工作空间（Bot 创建时自动创建，重启后文件不丢失）
+	workspaceMgr *sandbox.BotWorkspaceManager // 工作空间管理器（nil=未启用）
+	workspaceDir string                       // 当前 Bot 的工作空间目录绝对路径
+	soulLoader   *prompt.SoulLoader           // SOUL.md 加载器（nil=未启用）
+
 	// 资源管理（Close 时释放）
 	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
 	closerOnce  sync.Once // 确保 Close 只执行一次
@@ -92,6 +101,26 @@ type BotParams struct {
 	EventBus         outbound.EventBus         // 可选：旁路事件总线。nil 时禁用 SSE 事件推送。
 	Logger           *zap.SugaredLogger
 	TP               trace.TracerProvider
+
+	// --- 持久化工作空间 ---
+
+	// WorkspaceDir bot 工作空间的根目录物理路径（如 "data/workspaces"）。
+	// 为空时禁用工作空间（不创建目录、不加载 SOUL.md、不注册工具）。
+	// 每个 Bot 在此目录下拥有独立子目录 {WorkspaceDir}/{BotID}/。
+	// 文件持久化保存，重启后不丢失。
+	WorkspaceDir string
+
+	// PromptRegistry prompt.Registry（可选，用于 SoulLoader 加载 SOUL.md）。
+	// 为 nil 时跳过 SoulLoader（但工作空间目录仍会创建）。
+	PromptRegistry *prompt.Registry
+
+	// ToolManager 工具管理器（可选，用于注册工作空间文件操作工具）。
+	// 为 nil 时跳过工具注册（但工作空间目录仍会创建）。
+	ToolManager *tools.ToolManager
+
+	// SandboxConfig 沙箱配置（Backend/Image/Limits 等，可选）。
+	// 为空时使用 sandbox.DefaultConfig()。
+	SandboxConfig sandbox.Config
 }
 
 // New 创建一个 Bot 实例。
@@ -185,6 +214,70 @@ func New(params BotParams) (*Bot, error) {
 		ownRegistry:     ownRegistry,
 	}
 
+	// 创建持久化工作空间（文件在宿主文件系统，重启不丢失）
+	if params.WorkspaceDir != "" {
+		sbCfg := params.SandboxConfig
+		if sbCfg.Backend == "" {
+			sbCfg = sandbox.DefaultConfig()
+		}
+		// 确保时区已设置（调用方可通过 SandboxConfig.Timezone 注入 config.GetTimezone()）
+		if sbCfg.Timezone == "" {
+			sbCfg.Timezone = sandbox.DefaultConfig().Timezone
+		}
+
+		wsMgr, err := sandbox.NewBotWorkspaceManager(params.WorkspaceDir, sbCfg, botLogger)
+		if err != nil {
+			return nil, errs.Wrapf(err, "bot %q: create workspace manager", params.ID)
+		}
+
+		botDir, err := wsMgr.BotDir(params.ID)
+		if err != nil {
+			return nil, errs.Wrapf(err, "bot %q: create workspace dir", params.ID)
+		}
+
+		// 转为绝对路径，确保重启后路径一致
+		absDir, err := filepath.Abs(botDir)
+		if err != nil {
+			absDir = botDir
+		}
+
+		bot.workspaceMgr = wsMgr
+		bot.workspaceDir = absDir
+
+		botLogger.Infow("workspace created",
+			"dir", absDir,
+			"backend", wsMgr.Backend())
+
+		// SoulLoader 从工作空间目录加载 SOUL.md
+		if params.PromptRegistry != nil {
+			soulPath := filepath.Join(absDir, "SOUL.md")
+			soul := prompt.NewSoulLoader(prompt.SoulLoaderConfig{
+				Path:           soulPath,
+				BotID:          params.ID,
+				SectionName:    "identity",
+				Order:          0,
+				ReloadInterval: 5 * time.Second,
+			}, params.PromptRegistry)
+
+			if err := soul.Load(); err != nil {
+				botLogger.Warnw("soul load failed, using fallback prompt",
+					"path", soulPath, "err", err)
+			} else {
+				botLogger.Infow("soul loaded",
+					"path", soulPath, "loaded", soul.Loaded())
+			}
+			bot.soulLoader = soul
+		}
+
+		// 注册工作空间工具（sandbox_exec/read_file/write_file 等）
+		if params.ToolManager != nil {
+			if err := sandbox.RegisterBotWorkspaceTools(params.ToolManager, wsMgr); err != nil {
+				return nil, errs.Wrapf(err, "bot %q: register workspace tools", params.ID)
+			}
+			botLogger.Debugw("workspace tools registered")
+		}
+	}
+
 	// 创建 Engine，注入 Bot 的 hook
 	bot.engine = agent.NewEngine(
 		ingress,
@@ -240,6 +333,11 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.logger.Infow("channels started",
 		"senders_registered", b.replyHandler.RegisteredCount())
 
+	// 启动 SoulLoader 热重载（如果配置了工作空间）
+	if b.soulLoader != nil {
+		b.soulLoader.StartWatcher(ctx)
+	}
+
 	// 启动 Engine（会阻塞直到 ctx 取消）
 	err := b.engine.Run(ctx)
 
@@ -271,6 +369,14 @@ func (b *Bot) Close() {
 				r.Close()
 			}
 		}
+		// 停止 SoulLoader 热重载
+		if b.soulLoader != nil {
+			b.soulLoader.Stop()
+		}
+		// 关闭工作空间管理器（文件持久化，不删除）
+		if b.workspaceMgr != nil {
+			b.workspaceMgr.Close()
+		}
 	})
 }
 
@@ -292,6 +398,24 @@ func (b *Bot) Engine() *agent.Engine {
 // Channels 返回 Bot 拥有的所有 Channel 列表。
 func (b *Bot) Channels() []Channel {
 	return b.channels
+}
+
+// WorkspaceDir 返回 Bot 的持久化工作空间目录绝对路径。
+// 如果未启用工作空间，返回空字符串。
+func (b *Bot) WorkspaceDir() string {
+	return b.workspaceDir
+}
+
+// WorkspaceMgr 返回 Bot 的工作空间管理器。
+// 如果未启用工作空间，返回 nil。
+func (b *Bot) WorkspaceMgr() *sandbox.BotWorkspaceManager {
+	return b.workspaceMgr
+}
+
+// SoulLoader 返回 Bot 的 SoulLoader。
+// 如果未启用 SoulLoader，返回 nil。
+func (b *Bot) SoulLoader() *prompt.SoulLoader {
+	return b.soulLoader
 }
 
 // CallbackRegistry 返回 Bot 的回调注册表。

@@ -45,7 +45,7 @@ func main() {
 }
 
 func runExample(database *gorm.DB) error {
-	user := &db.User{Name: "ThinkBot", Email: "hello@thinkbot.local"}
+	user := &dao.User{Name: "ThinkBot", Email: "hello@thinkbot.local"}
 	if err := database.Create(user).Error; err != nil {
 		return errs.Wrap(err, "create user record")
 	}

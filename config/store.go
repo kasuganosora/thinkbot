@@ -13,8 +13,13 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
+
+// Setting 是 dao.Setting 的类型别名。
+// 实际模型定义在 dao/setting.go，此处仅保留别名以保持 config 包内部代码简洁。
+type Setting = dao.Setting
 
 // ============================================================================\
 // Store — 全局配置中心

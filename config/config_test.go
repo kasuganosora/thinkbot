@@ -9,6 +9,8 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+
+	"github.com/kasuganosora/thinkbot/dao"
 )
 
 // ============================================================================
@@ -21,7 +23,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open in-memory sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&Setting{}); err != nil {
+	if err := db.AutoMigrate(&dao.Setting{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -278,7 +280,7 @@ func TestStore_UpdateExisting(t *testing.T) {
 	store.Set(ctx, "key", "v1")
 	store.Set(ctx, "key", "v2")
 
-	var settings []Setting
+	var settings []dao.Setting
 	db.Find(&settings)
 	if len(settings) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(settings))
@@ -694,5 +696,106 @@ func TestBuilder_GetBotLLMAssignment_Empty(t *testing.T) {
 
 	if a.Main != "" {
 		t.Errorf("main should be empty: got %q", a.Main)
+	}
+}
+
+// ============================================================================
+// 时区配置
+// ============================================================================
+
+func TestBuilder_GetTimezone_Configured(t *testing.T) {
+	store := NewStore(nil)
+	store.LoadEnvMap(map[string]string{
+		"system.timezone": "Asia/Shanghai",
+	})
+	b := NewBuilder(store, testLogger())
+
+	tz := b.GetTimezone()
+	if tz != "Asia/Shanghai" {
+		t.Errorf("expected 'Asia/Shanghai', got %q", tz)
+	}
+}
+
+func TestBuilder_GetTimezone_DefaultFromEnv(t *testing.T) {
+	store := NewStore(nil)
+	b := NewBuilder(store, testLogger())
+
+	// 未设置 system.timezone，应该降级到 TZ 环境变量或服务器本地时区
+	setEnv(t, "TZ", "America/New_York")
+	tz := b.GetTimezone()
+	if tz != "America/New_York" {
+		t.Errorf("expected 'America/New_York' from TZ env, got %q", tz)
+	}
+}
+
+func TestBuilder_GetTimezoneLocation_Valid(t *testing.T) {
+	store := NewStore(nil)
+	store.LoadEnvMap(map[string]string{
+		"system.timezone": "Asia/Tokyo",
+	})
+	b := NewBuilder(store, testLogger())
+
+	loc := b.GetTimezoneLocation()
+	if loc.String() != "Asia/Tokyo" {
+		t.Errorf("expected Asia/Tokyo, got %q", loc.String())
+	}
+}
+
+func TestBuilder_GetTimezoneLocation_Invalid(t *testing.T) {
+	store := NewStore(nil)
+	store.LoadEnvMap(map[string]string{
+		"system.timezone": "Invalid/NotAZone",
+	})
+	b := NewBuilder(store, testLogger())
+
+	loc := b.GetTimezoneLocation()
+	// 无效时区降级到 time.Local
+	if loc != time.Local {
+		t.Errorf("expected time.Local for invalid timezone, got %q", loc.String())
+	}
+}
+
+// ============================================================================
+// Per-Bot 时区配置
+// ============================================================================
+
+func TestBuilder_GetBotTimezone_Override(t *testing.T) {
+	store := NewStore(nil)
+	store.LoadEnvMap(map[string]string{
+		"system.timezone":   "Asia/Shanghai",
+		"bot.tokyo-bot.timezone": "Asia/Tokyo",
+	})
+	b := NewBuilder(store, testLogger())
+
+	// bot 有独立时区 → 用独立的
+	tzTokyo := b.GetBotTimezone("tokyo-bot")
+	if tzTokyo != "Asia/Tokyo" {
+		t.Errorf("tokyo-bot: expected 'Asia/Tokyo', got %q", tzTokyo)
+	}
+
+	// bot 无独立时区 → 继承全局
+	tzDefault := b.GetBotTimezone("other-bot")
+	if tzDefault != "Asia/Shanghai" {
+		t.Errorf("other-bot: expected 'Asia/Shanghai', got %q", tzDefault)
+	}
+}
+
+func TestBuilder_GetBotTimezoneLocation_Override(t *testing.T) {
+	store := NewStore(nil)
+	store.LoadEnvMap(map[string]string{
+		"system.timezone":     "UTC",
+		"bot.pacific.timezone": "America/Los_Angeles",
+	})
+	b := NewBuilder(store, testLogger())
+
+	loc := b.GetBotTimezoneLocation("pacific")
+	if loc.String() != "America/Los_Angeles" {
+		t.Errorf("expected America/Los_Angeles, got %q", loc.String())
+	}
+
+	// 无 per-bot 设置 → 继承全局 UTC
+	locGlobal := b.GetBotTimezoneLocation("unset-bot")
+	if locGlobal.String() != "UTC" {
+		t.Errorf("unset-bot: expected UTC, got %q", locGlobal.String())
 	}
 }

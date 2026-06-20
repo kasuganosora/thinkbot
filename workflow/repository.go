@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -72,7 +73,7 @@ func (r *Repository) Get(id string) (*Workflow, error) {
 
 	// 回退到 DB
 	if r.db != nil {
-		var model WorkflowModel
+		var model dao.WorkflowModel
 		if err := r.db.First(&model, "id = ?", id).Error; err != nil {
 			return nil, errs.Wrapf(err, "workflow %s not found", id)
 		}
@@ -95,7 +96,7 @@ func (r *Repository) Get(id string) (*Workflow, error) {
 // 用于启动时崩溃恢复。
 func (r *Repository) FindNonTerminal() ([]*Workflow, error) {
 	if r.db != nil {
-		var models []WorkflowModel
+		var models []dao.WorkflowModel
 		// GORM 无法在 JSON 内查询，所以取出全部然后内存过滤
 		if err := r.db.Find(&models).Error; err != nil {
 			return nil, errs.Wrap(err, "failed to query workflows from DB")
@@ -135,7 +136,7 @@ func (r *Repository) List(limit int) ([]*Workflow, error) {
 	}
 
 	if r.db != nil {
-		var models []WorkflowModel
+		var models []dao.WorkflowModel
 		if err := r.db.Order("created_at DESC").Limit(limit).Find(&models).Error; err != nil {
 			return nil, errs.Wrap(err, "failed to list workflows from DB")
 		}

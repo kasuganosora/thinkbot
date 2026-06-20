@@ -10,8 +10,9 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
-	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -50,7 +51,7 @@ type SQLiteRepository struct {
 }
 
 // NewSQLiteRepository 创建 SQLite 记忆仓储。
-// db 必须是已迁移过的 GORM 实例（调用过 Migrate）。
+// db 必须是已迁移过的 GORM 实例（调用过 dao.Migrate）。
 func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRepository {
 	cfg := DefaultSQLiteRepositoryConfig()
 	if len(opts) > 0 {
@@ -102,7 +103,7 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entryID string) error {
 	result := r.db.WithContext(ctx).
 		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
-		Delete(&EntryModel{})
+		Delete(&dao.EntryModel{})
 
 	if result.Error != nil {
 		return errs.Wrap(result.Error, "sqlite_repository: delete failed")
@@ -117,7 +118,7 @@ func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entry
 func (r *SQLiteRepository) Clear(ctx context.Context, scope memory.Scope) error {
 	result := r.db.WithContext(ctx).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
-		Delete(&EntryModel{})
+		Delete(&dao.EntryModel{})
 
 	if result.Error != nil {
 		return errs.Wrap(result.Error, "sqlite_repository: clear failed")
@@ -141,7 +142,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		limit = r.config.DefaultLimit
 	}
 
-	tx := r.db.WithContext(ctx).Model(&EntryModel{})
+	tx := r.db.WithContext(ctx).Model(&dao.EntryModel{})
 
 	// Scope 过滤
 	if len(query.Scopes) > 0 {
@@ -168,7 +169,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 	}
 
 	// 按时间倒序 + limit
-	var models []EntryModel
+	var models []dao.EntryModel
 	if err := tx.Order("created_at DESC").Limit(limit).Find(&models).Error; err != nil {
 		return nil, errs.Wrap(err, "sqlite_repository: retrieve failed")
 	}
@@ -180,7 +181,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 			ids[i] = m.ID
 		}
 		go func() {
-			r.db.Model(&EntryModel{}).Where("id IN ?", ids).
+			r.db.Model(&dao.EntryModel{}).Where("id IN ?", ids).
 				Update("last_accessed_at", time.Now())
 		}()
 	}
@@ -196,7 +197,7 @@ func (r *SQLiteRepository) Recent(ctx context.Context, scope memory.Scope, limit
 		limit = r.config.DefaultLimit
 	}
 
-	var models []EntryModel
+	var models []dao.EntryModel
 	err := r.db.WithContext(ctx).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
 		Order("created_at DESC").
@@ -213,7 +214,7 @@ func (r *SQLiteRepository) Recent(ctx context.Context, scope memory.Scope, limit
 // Count 返回指定 scope 的记忆总数。
 func (r *SQLiteRepository) Count(ctx context.Context, scope memory.Scope) (int, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&EntryModel{}).
+	err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
 		Count(&count).Error
 
@@ -230,10 +231,10 @@ func (r *SQLiteRepository) Count(ctx context.Context, scope memory.Scope) (int, 
 // Metrics 返回当前指标快照。
 func (r *SQLiteRepository) Metrics() memory.RepositoryMetrics {
 	var totalEntries int64
-	r.db.Model(&EntryModel{}).Count(&totalEntries)
+	r.db.Model(&dao.EntryModel{}).Count(&totalEntries)
 
 	var totalScopes int64
-	r.db.Model(&EntryModel{}).Distinct("scope_kind", "scope_id").Count(&totalScopes)
+	r.db.Model(&dao.EntryModel{}).Distinct("scope_kind", "scope_id").Count(&totalScopes)
 
 	return memory.RepositoryMetrics{
 		TotalScopes:     int(totalScopes),
@@ -251,7 +252,7 @@ func (r *SQLiteRepository) Metrics() memory.RepositoryMetrics {
 // evictIfNeeded 检查 scope 是否超出容量，超出时淘汰最旧条目。
 func (r *SQLiteRepository) evictIfNeeded(scope memory.Scope) {
 	var count int64
-	r.db.Model(&EntryModel{}).
+	r.db.Model(&dao.EntryModel{}).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
 		Count(&count)
 
@@ -264,14 +265,14 @@ func (r *SQLiteRepository) evictIfNeeded(scope memory.Scope) {
 
 	// 找出最旧的 N 条 ID
 	var oldIDs []string
-	r.db.Model(&EntryModel{}).
+	r.db.Model(&dao.EntryModel{}).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
 		Order("created_at ASC").
 		Limit(excess).
 		Pluck("id", &oldIDs)
 
 	if len(oldIDs) > 0 {
-		result := r.db.Where("id IN ?", oldIDs).Delete(&EntryModel{})
+		result := r.db.Where("id IN ?", oldIDs).Delete(&dao.EntryModel{})
 		if result.RowsAffected > 0 {
 			r.entriesDeleted.Add(result.RowsAffected)
 		}
@@ -305,7 +306,7 @@ type WindowSnapshot struct {
 
 // Save 保存窗口快照（upsert 语义）。
 func (s *WindowStateStore) Save(ctx context.Context, snap WindowSnapshot) error {
-	model := WindowStateModel{
+	model := dao.WindowStateModel{
 		ScopeKey:          snap.ScopeKey,
 		UsedTokens:        snap.UsedTokens,
 		RoundCount:        snap.RoundCount,
@@ -330,7 +331,7 @@ func (s *WindowStateStore) Save(ctx context.Context, snap WindowSnapshot) error 
 
 // Load 加载窗口快照。不存在时返回 nil, nil。
 func (s *WindowStateStore) Load(ctx context.Context, scopeKey string) (*WindowSnapshot, error) {
-	var model WindowStateModel
+	var model dao.WindowStateModel
 	err := s.db.WithContext(ctx).Where("scope_key = ?", scopeKey).First(&model).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -350,7 +351,7 @@ func (s *WindowStateStore) Load(ctx context.Context, scopeKey string) (*WindowSn
 
 // Delete 删除指定 scope 的窗口快照。
 func (s *WindowStateStore) Delete(ctx context.Context, scopeKey string) error {
-	err := s.db.WithContext(ctx).Where("scope_key = ?", scopeKey).Delete(&WindowStateModel{}).Error
+	err := s.db.WithContext(ctx).Where("scope_key = ?", scopeKey).Delete(&dao.WindowStateModel{}).Error
 	if err != nil {
 		return errs.Wrap(err, "window_state_store: delete failed")
 	}
@@ -361,7 +362,7 @@ func (s *WindowStateStore) Delete(ctx context.Context, scopeKey string) error {
 // Conversion helpers
 // ============================================================================
 
-func entryToModel(entry memory.Entry) EntryModel {
+func entryToModel(entry memory.Entry) dao.EntryModel {
 	metadataJSON := ""
 	if entry.Metadata != nil {
 		if b, err := json.Marshal(entry.Metadata); err == nil {
@@ -369,7 +370,7 @@ func entryToModel(entry memory.Entry) EntryModel {
 		}
 	}
 
-	return EntryModel{
+	return dao.EntryModel{
 		ID:             entry.ID,
 		ScopeKind:      string(entry.Scope.Kind),
 		ScopeID:        entry.Scope.ID,
@@ -383,7 +384,7 @@ func entryToModel(entry memory.Entry) EntryModel {
 	}
 }
 
-func modelToEntry(m EntryModel) memory.Entry {
+func modelToEntry(m dao.EntryModel) memory.Entry {
 	var metadata map[string]any
 	if m.MetadataJSON != "" {
 		_ = json.Unmarshal([]byte(m.MetadataJSON), &metadata)
@@ -405,7 +406,7 @@ func modelToEntry(m EntryModel) memory.Entry {
 	}
 }
 
-func modelsToEntries(models []EntryModel) []memory.Entry {
+func modelsToEntries(models []dao.EntryModel) []memory.Entry {
 	entries := make([]memory.Entry, len(models))
 	for i, m := range models {
 		entries[i] = modelToEntry(m)

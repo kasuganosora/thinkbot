@@ -3,32 +3,21 @@ package workflow
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/dao"
 )
 
 // ============================================================================
-// GORM 持久化模型
+// 持久化转换函数
 // ============================================================================
 
-// WorkflowModel 是工作流的持久化模型。
-// 使用 JSON 全量序列化策略：整个 Workflow 对象序列化为 Data 字段。
-// 这样无需为每个字段建列，且支持未来结构变更的向前兼容。
-type WorkflowModel struct {
-	ID        string         `gorm:"primaryKey;column:id" json:"id"`
-	Data      string         `gorm:"column:data;type:text" json:"data"` // 序列化的 Workflow JSON
-	CreatedAt time.Time      `gorm:"column:created_at" json:"createdAt"`
-	UpdatedAt time.Time      `gorm:"column:updated_at" json:"updatedAt"`
-}
-
-// TableName 指定表名。
-func (WorkflowModel) TableName() string { return "workflow_workflows" }
-
 // ToModel 将领域对象转为持久化模型。
-func ToModel(wf *Workflow) (*WorkflowModel, error) {
+func ToModel(wf *Workflow) (*dao.WorkflowModel, error) {
 	data, err := json.Marshal(wf)
 	if err != nil {
 		return nil, err
 	}
-	return &WorkflowModel{
+	return &dao.WorkflowModel{
 		ID:        wf.ID,
 		Data:      string(data),
 		CreatedAt: wf.CreatedAt,
@@ -37,7 +26,7 @@ func ToModel(wf *Workflow) (*WorkflowModel, error) {
 }
 
 // FromModel 将持久化模型还原为领域对象。
-func FromModel(m *WorkflowModel) (*Workflow, error) {
+func FromModel(m *dao.WorkflowModel) (*Workflow, error) {
 	var wf Workflow
 	if err := json.Unmarshal([]byte(m.Data), &wf); err != nil {
 		return nil, err
