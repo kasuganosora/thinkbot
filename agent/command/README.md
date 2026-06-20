@@ -39,7 +39,7 @@ import "github.com/kasuganosora/thinkbot/agent/session"
 
 // 创建 command stage（包含所有内建命令）
 cmdStage := command.NewCommandStageWithBuiltins(
-    command.NewStaticAdminChecker("admin-telegram-id"), // 管理员检查
+    command.NewStaticAdminChecker("telegram:admin-id"), // 管理员检查（格式：platform:userID）
     sessionMgr,        // Session 管理器
     resolver,          // Session 解析器
     3,                 // /compact 默认保留消息数
@@ -79,7 +79,7 @@ app := fx.New(
     command.Module,
     // 覆盖默认 AdminChecker
     fx.Provide(func() command.AdminChecker {
-        return command.NewStaticAdminChecker("admin-id-1", "admin-id-2")
+        return command.NewStaticAdminChecker("telegram:admin-id-1", "telegram:admin-id-2")
     }),
     // 通过 pipeline 注册
     command.ProvideStage(command.DefaultOrder),
@@ -92,19 +92,22 @@ app := fx.New(
 
 ```go
 type AdminChecker interface {
-    IsAdmin(ctx context.Context, userID string) bool
+    IsAdmin(ctx context.Context, source, userID string) bool
 }
 ```
 
 内建实现：
-- `StaticAdminChecker` — 基于固定 userID 集合
+- `StaticAdminChecker` — 基于 `source:userID` 组合（如 `"telegram:123456"`）
 - `AllowAllChecker` — 始终返回 true（测试用）
 - `AdminCheckerFunc` — 函数适配器
+- `identity.IdentityAdminChecker`（外部）— 通过身份映射查内部用户再验证角色
 
 接入 `auth.AuthService` 的示例：
 
 ```go
-checker := command.AdminCheckerFunc(func(ctx context.Context, userID string) bool {
+checker := command.AdminCheckerFunc(func(ctx context.Context, source, userID string) bool {
+    // source: "telegram"、"misskey"、"web" 等
+    // userID: 平台侧用户 ID（Web 渠道为内部用户 ID 的字符串形式）
     user, err := authSvc.GetUserByUsername(ctx, userID)
     if err != nil {
         return false

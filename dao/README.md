@@ -12,6 +12,8 @@
 - **用量统计**：`UsageDaily` — 每日 Token 使用量
 - **窗口状态**：`WindowState` — 对话窗口快照
 - **工作流**：`Workflow` — 工作流定义与执行状态
+- **授权码**：`BindCode` — 一次性跨平台绑定授权码（5 分钟过期）
+- **身份映射**：`IdentityMapping` — 平台用户 ID 到内部用户的映射
 - **自动迁移**：`Migrate()` 启动时自动建表/加列
 
 ## 表结构
@@ -26,3 +28,5 @@
 | `usage_daily` | `UsageDaily` | 用量统计 |
 | `window_states` | `WindowState` | 窗口快照 |
 | `workflows` | `Workflow` | 工作流 |
+| `bind_codes` | `BindCode` | 授权码（一次性，5 分钟有效） |
+| `identity_mappings` | `IdentityMapping` | 平台身份映射 |

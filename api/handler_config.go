@@ -13,6 +13,14 @@ import (
 
 // handleGetConfig 列出所有配置项（带描述和分类）。
 // GET /api/config
+//
+// @Summary      获取所有配置
+// @Description  列出所有系统配置项（需要 system.config 权限）
+// @Tags         系统配置
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/config [get]
 func (s *Server) handleGetConfig(c *gin.Context) {
 	items, err := s.store.ListSettings(c.Request.Context())
 	if err != nil {
@@ -37,6 +45,18 @@ func (s *Server) handleGetConfigKey(c *gin.Context) {
 
 // handleSetConfigKey 设置单个配置项。
 // PUT /api/config/:key
+//
+// @Summary      设置配置项
+// @Description  设置单个系统配置项的值
+// @Tags         系统配置
+// @Accept       json
+// @Produce      json
+// @Param        key   path      string       true  "配置键"
+// @Param        body  body      SetConfigReq true  "配置值请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/config/{key} [put]
 func (s *Server) handleSetConfigKey(c *gin.Context) {
 	key := c.Param("key")
 
@@ -56,6 +76,17 @@ func (s *Server) handleSetConfigKey(c *gin.Context) {
 
 // handleBatchSetConfig 批量设置配置项。
 // PUT /api/config
+//
+// @Summary      批量设置配置
+// @Description  批量设置多个系统配置项
+// @Tags         系统配置
+// @Accept       json
+// @Produce      json
+// @Param        body  body      BatchSetConfigReq  true  "批量配置请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/config [put]
 func (s *Server) handleBatchSetConfig(c *gin.Context) {
 	var req BatchSetConfigReq
 	if err := c.ShouldBindJSON(&req); err != nil {

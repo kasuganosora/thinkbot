@@ -1,5 +1,13 @@
 package main
 
+// @title           thinkbot API
+// @version         1.0
+// @description     多渠道 AI 聊天机器人框架的 HTTP API
+// @host            localhost:8080
+// @BasePath        /
+// @securityDefinitions.apikey  CookieAuth
+// @in                            cookie
+// @name                          token
 import (
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/api"

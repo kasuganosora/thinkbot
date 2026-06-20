@@ -15,6 +15,14 @@ import (
 
 // handleListSkills 列出所有已注册的技能。
 // GET /api/skills
+//
+// @Summary      技能列表
+// @Description  列出所有已注册的技能（需要 bot.manage 权限）
+// @Tags         技能
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/skills [get]
 func (s *Server) handleListSkills(c *gin.Context) {
 	infos := s.skillMgr.List()
 	OK(c, gin.H{"skills": infos, "total": len(infos)})
@@ -22,6 +30,16 @@ func (s *Server) handleListSkills(c *gin.Context) {
 
 // handleGetSkill 获取单个技能详情。
 // GET /api/skills/:name
+//
+// @Summary      获取技能
+// @Description  获取指定技能的详细信息
+// @Tags         技能
+// @Produce      json
+// @Param        name  path      string  true  "技能名称"
+// @Success      200   {object}  Response
+// @Failure      404   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/skills/{name} [get]
 func (s *Server) handleGetSkill(c *gin.Context) {
 	name := c.Param("name")
 
@@ -35,6 +53,15 @@ func (s *Server) handleGetSkill(c *gin.Context) {
 
 // handleEnableSkill 启用技能。
 // PUT /api/skills/:name/enable
+//
+// @Summary      启用技能
+// @Description  启用指定技能
+// @Tags         技能
+// @Produce      json
+// @Param        name  path      string  true  "技能名称"
+// @Success      200   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/skills/{name}/enable [put]
 func (s *Server) handleEnableSkill(c *gin.Context) {
 	name := c.Param("name")
 
@@ -48,6 +75,15 @@ func (s *Server) handleEnableSkill(c *gin.Context) {
 
 // handleDisableSkill 禁用技能。
 // PUT /api/skills/:name/disable
+//
+// @Summary      禁用技能
+// @Description  禁用指定技能
+// @Tags         技能
+// @Produce      json
+// @Param        name  path      string  true  "技能名称"
+// @Success      200   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/skills/{name}/disable [put]
 func (s *Server) handleDisableSkill(c *gin.Context) {
 	name := c.Param("name")
 

@@ -15,6 +15,16 @@ import (
 
 // handleStatsOverview 全平台统计概览。
 // GET /api/stats/overview?from=2024-01-01&to=2024-12-31
+//
+// @Summary      统计概览
+// @Description  全平台模型用量统计概览（需要 user.manage 权限）
+// @Tags         统计
+// @Produce      json
+// @Param        from  query     string  false  "起始日期 (YYYY-MM-DD)"
+// @Param        to    query     string  false  "结束日期 (YYYY-MM-DD)"
+// @Success      200   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/stats/overview [get]
 func (s *Server) handleStatsOverview(c *gin.Context) {
 	from, to := parseDateRange(c)
 
@@ -28,6 +38,17 @@ func (s *Server) handleStatsOverview(c *gin.Context) {
 
 // handleStatsBot 单个 Bot 的模型统计。
 // GET /api/stats/bots/:id?from=2024-01-01&to=2024-12-31
+//
+// @Summary      Bot 统计
+// @Description  查询单个 Bot 的模型用量统计
+// @Tags         统计
+// @Produce      json
+// @Param        id    path      string  true   "Bot ID"
+// @Param        from  query     string  false  "起始日期 (YYYY-MM-DD)"
+// @Param        to    query     string  false  "结束日期 (YYYY-MM-DD)"
+// @Success      200   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/stats/bots/{id} [get]
 func (s *Server) handleStatsBot(c *gin.Context) {
 	botID := c.Param("id")
 	from, to := parseDateRange(c)
@@ -42,6 +63,17 @@ func (s *Server) handleStatsBot(c *gin.Context) {
 
 // handleStatsBotDaily 单个 Bot 的按日统计。
 // GET /api/stats/bots/:id/daily?from=2024-01-01&to=2024-12-31
+//
+// @Summary      按日统计
+// @Description  查询单个 Bot 的按日模型用量统计
+// @Tags         统计
+// @Produce      json
+// @Param        id    path      string  true   "Bot ID"
+// @Param        from  query     string  false  "起始日期 (YYYY-MM-DD)"
+// @Param        to    query     string  false  "结束日期 (YYYY-MM-DD)"
+// @Success      200   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/stats/bots/{id}/daily [get]
 func (s *Server) handleStatsBotDaily(c *gin.Context) {
 	botID := c.Param("id")
 	from, to := parseDateRange(c)

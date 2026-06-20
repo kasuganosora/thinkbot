@@ -13,6 +13,17 @@ import (
 
 // handleLogin 用户登录。
 // POST /api/auth/login
+//
+// @Summary      用户登录
+// @Description  通过用户名密码登录，返回 JWT Cookie
+// @Tags         认证
+// @Accept       json
+// @Produce      json
+// @Param        body  body      LoginReq  true  "登录请求"
+// @Success      200   {object}  Response{data=LoginResp}
+// @Failure      400   {object}  Response
+// @Failure      401   {object}  Response
+// @Router       /api/auth/login [post]
 func (s *Server) handleLogin(c *gin.Context) {
 	var req LoginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -55,6 +66,13 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 // handleLogout 用户登出。
 // POST /api/auth/logout
+//
+// @Summary      用户登出
+// @Description  清除 JWT Cookie
+// @Tags         认证
+// @Produce      json
+// @Success      200  {object}  Response
+// @Router       /api/auth/logout [post]
 func (s *Server) handleLogout(c *gin.Context) {
 	s.cookie.ClearCookie(c)
 	OKMsg(c, "logged out", nil)
@@ -62,6 +80,15 @@ func (s *Server) handleLogout(c *gin.Context) {
 
 // handleMe 获取当前登录用户信息。
 // GET /api/auth/me
+//
+// @Summary      获取当前用户
+// @Description  返回当前登录用户的详细信息
+// @Tags         认证
+// @Produce      json
+// @Success      200  {object}  Response{data=LoginResp}
+// @Failure      401  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/auth/me [get]
 func (s *Server) handleMe(c *gin.Context) {
 	user := currentUser(c)
 	if user == nil {
@@ -73,6 +100,18 @@ func (s *Server) handleMe(c *gin.Context) {
 
 // handleChangePassword 当前用户修改自己的密码。
 // PUT /api/auth/password
+//
+// @Summary      修改密码
+// @Description  当前用户修改自己的登录密码
+// @Tags         认证
+// @Accept       json
+// @Produce      json
+// @Param        body  body      ChangePasswordReq  true  "修改密码请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Failure      401   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/auth/password [put]
 func (s *Server) handleChangePassword(c *gin.Context) {
 	user := currentUser(c)
 	if user == nil {

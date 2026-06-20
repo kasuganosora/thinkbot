@@ -29,6 +29,14 @@ const (
 
 // handleChatBots 返回当前可聊天的 Bot 列表（状态为 running）。
 // GET /api/chat/bots
+//
+// @Summary      可聊 Bot 列表
+// @Description  返回当前处于运行状态的 Bot 列表
+// @Tags         聊天
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/chat/bots [get]
 func (s *Server) handleChatBots(c *gin.Context) {
 	defs, err := s.botSvc.ListDefinitions()
 	if err != nil {
@@ -61,6 +69,19 @@ func (s *Server) handleChatBots(c *gin.Context) {
 //
 // 请求体: { "botId": "xxx", "text": "hello" }
 // 响应: text/event-stream
+//
+// @Summary      发送消息（SSE）
+// @Description  向指定 Bot 发送消息，通过 SSE 流式返回回复
+// @Tags         聊天
+// @Accept       json
+// @Produce      text/event-stream
+// @Param        body  body      ChatReq  true  "聊天请求"
+// @Success      200   {string}  string          "SSE 事件流"
+// @Failure      400   {object}  Response
+// @Failure      401   {object}  Response
+// @Failure      404   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/chat/send [post]
 func (s *Server) handleChatSend(c *gin.Context) {
 	var req ChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {

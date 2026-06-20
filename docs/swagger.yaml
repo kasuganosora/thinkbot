@@ -1,0 +1,1807 @@
+basePath: /
+definitions:
+  api.BatchSetConfigReq:
+    properties:
+      items:
+        additionalProperties:
+          type: string
+        type: object
+    required:
+    - items
+    type: object
+  api.ChangePasswordReq:
+    properties:
+      newPassword:
+        minLength: 6
+        type: string
+      oldPassword:
+        type: string
+    required:
+    - newPassword
+    - oldPassword
+    type: object
+  api.ChatReq:
+    properties:
+      botId:
+        type: string
+      text:
+        type: string
+    required:
+    - botId
+    - text
+    type: object
+  api.CreateBotReq:
+    properties:
+      id:
+        type: string
+      llmLight:
+        type: string
+      llmMain:
+        type: string
+      maxTokens:
+        type: integer
+      model:
+        type: string
+      name:
+        type: string
+      systemPrompt:
+        type: string
+      temperature:
+        type: number
+      workers:
+        type: integer
+    required:
+    - id
+    - name
+    type: object
+  api.CreateChannelReq:
+    properties:
+      config:
+        description: JSON 字符串
+        type: string
+      name:
+        type: string
+      type:
+        type: string
+    required:
+    - name
+    - type
+    type: object
+  api.CreateCronJobReq:
+    properties:
+      channel:
+        type: string
+      feature:
+        type: string
+      maxRuns:
+        type: integer
+      model:
+        type: string
+      name:
+        type: string
+      prompt:
+        type: string
+      schedule:
+        type: string
+      skills:
+        items:
+          type: string
+        type: array
+      tags:
+        items:
+          type: string
+        type: array
+    required:
+    - name
+    - prompt
+    - schedule
+    type: object
+  api.CreateUserReq:
+    properties:
+      displayName:
+        type: string
+      email:
+        type: string
+      password:
+        minLength: 6
+        type: string
+      role:
+        type: string
+      username:
+        minLength: 3
+        type: string
+    required:
+    - password
+    - username
+    type: object
+  api.LoginReq:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    required:
+    - password
+    - username
+    type: object
+  api.LoginResp:
+    properties:
+      avatar:
+        type: string
+      displayName:
+        type: string
+      id:
+        type: integer
+      lastLoginAt:
+        type: string
+      role:
+        type: string
+      username:
+        type: string
+    type: object
+  api.Response:
+    properties:
+      code:
+        type: integer
+      data: {}
+      message:
+        type: string
+    type: object
+  api.SetConfigReq:
+    properties:
+      value:
+        type: string
+    required:
+    - value
+    type: object
+  api.UpdateBotReq:
+    properties:
+      llmLight:
+        type: string
+      llmMain:
+        type: string
+      maxTokens:
+        type: integer
+      model:
+        type: string
+      name:
+        type: string
+      systemPrompt:
+        type: string
+      temperature:
+        type: number
+      workers:
+        type: integer
+    type: object
+  api.UpdateChannelReq:
+    properties:
+      config:
+        type: string
+      enabled:
+        type: boolean
+      name:
+        type: string
+    type: object
+  api.UpdateCronJobReq:
+    properties:
+      channel:
+        type: string
+      enabled:
+        type: boolean
+      feature:
+        type: string
+      maxRuns:
+        type: integer
+      model:
+        type: string
+      name:
+        type: string
+      prompt:
+        type: string
+      schedule:
+        type: string
+    type: object
+  api.UpdateDreamingConfigReq:
+    properties:
+      enabled:
+        type: boolean
+      schedule:
+        type: string
+    type: object
+  api.UpdateRoleReq:
+    properties:
+      role:
+        type: string
+    required:
+    - role
+    type: object
+  api.UpdateUserReq:
+    properties:
+      avatar:
+        type: string
+      displayName:
+        type: string
+      email:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: 多渠道 AI 聊天机器人框架的 HTTP API
+  title: thinkbot API
+  version: "1.0"
+paths:
+  /api/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: 通过用户名密码登录，返回 JWT Cookie
+      parameters:
+      - description: 登录请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.LoginReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.LoginResp'
+              type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: 用户登录
+      tags:
+      - 认证
+  /api/auth/logout:
+    post:
+      description: 清除 JWT Cookie
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      summary: 用户登出
+      tags:
+      - 认证
+  /api/auth/me:
+    get:
+      description: 返回当前登录用户的详细信息
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/api.Response'
+            - properties:
+                data:
+                  $ref: '#/definitions/api.LoginResp'
+              type: object
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取当前用户
+      tags:
+      - 认证
+  /api/auth/password:
+    put:
+      consumes:
+      - application/json
+      description: 当前用户修改自己的登录密码
+      parameters:
+      - description: 修改密码请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.ChangePasswordReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 修改密码
+      tags:
+      - 认证
+  /api/bindcode:
+    get:
+      description: 返回当前用户所有未使用且未过期的授权码
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 列出授权码
+      tags:
+      - 授权码与绑定
+    post:
+      description: 生成一个一次性授权码（5 分钟有效），用于跨平台身份绑定
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 生成授权码
+      tags:
+      - 授权码与绑定
+  /api/bindings:
+    get:
+      description: 返回当前用户所有已绑定的平台身份
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 列出绑定
+      tags:
+      - 授权码与绑定
+  /api/bindings/{id}:
+    delete:
+      description: 解除指定的平台身份映射
+      parameters:
+      - description: 绑定记录 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 删除绑定
+      tags:
+      - 授权码与绑定
+  /api/bots:
+    get:
+      description: 列出所有 Bot 定义及其运行状态
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: Bot 列表
+      tags:
+      - Bot 管理
+    post:
+      consumes:
+      - application/json
+      description: 创建新的 Bot 定义（需要 bot.manage 权限）
+      parameters:
+      - description: 创建 Bot 请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateBotReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 创建 Bot
+      tags:
+      - Bot 管理
+  /api/bots/{id}:
+    delete:
+      description: 删除指定 Bot 定义
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 删除 Bot
+      tags:
+      - Bot 管理
+    get:
+      description: 获取指定 Bot 的定义和运行时信息
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取 Bot
+      tags:
+      - Bot 管理
+    put:
+      consumes:
+      - application/json
+      description: 更新指定 Bot 的配置（字段可选，需要 bot.manage 权限）
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 更新 Bot 请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateBotReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 更新 Bot
+      tags:
+      - Bot 管理
+  /api/bots/{id}/channels:
+    get:
+      description: 返回指定 Bot 的所有 Channel 配置
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: Channel 列表
+      tags:
+      - Channel 管理
+    post:
+      consumes:
+      - application/json
+      description: 为指定 Bot 创建新的 Channel 配置
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 创建 Channel 请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateChannelReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 创建 Channel
+      tags:
+      - Channel 管理
+  /api/bots/{id}/channels/{cid}:
+    delete:
+      description: 删除指定的 Channel 配置
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Channel ID
+        in: path
+        name: cid
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 删除 Channel
+      tags:
+      - Channel 管理
+    put:
+      consumes:
+      - application/json
+      description: 更新指定的 Channel 配置
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Channel ID
+        in: path
+        name: cid
+        required: true
+        type: string
+      - description: 更新 Channel 请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateChannelReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 更新 Channel
+      tags:
+      - Channel 管理
+  /api/bots/{id}/cron:
+    get:
+      description: 列出指定 Bot 的所有定时任务
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 仅活跃任务
+        in: query
+        name: active
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 定时任务列表
+      tags:
+      - 定时任务
+    post:
+      consumes:
+      - application/json
+      description: 为指定 Bot 创建新的定时任务
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 创建定时任务请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateCronJobReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 创建定时任务
+      tags:
+      - 定时任务
+  /api/bots/{id}/cron/{jobId}:
+    delete:
+      description: 删除指定的定时任务
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 任务 ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 删除定时任务
+      tags:
+      - 定时任务
+    get:
+      description: 获取指定定时任务的详情
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 任务 ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取定时任务
+      tags:
+      - 定时任务
+    put:
+      consumes:
+      - application/json
+      description: 更新指定定时任务（字段可选）
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 任务 ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      - description: 更新定时任务请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateCronJobReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 更新定时任务
+      tags:
+      - 定时任务
+  /api/bots/{id}/cron/{jobId}/pause:
+    post:
+      description: 暂停指定的定时任务
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 任务 ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 暂停定时任务
+      tags:
+      - 定时任务
+  /api/bots/{id}/cron/{jobId}/resume:
+    post:
+      description: 恢复指定的定时任务
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 任务 ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 恢复定时任务
+      tags:
+      - 定时任务
+  /api/bots/{id}/cron/{jobId}/trigger:
+    post:
+      description: 手动触发指定的定时任务立即执行
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 任务 ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 触发定时任务
+      tags:
+      - 定时任务
+  /api/bots/{id}/dreaming:
+    get:
+      description: 获取指定 Bot 的梦境巩固配置
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取梦境配置
+      tags:
+      - 梦境巩固
+    put:
+      consumes:
+      - application/json
+      description: 更新指定 Bot 的梦境巩固配置（字段可选）
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 更新梦境配置请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateDreamingConfigReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 更新梦境配置
+      tags:
+      - 梦境巩固
+  /api/bots/{id}/dreaming/status:
+    get:
+      description: 返回指定 Bot 的梦境巩固运行时状态
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 梦境巩固状态
+      tags:
+      - 梦境巩固
+  /api/bots/{id}/dreaming/trigger:
+    post:
+      description: 手动触发指定 Bot 的梦境巩固流程
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 触发梦境巩固
+      tags:
+      - 梦境巩固
+  /api/bots/{id}/memory:
+    get:
+      description: 查询指定 Bot 的分层记忆（需要 bot.manage 权限，需开启 dreaming）
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 记忆层级 (L0/L1/L2/L3)
+        in: query
+        name: tier
+        type: string
+      - default: 20
+        description: 返回条数
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 查询记忆
+      tags:
+      - 记忆
+  /api/bots/{id}/memory/stats:
+    get:
+      description: 返回指定 Bot 的记忆统计信息
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 记忆统计
+      tags:
+      - 记忆
+  /api/bots/{id}/start:
+    post:
+      description: 启动指定 Bot
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 启动 Bot
+      tags:
+      - Bot 管理
+  /api/bots/{id}/stop:
+    post:
+      description: 停止指定 Bot
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 停止 Bot
+      tags:
+      - Bot 管理
+  /api/channels/types:
+    get:
+      description: 返回系统支持的 Channel 类型及其配置字段
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: Channel 类型
+      tags:
+      - Channel 管理
+  /api/chat/bots:
+    get:
+      description: 返回当前处于运行状态的 Bot 列表
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 可聊 Bot 列表
+      tags:
+      - 聊天
+  /api/chat/history:
+    get:
+      description: 游标分页查询聊天历史记录
+      parameters:
+      - description: Bot ID
+        in: query
+        name: botId
+        required: true
+        type: string
+      - description: 分页游标
+        in: query
+        name: cursor
+        type: string
+      - default: 20
+        description: 每页条数
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 聊天历史
+      tags:
+      - 聊天
+  /api/chat/send:
+    post:
+      consumes:
+      - application/json
+      description: 向指定 Bot 发送消息，通过 SSE 流式返回回复
+      parameters:
+      - description: 聊天请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.ChatReq'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE 事件流
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 发送消息（SSE）
+      tags:
+      - 聊天
+  /api/config:
+    get:
+      description: 列出所有系统配置项（需要 system.config 权限）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取所有配置
+      tags:
+      - 系统配置
+    put:
+      consumes:
+      - application/json
+      description: 批量设置多个系统配置项
+      parameters:
+      - description: 批量配置请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.BatchSetConfigReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 批量设置配置
+      tags:
+      - 系统配置
+  /api/config/{key}:
+    put:
+      consumes:
+      - application/json
+      description: 设置单个系统配置项的值
+      parameters:
+      - description: 配置键
+        in: path
+        name: key
+        required: true
+        type: string
+      - description: 配置值请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.SetConfigReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 设置配置项
+      tags:
+      - 系统配置
+  /api/skills:
+    get:
+      description: 列出所有已注册的技能（需要 bot.manage 权限）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 技能列表
+      tags:
+      - 技能
+  /api/skills/{name}:
+    get:
+      description: 获取指定技能的详细信息
+      parameters:
+      - description: 技能名称
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取技能
+      tags:
+      - 技能
+  /api/skills/{name}/disable:
+    put:
+      description: 禁用指定技能
+      parameters:
+      - description: 技能名称
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 禁用技能
+      tags:
+      - 技能
+  /api/skills/{name}/enable:
+    put:
+      description: 启用指定技能
+      parameters:
+      - description: 技能名称
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 启用技能
+      tags:
+      - 技能
+  /api/stats/bots/{id}:
+    get:
+      description: 查询单个 Bot 的模型用量统计
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 起始日期 (YYYY-MM-DD)
+        in: query
+        name: from
+        type: string
+      - description: 结束日期 (YYYY-MM-DD)
+        in: query
+        name: to
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: Bot 统计
+      tags:
+      - 统计
+  /api/stats/bots/{id}/daily:
+    get:
+      description: 查询单个 Bot 的按日模型用量统计
+      parameters:
+      - description: Bot ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 起始日期 (YYYY-MM-DD)
+        in: query
+        name: from
+        type: string
+      - description: 结束日期 (YYYY-MM-DD)
+        in: query
+        name: to
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 按日统计
+      tags:
+      - 统计
+  /api/stats/overview:
+    get:
+      description: 全平台模型用量统计概览（需要 user.manage 权限）
+      parameters:
+      - description: 起始日期 (YYYY-MM-DD)
+        in: query
+        name: from
+        type: string
+      - description: 结束日期 (YYYY-MM-DD)
+        in: query
+        name: to
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 统计概览
+      tags:
+      - 统计
+  /api/system/events/metrics:
+    get:
+      description: 返回事件总线的运行时指标
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 事件总线指标
+      tags:
+      - 系统
+  /api/system/health:
+    get:
+      description: 返回详细的系统运行时信息（内存、goroutine、运行时间等）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 系统健康检查
+      tags:
+      - 系统
+  /api/users:
+    get:
+      description: 列出所有用户（需要 user.manage 权限）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 用户列表
+      tags:
+      - 用户管理
+    post:
+      consumes:
+      - application/json
+      description: 创建新用户（需要 user.manage 权限）
+      parameters:
+      - description: 创建用户请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateUserReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 创建用户
+      tags:
+      - 用户管理
+  /api/users/{id}:
+    delete:
+      description: 删除指定 ID 的用户
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 删除用户
+      tags:
+      - 用户管理
+    get:
+      description: 获取指定 ID 的用户详情
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 获取用户
+      tags:
+      - 用户管理
+    put:
+      consumes:
+      - application/json
+      description: 更新指定用户的邮箱、显示名、头像
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 更新用户请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateUserReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 更新用户资料
+      tags:
+      - 用户管理
+  /api/users/{id}/disable:
+    put:
+      description: 禁用指定用户的账户
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 禁用用户
+      tags:
+      - 用户管理
+  /api/users/{id}/enable:
+    put:
+      description: 启用指定用户的账户
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 启用用户
+      tags:
+      - 用户管理
+  /api/users/{id}/password:
+    put:
+      consumes:
+      - application/json
+      description: 管理员重置指定用户的密码
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 重置密码请求
+        in: body
+        name: body
+        required: true
+        schema:
+          properties:
+            password:
+              type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 重置密码
+      tags:
+      - 用户管理
+  /api/users/{id}/role:
+    put:
+      consumes:
+      - application/json
+      description: 修改指定用户的角色
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 角色请求
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/api.UpdateRoleReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 修改角色
+      tags:
+      - 用户管理
+  /api/workflows:
+    get:
+      description: 列出最近的工作流（需要 bot.manage 权限）
+      parameters:
+      - default: 20
+        description: 返回数量
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 工作流列表
+      tags:
+      - 工作流
+  /api/workflows/{wfId}:
+    get:
+      description: 查询指定工作流的详细状态
+      parameters:
+      - description: 工作流 ID
+        in: path
+        name: wfId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 工作流状态
+      tags:
+      - 工作流
+  /api/workflows/{wfId}/nodes:
+    get:
+      description: 查询指定工作流的节点列表
+      parameters:
+      - description: 工作流 ID
+        in: path
+        name: wfId
+        required: true
+        type: string
+      - default: flat
+        description: 输出格式 (flat/tree)
+        in: query
+        name: format
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 工作流节点
+      tags:
+      - 工作流
+  /api/workflows/metrics:
+    get:
+      description: 返回工作流引擎的全局指标
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 工作流指标
+      tags:
+      - 工作流
+  /api/workflows/recover:
+    post:
+      description: 恢复所有中断的工作流
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.Response'
+      security:
+      - CookieAuth: []
+      summary: 恢复工作流
+      tags:
+      - 工作流
+securityDefinitions:
+  CookieAuth:
+    in: cookie
+    name: token
+    type: apiKey
+swagger: "2.0"

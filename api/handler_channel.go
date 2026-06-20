@@ -12,6 +12,14 @@ import (
 
 // handleListChannelTypes 返回系统支持的 Channel 类型及其字段 schema。
 // GET /api/channels/types
+//
+// @Summary      Channel 类型
+// @Description  返回系统支持的 Channel 类型及其配置字段
+// @Tags         Channel 管理
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/channels/types [get]
 func (s *Server) handleListChannelTypes(c *gin.Context) {
 	OK(c, gin.H{
 		"types": SupportedChannelTypes(),
@@ -20,6 +28,15 @@ func (s *Server) handleListChannelTypes(c *gin.Context) {
 
 // handleListChannels 返回指定 Bot 的所有 Channel 配置。
 // GET /api/bots/:id/channels
+//
+// @Summary      Channel 列表
+// @Description  返回指定 Bot 的所有 Channel 配置
+// @Tags         Channel 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/channels [get]
 func (s *Server) handleListChannels(c *gin.Context) {
 	botID := c.Param("id")
 	channels, err := s.botSvc.ListChannelDefinitions(botID)
@@ -32,6 +49,18 @@ func (s *Server) handleListChannels(c *gin.Context) {
 
 // handleCreateChannel 创建 Channel 配置。
 // POST /api/bots/:id/channels
+//
+// @Summary      创建 Channel
+// @Description  为指定 Bot 创建新的 Channel 配置
+// @Tags         Channel 管理
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string            true  "Bot ID"
+// @Param        body  body      CreateChannelReq  true  "创建 Channel 请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/channels [post]
 func (s *Server) handleCreateChannel(c *gin.Context) {
 	botID := c.Param("id")
 	var req CreateChannelReq
@@ -56,6 +85,19 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 
 // handleUpdateChannel 更新 Channel 配置。
 // PUT /api/bots/:id/channels/:cid
+//
+// @Summary      更新 Channel
+// @Description  更新指定的 Channel 配置
+// @Tags         Channel 管理
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string             true  "Bot ID"
+// @Param        cid   path      string             true  "Channel ID"
+// @Param        body  body      UpdateChannelReq   true  "更新 Channel 请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/channels/{cid} [put]
 func (s *Server) handleUpdateChannel(c *gin.Context) {
 	botID := c.Param("id")
 	channelID := c.Param("cid")
@@ -76,6 +118,16 @@ func (s *Server) handleUpdateChannel(c *gin.Context) {
 
 // handleDeleteChannel 删除 Channel 配置。
 // DELETE /api/bots/:id/channels/:cid
+//
+// @Summary      删除 Channel
+// @Description  删除指定的 Channel 配置
+// @Tags         Channel 管理
+// @Produce      json
+// @Param        id   path      string  true  "Bot ID"
+// @Param        cid  path      string  true  "Channel ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/channels/{cid} [delete]
 func (s *Server) handleDeleteChannel(c *gin.Context) {
 	botID := c.Param("id")
 	channelID := c.Param("cid")
