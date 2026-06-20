@@ -38,7 +38,7 @@ func resolveSchema(v any) (any, error) {
 // reflection and json struct tags. This is a lightweight alternative to pulling
 // in a full JSON Schema inference library.
 func inferStructSchema(t reflect.Type) map[string]any {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
@@ -110,7 +110,7 @@ func splitJSONTag(tag string) []string {
 }
 
 func goTypeToJSONSchema(t reflect.Type) map[string]any {
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {

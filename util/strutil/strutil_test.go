@@ -194,8 +194,5 @@ func TestExtractJSON_ErrorIsJSONType(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	var syntaxErr *json.SyntaxError
-	if !errors.As(err, &syntaxErr) {
-		// 也可能是其他 json 错误类型，只要不是 nil 就行
-		// 这里只确认返回了某种 json 解析错误
-	}
+	_ = errors.As(err, &syntaxErr) // 确认返回了某种 json 解析错误
 }

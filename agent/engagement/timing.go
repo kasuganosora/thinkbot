@@ -54,7 +54,6 @@ type TimingGate struct {
 	// 参考 MaiBot 的 _schedule_wait_timeout 回调。
 	onWaitExpired  func(channelKey string)
 	waitTimers     map[string]*time.Timer
-	waitTimersDone chan struct{}
 }
 
 type channelTimingState struct {

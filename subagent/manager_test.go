@@ -402,7 +402,7 @@ func TestRegisterTools(t *testing.T) {
 	provider := &countingMockProvider{}
 	saMgr := NewSubAgentManager(provider, "test-model")
 	promptReg := prompt.NewRegistry()
-	toolMgr := tools.NewToolManager(promptReg, nil)
+	toolMgr := tools.NewToolManager(promptReg, nil, nil)
 
 	if err := RegisterTools(toolMgr, saMgr); err != nil {
 		t.Fatalf("RegisterTools failed: %v", err)
@@ -437,7 +437,7 @@ func TestRegisterTools(t *testing.T) {
 func TestSpawnToolNotAvailableInSubagentScope(t *testing.T) {
 	saMgr := NewSubAgentManager(newMockProvider(), "test-model")
 	promptReg := prompt.NewRegistry()
-	toolMgr := tools.NewToolManager(promptReg, nil)
+	toolMgr := tools.NewToolManager(promptReg, nil, nil)
 
 	RegisterTools(toolMgr, saMgr)
 

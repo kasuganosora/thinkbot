@@ -2,7 +2,6 @@ package stages
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -422,7 +421,7 @@ func PrefixDecider(_ context.Context, _ core.Message, result *llm.GenerateResult
 // SystemPromptWithDecision 是一个辅助函数，将决策指令附加到 system prompt 末尾。
 // 用于配合 PrefixDecider 使用。
 func SystemPromptWithDecision(basePrompt string) string {
-	return basePrompt + fmt.Sprintf(`
+	return basePrompt + `
 
 ## Output Format Rules
 
@@ -440,5 +439,5 @@ Examples:
 - "[SKIP]"
 
 IMPORTANT: Always include the prefix tag. If unsure, default to [REPLY].
-`)
+`
 }

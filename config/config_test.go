@@ -36,12 +36,12 @@ func testLogger() *zap.SugaredLogger {
 func setEnv(t *testing.T, key, val string) {
 	t.Helper()
 	old, ok := os.LookupEnv(key)
-	os.Setenv(key, val)
+	_ = os.Setenv(key, val)
 	t.Cleanup(func() {
 		if ok {
-			os.Setenv(key, old)
+			_ = os.Setenv(key, old)
 		} else {
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 		}
 	})
 }
@@ -144,7 +144,7 @@ func TestKeyConversion(t *testing.T) {
 func TestStore_Priority_OverrideWins(t *testing.T) {
 	db := testDB(t)
 	store := NewStore(db)
-	store.Set(context.Background(), "test.key", "db_value")
+	_ = store.Set(context.Background(), "test.key", "db_value")
 	store.LoadEnvMap(map[string]string{"test.key": "env_value"})
 	store.SetTemporary("test.key", "override_value")
 
@@ -156,7 +156,7 @@ func TestStore_Priority_OverrideWins(t *testing.T) {
 func TestStore_Priority_EnvFileOverDB(t *testing.T) {
 	db := testDB(t)
 	store := NewStore(db)
-	store.Set(context.Background(), "test.key", "db_value")
+	_ = store.Set(context.Background(), "test.key", "db_value")
 	store.LoadEnvMap(map[string]string{"test.key": "env_value"})
 
 	if got := store.GetString("test.key", ""); got != "env_value" {
@@ -168,7 +168,9 @@ func TestStore_Priority_DBOverOSEnv(t *testing.T) {
 	db := testDB(t)
 	store := NewStore(db)
 	setEnv(t, "TEST_KEY", "os_value")
-	store.Set(context.Background(), "test.key", "db_value")
+	_ = store.Set(context.Background(), "test.key", "db_value")
+
+
 
 	if got := store.GetString("test.key", ""); got != "db_value" {
 		t.Errorf("expected db_value, got %q", got)
@@ -261,11 +263,11 @@ func TestStore_PersistAndReload(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Set(ctx, "app.name", "thinkbot")
-	store.Set(ctx, "app.version", "1.0")
+	_ = store.Set(ctx, "app.name", "thinkbot")
+	_ = store.Set(ctx, "app.version", "1.0")
 
 	store2 := NewStore(db)
-	store2.Reload(ctx)
+	_ = store2.Reload(ctx)
 
 	if v := store2.GetString("app.name", ""); v != "thinkbot" {
 		t.Errorf("app.name: got %q", v)
@@ -277,8 +279,8 @@ func TestStore_UpdateExisting(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Set(ctx, "key", "v1")
-	store.Set(ctx, "key", "v2")
+	_ = store.Set(ctx, "key", "v1")
+	_ = store.Set(ctx, "key", "v2")
 
 	var settings []dao.Setting
 	db.Find(&settings)
@@ -295,8 +297,8 @@ func TestStore_Delete(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.Set(ctx, "myapp.test.delete", "val")
-	store.Delete(ctx, "myapp.test.delete")
+	_ = store.Set(ctx, "myapp.test.delete", "val")
+	_ = store.Delete(ctx, "myapp.test.delete")
 
 	if _, ok := store.Get("myapp.test.delete"); ok {
 		t.Error("key should be deleted")
@@ -449,8 +451,8 @@ func TestStore_SetWithMeta_OverwriteValueOnly(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.SetWithMeta(ctx, "llm.model", "gpt-4o", "LLM", "Default model")
-	store.Set(ctx, "llm.model", "gpt-4o-mini")
+	_ = store.SetWithMeta(ctx, "llm.model", "gpt-4o", "LLM", "Default model")
+	_ = store.Set(ctx, "llm.model", "gpt-4o-mini")
 
 	setting, err := store.GetSetting(ctx, "llm.model")
 	if err != nil {
@@ -472,8 +474,8 @@ func TestStore_SetWithMeta_UpdateMeta(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.SetWithMeta(ctx, "bot.model", "gpt-4o", "Bot", "Initial")
-	store.SetWithMeta(ctx, "bot.model", "claude", "Bot", "Updated description")
+	_ = store.SetWithMeta(ctx, "bot.model", "gpt-4o", "Bot", "Initial")
+	_ = store.SetWithMeta(ctx, "bot.model", "claude", "Bot", "Updated description")
 
 	setting, _ := store.GetSetting(ctx, "bot.model")
 	if setting.Value != "claude" {
@@ -504,7 +506,7 @@ func TestStore_RegisterMeta(t *testing.T) {
 		t.Errorf("Description: got %q", setting.Description)
 	}
 
-	store.Set(ctx, "bot.workers", "8")
+	_ = store.Set(ctx, "bot.workers", "8")
 	setting, _ = store.GetSetting(ctx, "bot.workers")
 	if setting.Value != "8" {
 		t.Errorf("Value: got %q", setting.Value)
@@ -539,9 +541,9 @@ func TestStore_ListSettings(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.SetWithMeta(ctx, "llm.api_key", "sk-1", "LLM", "API Key")
-	store.SetWithMeta(ctx, "bot.model", "gpt-4o", "Bot", "Model")
-	store.Set(ctx, "db.path", "data.db")
+	_ = store.SetWithMeta(ctx, "llm.api_key", "sk-1", "LLM", "API Key")
+	_ = store.SetWithMeta(ctx, "bot.model", "gpt-4o", "Bot", "Model")
+	_ = store.Set(ctx, "db.path", "data.db")
 
 	settings, err := store.ListSettings(ctx)
 	if err != nil {
@@ -563,9 +565,9 @@ func TestStore_ListByCategory(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.SetWithMeta(ctx, "llm.api_key", "sk-1", "LLM", "API Key")
-	store.SetWithMeta(ctx, "llm.model", "gpt-4o", "LLM", "Model")
-	store.SetWithMeta(ctx, "bot.workers", "4", "Bot", "Workers")
+	_ = store.SetWithMeta(ctx, "llm.api_key", "sk-1", "LLM", "API Key")
+	_ = store.SetWithMeta(ctx, "llm.model", "gpt-4o", "LLM", "Model")
+	_ = store.SetWithMeta(ctx, "bot.workers", "4", "Bot", "Workers")
 
 	llmSettings, err := store.ListByCategory(ctx, "LLM")
 	if err != nil {
@@ -581,9 +583,9 @@ func TestStore_ListCategories(t *testing.T) {
 	store := NewStore(db)
 	ctx := context.Background()
 
-	store.SetWithMeta(ctx, "llm.api_key", "sk-1", "LLM", "API Key")
-	store.SetWithMeta(ctx, "bot.workers", "4", "Bot", "Workers")
-	store.Set(ctx, "db.path", "data.db")
+	_ = store.SetWithMeta(ctx, "llm.api_key", "sk-1", "LLM", "API Key")
+	_ = store.SetWithMeta(ctx, "bot.workers", "4", "Bot", "Workers")
+	_ = store.Set(ctx, "db.path", "data.db")
 
 	categories, err := store.ListCategories(ctx)
 	if err != nil {

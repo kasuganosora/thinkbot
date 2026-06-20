@@ -1,6 +1,7 @@
 package engagement
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -179,7 +180,7 @@ func TestBuildFromConfig_Disabled(t *testing.T) {
 
 	// DenyAll → 所有消息被拒绝
 	msg := &core.Message{Source: "misskey", Text: "hello"}
-	decision := result.Policy.Evaluate(nil, msg)
+	decision := result.Policy.Evaluate(context.TODO(), msg)
 	if decision.Engage {
 		t.Error("disabled config should reject all messages")
 	}

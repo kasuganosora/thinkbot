@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
@@ -500,7 +501,7 @@ func TestAssembler_Metrics(t *testing.T) {
 
 // mockTracerProvider 用于测试的 noop TracerProvider。
 func noopTP() trace.TracerProvider {
-	return trace.NewNoopTracerProvider()
+	return noop_trace.NewTracerProvider()
 }
 
 func newTestLogger() *zap.SugaredLogger {

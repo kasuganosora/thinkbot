@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"os"
 
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/fx"
@@ -85,7 +87,11 @@ func newEngine(
 func registerEngineLifecycle(lc fx.Lifecycle, engine *Engine) {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
-			go engine.Run(ctx)
+			go func() {
+				if err := engine.Run(ctx); err != nil {
+					fmt.Fprintf(os.Stderr, "agent: engine run failed: %v\n", err)
+				}
+			}()
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {

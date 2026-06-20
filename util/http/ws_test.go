@@ -39,21 +39,13 @@ func newWSTestServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest
 	return srv
 }
 
-// wsURL 将 http://... URL 转为 ws://... URL。
-func wsURL(httpURL string) string {
-	if strings.HasPrefix(httpURL, "https://") {
-		return "wss://" + httpURL[8:]
-	}
-	return "ws://" + httpURL[7:]
-}
-
 // ============================================================================
 // Echo 测试
 // ============================================================================
 
 func TestWSEcho(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			msgType, data, err := conn.ReadMessage()
 			if err != nil {
@@ -109,7 +101,7 @@ func TestWSEcho(t *testing.T) {
 
 func TestWSDialAndReadWrite(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Echo
 		for {
 			msgType, data, err := conn.ReadMessage()
@@ -126,7 +118,7 @@ func TestWSDialAndReadWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 写文本
 	if err := conn.WriteText("ping"); err != nil {
@@ -167,7 +159,7 @@ func TestWSDialAndReadWrite(t *testing.T) {
 
 func TestWSBinary(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			msgType, data, err := conn.ReadMessage()
 			if err != nil {
@@ -213,7 +205,7 @@ func TestWSBinary(t *testing.T) {
 
 func TestWSOnMessage(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.WriteMessage(WSTextMessage, []byte("text-msg"))
 		_ = conn.WriteMessage(WSBinaryMessage, []byte("bin-msg"))
 		time.Sleep(50 * time.Millisecond)
@@ -256,7 +248,7 @@ func TestWSOnMessage(t *testing.T) {
 
 func TestWSChannel(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for i := 0; i < 5; i++ {
 			_ = conn.WriteMessage(WSTextMessage, []byte(fmt.Sprintf("msg-%d", i)))
 		}
@@ -276,7 +268,7 @@ func TestWSChannel(t *testing.T) {
 	for msg := range ch {
 		messages = append(messages, msg.Text())
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	if len(messages) != 5 {
 		t.Fatalf("expected 5 messages, got %d", len(messages))
@@ -297,7 +289,7 @@ func TestWSChannelBidirectional(t *testing.T) {
 	var receivedByServer int32
 
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for i := 0; i < 3; i++ {
 			_, _, err := conn.ReadMessage()
 			if err != nil {
@@ -329,7 +321,7 @@ func TestWSChannelBidirectional(t *testing.T) {
 	for range ch {
 		echoes++
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	if echoes != 3 {
 		t.Errorf("expected 3 echo messages, got %d", echoes)
@@ -345,7 +337,7 @@ func TestWSChannelBidirectional(t *testing.T) {
 
 func TestWSWatchdogTimeout(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// 发一条消息后永久卡住
 		_ = conn.WriteMessage(WSTextMessage, []byte("first"))
 		// 等待客户端断开
@@ -404,7 +396,7 @@ func TestWSWatchdogTimeout(t *testing.T) {
 
 func TestWSUserCancel(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -447,7 +439,7 @@ func TestWSUserCancel(t *testing.T) {
 
 func TestWSServerClose(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.WriteMessage(WSTextMessage, []byte("hello"))
 		time.Sleep(20 * time.Millisecond)
 		_ = conn.WriteMessage(WSCloseMessage,
@@ -494,7 +486,7 @@ func TestWSServerClose(t *testing.T) {
 
 func TestWSCallbackInterrupt(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for i := 0; i < 10; i++ {
 			_ = conn.WriteMessage(WSTextMessage, []byte(fmt.Sprintf("msg-%d", i)))
 			time.Sleep(10 * time.Millisecond)
@@ -554,7 +546,7 @@ func TestWSAutoPing(t *testing.T) {
 	var pingCount int32
 
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// 回显 Pong
 		conn.SetPingHandler(func(appData string) error {
 			atomic.AddInt32(&pingCount, 1)
@@ -669,7 +661,7 @@ func TestWSWatchdogTimeoutVsUserCancel(t *testing.T) {
 	// 场景 1：看门狗超时
 	t.Run("watchdog_timeout", func(t *testing.T) {
 		srv := newWSTestServer(t, func(conn *websocket.Conn) {
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			for {
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
@@ -694,7 +686,7 @@ func TestWSWatchdogTimeoutVsUserCancel(t *testing.T) {
 	// 场景 2：用户主动取消
 	t.Run("user_cancel", func(t *testing.T) {
 		srv := newWSTestServer(t, func(conn *websocket.Conn) {
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			for {
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
@@ -745,7 +737,7 @@ func TestWSHeaders(t *testing.T) {
 		_ = conn.WriteMessage(WSTextMessage, []byte("auth-ok"))
 		_ = conn.WriteMessage(WSCloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer srv.Close()
 
@@ -786,7 +778,7 @@ func TestWSSubprotocol(t *testing.T) {
 		_ = conn.WriteMessage(WSTextMessage, []byte(conn.Subprotocol()))
 		_ = conn.WriteMessage(WSCloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		conn.Close()
+		_ = conn.Close()
 	}))
 	defer srv.Close()
 
@@ -815,7 +807,7 @@ func TestWSSubprotocol(t *testing.T) {
 
 func TestWSExternalWatchdog(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.WriteMessage(WSTextMessage, []byte("data1"))
 		_ = conn.WriteMessage(WSTextMessage, []byte("data2"))
 		time.Sleep(50 * time.Millisecond)
@@ -854,7 +846,7 @@ func TestWSCloseWithCode(t *testing.T) {
 	var serverCloseCode int32
 
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			_, _, err := conn.ReadMessage()
 			if err != nil {
@@ -896,7 +888,7 @@ func TestWSCloseWithCode(t *testing.T) {
 
 func TestWSConcurrentWrite(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -910,7 +902,7 @@ func TestWSConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// 并发写不应 panic
 	done := make(chan struct{}, 5)

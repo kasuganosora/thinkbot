@@ -307,10 +307,10 @@ func TestToolManager_AutoWiredPolicy(t *testing.T) {
 	// 构造时传入 store，策略应自动接入，无需手动调用 SetPolicyProvider
 	mgr := NewToolManager(prompt.NewRegistry(), store, zap.NewNop().Sugar())
 
-	mgr.Register(ToolDef{
+	_ = mgr.Register(ToolDef{
 		Tool: llm.Tool{Name: "blocked_tool", Description: "should be filtered"},
 	})
-	mgr.Register(ToolDef{
+	_ = mgr.Register(ToolDef{
 		Tool: llm.Tool{Name: "allowed_tool", Description: "should pass"},
 	})
 
@@ -356,7 +356,7 @@ func TestToolManager_NilStoreNoPolicy(t *testing.T) {
 	// store 为 nil 时不做策略过滤
 	mgr := NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 
-	mgr.Register(ToolDef{
+	_ = mgr.Register(ToolDef{
 		Tool: llm.Tool{Name: "any_tool", Description: "should always pass"},
 	})
 

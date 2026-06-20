@@ -238,7 +238,7 @@ func TestName(t *testing.T) {
 
 // TestNilParentUsesBackground 验证 parent 为 nil 时不 panic。
 func TestNilParentUsesBackground(t *testing.T) {
-	wd := New(nil, 10*time.Second)
+	wd := New(context.TODO(), 10*time.Second)
 	defer wd.Stop(true)
 
 	if wd.Context() == nil {

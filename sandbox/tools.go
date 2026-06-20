@@ -661,7 +661,7 @@ func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 						continue
 					}
 					var lineNum int
-					fmt.Sscanf(parts[1], "%d", &lineNum)
+					_, _ = fmt.Sscanf(parts[1], "%d", &lineNum)
 					matches = append(matches, match{
 						File:    parts[0],
 						Line:    lineNum,

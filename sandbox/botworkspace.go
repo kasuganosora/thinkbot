@@ -71,7 +71,7 @@ func NewBotWorkspaceManager(baseDir string, cfg Config, logger *zap.SugaredLogge
 		backend = "auto"
 	}
 
-	b := "local"
+	var b string
 	switch backend {
 	case "docker":
 		if !dockerAvailable() {
@@ -422,7 +422,7 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 				return nil, err
 			}
 			targetDir = validated
-			os.MkdirAll(targetDir, 0o755)
+			_ = os.MkdirAll(targetDir, 0o755)
 		}
 
 		if runtime.GOOS == "windows" {

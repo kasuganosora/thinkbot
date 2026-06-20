@@ -142,7 +142,7 @@ func TestLocalSandbox_CreateAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	if ws.ID() != "test-create-1" {
 		t.Errorf("ID() = %q, want test-create-1", ws.ID())
@@ -160,7 +160,7 @@ func TestLocalSandbox_ExecSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	result, err := ws.Exec(context.Background(), ExecRequest{
 		Command: "echo hello_world",
@@ -184,7 +184,7 @@ func TestLocalSandbox_ExecNonZeroExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	result, err := ws.Exec(context.Background(), ExecRequest{
 		Command: "exit 42",
@@ -205,7 +205,7 @@ func TestLocalSandbox_ExecTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Windows: ping -n 10 127.0.0.1 >nul 是跨平台兼容的延迟方式
 	// Unix: sleep 10
@@ -234,7 +234,7 @@ func TestLocalSandbox_WriteAndReadFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Write
 	data := []byte("test file content\nline 2")
@@ -261,13 +261,13 @@ func TestLocalSandbox_WriteFileTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create local sandbox: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 
 	ws, err := sb.Create("test-write-limit")
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	bigData := make([]byte, 100)
 	err = ws.WriteFile(context.Background(), "big.txt", bigData)
@@ -284,7 +284,7 @@ func TestLocalSandbox_ListDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// 准备文件和目录
 	if err := ws.WriteFile(context.Background(), "file1.txt", []byte("a")); err != nil {
@@ -315,7 +315,7 @@ func TestLocalSandbox_PathTraversalRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// ReadFile should reject ..
 	_, err = ws.ReadFile(context.Background(), "../secret")
@@ -339,7 +339,7 @@ func TestSandboxManager_GetOrCreate(t *testing.T) {
 	defer cleanup()
 
 	mgr := NewSandboxManager(sb, nil, 0)
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 
 	key1 := SessionKey{BotID: "bot1", Channel: "ch1", UserID: "user1"}
 	ws1, err := mgr.GetOrCreate(key1)
@@ -366,7 +366,7 @@ func TestSandboxManager_SessionIsolation(t *testing.T) {
 	defer cleanup()
 
 	mgr := NewSandboxManager(sb, nil, 0)
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 
 	key1 := SessionKey{BotID: "bot1", Channel: "ch1", UserID: "user1"}
 	key2 := SessionKey{BotID: "bot1", Channel: "ch1", UserID: "user2"}
@@ -425,7 +425,7 @@ func TestNewSandbox_ForcedLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSandbox failed: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	if sb.Backend() != "local" {
 		t.Errorf("Backend = %q, want local", sb.Backend())
 	}
@@ -445,7 +445,7 @@ func TestNewSandbox_AutoFallbackToLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auto mode should not fail when Docker unavailable: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	// 可能是 docker 也可能是 local，取决于环境
 	// 关键是：不报错
 }
@@ -477,7 +477,7 @@ func TestSetupSandbox_Local(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetupSandbox failed: %v", err)
 	}
-	defer result.Close()
+	defer func() { _ = result.Close() }()
 
 	if result.Manager == nil {
 		t.Fatal("Manager should not be nil")
@@ -525,7 +525,7 @@ func TestSandboxTool_ExecViaManager(t *testing.T) {
 	defer cleanup()
 
 	mgr := NewSandboxManager(sb, nil, 0)
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 
 	key := SessionKey{BotID: "bot1", Channel: "test", UserID: "user1"}
 	ws, err := mgr.GetOrCreate(key)

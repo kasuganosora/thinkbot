@@ -5,13 +5,14 @@ import (
 	"testing"
 	"time"
 
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
 
 func noopTracerProvider() trace.TracerProvider {
-	return trace.NewNoopTracerProvider()
+	return noop_trace.NewTracerProvider()
 }
 
 // ============================================================================
@@ -539,7 +540,7 @@ func TestSessionWriteStage(t *testing.T) {
 	env := core.NewEnvelope(msg)
 
 	// ReadStage 解析 session
-	readStage.Process(context.Background(), env)
+	_, _ = readStage.Process(context.Background(), env)
 
 	// 模拟 Bot 回复
 	env.AddAction(core.Action{
@@ -549,7 +550,7 @@ func TestSessionWriteStage(t *testing.T) {
 	})
 
 	// WriteStage 写入回复
-	writeStage.Process(context.Background(), env)
+	_, _ = writeStage.Process(context.Background(), env)
 
 	// 验证 session 包含 user + assistant
 	sessionID := SessionIDFromEnvelope(env)

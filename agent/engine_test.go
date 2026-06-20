@@ -132,10 +132,7 @@ func TestEngine_EndToEnd(t *testing.T) {
 
 	// 等待处理完成
 	deadline := time.After(3 * time.Second)
-	for {
-		if len(disp.collected()) >= 3 {
-			break
-		}
+	for len(disp.collected()) < 3 {
 		select {
 		case <-deadline:
 			t.Fatalf("timeout waiting for dispatch, got %d actions", len(disp.collected()))
@@ -188,7 +185,7 @@ func TestEngine_EmptyPipeline(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	ingress.Receive(context.Background(), core.Message{ID: "msg-empty", Channel: "ch", Text: "hello"})
+	_ = ingress.Receive(context.Background(), core.Message{ID: "msg-empty", Channel: "ch", Text: "hello"})
 	time.Sleep(100 * time.Millisecond)
 
 	if len(disp.collected()) != 0 {
@@ -236,7 +233,7 @@ func TestEngine_DroppingStage(t *testing.T) {
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	ingress.Receive(context.Background(), core.Message{ID: "msg-drop", Channel: "ch", Text: "should be dropped"})
+	_ = ingress.Receive(context.Background(), core.Message{ID: "msg-drop", Channel: "ch", Text: "should be dropped"})
 	time.Sleep(100 * time.Millisecond)
 
 	if len(disp.collected()) != 0 {
@@ -274,14 +271,11 @@ func TestEngine_MemoryChannel(t *testing.T) {
 
 	// 通过 MemoryChannel 发送
 	bgCtx := context.Background()
-	mem.Send(bgCtx, core.Message{ID: "ch-1", Channel: "ch-a", Text: "from channel a"})
-	mem.Send(bgCtx, core.Message{ID: "ch-2", Channel: "ch-b", Text: "from channel b"})
+	_ = mem.Send(bgCtx, core.Message{ID: "ch-1", Channel: "ch-a", Text: "from channel a"})
+	_ = mem.Send(bgCtx, core.Message{ID: "ch-2", Channel: "ch-b", Text: "from channel b"})
 
 	deadline := time.After(3 * time.Second)
-	for {
-		if len(disp.collected()) >= 2 {
-			break
-		}
+	for len(disp.collected()) < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("timeout, got %d actions", len(disp.collected()))

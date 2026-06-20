@@ -382,7 +382,7 @@ func parseListOutput(data []byte) []FileEntry {
 			entry.IsDir = true
 		}
 		if len(parts) >= 3 {
-			fmt.Sscanf(parts[2], "%d", &entry.Size)
+			_, _ = fmt.Sscanf(parts[2], "%d", &entry.Size)
 		}
 		entries = append(entries, entry)
 	}

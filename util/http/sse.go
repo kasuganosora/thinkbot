@@ -217,7 +217,7 @@ func (r *Request) doSSEInternal(cfg SSEConfig) error {
 	if conn.wdOwned {
 		defer wd.Stop(true)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if cfg.OnConnect != nil {
 		cfg.OnConnect(resp)

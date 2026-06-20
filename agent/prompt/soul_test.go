@@ -255,7 +255,7 @@ func TestSoulLoader_FileRemoved(t *testing.T) {
 	defer loader.Stop()
 
 	// Remove the file — should be recreated with default content
-	os.Remove(path)
+	_ = os.Remove(path)
 
 	// Wait for recreate + reload
 	deadline := time.Now().Add(3 * time.Second)

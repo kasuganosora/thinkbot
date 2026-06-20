@@ -27,7 +27,7 @@ func newTestBotMgr(t *testing.T) (*BotWorkspaceManager, string, func()) {
 		t.Fatalf("failed to create bot workspace manager: %v", err)
 	}
 	botID := "test-bot"
-	return mgr, botID, func() { mgr.Close() }
+	return mgr, botID, func() { _ = mgr.Close() }
 }
 
 // getBotWS 获取测试 bot 工作空间。
@@ -222,8 +222,8 @@ func TestTool_SearchContent(t *testing.T) {
 	defer cleanup()
 	ws := getBotWS(t, mgr, botID)
 
-	ws.WriteFile(context.Background(), "a.txt", []byte("hello world\nfoo bar\nHELLO again"))
-	ws.WriteFile(context.Background(), "sub/b.txt", []byte("hello from sub\nnothing here"))
+	_ = ws.WriteFile(context.Background(), "a.txt", []byte("hello world\nfoo bar\nHELLO again"))
+	_ = ws.WriteFile(context.Background(), "sub/b.txt", []byte("hello from sub\nnothing here"))
 
 	result, err := ws.Exec(context.Background(), ExecRequest{
 		Command: "grep -rni -- 'hello' '.' 2>/dev/null || true",
@@ -241,8 +241,8 @@ func TestTool_WriteFile_Overwrite(t *testing.T) {
 	defer cleanup()
 	ws := getBotWS(t, mgr, botID)
 
-	ws.WriteFile(context.Background(), "ow.txt", []byte("original content"))
-	ws.WriteFile(context.Background(), "ow.txt", []byte("new content"))
+	_ = ws.WriteFile(context.Background(), "ow.txt", []byte("original content"))
+	_ = ws.WriteFile(context.Background(), "ow.txt", []byte("new content"))
 
 	got, _ := ws.ReadFile(context.Background(), "ow.txt")
 	if string(got) != "new content" {
@@ -271,7 +271,7 @@ func TestTool_ReadFile_Empty(t *testing.T) {
 	defer cleanup()
 	ws := getBotWS(t, mgr, botID)
 
-	ws.WriteFile(context.Background(), "empty.txt", []byte(""))
+	_ = ws.WriteFile(context.Background(), "empty.txt", []byte(""))
 
 	got, err := ws.ReadFile(context.Background(), "empty.txt")
 	if err != nil {
@@ -358,7 +358,7 @@ func TestBotWorkspace_Persistence(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	mgr1.Close()
+	_ = mgr1.Close()
 
 	// 验证文件在磁盘上存在
 	soulPath := filepath.Join(baseDir, "persist-bot", "SOUL.md")
@@ -378,7 +378,7 @@ func TestBotWorkspace_Persistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBotWorkspaceManager (2nd): %v", err)
 	}
-	defer mgr2.Close()
+	defer func() { _ = mgr2.Close() }()
 
 	ws2, err := mgr2.GetOrCreate("persist-bot")
 	if err != nil {
@@ -405,14 +405,14 @@ func TestBotWorkspace_BotIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBotWorkspaceManager: %v", err)
 	}
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 
 	// bot-a 和 bot-b 应该有各自独立的工作空间
 	wsA, _ := mgr.GetOrCreate("bot-a")
 	wsB, _ := mgr.GetOrCreate("bot-b")
 
-	wsA.WriteFile(context.Background(), "secret.txt", []byte("bot-a secret"))
-	wsB.WriteFile(context.Background(), "secret.txt", []byte("bot-b secret"))
+	_ = wsA.WriteFile(context.Background(), "secret.txt", []byte("bot-a secret"))
+	_ = wsB.WriteFile(context.Background(), "secret.txt", []byte("bot-b secret"))
 
 	// bot-a 不能看到 bot-b 的文件
 	dataA, _ := wsA.ReadFile(context.Background(), "secret.txt")
@@ -444,7 +444,7 @@ func TestBotWorkspace_BotDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBotWorkspaceManager: %v", err)
 	}
-	defer mgr.Close()
+	defer func() { _ = mgr.Close() }()
 
 	botDir, err := mgr.BotDir("soul-bot")
 	if err != nil {
@@ -518,7 +518,7 @@ func TestHealthCheck_BotWorkspace_DirDeleted(t *testing.T) {
 	ws := getBotWS(t, mgr, botID)
 
 	// 删除工作空间目录模拟异常
-	os.RemoveAll(ws.WorkDir())
+	_ = os.RemoveAll(ws.WorkDir())
 
 	status := ws.HealthCheck(context.Background())
 	if status.Healthy {
@@ -534,8 +534,8 @@ func TestHealthCheck_Manager_All(t *testing.T) {
 	defer cleanup()
 
 	// 创建两个 bot 工作空间
-	mgr.GetOrCreate("bot-a")
-	mgr.GetOrCreate("bot-b")
+	_, _ = mgr.GetOrCreate("bot-a")
+	_, _ = mgr.GetOrCreate("bot-b")
 
 	all := mgr.HealthCheckAll(context.Background())
 	if len(all) != 2 {

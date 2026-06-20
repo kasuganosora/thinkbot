@@ -20,6 +20,23 @@ const (
 	PrefixTools      = "tools"
 	PrefixWorkspace  = "workspace"
 	PrefixSystem     = "system"
+	PrefixAPI        = "api"
+)
+
+// API 键。
+const (
+	// KeyAPIAddr HTTP 服务器监听地址（默认 ":8080"）。
+	KeyAPIAddr = "api.addr"
+
+	// KeyAPICORSOrigins 允许的 CORS 来源列表，逗号分隔。
+	// 为空时仅允许 localhost 来源（开发模式）。
+	KeyAPICORSOrigins = "api.cors_origins"
+
+	// KeyAPICookieSecure Cookie 是否仅通过 HTTPS 传输（默认 false）。
+	KeyAPICookieSecure = "api.cookie_secure"
+
+	// KeyChatContextLimit LLM 上下文加载的最大历史消息数（默认 20）。
+	KeyChatContextLimit = "api.chat_context_limit"
 )
 
 // Bot 键。
@@ -154,8 +171,8 @@ func ValidateKey(key string) error {
 		return fmt.Errorf("%w: empty key", ErrInvalidKey)
 	}
 	for _, ch := range key {
-		if !(ch >= 'a' && ch <= 'z') &&
-			!(ch >= '0' && ch <= '9') &&
+		if (ch < 'a' || ch > 'z') &&
+			(ch < '0' || ch > '9') &&
 			ch != '.' && ch != '_' {
 			return fmt.Errorf("%w: key %q contains invalid character %q", ErrInvalidKey, key, ch)
 		}

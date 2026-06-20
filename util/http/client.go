@@ -398,7 +398,7 @@ func (r *Request) doOnce() (*Response, error) {
 			"method", r.method, "url", req.URL.String(), "err", err, "elapsed", time.Since(start))
 		return nil, errs.Wrap(err, "http request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 响应体大小限制
 	bodyReader := resp.Body
@@ -634,7 +634,7 @@ func truncate(s string, maxLen int) string {
 func (r *Request) dumpRequest(req *http.Request) {
 	var b strings.Builder
 	b.WriteString("\n========== HTTP Request Dump ==========\n")
-	b.WriteString(fmt.Sprintf("%s %s\n", req.Method, req.URL.String()))
+	fmt.Fprintf(&b, "%s %s\n", req.Method, req.URL.String())
 	b.WriteString("--- Headers ---\n")
 	for k, vs := range req.Header {
 		for _, v := range vs {
@@ -642,7 +642,7 @@ func (r *Request) dumpRequest(req *http.Request) {
 			if strings.EqualFold(k, "Authorization") {
 				v = "***"
 			}
-			b.WriteString(fmt.Sprintf("  %s: %s\n", k, v))
+			fmt.Fprintf(&b, "  %s: %s\n", k, v)
 		}
 	}
 	reqContentType := req.Header.Get("Content-Type")
@@ -655,7 +655,7 @@ func (r *Request) dumpRequest(req *http.Request) {
 				b.WriteString(v)
 				b.WriteString("\n")
 			} else {
-				b.WriteString(fmt.Sprintf("--- Body (binary, content-length=%d) ---\n", len(v)))
+				fmt.Fprintf(&b, "--- Body (binary, content-length=%d) ---\n", len(v))
 			}
 		case []byte:
 			if textReq {
@@ -663,7 +663,7 @@ func (r *Request) dumpRequest(req *http.Request) {
 				b.WriteString(string(v))
 				b.WriteString("\n")
 			} else {
-				b.WriteString(fmt.Sprintf("--- Body (binary, content-length=%d) ---\n", len(v)))
+				fmt.Fprintf(&b, "--- Body (binary, content-length=%d) ---\n", len(v))
 			}
 		case io.Reader:
 			b.WriteString("--- Body (io.Reader, not dumped) ---\n")
@@ -688,11 +688,11 @@ func (r *Request) dumpRequest(req *http.Request) {
 func (r *Request) dumpResponse(resp *Response, elapsed time.Duration) {
 	var b strings.Builder
 	b.WriteString("\n========== HTTP Response Dump ==========\n")
-	b.WriteString(fmt.Sprintf("%s %s -> %d (%v)\n", r.method, r.url, resp.StatusCode, elapsed))
+	fmt.Fprintf(&b, "%s %s -> %d (%v)\n", r.method, r.url, resp.StatusCode, elapsed)
 	b.WriteString("--- Headers ---\n")
 	for k, vs := range resp.Headers {
 		for _, v := range vs {
-			b.WriteString(fmt.Sprintf("  %s: %s\n", k, v))
+			fmt.Fprintf(&b, "  %s: %s\n", k, v)
 		}
 	}
 
@@ -702,7 +702,7 @@ func (r *Request) dumpResponse(resp *Response, elapsed time.Duration) {
 		b.WriteString(string(resp.Body))
 		b.WriteString("\n")
 	} else {
-		b.WriteString(fmt.Sprintf("--- Body (binary, not dumped, content-length=%d) ---\n", len(resp.Body)))
+		fmt.Fprintf(&b, "--- Body (binary, not dumped, content-length=%d) ---\n", len(resp.Body))
 	}
 	b.WriteString("========================================")
 	log.Logger.Infow("http response dump", "detail", b.String())

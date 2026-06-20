@@ -383,7 +383,7 @@ func TestNoteHandler_SourceAlwaysNote(t *testing.T) {
 		Payload: "thinking about something",
 	}
 
-	handler.Handle(context.Background(), action)
+	_ = handler.Handle(context.Background(), action)
 
 	if writer.Count() != 1 {
 		t.Fatal("expected 1 entry")
