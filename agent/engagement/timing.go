@@ -131,6 +131,18 @@ type TimingGateConfig struct {
 	// 最终概率 = ReplyProbability * FrequencyMultiplier。
 	// 参考 MaiBot 的 adjust_talk_frequency。
 	FrequencyMultiplier float64
+
+	// AutoAdjustFrequency 是否根据群组活跃度自动调整频率。
+	// 启用后，TimingGate 基于观察到的消息间隔动态调整 FrequencyMultiplier。
+	// 参考 Houde et al. (2025)：Agent 应自动匹配群组活跃度，
+	// 在活跃群组更积极、在安静群组更低调。
+	AutoAdjustFrequency bool
+
+	// MinFrequencyMultiplier 自动调整的下限（默认 0.3）。
+	MinFrequencyMultiplier float64
+
+	// MaxFrequencyMultiplier 自动调整的上限（默认 3.0）。
+	MaxFrequencyMultiplier float64
 }
 
 // DefaultTimingGateConfig 返回默认配置。
@@ -147,6 +159,9 @@ func DefaultTimingGateConfig() TimingGateConfig {
 		EngagedResetDecline:         true,
 		BackoffBypassPendingCount:   0,
 		FrequencyMultiplier:         1.0,
+		AutoAdjustFrequency:         false,
+		MinFrequencyMultiplier:      0.3,
+		MaxFrequencyMultiplier:      3.0,
 	}
 }
 
@@ -196,6 +211,15 @@ func (c *TimingGateConfig) normalize() {
 	if c.FrequencyMultiplier <= 0 {
 		c.FrequencyMultiplier = 1.0
 	}
+	if c.MinFrequencyMultiplier <= 0 {
+		c.MinFrequencyMultiplier = 0.3
+	}
+	if c.MaxFrequencyMultiplier <= 0 {
+		c.MaxFrequencyMultiplier = 3.0
+	}
+	if c.MinFrequencyMultiplier > c.MaxFrequencyMultiplier {
+		c.MinFrequencyMultiplier, c.MaxFrequencyMultiplier = c.MaxFrequencyMultiplier, c.MinFrequencyMultiplier
+	}
 }
 
 // TimingDecision 是 TimingGate 的完整决策结果。
@@ -214,6 +238,9 @@ type TimingDecision struct {
 	IsProbabilitySkip bool
 	// WaitDuration 如果 Action=wait，建议的等待时长。
 	WaitDuration time.Duration
+	// Phase 推断的当前对话阶段（当 AutoAdjustFrequency 启用时有值）。
+	// 参考 Houde et al. (2025)：不同对话阶段需要不同参与策略。
+	Phase ConversationPhase
 }
 
 // ShouldEvaluate 判断是否应该对这条消息运行 policy 评估。
@@ -340,6 +367,11 @@ func (g *TimingGate) RecordDecision(msg *core.Message, decision Decision) {
 			state.backoffUntil = time.Time{}
 		}
 		state.msgCountSinceLastEngage = 0
+
+		// 自动频率调整（engaged 时也调整）
+		if g.config.AutoAdjustFrequency {
+			g.autoAdjust(state, time.Now())
+		}
 		return
 	}
 
@@ -356,6 +388,11 @@ func (g *TimingGate) RecordDecision(msg *core.Message, decision Decision) {
 	backoff := g.calculateBackoff(state.consecutiveDecline)
 	if backoff > 0 {
 		state.backoffUntil = now.Add(time.Duration(backoff * float64(time.Second)))
+	}
+
+	// 自动频率调整（参考 Houde et al. (2025)：Agent 应匹配群组节奏）
+	if g.config.AutoAdjustFrequency {
+		g.autoAdjust(state, now)
 	}
 
 	// 如果底层 policy 返回了 wait 相关信息，设置 wait 状态
@@ -442,6 +479,50 @@ func (g *TimingGate) AdjustFrequency(multiplier float64) {
 		multiplier = 0
 	}
 	g.config.FrequencyMultiplier = multiplier
+}
+
+// autoAdjust 根据群组活跃度自动调整频率倍率。
+// 调用者需持有锁。
+//
+// 策略（参考 Houde et al. (2025) "Agent 应自动匹配群组节奏"）：
+//  1. 推断当前对话阶段（idle/divergent/convergent）
+//  2. 根据阶段获取目标倍率
+//  3. 平滑调整（向目标移动 30%），避免突变
+//  4. 限制在 [MinFrequencyMultiplier, MaxFrequencyMultiplier] 范围内
+func (g *TimingGate) autoAdjust(state *channelTimingState, now time.Time) {
+	if len(state.recentIntervals) < 3 {
+		return // 样本不足，不调整
+	}
+
+	// 推断对话阶段
+	phase := inferPhase(state.recentIntervals, now, state.lastMsgAt)
+	target := frequencyMultiplierForPhase(phase)
+
+	// 平滑调整（移动 30% 朝向目标值）
+	current := g.config.FrequencyMultiplier
+	adjusted := current + (target-current)*0.3
+
+	// 限制范围
+	if adjusted < g.config.MinFrequencyMultiplier {
+		adjusted = g.config.MinFrequencyMultiplier
+	}
+	if adjusted > g.config.MaxFrequencyMultiplier {
+		adjusted = g.config.MaxFrequencyMultiplier
+	}
+
+	g.config.FrequencyMultiplier = adjusted
+}
+
+// GetPhase 返回指定渠道当前推断的对话阶段。
+// 需要启用 AutoAdjustFrequency 才有意义。
+func (g *TimingGate) GetPhase(channelKey string) ConversationPhase {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	state, ok := g.channelStates[channelKey]
+	if !ok || len(state.recentIntervals) < 3 {
+		return PhaseIdle
+	}
+	return inferPhase(state.recentIntervals, time.Now(), state.lastMsgAt)
 }
 
 // Close 清理所有定时器资源。

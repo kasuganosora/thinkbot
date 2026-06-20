@@ -104,6 +104,9 @@ func BuildTimingGateConfig(cfg config.EngagementConfig) TimingGateConfig {
 		IdleCompensationWindow:      30 * time.Minute,
 		EngagedResetDecline:         true,
 		FrequencyMultiplier:         1.0,
+		AutoAdjustFrequency:         cfg.AutoAdjustFrequency,
+		MinFrequencyMultiplier:      0.3,
+		MaxFrequencyMultiplier:      3.0,
 	}
 }
 
@@ -137,12 +140,21 @@ type PolicyBuildResult struct {
 //	    stage.WithTimingGate(result.Gate)
 //	}
 func BuildFromConfig(cfg config.EngagementConfig, botUserID string, judge LLMJudge) PolicyBuildResult {
+	// 应用预设角色（覆盖相关参数）
+	if cfg.Profile != "" {
+		ApplyProfile(&cfg, cfg.Profile)
+	}
+
 	checker := BuildWritableChecker(cfg)
 	rules, rateLimit := BuildRuleEngine(cfg, botUserID)
 
 	opts := []PolicyOption{WithRules(rules)}
 	if cfg.LLMJudgeEnabled && judge != nil {
 		opts = append(opts, WithJudge(judge))
+		// 评分阈值（仅当 judge 支持评分模式时生效）
+		if cfg.EngagementThreshold > 0 {
+			opts = append(opts, WithEngagementThreshold(cfg.EngagementThreshold))
+		}
 	}
 
 	policy := NewCompositePolicy(checker, opts...)

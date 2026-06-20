@@ -90,6 +90,9 @@ const (
 	KeyEngagementBurstInterval      = "engagement.burst_interval_seconds"
 	KeyEngagementWaitTimeout        = "engagement.wait_timeout_seconds"
 	KeyEngagementBackoffBypass      = "engagement.backoff_bypass_pending"
+	KeyEngagementProfile            = "engagement.profile"
+	KeyEngagementThreshold          = "engagement.engagement_threshold"
+	KeyEngagementAutoAdjustFreq     = "engagement.auto_adjust_frequency"
 )
 
 // Soul 键。
