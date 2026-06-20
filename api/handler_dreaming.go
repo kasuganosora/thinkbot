@@ -13,6 +13,15 @@ import (
 
 // handleGetDreamingConfig 获取指定 Bot 的梦境巩固配置。
 // GET /api/bots/:id/dreaming
+//
+// @Summary      获取梦境配置
+// @Description  获取指定 Bot 的梦境巩固配置
+// @Tags         梦境巩固
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/dreaming [get]
 func (s *Server) handleGetDreamingConfig(c *gin.Context) {
 	botID := c.Param("id")
 
@@ -33,6 +42,18 @@ func (s *Server) handleGetDreamingConfig(c *gin.Context) {
 //	{"enabled": true, "schedule": "0 3 * * *"}
 //
 // 注意：修改配置后需要重启 Bot 才能生效。
+//
+// @Summary      更新梦境配置
+// @Description  更新指定 Bot 的梦境巩固配置（字段可选）
+// @Tags         梦境巩固
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string                  true  "Bot ID"
+// @Param        body  body      UpdateDreamingConfigReq true  "更新梦境配置请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/dreaming [put]
 func (s *Server) handleUpdateDreamingConfig(c *gin.Context) {
 	botID := c.Param("id")
 

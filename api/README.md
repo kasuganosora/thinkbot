@@ -183,3 +183,25 @@ GET  /api/system/health            — 详细健康检查（内存/goroutine/运
 GET  /api/system/events/metrics    — 事件总线指标
 GET  /health                       — 健康检查（公开，仅返回 ok）
 ```
+
+### Swagger API 文档
+
+```
+GET  /swagger/index.html           — Swagger UI（交互式 API 文档）
+GET  /swagger/swagger.json         — OpenAPI 3.0 JSON 规范
+GET  /swagger/swagger.yaml         — OpenAPI 3.0 YAML 规范
+```
+
+启动服务后访问 `http://localhost:8080/swagger/index.html` 即可查看完整的交互式 API 文档。
+
+**生成文档**（handler 注释变更后需重新生成）：
+
+```bash
+# 安装 swag CLI（仅需一次）
+go install github.com/swaggo/swag/cmd/swag@latest
+
+# 生成文档
+swag init -g cmd/main.go -o docs --parseDependency --parseInternal
+```
+
+每个 handler 函数上方的 `// @Summary`、`// @Param`、`// @Router` 等注解会被 swag 解析，自动生成 OpenAPI 3.0 规范。

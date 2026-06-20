@@ -24,6 +24,15 @@ import (
 
 // handleGenerateBindCode 生成一次性授权码。
 // 每个码有效期为 5 分钟，只能使用一次。
+//
+// @Summary      生成授权码
+// @Description  生成一个一次性授权码（5 分钟有效），用于跨平台身份绑定
+// @Tags         授权码与绑定
+// @Produce      json
+// @Success      200  {object}  Response
+// @Failure      401  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bindcode [post]
 func (s *Server) handleGenerateBindCode(c *gin.Context) {
 	user := currentUser(c)
 	if user == nil {
@@ -48,6 +57,15 @@ func (s *Server) handleGenerateBindCode(c *gin.Context) {
 }
 
 // handleListBindCodes 列出当前用户未使用且未过期的授权码。
+//
+// @Summary      列出授权码
+// @Description  返回当前用户所有未使用且未过期的授权码
+// @Tags         授权码与绑定
+// @Produce      json
+// @Success      200  {object}  Response
+// @Failure      401  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bindcode [get]
 func (s *Server) handleListBindCodes(c *gin.Context) {
 	user := currentUser(c)
 	if user == nil {
@@ -81,6 +99,15 @@ func (s *Server) handleListBindCodes(c *gin.Context) {
 }
 
 // handleListBindings 列出当前用户的所有身份映射。
+//
+// @Summary      列出绑定
+// @Description  返回当前用户所有已绑定的平台身份
+// @Tags         授权码与绑定
+// @Produce      json
+// @Success      200  {object}  Response
+// @Failure      401  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bindings [get]
 func (s *Server) handleListBindings(c *gin.Context) {
 	user := currentUser(c)
 	if user == nil {
@@ -115,6 +142,18 @@ func (s *Server) handleListBindings(c *gin.Context) {
 }
 
 // handleDeleteBinding 解绑某个平台身份。
+//
+// @Summary      删除绑定
+// @Description  解除指定的平台身份映射
+// @Tags         授权码与绑定
+// @Produce      json
+// @Param        id  path      int  true  "绑定记录 ID"
+// @Success      200  {object}  Response
+// @Failure      400  {object}  Response
+// @Failure      401  {object}  Response
+// @Failure      404  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bindings/{id} [delete]
 func (s *Server) handleDeleteBinding(c *gin.Context) {
 	user := currentUser(c)
 	if user == nil {

@@ -18,6 +18,18 @@ import (
 //
 // tier: L0（工作记忆）、L1（长期）、L2（场景）、L3（画像），默认全部
 // scope: 作用域过滤（如 "channel:general"），可选
+//
+// @Summary      查询记忆
+// @Description  查询指定 Bot 的分层记忆（需要 bot.manage 权限，需开启 dreaming）
+// @Tags         记忆
+// @Produce      json
+// @Param        id     path      string  true   "Bot ID"
+// @Param        tier   query     string  false  "记忆层级 (L0/L1/L2/L3)"
+// @Param        limit  query     int     false  "返回条数"  default(20)
+// @Success      200    {object}  Response
+// @Failure      404    {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/memory [get]
 func (s *Server) handleQueryMemory(c *gin.Context) {
 	botID := c.Param("id")
 
@@ -95,6 +107,16 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 
 // handleMemoryStats 记忆统计信息。
 // GET /api/bots/:id/memory/stats
+//
+// @Summary      记忆统计
+// @Description  返回指定 Bot 的记忆统计信息
+// @Tags         记忆
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Failure      404  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/memory/stats [get]
 func (s *Server) handleMemoryStats(c *gin.Context) {
 	botID := c.Param("id")
 
@@ -130,6 +152,16 @@ func (s *Server) handleMemoryStats(c *gin.Context) {
 
 // handleTriggerDreaming 手动触发梦境巩固。
 // POST /api/bots/:id/dreaming/trigger
+//
+// @Summary      触发梦境巩固
+// @Description  手动触发指定 Bot 的梦境巩固流程
+// @Tags         梦境巩固
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Failure      404  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/dreaming/trigger [post]
 func (s *Server) handleTriggerDreaming(c *gin.Context) {
 	botID := c.Param("id")
 
@@ -169,6 +201,15 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 
 // handleDreamingStatus 梦境巩固运行时状态。
 // GET /api/bots/:id/dreaming/status
+//
+// @Summary      梦境巩固状态
+// @Description  返回指定 Bot 的梦境巩固运行时状态
+// @Tags         梦境巩固
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/dreaming/status [get]
 func (s *Server) handleDreamingStatus(c *gin.Context) {
 	botID := c.Param("id")
 

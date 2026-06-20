@@ -14,6 +14,14 @@ import (
 
 // handleListBots 列出所有 Bot 定义。
 // GET /api/bots
+//
+// @Summary      Bot 列表
+// @Description  列出所有 Bot 定义及其运行状态
+// @Tags         Bot 管理
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots [get]
 func (s *Server) handleListBots(c *gin.Context) {
 	defs, err := s.botSvc.ListDefinitions()
 	if err != nil {
@@ -38,6 +46,16 @@ func (s *Server) handleListBots(c *gin.Context) {
 
 // handleGetBot 获取单个 Bot 定义。
 // GET /api/bots/:id
+//
+// @Summary      获取 Bot
+// @Description  获取指定 Bot 的定义和运行时信息
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id   path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Failure      404  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id} [get]
 func (s *Server) handleGetBot(c *gin.Context) {
 	id := c.Param("id")
 
@@ -69,6 +87,17 @@ func (s *Server) handleGetBot(c *gin.Context) {
 
 // handleCreateBot 创建 Bot 定义。
 // POST /api/bots
+//
+// @Summary      创建 Bot
+// @Description  创建新的 Bot 定义（需要 bot.manage 权限）
+// @Tags         Bot 管理
+// @Accept       json
+// @Produce      json
+// @Param        body  body      CreateBotReq  true  "创建 Bot 请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots [post]
 func (s *Server) handleCreateBot(c *gin.Context) {
 	var req CreateBotReq
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -99,6 +128,18 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 
 // handleUpdateBot 更新 Bot 定义。
 // PUT /api/bots/:id
+//
+// @Summary      更新 Bot
+// @Description  更新指定 Bot 的配置（字段可选，需要 bot.manage 权限）
+// @Tags         Bot 管理
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string        true  "Bot ID"
+// @Param        body  body      UpdateBotReq  true  "更新 Bot 请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id} [put]
 func (s *Server) handleUpdateBot(c *gin.Context) {
 	id := c.Param("id")
 
@@ -149,6 +190,15 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 
 // handleDeleteBot 删除 Bot 定义。
 // DELETE /api/bots/:id
+//
+// @Summary      删除 Bot
+// @Description  删除指定 Bot 定义
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id} [delete]
 func (s *Server) handleDeleteBot(c *gin.Context) {
 	id := c.Param("id")
 
@@ -162,6 +212,15 @@ func (s *Server) handleDeleteBot(c *gin.Context) {
 
 // handleStartBot 启动 Bot。
 // POST /api/bots/:id/start
+//
+// @Summary      启动 Bot
+// @Description  启动指定 Bot
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/start [post]
 func (s *Server) handleStartBot(c *gin.Context) {
 	id := c.Param("id")
 
@@ -175,6 +234,15 @@ func (s *Server) handleStartBot(c *gin.Context) {
 
 // handleStopBot 停止 Bot。
 // POST /api/bots/:id/stop
+//
+// @Summary      停止 Bot
+// @Description  停止指定 Bot
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/stop [post]
 func (s *Server) handleStopBot(c *gin.Context) {
 	id := c.Param("id")
 	s.botSvc.StopBot(id)

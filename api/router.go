@@ -6,8 +6,11 @@ import (
 	"path/filepath"
 
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 
 	"github.com/kasuganosora/thinkbot/auth"
+	_ "github.com/kasuganosora/thinkbot/docs" // Swagger 文档
 )
 
 // ============================================================================
@@ -22,6 +25,9 @@ func (s *Server) registerRoutes() {
 	r.GET("/health", func(c *gin.Context) {
 		OK(c, gin.H{"status": "ok"})
 	})
+
+	// Swagger UI
+	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	apiGroup := r.Group("/api")
 

@@ -21,6 +21,19 @@ import (
 //   - limit: 每页消息数（默认 20，最大 100）
 //
 // 返回消息按时间倒序（最新在前），配合 cursor 实现无限滚动翻页。
+//
+// @Summary      聊天历史
+// @Description  游标分页查询聊天历史记录
+// @Tags         聊天
+// @Produce      json
+// @Param        botId   query     string  true   "Bot ID"
+// @Param        cursor  query     string  false  "分页游标"
+// @Param        limit   query     int     false  "每页条数"  default(20)
+// @Success      200  {object}  Response
+// @Failure      400  {object}  Response
+// @Failure      401  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/chat/history [get]
 func (s *Server) handleChatHistory(c *gin.Context) {
 	botID := c.Query("botId")
 	if botID == "" {

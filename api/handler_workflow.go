@@ -18,6 +18,15 @@ import (
 
 // handleListWorkflows 列出最近的工作流。
 // GET /api/workflows?limit=20
+//
+// @Summary      工作流列表
+// @Description  列出最近的工作流（需要 bot.manage 权限）
+// @Tags         工作流
+// @Produce      json
+// @Param        limit  query     int  false  "返回数量"  default(20)
+// @Success      200    {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows [get]
 func (s *Server) handleListWorkflows(c *gin.Context) {
 	limit := 20
 	if v := c.Query("limit"); v != "" {
@@ -49,6 +58,16 @@ func (s *Server) handleListWorkflows(c *gin.Context) {
 
 // handleGetWorkflowStatus 查询工作流状态。
 // GET /api/workflows/:wfId
+//
+// @Summary      工作流状态
+// @Description  查询指定工作流的详细状态
+// @Tags         工作流
+// @Produce      json
+// @Param        wfId  path      string  true  "工作流 ID"
+// @Success      200   {object}  Response
+// @Failure      500   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows/{wfId} [get]
 func (s *Server) handleGetWorkflowStatus(c *gin.Context) {
 	wfID := c.Param("wfId")
 
@@ -68,6 +87,17 @@ func (s *Server) handleGetWorkflowStatus(c *gin.Context) {
 
 // handleGetWorkflowNodes 查询工作流节点列表。
 // GET /api/workflows/:wfId/nodes?format=flat|tree
+//
+// @Summary      工作流节点
+// @Description  查询指定工作流的节点列表
+// @Tags         工作流
+// @Produce      json
+// @Param        wfId    path      string  true   "工作流 ID"
+// @Param        format  query     string  false  "输出格式 (flat/tree)"  default(flat)
+// @Success      200     {object}  Response
+// @Failure      500     {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows/{wfId}/nodes [get]
 func (s *Server) handleGetWorkflowNodes(c *gin.Context) {
 	wfID := c.Param("wfId")
 	format := c.DefaultQuery("format", "flat")
@@ -88,6 +118,14 @@ func (s *Server) handleGetWorkflowNodes(c *gin.Context) {
 
 // handleRecoverWorkflows 恢复所有中断的工作流。
 // POST /api/workflows/recover
+//
+// @Summary      恢复工作流
+// @Description  恢复所有中断的工作流
+// @Tags         工作流
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows/recover [post]
 func (s *Server) handleRecoverWorkflows(c *gin.Context) {
 	result, err := s.workflowSvc.Recover(c.Request.Context())
 	if err != nil {
@@ -100,6 +138,14 @@ func (s *Server) handleRecoverWorkflows(c *gin.Context) {
 
 // handleWorkflowMetrics 查询工作流管理器指标。
 // GET /api/workflows/metrics
+//
+// @Summary      工作流指标
+// @Description  返回工作流引擎的全局指标
+// @Tags         工作流
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows/metrics [get]
 func (s *Server) handleWorkflowMetrics(c *gin.Context) {
 	mgr, err := s.workflowSvc.Manager()
 	if err != nil {
