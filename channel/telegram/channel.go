@@ -125,6 +125,12 @@ func (c *TelegramChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 	c.botUserID = me.ID
 	c.botUsername = me.Username
 
+	// 注册 Bot 自身用户 ID 到 Ingress，作为防止自回复循环的第二道防线。
+	// （Telegram Bot API 天然不会通过 getUpdates 回传 Bot 自身消息，
+	// 但注册后可作为防御性编程的保险）
+	// 注册时机：在 pollLoop 启动前，确保零竞态。
+	ingress.RegisterSelfUserID(fmt.Sprintf("%d", me.ID))
+
 	// 派生可取消的 context
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel

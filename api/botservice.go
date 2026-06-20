@@ -19,6 +19,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/engagement"
+	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
@@ -229,6 +230,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger,
 	)
 
+	// 创建共享 SelfIDSet——Ingress 和 Engagement 两层防线引用同一份数据。
+	// Channel 在 Start 时通过 RegisterSelfUserID 注册自身 ID，
+	// 两层防线同时生效，无需时序协调。
+	selfIDSet := inbound.NewSelfIDSet()
+
 	// 创建 Engagement Stage（主动参与）
 	engCfg := builder.GetEngagementConfig()
 	var engagementStage *engagement.EngagementStage
@@ -260,7 +266,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 
 		// 构建全部 engagement 组件（policy + gate + rateLimit）
-		result := engagement.BuildFromConfig(engCfg, "", judge)
+		// 使用共享 SelfIDSet 作为自消息检查器：
+		// - selfIDSet.Contains 绑定到 Engagement 的 SelfExclusionRule
+		// - 同一个 selfIDSet 也注入到 Ingress（通过 BotParams.SelfIDSet）
+		// - Channel 在 Start 时注册的 ID 会同时被两层防线感知
+		result := engagement.BuildFromConfigSelfChecker(engCfg, selfIDSet.Contains, judge)
 		stageCfg := engagement.BuildStageConfig(engCfg)
 		engagementStage = engagement.NewEngagementStage(
 			"engagement", result.Policy, stageCfg,
@@ -385,6 +395,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Logger:         s.logger,
 		TP:             s.tp,
 		DreamScheduler: dreamScheduler,
+		SelfIDSet:      selfIDSet,
 	})
 	if err != nil {
 		rollback()
