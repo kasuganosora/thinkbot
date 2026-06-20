@@ -18,6 +18,7 @@ package sandbox
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -283,5 +284,29 @@ func validatePath(root, path string) (string, error) {
 		full = strings.ReplaceAll(full, "//", "/")
 	}
 
+	// 解析 symlink，防止通过 symlink 逃逸到工作空间外
+	// 仅在路径或其父目录存在时检查（新文件写入场景跳过）
+	if resolved, err := filepath.EvalSymlinks(full); err == nil {
+		// 路径存在，验证解析后的路径仍在 root 内
+		resolvedRoot, _ := filepath.EvalSymlinks(root)
+		if resolvedRoot == "" {
+			resolvedRoot = root
+		}
+		if !isWithinPath(resolvedRoot, resolved) {
+			return "", errs.Newf("sandbox: path %q resolves outside workspace root (symlink escape)", path)
+		}
+		return resolved, nil
+	}
+
 	return full, nil
+}
+
+// isWithinPath 检查 target 路径是否在 root 目录内（含 root 自身）。
+func isWithinPath(root, target string) bool {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	if target == root {
+		return true
+	}
+	return strings.HasPrefix(target, root+string(filepath.Separator))
 }
