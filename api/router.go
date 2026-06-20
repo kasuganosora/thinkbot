@@ -1,6 +1,10 @@
 package api
 
 import (
+	"net/http"
+	"os"
+	"path/filepath"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/auth"
@@ -106,5 +110,43 @@ func (s *Server) registerRoutes() {
 			statsGroup.GET("/bots/:id", s.handleStatsBot)
 			statsGroup.GET("/bots/:id/daily", s.handleStatsBotDaily)
 		}
+	}
+
+	// --- 静态文件服务（前端 SPA） ---
+	staticDir := "static"
+	if _, err := os.Stat(staticDir); err == nil {
+		// 直接访问的静态资源文件（js/css/图片等）
+		r.Use(serveStatic(staticDir))
+		// SPA fallback：未匹配的路由返回 index.html
+		r.NoRoute(func(c *gin.Context) {
+			// 排除 /api 路径
+			if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			indexPath := filepath.Join(staticDir, "index.html")
+			c.File(indexPath)
+		})
+	}
+}
+
+// serveStatic 返回静态文件中间件。
+// 匹配 static 目录下的实际文件，不存在的路径交给后续 NoRoute 处理。
+func serveStatic(staticDir string) gin.HandlerFunc {
+	fs := http.FileServer(http.Dir(staticDir))
+	return func(c *gin.Context) {
+		// 排除 /api 路径
+		if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
+			c.Next()
+			return
+		}
+		// 检查文件是否存在
+		filePath := filepath.Join(staticDir, filepath.Clean(c.Request.URL.Path))
+		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+			fs.ServeHTTP(c.Writer, c.Request)
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
