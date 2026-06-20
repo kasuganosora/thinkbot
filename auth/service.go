@@ -129,10 +129,11 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 		return nil, ErrUserDisabled
 	}
 
-	// 更新最后登录时间
+	// 更新最后登录时间（失败不影响登录流程）
 	now := time.Now()
-	s.db.WithContext(ctx).Model(&user).Update("last_login_at", &now)
-	user.LastLoginAt = &now
+	if err := s.db.WithContext(ctx).Model(&user).Update("last_login_at", &now).Error; err == nil {
+		user.LastLoginAt = &now
+	}
 
 	return &user, nil
 }
