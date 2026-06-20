@@ -64,16 +64,29 @@ type SoulLoaderConfig struct {
 	// 0 表示不自动检测（仅在手动调用 Load() 时更新）。
 	// 推荐值：5s ~ 30s。
 	ReloadInterval time.Duration
+
+	// MaxContentBytes SOUL.md 内容的最大字节数。
+	// 超限时执行头尾保留截断（70% 头 + 20% 尾，中间省略）。
+	// 0 表示不截断（默认 20000，约 5K tokens）。
+	MaxContentBytes int
+
+	// ScanMode 安全扫描模式：
+	//   ScanModeOff   — 不扫描
+	//   ScanModeWarn  — 扫描并记录告警日志（默认）
+	//   ScanModeBlock — 扫描并阻止加载
+	ScanMode ScanMode
 }
 
 // DefaultSoulLoaderConfig 返回合理的默认配置。
 // Path 留空，NewSoulLoader 中会自动解析为二进制目录。
 func DefaultSoulLoaderConfig() SoulLoaderConfig {
 	return SoulLoaderConfig{
-		Path:           "",
-		SectionName:    "identity",
-		Order:          0,
-		ReloadInterval: 5 * time.Second,
+		Path:            "",
+		SectionName:     "identity",
+		Order:           0,
+		ReloadInterval:  5 * time.Second,
+		MaxContentBytes: 20000,
+		ScanMode:        ScanModeWarn,
 	}
 }
 
@@ -221,6 +234,24 @@ func (l *SoulLoader) Load() error {
 
 	// 解析 front matter
 	body, meta := parseFrontMatter(content)
+
+	// 安全扫描
+	if l.config.ScanMode != ScanModeOff {
+		findings := ScanForThreats(body)
+		if len(findings) > 0 {
+			summary := FindingsSummary(findings)
+			switch l.config.ScanMode {
+			case ScanModeBlock:
+				l.logger.Errorf("soul: blocked loading %s — threat patterns detected: %s", l.config.Path, summary)
+				return errs.Newf("soul: threat patterns detected in %s: %s", l.config.Path, summary)
+			case ScanModeWarn:
+				l.logger.Warnf("soul: threat patterns detected in %s: %s (content still loaded)", l.config.Path, summary)
+			}
+		}
+	}
+
+	// 内容截断
+	body = truncateContent(body, l.config.MaxContentBytes)
 
 	// 自动发现模板变量
 	variables := discoverVariables(body, meta)
