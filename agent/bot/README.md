@@ -11,6 +11,7 @@
 - `LLMBundle` 从配置构建多层级 LLM 实例集（主力/轻量/多模态）
 - 持久化工作空间（文件操作 + SOUL.md 热重载）
 - 技能系统装配（`SetupSkills` 组合根）
+- 梦境巩固子系统（`DreamingBundle` 按 Bot 独立配置，cron 调度定时整理记忆）
 
 ## 关键类型
 
@@ -23,6 +24,8 @@
 | `BotManager` | 多 Bot 生命周期管理器（线程安全） |
 | `Channel` / `Sender` | 输入端 / 输出端接口 |
 | `LLMBundle` | LLM 实例集（Main/Light/Vision） |
+| `DreamingBundle` | 梦境巩固子系统封装（DreamManager + cron Scheduler） |
+| `DreamExecutor` | cron.Executor 实现，桥接 cron 触发和 DreamManager.Run() |
 
 ## 使用示例
 
@@ -42,3 +45,38 @@ _ = mgr.Register(myBot)
 mgr.RunAll(ctx)
 mgr.StopAll()
 ```
+
+## 梦境巩固子系统
+
+`DreamingBundle` 封装了完整的梦境巩固流水线组件，按 Bot 独立配置：
+
+```go
+// 从 config 构建梦境配置
+dreamCfg := builder.GetDreamingConfig(botID)
+dreamCfg.Enabled = true
+
+// 创建子系统（Enabled=false 时返回 nil）
+bundle := bot.NewDreamingBundle(
+    dreamCfg,         // memory.DreamConfig
+    llmProvider,      // LLM 提供商
+    location,         // 时区
+    tp,               // TracerProvider
+    logger,           // 日志
+    botID,            // Bot ID
+    cronFilePath,     // cron Job 持久化路径
+)
+
+// Bot.Run 中启动调度器
+bundle.Scheduler.Start()
+
+// Bot 关闭时优雅停止
+defer bundle.Stop()
+```
+
+| 组件 | 说明 |
+|------|------|
+| `DreamManager` | 三相位记忆整理管线（Light → REM → Deep） |
+| `DreamExecutor` | cron.Executor 实现，触发 DreamManager.Run() |
+| `Scheduler` | cron 调度器，按 `dreamCfg.Schedule` 定时触发 |
+| `CronStore` | cron Job 持久化（JSON 文件） |
+| `TieredMgr` | 独立的分层记忆管理器（梦境管线专用） |

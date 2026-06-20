@@ -19,6 +19,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -80,6 +81,9 @@ type Bot struct {
 	workspaceDir string                       // 当前 Bot 的工作空间目录绝对路径
 	soulLoader   *prompt.SoulLoader           // SOUL.md 加载器（nil=未启用）
 
+	// 梦境巩固（nil=未启用，默认禁用）
+	dreamScheduler *cron.Scheduler // 梦境巩固的 cron 调度器
+
 	// 资源管理（Close 时释放）
 	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
 	closerOnce  sync.Once // 确保 Close 只执行一次
@@ -121,6 +125,10 @@ type BotParams struct {
 	// SandboxConfig 沙箱配置（Backend/Image/Limits 等，可选）。
 	// 为空时使用 sandbox.DefaultConfig()。
 	SandboxConfig sandbox.Config
+
+	// DreamScheduler 梦境巩固的 cron 调度器（可选，nil=不启用梦境巩固）。
+	// 调度器需要在调用方创建并注入，Bot.Run 会自动 Start 它，Bot.Close 会自动 Stop。
+	DreamScheduler *cron.Scheduler
 }
 
 // New 创建一个 Bot 实例。
@@ -292,6 +300,9 @@ func New(params BotParams) (*Bot, error) {
 		agent.WithHook(bot),
 	)
 
+	// 注入梦境巩固调度器
+	bot.dreamScheduler = params.DreamScheduler
+
 	return bot, nil
 }
 
@@ -338,6 +349,14 @@ func (b *Bot) Run(ctx context.Context) error {
 		b.soulLoader.StartWatcher(ctx)
 	}
 
+	// 启动梦境巩固调度器（如果配置了）
+	if b.dreamScheduler != nil {
+		b.dreamScheduler.Start(ctx)
+		b.logger.Infow("dream scheduler started",
+			"bot_id", b.ID,
+			"tz", b.dreamScheduler.Summary())
+	}
+
 	// 启动 Engine（会阻塞直到 ctx 取消）
 	err := b.engine.Run(ctx)
 
@@ -364,6 +383,10 @@ func (b *Bot) Stop() {
 // 如果 CallbackRegistry 或 EventBus 是外部传入的（Bot 不拥有），则不会关闭它们。
 func (b *Bot) Close() {
 	b.closerOnce.Do(func() {
+		// 停止梦境巩固调度器
+		if b.dreamScheduler != nil {
+			b.dreamScheduler.Stop()
+		}
 		if b.ownRegistry {
 			if r, ok := b.callbackHandler.Registry().(interface{ Close() }); ok {
 				r.Close()
