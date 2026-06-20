@@ -44,6 +44,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "create_user", "target", req.Username, "role", req.Role)
 	OK(c, user)
 }
 
@@ -103,6 +104,7 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "delete_user", "target_id", id)
 	OKMsg(c, "user deleted", nil)
 }
 
@@ -125,6 +127,7 @@ func (s *Server) handleUpdateUserRole(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "update_user_role", "target_id", id, "new_role", req.Role)
 	OKMsg(c, "role updated", nil)
 }
 
@@ -141,6 +144,7 @@ func (s *Server) handleDisableUser(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "disable_user", "target_id", id)
 	OKMsg(c, "user disabled", nil)
 }
 
@@ -157,6 +161,7 @@ func (s *Server) handleEnableUser(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "enable_user", "target_id", id)
 	OKMsg(c, "user enabled", nil)
 }
 
@@ -181,6 +186,7 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "reset_password", "target_id", id)
 	OKMsg(c, "password reset", nil)
 }
 

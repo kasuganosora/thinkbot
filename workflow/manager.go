@@ -582,6 +582,12 @@ func (m *Manager) GetWorkflow(wfID string) (*Workflow, error) {
 	return m.repo.Get(wfID)
 }
 
+// ListWorkflows 列出最近的工作流（按创建时间降序）。
+func (m *Manager) ListWorkflows(limit int) []*Workflow {
+	result, _ := m.repo.List(limit)
+	return result
+}
+
 // nodeSummaries 生成节点的摘要信息（用于事件 payload）。
 func nodeSummaries(nodes []*DAGNode) []map[string]any {
 	result := make([]map[string]any, len(nodes))

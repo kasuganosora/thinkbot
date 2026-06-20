@@ -4,6 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -49,6 +50,7 @@ func (s *Server) handleSetConfigKey(c *gin.Context) {
 		Fail(c, errs.Wrap(err, "failed to set config"))
 		return
 	}
+	auditLog(c, s.logger, "set_config", "key", key)
 	OKMsg(c, "config updated", nil)
 }
 
@@ -65,5 +67,6 @@ func (s *Server) handleBatchSetConfig(c *gin.Context) {
 		Fail(c, errs.Wrap(err, "failed to batch set config"))
 		return
 	}
+	auditLog(c, s.logger, "batch_set_config", "keys", strutil.MapKeys(req.Items))
 	OKMsg(c, "config batch updated", nil)
 }

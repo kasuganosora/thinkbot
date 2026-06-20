@@ -62,6 +62,8 @@ func (s *Server) handleUpdateDreamingConfig(c *gin.Context) {
 		return
 	}
 
+	auditLog(c, s.logger, "update_dreaming_config", "bot_id", botID, "enabled", cfg.Enabled, "schedule", cfg.Schedule)
+
 	OKMsg(c, "dreaming config updated, restart bot to take effect", DreamingConfigResp{
 		Enabled:  cfg.Enabled,
 		Schedule: cfg.Schedule,

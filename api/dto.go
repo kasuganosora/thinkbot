@@ -128,3 +128,32 @@ type SetConfigReq struct {
 type BatchSetConfigReq struct {
 	Items map[string]string `json:"items" binding:"required"`
 }
+
+// --- 定时任务 ---
+
+// CreateCronJobReq 创建定时任务请求。
+type CreateCronJobReq struct {
+	Name     string   `json:"name" binding:"required"`
+	Prompt   string   `json:"prompt" binding:"required"`
+	Schedule string   `json:"schedule" binding:"required"`
+	Model    string   `json:"model,omitempty"`
+	Channel  string   `json:"channel,omitempty"`
+	Skills   []string `json:"skills,omitempty"`
+	Feature  string   `json:"feature,omitempty"`
+	MaxRuns  int      `json:"maxRuns,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+}
+
+// UpdateCronJobReq 更新定时任务请求（字段可选）。
+type UpdateCronJobReq struct {
+	Name     *string `json:"name"`
+	Prompt   *string `json:"prompt"`
+	Schedule *string `json:"schedule"`
+	Model    *string `json:"model"`
+	Channel  *string `json:"channel"`
+	Feature  *string `json:"feature"`
+	MaxRuns  *int    `json:"maxRuns"`
+	Enabled  *bool   `json:"enabled"`
+}
+
+// --- 定时任务 ---

@@ -18,7 +18,7 @@ import (
 func (s *Server) registerRoutes() {
 	r := s.engine
 
-	// 健康检查
+	// 健康检查（公开，仅返回 ok）
 	r.GET("/health", func(c *gin.Context) {
 		OK(c, gin.H{"status": "ok"})
 	})
@@ -75,6 +75,22 @@ func (s *Server) registerRoutes() {
 				// 梦境巩固配置（嵌套在 Bot 下）
 				botsAdmin.GET("/:id/dreaming", s.handleGetDreamingConfig)
 				botsAdmin.PUT("/:id/dreaming", s.handleUpdateDreamingConfig)
+				botsAdmin.GET("/:id/dreaming/status", s.handleDreamingStatus)
+				botsAdmin.POST("/:id/dreaming/trigger", s.handleTriggerDreaming)
+
+				// 定时任务管理（嵌套在 Bot 下）
+				botsAdmin.GET("/:id/cron", s.handleListCronJobs)
+				botsAdmin.POST("/:id/cron", s.handleCreateCronJob)
+				botsAdmin.GET("/:id/cron/:jobId", s.handleGetCronJob)
+				botsAdmin.PUT("/:id/cron/:jobId", s.handleUpdateCronJob)
+				botsAdmin.DELETE("/:id/cron/:jobId", s.handleDeleteCronJob)
+				botsAdmin.POST("/:id/cron/:jobId/pause", s.handlePauseCronJob)
+				botsAdmin.POST("/:id/cron/:jobId/resume", s.handleResumeCronJob)
+				botsAdmin.POST("/:id/cron/:jobId/trigger", s.handleTriggerCronJob)
+
+				// 记忆查询（嵌套在 Bot 下）
+				botsAdmin.GET("/:id/memory", s.handleQueryMemory)
+				botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
 
 				// Channel 配置管理（嵌套在 Bot 下）
 				botsAdmin.GET("/:id/channels", s.handleListChannels)
@@ -113,6 +129,37 @@ func (s *Server) registerRoutes() {
 			statsGroup.GET("/overview", s.handleStatsOverview)
 			statsGroup.GET("/bots/:id", s.handleStatsBot)
 			statsGroup.GET("/bots/:id/daily", s.handleStatsBotDaily)
+		}
+
+		// --- 工作流监控（admin，只读 + 恢复） ---
+		// 工作流的创建和控制由 Agent 通过 task 系列工具完成，
+		// 终止由 session 生命周期信号触发。API 只暴露只读监控和崩溃恢复。
+		wfGroup := authed.Group("/workflows")
+		wfGroup.Use(requirePermission(auth.PermBotManage))
+		{
+			wfGroup.GET("", s.handleListWorkflows)
+			wfGroup.POST("/recover", s.handleRecoverWorkflows)
+			wfGroup.GET("/metrics", s.handleWorkflowMetrics)
+			wfGroup.GET("/:wfId", s.handleGetWorkflowStatus)
+			wfGroup.GET("/:wfId/nodes", s.handleGetWorkflowNodes)
+		}
+
+		// --- 技能管理（admin） ---
+		skillGroup := authed.Group("/skills")
+		skillGroup.Use(requirePermission(auth.PermBotManage))
+		{
+			skillGroup.GET("", s.handleListSkills)
+			skillGroup.GET("/:name", s.handleGetSkill)
+			skillGroup.PUT("/:name/enable", s.handleEnableSkill)
+			skillGroup.PUT("/:name/disable", s.handleDisableSkill)
+		}
+
+		// --- 系统监控（admin） ---
+		sysGroup := authed.Group("/system")
+		sysGroup.Use(requirePermission(auth.PermSystemConfig))
+		{
+			sysGroup.GET("/health", s.handleHealthDetailed)
+			sysGroup.GET("/events/metrics", s.handleEventBusMetrics)
 		}
 	}
 

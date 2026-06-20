@@ -22,6 +22,13 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 	user, err := s.authSvc.Authenticate(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
+		// 登录失败审计（无法获取 user，记录 username + IP）
+		s.logger.Warnw("[AUDIT] login_failed",
+			"action", "login",
+			"username", req.Username,
+			"ip", c.ClientIP(),
+			"err", err.Error(),
+		)
 		Fail(c, err)
 		return
 	}
@@ -33,6 +40,15 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 	s.cookie.SetCookie(c, token)
+
+	// 登录成功审计
+	s.logger.Infow("[AUDIT] login_success",
+		"action", "login",
+		"user_id", user.ID,
+		"user", user.Username,
+		"role", user.Role,
+		"ip", c.ClientIP(),
+	)
 
 	OK(c, toLoginResp(user))
 }

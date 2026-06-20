@@ -50,6 +50,7 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "create_channel", "bot_id", botID, "channel_id", ch.ID, "type", req.Type)
 	OK(c, ch)
 }
 
@@ -69,6 +70,7 @@ func (s *Server) handleUpdateChannel(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "update_channel", "bot_id", botID, "channel_id", channelID)
 	OK(c, ch)
 }
 
@@ -82,5 +84,6 @@ func (s *Server) handleDeleteChannel(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "delete_channel", "bot_id", botID, "channel_id", channelID)
 	OKMsg(c, "channel deleted", nil)
 }
