@@ -10,37 +10,22 @@ import (
 )
 
 // ============================================================================
-// Tools — 工具定义验证
+// Tools — 工具定义验证（统一 memory 工具）
 // ============================================================================
 
-func TestTools_ReturnsFiveTools(t *testing.T) {
+func TestTools_Definition(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
-	if len(defs) != 5 {
-		t.Fatalf("expected 5 tool defs, got %d", len(defs))
+	if len(defs) != 1 {
+		t.Fatalf("expected 1 tool def, got %d", len(defs))
 	}
-
-	names := map[string]bool{}
-	for _, d := range defs {
-		names[d.Name] = true
-	}
-	for _, expected := range []string{"memory_search", "memory_write", "memory_delete", "memory_recent", "memory_count"} {
-		if !names[expected] {
-			t.Errorf("missing tool: %s", expected)
-		}
-	}
-}
-
-func TestTools_NilRepoReturnsNil(t *testing.T) {
-	defs := ToolConfig{}
-	result := Tools(defs)
-	if result != nil {
-		t.Errorf("expected nil for nil repo")
+	if defs[0].Name != "memory" {
+		t.Errorf("expected tool name 'memory', got '%s'", defs[0].Name)
 	}
 }
 
 // ============================================================================
-// memory_search
+// search
 // ============================================================================
 
 func TestMemoryTool_Search(t *testing.T) {
@@ -59,14 +44,12 @@ func TestMemoryTool_Search(t *testing.T) {
 	})
 
 	defs := Tools(ToolConfig{Repo: repo})
-	searchDef := findMemoryTool(defs, "memory_search")
-	if searchDef == nil {
-		t.Fatal("memory_search not found")
-	}
+	tool := defs[0].Tool
 
-	result, err := searchDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":     "search",
 			"query":      "Go",
 			"scope_kind": "channel",
 			"scope_id":   "ch1",
@@ -90,11 +73,14 @@ func TestMemoryTool_Search(t *testing.T) {
 func TestMemoryTool_Search_NoResults(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
-	searchDef := findMemoryTool(defs, "memory_search")
+	tool := defs[0].Tool
 
-	result, err := searchDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
-		map[string]any{"query": "不存在的内容"},
+		map[string]any{
+			"action": "search",
+			"query":  "不存在的内容",
+		},
 	)
 	if err != nil {
 		t.Fatalf("search failed: %v", err)
@@ -107,26 +93,26 @@ func TestMemoryTool_Search_NoResults(t *testing.T) {
 }
 
 // ============================================================================
-// memory_write
+// add
 // ============================================================================
 
-func TestMemoryTool_Write(t *testing.T) {
+func TestMemoryTool_Add(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
-	writeDef := findMemoryTool(defs, "memory_write")
+	tool := defs[0].Tool
 
-	result, err := writeDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":     "add",
 			"content":    "用户是一名后端工程师，擅长 Go 和 Rust",
 			"category":   "fact",
-			"importance": 0.8,
 			"scope_kind": "user",
 			"scope_id":   "user123",
 		},
 	)
 	if err != nil {
-		t.Fatalf("write failed: %v", err)
+		t.Fatalf("add failed: %v", err)
 	}
 
 	m := result.(map[string]any)
@@ -135,10 +121,10 @@ func TestMemoryTool_Write(t *testing.T) {
 	}
 
 	// 验证写入的内容可以通过搜索找到
-	searchDef := findMemoryTool(defs, "memory_search")
-	searchResult, _ := searchDef.Execute(
+	searchResult, _ := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":     "search",
 			"query":      "后端工程师",
 			"scope_kind": "user",
 			"scope_id":   "user123",
@@ -146,27 +132,30 @@ func TestMemoryTool_Write(t *testing.T) {
 	)
 	sm := searchResult.(map[string]any)
 	if sm["count"].(int) != 1 {
-		t.Errorf("expected to find 1 entry after write, got %d", sm["count"])
+		t.Errorf("expected to find 1 entry after add, got %d", sm["count"])
 	}
 }
 
-func TestMemoryTool_Write_StripsThinkingAndToolOutput(t *testing.T) {
+func TestMemoryTool_Add_StripsThinkingAndToolOutput(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
-	writeDef := findMemoryTool(defs, "memory_write")
+	tool := defs[0].Tool
 
-	_, _ = writeDef.Execute(
+	_, _ = tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":  "add",
 			"content": `<think>分析一下</think><tool_call>{"name":"x"}</tool_call>用户喜欢咖啡`,
 		},
 	)
 
 	// 搜索验证内容被清理
-	searchDef := findMemoryTool(defs, "memory_search")
-	result, _ := searchDef.Execute(
+	result, _ := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
-		map[string]any{"query": "咖啡"},
+		map[string]any{
+			"action": "search",
+			"query":  "咖啡",
+		},
 	)
 	m := result.(map[string]any)
 	entries := m["entries"].([]EntryResult)
@@ -178,14 +167,17 @@ func TestMemoryTool_Write_StripsThinkingAndToolOutput(t *testing.T) {
 	}
 }
 
-func TestMemoryTool_Write_EmptyContentError(t *testing.T) {
+func TestMemoryTool_Add_EmptyContentError(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
-	writeDef := findMemoryTool(defs, "memory_write")
+	tool := defs[0].Tool
 
-	_, err := writeDef.Execute(
+	_, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
-		map[string]any{"content": ""},
+		map[string]any{
+			"action":  "add",
+			"content": "",
+		},
 	)
 	if err == nil {
 		t.Error("expected error for empty content")
@@ -193,10 +185,10 @@ func TestMemoryTool_Write_EmptyContentError(t *testing.T) {
 }
 
 // ============================================================================
-// memory_delete
+// remove (by ID)
 // ============================================================================
 
-func TestMemoryTool_Delete(t *testing.T) {
+func TestMemoryTool_Remove_ByID(t *testing.T) {
 	repo := NewMemoryRepository()
 	_ = repo.Append(context.Background(), Entry{
 		Scope:   ChannelScope("ch1"),
@@ -211,18 +203,19 @@ func TestMemoryTool_Delete(t *testing.T) {
 	entryID := entries[0].ID
 
 	defs := Tools(ToolConfig{Repo: repo})
-	deleteDef := findMemoryTool(defs, "memory_delete")
+	tool := defs[0].Tool
 
-	result, err := deleteDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":     "remove",
 			"memory_id":  entryID,
 			"scope_kind": "channel",
 			"scope_id":   "ch1",
 		},
 	)
 	if err != nil {
-		t.Fatalf("delete failed: %v", err)
+		t.Fatalf("remove failed: %v", err)
 	}
 
 	m := result.(map[string]any)
@@ -238,7 +231,7 @@ func TestMemoryTool_Delete(t *testing.T) {
 }
 
 // ============================================================================
-// memory_recent
+// recent
 // ============================================================================
 
 func TestMemoryTool_Recent(t *testing.T) {
@@ -251,11 +244,12 @@ func TestMemoryTool_Recent(t *testing.T) {
 	}
 
 	defs := Tools(ToolConfig{Repo: repo})
-	recentDef := findMemoryTool(defs, "memory_recent")
+	tool := defs[0].Tool
 
-	result, err := recentDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":     "recent",
 			"scope_kind": "channel",
 			"scope_id":   "ch1",
 			"limit":      3,
@@ -279,11 +273,11 @@ func TestMemoryTool_Recent(t *testing.T) {
 func TestMemoryTool_Recent_EmptyScope(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
-	recentDef := findMemoryTool(defs, "memory_recent")
+	tool := defs[0].Tool
 
-	result, err := recentDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
-		map[string]any{},
+		map[string]any{"action": "recent"},
 	)
 	if err != nil {
 		t.Fatalf("recent failed: %v", err)
@@ -296,7 +290,7 @@ func TestMemoryTool_Recent_EmptyScope(t *testing.T) {
 }
 
 // ============================================================================
-// memory_count
+// count
 // ============================================================================
 
 func TestMemoryTool_Count(t *testing.T) {
@@ -306,11 +300,12 @@ func TestMemoryTool_Count(t *testing.T) {
 	_ = repo.Append(context.Background(), Entry{Scope: UserScope("u1"), Content: "c"})
 
 	defs := Tools(ToolConfig{Repo: repo})
-	countDef := findMemoryTool(defs, "memory_count")
+	tool := defs[0].Tool
 
-	result, err := countDef.Execute(
+	result, err := tool.Execute(
 		&llm.ToolExecContext{Context: context.Background()},
 		map[string]any{
+			"action":     "count",
 			"scope_kind": "user",
 			"scope_id":   "u1",
 		},
@@ -337,8 +332,8 @@ func TestRegisterTools(t *testing.T) {
 		t.Fatalf("RegisterTools failed: %v", err)
 	}
 
-	if mgr.StaticCount() != 5 {
-		t.Errorf("expected 5 tools registered, got %d", mgr.StaticCount())
+	if mgr.StaticCount() != 1 {
+		t.Errorf("expected 1 tool registered, got %d", mgr.StaticCount())
 	}
 }
 
@@ -358,19 +353,18 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 	repo := NewMemoryRepository()
 	defs := Tools(ToolConfig{Repo: repo})
 	ctx := &llm.ToolExecContext{Context: context.Background()}
-
-	writeDef := findMemoryTool(defs, "memory_write")
-	searchDef := findMemoryTool(defs, "memory_search")
-	deleteDef := findMemoryTool(defs, "memory_delete")
+	tool := defs[0].Tool
 
 	// Step 1: 写入
-	_, _ = writeDef.Execute(ctx, map[string]any{
+	_, _ = tool.Execute(ctx, map[string]any{
+		"action":     "add",
 		"content":    "用户偏好深色主题",
 		"category":   "preference",
 		"scope_kind": "user",
 		"scope_id":   "u1",
 	})
-	_, _ = writeDef.Execute(ctx, map[string]any{
+	_, _ = tool.Execute(ctx, map[string]any{
+		"action":     "add",
 		"content":    "用户在用 MacBook Pro",
 		"category":   "fact",
 		"scope_kind": "user",
@@ -378,7 +372,8 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 	})
 
 	// Step 2: 搜索
-	result, _ := searchDef.Execute(ctx, map[string]any{
+	result, _ := tool.Execute(ctx, map[string]any{
+		"action":     "search",
 		"query":      "深色",
 		"scope_kind": "user",
 		"scope_id":   "u1",
@@ -390,14 +385,16 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 	entryID := m["entries"].([]EntryResult)[0].ID
 
 	// Step 3: 删除
-	_, _ = deleteDef.Execute(ctx, map[string]any{
+	_, _ = tool.Execute(ctx, map[string]any{
+		"action":     "remove",
 		"memory_id":  entryID,
 		"scope_kind": "user",
 		"scope_id":   "u1",
 	})
 
 	// Step 4: 再次搜索确认删除
-	result, _ = searchDef.Execute(ctx, map[string]any{
+	result, _ = tool.Execute(ctx, map[string]any{
+		"action":     "search",
 		"query":      "深色",
 		"scope_kind": "user",
 		"scope_id":   "u1",
@@ -408,7 +405,8 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 	}
 
 	// Step 5: 另一条记忆仍在
-	result, _ = searchDef.Execute(ctx, map[string]any{
+	result, _ = tool.Execute(ctx, map[string]any{
+		"action":     "search",
 		"query":      "MacBook",
 		"scope_kind": "user",
 		"scope_id":   "u1",
@@ -422,17 +420,4 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 func newTestToolManager(t *testing.T) *tools.ToolManager {
 	t.Helper()
 	return tools.NewToolManager(prompt.NewRegistry(), nil, nil)
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-func findMemoryTool(defs []tools.ToolDef, name string) *tools.ToolDef {
-	for i := range defs {
-		if defs[i].Name == name {
-			return &defs[i]
-		}
-	}
-	return nil
 }

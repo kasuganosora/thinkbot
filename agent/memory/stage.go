@@ -235,10 +235,19 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 			continue
 		}
 
-		// 确定存储 scope
-		scope := ChannelScope(env.Message.Channel)
-		if env.Message.Channel == "" {
-			scope = UserScope(env.Message.UserID)
+		// 确定存储 scope — 群聊场景下同时写入 Channel 和 User scope
+		// ChannelScope 记录会话/群组上下文（"这个群里发生了什么"）
+		// UserScope 用于跨会话的用户画像提取（"这个用户是谁、偏好什么"）
+		// 当 Channel == UserID（私聊/直接互动）时，两者指向同一人，只写一次
+		var scopes []Scope
+		if env.Message.Channel != "" {
+			scopes = append(scopes, ChannelScope(env.Message.Channel))
+		}
+		if env.Message.UserID != "" && env.Message.UserID != env.Message.Channel {
+			scopes = append(scopes, UserScope(env.Message.UserID))
+		}
+		if len(scopes) == 0 {
+			continue
 		}
 
 		// 提取分类
@@ -251,29 +260,32 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 			}
 		}
 
-		entry := Entry{
-			Scope:      scope,
-			Content:    StripThinking(text),
-			Category:   category,
-			Source:     "note",
-			Importance: 0.5, // 默认中等重要度
-			Metadata: map[string]any{
-				"message_id": env.Message.ID,
-				"user_id":    env.Message.UserID,
-				"bot_id":     env.Message.BotID,
-			},
-		}
+		// 写入每个 scope
+		for _, scope := range scopes {
+			entry := Entry{
+				Scope:      scope,
+				Content:    StripThinking(text),
+				Category:   category,
+				Source:     "note",
+				Importance: 0.5, // 默认中等重要度
+				Metadata: map[string]any{
+					"message_id": env.Message.ID,
+					"user_id":    env.Message.UserID,
+					"bot_id":     env.Message.BotID,
+				},
+			}
 
-		if err := s.store.Append(ctx, entry); err != nil {
-			logger.Warnw("memory write failed",
-				"message_id", env.Message.ID,
-				"err", err)
-			span.RecordError(err)
-			// 写入失败不阻塞 pipeline
-			continue
+			if err := s.store.Append(ctx, entry); err != nil {
+				logger.Warnw("memory write failed",
+					"message_id", env.Message.ID,
+					"scope", scope.Key(),
+					"err", err)
+				span.RecordError(err)
+				// 写入失败不阻塞 pipeline
+				continue
+			}
+			written++
 		}
-
-		written++
 	}
 
 	if written > 0 {
