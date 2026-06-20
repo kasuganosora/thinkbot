@@ -404,9 +404,10 @@ func TestRegisterTools_StaticCount(t *testing.T) {
 	// 4 static tools + 1 hidden meta = 5 static entries
 	// But hidden meta has scope __never__ so it won't show in tool list
 	staticCount := mgr.StaticCount()
-	// web_fetch, calculate, random, uuid, __common_tools_meta = 5
-	if staticCount != 5 {
-		t.Errorf("expected 5 static tools, got %d", staticCount)
+	// web_fetch, calculate, random, uuid, datetime_calc, list_files,
+	// text_hash, text_encode, text_diff, text_stats, web_search, __common_tools_meta = 12
+	if staticCount != 12 {
+		t.Errorf("expected 12 static tools, got %d", staticCount)
 	}
 }
 

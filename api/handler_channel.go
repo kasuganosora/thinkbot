@@ -36,12 +36,12 @@ func (s *Server) handleCreateChannel(c *gin.Context) {
 	botID := c.Param("botId")
 	var req CreateChannelReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request: " + err.Error()))
+		Fail(c, errs.BadRequest("invalid request: "+err.Error()))
 		return
 	}
 
 	if !IsValidChannelType(req.Type) {
-		Fail(c, errs.BadRequest("unsupported channel type: " + req.Type))
+		Fail(c, errs.BadRequest("unsupported channel type: "+req.Type))
 		return
 	}
 
@@ -60,7 +60,7 @@ func (s *Server) handleUpdateChannel(c *gin.Context) {
 	channelID := c.Param("id")
 	var req UpdateChannelReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request: " + err.Error()))
+		Fail(c, errs.BadRequest("invalid request: "+err.Error()))
 		return
 	}
 

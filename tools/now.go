@@ -46,15 +46,15 @@ func buildNowTool(timezone string) llm.Tool {
 		Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
 			now := time.Now().In(loc)
 			return map[string]any{
-				"datetime":   now.Format("2006-01-02 15:04:05"),
-				"date":       now.Format("2006-01-02"),
-				"time":       now.Format("15:04:05"),
-				"weekday":    now.Weekday().String(),
-				"timezone":   timezone,
-				"utc":        now.UTC().Format("2006-01-02T15:04:05Z"),
-				"unix":       now.Unix(),
-				"iso8601":    now.Format(time.RFC3339),
-				"isWeekend":  now.Weekday() == time.Saturday || now.Weekday() == time.Sunday,
+				"datetime":  now.Format("2006-01-02 15:04:05"),
+				"date":      now.Format("2006-01-02"),
+				"time":      now.Format("15:04:05"),
+				"weekday":   now.Weekday().String(),
+				"timezone":  timezone,
+				"utc":       now.UTC().Format("2006-01-02T15:04:05Z"),
+				"unix":      now.Unix(),
+				"iso8601":   now.Format(time.RFC3339),
+				"isWeekend": now.Weekday() == time.Saturday || now.Weekday() == time.Sunday,
 			}, nil
 		}),
 	}

@@ -201,9 +201,9 @@ func New(params BotParams) (*Bot, error) {
 	emitter := outbound.NewEventEmitter(params.EventBus, params.ID)
 
 	bot := &Bot{
-		ID:           params.ID,
-		Name:         params.Name,
-		Config:       cfg,
+		ID:              params.ID,
+		Name:            params.Name,
+		Config:          cfg,
 		replyHandler:    replyHandler,
 		noteHandler:     noteHandler,
 		callbackHandler: callbackHandler,
@@ -375,7 +375,7 @@ func (b *Bot) Close() {
 		}
 		// 关闭工作空间管理器（文件持久化，不删除）
 		if b.workspaceMgr != nil {
-			b.workspaceMgr.Close()
+			_ = b.workspaceMgr.Close()
 		}
 	})
 }

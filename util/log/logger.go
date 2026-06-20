@@ -75,15 +75,15 @@ func Stderr() Output {
 // File 快捷构造文件输出源。
 func File(dir, name string) Output {
 	return Output{
-		Type:     OutputFile,
-		Format:   FormatJSON,
-		FileDir:  dir,
-		FileName: name,
-		FileExt:  ".log",
-		MaxSize:  100,
+		Type:       OutputFile,
+		Format:     FormatJSON,
+		FileDir:    dir,
+		FileName:   name,
+		FileExt:    ".log",
+		MaxSize:    100,
 		MaxBackups: 7,
-		MaxAge:   30,
-		Compress: true,
+		MaxAge:     30,
+		Compress:   true,
 	}
 }
 

@@ -250,10 +250,10 @@ func TestBot_BotIDInMessage(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
-	memCh.Inject(context.Background(), core.Message{
+	_ = memCh.Inject(context.Background(), core.Message{
 		ID:   "msg-1",
 		Text: "test bot id",
 	})
@@ -306,10 +306,10 @@ func TestBot_BotConfigInEnvelope(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
-	memCh.Inject(context.Background(), core.Message{ID: "1", Text: "hi"})
+	_ = memCh.Inject(context.Background(), core.Message{ID: "1", Text: "hi"})
 	time.Sleep(200 * time.Millisecond)
 
 	if capturedBotID != "cfg-bot" {
@@ -349,12 +349,12 @@ func TestBot_MultipleChannels(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(50 * time.Millisecond)
 
 	// 两个 Channel 各发一条
-	ch1.Inject(context.Background(), core.Message{ID: "mk-1", Channel: "mk-ch", Text: "from misskey"})
-	ch2.Inject(context.Background(), core.Message{ID: "tg-1", Channel: "tg-ch", Text: "from telegram"})
+	_ = ch1.Inject(context.Background(), core.Message{ID: "mk-1", Channel: "mk-ch", Text: "from misskey"})
+	_ = ch2.Inject(context.Background(), core.Message{ID: "tg-1", Channel: "tg-ch", Text: "from telegram"})
 
 	if !waitForActions(disp, 2, 3*time.Second) {
 		t.Fatalf("timeout, got %d actions", len(disp.collected()))
@@ -610,10 +610,7 @@ func TestBot_OutboundFullPipeline(t *testing.T) {
 
 	// 等待 Sender 收到 action
 	deadline := time.After(3 * time.Second)
-	for {
-		if len(memCh.SentActions()) >= 1 {
-			break
-		}
+	for len(memCh.SentActions()) < 1 {
 		select {
 		case <-deadline:
 			t.Fatalf("timeout waiting for sent action, got %d", len(memCh.SentActions()))
@@ -683,24 +680,21 @@ func TestBot_OutboundMultipleChannels(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
 	// ch1 注入一条消息
-	ch1.Inject(context.Background(), core.Message{
+	_ = ch1.Inject(context.Background(), core.Message{
 		ID: "mk-1", Channel: "note-1", Text: "from misskey",
 	})
 	// ch2 注入一条消息
-	ch2.Inject(context.Background(), core.Message{
+	_ = ch2.Inject(context.Background(), core.Message{
 		ID: "tg-1", Channel: "chat-2", Text: "from telegram",
 	})
 
 	// 等待两个 sender 各收到一条
 	deadline := time.After(3 * time.Second)
-	for {
-		if len(ch1.SentActions()) >= 1 && len(ch2.SentActions()) >= 1 {
-			break
-		}
+	for len(ch1.SentActions()) < 1 || len(ch2.SentActions()) < 1 {
 		select {
 		case <-deadline:
 			t.Fatalf("timeout: ch1=%d, ch2=%d", len(ch1.SentActions()), len(ch2.SentActions()))
@@ -818,11 +812,11 @@ func TestBot_NoteOnlyPipeline(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
 	// 注入消息
-	memCh.Inject(context.Background(), core.Message{
+	_ = memCh.Inject(context.Background(), core.Message{
 		ID:      "msg-1",
 		Channel: "user-1",
 		UserID:  "u1",
@@ -906,11 +900,11 @@ func TestBot_ReplyAndNotePipeline(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
 	// 注入消息
-	memCh.Inject(context.Background(), core.Message{
+	_ = memCh.Inject(context.Background(), core.Message{
 		ID:      "msg-1",
 		Channel: "chat-99",
 		UserID:  "u1",
@@ -1059,11 +1053,11 @@ func TestBot_CallbackPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
 	// 注入消息
-	memCh.Inject(context.Background(), core.Message{
+	_ = memCh.Inject(context.Background(), core.Message{
 		ID:      "msg-cb",
 		Channel: "conv-1",
 		UserID:  "u1",
@@ -1072,10 +1066,7 @@ func TestBot_CallbackPipeline(t *testing.T) {
 
 	// 等待回调被调用
 	deadline := time.After(3 * time.Second)
-	for {
-		if callbackCalled {
-			break
-		}
+	for !callbackCalled {
 		select {
 		case <-deadline:
 			t.Fatal("timeout waiting for callback")
@@ -1133,11 +1124,11 @@ func TestBot_SilentPipeline(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go bot.Run(ctx)
+	go func() { _ = bot.Run(ctx) }()
 	time.Sleep(100 * time.Millisecond)
 
 	// 注入消息
-	memCh.Inject(context.Background(), core.Message{
+	_ = memCh.Inject(context.Background(), core.Message{
 		ID:      "msg-silent",
 		Channel: "chat-group",
 		UserID:  "u2",

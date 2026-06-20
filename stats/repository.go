@@ -8,38 +8,38 @@ import (
 
 // BotModelStat 是按 (bot_id, model) 维度的汇总查询结果。
 type BotModelStat struct {
-	BotID            string `gorm:"column:bot_id" json:"botId"`
-	Model            string `gorm:"column:model" json:"model"`
-	TotalRequests    int    `gorm:"column:total_requests" json:"totalRequests"`
-	CacheHitRequests int    `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
-	CacheMissRequests int   `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
-	CacheReadTokens  int    `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
-	CacheWriteTokens int    `gorm:"column:cache_write_tokens" json:"cacheWriteTokens"`
-	NonCacheTokens   int    `gorm:"column:non_cache_tokens" json:"nonCacheTokens"`
-	InputTokens      int    `gorm:"column:input_tokens" json:"inputTokens"`
-	OutputTokens     int    `gorm:"column:output_tokens" json:"outputTokens"`
-	TotalTokens      int    `gorm:"column:total_tokens" json:"totalTokens"`
-	ToolCalls        int    `gorm:"column:tool_calls" json:"toolCalls"`
+	BotID             string `gorm:"column:bot_id" json:"botId"`
+	Model             string `gorm:"column:model" json:"model"`
+	TotalRequests     int    `gorm:"column:total_requests" json:"totalRequests"`
+	CacheHitRequests  int    `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
+	CacheMissRequests int    `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
+	CacheReadTokens   int    `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
+	CacheWriteTokens  int    `gorm:"column:cache_write_tokens" json:"cacheWriteTokens"`
+	NonCacheTokens    int    `gorm:"column:non_cache_tokens" json:"nonCacheTokens"`
+	InputTokens       int    `gorm:"column:input_tokens" json:"inputTokens"`
+	OutputTokens      int    `gorm:"column:output_tokens" json:"outputTokens"`
+	TotalTokens       int    `gorm:"column:total_tokens" json:"totalTokens"`
+	ToolCalls         int    `gorm:"column:tool_calls" json:"toolCalls"`
 }
 
 // ModelFeatureStat 是按 (model, feature) 维度的汇总查询结果。
 type ModelFeatureStat struct {
-	Model            string `gorm:"column:model" json:"model"`
-	Feature          string `gorm:"column:feature" json:"feature"`
-	TotalRequests    int    `gorm:"column:total_requests" json:"totalRequests"`
-	CacheHitRequests int    `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
-	CacheMissRequests int   `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
-	CacheReadTokens  int    `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
-	TotalTokens      int    `gorm:"column:total_tokens" json:"totalTokens"`
+	Model             string `gorm:"column:model" json:"model"`
+	Feature           string `gorm:"column:feature" json:"feature"`
+	TotalRequests     int    `gorm:"column:total_requests" json:"totalRequests"`
+	CacheHitRequests  int    `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
+	CacheMissRequests int    `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
+	CacheReadTokens   int    `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
+	TotalTokens       int    `gorm:"column:total_tokens" json:"totalTokens"`
 }
 
 // DailyStat 是按日期维度的汇总查询结果。
 type DailyStat struct {
-	Date             time.Time `gorm:"column:date" json:"date"`
-	TotalRequests    int       `gorm:"column:total_requests" json:"totalRequests"`
-	CacheHitRequests int       `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
-	CacheMissRequests int      `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
-	TotalTokens      int       `gorm:"column:total_tokens" json:"totalTokens"`
+	Date              time.Time `gorm:"column:date" json:"date"`
+	TotalRequests     int       `gorm:"column:total_requests" json:"totalRequests"`
+	CacheHitRequests  int       `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
+	CacheMissRequests int       `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
+	TotalTokens       int       `gorm:"column:total_tokens" json:"totalTokens"`
 }
 
 // GetBotModelStats 查询指定 Bot 使用的各模型统计（可限定日期范围）。

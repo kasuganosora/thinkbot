@@ -15,11 +15,11 @@ import (
 
 // Error 是项目统一错误类型，包含消息、原因、HTTP 状态码、调用堆栈。
 type Error struct {
-	message  string     // 错误描述
-	cause    error      // 原始错误（可为 nil）
-	code     int        // HTTP 状态码（0 表示未设置）
-	stack    *stack     // 调用堆栈
-	context  []ctxField // 结构化上下文字段
+	message string     // 错误描述
+	cause   error      // 原始错误（可为 nil）
+	code    int        // HTTP 状态码（0 表示未设置）
+	stack   *stack     // 调用堆栈
+	context []ctxField // 结构化上下文字段
 }
 
 type ctxField struct {
@@ -227,12 +227,12 @@ func HTTPErrorf(code int, format string, args ...any) *Error {
 
 // 常用 HTTP 错误快捷构造。
 
-func BadRequest(message string) *Error       { return HTTPError(http.StatusBadRequest, message) }
-func Unauthorized(message string) *Error     { return HTTPError(http.StatusUnauthorized, message) }
-func Forbidden(message string) *Error        { return HTTPError(http.StatusForbidden, message) }
-func NotFound(message string) *Error         { return HTTPError(http.StatusNotFound, message) }
-func Conflict(message string) *Error         { return HTTPError(http.StatusConflict, message) }
-func Internal(msg string) *Error            { return HTTPError(http.StatusInternalServerError, msg) }
+func BadRequest(message string) *Error   { return HTTPError(http.StatusBadRequest, message) }
+func Unauthorized(message string) *Error { return HTTPError(http.StatusUnauthorized, message) }
+func Forbidden(message string) *Error    { return HTTPError(http.StatusForbidden, message) }
+func NotFound(message string) *Error     { return HTTPError(http.StatusNotFound, message) }
+func Conflict(message string) *Error     { return HTTPError(http.StatusConflict, message) }
+func Internal(msg string) *Error         { return HTTPError(http.StatusInternalServerError, msg) }
 func ServiceUnavailable(message string) *Error {
 	return HTTPError(http.StatusServiceUnavailable, message)
 }

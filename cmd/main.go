@@ -24,7 +24,7 @@ func main() {
 	}); err != nil {
 		panic(err)
 	}
-	defer log.Logger.Sync()
+	defer func() { _ = log.Logger.Sync() }()
 
 	log.Logger.Infow("starting thinkbot")
 

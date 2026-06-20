@@ -52,11 +52,11 @@ const (
 // rolePermissions 映射角色到允许的权限集合。
 var rolePermissions = map[string]map[string]bool{
 	RoleAdmin: {
-		PermBotCreate:     true,
-		PermBotManage:     true,
-		PermUserManage:    true,
-		PermBotUse:        true,
-		PermSystemConfig:  true,
+		PermBotCreate:    true,
+		PermBotManage:    true,
+		PermUserManage:   true,
+		PermBotUse:       true,
+		PermSystemConfig: true,
 	},
 	RoleMember: {
 		PermBotUse: true,

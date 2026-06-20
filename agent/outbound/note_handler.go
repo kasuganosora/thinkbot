@@ -9,8 +9,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
-	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -204,5 +204,3 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 
 	return nil
 }
-
-

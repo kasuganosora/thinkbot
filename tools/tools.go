@@ -38,6 +38,10 @@ type Config struct {
 
 	// UserAgent HTTP 请求的 User-Agent 头（默认 "ThinkbotBot/1.0"）。
 	UserAgent string
+
+	// SearchConfig 搜索工具配置（可选）。
+	// 为空时使用默认配置。
+	SearchConfig *SearchConfig
 }
 
 // defaults 填充零值字段。
@@ -63,9 +67,16 @@ func (c Config) defaults() Config {
 // 注册的工具：
 //   - now:          获取当前时间（支持 per-bot 时区）
 //   - web_fetch:    获取网页内容 / 发送 HTTP 请求
+//   - web_search:   搜索互联网获取信息
 //   - calculate:    计算数学表达式
 //   - random:       生成随机数
 //   - uuid:         生成 UUID
+//   - datetime_calc: 日期时间计算
+//   - list_files:   列出目录内容
+//   - text_hash:    计算文本哈希
+//   - text_encode:  Base64 编解码
+//   - text_diff:    文本差异比较
+//   - text_stats:   文本统计
 //
 // now 工具通过 ToolProvider 动态提供（per-bot 时区），
 // 其余工具为静态注册。
@@ -78,10 +89,28 @@ func RegisterTools(mgr *agenttools.ToolManager, cfg Config) error {
 		calculateToolDef(),
 		randomToolDef(),
 		uuidToolDef(),
+		datetimeCalcToolDef(),
+		listFilesToolDef(),
+		textHashToolDef(),
+		textEncodeToolDef(),
+		textDiffToolDef(),
+		textStatsToolDef(),
 	}
 
 	if err := mgr.RegisterMany(staticDefs...); err != nil {
 		return err
+	}
+
+	// 搜索工具（可选）
+	if cfg.SearchConfig != nil {
+		if err := RegisterSearchTools(mgr, *cfg.SearchConfig); err != nil {
+			return err
+		}
+	} else {
+		// 默认使用 DuckDuckGo
+		if err := RegisterSearchTools(mgr, DefaultSearchConfig()); err != nil {
+			return err
+		}
 	}
 
 	// now 工具：动态提供（per-bot 时区）

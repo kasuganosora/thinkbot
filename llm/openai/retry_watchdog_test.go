@@ -62,7 +62,7 @@ func mockChatChunk(content, finishReason string) string {
 		Choices: []ChatChoice{
 			{
 				Index:        0,
-				Delta:        ChatDelta{Content: content},
+				Delta:        &ChatDelta{Content: content},
 				FinishReason: finishReason,
 			},
 		},

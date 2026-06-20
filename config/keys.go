@@ -7,12 +7,12 @@ import (
 
 // 标准配置键前缀。
 const (
-	PrefixDB       = "db"
-	PrefixLLM      = "llm"
-	PrefixBot      = "bot"
-	PrefixChannel  = "channel"
-	PrefixLog      = "log"
-	PrefixMemory   = "memory"
+	PrefixDB         = "db"
+	PrefixLLM        = "llm"
+	PrefixBot        = "bot"
+	PrefixChannel    = "channel"
+	PrefixLog        = "log"
+	PrefixMemory     = "memory"
 	PrefixTracing    = "tracing"
 	PrefixWorkflow   = "workflow"
 	PrefixEngagement = "engagement"

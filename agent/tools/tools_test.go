@@ -262,7 +262,7 @@ func TestToolManager_UnregisterRemovesPrompt(t *testing.T) {
 	mgr := NewToolManager(promptReg, nil, nil)
 
 	_ = mgr.Register(ToolDef{
-		Tool:         llm.Tool{Name: "temp_tool", Description: "Temporary"},
+		Tool:          llm.Tool{Name: "temp_tool", Description: "Temporary"},
 		PromptSection: &ToolPromptSection{Name: "temp_tool", Order: 310, Content: "temp", Enabled: true},
 	})
 

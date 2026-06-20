@@ -14,8 +14,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
-	"github.com/kasuganosora/thinkbot/util/traceid"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================

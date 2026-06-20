@@ -2,9 +2,9 @@ package config
 
 import (
 	"bufio"
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"os"
 	"strings"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ParseEnvFile 解析 .env 文件内容，返回 key→value 映射。

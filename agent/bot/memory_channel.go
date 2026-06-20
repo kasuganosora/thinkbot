@@ -172,4 +172,3 @@ func (c *MemoryChannel) ClearSentActions() {
 	defer c.mu.Unlock()
 	c.sentActions = nil
 }
-

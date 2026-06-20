@@ -58,16 +58,16 @@ func NewServer(
 	engine.Use(corsMiddleware(corsOrigins))
 
 	s := &Server{
-		engine:  engine,
-		httpSrv: &http.Server{Addr: addr, Handler: engine},
-		logger:  logger.With("component", "api_server"),
-		addr:    addr,
-		authSvc: authSvc,
-		botSvc:  botSvc,
-		cookie:  cookie,
+		engine:      engine,
+		httpSrv:     &http.Server{Addr: addr, Handler: engine},
+		logger:      logger.With("component", "api_server"),
+		addr:        addr,
+		authSvc:     authSvc,
+		botSvc:      botSvc,
+		cookie:      cookie,
 		chatHistory: chatHistory,
-		store:   store,
-		db:      db,
+		store:       store,
+		db:          db,
 	}
 
 	// 注册所有路由
@@ -84,7 +84,7 @@ func (s *Server) Start(ctx context.Context) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		s.httpSrv.Shutdown(shutdownCtx)
+		_ = s.httpSrv.Shutdown(shutdownCtx)
 	}()
 
 	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -123,7 +123,7 @@ type dockerWorkspace struct {
 	logger    *zap.SugaredLogger
 }
 
-func (w *dockerWorkspace) ID() string     { return w.id }
+func (w *dockerWorkspace) ID() string      { return w.id }
 func (w *dockerWorkspace) WorkDir() string { return w.workDir }
 
 func (w *dockerWorkspace) HealthCheck(ctx context.Context) HealthStatus {

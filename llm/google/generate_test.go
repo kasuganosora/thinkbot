@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/log"
 )
 
@@ -372,9 +373,9 @@ func TestGenerateContentAPIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	apiErr, ok := err.(*APIError)
+	apiErr, ok := llm.AsLLMError(err)
 	if !ok {
-		t.Fatalf("expected *APIError, got %T", err)
+		t.Fatalf("expected *llm.LLMError, got %T", err)
 	}
 	if apiErr.Message != "Invalid model name" {
 		t.Errorf("expected 'Invalid model name', got %s", apiErr.Message)

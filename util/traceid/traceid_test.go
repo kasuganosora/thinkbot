@@ -296,8 +296,8 @@ func TestIsValid(t *testing.T) {
 		{"0102030405060708090A0B0C0D0E0F10", true}, // 大写也有效
 		{"", false},
 		{"too-short", false},
-		{"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", false}, // 非 hex
-		{"0102030405060708090a0b0c0d0e0f1", false},  // 31 字符
+		{"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", false},  // 非 hex
+		{"0102030405060708090a0b0c0d0e0f1", false},   // 31 字符
 		{"0102030405060708090a0b0c0d0e0f100", false}, // 33 字符
 	}
 

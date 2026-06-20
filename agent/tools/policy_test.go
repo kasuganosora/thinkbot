@@ -108,8 +108,8 @@ func TestToolPolicy_MultipleRules(t *testing.T) {
 				Disabled: []string{"tool_a"},
 			},
 			{
-				ChatType: "group",
-				Disabled: []string{"tool_b"},
+				ChatType:     "group",
+				Disabled:     []string{"tool_b"},
 				AllowedUsers: []string{"trusted_user"},
 			},
 		},

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -107,6 +108,12 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		cfg.Params.Tools[i].Parameters = schema
 	}
 
+	// Apply prompt caching policy based on the provider's capabilities.
+	applyProviderCachePolicy(&cfg.Params, prov.Name())
+
+	// Strip sandbox_ prefix so the LLM sees generic tool names.
+	cfg.Params.Tools = stripSandboxPrefixes(cfg.Params.Tools)
+
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
 		result, err := prov.DoGenerate(ctx, cfg.Params)
@@ -151,6 +158,9 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 
 		params := cfg.Params
 		params.Messages = messages
+		// Re-apply cache breakpoints for the current message set (the
+		// last messages may have changed since the initial placement).
+		applyProviderCachePolicy(&params, prov.Name())
 
 		result, err := prov.DoGenerate(ctx, params)
 		if err != nil {
@@ -261,6 +271,12 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 		cfg.Params.Tools[i].Parameters = schema
 	}
 
+	// Apply prompt caching policy based on the provider's capabilities.
+	applyProviderCachePolicy(&cfg.Params, prov.Name())
+
+	// Strip sandbox_ prefix so the LLM sees generic tool names.
+	cfg.Params.Tools = stripSandboxPrefixes(cfg.Params.Tools)
+
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
 		return prov.DoStream(ctx, cfg.Params)
@@ -296,6 +312,8 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			params := cfg.Params
 			params.Messages = messages
+			// Re-apply cache breakpoints for the current message set.
+			applyProviderCachePolicy(&params, prov.Name())
 
 			provSR, err := prov.DoStream(ctx, params)
 			if err != nil {
@@ -497,6 +515,34 @@ func buildToolMap(tools []Tool) map[string]*Tool {
 		m[tools[i].Name] = &tools[i]
 	}
 	return m
+}
+
+// SandboxToolPrefix is the prefix used for sandbox-scoped tools. It is stripped
+// before tools are presented to the LLM so the model sees generic names
+// (exec, read_file, …) without knowing about the sandbox implementation.
+const SandboxToolPrefix = "sandbox_"
+
+// stripSandboxPrefixes returns a copy of tools with the SandboxToolPrefix
+// removed from tool names. Tools whose stripped name would collide with an
+// existing non-sandbox tool keep their original name.
+func stripSandboxPrefixes(tools []Tool) []Tool {
+	existing := make(map[string]bool)
+	for _, t := range tools {
+		if !strings.HasPrefix(t.Name, SandboxToolPrefix) {
+			existing[t.Name] = true
+		}
+	}
+
+	out := make([]Tool, len(tools))
+	for i, t := range tools {
+		out[i] = t // struct copy
+		if stripped, ok := strings.CutPrefix(t.Name, SandboxToolPrefix); ok {
+			if stripped != "" && !existing[stripped] {
+				out[i].Name = stripped
+			}
+		}
+	}
+	return out
 }
 
 func hasExecutableTools(toolCalls []ToolCall, toolMap map[string]*Tool) bool {
@@ -710,6 +756,10 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		}
 	}
 
+	// Apply output truncation to prevent context bloat.
+	truncResult := TruncateOutput(output, DefaultTruncationConfig())
+	finalOutput := truncResult.Output
+
 	if sendProgress != nil {
 		sendProgress(&StreamToolResultPart{
 			ToolCallID: tc.ToolCallID,
@@ -721,6 +771,6 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 	return ToolResultPart{
 		ToolCallID: tc.ToolCallID,
 		ToolName:   tc.ToolName,
-		Result:     output,
+		Result:     finalOutput,
 	}
 }

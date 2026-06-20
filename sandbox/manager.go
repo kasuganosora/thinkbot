@@ -23,9 +23,9 @@ import (
 
 // SessionKey 唯一标识一个会话级工作空间。
 type SessionKey struct {
-	BotID    string
-	Channel  string
-	UserID   string
+	BotID   string
+	Channel string
+	UserID  string
 }
 
 // String 返回 SessionKey 的字符串表示，用作 map key。
@@ -55,9 +55,9 @@ type SandboxManager struct {
 
 	idleTTL time.Duration
 
-	stopCh chan struct{}
+	stopCh    chan struct{}
 	closeOnce sync.Once
-	wg     sync.WaitGroup
+	wg        sync.WaitGroup
 }
 
 // NewSandboxManager 创建工作空间管理器。

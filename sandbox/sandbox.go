@@ -170,7 +170,7 @@ func DefaultConfig() Config {
 		CPULimit:        "1.0",
 		NetworkDisabled: true,
 		Timeout:         30 * time.Second,
-		MaxOutput:       1 << 20, // 1 MB
+		MaxOutput:       1 << 20,  // 1 MB
 		MaxFileWrite:    10 << 20, // 10 MB
 		Timezone:        "UTC",
 	}

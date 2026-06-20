@@ -11,8 +11,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/llm"
-	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -174,8 +174,8 @@ func (c *LLMCompressor) Compress(ctx context.Context, entries []Entry) (*Compres
 		CompressionRatio:   ratio,
 		CreatedAt:          time.Now(),
 		Metadata: map[string]any{
-			"llm_provider":     c.config.Provider.Name(),
-			"llm_input_tokens": result.Usage.InputTokens,
+			"llm_provider":      c.config.Provider.Name(),
+			"llm_input_tokens":  result.Usage.InputTokens,
 			"llm_output_tokens": result.Usage.OutputTokens,
 		},
 	}
@@ -274,5 +274,3 @@ const defaultCompressPrompt = `你是一个记忆压缩助手。你的任务是�
 - 用户偏好Go语言开发，使用Gin框架 [ref:mem-abc123]
 - 项目使用Bazel构建系统，proto生成Go代码 [ref:mem-def456]
 - 已完成用户注册接口的软删除逻辑修复 [ref:mem-ghi789] [ref:mem-jkl012]`
-
-

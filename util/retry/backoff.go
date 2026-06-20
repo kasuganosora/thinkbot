@@ -10,8 +10,8 @@ import (
 type Strategy string
 
 const (
-	StrategyFixed      Strategy = "fixed"      // 固定间隔
-	StrategyLinear     Strategy = "linear"     // 线性增长：initial * attempt
+	StrategyFixed       Strategy = "fixed"       // 固定间隔
+	StrategyLinear      Strategy = "linear"      // 线性增长：initial * attempt
 	StrategyExponential Strategy = "exponential" // 指数增长：initial * factor^attempt
 )
 

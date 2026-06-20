@@ -39,12 +39,12 @@ import (
 //	})
 //	pipeline.AddStage(core.StageInfo{Stage: memStage, Order: 100, Enabled: true})
 type MemoryStage struct {
-	name    string
-	mgr     *ContextManager
-	repo    Repository
-	config  MemoryStageConfig
-	tracer  trace.Tracer
-	logger  *zap.SugaredLogger
+	name   string
+	mgr    *ContextManager
+	repo   Repository
+	config MemoryStageConfig
+	tracer trace.Tracer
+	logger *zap.SugaredLogger
 }
 
 // MemoryStageConfig 配置记忆 Stage。

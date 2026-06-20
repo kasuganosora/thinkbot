@@ -19,10 +19,10 @@ type EventType string
 
 const (
 	// 消息生命周期事件
-	EventMessageReceived EventType = "message.received"    // 消息进入 Pipeline
-	EventMessageDropped  EventType = "message.dropped"     // 消息被丢弃
-	EventMessageDone     EventType = "message.done"        // 消息处理完成（所有 Action 已派发）
-	EventMessageError    EventType = "message.error"       // 消息处理出错
+	EventMessageReceived EventType = "message.received" // 消息进入 Pipeline
+	EventMessageDropped  EventType = "message.dropped"  // 消息被丢弃
+	EventMessageDone     EventType = "message.done"     // 消息处理完成（所有 Action 已派发）
+	EventMessageError    EventType = "message.error"    // 消息处理出错
 
 	// Pipeline Stage 事件
 	EventStageEnter EventType = "stage.enter" // 进入某个 Stage
@@ -31,14 +31,14 @@ const (
 	EventStageError EventType = "stage.error" // Stage 出错（非致命，Pipeline 继续）
 
 	// LLM 流式事件（桥接 llm.StreamPartType）
-	EventLLMStart         EventType = "llm.start"          // LLM 调用开始
-	EventLLMTextDelta     EventType = "llm.text_delta"     // LLM 输出文本增量
-	EventLLMReasonDelta   EventType = "llm.reason_delta"   // LLM 推理文本增量
-	EventLLMToolCall      EventType = "llm.tool_call"      // LLM 调用工具
-	EventLLMToolResult    EventType = "llm.tool_result"    // 工具执行结果
-	EventLLMStepDone      EventType = "llm.step_done"      // 单步完成
-	EventLLMDone          EventType = "llm.done"           // LLM 生成完成
-	EventLLMError         EventType = "llm.error"          // LLM 错误
+	EventLLMStart       EventType = "llm.start"        // LLM 调用开始
+	EventLLMTextDelta   EventType = "llm.text_delta"   // LLM 输出文本增量
+	EventLLMReasonDelta EventType = "llm.reason_delta" // LLM 推理文本增量
+	EventLLMToolCall    EventType = "llm.tool_call"    // LLM 调用工具
+	EventLLMToolResult  EventType = "llm.tool_result"  // 工具执行结果
+	EventLLMStepDone    EventType = "llm.step_done"    // 单步完成
+	EventLLMDone        EventType = "llm.done"         // LLM 生成完成
+	EventLLMError       EventType = "llm.error"        // LLM 错误
 
 	// 决策事件
 	EventDecision EventType = "decision" // ReplyDecider 输出决策
@@ -49,18 +49,18 @@ const (
 	EventDispatchError EventType = "dispatch.error" // 派发出错
 
 	// Workflow 事件（DAG 工作流引擎）
-	EventWorkflowSubmitted EventType = "workflow.submitted"       // 工作流已提交（正在分析）
-	EventWorkflowAnalyzed  EventType = "workflow.analyzed"        // 分析完成，DAG 已生成
-	EventWorkflowCompleted EventType = "workflow.completed"       // 工作流全部完成
-	EventWorkflowFailed    EventType = "workflow.failed"          // 工作流失败
-	EventWorkflowTerminated EventType = "workflow.terminated"     // 工作流被终止
-	EventWorkflowRecovered EventType = "workflow.recovered"       // 工作流崩溃恢复
+	EventWorkflowSubmitted  EventType = "workflow.submitted"  // 工作流已提交（正在分析）
+	EventWorkflowAnalyzed   EventType = "workflow.analyzed"   // 分析完成，DAG 已生成
+	EventWorkflowCompleted  EventType = "workflow.completed"  // 工作流全部完成
+	EventWorkflowFailed     EventType = "workflow.failed"     // 工作流失败
+	EventWorkflowTerminated EventType = "workflow.terminated" // 工作流被终止
+	EventWorkflowRecovered  EventType = "workflow.recovered"  // 工作流崩溃恢复
 
-	EventWorkflowNodeStarted   EventType = "workflow.node.started"    // 节点开始执行
-	EventWorkflowNodeCompleted EventType = "workflow.node.completed"  // 节点完成
-	EventWorkflowNodeFailed    EventType = "workflow.node.failed"     // 节点失败
-	EventWorkflowNodeReviewing EventType = "workflow.node.reviewing"  // 节点进入审查
-	EventWorkflowNodeRetrying  EventType = "workflow.node.retrying"   // 节点重试
+	EventWorkflowNodeStarted   EventType = "workflow.node.started"   // 节点开始执行
+	EventWorkflowNodeCompleted EventType = "workflow.node.completed" // 节点完成
+	EventWorkflowNodeFailed    EventType = "workflow.node.failed"    // 节点失败
+	EventWorkflowNodeReviewing EventType = "workflow.node.reviewing" // 节点进入审查
+	EventWorkflowNodeRetrying  EventType = "workflow.node.retrying"  // 节点重试
 )
 
 // Event 是旁路事件总线中传递的事件。
@@ -535,5 +535,3 @@ func (b *MemoryEventBus) matches(sub *Subscription, event Event) bool {
 	}
 	return true
 }
-
-

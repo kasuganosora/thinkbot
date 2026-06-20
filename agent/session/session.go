@@ -92,15 +92,15 @@ type Message struct {
 // NewSession 创建一个新会话。
 func NewSession(id, botID, channel string, opts ...Option) *Session {
 	s := &Session{
-		id:            id,
-		botID:         botID,
-		channel:       channel,
-		status:        StatusActive,
-		messages:      make([]Message, 0, 20),
-		maxMessages:   20,
-		startedAt:     time.Now(),
+		id:             id,
+		botID:          botID,
+		channel:        channel,
+		status:         StatusActive,
+		messages:       make([]Message, 0, 20),
+		maxMessages:    20,
+		startedAt:      time.Now(),
 		lastActivityAt: time.Now(),
-		createdBy:     "user",
+		createdBy:      "user",
 	}
 	for _, opt := range opts {
 		opt(s)

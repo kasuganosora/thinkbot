@@ -301,7 +301,7 @@ func TestSSE(t *testing.T) {
 	var events []SSEEvent
 	c := New()
 
-	err := c.Get(srv.URL+"/sse").DoSSE(SSEConfig{
+	err := c.Get(srv.URL + "/sse").DoSSE(SSEConfig{
 		OnEvent: func(e SSEEvent) error {
 			events = append(events, e)
 			return nil
@@ -357,7 +357,7 @@ func TestSSEChannel(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	ch, err := c.Get(srv.URL+"/sse-channel").DoSSEStream(SSEConfig{})
+	ch, err := c.Get(srv.URL + "/sse-channel").DoSSEStream(SSEConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestSSEMultiLineData(t *testing.T) {
 
 	var events []SSEEvent
 	c := New()
-	err := c.Get(srv.URL+"/sse-multiline").DoSSE(SSEConfig{
+	err := c.Get(srv.URL + "/sse-multiline").DoSSE(SSEConfig{
 		OnEvent: func(e SSEEvent) error {
 			events = append(events, e)
 			return nil
@@ -489,7 +489,7 @@ func TestStreamChunks(t *testing.T) {
 
 	var chunks []string
 	c := New()
-	err := c.Get(srv.URL+"/stream").DoStream(StreamConfig{
+	err := c.Get(srv.URL + "/stream").DoStream(StreamConfig{
 		OnChunk: func(data []byte) error {
 			chunks = append(chunks, string(data))
 			return nil
@@ -520,7 +520,7 @@ func TestStreamLines(t *testing.T) {
 
 	var lines []string
 	c := New()
-	err := c.Get(srv.URL+"/stream-lines").DoStream(StreamConfig{
+	err := c.Get(srv.URL + "/stream-lines").DoStream(StreamConfig{
 		LineMode: true,
 		OnLine: func(line string) error {
 			lines = append(lines, line)
@@ -556,7 +556,7 @@ func TestStreamChannel(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	ch, err := c.Get(srv.URL+"/stream-ch").DoStreamChunks(StreamConfig{})
+	ch, err := c.Get(srv.URL + "/stream-ch").DoStreamChunks(StreamConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestStreamLineChannel(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	ch, err := c.Get(srv.URL+"/stream-line-ch").DoStreamLines(StreamConfig{})
+	ch, err := c.Get(srv.URL + "/stream-line-ch").DoStreamLines(StreamConfig{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -724,13 +724,13 @@ func TestPostJSONHelper(t *testing.T) {
 
 func TestSplitSSELine(t *testing.T) {
 	tests := []struct {
-		line     string
-		field    string
-		value    string
-		ok       bool
+		line  string
+		field string
+		value string
+		ok    bool
 	}{
 		{"data: hello", "data", "hello", true},
-		{"data:hello", "data", "hello", true},   // 无空格
+		{"data:hello", "data", "hello", true},    // 无空格
 		{"data:  hello", "data", " hello", true}, // 只去一个空格
 		{"event: ping", "event", "ping", true},
 		{":comment", "", "", false},
@@ -843,7 +843,7 @@ func TestStreamWithExternalWatchdog(t *testing.T) {
 	var lines []string
 	c := New()
 
-	err := c.Get(srv.URL+"/stream-ext-wd").DoStream(StreamConfig{
+	err := c.Get(srv.URL + "/stream-ext-wd").DoStream(StreamConfig{
 		Watchdog: wd,
 		LineMode: true,
 		OnLine: func(line string) error {
@@ -1377,7 +1377,7 @@ func TestStreamChunksWithErr(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	ch, errCh := c.Get(srv.URL+"/error").DoStreamChunksWithErr(StreamConfig{})
+	ch, errCh := c.Get(srv.URL + "/error").DoStreamChunksWithErr(StreamConfig{})
 
 	for data := range ch {
 		_ = data
@@ -1403,7 +1403,7 @@ func TestSSEStreamWithErr(t *testing.T) {
 	defer srv.Close()
 
 	c := New()
-	ch, errCh := c.Get(srv.URL+"/sse-err").DoSSEStreamWithErr(SSEConfig{})
+	ch, errCh := c.Get(srv.URL + "/sse-err").DoSSEStreamWithErr(SSEConfig{})
 
 	var count int
 	for event := range ch {

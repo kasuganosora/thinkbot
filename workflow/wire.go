@@ -4,8 +4,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
@@ -57,12 +57,12 @@ type WireConfig struct {
 // EngineConfig 是从 config.Store 解析出的引擎运行时配置。
 // 由 Setup() 内部创建，传递给 Analyzer / Scheduler / Executor。
 type EngineConfig struct {
-	MaxParallel        int
-	MaxRetries         int
-	MaxIterations      int
-	RetryInitial       time.Duration
-	RetryMax           time.Duration
-	ScheduleInterval   time.Duration
+	MaxParallel         int
+	MaxRetries          int
+	MaxIterations       int
+	RetryInitial        time.Duration
+	RetryMax            time.Duration
+	ScheduleInterval    time.Duration
 	AnalyzerTemperature float64
 	AnalyzerMaxTokens   int
 }

@@ -35,13 +35,13 @@ type ReenqueueFunc func(env *core.Envelope)
 //
 // Pipeline 位置：Order=40（在 Filter(20) 之后、Session(50) 之前）
 type EngagementStage struct {
-	name      string
-	policy    EngagementPolicy
-	gate      *TimingGate // 有状态时序门控（可选，nil 则跳过时序控制）
-	burstBuf  *BurstBuffer // 突发缓冲器（可选，nil 则不缓冲）
-	config    StageConfig
-	tracer    trace.Tracer
-	logger    *zap.SugaredLogger
+	name     string
+	policy   EngagementPolicy
+	gate     *TimingGate  // 有状态时序门控（可选，nil 则跳过时序控制）
+	burstBuf *BurstBuffer // 突发缓冲器（可选，nil 则不缓冲）
+	config   StageConfig
+	tracer   trace.Tracer
+	logger   *zap.SugaredLogger
 }
 
 // StageConfig 配置 EngagementStage。
@@ -94,7 +94,8 @@ func (s *EngagementStage) WithTimingGate(gate *TimingGate) *EngagementStage {
 //   - 突发结束后最后一条消息通过 reenqueue 重新投递评估
 //
 // 这实现了 MaiBot 的 wait-and-settle 策略：
-//   评估突发后的最后一条消息（通常包含最完整上下文）。
+//
+//	评估突发后的最后一条消息（通常包含最完整上下文）。
 func (s *EngagementStage) WithBurstBuffer(buf *BurstBuffer, reenqueue ReenqueueFunc) *EngagementStage {
 	s.burstBuf = buf
 	if buf != nil && reenqueue != nil {

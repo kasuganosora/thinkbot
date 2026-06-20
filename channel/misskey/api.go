@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/http"
 )
 
 // ============================================================================

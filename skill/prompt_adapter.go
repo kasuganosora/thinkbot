@@ -67,8 +67,8 @@ func (a *PromptRegistryAdapter) UnregisterSection(name string) {
 
 // DirectInjector 支持直拼模式的注入器。
 type DirectInjector struct {
-	skillOrder   []string            // 已注入的 Skill 名称顺序
-	skillContents map[string]string   // 缓存已注入的 Skill Content
+	skillOrder    []string          // 已注入的 Skill 名称顺序
+	skillContents map[string]string // 缓存已注入的 Skill Content
 }
 
 // NewDirectInjector 创建直拼注入器。

@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
@@ -326,27 +331,128 @@ func parseStreamEvent(event httputil.SSEEvent) (StreamEvent, error) {
 	return se, nil
 }
 
-// parseAPIError 尝试从 HTTP 响应中提取 Anthropic API 错误。
+// parseAPIError 尝试从 HTTP 响应中提取 Anthropic API 错误，并包装为统一的 llm.LLMError。
 func parseAPIError(resp *httputil.Response, httpErr error) error {
 	if resp != nil && resp.StatusCode >= 400 {
 		var errResp ErrorResponse
-		if err := json.Unmarshal(resp.Body, &errResp); err == nil && errResp.Error.Message != "" {
-			return &errResp.Error
+		if json.Unmarshal(resp.Body, &errResp) == nil && errResp.Error.Message != "" {
+			return anthropicErrorToLLMError(&errResp.Error, resp.StatusCode, resp.Headers)
 		}
+		// Body wasn't parseable as an Anthropic error — fall through with status code.
+		if resp.StatusCode >= 400 {
+			return llm.NewLLMError(
+				httpStatusToReason(resp.StatusCode),
+				"anthropic",
+				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(resp.Body)),
+				llm.WithCause(httpErr),
+			)
+		}
+	}
+	// Network / transport error (no response or < 400 status).
+	if httpErr != nil {
+		return llm.NewLLMError(llm.ErrorReasonTransport, "anthropic", httpErr.Error(), llm.WithCause(httpErr))
 	}
 	return httpErr
 }
 
-// parseStreamAPIError 尝试从流式 HTTP 错误中提取 Anthropic API 错误。
+// parseStreamAPIError 尝试从流式 HTTP 错误中提取 Anthropic API 错误，并包装为 llm.LLMError。
 func parseStreamAPIError(err error) error {
 	var streamErr *httputil.StreamHTTPError
 	if errors.As(err, &streamErr) && streamErr.StatusCode >= 400 {
 		var errResp ErrorResponse
 		if jsonErr := json.Unmarshal(streamErr.Body, &errResp); jsonErr == nil && errResp.Error.Message != "" {
-			return &errResp.Error
+			return anthropicErrorToLLMError(&errResp.Error, streamErr.StatusCode, streamErr.Headers)
 		}
+		return llm.NewLLMError(
+			httpStatusToReason(streamErr.StatusCode),
+			"anthropic",
+			fmt.Sprintf("HTTP %d: %s", streamErr.StatusCode, truncateBody(streamErr.Body)),
+			llm.WithCause(err),
+		)
 	}
 	return err
+}
+
+// anthropicErrorToLLMError converts an Anthropic APIError into a unified llm.LLMError.
+func anthropicErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header) *llm.LLMError {
+	reason := anthropicErrorTypeToReason(apiErr.Type, statusCode)
+	opts := []llm.LLMErrorOpt{llm.WithCause(apiErr)}
+
+	if delay := parseRetryAfterHeader(headers); delay > 0 {
+		opts = append(opts, llm.WithRetryAfter(delay))
+	}
+
+	return llm.NewLLMError(reason, "anthropic", apiErr.Message, opts...)
+}
+
+// anthropicErrorTypeToReason maps an Anthropic error type + HTTP status to an llm.ErrorReason.
+func anthropicErrorTypeToReason(errType string, statusCode int) llm.ErrorReason {
+	switch errType {
+	case "invalid_request_error":
+		return llm.ErrorReasonInvalidRequest
+	case "authentication_error":
+		return llm.ErrorReasonAuthentication
+	case "permission_error":
+		return llm.ErrorReasonAuthentication
+	case "rate_limit_error":
+		return llm.ErrorReasonRateLimit
+	case "not_found_error":
+		return llm.ErrorReasonNoRoute
+	case "request_too_large":
+		return llm.ErrorReasonInvalidRequest
+	case "overloaded_error":
+		return llm.ErrorReasonProviderInternal
+	case "api_error":
+		return llm.ErrorReasonProviderInternal
+	case "content_policy_violation":
+		return llm.ErrorReasonContentPolicy
+	case "billing_error":
+		return llm.ErrorReasonQuotaExceeded
+	}
+	return httpStatusToReason(statusCode)
+}
+
+func httpStatusToReason(statusCode int) llm.ErrorReason {
+	switch {
+	case statusCode == 429:
+		return llm.ErrorReasonRateLimit
+	case statusCode == 401 || statusCode == 403:
+		return llm.ErrorReasonAuthentication
+	case statusCode == 402:
+		return llm.ErrorReasonQuotaExceeded
+	case statusCode >= 500:
+		return llm.ErrorReasonProviderInternal
+	case statusCode >= 400:
+		return llm.ErrorReasonInvalidRequest
+	default:
+		return llm.ErrorReasonTransport
+	}
+}
+
+// parseRetryAfterHeader extracts the Retry-After delay from HTTP headers.
+func parseRetryAfterHeader(headers http.Header) time.Duration {
+	if headers == nil {
+		return 0
+	}
+	if msStr := headers.Get("Retry-After-MS"); msStr != "" {
+		if ms, err := strconv.ParseFloat(strings.TrimSpace(msStr), 64); err == nil {
+			return time.Duration(ms * float64(time.Millisecond))
+		}
+	}
+	if raStr := strings.TrimSpace(headers.Get("Retry-After")); raStr != "" {
+		if secs, err := strconv.Atoi(raStr); err == nil {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 0
+}
+
+func truncateBody(body []byte) string {
+	const max = 500
+	if len(body) <= max {
+		return string(body)
+	}
+	return string(body[:max]) + "..."
 }
 
 // validateMessageRequest 校验 MessageRequest 必要字段。

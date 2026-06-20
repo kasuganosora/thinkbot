@@ -17,8 +17,8 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
-	"github.com/kasuganosora/thinkbot/util/traceid"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================

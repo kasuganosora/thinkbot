@@ -208,8 +208,8 @@ func (RenoteExclusionRule) Allow(msg *core.Message) (bool, string) {
 // CooldownRule 对同一用户实施冷却时间。
 // 同一用户在 cooldown 期间的消息不会被主动参与。
 type CooldownRule struct {
-	cooldown  time.Duration
-	lastSeen  map[string]time.Time
+	cooldown time.Duration
+	lastSeen map[string]time.Time
 }
 
 // NewCooldownRule 创建用户冷却规则。

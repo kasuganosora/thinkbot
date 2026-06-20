@@ -6,12 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
 	"github.com/kasuganosora/thinkbot/util/errs"
+	utilhttp "github.com/kasuganosora/thinkbot/util/http"
 )
 
 // ============================================================================
@@ -119,62 +120,63 @@ func (t *stdioTransport) Close() error {
 // ============================================================================
 
 type httpTransport struct {
-	url      string
-	headers  map[string]string
-	client   *http.Client
-	mu       sync.Mutex // 保护 sessionID
-	sessionID string    // 服务器返回的 Mcp-Session-Id
+	url       string
+	headers   map[string]string
+	client    *utilhttp.Client
+	mu        sync.Mutex // 保护 sessionID
+	sessionID string     // 服务器返回的 Mcp-Session-Id
 }
 
 func newHTTPTransport(url string, headers map[string]string) *httpTransport {
 	return &httpTransport{
 		url:     url,
 		headers: headers,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client: utilhttp.New(
+			utilhttp.WithTimeout(120*time.Second),
+			utilhttp.WithHeaders(headers),
+			utilhttp.WithMaxBodySize(10*1024*1024), // 10MB
+		),
 	}
 }
 
 func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", t.url, bytes.NewReader(data))
-	if err != nil {
-		return nil, errs.Wrap(err, "mcp: create http request")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	for k, v := range t.headers {
-		req.Header.Set(k, v)
-	}
+	req := t.client.Post(t.url).
+		SetContext(ctx).
+		SetHeader("Content-Type", "application/json").
+		SetHeader("Accept", "application/json, text/event-stream").
+		SetBody(bytes.NewReader(data))
 
 	// 转发 session ID（如果服务器已分配）
 	t.mu.Lock()
 	if t.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", t.sessionID)
+		req.SetHeader("Mcp-Session-Id", t.sessionID)
 	}
 	t.mu.Unlock()
 
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return nil, errs.Wrap(err, "mcp: http request")
-	}
-	defer func() { _ = resp.Body.Close() }()
+	resp, err := req.Do()
 
 	// 捕获服务器分配的 session ID（通常在 initialize 响应中返回）
-	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-		t.mu.Lock()
-		t.sessionID = sid
-		t.mu.Unlock()
+	if resp != nil {
+		if sid := resp.Headers.Get("Mcp-Session-Id"); sid != "" {
+			t.mu.Lock()
+			t.sessionID = sid
+			t.mu.Unlock()
+		}
 	}
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("mcp: http error %d: %s", resp.StatusCode, string(body))
+	if err != nil {
+		// 非 2xx 时 resp 可能为 nil（网络错误）或非 nil（HTTP 错误码）
+		if resp != nil && resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("mcp: http error %d: %s", resp.StatusCode, string(resp.Body))
+		}
+		return nil, errs.Wrap(err, "mcp: http request")
 	}
 
-	contentType := resp.Header.Get("Content-Type")
+	contentType := resp.Headers.Get("Content-Type")
 	if strings.Contains(contentType, "text/event-stream") {
-		return parseSSEResponse(resp.Body)
+		return parseSSEResponse(bytes.NewReader(resp.Body))
 	}
-	return io.ReadAll(resp.Body)
+	return resp.Body, nil
 }
 
 func (t *httpTransport) Close() error { return nil }

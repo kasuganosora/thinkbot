@@ -275,7 +275,7 @@ func TestToolOutputFilterStore_StripsToolResult(t *testing.T) {
 			`The temperature is 25°C.`,
 	}
 
-	store.Append(context.Background(), entry)
+	_ = store.Append(context.Background(), entry)
 
 	results, _ := repo.Recent(context.Background(), ChannelScope("test"), 1)
 	if len(results) != 1 {
@@ -290,7 +290,7 @@ func TestToolOutputFilterStore_PassthroughDelete(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewToolOutputFilterStore(repo)
 
-	store.Append(context.Background(), Entry{
+	_ = store.Append(context.Background(), Entry{
 		Scope:   ChannelScope("test"),
 		Content: "hello",
 	})
@@ -300,7 +300,7 @@ func TestToolOutputFilterStore_PassthroughDelete(t *testing.T) {
 		t.Fatalf("expected 1 entry before delete, got %d", len(results))
 	}
 
-	store.Delete(context.Background(), ChannelScope("test"), results[0].ID)
+	_ = store.Delete(context.Background(), ChannelScope("test"), results[0].ID)
 
 	results, _ = repo.Recent(context.Background(), ChannelScope("test"), 1)
 	if len(results) != 0 {
@@ -312,10 +312,10 @@ func TestToolOutputFilterStore_PassthroughClear(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewToolOutputFilterStore(repo)
 
-	store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "a"})
-	store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "b"})
+	_ = store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "a"})
+	_ = store.Append(context.Background(), Entry{Scope: ChannelScope("test"), Content: "b"})
 
-	store.Clear(context.Background(), ChannelScope("test"))
+	_ = store.Clear(context.Background(), ChannelScope("test"))
 
 	results, _ := repo.Recent(context.Background(), ChannelScope("test"), 10)
 	if len(results) != 0 {
@@ -327,7 +327,7 @@ func TestToolOutputFilterStore_EmptyAfterStrip(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewToolOutputFilterStore(repo)
 
-	store.Append(context.Background(), Entry{
+	_ = store.Append(context.Background(), Entry{
 		Scope:   ChannelScope("test"),
 		Content: `<tool_call>{"name": "noop"}</tool_call>`,
 	})
@@ -357,7 +357,7 @@ func TestCompositeFilters_ThinkAndToolOutput(t *testing.T) {
 			`The user likes Go programming.`,
 	}
 
-	store.Append(context.Background(), entry)
+	_ = store.Append(context.Background(), entry)
 
 	results, _ := repo.Recent(context.Background(), ChannelScope("test"), 1)
 	if len(results) != 1 {

@@ -11,7 +11,7 @@ func TestNew(t *testing.T) {
 		t.Errorf("expected prefix 'msg-', got %s", id)
 	}
 	// prefix + "-" + 24 hex chars = 4 + 24 = 28
-	if len(id) != len("msg-") + 24 {
+	if len(id) != len("msg-")+24 {
 		t.Errorf("expected length 28, got %d (%s)", len(id), id)
 	}
 }

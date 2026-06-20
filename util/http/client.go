@@ -18,6 +18,7 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -195,16 +196,16 @@ func (c *Client) ensureTransport() *http.Transport {
 
 // Request 表示一个 HTTP 请求，使用链式 API 构造。
 type Request struct {
-	client    *Client
-	method    string
-	url       string
-	headers   map[string]string
-	query     url.Values
-	body      any
-	ctx       context.Context
-	retryCfg    *retry.Config // per-request 重试覆盖（可选）
-	dump        bool          // 是否 dump 本请求的详细信息
-	sseLastEventID string     // SSE 最后收到的事件 ID（用于自动重连）
+	client         *Client
+	method         string
+	url            string
+	headers        map[string]string
+	query          url.Values
+	body           any
+	ctx            context.Context
+	retryCfg       *retry.Config // per-request 重试覆盖（可选）
+	dump           bool          // 是否 dump 本请求的详细信息
+	sseLastEventID string        // SSE 最后收到的事件 ID（用于自动重连）
 }
 
 // NewRequest 创建一个新请求构造器。
@@ -394,7 +395,7 @@ func (r *Request) doOnce() (*Response, error) {
 	start := time.Now()
 	resp, err := r.client.httpClient.Do(req)
 	if err != nil {
-		log.Logger.Warnw("http request failed",
+		traceid.L(r.ctx).Warnw("http request failed",
 			"method", r.method, "url", req.URL.String(), "err", err, "elapsed", time.Since(start))
 		return nil, errs.Wrap(err, "http request failed")
 	}
@@ -415,7 +416,7 @@ func (r *Request) doOnce() (*Response, error) {
 		return nil, errs.Wrap(err, "failed to read response body")
 	}
 	if maxSize > 0 && int64(len(body)) > maxSize {
-		log.Logger.Warnw("http response body truncated",
+		traceid.L(r.ctx).Warnw("http response body truncated",
 			"url", req.URL.String(), "max_size", maxSize, "actual_size", len(body))
 		body = body[:maxSize]
 	}
@@ -426,7 +427,7 @@ func (r *Request) doOnce() (*Response, error) {
 		Body:       body,
 	}
 
-	log.Logger.Debugw("http response",
+	traceid.L(r.ctx).Debugw("http response",
 		"method", r.method, "url", req.URL.String(),
 		"status", resp.StatusCode, "body_len", len(body), "elapsed", time.Since(start))
 
@@ -534,6 +535,13 @@ func (r *Request) buildHTTPRequest() (*http.Request, error) {
 		req.Header.Set(k, v)
 	}
 
+	// --- 自动注入 Trace ID（如果 context 中有且请求头未手动设置）---
+	if traceID := traceid.FromContext(r.ctx); traceID != "" {
+		if req.Header.Get(traceid.HeaderKey) == "" {
+			req.Header.Set(traceid.HeaderKey, traceID)
+		}
+	}
+
 	return req, nil
 }
 
@@ -578,9 +586,9 @@ func (c *Client) PostJSON(ctx context.Context, path string, body, v any, headers
 func isRetryableCode(code int) bool {
 	switch code {
 	case http.StatusTooManyRequests, // 429
-		http.StatusBadGateway,           // 502
-		http.StatusServiceUnavailable,   // 503
-		http.StatusGatewayTimeout:       // 504
+		http.StatusBadGateway,         // 502
+		http.StatusServiceUnavailable, // 503
+		http.StatusGatewayTimeout:     // 504
 		return true
 	case 0: // 网络错误，没有状态码
 		return true
@@ -678,7 +686,7 @@ func (r *Request) dumpRequest(req *http.Request) {
 		}
 	}
 	b.WriteString("========================================")
-	log.Logger.Infow("http request dump", "detail", b.String())
+	traceid.L(r.ctx).Infow("http request dump", "detail", b.String())
 }
 
 // dumpResponse 将完整响应信息打印到日志。
@@ -705,7 +713,7 @@ func (r *Request) dumpResponse(resp *Response, elapsed time.Duration) {
 		fmt.Fprintf(&b, "--- Body (binary, not dumped, content-length=%d) ---\n", len(resp.Body))
 	}
 	b.WriteString("========================================")
-	log.Logger.Infow("http response dump", "detail", b.String())
+	traceid.L(r.ctx).Infow("http response dump", "detail", b.String())
 }
 
 // isTextContentType 判断 Content-Type 是否为可安全 dump 的文本类型。

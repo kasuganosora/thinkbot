@@ -20,12 +20,12 @@ import (
 
 // SSE 事件类型
 const (
-	sseTextDelta  = "text_delta"   // LLM 文本增量
-	sseDone       = "done"          // 生成完成
-	sseError      = "error"         // 错误
-	sseToolCall   = "tool_call"     // 工具调用
-	sseToolResult = "tool_result"   // 工具结果
-	sseStart      = "start"         // 开始处理
+	sseTextDelta  = "text_delta"  // LLM 文本增量
+	sseDone       = "done"        // 生成完成
+	sseError      = "error"       // 错误
+	sseToolCall   = "tool_call"   // 工具调用
+	sseToolResult = "tool_result" // 工具结果
+	sseStart      = "start"       // 开始处理
 )
 
 // handleChatBots 返回当前可聊天的 Bot 列表（状态为 running）。
@@ -38,9 +38,9 @@ func (s *Server) handleChatBots(c *gin.Context) {
 	}
 
 	type chatBot struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Running     bool   `json:"running"`
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Running bool   `json:"running"`
 	}
 
 	var result []chatBot
@@ -193,5 +193,5 @@ func writeSSE(w io.Writer, eventType string, data any) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
 }

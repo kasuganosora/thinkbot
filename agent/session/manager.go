@@ -228,11 +228,11 @@ func (m *SessionManager) Resolve(ctx context.Context, msg *core.Message) Resolve
 // 对于 resolve 结果为 ok=false 的消息（如时间线观察帖），
 // SessionStage 跳过 session 逻辑，消息继续在 Pipeline 中流转。
 type SessionStage struct {
-	name    string
-	mgr     *SessionManager
-	config  StageConfig
-	tracer  trace.Tracer
-	logger  *zap.SugaredLogger
+	name   string
+	mgr    *SessionManager
+	config StageConfig
+	tracer trace.Tracer
+	logger *zap.SugaredLogger
 }
 
 // StageConfig 配置 SessionStage。

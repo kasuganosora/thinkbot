@@ -15,11 +15,11 @@ import (
 // ============================================================================
 
 type mockProvider struct {
-	name     string
-	mu       sync.Mutex
-	calls    []mockCall
+	name      string
+	mu        sync.Mutex
+	calls     []mockCall
 	responses map[int]*llm.GenerateResult // call index → response
-	err      error
+	err       error
 }
 
 type mockCall struct {
@@ -115,9 +115,9 @@ func TestSubAgent_MultiTurnContext(t *testing.T) {
 	sa := New(mp, "test-model")
 
 	// Turn 1
-	sa.Chat(context.Background(), "Turn 1 user")
+	_, _ = sa.Chat(context.Background(), "Turn 1 user")
 	// Turn 2
-	sa.Chat(context.Background(), "Turn 2 user")
+	_, _ = sa.Chat(context.Background(), "Turn 2 user")
 
 	calls := mp.getCalls()
 	if len(calls) != 2 {
@@ -137,9 +137,9 @@ func TestSubAgent_ContextIsolation(t *testing.T) {
 	sa1 := New(mp1, "model-a")
 	sa2 := New(mp2, "model-b")
 
-	sa1.Chat(context.Background(), "Message to agent 1")
-	sa2.Chat(context.Background(), "Message to agent 2")
-	sa2.Chat(context.Background(), "Follow-up to agent 2")
+	_, _ = sa1.Chat(context.Background(), "Message to agent 1")
+	_, _ = sa2.Chat(context.Background(), "Message to agent 2")
+	_, _ = sa2.Chat(context.Background(), "Follow-up to agent 2")
 
 	// sa1 应该只有 1 条历史
 	h1 := sa1.History()
@@ -171,9 +171,9 @@ func TestSubAgent_SlidingWindow(t *testing.T) {
 	)
 
 	// 3 轮对话
-	sa.Chat(context.Background(), "Turn 1")
-	sa.Chat(context.Background(), "Turn 2")
-	sa.Chat(context.Background(), "Turn 3")
+	_, _ = sa.Chat(context.Background(), "Turn 1")
+	_, _ = sa.Chat(context.Background(), "Turn 2")
+	_, _ = sa.Chat(context.Background(), "Turn 3")
 
 	calls := mp.getCalls()
 
@@ -196,8 +196,8 @@ func TestSubAgent_Clear(t *testing.T) {
 	mp := newMockProvider()
 	sa := New(mp, "model")
 
-	sa.Chat(context.Background(), "Turn 1")
-	sa.Chat(context.Background(), "Turn 2")
+	_, _ = sa.Chat(context.Background(), "Turn 1")
+	_, _ = sa.Chat(context.Background(), "Turn 2")
 
 	if tc := sa.TurnCount(); tc != 2 {
 		t.Fatalf("expected 2 turns, got %d", tc)
@@ -215,7 +215,7 @@ func TestSubAgent_Clear(t *testing.T) {
 	}
 
 	// Clear 后应该从零开始
-	sa.Chat(context.Background(), "Turn 3")
+	_, _ = sa.Chat(context.Background(), "Turn 3")
 	calls := mp.getCalls()
 	if len(calls[2].messages) != 1 {
 		t.Errorf("after Clear + Chat: expected 1 message, got %d", len(calls[2].messages))
@@ -244,7 +244,7 @@ func TestSubAgent_TurnCountUnaffectedByWindow(t *testing.T) {
 	)
 
 	for i := 0; i < 5; i++ {
-		sa.Chat(context.Background(), "turn")
+		_, _ = sa.Chat(context.Background(), "turn")
 	}
 
 	if tc := sa.TurnCount(); tc != 5 {
@@ -258,7 +258,7 @@ func TestSubAgent_SystemPromptInheritance(t *testing.T) {
 		WithSystemPrompt("Inherited system prompt"),
 	)
 
-	sa.Chat(context.Background(), "hello")
+	_, _ = sa.Chat(context.Background(), "hello")
 
 	calls := mp.getCalls()
 	if calls[0].system != "Inherited system prompt" {
@@ -267,7 +267,7 @@ func TestSubAgent_SystemPromptInheritance(t *testing.T) {
 
 	// 动态修改
 	sa.SetSystem("Updated prompt")
-	sa.Chat(context.Background(), "hello again")
+	_, _ = sa.Chat(context.Background(), "hello again")
 
 	calls = mp.getCalls()
 	if calls[1].system != "Updated prompt" {
@@ -304,7 +304,7 @@ func TestSubAgent_SeedMessages(t *testing.T) {
 		llm.AssistantMessage("seed assistant"),
 	})
 
-	sa.Chat(context.Background(), "real message")
+	_, _ = sa.Chat(context.Background(), "real message")
 
 	calls := mp.getCalls()
 	if len(calls[0].messages) != 3 { // 2 seed + 1 new
@@ -394,7 +394,7 @@ func TestSubAgent_ConcurrentSafe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sa.Chat(context.Background(), "concurrent")
+			_, _ = sa.Chat(context.Background(), "concurrent")
 		}()
 	}
 	wg.Wait()

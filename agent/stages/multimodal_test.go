@@ -101,9 +101,9 @@ func TestMultimodal_ShouldProcess_HasAttachments(t *testing.T) {
 func TestMultimodal_ShouldProcess_MainSupportsMultimodal(t *testing.T) {
 	provider := &mockVisionProvider{name: "mock"}
 	stage := newTestMultimodalStage(t, MultimodalConfig{
-		VisionProvider:  provider,
-		VisionModel:     llm.ChatModel("vision-model"),
-		MainMultimodal:  true, // 主模型支持多模态
+		VisionProvider: provider,
+		VisionModel:    llm.ChatModel("vision-model"),
+		MainMultimodal: true, // 主模型支持多模态
 	})
 
 	attachments := []core.Attachment{

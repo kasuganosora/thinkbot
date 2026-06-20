@@ -50,6 +50,24 @@ type GenerateParams struct {
 	PresencePenalty  *float64 `json:"presencePenalty,omitempty"`
 	Seed             *int     `json:"seed,omitempty"`
 	ReasoningEffort  *string  `json:"reasoningEffort,omitempty"`
+
+	// CachePolicy controls how prompt-caching breakpoints are placed.
+	// Only Anthropic-family providers use explicit breakpoints; other
+	// providers (OpenAI, Google) have implicit prefix caching.
+	//   ""     = provider default (auto for anthropic, none otherwise)
+	//   "none" = strip all cache markers
+	//   "auto" = auto-place breakpoints on the stable prefix
+	CachePolicy CachePolicy `json:"cachePolicy,omitempty"`
+
+	// CacheKey is passed to providers that support a cache key hint
+	// (OpenAI promptCacheKey, OpenRouter prompt_cache_key). It typically
+	// holds the session ID to improve cross-request cache hit rates.
+	CacheKey string `json:"cacheKey,omitempty"`
+
+	// SystemCacheControl is set by the cache policy to indicate that the
+	// system prompt should carry a cache breakpoint. Provider adapters that
+	// support system-level caching (Anthropic) read this field.
+	SystemCacheControl *CacheControl `json:"-"`
 }
 
 // ResponseMetadata carries response-level metadata from the provider.

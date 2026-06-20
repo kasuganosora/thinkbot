@@ -8,8 +8,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -32,18 +32,18 @@ import (
 
 // Scheduler 执行单个工作流的 DAG 调度。
 type Scheduler struct {
-	wf       *Workflow
-	executor *Executor
-	repo     *Repository
-	ec       EngineConfig
+	wf          *Workflow
+	executor    *Executor
+	repo        *Repository
+	ec          EngineConfig
 	maxParallel int
-	tracer   trace.Tracer
-	logger   *zap.SugaredLogger
-	emitter  *outbound.EventEmitter // 可为 nil
+	tracer      trace.Tracer
+	logger      *zap.SugaredLogger
+	emitter     *outbound.EventEmitter // 可为 nil
 
-	mu         sync.Mutex     // 保护 wf.Nodes 状态读写
-	sem        chan struct{}  // 并发限流 semaphore
-	terminate  chan struct{}  // 终止信号（close to broadcast）
+	mu         sync.Mutex    // 保护 wf.Nodes 状态读写
+	sem        chan struct{} // 并发限流 semaphore
+	terminate  chan struct{} // 终止信号（close to broadcast）
 	terminated bool
 
 	// 手动重试请求
@@ -255,10 +255,10 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 			s.persist()
 
 			s.emitNodeEvent(outbound.EventWorkflowNodeRetrying, map[string]any{
-				"node_id":   node.ID,
-				"attempt":   attempt,
+				"node_id":     node.ID,
+				"attempt":     attempt,
 				"max_retries": maxRetries,
-				"error":     err.Error(),
+				"error":       err.Error(),
 			})
 
 			logger.Warnw("node execution failed, retrying",
@@ -302,9 +302,9 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		s.persist()
 
 		s.emitNodeEvent(outbound.EventWorkflowNodeFailed, map[string]any{
-			"node_id":      node.ID,
-			"retry_count":  node.RetryCount,
-			"error":        lastErr.Error(),
+			"node_id":     node.ID,
+			"retry_count": node.RetryCount,
+			"error":       lastErr.Error(),
 		})
 
 		// 级联跳过下游节点

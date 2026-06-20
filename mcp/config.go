@@ -7,8 +7,8 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/config"
-	"go.uber.org/zap"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"go.uber.org/zap"
 )
 
 // ============================================================================
@@ -62,11 +62,11 @@ func LoadServers(store *config.Store) []ServerConfig {
 // serverConfigJSON 是 MCP 服务器配置的 JSON 序列化格式。
 type serverConfigJSON struct {
 	Transport string            `json:"transport"`         // "stdio" | "http"
-	Command   string            `json:"command,omitempty"`  // stdio
-	Args      []string          `json:"args,omitempty"`     // stdio
-	Env       []string          `json:"env,omitempty"`      // stdio
-	URL       string            `json:"url,omitempty"`      // http
-	Headers   map[string]string `json:"headers,omitempty"`  // http
+	Command   string            `json:"command,omitempty"` // stdio
+	Args      []string          `json:"args,omitempty"`    // stdio
+	Env       []string          `json:"env,omitempty"`     // stdio
+	URL       string            `json:"url,omitempty"`     // http
+	Headers   map[string]string `json:"headers,omitempty"` // http
 	Enabled   bool              `json:"enabled"`
 }
 

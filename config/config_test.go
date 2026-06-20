@@ -170,8 +170,6 @@ func TestStore_Priority_DBOverOSEnv(t *testing.T) {
 	setEnv(t, "TEST_KEY", "os_value")
 	_ = store.Set(context.Background(), "test.key", "db_value")
 
-
-
 	if got := store.GetString("test.key", ""); got != "db_value" {
 		t.Errorf("expected db_value, got %q", got)
 	}
@@ -214,7 +212,10 @@ func TestStore_GetInt(t *testing.T) {
 
 func TestStore_GetBool(t *testing.T) {
 	store := NewStore(nil)
-	for _, tt := range []struct{ val string; exp bool }{
+	for _, tt := range []struct {
+		val string
+		exp bool
+	}{
 		{"true", true}, {"1", true}, {"yes", true}, {"on", true},
 		{"false", false}, {"0", false}, {"no", false}, {"off", false},
 	} {
@@ -764,7 +765,7 @@ func TestBuilder_GetTimezoneLocation_Invalid(t *testing.T) {
 func TestBuilder_GetBotTimezone_Override(t *testing.T) {
 	store := NewStore(nil)
 	store.LoadEnvMap(map[string]string{
-		"system.timezone":   "Asia/Shanghai",
+		"system.timezone":        "Asia/Shanghai",
 		"bot.tokyo-bot.timezone": "Asia/Tokyo",
 	})
 	b := NewBuilder(store, testLogger())
@@ -785,7 +786,7 @@ func TestBuilder_GetBotTimezone_Override(t *testing.T) {
 func TestBuilder_GetBotTimezoneLocation_Override(t *testing.T) {
 	store := NewStore(nil)
 	store.LoadEnvMap(map[string]string{
-		"system.timezone":     "UTC",
+		"system.timezone":      "UTC",
 		"bot.pacific.timezone": "America/Los_Angeles",
 	})
 	b := NewBuilder(store, testLogger())

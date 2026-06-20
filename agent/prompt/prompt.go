@@ -15,12 +15,12 @@ package prompt
 
 import (
 	"fmt"
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================

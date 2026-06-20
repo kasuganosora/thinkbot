@@ -184,7 +184,7 @@ func TestSubAgentManager_List(t *testing.T) {
 		t.Fatalf("expected 2 subagents, got %d", len(list))
 	}
 
-	mgr.Close(id1)
+	_ = mgr.Close(id1)
 	list = mgr.List()
 	if len(list) != 1 {
 		t.Errorf("expected 1 after close, got %d", len(list))
@@ -439,7 +439,7 @@ func TestSpawnToolNotAvailableInSubagentScope(t *testing.T) {
 	promptReg := prompt.NewRegistry()
 	toolMgr := tools.NewToolManager(promptReg, nil, nil)
 
-	RegisterTools(toolMgr, saMgr)
+	_ = RegisterTools(toolMgr, saMgr)
 
 	sctx := &tools.ToolSessionContext{
 		ChatType:   "private",

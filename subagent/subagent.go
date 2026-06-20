@@ -46,7 +46,7 @@ type SubAgent struct {
 	maxTokens int
 
 	// 上下文管理
-	ctxMgr    *ContextManager
+	ctxMgr     *ContextManager
 	totalTurns int
 	closed     bool
 
@@ -55,8 +55,8 @@ type SubAgent struct {
 	name string
 
 	// 额外生成参数
-	extraTools      []llm.Tool
-	responseFormat  *llm.ResponseFormat
+	extraTools     []llm.Tool
+	responseFormat *llm.ResponseFormat
 }
 
 // New 创建一个 SubAgent。
@@ -240,11 +240,11 @@ func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
 	maxTokens := sa.maxTokens
 
 	params := llm.GenerateParams{
-		Model:      llm.ChatModel(sa.model),
-		System:     sa.system,
-		Messages:   msgs,
+		Model:       llm.ChatModel(sa.model),
+		System:      sa.system,
+		Messages:    msgs,
 		Temperature: &temp,
-		MaxTokens:  &maxTokens,
+		MaxTokens:   &maxTokens,
 	}
 
 	if len(sa.extraTools) > 0 {

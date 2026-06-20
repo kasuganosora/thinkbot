@@ -56,10 +56,10 @@ type SkillResources struct {
 
 // SkillMeta 是 SKILL.md 的 YAML front matter。
 type SkillMeta struct {
-	Name         string   `yaml:"name"`
-	Description  string   `yaml:"description"`
+	Name          string   `yaml:"name"`
+	Description   string   `yaml:"description"`
 	Compatibility []string `yaml:"compatibility"`
-	Enabled      *bool    `yaml:"enabled"`
+	Enabled       *bool    `yaml:"enabled"`
 }
 
 // SkillInfo 是 Skill 的只读详情快照，供列表展示、API 返回等场景使用。

@@ -78,6 +78,9 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 
 			pendingToolCalls = map[int]*streamingToolCall{}
 			textBlockIDs     = map[int]string{}
+
+			// Track signature deltas for thinking blocks.
+			thinkingSignatures = map[int]string{}
 		)
 
 		flush := func() {
@@ -98,8 +101,17 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					responseID = event.Message.ID
 					responseModel = event.Message.Model
 					if event.Message.Usage.InputTokens > 0 || event.Message.Usage.OutputTokens > 0 {
-						usage.InputTokens = event.Message.Usage.InputTokens
+						// Anthropic input_tokens = non-cached only at message_start.
+						nonCached := event.Message.Usage.InputTokens
+						cacheRead := event.Message.Usage.CacheReadTokens
+						cacheWrite := event.Message.Usage.CacheCreationTokens
+						usage.InputTokens = nonCached + cacheRead + cacheWrite
 						usage.OutputTokens = event.Message.Usage.OutputTokens
+						usage.InputTokenDetails = llm.InputTokenDetail{
+							NoCacheTokens:    nonCached,
+							CacheReadTokens:  cacheRead,
+							CacheWriteTokens: cacheWrite,
+						}
 					}
 				}
 
@@ -146,6 +158,10 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 						reasoningStarted = true
 					}
 					send(&llm.ReasoningDeltaPart{Text: event.Delta.Thinking})
+				case "signature_delta":
+					// Accumulate the signature; it will be needed for the next
+					// request if this thinking block is included in context.
+					thinkingSignatures[idx] += event.Delta.Signature
 				case "input_json_delta":
 					if stc, ok := pendingToolCalls[idx]; ok {
 						stc.args += event.Delta.PartialJSON
@@ -186,10 +202,23 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					}
 				}
 				if event.Usage != nil {
+					// Anthropic reports non-cached input tokens; compute inclusive total.
+					nonCached := event.Usage.InputTokens
+					if nonCached == 0 {
+						nonCached = usage.InputTokenDetails.NoCacheTokens
+					}
+					cacheRead := event.Usage.CacheReadTokens
+					cacheWrite := event.Usage.CacheCreationTokens
+					totalInput := nonCached + cacheRead + cacheWrite
+
+					usage.InputTokens = totalInput
 					usage.OutputTokens = event.Usage.OutputTokens
-					usage.CachedInputTokens = event.Usage.CacheReadTokens
-					usage.InputTokenDetails.CacheReadTokens = event.Usage.CacheReadTokens
-					usage.InputTokenDetails.CacheWriteTokens = event.Usage.CacheCreationTokens
+					usage.CachedInputTokens = cacheRead
+					usage.InputTokenDetails = llm.InputTokenDetail{
+						NoCacheTokens:    nonCached,
+						CacheReadTokens:  cacheRead,
+						CacheWriteTokens: cacheWrite,
+					}
 					if event.Usage.CacheCreation != nil {
 						usage.InputTokenDetails.CacheWrite5mTokens = event.Usage.CacheCreation.Ephemeral5mTokens
 						usage.InputTokenDetails.CacheWrite1hTokens = event.Usage.CacheCreation.Ephemeral1hTokens
@@ -291,7 +320,36 @@ const (
 // DefaultMaxTokens is the default max_tokens when params.MaxTokens is not set.
 const DefaultMaxTokens = 4096
 
+// anthropicBreakpointCap is the maximum number of cache_control breakpoints
+// Anthropic allows per request. Beyond this, the API returns a 400 error.
+const anthropicBreakpointCap = 4
+
+// breakpointTracker tracks remaining cache breakpoints and silently drops
+// excess markers, enforcing the breakpoint cap.
+type breakpointTracker struct {
+	remaining int
+}
+
+func newBreakpointTracker() *breakpointTracker {
+	return &breakpointTracker{remaining: anthropicBreakpointCap}
+}
+
+// cacheControl converts a unified CacheControl, consuming a breakpoint slot.
+// Returns nil if the cap has been reached.
+func (bt *breakpointTracker) cacheControl(cc *llm.CacheControl) *CacheControl {
+	if cc == nil {
+		return nil
+	}
+	if bt.remaining <= 0 {
+		return nil
+	}
+	bt.remaining--
+	return convertCacheControl(cc)
+}
+
 func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, error) {
+	bt := newBreakpointTracker()
+
 	req := &MessageRequest{
 		Model:       params.Model.ID,
 		Temperature: params.Temperature,
@@ -299,7 +357,14 @@ func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, erro
 	}
 
 	if params.System != "" {
-		req.System = SystemText(params.System)
+		// Use SystemTextWithCache when the cache policy has set a breakpoint
+		// on the system prompt.
+		cc := bt.cacheControl(params.SystemCacheControl)
+		if cc != nil {
+			req.System = SystemTextWithCache(params.System, cc)
+		} else {
+			req.System = SystemText(params.System)
+		}
 	}
 
 	if params.MaxTokens != nil {
@@ -313,7 +378,7 @@ func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, erro
 	}
 
 	// 消息转换
-	messages, err := convertUnifiedMessages(params.Messages)
+	messages, err := convertUnifiedMessages(params.Messages, bt)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +386,7 @@ func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, erro
 
 	// 工具转换
 	if len(params.Tools) > 0 {
-		req.Tools = convertUnifiedTools(params.Tools)
+		req.Tools = convertUnifiedTools(params.Tools, bt)
 		if params.ToolChoice != nil {
 			req.ToolChoice = convertUnifiedToolChoice(params.ToolChoice)
 		}
@@ -347,14 +412,23 @@ func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, erro
 	return req, nil
 }
 
-func convertUnifiedMessages(messages []llm.Message) ([]Message, error) {
+func convertUnifiedMessages(messages []llm.Message, bt *breakpointTracker) ([]Message, error) {
 	var out []Message
 	for _, msg := range messages {
 		switch msg.Role {
 		case llm.MessageRoleSystem:
-			// Anthropic 通过 system 字段处理系统消息
-			// 如果统一消息中包含系统角色，这里跳过（已在 params.System 中处理）
-			continue
+			// Anthropic uses a top-level `system` field for the system prompt.
+			// Mid-conversation system messages are degraded to user text wrapped
+			// in <system-update> tags to avoid silently dropping them.
+			text := llm.TextFromParts(msg.Content)
+			if text != "" {
+				out = append(out, Message{
+					Role: RoleUser,
+					Content: MessageContent{
+						ContentBlock{Type: ContentTypeText, Text: "<system-update>\n" + text + "\n</system-update>"},
+					},
+				})
+			}
 
 		case llm.MessageRoleTool:
 			// 工具结果消息
@@ -377,7 +451,7 @@ func convertUnifiedMessages(messages []llm.Message) ([]Message, error) {
 			for _, part := range msg.Content {
 				switch p := part.(type) {
 				case llm.TextPart:
-					blocks = append(blocks, ContentBlock{Type: ContentTypeText, Text: p.Text, CacheControl: convertCacheControl(p.CacheControl)})
+					blocks = append(blocks, ContentBlock{Type: ContentTypeText, Text: p.Text, CacheControl: bt.cacheControl(p.CacheControl)})
 				case llm.ImagePart:
 					blocks = append(blocks, ContentBlock{Type: ContentTypeImage, Source: convertImageSource(p)})
 				case llm.FilePart:
@@ -395,7 +469,13 @@ func convertUnifiedMessages(messages []llm.Message) ([]Message, error) {
 				case llm.TextPart:
 					blocks = append(blocks, ContentBlock{Type: ContentTypeText, Text: p.Text})
 				case llm.ReasoningPart:
-					blocks = append(blocks, ContentBlock{Type: ContentTypeThinking, Thinking: p.Text})
+					// Preserve the signature so Anthropic can validate the
+					// thinking block in multi-turn extended-thinking sessions.
+					blocks = append(blocks, ContentBlock{
+						Type:      ContentTypeThinking,
+						Thinking:  p.Text,
+						Signature: p.Signature,
+					})
 				case llm.ToolCallPart:
 					blocks = append(blocks, ContentBlock{
 						Type:  ContentTypeToolUse,
@@ -413,14 +493,14 @@ func convertUnifiedMessages(messages []llm.Message) ([]Message, error) {
 	return out, nil
 }
 
-func convertUnifiedTools(tools []llm.Tool) []Tool {
+func convertUnifiedTools(tools []llm.Tool, bt *breakpointTracker) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
 		out = append(out, Tool{
 			Name:         t.Name,
 			Description:  t.Description,
 			InputSchema:  t.Parameters,
-			CacheControl: convertCacheControl(t.CacheControl),
+			CacheControl: bt.cacheControl(t.CacheControl),
 		})
 	}
 	return out
@@ -473,15 +553,22 @@ func anthropicResponseToResult(resp *MessageResponse) *llm.GenerateResult {
 		},
 	}
 
+	// Anthropic reports input_tokens as non-cached tokens only.
+	// Compute the inclusive total: nonCached + cacheRead + cacheWrite.
+	nonCached := resp.Usage.InputTokens
+	cacheRead := resp.Usage.CacheReadTokens
+	cacheWrite := resp.Usage.CacheCreationTokens
+	totalInput := nonCached + cacheRead + cacheWrite
+
 	result.Usage = llm.Usage{
-		InputTokens:       resp.Usage.InputTokens,
+		InputTokens:       totalInput,
 		OutputTokens:      resp.Usage.OutputTokens,
-		TotalTokens:       resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		CachedInputTokens: resp.Usage.CacheReadTokens,
+		TotalTokens:       totalInput + resp.Usage.OutputTokens,
+		CachedInputTokens: cacheRead,
 		InputTokenDetails: llm.InputTokenDetail{
-			CacheReadTokens:  resp.Usage.CacheReadTokens,
-			CacheWriteTokens: resp.Usage.CacheCreationTokens,
-			NoCacheTokens:    max(0, resp.Usage.InputTokens-resp.Usage.CacheReadTokens),
+			NoCacheTokens:    nonCached,
+			CacheReadTokens:  cacheRead,
+			CacheWriteTokens: cacheWrite,
 		},
 	}
 
@@ -498,6 +585,13 @@ func anthropicResponseToResult(resp *MessageResponse) *llm.GenerateResult {
 			result.Text += block.Text
 		case ContentTypeThinking:
 			result.Reasoning += block.Thinking
+			// Preserve the signature for multi-turn extended thinking.
+			if block.Signature != "" {
+				if result.ReasoningProviderMetadata == nil {
+					result.ReasoningProviderMetadata = map[string]any{}
+				}
+				result.ReasoningProviderMetadata["signature"] = block.Signature
+			}
 		case ContentTypeToolUse:
 			hasToolCall = true
 			var input any
@@ -543,9 +637,9 @@ func toJSONRaw(v any) json.RawMessage {
 // by the Anthropic API for tool_result content blocks.
 //
 // The API requires content to be either a string or an array of content blocks.
-// - If the result is already a string, it is used directly.
-// - Otherwise, the value is JSON-encoded and wrapped as a string so the API
-//   never receives a raw JSON object in the content field.
+//   - If the result is already a string, it is used directly.
+//   - Otherwise, the value is JSON-encoded and wrapped as a string so the API
+//     never receives a raw JSON object in the content field.
 func toolResultToContent(result any) json.RawMessage {
 	if result == nil {
 		return nil

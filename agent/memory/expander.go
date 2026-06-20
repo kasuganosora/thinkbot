@@ -180,9 +180,9 @@ func (e *Expander) formatExpanded(entries []Entry) string {
 	sb.WriteString("[Expanded Memory Details]\n")
 
 	for _, entry := range entries {
-		sb.WriteString(fmt.Sprintf("[%s] ", entry.ID))
+		fmt.Fprintf(&sb, "[%s] ", entry.ID)
 		if entry.Category != "" {
-			sb.WriteString(fmt.Sprintf("(%s) ", entry.Category))
+			fmt.Fprintf(&sb, "(%s) ", entry.Category)
 		}
 		sb.WriteString(entry.Content)
 		sb.WriteByte('\n')

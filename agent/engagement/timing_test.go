@@ -147,7 +147,7 @@ func TestTimingGate_BackoffResetOnEngage(t *testing.T) {
 func TestTimingGate_ProbabilityGating(t *testing.T) {
 	policy := NewCompositePolicy(NewSourceAllowlist("misskey"))
 	gate := NewTimingGate(policy, TimingGateConfig{
-		ReplyProbability: 0.1, // 约 10 条消息才评估一次
+		ReplyProbability:     0.1, // 约 10 条消息才评估一次
 		BurstIntervalSeconds: 0.1,
 	})
 

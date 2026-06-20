@@ -271,6 +271,13 @@ func paramsToOpenAIRequest(params *llm.GenerateParams) (*CreateResponseRequest, 
 		MaxOutputTokens: params.MaxTokens,
 	}
 
+	// Implicit prefix caching with cache key hint + store=false
+	if params.CacheKey != "" {
+		req.PromptCacheKey = params.CacheKey
+	}
+	store := false
+	req.Store = &store
+
 	if params.System != "" {
 		req.Instructions = params.System
 	}

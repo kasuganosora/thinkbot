@@ -164,13 +164,13 @@ func (c *LLMConsolidator) buildPrompt(l0Entries []TieredEntry, existing []Tiered
 	sb.WriteString("## 待处理的工作记忆（L0）\n\n")
 	for _, e := range l0Entries {
 		content := StripThinking(e.Content)
-		sb.WriteString(fmt.Sprintf("[%s] %s\n", e.ID, content))
+		fmt.Fprintf(&sb, "[%s] %s\n", e.ID, content)
 	}
 
 	if len(existing) > 0 {
 		sb.WriteString("\n## 已有的长期记忆（L1，供去重参考）\n\n")
 		for _, e := range existing {
-			sb.WriteString(fmt.Sprintf("[%s] (%s) %s\n", e.ID, e.Category, e.Content))
+			fmt.Fprintf(&sb, "[%s] (%s) %s\n", e.ID, e.Category, e.Content)
 		}
 	}
 
@@ -338,21 +338,21 @@ type TieredManagerConfig struct {
 //
 // 典型生命周期：
 //
-//	1. 用户消息 → WriteWorking() → 存入 L0
-//	2. L0 达到阈值 → Consolidate() → 提取 L1
-//	3. L1 积累到一定量 → Aggregate() → 生成 L2 场景
-//	4. L2 到达间隔 → ExtractProfile() → 更新 L3 画像
-//	5. 检索时 → RetrieveMerged() → 合并 L3+L2+L1+L0
+//  1. 用户消息 → WriteWorking() → 存入 L0
+//  2. L0 达到阈值 → Consolidate() → 提取 L1
+//  3. L1 积累到一定量 → Aggregate() → 生成 L2 场景
+//  4. L2 到达间隔 → ExtractProfile() → 更新 L3 画像
+//  5. 检索时 → RetrieveMerged() → 合并 L3+L2+L1+L0
 type TieredManager struct {
-	store               *TieredStore
-	consolidator        Consolidator
-	aggregator          Aggregator
-	profiler            Profiler
-	autoConsolidate     bool
+	store                *TieredStore
+	consolidator         Consolidator
+	aggregator           Aggregator
+	profiler             Profiler
+	autoConsolidate      bool
 	consolidateThreshold int
-	consolidateDebounce time.Duration
-	tracer              trace.Tracer
-	logger              *zap.SugaredLogger
+	consolidateDebounce  time.Duration
+	tracer               trace.Tracer
+	logger               *zap.SugaredLogger
 
 	// 用于 lastConsolidate 去重（避免短时间重复触发）
 	mu               sync.Mutex
@@ -527,7 +527,7 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 
 	// 标记已处理
 	if len(processedIDs) > 0 {
-		m.store.MarkProcessed(ctx, scope, processedIDs)
+		_ = m.store.MarkProcessed(ctx, scope, processedIDs)
 	}
 
 	span.SetAttributes(attribute.Int("promoted", promoted))
@@ -559,8 +559,8 @@ func (m *TieredManager) updateL1Entry(ctx context.Context, scope Scope, targetID
 		}
 
 		// 删除旧的，写入新的
-		m.store.Delete(ctx, Tier1LongTerm, scope, targetID)
-		m.WriteLongTerm(ctx, Entry{
+		_ = m.store.Delete(ctx, Tier1LongTerm, scope, targetID)
+		_ = m.WriteLongTerm(ctx, Entry{
 			ID:         targetID,
 			Scope:      scope,
 			Content:    content,
