@@ -12,6 +12,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -20,12 +21,10 @@ import (
 
 // SSE 事件类型
 const (
-	sseTextDelta  = "text_delta"  // LLM 文本增量
-	sseDone       = "done"        // 生成完成
-	sseError      = "error"       // 错误
-	sseToolCall   = "tool_call"   // 工具调用
-	sseToolResult = "tool_result" // 工具结果
-	sseStart      = "start"       // 开始处理
+	sseTextDelta = "text_delta" // LLM 文本增量
+	sseDone      = "done"       // 生成完成
+	sseError     = "error"      // 错误
+	sseStart     = "start"      // 开始处理
 )
 
 // handleChatBots 返回当前可聊天的 Bot 列表（状态为 running）。
@@ -84,8 +83,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 
 	userID := fmt.Sprintf("%d", user.ID)
 
-	// 生成 traceID
-	traceID := fmt.Sprintf("web-%d-%d", user.ID, time.Now().UnixNano())
+	// 生成 traceID（使用 crypto/rand，格式 "web-{24 hex}"）
+	traceID := idgen.New("web")
 
 	// 先加载历史（不含当前消息），再异步保存用户消息
 	// 顺序很重要：如果先保存再加载，当前消息会出现在历史中，

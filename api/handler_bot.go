@@ -5,6 +5,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -92,6 +93,7 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "create_bot", "bot_id", req.ID, "name", req.Name)
 	OK(c, def)
 }
 
@@ -141,6 +143,7 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "update_bot", "bot_id", id, "fields", strutil.MapKeys(updates))
 	OKMsg(c, "bot updated", nil)
 }
 
@@ -153,6 +156,7 @@ func (s *Server) handleDeleteBot(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "delete_bot", "bot_id", id)
 	OKMsg(c, "bot deleted", nil)
 }
 
@@ -165,6 +169,7 @@ func (s *Server) handleStartBot(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	auditLog(c, s.logger, "start_bot", "bot_id", id)
 	OKMsg(c, "bot started", nil)
 }
 
@@ -173,5 +178,6 @@ func (s *Server) handleStartBot(c *gin.Context) {
 func (s *Server) handleStopBot(c *gin.Context) {
 	id := c.Param("id")
 	s.botSvc.StopBot(id)
+	auditLog(c, s.logger, "stop_bot", "bot_id", id)
 	OKMsg(c, "bot stopped", nil)
 }

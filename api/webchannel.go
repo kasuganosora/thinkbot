@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -81,9 +82,7 @@ func (c *WebChannel) Inject(ctx context.Context, traceID, userID, text string, e
 	metadata := map[string]any{
 		"source_channel": c.name,
 	}
-	for k, v := range extraMetadata {
-		metadata[k] = v
-	}
+	maps.Copy(metadata, extraMetadata)
 
 	msg := core.Message{
 		ID:        traceID,

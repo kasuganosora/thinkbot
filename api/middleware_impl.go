@@ -89,3 +89,39 @@ func currentUser(c *gin.Context) *dao.User {
 	}
 	return user
 }
+
+// ============================================================================
+// 审计日志辅助
+// ============================================================================
+
+// auditLog 在 handler 内部调用，记录一条结构化审计日志。
+// 典型用法：
+//
+//	auditLog(c, s.logger, "create_bot", "id="+req.ID)
+//	auditLog(c, s.logger, "delete_user", "id="+strconv.FormatUint(uint64(id), 10))
+//	auditLog(c, s.logger, "update_config", "key="+key, "value="+req.Value)
+//
+// 自动从 gin.Context 提取当前用户，无需 handler 手动传参。
+func auditLog(c *gin.Context, logger loggableLogger, action string, details ...any) {
+	user := currentUser(c)
+	args := []any{
+		"action", action,
+		"method", c.Request.Method,
+		"path", c.Request.URL.Path,
+		"ip", c.ClientIP(),
+	}
+	if user != nil {
+		args = append(args, "user_id", user.ID, "user", user.Username, "role", user.Role)
+	} else {
+		args = append(args, "user", "anonymous")
+	}
+	args = append(args, details...)
+	logger.Infow("[AUDIT]", args...)
+}
+
+// loggableLogger 抽象 zap.SugaredLogger，方便测试。
+type loggableLogger interface {
+	Infow(msg string, keysAndValues ...any)
+	Warnw(msg string, keysAndValues ...any)
+	Errorw(msg string, keysAndValues ...any)
+}

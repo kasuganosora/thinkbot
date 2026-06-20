@@ -69,3 +69,16 @@ func stripMarkdownCodeBlock(raw string) string {
 	s = strings.TrimSuffix(s, "```")
 	return strings.TrimSpace(s)
 }
+
+// MapKeys 返回 map 的键列表（无序）。
+// 用于审计日志等场景记录修改了哪些字段。
+func MapKeys[V any](m map[string]V) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}

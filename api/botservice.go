@@ -51,9 +51,10 @@ type BotService struct {
 	mp       metric.MeterProvider
 	eventBus outbound.EventBus
 
-	mu           sync.RWMutex
-	channels     map[string]*WebChannel // botID → WebChannel
-	botInstances map[string]*bot.Bot    // botID → running Bot
+	mu              sync.RWMutex
+	channels        map[string]*WebChannel         // botID → WebChannel
+	botInstances    map[string]*bot.Bot            // botID → running Bot
+	dreamingBundles map[string]*bot.DreamingBundle // botID → DreamingBundle
 }
 
 // NewBotService 创建 BotService。
@@ -68,15 +69,16 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
 	return &BotService{
-		db:           db,
-		store:        store,
-		mgr:          mgr,
-		logger:       logger.With("component", "bot_service"),
-		tp:           tp,
-		mp:           mp,
-		eventBus:     eventBus,
-		channels:     make(map[string]*WebChannel),
-		botInstances: make(map[string]*bot.Bot),
+		db:              db,
+		store:           store,
+		mgr:             mgr,
+		logger:          logger.With("component", "bot_service"),
+		tp:              tp,
+		mp:              mp,
+		eventBus:        eventBus,
+		channels:        make(map[string]*WebChannel),
+		botInstances:    make(map[string]*bot.Bot),
+		dreamingBundles: make(map[string]*bot.DreamingBundle),
 	}
 }
 
@@ -267,6 +269,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建梦境巩固子系统（如果配置了）
 	var dreamScheduler *cron.Scheduler
+	var dreamBundle *bot.DreamingBundle
 	dreamCfg := builder.GetDreamingConfig(id)
 	if dreamCfg.Enabled {
 		loc := builder.GetBotTimezoneLocation(id)
@@ -288,6 +291,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		)
 		if bundle != nil {
 			dreamScheduler = bundle.Scheduler
+			dreamBundle = bundle
 			s.logger.Infow("dreaming enabled",
 				"bot_id", id,
 				"schedule", dreamCfg.Schedule)
@@ -361,6 +365,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.mu.Lock()
 	s.channels[id] = webCh
 	s.botInstances[id] = b
+	if dreamBundle != nil {
+		s.dreamingBundles[id] = dreamBundle
+	}
 	s.mu.Unlock()
 
 	// 更新定义状态
@@ -375,6 +382,10 @@ func (s *BotService) StopBot(id string) {
 	b, exists := s.botInstances[id]
 	delete(s.botInstances, id)
 	delete(s.channels, id)
+	if dreamBundle, ok := s.dreamingBundles[id]; ok {
+		dreamBundle.Stop()
+		delete(s.dreamingBundles, id)
+	}
 	s.mu.Unlock()
 
 	if !exists || b == nil {
@@ -403,6 +414,19 @@ func (s *BotService) IsRunning(id string) bool {
 	defer s.mu.RUnlock()
 	b, ok := s.botInstances[id]
 	return ok && b != nil
+}
+
+// RunningCount 返回当前运行中的 Bot 数量。
+func (s *BotService) RunningCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, b := range s.botInstances {
+		if b != nil {
+			count++
+		}
+	}
+	return count
 }
 
 // StartAll 从 DB 加载所有定义并启动状态为 running 的 Bot。
@@ -620,4 +644,46 @@ func toInt(v any) int {
 		}
 	}
 	return 0
+}
+
+// --- 子系统访问器 ---
+
+// GetDreamingBundle 返回指定 Bot 的梦境巩固子系统（如果已启用）。
+func (s *BotService) GetDreamingBundle(botID string) (*bot.DreamingBundle, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	bundle, ok := s.dreamingBundles[botID]
+	return bundle, ok
+}
+
+// GetCronManager 为指定 Bot 创建 cron.Manager（从 cron store 文件加载）。
+func (s *BotService) GetCronManager(botID string) *cron.Manager {
+	builder := config.NewBuilder(s.store, s.logger)
+	loc := builder.GetBotTimezoneLocation(botID)
+	cronFile := fmt.Sprintf("data/cron/%s_cron.json", botID)
+	store := cron.NewStore(cronFile)
+	return cron.NewManager(store, loc).WithLogger(s.logger)
+}
+
+// CreateLLMProvider 从配置创建 LLM Provider（用于 workflow 等全局子系统）。
+// 选择第一个配置了 LLM 的 Bot 作为 provider 来源。
+func (s *BotService) CreateLLMProvider() (llm.Provider, string, error) {
+	builder := config.NewBuilder(s.store, s.logger)
+	defs, err := s.ListDefinitions()
+	if err != nil {
+		return nil, "", errs.Wrap(err, "list definitions for LLM")
+	}
+	for _, def := range defs {
+		bundle, err := bot.CreateLLMBundle(builder, def.ID)
+		if err != nil {
+			continue
+		}
+		return bundle.Main, bundle.MainDef.Model, nil
+	}
+	return nil, "", errs.New("no LLM provider available — configure at least one bot with an LLM")
+}
+
+// EventBus 返回事件总线。
+func (s *BotService) EventBus() outbound.EventBus {
+	return s.eventBus
 }
