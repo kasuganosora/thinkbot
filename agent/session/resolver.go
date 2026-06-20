@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -245,20 +246,11 @@ func FormatContext(s *Session, maxMessages int) string {
 		if role == "" {
 			role = "unknown"
 		}
-		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", ts, role, truncateText(msg.Text, 200)))
+		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", ts, role, strutil.Truncate(msg.Text, 200)))
 	}
 
 	sb.WriteString("[End Session Context]")
 	return sb.String()
-}
-
-// truncateText 截断文本到指定 rune 数。
-func truncateText(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "..."
 }
 
 // SessionContextFromEnvelope 从 Envelope 中提取 session 上下文文本。

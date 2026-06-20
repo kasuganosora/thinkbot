@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -12,6 +11,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -145,27 +145,11 @@ func (p *LLMProfiler) buildPrompt(l1, l2, existing []TieredEntry) string {
 }
 
 func (p *LLMProfiler) parseResult(text string) []ProfileItem {
-	text = strings.TrimSpace(text)
-	text = strings.TrimPrefix(text, "```json")
-	text = strings.TrimPrefix(text, "```")
-	text = strings.TrimSuffix(text, "```")
-	text = strings.TrimSpace(text)
-
-	// 提取 JSON 数组
-	start := strings.Index(text, "[")
-	end := strings.LastIndex(text, "]")
-	if start < 0 || end < 0 || end <= start {
-		p.logger.Warnw("profiler: no JSON array found in LLM response",
-			"text_preview", truncateForLog(text, 200))
-		return nil
-	}
-
-	jsonStr := text[start : end+1]
 	var items []ProfileItem
-	if err := json.Unmarshal([]byte(jsonStr), &items); err != nil {
+	if err := strutil.ExtractJSON(text, &items); err != nil {
 		p.logger.Warnw("profiler: failed to parse LLM JSON",
 			"err", err,
-			"json_preview", truncateForLog(jsonStr, 200))
+			"text_preview", strutil.Truncate(text, 200))
 		return nil
 	}
 	return items
