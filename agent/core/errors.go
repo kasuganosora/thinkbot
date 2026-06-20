@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ============================================================================
 // Pipeline 专用错误类型
@@ -45,10 +48,10 @@ func (e *AbortError) Error() string {
 
 func (e *AbortError) Unwrap() error { return e.Cause }
 
-// IsAbortError 判断错误是否是 AbortError。
+// IsAbortError 判断错误是否是 AbortError（包括被 fmt.Errorf("%w") 包装的）。
 func IsAbortError(err error) bool {
-	_, ok := err.(*AbortError)
-	return ok
+	var target *AbortError
+	return errors.As(err, &target)
 }
 
 // ============================================================================
@@ -65,8 +68,8 @@ func (e *SkipError) Error() string {
 	return fmt.Sprintf("stage skipped: %s", e.Reason)
 }
 
-// IsSkipError 判断错误是否是 SkipError。
+// IsSkipError 判断错误是否是 SkipError（包括被 fmt.Errorf("%w") 包装的）。
 func IsSkipError(err error) bool {
-	_, ok := err.(*SkipError)
-	return ok
+	var target *SkipError
+	return errors.As(err, &target)
 }

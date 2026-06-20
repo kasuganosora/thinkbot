@@ -41,11 +41,12 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 	data, err := json.Marshal(wf)
 	if err != nil {
 		// 理论上不会失败（Workflow 只含基本类型）
-		return wf // fallback：返回原指针（降级但不崩溃）
+		// 返回空快照，绝不返回原指针以免破坏隔离
+		return &Workflow{ID: wf.ID, Nodes: []*DAGNode{}}
 	}
 	var clone Workflow
 	if err := json.Unmarshal(data, &clone); err != nil {
-		return wf
+		return &Workflow{ID: wf.ID, Nodes: []*DAGNode{}}
 	}
 	clone.EnsureIndex()
 	return &clone

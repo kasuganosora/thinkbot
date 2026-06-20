@@ -181,19 +181,28 @@ func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, err
 
 func (t *httpTransport) Close() error { return nil }
 
-// parseSSEResponse 从 SSE 流中提取最后一条 data: 行的 JSON。
+// parseSSEResponse 从 SSE 流中提取所有 data: 行并拼接为完整的 JSON。
+// SSE 规范允许多行 data: 组成单个事件体。
 func parseSSEResponse(r io.Reader) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
-	var lastData string
+	var dataLines []string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if len(line) > 5 && line[:5] == "data:" {
-			lastData = line[5:]
+		if rest, ok := strings.CutPrefix(line, "data:"); ok {
+			rest = strings.TrimSpace(rest)
+			if rest != "" {
+				dataLines = append(dataLines, rest)
+			}
 		}
 	}
-	if lastData == "" {
+	if len(dataLines) == 0 {
 		return nil, fmt.Errorf("mcp: no data in SSE response")
 	}
-	return []byte(lastData), nil
+	// 如果只有一行，直接返回
+	if len(dataLines) == 1 {
+		return []byte(dataLines[0]), nil
+	}
+	// 多行：拼接（SSE 规范中多行 data 用换行连接）
+	return []byte(strings.Join(dataLines, "\n")), nil
 }

@@ -13,7 +13,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
-	"github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -119,7 +119,7 @@ func (c *TelegramChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 	if err != nil {
 		return errs.Wrap(err, "telegram channel: token validation failed")
 	}
-	log.Logger.Infow("telegram channel started",
+	traceid.L(ctx).Infow("telegram channel started",
 		"channel", c.name, "bot_username", me.Username, "bot_id", me.ID)
 
 	c.botUserID = me.ID
@@ -164,7 +164,7 @@ func (c *TelegramChannel) pollLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return // 主动关闭
 			}
-			log.Logger.Warnw("telegram poll error",
+			traceid.L(ctx).Warnw("telegram poll error",
 				"channel", c.name, "err", err)
 			// 避免疯狂重试
 			select {
@@ -225,7 +225,7 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		actionCtx, actionCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer actionCancel()
 		if err := c.api.sendChatAction(actionCtx, msg.Chat.ID, "typing"); err != nil {
-			log.Logger.Debugw("telegram: sendChatAction failed",
+			traceid.L(ctx).Debugw("telegram: sendChatAction failed",
 				"channel", c.name, "err", err)
 		}
 	}()
@@ -325,7 +325,7 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 
 	// 注入 Ingress
 	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
-		log.Logger.Warnw("telegram ingress receive failed",
+		traceid.L(ctx).Warnw("telegram ingress receive failed",
 			"channel", c.name, "message_id", msg.MessageID, "err", err)
 	}
 }
@@ -399,7 +399,7 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		log.Logger.Infow("telegram channel stopped", "channel", c.name)
+		traceid.L(ctx).Infow("telegram channel stopped", "channel", c.name)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

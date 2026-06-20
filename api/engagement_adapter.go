@@ -36,12 +36,3 @@ func (a *llmJudgeAdapter) Chat(ctx context.Context, system, user string) (string
 	}
 	return result.Text, nil
 }
-
-// truncatePersona 截取人设描述到指定长度（rune），超出部分用省略号替代。
-func truncatePersona(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen]) + "..."
-}

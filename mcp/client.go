@@ -213,6 +213,9 @@ func extractText(blocks []contentBlock) string {
 			buf = append(buf, '\n')
 		}
 	}
+	if len(buf) == 0 {
+		return ""
+	}
 	return string(buf[:len(buf)-1]) // 去掉最后一个换行
 }
 

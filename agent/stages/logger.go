@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -47,10 +48,10 @@ func (s *LoggerStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	}
 
 	if s.LogPayload && env.Message.Text != "" {
-		// 截断过长文本
-		text := env.Message.Text
-		if len(text) > 500 {
-			text = text[:500] + "...(truncated)"
+		// 使用 rune 安全的截断，防止切断多字节 UTF-8 字符
+		text := strutil.Truncate(env.Message.Text, 500)
+		if len([]rune(env.Message.Text)) > 500 {
+			text += "...(truncated)"
 		}
 		fields = append(fields, "text", text)
 	}

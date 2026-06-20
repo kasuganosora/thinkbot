@@ -10,8 +10,8 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -249,7 +249,7 @@ func (c *Client) DoStreamChatCompletion(
 			return onChunk(chunk)
 		},
 		OnError: func(err error) {
-			log.Logger.Debugw("grok stream error", "err", err)
+			traceid.L(ctx).Debugw("grok stream error", "err", err)
 		},
 	}
 

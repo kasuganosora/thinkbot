@@ -571,9 +571,6 @@ func (b *Builder) GetTimezone() string {
 		return tz
 	}
 	// 降级到服务器本地时区
-	if name, err := time.LoadLocation(""); err == nil {
-		_ = name // time.LoadLocation("") 返回 time.Local，无法直接拿到名称
-	}
 	// 尝试从 TZ 环境变量获取
 	if tz := os.Getenv("TZ"); tz != "" {
 		return tz

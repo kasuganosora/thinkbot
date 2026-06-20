@@ -243,13 +243,14 @@ func (s *Store) GetByPrefix(prefix string) map[string]string {
 	check(s.dbCache)
 
 	// 环境变量
-	envPrefix := ConfigKeyToEnvKey(prefix) + "_"
+	// 去掉 prefix 尾部的分隔符，避免 ConfigKeyToEnvKey 转换后产生双下划线
+	envKeyPrefix := ConfigKeyToEnvKey(strings.TrimSuffix(prefix, ".")) + "_"
 	for _, kv := range os.Environ() {
 		envKey, envVal, found := strings.Cut(kv, "=")
 		if !found {
 			continue
 		}
-		if rest, ok := strings.CutPrefix(envKey, envPrefix); ok {
+		if rest, ok := strings.CutPrefix(envKey, envKeyPrefix); ok {
 			rest = EnvKeyToConfigKey(rest)
 			if _, exists := result[rest]; !exists {
 				result[rest] = envVal
@@ -414,10 +415,18 @@ func (s *Store) SetMany(ctx context.Context, kv map[string]string) error {
 		return errs.Wrap(err, "config: commit settings batch")
 	}
 
-	// 更新缓存
+	// 更新缓存并通知监听器
 	s.mu.Lock()
-	maps.Copy(s.dbCache, kv)
+	oldVals := make(map[string]string, len(kv))
+	for key, value := range kv {
+		oldVals[key] = s.dbCache[key]
+		s.dbCache[key] = value
+	}
 	s.mu.Unlock()
+
+	for key, value := range kv {
+		s.notifyListeners(key, oldVals[key], value)
+	}
 
 	return nil
 }
@@ -441,10 +450,14 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		}
 	}
 
+	oldVal, _ := s.Get(key)
+
 	s.mu.Lock()
 	delete(s.overrides, key)
 	delete(s.dbCache, key)
 	s.mu.Unlock()
+
+	s.notifyListeners(key, oldVal, "")
 	return nil
 }
 
