@@ -1,8 +1,8 @@
-package config
+package dao
 
 import "time"
 
-// Setting 是配置持久化的数据库模型。
+// Setting 配置持久化表。
 // 每个配置项存储为一行记录，包含值及前端渲染所需的元数据。
 type Setting struct {
 	// Key 配置键名（如 "llm.openai.api_key"），主键。

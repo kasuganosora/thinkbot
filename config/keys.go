@@ -18,6 +18,8 @@ const (
 	PrefixEngagement = "engagement"
 	PrefixSoul       = "soul"
 	PrefixTools      = "tools"
+	PrefixWorkspace  = "workspace"
+	PrefixSystem     = "system"
 )
 
 // Bot 键。
@@ -85,6 +87,22 @@ const (
 	KeySoulPromptDir = "soul.prompt_dir"
 )
 
+// Workspace 键。
+const (
+	// KeyWorkspaceDir bot 工作空间根目录的物理路径（默认 "data/workspaces"）。
+	// 每个 Bot 在此目录下拥有独立的子目录（{dir}/{botID}/），持久化存储文件。
+	// SOUL.md、笔记、配置等数据保存在此目录，重启后不丢失。
+	KeyWorkspaceDir = "workspace.dir"
+)
+
+// System 键。
+const (
+	// KeySystemTimezone 系统时区（IANA 时区标识符，如 "Asia/Shanghai"、"UTC"）。
+	// 为空时使用服务器本地时区（time.Local）。
+	// 影响范围：bot 的时间感知、Docker 沙箱容器的 TZ 环境变量。
+	KeySystemTimezone = "system.timezone"
+)
+
 // ToolPolicyKey 返回指定 bot 的工具权限策略 JSON 的数据库键。
 // 格式：tools.<bot_id>.policy
 // 值为 ToolPolicy 的 JSON 字符串。
@@ -105,6 +123,13 @@ func LLMConfigKey(llmID string) string {
 // 例如：bot.mybot.main、bot.mybot.light
 func BotLLMKey(botID, role string) string {
 	return "bot." + botID + "." + role
+}
+
+// BotTimezoneKey 返回指定 Bot 的时区配置键。
+// 格式：bot.<bot_id>.timezone
+// 例如：bot.mybot.timezone → "Asia/Shanghai"
+func BotTimezoneKey(botID string) string {
+	return "bot." + botID + ".timezone"
 }
 
 // EnvKeyToConfigKey 将环境变量名转换为配置键。

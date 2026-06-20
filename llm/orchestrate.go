@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
+
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -234,6 +237,8 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		}
 	}
 
+	logToolCallSummary(ctx, allSteps)
+
 	if cfg.OnFinish != nil && lastResult != nil {
 		cfg.OnFinish(lastResult)
 	}
@@ -427,6 +432,8 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			TotalUsage:      totalUsage,
 		})
 
+		logToolCallSummary(ctx, allSteps)
+
 		if cfg.OnFinish != nil {
 			cfg.OnFinish(&GenerateResult{
 				FinishReason:         lastFinishReason,
@@ -447,6 +454,42 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 // ============================================================================
 // Step helpers
 // ============================================================================
+
+// logToolCallSummary 从所有步骤中汇总工具调用统计并记录日志。
+// 记录总调用次数和去重后的工具名称列表。
+func logToolCallSummary(ctx context.Context, steps []StepResult) {
+	totalCalls := 0
+	toolSet := make(map[string]struct{})
+
+	for _, step := range steps {
+		for _, tc := range step.ToolCalls {
+			totalCalls++
+			toolSet[tc.ToolName] = struct{}{}
+		}
+	}
+
+	if totalCalls == 0 {
+		return
+	}
+
+	// 去重排序后的工具名列表
+	uniqueTools := make([]string, 0, len(toolSet))
+	for name := range toolSet {
+		uniqueTools = append(uniqueTools, name)
+	}
+	sort.Strings(uniqueTools)
+
+	logger := traceid.L(ctx)
+	if logger == nil {
+		return
+	}
+
+	logger.Infow("tool call summary",
+		"total_calls", totalCalls,
+		"unique_tools", uniqueTools,
+		"steps", len(steps),
+	)
+}
 
 func buildToolMap(tools []Tool) map[string]*Tool {
 	m := make(map[string]*Tool, len(tools))

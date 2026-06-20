@@ -1,16 +1,15 @@
 package dao
 
-import (
-	dbpkg "github.com/kasuganosora/thinkbot/db"
-	"github.com/kasuganosora/thinkbot/config"
-	"github.com/kasuganosora/thinkbot/workflow"
-	"gorm.io/gorm"
-)
+import "gorm.io/gorm"
 
+// Migrate 执行所有数据库表的自动迁移。
 func Migrate(database *gorm.DB) error {
 	return database.AutoMigrate(
-		&dbpkg.User{},
-		&config.Setting{},
-		&workflow.WorkflowModel{},
+		&User{},
+		&Setting{},
+		&WorkflowModel{},
+		&UsageDaily{},
+		&EntryModel{},
+		&WindowStateModel{},
 	)
 }

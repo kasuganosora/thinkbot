@@ -1,6 +1,6 @@
-package db
+package dao
 
-// User is a sample database model for the project.
+// User 用户表（示例模型）。
 type User struct {
 	ID    uint   `gorm:"primaryKey"`
 	Name  string `gorm:"size:255;not null"`
