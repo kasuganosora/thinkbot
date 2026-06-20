@@ -18,12 +18,14 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/channel/misskey"
 	"github.com/kasuganosora/thinkbot/channel/telegram"
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -263,6 +265,35 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("channel created", "type", cd.Type, "name", cd.Name)
 	}
 
+	// 创建梦境巩固子系统（如果配置了）
+	var dreamScheduler *cron.Scheduler
+	dreamCfg := builder.GetDreamingConfig(id)
+	if dreamCfg.Enabled {
+		loc := builder.GetBotTimezoneLocation(id)
+		cronFile := fmt.Sprintf("data/cron/%s_dream.json", id)
+
+		bundle := bot.NewDreamingBundle(
+			memory.DreamConfig{
+				Enabled:          dreamCfg.Enabled,
+				Schedule:         dreamCfg.Schedule,
+				JaccardThreshold: 0.9,
+				MaxDreamTokens:   10000,
+			},
+			bundle.Main, // 使用 bot 的主 LLM
+			loc,
+			s.tp,
+			s.logger,
+			id,
+			cronFile,
+		)
+		if bundle != nil {
+			dreamScheduler = bundle.Scheduler
+			s.logger.Infow("dreaming enabled",
+				"bot_id", id,
+				"schedule", dreamCfg.Schedule)
+		}
+	}
+
 	// 创建 Bot
 	botCfg := bot.BotConfig{
 		Workers:      def.Workers,
@@ -277,15 +308,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	b, err := bot.New(bot.BotParams{
-		ID:         id,
-		Name:       def.Name,
-		Config:     botCfg,
-		Pipeline:   p,
-		Dispatcher: dispatcher,
-		Channels:   allChannels,
-		EventBus:   s.eventBus,
-		Logger:     s.logger,
-		TP:         s.tp,
+		ID:             id,
+		Name:           def.Name,
+		Config:         botCfg,
+		Pipeline:       p,
+		Dispatcher:     dispatcher,
+		Channels:       allChannels,
+		EventBus:       s.eventBus,
+		Logger:         s.logger,
+		TP:             s.tp,
+		DreamScheduler: dreamScheduler,
 	})
 	if err != nil {
 		rollback()
