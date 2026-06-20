@@ -102,6 +102,21 @@ type UpdateChannelReq struct {
 	Enabled *bool   `json:"enabled"`
 }
 
+// --- 梦境巩固配置 ---
+
+// DreamingConfigResp 梦境巩固配置响应。
+type DreamingConfigResp struct {
+	Enabled  bool   `json:"enabled"`
+	Schedule string `json:"schedule"`
+}
+
+// UpdateDreamingConfigReq 更新梦境巩固配置请求。
+// 所有字段可选，只更新提供的字段。
+type UpdateDreamingConfigReq struct {
+	Enabled  *bool   `json:"enabled"`
+	Schedule *string `json:"schedule"`
+}
+
 // --- 配置 ---
 
 // SetConfigReq 设置单个配置项请求。

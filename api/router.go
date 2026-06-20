@@ -72,11 +72,15 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/start", s.handleStartBot)
 				botsAdmin.POST("/:id/stop", s.handleStopBot)
 
+				// 梦境巩固配置（嵌套在 Bot 下）
+				botsAdmin.GET("/:id/dreaming", s.handleGetDreamingConfig)
+				botsAdmin.PUT("/:id/dreaming", s.handleUpdateDreamingConfig)
+
 				// Channel 配置管理（嵌套在 Bot 下）
-				botsAdmin.GET("/:botId/channels", s.handleListChannels)
-				botsAdmin.POST("/:botId/channels", s.handleCreateChannel)
-				botsAdmin.PUT("/:botId/channels/:id", s.handleUpdateChannel)
-				botsAdmin.DELETE("/:botId/channels/:id", s.handleDeleteChannel)
+				botsAdmin.GET("/:id/channels", s.handleListChannels)
+				botsAdmin.POST("/:id/channels", s.handleCreateChannel)
+				botsAdmin.PUT("/:id/channels/:cid", s.handleUpdateChannel)
+				botsAdmin.DELETE("/:id/channels/:cid", s.handleDeleteChannel)
 			}
 		}
 

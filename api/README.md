@@ -8,6 +8,7 @@
 - **SSE 流式聊天**：`WebChannel` 将用户消息注入 Bot Pipeline，回复以 SSE 事件流推送
 - **认证中间件**：Cookie + Session 会话管理，按角色权限控制接口访问
 - **SPA 静态服务**：自动检测 `static/` 目录并提供前端单页应用
+- **梦境巩固配置**：按 Bot 独立读取/设置梦境巩固（dreaming）参数
 
 ## 关键类型
 
@@ -22,9 +23,11 @@
 ## 主要路由
 
 ```
-POST /api/auth/login       — 登录
-GET  /api/bots             — Bot 列表
-POST /api/chat/send        — SSE 流式聊天
-GET  /api/stats/overview   — 统计概览
-PUT  /api/config/:key      — 设置配置项
+POST /api/auth/login           — 登录
+GET  /api/bots                 — Bot 列表
+POST /api/chat/send            — SSE 流式聊天
+GET  /api/stats/overview       — 统计概览
+PUT  /api/config/:key          — 设置配置项
+GET  /api/bots/:id/dreaming    — 获取 Bot 梦境巩固配置（admin）
+PUT  /api/bots/:id/dreaming    — 更新 Bot 梦境巩固配置（admin）
 ```
