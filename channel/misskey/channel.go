@@ -505,11 +505,20 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		text = fmt.Sprintf("[Timeline] @%s: %s", note.User.Username, text)
 	}
 
+	// 确定 Channel 标识：
+	// - timeline 事件（社交时间线）→ 共享的社交空间，所有用户共享同一 channel scope
+	// - mention/reply 事件（直接互动）→ 按 user ID 隔离，视为 1:1 对话
+	// UserID 始终为发言者 ID，记忆系统据此为每个用户独立构建画像
+	channelID := note.User.ID
+	if eventType == "timeline" {
+		channelID = "misskey:timeline"
+	}
+
 	coreMsg := core.Message{
 		ID:        note.ID,
 		BotID:     c.botID,
 		Source:    c.name,
-		Channel:   note.User.ID, // 会话空间标识：用户 ID（同一用户的帖子视为一个对话流）
+		Channel:   channelID,
 		ChatType:  chatType,
 		UserID:    note.User.ID,
 		Text:      text,
