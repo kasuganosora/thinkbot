@@ -7,8 +7,8 @@ import (
 	"time"
 
 	httputil "github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -83,7 +83,7 @@ func (c *Client) DoStreamResponse(
 			return onEvent(se)
 		},
 		OnError: func(err error) {
-			log.Logger.Debugw("openai stream error", "err", err)
+			traceid.L(ctx).Debugw("openai stream error", "err", err)
 		},
 	}
 

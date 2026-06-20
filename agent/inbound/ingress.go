@@ -77,11 +77,17 @@ func NewIngress(
 		cfg.BufferSize = DefaultIngressConfig().BufferSize
 	}
 
+	selfIDs := cfg.SelfIDSet
+	if selfIDs == nil {
+		// 在构造时初始化，避免 lazyInitSelfIDs 的并发安全问题
+		selfIDs = NewSelfIDSet()
+	}
+
 	return &Ingress{
 		ch:      make(chan *core.Envelope, cfg.BufferSize),
 		tracer:  tp.Tracer("github.com/kasuganosora/thinkbot/agent/inbound"),
 		logger:  logger,
-		selfIDs: cfg.SelfIDSet,
+		selfIDs: selfIDs,
 	}
 }
 
@@ -143,17 +149,28 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 	defer span.End()
 
 	// 投递
-	select {
-	case g.ch <- env:
-		g.logger.Debugw("message received",
-			"trace_id", msg.TraceID,
-			"message_id", msg.ID,
-			"source", msg.Source,
-			"channel", msg.Channel)
-		return nil
-	case <-ctx.Done():
+	// 使用闭包 + recover 安全发送，防止 Close() 与 Receive() 的竞态导致 panic
+	sent := false
+	func() {
+		defer func() { _ = recover() }()
+		select {
+		case g.ch <- env:
+			sent = true
+		case <-ctx.Done():
+		}
+	}()
+	if !sent {
+		if g.closed.Load() {
+			return fmt.Errorf("ingress: closed")
+		}
 		return errs.Wrap(ctx.Err(), "ingress: context cancelled")
 	}
+	g.logger.Debugw("message received",
+		"trace_id", msg.TraceID,
+		"message_id", msg.ID,
+		"source", msg.Source,
+		"channel", msg.Channel)
+	return nil
 }
 
 // TryReceive 尝试非阻塞地注入一条消息。
@@ -182,12 +199,16 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 
 	env := core.NewEnvelope(msg)
 
-	select {
-	case g.ch <- env:
-		return true
-	default:
-		return false
-	}
+	sent := false
+	func() {
+		defer func() { _ = recover() }()
+		select {
+		case g.ch <- env:
+			sent = true
+		default:
+		}
+	}()
+	return sent
 }
 
 // C 返回 Envelope 消费通道。

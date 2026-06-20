@@ -12,6 +12,7 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -314,7 +315,7 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 	} else {
 		output := ""
 		if result != nil {
-			output = truncate(result.Output, 500)
+			output = strutil.Truncate(result.Output, 500)
 		}
 		latest.LastResult = output
 		latest.LastError = ""
@@ -420,14 +421,6 @@ func (s *Scheduler) computeNextRun(job *Job, fromUTC time.Time) {
 		job.State = StateDone
 		job.NextRunAt = nil
 	}
-}
-
-// truncate 截断字符串到 max 字符。
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
 }
 
 // ============================================================================

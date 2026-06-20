@@ -14,8 +14,8 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/strutil"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -147,9 +147,8 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 	if err != nil {
 		return errs.Wrap(err, "misskey channel: token validation failed")
 	}
-	log.Logger.Infow("misskey channel started",
+	traceid.L(ctx).Infow("misskey channel started",
 		"channel", c.name, "username", me.Username, "host", c.cfg.Host)
-
 	c.botUserID = me.ID
 	c.botUsername = me.Username
 	c.dedup = make(map[string]time.Time)
@@ -199,7 +198,7 @@ func (c *MisskeyChannel) streamLoop(ctx context.Context) {
 		}
 
 		if err != nil {
-			log.Logger.Warnw("misskey stream disconnected",
+			traceid.L(ctx).Warnw("misskey stream disconnected",
 				"channel", c.name, "err", err, "reconnect_delay", delay)
 		}
 
@@ -301,15 +300,15 @@ func (c *MisskeyChannel) connectAndServe(ctx context.Context, connID, timelineCo
 			// 发送所有订阅消息
 			for _, msg := range connectMsgs {
 				if err := conn.WriteText(msg); err != nil {
-					log.Logger.Warnw("misskey stream: failed to send connect message",
+					traceid.L(ctx).Warnw("misskey stream: failed to send connect message",
 						"channel", c.name, "err", err)
 				}
 			}
-			log.Logger.Debugw("misskey stream: subscribed",
+			traceid.L(ctx).Debugw("misskey stream: subscribed",
 				"channel", c.name, "channels", connectMsgs)
 		},
 		OnError: func(err error) {
-			log.Logger.Debugw("misskey ws error",
+			traceid.L(ctx).Debugw("misskey ws error",
 				"channel", c.name, "err", err)
 		},
 		OnText: func(text string) error {
@@ -336,7 +335,7 @@ func mustJSON(v any) json.RawMessage {
 func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, timelineConnID string) error {
 	var base streamMessage
 	if err := json.Unmarshal([]byte(text), &base); err != nil {
-		log.Logger.Debugw("misskey stream: failed to parse message",
+		traceid.L(ctx).Debugw("misskey stream: failed to parse message",
 			"channel", c.name, "raw", text, "err", err)
 		return nil // 不中断连接
 	}
@@ -357,7 +356,7 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 		case "mention", "reply":
 			var note Note
 			if err := json.Unmarshal(chMsg.Body, &note); err != nil {
-				log.Logger.Debugw("misskey stream: failed to parse note",
+				traceid.L(ctx).Debugw("misskey stream: failed to parse note",
 					"channel", c.name, "type", chMsg.Type, "err", err)
 				return nil
 			}
@@ -382,7 +381,7 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 		case "note":
 			var note Note
 			if err := json.Unmarshal(chMsg.Body, &note); err != nil {
-				log.Logger.Debugw("misskey stream: failed to parse timeline note",
+				traceid.L(ctx).Debugw("misskey stream: failed to parse timeline note",
 					"channel", c.name, "err", err)
 				return nil
 			}
@@ -534,7 +533,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	}
 
 	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
-		log.Logger.Warnw("misskey ingress receive failed",
+		traceid.L(ctx).Warnw("misskey ingress receive failed",
 			"channel", c.name, "note_id", note.ID, "err", err)
 	}
 }
@@ -614,7 +613,7 @@ func (c *MisskeyChannel) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		log.Logger.Infow("misskey channel stopped", "channel", c.name)
+		traceid.L(ctx).Infow("misskey channel stopped", "channel", c.name)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -634,7 +633,7 @@ func (c *MisskeyChannel) ReplyWithVisibility(ctx context.Context, noteID, text, 
 
 	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, "", nil)
 	if err != nil {
-		log.Logger.Warnw("misskey: reply failed, target note may be deleted",
+		traceid.L(ctx).Warnw("misskey: reply failed, target note may be deleted",
 			"channel", c.name, "note_id", noteID, "err", err)
 	}
 	return err
@@ -704,7 +703,7 @@ func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 	// 构建回复
 	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, cw, nil)
 	if err != nil {
-		log.Logger.Warnw("misskey send: reply failed",
+		traceid.L(ctx).Warnw("misskey send: reply failed",
 			"channel", c.name, "note_id", noteID, "err", err)
 		return errs.Wrapf(err, "misskey send: reply to %q failed", noteID)
 	}

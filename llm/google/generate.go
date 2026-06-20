@@ -9,8 +9,8 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -90,7 +90,7 @@ func (c *Client) StreamGenerateContentWithConfig(
 			return onChunk(chunk)
 		},
 		OnError: func(err error) {
-			log.Logger.Debugw("gemini stream error", "err", err)
+			traceid.L(ctx).Debugw("gemini stream error", "err", err)
 		},
 	}
 

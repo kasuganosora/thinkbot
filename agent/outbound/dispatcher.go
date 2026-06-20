@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -199,7 +200,7 @@ func (d *MultiDispatcher) Dispatch(ctx context.Context, actions []core.Action) e
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("dispatch errors: %d/%d actions failed", len(errs), len(actions))
+		return fmt.Errorf("dispatch errors: %d/%d actions failed: %w", len(errs), len(actions), errors.Join(errs...))
 	}
 	return nil
 }

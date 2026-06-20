@@ -10,8 +10,8 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -83,7 +83,7 @@ func (c *Client) DoStreamChatCompletion(
 			return onChunk(chunk)
 		},
 		OnError: func(err error) {
-			log.Logger.Debugw("openai chat stream error", "err", err)
+			traceid.L(ctx).Debugw("openai chat stream error", "err", err)
 		},
 	}
 

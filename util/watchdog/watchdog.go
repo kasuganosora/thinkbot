@@ -93,8 +93,9 @@ func (w *Watchdog) Feed() {
 	if w.stopped {
 		return
 	}
-	// 如果 context 已经因 parent 取消而失效，先重建
-	if w.ctx.Err() != nil {
+	// 如果看门狗自身已超时，不再重建 context，保持 TimedOut() == true 语义。
+	// 仅当 context 因 parent 取消而失效（非超时）时才重建。
+	if w.ctx.Err() != nil && !w.timedOut.Load() {
 		w.resetCtx()
 	}
 	w.timer.Reset(w.timeout)
@@ -110,7 +111,7 @@ func (w *Watchdog) FeedWithTimeout(timeout time.Duration) {
 	}
 	old := w.timeout
 	w.timeout = timeout
-	if w.ctx.Err() != nil {
+	if w.ctx.Err() != nil && !w.timedOut.Load() {
 		w.resetCtx()
 	}
 	w.timer.Reset(timeout)
@@ -170,14 +171,19 @@ func (w *Watchdog) resetCtx() {
 	w.ctx = ctx
 	w.cancel = cancel
 
+	// 将 goroutine 中使用的字段拷贝到局部变量，避免 data race
+	name := w.name
+	logger := w.logger
+	parent := w.parent
+
 	// 监听 parent 取消，自动传播
 	go func() {
 		select {
 		case <-ctx.Done():
-		case <-w.parent.Done():
+		case <-parent.Done():
 			cancel()
-			w.logger.Warnw("watchdog parent context canceled",
-				"name", w.name)
+			logger.Warnw("watchdog parent context canceled",
+				"name", name)
 		}
 	}()
 }

@@ -12,8 +12,9 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	"github.com/kasuganosora/thinkbot/util/strutil"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -95,7 +96,7 @@ func (c *Client) StreamMessageWithConfig(
 			return onEvent(se)
 		},
 		OnError: func(err error) {
-			log.Logger.Debugw("anthropic stream error", "err", err)
+			traceid.L(ctx).Debugw("anthropic stream error", "err", err)
 		},
 	}
 
@@ -343,7 +344,7 @@ func parseAPIError(resp *httputil.Response, httpErr error) error {
 			return llm.NewLLMError(
 				httpStatusToReason(resp.StatusCode),
 				"anthropic",
-				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(resp.Body)),
+				fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strutil.Truncate(string(resp.Body), 500)),
 				llm.WithCause(httpErr),
 			)
 		}
@@ -366,7 +367,7 @@ func parseStreamAPIError(err error) error {
 		return llm.NewLLMError(
 			httpStatusToReason(streamErr.StatusCode),
 			"anthropic",
-			fmt.Sprintf("HTTP %d: %s", streamErr.StatusCode, truncateBody(streamErr.Body)),
+			fmt.Sprintf("HTTP %d: %s", streamErr.StatusCode, strutil.Truncate(string(streamErr.Body), 500)),
 			llm.WithCause(err),
 		)
 	}
@@ -447,15 +448,6 @@ func parseRetryAfterHeader(headers http.Header) time.Duration {
 	return 0
 }
 
-func truncateBody(body []byte) string {
-	const max = 500
-	if len(body) <= max {
-		return string(body)
-	}
-	return string(body[:max]) + "..."
-}
-
-// validateMessageRequest 校验 MessageRequest 必要字段。
 func validateMessageRequest(req *MessageRequest) error {
 	if req.Model == "" {
 		return errors.New("anthropic: model is required")

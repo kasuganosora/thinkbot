@@ -9,6 +9,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -124,7 +125,7 @@ func (c *WebChannel) UnregisterResponse(traceID string) {
 
 // Send 实现 bot.Sender / outbound.ChannelSender。
 // 将 Bot 的回复路由到对应的 traceID response channel。
-func (c *WebChannel) Send(_ context.Context, action core.Action) error {
+func (c *WebChannel) Send(ctx context.Context, action core.Action) error {
 	// 从 Action.Metadata 提取 traceID（由 pipeline 设置）
 	traceID := ""
 	if action.Metadata != nil {
@@ -151,7 +152,8 @@ func (c *WebChannel) Send(_ context.Context, action core.Action) error {
 	select {
 	case ch <- action:
 	default:
-		// channel 满，丢弃（SSE 可能已断开）
+		traceid.L(ctx).Warnw("webchannel: response channel full, action dropped",
+			"channel", c.name, "trace_id", traceID, "action_type", action.Type)
 	}
 	return nil
 }

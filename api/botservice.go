@@ -31,6 +31,7 @@ import (
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -254,7 +255,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 			promptCfg := engagement.PromptConfig{
 				BotName:    def.Name,
-				BotPersona: truncatePersona(def.SystemPrompt, 200),
+				BotPersona: strutil.Truncate(def.SystemPrompt, 200),
 				Interests:  engCfg.Keywords,
 			}
 

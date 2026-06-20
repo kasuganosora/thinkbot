@@ -13,6 +13,7 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -418,7 +419,7 @@ func parseAPIError(resp *httputil.Response, httpErr error) error {
 		return llm.NewLLMError(
 			openaiHttpStatusToReason(resp.StatusCode),
 			"openai",
-			fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncateBody(resp.Body)),
+			fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strutil.Truncate(string(resp.Body), 500)),
 			llm.WithCause(httpErr),
 		)
 	}
@@ -494,14 +495,6 @@ func parseOpenAIRetryAfter(headers http.Header) time.Duration {
 		}
 	}
 	return 0
-}
-
-func truncateBody(body []byte) string {
-	const max = 500
-	if len(body) <= max {
-		return string(body)
-	}
-	return string(body[:max]) + "..."
 }
 
 func validateRequest(req *CreateResponseRequest) error {

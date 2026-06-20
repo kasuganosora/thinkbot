@@ -66,8 +66,10 @@ func (r *Repository) Save(wf *Workflow) error {
 func (r *Repository) Get(id string) (*Workflow, error) {
 	r.mu.RLock()
 	if wf, ok := r.cache[id]; ok {
+		// 返回深拷贝，确保调用方的修改不影响缓存中的快照
+		clone := cloneWorkflow(wf)
 		r.mu.RUnlock()
-		return wf, nil
+		return clone, nil
 	}
 	r.mu.RUnlock()
 
@@ -81,9 +83,9 @@ func (r *Repository) Get(id string) (*Workflow, error) {
 		if err != nil {
 			return nil, errs.Wrapf(err, "failed to deserialize workflow %s", id)
 		}
-		// 填充缓存
+		// 填充缓存（存入 clone，返回另一个 clone）
 		r.mu.Lock()
-		r.cache[id] = wf
+		r.cache[id] = cloneWorkflow(wf)
 		r.mu.Unlock()
 		return wf, nil
 	}

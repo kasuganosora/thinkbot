@@ -11,6 +11,7 @@ import (
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	utilhttp "github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -238,7 +239,7 @@ func (s *duckDuckGoSearcher) Search(ctx context.Context, query string, maxResult
 			continue
 		}
 		results = append(results, SearchResult{
-			Title:   truncateText(rt.Text, 80),
+			Title:   strutil.Truncate(rt.Text, 80),
 			Snippet: rt.Text,
 			URL:     rt.URL,
 		})
@@ -327,11 +328,4 @@ func toIntSearch(v any) (int, bool) {
 		return int(n), true
 	}
 	return 0, false
-}
-
-func truncateText(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }
