@@ -7,7 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kasuganosora/thinkbot/util/log"
+	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ErrWatchdogTimeout 是看门狗超时时的 sentinel error。
@@ -20,6 +22,7 @@ type Watchdog struct {
 	parent  context.Context
 	timeout time.Duration
 	name    string
+	logger  *zap.SugaredLogger // 从 parent context 派生，携带 trace_id
 
 	mu        sync.Mutex
 	timer     *time.Timer
@@ -45,10 +48,11 @@ func NewWithName(parent context.Context, timeout time.Duration, name string) *Wa
 		parent:  parent,
 		timeout: timeout,
 		name:    name,
+		logger:  traceid.L(parent),
 	}
 	w.resetCtx()
 	w.timer = time.AfterFunc(timeout, w.fire)
-	log.Logger.Infow("watchdog started", "name", name, "timeout", timeout)
+	w.logger.Infow("watchdog started", "name", name, "timeout", timeout)
 	return w
 }
 
@@ -66,11 +70,12 @@ func NewWithNameAndCallback(parent context.Context, timeout time.Duration, name 
 		parent:    parent,
 		timeout:   timeout,
 		name:      name,
+		logger:    traceid.L(parent),
 		onTimeout: onTimeout,
 	}
 	w.resetCtx()
 	w.timer = time.AfterFunc(timeout, w.fire)
-	log.Logger.Infow("watchdog started", "name", name, "timeout", timeout)
+	w.logger.Infow("watchdog started", "name", name, "timeout", timeout)
 	return w
 }
 
@@ -93,7 +98,7 @@ func (w *Watchdog) Feed() {
 		w.resetCtx()
 	}
 	w.timer.Reset(w.timeout)
-	log.Logger.Debugw("watchdog fed", "name", w.name, "timeout", w.timeout)
+	w.logger.Debugw("watchdog fed", "name", w.name, "timeout", w.timeout)
 }
 
 // FeedWithTimeout 投喂看门狗并动态修改超时时间。
@@ -109,7 +114,7 @@ func (w *Watchdog) FeedWithTimeout(timeout time.Duration) {
 		w.resetCtx()
 	}
 	w.timer.Reset(timeout)
-	log.Logger.Debugw("watchdog fed (timeout updated)",
+	w.logger.Debugw("watchdog fed (timeout updated)",
 		"name", w.name, "old_timeout", old, "new_timeout", timeout)
 }
 
@@ -126,7 +131,7 @@ func (w *Watchdog) Stop(cancel bool) {
 		w.cancel()
 	}
 	w.stopped = true
-	log.Logger.Infow("watchdog stopped", "name", w.name, "cancel", cancel)
+	w.logger.Infow("watchdog stopped", "name", w.name, "cancel", cancel)
 }
 
 // Timeout 返回当前配置的超时时长。
@@ -171,7 +176,7 @@ func (w *Watchdog) resetCtx() {
 		case <-ctx.Done():
 		case <-w.parent.Done():
 			cancel()
-			log.Logger.Warnw("watchdog parent context canceled",
+			w.logger.Warnw("watchdog parent context canceled",
 				"name", w.name)
 		}
 	}()
@@ -190,7 +195,7 @@ func (w *Watchdog) fire() {
 	name := w.name
 	w.mu.Unlock()
 
-	log.Logger.Warnw("watchdog timeout! context canceled",
+	w.logger.Warnw("watchdog timeout! context canceled",
 		"name", name)
 
 	if cb != nil {

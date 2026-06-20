@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -187,40 +187,14 @@ func (c *LLMConsolidator) buildPrompt(l0Entries []TieredEntry, existing []Tiered
 
 // parseResult 解析 LLM 返回的决策结果。
 func (c *LLMConsolidator) parseResult(text string) []ConsolidateResult {
-	text = strings.TrimSpace(text)
-	// 移除可能的 markdown 代码块标记
-	text = strings.TrimPrefix(text, "```json")
-	text = strings.TrimPrefix(text, "```")
-	text = strings.TrimSuffix(text, "```")
-	text = strings.TrimSpace(text)
-
-	// 提取 JSON 数组（LLM 可能在前后添加解释文本）
-	start := strings.Index(text, "[")
-	end := strings.LastIndex(text, "]")
-	if start < 0 || end < 0 || end <= start {
-		c.logger.Warnw("consolidator: no JSON array found in LLM response",
-			"text_preview", truncateForLog(text, 200))
-		return nil
-	}
-
-	jsonStr := text[start : end+1]
 	var results []ConsolidateResult
-	if err := json.Unmarshal([]byte(jsonStr), &results); err != nil {
+	if err := strutil.ExtractJSON(text, &results); err != nil {
 		c.logger.Warnw("consolidator: failed to parse LLM JSON",
 			"err", err,
-			"json_preview", truncateForLog(jsonStr, 200))
+			"text_preview", strutil.Truncate(text, 200))
 		return nil
 	}
 	return results
-}
-
-// truncateForLog 截断字符串用于日志预览。
-func truncateForLog(s string, maxRunes int) string {
-	r := []rune(s)
-	if len(r) <= maxRunes {
-		return s
-	}
-	return string(r[:maxRunes]) + "..."
 }
 
 const defaultConsolidatePrompt = `你是一个记忆提取助手。你的任务是从 Bot 的工作记忆（原始对话/观察）中提取值得长期保存的结构化事实。

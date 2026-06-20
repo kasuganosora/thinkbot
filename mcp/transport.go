@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -170,7 +171,7 @@ func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, err
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	if contains(contentType, "text/event-stream") {
+	if strings.Contains(contentType, "text/event-stream") {
 		return parseSSEResponse(resp.Body)
 	}
 	return io.ReadAll(resp.Body)
@@ -193,8 +194,4 @@ func parseSSEResponse(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("mcp: no data in SSE response")
 	}
 	return []byte(lastData), nil
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && bytes.Contains([]byte(s), []byte(substr))
 }

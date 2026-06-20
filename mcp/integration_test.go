@@ -201,7 +201,7 @@ func TestIntegration_MCP_ToolResolution(t *testing.T) {
 	mgr := setupIntegrationMCP(t)
 
 	// 创建 ToolManager 并注册 MCP Provider
-	toolMgr := tools.NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	toolMgr := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	if err := RegisterTools(toolMgr, mgr); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestIntegration_MCP_LLMOrchestration(t *testing.T) {
 	mgr := setupIntegrationMCP(t)
 
 	// 设置 MCP Provider
-	toolMgr := tools.NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	toolMgr := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	if err := RegisterTools(toolMgr, mgr); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestIntegration_MCP_EnableDisable(t *testing.T) {
 	}
 
 	// 注册到 ToolManager
-	toolMgr := tools.NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	toolMgr := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	if err := RegisterTools(toolMgr, mgr); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestIntegration_MCP_LLM_RealSearch(t *testing.T) {
 
 	mgr := setupIntegrationMCP(t)
 
-	toolMgr := tools.NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	toolMgr := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	if err := RegisterTools(toolMgr, mgr); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}

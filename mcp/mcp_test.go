@@ -521,7 +521,7 @@ func TestRegisterTools(t *testing.T) {
 	mgr.clients["srv_x"] = client
 	mgr.mu.Unlock()
 
-	toolMgr := tools.NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	toolMgr := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 
 	if err := RegisterTools(toolMgr, mgr); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
@@ -542,7 +542,7 @@ func TestRegisterTools(t *testing.T) {
 }
 
 func TestRegisterTools_NilManager(t *testing.T) {
-	toolMgr := tools.NewToolManager(prompt.NewRegistry(), zap.NewNop().Sugar())
+	toolMgr := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
 	if err := RegisterTools(toolMgr, nil); err != nil {
 		t.Fatalf("RegisterTools with nil manager should not error: %v", err)
 	}

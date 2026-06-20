@@ -6,8 +6,8 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // Config 重试配置。
@@ -87,6 +87,7 @@ type Result struct {
 // Do 执行 fn，按 cfg 配置自动重试。
 // name 用于日志标识。ctx 取消后立即停止重试并返回 ctx.Err()。
 func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Context) error) Result {
+	logger := traceid.L(ctx)
 	start := time.Now()
 
 	backoff := DefaultBackoff()
@@ -112,7 +113,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 			// 成功
 			elapsed := time.Since(start)
 			if attempts > 1 {
-				log.Logger.Infow("retry succeeded",
+				logger.Infow("retry succeeded",
 					"name", name, "attempts", attempts, "panics", panics, "elapsed", elapsed)
 			}
 			return Result{
@@ -125,7 +126,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 		// context 取消，立即返回
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			elapsed := time.Since(start)
-			log.Logger.Warnw("retry aborted (context canceled)",
+			logger.Warnw("retry aborted (context canceled)",
 				"name", name, "attempts", attempts, "ctx_err", ctxErr, "last_err", err)
 			return Result{
 				Err:          fmt.Errorf("%w (last error: %v)", ctxErr, err),
@@ -138,7 +139,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 		// --- ShouldRetry 回调判断 ---
 		if cfg.ShouldRetry != nil && !cfg.ShouldRetry(attempts, err) {
 			elapsed := time.Since(start)
-			log.Logger.Debugw("retry skipped by ShouldRetry",
+			logger.Debugw("retry skipped by ShouldRetry",
 				"name", name, "attempt", attempts, "err", err)
 			return Result{
 				Err:          err,
@@ -151,7 +152,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 		// --- 判断是否继续重试 ---
 		if !shouldRetry(cfg.MaxRetries, attempts) {
 			elapsed := time.Since(start)
-			log.Logger.Errorw("retry exhausted",
+			logger.Errorw("retry exhausted",
 				"name", name, "attempts", attempts, "panics", panics, "elapsed", elapsed, "err", err)
 			return Result{
 				Err:          errs.Wrapf(err, "retry exhausted after %d attempts", attempts),
@@ -179,7 +180,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 			}
 		}
 
-		log.Logger.Warnw("retry scheduled",
+		logger.Warnw("retry scheduled",
 			"name", name, "attempt", attempts, "wait", wait, "err", err)
 
 		// 回调
@@ -191,7 +192,7 @@ func Do(ctx context.Context, name string, cfg Config, fn func(ctx context.Contex
 		select {
 		case <-ctx.Done():
 			elapsed := time.Since(start)
-			log.Logger.Warnw("retry wait interrupted (context canceled)",
+			logger.Warnw("retry wait interrupted (context canceled)",
 				"name", name, "attempt", attempts)
 			return Result{
 				Err:          fmt.Errorf("%w (during retry wait)", ctx.Err()),
@@ -225,7 +226,7 @@ func safeExec(
 			stack := debug.Stack()
 			*panicCount++
 
-			log.Logger.Errorw("panic recovered during retry",
+			traceid.L(ctx).Errorw("panic recovered during retry",
 				"name", name, "attempt", attempt, "panic", r, "stack", string(stack))
 
 			if onPanic != nil {
