@@ -156,7 +156,7 @@ func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, err
 	if err != nil {
 		return nil, errs.Wrap(err, "mcp: http request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 捕获服务器分配的 session ID（通常在 initialize 响应中返回）
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {

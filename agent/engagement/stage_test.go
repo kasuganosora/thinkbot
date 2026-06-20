@@ -95,14 +95,14 @@ func TestEngagementStage_ReadOnlyChannel(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 只读渠道 → 不升级
-	if result.Message.Mentioned {
-		t.Error("should not engage on read-only channel")
-	}
-
 	// 但消息继续流转
 	if result == nil {
 		t.Fatal("message should not be dropped")
+	}
+
+	// 只读渠道 → 不升级
+	if result.Message.Mentioned {
+		t.Error("should not engage on read-only channel")
 	}
 
 	// Envelope 应标记评估结果
@@ -260,7 +260,7 @@ func TestEngagementStage_ConsumeToken(t *testing.T) {
 	// 第一次参与 → 消耗 1 个令牌
 	msg1 := *timelineMsg("golang discussion 1", "user1", "misskey")
 	env1 := newEnvelope(msg1)
-	stage.Process(context.Background(), env1)
+	_, _ = stage.Process(context.Background(), env1)
 
 	// 容量为 2，消耗 1 个后剩余 ~1（浮点精度容忍）
 	avail1 := bucket.Available()
@@ -271,7 +271,7 @@ func TestEngagementStage_ConsumeToken(t *testing.T) {
 	// 第二次参与 → 消耗另 1 个令牌
 	msg2 := *timelineMsg("golang discussion 2", "user2", "misskey")
 	env2 := newEnvelope(msg2)
-	stage.Process(context.Background(), env2)
+	_, _ = stage.Process(context.Background(), env2)
 
 	// 消耗完后剩余 ~0
 	if bucket.Available() > 0.01 {
@@ -304,7 +304,7 @@ func TestEngagementStage_DeclinedDoesNotConsumeToken(t *testing.T) {
 	// 不匹配关键词 → 被规则拒绝，不应消耗令牌
 	msg := *timelineMsg("boring weather", "user1", "misskey")
 	env := newEnvelope(msg)
-	stage.Process(context.Background(), env)
+	_, _ = stage.Process(context.Background(), env)
 
 	if bucket.Available() != 1 {
 		t.Errorf("declined message should not consume token, available = %v, want 1", bucket.Available())

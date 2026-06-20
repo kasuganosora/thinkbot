@@ -322,7 +322,7 @@ func TestHasEnabledSkills(t *testing.T) {
 		t.Error("should have enabled skills after registration")
 	}
 
-	mgr.Disable("pdf")
+	_ = mgr.Disable("pdf")
 	if mgr.HasEnabledSkills() {
 		t.Error("should not have enabled skills after disable")
 	}
@@ -355,7 +355,7 @@ func TestLoader_LoadSkill(t *testing.T) {
 	// 创建临时 SKILL.md 文件
 	tmpDir := t.TempDir()
 	skillDir := filepath.Join(tmpDir, "pdf")
-	os.MkdirAll(skillDir, 0755)
+	_ = os.MkdirAll(skillDir, 0755)
 
 	content := `---
 name: pdf
@@ -370,7 +370,7 @@ enabled: true
 
 当用户请求处理 PDF 时，使用 pdf_read 工具读取内容。
 `
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
 
 	loader := NewLoader(tmpDir, nil)
 	skill, err := loader.LoadSkill(skillDir)
@@ -398,13 +398,13 @@ enabled: true
 func TestLoader_LoadSkill_NoFrontMatter(t *testing.T) {
 	tmpDir := t.TempDir()
 	skillDir := filepath.Join(tmpDir, "simple")
-	os.MkdirAll(skillDir, 0755)
+	_ = os.MkdirAll(skillDir, 0755)
 
 	content := `# 简单技能
 
 这是一个没有 front matter 的技能。
 `
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
 
 	loader := NewLoader(tmpDir, nil)
 	_, err := loader.LoadSkill(skillDir)
@@ -417,7 +417,7 @@ func TestLoader_LoadSkill_NoFrontMatter(t *testing.T) {
 func TestLoader_LoadSkill_MissingRequiredField(t *testing.T) {
 	tmpDir := t.TempDir()
 	skillDir := filepath.Join(tmpDir, "bad")
-	os.MkdirAll(skillDir, 0755)
+	_ = os.MkdirAll(skillDir, 0755)
 
 	content := `---
 description: 缺少 name 字段。
@@ -425,7 +425,7 @@ description: 缺少 name 字段。
 
 # Bad Skill
 `
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
 
 	loader := NewLoader(tmpDir, nil)
 	_, err := loader.LoadSkill(skillDir)
@@ -510,7 +510,7 @@ func TestSkillManager_InjectAndRemovePrompt(t *testing.T) {
 	}
 
 	// 禁用后应触发 unregister
-	mgr.Disable("pdf")
+	_ = mgr.Disable("pdf")
 	if len(unregistered) != 1 {
 		t.Errorf("expected 1 unregistered, got %d", len(unregistered))
 	}

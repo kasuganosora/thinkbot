@@ -1,10 +1,15 @@
 package main
 
 import (
+	"github.com/kasuganosora/thinkbot/agent/bot"
+	"github.com/kasuganosora/thinkbot/api"
+	"github.com/kasuganosora/thinkbot/auth"
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/db"
-	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/log"
+	"go.uber.org/fx"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -12,11 +17,8 @@ func main() {
 	if err := log.InitWithConfig(log.Config{
 		Level: "debug",
 		Outputs: []log.Output{
-			// stdout：全级别，console 格式
 			log.Stdout(),
-			// stderr：仅 warn 及以上，console 格式
 			{Type: log.OutputStderr, Level: "warn", Format: log.FormatConsole},
-			// 文件：全级别，JSONL 格式，滚动
 			log.File("./logs", "thinkbot"),
 		},
 	}); err != nil {
@@ -26,30 +28,34 @@ func main() {
 
 	log.Logger.Infow("starting thinkbot")
 
-	database, err := db.OpenSQLiteWithLogger("thinkbot.db", log.NewGormLogger(log.GormConfig{
-		Level:                     log.GormInfo,
-		SlowThreshold:             200_000_000, // 200ms in ns
-		IgnoreRecordNotFoundError: true,
-	}))
-	if err != nil {
-		log.Logger.Fatalw("failed to open database", "error", err)
-	}
+	app := fx.New(
+		// 提供日志
+		fx.Provide(zap.NewProduction),
+		fx.Provide(func(l *zap.Logger) *zap.SugaredLogger { return l.Sugar() }),
 
-	if err := dao.Migrate(database); err != nil {
-		log.Logger.Fatalw("failed to migrate database", "error", err)
-	}
+		// 数据库
+		fx.Provide(func() (*gorm.DB, error) {
+			return db.OpenSQLiteWithLogger("thinkbot.db", log.NewGormLogger(log.GormConfig{
+				Level:                     log.GormInfo,
+				SlowThreshold:             200_000_000,
+				IgnoreRecordNotFoundError: true,
+			}))
+		}),
 
-	if err := runExample(database); err != nil {
-		log.Logger.Errorw("example execution failed", "error", err)
-	}
-}
+		// 数据库迁移
+		fx.Invoke(func(db *gorm.DB) error {
+			return dao.Migrate(db)
+		}),
 
-func runExample(database *gorm.DB) error {
-	user := &dao.User{Name: "ThinkBot", Email: "hello@thinkbot.local"}
-	if err := database.Create(user).Error; err != nil {
-		return errs.Wrap(err, "create user record")
-	}
+		// 模块
+		config.Module,
+		auth.Module,
+		bot.Module,
+		api.Module,
 
-	log.Logger.Infow("example completed", "user_id", user.ID)
-	return nil
+		// 优雅关闭
+		fx.NopLogger,
+	)
+
+	app.Run()
 }

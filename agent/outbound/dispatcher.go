@@ -45,7 +45,7 @@ func NewLogDispatcher(logger *zap.SugaredLogger, tp trace.TracerProvider) *LogDi
 
 // Dispatch 将每个 Action 记录到日志。
 func (d *LogDispatcher) Dispatch(ctx context.Context, actions []core.Action) error {
-	ctx, span := d.tracer.Start(ctx, "outbound.dispatch",
+	_, span := d.tracer.Start(ctx, "outbound.dispatch",
 		trace.WithAttributes(
 			attribute.Int("actions.count", len(actions)),
 		))

@@ -11,16 +11,16 @@ func TestFileLoader_LoadAll(t *testing.T) {
 	dir := t.TempDir()
 
 	// 000_identity.md
-	os.WriteFile(filepath.Join(dir, "000_identity.md"), []byte("You are ThinkBot, a helpful AI assistant."), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "000_identity.md"), []byte("You are ThinkBot, a helpful AI assistant."), 0644)
 
 	// 100_rules.md
-	os.WriteFile(filepath.Join(dir, "100_rules.md"), []byte("---\nenabled: true\n---\nAlways be polite and helpful."), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "100_rules.md"), []byte("---\nenabled: true\n---\nAlways be polite and helpful."), 0644)
 
 	// 200_context.md with variable
-	os.WriteFile(filepath.Join(dir, "200_context.md"), []byte("Here is what you remember:\n{{.memory_context}}"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "200_context.md"), []byte("Here is what you remember:\n{{.memory_context}}"), 0644)
 
 	// 999_disabled.md
-	os.WriteFile(filepath.Join(dir, "999_disabled.md"), []byte("---\nenabled: false\n---\nThis should be disabled."), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "999_disabled.md"), []byte("---\nenabled: false\n---\nThis should be disabled."), 0644)
 
 	registry := NewRegistry()
 	loader := NewFileLoader(dir, registry)
@@ -90,7 +90,7 @@ func TestFileLoader_NonExistentDir(t *testing.T) {
 func TestFileLoader_VariableMeta(t *testing.T) {
 	dir := t.TempDir()
 
-	os.WriteFile(filepath.Join(dir, "050_greeting.md"), []byte(`---
+	_ = os.WriteFile(filepath.Join(dir, "050_greeting.md"), []byte(`---
 var_bot_name_source: static
 var_bot_name_value: ThinkBot
 var_user_name_key: user.display_name
@@ -100,7 +100,7 @@ Hello {{.user_name}}! I am {{.bot_name}}.`), 0644)
 
 	registry := NewRegistry()
 	loader := NewFileLoader(dir, registry)
-	loader.LoadAll()
+	_, _ = loader.LoadAll()
 
 	sec, ok := registry.Get("greeting")
 	if !ok {
@@ -130,11 +130,11 @@ Hello {{.user_name}}! I am {{.bot_name}}.`), 0644)
 
 func TestFileLoader_NoOrderPrefix(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "custom.md"), []byte("No order prefix content"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "custom.md"), []byte("No order prefix content"), 0644)
 
 	registry := NewRegistry()
 	loader := NewFileLoader(dir, registry)
-	loader.LoadAll()
+	_, _ = loader.LoadAll()
 
 	sec, ok := registry.Get("custom")
 	if !ok {

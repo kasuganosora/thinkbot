@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -261,6 +260,3 @@ func (p *Pipeline) Len() int {
 // ============================================================================
 // 内部工具
 // ============================================================================
-
-// IsNilEnvelope 安全检查 nil envelope（避免 dropped 场景的 log 读 nil）。
-var errDropped = errors.New("message dropped")

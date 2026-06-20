@@ -51,11 +51,6 @@ func (a *apiClient) getSelf(ctx context.Context) (*User, error) {
 	return &user, nil
 }
 
-// createNote 发布帖子。
-func (a *apiClient) createNote(ctx context.Context, text, replyID, visibility string) (string, error) {
-	return a.createNoteFull(ctx, text, replyID, "", visibility, "", nil)
-}
-
 // createNoteFull 发布帖子，支持 replyID、renoteID、CW 和文件附件。
 func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID, visibility, cw string, fileIDs []string) (string, error) {
 	if visibility == "" {

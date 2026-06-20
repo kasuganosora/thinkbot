@@ -59,7 +59,7 @@ func TestToolRegistry_RegisterValidation(t *testing.T) {
 
 func TestToolRegistry_Unregister(t *testing.T) {
 	r := NewToolRegistry()
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool: llm.Tool{Name: "removable", Description: "d"},
 	})
 
@@ -79,10 +79,10 @@ func TestToolRegistry_Unregister(t *testing.T) {
 
 func TestToolRegistry_ResolveStatic(t *testing.T) {
 	r := NewToolRegistry()
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool: llm.Tool{Name: "a", Description: "Tool A"},
 	})
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool: llm.Tool{Name: "b", Description: "Tool B"},
 	})
 
@@ -102,7 +102,7 @@ func TestToolRegistry_ResolveStatic(t *testing.T) {
 
 func TestToolRegistry_ResolveWithDynamic(t *testing.T) {
 	r := NewToolRegistry()
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool: llm.Tool{Name: "static_tool", Description: "Static"},
 	})
 
@@ -121,7 +121,7 @@ func TestToolRegistry_ResolveWithDynamic(t *testing.T) {
 
 func TestToolRegistry_ResolveDedup(t *testing.T) {
 	r := NewToolRegistry()
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool: llm.Tool{Name: "shared", Description: "Static version"},
 	})
 
@@ -144,15 +144,15 @@ func TestToolRegistry_ResolveDedup(t *testing.T) {
 
 func TestToolRegistry_ResolveScopeFiltering(t *testing.T) {
 	r := NewToolRegistry()
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool:   llm.Tool{Name: "private_only", Description: "Private"},
 		Scopes: []string{"private"},
 	})
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool:   llm.Tool{Name: "group_only", Description: "Group"},
 		Scopes: []string{"group"},
 	})
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool:   llm.Tool{Name: "no_scope", Description: "Any"},
 		Scopes: []string{}, // 无限制
 	})
@@ -181,7 +181,7 @@ func TestToolRegistry_ResolveScopeFiltering(t *testing.T) {
 
 func TestToolRegistry_ResolveDynamicError(t *testing.T) {
 	r := NewToolRegistry()
-	r.Register(ToolDef{
+	_ = r.Register(ToolDef{
 		Tool: llm.Tool{Name: "static", Description: "S"},
 	})
 
@@ -261,7 +261,7 @@ func TestToolManager_UnregisterRemovesPrompt(t *testing.T) {
 	promptReg := prompt.NewRegistry()
 	mgr := NewToolManager(promptReg, nil, nil)
 
-	mgr.Register(ToolDef{
+	_ = mgr.Register(ToolDef{
 		Tool:         llm.Tool{Name: "temp_tool", Description: "Temporary"},
 		PromptSection: &ToolPromptSection{Name: "temp_tool", Order: 310, Content: "temp", Enabled: true},
 	})
@@ -313,7 +313,7 @@ func TestToolManager_ResolveForEnvelope(t *testing.T) {
 	promptReg := prompt.NewRegistry()
 	mgr := NewToolManager(promptReg, nil, nil)
 
-	mgr.Register(ToolDef{
+	_ = mgr.Register(ToolDef{
 		Tool:   llm.Tool{Name: "env_tool", Description: "Env"},
 		Scopes: []string{}, // 全场景
 	})
@@ -444,12 +444,12 @@ func TestBuiltin_CurrentTimeTool(t *testing.T) {
 	if def.Name != "current_time" {
 		t.Errorf("expected 'current_time', got %q", def.Name)
 	}
-	if def.Tool.Execute == nil {
+	if def.Execute == nil {
 		t.Error("Execute function should not be nil")
 	}
 
 	// 执行测试
-	result, err := def.Tool.Execute(&llm.ToolExecContext{}, nil)
+	result, err := def.Execute(&llm.ToolExecContext{}, nil)
 	if err != nil {
 		t.Fatalf("Execute failed: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestBuiltin_EchoTool(t *testing.T) {
 	}
 
 	// 执行测试
-	result, err := def.Tool.Execute(&llm.ToolExecContext{}, map[string]any{
+	result, err := def.Execute(&llm.ToolExecContext{}, map[string]any{
 		"message": "hello world",
 	})
 	if err != nil {
@@ -489,7 +489,7 @@ func TestBuiltin_EchoTool(t *testing.T) {
 
 func TestBuiltin_EchoTool_InvalidInput(t *testing.T) {
 	def := EchoTool()
-	_, err := def.Tool.Execute(&llm.ToolExecContext{}, "not-a-map")
+	_, err := def.Execute(&llm.ToolExecContext{}, "not-a-map")
 	if err == nil {
 		t.Error("expected error for invalid input")
 	}

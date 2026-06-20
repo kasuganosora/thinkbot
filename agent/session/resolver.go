@@ -246,7 +246,7 @@ func FormatContext(s *Session, maxMessages int) string {
 		if role == "" {
 			role = "unknown"
 		}
-		sb.WriteString(fmt.Sprintf("[%s] %s: %s\n", ts, role, strutil.Truncate(msg.Text, 200)))
+		fmt.Fprintf(&sb, "[%s] %s: %s\n", ts, role, strutil.Truncate(msg.Text, 200))
 	}
 
 	sb.WriteString("[End Session Context]")

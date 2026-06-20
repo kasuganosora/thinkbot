@@ -88,11 +88,6 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 	return apiResp.Result, nil
 }
 
-// sendMessage 发送文本消息到指定聊天。
-func (a *apiClient) sendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
-	return a.sendMessageFull(ctx, chatID, text, "", replyTo)
-}
-
 // sendMessageFull 发送文本消息，支持 parseMode。
 func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, parseMode string, replyTo int64) (int64, error) {
 	req := a.client.Post("sendMessage").

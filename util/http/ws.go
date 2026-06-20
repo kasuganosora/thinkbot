@@ -298,7 +298,7 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 			wd.Stop(true)
 		}
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 
 		// 看门狗超时
@@ -330,7 +330,7 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 		return nil, errs.Wrapf(err, "ws dial failed")
 	}
 	if resp != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 
 	// --- 配置连接 ---
@@ -439,7 +439,7 @@ func (r *Request) DoWS(cfg WSConfig) error {
 			if err := cfg.OnMessage(msg); err != nil {
 				log.Logger.Debugw("ws interrupted by OnMessage callback",
 					"url", conn.url, "err", err)
-				conn.Close()
+				_ = conn.Close()
 				return err
 			}
 		}
@@ -449,14 +449,14 @@ func (r *Request) DoWS(cfg WSConfig) error {
 			if err := cfg.OnText(string(data)); err != nil {
 				log.Logger.Debugw("ws interrupted by OnText callback",
 					"url", conn.url, "err", err)
-				conn.Close()
+				_ = conn.Close()
 				return err
 			}
 		} else if msgType == WSBinaryMessage && cfg.OnBinary != nil {
 			if err := cfg.OnBinary(data); err != nil {
 				log.Logger.Debugw("ws interrupted by OnBinary callback",
 					"url", conn.url, "err", err)
-				conn.Close()
+				_ = conn.Close()
 				return err
 			}
 		}
@@ -487,7 +487,7 @@ func (r *Request) DoWSMessages(cfg WSConfig) (<-chan WSMessage, *WSConn, error) 
 
 	go func() {
 		defer close(ch)
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		start := time.Now()
 		messagesReceived := 0

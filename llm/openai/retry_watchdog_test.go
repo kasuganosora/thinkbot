@@ -73,7 +73,7 @@ func mockChatChunk(content, finishReason string) string {
 
 // writeSSE 写入一个 SSE data 行并 flush。
 func writeSSE(w http.ResponseWriter, flusher http.Flusher, data string) {
-	fmt.Fprintf(w, "data: %s\n\n", data)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 }
 
@@ -99,11 +99,11 @@ func TestChat_Retry_OnServerError(t *testing.T) {
 		count := atomic.AddInt32(&attempts, 1)
 		if count < 3 {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"error":{"message":"server overloaded","type":"server_error"}}`))
+			_, _ = w.Write([]byte(`{"error":{"message":"server overloaded","type":"server_error"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(mockChatResponse("retry success")))
+		_, _ = w.Write([]byte(mockChatResponse("retry success")))
 	}))
 	defer srv.Close()
 
@@ -143,7 +143,7 @@ func TestChat_Retry_Exhausted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&attempts, 1)
 		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte(`{"error":{"message":"bad gateway","type":"server_error"}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"bad gateway","type":"server_error"}}`))
 	}))
 	defer srv.Close()
 
@@ -180,11 +180,11 @@ func TestChat_Retry_OnRetry429(t *testing.T) {
 		if count == 1 {
 			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`))
+			_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(mockChatResponse("after rate limit")))
+		_, _ = w.Write([]byte(mockChatResponse("after rate limit")))
 	}))
 	defer srv.Close()
 
@@ -352,7 +352,7 @@ func TestChat_Stream_RetryOnWatchdog_Success(t *testing.T) {
 		// 第二次：正常发送事件
 		writeSSE(w, flusher, mockChatChunk("hello-from-retry", ""))
 		writeSSE(w, flusher, mockChatChunk("", "stop"))
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}))
 	defer srv.Close()
@@ -548,7 +548,7 @@ func TestChat_Stream_Retry_CustomPolicy_RetryWithData(t *testing.T) {
 			// 第三次：正常完成
 			writeSSE(w, flusher, mockChatChunk("final-success", ""))
 			writeSSE(w, flusher, mockChatChunk("", "stop"))
-			fmt.Fprint(w, "data: [DONE]\n\n")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 			flusher.Flush()
 		}
 	}))
@@ -668,7 +668,7 @@ func TestChat_DoStream_NormalStream(t *testing.T) {
 		writeSSE(w, flusher, mockChatChunk("hello", ""))
 		writeSSE(w, flusher, mockChatChunk(" world", ""))
 		writeSSE(w, flusher, mockChatChunk("", "stop"))
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
 	}))
 	defer srv.Close()
@@ -734,7 +734,7 @@ func TestChat_DoGenerate_Retry(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(mockChatResponse("hello from retry")))
+		_, _ = w.Write([]byte(mockChatResponse("hello from retry")))
 	}))
 	defer srv.Close()
 

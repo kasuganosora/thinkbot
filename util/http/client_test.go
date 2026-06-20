@@ -51,7 +51,7 @@ func TestGet(t *testing.T) {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer srv.Close()
 
@@ -81,7 +81,7 @@ func TestPostJSON(t *testing.T) {
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("expected application/json, got %s", r.Header.Get("Content-Type"))
 		}
-		w.Write([]byte(`{"received":true}`))
+		_, _ = w.Write([]byte(`{"received":true}`))
 	}))
 	defer srv.Close()
 
@@ -177,7 +177,7 @@ func TestBearerToken(t *testing.T) {
 func TestErrorStatusCode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"not found"}`))
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
 	}))
 	defer srv.Close()
 
@@ -224,7 +224,7 @@ func TestRetry(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
@@ -292,7 +292,7 @@ func TestSSE(t *testing.T) {
 			"event: done\ndata: finished\nid: 42\n\n",
 		}
 		for _, e := range events {
-			fmt.Fprint(w, e)
+			_, _ = fmt.Fprint(w, e)
 			flusher.Flush()
 		}
 	}))
@@ -350,7 +350,7 @@ func TestSSEChannel(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		for i := 0; i < 5; i++ {
-			fmt.Fprintf(w, "data: item-%d\n\n", i)
+			_, _ = fmt.Fprintf(w, "data: item-%d\n\n", i)
 			flusher.Flush()
 		}
 	}))
@@ -381,7 +381,7 @@ func TestSSEMultiLineData(t *testing.T) {
 		w.WriteHeader(200)
 		flusher := w.(http.Flusher)
 
-		fmt.Fprint(w, "data: line1\ndata: line2\ndata: line3\n\n")
+		_, _ = fmt.Fprint(w, "data: line1\ndata: line2\ndata: line3\n\n")
 		flusher.Flush()
 	}))
 	defer srv.Close()
@@ -414,7 +414,7 @@ func TestSSEWithWatchdogTimeout(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		// 先发一个事件
-		fmt.Fprint(w, "data: first\n\n")
+		_, _ = fmt.Fprint(w, "data: first\n\n")
 		flusher.Flush()
 
 		// 然后永久卡住（10秒），不发送任何数据，也不关闭连接
@@ -480,7 +480,7 @@ func TestStreamChunks(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		for i := 0; i < 5; i++ {
-			fmt.Fprintf(w, "chunk-%d;", i)
+			_, _ = fmt.Fprintf(w, "chunk-%d;", i)
 			flusher.Flush()
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -511,7 +511,7 @@ func TestStreamLines(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		for i := 0; i < 5; i++ {
-			fmt.Fprintf(w, "line-%d\n", i)
+			_, _ = fmt.Fprintf(w, "line-%d\n", i)
 			flusher.Flush()
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -548,7 +548,7 @@ func TestStreamChannel(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		for i := 0; i < 3; i++ {
-			fmt.Fprintf(w, "data-%d", i)
+			_, _ = fmt.Fprintf(w, "data-%d", i)
 			flusher.Flush()
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -582,7 +582,7 @@ func TestStreamWithWatchdogTimeout(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		// 发一些数据
-		fmt.Fprint(w, "initial-data")
+		_, _ = fmt.Fprint(w, "initial-data")
 		flusher.Flush()
 
 		// 然后永久卡住（10秒）
@@ -637,7 +637,7 @@ func TestStreamLineChannel(t *testing.T) {
 
 		lines := []string{"alpha", "beta", "gamma"}
 		for _, l := range lines {
-			fmt.Fprintf(w, "%s\n", l)
+			_, _ = fmt.Fprintf(w, "%s\n", l)
 			flusher.Flush()
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -670,7 +670,7 @@ func TestStreamLineChannel(t *testing.T) {
 func TestGetJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"name":"test","age":30}`))
+		_, _ = w.Write([]byte(`{"name":"test","age":30}`))
 	}))
 	defer srv.Close()
 
@@ -695,7 +695,7 @@ func TestGetJSON(t *testing.T) {
 func TestPostJSONHelper(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":99,"created":true}`))
+		_, _ = w.Write([]byte(`{"id":99,"created":true}`))
 	}))
 	defer srv.Close()
 
@@ -830,7 +830,7 @@ func TestStreamWithExternalWatchdog(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		for i := 0; i < 5; i++ {
-			fmt.Fprintf(w, "tick-%d\n", i)
+			_, _ = fmt.Fprintf(w, "tick-%d\n", i)
 			flusher.Flush()
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -995,7 +995,7 @@ func TestSSERetryOnWatchdogTimeout(t *testing.T) {
 		}
 
 		// 第二次：正常发送事件
-		fmt.Fprint(w, "data: hello-from-retry\n\n")
+		_, _ = fmt.Fprint(w, "data: hello-from-retry\n\n")
 		flusher.Flush()
 	}))
 	defer srv.Close()
@@ -1092,7 +1092,7 @@ func TestSSERetryDefaultPolicyNoRetryWithData(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		// 发一个事件后卡住
-		fmt.Fprint(w, "data: partial\n\n")
+		_, _ = fmt.Fprint(w, "data: partial\n\n")
 		flusher.Flush()
 		stallServer(r, 10*time.Second)
 	}))
@@ -1135,7 +1135,7 @@ func TestSSERetryWithCustomPolicy(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		// 每次都发一个事件后卡住
-		fmt.Fprintf(w, "data: attempt-%d\n\n", count)
+		_, _ = fmt.Fprintf(w, "data: attempt-%d\n\n", count)
 		flusher.Flush()
 		stallServer(r, 10*time.Second)
 	}))
@@ -1187,7 +1187,7 @@ func TestStreamRetryOnWatchdogTimeout(t *testing.T) {
 			return
 		}
 		// 第二次正常
-		fmt.Fprint(w, "retry-success")
+		_, _ = fmt.Fprint(w, "retry-success")
 		flusher.Flush()
 	}))
 	defer srv.Close()
@@ -1284,7 +1284,7 @@ func TestBasicAuth(t *testing.T) {
 func TestDump(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Response-Header", "resp-val")
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
@@ -1320,7 +1320,7 @@ func TestSetRetryPerRequest(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
@@ -1349,7 +1349,7 @@ func TestMaxBodySize(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 返回 100KB 数据
 		data := strings.Repeat("x", 100*1024)
-		w.Write([]byte(data))
+		_, _ = w.Write([]byte(data))
 	}))
 	defer srv.Close()
 
@@ -1396,7 +1396,7 @@ func TestSSEStreamWithErr(t *testing.T) {
 		flusher := w.(http.Flusher)
 
 		for i := 0; i < 3; i++ {
-			fmt.Fprintf(w, "data: item-%d\n\n", i)
+			_, _ = fmt.Fprintf(w, "data: item-%d\n\n", i)
 			flusher.Flush()
 		}
 	}))
@@ -1477,7 +1477,7 @@ func TestMultipartBasic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("form file: %v", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		if header.Filename != "test.txt" {
 			t.Errorf("expected filename=test.txt, got %s", header.Filename)
 		}
@@ -1491,7 +1491,7 @@ func TestMultipartBasic(t *testing.T) {
 			t.Errorf("expected purpose=testing, got %s", r.FormValue("purpose"))
 		}
 
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
@@ -1521,7 +1521,7 @@ func TestMultipartWithMIME(t *testing.T) {
 		if header.Header.Get("Content-Type") != "application/pdf" {
 			t.Errorf("expected Content-Type=application/pdf, got %s", header.Header.Get("Content-Type"))
 		}
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
@@ -1550,7 +1550,7 @@ func TestMultipartDefaultMIME(t *testing.T) {
 		if header.Header.Get("Content-Type") != "application/octet-stream" {
 			t.Errorf("expected application/octet-stream, got %s", header.Header.Get("Content-Type"))
 		}
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer srv.Close()
 
@@ -1579,7 +1579,7 @@ func TestMultipartMultipleFiles(t *testing.T) {
 			t.Errorf("expected a.txt, got %s", h1.Filename)
 		}
 		c1, _ := io.ReadAll(f1)
-		f1.Close()
+		_ = f1.Close()
 		if string(c1) != "AAA" {
 			t.Errorf("expected AAA, got %q", c1)
 		}
@@ -1589,7 +1589,7 @@ func TestMultipartMultipleFiles(t *testing.T) {
 			t.Errorf("expected b.txt, got %s", h2.Filename)
 		}
 		c2, _ := io.ReadAll(f2)
-		f2.Close()
+		_ = f2.Close()
 		if string(c2) != "BBB" {
 			t.Errorf("expected BBB, got %q", c2)
 		}
@@ -1599,7 +1599,7 @@ func TestMultipartMultipleFiles(t *testing.T) {
 			t.Errorf("expected meta=batch, got %s", r.FormValue("meta"))
 		}
 
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer srv.Close()
 
@@ -1629,7 +1629,7 @@ func TestWithProxy(t *testing.T) {
 		proxiedRequest = r.Clone(r.Context())
 		// 简单代理：转发到目标（这里直接返回 OK 模拟成功）
 		w.WriteHeader(200)
-		w.Write([]byte(`{"via":"proxy"}`))
+		_, _ = w.Write([]byte(`{"via":"proxy"}`))
 	}))
 	defer proxySrv.Close()
 
@@ -1649,7 +1649,7 @@ func TestWithProxy(t *testing.T) {
 func TestWithProxyInvalidURL(t *testing.T) {
 	// 无效 URL 不应 panic，应正常发请求（无代理）
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer srv.Close()
 
@@ -1666,7 +1666,7 @@ func TestWithProxyInvalidURL(t *testing.T) {
 func TestWithProxyEmpty(t *testing.T) {
 	// 空字符串应不做任何事，正常请求
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer srv.Close()
 

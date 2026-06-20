@@ -136,7 +136,7 @@ func (r *Request) streamConnect(
 		!requireOK && resp.StatusCode >= 200 && resp.StatusCode < 300
 	if !statusOK {
 		body := readErrorBody(resp)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		r.ctx = origCtx
 		if wdOwned {
 			wd.Stop(true)

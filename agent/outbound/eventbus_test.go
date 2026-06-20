@@ -229,10 +229,7 @@ func TestMemoryEventBus_NonBlockingPublish(t *testing.T) {
 		}
 	}
 done:
-	if received > 2 {
-		// 可能收到 2 个（buffer 满后丢弃），这里不严格断言
-		// 因为读取和写入是并发的
-	}
+	_ = received // 可能收到 1-2 个（buffer 满后丢弃），并发下不严格断言
 	if received == 0 {
 		t.Error("expected at least 1 event")
 	}

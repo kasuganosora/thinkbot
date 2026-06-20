@@ -11,5 +11,8 @@ func Migrate(database *gorm.DB) error {
 		&UsageDaily{},
 		&EntryModel{},
 		&WindowStateModel{},
+		&BotDefinition{},
+		&ChannelDefinition{},
+		&ChatMessage{},
 	)
 }
