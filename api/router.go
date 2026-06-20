@@ -40,6 +40,12 @@ func (s *Server) registerRoutes() {
 		authed.GET("/auth/me", s.handleMe)
 		authed.PUT("/auth/password", s.handleChangePassword)
 
+		// --- 授权码 & 身份绑定（所有登录用户） ---
+		authed.POST("/bindcode", s.handleGenerateBindCode)
+		authed.GET("/bindcode", s.handleListBindCodes)
+		authed.GET("/bindings", s.handleListBindings)
+		authed.DELETE("/bindings/:id", s.handleDeleteBinding)
+
 		// --- 用户管理（admin） ---
 		users := authed.Group("/users")
 		users.Use(requirePermission(auth.PermUserManage))

@@ -16,6 +16,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -41,6 +42,7 @@ type Server struct {
 	db          *gorm.DB
 	workflowSvc *WorkflowService
 	skillMgr    *skill.SkillManager
+	bindSvc     *identity.BindService
 }
 
 // NewServer 创建并配置 Gin Server。
@@ -54,6 +56,7 @@ func NewServer(
 	logger *zap.SugaredLogger,
 	workflowSvc *WorkflowService,
 	skillMgr *skill.SkillManager,
+	bindSvc *identity.BindService,
 ) *Server {
 	gin.SetMode(gin.ReleaseMode)
 
@@ -87,6 +90,7 @@ func NewServer(
 		db:          db,
 		workflowSvc: workflowSvc,
 		skillMgr:    skillMgr,
+		bindSvc:     bindSvc,
 	}
 
 	// 注册所有路由

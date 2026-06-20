@@ -249,6 +249,30 @@ func (s *Session) Archive() {
 	s.status = StatusArchived
 }
 
+// Clear 清空工作记忆中的所有消息。
+// 会话的其他状态（ID、channel、topic 等）保持不变。
+// 用于 /clear 命令：重置上下文但保持会话本身。
+func (s *Session) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.messages = s.messages[:0]
+}
+
+// Compact 压缩工作记忆，只保留最近 keepRecent 条消息。
+// keepRecent <= 0 时保留默认的 3 条。
+// 用于 /compact 命令：主动压缩上下文。
+func (s *Session) Compact(keepRecent int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if keepRecent <= 0 {
+		keepRecent = 3
+	}
+	if len(s.messages) <= keepRecent {
+		return
+	}
+	s.messages = append([]Message(nil), s.messages[len(s.messages)-keepRecent:]...)
+}
+
 // IdleDuration 返回自上次活动以来的空闲时长。
 func (s *Session) IdleDuration() time.Duration {
 	s.mu.RLock()
