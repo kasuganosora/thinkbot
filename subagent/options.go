@@ -79,6 +79,8 @@ func WithResponseFormat(format *llm.ResponseFormat) Option {
 
 // String 返回 SubAgent 的可读描述。
 func (sa *SubAgent) String() string {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	name := sa.name
 	if name == "" {
 		name = sa.id

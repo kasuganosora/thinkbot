@@ -491,6 +491,3 @@ func (p *errorProvider) DoGenerate(ctx context.Context, params llm.GenerateParam
 func (p *errorProvider) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
 	return nil, context.DeadlineExceeded
 }
-
-// Suppress unused import in some test configurations.
-var _ = errors.New
