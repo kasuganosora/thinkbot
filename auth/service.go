@@ -138,6 +138,45 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 	return &user, nil
 }
 
+// AuthenticateOrBootstrap 尝试登录；如果数据库中一个用户都没有，则自动以 admin
+// 角色注册当前提交的凭据并完成登录。仅用于首次初始化场景。
+func (s *AuthService) AuthenticateOrBootstrap(ctx context.Context, username, password string) (*dao.User, bool, error) {
+	// 先尝试正常认证
+	user, err := s.Authenticate(ctx, username, password)
+	if err == nil {
+		return user, false, nil
+	}
+
+	// 只有 ErrInvalidCredentials（用户不存在/密码错误）才可能触发 bootstrap
+	if !errors.Is(err, ErrInvalidCredentials) {
+		return nil, false, err
+	}
+
+	// 检查数据库中是否完全没有用户
+	var total int64
+	if err := s.db.WithContext(ctx).Model(&dao.User{}).Count(&total).Error; err != nil {
+		return nil, false, errs.Wrap(err, "auth: count users for bootstrap")
+	}
+
+	if total > 0 {
+		// 已有用户但认证失败，返回原始错误
+		return nil, false, ErrInvalidCredentials
+	}
+
+	// 数据库为空 → 自动注册为 admin 并登录
+	created, createErr := s.CreateUser(ctx, CreateUserInput{
+		Username: strings.TrimSpace(username),
+		Password: password,
+		Role:     RoleAdmin,
+	})
+	if createErr != nil {
+		return nil, false, errs.Wrap(createErr, "auth: bootstrap first user")
+	}
+
+	// CreateUser 已设置 StatusActive，直接返回（LastLoginAt 由后续 Authenticate 更新）
+	return created, true, nil
+}
+
 // ----------------------------------------------------------------------------
 // 查询
 // ----------------------------------------------------------------------------
