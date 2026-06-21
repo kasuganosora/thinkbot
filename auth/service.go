@@ -41,6 +41,11 @@ func New(db *gorm.DB) *AuthService {
 	return &AuthService{db: db}
 }
 
+// DB 返回底层 gorm.DB（仅供内部模块使用，如 module.go 的 bootstrap 检查）。
+func (s *AuthService) DB() *gorm.DB {
+	return s.db
+}
+
 // ----------------------------------------------------------------------------
 // 创建用户
 // ----------------------------------------------------------------------------
@@ -121,12 +126,13 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 		return nil, errs.Wrap(err, "auth: query user")
 	}
 
-	if !VerifyPassword(user.PasswordHash, password) {
-		return nil, ErrInvalidCredentials
-	}
-
+	// 先检查状态（避免通过响应差异泄露密码正确性）
 	if user.Status != StatusActive {
 		return nil, ErrUserDisabled
+	}
+
+	if !VerifyPassword(user.PasswordHash, password) {
+		return nil, ErrInvalidCredentials
 	}
 
 	// 更新最后登录时间（失败不影响登录流程）
@@ -140,6 +146,9 @@ func (s *AuthService) Authenticate(ctx context.Context, username, password strin
 
 // AuthenticateOrBootstrap 尝试登录；如果数据库中一个用户都没有，则自动以 admin
 // 角色注册当前提交的凭据并完成登录。仅用于首次初始化场景。
+//
+// 整个 bootstrap 路径在数据库事务中执行，防止 TOCTOU 竞态
+// （两个并发请求同时检测到数据库为空，各自创建 admin）。
 func (s *AuthService) AuthenticateOrBootstrap(ctx context.Context, username, password string) (*dao.User, bool, error) {
 	// 先尝试正常认证
 	user, err := s.Authenticate(ctx, username, password)
@@ -152,29 +161,57 @@ func (s *AuthService) AuthenticateOrBootstrap(ctx context.Context, username, pas
 		return nil, false, err
 	}
 
-	// 检查数据库中是否完全没有用户
-	var total int64
-	if err := s.db.WithContext(ctx).Model(&dao.User{}).Count(&total).Error; err != nil {
-		return nil, false, errs.Wrap(err, "auth: count users for bootstrap")
-	}
+	// 在事务中执行 bootstrap，防止 TOCTOU 竞态
+	var bootstrapped *dao.User
+	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 事务内重新检查用户数
+		var total int64
+		if err := tx.Model(&dao.User{}).Count(&total).Error; err != nil {
+			return errs.Wrap(err, "auth: count users for bootstrap")
+		}
 
-	if total > 0 {
-		// 已有用户但认证失败，返回原始错误
-		return nil, false, ErrInvalidCredentials
-	}
+		if total > 0 {
+			// 已有用户但认证失败
+			return ErrInvalidCredentials
+		}
 
-	// 数据库为空 → 自动注册为 admin 并登录
-	created, createErr := s.CreateUser(ctx, CreateUserInput{
-		Username: strings.TrimSpace(username),
-		Password: password,
-		Role:     RoleAdmin,
+		// 校验输入
+		uname := strings.TrimSpace(username)
+		if uname == "" {
+			return errs.BadRequest("username is required")
+		}
+		if len(password) < 6 {
+			return errs.BadRequest("password must be at least 6 characters")
+		}
+
+		// 哈希密码
+		hash, err := HashPassword(password)
+		if err != nil {
+			return errs.Wrap(err, "auth: hash password")
+		}
+
+		// 创建 admin 用户
+		now := time.Now()
+		u := &dao.User{
+			Username:     uname,
+			PasswordHash: hash,
+			Role:         RoleAdmin,
+			Status:       StatusActive,
+			LastLoginAt:  &now,
+		}
+		if err := tx.Create(u).Error; err != nil {
+			return errs.Wrap(err, "auth: bootstrap create user")
+		}
+
+		bootstrapped = u
+		return nil
 	})
-	if createErr != nil {
-		return nil, false, errs.Wrap(createErr, "auth: bootstrap first user")
-	}
 
-	// CreateUser 已设置 StatusActive，直接返回（LastLoginAt 由后续 Authenticate 更新）
-	return created, true, nil
+	if txErr != nil {
+		// 如果事务因 ErrInvalidCredentials 回滚（已有用户），返回该错误
+		return nil, false, txErr
+	}
+	return bootstrapped, true, nil
 }
 
 // ----------------------------------------------------------------------------
