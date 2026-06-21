@@ -31,7 +31,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	user, err := s.authSvc.Authenticate(c.Request.Context(), req.Username, req.Password)
+	user, bootstrapped, err := s.authSvc.AuthenticateOrBootstrap(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
 		// 登录失败审计（无法获取 user，记录 username + IP）
 		s.logger.Warnw("[AUDIT] login_failed",
@@ -42,6 +42,15 @@ func (s *Server) handleLogin(c *gin.Context) {
 		)
 		Fail(c, err)
 		return
+	}
+
+	if bootstrapped {
+		s.logger.Infow("[AUDIT] bootstrap_admin_created",
+			"action", "login",
+			"user_id", user.ID,
+			"user", user.Username,
+			"ip", c.ClientIP(),
+		)
 	}
 
 	// 签发 JWT Cookie
