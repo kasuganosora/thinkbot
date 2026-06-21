@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -334,7 +335,7 @@ func (s *WindowStateStore) Load(ctx context.Context, scopeKey string) (*WindowSn
 	var model dao.WindowStateModel
 	err := s.db.WithContext(ctx).Where("scope_key = ?", scopeKey).First(&model).Error
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, errs.Wrap(err, "window_state_store: load failed")

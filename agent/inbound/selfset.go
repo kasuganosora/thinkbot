@@ -13,12 +13,12 @@ import "sync"
 // Ingress 和 Engagement 两层防线同时生效，无需时序协调。
 type SelfIDSet struct {
 	mu  sync.RWMutex
-	ids map[string]bool
+	ids map[string]struct{}
 }
 
 // NewSelfIDSet 创建一个空的 SelfIDSet。
 func NewSelfIDSet() *SelfIDSet {
-	return &SelfIDSet{ids: make(map[string]bool)}
+	return &SelfIDSet{ids: make(map[string]struct{})}
 }
 
 // Add 注册一个 Bot 自身用户 ID。空值会被忽略。
@@ -27,7 +27,7 @@ func (s *SelfIDSet) Add(id string) {
 		return
 	}
 	s.mu.Lock()
-	s.ids[id] = true
+	s.ids[id] = struct{}{}
 	s.mu.Unlock()
 }
 
@@ -45,7 +45,7 @@ func (s *SelfIDSet) Contains(id string) bool {
 		return false
 	}
 	s.mu.RLock()
-	ok := s.ids[id]
+	_, ok := s.ids[id]
 	s.mu.RUnlock()
 	return ok
 }

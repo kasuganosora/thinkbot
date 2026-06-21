@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -214,6 +215,12 @@ func NewCallbackHandler(
 	logger *zap.SugaredLogger,
 	tp trace.TracerProvider,
 ) *CallbackHandler {
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &CallbackHandler{
 		registry: registry,
 		logger:   logger.Named("callback_handler"),

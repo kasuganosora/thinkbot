@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -71,6 +72,12 @@ func NewEngagementStage(
 ) *EngagementStage {
 	if name == "" {
 		name = "engagement"
+	}
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
 	}
 	return &EngagementStage{
 		name:   name,

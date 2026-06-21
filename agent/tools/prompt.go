@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 )
@@ -20,8 +21,8 @@ type ToolPromptManager struct {
 	registry *prompt.Registry // 目标 prompt Registry
 	prefix   string           // Section 名称前缀（避免冲突）
 
-	// 已注册的段落名称（用于清理或重新注册）
-	registered []string
+	mu         sync.Mutex
+	registered []string // 已注册的段落名称（用于清理或重新注册）
 }
 
 // NewToolPromptManager 创建工具提示词管理器。
@@ -45,6 +46,8 @@ func (m *ToolPromptManager) RegisterToolPrompt(section *ToolPromptSection) {
 	}
 
 	name := m.prefix + section.Name
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.registry.Register(prompt.Section{
 		Name:    name,
 		Order:   section.Order,
@@ -63,6 +66,8 @@ func (m *ToolPromptManager) RegisterFromDefs(defs []ToolDef) {
 
 // UnregisterAll 清除所有已注册的工具提示词段落。
 func (m *ToolPromptManager) UnregisterAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, name := range m.registered {
 		m.registry.Unregister(name)
 	}
@@ -71,6 +76,8 @@ func (m *ToolPromptManager) UnregisterAll() {
 
 // RegisteredNames 返回已注册的段落名称列表。
 func (m *ToolPromptManager) RegisteredNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	out := make([]string, len(m.registered))
 	copy(out, m.registered)
 	return out

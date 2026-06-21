@@ -171,11 +171,9 @@ func TestDreamManager_REMPhase(t *testing.T) {
 		t.Fatalf("Run failed: %v", err)
 	}
 
-	// REM 应该发现至少一个主题
-	if report.REMThemes == 0 {
-		// 无 LLM 时按 category 聚类，可能只有一个 category
-		// 不强求，因为 rule-based 提取可能都归为 "observation"
-	}
+	// REM 主题数量：无 LLM 时按 category 聚类，可能只有一个 category。
+	// rule-based 提取可能都归为 "observation"，因此不强求非零。
+	_ = report.REMThemes
 }
 
 func TestDreamManager_DeepPhaseNoPromotion(t *testing.T) {

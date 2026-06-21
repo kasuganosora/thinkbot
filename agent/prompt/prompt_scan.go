@@ -2,7 +2,9 @@ package prompt
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ============================================================================
@@ -154,7 +156,12 @@ func ScanForThreats(content string) []ScanFinding {
 		}
 		snippet := content[loc[0]:loc[1]]
 		if len(snippet) > 80 {
-			snippet = snippet[:80]
+			// 确保截断位置在有效的 UTF-8 字符边界上
+			end := 80
+			for end > 0 && !utf8.RuneStart(snippet[end]) {
+				end--
+			}
+			snippet = snippet[:end]
 		}
 		findings = append(findings, ScanFinding{
 			PatternID: tp.patternID,
@@ -181,34 +188,19 @@ func truncateContent(content string, maxBytes int) string {
 	headSize := int(float64(maxBytes) * 0.7)
 	tailSize := int(float64(maxBytes) * 0.2)
 
+	// 确保截断位置在有效的 UTF-8 字符边界上，避免切断多字节字符
+	for headSize > 0 && !utf8.RuneStart(content[headSize]) {
+		headSize--
+	}
+	for tailSize > 0 && !utf8.RuneStart(content[len(content)-tailSize]) {
+		tailSize--
+	}
+
 	head := content[:headSize]
 	tail := content[len(content)-tailSize:]
 
 	omitted := len(content) - headSize - tailSize
-	return head + "\n\n[... truncated " + itoa(omitted) + " bytes ...]\n\n" + tail
-}
-
-// itoa 简单的 int → string 转换，避免引入 strconv。
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return head + "\n\n[... truncated " + strconv.Itoa(omitted) + " bytes ...]\n\n" + tail
 }
 
 // FindingsSummary 将扫描发现格式化为可读的摘要字符串。
@@ -225,7 +217,11 @@ func FindingsSummary(findings []ScanFinding) string {
 		seen[f.PatternID] = true
 		snippet := strings.TrimSpace(f.Snippet)
 		if len(snippet) > 60 {
-			snippet = snippet[:60] + "..."
+			end := 60
+			for end > 0 && !utf8.RuneStart(snippet[end]) {
+				end--
+			}
+			snippet = snippet[:end] + "..."
 		}
 		parts = append(parts, f.PatternID+"("+snippet+")")
 	}

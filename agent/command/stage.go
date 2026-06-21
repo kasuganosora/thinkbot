@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -50,6 +51,12 @@ func NewCommandStage(
 	}
 	if registry == nil {
 		registry = NewRegistry()
+	}
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
 	}
 	return &CommandStage{
 		name:     name,

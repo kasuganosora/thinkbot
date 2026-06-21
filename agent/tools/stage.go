@@ -114,7 +114,17 @@ func CurrentTimeTool() ToolDef {
 				},
 			},
 			func(ctx *llm.ToolExecContext, input any) (any, error) {
-				now := time.Now()
+				loc := time.Local
+				if m, ok := input.(map[string]any); ok {
+					if tz, ok := m["timezone"].(string); ok && tz != "" {
+						loaded, err := time.LoadLocation(tz)
+						if err != nil {
+							return nil, fmt.Errorf("invalid timezone %q: %w", tz, err)
+						}
+						loc = loaded
+					}
+				}
+				now := time.Now().In(loc)
 				return map[string]any{
 					"time":     now.Format(time.RFC3339),
 					"unix":     now.Unix(),
