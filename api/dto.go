@@ -55,27 +55,29 @@ type UpdateRoleReq struct {
 
 // CreateBotReq 创建 Bot 请求（admin）。
 type CreateBotReq struct {
-	ID           string  `json:"id" binding:"required"`
-	Name         string  `json:"name" binding:"required"`
-	SystemPrompt string  `json:"systemPrompt"`
-	LLMMain      string  `json:"llmMain"`
-	LLMLight     string  `json:"llmLight"`
-	Model        string  `json:"model"`
-	Temperature  float64 `json:"temperature"`
-	MaxTokens    int     `json:"maxTokens"`
-	Workers      int     `json:"workers"`
+	ID              string  `json:"id" binding:"required"`
+	Name            string  `json:"name" binding:"required"`
+	SystemPrompt    string  `json:"systemPrompt"`
+	LLMMain         string  `json:"llmMain"`
+	LLMLight        string  `json:"llmLight"`
+	Model           string  `json:"model"`
+	Temperature     float64 `json:"temperature"`
+	MaxTokens       int     `json:"maxTokens"`
+	Workers         int     `json:"workers"`
+	ReasoningEffort string  `json:"reasoningEffort"`
 }
 
 // UpdateBotReq 更新 Bot 请求（admin）。
 type UpdateBotReq struct {
-	Name         *string  `json:"name"`
-	SystemPrompt *string  `json:"systemPrompt"`
-	LLMMain      *string  `json:"llmMain"`
-	LLMLight     *string  `json:"llmLight"`
-	Model        *string  `json:"model"`
-	Temperature  *float64 `json:"temperature"`
-	MaxTokens    *int     `json:"maxTokens"`
-	Workers      *int     `json:"workers"`
+	Name            *string  `json:"name"`
+	SystemPrompt    *string  `json:"systemPrompt"`
+	LLMMain         *string  `json:"llmMain"`
+	LLMLight        *string  `json:"llmLight"`
+	Model           *string  `json:"model"`
+	Temperature     *float64 `json:"temperature"`
+	MaxTokens       *int     `json:"maxTokens"`
+	Workers         *int     `json:"workers"`
+	ReasoningEffort *string  `json:"reasoningEffort"`
 }
 
 // --- 聊天 ---
@@ -154,6 +156,33 @@ type UpdateCronJobReq struct {
 	Feature  *string `json:"feature"`
 	MaxRuns  *int    `json:"maxRuns"`
 	Enabled  *bool   `json:"enabled"`
+}
+
+// --- LLM 模型管理 ---
+
+// CreateLLMModelReq 创建 LLM 模型配置请求。
+type CreateLLMModelReq struct {
+	ID          string  `json:"id" binding:"required"`
+	Provider    string  `json:"provider" binding:"required"`
+	Model       string  `json:"model" binding:"required"`
+	APIKey      string  `json:"apiKey" binding:"required"`
+	BaseURL     string  `json:"baseUrl"`
+	ChatPath    string  `json:"chatPath"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"maxTokens"`
+	Multimodal  bool    `json:"multimodal"`
+}
+
+// UpdateLLMModelReq 更新 LLM 模型配置请求（字段可选）。
+type UpdateLLMModelReq struct {
+	Provider    *string  `json:"provider"`
+	Model       *string  `json:"model"`
+	APIKey      *string  `json:"apiKey"`
+	BaseURL     *string  `json:"baseUrl"`
+	ChatPath    *string  `json:"chatPath"`
+	Temperature *float64 `json:"temperature"`
+	MaxTokens   *int     `json:"maxTokens"`
+	Multimodal  *bool    `json:"multimodal"`
 }
 
 // --- 定时任务 ---

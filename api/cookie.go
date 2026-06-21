@@ -48,11 +48,11 @@ type CookieManager struct {
 }
 
 // NewCookieManager 创建 CookieManager。
-// secret 为空时使用随机生成的密钥（重启后失效）。
+// secret 不应为空（由调用方保证持久化）。
 // secure 控制 Cookie 的 Secure 标志（true=仅 HTTPS）。
 func NewCookieManager(secret string, secure bool) *CookieManager {
 	if secret == "" {
-		// 生成随机密钥（重启后失效，仅用于开发/未配置场景）
+		// 不应到达此处，但兜底生成随机密钥防止 panic
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
 			panic("crypto/rand failed: " + err.Error())

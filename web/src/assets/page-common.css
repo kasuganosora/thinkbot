@@ -1,0 +1,240 @@
+/* ============================================================
+   Page-level shared styles — aligned with Memoh design system.
+   ALL shared layout/visual patterns live here.
+   Individual pages should only contain page-specific styles.
+   ============================================================ */
+
+/* ---- Page shell ---- */
+
+.page {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- Content area (consistent padding for all pages) ---- */
+
+.page-content {
+  padding: 1.5rem;
+  flex: 1;
+}
+
+.page-content-narrow {
+  padding: 1.5rem;
+  max-width: 860px;
+  flex: 1;
+}
+
+/* ---- Loading / Empty states ---- */
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 1.5rem;
+}
+
+.empty-inline {
+  padding: 2rem;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+
+/* ---- Data table ---- */
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 0.625rem 1rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted-foreground);
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table td {
+  padding: 0.625rem 1rem;
+  font-size: 0.8125rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr {
+  transition: background 0.15s ease;
+}
+
+.data-table tbody tr:hover {
+  background: var(--accent);
+}
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* ---- Utility text ---- */
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.muted {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+
+/* ---- Form layout ---- */
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.form-field {
+  margin-bottom: 1rem;
+}
+
+.form-field label {
+  display: block;
+  margin-bottom: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.form-field-hint {
+  font-size: 0.6875rem;
+  color: var(--muted-foreground);
+  margin-top: 0.25rem;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+  margin-top: 1.25rem;
+}
+
+/* ---- Search box ---- */
+
+.search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-icon {
+  position: absolute;
+  left: 0.625rem;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.search-box {
+  height: 2.25rem;
+  width: 180px;
+  padding: 0 0.75rem 0 2rem;
+  font-size: 0.8125rem;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--foreground);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.search-box::placeholder {
+  color: var(--muted-foreground);
+}
+
+.search-box:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px oklch(0.575 0 0 / 0.15);
+}
+
+/* ---- Stat cards ---- */
+
+.stat-label {
+  font-size: 0.6875rem;
+  color: var(--muted-foreground);
+  margin-bottom: 0.375rem;
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.stat-value-sm {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.text-success {
+  color: var(--success);
+}
+
+/* ---- Section title (within page content) ---- */
+
+.section-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 0.625rem;
+}
+
+/* ---- Row action buttons — now using TButton size="icon-sm", no custom CSS needed ---- */
+
+/* ---- Tab content ---- */
+
+.tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding-bottom: 2rem;
+}
+
+/* ---- Inline create/edit panel (NOT a modal dialog) ---- */
+
+.create-panel {
+  margin-bottom: 1.5rem;
+}
+
+.create-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+}
+
+.create-panel-title {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.create-panel-subtitle {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  margin-top: 0.125rem;
+}
+
+/* ---- Responsive ---- */
+
+@media (max-width: 640px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}

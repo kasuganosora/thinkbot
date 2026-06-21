@@ -38,8 +38,8 @@ func main() {
 	log.Logger.Infow("starting thinkbot")
 
 	app := fx.New(
-		// 提供日志
-		fx.Provide(zap.NewProduction),
+		// 提供日志（使用已配置的全局 logger，统一输出到 stdout/stderr/file）
+		fx.Provide(func() *zap.Logger { return log.Logger.Desugar() }),
 		fx.Provide(func(l *zap.Logger) *zap.SugaredLogger { return l.Sugar() }),
 
 		// 数据库

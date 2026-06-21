@@ -29,6 +29,9 @@ type BotDefinition struct {
 	// MaxTokens 最大输出 token 数。
 	MaxTokens int `gorm:"default:4096" json:"maxTokens"`
 
+	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
+	ReasoningEffort string `gorm:"size:16;default:''" json:"reasoningEffort"`
+
 	// Workers 并发 worker 数量。
 	Workers int `gorm:"default:4" json:"workers"`
 

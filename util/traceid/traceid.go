@@ -21,6 +21,16 @@ import (
 	"github.com/kasuganosora/thinkbot/util/log"
 )
 
+func init() {
+	// 注册 GORM 上下文字段提取器，使数据库日志自动携带 trace_id
+	log.RegisterGormContextFielder(func(ctx context.Context) []zap.Field {
+		if id := FromContext(ctx); id != "" {
+			return []zap.Field{zap.String(LogField, id)}
+		}
+		return nil
+	})
+}
+
 // ============================================================================
 // 常量与类型
 // ============================================================================

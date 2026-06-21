@@ -106,16 +106,17 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 	}
 
 	def := &dao.BotDefinition{
-		ID:           req.ID,
-		Name:         req.Name,
-		SystemPrompt: req.SystemPrompt,
-		LLMMain:      req.LLMMain,
-		LLMLight:     req.LLMLight,
-		Model:        req.Model,
-		Temperature:  req.Temperature,
-		MaxTokens:    req.MaxTokens,
-		Workers:      req.Workers,
-		Status:       dao.BotStatusStopped,
+		ID:              req.ID,
+		Name:            req.Name,
+		SystemPrompt:    req.SystemPrompt,
+		LLMMain:         req.LLMMain,
+		LLMLight:        req.LLMLight,
+		Model:           req.Model,
+		Temperature:     req.Temperature,
+		MaxTokens:       req.MaxTokens,
+		Workers:         req.Workers,
+		ReasoningEffort: req.ReasoningEffort,
+		Status:          dao.BotStatusStopped,
 	}
 
 	if err := s.botSvc.CreateDefinition(def); err != nil {
@@ -173,6 +174,9 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	}
 	if req.Workers != nil {
 		updates["workers"] = *req.Workers
+	}
+	if req.ReasoningEffort != nil {
+		updates["reasoning_effort"] = *req.ReasoningEffort
 	}
 
 	if len(updates) == 0 {

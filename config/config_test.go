@@ -407,7 +407,7 @@ func TestBuilder_GetBotSettings(t *testing.T) {
 // ============================================================================
 
 func TestValidateKey(t *testing.T) {
-	for _, k := range []string{"llm.api_key", "db.path", "bot_1.name", "simple"} {
+	for _, k := range []string{"llm.api_key", "db.path", "bot_1.name", "simple", "llm.glm-5.2", "llm.claude-3.5"} {
 		if err := ValidateKey(k); err != nil {
 			t.Errorf("ValidateKey(%q): unexpected error: %v", k, err)
 		}

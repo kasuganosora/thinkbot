@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"path/filepath"
 
 	"go.opentelemetry.io/otel/metric"
@@ -58,11 +60,36 @@ func newEventBus(logger *zap.SugaredLogger) outbound.EventBus {
 }
 
 // newCookieManager 创建 CookieManager。
-// JWT secret 和 Secure 标志从 config store 读取。
-func newCookieManager(store *config.Store) *CookieManager {
-	secret := store.GetString("auth.jwt_secret", "")
-	secure := store.GetBool(config.KeyAPICookieSecure, false)
-	return NewCookieManager(secret, secure)
+// JWT secret 优先从 config store 读取（含 DB / .env / 环境变量）。
+// 如果不存在，生成随机 secret 并持久化到 DB，保证重启后 cookie 仍然有效。
+// Secure 标志从 config store 读取。
+//
+// 因为 config store 的 Migrate/Reload 在 OnStart 中执行，
+// 所以此处也在 OnStart 中初始化 secret，确保 DB 表已就绪。
+func newCookieManager(lc fx.Lifecycle, store *config.Store) *CookieManager {
+	m := &CookieManager{}
+
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			secret := store.GetString("auth.jwt_secret", "")
+			if secret == "" {
+				b := make([]byte, 32)
+				if _, err := rand.Read(b); err != nil {
+					return err
+				}
+				secret = hex.EncodeToString(b)
+				if err := store.Set(ctx, "auth.jwt_secret", secret); err != nil {
+					return err
+				}
+			}
+			secure := store.GetBool(config.KeyAPICookieSecure, false)
+			m.secret = []byte(secret)
+			m.secure = secure
+			return nil
+		},
+	})
+
+	return m
 }
 
 // newBotService 创建 BotService。
@@ -122,6 +149,9 @@ func newAPIServer(
 
 // registerAPILifecycle 绑定 Server 和 BotService 的生命周期。
 func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc *WorkflowService, skillMgr *skill.SkillManager) {
+	// 独立的 context，不依赖 FX OnStart 的短生命周期 context
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			// 启动所有定义中 status=running 的 Bot
@@ -137,9 +167,9 @@ func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc
 					"total", result.Total, "resumed", result.Resumed, "reanalyzed", result.Reanalyzed)
 			}
 
-			// 在后台启动 HTTP Server
+			// 在后台启动 HTTP Server（使用独立 context）
 			go func() {
-				if err := server.Start(ctx); err != nil {
+				if err := server.Start(srvCtx); err != nil {
 					p.Logger.Errorw("api: server error", "err", err)
 				}
 			}()
@@ -149,6 +179,8 @@ func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc
 		},
 		OnStop: func(ctx context.Context) error {
 			p.Logger.Infow("api server shutting down")
+			// 取消 HTTP Server 的 context，触发优雅关闭
+			srvCancel()
 			// 保存技能启用状态
 			skillMgr.SaveEnabledStates(ctx)
 			// 关闭工作流引擎

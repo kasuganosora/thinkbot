@@ -33,11 +33,14 @@ func (b *captureBus) Publish(_ context.Context, event outbound.Event) {
 	defer b.mu.Unlock()
 	b.events = append(b.events, event)
 }
-func (b *captureBus) Subscribe(string) *outbound.Subscription                   { return nil }
-func (b *captureBus) SubscribeBot(string) *outbound.Subscription                { return nil }
-func (b *captureBus) SubscribeWithReplay(string, uint64) *outbound.Subscription { return nil }
-func (b *captureBus) LatestSeq() uint64                                         { return 0 }
-func (b *captureBus) Unsubscribe(*outbound.Subscription)                        {}
+func (b *captureBus) Subscribe(string) *outbound.Subscription                              { return nil }
+func (b *captureBus) SubscribeBot(string) *outbound.Subscription                           { return nil }
+func (b *captureBus) SubscribeWithReplay(string, uint64) *outbound.Subscription            { return nil }
+func (b *captureBus) LatestSeq() uint64                                                    { return 0 }
+func (b *captureBus) Unsubscribe(*outbound.Subscription)                                   {}
+func (b *captureBus) PublishTextDelta(_ context.Context, _, _, _ string)                   {}
+func (b *captureBus) PublishToolCall(_ context.Context, _, _, _ string, _ any)             {}
+func (b *captureBus) PublishToolResult(_ context.Context, _, _, _ string, _ any, _ string) {}
 func (b *captureBus) Close() {
 	b.mu.Lock()
 	b.closed = true
