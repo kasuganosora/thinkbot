@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
@@ -56,11 +57,32 @@ type Manager struct {
 
 // ManagerMetrics 是工作流管理器的运行时指标（原子计数器快照）。
 type ManagerMetrics struct {
-	Submitted  atomic.Int64 // 累计提交
-	Completed  atomic.Int64 // 累计成功完成
-	Failed     atomic.Int64 // 累计失败
-	Terminated atomic.Int64 // 累计终止
-	Running    atomic.Int64 // 当前运行中
+	Submitted     atomic.Int64 // 累计提交
+	Completed     atomic.Int64 // 累计成功完成
+	Failed        atomic.Int64 // 累计失败
+	Terminated    atomic.Int64 // 累计终止
+	Running       atomic.Int64 // 当前运行中
+	NodeExecuted  atomic.Int64 // 累计节点执行次数
+	NodeFailed    atomic.Int64 // 累计节点失败次数
+	NodeRetries   atomic.Int64 // 累计节点重试次数（不含首次执行）
+	NodeReviews   atomic.Int64 // 累计 Review 迭代次数
+	NodeSkipped   atomic.Int64 // 累计节点跳过次数（级联 + 终止）
+	PersistErrors atomic.Int64 // 累计持久化失败次数
+}
+
+// MetricsSnapshot 是 ManagerMetrics 的只读快照，用于序列化展示。
+type MetricsSnapshot struct {
+	Submitted     int64 `json:"submitted"`
+	Completed     int64 `json:"completed"`
+	Failed        int64 `json:"failed"`
+	Terminated    int64 `json:"terminated"`
+	Running       int64 `json:"running"`
+	NodeExecuted  int64 `json:"nodeExecuted"`
+	NodeFailed    int64 `json:"nodeFailed"`
+	NodeRetries   int64 `json:"nodeRetries"`
+	NodeReviews   int64 `json:"nodeReviews"`
+	NodeSkipped   int64 `json:"nodeSkipped"`
+	PersistErrors int64 `json:"persistErrors"`
 }
 
 // NewManager 创建工作流管理器。
@@ -93,6 +115,23 @@ func (m *Manager) Metrics() (submitted, completed, failed, terminated, running i
 		m.metrics.Running.Load()
 }
 
+// MetricsSnapshot 返回包含所有指标的只读快照。
+func (m *Manager) MetricsSnapshot() MetricsSnapshot {
+	return MetricsSnapshot{
+		Submitted:     m.metrics.Submitted.Load(),
+		Completed:     m.metrics.Completed.Load(),
+		Failed:        m.metrics.Failed.Load(),
+		Terminated:    m.metrics.Terminated.Load(),
+		Running:       m.metrics.Running.Load(),
+		NodeExecuted:  m.metrics.NodeExecuted.Load(),
+		NodeFailed:    m.metrics.NodeFailed.Load(),
+		NodeRetries:   m.metrics.NodeRetries.Load(),
+		NodeReviews:   m.metrics.NodeReviews.Load(),
+		NodeSkipped:   m.metrics.NodeSkipped.Load(),
+		PersistErrors: m.metrics.PersistErrors.Load(),
+	}
+}
+
 // ============================================================================
 // Submit — 异步提交
 // ============================================================================
@@ -113,6 +152,9 @@ type SubmitResult struct {
 // Submit 创建工作流并异步启动分析+执行。
 // 立即返回 workflow_id，不等待执行完成。
 func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult, error) {
+	ctx, span := m.tracer.Start(ctx, "workflow.manager.submit")
+	defer span.End()
+
 	if req.Requirement == "" {
 		return nil, errs.New("requirement is empty")
 	}
@@ -129,7 +171,7 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	}
 
 	// 发布提交事件
-	m.emitWorkflowEvent(wfID, outbound.EventWorkflowSubmitted, map[string]any{
+	m.emitWorkflowEvent(ctx, wfID, outbound.EventWorkflowSubmitted, map[string]any{
 		"requirement": strutil.Truncate(req.Requirement, 200),
 	})
 
@@ -145,7 +187,21 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	m.running[wfID] = inst
 	m.mu.Unlock()
 
-	go m.analyzeAndRun(bgCtx, wf, req.MaxParallel, done)
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				m.logger.Errorw("panic in workflow goroutine",
+					"workflow_id", wf.ID, "panic", r)
+				wf.Status = WorkflowFailed
+				wf.Error = fmt.Sprintf("internal error: %v", r)
+				_ = m.repo.Save(wf)
+				m.metrics.Failed.Add(1)
+				m.cleanupRunning(wf.ID)
+			}
+		}()
+		m.analyzeAndRun(bgCtx, wf, req.MaxParallel)
+	}()
 
 	return &SubmitResult{
 		WorkflowID: wfID,
@@ -155,13 +211,14 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 }
 
 // emitWorkflowEvent 发布工作流级事件（workflow_id 作为 TraceID，供 SSE 订阅端筛选）。
-func (m *Manager) emitWorkflowEvent(wfID string, eventType outbound.EventType, data map[string]any) {
-	m.emitter.Emit(context.Background(), eventType, wfID, data)
+func (m *Manager) emitWorkflowEvent(ctx context.Context, wfID string, eventType outbound.EventType, data map[string]any) {
+	m.emitter.Emit(ctx, eventType, wfID, data)
 }
 
 // analyzeAndRun 后台执行：分析需求 → 构建 DAG → 调度执行。
-func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel int, done chan struct{}) {
-	defer close(done)
+func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel int) {
+	ctx, span := m.tracer.Start(ctx, "workflow.manager.analyze_and_run")
+	defer span.End()
 
 	m.metrics.Running.Add(1)
 	defer m.metrics.Running.Add(-1)
@@ -174,7 +231,7 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 		wf.Error = fmt.Sprintf("需求分析失败: %s", err.Error())
 		_ = m.repo.Save(wf)
 		m.metrics.Failed.Add(1)
-		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowFailed, map[string]any{
+		m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowFailed, map[string]any{
 			"error": wf.Error,
 		})
 		m.cleanupRunning(wf.ID)
@@ -192,7 +249,7 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	}
 
 	// 发布分析完成事件
-	m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowAnalyzed, map[string]any{
+	m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowAnalyzed, map[string]any{
 		"node_count": len(nodes),
 		"nodes":      nodeSummaries(nodes),
 	})
@@ -204,8 +261,11 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 // runScheduler 创建并运行 Scheduler，更新指标。
 // 被 analyzeAndRun（新工作流）和 Recover（恢复工作流）共用。
 func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel int) {
+	ctx, span := m.tracer.Start(ctx, "workflow.manager.run_scheduler")
+	defer span.End()
+
 	cfg := SchedulerConfig{MaxParallel: maxParallel}
-	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger, m.emitter)
+	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger, m.emitter, &m.metrics)
 
 	m.mu.Lock()
 	if inst, ok := m.running[wf.ID]; ok {
@@ -219,15 +279,15 @@ func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel in
 	// 发布终态事件
 	switch finalStatus {
 	case WorkflowCompleted:
-		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowCompleted, map[string]any{
+		m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowCompleted, map[string]any{
 			"node_count": len(wf.Nodes),
 		})
 	case WorkflowFailed:
-		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowFailed, map[string]any{
+		m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowFailed, map[string]any{
 			"error": wf.Error,
 		})
 	case WorkflowTerminated:
-		m.emitWorkflowEvent(wf.ID, outbound.EventWorkflowTerminated, nil)
+		m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowTerminated, nil)
 	}
 
 	switch finalStatus {
@@ -320,7 +380,21 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 			}
 			m.mu.Unlock()
 
-			go m.analyzeAndRun(bgCtx, wf, 0, done)
+			go func() {
+				defer close(done)
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Errorw("panic in workflow goroutine",
+							"workflow_id", wf.ID, "panic", r)
+						wf.Status = WorkflowFailed
+						wf.Error = fmt.Sprintf("internal error: %v", r)
+						_ = m.repo.Save(wf)
+						m.metrics.Failed.Add(1)
+						m.cleanupRunning(wf.ID)
+					}
+				}()
+				m.analyzeAndRun(bgCtx, wf, 0)
+			}()
 
 			result.Reanalyzed++
 			continue
@@ -370,6 +444,17 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 
 		go func(wf *Workflow) {
 			defer close(done)
+			defer func() {
+				if r := recover(); r != nil {
+					m.logger.Errorw("panic in workflow goroutine",
+						"workflow_id", wf.ID, "panic", r)
+					wf.Status = WorkflowFailed
+					wf.Error = fmt.Sprintf("internal error: %v", r)
+					_ = m.repo.Save(wf)
+					m.metrics.Failed.Add(1)
+					m.cleanupRunning(wf.ID)
+				}
+			}()
 			m.metrics.Running.Add(1)
 			defer m.metrics.Running.Add(-1)
 
@@ -527,6 +612,11 @@ type ControlResult struct {
 
 // Control 执行流程控制操作。
 func (m *Manager) Control(wfID string, req ControlRequest) (*ControlResult, error) {
+	ctx, span := m.tracer.Start(context.Background(), "workflow.manager.control",
+		trace.WithAttributes(attribute.String("workflow.id", wfID)))
+	defer span.End()
+	_ = ctx
+
 	m.mu.RLock()
 	inst, ok := m.running[wfID]
 	m.mu.RUnlock()

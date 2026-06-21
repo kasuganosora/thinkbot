@@ -102,7 +102,7 @@ func detectCycle(nodes []*DAGNode) []string {
 
 // ReadyNodes 返回所有依赖均已 completed 的 pending 节点。
 func ReadyNodes(wf *Workflow) []*DAGNode {
-	var ready []*DAGNode
+	ready := make([]*DAGNode, 0, len(wf.Nodes))
 	for _, n := range wf.Nodes {
 		if n.Status != NodePending {
 			continue

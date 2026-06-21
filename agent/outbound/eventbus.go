@@ -61,6 +61,7 @@ const (
 	EventWorkflowNodeFailed    EventType = "workflow.node.failed"    // 节点失败
 	EventWorkflowNodeReviewing EventType = "workflow.node.reviewing" // 节点进入审查
 	EventWorkflowNodeRetrying  EventType = "workflow.node.retrying"  // 节点重试
+	EventWorkflowNodeSkipped   EventType = "workflow.node.skipped"   // 节点被级联跳过
 )
 
 // Event 是旁路事件总线中传递的事件。
