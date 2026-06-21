@@ -94,5 +94,5 @@ func (cm *ContextManager) truncateLocked() {
 		start = len(cm.messages) - keep
 	}
 
-	cm.messages = cm.messages[start:]
+	cm.messages = append([]llm.Message(nil), cm.messages[start:]...)
 }

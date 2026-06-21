@@ -67,27 +67,35 @@ func NewSubAgentManager(provider llm.Provider, model string, defaultOpts ...Opti
 }
 
 // SetDelegateTimeout 设置 delegate 工具的超时时间。
+// 应在 Delegate/DelegateMany 调用前设置。
 func (m *SubAgentManager) SetDelegateTimeout(d time.Duration) {
+	m.mu.Lock()
 	m.delegateTimeout = d
+	m.mu.Unlock()
 }
 
 // SetMaxConcurrency 设置 DelegateMany 的最大并发数。
+// 应在 DelegateMany 调用前设置。
 func (m *SubAgentManager) SetMaxConcurrency(n int) {
 	if n > 0 {
+		m.mu.Lock()
 		m.maxConcurrency = n
+		m.mu.Unlock()
 	}
 }
 
 // Delegate 创建一个临时 SubAgent，执行任务后自动关闭。
 // 这是一次性委托模式，适合不需要多轮交互的场景。
 func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
-	if m.delegateTimeout > 0 {
+	timeout, _, defaultOpts := m.snapshotConfig()
+
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, m.delegateTimeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
-	allOpts := m.mergeOpts(systemPrompt, opts...)
+	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 
 	sa := New(m.provider, m.model, allOpts...)
 	defer sa.Close()
@@ -99,9 +107,15 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 // 每个任务在独立的 SubAgent 中执行，互不影响。
 // 返回每个任务的结果（顺序与输入一致）。
 func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string, tasks []string, opts ...Option) []TaskResult {
+	// 快照配置（线程安全）
+	timeout, maxConc, defaultOpts := m.snapshotConfig()
+
+	// 预计算合并选项，避免在每个 goroutine 中重复
+	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
+
 	results := make([]TaskResult, len(tasks))
 
-	sem := make(chan struct{}, m.maxConcurrency)
+	sem := make(chan struct{}, maxConc)
 	var wg sync.WaitGroup
 
 	for i, task := range tasks {
@@ -113,13 +127,12 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 
 			// 每个 SubAgent 有独立的超时上下文
 			taskCtx := ctx
-			if m.delegateTimeout > 0 {
+			if timeout > 0 {
 				var cancel context.CancelFunc
-				taskCtx, cancel = context.WithTimeout(ctx, m.delegateTimeout)
+				taskCtx, cancel = context.WithTimeout(ctx, timeout)
 				defer cancel()
 			}
 
-			allOpts := m.mergeOpts(systemPrompt, opts...)
 			sa := New(m.provider, m.model, allOpts...)
 			defer sa.Close()
 
@@ -202,12 +215,19 @@ func (m *SubAgentManager) Close(id string) error {
 // List 返回所有活跃的持久化 SubAgent 信息。
 func (m *SubAgentManager) List() []SubAgentInfo {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	result := make([]SubAgentInfo, 0, len(m.subagents))
+	// 快照 SubAgent 引用，避免持 m.mu 时获取 sa.mu 造成锁层级依赖
+	ids := make([]string, 0, len(m.subagents))
+	agents := make([]*SubAgent, 0, len(m.subagents))
 	for id, sa := range m.subagents {
+		ids = append(ids, id)
+		agents = append(agents, sa)
+	}
+	m.mu.Unlock()
+
+	result := make([]SubAgentInfo, 0, len(agents))
+	for i, sa := range agents {
 		result = append(result, SubAgentInfo{
-			ID:    id,
+			ID:    ids[i],
 			Name:  sa.Name(),
 			Turns: sa.TurnCount(),
 		})
@@ -225,10 +245,17 @@ func (m *SubAgentManager) CloseAll() {
 	m.mu.Unlock()
 }
 
-// mergeOpts 合并默认选项、系统提示词和额外选项。
-func (m *SubAgentManager) mergeOpts(systemPrompt string, opts ...Option) []Option {
-	allOpts := make([]Option, 0, len(m.defaultOpts)+len(opts)+1)
-	allOpts = append(allOpts, m.defaultOpts...)
+// snapshotConfig 返回当前配置的安全快照（线程安全）。
+func (m *SubAgentManager) snapshotConfig() (timeout time.Duration, maxConc int, defaultOpts []Option) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.delegateTimeout, m.maxConcurrency, m.defaultOpts
+}
+
+// mergeOptionLists 合并默认选项、系统提示词和额外选项。
+func mergeOptionLists(defaultOpts []Option, systemPrompt string, opts ...Option) []Option {
+	allOpts := make([]Option, 0, len(defaultOpts)+len(opts)+1)
+	allOpts = append(allOpts, defaultOpts...)
 	if systemPrompt != "" {
 		allOpts = append(allOpts, WithSystemPrompt(systemPrompt))
 	}
