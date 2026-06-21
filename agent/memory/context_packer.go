@@ -31,7 +31,10 @@ type ContextPackerConfig struct {
 	MaxItemChars int
 	// TargetItems 目标条目数（默认 8）。
 	TargetItems int
-	// OverfetchRatio 过采样率（默认 3，即获取目标数 3 倍的候选再筛选）。
+	// OverfetchRatio 过采样率（默认 3）。
+	// 供调用方在检索阶段预取 TargetItems × OverfetchRatio 条候选，
+	// 再交由 Pack 按评分筛选。Pack 本身不使用此值，
+	// 但调用方应据此设定检索 limit 以保证候选池足够大。
 	OverfetchRatio int
 	// EnableReorder 是否启用 anti-lost-in-the-middle 重排序（默认 true）。
 	EnableReorder bool
