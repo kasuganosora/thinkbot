@@ -229,21 +229,6 @@ func TestValidateWithJaccard(t *testing.T) {
 // Embedding Validation Tests (mock)
 // ============================================================================
 
-// mockEmbeddingProvider 模拟 embedding 后端用于测试。
-type mockEmbeddingProvider struct {
-	dimensions int
-}
-
-func (m *mockEmbeddingProvider) DoEmbed(_ context.Context, params llm.EmbedParams) (*llm.EmbedResult, error) {
-	// 返回简单的确定性 embedding：第一个维度为 1.0，其余为 0
-	embeddings := make([][]float64, len(params.Values))
-	for i := range embeddings {
-		embeddings[i] = make([]float64, m.dimensions)
-		embeddings[i][0] = 1.0
-	}
-	return &llm.EmbedResult{Embeddings: embeddings}, nil
-}
-
 func TestValidateWithEmbedding_AllPass(t *testing.T) {
 	// 使用 always-cosine-1 的 mock（所有向量相同 → cosine=1.0）
 	sourceEntries := []TieredEntry{

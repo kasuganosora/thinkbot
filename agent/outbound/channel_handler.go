@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -54,6 +55,12 @@ type ChannelReplyHandler struct {
 
 // NewChannelReplyHandler 创建一个 ChannelReplyHandler。
 func NewChannelReplyHandler(logger *zap.SugaredLogger, tp trace.TracerProvider) *ChannelReplyHandler {
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &ChannelReplyHandler{
 		senders: make(map[string]ChannelSender),
 		logger:  logger.With("component", "channel_reply_handler"),
@@ -83,7 +90,7 @@ func (h *ChannelReplyHandler) Unregister(channelName string) {
 // 路由策略：
 //  1. 优先使用 Action.Metadata["source_channel"] 作为路由键
 //  2. 找到对应 Sender 后，调用 Sender.Send(ctx, action)
-//  3. 找不到 Sender 时记录警告（不返回错误，避免阻塞其他 Action）
+//  3. 找不到 Sender 时返回 error，由 Dispatcher 决定是否阻塞其他 Action
 //
 // 实现了 ActionHandler 接口。
 func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) error {

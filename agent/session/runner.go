@@ -67,7 +67,10 @@ type SessionRunner struct {
 	mu sync.Mutex
 
 	state RunnerState
-	cond  *sync.Cond
+
+	// done 在 state 变为 idle 时 close，等待者通过 select 感知。
+	// 每次 release 后重建为新 channel。
+	done chan struct{}
 
 	// 当前执行的 context 取消函数
 	currentCancel context.CancelFunc
@@ -104,8 +107,8 @@ func DefaultRunnerConfig() RunnerConfig {
 func NewSessionRunner(config RunnerConfig) *SessionRunner {
 	r := &SessionRunner{
 		maxQueueDepth: config.MaxQueueDepth,
+		done:          make(chan struct{}),
 	}
-	r.cond = sync.NewCond(&r.mu)
 	return r
 }
 
@@ -128,17 +131,12 @@ func (r *SessionRunner) QueueDepth() int {
 // 如果 Runner 正忙，调用者阻塞等待直到前面的任务完成。
 // fn 在执行期间可以通过 ctx.Done() 感知取消。
 func (r *SessionRunner) Run(ctx context.Context, fn func(context.Context) error) error {
-	// 进入临界区排队
-	if err := r.acquire(ctx); err != nil {
+	// 进入临界区排队（acquire 内部原子设置 currentCancel）
+	execCtx, cancel, err := r.acquire(ctx)
+	if err != nil {
 		return err
 	}
 	defer r.release()
-
-	// 创建可取消的 context
-	execCtx, cancel := context.WithCancel(ctx)
-	r.mu.Lock()
-	r.currentCancel = cancel
-	r.mu.Unlock()
 	defer cancel()
 
 	return fn(execCtx)
@@ -152,18 +150,14 @@ func (r *SessionRunner) TryRun(ctx context.Context, fn func(context.Context) err
 		return ErrSessionBusy
 	}
 	r.state = RunnerStateBusy
+	r.totalRuns++
+	r.lastRunAt = time.Now()
 	execCtx, cancel := context.WithCancel(ctx)
 	r.currentCancel = cancel
 	r.mu.Unlock()
 
-	defer func() {
-		r.mu.Lock()
-		r.state = RunnerStateIdle
-		r.currentCancel = nil
-		r.cond.Signal()
-		r.mu.Unlock()
-		cancel()
-	}()
+	defer r.release()
+	defer cancel()
 
 	return fn(execCtx)
 }
@@ -183,60 +177,52 @@ func (r *SessionRunner) IsBusy() bool {
 }
 
 // acquire 获取执行锁（阻塞等待前面的任务完成）。
-func (r *SessionRunner) acquire(ctx context.Context) error {
-	r.mu.Lock()
+// 使用 channel-based 等待替代 sync.Cond，支持 context 取消。
+func (r *SessionRunner) acquire(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	for {
+		r.mu.Lock()
 
-	// 检查 context 是否已取消
-	if err := ctx.Err(); err != nil {
-		r.mu.Unlock()
-		return err
-	}
+		// 检查 context 是否已取消
+		if err := ctx.Err(); err != nil {
+			r.mu.Unlock()
+			return nil, nil, err
+		}
 
-	// 等待空闲
-	for r.state == RunnerStateBusy {
+		// 如果空闲，直接获取（与 currentCancel 原子设置）
+		if r.state != RunnerStateBusy {
+			r.state = RunnerStateBusy
+			r.totalRuns++
+			r.lastRunAt = time.Now()
+			execCtx, cancel := context.WithCancel(ctx)
+			r.currentCancel = cancel
+			r.mu.Unlock()
+			return execCtx, cancel, nil
+		}
+
 		// 检查队列深度限制
 		if r.maxQueueDepth > 0 && r.queueDepth >= r.maxQueueDepth {
 			r.mu.Unlock()
-			return ErrSessionBusy
+			return nil, nil, ErrSessionBusy
 		}
 
+		// 等待 release 的通知
+		done := r.done
 		r.queueDepth++
-
-		// 使用 goroutine + channel 实现 context 感知的 cond.Wait
-		done := make(chan struct{})
-		go func() {
-			r.mu.Lock()
-			r.cond.Wait()
-			r.queueDepth--
-			close(done)
-			r.mu.Unlock()
-		}()
+		r.mu.Unlock()
 
 		select {
 		case <-ctx.Done():
-			// context 取消，唤醒所有等待者
 			r.mu.Lock()
-			r.cond.Broadcast()
+			r.queueDepth--
 			r.mu.Unlock()
-			return ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-done:
-			// cond 被唤醒，继续检查状态
+			// 被唤醒，重新尝试获取
 			r.mu.Lock()
+			r.queueDepth--
+			r.mu.Unlock()
 		}
 	}
-
-	r.state = RunnerStateBusy
-	execCtx, cancel := context.WithCancel(ctx)
-	r.currentCancel = cancel
-	r.totalRuns++
-	r.lastRunAt = time.Now()
-	r.mu.Unlock()
-
-	// 将 execCtx 传递给调用者需要特殊处理
-	// 这里我们通过返回 cancel 来确保后续可以取消
-	_ = execCtx
-	_ = cancel
-	return nil
 }
 
 // release 释放执行锁。
@@ -247,7 +233,8 @@ func (r *SessionRunner) release() {
 		r.currentCancel()
 		r.currentCancel = nil
 	}
-	r.cond.Signal()
+	close(r.done)
+	r.done = make(chan struct{})
 	r.mu.Unlock()
 }
 

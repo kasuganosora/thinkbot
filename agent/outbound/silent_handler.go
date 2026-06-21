@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -35,6 +36,12 @@ func NewSilentHandler(
 	logger *zap.SugaredLogger,
 	tp trace.TracerProvider,
 ) *SilentHandler {
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &SilentHandler{
 		logger: logger.Named("silent_handler"),
 		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/agent/outbound/silent"),

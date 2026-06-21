@@ -144,7 +144,9 @@ func TestSnapshot_PeriodicMode(t *testing.T) {
 		t.Error("periodic should refresh at turn 0 when dirty")
 	}
 
-	snapshot.Refresh(ctx)
+	if _, err := snapshot.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
 	snapshot.MarkTurnComplete() // turnCount=1
 
 	// 写入新内容
@@ -377,8 +379,8 @@ func TestTools_ReturnsSingleTool(t *testing.T) {
 		t.Fatalf("expected 1 tool, got %d", len(defs))
 	}
 
-	if defs[0].Tool.Name != "memory" {
-		t.Errorf("expected tool name 'memory', got '%s'", defs[0].Tool.Name)
+	if defs[0].Name != "memory" {
+		t.Errorf("expected tool name 'memory', got '%s'", defs[0].Name)
 	}
 }
 
@@ -650,7 +652,9 @@ func TestTool_Add_MarksSnapshotDirty(t *testing.T) {
 	}
 
 	// 刷新后应包含新记忆
-	snap.Refresh(ctx)
+	if _, err := snap.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh failed: %v", err)
+	}
 	if !strings.Contains(snap.MemorySnapshot(), "new via tool") {
 		t.Error("live snapshot should reflect tool write after refresh")
 	}

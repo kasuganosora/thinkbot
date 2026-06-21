@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -79,6 +80,9 @@ func NewMultimodalStage(name string, config MultimodalConfig, tp trace.TracerPro
 	}
 	if config.SystemPrompt == "" {
 		config.SystemPrompt = DefaultMultimodalPrompt
+	}
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
 	}
 	if logger == nil {
 		logger = zap.NewNop().Sugar()

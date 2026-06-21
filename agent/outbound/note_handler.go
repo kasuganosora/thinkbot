@@ -6,6 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -74,6 +75,12 @@ type NoteHandler struct {
 // NewNoteHandler 创建备注处理器。
 // writer 是记忆写入接口，备注将作为 Entry（Source="note"）写入统一记忆仓储。
 func NewNoteHandler(writer NoteWriter, logger *zap.SugaredLogger, tp trace.TracerProvider) *NoteHandler {
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &NoteHandler{
 		writer: writer,
 		logger: logger.With("component", "note_handler"),

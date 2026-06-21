@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/strutil"
@@ -93,6 +94,7 @@ func (r *DefaultResolver) Resolve(_ context.Context, msg *core.Message) ResolveR
 // ChannelResolver 根据 Message.Source 路由到不同的子解析器。
 // 未注册的 source 回退到 DefaultResolver。
 type ChannelResolver struct {
+	mu              sync.RWMutex
 	defaultResolver SessionResolver
 	bySource        map[string]SessionResolver
 }
@@ -107,12 +109,17 @@ func NewChannelResolver() *ChannelResolver {
 
 // Register 为指定 source 注册专用解析器。
 func (r *ChannelResolver) Register(source string, resolver SessionResolver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.bySource[source] = resolver
 }
 
 // Resolve 实现SessionResolver 接口。
 func (r *ChannelResolver) Resolve(ctx context.Context, msg *core.Message) ResolveResult {
-	if resolver, ok := r.bySource[msg.Source]; ok {
+	r.mu.RLock()
+	resolver, ok := r.bySource[msg.Source]
+	r.mu.RUnlock()
+	if ok {
 		return resolver.Resolve(ctx, msg)
 	}
 	return r.defaultResolver.Resolve(ctx, msg)

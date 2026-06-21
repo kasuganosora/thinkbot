@@ -9,6 +9,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -38,6 +39,12 @@ type LogDispatcher struct {
 
 // NewLogDispatcher 创建日志派发器。
 func NewLogDispatcher(logger *zap.SugaredLogger, tp trace.TracerProvider) *LogDispatcher {
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &LogDispatcher{
 		logger: logger,
 		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/agent/outbound"),
@@ -103,6 +110,12 @@ func (f ActionHandlerFunc) Handle(ctx context.Context, action core.Action) error
 
 // NewMultiDispatcher 创建多路派发器。
 func NewMultiDispatcher(logger *zap.SugaredLogger, tp trace.TracerProvider) *MultiDispatcher {
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &MultiDispatcher{
 		handlers: make(map[core.ActionType]ActionHandler),
 		logger:   logger,

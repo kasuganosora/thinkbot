@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -27,6 +28,9 @@ func NewLoggerStage(name string, logger *zap.SugaredLogger, logPayload bool) *Lo
 	if name == "" {
 		name = "logger"
 	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
 	return &LoggerStage{
 		name:       name,
 		logger:     logger,
@@ -49,9 +53,11 @@ func (s *LoggerStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 
 	if s.LogPayload && env.Message.Text != "" {
 		// 使用 rune 安全的截断，防止切断多字节 UTF-8 字符
-		text := strutil.Truncate(env.Message.Text, 500)
-		if len([]rune(env.Message.Text)) > 500 {
-			text += "...(truncated)"
+		var text string
+		if utf8.RuneCountInString(env.Message.Text) > 500 {
+			text = strutil.Truncate(env.Message.Text, 500) + "...(truncated)"
+		} else {
+			text = env.Message.Text
 		}
 		fields = append(fields, "text", text)
 	}
