@@ -101,6 +101,9 @@ type LLMCompressor struct {
 
 // NewLLMCompressor 创建 LLM 压缩器。
 func NewLLMCompressor(config LLMCompressorConfig, tp trace.TracerProvider, logger *zap.SugaredLogger) *LLMCompressor {
+	if config.Provider == nil {
+		panic("compressor: config.Provider must not be nil")
+	}
 	if config.MaxSummaryTokens <= 0 {
 		config.MaxSummaryTokens = 500
 	}

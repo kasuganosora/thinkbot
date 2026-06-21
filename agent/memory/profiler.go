@@ -104,6 +104,9 @@ type LLMProfiler struct {
 
 // NewLLMProfiler 创建 LLM 画像提取器。
 func NewLLMProfiler(config LLMProfilerConfig, tp trace.TracerProvider, logger *zap.SugaredLogger) *LLMProfiler {
+	if config.Provider == nil {
+		panic("profiler: config.Provider must not be nil")
+	}
 	if config.SystemPrompt == "" {
 		config.SystemPrompt = defaultProfilePrompt
 	}
