@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -55,20 +56,16 @@ func registerAuthLifecycle(p LifecycleParams) {
 			adminPass := os.Getenv("AUTH_BOOTSTRAP_PASSWORD")
 
 			if adminUser != "" && adminPass != "" {
-				// 检查是否已有管理员
-				users, err := p.Service.ListUsers(ctx)
-				if err != nil {
-					return errs.Wrap(err, "auth: list users for bootstrap check")
-				}
-				hasAdmin := false
-				for _, u := range users {
-					if u.Role == RoleAdmin {
-						hasAdmin = true
-						break
-					}
+				// 检查是否已有 admin（使用 count 查询，避免全表加载）
+				var adminCount int64
+				if err := p.Service.DB().WithContext(ctx).
+					Model(&dao.User{}).
+					Where("role = ?", RoleAdmin).
+					Count(&adminCount).Error; err != nil {
+					return errs.Wrap(err, "auth: count admins for bootstrap check")
 				}
 
-				if !hasAdmin {
+				if adminCount == 0 {
 					_, err := p.Service.CreateUser(ctx, CreateUserInput{
 						Username: adminUser,
 						Password: adminPass,
