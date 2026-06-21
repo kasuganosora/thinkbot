@@ -51,6 +51,7 @@ const (
 	// Workflow 事件（DAG 工作流引擎）
 	EventWorkflowSubmitted  EventType = "workflow.submitted"  // 工作流已提交（正在分析）
 	EventWorkflowAnalyzed   EventType = "workflow.analyzed"   // 分析完成，DAG 已生成
+	EventWorkflowRunning    EventType = "workflow.running"    // 工作流开始执行调度
 	EventWorkflowCompleted  EventType = "workflow.completed"  // 工作流全部完成
 	EventWorkflowFailed     EventType = "workflow.failed"     // 工作流失败
 	EventWorkflowTerminated EventType = "workflow.terminated" // 工作流被终止

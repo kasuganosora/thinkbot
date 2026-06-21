@@ -2,11 +2,22 @@ package workflow
 
 import (
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/dao"
+	"go.uber.org/zap"
 )
+
+// pkgLogger 供包级函数（如 cloneWorkflow）使用的结构化日志。
+// 通过 SetPkgLogger 设置（由 NewRepository 调用）。
+var pkgLogger = zap.NewNop().Sugar()
+
+// SetPkgLogger 设置包级日志器。应在初始化阶段调用。
+func SetPkgLogger(l *zap.SugaredLogger) {
+	if l != nil {
+		pkgLogger = l
+	}
+}
 
 // ============================================================================
 // 持久化转换函数
@@ -43,12 +54,12 @@ func cloneWorkflow(wf *Workflow) *Workflow {
 	if err != nil {
 		// 极不应该发生：Workflow 只含基本类型和切片。
 		// 记录日志便于排查，返回包含 ID 和 Status 的空快照（绝不返回原指针）。
-		log.Printf("[workflow] cloneWorkflow marshal failed: %v (workflow_id=%s)", err, wf.ID)
+		pkgLogger.Errorw("cloneWorkflow marshal failed", "error", err, "workflow_id", wf.ID)
 		return &Workflow{ID: wf.ID, Status: wf.Status, Nodes: []*DAGNode{}}
 	}
 	var clone Workflow
 	if err := json.Unmarshal(data, &clone); err != nil {
-		log.Printf("[workflow] cloneWorkflow unmarshal failed: %v (workflow_id=%s)", err, wf.ID)
+		pkgLogger.Errorw("cloneWorkflow unmarshal failed", "error", err, "workflow_id", wf.ID)
 		return &Workflow{ID: wf.ID, Status: wf.Status, Nodes: []*DAGNode{}}
 	}
 	clone.EnsureIndex()
