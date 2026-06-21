@@ -98,6 +98,9 @@ type FormationPipeline struct {
 
 // NewFormationPipeline 创建即时记忆提取管线。
 func NewFormationPipeline(config FormationConfig, tp trace.TracerProvider, logger *zap.SugaredLogger) *FormationPipeline {
+	if config.Provider == nil {
+		panic("formation: config.Provider must not be nil")
+	}
 	if config.MaxFactsPerTurn <= 0 {
 		config.MaxFactsPerTurn = 5
 	}
@@ -210,23 +213,12 @@ func (f *FormationPipeline) ProcessTurn(
 				if f.updateExisting(ctx, store, scope, d) {
 					result.Updated++
 				} else {
-					// 更新失败，降级为 ADD
-					result.Skipped++
+					// 更新失败，降级为 ADD 新条目
+					f.appendAsNew(ctx, store, scope, d.Fact, result)
 				}
 			} else {
 				// 有 UPDATE 决策但没 TargetID，降级为 ADD
-				_ = store.Append(ctx, TieredEntry{
-					Entry: Entry{
-						Scope:      scope,
-						Content:    d.Fact.Content,
-						Category:   d.Fact.Category,
-						Source:     "formation",
-						Importance: d.Fact.Importance,
-					},
-					Tier:         Tier1LongTerm,
-					PromotedFrom: Tier0Working,
-				})
-				result.Added++
+				f.appendAsNew(ctx, store, scope, d.Fact, result)
 			}
 
 		case DecisionSkip:
@@ -402,6 +394,29 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 	}
 	f.logger.Warnw("formation: target entry not found for update", "target_id", d.TargetID)
 	return false
+}
+
+// appendAsNew 将一条 fact 作为新 L1 记忆写入，成功时自增 result.Added。
+func (f *FormationPipeline) appendAsNew(ctx context.Context, store *TieredStore, scope Scope, fact FactItem, result *FormationResult) {
+	err := store.Append(ctx, TieredEntry{
+		Entry: Entry{
+			Scope:      scope,
+			Content:    fact.Content,
+			Category:   fact.Category,
+			Source:     "formation",
+			Importance: fact.Importance,
+			Metadata: map[string]any{
+				"extracted_at": time.Now(),
+			},
+		},
+		Tier:         Tier1LongTerm,
+		PromotedFrom: Tier0Working,
+	})
+	if err != nil {
+		f.logger.Warnw("formation: fallback ADD failed", "err", err)
+		return
+	}
+	result.Added++
 }
 
 const defaultFormationPrompt = `你是一个记忆提取助手。你的任务是从对话中提取值得长期保存的事实。

@@ -37,7 +37,8 @@ type CompactionConfig struct {
 	// SystemPrompt 压缩用的系统提示词。
 	SystemPrompt string
 	// SimilarityThreshold 相似度阈值（0~1，默认 0.6）。
-	// 高于此阈值的条目才会被聚类合并。
+	// 当前由 LLM 自主决定聚类边界，此值作为 LLM prompt 的参考参数。
+	// 未来可用于后处理阶段校验 LLM 输出的聚类质量。
 	SimilarityThreshold float64
 	// MinClusterSize 最小聚类大小（默认 2，至少 2 条才合并）。
 	MinClusterSize int
@@ -209,8 +210,9 @@ func (c *SemanticCompactor) Compact(
 		if !mergedIDs[e.ID] {
 			continue
 		}
-		c.archiveEntry(ctx, store, scope, e)
-		report.ArchivedCount++
+		if c.archiveEntry(ctx, store, scope, e) {
+			report.ArchivedCount++
+		}
 	}
 
 	// 计算净减少量
@@ -306,12 +308,12 @@ func isArchived(meta map[string]any) bool {
 	return ok && archived
 }
 
-// archiveEntry 将一条记忆标记为已归档（而非删除）。
-func (c *SemanticCompactor) archiveEntry(ctx context.Context, store *TieredStore, scope Scope, entry TieredEntry) {
+// archiveEntry 将一条记忆标记为已归档（而非删除）。返回是否成功归档。
+func (c *SemanticCompactor) archiveEntry(ctx context.Context, store *TieredStore, scope Scope, entry TieredEntry) bool {
 	// 删除原始条目
 	if err := store.Delete(ctx, Tier1LongTerm, scope, entry.ID); err != nil {
 		c.logger.Warnw("compactor: delete for archive failed", "err", err, "id", entry.ID)
-		return
+		return false
 	}
 
 	// 重新写入，标记为 archived
@@ -323,7 +325,9 @@ func (c *SemanticCompactor) archiveEntry(ctx context.Context, store *TieredStore
 	entry.Metadata["archived_by"] = "compactor"
 	if err := store.Append(ctx, entry); err != nil {
 		c.logger.Warnw("compactor: re-append archived entry failed", "err", err, "id", entry.ID)
+		return false
 	}
+	return true
 }
 
 // PurgeArchived 物理删除所有标记为 archived 的记忆。
