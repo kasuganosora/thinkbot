@@ -186,3 +186,11 @@ type Repository interface {
 	Store
 	Retriever
 }
+
+// Replacer 定义原子性替换能力。
+// 将 Delete+Append 合并为单个锁内操作，避免中间状态导致的数据丢失。
+// 实现此接口的存储后端（如 MemoryRepository）可被调用方优先使用，
+// 未实现的则降级为 Append-before-Delete。
+type Replacer interface {
+	Replace(ctx context.Context, scope Scope, deleteID string, newEntry Entry) error
+}

@@ -365,10 +365,9 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map
 		}, nil
 	}
 
-	// 替换：先写入新条目，成功后再删除旧条目
+	// 替换：优先使用原子性 Replace（如果实现支持），否则降级为 Append-before-Delete
 	old := matches[0]
 	newEntry := Entry{
-		ID:             old.ID,
 		Scope:          scope,
 		Content:        content,
 		Category:       old.Category,
@@ -379,12 +378,19 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map
 		LastAccessedAt: old.LastAccessedAt,
 	}
 
-	if err := repo.Append(ctx, newEntry); err != nil {
-		return nil, errs.Wrap(err, "replace write failed")
-	}
-	// 删除旧条目（新条目有不同 ID，原 ID 由 Append 自动生成）
-	if err := repo.Delete(ctx, scope, old.ID); err != nil {
-		return nil, errs.Wrap(err, "cleanup of old entry failed")
+	if replacer, ok := repo.(Replacer); ok {
+		if err := replacer.Replace(ctx, scope, old.ID, newEntry); err != nil {
+			return nil, errs.Wrap(err, "replace failed")
+		}
+	} else {
+		// 降级路径：先 Append，成功后 Delete
+		newEntry.ID = old.ID
+		if err := repo.Append(ctx, newEntry); err != nil {
+			return nil, errs.Wrap(err, "replace write failed")
+		}
+		if err := repo.Delete(ctx, scope, old.ID); err != nil {
+			return nil, errs.Wrap(err, "cleanup of old entry failed")
+		}
 	}
 
 	return successResponse(scope, "Entry replaced.", true), nil
@@ -636,7 +642,6 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 			if ch.origEntry != nil {
 				e := ch.origEntry
 				updatedEntry := Entry{
-					ID:             e.ID,
 					Scope:          ch.entry.Scope,
 					Content:        ch.entry.Content,
 					Category:       ch.entry.Category,
@@ -646,11 +651,18 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 					CreatedAt:      e.CreatedAt,
 					LastAccessedAt: e.LastAccessedAt,
 				}
-				// 先写入新条目，再删除旧条目（避免 Delete 后 Append 失败导致数据丢失）
-				if err := repo.Append(ctx, updatedEntry); err != nil {
-					commitErrorCount++
+				if replacer, ok := repo.(Replacer); ok {
+					if err := replacer.Replace(ctx, scope, ch.target, updatedEntry); err != nil {
+						commitErrorCount++
+					}
 				} else {
-					_ = repo.Delete(ctx, scope, ch.target)
+					// 降级路径：先 Append，成功后 Delete
+					updatedEntry.ID = ch.target
+					if err := repo.Append(ctx, updatedEntry); err != nil {
+						commitErrorCount++
+					} else {
+						_ = repo.Delete(ctx, scope, ch.target)
+					}
 				}
 			}
 		case "delete":

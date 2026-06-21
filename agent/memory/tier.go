@@ -305,6 +305,64 @@ func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, en
 	return nil
 }
 
+// Replace 原子性地删除旧条目（按 ID）并追加新条目到同一 tier+scope 桶中。
+// 操作在单个写锁内完成，避免 Delete+Append 分离时的中间状态
+// （如 Append 失败但旧条目已被删除导致数据丢失）。
+// 如果 deleteID 为空或不存在，则仅追加新条目。
+func (s *TieredStore) Replace(_ context.Context, tier MemoryTier, scope Scope, deleteID string, newEntry TieredEntry) error {
+	newEntry.Tier = tier
+
+	if newEntry.ID == "" {
+		newEntry.ID = idgen.New("mem")
+	}
+	if newEntry.CreatedAt.IsZero() {
+		newEntry.CreatedAt = time.Now()
+	}
+	if newEntry.LastAccessedAt.IsZero() {
+		newEntry.LastAccessedAt = newEntry.CreatedAt
+	}
+
+	// 自动设置过期时间（仅 Tier0）
+	if newEntry.Tier == Tier0Working && newEntry.ExpiresAt.IsZero() {
+		if cfg, ok := s.configs[Tier0Working]; ok && cfg.TTL > 0 {
+			newEntry.ExpiresAt = newEntry.CreatedAt.Add(cfg.TTL)
+		}
+	}
+
+	key := tierScopeKey(tier, scope)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	bucket := s.buckets[key]
+
+	// 删除旧条目
+	if deleteID != "" {
+		for i, e := range bucket {
+			if e.ID == deleteID {
+				bucket = append(bucket[:i], bucket[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// 追加新条目
+	bucket = append(bucket, newEntry)
+
+	// 容量限制
+	if cfg, ok := s.configs[tier]; ok && cfg.MaxEntries > 0 {
+		if len(bucket) > cfg.MaxEntries {
+			excess := len(bucket) - cfg.MaxEntries
+			newBucket := make([]TieredEntry, cfg.MaxEntries)
+			copy(newBucket, bucket[excess:])
+			bucket = newBucket
+		}
+	}
+
+	s.buckets[key] = bucket
+	return nil
+}
+
 // Clear 清空指定 tier+scope 的所有记忆。
 func (s *TieredStore) Clear(_ context.Context, tier MemoryTier, scope Scope) error {
 	key := tierScopeKey(tier, scope)
