@@ -579,31 +579,27 @@ func (m *TieredManager) updateL1Entry(ctx context.Context, scope Scope, targetID
 			content = newContent
 		}
 
-		// 先创建新条目（使用原 ID），成功后再删除旧条目
-		// 这样如果写入失败，原始数据不会丢失
-		newEntry := Entry{
-			ID:             targetID,
-			Scope:          scope,
-			Content:        content,
-			Category:       e.Category,
-			Source:         e.Source,
-			Importance:     e.Importance,
-			Metadata:       e.Metadata,
-			CreatedAt:      e.CreatedAt,
-			LastAccessedAt: e.LastAccessedAt,
+		// 原子性替换：在单个锁内完成删除旧条目和写入新条目
+		newEntry := TieredEntry{
+			Entry: Entry{
+				ID:             e.ID,
+				Scope:          scope,
+				Content:        content,
+				Category:       e.Category,
+				Source:         e.Source,
+				Importance:     e.Importance,
+				Metadata:       e.Metadata,
+				CreatedAt:      e.CreatedAt,
+				LastAccessedAt: e.LastAccessedAt,
+			},
+			Tier:         Tier1LongTerm,
+			PromotedFrom: e.PromotedFrom,
 		}
 
-		// 写入新条目（会创建新 ID，但 Metadata 保留 promoted_from_id）
-		if err := m.WriteLongTerm(ctx, newEntry, Tier0Working); err != nil {
-			m.logger.Warnw("updateL1Entry: failed to write updated L1 entry",
+		if err := m.store.Replace(ctx, Tier1LongTerm, scope, targetID, newEntry); err != nil {
+			m.logger.Warnw("updateL1Entry: atomic replace failed",
 				"scope", scope.Key(), "target_id", targetID, "err", err)
 			return false
-		}
-
-		// 删除旧条目
-		if err := m.store.Delete(ctx, Tier1LongTerm, scope, targetID); err != nil {
-			m.logger.Warnw("updateL1Entry: failed to delete old L1 entry (duplicate may exist)",
-				"scope", scope.Key(), "target_id", targetID, "err", err)
 		}
 
 		return true

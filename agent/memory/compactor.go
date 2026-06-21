@@ -315,21 +315,16 @@ func isArchived(meta map[string]any) bool {
 
 // archiveEntry 将一条记忆标记为已归档（而非删除）。返回是否成功归档。
 func (c *SemanticCompactor) archiveEntry(ctx context.Context, store *TieredStore, scope Scope, entry TieredEntry) bool {
-	// 删除原始条目
-	if err := store.Delete(ctx, Tier1LongTerm, scope, entry.ID); err != nil {
-		c.logger.Warnw("compactor: delete for archive failed", "err", err, "id", entry.ID)
-		return false
-	}
-
-	// 重新写入，标记为 archived
+	// 原子性替换：在单个锁内完成删除旧条目和写入归档后的新条目
 	if entry.Metadata == nil {
 		entry.Metadata = make(map[string]any)
 	}
 	entry.Metadata["archived"] = true
 	entry.Metadata["archived_at"] = time.Now()
 	entry.Metadata["archived_by"] = "compactor"
-	if err := store.Append(ctx, entry); err != nil {
-		c.logger.Warnw("compactor: re-append archived entry failed", "err", err, "id", entry.ID)
+
+	if err := store.Replace(ctx, Tier1LongTerm, scope, entry.ID, entry); err != nil {
+		c.logger.Warnw("compactor: atomic archive replace failed", "err", err, "id", entry.ID)
 		return false
 	}
 	return true

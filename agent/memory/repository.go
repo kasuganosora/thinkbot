@@ -126,6 +126,56 @@ func (r *MemoryRepository) Delete(_ context.Context, scope Scope, entryID string
 	return nil // 不存在时静默返回
 }
 
+// Replace 原子性地删除旧条目（按 ID）并追加新条目到指定 scope。
+// 操作在单个写锁内完成，避免 Delete+Append 分离时的中间状态
+// （如 Append 失败但旧条目已被删除导致数据丢失）。
+// 如果 deleteID 为空或不存在，则仅追加新条目。
+func (r *MemoryRepository) Replace(_ context.Context, scope Scope, deleteID string, newEntry Entry) error {
+	if newEntry.ID == "" {
+		newEntry.ID = idgen.New("mem")
+	}
+	if newEntry.CreatedAt.IsZero() {
+		newEntry.CreatedAt = time.Now()
+	}
+	if newEntry.LastAccessedAt.IsZero() {
+		newEntry.LastAccessedAt = newEntry.CreatedAt
+	}
+	newEntry.Scope = scope
+
+	key := scope.Key()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	bucket := r.buckets[key]
+
+	// 删除旧条目
+	if deleteID != "" {
+		for i, e := range bucket {
+			if e.ID == deleteID {
+				bucket = append(bucket[:i], bucket[i+1:]...)
+				r.entriesDeleted.Add(1)
+				break
+			}
+		}
+	}
+
+	// 追加新条目
+	bucket = append(bucket, newEntry)
+
+	// 容量限制
+	if len(bucket) > r.config.MaxEntriesPerScope {
+		excess := len(bucket) - r.config.MaxEntriesPerScope
+		newBucket := make([]Entry, r.config.MaxEntriesPerScope)
+		copy(newBucket, bucket[excess:])
+		bucket = newBucket
+	}
+
+	r.buckets[key] = bucket
+	r.entriesAppended.Add(1)
+	return nil
+}
+
 // Clear 清空指定 scope 的所有记忆。
 func (r *MemoryRepository) Clear(_ context.Context, scope Scope) error {
 	key := scope.Key()

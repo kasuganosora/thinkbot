@@ -381,12 +381,8 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 		if d.Fact.Importance > importance {
 			importance = d.Fact.Importance
 		}
-		// 删除旧的，写入新的
-		if err := store.Delete(ctx, Tier1LongTerm, scope, d.TargetID); err != nil {
-			f.logger.Warnw("formation: delete old entry failed", "err", err, "target_id", d.TargetID)
-			return false
-		}
-		if err := store.Append(ctx, TieredEntry{
+		// 删除旧的，写入新的（原子性替换）
+		if err := store.Replace(ctx, Tier1LongTerm, scope, d.TargetID, TieredEntry{
 			Entry: Entry{
 				ID:         d.TargetID,
 				Scope:      scope,
@@ -399,7 +395,7 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 			Tier:         Tier1LongTerm,
 			PromotedFrom: e.PromotedFrom,
 		}); err != nil {
-			f.logger.Warnw("formation: append updated entry failed", "err", err, "target_id", d.TargetID)
+			f.logger.Warnw("formation: atomic replace failed", "err", err, "target_id", d.TargetID)
 			return false
 		}
 		return true

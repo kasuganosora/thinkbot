@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // ============================================================================
@@ -82,6 +83,7 @@ type ProviderRegistry struct {
 	mu      sync.RWMutex
 	entries map[string]*ProviderEntry // name -> entry
 	cache   map[string]MemoryProvider // cacheKey -> instance
+	sf      singleflight.Group        // 去重并发工厂调用，消除 TOCTOU 竞态
 	logger  *zap.SugaredLogger
 }
 
@@ -144,6 +146,8 @@ func (r *ProviderRegistry) Names() []string {
 
 // Create 从工厂创建一个 provider 实例。
 // 使用缓存避免重复创建同一配置的 provider。
+// 使用 singleflight 消除并发 TOCTOU 竞态：同一 cacheKey 的并发调用
+// 只执行一次工厂调用，所有调用者共享同一结果。
 func (r *ProviderRegistry) Create(name string, config ProviderFactoryConfig) (MemoryProvider, error) {
 	r.mu.RLock()
 	entry, ok := r.entries[name]
@@ -156,7 +160,7 @@ func (r *ProviderRegistry) Create(name string, config ProviderFactoryConfig) (Me
 	// 构建缓存键
 	cacheKey := r.cacheKey(name, config)
 
-	// 检查缓存
+	// 快速路径：检查缓存
 	r.mu.RLock()
 	if cached, ok := r.cache[cacheKey]; ok {
 		r.mu.RUnlock()
@@ -172,23 +176,43 @@ func (r *ProviderRegistry) Create(name string, config ProviderFactoryConfig) (Me
 		config.Logger = r.logger
 	}
 
-	// 调用工厂
-	provider, err := entry.Factory(config)
+	// 使用 singleflight 去重并发工厂调用。
+	// 同一 cacheKey 的并发调用只会执行一次工厂调用。
+	result, err, _ := r.sf.Do(cacheKey, func() (any, error) {
+		// 双重检查：在 singleflight 回调内再次检查缓存
+		// （之前的检查在锁外，可能已被其他 goroutine 填充）
+		r.mu.RLock()
+		if cached, ok := r.cache[cacheKey]; ok {
+			r.mu.RUnlock()
+			return cached, nil
+		}
+		r.mu.RUnlock()
+
+		provider, err := entry.Factory(config)
+		if err != nil {
+			return nil, fmt.Errorf("provider registry: factory %q failed: %w", name, err)
+		}
+
+		r.mu.Lock()
+		// 再次检查：singleflight 可能因其他 cacheKey 的调用而创建
+		if existing, ok := r.cache[cacheKey]; ok {
+			r.mu.Unlock()
+			return existing, nil
+		}
+		r.cache[cacheKey] = provider
+		r.mu.Unlock()
+
+		r.logger.Infow("provider created via factory",
+			"name", name,
+			"platform", config.Platform,
+			"bot_id", config.BotID)
+
+		return provider, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("provider registry: factory %q failed: %w", name, err)
+		return nil, err
 	}
-
-	// 缓存实例
-	r.mu.Lock()
-	r.cache[cacheKey] = provider
-	r.mu.Unlock()
-
-	r.logger.Infow("provider created via factory",
-		"name", name,
-		"platform", config.Platform,
-		"bot_id", config.BotID)
-
-	return provider, nil
+	return result.(MemoryProvider), nil
 }
 
 // CreateAndInitialize 创建并初始化 provider。
