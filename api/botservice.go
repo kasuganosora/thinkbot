@@ -422,6 +422,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Errorw("bot run panic", "bot_id", id, "err", r)
+			}
+		}()
 		if err := b.Run(ctx); err != nil {
 			s.logger.Errorw("bot run failed", "bot_id", id, "err", err)
 		}
@@ -456,7 +461,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.mu.Unlock()
 
 	// 更新定义状态
-	s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusRunning)
+	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusRunning).Error; err != nil {
+		s.logger.Warnw("failed to update bot status to running", "bot_id", id, "err", err)
+	}
 
 	return nil
 }
@@ -481,7 +488,9 @@ func (s *BotService) StopBot(id string) {
 	b.Close()
 	s.mgr.Unregister(id)
 
-	s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusStopped)
+	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusStopped).Error; err != nil {
+		s.logger.Warnw("failed to update bot status to stopped", "bot_id", id, "err", err)
+	}
 	s.logger.Infow("bot stopped", "bot_id", id)
 }
 

@@ -119,6 +119,11 @@ func (s *Server) handleChatSend(c *gin.Context) {
 
 	// 保存用户消息到 DB（异步，不阻塞响应）
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Errorw("panic saving user message", "err", r)
+			}
+		}()
 		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, traceID); err != nil {
 			s.logger.Warnw("failed to save user message", "err", err)
 		}
@@ -196,6 +201,11 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				// 保存 Bot 回复到 DB
 				if fullText != "" {
 					go func(content string) {
+						defer func() {
+							if r := recover(); r != nil {
+								s.logger.Errorw("panic saving assistant message", "err", r)
+							}
+						}()
 						if err := s.chatHistory.SaveMessage(botID, userID, "assistant", content, traceID); err != nil {
 							s.logger.Warnw("failed to save assistant message", "err", err)
 						}

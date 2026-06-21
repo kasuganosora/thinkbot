@@ -197,19 +197,32 @@ func (m *SkillManager) Disable(name string) error {
 
 // Toggle 切换指定 Skill 的启用状态。
 func (m *SkillManager) Toggle(name string) error {
-	m.mu.RLock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	skill, ok := m.skills[name]
 	if !ok {
-		m.mu.RUnlock()
 		return &errNotFound{name: name}
 	}
-	enabled := skill.Enabled
-	m.mu.RUnlock()
 
-	if enabled {
-		return m.Disable(name)
+	if skill.Enabled {
+		// inline disable 逻辑
+		skill.Enabled = false
+		if skill.Content != "" {
+			m.unregisterPromptLocked(name)
+		}
+		m.persistEnabledLocked(name, false)
+		m.logger.Infow("skill disabled", "name", name)
+	} else {
+		// inline enable 逻辑
+		skill.Enabled = true
+		if skill.Content != "" {
+			m.registerPromptLocked(skill)
+		}
+		m.persistEnabledLocked(name, true)
+		m.logger.Infow("skill enabled", "name", name)
 	}
-	return m.Enable(name)
+	return nil
 }
 
 // IsEnabled 检查指定 Skill 是否启用。
