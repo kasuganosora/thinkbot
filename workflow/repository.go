@@ -84,11 +84,12 @@ func (r *Repository) Get(id string) (*Workflow, error) {
 		if err != nil {
 			return nil, errs.Wrapf(err, "failed to deserialize workflow %s", id)
 		}
-		// 填充缓存（存入 clone，返回另一个 clone）
+		// 填充缓存（存入 clone），返回独立 clone 以保持与 cache-hit 路径一致
+		cached := cloneWorkflow(wf)
 		r.mu.Lock()
-		r.cache[id] = cloneWorkflow(wf)
+		r.cache[id] = cached
 		r.mu.Unlock()
-		return wf, nil
+		return cloneWorkflow(wf), nil
 	}
 
 	return nil, errs.Newf("workflow %s not found", id)

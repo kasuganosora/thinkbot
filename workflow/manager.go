@@ -197,6 +197,9 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 				wf.Error = fmt.Sprintf("internal error: %v", r)
 				_ = m.repo.Save(wf)
 				m.metrics.Failed.Add(1)
+				m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
+					"error": wf.Error,
+				})
 				m.cleanupRunning(wf.ID)
 			}
 		}()
@@ -390,6 +393,9 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 						wf.Error = fmt.Sprintf("internal error: %v", r)
 						_ = m.repo.Save(wf)
 						m.metrics.Failed.Add(1)
+						m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
+							"error": wf.Error,
+						})
 						m.cleanupRunning(wf.ID)
 					}
 				}()
@@ -452,6 +458,9 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 					wf.Error = fmt.Sprintf("internal error: %v", r)
 					_ = m.repo.Save(wf)
 					m.metrics.Failed.Add(1)
+					m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
+						"error": wf.Error,
+					})
 					m.cleanupRunning(wf.ID)
 				}
 			}()
@@ -611,11 +620,10 @@ type ControlResult struct {
 }
 
 // Control 执行流程控制操作。
-func (m *Manager) Control(wfID string, req ControlRequest) (*ControlResult, error) {
-	ctx, span := m.tracer.Start(context.Background(), "workflow.manager.control",
+func (m *Manager) Control(ctx context.Context, wfID string, req ControlRequest) (*ControlResult, error) {
+	_, span := m.tracer.Start(ctx, "workflow.manager.control",
 		trace.WithAttributes(attribute.String("workflow.id", wfID)))
 	defer span.End()
-	_ = ctx
 
 	m.mu.RLock()
 	inst, ok := m.running[wfID]
