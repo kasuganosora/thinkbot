@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +61,10 @@ type DreamCandidate struct {
 	LastSeen      time.Time `json:"last_seen"`
 	Score         float64   `json:"score,omitempty"`
 	Promoted      bool      `json:"promoted,omitempty"`
+
+	// seenQueries 追踪已记录的查询（用于 UniqueQueries 去重）。
+	// 不序列化，运行时状态。
+	seenQueries map[string]struct{} `json:"-"`
 }
 
 // ScoreBreakdown 各评分信号子分数。
@@ -184,7 +189,6 @@ type DreamManager struct {
 	config     DreamConfig
 	manager    *TieredManager
 	provider   llm.Provider
-	model      *llm.Model
 	tracer     trace.Tracer
 	logger     *zap.SugaredLogger
 	mu         sync.Mutex
@@ -281,8 +285,14 @@ func (d *DreamManager) RecordRecall(key, query string) {
 	defer d.mu.Unlock()
 	if c, ok := d.candidates[key]; ok {
 		c.RecallCount++
-		// 简化：用 query 长度做唯一性判断
-		c.UniqueQueries++
+		if c.seenQueries == nil {
+			c.seenQueries = make(map[string]struct{})
+		}
+		queryKey := strings.TrimSpace(strings.ToLower(query))
+		if _, exists := c.seenQueries[queryKey]; !exists {
+			c.seenQueries[queryKey] = struct{}{}
+			c.UniqueQueries++
+		}
 	}
 }
 

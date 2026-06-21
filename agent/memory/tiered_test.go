@@ -8,7 +8,20 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/llm"
 )
+
+// stubProvider 是测试用的最小 LLM Provider 实现。
+type stubProvider struct{}
+
+func (s *stubProvider) Name() string { return "stub" }
+func (s *stubProvider) DoGenerate(_ context.Context, _ llm.GenerateParams) (*llm.GenerateResult, error) {
+	return &llm.GenerateResult{Text: "[]"}, nil
+}
+func (s *stubProvider) DoStream(_ context.Context, _ llm.GenerateParams) (*llm.StreamResult, error) {
+	return nil, nil
+}
 
 // ============================================================================
 // TieredStore 基础操作
@@ -425,7 +438,7 @@ func TestLLMConsolidator_parseResult_MultiLineJSON(t *testing.T) {
 ]
 ` + fence
 
-	c := NewLLMConsolidator(DefaultLLMConsolidatorConfig(), otel.GetTracerProvider(), zap.NewNop().Sugar())
+	c := NewLLMConsolidator(LLMConsolidatorConfig{Provider: &stubProvider{}, MaxInputEntries: 30}, otel.GetTracerProvider(), zap.NewNop().Sugar())
 	results := c.parseResult(llmOutput)
 
 	if len(results) != 2 {
@@ -449,7 +462,7 @@ func TestLLMConsolidator_parseResult_CommaInContent(t *testing.T) {
 	// Content with commas was truncated by the old extractJSONString parser
 	llmOutput := `[{"source_id":"mem-1","decision":"ADD","category":"fact","content":"hello, world, foo","importance":0.5}]`
 
-	c := NewLLMConsolidator(DefaultLLMConsolidatorConfig(), otel.GetTracerProvider(), zap.NewNop().Sugar())
+	c := NewLLMConsolidator(LLMConsolidatorConfig{Provider: &stubProvider{}, MaxInputEntries: 30}, otel.GetTracerProvider(), zap.NewNop().Sugar())
 	results := c.parseResult(llmOutput)
 
 	if len(results) != 1 {
@@ -461,7 +474,7 @@ func TestLLMConsolidator_parseResult_CommaInContent(t *testing.T) {
 }
 
 func TestLLMConsolidator_parseResult_EmptyInput(t *testing.T) {
-	c := NewLLMConsolidator(DefaultLLMConsolidatorConfig(), otel.GetTracerProvider(), zap.NewNop().Sugar())
+	c := NewLLMConsolidator(LLMConsolidatorConfig{Provider: &stubProvider{}, MaxInputEntries: 30}, otel.GetTracerProvider(), zap.NewNop().Sugar())
 	results := c.parseResult("no json here")
 	if results != nil {
 		t.Errorf("expected nil for non-JSON input, got %v", results)
@@ -470,7 +483,7 @@ func TestLLMConsolidator_parseResult_EmptyInput(t *testing.T) {
 
 func TestLLMConsolidator_parseResult_UpdateWithTargetID(t *testing.T) {
 	llmOutput := `[{"source_id":"mem-1","decision":"UPDATE","target_id":"mem-old","content":"updated content","importance":0.9}]`
-	c := NewLLMConsolidator(DefaultLLMConsolidatorConfig(), otel.GetTracerProvider(), zap.NewNop().Sugar())
+	c := NewLLMConsolidator(LLMConsolidatorConfig{Provider: &stubProvider{}, MaxInputEntries: 30}, otel.GetTracerProvider(), zap.NewNop().Sugar())
 	results := c.parseResult(llmOutput)
 
 	if len(results) != 1 {
