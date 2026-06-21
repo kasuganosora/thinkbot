@@ -34,6 +34,9 @@ agent/memory/integration_test.go
 agent/stages/functioncall_integration_test.go
 workflow/integration_test.go
 
+# .env files (contain secrets)
+.env
+
 # CodeBuddy
 .codebuddy/
 .skills/tmp/
