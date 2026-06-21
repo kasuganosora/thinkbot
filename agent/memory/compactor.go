@@ -92,6 +92,9 @@ type SemanticCompactor struct {
 
 // NewSemanticCompactor 创建语义压缩器。
 func NewSemanticCompactor(config CompactionConfig, tp trace.TracerProvider, logger *zap.SugaredLogger) *SemanticCompactor {
+	if config.Provider == nil {
+		panic("compactor: config.Provider must not be nil")
+	}
 	if config.SimilarityThreshold <= 0 {
 		config.SimilarityThreshold = 0.6
 	}
@@ -161,6 +164,8 @@ func (c *SemanticCompactor) Compact(
 
 	// 限制输入数量
 	if len(active) > c.config.MaxInputEntries {
+		c.logger.Warnw("compactor: input exceeds MaxInputEntries, excess entries will not be processed this run",
+			"total", len(active), "max", c.config.MaxInputEntries)
 		active = active[:c.config.MaxInputEntries]
 	}
 

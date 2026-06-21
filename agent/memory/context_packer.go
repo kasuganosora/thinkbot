@@ -59,10 +59,29 @@ type ContextPacker struct {
 }
 
 // NewContextPacker 创建上下文打包器。
+//
+// 如果传入 config，零值字段会被填充为默认值。
+// EnableReorder 的零值 (false) 在显式传入 config 时被视为有效选择（即关闭重排序）。
+// 如需默认行为（开启重排序），请使用 NewContextPacker() 不传参数。
 func NewContextPacker(config ...ContextPackerConfig) *ContextPacker {
-	cfg := DefaultContextPackerConfig()
-	if len(config) > 0 {
-		cfg = mergePackerConfig(cfg, config[0])
+	if len(config) == 0 {
+		return &ContextPacker{config: DefaultContextPackerConfig()}
+	}
+	cfg := config[0]
+	if cfg.MaxTotalChars <= 0 {
+		cfg.MaxTotalChars = 1800
+	}
+	if cfg.MinItemChars <= 0 {
+		cfg.MinItemChars = 40
+	}
+	if cfg.MaxItemChars <= 0 {
+		cfg.MaxItemChars = 360
+	}
+	if cfg.TargetItems <= 0 {
+		cfg.TargetItems = 8
+	}
+	if cfg.OverfetchRatio <= 0 {
+		cfg.OverfetchRatio = 3
 	}
 	return &ContextPacker{config: cfg}
 }
@@ -126,13 +145,28 @@ func (p *ContextPacker) Pack(_ context.Context, entries []Entry, queryText strin
 		if used+contentLen > maxChars {
 			// 尝试压缩已选条目腾位
 			if p.config.MinItemChars > 0 && len(selected) > 0 {
-				// 压缩最长的已选条目
+				// 保存快照，压缩不可逆时用于回滚
+				savedContents := make([]string, len(selected))
+				savedTrunc := make([]bool, len(selected))
+				for i, s := range selected {
+					savedContents[i] = s.Entry.Content
+					savedTrunc[i] = s.Truncated
+				}
+				savedUsed := used
+
 				freed := p.compressToFit(selected, maxChars-used-contentLen)
 				if freed > 0 {
 					used -= freed
 					if used+contentLen <= maxChars {
 						selected = append(selected, pe)
 						used += contentLen
+					} else {
+						// 腾出的空间不够，回滚已选条目的压缩
+						for i := range selected {
+							selected[i].Entry.Content = savedContents[i]
+							selected[i].Truncated = savedTrunc[i]
+						}
+						used = savedUsed
 					}
 				}
 			}
@@ -323,25 +357,4 @@ func (p *ContextPacker) reorderAntiLostMiddle(entries []PackEntry) []PackEntry {
 	}
 
 	return result
-}
-
-// mergePackerConfig 合并配置（非零值覆盖）。
-func mergePackerConfig(base, override ContextPackerConfig) ContextPackerConfig {
-	if override.MaxTotalChars > 0 {
-		base.MaxTotalChars = override.MaxTotalChars
-	}
-	if override.MinItemChars > 0 {
-		base.MinItemChars = override.MinItemChars
-	}
-	if override.MaxItemChars > 0 {
-		base.MaxItemChars = override.MaxItemChars
-	}
-	if override.TargetItems > 0 {
-		base.TargetItems = override.TargetItems
-	}
-	if override.OverfetchRatio > 0 {
-		base.OverfetchRatio = override.OverfetchRatio
-	}
-	base.EnableReorder = override.EnableReorder
-	return base
 }
