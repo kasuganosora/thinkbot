@@ -179,8 +179,9 @@ func InitWithConfig(cfg Config) error {
 
 	// --- 组装 ---
 	core := zapcore.NewTee(cores...)
-	zl := zap.New(core, zap.AddCaller(), zap.AddCallerSkip(1))
+	zl := zap.New(core, zap.AddCaller())
 	Logger = zl.Sugar()
+	zap.ReplaceGlobals(zl)
 
 	return nil
 }

@@ -14,6 +14,19 @@ import (
 )
 
 // ============================================================================
+// StreamPublisher — LLM 流式输出发布器
+// ============================================================================
+
+// StreamPublisher 发布 LLM 流式增量（文本 + 工具调用）。
+// 当 LLMConfig.StreamPublisher 非 nil 时，LLMStage 使用 OrchestrateStream，
+// 并将每个增量通过此接口发布，供 SSE handler 实时消费。
+type StreamPublisher interface {
+	PublishTextDelta(ctx context.Context, traceID, botID, text string)
+	PublishToolCall(ctx context.Context, traceID, botID, toolName string, input any)
+	PublishToolResult(ctx context.Context, traceID, botID, toolName string, output any, errMsg string)
+}
+
+// ============================================================================
 // ToolResolver — 动态工具解析接口
 // ============================================================================
 
@@ -60,12 +73,19 @@ type LLMConfig struct {
 	Temperature *float64
 	// MaxTokens 最大 token 数。
 	MaxTokens *int
+	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
+	ReasoningEffort string
 	// MessageBuilder 自定义消息构造函数。
 	// 如果为 nil，默认将 Message.Text 作为 user message。
 	MessageBuilder func(msg core.Message) []llm.Message
 	// UsageRecorder 可选的使用统计记录器。
 	// 非 nil 时，每次 LLM 调用后自动记录 bot/model/feature 维度的用量。
 	UsageRecorder llm.UsageRecorder
+
+	// StreamPublisher 可选的流式输出发布器。
+	// 非 nil 时，LLMStage 使用 OrchestrateStream（流式生成），
+	// 并将文本增量通过此发布器推送，供 SSE handler 实时消费。
+	StreamPublisher StreamPublisher
 }
 
 // ============================================================================
@@ -99,6 +119,14 @@ func NewLLMStage(name string, provider llm.Provider, config LLMConfig, tp trace.
 
 // Name 返回 Stage 名称。
 func (s *LLMStage) Name() string { return s.name }
+
+// reasoningEffortPtr 将非空字符串转为 *string，空字符串返回 nil。
+func reasoningEffortPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
 
 // Process 调用 LLM 生成回复。
 func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
@@ -134,12 +162,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 构建参数
 	params := llm.GenerateParams{
-		Model:       s.config.Model,
-		System:      systemPrompt,
-		Messages:    messages,
-		Tools:       tools,
-		Temperature: s.config.Temperature,
-		MaxTokens:   s.config.MaxTokens,
+		Model:           s.config.Model,
+		System:          systemPrompt,
+		Messages:        messages,
+		Tools:           tools,
+		Temperature:     s.config.Temperature,
+		MaxTokens:       s.config.MaxTokens,
+		ReasoningEffort: reasoningEffortPtr(s.config.ReasoningEffort),
 	}
 
 	cfg := &llm.OrchestrateConfig{
@@ -150,18 +179,37 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	logger.Debugw("llm stage: starting orchestrate",
 		"message_id", env.Message.ID,
 		"provider", s.provider.Name(),
-		"max_steps", s.config.MaxSteps)
+		"max_steps", s.config.MaxSteps,
+		"streaming", s.config.StreamPublisher != nil)
 
-	result, err := llm.OrchestrateGenerate(ctx, s.provider, cfg)
-	if err != nil {
-		span.RecordError(err)
-		logger.Errorw("llm stage: orchestrate failed",
-			"message_id", env.Message.ID,
-			"err", err)
-		return env, &core.PipelineError{
-			Stage:   s.name,
-			Message: "LLM orchestrate failed",
-			Cause:   err,
+	var result *llm.GenerateResult
+	if s.config.StreamPublisher != nil {
+		var err error
+		result, err = s.processStream(ctx, env, cfg, logger)
+		if err != nil {
+			span.RecordError(err)
+			logger.Errorw("llm stage: stream orchestrate failed",
+				"message_id", env.Message.ID,
+				"err", err)
+			return env, &core.PipelineError{
+				Stage:   s.name,
+				Message: "LLM stream orchestrate failed",
+				Cause:   err,
+			}
+		}
+	} else {
+		var err error
+		result, err = llm.OrchestrateGenerate(ctx, s.provider, cfg)
+		if err != nil {
+			span.RecordError(err)
+			logger.Errorw("llm stage: orchestrate failed",
+				"message_id", env.Message.ID,
+				"err", err)
+			return env, &core.PipelineError{
+				Stage:   s.name,
+				Message: "LLM orchestrate failed",
+				Cause:   err,
+			}
 		}
 	}
 
@@ -213,6 +261,74 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	env.Set("llm.result", result)
 
 	return env, nil
+}
+
+// processStream 使用 OrchestrateStream 执行流式生成，
+// 将文本增量通过 StreamPublisher 实时发布，最终返回完整的 GenerateResult。
+//
+// 注意：stream channel 只能消费一次，因此这里手动组装 GenerateResult，
+// 而不是调用 StreamResult.ToResult()（后者会再次 range 已关闭的 channel）。
+func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *llm.OrchestrateConfig, logger *zap.SugaredLogger) (*llm.GenerateResult, error) {
+	streamResult, err := llm.OrchestrateStream(ctx, s.provider, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	traceID := env.Message.TraceID
+	botID := env.Message.BotID
+	publisher := s.config.StreamPublisher
+
+	result := &llm.GenerateResult{}
+
+	// 单次消费 stream channel，同时转发 text delta 到 EventBus
+	for part := range streamResult.Stream {
+		switch p := part.(type) {
+		case *llm.TextDeltaPart:
+			result.Text += p.Text
+			if p.Text != "" {
+				publisher.PublishTextDelta(ctx, traceID, botID, p.Text)
+			}
+		case *llm.ReasoningDeltaPart:
+			result.Reasoning += p.Text
+		case *llm.StreamToolCallPart:
+			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
+				ToolCallID: p.ToolCallID,
+				ToolName:   p.ToolName,
+				Input:      p.Input,
+			})
+			publisher.PublishToolCall(ctx, traceID, botID, p.ToolName, p.Input)
+		case *llm.StreamToolResultPart:
+			result.ToolResults = append(result.ToolResults, llm.ToolResult{
+				ToolCallID: p.ToolCallID,
+				ToolName:   p.ToolName,
+				Output:     p.Output,
+			})
+			publisher.PublishToolResult(ctx, traceID, botID, p.ToolName, p.Output, "")
+		case *llm.FinishStepPart:
+			result.Response = p.Response
+			if result.Usage.TotalTokens == 0 {
+				result.Usage = p.Usage
+				result.FinishReason = p.FinishReason
+				result.RawFinishReason = p.RawFinishReason
+			}
+		case *llm.FinishPart:
+			result.FinishReason = p.FinishReason
+			result.RawFinishReason = p.RawFinishReason
+			result.Usage = p.TotalUsage
+		case *llm.ErrorPart:
+			return nil, p.Error
+		}
+	}
+
+	result.Steps = streamResult.Steps
+	result.Messages = streamResult.Messages
+
+	logger.Debugw("llm stage: stream completed",
+		"message_id", env.Message.ID,
+		"steps", len(result.Steps),
+		"text_len", len(result.Text))
+
+	return result, nil
 }
 
 // recordUsage 从 Envelope 提取 bot_id，构建 UsageMetric 并异步记录。

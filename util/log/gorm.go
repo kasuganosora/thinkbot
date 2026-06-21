@@ -44,6 +44,19 @@ func DefaultGormConfig() GormConfig {
 	}
 }
 
+// ContextFielder 从 context.Context 中提取 zap 字段（如 trace_id）。
+// 由下游包（如 traceid）通过 RegisterGormContextFielder 注册，
+// 避免 util/log 反向导入 traceid 造成循环依赖。
+type ContextFielder func(ctx context.Context) []zap.Field
+
+var gormCtxFielder ContextFielder
+
+// RegisterGormContextFielder 注册上下文字段提取器。
+// GORM logger 会在每条日志中调用它，将 trace_id 等请求级字段注入数据库日志。
+func RegisterGormContextFielder(f ContextFielder) {
+	gormCtxFielder = f
+}
+
 // gormLogger 实现 gorm.io/gorm/logger.Interface，将日志转发到 zap。
 type gormLogger struct {
 	zl                        *zap.Logger
@@ -52,19 +65,35 @@ type gormLogger struct {
 	ignoreRecordNotFoundError bool
 }
 
+// ctxFields 从 context 中提取请求级字段（如 trace_id）。
+func (l *gormLogger) ctxFields(ctx context.Context) []zap.Field {
+	if gormCtxFielder != nil {
+		return gormCtxFielder(ctx)
+	}
+	return nil
+}
+
 // NewGormLogger 基于全局 Logger 创建一个 GORM logger.Interface 实现。
 // 需要在 Init / InitWithConfig 之后调用。
+//
+// 注意：GORM logger 禁用 zap 内置 AddCaller（它只会指向 log/gorm.go），
+// caller 信息由 captureGormCaller() 通过遍历调用栈获取真正的业务调用方。
 func NewGormLogger(cfg GormConfig) gormlogger.Interface {
 	zl := zap.L() // fallback
 	if Logger != nil {
-		zl = Logger.Desugar().With(zap.String("module", "gorm"))
+		// 从同一个 core 重建，禁用内置 caller，避免与 captureGormCaller 冲突
+		zl = zap.New(Logger.Desugar().Core(), zap.WithCaller(false))
 	}
-	return newGormLogger(zl, cfg)
+	return newGormLogger(zl.With(zap.String("module", "gorm")), cfg)
 }
 
 // NewGormLoggerWithZap 使用指定的 zap.Logger 创建 GORM logger（不依赖全局变量）。
 func NewGormLoggerWithZap(zl *zap.Logger, cfg GormConfig) gormlogger.Interface {
-	return newGormLogger(zl.With(zap.String("module", "gorm")), cfg)
+	// 禁用内置 caller，由 captureGormCaller 提供真实调用方
+	return newGormLogger(
+		zap.New(zl.Core(), zap.WithCaller(false)).With(zap.String("module", "gorm")),
+		cfg,
+	)
 }
 
 // newGormLogger 内部构造 gormLogger，复用公共逻辑。
@@ -108,21 +137,21 @@ func (l *gormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 // Info 实现接口。
 func (l *gormLogger) Info(ctx context.Context, msg string, data ...any) {
 	if l.level >= gormlogger.Info {
-		l.zl.Info(fmt.Sprintf(msg, data...))
+		l.zl.Info(fmt.Sprintf(msg, data...), l.ctxFields(ctx)...)
 	}
 }
 
 // Warn 实现接口。
 func (l *gormLogger) Warn(ctx context.Context, msg string, data ...any) {
 	if l.level >= gormlogger.Warn {
-		l.zl.Warn(fmt.Sprintf(msg, data...))
+		l.zl.Warn(fmt.Sprintf(msg, data...), l.ctxFields(ctx)...)
 	}
 }
 
 // Error 实现接口。
 func (l *gormLogger) Error(ctx context.Context, msg string, data ...any) {
 	if l.level >= gormlogger.Error {
-		l.zl.Error(fmt.Sprintf(msg, data...))
+		l.zl.Error(fmt.Sprintf(msg, data...), l.ctxFields(ctx)...)
 	}
 }
 
@@ -133,45 +162,43 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 	}
 
 	elapsed := time.Since(begin)
-
-	// 捕获业务调用方信息（跳过 gorm 内部帧）
 	caller := captureGormCaller()
+	tf := l.ctxFields(ctx)
 
-	check := func(err error) zap.Field {
-		switch {
-		case err != nil && l.level >= gormlogger.Error &&
-			(!l.ignoreRecordNotFoundError || !errors.Is(err, gormlogger.ErrRecordNotFound)):
-			sql, rows := fc()
-			l.zl.Error("gorm query error",
-				caller,
+	switch {
+	case err != nil && l.level >= gormlogger.Error &&
+		(!l.ignoreRecordNotFoundError || !errors.Is(err, gormlogger.ErrRecordNotFound)):
+		sql, rows := fc()
+		l.zl.Error("gorm query error",
+			append(tf, caller,
 				zap.Duration("elapsed", elapsed),
 				zap.String("sql", sql),
 				zap.Int64("rows", rows),
 				zap.Error(err),
-			)
+			)...,
+		)
 
-		case l.slowThreshold > 0 && elapsed > l.slowThreshold && l.level >= gormlogger.Warn:
-			sql, rows := fc()
-			l.zl.Warn("gorm slow query",
-				caller,
+	case l.slowThreshold > 0 && elapsed > l.slowThreshold && l.level >= gormlogger.Warn:
+		sql, rows := fc()
+		l.zl.Warn("gorm slow query",
+			append(tf, caller,
 				zap.Duration("elapsed", elapsed),
 				zap.Duration("threshold", l.slowThreshold),
 				zap.String("sql", sql),
 				zap.Int64("rows", rows),
-			)
+			)...,
+		)
 
-		case l.level >= gormlogger.Info:
-			sql, rows := fc()
-			l.zl.Debug("gorm query",
-				caller,
+	case l.level >= gormlogger.Info:
+		sql, rows := fc()
+		l.zl.Debug("gorm query",
+			append(tf, caller,
 				zap.Duration("elapsed", elapsed),
 				zap.String("sql", sql),
 				zap.Int64("rows", rows),
-			)
-		}
-		return zap.Skip()
+			)...,
+		)
 	}
-	_ = check(err)
 }
 
 // captureGormCaller 遍历调用栈，跳过 gorm.io 和本包内部帧，

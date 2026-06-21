@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
@@ -21,10 +22,12 @@ import (
 
 // SSE 事件类型
 const (
-	sseTextDelta = "text_delta" // LLM 文本增量
-	sseDone      = "done"       // 生成完成
-	sseError     = "error"      // 错误
-	sseStart     = "start"      // 开始处理
+	sseTextDelta  = "text_delta"  // LLM 文本增量
+	sseDone       = "done"        // 生成完成
+	sseError      = "error"       // 错误
+	sseStart      = "start"       // 开始处理
+	sseToolCall   = "tool_call"   // 工具调用
+	sseToolResult = "tool_result" // 工具结果
 )
 
 // handleChatBots 返回当前可聊天的 Bot 列表（状态为 running）。
@@ -129,9 +132,20 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		}
 	}()
 
-	// 注册回复 channel
+	// 注册回复 channel（用于接收最终完成信号）
 	respCh := webCh.RegisterResponse(traceID, 16)
 	defer webCh.UnregisterResponse(traceID)
+
+	// 订阅 EventBus 接收流式文本增量
+	var eventCh <-chan outbound.Event
+	bus := s.botSvc.EventBus()
+	if bus != nil {
+		if memBus, ok := bus.(*outbound.MemoryEventBus); ok {
+			eventSub := memBus.Subscribe(traceID)
+			defer memBus.Unsubscribe(eventSub)
+			eventCh = eventSub.C()
+		}
+	}
 
 	// 注入消息到 Bot（携带聊天历史作为 LLM 上下文）
 	extraMeta := map[string]any{}
@@ -177,6 +191,38 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			flusher.Flush()
 			return
 
+		// 流式增量：从 EventBus 接收 LLM 文本
+		case event, ok := <-eventCh:
+			if !ok {
+				continue
+			}
+			switch event.Type {
+			case outbound.EventLLMTextDelta:
+				delta, _ := event.Data["text"].(string)
+				if delta != "" {
+					fullText += delta
+					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": delta})
+					flusher.Flush()
+				}
+			case outbound.EventLLMToolCall:
+				writeSSE(c.Writer, sseToolCall, map[string]any{
+					"tool":  event.Data["tool"],
+					"input": event.Data["input"],
+				})
+				flusher.Flush()
+			case outbound.EventLLMToolResult:
+				payload := map[string]any{
+					"tool":   event.Data["tool"],
+					"output": event.Data["output"],
+				}
+				if errMsg, ok := event.Data["error"]; ok {
+					payload["error"] = errMsg
+				}
+				writeSSE(c.Writer, sseToolResult, payload)
+				flusher.Flush()
+			}
+
+		// 完成信号：从 WebChannel 收到最终 Action
 		case action, ok := <-respCh:
 			if !ok {
 				// channel 关闭，结束
@@ -185,16 +231,18 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				return
 			}
 
-			// 处理 Action
-			text, _ := action.Payload.(string)
-			if text != "" {
-				fullText += text
-				writeSSE(c.Writer, sseTextDelta, map[string]any{"text": text})
-				flusher.Flush()
-			}
-
-			// ActionReply 后发送 done 并保存回复
-			if action.Type == core.ActionReply || text != "" {
+			// ActionReply 表示 Bot 回复完成
+			// 文本已通过 EventBus 流式推送，这里只需发送 done
+			if action.Type == core.ActionReply {
+				// 如果 fullText 为空（EventBus 不可用），用 Action 的 payload
+				if fullText == "" {
+					text, _ := action.Payload.(string)
+					if text != "" {
+						fullText = text
+						writeSSE(c.Writer, sseTextDelta, map[string]any{"text": text})
+						flusher.Flush()
+					}
+				}
 				writeSSE(c.Writer, sseDone, map[string]any{"text": fullText})
 				flusher.Flush()
 

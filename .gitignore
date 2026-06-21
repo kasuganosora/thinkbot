@@ -41,3 +41,13 @@ workflow/integration_test.go
 .codebuddy/
 .skills/tmp/
 tmp/
+
+# Frontend (web/)
+web/node_modules/
+web/dist/
+
+# Runtime logs & DB temp files
+*.log
+*.db-shm
+*.db-wal
+*.db.bak

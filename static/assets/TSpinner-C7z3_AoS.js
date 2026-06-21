@@ -1,0 +1,1 @@
+import{d as n,c as s,n as a,o as t,_ as o}from"./index-Bl0_US1g.js";const r=n({__name:"TSpinner",props:{size:{default:"default"}},setup(e){return(c,p)=>(t(),s("div",{class:a(["tspinner",`spinner-${e.size}`])},null,2))}}),_=o(r,[["__scopeId","data-v-66c220e0"]]);export{_ as T};

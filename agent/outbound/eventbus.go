@@ -111,6 +111,15 @@ type EventBus interface {
 	// Publish 发布事件。非阻塞——如果订阅者的 channel 已满则丢弃。
 	Publish(ctx context.Context, event Event)
 
+	// PublishTextDelta 发布 LLM 文本增量事件（用于 SSE 流式输出）。
+	PublishTextDelta(ctx context.Context, traceID, botID, text string)
+
+	// PublishToolCall 发布 LLM 工具调用事件。
+	PublishToolCall(ctx context.Context, traceID, botID, toolName string, input any)
+
+	// PublishToolResult 发布工具执行结果事件。
+	PublishToolResult(ctx context.Context, traceID, botID, toolName string, output any, errMsg string)
+
 	// Subscribe 订阅事件流。
 	// traceID 为空时订阅所有事件（管理/调试用）。
 	// 返回的 Subscription 必须在使用完毕后调用 Unsubscribe 释放。
@@ -464,6 +473,40 @@ func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, repla
 		"active_subs", len(b.subscribers))
 
 	return sub
+}
+
+// PublishTextDelta 发布 LLM 文本增量事件（实现 EventBus 接口）。
+func (b *MemoryEventBus) PublishTextDelta(_ context.Context, traceID, botID, text string) {
+	b.Publish(context.Background(), Event{
+		Type:    EventLLMTextDelta,
+		TraceID: traceID,
+		BotID:   botID,
+		Data:    map[string]any{"text": text},
+	})
+}
+
+// PublishToolCall 发布工具调用事件（实现 EventBus 接口）。
+func (b *MemoryEventBus) PublishToolCall(_ context.Context, traceID, botID, toolName string, input any) {
+	b.Publish(context.Background(), Event{
+		Type:    EventLLMToolCall,
+		TraceID: traceID,
+		BotID:   botID,
+		Data:    map[string]any{"tool": toolName, "input": input},
+	})
+}
+
+// PublishToolResult 发布工具执行结果事件（实现 EventBus 接口）。
+func (b *MemoryEventBus) PublishToolResult(_ context.Context, traceID, botID, toolName string, output any, errMsg string) {
+	data := map[string]any{"tool": toolName, "output": output}
+	if errMsg != "" {
+		data["error"] = errMsg
+	}
+	b.Publish(context.Background(), Event{
+		Type:    EventLLMToolResult,
+		TraceID: traceID,
+		BotID:   botID,
+		Data:    data,
+	})
 }
 
 // Unsubscribe 取消订阅并关闭 channel。

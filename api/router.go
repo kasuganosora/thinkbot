@@ -115,6 +115,16 @@ func (s *Server) registerRoutes() {
 		// Channel 类型列表（所有登录用户可见，驱动前端表单）
 		authed.GET("/channels/types", s.handleListChannelTypes)
 
+		// --- LLM 模型管理（admin） ---
+		llmGroup := authed.Group("/llm/models")
+		llmGroup.Use(requirePermission(auth.PermBotManage))
+		{
+			llmGroup.GET("", s.handleListLLMModels)
+			llmGroup.POST("", s.handleCreateLLMModel)
+			llmGroup.PUT("/:id", s.handleUpdateLLMModel)
+			llmGroup.DELETE("/:id", s.handleDeleteLLMModel)
+		}
+
 		// --- 聊天（需要 bot.use 权限） ---
 		chat := authed.Group("/chat")
 		chat.Use(requirePermission(auth.PermBotUse))

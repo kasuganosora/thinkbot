@@ -1,0 +1,1 @@
+import{d as t,o as n,c,n as r,N as d,e as p,_ as l}from"./index-Bl0_US1g.js";const _=t({__name:"TBadge",props:{variant:{default:"secondary"}},setup(e){const a=e,s=p(()=>`badge-${a.variant}`);return(o,m)=>(n(),c("span",{class:r(["tbadge",s.value])},[d(o.$slots,"default",{},void 0)],2))}}),u=l(_,[["__scopeId","data-v-8bdede0c"]]);export{u as T};

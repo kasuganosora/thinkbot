@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -736,4 +737,145 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// defaultTimezoneName 返回服务器本地时区的 IANA 名称或偏移描述，供前端展示默认值。
+// Windows 上 time.Local.String() 返回 "Local"，Zone() 返回缩写（如 CST），
+// 都不是有效的 IANA 标识符，所以从 UTC 偏移推算一个可读的固定时区名称。
+func defaultTimezoneName() string {
+	// 尝试获取 IANA 名称（Linux 上通常有效）
+	name, _ := time.Now().Zone()
+	if name != "" && name != "Local" && name != "UTC" {
+		if _, err := time.LoadLocation(name); err == nil {
+			return name
+		}
+	}
+	// 回退：从偏移推算 Etc/GMT 格式
+	_, offset := time.Now().Zone()
+	if offset == 0 {
+		return "UTC"
+	}
+	hours := offset / 3600
+	if offset%3600 == 0 {
+		// IANA 的 Etc/GMT 系列符号是反的：Etc/GMT-8 = UTC+8
+		if hours > 0 {
+			return fmt.Sprintf("Etc/GMT-%d", hours)
+		}
+		return fmt.Sprintf("Etc/GMT+%d", -hours)
+	}
+	return "UTC"
+}
+
+// ============================================================================
+// 配置项元数据聚合 — 供启动时注册和前端设置界面使用
+// ============================================================================
+
+// APIMetaSpecs 返回 API 配置项的元数据。
+func APIMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyAPIAddr, Category: "API", Description: "HTTP 服务器监听地址（默认 :8080）"},
+		{Key: KeyAPICORSOrigins, Category: "API", Description: "允许的 CORS 来源列表（逗号分隔，为空时仅允许 localhost）"},
+		{Key: KeyAPICookieSecure, Category: "API", Description: "Cookie 是否仅通过 HTTPS 传输（默认 false）"},
+		{Key: KeyChatContextLimit, Category: "API", Description: "LLM 上下文加载的最大历史消息数（默认 20）"},
+	}
+}
+
+// BotMetaSpecs 返回全局 Bot 配置项的元数据。
+func BotMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyBotSystemPrompt, Category: "Bot", Description: "全局系统 prompt 覆盖（可选，优先级低于 SOUL.md）"},
+		{Key: KeyBotModel, Category: "Bot", Description: "默认模型名（已被 per-bot LLM 分配取代，仅作回退）"},
+		{Key: KeyBotTemperature, Category: "Bot", Description: "采样温度（默认 0.7，0 表示确定性输出）"},
+		{Key: KeyBotMaxTokens, Category: "Bot", Description: "最大输出 token 数（默认 4096）"},
+		{Key: KeyBotWorkers, Category: "Bot", Description: "Bot 并发 worker 数（默认 4）"},
+	}
+}
+
+// DBMetaSpecs 返回数据库配置项的元数据。
+func DBMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyDBPath, Category: "Database", Description: "SQLite 数据库文件路径（默认 thinkbot.db）"},
+	}
+}
+
+// LogMetaSpecs 返回日志配置项的元数据。
+func LogMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyLogLevel, Category: "Log", Description: "日志级别：debug / info / warn / error（默认 info）"},
+	}
+}
+
+// AllMetaSpecs 汇总所有模块的配置项元数据。
+func AllMetaSpecs() []MetaSpec {
+	var specs []MetaSpec
+	specs = append(specs, APIMetaSpecs()...)
+	specs = append(specs, BotMetaSpecs()...)
+	specs = append(specs, DBMetaSpecs()...)
+	specs = append(specs, LogMetaSpecs()...)
+	specs = append(specs, WorkflowMetaSpecs()...)
+	specs = append(specs, EngagementMetaSpecs()...)
+	specs = append(specs, SoulMetaSpecs()...)
+	specs = append(specs, WorkspaceMetaSpecs()...)
+	specs = append(specs, SystemMetaSpecs()...)
+	specs = append(specs, DreamingMetaSpecs()...)
+	specs = append(specs, ToolPolicyMetaSpecs()...)
+	return specs
+}
+
+// GlobalMetaSpecs 仅返回适合在系统设置页面展示的全局配置项。
+// 排除 Bot / Soul / Engagement / Dreaming / ToolPolicy 等 per-bot 配置，
+// 以及 Database / Workspace 等需要重启才生效的基础设施配置。
+func GlobalMetaSpecs() []MetaSpec {
+	return SystemMetaSpecs()
+}
+
+// DefaultMap 返回所有配置项的默认值映射，供前端设置界面填充空值。
+func DefaultMap() map[string]string {
+	return map[string]string{
+		// API
+		KeyAPIAddr:          ":8080",
+		KeyAPICORSOrigins:   "",
+		KeyAPICookieSecure:  "false",
+		KeyChatContextLimit: "20",
+		// Bot
+		KeyBotSystemPrompt: "",
+		KeyBotModel:        "",
+		KeyBotTemperature:  "0.7",
+		KeyBotMaxTokens:    "4096",
+		KeyBotWorkers:      "4",
+		// Database
+		KeyDBPath: "thinkbot.db",
+		// Log
+		KeyLogLevel: "info",
+		// System
+		KeySystemTimezone: defaultTimezoneName(),
+		// Workflow
+		KeyWorkflowMaxParallel:       "3",
+		KeyWorkflowMaxRetries:        "2",
+		KeyWorkflowMaxIterations:     "3",
+		KeyWorkflowRetryInitialMS:    "500",
+		KeyWorkflowRetryMaxMS:        "10000",
+		KeyWorkflowScheduleInterval:  "200",
+		KeyWorkflowAnalyzerTemp:      "0.3",
+		KeyWorkflowAnalyzerMaxTokens: "4096",
+		// Engagement
+		KeyEngagementEnabled:            "false",
+		KeyEngagementReplyProbability:   "0.15",
+		KeyEngagementRateLimitCapacity:  "3",
+		KeyEngagementRateLimitInterval:  "1h",
+		KeyEngagementBackoffBaseSeconds: "10",
+		KeyEngagementBackoffCapSeconds:  "300",
+		KeyEngagementBackoffStartCount:  "3",
+		KeyEngagementBurstInterval:      "5",
+		KeyEngagementWaitTimeout:        "30",
+		KeyEngagementBackoffBypass:      "0",
+		KeyEngagementThreshold:          "0",
+		// Soul
+		KeySoulReloadInterval: "5s",
+		// Workspace
+		KeyWorkspaceDir: "data/workspaces",
+		// Dreaming
+		"bot.dreaming.enabled":  "false",
+		"bot.dreaming.schedule": "0 3 * * *",
+	}
 }

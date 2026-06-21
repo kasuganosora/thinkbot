@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 )
@@ -22,10 +23,35 @@ import (
 // @Security     CookieAuth
 // @Router       /api/config [get]
 func (s *Server) handleGetConfig(c *gin.Context) {
-	items, err := s.store.ListSettings(c.Request.Context())
+	// 从 DB 读取用户已保存的值（可能为空）
+	dbItems, err := s.store.ListSettings(c.Request.Context())
 	if err != nil {
 		Fail(c, errs.Wrap(err, "failed to load config"))
 		return
+	}
+	dbMap := make(map[string]config.Setting, len(dbItems))
+	for _, item := range dbItems {
+		dbMap[item.Key] = item
+	}
+
+	// 以 GlobalMetaSpecs() 定义为基准，合并 DB 值 + 默认值
+	specs := config.GlobalMetaSpecs()
+	defaults := config.DefaultMap()
+
+	items := make([]config.Setting, 0, len(specs))
+	for _, spec := range specs {
+		val := ""
+		if dbItem, ok := dbMap[spec.Key]; ok && dbItem.Value != "" {
+			val = dbItem.Value
+		} else if dv, ok := defaults[spec.Key]; ok {
+			val = dv
+		}
+		items = append(items, config.Setting{
+			Key:         spec.Key,
+			Value:       val,
+			Category:    spec.Category,
+			Description: spec.Description,
+		})
 	}
 	OK(c, items)
 }

@@ -23,15 +23,20 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
+	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/stages"
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/channel/misskey"
 	"github.com/kasuganosora/thinkbot/channel/telegram"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/subagent"
+	"github.com/kasuganosora/thinkbot/tools"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/strutil"
+	"github.com/kasuganosora/thinkbot/workflow"
 )
 
 // ============================================================================
@@ -58,6 +63,7 @@ type BotService struct {
 	channels        map[string]*WebChannel         // botID → WebChannel
 	botInstances    map[string]*bot.Bot            // botID → running Bot
 	dreamingBundles map[string]*bot.DreamingBundle // botID → DreamingBundle
+	cancelFuncs     map[string]context.CancelFunc  // botID → bot context cancel
 }
 
 // NewBotService 创建 BotService。
@@ -82,6 +88,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		channels:        make(map[string]*WebChannel),
 		botInstances:    make(map[string]*bot.Bot),
 		dreamingBundles: make(map[string]*bot.DreamingBundle),
+		cancelFuncs:     make(map[string]context.CancelFunc),
 	}
 }
 
@@ -173,6 +180,22 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.mu.Unlock()
 	}
 
+	// 将 Bot 定义的 LLM 分配同步到 config store
+	// （CreateLLMBundle 从 config store 读 bot.<id>.main/light，而定义存在 DB 表中）
+	syncCtx := context.Background()
+	if def.LLMMain != "" {
+		if err := s.store.Set(syncCtx, config.BotLLMKey(id, "main"), def.LLMMain); err != nil {
+			rollback()
+			return errs.Wrap(err, "bot_service: sync LLM main assignment")
+		}
+	}
+	if def.LLMLight != "" {
+		if err := s.store.Set(syncCtx, config.BotLLMKey(id, "light"), def.LLMLight); err != nil {
+			rollback()
+			return errs.Wrap(err, "bot_service: sync LLM light assignment")
+		}
+	}
+
 	// 创建 LLM Bundle
 	builder := config.NewBuilder(s.store, s.logger)
 	bundle, err := bot.CreateLLMBundle(builder, id)
@@ -217,15 +240,58 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return messages
 	}
 
+	// 创建 Prompt Registry + Tool Manager
+	promptReg := prompt.NewRegistry()
+	toolMgr := agenttools.NewToolManager(promptReg, s.store, s.logger)
+
+	// 注册通用工具（web_fetch, calculate, now, web_search 等）
+	if err := tools.RegisterTools(toolMgr, tools.Config{
+		TimezoneResolver: builder.GetBotTimezone,
+	}); err != nil {
+		rollback()
+		return errs.Wrap(err, "bot_service: register tools")
+	}
+
+	// 注册记忆工具
+	memRepo := memory.NewMemoryRepository()
+	if err := memory.RegisterTools(toolMgr, memory.DefaultToolConfig(memRepo)); err != nil {
+		s.logger.Warnw("failed to register memory tools", "err", err)
+	}
+
+	// 注册工作流工具
+	wfMgr, wfSaMgr := workflow.Setup(workflow.WireConfig{
+		Provider:       bundle.Main,
+		Model:          bundle.MainDef.Model,
+		DB:             s.db,
+		Logger:         s.logger,
+		TracerProvider: s.tp,
+		Store:          s.store,
+		EventBus:       s.eventBus,
+	})
+	_ = wfSaMgr // workflow 内部 SubAgent 管理器，Bot 关闭时由 wfMgr 清理
+	if err := workflow.RegisterTools(toolMgr, wfMgr); err != nil {
+		s.logger.Warnw("failed to register workflow tools", "err", err)
+	}
+
+	// 注册 SubAgent 工具
+	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model)
+	if err := subagent.RegisterTools(toolMgr, saMgr); err != nil {
+		s.logger.Warnw("failed to register subagent tools", "err", err)
+	}
+
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
 		stages.LLMConfig{
-			SystemPrompt:   def.SystemPrompt,
-			Model:          mainModel,
-			Temperature:    temp,
-			MaxTokens:      maxTok,
-			MessageBuilder: messageBuilder,
+			SystemPrompt:    def.SystemPrompt,
+			Model:           mainModel,
+			Temperature:     temp,
+			MaxTokens:       maxTok,
+			ReasoningEffort: def.ReasoningEffort,
+			MessageBuilder:  messageBuilder,
+			ToolResolver:    toolMgr,
+			MaxSteps:        10,
+			StreamPublisher: s.eventBus,
 		},
 		s.tp,
 		s.logger,
@@ -397,6 +463,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		TP:             s.tp,
 		DreamScheduler: dreamScheduler,
 		SelfIDSet:      selfIDSet,
+		PromptRegistry: promptReg,
+		ToolManager:    toolMgr,
 	})
 	if err != nil {
 		rollback()
@@ -420,6 +488,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Wrap(err, "bot_service: register bot")
 	}
 
+	// 用独立 context 启动 Bot，避免 HTTP 请求结束后 ctx 被取消导致 Bot 立即关闭
+	botCtx, botCancel := context.WithCancel(context.Background())
+
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
 		defer func() {
@@ -427,24 +498,27 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				s.logger.Errorw("bot run panic", "bot_id", id, "err", r)
 			}
 		}()
-		if err := b.Run(ctx); err != nil {
+		if err := b.Run(botCtx); err != nil {
 			s.logger.Errorw("bot run failed", "bot_id", id, "err", err)
 		}
 	}()
 
 	// 等待 Bot 就绪（带 30s 超时，防止永久挂起）
+	// 注意：仍然监听 HTTP 请求的 ctx.Done()，但仅用于中断等待，不取消 Bot
 	readyTimeout := time.NewTimer(30 * time.Second)
 	defer readyTimeout.Stop()
 	select {
 	case <-b.Ready():
 		s.logger.Infow("bot started", "bot_id", id, "channels", len(allChannels))
 	case <-readyTimeout.C:
+		botCancel()
 		b.Stop()
 		b.Close()
 		s.mgr.Unregister(id)
 		rollback()
 		return errs.Internal("bot_service: bot startup timeout (30s)")
 	case <-ctx.Done():
+		botCancel()
 		b.Stop()
 		b.Close()
 		s.mgr.Unregister(id)
@@ -455,6 +529,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.mu.Lock()
 	s.channels[id] = webCh
 	s.botInstances[id] = b
+	s.cancelFuncs[id] = botCancel
 	if dreamBundle != nil {
 		s.dreamingBundles[id] = dreamBundle
 	}
@@ -474,6 +549,10 @@ func (s *BotService) StopBot(id string) {
 	b, exists := s.botInstances[id]
 	delete(s.botInstances, id)
 	delete(s.channels, id)
+	if cancel, ok := s.cancelFuncs[id]; ok {
+		cancel()
+		delete(s.cancelFuncs, id)
+	}
 	if dreamBundle, ok := s.dreamingBundles[id]; ok {
 		dreamBundle.Stop()
 		delete(s.dreamingBundles, id)

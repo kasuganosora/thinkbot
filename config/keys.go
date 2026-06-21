@@ -176,7 +176,7 @@ func ConfigKeyToEnvKey(configKey string) string {
 // ErrInvalidKey 配置键格式错误。
 var ErrInvalidKey = fmt.Errorf("config: invalid key format")
 
-// ValidateKey 检查配置键是否符合规范（小写字母/数字/点号）。
+// ValidateKey 检查配置键是否符合规范（小写字母/数字/点号/连字符/下划线）。
 func ValidateKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("%w: empty key", ErrInvalidKey)
@@ -184,7 +184,7 @@ func ValidateKey(key string) error {
 	for _, ch := range key {
 		if (ch < 'a' || ch > 'z') &&
 			(ch < '0' || ch > '9') &&
-			ch != '.' && ch != '_' {
+			ch != '.' && ch != '_' && ch != '-' {
 			return fmt.Errorf("%w: key %q contains invalid character %q", ErrInvalidKey, key, ch)
 		}
 	}
