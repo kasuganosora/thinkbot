@@ -365,21 +365,26 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map
 		}, nil
 	}
 
-	// 替换
+	// 替换：先写入新条目，成功后再删除旧条目
 	old := matches[0]
-	if err := repo.Delete(ctx, scope, old.ID); err != nil {
-		return nil, errs.Wrap(err, "delete failed")
+	newEntry := Entry{
+		ID:             old.ID,
+		Scope:          scope,
+		Content:        content,
+		Category:       old.Category,
+		Source:         old.Source,
+		Importance:     old.Importance,
+		Metadata:       old.Metadata,
+		CreatedAt:      old.CreatedAt,
+		LastAccessedAt: old.LastAccessedAt,
 	}
 
-	newEntry := Entry{
-		ID:       old.ID,
-		Scope:    scope,
-		Content:  content,
-		Category: old.Category,
-		Source:   old.Source,
-	}
 	if err := repo.Append(ctx, newEntry); err != nil {
 		return nil, errs.Wrap(err, "replace write failed")
+	}
+	// 删除旧条目（新条目有不同 ID，原 ID 由 Append 自动生成）
+	if err := repo.Delete(ctx, scope, old.ID); err != nil {
+		return nil, errs.Wrap(err, "cleanup of old entry failed")
 	}
 
 	return successResponse(scope, "Entry replaced.", true), nil
