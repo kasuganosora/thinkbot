@@ -180,15 +180,15 @@ func (m *ProviderManager) PrefetchAll(ctx context.Context, query, sessionID stri
 	providers := append([]MemoryProvider{}, m.providers...)
 	m.mu.RUnlock()
 
-	var parts []string
-	for _, p := range providers {
-		// 先检查 prefetch 缓存
-		cached := m.prefetchMgr.Get(query)
-		if cached != "" {
-			parts = append(parts, cached)
-			continue
-		}
+	// 先检查 prefetch 缓存（只取一次，避免 consume-on-read 导致后续 provider 丢失缓存）
+	cached := m.prefetchMgr.Get(query)
 
+	var parts []string
+	if cached != "" {
+		parts = append(parts, cached)
+	}
+
+	for _, p := range providers {
 		result, err := p.Prefetch(ctx, query, sessionID)
 		if err != nil {
 			m.logger.Debugw("provider prefetch failed (non-fatal)",
