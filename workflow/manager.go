@@ -568,11 +568,14 @@ func (m *Manager) Control(wfID string, req ControlRequest) (*ControlResult, erro
 		if _, exists := wf.GetNode(req.NodeID); !exists {
 			return nil, errs.Newf("node %q not found in workflow %q", req.NodeID, wfID)
 		}
-		// 在锁内读取 scheduler，避免 data race
+		// 工作流已完成时 inst 为 nil，先检查 ok 防止 nil pointer panic
+		if !ok {
+			return nil, errs.New("workflow is not actively running, cannot retry")
+		}
 		m.mu.RLock()
 		scheduler := inst.scheduler
 		m.mu.RUnlock()
-		if ok && scheduler != nil {
+		if scheduler != nil {
 			scheduler.SubmitRetry(req.NodeID)
 		} else {
 			return nil, errs.New("workflow is not actively running, cannot retry")

@@ -290,6 +290,10 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	}
 
 	if lastErr != nil {
+		// 如果执行期间被 terminate，handleTerminate 已设 NodeSkipped，不覆盖
+		if s.isTerminated() {
+			return
+		}
 		// 所有重试耗尽
 		span.RecordError(lastErr)
 		span.SetAttributes(attribute.String("node.final_status", "failed"))
@@ -327,6 +331,9 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	if node.Review {
 		finalResult, err := s.reviewLoop(ctx, node, result)
 		if err != nil {
+			if s.isTerminated() {
+				return
+			}
 			span.RecordError(err)
 			span.SetAttributes(attribute.String("node.final_status", "failed"))
 			s.mu.Lock()
@@ -348,7 +355,10 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		result = finalResult
 	}
 
-	// 成功完成
+	// 成功完成（如果在此期间被 terminate，不覆盖已设置的 NodeSkipped）
+	if s.isTerminated() {
+		return
+	}
 	span.SetAttributes(attribute.String("node.final_status", "completed"))
 	s.mu.Lock()
 	node.Status = NodeCompleted
