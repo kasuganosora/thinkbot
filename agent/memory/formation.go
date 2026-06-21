@@ -223,6 +223,12 @@ func (f *FormationPipeline) ProcessTurn(
 
 		case DecisionSkip:
 			result.Skipped++
+
+		default:
+			// 未知 action（LLM 返回了非 ADD/UPDATE/SKIP 的值）
+			f.logger.Warnw("formation: unknown action from LLM, skipping",
+				"action", d.Action, "content_preview", strutil.Truncate(d.Fact.Content, 80))
+			result.Skipped++
 		}
 	}
 
@@ -343,6 +349,12 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 	var decisions []FactDecision
 	if err := strutil.ExtractJSON(resp.Text, &decisions); err != nil {
 		return nil, errs.Wrap(err, "formation: parse decide JSON")
+	}
+
+	// 校验：LLM 返回的决策数应与输入事实数一致
+	if len(decisions) < len(facts) {
+		f.logger.Warnw("formation: LLM returned fewer decisions than facts, some facts will be dropped",
+			"facts", len(facts), "decisions", len(decisions))
 	}
 
 	return decisions, nil
