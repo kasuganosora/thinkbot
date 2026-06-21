@@ -30,10 +30,18 @@ import (
 //   - 支持 Terminate 信号中断
 // ============================================================================
 
+// NodeExecutor 抽象节点执行逻辑，使 Scheduler 可独立测试。
+// *Executor 是默认实现。
+type NodeExecutor interface {
+	Execute(ctx context.Context, node *DAGNode) (string, error)
+	ExecuteWithFeedback(ctx context.Context, node *DAGNode, prevResult, feedback string) (string, error)
+	Review(ctx context.Context, node *DAGNode, product string) (*ReviewResult, error)
+}
+
 // Scheduler 执行单个工作流的 DAG 调度。
 type Scheduler struct {
 	wf          *Workflow
-	executor    *Executor
+	executor    NodeExecutor
 	repo        *Repository
 	ec          EngineConfig
 	maxParallel int
@@ -59,7 +67,7 @@ type SchedulerConfig struct {
 }
 
 // NewScheduler 创建调度器。
-func NewScheduler(wf *Workflow, executor *Executor, repo *Repository, cfg SchedulerConfig, ec EngineConfig, tp trace.TracerProvider, logger *zap.SugaredLogger, emitter *outbound.EventEmitter, metrics *ManagerMetrics) *Scheduler {
+func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg SchedulerConfig, ec EngineConfig, tp trace.TracerProvider, logger *zap.SugaredLogger, emitter *outbound.EventEmitter, metrics *ManagerMetrics) *Scheduler {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
@@ -111,6 +119,7 @@ func (s *Scheduler) Run(ctx context.Context) WorkflowStatus {
 
 	// 标记工作流为运行中 + 确保节点初始状态正确
 	now := time.Now()
+	s.mu.Lock()
 	s.wf.StartedAt = &now
 	s.wf.Status = WorkflowRunning
 
@@ -120,6 +129,14 @@ func (s *Scheduler) Run(ctx context.Context) WorkflowStatus {
 			n.Status = NodePending
 		}
 	}
+	s.mu.Unlock()
+
+	// 发布工作流开始执行事件
+	s.emitter.Emit(ctx, outbound.EventWorkflowRunning, s.wf.ID, map[string]any{
+		"node_count":   len(s.wf.Nodes),
+		"max_parallel": s.maxParallel,
+	})
+
 	s.persist()
 
 	// 主调度循环
@@ -180,9 +197,11 @@ done:
 
 	// 计算最终状态
 	finalStatus := s.computeFinalStatus()
+	s.mu.Lock()
 	finishedAt := time.Now()
 	s.wf.FinishedAt = &finishedAt
 	s.wf.Status = finalStatus
+	s.mu.Unlock()
 	s.persist()
 
 	span.SetAttributes(attribute.String("workflow.final_status", string(finalStatus)))
@@ -496,8 +515,12 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 	}
 
 	// 超过最大迭代次数
+	feedback := node.ReviewFeedback
+	if feedback == "" {
+		feedback = "(no feedback)"
+	}
 	return result, errs.Newf("node %q exceeded max review iterations (%d), last feedback: %s",
-		node.ID, maxIter, strutil.Truncate(node.ReviewFeedback, 200))
+		node.ID, maxIter, strutil.Truncate(feedback, 200))
 }
 
 // ============================================================================
@@ -549,6 +572,16 @@ func (s *Scheduler) RequestRetry(nodeID string) error {
 
 // unskipDependents 将因指定节点失败而被跳过的下游节点恢复为 pending。
 func (s *Scheduler) unskipDependents(nodeID string) {
+	s.unskipDependentsDepth(nodeID, 0)
+}
+
+// unskipDependentsDepth 带递归深度保护的 unskipDependents 实现。
+func (s *Scheduler) unskipDependentsDepth(nodeID string, depth int) {
+	if depth > 1000 {
+		s.logger.Warnw("unskipDependents recursion depth exceeded limit",
+			"node_id", nodeID, "depth", depth)
+		return
+	}
 	for _, n := range s.wf.Nodes {
 		if n.Status != NodeSkipped {
 			continue
@@ -567,7 +600,7 @@ func (s *Scheduler) unskipDependents(nodeID string) {
 				if allDepsOk {
 					n.Status = NodePending
 					n.Error = ""
-					s.unskipDependents(n.ID) // 递归恢复
+					s.unskipDependentsDepth(n.ID, depth+1) // 递归恢复
 				}
 				break
 			}

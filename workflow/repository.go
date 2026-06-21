@@ -3,6 +3,7 @@ package workflow
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -14,6 +15,9 @@ import (
 // ============================================================================
 // Repository — 持久化仓储（内存优先 + DB 双写）
 // ============================================================================
+
+// maxCacheSize 缓存条目上限。超过时淘汰最早的终态工作流。
+const maxCacheSize = 500
 
 // Repository 管理工作流的持久化。
 // 读操作优先从内存 map 获取（O(1)），写操作同时更新内存和 DB。
@@ -30,6 +34,7 @@ func NewRepository(db *gorm.DB, logger *zap.SugaredLogger) *Repository {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
+	SetPkgLogger(logger)
 	return &Repository{
 		cache:  make(map[string]*Workflow),
 		db:     db,
@@ -48,6 +53,11 @@ func (r *Repository) Save(wf *Workflow) error {
 	snapshot := cloneWorkflow(wf)
 	r.cache[wf.ID] = snapshot
 
+	// 缓存超过上限时淘汰终态工作流
+	if len(r.cache) > maxCacheSize {
+		r.evictTerminal()
+	}
+
 	if r.db != nil {
 		model, err := ToModel(wf)
 		if err != nil {
@@ -61,6 +71,31 @@ func (r *Repository) Save(wf *Workflow) error {
 	}
 
 	return nil
+}
+
+// evictTerminal 从缓存中淘汰最早的终态工作流，直到缓存大小降到 maxCacheSize 以下。
+// 调用方必须持有 r.mu 写锁。
+func (r *Repository) evictTerminal() {
+	type entry struct {
+		id        string
+		createdAt time.Time
+	}
+	var terminal []entry
+	for id, wf := range r.cache {
+		if wf.Status.IsTerminal() {
+			terminal = append(terminal, entry{id, wf.CreatedAt})
+		}
+	}
+	// 按 createdAt 升序（最旧优先淘汰）
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminal[i].createdAt.Before(terminal[j].createdAt)
+	})
+	for _, e := range terminal {
+		if len(r.cache) <= maxCacheSize {
+			break
+		}
+		delete(r.cache, e.id)
+	}
 }
 
 // Get 从内存缓存获取工作流，缓存未命中时回退到 DB。
@@ -84,12 +119,11 @@ func (r *Repository) Get(id string) (*Workflow, error) {
 		if err != nil {
 			return nil, errs.Wrapf(err, "failed to deserialize workflow %s", id)
 		}
-		// 填充缓存（存入 clone），返回独立 clone 以保持与 cache-hit 路径一致
-		cached := cloneWorkflow(wf)
+		// 填充缓存（存入 clone），FromModel 返回的 wf 已是独立对象，可直接返回
 		r.mu.Lock()
-		r.cache[id] = cached
+		r.cache[id] = cloneWorkflow(wf)
 		r.mu.Unlock()
-		return cloneWorkflow(wf), nil
+		return wf, nil
 	}
 
 	return nil, errs.Newf("workflow %s not found", id)

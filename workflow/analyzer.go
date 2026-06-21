@@ -49,6 +49,13 @@ func NewAnalyzer(saMgr *subagent.SubAgentManager, tp trace.TracerProvider, ec En
 	}
 }
 
+// maxNodeRetries / maxNodeIterations 限制 LLM 输出的重试/迭代上限，
+// 防止恶意或异常输入导致节点无限重试。
+const (
+	maxNodeRetries    = 10
+	maxNodeIterations = 10
+)
+
 // analyzerSystemPrompt 是分析器 SubAgent 的系统提示词。
 const analyzerSystemPrompt = `你是一个任务分解专家。你的职责是将复杂需求分解为可执行的子任务 DAG 图。
 
@@ -148,10 +155,14 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode,
 		maxRetries := sn.MaxRetries
 		if maxRetries <= 0 {
 			maxRetries = 2
+		} else if maxRetries > maxNodeRetries {
+			maxRetries = maxNodeRetries
 		}
 		maxIter := sn.MaxIterations
 		if maxIter <= 0 {
 			maxIter = 3
+		} else if maxIter > maxNodeIterations {
+			maxIter = maxNodeIterations
 		}
 		nodes = append(nodes, &DAGNode{
 			ID:            sn.ID,
