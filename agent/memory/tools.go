@@ -521,9 +521,10 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 
 	// 提交变更：记录需要添加、修改、删除的条目
 	type batchChange struct {
-		op     string // "add", "update", "delete"
-		entry  *Entry
-		target string // for delete/update: existing entry ID
+		op        string // "add", "update", "delete"
+		entry     *Entry // new entry for add/update
+		target    string // existing entry ID for delete/update
+		origEntry *Entry // original entry for update (preserves metadata)
 	}
 	var changes []batchChange
 
@@ -573,14 +574,16 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 				return batchError(scope, pos+": '"+opOldText+"' matched multiple entries"), nil
 			}
 			targetID := matches[0].ID
+			orig := matches[0]
 			changes = append(changes, batchChange{
-				op:     "update",
-				target: targetID,
+				op:        "update",
+				target:    targetID,
+				origEntry: &orig,
 				entry: &Entry{
 					Scope:    scope,
 					Content:  opContent,
-					Category: matches[0].Category,
-					Source:   matches[0].Source,
+					Category: orig.Category,
+					Source:   orig.Source,
 				},
 			})
 			// 更新 working 副本以支持后续操作匹配
@@ -629,29 +632,25 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 				commitErrorCount++
 			}
 		case "update":
-			// 先查找原始条目以保留元数据
-			origEntries, _ := repo.Retrieve(ctx, Query{
-				Scopes: []Scope{scope},
-				Limit:  100,
-			})
-			for _, e := range origEntries {
-				if e.ID == ch.target {
-					updatedEntry := Entry{
-						ID:             e.ID,
-						Scope:          ch.entry.Scope,
-						Content:        ch.entry.Content,
-						Category:       ch.entry.Category,
-						Source:         ch.entry.Source,
-						Importance:     e.Importance,
-						Metadata:       e.Metadata,
-						CreatedAt:      e.CreatedAt,
-						LastAccessedAt: e.LastAccessedAt,
-					}
+			// 使用保存的原始条目元数据，避免重复查询
+			if ch.origEntry != nil {
+				e := ch.origEntry
+				updatedEntry := Entry{
+					ID:             e.ID,
+					Scope:          ch.entry.Scope,
+					Content:        ch.entry.Content,
+					Category:       ch.entry.Category,
+					Source:         ch.entry.Source,
+					Importance:     e.Importance,
+					Metadata:       e.Metadata,
+					CreatedAt:      e.CreatedAt,
+					LastAccessedAt: e.LastAccessedAt,
+				}
+				// 先写入新条目，再删除旧条目（避免 Delete 后 Append 失败导致数据丢失）
+				if err := repo.Append(ctx, updatedEntry); err != nil {
+					commitErrorCount++
+				} else {
 					_ = repo.Delete(ctx, scope, ch.target)
-					if err := repo.Append(ctx, updatedEntry); err != nil {
-						commitErrorCount++
-					}
-					break
 				}
 			}
 		case "delete":
