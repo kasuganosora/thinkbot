@@ -145,10 +145,8 @@ func (c *SemanticCompactor) Compact(
 	// 过滤已归档的
 	var active []TieredEntry
 	for _, e := range entries {
-		if e.Metadata != nil {
-			if _, archived := e.Metadata["archived"]; archived {
-				continue
-			}
+		if isArchived(e.Metadata) {
+			continue
 		}
 		active = append(active, e)
 	}
@@ -176,13 +174,13 @@ func (c *SemanticCompactor) Compact(
 	// 3. 应用合并结果
 	mergedIDs := make(map[string]bool)
 	for _, cluster := range clusters {
-		// 写入合并后的新条目
+		// 写入合并后的新条目（写入失败则跳过该 cluster，不归档源条目）
 		meta := map[string]any{
 			"compacted_at": time.Now(),
 			"source_ids":   cluster.SourceIDs,
 			"source_count": len(cluster.SourceIDs),
 		}
-		_ = store.Append(ctx, TieredEntry{
+		if err := store.Append(ctx, TieredEntry{
 			Entry: Entry{
 				Scope:      scope,
 				Content:    cluster.MergedContent,
@@ -193,9 +191,13 @@ func (c *SemanticCompactor) Compact(
 			},
 			Tier:         Tier1LongTerm,
 			PromotedFrom: Tier1LongTerm,
-		})
+		}); err != nil {
+			c.logger.Warnw("compactor: failed to write merged entry, skipping cluster",
+				"err", err, "source_ids", cluster.SourceIDs)
+			continue
+		}
 
-		// 标记原始条目为 archived
+		// 标记原始条目为待归档
 		for _, id := range cluster.SourceIDs {
 			mergedIDs[id] = true
 		}
@@ -295,10 +297,22 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 	return valid, nil
 }
 
+// isArchived 检查元数据中是否有 archived=true 标记。
+func isArchived(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	archived, ok := meta["archived"].(bool)
+	return ok && archived
+}
+
 // archiveEntry 将一条记忆标记为已归档（而非删除）。
 func (c *SemanticCompactor) archiveEntry(ctx context.Context, store *TieredStore, scope Scope, entry TieredEntry) {
 	// 删除原始条目
-	_ = store.Delete(ctx, Tier1LongTerm, scope, entry.ID)
+	if err := store.Delete(ctx, Tier1LongTerm, scope, entry.ID); err != nil {
+		c.logger.Warnw("compactor: delete for archive failed", "err", err, "id", entry.ID)
+		return
+	}
 
 	// 重新写入，标记为 archived
 	if entry.Metadata == nil {
@@ -307,7 +321,9 @@ func (c *SemanticCompactor) archiveEntry(ctx context.Context, store *TieredStore
 	entry.Metadata["archived"] = true
 	entry.Metadata["archived_at"] = time.Now()
 	entry.Metadata["archived_by"] = "compactor"
-	_ = store.Append(ctx, entry)
+	if err := store.Append(ctx, entry); err != nil {
+		c.logger.Warnw("compactor: re-append archived entry failed", "err", err, "id", entry.ID)
+	}
 }
 
 // PurgeArchived 物理删除所有标记为 archived 的记忆。
@@ -320,13 +336,11 @@ func (c *SemanticCompactor) PurgeArchived(ctx context.Context, store *TieredStor
 
 	removed := 0
 	for _, e := range entries {
-		if e.Metadata == nil {
+		if !isArchived(e.Metadata) {
 			continue
 		}
-		if archived, ok := e.Metadata["archived"].(bool); ok && archived {
-			if err := store.Delete(ctx, Tier1LongTerm, scope, e.ID); err == nil {
-				removed++
-			}
+		if err := store.Delete(ctx, Tier1LongTerm, scope, e.ID); err == nil {
+			removed++
 		}
 	}
 

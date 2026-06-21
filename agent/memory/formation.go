@@ -207,8 +207,12 @@ func (f *FormationPipeline) ProcessTurn(
 
 		case DecisionUpdate:
 			if d.TargetID != "" {
-				f.updateExisting(ctx, store, scope, d)
-				result.Updated++
+				if f.updateExisting(ctx, store, scope, d) {
+					result.Updated++
+				} else {
+					// 更新失败，降级为 ADD
+					result.Skipped++
+				}
 			} else {
 				// 有 UPDATE 决策但没 TargetID，降级为 ADD
 				_ = store.Append(ctx, TieredEntry{
@@ -311,12 +315,11 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 
 	var sb strings.Builder
 	sb.WriteString("## 新提取的事实\n\n")
-	for i, fact := range facts {
+	for _, fact := range facts {
 		sb.WriteString(strings.Repeat("-", 20))
 		sb.WriteString("\n")
 		sb.WriteString(fact.Content)
 		sb.WriteString("\n")
-		_ = i
 	}
 
 	sb.WriteString("\n## 已有的长期记忆（供去重参考）\n\n")
@@ -353,11 +356,12 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 	return decisions, nil
 }
 
-// updateExisting 更新已有 L1 记忆。
-func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredStore, scope Scope, d FactDecision) {
+// updateExisting 更新已有 L1 记忆。返回是否成功找到并更新。
+func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredStore, scope Scope, d FactDecision) bool {
 	all, err := store.GetAll(ctx, Tier1LongTerm, scope)
 	if err != nil {
-		return
+		f.logger.Warnw("formation: GetAll for update failed", "err", err, "target_id", d.TargetID)
+		return false
 	}
 	for _, e := range all {
 		if e.ID != d.TargetID {
@@ -374,8 +378,11 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 			importance = d.Fact.Importance
 		}
 		// 删除旧的，写入新的
-		_ = store.Delete(ctx, Tier1LongTerm, scope, d.TargetID)
-		_ = store.Append(ctx, TieredEntry{
+		if err := store.Delete(ctx, Tier1LongTerm, scope, d.TargetID); err != nil {
+			f.logger.Warnw("formation: delete old entry failed", "err", err, "target_id", d.TargetID)
+			return false
+		}
+		if err := store.Append(ctx, TieredEntry{
 			Entry: Entry{
 				ID:         d.TargetID,
 				Scope:      scope,
@@ -387,9 +394,14 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 			},
 			Tier:         Tier1LongTerm,
 			PromotedFrom: e.PromotedFrom,
-		})
-		break
+		}); err != nil {
+			f.logger.Warnw("formation: append updated entry failed", "err", err, "target_id", d.TargetID)
+			return false
+		}
+		return true
 	}
+	f.logger.Warnw("formation: target entry not found for update", "target_id", d.TargetID)
+	return false
 }
 
 const defaultFormationPrompt = `你是一个记忆提取助手。你的任务是从对话中提取值得长期保存的事实。
