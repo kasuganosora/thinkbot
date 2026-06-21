@@ -508,11 +508,20 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 		return nil, errs.Wrap(err, "batch: retrieval failed")
 	}
 
-	// 在副本上执行所有操作
+	// 在副本上验证操作（用于幂等检查和匹配验证）
 	working := make([]Entry, len(entries))
 	copy(working, entries)
 
 	appliedCount := 0
+
+	// 提交变更：记录需要添加、修改、删除的条目
+	type batchChange struct {
+		op     string // "add", "update", "delete"
+		entry  *Entry
+		target string // for delete/update: existing entry ID
+	}
+	var changes []batchChange
+
 	for i, opRaw := range opsList {
 		op := opRaw.(map[string]any)
 		opAction, _ := op["action"].(string)
@@ -535,12 +544,12 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 				}
 			}
 			if !exists {
-				working = append(working, Entry{
+				changes = append(changes, batchChange{op: "add", entry: &Entry{
 					Scope:    scope,
 					Content:  opContent,
 					Category: "observation",
 					Source:   "tool",
-				})
+				}})
 			}
 			appliedCount++
 
@@ -558,9 +567,20 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 			if len(matches) > 1 {
 				return batchError(scope, pos+": '"+opOldText+"' matched multiple entries"), nil
 			}
-			// 替换内容（保留 ID）
+			targetID := matches[0].ID
+			changes = append(changes, batchChange{
+				op:     "update",
+				target: targetID,
+				entry: &Entry{
+					Scope:    scope,
+					Content:  opContent,
+					Category: matches[0].Category,
+					Source:   matches[0].Source,
+				},
+			})
+			// 更新 working 副本以支持后续操作匹配
 			for j := range working {
-				if working[j].ID == matches[0].ID {
+				if working[j].ID == targetID {
 					working[j].Content = opContent
 					break
 				}
@@ -578,9 +598,10 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 			if len(matches) > 1 {
 				return batchError(scope, pos+": '"+opOldText+"' matched multiple entries"), nil
 			}
-			// 从 working 中移除
 			targetID := matches[0].ID
-			newWorking := working[:0]
+			changes = append(changes, batchChange{op: "delete", target: targetID})
+			// 更新 working 副本以支持后续操作匹配
+			newWorking := make([]Entry, 0, len(working))
 			for _, e := range working {
 				if e.ID != targetID {
 					newWorking = append(newWorking, e)
@@ -594,20 +615,53 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 		}
 	}
 
-	// 提交：先清空旧记忆，再写入新记忆
-	_ = repo.Clear(ctx, scope)
-	for _, e := range working {
-		newEntry := Entry{
-			Scope:      e.Scope,
-			Content:    e.Content,
-			Category:   e.Category,
-			Source:     e.Source,
-			Importance: e.Importance,
+	// 提交变更到持久层
+	commitErrorCount := 0
+	for _, ch := range changes {
+		switch ch.op {
+		case "add":
+			if err := repo.Append(ctx, *ch.entry); err != nil {
+				commitErrorCount++
+			}
+		case "update":
+			// 先查找原始条目以保留元数据
+			origEntries, _ := repo.Retrieve(ctx, Query{
+				Scopes: []Scope{scope},
+				Limit:  100,
+			})
+			for _, e := range origEntries {
+				if e.ID == ch.target {
+					updatedEntry := Entry{
+						ID:             e.ID,
+						Scope:          ch.entry.Scope,
+						Content:        ch.entry.Content,
+						Category:       ch.entry.Category,
+						Source:         ch.entry.Source,
+						Importance:     e.Importance,
+						Metadata:       e.Metadata,
+						CreatedAt:      e.CreatedAt,
+						LastAccessedAt: e.LastAccessedAt,
+					}
+					_ = repo.Delete(ctx, scope, ch.target)
+					if err := repo.Append(ctx, updatedEntry); err != nil {
+						commitErrorCount++
+					}
+					break
+				}
+			}
+		case "delete":
+			if err := repo.Delete(ctx, scope, ch.target); err != nil {
+				commitErrorCount++
+			}
 		}
-		_ = repo.Append(ctx, newEntry)
 	}
 
-	return successResponse(scope, fmt.Sprintf("Applied %d operation(s).", appliedCount), true), nil
+	msg := fmt.Sprintf("Applied %d operation(s).", appliedCount)
+	if commitErrorCount > 0 {
+		msg += fmt.Sprintf(" %d commit error(s) occurred.", commitErrorCount)
+	}
+
+	return successResponse(scope, msg, true), nil
 }
 
 // ============================================================================

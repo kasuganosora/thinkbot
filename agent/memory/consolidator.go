@@ -101,6 +101,9 @@ type LLMConsolidator struct {
 
 // NewLLMConsolidator 创建 LLM 巩固器。
 func NewLLMConsolidator(config LLMConsolidatorConfig, tp trace.TracerProvider, logger *zap.SugaredLogger) *LLMConsolidator {
+	if config.Provider == nil {
+		panic("consolidator: config.Provider must not be nil")
+	}
 	if config.MaxInputEntries <= 0 {
 		config.MaxInputEntries = 30
 	}
@@ -122,6 +125,8 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 
 	// 限制输入数量
 	if len(l0Entries) > c.config.MaxInputEntries {
+		c.logger.Warnw("consolidator: input exceeds MaxInputEntries, excess entries will not be processed this run",
+			"total", len(l0Entries), "max", c.config.MaxInputEntries)
 		l0Entries = l0Entries[:c.config.MaxInputEntries]
 	}
 
@@ -148,6 +153,12 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 
 	// 解析结果
 	decisions := c.parseResult(result.Text)
+
+	// 校验：LLM 返回的决策数应与输入条目数一致
+	if len(decisions) < len(l0Entries) {
+		c.logger.Warnw("consolidator: LLM returned fewer decisions than input entries",
+			"input", len(l0Entries), "decisions", len(decisions))
+	}
 
 	span.SetAttributes(attribute.Int("decisions_count", len(decisions)))
 	c.logger.Debugw("consolidation complete",
@@ -516,12 +527,19 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 		case DecisionUpdate, DecisionMerge:
 			// 更新或合并已有 L1 条目
 			if d.TargetID != "" {
-				m.updateL1Entry(ctx, scope, d.TargetID, d.Content, d.Decision)
+				if !m.updateL1Entry(ctx, scope, d.TargetID, d.Content, d.Decision) {
+					// 更新失败，不计入 promoted
+					continue
+				}
 			}
 			promoted++
 
 		case DecisionSkip:
 			// 无操作
+
+		default:
+			m.logger.Warnw("consolidator: unknown decision from LLM, skipping",
+				"decision", d.Decision, "source_id", d.SourceID)
 		}
 	}
 
@@ -540,10 +558,13 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 }
 
 // updateL1Entry 更新或合并一条 L1 记忆。
-func (m *TieredManager) updateL1Entry(ctx context.Context, scope Scope, targetID, newContent string, decision ConsolidateDecision) {
+// 返回 true 表示更新成功，false 表示失败（条目未找到或写入出错）。
+func (m *TieredManager) updateL1Entry(ctx context.Context, scope Scope, targetID, newContent string, decision ConsolidateDecision) bool {
 	existing, err := m.store.GetAll(ctx, Tier1LongTerm, scope)
 	if err != nil {
-		return
+		m.logger.Warnw("updateL1Entry: failed to get existing L1 entries",
+			"scope", scope.Key(), "target_id", targetID, "err", err)
+		return false
 	}
 
 	for _, e := range existing {
@@ -558,19 +579,39 @@ func (m *TieredManager) updateL1Entry(ctx context.Context, scope Scope, targetID
 			content = newContent
 		}
 
-		// 删除旧的，写入新的
-		_ = m.store.Delete(ctx, Tier1LongTerm, scope, targetID)
-		_ = m.WriteLongTerm(ctx, Entry{
-			ID:         targetID,
-			Scope:      scope,
-			Content:    content,
-			Category:   e.Category,
-			Source:     e.Source,
-			Importance: e.Importance,
-			Metadata:   e.Metadata,
-		}, Tier0Working)
-		break
+		// 先创建新条目（使用原 ID），成功后再删除旧条目
+		// 这样如果写入失败，原始数据不会丢失
+		newEntry := Entry{
+			ID:             targetID,
+			Scope:          scope,
+			Content:        content,
+			Category:       e.Category,
+			Source:         e.Source,
+			Importance:     e.Importance,
+			Metadata:       e.Metadata,
+			CreatedAt:      e.CreatedAt,
+			LastAccessedAt: e.LastAccessedAt,
+		}
+
+		// 写入新条目（会创建新 ID，但 Metadata 保留 promoted_from_id）
+		if err := m.WriteLongTerm(ctx, newEntry, Tier0Working); err != nil {
+			m.logger.Warnw("updateL1Entry: failed to write updated L1 entry",
+				"scope", scope.Key(), "target_id", targetID, "err", err)
+			return false
+		}
+
+		// 删除旧条目
+		if err := m.store.Delete(ctx, Tier1LongTerm, scope, targetID); err != nil {
+			m.logger.Warnw("updateL1Entry: failed to delete old L1 entry (duplicate may exist)",
+				"scope", scope.Key(), "target_id", targetID, "err", err)
+		}
+
+		return true
 	}
+
+	m.logger.Warnw("updateL1Entry: target entry not found",
+		"scope", scope.Key(), "target_id", targetID)
+	return false
 }
 
 // maybeConsolidate 检查是否需要触发巩固（带防抖）。

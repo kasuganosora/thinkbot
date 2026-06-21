@@ -311,6 +311,7 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 			runes := []rune(content)
 			if remaining < len(runes) {
 				content = string(runes[:remaining]) + "..."
+				entryLen = len([]rune(content)) // 更新为截断后的实际长度
 			}
 		}
 
@@ -377,7 +378,7 @@ func (s *Snapshot) SnapshotPromptSection() *prompt.Section {
 // 应在每轮系统提示组装前调用。
 func (s *Snapshot) UpdatePromptSection(ctx context.Context, section *prompt.Section) {
 	if s.config.Mode != ModeFrozen {
-		s.Refresh(ctx)
+		_, _ = s.Refresh(ctx)
 	}
 
 	s.mu.RLock()

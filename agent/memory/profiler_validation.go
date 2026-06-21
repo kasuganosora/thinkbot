@@ -133,10 +133,11 @@ func (p *LLMProfiler) validateWithJaccard(items []ProfileItem, sourceEntries []T
 			}
 		}
 
-		// Jaccard 分数通常较低，使用更低的阈值
-		threshold := p.config.MinValidationScore
-		if threshold > 0.1 {
-			threshold = 0.1 // Jaccard 稀疏，降阈值
+		// Jaccard token 相似度天然偏低（稀疏匹配），
+		// 使用配置阈值的 2/3 作为 Jaccard 适配阈值
+		threshold := p.config.MinValidationScore * 2.0 / 3.0
+		if threshold < 0.05 {
+			threshold = 0.05
 		}
 		if maxSim >= threshold {
 			item.Validated = true
