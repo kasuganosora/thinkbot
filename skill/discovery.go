@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -175,6 +176,7 @@ func loadSkillFromDir(dir string) (*Skill, error) {
 
 // SkillHotReloader 监控 Skill 文件变化并触发重载。
 type SkillHotReloader struct {
+	mu       sync.Mutex
 	config   DiscoveryConfig
 	logger   *zap.SugaredLogger
 	lastMod  map[string]time.Time
@@ -241,6 +243,8 @@ func (r *SkillHotReloader) Stop() {
 
 // scanInitial 记录所有现有 SKILL.md 文件的修改时间。
 func (r *SkillHotReloader) scanInitial() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, rootDir := range r.config.RootDirs {
 		_ = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -257,6 +261,8 @@ func (r *SkillHotReloader) scanInitial() {
 
 // checkChanges 检查文件是否有变化。
 func (r *SkillHotReloader) checkChanges() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	changed := false
 
 	for _, rootDir := range r.config.RootDirs {

@@ -618,8 +618,8 @@ func TestBuilder_GetLLMModel(t *testing.T) {
 	if main.Provider != "openai" || main.Model != "gpt-4o" || main.APIKey != "sk-main" {
 		t.Errorf("main: %+v", main)
 	}
-	if main.Temperature != 0.7 || main.MaxTokens != 4096 {
-		t.Errorf("main defaults: temp=%f max=%d", main.Temperature, main.MaxTokens)
+	if main.Temperature == nil || *main.Temperature != 0.7 || main.MaxTokens != 4096 {
+		t.Errorf("main defaults: temp=%v max=%d", main.Temperature, main.MaxTokens)
 	}
 
 	// 默认值填充

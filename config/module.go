@@ -123,8 +123,8 @@ type ModelDef struct {
 	// 默认为 /v1/chat/completions。
 	ChatPath string `json:"chat_path,omitempty"`
 
-	// Temperature 采样温度（默认 0.7）。
-	Temperature float64 `json:"temperature,omitempty"`
+	// Temperature 采样温度（默认 0.7，nil 表示使用默认值，0 表示确定性输出）。
+	Temperature *float64 `json:"temperature,omitempty"`
 
 	// MaxTokens 最大输出 token 数（默认 4096）。
 	MaxTokens int `json:"max_tokens,omitempty"`
@@ -148,13 +148,18 @@ func (b *Builder) GetLLMModel(llmID string) (ModelDef, bool) {
 	}
 
 	// 填充默认值
-	if def.Temperature == 0 {
-		def.Temperature = 0.7
+	if def.Temperature == nil {
+		def.Temperature = float64Ptr(0.7)
 	}
 	if def.MaxTokens == 0 {
 		def.MaxTokens = 4096
 	}
 	return def, true
+}
+
+// float64Ptr 返回 float64 的指针（用于 Temperature 默认值）。
+func float64Ptr(v float64) *float64 {
+	return &v
 }
 
 // GetAllLLMModels 读取所有已定义的 LLM 配置。
@@ -170,8 +175,8 @@ func (b *Builder) GetAllLLMModels() map[string]ModelDef {
 		if err := json.Unmarshal([]byte(jsonStr), &def); err != nil {
 			continue
 		}
-		if def.Temperature == 0 {
-			def.Temperature = 0.7
+		if def.Temperature == nil {
+			def.Temperature = float64Ptr(0.7)
 		}
 		if def.MaxTokens == 0 {
 			def.MaxTokens = 4096

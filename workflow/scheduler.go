@@ -566,10 +566,15 @@ func (s *Scheduler) drainRetryRequests() {
 }
 
 func (s *Scheduler) persist() {
-	if s.repo != nil {
-		if err := s.repo.Save(s.wf); err != nil {
-			s.logger.Errorw("failed to persist workflow state", "error", err)
-		}
+	if s.repo == nil {
+		return
+	}
+	// 在锁内克隆快照，避免序列化过程中其他 goroutine 并发修改 wf.Nodes
+	s.mu.Lock()
+	snapshot := cloneWorkflow(s.wf)
+	s.mu.Unlock()
+	if err := s.repo.Save(snapshot); err != nil {
+		s.logger.Errorw("failed to persist workflow state", "error", err)
 	}
 }
 
