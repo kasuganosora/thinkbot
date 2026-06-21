@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -164,9 +165,9 @@ func TestContextPacker_Scoring(t *testing.T) {
 
 // repeatStr 重复字符串 n 次。
 func repeatStr(s string, n int) string {
-	result := ""
-	for i := 0; i < n; i++ {
-		result += s
+	var sb strings.Builder
+	for range n {
+		sb.WriteString(s)
 	}
-	return result
+	return sb.String()
 }
