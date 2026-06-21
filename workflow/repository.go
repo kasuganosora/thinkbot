@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"sort"
 	"sync"
 
 	"go.uber.org/zap"
@@ -155,11 +156,15 @@ func (r *Repository) List(limit int) ([]*Workflow, error) {
 
 	// 纯内存模式
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	result := make([]*Workflow, 0, len(r.cache))
 	for _, wf := range r.cache {
 		result = append(result, cloneWorkflow(wf))
 	}
+	r.mu.RUnlock()
+	// 按 CreatedAt 降序排序，与 DB 模式的 ORDER BY created_at DESC 保持一致
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
 	if len(result) > limit {
 		result = result[:limit]
 	}
