@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"log"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/dao"
@@ -40,13 +41,15 @@ func FromModel(m *dao.WorkflowModel) (*Workflow, error) {
 func cloneWorkflow(wf *Workflow) *Workflow {
 	data, err := json.Marshal(wf)
 	if err != nil {
-		// 理论上不会失败（Workflow 只含基本类型）
-		// 返回空快照，绝不返回原指针以免破坏隔离
-		return &Workflow{ID: wf.ID, Nodes: []*DAGNode{}}
+		// 极不应该发生：Workflow 只含基本类型和切片。
+		// 记录日志便于排查，返回包含 ID 和 Status 的空快照（绝不返回原指针）。
+		log.Printf("[workflow] cloneWorkflow marshal failed: %v (workflow_id=%s)", err, wf.ID)
+		return &Workflow{ID: wf.ID, Status: wf.Status, Nodes: []*DAGNode{}}
 	}
 	var clone Workflow
 	if err := json.Unmarshal(data, &clone); err != nil {
-		return &Workflow{ID: wf.ID, Nodes: []*DAGNode{}}
+		log.Printf("[workflow] cloneWorkflow unmarshal failed: %v (workflow_id=%s)", err, wf.ID)
+		return &Workflow{ID: wf.ID, Status: wf.Status, Nodes: []*DAGNode{}}
 	}
 	clone.EnsureIndex()
 	return &clone

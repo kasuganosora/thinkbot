@@ -124,7 +124,8 @@ func ReadyNodes(wf *Workflow) []*DAGNode {
 
 // CascadeSkip 将指定失败节点的所有下游节点标记为 skipped。
 // 递归传播：被跳过的节点也会导致其下游节点被跳过。
-func CascadeSkip(wf *Workflow, failedNodeID string) {
+// 返回新被跳过的节点 ID 列表（不含已是终态的节点）。
+func CascadeSkip(wf *Workflow, failedNodeID string) []string {
 	// 构建邻接表：node → dependents
 	dependents := make(map[string][]string)
 	for _, n := range wf.Nodes {
@@ -134,6 +135,7 @@ func CascadeSkip(wf *Workflow, failedNodeID string) {
 	}
 
 	// BFS 传播
+	var skipped []string
 	queue := []string{failedNodeID}
 	visited := make(map[string]bool)
 	for len(queue) > 0 {
@@ -151,10 +153,12 @@ func CascadeSkip(wf *Workflow, failedNodeID string) {
 			if node.Status == NodePending {
 				node.Status = NodeSkipped
 				node.Error = fmt.Sprintf("upstream node %q did not complete", id)
+				skipped = append(skipped, childID)
 			}
 			queue = append(queue, childID)
 		}
 	}
+	return skipped
 }
 
 // BuildTree 将平铺的 DAG 节点列表构建为依赖树。
@@ -171,17 +175,19 @@ func BuildTree(wf *Workflow) []*TreeNode {
 	var roots []*TreeNode
 	for _, n := range wf.Nodes {
 		if len(n.Dependencies) == 0 {
-			roots = append(roots, buildTreeNode(n.ID, wf, children, make(map[string]bool)))
+			roots = append(roots, buildTreeNode(n.ID, wf, children, 0))
 		}
 	}
 	return roots
 }
 
-func buildTreeNode(id string, wf *Workflow, children map[string][]string, visited map[string]bool) *TreeNode {
-	if visited[id] {
-		return nil // 防止无限递归（虽然已验证无环，但防御性编程）
+// buildTreeNode 递归构建依赖树。使用 depth 限制替代全局 visited，
+// 使得 DAG 中的菱形依赖（节点同时依赖多个上游）能在每个父节点下完整展示。
+// ValidateDAG 已保证无环，depth 仅作防御性兜底。
+func buildTreeNode(id string, wf *Workflow, children map[string][]string, depth int) *TreeNode {
+	if depth > 256 { // 防御性深度限制
+		return nil
 	}
-	visited[id] = true
 
 	node, ok := wf.GetNode(id)
 	if !ok {
@@ -190,7 +196,7 @@ func buildTreeNode(id string, wf *Workflow, children map[string][]string, visite
 
 	tn := &TreeNode{Node: node}
 	for _, childID := range children[id] {
-		if child := buildTreeNode(childID, wf, children, visited); child != nil {
+		if child := buildTreeNode(childID, wf, children, depth+1); child != nil {
 			tn.Children = append(tn.Children, child)
 		}
 	}

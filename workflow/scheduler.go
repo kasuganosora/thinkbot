@@ -327,11 +327,11 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 
 		// 级联跳过下游节点
 		s.mu.Lock()
-		CascadeSkip(s.wf, node.ID)
+		skippedIDs := CascadeSkip(s.wf, node.ID)
 		s.mu.Unlock()
 		s.persist()
 
-		s.emitCascadeSkipEvent(ctx, node.ID)
+		s.emitCascadeSkipEvent(ctx, node.ID, skippedIDs)
 		return
 	}
 
@@ -367,11 +367,11 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 
 			// 级联跳过
 			s.mu.Lock()
-			CascadeSkip(s.wf, node.ID)
+			skippedIDs := CascadeSkip(s.wf, node.ID)
 			s.mu.Unlock()
 			s.persist()
 
-			s.emitCascadeSkipEvent(ctx, node.ID)
+			s.emitCascadeSkipEvent(ctx, node.ID, skippedIDs)
 			return
 		}
 		result = finalResult
@@ -629,16 +629,9 @@ func (s *Scheduler) emitNodeEvent(ctx context.Context, eventType outbound.EventT
 	s.emitter.Emit(ctx, eventType, s.wf.ID, data)
 }
 
-// emitCascadeSkipEvent 发布级联跳过事件。
-func (s *Scheduler) emitCascadeSkipEvent(ctx context.Context, failedNodeID string) {
-	skippedIDs := make([]string, 0)
-	s.mu.Lock()
-	for _, n := range s.wf.Nodes {
-		if n.Status == NodeSkipped && n.Error != "" && n.Error != "workflow terminated" {
-			skippedIDs = append(skippedIDs, n.ID)
-		}
-	}
-	s.mu.Unlock()
+// emitCascadeSkipEvent 发布级联跳过事件。直接使用 CascadeSkip 返回的 skippedIDs，
+// 避免通过字符串匹配过滤节点。
+func (s *Scheduler) emitCascadeSkipEvent(ctx context.Context, failedNodeID string, skippedIDs []string) {
 	if len(skippedIDs) > 0 {
 		s.emitNodeEvent(ctx, outbound.EventWorkflowNodeSkipped, map[string]any{
 			"caused_by":   failedNodeID,

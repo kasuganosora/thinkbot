@@ -238,7 +238,7 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 				if action == "" {
 					return nil, fmt.Errorf("action is required")
 				}
-				return mgr.Control(wfID, ControlRequest{
+				return mgr.Control(ctx, wfID, ControlRequest{
 					Action: ControlAction(action),
 					NodeID: nodeID,
 				})
