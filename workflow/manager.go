@@ -47,6 +47,9 @@ type Manager struct {
 	mu      sync.RWMutex
 	running map[string]*runningInstance
 
+	// recoverOnce 确保 Recover 只执行一次。
+	recoverOnce sync.Once
+
 	// 原子计数器 — 可观测性指标
 	metrics ManagerMetrics
 }
@@ -130,13 +133,9 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 		"requirement": strutil.Truncate(req.Requirement, 200),
 	})
 
-	// 启动后台 goroutine
+	// 注册运行实例（先注册再启动，避免 goroutine 中 runScheduler 找不到 instance）
 	bgCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-
-	go m.analyzeAndRun(bgCtx, wf, req.MaxParallel, done)
-
-	// 注册运行实例
 	inst := &runningInstance{
 		wf:     wf,
 		cancel: cancel,
@@ -145,6 +144,8 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	m.mu.Lock()
 	m.running[wfID] = inst
 	m.mu.Unlock()
+
+	go m.analyzeAndRun(bgCtx, wf, req.MaxParallel, done)
 
 	return &SubmitResult{
 		WorkflowID: wfID,
@@ -263,6 +264,16 @@ type RecoveryResult struct {
 //
 // 应在服务启动时调用一次。
 func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
+	// 确保 Recover 只执行一次，避免并发调用导致重复恢复
+	var result *RecoveryResult
+	var recoverErr error
+	m.recoverOnce.Do(func() {
+		result, recoverErr = m.recover(ctx)
+	})
+	return result, recoverErr
+}
+
+func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 	workflows, err := m.repo.FindNonTerminal()
 	if err != nil {
 		return nil, errs.Wrap(err, "failed to find non-terminal workflows")
@@ -300,8 +311,7 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 			bgCtx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 
-			go m.analyzeAndRun(bgCtx, wf, 0, done)
-
+			// 先注册再启动，确保 runScheduler 能找到 instance
 			m.mu.Lock()
 			m.running[wf.ID] = &runningInstance{
 				wf:     wf,
@@ -309,6 +319,8 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 				done:   done,
 			}
 			m.mu.Unlock()
+
+			go m.analyzeAndRun(bgCtx, wf, 0, done)
 
 			result.Reanalyzed++
 			continue
@@ -347,6 +359,7 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 		bgCtx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 
+		// 先注册再启动，确保 runScheduler 能找到 instance
 		m.mu.Lock()
 		m.running[wf.ID] = &runningInstance{
 			wf:     wf,
@@ -530,11 +543,16 @@ func (m *Manager) Control(wfID string, req ControlRequest) (*ControlResult, erro
 		if !ok {
 			return nil, errs.New("workflow is not running")
 		}
-		if inst.scheduler != nil {
-			inst.scheduler.Terminate()
+		// 在锁内读取 scheduler/cancel，避免与 runScheduler 的写入产生 data race
+		m.mu.RLock()
+		scheduler := inst.scheduler
+		cancelFn := inst.cancel
+		m.mu.RUnlock()
+		if scheduler != nil {
+			scheduler.Terminate()
 		} else {
 			// analyzing 阶段 scheduler 尚未创建，取消 context 中断分析
-			inst.cancel()
+			cancelFn()
 		}
 		return &ControlResult{
 			WorkflowID: wfID,
@@ -550,8 +568,12 @@ func (m *Manager) Control(wfID string, req ControlRequest) (*ControlResult, erro
 		if _, exists := wf.GetNode(req.NodeID); !exists {
 			return nil, errs.Newf("node %q not found in workflow %q", req.NodeID, wfID)
 		}
-		if ok && inst.scheduler != nil {
-			inst.scheduler.SubmitRetry(req.NodeID)
+		// 在锁内读取 scheduler，避免 data race
+		m.mu.RLock()
+		scheduler := inst.scheduler
+		m.mu.RUnlock()
+		if ok && scheduler != nil {
+			scheduler.SubmitRetry(req.NodeID)
 		} else {
 			return nil, errs.New("workflow is not actively running, cannot retry")
 		}

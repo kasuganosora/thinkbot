@@ -65,36 +65,6 @@ func (s *Store) load() error {
 	return nil
 }
 
-// save 原子写入所有 Job 到磁盘。
-func (s *Store) save() error {
-	jobs := make([]*Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		jobs = append(jobs, j)
-	}
-	// 按 ID 排序确保文件稳定
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].ID < jobs[j].ID
-	})
-
-	data, err := json.MarshalIndent(jobs, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	// 确保目录存在
-	dir := filepath.Dir(s.filePath)
-	if dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0755)
-	}
-
-	// 原子写入：临时文件 → rename
-	tmp := s.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.filePath)
-}
-
 // Get 返回指定 ID 的 Job 副本。
 func (s *Store) Get(id string) (*Job, bool) {
 	_ = s.load()
@@ -146,8 +116,9 @@ func (s *Store) Save(j *Job) error {
 	s.mu.Lock()
 	j.UpdatedAt = time.Now()
 	s.jobs[j.ID] = j
+	err := s.saveLocked()
 	s.mu.Unlock()
-	return s.save()
+	return err
 }
 
 // Delete 删除一个 Job。不存在时静默忽略。
@@ -155,6 +126,34 @@ func (s *Store) Delete(id string) error {
 	_ = s.load()
 	s.mu.Lock()
 	delete(s.jobs, id)
+	err := s.saveLocked()
 	s.mu.Unlock()
-	return s.save()
+	return err
+}
+
+// saveLocked 在持有锁的情况下序列化并写入磁盘（由 Save/Delete 调用）。
+func (s *Store) saveLocked() error {
+	jobs := make([]*Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		jobs = append(jobs, j)
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].ID < jobs[j].ID
+	})
+
+	data, err := json.MarshalIndent(jobs, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(s.filePath)
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
+
+	tmp := s.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.filePath)
 }

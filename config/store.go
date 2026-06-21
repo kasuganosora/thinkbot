@@ -69,7 +69,11 @@ func NewStore(db *gorm.DB) *Store {
 func (s *Store) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.getLocked(key)
+}
 
+// getLocked 在已持锁的情况下按优先级返回配置值。
+func (s *Store) getLocked(key string) (string, bool) {
 	// 1. 运行时覆盖
 	if v, ok := s.overrides[key]; ok {
 		return v, true
@@ -289,9 +293,9 @@ func (s *Store) Set(ctx context.Context, key, value string) error {
 		return errs.Wrapf(err, "config: persist setting %q", key)
 	}
 
-	// 更新缓存
-	oldVal, _ := s.Get(key)
+	// 更新缓存（在锁内读取旧值，避免 TOCTOU）
 	s.mu.Lock()
+	oldVal, _ := s.getLocked(key)
 	s.dbCache[key] = value
 	s.mu.Unlock()
 
@@ -325,8 +329,9 @@ func (s *Store) SetWithMeta(ctx context.Context, key, value, category, descripti
 		return errs.Wrapf(err, "config: persist setting %q with meta", key)
 	}
 
-	oldVal, _ := s.Get(key)
+	// 更新缓存（在锁内读取旧值，避免 TOCTOU）
 	s.mu.Lock()
+	oldVal, _ := s.getLocked(key)
 	s.dbCache[key] = value
 	s.mu.Unlock()
 
@@ -434,8 +439,8 @@ func (s *Store) SetMany(ctx context.Context, kv map[string]string) error {
 // SetTemporary 设置运行时覆盖值（不持久化到数据库）。
 // 优先级最高，立即生效。
 func (s *Store) SetTemporary(key, value string) {
-	oldVal, _ := s.Get(key)
 	s.mu.Lock()
+	oldVal, _ := s.getLocked(key)
 	s.overrides[key] = value
 	s.mu.Unlock()
 	s.notifyListeners(key, oldVal, value)
@@ -450,9 +455,8 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 		}
 	}
 
-	oldVal, _ := s.Get(key)
-
 	s.mu.Lock()
+	oldVal, _ := s.getLocked(key)
 	delete(s.overrides, key)
 	delete(s.dbCache, key)
 	s.mu.Unlock()

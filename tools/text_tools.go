@@ -243,6 +243,12 @@ type diffEntry struct {
 func simpleDiff(lines1, lines2 []string) []diffEntry {
 	result := make([]diffEntry, 0)
 
+	// 防止大文本导致内存爆炸（LCS 矩阵 O(n*m)）
+	const maxDiffLines = 5000
+	if len(lines1) > maxDiffLines || len(lines2) > maxDiffLines {
+		return []diffEntry{{Type: "error", Content: "too many lines for diff (max 5000 per side)"}}
+	}
+
 	// 简单 LCS-based diff
 	matrix := make([][]int, len(lines1)+1)
 	for i := range matrix {

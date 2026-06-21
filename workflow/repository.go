@@ -125,7 +125,7 @@ func (r *Repository) FindNonTerminal() ([]*Workflow, error) {
 	var result []*Workflow
 	for _, wf := range r.cache {
 		if wf.Status.IsRecoverable() {
-			result = append(result, wf)
+			result = append(result, cloneWorkflow(wf))
 		}
 	}
 	return result, nil
@@ -158,7 +158,7 @@ func (r *Repository) List(limit int) ([]*Workflow, error) {
 	defer r.mu.RUnlock()
 	result := make([]*Workflow, 0, len(r.cache))
 	for _, wf := range r.cache {
-		result = append(result, wf)
+		result = append(result, cloneWorkflow(wf))
 	}
 	if len(result) > limit {
 		result = result[:limit]

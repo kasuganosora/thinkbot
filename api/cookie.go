@@ -55,10 +55,9 @@ func NewCookieManager(secret string, secure bool) *CookieManager {
 		// 生成随机密钥（重启后失效，仅用于开发/未配置场景）
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
-			secret = "thinkbot-insecure-default-secret"
-		} else {
-			secret = hex.EncodeToString(b)
+			panic("crypto/rand failed: " + err.Error())
 		}
+		secret = hex.EncodeToString(b)
 	}
 	return &CookieManager{secret: []byte(secret), secure: secure}
 }

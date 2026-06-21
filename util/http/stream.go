@@ -3,6 +3,7 @@ package http
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -285,7 +286,7 @@ func (r *Request) readStreamChunks(
 		}
 
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return classifyStreamError(nil, origCtx, wd, reqURL, start, chunksReceived, totalBytes, "stream")
 			}
 			return classifyStreamError(err, origCtx, wd, reqURL, start, chunksReceived, totalBytes, "stream")
@@ -334,7 +335,7 @@ func (r *Request) readStreamLines(
 		}
 
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return classifyStreamError(nil, origCtx, wd, reqURL, start, totalLines, totalBytes, "stream")
 			}
 			return classifyStreamError(err, origCtx, wd, reqURL, start, totalLines, totalBytes, "stream")

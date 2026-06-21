@@ -571,9 +571,9 @@ func (c *WSConn) handleReadError(
 		websocket.CloseGoingAway,
 		websocket.CloseNoStatusReceived,
 	) {
-		ce, _ := readErr.(*websocket.CloseError)
+		var ce *websocket.CloseError
 		code, text := 0, ""
-		if ce != nil {
+		if errors.As(readErr, &ce) {
 			code, text = ce.Code, ce.Text
 		}
 		log.Logger.Debugw("ws closed normally",
