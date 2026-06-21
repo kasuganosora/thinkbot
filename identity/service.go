@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -192,11 +193,22 @@ func (s *BindService) ConsumeCode(ctx context.Context, rawCode, platform, platfo
 		}
 
 		// 创建映射
-		return tx.Create(&mapping).Error
+		if err := tx.Create(&mapping).Error; err != nil {
+			// 检测唯一约束冲突（不同 DB 驱动的错误信息格式不同）
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "unique constraint") || strings.Contains(msg, "duplicate") {
+				return ErrAlreadyBound
+			}
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		if errors.Is(err, ErrCodeUsed) {
 			return nil, ErrCodeUsed
+		}
+		if errors.Is(err, ErrAlreadyBound) {
+			return nil, ErrAlreadyBound
 		}
 		return nil, errs.Wrap(err, "identity: consume code")
 	}
