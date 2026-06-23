@@ -254,7 +254,7 @@ func (r *CooldownRule) Allow(msg *core.Message) (bool, string) {
 
 	now := time.Now()
 
-	// 惰性 GC：每 100 次调用清理一次过期条目
+	// 惰性 GC：当 map 超过 100 条时清理过期条目
 	if len(r.lastSeen) > 100 {
 		for uid, t := range r.lastSeen {
 			if now.Sub(t) > r.cooldown*2 {

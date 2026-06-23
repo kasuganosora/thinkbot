@@ -226,8 +226,16 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 		attribute.String("engagement.tier", string(decision.Tier)),
 	)
 
-	// 3. 评估未通过 → 消息继续流转（不修改 Mentioned）
+	// 3. 评估未通过 → 退还预扣的限流令牌，消息继续流转（不修改 Mentioned）
 	if !decision.Engage {
+		// 退还 RateLimitRule 在 Allow() 中预扣的令牌
+		if cp, ok := s.policy.(*CompositePolicy); ok && cp.rules != nil {
+			for _, rule := range cp.rules.rules {
+				if rl, ok := rule.(*RateLimitRule); ok {
+					rl.Refund()
+				}
+			}
+		}
 		logger.Debugw("engagement declined",
 			"message_id", env.Message.ID,
 			"action", decision.Action,
