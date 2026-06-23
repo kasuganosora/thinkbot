@@ -132,14 +132,23 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 	m.logger.Infow("starting all bots", "count", len(bots))
 
 	errCh := make(chan error, len(bots))
+	var wg sync.WaitGroup
 
 	for _, b := range bots {
+		wg.Add(1)
 		go func(bot *Bot) {
+			defer wg.Done()
 			if err := bot.Run(ctx); err != nil {
 				errCh <- errs.Wrapf(err, "bot %q", bot.ID)
 			}
 		}(b)
 	}
+
+	// 所有 bot goroutine 退出后关闭 errCh
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
 
 	// 等待所有 Bot 就绪或出错
 	for _, b := range bots {
@@ -148,7 +157,9 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 			m.logger.Debugw("bot ready", "bot_id", b.ID)
 		case err := <-errCh:
 			// 某个 Bot 在初始化阶段失败
-			return err
+			if err != nil {
+				return err
+			}
 		case <-ctx.Done():
 			return errs.Wrap(ctx.Err(), "bot_manager: context cancelled while waiting for bots")
 		}
@@ -157,7 +168,9 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 	// 非阻塞检查是否有在就绪后立即失败的
 	select {
 	case err := <-errCh:
-		return err
+		if err != nil {
+			return err
+		}
 	default:
 	}
 
@@ -171,22 +184,18 @@ func (m *BotManager) RunAll(ctx context.Context) error {
 	m.mu.Unlock()
 
 	go func() {
-		for {
-			select {
-			case err := <-errCh:
-				if err != nil {
-					m.logger.Errorw("bot crashed after startup",
-						"err", err)
-					select {
-					case errChForMonitor <- err:
-					default:
-						// errCh 满了，丢弃（调用方未消费）
-					}
+		for err := range errCh {
+			if err != nil {
+				m.logger.Errorw("bot crashed after startup", "err", err)
+				select {
+				case errChForMonitor <- err:
+				default:
+					// errChForMonitor 满了，丢弃（调用方未消费）
 				}
-			case <-ctx.Done():
-				return
 			}
 		}
+		// errCh 关闭（所有 bot 退出）后，这个 goroutine 自然退出
+		m.logger.Debugw("bot monitor goroutine exiting, all bots stopped")
 	}()
 
 	m.logger.Infow("all bots started and ready", "count", len(bots))

@@ -6,7 +6,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
-	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -27,7 +26,7 @@ const (
 // FilterStage 根据 Predicate 过滤消息。
 type FilterStage struct {
 	name      string
-	predicate pipeline.Predicate
+	predicate core.Predicate
 	action    FilterAction
 	logger    *zap.SugaredLogger
 }
@@ -37,7 +36,7 @@ type FilterStage struct {
 // action 语义：
 //   - FilterPass: predicate 匹配 → 放行，不匹配 → 丢弃（返回 nil）
 //   - FilterDrop: predicate 匹配 → 丢弃（返回 nil），不匹配 → 放行
-func NewFilterStage(name string, predicate pipeline.Predicate, action FilterAction, logger *zap.SugaredLogger) *FilterStage {
+func NewFilterStage(name string, predicate core.Predicate, action FilterAction, logger *zap.SugaredLogger) *FilterStage {
 	if name == "" {
 		name = "filter"
 	}

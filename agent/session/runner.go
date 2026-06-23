@@ -176,6 +176,14 @@ func (r *SessionRunner) IsBusy() bool {
 	return r.State() == RunnerStateBusy
 }
 
+// IsIdleAndEmpty 原子地检查 Runner 是否空闲且无排队。
+// 用于 Cleanup 的安全清理判断，避免分步检查的 TOCTOU 竞态。
+func (r *SessionRunner) IsIdleAndEmpty() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state == RunnerStateIdle && r.queueDepth == 0
+}
+
 // acquire 获取执行锁（阻塞等待前面的任务完成）。
 // 使用 channel-based 等待替代 sync.Cond，支持 context 取消。
 func (r *SessionRunner) acquire(ctx context.Context) (context.Context, context.CancelFunc, error) {
@@ -319,7 +327,7 @@ func (m *SessionRunnerManager) Cleanup() int {
 	defer m.mu.Unlock()
 	removed := 0
 	for id, r := range m.runners {
-		if !r.IsBusy() && r.QueueDepth() == 0 {
+		if r.IsIdleAndEmpty() {
 			delete(m.runners, id)
 			removed++
 		}

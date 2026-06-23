@@ -110,8 +110,9 @@ type Engine struct {
 	logger     *zap.SugaredLogger
 	tracer     trace.Tracer
 
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 	readyCh chan struct{} // close 后表示 Engine 已完成初始化（worker 已启动）
 
 	// metrics（原子计数器）
@@ -167,7 +168,9 @@ func NewEngine(
 // Run 启动 Engine 的消息处理循环。
 // 该方法会阻塞直到 ctx 被取消或 Stop 被调用。
 func (e *Engine) Run(ctx context.Context) error {
+	e.mu.Lock()
 	ctx, e.cancel = context.WithCancel(ctx)
+	e.mu.Unlock()
 
 	e.logger.Infow("engine starting",
 		"workers", e.config.Workers,
@@ -214,8 +217,11 @@ func (e *Engine) Run(ctx context.Context) error {
 
 // Stop 触发 Engine 优雅关闭。
 func (e *Engine) Stop() {
-	if e.cancel != nil {
-		e.cancel()
+	e.mu.Lock()
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 

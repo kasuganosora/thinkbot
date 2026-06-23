@@ -76,6 +76,10 @@ type channelTimingState struct {
 	// pendingMsgCount 待处理（被退避/突发跳过）的消息计数
 	// 用于退避绕过机制
 	pendingMsgCount int
+	// frequencyMultiplier per-channel 频率倍率（autoAdjust 使用）
+	frequencyMultiplier float64
+	// lastActiveAt 最近一次活跃时间（用于 GC）
+	lastActiveAt time.Time
 }
 
 // TimingGateConfig 配置 TimingGate 的时序控制参数。
@@ -320,7 +324,11 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 	state.lastMsgAt = now
 
 	// --- Check 4: 概率频率门控 ---
-	effectiveProb := g.config.ReplyProbability * g.config.FrequencyMultiplier
+	multiplier := state.frequencyMultiplier
+	if multiplier == 0 {
+		multiplier = g.config.FrequencyMultiplier
+	}
+	effectiveProb := g.config.ReplyProbability * multiplier
 	if effectiveProb > 1.0 {
 		effectiveProb = 1.0
 	}
@@ -499,7 +507,10 @@ func (g *TimingGate) autoAdjust(state *channelTimingState, now time.Time) {
 	target := frequencyMultiplierForPhase(phase)
 
 	// 平滑调整（移动 30% 朝向目标值）
-	current := g.config.FrequencyMultiplier
+	current := state.frequencyMultiplier
+	if current == 0 {
+		current = g.config.FrequencyMultiplier
+	}
 	adjusted := current + (target-current)*0.3
 
 	// 限制范围
@@ -510,7 +521,7 @@ func (g *TimingGate) autoAdjust(state *channelTimingState, now time.Time) {
 		adjusted = g.config.MaxFrequencyMultiplier
 	}
 
-	g.config.FrequencyMultiplier = adjusted
+	state.frequencyMultiplier = adjusted
 }
 
 // GetPhase 返回指定渠道当前推断的对话阶段。
@@ -576,9 +587,19 @@ func channelKeyForMessage(msg *core.Message) string {
 func (g *TimingGate) getOrCreateState(key string) *channelTimingState {
 	state, ok := g.channelStates[key]
 	if !ok {
+		// 惰性 GC：超过 1000 个 channel 时清理 1 小时无活动的
+		if len(g.channelStates) > 1000 {
+			cutoff := time.Now().Add(-1 * time.Hour)
+			for k, s := range g.channelStates {
+				if s.lastActiveAt.Before(cutoff) {
+					delete(g.channelStates, k)
+				}
+			}
+		}
 		state = &channelTimingState{}
 		g.channelStates[key] = state
 	}
+	state.lastActiveAt = time.Now()
 	return state
 }
 

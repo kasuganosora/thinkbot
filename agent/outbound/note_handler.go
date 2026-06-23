@@ -165,12 +165,13 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	if botID != "" {
 		entryMeta["bot_id"] = botID
 	}
-	// 保留 action 中的其他 metadata
+	// 保留 action 中的其他 metadata（过滤掉内部路由字段）
 	if action.Metadata != nil {
 		for k, v := range action.Metadata {
-			if k != "bot_id" && k != "message_id" && k != "category" && k != "importance" {
-				entryMeta[k] = v
+			if isInternalMetadataKey(k) {
+				continue
 			}
+			entryMeta[k] = v
 		}
 	}
 
@@ -210,4 +211,22 @@ func (h *NoteHandler) Handle(ctx context.Context, action core.Action) error {
 	}
 
 	return nil
+}
+
+// internalMetadataKeys 是不应泄露到记忆存储的内部路由/控制字段集合。
+var internalMetadataKeys = map[string]bool{
+	"bot_id":         true, // 已单独处理
+	"message_id":     true, // 已单独处理
+	"category":       true, // 已单独处理
+	"importance":     true, // 已单独处理
+	"source_channel": true, // 内部路由：来源 Channel
+	"action_type":    true, // 内部路由：Action 类型
+	"routing_key":    true, // 内部路由：路由键
+	"dispatch_id":    true, // 内部路由：Dispatcher 分发 ID
+	"trace_id":       true, // 内部追踪字段
+}
+
+// isInternalMetadataKey 检查 metadata key 是否是内部字段，不应写入记忆存储。
+func isInternalMetadataKey(key string) bool {
+	return internalMetadataKeys[key]
 }

@@ -132,30 +132,31 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 			}
 			bundle.Light = lightProvider
 			bundle.LightDef = lightDef
-			return bundle.withVision(b, botID, assignment), nil
+			return bundle.withVision(b, botID, assignment)
 		}
 	}
 
 	// Light 回退到 Main
 	bundle.LightDef = mainDef
-	return bundle.withVision(b, botID, assignment), nil
+	return bundle.withVision(b, botID, assignment)
 }
 
 // withVision 尝试创建多模态辅助 Provider。
-// 如果未配置 Vision 或配置无效，返回原 bundle 不变。
-func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment config.BotLLMAssignment) *LLMBundle {
+// 如果未配置 Vision，返回原 bundle 不变（nil error）。
+// 如果配置了 Vision 但创建失败，返回错误。
+func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment config.BotLLMAssignment) (*LLMBundle, error) {
 	if assignment.Vision == "" {
-		return b
+		return b, nil
 	}
 	visionDef, ok := builder.GetLLMModel(assignment.Vision)
 	if !ok {
-		return b
+		return b, nil
 	}
 	visionProvider, err := CreateProvider(visionDef)
 	if err != nil {
-		return b
+		return nil, errs.Wrapf(err, "bot %q: create vision LLM", botID)
 	}
 	b.Vision = visionProvider
 	b.VisionDef = visionDef
-	return b
+	return b, nil
 }
