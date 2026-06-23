@@ -8,23 +8,14 @@ import (
 )
 
 // ============================================================================
-// Predicate — 条件匹配器
+// Predicate — 条件匹配器（定义在 core 包，此处为类型别名保持兼容）
 // ============================================================================
 
-// Predicate 判断 Envelope 是否满足某个条件。
-// 用于 Router 的条件路由和 FilterStage 的消息过滤。
-type Predicate interface {
-	Match(env *core.Envelope) bool
-}
+// Predicate 是 core.Predicate 的类型别名，保持向后兼容。
+type Predicate = core.Predicate
 
-// ============================================================================
-// PredicateFunc — 函数式谓词
-// ============================================================================
-
-// PredicateFunc 将普通函数适配为 Predicate 接口。
-type PredicateFunc func(*core.Envelope) bool
-
-func (f PredicateFunc) Match(env *core.Envelope) bool { return f(env) }
+// PredicateFunc 是 core.PredicateFunc 的类型别名，保持向后兼容。
+type PredicateFunc = core.PredicateFunc
 
 // ============================================================================
 // 内置谓词

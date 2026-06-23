@@ -211,9 +211,11 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 
 	var memoryEntries, userEntries []Entry
 
+	var lastErr error
 	for _, scope := range scopes {
 		entries, err := retriever.Recent(ctx, scope, 50)
 		if err != nil {
+			lastErr = err
 			continue
 		}
 		for _, e := range entries {
@@ -223,6 +225,11 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 				memoryEntries = append(memoryEntries, e)
 			}
 		}
+	}
+
+	// 如果所有 scope 都失败了（无条目且有错误），返回错误
+	if len(memoryEntries) == 0 && len(userEntries) == 0 && lastErr != nil {
+		return fmt.Errorf("snapshot: all scope retrievals failed: %w", lastErr)
 	}
 
 	s.mu.Lock()

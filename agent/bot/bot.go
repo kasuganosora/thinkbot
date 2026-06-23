@@ -330,7 +330,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		"channels", len(b.channels))
 
 	// 启动所有 Channel
-	for _, ch := range b.channels {
+	for i, ch := range b.channels {
 		b.logger.Infow("starting channel",
 			"channel_name", ch.Name(),
 			"channel_type", ch.Type())
@@ -339,7 +339,8 @@ func (b *Bot) Run(ctx context.Context) error {
 			b.logger.Errorw("channel start failed, rolling back",
 				"channel_name", ch.Name(),
 				"err", err)
-			b.stopChannels(ctx)
+			// 只停止已成功启动的 channel (0..i-1)
+			b.stopChannelsSlice(ctx, b.channels[:i])
 			return errs.Wrapf(err, "bot %q: channel %q start failed", b.ID, ch.Name())
 		}
 
@@ -481,7 +482,12 @@ func (b *Bot) Metrics() BotMetrics {
 
 // stopChannels 停止所有 Channel（尽力而为）。
 func (b *Bot) stopChannels(ctx context.Context) {
-	for _, ch := range b.channels {
+	b.stopChannelsSlice(ctx, b.channels)
+}
+
+// stopChannelsSlice 停止给定的 Channel 切片（尽力而为）。
+func (b *Bot) stopChannelsSlice(ctx context.Context, channels []Channel) {
+	for _, ch := range channels {
 		if err := ch.Stop(ctx); err != nil {
 			b.logger.Warnw("channel stop error",
 				"channel_name", ch.Name(),

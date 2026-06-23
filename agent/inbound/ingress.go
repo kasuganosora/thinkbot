@@ -3,6 +3,7 @@ package inbound
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,7 +45,8 @@ type Ingress struct {
 	//
 	// selfIDs 是一个 *SelfIDSet，可与 Engagement 层的 SelfExclusionRule 共享，
 	// 确保两层防线引用同一份数据，无需时序协调。
-	selfIDs *SelfIDSet
+	selfIDs     *SelfIDSet
+	selfIDsOnce sync.Once
 }
 
 // IngressConfig 控制 Ingress 行为参数。
@@ -274,9 +276,11 @@ func (g *Ingress) SelfIDs() *SelfIDSet {
 
 // lazyInitSelfIDs 在首次使用时创建 SelfIDSet（如果未通过 IngressConfig 注入）。
 func (g *Ingress) lazyInitSelfIDs() {
-	if g.selfIDs == nil {
-		g.selfIDs = NewSelfIDSet()
-	}
+	g.selfIDsOnce.Do(func() {
+		if g.selfIDs == nil {
+			g.selfIDs = NewSelfIDSet()
+		}
+	})
 }
 
 // isSelfMessage 检查消息发送者是否是 Bot 自身。

@@ -58,6 +58,11 @@ func RecoveryMiddleware() Middleware {
 
 // TimeoutMiddleware 返回一个超时控制中间件。
 // 如果 Stage 在指定时间内未完成，返回 context.DeadlineExceeded。
+//
+// 设计说明：超时后 goroutine 仍在运行，但传入的 ctx 已被 cancel，
+// 下游 Stage 应通过 ctx.Done() 感知并尽快退出。
+// channel 使用 buffer=1，确保 goroutine 在 Stage 返回后能写入并退出，不会永久泄漏。
+// 如果 Stage 完全忽略 context（不推荐），goroutine 会持续到 Stage 自然完成。
 func TimeoutMiddleware(d time.Duration) Middleware {
 	return func(next core.Stage) core.Stage {
 		return &core.StageFunc{
