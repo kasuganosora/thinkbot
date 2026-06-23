@@ -33,7 +33,8 @@ func TestAgentConfig_Merge(t *testing.T) {
 
 func TestAgentConfig_EffectiveTemperature(t *testing.T) {
 	cfg := AgentConfig{}
-	botCfg := BotConfig{Temperature: 0.7}
+	botTemp := 0.7
+	botCfg := BotConfig{Temperature: &botTemp}
 
 	if cfg.EffectiveTemperature(botCfg) != 0.7 {
 		t.Error("expected 0.7 from bot config")

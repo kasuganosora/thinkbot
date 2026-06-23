@@ -201,14 +201,7 @@ func (m *ToolManager) ResolveTools(ctx context.Context, sctx *ToolSessionContext
 // 返回工具列表，如果没有任何工具返回 nil。
 func (m *ToolManager) ResolveForEnvelope(ctx context.Context, env *core.Envelope) ([]llm.Tool, error) {
 	sctx := envelopeToSessionContext(env)
-	tools, err := m.registry.Resolve(ctx, sctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(tools) == 0 {
-		return nil, nil
-	}
-	return tools, nil
+	return m.ResolveTools(ctx, sctx)
 }
 
 // StaticCount 返回静态注册的工具数量。

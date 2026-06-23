@@ -2,6 +2,7 @@ package engagement
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -229,6 +230,7 @@ func (RenoteExclusionRule) Allow(msg *core.Message) (bool, string) {
 // CooldownRule 对同一用户实施冷却时间。
 // 同一用户在 cooldown 期间的消息不会被主动参与。
 type CooldownRule struct {
+	mu       sync.Mutex
 	cooldown time.Duration
 	lastSeen map[string]time.Time
 }
@@ -247,7 +249,20 @@ func (r *CooldownRule) Allow(msg *core.Message) (bool, string) {
 		return true, ""
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	now := time.Now()
+
+	// 惰性 GC：每 100 次调用清理一次过期条目
+	if len(r.lastSeen) > 100 {
+		for uid, t := range r.lastSeen {
+			if now.Sub(t) > r.cooldown*2 {
+				delete(r.lastSeen, uid)
+			}
+		}
+	}
+
 	if last, ok := r.lastSeen[msg.UserID]; ok {
 		elapsed := now.Sub(last)
 		if elapsed < r.cooldown {
@@ -261,5 +276,7 @@ func (r *CooldownRule) Allow(msg *core.Message) (bool, string) {
 
 // Reset 重置指定用户的冷却（Bot 成功回复后调用）。
 func (r *CooldownRule) Reset(userID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.lastSeen, userID)
 }

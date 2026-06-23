@@ -379,7 +379,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Model:        def.Model,
 	}
 	if def.Temperature > 0 {
-		botCfg.Temperature = def.Temperature
+		t := def.Temperature
+		botCfg.Temperature = &t
 	}
 	if def.MaxTokens > 0 {
 		botCfg.MaxTokens = def.MaxTokens

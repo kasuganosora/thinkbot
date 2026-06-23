@@ -154,7 +154,7 @@ func (p *ContextPacker) Pack(_ context.Context, entries []Entry, queryText strin
 				}
 				savedUsed := used
 
-				freed := p.compressToFit(selected, maxChars-used-contentLen)
+				freed := p.compressToFit(selected, used+contentLen-maxChars)
 				if freed > 0 {
 					used -= freed
 					if used+contentLen <= maxChars {
@@ -311,7 +311,10 @@ func (p *ContextPacker) compressToFit(selected []PackEntry, need int) int {
 		content := pe.Entry.Content
 		runes := []rune(content)
 		if len(runes) > targetLen {
-			freed += len(runes) - targetLen - 3
+			gain := len(runes) - targetLen - 3 // "..." 占 3 字符
+			if gain > 0 {
+				freed += gain
+			}
 			pe.Entry.Content = string(runes[:targetLen]) + "..."
 			pe.Truncated = true
 		}

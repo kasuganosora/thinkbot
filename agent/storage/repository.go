@@ -95,7 +95,11 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 	r.entriesAppended.Add(1)
 
 	// 容量限制：异步检查并淘汰最旧条目
-	go r.evictIfNeeded(entry.Scope)
+	go func() {
+		evictCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		r.evictIfNeeded(evictCtx, entry.Scope)
+	}()
 
 	return nil
 }
@@ -182,7 +186,9 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 			ids[i] = m.ID
 		}
 		go func() {
-			r.db.Model(&dao.EntryModel{}).Where("id IN ?", ids).
+			updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			r.db.WithContext(updateCtx).Model(&dao.EntryModel{}).Where("id IN ?", ids).
 				Update("last_accessed_at", time.Now())
 		}()
 	}
@@ -251,11 +257,13 @@ func (r *SQLiteRepository) Metrics() memory.RepositoryMetrics {
 // ============================================================================
 
 // evictIfNeeded 检查 scope 是否超出容量，超出时淘汰最旧条目。
-func (r *SQLiteRepository) evictIfNeeded(scope memory.Scope) {
+func (r *SQLiteRepository) evictIfNeeded(ctx context.Context, scope memory.Scope) {
 	var count int64
-	r.db.Model(&dao.EntryModel{}).
+	if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
-		Count(&count)
+		Count(&count).Error; err != nil {
+		return // DB 错误，跳过淘汰
+	}
 
 	if int(count) <= r.config.MaxEntriesPerScope {
 		return
@@ -266,14 +274,16 @@ func (r *SQLiteRepository) evictIfNeeded(scope memory.Scope) {
 
 	// 找出最旧的 N 条 ID
 	var oldIDs []string
-	r.db.Model(&dao.EntryModel{}).
+	if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
 		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
 		Order("created_at ASC").
 		Limit(excess).
-		Pluck("id", &oldIDs)
+		Pluck("id", &oldIDs).Error; err != nil {
+		return
+	}
 
 	if len(oldIDs) > 0 {
-		result := r.db.Where("id IN ?", oldIDs).Delete(&dao.EntryModel{})
+		result := r.db.WithContext(ctx).Where("id IN ?", oldIDs).Delete(&dao.EntryModel{})
 		if result.RowsAffected > 0 {
 			r.entriesDeleted.Add(result.RowsAffected)
 		}

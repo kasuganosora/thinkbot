@@ -353,8 +353,22 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 
 	// 校验：LLM 返回的决策数应与输入事实数一致
 	if len(decisions) < len(facts) {
-		f.logger.Warnw("formation: LLM returned fewer decisions than facts, some facts will be dropped",
+		f.logger.Warnw("formation: LLM returned fewer decisions than facts, padding with store",
 			"facts", len(facts), "decisions", len(decisions))
+		// 对缺少决策的 fact 默认保留
+		for i := len(decisions); i < len(facts); i++ {
+			decisions = append(decisions, FactDecision{
+				Fact:   facts[i],
+				Action: DecisionAdd,
+				Reason: "default: LLM did not provide decision",
+			})
+		}
+	}
+	// 截断多余决策（LLM 幻觉）
+	if len(decisions) > len(facts) {
+		f.logger.Warnw("formation: LLM returned more decisions than facts, truncating",
+			"facts", len(facts), "decisions", len(decisions))
+		decisions = decisions[:len(facts)]
 	}
 
 	return decisions, nil

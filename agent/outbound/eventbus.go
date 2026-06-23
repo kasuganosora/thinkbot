@@ -436,9 +436,15 @@ func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, repla
 
 	b.subscribers[id] = sub
 
-	// 在写锁下回放历史事件——保证与后续实时事件无间隙、无重复
+	// 在写锁下回放历史事件——保证与后续实时事件无间隙、无重复。
+	// 权衡：回放期间 Publish 被阻塞。回放数量受 EventStore 容量限制。
 	if replay && b.store != nil {
 		events := b.store.replay(traceID, sinceSeq)
+		// 限制回放数量，避免长时间持锁
+		const maxReplay = 1000
+		if len(events) > maxReplay {
+			events = events[len(events)-maxReplay:]
+		}
 		replayed := 0
 		for _, e := range events {
 			// botID 过滤（store 只按 traceID 过滤）
