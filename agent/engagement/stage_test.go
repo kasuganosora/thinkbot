@@ -311,6 +311,47 @@ func TestEngagementStage_DeclinedDoesNotConsumeToken(t *testing.T) {
 	}
 }
 
+func TestEngagementStage_Tier2DeclineRefundsToken(t *testing.T) {
+	// Tier 1 全部通过（RateLimitRule 预扣令牌），但 Tier 2 LLM Judge 拒绝
+	// → 令牌应被退还，不泄漏
+	bucket := NewTokenBucket(1, 1*time.Hour)
+	rateRule := NewRateLimitRule(bucket)
+
+	// mockJudge 总是拒绝
+	mockJudge := &mockLLMJudge{engage: false, reason: "not interesting"}
+
+	policy := NewCompositePolicy(
+		NewSourceAllowlist("misskey"),
+		WithRules(NewRuleEngine(
+			NewKeywordRule("golang"),
+			rateRule,
+		)),
+		WithJudge(mockJudge),
+	)
+	stage := newTestStage(policy)
+
+	// 消息匹配关键词 + 有令牌 → Tier 1 通过，Tier 2 拒绝
+	msg := *timelineMsg("golang is great", "user1", "misskey")
+	env := newEnvelope(msg)
+	_, _ = stage.Process(context.Background(), env)
+
+	// 令牌应被退还
+	if bucket.Available() != 1 {
+		t.Errorf("Tier 2 decline should refund token, available = %v, want 1", bucket.Available())
+	}
+}
+
+// mockLLMJudge implements LLMJudge for testing.
+type mockLLMJudge struct {
+	engage bool
+	reason string
+	score  int
+}
+
+func (m *mockLLMJudge) Judge(_ context.Context, _ *core.Message) (JudgeResult, error) {
+	return JudgeResult{Engage: m.engage, Reason: m.reason, Score: m.score}, nil
+}
+
 func TestEngagementSummary(t *testing.T) {
 	// Not evaluated
 	env := newEnvelope(*mentionedMsg("hi", "user1", "misskey"))

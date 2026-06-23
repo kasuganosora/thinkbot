@@ -2,6 +2,7 @@ package engagement
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -166,6 +167,9 @@ func (w *SlidingWindow) Count() int {
 // 基于 msg.Source 或全局进行限流。
 type RateLimitRule struct {
 	bucket *TokenBucket
+	// took 标记 Allow() 是否成功预扣了一个令牌。
+	// 使用 atomic.Bool 保证并发安全，Refund 通过 CAS 确保只退还实际预扣的令牌。
+	took atomic.Bool
 }
 
 // NewRateLimitRule 创建频率限制规则。
@@ -180,8 +184,10 @@ func (r *RateLimitRule) Allow(_ *core.Message) (bool, string) {
 		return true, ""
 	}
 	if !r.bucket.TryTake() {
+		r.took.Store(false)
 		return false, "rate limit exceeded"
 	}
+	r.took.Store(true)
 	return true, ""
 }
 
@@ -191,8 +197,9 @@ func (r *RateLimitRule) Consume() {
 }
 
 // Refund 退还预扣的令牌（当消息最终未参与时调用）。
+// 使用 CAS 确保只退还 Allow() 实际预扣的令牌，避免超额退还。
 func (r *RateLimitRule) Refund() {
-	if r.bucket != nil {
+	if r.bucket != nil && r.took.CompareAndSwap(true, false) {
 		r.bucket.Refund()
 	}
 }
