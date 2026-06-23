@@ -134,6 +134,9 @@ func (m *SessionManager) Archive(sessionID string) {
 	m.mu.Lock()
 	session, ok := m.sessions[sessionID]
 	fn := m.onArchive
+	if ok {
+		delete(m.sessions, sessionID) // 先从 map 移除，防止并发获取
+	}
 	m.mu.Unlock()
 
 	if !ok || session == nil {
@@ -145,10 +148,6 @@ func (m *SessionManager) Archive(sessionID string) {
 	if fn != nil {
 		fn(session)
 	}
-
-	m.mu.Lock()
-	delete(m.sessions, sessionID)
-	m.mu.Unlock()
 
 	m.logger.Debugw("session archived",
 		"session_id", sessionID,
@@ -434,7 +433,7 @@ func (s *SessionWriteStage) Process(ctx context.Context, env *core.Envelope) (*c
 		Timestamp: time.Now(),
 	})
 
-	span.SetAttributes(attribute.String("session.reply_len", replyText))
+	span.SetAttributes(attribute.Int("session.reply_len", len(replyText)))
 	logger.Debugw("session reply recorded",
 		"message_id", env.Message.ID,
 		"session_id", sessionID,

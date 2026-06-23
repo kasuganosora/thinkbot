@@ -52,6 +52,9 @@ type CallbackRegistry interface {
 	Has(id string) bool
 	// Count 返回注册的回调数量。
 	Count() int
+	// Close 释放注册表持有的资源（如后台 goroutine）。
+	// 实现者应确保此方法是幂等的。
+	Close()
 }
 
 // ErrCallbackNotFound 表示指定的回调 ID 不存在。

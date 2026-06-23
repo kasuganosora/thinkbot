@@ -26,7 +26,7 @@ type BotConfig struct {
 	Model string `json:"model" yaml:"model"`
 
 	// Temperature LLM 温度参数。
-	Temperature float64 `json:"temperature" yaml:"temperature"`
+	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 
 	// MaxTokens LLM 最大输出 token 数。
 	MaxTokens int `json:"maxTokens" yaml:"maxTokens"`
@@ -74,10 +74,11 @@ func (c BotConfig) Location() *time.Location {
 
 // DefaultBotConfig 返回合理的默认配置。
 func DefaultBotConfig() BotConfig {
+	defaultTemp := 0.7
 	return BotConfig{
 		Workers:           4,
 		IngressBufferSize: 256,
-		Temperature:       0.7,
+		Temperature:       &defaultTemp,
 		MaxTokens:         4096,
 	}
 }
@@ -97,7 +98,7 @@ func (c BotConfig) Merge(other BotConfig) BotConfig {
 	if other.Model != "" {
 		c.Model = other.Model
 	}
-	if other.Temperature != 0 {
+	if other.Temperature != nil {
 		c.Temperature = other.Temperature
 	}
 	if other.MaxTokens > 0 {

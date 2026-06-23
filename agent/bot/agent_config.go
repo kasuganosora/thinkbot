@@ -121,7 +121,10 @@ func (c AgentConfig) EffectiveTemperature(botCfg BotConfig) float64 {
 	if c.Temperature != nil {
 		return *c.Temperature
 	}
-	return botCfg.Temperature
+	if botCfg.Temperature != nil {
+		return *botCfg.Temperature
+	}
+	return 0.7
 }
 
 // EffectiveSystemPrompt 返回有效 system prompt。

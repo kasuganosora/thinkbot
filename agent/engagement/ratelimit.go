@@ -86,6 +86,13 @@ func (b *TokenBucket) refill() {
 	}
 }
 
+// Refund 退还一个令牌（不超过容量）。
+func (b *TokenBucket) Refund() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tokens = min(b.capacity, b.tokens+1)
+}
+
 // Go 1.21+ 内置 min 支持所有可比较有序类型，无需手动定义。
 
 // ============================================================================
@@ -166,23 +173,26 @@ func NewRateLimitRule(bucket *TokenBucket) *RateLimitRule {
 	return &RateLimitRule{bucket: bucket}
 }
 
-// Allow 实现 Rule。
+// Allow 实现 Rule。预扣一个令牌，避免 TOCTOU 竞态。
+// 如果后续决定不参与，调用 Refund 退还令牌。
 func (r *RateLimitRule) Allow(_ *core.Message) (bool, string) {
-	// 注意：这里只是"检查"是否允许，不真正消耗令牌。
-	// 令牌在 EngagementStage 确认参与后才消耗（参见 Stage 的 consumeToken）。
-	// 这样被后续 Tier 拒绝的消息不会浪费令牌配额。
 	if r.bucket == nil {
 		return true, ""
 	}
-	if r.bucket.Available() < 1 {
+	if !r.bucket.TryTake() {
 		return false, "rate limit exceeded"
 	}
 	return true, ""
 }
 
-// Consume 消耗一个令牌。应在确定参与后调用。
+// Consume 确认消耗。令牌已在 Allow 中预扣，此方法现在是 no-op。
 func (r *RateLimitRule) Consume() {
+	// 令牌已在 Allow 中预扣，无需额外操作
+}
+
+// Refund 退还预扣的令牌（当消息最终未参与时调用）。
+func (r *RateLimitRule) Refund() {
 	if r.bucket != nil {
-		r.bucket.TryTake()
+		r.bucket.Refund()
 	}
 }

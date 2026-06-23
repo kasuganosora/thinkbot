@@ -86,9 +86,11 @@ func newEngine(
 // registerEngineLifecycle 将 Engine 的启停绑定到 fx.Lifecycle。
 func registerEngineLifecycle(lc fx.Lifecycle, engine *Engine) {
 	lc.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
+		OnStart: func(_ context.Context) error {
 			go func() {
-				if err := engine.Run(ctx); err != nil {
+				// 使用独立 context，生命周期由 OnStop 的 engine.Stop() 控制，
+				// 而非绑定到 fx OnStart 的短生命周期 ctx。
+				if err := engine.Run(context.Background()); err != nil {
 					fmt.Fprintf(os.Stderr, "agent: engine run failed: %v\n", err)
 				}
 			}()
