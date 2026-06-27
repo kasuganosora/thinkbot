@@ -39,6 +39,9 @@ type TokenBudgetConfig struct {
 	WarnPercent float64
 	// HardPercent 硬限制阈值（0.0-1.0）。超限时中止请求。0 = 不限制。
 	HardPercent float64
+
+	// StatsRecorder 可选的 stats 记录器，用于记录预算告警/超限事件。
+	StatsRecorder llm.UsageRecorder
 }
 
 // NewTokenBudgetConfig 返回默认预算配置（10 万 token，80% 警告，100% 硬限制）。
@@ -65,6 +68,12 @@ func (c TokenBudgetConfig) WithWarnPercent(p float64) TokenBudgetConfig {
 // WithHardPercent 设置硬限制阈值。
 func (c TokenBudgetConfig) WithHardPercent(p float64) TokenBudgetConfig {
 	c.HardPercent = p
+	return c
+}
+
+// WithStatsRecorder 注入 stats 记录器，超限事件自动记录。
+func (c TokenBudgetConfig) WithStatsRecorder(r llm.UsageRecorder) TokenBudgetConfig {
+	c.StatsRecorder = r
 	return c
 }
 
@@ -138,6 +147,15 @@ func TokenBudgetMiddleware(cfg TokenBudgetConfig) Middleware {
 					state.mu.Lock()
 					state.warned[channel] = true
 					state.mu.Unlock()
+
+					// 记录预算告警事件到 stats
+					if cfg.StatsRecorder != nil {
+						cfg.StatsRecorder.RecordUsage(ctx, llm.UsageMetric{
+							BotID:   env.Message.BotID,
+							Feature: "budget_warning",
+							Channel: channel,
+						})
+					}
 				}
 
 				// 硬警告：如果已经接近硬限制
