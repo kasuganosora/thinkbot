@@ -57,8 +57,16 @@ type WindowConfig struct {
 
 	// MemoryBudgetRatio memory 可使用的窗口比例（0.0 ~ 1.0）。
 	// 基于可用空间计算 memory 上限。
-	// 默认 0.3（即 30% 的可用空间分配给 memory）。
+	// 默认 0.15（即 15% 的可用空间分配给 memory）。
+	// 注意：0.3 对成本不友好——128K 窗口首轮有 ~36K tokens 记忆预算，
+	// 实际注入的检索结果极少超 1K tokens，过多预算会让 LLM 压缩触发过晚。
 	MemoryBudgetRatio float64
+
+	// MaxMemoryTokens memory 注入的硬上限（token 数）。
+	// 无论 Available() 返回多少，实际注入的 memory context 不超过此值。
+	// 0 表示不设硬上限（使用 Available() 结果）。
+	// 推荐值：2000-4000（约 6000-12000 字符的记忆上下文）。
+	MaxMemoryTokens int
 
 	// CompressThreshold 触发压缩的阈值比例。
 	// 当 memory 内容超过 MemoryBudget 的此比例时触发压缩。
@@ -72,8 +80,9 @@ func DefaultWindowConfig() WindowConfig {
 		MaxContextTokens:  128000,
 		ReservedTokens:    2000,
 		OutputReserve:     4096,
-		MemoryBudgetRatio: 0.3,
+		MemoryBudgetRatio: 0.15,
 		CompressThreshold: 0.8,
+		MaxMemoryTokens:   3000, // 硬上限 ~9000 字符，防止 memory 膨胀
 	}
 }
 
@@ -93,6 +102,9 @@ func NewWindow(opts ...WindowConfig) *Window {
 		}
 		if o.MemoryBudgetRatio > 0 && o.MemoryBudgetRatio <= 1.0 {
 			cfg.MemoryBudgetRatio = o.MemoryBudgetRatio
+		}
+		if o.MaxMemoryTokens > 0 {
+			cfg.MaxMemoryTokens = o.MaxMemoryTokens
 		}
 		if o.CompressThreshold > 0 && o.CompressThreshold <= 1.0 {
 			cfg.CompressThreshold = o.CompressThreshold
@@ -116,9 +128,10 @@ func (w *Window) RecordUsage(inputTokens, outputTokens int) {
 // Available 返回当前 memory 可用的 token 预算。
 // 计算公式：
 //
-//	available = (MaxContext - Reserved - OutputReserve - usedTokens) * MemoryBudgetRatio
+//	available = min((MaxContext - Reserved - OutputReserve - usedTokens) * MemoryBudgetRatio, MaxMemoryTokens)
 //
 // 返回值 <= 0 表示无剩余空间，应触发压缩或跳过 memory 注入。
+// MaxMemoryTokens 为硬上限，防止 memory 预算随窗口变大而无限膨胀。
 func (w *Window) Available() int {
 	w.mu.RLock()
 	used := w.usedTokens
@@ -130,17 +143,27 @@ func (w *Window) Available() int {
 	}
 
 	memoryBudget := int(float64(totalAvailable) * w.config.MemoryBudgetRatio)
+
+	// 硬上限：防止大窗口模型（如 200K Claude）注入过多记忆
+	if w.config.MaxMemoryTokens > 0 && memoryBudget > w.config.MaxMemoryTokens {
+		memoryBudget = w.config.MaxMemoryTokens
+	}
+
 	return memoryBudget
 }
 
 // MemoryBudget 返回 memory 的 token 总预算（不考虑已消耗的 token）。
-// 用于初始状态下的规划。
+// 用于初始状态下的规划。同样受 MaxMemoryTokens 硬上限约束。
 func (w *Window) MemoryBudget() int {
 	totalAvailable := w.config.MaxContextTokens - w.config.ReservedTokens - w.config.OutputReserve
 	if totalAvailable <= 0 {
 		return 0
 	}
-	return int(float64(totalAvailable) * w.config.MemoryBudgetRatio)
+	budget := int(float64(totalAvailable) * w.config.MemoryBudgetRatio)
+	if w.config.MaxMemoryTokens > 0 && budget > w.config.MaxMemoryTokens {
+		budget = w.config.MaxMemoryTokens
+	}
+	return budget
 }
 
 // ShouldCompress 判断给定 token 数是否超过压缩阈值。

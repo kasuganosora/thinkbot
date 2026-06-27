@@ -410,7 +410,9 @@ func (b *Bot) Close() {
 		}
 		// 关闭工作空间管理器（文件持久化，不删除）
 		if b.workspaceMgr != nil {
-			_ = b.workspaceMgr.Close()
+			if err := b.workspaceMgr.Close(); err != nil {
+				b.logger.Warnw("workspace manager close failed", "err", err)
+			}
 		}
 	})
 }
