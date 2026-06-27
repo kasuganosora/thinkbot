@@ -68,8 +68,9 @@ type DreamingBundle struct {
 // NewDreamingBundle 为单个 Bot 创建完整的梦境巩固子系统。
 //
 // 参数：
-//   - dreamCfg: 梦境配置（从 config.GetDreamingConfig 构建）
+//   - dreamCfg: 梦境配置（从 config.GetDreamingConfig 构建），Model 字段从 bot 主模型读取
 //   - provider: LLM 提供商（用于 Light 相位提取和画像验证）
+//   - model: LLM 模型名（从 bot 主模型/经济模型读取）
 //   - location: 时区（用于 cron 调度）
 //   - tp: TracerProvider
 //   - logger: 日志
@@ -81,6 +82,7 @@ type DreamingBundle struct {
 func NewDreamingBundle(
 	dreamCfg memory.DreamConfig,
 	provider llm.Provider,
+	model string,
 	location *time.Location,
 	tp trace.TracerProvider,
 	logger *zap.SugaredLogger,
@@ -98,7 +100,8 @@ func NewDreamingBundle(
 		EnableAutoConsolidate: true,
 	}, tp, logger)
 
-	// 2. 创建 DreamManager
+	// 2. 创建 DreamManager（注入 bot 的 LLM 模型名）
+	dreamCfg.Model = model
 	dreamMgr := memory.NewDreamManager(dreamCfg, tieredMgr, provider, tp, logger)
 
 	// 3. 创建 cron Store + Executor + Scheduler

@@ -451,7 +451,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				JaccardThreshold: 0.9,
 				MaxDreamTokens:   10000,
 			},
-			bundle.Main, // 使用 bot 的主 LLM
+			bundle.Main,          // 使用 bot 的主 LLM
+			bundle.MainDef.Model, // 模型名从 bot 主模型配置读取
 			loc,
 			s.tp,
 			s.logger,

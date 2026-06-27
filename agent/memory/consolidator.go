@@ -465,7 +465,9 @@ func (m *TieredManager) WriteProfile(ctx context.Context, entry Entry) error {
 		Tier:         Tier3Profile,
 		PromotedFrom: Tier2Episodic,
 	}
-	te.Category = "profile"
+	if te.Category == "" {
+		te.Category = "profile"
+	}
 	return m.store.Append(ctx, te)
 }
 
