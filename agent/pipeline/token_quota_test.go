@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
@@ -105,7 +106,7 @@ func TestQuotaResolver_SystemFallback(t *testing.T) {
 func TestQuotaResolver_BotOverridesSystem(t *testing.T) {
 	store := newMockQuotaStore()
 	store.Set("system.token_quota", 1000000)
-	store.Set("bot.bot1.token_quota", 500000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 500000)
 	resolver := NewQuotaResolver(store)
 
 	res := resolver.Resolve("bot1", "telegram", "-123")
@@ -120,59 +121,65 @@ func TestQuotaResolver_BotOverridesSystem(t *testing.T) {
 func TestQuotaResolver_ChannelOverridesBot(t *testing.T) {
 	store := newMockQuotaStore()
 	store.Set("system.token_quota", 1000000)
-	store.Set("bot.bot1.token_quota", 500000)
-	store.Set("bot.bot1.token_quota.channel.telegram", 300000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 500000)
+	store.Set(config.BotTokenQuotaChannelKey("bot1", "telegram"), 300000)
 	resolver := NewQuotaResolver(store)
 
 	res := resolver.Resolve("bot1", "telegram", "-123")
 	if res.Limit != 300000 {
 		t.Errorf("expected channel limit 300000, got %d", res.Limit)
 	}
-	if res.Dimension != "channel:telegram" {
-		t.Errorf("expected dimension 'channel:telegram', got %q", res.Dimension)
+	if res.Dimension != "bot:bot1:channel:telegram" {
+		t.Errorf("expected dimension 'bot:bot1:channel:telegram', got %q", res.Dimension)
 	}
 }
 
 func TestQuotaResolver_ChatOverridesChannel(t *testing.T) {
 	store := newMockQuotaStore()
 	store.Set("system.token_quota", 1000000)
-	store.Set("bot.bot1.token_quota", 500000)
-	store.Set("bot.bot1.token_quota.channel.telegram", 300000)
-	store.Set("bot.bot1.token_quota.channel.telegram.-123", 100000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 500000)
+	store.Set(config.BotTokenQuotaChannelKey("bot1", "telegram"), 300000)
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-123"), 100000)
 	resolver := NewQuotaResolver(store)
 
 	res := resolver.Resolve("bot1", "telegram", "-123")
 	if res.Limit != 100000 {
 		t.Errorf("expected chat limit 100000, got %d", res.Limit)
 	}
-	if res.Dimension != "chat:telegram:-123" {
-		t.Errorf("expected dimension 'chat:telegram:-123', got %q", res.Dimension)
+	if res.Dimension != "bot:bot1:chat:telegram:-123" {
+		t.Errorf("expected dimension 'bot:bot1:chat:telegram:-123', got %q", res.Dimension)
 	}
 }
 
 func TestQuotaResolver_DifferentChatsDifferentLimits(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 500000)
-	store.Set("bot.bot1.token_quota.channel.telegram.-123", 100000)
-	store.Set("bot.bot1.token_quota.channel.telegram.-456", 200000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 500000)
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-123"), 100000)
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-456"), 200000)
 	resolver := NewQuotaResolver(store)
 
 	res1 := resolver.Resolve("bot1", "telegram", "-123")
 	if res1.Limit != 100000 {
 		t.Errorf("chat -123: expected 100000, got %d", res1.Limit)
 	}
+	if res1.Dimension != "bot:bot1:chat:telegram:-123" {
+		t.Errorf("chat -123 dimension: %q", res1.Dimension)
+	}
 
 	res2 := resolver.Resolve("bot1", "telegram", "-456")
 	if res2.Limit != 200000 {
 		t.Errorf("chat -456: expected 200000, got %d", res2.Limit)
 	}
+	if res2.Dimension != "bot:bot1:chat:telegram:-456" {
+		t.Errorf("chat -456 dimension: %q", res2.Dimension)
+	}
 }
 
 func TestQuotaResolver_NoChatID_FallsToChannel(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 500000)
-	store.Set("bot.bot1.token_quota.channel.telegram", 300000)
-	store.Set("bot.bot1.token_quota.channel.telegram.-123", 100000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 500000)
+	store.Set(config.BotTokenQuotaChannelKey("bot1", "telegram"), 300000)
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-123"), 100000)
 	resolver := NewQuotaResolver(store)
 
 	// chatID 为空 → 跳过 chat 级，落到 channel 级
@@ -180,14 +187,14 @@ func TestQuotaResolver_NoChatID_FallsToChannel(t *testing.T) {
 	if res.Limit != 300000 {
 		t.Errorf("expected channel limit 300000, got %d", res.Limit)
 	}
-	if res.Dimension != "channel:telegram" {
-		t.Errorf("expected dimension 'channel:telegram', got %q", res.Dimension)
+	if res.Dimension != "bot:bot1:channel:telegram" {
+		t.Errorf("expected dimension 'bot:bot1:channel:telegram', got %q", res.Dimension)
 	}
 }
 
 func TestQuotaResolver_ChannelNotSet_FallsToBot(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 500000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 500000)
 	// 不给 telegram 设置 channel 级限额
 	resolver := NewQuotaResolver(store)
 
@@ -200,9 +207,33 @@ func TestQuotaResolver_ChannelNotSet_FallsToBot(t *testing.T) {
 	}
 }
 
+func TestQuotaResolver_DifferentBotsIndependentDimensions(t *testing.T) {
+	// 验证 bot1 和 bot2 的 chat 级 dimension 不冲突
+	store := newMockQuotaStore()
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-123"), 100000)
+	store.Set(config.BotTokenQuotaChatKey("bot2", "telegram", "-123"), 50000)
+	resolver := NewQuotaResolver(store)
+
+	res1 := resolver.Resolve("bot1", "telegram", "-123")
+	if res1.Dimension != "bot:bot1:chat:telegram:-123" {
+		t.Errorf("bot1 dimension: %q", res1.Dimension)
+	}
+	if res1.Limit != 100000 {
+		t.Errorf("bot1 limit: %d", res1.Limit)
+	}
+
+	res2 := resolver.Resolve("bot2", "telegram", "-123")
+	if res2.Dimension != "bot:bot2:chat:telegram:-123" {
+		t.Errorf("bot2 dimension: %q", res2.Dimension)
+	}
+	if res2.Limit != 50000 {
+		t.Errorf("bot2 limit: %d", res2.Limit)
+	}
+}
+
 func TestQuotaResolver_NegativeLimit_TreatedAsZero(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", -1) // negative
+	store.Set(config.BotTokenQuotaKey("bot1"), -1)
 	resolver := NewQuotaResolver(store)
 
 	res := resolver.Resolve("bot1", "telegram", "-123")
@@ -213,12 +244,11 @@ func TestQuotaResolver_NegativeLimit_TreatedAsZero(t *testing.T) {
 
 func TestQuotaResolver_ZeroLimit_TreatedAsUnset(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 0)
+	store.Set(config.BotTokenQuotaKey("bot1"), 0)
 	store.Set("system.token_quota", 1000000)
 	resolver := NewQuotaResolver(store)
 
 	res := resolver.Resolve("bot1", "telegram", "-123")
-	// 0 should fall through to system
 	if res.Limit != 1000000 {
 		t.Errorf("expected system limit 1000000, got %d", res.Limit)
 	}
@@ -302,7 +332,6 @@ func TestTokenQuotaMiddleware_NoLimit_PassThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// llm.result should have been set
 	v, ok := result.Get("llm.result")
 	if !ok || v == nil {
 		t.Error("expected llm.result in envelope")
@@ -311,7 +340,7 @@ func TestTokenQuotaMiddleware_NoLimit_PassThrough(t *testing.T) {
 
 func TestTokenQuotaMiddleware_UnderLimit_Succeeds(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 10000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 10000)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
@@ -330,18 +359,10 @@ func TestTokenQuotaMiddleware_UnderLimit_Succeeds(t *testing.T) {
 
 func TestTokenQuotaMiddleware_AtLimit_Blocked(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 1000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 1000)
 	resolver := NewQuotaResolver(store)
 
-	// 先积累到 998
-	state := newTokenQuotaState()
-	state.AddUsage("bot:bot1", 998)
-
-	// 需要手动状态注入…… 实际上 TokenQuotaMiddleware 有自己的内部状态
-	// 让我绕过这个问题：先调用一次达到 998，然后第二次用一个小调用让它到 1000
-	// 但我们没法预设 998...
-
-	// 简单方式：直接设置 limit=1000，先调用一次 1000，再次调用应被阻塞
+	// limit=1000，先调用一次 1000，再次调用应被阻塞
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 	inner := mockLLMResultStage(1000)
 	wrapped := mw(inner)
@@ -360,7 +381,7 @@ func TestTokenQuotaMiddleware_AtLimit_Blocked(t *testing.T) {
 	}
 	pipeErr, ok := err2.(*core.PipelineError)
 	if !ok {
-		t.Fatalf("expected PipelineError, got %T: %v", err2, pipeErr)
+		t.Fatalf("expected PipelineError, got %T", err2)
 	}
 	if pipeErr.Stage != "token_quota" {
 		t.Errorf("expected stage 'token_quota', got %q", pipeErr.Stage)
@@ -384,13 +405,13 @@ func (s *seqMockLLMStage) Process(ctx context.Context, env *core.Envelope) (*cor
 	return env, nil
 }
 
-func TestTokenQuotaMiddleware_998Plus102_ExceedsOnceThenBlocks(t *testing.T) {
+func TestTokenQuotaMiddleware_Overshoot_ExceedsOnceThenBlocks(t *testing.T) {
 	// 模拟场景：500 + 498 = 998 < 1000，第3次调用 + 500 = 1498 > 1000
-	// 998 < 1000 → 第3次应成功（超限额度）
+	// 998 < 1000 → 第3次应成功（允许超额度）
 	// 第4次 → 1498 >= 1000 → 拦截
 
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 1000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 1000)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
@@ -426,9 +447,40 @@ func TestTokenQuotaMiddleware_998Plus102_ExceedsOnceThenBlocks(t *testing.T) {
 	}
 }
 
+func TestTokenQuotaMiddleware_ContextDimensionPropagation(t *testing.T) {
+	// 验证 context 中注入了正确的 dimension
+	store := newMockQuotaStore()
+	store.Set(config.BotTokenQuotaKey("bot1"), 1000)
+	resolver := NewQuotaResolver(store)
+	state := NewTokenQuotaState()
+	mw := TokenQuotaMiddlewareWithState(resolver, state, quotaTestTP(), quotaTestLogger())
+
+	// 用一个能读取 context 中 dimension 的 stage 来验证
+	inner := &core.StageFunc{
+		StageName: "dim_checker",
+		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+			dim := llm.QuotaDimensionFromContext(ctx)
+			if dim != "bot:bot1" {
+				t.Errorf("expected 'bot:bot1' in context, got %q", dim)
+			}
+			env.Set("llm.result", &llm.GenerateResult{
+				Usage: llm.Usage{TotalTokens: 100},
+			})
+			return env, nil
+		},
+	}
+	wrapped := mw(inner)
+
+	env := core.NewEnvelope(core.Message{ID: "test", BotID: "bot1", Channel: "telegram:-123"})
+	_, err := wrapped.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestTokenQuotaMiddleware_NoLLMResult_NoAccumulation(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 100)
+	store.Set(config.BotTokenQuotaKey("bot1"), 100)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
@@ -447,8 +499,8 @@ func TestTokenQuotaMiddleware_NoLLMResult_NoAccumulation(t *testing.T) {
 
 func TestTokenQuotaMiddleware_DifferentBotsIndependent(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 1000)
-	store.Set("bot.bot2.token_quota", 1000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 1000)
+	store.Set(config.BotTokenQuotaKey("bot2"), 1000)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
@@ -462,22 +514,21 @@ func TestTokenQuotaMiddleware_DifferentBotsIndependent(t *testing.T) {
 		t.Fatalf("bot1 call 1 should succeed: %v", err)
 	}
 
-	// bot2 使用 900（其他 bot 的 900）
+	// bot2 使用 900（独立计数，不累加到 bot1）
 	env2 := core.NewEnvelope(core.Message{ID: "test2", BotID: "bot2", Channel: "telegram:-456"})
 	_, err = wrapped.Process(context.Background(), env2)
 	if err != nil {
 		t.Fatalf("bot2 should succeed: %v", err)
 	}
 
-	// bot1 再用 200 → 900+200=1100 > 1000 → 但现在 check before = 900 < 1000, 通过
-	// 下次被拦截
+	// bot1 再用 200 → 900+200=1100 > 1000 → check before = 900 < 1000, 通过
 	env3 := core.NewEnvelope(core.Message{ID: "test3", BotID: "bot1", Channel: "telegram:-123"})
 	_, err = wrapped.Process(context.Background(), env3)
 	if err != nil {
 		t.Fatalf("bot1 call 2 should succeed (900 < 1000): %v", err)
 	}
 
-	// bot1 用第3次 → blocked
+	// bot1 第3次 → blocked (1100 >= 1000)
 	env4 := core.NewEnvelope(core.Message{ID: "test4", BotID: "bot1", Channel: "telegram:-123"})
 	_, err = wrapped.Process(context.Background(), env4)
 	if err == nil {
@@ -494,7 +545,7 @@ func TestTokenQuotaMiddleware_DifferentBotsIndependent(t *testing.T) {
 
 func TestTokenQuotaMiddleware_ChannelDimension(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota.channel.telegram", 500)
+	store.Set(config.BotTokenQuotaChannelKey("bot1", "telegram"), 500)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
@@ -512,15 +563,13 @@ func TestTokenQuotaMiddleware_ChannelDimension(t *testing.T) {
 		t.Fatalf("first call should succeed: %v", err)
 	}
 
-	// 不同的 chat，同一 channel → 共享 channel 级额度
+	// 不同的 chat，同一 channel → 共享 channel 级额度（同 bot 内）
 	env2 := core.NewEnvelope(core.Message{
 		ID:       "test2",
 		BotID:    "bot1",
 		Channel:  "telegram:-456",
 		Metadata: map[string]any{"channel_type": "telegram", "chat_id": "-456"},
 	})
-
-	// 400 + 400 = 800 > 500 → check before = 400 < 500, succeeds but accumulates to 800
 	_, err2 := wrapped.Process(context.Background(), env2)
 	if err2 != nil {
 		t.Fatalf("second call should succeed (400 < 500): %v", err2)
@@ -541,8 +590,8 @@ func TestTokenQuotaMiddleware_ChannelDimension(t *testing.T) {
 
 func TestTokenQuotaMiddleware_ChatDimension(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota.channel.telegram.-123", 500)
-	store.Set("bot.bot1.token_quota.channel.telegram.-456", 500)
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-123"), 500)
+	store.Set(config.BotTokenQuotaChatKey("bot1", "telegram", "-456"), 500)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
@@ -612,16 +661,14 @@ func TestTokenQuotaMiddleware_ChatDimension(t *testing.T) {
 
 func TestTokenQuotaMiddleware_ConcurrentAccess(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 100000)
+	store.Set(config.BotTokenQuotaKey("bot1"), 100000)
 	resolver := NewQuotaResolver(store)
-	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
+	// 使用共享 state 以测试并发安全性
+	state := NewTokenQuotaState()
+	mw := TokenQuotaMiddlewareWithState(resolver, state, quotaTestTP(), quotaTestLogger())
 	inner := mockLLMResultStage(10)
 	wrapped := mw(inner)
-
-	stateMW := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
-	fakeLLM := mockLLMResultStage(10)
-	wrapped2 := stateMW(fakeLLM)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
@@ -633,27 +680,29 @@ func TestTokenQuotaMiddleware_ConcurrentAccess(t *testing.T) {
 				BotID:   "bot1",
 				Channel: "telegram:-123",
 			})
-			_, _ = wrapped2.Process(context.Background(), env)
+			_, _ = wrapped.Process(context.Background(), env)
 		}()
 	}
 	wg.Wait()
 
 	// 50 * 10 = 500 tokens, well under 100000
-	// 没有死锁或数据竞争即可
-	_ = wrapped
+	// 验证没有死锁或数据竞争
+	total := state.Usage("bot:bot1")
+	if total < 500 {
+		t.Errorf("expected at least 500 tokens, got %d", total)
+	}
 }
 
 func TestTokenQuotaMiddleware_SourceAsFallback(t *testing.T) {
 	// 没有 channel_type metadata → 使用 Source 作为 channelType
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota.channel.telegram", 1000)
+	store.Set(config.BotTokenQuotaChannelKey("bot1", "telegram"), 1000)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
 	inner := mockLLMResultStage(500)
 	wrapped := mw(inner)
 
-	// Source = "telegram" 会自动被用作 channelType
 	env := core.NewEnvelope(core.Message{
 		ID:      "test",
 		BotID:   "bot1",
@@ -666,16 +715,16 @@ func TestTokenQuotaMiddleware_SourceAsFallback(t *testing.T) {
 	}
 }
 
-func TestTokenQuotaMiddleware_ZeroTokenResult_StillCounts(t *testing.T) {
+func TestTokenQuotaMiddleware_ZeroTokenResult_Skipped(t *testing.T) {
 	store := newMockQuotaStore()
-	store.Set("bot.bot1.token_quota", 10)
+	store.Set(config.BotTokenQuotaKey("bot1"), 10)
 	resolver := NewQuotaResolver(store)
 	mw := TokenQuotaMiddleware(resolver, quotaTestTP(), quotaTestLogger())
 
 	zeroStage := mockLLMResultStage(0)
 	wrapped := mw(zeroStage)
 
-	// 调用 100 次零 token → 不会累积到超过限额
+	// 调用 100 次零 token → 不会累积到超过限额（used==0 被跳过）
 	for i := 0; i < 100; i++ {
 		env := core.NewEnvelope(core.Message{ID: "test", BotID: "bot1", Channel: "telegram:-123"})
 		_, err := wrapped.Process(context.Background(), env)
@@ -690,10 +739,10 @@ func TestTokenQuotaMiddleware_ZeroTokenResult_StillCounts(t *testing.T) {
 // ============================================================================
 
 func TestTokenQuotaState_Snapshot(t *testing.T) {
-	s := newTokenQuotaState()
+	s := NewTokenQuotaState()
 	s.AddUsage("bot:bot1", 100)
-	s.AddUsage("channel:telegram", 200)
-	s.AddUsage("chat:telegram:-123", 300)
+	s.AddUsage("bot:bot1:channel:telegram", 200)
+	s.AddUsage("bot:bot1:chat:telegram:-123", 300)
 
 	snap := s.Snapshot()
 	if len(snap) != 3 {
@@ -702,16 +751,16 @@ func TestTokenQuotaState_Snapshot(t *testing.T) {
 	if snap["bot:bot1"] != 100 {
 		t.Errorf("expected bot:bot1=100, got %d", snap["bot:bot1"])
 	}
-	if snap["channel:telegram"] != 200 {
-		t.Errorf("expected channel:telegram=200, got %d", snap["channel:telegram"])
+	if snap["bot:bot1:channel:telegram"] != 200 {
+		t.Errorf("expected bot:bot1:channel:telegram=200, got %d", snap["bot:bot1:channel:telegram"])
 	}
-	if snap["chat:telegram:-123"] != 300 {
-		t.Errorf("expected chat:telegram:-123=300, got %d", snap["chat:telegram:-123"])
+	if snap["bot:bot1:chat:telegram:-123"] != 300 {
+		t.Errorf("expected bot:bot1:chat:telegram:-123=300, got %d", snap["bot:bot1:chat:telegram:-123"])
 	}
 }
 
 func TestTokenQuotaState_Reset(t *testing.T) {
-	s := newTokenQuotaState()
+	s := NewTokenQuotaState()
 	s.AddUsage("bot:bot1", 1000)
 	if s.Usage("bot:bot1") != 1000 {
 		t.Fatal("expected 1000 before reset")
