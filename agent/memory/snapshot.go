@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/prompt"
+	"go.uber.org/zap"
 )
 
 // ============================================================================
@@ -99,6 +100,9 @@ type Snapshot struct {
 
 	// 脏标记：工具写入后设为 true，表示下次构建时应刷新
 	dirty bool
+
+	// logger 可选日志记录器（用于记录刷新失败等非致命错误）
+	logger *zap.SugaredLogger
 }
 
 // NewSnapshot 创建快照管理器。
@@ -123,6 +127,11 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		}
 	}
 	return &Snapshot{config: cfg}
+}
+
+// SetLogger 设置日志记录器（可选，用于记录非致命错误）。
+func (s *Snapshot) SetLogger(logger *zap.SugaredLogger) {
+	s.logger = logger
 }
 
 // Init 初始化快照，绑定检索器和作用域，并执行首次检索。
@@ -385,7 +394,10 @@ func (s *Snapshot) SnapshotPromptSection() *prompt.Section {
 // 应在每轮系统提示组装前调用。
 func (s *Snapshot) UpdatePromptSection(ctx context.Context, section *prompt.Section) {
 	if s.config.Mode != ModeFrozen {
-		_, _ = s.Refresh(ctx)
+		if _, err := s.Refresh(ctx); err != nil && s.logger != nil {
+			s.logger.Warnw("snapshot: refresh failed, using cached snapshot",
+				"mode", s.config.Mode, "err", err)
+		}
 	}
 
 	s.mu.RLock()

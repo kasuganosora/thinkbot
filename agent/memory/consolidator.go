@@ -141,10 +141,12 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 	prompt := c.buildPrompt(l0Entries, existing)
 
 	// 调用 LLM
+	maxTokens := 8192
 	result, err := c.config.Provider.DoGenerate(ctx, llm.GenerateParams{
-		Model:    c.config.Model,
-		System:   c.config.SystemPrompt,
-		Messages: []llm.Message{llm.UserMessage(prompt)},
+		Model:     c.config.Model,
+		System:    c.config.SystemPrompt,
+		Messages:  []llm.Message{llm.UserMessage(prompt)},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		span.RecordError(err)

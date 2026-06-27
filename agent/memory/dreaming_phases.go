@@ -140,9 +140,14 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 		fmt.Fprintf(&sb, "--- 片段 %d ---\n%s\n\n", i+1, strutil.Truncate(s.content, 500))
 	}
 
+	maxTokens := d.config.MaxDreamTokens
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
 	result, err := d.provider.DoGenerate(ctx, llm.GenerateParams{
-		System:   defaultLightExtractPrompt,
-		Messages: []llm.Message{llm.UserMessage(sb.String())},
+		System:    defaultLightExtractPrompt,
+		Messages:  []llm.Message{llm.UserMessage(sb.String())},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		d.logger.Warnw("dreaming light: LLM failed, rule-based fallback", "err", err)
@@ -283,9 +288,14 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 		fmt.Fprintf(&sb, "[key:%s] %s\n", c.Key, strutil.Truncate(c.Content, 100))
 	}
 
+	maxTokens := 2048
+	if d.config.MaxDreamTokens > 0 && d.config.MaxDreamTokens < 2048 {
+		maxTokens = d.config.MaxDreamTokens
+	}
 	result, err := d.provider.DoGenerate(ctx, llm.GenerateParams{
-		System:   "你是记忆主题分类助手。",
-		Messages: []llm.Message{llm.UserMessage(sb.String())},
+		System:    "你是记忆主题分类助手。",
+		Messages:  []llm.Message{llm.UserMessage(sb.String())},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		return d.clusterByCategory(candidates)

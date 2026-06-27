@@ -271,10 +271,12 @@ func (p *LLMProfiler) buildClusterPrompt(cluster profileCluster, l2, existing []
 
 // callLLM 调用 LLM 并解析结果。
 func (p *LLMProfiler) callLLM(ctx context.Context, prompt string) ([]ProfileItem, error) {
+	maxTokens := 4096
 	result, err := p.config.Provider.DoGenerate(ctx, llm.GenerateParams{
-		Model:    p.config.Model,
-		System:   p.config.SystemPrompt,
-		Messages: []llm.Message{llm.UserMessage(prompt)},
+		Model:     p.config.Model,
+		System:    p.config.SystemPrompt,
+		Messages:  []llm.Message{llm.UserMessage(prompt)},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "profiler: LLM call failed")
