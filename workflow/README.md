@@ -23,17 +23,19 @@
 ```
 
 1. **Analyzer** — 使用 LLM（JSON 模式）将需求文本分解为 DAG 节点图，自动识别依赖关系和审查需求
-2. **Scheduler** — 按拓扑序调度，同层无依赖节点并行执行（semaphore 限流）
-3. **Executor** — 每个节点由独立 SubAgent 执行；`review=true` 的节点执行后启动 Review 自循环
-4. **全程异步** — 提交后立即返回 `task_id`，LLM 通过工具轮询进度
+2. **Compile** — 编译工作流图：校验 DAG 完整性（无环、无悬空引用）+ 计算拓扑排序 + 构建邻接表和入度缓存
+3. **Scheduler** — 按拓扑序调度，同层无依赖节点并行执行（semaphore 限流）；下游节点自动注入上游产物上下文
+4. **Executor** — 每个节点由独立 SubAgent 执行；`review=true` 的节点执行后启动 Review 自循环
+5. **全程异步** — 提交后立即返回 `task_id`，LLM 通过工具轮询进度
 
 ## 架构
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `Manager` | `manager.go` | 统一入口：Submit / GetStatus / ListNodes / Control |
-| `Analyzer` | `analyzer.go` | LLM 需求分析 + DAG 生成 + 校验 |
-| `Scheduler` | `scheduler.go` | DAG 拓扑调度、并行限流、重试/Review 循环、级联跳过 |
+| `Manager` | `manager.go` | 统一入口：Submit / GetStatus / ListNodes / Control / Recover |
+| `Analyzer` | `analyzer.go` | LLM 需求分析 + DAG 生成 |
+| `Compile` | `dag.go` | DAG 编译：校验 + 拓扑排序 + 邻接表/入度缓存 + 上游结果聚合 |
+| `Scheduler` | `scheduler.go` | DAG 拓扑调度、并行限流、重试/Review 循环、级联跳过、上游结果注入 |
 | `Executor` | `executor.go` | 节点执行（SubAgent Delegate）、Review 审查、带反馈迭代 |
 | `DAG` | `dag.go` | 纯领域算法：校验、环检测、就绪节点计算、级联跳过、树构建 |
 | `Repository` | `repository.go` | 内存优先 + DB 双写持久化 |
@@ -54,6 +56,43 @@
 | `task_control` | 控制操作：重试指定失败节点 / 终止整个工作流 |
 
 > 工具命名与主流 LLM 预训练中的 agentic 工具名（如 Claude 的 Task、LangChain 的 TaskTool）对齐，降低 LLM 适配成本。
+
+## 图编译 (Compile)
+
+Analyzer 生成 DAG 节点后、Scheduler 运行前，`Workflow.Compile()` 统一执行：
+
+- **DAG 校验** — 无环检测、ID 唯一性、依赖无悬空引用
+- **拓扑排序** — Kahn 算法计算节点执行顺序缓存
+- **邻接索引** — 构建反向邻接表（nodeID → 下游节点列表）、入度缓存、根节点列表
+
+编译后 `ReadyNodes` / `CascadeSkip` / `BuildTree` 复用预计算索引，将 O(n×deps) 查询降为 O(n)。
+
+```go
+wf := NewWorkflow("wf", "req", nodes)
+if err := wf.Compile(); err != nil {
+    // DAG 校验失败 → 标记为 WorkflowFailed
+}
+// wf.Compiled() == true, 后续 ReadyNodes 走快速路径
+```
+
+崩溃恢复路径中也会自动重新编译从 DB 反序列化的 Workflow。
+
+## 上游结果注入
+
+Scheduler 在执行节点前，自动聚合已完成依赖节点的产物，注入为 SubAgent 输入前缀：
+
+```
+[上游任务汇总]
+n1(提取Q1数据): 营收增长12%...
+n2(市场分析): 份额+3%...
+
+[你的任务]
+综合以上数据写投资报告...
+```
+
+- 未完成的依赖自动排除（运行时自然为空）
+- 单结果 >4000 字符截断，总上下文 >8000 字符省略
+- 对 LLM 零感知 — Analyzer prompt 不需要改动，依赖关系语义自然传递
 
 ## 节点生命周期
 

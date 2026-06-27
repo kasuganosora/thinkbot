@@ -94,7 +94,17 @@ type Workflow struct {
 
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
+
+	// 编译缓存（由 Compile() 填充，不序列化）
+	compiled   bool                `json:"-"`
+	topoOrder  []string            `json:"-"` // 拓扑排序后的节点 ID 序列
+	reverseAdj map[string][]string `json:"-"` // nodeID → 依赖该节点的节点列表（下游）
+	inDegree   map[string]int      `json:"-"` // nodeID → 入度（依赖数）
+	roots      []string            `json:"-"` // 入度为 0 的根节点
 }
+
+// Compiled returns true if Compile() has been called successfully.
+func (wf *Workflow) Compiled() bool { return wf.compiled }
 
 // NewWorkflow 创建工作流并初始化节点索引。
 func NewWorkflow(id, requirement string, nodes []*DAGNode) *Workflow {
