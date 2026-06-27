@@ -241,7 +241,7 @@ func (s *MultimodalStage) transcribeAttachment(ctx context.Context, att core.Att
 		MaxTokens:   &maxTokens,
 	}
 
-	result, err := s.config.VisionProvider.DoGenerate(ctx, params)
+	result, err := s.config.VisionProvider.DoGenerate(llm.WithStatsFeature(ctx, "vision"), params)
 	if err != nil {
 		return "", fmt.Errorf("vision provider generate: %w", err)
 	}

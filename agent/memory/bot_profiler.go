@@ -91,7 +91,7 @@ func (p *BotProfileProfiler) ExtractProfile(ctx context.Context, l1Entries, l2En
 		"prompt_len", len(prompt))
 
 	maxTokens := 2048
-	result, err := p.config.Provider.DoGenerate(ctx, llm.GenerateParams{
+	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "bot_profiler"), llm.GenerateParams{
 		Model:     p.config.Model,
 		System:    p.config.SystemPrompt,
 		Messages:  []llm.Message{llm.UserMessage(prompt)},

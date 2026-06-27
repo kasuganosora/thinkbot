@@ -270,7 +270,7 @@ func (f *FormationPipeline) extractFacts(ctx context.Context, userContent, assis
 	sb.WriteString("如果对话中没有值得记忆的内容，输出空数组 []")
 
 	maxTokens := 2048
-	resp, err := f.config.Provider.DoGenerate(ctx, llm.GenerateParams{
+	resp, err := f.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_formation"), llm.GenerateParams{
 		Model:     f.config.Model,
 		System:    f.config.SystemPrompt,
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},
@@ -340,7 +340,7 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 	sb.WriteString("事实顺序与输入顺序一致。")
 
 	maxTokens := 4096
-	resp, err := f.config.Provider.DoGenerate(ctx, llm.GenerateParams{
+	resp, err := f.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_formation"), llm.GenerateParams{
 		Model:     f.config.Model,
 		System:    f.config.SystemPrompt,
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},

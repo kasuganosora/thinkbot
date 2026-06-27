@@ -149,7 +149,7 @@ func (c *LLMCompressor) Compress(ctx context.Context, entries []Entry) (*Compres
 		MaxTokens: &maxTokens,
 	}
 
-	result, err := c.config.Provider.DoGenerate(ctx, params)
+	result, err := c.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_compression"), params)
 	if err != nil {
 		span.RecordError(err)
 		c.logger.Errorw("compression LLM call failed", "err", err)

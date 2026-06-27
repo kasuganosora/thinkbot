@@ -51,13 +51,14 @@ import (
 
 // BotService 管理 Bot 定义和运行时实例。
 type BotService struct {
-	db       *gorm.DB
-	store    *config.Store
-	mgr      *bot.BotManager
-	logger   *zap.SugaredLogger
-	tp       trace.TracerProvider
-	mp       metric.MeterProvider
-	eventBus outbound.EventBus
+	db            *gorm.DB
+	store         *config.Store
+	mgr           *bot.BotManager
+	logger        *zap.SugaredLogger
+	tp            trace.TracerProvider
+	mp            metric.MeterProvider
+	eventBus      outbound.EventBus
+	statsRecorder llm.UsageRecorder // 可选，nil 时不记录 token 统计
 
 	mu              sync.RWMutex
 	channels        map[string]*WebChannel         // botID → WebChannel
@@ -68,7 +69,7 @@ type BotService struct {
 }
 
 // NewBotService 创建 BotService。
-func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus) *BotService {
+func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder) *BotService {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
@@ -86,6 +87,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		tp:              tp,
 		mp:              mp,
 		eventBus:        eventBus,
+		statsRecorder:   statsRecorder,
 		channels:        make(map[string]*WebChannel),
 		botInstances:    make(map[string]*bot.Bot),
 		dreamingBundles: make(map[string]*bot.DreamingBundle),
@@ -209,12 +211,27 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 创建共享 Token 配额状态 + 包裹 Provider
 	// - TokenQuotaState 由 pipeline 中间件和 QuotaRecordingProvider 共享
 	// - QuotaRecordingProvider 拦截所有 LLM 调用（subagent、workflow、memory 等）
-	//   通过 context 中的 dimension 自动记账，防止漏记
+	//   通过 context 中的 dimension 自动记账配额
+	// - StatsRecordingProvider 拦截所有 LLM 调用，自动记录到 stats_usage_daily
+	//   feature 从 context 读取（WithStatsFeature），pipeline stages 通过
+	//   WithStatsSkip 跳过以避免双重计数
 	quotaState := pipeline.NewTokenQuotaState()
 	quotaRecorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
-	bundle.Main = llm.NewQuotaRecordingProvider(bundle.Main, quotaRecorder)
+	bundle.Main = llm.NewStatsRecordingProvider(
+		llm.NewQuotaRecordingProvider(bundle.Main, quotaRecorder),
+		s.statsRecorder, id,
+	)
 	if bundle.Light != nil {
-		bundle.Light = llm.NewQuotaRecordingProvider(bundle.Light, quotaRecorder)
+		bundle.Light = llm.NewStatsRecordingProvider(
+			llm.NewQuotaRecordingProvider(bundle.Light, quotaRecorder),
+			s.statsRecorder, id,
+		)
+	}
+	if bundle.Vision != nil {
+		bundle.Vision = llm.NewStatsRecordingProvider(
+			llm.NewQuotaRecordingProvider(bundle.Vision, quotaRecorder),
+			s.statsRecorder, id,
+		)
 	}
 
 	// 创建 LLM Stage
@@ -309,6 +326,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 	}
 
+	// 创建复合 UsageRecorder：同时记录到 RunJournal 和 stats
+	// pipeline stages 通过 recordUsage() 调用此 recorder，
+	// StatsRecordingProvider 在 WithStatsSkip 标记下会跳过，避免双重计数
+	stageUsageRecorder := llm.NewMultiUsageRecorder(journal, s.statsRecorder)
+
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
@@ -322,7 +344,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			ToolResolver:    toolMgr,
 			MaxSteps:        10,
 			StreamPublisher: s.eventBus,
-			UsageRecorder:   journal, // RunJournal 记录每次 LLM 调用
+			UsageRecorder:   stageUsageRecorder, // RunJournal + stats 双写
 			ReductionConfig: llm.DefaultReductionConfigPtr(),
 		},
 		s.tp,

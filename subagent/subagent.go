@@ -106,7 +106,7 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 
 	params := sa.buildParams(msgs)
 
-	result, err := sa.provider.DoGenerate(ctx, params)
+	result, err := sa.provider.DoGenerate(llm.WithStatsFeature(ctx, "subagent"), params)
 	if err != nil {
 		return nil, errs.Wrapf(err, "subagent %q: LLM generate failed", sa.name)
 	}
@@ -139,7 +139,7 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 
 	params := sa.buildParams(msgs)
 
-	result, err := sa.provider.DoStream(ctx, params)
+	result, err := sa.provider.DoStream(llm.WithStatsFeature(ctx, "subagent"), params)
 	if err != nil {
 		return nil, errs.Wrapf(err, "subagent %q: LLM stream failed", sa.name)
 	}

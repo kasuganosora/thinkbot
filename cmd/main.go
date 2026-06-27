@@ -16,6 +16,7 @@ import (
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/db"
 	"github.com/kasuganosora/thinkbot/identity"
+	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -61,6 +62,7 @@ func main() {
 		auth.Module,
 		bot.Module,
 		identity.Module,
+		stats.Module,
 		api.Module,
 
 		// 优雅关闭
