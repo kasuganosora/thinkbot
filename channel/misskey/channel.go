@@ -484,6 +484,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		"display_name": displayName,
 		"acct":         username,
 		"note_type":    noteType,
+		"channel_type": "misskey", // Channel 类型，供 ToolSessionContext 使用
 	}
 	if len(note.Files) > 0 {
 		metadata["file_count"] = len(note.Files)

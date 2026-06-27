@@ -459,6 +459,27 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("channel created", "type", cd.Type, "name", cd.Name)
 	}
 
+	// 注册 Channel 专属工具（每个 Channel 实现 ChannelToolProvider 接口）
+	// 通过闭包持有 Channel API 客户端，支持跨 Channel 工具调用
+	for _, ch := range allChannels {
+		if ctp, ok := ch.(agenttools.ChannelToolProvider); ok {
+			defs, err := ctp.ChannelTools(context.Background())
+			if err != nil {
+				s.logger.Warnw("failed to get channel tools",
+					"channel_name", ch.Name(), "channel_type", ch.Type(), "err", err)
+				continue
+			}
+			for _, def := range defs {
+				if err := toolMgr.Register(def); err != nil {
+					s.logger.Warnw("failed to register channel tool",
+						"tool", def.Name, "channel", ch.Name(), "err", err)
+				}
+			}
+			s.logger.Infow("channel tools registered",
+				"channel_name", ch.Name(), "channel_type", ch.Type(), "count", len(defs))
+		}
+	}
+
 	// 创建梦境巩固子系统（如果配置了）
 	var dreamScheduler *cron.Scheduler
 	var dreamBundle *bot.DreamingBundle

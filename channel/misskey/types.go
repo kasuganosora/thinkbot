@@ -89,9 +89,11 @@ const (
 // ----------------------------------------------------------------------------
 
 // createNoteRequest 对应 notes/create API。
+// 注意：根据 Misskey 源码，text 是条件必需的——仅在无 renoteId/fileIds/poll 时强制要求。
+// 纯转发或带文件帖子可以省略 text。
 type createNoteRequest struct {
 	I          string   `json:"i"`
-	Text       string   `json:"text"`
+	Text       string   `json:"text,omitempty"`
 	ReplyID    string   `json:"replyId,omitempty"`
 	RenoteID   string   `json:"renoteId,omitempty"`
 	Visibility string   `json:"visibility,omitempty"`
@@ -121,4 +123,90 @@ type reactionRequest struct {
 	I        string `json:"i"`
 	NoteID   string `json:"noteId"`
 	Reaction string `json:"reaction,omitempty"` // 仅 create 需要
+}
+
+// deleteNoteRequest 对应 notes/delete。
+type deleteNoteRequest struct {
+	I      string `json:"i"`
+	NoteID string `json:"noteId"`
+}
+
+// ----------------------------------------------------------------------------
+// 关注/取消关注 API 类型
+// ----------------------------------------------------------------------------
+
+// followRequest 对应 following/create。
+type followRequest struct {
+	I      string `json:"i"`
+	UserID string `json:"userId"`
+}
+
+// unfollowRequest 对应 following/delete。
+type unfollowRequest struct {
+	I      string `json:"i"`
+	UserID string `json:"userId"`
+}
+
+// ----------------------------------------------------------------------------
+// 文件上传 API 类型
+// ----------------------------------------------------------------------------
+
+// driveUploadResponse 对应 drive/files/create 的响应。
+//
+//nolint:unused // 预留：供 future misskey_upload_file 工具使用
+type driveUploadResponse struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	URL      string `json:"url"`
+	Size     int64  `json:"size"`
+	IsFolder bool   `json:"isFolder"`
+}
+
+// ----------------------------------------------------------------------------
+// 用户搜索 API 类型
+// ----------------------------------------------------------------------------
+
+// searchUserRequest 对应 users/search。
+type searchUserRequest struct {
+	I      string `json:"i"`
+	Query  string `json:"query"`
+	Limit  int    `json:"limit,omitempty"`
+	Origin string `json:"origin,omitempty"` // "local"/"remote"/"combined"
+}
+
+// UserDetail 包含用户详细信息（users/show 响应）。
+type UserDetail struct {
+	ID             string `json:"id"`
+	Name           string `json:"name,omitempty"`
+	Username       string `json:"username"`
+	Host           string `json:"host,omitempty"`
+	Description    string `json:"description,omitempty"`
+	FollowersCount int    `json:"followersCount"`
+	FollowingCount int    `json:"followingCount"`
+	NotesCount     int    `json:"notesCount"`
+	IsFollowing    bool   `json:"isFollowing"`
+	IsFollowed     bool   `json:"isFollowed"`
+	AvatarURL      string `json:"avatarUrl,omitempty"`
+}
+
+// followingListRequest 对应 users/following。
+//
+//nolint:unused // 预留：供 getUserDetail API 方法使用
+type getUserDetailRequest struct {
+	I      string `json:"i"`
+	UserID string `json:"userId"`
+}
+
+type followingListRequest struct {
+	I      string `json:"i"`
+	UserID string `json:"userId,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+// FollowingUser 是关注列表中的用户条目。
+type FollowingUser struct {
+	ID       string `json:"id"`
+	Followee User   `json:"followee"`
+	Follower User   `json:"follower"`
 }

@@ -169,3 +169,71 @@ func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64
 func apiTimeoutMultiplier(timeoutSec int) time.Duration {
 	return time.Duration(timeoutSec+10) * time.Second
 }
+
+// banChatMember 踢出群成员（封禁）。
+func (a *apiClient) banChatMember(ctx context.Context, chatID, userID int64) error {
+	return a.simplePost(ctx, "banChatMember", banChatMemberRequest{
+		ChatID: chatID,
+		UserID: userID,
+	})
+}
+
+// unbanChatMember 解除群成员封禁。
+func (a *apiClient) unbanChatMember(ctx context.Context, chatID, userID int64) error {
+	return a.simplePost(ctx, "unbanChatMember", unbanChatMemberRequest{
+		ChatID: chatID,
+		UserID: userID,
+	})
+}
+
+// getChat 获取聊天详情。
+func (a *apiClient) getChat(ctx context.Context, chatID int64) (*getChatResponse, error) {
+	var resp apiResponse[getChatResponse]
+	if err := a.client.GetJSON(ctx, fmt.Sprintf("getChat?chat_id=%d", chatID), &resp); err != nil {
+		return nil, errs.Wrap(err, "telegram getChat")
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("telegram getChat failed: [%d] %s", resp.ErrorCode, resp.Description)
+	}
+	return &resp.Result, nil
+}
+
+// pinChatMessage 置顶消息。
+func (a *apiClient) pinChatMessage(ctx context.Context, chatID, messageID int64) error {
+	return a.simplePost(ctx, "pinChatMessage", pinChatMessageRequest{
+		ChatID:    chatID,
+		MessageID: messageID,
+	})
+}
+
+// sendPhoto 通过 URL 发送图片。
+// 预留：计划用于未来的 telegram_send_photo 工具。
+//
+//nolint:unused // 预留 API 方法
+func (a *apiClient) sendPhoto(ctx context.Context, chatID int64, photoURL, caption string) error {
+	return a.simplePost(ctx, "sendPhoto", sendPhotoRequest{
+		ChatID:  chatID,
+		Photo:   photoURL,
+		Caption: caption,
+	})
+}
+
+// simplePost 发送带 JSON body 的 POST 请求并检查 OK 状态。
+func (a *apiClient) simplePost(ctx context.Context, endpoint string, body any) error {
+	resp, err := a.client.Post(endpoint).
+		SetContext(ctx).
+		SetJSONBody(body).
+		Do()
+	if err != nil {
+		return errs.Wrapf(err, "telegram %s", endpoint)
+	}
+
+	var apiResp apiResponse[any]
+	if err := resp.JSON(&apiResp); err != nil {
+		return errs.Wrapf(err, "telegram %s parse", endpoint)
+	}
+	if !apiResp.OK {
+		return fmt.Errorf("telegram %s failed: [%d] %s", endpoint, apiResp.ErrorCode, apiResp.Description)
+	}
+	return nil
+}

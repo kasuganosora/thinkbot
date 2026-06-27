@@ -280,6 +280,7 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		"message_id":   msg.MessageID,
 		"reply_target": chatID, // outbound 回写目标（Telegram: chatID）
 		"date":         msg.Date,
+		"channel_type": "telegram", // Channel 类型，供 ToolSessionContext 使用
 	}
 	if displayName != "" {
 		metadata["user_display_name"] = displayName
