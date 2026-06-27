@@ -144,7 +144,12 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 	if maxTokens <= 0 {
 		maxTokens = 4096
 	}
+	model := d.model
+	if model == "" {
+		return d.extractCandidatesRuleBased(snippets)
+	}
 	result, err := d.provider.DoGenerate(ctx, llm.GenerateParams{
+		Model:     llm.ChatModel(model),
 		System:    defaultLightExtractPrompt,
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},
 		MaxTokens: &maxTokens,

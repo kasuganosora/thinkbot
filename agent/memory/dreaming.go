@@ -121,6 +121,7 @@ func (r *DreamReport) Duration() time.Duration {
 type DreamConfig struct {
 	Enabled          bool
 	Schedule         string // cron 表达式，默认 "0 3 * * *"
+	Model            string // LLM 模型名（从 bot 主模型/经济模型读取）
 	Scopes           []Scope
 	Light            LightPhaseConfig
 	REM              REMPhaseConfig
@@ -189,6 +190,7 @@ type DreamManager struct {
 	config     DreamConfig
 	manager    *TieredManager
 	provider   llm.Provider
+	model      string
 	tracer     trace.Tracer
 	logger     *zap.SugaredLogger
 	mu         sync.Mutex
@@ -199,6 +201,7 @@ type DreamManager struct {
 }
 
 // NewDreamManager 创建梦境管理器。
+// model 从 bot 配置中的主模型/经济模型读取，用于 Light/REM 相位的 LLM 调用。
 func NewDreamManager(
 	config DreamConfig,
 	manager *TieredManager,
@@ -220,6 +223,7 @@ func NewDreamManager(
 		config:     config,
 		manager:    manager,
 		provider:   provider,
+		model:      config.Model,
 		tracer:     tp.Tracer("github.com/kasuganosora/thinkbot/agent/memory/dreaming"),
 		logger:     logger.With("component", "dreaming"),
 		state:      state,
