@@ -259,5 +259,12 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 		}
 	}
 
+	// 从消息 Metadata 读取 channel_type（由 Channel 在 handleUpdate/handleNote 中注入）
+	if env.Message.Metadata != nil {
+		if ct, ok := env.Message.Metadata["channel_type"].(string); ok {
+			sctx.SourceChannelType = ct
+		}
+	}
+
 	return sctx
 }

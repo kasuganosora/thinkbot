@@ -44,6 +44,22 @@ func (f ToolFunc) Tools(ctx context.Context, sctx *ToolSessionContext) ([]llm.To
 }
 
 // ============================================================================
+// ChannelToolProvider — Channel 专属工具提供者
+// ============================================================================
+
+// ChannelToolProvider 由 Channel 实现，返回该 Channel 专属的工具定义。
+// 与 ToolProvider（per-request 动态解析）不同，ChannelToolProvider 是静态的：
+// BotService 在 StartBot 时遍历所有 Channel 一次性收集工具并注册到 ToolManager。
+//
+// 工具通过闭包捕获 Channel 的 API 客户端，因此跨 Channel 调用天然可行——
+// Misskey 工具始终用 Misskey 的 API，无论从哪个 Channel 触发。
+type ChannelToolProvider interface {
+	// ChannelTools 返回此 Channel 提供的全部工具定义。
+	// 返回 nil 或空切片表示此 Channel 无专属工具。
+	ChannelTools(ctx context.Context) ([]ToolDef, error)
+}
+
+// ============================================================================
 // ToolSessionContext — 工具会话上下文
 // ============================================================================
 
@@ -68,6 +84,11 @@ type ToolSessionContext struct {
 	// IsSubagent 是否在 SubAgent 场景下调用。
 	// SubAgent 场景通常不应返回联邦工具或记忆相关工具。
 	IsSubagent bool
+
+	// SourceChannelType 消息来源 Channel 的类型（"telegram"/"misskey"/"web"）。
+	// 由 Channel 在构建消息时注入到 Metadata["channel_type"]，
+	// envelopeToSessionContext 读取后设置。供工具提供者做场景感知决策。
+	SourceChannelType string
 
 	// Extra 额外上下文数据（插件/Stage 注入的自定义参数）。
 	Extra map[string]any

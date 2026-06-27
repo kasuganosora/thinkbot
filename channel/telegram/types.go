@@ -158,3 +158,46 @@ type editMessageTextRequest struct {
 	Text      string `json:"text"`
 	ParseMode string `json:"parse_mode,omitempty"`
 }
+
+// ----------------------------------------------------------------------------
+// Channel 工具 API 请求类型
+// ----------------------------------------------------------------------------
+
+// banChatMemberRequest 对应 banChatMember 方法。
+type banChatMemberRequest struct {
+	ChatID int64 `json:"chat_id"`
+	UserID int64 `json:"user_id"`
+}
+
+// unbanChatMemberRequest 对应 unbanChatMember 方法。
+type unbanChatMemberRequest struct {
+	ChatID int64 `json:"chat_id"`
+	UserID int64 `json:"user_id"`
+}
+
+// pinChatMessageRequest 对应 pinChatMessage 方法。
+type pinChatMessageRequest struct {
+	ChatID    int64 `json:"chat_id"`
+	MessageID int64 `json:"message_id"`
+}
+
+// sendPhotoRequest 对应 sendPhoto 方法（通过 URL 发送）。
+//
+//nolint:unused // 预留：供 sendPhoto API 方法使用
+type sendPhotoRequest struct {
+	ChatID  int64  `json:"chat_id"`
+	Photo   string `json:"photo"` // file_id 或 HTTP URL
+	Caption string `json:"caption,omitempty"`
+}
+
+// getChatResponse 是 getChat 返回的聊天详情。
+type getChatResponse struct {
+	ID          int64  `json:"id"`
+	Type        string `json:"type"`
+	Title       string `json:"title,omitempty"`
+	Username    string `json:"username,omitempty"`
+	FirstName   string `json:"first_name,omitempty"`
+	LastName    string `json:"last_name,omitempty"`
+	Description string `json:"description,omitempty"`
+	MemberCount int    `json:"member_count,omitempty"`
+}
