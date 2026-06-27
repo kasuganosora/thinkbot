@@ -306,6 +306,10 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 	if d.provider == nil {
 		return d.clusterByCategory(candidates)
 	}
+	model := d.model
+	if model == "" {
+		return d.clusterByCategory(candidates)
+	}
 
 	var sb strings.Builder
 	sb.WriteString("为以下候选记忆分配 1-3 个主题标签。输出 JSON: [{\"key\":\"候选key\",\"tags\":[\"标签\"]}]\n\n")
@@ -321,6 +325,7 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 		maxTokens = d.config.MaxDreamTokens
 	}
 	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_cluster"), llm.GenerateParams{
+		Model:     llm.ChatModel(model),
 		System:    "你是记忆主题分类助手。",
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},
 		MaxTokens: &maxTokens,
