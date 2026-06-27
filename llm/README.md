@@ -615,6 +615,7 @@ llm/
 ├── orchestrate.go      # 多步编排：OrchestrateGenerate / OrchestrateStream
 ├── patchtoolcalls.go   # PatchToolCalls — 修补悬挂工具调用
 ├── reduction.go        # ContextReduction — 工具结果超限截断
+├── quota_provider.go   # QuotaRecordingProvider — 拦截所有 LLM 调用自动记账 Token 用量
 ├── model.go            # Model 类型
 ├── usage.go            # Usage / Token 统计
 ├── openai/             # OpenAI provider 实现
@@ -680,3 +681,33 @@ FinishPart
 ```
 
 多步编排时，每个步骤重复 `StartStepPart...FinishStepPart`，最后只有一个 `FinishPart`。
+
+---
+
+## QuotaRecordingProvider — 全链路 Token 记账
+
+装饰器模式包裹任意 `Provider`，在每次 `DoGenerate` / `DoStream` 完成后自动从 context 读取配额维度并记账。确保 SubAgent、Workflow、Memory 等绕过 pipeline 中间件的调用也能被追踪。
+
+```go
+// 1. 准备 recorder（签名与 pipeline.TokenQuotaState.AddUsage 兼容）
+recorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
+
+// 2. 包裹 Provider
+wrappedProv := llm.NewQuotaRecordingProvider(originalProv, recorder)
+
+// 3. 在调用链上游注入 dimension（通常由 pipeline 中间件完成）
+ctx = llm.WithQuotaDimension(ctx, "bot:bot1:chat:telegram:-123")
+
+// 之后所有经过 wrappedProv 的调用都会自动记账
+result, err := wrappedProv.DoGenerate(ctx, params)
+// → recorder("bot:bot1:chat:telegram:-123", result.Usage.TotalTokens)
+```
+
+### Context 辅助函数
+
+| 函数 | 说明 |
+|------|------|
+| `WithQuotaDimension(ctx, dim)` | 将配额维度字符串注入 context |
+| `QuotaDimensionFromContext(ctx)` | 从 context 读取配额维度（未设置时返回空串） |
+
+`QuotaRecordingProvider` 在 `DoStream` 时通过拦截 `FinishPart` 的 `TotalUsage.TotalTokens` 完成记账。如果 context 中没有 dimension（未设置），则跳过记账，不影响正常调用。

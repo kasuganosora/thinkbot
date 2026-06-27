@@ -12,6 +12,7 @@
 - **线程安全**：`Envelope` 内部使用 RWMutex 保护共享状态
 - **循环检测中间件**（`loop_detection.go`）：检测重复工具调用模式，注入软/硬警告
 - **Token 预算中间件**（`token_budget.go`）：按 Channel 追踪累计 Token 用量，阈值告警和硬限制
+- **Token 月度配额中间件**（`token_quota.go`）：按 Bot / Channel / Chat 维度追踪月度 Token 消耗，支持分级限额和超额拦截
 - **运行日志中间件**（`run_journal.go`）：异步缓冲记录 LLM 用量到 DB，通过 context 注入追踪元数据
 
 ## 关键类型
@@ -25,6 +26,9 @@
 | `Observable` | 可观测性适配器 |
 | `LoopDetectionMiddleware` | 循环检测中间件（滑窗 + digest 重复检测） |
 | `TokenBudgetMiddleware` | Token 预算中间件（按 Channel 累计用量 + 阈值控制） |
+| `TokenQuotaMiddleware` / `TokenQuotaMiddlewareWithState` | Token 月度配额中间件（Bot/Channel/Chat 分级限额 + 共享 State） |
+| `TokenQuotaState` | 配额状态管理器（月度计数器 + Snapshot 快照 + `AddUsage` 增量记账） |
+| `NewQuotaResolver` | 从 `config.Store` 读取分维度配额阈值 |
 | `RunJournalRecorder` | 运行日志记录器（异步缓冲 + DB 持久化 + context 元数据注入） |
 
 ## 使用示例
@@ -67,6 +71,27 @@ cfg := NewTokenBudgetConfig().
 mw := TokenBudgetMiddleware(cfg)
 llmStage = mw(llmStage)
 ```
+
+### Token 月度配额
+
+按 Bot / Channel / Chat 三级维度追踪月度 Token 消耗，支持超额拦截：
+
+```go
+resolver := NewQuotaResolver(store)  // 从 config.Store 读取阈值
+state := NewTokenQuotaState()         // 共享状态（月度计数器）
+
+// 方式一：独立中间件（自带 State）
+mw := TokenQuotaMiddleware(resolver, tp, logger)
+llmStage = mw(llmStage)
+
+// 方式二：共享 State（推荐，配合 llm.QuotaRecordingProvider 全链路记账）
+mw := TokenQuotaMiddlewareWithState(resolver, state, tp, logger)
+llmStage = mw(llmStage)
+```
+
+**Dimension 格式**：`bot:<botID>:chat:<channelType>:<chatID>`、`bot:<botID>:channel:<channelType>`、`bot:<botID>`，确保不同 Bot 之间计数器隔离。
+
+**全链路记账**：中间件在 `Before` 阶段将解析出的 dimension 通过 `llm.WithQuotaDimension(ctx, dim)` 注入 context，使嵌套 LLM 调用（SubAgent、Workflow、Memory 等）通过 `QuotaRecordingProvider` 自动记账，防止漏记。
 
 ### 运行日志
 
