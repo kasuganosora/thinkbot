@@ -110,9 +110,9 @@ type Engine struct {
 	logger     *zap.SugaredLogger
 	tracer     trace.Tracer
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 	readyCh chan struct{} // close 后表示 Engine 已完成初始化（worker 已启动）
 
 	// metrics（原子计数器）
