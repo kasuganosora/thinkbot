@@ -140,6 +140,7 @@ type aggRow struct {
 	BotID             string
 	Model             string
 	Feature           string
+	Channel           string
 	Date              time.Time
 	TotalRequests     int
 	CacheHitRequests  int
@@ -156,11 +157,12 @@ type aggRow struct {
 
 // flushBatch 将一批指标按维度聚合后逐行 upsert 到数据库。
 func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
-	// 按 (bot_id, model, feature, date) 聚合
+	// 按 (bot_id, model, feature, channel, date) 聚合
 	type aggKey struct {
 		botID   string
 		model   string
 		feature string
+		channel string
 		date    time.Time
 	}
 	aggregated := make(map[aggKey]*aggRow)
@@ -171,6 +173,7 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 			botID:   m.BotID,
 			model:   m.Model,
 			feature: m.Feature,
+			channel: m.Channel,
 			date:    date,
 		}
 		row, ok := aggregated[key]
@@ -179,6 +182,7 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 				BotID:   m.BotID,
 				Model:   m.Model,
 				Feature: m.Feature,
+				Channel: m.Channel,
 				Date:    date,
 			}
 			aggregated[key] = row
@@ -213,14 +217,14 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 func (r *Recorder) upsertRow(row *aggRow) error {
 	now := time.Now().UTC()
 	sql := `INSERT INTO stats_usage_daily (
-		bot_id, model, feature, date,
+		bot_id, model, feature, channel, date,
 		total_requests, cache_hit_requests, cache_miss_requests,
 		cache_read_tokens, cache_write_tokens, non_cache_tokens,
 		input_tokens, output_tokens, total_tokens,
 		tool_calls, steps,
 		created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(bot_id, model, feature, date) DO UPDATE SET
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
 		total_requests = total_requests + excluded.total_requests,
 		cache_hit_requests = cache_hit_requests + excluded.cache_hit_requests,
 		cache_miss_requests = cache_miss_requests + excluded.cache_miss_requests,
@@ -235,7 +239,7 @@ func (r *Recorder) upsertRow(row *aggRow) error {
 		updated_at = excluded.updated_at`
 
 	return r.db.Exec(sql,
-		row.BotID, row.Model, row.Feature, row.Date,
+		row.BotID, row.Model, row.Feature, row.Channel, row.Date,
 		row.TotalRequests, row.CacheHitRequests, row.CacheMissRequests,
 		row.CacheReadTokens, row.CacheWriteTokens, row.NonCacheTokens,
 		row.InputTokens, row.OutputTokens, row.TotalTokens,

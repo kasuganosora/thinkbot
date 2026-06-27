@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/stats"
 )
 
 // ============================================================================
@@ -555,26 +557,12 @@ func TestIntegration_Pipeline_PatchToolCalls_Orchestrate(t *testing.T) {
 }
 
 // ============================================================================
-// 6. RunJournal 集成测试 — 验证 LLM 用量被持久化
+// 6. Stats 集成测试 — 验证 LLM 用量被持久化到 stats_usage_daily
 // ============================================================================
 
-// selectCount 辅助查询。
-func selectCount(db *gorm.DB, condition string, args ...any) int {
-	var count int64
-	db.Raw("SELECT count(*) FROM run_journal WHERE "+condition, args...).Scan(&count)
-	return int(count)
-}
-
-// getRunJournals 查询 run_journal 记录。
-func getRunJournals(db *gorm.DB) []dao.RunJournal {
-	var journals []dao.RunJournal
-	db.Order("id ASC").Find(&journals)
-	return journals
-}
-
-// TestIntegration_Pipeline_RunJournal_Record 验证通过 RunJournalMiddleware
-// 记录 LLM 调用到数据库。
-func TestIntegration_Pipeline_RunJournal_Record(t *testing.T) {
+// TestIntegration_Pipeline_StatsRecord 验证通过 StatsRecordingProvider
+// 自动记录 LLM 调用到 stats_usage_daily 表。
+func TestIntegration_Pipeline_StatsRecord(t *testing.T) {
 	skipIfShort(t)
 	bundle := setupIntegLLMBundle(t)
 
@@ -587,27 +575,27 @@ func TestIntegration_Pipeline_RunJournal_Record(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
+	// 创建 stats Recorder
+	recorder := stats.NewRecorder(database, zap.NewNop().Sugar())
+	recorder.Start()
+	defer recorder.Stop()
+
+	// 用 StatsRecordingProvider 包裹 provider
+	statsProvider := llm.NewStatsRecordingProvider(bundle.Main, recorder, integBotID)
+
 	stage := &warningAwareStage{
-		provider:   bundle.Main,
+		provider:   statsProvider,
 		model:      integCfg.Model,
 		baseSystem: "你是一个助手。请用一句话回答。",
 		maxTokens:  integCfg.MaxTokens,
 	}
 
-	// 包装 RunJournalMiddleware
-	journalCfg := pipeline.RunJournalConfig{
-		FlushThreshold: 1, // 立即刷新
-		Caller:         "integration_test",
-		Feature:        "test",
-	}
-	guarded := pipeline.RunJournalMiddleware(database, journalCfg)(stage)
+	channel := "stats-test"
 
-	channel := "journal-test"
-
-	// 执行 2 次 LLM 调用
+	// 执行 2 次 LLM 调用（标记 channel 维度）
 	for i := 1; i <= 2; i++ {
 		env := core.NewEnvelope(core.Message{
-			ID:        fmt.Sprintf("msg-journal-%d", i),
+			ID:        fmt.Sprintf("msg-stats-%d", i),
 			TraceID:   fmt.Sprintf("trace-%d", i),
 			Source:    "memory",
 			BotID:     integBotID,
@@ -618,7 +606,7 @@ func TestIntegration_Pipeline_RunJournal_Record(t *testing.T) {
 		})
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		out, err := guarded.Process(ctx, env)
+		out, err := stage.Process(ctx, env)
 		cancel()
 
 		if err != nil {
@@ -632,49 +620,35 @@ func TestIntegration_Pipeline_RunJournal_Record(t *testing.T) {
 		}
 	}
 
-	// 给异步写入一点时间
-	time.Sleep(500 * time.Millisecond)
+	// 同步 flush 确保数据落库
+	recorder.SyncFlush()
 
-	// 验证数据库记录
-	journals := getRunJournals(database)
-	t.Logf("RunJournal records: %d", len(journals))
-	for _, j := range journals {
-		t.Logf("  id=%d, trace=%s, channel=%s, user=%s, input=%d, output=%d, total=%d, model=%q, status=%s",
-			j.ID, j.TraceID, j.Channel, j.UserID, j.InputTokens, j.OutputTokens, j.TotalTokens, j.Model, j.Status)
+	// 查询 stats 表验证记录
+	var stats []dao.UsageDaily
+	if err := database.Where("bot_id = ?", integBotID).Find(&stats).Error; err != nil {
+		t.Fatalf("query stats_usage_daily: %v", err)
 	}
 
-	if len(journals) == 0 {
-		t.Fatal("expected at least 1 run journal record")
+	t.Logf("Stats records: %d", len(stats))
+	for _, s := range stats {
+		t.Logf("  bot=%s, model=%s, feature=%s, channel=%s, requests=%d, total_tokens=%d",
+			s.BotID, s.Model, s.Feature, s.Channel, s.TotalRequests, s.TotalTokens)
 	}
 
-	if len(journals) < 2 {
-		t.Logf("warning: expected 2 records, got %d (async flush may not have completed)", len(journals))
+	if len(stats) == 0 {
+		t.Fatal("expected at least 1 stats record")
 	}
 
-	// 验证记录的字段完整性
-	for _, j := range journals {
-		if j.TraceID == "" {
-			t.Error("expected non-empty trace_id")
+	for _, s := range stats {
+		if s.BotID != integBotID {
+			t.Error("expected correct bot_id")
 		}
-		if j.Channel == "" {
-			t.Error("expected non-empty channel")
-		}
-		if j.UserID == "" {
-			t.Error("expected non-empty user_id")
-		}
-		if j.TotalTokens == 0 {
+		if s.TotalTokens == 0 {
 			t.Error("expected non-zero total_tokens")
 		}
-		if j.Status != "success" {
-			t.Errorf("expected status 'success', got %q", j.Status)
+		if s.TotalRequests == 0 {
+			t.Error("expected non-zero total_requests")
 		}
-	}
-
-	// 验证按 channel 查询
-	count := selectCount(database, "channel = ?", channel)
-	t.Logf("Records for channel %q: %d", channel, count)
-	if count == 0 {
-		t.Error("expected at least 1 record for the test channel")
 	}
 }
 
@@ -683,19 +657,10 @@ func TestIntegration_Pipeline_RunJournal_Record(t *testing.T) {
 // ============================================================================
 
 // TestIntegration_Pipeline_CombinedMiddleware 验证多种中间件同时包装
-// LLMStage 时的端到端行为（警告 + 预算 + 日志在真实 LLM 下协同工作）。
+// LLMStage 时的端到端行为（警告 + 预算在真实 LLM 下协同工作）。
 func TestIntegration_Pipeline_CombinedMiddleware(t *testing.T) {
 	skipIfShort(t)
 	bundle := setupIntegLLMBundle(t)
-
-	// 内存 DB
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	if err := dao.Migrate(database); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 
 	baseStage := &warningAwareStage{
 		provider:   bundle.Main,
@@ -704,12 +669,6 @@ func TestIntegration_Pipeline_CombinedMiddleware(t *testing.T) {
 		maxTokens:  integCfg.MaxTokens,
 	}
 
-	// 链式包装中间件（模拟 api/botservice.go 的包装顺序）
-	journalMw := pipeline.RunJournalMiddleware(database, pipeline.RunJournalConfig{
-		FlushThreshold: 2,
-		Caller:         "combined_test",
-		Feature:        "test",
-	})
 	loopCfg := pipeline.NewLoopDetectionConfig().
 		WithWarnThreshold(3).
 		WithHardLimit(10).
@@ -719,10 +678,10 @@ func TestIntegration_Pipeline_CombinedMiddleware(t *testing.T) {
 		WithWarnPercent(0.5).
 		WithHardPercent(1.0)
 
-	// 包装顺序：journal → loop → budget → stage
+	// 包装顺序：loop → budget → stage
 	loopMw := pipeline.LoopDetectionMiddleware(loopCfg)
 	budgetMw := pipeline.TokenBudgetMiddleware(budgetCfg)
-	guarded := journalMw(loopMw(budgetMw(baseStage)))
+	guarded := loopMw(budgetMw(baseStage))
 
 	channel := "combined-test"
 
@@ -757,13 +716,5 @@ func TestIntegration_Pipeline_CombinedMiddleware(t *testing.T) {
 			result, _ := v.(*llm.GenerateResult)
 			t.Logf("Turn %d usage: total=%d, steps=%d", i, result.Usage.TotalTokens, len(result.Steps))
 		}
-	}
-
-	// 验证数据库记录
-	time.Sleep(500 * time.Millisecond)
-	journals := getRunJournals(database)
-	t.Logf("Combined middleware: %d run journal records", len(journals))
-	if len(journals) == 0 {
-		t.Error("expected run journal records from combined middleware")
 	}
 }

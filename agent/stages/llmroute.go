@@ -375,6 +375,7 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 		BotID:     botID,
 		Model:     modelID,
 		Feature:   feature,
+		Channel:   env.Message.Channel,
 		Usage:     result.Usage,
 		ToolCalls: toolCalls,
 		Steps:     steps,
