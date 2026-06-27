@@ -446,7 +446,9 @@ func cronActionUpdate(mgr *Manager, m map[string]any) (any, error) {
 		updates["model"] = v
 	}
 	if v, ok := m["skills"]; ok {
-		updates["skills"] = toStringSlice(v.([]any))
+		if skills, ok := v.([]any); ok {
+			updates["skills"] = toStringSlice(skills)
+		}
 	}
 	if v, ok := m["max_runs"]; ok {
 		updates["max_runs"] = toFloat64(v)

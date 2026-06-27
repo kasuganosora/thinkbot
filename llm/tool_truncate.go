@@ -87,7 +87,6 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 	}
 
 	// 执行截断 — 从头部保留
-	direction := "head"
 	maxLines := cfg.MaxLines
 	maxBytes := cfg.MaxBytes
 
@@ -124,8 +123,6 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 			"Do not retry with the same parameters expecting full output.",
 		removed, unit,
 	)
-
-	_ = direction // head is the only supported direction currently
 
 	return TruncationResult{
 		Output:       preview + hint,

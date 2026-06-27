@@ -562,7 +562,7 @@ func (m *Manager) UpdateJob(id string, updates map[string]any) (*Job, error) {
 		job.NextRunAt = nextRun
 		job.cronExpr = cronE
 		// 更新调度后重置状态
-		if job.Enabled && job.State == StateDone || job.State == StateFailed {
+		if job.Enabled && (job.State == StateDone || job.State == StateFailed) {
 			job.State = StateActive
 		}
 	}
