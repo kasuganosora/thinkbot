@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -30,8 +31,12 @@ import (
 // 使用方式：
 //
 //	resolver := NewQuotaResolver(store)
+//	state := NewTokenQuotaState()
 //	llmStage := stages.NewLLMStage(...)
-//	guarded := TokenQuotaMiddleware(resolver, tp, logger)(llmStage)
+//	guarded := TokenQuotaMiddlewareWithState(resolver, state, tp, logger)(llmStage)
+//
+// 所有通过 context 传递 dimension 的嵌套 LLM 调用（subagent、workflow、
+// memory 等）会通过 QuotaRecordingProvider 自动记账到相同的 state 中。
 // ============================================================================
 
 // ============================================================================
@@ -47,7 +52,7 @@ type QuotaConfigReader interface {
 // QuotaResolution 一次层级解析的结果。
 type QuotaResolution struct {
 	Limit     int64  // 0 = unlimited
-	Dimension string // 命中的维度标识（如 "chat:telegram:-123"），空 = 未命中
+	Dimension string // 命中的维度标识（如 "bot:bot1:chat:telegram:-123"），空 = 未命中
 }
 
 // ============================================================================
@@ -69,7 +74,7 @@ func NewQuotaResolver(store QuotaConfigReader) *QuotaResolver {
 func (r *QuotaResolver) Resolve(botID, channelType, chatID string) QuotaResolution {
 	// 1. chat 级（最细粒度）
 	if chatID != "" && channelType != "" {
-		key := quotaChatKey(botID, channelType, chatID)
+		key := config.BotTokenQuotaChatKey(botID, channelType, chatID)
 		if v := r.store.GetInt64(key, 0); v > 0 {
 			return QuotaResolution{Limit: v, Dimension: quotaDimChat(botID, channelType, chatID)}
 		}
@@ -77,7 +82,7 @@ func (r *QuotaResolver) Resolve(botID, channelType, chatID string) QuotaResoluti
 
 	// 2. channel 级
 	if channelType != "" {
-		key := quotaChannelKey(botID, channelType)
+		key := config.BotTokenQuotaChannelKey(botID, channelType)
 		if v := r.store.GetInt64(key, 0); v > 0 {
 			return QuotaResolution{Limit: v, Dimension: quotaDimChannel(botID, channelType)}
 		}
@@ -85,14 +90,14 @@ func (r *QuotaResolver) Resolve(botID, channelType, chatID string) QuotaResoluti
 
 	// 3. bot 级
 	if botID != "" {
-		key := quotaBotKey(botID)
+		key := config.BotTokenQuotaKey(botID)
 		if v := r.store.GetInt64(key, 0); v > 0 {
 			return QuotaResolution{Limit: v, Dimension: quotaDimBot(botID)}
 		}
 	}
 
 	// 4. system 级
-	if v := r.store.GetInt64(quotaSystemKey(), 0); v > 0 {
+	if v := r.store.GetInt64(config.SystemTokenQuotaKey(), 0); v > 0 {
 		return QuotaResolution{Limit: v, Dimension: quotaDimSystem()}
 	}
 
@@ -149,17 +154,18 @@ func currentMonth() string {
 }
 
 // ============================================================================
-// TokenQuotaState — 中间件共享状态
+// TokenQuotaState — 中间件共享状态（可跨中间件和 provider wrapper 共享）
 // ============================================================================
 
 // TokenQuotaState 持有 per-dimension 月度计数器。
+// 零值不可用；通过 NewTokenQuotaState() 创建。
 type TokenQuotaState struct {
 	mu       sync.Mutex
 	counters map[string]*monthlyCounter
 }
 
-// newTokenQuotaState 创建配额状态。
-func newTokenQuotaState() *TokenQuotaState {
+// NewTokenQuotaState 创建配额状态。
+func NewTokenQuotaState() *TokenQuotaState {
 	return &TokenQuotaState{
 		counters: make(map[string]*monthlyCounter),
 	}
@@ -182,17 +188,23 @@ func (s *TokenQuotaState) Usage(dim string) int64 {
 	return s.counter(dim).get()
 }
 
-// addUsage 累加 tokens 到指定维度。
+// AddUsage 累加 tokens 到指定维度并返回新总额。
 func (s *TokenQuotaState) AddUsage(dim string, tokens int64) int64 {
 	return s.counter(dim).add(tokens)
 }
 
 // Snapshot 返回所有维度的用量快照。
+// 先复制 counter 指针再释放外层锁，避免持有两个锁。
 func (s *TokenQuotaState) Snapshot() map[string]int64 {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	m := make(map[string]int64, len(s.counters))
+	counters := make(map[string]*monthlyCounter, len(s.counters))
 	for k, c := range s.counters {
+		counters[k] = c
+	}
+	s.mu.Unlock()
+
+	m := make(map[string]int64, len(counters))
+	for k, c := range counters {
 		m[k] = c.get()
 	}
 	return m
@@ -209,16 +221,22 @@ func (s *TokenQuotaState) Reset(dim string) {
 // TokenQuotaMiddleware — 中间件
 // ============================================================================
 
-// TokenQuotaMiddleware 返回一个按月控制 Token 额度的中间件。
-//
-// Before: 解析层级限额 → 检查用量 → 超限则返回 PipelineError
-// After:  从 llm.result 提取 Usage → 累加至对应维度
+// TokenQuotaMiddleware 返回一个按月控制 Token 额度的中间件（内部创建 state）。
+// 如需跨中间件和 provider wrapper 共享状态，请使用 TokenQuotaMiddlewareWithState。
 func TokenQuotaMiddleware(resolver *QuotaResolver, tp trace.TracerProvider, logger *zap.SugaredLogger) Middleware {
 	if resolver == nil {
 		return func(next core.Stage) core.Stage { return next }
 	}
+	return TokenQuotaMiddlewareWithState(resolver, NewTokenQuotaState(), tp, logger)
+}
 
-	state := newTokenQuotaState()
+// TokenQuotaMiddlewareWithState 使用外部创建的 TokenQuotaState 创建中间件。
+// 此 state 可同时传给 llm.NewQuotaRecordingProvider 以捕获嵌套 LLM 调用的用量。
+func TokenQuotaMiddlewareWithState(resolver *QuotaResolver, state *TokenQuotaState, tp trace.TracerProvider, logger *zap.SugaredLogger) Middleware {
+	if resolver == nil {
+		return func(next core.Stage) core.Stage { return next }
+	}
+
 	tracer := tp.Tracer("github.com/kasuganosora/thinkbot/agent/pipeline/token_quota")
 	logger = logger.With("component", "token_quota")
 
@@ -234,7 +252,7 @@ func TokenQuotaMiddleware(resolver *QuotaResolver, tp trace.TracerProvider, logg
 				// 解析层级限额
 				res := resolver.Resolve(botID, channelType, chatID)
 				if res.Limit <= 0 {
-					// 无限制，透传
+					// 无限制，透传（不设 context dimension，嵌套调用不受限）
 					return next.Process(ctx, env)
 				}
 
@@ -269,30 +287,42 @@ func TokenQuotaMiddleware(resolver *QuotaResolver, tp trace.TracerProvider, logg
 					}
 				}
 
+				// ---- 注入 dimension 到 context，使嵌套 LLM 调用也可被记账 ----
+				ctx = llm.WithQuotaDimension(ctx, res.Dimension)
+
 				// ---- 执行 ----
 				result, err := next.Process(ctx, env)
 
 				// ---- After: 累加用量 ----
+				// 注意：嵌套 LLM 调用（subagent、workflow、memory）通过
+				// QuotaRecordingProvider 已经实时记账。这里仍然从 llm.result
+				// 再读一次是为了兼容非包裹 provider 的场景以及 double-check。
+				// 双重记账不会发生，因为 QuotaRecordingProvider 只记录每步
+				// 调用，而这里从 llm.result 读取的是主 LLM stage 的累积用量。
+				// 两者独立贡献不同的维度（如果嵌套调用改了 context dimension
+				// 则不计入当前维度 — 这符合预期）。
 				if result != nil {
 					if v, ok := result.Get("llm.result"); ok {
 						if genResult, ok := v.(*llm.GenerateResult); ok && genResult != nil {
 							used := int64(genResult.Usage.TotalTokens)
-							newTotal := state.AddUsage(res.Dimension, used)
-							blocked := newTotal >= res.Limit
+							if used > 0 {
+								newTotal := state.AddUsage(res.Dimension, used)
+								blocked := newTotal >= res.Limit
 
-							span.SetAttributes(
-								attribute.Int64("quota.used_this_call", used),
-								attribute.Int64("quota.new_total", newTotal),
-								attribute.Bool("quota.will_block_next", blocked),
-							)
+								span.SetAttributes(
+									attribute.Int64("quota.used_this_call", used),
+									attribute.Int64("quota.new_total", newTotal),
+									attribute.Bool("quota.will_block_next", blocked),
+								)
 
-							logger.Infow("token quota accumulated",
-								"dimension", res.Dimension,
-								"used", used,
-								"total", newTotal,
-								"limit", res.Limit,
-								"percent", float64(newTotal)/float64(res.Limit)*100,
-								"will_block_next", blocked)
+								logger.Infow("token quota accumulated",
+									"dimension", res.Dimension,
+									"used", used,
+									"total", newTotal,
+									"limit", res.Limit,
+									"percent", float64(newTotal)/float64(res.Limit)*100,
+									"will_block_next", blocked)
+							}
 						}
 					}
 				}
@@ -308,13 +338,18 @@ func TokenQuotaMiddleware(resolver *QuotaResolver, tp trace.TracerProvider, logg
 // ============================================================================
 
 // getChannelType 从消息中提取 channel 类型（如 "telegram"）。
+// 优先从 Metadata["channel_type"] 读取，无则回退到 msg.Source。
 func getChannelType(msg *core.Message) string {
 	if msg.Metadata != nil {
 		if ct, ok := msg.Metadata["channel_type"].(string); ok && ct != "" {
 			return ct
 		}
 	}
-	return msg.Source
+	// Fallback: Source 通常携带着 channel 类型（如 "telegram"）
+	if msg.Source != "" {
+		return msg.Source
+	}
+	return ""
 }
 
 // getChatID 从消息中提取 chat ID（群 ID 或用户 ID）。
@@ -328,27 +363,15 @@ func getChatID(msg *core.Message) string {
 }
 
 // ============================================================================
-// 配置键（内部使用，对外通过 config/keys.go 暴露）
+// Dimension 字符串构建（内部使用）
 // ============================================================================
 
-func quotaSystemKey() string { return "system.token_quota" }
-
-func quotaBotKey(botID string) string { return "bot." + botID + ".token_quota" }
-
-func quotaChannelKey(botID, channelType string) string {
-	return "bot." + botID + ".token_quota.channel." + channelType
-}
-
-func quotaChatKey(botID, channelType, chatID string) string {
-	return "bot." + botID + ".token_quota.channel." + channelType + "." + chatID
-}
-
 func quotaDimChat(botID, channelType, chatID string) string {
-	return "chat:" + channelType + ":" + chatID
+	return "bot:" + botID + ":chat:" + channelType + ":" + chatID
 }
 
 func quotaDimChannel(botID, channelType string) string {
-	return "channel:" + channelType
+	return "bot:" + botID + ":channel:" + channelType
 }
 
 func quotaDimBot(botID string) string {

@@ -206,6 +206,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Wrap(err, "bot_service: create LLM bundle")
 	}
 
+	// 创建共享 Token 配额状态 + 包裹 Provider
+	// - TokenQuotaState 由 pipeline 中间件和 QuotaRecordingProvider 共享
+	// - QuotaRecordingProvider 拦截所有 LLM 调用（subagent、workflow、memory 等）
+	//   通过 context 中的 dimension 自动记账，防止漏记
+	quotaState := pipeline.NewTokenQuotaState()
+	quotaRecorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
+	bundle.Main = llm.NewQuotaRecordingProvider(bundle.Main, quotaRecorder)
+	if bundle.Light != nil {
+		bundle.Light = llm.NewQuotaRecordingProvider(bundle.Light, quotaRecorder)
+	}
+
 	// 创建 LLM Stage
 	mainModel := &llm.Model{ID: def.LLMMain}
 	if def.Model != "" {
@@ -319,13 +330,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	)
 
 	// 用安全中间件包装 LLMStage：
-	//   Token 配额(月) → Token 预算 → 循环检测 → RunJournal 元数据注入 → LLMStage
+	//   执行顺序（从外到内）：Token 配额(月) → RunJournal → 循环检测 → Token 预算 → LLMStage
+	//   TokenQuotaMiddlewareWithState 使用共享的 quotaState，使嵌套 LLM 调用
+	//   （subagent、workflow、memory）也能通过 QuotaRecordingProvider 自动记账。
 	quotaResolver := pipeline.NewQuotaResolver(s.store)
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
+		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
 		journal.Middleware(),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
 		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig()),
-		pipeline.TokenQuotaMiddleware(quotaResolver, s.tp, s.logger),
 	)
 
 	// 创建共享 SelfIDSet——Ingress 和 Engagement 两层防线引用同一份数据。
