@@ -3,7 +3,7 @@ package dao
 import "time"
 
 // UsageDaily 按日聚合的 LLM 使用统计表。
-// 维度组合 (bot_id, model, feature, date) 唯一，同一组合的多次调用累加计数。
+// 维度组合 (bot_id, model, feature, channel, date) 唯一，同一组合的多次调用累加计数。
 type UsageDaily struct {
 	ID uint `gorm:"primaryKey;autoIncrement" json:"id"`
 
@@ -11,6 +11,7 @@ type UsageDaily struct {
 	BotID   string    `gorm:"column:bot_id;size:255;not null;index:idx_usage_daily_unique,unique" json:"botId"`
 	Model   string    `gorm:"column:model;size:255;not null;index:idx_usage_daily_unique,unique" json:"model"`
 	Feature string    `gorm:"column:feature;size:100;not null;index:idx_usage_daily_unique,unique" json:"feature"`
+	Channel string    `gorm:"column:channel;size:100;not null;index:idx_usage_daily_unique,unique;default:''" json:"channel"`
 	Date    time.Time `gorm:"column:date;type:date;not null;index:idx_usage_daily_unique,unique" json:"date"`
 
 	// 请求数

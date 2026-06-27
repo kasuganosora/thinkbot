@@ -314,23 +314,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		saMgr.CloseAll()
 	}
 
-	// 创建 RunJournal 记录器（LLM 调用事件持久化）
-	journalCfg := pipeline.DefaultRunJournalConfig()
-	journalCfg.Caller = "lead_agent"
-	journal := pipeline.NewRunJournalRecorder(s.db, journalCfg)
-
-	// RunJournal cleanup（引用 journal，必须在 journal 创建之后）
-	journalCleanup := func(ctx context.Context) {
-		if err := journal.Shutdown(ctx); err != nil {
-			s.logger.Warnw("run journal shutdown failed", "err", err)
-		}
-	}
-
-	// 创建复合 UsageRecorder：同时记录到 RunJournal 和 stats
-	// pipeline stages 通过 recordUsage() 调用此 recorder，
-	// StatsRecordingProvider 在 WithStatsSkip 标记下会跳过，避免双重计数
-	stageUsageRecorder := llm.NewMultiUsageRecorder(journal, s.statsRecorder)
-
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
@@ -344,7 +327,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			ToolResolver:    toolMgr,
 			MaxSteps:        10,
 			StreamPublisher: s.eventBus,
-			UsageRecorder:   stageUsageRecorder, // RunJournal + stats 双写
+			UsageRecorder:   s.statsRecorder, // 统一记账到 stats
 			ReductionConfig: llm.DefaultReductionConfigPtr(),
 		},
 		s.tp,
@@ -352,13 +335,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	)
 
 	// 用安全中间件包装 LLMStage：
-	//   执行顺序（从外到内）：Token 配额(月) → RunJournal → 循环检测 → Token 预算 → LLMStage
+	//   执行顺序（从外到内）：Token 配额(月) → 循环检测 → Token 预算 → LLMStage
 	//   TokenQuotaMiddlewareWithState 使用共享的 quotaState，使嵌套 LLM 调用
 	//   （subagent、workflow、memory）也能通过 QuotaRecordingProvider 自动记账。
 	quotaResolver := pipeline.NewQuotaResolver(s.store)
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
-		journal.Middleware(),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
 		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig()),
 	)
@@ -692,9 +674,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 用独立 context 启动 Bot，避免 HTTP 请求结束后 ctx 被取消导致 Bot 立即关闭
 	botCtx, botCancel := context.WithCancel(context.Background())
 
-	// 启动 RunJournal 后台 flush goroutine
-	go journal.Run(botCtx)
-
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
 		defer func() {
@@ -716,7 +695,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("bot started", "bot_id", id, "channels", len(allChannels))
 	case <-readyTimeout.C:
 		botCancel()
-		journalCleanup(context.Background())
 		b.Stop()
 		b.Close()
 		s.mgr.Unregister(id)
@@ -724,7 +702,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Internal("bot_service: bot startup timeout (30s)")
 	case <-ctx.Done():
 		botCancel()
-		journalCleanup(context.Background())
 		b.Stop()
 		b.Close()
 		s.mgr.Unregister(id)
@@ -738,7 +715,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.cancelFuncs[id] = botCancel
 	s.closeFuncs[id] = func() {
 		wfCleanup()
-		journalCleanup(context.Background())
 	}
 	if dreamBundle != nil {
 		s.dreamingBundles[id] = dreamBundle

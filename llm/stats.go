@@ -15,6 +15,10 @@ type UsageMetric struct {
 	// Feature 功能维度，标记调用来源（如 "reply"、"chat"、"vision"、"memory_compress"）。
 	Feature string
 
+	// Channel 请求来源渠道（如 "telegram"、"web"、"misskey"）。
+	// 非 pipeline 路径（dream、memory 等）为空。
+	Channel string
+
 	// Usage 本次调用的 token 用量（含缓存明细）。
 	Usage Usage
 
