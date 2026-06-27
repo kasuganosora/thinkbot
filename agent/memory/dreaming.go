@@ -91,18 +91,19 @@ const (
 
 // DreamReport 一次梦境运行的完整报告。
 type DreamReport struct {
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    time.Time  `json:"finished_at"`
-	Phase         DreamPhase `json:"phase"`
-	LightIngested int        `json:"light_ingested"`
-	LightDeduped  int        `json:"light_deduped"`
-	LightDropped  int        `json:"light_dropped"`
-	REMThemes     int        `json:"rem_themes"`
-	REMCandidates int        `json:"rem_candidates"`
-	DeepScored    int        `json:"deep_scored"`
-	DeepPassed    int        `json:"deep_passed"`
-	DeepPromoted  int        `json:"deep_promoted"`
-	Error         string     `json:"error,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      time.Time  `json:"finished_at"`
+	Phase           DreamPhase `json:"phase"`
+	LightIngested   int        `json:"light_ingested"`
+	LightDeduped    int        `json:"light_deduped"`
+	LightDropped    int        `json:"light_dropped"`
+	REMThemes       int        `json:"rem_themes"`
+	REMCandidates   int        `json:"rem_candidates"`
+	DeepScored      int        `json:"deep_scored"`
+	DeepPassed      int        `json:"deep_passed"`
+	DeepPromoted    int        `json:"deep_promoted"`
+	SkippedInactive int        `json:"skipped_inactive"`
+	Error           string     `json:"error,omitempty"`
 }
 
 // Duration 返回本次梦境耗时。
@@ -119,16 +120,17 @@ func (r *DreamReport) Duration() time.Duration {
 
 // DreamConfig 配置梦境系统。
 type DreamConfig struct {
-	Enabled          bool
-	Schedule         string // cron 表达式，默认 "0 3 * * *"
-	Model            string // LLM 模型名（从 bot 主模型/经济模型读取）
-	Scopes           []Scope
-	Light            LightPhaseConfig
-	REM              REMPhaseConfig
-	Deep             DeepPhaseConfig
-	JaccardThreshold float64
-	MaxDreamTokens   int
-	VerboseLogging   bool
+	Enabled              bool
+	Schedule             string  // cron 表达式，默认 "0 3 * * *"
+	Model                string  // LLM 模型名（从 bot 主模型/经济模型读取）
+	ActiveThresholdHours float64 // 活跃度阈值：仅处理过去 N 小时内有 L0 写入的 scope，0=不过滤。默认 24。
+	Scopes               []Scope
+	Light                LightPhaseConfig
+	REM                  REMPhaseConfig
+	Deep                 DeepPhaseConfig
+	JaccardThreshold     float64
+	MaxDreamTokens       int
+	VerboseLogging       bool
 }
 
 // LightPhaseConfig 浅睡眠阶段配置。
@@ -343,8 +345,32 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 		return report, nil
 	}
 
+	// 活跃度过滤：跳过 24h 内无 L0 写入的僵尸 scope
+	threshold := d.config.ActiveThresholdHours
+	if threshold <= 0 {
+		threshold = 24
+	}
+	activeScopes := make([]Scope, 0, len(scopes))
+	for _, s := range scopes {
+		if d.manager.store.HasRecentActivity(ctx, s, threshold) {
+			activeScopes = append(activeScopes, s)
+		}
+	}
+	skipped := len(scopes) - len(activeScopes)
+	report.SkippedInactive = skipped
+	if skipped > 0 {
+		d.logger.Infow("dreaming: skipped inactive scopes",
+			"total", len(scopes), "active", len(activeScopes), "skipped", skipped)
+	}
+	if len(activeScopes) == 0 {
+		report.FinishedAt = time.Now()
+		report.Phase = PhaseDeep
+		d.logger.Info("dreaming: no active scopes, skipping")
+		return report, nil
+	}
+
 	// Phase 1: Light
-	lightRes, err := d.runLight(ctx, scopes)
+	lightRes, err := d.runLight(ctx, activeScopes)
 	if err != nil {
 		report.FinishedAt = time.Now()
 		report.Error = fmt.Sprintf("light: %v", err)
@@ -456,6 +482,9 @@ func (d *DreamManager) appendDreamDiary(report *DreamReport) {
 		report.LightIngested, report.LightDeduped, report.LightDropped,
 		report.REMThemes, report.REMCandidates,
 		report.DeepScored, report.DeepPassed, report.DeepPromoted)
+	if report.SkippedInactive > 0 {
+		entry += fmt.Sprintf("- Skipped (inactive): %d scopes\n", report.SkippedInactive)
+	}
 	if report.Error != "" {
 		entry += fmt.Sprintf("- Error: %s\n", report.Error)
 	}

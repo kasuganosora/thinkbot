@@ -989,6 +989,109 @@ func TestIntegration_Dream_Idempotent(t *testing.T) {
 }
 
 // ============================================================================
+// 活跃度阈值测试
+// ============================================================================
+
+// TestIntegration_Dream_ActivityThreshold 验证活跃度过滤：僵尸 scope 被跳过。
+func TestIntegration_Dream_ActivityThreshold(t *testing.T) {
+	skipIfShort(t)
+	bundle := setupIntegLLMBundle(t)
+
+	logger := zap.NewNop().Sugar()
+	tp := noop_trace.NewTracerProvider()
+
+	store := memory.NewTieredStore(nil)
+	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{
+		Store:                 store,
+		EnableAutoConsolidate: false,
+	}, tp, logger)
+
+	cfg := memory.DefaultDreamConfig()
+	cfg.Enabled = true
+	cfg.ActiveThresholdHours = 24 // 仅处理 24h 内有活动的 scope
+
+	now := time.Now()
+
+	// scope A：6 小时前有 L1 写入 → HasRecentActivity(24h) = true → 应被处理
+	scopeActive := memory.ChannelScope("dream-activity-active")
+	store.Append(context.Background(), memory.TieredEntry{
+		Entry: memory.Entry{
+			ID: "act-1", Scope: scopeActive, Content: "活跃群组的长期记忆",
+			Category: "fact", Source: "dreaming", CreatedAt: now.Add(-6 * time.Hour),
+		},
+		Tier: memory.Tier1LongTerm,
+	})
+
+	// scope B：3 天前有 L1 写入，之后无 → HasRecentActivity(24h) = false → 应被跳过
+	scopeZombie := memory.ChannelScope("dream-activity-zombie")
+	store.Append(context.Background(), memory.TieredEntry{
+		Entry: memory.Entry{
+			ID: "zmb-1", Scope: scopeZombie, Content: "僵尸群组的长期记忆，已 3 天无新写入",
+			Category: "fact", Source: "dreaming", CreatedAt: now.Add(-72 * time.Hour),
+		},
+		Tier: memory.Tier1LongTerm,
+	})
+
+	// 给活跃 scope 也写入当前 L0 让 Dreaming 有数据可提取
+	store.Append(context.Background(), memory.TieredEntry{
+		Entry: memory.Entry{
+			ID: "act-l0", Scope: scopeActive, Content: "活跃群组的新消息",
+			Category: "fact", Source: "conversation", CreatedAt: now,
+		},
+		Tier: memory.Tier0Working,
+	})
+
+	// 验证 HasRecentActivity
+	hasActive := store.HasRecentActivity(context.Background(), scopeActive, 24)
+	hasZombie := store.HasRecentActivity(context.Background(), scopeZombie, 24)
+	t.Logf("HasRecentActivity(24h): active=%v, zombie=%v", hasActive, hasZombie)
+
+	if !hasActive {
+		t.Error("expected active scope to have recent activity")
+	}
+	if hasZombie {
+		t.Error("expected zombie scope to have NO recent activity (3 days old)")
+	}
+
+	// 设置 DreamManager 处理所有 scope（让 discoverScopes 发现全部）
+	cfg.Scopes = []memory.Scope{scopeActive, scopeZombie}
+	dreamMgr2 := memory.NewDreamManager(cfg, tieredMgr, bundle.Main, tp, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	report, err := dreamMgr2.Run(ctx)
+	if err != nil {
+		t.Fatalf("dream run failed: %v", err)
+	}
+
+	t.Logf("Dream report: light_ingested=%d, skipped_inactive=%d",
+		report.LightIngested, report.SkippedInactive)
+
+	// 应跳过 1 个 inactive scope
+	if report.SkippedInactive != 1 {
+		t.Errorf("expected SkippedInactive=1, got %d", report.SkippedInactive)
+	}
+	// 活跃 scope 应被处理
+	if report.LightIngested == 0 {
+		t.Error("expected LightIngested > 0 (active scope should be processed)")
+	}
+
+	// 验证 L1：活跃 scope 应产出新条目，僵尸 scope 仅有预设的旧条目
+	l1Active := mustGetAll(t, store, memory.Tier1LongTerm, scopeActive)
+	l1Zombie := mustGetAll(t, store, memory.Tier1LongTerm, scopeZombie)
+	t.Logf("L1 active: %d, L1 zombie: %d", len(l1Active), len(l1Zombie))
+	// 僵尸 scope 的 L1 条目是测试预设的（source="dreaming"），Dream 运行不应新增
+	if len(l1Zombie) > 1 {
+		t.Errorf("zombie scope should only have 1 pre-seeded L1 entry, got %d", len(l1Zombie))
+	}
+	// 活跃 scope 应有 Dream 新产出的条目（source="dreaming" 且 metadata 含 dream_score）
+	if len(l1Active) < 1 {
+		t.Error("active scope should have L1 entries from dream")
+	}
+}
+
+// ============================================================================
 // 辅助函数
 // ============================================================================
 
