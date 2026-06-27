@@ -38,6 +38,12 @@ type OrchestrateConfig struct {
 	// It receives the current params and may return new params to override them.
 	PrepareStep func(*GenerateParams) *GenerateParams
 
+	// OnToolResults is called after tools execute but before results are
+	// appended to the message history. It can modify, filter, or truncate
+	// the results (e.g., for context-window management). If nil, results
+	// are used as-is.
+	OnToolResults func(step int, results []ToolResultPart) []ToolResultPart
+
 	// ApprovalHandler decides how to handle a tool call marked with RequireApproval.
 	ApprovalHandler func(ctx context.Context, call ToolCall) (ToolApprovalResult, error)
 }
@@ -67,6 +73,12 @@ func WithOnStep(fn func(*StepResult) *GenerateParams) OrchestrateOption {
 // WithPrepareStep registers a callback invoked before each step.
 func WithPrepareStep(fn func(*GenerateParams) *GenerateParams) OrchestrateOption {
 	return func(c *OrchestrateConfig) { c.PrepareStep = fn }
+}
+
+// WithOnToolResults registers a callback invoked after tools execute,
+// before results are appended to the message history.
+func WithOnToolResults(fn func(int, []ToolResultPart) []ToolResultPart) OrchestrateOption {
+	return func(c *OrchestrateConfig) { c.OnToolResults = fn }
 }
 
 // WithApprovalHandler registers a function that decides how to handle a tool
@@ -116,6 +128,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
+		cfg.Params.Messages = PatchToolCalls(cfg.Params.Messages)
 		result, err := prov.DoGenerate(ctx, cfg.Params)
 		if err != nil {
 			return nil, err
@@ -143,6 +156,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	toolMap := buildToolMap(cfg.Params.Tools)
 	messages := make([]Message, len(cfg.Params.Messages))
 	copy(messages, cfg.Params.Messages)
+	messages = PatchToolCalls(messages)
 
 	var (
 		totalUsage  Usage
@@ -155,6 +169,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		if step > 0 {
 			messages = applyPrepareStep(cfg, messages)
 		}
+		messages = PatchToolCalls(messages)
 
 		params := cfg.Params
 		params.Messages = messages
@@ -212,6 +227,11 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 				break
 			}
 			return nil, err
+		}
+
+		// Apply post-execution result processing (e.g., truncation).
+		if cfg.OnToolResults != nil {
+			toolResults = cfg.OnToolResults(step, toolResults)
 		}
 
 		stepMsgs := buildStepMessages(result.Text, result.Reasoning, result.ReasoningProviderMetadata, result.ToolCalls, toolResults, &result.Usage)
@@ -279,12 +299,14 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
+		cfg.Params.Messages = PatchToolCalls(cfg.Params.Messages)
 		return prov.DoStream(ctx, cfg.Params)
 	}
 
 	toolMap := buildToolMap(cfg.Params.Tools)
 	messages := make([]Message, len(cfg.Params.Messages))
 	copy(messages, cfg.Params.Messages)
+	messages = PatchToolCalls(messages)
 
 	ch := make(chan StreamPart, 64)
 	sr := &StreamResult{Stream: ch}
@@ -309,6 +331,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			if step > 0 {
 				messages = applyPrepareStep(cfg, messages)
 			}
+			messages = PatchToolCalls(messages)
 
 			params := cfg.Params
 			params.Messages = messages
@@ -413,6 +436,11 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				}
 				send(&ErrorPart{Error: err})
 				break
+			}
+
+			// Apply post-execution result processing (e.g., truncation).
+			if cfg.OnToolResults != nil {
+				toolResults = cfg.OnToolResults(step, toolResults)
 			}
 
 			stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, toolResults, &stepUsage)
