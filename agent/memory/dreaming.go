@@ -409,10 +409,20 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 	report.LightDropped = lightRes.dropped
 
 	if lightRes.deduped == 0 {
-		report.FinishedAt = time.Now()
-		report.Phase = PhaseDeep
-		d.logger.Info("dreaming: no candidates, skipping")
-		return report, nil
+		// 检查是否有已分期的候选（来自之前的 Run）
+		// 即使本轮 Light 没有新候选，可能有待 REM 聚类和 Deep 评分的旧候选
+		d.mu.Lock()
+		stagedCount := len(d.candidates)
+		d.mu.Unlock()
+		if stagedCount == 0 {
+			report.FinishedAt = time.Now()
+			report.Phase = PhaseDeep
+			d.logger.Info("dreaming: no candidates, skipping")
+			return report, nil
+		}
+		// 有已分期的候选，继续执行 REM + Deep
+		d.logger.Infow("dreaming: reuse staged candidates",
+			"count", stagedCount)
 	}
 
 	// Phase 2: REM
