@@ -171,18 +171,24 @@ func apiTimeoutMultiplier(timeoutSec int) time.Duration {
 }
 
 // banChatMember 踢出群成员（封禁）。
-func (a *apiClient) banChatMember(ctx context.Context, chatID, userID int64) error {
+// untilDate: Unix 时间戳，届时自动解封。0 表示永久。
+// revokeMessages: 是否同时删除该用户的所有消息。
+func (a *apiClient) banChatMember(ctx context.Context, chatID, userID int64, untilDate int64, revokeMessages bool) error {
 	return a.simplePost(ctx, "banChatMember", banChatMemberRequest{
-		ChatID: chatID,
-		UserID: userID,
+		ChatID:         chatID,
+		UserID:         userID,
+		UntilDate:      untilDate,
+		RevokeMessages: revokeMessages,
 	})
 }
 
 // unbanChatMember 解除群成员封禁。
-func (a *apiClient) unbanChatMember(ctx context.Context, chatID, userID int64) error {
+// onlyIfBanned: 仅当用户当前处于被封状态时才执行，避免对正常成员误操作。
+func (a *apiClient) unbanChatMember(ctx context.Context, chatID, userID int64, onlyIfBanned bool) error {
 	return a.simplePost(ctx, "unbanChatMember", unbanChatMemberRequest{
-		ChatID: chatID,
-		UserID: userID,
+		ChatID:       chatID,
+		UserID:       userID,
+		OnlyIfBanned: onlyIfBanned,
 	})
 }
 
@@ -199,11 +205,45 @@ func (a *apiClient) getChat(ctx context.Context, chatID int64) (*getChatResponse
 }
 
 // pinChatMessage 置顶消息。
-func (a *apiClient) pinChatMessage(ctx context.Context, chatID, messageID int64) error {
+// disableNotification: true 时不向全体成员发送通知。
+func (a *apiClient) pinChatMessage(ctx context.Context, chatID, messageID int64, disableNotification bool) error {
 	return a.simplePost(ctx, "pinChatMessage", pinChatMessageRequest{
+		ChatID:              chatID,
+		MessageID:           messageID,
+		DisableNotification: disableNotification,
+	})
+}
+
+// deleteMessage 删除消息。
+func (a *apiClient) deleteMessage(ctx context.Context, chatID, messageID int64) error {
+	return a.simplePost(ctx, "deleteMessage", deleteMessageRequest{
 		ChatID:    chatID,
 		MessageID: messageID,
 	})
+}
+
+// getChatMemberCount 获取群组成员数（独立 API，返回纯整数）。
+func (a *apiClient) getChatMemberCount(ctx context.Context, chatID int64) (int, error) {
+	var resp apiResponse[int]
+	if err := a.client.GetJSON(ctx, fmt.Sprintf("getChatMemberCount?chat_id=%d", chatID), &resp); err != nil {
+		return 0, errs.Wrap(err, "telegram getChatMemberCount")
+	}
+	if !resp.OK {
+		return 0, fmt.Errorf("telegram getChatMemberCount failed: [%d] %s", resp.ErrorCode, resp.Description)
+	}
+	return resp.Result, nil
+}
+
+// getChatAdministrators 获取群组管理员列表。
+func (a *apiClient) getChatAdministrators(ctx context.Context, chatID int64) ([]ChatMember, error) {
+	var resp apiResponse[[]ChatMember]
+	if err := a.client.GetJSON(ctx, fmt.Sprintf("getChatAdministrators?chat_id=%d", chatID), &resp); err != nil {
+		return nil, errs.Wrap(err, "telegram getChatAdministrators")
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("telegram getChatAdministrators failed: [%d] %s", resp.ErrorCode, resp.Description)
+	}
+	return resp.Result, nil
 }
 
 // sendPhoto 通过 URL 发送图片。

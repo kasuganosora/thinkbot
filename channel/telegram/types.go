@@ -165,20 +165,24 @@ type editMessageTextRequest struct {
 
 // banChatMemberRequest 对应 banChatMember 方法。
 type banChatMemberRequest struct {
-	ChatID int64 `json:"chat_id"`
-	UserID int64 `json:"user_id"`
+	ChatID         int64 `json:"chat_id"`
+	UserID         int64 `json:"user_id"`
+	UntilDate      int64 `json:"until_date,omitempty"`      // Unix 时间戳，届时自动解封。0 表示永久封禁
+	RevokeMessages bool  `json:"revoke_messages,omitempty"` // 是否同时删除该用户所有消息
 }
 
 // unbanChatMemberRequest 对应 unbanChatMember 方法。
 type unbanChatMemberRequest struct {
-	ChatID int64 `json:"chat_id"`
-	UserID int64 `json:"user_id"`
+	ChatID       int64 `json:"chat_id"`
+	UserID       int64 `json:"user_id"`
+	OnlyIfBanned bool  `json:"only_if_banned,omitempty"` // 仅当用户已被封时执行，避免误操作
 }
 
 // pinChatMessageRequest 对应 pinChatMessage 方法。
 type pinChatMessageRequest struct {
-	ChatID    int64 `json:"chat_id"`
-	MessageID int64 `json:"message_id"`
+	ChatID              int64 `json:"chat_id"`
+	MessageID           int64 `json:"message_id"`
+	DisableNotification bool  `json:"disable_notification,omitempty"` // true 时不发通知给全体成员
 }
 
 // sendPhotoRequest 对应 sendPhoto 方法（通过 URL 发送）。
@@ -200,4 +204,10 @@ type getChatResponse struct {
 	LastName    string `json:"last_name,omitempty"`
 	Description string `json:"description,omitempty"`
 	MemberCount int    `json:"member_count,omitempty"`
+}
+
+// deleteMessageRequest 对应 deleteMessage 方法。
+type deleteMessageRequest struct {
+	ChatID    int64 `json:"chat_id"`
+	MessageID int64 `json:"message_id"`
 }
