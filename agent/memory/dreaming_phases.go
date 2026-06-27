@@ -37,14 +37,23 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 
 	cutoff := time.Now().AddDate(0, 0, -d.config.Light.LookbackDays)
 	var snippets []rawSnippet
+	// 按 scope 追踪哪些 L0 条目被处理，用于标记
+	type scopeWithIDs struct {
+		scope Scope
+		ids   []string
+	}
+	var processedScopes []scopeWithIDs
 
 	for _, scope := range scopes {
-		l0Entries, err := d.manager.store.GetAll(ctx, Tier0Working, scope)
+		// 使用 GetUnprocessed 跳过已标记 consolidated 的条目
+		// limit=10000 模拟无限制（默认 50 不足以支持梦境全量提取）
+		l0Entries, err := d.manager.store.GetUnprocessed(ctx, scope, 10000)
 		if err != nil {
 			d.logger.Warnw("dreaming light: failed to get L0",
 				"scope", scope.Key(), "err", err)
 			continue
 		}
+		var ids []string
 		for _, e := range l0Entries {
 			if e.CreatedAt.Before(cutoff) {
 				continue
@@ -56,6 +65,10 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 			snippets = append(snippets, rawSnippet{
 				content: content, sourceID: e.ID, scope: scope,
 			})
+			ids = append(ids, e.ID)
+		}
+		if len(ids) > 0 {
+			processedScopes = append(processedScopes, scopeWithIDs{scope: scope, ids: ids})
 		}
 	}
 
@@ -70,6 +83,16 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 
 	if max := d.config.Light.MaxCandidates; max > 0 && len(deduped) > max {
 		deduped = deduped[:max]
+	}
+
+	// 标记已处理的 L0 条目（避免下次 cron 重复提取）
+	// 注意：使用 MarkProcessed 写入 metadata["consolidated"]，
+	// 与非 Dreaming 的 Consolidator 路径共享同一标记
+	for _, swi := range processedScopes {
+		if err := d.manager.store.MarkProcessed(ctx, swi.scope, swi.ids); err != nil {
+			d.logger.Warnw("dreaming light: mark processed failed",
+				"scope", swi.scope.Key(), "err", err)
+		}
 	}
 
 	// 合并到 staged candidates

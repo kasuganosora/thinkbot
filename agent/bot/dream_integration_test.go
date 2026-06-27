@@ -890,6 +890,105 @@ func TestIntegration_Dream_TieredRetrieval(t *testing.T) {
 }
 
 // ============================================================================
+// 幂等性测试 — 二次 Dream 不重复处理已标记的 L0
+// ============================================================================
+
+// TestIntegration_Dream_Idempotent 验证第二次运行时不重复处理已标记的 L0 条目。
+//
+// 流程：
+//  1. 写入 L0 条目 → 首次 Dream → 产出 L1 + 标记 L0 consolidated
+//  2. 再次 Dream → Light 阶段因 GetUnprocessed 跳过已标记条目
+//  3. 验证第二次 LightIngested=0
+func TestIntegration_Dream_Idempotent(t *testing.T) {
+	skipIfShort(t)
+	bundle := setupIntegLLMBundle(t)
+
+	logger := zap.NewNop().Sugar()
+	tp := noop_trace.NewTracerProvider()
+
+	store := memory.NewTieredStore(nil)
+	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{
+		Store:                 store,
+		EnableAutoConsolidate: false,
+	}, tp, logger)
+
+	cfg := memory.DefaultDreamConfig()
+	cfg.Enabled = true
+	cfg.Deep.MinScore = 0.2
+	cfg.Deep.MinRecallCount = 0
+	cfg.Deep.MinUniqueQueries = 0
+	cfg.Deep.MaxPromotions = 20
+	cfg.MaxDreamTokens = integCfg.MaxTokens
+	cfg.Model = integCfg.Model
+
+	dreamMgr := memory.NewDreamManager(cfg, tieredMgr, bundle.Main, tp, logger)
+
+	scope := memory.ChannelScope("idempotent-test")
+	now := time.Now()
+
+	for i, c := range []string{
+		"用户叫周八，在深圳做游戏开发。",
+		"周八主要用 C++ 和 Lua 写游戏逻辑。",
+		"他对 AI 游戏 NPC 很感兴趣，在学强化学习。",
+	} {
+		store.Append(context.Background(), memory.TieredEntry{
+			Entry: memory.Entry{
+				ID:        fmt.Sprintf("idem-%d", i),
+				Scope:     scope,
+				Content:   c,
+				Category:  "fact",
+				Source:    "conversation",
+				CreatedAt: now,
+			},
+			Tier: memory.Tier0Working,
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// 第一次运行
+	report1, err := dreamMgr.Run(ctx)
+	if err != nil {
+		t.Fatalf("first dream failed: %v", err)
+	}
+	t.Logf("Run 1: light_ingested=%d, deep_promoted=%d",
+		report1.LightIngested, report1.DeepPromoted)
+
+	// 验证 L0 已被标记为 consolidated
+	unprocessed, _ := store.GetUnprocessed(ctx, scope, 100)
+	t.Logf("Unprocessed L0 after run 1: %d", len(unprocessed))
+
+	// 第二次运行 — 应该跳过所有已处理的条目
+	report2, err := dreamMgr.Run(ctx)
+	if err != nil {
+		t.Fatalf("second dream failed: %v", err)
+	}
+	t.Logf("Run 2: light_ingested=%d, deep_promoted=%d",
+		report2.LightIngested, report2.DeepPromoted)
+
+	// 第二次不应有新条目被摄入
+	if report2.LightIngested > 0 {
+		t.Errorf("expected LightIngested=0 on second run (all L0 entries should be marked processed), got %d",
+			report2.LightIngested)
+	}
+
+	// 验证 L0 全部被标记
+	unprocessed2, _ := store.GetUnprocessed(ctx, scope, 100)
+	t.Logf("Unprocessed L0 after run 2: %d", len(unprocessed2))
+	if len(unprocessed2) > 0 {
+		t.Errorf("expected 0 unprocessed L0 entries, got %d", len(unprocessed2))
+	}
+
+	// L1 应至少含有第一次晋升的内容
+	l1 := mustGetAll(t, store, memory.Tier1LongTerm, scope)
+	t.Logf("L1 entries total: %d", len(l1))
+	if len(l1) == 0 {
+		t.Error("expected L1 entries from first dream run")
+	}
+}
+
+// ============================================================================
 // 辅助函数
 // ============================================================================
 
