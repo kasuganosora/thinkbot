@@ -160,8 +160,9 @@ func currentMonth() string {
 // TokenQuotaState 持有 per-dimension 月度计数器。
 // 零值不可用；通过 NewTokenQuotaState() 创建。
 type TokenQuotaState struct {
-	mu       sync.Mutex
-	counters map[string]*monthlyCounter
+	mu            sync.Mutex
+	counters      map[string]*monthlyCounter
+	statsRecorder llm.UsageRecorder // 可选，用于记录配额耗尽事件到 stats
 }
 
 // NewTokenQuotaState 创建配额状态。
@@ -169,6 +170,27 @@ func NewTokenQuotaState() *TokenQuotaState {
 	return &TokenQuotaState{
 		counters: make(map[string]*monthlyCounter),
 	}
+}
+
+// WithStatsRecorder 注入 stats 记录器，配额耗尽时自动记录事件。
+func (s *TokenQuotaState) WithStatsRecorder(r llm.UsageRecorder) *TokenQuotaState {
+	s.statsRecorder = r
+	return s
+}
+
+// recordQuotaBlocked 向 stats 记录一次配额耗尽事件（非阻塞）。
+func (s *TokenQuotaState) recordQuotaBlocked(botID, channel, dim string, current, limit int64) {
+	if s.statsRecorder == nil {
+		return
+	}
+	s.statsRecorder.RecordUsage(context.Background(), llm.UsageMetric{
+		BotID:   botID,
+		Feature: "quota_blocked",
+		Channel: channel,
+	})
+	_ = current // current 通过日志记录，stats 不做存
+	_ = limit
+	_ = dim
 }
 
 // getOrCreate 返回指定维度的计数器（线程安全）。
@@ -280,6 +302,10 @@ func TokenQuotaMiddlewareWithState(resolver *QuotaResolver, state *TokenQuotaSta
 						"bot_id", botID,
 						"channel_type", channelType,
 						"chat_id", chatID)
+
+					// 记录配额耗尽事件到 stats
+					state.recordQuotaBlocked(botID, msg.Channel, res.Dimension, current, res.Limit)
+
 					return env, &core.PipelineError{
 						Stage:   "token_quota",
 						Message: fmt.Sprintf("monthly token quota exceeded: %d/%d (dimension: %s)", current, res.Limit, res.Dimension),

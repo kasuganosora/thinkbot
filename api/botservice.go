@@ -215,7 +215,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// - StatsRecordingProvider 拦截所有 LLM 调用，自动记录到 stats_usage_daily
 	//   feature 从 context 读取（WithStatsFeature），pipeline stages 通过
 	//   WithStatsSkip 跳过以避免双重计数
-	quotaState := pipeline.NewTokenQuotaState()
+	quotaState := pipeline.NewTokenQuotaState().WithStatsRecorder(s.statsRecorder)
 	quotaRecorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
 	bundle.Main = llm.NewStatsRecordingProvider(
 		llm.NewQuotaRecordingProvider(bundle.Main, quotaRecorder),
@@ -342,7 +342,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
-		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig()),
+		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig().WithStatsRecorder(s.statsRecorder)),
 	)
 
 	// 创建共享 SelfIDSet——Ingress 和 Engagement 两层防线引用同一份数据。
