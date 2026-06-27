@@ -288,6 +288,27 @@ func (s *TieredStore) Count(_ context.Context, tier MemoryTier, scope Scope) (in
 	return count, nil
 }
 
+// HasRecentActivity 检查 scope 在过去 hours 小时内是否有任何层级的写入。
+// 用于 Dreaming 管线的活跃度过滤，避免对僵尸群组做无用 LLM 调用。
+// 检查所有层级（L0-L3），因为 L0 条目 TTL 短（30分钟），长期记忆（L1-L3）也能反映活跃度。
+func (s *TieredStore) HasRecentActivity(_ context.Context, scope Scope, hours float64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cutoff := time.Now().Add(-time.Duration(hours * float64(time.Hour)))
+	tiers := []MemoryTier{Tier0Working, Tier1LongTerm, Tier2Episodic, Tier3Profile}
+
+	for _, tier := range tiers {
+		key := tierScopeKey(tier, scope)
+		for _, e := range s.buckets[key] {
+			if e.CreatedAt.After(cutoff) && !e.IsExpired(time.Now()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Delete 按 ID 删除指定 tier+scope 下的一条记忆。
 func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, entryID string) error {
 	key := tierScopeKey(tier, scope)
