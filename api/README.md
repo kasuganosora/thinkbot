@@ -28,11 +28,14 @@ BotService 在装配 Pipeline 时自动接入以下增强中间件：
 
 | 中间件 | 职责 |
 |--------|------|
+| `TokenQuotaMiddlewareWithState` | Token 月度配额：按 Bot/Channel/Chat 维度限额，超额拦截（最外层优先检查） |
 | `LoopDetectionMiddleware` | 检测重复工具调用模式，注入软/硬警告 |
 | `TokenBudgetMiddleware` | 按 Channel 追踪累计 Token，阈值告警和硬限制 |
 | `RunJournalRecorder` | 异步缓冲记录 LLM 用量到 `run_journals` 表 |
 
-这些中间件在 LLMStage 外层包装，执行顺序为 `journal → loop → budget → LLM → budget(after) → loop(after) → journal(after)`。LLMRoute Stage 消费软警告并合并到 System Prompt。
+执行顺序为 `quota → journal → loop → budget → LLM → budget(after) → loop(after) → journal(after) → quota(after)`。Token 配额放在最外层，确保配额耗尽时立即拦截，不浪费后续中间件的计算。LLMRoute Stage 消费软警告并合并到 System Prompt。
+
+**全链路 Token 记账**：BotService 在装配时创建共享 `TokenQuotaState`，用 `llm.NewQuotaRecordingProvider` 包裹 LLM Provider（`bundle.Main` 和 `bundle.Light`）。配额中间件通过 `llm.WithQuotaDimension(ctx, dim)` 将 dimension 注入 context，所有经过 Provider 的 LLM 调用（包括 SubAgent、Workflow、Memory 等绕过 pipeline 的调用点）都自动记账，防止漏记。
 
 ## 关键类型
 
