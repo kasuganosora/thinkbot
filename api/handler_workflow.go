@@ -153,12 +153,18 @@ func (s *Server) handleWorkflowMetrics(c *gin.Context) {
 		return
 	}
 
-	submitted, completed, failed, terminated, running := mgr.Metrics()
+	snapshot := mgr.MetricsSnapshot()
 	OK(c, gin.H{
-		"submitted":  submitted,
-		"completed":  completed,
-		"failed":     failed,
-		"terminated": terminated,
-		"running":    running,
+		"submitted":     snapshot.Submitted,
+		"completed":     snapshot.Completed,
+		"failed":        snapshot.Failed,
+		"terminated":    snapshot.Terminated,
+		"running":       snapshot.Running,
+		"nodeExecuted":  snapshot.NodeExecuted,
+		"nodeFailed":    snapshot.NodeFailed,
+		"nodeRetries":   snapshot.NodeRetries,
+		"nodeReviews":   snapshot.NodeReviews,
+		"nodeSkipped":   snapshot.NodeSkipped,
+		"persistErrors": snapshot.PersistErrors,
 	})
 }

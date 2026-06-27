@@ -707,7 +707,10 @@ func (m *Manager) GetWorkflow(wfID string) (*Workflow, error) {
 
 // ListWorkflows 列出最近的工作流（按创建时间降序）。
 func (m *Manager) ListWorkflows(limit int) []*Workflow {
-	result, _ := m.repo.List(limit)
+	result, err := m.repo.List(limit)
+	if err != nil {
+		m.logger.Errorw("failed to list workflows", "error", err)
+	}
 	return result
 }
 
