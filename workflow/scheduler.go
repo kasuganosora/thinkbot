@@ -239,6 +239,12 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	}
 
 	s.mu.Lock()
+	// 再次检查终止状态，防止 handleTerminate 在 isTerminated() 检查
+	// 和获取 semaphore 之间的窗口期已将节点设为 NodeSkipped。
+	if s.terminated {
+		s.mu.Unlock()
+		return
+	}
 	node.Status = NodeRunning
 	startedAt := time.Now()
 	node.StartedAt = &startedAt
@@ -460,6 +466,10 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 
 		// 设置 Review 状态
 		s.mu.Lock()
+		if s.terminated {
+			s.mu.Unlock()
+			return result, errs.New("terminated during review")
+		}
 		node.Status = NodeReviewing
 		s.mu.Unlock()
 		s.persist()
@@ -496,6 +506,10 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 			"node_id", node.ID, "iteration", iter+1, "max_iterations", maxIter)
 
 		s.mu.Lock()
+		if s.terminated {
+			s.mu.Unlock()
+			return result, errs.New("terminated during review")
+		}
 		node.IterationCount = iter + 1
 		node.ReviewFeedback = reviewResult.Feedback
 		node.Status = NodeRunning
@@ -636,7 +650,10 @@ func (s *Scheduler) drainRetryRequests() {
 	for {
 		select {
 		case nodeID := <-s.retryRequests:
-			_ = s.RequestRetry(nodeID)
+			if err := s.RequestRetry(nodeID); err != nil {
+				s.logger.Warnw("failed to process retry request",
+					"node_id", nodeID, "error", err)
+			}
 		default:
 			return
 		}
