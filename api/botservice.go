@@ -482,6 +482,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		botCfg.MaxTokens = def.MaxTokens
 	}
 
+	// 梦境开启时桥接 NoteHandler 写入到分层存储
+	//   NoteHandler → MultiStore → MemoryRepository (检索) + TieredStore (梦境管线)
+	var memStore memory.Store
+	if dreamBundle != nil {
+		tieredAdapter := memory.NewTieredStoreAdapter(dreamBundle.TieredStore)
+		// ThinkFilterStore 在写入前清理 <think> 标签
+		filtered := memory.NewThinkFilterStore(tieredAdapter)
+		repo := memory.NewMemoryRepository()
+		memStore = memory.NewMultiStore(filtered, repo)
+	}
+
 	b, err := bot.New(bot.BotParams{
 		ID:             id,
 		Name:           def.Name,
@@ -490,6 +501,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Dispatcher:     dispatcher,
 		Channels:       allChannels,
 		EventBus:       s.eventBus,
+		MemoryStore:    memStore,
 		Logger:         s.logger,
 		TP:             s.tp,
 		DreamScheduler: dreamScheduler,

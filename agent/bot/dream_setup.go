@@ -57,12 +57,13 @@ func (e *DreamExecutor) Execute(ctx context.Context, _ *cron.Job) (*cron.Execute
 
 // DreamingBundle 封装梦境巩固子系统的完整组件。
 type DreamingBundle struct {
-	Manager   *memory.DreamManager
-	Executor  *DreamExecutor
-	Scheduler *cron.Scheduler
-	CronStore *cron.Store
-	CronJob   *cron.Job
-	TieredMgr *memory.TieredManager
+	Manager     *memory.DreamManager
+	Executor    *DreamExecutor
+	Scheduler   *cron.Scheduler
+	CronStore   *cron.Store
+	CronJob     *cron.Job
+	TieredMgr   *memory.TieredManager
+	TieredStore *memory.TieredStore // 供桥接层将 NoteHandler 写入同步到分层存储
 }
 
 // NewDreamingBundle 为单个 Bot 创建完整的梦境巩固子系统。
@@ -100,8 +101,11 @@ func NewDreamingBundle(
 		EnableAutoConsolidate: true,
 	}, tp, logger)
 
-	// 2. 创建 DreamManager（注入 bot 的 LLM 模型名）
+	// 2. 创建 DreamManager（注入 bot 的 LLM 模型名 + 活跃度阈值）
 	dreamCfg.Model = model
+	if dreamCfg.ActiveThresholdHours == 0 {
+		dreamCfg.ActiveThresholdHours = 24 // 默认仅处理 24h 内有记忆写入的 scope
+	}
 	dreamMgr := memory.NewDreamManager(dreamCfg, tieredMgr, provider, tp, logger)
 
 	// 3. 创建 cron Store + Executor + Scheduler
@@ -135,12 +139,13 @@ func NewDreamingBundle(
 		"job_id", job.ID)
 
 	return &DreamingBundle{
-		Manager:   dreamMgr,
-		Executor:  executor,
-		Scheduler: scheduler,
-		CronStore: cronStore,
-		CronJob:   job,
-		TieredMgr: tieredMgr,
+		Manager:     dreamMgr,
+		Executor:    executor,
+		Scheduler:   scheduler,
+		CronStore:   cronStore,
+		CronJob:     job,
+		TieredMgr:   tieredMgr,
+		TieredStore: store,
 	}
 }
 
