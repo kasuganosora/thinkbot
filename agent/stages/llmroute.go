@@ -86,6 +86,13 @@ type LLMConfig struct {
 	// 非 nil 时，LLMStage 使用 OrchestrateStream（流式生成），
 	// 并将文本增量通过此发布器推送，供 SSE handler 实时消费。
 	StreamPublisher StreamPublisher
+
+	// ReductionConfig 可选的上下文压缩配置。
+	// 非 nil 时，在 orchestration 循环中启用两阶段压缩：
+	//   Phase 1: 工具执行后截断超大输出
+	//   Phase 2: 模型调用前压缩旧消息历史
+	// 为 nil 时禁用压缩（仅依赖 PatchToolCalls 安全网）。
+	ReductionConfig *llm.ReductionConfig
 }
 
 // ============================================================================
@@ -150,12 +157,14 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 解析 system prompt：优先从 Envelope KV 读取动态组装的 prompt（PromptStage 注入），
 	// 回退到 LLMConfig.SystemPrompt 静态配置（向后兼容）。
+	// 并将延迟注入的 pipeline 警告（token 预算、循环检测等）合并到 system prompt 末尾。
 	systemPrompt := s.config.SystemPrompt
 	if v, ok := env.Get("system.prompt"); ok {
 		if sp, ok := v.(string); ok && sp != "" {
 			systemPrompt = sp
 		}
 	}
+	systemPrompt = core.MergeWarnings(env, systemPrompt)
 
 	// 解析工具列表
 	tools := resolveTools(ctx, s.config, env)
@@ -174,6 +183,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	cfg := &llm.OrchestrateConfig{
 		Params:   params,
 		MaxSteps: s.config.MaxSteps,
+	}
+
+	// Enable reduction if configured.
+	if s.config.ReductionConfig != nil {
+		rc := *s.config.ReductionConfig
+		cfg.OnToolResults = llm.NewOnToolResultsCallback(rc)
+		cfg.PrepareStep = llm.NewReducePrepareStepCallback(rc)
 	}
 
 	logger.Debugw("llm stage: starting orchestrate",

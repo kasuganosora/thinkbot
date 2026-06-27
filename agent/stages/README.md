@@ -4,7 +4,7 @@
 
 ## 功能
 
-- **LLMRoute**：根据消息内容路由到不同 LLM 模型
+- **LLMRoute**：根据消息内容路由到不同 LLM 模型，支持从 Envelope 消费软警告并合并到 System Prompt
 - **Enricher**：消息预处理（用户信息注入、历史加载）
 - **Multimodal**：多模态消息处理（图片/音频/视频附件）
 - **Reply**：LLM 调用 + 回复生成（核心 Stage）
@@ -15,7 +15,7 @@
 
 | 类型 | 说明 |
 |------|------|
-| `LLMStage` | LLM 调用 Stage（支持流式输出） |
+| `LLMStage` | LLM 调用 Stage（支持流式输出、UsageRecorder、警告合并） |
 | `LLMConfig` | LLM Stage 配置（SystemPrompt/Model/Temperature） |
 | `EnricherStage` | 消息预处理 Stage |
 | `MultimodalStage` | 多模态附件处理 Stage |
