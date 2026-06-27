@@ -273,7 +273,7 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 	sb.WriteString("\n```")
 	sb.WriteString("\n如果没有任何可合并的条目，输出空数组 []")
 
-	resp, err := c.config.Provider.DoGenerate(ctx, llm.GenerateParams{
+	resp, err := c.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), llm.GenerateParams{
 		Model:    c.config.Model,
 		System:   c.config.SystemPrompt,
 		Messages: []llm.Message{llm.UserMessage(sb.String())},

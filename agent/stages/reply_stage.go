@@ -173,7 +173,9 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		"message_id", env.Message.ID,
 		"provider", s.provider.Name())
 
-	result, err := llm.OrchestrateGenerate(ctx, s.provider, cfg)
+	// WithStatsSkip: 让 StatsRecordingProvider 跳过 Orchestrate 内部的逐次调用，
+	// 由下方 recordUsage() 统一记录合并后的总用量到 journal + stats
+	result, err := llm.OrchestrateGenerate(llm.WithStatsSkip(ctx), s.provider, cfg)
 	if err != nil {
 		span.RecordError(err)
 		logger.Errorw("reply stage: LLM failed",

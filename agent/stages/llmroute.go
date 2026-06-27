@@ -199,9 +199,12 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"streaming", s.config.StreamPublisher != nil)
 
 	var result *llm.GenerateResult
+	// WithStatsSkip: StatsRecordingProvider 会跳过 Orchestrate 内部的每次调用，
+	// 由下方 recordUsage() 统一记录合并后的总用量到 journal + stats
+	statsCtx := llm.WithStatsSkip(ctx)
 	if s.config.StreamPublisher != nil {
 		var err error
-		result, err = s.processStream(ctx, env, cfg, logger)
+		result, err = s.processStream(statsCtx, env, cfg, logger)
 		if err != nil {
 			span.RecordError(err)
 			logger.Errorw("llm stage: stream orchestrate failed",
@@ -215,7 +218,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	} else {
 		var err error
-		result, err = llm.OrchestrateGenerate(ctx, s.provider, cfg)
+		result, err = llm.OrchestrateGenerate(statsCtx, s.provider, cfg)
 		if err != nil {
 			span.RecordError(err)
 			logger.Errorw("llm stage: orchestrate failed",

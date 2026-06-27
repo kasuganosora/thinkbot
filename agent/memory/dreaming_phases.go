@@ -171,7 +171,7 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 	if model == "" {
 		return d.extractCandidatesRuleBased(snippets)
 	}
-	result, err := d.provider.DoGenerate(ctx, llm.GenerateParams{
+	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_extract"), llm.GenerateParams{
 		Model:     llm.ChatModel(model),
 		System:    defaultLightExtractPrompt,
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},
@@ -320,7 +320,7 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 	if d.config.MaxDreamTokens > 0 && d.config.MaxDreamTokens < 2048 {
 		maxTokens = d.config.MaxDreamTokens
 	}
-	result, err := d.provider.DoGenerate(ctx, llm.GenerateParams{
+	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_cluster"), llm.GenerateParams{
 		System:    "你是记忆主题分类助手。",
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},
 		MaxTokens: &maxTokens,

@@ -24,7 +24,7 @@ func newLLMJudgeAdapter(provider llm.Provider, modelID string) *llmJudgeAdapter 
 func (a *llmJudgeAdapter) Chat(ctx context.Context, system, user string) (string, error) {
 	temp := 0.3
 	maxTok := 100
-	result, err := a.provider.DoGenerate(ctx, llm.GenerateParams{
+	result, err := a.provider.DoGenerate(llm.WithStatsFeature(ctx, "engagement"), llm.GenerateParams{
 		Model:       a.model,
 		System:      system,
 		Messages:    []llm.Message{llm.UserMessage(user)},

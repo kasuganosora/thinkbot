@@ -19,6 +19,7 @@ import (
 	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/skill"
 )
 
@@ -30,14 +31,15 @@ import (
 type APIParams struct {
 	fx.In
 
-	DB        *gorm.DB
-	Store     *config.Store
-	AuthSvc   *auth.AuthService
-	BotMgr    *bot.BotManager
-	Logger    *zap.SugaredLogger
-	TP        trace.TracerProvider `optional:"true"`
-	MP        metric.MeterProvider `optional:"true"`
-	Lifecycle fx.Lifecycle
+	DB            *gorm.DB
+	Store         *config.Store
+	AuthSvc       *auth.AuthService
+	BotMgr        *bot.BotManager
+	Logger        *zap.SugaredLogger
+	TP            trace.TracerProvider `optional:"true"`
+	MP            metric.MeterProvider `optional:"true"`
+	StatsRecorder llm.UsageRecorder    `optional:"true"`
+	Lifecycle     fx.Lifecycle
 }
 
 // Module 是 API 的 fx 模块。
@@ -102,7 +104,7 @@ func newBotService(p APIParams, eventBus outbound.EventBus) *BotService {
 	if mp == nil {
 		mp = noop_metric.NewMeterProvider()
 	}
-	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus)
+	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus, p.StatsRecorder)
 }
 
 // newChatHistoryService 创建聊天历史服务。
