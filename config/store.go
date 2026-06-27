@@ -411,7 +411,9 @@ func (s *Store) SetMany(ctx context.Context, kv map[string]string) error {
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 		}).Create(&setting).Error; err != nil {
-			tx.Rollback()
+			if rbErr := tx.Rollback().Error; rbErr != nil {
+				return errs.Wrapf(rbErr, "config: rollback failed while handling persist error for %q: %v", key, err)
+			}
 			return errs.Wrapf(err, "config: persist setting %q", key)
 		}
 	}
@@ -664,7 +666,6 @@ func (s *Store) unmarshalStruct(prefix string, target any) error {
 func buildNestedMap(flat map[string]string) map[string]any {
 	result := make(map[string]any)
 	for k, v := range flat {
-		// 尝试自动类型推断
 		result[k] = autoType(v)
 	}
 	return result

@@ -269,10 +269,12 @@ func (f *FormationPipeline) extractFacts(ctx context.Context, userContent, assis
 	sb.WriteString("\nimportance: 0.0~1.0，越高越重要。闲聊/问候/客套不输出。\n")
 	sb.WriteString("如果对话中没有值得记忆的内容，输出空数组 []")
 
+	maxTokens := 2048
 	resp, err := f.config.Provider.DoGenerate(ctx, llm.GenerateParams{
-		Model:    f.config.Model,
-		System:   f.config.SystemPrompt,
-		Messages: []llm.Message{llm.UserMessage(sb.String())},
+		Model:     f.config.Model,
+		System:    f.config.SystemPrompt,
+		Messages:  []llm.Message{llm.UserMessage(sb.String())},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "formation: LLM extract call")
@@ -337,10 +339,12 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 	sb.WriteString("action: ADD(全新) / UPDATE(更新已有，需提供 target_id) / SKIP(已存在或无价值)\n")
 	sb.WriteString("事实顺序与输入顺序一致。")
 
+	maxTokens := 4096
 	resp, err := f.config.Provider.DoGenerate(ctx, llm.GenerateParams{
-		Model:    f.config.Model,
-		System:   f.config.SystemPrompt,
-		Messages: []llm.Message{llm.UserMessage(sb.String())},
+		Model:     f.config.Model,
+		System:    f.config.SystemPrompt,
+		Messages:  []llm.Message{llm.UserMessage(sb.String())},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "formation: LLM decide call")

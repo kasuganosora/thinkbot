@@ -212,6 +212,7 @@ type PrefetchManager struct {
 	cache    map[string]string // query -> prefetched context
 	executor *SyncExecutor
 	logger   *zap.SugaredLogger
+	maxSize  int // 缓存最大条目数（防止长时间运行内存泄漏）
 }
 
 // NewPrefetchManager 创建预取管理器。
@@ -222,6 +223,7 @@ func NewPrefetchManager(logger *zap.SugaredLogger) *PrefetchManager {
 		cache:    make(map[string]string),
 		executor: executor,
 		logger:   logger.With("component", "memory_prefetch"),
+		maxSize:  64, // 限制缓存条目数，防止长时间运行内存泄漏
 	}
 }
 
@@ -262,6 +264,13 @@ func (p *PrefetchManager) QueuePrefetch(
 		}
 
 		p.mu.Lock()
+		// 容量限制：超出时随机淘汰旧条目（简单 FIFO 近似）
+		if len(p.cache) >= p.maxSize {
+			for k := range p.cache {
+				delete(p.cache, k)
+				break // 只淘汰一个
+			}
+		}
 		p.cache[query] = sb.String()
 		p.mu.Unlock()
 	})
