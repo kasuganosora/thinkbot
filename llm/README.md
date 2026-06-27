@@ -6,6 +6,7 @@
 - **类型安全** — Message、Tool、Stream 全部强类型，告别 `map[string]any` 地狱。
 - **多步编排** — 内置工具自动执行循环（Agent loop），支持流式输出、审批、并行执行。
 - **零外部依赖** — Schema 推断用纯反射实现，不引入 jsonschema 库。
+- **上下文安全** — 内置 `PatchToolCalls`（修补悬挂工具调用）和 `ContextReduction`（超限工具结果截断），保障多步编排的健壮性。
 
 ---
 
@@ -18,6 +19,7 @@
 - [工具调用](#工具调用)
 - [流式输出](#流式输出)
 - [多步编排](#多步编排)
+- [上下文安全](#上下文安全)
 - [文件结构](#文件结构)
 - [如何写一个新 Provider](#如何写一个新-provider)
 
@@ -566,6 +568,39 @@ type StepResult struct {
 
 ---
 
+## 上下文安全
+
+### PatchToolCalls — 修补悬挂工具调用
+
+当历史消息中存在 assistant 发出的 tool call 但缺少对应的 tool result 时，部分 API（如 Anthropic）会拒绝请求。`PatchToolCalls` 自动检测并补全空的 tool result 消息：
+
+```go
+// 在发送请求前调用
+params.Messages = llm.PatchToolCalls(params.Messages)
+```
+
+`OrchestrateGenerate` 和 `OrchestrateStream` 已内置此调用（包括单步快速路径）。
+
+### ContextReduction — 工具结果截断
+
+多步编排中，工具执行结果可能累积到超长上下文。`ContextReduction` 在 `PrepareStep` 回调中自动截断过长的 tool result 消息，将超出阈值的部分替换为摘要预览：
+
+```go
+result, err := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
+    Params:   params,
+    MaxSteps: 10,
+    PrepareStep: llm.NewContextReduction(llm.ReductionConfig{
+        MaxOutputTokens: 7500, // 超过此 token 估算的工具结果会被截断
+    }).PrepareStep,
+})
+```
+
+截断策略：
+- 每个 tool result 保留前 `MaxOutputTokens` 字符（≈1/4 的 token 值）+ `... (truncated)` 标记
+- 每步最多截断一个最长的 tool result，避免一次性修改过多历史
+
+---
+
 ## 文件结构
 
 ```
@@ -578,6 +613,8 @@ llm/
 ├── tool.go             # Tool / ToolCall / ToolResult + 审批类型
 ├── tool_schema.go      # NewTool[T] 泛型 + struct→JSONSchema 反射推断
 ├── orchestrate.go      # 多步编排：OrchestrateGenerate / OrchestrateStream
+├── patchtoolcalls.go   # PatchToolCalls — 修补悬挂工具调用
+├── reduction.go        # ContextReduction — 工具结果超限截断
 ├── model.go            # Model 类型
 ├── usage.go            # Usage / Token 统计
 ├── openai/             # OpenAI provider 实现
