@@ -64,6 +64,7 @@ type BotService struct {
 	botInstances    map[string]*bot.Bot            // botID → running Bot
 	dreamingBundles map[string]*bot.DreamingBundle // botID → DreamingBundle
 	cancelFuncs     map[string]context.CancelFunc  // botID → bot context cancel
+	closeFuncs      map[string]func()              // botID → sub-agent managers cleanup
 }
 
 // NewBotService 创建 BotService。
@@ -89,6 +90,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		botInstances:    make(map[string]*bot.Bot),
 		dreamingBundles: make(map[string]*bot.DreamingBundle),
 		cancelFuncs:     make(map[string]context.CancelFunc),
+		closeFuncs:      make(map[string]func()),
 	}
 }
 
@@ -268,7 +270,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Store:          s.store,
 		EventBus:       s.eventBus,
 	})
-	_ = wfSaMgr // workflow 内部 SubAgent 管理器，Bot 关闭时由 wfMgr 清理
 	if err := workflow.RegisterTools(toolMgr, wfMgr); err != nil {
 		s.logger.Warnw("failed to register workflow tools", "err", err)
 	}
@@ -277,6 +278,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model)
 	if err := subagent.RegisterTools(toolMgr, saMgr); err != nil {
 		s.logger.Warnw("failed to register subagent tools", "err", err)
+	}
+
+	// 注册子代理清理回调，Bot 停止时释放 goroutine 和 LLM 连接
+	wfCleanup := func() {
+		wfSaMgr.CloseAll()
+		saMgr.CloseAll()
 	}
 
 	llmStage := stages.NewLLMStage(
@@ -531,6 +538,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.channels[id] = webCh
 	s.botInstances[id] = b
 	s.cancelFuncs[id] = botCancel
+	s.closeFuncs[id] = wfCleanup
 	if dreamBundle != nil {
 		s.dreamingBundles[id] = dreamBundle
 	}
@@ -553,6 +561,10 @@ func (s *BotService) StopBot(id string) {
 	if cancel, ok := s.cancelFuncs[id]; ok {
 		cancel()
 		delete(s.cancelFuncs, id)
+	}
+	if closeFn, ok := s.closeFuncs[id]; ok {
+		closeFn()
+		delete(s.closeFuncs, id)
 	}
 	if dreamBundle, ok := s.dreamingBundles[id]; ok {
 		dreamBundle.Stop()
