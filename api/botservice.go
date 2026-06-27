@@ -319,11 +319,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	)
 
 	// 用安全中间件包装 LLMStage：
-	//   Token 预算 → 循环检测 → RunJournal 元数据注入 → LLMStage
+	//   Token 配额(月) → Token 预算 → 循环检测 → RunJournal 元数据注入 → LLMStage
+	quotaResolver := pipeline.NewQuotaResolver(s.store)
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		journal.Middleware(),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
 		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig()),
+		pipeline.TokenQuotaMiddleware(quotaResolver, s.tp, s.logger),
 	)
 
 	// 创建共享 SelfIDSet——Ingress 和 Engagement 两层防线引用同一份数据。

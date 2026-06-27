@@ -160,6 +160,34 @@ func BotTimezoneKey(botID string) string {
 	return "bot." + botID + ".timezone"
 }
 
+// BotTokenQuotaKey 返回 Bot 级月 Token 额度配置键。
+// 格式：bot.<bot_id>.token_quota
+// 值为 int64（tokens/月），0 = 不限制。
+func BotTokenQuotaKey(botID string) string {
+	return "bot." + botID + ".token_quota"
+}
+
+// BotTokenQuotaChannelKey 返回 channel 级 Token 额度配置键。
+// 格式：bot.<bot_id>.token_quota.channel.<channel_type>
+// 例如：bot.mybot.token_quota.channel.telegram → "500000"
+func BotTokenQuotaChannelKey(botID, channelType string) string {
+	return "bot." + botID + ".token_quota.channel." + channelType
+}
+
+// BotTokenQuotaChatKey 返回 chat 级 Token 额度配置键（最细粒度）。
+// 格式：bot.<bot_id>.token_quota.channel.<channel_type>.<chat_id>
+// 例如：bot.mybot.token_quota.channel.telegram.-123456 → "100000"
+func BotTokenQuotaChatKey(botID, channelType, chatID string) string {
+	return "bot." + botID + ".token_quota.channel." + channelType + "." + chatID
+}
+
+// SystemTokenQuotaKey 返回系统级月 Token 额度配置键。
+// 格式：system.token_quota
+// 例如：system.token_quota → "2000000"
+func SystemTokenQuotaKey() string {
+	return "system.token_quota"
+}
+
 // BotAdaptiveEngagementKey 返回 Bot 级自适应 engagement 配置键。
 // sub 为具体配置项名称（如 "enabled"、"channel.<type>.enabled"）。
 // 格式：bot.<bot_id>.engagement.adaptive.<sub>
