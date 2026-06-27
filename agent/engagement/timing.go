@@ -3,6 +3,7 @@ package engagement
 import (
 	"context"
 	"math"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -34,12 +35,24 @@ const (
 // TimingGate — 有状态的时序门控（参考 MaiBot 的 Timing Gate + 频率模型）
 // ============================================================================
 
+// DynamicConfigFunc 是动态配置回调。
+// 调用方通过注入此回调，使 TimingGate 能在每次评估时获取最新的 per-channel 参数。
+// 返回 nil 表示使用 TimingGate 的静态配置。
+//
+// channelType: channel 类型（如 "telegram"）
+// chatID: 聊天 ID（群 ID 或用户 ID），为空表示不区分
+//
+// 典型注入方：AdaptiveEngagementSyncer.GetTimingConfigOverride
+type DynamicConfigFunc func(channelType, chatID string) *channelEngagementOverride
+
 // TimingGate 在 EngagementPolicy 之上增加有状态的时序控制：
 //
 //   - 概率频率门控（talk_value）：随机决定是否评估，模拟"每 N 条消息参与一次"
 //   - 连续 no_action 退避：连续 N 次不参与后指数退避，避免对安静频道反复评估
 //   - 消息突发检测（debounce）：连发消息只评估最后一条
 //   - Wait 状态超时重评估：ActionWait 后设定计时，超时后重新允许评估
+//   - 动态配置（DynamicConfigFunc）：per-channel 实时参数覆盖
+//   - 随机噪声（RandomNoiseRate）：5-10% 随机跳出画像约束，模拟真人跨界
 //
 // TimingGate 是线程安全的。
 type TimingGate struct {
@@ -54,6 +67,18 @@ type TimingGate struct {
 	// 参考 MaiBot 的 _schedule_wait_timeout 回调。
 	onWaitExpired func(channelKey string)
 	waitTimers    map[string]*time.Timer
+
+	// dynamicConfig 动态配置回调（nil = 禁用）。
+	dynamicConfig DynamicConfigFunc
+
+	// randomNoiseRate 随机噪声率（0.0~1.0）。默认 0.08（8%）。
+	// 当命中随机噪声时，Bot 即使在画像不匹配的情况下也会尝试参与，
+	// 模拟真人偶尔跨界聊天的行为。
+	randomNoiseRate float64
+
+	// rejectionDetector 被无视检测器（可选）。
+	// 注入后，TimingGate 会在决策时考虑自闭模式。
+	rejectionDetector *RejectionDetector
 }
 
 type channelTimingState struct {
@@ -177,7 +202,37 @@ func NewTimingGate(policy EngagementPolicy, config TimingGateConfig) *TimingGate
 		config:        config,
 		channelStates: make(map[string]*channelTimingState),
 		waitTimers:    make(map[string]*time.Timer),
+		// randomNoiseRate 默认 0（关闭），调用方需显式开启。
+		// 推荐值 0.08（8%），仅在启用自适应 Engagement 时设置。
 	}
+}
+
+// SetDynamicConfig 注入动态配置回调。
+func (g *TimingGate) SetDynamicConfig(cb DynamicConfigFunc) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.dynamicConfig = cb
+}
+
+// SetRandomNoiseRate 设置随机噪声率（0.0~1.0）。
+// 0 = 禁用随机噪声，0.08 = 8% 随机跨界参与。
+func (g *TimingGate) SetRandomNoiseRate(rate float64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if rate < 0 {
+		rate = 0
+	}
+	if rate > 1 {
+		rate = 1
+	}
+	g.randomNoiseRate = rate
+}
+
+// SetRejectionDetector 注入被无视检测器。
+func (g *TimingGate) SetRejectionDetector(detector *RejectionDetector) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.rejectionDetector = detector
 }
 
 // normalize 确保 TimingGateConfig 中未设置的字段使用合理默认值。
@@ -256,10 +311,36 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 	g.mu.Lock()
 	state := g.getOrCreateState(channelKey)
 
+	// 解析 channel type 和 chat ID（用于动态配置）
+	channelType := g.channelTypeForMessage(msg)
+	chatID := g.chatIDForMessage(msg)
+
+	// 获取动态配置（如果有）
+	effectiveConfig := g.config // 默认静态配置
+	if g.dynamicConfig != nil {
+		if override := g.dynamicConfig(channelType, chatID); override != nil {
+			effectiveConfig = g.applyDynamicOverride(effectiveConfig, override)
+		}
+	}
+
+	// 被无视检测：自闭模式下大幅降低参与
+	if g.rejectionDetector != nil && g.rejectionDetector.IsInStreak(channelKey) {
+		if adj := g.rejectionDetector.GetRejectionAdjustment(channelKey); adj != nil {
+			effectiveConfig = g.applyDynamicOverride(effectiveConfig, adj)
+			// 确保自闭模式下概率封顶 0.05
+			if effectiveConfig.ReplyProbability > 0.05 {
+				effectiveConfig.ReplyProbability = 0.05
+			}
+			if effectiveConfig.BackoffStartCount > 1 {
+				effectiveConfig.BackoffStartCount = 1
+			}
+		}
+	}
+
 	// 记录消息间隔
 	if !state.lastExternalMsgAt.IsZero() {
 		interval := now.Sub(state.lastExternalMsgAt).Seconds()
-		if interval >= g.config.BurstIntervalSeconds {
+		if interval >= effectiveConfig.BurstIntervalSeconds {
 			g.recordInterval(state, now, interval)
 		}
 	}
@@ -288,7 +369,7 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 		state.pendingMsgCount++
 		// 检查退避绕过：待处理消息数达到阈值时绕过退避
 		// 参考 MaiBot 的 _no_action_backoff_bypass_pending_count
-		if g.config.BackoffBypassPendingCount > 0 && state.pendingMsgCount >= g.config.BackoffBypassPendingCount {
+		if effectiveConfig.BackoffBypassPendingCount > 0 && state.pendingMsgCount >= effectiveConfig.BackoffBypassPendingCount {
 			// 绕过退避，重置状态
 			state.backoffUntil = time.Time{}
 			state.consecutiveDecline = 0
@@ -310,7 +391,7 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 	// --- Check 3: 消息突发检测（debounce） ---
 	if !state.lastMsgAt.IsZero() {
 		sinceLast := now.Sub(state.lastMsgAt).Seconds()
-		if sinceLast < g.config.BurstIntervalSeconds {
+		if sinceLast < effectiveConfig.BurstIntervalSeconds {
 			state.lastMsgAt = now
 			state.pendingMsgCount++
 			g.mu.Unlock()
@@ -323,12 +404,26 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 	}
 	state.lastMsgAt = now
 
+	// --- Check 3.5: 随机噪声（灵光乍现） ---
+	// 5-10% 概率绕过画像约束，随机决定参与评估。
+	// 模拟真人偶尔跨界，打破刻板印象。
+	if g.randomNoiseRate > 0 {
+		if rand.Float64() < g.randomNoiseRate {
+			state.lastEvalAt = now
+			g.mu.Unlock()
+			return true, TimingDecision{
+				Action: ActionContinue,
+				Reason: "random noise injection — spontaneous participation",
+			}
+		}
+	}
+
 	// --- Check 4: 概率频率门控 ---
 	multiplier := state.frequencyMultiplier
 	if multiplier == 0 {
-		multiplier = g.config.FrequencyMultiplier
+		multiplier = effectiveConfig.FrequencyMultiplier
 	}
-	effectiveProb := g.config.ReplyProbability * multiplier
+	effectiveProb := effectiveConfig.ReplyProbability * multiplier
 	if effectiveProb > 1.0 {
 		effectiveProb = 1.0
 	}
@@ -582,6 +677,40 @@ func channelKeyForMessage(msg *core.Message) string {
 		return msg.Channel
 	}
 	return msg.Source
+}
+
+// channelTypeForMessage 从消息中提取 channel 类型（如 "telegram"）。
+func (g *TimingGate) channelTypeForMessage(msg *core.Message) string {
+	if msg.Metadata != nil {
+		if ct, ok := msg.Metadata["channel_type"].(string); ok && ct != "" {
+			return ct
+		}
+	}
+	return msg.Source
+}
+
+// chatIDForMessage 从消息中提取 chat ID（群 ID 或用户 ID）。
+func (g *TimingGate) chatIDForMessage(msg *core.Message) string {
+	if msg.Metadata != nil {
+		if cid, ok := msg.Metadata["chat_id"].(string); ok && cid != "" {
+			return cid
+		}
+	}
+	return ""
+}
+
+// applyDynamicOverride 将动态覆盖应用到 TimingGateConfig 副本。
+func (g *TimingGate) applyDynamicOverride(base TimingGateConfig, override *channelEngagementOverride) TimingGateConfig {
+	if override.ReplyProbability != nil {
+		base.ReplyProbability = *override.ReplyProbability
+	}
+	if override.BackoffBaseSeconds != nil {
+		base.BackoffBaseSeconds = *override.BackoffBaseSeconds
+	}
+	if override.BackoffStartCount != nil {
+		base.BackoffStartCount = *override.BackoffStartCount
+	}
+	return base
 }
 
 func (g *TimingGate) getOrCreateState(key string) *channelTimingState {

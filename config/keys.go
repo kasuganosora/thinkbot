@@ -160,6 +160,20 @@ func BotTimezoneKey(botID string) string {
 	return "bot." + botID + ".timezone"
 }
 
+// BotAdaptiveEngagementKey 返回 Bot 级自适应 engagement 配置键。
+// sub 为具体配置项名称（如 "enabled"、"channel.<type>.enabled"）。
+// 格式：bot.<bot_id>.engagement.adaptive.<sub>
+// 例如：bot.mybot.engagement.adaptive.enabled → "true"
+//
+// 层级继承关系（从粗到细）：
+//
+//	bot.<id>.engagement.adaptive.enabled                     → Bot 全局开关
+//	bot.<id>.engagement.adaptive.channel.<type>.enabled      → Channel 类型级开关
+//	bot.<id>.engagement.adaptive.channel.<type>.<chatid>.enabled → 具体群/单聊级开关
+func BotAdaptiveEngagementKey(botID, sub string) string {
+	return "bot." + botID + ".engagement.adaptive." + sub
+}
+
 // EnvKeyToConfigKey 将环境变量名转换为配置键。
 // 规则：小写化，下划线 _ → 点号 .
 func EnvKeyToConfigKey(envKey string) string {
