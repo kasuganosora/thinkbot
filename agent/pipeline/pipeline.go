@@ -119,7 +119,7 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 		if !si.Enabled {
 			continue
 		}
-		if env.Aborted() {
+		if env == nil || env.Aborted() {
 			logger.Infow("pipeline aborted by envelope",
 				"message_id", env.Message.ID,
 				"err", env.Err())
