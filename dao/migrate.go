@@ -16,5 +16,6 @@ func Migrate(database *gorm.DB) error {
 		&ChatMessage{},
 		&BindCode{},
 		&IdentityMapping{},
+		&RunJournal{},
 	)
 }
