@@ -103,7 +103,6 @@ func evalMath(expr string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	p.skipSpaces()
 	if p.pos < len(p.tokens) {
 		return 0, fmt.Errorf("unexpected token: %q", p.peek().value)
 	}
@@ -173,12 +172,6 @@ func (p *mathParser) advance() mathToken {
 	t := p.peek()
 	p.pos++
 	return t
-}
-
-func (p *mathParser) skipSpaces() {
-	for p.pos < len(p.tokens) && p.tokens[p.pos].kind == "space" {
-		p.pos++
-	}
 }
 
 // parseExpr: expr → term (('+' | '-') term)*

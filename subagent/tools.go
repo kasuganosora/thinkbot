@@ -5,6 +5,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -99,6 +100,8 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 
 				// 截断到最大数量
 				if len(tasksArr) > maxTasksPerSpawn {
+					traceid.L(ctx).Warnw("spawn: tasks truncated",
+						"requested", len(tasksArr), "max", maxTasksPerSpawn)
 					tasksArr = tasksArr[:maxTasksPerSpawn]
 				}
 

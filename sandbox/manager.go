@@ -194,8 +194,7 @@ func (m *SandboxManager) Count() int {
 func (m *SandboxManager) HealthCheckAll(ctx context.Context) map[string]HealthStatus {
 	m.mu.RLock()
 	keys := make([]string, 0, len(m.workspaces))
-	for k, entry := range m.workspaces {
-		_ = entry
+	for k := range m.workspaces {
 		keys = append(keys, k)
 	}
 	m.mu.RUnlock()

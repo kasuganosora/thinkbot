@@ -73,10 +73,13 @@ func NormalizeCode(text string) string {
 // Source 示例: "telegram-bot1"、"misskey-bot1"、"web-bot1"。
 // 未知前缀时返回原值。
 func extractPlatform(source string) string {
-	for _, p := range []string{"telegram", "misskey", "discord", "slack", "web"} {
+	for _, p := range knownPlatforms {
 		if strings.HasPrefix(source, p) {
 			return p
 		}
 	}
 	return source
 }
+
+// knownPlatforms 已知平台前缀列表（按匹配优先级排序）。
+var knownPlatforms = []string{"telegram", "misskey", "discord", "slack", "web"}

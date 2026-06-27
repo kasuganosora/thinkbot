@@ -427,9 +427,6 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 		System:   CompactionSystemPrompt,
 		Messages: summaryMessages,
 	}
-	if summaryParams.Model == nil {
-		summaryParams.Model = params.Model
-	}
 	maxTokens := c.config.SummaryMaxTokens
 	summaryParams.MaxTokens = &maxTokens
 

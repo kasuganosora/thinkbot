@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -276,7 +277,7 @@ func listFilesInternal(path string, recursive bool, depth, maxDepth int) ([]map[
 		}
 
 		if recursive && entry.IsDir && depth < maxDepth {
-			subPath := path + "/" + entry.Name
+			subPath := filepath.Join(path, entry.Name)
 			children, err := listFilesInternal(subPath, true, depth+1, maxDepth)
 			if err == nil {
 				item["children"] = children
