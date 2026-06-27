@@ -312,6 +312,12 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		if s.isTerminated() {
 			return errs.New("workflow terminated")
 		}
+		// 注入上游结果上下文（编译后的 Workflow 自动生效）
+		taskContext := BuildUpstreamContext(s.wf, node)
+		if taskContext != "" {
+			// 将上游结果注入到节点任务中，SubAgent 看到更完整的上下文
+			node.Task = taskContext
+		}
 		execResult, err := s.executor.Execute(ctx, node)
 		if err != nil {
 			return err

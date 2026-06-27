@@ -590,3 +590,163 @@ func TestRun_TerminateDuringRun(t *testing.T) {
 		t.Errorf("expected terminated, got %s", status)
 	}
 }
+
+// ============================================================================
+// BuildUpstreamContext + Compile 集入测试
+// ============================================================================
+
+// upstreamInjectExecutor 记录 Execute 时传入的 task 内容（用于验证上游结果注入）。
+type upstreamInjectExecutor struct {
+	execResult string
+	execErr    error
+	// 记录每次 Execute 调用时传入的 node.Task（可能被上游结果修改）
+	capturedTasks []string
+}
+
+func (e *upstreamInjectExecutor) Execute(_ context.Context, node *DAGNode) (string, error) {
+	e.capturedTasks = append(e.capturedTasks, node.Task)
+	return e.execResult, e.execErr
+}
+
+func (e *upstreamInjectExecutor) ExecuteWithFeedback(_ context.Context, node *DAGNode, _, _ string) (string, error) {
+	return e.execResult, e.execErr
+}
+
+func (e *upstreamInjectExecutor) Review(_ context.Context, node *DAGNode, _ string) (*ReviewResult, error) {
+	return &ReviewResult{Passed: true}, nil
+}
+
+func TestRunNode_InjectsUpstreamContext(t *testing.T) {
+	// n1 → n2, n1 has result → n2 should see upstream context in task
+	wf := NewWorkflow("wf", "req", []*DAGNode{
+		{ID: "n1", Name: "extract"},
+		{ID: "n2", Name: "summarize", Dependencies: []string{"n1"}, Task: "总结提取结果"},
+	})
+	if err := wf.Compile(); err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+
+	n1, _ := wf.GetNode("n1")
+	n1.Status = NodeCompleted
+	n1.Result = "上游产出: 营收增长12%"
+
+	exec := &upstreamInjectExecutor{execResult: "摘要完成"}
+	s := newMockScheduler(wf, exec)
+
+	node, _ := wf.GetNode("n2")
+	node.Status = NodeReady
+
+	s.runNode(context.Background(), node)
+
+	if len(exec.capturedTasks) != 1 {
+		t.Fatalf("expected 1 Execute call, got %d", len(exec.capturedTasks))
+	}
+	task := exec.capturedTasks[0]
+	if !contains(task, "[上游任务汇总]") {
+		t.Errorf("expected upstream context injection in task, got: %s", task)
+	}
+	if !contains(task, "营收增长") {
+		t.Errorf("expected upstream result content, got: %s", task)
+	}
+	if !contains(task, "[你的任务]") {
+		t.Errorf("expected task separator, got: %s", task)
+	}
+}
+
+func TestRunNode_NoUpstreamContext_WhenNoDeps(t *testing.T) {
+	// Root node (no deps) should not have injected upstream context.
+	wf := NewWorkflow("wf", "req", []*DAGNode{
+		{ID: "n1", Name: "root", Task: "原始任务"},
+	})
+	if err := wf.Compile(); err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+
+	exec := &upstreamInjectExecutor{execResult: "done"}
+	s := newMockScheduler(wf, exec)
+
+	node, _ := wf.GetNode("n1")
+	node.Status = NodeReady
+
+	s.runNode(context.Background(), node)
+
+	task := exec.capturedTasks[0]
+	if contains(task, "[上游任务汇总]") {
+		t.Errorf("root node should not have upstream context, got: %s", task)
+	}
+	if task != "原始任务" {
+		t.Errorf("expected original task unchanged, got: %s", task)
+	}
+}
+
+func TestRunNode_UpstreamNotCompleted_NoContext(t *testing.T) {
+	// n1 still pending → n2 should not see its (nonexistent) result.
+	wf := NewWorkflow("wf", "req", []*DAGNode{
+		{ID: "n1", Name: "not_done", Task: "t1"},
+		{ID: "n2", Name: "consumer", Dependencies: []string{"n1"}, Task: "t2"},
+	})
+	if err := wf.Compile(); err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+
+	exec := &upstreamInjectExecutor{execResult: "done"}
+	s := newMockScheduler(wf, exec)
+
+	node, _ := wf.GetNode("n2")
+	node.Status = NodeReady
+
+	s.runNode(context.Background(), node)
+
+	task := exec.capturedTasks[0]
+	if contains(task, "[上游任务汇总]") {
+		t.Errorf("uncompleted upstream should not inject context, got: %s", task)
+	}
+}
+
+// ============================================================================
+// Manager Compile 流程集成测试
+// ============================================================================
+
+func TestManager_CompileCalledDuringAnalyzeAndRun(t *testing.T) {
+	// Verify that Compile() is wired into the flow: Analyze → Compile → Schedule.
+	// Use a simple DAG that passes validation.
+
+	nodes := []*DAGNode{
+		{ID: "n1"},
+		{ID: "n2", Dependencies: []string{"n1"}},
+	}
+
+	for _, n := range nodes {
+		n.Status = NodePending
+	}
+	wf := NewWorkflow("wf-test", "test req", nodes)
+
+	// Simulate the analyzeAndRun flow: compile after nodes populated
+	if err := wf.Compile(); err != nil {
+		t.Fatalf("compile should succeed for valid DAG: %v", err)
+	}
+	if !wf.Compiled() {
+		t.Error("workflow should be compiled")
+	}
+	if wf.topoOrder == nil || wf.reverseAdj == nil || wf.roots == nil || wf.inDegree == nil {
+		t.Error("all compile caches should be populated")
+	}
+}
+
+func TestManager_CompileRejectedOnInvalidDAG(t *testing.T) {
+	nodes := []*DAGNode{
+		{ID: "n1", Dependencies: []string{"n2"}},
+		{ID: "n2", Dependencies: []string{"n1"}},
+	}
+	for _, n := range nodes {
+		n.Status = NodePending
+	}
+	wf := NewWorkflow("wf-bad", "req", nodes)
+	err := wf.Compile()
+	if err == nil {
+		t.Fatal("expected cycle rejection")
+	}
+	if wf.Compiled() {
+		t.Error("workflow should not be marked compiled on failure")
+	}
+}

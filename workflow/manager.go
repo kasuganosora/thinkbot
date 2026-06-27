@@ -241,12 +241,27 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 		return
 	}
 
-	// 更新工作流节点 + 初始化状态 + 重建索引
+	// 更新工作流节点 + 初始化状态 + 编译验证 + 重建索引
 	for _, n := range nodes {
 		n.Status = NodePending
 	}
 	wf.Nodes = nodes
 	wf.RebuildIndex()
+
+	// 编译工作流图：校验 DAG + 计算拓扑排序 + 构建邻接索引
+	if err := wf.Compile(); err != nil {
+		m.logger.Errorw("workflow compilation failed", "workflow_id", wf.ID, "error", err)
+		wf.Status = WorkflowFailed
+		wf.Error = fmt.Sprintf("DAG 编译失败: %s", err.Error())
+		_ = m.repo.Save(wf)
+		m.metrics.Failed.Add(1)
+		m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowFailed, map[string]any{
+			"error": wf.Error,
+		})
+		m.cleanupRunning(wf.ID)
+		return
+	}
+
 	if err := m.repo.Save(wf); err != nil {
 		m.logger.Errorw("failed to save analyzed workflow", "error", err)
 	}
@@ -412,6 +427,19 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 			"node_count", len(wf.Nodes))
 
 		wf.EnsureIndex()
+		// 反序列化的 workflow 没有编译缓存，需要重新编译
+		if !wf.Compiled() {
+			if err := wf.Compile(); err != nil {
+				m.logger.Errorw("failed to compile recovered workflow, marking as failed",
+					"workflow_id", wf.ID, "error", err)
+				wf.Status = WorkflowFailed
+				wf.Error = fmt.Sprintf("DAG 编译失败: %s", err.Error())
+				_ = m.repo.Save(wf)
+				m.metrics.Failed.Add(1)
+				result.Failed++
+				continue
+			}
+		}
 		resetCount := 0
 		for _, n := range wf.Nodes {
 			if !n.Status.IsTerminal() && n.Status != NodePending {

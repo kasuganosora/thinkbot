@@ -51,6 +51,7 @@ func NewExecutor(saMgr *subagent.SubAgentManager, tp trace.TracerProvider, logge
 }
 
 // Execute 通过 SubAgent 执行节点任务，返回产物文本。
+// 自动注入已完成的依赖节点的产物作为上下文，提升 SubAgent 输出质量。
 func (e *Executor) Execute(ctx context.Context, node *DAGNode) (string, error) {
 	ctx, span := e.tracer.Start(ctx, "workflow.node.execute",
 		trace.WithAttributes(
