@@ -216,6 +216,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	//   feature 从 context 读取（WithStatsFeature），pipeline stages 通过
 	//   WithStatsSkip 跳过以避免双重计数
 	quotaState := pipeline.NewTokenQuotaState().WithStatsRecorder(s.statsRecorder)
+	// 从 stats_usage_daily 恢复本月已用 token，防止重启后计数器归零绕过限额
+	if err := quotaState.RestoreFromStats(syncCtx, s.db, id); err != nil {
+		s.logger.Warnw("bot_service: failed to restore quota counters from stats", "bot_id", id, "err", err)
+	}
 	quotaRecorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
 	bundle.Main = llm.NewStatsRecordingProvider(
 		llm.NewQuotaRecordingProvider(bundle.Main, quotaRecorder),

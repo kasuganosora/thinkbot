@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/config"
@@ -230,6 +231,59 @@ func (s *TokenQuotaState) Snapshot() map[string]int64 {
 		m[k] = c.get()
 	}
 	return m
+}
+
+// RestoreFromStats 从 stats_usage_daily 恢复本月已用 token 数。
+// 用于服务器重启后恢复配额状态，防止因重启导致计数器归零而绕过月度限额。
+// 仅恢复 bot 级维度（bot:{botID}），channel/chat 级维度从零开始。
+func (s *TokenQuotaState) RestoreFromStats(ctx context.Context, db *gorm.DB, botIDs ...string) error {
+	if db == nil {
+		return nil
+	}
+	type botRow struct {
+		BotID       string
+		TotalTokens int64
+	}
+	var rows []botRow
+
+	monthStart := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.UTC)
+	query := db.WithContext(ctx).Raw(`
+		SELECT bot_id, SUM(total_tokens) as total_tokens
+		FROM stats_usage_daily
+		WHERE date >= ?
+		GROUP BY bot_id
+	`, monthStart)
+	if len(botIDs) > 0 {
+		query = db.WithContext(ctx).Raw(`
+			SELECT bot_id, SUM(total_tokens) as total_tokens
+			FROM stats_usage_daily
+			WHERE date >= ? AND bot_id IN ?
+			GROUP BY bot_id
+		`, monthStart, botIDs)
+	}
+	if err := query.Scan(&rows).Error; err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range rows {
+		if r.TotalTokens <= 0 {
+			continue
+		}
+		dim := quotaDimBot(r.BotID)
+		c, ok := s.counters[dim]
+		if !ok {
+			c = newMonthlyCounter()
+			s.counters[dim] = c
+		}
+		c.mu.Lock()
+		if c.tokens < r.TotalTokens {
+			c.tokens = r.TotalTokens
+		}
+		c.mu.Unlock()
+	}
+	return nil
 }
 
 // Reset 重置指定维度的计数（跨月或手动）。
