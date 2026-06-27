@@ -286,6 +286,18 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		saMgr.CloseAll()
 	}
 
+	// 创建 RunJournal 记录器（LLM 调用事件持久化）
+	journalCfg := pipeline.DefaultRunJournalConfig()
+	journalCfg.Caller = "lead_agent"
+	journal := pipeline.NewRunJournalRecorder(s.db, journalCfg)
+
+	// RunJournal cleanup（引用 journal，必须在 journal 创建之后）
+	journalCleanup := func(ctx context.Context) {
+		if err := journal.Shutdown(ctx); err != nil {
+			s.logger.Warnw("run journal shutdown failed", "err", err)
+		}
+	}
+
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
@@ -299,9 +311,19 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			ToolResolver:    toolMgr,
 			MaxSteps:        10,
 			StreamPublisher: s.eventBus,
+			UsageRecorder:   journal, // RunJournal 记录每次 LLM 调用
+			ReductionConfig: llm.DefaultReductionConfigPtr(),
 		},
 		s.tp,
 		s.logger,
+	)
+
+	// 用安全中间件包装 LLMStage：
+	//   Token 预算 → 循环检测 → RunJournal 元数据注入 → LLMStage
+	wrappedLLM := pipeline.WithMiddleware(llmStage,
+		journal.Middleware(),
+		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
+		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig()),
 	)
 
 	// 创建共享 SelfIDSet——Ingress 和 Engagement 两层防线引用同一份数据。
@@ -370,7 +392,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建 Pipeline
 	stages := []core.StageInfo{
-		{Stage: llmStage, Order: 100, Enabled: true},
+		{Stage: wrappedLLM, Order: 100, Enabled: true},
 	}
 	if engagementStage != nil {
 		// Engagement 放在 LLM 之前——先决定是否参与，再生成回复
@@ -499,6 +521,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 用独立 context 启动 Bot，避免 HTTP 请求结束后 ctx 被取消导致 Bot 立即关闭
 	botCtx, botCancel := context.WithCancel(context.Background())
 
+	// 启动 RunJournal 后台 flush goroutine
+	go journal.Run(botCtx)
+
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
 		defer func() {
@@ -520,6 +545,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("bot started", "bot_id", id, "channels", len(allChannels))
 	case <-readyTimeout.C:
 		botCancel()
+		journalCleanup(context.Background())
 		b.Stop()
 		b.Close()
 		s.mgr.Unregister(id)
@@ -527,6 +553,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Internal("bot_service: bot startup timeout (30s)")
 	case <-ctx.Done():
 		botCancel()
+		journalCleanup(context.Background())
 		b.Stop()
 		b.Close()
 		s.mgr.Unregister(id)
@@ -538,7 +565,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.channels[id] = webCh
 	s.botInstances[id] = b
 	s.cancelFuncs[id] = botCancel
-	s.closeFuncs[id] = wfCleanup
+	s.closeFuncs[id] = func() {
+		wfCleanup()
+		journalCleanup(context.Background())
+	}
 	if dreamBundle != nil {
 		s.dreamingBundles[id] = dreamBundle
 	}

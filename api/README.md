@@ -22,6 +22,18 @@
 - **记忆查询**：只读访问 Bot 的分层记忆（L0~L3）
 - **系统监控**：运行时健康检查、事件总线指标
 
+## Pipeline 集成
+
+BotService 在装配 Pipeline 时自动接入以下增强中间件：
+
+| 中间件 | 职责 |
+|--------|------|
+| `LoopDetectionMiddleware` | 检测重复工具调用模式，注入软/硬警告 |
+| `TokenBudgetMiddleware` | 按 Channel 追踪累计 Token，阈值告警和硬限制 |
+| `RunJournalRecorder` | 异步缓冲记录 LLM 用量到 `run_journals` 表 |
+
+这些中间件在 LLMStage 外层包装，执行顺序为 `journal → loop → budget → LLM → budget(after) → loop(after) → journal(after)`。LLMRoute Stage 消费软警告并合并到 System Prompt。
+
 ## 关键类型
 
 | 类型 | 说明 |
