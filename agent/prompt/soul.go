@@ -136,6 +136,10 @@ You are a helpful AI assistant.
 <!-- Edit this file to customize your bot's personality. Changes are hot-reloaded. -->
 `
 
+// OnReloadFunc 是 SOUL.md 热重载后的回调。
+// content 为重新加载后的内容（已去除 front matter）。
+type OnReloadFunc func(content string)
+
 // SoulLoader 负责加载和热重载 SOUL.md 文件。
 type SoulLoader struct {
 	config   SoulLoaderConfig
@@ -147,6 +151,9 @@ type SoulLoader struct {
 	variables []Variable
 	loaded    atomic.Bool // 是否已成功加载
 	logger    SoulLogger  // 可选日志接口
+
+	// onReload 热重载后回调（可选）。调用方在此更新依赖方（如 AdaptiveEngagementSyncer）。
+	onReload OnReloadFunc
 
 	stopCh  chan struct{}
 	stopped atomic.Bool
@@ -282,6 +289,14 @@ func (l *SoulLoader) Load() error {
 	l.logger.Infof("soul: loaded %s (%d bytes, %d variables, mtime=%s)",
 		l.config.Path, len(body), len(variables), info.ModTime().Format(time.RFC3339))
 
+	// 触发热重载回调（调用方在锁外回调，避免死锁）
+	onReload := l.onReload
+
+	// 按值传递 content，避免回调中持有锁
+	if onReload != nil {
+		go onReload(strings.TrimSpace(body))
+	}
+
 	return nil
 }
 
@@ -290,6 +305,15 @@ func (l *SoulLoader) Content() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.content
+}
+
+// SetOnReload 设置热重载后的回调。
+// 回调在 Load() 成功后、锁释放前被调用，传入新内容。
+// 典型用法：通知 AdaptiveEngagementSyncer 重新解析画像。
+func (l *SoulLoader) SetOnReload(cb OnReloadFunc) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.onReload = cb
 }
 
 // Loaded 返回是否已成功加载。

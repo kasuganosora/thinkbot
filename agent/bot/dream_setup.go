@@ -64,6 +64,10 @@ type DreamingBundle struct {
 	CronJob     *cron.Job
 	TieredMgr   *memory.TieredManager
 	TieredStore *memory.TieredStore // 供桥接层将 NoteHandler 写入同步到分层存储
+
+	// BotProfiler Bot 自我画像提取器（可选）。
+	// 注入后，梦境管线会在每次运行时对 BotScope 执行画像提取。
+	BotProfiler *memory.BotProfileProfiler
 }
 
 // NewDreamingBundle 为单个 Bot 创建完整的梦境巩固子系统。

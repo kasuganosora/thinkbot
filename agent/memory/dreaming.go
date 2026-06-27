@@ -13,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -200,6 +201,14 @@ type DreamManager struct {
 	report     *DreamReport
 	candidates map[string]*DreamCandidate
 	dreamDiary []string
+
+	// botProfiler Bot 自我画像提取器（可选）。
+	// 注入后，梦境管线会在 Deep 相位后对 BotScope 执行画像提取。
+	botProfiler *BotProfileProfiler
+
+	// onBotProfileUpdated 回调：Bot 画像更新后触发（可选）。
+	// 调用方可在此通知 AdaptiveEngagementSyncer 刷新参数。
+	onBotProfileUpdated func(botID string, result *BotProfileResult)
 }
 
 // NewDreamManager 创建梦境管理器。
@@ -231,6 +240,20 @@ func NewDreamManager(
 		state:      state,
 		candidates: make(map[string]*DreamCandidate),
 	}
+}
+
+// SetBotProfiler 注入 Bot 自我画像提取器。
+func (d *DreamManager) SetBotProfiler(profiler *BotProfileProfiler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.botProfiler = profiler
+}
+
+// SetOnBotProfileUpdated 设置 Bot 画像更新回调。
+func (d *DreamManager) SetOnBotProfileUpdated(cb func(botID string, result *BotProfileResult)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onBotProfileUpdated = cb
 }
 
 // State 返回当前状态。
@@ -417,6 +440,12 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 	report.FinishedAt = time.Now()
 	report.Phase = PhaseDeep
 
+	// Phase 4 (Optional): Bot 自我画像提取
+	// 对 BotScope 的 L1+L2 记忆执行画像蒸馏，更新 Bot 的 L3 自我认知。
+	if d.botProfiler != nil {
+		d.extractBotProfiles(ctx, activeScopes)
+	}
+
 	span.SetAttributes(
 		attribute.Int("ingested", report.LightIngested),
 		attribute.Int("promoted", report.DeepPromoted),
@@ -470,6 +499,113 @@ func parseScopeFromKey(key string) Scope {
 		return Scope{Kind: ScopeKind(rest)}
 	}
 	return Scope{Kind: ScopeKind(rest[:colon]), ID: rest[colon+1:]}
+}
+
+// extractBotProfiles 对活跃 scope 中的 BotScope 执行自我画像提取。
+func (d *DreamManager) extractBotProfiles(ctx context.Context, activeScopes []Scope) {
+	ctx, span := d.tracer.Start(ctx, "memory.dreaming.bot_profile",
+		trace.WithAttributes(
+			attribute.Int("active_scopes", len(activeScopes)),
+		))
+	defer span.End()
+	logger := traceid.WithLoggerFrom(ctx, d.logger)
+
+	var extractedCount int
+	defer func() {
+		span.SetAttributes(attribute.Int("bot_profiles_extracted", extractedCount))
+	}()
+
+	for _, scope := range activeScopes {
+		if scope.Kind != ScopeBot {
+			continue
+		}
+
+		botID := scope.ID
+		if botID == "" {
+			continue
+		}
+
+		logger.Debugw("dreaming: extracting bot profile", "bot_id", botID)
+
+		// 获取 BotScope 的 L1 和 L2 记忆
+		l1Entries, err := d.manager.store.Retrieve(ctx, Tier1LongTerm, []Scope{scope}, 50)
+		if err != nil {
+			logger.Warnw("dreaming: failed to get bot L1 entries",
+				"bot_id", botID, "err", err)
+			continue
+		}
+		l2Entries, err := d.manager.store.Retrieve(ctx, Tier2Episodic, []Scope{scope}, 20)
+		if err != nil {
+			logger.Warnw("dreaming: failed to get bot L2 entries",
+				"bot_id", botID, "err", err)
+			l2Entries = nil
+		}
+
+		if len(l1Entries) == 0 && len(l2Entries) == 0 {
+			continue
+		}
+
+		// 获取已有 L3 画像（供参考）
+		existing, err := d.manager.store.Retrieve(ctx, Tier3Profile, []Scope{scope}, 10)
+		if err != nil {
+			logger.Warnw("dreaming: failed to get existing bot L3",
+				"bot_id", botID, "err", err)
+			existing = nil
+		}
+
+		// 调用 BotProfileProfiler
+		profile, err := d.botProfiler.ExtractProfile(ctx, l1Entries, l2Entries, existing)
+		if err != nil {
+			logger.Warnw("dreaming: bot profile extraction failed",
+				"bot_id", botID, "err", err)
+			continue
+		}
+		if profile == nil {
+			continue
+		}
+
+		// 将画像写入 L3（BotScope）
+		d.persistBotProfile(ctx, scope, profile)
+
+		extractedCount++
+
+		// 回调通知
+		if d.onBotProfileUpdated != nil {
+			d.onBotProfileUpdated(botID, profile)
+		}
+	}
+}
+
+// persistBotProfile 将 Bot 自我画像写入 L3。
+func (d *DreamManager) persistBotProfile(ctx context.Context, scope Scope, profile *BotProfileResult) {
+	logger := traceid.WithLoggerFrom(ctx, d.logger)
+
+	entry := Entry{
+		Scope:      scope,
+		Content:    profile.Personality,
+		Category:   "bot_personality",
+		Source:     "bot_profiler",
+		Importance: profile.Confidence,
+		Metadata: map[string]any{
+			"energy_level":     profile.EnergyLevel,
+			"patience":         profile.Patience,
+			"verbosity":        profile.Verbosity,
+			"preferred_topics": profile.PreferredTopics,
+			"extracted_at":     time.Now(),
+		},
+	}
+
+	if err := d.manager.WriteProfile(ctx, entry); err != nil {
+		logger.Warnw("dreaming: failed to write bot profile", "err", err)
+		return
+	}
+
+	logger.Infow("dreaming: bot profile written to L3",
+		"bot_id", scope.ID,
+		"personality", profile.Personality,
+		"energy", profile.EnergyLevel,
+		"patience", profile.Patience,
+		"confidence", profile.Confidence)
 }
 
 // appendDreamDiary 追加一条梦境日记。

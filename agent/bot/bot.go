@@ -13,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent"
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/engagement"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
@@ -34,6 +35,7 @@ import (
 //   - EventBus 旁路事件（SSE 实时状态推送）
 //   - 内建 Handler 自动注册（Reply/Forward/Broadcast/Note/Callback/Silent）
 //   - Bot 级别配置（LLM 参数、system prompt 等）
+//   - 自适应 Engagement（Bot 自我画像 + 动态参数调整）
 //
 // Bot 通过 EngineHook 机制扩展 Engine 的处理流程，
 // 在消息处理各阶段注入事件发射和 context 增强，无需复制 Engine 代码。
@@ -83,6 +85,9 @@ type Bot struct {
 
 	// 梦境巩固（nil=未启用，默认禁用）
 	dreamScheduler *cron.Scheduler // 梦境巩固的 cron 调度器
+
+	// 自适应 Engagement（可选）
+	adaptiveSyncer *engagement.AdaptiveEngagementSyncer // 画像→参数映射器（nil=未启用）
 
 	// 资源管理（Close 时释放）
 	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
@@ -136,6 +141,15 @@ type BotParams struct {
 	// 使两层防线共享同一份数据，无需时序协调。
 	// 如果为 nil，Ingress 会创建一个内部的 SelfIDSet。
 	SelfIDSet *inbound.SelfIDSet
+
+	// AdaptiveSyncer 自适应 Engagement 同步器（可选，nil=禁用）。
+	// 注入后，Bot 会将此同步器的 DynamicConfigFunc 绑定到 TimingGate，
+	// 实现 Bot 自我画像 → Engagement 参数的动态映射。
+	AdaptiveSyncer *engagement.AdaptiveEngagementSyncer
+
+	// RejectionDetector 被无视检测器（可选，nil=禁用）。
+	// 注入后，Bot 会在发送回复时通知检测器，并在 TimingGate 中考虑自闭模式。
+	RejectionDetector *engagement.RejectionDetector
 }
 
 // New 创建一个 Bot 实例。
@@ -313,6 +327,9 @@ func New(params BotParams) (*Bot, error) {
 
 	// 注入梦境巩固调度器
 	bot.dreamScheduler = params.DreamScheduler
+
+	// 注入自适应 Engagement 组件
+	bot.adaptiveSyncer = params.AdaptiveSyncer
 
 	return bot, nil
 }

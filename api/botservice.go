@@ -444,7 +444,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		loc := builder.GetBotTimezoneLocation(id)
 		cronFile := fmt.Sprintf("data/cron/%s_dream.json", id)
 
-		bundle := bot.NewDreamingBundle(
+		dBundle := bot.NewDreamingBundle(
 			memory.DreamConfig{
 				Enabled:          dreamCfg.Enabled,
 				Schedule:         dreamCfg.Schedule,
@@ -459,13 +459,86 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			id,
 			cronFile,
 		)
-		if bundle != nil {
-			dreamScheduler = bundle.Scheduler
-			dreamBundle = bundle
+		if dBundle != nil {
+			dreamScheduler = dBundle.Scheduler
+			dreamBundle = dBundle
 			s.logger.Infow("dreaming enabled",
 				"bot_id", id,
 				"schedule", dreamCfg.Schedule)
 		}
+	}
+
+	// 创建自适应 Engagement 组件（Bot 自我画像 → 动态参数映射）
+	var adaptiveSyncer *engagement.AdaptiveEngagementSyncer
+	var rejectionDetector *engagement.RejectionDetector
+
+	// 从 config store 读取自适应开关配置
+	adaptiveEnabled := s.store.GetBool(config.BotAdaptiveEngagementKey(id, "enabled"), false)
+	adaptiveChannels := s.store.GetStringSlice(config.BotAdaptiveEngagementKey(id, "channels"), nil)
+
+	// 从 SOUL.md 解析初始画像
+	soulContent := def.SystemPrompt
+	initialTraits := engagement.ParseSoulProfile(soulContent)
+
+	// 创建自适应同步器
+	adaptiveSyncer = engagement.NewAdaptiveEngagementSyncer(
+		engagement.SyncerConfig{
+			BotID:           id,
+			InitialTraits:   initialTraits,
+			GlobalEnabled:   adaptiveEnabled,
+			EnabledChannels: adaptiveChannels,
+		},
+		s.tp,
+		s.logger,
+	)
+
+	// 创建被无视检测器
+	rejectionDetector = engagement.NewRejectionDetector(
+		engagement.RejectionDetectorConfig{
+			SilenceWindowSeconds: 120.0,
+			StreakThreshold:      3,
+			StreakDuration:       1 * time.Hour,
+			ChannelType:          "",
+			BotName:              def.Name,
+		},
+		s.tp,
+		s.logger,
+	)
+
+	// 将 BotProfileProfiler 注入 DreamManager（如果启用了梦境）
+	if dreamBundle != nil {
+		botProfiler := memory.NewBotProfileProfiler(
+			memory.BotProfileProfilerConfig{
+				Provider: bundle.Main,
+				Model:    &llm.Model{ID: bundle.MainDef.Model},
+			},
+			s.tp,
+			s.logger,
+		)
+		dreamBundle.Manager.SetBotProfiler(botProfiler)
+		dreamBundle.BotProfiler = botProfiler
+
+		// 回调：画像更新后同步到 AdaptiveEngagementSyncer
+		dreamBundle.Manager.SetOnBotProfileUpdated(func(botID string, result *memory.BotProfileResult) {
+			if result == nil {
+				return
+			}
+			adaptiveSyncer.UpdateTraits(engagement.BotProfileTraits{
+				EnergyLevel:     result.EnergyLevel,
+				Patience:        result.Patience,
+				PreferredTopics: result.PreferredTopics,
+				Verbosity:       result.Verbosity,
+				Personality:     result.Personality,
+				Confidence:      result.Confidence,
+			})
+			s.logger.Infow("adaptive engagement synced from dreaming",
+				"bot_id", botID,
+				"personality", result.Personality,
+				"energy", result.EnergyLevel)
+		})
+
+		s.logger.Infow("bot profile profiler wired into dreaming",
+			"bot_id", id)
 	}
 
 	// 创建 Bot
@@ -494,20 +567,22 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	b, err := bot.New(bot.BotParams{
-		ID:             id,
-		Name:           def.Name,
-		Config:         botCfg,
-		Pipeline:       p,
-		Dispatcher:     dispatcher,
-		Channels:       allChannels,
-		EventBus:       s.eventBus,
-		MemoryStore:    memStore,
-		Logger:         s.logger,
-		TP:             s.tp,
-		DreamScheduler: dreamScheduler,
-		SelfIDSet:      selfIDSet,
-		PromptRegistry: promptReg,
-		ToolManager:    toolMgr,
+		ID:                id,
+		Name:              def.Name,
+		Config:            botCfg,
+		Pipeline:          p,
+		Dispatcher:        dispatcher,
+		Channels:          allChannels,
+		EventBus:          s.eventBus,
+		MemoryStore:       memStore,
+		Logger:            s.logger,
+		TP:                s.tp,
+		DreamScheduler:    dreamScheduler,
+		SelfIDSet:         selfIDSet,
+		PromptRegistry:    promptReg,
+		ToolManager:       toolMgr,
+		AdaptiveSyncer:    adaptiveSyncer,
+		RejectionDetector: rejectionDetector,
 	})
 	if err != nil {
 		rollback()
@@ -522,6 +597,52 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 					"message_id", env.Message.ID, "err", err)
 			}
 		})
+	}
+
+	// 接线自适应 Engagement：TimingGate + AdaptiveSyncer + RejectionDetector
+	if engagementStage != nil && engagementStage.TimingGate() != nil {
+		gate := engagementStage.TimingGate()
+
+		// 注入动态配置回调 + 开启随机噪声（只在启用自适应时生效）
+		if adaptiveSyncer != nil {
+			gate.SetDynamicConfig(adaptiveSyncer.GetTimingConfigOverride)
+			gate.SetRandomNoiseRate(0.08) // 8% 随机跨界参与，模拟真人灵光乍现
+			s.logger.Infow("adaptive engagement: dynamic config wired to timing gate", "bot_id", id)
+		}
+
+		// 注入被无视检测器
+		if rejectionDetector != nil {
+			gate.SetRejectionDetector(rejectionDetector)
+			s.logger.Infow("adaptive engagement: rejection detector wired to timing gate", "bot_id", id)
+		}
+	}
+
+	// 联动 SoulLoader → AdaptiveSyncer：
+	// Bot 内部有 SoulLoader 实时加载 SOUL.md。将真实 SOUL.md 内容作为
+	// 初始画像种子（覆盖 def.SystemPrompt 的 fallback 解析），
+	// 并接线热重载回调。
+	if adaptiveSyncer != nil && b.SoulLoader() != nil && b.SoulLoader().Loaded() {
+		soulContent := b.SoulLoader().Content()
+		if soulContent != "" {
+			realTraits := engagement.ParseSoulProfile(soulContent)
+			adaptiveSyncer.UpdateTraits(realTraits)
+			s.logger.Infow("adaptive engagement: synced from actual SOUL.md",
+				"bot_id", id,
+				"personality", realTraits.Personality,
+				"energy", realTraits.EnergyLevel,
+				"confidence", realTraits.Confidence)
+		}
+
+		// 热重载联动：SOUL.md 变更后自动重新解析画像
+		b.SoulLoader().SetOnReload(func(content string) {
+			traits := engagement.ParseSoulProfile(content)
+			adaptiveSyncer.UpdateTraits(traits)
+			s.logger.Infow("adaptive engagement: profile updated from SOUL.md hot-reload",
+				"bot_id", id,
+				"personality", traits.Personality,
+				"energy", traits.EnergyLevel)
+		})
+		s.logger.Infow("adaptive engagement: SoulLoader hot-reload wired", "bot_id", id)
 	}
 
 	// 注册到 BotManager

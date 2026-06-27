@@ -95,6 +95,12 @@ func (s *EngagementStage) WithTimingGate(gate *TimingGate) *EngagementStage {
 	return s
 }
 
+// TimingGate 返回内部的 TimingGate（供外部接线）。
+// 返回 nil 表示未配置 TimingGate。
+func (s *EngagementStage) TimingGate() *TimingGate {
+	return s.gate
+}
+
 // WithBurstBuffer 注入突发缓冲器。
 // 调用后，Stage 在处理每条消息前先经过 BurstBuffer 检查：
 //   - 突发期间的消息被缓存，Stage 直接返回（不评估）
