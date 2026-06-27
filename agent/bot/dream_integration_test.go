@@ -66,7 +66,7 @@ func seedConversationData(t *testing.T, store *memory.TieredStore, scope memory.
 				Content:   content,
 				Category:  "fact",
 				Source:    "conversation",
-				CreatedAt: now.Add(-time.Duration(15-i) * time.Hour),
+				CreatedAt: now, // 当前时间避免 L0 30min TTL 过期
 			},
 			Tier: memory.Tier0Working,
 		})
@@ -233,7 +233,7 @@ func TestIntegration_Dream_LLMExtraction(t *testing.T) {
 				Content:   content,
 				Category:  "fact",
 				Source:    "conversation",
-				CreatedAt: now.Add(-time.Duration(5-i) * time.Hour),
+				CreatedAt: now,
 			},
 			Tier: memory.Tier0Working,
 		})
@@ -311,7 +311,7 @@ func TestIntegration_Dream_BasicPipeline(t *testing.T) {
 				Content:   c,
 				Category:  "fact",
 				Source:    "conversation",
-				CreatedAt: now.Add(-time.Duration(5-i) * time.Hour),
+				CreatedAt: now,
 			},
 			Tier: memory.Tier0Working,
 		})
@@ -389,7 +389,7 @@ func TestIntegration_Dream_NoLLM_Fallback(t *testing.T) {
 				Content:   c,
 				Category:  "fact",
 				Source:    "conversation",
-				CreatedAt: now.Add(-time.Duration(3-i) * time.Hour),
+				CreatedAt: now,
 			},
 			Tier: memory.Tier0Working,
 		})

@@ -345,18 +345,22 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 		return report, nil
 	}
 
-	// 活跃度过滤：跳过 24h 内无 L0 写入的僵尸 scope
+	// 活跃度过滤：跳过指定时间内无记忆写入的僵尸 scope
+	// ActiveThresholdHours=0 时跳过过滤
 	threshold := d.config.ActiveThresholdHours
-	if threshold <= 0 {
-		threshold = 24
-	}
-	activeScopes := make([]Scope, 0, len(scopes))
-	for _, s := range scopes {
-		if d.manager.store.HasRecentActivity(ctx, s, threshold) {
-			activeScopes = append(activeScopes, s)
+	var activeScopes []Scope
+	skipped := 0
+	if threshold > 0 {
+		activeScopes = make([]Scope, 0, len(scopes))
+		for _, s := range scopes {
+			if d.manager.store.HasRecentActivity(ctx, s, threshold) {
+				activeScopes = append(activeScopes, s)
+			}
 		}
+		skipped = len(scopes) - len(activeScopes)
+	} else {
+		activeScopes = scopes
 	}
-	skipped := len(scopes) - len(activeScopes)
 	report.SkippedInactive = skipped
 	if skipped > 0 {
 		d.logger.Infow("dreaming: skipped inactive scopes",
