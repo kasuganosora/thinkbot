@@ -30,7 +30,16 @@ type statsFeatureKey struct{}
 
 // WithStatsFeature sets the feature label for stats recording in context.
 // Non-stage callers use this to tag their LLM calls with a meaningful label.
+//
+// IMPORTANT: This also clears the WithStatsSkip flag. Pipeline stages set
+// WithStatsSkip to prevent double-counting of orchestrated calls, but
+// explicit WithStatsFeature means the caller wants this specific call
+// recorded (e.g. subagent tool calls within a pipeline stage). Without
+// clearing the skip flag, subagent/workflow tool LLM calls inside a
+// pipeline would be silently dropped from stats.
 func WithStatsFeature(ctx context.Context, feature string) context.Context {
+	// Clear skip flag — explicit feature implies desired recording
+	ctx = context.WithValue(ctx, statsSkipKey{}, false)
 	return context.WithValue(ctx, statsFeatureKey{}, feature)
 }
 
