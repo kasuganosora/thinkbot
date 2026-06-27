@@ -20,7 +20,10 @@ func (c *MisskeyChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDef
 		c.followUserTool(),
 		c.unfollowUserTool(),
 		c.createNoteTool(),
+		c.createRenoteTool(),
 		c.deleteNoteTool(),
+		c.reactToNoteTool(),
+		c.unreactToNoteTool(),
 		c.searchUserTool(),
 		c.listFollowingTool(),
 	}, nil
@@ -164,6 +167,61 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 	}
 }
 
+// createRenoteTool 返回 misskey_create_renote 工具定义。
+func (c *MisskeyChannel) createRenoteTool() agenttools.ToolDef {
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "misskey_create_renote",
+			Description: "在 Misskey 平台上转发（Renote/Boost）一条帖子。" +
+				"需要提供原帖子的 noteId。",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"noteId": map[string]any{
+						"type":        "string",
+						"description": "要转发的原帖子 ID",
+					},
+					"visibility": map[string]any{
+						"type":        "string",
+						"description": "转发的可见性：public（公开，默认）、home（首页）、followers（仅关注者）",
+						"enum":        []string{"public", "home", "followers"},
+					},
+				},
+				"required": []string{"noteId"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("misskey_create_renote: invalid input type")
+				}
+				noteID, _ := args["noteId"].(string)
+				if noteID == "" {
+					return nil, fmt.Errorf("misskey_create_renote: noteId is required")
+				}
+				visibility, _ := args["visibility"].(string)
+				if visibility == "" {
+					visibility = VisibilityPublic
+				}
+
+				newNoteID, err := c.api.createNoteFull(ctx, "", "", noteID, visibility, "", nil)
+				if err != nil {
+					return nil, fmt.Errorf("renote failed: %w", err)
+				}
+
+				noteURL := fmt.Sprintf("%s/notes/%s", strings.TrimRight(c.cfg.Host, "/"), newNoteID)
+				return map[string]any{
+					"success":    true,
+					"noteId":     newNoteID,
+					"noteUrl":    noteURL,
+					"visibility": visibility,
+					"message":    fmt.Sprintf("已转发帖子: %s", noteURL),
+				}, nil
+			}),
+		},
+		Category: "misskey",
+	}
+}
+
 // deleteNoteTool 返回 misskey_delete_note 工具定义。
 func (c *MisskeyChannel) deleteNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
@@ -196,6 +254,92 @@ func (c *MisskeyChannel) deleteNoteTool() agenttools.ToolDef {
 				return map[string]any{
 					"success": true,
 					"message": fmt.Sprintf("帖子 %s 已删除", noteID),
+				}, nil
+			}),
+		},
+		Category: "misskey",
+	}
+}
+
+// reactToNoteTool 返回 misskey_react_to_note 工具定义。
+func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "misskey_react_to_note",
+			Description: "对 Misskey 平台上的一条帖子添加 emoji 反应。" +
+				"需要提供帖子的 noteId 和 reaction（如 :heart:）。",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"noteId": map[string]any{
+						"type":        "string",
+						"description": "目标帖子 ID",
+					},
+					"reaction": map[string]any{
+						"type":        "string",
+						"description": "反应内容，格式为 emoji 或 :name:，如 \"👍\" 或 \":heart:\"",
+					},
+				},
+				"required": []string{"noteId", "reaction"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("misskey_react_to_note: invalid input type")
+				}
+				noteID, _ := args["noteId"].(string)
+				reaction, _ := args["reaction"].(string)
+				if noteID == "" || reaction == "" {
+					return nil, fmt.Errorf("misskey_react_to_note: noteId and reaction are required")
+				}
+				if err := c.api.createReaction(ctx, noteID, reaction); err != nil {
+					return nil, fmt.Errorf("react failed: %w", err)
+				}
+				return map[string]any{
+					"success":  true,
+					"noteId":   noteID,
+					"reaction": reaction,
+					"message":  fmt.Sprintf("已对帖子 %s 添加反应 %s", noteID, reaction),
+				}, nil
+			}),
+		},
+		Category: "misskey",
+	}
+}
+
+// unreactToNoteTool 返回 misskey_unreact_to_note 工具定义。
+func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "misskey_unreact_to_note",
+			Description: "移除自己在 Misskey 平台上对一条帖子添加的 emoji 反应。" +
+				"只需要提供帖子的 noteId（自动移除当前 Bot 的反应）。",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"noteId": map[string]any{
+						"type":        "string",
+						"description": "目标帖子 ID",
+					},
+				},
+				"required": []string{"noteId"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("misskey_unreact_to_note: invalid input type")
+				}
+				noteID, _ := args["noteId"].(string)
+				if noteID == "" {
+					return nil, fmt.Errorf("misskey_unreact_to_note: noteId is required")
+				}
+				if err := c.api.deleteReaction(ctx, noteID); err != nil {
+					return nil, fmt.Errorf("unreact failed: %w", err)
+				}
+				return map[string]any{
+					"success": true,
+					"noteId":  noteID,
+					"message": fmt.Sprintf("已移除对帖子 %s 的反应", noteID),
 				}, nil
 			}),
 		},
