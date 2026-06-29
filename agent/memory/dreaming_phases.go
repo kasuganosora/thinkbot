@@ -520,7 +520,7 @@ func (d *DreamManager) scoreCandidate(c *DreamCandidate, now time.Time) ScoreBre
 			halfLife = 14 * 24
 		}
 		ageHours := now.Sub(c.LastSeen).Hours()
-		sb.Recency = 0.5 * (1.0 - ageHours/halfLife)
+		sb.Recency = 1.0 - ageHours/halfLife
 		if sb.Recency < 0 {
 			sb.Recency = 0
 		}

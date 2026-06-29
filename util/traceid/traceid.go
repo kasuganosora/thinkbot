@@ -116,7 +116,7 @@ func WithLogger(ctx context.Context) *zap.SugaredLogger {
 // WithLoggerFrom 使用指定的 SugaredLogger 创建携带 trace_id 的子 logger。
 func WithLoggerFrom(ctx context.Context, logger *zap.SugaredLogger) *zap.SugaredLogger {
 	if logger == nil {
-		return nil
+		return zap.NewNop().Sugar()
 	}
 	id := FromContext(ctx)
 	if id == "" {

@@ -300,44 +300,53 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 	result := &llm.GenerateResult{}
 
 	// 单次消费 stream channel，同时转发 text delta 到 EventBus
-	for part := range streamResult.Stream {
-		switch p := part.(type) {
-		case *llm.TextDeltaPart:
-			result.Text += p.Text
-			if p.Text != "" {
-				publisher.PublishTextDelta(ctx, traceID, botID, p.Text)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case part, ok := <-streamResult.Stream:
+			if !ok {
+				goto streamDone
 			}
-		case *llm.ReasoningDeltaPart:
-			result.Reasoning += p.Text
-		case *llm.StreamToolCallPart:
-			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
-				ToolCallID: p.ToolCallID,
-				ToolName:   p.ToolName,
-				Input:      p.Input,
-			})
-			publisher.PublishToolCall(ctx, traceID, botID, p.ToolName, p.Input)
-		case *llm.StreamToolResultPart:
-			result.ToolResults = append(result.ToolResults, llm.ToolResult{
-				ToolCallID: p.ToolCallID,
-				ToolName:   p.ToolName,
-				Output:     p.Output,
-			})
-			publisher.PublishToolResult(ctx, traceID, botID, p.ToolName, p.Output, "")
-		case *llm.FinishStepPart:
-			result.Response = p.Response
-			if result.Usage.TotalTokens == 0 {
-				result.Usage = p.Usage
+			switch p := part.(type) {
+			case *llm.TextDeltaPart:
+				result.Text += p.Text
+				if p.Text != "" {
+					publisher.PublishTextDelta(ctx, traceID, botID, p.Text)
+				}
+			case *llm.ReasoningDeltaPart:
+				result.Reasoning += p.Text
+			case *llm.StreamToolCallPart:
+				result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
+					ToolCallID: p.ToolCallID,
+					ToolName:   p.ToolName,
+					Input:      p.Input,
+				})
+				publisher.PublishToolCall(ctx, traceID, botID, p.ToolName, p.Input)
+			case *llm.StreamToolResultPart:
+				result.ToolResults = append(result.ToolResults, llm.ToolResult{
+					ToolCallID: p.ToolCallID,
+					ToolName:   p.ToolName,
+					Output:     p.Output,
+				})
+				publisher.PublishToolResult(ctx, traceID, botID, p.ToolName, p.Output, "")
+			case *llm.FinishStepPart:
+				result.Response = p.Response
+				if result.Usage.TotalTokens == 0 {
+					result.Usage = p.Usage
+					result.FinishReason = p.FinishReason
+					result.RawFinishReason = p.RawFinishReason
+				}
+			case *llm.FinishPart:
 				result.FinishReason = p.FinishReason
 				result.RawFinishReason = p.RawFinishReason
+				result.Usage = p.TotalUsage
+			case *llm.ErrorPart:
+				return nil, p.Error
 			}
-		case *llm.FinishPart:
-			result.FinishReason = p.FinishReason
-			result.RawFinishReason = p.RawFinishReason
-			result.Usage = p.TotalUsage
-		case *llm.ErrorPart:
-			return nil, p.Error
 		}
 	}
+streamDone:
 
 	result.Steps = streamResult.Steps
 	result.Messages = streamResult.Messages

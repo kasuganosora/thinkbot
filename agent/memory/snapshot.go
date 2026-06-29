@@ -131,6 +131,8 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 
 // SetLogger 设置日志记录器（可选，用于记录非致命错误）。
 func (s *Snapshot) SetLogger(logger *zap.SugaredLogger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.logger = logger
 }
 
@@ -394,9 +396,14 @@ func (s *Snapshot) SnapshotPromptSection() *prompt.Section {
 // 应在每轮系统提示组装前调用。
 func (s *Snapshot) UpdatePromptSection(ctx context.Context, section *prompt.Section) {
 	if s.config.Mode != ModeFrozen {
-		if _, err := s.Refresh(ctx); err != nil && s.logger != nil {
-			s.logger.Warnw("snapshot: refresh failed, using cached snapshot",
-				"mode", s.config.Mode, "err", err)
+		if _, err := s.Refresh(ctx); err != nil {
+			s.mu.RLock()
+			logger := s.logger
+			s.mu.RUnlock()
+			if logger != nil {
+				logger.Warnw("snapshot: refresh failed, using cached snapshot",
+					"mode", s.config.Mode, "err", err)
+			}
 		}
 	}
 

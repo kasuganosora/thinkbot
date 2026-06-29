@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -25,10 +26,11 @@ import (
 
 // SyncExecutor 是单 worker 的后台任务执行器。
 type SyncExecutor struct {
-	tasks  chan func()
-	logger *zap.SugaredLogger // 可选，用于记录 panic
-	once   sync.Once
-	wg     sync.WaitGroup
+	tasks   chan func()
+	logger  *zap.SugaredLogger // 可选，用于记录 panic
+	once    sync.Once
+	wg      sync.WaitGroup
+	stopped atomic.Bool
 }
 
 // NewSyncExecutor 创建后台同步执行器。
@@ -72,6 +74,10 @@ func (e *SyncExecutor) worker() {
 // Submit 提交一个后台任务。
 // 如果队列已满或 executor 已关闭，降级为内联执行。
 func (e *SyncExecutor) Submit(fn func()) bool {
+	if e.stopped.Load() {
+		fn()
+		return false
+	}
 	select {
 	case e.tasks <- fn:
 		return true
@@ -86,6 +92,7 @@ func (e *SyncExecutor) Submit(fn func()) bool {
 // 关闭任务通道，等待 worker 排空所有已提交任务。
 // drainTimeout 为等待队列排空的最大时间。
 func (e *SyncExecutor) Shutdown(drainTimeout time.Duration) {
+	e.stopped.Store(true)
 	e.once.Do(func() {
 		close(e.tasks)
 	})

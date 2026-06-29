@@ -113,7 +113,8 @@ type Engine struct {
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
-	readyCh chan struct{} // close 后表示 Engine 已完成初始化（worker 已启动）
+	readyCh   chan struct{} // close 后表示 Engine 已完成初始化（worker 已启动）
+	readyOnce sync.Once
 
 	// metrics（原子计数器）
 	messagesProcessed atomic.Int64
@@ -185,7 +186,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.logger.Infow("engine running")
 
 	// 标记 Engine 已就绪
-	close(e.readyCh)
+	e.readyOnce.Do(func() { close(e.readyCh) })
 
 	// 阻塞直到 ctx 取消
 	<-ctx.Done()

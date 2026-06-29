@@ -167,9 +167,10 @@ func (w *SlidingWindow) Count() int {
 // 基于 msg.Source 或全局进行限流。
 type RateLimitRule struct {
 	bucket *TokenBucket
-	// took 标记 Allow() 是否成功预扣了一个令牌。
-	// 使用 atomic.Bool 保证并发安全，Refund 通过 CAS 确保只退还实际预扣的令牌。
-	took atomic.Bool
+	// took 记录未退还的预扣令牌数。
+	// 使用 atomic.Int32 计数器解决并发 Allow/Refund 时的竞态问题：
+	// 多个 goroutine 可以并发 Allow（各自 +1），各自 Refund 时 -1，互不干扰。
+	took atomic.Int32
 }
 
 // NewRateLimitRule 创建频率限制规则。
@@ -184,10 +185,9 @@ func (r *RateLimitRule) Allow(_ *core.Message) (bool, string) {
 		return true, ""
 	}
 	if !r.bucket.TryTake() {
-		r.took.Store(false)
 		return false, "rate limit exceeded"
 	}
-	r.took.Store(true)
+	r.took.Add(1)
 	return true, ""
 }
 
@@ -197,9 +197,19 @@ func (r *RateLimitRule) Consume() {
 }
 
 // Refund 退还预扣的令牌（当消息最终未参与时调用）。
-// 使用 CAS 确保只退还 Allow() 实际预扣的令牌，避免超额退还。
+// 使用 CAS 循环确保只退还 Allow() 实际预扣的令牌，避免超额退还。
 func (r *RateLimitRule) Refund() {
-	if r.bucket != nil && r.took.CompareAndSwap(true, false) {
-		r.bucket.Refund()
+	if r.bucket == nil {
+		return
+	}
+	for {
+		old := r.took.Load()
+		if old <= 0 {
+			return
+		}
+		if r.took.CompareAndSwap(old, old-1) {
+			r.bucket.Refund()
+			return
+		}
 	}
 }

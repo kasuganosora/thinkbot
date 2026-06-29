@@ -197,21 +197,27 @@ func (d *RejectionDetector) OnExternalMessage(channelKey string, msg *core.Messa
 // CheckSilence 检查指定 channel 是否静默超时（Bot 回复后无人说话）。
 // 应在超时后由定时器或外部周期性调用。
 func (d *RejectionDetector) CheckSilence(channelKey string) {
+	var cb func(string, int)
+	var cbChannelKey string
+	var cbStreakCount int
+
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	state := d.getOrCreateState(channelKey)
 	if !state.pendingReply {
+		d.mu.Unlock()
 		return
 	}
 
 	repliedAt, ok := d.botRepliedAt[channelKey]
 	if !ok {
+		d.mu.Unlock()
 		return
 	}
 
 	silenceWindow := time.Duration(d.config.SilenceWindowSeconds * float64(time.Second))
 	if time.Since(repliedAt) < silenceWindow {
+		d.mu.Unlock()
 		return
 	}
 
@@ -220,7 +226,14 @@ func (d *RejectionDetector) CheckSilence(channelKey string) {
 
 	// 判定：既无后续消息，又无人引用 Bot
 	if state.postReplyMsgCount == 0 || !state.botReferenced {
-		d.recordRejection(channelKey, state)
+		cb, cbChannelKey, cbStreakCount = d.recordRejection(channelKey, state)
+	}
+
+	d.mu.Unlock()
+
+	// 在锁外调用回调，避免死锁
+	if cb != nil {
+		cb(cbChannelKey, cbStreakCount)
 	}
 }
 
@@ -238,6 +251,7 @@ func (d *RejectionDetector) IsInStreak(channelKey string) bool {
 	if state.streakActive && time.Since(state.streakStartedAt) > d.config.StreakDuration {
 		state.streakActive = false
 		state.consecutiveRejections = 0
+		d.activeStreakCount.Add(-1)
 		return false
 	}
 
@@ -282,6 +296,7 @@ func (d *RejectionDetector) GetRejectionAdjustment(channelKey string) *channelEn
 	if time.Since(state.streakStartedAt) > d.config.StreakDuration {
 		state.streakActive = false
 		state.consecutiveRejections = 0
+		d.activeStreakCount.Add(-1)
 		return nil
 	}
 
@@ -308,7 +323,9 @@ func (d *RejectionDetector) getOrCreateState(channelKey string) *channelRejectio
 	return state
 }
 
-func (d *RejectionDetector) recordRejection(channelKey string, state *channelRejectionState) {
+// recordRejection 记录一次被无视。调用方必须持有 d.mu。
+// 返回值：如果触发了 streak，返回 (callback, channelKey, streakCount)，调用方应在锁外调用回调。
+func (d *RejectionDetector) recordRejection(channelKey string, state *channelRejectionState) (func(string, int), string, int) {
 	state.consecutiveRejections++
 	state.lastRejectionAt = time.Now()
 	d.totalRejections.Add(1)
@@ -321,7 +338,11 @@ func (d *RejectionDetector) recordRejection(channelKey string, state *channelRej
 
 	if state.consecutiveRejections >= d.config.StreakThreshold {
 		d.activateStreak(channelKey, state)
+		if d.onRejectionStreak != nil {
+			return d.onRejectionStreak, channelKey, state.consecutiveRejections
+		}
 	}
+	return nil, "", 0
 }
 
 func (d *RejectionDetector) activateStreak(channelKey string, state *channelRejectionState) {
@@ -340,10 +361,6 @@ func (d *RejectionDetector) activateStreak(channelKey string, state *channelReje
 		"total_streaks", d.totalStreaks.Load(),
 		"active_streaks", d.activeStreakCount.Load(),
 		"total_rejections", d.totalRejections.Load())
-
-	if d.onRejectionStreak != nil {
-		d.onRejectionStreak(channelKey, state.consecutiveRejections)
-	}
 }
 
 func (d *RejectionDetector) resetRejection(channelKey string, state *channelRejectionState) {
