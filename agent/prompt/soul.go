@@ -283,16 +283,14 @@ func (l *SoulLoader) Load() error {
 	l.content = strings.TrimSpace(body)
 	l.modTime = info.ModTime()
 	l.variables = variables
+	onReload := l.onReload
 	l.mu.Unlock()
 
 	l.loaded.Store(true)
 	l.logger.Infof("soul: loaded %s (%d bytes, %d variables, mtime=%s)",
 		l.config.Path, len(body), len(variables), info.ModTime().Format(time.RFC3339))
 
-	// 触发热重载回调（调用方在锁外回调，避免死锁）
-	onReload := l.onReload
-
-	// 按值传递 content，避免回调中持有锁
+	// 触发热重载回调（在锁外回调，避免死锁）
 	if onReload != nil {
 		go onReload(strings.TrimSpace(body))
 	}

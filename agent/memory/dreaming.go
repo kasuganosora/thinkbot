@@ -579,9 +579,12 @@ func (d *DreamManager) extractBotProfiles(ctx context.Context, activeScopes []Sc
 
 		extractedCount++
 
-		// 回调通知
-		if d.onBotProfileUpdated != nil {
-			d.onBotProfileUpdated(botID, profile)
+		// 回调通知（加锁拷贝函数指针，避免与 SetOnBotProfileUpdated 并发写竞争）
+		d.mu.Lock()
+		cb := d.onBotProfileUpdated
+		d.mu.Unlock()
+		if cb != nil {
+			cb(botID, profile)
 		}
 	}
 }

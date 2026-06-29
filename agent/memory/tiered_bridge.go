@@ -1,6 +1,9 @@
 package memory
 
-import "context"
+import (
+	"context"
+	"log"
+)
 
 // ============================================================================
 // TieredStoreAdapter — 将 TieredStore 适配为 memory.Store 接口
@@ -61,8 +64,11 @@ func NewMultiStore(stores ...Store) *MultiStore {
 func (m *MultiStore) Append(ctx context.Context, entry Entry) error {
 	var firstErr error
 	for _, s := range m.stores {
-		if err := s.Append(ctx, entry); err != nil && firstErr == nil {
-			firstErr = err
+		if err := s.Append(ctx, entry); err != nil {
+			log.Printf("[MultiStore] Append failed for backend: %v", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
@@ -72,8 +78,11 @@ func (m *MultiStore) Append(ctx context.Context, entry Entry) error {
 func (m *MultiStore) Delete(ctx context.Context, scope Scope, entryID string) error {
 	var firstErr error
 	for _, s := range m.stores {
-		if err := s.Delete(ctx, scope, entryID); err != nil && firstErr == nil {
-			firstErr = err
+		if err := s.Delete(ctx, scope, entryID); err != nil {
+			log.Printf("[MultiStore] Delete failed for backend: %v", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
@@ -83,8 +92,11 @@ func (m *MultiStore) Delete(ctx context.Context, scope Scope, entryID string) er
 func (m *MultiStore) Clear(ctx context.Context, scope Scope) error {
 	var firstErr error
 	for _, s := range m.stores {
-		if err := s.Clear(ctx, scope); err != nil && firstErr == nil {
-			firstErr = err
+		if err := s.Clear(ctx, scope); err != nil {
+			log.Printf("[MultiStore] Clear failed for backend: %v", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr

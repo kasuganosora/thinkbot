@@ -313,12 +313,17 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 			return errs.New("workflow terminated")
 		}
 		// 注入上游结果上下文（编译后的 Workflow 自动生效）
+		// 注意：不修改 node.Task 以避免重试时累加
 		taskContext := BuildUpstreamContext(s.wf, node)
+		effectiveTask := node.Task
 		if taskContext != "" {
-			// 将上游结果注入到节点任务中，SubAgent 看到更完整的上下文
-			node.Task = taskContext
+			effectiveTask = taskContext
 		}
+		// 用含上游上下文的临时 task 执行，不改变 node 本身
+		originalTask := node.Task
+		node.Task = effectiveTask
 		execResult, err := s.executor.Execute(ctx, node)
+		node.Task = originalTask // 恢复原始 task
 		if err != nil {
 			return err
 		}

@@ -150,7 +150,7 @@ func (c *monthlyCounter) get() int64 {
 
 // currentMonth 返回当前月份标识 "YYYY-MM"。
 func currentMonth() string {
-	now := time.Now()
+	now := time.Now().UTC()
 	return fmt.Sprintf("%04d-%02d", now.Year(), now.Month())
 }
 

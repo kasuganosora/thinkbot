@@ -129,15 +129,23 @@ func TokenBudgetMiddleware(cfg TokenBudgetConfig) Middleware {
 
 				// 硬限制：超限时中止
 				if hardLimit > 0 && currentTotal >= hardLimit {
-					return env, &core.PipelineError{
-						Stage:   "token_budget",
-						Message: fmt.Sprintf("token budget hard limit exceeded: %d/%d", currentTotal, hardLimit),
-						Cause:   fmt.Errorf("token budget exhausted"),
+					return env, &core.AbortError{
+						Reason: fmt.Sprintf("token budget hard limit exceeded: %d/%d", currentTotal, hardLimit),
+						Cause:  fmt.Errorf("token budget exhausted"),
 					}
 				}
 
-				// 软警告：注入提示
-				if warnLimit > 0 && currentTotal >= warnLimit && !wasWarned {
+				// 硬警告：如果已经接近硬限制（90%）
+				hardWarnThreshold := int(float64(hardLimit) * 0.9)
+				if hardLimit > 0 && currentTotal >= hardWarnThreshold && currentTotal < hardLimit {
+					core.QueueWarning(env, core.Warning{
+						Source: "token_budget",
+						Level:  core.WarningLevelHard,
+						Message: fmt.Sprintf("CRITICAL: Token budget nearly exhausted (%d/%d). You MUST stop making tool calls and produce your final answer NOW.",
+							currentTotal, hardLimit),
+					})
+				} else if warnLimit > 0 && currentTotal >= warnLimit && !wasWarned {
+					// 软警告：注入提示（与硬警告互斥）
 					core.QueueWarning(env, core.Warning{
 						Source: "token_budget",
 						Level:  core.WarningLevelSoft,
@@ -156,16 +164,6 @@ func TokenBudgetMiddleware(cfg TokenBudgetConfig) Middleware {
 							Channel: channel,
 						})
 					}
-				}
-
-				// 硬警告：如果已经接近硬限制
-				if hardLimit > 0 && currentTotal >= hardLimit*90/100 && currentTotal < hardLimit {
-					core.QueueWarning(env, core.Warning{
-						Source: "token_budget",
-						Level:  core.WarningLevelHard,
-						Message: fmt.Sprintf("CRITICAL: Token budget nearly exhausted (%d/%d). You MUST stop making tool calls and produce your final answer NOW.",
-							currentTotal, hardLimit),
-					})
 				}
 
 				// ---- 执行 ----

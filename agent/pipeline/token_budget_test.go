@@ -101,9 +101,11 @@ func TestTokenBudgetMiddleware_BelowThreshold(t *testing.T) {
 
 func TestTokenBudgetMiddleware_SoftWarning(t *testing.T) {
 	// warn at 80% of 1000 = 800 tokens. Start usage at 900 → should trigger.
+	// Disable hard limit to test soft warning in isolation.
 	cfg := NewTokenBudgetConfig().
 		WithMaxTokens(1000).
-		WithWarnPercent(0.8)
+		WithWarnPercent(0.8).
+		WithHardPercent(0)
 
 	mw2 := TokenBudgetMiddleware(cfg)
 
@@ -160,11 +162,8 @@ func TestTokenBudgetMiddleware_HardLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected hard limit error")
 	}
-	var pe *core.PipelineError
-	if ok := isPE(err, &pe); !ok {
-		t.Errorf("expected PipelineError, got %T: %v", err, err)
-	} else if pe.Stage != "token_budget" {
-		t.Errorf("expected stage token_budget, got %s", pe.Stage)
+	if !core.IsAbortError(err) {
+		t.Errorf("expected AbortError, got %T: %v", err, err)
 	}
 }
 
