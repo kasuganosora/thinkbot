@@ -2,6 +2,7 @@ package api
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -156,7 +157,7 @@ func (s *Server) handleStatsDailyByBot(c *gin.Context) {
 	}
 	dateMap := make(map[string]*SeriesEntry)
 	for _, e := range entries {
-		dateStr := e.Date.Format("2006-01-02")
+		dateStr := e.Date.UTC().Format("2006-01-02T00:00:00Z")
 		se, ok := dateMap[dateStr]
 		if !ok {
 			se = &SeriesEntry{Date: dateStr, Usage: make(map[string]int)}
@@ -199,7 +200,23 @@ func (s *Server) handleStatsRecords(c *gin.Context) {
 		return
 	}
 
-	OK(c, gin.H{"total": total, "page": page, "pageSize": pageSize, "items": items})
+	// 为每条记录补上 botName 和 provider
+	type RecordWithExtra struct {
+		stats.UsageRecord
+		BotName  string `json:"botName"`
+		Provider string `json:"provider"`
+	}
+	enriched := make([]RecordWithExtra, 0, len(items))
+	for _, r := range items {
+		name := r.BotID
+		if def, err := s.botSvc.GetDefinition(r.BotID); err == nil && def != nil {
+			name = def.Name
+		}
+		provider := providerOfModel(r.Model)
+		enriched = append(enriched, RecordWithExtra{UsageRecord: r, BotName: name, Provider: provider})
+	}
+
+	OK(c, gin.H{"total": total, "page": page, "pageSize": pageSize, "items": enriched})
 }
 
 // handleStatsByBotModel Bot×Model 矩阵统计。
@@ -228,4 +245,24 @@ func (s *Server) handleStatsByBotModel(c *gin.Context) {
 	}
 
 	OK(c, enriched)
+}
+
+// providerOfModel 根据模型名推导供应商名称。
+func providerOfModel(model string) string {
+	switch {
+	case strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4"):
+		return "openai"
+	case strings.HasPrefix(model, "claude-"):
+		return "anthropic"
+	case strings.HasPrefix(model, "gemini-"):
+		return "google"
+	case strings.HasPrefix(model, "grok-"):
+		return "grok"
+	case strings.HasPrefix(model, "deepseek-"):
+		return "deepseek"
+	case strings.HasPrefix(model, "qwen"):
+		return "alibaba"
+	default:
+		return "unknown"
+	}
 }

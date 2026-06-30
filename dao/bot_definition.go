@@ -11,6 +11,9 @@ type BotDefinition struct {
 	// Name 显示名称。
 	Name string `gorm:"size:128;not null" json:"name"`
 
+	// Avatar 头像（emoji 或 URL）。
+	Avatar string `gorm:"size:256;default:''" json:"avatar"`
+
 	// SystemPrompt 系统提示词。
 	SystemPrompt string `gorm:"type:text" json:"systemPrompt"`
 
