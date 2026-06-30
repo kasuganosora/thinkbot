@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/workflow"
 )
 
 // ============================================================================
@@ -167,4 +168,40 @@ func (s *Server) handleWorkflowMetrics(c *gin.Context) {
 		"nodeSkipped":   snapshot.NodeSkipped,
 		"persistErrors": snapshot.PersistErrors,
 	})
+}
+
+// handleRetryWorkflowNode 重试工作流中的指定节点。
+// POST /api/workflows/:wfId/nodes/:nodeId/retry
+//
+// @Summary      重试节点
+// @Description  重试指定工作流中失败的节点
+// @Tags         工作流
+// @Produce      json
+// @Param        wfId    path  string  true  "工作流 ID"
+// @Param        nodeId  path  string  true  "节点 ID"
+// @Success      200     {object}  Response
+// @Failure      500     {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows/{wfId}/nodes/{nodeId}/retry [post]
+func (s *Server) handleRetryWorkflowNode(c *gin.Context) {
+	wfID := c.Param("wfId")
+	nodeID := c.Param("nodeId")
+
+	mgr, err := s.workflowSvc.Manager()
+	if err != nil {
+		Fail(c, errs.Wrap(err, "workflow engine not available"))
+		return
+	}
+
+	result, err := mgr.Control(c.Request.Context(), wfID, workflow.ControlRequest{
+		Action: workflow.ActionRetry,
+		NodeID: nodeID,
+	})
+	if err != nil {
+		Fail(c, errs.Wrap(err, "failed to retry workflow node"))
+		return
+	}
+
+	auditLog(c, s.logger, "retry_workflow_node", "workflow", wfID, "node", nodeID)
+	OK(c, result)
 }

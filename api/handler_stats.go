@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -99,4 +100,132 @@ func parseDateRange(c *gin.Context) (from, to *time.Time) {
 		}
 	}
 	return
+}
+
+// handleStatsDailyRange 全局按日统计序列（可选 botId 过滤）。
+// GET /api/stats/daily?from=2024-01-01&to=2024-12-31&botId=assistant
+func (s *Server) handleStatsDailyRange(c *gin.Context) {
+	from, to := parseDateRange(c)
+	botID := c.Query("botId")
+
+	result, err := stats.GetDailyStatsGlobal(s.db, botID, from, to)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "failed to query daily stats"))
+		return
+	}
+	OK(c, result)
+}
+
+// handleStatsDailyByBot 按日×各 Bot 的 token 使用量（堆叠图表用）。
+// GET /api/stats/daily-by-bot?from=2024-01-01&to=2024-12-31
+//
+// 响应格式：{ bots: [{id, name}], series: [{ date, usage: { <botId>: tokens } }] }
+func (s *Server) handleStatsDailyByBot(c *gin.Context) {
+	from, to := parseDateRange(c)
+
+	entries, err := stats.GetDailyByBotStats(s.db, from, to)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "failed to query daily-by-bot stats"))
+		return
+	}
+
+	// 收集所有出现的 bot ID
+	botSet := make(map[string]bool)
+	for _, e := range entries {
+		botSet[e.BotID] = true
+	}
+
+	// 构造 bots 列表（尝试从 BotService 获取名称）
+	type BotInfo struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	bots := make([]BotInfo, 0, len(botSet))
+	for bid := range botSet {
+		name := bid
+		if def, err := s.botSvc.GetDefinition(bid); err == nil && def != nil {
+			name = def.Name
+		}
+		bots = append(bots, BotInfo{ID: bid, Name: name})
+	}
+
+	// 构造按日分组的 series
+	type SeriesEntry struct {
+		Date  string         `json:"date"`
+		Usage map[string]int `json:"usage"`
+	}
+	dateMap := make(map[string]*SeriesEntry)
+	for _, e := range entries {
+		dateStr := e.Date.Format("2006-01-02")
+		se, ok := dateMap[dateStr]
+		if !ok {
+			se = &SeriesEntry{Date: dateStr, Usage: make(map[string]int)}
+			dateMap[dateStr] = se
+		}
+		se.Usage[e.BotID] = e.Tokens
+	}
+
+	// 转换为有序切片
+	series := make([]SeriesEntry, 0, len(dateMap))
+	for _, se := range dateMap {
+		series = append(series, *se)
+	}
+
+	OK(c, gin.H{"bots": bots, "series": series})
+}
+
+// handleStatsRecords 调用流水明细（分页）。
+// GET /api/stats/records?from&to&page&pageSize&botId
+func (s *Server) handleStatsRecords(c *gin.Context) {
+	from, to := parseDateRange(c)
+	botID := c.Query("botId")
+
+	page := 1
+	if v := c.Query("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page = n
+		}
+	}
+	pageSize := 20
+	if v := c.Query("pageSize"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			pageSize = n
+		}
+	}
+
+	items, total, err := stats.GetUsageRecords(s.db, botID, from, to, page, pageSize)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "failed to query usage records"))
+		return
+	}
+
+	OK(c, gin.H{"total": total, "page": page, "pageSize": pageSize, "items": items})
+}
+
+// handleStatsByBotModel Bot×Model 矩阵统计。
+// GET /api/stats/by-bot-model?from&to
+func (s *Server) handleStatsByBotModel(c *gin.Context) {
+	from, to := parseDateRange(c)
+
+	result, err := stats.GetAllBotsModelStats(s.db, from, to)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "failed to query by-bot-model stats"))
+		return
+	}
+
+	// 为每条记录补上 botName
+	type BotModelStatWithName struct {
+		stats.BotModelStat
+		BotName string `json:"botName"`
+	}
+	enriched := make([]BotModelStatWithName, 0, len(result))
+	for _, r := range result {
+		name := r.BotID
+		if def, err := s.botSvc.GetDefinition(r.BotID); err == nil && def != nil {
+			name = def.Name
+		}
+		enriched = append(enriched, BotModelStatWithName{BotModelStat: r, BotName: name})
+	}
+
+	OK(c, enriched)
 }

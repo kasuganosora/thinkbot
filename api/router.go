@@ -102,6 +102,9 @@ func (s *Server) registerRoutes() {
 
 				// 记忆查询（嵌套在 Bot 下）
 				botsAdmin.GET("/:id/memory", s.handleQueryMemory)
+				botsAdmin.POST("/:id/memory", s.handleCreateBotMemoryEntry)
+				botsAdmin.PUT("/:id/memory/:mid", s.handleUpdateBotMemoryEntry)
+				botsAdmin.DELETE("/:id/memory/:mid", s.handleDeleteBotMemoryEntry)
 				botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
 
 				// Channel 配置管理（嵌套在 Bot 下）
@@ -109,13 +112,52 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/channels", s.handleCreateChannel)
 				botsAdmin.PUT("/:id/channels/:cid", s.handleUpdateChannel)
 				botsAdmin.DELETE("/:id/channels/:cid", s.handleDeleteChannel)
+
+				// 平台管理（嵌套在 Bot 下）
+				botsAdmin.GET("/:id/platforms", s.handleListBotPlatforms)
+				botsAdmin.POST("/:id/platforms", s.handleCreateBotPlatform)
+				botsAdmin.PUT("/:id/platforms/:pid", s.handleUpdateBotPlatform)
+				botsAdmin.DELETE("/:id/platforms/:pid", s.handleDeleteBotPlatform)
+
+				// 访问控制
+				botsAdmin.GET("/:id/access", s.handleGetBotAccess)
+				botsAdmin.PUT("/:id/access", s.handleUpdateBotAccess)
+
+				// 文件管理
+				botsAdmin.GET("/:id/files", s.handleListBotFiles)
+				botsAdmin.POST("/:id/files/mkdir", s.handleBotFileMkdir)
+				botsAdmin.POST("/:id/files/upload", s.handleBotFileUpload)
+
+				// 聊天节奏
+				botsAdmin.GET("/:id/chat-rhythm", s.handleGetBotRhythm)
+				botsAdmin.PUT("/:id/chat-rhythm", s.handleUpdateBotRhythm)
+
+				// 容器管理
+				botsAdmin.GET("/:id/container", s.handleGetBotContainer)
+				botsAdmin.GET("/:id/container/snapshots", s.handleGetBotContainerSnapshots)
+				botsAdmin.POST("/:id/container/start", s.handleStartBotContainer)
+				botsAdmin.POST("/:id/container/stop", s.handleStopBotContainer)
+				botsAdmin.POST("/:id/container/snapshots", s.handleCreateBotContainerSnapshot)
+				botsAdmin.POST("/:id/container/export", s.handleExportBotContainer)
+				botsAdmin.POST("/:id/container/import", s.handleImportBotContainer)
+				botsAdmin.POST("/:id/container/restore", s.handleRestoreBotContainer)
+				botsAdmin.DELETE("/:id/container", s.handleRemoveBotContainer)
+
+				// 上下文压缩
+				botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)
+				botsAdmin.PUT("/:id/compaction", s.handleUpdateBotCompaction)
+				botsAdmin.GET("/:id/compaction/history", s.handleGetBotCompactionHistory)
+				botsAdmin.DELETE("/:id/compaction/history", s.handleClearBotCompactionHistory)
 			}
 		}
 
 		// Channel 类型列表（所有登录用户可见，驱动前端表单）
 		authed.GET("/channels/types", s.handleListChannelTypes)
 
-		// --- LLM 模型管理（admin） ---
+		// 平台工具目录（所有登录用户可见，驱动 Bot 详情面板）
+		authed.GET("/bots/platforms/tool-catalog", s.handleBotToolCatalog)
+
+		// --- LLM 模型管理（admin）— 保留旧路由兼容 ---
 		llmGroup := authed.Group("/llm/models")
 		llmGroup.Use(requirePermission(auth.PermBotManage))
 		{
@@ -123,6 +165,21 @@ func (s *Server) registerRoutes() {
 			llmGroup.POST("", s.handleCreateLLMModel)
 			llmGroup.PUT("/:id", s.handleUpdateLLMModel)
 			llmGroup.DELETE("/:id", s.handleDeleteLLMModel)
+		}
+
+		// --- Provider 层级化模型管理（admin）---
+		providerGroup := authed.Group("/providers")
+		providerGroup.Use(requirePermission(auth.PermBotManage))
+		{
+			providerGroup.GET("", s.handleListProviders)
+			providerGroup.POST("", s.handleCreateProvider)
+			providerGroup.PUT("/:pid", s.handleUpdateProvider)
+			providerGroup.DELETE("/:pid", s.handleDeleteProvider)
+			providerGroup.POST("/:pid/test", s.handleTestProvider)
+			providerGroup.POST("/:pid/models", s.handleAddModel)
+			providerGroup.PUT("/:pid/models/:mid", s.handleUpdateModel)
+			providerGroup.DELETE("/:pid/models/:mid", s.handleDeleteModel)
+			providerGroup.POST("/:pid/models/import", s.handleImportModels)
 		}
 
 		// --- 聊天（需要 bot.use 权限） ---
@@ -149,11 +206,15 @@ func (s *Server) registerRoutes() {
 		statsGroup.Use(requirePermission(auth.PermUserManage))
 		{
 			statsGroup.GET("/overview", s.handleStatsOverview)
+			statsGroup.GET("/daily", s.handleStatsDailyRange)
+			statsGroup.GET("/daily-by-bot", s.handleStatsDailyByBot)
+			statsGroup.GET("/records", s.handleStatsRecords)
+			statsGroup.GET("/by-bot-model", s.handleStatsByBotModel)
 			statsGroup.GET("/bots/:id", s.handleStatsBot)
 			statsGroup.GET("/bots/:id/daily", s.handleStatsBotDaily)
 		}
 
-		// --- 工作流监控（admin，只读 + 恢复） ---
+		// --- 工作流监控（admin，只读 + 恢复 + 节点重试） ---
 		// 工作流的创建和控制由 Agent 通过 task 系列工具完成，
 		// 终止由 session 生命周期信号触发。API 只暴露只读监控和崩溃恢复。
 		wfGroup := authed.Group("/workflows")
@@ -164,6 +225,7 @@ func (s *Server) registerRoutes() {
 			wfGroup.GET("/metrics", s.handleWorkflowMetrics)
 			wfGroup.GET("/:wfId", s.handleGetWorkflowStatus)
 			wfGroup.GET("/:wfId/nodes", s.handleGetWorkflowNodes)
+			wfGroup.POST("/:wfId/nodes/:nodeId/retry", s.handleRetryWorkflowNode)
 		}
 
 		// --- 技能管理（admin） ---
