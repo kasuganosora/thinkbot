@@ -203,5 +203,15 @@ func (s *Server) handleRetryWorkflowNode(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "retry_workflow_node", "workflow", wfID, "node", nodeID)
-	OK(c, result)
+
+	// 返回前端期望的 {workflowId, nodeId, status} 格式
+	status := "running"
+	if result != nil && !result.Success {
+		status = "failed"
+	}
+	OK(c, gin.H{
+		"workflowId": wfID,
+		"nodeId":     nodeID,
+		"status":     status,
+	})
 }

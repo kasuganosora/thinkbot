@@ -39,6 +39,9 @@ type DailyStat struct {
 	TotalRequests     int       `gorm:"column:total_requests" json:"totalRequests"`
 	CacheHitRequests  int       `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
 	CacheMissRequests int       `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
+	CacheReadTokens   int       `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
+	CacheWriteTokens  int       `gorm:"column:cache_write_tokens" json:"cacheWriteTokens"`
+	NonCacheTokens    int       `gorm:"column:non_cache_tokens" json:"nonCacheTokens"`
 	TotalTokens       int       `gorm:"column:total_tokens" json:"totalTokens"`
 }
 
@@ -100,6 +103,9 @@ func GetDailyStats(db *gorm.DB, botID string, from, to *time.Time) ([]DailyStat,
 			SUM(total_requests) as total_requests,
 			SUM(cache_hit_requests) as cache_hit_requests,
 			SUM(cache_miss_requests) as cache_miss_requests,
+			SUM(cache_read_tokens) as cache_read_tokens,
+			SUM(cache_write_tokens) as cache_write_tokens,
+			SUM(non_cache_tokens) as non_cache_tokens,
 			SUM(total_tokens) as total_tokens
 		`).
 		Where("bot_id = ?", botID).
@@ -147,6 +153,9 @@ func GetDailyStatsGlobal(db *gorm.DB, botID string, from, to *time.Time) ([]Dail
 			SUM(total_requests) as total_requests,
 			SUM(cache_hit_requests) as cache_hit_requests,
 			SUM(cache_miss_requests) as cache_miss_requests,
+			SUM(cache_read_tokens) as cache_read_tokens,
+			SUM(cache_write_tokens) as cache_write_tokens,
+			SUM(non_cache_tokens) as non_cache_tokens,
 			SUM(total_tokens) as total_tokens
 		`)
 

@@ -245,6 +245,19 @@ func (s *Server) registerRoutes() {
 			sysGroup.GET("/health", s.handleHealthDetailed)
 			sysGroup.GET("/events/metrics", s.handleEventBusMetrics)
 		}
+
+		// --- 会话工具（admin） ---
+		sessionGroup := authed.Group("/sessions")
+		sessionGroup.Use(requirePermission(auth.PermBotManage))
+		{
+			sessionGroup.GET("/:sid/terminal", s.handleSessionTerminal)
+			sessionGroup.POST("/:sid/terminal/exec", s.handleSessionTerminalExec)
+			sessionGroup.GET("/:sid/files", s.handleSessionFiles)
+			sessionGroup.POST("/:sid/files/mkdir", s.handleSessionFileMkdir)
+			sessionGroup.POST("/:sid/files/upload", s.handleSessionFileUpload)
+			sessionGroup.GET("/:sid/status", s.handleSessionStatus)
+			sessionGroup.POST("/:sid/compact", s.handleSessionCompact)
+		}
 	}
 
 	// --- 静态文件服务（前端 SPA） ---
