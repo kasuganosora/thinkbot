@@ -180,8 +180,9 @@ func TestWithLogger_NoTraceID(t *testing.T) {
 func TestWithLogger_NilLogger(t *testing.T) {
 	ctx := WithTraceID(context.Background(), New())
 	logger := WithLoggerFrom(ctx, nil)
-	if logger != nil {
-		t.Fatal("expected nil logger")
+	// WithLoggerFrom 在 logger==nil 时返回 nop logger（不 panic）
+	if logger == nil {
+		t.Fatal("expected nop logger, got nil")
 	}
 }
 
