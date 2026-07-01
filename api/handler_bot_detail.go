@@ -279,6 +279,8 @@ type BotMemoryEntry struct {
 // handleListBotMemoryEntries 列出 Bot 的记忆条目。
 // GET /api/bots/:id/memory（注意：此接口与现有 handleQueryMemory 重叠，但结构不同）
 // 此 handler 返回前端 botMemoryApi.list 需要的格式
+//
+//nolint:unused // 预留接口，计划后续注册到路由
 func (s *Server) handleListBotMemoryEntries(c *gin.Context) {
 	botID := c.Param("id")
 	entries := s.getBotMemoryEntries(botID)
@@ -389,16 +391,16 @@ func (s *Server) handleDeleteBotMemoryEntry(c *gin.Context) {
 
 // BotAccessConfig 访问控制配置。
 type BotAccessConfig struct {
-	Default string           `json:"default"` // "allow" or "deny"
-	Rules   []BotAccessRule  `json:"rules"`
+	Default string          `json:"default"` // "allow" or "deny"
+	Rules   []BotAccessRule `json:"rules"`
 }
 
 // BotAccessRule 访问控制规则。
 type BotAccessRule struct {
 	ID       string `json:"id,omitempty"`
-	Type     string `json:"type"`     // "user" | "group" | "channel"
-	Target   string `json:"target"`   // 匹配目标
-	Action   string `json:"action"`   // "allow" | "deny"
+	Type     string `json:"type"`   // "user" | "group" | "channel"
+	Target   string `json:"target"` // 匹配目标
+	Action   string `json:"action"` // "allow" | "deny"
 	Priority int    `json:"priority"`
 }
 
@@ -495,12 +497,12 @@ func (s *Server) handleBotFileUpload(c *gin.Context) {
 
 // BotChatRhythm 聊天节奏配置。
 type BotChatRhythm struct {
-	Enabled       bool              `json:"enabled"`
-	Debounce      RhythmDebounce    `json:"debounce"`
-	Timing        RhythmTiming      `json:"timing"`
-	SpeakTendency float64           `json:"speakTendency"`
-	Interrupt     RhythmInterrupt   `json:"interrupt"`
-	IdleComp      RhythmIdleComp    `json:"idleComp"`
+	Enabled       bool            `json:"enabled"`
+	Debounce      RhythmDebounce  `json:"debounce"`
+	Timing        RhythmTiming    `json:"timing"`
+	SpeakTendency float64         `json:"speakTendency"`
+	Interrupt     RhythmInterrupt `json:"interrupt"`
+	IdleComp      RhythmIdleComp  `json:"idleComp"`
 }
 
 // RhythmDebounce 防抖配置。
@@ -708,10 +710,10 @@ func (s *Server) handleRemoveBotContainer(c *gin.Context) {
 
 // BotCompactionConfig 上下文压缩配置。
 type BotCompactionConfig struct {
-	Enabled   bool    `json:"enabled"`
-	Threshold int     `json:"threshold"`
-	Ratio     int     `json:"ratio"`
-	Model     string  `json:"model"`
+	Enabled   bool   `json:"enabled"`
+	Threshold int    `json:"threshold"`
+	Ratio     int    `json:"ratio"`
+	Model     string `json:"model"`
 }
 
 // BotCompactionRecord 压缩记录。

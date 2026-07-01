@@ -81,7 +81,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
@@ -89,6 +89,8 @@ import { botApi } from '@/api/services'
 
 const router = useRouter()
 const store = useBotStore()
+
+onMounted(() => { store.fetchBots() })
 
 const kw = ref('')
 const filtered = computed(() => {
@@ -149,10 +151,8 @@ async function submit(ctx) {
       timezone: form.value.timezone.trim(),
       securityPolicy: form.value.securityPolicy
     }
-    // 本地 store 立即可见（聊天侧栏 / 列表）
-    const bot = store.createBot(payload)
-    // 同步后端契约（mock）：POST /api/bots
-    botApi.create({ id: bot.id, ...payload }).catch(() => {})
+    // store.createBot 内部已调用 botApi.create 创建后端记录
+    await store.createBot(payload)
     MessagePlugin.success('Bot 已创建')
     dlgVisible.value = false
   } finally {
