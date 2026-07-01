@@ -90,15 +90,16 @@ func (s *Server) handleCreateCronJob(c *gin.Context) {
 
 	mgr := s.botSvc.GetCronManager(botID)
 	job, err := mgr.CreateJob(cron.CreateJobRequest{
-		Name:     req.Name,
-		Prompt:   req.Prompt,
-		Schedule: req.Schedule,
-		Model:    req.Model,
-		Channel:  req.Channel,
-		Skills:   req.Skills,
-		Feature:  req.Feature,
-		MaxRuns:  req.MaxRuns,
-		Tags:     req.Tags,
+		Name:        req.Name,
+		Description: req.Description,
+		Prompt:      req.Prompt,
+		Schedule:    req.Schedule,
+		Model:       req.Model,
+		Channel:     req.Channel,
+		Skills:      req.Skills,
+		Feature:     req.Feature,
+		MaxRuns:     req.MaxRuns,
+		Tags:        req.Tags,
 	})
 	if err != nil {
 		Fail(c, errs.Wrap(err, "failed to create cron job"))
@@ -136,6 +137,9 @@ func (s *Server) handleUpdateCronJob(c *gin.Context) {
 	updates := map[string]any{}
 	if req.Name != nil {
 		updates["name"] = *req.Name
+	}
+	if req.Description != nil {
+		updates["description"] = *req.Description
 	}
 	if req.Prompt != nil {
 		updates["prompt"] = *req.Prompt
