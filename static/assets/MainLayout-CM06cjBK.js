@@ -1,1 +1,0 @@
-import{_ as o,c as t,b as c,d as a,o as n}from"./index-iaT7_QMS.js";const s={},r={class:"main-layout"};function _(d,i){const e=a("router-view");return n(),t("div",r,[c(e)])}const l=o(s,[["render",_],["__scopeId","data-v-7f818701"]]);export{l as default};
