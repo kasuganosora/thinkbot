@@ -56,7 +56,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
@@ -65,6 +65,8 @@ import { useUserStore } from '@/stores/user'
 const router = useRouter()
 const store = useBotStore()
 const userStore = useUserStore()
+
+onMounted(() => { store.fetchBots() })
 const keyword = ref('')
 
 const userInitial = computed(() => {
@@ -78,8 +80,8 @@ const filteredBots = computed(() => {
   return store.bots.filter(b => b.name.toLowerCase().includes(k) || b.desc.toLowerCase().includes(k))
 })
 
-function onCreateBot() {
-  const bot = store.createBot()
+async function onCreateBot() {
+  const bot = await store.createBot()
   store.selectBot(bot.id)
   router.push({ name: 'bot-settings', params: { id: bot.id } })
 }

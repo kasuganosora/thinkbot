@@ -143,27 +143,27 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/container/restore", s.handleRestoreBotContainer)
 				botsAdmin.DELETE("/:id/container", s.handleRemoveBotContainer)
 
-			// 上下文压缩
-			botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)
-			botsAdmin.PUT("/:id/compaction", s.handleUpdateBotCompaction)
-			botsAdmin.GET("/:id/compaction/history", s.handleGetBotCompactionHistory)
-			botsAdmin.DELETE("/:id/compaction/history", s.handleClearBotCompactionHistory)
+				// 上下文压缩
+				botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)
+				botsAdmin.PUT("/:id/compaction", s.handleUpdateBotCompaction)
+				botsAdmin.GET("/:id/compaction/history", s.handleGetBotCompactionHistory)
+				botsAdmin.DELETE("/:id/compaction/history", s.handleClearBotCompactionHistory)
 
-			// Bot 级技能管理
-			botsAdmin.GET("/:id/skills", s.handleListBotSkills)
-			botsAdmin.GET("/:id/skills/:sid", s.handleGetBotSkill)
-			botsAdmin.POST("/:id/skills", s.handleCreateBotSkill)
-			botsAdmin.PUT("/:id/skills/:sid", s.handleUpdateBotSkill)
-			botsAdmin.DELETE("/:id/skills/:sid", s.handleRemoveBotSkill)
+				// Bot 级技能管理
+				botsAdmin.GET("/:id/skills", s.handleListBotSkills)
+				botsAdmin.GET("/:id/skills/:sid", s.handleGetBotSkill)
+				botsAdmin.POST("/:id/skills", s.handleCreateBotSkill)
+				botsAdmin.PUT("/:id/skills/:sid", s.handleUpdateBotSkill)
+				botsAdmin.DELETE("/:id/skills/:sid", s.handleRemoveBotSkill)
 
-			// Bot MCP 服务器管理
-			botsAdmin.GET("/:id/mcp", s.handleListBotMcp)
-			botsAdmin.POST("/:id/mcp", s.handleCreateBotMcp)
-			botsAdmin.PUT("/:id/mcp/:mid", s.handleUpdateBotMcp)
-			botsAdmin.DELETE("/:id/mcp/:mid", s.handleRemoveBotMcp)
-			botsAdmin.POST("/:id/mcp/import", s.handleImportBotMcp)
+				// Bot MCP 服务器管理
+				botsAdmin.GET("/:id/mcp", s.handleListBotMcp)
+				botsAdmin.POST("/:id/mcp", s.handleCreateBotMcp)
+				botsAdmin.PUT("/:id/mcp/:mid", s.handleUpdateBotMcp)
+				botsAdmin.DELETE("/:id/mcp/:mid", s.handleRemoveBotMcp)
+				botsAdmin.POST("/:id/mcp/import", s.handleImportBotMcp)
+			}
 		}
-	}
 
 		// Channel 类型列表（所有登录用户可见，驱动前端表单）
 		authed.GET("/channels/types", s.handleListChannelTypes)
