@@ -45,6 +45,7 @@ tmp/
 # Frontend (web/)
 web/node_modules/
 web/dist/
+static/
 
 # Runtime logs & DB temp files
 *.log
