@@ -9,7 +9,7 @@
 //   失败：{ code: <非零>, message: '错误描述', data: null }
 // ============================================================================
 
-export const USE_MOCK = true
+export const USE_MOCK = false
 
 // 模拟网络延迟（毫秒），让 loading 状态可见
 const MOCK_LATENCY = 280
