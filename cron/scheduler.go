@@ -453,15 +453,16 @@ func (m *Manager) WithLogger(l *zap.SugaredLogger) *Manager {
 
 // CreateJobRequest 是创建 Job 的请求参数。
 type CreateJobRequest struct {
-	Name     string   `json:"name"`
-	Prompt   string   `json:"prompt"`
-	Schedule string   `json:"schedule"`
-	Model    string   `json:"model,omitempty"`
-	Channel  string   `json:"channel,omitempty"`
-	Skills   []string `json:"skills,omitempty"`
-	Feature  string   `json:"feature,omitempty"` // 统计维度标签（默认 "cron"）
-	MaxRuns  int      `json:"max_runs,omitempty"`
-	Tags     []string `json:"tags,omitempty"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"` // 可选：任务描述
+	Prompt      string   `json:"prompt"`
+	Schedule    string   `json:"schedule"`
+	Model       string   `json:"model,omitempty"`
+	Channel     string   `json:"channel,omitempty"`
+	Skills      []string `json:"skills,omitempty"`
+	Feature     string   `json:"feature,omitempty"` // 统计维度标签（默认 "cron"）
+	MaxRuns     int      `json:"max_runs,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
 }
 
 // CreateJob 创建一个新 Job。
@@ -485,6 +486,7 @@ func (m *Manager) CreateJob(req CreateJobRequest) (*Job, error) {
 	job := &Job{
 		ID:              idgen.New("cron"),
 		Name:            req.Name,
+		Description:     req.Description,
 		Prompt:          req.Prompt,
 		Model:           req.Model,
 		Channel:         req.Channel,
@@ -538,6 +540,9 @@ func (m *Manager) UpdateJob(id string, updates map[string]any) (*Job, error) {
 
 	if name, ok := updates["name"].(string); ok {
 		job.Name = name
+	}
+	if desc, ok := updates["description"].(string); ok {
+		job.Description = desc
 	}
 	if prompt, ok := updates["prompt"].(string); ok {
 		job.Prompt = prompt

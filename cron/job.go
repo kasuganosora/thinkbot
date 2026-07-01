@@ -40,12 +40,13 @@ const (
 
 // Job 是一个定时任务定义。
 type Job struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Prompt  string   `json:"prompt"`            // 自包含提示词（触发后发送给 bot）
-	Model   string   `json:"model,omitempty"`   // 可选：覆盖 bot 默认模型
-	Channel string   `json:"channel,omitempty"` // 可选：指定输出渠道（空=bot 默认）
-	Skills  []string `json:"skills,omitempty"`  // 可选：执行时激活的技能
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"` // 可选：任务描述
+	Prompt      string   `json:"prompt"`                // 自包含提示词（触发后发送给 bot）
+	Model       string   `json:"model,omitempty"`       // 可选：覆盖 bot 默认模型
+	Channel     string   `json:"channel,omitempty"`     // 可选：指定输出渠道（空=bot 默认）
+	Skills      []string `json:"skills,omitempty"`      // 可选：执行时激活的技能
 
 	// Feature 统计维度标签（默认 "cron"）。
 	// 用于在 stats 模块中区分 cron 产生的 token 消耗。
