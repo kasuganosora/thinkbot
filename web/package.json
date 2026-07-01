@@ -1,26 +1,25 @@
 {
-  "name": "thinkbot-web",
+  "name": "bot-platform",
+  "version": "1.0.0",
+  "description": "Bot 平台前端 - Vue3 + TDesign",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vueuse/core": "^14.3.0",
-    "dompurify": "^3.2.4",
-    "lucide-vue-next": "^0.577.0",
-    "marked": "^15.0.7",
-    "vue": "^3.5.13",
-    "vue-router": "^4.6.4"
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "pinia": "^2.1.7",
+    "tdesign-icons-vue-next": "^0.2.6",
+    "tdesign-vue-next": "^1.9.4",
+    "vue": "^3.4.21",
+    "vue-router": "^4.3.0"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
-    "@vitejs/plugin-vue": "^5.2.1",
-    "typescript": "~5.7.3",
-    "vite": "^6.1.0",
-    "vue-tsc": "^2.2.0"
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.2.8"
   }
 }

@@ -1,0 +1,1 @@
+import{_ as o,c as t,b as c,d as a,o as n}from"./index-2mjoJO54.js";const s={},r={class:"main-layout"};function _(d,i){const e=a("router-view");return n(),t("div",r,[c(e)])}const l=o(s,[["render",_],["__scopeId","data-v-557fd4cc"]]);export{l as default};
