@@ -143,6 +143,12 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/container/restore", s.handleRestoreBotContainer)
 				botsAdmin.DELETE("/:id/container", s.handleRemoveBotContainer)
 
+				// 心跳管理
+				botsAdmin.GET("/:id/heartbeat", s.handleGetHeartbeatConfig)
+				botsAdmin.PUT("/:id/heartbeat", s.handleUpdateHeartbeatConfig)
+				botsAdmin.GET("/:id/heartbeat/logs", s.handleListHeartbeatLogs)
+				botsAdmin.DELETE("/:id/heartbeat/logs", s.handleClearHeartbeatLogs)
+
 				// 上下文压缩
 				botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)
 				botsAdmin.PUT("/:id/compaction", s.handleUpdateBotCompaction)
