@@ -172,7 +172,6 @@ function loadBot() {
   if (b) {
     form.value = {
       id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
-      systemPrompt: b.systemPrompt || b.prompt || '', model: b.model || 'gpt-4o',
       llmMain: b.llmMain || '', llmLight: b.llmLight || '',
       temperature: b.temperature ?? 0.7, maxTokens: b.maxTokens ?? 4096,
       workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort || 'medium'
@@ -205,13 +204,12 @@ async function saveBasic() {
   const f = form.value
   await botApi.update(f.id, {
     name: f.name, avatar: f.avatar, description: f.desc,
-    systemPrompt: f.systemPrompt, model: f.model,
     llmMain: f.llmMain, llmLight: f.llmLight, temperature: f.temperature,
     maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort
   }).catch(() => {})
   store.updateBot(f.id, {
-    name: f.name, avatar: f.avatar, description: f.desc, model: f.model,
-    temperature: f.temperature, systemPrompt: f.systemPrompt,
+    name: f.name, avatar: f.avatar, description: f.desc,
+    temperature: f.temperature,
     llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
     workers: f.workers, reasoningEffort: f.reasoningEffort
   })
