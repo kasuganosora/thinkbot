@@ -144,29 +144,29 @@ export const useBotStore = defineStore('bot', () => {
     sess.messages.push({ id: msgId, role: 'assistant', content: '' })
     saveSessions(botId, sessionsCache.value[botId])
 
+    function updateMsg(idx, patch) {
+      // 替换数组元素触发 Vue 响应式更新（直接改属性不会触发 v-for 重渲染）
+      sess.messages.splice(idx, 1, { ...sess.messages[idx], ...patch })
+      sess.updatedAt = Date.now()
+      saveSessions(botId, sessionsCache.value[botId])
+    }
+
     replying.value = true
     chatApi.send(botId, content, (delta) => {
-      const m = sess.messages.find(x => x.id === msgId)
-      if (m) {
-        m.content += delta
-        sess.updatedAt = Date.now()
-        saveSessions(botId, sessionsCache.value[botId])
-      }
+      const idx = sess.messages.findIndex(x => x.id === msgId)
+      if (idx >= 0) updateMsg(idx, { content: sess.messages[idx].content + delta })
       _streamTick.value++
     })
       .then((resp) => {
-        const m = sess.messages.find(x => x.id === msgId)
-        if (m) {
-          m.content = resp.text || m.content
-          m.toolCalls = resp.toolCalls || []
-        }
-        sess.updatedAt = Date.now()
-        saveSessions(botId, sessionsCache.value[botId])
+        const idx = sess.messages.findIndex(x => x.id === msgId)
+        if (idx >= 0) updateMsg(idx, {
+          content: resp.text || sess.messages[idx].content,
+          toolCalls: resp.toolCalls || []
+        })
       })
       .catch(() => {
-        const m = sess.messages.find(x => x.id === msgId)
-        if (m && !m.content) m.content = '（回复失败，请稍后重试）'
-        saveSessions(botId, sessionsCache.value[botId])
+        const idx = sess.messages.findIndex(x => x.id === msgId)
+        if (idx >= 0 && !sess.messages[idx].content) updateMsg(idx, { content: '（回复失败，请稍后重试）' })
       })
       .finally(() => { replying.value = false })
   }
