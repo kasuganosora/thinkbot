@@ -119,8 +119,10 @@ export const useBotStore = defineStore('bot', () => {
   }
 
   // ---- 发送消息（走后端 SSE） ----
+  const replying = ref(false)
+
   function sendMessage(content) {
-    if (!activeBot.value) return
+    if (!activeBot.value || replying.value) return
     const botId = activeBotId.value
 
     if (!activeSession.value) createSession()
@@ -135,6 +137,7 @@ export const useBotStore = defineStore('bot', () => {
     sess.updatedAt = Date.now()
     saveSessions(botId, sessionsCache.value[botId])
 
+    replying.value = true
     chatApi.send(botId, content)
       .then((resp) => {
         sess.messages.push({
@@ -150,10 +153,11 @@ export const useBotStore = defineStore('bot', () => {
         sess.messages.push({ id: uid(), role: 'assistant', content: '（回复失败，请稍后重试）' })
         saveSessions(botId, sessionsCache.value[botId])
       })
+      .finally(() => { replying.value = false })
   }
 
   return {
-    bots, loading, error, activeBotId, activeSessionId,
+    bots, loading, error, replying, activeBotId, activeSessionId,
     activeBot, sessions, activeSession,
     fetchBots, selectBot, selectSession,
     createBot, updateBot, deleteBot,

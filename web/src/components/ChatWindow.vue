@@ -56,6 +56,18 @@
             </div>
           </div>
         </div>
+
+        <!-- 加载中动画 -->
+        <div v-if="store.replying" class="msg-row assistant">
+          <div class="msg-avatar">
+            <div class="bot-bubble-avatar">{{ store.activeBot?.avatar }}</div>
+          </div>
+          <div class="msg-content-wrap">
+            <div class="msg-bubble thinking">
+              <span class="dot" /><span class="dot" /><span class="dot" />
+            </div>
+          </div>
+        </div>
       </template>
 
       <div v-else class="empty-greeting" data-testid="chat-empty-state">
@@ -103,7 +115,8 @@
           <t-button
             theme="primary"
             shape="circle"
-            :disabled="!draft.trim()"
+            :disabled="!draft.trim() || store.replying"
+            :loading="store.replying"
             data-testid="chat-btn-send"
             aria-label="发送消息"
             @click="send"
@@ -358,5 +371,26 @@ function onKeydown(value, { e }) {
   font-size: 11px;
   color: #bbb;
   margin-top: 8px;
+}
+/* 加载中动画 */
+.msg-bubble.thinking {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 14px 18px;
+}
+.msg-bubble.thinking .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #aaa;
+  animation: dotPulse 1.4s infinite ease-in-out both;
+}
+.msg-bubble.thinking .dot:nth-child(1) { animation-delay: -0.32s; }
+.msg-bubble.thinking .dot:nth-child(2) { animation-delay: -0.16s; }
+.msg-bubble.thinking .dot:nth-child(3) { animation-delay: 0s; }
+@keyframes dotPulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
 }
 </style>
