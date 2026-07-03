@@ -146,7 +146,7 @@ async function loadModelOptions() {
     for (const p of providers) {
       if (!p.enabled) continue
       for (const m of (p.models || [])) {
-        opts.push({ label: `${m.name} (${p.name})`, value: m.id })
+        opts.push({ label: `${m.name} (${p.name})`, value: m.id, contextLength: m.contextLength || 4096 })
       }
     }
     modelOptions.value = opts
