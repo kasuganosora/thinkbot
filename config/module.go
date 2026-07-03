@@ -135,27 +135,102 @@ type ModelDef struct {
 	Multimodal bool `json:"multimodal,omitempty"`
 }
 
-// GetLLMModel 从数据库读取单个 LLM 配置（JSON）。
-// 键格式：llm.<llm_id>
+// GetLLMModel 从 config store 读取 LLM 配置。
+//
+// 优先查找 llm.<llm_id>；若不存在，则遍历 provider.* 中的模型（统一入口）。
 func (b *Builder) GetLLMModel(llmID string) (ModelDef, bool) {
+	// 1. 旧键：llm.<llm_id>
 	raw, ok := b.store.Get(LLMConfigKey(llmID))
-	if !ok || raw == "" {
-		return ModelDef{}, false
+	if ok && raw != "" {
+		var def ModelDef
+		if err := json.Unmarshal([]byte(raw), &def); err == nil {
+			return fillModelDefaults(def), true
+		}
 	}
 
-	var def ModelDef
-	if err := json.Unmarshal([]byte(raw), &def); err != nil {
-		return ModelDef{}, false
+	// 2. 新 Provider 系统：遍历 provider.* 查找匹配的模型
+	if def, ok := b.resolveProviderModel(llmID); ok {
+		return def, true
 	}
 
-	// 填充默认值
+	return ModelDef{}, false
+}
+
+// resolveProviderModel 扫描所有 provider.* 配置，从中查找指定模型 ID。
+func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
+	rawProviders := b.store.GetByPrefix("provider.")
+	for _, raw := range rawProviders {
+		if raw == "" {
+			continue
+		}
+		var prov struct {
+			Enabled    bool   `json:"enabled"`
+			ClientType string `json:"clientType"`
+			BaseURL    string `json:"baseUrl"`
+			APIKey     string `json:"apiKey"`
+			Models     []struct {
+				ID            string   `json:"id"`
+				Name          string   `json:"name"`
+				ContextLength int      `json:"contextLength"`
+				Multimodal    bool     `json:"multimodal"`
+				Temperature   float64  `json:"temperature"`
+				MaxTokens     int      `json:"maxTokens"`
+				Capabilities  []string `json:"capabilities"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal([]byte(raw), &prov); err != nil || !prov.Enabled {
+			continue
+		}
+		for _, m := range prov.Models {
+			if m.ID == modelID {
+				t := 0.7
+				if m.Temperature > 0 {
+					t = m.Temperature
+				}
+				mt := m.MaxTokens
+				if mt == 0 {
+					mt = 4096
+				}
+				return fillModelDefaults(ModelDef{
+					Provider:    mapClientType(prov.ClientType),
+					Model:       m.ID,
+					APIKey:      prov.APIKey,
+					BaseURL:     prov.BaseURL,
+					Temperature: &t,
+					MaxTokens:   mt,
+					Multimodal:  m.Multimodal,
+				}), true
+			}
+		}
+	}
+	return ModelDef{}, false
+}
+
+// mapClientType 将前端 Provider 的 clientType 映射为 llm.Provider 工厂所需的 provider 字符串。
+func mapClientType(clientType string) string {
+	switch strings.ToLower(clientType) {
+	case "openai compatible", "openai":
+		return "openai"
+	case "anthropic compatible", "anthropic":
+		return "anthropic"
+	case "google", "gemini":
+		return "google"
+	case "grok":
+		return "grok"
+	default:
+		return "openai"
+	}
+}
+
+// fillModelDefaults 填充 ModelDef 的默认值。
+func fillModelDefaults(def ModelDef) ModelDef {
 	if def.Temperature == nil {
 		def.Temperature = float64Ptr(0.7)
 	}
 	if def.MaxTokens == 0 {
 		def.MaxTokens = 4096
 	}
-	return def, true
+	return def
 }
 
 // float64Ptr 返回 float64 的指针（用于 Temperature 默认值）。
