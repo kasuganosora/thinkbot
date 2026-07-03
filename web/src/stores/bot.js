@@ -118,7 +118,7 @@ export const useBotStore = defineStore('bot', () => {
     saveSessions(botId, list)
   }
 
-  // ---- 发送消息（走后端 SSE） ----
+  // ---- 发送消息（走后端 SSE 流式） ----
   const replying = ref(false)
 
   function sendMessage(content) {
@@ -137,20 +137,32 @@ export const useBotStore = defineStore('bot', () => {
     sess.updatedAt = Date.now()
     saveSessions(botId, sessionsCache.value[botId])
 
+    // 流式 placeholder，逐字更新
+    const msgId = uid()
+    sess.messages.push({ id: msgId, role: 'assistant', content: '' })
+    saveSessions(botId, sessionsCache.value[botId])
+
     replying.value = true
-    chatApi.send(botId, content)
+    chatApi.send(botId, content, (delta) => {
+      const m = sess.messages.find(x => x.id === msgId)
+      if (m) {
+        m.content += delta
+        sess.updatedAt = Date.now()
+        saveSessions(botId, sessionsCache.value[botId])
+      }
+    })
       .then((resp) => {
-        sess.messages.push({
-          id: uid(),
-          role: 'assistant',
-          content: resp.text,
-          toolCalls: resp.toolCalls || []
-        })
+        const m = sess.messages.find(x => x.id === msgId)
+        if (m) {
+          m.content = resp.text || m.content
+          m.toolCalls = resp.toolCalls || []
+        }
         sess.updatedAt = Date.now()
         saveSessions(botId, sessionsCache.value[botId])
       })
       .catch(() => {
-        sess.messages.push({ id: uid(), role: 'assistant', content: '（回复失败，请稍后重试）' })
+        const m = sess.messages.find(x => x.id === msgId)
+        if (m && !m.content) m.content = '（回复失败，请稍后重试）'
         saveSessions(botId, sessionsCache.value[botId])
       })
       .finally(() => { replying.value = false })
