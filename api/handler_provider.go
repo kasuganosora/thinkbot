@@ -529,3 +529,11 @@ func generateModelID(name string) string {
 	}
 	return result
 }
+
+// maskAPIKey 脱敏 API Key，仅显示前 6 位和后 4 位。
+func maskAPIKey(key string) string {
+	if len(key) <= 12 {
+		return strings.Repeat("*", len(key))
+	}
+	return key[:6] + strings.Repeat("*", len(key)-10) + key[len(key)-4:]
+}

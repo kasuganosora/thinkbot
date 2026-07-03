@@ -604,16 +604,15 @@ func TestStore_ListCategories(t *testing.T) {
 func TestBuilder_GetLLMModel(t *testing.T) {
 	store := NewStore(nil)
 	store.LoadEnvMap(map[string]string{
-		"llm.main":  `{"provider":"openai","model":"gpt-4o","api_key":"sk-main","temperature":0.7,"max_tokens":4096}`,
-		"llm.light": `{"provider":"openai","model":"gpt-4o-mini","api_key":"sk-light","temperature":0.3}`,
+		"provider.openai": `{"enabled":true,"clientType":"OpenAI Compatible","baseUrl":"https://api.openai.com","apiKey":"sk-main","models":[{"id":"gpt-4o","name":"gpt-4o","temperature":0.7,"maxTokens":4096},{"id":"gpt-4o-mini","name":"gpt-4o-mini","temperature":0.3}]}`,
 	})
 
 	b := NewBuilder(store, testLogger())
 
 	// 单个读取
-	main, ok := b.GetLLMModel("main")
+	main, ok := b.GetLLMModel("gpt-4o")
 	if !ok {
-		t.Fatal("model 'main' not found")
+		t.Fatal("model 'gpt-4o' not found")
 	}
 	if main.Provider != "openai" || main.Model != "gpt-4o" || main.APIKey != "sk-main" {
 		t.Errorf("main: %+v", main)
@@ -623,7 +622,7 @@ func TestBuilder_GetLLMModel(t *testing.T) {
 	}
 
 	// 默认值填充
-	light, _ := b.GetLLMModel("light")
+	light, _ := b.GetLLMModel("gpt-4o-mini")
 	if light.MaxTokens != 4096 {
 		t.Errorf("light max_tokens default: got %d", light.MaxTokens)
 	}
@@ -632,28 +631,6 @@ func TestBuilder_GetLLMModel(t *testing.T) {
 	_, ok = b.GetLLMModel("nonexistent")
 	if ok {
 		t.Error("should not find nonexistent")
-	}
-}
-
-func TestBuilder_GetAllLLMModels(t *testing.T) {
-	store := NewStore(nil)
-	store.LoadEnvMap(map[string]string{
-		"llm.main":   `{"provider":"openai","model":"gpt-4o","api_key":"sk-1"}`,
-		"llm.light":  `{"provider":"openai","model":"gpt-4o-mini","api_key":"sk-2"}`,
-		"llm.claude": `{"provider":"anthropic","model":"claude-sonnet-4-20250514","api_key":"sk-3"}`,
-	})
-
-	b := NewBuilder(store, testLogger())
-	models := b.GetAllLLMModels()
-
-	if len(models) != 3 {
-		t.Fatalf("expected 3 models, got %d", len(models))
-	}
-	if _, ok := models["main"]; !ok {
-		t.Error("missing 'main'")
-	}
-	if _, ok := models["claude"]; !ok {
-		t.Error("missing 'claude'")
 	}
 }
 

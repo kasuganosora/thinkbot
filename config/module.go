@@ -135,25 +135,10 @@ type ModelDef struct {
 	Multimodal bool `json:"multimodal,omitempty"`
 }
 
-// GetLLMModel 从 config store 读取 LLM 配置。
-//
-// 优先查找 llm.<llm_id>；若不存在，则遍历 provider.* 中的模型（统一入口）。
+// GetLLMModel 从 provider 系统查找 LLM 模型配置。
+// 模型由 provider.* 配置定义，每个 provider 包含一个 models 列表。
 func (b *Builder) GetLLMModel(llmID string) (ModelDef, bool) {
-	// 1. 旧键：llm.<llm_id>
-	raw, ok := b.store.Get(LLMConfigKey(llmID))
-	if ok && raw != "" {
-		var def ModelDef
-		if err := json.Unmarshal([]byte(raw), &def); err == nil {
-			return fillModelDefaults(def), true
-		}
-	}
-
-	// 2. 新 Provider 系统：遍历 provider.* 查找匹配的模型
-	if def, ok := b.resolveProviderModel(llmID); ok {
-		return def, true
-	}
-
-	return ModelDef{}, false
+	return b.resolveProviderModel(llmID)
 }
 
 // resolveProviderModel 扫描所有 provider.* 配置，从中查找指定模型 ID。
@@ -236,30 +221,6 @@ func fillModelDefaults(def ModelDef) ModelDef {
 // float64Ptr 返回 float64 的指针（用于 Temperature 默认值）。
 func float64Ptr(v float64) *float64 {
 	return &v
-}
-
-// GetAllLLMModels 读取所有已定义的 LLM 配置。
-// 扫描 llm.* 前缀，解析每个值为 JSON，返回以 id 为键的 map。
-func (b *Builder) GetAllLLMModels() map[string]ModelDef {
-	raw := b.store.GetByPrefix("llm.")
-	result := make(map[string]ModelDef, len(raw))
-	for id, jsonStr := range raw {
-		if jsonStr == "" {
-			continue
-		}
-		var def ModelDef
-		if err := json.Unmarshal([]byte(jsonStr), &def); err != nil {
-			continue
-		}
-		if def.Temperature == nil {
-			def.Temperature = float64Ptr(0.7)
-		}
-		if def.MaxTokens == 0 {
-			def.MaxTokens = 4096
-		}
-		result[id] = def
-	}
-	return result
 }
 
 // BotLLMAssignment 描述一个 Bot 的 LLM 角色分配。

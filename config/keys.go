@@ -8,7 +8,6 @@ import (
 // 标准配置键前缀。
 const (
 	PrefixDB         = "db"
-	PrefixLLM        = "llm"
 	PrefixBot        = "bot"
 	PrefixChannel    = "channel"
 	PrefixLog        = "log"
@@ -136,13 +135,6 @@ func ToolPolicyKey(botID string) string {
 // 例如：bot.mybot.dreaming.enabled → "true"
 func BotDreamingKey(botID, sub string) string {
 	return "bot." + botID + ".dreaming." + sub
-}
-
-// LLMConfigKey 返回存储 LLM 配置 JSON 的数据库键。
-// 格式：llm.<llm_id>
-// 例如：llm.main、llm.light、llm.claude
-func LLMConfigKey(llmID string) string {
-	return "llm." + llmID
 }
 
 // BotLLMKey 返回 Bot 的 LLM 角色分配键。
