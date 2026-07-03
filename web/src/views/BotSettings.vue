@@ -80,11 +80,11 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, h } from 'vue'
+import { ref, computed, watch, h, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
-import { botApi } from '@/api/services'
+import { botApi, providerApi } from '@/api/services'
 import BotBasicForm from '@/components/bot/BotBasicForm.vue'
 import BotCronJobs from '@/components/bot/BotCronJobs.vue'
 import BotPlatforms from '@/components/bot/BotPlatforms.vue'
@@ -137,12 +137,22 @@ const navItems = [
 const activeKey = ref('overview')
 
 const emojis = ['🤖', '💻', '✍️', '🧠', '📊', '🎨', '🔍', '⚡', '🌟', '🚀']
-const modelOptions = [
-  { label: 'GPT-4o', value: 'gpt-4o' },
-  { label: 'GPT-4o mini', value: 'gpt-4o-mini' },
-  { label: 'Claude 3.5 Sonnet', value: 'claude-3.5-sonnet' },
-  { label: 'Gemini 1.5 Pro', value: 'gemini-1.5-pro' }
-]
+const modelOptions = ref([])
+
+async function loadModelOptions() {
+  try {
+    const providers = await providerApi.list()
+    const opts = []
+    for (const p of providers) {
+      if (!p.enabled) continue
+      for (const m of (p.models || [])) {
+        opts.push({ label: `${m.name} (${p.name})`, value: m.id })
+      }
+    }
+    modelOptions.value = opts
+  } catch { /* 静默失败，保留空列表 */ }
+}
+onMounted(() => { loadModelOptions() })
 
 const bot = ref(null)
 const form = ref({})
