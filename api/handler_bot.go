@@ -139,7 +139,6 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		Description:     req.Description,
 		Timezone:        req.Timezone,
 		SecurityPolicy:  secPolicy,
-		SystemPrompt:    req.SystemPrompt,
 		LLMMain:         req.LLMMain,
 		LLMLight:        req.LLMLight,
 		Model:           req.Model,
@@ -196,9 +195,6 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	}
 	if req.SecurityPolicy != nil {
 		updates["security_policy"] = *req.SecurityPolicy
-	}
-	if req.SystemPrompt != nil {
-		updates["system_prompt"] = *req.SystemPrompt
 	}
 	if req.LLMMain != nil {
 		updates["llm_main"] = *req.LLMMain
