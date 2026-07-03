@@ -11,7 +11,7 @@
       <!-- Bot 头部 -->
       <div class="bot-head">
         <div class="bh-avatar">
-          <img v-if="bot.avatarUrl" :src="bot.avatarUrl" :alt="bot.name" />
+          <img v-if="isUrl(bot.avatar)" :src="bot.avatar" :alt="bot.name" />
           <span v-else>{{ avatarText }}</span>
         </div>
         <div class="bh-info">
@@ -152,6 +152,7 @@ const avatarText = computed(() => {
   if (!b) return '?'
   return (b.avatar && b.avatar.length <= 2) ? b.avatar : (b.name || '?').slice(0, 2)
 })
+function isUrl(s) { return s && (s.startsWith('http://') || s.startsWith('https://')) }
 
 function loadBot() {
   const id = route.params.id || store.activeBotId
@@ -160,7 +161,7 @@ function loadBot() {
   bot.value = b || null
   if (b) {
     form.value = {
-      id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.desc || '',
+      id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
       systemPrompt: b.systemPrompt || b.prompt || '', model: b.model || 'gpt-4o',
       llmMain: b.llmMain || '', llmLight: b.llmLight || '',
       temperature: b.temperature ?? 0.7, maxTokens: b.maxTokens ?? 4096,
@@ -193,13 +194,14 @@ function renameBot() {
 async function saveBasic() {
   const f = form.value
   await botApi.update(f.id, {
-    name: f.name, systemPrompt: f.systemPrompt, model: f.model,
+    name: f.name, avatar: f.avatar, description: f.desc,
+    systemPrompt: f.systemPrompt, model: f.model,
     llmMain: f.llmMain, llmLight: f.llmLight, temperature: f.temperature,
     maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort
   }).catch(() => {})
   store.updateBot(f.id, {
-    name: f.name, avatar: f.avatar, desc: f.desc, model: f.model,
-    temperature: f.temperature, prompt: f.systemPrompt, systemPrompt: f.systemPrompt,
+    name: f.name, avatar: f.avatar, description: f.desc, model: f.model,
+    temperature: f.temperature, systemPrompt: f.systemPrompt,
     llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
     workers: f.workers, reasoningEffort: f.reasoningEffort
   })

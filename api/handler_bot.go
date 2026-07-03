@@ -5,6 +5,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
@@ -105,16 +106,46 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		return
 	}
 
+	// 决定头像：前端可能传 avatarUrl（URL）或 avatar（emoji），优先 avatarUrl
+	avatar := req.Avatar
+	if req.AvatarUrl != "" {
+		avatar = req.AvatarUrl
+	}
+
+	// 安全策略默认值
+	secPolicy := req.SecurityPolicy
+	if secPolicy == "" {
+		secPolicy = "allow_all"
+	}
+
+	// 数值默认值
+	temperature := 0.7
+	if req.Temperature != nil {
+		temperature = *req.Temperature
+	}
+	maxTokens := 4096
+	if req.MaxTokens != nil {
+		maxTokens = *req.MaxTokens
+	}
+	workers := 4
+	if req.Workers != nil {
+		workers = *req.Workers
+	}
+
 	def := &dao.BotDefinition{
-		ID:              req.ID,
+		ID:              idgen.New("bot"),
 		Name:            req.Name,
+		Avatar:          avatar,
+		Description:     req.Description,
+		Timezone:        req.Timezone,
+		SecurityPolicy:  secPolicy,
 		SystemPrompt:    req.SystemPrompt,
 		LLMMain:         req.LLMMain,
 		LLMLight:        req.LLMLight,
 		Model:           req.Model,
-		Temperature:     req.Temperature,
-		MaxTokens:       req.MaxTokens,
-		Workers:         req.Workers,
+		Temperature:     temperature,
+		MaxTokens:       maxTokens,
+		Workers:         workers,
 		ReasoningEffort: req.ReasoningEffort,
 		Status:          dao.BotStatusStopped,
 	}
@@ -123,7 +154,7 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
-	auditLog(c, s.logger, "create_bot", "bot_id", req.ID, "name", req.Name)
+	auditLog(c, s.logger, "create_bot", "bot_id", def.ID, "name", req.Name)
 	OK(c, def)
 }
 
@@ -153,6 +184,18 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	updates := map[string]any{}
 	if req.Name != nil {
 		updates["name"] = *req.Name
+	}
+	if req.Avatar != nil {
+		updates["avatar"] = *req.Avatar
+	}
+	if req.Description != nil {
+		updates["description"] = *req.Description
+	}
+	if req.Timezone != nil {
+		updates["timezone"] = *req.Timezone
+	}
+	if req.SecurityPolicy != nil {
+		updates["security_policy"] = *req.SecurityPolicy
 	}
 	if req.SystemPrompt != nil {
 		updates["system_prompt"] = *req.SystemPrompt

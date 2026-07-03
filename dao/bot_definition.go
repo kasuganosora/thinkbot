@@ -14,6 +14,15 @@ type BotDefinition struct {
 	// Avatar 头像（emoji 或 URL）。
 	Avatar string `gorm:"size:256;default:''" json:"avatar"`
 
+	// Description 简短描述。
+	Description string `gorm:"size:512;default:''" json:"description"`
+
+	// Timezone 时区标识（如 "Asia/Shanghai"），为空继承系统默认。
+	Timezone string `gorm:"size:64;default:''" json:"timezone"`
+
+	// SecurityPolicy 安全策略（allow_all | whitelist | private_only）。
+	SecurityPolicy string `gorm:"size:32;default:'allow_all'" json:"securityPolicy"`
+
 	// SystemPrompt 系统提示词。
 	SystemPrompt string `gorm:"type:text" json:"systemPrompt"`
 

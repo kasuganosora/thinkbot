@@ -54,22 +54,31 @@ type UpdateRoleReq struct {
 // --- Bot 管理 ---
 
 // CreateBotReq 创建 Bot 请求（admin）。
+// 前端创建时仅需 name，其余字段可选，模型参数在编辑页配置。
 type CreateBotReq struct {
-	ID              string  `json:"id" binding:"required"`
-	Name            string  `json:"name" binding:"required"`
-	SystemPrompt    string  `json:"systemPrompt"`
-	LLMMain         string  `json:"llmMain"`
-	LLMLight        string  `json:"llmLight"`
-	Model           string  `json:"model"`
-	Temperature     float64 `json:"temperature"`
-	MaxTokens       int     `json:"maxTokens"`
-	Workers         int     `json:"workers"`
-	ReasoningEffort string  `json:"reasoningEffort"`
+	Name           string `json:"name" binding:"required"`
+	Avatar         string `json:"avatar"`
+	AvatarUrl      string `json:"avatarUrl"` // 前端兼容字段，优先级高于 Avatar
+	Description    string `json:"description"`
+	Timezone       string `json:"timezone"`
+	SecurityPolicy string `json:"securityPolicy"`
+	SystemPrompt   string `json:"systemPrompt"`
+	LLMMain        string `json:"llmMain"`
+	LLMLight       string `json:"llmLight"`
+	Model          string `json:"model"`
+	Temperature    *float64 `json:"temperature"`
+	MaxTokens      *int     `json:"maxTokens"`
+	Workers        *int     `json:"workers"`
+	ReasoningEffort string `json:"reasoningEffort"`
 }
 
 // UpdateBotReq 更新 Bot 请求（admin）。
 type UpdateBotReq struct {
 	Name            *string  `json:"name"`
+	Avatar          *string  `json:"avatar"`
+	Description     *string  `json:"description"`
+	Timezone        *string  `json:"timezone"`
+	SecurityPolicy  *string  `json:"securityPolicy"`
 	SystemPrompt    *string  `json:"systemPrompt"`
 	LLMMain         *string  `json:"llmMain"`
 	LLMLight        *string  `json:"llmLight"`

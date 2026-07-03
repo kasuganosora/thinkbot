@@ -134,7 +134,7 @@ export const botApi = {
   create(payload) {
     if (USE_MOCK) {
       return mockResolve(() => {
-        const b = { avatar: '🆕', sessions: [], running: false, status: 'stopped', createdAt: nowISO(), updatedAt: nowISO(), temperature: 0.7, maxTokens: 4096, workers: 4, reasoningEffort: '', llmMain: '', llmLight: '', model: '', systemPrompt: '', ...payload }
+        const b = { id: genId('bot'), avatar: '🆕', description: '', timezone: '', securityPolicy: 'allow_all', sessions: [], running: false, status: 'stopped', createdAt: nowISO(), updatedAt: nowISO(), temperature: 0.7, maxTokens: 4096, workers: 4, reasoningEffort: '', llmMain: '', llmLight: '', model: '', systemPrompt: '', ...payload }
         db().bots.push(b)
         saveDB()
         return stripBot(b)
