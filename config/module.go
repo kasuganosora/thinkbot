@@ -181,6 +181,7 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 					Model:       m.ID,
 					APIKey:      prov.APIKey,
 					BaseURL:     prov.BaseURL,
+					ChatPath:    resolveChatPath(prov.ClientType, prov.BaseURL),
 					Temperature: &t,
 					MaxTokens:   mt,
 					Multimodal:  m.Multimodal,
@@ -204,6 +205,21 @@ func mapClientType(clientType string) string {
 		return "grok"
 	default:
 		return "openai"
+	}
+}
+
+// resolveChatPath 根据 provider 类型和 baseUrl 推断对应的 chat API 路径。
+func resolveChatPath(clientType, baseURL string) string {
+	switch strings.ToLower(clientType) {
+	case "anthropic compatible", "anthropic":
+		return "/v1/messages"
+	case "google", "gemini":
+		return ""
+	default: // OpenAI Compatible
+		if strings.Contains(baseURL, "bigmodel") {
+			return "/v4/chat/completions"
+		}
+		return "/v1/chat/completions"
 	}
 }
 
