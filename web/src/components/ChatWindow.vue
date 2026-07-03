@@ -131,7 +131,8 @@ const userStore = useUserStore()
 const draft = ref('')
 const scrollRef = ref()
 
-const messages = computed(() => store.activeSession?.messages || [])
+// 直接使用 store 暴露的 messages（内含版本号追踪，支持流式更新）
+const messages = computed(() => store.messages)
 
 // 当前会话关联的工作流 id：
 // 真实接入后应由后端返回（session 创建工作流时下发），这里 mock 演示：
@@ -165,6 +166,8 @@ function scrollToBottom() {
 
 watch(() => messages.value.length, scrollToBottom)
 watch(() => store.activeSessionId, scrollToBottom)
+// 流式更新时滚动到底部（replying 变化 → 首次和结束时各触发一次）
+watch(() => store.replying, scrollToBottom)
 
 function send() {
   const text = draft.value.trim()
