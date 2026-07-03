@@ -150,7 +150,9 @@ async function loadModelOptions() {
       }
     }
     modelOptions.value = opts
-  } catch { /* 静默失败，保留空列表 */ }
+  } catch (e) {
+    console.error('加载模型列表失败:', e)
+  }
 }
 onMounted(() => { loadModelOptions() })
 
