@@ -177,16 +177,6 @@ func (s *Server) registerRoutes() {
 		// 平台工具目录（所有登录用户可见，驱动 Bot 详情面板）
 		authed.GET("/bots/platforms/tool-catalog", s.handleBotToolCatalog)
 
-		// --- LLM 模型管理（admin）— 保留旧路由兼容 ---
-		llmGroup := authed.Group("/llm/models")
-		llmGroup.Use(requirePermission(auth.PermBotManage))
-		{
-			llmGroup.GET("", s.handleListLLMModels)
-			llmGroup.POST("", s.handleCreateLLMModel)
-			llmGroup.PUT("/:id", s.handleUpdateLLMModel)
-			llmGroup.DELETE("/:id", s.handleDeleteLLMModel)
-		}
-
 		// --- Provider 层级化模型管理（admin）---
 		providerGroup := authed.Group("/providers")
 		providerGroup.Use(requirePermission(auth.PermBotManage))

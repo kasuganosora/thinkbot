@@ -167,31 +167,4 @@ type UpdateCronJobReq struct {
 	Enabled     *bool   `json:"enabled"`
 }
 
-// --- LLM 模型管理 ---
-
-// CreateLLMModelReq 创建 LLM 模型配置请求。
-type CreateLLMModelReq struct {
-	ID          string  `json:"id" binding:"required"`
-	Provider    string  `json:"provider" binding:"required"`
-	Model       string  `json:"model" binding:"required"`
-	APIKey      string  `json:"apiKey" binding:"required"`
-	BaseURL     string  `json:"baseUrl"`
-	ChatPath    string  `json:"chatPath"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"maxTokens"`
-	Multimodal  bool    `json:"multimodal"`
-}
-
-// UpdateLLMModelReq 更新 LLM 模型配置请求（字段可选）。
-type UpdateLLMModelReq struct {
-	Provider    *string  `json:"provider"`
-	Model       *string  `json:"model"`
-	APIKey      *string  `json:"apiKey"`
-	BaseURL     *string  `json:"baseUrl"`
-	ChatPath    *string  `json:"chatPath"`
-	Temperature *float64 `json:"temperature"`
-	MaxTokens   *int     `json:"maxTokens"`
-	Multimodal  *bool    `json:"multimodal"`
-}
-
 // --- 定时任务 ---
