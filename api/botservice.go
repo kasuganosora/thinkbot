@@ -35,7 +35,6 @@ import (
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/tools"
 	"github.com/kasuganosora/thinkbot/util/errs"
-	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/workflow"
 )
 
@@ -322,7 +321,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		"llm",
 		bundle.Main,
 		stages.LLMConfig{
-			SystemPrompt:    def.SystemPrompt,
+			SystemPrompt:    "", // 由 PromptStage 从 SOUL.md 注入
 			Model:           mainModel,
 			Temperature:     temp,
 			MaxTokens:       maxTok,
@@ -373,7 +372,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 			promptCfg := engagement.PromptConfig{
 				BotName:    def.Name,
-				BotPersona: strutil.Truncate(def.SystemPrompt, 200),
+				BotPersona: "", // 由 SOUL.md 提供
 				Interests:  engCfg.Keywords,
 			}
 
@@ -521,8 +520,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	adaptiveChannels := s.store.GetStringSlice(config.BotAdaptiveEngagementKey(id, "channels"), nil)
 
 	// 从 SOUL.md 解析初始画像
-	soulContent := def.SystemPrompt
-	initialTraits := engagement.ParseSoulProfile(soulContent)
+	initialTraits := engagement.ParseSoulProfile("")
 
 	// 创建自适应同步器
 	adaptiveSyncer = engagement.NewAdaptiveEngagementSyncer(
@@ -588,7 +586,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 创建 Bot
 	botCfg := bot.BotConfig{
 		Workers:      def.Workers,
-		SystemPrompt: def.SystemPrompt,
+		SystemPrompt: "", // 由 PromptStage 从 SOUL.md 注入
 		Model:        def.Model,
 	}
 	if def.Temperature > 0 {
@@ -662,9 +660,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	// 联动 SoulLoader → AdaptiveSyncer：
-	// Bot 内部有 SoulLoader 实时加载 SOUL.md。将真实 SOUL.md 内容作为
-	// 初始画像种子（覆盖 def.SystemPrompt 的 fallback 解析），
-	// 并接线热重载回调。
+	// Bot 内部有 SoulLoader 实时加载 SOUL.md，并接线热重载回调。
 	if adaptiveSyncer != nil && b.SoulLoader() != nil && b.SoulLoader().Loaded() {
 		soulContent := b.SoulLoader().Content()
 		if soulContent != "" {
