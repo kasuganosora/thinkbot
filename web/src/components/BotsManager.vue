@@ -26,7 +26,7 @@
         @click="openBot(b.id)"
       >
         <div class="bc-avatar">
-          <img v-if="b.avatarUrl" :src="b.avatarUrl" :alt="b.name" />
+          <img v-if="isUrl(b.avatar)" :src="b.avatar" :alt="b.name" />
           <span v-else>{{ avatarText(b) }}</span>
         </div>
         <div class="bc-main">
@@ -102,6 +102,7 @@ const filtered = computed(() => {
 function avatarText(b) {
   return (b.avatar && b.avatar.length <= 2) ? b.avatar : (b.name || '?').slice(0, 2)
 }
+function isUrl(s) { return s && (s.startsWith('http://') || s.startsWith('https://')) }
 function fmtDate(v) {
   if (!v) return '--'
   const d = new Date(v)

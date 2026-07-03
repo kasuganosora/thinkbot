@@ -65,11 +65,6 @@ export const useBotStore = defineStore('bot', () => {
   async function createBot(payload = {}) {
     const bot = await botApi.create({
       name: payload.name || '新建 Bot',
-      systemPrompt: payload.prompt || '',
-      llmMain: payload.llmMain || '',
-      llmLight: payload.llmLight || '',
-      temperature: payload.temperature ?? 0.7,
-      maxTokens: payload.maxTokens ?? 4096,
       ...payload
     })
     bots.value.push(bot)
