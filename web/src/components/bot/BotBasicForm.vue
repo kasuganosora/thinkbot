@@ -30,45 +30,34 @@
     <t-card title="模型参数" :bordered="false" class="card">
       <t-form :data="form" label-align="top" class="form">
         <div class="row2">
-          <t-form-item label="兼容模型（model）">
-            <t-select v-model="form.model" :options="modelOptions" filterable creatable data-testid="bot-model" />
+          <t-form-item label="主模型（llmMain）">
+            <t-select v-model="form.llmMain" :options="modelOptions" filterable creatable clearable placeholder="主 LLM 模型 ID" data-testid="bot-llm-main" />
           </t-form-item>
           <t-form-item label="推理强度（reasoningEffort）">
             <t-select v-model="form.reasoningEffort" :options="effortOptions" data-testid="bot-effort" />
           </t-form-item>
         </div>
         <div class="row2">
-          <t-form-item label="主模型（llmMain）">
-            <t-select v-model="form.llmMain" :options="modelOptions" filterable creatable clearable placeholder="主 LLM 模型 ID" data-testid="bot-llm-main" />
-          </t-form-item>
           <t-form-item label="轻量模型（llmLight）">
             <t-select v-model="form.llmLight" :options="modelOptions" filterable creatable clearable placeholder="轻量 LLM 模型 ID" data-testid="bot-llm-light" />
           </t-form-item>
-        </div>
-        <t-form-item label="温度（Temperature）">
-          <div class="slider-row">
-            <div class="slider-box">
-              <t-slider class="temp-slider" v-model="form.temperature" :min="0" :max="2" :step="0.1" />
+          <t-form-item label="温度（Temperature）">
+            <div class="slider-row">
+              <div class="slider-box">
+                <t-slider class="temp-slider" v-model="form.temperature" :min="0" :max="2" :step="0.1" />
+              </div>
+              <span class="slider-val">{{ form.temperature }}</span>
             </div>
-            <span class="slider-val">{{ form.temperature }}</span>
-          </div>
-        </t-form-item>
+          </t-form-item>
+        </div>
         <div class="row2">
           <t-form-item label="最大 Token（maxTokens）">
-            <t-input-number v-model="form.maxTokens" :min="1" :step="512" style="width: 100%" data-testid="bot-maxtokens" />
+            <t-input-number v-model="form.maxTokens" :min="1" :step="512" style="width: 100%" data-testid="bot-maxtokens" :placeholder="String(modelMaxTokens)" />
           </t-form-item>
           <t-form-item label="并发 Worker 数（workers）">
             <t-input-number v-model="form.workers" :min="1" :max="64" style="width: 100%" data-testid="bot-workers" />
           </t-form-item>
         </div>
-        <t-form-item label="系统提示词（System Prompt）">
-          <t-textarea
-            v-model="form.systemPrompt"
-            :autosize="{ minRows: 5, maxRows: 14 }"
-            placeholder="定义 Bot 的角色、风格与约束"
-            data-testid="bot-system-prompt"
-          />
-        </t-form-item>
       </t-form>
     </t-card>
 
@@ -92,7 +81,9 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
   form: { type: Object, required: true },
   emojis: { type: Array, default: () => [] },
   modelOptions: { type: Array, default: () => [] },
@@ -108,6 +99,11 @@ const effortOptions = [
   { label: 'medium', value: 'medium' },
   { label: 'high', value: 'high' }
 ]
+
+const modelMaxTokens = computed(() => {
+  const m = props.modelOptions.find(o => o.value === props.form.llmMain)
+  return m?.contextLength || 4096
+})
 </script>
 
 <style scoped>
