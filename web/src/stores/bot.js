@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, triggerRef, shallowRef } from 'vue'
 import { botApi, chatApi } from '@/api/services'
 
 let idSeed = 1000
@@ -11,8 +11,15 @@ function loadSessions(botId) {
     return JSON.parse(localStorage.getItem(`bp_sessions_${botId}`) || '[]')
   } catch { return [] }
 }
+
+// 防抖 saveSessions — 流式更新时避免高频 localStorage I/O
+let _saveTimer = null
 function saveSessions(botId, sessions) {
   localStorage.setItem(`bp_sessions_${botId}`, JSON.stringify(sessions))
+}
+function saveSessionsDebounced(botId, sessions) {
+  clearTimeout(_saveTimer)
+  _saveTimer = setTimeout(() => saveSessions(botId, sessions), 200)
 }
 
 export const useBotStore = defineStore('bot', () => {
@@ -21,7 +28,9 @@ export const useBotStore = defineStore('bot', () => {
   const error = ref(null)
   const activeBotId = ref('')
   const activeSessionId = ref('')
-  const sessionsCache = ref({}) // botId → sessions[]
+  // shallowRef：不深度 reactive 化内部数组/对象，
+  // 手动 triggerRef 控制更新时机，避免 computed 引用缓存导致下游不刷新
+  const sessionsCache = shallowRef({})
 
   // ---- 初始化：从后端加载 Bot 列表 ----
   async function fetchBots() {
@@ -39,12 +48,15 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
+  // 手动通知 sessionsCache 已变更（shallowRef 不自动追踪内部变化）
+  function notifySessions() {
+    triggerRef(sessionsCache)
+  }
+
   // ---- 计算属性 ----
   const activeBot = computed(() => bots.value.find(b => b.id === activeBotId.value))
-  const _streamTick = ref(0)
   const sessions = computed(() => {
     const botId = activeBotId.value
-    void _streamTick.value // 流式更新时强制重算
     if (!botId) return []
     if (!sessionsCache.value[botId]) {
       sessionsCache.value[botId] = loadSessions(botId)
@@ -52,10 +64,18 @@ export const useBotStore = defineStore('bot', () => {
     return sessionsCache.value[botId]
   })
   const activeSession = computed(() => sessions.value.find(s => s.id === activeSessionId.value))
+  // 消息列表 — 使用独立版本计数器确保流式更新时 computed 能重算
+  const _msgVersion = ref(0)
+  const messages = computed(() => {
+    void _msgVersion.value
+    return activeSession.value?.messages || []
+  })
 
   // ---- Bot 操作（走后端 API） ----
   function selectBot(id) {
     activeBotId.value = id
+    // triggerRef 确保 sessions computed 能拿到新 botId 对应的数据
+    notifySessions()
     const list = sessions.value
     activeSessionId.value = list.length > 0 ? list[0].id : ''
   }
@@ -89,6 +109,7 @@ export const useBotStore = defineStore('bot', () => {
     // 清理本地 session 缓存
     delete sessionsCache.value[id]
     localStorage.removeItem(`bp_sessions_${id}`)
+    notifySessions()
   }
 
   // ---- Session 操作（前端本地管理） ----
@@ -106,6 +127,7 @@ export const useBotStore = defineStore('bot', () => {
     sessionsCache.value[botId] = list
     activeSessionId.value = sess.id
     saveSessions(botId, list)
+    notifySessions()
   }
 
   function deleteSession(id) {
@@ -118,6 +140,7 @@ export const useBotStore = defineStore('bot', () => {
       activeSessionId.value = list.length > 0 ? list[0].id : ''
     }
     saveSessions(botId, list)
+    notifySessions()
   }
 
   // ---- 发送消息（走后端 SSE 流式） ----
@@ -132,48 +155,59 @@ export const useBotStore = defineStore('bot', () => {
     const sess = activeSession.value
     if (!sess) return
 
+    // 用户消息
     sess.messages.push({ id: uid(), role: 'user', content })
     if (sess.messages.length === 1) {
       sess.title = content.slice(0, 18)
     }
     sess.updatedAt = Date.now()
+    _msgVersion.value++
     saveSessions(botId, sessionsCache.value[botId])
 
     // 流式 placeholder，逐字更新
     const msgId = uid()
     sess.messages.push({ id: msgId, role: 'assistant', content: '' })
+    _msgVersion.value++
     saveSessions(botId, sessionsCache.value[botId])
-
-    function updateMsg(idx, patch) {
-      // 替换数组元素触发 Vue 响应式更新（直接改属性不会触发 v-for 重渲染）
-      sess.messages.splice(idx, 1, { ...sess.messages[idx], ...patch })
-      sess.updatedAt = Date.now()
-      saveSessions(botId, sessionsCache.value[botId])
-    }
 
     replying.value = true
     chatApi.send(botId, content, (delta) => {
+      // onDelta 回调：追加文本到 assistant 消息
       const idx = sess.messages.findIndex(x => x.id === msgId)
-      if (idx >= 0) updateMsg(idx, { content: sess.messages[idx].content + delta })
-      _streamTick.value++
+      if (idx < 0) return
+      const old = sess.messages[idx]
+      // splice 替换元素 + 版本号递增 → 强制 messages computed 重算 → 模板重渲染
+      sess.messages.splice(idx, 1, { ...old, content: old.content + delta })
+      _msgVersion.value++
+      // 流式期间防抖持久化，避免高频 localStorage 写入
+      saveSessionsDebounced(botId, sessionsCache.value[botId])
     })
       .then((resp) => {
         const idx = sess.messages.findIndex(x => x.id === msgId)
-        if (idx >= 0) updateMsg(idx, {
-          content: resp.text || sess.messages[idx].content,
-          toolCalls: resp.toolCalls || []
-        })
+        if (idx >= 0) {
+          sess.messages.splice(idx, 1, {
+            ...sess.messages[idx],
+            content: resp.text || sess.messages[idx].content,
+            toolCalls: resp.toolCalls || []
+          })
+          _msgVersion.value++
+        }
+        saveSessions(botId, sessionsCache.value[botId])
       })
       .catch(() => {
         const idx = sess.messages.findIndex(x => x.id === msgId)
-        if (idx >= 0 && !sess.messages[idx].content) updateMsg(idx, { content: '（回复失败，请稍后重试）' })
+        if (idx >= 0 && !sess.messages[idx].content) {
+          sess.messages.splice(idx, 1, { ...sess.messages[idx], content: '（回复失败，请稍后重试）' })
+          _msgVersion.value++
+        }
+        saveSessions(botId, sessionsCache.value[botId])
       })
       .finally(() => { replying.value = false })
   }
 
   return {
     bots, loading, error, replying, activeBotId, activeSessionId,
-    activeBot, sessions, activeSession,
+    activeBot, sessions, activeSession, messages,
     fetchBots, selectBot, selectSession,
     createBot, updateBot, deleteBot,
     createSession, deleteSession, sendMessage
