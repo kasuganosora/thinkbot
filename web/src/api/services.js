@@ -842,7 +842,12 @@ export const chatApi = {
   // }
   // 说明：mock 下工具初始为 running，由前端 ToolCallCard 模拟推进到 _finalStatus；
   //       真实接入时由 SSE 增量推送 status 变化，无需 _finalStatus。
-  send(botId, text) {
+  /**
+   * 发送消息，走 SSE 流式响应。
+   * 返回 Promise<{traceId, text, toolCalls[]}>。
+   * 可选 onDelta(textChunk) 回调支持逐字显示。
+   */
+  async send(botId, text, onDelta) {
     if (USE_MOCK) {
       const bot = db().bots.find(b => b.id === botId)
       return mockResolve(() => {
@@ -850,43 +855,85 @@ export const chatApi = {
           traceId: genId('web'),
           text: `收到你的消息：「${text}」。我是「${bot?.name || 'Bot'}」，这是一条模拟回复。`
         }
-        // 演示：当消息涉及代码/修改类意图时，附带一组工具调用卡片（初始执行中）
         if (/改|修改|代码|文件|重构|实现|删除|新增|fix|bug/i.test(text)) {
           resp.toolCalls = [
-            {
-              id: genId('tool'),
-              name: 'edit_file',
-              title: '编辑文件',
-              status: 'running',
-              runningText: '写入文件中',
-              _finalStatus: 'success',
-              summary: '2 个文件已更改',
-              added: 0,
-              removed: 7,
-              reversible: true,
-              files: [
-                { path: 'src/components/BotSidebar.vue', added: 0, removed: 1, status: 'modified' },
-                { path: 'src/router/index.js', added: 0, removed: 6, status: 'modified' }
-              ]
-            },
-            {
-              id: genId('tool'),
-              name: 'run_command',
-              title: '执行命令',
-              status: 'running',
-              runningText: '命令执行中',
-              _finalStatus: 'success',
-              summary: 'vite build',
-              reversible: false,
-              command: 'npm run build',
-              output: '✓ built in 5.33s'
-            }
+            { id: genId('tool'), name: 'edit_file', title: '编辑文件', status: 'running', runningText: '写入文件中', _finalStatus: 'success', summary: '2 个文件已更改', added: 0, removed: 7, reversible: true, files: [{ path: 'src/components/BotSidebar.vue', added: 0, removed: 1, status: 'modified' }, { path: 'src/router/index.js', added: 0, removed: 6, status: 'modified' }] },
+            { id: genId('tool'), name: 'run_command', title: '执行命令', status: 'running', runningText: '命令执行中', _finalStatus: 'success', summary: 'vite build', reversible: false, command: 'npm run build', output: '✓ built in 5.33s' }
           ]
         }
         return resp
       })
     }
-    return request('POST', '/api/chat/send', { botId, text })
+
+    const response = await fetch('/api/chat/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ botId, text })
+    })
+    if (!response.ok) {
+      const err = new Error(`HTTP ${response.status}`)
+      try { const j = await response.json(); err.message = j.message || err.message } catch {}
+      throw err
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullText = ''
+    const toolCalls = []
+    let currentEvent = null
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE 按双换行分割事件块
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() // 保留未完成的事件块
+
+        for (const block of blocks) {
+          if (!block.trim()) continue
+          const lines = block.split('\n')
+          let evtType = ''
+          const parts = {}
+          for (const line of lines) {
+            if (line.startsWith('event:')) evtType = line.slice(6).trim()
+            else if (line.startsWith('data:')) {
+              try { Object.assign(parts, JSON.parse(line.slice(5).trim())) } catch {}
+            }
+          }
+          switch (evtType) {
+            case 'text_delta':
+              const chunk = parts.text || ''
+              fullText += chunk
+              if (onDelta) onDelta(chunk)
+              break
+            case 'start':
+              currentEvent = parts.traceId
+              break
+            case 'done':
+              if (parts.text) fullText = parts.text
+              if (parts.toolCalls) toolCalls.push(...parts.toolCalls)
+              return { traceId: currentEvent, text: fullText, toolCalls }
+            case 'error':
+              throw new Error(parts.message || '请求失败')
+            case 'tool_call':
+              toolCalls.push({ id: parts.id || genId('tool'), name: parts.tool, input: parts.input, status: 'running' })
+              break
+            case 'tool_result':
+              const t = toolCalls.find(x => x.id === parts.id)
+              if (t) Object.assign(t, { status: parts.status, summary: parts.summary, output: parts.output })
+              break
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    return { traceId: currentEvent, text: fullText, toolCalls }
   }
 }
 
