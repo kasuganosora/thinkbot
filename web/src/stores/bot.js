@@ -41,8 +41,10 @@ export const useBotStore = defineStore('bot', () => {
 
   // ---- 计算属性 ----
   const activeBot = computed(() => bots.value.find(b => b.id === activeBotId.value))
+  const _streamTick = ref(0)
   const sessions = computed(() => {
     const botId = activeBotId.value
+    void _streamTick.value // 流式更新时强制重算
     if (!botId) return []
     if (!sessionsCache.value[botId]) {
       sessionsCache.value[botId] = loadSessions(botId)
@@ -150,6 +152,7 @@ export const useBotStore = defineStore('bot', () => {
         sess.updatedAt = Date.now()
         saveSessions(botId, sessionsCache.value[botId])
       }
+      _streamTick.value++
     })
       .then((resp) => {
         const m = sess.messages.find(x => x.id === msgId)
