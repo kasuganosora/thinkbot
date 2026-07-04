@@ -820,6 +820,22 @@ export const chatApi = {
     if (USE_MOCK) return mockResolve(() => db().bots.filter(b => b.running).map(b => ({ id: b.id, name: b.name, running: true })))
     return request('GET', '/api/chat/bots')
   },
+  /**
+   * 获取聊天历史（游标分页，倒序返回）。
+   * @param {string} botId
+   * @param {string} [cursor] 分页游标（首次留空）
+   * @param {number} [limit=30]
+   * @returns {Promise<{messages: Array, nextCursor?: string, hasMore: boolean}>}
+   */
+  history(botId, cursor, limit = 30) {
+    if (USE_MOCK) {
+      // mock: 返回空历史
+      return mockResolve(() => ({ messages: [], hasMore: false }))
+    }
+    const params = new URLSearchParams({ botId, limit: String(limit) })
+    if (cursor) params.set('cursor', cursor)
+    return request('GET', `/api/chat/history?${params.toString()}`)
+  },
   // mock 下不做真正 SSE，返回完整文本；真实接入时改为 EventSource/fetch-stream
   //
   // 返回结构（后端对齐）：

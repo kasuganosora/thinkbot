@@ -340,7 +340,7 @@ function fmtBig(n) {
   return String(n)
 }
 
-const sid = computed(() => store.activeSessionId)
+const sid = computed(() => store.activeBotId)
 
 async function loadAll() {
   if (!sid.value) return

@@ -1,36 +1,21 @@
 import { defineStore } from 'pinia'
-import { ref, computed, triggerRef, shallowRef } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { botApi, chatApi } from '@/api/services'
 
-let idSeed = 1000
-const uid = () => `id_${++idSeed}`
-
-// 前端本地 session 管理（后端为 bot 级 chat/history，暂无 session CRUD）
-function loadSessions(botId) {
-  try {
-    return JSON.parse(localStorage.getItem(`bp_sessions_${botId}`) || '[]')
-  } catch { return [] }
-}
-
-// 防抖 saveSessions — 流式更新时避免高频 localStorage I/O
-let _saveTimer = null
-function saveSessions(botId, sessions) {
-  localStorage.setItem(`bp_sessions_${botId}`, JSON.stringify(sessions))
-}
-function saveSessionsDebounced(botId, sessions) {
-  clearTimeout(_saveTimer)
-  _saveTimer = setTimeout(() => saveSessions(botId, sessions), 200)
-}
+let idSeed = Date.now()
+const uid = () => `msg_${++idSeed}`
 
 export const useBotStore = defineStore('bot', () => {
   const bots = ref([])
   const loading = ref(false)
   const error = ref(null)
   const activeBotId = ref('')
-  const activeSessionId = ref('')
-  // shallowRef：不深度 reactive 化内部数组/对象，
-  // 手动 triggerRef 控制更新时机，避免 computed 引用缓存导致下游不刷新
-  const sessionsCache = shallowRef({})
+
+  // 消息列表 — 完全来自后端，不用 localStorage
+  const messages = ref([])
+  const messagesLoading = ref(false)
+  const hasMore = ref(false)
+  const nextCursor = ref('')
 
   // ---- 初始化：从后端加载 Bot 列表 ----
   async function fetchBots() {
@@ -48,40 +33,12 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
-  // 手动通知 sessionsCache 已变更（shallowRef 不自动追踪内部变化）
-  function notifySessions() {
-    triggerRef(sessionsCache)
-  }
-
   // ---- 计算属性 ----
   const activeBot = computed(() => bots.value.find(b => b.id === activeBotId.value))
-  const sessions = computed(() => {
-    const botId = activeBotId.value
-    if (!botId) return []
-    if (!sessionsCache.value[botId]) {
-      sessionsCache.value[botId] = loadSessions(botId)
-    }
-    return sessionsCache.value[botId]
-  })
-  const activeSession = computed(() => sessions.value.find(s => s.id === activeSessionId.value))
-  // 消息列表 — 使用独立版本计数器确保流式更新时 computed 能重算
-  const _msgVersion = ref(0)
-  const messages = computed(() => {
-    void _msgVersion.value
-    return activeSession.value?.messages || []
-  })
 
-  // ---- Bot 操作（走后端 API） ----
+  // ---- Bot 操作 ----
   function selectBot(id) {
     activeBotId.value = id
-    // triggerRef 确保 sessions computed 能拿到新 botId 对应的数据
-    notifySessions()
-    const list = sessions.value
-    activeSessionId.value = list.length > 0 ? list[0].id : ''
-  }
-
-  function selectSession(id) {
-    activeSessionId.value = id
   }
 
   async function createBot(payload = {}) {
@@ -104,44 +61,54 @@ export const useBotStore = defineStore('bot', () => {
     const idx = bots.value.findIndex(b => b.id === id)
     if (idx > -1) bots.value.splice(idx, 1)
     if (activeBotId.value === id) {
-      selectBot(bots.value[0]?.id || '')
+      activeBotId.value = bots.value[0]?.id || ''
     }
-    // 清理本地 session 缓存
-    delete sessionsCache.value[id]
-    localStorage.removeItem(`bp_sessions_${id}`)
-    notifySessions()
   }
 
-  // ---- Session 操作（前端本地管理） ----
-  function createSession() {
-    if (!activeBot.value) return
+  // ---- 消息加载（从后端） ----
+  async function loadMessages() {
     const botId = activeBotId.value
-    const list = sessionsCache.value[botId] || loadSessions(botId)
-    const sess = {
-      id: uid(),
-      title: '新会话',
-      updatedAt: Date.now(),
-      messages: []
+    if (!botId) {
+      messages.value = []
+      return
     }
-    list.unshift(sess)
-    sessionsCache.value[botId] = list
-    activeSessionId.value = sess.id
-    saveSessions(botId, list)
-    notifySessions()
+    messagesLoading.value = true
+    try {
+      const page = await chatApi.history(botId)
+      // 后端返回倒序（最新在前），前端显示需要正序（旧在前）
+      messages.value = (page.messages || []).reverse()
+      hasMore.value = page.hasMore || false
+      nextCursor.value = page.nextCursor || ''
+    } catch (e) {
+      console.error('加载消息历史失败', e)
+      messages.value = []
+    } finally {
+      messagesLoading.value = false
+    }
   }
 
-  function deleteSession(id) {
+  // 加载更早的消息（上滑加载更多）
+  async function loadMoreMessages() {
     const botId = activeBotId.value
-    const list = sessionsCache.value[botId]
-    if (!list) return
-    const idx = list.findIndex(s => s.id === id)
-    if (idx > -1) list.splice(idx, 1)
-    if (activeSessionId.value === id) {
-      activeSessionId.value = list.length > 0 ? list[0].id : ''
+    if (!botId || !hasMore.value || messagesLoading.value) return
+    messagesLoading.value = true
+    try {
+      const page = await chatApi.history(botId, nextCursor.value)
+      const older = (page.messages || []).reverse()
+      messages.value = [...older, ...messages.value]
+      hasMore.value = page.hasMore || false
+      nextCursor.value = page.nextCursor || ''
+    } catch (e) {
+      console.error('加载更多消息失败', e)
+    } finally {
+      messagesLoading.value = false
     }
-    saveSessions(botId, list)
-    notifySessions()
   }
+
+  // 切换 bot 时自动加载消息
+  watch(() => activeBotId.value, () => {
+    loadMessages()
+  })
 
   // ---- 发送消息（走后端 SSE 流式） ----
   const replying = ref(false)
@@ -150,66 +117,54 @@ export const useBotStore = defineStore('bot', () => {
     if (!activeBot.value || replying.value) return
     const botId = activeBotId.value
 
-    if (!activeSession.value) createSession()
+    // 乐观追加用户消息（后端异步保存，不需等待）
+    const userMsg = { id: uid(), role: 'user', content, createdAt: new Date().toISOString() }
+    messages.value = [...messages.value, userMsg]
 
-    const sess = activeSession.value
-    if (!sess) return
-
-    // 用户消息
-    sess.messages.push({ id: uid(), role: 'user', content })
-    if (sess.messages.length === 1) {
-      sess.title = content.slice(0, 18)
-    }
-    sess.updatedAt = Date.now()
-    _msgVersion.value++
-    saveSessions(botId, sessionsCache.value[botId])
-
-    // 流式 placeholder，逐字更新
-    const msgId = uid()
-    sess.messages.push({ id: msgId, role: 'assistant', content: '' })
-    _msgVersion.value++
-    saveSessions(botId, sessionsCache.value[botId])
+    // 追加 assistant placeholder
+    const assistantMsgId = uid()
+    const assistantMsg = { id: assistantMsgId, role: 'assistant', content: '', createdAt: new Date().toISOString() }
+    messages.value = [...messages.value, assistantMsg]
 
     replying.value = true
     chatApi.send(botId, content, (delta) => {
-      // onDelta 回调：追加文本到 assistant 消息
-      const idx = sess.messages.findIndex(x => x.id === msgId)
+      // onDelta: 找到 assistant message 并追加文本
+      const idx = messages.value.findIndex(m => m.id === assistantMsgId)
       if (idx < 0) return
-      const old = sess.messages[idx]
-      // splice 替换元素 + 版本号递增 → 强制 messages computed 重算 → 模板重渲染
-      sess.messages.splice(idx, 1, { ...old, content: old.content + delta })
-      _msgVersion.value++
-      // 流式期间防抖持久化，避免高频 localStorage 写入
-      saveSessionsDebounced(botId, sessionsCache.value[botId])
+      // 替换整个数组以确保 Vue 检测到变化（避免引用缓存问题）
+      const updated = [...messages.value]
+      updated[idx] = { ...updated[idx], content: updated[idx].content + delta }
+      messages.value = updated
     })
       .then((resp) => {
-        const idx = sess.messages.findIndex(x => x.id === msgId)
+        // 完成：用最终文本覆盖（确保一致性）
+        const idx = messages.value.findIndex(m => m.id === assistantMsgId)
         if (idx >= 0) {
-          sess.messages.splice(idx, 1, {
-            ...sess.messages[idx],
-            content: resp.text || sess.messages[idx].content,
+          const updated = [...messages.value]
+          updated[idx] = {
+            ...updated[idx],
+            content: resp.text || updated[idx].content,
             toolCalls: resp.toolCalls || []
-          })
-          _msgVersion.value++
+          }
+          messages.value = updated
         }
-        saveSessions(botId, sessionsCache.value[botId])
       })
       .catch(() => {
-        const idx = sess.messages.findIndex(x => x.id === msgId)
-        if (idx >= 0 && !sess.messages[idx].content) {
-          sess.messages.splice(idx, 1, { ...sess.messages[idx], content: '（回复失败，请稍后重试）' })
-          _msgVersion.value++
+        const idx = messages.value.findIndex(m => m.id === assistantMsgId)
+        if (idx >= 0 && !messages.value[idx].content) {
+          const updated = [...messages.value]
+          updated[idx] = { ...updated[idx], content: '（回复失败，请稍后重试）' }
+          messages.value = updated
         }
-        saveSessions(botId, sessionsCache.value[botId])
       })
       .finally(() => { replying.value = false })
   }
 
   return {
-    bots, loading, error, replying, activeBotId, activeSessionId,
-    activeBot, sessions, activeSession, messages,
-    fetchBots, selectBot, selectSession,
+    bots, loading, error, replying, activeBotId,
+    activeBot, messages, messagesLoading, hasMore,
+    fetchBots, selectBot,
     createBot, updateBot, deleteBot,
-    createSession, deleteSession, sendMessage
+    loadMessages, loadMoreMessages, sendMessage
   }
 })

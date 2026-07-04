@@ -7,7 +7,7 @@
   >
     <div class="chat-topbar" data-testid="chat-topbar">
       <div class="topbar-title" data-testid="chat-session-title">
-        {{ store.activeSession?.title || store.activeBot?.name || '对话' }}
+        {{ store.activeBot?.name || '对话' }}
       </div>
       <t-tag v-if="store.activeBot" theme="success" variant="light" data-testid="chat-bot-model">
         {{ store.activeBot.model }}
@@ -24,7 +24,7 @@
     >
       <SessionWorkflowPanel
         v-if="sessionWorkflowId"
-        :session-id="store.activeSessionId"
+        :session-id="store.activeBotId"
         :workflow-id="sessionWorkflowId"
       />
 
@@ -131,20 +131,11 @@ const userStore = useUserStore()
 const draft = ref('')
 const scrollRef = ref()
 
-// 直接使用 store 暴露的 messages（内含版本号追踪，支持流式更新）
+// 直接使用 store 的 messages（reactive ref，SSE 更新时自动触发重渲染）
 const messages = computed(() => store.messages)
 
-// 当前会话关联的工作流 id：
-// 真实接入后应由后端返回（session 创建工作流时下发），这里 mock 演示：
-// 优先取 session.workflowId，否则对带有「报告/调研/重构」等任务型标题的会话挂演示工作流 wf-1。
-const sessionWorkflowId = computed(() => {
-  const sess = store.activeSession
-  if (!sess) return ''
-  if (sess.workflowId) return sess.workflowId
-  const title = sess.title || ''
-  if (/报告|调研|重构|文案|整理|优化/.test(title)) return 'wf-1'
-  return ''
-})
+// 工作流（预留）
+const sessionWorkflowId = computed(() => '')
 
 const userInitial = computed(() => {
   const name = userStore.user?.nickname || userStore.user?.username || 'U'
@@ -164,10 +155,14 @@ function scrollToBottom() {
   })
 }
 
+// 消息列表长度变化时滚动到底部
 watch(() => messages.value.length, scrollToBottom)
-watch(() => store.activeSessionId, scrollToBottom)
-// 流式更新时滚动到底部（replying 变化 → 首次和结束时各触发一次）
+// bot 切换时滚动
+watch(() => store.activeBotId, scrollToBottom)
+// 流式更新时也滚动（replying 状态变化触发）
 watch(() => store.replying, scrollToBottom)
+// 消息内容变化时也需要滚动（流式追加）
+watch(messages, scrollToBottom, { deep: true })
 
 function send() {
   const text = draft.value.trim()
