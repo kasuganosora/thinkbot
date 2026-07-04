@@ -5,65 +5,40 @@
         <span class="cur-bot-avatar">{{ store.activeBot?.avatar }}</span>
         <span class="cur-bot-name" data-testid="session-current-bot">{{ store.activeBot?.name || '未选择 Bot' }}</span>
       </div>
-      <t-button theme="primary" variant="text" size="small" data-testid="session-create-btn" @click="store.createSession()">
-        <template #icon><t-icon name="add" /></template>
-        新会话
+      <t-button theme="primary" variant="text" size="small" data-testid="session-create-btn" @click="store.loadMessages()">
+        <template #icon><t-icon name="refresh" /></template>
+        刷新
       </t-button>
     </div>
 
-    <div class="session-list" data-testid="session-list" role="listbox" aria-label="会话列表">
-      <template v-if="store.sessions.length">
+    <div class="session-list" data-testid="session-list" role="listbox" aria-label="Bot 列表">
+      <template v-if="store.bots.length">
         <div
-          v-for="sess in store.sessions"
-          :key="sess.id"
+          v-for="bot in store.bots"
+          :key="bot.id"
           class="session-item"
-          :class="{ active: sess.id === store.activeSessionId }"
-          :data-testid="`session-item-${sess.id}`"
-          :data-session-title="sess.title"
+          :class="{ active: bot.id === store.activeBotId }"
+          :data-testid="`session-item-${bot.id}`"
           role="option"
-          :aria-selected="sess.id === store.activeSessionId"
-          @click="store.selectSession(sess.id)"
+          :aria-selected="bot.id === store.activeBotId"
+          @click="store.selectBot(bot.id)"
         >
-          <t-icon name="chat" class="sess-icon" />
+          <div class="sess-avatar">{{ bot.avatar || '🤖' }}</div>
           <div class="sess-body">
-            <div class="sess-title">{{ sess.title }}</div>
-            <div class="sess-time">{{ formatTime(sess.updatedAt) }}</div>
+            <div class="sess-title">{{ bot.name }}</div>
+            <div class="sess-time">{{ bot.running ? '运行中' : '已停止' }}</div>
           </div>
-          <t-icon name="delete" class="sess-del" data-testid="session-delete-btn" aria-label="删除会话" @click.stop="onDelete(sess)" />
         </div>
       </template>
-      <t-empty v-else description="暂无会话，点击「新会话」开始" style="margin-top: 40px" data-testid="session-empty-state" />
+      <t-empty v-else description="暂无 Bot" style="margin-top: 40px" data-testid="session-empty-state" />
     </div>
   </div>
 </template>
 
 <script setup>
-import { DialogPlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
 
 const store = useBotStore()
-
-function formatTime(ts) {
-  const d = new Date(ts)
-  const now = Date.now()
-  const diff = now - ts
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前`
-  return `${d.getMonth() + 1}/${d.getDate()}`
-}
-
-function onDelete(sess) {
-  const dlg = DialogPlugin.confirm({
-    header: '删除会话',
-    body: `确认删除会话「${sess.title}」？`,
-    theme: 'warning',
-    onConfirm: () => {
-      store.deleteSession(sess.id)
-      dlg.destroy()
-    }
-  })
-}
 </script>
 
 <style scoped>
@@ -119,8 +94,8 @@ function onDelete(sess) {
 .session-item.active {
   background: #e6f4ef;
 }
-.sess-icon {
-  color: #00a870;
+.sess-avatar {
+  font-size: 20px;
   flex-shrink: 0;
 }
 .sess-body {
@@ -138,16 +113,5 @@ function onDelete(sess) {
   font-size: 11px;
   color: #aaa;
   margin-top: 2px;
-}
-.sess-del {
-  opacity: 0;
-  color: #bbb;
-  transition: opacity 0.15s, color 0.15s;
-}
-.session-item:hover .sess-del {
-  opacity: 1;
-}
-.sess-del:hover {
-  color: #e34d59;
 }
 </style>
