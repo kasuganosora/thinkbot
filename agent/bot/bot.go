@@ -105,6 +105,7 @@ type BotParams struct {
 	ID               string
 	Name             string
 	Config           BotConfig
+	AgentConfig      AgentConfig // Per-bot agent 行为配置（compaction、工具过滤等）
 	Pipeline         *pipeline.Pipeline
 	Dispatcher       outbound.Dispatcher
 	Channels         []Channel
