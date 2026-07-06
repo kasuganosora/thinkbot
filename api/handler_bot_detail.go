@@ -358,32 +358,6 @@ type BotAccessRule struct {
 	Priority int    `json:"priority"`
 }
 
-// handleGetBotAccess 获取 Bot 访问控制配置。
-// GET /api/bots/:id/access
-func (s *Server) handleGetBotAccess(c *gin.Context) {
-	botID := c.Param("id")
-	cfg := s.getBotAccessConfig(botID)
-	OK(c, cfg)
-}
-
-// handleUpdateBotAccess 更新 Bot 访问控制配置。
-// PUT /api/bots/:id/access
-func (s *Server) handleUpdateBotAccess(c *gin.Context) {
-	botID := c.Param("id")
-
-	var req BotAccessConfig
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
-		return
-	}
-
-	if err := s.saveBotAccessConfig(c, botID, &req); err != nil {
-		Fail(c, err)
-		return
-	}
-	OK(c, nil)
-}
-
 // --- 文件管理 (Files) ---
 
 // BotFileEntry 文件/目录条目。
@@ -445,69 +419,6 @@ func (s *Server) handleBotFileUpload(c *gin.Context) {
 		return
 	}
 	OK(c, gin.H{"ok": true})
-}
-
-// --- 聊天节奏 (Chat Rhythm) ---
-
-// BotChatRhythm 聊天节奏配置。
-type BotChatRhythm struct {
-	Enabled       bool            `json:"enabled"`
-	Debounce      RhythmDebounce  `json:"debounce"`
-	Timing        RhythmTiming    `json:"timing"`
-	SpeakTendency float64         `json:"speakTendency"`
-	Interrupt     RhythmInterrupt `json:"interrupt"`
-	IdleComp      RhythmIdleComp  `json:"idleComp"`
-}
-
-// RhythmDebounce 防抖配置。
-type RhythmDebounce struct {
-	QuietWait int `json:"quietWait"`
-	MaxWait   int `json:"maxWait"`
-}
-
-// RhythmTiming 打字节奏配置。
-type RhythmTiming struct {
-	Enabled bool `json:"enabled"`
-}
-
-// RhythmInterrupt 打断控制配置。
-type RhythmInterrupt struct {
-	Enabled        bool `json:"enabled"`
-	MaxConsecutive int  `json:"maxConsecutive"`
-	MaxRounds      int  `json:"maxRounds"`
-}
-
-// RhythmIdleComp 空闲补偿配置。
-type RhythmIdleComp struct {
-	Enabled    bool `json:"enabled"`
-	IdleWindow int  `json:"idleWindow"`
-	MinIdle    int  `json:"minIdle"`
-}
-
-// handleGetBotRhythm 获取 Bot 聊天节奏配置。
-// GET /api/bots/:id/chat-rhythm
-func (s *Server) handleGetBotRhythm(c *gin.Context) {
-	botID := c.Param("id")
-	cfg := s.getBotRhythmConfig(botID)
-	OK(c, cfg)
-}
-
-// handleUpdateBotRhythm 更新 Bot 聊天节奏配置。
-// PUT /api/bots/:id/chat-rhythm
-func (s *Server) handleUpdateBotRhythm(c *gin.Context) {
-	botID := c.Param("id")
-
-	var req BotChatRhythm
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
-		return
-	}
-
-	if err := s.saveBotRhythmConfig(c, botID, &req); err != nil {
-		Fail(c, err)
-		return
-	}
-	OK(c, nil)
 }
 
 // --- 容器管理 (Container) ---
@@ -778,26 +689,6 @@ func (s *Server) saveBotMemoryEntries(c *gin.Context, botID string, entries []Bo
 	return s.store.Set(c.Request.Context(), botDetailKey(botID, "memory_entries"), string(data))
 }
 
-func (s *Server) getBotAccessConfig(botID string) *BotAccessConfig {
-	raw, ok := s.store.Get(botDetailKey(botID, "access"))
-	if !ok || raw == "" {
-		return &BotAccessConfig{Default: "allow", Rules: []BotAccessRule{}}
-	}
-	var cfg BotAccessConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return &BotAccessConfig{Default: "allow", Rules: []BotAccessRule{}}
-	}
-	if cfg.Rules == nil {
-		cfg.Rules = []BotAccessRule{}
-	}
-	return &cfg
-}
-
-func (s *Server) saveBotAccessConfig(c *gin.Context, botID string, cfg *BotAccessConfig) error {
-	data, _ := json.Marshal(cfg)
-	return s.store.Set(c.Request.Context(), botDetailKey(botID, "access"), string(data))
-}
-
 func (s *Server) getBotFileEntries(botID, path string) []BotFileEntry {
 	key := botDetailKey(botID, "files."+path)
 	raw, ok := s.store.Get(key)
@@ -850,30 +741,6 @@ func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, size in
 
 	data, _ := json.Marshal(entries)
 	return s.store.Set(c.Request.Context(), key, string(data))
-}
-
-func (s *Server) getBotRhythmConfig(botID string) *BotChatRhythm {
-	raw, ok := s.store.Get(botDetailKey(botID, "chat_rhythm"))
-	if !ok || raw == "" {
-		return &BotChatRhythm{
-			Enabled:       true,
-			Debounce:      RhythmDebounce{QuietWait: 2, MaxWait: 15},
-			Timing:        RhythmTiming{Enabled: true},
-			SpeakTendency: 0.7,
-			Interrupt:     RhythmInterrupt{Enabled: true, MaxConsecutive: 3, MaxRounds: 6},
-			IdleComp:      RhythmIdleComp{Enabled: true, IdleWindow: 60, MinIdle: 5},
-		}
-	}
-	var cfg BotChatRhythm
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return &BotChatRhythm{Enabled: true, SpeakTendency: 0.7}
-	}
-	return &cfg
-}
-
-func (s *Server) saveBotRhythmConfig(c *gin.Context, botID string, cfg *BotChatRhythm) error {
-	data, _ := json.Marshal(cfg)
-	return s.store.Set(c.Request.Context(), botDetailKey(botID, "chat_rhythm"), string(data))
 }
 
 func (s *Server) getBotContainerInfo(botID string) *BotContainerInfo {

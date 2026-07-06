@@ -647,10 +647,25 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		memStore = memory.NewMultiStore(filtered, repo)
 	}
 
+	// AgentConfig：读取 compaction 等运行时行为配置
+	var agentCfg bot.AgentConfig
+	if raw, ok := s.store.Get("bot." + id + ".detail.compaction"); ok && raw != "" {
+		var cc struct {
+			Enabled   bool `json:"enabled"`
+			Threshold int  `json:"threshold"`
+			Ratio     int  `json:"ratio"`
+		}
+		if err := json.Unmarshal([]byte(raw), &cc); err == nil && cc.Enabled {
+			enabled := true
+			agentCfg.CompactionEnabled = &enabled
+		}
+	}
+
 	b, err := bot.New(bot.BotParams{
 		ID:                id,
 		Name:              def.Name,
 		Config:            botCfg,
+		AgentConfig:       agentCfg,
 		Pipeline:          p,
 		Dispatcher:        dispatcher,
 		Channels:          allChannels,

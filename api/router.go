@@ -119,18 +119,10 @@ func (s *Server) registerRoutes() {
 				botsAdmin.PUT("/:id/platforms/:pid", s.handleUpdateBotPlatform)
 				botsAdmin.DELETE("/:id/platforms/:pid", s.handleDeleteBotPlatform)
 
-				// 访问控制
-				botsAdmin.GET("/:id/access", s.handleGetBotAccess)
-				botsAdmin.PUT("/:id/access", s.handleUpdateBotAccess)
-
 				// 文件管理
 				botsAdmin.GET("/:id/files", s.handleListBotFiles)
 				botsAdmin.POST("/:id/files/mkdir", s.handleBotFileMkdir)
 				botsAdmin.POST("/:id/files/upload", s.handleBotFileUpload)
-
-				// 聊天节奏
-				botsAdmin.GET("/:id/chat-rhythm", s.handleGetBotRhythm)
-				botsAdmin.PUT("/:id/chat-rhythm", s.handleUpdateBotRhythm)
 
 				// 容器管理
 				botsAdmin.GET("/:id/container", s.handleGetBotContainer)
@@ -149,7 +141,7 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/heartbeat/logs", s.handleListHeartbeatLogs)
 				botsAdmin.DELETE("/:id/heartbeat/logs", s.handleClearHeartbeatLogs)
 
-				// 上下文压缩
+				// 上下文压缩（agent memory compaction）
 				botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)
 				botsAdmin.PUT("/:id/compaction", s.handleUpdateBotCompaction)
 				botsAdmin.GET("/:id/compaction/history", s.handleGetBotCompactionHistory)
