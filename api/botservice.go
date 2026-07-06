@@ -164,11 +164,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return err
 	}
 
-	// 竞态修复：reserve 占位模式
+	// 如果已在运行，先停止再重启（支持 Channel/配置热更新）
 	s.mu.Lock()
+	if inst, exists := s.botInstances[id]; exists && inst != nil {
+		s.mu.Unlock()
+		s.StopBot(id)
+		// 重新获取锁
+		s.mu.Lock()
+	}
 	if _, exists := s.botInstances[id]; exists {
 		s.mu.Unlock()
-		return errs.Conflict("bot is already running")
+		return errs.Conflict("bot is already starting, please wait")
 	}
 	s.botInstances[id] = nil // 占位，防止并发启动
 	s.mu.Unlock()
