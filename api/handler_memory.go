@@ -82,7 +82,7 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 		return
 	}
 
-	// 构建响应
+	// 构建响应（TieredManager 自动记忆）
 	items := make([]gin.H, 0, len(entries))
 	for _, e := range entries {
 		items = append(items, gin.H{
@@ -95,6 +95,19 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 			"importance":   e.Importance,
 			"createdAt":    e.CreatedAt,
 			"lastAccessed": e.LastAccessedAt,
+		})
+	}
+
+	// 合并手动记忆条目（BotPlatforms 表单写入 config store）
+	manualEntries := s.getBotMemoryEntries(botID)
+	for _, me := range manualEntries {
+		items = append(items, gin.H{
+			"id":        me.ID,
+			"content":   me.Content,
+			"title":     me.Title,
+			"tier":      "manual",
+			"source":    "manual",
+			"createdAt": me.UpdatedAt,
 		})
 	}
 
