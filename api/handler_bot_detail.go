@@ -71,56 +71,10 @@ var botToolCatalog = []ToolCatalogGroup{
 	{Group: "Email", Tools: []string{"list_mail", "read_mail", "send_mail"}},
 }
 
-// 内置平台类型
-var platformTypes = []PlatformType{
-	{Type: "dingtalk", Name: "钉钉", Icon: "📨", Color: "#3b8fff", Fields: []PlatformField{
-		{Key: "clientId", Label: "Client ID", Type: "text"},
-		{Key: "clientSecret", Label: "Client Secret", Type: "password"},
-	}},
-	{Type: "discord", Name: "Discord", Icon: "🎮", Color: "#5865f2", Fields: []PlatformField{
-		{Key: "token", Label: "Bot Token", Type: "password"},
-	}},
-	{Type: "feishu", Name: "飞书", Icon: "🪶", Color: "#3370ff", Fields: []PlatformField{
-		{Key: "appId", Label: "App ID", Type: "text"},
-		{Key: "appSecret", Label: "App Secret", Type: "password"},
-	}},
-	{Type: "matrix", Name: "Matrix", Icon: "🌐", Color: "#0dbd8b", Fields: []PlatformField{
-		{Key: "homeserver", Label: "Homeserver", Type: "text", Placeholder: "https://matrix.org"},
-		{Key: "token", Label: "Access Token", Type: "password"},
-	}},
-	{Type: "qq", Name: "QQ", Icon: "🐧", Color: "#12b7f5", Fields: []PlatformField{
-		{Key: "appId", Label: "App ID", Type: "text"},
-		{Key: "clientSecret", Label: "Client Secret", Type: "password"},
-		{Key: "inputHint", Label: "Input Hint", Type: "switch", Optional: true, Help: "Send QQ input-notify hints for direct messages while the bot is processing."},
-		{Key: "markdown", Label: "Markdown Support", Type: "switch", Optional: true, Help: "Enable QQ markdown message mode for C2C and group replies when the bot has permission."},
-	}},
-	{Type: "slack", Name: "Slack", Icon: "💬", Color: "#611f69", Fields: []PlatformField{
-		{Key: "botToken", Label: "Bot Token", Type: "password", Placeholder: "xoxb-..."},
-	}},
-	{Type: "telegram", Name: "Telegram", Icon: "✈️", Color: "#2aabee", Fields: []PlatformField{
-		{Key: "token", Label: "Bot Token", Type: "password", Placeholder: "从 @BotFather 获取"},
-	}},
-	{Type: "wechat_mp", Name: "微信服务号", Icon: "🟢", Color: "#2dc100", Fields: []PlatformField{
-		{Key: "appId", Label: "App ID", Type: "text"},
-		{Key: "appSecret", Label: "App Secret", Type: "password"},
-	}},
-	{Type: "wecom", Name: "企业微信", Icon: "🏢", Color: "#2f90ea", Fields: []PlatformField{
-		{Key: "corpId", Label: "Corp ID", Type: "text"},
-		{Key: "corpSecret", Label: "Corp Secret", Type: "password"},
-	}},
-	{Type: "wechat", Name: "微信", Icon: "💚", Color: "#07c160", Fields: []PlatformField{
-		{Key: "token", Label: "Token", Type: "password"},
-	}},
-	{Type: "misskey", Name: "Misskey", Icon: "🟩", Color: "#86b300", Fields: []PlatformField{
-		{Key: "token", Label: "Access Token", Type: "password"},
-		{Key: "instanceUrl", Label: "Instance URL", Type: "text", Help: "Misskey instance URL (e.g. https://misskey.io)", Placeholder: "https://misskey.io"},
-	}},
-}
-
-// handleBotToolCatalog 返回工具目录和平台类型。
+// handleBotToolCatalog 返回工具目录和平台类型（统一来自 channel_registry）。
 // GET /api/bots/platforms/tool-catalog
 func (s *Server) handleBotToolCatalog(c *gin.Context) {
-	OK(c, gin.H{"catalog": botToolCatalog, "types": platformTypes})
+	OK(c, gin.H{"catalog": botToolCatalog, "types": SupportedPlatformTypes()})
 }
 
 // handleListBotPlatforms 列出 Bot 绑定的平台。
