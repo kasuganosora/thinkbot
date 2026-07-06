@@ -464,6 +464,39 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("channel created", "type", cd.Type, "name", cd.Name)
 	}
 
+	// 从 config store 加载平台配置（前端 BotPlatforms 组件写入），也实例化为 Channel
+	var platforms []struct {
+		ID      string         `json:"id"`
+		Type    string         `json:"type"`
+		Name    string         `json:"name"`
+		Enabled bool           `json:"enabled"`
+		Config  map[string]any `json:"config"`
+	}
+	if raw, ok := s.store.Get("bot." + id + ".detail.platforms"); ok && raw != "" {
+		_ = json.Unmarshal([]byte(raw), &platforms)
+	}
+	for _, p := range platforms {
+		if !p.Enabled {
+			continue
+		}
+		configJSON, _ := json.Marshal(p.Config)
+		cd := dao.ChannelDefinition{
+			BotID:   id,
+			Name:    p.Name,
+			Type:    p.Type,
+			Config:  string(configJSON),
+			Enabled: true,
+		}
+		ch, err := s.createChannel(cd)
+		if err != nil {
+			s.logger.Warnw("failed to create platform channel, skipping",
+				"platform_id", p.ID, "type", p.Type, "err", err)
+			continue
+		}
+		allChannels = append(allChannels, ch)
+		s.logger.Infow("platform channel created", "type", p.Type, "name", p.Name)
+	}
+
 	// 注册 Channel 专属工具（每个 Channel 实现 ChannelToolProvider 接口）
 	// 通过闭包持有 Channel API 客户端，支持跨 Channel 工具调用
 	for _, ch := range allChannels {
