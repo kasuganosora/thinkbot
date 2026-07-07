@@ -314,67 +314,8 @@ function maskKey(k) {
   return k.slice(0, 6) + '...' + k.slice(-4)
 }
 
-// ============================ 5. Channel ============================
-
-export const channelApi = {
-  list(botId) {
-    if (USE_MOCK) return mockResolve(() => db().channels.filter(c => c.botId === botId).map(c => ({ ...c })))
-    return request('GET', `/api/bots/${botId}/channels`)
-  },
-  create(botId, payload) {
-    // payload: {name,type,config}
-    if (USE_MOCK) {
-      return mockResolve(() => {
-        const c = { id: ++_seq, botId, enabled: true, createdAt: nowISO(), updatedAt: nowISO(), ...payload }
-        db().channels.push(c)
-        saveDB()
-        return { ...c }
-      })
-    }
-    return request('POST', `/api/bots/${botId}/channels`, payload)
-  },
-  update(botId, cid, payload) {
-    // payload: {name?,config?,enabled?}
-    if (USE_MOCK) {
-      return mockResolve(() => { const c = db().channels.find(x => x.id === cid); Object.assign(c, payload, { updatedAt: nowISO() }); saveDB(); return null })
-    }
-    return request('PUT', `/api/bots/${botId}/channels/${cid}`, payload)
-  },
-  remove(botId, cid) {
-    if (USE_MOCK) {
-      return mockResolve(() => { const l = db().channels; const i = l.findIndex(x => x.id === cid); if (i > -1) l.splice(i, 1); saveDB(); return null })
-    }
-    return request('DELETE', `/api/bots/${botId}/channels/${cid}`)
-  },
-  // GET /api/channels/types → { types: [...] }
-  types() {
-    if (USE_MOCK) return mockResolve(() => CHANNEL_TYPES)
-    return request('GET', '/api/channels/types')
-  }
-}
-
-const CHANNEL_TYPES = {
-  types: [
-    {
-      type: 'telegram', displayName: 'Telegram', description: 'Telegram Bot 接入', icon: 'telegram',
-      fields: [
-        { key: 'token', label: 'Bot Token', type: 'password', required: true, helpText: '从 @BotFather 获取' },
-        { key: 'pollTimeout', label: '轮询超时(秒)', type: 'number', required: false, default: '30' },
-        { key: 'apiBaseUrl', label: 'API Base URL', type: 'string', required: false },
-        { key: 'parseMode', label: '解析模式', type: 'select', required: false, default: '', options: ['', 'HTML', 'MarkdownV2'] },
-        { key: 'allowedUpdates', label: '允许的更新类型', type: 'string', required: false }
-      ]
-    },
-    {
-      type: 'misskey', displayName: 'Misskey', description: 'Misskey 实例接入', icon: 'misskey',
-      fields: [
-        { key: 'host', label: '实例域名', type: 'string', required: true, helpText: '如 misskey.io' },
-        { key: 'token', label: 'Access Token', type: 'password', required: true },
-        { key: 'subscribeTimeline', label: '订阅时间线', type: 'boolean', required: false, default: 'true' }
-      ]
-    }
-  ]
-}
+// ============================ 5. Channel — 已废弃，统一使用 botPlatformApi ============================
+// channelApi 已移除，平台管理统一使用 botPlatformApi（/api/bots/:id/platforms）
 
 // ============================ 6. 定时任务（cron.Job，snake_case） ============================
 

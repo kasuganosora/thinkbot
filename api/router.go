@@ -107,11 +107,8 @@ func (s *Server) registerRoutes() {
 				botsAdmin.DELETE("/:id/memory/:mid", s.handleDeleteBotMemoryEntry)
 				botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
 
-				// Channel 配置管理（嵌套在 Bot 下）
-				botsAdmin.GET("/:id/channels", s.handleListChannels)
-				botsAdmin.POST("/:id/channels", s.handleCreateChannel)
-				botsAdmin.PUT("/:id/channels/:cid", s.handleUpdateChannel)
-				botsAdmin.DELETE("/:id/channels/:cid", s.handleDeleteChannel)
+				// Channel 配置管理 — 已废弃，统一使用 Platform API（/api/bots/:id/platforms）
+				// 旧 Channel API 路由已移除
 
 				// 平台管理（嵌套在 Bot 下）
 				botsAdmin.GET("/:id/platforms", s.handleListBotPlatforms)
@@ -163,8 +160,8 @@ func (s *Server) registerRoutes() {
 			}
 		}
 
-		// Channel 类型列表（所有登录用户可见，驱动前端表单）
-		authed.GET("/channels/types", s.handleListChannelTypes)
+		// Channel 类型列表 — 已废弃，平台类型信息统一通过 /api/bots/platforms/tool-catalog 获取
+		// authed.GET("/channels/types", s.handleListChannelTypes)
 
 		// 平台工具目录（所有登录用户可见，驱动 Bot 详情面板）
 		authed.GET("/bots/platforms/tool-catalog", s.handleBotToolCatalog)

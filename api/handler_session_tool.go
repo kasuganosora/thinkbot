@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -75,32 +74,25 @@ func (s *Server) handleSessionTerminalExec(c *gin.Context) {
 }
 
 // --- 文件浏览 API ---
+// Session Files 代理到 Bot Files — 通过 session 对应的 bot 查找实际文件数据。
+// 如果 session 无法映射到 bot，返回空列表。
 
-// FileEntry 文件条目。
-type FileEntry struct {
-	Name  string    `json:"name"`
-	Type  string    `json:"type"` // "dir" | "file"
-	Size  int64     `json:"size"`
-	Mtime time.Time `json:"mtime"`
-}
-
-// handleSessionFiles 列出会话工作区文件。
+// handleSessionFiles 列出会话工作区文件（代理到 Bot 文件存储）。
 // GET /api/sessions/:sid/files?path=/
 func (s *Server) handleSessionFiles(c *gin.Context) {
 	sid := c.Param("sid")
 	path := c.DefaultQuery("path", "/")
 
-	files := s.getSessionFiles(sid, path)
+	// session ID 即 bot ID（当前设计下 session 与 bot 1:1 映射）
+	entries := s.getBotFileEntries(sid, path)
 	OK(c, gin.H{
 		"path":    path,
-		"entries": files,
+		"entries": entries,
 	})
 }
 
-// handleSessionFileMkdir 在会话工作区创建目录。
+// handleSessionFileMkdir 在会话工作区创建目录（代理到 Bot 文件存储）。
 // POST /api/sessions/:sid/files/mkdir
-//
-// 请求体: { "path": "/workspace", "name": "new_dir" }
 func (s *Server) handleSessionFileMkdir(c *gin.Context) {
 	sid := c.Param("sid")
 	var req struct {
@@ -112,14 +104,16 @@ func (s *Server) handleSessionFileMkdir(c *gin.Context) {
 		return
 	}
 
+	if err := s.botFileMkdir(c, sid, req.Path, req.Name); err != nil {
+		Fail(c, err)
+		return
+	}
 	auditLog(c, s.logger, "session_file_mkdir", "session", sid, "path", req.Path, "name", req.Name)
 	OK(c, gin.H{"ok": true})
 }
 
-// handleSessionFileUpload 上传文件到会话工作区。
+// handleSessionFileUpload 上传文件到会话工作区（代理到 Bot 文件存储）。
 // POST /api/sessions/:sid/files/upload
-//
-// 请求体: { "path": "/workspace", "name": "file.txt", "size": 1024 }
 func (s *Server) handleSessionFileUpload(c *gin.Context) {
 	sid := c.Param("sid")
 	var req struct {
@@ -132,6 +126,10 @@ func (s *Server) handleSessionFileUpload(c *gin.Context) {
 		return
 	}
 
+	if err := s.botFileUpload(c, sid, req.Path, req.Name, req.Size); err != nil {
+		Fail(c, err)
+		return
+	}
 	auditLog(c, s.logger, "session_file_upload", "session", sid, "path", req.Path, "name", req.Name, "size", req.Size)
 	OK(c, gin.H{"ok": true})
 }
@@ -194,23 +192,7 @@ func (s *Server) getSessionTerminalState(sid string) TerminalState {
 	return state
 }
 
-func (s *Server) getSessionFiles(sid, path string) []FileEntry {
-	key := sessionToolKey(sid, "files")
-	raw, ok := s.store.Get(key)
-	if !ok || raw == "" {
-		return []FileEntry{}
-	}
-	// 存储为 map[path][]FileEntry
-	var fileMap map[string][]FileEntry
-	if err := json.Unmarshal([]byte(raw), &fileMap); err != nil {
-		return []FileEntry{}
-	}
-	entries, ok := fileMap[path]
-	if !ok {
-		return []FileEntry{}
-	}
-	return entries
-}
+// getSessionFiles 已废弃 — Session Files 现在代理到 Bot Files（getBotFileEntries）。
 
 func (s *Server) getSessionStatus(sid string) SessionToolStatus {
 	raw, ok := s.store.Get(sessionToolKey(sid, "status"))
