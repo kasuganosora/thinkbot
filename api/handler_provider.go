@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -94,7 +96,7 @@ type AddModelReq struct {
 	Capabilities  []string `json:"capabilities"`
 	ContextLength int      `json:"contextLength"`
 	Multimodal    bool     `json:"multimodal"`
-	Temperature   float64  `json:"temperature"`
+	Temperature   *float64 `json:"temperature"` // 指针类型区分"未设置"和"显式设0"
 	MaxTokens     int      `json:"maxTokens"`
 }
 
@@ -258,8 +260,8 @@ func (s *Server) handleUpdateProvider(c *gin.Context) {
 	if req.BaseURL != nil {
 		def.BaseURL = *req.BaseURL
 	}
-	if req.APIKey != nil && *req.APIKey != "" {
-		def.APIKey = *req.APIKey
+	if req.APIKey != nil {
+		def.APIKey = *req.APIKey // 允许传空字符串来清空 API Key
 	}
 	if req.Enabled != nil {
 		def.Enabled = *req.Enabled
@@ -351,9 +353,9 @@ func (s *Server) handleAddModel(c *gin.Context) {
 	if caps == nil {
 		caps = []string{"chat"}
 	}
-	temp := req.Temperature
-	if temp == 0 {
-		temp = 0.7
+	temp := 0.7 // 默认值
+	if req.Temperature != nil {
+		temp = *req.Temperature // 尊重用户显式设置（包括 0）
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -496,6 +498,7 @@ func (s *Server) handleImportModels(c *gin.Context) {
 // --- 辅助函数 ---
 
 // generateProviderID 从名称生成 Provider ID（小写 + 去空格）。
+// 非 ASCII 名称（如中文）会回退到 "provider-<timestamp>" 避免 ID 冲突。
 func generateProviderID(name string) string {
 	id := strings.ToLower(strings.TrimSpace(name))
 	id = strings.ReplaceAll(id, " ", "-")
@@ -508,12 +511,14 @@ func generateProviderID(name string) string {
 	}
 	result := b.String()
 	if result == "" {
-		result = "provider"
+		// 非 ASCII 名称回退：使用 "provider-" + 时间戳避免冲突
+		result = "provider-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return result
 }
 
 // generateModelID 从模型名称生成 ID（小写 + 去空格）。
+// 非 ASCII 名称回退到 "model-<timestamp>" 避免 ID 冲突。
 func generateModelID(name string) string {
 	id := strings.ToLower(strings.TrimSpace(name))
 	id = strings.ReplaceAll(id, " ", "-")
@@ -525,7 +530,7 @@ func generateModelID(name string) string {
 	}
 	result := b.String()
 	if result == "" {
-		result = "model"
+		result = "model-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	return result
 }

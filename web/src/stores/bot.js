@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { botApi, chatApi } from '@/api/services'
 
 let idSeed = Date.now()
-const uid = () => `msg_${++idSeed}`
+const uid = () => `_tmp_${++idSeed}`
 
 export const useBotStore = defineStore('bot', () => {
   const bots = ref([])
@@ -11,13 +11,19 @@ export const useBotStore = defineStore('bot', () => {
   const error = ref(null)
   const activeBotId = ref('')
 
-  // 消息列表 — 完全来自后端，不用 localStorage
+  // ---- 消息 ----
+  // 完全来自后端，不用 localStorage
   const messages = ref([])
   const messagesLoading = ref(false)
   const hasMore = ref(false)
   const nextCursor = ref('')
 
-  // ---- 初始化：从后端加载 Bot 列表 ----
+  // SSE 流式状态
+  const replying = ref(false)
+  // 当前正在流式的 SSE AbortController（用于取消）
+  let _abortController = null
+
+  // ---- Bot 列表 ----
   async function fetchBots() {
     loading.value = true
     error.value = null
@@ -33,11 +39,11 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
-  // ---- 计算属性 ----
   const activeBot = computed(() => bots.value.find(b => b.id === activeBotId.value))
 
-  // ---- Bot 操作 ----
   function selectBot(id) {
+    // 切换 bot 时中止进行中的 SSE
+    _abortStreaming()
     activeBotId.value = id
   }
 
@@ -65,7 +71,7 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
-  // ---- 消息加载（从后端） ----
+  // ---- 消息加载（从后端 API） ----
   async function loadMessages() {
     const botId = activeBotId.value
     if (!botId) {
@@ -75,7 +81,7 @@ export const useBotStore = defineStore('bot', () => {
     messagesLoading.value = true
     try {
       const page = await chatApi.history(botId)
-      // 后端返回倒序（最新在前），前端显示需要正序（旧在前）
+      // 后端返回倒序（最新在前），前端需要正序（旧在前）
       messages.value = (page.messages || []).reverse()
       hasMore.value = page.hasMore || false
       nextCursor.value = page.nextCursor || ''
@@ -87,7 +93,6 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
-  // 加载更早的消息（上滑加载更多）
   async function loadMoreMessages() {
     const botId = activeBotId.value
     if (!botId || !hasMore.value || messagesLoading.value) return
@@ -105,59 +110,90 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
-  // 切换 bot 时自动加载消息
+  // 切换 bot 时重新加载消息
   watch(() => activeBotId.value, () => {
     loadMessages()
   })
 
-  // ---- 发送消息（走后端 SSE 流式） ----
-  const replying = ref(false)
+  // ---- 中止流式 ----
+  function _abortStreaming() {
+    if (_abortController) {
+      _abortController.abort()
+      _abortController = null
+    }
+    replying.value = false
+  }
 
+  // ---- 发送消息 ----
   function sendMessage(content) {
     if (!activeBot.value || replying.value) return
     const botId = activeBotId.value
 
-    // 乐观追加用户消息（后端异步保存，不需等待）
-    const userMsg = { id: uid(), role: 'user', content, createdAt: new Date().toISOString() }
+    // 1) 乐观追加用户消息（后端异步保存，不等待）
+    const userTmpId = uid()
+    const userMsg = {
+      id: userTmpId,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString(),
+      _temp: true // 标记为临时消息
+    }
     messages.value = [...messages.value, userMsg]
 
-    // 追加 assistant placeholder
-    const assistantMsgId = uid()
-    const assistantMsg = { id: assistantMsgId, role: 'assistant', content: '', createdAt: new Date().toISOString() }
+    // 2) 追加 assistant 占位
+    const assistantTmpId = uid()
+    const assistantMsg = {
+      id: assistantTmpId,
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      _temp: true
+    }
     messages.value = [...messages.value, assistantMsg]
 
+    // 3) 启动 SSE 流式请求
     replying.value = true
+    _abortController = new AbortController()
+
     chatApi.send(botId, content, (delta) => {
-      // onDelta: 找到 assistant message 并追加文本
-      const idx = messages.value.findIndex(m => m.id === assistantMsgId)
+      // SSE text_delta：追加文本到 assistant 占位消息
+      const idx = messages.value.findIndex(m => m.id === assistantTmpId)
       if (idx < 0) return
-      // 替换整个数组以确保 Vue 检测到变化（避免引用缓存问题）
       const updated = [...messages.value]
       updated[idx] = { ...updated[idx], content: updated[idx].content + delta }
       messages.value = updated
-    })
+    }, _abortController.signal)
       .then((resp) => {
-        // 完成：用最终文本覆盖（确保一致性）
-        const idx = messages.value.findIndex(m => m.id === assistantMsgId)
-        if (idx >= 0) {
-          const updated = [...messages.value]
-          updated[idx] = {
-            ...updated[idx],
-            content: resp.text || updated[idx].content,
-            toolCalls: resp.toolCalls || []
+        // SSE 完成：一次性更新 assistant 最终文本 + user 标记为非临时
+        const updated = [...messages.value]
+        const aIdx = updated.findIndex(m => m.id === assistantTmpId)
+        if (aIdx >= 0) {
+          updated[aIdx] = {
+            ...updated[aIdx],
+            content: resp.text || updated[aIdx].content,
+            toolCalls: resp.toolCalls || [],
+            _temp: false
           }
-          messages.value = updated
         }
+        const uIdx = updated.findIndex(m => m.id === userTmpId)
+        if (uIdx >= 0) {
+          updated[uIdx] = { ...updated[uIdx], _temp: false }
+        }
+        messages.value = updated
       })
-      .catch(() => {
-        const idx = messages.value.findIndex(m => m.id === assistantMsgId)
+      .catch((err) => {
+        if (err?.name === 'AbortError') return // 用户主动取消
+        const idx = messages.value.findIndex(m => m.id === assistantTmpId)
         if (idx >= 0 && !messages.value[idx].content) {
           const updated = [...messages.value]
-          updated[idx] = { ...updated[idx], content: '（回复失败，请稍后重试）' }
+          updated[idx] = { ...updated[idx], content: '（回复失败，请稍后重试）', _temp: false }
           messages.value = updated
         }
       })
-      .finally(() => { replying.value = false })
+      .finally(() => {
+        replying.value = false
+        _abortController = null
+      })
   }
 
   return {

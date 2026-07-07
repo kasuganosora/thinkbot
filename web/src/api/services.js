@@ -861,9 +861,12 @@ export const chatApi = {
   /**
    * 发送消息，走 SSE 流式响应。
    * 返回 Promise<{traceId, text, toolCalls[]}>。
-   * 可选 onDelta(textChunk) 回调支持逐字显示。
+   * @param {string} botId
+   * @param {string} text
+   * @param {(chunk: string) => void} [onDelta] 逐字显示回调
+   * @param {AbortSignal} [signal] 可选的取消信号
    */
-  async send(botId, text, onDelta) {
+  async send(botId, text, onDelta, signal) {
     if (USE_MOCK) {
       const bot = db().bots.find(b => b.id === botId)
       return mockResolve(() => {
@@ -885,7 +888,8 @@ export const chatApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ botId, text })
+      body: JSON.stringify({ botId, text }),
+      signal
     })
     if (!response.ok) {
       const err = new Error(`HTTP ${response.status}`)
