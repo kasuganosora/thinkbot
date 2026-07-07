@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/agent/heartbeat"
 	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
@@ -34,15 +35,16 @@ type Server struct {
 	addr    string
 
 	// 依赖
-	authSvc     *auth.AuthService
-	botSvc      *BotService
-	cookie      *CookieManager
-	chatHistory *ChatHistoryService
-	store       *config.Store
-	db          *gorm.DB
-	workflowSvc *WorkflowService
-	skillMgr    *skill.SkillManager
-	bindSvc     *identity.BindService
+	authSvc        *auth.AuthService
+	botSvc         *BotService
+	cookie         *CookieManager
+	chatHistory    *ChatHistoryService
+	store          *config.Store
+	db             *gorm.DB
+	workflowSvc    *WorkflowService
+	skillMgr       *skill.SkillManager
+	bindSvc        *identity.BindService
+	heartbeatStore *heartbeat.Store
 }
 
 // NewServer 创建并配置 Gin Server。
@@ -78,19 +80,20 @@ func NewServer(
 	engine.Use(corsMiddleware(corsOrigins))
 
 	s := &Server{
-		engine:      engine,
-		httpSrv:     &http.Server{Addr: addr, Handler: engine},
-		logger:      logger.With("component", "api_server"),
-		addr:        addr,
-		authSvc:     authSvc,
-		botSvc:      botSvc,
-		cookie:      cookie,
-		chatHistory: chatHistory,
-		store:       store,
-		db:          db,
-		workflowSvc: workflowSvc,
-		skillMgr:    skillMgr,
-		bindSvc:     bindSvc,
+		engine:         engine,
+		httpSrv:        &http.Server{Addr: addr, Handler: engine},
+		logger:         logger.With("component", "api_server"),
+		addr:           addr,
+		authSvc:        authSvc,
+		botSvc:         botSvc,
+		cookie:         cookie,
+		chatHistory:    chatHistory,
+		store:          store,
+		db:             db,
+		workflowSvc:    workflowSvc,
+		skillMgr:       skillMgr,
+		bindSvc:        bindSvc,
+		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
 	}
 
 	// 注册所有路由

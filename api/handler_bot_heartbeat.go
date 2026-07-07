@@ -11,6 +11,7 @@ import (
 // Bot 心跳管理 Handler
 //
 // 每个 Bot 独立管理心跳配置和日志，存储在 data/heartbeat/{botId}/。
+// heartbeatStore 已迁移为 Server 字段，由 NewServer 注入，与 NewBundle 共享同一数据目录。
 //
 // 路由：
 //   GET    /api/bots/:id/heartbeat       → 获取心跳配置
@@ -19,14 +20,11 @@ import (
 //   DELETE /api/bots/:id/heartbeat/logs  → 清空心跳日志
 // ============================================================================
 
-// heartbeatStore 是全局共享的心跳存储实例（惰性初始化）。
-var heartbeatStore = heartbeat.NewStore("data/heartbeat")
-
 // handleGetHeartbeatConfig 获取 Bot 心跳配置。
 func (s *Server) handleGetHeartbeatConfig(c *gin.Context) {
 	botID := c.Param("id")
 
-	cfg, err := heartbeatStore.LoadConfig(botID)
+	cfg, err := s.heartbeatStore.LoadConfig(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "load heartbeat config"))
 		return
@@ -52,7 +50,7 @@ func (s *Server) handleUpdateHeartbeatConfig(c *gin.Context) {
 	}
 
 	// 加载现有配置
-	cfg, err := heartbeatStore.LoadConfig(botID)
+	cfg, err := s.heartbeatStore.LoadConfig(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "load heartbeat config"))
 		return
@@ -77,7 +75,7 @@ func (s *Server) handleUpdateHeartbeatConfig(c *gin.Context) {
 	}
 
 	// 保存
-	if err := heartbeatStore.SaveConfig(botID, cfg); err != nil {
+	if err := s.heartbeatStore.SaveConfig(botID, cfg); err != nil {
 		Fail(c, errs.Wrap(err, "save heartbeat config"))
 		return
 	}
@@ -93,16 +91,19 @@ func (s *Server) handleListHeartbeatLogs(c *gin.Context) {
 	botID := c.Param("id")
 	status := c.DefaultQuery("status", "all")
 
-	store, err := heartbeatStore.LoadLogs(botID)
+	logStore, err := s.heartbeatStore.LoadLogs(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "load heartbeat logs"))
 		return
 	}
 
-	logs := store.Logs
+	allLogs := logStore.Logs
+	totalHistory := len(allLogs) // 历史总数（滚动窗口内）
+
+	logs := allLogs
 	if status != "" && status != "all" {
-		filtered := make([]heartbeat.Log, 0, len(logs))
-		for _, l := range logs {
+		filtered := make([]heartbeat.Log, 0, len(allLogs))
+		for _, l := range allLogs {
 			if l.Status == status {
 				filtered = append(filtered, l)
 			}
@@ -112,7 +113,8 @@ func (s *Server) handleListHeartbeatLogs(c *gin.Context) {
 
 	OK(c, gin.H{
 		"logs":  logs,
-		"total": len(logs),
+		"total": totalHistory, // 历史总数
+		"count": len(logs),    // 当前过滤后条数
 	})
 }
 
@@ -120,7 +122,7 @@ func (s *Server) handleListHeartbeatLogs(c *gin.Context) {
 func (s *Server) handleClearHeartbeatLogs(c *gin.Context) {
 	botID := c.Param("id")
 
-	if err := heartbeatStore.ClearLogs(botID); err != nil {
+	if err := s.heartbeatStore.ClearLogs(botID); err != nil {
 		Fail(c, errs.Wrap(err, "clear heartbeat logs"))
 		return
 	}

@@ -204,19 +204,23 @@ function renameBot() {
 
 async function saveBasic() {
   const f = form.value
-  await botApi.update(f.id, {
-    name: f.name, avatar: f.avatar, description: f.desc,
-    llmMain: f.llmMain, llmLight: f.llmLight, temperature: f.temperature,
-    maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort
-  }).catch(() => {})
-  store.updateBot(f.id, {
-    name: f.name, avatar: f.avatar, description: f.desc,
-    temperature: f.temperature,
-    llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
-    workers: f.workers, reasoningEffort: f.reasoningEffort
-  })
-  bot.value.name = f.name
-  MessagePlugin.success('Bot 设置已保存')
+  try {
+    await botApi.update(f.id, {
+      name: f.name, avatar: f.avatar, description: f.desc,
+      llmMain: f.llmMain, llmLight: f.llmLight, temperature: f.temperature,
+      maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort
+    })
+    store.updateBot(f.id, {
+      name: f.name, avatar: f.avatar, description: f.desc,
+      temperature: f.temperature,
+      llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
+      workers: f.workers, reasoningEffort: f.reasoningEffort
+    })
+    bot.value.name = f.name
+    MessagePlugin.success('Bot 设置已保存')
+  } catch (e) {
+    MessagePlugin.error('保存失败：' + (e.message || '请稍后重试'))
+  }
 }
 
 const toggling = ref(false)

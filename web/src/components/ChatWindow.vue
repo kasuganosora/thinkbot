@@ -120,7 +120,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch, onUnmounted } from 'vue'
 import { useBotStore } from '@/stores/bot'
 import { useUserStore } from '@/stores/user'
 import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
@@ -159,10 +159,28 @@ function scrollToBottom() {
 watch(() => messages.value.length, scrollToBottom)
 // bot 切换时滚动
 watch(() => store.activeBotId, scrollToBottom)
-// 流式更新时也滚动（replying 状态变化触发）
-watch(() => store.replying, scrollToBottom)
-// 消息内容变化时也需要滚动（流式追加）
-watch(messages, scrollToBottom, { deep: true })
+// 流式期间持续滚动（通过 replying 状态变化 + messages 引用变化）
+watch(() => store.replying, (val) => {
+  if (val) {
+    // 流式开始：启动定时滚动
+    _scrollTimer = setInterval(scrollToBottom, 200)
+  } else {
+    // 流式结束：停止定时滚动，做一次最终滚动
+    clearInterval(_scrollTimer)
+    _scrollTimer = null
+    scrollToBottom()
+  }
+})
+
+let _scrollTimer = null
+
+// 组件卸载时清理定时器，防止内存泄漏
+onUnmounted(() => {
+  if (_scrollTimer) {
+    clearInterval(_scrollTimer)
+    _scrollTimer = null
+  }
+})
 
 function send() {
   const text = draft.value.trim()
