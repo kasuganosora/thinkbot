@@ -445,26 +445,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 创建 WebChannel（始终自动添加）
 	webCh := NewWebChannel("web-"+id, id)
 
-	// 从 DB 加载已启用的 Channel 定义并实例化
-	channelDefs, err := s.ListEnabledChannelDefinitions(id)
-	if err != nil {
-		rollback()
-		return errs.Wrap(err, "bot_service: load channel definitions")
-	}
-
-	allChannels := []bot.Channel{webCh}
-	for _, cd := range channelDefs {
-		ch, err := s.createChannel(cd)
-		if err != nil {
-			s.logger.Warnw("failed to create channel, skipping",
-				"channel_def_id", cd.ID, "type", cd.Type, "err", err)
-			continue
-		}
-		allChannels = append(allChannels, ch)
-		s.logger.Infow("channel created", "type", cd.Type, "name", cd.Name)
-	}
-
-	// 从 config store 加载平台配置（前端 BotPlatforms 组件写入），也实例化为 Channel
+	// 从 config store 加载平台配置（前端 BotPlatforms 组件写入）并实例化为 Channel
+	// 注意：旧的 DB ChannelDefinition 路径已废弃，统一使用 Platform API 管理
 	var platforms []struct {
 		ID      string         `json:"id"`
 		Type    string         `json:"type"`
@@ -475,6 +457,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if raw, ok := s.store.Get("bot." + id + ".detail.platforms"); ok && raw != "" {
 		_ = json.Unmarshal([]byte(raw), &platforms)
 	}
+
+	allChannels := []bot.Channel{webCh}
 	for _, p := range platforms {
 		if !p.Enabled {
 			continue

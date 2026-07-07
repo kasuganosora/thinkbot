@@ -8,6 +8,10 @@ import (
 
 // ============================================================================
 // Channel 管理 Handler — CRUD + 类型列表
+//
+// Deprecated: Channel API 已废弃，平台管理统一使用 Platform API
+// （/api/bots/:id/platforms，handler_bot_detail.go）。
+// 此文件中的 handler 不再注册路由，保留仅供内部服务方法引用。
 // ============================================================================
 
 // handleListChannelTypes 返回系统支持的 Channel 类型及其字段 schema。
