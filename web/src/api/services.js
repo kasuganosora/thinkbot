@@ -1041,48 +1041,20 @@ const BOT_TOOL_CATALOG = [
   { group: 'Email', tools: ['list_mail', 'read_mail', 'send_mail'] }
 ]
 
+// mock 模式下的平台类型，需与后端 channel_registry.go 保持一致：
+// 仅包含后端 channel/ 目录已实现的平台（telegram、misskey）。
 const PLATFORM_TYPES = [
-  { type: 'dingtalk', name: '钉钉', icon: '📨', color: '#3b8fff', fields: [
-    { key: 'clientId', label: 'Client ID', type: 'text', placeholder: '' },
-    { key: 'clientSecret', label: 'Client Secret', type: 'password', placeholder: '' }
+  { type: 'telegram', name: 'Telegram', description: '通过 Telegram Bot API 接收用户消息，使用 long polling 方式。', icon: 'telegram', color: '#2aabee', fields: [
+    { key: 'token', label: 'Bot Token', type: 'password', help: '从 @BotFather 获取' },
+    { key: 'pollTimeout', label: 'Long Polling 超时（秒）', type: 'number', placeholder: '30' },
+    { key: 'apiBaseUrl', label: 'API 反代地址', type: 'text', help: '无法直连 api.telegram.org 时填写' },
+    { key: 'parseMode', label: '消息格式化模式', type: 'select', options: ['', 'HTML', 'MarkdownV2'] },
+    { key: 'allowedUpdates', label: '接收的更新类型', type: 'text', placeholder: 'message,edited_message', help: '逗号分隔' }
   ] },
-  { type: 'discord', name: 'Discord', icon: '🎮', color: '#5865f2', fields: [
-    { key: 'token', label: 'Bot Token', type: 'password', placeholder: '' }
-  ] },
-  { type: 'feishu', name: '飞书', icon: '🪶', color: '#3370ff', fields: [
-    { key: 'appId', label: 'App ID', type: 'text', placeholder: '' },
-    { key: 'appSecret', label: 'App Secret', type: 'password', placeholder: '' }
-  ] },
-  { type: 'matrix', name: 'Matrix', icon: '🌐', color: '#0dbd8b', fields: [
-    { key: 'homeserver', label: 'Homeserver', type: 'text', placeholder: 'https://matrix.org' },
-    { key: 'token', label: 'Access Token', type: 'password', placeholder: '' }
-  ] },
-  { type: 'qq', name: 'QQ', icon: '🐧', color: '#12b7f5', fields: [
-    { key: 'appId', label: 'App ID', type: 'text', placeholder: '' },
-    { key: 'clientSecret', label: 'Client Secret', type: 'password', placeholder: '' },
-    { key: 'inputHint', label: 'Input Hint', type: 'switch', optional: true, help: 'Send QQ input-notify hints for direct messages while the bot is processing.' },
-    { key: 'markdown', label: 'Markdown Support', type: 'switch', optional: true, help: 'Enable QQ markdown message mode for C2C and group replies when the bot has permission.' }
-  ] },
-  { type: 'slack', name: 'Slack', icon: '💬', color: '#611f69', fields: [
-    { key: 'botToken', label: 'Bot Token', type: 'password', placeholder: 'xoxb-...' }
-  ] },
-  { type: 'telegram', name: 'Telegram', icon: '✈️', color: '#2aabee', fields: [
-    { key: 'token', label: 'Bot Token', type: 'password', placeholder: '从 @BotFather 获取' }
-  ] },
-  { type: 'wechat_mp', name: '微信服务号', icon: '🟢', color: '#2dc100', fields: [
-    { key: 'appId', label: 'App ID', type: 'text', placeholder: '' },
-    { key: 'appSecret', label: 'App Secret', type: 'password', placeholder: '' }
-  ] },
-  { type: 'wecom', name: '企业微信', icon: '🏢', color: '#2f90ea', fields: [
-    { key: 'corpId', label: 'Corp ID', type: 'text', placeholder: '' },
-    { key: 'corpSecret', label: 'Corp Secret', type: 'password', placeholder: '' }
-  ] },
-  { type: 'wechat', name: '微信', icon: '💚', color: '#07c160', fields: [
-    { key: 'token', label: 'Token', type: 'password', placeholder: '' }
-  ] },
-  { type: 'misskey', name: 'Misskey', icon: '🟩', color: '#86b300', fields: [
-    { key: 'token', label: 'Access Token', type: 'password', placeholder: '' },
-    { key: 'instanceUrl', label: 'Instance URL', type: 'text', help: 'Misskey instance URL (e.g. https://misskey.io)', placeholder: 'https://misskey.io' }
+  { type: 'misskey', name: 'Misskey', description: '通过 Misskey WebSocket streaming 接收提及和回复消息。', icon: 'misskey', color: '#86b300', fields: [
+    { key: 'host', label: '实例 URL', type: 'text', help: '如 https://misskey.io', placeholder: 'https://misskey.io' },
+    { key: 'token', label: 'API Token', type: 'password', help: 'Misskey API Token' },
+    { key: 'subscribeTimeline', label: '订阅时间线', type: 'boolean', optional: true, placeholder: 'false', help: '启用后接收时间线全部帖子' }
   ] }
 ]
 
@@ -1091,7 +1063,7 @@ function ensurePlatforms(botId) {
   if (!_botPlatforms[botId]) {
     _botPlatforms[botId] = [
       { id: genId('plat'), type: 'misskey', name: 'Misskey', enabled: true, configured: true,
-        config: { token: 'mk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx', instanceUrl: 'https://maid.lat' },
+        config: { token: 'mk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx', host: 'https://maid.lat', subscribeTimeline: false },
         tools: ['send', 'reply', 'react', 'get_contacts', 'search_memory', 'web_search'] }
     ]
   }
