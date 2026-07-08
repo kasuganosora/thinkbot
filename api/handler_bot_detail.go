@@ -44,21 +44,23 @@ type ToolCatalogGroup struct {
 
 // PlatformType 平台类型定义。
 type PlatformType struct {
-	Type   string          `json:"type"`
-	Name   string          `json:"name"`
-	Icon   string          `json:"icon"`
-	Color  string          `json:"color"`
-	Fields []PlatformField `json:"fields"`
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Icon        string          `json:"icon"`
+	Color       string          `json:"color"`
+	Fields      []PlatformField `json:"fields"`
 }
 
 // PlatformField 平台配置字段定义。
 type PlatformField struct {
-	Key         string `json:"key"`
-	Label       string `json:"label"`
-	Type        string `json:"type"`
-	Placeholder string `json:"placeholder,omitempty"`
-	Help        string `json:"help,omitempty"`
-	Optional    bool   `json:"optional,omitempty"`
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	Type        string   `json:"type"`
+	Placeholder string   `json:"placeholder,omitempty"`
+	Help        string   `json:"help,omitempty"`
+	Optional    bool     `json:"optional,omitempty"`
+	Options     []string `json:"options,omitempty"`
 }
 
 // 内置工具目录
@@ -98,6 +100,12 @@ func (s *Server) handleCreateBotPlatform(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// 只允许后端注册表中真实支持的平台类型，避免创建出无 channel 实现的平台。
+	if !IsValidChannelType(req.Type) {
+		Fail(c, errs.BadRequest("unsupported platform type: "+req.Type))
 		return
 	}
 

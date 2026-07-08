@@ -30,11 +30,12 @@ type ChannelTypeInfo struct {
 // ToPlatformType 转为前端 BotPlatforms 组件需要的格式。
 func (c ChannelTypeInfo) ToPlatformType() PlatformType {
 	return PlatformType{
-		Type:   c.Type,
-		Name:   c.DisplayName,
-		Icon:   c.Icon,
-		Color:  c.Color,
-		Fields: c.ToPlatformFields(),
+		Type:        c.Type,
+		Name:        c.DisplayName,
+		Description: c.Description,
+		Icon:        c.Icon,
+		Color:       c.Color,
+		Fields:      c.ToPlatformFields(),
 	}
 }
 
@@ -49,12 +50,17 @@ func (c ChannelTypeInfo) ToPlatformFields() []PlatformField {
 			Help:        f.HelpText,
 			Placeholder: f.Default,
 			Optional:    !f.Required,
+			Options:     f.Options,
 		}
 	}
 	return out
 }
 
 // supportedChannelTypes 是系统支持的 Channel/Platform 类型注册表（统一）。
+//
+// 注意：此处只登记「后端 channel/ 目录下已有真实实现」的平台。
+// 新增平台的正确顺序：先在 channel/<type>/ 实现 Channel，再在此注册字段 schema，
+// 前端「添加平台」列表与配置表单会据此自动渲染，无需改动前端代码。
 var supportedChannelTypes = []ChannelTypeInfo{
 	{
 		Type:        "telegram",
@@ -81,42 +87,6 @@ var supportedChannelTypes = []ChannelTypeInfo{
 			{Key: "token", Label: "API Token", Type: "password", Required: true, HelpText: "Misskey API Token"},
 			{Key: "subscribeTimeline", Label: "订阅时间线", Type: "boolean", Default: "false", HelpText: "启用后接收时间线全部帖子"},
 		},
-	},
-	{
-		Type: "dingtalk", DisplayName: "钉钉", Icon: "dingtalk", Color: "#3b8fff",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "discord", DisplayName: "Discord", Icon: "discord", Color: "#5865f2",
-		Fields: []ChannelField{{Key: "token", Label: "Bot Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "feishu", DisplayName: "飞书", Icon: "feishu", Color: "#3370ff",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "matrix", DisplayName: "Matrix", Icon: "matrix", Color: "#0dbd8b",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "qq", DisplayName: "QQ", Icon: "qq", Color: "#12b7f5",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "slack", DisplayName: "Slack", Icon: "slack", Color: "#611f69",
-		Fields: []ChannelField{{Key: "token", Label: "Bot Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "wechat_mp", DisplayName: "微信公众号", Icon: "wechat", Color: "#07c160",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "wecom", DisplayName: "企业微信", Icon: "wecom", Color: "#0082ef",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
-	},
-	{
-		Type: "wechat", DisplayName: "微信", Icon: "wechat", Color: "#07c160",
-		Fields: []ChannelField{{Key: "token", Label: "Token", Type: "password", Required: true}},
 	},
 }
 

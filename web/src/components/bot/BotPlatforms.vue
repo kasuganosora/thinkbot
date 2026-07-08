@@ -9,7 +9,7 @@
         :class="{ active: cur && cur.id === p.id }"
         @click="select(p)"
       >
-        <div class="pi-icon" :style="{ background: (metaOf(p.type)?.color || '#ccc') + '22' }">{{ metaOf(p.type)?.icon || p.name.slice(0, 1) }}</div>
+        <div class="pi-icon" :style="{ background: (metaOf(p.type)?.color || '#ccc') + '22', color: metaOf(p.type)?.color || '#888' }">{{ iconText(metaOf(p.type), p.name) }}</div>
         <div class="pi-main">
           <div class="pi-name">{{ p.name }}</div>
           <div class="pi-sub">{{ p.configured ? '已配置' : '未配置' }}</div>
@@ -23,7 +23,7 @@
     <!-- 右：详情 -->
     <div v-if="cur" class="plat-detail">
       <div class="pd-head">
-        <div class="pd-avatar" :style="{ background: (curMeta?.color || '#f0f0f0') + '22' }">{{ curMeta?.icon || cur.name.slice(0, 1) }}</div>
+        <div class="pd-avatar" :style="{ background: (curMeta?.color || '#f0f0f0') + '22', color: curMeta?.color || '#666' }">{{ iconText(curMeta, cur.name) }}</div>
         <div class="pd-title">
           <div class="pd-name">{{ cur.name }}</div>
           <div class="pd-id">平台标识：{{ cur.type }}</div>
@@ -32,20 +32,44 @@
 
       <h4 class="sec-title">凭据配置</h4>
       <div class="cred-form">
-        <div v-for="f in fields" :key="f.key" class="cred-item">
-          <label>{{ f.label }} <span v-if="f.optional" class="opt">(可选)</span></label>
-          <div v-if="f.help" class="cred-help">{{ f.help }}</div>
-          <t-switch v-if="f.type === 'switch'" v-model="cur.config[f.key]" />
-          <t-input
-            v-else
-            v-model="cur.config[f.key]"
-            :type="f.type === 'password' && !showKey[f.key] ? 'password' : 'text'"
-            :placeholder="f.placeholder"
-          >
-            <template v-if="f.type === 'password'" #suffix-icon>
-              <t-icon :name="showKey[f.key] ? 'browse' : 'browse-off'" style="cursor:pointer" @click="showKey[f.key] = !showKey[f.key]" />
-            </template>
-          </t-input>
+        <div v-for="f in fields" :key="f.key" class="cred-item" :class="{ 'cred-item-inline': isSwitch(f) }">
+          <template v-if="isSwitch(f)">
+            <div class="cred-switch-row">
+              <div class="cred-switch-label">
+                <label>{{ f.label }} <span v-if="f.optional" class="opt">(可选)</span></label>
+                <div v-if="f.help" class="cred-help">{{ f.help }}</div>
+              </div>
+              <t-switch :model-value="asBool(cur.config[f.key])" @change="v => cur.config[f.key] = v" />
+            </div>
+          </template>
+          <template v-else>
+            <label>{{ f.label }} <span v-if="f.optional" class="opt">(可选)</span></label>
+            <div v-if="f.help" class="cred-help">{{ f.help }}</div>
+            <t-select
+              v-if="f.type === 'select'"
+              v-model="cur.config[f.key]"
+              :options="optionsOf(f)"
+              :placeholder="f.placeholder || '请选择'"
+              clearable
+            />
+            <t-input-number
+              v-else-if="f.type === 'number'"
+              v-model="cur.config[f.key]"
+              theme="column"
+              :placeholder="f.placeholder"
+              style="width: 100%"
+            />
+            <t-input
+              v-else
+              v-model="cur.config[f.key]"
+              :type="f.type === 'password' && !showKey[f.key] ? 'password' : 'text'"
+              :placeholder="f.placeholder"
+            >
+              <template v-if="f.type === 'password'" #suffix-icon>
+                <t-icon :name="showKey[f.key] ? 'browse' : 'browse-off'" style="cursor:pointer" @click="showKey[f.key] = !showKey[f.key]" />
+              </template>
+            </t-input>
+          </template>
         </div>
       </div>
 
@@ -68,8 +92,11 @@
           @click="addType = t.type"
           @dblclick="confirmAdd"
         >
-          <div class="ai-icon" :style="{ background: (t.color || '#ccc') + '22' }">{{ t.icon || t.name.slice(0, 1) }}</div>
-          <span class="ai-name">{{ t.name }}</span>
+          <div class="ai-icon" :style="{ background: (t.color || '#ccc') + '22', color: t.color || '#888' }">{{ iconText(t, t.name) }}</div>
+          <div class="ai-body">
+            <span class="ai-name">{{ t.name }}</span>
+            <span v-if="t.description" class="ai-desc">{{ t.description }}</span>
+          </div>
         </div>
       </div>
       <template #footer>
@@ -96,15 +123,51 @@ const fields = computed(() => types.value.find(t => t.type === cur.value?.type)?
 const curMeta = computed(() => types.value.find(t => t.type === cur.value?.type))
 function metaOf(type) { return types.value.find(t => t.type === type) }
 
+// 图标文案：后端 icon 多为平台英文名（如 "misskey"），整串塞进小圆圈会溢出。
+// 规则：icon 为单个字符/emoji 时直接用；否则（多字符或缺省）取首字母大写。
+function iconText(meta, fallbackName) {
+  const raw = meta?.icon || meta?.name || fallbackName || '?'
+  const chars = Array.from(String(raw).trim())
+  if (chars.length <= 1) return raw || '?'
+  return chars[0].toUpperCase()
+}
+
+// 兼容后端 "boolean" 与 mock "switch" 两种开关类型名
+function isSwitch(f) { return f.type === 'switch' || f.type === 'boolean' }
+// 将 config 中可能为 undefined / "true" / "false" 字符串的值归一为布尔
+function asBool(v) { return v === true || v === 'true' }
+// select 选项：兼容 ["a","b"] 或 [{label,value}]，并过滤空串占位项给出可读文案
+function optionsOf(f) {
+  const opts = f.options || []
+  return opts.map(o => {
+    if (o && typeof o === 'object') return o
+    return { label: o === '' ? '（默认）' : o, value: o }
+  })
+}
+
+// 选中平台时，用字段定义补齐缺省 config，避免开关/选择框初值为 undefined
+function ensureConfigDefaults(p) {
+  if (!p) return
+  if (!p.config) p.config = {}
+  const defs = types.value.find(t => t.type === p.type)?.fields || []
+  for (const f of defs) {
+    if (p.config[f.key] === undefined) {
+      if (isSwitch(f)) p.config[f.key] = asBool(p.placeholder ?? f.placeholder)
+      else if (f.type === 'number') p.config[f.key] = f.placeholder ? Number(f.placeholder) : undefined
+    }
+  }
+}
+
 async function load() {
   const [cat, l] = await Promise.all([botPlatformApi.toolCatalog(), botPlatformApi.list(props.botId)])
   types.value = cat.types
   list.value = l
   cur.value = l[0] || null
+  ensureConfigDefaults(cur.value)
 }
 onMounted(load)
 
-function select(p) { cur.value = p }
+function select(p) { cur.value = p; ensureConfigDefaults(p) }
 
 async function save(enable) {
   if (enable) cur.value.enabled = true
@@ -136,6 +199,7 @@ async function confirmAdd() {
   addVisible.value = false
   await load()
   cur.value = list.value.find(p => p.id === created.id) || cur.value
+  ensureConfigDefaults(cur.value)
   MessagePlugin.success('平台已添加')
 }
 </script>
@@ -154,7 +218,8 @@ async function confirmAdd() {
 .plat-item.active { border-color: #d9d9d9; box-shadow: 0 2px 8px rgba(0,0,0,.05); background: #fafafa; }
 .pi-icon {
   width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center; font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 700; line-height: 1; overflow: hidden; text-transform: uppercase;
 }
 .pi-main { flex: 1; min-width: 0; }
 .pi-name { font-size: 14px; font-weight: 600; color: #1d1d1f; }
@@ -169,8 +234,9 @@ async function confirmAdd() {
 .plat-detail { flex: 1; min-width: 0; overflow-y: auto; padding-right: 4px; }
 .pd-head { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
 .pd-avatar {
-  width: 40px; height: 40px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center; font-size: 18px; color: #666;
+  width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 700; line-height: 1; overflow: hidden; text-transform: uppercase;
 }
 .pd-title { flex: 1; }
 .pd-name { font-size: 16px; font-weight: 600; }
@@ -180,6 +246,12 @@ async function confirmAdd() {
 .cred-item label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 .cred-item label .opt { font-weight: 400; color: #999; font-size: 12px; margin-left: 4px; }
 .cred-help { font-size: 12px; color: #999; margin-bottom: 8px; }
+/* 开关型字段：标签左、开关右，垂直居中 */
+.cred-item-inline { padding: 4px 0; }
+.cred-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.cred-switch-label { flex: 1; min-width: 0; }
+.cred-switch-label label { margin-bottom: 2px; }
+.cred-switch-label .cred-help { margin-bottom: 0; }
 .pd-footer { margin-top: 20px; padding-top: 18px; border-top: 1px solid #f0f0f0; display: flex; justify-content: flex-end; gap: 12px; align-items: center; }
 .pd-del { margin-right: auto; }
 .plat-empty { margin: 60px auto; }
@@ -198,9 +270,12 @@ async function confirmAdd() {
 .add-item.active { background: #f0f1f3; }
 .ai-icon {
   width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center; font-size: 17px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 700; line-height: 1; overflow: hidden; text-transform: uppercase;
 }
 .ai-name { font-size: 15px; color: #1d1d1f; }
+.ai-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ai-desc { font-size: 12px; color: #999; line-height: 1.3; }
 </style>
 
 <!-- 弹窗渲染在 body 下，scoped 命中不到，用全局样式 -->
