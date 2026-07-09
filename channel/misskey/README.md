@@ -6,7 +6,7 @@
 
 | 类型 | 说明 |
 |------|------|
-| `Config` | Misskey 渠道配置（`Host`、`Token`、`WatchdogTimeout`、`SubscribeTimeline` 等） |
+| `Config` | Misskey 渠道配置（`Host`、`Token`、`WatchdogTimeout`、`TimelineChannels` 等） |
 | `MisskeyChannel` | Misskey 平台适配器，实现 `channel.Channel` 接口 |
 
 ## 导出常量

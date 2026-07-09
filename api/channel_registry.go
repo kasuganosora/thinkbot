@@ -6,15 +6,23 @@ package api
 // 驱动前端动态表单渲染：前端根据 Fields[] 自动生成配置表单。
 // ============================================================================
 
+// ChannelOption 描述一个带显示名的选项（用于 select / multiselect）。
+type ChannelOption struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
 // ChannelField 描述一个 Channel 配置字段。
 type ChannelField struct {
 	Key      string   `json:"key"`
 	Label    string   `json:"label"`
-	Type     string   `json:"type"` // "string"|"password"|"number"|"select"|"boolean"
+	Type     string   `json:"type"` // "string"|"password"|"number"|"select"|"multiselect"|"boolean"
 	Required bool     `json:"required"`
 	Default  string   `json:"default,omitempty"`
 	HelpText string   `json:"helpText,omitempty"`
 	Options  []string `json:"options,omitempty"`
+	// OptionItems 用于 select/multiselect 需要「显示名 ≠ 值」时；优先于 Options。
+	OptionItems []ChannelOption `json:"optionItems,omitempty"`
 }
 
 // ChannelTypeInfo 描述一种 Channel 类型的元信息。
@@ -43,6 +51,16 @@ func (c ChannelTypeInfo) ToPlatformType() PlatformType {
 func (c ChannelTypeInfo) ToPlatformFields() []PlatformField {
 	out := make([]PlatformField, len(c.Fields))
 	for i, f := range c.Fields {
+		var opts []any
+		if len(f.OptionItems) > 0 {
+			for _, o := range f.OptionItems {
+				opts = append(opts, o)
+			}
+		} else {
+			for _, o := range f.Options {
+				opts = append(opts, o)
+			}
+		}
 		out[i] = PlatformField{
 			Key:         f.Key,
 			Label:       f.Label,
@@ -50,7 +68,7 @@ func (c ChannelTypeInfo) ToPlatformFields() []PlatformField {
 			Help:        f.HelpText,
 			Placeholder: f.Default,
 			Optional:    !f.Required,
-			Options:     f.Options,
+			Options:     opts,
 		}
 	}
 	return out
@@ -85,7 +103,19 @@ var supportedChannelTypes = []ChannelTypeInfo{
 		Fields: []ChannelField{
 			{Key: "host", Label: "实例 URL", Type: "string", Required: true, HelpText: "如 https://misskey.io"},
 			{Key: "token", Label: "API Token", Type: "password", Required: true, HelpText: "Misskey API Token"},
-			{Key: "subscribeTimeline", Label: "订阅时间线", Type: "boolean", Default: "false", HelpText: "启用后接收时间线全部帖子"},
+			{
+				Key:   "timelineChannels",
+				Label: "订阅时间线",
+				Type:  "multiselect",
+				HelpText: "选择要旁听的时间线（可多选，留空则仅接收 @提及/回复）。" +
+					"名称与 Misskey streaming channel 一致。",
+				OptionItems: []ChannelOption{
+					{Value: "homeTimeline", Label: "主页时间线"},
+					{Value: "localTimeline", Label: "本地时间线"},
+					{Value: "hybridTimeline", Label: "社交时间线"},
+					{Value: "globalTimeline", Label: "全局时间线"},
+				},
+			},
 		},
 	},
 }
