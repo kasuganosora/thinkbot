@@ -1,5 +1,5 @@
 <template>
-  <SettingsShell title="技能管理">
+  <SettingsShell v-if="!embedded" title="技能管理">
     <t-card title="技能列表" :bordered="false" class="card">
       <t-table
         row-key="name"
@@ -32,6 +32,46 @@
       </t-table>
     </t-card>
   </SettingsShell>
+
+  <div v-else class="embed-panel">
+    <div class="panel-head">
+      <div>
+        <h3 class="panel-title">技能管理</h3>
+        <p class="panel-desc">列出 / 启用 / 禁用已注册技能。</p>
+      </div>
+    </div>
+    <div class="panel-card">
+      <t-table
+        row-key="name"
+        data-testid="skills-table"
+        :data="skills"
+        :columns="columns"
+        :loading="loading"
+        size="small"
+        hover
+      >
+        <template #source="{ row }">
+          <t-tag variant="light" theme="primary">{{ row.source || '-' }}</t-tag>
+        </template>
+        <template #capabilities="{ row }">
+          <div class="cap-tags">
+            <t-tag v-if="row.hasContent" size="small" variant="light">内容</t-tag>
+            <t-tag v-if="row.hasScripts" size="small" variant="light" theme="warning">脚本</t-tag>
+            <t-tag v-if="row.hasReferences" size="small" variant="light" theme="success">引用</t-tag>
+            <t-tag v-if="row.hasAssets" size="small" variant="light" theme="primary">资源</t-tag>
+          </div>
+        </template>
+        <template #enabled="{ row }">
+          <t-switch
+            :value="row.enabled"
+            :loading="toggling === row.name"
+            :data-testid="`skill-switch-${row.name}`"
+            @change="(val) => toggle(row, val)"
+          />
+        </template>
+      </t-table>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -39,6 +79,8 @@ import { ref, onMounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { skillApi } from '@/api/services'
+
+const props = defineProps({ embedded: { type: Boolean, default: false } })
 
 const loading = ref(false)
 const toggling = ref('')

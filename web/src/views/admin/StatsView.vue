@@ -1,5 +1,5 @@
 <template>
-  <SettingsShell title="统计概览">
+  <SettingsShell v-if="!embedded" title="统计概览">
     <div class="summary-cards" data-testid="stats-summary">
       <t-card :bordered="false" class="metric-card">
         <div class="metric-label">总请求数</div>
@@ -51,6 +51,67 @@
       </t-table>
     </t-card>
   </SettingsShell>
+
+  <div v-else class="embed-panel">
+    <div class="panel-head">
+      <div>
+        <h3 class="panel-title">统计概览</h3>
+        <p class="panel-desc">模型用量、缓存命中与各 Bot×模型的消耗情况。</p>
+      </div>
+    </div>
+    <div class="panel-card">
+      <div class="summary-cards" data-testid="stats-summary">
+        <t-card :bordered="false" class="metric-card">
+          <div class="metric-label">总请求数</div>
+          <div class="metric-value" data-testid="stats-total-requests">{{ summary.totalRequests }}</div>
+        </t-card>
+        <t-card :bordered="false" class="metric-card">
+          <div class="metric-label">总 Token 数</div>
+          <div class="metric-value" data-testid="stats-total-tokens">{{ summary.totalTokens }}</div>
+        </t-card>
+        <t-card :bordered="false" class="metric-card">
+          <div class="metric-label">总工具调用</div>
+          <div class="metric-value" data-testid="stats-total-toolcalls">{{ summary.toolCalls }}</div>
+        </t-card>
+      </div>
+
+      <t-card title="各 Bot 用量统计" :bordered="false" class="card">
+        <t-table
+          row-key="botId"
+          data-testid="stats-overview-table"
+          :data="overview"
+          :columns="overviewColumns"
+          :loading="loading"
+          size="small"
+          hover
+        >
+          <template #op="{ row }">
+            <t-button
+              variant="text"
+              theme="primary"
+              size="small"
+              :data-testid="`stats-daily-btn-${row.botId}`"
+              @click="loadDaily(row.botId)"
+            >查看趋势</t-button>
+          </template>
+        </t-table>
+      </t-card>
+
+      <t-card v-if="selectedBot" :title="`每日趋势 · ${selectedBot}`" :bordered="false" class="card">
+        <t-table
+          row-key="date"
+          data-testid="stats-daily-table"
+          :data="daily"
+          :columns="dailyColumns"
+          :loading="dailyLoading"
+          size="small"
+          hover
+        >
+          <template #date="{ row }">{{ formatTime(row.date) }}</template>
+        </t-table>
+      </t-card>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -58,6 +119,8 @@ import { ref, computed, onMounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { statsApi } from '@/api/services'
+
+const props = defineProps({ embedded: { type: Boolean, default: false } })
 
 const loading = ref(false)
 const dailyLoading = ref(false)

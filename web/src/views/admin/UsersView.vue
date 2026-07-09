@@ -1,5 +1,5 @@
 <template>
-  <SettingsShell title="用户管理">
+  <SettingsShell v-if="!embedded" title="用户管理">
     <t-card :bordered="false" class="card">
       <div class="toolbar">
         <t-input v-model="keyword" placeholder="搜索用户名 / 昵称" clearable style="width: 240px" data-testid="user-search" />
@@ -67,6 +67,81 @@
       </t-form>
     </t-dialog>
   </SettingsShell>
+
+  <div v-else class="embed-panel">
+    <div class="panel-head">
+      <div>
+        <h3 class="panel-title">用户管理</h3>
+        <p class="panel-desc">创建、查询、启用 / 禁用与删除用户。</p>
+      </div>
+    </div>
+    <div class="panel-card">
+      <div class="toolbar">
+        <t-input v-model="keyword" placeholder="搜索用户名 / 昵称" clearable style="width: 240px" data-testid="user-search" />
+        <t-button theme="primary" @click="openCreate" data-testid="user-create-btn">
+          <template #icon><t-icon name="add" /></template>
+          新建用户
+        </t-button>
+      </div>
+
+      <t-table
+        :data="filtered"
+        :columns="columns"
+        row-key="id"
+        :loading="loading"
+        size="medium"
+        data-testid="user-table"
+      >
+        <template #role="{ row }">
+          <t-tag :theme="row.role === 'admin' ? 'primary' : 'default'" variant="light">
+            {{ row.role === 'admin' ? '管理员' : '成员' }}
+          </t-tag>
+        </template>
+        <template #status="{ row }">
+          <t-tag :theme="row.status === 'active' ? 'success' : 'danger'" variant="light">
+            {{ row.status === 'active' ? '正常' : '已禁用' }}
+          </t-tag>
+        </template>
+        <template #lastLoginAt="{ row }">{{ formatTime(row.lastLoginAt) }}</template>
+        <template #op="{ row }">
+          <t-space size="small">
+            <t-button variant="text" theme="primary" size="small" @click="openEdit(row)" :data-testid="`user-edit-${row.id}`">编辑</t-button>
+            <t-button variant="text" size="small" @click="toggleRole(row)">{{ row.role === 'admin' ? '降为成员' : '设为管理员' }}</t-button>
+            <t-button variant="text" :theme="row.status === 'active' ? 'warning' : 'success'" size="small" @click="toggleStatus(row)">
+              {{ row.status === 'active' ? '禁用' : '启用' }}
+            </t-button>
+            <t-button variant="text" theme="danger" size="small" @click="remove(row)" :data-testid="`user-delete-${row.id}`">删除</t-button>
+          </t-space>
+        </template>
+      </t-table>
+    </div>
+
+    <t-dialog
+      v-model:visible="dialog.visible"
+      :header="dialog.isEdit ? '编辑用户' : '新建用户'"
+      :on-confirm="submit"
+      width="480px"
+      data-testid="user-dialog"
+    >
+      <t-form :data="dialog.form" label-align="top">
+        <t-form-item label="用户名" v-if="!dialog.isEdit">
+          <t-input v-model="dialog.form.username" placeholder="登录用户名" data-testid="user-form-username" />
+        </t-form-item>
+        <t-form-item label="初始密码" v-if="!dialog.isEdit">
+          <t-input v-model="dialog.form.password" type="password" placeholder="至少 6 位" data-testid="user-form-password" />
+        </t-form-item>
+        <t-form-item label="昵称">
+          <t-input v-model="dialog.form.displayName" placeholder="显示名称" data-testid="user-form-displayname" />
+        </t-form-item>
+        <t-form-item label="邮箱">
+          <t-input v-model="dialog.form.email" placeholder="邮箱地址" data-testid="user-form-email" />
+        </t-form-item>
+        <t-form-item label="角色" v-if="!dialog.isEdit">
+          <t-select v-model="dialog.form.role" :options="roleOptions" />
+        </t-form-item>
+      </t-form>
+    </t-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -75,6 +150,8 @@ import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { userApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
+
+const props = defineProps({ embedded: { type: Boolean, default: false } })
 
 const loading = ref(false)
 const users = ref([])
