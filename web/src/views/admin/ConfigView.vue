@@ -1,5 +1,5 @@
 <template>
-  <SettingsShell title="系统配置">
+  <SettingsShell v-if="!embedded" title="系统配置">
     <t-card :bordered="false" class="card">
       <div class="toolbar">
         <span class="hint">这些配置由后端 /api/config 持久化，按分类分组。修改后点击「保存全部修改」。</span>
@@ -33,6 +33,47 @@
       </t-loading>
     </t-card>
   </SettingsShell>
+
+  <div v-else class="embed-panel">
+    <div class="panel-head">
+      <div>
+        <h3 class="panel-title">系统配置</h3>
+        <p class="panel-desc">全局系统配置项，按分类分组，修改后点击「保存全部修改」。</p>
+      </div>
+    </div>
+    <div class="panel-card">
+      <div class="toolbar">
+        <span class="hint">这些配置由后端 /api/config 持久化，按分类分组。修改后点击「保存全部修改」。</span>
+        <t-button theme="primary" :disabled="!dirty" @click="saveAll" data-testid="config-save-btn">保存全部修改</t-button>
+      </div>
+
+      <t-loading :loading="loading">
+        <div v-for="(items, cat) in grouped" :key="cat" class="group">
+          <div class="group-title">{{ catLabel(cat) }}</div>
+          <t-form label-align="left" :label-width="200">
+            <t-form-item v-for="item in items" :key="item.key" :label="item.description || item.key">
+              <div class="field">
+                <t-switch
+                  v-if="isBool(item.value)"
+                  :value="item.value === 'true'"
+                  @change="v => updateValue(item.key, v ? 'true' : 'false')"
+                  :data-testid="`config-${item.key}`"
+                />
+                <t-input
+                  v-else
+                  :value="draft[item.key]"
+                  @change="v => updateValue(item.key, v)"
+                  :data-testid="`config-${item.key}`"
+                  style="width: 320px"
+                />
+                <span class="key-name">{{ item.key }}</span>
+              </div>
+            </t-form-item>
+          </t-form>
+        </div>
+      </t-loading>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -40,6 +81,8 @@ import { ref, computed, onMounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { configApi } from '@/api/services'
+
+const props = defineProps({ embedded: { type: Boolean, default: false } })
 
 const loading = ref(false)
 const list = ref([])

@@ -4,13 +4,13 @@
       <!-- 左侧子导航 -->
       <nav class="sys-nav" data-testid="system-settings-nav" aria-label="系统设置导航">
         <button
-          v-for="item in navItems"
+          v-for="item in visibleNavItems"
           :key="item.key"
           class="nav-item"
           :class="{ active: activeKey === item.key }"
           :data-testid="`system-nav-${item.key}`"
           :aria-current="activeKey === item.key ? 'page' : undefined"
-          @click="activeKey = item.key"
+          @click="onNavClick(item)"
         >
           <t-icon :name="item.icon" class="nav-icon" />
           <span>{{ item.label }}</span>
@@ -145,19 +145,46 @@
             <div class="about-row"><span class="about-k">数据来源</span><span class="about-v">本地 Mock（待接入后端）</span></div>
           </div>
         </div>
+
+        <!-- 管理后台：整合进系统设置页内 -->
+        <div v-show="activeKey === 'admin-users'" class="panel panel-wide" data-testid="system-panel-admin-users">
+          <UsersView embedded />
+        </div>
+        <div v-show="activeKey === 'admin-skills'" class="panel panel-wide" data-testid="system-panel-admin-skills">
+          <SkillsView embedded />
+        </div>
+        <div v-show="activeKey === 'admin-config'" class="panel panel-wide" data-testid="system-panel-admin-config">
+          <ConfigView embedded />
+        </div>
+        <div v-show="activeKey === 'admin-stats'" class="panel panel-wide" data-testid="system-panel-admin-stats">
+          <StatsView embedded />
+        </div>
+        <div v-show="activeKey === 'admin-system'" class="panel panel-wide" data-testid="system-panel-admin-system">
+          <SystemMonitorView embedded />
+        </div>
       </section>
     </div>
   </SettingsShell>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
+import { useUserStore } from '@/stores/user'
 import SettingsShell from '@/components/SettingsShell.vue'
 import BotsManager from '@/components/BotsManager.vue'
 import ProvidersManager from '@/components/ProvidersManager.vue'
 import SearchProvidersManager from '@/components/SearchProvidersManager.vue'
 import UsageStats from '@/components/UsageStats.vue'
+import UsersView from '@/views/admin/UsersView.vue'
+import SkillsView from '@/views/admin/SkillsView.vue'
+import ConfigView from '@/views/admin/ConfigView.vue'
+import StatsView from '@/views/admin/StatsView.vue'
+import SystemMonitorView from '@/views/admin/SystemMonitorView.vue'
+
+const userStore = useUserStore()
+
+const isAdmin = computed(() => userStore.user?.role === 'admin')
 
 const navItems = [
   { key: 'bots', label: 'Bots', icon: 'application' },
@@ -166,9 +193,24 @@ const navItems = [
   { key: 'model', label: '模型服务', icon: 'server' },
   { key: 'search', label: '搜索', icon: 'internet' },
   { key: 'usage', label: '统计', icon: 'chart' },
-  { key: 'about', label: '关于', icon: 'info-circle' }
+  { key: 'about', label: '关于', icon: 'info-circle' },
+  // 管理后台功能整合进系统设置（仅管理员可见，页内切换面板）
+  { key: 'admin-users', label: '用户管理', icon: 'user', admin: true },
+  { key: 'admin-skills', label: '技能管理', icon: 'code', admin: true },
+  { key: 'admin-config', label: '系统配置', icon: 'setting', admin: true },
+  { key: 'admin-stats', label: '统计概览', icon: 'chart-bar', admin: true },
+  { key: 'admin-system', label: '系统监控', icon: 'monitor', admin: true }
 ]
+
+const visibleNavItems = computed(() =>
+  navItems.filter(item => !item.admin || isAdmin.value)
+)
+
 const activeKey = ref('bots')
+
+function onNavClick(item) {
+  activeKey.value = item.key
+}
 
 const langOptions = [
   { label: '简体中文', value: 'zh-CN' },
@@ -250,6 +292,8 @@ function save() {
   display: flex;
 }
 .panel-wide .panel-card-flush > * { flex: 1; min-width: 0; }
+.embed-panel { height: 100%; display: flex; flex-direction: column; }
+.embed-panel .panel-card { flex: 1; overflow-y: auto; }
 .panel-scroll {
   flex: 1;
   overflow-y: auto;

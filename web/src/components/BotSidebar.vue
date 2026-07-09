@@ -114,16 +114,6 @@ const userMenu = computed(() => {
     { content: '用户设置', value: 'user', onClick: () => router.push({ name: 'user-settings' }) },
     { content: '系统设置', value: 'system', onClick: () => router.push({ name: 'system-settings' }) }
   ]
-  if (userStore.user?.role === 'admin') {
-    items.push(
-      { content: '── 管理后台 ──', value: 'divider', disabled: true },
-      { content: '用户管理', value: 'admin-users', onClick: () => router.push({ name: 'admin-users' }) },
-      { content: '技能管理', value: 'admin-skills', onClick: () => router.push({ name: 'admin-skills' }) },
-      { content: '系统配置', value: 'admin-config', onClick: () => router.push({ name: 'admin-config' }) },
-      { content: '统计概览', value: 'admin-stats', onClick: () => router.push({ name: 'admin-stats' }) },
-      { content: '系统监控', value: 'admin-system', onClick: () => router.push({ name: 'admin-system' }) }
-    )
-  }
   items.push({
     content: '退出登录',
     value: 'logout',
