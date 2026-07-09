@@ -1044,9 +1044,14 @@ func (s *BotService) createMisskeyChannel(def dao.ChannelDefinition) (bot.Channe
 	if cfg.Token == "" {
 		return nil, fmt.Errorf("misskey channel: token is required")
 	}
-	if v, ok := raw["subscribeTimeline"]; ok {
-		if b, ok := v.(bool); ok {
-			cfg.SubscribeTimeline = b
+	// 订阅的 timeline 频道（homeTimeline/localTimeline/hybridTimeline/globalTimeline，可多选）。
+	if v, ok := raw["timelineChannels"]; ok {
+		if arr, ok := v.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok && s != "" {
+					cfg.TimelineChannels = append(cfg.TimelineChannels, s)
+				}
+			}
 		}
 	}
 

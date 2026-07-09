@@ -54,13 +54,14 @@ type PlatformType struct {
 
 // PlatformField 平台配置字段定义。
 type PlatformField struct {
-	Key         string   `json:"key"`
-	Label       string   `json:"label"`
-	Type        string   `json:"type"`
-	Placeholder string   `json:"placeholder,omitempty"`
-	Help        string   `json:"help,omitempty"`
-	Optional    bool     `json:"optional,omitempty"`
-	Options     []string `json:"options,omitempty"`
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Type        string `json:"type"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Help        string `json:"help,omitempty"`
+	Optional    bool   `json:"optional,omitempty"`
+	// Options 兼容两种形态：字符串数组（select）或 {label,value} 对象数组（multiselect）。
+	Options []any `json:"options,omitempty"`
 }
 
 // 内置工具目录
@@ -828,6 +829,99 @@ func (s *Server) getBotCompactionHistory(botID string) []BotCompactionRecord {
 func (s *Server) saveBotCompactionHistory(c *gin.Context, botID string, records []BotCompactionRecord) error {
 	data, _ := json.Marshal(records)
 	return s.store.Set(c.Request.Context(), botDetailKey(botID, "compaction_history"), string(data))
+}
+
+// ============================================================================
+// 聊天节奏 (Rhythm)
+// ============================================================================
+
+// BotRhythmConfig 聊天节奏配置。
+type BotRhythmConfig struct {
+	Enabled       bool                   `json:"enabled"`
+	Debounce      BotRhythmDebounce     `json:"debounce"`
+	Timing        BotRhythmToggle       `json:"timing"`
+	SpeakTendency float64               `json:"speakTendency"`
+	Interrupt     BotRhythmInterrupt    `json:"interrupt"`
+	IdleComp      BotRhythmIdleComp     `json:"idleComp"`
+}
+
+// BotRhythmDebounce 消息防抖。
+type BotRhythmDebounce struct {
+	QuietWait int `json:"quietWait"`
+	MaxWait   int `json:"maxWait"`
+}
+
+// BotRhythmToggle 开关型子项。
+type BotRhythmToggle struct {
+	Enabled bool `json:"enabled"`
+}
+
+// BotRhythmInterrupt 计划中断。
+type BotRhythmInterrupt struct {
+	Enabled          bool `json:"enabled"`
+	MaxConsecutive   int  `json:"maxConsecutive"`
+	MaxRounds        int  `json:"maxRounds"`
+}
+
+// BotRhythmIdleComp 空闲补偿。
+type BotRhythmIdleComp struct {
+	Enabled  bool `json:"enabled"`
+	IdleWindow int `json:"idleWindow"`
+	MinIdle  int  `json:"minIdle"`
+}
+
+// defaultBotRhythmConfig 返回聊天节奏默认配置。
+func defaultBotRhythmConfig() *BotRhythmConfig {
+	return &BotRhythmConfig{
+		Enabled:       true,
+		Debounce:      BotRhythmDebounce{QuietWait: 3, MaxWait: 15},
+		Timing:        BotRhythmToggle{Enabled: true},
+		SpeakTendency: 0.5,
+		Interrupt:     BotRhythmInterrupt{Enabled: true, MaxConsecutive: 3, MaxRounds: 5},
+		IdleComp:      BotRhythmIdleComp{Enabled: false, IdleWindow: 30, MinIdle: 10},
+	}
+}
+
+// handleGetBotRhythm 获取 Bot 聊天节奏配置。
+// GET /api/bots/:id/chat-rhythm
+func (s *Server) handleGetBotRhythm(c *gin.Context) {
+	botID := c.Param("id")
+	OK(c, s.getBotRhythmConfig(botID))
+}
+
+// handleUpdateBotRhythm 更新 Bot 聊天节奏配置。
+// PUT /api/bots/:id/chat-rhythm
+func (s *Server) handleUpdateBotRhythm(c *gin.Context) {
+	botID := c.Param("id")
+
+	var req BotRhythmConfig
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	if err := s.saveBotRhythmConfig(c, botID, &req); err != nil {
+		Fail(c, err)
+		return
+	}
+	OK(c, nil)
+}
+
+func (s *Server) getBotRhythmConfig(botID string) *BotRhythmConfig {
+	raw, ok := s.store.Get(botDetailKey(botID, "rhythm"))
+	if !ok || raw == "" {
+		return defaultBotRhythmConfig()
+	}
+	var cfg BotRhythmConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return defaultBotRhythmConfig()
+	}
+	return &cfg
+}
+
+func (s *Server) saveBotRhythmConfig(c *gin.Context, botID string, cfg *BotRhythmConfig) error {
+	data, _ := json.Marshal(cfg)
+	return s.store.Set(c.Request.Context(), botDetailKey(botID, "rhythm"), string(data))
 }
 
 // nowRFC3339 返回当前时间的 RFC3339 格式字符串。

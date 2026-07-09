@@ -31,7 +31,12 @@ const (
 	// 去重缓存 TTL 和清理间隔。
 	misskeyDedupTTL          = 2 * time.Minute
 	misskeyDedupCleanupEvery = 30 * time.Second
+	// mainConnID 是 main 通道的固定连接 ID。
+	mainConnID = "main-1"
 )
+
+// timelineConnID 返回某个 timeline 频道的 streaming 连接 ID（如 "tl:homeTimeline"）。
+func timelineConnID(channel string) string { return "tl:" + channel }
 
 // Config 配置 MisskeyChannel。
 type Config struct {
@@ -50,11 +55,20 @@ type Config struct {
 	// ReconnectDelay 断线后重连间隔。0 = 使用 5s 默认值。
 	ReconnectDelay time.Duration
 
-	// SubscribeTimeline 是否同时订阅 homeTimeline 频道。
-	// 启用后 Bot 会收到时间线上的所有帖子（不仅仅是 @提及），
-	// Pipeline 可据此实现"旁听群聊"等场景。
-	// 这些消息的 Mentioned 字段为 false。
-	SubscribeTimeline bool
+	// TimelineChannels 需要订阅的 Misskey streaming timeline 频道列表。
+	// 合法值来自 Misskey 官方：homeTimeline / localTimeline / hybridTimeline / globalTimeline。
+	// 订阅后 Bot 会收到这些时间线上的帖子（Mentioned=false），可用于"旁听群聊"。
+	// 留空则仅通过 main 通道接收 @提及 / 回复。
+	TimelineChannels []string
+}
+
+// validTimelineChannels 是 Misskey 官方支持的可订阅 timeline streaming 频道。
+// 与 packages/backend/src/server/api/stream/channels/*.ts 的 chName 一致。
+var validTimelineChannels = map[string]bool{
+	"homeTimeline":   true,
+	"localTimeline":  true,
+	"hybridTimeline": true,
+	"globalTimeline": true,
 }
 
 // MisskeyChannel 是 Misskey 平台的输入端实现。
@@ -113,6 +127,7 @@ func NewChannel(name, botID string, cfg Config) *MisskeyChannel {
 	if cfg.ReconnectDelay <= 0 {
 		cfg.ReconnectDelay = 5 * time.Second
 	}
+	cfg.TimelineChannels = normalizeTimelineChannels(cfg)
 	return &MisskeyChannel{
 		name:  name,
 		botID: botID,
@@ -120,6 +135,19 @@ func NewChannel(name, botID string, cfg Config) *MisskeyChannel {
 		hc:    http.New(),
 		api:   newAPIClient(cfg.Host, cfg.Token),
 	}
+}
+
+// normalizeTimelineChannels 过滤非法频道名并去重，保持稳定顺序。
+func normalizeTimelineChannels(cfg Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, ch := range cfg.TimelineChannels {
+		if validTimelineChannels[ch] && !seen[ch] {
+			seen[ch] = true
+			out = append(out, ch)
+		}
+	}
+	return out
 }
 
 // Name 返回 Channel 名称。
@@ -180,9 +208,6 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 func (c *MisskeyChannel) streamLoop(ctx context.Context) {
 	defer c.wg.Done()
 
-	connID := "main-1"       // main 通道连接 ID
-	timelineConnID := "tl-1" // timeline 通道连接 ID（可选）
-
 	delay := misskeyReconnectDelayMin
 	for {
 		select {
@@ -192,7 +217,7 @@ func (c *MisskeyChannel) streamLoop(ctx context.Context) {
 		}
 
 		start := time.Now()
-		err := c.connectAndServe(ctx, connID, timelineConnID)
+		err := c.connectAndServe(ctx)
 		if ctx.Err() != nil {
 			return // 主动关闭
 		}
@@ -263,7 +288,7 @@ func (c *MisskeyChannel) dedupSeen(noteID string) bool {
 
 // connectAndServe 建立 WebSocket 连接并持续处理消息。
 // 阻塞直到连接断开或 ctx 被取消。
-func (c *MisskeyChannel) connectAndServe(ctx context.Context, connID, timelineConnID string) error {
+func (c *MisskeyChannel) connectAndServe(ctx context.Context) error {
 	// 构建 streaming URL: wss://{host}/streaming?i={token}
 	host := strings.TrimPrefix(strings.TrimPrefix(c.cfg.Host, "https://"), "http://")
 	wsURL := fmt.Sprintf("wss://%s/streaming", host)
@@ -276,18 +301,18 @@ func (c *MisskeyChannel) connectAndServe(ctx context.Context, connID, timelineCo
 		Type: "connect",
 		Body: mustJSON(connectBody{
 			Channel: "main",
-			ID:      connID,
+			ID:      mainConnID,
 		}),
 	})
 	connectMsgs = append(connectMsgs, string(mainMsg))
 
-	// 可选：订阅 homeTimeline 通道（所有时间线帖子）
-	if c.cfg.SubscribeTimeline {
+	// 按配置订阅各个 timeline 频道，连接 ID 形如 "tl:homeTimeline"。
+	for _, tl := range c.cfg.TimelineChannels {
 		tlMsg, _ := json.Marshal(streamMessage{
 			Type: "connect",
 			Body: mustJSON(connectBody{
-				Channel: "homeTimeline",
-				ID:      timelineConnID,
+				Channel: tl,
+				ID:      timelineConnID(tl),
 			}),
 		})
 		connectMsgs = append(connectMsgs, string(tlMsg))
@@ -312,7 +337,7 @@ func (c *MisskeyChannel) connectAndServe(ctx context.Context, connID, timelineCo
 				"channel", c.name, "err", err)
 		},
 		OnText: func(text string) error {
-			return c.handleStreamMessage(ctx, text, connID, timelineConnID)
+			return c.handleStreamMessage(ctx, text)
 		},
 	}
 
@@ -332,7 +357,7 @@ func mustJSON(v any) json.RawMessage {
 }
 
 // handleStreamMessage 处理一条来自 streaming 的文本消息。
-func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, timelineConnID string) error {
+func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) error {
 	var base streamMessage
 	if err := json.Unmarshal([]byte(text), &base); err != nil {
 		traceid.L(ctx).Debugw("misskey stream: failed to parse message",
@@ -351,7 +376,7 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 	}
 
 	// main 通道事件：mention / reply（Bot 被明确提及）
-	if chMsg.ID == connID {
+	if chMsg.ID == mainConnID {
 		switch chMsg.Type {
 		case "mention", "reply":
 			var note Note
@@ -375,8 +400,9 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text, connID, 
 		return nil
 	}
 
-	// timeline 通道事件：时间线上的所有帖子（Bot 未被提及）
-	if c.cfg.SubscribeTimeline && chMsg.ID == timelineConnID {
+	// timeline 通道事件：时间线上的所有帖子（Bot 未被提及）。
+	// 连接 ID 形如 "tl:homeTimeline"，任一订阅的 timeline 都走此分支。
+	if strings.HasPrefix(chMsg.ID, "tl:") {
 		switch chMsg.Type {
 		case "note":
 			var note Note

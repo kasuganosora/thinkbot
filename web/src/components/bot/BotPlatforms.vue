@@ -52,6 +52,14 @@
               :placeholder="f.placeholder || '请选择'"
               clearable
             />
+            <t-select
+              v-else-if="f.type === 'multiselect'"
+              v-model="cur.config[f.key]"
+              :options="optionsOf(f)"
+              :placeholder="f.placeholder || '请选择（可多选）'"
+              multiple
+              clearable
+            />
             <t-input-number
               v-else-if="f.type === 'number'"
               v-model="cur.config[f.key]"
@@ -153,6 +161,7 @@ function ensureConfigDefaults(p) {
   for (const f of defs) {
     if (p.config[f.key] === undefined) {
       if (isSwitch(f)) p.config[f.key] = asBool(p.placeholder ?? f.placeholder)
+      else if (f.type === 'multiselect') p.config[f.key] = []
       else if (f.type === 'number') p.config[f.key] = f.placeholder ? Number(f.placeholder) : undefined
     }
   }

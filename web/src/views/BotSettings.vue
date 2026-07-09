@@ -75,6 +75,10 @@
       </div>
     </template>
 
+    <div v-else-if="loadingBot" class="bot-loading">
+      <t-loading text="加载中..." />
+    </div>
+
     <t-empty v-else description="未找到对应的 Bot" style="margin-top:80px" />
   </div>
 </template>
@@ -158,6 +162,7 @@ onMounted(() => { loadModelOptions() })
 
 const bot = ref(null)
 const form = ref({})
+const loadingBot = ref(false)
 
 const avatarText = computed(() => {
   const b = bot.value
@@ -169,7 +174,8 @@ function isUrl(s) { return s && (s.startsWith('http://') || s.startsWith('https:
 function loadBot() {
   const id = route.params.id || store.activeBotId
   let b = store.bots.find(x => x.id === id)
-  if (!b && store.bots.length) b = store.bots[0]
+  // 仅当明确没有指定 id 时，才回退到第一个 bot
+  if (!b && !id && store.bots.length) b = store.bots[0]
   bot.value = b || null
   if (b) {
     form.value = {
@@ -180,8 +186,23 @@ function loadBot() {
     }
   }
 }
-loadBot()
+
+async function ensureBotsLoaded() {
+  // 刷新页面时 store 为空，需要先从后端拉取 bot 列表再匹配
+  if (store.bots.length === 0) {
+    loadingBot.value = true
+    try {
+      await store.fetchBots()
+    } finally {
+      loadingBot.value = false
+    }
+  }
+  loadBot()
+}
+ensureBotsLoaded()
 watch(() => route.params.id, () => { activeKey.value = 'overview'; loadBot() })
+// bot 列表异步加载完成后重新匹配
+watch(() => store.bots.length, () => { if (!bot.value) loadBot() })
 
 function goBack() { router.push({ name: 'system-settings' }) }
 
@@ -288,6 +309,8 @@ function removeBot() {
 
 .bot-content { flex: 1; min-width: 0; overflow-y: auto; padding: 24px 28px; }
 .bot-content .pad { width: 100%; }
+
+.bot-loading { display: flex; align-items: center; justify-content: center; padding: 80px 0; }
 
 :deep(.ph) { width: 100%; }
 :deep(.ph-title) { font-size: 16px; font-weight: 600; margin: 0 0 6px; }

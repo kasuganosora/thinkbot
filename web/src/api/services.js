@@ -1054,7 +1054,12 @@ const PLATFORM_TYPES = [
   { type: 'misskey', name: 'Misskey', description: '通过 Misskey WebSocket streaming 接收提及和回复消息。', icon: 'misskey', color: '#86b300', fields: [
     { key: 'host', label: '实例 URL', type: 'text', help: '如 https://misskey.io', placeholder: 'https://misskey.io' },
     { key: 'token', label: 'API Token', type: 'password', help: 'Misskey API Token' },
-    { key: 'subscribeTimeline', label: '订阅时间线', type: 'boolean', optional: true, placeholder: 'false', help: '启用后接收时间线全部帖子' }
+    { key: 'timelineChannels', label: '订阅时间线', type: 'multiselect', optional: true, help: '选择要旁听的时间线（可多选，留空则仅接收 @提及/回复）。', options: [
+      { value: 'homeTimeline', label: '主页时间线' },
+      { value: 'localTimeline', label: '本地时间线' },
+      { value: 'hybridTimeline', label: '社交时间线' },
+      { value: 'globalTimeline', label: '全局时间线' }
+    ] }
   ] }
 ]
 
@@ -1063,7 +1068,7 @@ function ensurePlatforms(botId) {
   if (!_botPlatforms[botId]) {
     _botPlatforms[botId] = [
       { id: genId('plat'), type: 'misskey', name: 'Misskey', enabled: true, configured: true,
-        config: { token: 'mk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx', host: 'https://maid.lat', subscribeTimeline: false },
+        config: { token: 'mk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx', host: 'https://maid.lat', timelineChannels: [] },
         tools: ['send', 'reply', 'react', 'get_contacts', 'search_memory', 'web_search'] }
     ]
   }

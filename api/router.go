@@ -144,6 +144,10 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/compaction/history", s.handleGetBotCompactionHistory)
 				botsAdmin.DELETE("/:id/compaction/history", s.handleClearBotCompactionHistory)
 
+				// 聊天节奏（群聊回复节奏控制）
+				botsAdmin.GET("/:id/chat-rhythm", s.handleGetBotRhythm)
+				botsAdmin.PUT("/:id/chat-rhythm", s.handleUpdateBotRhythm)
+
 				// Bot 级技能管理
 				botsAdmin.GET("/:id/skills", s.handleListBotSkills)
 				botsAdmin.GET("/:id/skills/:sid", s.handleGetBotSkill)
