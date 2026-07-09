@@ -23,6 +23,10 @@ type ChatMessage struct {
 	// Content 消息内容。
 	Content string `gorm:"type:text" json:"content"`
 
+	// ToolCalls 本轮 assistant 回复关联的工具调用信息（JSON 序列化数组）。
+	// 仅 assistant 消息可能有值；user 消息为空。刷新后前端据此复原工具卡片。
+	ToolCalls string `gorm:"type:text" json:"-"`
+
 	// TraceID 追踪 ID，用于关联请求-回复对。
 	TraceID string `gorm:"size:128" json:"traceId"`
 

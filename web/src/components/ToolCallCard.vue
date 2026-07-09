@@ -219,8 +219,28 @@ onBeforeUnmount(stop)
   align-items: center;
   gap: 4px;
 }
-.tc-undo { color: #888; }
-.tc-chevron { color: #999; cursor: pointer; }
+.tc-undo {
+  color: #888;
+  display: inline-flex;
+  align-items: center;
+}
+.tc-undo :deep(.t-button__text) {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.tc-undo :deep(.t-icon) {
+  font-size: 14px;
+  line-height: 1;
+}
+.tc-chevron {
+  color: #999;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font-size: 16px;
+  line-height: 1;
+}
 
 .tc-progress {
   height: 3px;

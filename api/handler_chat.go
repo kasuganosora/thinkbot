@@ -179,6 +179,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 
 	fullText := ""
 	botID := req.BotID
+	// 累积本轮工具调用，用于回复完成后随 assistant 消息一起持久化
+	toolCalls := make([]map[string]any, 0)
 
 	for {
 		select {
@@ -205,12 +207,22 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					flusher.Flush()
 				}
 			case outbound.EventLLMToolCall:
+				toolName, _ := event.Data["tool"].(string)
 				writeSSE(c.Writer, sseToolCall, map[string]any{
 					"tool":  event.Data["tool"],
 					"input": event.Data["input"],
 				})
 				flusher.Flush()
+				// 累积一条工具调用（初始为 running 态，等 tool_result 回填）
+				toolCalls = append(toolCalls, map[string]any{
+					"id":     idgen.New("tool"),
+					"name":   toolName,
+					"title":  toolName,
+					"status": "running",
+					"input":  event.Data["input"],
+				})
 			case outbound.EventLLMToolResult:
+				toolName, _ := event.Data["tool"].(string)
 				payload := map[string]any{
 					"tool":   event.Data["tool"],
 					"output": event.Data["output"],
@@ -220,6 +232,19 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				}
 				writeSSE(c.Writer, sseToolResult, payload)
 				flusher.Flush()
+				// 回填最近一个同名且仍处于 running 的工具调用
+				for i := len(toolCalls) - 1; i >= 0; i-- {
+					if toolCalls[i]["name"] == toolName && toolCalls[i]["status"] == "running" {
+						if _, isErr := event.Data["error"]; isErr {
+							toolCalls[i]["status"] = "error"
+							toolCalls[i]["output"] = event.Data["error"]
+						} else {
+							toolCalls[i]["status"] = "success"
+							toolCalls[i]["output"] = event.Data["output"]
+						}
+						break
+					}
+				}
 			}
 
 		// 完成信号：从 WebChannel 收到最终 Action
@@ -243,21 +268,31 @@ func (s *Server) handleChatSend(c *gin.Context) {
 						flusher.Flush()
 					}
 				}
-				writeSSE(c.Writer, sseDone, map[string]any{"text": fullText})
+				donePayload := map[string]any{"text": fullText}
+				if len(toolCalls) > 0 {
+					donePayload["toolCalls"] = toolCalls
+				}
+				writeSSE(c.Writer, sseDone, donePayload)
 				flusher.Flush()
 
-				// 保存 Bot 回复到 DB
-				if fullText != "" {
-					go func(content string) {
+				// 保存 Bot 回复到 DB（含工具调用信息）
+				if fullText != "" || len(toolCalls) > 0 {
+					toolCallsJSON := ""
+					if len(toolCalls) > 0 {
+						if b, err := json.Marshal(toolCalls); err == nil {
+							toolCallsJSON = string(b)
+						}
+					}
+					go func(content, tcJSON string) {
 						defer func() {
 							if r := recover(); r != nil {
 								s.logger.Errorw("panic saving assistant message", "err", r)
 							}
 						}()
-						if err := s.chatHistory.SaveMessage(botID, userID, "assistant", content, traceID); err != nil {
+						if err := s.chatHistory.SaveMessageWithTools(botID, userID, "assistant", content, traceID, tcJSON); err != nil {
 							s.logger.Warnw("failed to save assistant message", "err", err)
 						}
-					}(fullText)
+					}(fullText, toolCallsJSON)
 				}
 				return
 			}

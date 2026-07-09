@@ -51,13 +51,20 @@ func NewChatHistoryService(db *gorm.DB, logger *zap.SugaredLogger) *ChatHistoryS
 	}
 }
 
-// SaveMessage 保存一条聊天消息。
+// SaveMessage 保存一条聊天消息（无工具调用信息）。
 func (s *ChatHistoryService) SaveMessage(botID, userID, role, content, traceID string) error {
+	return s.SaveMessageWithTools(botID, userID, role, content, traceID, "")
+}
+
+// SaveMessageWithTools 保存一条聊天消息，并附带工具调用信息（JSON 字符串）。
+// toolCallsJSON 为空时等价于 SaveMessage。仅 assistant 消息通常带工具调用。
+func (s *ChatHistoryService) SaveMessageWithTools(botID, userID, role, content, traceID, toolCallsJSON string) error {
 	msg := dao.ChatMessage{
 		BotID:     botID,
 		UserID:    userID,
 		Role:      role,
 		Content:   content,
+		ToolCalls: toolCallsJSON,
 		TraceID:   traceID,
 		CreatedAt: time.Now(),
 	}
