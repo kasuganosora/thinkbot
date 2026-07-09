@@ -1,10 +1,13 @@
 package api
 
 import (
+	"encoding/json"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -61,5 +64,47 @@ func (s *Server) handleChatHistory(c *gin.Context) {
 		return
 	}
 
-	OK(c, page)
+	OK(c, gin.H{
+		"messages":   toChatMessageDTOs(page.Messages),
+		"nextCursor": page.NextCursor,
+		"hasMore":    page.HasMore,
+	})
+}
+
+// chatMessageDTO 前端展示用的消息结构。
+// ToolCalls 由持久化的 JSON 字符串反序列化为数组，供前端复原工具卡片。
+type chatMessageDTO struct {
+	ID        uint64 `json:"id"`
+	BotID     string `json:"botId"`
+	UserID    string `json:"userId"`
+	Role      string `json:"role"`
+	Content   string `json:"content"`
+	ToolCalls []any  `json:"toolCalls"`
+	TraceID   string `json:"traceId"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// toChatMessageDTOs 将持久化消息转换为前端 DTO，并解析 ToolCalls JSON。
+func toChatMessageDTOs(msgs []dao.ChatMessage) []chatMessageDTO {
+	out := make([]chatMessageDTO, 0, len(msgs))
+	for _, m := range msgs {
+		dto := chatMessageDTO{
+			ID:        m.ID,
+			BotID:     m.BotID,
+			UserID:    m.UserID,
+			Role:      m.Role,
+			Content:   m.Content,
+			ToolCalls: []any{},
+			TraceID:   m.TraceID,
+			CreatedAt: m.CreatedAt.Format(time.RFC3339),
+		}
+		if m.ToolCalls != "" {
+			var tc []any
+			if err := json.Unmarshal([]byte(m.ToolCalls), &tc); err == nil && tc != nil {
+				dto.ToolCalls = tc
+			}
+		}
+		out = append(out, dto)
+	}
+	return out
 }

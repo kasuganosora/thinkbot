@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -480,6 +482,9 @@ func (s *Server) handleDeleteModel(c *gin.Context) {
 
 // handleImportModels 从 Provider 远端拉取可用模型并导入。
 // POST /api/providers/:pid/models/import
+//
+// 目前仅支持 OpenAI Compatible 类型的服务商：调用其 /models 端点，
+// 解析 data[].id 列表，去重后追加到该 Provider 下，返回本次新增的模型。
 func (s *Server) handleImportModels(c *gin.Context) {
 	pid := c.Param("pid")
 
@@ -489,10 +494,116 @@ func (s *Server) handleImportModels(c *gin.Context) {
 		return
 	}
 
-	// TODO: 实际调用 Provider 的 /models API 获取模型列表
-	// 当前返回空列表，待后续实现真正的远端拉取逻辑
-	_ = def
-	OK(c, []ProviderModel{})
+	if def.ClientType != "OpenAI Compatible" {
+		// 其余类型暂未实现远端模型枚举，保持与前端契约一致返回空数组并给出提示。
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	if def.APIKey == "" {
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	base := strings.TrimRight(def.BaseURL, "/")
+	if base == "" {
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	reqURL := base + "/models"
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, reqURL, nil)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "build import request"))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+def.APIKey)
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "call provider models API"))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "read provider models response"))
+		return
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		Fail(c, errs.BadRequest(fmt.Sprintf("provider returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))))
+		return
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		// 部分厂商把模型放在根数组
+		Models []struct {
+			ID string `json:"id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		Fail(c, errs.Wrap(err, "parse provider models response"))
+		return
+	}
+
+	// 合并 data 与 models 两种常见结构
+	type remoteModel struct{ id string }
+	remote := make([]remoteModel, 0, len(parsed.Data)+len(parsed.Models))
+	for _, m := range parsed.Data {
+		if m.ID != "" {
+			remote = append(remote, remoteModel{id: m.ID})
+		}
+	}
+	for _, m := range parsed.Models {
+		if m.ID != "" {
+			remote = append(remote, remoteModel{id: m.ID})
+		}
+	}
+
+	if len(remote) == 0 {
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	// 去重：已存在的模型 ID 跳过
+	exist := make(map[string]bool, len(def.Models))
+	for _, m := range def.Models {
+		exist[m.ID] = true
+	}
+
+	added := make([]ProviderModel, 0, len(remote))
+	for _, rm := range remote {
+		if exist[rm.id] {
+			continue
+		}
+		exist[rm.id] = true
+		model := ProviderModel{
+			ID:            rm.id,
+			Name:          rm.id,
+			Capabilities:  []string{"chat"},
+			ContextLength: 0,
+			Multimodal:    false,
+			Temperature:   0.7,
+			MaxTokens:     4096,
+		}
+		def.Models = append(def.Models, model)
+		added = append(added, model)
+	}
+
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "import_provider_models", "provider", pid, "count", len(added))
+	OK(c, added)
 }
 
 // --- 辅助函数 ---

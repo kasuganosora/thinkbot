@@ -209,6 +209,11 @@ func mapClientType(clientType string) string {
 }
 
 // resolveChatPath 根据 provider 类型和 baseUrl 推断对应的 chat API 路径。
+//
+// 注意：baseURL 可能已经包含版本段（如智谱 GLM 的
+// "https://open.bigmodel.cn/api/coding/paas/v4"），此时若再拼 "/v4/..." 会
+// 导致路径重复（.../v4/v4/chat/completions → 404）。因此当 baseURL 已含
+// 版本段时只返回相对路径 "/chat/completions"。
 func resolveChatPath(clientType, baseURL string) string {
 	switch strings.ToLower(clientType) {
 	case "anthropic compatible", "anthropic":
@@ -216,11 +221,25 @@ func resolveChatPath(clientType, baseURL string) string {
 	case "google", "gemini":
 		return ""
 	default: // OpenAI Compatible
+		// baseURL 已自带版本段（/v1、/v4 等）时不再重复前缀
+		if hasVersionSegment(baseURL) {
+			return "/chat/completions"
+		}
 		if strings.Contains(baseURL, "bigmodel") {
 			return "/v4/chat/completions"
 		}
 		return "/v1/chat/completions"
 	}
+}
+
+// hasVersionSegment 判断 baseURL 是否已包含 /vN 形式的版本段。
+func hasVersionSegment(baseURL string) bool {
+	for _, seg := range []string{"/v1", "/v2", "/v3", "/v4", "/v5"} {
+		if strings.Contains(baseURL, seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // fillModelDefaults 填充 ModelDef 的默认值。

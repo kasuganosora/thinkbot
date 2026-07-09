@@ -12,6 +12,8 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "dompurify": "^3.4.11",
+    "marked": "^18.0.5",
     "pinia": "^2.1.7",
     "tdesign-icons-vue-next": "^0.2.6",
     "tdesign-vue-next": "^1.9.4",
