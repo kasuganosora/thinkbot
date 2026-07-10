@@ -3,10 +3,15 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -410,20 +415,28 @@ func (s *Server) handleBotFileMkdir(c *gin.Context) {
 
 // handleBotFileUpload 向 Bot 文件系统上传文件。
 // POST /api/bots/:id/files/upload
+// 接收 multipart/form-data：字段 file（文件）、path（目标路径）。
 func (s *Server) handleBotFileUpload(c *gin.Context) {
 	botID := c.Param("id")
 
-	var req struct {
-		Path string `json:"path" binding:"required"`
-		Name string `json:"name" binding:"required"`
-		Size int64  `json:"size"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		Fail(c, errs.BadRequest("file is required: "+err.Error()))
 		return
 	}
+	path := c.PostForm("path")
+	if path == "" {
+		path = "/"
+	}
 
-	if err := s.botFileUpload(c, botID, req.Path, req.Name, req.Size); err != nil {
+	f, err := fileHeader.Open()
+	if err != nil {
+		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
+		return
+	}
+	defer f.Close()
+
+	if err := s.botFileUpload(c, botID, path, fileHeader.Filename, f); err != nil {
 		Fail(c, err)
 		return
 	}
@@ -698,58 +711,149 @@ func (s *Server) saveBotMemoryEntries(c *gin.Context, botID string, entries []Bo
 	return s.store.Set(c.Request.Context(), botDetailKey(botID, "memory_entries"), string(data))
 }
 
+// botWorkspaceRoot 返回指定 bot 的工作目录根路径 {workspaceDir}/{botID}，
+// 并确保该目录存在。
+func (s *Server) botWorkspaceRoot(botID string) (string, error) {
+	workspaceDir := config.NewBuilder(s.store, s.logger).GetWorkspaceDir()
+	root := filepath.Join(workspaceDir, botID)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", err
+	}
+	// 返回绝对路径，便于后续前缀校验的一致性。
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return root, nil
+	}
+	return abs, nil
+}
+
+// safeJoin 将用户传入的相对路径安全地拼接到 root 之下，防止目录穿越。
+// 返回的 fullPath 保证始终位于 root 之内（含 root 自身）。
+// elems 可以是 path、name 等多个片段，会依次清理拼接。
+func safeJoin(root string, elems ...string) (string, error) {
+	// 先把所有片段拼成一个相对路径，再统一清理。
+	rel := filepath.Join(elems...)
+	// 去掉开头的分隔符，避免被当成绝对路径。
+	rel = strings.TrimPrefix(rel, string(filepath.Separator))
+	rel = filepath.Clean("/" + rel) // 归一化，消除 .. 逃逸到根之上的情况
+	rel = strings.TrimPrefix(rel, "/")
+
+	full := filepath.Join(root, rel)
+
+	// 前缀校验：full 必须等于 root 或在 root/ 之下。
+	if full != root && !strings.HasPrefix(full, root+string(filepath.Separator)) {
+		return "", errs.BadRequest("invalid path: escapes workspace root")
+	}
+	// 双保险：用 Rel 检查是否包含向上逃逸。
+	relCheck, err := filepath.Rel(root, full)
+	if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
+		return "", errs.BadRequest("invalid path: escapes workspace root")
+	}
+	return full, nil
+}
+
 func (s *Server) getBotFileEntries(botID, path string) []BotFileEntry {
-	key := botDetailKey(botID, "files."+path)
-	raw, ok := s.store.Get(key)
-	if !ok || raw == "" {
-		// 返回默认的根目录结构
-		if path == "/" {
-			return []BotFileEntry{{Name: "data", Type: "dir", Size: 0, Mtime: nowRFC3339()}}
+	root, err := s.botWorkspaceRoot(botID)
+	if err != nil {
+		return []BotFileEntry{}
+	}
+
+	fullPath, err := safeJoin(root, path)
+	if err != nil {
+		return []BotFileEntry{}
+	}
+
+	dirEntries, err := os.ReadDir(fullPath)
+	if err != nil {
+		// 目录不存在或无法读取，返回空切片而非报错。
+		return []BotFileEntry{}
+	}
+
+	entries := make([]BotFileEntry, 0, len(dirEntries))
+	for _, de := range dirEntries {
+		info, err := de.Info()
+		if err != nil {
+			continue
 		}
-		return []BotFileEntry{}
+		entry := BotFileEntry{
+			Name:  de.Name(),
+			Mtime: info.ModTime().UTC().Format(time.RFC3339),
+		}
+		if de.IsDir() {
+			entry.Type = "dir"
+			entry.Size = 0
+		} else {
+			entry.Type = "file"
+			entry.Size = info.Size()
+		}
+		entries = append(entries, entry)
 	}
-	var result []BotFileEntry
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return []BotFileEntry{}
-	}
-	return result
+	return entries
 }
 
 func (s *Server) botFileMkdir(c *gin.Context, botID, path, name string) error {
-	key := botDetailKey(botID, "files."+path)
-	entries := s.getBotFileEntries(botID, path)
-
-	// 检查是否已存在
-	for _, e := range entries {
-		if e.Name == name {
-			return errs.Conflict("directory already exists")
-		}
+	// 校验 name 合法性：不含路径分隔符，不为 . 或 ..
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
+		return errs.BadRequest("invalid directory name")
 	}
 
-	entries = append(entries, BotFileEntry{Name: name, Type: "dir", Size: 0, Mtime: nowRFC3339()})
-	data, _ := json.Marshal(entries)
-	return s.store.Set(c.Request.Context(), key, string(data))
+	root, err := s.botWorkspaceRoot(botID)
+	if err != nil {
+		return errs.Internal("failed to resolve workspace root: " + err.Error())
+	}
+
+	target, err := safeJoin(root, path, name)
+	if err != nil {
+		return err
+	}
+
+	if _, statErr := os.Stat(target); statErr == nil {
+		return errs.Conflict("directory already exists")
+	}
+
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return errs.Internal("failed to create directory: " + err.Error())
+	}
+	return nil
 }
 
-func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, size int64) error {
-	key := botDetailKey(botID, "files."+path)
-	entries := s.getBotFileEntries(botID, path)
-
-	// 覆盖或新增
-	found := false
-	for i, e := range entries {
-		if e.Name == name {
-			entries[i] = BotFileEntry{Name: name, Type: "file", Size: size, Mtime: nowRFC3339()}
-			found = true
-			break
-		}
-	}
-	if !found {
-		entries = append(entries, BotFileEntry{Name: name, Type: "file", Size: size, Mtime: nowRFC3339()})
+func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, content io.Reader) error {
+	// 校验文件名合法性。
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
+		return errs.BadRequest("invalid file name")
 	}
 
-	data, _ := json.Marshal(entries)
-	return s.store.Set(c.Request.Context(), key, string(data))
+	root, err := s.botWorkspaceRoot(botID)
+	if err != nil {
+		return errs.Internal("failed to resolve workspace root: " + err.Error())
+	}
+
+	// 目标所在目录（path 部分）与文件路径分别做安全校验。
+	dir, err := safeJoin(root, path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return errs.Internal("failed to prepare directory: " + err.Error())
+	}
+
+	target, err := safeJoin(root, path, name)
+	if err != nil {
+		return err
+	}
+
+	dst, err := os.Create(target)
+	if err != nil {
+		return errs.Internal("failed to create file: " + err.Error())
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, content); err != nil {
+		return errs.Internal("failed to write file: " + err.Error())
+	}
+	return nil
 }
 
 func (s *Server) getBotContainerInfo(botID string) *BotContainerInfo {

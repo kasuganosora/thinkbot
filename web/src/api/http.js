@@ -53,14 +53,35 @@ export function mockResolve(producer) {
 }
 
 /**
- * 真实请求占位（后端就绪后实现）。当前 USE_MOCK=true 时不会被调用。
- * 约定：解包统一响应，code!==0 时 throw，成功时 resolve data。
+ * 把 query 对象拼接到 URL 上（复用 URLSearchParams）。
+ * - 兼容 url 上已存在的 querystring（用 & 追加）。
+ * - 过滤 undefined / null / '' 等空值，不参与拼接。
+ * @param {string} url
+ * @param {object} [query]
+ * @returns {string}
+ */
+function withQuery(url, query) {
+  if (!query || typeof query !== 'object') return url
+  const params = new URLSearchParams()
+  for (const [k, v] of Object.entries(query)) {
+    if (v === undefined || v === null || v === '') continue
+    params.append(k, String(v))
+  }
+  const qs = params.toString()
+  if (!qs) return url
+  return url + (url.includes('?') ? '&' : '?') + qs
+}
+
+/**
+ * 真实请求（JSON）。约定：解包统一响应，code!==0 时 throw，成功时 resolve data。
  * @param {string} method
  * @param {string} url
- * @param {object} [body]
+ * @param {object} [body]  JSON 请求体
+ * @param {object} [query] 可选的 query 参数对象，会拼接到 URL 的 querystring 上
  */
-export async function request(method, url, body) {
-  const resp = await fetch(url, {
+export async function request(method, url, body, query) {
+  const finalUrl = withQuery(url, query)
+  const resp = await fetch(finalUrl, {
     method,
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
@@ -69,6 +90,31 @@ export async function request(method, url, body) {
   const json = await resp.json()
   if (json.code !== 0) {
     const err = new Error(json.message || '请求失败')
+    err.code = json.code
+    throw err
+  }
+  return json.data
+}
+
+/**
+ * multipart/form-data 请求（文件上传专用）。
+ * 与 request 一样解包统一响应 {code,message,data} 并携带 cookie；
+ * 但**不手动设置 Content-Type**——交给浏览器根据 FormData 自动带上 boundary。
+ * @param {string} method
+ * @param {string} url
+ * @param {FormData} formData
+ * @param {object} [query] 可选 query 参数
+ */
+export async function uploadRequest(method, url, formData, query) {
+  const finalUrl = withQuery(url, query)
+  const resp = await fetch(finalUrl, {
+    method,
+    credentials: 'include',
+    body: formData
+  })
+  const json = await resp.json()
+  if (json.code !== 0) {
+    const err = new Error(json.message || '上传失败')
     err.code = json.code
     throw err
   }

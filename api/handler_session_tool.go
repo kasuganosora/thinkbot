@@ -114,23 +114,32 @@ func (s *Server) handleSessionFileMkdir(c *gin.Context) {
 
 // handleSessionFileUpload 上传文件到会话工作区（代理到 Bot 文件存储）。
 // POST /api/sessions/:sid/files/upload
+// 接收 multipart/form-data：字段 file（文件）、path（目标路径）。
 func (s *Server) handleSessionFileUpload(c *gin.Context) {
 	sid := c.Param("sid")
-	var req struct {
-		Path string `json:"path" binding:"required"`
-		Name string `json:"name" binding:"required"`
-		Size int64  `json:"size"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("path and name are required"))
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		Fail(c, errs.BadRequest("file is required: "+err.Error()))
 		return
 	}
+	path := c.PostForm("path")
+	if path == "" {
+		path = "/"
+	}
 
-	if err := s.botFileUpload(c, sid, req.Path, req.Name, req.Size); err != nil {
+	f, err := fileHeader.Open()
+	if err != nil {
+		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
+		return
+	}
+	defer f.Close()
+
+	if err := s.botFileUpload(c, sid, path, fileHeader.Filename, f); err != nil {
 		Fail(c, err)
 		return
 	}
-	auditLog(c, s.logger, "session_file_upload", "session", sid, "path", req.Path, "name", req.Name, "size", req.Size)
+	auditLog(c, s.logger, "session_file_upload", "session", sid, "path", path, "name", fileHeader.Filename, "size", fileHeader.Size)
 	OK(c, gin.H{"ok": true})
 }
 

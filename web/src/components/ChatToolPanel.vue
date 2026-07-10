@@ -259,10 +259,10 @@ function onTermExec(cmd) {
 }
 
 // ---------- 文件 ----------
-const files = ref({ path: '/data', entries: [] })
+const files = ref({ path: '/', entries: [] })
 const uploadInputRef = ref()
 const crumbs = computed(() => ['/', ...String(files.value.path || '').split('/').filter(Boolean)])
-const isRoot = computed(() => files.value.path === '/data' || files.value.path === '/')
+const isRoot = computed(() => files.value.path === '/')
 
 async function loadFiles() {
   if (!sid.value) return
@@ -297,10 +297,23 @@ function openMkdir() {
 function triggerUpload() { uploadInputRef.value?.click() }
 async function onUpload(e) {
   const list = Array.from(e.target.files || [])
+  const failed = []
   for (const f of list) {
-    try { await sessionToolApi.upload(sid.value, files.value.path, f.name, f.size) } catch (_) {}
+    try {
+      await sessionToolApi.upload(sid.value, files.value.path, f)
+    } catch (err) {
+      failed.push({ name: f.name, message: err?.message || '上传失败' })
+    }
   }
-  if (list.length) MessagePlugin.success(`已上传 ${list.length} 个文件`)
+  if (failed.length) {
+    for (const item of failed) {
+      MessagePlugin.error(`${item.name} 上传失败：${item.message}`)
+    }
+    const okCount = list.length - failed.length
+    if (okCount > 0) MessagePlugin.success(`已上传 ${okCount} 个文件`)
+  } else if (list.length) {
+    MessagePlugin.success(`已上传 ${list.length} 个文件`)
+  }
   e.target.value = ''
   loadFiles()
 }
@@ -346,7 +359,7 @@ async function loadAll() {
   if (!sid.value) return
   try {
     status.value = await sessionToolApi.status(sid.value)
-    files.value.path = '/data'
+    files.value.path = '/'
     await loadFiles()
   } catch (e) {
     // 静默：工具栏非核心
