@@ -443,6 +443,37 @@ func (s *Server) handleBotFileUpload(c *gin.Context) {
 	OK(c, gin.H{"ok": true})
 }
 
+// handleBotFileDownload 下载 Bot 文件系统中的单个文件。
+// GET /api/bots/:id/files/download?path=/xxx.txt
+func (s *Server) handleBotFileDownload(c *gin.Context) {
+	botID := c.Param("id")
+	s.serveBotFileDownload(c, botID, c.Query("path"))
+}
+
+// serveBotFileDownload 校验路径并以附件形式返回文件内容（供 bot / session 复用）。
+func (s *Server) serveBotFileDownload(c *gin.Context, botID, path string) {
+	if path == "" || path == "/" {
+		Fail(c, errs.BadRequest("path is required"))
+		return
+	}
+	root, err := s.botWorkspaceRoot(botID)
+	if err != nil {
+		Fail(c, errs.Internal("failed to resolve workspace root: "+err.Error()))
+		return
+	}
+	fullPath, err := safeJoin(root, path)
+	if err != nil {
+		Fail(c, errs.BadRequest("invalid path"))
+		return
+	}
+	info, err := os.Stat(fullPath)
+	if err != nil || info.IsDir() {
+		Fail(c, errs.NotFound("file not found"))
+		return
+	}
+	c.FileAttachment(fullPath, filepath.Base(fullPath))
+}
+
 // --- 容器管理 (Container) ---
 
 // BotContainerInfo 容器信息。

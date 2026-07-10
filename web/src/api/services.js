@@ -1004,6 +1004,9 @@ export const sessionToolApi = {
     fd.append('path', path)
     return uploadRequest('POST', `/api/sessions/${sid}/files/upload`, fd)
   },
+  downloadUrl(sid, path) {
+    return `/api/sessions/${sid}/files/download?path=${encodeURIComponent(path)}`
+  },
   status(sid) {
     if (USE_MOCK) {
       return mockResolve(() => ({
