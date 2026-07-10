@@ -32,6 +32,7 @@ import (
 	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/tools"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -645,6 +646,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 	}
 
+	// 持久化工作空间接线：每个 bot 独立目录 {workspaceDir}/{botID}/。
+	// 传入 WorkspaceDir 后，bot.New 会创建目录并注册工作空间文件工具。
+	// SandboxConfig 留空 Backend 时，bot.New 会用 sandbox.DefaultConfig()（非 docker/local）。
+	workspaceDir := builder.GetWorkspaceDir()
+	sbCfg := sandbox.DefaultConfig()
+	sbCfg.Timezone = builder.GetTimezone()
+
 	b, err := bot.New(bot.BotParams{
 		ID:                id,
 		Name:              def.Name,
@@ -663,6 +671,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		ToolManager:       toolMgr,
 		AdaptiveSyncer:    adaptiveSyncer,
 		RejectionDetector: rejectionDetector,
+		WorkspaceDir:      workspaceDir,
+		SandboxConfig:     sbCfg,
 	})
 	if err != nil {
 		rollback()

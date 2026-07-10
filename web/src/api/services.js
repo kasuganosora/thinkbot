@@ -7,7 +7,7 @@
 // 返回值均为「解包后的 data」（Promise）。失败时 reject Error。
 // ============================================================================
 
-import { USE_MOCK, mockResolve, request } from './http'
+import { USE_MOCK, mockResolve, request, uploadRequest } from './http'
 import { db, saveDB, nowISO } from './mockDb'
 
 let _seq = 1000
@@ -986,10 +986,12 @@ export const sessionToolApi = {
     }
     return request('POST', `/api/sessions/${sid}/files/mkdir`, { path, name })
   },
-  upload(sid, path, name, size) {
+  upload(sid, path, file) {
     if (USE_MOCK) {
       return mockResolve(() => {
         if (!_mockFS[path]) _mockFS[path] = []
+        const name = file?.name
+        const size = file?.size
         const idx = _mockFS[path].findIndex(e => e.name === name)
         const entry = { name, type: 'file', size: size || 0, mtime: nowISO() }
         if (idx > -1) _mockFS[path][idx] = entry
@@ -997,7 +999,10 @@ export const sessionToolApi = {
         return { ok: true }
       })
     }
-    return request('POST', `/api/sessions/${sid}/files/upload`, { path, name, size })
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('path', path)
+    return uploadRequest('POST', `/api/sessions/${sid}/files/upload`, fd)
   },
   status(sid) {
     if (USE_MOCK) {
