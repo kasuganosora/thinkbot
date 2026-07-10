@@ -95,10 +95,12 @@
             </template>
           </div>
           <div class="files-ops">
-            <t-button size="small" variant="outline" @click="triggerUpload"><template #icon><t-icon name="upload" /></template>上传</t-button>
+            <label class="upload-btn" for="cttp-upload-input" data-testid="file-upload-btn">
+              <t-icon name="upload" /><span>上传</span>
+            </label>
+            <input id="cttp-upload-input" ref="uploadInputRef" type="file" multiple class="hidden-file" @change="onUpload" />
             <t-button size="small" variant="outline" @click="openMkdir"><template #icon><t-icon name="folder-add" /></template>新建文件夹</t-button>
             <t-button size="small" variant="outline" shape="square" @click="loadFiles"><t-icon name="refresh" /></t-button>
-            <input ref="uploadInputRef" type="file" multiple class="hidden-file" @change="onUpload" />
           </div>
         </div>
         <div class="files-table">
@@ -127,7 +129,14 @@
           >
             <span class="col-name">
               <t-icon :name="e.type === 'dir' ? 'folder' : 'file'" :class="e.type === 'dir' ? 'ic-dir' : 'ic-file'" />
-              {{ e.name }}
+              <span class="fname">{{ e.name }}</span>
+              <t-icon
+                v-if="e.type !== 'dir'"
+                name="download"
+                class="ic-download"
+                title="下载"
+                @click.stop="downloadFile(e.name)"
+              />
             </span>
             <span class="col-size">{{ e.type === 'dir' ? '' : fmtSize(e.size) }}</span>
             <span class="col-time">{{ fmtTime(e.mtime) }}</span>
@@ -272,6 +281,17 @@ function enterDir(name) {
   files.value.path = `${files.value.path.replace(/\/$/, '')}/${name}`
   loadFiles()
 }
+function downloadFile(name) {
+  if (!sid.value) return
+  const full = `${files.value.path.replace(/\/$/, '')}/${name}`
+  const url = sessionToolApi.downloadUrl(sid.value, full)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
 function goUp() {
   const parts = files.value.path.split('/').filter(Boolean)
   parts.pop()
@@ -339,8 +359,14 @@ function fmtSize(b) {
 function fmtTime(iso) {
   const d = new Date(iso)
   if (isNaN(d)) return ''
-  const days = Math.floor((Date.now() - d.getTime()) / 86400000)
-  if (days >= 0 && days <= 15) return `${days}d ago`
+  const pad = (n) => String(n).padStart(2, '0')
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const dayDiff = Math.floor((startOfToday - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400000)
+  if (dayDiff === 0) return hm
+  if (dayDiff === 1) return `昨天 ${hm}`
+  if (dayDiff > 1 && dayDiff <= 6) return `${dayDiff}天前`
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
 function fmtK(n) {
@@ -505,7 +531,34 @@ watch(sid, loadAll)
 .crumb-seg.last { font-weight: 600; color: #1d1d1f; cursor: default; }
 .crumb-seg.last:hover { color: #1d1d1f; }
 .files-ops { display: flex; gap: 8px; }
-.hidden-file { display: none; }
+.upload-btn {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  color: #0052d9;
+  background: #fff;
+  border: 1px solid #0052d9;
+  border-radius: 3px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.2s, color 0.2s;
+}
+.upload-btn:hover { background: rgba(0, 82, 217, 0.08); }
+.upload-btn:active { background: rgba(0, 82, 217, 0.16); }
+.hidden-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 .files-table { font-size: 13px; }
 .files-row {
   display: grid;
@@ -519,11 +572,22 @@ watch(sid, loadAll)
 .files-row.clickable:hover, .file-up:hover { background: #f5f7fa; }
 .file-up { cursor: pointer; color: #888; }
 .files-th { color: #99a; font-size: 12px; border-bottom: 1px solid #eceef1; border-radius: 0; }
-.col-name { display: flex; align-items: center; gap: 10px; color: #1d1d1f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-name { display: flex; align-items: center; gap: 10px; color: #1d1d1f; overflow: hidden; min-width: 0; }
+.col-name .fname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-size { text-align: right; color: #888; }
 .col-time { text-align: right; color: #999; }
-.ic-dir { color: #4b8bf5; font-size: 16px; }
-.ic-file { color: #9aa3b0; font-size: 16px; }
+.ic-dir { flex: 0 0 auto; color: #4b8bf5; font-size: 16px; }
+.ic-file { flex: 0 0 auto; color: #9aa3b0; font-size: 16px; }
+.ic-download {
+  flex: 0 0 auto;
+  color: #b0b7c3;
+  font-size: 15px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+.files-row:hover .ic-download { opacity: 1; }
+.ic-download:hover { color: #0052d9; }
 .files-empty { text-align: center; color: #aaa; padding: 28px 0; font-size: 13px; }
 
 /* status */

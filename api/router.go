@@ -118,6 +118,7 @@ func (s *Server) registerRoutes() {
 
 				// 文件管理
 				botsAdmin.GET("/:id/files", s.handleListBotFiles)
+				botsAdmin.GET("/:id/files/download", s.handleBotFileDownload)
 				botsAdmin.POST("/:id/files/mkdir", s.handleBotFileMkdir)
 				botsAdmin.POST("/:id/files/upload", s.handleBotFileUpload)
 
@@ -267,6 +268,7 @@ func (s *Server) registerRoutes() {
 			sessionGroup.GET("/:sid/terminal", s.handleSessionTerminal)
 			sessionGroup.POST("/:sid/terminal/exec", s.handleSessionTerminalExec)
 			sessionGroup.GET("/:sid/files", s.handleSessionFiles)
+			sessionGroup.GET("/:sid/files/download", s.handleSessionFileDownload)
 			sessionGroup.POST("/:sid/files/mkdir", s.handleSessionFileMkdir)
 			sessionGroup.POST("/:sid/files/upload", s.handleSessionFileUpload)
 			sessionGroup.GET("/:sid/status", s.handleSessionStatus)

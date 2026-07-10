@@ -143,6 +143,13 @@ func (s *Server) handleSessionFileUpload(c *gin.Context) {
 	OK(c, gin.H{"ok": true})
 }
 
+// handleSessionFileDownload 下载会话工作区文件（代理到 Bot 文件存储）。
+// GET /api/sessions/:sid/files/download?path=/xxx
+func (s *Server) handleSessionFileDownload(c *gin.Context) {
+	sid := c.Param("sid")
+	s.serveBotFileDownload(c, sid, c.Query("path"))
+}
+
 // --- 会话状态 API ---
 
 // SessionStatus 会话状态信息。
