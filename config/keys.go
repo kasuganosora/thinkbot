@@ -118,6 +118,12 @@ const (
 
 	// KeySandboxImage 沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用）。
 	KeySandboxImage = "sandbox.image"
+
+	// KeySandboxRequireDocker 是否在 auto 模式下强制要求 Docker 可用。
+	// true：auto 模式下探测不到 Docker 直接报错，不降级到 local（避免无隔离裸跑）；
+	// false（默认）：auto 模式下探测不到 Docker 则降级 local 进程执行。
+	// 注意：Backend 显式设为 "docker" 时本就强制要求 Docker，与本键无关。
+	KeySandboxRequireDocker = "sandbox.require_docker"
 )
 
 // System 键。

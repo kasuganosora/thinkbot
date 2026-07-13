@@ -401,8 +401,16 @@ type botWorkspace struct {
 	container *botContainer
 }
 
-func (w *botWorkspace) ID() string      { return w.botID }
-func (w *botWorkspace) WorkDir() string { return w.root }
+func (w *botWorkspace) ID() string { return w.botID }
+func (w *botWorkspace) WorkDir() string {
+	// 持久容器模式下，agent 面向的统一工作目录是容器内虚拟根 /data，
+	// 而非主程序容器内的 w.root（named volume 在主程序侧不可见）。
+	// 与 ContainerInfo().WorkDir 保持一致，避免向 LLM/用户泄露主程序内部路径。
+	if w.container != nil {
+		return VirtualRoot
+	}
+	return w.root
+}
 
 func (w *botWorkspace) HealthCheck(ctx context.Context) HealthStatus {
 	// docker 持久容器模式：检查容器是否可运行。
@@ -560,7 +568,14 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 	var cmd *exec.Cmd
 
 	if w.backend == "docker" {
-		// Docker 临时容器：docker run --rm -v {root}:/workspace -w /workspace {image} sh -c {cmd}
+		// 临时容器路径（bind mount 模式）：docker run --rm -v {root}:/workspace ...
+		//
+		// 不可达说明：当前 docker 后端下 NewBotWorkspaceManager 会强制
+		// PersistentContainer=true（见上方强制逻辑 :112），因此 w.container != nil，
+		// Exec 已在上方 :549 走容器模式，本分支实际不会被触发。
+		// 若将来允许关闭持久容器走此分支，在 DooD 部署（主程序自身运行在容器内）
+		// 场景下 w.root 是主程序容器内路径，bind mount 到宿主 daemon 会按宿主文件
+		// 系统解析而失败或挂空目录 —— 届时需改用 named volume 挂载而非 bind mount。
 		args := []string{"run", "--rm"}
 
 		// Volume mount（宿主目录 → 容器 /workspace）

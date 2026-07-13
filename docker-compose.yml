@@ -1,0 +1,46 @@
+# ============================================================================
+# ThinkBot DooD（Docker-outside-of-Docker）部署
+#
+# 架构：
+#   主程序运行在本 thinkbot 容器内；通过挂载的 /var/run/docker.sock 指挥宿主
+#   Docker daemon，为每个 bot 创建一个独立的「兄弟容器」（sandbox）。bot 命令在
+#   兄弟容器内 docker exec 执行，文件落 named volume，实现与主程序隔离。
+#
+# 前提：
+#   1) 宿主已安装并运行 Docker daemon。
+#   2) 宿主用户对该 daemon 有访问权限（docker.sock 可读写）。
+#
+# 首次运行：
+#   cp .env.example .env
+#   # 编辑 .env，至少确认 sandbox.backend=docker（示例已默认开启）
+#   docker compose up -d
+#
+# 注意：本容器不需要 privileged，也不要在容器内再跑 dockerd；它只作为 docker
+#       客户端连接宿主 daemon。bot 兄弟容器的资源限制由 sandbox 代码设置
+#       （--memory / --cpus / --network none）。
+# ============================================================================
+
+services:
+  thinkbot:
+    build: .
+    container_name: thinkbot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 【关键】挂载宿主 docker.sock，使容器内 docker CLI 能创建 bot 兄弟容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 应用数据持久化（数据库、bot 元数据、主程序侧工作空间目录 data/workspaces）
+      - ./data:/app/data
+      # 配置文件（应用默认 CONFIG_FILE=/app/.env；挂载后覆盖镜像内置默认）
+      - ./.env:/app/.env:ro
+    # 可选：自定义配置路径（配合宿主编排挂载到该路径）
+    # environment:
+    #   CONFIG_FILE: /app/.env
+    healthcheck:
+      # 检查 docker.sock 可用 + 二进制存在（无需依赖特定 HTTP 端点）
+      test: ["CMD-SHELL", "test -S /var/run/docker.sock && test -x /app/thinkbot || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
