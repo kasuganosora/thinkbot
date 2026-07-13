@@ -259,7 +259,7 @@ func New(params BotParams) (*Bot, error) {
 	if params.WorkspaceDir != "" {
 		sbCfg := params.SandboxConfig
 		if sbCfg.Backend == "" {
-			sbCfg = sandbox.DefaultConfig()
+			sbCfg.Backend = sandbox.DefaultConfig().Backend
 		}
 		// 确保时区已设置（调用方可通过 SandboxConfig.Timezone 注入 config.GetTimezone()）
 		if sbCfg.Timezone == "" {
@@ -291,7 +291,12 @@ func New(params BotParams) (*Bot, error) {
 
 		// SoulLoader 从工作空间目录加载 SOUL.md
 		if params.PromptRegistry != nil {
-			soulPath := filepath.Join(absDir, "SOUL.md")
+			// 使用主程序侧真实路径（{WorkspaceDir}/{botID}/SOUL.md），
+			// 而非 WorkDir() 的容器内虚拟根 /data：容器模式下 bot 文件虽经 named
+			// volume 隔离，但 SOUL.md 由主程序侧 SoulLoader 基于宿主路径加载，
+			// 必须指向主程序容器磁盘上的真实目录（见 P0 待决策：SoulLoader 与
+			// named volume 脱节问题）。
+			soulPath := filepath.Join(params.WorkspaceDir, params.ID, "SOUL.md")
 			soul := prompt.NewSoulLoader(prompt.SoulLoaderConfig{
 				Path:           soulPath,
 				BotID:          params.ID,

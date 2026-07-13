@@ -1,0 +1,12 @@
+.git
+.gitignore
+data
+logs
+*.db
+*.db-shm
+*.db-wal
+docs
+docker_sandbox_test
+deploy
+# 用户真实配置不进镜像（由 compose 挂载 ./.env）
+.env

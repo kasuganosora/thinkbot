@@ -635,6 +635,9 @@ func (b *Builder) GetWorkspaceDir() string {
 func WorkspaceMetaSpecs() []MetaSpec {
 	return []MetaSpec{
 		{Key: KeyWorkspaceDir, Category: "Workspace", Description: "Bot 工作空间根目录的物理路径（默认 data/workspaces）。每个 Bot 拥有独立子目录，文件持久化保存。"},
+		{Key: KeySandboxBackend, Category: "Workspace", Description: "沙箱后端：auto（默认，有 Docker 用容器隔离否则 local）| docker（强制容器隔离，不可用则报错）| local（强制本地进程，无隔离）。DooD 部署建议设为 docker。"},
+		{Key: KeySandboxImage, Category: "Workspace", Description: "沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用，默认 alpine:latest）。"},
+		{Key: KeySandboxRequireDocker, Category: "Workspace", Description: "auto 模式下是否强制要求 Docker 可用：true 则探测不到 Docker 直接报错而非降级 local（避免无隔离裸跑）；false（默认）则降级 local。"},
 	}
 }
 
@@ -944,7 +947,10 @@ func DefaultMap() map[string]string {
 		// Soul
 		KeySoulReloadInterval: "5s",
 		// Workspace
-		KeyWorkspaceDir: "data/workspaces",
+		KeyWorkspaceDir:         "data/workspaces",
+		KeySandboxBackend:       "auto",
+		KeySandboxImage:         "alpine:latest",
+		KeySandboxRequireDocker: "false",
 		// Dreaming
 		"bot.dreaming.enabled":  "false",
 		"bot.dreaming.schedule": "0 3 * * *",

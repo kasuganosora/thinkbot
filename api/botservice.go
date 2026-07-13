@@ -203,6 +203,10 @@ func (s *BotService) SandboxConfigForBot() sandbox.Config {
 	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
 		cfg.Backend = backend
 	}
+	// auto 模式下是否强制要求 Docker 可用：避免 DooD 部署探测失败时静默降级 local 裸跑。
+	if s.store.GetString(config.KeySandboxRequireDocker, "") == "true" {
+		cfg.RequireDocker = true
+	}
 	return cfg
 }
 
