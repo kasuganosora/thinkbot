@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -456,6 +458,20 @@ func (s *Server) serveBotFileDownload(c *gin.Context, botID, path string) {
 		Fail(c, errs.BadRequest("path is required"))
 		return
 	}
+
+	// docker 隔离模式：从容器内读取文件流返回。
+	if ws, ok := s.botFileWorkspace(botID); ok {
+		data, err := ws.ReadFile(c.Request.Context(), path)
+		if err != nil {
+			Fail(c, errs.NotFound("file not found"))
+			return
+		}
+		name := filepath.Base(filepath.ToSlash(path))
+		c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
+		c.Data(200, "application/octet-stream", data)
+		return
+	}
+
 	root, err := s.botWorkspaceRoot(botID)
 	if err != nil {
 		Fail(c, errs.Internal("failed to resolve workspace root: "+err.Error()))
@@ -621,7 +637,22 @@ func (s *Server) handleRemoveBotContainer(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+
+	// 真实销毁 docker 持久容器（removeData 与 KeepData 相反）。
+	if s.botSvc != nil {
+		cfg := s.botSvc.SandboxConfigForBot()
+		if mgr, err := sandbox.NewBotWorkspaceManager(s.botSvc.GetWorkspaceBaseDir(), cfg, s.logger); err == nil {
+			if err := mgr.DestroyBot(botID, !req.KeepData); err != nil {
+				s.logger.Warnw("destroy bot container failed", "bot", botID, "err", err)
+			}
+		}
+	}
 	OK(c, nil)
+}
+
+// shellQuoteArg 用单引号安全包裹一个 shell 参数。
+func shellQuoteArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // --- 上下文压缩 (Compaction) ---
@@ -783,7 +814,62 @@ func safeJoin(root string, elems ...string) (string, error) {
 	return full, nil
 }
 
+// botFileWorkspace 返回 docker 持久容器模式下的容器工作空间；
+// 若当前不是 docker 隔离模式（local 后端），返回 (nil, false)，调用方走宿主磁盘直读逻辑。
+//
+// 优先复用运行中 bot 的工作空间管理器（与运行时状态完全一致）；
+// bot 未运行时按当前配置临时构造一个 manager（用于离线浏览容器文件）。
+func (s *Server) botFileWorkspace(botID string) (sandbox.Workspace, bool) {
+	var mgr *sandbox.BotWorkspaceManager
+	if s.botSvc != nil {
+		if m, ok := s.botSvc.RunningBotWorkspaceMgr(botID); ok {
+			mgr = m
+		}
+	}
+	if mgr == nil && s.botSvc != nil {
+		cfg := s.botSvc.SandboxConfigForBot()
+		m, err := sandbox.NewBotWorkspaceManager(s.botSvc.GetWorkspaceBaseDir(), cfg, s.logger)
+		if err != nil {
+			return nil, false
+		}
+		mgr = m
+	}
+	if mgr == nil || mgr.Backend() != "docker" {
+		return nil, false // local 模式：走宿主磁盘
+	}
+	ws, err := mgr.GetOrCreate(botID)
+	if err != nil {
+		return nil, false
+	}
+	return ws, true
+}
+
 func (s *Server) getBotFileEntries(botID, path string) []BotFileEntry {
+	// docker 隔离模式：文件在容器内，通过容器列目录。
+	if ws, ok := s.botFileWorkspace(botID); ok {
+		entries, err := ws.ListDir(context.Background(), path)
+		if err != nil {
+			return []BotFileEntry{}
+		}
+		result := make([]BotFileEntry, 0, len(entries))
+		for _, e := range entries {
+			be := BotFileEntry{Name: e.Name, Size: e.Size}
+			if e.IsDir {
+				be.Type = "dir"
+				be.Size = 0
+			} else {
+				be.Type = "file"
+			}
+			if !e.ModTime.IsZero() {
+				be.Mtime = e.ModTime.UTC().Format(time.RFC3339)
+			} else {
+				be.Mtime = nowRFC3339()
+			}
+			result = append(result, be)
+		}
+		return result
+	}
+
 	root, err := s.botWorkspaceRoot(botID)
 	if err != nil {
 		return []BotFileEntry{}
@@ -829,6 +915,21 @@ func (s *Server) botFileMkdir(c *gin.Context, botID, path, name string) error {
 		return errs.BadRequest("invalid directory name")
 	}
 
+	// docker 隔离模式：在容器内创建目录。
+	if ws, ok := s.botFileWorkspace(botID); ok {
+		target := filepath.ToSlash(filepath.Join(path, name))
+		res, err := ws.Exec(c.Request.Context(), sandbox.ExecRequest{
+			Command: "mkdir -p " + shellQuoteArg("/workspace/"+strings.TrimPrefix(target, "/")),
+		})
+		if err != nil {
+			return errs.Internal("failed to create directory: " + err.Error())
+		}
+		if res.ExitCode != 0 {
+			return errs.Internal("failed to create directory: " + res.Stderr)
+		}
+		return nil
+	}
+
 	root, err := s.botWorkspaceRoot(botID)
 	if err != nil {
 		return errs.Internal("failed to resolve workspace root: " + err.Error())
@@ -854,6 +955,19 @@ func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, content
 	if name == "" || name == "." || name == ".." ||
 		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
 		return errs.BadRequest("invalid file name")
+	}
+
+	// docker 隔离模式：写入容器内。
+	if ws, ok := s.botFileWorkspace(botID); ok {
+		data, err := io.ReadAll(content)
+		if err != nil {
+			return errs.Internal("failed to read upload: " + err.Error())
+		}
+		target := filepath.ToSlash(filepath.Join(path, name))
+		if err := ws.WriteFile(c.Request.Context(), target, data); err != nil {
+			return errs.Internal("failed to write file into container: " + err.Error())
+		}
+		return nil
 	}
 
 	root, err := s.botWorkspaceRoot(botID)

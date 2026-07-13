@@ -108,6 +108,12 @@ func NewBotWorkspaceManager(baseDir string, cfg Config, logger *zap.SugaredLogge
 		}()
 	}
 
+	// docker 后端默认启用「一 bot 一长期容器」持久化隔离模式。
+	if b == "docker" && !cfg.PersistentContainer {
+		cfg.PersistentContainer = true
+		logger.Info("bot_workspace: persistent per-bot container mode enabled (isolated)")
+	}
+
 	return &BotWorkspaceManager{
 		baseDir:    baseDir,
 		cfg:        cfg,
@@ -162,6 +168,10 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 		backend: m.backend,
 		logger:  m.logger,
 	}
+	// docker 持久容器模式：为该 bot 绑定一个长期容器（惰性创建）。
+	if m.backend == "docker" && m.cfg.PersistentContainer {
+		ws.container = newBotContainer(botID, m.cfg, m.logger)
+	}
 	m.workspaces[botID] = ws
 
 	m.logger.Debugw("bot workspace ready", "botID", botID, "dir", dir)
@@ -184,6 +194,43 @@ func (m *BotWorkspaceManager) CloseAll() {
 	m.mu.Lock()
 	m.workspaces = make(map[string]*botWorkspace)
 	m.mu.Unlock()
+}
+
+// DestroyBot 彻底销毁指定 bot 的运行时资源。
+// docker 持久容器模式下：删除容器；removeData 为 true 时连同持久化 volume 一起删除。
+// local 模式下：removeData 为 true 时删除宿主工作目录。
+// 用于 bot 被删除时清理，确保不残留容器/卷/文件。
+func (m *BotWorkspaceManager) DestroyBot(botID string, removeData bool) error {
+	m.mu.Lock()
+	ws := m.workspaces[botID]
+	delete(m.workspaces, botID)
+	m.mu.Unlock()
+
+	// 容器模式：即使内存中无引用，也按命名规则销毁容器/卷（重启后仍可清理）。
+	if m.backend == "docker" && m.cfg.PersistentContainer {
+		c := newBotContainer(botID, m.cfg, m.logger)
+		return c.destroy(removeData)
+	}
+
+	// local 模式：可选删除宿主目录。
+	if removeData {
+		dir := filepath.Join(m.baseDir, botID)
+		if err := os.RemoveAll(dir); err != nil {
+			return errs.Wrapf(err, "bot_workspace: remove dir %q", dir)
+		}
+	}
+	_ = ws
+	return nil
+}
+
+// StopBot 停止指定 bot 的容器（保留容器与数据，下次使用时自动重启）。
+// 仅对 docker 持久容器模式有效；其他模式为 no-op。
+func (m *BotWorkspaceManager) StopBot(botID string) error {
+	if m.backend != "docker" || !m.cfg.PersistentContainer {
+		return nil
+	}
+	c := newBotContainer(botID, m.cfg, m.logger)
+	return c.stop()
 }
 
 // Close 释放管理器（不删除 bot 数据文件）。
@@ -250,12 +297,44 @@ type botWorkspace struct {
 	cfg     Config
 	backend string // "docker" 或 "local"
 	logger  *zap.SugaredLogger
+
+	// container 非 nil 时（docker 持久容器模式），所有文件/命令操作走容器内，
+	// 宿主机磁盘不落 bot 文件（隔离）。为 nil 时走原有逻辑（宿主目录 + 临时容器/local）。
+	container *botContainer
 }
 
 func (w *botWorkspace) ID() string      { return w.botID }
 func (w *botWorkspace) WorkDir() string { return w.root }
 
 func (w *botWorkspace) HealthCheck(ctx context.Context) HealthStatus {
+	// docker 持久容器模式：检查容器是否可运行。
+	if w.container != nil {
+		if !dockerAvailable() {
+			return HealthStatus{
+				Healthy: false, Backend: "docker", Status: "docker-unavailable",
+				Message: "Docker daemon is not available",
+			}
+		}
+		state := w.container.containerState(ctx)
+		switch state {
+		case "running":
+			return HealthStatus{
+				Healthy: true, Backend: "docker", Status: "running",
+				Message: fmt.Sprintf("container %q running (isolated)", w.container.container),
+			}
+		case "":
+			return HealthStatus{
+				Healthy: true, Backend: "docker", Status: "not-created",
+				Message: fmt.Sprintf("container %q will be created on first use", w.container.container),
+			}
+		default:
+			return HealthStatus{
+				Healthy: true, Backend: "docker", Status: state,
+				Message: fmt.Sprintf("container %q is %s (will start on demand)", w.container.container, state),
+			}
+		}
+	}
+
 	// 检查持久化目录是否存在
 	info, err := os.Stat(w.root)
 	if err != nil {
@@ -298,6 +377,9 @@ func (w *botWorkspace) HealthCheck(ctx context.Context) HealthStatus {
 // --- 文件操作（直接宿主文件系统） ---
 
 func (w *botWorkspace) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	if w.container != nil {
+		return w.container.ReadFile(ctx, path)
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return nil, err
@@ -310,6 +392,9 @@ func (w *botWorkspace) ReadFile(ctx context.Context, path string) ([]byte, error
 }
 
 func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) error {
+	if w.container != nil {
+		return w.container.WriteFile(ctx, path, data)
+	}
 	if w.cfg.MaxFileWrite > 0 && len(data) > w.cfg.MaxFileWrite {
 		return errs.Newf("bot_workspace: file size %d exceeds max write %d",
 			len(data), w.cfg.MaxFileWrite)
@@ -329,6 +414,9 @@ func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) 
 }
 
 func (w *botWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, error) {
+	if w.container != nil {
+		return w.container.ListDir(ctx, path)
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return nil, err
@@ -358,6 +446,10 @@ func (w *botWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, e
 func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
 	if req.Command == "" {
 		return nil, errs.New("bot_workspace: command is empty")
+	}
+
+	if w.container != nil {
+		return w.container.Exec(ctx, req)
 	}
 
 	timeout := req.Timeout
