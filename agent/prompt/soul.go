@@ -75,6 +75,13 @@ type SoulLoaderConfig struct {
 	//   ScanModeWarn  — 扫描并记录告警日志（默认）
 	//   ScanModeBlock — 扫描并阻止加载
 	ScanMode ScanMode
+
+	// Store 抽象文件 IO 后端（可选）。
+	// 留空时默认使用 osSoulStore（直接 os.* 操作 config.Path 指向的宿主路径），
+	// 兼容 local 后端与单测。docker 持久容器（DooD）模式下由调用方注入基于
+	// sandbox.Workspace 的实现，使 SOUL.md 读写落到 bot 容器 named volume 内的
+	// 真实文件（/data/SOUL.md）而非主程序侧空目录 —— 单一数据源，agent 自改可持久化。
+	Store SoulStore
 }
 
 // DefaultSoulLoaderConfig 返回合理的默认配置。
@@ -136,6 +143,63 @@ You are a helpful AI assistant.
 <!-- Edit this file to customize your bot's personality. Changes are hot-reloaded. -->
 `
 
+// ============================================================================
+// SoulStore — 文件 IO 抽象
+//
+// SoulLoader 默认直接调用 os.* 操作宿主路径（local 后端 / 单测）。
+// docker 持久容器（DooD）模式下，bot 的 SOUL.md 真实文件位于 bot 容器
+// named volume 内的 /data/SOUL.md，而主程序侧 {WorkspaceDir}/{botID}/ 是空目录。
+// 此时调用方应注入基于 sandbox.Workspace 的 SoulStore 实现，让读取 / 写入 /
+// 轮询 mtime 都经 docker exec 落到真实文件，实现单一数据源（agent 自改可持久化）。
+// ============================================================================
+
+// SoulStat 是 StatSoul 的结果。
+// Exists 表示文件存在；ModTime 为其最后修改时间；
+// Err 表示传输层错误（与「文件不存在」区分：后者 Exists=false 且 Err=nil）。
+type SoulStat struct {
+	Exists  bool
+	ModTime time.Time
+	Err     error
+}
+
+// SoulStore 抽象 SoulLoader 所需的文件 IO。
+// path 的语义由实现决定：osSoulStore 视其为宿主路径；
+// workspaceSoulStore 视其为工作空间内相对路径（如 "SOUL.md"）。
+type SoulStore interface {
+	ReadSoul(ctx context.Context, path string) ([]byte, error)
+	WriteSoul(ctx context.Context, path string, data []byte) error
+	StatSoul(ctx context.Context, path string) SoulStat
+}
+
+// osSoulStore 是默认实现，直接操作宿主文件系统（os.ReadFile/Stat/WriteFile/MkdirAll）。
+// 行为与改造前完全一致，保证 local 后端与既有测试零回归。
+type osSoulStore struct{}
+
+func (osSoulStore) ReadSoul(_ context.Context, path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+func (osSoulStore) WriteSoul(_ context.Context, path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func (osSoulStore) StatSoul(_ context.Context, path string) SoulStat {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return SoulStat{Exists: false}
+		}
+		return SoulStat{Exists: false, Err: err}
+	}
+	return SoulStat{Exists: true, ModTime: info.ModTime()}
+}
+
 // OnReloadFunc 是 SOUL.md 热重载后的回调。
 // content 为重新加载后的内容（已去除 front matter）。
 type OnReloadFunc func(content string)
@@ -182,6 +246,9 @@ func NewSoulLoader(config SoulLoaderConfig, registry *Registry) *SoulLoader {
 	if config.SectionName == "" {
 		config.SectionName = "identity"
 	}
+	if config.Store == nil {
+		config.Store = osSoulStore{}
+	}
 	return &SoulLoader{
 		config:   config,
 		registry: registry,
@@ -203,40 +270,44 @@ func (l *SoulLoader) Path() string {
 	return l.config.Path
 }
 
-// createDefault 创建默认 SOUL.md 文件（含必要的父目录）。
+// createDefault 创建默认 SOUL.md 文件（父目录由 Store 实现负责创建）。
 func (l *SoulLoader) createDefault() error {
-	dir := filepath.Dir(l.config.Path)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-	}
-	return os.WriteFile(l.config.Path, []byte(DefaultSoulContent), 0644)
+	return l.config.Store.WriteSoul(context.Background(), l.config.Path, []byte(DefaultSoulContent))
 }
 
 // Load 读取 SOUL.md 并注册为 Section。
 // 文件不存在时自动创建默认模板。
 func (l *SoulLoader) Load() error {
-	data, err := os.ReadFile(l.config.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// 自动创建默认 SOUL.md
-			if createErr := l.createDefault(); createErr != nil {
-				return errs.Wrapf(createErr, "soul: create default %s", l.config.Path)
-			}
-			l.logger.Infof("soul: created default SOUL.md at %s — edit it to customize personality", l.config.Path)
-			data = []byte(DefaultSoulContent)
-		} else {
+	// 先探测存在性（后端无关：OS 走 os.Stat，docker 走 ListDir），
+	// 再决定是否读取或创建默认模板。避免依赖 Store 返回 os.IsNotExist
+	// （workspace 后端的错误来自 docker exec，非 os.PathError）。
+	st := l.config.Store.StatSoul(context.Background(), l.config.Path)
+	if st.Err != nil {
+		return errs.Wrapf(st.Err, "soul: stat %s", l.config.Path)
+	}
+
+	var data []byte
+	if !st.Exists {
+		// 文件不存在 → 自动创建默认 SOUL.md 模板
+		if createErr := l.createDefault(); createErr != nil {
+			return errs.Wrapf(createErr, "soul: create default %s", l.config.Path)
+		}
+		l.logger.Infof("soul: created default SOUL.md at %s — edit it to customize personality", l.config.Path)
+		data = []byte(DefaultSoulContent)
+	} else {
+		read, err := l.config.Store.ReadSoul(context.Background(), l.config.Path)
+		if err != nil {
 			return errs.Wrapf(err, "soul: read %s", l.config.Path)
 		}
+		data = read
 	}
 
 	content := string(data)
 
-	// 获取文件修改时间
-	info, err := os.Stat(l.config.Path)
-	if err != nil {
-		return errs.Wrapf(err, "soul: stat %s", l.config.Path)
+	// 文件修改时间（已由上方 StatSoul 取得；刚创建默认模板时用当前时间兜底）
+	info := st.ModTime
+	if !st.Exists {
+		info = time.Now()
 	}
 
 	// 解析 front matter
@@ -281,14 +352,14 @@ func (l *SoulLoader) Load() error {
 	// 更新内部状态
 	l.mu.Lock()
 	l.content = strings.TrimSpace(body)
-	l.modTime = info.ModTime()
+	l.modTime = info
 	l.variables = variables
 	onReload := l.onReload
 	l.mu.Unlock()
 
 	l.loaded.Store(true)
 	l.logger.Infof("soul: loaded %s (%d bytes, %d variables, mtime=%s)",
-		l.config.Path, len(body), len(variables), info.ModTime().Format(time.RFC3339))
+		l.config.Path, len(body), len(variables), info.Format(time.RFC3339))
 
 	// 触发热重载回调（在锁外回调，避免死锁）
 	if onReload != nil {
@@ -353,9 +424,13 @@ func (l *SoulLoader) Stop() {
 
 // checkAndReload 检查文件是否被修改，如果是则重新加载。
 func (l *SoulLoader) checkAndReload() {
-	info, err := os.Stat(l.config.Path)
-	if err != nil {
-		if os.IsNotExist(err) && l.loaded.Load() {
+	st := l.config.Store.StatSoul(context.Background(), l.config.Path)
+	if st.Err != nil {
+		l.logger.Warnf("soul: stat %s failed: %v", l.config.Path, st.Err)
+		return
+	}
+	if !st.Exists {
+		if l.loaded.Load() {
 			// 文件被删除，重建默认模板
 			l.logger.Warnf("soul: %s was removed, recreating default", l.config.Path)
 			if createErr := l.createDefault(); createErr != nil {
@@ -373,12 +448,12 @@ func (l *SoulLoader) checkAndReload() {
 	lastModTime := l.modTime
 	l.mu.RUnlock()
 
-	if !info.ModTime().After(lastModTime) {
+	if !st.ModTime.After(lastModTime) {
 		return
 	}
 
 	l.logger.Infof("soul: %s changed (mtime %s → %s), reloading",
-		l.config.Path, lastModTime.Format(time.RFC3339), info.ModTime().Format(time.RFC3339))
+		l.config.Path, lastModTime.Format(time.RFC3339), st.ModTime.Format(time.RFC3339))
 
 	if err := l.Load(); err != nil {
 		l.logger.Errorf("soul: reload failed: %v", err)
