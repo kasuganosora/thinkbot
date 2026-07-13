@@ -268,6 +268,14 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			"approval_id", result.DeferredToolApproval.ApprovalID,
 			"decision", result.DeferredToolApproval.Decision,
 			"reason", result.DeferredToolApproval.Reason)
+
+		// TODO(HITL): 工具审批被 defer 时，编排已暂停（工具未执行），result.Text 是
+		// 半成品回复。在接入确认流之前，这里必须阻断——不能把未完成回复发给用户，
+		// 也不能产生 Action。将来通过「持久化 DeferredToolApproval → 用户确认 →
+		// 重新编排（携带 approval 结果）」的续跑入口恢复，而非在此直接发射。
+		// 正常路径下（无 ApprovalHandler）此分支不触发，故不影响当前行为。
+		env.Set("llm.result", result)
+		return env, nil
 	}
 
 	// 记录使用统计
