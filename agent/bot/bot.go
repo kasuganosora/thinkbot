@@ -289,20 +289,32 @@ func New(params BotParams) (*Bot, error) {
 			"dir", absDir,
 			"backend", wsMgr.Backend())
 
-		// SoulLoader 从工作空间目录加载 SOUL.md
+		// SoulLoader 加载 SOUL.md（人格定义）。
+		// 文件 IO 后端选择：
+		//   - docker 持久容器模式（DooD）：SOUL.md 真实位于 bot 容器 named volume
+		//     的 /data/SOUL.md，主程序侧 {WorkspaceDir}/{botID}/ 是空目录。必须经
+		//     sandbox.Workspace 抽象（docker exec）读写，单一数据源，否则 agent 自改
+		//     无法被主程序读回（P0：SoulLoader 与 named volume 脱节，方向 A 修复）。
+		//   - local 模式：直接走主程序侧宿主路径（OS 文件 IO，零隔离）。
 		if params.PromptRegistry != nil {
-			// 使用主程序侧真实路径（{WorkspaceDir}/{botID}/SOUL.md），
-			// 而非 WorkDir() 的容器内虚拟根 /data：容器模式下 bot 文件虽经 named
-			// volume 隔离，但 SOUL.md 由主程序侧 SoulLoader 基于宿主路径加载，
-			// 必须指向主程序容器磁盘上的真实目录（见 P0 待决策：SoulLoader 与
-			// named volume 脱节问题）。
 			soulPath := filepath.Join(params.WorkspaceDir, params.ID, "SOUL.md")
+			var soulStore prompt.SoulStore
+			if wsMgr.Backend() == "docker" {
+				if bw, gErr := wsMgr.GetOrCreate(params.ID); gErr == nil {
+					soulStore = NewWorkspaceSoulStore(bw, "SOUL.md")
+					soulPath = "SOUL.md"
+					botLogger.Infow("soul store: workspace backend (docker named volume)", "botID", params.ID)
+				} else {
+					botLogger.Warnw("soul store: get workspace failed, fallback to host path", "err", gErr)
+				}
+			}
 			soul := prompt.NewSoulLoader(prompt.SoulLoaderConfig{
 				Path:           soulPath,
 				BotID:          params.ID,
 				SectionName:    "identity",
 				Order:          0,
 				ReloadInterval: 5 * time.Second,
+				Store:          soulStore,
 			}, params.PromptRegistry)
 
 			if err := soul.Load(); err != nil {
