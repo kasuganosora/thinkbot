@@ -120,6 +120,17 @@ func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit
 	return page, nil
 }
 
+// CountMessages 统计指定 Bot 的消息总数（跨所有用户）。
+func (s *ChatHistoryService) CountMessages(botID string) (int64, error) {
+	var n int64
+	if err := s.db.Model(&dao.ChatMessage{}).
+		Where("bot_id = ?", botID).
+		Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("chat_history: count messages: %w", err)
+	}
+	return n, nil
+}
+
 // LoadContext 加载最近 N 条消息作为 LLM 上下文。
 // 返回的消息按时间正序（旧→新），直接拼入 LLM messages。
 func (s *ChatHistoryService) LoadContext(botID, userID string, limit int) ([]dao.ChatMessage, error) {
