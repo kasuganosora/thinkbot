@@ -139,9 +139,9 @@ const snapName = ref('')
 const columns = [
   { colKey: 'name', title: '名称', width: 380, ellipsis: true,
     cell: (_h, { row }) => h('span', { class: 'snap-name' }, row.name) },
-  { colKey: 'version', title: '版本', width: 70 },
-  { colKey: 'source', title: '来源', width: 120 },
-  { colKey: 'parent', title: '父级', ellipsis: true,
+  { colKey: 'version', title: '大小', width: 90 },
+  { colKey: 'source', title: '来源', width: 130 },
+  { colKey: 'parent', title: '镜像仓库', ellipsis: true,
     cell: (_h, { row }) => h('span', { class: 'snap-parent' }, row.parent || '-') },
   { colKey: 'createdAt', title: '创建时间', width: 170,
     cell: (_h, { row }) => fmt(row.createdAt) },
@@ -177,33 +177,43 @@ onMounted(load)
 async function onStart() {
   acting.value = true
   try { info.value = await botContainerApi.start(props.botId); MessagePlugin.success('容器已启动') }
+  catch (e) { MessagePlugin.error(e?.message || '启动失败') }
   finally { acting.value = false }
 }
 async function onStop() {
   acting.value = true
   try { info.value = await botContainerApi.stop(props.botId); MessagePlugin.success('容器已停止') }
+  catch (e) { MessagePlugin.error(e?.message || '停止失败') }
   finally { acting.value = false }
 }
 
 async function onExport() {
   busy.export = true
   try { await botContainerApi.exportData(props.botId); MessagePlugin.success('已开始导出 /data') }
+  catch (e) { MessagePlugin.warning(e?.message || '导出功能暂未实现') }
   finally { busy.export = false }
 }
 function onImport() {
   const dlg = DialogPlugin.confirm({
     header: '导入数据',
-    body: '请选择要导入到 /data 的数据包（模拟）。导入会覆盖容器内现有数据。',
+    body: '请选择要导入到 /data 的数据包。导入会覆盖容器内现有数据。',
     confirmBtn: '确认导入',
     onConfirm: async () => {
-      await botContainerApi.importData(props.botId, {})
-      dlg.destroy(); MessagePlugin.success('数据导入完成')
+      try {
+        await botContainerApi.importData(props.botId, {})
+        MessagePlugin.success('数据导入完成')
+      } catch (e) {
+        MessagePlugin.warning(e?.message || '导入功能暂未实现')
+      } finally {
+        dlg.destroy()
+      }
     }
   })
 }
 async function onRestore() {
   busy.restore = true
   try { await botContainerApi.restoreData(props.botId); MessagePlugin.success('已恢复保留数据') }
+  catch (e) { MessagePlugin.warning(e?.message || '恢复功能暂未实现') }
   finally { busy.restore = false }
 }
 
@@ -231,6 +241,8 @@ async function onCreateSnapshot() {
     snapName.value = ''
     MessagePlugin.success('快照已创建')
     await load()
+  } catch (e) {
+    MessagePlugin.error(e?.message || '创建快照失败')
   } finally { busy.snap = false }
 }
 </script>

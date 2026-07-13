@@ -133,6 +133,9 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/container/restore", s.handleRestoreBotContainer)
 				botsAdmin.DELETE("/:id/container", s.handleRemoveBotContainer)
 
+				// 运行时检查（概览页，接入真实 sandbox 状态）
+				botsAdmin.GET("/:id/runtime-checks", s.handleBotRuntimeChecks)
+
 				// 心跳管理
 				botsAdmin.GET("/:id/heartbeat", s.handleGetHeartbeatConfig)
 				botsAdmin.PUT("/:id/heartbeat", s.handleUpdateHeartbeatConfig)

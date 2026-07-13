@@ -516,53 +516,91 @@ type BotContainerSnapshot struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// handleGetBotContainer 获取 Bot 容器信息。
+// handleGetBotContainer 获取 Bot 容器信息（真实 sandbox 状态）。
 // GET /api/bots/:id/container
 func (s *Server) handleGetBotContainer(c *gin.Context) {
 	botID := c.Param("id")
-	info := s.getBotContainerInfo(botID)
+	info := s.realBotContainerInfo(c.Request.Context(), botID)
 	OK(c, info)
 }
 
-// handleGetBotContainerSnapshots 获取 Bot 容器快照列表。
+// handleGetBotContainerSnapshots 获取 Bot 容器快照列表（真实 docker 镜像）。
 // GET /api/bots/:id/container/snapshots
 func (s *Server) handleGetBotContainerSnapshots(c *gin.Context) {
 	botID := c.Param("id")
-	snapshots := s.getBotContainerSnapshots(botID)
+	snapshots := s.realBotContainerSnapshots(c.Request.Context(), botID)
 	OK(c, snapshots)
 }
 
-// handleStartBotContainer 启动 Bot 容器。
+// realBotContainerSnapshots 从真实 docker 镜像列出该 bot 的快照。
+func (s *Server) realBotContainerSnapshots(ctx context.Context, botID string) []BotContainerSnapshot {
+	out := []BotContainerSnapshot{}
+	if s.botSvc == nil {
+		return out
+	}
+	mgr, err := s.botSvc.WorkspaceManagerForBot(botID)
+	if err != nil {
+		return out
+	}
+	list, err := mgr.ListBotSnapshots(ctx, botID)
+	if err != nil {
+		s.logger.Warnw("list bot snapshots failed", "bot", botID, "err", err)
+		return out
+	}
+	for _, si := range list {
+		created := ""
+		if !si.CreatedAt.IsZero() {
+			created = si.CreatedAt.Format(time.RFC3339)
+		}
+		out = append(out, BotContainerSnapshot{
+			ID:        si.ID,
+			Name:      si.Tag,
+			Version:   si.Size,
+			Source:    "docker-commit",
+			Parent:    si.Repo,
+			CreatedAt: created,
+		})
+	}
+	return out
+}
+
+// handleStartBotContainer 启动 Bot 容器（真实 docker start/create）。
 // POST /api/bots/:id/container/start
 func (s *Server) handleStartBotContainer(c *gin.Context) {
 	botID := c.Param("id")
-	info := s.getBotContainerInfo(botID)
-	info.ContainerStatus = "running"
-	info.TaskStatus = "running"
-	info.UpdatedAt = nowRFC3339()
-	if err := s.saveBotContainerInfo(c, botID, info); err != nil {
-		Fail(c, err)
-		return
+	if s.botSvc != nil {
+		if mgr, err := s.botSvc.WorkspaceManagerForBot(botID); err == nil {
+			if err := mgr.StartBot(c.Request.Context(), botID); err != nil {
+				Fail(c, fmt.Errorf("启动容器失败: %w", err))
+				return
+			}
+		} else {
+			Fail(c, err)
+			return
+		}
 	}
-	OK(c, info)
+	OK(c, s.realBotContainerInfo(c.Request.Context(), botID))
 }
 
-// handleStopBotContainer 停止 Bot 容器。
+// handleStopBotContainer 停止 Bot 容器（真实 docker stop，保留数据）。
 // POST /api/bots/:id/container/stop
 func (s *Server) handleStopBotContainer(c *gin.Context) {
 	botID := c.Param("id")
-	info := s.getBotContainerInfo(botID)
-	info.ContainerStatus = "stopped"
-	info.TaskStatus = "stopped"
-	info.UpdatedAt = nowRFC3339()
-	if err := s.saveBotContainerInfo(c, botID, info); err != nil {
-		Fail(c, err)
-		return
+	if s.botSvc != nil {
+		if mgr, err := s.botSvc.WorkspaceManagerForBot(botID); err == nil {
+			if err := mgr.StopBot(botID); err != nil {
+				Fail(c, fmt.Errorf("停止容器失败: %w", err))
+				return
+			}
+		} else {
+			Fail(c, err)
+			return
+		}
 	}
-	OK(c, info)
+	OK(c, s.realBotContainerInfo(c.Request.Context(), botID))
 }
 
-// handleCreateBotContainerSnapshot 创建容器快照。
+// handleCreateBotContainerSnapshot 创建容器快照（真实 docker commit）。
 // POST /api/bots/:id/container/snapshots
 func (s *Server) handleCreateBotContainerSnapshot(c *gin.Context) {
 	botID := c.Param("id")
@@ -572,50 +610,72 @@ func (s *Server) handleCreateBotContainerSnapshot(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&req)
 
-	name := req.DisplayName
-	if name == "" {
-		name = fmt.Sprintf("snapshot-%d", len(s.getBotContainerSnapshots(botID))+1)
+	if s.botSvc == nil {
+		Fail(c, fmt.Errorf("bot service unavailable"))
+		return
 	}
-
-	info := s.getBotContainerInfo(botID)
-	snap := BotContainerSnapshot{
-		ID:        fmt.Sprintf("snap-%s", generateModelID(name)),
-		Name:      name,
-		Version:   "-",
-		Source:    "manual",
-		Parent:    info.ContainerID,
-		CreatedAt: nowRFC3339(),
-	}
-
-	snapshots := s.getBotContainerSnapshots(botID)
-	snapshots = append([]BotContainerSnapshot{snap}, snapshots...)
-	if err := s.saveBotContainerSnapshots(c, botID, snapshots); err != nil {
+	mgr, err := s.botSvc.WorkspaceManagerForBot(botID)
+	if err != nil {
 		Fail(c, err)
 		return
 	}
-	OK(c, snap)
+
+	// 生成合法的镜像 tag（docker tag 只允许 [a-z0-9._-]，且不能大写）。
+	tag := sanitizeSnapshotTag(req.DisplayName)
+	if tag == "" {
+		tag = fmt.Sprintf("snap-%d", time.Now().Unix())
+	}
+
+	id, err := mgr.SnapshotBot(c.Request.Context(), botID, tag)
+	if err != nil {
+		Fail(c, fmt.Errorf("创建快照失败: %w", err))
+		return
+	}
+
+	OK(c, BotContainerSnapshot{
+		ID:        id,
+		Name:      tag,
+		Version:   "-",
+		Source:    "docker-commit",
+		CreatedAt: nowRFC3339(),
+	})
+}
+
+// sanitizeSnapshotTag 把用户输入转成合法的 docker 镜像 tag。
+func sanitizeSnapshotTag(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-._")
+	if len(out) > 100 {
+		out = out[:100]
+	}
+	return out
 }
 
 // handleExportBotContainer 导出 Bot 容器数据。
 // POST /api/bots/:id/container/export
 func (s *Server) handleExportBotContainer(c *gin.Context) {
-	botID := c.Param("id")
-	// TODO: 实际导出逻辑
-	OK(c, gin.H{"url": fmt.Sprintf("/api/bots/%s/container/export/download", botID)})
+	Fail(c, fmt.Errorf("数据导出功能尚未实现，敬请期待"))
 }
 
 // handleImportBotContainer 导入 Bot 容器数据。
 // POST /api/bots/:id/container/import
 func (s *Server) handleImportBotContainer(c *gin.Context) {
-	// TODO: 实际导入逻辑
-	OK(c, nil)
+	Fail(c, fmt.Errorf("数据导入功能尚未实现，敬请期待"))
 }
 
 // handleRestoreBotContainer 恢复 Bot 容器。
 // POST /api/bots/:id/container/restore
 func (s *Server) handleRestoreBotContainer(c *gin.Context) {
-	// TODO: 实际恢复逻辑
-	OK(c, nil)
+	Fail(c, fmt.Errorf("数据恢复功能尚未实现，敬请期待"))
 }
 
 // handleRemoveBotContainer 删除 Bot 容器。
@@ -999,6 +1059,61 @@ func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, content
 		return errs.Internal("failed to write file: " + err.Error())
 	}
 	return nil
+}
+
+// realBotContainerInfo 从真实 sandbox 读取容器信息，映射为前端 BotContainerInfo。
+// 状态字段（容器 ID / 状态 / 镜像 / 路径）以 sandbox 真实数据为准；
+// keepData / 时间等可持久化偏好从 store 合并。
+func (s *Server) realBotContainerInfo(ctx context.Context, botID string) *BotContainerInfo {
+	stored := s.getBotContainerInfo(botID)
+	if s.botSvc == nil {
+		return stored
+	}
+	mgr, err := s.botSvc.WorkspaceManagerForBot(botID)
+	if err != nil {
+		return stored
+	}
+	// 触发工作空间实例化，使 ContainerInfo 能拿到真实容器名/状态。
+	_, _ = mgr.GetOrCreate(botID)
+	ci := mgr.ContainerInfo(ctx, botID)
+
+	info := &BotContainerInfo{
+		Namespace: "default",
+		CdiDevice: "未附加 GPU",
+		KeepData:  stored.KeepData,
+		CreatedAt: stored.CreatedAt,
+		UpdatedAt: nowRFC3339(),
+	}
+	info.Image = ci.Image
+	info.ContainerPath = ci.WorkDir
+
+	if ci.Backend == "docker" && ci.Persistent {
+		info.ContainerID = ci.ContainerID
+		switch ci.State {
+		case "running":
+			info.ContainerStatus = "running"
+			info.TaskStatus = "running"
+		case "", "not-created":
+			info.ContainerStatus = "stopped"
+			info.TaskStatus = "not-created"
+		case "docker-unavailable":
+			info.ContainerStatus = "error"
+			info.TaskStatus = "docker-unavailable"
+		default: // exited / paused / created ...
+			info.ContainerStatus = "stopped"
+			info.TaskStatus = ci.State
+		}
+		if info.ContainerPath == "" && ci.Volume != "" {
+			info.ContainerPath = ci.Volume + ":/workspace"
+		}
+	} else {
+		// 本地模式：无独立容器
+		info.ContainerID = ""
+		info.ContainerStatus = "local"
+		info.TaskStatus = "local"
+		info.Image = "(local process)"
+	}
+	return info
 }
 
 func (s *Server) getBotContainerInfo(botID string) *BotContainerInfo {
