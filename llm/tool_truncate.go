@@ -86,46 +86,67 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 		}
 	}
 
-	// 执行截断 — 从头部保留
+	// 执行截断 — 头部 + 尾部保留，中间省略。
+	// 相比纯头部截断，保留尾部能让 LLM 看到输出的结尾（如错误信息、
+	// 汇总行、退出码通常出现在末尾），避免因丢尾部而漏掉关键信息。
+	//
+	// 预算分配：头部占约 2/3，尾部占约 1/3（头部通常包含更多上下文）。
 	maxLines := cfg.MaxLines
 	maxBytes := cfg.MaxBytes
 
-	var kept []string
-	keptBytes := 0
-	hitBytes := false
+	headLineBudget := maxLines * 2 / 3
+	tailLineBudget := maxLines - headLineBudget
+	headByteBudget := maxBytes * 2 / 3
+	tailByteBudget := maxBytes - headByteBudget
 
-	for i := 0; i < len(lines) && i < maxLines; i++ {
+	// 头部：从前往后累积。
+	var head []string
+	headBytes := 0
+	for i := 0; i < len(lines) && len(head) < headLineBudget; i++ {
 		lineSize := len(lines[i])
 		if i > 0 {
 			lineSize++ // newline
 		}
-		if keptBytes+lineSize > maxBytes {
-			hitBytes = true
+		if headBytes+lineSize > headByteBudget {
 			break
 		}
-		kept = append(kept, lines[i])
-		keptBytes += lineSize
+		head = append(head, lines[i])
+		headBytes += lineSize
 	}
 
-	removed := len(lines) - len(kept)
-	unit := "lines"
-	if hitBytes {
-		removed = totalBytes - keptBytes
-		unit = "bytes"
+	// 尾部：从后往前累积（避免与头部重叠）。
+	var tail []string
+	tailBytes := 0
+	for i := len(lines) - 1; i >= len(head) && len(tail) < tailLineBudget; i-- {
+		lineSize := len(lines[i]) + 1 // 含 newline
+		if tailBytes+lineSize > tailByteBudget {
+			break
+		}
+		tail = append(tail, lines[i])
+		tailBytes += lineSize
+	}
+	// tail 是逆序收集的，反转回正序。
+	for i, j := 0, len(tail)-1; i < j; i, j = i+1, j-1 {
+		tail[i], tail[j] = tail[j], tail[i]
 	}
 
-	preview := strings.Join(kept, "\n")
+	removedLines := len(lines) - len(head) - len(tail)
+	removedBytes := totalBytes - headBytes - tailBytes
+
+	headText := strings.Join(head, "\n")
+	tailText := strings.Join(tail, "\n")
 
 	hint := fmt.Sprintf(
-		"\n\n... [%d %s truncated] ...\n\n"+
-			"⚠️ Output was truncated. Use more specific parameters (e.g., narrower search pattern, "+
+		"\n\n... [中间省略 %d 行 / 约 %d 字节，已保留头部和尾部] ...\n\n"+
+			"⚠️ Output was truncated (head + tail kept, middle omitted). "+
+			"Use more specific parameters (e.g., narrower search pattern, "+
 			"offset/limit for file reads, or grep for specific content) to get focused results. "+
 			"Do not retry with the same parameters expecting full output.",
-		removed, unit,
+		removedLines, removedBytes,
 	)
 
 	return TruncationResult{
-		Output:       preview + hint,
+		Output:       headText + hint + "\n\n" + tailText,
 		Truncated:    true,
 		OriginalSize: totalBytes,
 	}

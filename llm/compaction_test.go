@@ -492,6 +492,42 @@ func TestTruncateOutput_Global(t *testing.T) {
 	}
 }
 
+// TestOutputTruncator_HeadAndTailKept 验证截断保留头部和尾部（中间省略），
+// 而非纯头部截断——尾部信息（如错误、汇总）不应丢失。
+func TestOutputTruncator_HeadAndTailKept(t *testing.T) {
+	cfg := TruncationConfig{
+		MaxLines: 6,
+		MaxBytes: 100000,
+	}
+
+	// 生成 30 行输出，首行和末行有可识别标记。
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%02d", i)
+	}
+	lines[0] = "FIRST_LINE_MARKER"
+	lines[29] = "LAST_LINE_MARKER"
+	longOutput := strings.Join(lines, "\n")
+
+	result := TruncateOutput(longOutput, cfg)
+	if !result.Truncated {
+		t.Fatal("expected truncation")
+	}
+	outputStr, ok := result.Output.(string)
+	if !ok {
+		t.Fatal("expected string output")
+	}
+	if !strings.Contains(outputStr, "FIRST_LINE_MARKER") {
+		t.Error("expected head (first line) to be kept")
+	}
+	if !strings.Contains(outputStr, "LAST_LINE_MARKER") {
+		t.Error("expected tail (last line) to be kept")
+	}
+	if !strings.Contains(outputStr, "truncated") {
+		t.Error("expected truncation marker")
+	}
+}
+
 // ============================================================================
 // MidConversationMessage 测试
 // ============================================================================

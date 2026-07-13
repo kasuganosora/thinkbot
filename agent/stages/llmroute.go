@@ -93,6 +93,13 @@ type LLMConfig struct {
 	//   Phase 2: 模型调用前压缩旧消息历史
 	// 为 nil 时禁用压缩（仅依赖 PatchToolCalls 安全网）。
 	ReductionConfig *llm.ReductionConfig
+
+	// ApprovalHandler 可选的工具审批处理器（HITL 门禁）。
+	// 非 nil 时，标记了 RequireApproval 的工具在执行前会调用此处理器决策
+	// （approved/rejected/deferred）。为 nil 时不做审批拦截——这是当前默认，
+	// 因为 thinkbot 均运行在 Docker 沙箱中，危险操作影响被沙箱边界限制。
+	// 框架层保留此注入点，便于将来在交互式渠道（如 Web）接入确认流。
+	ApprovalHandler func(ctx context.Context, call llm.ToolCall) (llm.ToolApprovalResult, error)
 }
 
 // ============================================================================
@@ -185,6 +192,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		MaxSteps: s.config.MaxSteps,
 	}
 
+	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。
+	if s.config.ApprovalHandler != nil {
+		cfg.ApprovalHandler = s.config.ApprovalHandler
+	}
+
 	// Enable reduction if configured.
 	if s.config.ReductionConfig != nil {
 		rc := *s.config.ReductionConfig
@@ -246,6 +258,17 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"steps", len(result.Steps),
 		"tokens", result.Usage.TotalTokens,
 		"finish_reason", result.FinishReason)
+
+	// 可观测：若编排层因工具审批被 defer（RequireApproval + ApprovalHandler
+	// 返回 deferred），记录信号，便于排查“工具在等确认却没有续跑入口”的情况。
+	// 当前默认无 ApprovalHandler，此分支通常不触发；保留用于将来接入 HITL。
+	if result.DeferredToolApproval != nil {
+		logger.Warnw("llm stage: tool approval deferred (no resume path wired yet)",
+			"message_id", env.Message.ID,
+			"approval_id", result.DeferredToolApproval.ApprovalID,
+			"decision", result.DeferredToolApproval.Decision,
+			"reason", result.DeferredToolApproval.Reason)
+	}
 
 	// 记录使用统计
 	recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, result)
@@ -350,6 +373,10 @@ streamDone:
 
 	result.Steps = streamResult.Steps
 	result.Messages = streamResult.Messages
+	// 透传 defer 审批信号：OrchestrateStream 已将 DeferredToolApproval 挂到
+	// StreamResult，但此处手动组装 GenerateResult（未走 ToResult），必须显式读回，
+	// 否则流式路径下审批信号会丢失（进黑洞）。
+	result.DeferredToolApproval = streamResult.DeferredToolApproval
 
 	logger.Debugw("llm stage: stream completed",
 		"message_id", env.Message.ID,
