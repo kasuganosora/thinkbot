@@ -8,7 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/sandbox"
+	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -210,11 +212,34 @@ func (s *Server) handleSessionStatus(c *gin.Context) {
 
 // handleSessionCompact 压缩会话上下文。
 // POST /api/sessions/:sid/compact
+//
+// session ID 即 bot ID。通过向运行中的 bot 注入 `/compact` admin 命令触发真实压缩；
+// 若 bot 未运行则返回明确提示，不再假成功。
 func (s *Server) handleSessionCompact(c *gin.Context) {
 	sid := c.Param("sid")
 
+	if s.botSvc == nil {
+		Fail(c, errs.Internal("bot service unavailable"))
+		return
+	}
+	webCh, ok := s.botSvc.GetWebChannel(sid)
+	if !ok {
+		Fail(c, errs.BadRequest("bot 未运行，无法压缩上下文"))
+		return
+	}
+
+	userID := "admin"
+	if u := currentUser(c); u != nil {
+		userID = fmt.Sprintf("%d", u.ID)
+	}
+	traceID := idgen.New("compact")
+	if err := webCh.Inject(c.Request.Context(), traceID, userID, "/compact", map[string]any{"trigger": "manual_compact"}); err != nil {
+		Fail(c, errs.Internal("触发压缩失败: "+err.Error()))
+		return
+	}
+
 	auditLog(c, s.logger, "session_compact", "session", sid)
-	OK(c, gin.H{"ok": true})
+	OK(c, gin.H{"ok": true, "message": "已触发上下文压缩"})
 }
 
 // ============================================================================
@@ -246,22 +271,50 @@ func (s *Server) getSessionTerminalState(sid string) TerminalState {
 
 // getSessionFiles 已废弃 — Session Files 现在代理到 Bot Files（getBotFileEntries）。
 
+// getSessionStatus 组装会话状态：数据全部来自真实来源。
+//   - Messages:  ChatHistory 中该 bot 的消息总数
+//   - Cache*:    stats_usage_daily 聚合的真实缓存命中/读写统计
+//   - ContextUsed: 该 bot 累计消耗的 token 总量（真实）
+//   - Skills:    会话级 skill 使用记录（暂无来源时返回空数组）
+//
+// session ID 即 bot ID（1:1 映射）。
 func (s *Server) getSessionStatus(sid string) SessionToolStatus {
-	raw, ok := s.store.Get(sessionToolKey(sid, "status"))
-	if !ok || raw == "" {
-		return SessionToolStatus{
-			Messages:     0,
-			ContextUsed:  0,
-			ContextLimit: nil,
-			CacheHitRate: 0,
-			CacheRead:    0,
-			CacheWrite:   0,
-			Skills:       []string{},
+	status := SessionToolStatus{Skills: []string{}}
+
+	// 消息数（真实，来自 chat_history）
+	if s.chatHistory != nil {
+		if n, err := s.chatHistory.CountMessages(sid); err != nil {
+			s.logger.Warnw("session status: count messages failed", "sid", sid, "err", err)
+		} else {
+			status.Messages = int(n)
 		}
 	}
-	var status SessionToolStatus
-	if err := json.Unmarshal([]byte(raw), &status); err != nil {
-		return SessionToolStatus{Skills: []string{}}
+
+	// 缓存与 token 统计（真实，来自 stats_usage_daily 聚合）
+	if s.db != nil {
+		rows, err := stats.GetBotModelStats(s.db, sid, nil, nil)
+		if err != nil {
+			s.logger.Warnw("session status: query stats failed", "sid", sid, "err", err)
+		} else {
+			var totalReq, hitReq, cacheRead, cacheWrite, totalTokens int
+			for _, r := range rows {
+				totalReq += r.TotalRequests
+				hitReq += r.CacheHitRequests
+				cacheRead += r.CacheReadTokens
+				cacheWrite += r.CacheWriteTokens
+				totalTokens += r.TotalTokens
+			}
+			if totalReq > 0 {
+				status.CacheHitRate = float64(hitReq) / float64(totalReq)
+			}
+			status.CacheRead = cacheRead
+			status.CacheWrite = cacheWrite
+			status.ContextUsed = totalTokens
+		}
 	}
+
+	// 上下文上限：会话级实时窗口上限暂无稳定来源，保持 nil（前端显示 "--"），避免造假。
+	status.ContextLimit = nil
+
 	return status
 }
