@@ -161,6 +161,11 @@ export const botApi = {
   stop(id) {
     if (USE_MOCK) return mockResolve(() => { const b = db().bots.find(x => x.id === id); b.running = false; b.status = 'stopped'; saveDB(); return null })
     return request('POST', `/api/bots/${id}/stop`)
+  },
+  // 运行时检查（概览页，返回真实 sandbox 状态）
+  // GET /api/bots/:id/runtime-checks → { hasError, backend, checks: [{name, sub, message, extra, ok, mono}] }
+  runtimeChecks(id) {
+    return request('GET', `/api/bots/${id}/runtime-checks`)
   }
 }
 

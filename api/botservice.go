@@ -126,16 +126,27 @@ func (s *BotService) ResolveWorkspace(botID string) (sandbox.Workspace, error) {
 	if botID == "" {
 		return nil, errs.New("bot_service: botID is required")
 	}
-	// 优先复用运行中 bot 的工作空间管理器（与运行时状态完全一致）。
-	if mgr, ok := s.RunningBotWorkspaceMgr(botID); ok {
-		return mgr.GetOrCreate(botID)
+	mgr, err := s.WorkspaceManagerForBot(botID)
+	if err != nil {
+		return nil, err
 	}
-	// bot 未运行时按当前配置临时构造（docker 或 local 均可）。
+	return mgr.GetOrCreate(botID)
+}
+
+// WorkspaceManagerForBot 返回用于该 bot 的工作空间管理器：
+// 运行中优先复用运行时管理器（状态一致），否则按当前配置临时构造。
+func (s *BotService) WorkspaceManagerForBot(botID string) (*sandbox.BotWorkspaceManager, error) {
+	if botID == "" {
+		return nil, errs.New("bot_service: botID is required")
+	}
+	if mgr, ok := s.RunningBotWorkspaceMgr(botID); ok {
+		return mgr, nil
+	}
 	mgr, err := sandbox.NewBotWorkspaceManager(s.GetWorkspaceBaseDir(), s.SandboxConfigForBot(), s.logger)
 	if err != nil {
 		return nil, errs.Wrap(err, "bot_service: build workspace manager")
 	}
-	return mgr.GetOrCreate(botID)
+	return mgr, nil
 }
 
 // workspaceExecAdapter 把 sandbox.Workspace 适配为 tools.WorkspaceExecutor，

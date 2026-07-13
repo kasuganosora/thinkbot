@@ -85,6 +85,23 @@ func (c *botContainer) containerState(ctx context.Context) string {
 	return strings.TrimSpace(out.String())
 }
 
+// containerID 返回容器短 ID（12 位）。不存在返回 ""。
+func (c *botContainer) containerID(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{.Id}}", c.container)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(out.String())
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
 // ensure 保证容器已创建并处于 running 状态（惰性、幂等）。
 func (c *botContainer) ensure(ctx context.Context) error {
 	c.mu.Lock()
@@ -421,4 +438,79 @@ func parseListOutputWithMtime(data []byte) []FileEntry {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+// SnapshotInfo 描述一个容器快照（docker commit 生成的镜像）。
+type SnapshotInfo struct {
+	ID        string    `json:"id"`        // 镜像短 ID
+	Repo      string    `json:"repo"`      // 仓库名 thinkbot-snap/<bot>
+	Tag       string    `json:"tag"`       // 标签（快照名，sanitize 后）
+	CreatedAt time.Time `json:"createdAt"` // 镜像创建时间
+	Size      string    `json:"size"`      // 人类可读大小
+}
+
+// snapshotRepo 返回该 bot 的快照镜像仓库名。
+func (c *botContainer) snapshotRepo() string {
+	return "thinkbot-snap/" + sanitizeName(c.botID)
+}
+
+// snapshot 用 docker commit 把当前容器状态保存为镜像。
+// tag 为快照标签（已 sanitize）；返回镜像短 ID。
+func (c *botContainer) snapshot(ctx context.Context, tag string) (string, error) {
+	if c.containerState(ctx) == "" {
+		return "", errs.Newf("bot_container: container %q does not exist", c.container)
+	}
+	ref := c.snapshotRepo() + ":" + tag
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", "commit",
+		"--message", "thinkbot snapshot "+tag,
+		c.container, ref)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return "", errs.Wrapf(err, "bot_container: commit snapshot %q: %s", ref, strings.TrimSpace(out.String()))
+	}
+	id := strings.TrimSpace(out.String())
+	if i := strings.Index(id, ":"); i >= 0 {
+		id = id[i+1:]
+	}
+	if len(id) > 12 {
+		id = id[:12]
+	}
+	return id, nil
+}
+
+// listSnapshots 列出该 bot 的所有快照镜像。
+func (c *botContainer) listSnapshots(ctx context.Context) ([]SnapshotInfo, error) {
+	repo := c.snapshotRepo()
+	cmd := exec.CommandContext(ctx, "docker", "images",
+		"--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.CreatedAt}}\t{{.Size}}",
+		repo)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return nil, errs.Wrapf(err, "bot_container: list snapshots: %s", strings.TrimSpace(errb.String()))
+	}
+	var result []SnapshotInfo
+	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) < 3 {
+			continue
+		}
+		si := SnapshotInfo{ID: parts[0], Repo: parts[1], Tag: parts[2]}
+		if len(parts) >= 5 {
+			si.Size = parts[4]
+			// CreatedAt 形如 "2026-07-13 14:35:56 +0800 CST"
+			if t, e := time.Parse("2006-01-02 15:04:05 -0700 MST", parts[3]); e == nil {
+				si.CreatedAt = t
+			}
+		}
+		result = append(result, si)
+	}
+	return result, nil
 }

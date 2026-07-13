@@ -283,6 +283,97 @@ func (m *BotWorkspaceManager) HealthCheck(ctx context.Context, botID string) Hea
 	return ws.HealthCheck(ctx)
 }
 
+// ContainerInfo 描述 bot 工作空间底层容器/后端的真实信息（供 API 概览展示）。
+type ContainerInfo struct {
+	Backend       string `json:"backend"`       // "docker" | "local"
+	Persistent    bool   `json:"persistent"`    // 是否长期容器模式
+	ContainerName string `json:"containerName"` // docker 容器名（persistent 模式）
+	ContainerID   string `json:"containerId"`   // docker 容器短 ID（persistent 且存在时）
+	Volume        string `json:"volume"`        // named volume 名（persistent 模式）
+	Image         string `json:"image"`         // 镜像
+	State         string `json:"state"`         // 真实容器状态：running/exited/""(未创建)；local 为 "local"
+	WorkDir       string `json:"workDir"`       // 工作目录（容器内 /workspace 或宿主目录）
+	Created       bool   `json:"created"`       // 工作空间是否已实例化
+}
+
+// ContainerInfo 返回指定 bot 的真实底层容器/后端信息。
+// docker 持久容器模式下会通过 docker inspect 读取真实状态；local 模式返回本地信息。
+func (m *BotWorkspaceManager) ContainerInfo(ctx context.Context, botID string) ContainerInfo {
+	info := ContainerInfo{
+		Backend:    m.backend,
+		Persistent: m.backend == "docker" && m.cfg.PersistentContainer,
+		Image:      m.cfg.Image,
+	}
+	m.mu.RLock()
+	ws, ok := m.workspaces[botID]
+	m.mu.RUnlock()
+	if !ok {
+		info.State = ""
+		info.Created = false
+		return info
+	}
+	info.Created = true
+	info.WorkDir = ws.WorkDir()
+	if ws.container != nil {
+		info.ContainerName = ws.container.container
+		info.Volume = ws.container.volume
+		if dockerAvailable() {
+			info.State = ws.container.containerState(ctx)
+			if info.State != "" {
+				info.ContainerID = ws.container.containerID(ctx)
+			}
+		} else {
+			info.State = "docker-unavailable"
+		}
+	} else {
+		info.State = "local"
+	}
+	return info
+}
+
+// StartBot 启动（或创建后启动）指定 bot 的持久容器。
+// 仅对 docker 持久容器模式有效；其他模式为 no-op。
+func (m *BotWorkspaceManager) StartBot(ctx context.Context, botID string) error {
+	if m.backend != "docker" || !m.cfg.PersistentContainer {
+		return nil
+	}
+	ws, err := m.GetOrCreate(botID)
+	if err != nil {
+		return err
+	}
+	bw, ok := ws.(*botWorkspace)
+	if !ok || bw.container == nil {
+		return nil
+	}
+	return bw.container.ensure(ctx)
+}
+
+// SnapshotBot 用 docker commit 将当前容器状态保存为镜像快照，返回镜像短 ID。
+// 仅 docker 持久容器模式有效。
+func (m *BotWorkspaceManager) SnapshotBot(ctx context.Context, botID, tag string) (string, error) {
+	if m.backend != "docker" || !m.cfg.PersistentContainer {
+		return "", errs.New("bot_workspace: snapshot only supported in docker persistent mode")
+	}
+	ws, err := m.GetOrCreate(botID)
+	if err != nil {
+		return "", err
+	}
+	bw, ok := ws.(*botWorkspace)
+	if !ok || bw.container == nil {
+		return "", errs.New("bot_workspace: no container for bot")
+	}
+	return bw.container.snapshot(ctx, tag)
+}
+
+// ListBotSnapshots 列出该 bot 的所有快照镜像。
+func (m *BotWorkspaceManager) ListBotSnapshots(ctx context.Context, botID string) ([]SnapshotInfo, error) {
+	if m.backend != "docker" || !m.cfg.PersistentContainer {
+		return nil, nil
+	}
+	c := newBotContainer(botID, m.cfg, m.logger)
+	return c.listSnapshots(ctx)
+}
+
 // ============================================================================
 // botWorkspace — 持久化 per-bot 工作空间
 // ============================================================================
