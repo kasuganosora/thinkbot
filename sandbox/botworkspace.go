@@ -292,7 +292,8 @@ type ContainerInfo struct {
 	Volume        string `json:"volume"`        // named volume 名（persistent 模式）
 	Image         string `json:"image"`         // 镜像
 	State         string `json:"state"`         // 真实容器状态：running/exited/""(未创建)；local 为 "local"
-	WorkDir       string `json:"workDir"`       // 工作目录（容器内 /workspace 或宿主目录）
+	WorkDir       string `json:"workDir"`       // agent 视角工作目录：docker 模式为虚拟根 /data，local 模式为宿主真实目录
+	HostDir       string `json:"hostDir"`       // 宿主真实目录（docker 模式为 volume 挂载源 / 数据目录）
 	Created       bool   `json:"created"`       // 工作空间是否已实例化
 }
 
@@ -315,6 +316,10 @@ func (m *BotWorkspaceManager) ContainerInfo(ctx context.Context, botID string) C
 	info.Created = true
 	info.WorkDir = ws.WorkDir()
 	if ws.container != nil {
+		// docker 持久容器：agent 视角工作目录为虚拟根 /data，
+		// 宿主真实路径（named volume 挂载源）单独记录到 HostDir。
+		info.HostDir = ws.WorkDir()
+		info.WorkDir = VirtualRoot
 		info.ContainerName = ws.container.container
 		info.Volume = ws.container.volume
 		if dockerAvailable() {
@@ -326,6 +331,8 @@ func (m *BotWorkspaceManager) ContainerInfo(ctx context.Context, botID string) C
 			info.State = "docker-unavailable"
 		}
 	} else {
+		// local 模式：WorkDir 为宿主真实目录（诚实展示），HostDir 相同。
+		info.HostDir = ws.WorkDir()
 		info.State = "local"
 	}
 	return info
@@ -563,7 +570,7 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 		}
 		// Docker 在所有平台上都接受正斜杠
 		mountPath = filepath.ToSlash(mountPath)
-		args = append(args, "-v", mountPath+":/workspace")
+		args = append(args, "-v", mountPath+":"+VirtualRoot)
 
 		// 时区环境变量
 		tz := w.cfg.Timezone
@@ -573,9 +580,9 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 		args = append(args, "-e", "TZ="+tz)
 
 		// 工作目录
-		containerWorkDir := "/workspace"
+		containerWorkDir := VirtualRoot
 		if req.WorkDir != "" {
-			validated, err := validatePath("/workspace", req.WorkDir)
+			validated, err := validatePath(VirtualRoot, req.WorkDir)
 			if err != nil {
 				return nil, err
 			}
@@ -614,10 +621,14 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 			cmd = exec.CommandContext(execCtx, "sh", "-c", req.Command)
 		}
 		cmd.Dir = targetDir
-		// 设置 TZ 环境变量
+		// 注入环境变量：
+		//   WORKSPACE=/data —— agent 面向的统一虚拟根（与 docker 模式一致）
+		//   TZ            —— 时区
+		env := append(os.Environ(), "WORKSPACE="+VirtualRoot)
 		if w.cfg.Timezone != "" {
-			cmd.Env = append(os.Environ(), "TZ="+w.cfg.Timezone)
+			env = append(env, "TZ="+w.cfg.Timezone)
 		}
+		cmd.Env = env
 	}
 
 	var stdout, stderr bytes.Buffer

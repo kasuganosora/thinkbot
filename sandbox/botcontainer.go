@@ -27,8 +27,8 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
-// 容器内固定工作目录。
-const containerWorkDir = "/workspace"
+// 容器内固定工作目录（agent 面向的虚拟根 /data）。
+const containerWorkDir = VirtualRoot
 
 // botContainer 管理单个 bot 的长期容器。
 type botContainer struct {

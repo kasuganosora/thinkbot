@@ -887,11 +887,24 @@ export const chatApi = {
             case 'error':
               throw new Error(parts.message || '请求失败')
             case 'tool_call':
-              toolCalls.push({ id: parts.id || genId('tool'), name: parts.tool, input: parts.input, status: 'running' })
+              toolCalls.push({ id: parts.id || genId('tool'), name: parts.tool, title: parts.tool, input: parts.input, status: 'running' })
               break
             case 'tool_result':
-              const t = toolCalls.find(x => x.id === parts.id)
-              if (t) Object.assign(t, { status: parts.status, summary: parts.summary, output: parts.output })
+              // 后端 tool_result 不带 id，按“最近一个同名且仍在 running 的调用”回填
+              let t = parts.id ? toolCalls.find(x => x.id === parts.id) : null
+              if (!t) {
+                for (let i = toolCalls.length - 1; i >= 0; i--) {
+                  if (toolCalls[i].name === parts.tool && toolCalls[i].status === 'running') { t = toolCalls[i]; break }
+                }
+              }
+              if (t) {
+                const isErr = parts.error != null
+                Object.assign(t, {
+                  status: parts.status || (isErr ? 'error' : 'success'),
+                  summary: parts.summary,
+                  output: isErr ? parts.error : parts.output,
+                })
+              }
               break
           }
         }
