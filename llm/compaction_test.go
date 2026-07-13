@@ -480,8 +480,8 @@ func TestOutputTruncator_Truncation(t *testing.T) {
 	if !ok {
 		t.Fatal("expected string output")
 	}
-	if !strings.Contains(outputStr, "truncated") {
-		t.Error("expected 'truncated' marker in truncated output")
+	if !strings.Contains(outputStr, "中间省略") {
+		t.Error("expected truncation marker (中间省略) in truncated output")
 	}
 }
 
@@ -523,8 +523,40 @@ func TestOutputTruncator_HeadAndTailKept(t *testing.T) {
 	if !strings.Contains(outputStr, "LAST_LINE_MARKER") {
 		t.Error("expected tail (last line) to be kept")
 	}
-	if !strings.Contains(outputStr, "truncated") {
-		t.Error("expected truncation marker")
+	if !strings.Contains(outputStr, "中间省略") {
+		t.Error("expected truncation marker (中间省略)")
+	}
+}
+
+// TestOutputTruncator_SingleHugeLine 验证无换行的超长单行（压缩 JSON / 单行
+// HTML / 长 base64 等）不会整块丢失：应退回字节级兜底，保留头部和尾部字节。
+func TestOutputTruncator_SingleHugeLine(t *testing.T) {
+	cfg := TruncationConfig{
+		MaxLines: 500,
+		MaxBytes: 50 * 1024,
+	}
+
+	// 60KB 无换行单行（模拟压缩 JSON blob）。
+	huge := strings.Repeat("x", 60*1024)
+	result := TruncateOutput(huge, cfg)
+	if !result.Truncated {
+		t.Fatal("expected truncation")
+	}
+	outputStr, ok := result.Output.(string)
+	if !ok {
+		t.Fatal("expected string output")
+	}
+	// 内容不应整块丢失：至少应保留首尾字节（去掉提示语后仍有原始字符）。
+	kept := strings.Count(outputStr, "x")
+	if kept == 0 {
+		t.Error("expected head/tail bytes to be kept for single huge line (byte-level fallback)")
+	}
+	// 又不应因保留过头而等于原文（确认确实发生了省略）。
+	if kept == len(huge) {
+		t.Error("expected content to be omitted (not full passthrough)")
+	}
+	if !strings.Contains(outputStr, "中间省略") {
+		t.Error("expected truncation marker (中间省略)")
 	}
 }
 

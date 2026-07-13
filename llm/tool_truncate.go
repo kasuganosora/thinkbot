@@ -99,14 +99,12 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 	headByteBudget := maxBytes * 2 / 3
 	tailByteBudget := maxBytes - headByteBudget
 
-	// 头部：从前往后累积。
+	// 头部：从前往后累积。每个元素含其后的 newline（与尾部口径一致），
+	// 这样 headBytes 与 tailBytes 的字节预算分配对称，removedBytes 估算也更准。
 	var head []string
 	headBytes := 0
 	for i := 0; i < len(lines) && len(head) < headLineBudget; i++ {
-		lineSize := len(lines[i])
-		if i > 0 {
-			lineSize++ // newline
-		}
+		lineSize := len(lines[i]) + 1 // 含 newline
 		if headBytes+lineSize > headByteBudget {
 			break
 		}
@@ -130,24 +128,58 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 		tail[i], tail[j] = tail[j], tail[i]
 	}
 
+	// 字节级兜底：当输入是「无换行的超长单行」（压缩 JSON / 单行 HTML / 长 base64 等），
+	// head 和 tail 都会因首行即超字节预算而落空，纯按行截断会整块丢弃内容。
+	// 此时退回字节切片：保留前 headByteBudget 与后 tailByteBudget 字节，中间省略。
+	if len(head) == 0 && len(tail) == 0 && totalBytes > 0 {
+		headBytes = headByteBudget
+		if headBytes > totalBytes {
+			headBytes = totalBytes
+		}
+		tailBytes = tailByteBudget
+		if tailBytes > totalBytes-headBytes {
+			tailBytes = totalBytes - headBytes
+		}
+		headText := text[:headBytes]
+		tailText := ""
+		if tailBytes > 0 {
+			tailText = text[totalBytes-tailBytes:]
+		}
+		hint := truncationHint(totalBytes-headBytes-tailBytes, -1)
+		return TruncationResult{
+			Output:       headText + hint + "\n\n" + tailText,
+			Truncated:    true,
+			OriginalSize: totalBytes,
+		}
+	}
+
 	removedLines := len(lines) - len(head) - len(tail)
 	removedBytes := totalBytes - headBytes - tailBytes
 
 	headText := strings.Join(head, "\n")
 	tailText := strings.Join(tail, "\n")
 
-	hint := fmt.Sprintf(
-		"\n\n... [中间省略 %d 行 / 约 %d 字节，已保留头部和尾部] ...\n\n"+
-			"⚠️ Output was truncated (head + tail kept, middle omitted). "+
-			"Use more specific parameters (e.g., narrower search pattern, "+
-			"offset/limit for file reads, or grep for specific content) to get focused results. "+
-			"Do not retry with the same parameters expecting full output.",
-		removedLines, removedBytes,
-	)
+	hint := truncationHint(removedBytes, removedLines)
 
 	return TruncationResult{
 		Output:       headText + hint + "\n\n" + tailText,
 		Truncated:    true,
 		OriginalSize: totalBytes,
 	}
+}
+
+// truncationHint 生成统一的截断提示。
+// removedBytes 为必填（估算省略的字节数）；removedLines 为 -1 表示未知行数
+// （字节级兜底场景，因不按行截断）。提示面向 LLM，告知输出被裁剪并建议更精确的参数。
+func truncationHint(removedBytes, removedLines int) string {
+	marker := "... [中间省略"
+	if removedLines >= 0 {
+		marker += fmt.Sprintf(" %d 行 / 约 %d 字节", removedLines, removedBytes)
+	} else {
+		marker += fmt.Sprintf(" 约 %d 字节", removedBytes)
+	}
+	marker += "，已保留头部和尾部] ..."
+	return "\n\n" + marker + "\n\n" +
+		"⚠️ 输出已截断（保留头尾，省略中间）。请使用更精确的参数（如更小的搜索范围、offset/limit 分页读取、grep 关键词）获取聚焦结果。" +
+		"不要以相同参数重试期望获取完整输出。"
 }
