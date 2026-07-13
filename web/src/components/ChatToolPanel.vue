@@ -95,11 +95,11 @@
             </template>
           </div>
           <div class="files-ops">
-            <label class="upload-btn" for="cttp-upload-input" data-testid="file-upload-btn">
+            <label class="upload-btn" data-testid="file-upload-btn">
               <t-icon name="upload" /><span>上传</span>
+              <input ref="uploadInputRef" type="file" multiple class="upload-input" @change="onUpload" />
             </label>
-            <input id="cttp-upload-input" ref="uploadInputRef" type="file" multiple class="hidden-file" @change="onUpload" />
-            <t-button size="small" variant="outline" @click="openMkdir"><template #icon><t-icon name="folder-add" /></template>新建文件夹</t-button>
+            <t-button size="small" variant="outline" @click="startMkdir"><template #icon><t-icon name="folder-add" /></template>新建文件夹</t-button>
             <t-button size="small" variant="outline" shape="square" @click="loadFiles"><t-icon name="refresh" /></t-button>
           </div>
         </div>
@@ -116,6 +116,24 @@
             @click="goUp"
           >
             <span class="col-name"><t-icon name="rollback" class="ic-dir" /> ..</span>
+            <span class="col-size"></span>
+            <span class="col-time"></span>
+          </div>
+          <div v-if="mkdir.editing" class="files-row mkdir-row" data-testid="file-mkdir-row">
+            <span class="col-name">
+              <t-icon name="folder" class="ic-dir" />
+              <input
+                ref="mkdirInputRef"
+                v-model="mkdir.name"
+                class="mkdir-input"
+                data-testid="file-mkdir-input"
+                placeholder="新建文件夹"
+                :disabled="mkdir.saving"
+                @keydown.enter.prevent="confirmMkdir"
+                @keydown.esc.prevent="cancelMkdir"
+                @blur="confirmMkdir"
+              />
+            </span>
             <span class="col-size"></span>
             <span class="col-time"></span>
           </div>
@@ -141,7 +159,7 @@
             <span class="col-size">{{ e.type === 'dir' ? '' : fmtSize(e.size) }}</span>
             <span class="col-time">{{ fmtTime(e.mtime) }}</span>
           </div>
-          <div v-if="!files.entries.length" class="files-empty">此目录为空</div>
+          <div v-if="!files.entries.length && !mkdir.editing" class="files-empty">此目录为空</div>
         </div>
       </section>
 
@@ -200,7 +218,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sessionToolApi } from '@/api/services'
 import { useBotStore } from '@/stores/bot'
@@ -270,6 +288,8 @@ function onTermExec(cmd) {
 // ---------- 文件 ----------
 const files = ref({ path: '/', entries: [] })
 const uploadInputRef = ref()
+const mkdir = ref({ editing: false, name: '', saving: false })
+const mkdirInputRef = ref()
 const crumbs = computed(() => ['/', ...String(files.value.path || '').split('/').filter(Boolean)])
 const isRoot = computed(() => files.value.path === '/')
 
@@ -278,6 +298,7 @@ async function loadFiles() {
   files.value = await sessionToolApi.files(sid.value, files.value.path)
 }
 function enterDir(name) {
+  if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
   files.value.path = `${files.value.path.replace(/\/$/, '')}/${name}`
   loadFiles()
 }
@@ -293,12 +314,14 @@ function downloadFile(name) {
   document.body.removeChild(a)
 }
 function goUp() {
+  if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
   const parts = files.value.path.split('/').filter(Boolean)
   parts.pop()
   files.value.path = '/' + parts.join('/')
   loadFiles()
 }
 function goCrumb(i) {
+  if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
   if (i === 0) { files.value.path = '/'; }
   else {
     const parts = crumbs.value.slice(1, i + 1)
@@ -306,13 +329,33 @@ function goCrumb(i) {
   }
   loadFiles()
 }
-function openMkdir() {
-  const n = window.prompt('请输入文件夹名称')
-  if (n === null) return
-  if (!n.trim()) { MessagePlugin.warning('请输入文件夹名'); return }
-  sessionToolApi.mkdir(sid.value, files.value.path, n.trim())
-    .then(() => { MessagePlugin.success('已创建'); loadFiles() })
-    .catch(e => MessagePlugin.error(e.message || '创建失败'))
+function startMkdir() {
+  if (mkdir.value.editing) {
+    mkdirInputRef.value?.focus()
+    return
+  }
+  mkdir.value = { editing: true, name: '', saving: false }
+  nextTick(() => mkdirInputRef.value?.focus())
+}
+function cancelMkdir() {
+  if (mkdir.value.saving) return
+  mkdir.value = { editing: false, name: '', saving: false }
+}
+async function confirmMkdir() {
+  if (!mkdir.value.editing || mkdir.value.saving) return
+  const name = mkdir.value.name.trim()
+  if (!name) { cancelMkdir(); return }
+  mkdir.value.saving = true
+  try {
+    await sessionToolApi.mkdir(sid.value, files.value.path, name)
+    mkdir.value = { editing: false, name: '', saving: false }
+    MessagePlugin.success('已创建')
+    await loadFiles()
+  } catch (e) {
+    mkdir.value.saving = false
+    MessagePlugin.error(e.message || '创建失败')
+    nextTick(() => mkdirInputRef.value?.focus())
+  }
 }
 function triggerUpload() { uploadInputRef.value?.click() }
 async function onUpload(e) {
@@ -553,11 +596,22 @@ watch(sid, loadAll)
 .upload-btn:active { background: rgba(0, 82, 217, 0.16); }
 .hidden-file {
   position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.upload-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 0;
 }
 .files-table { font-size: 13px; }
 .files-row {
@@ -589,6 +643,19 @@ watch(sid, loadAll)
 .files-row:hover .ic-download { opacity: 1; }
 .ic-download:hover { color: #0052d9; }
 .files-empty { text-align: center; color: #aaa; padding: 28px 0; font-size: 13px; }
+.mkdir-row { background: #f5f9ff; }
+.mkdir-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid #0052d9;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 13px;
+  color: #1d1d1f;
+  outline: none;
+  background: #fff;
+}
+.mkdir-input:disabled { background: #f2f3f5; color: #999; }
 
 /* status */
 .status-body { padding: 18px; }

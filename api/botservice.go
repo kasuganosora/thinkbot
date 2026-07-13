@@ -98,6 +98,42 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 
 // --- BotDefinition CRUD ---
 
+// RunningBotWorkspaceMgr 返回指定 bot 运行时的工作空间管理器（若 bot 正在运行且已启用）。
+// 文件管理 API 借此复用与运行时完全一致的后端（docker 持久容器 / local）。
+func (s *BotService) RunningBotWorkspaceMgr(botID string) (*sandbox.BotWorkspaceManager, bool) {
+	s.mu.RLock()
+	b, ok := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return nil, false
+	}
+	mgr := b.WorkspaceMgr()
+	if mgr == nil {
+		return nil, false
+	}
+	return mgr, true
+}
+
+// SandboxConfigForBot 构造文件管理 API 使用的 sandbox 配置，与运行时保持一致。
+// Backend 由 config 决定（默认 auto：有 Docker 则容器隔离，否则 local）。
+func (s *BotService) SandboxConfigForBot() sandbox.Config {
+	builder := config.NewBuilder(s.store, s.logger)
+	cfg := sandbox.DefaultConfig()
+	cfg.Timezone = builder.GetTimezone()
+	if img := s.store.GetString(config.KeySandboxImage, ""); img != "" {
+		cfg.Image = img
+	}
+	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
+		cfg.Backend = backend
+	}
+	return cfg
+}
+
+// GetWorkspaceBaseDir 返回 bot 工作空间根目录。
+func (s *BotService) GetWorkspaceBaseDir() string {
+	return config.NewBuilder(s.store, s.logger).GetWorkspaceDir()
+}
+
 // ListDefinitions 返回所有 Bot 定义。
 func (s *BotService) ListDefinitions() ([]dao.BotDefinition, error) {
 	var defs []dao.BotDefinition

@@ -116,6 +116,8 @@ type FileEntry struct {
 	Name  string `json:"name"`
 	IsDir bool   `json:"isDir"`
 	Size  int64  `json:"size"`
+	// ModTime 最后修改时间（可能为零值，取决于后端是否提供）。
+	ModTime time.Time `json:"modTime,omitempty"`
 }
 
 // ============================================================================
@@ -159,6 +161,14 @@ type Config struct {
 	// 为空时使用 "UTC" 作为容器默认时区（不影响本地进程，本地进程继承宿主时区）。
 	// 影响：Docker 容器的 TZ 环境变量、本地执行进程的 TZ 环境变量。
 	Timezone string
+
+	// PersistentContainer 为 true 时，per-bot Docker 后端使用「一个 bot 一个长期容器」
+	// 模式：容器在首次使用时创建（docker run -d ... sleep infinity），挂载一个 named
+	// volume 到容器内 /workspace，bot 的所有文件读写与命令执行都通过 docker exec 在
+	// 容器内完成，宿主机磁盘不落任何 bot 文件（真正隔离）。
+	// 为 false 时（旧行为）：每条命令起一个临时容器（docker run --rm），文件走宿主机 bind mount。
+	// 仅影响 BotWorkspaceManager 的 Docker 后端；local 后端不受影响。
+	PersistentContainer bool
 }
 
 // DefaultConfig 返回默认配置。

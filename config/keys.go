@@ -112,6 +112,12 @@ const (
 	// 每个 Bot 在此目录下拥有独立的子目录（{dir}/{botID}/），持久化存储文件。
 	// SOUL.md、笔记、配置等数据保存在此目录，重启后不丢失。
 	KeyWorkspaceDir = "workspace.dir"
+
+	// KeySandboxBackend 沙箱后端："auto"（默认，有 Docker 用容器隔离否则 local）|"docker"|"local"。
+	KeySandboxBackend = "sandbox.backend"
+
+	// KeySandboxImage 沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用）。
+	KeySandboxImage = "sandbox.image"
 )
 
 // System 键。
