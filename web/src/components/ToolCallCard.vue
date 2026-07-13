@@ -81,10 +81,28 @@
       </div>
 
       <!-- 命令类工具 -->
-      <div v-if="call.command" class="tc-cmd" :data-testid="`chat-toolcall-cmd-${call.id}`">
-        <div class="cmd-line"><span class="cmd-prompt">$</span> {{ call.command }}</div>
+      <div v-if="cmdText" class="tc-cmd" :data-testid="`chat-toolcall-cmd-${call.id}`">
+        <div class="cmd-line"><span class="cmd-prompt">$</span> {{ cmdText }}</div>
         <div v-if="state === 'running'" class="cmd-output running">执行中<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
-        <div v-else-if="call.output" class="cmd-output">{{ call.output }}</div>
+        <div v-else-if="outputText" class="cmd-output">{{ outputText }}</div>
+      </div>
+
+      <!-- 通用兜底：任意工具都回显入参与结果 -->
+      <div
+        v-if="showGeneric"
+        class="tc-generic"
+        :data-testid="`chat-toolcall-generic-${call.id}`"
+      >
+        <div v-if="inputText" class="tc-kv">
+          <div class="tc-kv-label">参数</div>
+          <pre class="tc-kv-val">{{ inputText }}</pre>
+        </div>
+        <div v-if="state !== 'running' && outputText" class="tc-kv">
+          <div class="tc-kv-label" :class="{ 'is-error': state === 'error' }">{{ state === 'error' ? '错误' : '结果' }}</div>
+          <pre class="tc-kv-val" :class="{ 'is-error': state === 'error' }">{{ outputText }}</pre>
+        </div>
+        <div v-else-if="state === 'running'" class="cmd-output running">执行中<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
+        <div v-if="!inputText && !outputText && state !== 'running'" class="tc-empty">无输出</div>
       </div>
     </div>
   </div>
@@ -116,6 +134,40 @@ const doneFileCount = computed(() => {
 
 const hasDiff = computed(() =>
   typeof props.call.added === 'number' || typeof props.call.removed === 'number'
+)
+
+// --- 通用回显：兼容真实后端返回的 input(对象) / output(字符串) ---
+
+// 命令行文本：优先 call.command，其次 shell 类工具的 input.command
+const cmdText = computed(() => {
+  if (props.call.command) return props.call.command
+  const inp = props.call.input
+  if (inp && typeof inp === 'object') {
+    if (typeof inp.command === 'string') return inp.command
+    if (typeof inp.cmd === 'string') return inp.cmd
+  }
+  return ''
+})
+
+// 输出文本：兼容 output 为字符串或对象
+const outputText = computed(() => {
+  const o = props.call.output
+  if (o == null) return ''
+  if (typeof o === 'string') return o
+  try { return JSON.stringify(o, null, 2) } catch { return String(o) }
+})
+
+// 入参文本：对象美化为 JSON；命令类已单独展示则不再重复
+const inputText = computed(() => {
+  const inp = props.call.input
+  if (inp == null || inp === '') return ''
+  if (typeof inp === 'string') return inp
+  try { return JSON.stringify(inp, null, 2) } catch { return String(inp) }
+})
+
+// 是否显示通用兜底块：既没有文件列表、也没有命令行时启用
+const showGeneric = computed(() =>
+  !(props.call.files && props.call.files.length) && !cmdText.value
 )
 
 const headIcon = computed(() => {
@@ -312,6 +364,34 @@ onBeforeUnmount(stop)
 .dots i { animation: blink 1.2s infinite; }
 .dots i:nth-child(2) { animation-delay: 0.2s; }
 .dots i:nth-child(3) { animation-delay: 0.4s; }
+
+.tc-generic { padding: 4px 6px; display: flex; flex-direction: column; gap: 8px; }
+.tc-kv { display: flex; flex-direction: column; gap: 3px; }
+.tc-kv-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #667085;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.tc-kv-label.is-error { color: #d63c3c; }
+.tc-kv-val {
+  margin: 0;
+  background: #f5f6f8;
+  border: 1px solid #eceef1;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #344054;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+.tc-kv-val.is-error { background: #fff5f5; border-color: #f3d0d0; color: #b42318; }
+.tc-empty { font-size: 12px; color: #98a2b3; padding: 4px 2px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes flow { to { background-position: -200% 0; } }

@@ -855,6 +855,14 @@ func (s *Server) botWorkspaceRoot(botID string) (string, error) {
 func safeJoin(root string, elems ...string) (string, error) {
 	// 先把所有片段拼成一个相对路径，再统一清理。
 	rel := filepath.Join(elems...)
+	// 剥离 agent 面向的虚拟根前缀 /data（local 模式下映射回宿主真实 root）。
+	rel = filepath.ToSlash(rel)
+	if rel == sandbox.VirtualRoot {
+		rel = ""
+	} else if strings.HasPrefix(rel, sandbox.VirtualRoot+"/") {
+		rel = rel[len(sandbox.VirtualRoot)+1:]
+	}
+	rel = filepath.FromSlash(rel)
 	// 去掉开头的分隔符，避免被当成绝对路径。
 	rel = strings.TrimPrefix(rel, string(filepath.Separator))
 	rel = filepath.Clean("/" + rel) // 归一化，消除 .. 逃逸到根之上的情况

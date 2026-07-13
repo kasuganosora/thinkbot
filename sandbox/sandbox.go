@@ -259,10 +259,16 @@ func dockerAvailable() bool {
 	return true
 }
 
+// VirtualRoot 是 agent（bot）面向的统一工作目录虚拟根。
+// docker 模式下容器内物理挂载点即为该路径；local 模式下它是宿主真实
+// 工作目录的逻辑别名，路径入参会被映射回宿主目录。
+const VirtualRoot = "/data"
+
 // validatePath 校验路径安全性，防止路径逃逸（../../etc/passwd 之类）。
 //
 // root 是工作空间根目录的绝对路径。
 // path 是用户提供的相对路径或绝对路径。
+// 若 path 以虚拟根 /data 开头，会先剥离该前缀（统一 docker/local 语义）。
 // 返回经过清理的、保证在 root 内的绝对路径。
 func validatePath(root, path string) (string, error) {
 	if path == "" {
@@ -271,6 +277,13 @@ func validatePath(root, path string) (string, error) {
 
 	// 统一替换为正斜杠（兼容 Windows 反斜杠）
 	cleaned := strings.ReplaceAll(path, "\\", "/")
+
+	// 剥离虚拟根前缀 /data（agent 以 /data 为工作根，需映射回真实 root）。
+	if cleaned == VirtualRoot {
+		cleaned = "."
+	} else if strings.HasPrefix(cleaned, VirtualRoot+"/") {
+		cleaned = cleaned[len(VirtualRoot)+1:]
+	}
 
 	// 拒绝包含 .. 的路径（防止目录遍历攻击）
 	parts := strings.Split(cleaned, "/")

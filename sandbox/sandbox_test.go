@@ -54,6 +54,47 @@ func TestValidatePath_AbsoluteStripped(t *testing.T) {
 	}
 }
 
+func TestValidatePath_VirtualRootStripped(t *testing.T) {
+	// docker 模式：root 即虚拟根 /data，传入 /data/foo 应映射为 /data/foo（不重复）
+	got, err := validatePath("/data", "/data/foo/bar.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/data/foo/bar.txt" {
+		t.Errorf("docker mode: got %q, want /data/foo/bar.txt", got)
+	}
+
+	// local 模式：root 是宿主真实目录，传入 /data/foo 应映射到 root 下（不出现多余 data 层）
+	got, err = validatePath("/host/ws/bot-1", "/data/foo/bar.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/host/ws/bot-1/foo/bar.txt" {
+		t.Errorf("local mode: got %q, want /host/ws/bot-1/foo/bar.txt", got)
+	}
+
+	// 恰好等于虚拟根 /data 时应映射到 root 本身
+	got, err = validatePath("/host/ws/bot-1", "/data")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/host/ws/bot-1" {
+		t.Errorf("bare /data: got %q, want /host/ws/bot-1", got)
+	}
+
+	// 相对路径不受影响
+	got, _ = validatePath("/host/ws/bot-1", "foo/bar.txt")
+	if got != "/host/ws/bot-1/foo/bar.txt" {
+		t.Errorf("relative: got %q, want /host/ws/bot-1/foo/bar.txt", got)
+	}
+
+	// /datax 不应被误剥离（只匹配 /data 或 /data/）
+	got, _ = validatePath("/host/ws/bot-1", "/datax/y")
+	if got != "/host/ws/bot-1/datax/y" {
+		t.Errorf("/datax should not be stripped: got %q", got)
+	}
+}
+
 func TestDefaultConfig_HasTimezone(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Timezone != "UTC" {
