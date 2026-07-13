@@ -3,9 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -50,27 +52,61 @@ func (s *Server) handleSessionTerminal(c *gin.Context) {
 // handleSessionTerminalExec 在会话终端中执行命令。
 // POST /api/sessions/:sid/terminal/exec
 //
-// 请求体: { "cmd": "ls -la" }
-// 响应:   { "output": "...", "cwd": "/home/user" }
+// 请求体: { "cmd": "ls -la", "cwd": "sub/dir" }
+// 响应:   { "output": "...", "exitCode": 0, "cwd": "..." }
+//
+// 执行路由完全交给 sandbox 兼容层（Workspace.Exec）：有 Docker 环境则在该 bot 的
+// 隔离容器内执行，无 Docker 则在宿主机本地进程执行，本 handler 不感知具体后端。
 func (s *Server) handleSessionTerminalExec(c *gin.Context) {
 	sid := c.Param("sid")
 	var req struct {
 		Cmd string `json:"cmd" binding:"required"`
+		Cwd string `json:"cwd"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("cmd is required"))
 		return
 	}
 
-	// 目前终端执行是 stub 实现——记录命令并返回模拟结果。
-	// 完整实现需要集成 PTY 或 Docker exec。
-	result := gin.H{
-		"output": fmt.Sprintf("[session %s] command received: %s\n(terminal exec not yet implemented)", sid, req.Cmd),
-		"cwd":    "/",
+	if s.botSvc == nil {
+		Fail(c, errs.Internal("bot service unavailable"))
+		return
+	}
+	// session ID 即 bot ID（当前设计下 session 与 bot 1:1 映射）。
+	ws, err := s.botSvc.ResolveWorkspace(sid)
+	if err != nil {
+		Fail(c, errs.Internal("resolve workspace: "+err.Error()))
+		return
+	}
+
+	res, err := ws.Exec(c.Request.Context(), sandbox.ExecRequest{
+		Command: req.Cmd,
+		WorkDir: req.Cwd,
+	})
+	if err != nil {
+		Fail(c, errs.Internal("exec failed: "+err.Error()))
+		return
+	}
+
+	// 组装终端输出：stdout + stderr，末尾附非零退出码提示。
+	output := res.Stdout
+	if res.Stderr != "" {
+		output += res.Stderr
+	}
+	if res.ExitCode != 0 {
+		if output != "" && !strings.HasSuffix(output, "\n") {
+			output += "\n"
+		}
+		output += fmt.Sprintf("[exit code: %d]\n", res.ExitCode)
 	}
 
 	auditLog(c, s.logger, "session_terminal_exec", "session", sid, "cmd", req.Cmd)
-	OK(c, result)
+	OK(c, gin.H{
+		"output":    output,
+		"exitCode":  res.ExitCode,
+		"truncated": res.Truncated,
+		"cwd":       ws.WorkDir(),
+	})
 }
 
 // --- 文件浏览 API ---

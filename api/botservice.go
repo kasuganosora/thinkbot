@@ -114,6 +114,72 @@ func (s *BotService) RunningBotWorkspaceMgr(botID string) (*sandbox.BotWorkspace
 	return mgr, true
 }
 
+// ResolveWorkspace 返回指定 bot 的工作空间兼容层入口（docker/local 都返回）。
+//
+// 这是终端执行、agent shell/list_files 工具统一的执行出口：调用方只面向
+// sandbox.Workspace.Exec / ListDir 等接口，完全不感知底层是 docker 容器还是
+// 物理机进程 —— 有 Docker 环境走容器隔离，无则走宿主机本地进程。
+//
+// 与 botFileWorkspace（api/handler_bot_detail.go，仅 docker 模式返回）不同，
+// 本方法在 local 模式下也会返回一个可用的 workspace。
+func (s *BotService) ResolveWorkspace(botID string) (sandbox.Workspace, error) {
+	if botID == "" {
+		return nil, errs.New("bot_service: botID is required")
+	}
+	// 优先复用运行中 bot 的工作空间管理器（与运行时状态完全一致）。
+	if mgr, ok := s.RunningBotWorkspaceMgr(botID); ok {
+		return mgr.GetOrCreate(botID)
+	}
+	// bot 未运行时按当前配置临时构造（docker 或 local 均可）。
+	mgr, err := sandbox.NewBotWorkspaceManager(s.GetWorkspaceBaseDir(), s.SandboxConfigForBot(), s.logger)
+	if err != nil {
+		return nil, errs.Wrap(err, "bot_service: build workspace manager")
+	}
+	return mgr.GetOrCreate(botID)
+}
+
+// workspaceExecAdapter 把 sandbox.Workspace 适配为 tools.WorkspaceExecutor，
+// 使 shell / list_files 工具无需直接依赖 sandbox 包即可走兼容层执行。
+type workspaceExecAdapter struct {
+	ws sandbox.Workspace
+}
+
+func (a *workspaceExecAdapter) WorkDir() string { return a.ws.WorkDir() }
+
+func (a *workspaceExecAdapter) Exec(ctx context.Context, req tools.WsExecRequest) (*tools.WsExecResult, error) {
+	res, err := a.ws.Exec(ctx, sandbox.ExecRequest{
+		Command: req.Command,
+		WorkDir: req.WorkDir,
+		Timeout: req.Timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &tools.WsExecResult{
+		ExitCode:  res.ExitCode,
+		Stdout:    res.Stdout,
+		Stderr:    res.Stderr,
+		Truncated: res.Truncated,
+	}, nil
+}
+
+func (a *workspaceExecAdapter) ListDir(ctx context.Context, path string) ([]tools.WsFileEntry, error) {
+	entries, err := a.ws.ListDir(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.WsFileEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, tools.WsFileEntry{
+			Name:    e.Name,
+			IsDir:   e.IsDir,
+			Size:    e.Size,
+			ModTime: e.ModTime,
+		})
+	}
+	return out, nil
+}
+
 // SandboxConfigForBot 构造文件管理 API 使用的 sandbox 配置，与运行时保持一致。
 // Backend 由 config 决定（默认 auto：有 Docker 则容器隔离，否则 local）。
 func (s *BotService) SandboxConfigForBot() sandbox.Config {
@@ -323,6 +389,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 注册通用工具（web_fetch, calculate, now, web_search 等）
 	if err := tools.RegisterTools(toolMgr, tools.Config{
 		TimezoneResolver: builder.GetBotTimezone,
+		WorkspaceResolver: func(botID string) (tools.WorkspaceExecutor, error) {
+			ws, err := s.ResolveWorkspace(botID)
+			if err != nil {
+				return nil, err
+			}
+			return &workspaceExecAdapter{ws: ws}, nil
+		},
 	}); err != nil {
 		rollback()
 		return errs.Wrap(err, "bot_service: register tools")
