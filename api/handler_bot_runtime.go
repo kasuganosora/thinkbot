@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/sandbox"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -167,4 +169,104 @@ func buildContainerTaskCheck(info sandbox.ContainerInfo, health sandbox.HealthSt
 			Extra: "status=" + state, OK: health.Healthy,
 		}
 	}
+}
+
+// ============================================================================
+// Bot 终端（容器 shell）— 接入真实 sandbox
+//
+// 前端契约（botTerminalApi）：
+//   GET  /api/bots/:id/terminal       — 终端状态（连接信息 / 提示符）
+//   POST /api/bots/:id/terminal/exec  — 执行命令（真实 docker exec 或本地进程）
+//
+// 参考实现：session 终端 (handler_session_tool.go) 的 handleSessionTerminal /
+// handleSessionTerminalExec，核心模式完全一致：ResolveWorkspace → ws.Exec。
+// 区别：session 用 sid（= bot ID），这里直接用 botId。
+// ============================================================================
+
+// handleBotTerminal 获取 bot 终端连接状态。
+// GET /api/bots/:id/terminal
+func (s *Server) handleBotTerminal(c *gin.Context) {
+	botID := c.Param("id")
+	if s.botSvc == nil {
+		Fail(c, fmt.Errorf("bot service unavailable"))
+		return
+	}
+
+	ws, err := s.botSvc.ResolveWorkspace(botID)
+	if err != nil {
+		// workspace 不可用时不阻断：返回未连接状态让前端显示提示
+		OK(c, gin.H{
+			"host":      "unavailable",
+			"cwd":       "",
+			"connected": false,
+			"banner":    "无法解析工作空间：" + err.Error(),
+		})
+		return
+	}
+
+	banner := fmt.Sprintf("Connected to container of bot %s (%s)", botID, ws.WorkDir())
+	OK(c, gin.H{
+		"host":      fmt.Sprintf("root@%s", botID),
+		"cwd":       ws.WorkDir(),
+		"connected": true,
+		"banner":    banner,
+	})
+}
+
+// handleBotTerminalExec 在 bot 终端中执行命令。
+// POST /api/bots/:id/terminal/exec
+//
+// 请求体: { "cmd": "ls -la", "cwd": "/data/sub" }
+// 响应:   { "output": "...", "cwd": "..." }
+//
+// 执行路由完全交给 sandbox 兼容层（Workspace.Exec）：有 Docker 则在 bot 的
+// 隔离容器内执行，无 Docker 则在本地进程执行，本 handler 不感知具体后端。
+func (s *Server) handleBotTerminalExec(c *gin.Context) {
+	botID := c.Param("id")
+	var req struct {
+		Cmd string `json:"cmd" binding:"required"`
+		Cwd string `json:"cwd"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("cmd is required"))
+		return
+	}
+
+	if s.botSvc == nil {
+		Fail(c, fmt.Errorf("bot service unavailable"))
+		return
+	}
+
+	ws, err := s.botSvc.ResolveWorkspace(botID)
+	if err != nil {
+		Fail(c, fmt.Errorf("resolve workspace: %w", err))
+		return
+	}
+
+	res, err := ws.Exec(c.Request.Context(), sandbox.ExecRequest{
+		Command: req.Cmd,
+		WorkDir: req.Cwd,
+	})
+	if err != nil {
+		Fail(c, fmt.Errorf("exec failed: %w", err))
+		return
+	}
+
+	// 组装终端输出：stdout + stderr，末尾附非零退出码提示。
+	output := res.Stdout
+	if res.Stderr != "" {
+		output += res.Stderr
+	}
+	if res.ExitCode != 0 {
+		if output != "" && !strings.HasSuffix(output, "\n") {
+			output += "\n"
+		}
+		output += fmt.Sprintf("[exit code: %d]\n", res.ExitCode)
+	}
+
+	auditLog(c, s.logger, "bot_terminal_exec", "bot", botID, "cmd", req.Cmd)
+	OK(c, gin.H{
+		"output": output,
+		"cwd":    ws.WorkDir(),
+	})
 }
