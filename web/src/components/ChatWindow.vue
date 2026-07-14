@@ -108,19 +108,35 @@
         />
         <div class="input-toolbar">
           <div class="tool-left">
-            <t-button variant="text" size="small" shape="round" data-testid="chat-btn-deepthink">
-              <template #icon><t-icon name="lightbulb" /></template>
-              深度思考
-            </t-button>
-            <t-button variant="text" size="small" shape="round" data-testid="chat-btn-tools">
-              <template #icon><t-icon name="tools" /></template>
-              工具
-            </t-button>
+            <label class="attach-btn" data-testid="chat-btn-attach" title="上传文件（图片、音频、视频）">
+              <t-icon name="attach" />
+              <input
+                ref="fileInputRef"
+                type="file"
+                multiple
+                accept="image/*,audio/*,video/*,.pdf,.txt,.md,.json,.csv,.xml,.html,.css,.js,.ts,.py,.go,.java,.c,.cpp,.h,.sh,.yaml,.yml,.toml,.env,.log,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                class="attach-input"
+                @change="onFileSelect"
+              />
+            </label>
+            <!-- 附件预览条（有附件时显示） -->
+            <div v-if="attachments.length" class="attach-strip">
+              <span
+                v-for="(f, i) in attachments"
+                :key="i"
+                class="attach-chip"
+                :data-testid="`chat-attach-${i}`"
+              >
+                <t-icon :name="fileIcon(f.type)" />
+                {{ f.name }}
+                <t-icon name="close" class="attach-remove" @click.stop="removeAttach(i)" />
+              </span>
+            </div>
           </div>
           <t-button
             theme="primary"
             shape="circle"
-            :disabled="!draft.trim() || store.replying"
+            :disabled="!draft.trim() && !attachments.length || store.replying"
             :loading="store.replying"
             data-testid="chat-btn-send"
             aria-label="发送消息"
@@ -130,7 +146,6 @@
           </t-button>
         </div>
       </div>
-      <div class="input-foot">内容由 AI 生成，仅供参考</div>
     </div>
   </div>
 </template>
@@ -154,6 +169,71 @@ const store = useBotStore()
 const userStore = useUserStore()
 const draft = ref('')
 const scrollRef = ref()
+const fileInputRef = ref()
+
+// ── 附件（图片 / 音频 / 视频）──
+const attachments = ref([])  // { name, type, size, dataUrl (base64) }[]
+
+/** 根据 MIME type 返回图标名 */
+function fileIcon(mimeType) {
+  if (mimeType?.startsWith('image')) return 'image'
+  if (mimeType?.startsWith('audio')) return 'voice'
+  if (mimeType?.startsWith('video')) return 'video-play'
+  if (mimeType === 'application/pdf') return 'file-pdf'
+  return 'file-unknown'
+}
+
+/** 文件选择 → 读为 base64 data URL */
+async function onFileSelect(e) {
+  const files = Array.from(e.target.files || [])
+  for (const f of files) {
+    // 单文件上限 20MB
+    if (f.size > 20 * 1024 * 1024) {
+      alert(`文件 "${f.name}" 超过 20MB 上限，已跳过`)
+      continue
+    }
+    const dataUrl = await readFileAsDataURL(f)
+    attachments.value.push({
+      name: f.name,
+      type: f.type || guessType(f.name),
+      size: f.size,
+      dataUrl,
+    })
+  }
+  // 重置 input 以允许重复选择同一文件
+  e.target.value = ''
+}
+
+function removeAttach(i) { attachments.value.splice(i, 1) }
+
+/** 将 File 读为 base64 Data URL */
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
+/** 从扩展名猜测 MIME type */
+function guessType(name) {
+  const ext = name.split('.').pop()?.toLowerCase() || ''
+  const map = {
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
+    json: 'application/json', csv: 'text/csv', xml: 'application/xml',
+    html: 'text/html', css: 'text/css',
+    js: 'text/javascript', ts: 'text/typescript', py: 'text/x-python',
+    go: 'text/x-go', java: 'text/x-java', c: 'text/x-c',
+    cpp: 'text/x-c++', h: 'text/x-c-header', sh: 'text/x-shellscript',
+    yaml: 'text/yaml', yml: 'text/yaml', toml: 'text/toml', env: 'text/plain',
+    log: 'text/plain',
+    doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  }
+  return map[ext] || 'application/octet-stream'
+}
 
 // 直接使用 store 的 messages（reactive ref，SSE 更新时自动触发重渲染）
 const messages = computed(() => store.messages)
@@ -208,9 +288,17 @@ onUnmounted(() => {
 
 function send() {
   const text = draft.value.trim()
-  if (!text) return
-  store.sendMessage(text)
+  if (!text && !attachments.value.length) return
+  // 提取附件信息（dataUrl 含 base64 编码的文件数据）
+  const attachPayload = attachments.value.map(a => ({
+    name: a.name,
+    type: a.type,
+    size: a.size,
+    dataUrl: a.dataUrl,   // "data:<mime>;base64,<data>"
+  }))
+  store.sendMessage(text || '[附件]', attachPayload)
   draft.value = ''
+  attachments.value = []
 }
 
 function quickSend(text) {
@@ -499,12 +587,53 @@ function onKeydown(value, { e }) {
 }
 .tool-left {
   display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.attach-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #666;
+  font-size: 18px;
+  transition: background 0.15s, color 0.15s;
+}
+.attach-btn:hover { background: #f2f3f5; color: #333; }
+.attach-input {
+  position: absolute; inset: 0; opacity: 0; cursor: pointer;
+  font-size: 0;
+}
+.attach-strip {
+  display: flex;
   gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0;
+  max-width: 400px;
+  scrollbar-width: none;
 }
-.input-foot {
-  text-align: center;
-  font-size: 11px;
-  color: #bbb;
-  margin-top: 8px;
+.attach-strip::-webkit-scrollbar { display: none; }
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 6px;
+  background: #eef1f5;
+  font-size: 12px;
+  color: #444;
+  white-space: nowrap;
+  max-width: 160px;
 }
+.attach-chip .t-icon:first-child { color: #4b8bf5; font-size: 14px; }
+.attach-chip .attach-remove {
+  font-size: 12px; color: #aaa; cursor: pointer; opacity: 0;
+  transition: opacity 0.12s;
+}
+.attach-chip:hover .attach-remove { opacity: 1; }
+.attach-chip:hover .attach-remove:hover { color: #e06a6a; }
 </style>

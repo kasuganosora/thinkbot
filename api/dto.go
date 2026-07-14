@@ -91,8 +91,18 @@ type UpdateBotReq struct {
 
 // ChatReq 发送聊天消息请求。
 type ChatReq struct {
-	BotID string `json:"botId" binding:"required"`
-	Text  string `json:"text" binding:"required"`
+	BotID       string          `json:"botId" binding:"required"`
+	Text        string          `json:"text" binding:"required"`
+	Attachments []ChatAttachment `json:"attachments,omitempty"`
+}
+
+// ChatAttachment 表示用户上传的附件（图片/音频/视频等）。
+// DataUrl 格式为 "data:<mime>;base64,<base64-encoded-data>"。
+type ChatAttachment struct {
+	Name    string `json:"name"`              // 文件名（如 "photo.jpg"）
+	Type    string `json:"type"`              // MIME type（如 "image/jpeg"）
+	Size    int64  `json:"size"`              // 字节数
+	DataUrl string `json:"dataUrl,omitempty"` // base64 data URL
 }
 
 // --- Channel 管理 ---

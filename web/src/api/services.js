@@ -811,8 +811,9 @@ export const chatApi = {
    * @param {string} text
    * @param {(chunk: string) => void} [onDelta] 逐字显示回调
    * @param {AbortSignal} [signal] 可选的取消信号
+   * @param {Array} [attachments] 附件列表 [{name, type, size, dataUrl}]
    */
-  async send(botId, text, onDelta, signal) {
+  async send(botId, text, onDelta, signal, attachments = []) {
     if (USE_MOCK) {
       const bot = db().bots.find(b => b.id === botId)
       return mockResolve(() => {
@@ -834,7 +835,7 @@ export const chatApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ botId, text }),
+      body: JSON.stringify({ botId, text, ...(attachments.length ? { attachments } : {}) }),
       signal
     })
     if (!response.ok) {
