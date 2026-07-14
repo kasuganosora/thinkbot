@@ -222,9 +222,14 @@ const TABS = [
 const tab = ref('terminal')
 
 // 折叠 / 宽度（持久化）
+// 默认收起（localStorage 无值或为 '0' 时展开；'1' 时收起）
 const MIN_W = 340
 const MAX_W = 720
-const collapsed = ref(localStorage.getItem('bp_tool_collapsed') === '1')
+const collapsed = ref(() => {
+  const v = localStorage.getItem('bp_tool_collapsed')
+  // 未设置过 → 默认收起
+  return v === null || v === '1'
+})()
 const width = ref(Number(localStorage.getItem('bp_tool_width')) || 404)
 
 function collapse() { collapsed.value = true; localStorage.setItem('bp_tool_collapsed', '1') }
