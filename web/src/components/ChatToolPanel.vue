@@ -171,7 +171,7 @@
             <span class="stat-k">Cache 读取</span>
             <span class="stat-v">{{ fmtBig(status.cacheRead) }}</span>
           </div>
-          <div class="stat-row">
+          <div v-if="status.cacheWrite > 0" class="stat-row">
             <span class="stat-k">Cache 写入</span>
             <span class="stat-v">{{ fmtBig(status.cacheWrite) }}</span>
           </div>
