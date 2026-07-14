@@ -172,9 +172,9 @@ func GetDailyStatsGlobal(db *gorm.DB, botID string, from, to *time.Time) ([]Dail
 
 // DailyByBotEntry 按日×Bot 维度的每日用量。
 type DailyByBotEntry struct {
-	Date    time.Time `gorm:"column:date" json:"date"`
-	BotID   string    `gorm:"column:bot_id" json:"botId"`
-	Tokens  int       `gorm:"column:total_tokens" json:"tokens"`
+	Date   time.Time `gorm:"column:date" json:"date"`
+	BotID  string    `gorm:"column:bot_id" json:"botId"`
+	Tokens int       `gorm:"column:total_tokens" json:"tokens"`
 }
 
 // GetDailyByBotStats 查询按日×Bot 的 token 使用量（用于堆叠图表）。

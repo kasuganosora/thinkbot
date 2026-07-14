@@ -226,7 +226,7 @@ func TestIntegration_Dream_LLMExtraction(t *testing.T) {
 	}
 
 	for i, content := range extractEntries {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("extract-%d", i),
 				Scope:     scope,
@@ -304,7 +304,7 @@ func TestIntegration_Dream_BasicPipeline(t *testing.T) {
 	}
 
 	for i, c := range contents {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("basic-%d", i),
 				Scope:     scope,
@@ -382,7 +382,7 @@ func TestIntegration_Dream_NoLLM_Fallback(t *testing.T) {
 		"王小明喜欢看电影，特别是科幻片。",
 		"他是后端工程师，用 Python 和 Go 写代码。",
 	} {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("fallback-%d", i),
 				Scope:     scope,
@@ -449,7 +449,7 @@ func TestIntegration_Dream_ScopeIsolation(t *testing.T) {
 		"用户Alice说她是北京人，做设计师，喜欢插画。",
 		"Alice最喜欢用Figma做UI，觉得Sketch太慢了。",
 	} {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("iso-a-%d", i),
 				Scope:     scopeA,
@@ -466,7 +466,7 @@ func TestIntegration_Dream_ScopeIsolation(t *testing.T) {
 		"用户Bob说他是上海人，做后端开发，喜欢跑步。",
 		"Bob主要用Go和Java，最近在学Rust。",
 	} {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("iso-b-%d", i),
 				Scope:     scopeB,
@@ -548,7 +548,7 @@ func TestIntegration_Dream_Diary(t *testing.T) {
 		"赵六说他负责一个协同编辑产品的迭代，觉得需求优先级很难排。",
 		"他觉得用户反馈应该更快速地被响应，想引入 A/B 测试。",
 	} {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("diary-%d", i),
 				Scope:     scope,
@@ -727,7 +727,7 @@ func TestIntegration_Dream_ProfileWithL2Episodic(t *testing.T) {
 	}
 
 	for i, c := range l1Contents {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("l1-%d", i),
 				Scope:     scope,
@@ -751,7 +751,7 @@ func TestIntegration_Dream_ProfileWithL2Episodic(t *testing.T) {
 	}
 
 	for _, ep := range l2Episodes {
-		tieredMgr.WriteEpisodic(context.Background(), memory.Entry{
+		_ = tieredMgr.WriteEpisodic(context.Background(), memory.Entry{
 			Scope:    scope,
 			Content:  ep.content,
 			Category: "episode",
@@ -823,7 +823,7 @@ func TestIntegration_Dream_TieredRetrieval(t *testing.T) {
 
 	// 写入各层级的记忆
 	// L0: 原始工作记忆
-	store.Append(context.Background(), memory.TieredEntry{
+	_ = store.Append(context.Background(), memory.TieredEntry{
 		Entry: memory.Entry{ID: "w0", Scope: scope, Content: "刚才用户问了天气", Category: "observation", CreatedAt: now},
 		Tier:  memory.Tier0Working,
 	})
@@ -833,7 +833,7 @@ func TestIntegration_Dream_TieredRetrieval(t *testing.T) {
 		"用户名叫钱七，是杭州人",
 		"钱七是做前端开发的，擅长 React 和 Vue",
 	} {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID: fmt.Sprintf("l1-%d", i), Scope: scope, Content: c, Category: "fact", Source: "dreaming", CreatedAt: now,
 			},
@@ -842,12 +842,12 @@ func TestIntegration_Dream_TieredRetrieval(t *testing.T) {
 	}
 
 	// L2: 场景
-	tieredMgr.WriteEpisodic(context.Background(), memory.Entry{
+	_ = tieredMgr.WriteEpisodic(context.Background(), memory.Entry{
 		Scope: scope, Content: "前端技术偏好：用户使用 React/Vue，关注组件化和性能", Category: "episode", Source: "aggregator",
 	}, []string{"l1-0", "l1-1"})
 
 	// L3: 画像
-	tieredMgr.WriteProfile(context.Background(), memory.Entry{
+	_ = tieredMgr.WriteProfile(context.Background(), memory.Entry{
 		Scope: scope, Content: "用户是前端开发工程师，来自杭州", Category: "fact", Source: "profiler", Importance: 0.9,
 	})
 
@@ -931,7 +931,7 @@ func TestIntegration_Dream_Idempotent(t *testing.T) {
 		"周八主要用 C++ 和 Lua 写游戏逻辑。",
 		"他对 AI 游戏 NPC 很感兴趣，在学强化学习。",
 	} {
-		store.Append(context.Background(), memory.TieredEntry{
+		_ = store.Append(context.Background(), memory.TieredEntry{
 			Entry: memory.Entry{
 				ID:        fmt.Sprintf("idem-%d", i),
 				Scope:     scope,
@@ -1014,7 +1014,7 @@ func TestIntegration_Dream_ActivityThreshold(t *testing.T) {
 
 	// scope A：6 小时前有 L1 写入 → HasRecentActivity(24h) = true → 应被处理
 	scopeActive := memory.ChannelScope("dream-activity-active")
-	store.Append(context.Background(), memory.TieredEntry{
+	_ = store.Append(context.Background(), memory.TieredEntry{
 		Entry: memory.Entry{
 			ID: "act-1", Scope: scopeActive, Content: "活跃群组的长期记忆",
 			Category: "fact", Source: "dreaming", CreatedAt: now.Add(-6 * time.Hour),
@@ -1024,7 +1024,7 @@ func TestIntegration_Dream_ActivityThreshold(t *testing.T) {
 
 	// scope B：3 天前有 L1 写入，之后无 → HasRecentActivity(24h) = false → 应被跳过
 	scopeZombie := memory.ChannelScope("dream-activity-zombie")
-	store.Append(context.Background(), memory.TieredEntry{
+	_ = store.Append(context.Background(), memory.TieredEntry{
 		Entry: memory.Entry{
 			ID: "zmb-1", Scope: scopeZombie, Content: "僵尸群组的长期记忆，已 3 天无新写入",
 			Category: "fact", Source: "dreaming", CreatedAt: now.Add(-72 * time.Hour),
@@ -1033,7 +1033,7 @@ func TestIntegration_Dream_ActivityThreshold(t *testing.T) {
 	})
 
 	// 给活跃 scope 也写入当前 L0 让 Dreaming 有数据可提取
-	store.Append(context.Background(), memory.TieredEntry{
+	_ = store.Append(context.Background(), memory.TieredEntry{
 		Entry: memory.Entry{
 			ID: "act-l0", Scope: scopeActive, Content: "活跃群组的新消息",
 			Category: "fact", Source: "conversation", CreatedAt: now,

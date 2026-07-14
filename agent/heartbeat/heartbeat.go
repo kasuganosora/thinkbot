@@ -175,7 +175,7 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 			Cost:   cost,
 			Result: fmt.Sprintf("心跳检查失败: %v", err),
 		}
-		e.store.AppendLog(e.botID, entry)
+		_ = e.store.AppendLog(e.botID, entry)
 		e.logger.Warnw("heartbeat LLM call failed", "err", err)
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 		Cost:   cost,
 		Result: text,
 	}
-	e.store.AppendLog(e.botID, entry)
+	_ = e.store.AppendLog(e.botID, entry)
 
 	e.logger.Infow("heartbeat completed",
 		"status", status,

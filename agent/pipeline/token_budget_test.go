@@ -320,11 +320,3 @@ func TestTokenBudgetMiddleware_WarnOnlyOnce(t *testing.T) {
 // ============================================================================
 // 辅助
 // ============================================================================
-
-func isPE(err error, target **core.PipelineError) bool {
-	if pe, ok := err.(*core.PipelineError); ok {
-		*target = pe
-		return true
-	}
-	return false
-}

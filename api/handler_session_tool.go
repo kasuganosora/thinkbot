@@ -178,7 +178,7 @@ func (s *Server) handleSessionFileUpload(c *gin.Context) {
 		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err := s.botFileUpload(c, sid, path, fileHeader.Filename, f); err != nil {
 		Fail(c, err)

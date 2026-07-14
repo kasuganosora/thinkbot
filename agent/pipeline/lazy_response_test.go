@@ -306,14 +306,14 @@ func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
 		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
 			calls++
 			var gr *llm.GenerateResult
-			switch {
-			case calls == 1: // 首次：偷懒
+			switch calls {
+			case 1: // 首次：偷懒
 				gr = &llm.GenerateResult{Text: "git 未安装。", Steps: []llm.StepResult{{Text: "git 未安装。"}}}
-			case calls == 2: // 首次的重算：已纠正（带工具调用）
+			case 2: // 首次的重算：已纠正（带工具调用）
 				gr = &llm.GenerateResult{Text: "经 which git 确认未安装。", Steps: []llm.StepResult{{Text: "x", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
-			case calls == 3: // 工具调用结果 → 复位警告标记
+			case 3: // 工具调用结果 → 复位警告标记
 				gr = &llm.GenerateResult{Text: "ok", Steps: []llm.StepResult{{Text: "ok", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
-			case calls == 4: // 再次偷懒
+			case 4: // 再次偷懒
 				gr = &llm.GenerateResult{Text: "apt 未安装。", Steps: []llm.StepResult{{Text: "apt 未安装。"}}}
 			default: // calls==5：再次的重算
 				gr = &llm.GenerateResult{Text: "经 which apt 确认。", Steps: []llm.StepResult{{Text: "x", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
@@ -325,9 +325,9 @@ func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
 	}
 
 	wrapped := mw(dummy)
-	wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "1"})) // 1,2
-	wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "2"})) // 3 (复位)
-	wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "3"})) // 4,5
+	_, _ = wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "1"})) // 1,2
+	_, _ = wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "2"})) // 3 (复位)
+	_, _ = wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "3"})) // 4,5
 
 	// 若复位失效：call 3 不会改变 warned=true，call 4 会因已警告而跳过 loop-back → calls==4
 	// 复位生效：call 4 重新触发 loop-back → calls==5
