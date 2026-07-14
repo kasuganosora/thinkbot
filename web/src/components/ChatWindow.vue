@@ -133,16 +133,28 @@
               </span>
             </div>
           </div>
+          <!-- 发送 / 中断 按钮 -->
           <t-button
+            v-if="!store.replying"
             theme="primary"
             shape="circle"
-            :disabled="!draft.trim() && !attachments.length || store.replying"
-            :loading="store.replying"
+            :disabled="!draft.trim() && !attachments.length"
             data-testid="chat-btn-send"
             aria-label="发送消息"
             @click="send"
           >
             <template #icon><t-icon name="send" /></template>
+          </t-button>
+          <t-button
+            v-else
+            theme="danger"
+            shape="circle"
+            variant="outline"
+            data-testid="chat-btn-stop"
+            aria-label="停止生成"
+            @click="store.stopReply()"
+          >
+            <template #icon><t-icon name="stop" /></template>
           </t-button>
         </div>
       </div>
