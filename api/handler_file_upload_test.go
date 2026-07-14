@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ func TestBotFileUpload_RealFilesystem(t *testing.T) {
 
 	// store（db=nil 时 Set 走内存覆盖），注入工作空间根目录到临时目录。
 	store := config.NewStore(nil)
-	if err := store.Set(nil, config.KeyWorkspaceDir, tmp); err != nil {
+	if err := store.Set(context.TODO(), config.KeyWorkspaceDir, tmp); err != nil {
 		t.Fatalf("set workspace dir: %v", err)
 	}
 

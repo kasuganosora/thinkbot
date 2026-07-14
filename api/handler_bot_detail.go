@@ -436,7 +436,7 @@ func (s *Server) handleBotFileUpload(c *gin.Context) {
 		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err := s.botFileUpload(c, botID, path, fileHeader.Filename, f); err != nil {
 		Fail(c, err)
@@ -1061,7 +1061,7 @@ func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, content
 	if err != nil {
 		return errs.Internal("failed to create file: " + err.Error())
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	if _, err := io.Copy(dst, content); err != nil {
 		return errs.Internal("failed to write file: " + err.Error())
@@ -1152,23 +1152,6 @@ func (s *Server) saveBotContainerInfo(c *gin.Context, botID string, info *BotCon
 	return s.store.Set(c.Request.Context(), botDetailKey(botID, "container"), string(data))
 }
 
-func (s *Server) getBotContainerSnapshots(botID string) []BotContainerSnapshot {
-	raw, ok := s.store.Get(botDetailKey(botID, "container_snapshots"))
-	if !ok || raw == "" {
-		return []BotContainerSnapshot{}
-	}
-	var result []BotContainerSnapshot
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return []BotContainerSnapshot{}
-	}
-	return result
-}
-
-func (s *Server) saveBotContainerSnapshots(c *gin.Context, botID string, snapshots []BotContainerSnapshot) error {
-	data, _ := json.Marshal(snapshots)
-	return s.store.Set(c.Request.Context(), botDetailKey(botID, "container_snapshots"), string(data))
-}
-
 func (s *Server) getBotCompactionConfig(botID string) *BotCompactionConfig {
 	raw, ok := s.store.Get(botDetailKey(botID, "compaction"))
 	if !ok || raw == "" {
@@ -1209,12 +1192,12 @@ func (s *Server) saveBotCompactionHistory(c *gin.Context, botID string, records 
 
 // BotRhythmConfig 聊天节奏配置。
 type BotRhythmConfig struct {
-	Enabled       bool                   `json:"enabled"`
-	Debounce      BotRhythmDebounce     `json:"debounce"`
-	Timing        BotRhythmToggle       `json:"timing"`
-	SpeakTendency float64               `json:"speakTendency"`
-	Interrupt     BotRhythmInterrupt    `json:"interrupt"`
-	IdleComp      BotRhythmIdleComp     `json:"idleComp"`
+	Enabled       bool               `json:"enabled"`
+	Debounce      BotRhythmDebounce  `json:"debounce"`
+	Timing        BotRhythmToggle    `json:"timing"`
+	SpeakTendency float64            `json:"speakTendency"`
+	Interrupt     BotRhythmInterrupt `json:"interrupt"`
+	IdleComp      BotRhythmIdleComp  `json:"idleComp"`
 }
 
 // BotRhythmDebounce 消息防抖。
@@ -1230,16 +1213,16 @@ type BotRhythmToggle struct {
 
 // BotRhythmInterrupt 计划中断。
 type BotRhythmInterrupt struct {
-	Enabled          bool `json:"enabled"`
-	MaxConsecutive   int  `json:"maxConsecutive"`
-	MaxRounds        int  `json:"maxRounds"`
+	Enabled        bool `json:"enabled"`
+	MaxConsecutive int  `json:"maxConsecutive"`
+	MaxRounds      int  `json:"maxRounds"`
 }
 
 // BotRhythmIdleComp 空闲补偿。
 type BotRhythmIdleComp struct {
-	Enabled  bool `json:"enabled"`
-	IdleWindow int `json:"idleWindow"`
-	MinIdle  int  `json:"minIdle"`
+	Enabled    bool `json:"enabled"`
+	IdleWindow int  `json:"idleWindow"`
+	MinIdle    int  `json:"minIdle"`
 }
 
 // defaultBotRhythmConfig 返回聊天节奏默认配置。

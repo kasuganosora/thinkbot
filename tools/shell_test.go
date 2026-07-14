@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/agent/prompt"
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 

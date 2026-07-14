@@ -91,8 +91,8 @@ type UpdateBotReq struct {
 
 // ChatReq 发送聊天消息请求。
 type ChatReq struct {
-	BotID       string          `json:"botId" binding:"required"`
-	Text        string          `json:"text" binding:"required"`
+	BotID       string           `json:"botId" binding:"required"`
+	Text        string           `json:"text" binding:"required"`
 	Attachments []ChatAttachment `json:"attachments,omitempty"`
 }
 
