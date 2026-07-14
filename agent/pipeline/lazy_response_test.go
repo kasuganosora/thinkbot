@@ -247,3 +247,91 @@ func TestLazyResponseMiddleware_SkipsWithToolCalls(t *testing.T) {
 		t.Error("should not warn when tool calls are present")
 	}
 }
+
+// TestLazyResponseMiddleware_LoopBackReturnsCorrected 验证同轮 loop-back：
+// 首次产出无依据的偷懒答案时，注入警告并重算 LLM，当轮即返回修正后的答案。
+func TestLazyResponseMiddleware_LoopBackReturnsCorrected(t *testing.T) {
+	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	calls := 0
+	dummy := &core.StageFunc{
+		StageName: "llm",
+		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+			calls++
+			var gr *llm.GenerateResult
+			if calls == 1 {
+				// 首次：无工具调用的偷懒答案
+				const text = "当前环境未安装 git，无可用包管理器。"
+				gr = &llm.GenerateResult{Text: text, Steps: []llm.StepResult{{Text: text}}}
+			} else {
+				// loop-back 重算：模型这次调了工具，给出有依据的答案
+				const text = "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。"
+				gr = &llm.GenerateResult{
+					Text:  text,
+					Steps: []llm.StepResult{{Text: text, ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}},
+				}
+			}
+			result := core.NewEnvelope(env.Message)
+			result.Set("llm.result", gr)
+			return result, nil
+		},
+	}
+
+	wrapped := mw(dummy)
+	env := core.NewEnvelope(core.Message{Channel: "lb-ch", ID: "1"})
+	result, err := wrapped.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 LLM calls (1 original + 1 loop-back), got %d", calls)
+	}
+	v, ok := result.Get("llm.result")
+	if !ok {
+		t.Fatal("expected llm.result on returned envelope")
+	}
+	gr := v.(*llm.GenerateResult)
+	if !hadToolCalls(gr) {
+		t.Errorf("loop-back should return the corrected answer (with tool call), got: %q", gr.Text)
+	}
+}
+
+// TestLazyResponseMiddleware_ResetOnToolCall 验证：模型成功调工具后，
+// 同 channel 的警告标记被复位，后续再偷懒仍会被拦截（不会永久静默）。
+// 调用序列：lazy(1+重算2) → 工具调用(3,复位) → lazy 再次(4+重算5)。
+func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
+	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	calls := 0
+	dummy := &core.StageFunc{
+		StageName: "llm",
+		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+			calls++
+			var gr *llm.GenerateResult
+			switch {
+			case calls == 1: // 首次：偷懒
+				gr = &llm.GenerateResult{Text: "git 未安装。", Steps: []llm.StepResult{{Text: "git 未安装。"}}}
+			case calls == 2: // 首次的重算：已纠正（带工具调用）
+				gr = &llm.GenerateResult{Text: "经 which git 确认未安装。", Steps: []llm.StepResult{{Text: "x", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
+			case calls == 3: // 工具调用结果 → 复位警告标记
+				gr = &llm.GenerateResult{Text: "ok", Steps: []llm.StepResult{{Text: "ok", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
+			case calls == 4: // 再次偷懒
+				gr = &llm.GenerateResult{Text: "apt 未安装。", Steps: []llm.StepResult{{Text: "apt 未安装。"}}}
+			default: // calls==5：再次的重算
+				gr = &llm.GenerateResult{Text: "经 which apt 确认。", Steps: []llm.StepResult{{Text: "x", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
+			}
+			result := core.NewEnvelope(env.Message)
+			result.Set("llm.result", gr)
+			return result, nil
+		},
+	}
+
+	wrapped := mw(dummy)
+	wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "1"})) // 1,2
+	wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "2"})) // 3 (复位)
+	wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "3"})) // 4,5
+
+	// 若复位失效：call 3 不会改变 warned=true，call 4 会因已警告而跳过 loop-back → calls==4
+	// 复位生效：call 4 重新触发 loop-back → calls==5
+	if calls != 5 {
+		t.Errorf("expected 5 LLM calls (lazy+rerun, toolcall, lazy+rerun), got %d", calls)
+	}
+}
