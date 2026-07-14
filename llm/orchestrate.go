@@ -246,13 +246,13 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 				result.DeferredToolApproval = &deferred.Approval
 				break
 			}
-		return nil, err
-	}
-	toolsExecuted = true
+			return nil, err
+		}
+		toolsExecuted = true
 
-	// Apply post-execution result processing (e.g., truncation).
-	if cfg.OnToolResults != nil {
-		toolResults = cfg.OnToolResults(step, toolResults)
+		// Apply post-execution result processing (e.g., truncation).
+		if cfg.OnToolResults != nil {
+			toolResults = cfg.OnToolResults(step, toolResults)
 		}
 
 		stepMsgs := buildStepMessages(result.Text, result.Reasoning, result.ReasoningProviderMetadata, result.ToolCalls, toolResults, &result.Usage)
@@ -460,15 +460,15 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 					applyOnStep(cfg, &stepR)
 					break
 				}
-			send(&ErrorPart{Error: err})
-			break
-		}
-		toolsExecuted = true
+				send(&ErrorPart{Error: err})
+				break
+			}
+			toolsExecuted = true
 
-		// Apply post-execution result processing (e.g., truncation).
-		if cfg.OnToolResults != nil {
-			toolResults = cfg.OnToolResults(step, toolResults)
-		}
+			// Apply post-execution result processing (e.g., truncation).
+			if cfg.OnToolResults != nil {
+				toolResults = cfg.OnToolResults(step, toolResults)
+			}
 
 			stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, toolResults, &stepUsage)
 			stepR := StepResult{
