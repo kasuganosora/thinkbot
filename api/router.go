@@ -136,6 +136,10 @@ func (s *Server) registerRoutes() {
 				// 运行时检查（概览页，接入真实 sandbox 状态）
 				botsAdmin.GET("/:id/runtime-checks", s.handleBotRuntimeChecks)
 
+				// 终端（容器 shell，接入真实 sandbox exec）
+				botsAdmin.GET("/:id/terminal", s.handleBotTerminal)
+				botsAdmin.POST("/:id/terminal/exec", s.handleBotTerminalExec)
+
 				// 心跳管理
 				botsAdmin.GET("/:id/heartbeat", s.handleGetHeartbeatConfig)
 				botsAdmin.PUT("/:id/heartbeat", s.handleUpdateHeartbeatConfig)
