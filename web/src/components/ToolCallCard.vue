@@ -6,7 +6,7 @@
     :data-tool-name="call.name"
     :data-tool-status="state"
     role="group"
-    :aria-label="`工具调用：${call.title || call.name}`"
+    :aria-label="`工具调用：${call.title || toolLabel(call.name) || call.name}`"
   >
     <!-- 头部摘要 -->
     <div class="tc-head" :data-testid="`chat-toolcall-head-${call.id}`" @click="toggle">
@@ -20,7 +20,7 @@
         <template v-if="state === 'running'">
           <span class="tc-running-text">{{ runningLabel }}…</span>
         </template>
-        <template v-else>{{ call.title || call.name }}</template>
+        <template v-else>{{ call.title || toolLabel(call.name) || call.name }}</template>
       </span>
 
       <span v-if="state !== 'running' && call.summary" class="tc-summary">{{ call.summary }}</span>
@@ -151,10 +151,18 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
+import toolLabels from '@/i18n/toolLabels'
 
 const props = defineProps({
   call: { type: Object, required: true }
 })
+
+/** Resolve a tool name to its display label (Chinese). Returns null if unknown. */
+function toolLabel(name) {
+  // Strip sandbox_ prefix for unified labels (sandbox_read_file → read_file)
+  const key = name?.replace(/^sandbox_/, '')
+  return toolLabels[name] || (key !== name ? toolLabels[key] : null)
+}
 
 const expanded = ref(true)
 // 运行态：初始取自 call.status；running 时本地推进
@@ -162,7 +170,7 @@ const state = ref(props.call.status || 'success')
 const pct = ref(props.call.status === 'running' ? 6 : 100)
 let timer = null
 
-const runningLabel = computed(() => props.call.runningText || props.call.title || props.call.name || '执行中')
+const runningLabel = computed(() => props.call.runningText || props.call.title || toolLabel(props.call.name) || props.call.name || '执行中')
 
 // 已完成的文件数（按进度比例推进，制造逐个写入的观感）
 const doneFileCount = computed(() => {
