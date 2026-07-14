@@ -2,11 +2,13 @@
   <XtermConsole
     :connect="onConnect"
     :exec="onExec"
+    :initial-host="'root@' + botId"
+    initial-cwd="/data"
     title="终端"
     body-height="440px"
   >
     <template #tip>
-      这是容器 shell 的模拟终端（mock 数据）。输入 <code>help</code> 查看可用命令。
+      Bot 容器 shell 终端（通过 sandbox 执行命令）。输入 <code>help</code> 查看可用命令。
     </template>
   </XtermConsole>
 </template>
