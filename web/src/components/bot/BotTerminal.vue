@@ -2,8 +2,6 @@
   <XtermConsole
     :connect="onConnect"
     :exec="onExec"
-    :initial-host="'root@' + botId"
-    initial-cwd="/data"
     title="终端"
     body-height="440px"
   >
