@@ -46,6 +46,21 @@ type OrchestrateConfig struct {
 
 	// ApprovalHandler decides how to handle a tool call marked with RequireApproval.
 	ApprovalHandler func(ctx context.Context, call ToolCall) (ToolApprovalResult, error)
+
+	// ToolChoiceForStep overrides tool_choice on a per-step basis.
+	// It is consulted immediately before each LLM call. If non-nil, its
+	// return value replaces cfg.Params.ToolChoice for that single step.
+	// The value must be compatible with GenerateParams.ToolChoice
+	// (e.g. "auto" | "none" | "required" | {"type":"function",...}).
+	//
+	// step is the 0-based iteration index; toolsExecuted reports whether at
+	// least one executable tool has already run in this orchestration.
+	//
+	// Typical use (anti-hallucination gate): force "required" on the first
+	// step of a verification task so the model physically cannot emit a
+	// final answer without calling a tool, then relax to nil once real tool
+	// results exist. See agent/pipeline/verification_gate.go.
+	ToolChoiceForStep func(step int, toolsExecuted bool) any
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -159,10 +174,11 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	messages = PatchToolCalls(messages)
 
 	var (
-		totalUsage  Usage
-		lastResult  *GenerateResult
-		allSteps    []StepResult
-		allMessages []Message
+		totalUsage    Usage
+		lastResult    *GenerateResult
+		allSteps      []StepResult
+		allMessages   []Message
+		toolsExecuted bool
 	)
 
 	for step := 0; shouldContinueLoop(cfg.MaxSteps, step); step++ {
@@ -176,6 +192,10 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		// Re-apply cache breakpoints for the current message set (the
 		// last messages may have changed since the initial placement).
 		applyProviderCachePolicy(&params, prov.Name())
+		// Per-step tool_choice override (anti-hallucination gate, etc.).
+		if cfg.ToolChoiceForStep != nil {
+			params.ToolChoice = cfg.ToolChoiceForStep(step, toolsExecuted)
+		}
 
 		result, err := prov.DoGenerate(ctx, params)
 		if err != nil {
@@ -226,12 +246,13 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 				result.DeferredToolApproval = &deferred.Approval
 				break
 			}
-			return nil, err
-		}
+		return nil, err
+	}
+	toolsExecuted = true
 
-		// Apply post-execution result processing (e.g., truncation).
-		if cfg.OnToolResults != nil {
-			toolResults = cfg.OnToolResults(step, toolResults)
+	// Apply post-execution result processing (e.g., truncation).
+	if cfg.OnToolResults != nil {
+		toolResults = cfg.OnToolResults(step, toolResults)
 		}
 
 		stepMsgs := buildStepMessages(result.Text, result.Reasoning, result.ReasoningProviderMetadata, result.ToolCalls, toolResults, &result.Usage)
@@ -326,6 +347,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 		var lastRawFinishReason string
 		var allSteps []StepResult
 		var allMessages []Message
+		toolsExecuted := false
 
 		for step := 0; shouldContinueLoop(cfg.MaxSteps, step); step++ {
 			if step > 0 {
@@ -337,6 +359,10 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			params.Messages = messages
 			// Re-apply cache breakpoints for the current message set.
 			applyProviderCachePolicy(&params, prov.Name())
+			// Per-step tool_choice override (anti-hallucination gate, etc.).
+			if cfg.ToolChoiceForStep != nil {
+				params.ToolChoice = cfg.ToolChoiceForStep(step, toolsExecuted)
+			}
 
 			provSR, err := prov.DoStream(ctx, params)
 			if err != nil {
@@ -434,14 +460,15 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 					applyOnStep(cfg, &stepR)
 					break
 				}
-				send(&ErrorPart{Error: err})
-				break
-			}
+			send(&ErrorPart{Error: err})
+			break
+		}
+		toolsExecuted = true
 
-			// Apply post-execution result processing (e.g., truncation).
-			if cfg.OnToolResults != nil {
-				toolResults = cfg.OnToolResults(step, toolResults)
-			}
+		// Apply post-execution result processing (e.g., truncation).
+		if cfg.OnToolResults != nil {
+			toolResults = cfg.OnToolResults(step, toolResults)
+		}
 
 			stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, toolResults, &stepUsage)
 			stepR := StepResult{
