@@ -102,6 +102,13 @@ func TestDefaultConfig_HasTimezone(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_NetworkEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.NetworkDisabled {
+		t.Error("expected default docker network to be enabled")
+	}
+}
+
 func TestFillDefaults_FillsTimezone(t *testing.T) {
 	cfg := Config{Backend: "local"}
 	filled := fillDefaults(cfg)
