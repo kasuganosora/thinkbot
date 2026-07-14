@@ -474,6 +474,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	//   （subagent、workflow、memory）也能通过 QuotaRecordingProvider 自动记账。
 	quotaResolver := pipeline.NewQuotaResolver(s.store)
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
+		pipeline.VerificationGateMiddleware(pipeline.NewVerificationGateConfig()),
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
 		pipeline.LazyResponseMiddleware(pipeline.NewLazyResponseConfig()),

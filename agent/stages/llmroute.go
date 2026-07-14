@@ -197,6 +197,21 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		cfg.ApprovalHandler = s.config.ApprovalHandler
 	}
 
+	// 防偷懒门禁：环境类问题确定性强制"先调工具再作答"。
+	// VerificationGateMiddleware 已在 LLMStage 之前对用户问题做确定性分类，
+	// 命中时在本 Envelope 上标记 verify.required。这里把它落地为
+	// OrchestrateConfig.ToolChoiceForStep：第一步强制 tool_choice=required，
+	// 模型在拿到真实工具结果前无法 finalize；首次工具执行后复位为 auto，
+	// 允许基于真实结果合成最终答案。无可用工具时不强制（避免 required 死循环）。
+	if v, ok := env.Get("verify.required"); ok && v == true && len(tools) > 0 {
+		cfg.ToolChoiceForStep = func(step int, toolsExecuted bool) any {
+			if !toolsExecuted {
+				return "required"
+			}
+			return nil
+		}
+	}
+
 	// Enable reduction if configured.
 	if s.config.ReductionConfig != nil {
 		rc := *s.config.ReductionConfig
