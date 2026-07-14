@@ -52,18 +52,7 @@
       <!-- Terminal -->
       <section v-show="tab === 'terminal'" class="tp-body terminal-body" data-testid="tool-pane-terminal">
         <div class="term-head">
-          <div class="term-tabs">
-            <span
-              v-for="tt in terminal.tabs"
-              :key="tt.id"
-              class="term-tab"
-              :class="{ active: tt.active }"
-            >
-              <i class="dot-live" />{{ tt.name }}
-              <t-icon name="close" class="term-tab-close" />
-            </span>
-            <button class="term-add"><t-icon name="add" /></button>
-          </div>
+          <span class="term-label">Terminal</span>
           <span class="term-conn" :class="{ ok: terminal.connected }">
             {{ terminal.connected ? '已连接' : '未连接' }}
           </span>
@@ -536,26 +525,10 @@ watch(sid, loadAll)
   justify-content: space-between;
   margin-bottom: 10px;
 }
-.term-tabs { display: flex; align-items: center; gap: 8px; }
-.term-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.term-label {
   font-size: 13px;
-  padding: 5px 10px;
-  border-radius: 8px;
-  background: #f4f6f8;
+  font-weight: 600;
   color: #444;
-}
-.term-tab .dot-live {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: #00c853; display: inline-block;
-}
-.term-tab-close { font-size: 12px; color: #aaa; cursor: pointer; }
-.term-add {
-  width: 28px; height: 28px;
-  border: 1px dashed #d4d7dd; border-radius: 8px;
-  background: none; color: #999; cursor: pointer;
 }
 .term-conn { font-size: 13px; color: #bbb; }
 .term-conn.ok { color: #00b96b; }
