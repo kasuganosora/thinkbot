@@ -31,11 +31,11 @@
       <span v-if="state === 'running'" class="tc-pct">{{ Math.round(pct) }}%</span>
 
       <div class="tc-actions">
-        <t-tooltip :content="call.reversible ? '撤销（待接入）' : '该操作不可撤销'">
+        <t-tooltip v-if="call.reversible" content="撤销（待接入）">
           <t-button
             variant="text"
             size="small"
-            :disabled="!call.reversible || state === 'running'"
+            :disabled="state === 'running'"
             class="tc-undo"
             :data-testid="`chat-toolcall-undo-${call.id}`"
             aria-label="撤销此操作（预留）"
