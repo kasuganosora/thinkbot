@@ -37,13 +37,20 @@ import (
 // ============================================================================
 
 // 环境状态实体：其状态必须用工具核实，不可凭记忆猜测。
+// 仅保留「具体工具/服务/软件名」与「明确的环境技术名词」，
+// 故意移除 文件/目录/脚本/命令/程序/软件 等泛化词，
+// 避免「查看配置文件」「命令行程序怎么写」这类良性问题被强制调工具。
 var envEntityPat = regexp.MustCompile(`(?i)(` +
 	`git|python3?|pip|node|nvm|npx|npm|yarn|pnpm|go|golang|java|jdk|maven|` +
 	`gcc|clang|docker|podman|kubectl|k8s|redis|mysql|postgres|postgresql|nginx|apache|` +
 	`ssh|curl|wget|telnet|netcat|\bnc\b|apt|apt-get|yum|dnf|brew|rpm|dpkg|systemctl|` +
-	`包管理器|依赖|软件|命令|程序|服务|进程|端口|防火墙|环境变量|` +
-	`\benv\b|PATH|系统|操作系统|内核|内存|磁盘|cpu|gpu|文件|目录|文件夹|脚本|容器|镜像|sandbox` +
+	`包管理器|依赖|服务|进程|端口|防火墙|环境变量|` +
+	`\benv\b|PATH|系统|操作系统|内核|内存|磁盘|cpu|gpu|容器|镜像|sandbox` +
 	`)`)
+
+// 文件/目录存在性查询：精确匹配「文件|目录 + 存在/路径/有无」，
+// 既保留「这个文件是否存在」这类合法环境查询，又不误伤「查看文件内容」类良性问题。
+var envFileNounPat = regexp.MustCompile(`(?i)(文件|目录|文件夹).{0,6}(存在|在哪|路径|有无|占用|位置)`)
 
 // 核实类动词：显式要求"检查 / 确认状态"的措辞。
 var verifyVerbPat = regexp.MustCompile(`(?i)(` +
@@ -90,7 +97,11 @@ func requiresVerification(text string) bool {
 	if entityVersionPat.MatchString(t) {
 		return true
 	}
-	// 4) 核实动词 + 环境实体
+	// 4) 文件/目录存在性查询（精确匹配，避免误伤）
+	if envFileNounPat.MatchString(t) {
+		return true
+	}
+	// 5) 核实动词 + 环境实体（实体已收窄为具体工具/服务/技术名词）
 	if verifyVerbPat.MatchString(t) && envEntityPat.MatchString(t) {
 		return true
 	}
