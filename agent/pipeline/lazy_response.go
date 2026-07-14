@@ -47,8 +47,8 @@ var lazyPatterns = []*regexp.Regexp{
 
 // lazyResponseState 按通道追踪是否已注入过警告。
 type lazyResponseState struct {
-	mu       sync.Mutex
-	warned   map[string]bool // channel → 已警告
+	mu     sync.Mutex
+	warned map[string]bool // channel → 已警告
 }
 
 func newLazyResponseState() *lazyResponseState {
@@ -142,8 +142,8 @@ func LazyResponseMiddleware(cfg LazyResponseConfig) Middleware {
 
 					if !alreadyWarned {
 						core.QueueWarning(result, core.Warning{
-							Source:  "lazy_response",
-							Level:   core.WarningLevelHard,
+							Source: "lazy_response",
+							Level:  core.WarningLevelHard,
 							Message: `[SYSTEM WARNING - URGENT]
 You just provided an answer about environment/system state WITHOUT calling any tools to verify.
 This is a CRITICAL violation. You MUST NOT guess or assume environment state.
