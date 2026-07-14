@@ -179,7 +179,7 @@ func DefaultConfig() Config {
 		BaseDir:         "",
 		MemoryLimit:     "512m",
 		CPULimit:        "1.0",
-		NetworkDisabled: true,
+		NetworkDisabled: false,
 		Timeout:         30 * time.Second,
 		MaxOutput:       1 << 20,  // 1 MB
 		MaxFileWrite:    10 << 20, // 10 MB

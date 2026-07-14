@@ -102,14 +102,72 @@ func (c *botContainer) containerID(ctx context.Context) string {
 	return id
 }
 
+// inspectNetwork 返回容器网络模式与已连接网络数量。
+func (c *botContainer) inspectNetwork(ctx context.Context) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect",
+		"--format", "{{.HostConfig.NetworkMode}} {{len .NetworkSettings.Networks}}", c.container)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return "", 0, errs.Wrapf(err, "bot_container: inspect network %q: %s",
+			c.container, strings.TrimSpace(errb.String()))
+	}
+	raw := strings.TrimSpace(out.String())
+	if raw == "" {
+		return "", 0, nil
+	}
+	mode := ""
+	networks := 0
+	_, _ = fmt.Sscanf(raw, "%s %d", &mode, &networks)
+	return mode, networks, nil
+}
+
+// ensureNetwork 在网络启用模式下确保容器已接入 bridge 网络。
+// 用于修复历史上以 --network none 创建的长期容器（无需手工删容器）。
+func (c *botContainer) ensureNetwork(ctx context.Context) error {
+	if c.cfg.NetworkDisabled {
+		return nil
+	}
+	mode, networks, err := c.inspectNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	if mode != "none" && networks > 0 {
+		return nil
+	}
+
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", "network", "connect", "bridge", c.container)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		msg := strings.ToLower(strings.TrimSpace(out.String()))
+		if strings.Contains(msg, "already exists") || strings.Contains(msg, "already connected") {
+			return nil
+		}
+		return errs.Wrapf(err, "bot_container: connect bridge network for %q: %s",
+			c.container, strings.TrimSpace(out.String()))
+	}
+
+	c.logger.Infow("bot container bridge network attached",
+		"container", c.container,
+		"previous_mode", mode,
+		"previous_networks", networks)
+	return nil
+}
+
 // ensure 保证容器已创建并处于 running 状态（惰性、幂等）。
 func (c *botContainer) ensure(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.ready {
-		// 快速复核：仍在运行则直接返回
+		// 快速复核：仍在运行则直接返回（并补齐网络配置）。
 		if c.containerState(ctx) == "running" {
+			if err := c.ensureNetwork(ctx); err != nil {
+				return err
+			}
 			return nil
 		}
 		c.ready = false
@@ -118,12 +176,18 @@ func (c *botContainer) ensure(ctx context.Context) error {
 	state := c.containerState(ctx)
 	switch state {
 	case "running":
+		if err := c.ensureNetwork(ctx); err != nil {
+			return err
+		}
 		c.ready = true
 		return nil
 	case "exited", "created", "paused":
 		// 已存在但未运行 → 启动
 		if err := exec.CommandContext(ctx, "docker", "start", c.container).Run(); err != nil {
 			return errs.Wrapf(err, "bot_container: start existing container %q", c.container)
+		}
+		if err := c.ensureNetwork(ctx); err != nil {
+			return err
 		}
 		c.ready = true
 		c.logger.Infow("bot container started (existing)", "container", c.container)
@@ -175,6 +239,10 @@ func (c *botContainer) create(ctx context.Context) error {
 	// 确保工作目录存在（named volume 首次挂载可能为空但目录已由 -w 隐含创建）。
 	_ = exec.CommandContext(ctx, "docker", "exec", c.container,
 		"sh", "-c", "mkdir -p "+containerWorkDir).Run()
+
+	if err := c.ensureNetwork(ctx); err != nil {
+		return err
+	}
 
 	c.ready = true
 	c.logger.Infow("bot container created",
