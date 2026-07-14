@@ -124,6 +124,9 @@ export const useBotStore = defineStore('bot', () => {
     replying.value = false
   }
 
+  /** 供 UI 中断按钮调用 */
+  function stopReply() { _abortStreaming() }
+
   // ---- 发送消息 ----
   // @param {string} content 消息文本
   // @param {Array}  [attachments] 附件列表 [{name, type, size, dataUrl}]
@@ -203,6 +206,6 @@ export const useBotStore = defineStore('bot', () => {
     activeBot, messages, messagesLoading, hasMore,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
-    loadMessages, loadMoreMessages, sendMessage
+    loadMessages, loadMoreMessages, sendMessage, stopReply
   }
 })
