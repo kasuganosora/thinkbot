@@ -125,7 +125,9 @@ export const useBotStore = defineStore('bot', () => {
   }
 
   // ---- 发送消息 ----
-  function sendMessage(content) {
+  // @param {string} content 消息文本
+  // @param {Array}  [attachments] 附件列表 [{name, type, size, dataUrl}]
+  function sendMessage(content, attachments) {
     if (!activeBot.value || replying.value) return
     const botId = activeBotId.value
 
@@ -162,7 +164,7 @@ export const useBotStore = defineStore('bot', () => {
       const updated = [...messages.value]
       updated[idx] = { ...updated[idx], content: updated[idx].content + delta }
       messages.value = updated
-    }, _abortController.signal)
+    }, _abortController.signal, attachments || [])
       .then((resp) => {
         // SSE 完成：一次性更新 assistant 最终文本 + user 标记为非临时
         const updated = [...messages.value]

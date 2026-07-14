@@ -70,7 +70,7 @@ func (s *Server) handleChatBots(c *gin.Context) {
 // handleChatSend SSE 流式聊天。
 // POST /api/chat/send
 //
-// 请求体: { "botId": "xxx", "text": "hello" }
+// 请求体: { "botId": "xxx", "text": "hello", "attachments": [{name,type,size,dataUrl}] }
 // 响应: text/event-stream
 //
 // @Summary      发送消息（SSE）
@@ -151,6 +151,9 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	extraMeta := map[string]any{}
 	if len(history) > 0 {
 		extraMeta["chat_history"] = history
+	}
+	if len(req.Attachments) > 0 {
+		extraMeta["attachments"] = req.Attachments
 	}
 	if err := webCh.Inject(c.Request.Context(), traceID, userID, req.Text, extraMeta); err != nil {
 		Fail(c, errs.Wrap(err, "failed to send message to bot"))
