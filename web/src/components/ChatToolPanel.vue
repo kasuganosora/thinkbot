@@ -279,7 +279,7 @@ const terminal = ref({ host: 'root@host', connected: false, tabs: [] })
 async function onTermConnect() {
   const t = await sessionToolApi.terminal(sid.value)
   terminal.value = t
-  return { host: t.host, cwd: '~', connected: !!t.connected, banner: `Connected to ${t.host}` }
+  return { host: t.host, cwd: t.cwd, connected: !!t.connected, banner: `Connected to ${t.host}` }
 }
 function onTermExec(cmd) {
   return sessionToolApi.exec(sid.value, cmd)

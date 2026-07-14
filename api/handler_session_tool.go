@@ -39,6 +39,7 @@ type TerminalTab struct {
 type TerminalState struct {
 	Host      string        `json:"host"`
 	Connected bool          `json:"connected"`
+	Cwd       string        `json:"cwd"`
 	Tabs      []TerminalTab `json:"tabs"`
 }
 
@@ -48,6 +49,12 @@ func (s *Server) handleSessionTerminal(c *gin.Context) {
 	sid := c.Param("sid")
 
 	state := s.getSessionTerminalState(sid)
+	// session ID 即 bot ID（1:1 映射），补全真实工作目录（如 /data）。
+	if s.botSvc != nil {
+		if ws, err := s.botSvc.ResolveWorkspace(sid); err == nil {
+			state.Cwd = ws.WorkDir()
+		}
+	}
 	OK(c, state)
 }
 
