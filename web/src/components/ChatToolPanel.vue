@@ -234,7 +234,15 @@ const width = ref(Number(localStorage.getItem('bp_tool_width')) || 404)
 
 function collapse() { collapsed.value = true; localStorage.setItem('bp_tool_collapsed', '1') }
 function expand() { collapsed.value = false; localStorage.setItem('bp_tool_collapsed', '0') }
-function openTab(k) { tab.value = k; expand() }
+function openTab(k) {
+  // 已在展开态且就是当前 tab → 再点一次收起（符合直觉的切换行为）
+  if (!collapsed.value && tab.value === k) {
+    collapse()
+  } else {
+    tab.value = k
+    expand()
+  }
+}
 
 // 拖拽调宽
 let resizing = false
