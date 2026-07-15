@@ -123,8 +123,9 @@ func (c *botContainer) inspectNetwork(ctx context.Context) (string, int, error) 
 	return mode, networks, nil
 }
 
-// ensureNetwork 在网络启用模式下确保容器已接入 bridge 网络。
-// 用于修复历史上以 --network none 创建的长期容器（无需手工删容器）。
+// ensureNetwork 在网络启用模式下确保容器可联网。
+// 兼容历史遗留：若容器以 --network none 创建，Docker 不允许直接 connect 其他网络，
+// 需重建容器（复用原 named volume）。
 func (c *botContainer) ensureNetwork(ctx context.Context) error {
 	if c.cfg.NetworkDisabled {
 		return nil
@@ -133,7 +134,19 @@ func (c *botContainer) ensureNetwork(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if mode != "none" && networks > 0 {
+	if mode == "none" {
+		return c.recreateForNetwork(ctx, mode, networks)
+	}
+	if networks > 0 {
+		return nil
+	}
+
+	// 非 bridge/default 的网络模式（如 host/container）不主动改写。
+	if mode != "" && mode != "default" && mode != "bridge" {
+		c.logger.Warnw("skip bridge attach for non-bridge network mode",
+			"container", c.container,
+			"mode", mode,
+			"networks", networks)
 		return nil
 	}
 
@@ -155,6 +168,24 @@ func (c *botContainer) ensureNetwork(ctx context.Context) error {
 		"previous_mode", mode,
 		"previous_networks", networks)
 	return nil
+}
+
+func (c *botContainer) recreateForNetwork(ctx context.Context, mode string, networks int) error {
+	var out bytes.Buffer
+	rm := exec.CommandContext(ctx, "docker", "rm", "-f", c.container)
+	rm.Stdout = &out
+	rm.Stderr = &out
+	if err := rm.Run(); err != nil {
+		return errs.Wrapf(err, "bot_container: remove legacy none-network container %q: %s",
+			c.container, strings.TrimSpace(out.String()))
+	}
+
+	c.ready = false
+	c.logger.Warnw("bot container recreated to recover networking",
+		"container", c.container,
+		"previous_mode", mode,
+		"previous_networks", networks)
+	return c.create(ctx)
 }
 
 // ensure 保证容器已创建并处于 running 状态（惰性、幂等）。
