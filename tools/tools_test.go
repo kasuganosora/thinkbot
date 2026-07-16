@@ -461,8 +461,8 @@ func TestConfig_Defaults(t *testing.T) {
 	if cfg.HTTPTimeout != 30*time.Second {
 		t.Errorf("default HTTPTimeout: got %v", cfg.HTTPTimeout)
 	}
-	if cfg.MaxFetchSize != 32768 {
-		t.Errorf("default MaxFetchSize: got %d", cfg.MaxFetchSize)
+	if cfg.MaxFetchSize != 1<<20 {
+		t.Errorf("default MaxFetchSize: got %d, want %d", cfg.MaxFetchSize, 1<<20)
 	}
 	if cfg.UserAgent == "" {
 		t.Error("default UserAgent should not be empty")
