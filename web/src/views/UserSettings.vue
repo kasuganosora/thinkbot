@@ -27,6 +27,17 @@
       </t-form>
     </t-card>
 
+    <t-card title="对话偏好" :bordered="false" class="card">
+      <t-form label-align="left" :label-width="120">
+        <t-form-item label="发送快捷键">
+          <t-radio-group v-model="preferences.sendKey" data-testid="user-send-key">
+            <t-radio-button value="enter">Enter 发送</t-radio-button>
+            <t-radio-button value="cmd-enter">⌘ / Ctrl + Enter 发送</t-radio-button>
+          </t-radio-group>
+        </t-form-item>
+      </t-form>
+    </t-card>
+
     <t-card title="安全设置" :bordered="false" class="card">
       <t-form label-align="top">
         <t-form-item label="当前密码">
@@ -110,11 +121,13 @@ import { ref } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { useUserStore } from '@/stores/user'
+import { loadUserPreferences, saveUserPreferences } from '@/utils/userPreferences'
 import { authApi, userApi, bindApi } from '@/api/services'
 import { onMounted } from 'vue'
 
 const userStore = useUserStore()
 const pwd = ref({ old: '', new: '' })
+const preferences = ref(loadUserPreferences(userStore.user?.id))
 
 function buildForm() {
   return {
@@ -138,6 +151,7 @@ async function save() {
     email: form.value.email,
     bio: form.value.bio
   })
+  saveUserPreferences(userStore.user?.id, preferences.value)
   MessagePlugin.success('已保存')
 }
 
@@ -155,6 +169,7 @@ async function changePassword() {
 
 function reset() {
   form.value = buildForm()
+  preferences.value = loadUserPreferences(userStore.user?.id)
   pwd.value = { old: '', new: '' }
 }
 

@@ -64,33 +64,6 @@
           </div>
         </div>
 
-        <!-- 对话设置 -->
-        <div v-show="activeKey === 'chat'" class="panel" data-testid="system-panel-chat">
-          <div class="panel-head">
-            <div>
-              <h3 class="panel-title">对话设置</h3>
-              <p class="panel-desc">控制发送方式、输出与上下文保留。</p>
-            </div>
-            <t-button theme="primary" size="small" @click="save">保存</t-button>
-          </div>
-          <div class="panel-card">
-            <t-form label-align="left" :label-width="120">
-              <t-form-item label="发送快捷键">
-                <t-radio-group v-model="settings.sendKey">
-                  <t-radio-button value="enter">Enter 发送</t-radio-button>
-                  <t-radio-button value="cmd-enter">⌘ + Enter 发送</t-radio-button>
-                </t-radio-group>
-              </t-form-item>
-              <t-form-item label="流式输出">
-                <t-switch v-model="settings.stream" />
-              </t-form-item>
-              <t-form-item label="保留历史轮数">
-                <t-input-number v-model="settings.contextRounds" :min="1" :max="50" style="width: 160px" />
-              </t-form-item>
-            </t-form>
-          </div>
-        </div>
-
         <!-- 模型服务 -->
         <div v-show="activeKey === 'model'" class="panel panel-wide" data-testid="system-panel-model">
           <div class="panel-head">
@@ -139,10 +112,7 @@
             </div>
           </div>
           <div class="panel-card">
-            <div class="about-row"><span class="about-k">应用名称</span><span class="about-v">Bot 平台</span></div>
-            <div class="about-row"><span class="about-k">版本</span><span class="about-v">v1.0.0 (mock)</span></div>
-            <div class="about-row"><span class="about-k">前端框架</span><span class="about-v">Vue 3 + TDesign</span></div>
-            <div class="about-row"><span class="about-k">数据来源</span><span class="about-v">本地 Mock（待接入后端）</span></div>
+            <div class="about-row"><span class="about-k">Git Commit</span><span class="about-v" data-testid="system-about-commit">{{ APP_COMMIT }}</span></div>
           </div>
         </div>
 
@@ -189,22 +159,23 @@ const isAdmin = computed(() => userStore.user?.role === 'admin')
 const navItems = [
   { key: 'bots', label: 'Bots', icon: 'application' },
   { key: 'appearance', label: '外观', icon: 'palette' },
-  { key: 'chat', label: '对话设置', icon: 'chat' },
   { key: 'model', label: '模型服务', icon: 'server' },
   { key: 'search', label: '搜索', icon: 'internet' },
   { key: 'usage', label: '统计', icon: 'chart' },
-  { key: 'about', label: '关于', icon: 'info-circle' },
   // 管理后台功能整合进系统设置（仅管理员可见，页内切换面板）
   { key: 'admin-users', label: '用户管理', icon: 'user', admin: true },
   { key: 'admin-skills', label: '技能管理', icon: 'code', admin: true },
   { key: 'admin-config', label: '系统配置', icon: 'setting', admin: true },
   { key: 'admin-stats', label: '统计概览', icon: 'chart-bar', admin: true },
-  { key: 'admin-system', label: '系统监控', icon: 'monitor', admin: true }
+  { key: 'admin-system', label: '系统监控', icon: 'desktop', admin: true },
+  { key: 'about', label: '关于', icon: 'info-circle' }
 ]
 
 const visibleNavItems = computed(() =>
   navItems.filter(item => !item.admin || isAdmin.value)
 )
+
+const APP_COMMIT = import.meta.env.APP_COMMIT || 'unknown'
 
 const activeKey = ref('bots')
 
@@ -221,9 +192,6 @@ const defaults = {
   theme: 'light',
   primaryColor: 'green',
   language: 'zh-CN',
-  sendKey: 'enter',
-  stream: true,
-  contextRounds: 10,
   apiBase: 'https://api.example.com/v1',
   apiKey: ''
 }

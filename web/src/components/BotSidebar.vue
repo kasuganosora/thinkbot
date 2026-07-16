@@ -56,7 +56,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
@@ -66,7 +66,6 @@ const router = useRouter()
 const store = useBotStore()
 const userStore = useUserStore()
 
-onMounted(() => { store.fetchBots() })
 const keyword = ref('')
 
 const userInitial = computed(() => {

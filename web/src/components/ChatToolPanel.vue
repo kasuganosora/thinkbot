@@ -44,9 +44,6 @@
           <t-icon :name="t.icon" />
           <span>{{ t.label }}</span>
         </button>
-        <button class="tp-collapse" title="收起工具栏" data-testid="tool-panel-collapse" @click="collapse">
-          <t-icon name="chevron-right" />
-        </button>
       </div>
 
       <!-- Terminal -->
@@ -196,8 +193,8 @@
         :key="t.key"
         class="rail-btn"
         :class="{ active: tab === t.key }"
-        :title="t.label"
-        @click="tab = t.key"
+        :title="tab === t.key ? '收起工具栏' : t.label"
+        @click="openTab(t.key)"
       >
         <t-icon :name="t.icon" />
       </button>
@@ -222,14 +219,15 @@ const TABS = [
 const tab = ref('terminal')
 
 // 折叠 / 宽度（持久化）
-// 默认展开（localStorage 无值或为 '0' 时展开；'1' 时收起）
+// 默认收起；用户手动操作后按 localStorage 中的偏好恢复
 const MIN_W = 340
 const MAX_W = 720
 function getInitialCollapsed() {
   try {
-    return localStorage.getItem('bp_tool_collapsed') === '1'
+    const saved = localStorage.getItem('bp_tool_collapsed')
+    return saved === null ? true : saved === '1'
   } catch (_) {
-    return false
+    return true
   }
 }
 function getInitialWidth() {
@@ -524,18 +522,6 @@ watch(sid, loadAll)
   font-weight: 600;
   border-bottom-color: #1d1d1f;
 }
-.tp-collapse {
-  margin-left: auto;
-  margin-bottom: 8px;
-  border: none;
-  background: none;
-  color: #aab;
-  cursor: pointer;
-  font-size: 16px;
-  border-radius: 6px;
-  width: 26px; height: 26px;
-}
-.tp-collapse:hover { background: #f2f3f5; color: #555; }
 
 .tp-body {
   flex: 1;

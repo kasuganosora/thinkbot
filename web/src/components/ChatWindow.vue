@@ -100,10 +100,10 @@
         <t-textarea
           v-model="draft"
           :autosize="{ minRows: 1, maxRows: 6 }"
-          placeholder="有问题，尽管问，Shift + Enter 换行"
+          :placeholder="inputPlaceholder"
           :bordered="false"
           data-testid="chat-input-textarea"
-          aria-label="消息输入框，Enter 发送，Shift+Enter 换行"
+          :aria-label="inputAriaLabel"
           @keydown="onKeydown"
         />
         <div class="input-toolbar">
@@ -168,6 +168,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useBotStore } from '@/stores/bot'
 import { useUserStore } from '@/stores/user'
+import { loadUserPreferences } from '@/utils/userPreferences'
 import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
 
@@ -179,6 +180,13 @@ function renderMarkdown(text) {
 
 const store = useBotStore()
 const userStore = useUserStore()
+const userPreferences = computed(() => loadUserPreferences(userStore.user?.id))
+const inputPlaceholder = computed(() => userPreferences.value.sendKey === 'cmd-enter'
+  ? '有问题，尽管问，⌘ / Ctrl + Enter 发送'
+  : '有问题，尽管问，Shift + Enter 换行')
+const inputAriaLabel = computed(() => userPreferences.value.sendKey === 'cmd-enter'
+  ? '消息输入框，Command 或 Control 加 Enter 发送，Enter 换行'
+  : '消息输入框，Enter 发送，Shift 加 Enter 换行')
 const draft = ref('')
 const scrollRef = ref()
 const fileInputRef = ref()
@@ -318,7 +326,14 @@ function quickSend(text) {
 }
 
 function onKeydown(value, { e }) {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key !== 'Enter' || e.isComposing) return
+
+  const useCommandEnter = userPreferences.value.sendKey === 'cmd-enter'
+  const shouldSend = useCommandEnter
+    ? (e.metaKey || e.ctrlKey)
+    : !e.shiftKey && !e.metaKey && !e.ctrlKey
+
+  if (shouldSend) {
     e.preventDefault()
     send()
   }

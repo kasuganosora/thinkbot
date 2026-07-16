@@ -46,12 +46,13 @@
 
 <script setup>
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/api/services'
 
 const router = useRouter()
+const route = useRoute()
 const userStore = useUserStore()
 
 const formRef = ref()
@@ -80,7 +81,10 @@ function onSubmit({ validateResult }) {
         bio: '这个人很懒，什么都没留下'
       })
       MessagePlugin.success('登录成功')
-      router.push({ name: 'chat' })
+      const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
+        ? route.query.redirect
+        : { name: 'chat' }
+      router.push(redirect)
     })
     .catch((e) => {
       MessagePlugin.error(e.message || '登录失败')
