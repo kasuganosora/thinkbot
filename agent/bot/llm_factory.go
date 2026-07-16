@@ -2,6 +2,7 @@ package bot
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -11,6 +12,12 @@ import (
 	"github.com/kasuganosora/thinkbot/llm/openai"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
+
+// llmClientTimeout 是 LLM  Provider 底层 HTTP 客户端的超时。
+// 全局默认（util/http）仅 30s，对 bigmodel/智谱 等偶尔首字节较慢的模型会导致
+// "Client.Timeout exceeded while awaiting headers" 而回复失败。这里单独放宽到 5 分钟
+// （流式由 SSE 看门狗负责检测卡死，过长的整体超时不会掩盖真实 stall）。
+const llmClientTimeout = 5 * time.Minute
 
 // ============================================================================
 // LLM Factory — 从 config.ModelDef 构建实际的 llm.Provider 实例
@@ -34,6 +41,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 				opts = append(opts, openai.WithChatPath(def.ChatPath))
 			}
 		}
+		opts = append(opts, openai.WithTimeout(llmClientTimeout))
 		return openai.New(opts...), nil
 
 	case "anthropic":
@@ -41,6 +49,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 		if def.BaseURL != "" {
 			opts = append(opts, anthropic.WithBaseURL(def.BaseURL))
 		}
+		opts = append(opts, anthropic.WithTimeout(llmClientTimeout))
 		return anthropic.New(opts...), nil
 
 	case "google":
@@ -48,6 +57,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 		if def.BaseURL != "" {
 			opts = append(opts, google.WithBaseURL(def.BaseURL))
 		}
+		opts = append(opts, google.WithTimeout(llmClientTimeout))
 		return google.New(opts...), nil
 
 	case "grok":
@@ -55,6 +65,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 		if def.BaseURL != "" {
 			opts = append(opts, grok.WithBaseURL(def.BaseURL))
 		}
+		opts = append(opts, grok.WithTimeout(llmClientTimeout))
 		return grok.New(opts...), nil
 
 	default:

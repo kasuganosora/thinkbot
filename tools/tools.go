@@ -39,7 +39,7 @@ type Config struct {
 	// HTTPTimeout HTTP 请求超时时间（默认 30 秒）。
 	HTTPTimeout time.Duration
 
-	// MaxFetchSize web_fetch 返回的最大 body 字节数（默认 32768）。
+	// MaxFetchSize web_fetch 返回的最大 body 字节数（默认 1MB）。
 	MaxFetchSize int
 
 	// UserAgent HTTP 请求的 User-Agent 头（默认 "ThinkbotBot/1.0"）。
@@ -56,7 +56,7 @@ func (c Config) defaults() Config {
 		c.HTTPTimeout = 30 * time.Second
 	}
 	if c.MaxFetchSize == 0 {
-		c.MaxFetchSize = 32768
+		c.MaxFetchSize = 1 << 20 // 1MB
 	}
 	if c.UserAgent == "" {
 		c.UserAgent = "ThinkbotBot/1.0"
