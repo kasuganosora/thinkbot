@@ -22,8 +22,9 @@ import (
 // 并将每个增量通过此接口发布，供 SSE handler 实时消费。
 type StreamPublisher interface {
 	PublishTextDelta(ctx context.Context, traceID, botID, text string)
-	PublishToolCall(ctx context.Context, traceID, botID, toolName string, input any)
-	PublishToolResult(ctx context.Context, traceID, botID, toolName string, output any, errMsg string)
+	PublishToolCall(ctx context.Context, traceID, botID, toolCallID, toolName string, input any)
+	PublishToolProgress(ctx context.Context, traceID, botID, toolCallID, toolName string, payload any)
+	PublishToolResult(ctx context.Context, traceID, botID, toolCallID, toolName string, output any, errMsg string)
 }
 
 // ============================================================================
@@ -368,14 +369,16 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					ToolName:   p.ToolName,
 					Input:      p.Input,
 				})
-				publisher.PublishToolCall(ctx, traceID, botID, p.ToolName, p.Input)
+				publisher.PublishToolCall(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Input)
+			case *llm.ToolProgressPart:
+				publisher.PublishToolProgress(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Content)
 			case *llm.StreamToolResultPart:
 				result.ToolResults = append(result.ToolResults, llm.ToolResult{
 					ToolCallID: p.ToolCallID,
 					ToolName:   p.ToolName,
 					Output:     p.Output,
 				})
-				publisher.PublishToolResult(ctx, traceID, botID, p.ToolName, p.Output, "")
+				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Output, "")
 			case *llm.FinishStepPart:
 				result.Response = p.Response
 				if result.Usage.TotalTokens == 0 {

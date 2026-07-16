@@ -83,13 +83,13 @@
       <!-- 命令类工具 -->
       <div v-if="isCommand" class="tc-cmd" :data-testid="`chat-toolcall-cmd-${call.id}`">
         <div class="cmd-line"><span class="cmd-prompt">$</span> {{ cmdText }}</div>
-        <div v-if="state === 'running'" class="cmd-output running">执行中<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
+        <div v-if="state === 'running' && !hasShellOutput" class="cmd-output running">执行中<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
         <template v-else-if="shellResult">
           <div v-if="shellResult.stdout" class="cmd-output">{{ shellResult.stdout }}</div>
           <div v-if="shellResult.stderr" class="cmd-output cmd-err">{{ shellResult.stderr }}</div>
           <div v-if="shellResult.truncated" class="cmd-note">（输出已截断）</div>
-          <div class="cmd-meta">
-            <span :class="shellResult.exitCode === 0 ? 'exit-ok' : 'exit-fail'">exit {{ shellResult.exitCode ?? '?' }}</span>
+          <div v-if="state !== 'running' || shellResult.exitCode !== null || shellResult.workdir" class="cmd-meta">
+            <span v-if="shellResult.exitCode !== null" :class="shellResult.exitCode === 0 ? 'exit-ok' : 'exit-fail'">exit {{ shellResult.exitCode }}</span>
             <span v-if="shellResult.workdir" class="cmd-cwd">cwd: {{ shellResult.workdir }}</span>
           </div>
         </template>
@@ -149,7 +149,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import toolLabels from '@/i18n/toolLabels'
 
@@ -165,10 +165,8 @@ function toolLabel(name) {
 }
 
 const expanded = ref(true)
-// 运行态：初始取自 call.status；running 时本地推进
-const state = ref(props.call.status || 'success')
-const pct = ref(props.call.status === 'running' ? 6 : 100)
-let timer = null
+const state = computed(() => props.call.status || 'success')
+const pct = computed(() => state.value === 'running' ? 60 : 100)
 
 const runningLabel = computed(() => props.call.runningText || props.call.title || toolLabel(props.call.name) || props.call.name || '执行中')
 
@@ -227,6 +225,7 @@ const shellResult = computed(() => {
     truncated: o.truncated === true,
   }
 })
+const hasShellOutput = computed(() => !!(shellResult.value && (shellResult.value.stdout || shellResult.value.stderr)))
 
 // 原始输出文本（兜底 / 查看原文用）
 const outputText = computed(() => {
@@ -308,26 +307,12 @@ const headIcon = computed(() => {
   switch (state.value) {
     case 'success': return 'check-circle'
     case 'error': return 'error-circle'
+    case 'killed':
+    case 'timeout':
+      return 'stop-circle'
     default: return 'tools'
   }
 })
-
-function tick() {
-  pct.value = Math.min(100, pct.value + 6 + Math.random() * 12)
-  if (pct.value >= 100) {
-    pct.value = 100
-    stop()
-    // 切换到最终态（真实接入时由后端 SSE 推送，无需 _finalStatus）
-    state.value = props.call._finalStatus || 'success'
-  }
-}
-function start() {
-  stop()
-  timer = setInterval(tick, 480)
-}
-function stop() {
-  if (timer) { clearInterval(timer); timer = null }
-}
 
 function toggle() {
   expanded.value = !expanded.value
@@ -341,10 +326,6 @@ function onUndo() {
   MessagePlugin.info('撤销功能待后端接入')
 }
 
-onMounted(() => {
-  if (state.value === 'running') start()
-})
-onBeforeUnmount(stop)
 </script>
 
 <style scoped>
@@ -358,6 +339,7 @@ onBeforeUnmount(stop)
 .tc-success { border-color: #e3e8ef; }
 .tc-error { border-color: #f3c9c9; background: #fff8f8; }
 .tc-running { border-color: #c5d8f7; background: #f5f9ff; }
+.tc-killed, .tc-timeout { border-color: #f3ddaa; background: #fffaf0; }
 
 .tc-head {
   display: flex;
@@ -493,7 +475,7 @@ onBeforeUnmount(stop)
 }
 .cmd-line { color: #e6e6e6; }
 .cmd-prompt { color: #00a870; margin-right: 6px; }
-.cmd-output { color: #9aa0a6; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.cmd-output { color: #9aa0a6; margin-top: 4px; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
 .cmd-output.running { color: #7aa7ff; }
 .cmd-err { color: #ff9b9b; }
 .cmd-note { color: #c9a24a; margin-top: 4px; font-size: 11px; }

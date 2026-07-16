@@ -1,11 +1,15 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -163,6 +167,10 @@ func (w *dockerWorkspace) HealthCheck(ctx context.Context) HealthStatus {
 }
 
 func (w *dockerWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
+	return w.ExecStream(ctx, req, nil)
+}
+
+func (w *dockerWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
 	if req.Command == "" {
 		return nil, errs.New("sandbox/docker: command is empty")
 	}
@@ -177,7 +185,6 @@ func (w *dockerWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResul
 	// 选择工作目录
 	targetDir := w.workDir
 	if req.WorkDir != "" {
-		// 校验路径安全性
 		validated, err := validatePath(w.workDir, req.WorkDir)
 		if err != nil {
 			return nil, err
@@ -188,44 +195,17 @@ func (w *dockerWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResul
 	cmd := exec.CommandContext(execCtx, "docker",
 		"exec", "-w", targetDir, w.container, "sh", "-c", req.Command)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	// 判断截断
-	maxOut := w.cfg.MaxOutput
-	result := &ExecResult{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
-	}
-	if maxOut > 0 {
-		if s, trunc := truncateString(result.Stdout, maxOut); trunc {
-			result.Stdout = s
-			result.Truncated = true
+	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, func(stream, chunk string) {
+		if onChunk != nil {
+			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
-		if s, trunc := truncateString(result.Stderr, maxOut); trunc {
-			result.Stderr = s
-			result.Truncated = true
-		}
-	}
-
-	// 获取退出码
-	if execCtx.Err() == context.DeadlineExceeded {
-		result.ExitCode = -1
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
-		return result, nil
-	}
-
+	})
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, errs.Wrapf(err, "sandbox/docker: exec in container %q", w.container)
-		}
+		return nil, errs.Wrapf(err, "sandbox/docker: exec in container %q", w.container)
 	}
-
+	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
+		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
+	}
 	return result, nil
 }
 
@@ -348,6 +328,92 @@ func pathDir(path string) string {
 // shellQuote 用单引号包裹路径并转义内部单引号，防止 shell 注入。
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// runCommandWithStreaming 执行命令并可选回调 stdout/stderr 增量。
+func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, onChunk func(stream, chunk string)) (*ExecResult, error) {
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	var mu sync.Mutex
+	readPipe := func(stream string, r io.Reader) {
+		reader := bufio.NewReader(r)
+		buf := make([]byte, 2048)
+		for {
+			n, readErr := reader.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				mu.Lock()
+				if stream == "stderr" {
+					stderrBuf.WriteString(chunk)
+				} else {
+					stdoutBuf.WriteString(chunk)
+				}
+				mu.Unlock()
+				if onChunk != nil {
+					onChunk(stream, chunk)
+				}
+			}
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					return
+				}
+				return
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		readPipe("stdout", stdoutPipe)
+	}()
+	go func() {
+		defer wg.Done()
+		readPipe("stderr", stderrPipe)
+	}()
+
+	waitErr := cmd.Wait()
+	wg.Wait()
+
+	result := &ExecResult{
+		Stdout: stdoutBuf.String(),
+		Stderr: stderrBuf.String(),
+	}
+	if maxOut > 0 {
+		if s, trunc := truncateString(result.Stdout, maxOut); trunc {
+			result.Stdout = s
+			result.Truncated = true
+		}
+		if s, trunc := truncateString(result.Stderr, maxOut); trunc {
+			result.Stderr = s
+			result.Truncated = true
+		}
+	}
+
+	if ctx.Err() == context.DeadlineExceeded {
+		result.ExitCode = -1
+		return result, nil
+	}
+	if waitErr != nil {
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			return nil, waitErr
+		}
+	}
+	return result, nil
 }
 
 // truncateString 安全截断字符串到 maxBytes，确保不截断多字节 UTF-8 字符。

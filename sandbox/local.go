@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -117,6 +116,10 @@ func (w *localWorkspace) HealthCheck(ctx context.Context) HealthStatus {
 }
 
 func (w *localWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
+	return w.ExecStream(ctx, req, nil)
+}
+
+func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
 	if req.Command == "" {
 		return nil, errs.New("sandbox/local: command is empty")
 	}
@@ -149,47 +152,21 @@ func (w *localWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult
 		cmd = exec.CommandContext(execCtx, "sh", "-c", req.Command)
 	}
 	cmd.Dir = targetDir
-	// 设置 TZ 环境变量
 	if w.cfg.Timezone != "" {
 		cmd.Env = append(os.Environ(), "TZ="+w.cfg.Timezone)
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	maxOut := w.cfg.MaxOutput
-	result := &ExecResult{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
-	}
-	if maxOut > 0 {
-		if s, trunc := truncateString(result.Stdout, maxOut); trunc {
-			result.Stdout = s
-			result.Truncated = true
+	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, func(stream, chunk string) {
+		if onChunk != nil {
+			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
-		if s, trunc := truncateString(result.Stderr, maxOut); trunc {
-			result.Stderr = s
-			result.Truncated = true
-		}
-	}
-
-	if execCtx.Err() == context.DeadlineExceeded {
-		result.ExitCode = -1
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
-		return result, nil
-	}
-
+	})
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, errs.Wrap(err, "sandbox/local: exec command")
-		}
+		return nil, errs.Wrap(err, "sandbox/local: exec command")
 	}
-
+	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
+		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
+	}
 	return result, nil
 }
 
