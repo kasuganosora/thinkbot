@@ -367,11 +367,10 @@ type BotAccessConfig struct {
 
 // BotAccessRule 访问控制规则。
 type BotAccessRule struct {
-	ID       string `json:"id,omitempty"`
-	Type     string `json:"type"`   // "user" | "group" | "channel"
-	Target   string `json:"target"` // 匹配目标
-	Action   string `json:"action"` // "allow" | "deny"
-	Priority int    `json:"priority"`
+	ID     string `json:"id,omitempty"`
+	Field  string `json:"field"`  // 匹配字段：platform | userId | keyword
+	Value  string `json:"value"`  // 匹配值
+	Action string `json:"action"` // "allow" | "deny"
 }
 
 // --- 文件管理 (Files) ---
@@ -1282,4 +1281,72 @@ func (s *Server) saveBotRhythmConfig(c *gin.Context, botID string, cfg *BotRhyth
 // nowRFC3339 返回当前时间的 RFC3339 格式字符串。
 func nowRFC3339() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
+}
+
+// ============================================================================
+// 访问控制（图3：默认行为 + 规则列表）
+// GET/PUT /api/bots/:id/access
+// 类型 BotAccessConfig / BotAccessRule 见上方“--- 访问控制 (Access) ---”区块。
+// ============================================================================
+
+// defaultBotAccessConfig 返回访问控制默认配置（默认放行）。
+func defaultBotAccessConfig() *BotAccessConfig {
+	return &BotAccessConfig{
+		Default: "allow",
+		Rules:   []BotAccessRule{},
+	}
+}
+
+// handleGetBotAccess 获取 Bot 访问控制配置。
+// GET /api/bots/:id/access
+func (s *Server) handleGetBotAccess(c *gin.Context) {
+	botID := c.Param("id")
+	OK(c, s.getBotAccessConfig(botID))
+}
+
+// handleUpdateBotAccess 更新 Bot 访问控制配置。
+// PUT /api/bots/:id/access
+func (s *Server) handleUpdateBotAccess(c *gin.Context) {
+	botID := c.Param("id")
+
+	var req BotAccessConfig
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+	// 规范化默认值
+	if req.Default != "deny" {
+		req.Default = "allow"
+	}
+	for i := range req.Rules {
+		if req.Rules[i].Action != "deny" {
+			req.Rules[i].Action = "allow"
+		}
+	}
+
+	if err := s.saveBotAccessConfig(c, botID, &req); err != nil {
+		Fail(c, err)
+		return
+	}
+	OK(c, nil)
+}
+
+func (s *Server) getBotAccessConfig(botID string) *BotAccessConfig {
+	raw, ok := s.store.Get(botDetailKey(botID, "access"))
+	if !ok || raw == "" {
+		return defaultBotAccessConfig()
+	}
+	var cfg BotAccessConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return defaultBotAccessConfig()
+	}
+	if cfg.Default != "deny" {
+		cfg.Default = "allow"
+	}
+	return &cfg
+}
+
+func (s *Server) saveBotAccessConfig(c *gin.Context, botID string, cfg *BotAccessConfig) error {
+	data, _ := json.Marshal(cfg)
+	return s.store.Set(c.Request.Context(), botDetailKey(botID, "access"), string(data))
 }

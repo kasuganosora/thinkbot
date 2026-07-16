@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -40,6 +43,11 @@ func (s *Server) handleLogin(c *gin.Context) {
 			"ip", c.ClientIP(),
 			"err", err.Error(),
 		)
+		// 凭据错误应返回 401，而非默认的 500
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			Fail(c, errs.Unauthorized("invalid username or password"))
+			return
+		}
 		Fail(c, err)
 		return
 	}
