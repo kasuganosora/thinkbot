@@ -586,6 +586,9 @@ func (s *Server) handleStartBotContainer(c *gin.Context) {
 func (s *Server) handleStopBotContainer(c *gin.Context) {
 	botID := c.Param("id")
 	if s.botSvc != nil {
+		// 先停掉 bot 的 agent 实例：取消在跑的任务并使 DB status 置为 stopped，
+		// 避免残留的 exec 又把刚停止的容器拉起来。
+		s.botSvc.StopBot(botID)
 		if mgr, err := s.botSvc.WorkspaceManagerForBot(botID); err == nil {
 			if err := mgr.StopBot(botID); err != nil {
 				Fail(c, fmt.Errorf("停止容器失败: %w", err))
@@ -1080,8 +1083,8 @@ func (s *Server) realBotContainerInfo(ctx context.Context, botID string) *BotCon
 	if err != nil {
 		return stored
 	}
-	// 触发工作空间实例化，使 ContainerInfo 能拿到真实容器名/状态。
-	_, _ = mgr.GetOrCreate(botID)
+	// 只读获取容器信息：不调用 GetOrCreate（其内部 ensure() 会在容器 exited 时自动 restart），
+	// 避免查状态时副作用地重启已停止的容器。
 	ci := mgr.ContainerInfo(ctx, botID)
 
 	info := &BotContainerInfo{

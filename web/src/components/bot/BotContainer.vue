@@ -149,7 +149,7 @@ const columns = [
 ]
 
 function statusText(s) {
-  return ({ running: '运行中', stopped: '已停止', removed: '已删除' })[s] || s || '-'
+  return ({ running: '运行中', stopped: '已停止', exited: '已停止', removed: '已删除', 'not-created': '未创建' })[s] || s || '-'
 }
 function fmt(iso) {
   if (!iso) return '-'
