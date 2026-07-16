@@ -9,6 +9,7 @@
 
 import { USE_MOCK, mockResolve, request, uploadRequest } from './http'
 import { db, saveDB, nowISO } from './mockDb'
+import toolLabels from '@/i18n/toolLabels'
 
 let _seq = 1000
 const genId = (p = 'id') => `${p}-${++_seq}`
@@ -778,13 +779,14 @@ export const chatApi = {
    * @param {number} [limit=30]
    * @returns {Promise<{messages: Array, nextCursor?: string, hasMore: boolean}>}
    */
-  history(botId, cursor, limit = 30) {
+  history(botId, cursor, limit = 30, sessionId) {
     if (USE_MOCK) {
       // mock: 返回空历史
       return mockResolve(() => ({ messages: [], hasMore: false }))
     }
     const params = new URLSearchParams({ botId, limit: String(limit) })
     if (cursor) params.set('cursor', cursor)
+    if (sessionId) params.set('sessionId', sessionId)
     return request('GET', `/api/chat/history?${params.toString()}`)
   },
   // mock 下不做真正 SSE，返回完整文本；真实接入时改为 EventSource/fetch-stream
@@ -832,6 +834,7 @@ export const chatApi = {
       onToolProgress,
       onToolResult,
       signal,
+      sessionId,
       attachments = [],
     } = options || {}
 
@@ -847,7 +850,7 @@ export const chatApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ botId, text, ...(attachments.length ? { attachments } : {}) }),
+      body: JSON.stringify({ botId, text, ...(sessionId ? { sessionId: String(sessionId) } : {}), ...(attachments.length ? { attachments } : {}) }),
       signal
     })
     if (!response.ok) {
@@ -902,7 +905,7 @@ export const chatApi = {
               const call = {
                 id: parts.toolCallId || genId('tool'),
                 name: parts.tool,
-                title: parts.tool,
+                title: toolLabels[parts.tool] || parts.tool,
                 input: parts.input,
                 status: 'running',
                 output: { stdout: '', stderr: '', exitCode: null, truncated: false },
@@ -1111,6 +1114,49 @@ export const sessionToolApi = {
     if (USE_MOCK) return mockResolve(() => ({ ok: true }))
     return request('POST', `/api/sessions/${sid}/compact`)
   }
+}
+
+// ============================ 会话管理（Session CRUD） ============================
+//
+// 前端契约（sessionApi）：
+//   GET    /api/bots/:id/sessions     — 指定 Bot 的会话列表
+//   POST   /api/bots/:id/sessions     — 新建会话
+//   DELETE /api/sessions/:sid          — 删除会话（级联删除消息）
+//   PUT    /api/sessions/:sid          — 更新会话标题/状态
+export const sessionApi = {
+  list(botId) {
+    if (USE_MOCK) {
+      const sessions = db().sessions?.filter(s => s.botId === botId) || []
+      return mockResolve(() => ({ sessions, total: sessions.length }))
+    }
+    return request('GET', `/api/bots/${botId}/sessions`)
+  },
+  create(botId, title) {
+    if (USE_MOCK) {
+      const sess = { id: ++_seq, botId, title: title || '新会话', status: 'active', messageCount: 0, createdAt: nowISO(), updatedAt: nowISO() }
+      ensureSessions(botId).push(sess)
+      saveDB()
+      return mockResolve(() => sess)
+    }
+    return request('POST', `/api/bots/${botId}/sessions`, { title: title || '新会话' })
+  },
+  remove(sid) {
+    if (USE_MOCK) {
+      db().sessions = (db().sessions || []).filter(s => s.id !== sid)
+      saveDB()
+      return mockResolve(() => ({ ok: true }))
+    }
+    return request('DELETE', `/api/sessions/${sid}`)
+  },
+  update(sid, payload) {
+    if (USE_MOCK) {
+      const s = (db().sessions || []).find(s => s.id === sid)
+      if (s) Object.assign(s, payload, { updatedAt: nowISO() })
+      saveDB()
+      return mockResolve(() => s)
+    }
+    return request('PUT', `/api/sessions/${sid}`, payload)
+  },
 }
 
 // ============================ Bot 详情面板（平台/记忆/访问控制/文件/聊天节奏） ============================

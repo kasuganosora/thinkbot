@@ -52,19 +52,27 @@ func NewChatHistoryService(db *gorm.DB, logger *zap.SugaredLogger) *ChatHistoryS
 }
 
 // SaveMessage 保存一条聊天消息（无工具调用信息）。
-func (s *ChatHistoryService) SaveMessage(botID, userID, role, content, traceID string) error {
-	return s.SaveMessageWithTools(botID, userID, role, content, traceID, "")
+func (s *ChatHistoryService) SaveMessage(botID, userID, role, content, traceID, sessionID string) error {
+	return s.SaveMessageWithTools(botID, userID, role, content, traceID, "", sessionID)
 }
 
 // SaveMessageWithTools 保存一条聊天消息，并附带工具调用信息（JSON 字符串）。
 // toolCallsJSON 为空时等价于 SaveMessage。仅 assistant 消息通常带工具调用。
-func (s *ChatHistoryService) SaveMessageWithTools(botID, userID, role, content, traceID, toolCallsJSON string) error {
+func (s *ChatHistoryService) SaveMessageWithTools(botID, userID, role, content, traceID, toolCallsJSON, sessionID string) error {
+	return s.SaveMessageWithParts(botID, userID, role, content, traceID, toolCallsJSON, "", sessionID)
+}
+
+// SaveMessageWithParts 保存一条聊天消息，含工具调用 + 有序 parts。
+// partsJSON 为空时等价于 SaveMessageWithTools。parts 保留 LLM 输出的文本/工具交错顺序。
+func (s *ChatHistoryService) SaveMessageWithParts(botID, userID, role, content, traceID, toolCallsJSON, partsJSON, sessionID string) error {
 	msg := dao.ChatMessage{
 		BotID:     botID,
 		UserID:    userID,
+		SessionID: sessionID,
 		Role:      role,
 		Content:   content,
 		ToolCalls: toolCallsJSON,
+		PartsJSON: partsJSON,
 		TraceID:   traceID,
 		CreatedAt: time.Now(),
 	}
@@ -78,7 +86,7 @@ func (s *ChatHistoryService) SaveMessageWithTools(botID, userID, role, content, 
 //
 // cursor 为空时返回最新的消息。返回的消息按时间倒序（最新在前）。
 // 使用 WHERE 条件替代 OFFSET，时间复杂度 O(log N + limit)。
-func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit int) (*HistoryPage, error) {
+func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit int, sessionID string) (*HistoryPage, error) {
 	if limit <= 0 {
 		limit = defaultPageSize
 	}
@@ -87,7 +95,7 @@ func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit
 	}
 
 	q := s.db.Model(&dao.ChatMessage{}).
-		Where("bot_id = ? AND user_id = ?", botID, userID)
+		Where("bot_id = ? AND user_id = ? AND session_id = ?", botID, userID, sessionID)
 
 	if cursor != "" {
 		ts, id, err := decodeCursor(cursor)
@@ -133,7 +141,7 @@ func (s *ChatHistoryService) CountMessages(botID string) (int64, error) {
 
 // LoadContext 加载最近 N 条消息作为 LLM 上下文。
 // 返回的消息按时间正序（旧→新），直接拼入 LLM messages。
-func (s *ChatHistoryService) LoadContext(botID, userID string, limit int) ([]dao.ChatMessage, error) {
+func (s *ChatHistoryService) LoadContext(botID, userID string, limit int, sessionID string) ([]dao.ChatMessage, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -144,7 +152,7 @@ func (s *ChatHistoryService) LoadContext(botID, userID string, limit int) ([]dao
 	var messages []dao.ChatMessage
 	// 先按 DESC 取最近 limit 条，再反转为正序
 	if err := s.db.Model(&dao.ChatMessage{}).
-		Where("bot_id = ? AND user_id = ?", botID, userID).
+		Where("bot_id = ? AND user_id = ? AND session_id = ?", botID, userID, sessionID).
 		Order("created_at DESC, id DESC").
 		Limit(limit).
 		Find(&messages).Error; err != nil {

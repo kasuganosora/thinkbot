@@ -151,7 +151,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	// 顺序很重要：如果先保存再加载，当前消息会出现在历史中，
 	// 导致 MessageBuilder 重复追加，LLM 上下文中出现两次相同消息
 	contextLimit := s.store.GetInt(config.KeyChatContextLimit, 20)
-	history, err := s.chatHistory.LoadContext(req.BotID, userID, contextLimit)
+	history, err := s.chatHistory.LoadContext(req.BotID, userID, contextLimit, req.SessionID)
 	if err != nil {
 		s.logger.Warnw("failed to load chat history", "err", err)
 		history = nil
@@ -164,7 +164,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				s.logger.Errorw("panic saving user message", "err", r)
 			}
 		}()
-		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, traceID); err != nil {
+		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, traceID, req.SessionID); err != nil {
 			s.logger.Warnw("failed to save user message", "err", err)
 		}
 	}()
@@ -235,6 +235,30 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	// 累积本轮工具调用，用于回复完成后随 assistant 消息一起持久化。
 	toolCalls := make([]map[string]any, 0)
 	toolCallIdx := make(map[string]int)
+	// ── 有序 parts：按 LLM 实际输出顺序记录文本片段和工具调用，
+	//    用于前端按时间线交错渲染（而非文本全在前、工具全在后）。
+	parts := make([]map[string]any, 0) // 有序: [{type:"text",content},{type:"tool",...}]
+
+	// syncPartTool 将 toolCalls[idx] 的最新状态同步到 parts 数组中对应的 tool part。
+	syncPartTool := func(toolCallID string) {
+		idx, ok := toolCallIdx[toolCallID]
+		if !ok || idx < 0 || idx >= len(toolCalls) {
+			return
+		}
+		src := toolCalls[idx]
+		for i := len(parts) - 1; i >= 0; i-- {
+			if parts[i]["type"] == "tool" && parts[i]["id"] == toolCallID {
+				// 合并 src 的字段到 part（不覆盖 type/id/name 等标识字段）
+				p := parts[i]
+				for k, v := range src {
+					if k != "type" && k != "id" && k != "name" {
+						p[k] = v
+					}
+				}
+				break
+			}
+		}
+	}
 
 	for {
 		select {
@@ -264,6 +288,12 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					fullText += delta
 					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": delta})
 					flusher.Flush()
+					// 有序 parts：合并到最后一个 text part 或新建
+					if len(parts) > 0 && parts[len(parts)-1]["type"] == "text" {
+						parts[len(parts)-1]["content"] = parts[len(parts)-1]["content"].(string) + delta
+					} else {
+						parts = append(parts, map[string]any{"type": "text", "content": delta})
+					}
 				}
 
 			case outbound.EventLLMToolCall:
@@ -279,20 +309,35 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				})
 				flusher.Flush()
 				if _, ok := toolCallIdx[toolCallID]; !ok {
-					toolCalls = append(toolCalls, map[string]any{
+					tc := map[string]any{
 						"id":     toolCallID,
 						"name":   toolName,
 						"title":  toolName,
 						"status": "running",
 						"input":  event.Data["input"],
 						"output": map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false},
-					})
+					}
+					toolCalls = append(toolCalls, tc)
 					toolCallIdx[toolCallID] = len(toolCalls) - 1
+					// 有序 parts：追加工具 part（保持调用顺序）
+					part := map[string]any{
+						"type":   "tool",
+						"id":     toolCallID,
+						"name":   toolName,
+						"title":  toolName,
+						"status": "running",
+						"input":  event.Data["input"],
+					}
+					if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
+						part["invocationId"] = invID
+					}
+					parts = append(parts, part)
 				}
 
 			case outbound.EventLLMToolProgress:
 				toolCallID, _ := event.Data["toolCallId"].(string)
 				toolName, _ := event.Data["tool"].(string)
+				invocationID, _ := event.Data["invocationId"].(string)
 				payload, _ := event.Data["payload"].(map[string]any)
 				stream := "stdout"
 				chunk := ""
@@ -305,11 +350,12 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					}
 				}
 				writeSSE(c.Writer, sseToolProgress, map[string]any{
-					"toolCallId": toolCallID,
-					"tool":       toolName,
-					"stream":     stream,
-					"chunk":      chunk,
-					"payload":    payload,
+					"toolCallId":   toolCallID,
+					"tool":         toolName,
+					"invocationId": invocationID,
+					"stream":       stream,
+					"chunk":        chunk,
+					"payload":      payload,
 				})
 				flusher.Flush()
 
@@ -326,15 +372,21 @@ func (s *Server) handleChatSend(c *gin.Context) {
 						out["stdout"] = prev + chunk
 					}
 					toolCalls[idx]["output"] = out
+					if invocationID != "" {
+						toolCalls[idx]["invocationId"] = invocationID
+					}
+					syncPartTool(toolCallID)
 				}
 
 			case outbound.EventLLMToolResult:
 				toolCallID, _ := event.Data["toolCallId"].(string)
 				toolName, _ := event.Data["tool"].(string)
+				invocationID, _ := event.Data["invocationId"].(string)
 				payload := map[string]any{
-					"toolCallId": toolCallID,
-					"tool":       toolName,
-					"output":     event.Data["output"],
+					"toolCallId":   toolCallID,
+					"tool":         toolName,
+					"invocationId": invocationID,
+					"output":       event.Data["output"],
 				}
 				if errMsg, ok := event.Data["error"]; ok {
 					payload["error"] = errMsg
@@ -351,6 +403,10 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					if event.Data["output"] != nil {
 						toolCalls[idx]["output"] = event.Data["output"]
 					}
+					if invocationID != "" {
+						toolCalls[idx]["invocationId"] = invocationID
+					}
+					syncPartTool(toolCallID)
 				}
 			}
 
@@ -383,7 +439,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				writeSSE(c.Writer, sseDone, donePayload)
 				flusher.Flush()
 
-				// 保存 Bot 回复到 DB（含工具调用信息）
+				// 保存 Bot 回复到 DB（含工具调用信息 + 有序 parts）
 				if fullText != "" || len(toolCalls) > 0 {
 					toolCallsJSON := ""
 					if len(toolCalls) > 0 {
@@ -391,16 +447,22 @@ func (s *Server) handleChatSend(c *gin.Context) {
 							toolCallsJSON = string(b)
 						}
 					}
-					go func(content, tcJSON string) {
+					partsJSON := ""
+					if len(parts) > 0 {
+						if b, err := json.Marshal(parts); err == nil {
+							partsJSON = string(b)
+						}
+					}
+					go func(content, tcJSON, pJSON string) {
 						defer func() {
 							if r := recover(); r != nil {
 								s.logger.Errorw("panic saving assistant message", "err", r)
 							}
 						}()
-						if err := s.chatHistory.SaveMessageWithTools(botID, userID, "assistant", content, traceID, tcJSON); err != nil {
+						if err := s.chatHistory.SaveMessageWithParts(botID, userID, "assistant", content, traceID, tcJSON, pJSON, req.SessionID); err != nil {
 							s.logger.Warnw("failed to save assistant message", "err", err)
 						}
-					}(fullText, toolCallsJSON)
+					}(fullText, toolCallsJSON, partsJSON)
 				}
 				return
 			}

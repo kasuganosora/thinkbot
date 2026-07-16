@@ -20,7 +20,7 @@ const routes = [
         component: () => import('@/views/Chat.vue')
       },
       {
-        path: 'chat/bot/:botId',
+        path: 'chat/bot/:botId/:sessionId?',
         name: 'chat-bot',
         component: () => import('@/views/Chat.vue')
       },

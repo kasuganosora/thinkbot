@@ -5,6 +5,7 @@
     :data-testid="`chat-toolcall-${call.id}`"
     :data-tool-name="call.name"
     :data-tool-status="state"
+    :data-invocation-id="call.invocationId"
     role="group"
     :aria-label="`工具调用：${call.title || toolLabel(call.name) || call.name}`"
   >
@@ -23,12 +24,12 @@
         <template v-else>{{ call.title || toolLabel(call.name) || call.name }}</template>
       </span>
 
+      <span v-if="invocationShort" class="tc-inv" :data-testid="`chat-toolcall-inv-${call.id}`" :title="`调用标识 ${call.invocationId}`">#{{ invocationShort }}</span>
       <span v-if="state !== 'running' && call.summary" class="tc-summary">{{ call.summary }}</span>
       <span v-if="state !== 'running' && hasDiff" class="tc-diff">
         <span class="add">+{{ call.added || 0 }}</span>
         <span class="del">-{{ call.removed || 0 }}</span>
       </span>
-      <span v-if="state === 'running'" class="tc-pct">{{ Math.round(pct) }}%</span>
 
       <div class="tc-actions">
         <t-tooltip v-if="call.reversible" content="撤销（待接入）">
@@ -49,11 +50,6 @@
           @click.stop="toggle"
         />
       </div>
-    </div>
-
-    <!-- 执行中进度条 -->
-    <div v-if="state === 'running'" class="tc-progress" :data-testid="`chat-toolcall-progress-${call.id}`" :data-progress="Math.round(pct)">
-      <div class="tc-progress-fill" :style="{ width: pct + '%' }" />
     </div>
 
     <!-- 展开内容 -->
@@ -166,16 +162,23 @@ function toolLabel(name) {
 
 const expanded = ref(true)
 const state = computed(() => props.call.status || 'success')
-const pct = computed(() => state.value === 'running' ? 60 : 100)
+
+// 执行标识短码：取 invocationId 去掉连字符后的前 8 位，用于在多步循环里
+// 一眼区分「这是第几次 exec 调用」。完整值见 title 与 data-invocation-id。
+const invocationShort = computed(() => {
+  const id = props.call.invocationId
+  if (!id) return ''
+  return id.replace(/-/g, '').slice(0, 8)
+})
 
 const runningLabel = computed(() => props.call.runningText || props.call.title || toolLabel(props.call.name) || props.call.name || '执行中')
 
-// 已完成的文件数（按进度比例推进，制造逐个写入的观感）
+// 已完成的文件数（running 时全部显示为待处理/执行中，完成后全标完成）
 const doneFileCount = computed(() => {
   const total = (props.call.files || []).length
   if (!total) return 0
   if (state.value !== 'running') return total
-  return Math.min(total, Math.floor((pct.value / 100) * total))
+  return 0 // running 时全部显示"写入中"/pending，不做假进度
 })
 
 const hasDiff = computed(() =>
@@ -376,7 +379,17 @@ function onUndo() {
   animation: flow 1.6s linear infinite;
 }
 .tc-summary { color: #666; }
-.tc-pct { color: #0052d9; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tc-inv {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #8a94a6;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  padding: 1px 5px;
+  cursor: default;
+  user-select: all;
+}
 .tc-diff { font-size: 12px; font-variant-numeric: tabular-nums; }
 .tc-diff .add, .file-diff .add { color: #00a870; margin-right: 6px; }
 .tc-diff .del, .file-diff .del { color: #d63c3c; }
@@ -408,25 +421,6 @@ function onUndo() {
   align-items: center;
   font-size: 16px;
   line-height: 1;
-}
-
-.tc-progress {
-  height: 3px;
-  background: #e3ecfb;
-  overflow: hidden;
-}
-.tc-progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #2f7bff, #0052d9);
-  transition: width 0.4s ease;
-  position: relative;
-}
-.tc-progress-fill::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6), transparent);
-  animation: shimmer 1s infinite;
 }
 
 .tc-body {
@@ -555,6 +549,5 @@ function onUndo() {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes flow { to { background-position: -200% 0; } }
-@keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
 @keyframes blink { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
 </style>

@@ -17,6 +17,10 @@ type ChatMessage struct {
 	// UserID 用户标识。
 	UserID string `gorm:"size:64;not null;index:idx_chat_session_time,priority:2" json:"userId"`
 
+	// SessionID 会话 ID（关联 ChatSession）。用于按会话隔离消息与上下文。
+	// 空字符串表示未归属到具体会话（兼容历史数据 / 未选择会话时）。
+	SessionID string `gorm:"size:64;index:idx_chat_msg_session" json:"sessionId"`
+
 	// Role 消息角色："user" 或 "assistant"。
 	Role string `gorm:"size:16;not null" json:"role"`
 
@@ -26,6 +30,12 @@ type ChatMessage struct {
 	// ToolCalls 本轮 assistant 回复关联的工具调用信息（JSON 序列化数组）。
 	// 仅 assistant 消息可能有值；user 消息为空。刷新后前端据此复原工具卡片。
 	ToolCalls string `gorm:"type:text" json:"-"`
+
+	// PartsJSON 有序 parts 数组（JSON），按 LLM 实际输出顺序排列：
+	//   [{type:"text",content:"..."},{type:"tool",id:"...",name:"...",...},...]
+	// 保留文本与工具调用的交错位置信息，解决"所有工具堆在消息底部"的问题。
+	// 空字符串或 null 表示旧格式消息（仅 content + tool_calls），前端降级处理。
+	PartsJSON string `gorm:"type:text;default:''" json:"parts,omitempty"`
 
 	// TraceID 追踪 ID，用于关联请求-回复对。
 	TraceID string `gorm:"size:128" json:"traceId"`

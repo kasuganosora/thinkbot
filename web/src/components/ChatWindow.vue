@@ -42,6 +42,47 @@
             <span class="msg-header-name">{{ store.activeBot?.name || 'Bot' }}</span>
           </div>
           <div class="msg-content-wrap">
+            <!-- 按 LLM 调用顺序交错渲染文本和工具卡片 -->
+            <template v-if="msg.role === 'assistant' && hasOrderedParts(msg)">
+              <div class="msg-bubble" data-testid="chat-message-content">
+                <template v-if="store.replying && !hasContentText(msg)">
+                  <span class="typing-indicator" data-testid="chat-typing"><i></i><i></i><i></i></span>
+                  <span class="typing-text">思考中…</span>
+                </template>
+                <template v-for="(part, pi) in renderParts(msg)" :key="pi">
+                  <!-- 文本 part → markdown -->
+                  <div
+                    v-if="part.type === 'text' && part.content"
+                    class="markdown-body"
+                    v-html="renderMarkdown(part.content)"
+                  ></div>
+                  <span
+                    v-if="part.type === 'text' && store.replying && isLastTextPart(msg, pi)"
+                    class="stream-caret"
+                    data-testid="chat-stream-caret"
+                  ></span>
+                  <!-- 工具 part → 卡片/归并组 -->
+                  <div
+                    v-if="part.type === 'tool'"
+                    class="msg-toolcall-item"
+                    data-testid="chat-message-toolcall"
+                  >
+                    <ToolCallGroup
+                      v-if="part._group"
+                      :name="part.name"
+                      :calls="part._group"
+                    />
+                    <ToolCallCard
+                      v-else
+                      :key="part.id"
+                      :call="part"
+                    />
+                  </div>
+                </template>
+              </div>
+            </template>
+            <!-- 降级：无 parts 的旧消息（含 user 消息）仍走原逻辑 -->
+            <template v-else>
             <div class="msg-bubble" data-testid="chat-message-content">
               <template v-if="msg.role === 'assistant' && store.replying && !msg.content">
                 <span class="typing-indicator" data-testid="chat-typing">
@@ -64,12 +105,20 @@
               class="msg-toolcalls"
               data-testid="chat-message-toolcalls"
             >
-              <ToolCallCard
-                v-for="tc in msg.toolCalls"
-                :key="tc.id"
-                :call="tc"
-              />
+              <template v-for="(g, gi) in groupToolCalls(msg.toolCalls)" :key="gi">
+                <ToolCallGroup
+                  v-if="g.type === 'group'"
+                  :name="g.name"
+                  :calls="g.calls"
+                />
+                <ToolCallCard
+                  v-else
+                  :key="g.call.id"
+                  :call="g.call"
+                />
+              </template>
             </div>
+            </template>
           </div>
         </div>
 
@@ -171,6 +220,7 @@ import { useUserStore } from '@/stores/user'
 import { loadUserPreferences } from '@/utils/userPreferences'
 import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
+import ToolCallGroup from '@/components/ToolCallGroup.vue'
 
 marked.setOptions({ breaks: true, gfm: true })
 function renderMarkdown(text) {
@@ -257,6 +307,95 @@ function guessType(name) {
 
 // 直接使用 store 的 messages（reactive ref，SSE 更新时自动触发重渲染）
 const messages = computed(() => store.messages)
+
+// ── 有序 Parts 渲染（LLM 文本与工具按调用顺序交错展示）──
+
+/** 消息是否包含有序 parts 数组 */
+function hasOrderedParts(msg) {
+  return Array.isArray(msg.parts) && msg.parts.length > 0
+}
+
+/** parts 中是否有文本内容（用于判断"思考中"占位） */
+function hasContentText(msg) {
+  if (!Array.isArray(msg.parts)) return !!msg.content
+  return msg.parts.some(p => p.type === 'text' && p.content)
+}
+
+/** 当前 text part 是否是最后一个 part（用于流式光标位置） */
+function isLastTextPart(msg, pi) {
+  if (!Array.isArray(msg.parts)) return true
+  // 检查之后是否还有非空 part
+  for (let i = pi + 1; i < msg.parts.length; i++) {
+    if (msg.parts[i].type === 'text' && msg.parts[i].content) return false
+    if (msg.parts[i].type === 'tool') return false
+  }
+  return true
+}
+
+/**
+ * 将有序 parts 展平为渲染列表。
+ * 规则：
+ * - text part → {type:'text', content:'...'}
+ * - tool part → {type:'tool', ...call} （单独卡片）
+ * - 连续同名 tool part → 第一个升为 {type:'tool', _group:[...]}
+ *
+ * 这样 LLM 的 "说话→调用工具→说话→调用工具" 自然呈现为交错顺序。
+ */
+function renderParts(msg) {
+  if (!Array.isArray(msg.parts)) return []
+  const out = []
+  let groupAcc = null   // 正在收集的连续同名工具组
+
+  for (const p of msg.parts) {
+    if (p.type === 'text') {
+      // flush group
+      if (groupAcc) { flushGroup(out, groupAcc); groupAcc = null }
+      out.push(p)
+      continue
+    }
+    if (p.type === 'tool') {
+      if (groupAcc && groupAcc.name === p.name) {
+        // 同名连续 → 加入当前组
+        groupAcc.calls.push(p)
+      } else {
+        // 不同名 → flush 旧组，开新组或单卡
+        if (groupAcc) { flushGroup(out, groupAcc); groupAcc = null }
+        groupAcc = { name: p.name, calls: [p] }
+      }
+    }
+  }
+  if (groupAcc) flushGroup(out, groupAcc)
+  return out
+}
+
+/** 将归并组写入渲染列表 */
+function flushGroup(out, g) {
+  if (g.calls.length === 1) {
+    // 单个工具不套组壳，直接渲染 ToolCallCard
+    out.push(g.calls[0])
+  } else {
+    // 多个同名工具 → 带组的 tool part
+    out.push({ type: 'tool', name: g.name, _group: g.calls })
+  }
+}
+
+// ── 降级：旧消息无 parts 时仍用此函数对 toolCalls 归并分组 ──
+function groupToolCalls(calls) {
+  const list = Array.isArray(calls) ? calls : []
+  const groups = []
+  for (const c of list) {
+    const last = groups[groups.length - 1]
+    if (last && last.type === 'group' && last.name === c.name) {
+      last.calls.push(c)
+    } else if (last && last.type === 'single' && last.call.name === c.name) {
+      // 把落单的上一个同 name 调用升级成组
+      groups[groups.length - 1] = { type: 'group', name: c.name, calls: [last.call, c] }
+    } else {
+      groups.push({ type: 'single', call: c })
+    }
+  }
+  return groups
+}
 
 // 工作流（预留）
 const sessionWorkflowId = computed(() => '')
@@ -427,6 +566,10 @@ function onKeydown(value, { e }) {
 }
 .msg-toolcalls {
   width: 100%;
+}
+.msg-toolcall-item {
+  width: 100%;
+  margin: 2px 0;
 }
 .msg-row.user .msg-bubble {
   background: #f0f1f3;

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { botApi, chatApi } from '@/api/services'
+import { botApi, chatApi, sessionApi } from '@/api/services'
+import toolLabels from '@/i18n/toolLabels'
 
 let idSeed = Date.now()
 const uid = () => `_tmp_${++idSeed}`
@@ -24,6 +25,97 @@ export const useBotStore = defineStore('bot', () => {
   let _abortController = null
   // 当前流式请求 traceId（用于后端主动中止）
   let _activeTraceId = ''
+
+  // ---- 会话（Session） ----
+  const sessions = ref([])
+  const sessionsLoading = ref(false)
+  const activeSessionId = ref(null) // 当前选中的 session ID
+  const pendingSessionId = ref(null) // URL / 外部指定的待选中 session（优先于自动选中）
+
+  async function loadSessions(botId) {
+    const bid = botId || activeBotId.value
+    if (!bid) return
+    sessionsLoading.value = true
+    try {
+      const res = await sessionApi.list(bid)
+      sessions.value = res.sessions || []
+      // 自动选中优先级：URL 指定(pendingSessionId) > 已选中的 > 列表第一个
+      if (sessions.value.length > 0) {
+        let target = null
+        if (pendingSessionId.value && sessions.value.find(s => s.id === pendingSessionId.value)) {
+          target = pendingSessionId.value
+        } else if (activeSessionId.value && sessions.value.find(s => s.id === activeSessionId.value)) {
+          target = activeSessionId.value
+        } else {
+          target = sessions.value[0].id
+        }
+        if (String(activeSessionId.value) !== String(target)) {
+          activeSessionId.value = target
+          await loadMessages()
+        }
+      }
+    } catch (e) {
+      console.error('loadSessions failed', e)
+    } finally {
+      pendingSessionId.value = null
+      sessionsLoading.value = false
+    }
+  }
+
+  async function createSession(title) {
+    const bid = activeBotId.value
+    if (!bid) return null
+    try {
+      const sess = await sessionApi.create(bid, title)
+      sessions.value.unshift(sess)
+      activeSessionId.value = sess.id
+      loadMessages()
+      return sess
+    } catch (e) {
+      console.error('createSession failed', e)
+      throw e // 向上层抛，让调用方决定是否提示
+    }
+  }
+
+  async function deleteSession(sid) {
+    await sessionApi.remove(sid)
+    sessions.value = sessions.value.filter(s => s.id !== sid)
+    if (activeSessionId.value === sid) {
+      activeSessionId.value = sessions.value.length > 0 ? sessions.value[0].id : null
+      // 切到其他会话后加载消息
+      if (activeSessionId.value) loadMessages()
+    }
+    return true // 成功
+  }
+
+  function selectSession(sid) {
+    if (activeSessionId.value === sid) return
+    activeSessionId.value = sid
+    loadMessages()
+  }
+
+  function setPendingSession(id) {
+    pendingSessionId.value = id || null
+  }
+
+  // 通过 URL 指定或外部调用选中某个 session（确保会话列表加载完成后再选中）
+  async function openSessionById(sid) {
+    if (!sid) return
+    if (!sessions.value.length) {
+      pendingSessionId.value = sid
+      await loadSessions(activeBotId.value)
+      return
+    }
+    const exists = sessions.value.find(s => s.id === sid)
+    if (exists && String(activeSessionId.value) !== String(sid)) {
+      selectSession(sid)
+    }
+  }
+
+  // 当切换 bot 时自动加载该 bot 的会话列表
+  watch(activeBotId, (newId) => {
+    if (newId) loadSessions(newId)
+  }, { immediate: true })
 
   // ---- Bot 列表 ----
   async function fetchBots() {
@@ -74,6 +166,23 @@ export const useBotStore = defineStore('bot', () => {
   }
 
   // ---- 消息加载（从后端 API） ----
+  /** 从后端 API 响应或 legacy {content, toolCalls} 构建有序 parts。
+   *  - 后端返回 msg.parts（有序 parts 数组）→ 直接使用（保留文本/工具交错顺序）
+   *  - 旧消息无 parts 字段 → 从 content + toolCalls 构建（降级：文本在前、工具在后）
+   */
+  function buildPartsForMessage(msg) {
+    if (msg.role !== 'assistant') return msg
+    if (Array.isArray(msg.parts) && msg.parts.length) return msg  // 已有有序 parts（来自新格式 API 或流式构建）
+    const parts = []
+    if (msg.content) parts.push({ type: 'text', content: msg.content })
+    if (Array.isArray(msg.toolCalls)) {
+      for (const tc of msg.toolCalls) {
+        parts.push({ type: 'tool', ...tc })
+      }
+    }
+    return { ...msg, parts }
+  }
+
   async function loadMessages() {
     const botId = activeBotId.value
     if (!botId) {
@@ -82,9 +191,9 @@ export const useBotStore = defineStore('bot', () => {
     }
     messagesLoading.value = true
     try {
-      const page = await chatApi.history(botId)
+      const page = await chatApi.history(botId, null, 30, activeSessionId.value)
       // 后端返回倒序（最新在前），前端需要正序（旧在前）
-      messages.value = (page.messages || []).reverse()
+      messages.value = (page.messages || []).reverse().map(buildPartsForMessage)
       hasMore.value = page.hasMore || false
       nextCursor.value = page.nextCursor || ''
     } catch (e) {
@@ -100,8 +209,8 @@ export const useBotStore = defineStore('bot', () => {
     if (!botId || !hasMore.value || messagesLoading.value) return
     messagesLoading.value = true
     try {
-      const page = await chatApi.history(botId, nextCursor.value)
-      const older = (page.messages || []).reverse()
+      const page = await chatApi.history(botId, nextCursor.value, 30, activeSessionId.value)
+      const older = (page.messages || []).reverse().map(buildPartsForMessage)
       messages.value = [...older, ...messages.value]
       hasMore.value = page.hasMore || false
       nextCursor.value = page.nextCursor || ''
@@ -139,6 +248,16 @@ export const useBotStore = defineStore('bot', () => {
         ? { ...tc, status: 'killed', summary: tc.summary || '用户已停止' }
         : tc)
       updated[i] = { ...m, toolCalls: calls }
+      // 同步 parts 中 running → killed
+      const parts = Array.isArray(m.parts) ? [...m.parts] : []
+      let changed = false
+      for (let pi = 0; pi < parts.length; pi++) {
+        if (parts[pi].type === 'tool' && parts[pi].status === 'running') {
+          parts[pi] = { ...parts[pi], status: 'killed', summary: parts[pi].summary || '用户已停止' }
+          changed = true
+        }
+      }
+      if (changed) updated[i] = { ...updated[i], parts }
       break
     }
     messages.value = updated
@@ -174,21 +293,29 @@ export const useBotStore = defineStore('bot', () => {
     const msg = { ...updated[mIdx] }
     const list = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
     const idx = list.findIndex(x => x.id === call.id)
+    const part = {
+      id: call.id,
+      name: call.name,
+      title: call.title || call.name,
+      status: call.status || 'running',
+      input: call.input,
+      output: normalizeToolOutput(call.output),
+    }
     if (idx < 0) {
-      list.push({
-        id: call.id,
-        name: call.name,
-        title: call.title || call.name,
-        status: call.status || 'running',
-        input: call.input,
-        output: normalizeToolOutput(call.output),
-      })
+      list.push(part)
+      // ── 有序 parts 追加工具 part ──
+      const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+      parts.push({ type: 'tool', ...part })
+      msg.parts = parts
     } else {
       const prev = list[idx]
-      list[idx] = {
-        ...prev,
-        ...call,
-        output: normalizeToolOutput(call.output, normalizeToolOutput(prev.output)),
+      list[idx] = { ...prev, ...part, output: normalizeToolOutput(call.output, normalizeToolOutput(prev.output)) }
+      // 同步更新 parts 中的对应工具 part
+      const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+      const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === call.id)
+      if (pIdx >= 0) {
+        parts[pIdx] = { ...parts[pIdx], ...list[idx] }
+        msg.parts = parts
       }
     }
     msg.toolCalls = list
@@ -217,6 +344,9 @@ export const useBotStore = defineStore('bot', () => {
     call.status = call.status || 'running'
     list[idx] = call
 
+    // 同步 parts 中的对应工具 part
+    syncPartFromToolCall(msg, toolCallId, call)
+
     msg.toolCalls = list
     updated[mIdx] = msg
     messages.value = updated
@@ -230,7 +360,7 @@ export const useBotStore = defineStore('bot', () => {
     const list = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
     let idx = list.findIndex(x => x.id === toolCallId)
     if (idx < 0) {
-      list.push({ id: toolCallId, name: payload?.tool, title: payload?.tool, status: 'running', output: normalizeToolOutput(null) })
+      list.push({ id: toolCallId, name: payload?.tool, title: toolLabels[payload?.tool] || payload?.tool, status: 'running', output: normalizeToolOutput(null) })
       idx = list.length - 1
     }
 
@@ -253,9 +383,23 @@ export const useBotStore = defineStore('bot', () => {
     }
 
     list[idx] = call
+
+    // 同步 parts 中的对应工具 part
+    syncPartFromToolCall(msg, toolCallId, call)
+
     msg.toolCalls = list
     updated[mIdx] = msg
     messages.value = updated
+  }
+
+  /** 同步 parts 数组中指定工具 part 的状态（供 appendToolProgress / finishToolCall 复用） */
+  function syncPartFromToolCall(msg, toolCallId, call) {
+    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+    const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === toolCallId)
+    if (pIdx >= 0) {
+      parts[pIdx] = { ...parts[pIdx], ...call }
+      msg.parts = parts
+    }
   }
 
   // ---- 发送消息 ----
@@ -281,6 +425,7 @@ export const useBotStore = defineStore('bot', () => {
       role: 'assistant',
       content: '',
       toolCalls: [],
+      parts: [],           // 有序 part 列表：type:'text' | type:'tool'，按 LLM 调用顺序排列
       createdAt: new Date().toISOString(),
       _temp: true
     }
@@ -290,16 +435,34 @@ export const useBotStore = defineStore('bot', () => {
     _abortController = new AbortController()
     _activeTraceId = ''
 
+    /** 向 assistant 消息的有序 parts 中追加/合并文本内容 */
+    function appendTextPart(tmpId, delta) {
+      const idx = messages.value.findIndex(m => m.id === tmpId)
+      if (idx < 0) return
+      const updated = [...messages.value]
+      const msg = { ...updated[idx] }
+      // 始终同步更新 content 字段（向后兼容）
+      msg.content = (msg.content || '') + delta
+      // 有序 parts：合并到最后一个 text part 或新建
+      const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+      const last = parts[parts.length - 1]
+      if (last && last.type === 'text') {
+        parts[parts.length - 1] = { ...last, content: last.content + delta }
+      } else {
+        parts.push({ type: 'text', content: delta })
+      }
+      msg.parts = parts
+      updated[idx] = msg
+      messages.value = updated
+    }
+
     chatApi.send(botId, content, {
+      sessionId: activeSessionId.value,
       onStart: (traceId) => {
         _activeTraceId = traceId || ''
       },
       onTextDelta: (delta) => {
-        const idx = messages.value.findIndex(m => m.id === assistantTmpId)
-        if (idx < 0) return
-        const updated = [...messages.value]
-        updated[idx] = { ...updated[idx], content: (updated[idx].content || '') + delta }
-        messages.value = updated
+        appendTextPart(assistantTmpId, delta)
       },
       onToolCall: (call) => {
         upsertToolCall(assistantTmpId, call)
@@ -318,11 +481,17 @@ export const useBotStore = defineStore('bot', () => {
         const updated = [...messages.value]
         const aIdx = updated.findIndex(m => m.id === assistantTmpId)
         if (aIdx >= 0) {
-          updated[aIdx] = {
-            ...updated[aIdx],
-            content: resp.text || updated[aIdx].content,
-            _temp: false
+          const finalContent = resp.text || updated[aIdx].content
+          const base = { ...updated[aIdx], content: finalContent, _temp: false }
+          // 确保.parts 中最后一个 text part 的内容与最终 content 一致
+          const parts = Array.isArray(base.parts) ? [...base.parts] : []
+          if (parts.length && parts[parts.length - 1].type === 'text') {
+            parts[parts.length - 1] = { ...parts[parts.length - 1], content: finalContent }
+          } else if (finalContent) {
+            parts.push({ type: 'text', content: finalContent })
           }
+          base.parts = parts
+          updated[aIdx] = base
         }
         const uIdx = updated.findIndex(m => m.id === userTmpId)
         if (uIdx >= 0) {
@@ -342,7 +511,13 @@ export const useBotStore = defineStore('bot', () => {
         const idx = messages.value.findIndex(m => m.id === assistantTmpId)
         if (idx >= 0 && !messages.value[idx].content) {
           const updated = [...messages.value]
-          updated[idx] = { ...updated[idx], content: '（回复失败，请稍后重试）', _temp: false }
+          const failText = '（回复失败，请稍后重试）'
+          updated[idx] = {
+            ...updated[idx],
+            content: failText,
+            _temp: false,
+            parts: [{ type: 'text', content: failText }]
+          }
           messages.value = updated
         }
       })
@@ -358,6 +533,10 @@ export const useBotStore = defineStore('bot', () => {
     activeBot, messages, messagesLoading, hasMore,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
-    loadMessages, loadMoreMessages, sendMessage, stopReply
+    loadMessages, loadMoreMessages, sendMessage, stopReply,
+    // 会话管理
+    sessions, sessionsLoading, activeSessionId,
+    loadSessions, createSession, deleteSession, selectSession,
+    setPendingSession, openSessionById
   }
 })
