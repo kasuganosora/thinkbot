@@ -1049,6 +1049,12 @@ func (s *BotService) StopBot(id string) {
 		}
 	}
 
+	// 无论内存中是否存在 agent 实例，都确保 DB 状态置为 stopped。
+	// （容器停止按钮也会调用本方法，需保证「任务状态」与容器状态一致。）
+	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusStopped).Error; err != nil {
+		s.logger.Warnw("failed to update bot status to stopped", "bot_id", id, "err", err)
+	}
+
 	if !exists || b == nil {
 		return
 	}
@@ -1057,9 +1063,6 @@ func (s *BotService) StopBot(id string) {
 	b.Close()
 	s.mgr.Unregister(id)
 
-	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusStopped).Error; err != nil {
-		s.logger.Warnw("failed to update bot status to stopped", "bot_id", id, "err", err)
-	}
 	s.logger.Infow("bot stopped", "bot_id", id)
 }
 

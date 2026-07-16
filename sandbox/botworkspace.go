@@ -224,12 +224,20 @@ func (m *BotWorkspaceManager) DestroyBot(botID string, removeData bool) error {
 
 // StopBot 停止指定 bot 的容器（保留容器与数据，下次使用时自动重启）。
 // 仅对 docker 持久容器模式有效；其他模式为 no-op。
+// 注意：操作的是工作空间内存中真实的容器对象（而非每次新建），
+// 这样被用户停止后置位的 stopped 标记才能生效，避免又被 ensure() 自动拉起。
 func (m *BotWorkspaceManager) StopBot(botID string) error {
 	if m.backend != "docker" || !m.cfg.PersistentContainer {
 		return nil
 	}
-	c := newBotContainer(botID, m.cfg, m.logger)
-	return c.stop()
+	m.mu.RLock()
+	ws, ok := m.workspaces[botID]
+	m.mu.RUnlock()
+	if ok && ws != nil && ws.container != nil {
+		return ws.container.stop()
+	}
+	// 工作空间尚未实例化时也尝试停止真实容器（幂等）。
+	return newBotContainer(botID, m.cfg, m.logger).stop()
 }
 
 // Close 释放管理器（不删除 bot 数据文件）。
@@ -308,7 +316,24 @@ func (m *BotWorkspaceManager) ContainerInfo(ctx context.Context, botID string) C
 	ws, ok := m.workspaces[botID]
 	m.mu.RUnlock()
 	if !ok {
-		info.State = ""
+		// 工作空间尚未实例化（如进程刚重启、尚无 bot 被激活）：docker 持久容器
+		// 模式下仍可通过「确定性容器名」做一次只读 docker inspect 拿到真实状态。
+		// 注意：这里只调 containerState（纯 docker inspect，无 ensure/start 副作用），
+		// 不会把已停止的容器拉起，也不会为未创建的 bot 凭空 docker run。
+		if m.backend == "docker" && m.cfg.PersistentContainer {
+			c := newBotContainer(botID, m.cfg, m.logger)
+			info.ContainerName = c.container
+			info.Volume = c.volume
+			info.WorkDir = VirtualRoot
+			if dockerAvailable() {
+				info.State = c.containerState(ctx)
+				if info.State != "" {
+					info.ContainerID = c.containerID(ctx)
+				}
+			} else {
+				info.State = "docker-unavailable"
+			}
+		}
 		info.Created = false
 		return info
 	}
@@ -339,6 +364,7 @@ func (m *BotWorkspaceManager) ContainerInfo(ctx context.Context, botID string) C
 
 // StartBot 启动（或创建后启动）指定 bot 的持久容器。
 // 仅对 docker 持久容器模式有效；其他模式为 no-op。
+// 启动前解除 stopped 标记，使 ensure() 可以正常拉起容器。
 func (m *BotWorkspaceManager) StartBot(ctx context.Context, botID string) error {
 	if m.backend != "docker" || !m.cfg.PersistentContainer {
 		return nil
@@ -351,6 +377,7 @@ func (m *BotWorkspaceManager) StartBot(ctx context.Context, botID string) error 
 	if !ok || bw.container == nil {
 		return nil
 	}
+	bw.container.unstop()
 	return bw.container.ensure(ctx)
 }
 

@@ -38,8 +38,9 @@ type botContainer struct {
 	cfg       Config
 	logger    *zap.SugaredLogger
 
-	mu    sync.Mutex
-	ready bool // 容器是否已确认就绪（避免每次 exec 都探测）
+	mu      sync.Mutex
+	ready   bool // 容器是否已确认就绪（避免每次 exec 都探测）
+	stopped bool // 用户显式停止后置位；ensure() 不会再自动 docker start
 }
 
 func newBotContainer(botID string, cfg Config, logger *zap.SugaredLogger) *botContainer {
@@ -193,6 +194,11 @@ func (c *botContainer) ensure(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 用户已显式停止：不再自动拉起，避免“停止后又被 agent exec 重启”的死循环。
+	if c.stopped {
+		return errs.New("bot_container: container is stopped by user; refusing to auto-start")
+	}
+
 	if c.ready {
 		// 快速复核：仍在运行则直接返回（并补齐网络配置）。
 		if c.containerState(ctx) == "running" {
@@ -304,11 +310,20 @@ func (c *botContainer) destroy(removeVolume bool) error {
 func (c *botContainer) stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.stopped = true
 	c.ready = false
 	if err := exec.Command("docker", "stop", "-t", "10", c.container).Run(); err != nil {
 		return errs.Wrapf(err, "bot_container: stop container %q", c.container)
 	}
 	return nil
+}
+
+// unstop 解除用户停止标记（容器启动前调用），允许 ensure() 再次自动拉起。
+func (c *botContainer) unstop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopped = false
+	c.ready = false
 }
 
 // execInContainer 在容器内执行一条 shell 命令（底层原语）。
