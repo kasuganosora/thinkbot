@@ -23,8 +23,8 @@ import (
 type StreamPublisher interface {
 	PublishTextDelta(ctx context.Context, traceID, botID, text string)
 	PublishToolCall(ctx context.Context, traceID, botID, toolCallID, toolName string, input any)
-	PublishToolProgress(ctx context.Context, traceID, botID, toolCallID, toolName string, payload any)
-	PublishToolResult(ctx context.Context, traceID, botID, toolCallID, toolName string, output any, errMsg string)
+	PublishToolProgress(ctx context.Context, traceID, botID, toolCallID, toolName string, invocationID string, payload any)
+	PublishToolResult(ctx context.Context, traceID, botID, toolCallID, toolName string, invocationID string, output any, errMsg string)
 }
 
 // ============================================================================
@@ -59,8 +59,12 @@ func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.
 type LLMConfig struct {
 	// SystemPrompt 系统提示词。
 	SystemPrompt string
-	// MaxSteps Orchestrate 最大执行步数（0=单次, >0=多步, -1=无限）。
+	// MaxSteps Orchestrate 软预算步数（0=单次, >0=多步, -1=无限）。
+	// 复杂任务在持续推进时可自动延长至 HardMaxSteps，详见 llm.loopController。
 	MaxSteps int
+	// HardMaxSteps Orchestrate 硬上限步数（绝对天花板，仅 MaxSteps>0 时生效）。
+	// <=0 表示自动取 MaxSteps*3。
+	HardMaxSteps int
 	// Tools 静态工具列表。
 	// 如果 ToolResolver 为 nil，直接使用此列表。
 	Tools []llm.Tool
@@ -189,8 +193,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 
 	cfg := &llm.OrchestrateConfig{
-		Params:   params,
-		MaxSteps: s.config.MaxSteps,
+		Params:       params,
+		MaxSteps:     s.config.MaxSteps,
+		HardMaxSteps: s.config.HardMaxSteps,
 	}
 
 	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。
@@ -224,6 +229,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"message_id", env.Message.ID,
 		"provider", s.provider.Name(),
 		"max_steps", s.config.MaxSteps,
+		"hard_max_steps", s.config.HardMaxSteps,
 		"streaming", s.config.StreamPublisher != nil)
 
 	var result *llm.GenerateResult
@@ -296,6 +302,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 记录使用统计
 	recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, result)
+
+	// 若 LLM 因达到输出 token 上限（length）被截断，追加提示，
+	// 避免用户误以为任务已完成（实际可能只生成了半成品回复）。
+	if result.FinishReason == llm.FinishReasonLength {
+		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。" +
+			"请回复「继续」让我接着完成剩余工作。"
+	}
 
 	// 将回复添加为 Action
 	// 使用 reply_target 作为 outbound 回复目标（由 Channel 在 Inbound 时设置）
@@ -371,14 +384,29 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 				})
 				publisher.PublishToolCall(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Input)
 			case *llm.ToolProgressPart:
-				publisher.PublishToolProgress(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Content)
+				publisher.PublishToolProgress(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, p.Content)
 			case *llm.StreamToolResultPart:
 				result.ToolResults = append(result.ToolResults, llm.ToolResult{
-					ToolCallID: p.ToolCallID,
-					ToolName:   p.ToolName,
-					Output:     p.Output,
+					ToolCallID:   p.ToolCallID,
+					ToolName:     p.ToolName,
+					InvocationID: p.InvocationID,
+					Output:       p.Output,
 				})
-				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Output, "")
+				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, p.Output, "")
+			case *llm.StreamToolErrorPart:
+				// 工具执行失败：把错误作为结果事件下发，使前端卡片能正常收尾
+				// （error 状态），而不是永远停留在 running。
+				errMsg := ""
+				if p.Error != nil {
+					errMsg = p.Error.Error()
+				}
+				result.ToolResults = append(result.ToolResults, llm.ToolResult{
+					ToolCallID:   p.ToolCallID,
+					ToolName:     p.ToolName,
+					InvocationID: p.InvocationID,
+					Output:       errMsg,
+				})
+				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, nil, errMsg)
 			case *llm.FinishStepPart:
 				result.Response = p.Response
 				if result.Usage.TotalTokens == 0 {

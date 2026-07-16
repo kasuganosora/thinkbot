@@ -105,7 +105,7 @@ type CompactionConfig struct {
 // 适合 128K context window 的模型。
 func DefaultCompactionConfig() CompactionConfig {
 	return CompactionConfig{
-		MaxTokens:            128000,
+		MaxTokens:            64000,
 		ReservedTokens:       20000,
 		TailTokens:           8000,
 		TailTurns:            DefaultTailTurns,

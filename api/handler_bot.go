@@ -131,6 +131,15 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 	if req.Workers != nil {
 		workers = *req.Workers
 	}
+	// 步数预算：0 = 使用全局默认（soft=30, hard=soft×3），由运行时装配处解析。
+	maxSteps := 0
+	if req.MaxSteps != nil {
+		maxSteps = *req.MaxSteps
+	}
+	hardMaxSteps := 0
+	if req.HardMaxSteps != nil {
+		hardMaxSteps = *req.HardMaxSteps
+	}
 
 	def := &dao.BotDefinition{
 		ID:              idgen.New("bot"),
@@ -144,6 +153,8 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		Model:           req.Model,
 		Temperature:     temperature,
 		MaxTokens:       maxTokens,
+		MaxSteps:        maxSteps,
+		HardMaxSteps:    hardMaxSteps,
 		Workers:         workers,
 		ReasoningEffort: req.ReasoningEffort,
 		Status:          dao.BotStatusStopped,
@@ -210,6 +221,12 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	}
 	if req.MaxTokens != nil {
 		updates["max_tokens"] = *req.MaxTokens
+	}
+	if req.MaxSteps != nil {
+		updates["max_steps"] = *req.MaxSteps
+	}
+	if req.HardMaxSteps != nil {
+		updates["hard_max_steps"] = *req.HardMaxSteps
 	}
 	if req.Workers != nil {
 		updates["workers"] = *req.Workers

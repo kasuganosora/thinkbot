@@ -20,11 +20,22 @@ import (
 type OrchestrateConfig struct {
 	Params GenerateParams
 
-	// MaxSteps controls the tool auto-execution loop.
+	// MaxSteps controls the tool auto-execution loop (the "soft" budget).
 	//   0  = single LLM call, no auto-execution (default)
-	//  >0  = at most N LLM calls
+	//  >0  = target of at most N LLM calls; the loop may extend past this up to
+	//        HardMaxSteps while the model keeps making *new* tool calls (see
+	//        loopController), and stops early if it detects a repeat loop.
 	//  -1  = unlimited loop until LLM stops producing tool calls
 	MaxSteps int
+
+	// HardMaxSteps is the absolute ceiling on LLM calls — the loop never
+	// exceeds it regardless of progress. It only takes effect when MaxSteps > 0.
+	//   <=0 = auto (MaxSteps * 3)
+	//   >0  = explicit ceiling (clamped up to MaxSteps if smaller)
+	// This lets a complex task (e.g. a large refactor) automatically extend
+	// beyond the soft MaxSteps budget without an operator having to guess the
+	// exact number, while still capping runaway loops.
+	HardMaxSteps int
 
 	// OnFinish is called once when all steps complete.
 	OnFinish func(*GenerateResult)
@@ -73,6 +84,16 @@ type OrchestrateOption func(*OrchestrateConfig)
 //	-1           = unlimited, loops until LLM stops requesting tools
 func WithMaxSteps(n int) OrchestrateOption {
 	return func(c *OrchestrateConfig) { c.MaxSteps = n }
+}
+
+// WithHardMaxSteps sets the absolute ceiling on LLM calls. The loop may extend
+// past MaxSteps (the soft budget) up to this value while the model keeps making
+// new tool calls, but never beyond it.
+//
+//	<=0 = auto (MaxSteps * 3)
+//	>0  = explicit ceiling
+func WithHardMaxSteps(n int) OrchestrateOption {
+	return func(c *OrchestrateConfig) { c.HardMaxSteps = n }
 }
 
 // WithOnFinish registers a callback invoked once when all steps complete.
@@ -181,7 +202,8 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		toolsExecuted bool
 	)
 
-	for step := 0; shouldContinueLoop(cfg.MaxSteps, step); step++ {
+	loop := newLoopController(cfg.MaxSteps, cfg.HardMaxSteps)
+	for step := 0; loop.shouldContinue(step); step++ {
 		if step > 0 {
 			messages = applyPrepareStep(cfg, messages)
 		}
@@ -250,6 +272,11 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		}
 		toolsExecuted = true
 
+		// Update the dynamic loop controller with this step's tool-call
+		// signature so it can extend past the soft budget while progressing
+		// and stop early if the model gets stuck repeating the same calls.
+		loop.recordStep(step, toolCallSignature(result.ToolCalls))
+
 		// Apply post-execution result processing (e.g., truncation).
 		if cfg.OnToolResults != nil {
 			toolResults = cfg.OnToolResults(step, toolResults)
@@ -273,6 +300,8 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 
 		messages = append(messages, stepMsgs...)
 	}
+
+	logLoopStop(ctx, loop, len(allSteps))
 
 	if lastResult != nil {
 		lastResult.Usage = totalUsage
@@ -349,7 +378,8 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 		var allMessages []Message
 		toolsExecuted := false
 
-		for step := 0; shouldContinueLoop(cfg.MaxSteps, step); step++ {
+		loop := newLoopController(cfg.MaxSteps, cfg.HardMaxSteps)
+		for step := 0; loop.shouldContinue(step); step++ {
 			if step > 0 {
 				messages = applyPrepareStep(cfg, messages)
 			}
@@ -465,6 +495,10 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			}
 			toolsExecuted = true
 
+			// Update the dynamic loop controller with this step's tool-call
+			// signature (same rationale as the non-streaming path).
+			loop.recordStep(step, toolCallSignature(stepToolCalls))
+
 			// Apply post-execution result processing (e.g., truncation).
 			if cfg.OnToolResults != nil {
 				toolResults = cfg.OnToolResults(step, toolResults)
@@ -488,6 +522,8 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			messages = append(messages, stepMsgs...)
 		}
+
+		logLoopStop(ctx, loop, len(allSteps))
 
 		// Populate StreamResult fields before closing the channel.
 		sr.Steps = allSteps
@@ -607,13 +643,6 @@ func hasExecutableTools(toolCalls []ToolCall, toolMap map[string]*Tool) bool {
 		}
 	}
 	return false
-}
-
-func shouldContinueLoop(maxSteps, step int) bool {
-	if maxSteps < 0 {
-		return true
-	}
-	return step < maxSteps
 }
 
 // buildStepMessages creates the messages produced by a step: an assistant
@@ -776,13 +805,18 @@ func rejectedToolResultText(approval ToolApprovalResult) string {
 }
 
 func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart)) ToolResultPart {
+	// invocationID：本次「实际执行」的服务端唯一标识。它与模型下发的
+	// ToolCallID 相互独立，用于在日志与前端稳定地区分「来自哪次调用」。
+	invocationID := newInvocationID()
+
 	var progressFn func(content any)
 	if sendProgress != nil {
 		progressFn = func(content any) {
 			sendProgress(&ToolProgressPart{
-				ToolCallID: tc.ToolCallID,
-				ToolName:   tc.ToolName,
-				Content:    content,
+				ToolCallID:   tc.ToolCallID,
+				ToolName:     tc.ToolName,
+				InvocationID: invocationID,
+				Content:      content,
 			})
 		}
 	}
@@ -791,6 +825,7 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		Context:      ctx,
 		ToolCallID:   tc.ToolCallID,
 		ToolName:     tc.ToolName,
+		InvocationID: invocationID,
 		SendProgress: progressFn,
 	}
 
@@ -798,16 +833,18 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 	if err != nil {
 		if sendProgress != nil {
 			sendProgress(&StreamToolErrorPart{
-				ToolCallID: tc.ToolCallID,
-				ToolName:   tc.ToolName,
-				Error:      err,
+				ToolCallID:   tc.ToolCallID,
+				ToolName:     tc.ToolName,
+				InvocationID: invocationID,
+				Error:        err,
 			})
 		}
 		return ToolResultPart{
-			ToolCallID: tc.ToolCallID,
-			ToolName:   tc.ToolName,
-			Result:     err.Error(),
-			IsError:    true,
+			ToolCallID:   tc.ToolCallID,
+			ToolName:     tc.ToolName,
+			InvocationID: invocationID,
+			Result:       err.Error(),
+			IsError:      true,
 		}
 	}
 
@@ -817,15 +854,17 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 
 	if sendProgress != nil {
 		sendProgress(&StreamToolResultPart{
-			ToolCallID: tc.ToolCallID,
-			ToolName:   tc.ToolName,
-			Input:      tc.Input,
-			Output:     output,
+			ToolCallID:   tc.ToolCallID,
+			ToolName:     tc.ToolName,
+			InvocationID: invocationID,
+			Input:        tc.Input,
+			Output:       output,
 		})
 	}
 	return ToolResultPart{
-		ToolCallID: tc.ToolCallID,
-		ToolName:   tc.ToolName,
-		Result:     finalOutput,
+		ToolCallID:   tc.ToolCallID,
+		ToolName:     tc.ToolName,
+		InvocationID: invocationID,
+		Result:       finalOutput,
 	}
 }

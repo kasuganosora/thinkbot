@@ -232,8 +232,8 @@ func (e *EventEmitter) EmitLLMToolCall(ctx context.Context, traceID, toolName, t
 		BotID:     e.botID,
 		Timestamp: time.Now(),
 		Data: map[string]any{
-			"tool_name":    toolName,
-			"tool_call_id": toolCallID,
+			"tool":       toolName,
+			"toolCallId": toolCallID,
 		},
 	})
 }
@@ -249,8 +249,8 @@ func (e *EventEmitter) EmitLLMToolResult(ctx context.Context, traceID, toolName,
 		BotID:     e.botID,
 		Timestamp: time.Now(),
 		Data: map[string]any{
-			"tool_name":    toolName,
-			"tool_call_id": toolCallID,
+			"tool":       toolName,
+			"toolCallId": toolCallID,
 		},
 	})
 }

@@ -165,8 +165,9 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 	}
 
 	cfg := &llm.OrchestrateConfig{
-		Params:   params,
-		MaxSteps: s.config.LLM.MaxSteps,
+		Params:       params,
+		MaxSteps:     s.config.LLM.MaxSteps,
+		HardMaxSteps: s.config.LLM.HardMaxSteps,
 	}
 
 	logger.Debugw("reply stage: calling LLM",

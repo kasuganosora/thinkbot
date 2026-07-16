@@ -118,18 +118,20 @@ func (p *StreamToolCallPart) Type() StreamPartType { return StreamPartTypeToolCa
 // --- Tool result / error / progress (emitted during multi-step execution) ---
 
 type StreamToolResultPart struct {
-	ToolCallID string
-	ToolName   string
-	Input      any
-	Output     any
+	ToolCallID   string
+	ToolName     string
+	InvocationID string
+	Input        any
+	Output       any
 }
 
 func (p *StreamToolResultPart) Type() StreamPartType { return StreamPartTypeToolResult }
 
 type StreamToolErrorPart struct {
-	ToolCallID string
-	ToolName   string
-	Error      error
+	ToolCallID   string
+	ToolName     string
+	InvocationID string
+	Error        error
 }
 
 func (p *StreamToolErrorPart) Type() StreamPartType { return StreamPartTypeToolError }
@@ -137,9 +139,10 @@ func (p *StreamToolErrorPart) Type() StreamPartType { return StreamPartTypeToolE
 // --- Tool progress (UX streaming during execution) ---
 
 type ToolProgressPart struct {
-	ToolCallID string
-	ToolName   string
-	Content    any
+	ToolCallID   string
+	ToolName     string
+	InvocationID string
+	Content      any
 }
 
 func (p *ToolProgressPart) Type() StreamPartType { return StreamPartTypeToolProgress }

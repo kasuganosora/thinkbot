@@ -91,10 +91,11 @@ func (p ToolCallPart) PartType() MessagePartType { return PartTypeToolCall }
 
 // ToolResultPart carries the result of a tool execution.
 type ToolResultPart struct {
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Result     any    `json:"result"`
-	IsError    bool   `json:"isError,omitempty"`
+	ToolCallID   string `json:"toolCallId"`
+	ToolName     string `json:"toolName"`
+	InvocationID string `json:"invocationId,omitempty"`
+	Result       any    `json:"result"`
+	IsError      bool   `json:"isError,omitempty"`
 }
 
 func (p ToolResultPart) PartType() MessagePartType { return PartTypeToolResult }

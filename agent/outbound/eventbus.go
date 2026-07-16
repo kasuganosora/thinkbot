@@ -119,10 +119,10 @@ type EventBus interface {
 	PublishToolCall(ctx context.Context, traceID, botID, toolCallID, toolName string, input any)
 
 	// PublishToolProgress 发布工具执行增量事件。
-	PublishToolProgress(ctx context.Context, traceID, botID, toolCallID, toolName string, payload any)
+	PublishToolProgress(ctx context.Context, traceID, botID, toolCallID, toolName string, invocationID string, payload any)
 
 	// PublishToolResult 发布工具执行结果事件。
-	PublishToolResult(ctx context.Context, traceID, botID, toolCallID, toolName string, output any, errMsg string)
+	PublishToolResult(ctx context.Context, traceID, botID, toolCallID, toolName string, invocationID string, output any, errMsg string)
 
 	// Subscribe 订阅事件流。
 	// traceID 为空时订阅所有事件（管理/调试用）。
@@ -510,25 +510,27 @@ func (b *MemoryEventBus) PublishToolCall(_ context.Context, traceID, botID, tool
 }
 
 // PublishToolProgress 发布工具执行增量事件（实现 EventBus 接口）。
-func (b *MemoryEventBus) PublishToolProgress(_ context.Context, traceID, botID, toolCallID, toolName string, payload any) {
+func (b *MemoryEventBus) PublishToolProgress(_ context.Context, traceID, botID, toolCallID, toolName string, invocationID string, payload any) {
 	b.Publish(context.Background(), Event{
 		Type:    EventLLMToolProgress,
 		TraceID: traceID,
 		BotID:   botID,
 		Data: map[string]any{
-			"toolCallId": toolCallID,
-			"tool":       toolName,
-			"payload":    payload,
+			"toolCallId":   toolCallID,
+			"tool":         toolName,
+			"invocationId": invocationID,
+			"payload":      payload,
 		},
 	})
 }
 
 // PublishToolResult 发布工具执行结果事件（实现 EventBus 接口）。
-func (b *MemoryEventBus) PublishToolResult(_ context.Context, traceID, botID, toolCallID, toolName string, output any, errMsg string) {
+func (b *MemoryEventBus) PublishToolResult(_ context.Context, traceID, botID, toolCallID, toolName string, invocationID string, output any, errMsg string) {
 	data := map[string]any{
-		"toolCallId": toolCallID,
-		"tool":       toolName,
-		"output":     output,
+		"toolCallId":   toolCallID,
+		"tool":         toolName,
+		"invocationId": invocationID,
+		"output":       output,
 	}
 	if errMsg != "" {
 		data["error"] = errMsg

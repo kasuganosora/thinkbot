@@ -248,7 +248,7 @@ func fillModelDefaults(def ModelDef) ModelDef {
 		def.Temperature = float64Ptr(0.7)
 	}
 	if def.MaxTokens == 0 {
-		def.MaxTokens = 4096
+		def.MaxTokens = 8192
 	}
 	return def
 }
