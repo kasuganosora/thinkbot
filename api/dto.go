@@ -67,6 +67,8 @@ type CreateBotReq struct {
 	Model           string   `json:"model"`
 	Temperature     *float64 `json:"temperature"`
 	MaxTokens       *int     `json:"maxTokens"`
+	MaxSteps        *int     `json:"maxSteps"`
+	HardMaxSteps    *int     `json:"hardMaxSteps"`
 	Workers         *int     `json:"workers"`
 	ReasoningEffort string   `json:"reasoningEffort"`
 }
@@ -83,6 +85,8 @@ type UpdateBotReq struct {
 	Model           *string  `json:"model"`
 	Temperature     *float64 `json:"temperature"`
 	MaxTokens       *int     `json:"maxTokens"`
+	MaxSteps        *int     `json:"maxSteps"`
+	HardMaxSteps    *int     `json:"hardMaxSteps"`
 	Workers         *int     `json:"workers"`
 	ReasoningEffort *string  `json:"reasoningEffort"`
 }
@@ -93,6 +97,7 @@ type UpdateBotReq struct {
 type ChatReq struct {
 	BotID       string           `json:"botId" binding:"required"`
 	Text        string           `json:"text" binding:"required"`
+	SessionID   string           `json:"sessionId,omitempty"`
 	Attachments []ChatAttachment `json:"attachments,omitempty"`
 }
 

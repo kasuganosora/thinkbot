@@ -24,6 +24,7 @@ let initialized = false
 
 async function initializeBotFromRoute() {
   const requestedId = String(route.params.botId || '')
+  const requestedSessionId = route.params.sessionId ? Number(route.params.sessionId) : null
   if (!store.bots.length) await store.fetchBots()
 
   const requestedBot = store.bots.find(bot => String(bot.id) === requestedId)
@@ -33,11 +34,21 @@ async function initializeBotFromRoute() {
     initialized = true
     return
   }
-  if (String(store.activeBotId) !== String(targetId)) store.selectBot(targetId)
+
+  if (String(store.activeBotId) !== String(targetId)) {
+    store.selectBot(targetId)
+    if (requestedSessionId) await store.openSessionById(requestedSessionId)
+  } else if (requestedSessionId) {
+    // 同一 bot，仅 sessionId 变化（如从侧边栏深链接跳转）
+    await store.openSessionById(requestedSessionId)
+  }
 
   if (route.name !== 'chat-bot' || String(route.params.botId) !== String(targetId)) {
     syncingRoute = true
-    await router.replace({ name: 'chat-bot', params: { botId: targetId } })
+    await router.replace({
+      name: 'chat-bot',
+      params: { botId: targetId, sessionId: requestedSessionId || undefined }
+    })
     syncingRoute = false
   }
   initialized = true
@@ -47,6 +58,12 @@ onMounted(initializeBotFromRoute)
 
 watch(() => route.params.botId, () => {
   if (initialized && !syncingRoute) initializeBotFromRoute()
+})
+
+// 同一 bot 下通过 URL 切换 session（如 /chat/bot/:botId/:sessionId）
+watch(() => route.params.sessionId, (sid) => {
+  if (!initialized || syncingRoute) return
+  if (sid) store.openSessionById(Number(sid))
 })
 
 watch(() => store.activeBotId, (botId) => {

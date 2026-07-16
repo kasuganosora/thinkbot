@@ -173,7 +173,19 @@ func (s *Server) registerRoutes() {
 				botsAdmin.PUT("/:id/mcp/:mid", s.handleUpdateBotMcp)
 				botsAdmin.DELETE("/:id/mcp/:mid", s.handleRemoveBotMcp)
 				botsAdmin.POST("/:id/mcp/import", s.handleImportBotMcp)
+
+				// 会话管理（Session 列表 / 新建）
+				botsAdmin.GET("/:id/sessions", s.handleListSessions)
+				botsAdmin.POST("/:id/sessions", s.handleCreateSession)
 			}
+		}
+
+		// Session 级操作（删除 / 更新，按 session ID 直接操作）
+		sessionCRUD := authed.Group("/sessions")
+		sessionCRUD.Use(requirePermission(auth.PermBotManage))
+		{
+			sessionCRUD.DELETE("/:sid", s.handleDeleteSession)
+			sessionCRUD.PUT("/:sid", s.handleUpdateSession)
 		}
 
 		// Channel 类型列表 — 已废弃，平台类型信息统一通过 /api/bots/platforms/tool-catalog 获取

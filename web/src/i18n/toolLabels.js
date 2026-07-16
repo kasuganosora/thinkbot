@@ -17,6 +17,7 @@ export default {
   read_file:              '读取文件',
   write_file:             '写入文件',
   list_dir:               '列出目录',
+  list_files:             '列出文件',
   edit_file:              '编辑文件',
   replace_in_file:        '替换内容',
   delete_file:            '删除文件',
@@ -54,4 +55,24 @@ export default {
   text_encode:            '文本编码',
   text_diff:              '文本对比',
   text_stats:             '文本统计',
+
+  // ── 技能 ──
+  skill_trigger:          '触发技能',
+
+  // ── 平台 / 容器（非 sandbox 命名空间的防御性别名）──
+  read:                   '读取文件',
+  write:                  '写入文件',
+  list:                   '列出目录',
+  edit:                   '编辑文件',
+  exec:                   '执行命令',
+  run_command:            '运行命令',
+  bg_exec:                '后台执行',
+  bg_status:              '后台任务状态',
+
+  // ── 消息平台 ──
+  send:                   '发送消息',
+  reply:                  '回复消息',
+  react:                  '表情回应',
+  get_contacts:           '获取联系人',
+  search_memory:          '检索记忆',
 }

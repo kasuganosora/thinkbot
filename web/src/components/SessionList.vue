@@ -5,40 +5,114 @@
         <span class="cur-bot-avatar">{{ store.activeBot?.avatar }}</span>
         <span class="cur-bot-name" data-testid="session-current-bot">{{ store.activeBot?.name || '未选择 Bot' }}</span>
       </div>
-      <t-button theme="primary" variant="text" size="small" data-testid="session-create-btn" @click="store.loadMessages()">
-        <template #icon><t-icon name="refresh" /></template>
-        刷新
-      </t-button>
+      <div class="header-actions">
+        <t-button theme="primary" variant="text" size="small" data-testid="session-create-btn" @click="onCreate">
+          <template #icon><t-icon name="add" /></template>
+          新建
+        </t-button>
+        <t-button theme="default" variant="text" size="small" @click="store.loadSessions()">
+          <template #icon><t-icon name="refresh" /></template>
+        </t-button>
+      </div>
     </div>
 
-    <div class="session-list" data-testid="session-list" role="listbox" aria-label="Bot 列表">
-      <template v-if="store.bots.length">
+    <!-- 会话列表 -->
+    <div class="session-list" data-testid="session-list" role="listbox" aria-label="会话列表">
+      <template v-if="store.sessions.length">
         <div
-          v-for="bot in store.bots"
-          :key="bot.id"
+          v-for="s in store.sessions"
+          :key="s.id"
           class="session-item"
-          :class="{ active: bot.id === store.activeBotId }"
-          :data-testid="`session-item-${bot.id}`"
+          :class="{ active: s.id === store.activeSessionId }"
+          :data-testid="`session-item-${s.id}`"
           role="option"
-          :aria-selected="bot.id === store.activeBotId"
-          @click="store.selectBot(bot.id)"
+          :aria-selected="s.id === store.activeSessionId"
+          @click="onSelect(s)"
         >
-          <div class="sess-avatar">{{ bot.avatar || '🤖' }}</div>
           <div class="sess-body">
-            <div class="sess-title">{{ bot.name }}</div>
-            <div class="sess-time">{{ bot.running ? '运行中' : '已停止' }}</div>
+            <div class="sess-title">{{ s.title || '新会话' }}</div>
+            <div class="sess-meta">
+              <span v-if="s.messageCount > 0" class="sess-count">{{ s.messageCount }} 条消息</span>
+              <span class="sess-time">{{ formatTime(s.lastMsgAt || s.createdAt) }}</span>
+            </div>
           </div>
+          <t-button
+            v-if="s.id !== store.activeSessionId"
+            class="sess-delete"
+            theme="default" variant="text" size="small" shape="circle"
+            :data-testid="`session-delete-${s.id}`"
+            @click.stop="onDelete(s)"
+          >
+            <template #icon><t-icon name="delete" /></template>
+          </t-button>
         </div>
       </template>
-      <t-empty v-else description="暂无 Bot" style="margin-top: 40px" data-testid="session-empty-state" />
+      <t-empty
+        v-else-if="!store.sessionsLoading"
+        description="暂无会话，点击上方新建开始对话"
+        style="margin-top: 40px"
+        data-testid="session-empty-state"
+      />
+      <div v-else class="loading-wrap"><t-loading /></div>
     </div>
   </div>
 </template>
 
 <script setup>
+import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
+import { useRouter } from 'vue-router'
 import { useBotStore } from '@/stores/bot'
 
 const store = useBotStore()
+const router = useRouter()
+
+function onSelect(s) {
+  store.selectSession(s.id)
+  // 同步 URL，使会话深链接可分享（#/chat/bot/:botId/:sessionId）
+  router.push({ name: 'chat-bot', params: { botId: store.activeBotId, sessionId: s.id } })
+}
+
+async function onCreate() {
+  try {
+    const sess = await store.createSession('新会话')
+    if (sess) router.push({ name: 'chat-bot', params: { botId: store.activeBotId, sessionId: sess.id } })
+  } catch (e) {
+    MessagePlugin.error(typeof e === 'string' ? e : e?.message || '创建失败')
+  }
+}
+
+function onDelete(session) {
+  const dialog = DialogPlugin.confirm({
+    header: '删除确认',
+    body: `确定删除「${session.title || '新会话'}」？该会话下的所有消息将被清除。`,
+    theme: 'warning',
+    onConfirm: async () => {
+      try {
+        await store.deleteSession(session.id)
+        MessagePlugin.success('已删除')
+      } catch (e) {
+        console.error('onDelete failed', e)
+        MessagePlugin.error(typeof e === 'string' ? e : e?.message || '删除失败')
+      } finally {
+        // 无论成功失败都关闭对话框
+        dialog.hide()
+      }
+    },
+    onCancel: () => { dialog.hide() },
+  })
+}
+
+function formatTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const now = new Date()
+  const isToday = d.toDateString() === now.toDateString()
+  if (isToday) return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return '昨天'
+  return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+}
 </script>
 
 <style scoped>
@@ -74,6 +148,11 @@ const store = useBotStore()
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -82,7 +161,7 @@ const store = useBotStore()
 .session-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 10px;
   border-radius: 8px;
   cursor: pointer;
@@ -91,12 +170,11 @@ const store = useBotStore()
 .session-item:hover {
   background: #f0f0f0;
 }
+.session-item:hover .sess-delete {
+  opacity: 1;
+}
 .session-item.active {
   background: #e6f4ef;
-}
-.sess-avatar {
-  font-size: 20px;
-  flex-shrink: 0;
 }
 .sess-body {
   flex: 1;
@@ -109,9 +187,30 @@ const store = useBotStore()
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.sess-time {
+.sess-meta {
+  display: flex;
+  gap: 8px;
   font-size: 11px;
   color: #aaa;
   margin-top: 2px;
+}
+.sess-count {
+  color: #888;
+}
+.sess-time {
+  flex-shrink: 0;
+}
+.sess-delete {
+  opacity: 0;
+  transition: opacity 0.15s;
+  color: #999 !important;
+}
+.sess-delete:hover {
+  color: #d63c3c !important;
+}
+.loading-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 40px;
 }
 </style>

@@ -58,7 +58,8 @@ func (s *Server) handleChatHistory(c *gin.Context) {
 		}
 	}
 
-	page, err := s.chatHistory.PaginateHistory(botID, strconv.FormatUint(uint64(user.ID), 10), cursor, limit)
+	sessionID := c.Query("sessionId")
+	page, err := s.chatHistory.PaginateHistory(botID, strconv.FormatUint(uint64(user.ID), 10), cursor, limit, sessionID)
 	if err != nil {
 		Fail(c, err)
 		return
@@ -73,6 +74,7 @@ func (s *Server) handleChatHistory(c *gin.Context) {
 
 // chatMessageDTO 前端展示用的消息结构。
 // ToolCalls 由持久化的 JSON 字符串反序列化为数组，供前端复原工具卡片。
+// Parts 为有序 parts 数组（按 LLM 输出顺序排列），保留文本与工具的交错位置。
 type chatMessageDTO struct {
 	ID        uint64 `json:"id"`
 	BotID     string `json:"botId"`
@@ -80,11 +82,12 @@ type chatMessageDTO struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
 	ToolCalls []any  `json:"toolCalls"`
+	Parts     []any  `json:"parts,omitempty"`
 	TraceID   string `json:"traceId"`
 	CreatedAt string `json:"createdAt"`
 }
 
-// toChatMessageDTOs 将持久化消息转换为前端 DTO，并解析 ToolCalls JSON。
+// toChatMessageDTOs 将持久化消息转换为前端 DTO，并解析 ToolCalls / Parts JSON。
 func toChatMessageDTOs(msgs []dao.ChatMessage) []chatMessageDTO {
 	out := make([]chatMessageDTO, 0, len(msgs))
 	for _, m := range msgs {
@@ -102,6 +105,12 @@ func toChatMessageDTOs(msgs []dao.ChatMessage) []chatMessageDTO {
 			var tc []any
 			if err := json.Unmarshal([]byte(m.ToolCalls), &tc); err == nil && tc != nil {
 				dto.ToolCalls = tc
+			}
+		}
+		if m.PartsJSON != "" {
+			var p []any
+			if err := json.Unmarshal([]byte(m.PartsJSON), &p); err == nil && p != nil {
+				dto.Parts = p
 			}
 		}
 		out = append(out, dto)
