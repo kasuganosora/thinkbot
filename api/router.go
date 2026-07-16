@@ -136,6 +136,10 @@ func (s *Server) registerRoutes() {
 				// 运行时检查（概览页，接入真实 sandbox 状态）
 				botsAdmin.GET("/:id/runtime-checks", s.handleBotRuntimeChecks)
 
+				// 访问控制（默认行为 + 规则列表）
+				botsAdmin.GET("/:id/access", s.handleGetBotAccess)
+				botsAdmin.PUT("/:id/access", s.handleUpdateBotAccess)
+
 				// 终端（容器 shell，接入真实 sandbox exec）
 				botsAdmin.GET("/:id/terminal", s.handleBotTerminal)
 				botsAdmin.POST("/:id/terminal/exec", s.handleBotTerminalExec)
@@ -200,6 +204,14 @@ func (s *Server) registerRoutes() {
 			chat.GET("/bots", s.handleChatBots)       // 可聊天的 Bot 列表
 			chat.GET("/history", s.handleChatHistory) // 聊天历史（游标分页）
 			chat.POST("/send", s.handleChatSend)      // SSE 流式聊天
+			chat.POST("/abort", s.handleChatAbort)    // 中止正在执行的聊天
+
+			// 运营操作（admin）：重置 token 预算，解除预算永久卡死导致 bot 无响应
+			chatAdmin := chat.Group("")
+			chatAdmin.Use(requirePermission(auth.PermBotManage))
+			{
+				chatAdmin.POST("/token-budget/reset", s.handleResetTokenBudget)
+			}
 		}
 
 		// --- 系统配置（admin） ---

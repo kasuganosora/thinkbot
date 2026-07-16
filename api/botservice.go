@@ -66,6 +66,9 @@ type BotService struct {
 	dreamingBundles map[string]*bot.DreamingBundle // botID → DreamingBundle
 	cancelFuncs     map[string]context.CancelFunc  // botID → bot context cancel
 	closeFuncs      map[string]func()              // botID → sub-agent managers cleanup
+	messageCancels  map[string]context.CancelFunc  // "botID:traceID" → message context cancel
+
+	tokenBudget *pipeline.TokenBudgetState // 共享 token 预算状态（支持空闲自动重置 / 手动重置）
 }
 
 // NewBotService 创建 BotService。
@@ -93,6 +96,11 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		dreamingBundles: make(map[string]*bot.DreamingBundle),
 		cancelFuncs:     make(map[string]context.CancelFunc),
 		closeFuncs:      make(map[string]func()),
+		messageCancels:  make(map[string]context.CancelFunc),
+
+		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
+		// 也可通过 ResetTokenBudgets() 手动重置。
+		tokenBudget: pipeline.NewTokenBudgetState(time.Hour),
 	}
 }
 
@@ -162,6 +170,31 @@ func (a *workspaceExecAdapter) Exec(ctx context.Context, req tools.WsExecRequest
 		Command: req.Command,
 		WorkDir: req.WorkDir,
 		Timeout: req.Timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &tools.WsExecResult{
+		ExitCode:  res.ExitCode,
+		Stdout:    res.Stdout,
+		Stderr:    res.Stderr,
+		Truncated: res.Truncated,
+	}, nil
+}
+
+func (a *workspaceExecAdapter) ExecStream(ctx context.Context, req tools.WsExecRequest, onChunk func(stream, chunk string)) (*tools.WsExecResult, error) {
+	sw, ok := a.ws.(sandbox.StreamWorkspace)
+	if !ok {
+		return a.Exec(ctx, req)
+	}
+	res, err := sw.ExecStream(ctx, sandbox.ExecRequest{
+		Command: req.Command,
+		WorkDir: req.WorkDir,
+		Timeout: req.Timeout,
+	}, func(chunk sandbox.ExecChunk) {
+		if onChunk != nil {
+			onChunk(chunk.Stream, chunk.Data)
+		}
 	})
 	if err != nil {
 		return nil, err
@@ -274,6 +307,59 @@ func (s *BotService) DeleteDefinition(id string) error {
 }
 
 // --- 运行时管理 ---
+
+func messageCancelKey(botID, traceID string) string {
+	return botID + ":" + traceID
+}
+
+// RegisterMessageCancel 注册一条正在执行消息的取消函数（botID+traceID 维度）。
+func (s *BotService) RegisterMessageCancel(botID, traceID string, cancel context.CancelFunc) {
+	if botID == "" || traceID == "" || cancel == nil {
+		return
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	s.messageCancels[key] = cancel
+	s.mu.Unlock()
+}
+
+// UnregisterMessageCancel 注销一条消息取消函数。
+func (s *BotService) UnregisterMessageCancel(botID, traceID string) {
+	if botID == "" || traceID == "" {
+		return
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	delete(s.messageCancels, key)
+	s.mu.Unlock()
+}
+
+// AbortMessage 取消一条正在执行的消息。
+// 返回 true 表示找到了对应执行并发起取消，false 表示未命中（可能已结束）。
+func (s *BotService) AbortMessage(botID, traceID string) bool {
+	if botID == "" || traceID == "" {
+		return false
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	cancel, ok := s.messageCancels[key]
+	if ok {
+		delete(s.messageCancels, key)
+	}
+	s.mu.Unlock()
+	if !ok || cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// ResetTokenBudgets 重置所有 channel 的 token 预算追踪。
+// 当某 channel 累计 token 超过硬限制后，Pipeline 会在每次请求前直接中止，
+// 若不重置则该 channel 将永久拒绝新消息。空闲 1 小时会自动清零，但手动重置可立即恢复。
+func (s *BotService) ResetTokenBudgets() {
+	s.tokenBudget.ResetAll()
+}
 
 // StartBot 从定义创建并启动 Bot 实例。
 func (s *BotService) StartBot(ctx context.Context, id string) error {
@@ -478,7 +564,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
 		pipeline.LazyResponseMiddleware(pipeline.NewLazyResponseConfig()),
-		pipeline.TokenBudgetMiddleware(pipeline.NewTokenBudgetConfig().WithStatsRecorder(s.statsRecorder)),
+		pipeline.TokenBudgetMiddlewareWithState(pipeline.NewTokenBudgetConfig().WithStatsRecorder(s.statsRecorder), s.tokenBudget),
 	)
 
 	// 创建共享 SelfIDSet——Ingress 和 Engagement 两层防线引用同一份数据。
@@ -797,8 +883,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		ToolManager:       toolMgr,
 		AdaptiveSyncer:    adaptiveSyncer,
 		RejectionDetector: rejectionDetector,
-		WorkspaceDir:      workspaceDir,
-		SandboxConfig:     sbCfg,
+		OnMessageStart: func(botID, traceID string, cancel context.CancelFunc) {
+			s.RegisterMessageCancel(botID, traceID, cancel)
+		},
+		OnMessageDone: func(botID, traceID string) {
+			s.UnregisterMessageCancel(botID, traceID)
+		},
+		WorkspaceDir:  workspaceDir,
+		SandboxConfig: sbCfg,
 	})
 	if err != nil {
 		rollback()
@@ -942,7 +1034,20 @@ func (s *BotService) StopBot(id string) {
 		dreamBundle.Stop()
 		delete(s.dreamingBundles, id)
 	}
+	pendingCancels := make([]context.CancelFunc, 0)
+	prefix := id + ":"
+	for key, cancel := range s.messageCancels {
+		if strings.HasPrefix(key, prefix) {
+			pendingCancels = append(pendingCancels, cancel)
+			delete(s.messageCancels, key)
+		}
+	}
 	s.mu.Unlock()
+	for _, cancel := range pendingCancels {
+		if cancel != nil {
+			cancel()
+		}
+	}
 
 	if !exists || b == nil {
 		return

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -137,6 +138,8 @@ func TestTokenBudgetMiddleware_SoftWarning(t *testing.T) {
 }
 
 func TestTokenBudgetMiddleware_HardLimit(t *testing.T) {
+	// 硬限制不再永久中止：单次用量超过硬限时，中间件重置该 channel 计数窗口后
+	// 继续处理，因此连续多次超线调用都能成功（不会出现永久"回复失败"）。
 	cfg := NewTokenBudgetConfig().
 		WithMaxTokens(1000).
 		WithHardPercent(1.0)
@@ -148,22 +151,11 @@ func TestTokenBudgetMiddleware_HardLimit(t *testing.T) {
 	mw := TokenBudgetMiddleware(cfg)
 	wrapped := mw(inner)
 
-	// First call: check happens BEFORE execution. Initial usage is 0, so it passes.
-	env := core.NewEnvelope(core.Message{ID: "test", Channel: "ch-1"})
-	result, err := wrapped.Process(context.Background(), env)
-	if err != nil {
-		t.Fatalf("unexpected error on first call: %v", err)
-	}
-	_ = result
-
-	// After first call, cumulative = 1100. Second call should hit hard limit.
-	env2 := core.NewEnvelope(core.Message{ID: "test2", Channel: "ch-1"})
-	_, err = wrapped.Process(context.Background(), env2)
-	if err == nil {
-		t.Fatal("expected hard limit error")
-	}
-	if !core.IsAbortError(err) {
-		t.Errorf("expected AbortError, got %T: %v", err, err)
+	for i := 0; i < 3; i++ {
+		env := core.NewEnvelope(core.Message{ID: fmt.Sprintf("test%d", i), Channel: "ch-1"})
+		if _, err := wrapped.Process(context.Background(), env); err != nil {
+			t.Fatalf("call %d: expected no error (budget resets on exceed), got %v", i, err)
+		}
 	}
 }
 

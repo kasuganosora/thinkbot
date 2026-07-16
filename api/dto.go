@@ -96,6 +96,12 @@ type ChatReq struct {
 	Attachments []ChatAttachment `json:"attachments,omitempty"`
 }
 
+// ChatAbortReq 中止一条流式聊天请求。
+type ChatAbortReq struct {
+	BotID   string `json:"botId" binding:"required"`
+	TraceID string `json:"traceId" binding:"required"`
+}
+
 // ChatAttachment 表示用户上传的附件（图片/音频/视频等）。
 // DataUrl 格式为 "data:<mime>;base64,<base64-encoded-data>"。
 type ChatAttachment struct {

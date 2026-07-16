@@ -22,12 +22,14 @@ import (
 
 // SSE 事件类型
 const (
-	sseTextDelta  = "text_delta"  // LLM 文本增量
-	sseDone       = "done"        // 生成完成
-	sseError      = "error"       // 错误
-	sseStart      = "start"       // 开始处理
-	sseToolCall   = "tool_call"   // 工具调用
-	sseToolResult = "tool_result" // 工具结果
+	sseTextDelta    = "text_delta"    // LLM 文本增量
+	sseDone         = "done"          // 生成完成
+	sseError        = "error"         // 错误
+	sseStart        = "start"         // 开始处理
+	sseToolCall     = "tool_call"     // 工具调用
+	sseToolProgress = "tool_progress" // 工具增量输出
+	sseToolResult   = "tool_result"   // 工具结果
+	ssePing         = "ping"          // 心跳
 )
 
 // handleChatBots 返回当前可聊天的 Bot 列表（状态为 running）。
@@ -65,6 +67,41 @@ func (s *Server) handleChatBots(c *gin.Context) {
 	}
 
 	OK(c, result)
+}
+
+// handleChatAbort 中止一条正在执行的聊天请求。
+// POST /api/chat/abort
+//
+// @Summary      中止聊天请求
+// @Description  按 botId + traceId 中止一条正在执行的聊天链路（包括工具执行）
+// @Tags         聊天
+// @Accept       json
+// @Produce      json
+// @Param        body  body      ChatAbortReq  true  "中止请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Failure      401   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/chat/abort [post]
+func (s *Server) handleChatAbort(c *gin.Context) {
+	var req ChatAbortReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+	aborted := s.botSvc.AbortMessage(req.BotID, req.TraceID)
+	OK(c, map[string]any{"aborted": aborted})
+}
+
+// handleResetTokenBudget 重置所有 channel 的 token 预算追踪。
+// POST /api/chat/token-budget/reset
+//
+// 当某 channel 累计 token 超过硬限制后，Pipeline 会在每次请求前直接中止，
+// 若不重置则该 channel 将永久拒绝新消息（bot 表现为"已读不回"）。
+// 空闲 1 小时会自动清零，但本接口可立即恢复。需 admin 权限。
+func (s *Server) handleResetTokenBudget(c *gin.Context) {
+	s.botSvc.ResetTokenBudgets()
+	OKMsg(c, "token budgets reset", nil)
 }
 
 // handleChatSend SSE 流式聊天。
@@ -176,14 +213,28 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	writeSSE(c.Writer, sseStart, map[string]any{"traceId": traceID})
 	flusher.Flush()
 
-	// 设置超时
-	timeout := time.NewTimer(120 * time.Second)
-	defer timeout.Stop()
+	// 设置空闲超时（收到任意流式事件会重置），避免总时长硬切长命令。
+	idleTimeout := 120 * time.Second
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+	resetIdle := func() {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+	}
+	// 心跳，防止中间代理在长静默期断开 SSE。
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 
 	fullText := ""
 	botID := req.BotID
-	// 累积本轮工具调用，用于回复完成后随 assistant 消息一起持久化
+	// 累积本轮工具调用，用于回复完成后随 assistant 消息一起持久化。
 	toolCalls := make([]map[string]any, 0)
+	toolCallIdx := make(map[string]int)
 
 	for {
 		select {
@@ -191,16 +242,21 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			// 客户端断开
 			return
 
-		case <-timeout.C:
-			writeSSE(c.Writer, sseError, map[string]any{"message": "timeout"})
+		case <-idleTimer.C:
+			writeSSE(c.Writer, sseError, map[string]any{"message": "idle timeout"})
 			flusher.Flush()
 			return
 
-		// 流式增量：从 EventBus 接收 LLM 文本
+		case <-heartbeat.C:
+			writeSSE(c.Writer, ssePing, map[string]any{"ts": time.Now().Unix()})
+			flusher.Flush()
+
+		// 流式增量：从 EventBus 接收 LLM 文本/工具事件
 		case event, ok := <-eventCh:
 			if !ok {
 				continue
 			}
+			resetIdle()
 			switch event.Type {
 			case outbound.EventLLMTextDelta:
 				delta, _ := event.Data["text"].(string)
@@ -209,49 +265,98 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": delta})
 					flusher.Flush()
 				}
+
 			case outbound.EventLLMToolCall:
+				toolCallID, _ := event.Data["toolCallId"].(string)
 				toolName, _ := event.Data["tool"].(string)
+				if toolCallID == "" {
+					toolCallID = idgen.New("tool")
+				}
 				writeSSE(c.Writer, sseToolCall, map[string]any{
-					"tool":  event.Data["tool"],
-					"input": event.Data["input"],
+					"toolCallId": toolCallID,
+					"tool":       toolName,
+					"input":      event.Data["input"],
 				})
 				flusher.Flush()
-				// 累积一条工具调用（初始为 running 态，等 tool_result 回填）
-				toolCalls = append(toolCalls, map[string]any{
-					"id":     idgen.New("tool"),
-					"name":   toolName,
-					"title":  toolName,
-					"status": "running",
-					"input":  event.Data["input"],
+				if _, ok := toolCallIdx[toolCallID]; !ok {
+					toolCalls = append(toolCalls, map[string]any{
+						"id":     toolCallID,
+						"name":   toolName,
+						"title":  toolName,
+						"status": "running",
+						"input":  event.Data["input"],
+						"output": map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false},
+					})
+					toolCallIdx[toolCallID] = len(toolCalls) - 1
+				}
+
+			case outbound.EventLLMToolProgress:
+				toolCallID, _ := event.Data["toolCallId"].(string)
+				toolName, _ := event.Data["tool"].(string)
+				payload, _ := event.Data["payload"].(map[string]any)
+				stream := "stdout"
+				chunk := ""
+				if payload != nil {
+					if v, ok := payload["stream"].(string); ok && v != "" {
+						stream = v
+					}
+					if v, ok := payload["chunk"].(string); ok {
+						chunk = v
+					}
+				}
+				writeSSE(c.Writer, sseToolProgress, map[string]any{
+					"toolCallId": toolCallID,
+					"tool":       toolName,
+					"stream":     stream,
+					"chunk":      chunk,
+					"payload":    payload,
 				})
+				flusher.Flush()
+
+				if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
+					out, _ := toolCalls[idx]["output"].(map[string]any)
+					if out == nil {
+						out = map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false}
+					}
+					if stream == "stderr" {
+						prev, _ := out["stderr"].(string)
+						out["stderr"] = prev + chunk
+					} else {
+						prev, _ := out["stdout"].(string)
+						out["stdout"] = prev + chunk
+					}
+					toolCalls[idx]["output"] = out
+				}
+
 			case outbound.EventLLMToolResult:
+				toolCallID, _ := event.Data["toolCallId"].(string)
 				toolName, _ := event.Data["tool"].(string)
 				payload := map[string]any{
-					"tool":   event.Data["tool"],
-					"output": event.Data["output"],
+					"toolCallId": toolCallID,
+					"tool":       toolName,
+					"output":     event.Data["output"],
 				}
 				if errMsg, ok := event.Data["error"]; ok {
 					payload["error"] = errMsg
 				}
 				writeSSE(c.Writer, sseToolResult, payload)
 				flusher.Flush()
-				// 回填最近一个同名且仍处于 running 的工具调用
-				for i := len(toolCalls) - 1; i >= 0; i-- {
-					if toolCalls[i]["name"] == toolName && toolCalls[i]["status"] == "running" {
-						if _, isErr := event.Data["error"]; isErr {
-							toolCalls[i]["status"] = "error"
-							toolCalls[i]["output"] = event.Data["error"]
-						} else {
-							toolCalls[i]["status"] = "success"
-							toolCalls[i]["output"] = event.Data["output"]
-						}
-						break
+
+				if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
+					if _, isErr := event.Data["error"]; isErr {
+						toolCalls[idx]["status"] = "error"
+					} else {
+						toolCalls[idx]["status"] = "success"
+					}
+					if event.Data["output"] != nil {
+						toolCalls[idx]["output"] = event.Data["output"]
 					}
 				}
 			}
 
 		// 完成信号：从 WebChannel 收到最终 Action
 		case action, ok := <-respCh:
+			resetIdle()
 			if !ok {
 				// channel 关闭，结束
 				writeSSE(c.Writer, sseDone, map[string]any{"text": fullText})
