@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
@@ -52,6 +53,81 @@ type WorkspaceExecutor interface {
 	Exec(ctx context.Context, req WsExecRequest) (*WsExecResult, error)
 	// ListDir 列出工作空间中指定目录的内容。
 	ListDir(ctx context.Context, path string) ([]WsFileEntry, error)
+}
+
+// StreamWorkspaceExecutor 是可选接口：支持命令流式输出。
+// 不实现该接口时，shell 工具会回退为一次性 Exec。
+type StreamWorkspaceExecutor interface {
+	ExecStream(ctx context.Context, req WsExecRequest, onChunk func(stream, chunk string)) (*WsExecResult, error)
+}
+
+type shellProgressAggregator struct {
+	mu           sync.Mutex
+	send         func(content any)
+	stdoutBuf    strings.Builder
+	stderrBuf    strings.Builder
+	lastFlushAt  time.Time
+	seq          int
+	stdoutOffset int
+	stderrOffset int
+}
+
+func newShellProgressAggregator(send func(content any)) *shellProgressAggregator {
+	return &shellProgressAggregator{send: send, lastFlushAt: time.Now()}
+}
+
+func (a *shellProgressAggregator) Append(stream, chunk string) {
+	if a == nil || a.send == nil || chunk == "" {
+		return
+	}
+	a.mu.Lock()
+	if stream == "stderr" {
+		a.stderrBuf.WriteString(chunk)
+	} else {
+		a.stdoutBuf.WriteString(chunk)
+	}
+	shouldFlush := a.stdoutBuf.Len()+a.stderrBuf.Len() >= 2048 || time.Since(a.lastFlushAt) >= 100*time.Millisecond
+	if shouldFlush {
+		a.flushLocked()
+	}
+	a.mu.Unlock()
+}
+
+func (a *shellProgressAggregator) Flush() {
+	if a == nil || a.send == nil {
+		return
+	}
+	a.mu.Lock()
+	a.flushLocked()
+	a.mu.Unlock()
+}
+
+func (a *shellProgressAggregator) flushLocked() {
+	if a.stdoutBuf.Len() > 0 {
+		chunk := a.stdoutBuf.String()
+		a.stdoutBuf.Reset()
+		a.seq++
+		a.stdoutOffset += len(chunk)
+		a.send(map[string]any{
+			"stream": "stdout",
+			"chunk":  chunk,
+			"seq":    a.seq,
+			"offset": a.stdoutOffset,
+		})
+	}
+	if a.stderrBuf.Len() > 0 {
+		chunk := a.stderrBuf.String()
+		a.stderrBuf.Reset()
+		a.seq++
+		a.stderrOffset += len(chunk)
+		a.send(map[string]any{
+			"stream": "stderr",
+			"chunk":  chunk,
+			"seq":    a.seq,
+			"offset": a.stderrOffset,
+		})
+	}
+	a.lastFlushAt = time.Now()
 }
 
 // shellToolProvider 按 sctx.BotID 动态解析该 bot 的工作空间执行器，
@@ -114,7 +190,16 @@ func buildShellTool(botID string, resolve func(string) (WorkspaceExecutor, error
 				req.Timeout = time.Duration(v) * time.Second
 			}
 
-			res, err := ws.Exec(ctx, req)
+			var res *WsExecResult
+			if sws, ok := ws.(StreamWorkspaceExecutor); ok && ctx.SendProgress != nil {
+				agg := newShellProgressAggregator(ctx.SendProgress)
+				res, err = sws.ExecStream(ctx, req, func(stream, chunk string) {
+					agg.Append(stream, chunk)
+				})
+				agg.Flush()
+			} else {
+				res, err = ws.Exec(ctx, req)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("exec failed: %w", err)
 			}

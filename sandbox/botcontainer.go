@@ -370,6 +370,11 @@ func (c *botContainer) execInContainer(ctx context.Context, workDir, command str
 
 // Exec 执行用户命令（带超时）。
 func (c *botContainer) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
+	return c.ExecStream(ctx, req, nil)
+}
+
+// ExecStream 执行用户命令并回调增量输出。
+func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
 	if req.Command == "" {
 		return nil, errs.New("bot_container: command is empty")
 	}
@@ -380,9 +385,27 @@ func (c *botContainer) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	result, err := c.execInContainer(execCtx, req.WorkDir, req.Command, nil)
-	if err != nil {
+	if err := c.ensure(execCtx); err != nil {
 		return nil, err
+	}
+
+	wd := containerWorkDir
+	if req.WorkDir != "" {
+		validated, err := validatePath(containerWorkDir, req.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		wd = validated
+	}
+
+	cmd := exec.CommandContext(execCtx, "docker", "exec", "-w", wd, c.container, "sh", "-c", req.Command)
+	result, err := runCommandWithStreaming(execCtx, cmd, c.cfg.MaxOutput, func(stream, chunk string) {
+		if onChunk != nil {
+			onChunk(ExecChunk{Stream: stream, Data: chunk})
+		}
+	})
+	if err != nil {
+		return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
 	}
 	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
 		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)

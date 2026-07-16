@@ -766,6 +766,11 @@ export const chatApi = {
     if (USE_MOCK) return mockResolve(() => db().bots.filter(b => b.running).map(b => ({ id: b.id, name: b.name, running: true })))
     return request('GET', '/api/chat/bots')
   },
+  abort(botId, traceId) {
+    if (!botId || !traceId) return Promise.resolve({ aborted: false })
+    if (USE_MOCK) return mockResolve(() => ({ aborted: true }))
+    return request('POST', '/api/chat/abort', { botId, traceId })
+  },
   /**
    * 获取聊天历史（游标分页，倒序返回）。
    * @param {string} botId
@@ -809,26 +814,33 @@ export const chatApi = {
    * 返回 Promise<{traceId, text, toolCalls[]}>。
    * @param {string} botId
    * @param {string} text
-   * @param {(chunk: string) => void} [onDelta] 逐字显示回调
-   * @param {AbortSignal} [signal] 可选的取消信号
-   * @param {Array} [attachments] 附件列表 [{name, type, size, dataUrl}]
+   * @param {{
+   *   onStart?: (traceId: string) => void,
+   *   onTextDelta?: (chunk: string) => void,
+   *   onToolCall?: (call: any) => void,
+   *   onToolProgress?: (toolCallId: string, payload: any) => void,
+   *   onToolResult?: (toolCallId: string, payload: any) => void,
+   *   signal?: AbortSignal,
+   *   attachments?: Array
+   * }} [options]
    */
-  async send(botId, text, onDelta, signal, attachments = []) {
+  async send(botId, text, options = {}) {
+    const {
+      onStart,
+      onTextDelta,
+      onToolCall,
+      onToolProgress,
+      onToolResult,
+      signal,
+      attachments = [],
+    } = options || {}
+
     if (USE_MOCK) {
       const bot = db().bots.find(b => b.id === botId)
-      return mockResolve(() => {
-        const resp = {
-          traceId: genId('web'),
-          text: `收到你的消息：「${text}」。我是「${bot?.name || 'Bot'}」，这是一条模拟回复。`
-        }
-        if (/改|修改|代码|文件|重构|实现|删除|新增|fix|bug/i.test(text)) {
-          resp.toolCalls = [
-            { id: genId('tool'), name: 'edit_file', title: '编辑文件', status: 'running', runningText: '写入文件中', _finalStatus: 'success', summary: '2 个文件已更改', added: 0, removed: 7, reversible: true, files: [{ path: 'src/components/BotSidebar.vue', added: 0, removed: 1, status: 'modified' }, { path: 'src/router/index.js', added: 0, removed: 6, status: 'modified' }] },
-            { id: genId('tool'), name: 'run_command', title: '执行命令', status: 'running', runningText: '命令执行中', _finalStatus: 'success', summary: 'vite build', reversible: false, command: 'npm run build', output: '✓ built in 5.33s' }
-          ]
-        }
-        return resp
-      })
+      return mockResolve(() => ({
+        traceId: genId('web'),
+        text: `收到你的消息：「${text}」。我是「${bot?.name || 'Bot'}」，这是一条模拟回复。`
+      }))
     }
 
     const response = await fetch('/api/chat/send', {
@@ -849,6 +861,7 @@ export const chatApi = {
     let buffer = ''
     let fullText = ''
     const toolCalls = []
+    const toolCallMap = new Map()
     let currentEvent = null
 
     try {
@@ -857,9 +870,8 @@ export const chatApi = {
         if (done) break
         buffer += decoder.decode(value, { stream: true })
 
-        // SSE 按双换行分割事件块
         const blocks = buffer.split('\n\n')
-        buffer = blocks.pop() // 保留未完成的事件块
+        buffer = blocks.pop()
 
         for (const block of blocks) {
           if (!block.trim()) continue
@@ -872,40 +884,95 @@ export const chatApi = {
               try { Object.assign(parts, JSON.parse(line.slice(5).trim())) } catch {}
             }
           }
+
           switch (evtType) {
-            case 'text_delta':
+            case 'text_delta': {
               const chunk = parts.text || ''
               fullText += chunk
-              if (onDelta) onDelta(chunk)
+              if (onTextDelta) onTextDelta(chunk)
               break
+            }
+
             case 'start':
               currentEvent = parts.traceId
+              if (onStart && currentEvent) onStart(currentEvent)
               break
-            case 'done':
-              if (parts.text) fullText = parts.text
-              if (parts.toolCalls) toolCalls.push(...parts.toolCalls)
-              return { traceId: currentEvent, text: fullText, toolCalls }
-            case 'error':
-              throw new Error(parts.message || '请求失败')
-            case 'tool_call':
-              toolCalls.push({ id: parts.id || genId('tool'), name: parts.tool, title: parts.tool, input: parts.input, status: 'running' })
+
+            case 'tool_call': {
+              const call = {
+                id: parts.toolCallId || genId('tool'),
+                name: parts.tool,
+                title: parts.tool,
+                input: parts.input,
+                status: 'running',
+                output: { stdout: '', stderr: '', exitCode: null, truncated: false },
+              }
+              toolCalls.push(call)
+              toolCallMap.set(call.id, call)
+              if (onToolCall) onToolCall(call)
               break
-            case 'tool_result':
-              // 后端 tool_result 不带 id，按“最近一个同名且仍在 running 的调用”回填
-              let t = parts.id ? toolCalls.find(x => x.id === parts.id) : null
-              if (!t) {
-                for (let i = toolCalls.length - 1; i >= 0; i--) {
-                  if (toolCalls[i].name === parts.tool && toolCalls[i].status === 'running') { t = toolCalls[i]; break }
-                }
+            }
+
+            case 'tool_progress': {
+              const toolCallId = parts.toolCallId
+              const payload = {
+                ...(typeof parts.payload === 'object' && parts.payload ? parts.payload : {}),
+                stream: (parts.payload && parts.payload.stream) || parts.stream || 'stdout',
+                chunk: (parts.payload && parts.payload.chunk) || parts.chunk || '',
+              }
+              const t = toolCallMap.get(toolCallId)
+              if (t) {
+                const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout'
+                const chunk = payload.chunk || ''
+                const out = (typeof t.output === 'object' && t.output) ? t.output : { stdout: '', stderr: '', exitCode: null, truncated: false }
+                out[stream] = (out[stream] || '') + chunk
+                t.output = out
+              }
+              if (onToolProgress) onToolProgress(toolCallId, payload)
+              break
+            }
+
+            case 'tool_result': {
+              const toolCallId = parts.toolCallId
+              const t = toolCallMap.get(toolCallId)
+              const isErr = parts.error != null
+              const payload = {
+                ...parts,
+                status: parts.status || (isErr ? 'error' : 'success')
               }
               if (t) {
-                const isErr = parts.error != null
                 Object.assign(t, {
-                  status: parts.status || (isErr ? 'error' : 'success'),
+                  status: payload.status,
                   summary: parts.summary,
-                  output: isErr ? parts.error : parts.output,
                 })
+                if (parts.output !== undefined) t.output = parts.output
+                if (isErr && typeof t.output === 'object' && t.output) {
+                  t.output.stderr = (t.output.stderr || '') + String(parts.error)
+                }
               }
+              if (onToolResult) onToolResult(toolCallId, payload)
+              break
+            }
+
+            case 'done':
+              if (parts.text) fullText = parts.text
+              if (parts.toolCalls && Array.isArray(parts.toolCalls)) {
+                for (const tc of parts.toolCalls) {
+                  if (!tc?.id) continue
+                  const existed = toolCallMap.get(tc.id)
+                  if (existed) Object.assign(existed, tc)
+                  else {
+                    toolCalls.push(tc)
+                    toolCallMap.set(tc.id, tc)
+                  }
+                }
+              }
+              return { traceId: currentEvent, text: fullText, toolCalls }
+
+            case 'error':
+              throw new Error(parts.message || '请求失败')
+
+            default:
               break
           }
         }

@@ -111,6 +111,18 @@ type ExecResult struct {
 	Truncated bool `json:"truncated"`
 }
 
+// ExecChunk 是命令执行中的流式输出片段。
+type ExecChunk struct {
+	Stream string `json:"stream"` // stdout | stderr
+	Data   string `json:"data"`
+}
+
+// StreamWorkspace 是可选接口：支持命令流式输出。
+// 不实现该接口的 Workspace 仍可通过 Exec 正常工作。
+type StreamWorkspace interface {
+	ExecStream(ctx context.Context, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error)
+}
+
 // FileEntry 是目录中的一个条目。
 type FileEntry struct {
 	Name  string `json:"name"`

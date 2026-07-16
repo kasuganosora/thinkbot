@@ -20,7 +20,6 @@ package sandbox
 // ============================================================================
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -550,12 +549,16 @@ func (w *botWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, e
 // --- 命令执行 ---
 
 func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error) {
+	return w.ExecStream(ctx, req, nil)
+}
+
+func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
 	if req.Command == "" {
 		return nil, errs.New("bot_workspace: command is empty")
 	}
 
 	if w.container != nil {
-		return w.container.Exec(ctx, req)
+		return w.container.ExecStream(ctx, req, onChunk)
 	}
 
 	timeout := req.Timeout
@@ -566,35 +569,22 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 	defer cancel()
 
 	var cmd *exec.Cmd
-
 	if w.backend == "docker" {
-		// 临时容器路径（bind mount 模式）：docker run --rm -v {root}:/workspace ...
-		//
-		// 不可达说明：当前 docker 后端下 NewBotWorkspaceManager 会强制
-		// PersistentContainer=true（见上方强制逻辑 :112），因此 w.container != nil，
-		// Exec 已在上方 :549 走容器模式，本分支实际不会被触发。
-		// 若将来允许关闭持久容器走此分支，在 DooD 部署（主程序自身运行在容器内）
-		// 场景下 w.root 是主程序容器内路径，bind mount 到宿主 daemon 会按宿主文件
-		// 系统解析而失败或挂空目录 —— 届时需改用 named volume 挂载而非 bind mount。
 		args := []string{"run", "--rm"}
 
-		// Volume mount（宿主目录 → 容器 /workspace）
 		mountPath, err := filepath.Abs(w.root)
 		if err != nil {
 			mountPath = w.root
 		}
-		// Docker 在所有平台上都接受正斜杠
 		mountPath = filepath.ToSlash(mountPath)
 		args = append(args, "-v", mountPath+":"+VirtualRoot)
 
-		// 时区环境变量
 		tz := w.cfg.Timezone
 		if tz == "" {
 			tz = "UTC"
 		}
 		args = append(args, "-e", "TZ="+tz)
 
-		// 工作目录
 		containerWorkDir := VirtualRoot
 		if req.WorkDir != "" {
 			validated, err := validatePath(VirtualRoot, req.WorkDir)
@@ -605,7 +595,6 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 		}
 		args = append(args, "-w", containerWorkDir)
 
-		// 资源限制
 		if w.cfg.MemoryLimit != "" {
 			args = append(args, "--memory", w.cfg.MemoryLimit)
 		}
@@ -619,7 +608,6 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 		args = append(args, w.cfg.Image, "sh", "-c", req.Command)
 		cmd = exec.CommandContext(execCtx, "docker", args...)
 	} else {
-		// 本地执行
 		targetDir := w.root
 		if req.WorkDir != "" {
 			validated, err := validatePath(w.root, req.WorkDir)
@@ -636,9 +624,6 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 			cmd = exec.CommandContext(execCtx, "sh", "-c", req.Command)
 		}
 		cmd.Dir = targetDir
-		// 注入环境变量：
-		//   WORKSPACE=/data —— agent 面向的统一虚拟根（与 docker 模式一致）
-		//   TZ            —— 时区
 		env := append(os.Environ(), "WORKSPACE="+VirtualRoot)
 		if w.cfg.Timezone != "" {
 			env = append(env, "TZ="+w.cfg.Timezone)
@@ -646,42 +631,17 @@ func (w *botWorkspace) Exec(ctx context.Context, req ExecRequest) (*ExecResult, 
 		cmd.Env = env
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	maxOut := w.cfg.MaxOutput
-	result := &ExecResult{
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
-	}
-	if maxOut > 0 {
-		if s, trunc := truncateString(result.Stdout, maxOut); trunc {
-			result.Stdout = s
-			result.Truncated = true
+	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, func(stream, chunk string) {
+		if onChunk != nil {
+			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
-		if s, trunc := truncateString(result.Stderr, maxOut); trunc {
-			result.Stderr = s
-			result.Truncated = true
-		}
-	}
-
-	if execCtx.Err() == context.DeadlineExceeded {
-		result.ExitCode = -1
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
-		return result, nil
-	}
-
+	})
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, errs.Wrap(err, "bot_workspace: exec command")
-		}
+		return nil, errs.Wrap(err, "bot_workspace: exec command")
 	}
-
+	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
+		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
+	}
 	return result, nil
 }
 
