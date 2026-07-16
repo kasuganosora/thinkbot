@@ -98,6 +98,10 @@ type Bot struct {
 
 	// botMetrics 是 Bot 层额外的指标（Engine 层有自己的基础指标）
 	dispatchErrors atomic.Int64
+
+	// 消息级取消链路（可选）：用于将每条消息的 cancel 函数注册到上层（如 API abort 接口）。
+	onMessageStart func(botID, traceID string, cancel context.CancelFunc)
+	onMessageDone  func(botID, traceID string)
 }
 
 // BotParams 是 Bot 构造参数。
@@ -158,6 +162,13 @@ type BotParams struct {
 	// RejectionDetector 被无视检测器（可选，nil=禁用）。
 	// 注入后，Bot 会在发送回复时通知检测器，并在 TimingGate 中考虑自闭模式。
 	RejectionDetector *engagement.RejectionDetector
+
+	// OnMessageStart 在单条消息开始处理时回调，提供可取消的 message context。
+	// 典型用途：上层注册 traceID -> cancelFunc，供 /chat/abort 终止本轮执行。
+	OnMessageStart func(botID, traceID string, cancel context.CancelFunc)
+	// OnMessageDone 在单条消息结束（成功/失败/丢弃/派发失败）时回调。
+	// 典型用途：上层注销 traceID -> cancelFunc，避免内存泄漏。
+	OnMessageDone func(botID, traceID string)
 }
 
 // New 创建一个 Bot 实例。
@@ -253,6 +264,8 @@ func New(params BotParams) (*Bot, error) {
 		channels:        params.Channels,
 		logger:          botLogger,
 		ownRegistry:     ownRegistry,
+		onMessageStart:  params.OnMessageStart,
+		onMessageDone:   params.OnMessageDone,
 	}
 
 	// 创建持久化工作空间（文件在宿主文件系统，重启不丢失）
@@ -557,10 +570,31 @@ func (b *Bot) stopChannelsSlice(ctx context.Context, channels []Channel) {
 // EngineHook 实现 — Bot 通过 hook 扩展 Engine 行为
 // ============================================================================
 
+type messageCancelCtxKey struct{}
+
+// finishMessageLifecycle 清理单条消息的取消函数注册与回调。
+func (b *Bot) finishMessageLifecycle(ctx context.Context, traceID string) {
+	if v := ctx.Value(messageCancelCtxKey{}); v != nil {
+		if cancel, ok := v.(context.CancelFunc); ok && cancel != nil {
+			cancel()
+		}
+	}
+	if b.onMessageDone != nil && traceID != "" {
+		b.onMessageDone(b.ID, traceID)
+	}
+}
+
 // OnBeforeProcess 在 Engine 处理 Envelope 之前注入 EventEmitter 和 Bot 配置。
 func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.Context {
 	// 注入 EventEmitter 到 context，供 Pipeline Stage（如 ObservableStage）使用
 	ctx = outbound.ContextWithEmitter(ctx, b.emitter)
+
+	traceID := env.Message.TraceID
+	if b.onMessageStart != nil && traceID != "" {
+		msgCtx, cancel := context.WithCancel(ctx)
+		b.onMessageStart(b.ID, traceID, cancel)
+		ctx = context.WithValue(msgCtx, messageCancelCtxKey{}, cancel)
+	}
 
 	// 注入 Bot 配置到 Envelope KV，供 Stage 读取
 	env.Set("bot.id", b.ID)
@@ -575,11 +609,13 @@ func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.C
 // OnPipelineError 在 Pipeline 执行出错时发射旁路事件。
 func (b *Bot) OnPipelineError(ctx context.Context, env *core.Envelope, err error) {
 	b.emitter.EmitMessageError(ctx, env.Message.TraceID, err)
+	b.finishMessageLifecycle(ctx, env.Message.TraceID)
 }
 
 // OnMessageDropped 在消息被 Pipeline 丢弃时发射旁路事件。
 func (b *Bot) OnMessageDropped(ctx context.Context, env *core.Envelope) {
 	b.emitter.EmitMessageDropped(ctx, env.Message.TraceID, "pipeline")
+	b.finishMessageLifecycle(ctx, env.Message.TraceID)
 }
 
 // OnBeforeDispatch 在 Dispatcher 派发前发射旁路事件。
@@ -591,9 +627,11 @@ func (b *Bot) OnBeforeDispatch(ctx context.Context, env *core.Envelope, actions 
 func (b *Bot) OnDispatchError(ctx context.Context, env *core.Envelope, err error) {
 	b.dispatchErrors.Add(1)
 	b.emitter.EmitDispatchError(ctx, env.Message.TraceID, err)
+	b.finishMessageLifecycle(ctx, env.Message.TraceID)
 }
 
 // OnMessageDone 在消息处理成功完成时发射旁路事件。
 func (b *Bot) OnMessageDone(ctx context.Context, env *core.Envelope, actions []core.Action, duration time.Duration) {
 	b.emitter.EmitMessageDone(ctx, env.Message.TraceID, len(actions), duration)
+	b.finishMessageLifecycle(ctx, env.Message.TraceID)
 }
