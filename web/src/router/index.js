@@ -19,6 +19,11 @@ const routes = [
         name: 'chat',
         component: () => import('@/views/Chat.vue')
       },
+      {
+        path: 'chat/bot/:botId',
+        name: 'chat-bot',
+        component: () => import('@/views/Chat.vue')
+      },
       // --- 个人 / 系统设置 ---
       {
         path: 'settings/system',
@@ -78,7 +83,7 @@ const router = createRouter({
 router.beforeEach((to) => {
   const userStore = useUserStore()
   if (!to.meta.public && !userStore.isLoggedIn) {
-    return { name: 'login' }
+    return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (to.name === 'login' && userStore.isLoggedIn) {
     return { name: 'chat' }
