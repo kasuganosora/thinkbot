@@ -47,6 +47,15 @@ type BotDefinition struct {
 	// Workers 并发 worker 数量。
 	Workers int `gorm:"default:4" json:"workers"`
 
+	// MaxSteps 工具调用循环的软上限（soft budget）。
+	// 0 = 使用全局默认（当前 30）。>0 时该 Bot 独立覆盖全局默认。
+	// 编排器在 soft 内自然收尾；超出后若仍在产生新的工具调用则自动延长至 HardMaxSteps。
+	MaxSteps int `gorm:"default:0" json:"maxSteps,omitempty"`
+
+	// HardMaxSteps 工具调用循环的硬上限（safety net）。
+	// 0 = 使用全局默认（当前 soft×3 = 90）。必须大于等于 MaxSteps。
+	HardMaxSteps int `gorm:"default:0" json:"hardMaxSteps,omitempty"`
+
 	// Status 运行状态：stopped | running。
 	Status string `gorm:"size:32;not null;default:'stopped'" json:"status"`
 

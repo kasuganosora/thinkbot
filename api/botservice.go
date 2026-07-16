@@ -361,6 +361,31 @@ func (s *BotService) ResetTokenBudgets() {
 	s.tokenBudget.ResetAll()
 }
 
+// 工具调用步数预算的全局默认值。
+// soft：常规任务在此内自然收尾；hard：复杂任务持续产生新调用时自动延长至该安全网。
+const (
+	defaultSoftMaxSteps = 30
+	defaultHardMaxSteps = 90 // = defaultSoftMaxSteps * 3
+)
+
+// effectiveStepBudgets 计算 per-bot 的工具调用步数预算。
+// BotDefinition 中 MaxSteps/HardMaxSteps 为 0 表示使用全局默认；
+// 显式设置则独立覆盖。HardMaxSteps 始终 >= MaxSteps（避免硬上限低于软上限）。
+func effectiveStepBudgets(def *dao.BotDefinition) (soft, hard int) {
+	soft = def.MaxSteps
+	if soft <= 0 {
+		soft = defaultSoftMaxSteps
+	}
+	hard = def.HardMaxSteps
+	if hard <= 0 {
+		hard = soft * 3
+	}
+	if hard < soft {
+		hard = soft
+	}
+	return soft, hard
+}
+
 // StartBot 从定义创建并启动 Bot 实例。
 func (s *BotService) StartBot(ctx context.Context, id string) error {
 	def, err := s.GetDefinition(id)
@@ -534,6 +559,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		saMgr.CloseAll()
 	}
 
+	// 计算 per-bot 工具调用步数预算（soft/hard）。DB 中为 0 时回退全局默认。
+	// 该值后续同时用于 LLMStage 装配与 AgentConfig.MaxSteps，保证两处一致。
+	softSteps, hardSteps := effectiveStepBudgets(def)
+
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
@@ -545,7 +574,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			ReasoningEffort: def.ReasoningEffort,
 			MessageBuilder:  messageBuilder,
 			ToolResolver:    toolMgr,
-			MaxSteps:        10,
+			// 动态步数预算：常规任务在 soft 内自然收尾；复杂任务（如大规模
+			// 代码修复）在持续产生新工具调用时自动延长至 hard 安全网，
+			// 陷入重复循环则提前停止。详见 llm.loopController。
+			MaxSteps:        softSteps,
+			HardMaxSteps:    hardSteps,
 			StreamPublisher: s.eventBus,
 			UsageRecorder:   s.statsRecorder, // 统一记账到 stats
 			ReductionConfig: llm.DefaultReductionConfigPtr(),
@@ -846,6 +879,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// AgentConfig：读取 compaction 等运行时行为配置
 	var agentCfg bot.AgentConfig
+	// 让 AgentConfig.MaxSteps 与 LLMStage 实际使用的 soft 预算保持一致，
+	// 避免该字段长期空洞（此前 DefaultAgentConfig 写死 10，与运行时脱节）。
+	agentCfg.MaxSteps = softSteps
 	if raw, ok := s.store.Get("bot." + id + ".detail.compaction"); ok && raw != "" {
 		var cc struct {
 			Enabled   bool `json:"enabled"`

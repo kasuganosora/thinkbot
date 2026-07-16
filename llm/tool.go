@@ -13,6 +13,7 @@ type ToolExecContext struct {
 	context.Context
 	ToolCallID   string
 	ToolName     string
+	InvocationID string            // 服务端生成的本次执行唯一标识，用于日志追踪/前端区分
 	SendProgress func(content any) // nil when not in streaming mode
 }
 
@@ -60,7 +61,8 @@ type ToolCall struct {
 
 // ToolResult holds the output of a tool execution.
 type ToolResult struct {
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Output     any    `json:"output"`
+	ToolCallID   string `json:"toolCallId"`
+	ToolName     string `json:"toolName"`
+	InvocationID string `json:"invocationId,omitempty"`
+	Output       any    `json:"output"`
 }

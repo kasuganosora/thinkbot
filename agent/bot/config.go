@@ -79,7 +79,7 @@ func DefaultBotConfig() BotConfig {
 		Workers:           4,
 		IngressBufferSize: 256,
 		Temperature:       &defaultTemp,
-		MaxTokens:         4096,
+		MaxTokens:         8192,
 	}
 }
 
