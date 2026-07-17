@@ -1480,6 +1480,10 @@ export const botContainerApi = {
   remove(botId, keepData) {
     if (USE_MOCK) return mockResolve(() => { const c = ensureContainer(botId); c.info.containerStatus = 'removed'; c.info.taskStatus = 'stopped'; c.info.keepData = !!keepData; return null })
     return request('DELETE', `/api/bots/${botId}/container`, { keepData })
+  },
+  updateConfig(botId, payload) {
+    if (USE_MOCK) return mockResolve(() => { const c = ensureContainer(botId); Object.assign(c.info, payload); return { ok: true } })
+    return request('PUT', `/api/bots/${botId}/container/config`, payload)
   }
 }
 
