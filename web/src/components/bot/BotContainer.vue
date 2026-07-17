@@ -43,7 +43,25 @@
           <div class="ic-label">镜像</div>
           <div class="ic-value">{{ info.image || '-' }}</div>
         </div>
-        <div class="info-cell"></div>
+        <div class="info-cell">
+          <div class="ic-label">内存限制</div>
+          <div class="ic-value mem-cell">
+            <t-input-number
+              :value="memValue"
+              :min="0"
+              :step="512"
+              theme="normal"
+              size="small"
+              placeholder="0 = 不限制"
+              style="width: 130px"
+              @change="onMemChange"
+            />
+            <span class="mem-unit">MB</span>
+            <span v-if="memSaving" class="mem-hint saving">保存中...</span>
+            <span v-else-if="memSaved" class="mem-hint ok">已保存</span>
+            <span class="mem-hint tip">0 = 不限制内存 · 单位 MB</span>
+          </div>
+        </div>
 
         <div class="info-cell">
           <div class="ic-label">CDI 设备</div>
@@ -74,8 +92,8 @@
       </div>
     </div>
 
-    <!-- GPU 提示 -->
-    <div class="ctn-tip">GPU 配置变更需要重建容器后才会生效，单纯启动或停止不会更新当前已附加的设备。</div>
+    <!-- 提示条 -->
+    <div class="ctn-tip">内存限制变更需要<strong>重建容器</strong>后才会生效（删除容器后重新启动）。GPU 配置变更同样需要重建容器。</div>
 
     <!-- 数据操作 -->
     <div class="block">
@@ -135,6 +153,10 @@ const busy = reactive({ export: false, restore: false, snap: false })
 const info = ref({})
 const snapshots = ref([])
 const snapName = ref('')
+const memValue = ref(0)        // 当前编辑值
+const memSaving = ref(false)
+const memSaved = ref(false)
+let memTimer = null           // 防抖定时器
 
 const columns = [
   { colKey: 'name', title: '名称', width: 380, ellipsis: true,
@@ -168,11 +190,33 @@ async function load() {
     ])
     info.value = i
     snapshots.value = s
+    memValue.value = i.memoryLimitMB || 0
   } finally {
     loading.value = false
   }
 }
 onMounted(load)
+
+// 内存限制变更（防抖保存）
+function onMemChange(val) {
+  memValue.value = val ?? 0
+  memSaved.value = false
+  clearTimeout(memTimer)
+  memTimer = setTimeout(async () => {
+    const mb = Number(memValue.value) || 0
+    memSaving.value = true
+    try {
+      await botContainerApi.updateConfig(props.botId, { memoryLimitMB: mb })
+      info.value.memoryLimitMB = mb
+      memSaved.value = true
+      setTimeout(() => { memSaved.value = false }, 2000)
+    } catch (e) {
+      MessagePlugin.error(e?.message || '保存失败')
+    } finally {
+      memSaving.value = false
+    }
+  }, 800)
+}
 
 async function onStart() {
   acting.value = true
@@ -262,6 +306,14 @@ async function onCreateSnapshot() {
 .ic-label { font-size: 13px; color: #999; margin-bottom: 4px; }
 .ic-value { font-size: 14px; color: #1d1d1f; word-break: break-all; }
 .ic-value.mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; }
+
+/* 内存限制单元格 */
+.mem-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mem-unit { font-size: 13px; color: #888; }
+.mem-hint { font-size: 11px; white-space: nowrap; }
+.mem-hint.saving { color: #e6a23c; }
+.mem-hint.ok { color: #52c41a; }
+.mem-hint.tip { color: #bbb; }
 
 /* 提示条 */
 .ctn-tip {
