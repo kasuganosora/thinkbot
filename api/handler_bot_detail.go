@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -501,6 +502,7 @@ type BotContainerInfo struct {
 	CdiDevice       string `json:"cdiDevice"`
 	ContainerPath   string `json:"containerPath"`
 	KeepData        bool   `json:"keepData"`
+	MemoryLimitMB   int64  `json:"memoryLimitMB"` // 0 = 不限制（使用系统默认）
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
 }
@@ -521,6 +523,37 @@ func (s *Server) handleGetBotContainer(c *gin.Context) {
 	botID := c.Param("id")
 	info := s.realBotContainerInfo(c.Request.Context(), botID)
 	OK(c, info)
+}
+
+// handleUpdateBotContainerConfig 更新 Bot 容器配置（如内存限制）。
+// PUT /api/bots/:id/container/config
+func (s *Server) handleUpdateBotContainerConfig(c *gin.Context) {
+	botID := c.Param("id")
+
+	var req struct {
+		MemoryLimitMB int64 `json:"memoryLimitMB"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+	if req.MemoryLimitMB < 0 {
+		Fail(c, errs.BadRequest("memoryLimitMB must be >= 0"))
+		return
+	}
+
+	if s.botSvc == nil {
+		Fail(c, errs.New("bot service unavailable"))
+		return
+	}
+	if err := s.botSvc.UpdateDefinition(botID, map[string]any{
+		"memory_limit_mb": req.MemoryLimitMB,
+	}); err != nil {
+		Fail(c, fmt.Errorf("更新容器配置失败: %w", err))
+		return
+	}
+
+	OK(c, gin.H{"ok": true})
 }
 
 // handleGetBotContainerSnapshots 获取 Bot 容器快照列表（真实 docker 镜像）。
@@ -563,22 +596,46 @@ func (s *Server) realBotContainerSnapshots(ctx context.Context, botID string) []
 	return out
 }
 
-// handleStartBotContainer 启动 Bot 容器（真实 docker start/create）。
+// handleStartBotContainer 启动 Bot 容器（真实 docker start/create）+ 启动 agent 实例。
 // POST /api/bots/:id/container/start
+//
+// 必须同时启动 agent 实例：仅启动 docker 容器会让 chat 接口因 WebChannel 不存在而
+// 返回 404（bot is not running）。这与停止时「一并停 agent」对称——启动也必须一并
+// 启动，否则容器在跑但 bot 不在聊天可用状态。
 func (s *Server) handleStartBotContainer(c *gin.Context) {
 	botID := c.Param("id")
-	if s.botSvc != nil {
-		if mgr, err := s.botSvc.WorkspaceManagerForBot(botID); err == nil {
-			if err := mgr.StartBot(c.Request.Context(), botID); err != nil {
-				Fail(c, fmt.Errorf("启动容器失败: %w", err))
-				return
-			}
-		} else {
-			Fail(c, err)
+	ctx := c.Request.Context()
+	if s.botSvc == nil {
+		Fail(c, errs.New("bot service unavailable"))
+		return
+	}
+	// 1) 启动 docker 容器并清除 stopped 标记（否则后续 ensure() 拒绝拉起，工具执行失败）。
+	mgr, err := s.botSvc.WorkspaceManagerForBot(botID)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+	// 0) 读取 per-bot 内存限制并设置到 manager（必须是同一个 mgr 实例，
+	//    因为 WorkspaceManagerForBot 对未缓存的 bot 每次返回新实例；
+	//    覆盖值设在 StartBot 所用的实例上，容器创建时才会生效）。
+	if def, derr := s.botSvc.GetDefinition(botID); derr == nil {
+		mgr.SetBotMemoryOverride(botID, def.MemoryLimitMB)
+	}
+	if err := mgr.StartBot(ctx, botID); err != nil {
+		Fail(c, fmt.Errorf("启动容器失败: %w", err))
+		return
+	}
+	// 2) 启动 agent 实例（注册 WebChannel，使聊天可用）。
+	//    若 agent 已在运行则跳过，避免每次点启动都重启 agent。
+	if !s.botSvc.IsRunning(botID) {
+		if err := s.botSvc.StartBot(ctx, botID); err != nil {
+			Fail(c, fmt.Errorf("启动 Bot 实例失败: %w", err))
 			return
 		}
 	}
-	OK(c, s.realBotContainerInfo(c.Request.Context(), botID))
+	// 3) DB 状态恢复为 running（与停止时置 stopped 对称）。
+	s.botSvc.SetBotStatus(botID, dao.BotStatusRunning)
+	OK(c, s.realBotContainerInfo(ctx, botID))
 }
 
 // handleStopBotContainer 停止 Bot 容器（真实 docker stop，保留数据）。
@@ -1088,11 +1145,16 @@ func (s *Server) realBotContainerInfo(ctx context.Context, botID string) *BotCon
 	ci := mgr.ContainerInfo(ctx, botID)
 
 	info := &BotContainerInfo{
-		Namespace: "default",
-		CdiDevice: "未附加 GPU",
-		KeepData:  stored.KeepData,
-		CreatedAt: stored.CreatedAt,
-		UpdatedAt: nowRFC3339(),
+		Namespace:     "default",
+		CdiDevice:     "未附加 GPU",
+		KeepData:      stored.KeepData,
+		MemoryLimitMB: stored.MemoryLimitMB,
+		CreatedAt:     stored.CreatedAt,
+		UpdatedAt:     nowRFC3339(),
+	}
+	// 从 bot definition DB 读取 memoryLimitMB（优先级高于 store 缓存）。
+	if def, err := s.botSvc.GetDefinition(botID); err == nil && def.MemoryLimitMB > 0 {
+		info.MemoryLimitMB = def.MemoryLimitMB
 	}
 	info.Image = ci.Image
 	info.ContainerPath = ci.WorkDir
