@@ -123,6 +123,7 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/files/upload", s.handleBotFileUpload)
 
 				// 容器管理
+				botsAdmin.PUT("/:id/container/config", s.handleUpdateBotContainerConfig)
 				botsAdmin.GET("/:id/container", s.handleGetBotContainer)
 				botsAdmin.GET("/:id/container/snapshots", s.handleGetBotContainerSnapshots)
 				botsAdmin.POST("/:id/container/start", s.handleStartBotContainer)

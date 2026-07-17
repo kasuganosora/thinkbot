@@ -226,7 +226,16 @@ func (a *workspaceExecAdapter) ListDir(ctx context.Context, path string) ([]tool
 
 // SandboxConfigForBot 构造文件管理 API 使用的 sandbox 配置，与运行时保持一致。
 // Backend 由 config 决定（默认 auto：有 Docker 则容器隔离，否则 local）。
+// 不带 per-bot 内存覆盖，使用系统默认（2G）。
 func (s *BotService) SandboxConfigForBot() sandbox.Config {
+	return s.sandboxConfigWithMemoryLimit(-1)
+}
+
+// sandboxConfigWithMemoryLimit 构造基础 sandbox 配置并按 mb 决定内存限制。
+//   - mb > 0：限制为该 MB 数（如 "2048m"）。
+//   - mb == 0：不限制（docker run 不加 --memory）。
+//   - mb < 0：使用系统默认（DefaultConfig 中的 2G）—— 用于无 per-bot 上下文的场景。
+func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	builder := config.NewBuilder(s.store, s.logger)
 	cfg := sandbox.DefaultConfig()
 	cfg.Timezone = builder.GetTimezone()
@@ -239,6 +248,13 @@ func (s *BotService) SandboxConfigForBot() sandbox.Config {
 	// auto 模式下是否强制要求 Docker 可用：避免 DooD 部署探测失败时静默降级 local 裸跑。
 	if s.store.GetString(config.KeySandboxRequireDocker, "") == "true" {
 		cfg.RequireDocker = true
+	}
+	switch {
+	case mb > 0:
+		cfg.MemoryLimit = fmt.Sprintf("%dm", mb)
+	case mb == 0:
+		cfg.MemoryLimit = "" // 0 = 不限制
+	default: // mb < 0：保留 DefaultConfig 的 2G 默认
 	}
 	return cfg
 }
@@ -1100,6 +1116,14 @@ func (s *BotService) StopBot(id string) {
 	s.mgr.Unregister(id)
 
 	s.logger.Infow("bot stopped", "bot_id", id)
+}
+
+// SetBotStatus 直接更新 Bot 的 DB 状态（不启停 agent 实例，仅修改持久化状态）。
+// 供容器启动/停止按钮使用，保证 DB status 与容器实际状态一致。
+func (s *BotService) SetBotStatus(id, status string) {
+	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", status).Error; err != nil {
+		s.logger.Warnw("failed to update bot status", "bot_id", id, "status", status, "err", err)
+	}
 }
 
 // GetWebChannel 返回指定 Bot 的 WebChannel（供 SSE 聊天使用）。

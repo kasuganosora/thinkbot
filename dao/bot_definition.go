@@ -56,6 +56,11 @@ type BotDefinition struct {
 	// 0 = 使用全局默认（当前 soft×3 = 90）。必须大于等于 MaxSteps。
 	HardMaxSteps int `gorm:"default:0" json:"hardMaxSteps,omitempty"`
 
+	// MemoryLimitMB 容器内存限制（MB）。
+	// 0 = 不限制（docker run 不加 --memory）；>0 = 限制该 MB 数；缺省/未配置 = 2G（2048MB）。
+	// 仅 Docker 后端生效，创建/重建容器时读取此值。
+	MemoryLimitMB int64 `gorm:"default:2048" json:"memoryLimitMB"`
+
 	// Status 运行状态：stopped | running。
 	Status string `gorm:"size:32;not null;default:'stopped'" json:"status"`
 

@@ -189,7 +189,7 @@ func DefaultConfig() Config {
 		Backend:         "auto",
 		Image:           "alpine:latest",
 		BaseDir:         "",
-		MemoryLimit:     "1g",
+		MemoryLimit:     "2g",
 		CPULimit:        "1.0",
 		NetworkDisabled: false,
 		Timeout:         30 * time.Second,

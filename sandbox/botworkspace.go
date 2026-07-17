@@ -40,8 +40,9 @@ type BotWorkspaceManager struct {
 	backend string // "docker" 或 "local"
 	logger  *zap.SugaredLogger
 
-	mu         sync.RWMutex
-	workspaces map[string]*botWorkspace
+	mu              sync.RWMutex
+	workspaces      map[string]*botWorkspace
+	memoryOverrides map[string]int64 // botID → 内存限制(MB)，0=未设置(用默认)，<0=不限制
 }
 
 // NewBotWorkspaceManager 创建持久化工作空间管理器。
@@ -114,12 +115,38 @@ func NewBotWorkspaceManager(baseDir string, cfg Config, logger *zap.SugaredLogge
 	}
 
 	return &BotWorkspaceManager{
-		baseDir:    baseDir,
-		cfg:        cfg,
-		backend:    b,
-		logger:     logger,
-		workspaces: make(map[string]*botWorkspace),
+		baseDir:         baseDir,
+		cfg:             cfg,
+		backend:         b,
+		logger:          logger,
+		workspaces:      make(map[string]*botWorkspace),
+		memoryOverrides: make(map[string]int64),
 	}, nil
+}
+
+// SetBotMemoryOverride 设置指定 Bot 的内存覆盖值（MB）。
+// 与 API/DB 语义一致：mb > 0 限制为 mb MB；mb <= 0 不限制（docker run 不加 --memory）。
+// 注意：系统默认 2G 通过 DefaultConfig 体现，无需在此区分“默认”与“显式值”。
+func (m *BotWorkspaceManager) SetBotMemoryOverride(botID string, mb int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.memoryOverrides[botID] = mb
+}
+
+// getBotMemoryLimit 获取指定 bot 的内存限制字符串（用于 docker --memory）。
+// 返回 "" 表示使用全局默认（m.cfg.MemoryLimit）；返回 "-" 表示显式不限制。
+func (m *BotWorkspaceManager) getBotMemoryLimit(botID string) string {
+	m.mu.RLock()
+	mb, ok := m.memoryOverrides[botID]
+	m.mu.RUnlock()
+	if !ok {
+		return m.cfg.MemoryLimit // 未设置覆盖，用全局默认
+	}
+	if mb > 0 {
+		return fmt.Sprintf("%dm", mb)
+	}
+	// mb <= 0：显式不限制（用户在前端将内存限制设为 0）。
+	return "-"
 }
 
 // Backend 返回命令执行的后端类型。
@@ -169,7 +196,11 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 	}
 	// docker 持久容器模式：为该 bot 绑定一个长期容器（惰性创建）。
 	if m.backend == "docker" && m.cfg.PersistentContainer {
-		ws.container = newBotContainer(botID, m.cfg, m.logger)
+		c := newBotContainer(botID, m.cfg, m.logger)
+		if mem := m.getBotMemoryLimit(botID); mem != m.cfg.MemoryLimit {
+			c.SetMemoryOverride(mem)
+		}
+		ws.container = c
 	}
 	m.workspaces[botID] = ws
 

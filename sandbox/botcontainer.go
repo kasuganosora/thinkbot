@@ -41,6 +41,10 @@ type botContainer struct {
 	mu      sync.Mutex
 	ready   bool // 容器是否已确认就绪（避免每次 exec 都探测）
 	stopped bool // 用户显式停止后置位；ensure() 不会再自动 docker start
+
+	// memoryOverride 非空时覆盖 cfg.MemoryLimit（per-bot 配置）。
+	// "" 表示使用 cfg.MemoryLimit；"0" 或 "-" 表示不限制。
+	memoryOverride string
 }
 
 func newBotContainer(botID string, cfg Config, logger *zap.SugaredLogger) *botContainer {
@@ -252,8 +256,8 @@ func (c *botContainer) create(ctx context.Context) error {
 	}
 	args = append(args, "-e", "TZ="+tz)
 
-	if c.cfg.MemoryLimit != "" {
-		args = append(args, "--memory", c.cfg.MemoryLimit)
+	if mem := c.effectiveMemory(); mem != "" {
+		args = append(args, "--memory", mem)
 	}
 	if c.cfg.CPULimit != "" {
 		args = append(args, "--cpus", c.cfg.CPULimit)
@@ -324,6 +328,32 @@ func (c *botContainer) unstop() {
 	defer c.mu.Unlock()
 	c.stopped = false
 	c.ready = false
+}
+
+// SetMemoryOverride 设置内存限制覆盖值。
+// limit 为 "" 时清除覆盖（使用 cfg.MemoryLimit）；
+// 为 "0" 或 "-" 时不设置内存限制；
+// 其他值直接作为 docker --memory 参数。
+func (c *botContainer) SetMemoryOverride(limit string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.memoryOverride = limit
+}
+
+// effectiveMemory 返回实际使用的 --memory 值。
+//   - memoryOverride 为空：使用 cfg.MemoryLimit（系统默认 2G）。
+//   - memoryOverride 为 "0" 或 "-"：显式不限制（返回 ""，docker run 不加 --memory）。
+//   - 其他：直接使用该值（如 "4096m"）。
+func (c *botContainer) effectiveMemory() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.memoryOverride == "" {
+		return c.cfg.MemoryLimit
+	}
+	if c.memoryOverride == "0" || c.memoryOverride == "-" {
+		return "" // 不限制
+	}
+	return c.memoryOverride
 }
 
 // execInContainer 在容器内执行一条 shell 命令（底层原语）。
