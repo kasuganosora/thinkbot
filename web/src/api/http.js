@@ -9,7 +9,22 @@
 //   失败：{ code: <非零>, message: '错误描述', data: null }
 // ============================================================================
 
+import { useUserStore } from '@/stores/user'
+
 export const USE_MOCK = false
+
+// 会话失效（401）统一处理：清本地登录态并跳回登录页。
+// 这样即使 localStorage 残留登录信息、但服务端 cookie 已失效，
+// 接口报 401 时也能自动回到登录页，而不是卡在受保护页面。
+function handleUnauthorized() {
+  if (window.location.hash === '#/login') return
+  try {
+    useUserStore().logout()
+  } catch (e) {
+    localStorage.removeItem('bp_user')
+  }
+  window.location.hash = '#/login'
+}
 
 // 模拟网络延迟（毫秒），让 loading 状态可见
 const MOCK_LATENCY = 280
@@ -87,6 +102,13 @@ export async function request(method, url, body, query) {
     credentials: 'include',
     body: body ? JSON.stringify(body) : undefined
   })
+  if (resp.status === 401) {
+    handleUnauthorized()
+    const json = await resp.json().catch(() => ({}))
+    const err = new Error(json.message || '登录已失效，请重新登录')
+    err.code = 401
+    throw err
+  }
   const json = await resp.json()
   if (json.code !== 0) {
     const err = new Error(json.message || '请求失败')
@@ -112,6 +134,13 @@ export async function uploadRequest(method, url, formData, query) {
     credentials: 'include',
     body: formData
   })
+  if (resp.status === 401) {
+    handleUnauthorized()
+    const json = await resp.json().catch(() => ({}))
+    const err = new Error(json.message || '登录已失效，请重新登录')
+    err.code = 401
+    throw err
+  }
   const json = await resp.json()
   if (json.code !== 0) {
     const err = new Error(json.message || '上传失败')
