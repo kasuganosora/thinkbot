@@ -256,7 +256,7 @@ func (c *botContainer) create(ctx context.Context) error {
 	}
 	args = append(args, "-e", "TZ="+tz)
 
-	if mem := c.effectiveMemory(); mem != "" {
+	if mem := c.effectiveMemoryLocked(); mem != "" {
 		args = append(args, "--memory", mem)
 	}
 	if c.cfg.CPULimit != "" {
@@ -344,9 +344,11 @@ func (c *botContainer) SetMemoryOverride(limit string) {
 //   - memoryOverride 为空：使用 cfg.MemoryLimit（系统默认 2G）。
 //   - memoryOverride 为 "0" 或 "-"：显式不限制（返回 ""，docker run 不加 --memory）。
 //   - 其他：直接使用该值（如 "4096m"）。
-func (c *botContainer) effectiveMemory() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+//
+// effectiveMemoryLocked 内部版本：调用方必须已持有 c.mu。
+// 拆出此版本是为了避免在持锁路径（如 ensure→create）中再次请求同一把锁，
+// 否则会与自身持有的锁构成 Mutex 自死锁（Go 的 sync.Mutex 不可重入）。
+func (c *botContainer) effectiveMemoryLocked() string {
 	if c.memoryOverride == "" {
 		return c.cfg.MemoryLimit
 	}
