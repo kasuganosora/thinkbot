@@ -133,12 +133,12 @@ func (m *BotWorkspaceManager) SetBotMemoryOverride(botID string, mb int64) {
 	m.memoryOverrides[botID] = mb
 }
 
-// getBotMemoryLimit 获取指定 bot 的内存限制字符串（用于 docker --memory）。
+// getBotMemoryLimitLocked 返回指定 bot 的内存限制字符串（用于 docker --memory）。
+// 调用方必须已持有 m.mu（读锁或写锁均可）。拆出此无锁版本是为了避免在持写锁的路径
+// （如 GetOrCreate 慢路径）中再次请求读锁，否则会与自身持有的写锁构成 RWMutex 自死锁。
 // 返回 "" 表示使用全局默认（m.cfg.MemoryLimit）；返回 "-" 表示显式不限制。
-func (m *BotWorkspaceManager) getBotMemoryLimit(botID string) string {
-	m.mu.RLock()
+func (m *BotWorkspaceManager) getBotMemoryLimitLocked(botID string) string {
 	mb, ok := m.memoryOverrides[botID]
-	m.mu.RUnlock()
 	if !ok {
 		return m.cfg.MemoryLimit // 未设置覆盖，用全局默认
 	}
@@ -197,7 +197,7 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 	// docker 持久容器模式：为该 bot 绑定一个长期容器（惰性创建）。
 	if m.backend == "docker" && m.cfg.PersistentContainer {
 		c := newBotContainer(botID, m.cfg, m.logger)
-		if mem := m.getBotMemoryLimit(botID); mem != m.cfg.MemoryLimit {
+		if mem := m.getBotMemoryLimitLocked(botID); mem != m.cfg.MemoryLimit {
 			c.SetMemoryOverride(mem)
 		}
 		ws.container = c
