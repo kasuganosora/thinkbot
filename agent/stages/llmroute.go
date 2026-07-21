@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"errors"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -241,6 +242,16 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		result, err = s.processStream(statsCtx, env, cfg, logger)
 		if err != nil {
 			span.RecordError(err)
+			if errors.Is(err, context.Canceled) {
+				logger.Debugw("llm stage: stream orchestrate canceled (client disconnected)",
+					"message_id", env.Message.ID,
+					"err", err)
+				return env, &core.PipelineError{
+					Stage:   s.name,
+					Message: "LLM stream orchestrate canceled",
+					Cause:   err,
+				}
+			}
 			logger.Errorw("llm stage: stream orchestrate failed",
 				"message_id", env.Message.ID,
 				"err", err)
@@ -255,6 +266,16 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		result, err = llm.OrchestrateGenerate(statsCtx, s.provider, cfg)
 		if err != nil {
 			span.RecordError(err)
+			if errors.Is(err, context.Canceled) {
+				logger.Debugw("llm stage: orchestrate canceled (client disconnected)",
+					"message_id", env.Message.ID,
+					"err", err)
+				return env, &core.PipelineError{
+					Stage:   s.name,
+					Message: "LLM orchestrate canceled",
+					Cause:   err,
+				}
+			}
 			logger.Errorw("llm stage: orchestrate failed",
 				"message_id", env.Message.ID,
 				"err", err)

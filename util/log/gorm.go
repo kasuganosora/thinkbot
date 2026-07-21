@@ -167,7 +167,9 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 
 	switch {
 	case err != nil && l.level >= gormlogger.Error &&
-		(!l.ignoreRecordNotFoundError || !errors.Is(err, gormlogger.ErrRecordNotFound)):
+		(!l.ignoreRecordNotFoundError || !errors.Is(err, gormlogger.ErrRecordNotFound)) &&
+		// 客户端断开 / 超时取消是预期中断，不应记为 ERROR（避免误报刷屏）
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded):
 		sql, rows := fc()
 		l.zl.Error("gorm query error",
 			append(tf, caller,
