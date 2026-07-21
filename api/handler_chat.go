@@ -246,24 +246,77 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			return
 		}
 		src := toolCalls[idx]
-		for i := len(parts) - 1; i >= 0; i-- {
-			if parts[i]["type"] == "tool" && parts[i]["id"] == toolCallID {
-				// 合并 src 的字段到 part（不覆盖 type/id/name 等标识字段）
-				p := parts[i]
-				for k, v := range src {
-					if k != "type" && k != "id" && k != "name" {
-						p[k] = v
-					}
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i]["type"] == "tool" && parts[i]["id"] == toolCallID {
+			// 合并 src 的字段到 part（不覆盖 type/id/name 等标识字段）
+			p := parts[i]
+			for k, v := range src {
+				if k != "type" && k != "id" && k != "name" {
+					p[k] = v
 				}
-				break
 			}
+			break
 		}
 	}
+}
+
+// saveAssistant 将本轮 assistant 回复（文本 + 工具调用 + 有序 parts）持久化到 DB。
+// 供「正常完成」与「客户端断开」两条路径共用，确保工具调用终态（success/error/killed）
+// 都能落库，避免重连后卡片停留在 running。
+saveAssistant := func() {
+	if fullText == "" && len(toolCalls) == 0 {
+		return
+	}
+	toolCallsJSON := ""
+	if len(toolCalls) > 0 {
+		if b, err := json.Marshal(toolCalls); err == nil {
+			toolCallsJSON = string(b)
+		}
+	}
+	partsJSON := ""
+	if len(parts) > 0 {
+		if b, err := json.Marshal(parts); err == nil {
+			partsJSON = string(b)
+		}
+	}
+	go func(content, tcJSON, pJSON string) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Errorw("panic saving assistant message", "err", r)
+			}
+		}()
+		if err := s.chatHistory.SaveMessageWithParts(botID, userID, "assistant", content, traceID, tcJSON, pJSON, req.SessionID); err != nil {
+			s.logger.Warnw("failed to save assistant message", "err", err)
+		}
+	}(fullText, toolCallsJSON, partsJSON)
+}
 
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			// 客户端断开
+			// 客户端断开：中止 bot 执行链路（取消 ctx → 级联 kill 进行中的工具进程），
+			// 并将仍处于 running 的工具调用标记为 killed 后落库，避免重连后卡片永久
+			// 停留在「执行中」（孤儿会话）。
+			s.botSvc.AbortMessage(botID, traceID)
+			killedAny := false
+			for _, tc := range toolCalls {
+				if tc["status"] == "running" {
+					tc["status"] = "killed"
+					tc["output"] = map[string]any{
+						"stdout":    "",
+						"stderr":    "执行被客户端断开中断",
+						"exitCode":  nil,
+						"truncated": false,
+						"killed":    true,
+					}
+					killedAny = true
+				}
+			}
+			if killedAny {
+				s.logger.Infow("chat SSE: client disconnected, marked in-flight tool calls killed",
+					"bot_id", botID, "trace_id", traceID)
+			}
+			saveAssistant()
 			return
 
 		case <-idleTimer.C:
@@ -432,39 +485,16 @@ func (s *Server) handleChatSend(c *gin.Context) {
 						flusher.Flush()
 					}
 				}
-				donePayload := map[string]any{"text": fullText}
-				if len(toolCalls) > 0 {
-					donePayload["toolCalls"] = toolCalls
-				}
-				writeSSE(c.Writer, sseDone, donePayload)
-				flusher.Flush()
+			donePayload := map[string]any{"text": fullText}
+			if len(toolCalls) > 0 {
+				donePayload["toolCalls"] = toolCalls
+			}
+			writeSSE(c.Writer, sseDone, donePayload)
+			flusher.Flush()
 
-				// 保存 Bot 回复到 DB（含工具调用信息 + 有序 parts）
-				if fullText != "" || len(toolCalls) > 0 {
-					toolCallsJSON := ""
-					if len(toolCalls) > 0 {
-						if b, err := json.Marshal(toolCalls); err == nil {
-							toolCallsJSON = string(b)
-						}
-					}
-					partsJSON := ""
-					if len(parts) > 0 {
-						if b, err := json.Marshal(parts); err == nil {
-							partsJSON = string(b)
-						}
-					}
-					go func(content, tcJSON, pJSON string) {
-						defer func() {
-							if r := recover(); r != nil {
-								s.logger.Errorw("panic saving assistant message", "err", r)
-							}
-						}()
-						if err := s.chatHistory.SaveMessageWithParts(botID, userID, "assistant", content, traceID, tcJSON, pJSON, req.SessionID); err != nil {
-							s.logger.Warnw("failed to save assistant message", "err", err)
-						}
-					}(fullText, toolCallsJSON, partsJSON)
-				}
-				return
+			// 保存 Bot 回复到 DB（含工具调用信息 + 有序 parts）
+			saveAssistant()
+			return
 			}
 		}
 	}
