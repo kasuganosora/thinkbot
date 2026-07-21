@@ -338,6 +338,15 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
+	// 关键：必须在 Start() 之前设置进程组，否则 SysProcAttr 不生效。
+	// 进程组看门狗依赖它：ctx 取消时 syscall.Kill(-pid) 才能连带杀掉
+	// sh -c "cmd | head" 的全部子孙进程，避免子进程持管道写端导致
+	// cmd.Wait() 永久阻塞（即「执行中」永不停的根因）。
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	} else {
+		cmd.SysProcAttr.Setpgid = true
+	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -351,14 +360,9 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 	}
 
 	// 进程组看门狗：当 ctx 被取消（超时 / 客户端断开 / 主动 abort）时，
-	// 杀掉整个进程组而非仅直接子进程。否则 `sh -c "cmd | head"` 中 head/cmd
-	// 仍持有管道写端会导致 cmd.Wait() 永久阻塞 —— 这正是「执行中」永不停的
-	// 根因。Setpgid 使本进程成为组首，kill(-pid) 可连带清理所有子孙。
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	} else {
-		cmd.SysProcAttr.Setpgid = true
-	}
+	// 杀掉整个进程组而非仅直接子进程。配合上方 Setpgid（已在 Start 前设置），
+	// kill(-pid) 可连带清理 sh -c "cmd | head" 的全部子孙，避免子进程持管道
+	// 写端导致 cmd.Wait() 永久阻塞 —— 这是「执行中」永不停的根因。
 	watchDone := make(chan struct{})
 	go func() {
 		select {

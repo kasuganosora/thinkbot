@@ -219,28 +219,27 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 //   - 仅作用于内存中的容器内存上限（不落库；bot 重启后恢复默认），避免「无限内存」风险。
 //   - 仅在命令被判定为 OOMKilled 时才触发，且只重试一次。
 //   - 任何内部错误均无害回退：返回首次的不可信结果（含警告），绝不丢弃已有输出。
-func (m *BotWorkspaceManager) RetryOOMWithElevatedMemory(ctx context.Context, botID string, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
+// RetryOOMWithElevatedMemory 在首次执行（由调用方已完成）判定为 OOM 后，
+// 临时提升沙箱内存上限、重建容器并重试一次（仅对 docker 持久容器生效）。
+// 注意：首次 ExecStream 已在 tools.go 的 sandbox_exec.Execute 中执行过，
+// 这里不再重复执行，避免同一命令跑 3 次（首次 + 内部冗余 + 重试）。
+func (m *BotWorkspaceManager) RetryOOMWithElevatedMemory(ctx context.Context, botID string, firstRes *ExecResult, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
+	if firstRes == nil || !firstRes.OOMKilled {
+		return firstRes, nil
+	}
 	ws, err := m.GetOrCreate(botID)
 	if err != nil {
 		return nil, err
 	}
 	sw, ok := ws.(StreamWorkspace)
 	if !ok {
-		return nil, errs.New("bot_workspace: workspace does not support streaming exec")
+		return firstRes, nil
 	}
 
-	res, err := sw.ExecStream(ctx, req, onChunk)
-	if err != nil {
-		return nil, err
-	}
-	if !res.OOMKilled {
-		return res, nil
-	}
-
-	// 仅 docker 持久容器模式能提升内存；local 模式无容器隔离，直接返回。
+	// 仅 docker 持久容器模式能提升内存；local 模式无容器隔离，直接返回首次结果。
 	bw, ok := ws.(*botWorkspace)
 	if !ok || bw.container == nil {
-		return res, nil
+		return firstRes, nil
 	}
 
 	limit := fmt.Sprintf("%dm", oomRetryElevatedMB)
@@ -253,12 +252,12 @@ func (m *BotWorkspaceManager) RetryOOMWithElevatedMemory(ctx context.Context, bo
 		m.logger.Warnw("exec OOM retry: container destroy failed, keeping original result",
 			"botID", botID, "err", derr)
 		bw.container.SetMemoryOverride(prev)
-		return res, nil
+		return firstRes, nil
 	}
 
 	retry, rerr := sw.ExecStream(ctx, req, onChunk)
 	if rerr != nil || retry == nil {
-		return res, nil
+		return firstRes, nil
 	}
 	m.logger.Infow("exec OOM retry succeeded after memory elevation",
 		"botID", botID, "elevatedTo", limit)

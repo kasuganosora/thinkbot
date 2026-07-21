@@ -205,8 +205,9 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			}
 
 			// 层2（agent 门禁·强版）：验证型命令 OOM 时自动重试一次（临时提升沙箱内存）。
+			// 首次执行已在上方完成，传入首结果避免重复执行。
 			if res.OOMKilled && isVerificationCommand(command) {
-				if retryRes, rerr := mgr.RetryOOMWithElevatedMemory(ctx, botID, req, onChunk); rerr == nil && retryRes != nil {
+				if retryRes, rerr := mgr.RetryOOMWithElevatedMemory(ctx, botID, res, req, onChunk); rerr == nil && retryRes != nil {
 					res = retryRes
 				}
 			}
