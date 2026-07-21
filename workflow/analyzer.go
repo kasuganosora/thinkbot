@@ -10,7 +10,6 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
-	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
@@ -121,6 +120,12 @@ type dagSpec struct {
 }
 
 // Analyze 分析需求并生成 DAG 节点列表。
+//
+// 注意：不强制使用 LLM 的 JSON 响应模式。经验表明 GLM 在
+// response_format=json_object 且输入需求较长时，经常返回空 content（HTTP 200 但
+// body 为空），导致解析直接失败、整个工作流在分析（准备）阶段就 failed 且无法恢复。
+// 改为仅靠 system prompt 约束输出 JSON，并依赖 parseDAGSpec/ExtractJSON 的 markdown
+// 容错提取。同时加入重试，偶发的空响应或截断可被自动恢复。
 func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode, error) {
 	ctx, span := a.tracer.Start(ctx, "workflow.analyzer.analyze")
 	defer span.End()
@@ -131,66 +136,90 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode,
 	// 构建分析任务
 	task := fmt.Sprintf("请将以下需求分解为 DAG 子任务图：\n\n%s", requirement)
 
-	// 调用 LLM（JSON 模式）
-	raw, err := a.saMgr.Delegate(ctx, analyzerSystemPrompt, task,
-		subagent.WithResponseFormat(&llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}),
-		subagent.WithTemperature(a.ec.AnalyzerTemperature),
-		subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
-	)
-	if err != nil {
-		span.RecordError(err)
-		return nil, errs.Wrap(err, "analyzer LLM call failed")
-	}
-
-	// 解析 JSON
-	spec, err := parseDAGSpec(raw)
-	if err != nil {
-		span.RecordError(err)
-		return nil, errs.Wrapf(err, "failed to parse analyzer output")
-	}
-
-	// 转换为领域对象
-	nodes := make([]*DAGNode, 0, len(spec.Nodes))
-	for _, sn := range spec.Nodes {
-		maxRetries := sn.MaxRetries
-		if maxRetries <= 0 {
-			maxRetries = 2
-		} else if maxRetries > maxNodeRetries {
-			maxRetries = maxNodeRetries
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 重试时提高温度，打破 GLM 在长输入下"稳定返回空"的退化行为
+		temp := a.ec.AnalyzerTemperature
+		if attempt > 1 {
+			temp = 0.7
 		}
-		maxIter := sn.MaxIterations
-		if maxIter <= 0 {
-			maxIter = 3
-		} else if maxIter > maxNodeIterations {
-			maxIter = maxNodeIterations
+
+		raw, err := a.saMgr.Delegate(ctx, analyzerSystemPrompt, task,
+			subagent.WithTemperature(temp),
+			subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
+		)
+		if err != nil {
+			lastErr = errs.Wrap(err, "analyzer LLM call failed")
+			logger.Warnw("analyzer LLM call failed, will retry",
+				"attempt", attempt, "max_attempts", maxAttempts, "error", err)
+			continue
 		}
-		nodes = append(nodes, &DAGNode{
-			ID:            sn.ID,
-			Name:          sn.Name,
-			Task:          sn.Task,
-			SystemPrompt:  sn.SystemPrompt,
-			Dependencies:  sn.Dependencies,
-			Review:        sn.Review,
-			ReviewPrompt:  sn.ReviewPrompt,
-			MaxRetries:    maxRetries,
-			MaxIterations: maxIter,
-		})
+
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			lastErr = errs.New("analyzer returned empty response")
+			logger.Warnw("analyzer returned empty response, will retry",
+				"attempt", attempt, "max_attempts", maxAttempts)
+			continue
+		}
+
+		// 解析 JSON（支持 markdown 包裹与混合文本容错提取）
+		spec, perr := parseDAGSpec(raw)
+		if perr != nil {
+			lastErr = errs.Wrapf(perr, "failed to parse analyzer output")
+			logger.Warnw("analyzer parse failed, will retry",
+				"attempt", attempt, "max_attempts", maxAttempts, "error", perr)
+			continue
+		}
+
+		// 转换为领域对象
+		nodes := make([]*DAGNode, 0, len(spec.Nodes))
+		for _, sn := range spec.Nodes {
+			maxRetries := sn.MaxRetries
+			if maxRetries <= 0 {
+				maxRetries = 2
+			} else if maxRetries > maxNodeRetries {
+				maxRetries = maxNodeRetries
+			}
+			maxIter := sn.MaxIterations
+			if maxIter <= 0 {
+				maxIter = 3
+			} else if maxIter > maxNodeIterations {
+				maxIter = maxNodeIterations
+			}
+			nodes = append(nodes, &DAGNode{
+				ID:            sn.ID,
+				Name:          sn.Name,
+				Task:          sn.Task,
+				SystemPrompt:  sn.SystemPrompt,
+				Dependencies:  sn.Dependencies,
+				Review:        sn.Review,
+				ReviewPrompt:  sn.ReviewPrompt,
+				MaxRetries:    maxRetries,
+				MaxIterations: maxIter,
+			})
+		}
+
+		// 校验 DAG
+		if err := ValidateDAG(nodes); err != nil {
+			lastErr = errs.Wrap(err, "generated DAG is invalid")
+			logger.Warnw("generated DAG invalid, will retry",
+				"attempt", attempt, "max_attempts", maxAttempts, "error", err)
+			continue
+		}
+
+		span.SetAttributes(attribute.Int("analyzer.node_count", len(nodes)))
+		logger.Infow("requirement analyzed", "nodes", len(nodes), "attempt", attempt)
+		for _, n := range nodes {
+			logger.Debugw("node", "id", n.ID, "name", n.Name,
+				"deps", n.Dependencies, "review", n.Review)
+		}
+		return nodes, nil
 	}
 
-	// 校验 DAG
-	if err := ValidateDAG(nodes); err != nil {
-		span.RecordError(err)
-		return nil, errs.Wrap(err, "generated DAG is invalid")
-	}
-
-	span.SetAttributes(attribute.Int("analyzer.node_count", len(nodes)))
-	logger.Infow("requirement analyzed", "nodes", len(nodes))
-	for _, n := range nodes {
-		logger.Debugw("node", "id", n.ID, "name", n.Name,
-			"deps", n.Dependencies, "review", n.Review)
-	}
-
-	return nodes, nil
+	span.RecordError(lastErr)
+	return nil, lastErr
 }
 
 // parseDAGSpec 解析 LLM 返回的 JSON 为 dagSpec。

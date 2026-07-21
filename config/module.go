@@ -428,7 +428,7 @@ func DefaultWorkflowConfig() WorkflowConfig {
 		RetryMaxMS:          10000,
 		ScheduleIntervalMS:  200,
 		AnalyzerTemperature: 0.3,
-		AnalyzerMaxTokens:   4096,
+		AnalyzerMaxTokens:   8192,
 	}
 }
 
@@ -931,7 +931,7 @@ func DefaultMap() map[string]string {
 		KeyWorkflowRetryMaxMS:        "10000",
 		KeyWorkflowScheduleInterval:  "200",
 		KeyWorkflowAnalyzerTemp:      "0.3",
-		KeyWorkflowAnalyzerMaxTokens: "4096",
+		KeyWorkflowAnalyzerMaxTokens: "8192",
 		// Engagement
 		KeyEngagementEnabled:            "false",
 		KeyEngagementReplyProbability:   "0.15",
