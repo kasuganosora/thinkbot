@@ -157,73 +157,6 @@ func (s *BotService) WorkspaceManagerForBot(botID string) (*sandbox.BotWorkspace
 	return mgr, nil
 }
 
-// workspaceExecAdapter 把 sandbox.Workspace 适配为 tools.WorkspaceExecutor，
-// 使 shell / list_files 工具无需直接依赖 sandbox 包即可走兼容层执行。
-type workspaceExecAdapter struct {
-	ws sandbox.Workspace
-}
-
-func (a *workspaceExecAdapter) WorkDir() string { return a.ws.WorkDir() }
-
-func (a *workspaceExecAdapter) Exec(ctx context.Context, req tools.WsExecRequest) (*tools.WsExecResult, error) {
-	res, err := a.ws.Exec(ctx, sandbox.ExecRequest{
-		Command: req.Command,
-		WorkDir: req.WorkDir,
-		Timeout: req.Timeout,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &tools.WsExecResult{
-		ExitCode:  res.ExitCode,
-		Stdout:    res.Stdout,
-		Stderr:    res.Stderr,
-		Truncated: res.Truncated,
-	}, nil
-}
-
-func (a *workspaceExecAdapter) ExecStream(ctx context.Context, req tools.WsExecRequest, onChunk func(stream, chunk string)) (*tools.WsExecResult, error) {
-	sw, ok := a.ws.(sandbox.StreamWorkspace)
-	if !ok {
-		return a.Exec(ctx, req)
-	}
-	res, err := sw.ExecStream(ctx, sandbox.ExecRequest{
-		Command: req.Command,
-		WorkDir: req.WorkDir,
-		Timeout: req.Timeout,
-	}, func(chunk sandbox.ExecChunk) {
-		if onChunk != nil {
-			onChunk(chunk.Stream, chunk.Data)
-		}
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &tools.WsExecResult{
-		ExitCode:  res.ExitCode,
-		Stdout:    res.Stdout,
-		Stderr:    res.Stderr,
-		Truncated: res.Truncated,
-	}, nil
-}
-
-func (a *workspaceExecAdapter) ListDir(ctx context.Context, path string) ([]tools.WsFileEntry, error) {
-	entries, err := a.ws.ListDir(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]tools.WsFileEntry, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, tools.WsFileEntry{
-			Name:    e.Name,
-			IsDir:   e.IsDir,
-			Size:    e.Size,
-			ModTime: e.ModTime,
-		})
-	}
-	return out, nil
-}
-
 // SandboxConfigForBot 构造文件管理 API 使用的 sandbox 配置，与运行时保持一致。
 // Backend 由 config 决定（默认 auto：有 Docker 则容器隔离，否则 local）。
 // 不带 per-bot 内存覆盖，使用系统默认（2G）。
@@ -529,15 +462,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	toolMgr := agenttools.NewToolManager(promptReg, s.store, s.logger)
 
 	// 注册通用工具（web_fetch, calculate, now, web_search 等）
+	// 注意：shell 命令执行与文件列举工具（sandbox_exec / sandbox_read_file 等）
+	// 由 sandbox 包通过 BotWorkspaceManager 在 Bot 构造时统一注册，这里不再注册。
 	if err := tools.RegisterTools(toolMgr, tools.Config{
 		TimezoneResolver: builder.GetBotTimezone,
-		WorkspaceResolver: func(botID string) (tools.WorkspaceExecutor, error) {
-			ws, err := s.ResolveWorkspace(botID)
-			if err != nil {
-				return nil, err
-			}
-			return &workspaceExecAdapter{ws: ws}, nil
-		},
 	}); err != nil {
 		rollback()
 		return errs.Wrap(err, "bot_service: register tools")

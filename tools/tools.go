@@ -30,12 +30,6 @@ type Config struct {
 	// 为 nil 时使用 time.Local。
 	TimezoneResolver func(botID string) string
 
-	// WorkspaceResolver 根据 botID 返回该 bot 的 sandbox 工作空间执行器。
-	// shell / list_files 工具借此把命令与目录列举路由到 sandbox 兼容层：
-	// 有 Docker 环境走隔离容器，无则走宿主机本地进程 —— 工具本身不感知后端。
-	// 为 nil 时不注册 shell 工具，且 list_files 退化为直读宿主文件系统（兼容旧行为）。
-	WorkspaceResolver func(botID string) (WorkspaceExecutor, error)
-
 	// HTTPTimeout HTTP 请求超时时间（默认 30 秒）。
 	HTTPTimeout time.Duration
 
@@ -106,17 +100,9 @@ func RegisterTools(mgr *agenttools.ToolManager, cfg Config) error {
 		return err
 	}
 
-	// list_files 与 shell：统一走 sandbox 兼容层。
-	// 有 WorkspaceResolver 时，两者都按 per-bot 工作空间路由（docker 容器 / 本地进程）；
-	// 为 nil 时，list_files 退化为直读宿主文件系统（兼容旧行为），不注册 shell。
-	if cfg.WorkspaceResolver != nil {
-		mgr.AddProvider(&shellToolProvider{resolve: cfg.WorkspaceResolver})
-		mgr.AddProvider(&listFilesToolProvider{resolve: cfg.WorkspaceResolver})
-	} else {
-		if err := mgr.Register(listFilesToolDef()); err != nil {
-			return err
-		}
-	}
+	// 注意：shell 命令执行与文件列举工具（sandbox_exec / sandbox_read_file 等）
+	// 由 sandbox 包通过 BotWorkspaceManager 统一注册（单一事实来源，避免双实现漂移）。
+	// 本包只注册与 bot 工作空间无关的通用工具（now / web_fetch / calculate 等）。
 
 	// 搜索工具（可选）
 	if cfg.SearchConfig != nil {
