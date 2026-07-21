@@ -54,6 +54,10 @@
 
     <!-- 展开内容 -->
     <div v-show="expanded" class="tc-body" :data-testid="`chat-toolcall-body-${call.id}`">
+      <!-- 卡死提示：running 超过阈值无更新，连接可能已中断 -->
+      <div v-if="state === 'timeout'" class="tc-interrupt">
+        ⚠️ 执行超时：连接可能已中断，结果未回传。请刷新对话或重新执行该命令。
+      </div>
       <!-- 文件类工具 -->
       <div
         v-for="(f, i) in (call.files || [])"
@@ -145,7 +149,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import toolLabels from '@/i18n/toolLabels'
 
@@ -161,7 +165,31 @@ function toolLabel(name) {
 }
 
 const expanded = ref(true)
-const state = computed(() => props.call.status || 'success')
+
+// 卡死看门狗：后端流式连接断开时，工具调用会永久停在 running（"执行中"）。
+// 若 running 状态超过阈值仍无更新，本地降级为 timeout，避免 UI 永久假死。
+const STUCK_TIMEOUT_MS = 3 * 60 * 1000
+const stuck = ref(false)
+let stuckTimer = null
+function clearStuckTimer() {
+  if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null }
+  stuck.value = false
+}
+function armStuckTimer() {
+  clearStuckTimer()
+  if (props.call.status === 'running') {
+    stuckTimer = setTimeout(() => { stuck.value = true }, STUCK_TIMEOUT_MS)
+  }
+}
+onMounted(armStuckTimer)
+onUnmounted(clearStuckTimer)
+// 每次收到新的 call 更新（流式 chunk / 最终 part）都重置计时器
+watch(() => props.call, armStuckTimer)
+
+const state = computed(() => {
+  if (stuck.value && props.call.status === 'running') return 'timeout'
+  return props.call.status || 'success'
+})
 
 // 执行标识短码：取 invocationId 去掉连字符后的前 8 位，用于在多步循环里
 // 一眼区分「这是第几次 exec 调用」。完整值见 title 与 data-invocation-id。
@@ -429,6 +457,15 @@ function onUndo() {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+.tc-interrupt {
+  font-size: 12px;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 2px 4px 6px;
 }
 .tc-file {
   display: flex;
