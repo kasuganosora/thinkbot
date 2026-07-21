@@ -32,6 +32,9 @@ export const useBotStore = defineStore('bot', () => {
   const activeSessionId = ref(null) // 当前选中的 session ID
   const pendingSessionId = ref(null) // URL / 外部指定的待选中 session（优先于自动选中）
 
+  // 当前会话中由 bot 通过 task 工具创建的工作流 ID（驱动 SessionWorkflowPanel 展示）
+  const activeWorkflowId = ref('')
+
   async function loadSessions(botId) {
     const bid = botId || activeBotId.value
     if (!bid) return
@@ -405,8 +408,28 @@ export const useBotStore = defineStore('bot', () => {
   // ---- 发送消息 ----
   // @param {string} content 消息文本
   // @param {Array}  [attachments] 附件列表 [{name, type, size, dataUrl}]
+  // 从工具返回 payload 中递归提取工作流 ID（task 工具返回 {workflowId:"wf-..."}）
+  function extractWorkflowId(payload) {
+    if (!payload || typeof payload !== 'object') return ''
+    const stack = [payload]
+    while (stack.length) {
+      const cur = stack.pop()
+      if (Array.isArray(cur)) { for (const it of cur) stack.push(it); continue }
+      if (cur && typeof cur === 'object') {
+        for (const [k, v] of Object.entries(cur)) {
+          if (typeof v === 'string' && /^wf-[\w-]+$/.test(v)) return v
+          if ((k === 'workflowId' || k === 'taskId') && typeof v === 'string' && v) return v
+          if (v && typeof v === 'object') stack.push(v)
+        }
+      }
+    }
+    return ''
+  }
+
   function sendMessage(content, attachments) {
     if (!activeBot.value || replying.value) return
+    // 新对话开始：清空上一轮工作流面板（task 触发时再重新显示）
+    activeWorkflowId.value = ''
     const botId = activeBotId.value
 
     const userTmpId = uid()
@@ -472,6 +495,9 @@ export const useBotStore = defineStore('bot', () => {
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
+        // task 工具返回里携带 workflowId（如 "wf-xxxx"），提取后驱动工作流面板展示
+        const wid = extractWorkflowId(payload)
+        if (wid) activeWorkflowId.value = wid
       },
       signal: _abortController.signal,
       attachments: attachments || [],
@@ -531,6 +557,7 @@ export const useBotStore = defineStore('bot', () => {
   return {
     bots, loading, error, replying, activeBotId,
     activeBot, messages, messagesLoading, hasMore,
+    activeWorkflowId,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
     loadMessages, loadMoreMessages, sendMessage, stopReply,
