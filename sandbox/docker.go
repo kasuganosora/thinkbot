@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -348,6 +349,29 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+
+	// 进程组看门狗：当 ctx 被取消（超时 / 客户端断开 / 主动 abort）时，
+	// 杀掉整个进程组而非仅直接子进程。否则 `sh -c "cmd | head"` 中 head/cmd
+	// 仍持有管道写端会导致 cmd.Wait() 永久阻塞 —— 这正是「执行中」永不停的
+	// 根因。Setpgid 使本进程成为组首，kill(-pid) 可连带清理所有子孙。
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	} else {
+		cmd.SysProcAttr.Setpgid = true
+	}
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				// 先杀进程组，再兜底杀直接子进程。
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = cmd.Process.Kill()
+			}
+		case <-watchDone:
+		}
+	}()
+	defer close(watchDone)
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var mu sync.Mutex

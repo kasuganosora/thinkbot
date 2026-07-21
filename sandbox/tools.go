@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -126,7 +127,11 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Description: "在工作空间中执行 shell 命令，返回 stdout、stderr 和 exitCode。" +
 			"用于终端操作（如构建、测试、git、包管理等）。" +
 			"不要用它做文件操作（读写、搜索文件），应使用专用工具。" +
-			"命令有超时限制（默认 30 秒），可配置 timeout 参数。" +
+			"命令有超时限制（默认 30 秒，可配置 timeout 参数）。" +
+			"【重要】不要为了限制输出而在命令末尾追加 `| head` / `| tail` / `| less` 等管道——" +
+			"沙箱已按 MaxOutput 字节自动截断输出，这类管道既冗余，又会在被测进程异常时" +
+			"导致命令永久挂起（子进程持有管道写端不退出）。如需更少输出，请用 timeout 或" +
+			"让命令自身限制（如 golangci-lint 的 --out-format）。" +
 			"返回还包含可靠性信号：reliable(命令是否完整可信)、aborted(是否中途失败)、" +
 			"oomKilled(是否被 OOM 杀死)、warnings(不可信原因)。" +
 			"若 reliable 为 false，说明命令未完整/可信地执行（可能因 OOM、超时或被杀死），" +
@@ -158,6 +163,10 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if command == "" {
 				return nil, fmt.Errorf("command is required")
 			}
+			// 剥离 LLM 自行追加的 `| head`/`| tail` 输出限制管道：
+			// 既冗余（sandbox 已按 MaxOutput 截断）又是命令永久挂死的常见根因。
+			stripped := false
+			command, stripped = stripOutputLimitingPipe(command)
 			workdir, _ := m["workdir"].(string)
 
 			req := ExecRequest{
@@ -200,6 +209,12 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				if retryRes, rerr := mgr.RetryOOMWithElevatedMemory(ctx, botID, req, onChunk); rerr == nil && retryRes != nil {
 					res = retryRes
 				}
+			}
+
+			// 若剥离了 `| head`/`| tail` 管道，提示 bot 该操作已被自动处理。
+			if stripped {
+				res.Warnings = append(res.Warnings,
+					"已自动剥离命令末尾的 `| head`/`| tail` 输出限制管道（沙箱已按 MaxOutput 截断输出，且此类管道可能导致命令挂死）")
 			}
 
 			return execResultToToolOutput(res, ws.WorkDir()), nil
@@ -932,4 +947,25 @@ func isVerificationCommand(cmd string) bool {
 		}
 	}
 	return false
+}
+
+// outputLimitPipeRE 匹配命令末尾用于「限制输出行数」的管道段，例如：
+//   | head -300   | head -n 300   | head   | tail -20   | tail -n 20
+// golangci-lint / go test 等命令经 LLM 自行追加这类管道时，若被测进程被 OOM /
+// 信号杀死，子进程可能仍持有管道写端，导致 head/tail 永不退出、命令永久挂起
+// （即「执行中」永不停）。而 sandbox 已按 MaxOutput 字节截断输出，该管道既冗余
+// 又是挂死源，故在执行前将其剥离。
+var outputLimitPipeRE = regexp.MustCompile(`(?i)\|\s*(?:head|tail)(?:\s+-n\s+\d+|\s+-\d+)?\s*$`)
+
+// stripOutputLimitingPipe 若命令以 `| head`/`| tail` 结尾则剥离该管道段，
+// 返回（清理后的命令, 是否剥离了管道）。被剥离的部分对结果无实质影响
+// （sandbox 已按 MaxOutput 截断），但能消除挂死风险。
+func stripOutputLimitingPipe(cmd string) (string, bool) {
+	if outputLimitPipeRE.MatchString(cmd) {
+		cleaned := outputLimitPipeRE.ReplaceAllString(cmd, "")
+		// 去掉管道前的多余空白（避免留下孤立的 "| "）。
+		cleaned = strings.TrimRight(cleaned, " \t|")
+		return strings.TrimSpace(cleaned), true
+	}
+	return cmd, false
 }

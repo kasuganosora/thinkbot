@@ -6,6 +6,39 @@ import (
 )
 
 // ============================================================================
+// stripOutputLimitingPipe — 剥离 LLM 自行追加的 `| head`/`| tail` 输出限制管道
+// ============================================================================
+
+func TestStripOutputLimitingPipe(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+		stri bool
+	}{
+		{"head -N", "golangci-lint run ./... 2>&1 | head -300", "golangci-lint run ./... 2>&1", true},
+		{"head -n N", "go test ./... | head -n 50", "go test ./...", true},
+		{"bare head", "cat file.log | head", "cat file.log", true},
+		{"tail -N", "grep -r foo . | tail -20", "grep -r foo .", true},
+		{"tail -n N", "ls -la | tail -n 5", "ls -la", true},
+		{"no pipe", "golangci-lint run ./... --timeout 10m", "golangci-lint run ./... --timeout 10m", false},
+		{"mid pipe kept", "cat a | grep x | head -10", "cat a | grep x", true},
+		{"case insensitive", "go build ./... | HEAD -5", "go build ./...", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, stripped := stripOutputLimitingPipe(c.in)
+			if stripped != c.stri {
+				t.Errorf("stripped = %v, want %v", stripped, c.stri)
+			}
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// ============================================================================
 // finalizeExecResult — 完整性 / 可信度信号
 // 对应 docs/shell_reliable_result_design.md §9 测试计划
 // ============================================================================
