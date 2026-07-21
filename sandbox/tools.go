@@ -126,7 +126,11 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Description: "在工作空间中执行 shell 命令，返回 stdout、stderr 和 exitCode。" +
 			"用于终端操作（如构建、测试、git、包管理等）。" +
 			"不要用它做文件操作（读写、搜索文件），应使用专用工具。" +
-			"命令有超时限制（默认 30 秒），可配置 timeout 参数。",
+			"命令有超时限制（默认 30 秒），可配置 timeout 参数。" +
+			"返回还包含可靠性信号：reliable(命令是否完整可信)、aborted(是否中途失败)、" +
+			"oomKilled(是否被 OOM 杀死)、warnings(不可信原因)。" +
+			"若 reliable 为 false，说明命令未完整/可信地执行（可能因 OOM、超时或被杀死），" +
+			"请勿将其当作完整结果使用，应提高沙箱内存上限或更换执行方式后重试。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -169,17 +173,36 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				return nil, err
 			}
 
-			result, err := ws.Exec(ctx, req)
+			// 流式输出（若后端支持且调用方提供进度回调）。
+			onChunk := func(c ExecChunk) {
+				if ctx.SendProgress != nil {
+					if c.Stream == "stderr" {
+						ctx.SendProgress(map[string]any{"stream": "stderr", "chunk": c.Data})
+					} else {
+						ctx.SendProgress(map[string]any{"stream": "stdout", "chunk": c.Data})
+					}
+				}
+			}
+			streamable, _ := ws.(StreamWorkspace)
+
+			var res *ExecResult
+			if streamable != nil && ctx.SendProgress != nil {
+				res, err = streamable.ExecStream(ctx, req, onChunk)
+			} else {
+				res, err = ws.Exec(ctx, req)
+			}
 			if err != nil {
 				return nil, err
 			}
 
-			return map[string]any{
-				"exitCode":  result.ExitCode,
-				"stdout":    result.Stdout,
-				"stderr":    result.Stderr,
-				"truncated": result.Truncated,
-			}, nil
+			// 层2（agent 门禁·强版）：验证型命令 OOM 时自动重试一次（临时提升沙箱内存）。
+			if res.OOMKilled && isVerificationCommand(command) {
+				if retryRes, rerr := mgr.RetryOOMWithElevatedMemory(ctx, botID, req, onChunk); rerr == nil && retryRes != nil {
+					res = retryRes
+				}
+			}
+
+			return execResultToToolOutput(res, ws.WorkDir()), nil
 		}),
 	}
 }
@@ -842,4 +865,71 @@ func BotWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []tools.ToolDe
 		})
 	}
 	return defs
+}
+
+// ============================================================================
+// 工具结果 → LLM 输出（含完整性 / 可信度信号）
+// ============================================================================
+
+// execResultToToolOutput 将底层 ExecResult 转为 LLM 工具返回结构，并注入可靠性信号。
+// 当结果不可信（reliable=false）时，额外设置 reliabilityWarning 字段，并把显著警告
+// 前置到 stdout，确保 LLM 无论如何都能看到「结果不完整」提示（agent 门禁·轻量版）。
+func execResultToToolOutput(res *ExecResult, workdir string) map[string]any {
+	out := map[string]any{
+		"exitCode":  res.ExitCode,
+		"stdout":    res.Stdout,
+		"stderr":    res.Stderr,
+		"truncated": res.Truncated,
+		"reliable":  res.Reliable,
+		"aborted":   res.Aborted,
+		"oomKilled": res.OOMKilled,
+		"warnings":  res.Warnings,
+		"workdir":   workdir,
+	}
+	if !res.Reliable {
+		warn := buildReliabilityWarning(res)
+		out["reliabilityWarning"] = warn
+		// 前置到 stdout，确保 LLM 无论如何都能看到不可信提示。
+		out["stdout"] = warn + "\n" + res.Stdout
+	}
+	return out
+}
+
+// buildReliabilityWarning 生成面向 LLM 的不可信警告文案。
+func buildReliabilityWarning(res *ExecResult) string {
+	var b strings.Builder
+	b.WriteString("⚠️ [工具结果不完整/不可信] ")
+	switch {
+	case res.OOMKilled:
+		b.WriteString("命令疑似被 OOM 杀死（沙箱内存不足），只拿到部分输出。")
+	case res.Aborted:
+		b.WriteString("命令中途失败（可能被信号杀死或超时），只拿到部分输出。")
+	default:
+		b.WriteString("命令执行结果不可信。")
+	}
+	if len(res.Warnings) > 0 {
+		b.WriteString(" 原因: " + strings.Join(res.Warnings, "; "))
+	}
+	b.WriteString(" 请勿将其当作完整结果使用；如需完整结果，请提高沙箱内存上限或更换执行方式后重试。")
+	return b.String()
+}
+
+// verificationCommandMarkers 命中即视为「验证型命令」（lint/test/build 等）——
+// 其输出若不完整会对 LLM 决策造成致命误导，故享受 OOM 自动重试等强门禁。
+var verificationCommandMarkers = []string{
+	"golangci-lint", "go test", "go build", "go vet", "go run",
+	"pytest", "pytest-", "npm test", "npm run build", "yarn test", "yarn build",
+	"make test", "make build", "cargo test", "cargo build", "tox", "mvn test", "gradle test",
+	"grep -c", "wc -l",
+}
+
+// isVerificationCommand 判断命令是否为验证型（大小写不敏感子串匹配）。
+func isVerificationCommand(cmd string) bool {
+	c := strings.ToLower(cmd)
+	for _, mk := range verificationCommandMarkers {
+		if strings.Contains(c, mk) {
+			return true
+		}
+	}
+	return false
 }

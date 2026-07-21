@@ -107,8 +107,19 @@ type ExecResult struct {
 	ExitCode int    `json:"exitCode"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
-	// Truncated 输出是否被截断（超过 MaxOutput 限制）。
+	// Truncated 输出是否被截断（超过 MaxOutput 限制）。仅表示「输出超长被截断，
+	// 命令已完整执行」，不表示「命令没跑完」。
 	Truncated bool `json:"truncated"`
+
+	// —— 完整性 / 可信度信号（shell 工具结果加固，见 docs/shell_reliable_result_design.md）——
+	// Reliable 命令是否正常且完整地执行（默认 true；命中 OOM / 信号杀 / 超时 / 异常文本则为 false）。
+	Reliable bool `json:"reliable"`
+	// Aborted 命令是否中途失败（OOM / 被信号杀死 / 超时）。
+	Aborted bool `json:"aborted"`
+	// OOMKilled 执行期间 cgroup oom_kill 计数是否增加（docker/local 后端在支持时填充）。
+	OOMKilled bool `json:"oomKilled"`
+	// Warnings 人类可读的不可信原因，回传给 LLM。
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ExecChunk 是命令执行中的流式输出片段。

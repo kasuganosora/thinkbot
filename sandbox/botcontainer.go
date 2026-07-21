@@ -380,37 +380,10 @@ func (c *botContainer) execInContainer(ctx context.Context, workDir, command str
 	args = append(args, c.container, "sh", "-c", command)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-
-	result := &ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
-	if maxOut := c.cfg.MaxOutput; maxOut > 0 {
-		if s, trunc := truncateString(result.Stdout, maxOut); trunc {
-			result.Stdout = s
-			result.Truncated = true
-		}
-		if s, trunc := truncateString(result.Stderr, maxOut); trunc {
-			result.Stderr = s
-			result.Truncated = true
-		}
-	}
-
-	if ctx.Err() == context.DeadlineExceeded {
-		result.ExitCode = -1
-		return result, nil
-	}
+	// 复用统一的执行 + 完整性检测收尾（finalizeExecResult）。
+	result, err := runCommandWithStreaming(ctx, cmd, c.cfg.MaxOutput, stdin, nil)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
-		}
+		return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
 	}
 	return result, nil
 }
@@ -446,7 +419,12 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	}
 
 	cmd := exec.CommandContext(execCtx, "docker", "exec", "-w", wd, c.container, "sh", "-c", req.Command)
-	result, err := runCommandWithStreaming(execCtx, cmd, c.cfg.MaxOutput, func(stream, chunk string) {
+
+	// OOM 检测：命令前后对比容器内 cgroup 的 oom_kill 计数。
+	// 这是最可靠的判定（不被管道掩盖退出码影响，如 `cmd | tee | head`）。
+	snap0, _ := readContainerCgroupOOMKill(execCtx, c.container)
+
+	result, err := runCommandWithStreaming(execCtx, cmd, c.cfg.MaxOutput, nil, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
@@ -454,6 +432,18 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
 	}
+
+	// 命令可能已超时导致 execCtx 失效，用独立短超时上下文读取 oom_kill 收尾值。
+	snapCtx, snapCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer snapCancel()
+	if snap1, ok := readContainerCgroupOOMKill(snapCtx, c.container); ok && snap1 > snap0 {
+		result.OOMKilled = true
+		result.Aborted = true
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("进程可能被 OOM 杀死（cgroup oom_kill 增加 %d→%d），结果不完整", snap0, snap1))
+	}
+	result.Reliable = !(result.Aborted || result.OOMKilled)
+
 	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
 		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
 	}
