@@ -209,6 +209,62 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 	return ws, nil
 }
 
+// RetryOOMWithElevatedMemory 执行命令；若因 OOM 失败，则临时提升该 bot 沙箱内存上限并重试一次。
+//
+// 适用场景：golangci-lint / go test 等内存饥饿的验证型命令在默认 2G 容器下被 OOM 杀死，
+// 仅拿到半份结果（见 docs/shell_reliable_result_design.md）。提升到的上限为 oomRetryElevatedMB
+//（6GB，实测足以跑完 community 80 包）。
+//
+// 安全性：
+//   - 仅作用于内存中的容器内存上限（不落库；bot 重启后恢复默认），避免「无限内存」风险。
+//   - 仅在命令被判定为 OOMKilled 时才触发，且只重试一次。
+//   - 任何内部错误均无害回退：返回首次的不可信结果（含警告），绝不丢弃已有输出。
+func (m *BotWorkspaceManager) RetryOOMWithElevatedMemory(ctx context.Context, botID string, req ExecRequest, onChunk func(ExecChunk)) (*ExecResult, error) {
+	ws, err := m.GetOrCreate(botID)
+	if err != nil {
+		return nil, err
+	}
+	sw, ok := ws.(StreamWorkspace)
+	if !ok {
+		return nil, errs.New("bot_workspace: workspace does not support streaming exec")
+	}
+
+	res, err := sw.ExecStream(ctx, req, onChunk)
+	if err != nil {
+		return nil, err
+	}
+	if !res.OOMKilled {
+		return res, nil
+	}
+
+	// 仅 docker 持久容器模式能提升内存；local 模式无容器隔离，直接返回。
+	bw, ok := ws.(*botWorkspace)
+	if !ok || bw.container == nil {
+		return res, nil
+	}
+
+	limit := fmt.Sprintf("%dm", oomRetryElevatedMB)
+	prev := bw.container.memoryOverride
+	m.logger.Infow("exec OOM detected: elevating sandbox memory and retrying once",
+		"botID", botID, "from", prev, "to", limit)
+	bw.container.SetMemoryOverride(limit)
+	if derr := bw.container.destroy(false); derr != nil {
+		// 重建失败：恢复原上限并返回首次的不可信结果（含警告）。
+		m.logger.Warnw("exec OOM retry: container destroy failed, keeping original result",
+			"botID", botID, "err", derr)
+		bw.container.SetMemoryOverride(prev)
+		return res, nil
+	}
+
+	retry, rerr := sw.ExecStream(ctx, req, onChunk)
+	if rerr != nil || retry == nil {
+		return res, nil
+	}
+	m.logger.Infow("exec OOM retry succeeded after memory elevation",
+		"botID", botID, "elevatedTo", limit)
+	return retry, nil
+}
+
 // BotDir 返回指定 bot 的工作空间目录路径（不存在则创建）。
 // 用于 SoulLoader 等外部模块获取 bot 数据目录。
 func (m *BotWorkspaceManager) BotDir(botID string) (string, error) {
@@ -689,7 +745,7 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		cmd.Env = env
 	}
 
-	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, func(stream, chunk string) {
+	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, nil, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}

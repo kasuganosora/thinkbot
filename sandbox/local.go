@@ -156,7 +156,10 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 		cmd.Env = append(os.Environ(), "TZ="+w.cfg.Timezone)
 	}
 
-	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, func(stream, chunk string) {
+	// OOM 检测：命令前后对比宿主进程 cgroup 的 oom_kill 计数（local 后端命令直接在宿主 cgroup 内运行）。
+	snap0, _ := readCgroupOOMKill()
+
+	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, nil, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
@@ -164,6 +167,15 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 	if err != nil {
 		return nil, errs.Wrap(err, "sandbox/local: exec command")
 	}
+
+	if snap1, ok := readCgroupOOMKill(); ok && snap1 > snap0 {
+		result.OOMKilled = true
+		result.Aborted = true
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("进程可能被 OOM 杀死（cgroup oom_kill 增加 %d→%d），结果不完整", snap0, snap1))
+	}
+	result.Reliable = !(result.Aborted || result.OOMKilled)
+
 	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
 		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
 	}

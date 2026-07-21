@@ -195,7 +195,7 @@ func (w *dockerWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChu
 	cmd := exec.CommandContext(execCtx, "docker",
 		"exec", "-w", targetDir, w.container, "sh", "-c", req.Command)
 
-	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, func(stream, chunk string) {
+	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, nil, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
@@ -331,7 +331,12 @@ func shellQuote(s string) string {
 }
 
 // runCommandWithStreaming 执行命令并可选回调 stdout/stderr 增量。
-func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, onChunk func(stream, chunk string)) (*ExecResult, error) {
+// stdin 非空时作为命令标准输入（用于 write_file 等场景）；onChunk 为 nil 时不回调。
+// 收尾处调用 finalizeExecResult 填充完整性 / 可信度信号（退出码 / 超时 / 输出文本特征）。
+func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, stdin []byte, onChunk func(stream, chunk string)) (*ExecResult, error) {
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -404,15 +409,17 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, onC
 
 	if ctx.Err() == context.DeadlineExceeded {
 		result.ExitCode = -1
-		return result, nil
-	}
-	if waitErr != nil {
+	} else if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 		} else {
 			return nil, waitErr
 		}
 	}
+
+	// 填充完整性 / 可信度信号（退出码 / 超时 / 输出文本特征）。
+	// cgroup OOM 由调用方在 ExecStream 中前后对比后叠加到 OOMKilled。
+	finalizeExecResult(result)
 	return result, nil
 }
 
