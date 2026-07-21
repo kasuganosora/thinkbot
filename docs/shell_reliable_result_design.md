@@ -244,3 +244,42 @@ return map[string]any{
    → 不落库。仅临时提升容器内内存上限（`oomRetryElevatedMB=6144`，6GB），重建容器重试一次；bot 重启后恢复默认，避免「无限内存」。
 3. 强版门禁的「验证型工具」清单是否够用，是否需要用户可配置？
    → 当前内置 `verificationCommandMarkers`（golangci-lint / go test / go build / go vet / go run / pytest / npm test / npm run build / yarn test / yarn build / make test / make build / cargo test / cargo build / tox / mvn test / gradle test / grep -c / wc -l 等）。后续如需用户可配置，可作为增强项。
+
+---
+
+## 12. 第二轮加固（2026-07-21）：彻底修复孤儿会话 + 抑制 head/tail 挂死
+
+第一轮实现后，线上仍出现 bot 卡在「执行中」的案例。根因梳理与修复如下：
+
+### 12.1 永久挂死根因
+`runCommandWithStreaming`（`sandbox/docker.go`）直接 `cmd.Wait()` 阻塞，超时仅设 `ExitCode=-1` 而**不 kill 进程**。
+`docker exec` 类长命令在 `sh -c "cmd | head"` 场景下，若 `cmd` 被 OOM/信号杀死，子进程 `head` 仍持有管道写端，
+`head` 永远等不到 EOF → `sh` 不返回 → `docker exec` 不退 → `cmd.Wait()` 永久阻塞 → 工具永不返回 →
+SSE 收不到 `tool_result` → 消息不落库 → 前端卡片永久「执行中」。
+
+### 12.2 修复 1：进程组 kill 看门狗（sandbox/docker.go）
+`runCommandWithStreaming` 启动后为命令设置 `SysProcAttr{Setpgid:true}`，并起一个看门狗 goroutine：
+`ctx.Done()` 时 `syscall.Kill(-pid, SIGKILL)` 杀整个进程组（fallback `Process.Kill()`）。
+覆盖三后端（docker 临时 / local / bot 持久容器，均复用此函数）。**保证命令在超时 / 客户端断开 /
+主动 abort 时必然终止**，从根上消灭永久挂死。
+
+### 12.3 修复 2：剥离 LLM 自行追加的 `| head` / `| tail`（sandbox/tools.go）
+bot（LLM）常自行在命令末尾加 `| head -300` 限制输出，正是 12.1 挂死的典型诱因，且冗余
+（sandbox 已按 `MaxOutput` 字节截断输出）。
+- `sandbox_exec.Description` 强化：**禁止**为限制输出追加 `| head`/`| tail`/`| less`，说明沙箱已自动截断。
+- `Execute` 中新增 `stripOutputLimitingPipe`：命令以 `| head`/`| tail`（含 `-n N`/`-N`/裸）结尾时自动剥离，
+  剥离后在 `Warnings` 中提示 bot。既消除挂死源，又不影响结果（输出本就被截断）。
+- 单测 `TestStripOutputLimitingPipe` 覆盖 `head -300` / `head -n N` / 裸 `head` / `tail` / 大小写 / 中段管道保留等。
+
+### 12.4 修复 3：客户端断开 → 中止执行并落库 killed（api/handler_chat.go）
+原 SSE 循环在 `c.Request.Context().Done()`（客户端断开）时直接 `return`，**既不保存消息也不中止 bot**
+→ 重连后卡片仍可能停留在 running（孤儿会话）。
+改为：
+- 调用已有的 `botSvc.AbortMessage(botID, traceID)` 取消 bot 执行 ctx → 级联 kill 进行中的工具进程
+  （复用 `RegisterMessageCancel` 注册的 cancel，经 `execCtx`→`exec.CommandContext` 生效）。
+- 将仍处于 `running` 的工具调用标记为 `killed`（带 `killed:true` 输出），经统一的 `saveAssistant` 闭包
+  持久化到 DB。前端 `ToolCallGroup` 已支持 `killed` 状态，重连后直接展示「已中断」而非「执行中」。
+- `saveAssistant` 闭包同时被「正常完成（done）」与「客户端断开」两条路径复用，确保工具终态必落库。
+
+> 至此，孤儿会话被从根上消除：命令必然终止（12.2）+ 断开必落库终态（12.4）+ 前端看门狗兜底
+> （`ToolCallCard` 3 分钟无更新降级 timeout）。三者共同构成「执行中」永不停的彻底修复。
