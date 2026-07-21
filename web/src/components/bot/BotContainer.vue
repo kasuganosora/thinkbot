@@ -57,16 +57,9 @@
               @change="onMemChange"
             />
             <span class="mem-unit">MB</span>
-            <t-button
-              size="small"
-              variant="base"
-              :loading="memSaving"
-              :disabled="!memDirty"
-              @click="onMemSave"
-            >保存</t-button>
-            <span v-if="memSaved" class="mem-hint ok">✓ 已保存</span>
-            <span v-else-if="memDirty" class="mem-hint dirty">已修改</span>
-            <span class="mem-hint tip">0 = 不限制内存 · 单位 MB</span>
+            <span v-if="memSaved" class="mem-hint ok">✓ 已生效</span>
+            <span v-else-if="memDirty" class="mem-hint dirty">未保存 · 重建容器后生效</span>
+            <span class="mem-hint tip">0 = 不限制</span>
           </div>
         </div>
 
@@ -96,6 +89,18 @@
           <div class="ic-value">{{ fmt(info.updatedAt) }}</div>
         </div>
         <div class="info-cell"></div>
+      </div>
+
+      <!-- 容器设置保存区（管整个容器配置） -->
+      <div class="ctn-config-actions">
+        <t-button
+          theme="primary"
+          :loading="memSaving"
+          @click="onMemSave"
+        >保存容器设置</t-button>
+        <span v-if="memSaved" class="mem-hint ok">✓ 已保存</span>
+        <span v-else-if="memDirty" class="mem-hint dirty">有未保存的更改</span>
+        <span v-else class="mem-hint tip">内存限制等容器配置修改后，点击此处统一保存</span>
       </div>
     </div>
 
@@ -215,9 +220,12 @@ function onMemChange(val) {
   clearTimeout(memTimer)
 }
 
-// 手动点击保存按钮
+// 手动点击保存按钮（始终可点；未变更时给出轻提示）
 async function onMemSave() {
-  if (!memDirty.value) return
+  if (!memDirty.value) {
+    MessagePlugin.info('容器设置未变更')
+    return
+  }
   clearTimeout(memTimer)
   await doSaveMemory()
 }
@@ -336,6 +344,13 @@ async function onCreateSnapshot() {
 .mem-hint.ok { color: #52c41a; }
 .mem-hint.dirty { color: #e6a23c; }
 .mem-hint.tip { color: #bbb; }
+
+/* 容器设置保存区 */
+.ctn-config-actions {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 20px; padding-top: 18px;
+  border-top: 1px dashed #ececec;
+}
 
 /* 提示条 */
 .ctn-tip {
