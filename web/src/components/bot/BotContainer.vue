@@ -57,8 +57,15 @@
               @change="onMemChange"
             />
             <span class="mem-unit">MB</span>
-            <span v-if="memSaving" class="mem-hint saving">保存中...</span>
-            <span v-else-if="memSaved" class="mem-hint ok">已保存</span>
+            <t-button
+              size="small"
+              variant="base"
+              :loading="memSaving"
+              :disabled="!memDirty"
+              @click="onMemSave"
+            >保存</t-button>
+            <span v-if="memSaved" class="mem-hint ok">✓ 已保存</span>
+            <span v-else-if="memDirty" class="mem-hint dirty">已修改</span>
             <span class="mem-hint tip">0 = 不限制内存 · 单位 MB</span>
           </div>
         </div>
@@ -156,6 +163,7 @@ const snapName = ref('')
 const memValue = ref(0)        // 当前编辑值
 const memSaving = ref(false)
 const memSaved = ref(false)
+const memDirty = ref(false)     // 值是否被修改但未保存
 let memTimer = null           // 防抖定时器
 
 const columns = [
@@ -191,31 +199,44 @@ async function load() {
     info.value = i
     snapshots.value = s
     memValue.value = i.memoryLimitMB || 0
+    memDirty.value = false
+    memSaved.value = false
   } finally {
     loading.value = false
   }
 }
 onMounted(load)
 
-// 内存限制变更（防抖保存）
+// 内存限制变更（标记脏 + 防抖自动保存）
 function onMemChange(val) {
   memValue.value = val ?? 0
+  memDirty.value = (memValue.value !== (info.value.memoryLimitMB || 0))
   memSaved.value = false
   clearTimeout(memTimer)
-  memTimer = setTimeout(async () => {
-    const mb = Number(memValue.value) || 0
-    memSaving.value = true
-    try {
-      await botContainerApi.updateConfig(props.botId, { memoryLimitMB: mb })
-      info.value.memoryLimitMB = mb
-      memSaved.value = true
-      setTimeout(() => { memSaved.value = false }, 2000)
-    } catch (e) {
-      MessagePlugin.error(e?.message || '保存失败')
-    } finally {
-      memSaving.value = false
-    }
-  }, 800)
+}
+
+// 手动点击保存按钮
+async function onMemSave() {
+  if (!memDirty.value) return
+  clearTimeout(memTimer)
+  await doSaveMemory()
+}
+
+// 执行保存
+async function doSaveMemory() {
+  const mb = Number(memValue.value) || 0
+  memSaving.value = true
+  try {
+    await botContainerApi.updateConfig(props.botId, { memoryLimitMB: mb })
+    info.value.memoryLimitMB = mb
+    memDirty.value = false
+    memSaved.value = true
+    setTimeout(() => { memSaved.value = false }, 3000)
+  } catch (e) {
+    MessagePlugin.error(e?.message || '保存失败')
+  } finally {
+    memSaving.value = false
+  }
 }
 
 async function onStart() {
@@ -313,6 +334,7 @@ async function onCreateSnapshot() {
 .mem-hint { font-size: 11px; white-space: nowrap; }
 .mem-hint.saving { color: #e6a23c; }
 .mem-hint.ok { color: #52c41a; }
+.mem-hint.dirty { color: #e6a23c; }
 .mem-hint.tip { color: #bbb; }
 
 /* 提示条 */
