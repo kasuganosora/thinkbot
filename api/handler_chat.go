@@ -309,6 +309,11 @@ saveAssistant := func() {
 						"truncated": false,
 						"killed":    true,
 					}
+					// 同步有序 parts 数组中对应的 tool part，否则重连后
+					// 前端按 parts 渲染仍会停在 running（孤儿卡片）。
+					if id, _ := tc["id"].(string); id != "" {
+						syncPartTool(id)
+					}
 					killedAny = true
 				}
 			}

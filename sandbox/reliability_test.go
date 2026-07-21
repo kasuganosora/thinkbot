@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -291,4 +292,24 @@ func containsWarning(ws []string, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ============================================================================
+// RetryOOMWithElevatedMemory — 回归：首次结果非 OOM 时不得重复执行命令
+// ============================================================================
+
+// TestRetryOOMWithElevatedMemory_NoOOMReturnsFirstRes 锁定修复：
+// 首次结果非 OOM 时必须原样返回，不得再内部执行一遍 ExecStream
+// （历史 bug：函数内先重复跑一次未升内存的命令，导致同一命令被执行 3 次）。
+func TestRetryOOMWithElevatedMemory_NoOOMReturnsFirstRes(t *testing.T) {
+	mgr := &BotWorkspaceManager{} // 零值即可：OOMKilled=false 时不会触达 GetOrCreate
+	first := &ExecResult{ExitCode: 0, Stdout: "ok", OOMKilled: false, Reliable: true}
+	got, err := mgr.RetryOOMWithElevatedMemory(
+		context.Background(), "bot-x", first, ExecRequest{Command: "echo hi"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != first {
+		t.Error("expected the exact same firstRes pointer returned (no re-exec on non-OOM)")
+	}
 }
