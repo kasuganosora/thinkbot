@@ -397,8 +397,8 @@ function groupToolCalls(calls) {
   return groups
 }
 
-// 工作流（预留）
-const sessionWorkflowId = computed(() => '')
+// 工作流：由 bot 在对话中通过 task 工具创建后，从 store 拿到 workflowId 驱动面板展示
+const sessionWorkflowId = computed(() => store.activeWorkflowId)
 
 const userInitial = computed(() => {
   const name = userStore.user?.nickname || userStore.user?.username || 'U'
