@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -36,6 +37,17 @@ type SubAgentManager struct {
 
 	// 并发控制
 	maxConcurrency int // DelegateMany 的最大并发数（0=不限制）
+
+	// toolMgr 是可选的「主 Agent 工具解析器」。非 nil 时，委托创建的子 Agent
+	// 会解析主 Agent 在子 Agent 场景下可用的全部工具（exec/读/写/列目录等，
+	// 由 scope 自动排除 spawn 防套娃），并注入执行回路使其能像主 Agent 一样
+	// 操作工作空间。nil 表示子 Agent 不携带任何工具（纯 LLM，旧行为，如 workflow 分析器）。
+	toolMgr *tools.ToolManager
+	// baseCtx 是解析子 Agent 工具时的会话上下文模板（通常只填 BotID；
+	// IsSubagent 在 resolveTools 时强制置 true）。
+	baseCtx tools.ToolSessionContext
+	// defaultToolSteps 是带工具回路时的默认最大 LLM 步数预算（0 = 包默认）。
+	defaultToolSteps int
 }
 
 // SubAgentInfo 描述一个活跃的持久化 SubAgent。
@@ -86,6 +98,36 @@ func (m *SubAgentManager) SetMaxConcurrency(n int) {
 	}
 }
 
+// SetToolResolver 让委托创建的子 Agent 继承主 Agent 的可用工具（经 scope 过滤，
+// 自动排除 spawn 防套娃），从而能操作工作空间（exec/读/写/列目录等）。
+// base 通常只填 BotID；解析时 IsSubagent 会被强制置 true。
+// 不调用本方法（或传 nil toolMgr）则子 Agent 不携带工具（纯 LLM，旧行为）。
+func (m *SubAgentManager) SetToolResolver(toolMgr *tools.ToolManager, base tools.ToolSessionContext) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.toolMgr = toolMgr
+	m.baseCtx = base
+}
+
+// SetDefaultToolSteps 设置带工具执行回路时的默认最大 LLM 步数预算（0 = 包默认）。
+// 应在 Delegate/DelegateMany/Spawn 调用前设置。
+func (m *SubAgentManager) SetDefaultToolSteps(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.defaultToolSteps = n
+}
+
+// resolveTools 解析子 Agent 场景下可用的工具列表（IsSubagent=true）。
+// toolMgr 为 nil 时返回 nil（子 Agent 不带工具）。
+func (m *SubAgentManager) resolveTools(ctx context.Context) ([]llm.Tool, error) {
+	if m.toolMgr == nil {
+		return nil, nil
+	}
+	sctx := m.baseCtx
+	sctx.IsSubagent = true
+	return m.toolMgr.ResolveTools(ctx, &sctx)
+}
+
 // ============================================================================
 // 流式委托 + 卡死看门狗
 // ============================================================================
@@ -112,6 +154,11 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 
 	// 合并选项（WithCallTimeout 可能覆盖默认超时）
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
+
+	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
+	if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	}
 
 	// 创建临时 SubAgent 以提取 callTimeout 覆盖值
 	sa := New(m.provider, m.model, allOpts...)
@@ -141,6 +188,9 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 //   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），作为绝对兜底，
 //     防止无限挂起（如模型以极小间隔吐 token 骗过卡死检测）。
 //
+// 带工具的场景（子 Agent 注入主 Agent 工作空间工具）：工具自身的看门狗已保护长命令，
+// 此处不再叠加 LLM 输出停滞看门狗（否则长 exec 会被误判卡死），直接走编排流式回路。
+//
 // 参数：
 //   - WithStuckTimeout(d)：覆盖卡死阈值（默认 180s）；WithCallTimeout 对本方法无效。
 //
@@ -148,8 +198,29 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
 	_, _, defaultOpts := m.snapshotConfig()
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
+
+	// 注入主 Agent 在子 Agent 场景可用的工具（如有）。
+	if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	}
+
 	sa := New(m.provider, m.model, allOpts...)
 	defer sa.Close()
+
+	// 带工具：直接走编排流式回路（工具执行有自身看门狗），不做额外 LLM 停滞看门狗。
+	if len(sa.extraTools) > 0 {
+		stream, err := sa.Stream(ctx, task)
+		if err != nil {
+			return "", errs.Wrapf(err, "subagent stream failed")
+		}
+		var b strings.Builder
+		for part := range stream.Stream {
+			if tp, ok := part.(*llm.TextDeltaPart); ok {
+				b.WriteString(tp.Text)
+			}
+		}
+		return b.String(), nil
+	}
 
 	// 解析卡死阈值（stuck）与硬上限（hard = stuck × factor，派生，不写死）
 	stuck := sa.stuckTimeout
@@ -253,6 +324,11 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 	// 预计算合并选项（WithCallTimeout 可能覆盖默认超时）
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 
+	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
+	if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	}
+
 	// 创建临时实例提取 callTimeout
 	dummy := New(m.provider, m.model, allOpts...)
 	effectiveTimeout := timeout
@@ -323,6 +399,11 @@ func (m *SubAgentManager) Spawn(systemPrompt, name string, opts ...Option) (stri
 		allOpts = append(allOpts, WithSystemPrompt(systemPrompt))
 	}
 	allOpts = append(allOpts, opts...)
+
+	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
+	if tools, err := m.resolveTools(context.Background()); err == nil && len(tools) > 0 {
+		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	}
 
 	sa := New(m.provider, m.model, allOpts...)
 	m.subagents[id] = sa
