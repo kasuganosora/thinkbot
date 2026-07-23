@@ -34,8 +34,19 @@ import (
 //	reply, err := sub.Chat(ctx, "审查这段代码: ...")
 // ============================================================================
 
+// defaultSubagentToolSteps 是子 Agent 带工具执行回路时的默认最大 LLM 步数预算。
+// 仅当通过 WithTools 注入了可执行工具、且 toolSteps != 0 时启用多步编排回路。
+const defaultSubagentToolSteps = 20
+
 // SubAgent 是一个上下文隔离的轻量 Agent。
 // 它复用主 Agent 的 LLM Provider，但维护独立的对话历史。
+//
+// 工具能力：若通过 WithTools 注入了带 Execute 处理函数的工具（通常由
+// SubAgentManager 从主 Agent 的 ToolManager 解析后注入），且 toolSteps != 0，
+// 则 Chat/Stream 会走 llm.OrchestrateGenerate/Stream 多步回路——自动执行工具、
+// 将结果喂回模型，直到模型停止请求工具。子 Agent 因此能像主 Agent 一样使用
+// 工作空间（exec/读/写/列目录等），只是不能 spawn 子 Agent（由 spawn 工具的
+// scope 排除，防止套娃）。
 type SubAgent struct {
 	mu sync.Mutex
 
@@ -67,6 +78,10 @@ type SubAgent struct {
 	// 额外生成参数
 	extraTools     []llm.Tool
 	responseFormat *llm.ResponseFormat
+
+	// toolSteps 是带工具执行回路时的最大 LLM 步数预算（>0 启用 OrchestrateGenerate/Stream）。
+	// 0 = 使用包默认 defaultSubagentToolSteps。仅当 extraTools 非空时生效。
+	toolSteps int
 }
 
 // New 创建一个 SubAgent。
@@ -114,6 +129,35 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 	msgs = append(msgs, history...)
 	msgs = append(msgs, llm.UserMessage(text))
 
+	// 带可执行工具时走多步编排回路：自动执行工具并把结果喂回模型，
+	// 直到模型停止请求工具。子 Agent 因此能像主 Agent 一样使用工作空间。
+	if len(sa.extraTools) > 0 && sa.toolSteps != 0 {
+		params := sa.buildParams(msgs)
+		steps := sa.toolSteps
+		if steps <= 0 {
+			steps = defaultSubagentToolSteps
+		}
+		cfg := &llm.OrchestrateConfig{
+			Params:       params,
+			MaxSteps:     steps,
+			HardMaxSteps: 0, // 0 = 自动 = MaxSteps * 3（看门狗兜底）
+		}
+		result, err := llm.OrchestrateGenerate(ctx, sa.provider, cfg)
+		if err != nil {
+			return nil, errs.Wrapf(err, "subagent %q: orchestrated generate failed", sa.name)
+		}
+		// 持久化完整输出消息（含工具调用/结果），保证多轮上下文连贯。
+		sa.mu.Lock()
+		if !sa.closed {
+			for _, m := range result.Messages {
+				sa.ctxMgr.Append(m)
+			}
+			sa.totalTurns++
+		}
+		sa.mu.Unlock()
+		return result, nil
+	}
+
 	params := sa.buildParams(msgs)
 
 	result, err := sa.provider.DoGenerate(llm.WithStatsFeature(ctx, "subagent"), params)
@@ -146,6 +190,52 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 	msgs := make([]llm.Message, 0, len(history)+1)
 	msgs = append(msgs, history...)
 	msgs = append(msgs, llm.UserMessage(text))
+
+	// 带可执行工具时走多步编排流式回路（自动执行工具）。
+	if len(sa.extraTools) > 0 && sa.toolSteps != 0 {
+		params := sa.buildParams(msgs)
+		steps := sa.toolSteps
+		if steps <= 0 {
+			steps = defaultSubagentToolSteps
+		}
+		cfg := &llm.OrchestrateConfig{
+			Params:       params,
+			MaxSteps:     steps,
+			HardMaxSteps: 0, // 0 = 自动 = MaxSteps * 3
+		}
+		result, err := llm.OrchestrateStream(ctx, sa.provider, cfg)
+		if err != nil {
+			return nil, errs.Wrapf(err, "subagent %q: orchestrated stream failed", sa.name)
+		}
+		// 流结束后把最终文本持久化到上下文（工具中间消息不持久化，
+		// 因流式场景无法在消费后可靠回调更新）。
+		originalCh := result.Stream
+		wrappedCh := make(chan llm.StreamPart, 256)
+		go func() {
+			defer close(wrappedCh)
+			var textBuf string
+			for part := range originalCh {
+				select {
+				case wrappedCh <- part:
+					if tp, ok := part.(*llm.TextDeltaPart); ok {
+						textBuf += tp.Text
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+			if textBuf != "" {
+				sa.mu.Lock()
+				if !sa.closed {
+					sa.ctxMgr.AppendTurn(text, textBuf)
+					sa.totalTurns++
+				}
+				sa.mu.Unlock()
+			}
+		}()
+		result.Stream = wrappedCh
+		return result, nil
+	}
 
 	params := sa.buildParams(msgs)
 
