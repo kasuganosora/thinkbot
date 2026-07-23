@@ -37,12 +37,8 @@ func NewProvider(mgr *Manager) *Provider {
 
 // Tools 实现 tools.ToolProvider 接口。
 // 返回所有已连接 MCP 服务器的工具列表。
+// 主 Agent 与子 Agent 共用同一套 MCP 工具（子 Agent 仅不能 spawn，其余有权使用的工具皆可访问）。
 func (p *Provider) Tools(ctx context.Context, sctx *tools.ToolSessionContext) ([]llm.Tool, error) {
-	// SubAgent 场景不暴露 MCP 工具
-	if sctx != nil && sctx.IsSubagent {
-		return nil, nil
-	}
-
 	// 使用缓存（如果可用）
 	if cached := p.getCached(); cached != nil {
 		return cached, nil
