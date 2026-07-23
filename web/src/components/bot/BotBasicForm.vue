@@ -58,6 +58,12 @@
             <t-input-number v-model="form.workers" :min="1" :max="64" style="width: 100%" data-testid="bot-workers" />
           </t-form-item>
         </div>
+        <t-form-item label="步数限制（hardMaxSteps）">
+          <div>
+            <t-input-number v-model="form.hardMaxSteps" :min="0" :step="50" style="width: 200px" data-testid="bot-hardmaxsteps" placeholder="0 = 不限制" />
+            <div class="field-tip">0 = 不限制（默认）。设为正整数则作为硬上限：Bot 到达上限会提示你「回复继续」接着做剩余工作，不会再静默停在中途。</div>
+          </div>
+        </t-form-item>
       </t-form>
     </t-card>
 
@@ -122,6 +128,7 @@ const modelMaxTokens = computed(() => {
 .emoji:hover { background: #f0f0f0; }
 .emoji.active { border-color: #00a870; background: #e6f4ef; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.field-tip { margin-top: 6px; font-size: 12px; line-height: 1.5; color: #888; }
 .slider-row { display: flex; align-items: center; gap: 16px; width: 100%; }
 .slider-box { flex: 1; min-width: 0; }
 .slider-box :deep(.t-slider) { width: 100%; }

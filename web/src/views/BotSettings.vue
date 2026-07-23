@@ -182,7 +182,8 @@ function loadBot() {
       id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
       llmMain: b.llmMain || '', llmLight: b.llmLight || '',
       temperature: b.temperature ?? 0.7, maxTokens: b.maxTokens ?? 4096,
-      workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort || 'medium'
+      workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort || 'medium',
+      hardMaxSteps: b.hardMaxSteps ?? 0
     }
   }
 }
@@ -229,13 +230,15 @@ async function saveBasic() {
     await botApi.update(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
       llmMain: f.llmMain, llmLight: f.llmLight, temperature: f.temperature,
-      maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort
+      maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort,
+      hardMaxSteps: f.hardMaxSteps ?? 0
     })
     store.updateBot(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
       temperature: f.temperature,
       llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
-      workers: f.workers, reasoningEffort: f.reasoningEffort
+      workers: f.workers, reasoningEffort: f.reasoningEffort,
+      hardMaxSteps: f.hardMaxSteps ?? 0
     })
     bot.value.name = f.name
     MessagePlugin.success('Bot 设置已保存')

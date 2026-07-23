@@ -60,8 +60,11 @@ type loopController struct {
 //	soft < 0  ：无限模式（对应 MaxSteps == -1），永不因步数上限停止。
 //	soft == 0 ：单步 fast path 已在 orchestrate 上游处理，不会进入循环，
 //	            此处退化为「最多 1 步」以保证安全。
-//	hard <= 0 ：自动取 soft * defaultHardMultiplier。
-//	hard < soft：夹紧为 soft（hard 不得小于 soft）。
+//	hard == 0 ：不限制（无限）。用户未设步数上限，Bot 跑到任务完成为止，
+//	           不会因步数预算耗尽而被腰斩（见 effectiveStepBudgets 注释）。
+//	hard < 0  ：内置默认安全网（soft * defaultHardMultiplier），历史/内部语义。
+//	hard > 0  ：有限硬上限。
+//	hard < soft（且 hard != -1）：夹紧为 soft（hard 不得小于 soft）。
 func newLoopController(soft, hard int) *loopController {
 	lc := &loopController{
 		soft:        soft,
@@ -77,10 +80,16 @@ func newLoopController(soft, hard int) *loopController {
 		return lc
 	}
 
-	if hard <= 0 {
+	switch {
+	case hard < 0:
+		// 内置默认安全网
 		hard = soft * defaultHardMultiplier
+	case hard == 0:
+		// 0 = 不限制（无限）
+		hard = -1
 	}
-	if hard < soft {
+	// 有限硬上限时保证 >= soft；无限（-1）不夹紧
+	if hard != -1 && hard < soft {
 		hard = soft
 	}
 	lc.hard = hard
@@ -89,8 +98,8 @@ func newLoopController(soft, hard int) *loopController {
 
 // shouldContinue 判断第 step 步（0-based）是否可以开始执行。
 func (lc *loopController) shouldContinue(step int) bool {
-	if lc.soft < 0 {
-		return true // 无限模式
+	if lc.soft < 0 || lc.hard < 0 {
+		return true // 无限模式（soft=-1 或 hard=0→不限制）
 	}
 	if lc.stalled {
 		return false // 已检测到死循环
@@ -172,10 +181,14 @@ func toolCallSignature(calls []ToolCall) string {
 }
 
 // stoppedByGuard 报告循环是否因步数守卫（重复循环或硬上限）而停止，
-// 而非模型自然收尾（不再产生工具调用）。
+// 而非模型自然收尾（不再产生工具调用）。无限模式（hard<0，即 0=不限制）
+// 永远不会因步数上限停止。
 func (lc *loopController) stoppedByGuard(steps int) bool {
 	if lc.stalled {
 		return true
+	}
+	if lc.hard < 0 {
+		return false // 不限制：不会因步数上限停止
 	}
 	return lc.soft >= 0 && steps >= lc.hard
 }

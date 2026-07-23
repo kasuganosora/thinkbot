@@ -131,7 +131,8 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 	if req.Workers != nil {
 		workers = *req.Workers
 	}
-	// 步数预算：0 = 使用全局默认（soft=30, hard=soft×3），由运行时装配处解析。
+	// 步数预算：0 = 不限制（无限，默认）。hardMaxSteps 即用户「步数限制」设置，
+	// 0 表示 Bot 跑到任务完成为止，不被步数上限腰斩；由 effectiveStepBudgets 解析。
 	maxSteps := 0
 	if req.MaxSteps != nil {
 		maxSteps = *req.MaxSteps
