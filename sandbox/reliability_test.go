@@ -46,7 +46,7 @@ func TestStripOutputLimitingPipe(t *testing.T) {
 
 func TestFinalizeExecResult_Healthy(t *testing.T) {
 	res := &ExecResult{ExitCode: 0, Stdout: "hello", Stderr: ""}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if res.Aborted {
 		t.Error("expected not aborted")
 	}
@@ -63,7 +63,7 @@ func TestFinalizeExecResult_Healthy(t *testing.T) {
 
 func TestFinalizeExecResult_Timeout(t *testing.T) {
 	res := &ExecResult{ExitCode: -1, Stderr: "partial"}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if !res.Aborted {
 		t.Error("expected aborted for timeout (exit=-1)")
 	}
@@ -77,7 +77,7 @@ func TestFinalizeExecResult_Timeout(t *testing.T) {
 
 func TestFinalizeExecResult_Signal137(t *testing.T) {
 	res := &ExecResult{ExitCode: 137}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if !res.Aborted {
 		t.Error("expected aborted for exit=137")
 	}
@@ -89,7 +89,7 @@ func TestFinalizeExecResult_Signal137(t *testing.T) {
 func TestFinalizeExecResult_OOMTextScan(t *testing.T) {
 	// 即使退出码为 0（被管道掩盖），输出文本含 "Killed" 也应判定不可信。
 	res := &ExecResult{ExitCode: 0, Stderr: "make[1]: *** [all] Killed"}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if !res.Aborted {
 		t.Error("expected aborted when output contains OOM/text feature")
 	}
@@ -109,7 +109,7 @@ func TestFinalizeExecResult_PipelineMaskedExit0(t *testing.T) {
 		Stdout:   "some output lines",
 		Stderr:   "fatal error: runtime: out of memory",
 	}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if !res.Aborted {
 		t.Error("expected aborted for pipeline-masked OOM (exit 0 but oom text)")
 	}
@@ -122,7 +122,7 @@ func TestFinalizeExecResult_OOMKilledFlagSet(t *testing.T) {
 	// cgroup 对比在 ExecStream 层置 OOMKilled（调用方同时置 Aborted）。
 	// finalizeExecResult 自身只保证 OOMKilled 时 Reliable=false，不重复置 Aborted。
 	res := &ExecResult{ExitCode: 0, OOMKilled: true}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if res.Aborted {
 		t.Error("finalizeExecResult must not set Aborted from OOMKilled (caller does)")
 	}
@@ -134,7 +134,7 @@ func TestFinalizeExecResult_OOMKilledFlagSet(t *testing.T) {
 func TestFinalizeExecResult_TruncatedStillReliable(t *testing.T) {
 	// Truncated 仅表示输出超长被截断，命令已完整执行，不应影响可信度。
 	res := &ExecResult{ExitCode: 0, Truncated: true, Stdout: strings.Repeat("x", 50)}
-	finalizeExecResult(res)
+	finalizeExecResult(res, "")
 	if res.Aborted {
 		t.Error("truncated output must not be treated as aborted")
 	}
@@ -145,7 +145,7 @@ func TestFinalizeExecResult_TruncatedStillReliable(t *testing.T) {
 
 func TestFinalizeExecResult_NilSafe(t *testing.T) {
 	// 不 panic
-	finalizeExecResult(nil)
+	finalizeExecResult(nil, "")
 }
 
 // ============================================================================
@@ -311,5 +311,32 @@ func TestRetryOOMWithElevatedMemory_NoOOMReturnsFirstRes(t *testing.T) {
 	}
 	if got != first {
 		t.Error("expected the exact same firstRes pointer returned (no re-exec on non-OOM)")
+	}
+}
+
+// ============================================================================
+// sanitizeMemoryMB — OOM 提升目标内存的边界规范化
+// ============================================================================
+
+func TestSanitizeMemoryMB(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"below floor clamps to 6144", 1024, 6144},
+		{"exact floor", 6144, 6144},
+		{"between floor and cap", 8192, 8192},
+		{"exact cap", 16384, 16384},
+		{"above cap clamps to 16384", 65536, 16384},
+		{"zero clamps to floor", 0, 6144},
+		{"negative clamps to floor", -1, 6144},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeMemoryMB(c.in); got != c.want {
+				t.Errorf("sanitizeMemoryMB(%d) = %d, want %d", c.in, got, c.want)
+			}
+		})
 	}
 }

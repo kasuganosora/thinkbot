@@ -14,9 +14,12 @@ package sandbox
 //   - SandboxManager: per-session（BotID:Channel:UserID），临时，自动清理
 //   - BotWorkspaceManager: per-bot（BotID only），持久化，不自动清理
 //
-// Docker 执行模式：
-//   docker run --rm -v {hostDir}:/workspace -w /workspace {image} sh -c {cmd}
-//   每条命令一个临时容器，文件通过 volume mount 持久化在宿主机
+// Docker 执行模式（docker 持久容器 + named volume）：
+//   每个 bot 对应一个长期运行的容器（thinkbot-bot-<botID>），其 /data 由 named volume
+//   （thinkbot-bot-<botID>）持久化挂载。所有命令通过 `docker exec` 在该容器内执行，
+//   文件在 exec 调用之间天然持久化。OOM 时通过 `docker update --memory` 在原容器内
+//   就地提升内存并重试，不销毁容器（避免容器文件系统丢失被误判为「不持久化」）。
+//   注：早期设计曾用 `docker run --rm -v {hostDir}:/workspace` 的临时容器，已废弃。
 // ============================================================================
 
 import (
@@ -242,10 +245,31 @@ func (m *BotWorkspaceManager) RetryOOMWithElevatedMemory(ctx context.Context, bo
 		return firstRes, nil
 	}
 
-	limit := fmt.Sprintf("%dm", oomRetryElevatedMB)
+	// 优先在原容器内【就地】提升内存（docker update），避免销毁容器导致容器文件系统
+	// （/tmp、构建缓存、已安装 toolchain）丢失，从而被 bot 误判为
+	// 「文件系统在不同 exec 调用之间不持久化」。ElevateMemory 内部按「当前上限 2 倍」
+	// 逐级放大（封顶 oomRetryMaxMB），无需调用方自行维护升级状态。
 	prev := bw.container.memoryOverride
+	appliedMB, err := bw.container.ElevateMemory(ctx, int(oomRetryElevatedMB))
 	m.logger.Infow("exec OOM detected: elevating sandbox memory and retrying once",
-		"botID", botID, "from", prev, "to", limit)
+		"botID", botID, "from", prev, "to", fmt.Sprintf("%dm", appliedMB))
+	if err == nil {
+		retry, rerr := sw.ExecStream(ctx, req, onChunk)
+		if rerr == nil && retry != nil {
+			m.logger.Infow("exec OOM retry succeeded after in-place memory elevation",
+				"botID", botID, "elevatedTo", fmt.Sprintf("%dm", appliedMB))
+			return retry, nil
+		}
+		// 就地提升成功但重试仍失败：保留已提升上限，返回首次结果（含警告），不丢输出。
+		m.logger.Warnw("exec OOM retry: in-place elevation applied but retry failed, keeping original result",
+			"botID", botID, "err", rerr)
+		return firstRes, nil
+	}
+
+	// 兜底：docker update 不可用（老旧 docker）时，退回「销毁+重建容器」旧逻辑。
+	m.logger.Warnw("exec OOM retry: in-place elevation unsupported, falling back to recreate",
+		"botID", botID, "err", err)
+	limit := fmt.Sprintf("%dm", appliedMB)
 	bw.container.SetMemoryOverride(limit)
 	if derr := bw.container.destroy(false); derr != nil {
 		// 重建失败：恢复原上限并返回首次的不可信结果（含警告）。
@@ -259,7 +283,7 @@ func (m *BotWorkspaceManager) RetryOOMWithElevatedMemory(ctx context.Context, bo
 	if rerr != nil || retry == nil {
 		return firstRes, nil
 	}
-	m.logger.Infow("exec OOM retry succeeded after memory elevation",
+	m.logger.Infow("exec OOM retry succeeded after memory elevation (recreate fallback)",
 		"botID", botID, "elevatedTo", limit)
 	return retry, nil
 }
@@ -674,12 +698,9 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		return w.container.ExecStream(ctx, req, onChunk)
 	}
 
-	timeout := req.Timeout
-	if timeout == 0 {
-		timeout = w.cfg.Timeout
-	}
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stuck, hard := resolveExecTimeouts(req, w.cfg)
 
 	var cmd *exec.Cmd
 	if w.backend == "docker" {
@@ -744,16 +765,13 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		cmd.Env = env
 	}
 
-	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, nil, func(stream, chunk string) {
+	result, err := runCommandWithStreaming(execCtx, cancel, cmd, w.cfg.MaxOutput, nil, stuck, hard, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "bot_workspace: exec command")
-	}
-	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
 	}
 	return result, nil
 }
