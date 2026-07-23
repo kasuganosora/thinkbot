@@ -368,7 +368,7 @@ func TestProvider_Tools(t *testing.T) {
 	}
 }
 
-func TestProvider_SubagentFiltered(t *testing.T) {
+func TestProvider_SubagentGetsTools(t *testing.T) {
 	mgr := NewManager(zap.NewNop().Sugar())
 
 	tp := setupMockTransport([]mcpTool{
@@ -386,8 +386,11 @@ func TestProvider_SubagentFiltered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tools: %v", err)
 	}
-	if result != nil {
-		t.Errorf("expected nil for subagent context, got %d tools", len(result))
+	if len(result) != 1 {
+		t.Fatalf("expected 1 tool for subagent context, got %d", len(result))
+	}
+	if result[0].Name != "srv__tool1" {
+		t.Errorf("expected 'srv__tool1', got %q", result[0].Name)
 	}
 }
 
