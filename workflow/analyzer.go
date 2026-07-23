@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -136,18 +137,41 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode,
 	// 构建分析任务
 	task := fmt.Sprintf("请将以下需求分解为 DAG 子任务图：\n\n%s", requirement)
 
-	const maxAttempts = 3
+	// GLM 的空响应退化通常不是单次抖动，而是持续数十秒到数分钟的窗口：
+	// 一旦进入该窗口，紧挨着的连续重试会全部撞在同一窗口里失败（实测 90s 内 3 连败）。
+	// 因此重试之间采用指数退避，把多次尝试拉开到更宽的时间跨度上，
+	// 显著提高"跨过退化窗口后自动恢复"的概率；退避可被 ctx 取消打断。
+	const maxAttempts = 5
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 首次尝试不等待；后续尝试指数退避（2s, 4s, 8s, 16s，上限 30s）。
+		if attempt > 1 {
+			backoff := time.Duration(1<<(attempt-1)) * time.Second
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			logger.Infow("backing off before analyzer retry",
+				"attempt", attempt, "max_attempts", maxAttempts, "backoff", backoff.String())
+			select {
+			case <-ctx.Done():
+				if lastErr == nil {
+					lastErr = ctx.Err()
+				}
+				return nil, lastErr
+			case <-time.After(backoff):
+			}
+		}
+
 		// 重试时提高温度，打破 GLM 在长输入下"稳定返回空"的退化行为
 		temp := a.ec.AnalyzerTemperature
 		if attempt > 1 {
 			temp = 0.7
 		}
 
-		raw, err := a.saMgr.Delegate(ctx, analyzerSystemPrompt, task,
+		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, task,
 			subagent.WithTemperature(temp),
 			subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
+			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
 		)
 		if err != nil {
 			lastErr = errs.Wrap(err, "analyzer LLM call failed")
