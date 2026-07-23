@@ -61,8 +61,8 @@ func (ws *WorkflowService) Manager() (*workflow.Manager, error) {
 		return ws.mgr, nil
 	}
 
-	// 从 BotService 获取 LLM Provider
-	provider, model, err := ws.botSvc.CreateLLMProvider()
+	// 从 BotService 获取 LLM Provider（含当前主模型定义，用于推导分析器 max_tokens）
+	provider, model, modelDef, err := ws.botSvc.CreateLLMProvider()
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +75,7 @@ func (ws *WorkflowService) Manager() (*workflow.Manager, error) {
 		Logger:         ws.logger,
 		TracerProvider: ws.tp,
 		Store:          ws.store,
+		ModelDef:       modelDef,
 		EventBus:       ws.bus,
 	})
 
