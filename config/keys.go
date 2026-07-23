@@ -67,6 +67,11 @@ const (
 	KeyWorkflowScheduleInterval  = "workflow.schedule_interval_ms"
 	KeyWorkflowAnalyzerTemp      = "workflow.analyzer_temperature"
 	KeyWorkflowAnalyzerMaxTokens = "workflow.analyzer_max_tokens"
+	// KeyWorkflowAnalyzerStuckTimeout 需求分析器（流式 LLM 调用）的卡死看门狗阈值（秒，默认 180，即 3 分钟）。
+	// 分析器改用流式委托 + 卡死看门狗：只要 LLM 持续输出 token（哪怕慢）就不杀，
+	// 只有连续无 token 超过该时长（且已过首 token 宽限期）才判卡死终止。硬上限 = 该值 ×3 派生。
+	// 这是「看门狗判断真卡死」而非「固定超时一刀切」——正常处理超长 prompt（如 86 个 lint 问题）不会被打断。
+	KeyWorkflowAnalyzerStuckTimeout = "workflow.analyzer_stuck_timeout"
 )
 
 // Engagement 键。

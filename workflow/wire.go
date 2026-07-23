@@ -49,6 +49,12 @@ type WireConfig struct {
 	// Store 全局配置中心（可为 nil，则使用 config.DefaultWorkflowConfig()）。
 	Store *config.Store
 
+	// ModelDef 当前工作流使用的主模型定义（来自 LLM bundle 的 MainDef）。
+	// 用于推导分析器的最大输出 token：当运营未显式配置
+	// workflow.analyzer_max_tokens 时，回退到模型自身的 MaxTokens，
+	// 而非写死固定值。可为空（nil ModelDef），此时走代码兜底默认。
+	ModelDef *config.ModelDef
+
 	// EventBus 旁路事件总线（可为 nil，则不发布事件）。
 	// Web SSE 订阅端通过 workflow_id 订阅实时进度事件。
 	EventBus outbound.EventBus
@@ -65,6 +71,10 @@ type EngineConfig struct {
 	ScheduleInterval    time.Duration
 	AnalyzerTemperature float64
 	AnalyzerMaxTokens   int
+	// AnalyzerStuckTimeout 需求分析器流式 LLM 调用的卡死看门狗阈值。
+	// 0 表示使用 subagent 包默认（180s）。由 DelegateStream 读取，作为「判卡死」阈值；
+	// 硬上限 = 该值 ×3（派生，不写死）。看门狗判断真卡死而非固定超时。
+	AnalyzerStuckTimeout time.Duration
 }
 
 // Setup 创建并装配工作流引擎的所有组件。
@@ -98,10 +108,15 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	}
 
 	// 从 config.Store 读取引擎配置，Store 为 nil 时使用默认值
-	ec := resolveEngineConfig(cfg.Store, cfg.MaxParallel)
+	ec := resolveEngineConfig(cfg.Store, cfg.MaxParallel, cfg.ModelDef)
 
 	// 1. SubAgent 管理器
-	saMgr := subagent.NewSubAgentManager(cfg.Provider, cfg.Model, cfg.SAOpts...)
+	// 默认输出上限跟随当前模型配置（如 glm-5.2=128K）；analyzer 显式传的 cap 会覆盖此默认。
+	saOpts := cfg.SAOpts
+	if cfg.ModelDef != nil && cfg.ModelDef.MaxTokens > 0 {
+		saOpts = append(saOpts, subagent.WithMaxTokens(cfg.ModelDef.MaxTokens))
+	}
+	saMgr := subagent.NewSubAgentManager(cfg.Provider, cfg.Model, saOpts...)
 
 	// 2. 持久化仓储
 	repo := NewRepository(cfg.DB, cfg.Logger)
@@ -120,9 +135,10 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 
 // resolveEngineConfig 从 config.Store 构建 EngineConfig。
 // store 为 nil 时使用全部默认值；maxParallelFallback > 0 时覆盖 MaxParallel（向后兼容）。
-func resolveEngineConfig(store *config.Store, maxParallelFallback int) EngineConfig {
+// modelDef 提供当前模型定义，用于推导分析器最大输出 token（见 engineConfigFromWorkflowConfig）。
+func resolveEngineConfig(store *config.Store, maxParallelFallback int, modelDef *config.ModelDef) EngineConfig {
 	if store == nil {
-		ec := engineConfigFromWorkflowConfig(config.DefaultWorkflowConfig())
+		ec := engineConfigFromWorkflowConfig(config.DefaultWorkflowConfig(), modelDef)
 		if maxParallelFallback > 0 {
 			ec.MaxParallel = maxParallelFallback
 		}
@@ -130,14 +146,28 @@ func resolveEngineConfig(store *config.Store, maxParallelFallback int) EngineCon
 	}
 
 	wc := config.NewBuilder(store, nil).GetWorkflowConfig()
-	ec := engineConfigFromWorkflowConfig(wc)
+	ec := engineConfigFromWorkflowConfig(wc, modelDef)
 	if maxParallelFallback > 0 {
 		ec.MaxParallel = maxParallelFallback
 	}
 	return ec
 }
 
-func engineConfigFromWorkflowConfig(wc config.WorkflowConfig) EngineConfig {
+// analyzerMaxTokens 推导分析器最大输出 token：
+//  1. 运营显式配置了 workflow.analyzer_max_tokens（>0）→ 直接用；
+//  2. 否则回退到当前模型 ModelDef.MaxTokens（模型自身配置，避免写死）；
+//  3. 两者都无 → 代码兜底默认 8192。
+func analyzerMaxTokens(cfgMaxTokens int, modelDef *config.ModelDef) int {
+	if cfgMaxTokens > 0 {
+		return cfgMaxTokens
+	}
+	if modelDef != nil && modelDef.MaxTokens > 0 {
+		return modelDef.MaxTokens
+	}
+	return 8192
+}
+
+func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.ModelDef) EngineConfig {
 	return EngineConfig{
 		MaxParallel:         wc.MaxParallel,
 		MaxRetries:          wc.MaxRetries,
@@ -146,6 +176,7 @@ func engineConfigFromWorkflowConfig(wc config.WorkflowConfig) EngineConfig {
 		RetryMax:            time.Duration(wc.RetryMaxMS) * time.Millisecond,
 		ScheduleInterval:    time.Duration(wc.ScheduleIntervalMS) * time.Millisecond,
 		AnalyzerTemperature: wc.AnalyzerTemperature,
-		AnalyzerMaxTokens:   wc.AnalyzerMaxTokens,
+		AnalyzerMaxTokens:   analyzerMaxTokens(wc.AnalyzerMaxTokens, modelDef),
+		AnalyzerStuckTimeout: time.Duration(wc.AnalyzerStuckTimeoutMS) * time.Millisecond,
 	}
 }
