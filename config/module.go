@@ -416,6 +416,10 @@ type WorkflowConfig struct {
 
 	// AnalyzerMaxTokens 需求分析器 LLM 最大 token 数。
 	AnalyzerMaxTokens int `json:"analyzerMaxTokens"`
+
+	// AnalyzerStuckTimeoutMS 需求分析器流式 LLM 调用的卡死看门狗阈值（毫秒）。
+	// 默认 180000（3 分钟）。连续性说明见 KeyWorkflowAnalyzerStuckTimeout。
+	AnalyzerStuckTimeoutMS int `json:"analyzerStuckTimeoutMs"`
 }
 
 // DefaultWorkflowConfig 返回引擎默认配置值。
@@ -428,7 +432,11 @@ func DefaultWorkflowConfig() WorkflowConfig {
 		RetryMaxMS:          10000,
 		ScheduleIntervalMS:  200,
 		AnalyzerTemperature: 0.3,
-		AnalyzerMaxTokens:   8192,
+		// AnalyzerMaxTokens 默认 0：表示「未显式配置」，由 resolveEngineConfig
+		// 回退到当前模型 ModelDef.MaxTokens；仅当连模型定义都缺失时兜底为 8192。
+		// 不再写死固定值，跟随实际使用的模型配置。
+		AnalyzerMaxTokens:   0,
+		AnalyzerStuckTimeoutMS: 180000,
 	}
 }
 
@@ -444,6 +452,7 @@ func (b *Builder) GetWorkflowConfig() WorkflowConfig {
 		ScheduleIntervalMS:  b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
 		AnalyzerTemperature: b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
 		AnalyzerMaxTokens:   b.store.GetInt(KeyWorkflowAnalyzerMaxTokens, d.AnalyzerMaxTokens),
+		AnalyzerStuckTimeoutMS: b.store.GetInt(KeyWorkflowAnalyzerStuckTimeout, d.AnalyzerStuckTimeoutMS),
 	}
 }
 
@@ -457,7 +466,8 @@ func WorkflowMetaSpecs() []MetaSpec {
 		{Key: KeyWorkflowRetryMaxMS, Category: "Workflow", Description: "重试指数退避的最大等待毫秒（默认 10000）"},
 		{Key: KeyWorkflowScheduleInterval, Category: "Workflow", Description: "调度器主循环轮询间隔毫秒（默认 200）"},
 		{Key: KeyWorkflowAnalyzerTemp, Category: "Workflow", Description: "需求分析器 LLM 温度（默认 0.3）"},
-		{Key: KeyWorkflowAnalyzerMaxTokens, Category: "Workflow", Description: "需求分析器 LLM 最大 token 数（默认 4096）"},
+		{Key: KeyWorkflowAnalyzerMaxTokens, Category: "Workflow", Description: "需求分析器（生成 DAG JSON）的输出长度 cap，针对该任务而非模型最大能力。默认 8192（DAG 仅数 KB 已足够）；留空/0 时回退到当前模型真实最大输出（如 glm-5.2=128K），不推荐——过大会浪费 token 预算。"},
+		{Key: KeyWorkflowAnalyzerStuckTimeout, Category: "Workflow", Description: "需求分析器（流式 LLM）卡死看门狗阈值秒数（默认 180=3 分钟）。连续无 token 超该时长判卡死终止；硬上限=该值×3。靠看门狗判断真卡死，不写死固定超时。"},
 	}
 }
 
@@ -933,7 +943,12 @@ func DefaultMap() map[string]string {
 		KeyWorkflowRetryMaxMS:        "10000",
 		KeyWorkflowScheduleInterval:  "200",
 		KeyWorkflowAnalyzerTemp:      "0.3",
+		// 需求分析器输出长度 cap（针对「生成 DAG JSON」这一具体任务的输出上限，
+		// 与模型自身的最大输出能力无关）。DAG JSON 通常仅数 KB，8192 已绰绰有余；
+		// 设得过大只会浪费 token 预算、增加截断/延迟风险，故显式 cap 而非跟随模型 128K 上限。
+		// 留空/0 时回退到当前模型 ModelDef.MaxTokens（真实能力值，如 glm-5.2=128K）——仅兜底，不推荐。
 		KeyWorkflowAnalyzerMaxTokens: "8192",
+		KeyWorkflowAnalyzerStuckTimeout: "180",
 		// Engagement
 		KeyEngagementEnabled:            "false",
 		KeyEngagementReplyProbability:   "0.15",
