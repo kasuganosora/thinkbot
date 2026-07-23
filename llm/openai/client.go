@@ -19,6 +19,12 @@ type Client struct {
 	baseURL  string
 	chatMode bool   // true = 使用 Chat Completions API（/v1/chat/completions）
 	chatPath string // Chat Completions 端点路径
+
+	// retryCfg 重试配置（可为 nil）。
+	// 非流式请求由 httputil.WithRetry 自动应用；流式（SSE）请求则由
+	// doStreamChat/doStream 显式透传到 ChatStreamConfig.RetryConfig，
+	// 以便对连接建立阶段的 429/5xx 重试（首字节前重试整条流是安全的）。
+	retryCfg *retry.Config
 }
 
 // Option 配置 Client。
@@ -163,7 +169,22 @@ func New(opts ...Option) *Client {
 		baseURL:  cfg.baseURL,
 		chatMode: cfg.chatMode,
 		chatPath: cfg.chatPath,
+		retryCfg: cfg.retryCfg,
 	}
+}
+
+// streamRetryConfig 返回用于流式（SSE）请求的重试配置。
+// 复用 client 的 retryCfg，但把 ShouldRetry/GetRetryDelay 替换为流式感知版本
+// （StreamShouldRetry 能识别 *StreamHTTPError 的 429/5xx 并解析 Retry-After）。
+// 若未配置 retryCfg，返回 nil（不重试）。
+func (c *Client) streamRetryConfig() *retry.Config {
+	if c.retryCfg == nil || c.retryCfg.MaxRetries == 0 {
+		return nil
+	}
+	cfg := *c.retryCfg // copy
+	cfg.ShouldRetry = httputil.StreamShouldRetry
+	cfg.GetRetryDelay = httputil.StreamGetRetryDelay
+	return &cfg
 }
 
 // ============================================================================
