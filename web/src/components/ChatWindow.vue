@@ -22,11 +22,12 @@
       aria-label="消息列表"
       aria-live="polite"
     >
-      <SessionWorkflowPanel
-        v-if="sessionWorkflowId"
-        :session-id="store.activeBotId"
-        :workflow-id="sessionWorkflowId"
-      />
+      <div v-if="sessionWorkflowId" class="wf-sticky">
+        <SessionWorkflowPanel
+          :session-id="store.activeBotId"
+          :workflow-id="sessionWorkflowId"
+        />
+      </div>
 
       <template v-if="messages.length">
         <div
@@ -508,6 +509,15 @@ function onKeydown(value, { e }) {
   flex: 1;
   overflow-y: auto;
   padding: 20px 0;
+}
+/* workflow 面板：固定在聊天区顶部，任务进行中始终可见（避免被长对话滚出视口） */
+.wf-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: #fff;
+  padding: 10px 32px 8px;
+  border-bottom: 1px solid #f0f0f0;
 }
 .msg-row {
   display: flex;
