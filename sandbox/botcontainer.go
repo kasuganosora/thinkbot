@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -45,6 +46,11 @@ type botContainer struct {
 	// memoryOverride 非空时覆盖 cfg.MemoryLimit（per-bot 配置）。
 	// "" 表示使用 cfg.MemoryLimit；"0" 或 "-" 表示不限制。
 	memoryOverride string
+
+	// oomElevatedMB 记录因 OOM 重试已临时提升到的内存上限（MB），0 表示尚未提升。
+	// 用于在反复 OOM 时按 2 倍逐级放大（6144 → 12288 → …）直到封顶，
+	// 避免每次 OOM 都只回到固定的 6144m 而陷入「OOM→重建→再 OOM」死循环。
+	oomElevatedMB atomic.Int64
 }
 
 func newBotContainer(botID string, cfg Config, logger *zap.SugaredLogger) *botContainer {
@@ -358,6 +364,101 @@ func (c *botContainer) effectiveMemoryLocked() string {
 	return c.memoryOverride
 }
 
+// sanitizeMemoryMB 规范化 OOM 提升的目标内存（MB）：低于起步值取起步值，超过封顶值取封顶值。
+func sanitizeMemoryMB(mb int) int {
+	if int64(mb) < oomRetryElevatedMB {
+		return int(oomRetryElevatedMB)
+	}
+	if int64(mb) > oomRetryMaxMB {
+		return int(oomRetryMaxMB)
+	}
+	return mb
+}
+
+// ElevateMemory 在【不销毁容器】的前提下，通过 `docker update --memory` 提升
+// 运行中容器的内存上限，随后即可在原容器内立即重试命令。
+//
+// 相比原先「销毁 + 重建容器」的 OOM 恢复方式，这种做法完整保留了容器文件系统
+// （/tmp、构建缓存、已安装的 toolchain 等），从而避免 bot 误判为
+// 「文件系统在不同 exec 调用之间不持久化」（容器重建会清空 volume 以外的全部状态）。
+//
+// 行为：
+//   - 先 ensure() 保证容器存活（OOM 通常只杀死容器内进程，容器仍在；极端情况下
+//     init 进程也死亡时 ensure 会重建，但 named volume 不删，/data 数据仍在）。
+//   - 调 `docker update --memory {mb}m` 就地放大上限；该命令在运行中的容器上生效，无需重建。
+//   - 成功后把 memoryOverride / oomElevatedMB 一并更新，使后续重建（如宿主机重启）沿用已提升上限。
+//
+// 返回 error 表示 docker update 不可用（老旧 docker），调用方应回退到销毁+重建兜底逻辑。
+// ElevateMemory 在【不销毁容器】的前提下，通过 `docker update --memory` 提升运行中容器
+// 的内存上限，随后即可在原容器内立即重试命令。返回实际采用的目标上限（MB）与可能的错误。
+//
+// 提升策略：在「调用方建议值」与「容器当前上限的 2 倍」中取较大者（封顶 oomRetryMaxMB），
+// 确保每次 OOM 重试都真正放大内存，避免容器当前已等于建议值却原地踏步（thinkbot 重启后
+// 内存记忆清零时尤其常见）。若容器当前上限已不低于目标，则不做 docker update（避免降配），
+// 直接返回当前值。
+//
+// 相比原先「销毁 + 重建容器」的 OOM 恢复方式，这种做法完整保留了容器文件系统
+// （/tmp、构建缓存、已安装的 toolchain 等），从而避免 bot 误判为
+// 「文件系统在不同 exec 调用之间不持久化」（容器重建会清空 volume 以外的全部状态）。
+func (c *botContainer) ElevateMemory(ctx context.Context, suggestMB int) (int, error) {
+	if err := c.ensure(ctx); err != nil {
+		return 0, errs.Wrapf(err, "bot_container: ensure before elevate memory")
+	}
+
+	target := sanitizeMemoryMB(suggestMB)
+	// 若容器当前上限已知，则取「建议值的 2 倍」与「当前上限的 2 倍」中较大者，确保逐步放大。
+	if curBytes, err := c.currentMemoryBytes(ctx); err == nil && curBytes > 0 {
+		curMB := int(curBytes / (1024 * 1024))
+		if doubled := curMB * 2; doubled > target {
+			target = sanitizeMemoryMB(doubled)
+		}
+		if curBytes >= int64(target)*1024*1024 {
+			// 当前已足够高：同步内存记忆，不降配，直接返回当前值。
+			c.mu.Lock()
+			c.memoryOverride = fmt.Sprintf("%dm", curMB)
+			c.oomElevatedMB.Store(int64(curMB))
+			c.mu.Unlock()
+			c.logger.Infow("bot container memory already >= target, skip in-place update",
+				"container", c.container, "target", fmt.Sprintf("%dm", target), "actual", fmt.Sprintf("%dm", curMB))
+			return curMB, nil
+		}
+	}
+
+	limit := fmt.Sprintf("%dm", target)
+	cmd := exec.CommandContext(ctx, "docker", "update", "--memory", limit, c.container)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return target, errs.Wrapf(err, "bot_container: docker update --memory %s %q: %s",
+			limit, c.container, strings.TrimSpace(out.String()))
+	}
+
+	c.mu.Lock()
+	c.memoryOverride = limit
+	c.oomElevatedMB.Store(int64(target))
+	c.mu.Unlock()
+
+	c.logger.Infow("bot container memory elevated in-place (no recreate)",
+		"container", c.container, "to", limit)
+	return target, nil
+}
+
+// currentMemoryBytes 读取容器当前 --memory 限制（字节）；0 表示不限制（unlimited）。
+func (c *botContainer) currentMemoryBytes(ctx context.Context) (int64, error) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.HostConfig.Memory}}", c.container)
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return 0, errs.Wrapf(err, "bot_container: inspect memory %q: %s",
+			c.container, strings.TrimSpace(errb.String()))
+	}
+	var b int64
+	_, _ = fmt.Sscanf(strings.TrimSpace(out.String()), "%d", &b)
+	return b, nil
+}
+
 // execInContainer 在容器内执行一条 shell 命令（底层原语）。
 func (c *botContainer) execInContainer(ctx context.Context, workDir, command string, stdin []byte) (*ExecResult, error) {
 	if err := c.ensure(ctx); err != nil {
@@ -379,9 +480,12 @@ func (c *botContainer) execInContainer(ctx context.Context, workDir, command str
 	}
 	args = append(args, c.container, "sh", "-c", command)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	execCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(execCtx, "docker", args...)
 	// 复用统一的执行 + 完整性检测收尾（finalizeExecResult）。
-	result, err := runCommandWithStreaming(ctx, cmd, c.cfg.MaxOutput, stdin, nil)
+	stuck, hard := resolveExecTimeouts(ExecRequest{}, c.cfg)
+	result, err := runCommandWithStreaming(execCtx, cancel, cmd, c.cfg.MaxOutput, stdin, stuck, hard, nil)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
 	}
@@ -398,12 +502,9 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	if req.Command == "" {
 		return nil, errs.New("bot_container: command is empty")
 	}
-	timeout := req.Timeout
-	if timeout == 0 {
-		timeout = c.cfg.Timeout
-	}
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stuck, hard := resolveExecTimeouts(req, c.cfg)
 
 	if err := c.ensure(execCtx); err != nil {
 		return nil, err
@@ -424,7 +525,7 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	// 这是最可靠的判定（不被管道掩盖退出码影响，如 `cmd | tee | head`）。
 	snap0, _ := readContainerCgroupOOMKill(execCtx, c.container)
 
-	result, err := runCommandWithStreaming(execCtx, cmd, c.cfg.MaxOutput, nil, func(stream, chunk string) {
+	result, err := runCommandWithStreaming(execCtx, cancel, cmd, c.cfg.MaxOutput, nil, stuck, hard, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
@@ -442,11 +543,8 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		result.Warnings = append(result.Warnings,
 			fmt.Sprintf("进程可能被 OOM 杀死（cgroup oom_kill 增加 %d→%d），结果不完整", snap0, snap1))
 	}
-	result.Reliable = !(result.Aborted || result.OOMKilled)
+	result.Reliable = !result.Aborted && !result.OOMKilled
 
-	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
-	}
 	return result, nil
 }
 
