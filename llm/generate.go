@@ -106,6 +106,13 @@ type GenerateResult struct {
 	// Messages holds all output messages across all steps (assistant + tool),
 	// excluding the original input messages.
 	Messages []Message `json:"messages,omitempty"`
+	// LoopStoppedByGuard 报告本次编排循环是否因步数守卫（撞硬上限或陷入
+	// 重复循环）而停止，而非模型自然收尾。上游据此向用户给出明确提示，
+	// 避免把「步数预算耗尽」误判为 Bot 卡死。json:"-" 不进入持久化结果。
+	LoopStoppedByGuard bool `json:"-"`
+	// LoopStopReason 是守卫停止的可读原因（如 "reached hard cap 150"
+	// 或 "stalled: same tool calls repeated 2 times"）。
+	LoopStopReason string `json:"-"`
 }
 
 // StepResult represents the outcome of a single step (one LLM call + tool execution round).
