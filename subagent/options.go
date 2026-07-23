@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
 )
@@ -74,6 +75,31 @@ func WithTools(tools ...llm.Tool) Option {
 func WithResponseFormat(format *llm.ResponseFormat) Option {
 	return func(sa *SubAgent) {
 		sa.responseFormat = format
+	}
+}
+
+// WithCallTimeout 设置本次 Delegate/DelegateMany 调用的超时时间（固定一刀切）。
+// 覆盖 SubAgentManager 的默认 delegateTimeout（120s）。
+// 设为 0 表示不覆盖（使用管理器默认值）。
+// 注意：对 DelegateStream 无效——流式委托用卡死看门狗（WithStuckTimeout）替代固定超时。
+func WithCallTimeout(d time.Duration) Option {
+	return func(sa *SubAgent) {
+		sa.callTimeout = d
+	}
+}
+
+// WithStuckTimeout 设置 DelegateStream 卡死看门狗的阈值（连续无 token 输出的容忍时长）。
+// 仅对 DelegateStream（流式委托）生效。设为 0 表示使用包默认 defaultDelegateStuckTimeout(180s)。
+//
+// 看门狗逻辑（与 sandbox 卡死看门狗一致）：
+//   - 只要 LLM 持续输出 token（哪怕很慢）就不杀——正常处理超长 prompt（如 86 个 lint 问题）
+//     不会因固定超时被迫中断；
+//   - 只有连续 stuckTimeout 无任何 token（且已过首 token 宽限期）才判定「卡死」并终止；
+//   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），作为绝对兜底，
+//     防止无限挂起（如模型以极小间隔吐 token 骗过卡死检测）。
+func WithStuckTimeout(d time.Duration) Option {
+	return func(sa *SubAgent) {
+		sa.stuckTimeout = d
 	}
 }
 

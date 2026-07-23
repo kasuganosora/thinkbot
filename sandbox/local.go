@@ -124,12 +124,9 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 		return nil, errs.New("sandbox/local: command is empty")
 	}
 
-	timeout := req.Timeout
-	if timeout == 0 {
-		timeout = w.cfg.Timeout
-	}
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stuck, hard := resolveExecTimeouts(req, w.cfg)
 
 	// 选择工作目录
 	targetDir := w.root
@@ -159,7 +156,7 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 	// OOM 检测：命令前后对比宿主进程 cgroup 的 oom_kill 计数（local 后端命令直接在宿主 cgroup 内运行）。
 	snap0, _ := readCgroupOOMKill()
 
-	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, nil, func(stream, chunk string) {
+	result, err := runCommandWithStreaming(execCtx, cancel, cmd, w.cfg.MaxOutput, nil, stuck, hard, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
@@ -174,11 +171,8 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 		result.Warnings = append(result.Warnings,
 			fmt.Sprintf("进程可能被 OOM 杀死（cgroup oom_kill 增加 %d→%d），结果不完整", snap0, snap1))
 	}
-	result.Reliable = !(result.Aborted || result.OOMKilled)
+	result.Reliable = !result.Aborted && !result.OOMKilled
 
-	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
-	}
 	return result, nil
 }
 

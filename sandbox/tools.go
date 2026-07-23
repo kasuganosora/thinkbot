@@ -127,7 +127,9 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Description: "在工作空间中执行 shell 命令，返回 stdout、stderr 和 exitCode。" +
 			"用于终端操作（如构建、测试、git、包管理等）。" +
 			"不要用它做文件操作（读写、搜索文件），应使用专用工具。" +
-			"命令有超时限制（默认 30 秒，可配置 timeout 参数）。" +
+			"命令执行受「卡死看门狗」保护：只要命令持续有输出（哪怕缓慢）就不会被杀；" +
+			"仅当连续无输出超过卡死阈值（默认 180 秒，可配置 stuck_timeout）才判定卡死并终止。" +
+			"另有硬上限兜底（默认 600 秒，可配置 timeout）——超过它无论如何都会终止，防止无限挂起。" +
 			"【重要】不要为了限制输出而在命令末尾追加 `| head` / `| tail` / `| less` 等管道——" +
 			"沙箱已按 MaxOutput 字节自动截断输出，这类管道既冗余，又会在被测进程异常时" +
 			"导致命令永久挂起（子进程持有管道写端不退出）。如需更少输出，请用 timeout 或" +
@@ -149,7 +151,11 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				},
 				"timeout": map[string]any{
 					"type":        "integer",
-					"description": "超时时间（秒）。可选，默认 30 秒。",
+					"description": "硬上限时间（秒）。可选，默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟，由 sandbox.timeout 配置控制）。这是命令最长可运行的总时长兜底，超过即强制终止；正常慢命令（持续有输出）不会因本值被杀，由卡死看门狗放行。",
+				},
+				"stuck_timeout": map[string]any{
+					"type":        "integer",
+					"description": "卡死看门狗阈值（秒）。可选，默认 300 秒（5 分钟，由 sandbox.stuck_timeout 配置控制）。命令连续无输出超过该时长即判定卡死并终止；只要命令持续有输出（哪怕慢）就不杀。用于区分「编译慢」与「死锁卡死」。",
 				},
 			},
 			"required": []string{"command"},
@@ -176,6 +182,9 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if timeoutSec, ok := toInt(m["timeout"]); ok && timeoutSec > 0 {
 				req.Timeout = durationFromSeconds(timeoutSec)
 			}
+			if stuckSec, ok := toInt(m["stuck_timeout"]); ok && stuckSec > 0 {
+				req.StuckTimeout = durationFromSeconds(stuckSec)
+			}
 
 			ws, err := mgr.GetOrCreate(botID)
 			if err != nil {
@@ -185,9 +194,13 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			// 流式输出（若后端支持且调用方提供进度回调）。
 			onChunk := func(c ExecChunk) {
 				if ctx.SendProgress != nil {
-					if c.Stream == "stderr" {
+					switch c.Stream {
+					case "stderr":
 						ctx.SendProgress(map[string]any{"stream": "stderr", "chunk": c.Data})
-					} else {
+					case "heartbeat":
+						// 保活心跳：不携带 chunk，前端收到仅刷新「存活」状态，不污染输出。
+						ctx.SendProgress(map[string]any{"stream": "heartbeat"})
+					default:
 						ctx.SendProgress(map[string]any{"stream": "stdout", "chunk": c.Data})
 					}
 				}
