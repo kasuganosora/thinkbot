@@ -79,12 +79,12 @@ type BotWorkspaceToolProvider struct {
 }
 
 // Tools 实现 tools.ToolProvider 接口。
-// SubAgent 场景下不提供工作空间工具。
+// 子 Agent（IsSubagent=true）同样返回工作空间工具：子 Agent 与主 Agent 共用同一个
+// per-bot 沙箱（同一 BotID 的工作空间），因此能像主 Agent 一样 exec/读写/列目录。
+// 唯一的递归防护由 spawn 工具的 scope 实现（spawn 仅对 private/group 场景可见，
+// 子 Agent 场景不可见），防止子 Agent 再 spawn 子 Agent 形成套娃。
 // 工具闭包捕获 BotID（从 sctx 获取），确保执行时能获取正确的 bot 工作空间。
 func (p *BotWorkspaceToolProvider) Tools(ctx context.Context, sctx *tools.ToolSessionContext) ([]llm.Tool, error) {
-	if sctx != nil && sctx.IsSubagent {
-		return nil, nil
-	}
 	if p.Manager == nil {
 		return nil, nil
 	}
@@ -863,7 +863,8 @@ func SessionKeyFromContext(ctx context.Context) SessionKey {
 //     但其 PromptSection 会被注册到 prompt.Registry）
 //  2. 动态 ToolProvider（会话感知，每次 Resolve 时从 ToolSessionContext 捕获 BotID）
 //
-// SubAgent 场景下不提供工作空间工具（防止递归使用）。
+// 子 Agent 场景同样提供工作空间工具（与主 Agent 共用同一 per-bot 沙箱），
+// 仅由 spawn 工具的 scope 排除子 Agent，防止递归套娃。
 func RegisterBotWorkspaceTools(toolMgr *tools.ToolManager, mgr *BotWorkspaceManager) error {
 	if mgr == nil {
 		return nil
