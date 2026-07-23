@@ -128,7 +128,7 @@ func (m *SkillManager) availableNamesLocked() []string {
 // 行为：
 //   - 存在已启用技能 → 返回 [use_skill] 工具
 //   - 无已启用技能   → 返回 nil（LLM 不会看到 use_skill）
-//   - SubAgent 场景  → 返回 nil（不暴露技能工具给子 Agent）
+//   - 主 Agent 与子 Agent 共用：子 Agent 同样可加载技能（仅不能 spawn）
 // ============================================================================
 
 // SkillToolProvider 将 SkillManager 适配为动态工具提供者。
@@ -137,10 +137,8 @@ type SkillToolProvider struct {
 }
 
 // Tools 实现 tools.ToolProvider 接口。
+// 主 Agent 与子 Agent 共用同一套技能工具（子 Agent 仅不能 spawn，其余有权使用的工具皆可访问）。
 func (p *SkillToolProvider) Tools(ctx context.Context, sctx *tools.ToolSessionContext) ([]llm.Tool, error) {
-	if sctx != nil && sctx.IsSubagent {
-		return nil, nil
-	}
 	if !p.Manager.HasEnabledSkills() {
 		return nil, nil
 	}
