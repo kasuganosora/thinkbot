@@ -253,15 +253,22 @@ func (s *Server) registerRoutes() {
 		// --- 工作流监控（admin，只读 + 恢复 + 节点重试） ---
 		// 工作流的创建和控制由 Agent 通过 task 系列工具完成，
 		// 终止由 session 生命周期信号触发。API 只暴露只读监控和崩溃恢复。
-		wfGroup := authed.Group("/workflows")
-		wfGroup.Use(requirePermission(auth.PermBotManage))
+		// 会话内的工作流进度（status / nodes / 节点重试）由该用户的 Bot 在对话中
+		// 创建，应对【任意已登录用户】可见，不应要求 admin 权限——否则普通成员在
+		// 对话里看不到 workflow 卡片。列表 / 指标 / 崩溃恢复属于运营操作，保留 admin。
+		wfRead := authed.Group("/workflows")
 		{
-			wfGroup.GET("", s.handleListWorkflows)
-			wfGroup.POST("/recover", s.handleRecoverWorkflows)
-			wfGroup.GET("/metrics", s.handleWorkflowMetrics)
-			wfGroup.GET("/:wfId", s.handleGetWorkflowStatus)
-			wfGroup.GET("/:wfId/nodes", s.handleGetWorkflowNodes)
-			wfGroup.POST("/:wfId/nodes/:nodeId/retry", s.handleRetryWorkflowNode)
+			wfRead.GET("/:wfId", s.handleGetWorkflowStatus)
+			wfRead.GET("/:wfId/nodes", s.handleGetWorkflowNodes)
+			wfRead.POST("/:wfId/nodes/:nodeId/retry", s.handleRetryWorkflowNode)
+		}
+
+		wfAdmin := authed.Group("/workflows")
+		wfAdmin.Use(requirePermission(auth.PermBotManage))
+		{
+			wfAdmin.GET("", s.handleListWorkflows)
+			wfAdmin.POST("/recover", s.handleRecoverWorkflows)
+			wfAdmin.GET("/metrics", s.handleWorkflowMetrics)
 		}
 
 		// --- 技能管理（admin） ---
