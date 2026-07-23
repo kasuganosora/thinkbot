@@ -3,13 +3,18 @@ package llm
 import "testing"
 
 func TestNewLoopController_Defaults(t *testing.T) {
-	// hard 未设置时自动取 soft*3。
+	// hard == 0 表示「不限制（无限）」，loopController 解释为 -1。
 	lc := newLoopController(30, 0)
 	if lc.soft != 30 {
 		t.Errorf("soft = %d, want 30", lc.soft)
 	}
-	if lc.hard != 90 {
-		t.Errorf("hard = %d, want 90 (auto = soft*3)", lc.hard)
+	if lc.hard != -1 {
+		t.Errorf("hard = %d, want -1 (0 = 不限制/无限)", lc.hard)
+	}
+	for _, step := range []int{0, 5, 100, 100000} {
+		if !lc.shouldContinue(step) {
+			t.Errorf("unlimited (hard=0): shouldContinue(%d) = false, want true", step)
+		}
 	}
 }
 

@@ -330,18 +330,32 @@ const (
 )
 
 // effectiveStepBudgets 计算 per-bot 的工具调用步数预算。
-// BotDefinition 中 MaxSteps/HardMaxSteps 为 0 表示使用全局默认；
-// 显式设置则独立覆盖。HardMaxSteps 始终 >= MaxSteps（避免硬上限低于软上限）。
+//
+// MaxSteps(soft)：
+//   - <= 0（含未设置）→ 全局默认 defaultSoftMaxSteps(30)。
+//
+// HardMaxSteps(hard，面向用户「步数限制」设置)：
+//   - > 0  → 有限硬上限（用户设置的具体步数）。
+//   - == 0 → 不限制（无限）：用户未设上限，Bot 跑到任务完成为止，
+//            不会因步数预算耗尽被腰斩。这是默认行为。
+//   - < 0  → 内置默认安全网（soft * defaultHardMultiplier），历史/内部语义。
+//
+// 返回值中 hard==0 表示不限制，交由 loopController 解释为无限。
 func effectiveStepBudgets(def *dao.BotDefinition) (soft, hard int) {
 	soft = def.MaxSteps
 	if soft <= 0 {
 		soft = defaultSoftMaxSteps
 	}
 	hard = def.HardMaxSteps
-	if hard <= 0 {
-		hard = soft * 3
+	switch {
+	case hard > 0:
+		// 有限硬上限，原样返回
+	case hard == 0:
+		// 不限制（无限）：返回 0，loopController 会解释为无限
+	default: // hard < 0
+		hard = soft * 3 // 内置默认安全网（soft × 3）
 	}
-	if hard < soft {
+	if hard > 0 && hard < soft {
 		hard = soft
 	}
 	return soft, hard
