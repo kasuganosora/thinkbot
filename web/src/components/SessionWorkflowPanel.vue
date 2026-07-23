@@ -78,7 +78,14 @@
       </div>
 
       <div v-if="!nodes.length" class="todo-empty" data-testid="chat-workflow-empty">
-        正在分析需求并拆解任务…
+        <template v-if="isLive">正在分析需求并拆解任务…</template>
+        <template v-else-if="workflow && workflow.status === 'failed'">
+          <div class="todo-fail-title">任务执行失败，未生成子任务清单</div>
+          <div v-if="workflow.error" class="todo-fail-reason" data-testid="chat-workflow-error">
+            原因：{{ workflow.error }}
+          </div>
+        </template>
+        <template v-else>暂无子任务</template>
       </div>
     </div>
   </div>
@@ -302,6 +309,14 @@ onBeforeUnmount(stopLive)
   color: #999;
   padding: 6px 10px;
   text-align: center;
+}
+.todo-fail-title { color: #d63c3c; font-weight: 500; }
+.todo-fail-reason {
+  margin-top: 4px;
+  color: #b06a00;
+  font-size: 12px;
+  text-align: left;
+  word-break: break-word;
 }
 
 .live-dot {
