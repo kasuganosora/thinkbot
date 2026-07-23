@@ -101,7 +101,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			}
 		}
 
-		streamErr := c.DoStreamResponse(ctx, *req, StreamConfig{}, func(event StreamEvent) error {
+		streamErr := c.DoStreamResponse(ctx, *req, StreamConfig{RetryConfig: c.streamRetryConfig()}, func(event StreamEvent) error {
 			switch event.Type {
 			case EventResponseCreated, EventResponseInProgress:
 				if event.Response != nil {

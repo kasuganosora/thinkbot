@@ -177,7 +177,7 @@ func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*
 			}
 		}
 
-		streamErr := c.DoStreamChatCompletion(ctx, *req, ChatStreamConfig{}, func(chunk ChatCompletionResponse) error {
+		streamErr := c.DoStreamChatCompletion(ctx, *req, ChatStreamConfig{RetryConfig: c.streamRetryConfig()}, func(chunk ChatCompletionResponse) error {
 			responseID = chunk.ID
 			responseModel = chunk.Model
 

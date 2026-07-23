@@ -11,6 +11,7 @@ import (
 	"github.com/kasuganosora/thinkbot/llm/grok"
 	"github.com/kasuganosora/thinkbot/llm/openai"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
 // llmClientTimeout 是 LLM  Provider 底层 HTTP 客户端的超时。
@@ -18,6 +19,17 @@ import (
 // "Client.Timeout exceeded while awaiting headers" 而回复失败。这里单独放宽到 5 分钟
 // （流式由 SSE 看门狗负责检测卡死，过长的整体超时不会掩盖真实 stall）。
 const llmClientTimeout = 5 * time.Minute
+
+// llmRetryMaxRetries 是 LLM Provider 遇到可恢复错误（429 限流 / 5xx）时的重试次数。
+// 非流式请求由底层 httputil 自动重试；流式（SSE）请求在连接建立阶段（首字节前）
+// 遇到 429/5xx 时重试整条流是安全的。退避策略为指数退避 + 解析 Retry-After 头。
+const llmRetryMaxRetries = 4
+
+// llmRetryConfig 返回各 Provider 共用的重试配置。
+// GLM/智谱经常在高负载时返回 429（访问量过大），若不重试会直接中断对话/工作流。
+func llmRetryConfig() retry.Config {
+	return retry.LLMRetryConfig(llmRetryMaxRetries)
+}
 
 // ============================================================================
 // LLM Factory — 从 config.ModelDef 构建实际的 llm.Provider 实例
@@ -42,6 +54,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 			}
 		}
 		opts = append(opts, openai.WithTimeout(llmClientTimeout))
+		opts = append(opts, openai.WithRetry(llmRetryConfig()))
 		return openai.New(opts...), nil
 
 	case "anthropic":
@@ -50,6 +63,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 			opts = append(opts, anthropic.WithBaseURL(def.BaseURL))
 		}
 		opts = append(opts, anthropic.WithTimeout(llmClientTimeout))
+		opts = append(opts, anthropic.WithRetry(llmRetryConfig()))
 		return anthropic.New(opts...), nil
 
 	case "google":
@@ -58,6 +72,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 			opts = append(opts, google.WithBaseURL(def.BaseURL))
 		}
 		opts = append(opts, google.WithTimeout(llmClientTimeout))
+		opts = append(opts, google.WithRetry(llmRetryConfig()))
 		return google.New(opts...), nil
 
 	case "grok":
@@ -66,6 +81,7 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 			opts = append(opts, grok.WithBaseURL(def.BaseURL))
 		}
 		opts = append(opts, grok.WithTimeout(llmClientTimeout))
+		opts = append(opts, grok.WithRetry(llmRetryConfig()))
 		return grok.New(opts...), nil
 
 	default:
