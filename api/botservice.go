@@ -497,6 +497,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Logger:         s.logger,
 		TracerProvider: s.tp,
 		Store:          s.store,
+		ModelDef:       &bundle.MainDef,
 		EventBus:       s.eventBus,
 	})
 	if err := workflow.RegisterTools(toolMgr, wfMgr); err != nil {
@@ -504,7 +505,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	// 注册 SubAgent 工具
-	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model)
+	// 将当前模型的 MaxTokens 作为默认输出上限注入，避免 SubAgent 写死 4096：
+	// 调用方未显式 WithMaxTokens 时，自动跟随模型配置（如 glm-5.2=128K）。
+	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model,
+		subagent.WithMaxTokens(bundle.MainDef.MaxTokens))
 	if err := subagent.RegisterTools(toolMgr, saMgr); err != nil {
 		s.logger.Warnw("failed to register subagent tools", "err", err)
 	}
@@ -1338,20 +1342,21 @@ func (s *BotService) GetCronManager(botID string) *cron.Manager {
 
 // CreateLLMProvider 从配置创建 LLM Provider（用于 workflow 等全局子系统）。
 // 选择第一个配置了 LLM 的 Bot 作为 provider 来源。
-func (s *BotService) CreateLLMProvider() (llm.Provider, string, error) {
+func (s *BotService) CreateLLMProvider() (llm.Provider, string, *config.ModelDef, error) {
 	builder := config.NewBuilder(s.store, s.logger)
 	defs, err := s.ListDefinitions()
 	if err != nil {
-		return nil, "", errs.Wrap(err, "list definitions for LLM")
+		return nil, "", nil, errs.Wrap(err, "list definitions for LLM")
 	}
 	for _, def := range defs {
 		bundle, err := bot.CreateLLMBundle(builder, def.ID)
 		if err != nil {
 			continue
 		}
-		return bundle.Main, bundle.MainDef.Model, nil
+		md := bundle.MainDef
+		return bundle.Main, bundle.MainDef.Model, &md, nil
 	}
-	return nil, "", errs.New("no LLM provider available — configure at least one bot with an LLM")
+	return nil, "", nil, errs.New("no LLM provider available — configure at least one bot with an LLM")
 }
 
 // EventBus 返回事件总线。
