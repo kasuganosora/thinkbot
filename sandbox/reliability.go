@@ -36,14 +36,23 @@ var fatalTextPatterns = []string{
 // finalizeExecResult 在命令结束后填充完整性 / 可信度信号（退出码 / 超时 / 输出文本特征）。
 // cgroup OOM 由调用方（docker/local 后端）在前后对比后通过 OOMKilled 字段叠加，
 // 这里只负责 exit / timeout / 文本扫描，并在最后根据 Aborted || OOMKilled 计算 Reliable。
-func finalizeExecResult(result *ExecResult) {
+func finalizeExecResult(result *ExecResult, killReason string) {
 	if result == nil {
 		return
 	}
-	// 超时（runCommandWithStreaming 已将 ExitCode 置 -1）
+	// 超时 / 卡死（runCommandWithStreaming 已将 ExitCode 置 -1）
 	if result.ExitCode == -1 {
 		result.Aborted = true
-		result.Warnings = append(result.Warnings, "命令超时未跑完，结果不完整")
+		switch killReason {
+		case "stuck":
+			result.Warnings = append(result.Warnings,
+				"命令被卡死看门狗终止（长时间无输出/无进展），结果不完整")
+		case "hard":
+			result.Warnings = append(result.Warnings,
+				"命令超过硬上限被强制终止，结果不完整")
+		default:
+			result.Warnings = append(result.Warnings, "命令超时未跑完，结果不完整")
+		}
 	}
 	// 退出码 137 = 128 + SIGKILL：docker 下 OOM 即返回 137；本地进程被杀死也可能落到此区间。
 	if result.ExitCode == 137 {
@@ -56,7 +65,7 @@ func finalizeExecResult(result *ExecResult) {
 		result.Aborted = true
 		result.Warnings = append(result.Warnings, "输出中出现 OOM/中止特征: "+msg)
 	}
-	result.Reliable = !(result.Aborted || result.OOMKilled)
+	result.Reliable = !result.Aborted && !result.OOMKilled
 }
 
 // scanFatalText 在输出尾部扫描 OOM / 中止特征，返回匹配的证据片段（空表示未命中）。
@@ -136,3 +145,9 @@ func parseOOMKill(s string) (int, bool) {
 // 取值依据实测：community(80 包) 的 golangci-lint 峰值约 4.9GB，6GB 可跑完
 // （见 docs/shell_reliable_result_design.md）。提升仅作用于内存中的容器上限，不落库。
 const oomRetryElevatedMB = int64(6144)
+
+// oomRetryMaxMB 是 OOM 自动重试时内存上限的封顶值（MB）。
+// 若单次提升后（6144m）仍 OOM，下次重试会按 2 倍逐级提升
+// （6144 → 12288 → 16384 …），直至到达此封顶值后不再继续放大，
+// 避免无限制吃光宿主机内存。提升仅作用于内存中的容器上限，不落库。
+const oomRetryMaxMB = int64(16384)
