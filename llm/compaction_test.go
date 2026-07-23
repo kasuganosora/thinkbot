@@ -359,8 +359,8 @@ func TestCompactor_BuildSummaryPrompt_WithPrevious(t *testing.T) {
 
 func TestDefaultCompactionConfig(t *testing.T) {
 	cfg := DefaultCompactionConfig()
-	if cfg.MaxTokens != 128000 {
-		t.Errorf("expected MaxTokens=128000, got %d", cfg.MaxTokens)
+	if cfg.MaxTokens != 64000 {
+		t.Errorf("expected MaxTokens=64000, got %d", cfg.MaxTokens)
 	}
 	if cfg.ReservedTokens <= 0 {
 		t.Error("expected positive ReservedTokens")
