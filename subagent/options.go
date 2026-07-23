@@ -63,11 +63,23 @@ func WithName(name string) Option {
 	}
 }
 
-// WithTools 附加工具定义（LLM function calling）。
-// 注意：SubAgent 本身不执行工具，仅将定义传递给 LLM。
+// WithTools 注入带 Execute 处理函数的工具（LLM function calling）。
+// 当同时设置 WithToolSteps（>0）时，SubAgent 会走多步编排回路自动执行这些工具，
+// 使其能像主 Agent 一样使用工作空间（exec/读/写/列目录等）。
+// 工具通常由 SubAgentManager 从主 Agent 的 ToolManager 解析后注入。
 func WithTools(tools ...llm.Tool) Option {
 	return func(sa *SubAgent) {
 		sa.extraTools = append(sa.extraTools, tools...)
+	}
+}
+
+// WithToolSteps 设置带工具执行回路时的最大 LLM 步数预算（仅当通过 WithTools
+// 注入了可执行工具时生效）。0 = 使用包默认 defaultSubagentToolSteps。
+func WithToolSteps(n int) Option {
+	return func(sa *SubAgent) {
+		if n > 0 {
+			sa.toolSteps = n
+		}
 	}
 }
 

@@ -523,6 +523,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 调用方未显式 WithMaxTokens 时，自动跟随模型配置（如 glm-5.2=128K）。
 	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model,
 		subagent.WithMaxTokens(bundle.MainDef.MaxTokens))
+	// 让子 Agent 继承主 Agent 在子 Agent 场景可用的工具（exec/读/写/列目录等），
+	// 使其能像主 Agent 一样操作工作空间。spawn 工具由 scope 排除防套娃。
+	saMgr.SetToolResolver(toolMgr, agenttools.ToolSessionContext{BotID: id})
 	if err := subagent.RegisterTools(toolMgr, saMgr); err != nil {
 		s.logger.Warnw("failed to register subagent tools", "err", err)
 	}
