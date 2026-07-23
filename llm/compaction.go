@@ -102,7 +102,8 @@ type CompactionConfig struct {
 }
 
 // DefaultCompactionConfig 返回默认压缩配置。
-// 适合 128K context window 的模型。
+// MaxTokens 是压缩模块假定的上下文窗口预算（可用空间 = MaxTokens - ReservedTokens），
+// 取比模型真实上限更小的保守值，使压缩更早触发以预留安全余量，避免大输入挤爆输出窗口。
 func DefaultCompactionConfig() CompactionConfig {
 	return CompactionConfig{
 		MaxTokens:            64000,
