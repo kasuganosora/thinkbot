@@ -98,8 +98,17 @@ type ExecRequest struct {
 	// WorkDir 命令的工作目录（相对于工作空间根）。空表示使用默认工作目录。
 	WorkDir string
 
-	// Timeout 执行超时。零值使用 Config.Timeout。
+	// Timeout 执行超时（硬上限兜底）。零值使用 Config.Timeout。
+	// 注意：单条命令不再用固定超时一刀切地杀掉——真正决定是否终止的是
+	// 卡死看门狗（见 StuckTimeout）。本字段作为「硬上限」：即便命令一直在输出，
+	// 超过它也会被强制终止，防止无限挂起。bot 也可显式传此值覆盖。
 	Timeout time.Duration
+
+	// StuckTimeout 卡死看门狗阈值（可选覆盖）。零值使用 Config.StuckTimeout。
+	// 命令连续无 stdout/stderr 输出超过该时长，且已超过启动宽限期、进程仍存活，
+	// 则判定为「卡死（无进展）」并终止。只要命令持续产生输出（哪怕缓慢），就不会被杀；
+	// 只有真正卡住无进展时才终止。这正是区分「编译慢」与「死锁卡死」的关键。
+	StuckTimeout time.Duration
 }
 
 // ExecResult 是命令执行结果。
@@ -124,7 +133,9 @@ type ExecResult struct {
 
 // ExecChunk 是命令执行中的流式输出片段。
 type ExecChunk struct {
-	Stream string `json:"stream"` // stdout | stderr
+	// Stream 为输出流："stdout" | "stderr" 为真实输出；"heartbeat" 为保活心跳
+	// （不携带数据，仅用于向前端证明命令仍在运行，避免前端卡死看门狗误报）。
+	Stream string `json:"stream"`
 	Data   string `json:"data"`
 }
 
@@ -167,8 +178,16 @@ type Config struct {
 	// NetworkDisabled Docker 容器是否禁用网络。
 	NetworkDisabled bool
 
-	// Timeout 命令执行的默认超时。
+	// Timeout 单条命令的硬上限（兜底）。默认 0 表示自动 = StuckTimeout × 3（见
+	// resolveExecTimeouts 与 hardTimeoutFactor），可由 sandbox.timeout 配置显式覆盖。
+	// 与 StuckTimeout 的区别：本值是「无论如何都不能超过」的总时长；StuckTimeout 是
+	// 「无输出多久算卡死」的看门狗阈值。正常运行的慢命令（持续输出）靠 StuckTimeout 放行，
+	// 只有本值兜底防止无限挂起。本值不写死，始终随卡死阈值联动。
 	Timeout time.Duration
+
+	// StuckTimeout 卡死看门狗阈值。默认 5 分钟；可由 sandbox.stuck_timeout 配置覆盖。
+	// 命令连续无输出超过该时长即判定卡死并终止（需已过启动宽限期且进程存活）。
+	StuckTimeout time.Duration
 
 	// MaxOutput stdout/stderr 各自的最大字节数。
 	MaxOutput int
@@ -203,11 +222,63 @@ func DefaultConfig() Config {
 		MemoryLimit:     "2g",
 		CPULimit:        "1.0",
 		NetworkDisabled: false,
-		Timeout:         30 * time.Second,
+		Timeout:         0, // 硬上限兜底：0 表示自动 = StuckTimeout × 3（见 resolveExecTimeouts / hardTimeoutFactor），可由 sandbox.timeout 配置显式覆盖
+		StuckTimeout:    5 * time.Minute, // 卡死看门狗阈值：连续 5 分钟无输出即判定卡死，可由 sandbox.stuck_timeout 配置覆盖
 		MaxOutput:       1 << 20,  // 1 MB
 		MaxFileWrite:    10 << 20, // 10 MB
 		Timezone:        "UTC",
 	}
+}
+
+// ============================================================================
+// 卡死看门狗（stuck watchdog）参数
+// ============================================================================
+//
+// 设计理念：单条命令不再用「固定超时一刀切杀掉」——那样会把「编译慢」和「死锁卡死」
+// 同等对待。取而代之的是看门狗：只要命令持续产生输出（哪怕缓慢），就认为它活着，
+// 不杀；只有当命令「连续长时间无任何输出且进程仍存活」时才判定为卡死并终止。
+// 硬上限（Config.Timeout）仅作为最终兜底，防止无限挂起。
+
+const (
+	// defaultStuckTimeout 卡死看门狗默认阈值：连续 5 分钟无输出即判定卡死。
+	defaultStuckTimeout = 5 * time.Minute
+	// hardTimeoutFactor 硬上限兜底 = 卡死阈值 × 该系数（默认 3 倍）。
+	// 硬上限不再写死为固定时长，而是随卡死阈值联动：StuckTimeout 越大，硬上限越长。
+	hardTimeoutFactor = 3
+	// watchdogTick 看门狗轮询间隔。
+	watchdogTick = 5 * time.Second
+	// heartbeatInterval 前端保活心跳间隔：命令「安静」（距上次真实输出已超过该时长）
+	// 时，向前端发一次「活着」信号。远小于前端卡死看门狗阈值（默认 3 分钟），
+	// 保证前端不会把「编译慢 / 长时间无输出但仍在跑」误报为「连接已中断」。
+	heartbeatInterval = 15 * time.Second
+	// maxStartupGrace 启动宽限期上限：命令运行不足该时长时不判卡死，
+	// 避免启动加载阶段（前若干秒无输出）被误杀。实际宽限期取 stuckTimeout/2，
+	// 并受此上限约束（见 runCommandWithStreaming）。
+	maxStartupGrace = 30 * time.Second
+)
+
+// resolveExecTimeouts 从请求 / 配置 / 默认中解析卡死阈值与硬上限。
+//   - stuck：卡死看门狗阈值，优先 req.StuckTimeout → cfg.StuckTimeout → 默认 5 分钟
+//   - hard：硬上限兜底，优先 req.Timeout → cfg.Timeout → 默认 = StuckTimeout × 3
+//     （见 hardTimeoutFactor）。硬上限始终随卡死阈值联动，不写死固定时长。
+func resolveExecTimeouts(req ExecRequest, cfg Config) (stuck, hard time.Duration) {
+	stuck = req.StuckTimeout
+	if stuck == 0 {
+		stuck = cfg.StuckTimeout
+	}
+	if stuck == 0 {
+		stuck = defaultStuckTimeout
+	}
+	hard = req.Timeout
+	if hard == 0 {
+		hard = cfg.Timeout
+	}
+	if hard == 0 {
+		// 硬上限兜底不写死：取卡死阈值的 hardTimeoutFactor 倍（默认 3 倍）。
+		// StuckTimeout 调整时硬上限自动联动。
+		hard = stuck * hardTimeoutFactor
+	}
+	return stuck, hard
 }
 
 // ============================================================================

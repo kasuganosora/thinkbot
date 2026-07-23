@@ -182,6 +182,18 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	if s.store.GetString(config.KeySandboxRequireDocker, "") == "true" {
 		cfg.RequireDocker = true
 	}
+	// 单条命令硬上限（秒）。默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟），
+	// 不写死固定时长；设为正整数时显式覆盖。作为卡死看门狗的最终兜底，
+	// 避免 go build / go install / golangci-lint run 等耗时命令被无限挂起。
+	// 注意：命令默认不再用固定超时一刀切杀掉，真正判定「卡死」的是 StuckTimeout 看门狗。
+	if sec := s.store.GetInt(config.KeySandboxTimeout, 0); sec > 0 {
+		cfg.Timeout = time.Duration(sec) * time.Second
+	}
+	// 卡死看门狗阈值（秒）。默认 300（5 分钟）：命令连续无输出超过该时长即判定卡死并终止。
+	// 区分「编译慢（持续输出）」与「死锁卡死（无输出）」。
+	if sec := s.store.GetInt(config.KeySandboxStuckTimeout, 300); sec > 0 {
+		cfg.StuckTimeout = time.Duration(sec) * time.Second
+	}
 	switch {
 	case mb > 0:
 		cfg.MemoryLimit = fmt.Sprintf("%dm", mb)

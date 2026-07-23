@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -48,7 +49,16 @@ type SubAgent struct {
 	// 上下文管理
 	ctxMgr     *ContextManager
 	totalTurns int
-	closed     bool
+
+	// callTimeout 本次调用的超时覆盖（0 = 使用 SubAgentManager 的默认 delegateTimeout）。
+	// 由 WithCallTimeout 设置，仅对 Delegate/DelegateMany 的单次调用生效。
+	callTimeout time.Duration
+
+	// stuckTimeout 卡死看门狗阈值（0 = 使用默认 defaultDelegateStuckTimeout）。
+	// 由 WithStuckTimeout 设置，仅对 DelegateStream（流式委托）生效。
+	stuckTimeout time.Duration
+
+	closed bool
 
 	// 元数据
 	id   string
