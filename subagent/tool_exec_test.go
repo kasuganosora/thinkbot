@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -97,5 +98,99 @@ func TestSubAgentNoToolsStaysPureLLM(t *testing.T) {
 	}
 	if res.FinishReason != llm.FinishReasonToolCalls {
 		t.Errorf("expected raw single-call result (tool-calls), got %q", res.FinishReason)
+	}
+}
+
+// recordingProvider 记录每次 DoGenerate 收到的完整消息序列，用于校验多轮上下文连贯性。
+type recordingProvider struct {
+	calls    int32
+	mu       sync.Mutex
+	callMsgs [][]llm.Message
+	echoRan bool
+}
+
+func (p *recordingProvider) Name() string { return "rec" }
+
+func (p *recordingProvider) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	n := atomic.AddInt32(&p.calls, 1)
+	p.mu.Lock()
+	p.callMsgs = append(p.callMsgs, params.Messages)
+	p.mu.Unlock()
+	if n == 1 {
+		return &llm.GenerateResult{
+			Text:         "",
+			FinishReason: llm.FinishReasonToolCalls,
+			ToolCalls: []llm.ToolCall{
+				{ToolCallID: "call-1", ToolName: "echo_tool", Input: map[string]any{"msg": "hi"}},
+			},
+		}, nil
+	}
+	// 后续调用（包括第二轮）：返回最终文本，结束编排。
+	return &llm.GenerateResult{Text: "done", FinishReason: llm.FinishReasonStop}, nil
+}
+
+func (p *recordingProvider) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
+	ch := make(chan llm.StreamPart, 4)
+	go func() {
+		defer close(ch)
+		ch <- &llm.TextDeltaPart{Text: "done"}
+		ch <- &llm.FinishPart{FinishReason: llm.FinishReasonStop}
+	}()
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
+func hasUserMsg(msgs []llm.Message, want string) bool {
+	for _, m := range msgs {
+		if m.Role != llm.MessageRoleUser {
+			continue
+		}
+		for _, part := range m.Content {
+			if tp, ok := part.(llm.TextPart); ok && tp.Text == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestSubAgentToolPathPersistsUserMessageAcrossTurns 验证：带工具的多轮子 Agent，
+// 第一轮 user 消息必须保留在上下文中——第二轮调用时 provider 收到的消息里应包含第一轮的
+// user 消息。回归：编排路径曾只追加 result.Messages（仅 assistant/tool 消息），丢失 user 消息，
+// 导致多轮 spawn 子 Agent 上下文错乱。
+func TestSubAgentToolPathPersistsUserMessageAcrossTurns(t *testing.T) {
+	prov := &recordingProvider{}
+	echoTool := llm.Tool{
+		Name:        "echo_tool",
+		Description: "echo",
+		Parameters: map[string]any{
+			"type":     "object",
+			"properties": map[string]any{"msg": map[string]any{"type": "string"}},
+		},
+		Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+			prov.mu.Lock()
+			prov.echoRan = true
+			prov.mu.Unlock()
+			return input, nil
+		}),
+	}
+
+	sa := New(prov, "test-model", WithTools(echoTool), WithToolSteps(10))
+	defer sa.Close()
+
+	if _, err := sa.ChatWithResult(context.Background(), "turn-1 task"); err != nil {
+		t.Fatalf("turn 1 failed: %v", err)
+	}
+	if _, err := sa.ChatWithResult(context.Background(), "turn-2 task"); err != nil {
+		t.Fatalf("turn 2 failed: %v", err)
+	}
+
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	if len(prov.callMsgs) < 3 {
+		t.Fatalf("expected >=3 provider calls (turn1: tool+final, turn2: ...), got %d", len(prov.callMsgs))
+	}
+	// 第三轮调用（turn-2 的首步）应携带第一轮 user 消息 "turn-1 task"。
+	if !hasUserMsg(prov.callMsgs[2], "turn-1 task") {
+		t.Errorf("turn-2 context lost turn-1 user message; call[2] msgs = %+v", prov.callMsgs[2])
 	}
 }

@@ -147,8 +147,11 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 			return nil, errs.Wrapf(err, "subagent %q: orchestrated generate failed", sa.name)
 		}
 		// 持久化完整输出消息（含工具调用/结果），保证多轮上下文连贯。
+		// 注意：result.Messages 仅含本轮的 assistant/tool 消息，不含本轮 user 消息，
+		// 必须先把 user 消息写回上下文，否则下一轮会丢失 user 导致对话错乱。
 		sa.mu.Lock()
 		if !sa.closed {
+			sa.ctxMgr.Append(llm.UserMessage(text))
 			for _, m := range result.Messages {
 				sa.ctxMgr.Append(m)
 			}
@@ -207,31 +210,29 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 		if err != nil {
 			return nil, errs.Wrapf(err, "subagent %q: orchestrated stream failed", sa.name)
 		}
-		// 流结束后把最终文本持久化到上下文（工具中间消息不持久化，
-		// 因流式场景无法在消费后可靠回调更新）。
+		// 流结束后把本轮完整消息持久化到上下文：先写回 user 消息，
+		// 再写入编排结果（含工具调用/结果等中间消息），保证多轮上下文连贯。
+		// OrchestrateStream 在关闭 channel 前已填充 result.Messages，此处可安全读取。
 		originalCh := result.Stream
 		wrappedCh := make(chan llm.StreamPart, 256)
 		go func() {
 			defer close(wrappedCh)
-			var textBuf string
 			for part := range originalCh {
 				select {
 				case wrappedCh <- part:
-					if tp, ok := part.(*llm.TextDeltaPart); ok {
-						textBuf += tp.Text
-					}
 				case <-ctx.Done():
 					return
 				}
 			}
-			if textBuf != "" {
-				sa.mu.Lock()
-				if !sa.closed {
-					sa.ctxMgr.AppendTurn(text, textBuf)
-					sa.totalTurns++
+			sa.mu.Lock()
+			if !sa.closed {
+				sa.ctxMgr.Append(llm.UserMessage(text))
+				for _, m := range result.Messages {
+					sa.ctxMgr.Append(m)
 				}
-				sa.mu.Unlock()
+				sa.totalTurns++
 			}
+			sa.mu.Unlock()
 		}()
 		result.Stream = wrappedCh
 		return result, nil
