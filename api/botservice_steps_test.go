@@ -14,16 +14,16 @@ func TestEffectiveStepBudgets(t *testing.T) {
 		wantHard int
 	}{
 		{
-			name:     "zero means global defaults",
+			name:     "zero means unlimited (不限制, default)",
 			def:      &dao.BotDefinition{},
 			wantSoft: defaultSoftMaxSteps, // 30
-			wantHard: defaultHardMaxSteps, // 90
+			wantHard: 0,                    // 0 = 不限制（无限）
 		},
 		{
-			name:     "soft override only, hard derived",
+			name:     "soft override only, hard derived as unlimited",
 			def:      &dao.BotDefinition{MaxSteps: 50},
 			wantSoft: 50,
-			wantHard: 150, // 50 * 3
+			wantHard: 0, // hard=0 → 不限制（无限）
 		},
 		{
 			name:     "explicit hard honored",
