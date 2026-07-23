@@ -124,6 +124,21 @@ const (
 	// false（默认）：auto 模式下探测不到 Docker 则降级 local 进程执行。
 	// 注意：Backend 显式设为 "docker" 时本就强制要求 Docker，与本键无关。
 	KeySandboxRequireDocker = "sandbox.require_docker"
+
+	// KeySandboxTimeout bot 在沙箱里执行单条命令的「硬上限」秒数。
+	// 默认 0 表示自动 = 卡死阈值 × 3（见 hardTimeoutFactor），不写死固定时长；
+	// 设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：即便命令一直在输出，
+	// 超过它也会被强制终止，防止无限挂起。
+	// 注意：单条命令默认不再用固定超时一刀切杀掉——真正决定是否终止的是卡死看门狗
+	// （见 KeySandboxStuckTimeout）：只要命令持续有输出（哪怕慢）就不杀，只有长时间无输出
+	// 才判定卡死。本键是「无论如何都不能超过」的总时长上限。
+	KeySandboxTimeout = "sandbox.timeout"
+
+	// KeySandboxStuckTimeout 卡死看门狗阈值（秒，默认 300，即 5 分钟）。
+	// 命令连续无 stdout/stderr 输出超过该时长，且已过启动宽限期、进程仍存活，
+	// 则判定为「卡死（无进展）」并终止。这是区分「编译慢」与「死锁卡死」的关键：
+	// 正常运行的慢命令（持续输出）靠本阈值放行，不会误杀。
+	KeySandboxStuckTimeout = "sandbox.stuck_timeout"
 )
 
 // System 键。

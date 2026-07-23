@@ -3,11 +3,13 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -84,34 +86,180 @@ func (m *SubAgentManager) SetMaxConcurrency(n int) {
 	}
 }
 
+// ============================================================================
+// 流式委托 + 卡死看门狗
+// ============================================================================
+
+const (
+	// defaultDelegateStuckTimeout DelegateStream 卡死看门狗默认阈值：
+	// 流式 LLM 调用连续无 token 输出超过该时长即判定卡死并终止。默认 180s。
+	defaultDelegateStuckTimeout = 180 * time.Second
+	// delegateHardTimeoutFactor 硬上限 = 卡死阈值 × 该系数，派生而非写死。
+	// 与 sandbox 的硬兜底策略一致（看门狗时间 ×3）。
+	delegateHardTimeoutFactor = 3
+	// delegateWatchdogTick 看门狗轮询间隔。
+	delegateWatchdogTick = 5 * time.Second
+	// delegateMaxStartupGrace 首 token 宽限期上限：尚未收到任何 token 时，
+	// 启动后不足该时长不判卡死，容忍 LLM「思考」阶段（读长输入 + 推理）无输出。
+	// 实际宽限期取 stuckTimeout/2，并受此上限约束。
+	delegateMaxStartupGrace = 60 * time.Second
+)
+
 // Delegate 创建一个临时 SubAgent，执行任务后自动关闭。
 // 这是一次性委托模式，适合不需要多轮交互的场景。
 func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
 	timeout, _, defaultOpts := m.snapshotConfig()
 
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-
+	// 合并选项（WithCallTimeout 可能覆盖默认超时）
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 
+	// 创建临时 SubAgent 以提取 callTimeout 覆盖值
 	sa := New(m.provider, m.model, allOpts...)
 	defer sa.Close()
+
+	// 使用 callTimeout 覆盖或回退到管理器默认值
+	effectiveTimeout := timeout
+	if sa.callTimeout > 0 {
+		effectiveTimeout = sa.callTimeout
+	}
+
+	if effectiveTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, effectiveTimeout)
+		defer cancel()
+	}
 
 	return sa.Chat(ctx, task)
 }
 
-// DelegateMany 并发执行多个一次性委托任务。
+// DelegateStream 创建临时 SubAgent，流式执行任务，并用卡死看门狗保护。
+//
+// 与 Delegate（固定超时一刀切）不同，DelegateStream 用「卡死看门狗」判断 LLM 是否真卡死：
+//   - 只要 LLM 持续输出 token（哪怕很慢）就不杀——正常处理超长 prompt（如 86 个 lint 问题）
+//     不会因固定超时被迫中断；
+//   - 只有连续 stuckTimeout 无任何 token（且已过首 token 宽限期）才判定「卡死」并终止；
+//   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），作为绝对兜底，
+//     防止无限挂起（如模型以极小间隔吐 token 骗过卡死检测）。
+//
+// 参数：
+//   - WithStuckTimeout(d)：覆盖卡死阈值（默认 180s）；WithCallTimeout 对本方法无效。
+//
+// 返回完整文本；被看门狗终止时返回带 stuck/hard 区分的错误。
+func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
+	_, _, defaultOpts := m.snapshotConfig()
+	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
+	sa := New(m.provider, m.model, allOpts...)
+	defer sa.Close()
+
+	// 解析卡死阈值（stuck）与硬上限（hard = stuck × factor，派生，不写死）
+	stuck := sa.stuckTimeout
+	if stuck <= 0 {
+		stuck = defaultDelegateStuckTimeout
+	}
+	hard := stuck * delegateHardTimeoutFactor
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := sa.Stream(streamCtx, task)
+	if err != nil {
+		return "", errs.Wrapf(err, "subagent stream failed")
+	}
+
+	var (
+		lastActivity int64 // atomic: 上次收到 token 的 unix nano
+		gotFirst     int32 // atomic: 是否已收到首个 token
+		killReason   string
+	)
+	startTime := time.Now()
+	atomic.StoreInt64(&lastActivity, startTime.UnixNano())
+
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		ticker := time.NewTicker(delegateWatchdogTick)
+		defer ticker.Stop()
+		grace := stuck / 2
+		if grace > delegateMaxStartupGrace {
+			grace = delegateMaxStartupGrace
+		}
+		for {
+			select {
+			case <-streamCtx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				elapsed := now.Sub(startTime)
+				// 硬上限 = 总运行时间上限（派生：stuck × factor），作为绝对兜底。
+				// 注意：基于「总时长」而非「空闲时长」——持续吐 token 的模型不会触发卡死，
+				// 但若永远不结束（idle 始终很小），靠总时长硬上限强制终止。
+				if elapsed > hard {
+					killReason = "hard"
+					cancel()
+					return
+				}
+				// 首 token 宽限期内不判卡死：LLM 读长输入 + 推理阶段可能长时间无输出
+				if atomic.LoadInt32(&gotFirst) == 0 && elapsed < grace {
+					continue
+				}
+				idle := now.Sub(time.Unix(0, atomic.LoadInt64(&lastActivity)))
+				if idle > stuck {
+					killReason = "stuck"
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	var textBuf strings.Builder
+	var streamErr error
+	for part := range stream.Stream {
+		switch p := part.(type) {
+		case *llm.TextDeltaPart:
+			// token 到达 = 活跃信号
+			atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
+			atomic.StoreInt32(&gotFirst, 1)
+			textBuf.WriteString(p.Text)
+		case *llm.ReasoningDeltaPart:
+			// 推理 token 也算活跃信号
+			atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
+			atomic.StoreInt32(&gotFirst, 1)
+		case *llm.ErrorPart:
+			streamErr = p.Error
+			cancel() // 流内错误：停止消费，触发看门狗退出
+		}
+	}
+	// 流已正常结束（或已被看门狗取消）：通知看门狗退出，避免其阻塞在 ticker 上。
+	cancel()
+	<-watchdogDone
+
+	switch {
+	case killReason == "stuck":
+		return "", errs.Newf("subagent LLM 卡死：连续 %s 无 token 输出（卡死看门狗终止）", stuck)
+	case killReason == "hard":
+		return "", errs.Newf("subagent LLM 超过硬上限 %s 被强制终止（看门狗兜底）", hard)
+	case streamErr != nil:
+		return "", errs.Wrapf(streamErr, "subagent stream failed")
+	}
+	return textBuf.String(), nil
+}
 // 每个任务在独立的 SubAgent 中执行，互不影响。
 // 返回每个任务的结果（顺序与输入一致）。
 func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string, tasks []string, opts ...Option) []TaskResult {
 	// 快照配置（线程安全）
 	timeout, maxConc, defaultOpts := m.snapshotConfig()
 
-	// 预计算合并选项，避免在每个 goroutine 中重复
+	// 预计算合并选项（WithCallTimeout 可能覆盖默认超时）
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
+
+	// 创建临时实例提取 callTimeout
+	dummy := New(m.provider, m.model, allOpts...)
+	effectiveTimeout := timeout
+	if dummy.callTimeout > 0 {
+		effectiveTimeout = dummy.callTimeout
+	}
+	dummy.Close()
 
 	results := make([]TaskResult, len(tasks))
 
@@ -127,9 +275,9 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 
 			// 每个 SubAgent 有独立的超时上下文
 			taskCtx := ctx
-			if timeout > 0 {
+			if effectiveTimeout > 0 {
 				var cancel context.CancelFunc
-				taskCtx, cancel = context.WithTimeout(ctx, timeout)
+				taskCtx, cancel = context.WithTimeout(ctx, effectiveTimeout)
 				defer cancel()
 			}
 

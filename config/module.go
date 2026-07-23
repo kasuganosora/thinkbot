@@ -638,6 +638,8 @@ func WorkspaceMetaSpecs() []MetaSpec {
 		{Key: KeySandboxBackend, Category: "Workspace", Description: "沙箱后端：auto（默认，有 Docker 用容器隔离否则 local）| docker（强制容器隔离，不可用则报错）| local（强制本地进程，无隔离）。DooD 部署建议设为 docker。"},
 		{Key: KeySandboxImage, Category: "Workspace", Description: "沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用，默认 alpine:latest）。"},
 		{Key: KeySandboxRequireDocker, Category: "Workspace", Description: "auto 模式下是否强制要求 Docker 可用：true 则探测不到 Docker 直接报错而非降级 local（避免无隔离裸跑）；false（默认）则降级 local。"},
+		{Key: KeySandboxTimeout, Category: "Workspace", Description: "bot 在沙箱里执行单条命令的「硬上限」秒数。默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟），不写死固定时长；设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：哪怕命令一直在输出，超过它也会被强制终止。正常慢命令靠卡死看门狗放行，不会误杀。"},
+		{Key: KeySandboxStuckTimeout, Category: "Workspace", Description: "卡死看门狗阈值（秒，默认 300，即 5 分钟）。命令连续无输出超过该时长即判定卡死并终止。这是区分「编译慢」与「死锁卡死」的关键：只要命令持续有输出（哪怕慢）就不杀。"},
 	}
 }
 
@@ -951,6 +953,8 @@ func DefaultMap() map[string]string {
 		KeySandboxBackend:       "auto",
 		KeySandboxImage:         "alpine:latest",
 		KeySandboxRequireDocker: "false",
+		KeySandboxTimeout:       "0",
+		KeySandboxStuckTimeout:  "300",
 		// Dreaming
 		"bot.dreaming.enabled":  "false",
 		"bot.dreaming.schedule": "0 3 * * *",

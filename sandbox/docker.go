@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -176,12 +178,9 @@ func (w *dockerWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChu
 		return nil, errs.New("sandbox/docker: command is empty")
 	}
 
-	timeout := req.Timeout
-	if timeout == 0 {
-		timeout = w.cfg.Timeout
-	}
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stuck, hard := resolveExecTimeouts(req, w.cfg)
 
 	// 选择工作目录
 	targetDir := w.workDir
@@ -196,16 +195,13 @@ func (w *dockerWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChu
 	cmd := exec.CommandContext(execCtx, "docker",
 		"exec", "-w", targetDir, w.container, "sh", "-c", req.Command)
 
-	result, err := runCommandWithStreaming(execCtx, cmd, w.cfg.MaxOutput, nil, func(stream, chunk string) {
+	result, err := runCommandWithStreaming(execCtx, cancel, cmd, w.cfg.MaxOutput, nil, stuck, hard, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
 	})
 	if err != nil {
 		return nil, errs.Wrapf(err, "sandbox/docker: exec in container %q", w.container)
-	}
-	if result.ExitCode == -1 && execCtx.Err() == context.DeadlineExceeded {
-		result.Stderr = fmt.Sprintf("command timed out after %s\n%s", timeout, result.Stderr)
 	}
 	return result, nil
 }
@@ -333,8 +329,11 @@ func shellQuote(s string) string {
 
 // runCommandWithStreaming 执行命令并可选回调 stdout/stderr 增量。
 // stdin 非空时作为命令标准输入（用于 write_file 等场景）；onChunk 为 nil 时不回调。
-// 收尾处调用 finalizeExecResult 填充完整性 / 可信度信号（退出码 / 超时 / 输出文本特征）。
-func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, stdin []byte, onChunk func(stream, chunk string)) (*ExecResult, error) {
+// cancel 由调用方持有（context.WithCancel 的 cancelFunc），卡死看门狗判定命令卡死或
+// 超硬上限时调用它终止命令；进程组看门狗（见下）会随之清理整个管道子孙进程。
+// stuckTimeout / hardTimeout 分别为卡死看门狗阈值与硬上限兜底。
+// 收尾处调用 finalizeExecResult 填充完整性 / 可信度信号（退出码 / 卡死 / 输出文本特征）。
+func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, maxOut int, stdin []byte, stuckTimeout, hardTimeout time.Duration, onChunk func(stream, chunk string)) (*ExecResult, error) {
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -359,7 +358,15 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 		return nil, err
 	}
 
-	// 进程组看门狗：当 ctx 被取消（超时 / 客户端断开 / 主动 abort）时，
+	// 命令启动时刻与最后一次「有输出」时刻（看门狗心跳）。
+	startTime := time.Now()
+	var lastActivity atomic.Int64
+	lastActivity.Store(startTime.UnixNano())
+	// 看门狗判定原因："stuck"(卡死) / "hard"(硬上限) / ""(正常结束或外部取消)。
+	var stuckReason atomic.Value
+	stuckReason.Store("")
+
+	// 进程组看门狗：当 ctx 被取消（卡死看门狗触发 / 客户端断开 / 主动 abort）时，
 	// 杀掉整个进程组而非仅直接子进程。配合上方 Setpgid（已在 Start 前设置），
 	// kill(-pid) 可连带清理 sh -c "cmd | head" 的全部子孙，避免子进程持管道
 	// 写端导致 cmd.Wait() 永久阻塞 —— 这是「执行中」永不停的根因。
@@ -377,6 +384,81 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 	}()
 	defer close(watchDone)
 
+	// 卡死看门狗：真正判断命令「是否真的卡住」，而非固定超时一刀切。
+	//   - 只要命令持续产生输出（哪怕缓慢），lastActivity 不断刷新，就不会被杀；
+	//   - 连续 stuckTimeout 无任何输出、且已超过启动宽限期、且进程仍存活
+	//     （kill -0 成功）→ 判定卡死，cancel() 终止；
+	//   - 超过 hardTimeout（无论是否有输出）→ 强制终止，作为最终兜底。
+	// 注意：命令已正常结束的情况，readPipe 会读到 EOF、cmd.Wait 自然返回，
+	// 不会触发本看门狗（进程已退出，kill -0 失败）。
+	// 启动宽限期：取 stuckTimeout 的一半、上限 maxStartupGrace——避免启动加载阶段
+	// （前若干秒无输出）被误杀，同时不影响较短阈值的判定灵敏度。
+	startupGrace := stuckTimeout / 2
+	if startupGrace > maxStartupGrace {
+		startupGrace = maxStartupGrace
+	}
+	stuckWatchDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(watchdogTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stuckWatchDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				elapsed := now.Sub(startTime)
+				// 硬上限兜底：单条命令总时长不可超过 hardTimeout。
+				if elapsed > hardTimeout {
+					stuckReason.Store("hard")
+					cancel()
+					return
+				}
+				// 卡死判定：已过启动宽限期，且连续 stuckTimeout 无输出、进程仍存活。
+				if elapsed > startupGrace &&
+					now.UnixNano()-lastActivity.Load() > int64(stuckTimeout) &&
+					cmd.Process != nil {
+					if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
+						stuckReason.Store("stuck")
+						cancel()
+						return
+					}
+				}
+			}
+		}
+	}()
+	defer close(stuckWatchDone)
+
+	// 前端保活心跳：只要命令还在运行，就周期性地向前端发「活着」信号，
+	// 避免前端的卡死看门狗（默认 3 分钟无更新即报「连接可能已中断」）把
+	// 「编译慢 / 长时间无输出但仍在跑」的命令误杀。仅在命令「安静」（距上次
+	// 真实输出已超过一个心跳间隔）时才发，避免与真实输出 chunk 重复刷屏。
+	// 心跳走 onChunk("heartbeat", "")：上游工具层转成不携带 chunk 的 progress
+	// 事件，前端收到后仅刷新「存活」状态、不污染输出。
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				last := time.Unix(0, lastActivity.Load())
+				if time.Since(last) >= heartbeatInterval {
+					if onChunk != nil {
+						onChunk("heartbeat", "")
+					}
+				}
+			}
+		}
+	}()
+	defer close(heartbeatDone)
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 	var mu sync.Mutex
 	readPipe := func(stream string, r io.Reader) {
@@ -386,6 +468,8 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 			n, readErr := reader.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
+				// 刷新看门狗心跳：有输出即视为「活着 / 有进展」，不判卡死。
+				lastActivity.Store(time.Now().UnixNano())
 				mu.Lock()
 				if stream == "stderr" {
 					stderrBuf.WriteString(chunk)
@@ -435,8 +519,17 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 		}
 	}
 
-	if ctx.Err() == context.DeadlineExceeded {
+	// 卡死看门狗 / 硬上限触发：判定后 cancel() 已被调用，进程组看门狗随之清理
+	// 整个管道，cmd.Wait() 返回。此时以看门狗原因为准，不再依赖 ctx.Err()。
+	if reason := stuckReason.Load().(string); reason != "" {
 		result.ExitCode = -1
+		var label string
+		if reason == "stuck" {
+			label = fmt.Sprintf("命令被卡死看门狗终止：连续 %s 无输出且无进展\n", stuckTimeout)
+		} else {
+			label = fmt.Sprintf("命令超过硬上限 %s 被强制终止\n", hardTimeout)
+		}
+		result.Stderr = label + result.Stderr
 	} else if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
@@ -445,9 +538,9 @@ func runCommandWithStreaming(ctx context.Context, cmd *exec.Cmd, maxOut int, std
 		}
 	}
 
-	// 填充完整性 / 可信度信号（退出码 / 超时 / 输出文本特征）。
+	// 填充完整性 / 可信度信号（退出码 / 卡死 / 输出文本特征）。
 	// cgroup OOM 由调用方在 ExecStream 中前后对比后叠加到 OOMKilled。
-	finalizeExecResult(result)
+	finalizeExecResult(result, stuckReason.Load().(string))
 	return result, nil
 }
 
