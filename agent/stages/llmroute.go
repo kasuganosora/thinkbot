@@ -331,6 +331,19 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			"请回复「继续」让我接着完成剩余工作。"
 	}
 
+	// 若编排循环因步数守卫（撞硬上限或陷入重复循环）而停止，追加提示，
+	// 避免用户把「步数预算耗尽、Bot 主动停下」误判为卡死。实际上任务
+	// 可能尚未跑完，回复「继续」即可让 Bot 接着处理剩余工作。
+	if result.LoopStoppedByGuard {
+		result.Text += "\n\n⚠️ 提示：本次任务因达到工具调用步数上限（" +
+			result.LoopStopReason + "）被暂停，可能尚未全部完成。" +
+			"请回复「继续」让我接着完成剩余工作。"
+		// 归一结束原因：模型仍在 tool-calls（想继续），但本轮回合已被守卫
+		// 强制结束。置为 stop 以免前端把 finish_reason=tool-calls 误判为
+		// 「Bot 仍在调用工具 / 卡住」。
+		result.FinishReason = llm.FinishReasonStop
+	}
+
 	// 将回复添加为 Action
 	// 使用 reply_target 作为 outbound 回复目标（由 Channel 在 Inbound 时设置）
 	replyTarget := env.Message.Channel // 默认使用 Channel（向后兼容）

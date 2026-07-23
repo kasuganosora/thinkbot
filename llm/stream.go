@@ -221,6 +221,10 @@ type StreamResult struct {
 	// excluding the original input messages. Populated as the stream is consumed.
 	Messages             []Message
 	DeferredToolApproval *ToolApprovalResult
+	// LoopStoppedByGuard / LoopStopReason 由编排层填充，含义同 GenerateResult：
+	// 用于通知上游本次多步循环是否因步数守卫而停止。
+	LoopStoppedByGuard bool   `json:"-"`
+	LoopStopReason     string `json:"-"`
 }
 
 // Text consumes the entire stream and returns concatenated text.
