@@ -304,6 +304,9 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	logLoopStop(ctx, loop, len(allSteps))
 
 	if lastResult != nil {
+		// 暴露步数守卫停止信号，供上游（llmroute）向用户给出明确提示。
+		lastResult.LoopStoppedByGuard = loop.stoppedByGuard(len(allSteps))
+		lastResult.LoopStopReason = loop.describeLoopStop(len(allSteps))
 		lastResult.Usage = totalUsage
 		lastResult.Steps = allSteps
 		lastResult.Messages = allMessages
@@ -524,6 +527,10 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 		}
 
 		logLoopStop(ctx, loop, len(allSteps))
+
+		// 暴露步数守卫停止信号，供上游（llmroute）向用户给出明确提示。
+		sr.LoopStoppedByGuard = loop.stoppedByGuard(len(allSteps))
+		sr.LoopStopReason = loop.describeLoopStop(len(allSteps))
 
 		// Populate StreamResult fields before closing the channel.
 		sr.Steps = allSteps
