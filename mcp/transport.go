@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -26,6 +27,8 @@ type transport interface {
 	RoundTrip(ctx context.Context, data []byte) ([]byte, error)
 	// Close 关闭传输层。
 	Close() error
+	// Healthy 返回传输层是否仍存活（用于断线检测 / 自动重连）。
+	Healthy() bool
 }
 
 // ============================================================================
@@ -115,6 +118,14 @@ func (t *stdioTransport) Close() error {
 	return nil
 }
 
+// Healthy 通过向子进程发送信号 0 探测其是否仍存活（进程退出后 Signal(0) 报错）。
+func (t *stdioTransport) Healthy() bool {
+	if t.cmd == nil || t.cmd.Process == nil {
+		return false
+	}
+	return t.cmd.Process.Signal(syscall.Signal(0)) == nil
+}
+
 // ============================================================================
 // httpTransport — Streamable HTTP 传输
 // ============================================================================
@@ -180,6 +191,9 @@ func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, err
 }
 
 func (t *httpTransport) Close() error { return nil }
+
+// Healthy HTTP 传输始终返回 true；连接错误由调用方在请求失败时驱动重连。
+func (t *httpTransport) Healthy() bool { return true }
 
 // parseSSEResponse 从 SSE 流中提取所有 data: 行并拼接为完整的 JSON。
 // SSE 规范允许多行 data: 组成单个事件体。
