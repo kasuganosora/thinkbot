@@ -343,7 +343,15 @@ func convertUnifiedToGeminiContents(messages []llm.Message) ([]Content, error) {
 func convertUnifiedToGeminiTools(tools []llm.Tool) []Tool {
 	decls := make([]FunctionDeclaration, 0, len(tools))
 	for _, t := range tools {
-		params, _ := json.Marshal(t.Parameters)
+		// Deferred tools expose a nil Parameters; emit a valid minimal schema
+		// ({"type":"object"}) rather than {} so providers that require a type
+		// (e.g. Anthropic) accept the tool definition.
+		var params json.RawMessage = []byte(`{"type":"object"}`)
+		if t.Parameters != nil {
+			if b, err := json.Marshal(t.Parameters); err == nil {
+				params = b
+			}
+		}
 		decls = append(decls, FunctionDeclaration{
 			Name:        t.Name,
 			Description: t.Description,

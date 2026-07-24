@@ -50,6 +50,18 @@ type Tool struct {
 	// RequireApproval, when true, causes the orchestration layer to call the
 	// configured ApprovalHandler before executing this tool.
 	RequireApproval bool `json:"-"`
+
+	// DeferredLoad marks this tool as lazily loaded (Claude-style defer_loading).
+	// When true, the orchestration layer initially shows the model only the
+	// tool's name and description — its Parameters (input schema) are hidden —
+	// until the tool is "loaded" on demand. Loading happens either via the
+	// injected tool_search tool, or automatically when the model references the
+	// tool by name. Once loaded, the full schema is included so the model can
+	// call it with arguments.
+	DeferredLoad bool `json:"-"`
+
+	// Keywords are extra terms used by tool_search to match this tool. Optional.
+	Keywords []string `json:"-"`
 }
 
 // ToolCall represents a tool invocation requested by the model.

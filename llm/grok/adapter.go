@@ -349,7 +349,15 @@ func convertUnifiedToGrokMessages(system string, messages []llm.Message) ([]Mess
 func convertUnifiedToGrokTools(tools []llm.Tool) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
-		params, _ := json.Marshal(t.Parameters)
+		// Deferred tools expose a nil Parameters; emit a valid minimal schema
+		// ({"type":"object"}) rather than {} so providers that require a type
+		// (e.g. Anthropic) accept the tool definition.
+		var params json.RawMessage = []byte(`{"type":"object"}`)
+		if t.Parameters != nil {
+			if b, err := json.Marshal(t.Parameters); err == nil {
+				params = b
+			}
+		}
 		out = append(out, Tool{
 			Type: "function",
 			Function: ToolFunction{

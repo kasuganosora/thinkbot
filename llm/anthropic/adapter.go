@@ -496,10 +496,17 @@ func convertUnifiedMessages(messages []llm.Message, bt *breakpointTracker) ([]Me
 func convertUnifiedTools(tools []llm.Tool, bt *breakpointTracker) []Tool {
 	out := make([]Tool, 0, len(tools))
 	for _, t := range tools {
+		// Deferred tools expose a nil Parameters; emit a valid minimal schema
+		// ({"type":"object"}) rather than {} so Anthropic accepts the tool
+		// definition (its API requires input_schema.type == "object").
+		inputSchema := any(map[string]any{"type": "object"})
+		if t.Parameters != nil {
+			inputSchema = t.Parameters
+		}
 		out = append(out, Tool{
 			Name:         t.Name,
 			Description:  t.Description,
-			InputSchema:  t.Parameters,
+			InputSchema:  inputSchema,
 			CacheControl: bt.cacheControl(t.CacheControl),
 		})
 	}
