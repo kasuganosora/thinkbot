@@ -131,7 +131,7 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 
 	// 带可执行工具时走多步编排回路：自动执行工具并把结果喂回模型，
 	// 直到模型停止请求工具。子 Agent 因此能像主 Agent 一样使用工作空间。
-	if len(sa.extraTools) > 0 && sa.toolSteps != 0 {
+	if len(sa.extraTools) > 0 {
 		params := sa.buildParams(msgs)
 		steps := sa.toolSteps
 		if steps <= 0 {
@@ -198,7 +198,7 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 	msgs = append(msgs, llm.UserMessage(text))
 
 	// 带可执行工具时走多步编排流式回路（自动执行工具）。
-	if len(sa.extraTools) > 0 && sa.toolSteps != 0 {
+	if len(sa.extraTools) > 0 {
 		params := sa.buildParams(msgs)
 		steps := sa.toolSteps
 		if steps <= 0 {
