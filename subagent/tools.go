@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -127,9 +128,33 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 					return nil, fmt.Errorf("tasks must contain at least one non-empty string")
 				}
 
-				systemPrompt, _ := m["system_prompt"].(string)
+			systemPrompt, _ := m["system_prompt"].(string)
 
-				results := mgr.DelegateMany(ctx, systemPrompt, tasks)
+			// 心跳保活：spawn 是同步阻塞调用（DelegateMany 返回整个子 Agent 的最终结果），
+			// 重任务（读大量文件 + 多轮模型推理）很容易超过前端 3 分钟「卡死看门狗」阈值，
+			// 触发误报「执行超时：连接可能已中断」。周期性发送 heartbeat 进度以重置前端计时器。
+			stopHeartbeat := make(chan struct{})
+			if ctx.SendProgress != nil {
+				go func() {
+					ticker := time.NewTicker(30 * time.Second)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-stopHeartbeat:
+							return
+						case <-ticker.C:
+							ctx.SendProgress(map[string]any{
+								"stream": "heartbeat",
+								"chunk":  "子 Agent 仍在执行中（读取文件 / 模型推理）…\n",
+							})
+						}
+					}
+				}()
+			}
+
+			results := mgr.DelegateMany(ctx, systemPrompt, tasks)
+
+			close(stopHeartbeat)
 
 				return map[string]any{
 					"success": true,
