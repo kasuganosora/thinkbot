@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -144,6 +145,12 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode,
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 分析阶段被显式终止（如外部调用 Control(terminate) 取消了 bgCtx）：
+		// 立刻返回，不重试、不污染错误信息。上层会据此标记为 terminated 而非 failed。
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, errs.Wrap(cerr, "analysis canceled")
+		}
+
 		// 首次尝试不等待；后续尝试指数退避（2s, 4s, 8s, 16s，上限 30s）。
 		if attempt > 1 {
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
@@ -174,6 +181,10 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode,
 			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
 		)
 		if err != nil {
+			// 上下文被取消（分析被终止）：不再重试，直接返回清晰错误。
+			if errors.Is(err, context.Canceled) {
+				return nil, errs.Wrap(err, "analysis canceled")
+			}
 			lastErr = errs.Wrap(err, "analyzer LLM call failed")
 			logger.Warnw("analyzer LLM call failed, will retry",
 				"attempt", attempt, "max_attempts", maxAttempts, "error", err)
