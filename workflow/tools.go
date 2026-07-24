@@ -221,7 +221,7 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 		Tool: llm.Tool{
 			Name:        "task_control",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description: "对任务执行控制操作。支持两种操作：1) retry - 重试指定的失败/跳过子任务；2) terminate - 终止整个任务（所有未完成子任务标记为跳过）。",
+			Description: "对任务执行控制操作。支持两种操作：1) retry - 重试指定的失败/跳过子任务；2) terminate - 终止整个任务（所有未完成子任务标记为跳过）。\n\n⚠️ 不要在分析阶段（status=analyzing）调用 terminate：此时工作流正在等待模型推理以分解任务，会较久没有进度输出（尤其推理模型首 token 延迟可达数十秒），这是正常现象，并非卡死。此时终止会杀掉一个本可成功的工作流。请等待其进入 running（已生成子任务）后，若确有节点卡住再考虑 terminate；若只是需求有误，应修正后重新提交，而非终止。",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
