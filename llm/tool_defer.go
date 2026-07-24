@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 // Default eviction policy for loaded deferred tools. A loaded tool only stays
@@ -39,6 +41,10 @@ const (
 type ToolDeferral struct {
 	mu sync.Mutex
 
+	// logger optionally records deferral activity (view/load) at DEBUG level
+	// so the feature is observable from logs. Nil disables logging.
+	logger *zap.SugaredLogger
+
 	enabled bool
 	loaded  map[string]bool
 	// lastUsed records the orchestration step when a tool was last loaded or
@@ -67,6 +73,32 @@ func NewToolDeferral(enabled bool) *ToolDeferral {
 		maxLoaded: DefaultMaxLoaded,
 		idleEvict: DefaultIdleEvictSteps,
 	}
+}
+
+// SetLogger enables DEBUG-level logging of deferral activity (view/load).
+// Optional; returns the receiver for chaining.
+func (d *ToolDeferral) SetLogger(l *zap.SugaredLogger) *ToolDeferral {
+	d.mu.Lock()
+	d.logger = l
+	d.mu.Unlock()
+	return d
+}
+
+// CountDeferred returns how many tools in the installed list are deferred.
+func (d *ToolDeferral) CountDeferred() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.countDeferredLocked()
+}
+
+func (d *ToolDeferral) countDeferredLocked() int {
+	n := 0
+	for i := range d.full {
+		if d.full[i].DeferredLoad {
+			n++
+		}
+	}
+	return n
 }
 
 // SetTools installs the full tool list (with Parameters + Execute) used both to
@@ -188,7 +220,17 @@ func (d *ToolDeferral) View() []Tool {
 		out = append(out, t)
 	}
 	hasUnloaded := d.hasUnloadedLocked()
+	deferredTotal := d.countDeferredLocked()
+	loaded := len(d.loaded)
 	d.mu.Unlock()
+
+	if d.logger != nil && hasUnloaded {
+		d.logger.Debugw("defer_loading: view",
+			"deferred_total", deferredTotal,
+			"loaded", loaded,
+			"hidden", deferredTotal-loaded,
+			"tool_search_injected", true)
+	}
 
 	if hasUnloaded {
 		out = append(out, d.searchTool())
@@ -230,7 +272,17 @@ func (d *ToolDeferral) searchTool() Tool {
 			}
 			hits := d.Search(query)
 			if len(hits) == 0 {
+				if d.logger != nil {
+					d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", []string{})
+				}
 				return "No matching tools found. Try different keywords, or describe the capability you need.", nil
+			}
+			if d.logger != nil {
+				names := make([]string, len(hits))
+				for i, h := range hits {
+					names[i] = h.Name
+				}
+				d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", names)
 			}
 			var b strings.Builder
 			b.WriteString(fmt.Sprintf("Found %d tool(s). They are now available for direct use:\n", len(hits)))
@@ -391,4 +443,74 @@ func (d *ToolDeferral) unloadLocked(name string) {
 			break
 		}
 	}
+}
+
+// ============================================================================
+// Per-session deferral store
+// ============================================================================
+
+// DeferralStore owns one ToolDeferral per conversation (session) so that
+// deferred-tool load state is isolated per conversation instead of leaking
+// across concurrent conversations that share the same bot. This matches
+// Claude's per-session defer_loading semantics and avoids step-counter races
+// when several conversations run at once.
+//
+// Callers create one store per bot (enabled) and resolve it per request via
+// ForSession(sessionID). An empty session id falls back to a single shared
+// deferral, preserving the previous behavior rather than disabling deferral.
+type DeferralStore struct {
+	mu sync.Mutex
+	// enabled mirrors ToolDeferral.enabled; ForSession returns nil when false.
+	enabled bool
+	// logger, if set, is inherited by every ToolDeferral the store creates.
+	logger *zap.SugaredLogger
+	// sessions maps a session id to its ToolDeferral, created lazily.
+	sessions map[string]*ToolDeferral
+	// fallback is used when no session id is available (rare); it keeps the
+	// previous per-bot semantics instead of turning deferral off.
+	fallback *ToolDeferral
+}
+
+// NewDeferralStore creates a per-session deferral store. When enabled is false,
+// ForSession returns nil and the orchestrator bypasses deferral.
+func NewDeferralStore(enabled bool) *DeferralStore {
+	return &DeferralStore{
+		enabled:  enabled,
+		sessions: make(map[string]*ToolDeferral),
+	}
+}
+
+// SetLogger enables DEBUG logging for all ToolDeferrals created by the store.
+// Optional; returns the receiver for chaining.
+func (s *DeferralStore) SetLogger(l *zap.SugaredLogger) *DeferralStore {
+	s.mu.Lock()
+	s.logger = l
+	s.mu.Unlock()
+	return s
+}
+
+// ForSession returns the ToolDeferral for the given session id, creating it on
+// first use. An empty session id falls back to a single shared deferral.
+// Returns nil when the store is disabled.
+func (s *DeferralStore) ForSession(sid string) *ToolDeferral {
+	if !s.enabled {
+		return nil
+	}
+	if sid == "" {
+		s.mu.Lock()
+		if s.fallback == nil {
+			s.fallback = NewToolDeferral(true).SetLogger(s.logger)
+		}
+		fb := s.fallback
+		s.mu.Unlock()
+		return fb
+	}
+	s.mu.Lock()
+	d, ok := s.sessions[sid]
+	if !ok {
+		d = NewToolDeferral(true).SetLogger(s.logger)
+		s.sessions[sid] = d
+	}
+	s.mu.Unlock()
+	return d
 }
