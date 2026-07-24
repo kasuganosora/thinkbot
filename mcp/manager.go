@@ -53,6 +53,7 @@ type Manager struct {
 	configs        map[string]ServerConfig
 	logger         *zap.SugaredLogger
 	onServerChange func() // 服务器状态变更回调（由 Provider 设置以失效缓存）
+	reconnectMu    sync.Map // server name → *sync.Mutex（按服务器串行化重连，避免并发重连风暴）
 }
 
 // NewManager 创建 MCP 管理器。
@@ -330,6 +331,88 @@ func (m *Manager) GetClient(name string) (*Client, bool) {
 }
 
 // ListAllTools 列出所有已连接服务器的工具，返回以服务器名分组的工具列表。
+// CallTool 调用指定 MCP 服务器的工具，自动处理断线重连。
+//
+// 若连接已失效（stdio 子进程崩溃 / HTTP 断开），会先重建连接再重试一次，
+// 使 MCP 服务器偶发崩溃或重启后工具可自愈，而不是像此前那样静默失效
+// 直到整个进程重启。
+func (m *Manager) CallTool(ctx context.Context, server, toolName string, args map[string]any) (string, error) {
+	c, err := m.liveClient(ctx, server)
+	if err != nil {
+		return "", err
+	}
+	res, callErr := c.CallTool(ctx, toolName, args)
+	if callErr != nil && !c.IsHealthy() {
+		// 调用期间连接失效，尝试重连并重试一次
+		if rc, rerr := m.reconnect(ctx, server); rerr == nil {
+			return rc.CallTool(ctx, toolName, args)
+		}
+	}
+	if callErr != nil {
+		return "", callErr
+	}
+	return res, nil
+}
+
+// liveClient 返回指定服务器的健康客户端；若当前客户端不健康则触发重连。
+func (m *Manager) liveClient(ctx context.Context, server string) (*Client, error) {
+	m.mu.RLock()
+	c := m.clients[server]
+	m.mu.RUnlock()
+	if c == nil {
+		return nil, fmt.Errorf("mcp: server %q not connected", server)
+	}
+	if c.IsHealthy() {
+		return c, nil
+	}
+	return m.reconnect(ctx, server)
+}
+
+// reconnect 关闭（如有）并按配置重建指定服务器的连接。
+// 使用按服务器粒度的锁串行化，且获取锁后会二次检查，避免并发重连风暴。
+func (m *Manager) reconnect(ctx context.Context, server string) (*Client, error) {
+	mu := m.reconnectLock(server)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 二次检查：获取锁期间可能已被其他 goroutine 重建
+	m.mu.RLock()
+	c := m.clients[server]
+	m.mu.RUnlock()
+	if c != nil && c.IsHealthy() {
+		return c, nil
+	}
+	if c != nil {
+		_ = c.Close()
+		m.mu.Lock()
+		delete(m.clients, server)
+		m.mu.Unlock()
+	}
+
+	cfg, ok := m.configs[server]
+	if !ok {
+		return nil, fmt.Errorf("mcp: server %q config not found", server)
+	}
+	if err := m.connectOne(ctx, cfg); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	c = m.clients[server]
+	m.mu.RUnlock()
+	if c == nil {
+		return nil, fmt.Errorf("mcp: server %q reconnect failed", server)
+	}
+	m.logger.Infow("mcp server reconnected", "server", server)
+	m.notifyServerChange()
+	return c, nil
+}
+
+// reconnectLock 返回指定服务器的重连锁（惰性创建，按服务器隔离）。
+func (m *Manager) reconnectLock(server string) *sync.Mutex {
+	v, _ := m.reconnectMu.LoadOrStore(server, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 func (m *Manager) ListAllTools(ctx context.Context) (map[string][]mcpTool, error) {
 	m.mu.RLock()
 	clients := make(map[string]*Client, len(m.clients))

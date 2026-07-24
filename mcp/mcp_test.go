@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -88,6 +89,8 @@ func (t *mockTransport) Close() error {
 	t.closed = true
 	return nil
 }
+
+func (t *mockTransport) Healthy() bool { return true }
 
 func (t *mockTransport) wasCalled(method string) bool {
 	t.mu.Lock()
@@ -240,6 +243,10 @@ func TestClient_Close(t *testing.T) {
 func TestMcpToolToLLM(t *testing.T) {
 	tp := setupMockTransport(nil, "result text")
 	client := newClient("myserver", tp, zap.NewNop().Sugar())
+	mgr := &Manager{
+		clients: map[string]*Client{"myserver": client},
+		logger:  zap.NewNop().Sugar(),
+	}
 
 	tool := mcpTool{
 		Name:        "search",
@@ -247,7 +254,7 @@ func TestMcpToolToLLM(t *testing.T) {
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
 	}
 
-	llmTool := mcpToolToLLM(tool, client, "myserver")
+	llmTool := mcpToolToLLM(tool, mgr, "myserver")
 
 	if llmTool.Name != "myserver__search" {
 		t.Errorf("expected name 'myserver__search', got %q", llmTool.Name)
@@ -580,5 +587,45 @@ func TestExtractText(t *testing.T) {
 				t.Errorf("extractText() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+
+// TestStdioTransportHealthy 验证 stdio 传输层的健康探测：进程存活时为 true，
+// 被杀后为 false（断线自动重连依赖此信号）。
+func TestStdioTransportHealthy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires subprocess")
+	}
+	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil)
+	if err != nil {
+		t.Fatalf("newStdioTransport: %v", err)
+	}
+	defer tp.Close()
+
+	if !tp.Healthy() {
+		t.Fatal("fresh stdio transport should be healthy")
+	}
+
+	// 杀掉子进程后应变为不健康
+	if tp.cmd != nil && tp.cmd.Process != nil {
+		_ = tp.cmd.Process.Kill()
+	}
+	time.Sleep(50 * time.Millisecond)
+	if tp.Healthy() {
+		t.Fatal("killed stdio transport should be unhealthy")
+	}
+}
+
+// TestClientIsHealthy 验证 Client 健康状态：未关闭且传输健康为 true，关闭后为 false。
+func TestClientIsHealthy(t *testing.T) {
+	tp := newMockTransport()
+	c := newClient("srv", tp, zap.NewNop().Sugar())
+	if !c.IsHealthy() {
+		t.Fatal("new client should be healthy")
+	}
+	_ = c.Close()
+	if c.IsHealthy() {
+		t.Fatal("closed client should be unhealthy")
 	}
 }
