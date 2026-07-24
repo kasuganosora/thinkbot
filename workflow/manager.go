@@ -229,6 +229,20 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	// Phase 1: 分析需求
 	nodes, err := m.analyzer.Analyze(ctx, wf.Requirement)
 	if err != nil {
+		// 分析阶段被显式终止（bgCtx 被 Control(terminate) 取消）：标记为 terminated 而非 failed，
+		// 避免把"用户/bot 主动终止"误报成"分析失败"。
+		if ctx.Err() != nil {
+			m.logger.Infow("analysis terminated", "workflow_id", wf.ID, "error", err)
+			wf.Status = WorkflowTerminated
+			wf.Error = "分析阶段被终止（需求分析未完成）"
+			_ = m.repo.Save(wf)
+			m.metrics.Terminated.Add(1)
+			m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowTerminated, map[string]any{
+				"error": wf.Error,
+			})
+			m.cleanupRunning(wf.ID)
+			return
+		}
 		m.logger.Errorw("analysis failed", "workflow_id", wf.ID, "error", err)
 		wf.Status = WorkflowFailed
 		wf.Error = fmt.Sprintf("需求分析失败: %s", err.Error())
@@ -668,6 +682,12 @@ func (m *Manager) Control(ctx context.Context, wfID string, req ControlRequest) 
 	case ActionTerminate:
 		if !ok {
 			return nil, errs.New("workflow is not running")
+		}
+		// 分析阶段尚未产生任何子任务：bot 在此阶段主动终止几乎总是误判
+		// （例如把模型"思考/首 token 延迟"当成卡死）。拒绝终止，让需求分析
+		// 继续完成，避免杀死一个本可成功的工作流。进入 running 后仍可正常终止。
+		if wf.Status == WorkflowAnalyzing {
+			return nil, errs.New("任务仍在分析中，暂不能终止；请等待分析完成（进入 running）后再终止，或修正需求后重新提交")
 		}
 		// 在锁内读取 scheduler/cancel，避免与 runScheduler 的写入产生 data race
 		m.mu.RLock()
