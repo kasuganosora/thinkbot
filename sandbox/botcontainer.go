@@ -287,6 +287,12 @@ func (c *botContainer) create(ctx context.Context) error {
 	_ = exec.CommandContext(ctx, "docker", "exec", c.container,
 		"sh", "-c", "mkdir -p "+containerWorkDir).Run()
 
+	// 引导安装 ripgrep：sandbox_search_content 优先使用 rg（比 BusyBox grep 强大得多，
+	// 支持真正的正则、PCRE2、更快）。幂等：已存在则跳过；失败（非 alpine 镜像 / 无网络）
+	// 静默忽略，搜索工具会自动回退到容器内的 grep。
+	_ = exec.CommandContext(ctx, "docker", "exec", c.container,
+		"sh", "-c", "command -v rg >/dev/null 2>&1 || apk add --no-cache ripgrep >/dev/null 2>&1 || true").Run()
+
 	if err := c.ensureNetwork(ctx); err != nil {
 		return err
 	}

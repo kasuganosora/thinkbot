@@ -676,9 +676,9 @@ func buildListDirTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_search_content",
-		Description: "在工作空间的文件中搜索内容（类似 grep -rn）。" +
-			"支持正则表达式（如 \"log.*Error\"、\"function\\s+\\w+\"）和递归搜索目录。" +
-			"返回匹配的文件名、行号和匹配行内容。" +
+		Description: "在工作空间的文件中搜索内容（基于 ripgrep，能力远强于 BusyBox grep）。" +
+			"支持完整正则表达式（如 \"log.*Error\"、\"function\\s+\\w+\"、\"\\d{4}-\\d{2}\"），" +
+			"递归搜索目录并包含隐藏文件。返回匹配的文件名、行号和匹配行内容。" +
 			"使用更精确的 pattern 可以获得更聚焦的结果。" +
 			"如果需要按文件名查找文件，先用 list_dir 列出目录。",
 		Parameters: map[string]any{
@@ -732,51 +732,38 @@ func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				return nil, err
 			}
 
-			// 构建 grep 命令
+			// 优先使用 ripgrep（rg）：能力远强于 BusyBox grep，支持真正的正则
+			// （\s \w \d、量词、分组等）、递归、隐藏文件、更快。若容器内未安装 rg
+			// （ExitCode == 127），自动回退到 grep。
+			icase := ""
+			if !caseSensitive {
+				icase = " -i"
+			}
+			rgCmd := fmt.Sprintf("rg --line-number --no-heading --hidden --no-ignore%s --max-count=%d -- %s %s 2>/dev/null",
+				icase, maxResults, shellQuote(pattern), shellQuote(searchPath))
 			grepFlags := "-rn"
 			if !caseSensitive {
 				grepFlags = "-rni"
 			}
 			grepFlags += fmt.Sprintf(" --max-count=%d", maxResults)
 
-			result, err := ws.Exec(ctx, ExecRequest{
-				Command: fmt.Sprintf("grep %s -- %s %s 2>/dev/null || true",
-					grepFlags, shellQuote(pattern), shellQuote(searchPath)),
-			})
+			res, err := ws.Exec(ctx, ExecRequest{Command: rgCmd})
 			if err != nil {
 				return nil, err
 			}
+			stdout := res.Stdout
+			if res.ExitCode == 127 {
+				// rg 不可用，回退到 grep（保持旧行为）
+				res2, err2 := ws.Exec(ctx, ExecRequest{Command: fmt.Sprintf("grep %s -- %s %s 2>/dev/null || true",
+					grepFlags, shellQuote(pattern), shellQuote(searchPath))})
+				if err2 != nil {
+					return nil, err2
+				}
+				stdout = res2.Stdout
+			}
 
 			// 解析 grep 输出: path:lineno:content
-			type match struct {
-				File    string `json:"file"`
-				Line    int    `json:"line"`
-				Content string `json:"content"`
-			}
-			matches := make([]match, 0)
-			if result.Stdout != "" {
-				for _, line := range strings.Split(result.Stdout, "\n") {
-					line = strings.TrimRight(line, "\r")
-					if line == "" {
-						continue
-					}
-					// 格式: path:lineno:content
-					parts := strings.SplitN(line, ":", 3)
-					if len(parts) < 3 {
-						continue
-					}
-					var lineNum int
-					_, _ = fmt.Sscanf(parts[1], "%d", &lineNum)
-					matches = append(matches, match{
-						File:    parts[0],
-						Line:    lineNum,
-						Content: parts[2],
-					})
-					if len(matches) >= maxResults {
-						break
-					}
-				}
-			}
+			matches := parseSearchMatches(stdout, maxResults)
 
 			return map[string]any{
 				"pattern":    pattern,
@@ -986,4 +973,43 @@ func stripOutputLimitingPipe(cmd string) (string, bool) {
 		return strings.TrimSpace(cleaned), true
 	}
 	return cmd, false
+}
+
+
+// searchMatch 是 search_content 单条匹配结果。
+type searchMatch struct {
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Content string `json:"content"`
+}
+
+// parseSearchMatches 解析 ripgrep / grep 的 "path:line:content" 输出。
+// rg 与 grep -n 输出格式一致（file:line:content），故同一解析逻辑复用。
+func parseSearchMatches(stdout string, maxResults int) []searchMatch {
+	matches := make([]searchMatch, 0)
+	if stdout == "" {
+		return matches
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		// 格式: path:line:content
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		var lineNum int
+		_, _ = fmt.Sscanf(parts[1], "%d", &lineNum)
+		matches = append(matches, searchMatch{
+			File:    parts[0],
+			Line:    lineNum,
+			Content: parts[2],
+		})
+		if len(matches) >= maxResults {
+			break
+		}
+	}
+	return matches
 }
