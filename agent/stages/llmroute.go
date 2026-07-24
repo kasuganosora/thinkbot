@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/session"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -110,9 +111,9 @@ type LLMConfig struct {
 	// ToolDeferral 可选的延迟加载工具管理器（Claude 风格 defer_loading）。
 	// 非 nil 时，标记了 DeferredLoad 的工具初始仅向模型暴露名称 + 描述，
 	// 完整 input schema 经注入的 tool_search 工具或「模型直接引用」按需加载，
-	// 从而节省 token 并减少工具选择错误。典型由调用方每 bot/session 持有一个
-	// 实例，使已发现的工具跨轮持久可用。
-	ToolDeferral *llm.ToolDeferral
+	// 从而节省 token 并减少工具选择错误。其状态按会话（session）隔离，
+	// 使已发现的工具在同一会话内跨轮持久可用，且不会串扰到其它并发会话。
+	ToolDeferral *llm.DeferralStore
 }
 
 // ============================================================================
@@ -212,9 +213,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 
 	// 注入延迟加载工具管理器（defer_loading / tool search）。为 nil 时
-	// orchestrator 不做拦截。
+	// orchestrator 不做拦截。按当前会话解析各自的 ToolDeferral 实例，
+	// 保证延迟加载状态在同一会话内跨轮持久、且不与其它并发会话串扰。
 	if s.config.ToolDeferral != nil {
-		cfg.ToolDeferral = s.config.ToolDeferral
+		cfg.ToolDeferral = s.config.ToolDeferral.ForSession(session.SessionIDFromEnvelope(env))
 	}
 
 	// 防偷懒门禁：环境类问题确定性强制"先调工具再作答"。
