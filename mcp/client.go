@@ -119,6 +119,18 @@ func (c *Client) Close() error {
 	return c.transport.Close()
 }
 
+// IsHealthy 返回连接是否健康。已关闭或底层传输层不可达时返回 false，
+// 供 Manager 判断是否需要触发断线自动重连。
+func (c *Client) IsHealthy() bool {
+	if c.closed.Load() {
+		return false
+	}
+	if c.transport == nil {
+		return false
+	}
+	return c.transport.Healthy()
+}
+
 // Name 返回服务器名称。
 func (c *Client) Name() string { return c.name }
 
@@ -220,12 +232,12 @@ func extractText(blocks []contentBlock) string {
 }
 
 // mcpToolToLLM 将 MCP 工具定义转换为 thinkbot 的 llm.Tool。
-// owner 用于创建工具执行闭包。
-// toolPrefix 用于给工具名添加前缀以避免命名冲突。
-func mcpToolToLLM(tool mcpTool, owner *Client, toolPrefix string) llm.Tool {
+// mgr 用于创建工具执行闭包（调用时按服务器名解析客户端，支持断线自动重连）。
+// serverName 用于给工具名添加前缀以避免命名冲突，同时作为重连时的服务器标识。
+func mcpToolToLLM(tool mcpTool, mgr *Manager, serverName string) llm.Tool {
 	name := tool.Name
-	if toolPrefix != "" {
-		name = toolPrefix + "__" + tool.Name
+	if serverName != "" {
+		name = serverName + "__" + tool.Name
 	}
 
 	// 解析 inputSchema，默认空对象
@@ -250,7 +262,7 @@ func mcpToolToLLM(tool mcpTool, owner *Client, toolPrefix string) llm.Tool {
 			if args == nil {
 				args = map[string]any{}
 			}
-			result, err := owner.CallTool(ctx, tool.Name, args)
+			result, err := mgr.CallTool(ctx, serverName, tool.Name, args)
 			if err != nil {
 				return nil, err
 			}

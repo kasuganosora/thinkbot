@@ -78,12 +78,8 @@ func (p *Provider) refresh(ctx context.Context) ([]llm.Tool, error) {
 
 	var result []llm.Tool
 	for serverName, mcpTools := range serverTools {
-		client, ok := p.manager.GetClient(serverName)
-		if !ok {
-			continue
-		}
 		for _, t := range mcpTools {
-			result = append(result, mcpToolToLLM(t, client, serverName))
+			result = append(result, mcpToolToLLM(t, p.manager, serverName))
 		}
 	}
 
