@@ -241,6 +241,10 @@ func mcpToolToLLM(tool mcpTool, owner *Client, toolPrefix string) llm.Tool {
 		Name:        name,
 		Description: tool.Description,
 		Parameters:  params,
+		// 延迟加载：MCP 工具数量往往较多，初始仅向模型暴露名称 + 描述，
+		// 完整 input schema 经 tool_search 或「模型直接引用」按需加载，
+		// 节省 token 并降低工具选择错误（对齐 Claude 的 defer_loading）。
+		DeferredLoad: true,
 		Execute: func(ctx *llm.ToolExecContext, input any) (any, error) {
 			args, _ := input.(map[string]any)
 			if args == nil {

@@ -78,6 +78,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:        "task",
+			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
 			Description: "提交复杂多步任务。对于包含多个步骤、多文件改动、有依赖关系或需要质量审查的复杂任务，你应优先使用此工具而非逐步手动调用工具——它会自动分析需求、拆解为子任务 DAG 图并异步并行执行，且支持结果审查与重试。立即返回 task_id，后续通过 task_status 轮询进度。",
 			Parameters: map[string]any{
 				"type": "object",
@@ -134,6 +135,7 @@ func statusToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:        "task_status",
+			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
 			Description: "查询任务的当前状态和进度。返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。",
 			Parameters: map[string]any{
 				"type": "object",
@@ -171,6 +173,7 @@ func nodesToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:        "task_detail",
+			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
 			Description: "查询任务中各子任务的详细状态，包括任务描述、执行结果、错误信息、依赖关系等。支持两种返回格式：flat（顺序平铺列表）和 tree（按依赖关系构建的树状结构，适合前端展示）。",
 			Parameters: map[string]any{
 				"type": "object",
@@ -217,6 +220,7 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:        "task_control",
+			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
 			Description: "对任务执行控制操作。支持两种操作：1) retry - 重试指定的失败/跳过子任务；2) terminate - 终止整个任务（所有未完成子任务标记为跳过）。",
 			Parameters: map[string]any{
 				"type": "object",
