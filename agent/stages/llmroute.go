@@ -106,6 +106,13 @@ type LLMConfig struct {
 	// 因为 thinkbot 均运行在 Docker 沙箱中，危险操作影响被沙箱边界限制。
 	// 框架层保留此注入点，便于将来在交互式渠道（如 Web）接入确认流。
 	ApprovalHandler func(ctx context.Context, call llm.ToolCall) (llm.ToolApprovalResult, error)
+
+	// ToolDeferral 可选的延迟加载工具管理器（Claude 风格 defer_loading）。
+	// 非 nil 时，标记了 DeferredLoad 的工具初始仅向模型暴露名称 + 描述，
+	// 完整 input schema 经注入的 tool_search 工具或「模型直接引用」按需加载，
+	// 从而节省 token 并减少工具选择错误。典型由调用方每 bot/session 持有一个
+	// 实例，使已发现的工具跨轮持久可用。
+	ToolDeferral *llm.ToolDeferral
 }
 
 // ============================================================================
@@ -202,6 +209,12 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。
 	if s.config.ApprovalHandler != nil {
 		cfg.ApprovalHandler = s.config.ApprovalHandler
+	}
+
+	// 注入延迟加载工具管理器（defer_loading / tool search）。为 nil 时
+	// orchestrator 不做拦截。
+	if s.config.ToolDeferral != nil {
+		cfg.ToolDeferral = s.config.ToolDeferral
 	}
 
 	// 防偷懒门禁：环境类问题确定性强制"先调工具再作答"。
