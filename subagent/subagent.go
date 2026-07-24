@@ -141,6 +141,9 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 			Params:       params,
 			MaxSteps:     steps,
 			HardMaxSteps: 0, // 0 = 自动 = MaxSteps * 3（看门狗兜底）
+			// 延迟加载：子 Agent 与主 Agent 共用同一批工具（含可能延迟的
+			// MCP 工具），按需经 tool_search / 直接引用加载完整 schema。
+			ToolDeferral: llm.NewToolDeferral(true),
 		}
 		result, err := llm.OrchestrateGenerate(ctx, sa.provider, cfg)
 		if err != nil {
@@ -205,6 +208,10 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 			Params:       params,
 			MaxSteps:     steps,
 			HardMaxSteps: 0, // 0 = 自动 = MaxSteps * 3
+			// 延迟加载：子 Agent 与主 Agent 共用同一批工具（含可能延迟的
+			// MCP 工具），按需经 tool_search / 直接引用加载完整 schema。
+			// 与 ChatWithResult 路径保持一致，避免流式下延迟工具暴露完整 schema。
+			ToolDeferral: llm.NewToolDeferral(true),
 		}
 		result, err := llm.OrchestrateStream(ctx, sa.provider, cfg)
 		if err != nil {
