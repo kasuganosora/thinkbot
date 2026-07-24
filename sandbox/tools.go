@@ -508,6 +508,7 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name:        "sandbox_delete_file",
+		DeferredLoad: true, // 破坏性操作，非日常高频，初始仅暴露名称+描述
 		Description: "删除 bot 工作空间中的文件或目录（递归删除目录）。",
 		Parameters: map[string]any{
 			"type": "object",
@@ -560,6 +561,7 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name:        "sandbox_move_file",
+		DeferredLoad: true, // 重命名/移动，非日常高频，初始仅暴露名称+描述
 		Description: "移动或重命名 bot 工作空间中的文件或目录。",
 		Parameters: map[string]any{
 			"type": "object",
@@ -794,6 +796,7 @@ func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildHealthTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_health",
+		DeferredLoad: true, // 诊断工具，非常规使用，初始仅暴露名称+描述
 		Description: "检查 bot 工作空间的健康状态。" +
 			"返回工作空间是否可用、后端类型（docker/local）、状态和详细信息。" +
 			"当命令执行失败或行为异常时，先调用此工具诊断问题。",

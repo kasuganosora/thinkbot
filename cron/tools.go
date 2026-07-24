@@ -204,6 +204,7 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name: "cron",
+			DeferredLoad: true, // 定时任务非日常任务，初始仅暴露名称+描述
 			Description: "管理定时任务。使用 action 参数选择操作：create（创建）、list（列表）、get（详情）、" +
 				"update（更新）、remove（删除）、pause（暂停）、resume（恢复）、trigger（立即触发）。" +
 				"\n\n" +
