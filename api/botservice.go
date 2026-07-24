@@ -542,8 +542,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 延迟加载工具（defer_loading）：MCP 等"多工具"类工具初始仅暴露名称 +
 	// 描述，完整 input schema 经注入的 tool_search 工具或「模型直接引用」按需
-	// 加载，节省 token 并减少工具选择错误。状态随 bot 生命周期持久（跨轮可用）。
-	toolDeferral := llm.NewToolDeferral(true)
+	// 加载，节省 token 并减少工具选择错误。按会话隔离（DeferralStore），
+	// 同一会话内跨轮持久可用，且不与其它并发会话串扰。
+	deferralStore := llm.NewDeferralStore(true).SetLogger(s.logger)
 
 	llmStage := stages.NewLLMStage(
 		"llm",
@@ -564,7 +565,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			StreamPublisher: s.eventBus,
 			UsageRecorder:   s.statsRecorder, // 统一记账到 stats
 			ReductionConfig: llm.DefaultReductionConfigPtr(),
-			ToolDeferral:    toolDeferral,
+			ToolDeferral:    deferralStore,
 		},
 		s.tp,
 		s.logger,

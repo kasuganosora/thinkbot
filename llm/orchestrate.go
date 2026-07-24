@@ -270,6 +270,9 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		// with guessed arguments.
 		if deferActive {
 			if names := loadTriggeredDeferredTools(result.ToolCalls, toolMap, cfg.ToolDeferral); len(names) > 0 {
+				if logger := traceid.L(ctx); logger != nil {
+					logger.Debugw("defer_loading: auto-load on reference", "tools", names)
+				}
 				for _, n := range names {
 					cfg.ToolDeferral.Load(n)
 				}
@@ -601,6 +604,9 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			// with guessed arguments.
 			if deferActive {
 				if names := loadTriggeredDeferredTools(stepToolCalls, toolMap, cfg.ToolDeferral); len(names) > 0 {
+					if logger := traceid.L(ctx); logger != nil {
+						logger.Debugw("defer_loading: auto-load on reference", "tools", names)
+					}
 					for _, n := range names {
 						cfg.ToolDeferral.Load(n)
 					}
