@@ -540,6 +540,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 该值后续同时用于 LLMStage 装配与 AgentConfig.MaxSteps，保证两处一致。
 	softSteps, hardSteps := effectiveStepBudgets(def)
 
+	// 延迟加载工具（defer_loading）：MCP 等"多工具"类工具初始仅暴露名称 +
+	// 描述，完整 input schema 经注入的 tool_search 工具或「模型直接引用」按需
+	// 加载，节省 token 并减少工具选择错误。状态随 bot 生命周期持久（跨轮可用）。
+	toolDeferral := llm.NewToolDeferral(true)
+
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
@@ -559,6 +564,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			StreamPublisher: s.eventBus,
 			UsageRecorder:   s.statsRecorder, // 统一记账到 stats
 			ReductionConfig: llm.DefaultReductionConfigPtr(),
+			ToolDeferral:    toolDeferral,
 		},
 		s.tp,
 		s.logger,
