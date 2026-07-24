@@ -188,8 +188,9 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 //   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），作为绝对兜底，
 //     防止无限挂起（如模型以极小间隔吐 token 骗过卡死检测）。
 //
-// 带工具的场景（子 Agent 注入主 Agent 工作空间工具）：工具自身的看门狗已保护长命令，
-// 此处不再叠加 LLM 输出停滞看门狗（否则长 exec 会被误判卡死），直接走编排流式回路。
+// 带工具的场景（子 Agent 注入主 Agent 工作空间工具）：同样启用看门狗，但任意流片段
+// （含工具调用/结果）都算活跃信号——长 exec 在首尾产生工具片段、且自身有超时保护，
+// 不会被误判卡死；只有 LLM 彻底沉默才触发卡死判定。
 //
 // 参数：
 //   - WithStuckTimeout(d)：覆盖卡死阈值（默认 180s）；WithCallTimeout 对本方法无效。
@@ -207,20 +208,9 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	sa := New(m.provider, m.model, allOpts...)
 	defer sa.Close()
 
-	// 带工具：直接走编排流式回路（工具执行有自身看门狗），不做额外 LLM 停滞看门狗。
-	if len(sa.extraTools) > 0 {
-		stream, err := sa.Stream(ctx, task)
-		if err != nil {
-			return "", errs.Wrapf(err, "subagent stream failed")
-		}
-		var b strings.Builder
-		for part := range stream.Stream {
-			if tp, ok := part.(*llm.TextDeltaPart); ok {
-				b.WriteString(tp.Text)
-			}
-		}
-		return b.String(), nil
-	}
+	// 带工具：同样走下方统一的卡死看门狗（streamWithWatchdog 把任意流片段视为活跃，
+	// 长 exec 在首尾产生工具调用/结果片段、且其自身有 sandbox 超时保护，不会被误判卡死；
+	// 只有 LLM 彻底沉默才触发卡死判定）。不再提前返回。
 
 	// 解析卡死阈值（stuck）与硬上限（hard = stuck × factor，派生，不写死）
 	stuck := sa.stuckTimeout
@@ -229,17 +219,41 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	}
 	hard := stuck * delegateHardTimeoutFactor
 
+	return m.streamWithWatchdog(ctx, sa, task, stuck, hard)
+}
+
+// streamWithWatchdog 在卡死看门狗保护下运行一个 SubAgent 的一次流式任务。
+//
+// 与 Delegate/DelegateMany 早期用的「context.WithTimeout 一刀切」不同，看门狗区分
+// 「慢但活着」与「真卡死」：
+//   - 只要流持续产出任意片段（文本/推理 token、工具调用、工具结果）即视为活跃，
+//     正常处理超长 prompt 或慢思考模型不会被中断；带工具时，长 exec 在首尾产生工具
+//     片段、且其自身有 sandbox 超时保护，也不会被误判卡死；
+//   - 仅当连续 stuck 无任何片段输出（且已过首片段宽限期）才判定卡死并终止；
+//   - 硬上限 = stuck × delegateHardTimeoutFactor 作为绝对兜底，防止无限挂起。
+//
+// DelegateStream 与 DelegateMany 共用此方法，使 spawn 等带工具的子 Agent 也能真正
+// 享受看门狗保护，而非被旧的工具分支逻辑绕过。
+func (m *SubAgentManager) streamWithWatchdog(ctx context.Context, sa *SubAgent, task string, stuck, hard time.Duration) (string, error) {
+	// streamCtx 才是真正传给流的可取消上下文：看门狗触达 killReason 时 cancel()
+	// 才能中止底层 LLM/工具流，否则消费者会永远阻塞在 stream.Stream 上。
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	stream, err := sa.Stream(streamCtx, task)
 	if err != nil {
+		// provider 不支持流式（如仅实现 DoGenerate 的后端 / 测试 mock）：
+		// 退化到单次生成 + 硬上限超时。无法做「慢但活着」探活，但至少受 hard 兜底，
+		// 比原先 120s 一刀切略好；生产（GLM 等支持流式）仍走下方看门狗。
+		if strings.Contains(err.Error(), "stream not supported") {
+			return m.chatWithHardTimeout(ctx, sa, task, hard)
+		}
 		return "", errs.Wrapf(err, "subagent stream failed")
 	}
 
 	var (
-		lastActivity int64 // atomic: 上次收到 token 的 unix nano
-		gotFirst     int32 // atomic: 是否已收到首个 token
+		lastActivity int64 // atomic: 上次收到任意片段的 unix nano
+		gotFirst     int32 // atomic: 是否已收到首个片段
 		killReason   string
 	)
 	startTime := time.Now()
@@ -262,14 +276,12 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 				now := time.Now()
 				elapsed := now.Sub(startTime)
 				// 硬上限 = 总运行时间上限（派生：stuck × factor），作为绝对兜底。
-				// 注意：基于「总时长」而非「空闲时长」——持续吐 token 的模型不会触发卡死，
-				// 但若永远不结束（idle 始终很小），靠总时长硬上限强制终止。
 				if elapsed > hard {
 					killReason = "hard"
 					cancel()
 					return
 				}
-				// 首 token 宽限期内不判卡死：LLM 读长输入 + 推理阶段可能长时间无输出
+				// 首片段宽限期内不判卡死：LLM 读长输入 + 推理阶段可能长时间无输出
 				if atomic.LoadInt32(&gotFirst) == 0 && elapsed < grace {
 					continue
 				}
@@ -286,16 +298,13 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	var textBuf strings.Builder
 	var streamErr error
 	for part := range stream.Stream {
+		// 任意片段都刷新活跃时间戳：文本/推理 token 与工具调用/结果都算活着，
+		// 避免一段较长的 exec（仅在首尾产生工具片段）被误判卡死。
+		atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
+		atomic.StoreInt32(&gotFirst, 1)
 		switch p := part.(type) {
 		case *llm.TextDeltaPart:
-			// token 到达 = 活跃信号
-			atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
-			atomic.StoreInt32(&gotFirst, 1)
 			textBuf.WriteString(p.Text)
-		case *llm.ReasoningDeltaPart:
-			// 推理 token 也算活跃信号
-			atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
-			atomic.StoreInt32(&gotFirst, 1)
 		case *llm.ErrorPart:
 			streamErr = p.Error
 			cancel() // 流内错误：停止消费，触发看门狗退出
@@ -307,14 +316,30 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 
 	switch {
 	case killReason == "stuck":
-		return "", errs.Newf("subagent LLM 卡死：连续 %s 无 token 输出（卡死看门狗终止）", stuck)
+		return "", errs.Newf("subagent LLM 卡死：连续 %s 无输出（卡死看门狗终止）", stuck)
 	case killReason == "hard":
-		return "", errs.Newf("subagent LLM 超过硬上限 %s 被强制终止（看门狗兜底）", hard)
+		return "", errs.Newf("subagent 超过硬上限 %s 被强制终止（看门狗兜底）", hard)
 	case streamErr != nil:
 		return "", errs.Wrapf(streamErr, "subagent stream failed")
 	}
 	return textBuf.String(), nil
 }
+
+// chatWithHardTimeout 是不支持流式时的退化路径：单次生成 + 硬上限超时。
+// 无流片段可探活，故不做「慢但活着」判定，仅以 hard 作为绝对上限兜底。
+func (m *SubAgentManager) chatWithHardTimeout(ctx context.Context, sa *SubAgent, task string, hard time.Duration) (string, error) {
+	if hard > 0 {
+		var c context.CancelFunc
+		ctx, c = context.WithTimeout(ctx, hard)
+		defer c()
+	}
+	res, err := sa.Chat(ctx, task)
+	if err != nil {
+		return "", errs.Wrapf(err, "subagent chat failed")
+	}
+	return res, nil
+}
+
 // 每个任务在独立的 SubAgent 中执行，互不影响。
 // 返回每个任务的结果（顺序与输入一致）。
 func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string, tasks []string, opts ...Option) []TaskResult {
@@ -360,7 +385,19 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 			sa := New(m.provider, m.model, allOpts...)
 			defer sa.Close()
 
-			reply, err := sa.Chat(taskCtx, t)
+			// 用卡死看门狗替代原先的 context.WithTimeout 一刀切：
+			// 慢但活着（持续产出片段）不杀，只有彻底沉默超过 stuck 才终止，hard 兜底。
+			// 这样带工具的 spawn 子 Agent（如代码审查专家）也能真正享受看门狗保护。
+			stuck := effectiveTimeout / delegateHardTimeoutFactor
+			if stuck <= 0 {
+				stuck = defaultDelegateStuckTimeout
+			}
+			hard := stuck * delegateHardTimeoutFactor
+			if effectiveTimeout > 0 && hard > effectiveTimeout {
+				hard = effectiveTimeout // 硬上限不超过 delegateTimeout
+			}
+
+			reply, err := m.streamWithWatchdog(taskCtx, sa, t, stuck, hard)
 			if err != nil {
 				results[idx] = TaskResult{
 					Task:    t,
