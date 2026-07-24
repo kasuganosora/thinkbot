@@ -72,6 +72,14 @@ type OrchestrateConfig struct {
 	// final answer without calling a tool, then relax to nil once real tool
 	// results exist. See agent/pipeline/verification_gate.go.
 	ToolChoiceForStep func(step int, toolsExecuted bool) any
+
+	// ToolDeferral enables lazy loading of deferred tools (Claude-style
+	// defer_loading / tool search). When non-nil and the tool list contains
+	// deferred tools, the orchestrator hides their Parameters from the model
+	// and injects a tool_search tool; deferred tools are loaded on demand
+	// (via tool_search or when the model references them by name). The
+	// execution map always keeps the full definitions so loaded tools run.
+	ToolDeferral *ToolDeferral
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -159,11 +167,36 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	// Apply prompt caching policy based on the provider's capabilities.
 	applyProviderCachePolicy(&cfg.Params, prov.Name())
 
-	// Strip sandbox_ prefix so the LLM sees generic tool names.
-	cfg.Params.Tools = stripSandboxPrefixes(cfg.Params.Tools)
+	// Build the execution tool list (full schemas), keeping a stable copy
+	// before any per-view mutation. If tool deferral is active, split it into
+	// a model-facing view that hides deferred tools' Parameters and injects a
+	// tool_search tool; the execution map always keeps the full definitions.
+	fullTools := make([]Tool, len(cfg.Params.Tools))
+	copy(fullTools, cfg.Params.Tools)
+	fullTools = stripSandboxPrefixes(fullTools)
+
+	deferActive := false
+	if cfg.ToolDeferral != nil {
+		cfg.ToolDeferral.SetTools(fullTools)
+		if cfg.ToolDeferral.HasDeferred() {
+			deferActive = true
+			cfg.Params.Tools = cfg.ToolDeferral.View()
+			fullTools = append(fullTools, cfg.ToolDeferral.ExecTool())
+		} else {
+			cfg.Params.Tools = fullTools
+		}
+	} else {
+		cfg.Params.Tools = fullTools
+	}
 
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
+		// No orchestration loop, so tool_search cannot be used and deferred
+		// tools would expose no schema. Bypass deferral and give the model the
+		// full tool list so behavior is well-defined.
+		if deferActive {
+			cfg.Params.Tools = fullTools
+		}
 		cfg.Params.Messages = PatchToolCalls(cfg.Params.Messages)
 		result, err := prov.DoGenerate(ctx, cfg.Params)
 		if err != nil {
@@ -189,7 +222,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		return result, nil
 	}
 
-	toolMap := buildToolMap(cfg.Params.Tools)
+	toolMap := buildToolMap(fullTools)
 	messages := make([]Message, len(cfg.Params.Messages))
 	copy(messages, cfg.Params.Messages)
 	messages = PatchToolCalls(messages)
@@ -211,6 +244,12 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 
 		params := cfg.Params
 		params.Messages = messages
+		// Refresh the model-facing tool view so tools loaded via tool_search
+		// (or auto-loaded on reference) become visible this step.
+		if deferActive {
+			cfg.ToolDeferral.SetStep(step)
+			params.Tools = cfg.ToolDeferral.View()
+		}
 		// Re-apply cache breakpoints for the current message set (the
 		// last messages may have changed since the initial placement).
 		applyProviderCachePolicy(&params, prov.Name())
@@ -225,6 +264,76 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		}
 		lastResult = result
 		totalUsage.Add(&result.Usage)
+
+		// Lazy tool loading: if the model referenced a deferred tool whose
+		// schema isn't loaded yet, load it and re-prompt instead of executing
+		// with guessed arguments.
+		if deferActive {
+			if names := loadTriggeredDeferredTools(result.ToolCalls, toolMap, cfg.ToolDeferral); len(names) > 0 {
+				for _, n := range names {
+					cfg.ToolDeferral.Load(n)
+				}
+				// Execute any sibling tool calls that are already ready
+				// (non-deferred or already-loaded deferred tools) so we don't
+				// waste a round-trip; only the newly-referenced deferred tools
+				// need a re-prompt to be called with proper arguments.
+				exclude := make(map[string]bool, len(names))
+				for _, n := range names {
+					exclude[n] = true
+				}
+				ready := filterToolCalls(result.ToolCalls, exclude)
+				if len(ready) > 0 {
+					readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, nil)
+					if rerr != nil {
+						var deferred *ToolApprovalDeferredError
+						if errors.As(rerr, &deferred) {
+							stepMsgs := buildStepMessages(result.Text, result.Reasoning, result.ReasoningProviderMetadata, ready, nil, &result.Usage)
+							sr := StepResult{
+								Text:                 result.Text,
+								Reasoning:            result.Reasoning,
+								FinishReason:         result.FinishReason,
+								RawFinishReason:      result.RawFinishReason,
+								Usage:                result.Usage,
+								ToolCalls:            ready,
+								Response:             result.Response,
+								DeferredToolApproval: &deferred.Approval,
+								Messages:             stepMsgs,
+							}
+							allSteps = append(allSteps, sr)
+							allMessages = append(allMessages, stepMsgs...)
+							applyOnStep(cfg, &sr)
+							result.DeferredToolApproval = &deferred.Approval
+							lastResult = result
+							break
+						}
+						return nil, rerr
+					}
+					toolsExecuted = true
+					loop.recordStep(step, toolCallSignature(ready))
+					if cfg.OnToolResults != nil {
+						readyResults = cfg.OnToolResults(step, readyResults)
+					}
+					stepMsgs := buildStepMessages(result.Text, result.Reasoning, result.ReasoningProviderMetadata, ready, readyResults, &result.Usage)
+					sr := StepResult{
+						Text:            result.Text,
+						Reasoning:       result.Reasoning,
+						FinishReason:    result.FinishReason,
+						RawFinishReason: result.RawFinishReason,
+						Usage:           result.Usage,
+						ToolCalls:       ready,
+						ToolResults:     toolCallResultsFromParts(readyResults),
+						Response:        result.Response,
+						Messages:        stepMsgs,
+					}
+					allSteps = append(allSteps, sr)
+					allMessages = append(allMessages, stepMsgs...)
+					applyOnStep(cfg, &sr)
+					messages = append(messages, stepMsgs...)
+				}
+				messages = append(messages, UserMessage(loadNote(names)))
+				continue
+			}
+		}
 
 		// No tool calls or not a tool-calls finish → final step
 		if result.FinishReason != FinishReasonToolCalls || len(result.ToolCalls) == 0 || !hasExecutableTools(result.ToolCalls, toolMap) {
@@ -271,6 +380,16 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 			return nil, err
 		}
 		toolsExecuted = true
+
+		// Keep loaded deferred tools that were just executed "fresh" so they
+		// are not idle-evicted while still relevant.
+		if deferActive {
+			for _, tc := range result.ToolCalls {
+				if t, ok := toolMap[tc.ToolName]; ok && t != nil && t.DeferredLoad {
+					cfg.ToolDeferral.Touch(tc.ToolName)
+				}
+			}
+		}
 
 		// Update the dynamic loop controller with this step's tool-call
 		// signature so it can extend past the soft budget while progressing
@@ -347,16 +466,41 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 	// Apply prompt caching policy based on the provider's capabilities.
 	applyProviderCachePolicy(&cfg.Params, prov.Name())
 
-	// Strip sandbox_ prefix so the LLM sees generic tool names.
-	cfg.Params.Tools = stripSandboxPrefixes(cfg.Params.Tools)
+	// Build the execution tool list (full schemas), keeping a stable copy
+	// before any per-view mutation. If tool deferral is active, split it into
+	// a model-facing view that hides deferred tools' Parameters and injects a
+	// tool_search tool; the execution map always keeps the full definitions.
+	fullTools := make([]Tool, len(cfg.Params.Tools))
+	copy(fullTools, cfg.Params.Tools)
+	fullTools = stripSandboxPrefixes(fullTools)
+
+	deferActive := false
+	if cfg.ToolDeferral != nil {
+		cfg.ToolDeferral.SetTools(fullTools)
+		if cfg.ToolDeferral.HasDeferred() {
+			deferActive = true
+			cfg.Params.Tools = cfg.ToolDeferral.View()
+			fullTools = append(fullTools, cfg.ToolDeferral.ExecTool())
+		} else {
+			cfg.Params.Tools = fullTools
+		}
+	} else {
+		cfg.Params.Tools = fullTools
+	}
 
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
+		// No orchestration loop, so tool_search cannot be used and deferred
+		// tools would expose no schema. Bypass deferral and give the model the
+		// full tool list so behavior is well-defined.
+		if deferActive {
+			cfg.Params.Tools = fullTools
+		}
 		cfg.Params.Messages = PatchToolCalls(cfg.Params.Messages)
 		return prov.DoStream(ctx, cfg.Params)
 	}
 
-	toolMap := buildToolMap(cfg.Params.Tools)
+	toolMap := buildToolMap(fullTools)
 	messages := make([]Message, len(cfg.Params.Messages))
 	copy(messages, cfg.Params.Messages)
 	messages = PatchToolCalls(messages)
@@ -390,6 +534,12 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			params := cfg.Params
 			params.Messages = messages
+			// Refresh the model-facing tool view so tools loaded via tool_search
+			// (or auto-loaded on reference) become visible this step.
+			if deferActive {
+				cfg.ToolDeferral.SetStep(step)
+				params.Tools = cfg.ToolDeferral.View()
+			}
 			// Re-apply cache breakpoints for the current message set.
 			applyProviderCachePolicy(&params, prov.Name())
 			// Per-step tool_choice override (anti-hallucination gate, etc.).
@@ -446,6 +596,76 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			totalUsage.Add(&stepUsage)
 
+			// Lazy tool loading: if the model referenced a deferred tool whose
+			// schema isn't loaded yet, load it and re-prompt instead of executing
+			// with guessed arguments.
+			if deferActive {
+				if names := loadTriggeredDeferredTools(stepToolCalls, toolMap, cfg.ToolDeferral); len(names) > 0 {
+					for _, n := range names {
+						cfg.ToolDeferral.Load(n)
+					}
+					// Execute any sibling tool calls that are already ready
+					// (non-deferred or already-loaded deferred tools) so we don't
+					// waste a round-trip; only the newly-referenced deferred tools
+					// need a re-prompt to be called with proper arguments.
+					exclude := make(map[string]bool, len(names))
+					for _, n := range names {
+						exclude[n] = true
+					}
+					ready := filterToolCalls(stepToolCalls, exclude)
+					if len(ready) > 0 {
+						sendProgress := func(part StreamPart) { send(part) }
+						readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, sendProgress)
+						if rerr != nil {
+							var deferred *ToolApprovalDeferredError
+							if errors.As(rerr, &deferred) {
+								stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, ready, nil, &stepUsage)
+								stepR := StepResult{
+									Text:                 stepText,
+									Reasoning:            stepReasoning,
+									FinishReason:         lastFinishReason,
+									RawFinishReason:      lastRawFinishReason,
+									Usage:                stepUsage,
+									ToolCalls:            ready,
+									Response:             stepResponse,
+									DeferredToolApproval: &deferred.Approval,
+									Messages:             stepMsgs,
+								}
+								allSteps = append(allSteps, stepR)
+								allMessages = append(allMessages, stepMsgs...)
+								applyOnStep(cfg, &stepR)
+								break
+							}
+							send(&ErrorPart{Error: rerr})
+							break
+						}
+						toolsExecuted = true
+						loop.recordStep(step, toolCallSignature(ready))
+						if cfg.OnToolResults != nil {
+							readyResults = cfg.OnToolResults(step, readyResults)
+						}
+						stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, ready, readyResults, &stepUsage)
+						stepR := StepResult{
+							Text:            stepText,
+							Reasoning:       stepReasoning,
+							FinishReason:    lastFinishReason,
+							RawFinishReason: lastRawFinishReason,
+							Usage:           stepUsage,
+							ToolCalls:       ready,
+							ToolResults:     toolCallResultsFromParts(readyResults),
+							Response:        stepResponse,
+							Messages:        stepMsgs,
+						}
+						allSteps = append(allSteps, stepR)
+						allMessages = append(allMessages, stepMsgs...)
+						applyOnStep(cfg, &stepR)
+						messages = append(messages, stepMsgs...)
+					}
+					messages = append(messages, UserMessage(loadNote(names)))
+					continue
+				}
+			}
+
 			// If context was cancelled during streaming, stop immediately.
 			if ctx.Err() != nil {
 				break
@@ -496,10 +716,20 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				send(&ErrorPart{Error: err})
 				break
 			}
-			toolsExecuted = true
+		toolsExecuted = true
 
-			// Update the dynamic loop controller with this step's tool-call
-			// signature (same rationale as the non-streaming path).
+		// Keep loaded deferred tools that were just executed "fresh" so they
+		// are not idle-evicted while still relevant.
+		if deferActive {
+			for _, tc := range stepToolCalls {
+				if t, ok := toolMap[tc.ToolName]; ok && t != nil && t.DeferredLoad {
+					cfg.ToolDeferral.Touch(tc.ToolName)
+				}
+			}
+		}
+
+		// Update the dynamic loop controller with this step's tool-call
+		// signature (same rationale as the non-streaming path).
 			loop.recordStep(step, toolCallSignature(stepToolCalls))
 
 			// Apply post-execution result processing (e.g., truncation).
@@ -613,6 +843,36 @@ func buildToolMap(tools []Tool) map[string]*Tool {
 		m[tools[i].Name] = &tools[i]
 	}
 	return m
+}
+
+// loadTriggeredDeferredTools returns the names of tool calls that reference a
+// deferred tool whose schema is not yet loaded. Such calls should trigger a
+// load + re-prompt rather than execution with guessed arguments.
+func loadTriggeredDeferredTools(calls []ToolCall, toolMap map[string]*Tool, d *ToolDeferral) []string {
+	var names []string
+	for _, tc := range calls {
+		t, ok := toolMap[tc.ToolName]
+		if !ok || t == nil {
+			continue
+		}
+		if t.DeferredLoad && !d.IsLoaded(tc.ToolName) {
+			names = append(names, tc.ToolName)
+		}
+	}
+	return names
+}
+
+// filterToolCalls returns the subset of calls whose tool name is NOT in the
+// exclude set. Used to execute the ready sibling tool calls while deferring
+// newly-referenced (not-yet-loaded) deferred tools to a re-prompt.
+func filterToolCalls(calls []ToolCall, exclude map[string]bool) []ToolCall {
+	out := make([]ToolCall, 0, len(calls))
+	for _, tc := range calls {
+		if !exclude[tc.ToolName] {
+			out = append(out, tc)
+		}
+	}
+	return out
 }
 
 // SandboxToolPrefix is the prefix used for sandbox-scoped tools. It is stripped
