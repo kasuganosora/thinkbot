@@ -23,6 +23,7 @@ func datetimeCalcToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "datetime_calc",
+			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "日期时间计算工具。支持日期加减、日期差计算、星期查询、格式转换。" +
 				"输入日期格式：YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS。",
 			Parameters: map[string]any{

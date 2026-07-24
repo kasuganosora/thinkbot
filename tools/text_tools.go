@@ -24,6 +24,7 @@ func textHashToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name:        "text_hash",
+			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "计算文本的哈希值（支持 MD5 和 SHA256）。",
 			Parameters: map[string]any{
 				"type": "object",
@@ -83,6 +84,7 @@ func textEncodeToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name:        "text_encode",
+			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "Base64 编码或解码文本。",
 			Parameters: map[string]any{
 				"type": "object",
@@ -143,6 +145,7 @@ func textDiffToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name:        "text_diff",
+			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "比较两段文本的差异，返回行级别的增删改。",
 			Parameters: map[string]any{
 				"type": "object",
@@ -187,6 +190,7 @@ func textStatsToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name:        "text_stats",
+			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "统计文本的行数、词数、字符数等信息。",
 			Parameters: map[string]any{
 				"type": "object",
