@@ -100,6 +100,12 @@ func NewDreamingBundle(
 		return nil
 	}
 
+	// 合并相位默认值：生产接线通常只设置 Enabled/Schedule，
+	// 若不补 Light/REM/Deep 的默认配置，LookbackDays 等字段会保持 0，
+	// 导致 Light 相位的 cutoff=now，把全部历史 L0 记忆判为过期而跳过，
+	// 梦境实质上不做任何巩固。这里用 DefaultDreamConfig 补齐缺失项。
+	applyDreamPhaseDefaults(&dreamCfg)
+
 	// 1. 创建分层记忆管理器（带 SQLite 持久化，重启可恢复）
 	store := memory.NewTieredStoreWithDB(nil, db)
 	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{
@@ -152,6 +158,51 @@ func NewDreamingBundle(
 		CronJob:     job,
 		TieredMgr:   tieredMgr,
 		TieredStore: store,
+	}
+}
+
+// applyDreamPhaseDefaults 用 DefaultDreamConfig 补齐 dreamCfg 中缺失的相位配置。
+// 仅当对应字段为零值（未设置）时才用默认值覆盖，避免覆盖显式配置。
+func applyDreamPhaseDefaults(dreamCfg *memory.DreamConfig) {
+	def := memory.DefaultDreamConfig()
+	if dreamCfg.Light.LookbackDays == 0 {
+		dreamCfg.Light.LookbackDays = def.Light.LookbackDays
+	}
+	if dreamCfg.Light.MaxCandidates == 0 {
+		dreamCfg.Light.MaxCandidates = def.Light.MaxCandidates
+	}
+	if dreamCfg.REM.LookbackDays == 0 {
+		dreamCfg.REM.LookbackDays = def.REM.LookbackDays
+	}
+	if dreamCfg.REM.MaxThemes == 0 {
+		dreamCfg.REM.MaxThemes = def.REM.MaxThemes
+	}
+	if dreamCfg.REM.MinPatternStrength == 0 {
+		dreamCfg.REM.MinPatternStrength = def.REM.MinPatternStrength
+	}
+	if dreamCfg.Deep.MinScore == 0 {
+		dreamCfg.Deep.MinScore = def.Deep.MinScore
+	}
+	if dreamCfg.Deep.MinRecallCount == 0 {
+		dreamCfg.Deep.MinRecallCount = def.Deep.MinRecallCount
+	}
+	if dreamCfg.Deep.MinUniqueQueries == 0 {
+		dreamCfg.Deep.MinUniqueQueries = def.Deep.MinUniqueQueries
+	}
+	if dreamCfg.Deep.MaxPromotions == 0 {
+		dreamCfg.Deep.MaxPromotions = def.Deep.MaxPromotions
+	}
+	if dreamCfg.Deep.RecencyHalfLifeDays == 0 {
+		dreamCfg.Deep.RecencyHalfLifeDays = def.Deep.RecencyHalfLifeDays
+	}
+	if dreamCfg.Deep.MaxAgeDays == 0 {
+		dreamCfg.Deep.MaxAgeDays = def.Deep.MaxAgeDays
+	}
+	if dreamCfg.JaccardThreshold == 0 {
+		dreamCfg.JaccardThreshold = def.JaccardThreshold
+	}
+	if dreamCfg.MaxDreamTokens == 0 {
+		dreamCfg.MaxDreamTokens = def.MaxDreamTokens
 	}
 }
 
