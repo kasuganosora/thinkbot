@@ -2,10 +2,14 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
+
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
@@ -148,22 +152,61 @@ func DefaultTierConfigs() map[MemoryTier]TierConfig {
 // 它是 TieredMemoryManager 的存储后端。
 //
 // 线程安全：所有操作通过 sync.RWMutex 保护。
+//
+// 持久化：若 db 非 nil，则内存 map 仍为检索/TTL/淘汰的工作副本（逻辑不变），
+// 同时每个写操作 write-through 到 SQLite（表 tiered_memories），并在初始化时
+// 从库加载未过期的条目。这样进程重启后分层记忆可恢复，避免“重启即失”。
 type TieredStore struct {
 	mu sync.RWMutex
 	// key = tier:scope.Key() -> []TieredEntry
 	buckets map[string][]TieredEntry
 	configs map[MemoryTier]TierConfig
+
+	// db 可选的持久化后端。nil 表示纯内存模式（兼容测试/旧行为）。
+	db *gorm.DB
 }
 
-// NewTieredStore 创建分层存储。
+// NewTieredStore 创建分层存储（纯内存模式）。
 // configs 为 nil 时使用 DefaultTierConfigs()。
 func NewTieredStore(configs map[MemoryTier]TierConfig) *TieredStore {
+	return NewTieredStoreWithDB(configs, nil)
+}
+
+// NewTieredStoreWithDB 创建带 SQLite 持久化的分层存储。
+// db 非 nil 时，初始化会从库加载未过期的条目，之后所有写操作 write-through。
+func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *TieredStore {
 	if configs == nil {
 		configs = DefaultTierConfigs()
 	}
-	return &TieredStore{
+	s := &TieredStore{
 		buckets: make(map[string][]TieredEntry),
 		configs: configs,
+		db:      db,
+	}
+	if db != nil {
+		s.loadFromDB()
+	}
+	return s
+}
+
+// loadFromDB 从 SQLite 加载未过期的分层记忆到内存 map。
+// 仅在 NewTieredStoreWithDB 且 db 非 nil 时调用一次。
+func (s *TieredStore) loadFromDB() {
+	var models []dao.TieredMemoryModel
+	if err := s.db.Order("created_at ASC").Find(&models).Error; err != nil {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range models {
+		// 跳过已过期条目（L0 TTL 已过）
+		if m.ExpiresAt.IsZero() == false && now.After(m.ExpiresAt) {
+			continue
+		}
+		te := modelToTiedEntry(m)
+		key := tierScopeKey(te.Tier, te.Scope)
+		s.buckets[key] = append(s.buckets[key], te)
 	}
 }
 
@@ -189,7 +232,6 @@ func (s *TieredStore) Append(_ context.Context, entry TieredEntry) error {
 	key := tierScopeKey(entry.Tier, entry.Scope)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	bucket := s.buckets[key]
 	bucket = append(bucket, entry)
@@ -205,6 +247,11 @@ func (s *TieredStore) Append(_ context.Context, entry TieredEntry) error {
 	}
 
 	s.buckets[key] = bucket
+	s.mu.Unlock()
+
+	if s.db != nil {
+		s.persistUpsert(context.Background(), entry)
+	}
 	return nil
 }
 
@@ -314,15 +361,18 @@ func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, en
 	key := tierScopeKey(tier, scope)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	bucket := s.buckets[key]
 	for i, e := range bucket {
 		if e.ID == entryID {
 			s.buckets[key] = append(bucket[:i], bucket[i+1:]...)
+			s.mu.Unlock()
+			if s.db != nil {
+				s.persistDelete(tier, scope, entryID)
+			}
 			return nil
 		}
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -353,7 +403,6 @@ func (s *TieredStore) Replace(_ context.Context, tier MemoryTier, scope Scope, d
 	key := tierScopeKey(tier, scope)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	bucket := s.buckets[key]
 
@@ -381,6 +430,14 @@ func (s *TieredStore) Replace(_ context.Context, tier MemoryTier, scope Scope, d
 	}
 
 	s.buckets[key] = bucket
+	s.mu.Unlock()
+
+	if s.db != nil {
+		if deleteID != "" {
+			s.persistDelete(tier, scope, deleteID)
+		}
+		s.persistUpsert(context.Background(), newEntry)
+	}
 	return nil
 }
 
@@ -390,6 +447,9 @@ func (s *TieredStore) Clear(_ context.Context, tier MemoryTier, scope Scope) err
 	s.mu.Lock()
 	delete(s.buckets, key)
 	s.mu.Unlock()
+	if s.db != nil {
+		s.persistClearTierScope(tier, scope)
+	}
 	return nil
 }
 
@@ -402,6 +462,9 @@ func (s *TieredStore) ClearTier(_ context.Context, tier MemoryTier) error {
 		}
 	}
 	s.mu.Unlock()
+	if s.db != nil {
+		s.persistClearTier(tier)
+	}
 	return nil
 }
 
@@ -412,7 +475,13 @@ func (s *TieredStore) GC(_ context.Context) int {
 	removed := 0
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	// DB 中需删除的过期条目（解锁后统一删除，避免持锁做 I/O）
+	var expired []struct {
+		tier  MemoryTier
+		scope Scope
+		id    string
+	}
 
 	for key, bucket := range s.buckets {
 		if tierOf(key) != Tier0Working {
@@ -422,6 +491,13 @@ func (s *TieredStore) GC(_ context.Context) int {
 		for _, e := range bucket {
 			if e.IsExpired(now) {
 				removed++
+				if s.db != nil {
+					expired = append(expired, struct {
+						tier  MemoryTier
+						scope Scope
+						id    string
+					}{tier: Tier0Working, scope: e.Scope, id: e.ID})
+				}
 			} else {
 				kept = append(kept, e)
 			}
@@ -430,6 +506,14 @@ func (s *TieredStore) GC(_ context.Context) int {
 			delete(s.buckets, key)
 		} else if len(kept) != len(bucket) {
 			s.buckets[key] = kept
+		}
+	}
+
+	s.mu.Unlock()
+
+	if s.db != nil {
+		for _, e := range expired {
+			s.persistDelete(e.tier, e.scope, e.id)
 		}
 	}
 
@@ -451,9 +535,9 @@ func (s *TieredStore) MarkProcessed(_ context.Context, scope Scope, entryIDs []s
 	key := tierScopeKey(Tier0Working, scope)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	bucket := s.buckets[key]
+	var updated []TieredEntry
 	for i := range bucket {
 		if _, ok := idSet[bucket[i].ID]; ok {
 			if bucket[i].Metadata == nil {
@@ -461,6 +545,16 @@ func (s *TieredStore) MarkProcessed(_ context.Context, scope Scope, entryIDs []s
 			}
 			bucket[i].Metadata["consolidated"] = true
 			bucket[i].Metadata["consolidated_at"] = time.Now()
+			if s.db != nil {
+				updated = append(updated, bucket[i])
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if s.db != nil {
+		for _, e := range updated {
+			s.persistUpsert(context.Background(), e)
 		}
 	}
 	return nil
@@ -569,4 +663,97 @@ func sortTieredEntriesByTimeDesc(entries []TieredEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].CreatedAt.After(entries[j].CreatedAt)
 	})
+}
+
+// ============================================================================
+// 持久化辅助（SQLite write-through）
+// ============================================================================
+
+// tieredEntryToModel 将 TieredEntry 转换为 DAO 模型。
+func tieredEntryToModel(e TieredEntry) dao.TieredMemoryModel {
+	metadataJSON := ""
+	if e.Metadata != nil {
+		if b, err := json.Marshal(e.Metadata); err == nil {
+			metadataJSON = string(b)
+		}
+	}
+	return dao.TieredMemoryModel{
+		ID:            e.ID,
+		Tier:          int(e.Tier),
+		ScopeKind:     string(e.Scope.Kind),
+		ScopeID:       e.Scope.ID,
+		Content:       e.Content,
+		Category:      e.Category,
+		Source:        e.Source,
+		Importance:    e.Importance,
+		MetadataJSON:  metadataJSON,
+		ExpiresAt:     e.ExpiresAt,
+		PromotedFrom:  int(e.PromotedFrom),
+		CreatedAt:     e.CreatedAt,
+		LastAccessedAt: e.LastAccessedAt,
+	}
+}
+
+// modelToTiedEntry 将 DAO 模型转换回 TieredEntry。
+func modelToTiedEntry(m dao.TieredMemoryModel) TieredEntry {
+	var metadata map[string]any
+	if m.MetadataJSON != "" {
+		_ = json.Unmarshal([]byte(m.MetadataJSON), &metadata)
+	}
+	return TieredEntry{
+		Entry: Entry{
+			ID:            m.ID,
+			Scope:         Scope{Kind: ScopeKind(m.ScopeKind), ID: m.ScopeID},
+			Content:       m.Content,
+			Category:      m.Category,
+			Source:        m.Source,
+			Importance:    m.Importance,
+			Metadata:      metadata,
+			CreatedAt:     m.CreatedAt,
+			LastAccessedAt: m.LastAccessedAt,
+		},
+		Tier:         MemoryTier(m.Tier),
+		ExpiresAt:    m.ExpiresAt,
+		PromotedFrom: MemoryTier(m.PromotedFrom),
+	}
+}
+
+// persistUpsert 将单条记忆 upsert 到 SQLite（按 ID 主键）。
+func (s *TieredStore) persistUpsert(ctx context.Context, e TieredEntry) {
+	if s.db == nil {
+		return
+	}
+	model := tieredEntryToModel(e)
+	if err := s.db.WithContext(ctx).Save(&model).Error; err != nil {
+		// 非致命：内存副本已更新，仅持久化同步失败。
+		// 避免阻塞记忆写入主流程。
+	}
+}
+
+// persistDelete 按 tier+scope+id 从 SQLite 删除一条记忆。
+func (s *TieredStore) persistDelete(tier MemoryTier, scope Scope, id string) {
+	if s.db == nil {
+		return
+	}
+	s.db.Where("id = ? AND tier = ? AND scope_kind = ? AND scope_id = ?",
+		id, int(tier), string(scope.Kind), scope.ID).
+		Delete(&dao.TieredMemoryModel{})
+}
+
+// persistClearTierScope 清空 SQLite 中指定 tier+scope 的所有记忆。
+func (s *TieredStore) persistClearTierScope(tier MemoryTier, scope Scope) {
+	if s.db == nil {
+		return
+	}
+	s.db.Where("tier = ? AND scope_kind = ? AND scope_id = ?",
+		int(tier), string(scope.Kind), scope.ID).
+		Delete(&dao.TieredMemoryModel{})
+}
+
+// persistClearTier 清空 SQLite 中整个 tier 的所有记忆。
+func (s *TieredStore) persistClearTier(tier MemoryTier) {
+	if s.db == nil {
+		return
+	}
+	s.db.Where("tier = ?", int(tier)).Delete(&dao.TieredMemoryModel{})
 }
