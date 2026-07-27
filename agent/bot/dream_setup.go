@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/cron"
@@ -93,13 +94,14 @@ func NewDreamingBundle(
 	logger *zap.SugaredLogger,
 	botID string,
 	cronFilePath string,
+	db *gorm.DB,
 ) *DreamingBundle {
 	if !dreamCfg.Enabled {
 		return nil
 	}
 
-	// 1. 创建分层记忆管理器
-	store := memory.NewTieredStore(nil)
+	// 1. 创建分层记忆管理器（带 SQLite 持久化，重启可恢复）
+	store := memory.NewTieredStoreWithDB(nil, db)
 	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{
 		Store:                 store,
 		EnableAutoConsolidate: true,

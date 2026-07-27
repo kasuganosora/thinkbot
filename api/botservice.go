@@ -25,6 +25,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/stages"
+	"github.com/kasuganosora/thinkbot/agent/storage"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/channel/misskey"
 	"github.com/kasuganosora/thinkbot/channel/telegram"
@@ -497,8 +498,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Wrap(err, "bot_service: register tools")
 	}
 
-	// 注册记忆工具
-	memRepo := memory.NewMemoryRepository()
+	// 注册记忆工具（SQLite 持久化，记忆可跨重启累积）
+	memRepo := storage.NewSQLiteRepository(s.db)
 	if err := memory.RegisterTools(toolMgr, memory.DefaultToolConfig(memRepo)); err != nil {
 		s.logger.Warnw("failed to register memory tools", "err", err)
 	}
@@ -757,6 +758,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			s.logger,
 			id,
 			cronFile,
+			s.db,
 		)
 		if dBundle != nil {
 			dreamScheduler = dBundle.Scheduler
@@ -860,7 +862,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		tieredAdapter := memory.NewTieredStoreAdapter(dreamBundle.TieredStore)
 		// ThinkFilterStore 在写入前清理 <think> 标签
 		filtered := memory.NewThinkFilterStore(tieredAdapter)
-		repo := memory.NewMemoryRepository()
+		repo := storage.NewSQLiteRepository(s.db)
 		memStore = memory.NewMultiStore(filtered, repo)
 	}
 
