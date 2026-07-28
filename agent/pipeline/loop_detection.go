@@ -45,6 +45,10 @@ type LoopDetectionConfig struct {
 	HardLimit int
 	// WindowSize 滑动窗口大小（记录最近 N 次的工具调用模式）。默认 20。
 	WindowSize int
+	// ExemptTools 这些工具（通常是进度轮询类，如 task_status）的重复调用
+	// 不计入循环检测。工作流分析/执行可能持续数十秒到数分钟，bot 轮询进度
+	// 属正常行为，不应被误判为死循环而强制收尾。
+	ExemptTools []string
 }
 
 // NewLoopDetectionConfig 返回默认循环检测配置。
@@ -65,6 +69,12 @@ func (c LoopDetectionConfig) WithWarnThreshold(n int) LoopDetectionConfig {
 // WithHardLimit 设置硬限制。
 func (c LoopDetectionConfig) WithHardLimit(n int) LoopDetectionConfig {
 	c.HardLimit = n
+	return c
+}
+
+// WithExemptTools 设置循环检测豁免工具（其重复调用不计入检测）。
+func (c LoopDetectionConfig) WithExemptTools(tools ...string) LoopDetectionConfig {
+	c.ExemptTools = append(c.ExemptTools, tools...)
 	return c
 }
 
@@ -118,13 +128,14 @@ func (w *loopWindow) push(hash string) int {
 }
 
 // toolCallsDigest 从 GenerateResult 的 Steps 中提取工具调用信息，生成稳定 hash。
-// 返回空字符串表示没有工具调用。
-func toolCallsDigest(result *llm.GenerateResult) string {
+// 返回空字符串表示没有（非豁免的）工具调用。
+// exempt 为需要排除的工具名集合（如轮询类工具 task_status），其调用不计入循环检测。
+func toolCallsDigest(result *llm.GenerateResult, exempt map[string]bool) string {
 	if result == nil || len(result.Steps) == 0 {
 		return ""
 	}
 
-	// 提取所有工具调用的 (name, args) 对并排序
+	// 提取所有工具调用的 (name, args) 对并排序（跳过豁免工具）
 	type toolCallKey struct {
 		name string
 		args string
@@ -133,6 +144,9 @@ func toolCallsDigest(result *llm.GenerateResult) string {
 
 	for _, step := range result.Steps {
 		for _, tc := range step.ToolCalls {
+			if exempt[tc.ToolName] {
+				continue
+			}
 			argsJSON, err := json.Marshal(tc.Input)
 			if err != nil {
 				argsJSON = []byte("{}")
@@ -181,6 +195,12 @@ func LoopDetectionMiddleware(cfg LoopDetectionConfig) Middleware {
 		hardWarned: make(map[string]bool),
 	}
 
+	// 构建豁免工具集合（轮询类工具不计入循环检测）
+	exempt := make(map[string]bool, len(cfg.ExemptTools))
+	for _, t := range cfg.ExemptTools {
+		exempt[t] = true
+	}
+
 	return func(next core.Stage) core.Stage {
 		return &core.StageFunc{
 			StageName: next.Name(),
@@ -205,7 +225,7 @@ func LoopDetectionMiddleware(cfg LoopDetectionConfig) Middleware {
 				if result != nil {
 					if v, ok := result.Get("llm.result"); ok {
 						if genResult, ok := v.(*llm.GenerateResult); ok && genResult != nil {
-							digest := toolCallsDigest(genResult)
+							digest := toolCallsDigest(genResult, exempt)
 							if digest != "" {
 								state.mu.Lock()
 
