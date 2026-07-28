@@ -20,7 +20,7 @@
       >
         <span v-if="isLive" class="live-dot" />{{ statusText(workflow.status) }}
       </t-tag>
-      <span class="wf-progress-text" data-testid="chat-workflow-progress">{{ doneCount }}/{{ nodes.length }}</span>
+      <span class="wf-progress-text" data-testid="chat-workflow-progress">{{ progressLabel }}</span>
       <t-button
         variant="text"
         size="small"
@@ -110,6 +110,12 @@ const retrying = ref('')
 let pollTimer = null
 
 const doneCount = computed(() => nodes.value.filter(n => n.status === 'completed').length)
+
+// 进度计数文案：分析阶段尚未生成子任务时显示"分析中…"而非"0/0"，避免误判卡死
+const progressLabel = computed(() => {
+  if (!nodes.value.length) return isLive.value ? '分析中…' : '0/0'
+  return `${doneCount.value}/${nodes.value.length}`
+})
 
 // 进行中（需轮询刷新）
 const isLive = computed(() => {
