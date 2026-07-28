@@ -7,10 +7,12 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/util/log"
 )
 
 // ============================================================================
@@ -164,6 +166,10 @@ type TieredStore struct {
 
 	// db 可选的持久化后端。nil 表示纯内存模式（兼容测试/旧行为）。
 	db *gorm.DB
+
+	// logger 用于持久化层的可观测性（DB 失败、加载统计）。
+	// nil 时退化为 no-op，避免未初始化日志时 panic。
+	logger *zap.SugaredLogger
 }
 
 // NewTieredStore 创建分层存储（纯内存模式）。
@@ -182,6 +188,7 @@ func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *Tiere
 		buckets: make(map[string][]TieredEntry),
 		configs: configs,
 		db:      db,
+		logger:  log.Logger,
 	}
 	if db != nil {
 		s.loadFromDB()
@@ -194,11 +201,15 @@ func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *Tiere
 func (s *TieredStore) loadFromDB() {
 	var models []dao.TieredMemoryModel
 	if err := s.db.Order("created_at ASC").Find(&models).Error; err != nil {
+		if s.logger != nil {
+			s.logger.Errorw("tiered_store: failed to load persisted memories from db", "err", err)
+		}
 		return
 	}
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	loaded := 0
 	for _, m := range models {
 		// 跳过已过期条目（L0 TTL 已过）
 		if m.ExpiresAt.IsZero() == false && now.After(m.ExpiresAt) {
@@ -207,6 +218,11 @@ func (s *TieredStore) loadFromDB() {
 		te := modelToTiedEntry(m)
 		key := tierScopeKey(te.Tier, te.Scope)
 		s.buckets[key] = append(s.buckets[key], te)
+		loaded++
+	}
+	if s.logger != nil {
+		s.logger.Infow("tiered_store: loaded persisted memories from db",
+			"loaded", loaded, "total_rows", len(models))
 	}
 }
 
@@ -726,7 +742,12 @@ func (s *TieredStore) persistUpsert(ctx context.Context, e TieredEntry) {
 	model := tieredEntryToModel(e)
 	if err := s.db.WithContext(ctx).Save(&model).Error; err != nil {
 		// 非致命：内存副本已更新，仅持久化同步失败。
-		// 避免阻塞记忆写入主流程。
+		// 避免阻塞记忆写入主流程，但必须上报，否则数据静默丢失不可观测。
+		if s.logger != nil {
+			s.logger.Errorw("tiered_store: persist upsert failed (in-memory copy kept)",
+				"id", e.ID, "tier", int(e.Tier),
+				"scope_kind", string(e.Scope.Kind), "scope_id", e.Scope.ID, "err", err)
+		}
 	}
 }
 
@@ -735,9 +756,15 @@ func (s *TieredStore) persistDelete(tier MemoryTier, scope Scope, id string) {
 	if s.db == nil {
 		return
 	}
-	s.db.Where("id = ? AND tier = ? AND scope_kind = ? AND scope_id = ?",
+	if err := s.db.Where("id = ? AND tier = ? AND scope_kind = ? AND scope_id = ?",
 		id, int(tier), string(scope.Kind), scope.ID).
-		Delete(&dao.TieredMemoryModel{})
+		Delete(&dao.TieredMemoryModel{}).Error; err != nil {
+		if s.logger != nil {
+			s.logger.Errorw("tiered_store: persist delete failed",
+				"id", id, "tier", int(tier),
+				"scope_kind", string(scope.Kind), "scope_id", scope.ID, "err", err)
+		}
+	}
 }
 
 // persistClearTierScope 清空 SQLite 中指定 tier+scope 的所有记忆。
@@ -745,9 +772,14 @@ func (s *TieredStore) persistClearTierScope(tier MemoryTier, scope Scope) {
 	if s.db == nil {
 		return
 	}
-	s.db.Where("tier = ? AND scope_kind = ? AND scope_id = ?",
+	if err := s.db.Where("tier = ? AND scope_kind = ? AND scope_id = ?",
 		int(tier), string(scope.Kind), scope.ID).
-		Delete(&dao.TieredMemoryModel{})
+		Delete(&dao.TieredMemoryModel{}).Error; err != nil {
+		if s.logger != nil {
+			s.logger.Errorw("tiered_store: persist clear-tier-scope failed",
+				"tier", int(tier), "scope_kind", string(scope.Kind), "scope_id", scope.ID, "err", err)
+		}
+	}
 }
 
 // persistClearTier 清空 SQLite 中整个 tier 的所有记忆。
@@ -755,5 +787,10 @@ func (s *TieredStore) persistClearTier(tier MemoryTier) {
 	if s.db == nil {
 		return
 	}
-	s.db.Where("tier = ?", int(tier)).Delete(&dao.TieredMemoryModel{})
+	if err := s.db.Where("tier = ?", int(tier)).Delete(&dao.TieredMemoryModel{}).Error; err != nil {
+		if s.logger != nil {
+			s.logger.Errorw("tiered_store: persist clear-tier failed",
+				"tier", int(tier), "err", err)
+		}
+	}
 }
