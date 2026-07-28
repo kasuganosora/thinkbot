@@ -586,7 +586,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		pipeline.VerificationGateMiddleware(pipeline.NewVerificationGateConfig()),
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
-		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
+		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig().WithExemptTools(
+			"task_status", // 工作流进度轮询：分析/执行可能持续数分钟，重复调用属正常等待，不应被误判为死循环
+		)),
 		pipeline.LazyResponseMiddleware(pipeline.NewLazyResponseConfig()),
 		pipeline.TokenBudgetMiddlewareWithState(pipeline.NewTokenBudgetConfig().WithStatsRecorder(s.statsRecorder), s.tokenBudget),
 	)
