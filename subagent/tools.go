@@ -174,7 +174,34 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 				}()
 			}
 
-			results := mgr.DelegateMany(ctx, systemPrompt, tasks)
+			// 流式进度：把 DelegateMany 内每个子 Agent 的「启动/完成」实时推到 UI，
+			// 让并行的多个 subagent 可见（否则 spawn 同步阻塞期间 UI 只有心跳，看不出并行）。
+			progressHandler := func(phase string, index, total int, task string, elapsed time.Duration, res *TaskResult) {
+				if l := traceid.L(ctx); l != nil {
+					l.Infow("spawn: subagent progress", "phase", phase, "index", index, "total", total, "task", task, "elapsed", elapsed.String())
+				}
+				if ctx.SendProgress == nil {
+					return
+				}
+				var chunk string
+				switch phase {
+				case "start":
+					chunk = fmt.Sprintf("🔄 子 Agent %d/%d 启动：%s", index, total, task)
+				case "done":
+					status := "✅"
+					if res != nil && !res.Success {
+						status = "❌"
+					}
+					chunk = fmt.Sprintf("%s 子 Agent %d/%d 完成（耗时 %s）：%s",
+						status, index, total, elapsed.Round(time.Second), task)
+				}
+				ctx.SendProgress(map[string]any{
+					"stream": "subagent",
+					"chunk":  chunk,
+				})
+			}
+
+			results := mgr.DelegateMany(WithDelegateProgress(ctx, progressHandler), systemPrompt, tasks)
 
 			close(stopHeartbeat)
 
