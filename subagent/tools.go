@@ -57,8 +57,24 @@ spawn({
 ## 使用原则
 
 - 简单任务直接回答，不要过度委托
-- 多个独立任务可以放在一个 spawn 调用中并行处理
-- 在 system_prompt 中清晰描述子 Agent 的角色和职责`,
+- **独立子任务必须合并进同一次 spawn**：如果你能把任务拆成 N 个互相独立、互不依赖的子任务，必须把它们全部放进**同一次** spawn 的 tasks 数组（最多 5 个）。同一次调用中的多个任务会**自动并行**执行；**禁止**为了"分批"而多次调用 spawn 工具——多次调用会被主 Agent 串行执行，反而更慢。
+- **仅当后一步依赖前一步的结果时**，才分多次调用 spawn。
+- 在 system_prompt 中清晰描述子 Agent 的角色和职责
+
+正确示例（一次并行审查三个模块）：
+` + "```" + `
+spawn({
+  tasks: ["审查模块A的安全风险", "审查模块B的性能瓶颈", "审查模块C的可维护性"],
+  system_prompt: "你是一个代码审查专家"
+})
+` + "```" + `
+错误示例（拆成三次调用 → 串行、更慢，不要这样做）：
+` + "```" + `
+spawn({ tasks: ["审查模块A"] })   // 主 Agent 等它返回
+spawn({ tasks: ["审查模块B"] })   // 再等
+spawn({ tasks: ["审查模块C"] })   // 再等
+` + "```" + `
+`,
 	Enabled: true,
 }
 
@@ -129,6 +145,12 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 				}
 
 			systemPrompt, _ := m["system_prompt"].(string)
+
+			// 诊断日志：记录本次 spawn 实际派发的任务数，便于观察模型是否把独立子任务
+			// 合并进单次调用（并行）还是分多次调用（串行）。
+			if l := traceid.L(ctx); l != nil {
+				l.Infow("spawn: delegate many", "tasks", len(tasks), "system_prompt_set", systemPrompt != "")
+			}
 
 			// 心跳保活：spawn 是同步阻塞调用（DelegateMany 返回整个子 Agent 的最终结果），
 			// 重任务（读大量文件 + 多轮模型推理）很容易超过前端 3 分钟「卡死看门狗」阈值，

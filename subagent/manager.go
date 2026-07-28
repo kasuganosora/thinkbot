@@ -13,6 +13,12 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
+// DefaultMaxConcurrency 是 DelegateMany 的默认并发上限。
+// 与单次 spawn 的任务上限（5）对齐，使一次派多任务时真正全并发，
+// 而非被旧默认 2 限流成"分批"。可用 SetMaxConcurrency 覆盖，
+// 或全局配置 subagent.max_concurrency 覆盖。
+const DefaultMaxConcurrency = 5
+
 // ============================================================================
 // SubAgentManager — 管理 SubAgent 生命周期
 //
@@ -76,7 +82,7 @@ func NewSubAgentManager(provider llm.Provider, model string, defaultOpts ...Opti
 		subagents:       make(map[string]*SubAgent),
 		defaultOpts:     defaultOpts,
 		delegateTimeout: 120 * time.Second,
-		maxConcurrency:  2,
+		maxConcurrency:  DefaultMaxConcurrency,
 	}
 }
 
