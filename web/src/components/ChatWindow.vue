@@ -21,6 +21,7 @@
       role="log"
       aria-label="消息列表"
       aria-live="polite"
+      @scroll="onScroll"
     >
       <div v-if="sessionWorkflowId" class="wf-sticky">
         <SessionWorkflowPanel
@@ -143,6 +144,22 @@
           </div>
         </div>
       </div>
+
+      <!-- 回到底部按钮：流式期间用户上翻时显示 -->
+      <Transition name="scroll-bottom-fade">
+        <div
+          v-if="store.replying && !isAtBottom"
+          class="scroll-to-bottom-btn"
+          data-testid="chat-scroll-bottom"
+          role="button"
+          aria-label="回到底部"
+          tabindex="0"
+          @click="scrollToBottomManual"
+          @keydown.enter="scrollToBottomManual"
+        >
+          <t-icon name="chevron-down" />
+        </div>
+      </Transition>
     </div>
 
     <div class="chat-input-area" data-testid="chat-input-area">
@@ -241,8 +258,34 @@ const inputAriaLabel = computed(() => userPreferences.value.sendKey === 'cmd-ent
 const draft = ref('')
 const scrollRef = ref()
 const fileInputRef = ref()
+// ── 智能滚动：用户在底部才自动滚，上翻时不干扰 ──
+const isAtBottom = ref(true)
+const SCROLL_THRESHOLD = 120 // 距底部多少 px 内视为"在底部"
 
-// ── 附件（图片 / 音频 / 视频）──
+/** 判断当前滚动位置是否接近底部 */
+function checkAtBottom() {
+  const el = scrollRef.value
+  if (!el) return
+  isAtBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
+}
+
+/** 滚动到底部（供外部调用） */
+function scrollToBottom() {
+  nextTick(() => {
+    if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
+  })
+}
+
+/** 用户手动滚动时更新 atBottom 状态 */
+function onScroll() {
+  checkAtBottom()
+}
+
+/** 点击"回到底部"按钮 */
+function scrollToBottomManual() {
+  scrollToBottom()
+  isAtBottom.value = true
+}
 const attachments = ref([])  // { name, type, size, dataUrl (base64) }[]
 
 /** 根据 MIME type 返回图标名 */
@@ -413,25 +456,31 @@ const chips = [
   '帮我润色一段商务邮件'
 ]
 
-function scrollToBottom() {
-  nextTick(() => {
-    if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
-  })
+// ── 智能自动滚动 ──
+
+/** 仅在用户位于底部时才执行滚底（不干扰手动上翻） */
+function scrollToBottomIfAtBottom() {
+  if (isAtBottom.value) scrollToBottom()
 }
 
-// 消息列表长度变化时滚动到底部
-watch(() => messages.value.length, scrollToBottom)
-// bot 切换时滚动
-watch(() => store.activeBotId, scrollToBottom)
-// 流式期间持续滚动（通过 replying 状态变化 + messages 引用变化）
+// 消息列表长度变化时（新消息到达）智能滚动
+watch(() => messages.value.length, scrollToBottomIfAtBottom)
+// bot 切换时强制滚到底部
+watch(() => store.activeBotId, () => {
+  isAtBottom.value = true
+  scrollToBottom()
+})
+
+// 流式期间：仅在用户在底部时才持续跟滚；用户上翻即暂停
 watch(() => store.replying, (val) => {
   if (val) {
-    // 流式开始：启动定时滚动
-    _scrollTimer = setInterval(scrollToBottom, 200)
+    // 流式开始：启动智能定时滚动
+    _scrollTimer = setInterval(scrollToBottomIfAtBottom, 200)
   } else {
-    // 流式结束：停止定时滚动，做一次最终滚动
+    // 流式结束：停止定时器，做一次最终滚底
     clearInterval(_scrollTimer)
     _scrollTimer = null
+    isAtBottom.value = true
     scrollToBottom()
   }
 })
@@ -509,6 +558,43 @@ function onKeydown(value, { e }) {
   flex: 1;
   overflow-y: auto;
   padding: 20px 0;
+  position: relative; /* 为悬浮按钮提供定位上下文 */
+}
+/* 回到底部悬浮按钮 */
+.scroll-to-bottom-btn {
+  position: absolute;
+  bottom: 16px;
+  right: 24px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #666;
+  font-size: 18px;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+.scroll-to-bottom-btn:hover {
+  background: #0052d9;
+  border-color: #0052d9;
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(0, 82, 217, 0.3);
+}
+/* 按钮淡入淡出 */
+.scroll-bottom-fade-enter-active,
+.scroll-bottom-fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.scroll-bottom-fade-enter-from,
+.scroll-bottom-fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.9);
 }
 /* workflow 面板：固定在聊天区顶部，任务进行中始终可见（避免被长对话滚出视口） */
 .wf-sticky {
