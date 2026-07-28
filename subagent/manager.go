@@ -348,6 +348,28 @@ func (m *SubAgentManager) chatWithHardTimeout(ctx context.Context, sa *SubAgent,
 
 // 每个任务在独立的 SubAgent 中执行，互不影响。
 // 返回每个任务的结果（顺序与输入一致）。
+// DelegateProgressHandler 接收 DelegateMany 内每个子 Agent 的生命周期进度通知，
+// 用于把「多个子 Agent 并行」的过程实时推到 UI（而非等全部完成后才一次性返回）。
+//   - phase: "start"（子 Agent 实际开始执行）/ "done"（完成，res 非 nil）
+//   - index/total: 当前第几个 / 总共几个（1-based）
+//   - elapsed: 该子 Agent 耗时（start 时为 0）
+type DelegateProgressHandler func(phase string, index, total int, task string, elapsed time.Duration, res *TaskResult)
+
+type delegateProgressKey struct{}
+
+// WithDelegateProgress 将进度回调挂到 ctx，DelegateMany 在执行时会按子 Agent 生命周期回调。
+// spawn 工具用它把并行进度实时推到前端，解决「spawn 同步阻塞导致看不出并行」的体感问题。
+func WithDelegateProgress(ctx context.Context, fn DelegateProgressHandler) context.Context {
+	return context.WithValue(ctx, delegateProgressKey{}, fn)
+}
+
+func delegateProgressFromCtx(ctx context.Context) DelegateProgressHandler {
+	if fn, ok := ctx.Value(delegateProgressKey{}).(DelegateProgressHandler); ok {
+		return fn
+	}
+	return nil
+}
+
 func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string, tasks []string, opts ...Option) []TaskResult {
 	// 快照配置（线程安全）
 	timeout, maxConc, defaultOpts := m.snapshotConfig()
@@ -380,6 +402,12 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			// 进度：子 Agent 实际开始执行（信号量放行后，真正并发起跑）
+			if ph := delegateProgressFromCtx(ctx); ph != nil {
+				ph("start", idx+1, len(tasks), t, 0, nil)
+			}
+			startAt := time.Now()
+
 			// 每个 SubAgent 有独立的超时上下文
 			taskCtx := ctx
 			if effectiveTimeout > 0 {
@@ -404,19 +432,15 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 			}
 
 			reply, err := m.streamWithWatchdog(taskCtx, sa, t, stuck, hard)
+			res := TaskResult{Task: t, Text: reply, Success: err == nil}
 			if err != nil {
-				results[idx] = TaskResult{
-					Task:    t,
-					Success: false,
-					Error:   err.Error(),
-				}
-				return
+				res.Error = err.Error()
 			}
-			results[idx] = TaskResult{
-				Task:    t,
-				Text:    reply,
-				Success: true,
+			// 进度：子 Agent 完成，推实时结果，让前端看见「多个在并行、逐个完成」
+			if ph := delegateProgressFromCtx(ctx); ph != nil {
+				ph("done", idx+1, len(tasks), t, time.Since(startAt), &res)
 			}
+			results[idx] = res
 		}(i, task)
 	}
 
