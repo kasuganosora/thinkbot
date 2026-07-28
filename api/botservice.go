@@ -530,6 +530,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 子 Agent 重任务（读大量文件 + 多轮模型推理）常超过默认 120s：放宽到 10 分钟，
 	// 避免 context deadline exceeded（日志曾见单次 LLM 调用 ~108s 被 120s 上限杀掉）。
 	saMgr.SetDelegateTimeout(10 * time.Minute)
+	// 提高子 Agent 并发上限：默认对齐单次 spawn 任务上限（5），避免一次派多任务时
+	// 被默认 2 的信号量限流成"分批"。可通过全局配置 subagent.max_concurrency 覆盖。
+	saMgr.SetMaxConcurrency(s.store.GetInt("subagent.max_concurrency", subagent.DefaultMaxConcurrency))
 	if err := subagent.RegisterTools(toolMgr, saMgr); err != nil {
 		s.logger.Warnw("failed to register subagent tools", "err", err)
 	}
