@@ -178,7 +178,24 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 			// 让并行的多个 subagent 可见（否则 spawn 同步阻塞期间 UI 只有心跳，看不出并行）。
 			progressHandler := func(phase string, index, total int, task string, elapsed time.Duration, res *TaskResult) {
 				if l := traceid.L(ctx); l != nil {
-					l.Infow("spawn: subagent progress", "phase", phase, "index", index, "total", total, "task", task, "elapsed", elapsed.String())
+					success := res == nil || res.Success
+					fields := []any{
+						"phase", phase,
+						"index", index,
+						"total", total,
+						"task", task,
+						"elapsed", elapsed.String(),
+						"success", success,
+					}
+					if res != nil && !res.Success && res.Error != "" {
+						fields = append(fields, "error", res.Error)
+					}
+					// 失败用 Warn 让其从日志中凸显，便于排障。
+					if success {
+						l.Infow("spawn: subagent progress", fields...)
+					} else {
+						l.Warnw("spawn: subagent progress", fields...)
+					}
 				}
 				if ctx.SendProgress == nil {
 					return

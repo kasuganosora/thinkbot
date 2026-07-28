@@ -11,6 +11,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // DefaultMaxConcurrency 是 DelegateMany 的默认并发上限。
@@ -445,6 +446,22 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 	}
 
 	wg.Wait()
+
+	// 服务端汇总日志：即使是非 spawn 直接调用 DelegateMany（无进度回调）时，
+	// 也能在日志里看到本轮并发执行的整体成败，便于排障。
+	if l := traceid.L(ctx); l != nil {
+		ok, fail := 0, 0
+		for _, r := range results {
+			if r.Success {
+				ok++
+			} else {
+				fail++
+			}
+		}
+		l.Infow("subagent: delegate many complete",
+			"total", len(results), "success", ok, "failed", fail, "max_concurrency", maxConc)
+	}
+
 	return results
 }
 
