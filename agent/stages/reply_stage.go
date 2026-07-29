@@ -218,6 +218,10 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 	switch decision {
 	case DecisionReply:
 		s.addReplyAction(env, replyTarget, sourceChannel, replyText, result)
+		// 自动捕获：纯回复（未显式记笔记）时，把回复内容作为 L0 工作记忆写入，
+		// 供梦境巩固管线分析。否则 bot 从不记笔记 → 分层记忆库恒为空 → dreaming 永远空跑。
+		// 复用已有 NoteHandler → TieredStore 路径，category=exchange 便于区分。
+		s.addNoteAction(env, sourceChannel, replyText, "exchange")
 
 	case DecisionReplyWithNote:
 		s.addReplyAction(env, replyTarget, sourceChannel, replyText, result)

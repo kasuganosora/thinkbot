@@ -128,8 +128,10 @@ type TierConfig struct {
 func DefaultTierConfigs() map[MemoryTier]TierConfig {
 	return map[MemoryTier]TierConfig{
 		Tier0Working: {
-			MaxEntries:           200,
-			TTL:                  30 * time.Minute,
+			MaxEntries: 200,
+			// 工作记忆需保留到下次梦境运行（每天 03:00）并为 2 天 lookback 留余量。
+			// 原 30min TTL 会导致白天产生的笔记到半夜被 GC 清掉，dreaming 因此永远空跑。
+			TTL:                  48 * time.Hour,
 			ConsolidateThreshold: 20,
 		},
 		Tier1LongTerm: {
@@ -561,6 +563,48 @@ func (s *TieredStore) MarkProcessed(_ context.Context, scope Scope, entryIDs []s
 			}
 			bucket[i].Metadata["consolidated"] = true
 			bucket[i].Metadata["consolidated_at"] = time.Now()
+			if s.db != nil {
+				updated = append(updated, bucket[i])
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if s.db != nil {
+		for _, e := range updated {
+			s.persistUpsert(context.Background(), e)
+		}
+	}
+	return nil
+}
+
+// MarkDreamProcessed 标记 L0 条目已被梦境巩固管线处理（独立于 Consolidator 的
+// "consolidated" 标记）。实时 Consolidator 会把 L0 提升为 L1 并标记 consolidated，
+// 若梦境管线复用同一标记（GetUnprocessed），则 03:00 运行时 L0 早已被"消费"光，
+// 导致 dreaming 永远空跑。改用独立的 dream_processed 标记，让梦境管线与实时
+// Consolidator 各自独立去重、互不饿死。
+func (s *TieredStore) MarkDreamProcessed(_ context.Context, scope Scope, entryIDs []string) error {
+	if len(entryIDs) == 0 {
+		return nil
+	}
+
+	idSet := make(map[string]struct{}, len(entryIDs))
+	for _, id := range entryIDs {
+		idSet[id] = struct{}{}
+	}
+
+	key := tierScopeKey(Tier0Working, scope)
+
+	s.mu.Lock()
+	bucket := s.buckets[key]
+	var updated []TieredEntry
+	for i := range bucket {
+		if _, ok := idSet[bucket[i].ID]; ok {
+			if bucket[i].Metadata == nil {
+				bucket[i].Metadata = make(map[string]any)
+			}
+			bucket[i].Metadata["dream_processed"] = true
+			bucket[i].Metadata["dream_processed_at"] = time.Now()
 			if s.db != nil {
 				updated = append(updated, bucket[i])
 			}
