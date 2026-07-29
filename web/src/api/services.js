@@ -773,6 +773,144 @@ export const chatApi = {
     return request('POST', '/api/chat/abort', { botId, traceId })
   },
   /**
+   * 查询指定 bot 当前仍在后台执行的任务 traceID 列表（断连后后台仍在跑的任务）。
+   * @param {string} botId
+   * @returns {Promise<string[]>}
+   */
+  async activeTasks(botId) {
+    if (!botId) return []
+    if (USE_MOCK) return []
+    try {
+      const data = await request('GET', `/api/chat/active?botId=${encodeURIComponent(botId)}`)
+      return (data && data.traceIds) || []
+    } catch {
+      return []
+    }
+  },
+  /**
+   * 按 traceID 重连续流（断连后重连，恢复对后台仍在运行任务的进度展示与终止能力）。
+   * 解析 SSE 事件并通过 handlers 回调给调用方；事件语义与 send 保持一致。
+   * @param {string} botId
+   * @param {string} traceId
+   * @param {object} [handlers] { onStart, onTextDelta, onToolCall, onToolProgress, onToolResult, onDone, signal }
+   * @returns {Promise<{traceId, text, toolCalls}|null>}
+   */
+  async resume(botId, traceId, handlers = {}) {
+    if (!botId || !traceId) return null
+    if (USE_MOCK) return null
+    const {
+      onStart, onTextDelta, onToolCall, onToolProgress, onToolResult, onDone, signal,
+    } = handlers || {}
+    const url = `/api/chat/resume?botId=${encodeURIComponent(botId)}&traceId=${encodeURIComponent(traceId)}`
+    const fetchOpts = { method: 'GET', credentials: 'include', headers: { Accept: 'text/event-stream' } }
+    if (signal) fetchOpts.signal = signal
+    const response = await fetch(url, fetchOpts)
+    if (!response.ok) {
+      const err = new Error(`HTTP ${response.status}`)
+      try { const j = await response.json(); err.message = j.message || err.message } catch {}
+      throw err
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullText = ''
+    const toolCalls = []
+    const toolCallMap = new Map()
+    let currentEvent = traceId
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop()
+        for (const block of blocks) {
+          if (!block.trim()) continue
+          const lines = block.split('\n')
+          let evtType = ''
+          const parts = {}
+          for (const line of lines) {
+            if (line.startsWith('event:')) evtType = line.slice(6).trim()
+            else if (line.startsWith('data:')) {
+              try { Object.assign(parts, JSON.parse(line.slice(5).trim())) } catch {}
+            }
+          }
+          switch (evtType) {
+            case 'text_delta': {
+              const chunk = parts.text || ''
+              fullText += chunk
+              if (onTextDelta) onTextDelta(chunk)
+              break
+            }
+            case 'start': {
+              currentEvent = parts.traceId || currentEvent
+              if (onStart) onStart(currentEvent)
+              break
+            }
+            case 'tool_call': {
+              const call = {
+                id: parts.toolCallId || genId('tool'),
+                name: parts.tool,
+                title: toolLabels[parts.tool] || parts.tool,
+                input: parts.input,
+                status: 'running',
+                output: { stdout: '', stderr: '', exitCode: null, truncated: false },
+              }
+              toolCalls.push(call)
+              toolCallMap.set(call.id, call)
+              if (onToolCall) onToolCall(call)
+              break
+            }
+            case 'tool_progress': {
+              const toolCallId = parts.toolCallId
+              const payload = {
+                ...(typeof parts.payload === 'object' && parts.payload ? parts.payload : {}),
+                stream: (parts.payload && parts.payload.stream) || parts.stream || 'stdout',
+                chunk: (parts.payload && parts.payload.chunk) || parts.chunk || '',
+              }
+              const t = toolCallMap.get(toolCallId)
+              if (t) {
+                const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout'
+                const chunk = payload.chunk || ''
+                const out = (typeof t.output === 'object' && t.output) ? t.output : { stdout: '', stderr: '', exitCode: null, truncated: false }
+                out[stream] = (out[stream] || '') + chunk
+                t.output = out
+              }
+              if (onToolProgress) onToolProgress(toolCallId, payload)
+              break
+            }
+            case 'tool_result': {
+              const toolCallId = parts.toolCallId
+              const t = toolCallMap.get(toolCallId)
+              const isErr = parts.error != null
+              const payload = { ...parts, status: parts.status || (isErr ? 'error' : 'success') }
+              if (t) {
+                Object.assign(t, { status: payload.status, summary: parts.summary })
+                if (parts.output !== undefined) t.output = parts.output
+                if (isErr && typeof t.output === 'object' && t.output) {
+                  t.output.stderr = (t.output.stderr || '') + String(parts.error)
+                }
+              }
+              if (onToolResult) onToolResult(toolCallId, payload)
+              break
+            }
+            case 'done': {
+              if (onDone) onDone({ traceId: currentEvent, text: fullText, toolCalls })
+              return { traceId: currentEvent, text: fullText, toolCalls }
+            }
+            case 'error':
+              throw new Error(parts.message || '请求失败')
+            default:
+              break
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    return { traceId: currentEvent, text: fullText, toolCalls }
+  },
+  /**
    * 获取聊天历史（游标分页，倒序返回）。
    * @param {string} botId
    * @param {string} [cursor] 分页游标（首次留空）

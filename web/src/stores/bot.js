@@ -205,6 +205,8 @@ export const useBotStore = defineStore('bot', () => {
     } finally {
       messagesLoading.value = false
     }
+    // 重连后恢复仍在后台运行的任务（断连不杀后台任务）：重连续流 + 允许手动终止
+    await resumeInFlightTasks()
   }
 
   async function loadMoreMessages() {
@@ -221,6 +223,130 @@ export const useBotStore = defineStore('bot', () => {
       console.error('加载更多消息失败', e)
     } finally {
       messagesLoading.value = false
+    }
+  }
+
+  // 正在重连续流中的 traceID（防止 loadMessages 被多次触发时重复 resume）
+  const _resuming = new Set()
+
+  // 断连后重连：恢复仍在后台运行的任务（断连不腰斩后台长任务）。
+  // 查询 activeTasks，对每条仍在跑的 traceID 重连续流并把进度渲染进一个占位 assistant 消息，
+  // 同时设置 replying + _activeTraceId，使「停止生成」按钮可精确命中该任务予以终止。
+  async function resumeInFlightTasks() {
+    const botId = activeBotId.value
+    if (!botId) return
+    let traceIds = []
+    try {
+      traceIds = await chatApi.activeTasks(botId)
+    } catch {
+      return
+    }
+    traceIds = traceIds.filter(id => id && !_resuming.has(id))
+    if (!traceIds.length) return
+
+    for (const traceId of traceIds) {
+      _resuming.add(traceId)
+      const assistantTmpId = uid()
+      const assistantMsg = {
+        id: assistantTmpId,
+        role: 'assistant',
+        content: '',
+        toolCalls: [],
+        parts: [],
+        _temp: true,
+      }
+      messages.value = [...messages.value, assistantMsg]
+
+      // 与 sendMessage 一致的累积辅助函数（本地内联，避免改动发送主路径）
+      const appendTextPart = (tmpId, delta) => {
+        const idx = messages.value.findIndex(m => m.id === tmpId)
+        if (idx < 0) return
+        const updated = [...messages.value]
+        const msg = { ...updated[idx] }
+        msg.content = (msg.content || '') + delta
+        const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+        const last = parts[parts.length - 1]
+        if (last && last.type === 'text') {
+          parts[parts.length - 1] = { ...last, content: last.content + delta }
+        } else {
+          parts.push({ type: 'text', content: delta })
+        }
+        msg.parts = parts
+        updated[idx] = msg
+        messages.value = updated
+      }
+      const upsertToolCall = (tmpId, call) => {
+        const idx = messages.value.findIndex(m => m.id === tmpId)
+        if (idx < 0) return
+        const updated = [...messages.value]
+        const msg = { ...updated[idx] }
+        const toolCalls = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
+        const existing = toolCalls.findIndex(t => t.id === call.id)
+        if (existing >= 0) toolCalls[existing] = { ...toolCalls[existing], ...call }
+        else toolCalls.push(call)
+        msg.toolCalls = toolCalls
+        updated[idx] = msg
+        messages.value = updated
+      }
+      const appendToolProgress = (tmpId, toolCallId, payload) => {
+        const idx = messages.value.findIndex(m => m.id === tmpId)
+        if (idx < 0) return
+        const updated = [...messages.value]
+        const msg = { ...updated[idx] }
+        const toolCalls = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
+        const ti = toolCalls.findIndex(t => t.id === toolCallId)
+        if (ti >= 0) {
+          const t = { ...toolCalls[ti] }
+          const out = (typeof t.output === 'object' && t.output) ? { ...t.output } : { stdout: '', stderr: '', exitCode: null, truncated: false }
+          const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout'
+          out[stream] = (out[stream] || '') + (payload.chunk || '')
+          t.output = out
+          toolCalls[ti] = t
+          msg.toolCalls = toolCalls
+          updated[idx] = msg
+          messages.value = updated
+        }
+      }
+      const finishToolCall = (tmpId, toolCallId, payload) => {
+        const idx = messages.value.findIndex(m => m.id === tmpId)
+        if (idx < 0) return
+        const updated = [...messages.value]
+        const msg = { ...updated[idx] }
+        const toolCalls = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
+        const ti = toolCalls.findIndex(t => t.id === toolCallId)
+        if (ti >= 0) {
+          toolCalls[ti] = { ...toolCalls[ti], ...payload, status: payload.status || (payload.error != null ? 'error' : 'success') }
+          msg.toolCalls = toolCalls
+          updated[idx] = msg
+          messages.value = updated
+        }
+      }
+
+      replying.value = true
+      _activeTraceId = traceId
+      try {
+        await chatApi.resume(botId, traceId, {
+          onTextDelta: (delta) => appendTextPart(assistantTmpId, delta),
+          onToolCall: (call) => upsertToolCall(assistantTmpId, call),
+          onToolProgress: (toolCallId, payload) => appendToolProgress(assistantTmpId, toolCallId, payload),
+          onToolResult: (toolCallId, payload) => {
+            finishToolCall(assistantTmpId, toolCallId, payload)
+            const wid = extractWorkflowId(payload)
+            if (wid) activeWorkflowId.value = wid
+          },
+        })
+        // 重连续流正常结束：把占位消息转正
+        const updated = [...messages.value]
+        const idx = updated.findIndex(m => m.id === assistantTmpId)
+        if (idx >= 0) updated[idx] = { ...updated[idx], _temp: false }
+        messages.value = updated
+      } catch (e) {
+        console.warn('resume in-flight task failed', traceId, e)
+      } finally {
+        replying.value = false
+        _activeTraceId = ''
+        _resuming.delete(traceId)
+      }
     }
   }
 
@@ -560,7 +686,7 @@ export const useBotStore = defineStore('bot', () => {
     activeWorkflowId,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
-    loadMessages, loadMoreMessages, sendMessage, stopReply,
+    loadMessages, loadMoreMessages, sendMessage, stopReply, resumeInFlightTasks,
     // 会话管理
     sessions, sessionsLoading, activeSessionId,
     loadSessions, createSession, deleteSession, selectSession,

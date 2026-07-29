@@ -316,6 +316,23 @@ func (s *BotService) AbortMessage(botID, traceID string) bool {
 	return true
 }
 
+// ActiveMessageTraceIDs 返回指定 bot 当前仍在执行（未结束）的消息 traceID 列表。
+// 用于前端重连后恢复对「断连但后台仍运行」的任务的订阅与终止能力：
+// 用户关页面后后台长任务继续跑，其 cancel 仍注册在 messageCancels 中，直到消息真正完成
+// （OnMessageDone 注销）。前端据此知道哪些 traceID 仍可 resume / abort。
+func (s *BotService) ActiveMessageTraceIDs(botID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := botID + ":"
+	out := make([]string, 0, len(s.messageCancels))
+	for key := range s.messageCancels {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, strings.TrimPrefix(key, prefix))
+		}
+	}
+	return out
+}
+
 // ResetTokenBudgets 重置所有 channel 的 token 预算追踪。
 // 当某 channel 累计 token 超过硬限制后，Pipeline 会在每次请求前直接中止，
 // 若不重置则该 channel 将永久拒绝新消息。空闲 1 小时会自动清零，但手动重置可立即恢复。
