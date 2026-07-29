@@ -133,6 +133,17 @@ func NewDreamingBundle(
 	// 4. 创建并注册 cron Job
 	mgr := cron.NewManager(cronStore, location)
 
+	// 幂等：先清理该 bot 既有的 dreaming cron job，避免每次进程启动都新建一条
+	// （CreateJob 用随机 UUID，不清理会导致 data/cron/<botID>_dream.json 累积多个同名
+	//  job，且 scheduler 按 store.ListActive() 全量触发 → 每天 03:00 被重复执行）。
+	for _, existing := range mgr.ListJobs() {
+		if existing.Name == "dreaming-"+botID {
+			if derr := mgr.DeleteJob(existing.ID); derr != nil {
+				logger.Warnw("dreaming: failed to prune stale job", "job_id", existing.ID, "err", derr)
+			}
+		}
+	}
+
 	job, err := mgr.CreateJob(cron.CreateJobRequest{
 		Name:     "dreaming-" + botID,
 		Prompt:   "trigger dreaming consolidation",
