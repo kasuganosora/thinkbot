@@ -455,6 +455,55 @@ func TestSpawnToolNotAvailableInSubagentScope(t *testing.T) {
 }
 
 // ============================================================================
+// WithoutCancel 韧性回归测试
+//
+// 背景：spawn 工具传入 DelegateMany 的 ctx 派生自「消息级 cancel ctx」
+// （客户端断连 → AbortMessage 与 stop 按钮共用）。历史上用户关页面会让该 ctx
+// 被取消，级联腰斩正在跑的子 Agent（日志曾见
+// "client disconnected → spawn killed (context canceled)"）。
+// 修复后，Delegate*/DelegateMany 必须用 context.WithoutCancel 脱离该维度，
+// 使子 Agent 只受自身 delegateTimeout / 卡死看门狗约束，不因断连而中断。
+// 以下测试用 cancelAwareMockProvider 模拟「ctx 已取消」场景验证该不变量。
+// ============================================================================
+
+func TestSubAgentManager_DelegateManySurvivesParentCancel(t *testing.T) {
+	provider := &cancelAwareMockProvider{}
+	mgr := NewSubAgentManager(provider, "test-model")
+	mgr.SetMaxConcurrency(3)
+
+	// 父 ctx 立即取消，模拟「客户端断连 → AbortMessage 取消消息级 ctx」。
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	results := mgr.DelegateMany(parent, "你是助手", []string{"task A", "task B", "task C"})
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if !r.Success {
+			t.Errorf("task %d should still succeed after parent ctx cancel (WithoutCancel), got err: %s",
+				i, r.Error)
+		}
+	}
+}
+
+func TestSubAgentManager_DelegateSurvivesParentCancel(t *testing.T) {
+	provider := &cancelAwareMockProvider{}
+	mgr := NewSubAgentManager(provider, "test-model")
+
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := mgr.Delegate(parent, "你是助手", "翻译 hello")
+	if err != nil {
+		t.Fatalf("Delegate should survive parent cancel, got err: %v", err)
+	}
+	if result == "" {
+		t.Error("expected non-empty delegation result")
+	}
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -490,4 +539,24 @@ func (p *errorProvider) DoGenerate(ctx context.Context, params llm.GenerateParam
 }
 func (p *errorProvider) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
 	return nil, context.DeadlineExceeded
+}
+
+// cancelAwareMockProvider 在 ctx 已取消时返回错误，用于验证 Delegate*/DelegateMany
+// 已通过 context.WithoutCancel 脱离上级取消——若未脱离，父 ctx 取消会让子 Agent 任务失败。
+type cancelAwareMockProvider struct {
+	countingMockProvider
+}
+
+func (p *cancelAwareMockProvider) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return p.countingMockProvider.DoGenerate(ctx, params)
+}
+
+func (p *cancelAwareMockProvider) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return p.countingMockProvider.DoStream(ctx, params)
 }
