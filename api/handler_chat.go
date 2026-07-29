@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -93,6 +94,133 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 	OK(c, map[string]any{"aborted": aborted})
 }
 
+// handleChatActiveTasks 返回指定 bot 当前仍在后台执行的消息 traceID 列表。
+// GET /api/chat/active?botId=xxx
+//
+// 用户断连后后台长任务继续跑，其 cancel 仍注册在 messageCancels 中（直到消息真正完成）。
+// 前端重连后据此知道自己可以 resume / abort 哪些任务。
+func (s *Server) handleChatActiveTasks(c *gin.Context) {
+	botID := c.Query("botId")
+	if botID == "" {
+		Fail(c, errs.BadRequest("botId required"))
+		return
+	}
+	OK(c, map[string]any{"traceIds": s.botSvc.ActiveMessageTraceIDs(botID)})
+}
+
+// handleChatResume 按 traceID 重连续流（SSE）。
+// GET /api/chat/resume?botId=xxx&traceId=zzz
+//
+// 使用 EventBus.SubscribeWithReplay(traceID, 0) 回放历史事件并实时转发，
+// 使断连后重连的前端能继续看到「仍在后台运行」的任务的真实进度，并据此手动终止。
+func (s *Server) handleChatResume(c *gin.Context) {
+	botID := c.Query("botId")
+	traceID := c.Query("traceId")
+	if botID == "" || traceID == "" {
+		Fail(c, errs.BadRequest("botId and traceId required"))
+		return
+	}
+	bus := s.botSvc.EventBus()
+	memBus, ok := bus.(*outbound.MemoryEventBus)
+	if !ok || memBus == nil {
+		Fail(c, errs.Internal("event bus unavailable"))
+		return
+	}
+
+	sub := memBus.SubscribeWithReplay(traceID, 0)
+	defer memBus.Unsubscribe(sub)
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		Fail(c, errs.Internal("streaming not supported"))
+		return
+	}
+
+	writeSSE(c.Writer, sseStart, map[string]any{"traceId": traceID})
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-heartbeat.C:
+			writeSSE(c.Writer, ssePing, map[string]any{"ts": time.Now().Unix()})
+			flusher.Flush()
+		case event, ok := <-sub.C():
+			if !ok {
+				return
+			}
+			// 消息终态：转发 done 并结束重连续流。
+			if event.Type == outbound.EventMessageDone || event.Type == outbound.EventMessageError ||
+				event.Type == outbound.EventMessageDropped || event.Type == outbound.EventDispatchError {
+				writeSSE(c.Writer, sseDone, map[string]any{})
+				flusher.Flush()
+				return
+			}
+			evtType, data := translateEventToSSE(event)
+			if evtType == "" {
+				continue
+			}
+			writeSSE(c.Writer, evtType, data)
+			flusher.Flush()
+		}
+	}
+}
+
+// translateEventToSSE 将 EventBus 内部事件翻译为前端 SSE 事件（type + data）。
+// 供 handleChatSend（正常流式）与 handleChatResume（重连续流）共用，避免两边
+// 各自拼装 SSE 负载导致漂移。
+func translateEventToSSE(event outbound.Event) (string, map[string]any) {
+	switch event.Type {
+	case outbound.EventLLMTextDelta:
+		return sseTextDelta, map[string]any{"text": event.Data["text"]}
+	case outbound.EventLLMToolCall:
+		return sseToolCall, map[string]any{
+			"toolCallId": event.Data["toolCallId"],
+			"tool":       event.Data["tool"],
+			"input":      event.Data["input"],
+		}
+	case outbound.EventLLMToolProgress:
+		stream := "stdout"
+		chunk := ""
+		if payload, _ := event.Data["payload"].(map[string]any); payload != nil {
+			if v, ok := payload["stream"].(string); ok && v != "" {
+				stream = v
+			}
+			if v, ok := payload["chunk"].(string); ok {
+				chunk = v
+			}
+		}
+		return sseToolProgress, map[string]any{
+			"toolCallId":   event.Data["toolCallId"],
+			"tool":         event.Data["tool"],
+			"invocationId": event.Data["invocationId"],
+			"stream":       stream,
+			"chunk":        chunk,
+			"payload":      event.Data["payload"],
+		}
+	case outbound.EventLLMToolResult:
+		payload := map[string]any{
+			"toolCallId":   event.Data["toolCallId"],
+			"tool":         event.Data["tool"],
+			"invocationId": event.Data["invocationId"],
+			"output":       event.Data["output"],
+		}
+		if errMsg, ok := event.Data["error"]; ok {
+			payload["error"] = errMsg
+		}
+		return sseToolResult, payload
+	}
+	return "", nil
+}
+
 // handleResetTokenBudget 重置所有 channel 的 token 预算追踪。
 // POST /api/chat/token-budget/reset
 //
@@ -175,12 +303,21 @@ func (s *Server) handleChatSend(c *gin.Context) {
 
 	// 订阅 EventBus 接收流式文本增量
 	var eventCh <-chan outbound.Event
+	var eventSub *outbound.Subscription
+	var memBus *outbound.MemoryEventBus
 	bus := s.botSvc.EventBus()
 	if bus != nil {
-		if memBus, ok := bus.(*outbound.MemoryEventBus); ok {
-			eventSub := memBus.Subscribe(traceID)
-			defer memBus.Unsubscribe(eventSub)
+		if mb, ok := bus.(*outbound.MemoryEventBus); ok {
+			memBus = mb
+			eventSub = mb.Subscribe(traceID)
 			eventCh = eventSub.C()
+		}
+	}
+	// unsubscribeEventSub 释放 EventBus 订阅。仅在「连接已结束」或「后台 goroutine 接管」后
+	// 调用一次，避免与断连后的后台落库 goroutine 重复退订。
+	unsubscribeEventSub := func() {
+		if memBus != nil && eventSub != nil {
+			memBus.Unsubscribe(eventSub)
 		}
 	}
 
@@ -291,44 +428,150 @@ saveAssistant := func() {
 	}(fullText, toolCallsJSON, partsJSON)
 }
 
+	// accumulate 将一条 EventBus 事件合并进本轮 assistant 回复的累积结构
+	//（fullText / toolCalls / parts），供「断连后后台继续落库」与「正常完成落库」共用。
+	// 仅更新累积结构，不负责向客户端写 SSE。
+	accumulate := func(event outbound.Event) {
+		switch event.Type {
+		case outbound.EventLLMTextDelta:
+			delta, _ := event.Data["text"].(string)
+			if delta != "" {
+				fullText += delta
+				if len(parts) > 0 && parts[len(parts)-1]["type"] == "text" {
+					parts[len(parts)-1]["content"] = parts[len(parts)-1]["content"].(string) + delta
+				} else {
+					parts = append(parts, map[string]any{"type": "text", "content": delta})
+				}
+			}
+		case outbound.EventLLMToolCall:
+			toolCallID, _ := event.Data["toolCallId"].(string)
+			toolName, _ := event.Data["tool"].(string)
+			if toolCallID == "" {
+				toolCallID = idgen.New("tool")
+			}
+			if _, ok := toolCallIdx[toolCallID]; !ok {
+				toolCalls = append(toolCalls, map[string]any{
+					"id":     toolCallID,
+					"name":   toolName,
+					"title":  toolName,
+					"status": "running",
+					"input":  event.Data["input"],
+					"output": map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false},
+				})
+				toolCallIdx[toolCallID] = len(toolCalls) - 1
+				part := map[string]any{
+					"type":   "tool",
+					"id":     toolCallID,
+					"name":   toolName,
+					"title":  toolName,
+					"status": "running",
+					"input":  event.Data["input"],
+				}
+				if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
+					part["invocationId"] = invID
+				}
+				parts = append(parts, part)
+			}
+		case outbound.EventLLMToolProgress:
+			toolCallID, _ := event.Data["toolCallId"].(string)
+			payload, _ := event.Data["payload"].(map[string]any)
+			stream := "stdout"
+			chunk := ""
+			if payload != nil {
+				if v, ok := payload["stream"].(string); ok && v != "" {
+					stream = v
+				}
+				if v, ok := payload["chunk"].(string); ok {
+					chunk = v
+				}
+			}
+			if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
+				out, _ := toolCalls[idx]["output"].(map[string]any)
+				if out == nil {
+					out = map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false}
+				}
+				if stream == "stderr" {
+					prev, _ := out["stderr"].(string)
+					out["stderr"] = prev + chunk
+				} else {
+					prev, _ := out["stdout"].(string)
+					out["stdout"] = prev + chunk
+				}
+				toolCalls[idx]["output"] = out
+				if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
+					toolCalls[idx]["invocationId"] = invID
+				}
+				syncPartTool(toolCallID)
+			}
+		case outbound.EventLLMToolResult:
+			toolCallID, _ := event.Data["toolCallId"].(string)
+			if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
+				if _, isErr := event.Data["error"]; isErr {
+					toolCalls[idx]["status"] = "error"
+				} else {
+					toolCalls[idx]["status"] = "success"
+				}
+				if event.Data["output"] != nil {
+					toolCalls[idx]["output"] = event.Data["output"]
+				}
+				if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
+					toolCalls[idx]["invocationId"] = invID
+				}
+				syncPartTool(toolCallID)
+			}
+		}
+	}
+
+	// drainAndSaveInBackground 在客户端断开后由后台 goroutine 继续消费 EventBus 事件，
+	// 直到消息终态（done/error/dropped/dispatch-error）再把最终 assistant 回复落库。
+	// 这样断连不会腰斩后台长任务，也不会丢失最终结果——重连后经前端回放即可看到真实进度。
+	drainAndSaveInBackground := func() {
+		if eventSub == nil {
+			return
+		}
+		bgCtx, bgCancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer bgCancel()
+		for {
+			select {
+			case <-bgCtx.Done():
+				saveAssistant()
+				unsubscribeEventSub()
+				return
+			case event, ok := <-eventSub.C():
+				if !ok {
+					saveAssistant()
+					unsubscribeEventSub()
+					return
+				}
+				accumulate(event)
+				switch event.Type {
+				case outbound.EventMessageDone, outbound.EventMessageError,
+					outbound.EventMessageDropped, outbound.EventDispatchError:
+					saveAssistant()
+					unsubscribeEventSub()
+					return
+				}
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			// 客户端断开：不再取消后台执行链路。
-			// Bot 在独立的 botCtx（context.Background 派生）运行，消息级 ctx（msgCtx）
-			// 仅由「stop 按钮」(handleChatAbort → AbortMessage) 控制；断连只表示 SSE 通道
-			// 消失，不应腰斩后台长任务（否则用户关页面就会中断正在跑的子 Agent / 测试修复等）。
-			// 这里仅把断开瞬间仍处于 running 的工具调用标记为 killed 并落库，作为 UI 快照；
-			// 后台 bot 继续运行，事件已写入 EventStore，用户重连经回放即可看到真实结果。
-			killedAny := false
-			for _, tc := range toolCalls {
-				if tc["status"] == "running" {
-					tc["status"] = "killed"
-					tc["output"] = map[string]any{
-						"stdout":    "",
-						"stderr":    "执行被客户端断开中断",
-						"exitCode":  nil,
-						"truncated": false,
-						"killed":    true,
-					}
-					// 同步有序 parts 数组中对应的 tool part，否则重连后
-					// 前端按 parts 渲染仍会停在 running（孤儿卡片）。
-					if id, _ := tc["id"].(string); id != "" {
-						syncPartTool(id)
-					}
-					killedAny = true
-				}
+			// 客户端断开：不再取消后台执行链路（msgCtx 仅由 stop 按钮控制），
+			// 也不再写入「killed」残骸快照。改为把 EventBus 订阅移交给后台 goroutine，
+			// 由其继续消费事件直到消息终态，再把最终 assistant 回复落库。
+			// 这样断连既不会腰斩长任务，也不会丢失最终结果；用户重连后可由前端
+			// 经回放订阅看到真实进度并手动终止（见 resume 端点）。
+			if eventSub != nil {
+				go drainAndSaveInBackground()
 			}
-			if killedAny {
-				s.logger.Infow("chat SSE: client disconnected, marked in-flight tool calls killed",
-					"bot_id", botID, "trace_id", traceID)
-			}
-			saveAssistant()
 			return
 
 		case <-idleTimer.C:
 			writeSSE(c.Writer, sseError, map[string]any{"message": "idle timeout"})
 			flusher.Flush()
+			unsubscribeEventSub()
 			return
 
 		case <-heartbeat.C:
@@ -477,6 +720,7 @@ saveAssistant := func() {
 				// channel 关闭，结束
 				writeSSE(c.Writer, sseDone, map[string]any{"text": fullText})
 				flusher.Flush()
+				unsubscribeEventSub()
 				return
 			}
 
@@ -501,6 +745,7 @@ saveAssistant := func() {
 
 			// 保存 Bot 回复到 DB（含工具调用信息 + 有序 parts）
 			saveAssistant()
+			unsubscribeEventSub()
 			return
 			}
 		}
