@@ -294,10 +294,12 @@ saveAssistant := func() {
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			// 客户端断开：中止 bot 执行链路（取消 ctx → 级联 kill 进行中的工具进程），
-			// 并将仍处于 running 的工具调用标记为 killed 后落库，避免重连后卡片永久
-			// 停留在「执行中」（孤儿会话）。
-			s.botSvc.AbortMessage(botID, traceID)
+			// 客户端断开：不再取消后台执行链路。
+			// Bot 在独立的 botCtx（context.Background 派生）运行，消息级 ctx（msgCtx）
+			// 仅由「stop 按钮」(handleChatAbort → AbortMessage) 控制；断连只表示 SSE 通道
+			// 消失，不应腰斩后台长任务（否则用户关页面就会中断正在跑的子 Agent / 测试修复等）。
+			// 这里仅把断开瞬间仍处于 running 的工具调用标记为 killed 并落库，作为 UI 快照；
+			// 后台 bot 继续运行，事件已写入 EventStore，用户重连经回放即可看到真实结果。
 			killedAny := false
 			for _, tc := range toolCalls {
 				if tc["status"] == "running" {
