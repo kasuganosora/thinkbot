@@ -178,10 +178,8 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 	}
 
 	if effectiveTimeout > 0 {
-		// 脱离「客户端断连 / stop 发起的消息级取消」维度：子 Agent 委托任务不因用户
-		// 关页面而腰斩，由自身的 delegateTimeout / 卡死看门狗兜底终止。
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), effectiveTimeout)
+		ctx, cancel = context.WithTimeout(ctx, effectiveTimeout)
 		defer cancel()
 	}
 
@@ -228,9 +226,7 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	}
 	hard := stuck * delegateHardTimeoutFactor
 
-	// 脱离「客户端断连 / stop 发起的消息级取消」维度：流式委托任务不因用户关页面
-	// 而腰斩（否则长生成会被 context canceled 中断）。停止仍由卡死看门狗 + hard 兜底。
-	return m.streamWithWatchdog(context.WithoutCancel(ctx), sa, task, stuck, hard)
+	return m.streamWithWatchdog(ctx, sa, task, stuck, hard)
 }
 
 // streamWithWatchdog 在卡死看门狗保护下运行一个 SubAgent 的一次流式任务。
@@ -414,18 +410,17 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 			startAt := time.Now()
 
 			// 每个 SubAgent 有独立的超时上下文。
-			// 关键：用 context.WithoutCancel 脱离「客户端断连 / stop 发起的消息级取消」
-			// 维度——spawn 工具传入的 ctx 派生自消息级 cancel（断连与 stop 共用），若不
-			// 脱离，用户关页面（c.Request.Context 取消 → AbortMessage）会级联腰斩正在跑的
-			// 子 Agent（曾见日志 "client disconnected → spawn killed (context canceled)"）。
-			// 脱离后，子 Agent 只受 effectiveTimeout（delegateTimeout）与卡死看门狗约束，
-			// 长任务得以跑完；调用方（主 Agent）被 stop 取消后，子 Agent 也会在兜底超时内
-			// 结束，不会永久泄漏（临时 SubAgent 执行完自动 Close）。
-			base := context.WithoutCancel(ctx)
-			taskCtx := base
+			// 子 Agent 执行 ctx 直接继承传入的 ctx（即消息级 ctx / msgCtx）：
+			//   - 用户点击 stop（handleChatAbort → AbortMessage）会取消 msgCtx，从而精确
+			//     终止正在跑的子 Agent；
+			//   - 客户端断连不再取消 msgCtx（handler 断连分支已不再调用 AbortMessage，
+			//     Bot 在独立 botCtx 运行），因此关页面不会腰斩后台长任务。
+			// 子 Agent 仍受自身 effectiveTimeout（delegateTimeout）+ 卡死看门狗兜底，
+			// 临时 SubAgent 执行完自动 Close，不会永久泄漏。
+			taskCtx := ctx
 			if effectiveTimeout > 0 {
 				var cancel context.CancelFunc
-				taskCtx, cancel = context.WithTimeout(base, effectiveTimeout)
+				taskCtx, cancel = context.WithTimeout(ctx, effectiveTimeout)
 				defer cancel()
 			}
 
