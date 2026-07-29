@@ -121,6 +121,59 @@ func TestDreamManager_LightPhase(t *testing.T) {
 	}
 }
 
+// TestDreamManager_LightIngestsConsolidatedL0 回归测试：模拟实时 Consolidator 已将
+// L0 标记为 consolidated 的场景（这正是此前 dreaming 永远空跑的根因）。修复后 runLight
+// 改用 Retrieve 拉取全部 L0 并仅跳过 dream_processed，因此即便已被 consolidated 也应被
+// 梦境管线摄取，而不是被旧的 GetUnprocessed("consolidated") 过滤掉。
+func TestDreamManager_LightIngestsConsolidatedL0(t *testing.T) {
+	scope := ChannelScope("consolidated-test")
+	dm, _ := newTestDreamManager(t, []Scope{scope})
+	ctx := context.Background()
+
+	const n = 6
+	for i := 0; i < n; i++ {
+		if err := dm.manager.WriteWorking(ctx, scope,
+			"用户使用 Go 语言开发后端服务，偏好简洁代码风格", "test"); err != nil {
+			t.Fatalf("WriteWorking failed: %v", err)
+		}
+	}
+
+	// 模拟实时 Consolidator 把 L0 提升为 L1 并标记 consolidated
+	entries, err := dm.manager.store.Retrieve(ctx, Tier0Working, []Scope{scope}, 100)
+	if err != nil {
+		t.Fatalf("Retrieve failed: %v", err)
+	}
+	if len(entries) != n {
+		t.Fatalf("expected %d L0 entries, got %d", n, len(entries))
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.ID)
+	}
+	if err := dm.manager.store.MarkProcessed(ctx, scope, ids); err != nil {
+		t.Fatalf("MarkProcessed failed: %v", err)
+	}
+
+	// 修复前的旧逻辑（GetUnprocessed 跳过 consolidated）会得到 ingested=0；
+	// 修复后应当摄取全部 n 条。
+	report, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if report.LightIngested != n {
+		t.Errorf("expected %d ingested despite consolidated marker, got %d", n, report.LightIngested)
+	}
+
+	// 再次运行应被 dream_processed 跳过 → ingested=0（幂等，避免重复摄取）
+	report2, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("second Run failed: %v", err)
+	}
+	if report2.LightIngested != 0 {
+		t.Errorf("expected 0 ingested on second run (already dream_processed), got %d", report2.LightIngested)
+	}
+}
+
 func TestDreamManager_JaccardDedup(t *testing.T) {
 	candidates := []DreamCandidate{
 		{Content: "用户偏好使用 Go 语言"},
