@@ -45,9 +45,11 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 	var processedScopes []scopeWithIDs
 
 	for _, scope := range scopes {
-		// 使用 GetUnprocessed 跳过已标记 consolidated 的条目
-		// limit=10000 模拟无限制（默认 50 不足以支持梦境全量提取）
-		l0Entries, err := d.manager.store.GetUnprocessed(ctx, scope, 10000)
+		// 直接拉取该 scope 的全部 L0 条目（含已被实时 Consolidator 提升为 L1 的），
+		// 而不用 GetUnprocessed（它会跳过 consolidated 标记）——否则实时 Consolidator
+		// 把 L0 消费掉后，03:00 的 dreaming 会因无未处理 L0 而永远空跑。
+		// limit=10000 模拟无限制（默认 50 不足以支持梦境全量提取）。
+		l0Entries, err := d.manager.store.Retrieve(ctx, Tier0Working, []Scope{scope}, 10000)
 		if err != nil {
 			d.logger.Warnw("dreaming light: failed to get L0",
 				"scope", scope.Key(), "err", err)
@@ -55,8 +57,18 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 		}
 		var ids []string
 		for _, e := range l0Entries {
+			if e.IsExpired(time.Now()) {
+				continue
+			}
 			if e.CreatedAt.Before(cutoff) {
 				continue
+			}
+			// 跳过本梦境管线已处理过的条目（独立标记 dream_processed，与 Consolidator 的
+			// consolidated 解耦，互不影响去重）
+			if e.Metadata != nil {
+				if _, ok := e.Metadata["dream_processed"]; ok {
+					continue
+				}
 			}
 			content := strings.TrimSpace(StripThinking(e.Content))
 			if content == "" {
@@ -85,12 +97,12 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 		deduped = deduped[:max]
 	}
 
-	// 标记已处理的 L0 条目（避免下次 cron 重复提取）
-	// 注意：使用 MarkProcessed 写入 metadata["consolidated"]，
-	// 与非 Dreaming 的 Consolidator 路径共享同一标记
+	// 标记已处理的 L0 条目（避免下次 cron 重复提取）。
+	// 使用独立的 MarkDreamProcessed（写入 metadata["dream_processed"]），
+	// 与 Consolidator 的 consolidated 标记解耦，互不饿死。
 	for _, swi := range processedScopes {
-		if err := d.manager.store.MarkProcessed(ctx, swi.scope, swi.ids); err != nil {
-			d.logger.Warnw("dreaming light: mark processed failed",
+		if err := d.manager.store.MarkDreamProcessed(ctx, swi.scope, swi.ids); err != nil {
+			d.logger.Warnw("dreaming light: mark dream processed failed",
 				"scope", swi.scope.Key(), "err", err)
 		}
 	}
