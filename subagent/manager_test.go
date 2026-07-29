@@ -455,23 +455,26 @@ func TestSpawnToolNotAvailableInSubagentScope(t *testing.T) {
 }
 
 // ============================================================================
-// WithoutCancel 韧性回归测试
+// 断连 / stop 区分回归测试
 //
-// 背景：spawn 工具传入 DelegateMany 的 ctx 派生自「消息级 cancel ctx」
-// （客户端断连 → AbortMessage 与 stop 按钮共用）。历史上用户关页面会让该 ctx
-// 被取消，级联腰斩正在跑的子 Agent（日志曾见
+// 背景：消息级 ctx（msgCtx）独立于请求 ctx，且 stop 按钮（handleChatAbort →
+// AbortMessage）与客户端断连（handler 断连分支）原本共用同一个取消信号，导致
+// 关页面也会腰斩正在跑的子 Agent（日志曾见
 // "client disconnected → spawn killed (context canceled)"）。
-// 修复后，Delegate*/DelegateMany 必须用 context.WithoutCancel 脱离该维度，
-// 使子 Agent 只受自身 delegateTimeout / 卡死看门狗约束，不因断连而中断。
-// 以下测试用 cancelAwareMockProvider 模拟「ctx 已取消」场景验证该不变量。
+// 修复后：
+//   - handler 断连分支不再调用 AbortMessage，断连只标记 UI killed 快照，后台继续跑；
+//   - Delegate*/DelegateMany 的子 Agent 执行 ctx 直接继承 msgCtx，因此 stop 按钮
+//     能精确取消（杀）子 Agent，而断连（不再取消 msgCtx）不会腰斩后台长任务。
+// 以下测试用 cancelAwareMockProvider（ctx 已取消即返回 error）验证：
+//   父 ctx 被取消（= 用户点 stop）→ 子 Agent 任务应被取消（失败）。
 // ============================================================================
 
-func TestSubAgentManager_DelegateManySurvivesParentCancel(t *testing.T) {
+func TestSubAgentManager_DelegateManyStopCancelsChildren(t *testing.T) {
 	provider := &cancelAwareMockProvider{}
 	mgr := NewSubAgentManager(provider, "test-model")
 	mgr.SetMaxConcurrency(3)
 
-	// 父 ctx 立即取消，模拟「客户端断连 → AbortMessage 取消消息级 ctx」。
+	// 父 ctx 立即取消，模拟「用户点击 stop → AbortMessage 取消 msgCtx」。
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -480,26 +483,23 @@ func TestSubAgentManager_DelegateManySurvivesParentCancel(t *testing.T) {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
 	for i, r := range results {
-		if !r.Success {
-			t.Errorf("task %d should still succeed after parent ctx cancel (WithoutCancel), got err: %s",
-				i, r.Error)
+		if r.Success {
+			t.Errorf("task %d should be cancelled by stop (parent ctx cancel), but succeeded: %s", i, r.Text)
 		}
 	}
 }
 
-func TestSubAgentManager_DelegateSurvivesParentCancel(t *testing.T) {
+func TestSubAgentManager_DelegateStopCancels(t *testing.T) {
 	provider := &cancelAwareMockProvider{}
 	mgr := NewSubAgentManager(provider, "test-model")
 
+	// 父 ctx 立即取消，模拟「用户点击 stop → AbortMessage 取消 msgCtx」。
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	result, err := mgr.Delegate(parent, "你是助手", "翻译 hello")
-	if err != nil {
-		t.Fatalf("Delegate should survive parent cancel, got err: %v", err)
-	}
-	if result == "" {
-		t.Error("expected non-empty delegation result")
+	_, err := mgr.Delegate(parent, "你是助手", "翻译 hello")
+	if err == nil {
+		t.Fatal("Delegate should be cancelled by stop (parent ctx cancel), expected error")
 	}
 }
 
