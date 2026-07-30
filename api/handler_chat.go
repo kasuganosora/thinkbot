@@ -94,6 +94,45 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 	OK(c, map[string]any{"aborted": aborted})
 }
 
+// handleChatAppend 在一条正在执行的聊天（生成中）过程中，接收用户中途追加的内容，
+// 注入 botID+traID 这同一轮对话（Claude-CLI 风格的「边思考/边输出边补充」）。
+//
+// 与 /send 的区别：它不开启新一轮、不新建 traceID、不返回 SSE；当前 /send 的 SSE
+// 流继续把模型结合补充后的输出推给原客户端。若本轮已结束（accepted=false），
+// 前端应退化为一次普通的 /send。被接受的补充会异步落库为用户消息，保证后续轮次
+// 上下文一致。
+// POST /api/chat/append
+func (s *Server) handleChatAppend(c *gin.Context) {
+	var req ChatAppendReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	if _, ok := s.botSvc.GetWebChannel(req.BotID); !ok {
+		Fail(c, errs.NotFound("bot is not running or not available for chat"))
+		return
+	}
+	user := currentUser(c)
+	if user == nil {
+		Fail(c, errs.Unauthorized("not logged in"))
+		return
+	}
+	userID := fmt.Sprintf("%d", user.ID)
+
+	accepted := s.botSvc.AppendToMessage(req.BotID, req.TraceID, req.Text)
+	if accepted {
+		// 持久化补充的用户消息，保证后续轮次上下文一致（与 /send 保存用户消息一致）。
+		go func() {
+			defer func() { _ = recover() }()
+			if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, req.TraceID, req.SessionID); err != nil {
+				s.logger.Warnw("failed to save appended user message", "err", err)
+			}
+		}()
+	}
+	OK(c, map[string]any{"accepted": accepted})
+}
+
 // handleChatActiveTasks 返回指定 bot 当前仍在后台执行的消息 traceID 列表。
 // GET /api/chat/active?botId=xxx
 //

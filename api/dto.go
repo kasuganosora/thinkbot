@@ -107,6 +107,16 @@ type ChatAbortReq struct {
 	TraceID string `json:"traceId" binding:"required"`
 }
 
+// ChatAppendReq 在一条正在执行的聊天（生成中）过程中，用户中途追加的内容。
+// 与 /send 不同：它不会开启新一轮，而是把 text 注入 botID+traID 这同一轮对话，
+// 让 agent 在继续生成时结合这条补充（Claude-CLI 风格）。
+type ChatAppendReq struct {
+	BotID     string `json:"botId" binding:"required"`
+	TraceID   string `json:"traceId" binding:"required"`
+	Text      string `json:"text" binding:"required"`
+	SessionID string `json:"sessionId,omitempty"`
+}
+
 // ChatAttachment 表示用户上传的附件（图片/音频/视频等）。
 // DataUrl 格式为 "data:<mime>;base64,<base64-encoded-data>"。
 type ChatAttachment struct {

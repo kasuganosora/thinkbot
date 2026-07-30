@@ -773,6 +773,26 @@ export const chatApi = {
     return request('POST', '/api/chat/abort', { botId, traceId })
   },
   /**
+   * 在一条正在执行的聊天（生成中）过程中，把用户中途补充的内容注入同一轮对话
+   * （Claude-CLI 风格的「边思考/边输出边补充」）。不会开启新一轮、不返回 SSE；
+   * 当前 /send 的流式输出会继续把模型结合补充后的内容推给原客户端。
+   * @param {string} botId
+   * @param {string} traceId 当前正在执行的 traceID（来自 onStart）
+   * @param {string} text 用户中途补充的内容
+   * @param {string} [sessionId]
+   * @returns {Promise<{accepted: boolean}>} accepted=false 表示本轮已结束，应退化为普通 send
+   */
+  append(botId, traceId, text, sessionId) {
+    if (!botId || !traceId || !text || !text.trim()) return Promise.resolve({ accepted: false })
+    if (USE_MOCK) return Promise.resolve({ accepted: false })
+    return request('POST', '/api/chat/append', {
+      botId,
+      traceId,
+      text,
+      ...(sessionId ? { sessionId: String(sessionId) } : {}),
+    })
+  },
+  /**
    * 查询指定 bot 当前仍在后台执行的任务 traceID 列表（断连后后台仍在跑的任务）。
    * @param {string} botId
    * @returns {Promise<string[]>}

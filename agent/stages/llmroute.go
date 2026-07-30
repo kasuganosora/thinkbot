@@ -11,6 +11,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/session"
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -205,6 +206,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		Params:       params,
 		MaxSteps:     s.config.MaxSteps,
 		HardMaxSteps: s.config.HardMaxSteps,
+		// 把本轮的「用户中途追加」通道透传给编排循环（Claude-CLI 风格），
+		// 让生成中的用户补充能注入同一轮对话。
+		InterruptCh: bot.InterruptChannelFromContext(ctx),
 	}
 
 	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。

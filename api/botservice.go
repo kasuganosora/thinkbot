@@ -70,6 +70,7 @@ type BotService struct {
 	cancelFuncs     map[string]context.CancelFunc  // botID → bot context cancel
 	closeFuncs      map[string]func()              // botID → sub-agent managers cleanup
 	messageCancels  map[string]context.CancelFunc  // "botID:traceID" → message context cancel
+	messageInterrupts map[string]chan string        // "botID:traceID" → 用户中途追加通道（生成中补充）
 
 	tokenBudget *pipeline.TokenBudgetState // 共享 token 预算状态（支持空闲自动重置 / 手动重置）
 }
@@ -100,6 +101,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		cancelFuncs:     make(map[string]context.CancelFunc),
 		closeFuncs:      make(map[string]func()),
 		messageCancels:  make(map[string]context.CancelFunc),
+		messageInterrupts: make(map[string]chan string),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -296,6 +298,55 @@ func (s *BotService) UnregisterMessageCancel(botID, traceID string) {
 	s.mu.Lock()
 	delete(s.messageCancels, key)
 	s.mu.Unlock()
+}
+
+// RegisterMessageInterrupt 注册一条正在执行消息的「用户中途追加」通道。
+func (s *BotService) RegisterMessageInterrupt(botID, traceID string, ch chan string) {
+	if botID == "" || traceID == "" || ch == nil {
+		return
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	s.messageInterrupts[key] = ch
+	s.mu.Unlock()
+}
+
+// UnregisterMessageInterrupt 注销一条消息的「用户中途追加」通道。
+func (s *BotService) UnregisterMessageInterrupt(botID, traceID string) {
+	if botID == "" || traceID == "" {
+		return
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	delete(s.messageInterrupts, key)
+	s.mu.Unlock()
+}
+
+// AppendToMessage 在一条正在执行的消息（botID+traID）生成过程中，把用户
+// 中途补充的内容追加进同一轮对话（Claude-CLI 风格的「边思考/边输出边补充」）。
+//
+// 返回 true 表示成功投递（本轮仍在执行、已被接管）；返回 false 表示本轮已
+// 结束或不存在，调用方应退化为一次普通的 /send 新消息。
+func (s *BotService) AppendToMessage(botID, traceID, text string) bool {
+	if botID == "" || traceID == "" || strings.TrimSpace(text) == "" {
+		return false
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	ch, ok := s.messageInterrupts[key]
+	s.mu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- text:
+		return true
+	default:
+		// 缓冲已满（极端情况）：丢弃避免阻塞，调用方退化为普通发送。
+		s.logger.Warnw("message interrupt channel full, drop append",
+			"botID", botID, "traceID", traceID)
+		return false
+	}
 }
 
 // AbortMessage 取消一条正在执行的消息。
@@ -951,11 +1002,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		ToolManager:       toolMgr,
 		AdaptiveSyncer:    adaptiveSyncer,
 		RejectionDetector: rejectionDetector,
-		OnMessageStart: func(botID, traceID string, cancel context.CancelFunc) {
+		OnMessageStart: func(botID, traceID string, cancel context.CancelFunc, interruptCh chan string) {
 			s.RegisterMessageCancel(botID, traceID, cancel)
+			s.RegisterMessageInterrupt(botID, traceID, interruptCh)
 		},
 		OnMessageDone: func(botID, traceID string) {
 			s.UnregisterMessageCancel(botID, traceID)
+			s.UnregisterMessageInterrupt(botID, traceID)
 		},
 		WorkspaceDir:  workspaceDir,
 		SandboxConfig: sbCfg,

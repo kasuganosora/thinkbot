@@ -212,17 +212,30 @@
           >
             <template #icon><t-icon name="send" /></template>
           </t-button>
-          <t-button
-            v-else
-            theme="danger"
-            shape="circle"
-            variant="outline"
-            data-testid="chat-btn-stop"
-            aria-label="停止生成"
-            @click="store.stopReply()"
-          >
-            <template #icon><t-icon name="stop" /></template>
-          </t-button>
+          <template v-else>
+            <!-- 生成中：补充内容注入同一轮（Claude-CLI 风格） -->
+            <t-button
+              theme="primary"
+              shape="circle"
+              :disabled="!draft.trim() || attachments.length > 0"
+              data-testid="chat-btn-append"
+              aria-label="补充内容（同一轮）"
+              title="把这段内容补充进当前回复，无需停止"
+              @click="send"
+            >
+              <template #icon><t-icon name="arrow-up" /></template>
+            </t-button>
+            <t-button
+              theme="danger"
+              shape="circle"
+              variant="outline"
+              data-testid="chat-btn-stop"
+              aria-label="停止生成"
+              @click="store.stopReply()"
+            >
+              <template #icon><t-icon name="stop" /></template>
+            </t-button>
+          </template>
         </div>
       </div>
     </div>
@@ -505,7 +518,12 @@ function send() {
     size: a.size,
     dataUrl: a.dataUrl,   // "data:<mime>;base64,<data>"
   }))
-  store.sendMessage(text || '[附件]', attachPayload)
+  // 生成中：把纯文本补充注入同一轮（不开启新一轮）；带附件时回退普通发送。
+  if (store.replying && !attachments.value.length) {
+    store.appendToCurrentReply(text || '[附件]')
+  } else {
+    store.sendMessage(text || '[附件]', attachPayload)
+  }
   draft.value = ''
   attachments.value = []
 }

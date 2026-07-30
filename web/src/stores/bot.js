@@ -396,6 +396,47 @@ export const useBotStore = defineStore('bot', () => {
   /** 供 UI 中断按钮调用 */
   function stopReply() { _abortStreaming() }
 
+  /**
+   * 生成中追加：把用户中途补充的内容注入「同一轮」对话（Claude-CLI 风格）。
+   * 与 sendMessage 的区别：不开启新一轮，而是调用 /api/chat/append，
+   * 当前流式回复会继续结合这条补充继续生成。若本轮已结束（后端 accepted=false）
+   * 或当前并不在生成中，则退化为一次普通的 sendMessage。
+   * @param {string} content
+   */
+  function appendToCurrentReply(content) {
+    const text = (content || '').trim()
+    if (!text) return
+    const traceId = _activeTraceId
+    const botId = activeBotId.value
+    // 不在生成中，或本轮已结束 → 退化为普通发送
+    if (!replying.value || !traceId || !botId) {
+      sendMessage(text)
+      return
+    }
+    // 立即在本地渲染这条补充为用户消息气泡（与后端落库一致）
+    const userMsg = {
+      id: uid(),
+      role: 'user',
+      content: text,
+      createdAt: new Date().toISOString(),
+      _temp: false,
+      _appended: true,
+    }
+    messages.value = [...messages.value, userMsg]
+    chatApi.append(botId, traceId, text, activeSessionId.value)
+      .then((resp) => {
+        if (!resp || resp.accepted === false) {
+          // 本轮已结束，降级为普通发送
+          messages.value = messages.value.filter(m => m.id !== userMsg.id)
+          sendMessage(text)
+        }
+      })
+      .catch(() => {
+        messages.value = messages.value.filter(m => m.id !== userMsg.id)
+        sendMessage(text)
+      })
+  }
+
   function truncateTail(text, max = 200 * 1024) {
     if (!text || text.length <= max) return { value: text || '', truncated: false }
     return { value: text.slice(text.length - max), truncated: true }
@@ -686,7 +727,7 @@ export const useBotStore = defineStore('bot', () => {
     activeWorkflowId,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
-    loadMessages, loadMoreMessages, sendMessage, stopReply, resumeInFlightTasks,
+    loadMessages, loadMoreMessages, sendMessage, stopReply, appendToCurrentReply, resumeInFlightTasks,
     // 会话管理
     sessions, sessionsLoading, activeSessionId,
     loadSessions, createSession, deleteSession, selectSession,
