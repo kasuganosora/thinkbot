@@ -79,6 +79,8 @@ type EngineConfig struct {
 	// 兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；
 	// 超过该时长分析阶段整体失败（明确报错），前端可立即看到结果而非一直转圈。
 	AnalyzerMaxDuration time.Duration
+	// GoalMaxIterations 目标模式（闭环循环）全局最大迭代轮数。0 表示代码兜底默认 5。
+	GoalMaxIterations int
 }
 
 // Setup 创建并装配工作流引擎的所有组件。
@@ -183,5 +185,6 @@ func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.M
 		AnalyzerMaxTokens:   analyzerMaxTokens(wc.AnalyzerMaxTokens, modelDef),
 		AnalyzerStuckTimeout: time.Duration(wc.AnalyzerStuckTimeoutMS) * time.Millisecond,
 		AnalyzerMaxDuration:  time.Duration(wc.AnalyzerMaxDurationMS) * time.Millisecond,
+		GoalMaxIterations:     wc.GoalMaxIterations,
 	}
 }

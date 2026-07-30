@@ -62,6 +62,15 @@ type DAGNode struct {
 	MaxRetries    int      `json:"maxRetries"`             // 执行错误最大重试次数（默认 2）
 	MaxIterations int      `json:"maxIterations"`          // Review 迭代上限（默认 3）
 
+	// Feedback 声明该节点 review 不通过时回退到的「上游节点」列表（目标模式闭环）。
+	// 仅当所属工作流开启 GoalMode 且本节点 Review=true 时生效。
+	// 反馈边是「受控闭环」：它不计入 DAG 的 Dependencies，因此不影响拓扑排序与环检测
+	// （detectCycle 只看 Dependencies），逻辑图始终保持无环。
+	// 当 review 节点在节点级迭代（MaxIterations）后仍不通过，且目标模式迭代额度未耗尽，
+	// Scheduler 会把这些 Feedback 目标节点（及本节点）重置为 pending 重新执行，
+	// 并把 review 意见作为反馈注入目标节点——即「工作→审查→修复→审查」的全局循环。
+	Feedback []string `json:"feedback,omitempty"`
+
 	// 运行时状态（非 Analyzer 生成，由 Scheduler 更新）
 	Status         NodeStatus     `json:"status"`
 	Result         string         `json:"result,omitempty"`
@@ -72,6 +81,11 @@ type DAGNode struct {
 	CompletedAt    *time.Time     `json:"completedAt,omitempty"`
 	ReviewFeedback string         `json:"reviewFeedback,omitempty"`
 	ReviewHistory  []ReviewRecord `json:"reviewHistory,omitempty"`
+
+	// LoopFeedback 目标模式闭环时由 Scheduler 写入的「审查意见」，
+	// 供节点在下一轮执行（ExecuteWithFeedback）时作为修复依据。执行后立即清空。
+	// 运行时字段（不持久化语义依赖，但序列化无害）。
+	LoopFeedback string `json:"loopFeedback,omitempty"`
 }
 
 // ReviewRecord 记录一次 Review 的结果。
@@ -99,6 +113,16 @@ type Workflow struct {
 	// UpdatedAt 最后落库时间（由 Repository.Save 维护，与 DB 的 updated_at 列一致）。
 	// 供卡死看门狗（Sweeper）判断工作流是否长时间无进展。
 	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+
+	// 目标模式（Goal Mode）：开启后，review 节点在节点级迭代（MaxIterations）仍不通过时，
+	// 不立即失败，而是回退到其 Feedback 目标节点重新执行（并注入审查意见），
+	// 形成「工作→审查→修复→审查」的全局闭环，直到 review 通过或达到最大迭代轮数。
+	// 由提交时（SubmitRequest.GoalMode）或分析器（GoalMode 开启时自动接线）设置。
+	GoalMode bool `json:"goalMode,omitempty"`
+	// GoalIteration 目标模式已执行的闭环轮数（运行时计数，持久化以在前端展示）。
+	GoalIteration int `json:"goalIteration,omitempty"`
+	// GoalMaxIterations 目标模式最大闭环轮数（0 表示使用引擎默认配置）。
+	GoalMaxIterations int `json:"goalMaxIterations,omitempty"`
 
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`

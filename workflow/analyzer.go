@@ -88,6 +88,10 @@ const analyzerSystemPrompt = `你是一个任务分解专家。你的职责是�
 - reviewPrompt: 审查 prompt（可选，为空则使用默认审查规则）
 - maxRetries: 执行失败最大重试次数（默认 2）
 - maxIterations: Review 迭代上限（默认 3，仅 review=true 时生效）
+- feedback: 【可选】"目标模式"专用的回退边数组——当本节点 review 不通过时，
+  回退到这些上游节点重新执行（形成"工作→审查→修复→审查"的闭环）。
+  仅当整个任务开启了目标模式时才生效；若你不填，系统会自动把最终节点的
+  feedback 接线到它的直接上游工作节点。
 
 ## 输出格式
 必须返回 JSON，结构如下：
@@ -101,13 +105,14 @@ const analyzerSystemPrompt = `你是一个任务分解专家。你的职责是�
       "dependencies": [],
       "review": false,
       "maxRetries": 2,
-      "maxIterations": 3
+      "maxIterations": 3,
+      "feedback": []
     }
   ]
 }`
 
 // dagSpec 是分析器输出的 DAG 规范（从 LLM JSON 解析）。
-type dagSpec struct {
+type 	dagSpec struct {
 	Nodes []struct {
 		ID            string   `json:"id"`
 		Name          string   `json:"name"`
@@ -118,17 +123,22 @@ type dagSpec struct {
 		ReviewPrompt  string   `json:"reviewPrompt"`
 		MaxRetries    int      `json:"maxRetries"`
 		MaxIterations int      `json:"maxIterations"`
+		Feedback      []string `json:"feedback"`
 	} `json:"nodes"`
 }
 
 // Analyze 分析需求并生成 DAG 节点列表。
+//
+// goalMode 为 true 时进入「目标模式」：分析完成后会自动把最终（无下游）节点的
+// review 打开并将其 feedback 回退边接线到直接上游工作节点，从而实现
+// 「工作→审查→修复→审查」的全局闭环（详见 wireGoalMode）。
 //
 // 注意：不强制使用 LLM 的 JSON 响应模式。经验表明 GLM 在
 // response_format=json_object 且输入需求较长时，经常返回空 content（HTTP 200 但
 // body 为空），导致解析直接失败、整个工作流在分析（准备）阶段就 failed 且无法恢复。
 // 改为仅靠 system prompt 约束输出 JSON，并依赖 parseDAGSpec/ExtractJSON 的 markdown
 // 容错提取。同时加入重试，偶发的空响应或截断可被自动恢复。
-func (a *Analyzer) Analyze(ctx context.Context, requirement string, onProgress ...func(attempt int, phase string)) ([]*DAGNode, error) {
+func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode bool, onProgress ...func(attempt int, phase string)) ([]*DAGNode, error) {
 	ctx, span := a.tracer.Start(ctx, "workflow.analyzer.analyze")
 	defer span.End()
 
@@ -242,10 +252,16 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, onProgress .
 				ReviewPrompt:  sn.ReviewPrompt,
 				MaxRetries:    maxRetries,
 				MaxIterations: maxIter,
+				Feedback:      sn.Feedback,
 			})
 		}
 
-		// 校验 DAG
+		// 目标模式：自动接线最终节点的 review + feedback 回退边（在校验前完成）。
+		if goalMode {
+			wireGoalMode(nodes)
+		}
+
+		// 校验 DAG（feedback 边不计入 Dependencies，故不影响无环性校验）
 		if err := ValidateDAG(nodes); err != nil {
 			lastErr = errs.Wrap(err, "generated DAG is invalid")
 			logger.Warnw("generated DAG invalid, will retry",
@@ -308,4 +324,70 @@ func parseDAGSpec(raw string) (*dagSpec, error) {
 // GenerateWorkflowID 生成工作流 ID。
 func GenerateWorkflowID() string {
 	return idgen.New("wf")
+}
+
+// maxFeedbackEdges 单个目标模式节点允许的最大回退边数（防御性上限）。
+const maxFeedbackEdges = 8
+
+// wireGoalMode 在目标模式下自动接线「目标模式闭环」：
+//   - 找出 DAG 的「终点节点」（无任何下游依赖的节点 = 最终产物节点）；
+//   - 为每个终点节点确保 review=true（作为目标质量检查点）；
+//   - 若其 feedback 未由 LLM 显式指定，则自动接线到它的直接上游工作节点
+//     （即 Dependencies），形成「工作→审查→修复→审查」的闭环。
+//
+// 单节点工作流（终点即起点、无依赖）时，feedback 指向自身，下一轮带审查意见
+// 重跑该节点。
+//
+// 注意：feedback 边不写入 Dependencies，因此不影响拓扑排序与无环性校验。
+func wireGoalMode(nodes []*DAGNode) {
+	if len(nodes) == 0 {
+		return
+	}
+
+	index := make(map[string]*DAGNode, len(nodes))
+	for _, n := range nodes {
+		index[n.ID] = n
+	}
+
+	// 找出终点节点：没有任何其他节点以它为依赖。
+	isDependency := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		for _, dep := range n.Dependencies {
+			isDependency[dep] = true
+		}
+	}
+
+	for _, n := range nodes {
+		if isDependency[n.ID] {
+			continue // 有下游，跳过
+		}
+
+		// 终点节点作为目标质量检查点，必须开启 review。
+		if !n.Review {
+			n.Review = true
+		}
+
+		// 回退边：LLM 已指定则保留；否则默认回到直接上游工作节点。
+		if len(n.Feedback) == 0 {
+			if len(n.Dependencies) == 0 {
+				// 单节点工作流：回退到自身（带审查意见重跑）。
+				n.Feedback = []string{n.ID}
+			} else {
+				// 复制直接上游（去重 + 上限防御）。
+				seen := make(map[string]bool, len(n.Dependencies))
+				fb := make([]string, 0, len(n.Dependencies))
+				for _, dep := range n.Dependencies {
+					if seen[dep] {
+						continue
+					}
+					seen[dep] = true
+					fb = append(fb, dep)
+					if len(fb) >= maxFeedbackEdges {
+						break
+					}
+				}
+				n.Feedback = fb
+			}
+		}
+	}
 }

@@ -21,6 +21,16 @@
         <span v-if="isLive" class="live-dot" />{{ statusText(workflow.status) }}
       </t-tag>
       <span class="wf-progress-text" data-testid="chat-workflow-progress">{{ progressLabel }}</span>
+      <t-tag
+        v-if="workflow && workflow.goalMode"
+        theme="warning"
+        variant="light"
+        size="small"
+        class="wf-goal-badge"
+        data-testid="chat-workflow-goal"
+      >
+        🎯 目标模式<span v-if="goalLabel"> · {{ goalLabel }}</span>
+      </t-tag>
       <t-button
         variant="text"
         size="small"
@@ -124,6 +134,15 @@ const progressLabel = computed(() => {
 const isLive = computed(() => {
   const s = workflow.value?.status
   return s === 'running' || s === 'analyzing' || s === 'interrupted'
+})
+
+// 目标模式闭环进度文案：第 N/M 轮（M=0 时回退到引擎默认 5）
+const goalLabel = computed(() => {
+  const wf = workflow.value
+  if (!wf || !wf.goalMode) return ''
+  if (!wf.goalIteration || wf.goalIteration <= 0) return '待闭环'
+  const max = wf.goalMaxIterations && wf.goalMaxIterations > 0 ? wf.goalMaxIterations : 5
+  return `第 ${wf.goalIteration}/${max} 轮`
 })
 
 function statusText(s) {
@@ -250,6 +269,8 @@ onBeforeUnmount(stopLive)
   font-variant-numeric: tabular-nums;
 }
 .wf-toggle { color: #999; }
+
+.wf-goal-badge { font-variant-numeric: tabular-nums; }
 
 /* 一维 TODO 清单 */
 .wf-todo {
