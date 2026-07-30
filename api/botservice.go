@@ -891,6 +891,22 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		memStore = memory.NewMultiStore(filtered, repo)
 	}
 
+	// 历史对话回灌：若分层记忆为空，则把该 bot 的历史 chat_messages 补灌进 L0，
+	// 让 dreaming 能处理此前从未进入记忆系统的历史 backlog（详见 memory.BackfillFromChatHistory）。
+	// 仅在 tiered_memories 尚无任何条目时执行，避免每次启动重复灌入。
+	if dreamBundle != nil && memStore != nil {
+		var l0Count int64
+		if err := s.db.Table("tiered_memories").Count(&l0Count).Error; err == nil && l0Count == 0 {
+			if n, berr := memory.BackfillFromChatHistory(
+				context.Background(), memStore, s.db, id, s.logger,
+			); berr != nil {
+				s.logger.Warnw("memory backfill failed", "err", berr, "bot_id", id)
+			} else if n > 0 {
+				s.logger.Infow("memory backfill completed", "bot_id", id, "written", n)
+			}
+		}
+	}
+
 	// AgentConfig：读取 compaction 等运行时行为配置
 	var agentCfg bot.AgentConfig
 	// 让 AgentConfig.MaxSteps 与 LLMStage 实际使用的 soft 预算保持一致，
