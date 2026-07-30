@@ -92,6 +92,14 @@ type Workflow struct {
 	FinishedAt  *time.Time     `json:"finishedAt,omitempty"`
 	Error       string         `json:"error,omitempty"`
 
+	// AnalyzeMessage 分析阶段的实时进度文案（如「模型返回异常，第 2/5 次重试」）。
+	// 用于前端在分析阶段展示进展，避免「分析中…」长期无变化被误判为卡死。
+	// 由 Manager 在 Analyze 的 onProgress 回调中更新并持久化。
+	AnalyzeMessage string `json:"analyzeMessage,omitempty"`
+	// UpdatedAt 最后落库时间（由 Repository.Save 维护，与 DB 的 updated_at 列一致）。
+	// 供卡死看门狗（Sweeper）判断工作流是否长时间无进展。
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
 

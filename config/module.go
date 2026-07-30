@@ -420,6 +420,11 @@ type WorkflowConfig struct {
 	// AnalyzerStuckTimeoutMS 需求分析器流式 LLM 调用的卡死看门狗阈值（毫秒）。
 	// 默认 180000（3 分钟）。连续性说明见 KeyWorkflowAnalyzerStuckTimeout。
 	AnalyzerStuckTimeoutMS int `json:"analyzerStuckTimeoutMs"`
+
+	// AnalyzerMaxDurationMS 需求分析阶段「整轮总时长上限」（毫秒）。默认 600000（10 分钟）。
+	// 兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；超过该时长分析阶段
+	// 整体失败并给出明确报错，前端可立即看到结果而非一直转圈。
+	AnalyzerMaxDurationMS int `json:"analyzerMaxDurationMs"`
 }
 
 // DefaultWorkflowConfig 返回引擎默认配置值。
@@ -437,6 +442,7 @@ func DefaultWorkflowConfig() WorkflowConfig {
 		// 不再写死固定值，跟随实际使用的模型配置。
 		AnalyzerMaxTokens:   0,
 		AnalyzerStuckTimeoutMS: 180000,
+		AnalyzerMaxDurationMS:  600000,
 	}
 }
 
@@ -453,6 +459,7 @@ func (b *Builder) GetWorkflowConfig() WorkflowConfig {
 		AnalyzerTemperature: b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
 		AnalyzerMaxTokens:   b.store.GetInt(KeyWorkflowAnalyzerMaxTokens, d.AnalyzerMaxTokens),
 		AnalyzerStuckTimeoutMS: b.store.GetInt(KeyWorkflowAnalyzerStuckTimeout, d.AnalyzerStuckTimeoutMS),
+		AnalyzerMaxDurationMS:  b.store.GetInt(KeyWorkflowAnalyzerMaxDuration, d.AnalyzerMaxDurationMS),
 	}
 }
 
@@ -468,6 +475,7 @@ func WorkflowMetaSpecs() []MetaSpec {
 		{Key: KeyWorkflowAnalyzerTemp, Category: "Workflow", Description: "需求分析器 LLM 温度（默认 0.3）"},
 		{Key: KeyWorkflowAnalyzerMaxTokens, Category: "Workflow", Description: "需求分析器（生成 DAG JSON）的输出长度 cap，针对该任务而非模型最大能力。默认 8192（DAG 仅数 KB 已足够）；留空/0 时回退到当前模型真实最大输出（如 glm-5.2=128K），不推荐——过大会浪费 token 预算。"},
 		{Key: KeyWorkflowAnalyzerStuckTimeout, Category: "Workflow", Description: "需求分析器（流式 LLM）卡死看门狗阈值秒数（默认 180=3 分钟）。连续无 token 超该时长判卡死终止；硬上限=该值×3。靠看门狗判断真卡死，不写死固定超时。"},
+		{Key: KeyWorkflowAnalyzerMaxDuration, Category: "Workflow", Description: "需求分析阶段「整轮总时长上限」毫秒（默认 600000=10 分钟）。兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；超过该时长分析阶段整体失败并明确报错。"},
 	}
 }
 
@@ -949,6 +957,7 @@ func DefaultMap() map[string]string {
 		// 留空/0 时回退到当前模型 ModelDef.MaxTokens（真实能力值，如 glm-5.2=128K）——仅兜底，不推荐。
 		KeyWorkflowAnalyzerMaxTokens: "8192",
 		KeyWorkflowAnalyzerStuckTimeout: "180",
+		KeyWorkflowAnalyzerMaxDuration:   "600000",
 		// Engagement
 		KeyEngagementEnabled:            "false",
 		KeyEngagementReplyProbability:   "0.15",

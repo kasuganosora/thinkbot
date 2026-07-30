@@ -43,6 +43,8 @@ func FromModel(m *dao.WorkflowModel) (*Workflow, error) {
 	if err := json.Unmarshal([]byte(m.Data), &wf); err != nil {
 		return nil, err
 	}
+	// 用模型列（GORM 自动维护）回填最后落库时间，供卡死看门狗判陈旧。
+	wf.UpdatedAt = m.UpdatedAt
 	wf.EnsureIndex()
 	return &wf, nil
 }
