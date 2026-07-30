@@ -96,6 +96,16 @@ func newLoopController(soft, hard int) *loopController {
 	return lc
 }
 
+// atHardLimit 报告第 step 步是否已触及（或超过）硬上限。
+// 用于「中途追加」场景：当用户在生成中补充内容时，我们需要判断能否为了
+// 服务这次补充而强制再多跑一步，而不突破 HardMaxSteps 安全网。
+func (lc *loopController) atHardLimit(step int) bool {
+	if lc.hard < 0 {
+		return false // 无限模式
+	}
+	return step >= lc.hard
+}
+
 // shouldContinue 判断第 step 步（0-based）是否可以开始执行。
 func (lc *loopController) shouldContinue(step int) bool {
 	if lc.soft < 0 || lc.hard < 0 {
