@@ -100,7 +100,7 @@ type Bot struct {
 	dispatchErrors atomic.Int64
 
 	// 消息级取消链路（可选）：用于将每条消息的 cancel 函数注册到上层（如 API abort 接口）。
-	onMessageStart func(botID, traceID string, cancel context.CancelFunc)
+	onMessageStart func(botID, traceID string, cancel context.CancelFunc, interruptCh chan string)
 	onMessageDone  func(botID, traceID string)
 }
 
@@ -163,9 +163,12 @@ type BotParams struct {
 	// 注入后，Bot 会在发送回复时通知检测器，并在 TimingGate 中考虑自闭模式。
 	RejectionDetector *engagement.RejectionDetector
 
-	// OnMessageStart 在单条消息开始处理时回调，提供可取消的 message context。
-	// 典型用途：上层注册 traceID -> cancelFunc，供 /chat/abort 终止本轮执行。
-	OnMessageStart func(botID, traceID string, cancel context.CancelFunc)
+	// OnMessageStart 在单条消息开始处理时回调，提供可取消的 message context
+	// 以及本消息生命周期内的「用户中途追加」通道（interruptCh，用于 Claude-CLI
+	// 风格的边生成边补充）。
+	// 典型用途：上层注册 traceID -> cancelFunc，供 /chat/abort 终止本轮执行；
+	// 同时把 interruptCh 存起来，供 /chat/append 在生成中向同一轮注入用户补充。
+	OnMessageStart func(botID, traceID string, cancel context.CancelFunc, interruptCh chan string)
 	// OnMessageDone 在单条消息结束（成功/失败/丢弃/派发失败）时回调。
 	// 典型用途：上层注销 traceID -> cancelFunc，避免内存泄漏。
 	OnMessageDone func(botID, traceID string)
@@ -572,6 +575,25 @@ func (b *Bot) stopChannelsSlice(ctx context.Context, channels []Channel) {
 
 type messageCancelCtxKey struct{}
 
+// interruptCtxKey 用于在 message context 中携带「用户中途追加」通道
+// （Claude-CLI 风格的「边思考/边输出边补充」）。
+type interruptCtxKey struct{}
+
+// WithInterruptChannel 将一条消息生命周期内的「用户中途追加」通道绑定到 ctx。
+func WithInterruptChannel(ctx context.Context, ch chan string) context.Context {
+	return context.WithValue(ctx, interruptCtxKey{}, ch)
+}
+
+// InterruptChannelFromContext 取回绑定到 ctx 的中途追加通道；无则返回 nil。
+func InterruptChannelFromContext(ctx context.Context) chan string {
+	if v := ctx.Value(interruptCtxKey{}); v != nil {
+		if ch, ok := v.(chan string); ok {
+			return ch
+		}
+	}
+	return nil
+}
+
 // finishMessageLifecycle 清理单条消息的取消函数注册与回调。
 func (b *Bot) finishMessageLifecycle(ctx context.Context, traceID string) {
 	if v := ctx.Value(messageCancelCtxKey{}); v != nil {
@@ -592,8 +614,11 @@ func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.C
 	traceID := env.Message.TraceID
 	if b.onMessageStart != nil && traceID != "" {
 		msgCtx, cancel := context.WithCancel(ctx)
-		b.onMessageStart(b.ID, traceID, cancel)
+		// 为本轮创建「用户中途追加」通道（带缓冲，避免上游阻塞）。
+		interruptCh := make(chan string, 16)
+		b.onMessageStart(b.ID, traceID, cancel, interruptCh)
 		ctx = context.WithValue(msgCtx, messageCancelCtxKey{}, cancel)
+		ctx = WithInterruptChannel(ctx, interruptCh)
 	}
 
 	// 注入 Bot 配置到 Envelope KV，供 Stage 读取

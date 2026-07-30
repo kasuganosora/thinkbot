@@ -80,6 +80,13 @@ type OrchestrateConfig struct {
 	// (via tool_search or when the model references them by name). The
 	// execution map always keeps the full definitions so loaded tools run.
 	ToolDeferral *ToolDeferral
+
+	// InterruptCh 实现 Claude-CLI 风格的「边思考/边输出边补充」：用户在 agent
+	// 生成过程中追加的内容，由调用方通过此 channel 投递；编排循环会在下一步
+	// 边界（或最终答案收尾前）将其作为一条用户消息注入「同一轮」对话，从而
+	// 无需先终止当前生成再重新发起。nil 表示不启用。建议带缓冲（如 cap=16），
+	// 避免上游在无人消费时阻塞。
+	InterruptCh chan string
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -102,6 +109,12 @@ func WithMaxSteps(n int) OrchestrateOption {
 //	>0  = explicit ceiling
 func WithHardMaxSteps(n int) OrchestrateOption {
 	return func(c *OrchestrateConfig) { c.HardMaxSteps = n }
+}
+
+// WithInterruptChannel sets the mid-generation user-append channel (Claude-CLI
+// style "add context while the agent is still generating"). See OrchestrateConfig.InterruptCh.
+func WithInterruptChannel(ch chan string) OrchestrateOption {
+	return func(c *OrchestrateConfig) { c.InterruptCh = ch }
 }
 
 // WithOnFinish registers a callback invoked once when all steps complete.
@@ -236,7 +249,15 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	)
 
 	loop := newLoopController(cfg.MaxSteps, cfg.HardMaxSteps)
-	for step := 0; loop.shouldContinue(step); step++ {
+	for step := 0; ; step++ {
+		// 中途追加：把用户在生成中补充的内容注入当前轮（Claude-CLI 风格）。
+		// 在下一步边界消费；若已触及硬上限则不再为追加多跑一步，本轮结束。
+		if drainInterruptMessages(cfg.InterruptCh, &messages) > 0 && loop.atHardLimit(step) {
+			break
+		}
+		if !loop.shouldContinue(step) {
+			break
+		}
 		if step > 0 {
 			messages = applyPrepareStep(cfg, messages)
 		}
@@ -677,9 +698,15 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				break
 			}
 
-			// No tool calls or not a tool-calls finish → done
-			if lastFinishReason != FinishReasonToolCalls || len(stepToolCalls) == 0 || !hasExecutableTools(stepToolCalls, toolMap) {
-				stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, nil, &stepUsage)
+		// No tool calls or not a tool-calls finish → done
+		if lastFinishReason != FinishReasonToolCalls || len(stepToolCalls) == 0 || !hasExecutableTools(stepToolCalls, toolMap) {
+			// 收尾前再给一次「中途追加」机会：若用户在本步流式输出期间补充了
+			// 内容，则作为用户消息加入上下文并继续循环，让模型结合新内容重新
+			// 生成（无需先终止当前生成再补充）。
+			if drainInterruptMessages(cfg.InterruptCh, &messages) > 0 {
+				continue
+			}
+			stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, nil, &stepUsage)
 				stepR := StepResult{
 					Text:            stepText,
 					Reasoning:       stepReasoning,
@@ -786,6 +813,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 		logToolCallSummary(ctx, allSteps)
 
+
 		if cfg.OnFinish != nil {
 			cfg.OnFinish(&GenerateResult{
 				FinishReason:         lastFinishReason,
@@ -801,6 +829,29 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 	}()
 
 	return sr, nil
+}
+
+// drainInterruptMessages 非阻塞地取出用户在生成过程中通过 InterruptCh 中途
+// 追加的内容，作为用户消息追加到 messages，返回本次取出的条数。
+//
+// 用于 Claude-CLI 风格的「边思考/边输出边补充」：无需终止当前生成即可把新
+// 上下文注入同一轮对话。调用方应保证通道带缓冲，因此本函数永不阻塞。
+func drainInterruptMessages(ch chan string, messages *[]Message) int {
+	if ch == nil {
+		return 0
+	}
+	n := 0
+	for {
+		select {
+		case extra := <-ch:
+			if strings.TrimSpace(extra) != "" {
+				*messages = append(*messages, UserMessage(extra))
+				n++
+			}
+		default:
+			return n
+		}
+	}
 }
 
 // ============================================================================
