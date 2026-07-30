@@ -61,7 +61,7 @@ func TestAnalyzer_RetryRecoversFromEmpty(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	nodes, err := a.Analyze(ctx, "请修复若干 lint 问题")
+	nodes, err := a.Analyze(ctx, "请修复若干 lint 问题", false)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("expected recovery, got error: %v", err)
@@ -95,7 +95,7 @@ func TestAnalyzer_ExhaustsThenFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, err := a.Analyze(ctx, "请修复若干 lint 问题")
+	_, err := a.Analyze(ctx, "请修复若干 lint 问题", false)
 	if err == nil {
 		t.Fatal("expected error when GLM keeps returning empty")
 	}

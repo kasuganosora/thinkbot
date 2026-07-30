@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -37,6 +38,12 @@ type NodeExecutor interface {
 	ExecuteWithFeedback(ctx context.Context, node *DAGNode, prevResult, feedback string) (string, error)
 	Review(ctx context.Context, node *DAGNode, product string) (*ReviewResult, error)
 }
+
+// errGoalFeedback 是目标模式闭环的哨兵错误：review 节点在节点级迭代仍不通过，
+// 但工作流开启了 GoalMode 且仍有闭环额度，Scheduler 已将本节点及其 Feedback 目标节点
+// 回退为 pending，由主调度循环重新执行。runNode 捕获该错误后不标记失败、不级联跳过，
+// 直接返回，让闭环继续。
+var errGoalFeedback = errors.New("goal-mode feedback loop")
 
 // Scheduler 执行单个工作流的 DAG 调度。
 type Scheduler struct {
@@ -273,6 +280,13 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	var result string
 	var lastErr error
 
+	// 目标模式闭环：若本节点被上一轮 review 打回了修复意见（LoopFeedback），
+	// 则带反馈重新执行；否则走普通执行。读取后立即清空，避免影响后续重试。
+	s.mu.Lock()
+	loopFb := node.LoopFeedback
+	node.LoopFeedback = ""
+	s.mu.Unlock()
+
 	retryRes := retry.Do(ctx, "workflow_node_"+node.ID, retry.Config{
 		MaxRetries: maxRetries,
 		Backoff: &retry.Backoff{
@@ -322,7 +336,14 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		// 用含上游上下文的临时 task 执行，不改变 node 本身
 		originalTask := node.Task
 		node.Task = effectiveTask
-		execResult, err := s.executor.Execute(ctx, node)
+		var execResult string
+		var err error
+		if loopFb != "" {
+			// 目标模式闭环：带上一轮审查意见重跑（prevResult 传空，意见即修复依据）
+			execResult, err = s.executor.ExecuteWithFeedback(ctx, node, "", loopFb)
+		} else {
+			execResult, err = s.executor.Execute(ctx, node)
+		}
 		node.Task = originalTask // 恢复原始 task
 		if err != nil {
 			return err
@@ -381,11 +402,16 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	// Phase 2: Review 自循环（仅 review=true 的节点）
 	// ================================================================
 	if node.Review {
-		finalResult, err := s.reviewLoop(ctx, node, result)
-		if err != nil {
-			if s.isTerminated() {
-				return
-			}
+	finalResult, err := s.reviewLoop(ctx, node, result)
+	if err != nil {
+		// 目标模式闭环哨兵：review 不通过但仍有闭环额度，节点已被回退为 pending，
+		// 由主调度循环重新执行 Feedback 目标节点。此处直接返回，不标记失败、不级联跳过。
+		if errors.Is(err, errGoalFeedback) {
+			return
+		}
+		if s.isTerminated() {
+			return
+		}
 			span.RecordError(err)
 			span.SetAttributes(
 				attribute.String("node.final_status", "failed"),
@@ -539,13 +565,98 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 		s.mu.Unlock()
 	}
 
-	// 超过最大迭代次数
+	// 目标模式闭环：节点级迭代（MaxIterations）仍不通过，但工作流开启了 GoalMode、
+	// 存在 Feedback 回退边、且全局迭代额度未耗尽 → 回退到 Feedback 目标节点重跑，
+	// 形成「工作→审查→修复→审查」的全局闭环，而非立即失败。
+	if s.wf.GoalMode && len(node.Feedback) > 0 && s.goalCanIterate() {
+		feedback := node.ReviewFeedback
+		if feedback == "" {
+			feedback = "(review failed, no detailed feedback)"
+		}
+		if s.isTerminated() {
+			return result, errs.New("terminated during goal feedback")
+		}
+		if err := s.goalFeedbackReset(ctx, node, feedback); err != nil {
+			return result, err
+		}
+		return result, errGoalFeedback
+	}
+
+	// 超过最大迭代次数（且目标模式不可用/额度耗尽）
 	feedback := node.ReviewFeedback
 	if feedback == "" {
 		feedback = "(no feedback)"
 	}
 	return result, errs.Newf("node %q exceeded max review iterations (%d), last feedback: %s",
 		node.ID, maxIter, strutil.Truncate(feedback, 200))
+}
+
+// goalCanIterate 返回目标模式是否还有闭环额度。优先使用工作流级 GoalMaxIterations，
+// 否则回退到引擎默认配置，最后兜底为 5。
+func (s *Scheduler) goalCanIterate() bool {
+	max := s.wf.GoalMaxIterations
+	if max <= 0 {
+		max = s.ec.GoalMaxIterations
+	}
+	if max <= 0 {
+		max = 5
+	}
+	return s.wf.GoalIteration < max
+}
+
+// goalFeedbackReset 执行目标模式闭环的「回退」：
+//   - 将 review 节点与它的 Feedback 目标节点重置为 pending（连同清空运行态）；
+//   - 把审查意见写入每个目标节点的 LoopFeedback，下一轮执行时作为修复依据注入；
+//   - 全局闭环计数 GoalIteration +1。
+//
+// 调用方（reviewLoop）随后返回 errGoalFeedback，runNode 据此直接返回，
+// 主调度循环会重新挑选就绪的目标节点（及其下游 review 节点）执行。
+// 注意：Feedback 目标节点的「其它下游」不会被重置——若 review 节点是 DAG 的终点，
+// 则其所有下游仅含自身，重置即完整重跑；若目标节点另有其它下游，它们不会看到新结果
+// （目标模式的预期用法是 review 节点作为最终检查点）。
+func (s *Scheduler) goalFeedbackReset(ctx context.Context, node *DAGNode, feedback string) error {
+	s.mu.Lock()
+	s.wf.GoalIteration++
+
+	// 重置 review 节点自身
+	node.Status = NodePending
+	node.Error = ""
+	node.Result = ""
+	node.RetryCount = 0
+	node.IterationCount = 0
+	node.ReviewHistory = nil
+	node.ReviewFeedback = ""
+	node.CompletedAt = nil
+
+	// 重置 Feedback 目标节点，并写入审查意见
+	for _, fid := range node.Feedback {
+		fn, ok := s.wf.GetNode(fid)
+		if !ok {
+			continue
+		}
+		fn.Status = NodePending
+		fn.Error = ""
+		fn.Result = ""
+		fn.RetryCount = 0
+		fn.IterationCount = 0
+		fn.ReviewHistory = nil
+		fn.CompletedAt = nil
+		fn.LoopFeedback = feedback
+	}
+	s.mu.Unlock()
+
+	s.persist()
+
+	s.emitNodeEvent(ctx, outbound.EventWorkflowNodeReviewing, map[string]any{
+		"node_id":      node.ID,
+		"goal_mode":    true,
+		"goal_round":   s.wf.GoalIteration,
+		"loop_back_to": node.Feedback,
+		"feedback":     strutil.Truncate(feedback, 300),
+	})
+	s.logger.Infow("goal-mode feedback loop",
+		"node_id", node.ID, "goal_round", s.wf.GoalIteration, "loop_back_to", node.Feedback)
+	return nil
 }
 
 // ============================================================================

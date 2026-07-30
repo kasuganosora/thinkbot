@@ -36,7 +36,7 @@ var workflowToolPromptSection = &tools.ToolPromptSection{
 	Order: 310,
 	Content: `# 任务引擎
 
-你可以使用 ` + "`task`" + ` 工具来处理复杂的多步骤任务。任务引擎会自动将需求分解为子任务 DAG 图，并行/串行执行，并支持结果审查和质量迭代。
+你可以使用 ` + "`task`" + ` 工具来处理复杂的多步骤任务。任务引擎会自动将需求分解为子任务 DAG 图，并行/串行执行，并支持结果审查和质量迭代。对于「必须达到某质量标准、需反复打磨」的任务，可传 ` + "`goalMode: true`" + ` 开启目标模式：最终产物审查不通过时自动回退到对应工作节点、带审查意见重跑，形成「工作→审查→修复→审查」闭环，直到通过或达到最大轮数。
 
 ## 使用流程
 
@@ -91,6 +91,10 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 						"type":        "integer",
 						"description": "最大并行执行子任务数（可选，默认 3）",
 					},
+					"goalMode": map[string]any{
+						"type":        "boolean",
+						"description": "目标模式（闭环迭代，可选，默认 false）。开启后：最终产物的质量检查点若审查不通过，会自动回退到对应工作节点、带着审查意见重新执行，形成「工作→审查→修复→审查」的循环，直到审查通过或达到最大轮数。适合「必须达到某质量标准、反复打磨」的任务；简单任务无需开启。",
+					},
 				},
 				"required": []string{"requirement"},
 			},
@@ -109,10 +113,17 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 						maxParallel = int(f)
 					}
 				}
+				goalMode := false
+				if v, ok := m["goalMode"]; ok {
+					if b, ok := v.(bool); ok {
+						goalMode = b
+					}
+				}
 
 				result, err := mgr.Submit(ctx, SubmitRequest{
 					Requirement: requirement,
 					MaxParallel: maxParallel,
+					GoalMode:    goalMode,
 				})
 				if err != nil {
 					return nil, err

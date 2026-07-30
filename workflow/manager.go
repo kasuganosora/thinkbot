@@ -169,6 +169,12 @@ func (m *Manager) MetricsSnapshot() MetricsSnapshot {
 type SubmitRequest struct {
 	Requirement string // 用户需求文本
 	MaxParallel int    // 最大并行度（可选，默认 3）
+	// GoalMode 目标模式：开启后 review 节点在节点级迭代仍不通过时，回退到其 Feedback
+	// 目标节点重新执行（注入审查意见），形成「工作→审查→修复→审查」的全局闭环，
+	// 直到 review 通过或达到最大迭代轮数。
+	GoalMode bool
+	// GoalMaxIterations 目标模式最大闭环轮数（0 表示使用引擎默认配置）。
+	GoalMaxIterations int
 }
 
 // SubmitResult 是提交工作流的立即返回结果。
@@ -193,6 +199,8 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 
 	// 创建初始工作流（status=analyzing）
 	wf := NewWorkflow(wfID, req.Requirement, nil)
+	wf.GoalMode = req.GoalMode
+	wf.GoalMaxIterations = req.GoalMaxIterations
 
 	// 持久化初始状态
 	if err := m.repo.Save(wf); err != nil {
@@ -275,7 +283,7 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 		_ = m.repo.Save(wf)
 	}
 
-	nodes, err := m.analyzer.Analyze(analyzeCtx, wf.Requirement, onProgress)
+	nodes, err := m.analyzer.Analyze(analyzeCtx, wf.Requirement, wf.GoalMode, onProgress)
 	if err != nil {
 		// 分析阶段被显式终止（bgCtx 被 Control(terminate) 取消）：标记为 terminated 而非 failed，
 		// 避免把"用户/bot 主动终止"误报成"分析失败"。
@@ -678,6 +686,10 @@ type StatusResult struct {
 	CreatedAt      string         `json:"createdAt"`
 	Error          string         `json:"error,omitempty"`
 	AnalyzeMessage string         `json:"analyzeMessage,omitempty"`
+	// 目标模式相关（前端展示闭环进度）
+	GoalMode         bool `json:"goalMode,omitempty"`
+	GoalIteration    int  `json:"goalIteration,omitempty"`
+	GoalMaxIterations int  `json:"goalMaxIterations,omitempty"`
 }
 
 // ProgressInfo 是工作流进度信息。
@@ -731,6 +743,9 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 		CreatedAt:      createdAt,
 		Error:          wf.Error,
 		AnalyzeMessage: wf.AnalyzeMessage,
+		GoalMode:         wf.GoalMode,
+		GoalIteration:    wf.GoalIteration,
+		GoalMaxIterations: wf.GoalMaxIterations,
 	}, nil
 }
 

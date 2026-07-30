@@ -425,6 +425,11 @@ type WorkflowConfig struct {
 	// 兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；超过该时长分析阶段
 	// 整体失败并给出明确报错，前端可立即看到结果而非一直转圈。
 	AnalyzerMaxDurationMS int `json:"analyzerMaxDurationMs"`
+
+	// GoalMaxIterations 目标模式（闭环循环）的全局最大迭代轮数。默认 5。
+	// review 节点在节点级迭代仍不通过时回退到 Feedback 目标节点重跑，每轮 +1；
+	// 达到上限仍不通过则工作流失败。0 表示使用代码兜底默认。
+	GoalMaxIterations int `json:"goalMaxIterations"`
 }
 
 // DefaultWorkflowConfig 返回引擎默认配置值。
@@ -443,6 +448,7 @@ func DefaultWorkflowConfig() WorkflowConfig {
 		AnalyzerMaxTokens:   0,
 		AnalyzerStuckTimeoutMS: 180000,
 		AnalyzerMaxDurationMS:  600000,
+		GoalMaxIterations:       5,
 	}
 }
 
@@ -460,6 +466,7 @@ func (b *Builder) GetWorkflowConfig() WorkflowConfig {
 		AnalyzerMaxTokens:   b.store.GetInt(KeyWorkflowAnalyzerMaxTokens, d.AnalyzerMaxTokens),
 		AnalyzerStuckTimeoutMS: b.store.GetInt(KeyWorkflowAnalyzerStuckTimeout, d.AnalyzerStuckTimeoutMS),
 		AnalyzerMaxDurationMS:  b.store.GetInt(KeyWorkflowAnalyzerMaxDuration, d.AnalyzerMaxDurationMS),
+		GoalMaxIterations:      b.store.GetInt(KeyWorkflowGoalMaxIterations, d.GoalMaxIterations),
 	}
 }
 
@@ -476,6 +483,7 @@ func WorkflowMetaSpecs() []MetaSpec {
 		{Key: KeyWorkflowAnalyzerMaxTokens, Category: "Workflow", Description: "需求分析器（生成 DAG JSON）的输出长度 cap，针对该任务而非模型最大能力。默认 8192（DAG 仅数 KB 已足够）；留空/0 时回退到当前模型真实最大输出（如 glm-5.2=128K），不推荐——过大会浪费 token 预算。"},
 		{Key: KeyWorkflowAnalyzerStuckTimeout, Category: "Workflow", Description: "需求分析器（流式 LLM）卡死看门狗阈值秒数（默认 180=3 分钟）。连续无 token 超该时长判卡死终止；硬上限=该值×3。靠看门狗判断真卡死，不写死固定超时。"},
 		{Key: KeyWorkflowAnalyzerMaxDuration, Category: "Workflow", Description: "需求分析阶段「整轮总时长上限」毫秒（默认 600000=10 分钟）。兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；超过该时长分析阶段整体失败并明确报错。"},
+		{Key: KeyWorkflowGoalMaxIterations, Category: "Workflow", Description: "目标模式（闭环循环）的全局最大迭代轮数（默认 5）。review 节点在节点级迭代仍不通过时，回退到其 Feedback 目标节点重跑并注入审查意见，形成「工作→审查→修复→审查」循环；达到该上限仍不通过则工作流失败。"},
 	}
 }
 
@@ -958,6 +966,7 @@ func DefaultMap() map[string]string {
 		KeyWorkflowAnalyzerMaxTokens: "8192",
 		KeyWorkflowAnalyzerStuckTimeout: "180",
 		KeyWorkflowAnalyzerMaxDuration:   "600000",
+		KeyWorkflowGoalMaxIterations:      "5",
 		// Engagement
 		KeyEngagementEnabled:            "false",
 		KeyEngagementReplyProbability:   "0.15",

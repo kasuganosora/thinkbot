@@ -77,6 +77,10 @@ const (
 	// GLM 频繁退化时空分析器会反复重试，最坏可达数十分钟「分析中」黑洞。该上限保证
 	// 整轮分析无论重试多少次都在该时长内结束（成功或明确失败），前端不再无限转圈。
 	KeyWorkflowAnalyzerMaxDuration = "workflow.analyzer_max_duration_ms"
+	// KeyWorkflowGoalMaxIterations 目标模式（闭环循环）的全局最大迭代轮数（默认 5）。
+	// review 节点在节点级迭代（MaxIterations）仍不通过时，回退到 Feedback 目标节点重新执行，
+	// 每轮闭环计数 +1；达到该上限仍不通过则工作流失败。0 表示使用代码兜底默认（5）。
+	KeyWorkflowGoalMaxIterations = "workflow.goal_max_iterations"
 )
 
 // Engagement 键。
