@@ -169,6 +169,9 @@ func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc
 					"total", result.Total, "resumed", result.Resumed, "reanalyzed", result.Reanalyzed)
 			}
 
+			// 启动卡死工作流看门狗（进程内卡死回收，与 Recover 互补）
+			wfSvc.StartSweeper(srvCtx)
+
 			// 在后台启动 HTTP Server（使用独立 context）
 			go func() {
 				if err := server.Start(srvCtx); err != nil {

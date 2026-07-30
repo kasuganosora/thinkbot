@@ -49,6 +49,9 @@ func (r *Repository) Save(wf *Workflow) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// 维护最后落库时间（与 DB updated_at 列一致），供卡死看门狗判陈旧。
+	wf.UpdatedAt = time.Now()
+
 	// 深拷贝存入缓存，隔离 Scheduler 的实时修改
 	snapshot := cloneWorkflow(wf)
 	r.cache[wf.ID] = snapshot

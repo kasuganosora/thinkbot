@@ -128,12 +128,19 @@ type dagSpec struct {
 // body 为空），导致解析直接失败、整个工作流在分析（准备）阶段就 failed 且无法恢复。
 // 改为仅靠 system prompt 约束输出 JSON，并依赖 parseDAGSpec/ExtractJSON 的 markdown
 // 容错提取。同时加入重试，偶发的空响应或截断可被自动恢复。
-func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode, error) {
+func (a *Analyzer) Analyze(ctx context.Context, requirement string, onProgress ...func(attempt int, phase string)) ([]*DAGNode, error) {
 	ctx, span := a.tracer.Start(ctx, "workflow.analyzer.analyze")
 	defer span.End()
 
 	logger := traceid.WithLoggerFrom(ctx, a.logger)
 	logger.Infow("analyzing requirement", "requirement_len", len(requirement))
+
+	// onProgress 在每次尝试前后上报进度（用于前端展示分析阶段进展，避免「分析中…」长期无变化）。
+	fireProgress := func(attempt int, phase string) {
+		if len(onProgress) > 0 && onProgress[0] != nil {
+			onProgress[0](attempt, phase)
+		}
+	}
 
 	// 构建分析任务
 	task := fmt.Sprintf("请将以下需求分解为 DAG 子任务图：\n\n%s", requirement)
@@ -174,6 +181,8 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string) ([]*DAGNode,
 		if attempt > 1 {
 			temp = 0.7
 		}
+
+		fireProgress(attempt, fmt.Sprintf("正在调用模型分析需求（第 %d/%d 次尝试）", attempt, maxAttempts))
 
 		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, task,
 			subagent.WithTemperature(temp),

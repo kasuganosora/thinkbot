@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
@@ -102,4 +103,26 @@ func (ws *WorkflowService) Recover(ctx context.Context) (*workflow.RecoveryResul
 		return nil, err
 	}
 	return mgr.Recover(ctx)
+}
+
+// StartSweeper 启动卡死工作流看门狗（进程级）。引擎懒初始化，故每次 tick 时取管理器；
+// 若引擎尚未就绪（未配置 LLM）则跳过本轮。应在服务启动时调用一次。
+func (ws *WorkflowService) StartSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				mgr, err := ws.Manager()
+				if err != nil {
+					// 引擎尚未初始化（未配置 LLM），下一轮再试。
+					continue
+				}
+				mgr.SweepStale(ctx)
+			}
+		}
+	}()
 }

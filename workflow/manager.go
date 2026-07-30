@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -51,8 +52,36 @@ type Manager struct {
 	// recoverOnce 确保 Recover 只执行一次。
 	recoverOnce sync.Once
 
+	// sweeperOnce 确保卡死看门狗只启动一次。
+	sweeperOnce sync.Once
+
 	// 原子计数器 — 可观测性指标
 	metrics ManagerMetrics
+}
+
+// 卡死看门狗相关常量。
+const (
+	// sweepInterval 看门狗扫描周期。
+	sweepInterval = 2 * time.Minute
+	// analyzingStaleMaxAge 分析阶段无进展上限（分析总时长上限默认 10min，20min 为兜底）。
+	analyzingStaleMaxAge = 20 * time.Minute
+	// runningStaleMaxAge 执行阶段无进展上限（节点可能耗时较长，给足余量）。
+	runningStaleMaxAge = 3 * time.Hour
+	// interruptedStaleMaxAge 中断恢复态无进展上限。
+	interruptedStaleMaxAge = 30 * time.Minute
+)
+
+// staleThreshold 返回某状态允许的最大无进展时长；非监控状态返回 0。
+func staleThreshold(status WorkflowStatus) time.Duration {
+	switch status {
+	case WorkflowAnalyzing:
+		return analyzingStaleMaxAge
+	case WorkflowRunning:
+		return runningStaleMaxAge
+	case WorkflowInterrupted:
+		return interruptedStaleMaxAge
+	}
+	return 0
 }
 
 // ManagerMetrics 是工作流管理器的运行时指标（原子计数器快照）。
@@ -227,7 +256,26 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	defer m.metrics.Running.Add(-1)
 
 	// Phase 1: 分析需求
-	nodes, err := m.analyzer.Analyze(ctx, wf.Requirement)
+	// 分析阶段总时长上限：防止 GLM 退化时分析器反复重试（每次最坏 stuck×3≈9 分钟）
+	// 把「分析中」拖成数十分钟的黑洞。超过该时长整轮分析失败并给出明确报错，
+	// 前端可立即看到结果而非一直转圈。
+	analyzeCtx := ctx
+	analyzeCancel := func() {}
+	if m.ec.AnalyzerMaxDuration > 0 {
+		analyzeCtx, analyzeCancel = context.WithTimeout(ctx, m.ec.AnalyzerMaxDuration)
+	}
+	defer analyzeCancel()
+
+	// 分析进度回调：每次尝试时更新文案并落库，前端轮询即可看到「第 N 次尝试」等进展，
+	// 避免长期停留在静态「分析中…」被误判为卡死。
+	onProgress := func(attempt int, phase string) {
+		m.mu.Lock()
+		wf.AnalyzeMessage = phase
+		m.mu.Unlock()
+		_ = m.repo.Save(wf)
+	}
+
+	nodes, err := m.analyzer.Analyze(analyzeCtx, wf.Requirement, onProgress)
 	if err != nil {
 		// 分析阶段被显式终止（bgCtx 被 Control(terminate) 取消）：标记为 terminated 而非 failed，
 		// 避免把"用户/bot 主动终止"误报成"分析失败"。
@@ -238,6 +286,20 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 			_ = m.repo.Save(wf)
 			m.metrics.Terminated.Add(1)
 			m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowTerminated, map[string]any{
+				"error": wf.Error,
+			})
+			m.cleanupRunning(wf.ID)
+			return
+		}
+		// 分析总时长超限：给出更明确的报错，引导用户稍后重试。
+		if analyzeCtx.Err() != nil && m.ec.AnalyzerMaxDuration > 0 {
+			m.logger.Errorw("analysis timed out", "workflow_id", wf.ID,
+				"max_duration", m.ec.AnalyzerMaxDuration.String(), "error", err)
+			wf.Status = WorkflowFailed
+			wf.Error = fmt.Sprintf("需求分析超时（超过 %s），通常由模型服务不稳定导致，请稍后重试", m.ec.AnalyzerMaxDuration)
+			_ = m.repo.Save(wf)
+			m.metrics.Failed.Add(1)
+			m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowFailed, map[string]any{
 				"error": wf.Error,
 			})
 			m.cleanupRunning(wf.ID)
@@ -363,6 +425,84 @@ func (m *Manager) Recover(ctx context.Context) (*RecoveryResult, error) {
 		result, recoverErr = m.recover(ctx)
 	})
 	return result, recoverErr
+}
+
+// ============================================================================
+// Stuck-watchdog — 进程内卡死工作流看门狗
+// ============================================================================
+
+// StartSweeper 启动卡死看门狗（进程级，应在服务启动时调用一次）。
+// 周期扫描非终态工作流，将超过无进展阈值（analyzing/running/interrupted 各异）的
+// 工作流强制标记失败，避免「分析中/执行中」因 GLM 退化或 goroutine 卡死而永久挂起。
+//
+// 与 Recover（仅启动时跑一次、且跳过在跑实例）互补：Recover 处理进程崩溃后的恢复，
+// Sweeper 处理进程内存活但已卡死、且 Recover 因「在跑」而被跳过的工作流——这正是
+// 之前「修了很多遍仍卡住」的盲区：一个在跑但 wedged 的 goroutine 永远不会被回收。
+func (m *Manager) StartSweeper(ctx context.Context) {
+	m.sweeperOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(sweepInterval)
+			defer ticker.Stop()
+			m.logger.Infow("workflow stuck-watchdog started", "interval", sweepInterval.String())
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					m.SweepStale(context.Background())
+				}
+			}
+		}()
+	})
+}
+
+// SweepStale 扫描非终态工作流，将超过无进展阈值者强制失败。
+// 供 StartSweeper 周期调用，也可手动触发调试。
+func (m *Manager) SweepStale(ctx context.Context) {
+	wfs, err := m.repo.FindNonTerminal()
+	if err != nil {
+		m.logger.Warnw("stuck-watchdog: failed to list workflows", "error", err)
+		return
+	}
+	now := time.Now()
+	for _, wf := range wfs {
+		maxAge := staleThreshold(wf.Status)
+		if maxAge <= 0 {
+			continue
+		}
+		age := now.Sub(wf.UpdatedAt)
+		if age <= maxAge {
+			continue
+		}
+		m.forceFailStale(wf, age)
+	}
+}
+
+// forceFailStale 强制终止一个长时间无进展的工作流。
+func (m *Manager) forceFailStale(wf *Workflow, age time.Duration) {
+	prevStatus := wf.Status
+
+	// 若存在在跑实例，取消其 goroutine（被卡死的 LLM 调用会随 ctx 取消而返回）。
+	m.mu.Lock()
+	if inst, ok := m.running[wf.ID]; ok && inst.cancel != nil {
+		inst.cancel()
+	}
+	m.mu.Unlock()
+
+	wf.Status = WorkflowFailed
+	wf.Error = fmt.Sprintf("工作流长时间无进展（约 %.0f 分钟无状态更新），已被卡死看门狗自动终止，疑似分析/执行卡死。可重新提交。", age.Minutes())
+	if err := m.repo.Save(wf); err != nil {
+		m.logger.Errorw("stuck-watchdog: failed to persist forced-fail", "workflow_id", wf.ID, "error", err)
+		return
+	}
+	m.metrics.Failed.Add(1)
+	m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
+		"error": wf.Error,
+		"reason": "stuck_watchdog",
+	})
+	m.cleanupRunning(wf.ID)
+	m.logger.Infow("stuck-watchdog: force-failed stale workflow",
+		"workflow_id", wf.ID, "prev_status", string(prevStatus), "age_min", age.Minutes())
 }
 
 func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
@@ -530,13 +670,14 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 
 // StatusResult 是工作流状态查询结果。
 type StatusResult struct {
-	ID          string         `json:"id"`
-	Status      WorkflowStatus `json:"status"`
-	Requirement string         `json:"requirement"`
-	NodeCount   int            `json:"nodeCount"`
-	Progress    ProgressInfo   `json:"progress"`
-	CreatedAt   string         `json:"createdAt"`
-	Error       string         `json:"error,omitempty"`
+	ID             string         `json:"id"`
+	Status         WorkflowStatus `json:"status"`
+	Requirement    string         `json:"requirement"`
+	NodeCount      int            `json:"nodeCount"`
+	Progress       ProgressInfo   `json:"progress"`
+	CreatedAt      string         `json:"createdAt"`
+	Error          string         `json:"error,omitempty"`
+	AnalyzeMessage string         `json:"analyzeMessage,omitempty"`
 }
 
 // ProgressInfo 是工作流进度信息。
@@ -582,13 +723,14 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 	}
 
 	return &StatusResult{
-		ID:          wf.ID,
-		Status:      wf.Status,
-		Requirement: wf.Requirement,
-		NodeCount:   len(wf.Nodes),
-		Progress:    progress,
-		CreatedAt:   createdAt,
-		Error:       wf.Error,
+		ID:             wf.ID,
+		Status:         wf.Status,
+		Requirement:    wf.Requirement,
+		NodeCount:      len(wf.Nodes),
+		Progress:       progress,
+		CreatedAt:      createdAt,
+		Error:          wf.Error,
+		AnalyzeMessage: wf.AnalyzeMessage,
 	}, nil
 }
 
