@@ -36,7 +36,7 @@ var workflowToolPromptSection = &tools.ToolPromptSection{
 	Order: 310,
 	Content: `# 任务引擎
 
-你可以使用 ` + "`task`" + ` 工具来处理复杂的多步骤任务。任务引擎会自动将需求分解为子任务 DAG 图，并行/串行执行，并支持结果审查和质量迭代。对于「必须达到某质量标准、需反复打磨」的任务，可传 ` + "`goalMode: true`" + ` 开启目标模式：最终产物审查不通过时自动回退到对应工作节点、带审查意见重跑，形成「工作→审查→修复→审查」闭环，直到通过或达到最大轮数。
+你可以使用 ` + "`task`" + ` 工具来处理复杂的多步骤任务。任务引擎会自动将需求分解为子任务 DAG 图，并行/串行执行，并支持结果审查和质量迭代。
 
 ## 使用流程
 
@@ -58,12 +58,34 @@ var workflowToolPromptSection = &tools.ToolPromptSection{
 
 简单、单步、即时任务（单条命令、单次查询）直接执行即可，无需走 task。
 
+## 目标模式（goalMode）
+
+` + "`task`" + ` 的 ` + "`goalMode: true`" + ` 参数开启**闭环迭代**：默认模式下子任务审查不通过只会在该节点内部就地修复有限次，仍不通过就失败收场；开启目标模式后，最终产物审查不通过时会**自动回退到上游的工作节点**、带着审查意见重新执行，形成「工作 → 审查 → 修复 → 审查」的循环，直到审查通过或达到最大轮数（默认 5 轮）才停止。
+
+**应当开启（goalMode: true）**——需求描述里出现「目标 / 直到 / 确保 / 全部 / 彻底 / 反复打磨 / 达到某标准」这类**收敛性要求**时：
+
+- "修复所有测试直到全部通过"
+- "重构这个模块，确保 lint 和构建都没有报错"
+- "把这篇文章打磨到可以直接发布的质量"
+- "清理项目里所有 TypeScript 类型错误"
+
+**不要开启（保持默认 false）**——**一次性产出**、没有明确合格线的任务：
+
+- "调研 Redis 和 Memcached 的差异并写一份对比"（产出即完成，无需反复收敛）
+- "把这三个文件翻译成英文"
+- "统计一下代码库有多少个 Go 文件"
+
+判断口诀：**任务有没有一个「做完了才算数」的验收条件？有 → 开目标模式；只是把活干完就行 → 不开。**
+
+开启后可通过 ` + "`task_status`" + ` 的 ` + "`goalIteration`" + ` / ` + "`goalMaxIterations`" + ` 观察当前处于第几轮闭环。注意目标模式会因反复迭代而消耗更多时间和轮次，不要对简单任务滥用。
+
 ## 使用时机
 
 - 任务复杂，需要拆解为多个子任务
 - 子任务间有依赖关系（串行/并行）
 - 关键任务需要质量审查
-- 需要并行处理提高效率`,
+- 需要并行处理提高效率
+- 任务有明确验收标准、必须迭代到达标（此时额外传 ` + "`goalMode: true`" + `）`,
 	Enabled: true,
 }
 
@@ -79,7 +101,14 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 		Tool: llm.Tool{
 			Name:        "task",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description: "提交复杂多步任务。对于包含多个步骤、多文件改动、有依赖关系或需要质量审查的复杂任务，你应优先使用此工具而非逐步手动调用工具——它会自动分析需求、拆解为子任务 DAG 图并异步并行执行，且支持结果审查与重试。立即返回 task_id，后续通过 task_status 轮询进度。",
+			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
+			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
+			// 否则模型无从得知该参数的存在。
+			Description: "提交复杂多步任务。对于包含多个步骤、多文件改动、有依赖关系或需要质量审查的复杂任务，你应优先使用此工具而非逐步手动调用工具——它会自动分析需求、拆解为子任务 DAG 图并异步并行执行，且支持结果审查与重试。传 goalMode: true 可开启目标模式（闭环迭代）：审查不通过时自动回退重做，形成「工作→审查→修复→审查」循环直到达标，适合「修复所有 X 直到全部通过」这类有明确验收标准的任务。立即返回 task_id，后续通过 task_status 轮询进度。",
+			Keywords: []string{
+				"目标模式", "goal mode", "闭环", "迭代", "反复打磨", "直到通过",
+				"质量审查", "工作流", "workflow", "任务拆解", "并行执行", "DAG",
+			},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -147,7 +176,8 @@ func statusToolDef(mgr *Manager) tools.ToolDef {
 		Tool: llm.Tool{
 			Name:        "task_status",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description: "查询任务的当前状态和进度。返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。",
+			Description: "查询任务的当前状态和进度。返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。若任务开启了目标模式，还会返回 goalMode/goalIteration/goalMaxIterations，表示当前处于第几轮闭环迭代。",
+			Keywords:    []string{"任务状态", "进度", "轮询", "目标模式", "闭环轮次", "workflow"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

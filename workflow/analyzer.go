@@ -111,6 +111,19 @@ const analyzerSystemPrompt = `你是一个任务分解专家。你的职责是�
   ]
 }`
 
+// goalModeAnalyzerHint 在目标模式下追加到分析任务末尾，告知模型本次需要
+// 一个可闭环的验收节点。system prompt 是静态的，模型无法从中判断当前请求
+// 是否开启了目标模式，必须在任务侧显式说明。
+const goalModeAnalyzerHint = `## 本次为「目标模式」
+
+本任务开启了目标模式：最终产物必须迭代到达标才算完成。因此请额外遵守：
+
+1. 在 DAG 末尾安排一个**独立的验收节点**（如"运行测试确认全部通过""检查构建无报错""通读全文核对是否满足全部要求"），
+   而不要把验收混在产出节点里。
+2. 该验收节点必须设置 "review": true，其 reviewPrompt 要写明**具体的合格标准**（可判定的通过/不通过条件，而非"质量良好"这类空泛描述）。
+3. 该验收节点的 "feedback" 填写**审查不通过时应当回退重做的工作节点 ID**（通常是产出/修改类节点，可以有多个）。
+   回退边不参与依赖关系、不会构成环，放心填写。`
+
 // dagSpec 是分析器输出的 DAG 规范（从 LLM JSON 解析）。
 type 	dagSpec struct {
 	Nodes []struct {
@@ -152,8 +165,16 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		}
 	}
 
-	// 构建分析任务
+	// 构建分析任务。
+	//
+	// 目标模式下必须显式告知分析器：system prompt 里 feedback 字段的说明是
+	// 「仅当整个任务开启了目标模式时才生效」，但 system prompt 是静态的，
+	// 模型无从判断本次请求是否开启。不告知的话它只会留空 feedback、退化为
+	// 依赖 wireGoalMode 兜底接线（能跑，但拿不到一个专门的验收节点）。
 	task := fmt.Sprintf("请将以下需求分解为 DAG 子任务图：\n\n%s", requirement)
+	if goalMode {
+		task += "\n\n" + goalModeAnalyzerHint
+	}
 
 	// GLM 的空响应退化通常不是单次抖动，而是持续数十秒到数分钟的窗口：
 	// 一旦进入该窗口，紧挨着的连续重试会全部撞在同一窗口里失败（实测 90s 内 3 连败）。
