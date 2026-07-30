@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1399,6 +1401,68 @@ func (s *BotService) GetDreamingBundle(botID string) (*bot.DreamingBundle, bool)
 	defer s.mu.RUnlock()
 	bundle, ok := s.dreamingBundles[botID]
 	return bundle, ok
+}
+
+// BuildDreamingBundleOnDemand 在 Bot 未启动的情况下按需构建梦境 bundle，
+// 供「手动触发梦境」接口调试使用。返回 (nil, nil) 表示该 Bot 未启用 dreaming。
+//
+// 为维护单一事实来源，本方法与 StartBot 共用相同的构建逻辑
+// （config.Builder + bot.CreateLLMBundle + bot.NewDreamingBundle）。
+// cron 文件使用临时路径，避免为一次性触发创建持久 cron job。
+// 调用方在完成触发后应调用 bundle.Stop() 释放资源（通常由 defer 处理）。
+func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBundle, error) {
+	builder := config.NewBuilder(s.store, s.logger)
+	dreamCfg := builder.GetDreamingConfig(botID)
+	if !dreamCfg.Enabled {
+		return nil, nil
+	}
+
+	llmBundle, err := bot.CreateLLMBundle(builder, botID)
+	if err != nil {
+		return nil, errs.Wrap(err, "build dreaming bundle: create llm bundle")
+	}
+	loc := builder.GetBotTimezoneLocation(botID)
+
+	// 临时 cron 文件路径：一次性触发不应污染 data/cron/<botID>_dream.json
+	cronFile := filepath.Join(os.TempDir(), "dream_trigger_"+botID+".json")
+	dBundle := bot.NewDreamingBundle(
+		memory.DreamConfig{
+			Enabled:          dreamCfg.Enabled,
+			Schedule:         dreamCfg.Schedule,
+			JaccardThreshold: 0.9,
+			MaxDreamTokens:   10000,
+		},
+		llmBundle.Main,
+		llmBundle.MainDef.Model,
+		loc,
+		s.tp,
+		s.logger,
+		botID,
+		cronFile,
+		s.db,
+	)
+	if dBundle == nil {
+		return nil, fmt.Errorf("dreaming bundle construction failed for bot %s", botID)
+	}
+
+	// 注入 Bot 自我画像提取器（仅用于画像蒸馏，不影响触发流程）
+	botProfiler := memory.NewBotProfileProfiler(
+		memory.BotProfileProfilerConfig{
+			Provider: llmBundle.Main,
+			Model:    &llm.Model{ID: llmBundle.MainDef.Model},
+		},
+		s.tp,
+		s.logger,
+	)
+	dBundle.Manager.SetBotProfiler(botProfiler)
+	dBundle.BotProfiler = botProfiler
+	dBundle.Manager.SetOnBotProfileUpdated(func(bid string, result *memory.BotProfileResult) {
+		if result == nil {
+			return
+		}
+		s.logger.Infow("dreaming on-demand profile updated", "bot_id", bid, "personality", result.Personality)
+	})
+	return dBundle, nil
 }
 
 // GetCronManager 为指定 Bot 创建 cron.Manager（从 cron store 文件加载）。

@@ -180,8 +180,19 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 
 	bundle, ok := s.botSvc.GetDreamingBundle(botID)
 	if !ok {
-		Fail(c, errs.NotFound("dreaming not enabled for this bot"))
-		return
+		// 调试友好：Bot 未启动时也允许按需构建 bundle 触发，无需先 start。
+		s.logger.Infow("dreaming trigger: bot not running, building bundle on demand", "bot_id", botID)
+		var berr error
+		bundle, berr = s.botSvc.BuildDreamingBundleOnDemand(botID)
+		if berr != nil {
+			Fail(c, errs.Wrap(berr, "failed to build dreaming bundle on demand"))
+			return
+		}
+		if bundle == nil {
+			Fail(c, errs.NotFound("dreaming not enabled for this bot"))
+			return
+		}
+		defer bundle.Stop()
 	}
 
 	if bundle.Manager == nil {
@@ -197,18 +208,41 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 
 	auditLog(c, s.logger, "trigger_dreaming", "bot_id", botID, "phase", report.Phase)
 
+	// 调试辅助：解释 ingested=0 的常见原因，便于快速定位问题。
+	message := ""
+	switch {
+	case report.Error != "":
+		message = report.Error
+	case report.LightIngested == 0 && report.SkippedInactive > 0:
+		message = "所有 scope 因超过活跃阈值被跳过（需有近期 L0 写入才会处理）"
+	case report.LightIngested == 0 && report.LightDeduped > 0:
+		message = "本轮没有新 L0 候选，已复用此前分期的候选进入 REM/Deep"
+	case report.LightIngested == 0:
+		message = "没有可巩固的 L0 工作记忆（L0 为空或历史均已处理）"
+	}
+
+	// 附带梦境日记尾部，便于排查管线内部行为。
+	diary := bundle.Manager.DreamDiary()
+	diaryTail := diary
+	if len(diary) > 12 {
+		diaryTail = diary[len(diary)-12:]
+	}
+
 	OK(c, gin.H{
-		"lightIngested": report.LightIngested,
-		"lightDeduped":  report.LightDeduped,
-		"lightDropped":  report.LightDropped,
-		"remThemes":     report.REMThemes,
-		"remCandidates": report.REMCandidates,
-		"deepScored":    report.DeepScored,
-		"deepPassed":    report.DeepPassed,
-		"deepPromoted":  report.DeepPromoted,
-		"duration":      report.Duration().String(),
-		"phase":         report.Phase,
-		"error":         report.Error,
+		"lightIngested":   report.LightIngested,
+		"lightDeduped":    report.LightDeduped,
+		"lightDropped":    report.LightDropped,
+		"remThemes":       report.REMThemes,
+		"remCandidates":   report.REMCandidates,
+		"deepScored":      report.DeepScored,
+		"deepPassed":      report.DeepPassed,
+		"deepPromoted":    report.DeepPromoted,
+		"skippedInactive": report.SkippedInactive,
+		"duration":        report.Duration().String(),
+		"phase":           report.Phase,
+		"error":           report.Error,
+		"message":         message,
+		"dreamDiary":      diaryTail,
 	})
 }
 
