@@ -78,7 +78,10 @@
       </div>
 
       <div v-if="!nodes.length" class="todo-empty" data-testid="chat-workflow-empty">
-        <template v-if="isLive">正在分析需求并拆解任务…</template>
+        <template v-if="isLive">
+          <span v-if="workflow && workflow.analyzeMessage">{{ workflow.analyzeMessage }}</span>
+          <span v-else>正在分析需求并拆解任务…</span>
+        </template>
         <template v-else-if="workflow && workflow.status === 'failed'">
           <div class="todo-fail-title">任务执行失败，未生成子任务清单</div>
           <div v-if="workflow.error" class="todo-fail-reason" data-testid="chat-workflow-error">
@@ -111,9 +114,9 @@ let pollTimer = null
 
 const doneCount = computed(() => nodes.value.filter(n => n.status === 'completed').length)
 
-// 进度计数文案：分析阶段尚未生成子任务时显示"分析中…"而非"0/0"，避免误判卡死
+// 进度计数文案：分析阶段尚未生成子任务时显示分析进度（或"分析中…"）而非"0/0"，避免误判卡死
 const progressLabel = computed(() => {
-  if (!nodes.value.length) return isLive.value ? '分析中…' : '0/0'
+  if (!nodes.value.length) return isLive.value ? (workflow.value?.analyzeMessage || '分析中…') : '0/0'
   return `${doneCount.value}/${nodes.value.length}`
 })
 

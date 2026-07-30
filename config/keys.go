@@ -72,6 +72,11 @@ const (
 	// 只有连续无 token 超过该时长（且已过首 token 宽限期）才判卡死终止。硬上限 = 该值 ×3 派生。
 	// 这是「看门狗判断真卡死」而非「固定超时一刀切」——正常处理超长 prompt（如 86 个 lint 问题）不会被打断。
 	KeyWorkflowAnalyzerStuckTimeout = "workflow.analyzer_stuck_timeout"
+	// KeyWorkflowAnalyzerMaxDuration 需求分析阶段的「总时长上限」（毫秒，默认 600000=10 分钟）。
+	// 与上面的「卡死看门狗」（单次调用无 token 才杀）不同，这是分析阶段整轮的硬上限：
+	// GLM 频繁退化时空分析器会反复重试，最坏可达数十分钟「分析中」黑洞。该上限保证
+	// 整轮分析无论重试多少次都在该时长内结束（成功或明确失败），前端不再无限转圈。
+	KeyWorkflowAnalyzerMaxDuration = "workflow.analyzer_max_duration_ms"
 )
 
 // Engagement 键。

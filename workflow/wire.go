@@ -75,6 +75,10 @@ type EngineConfig struct {
 	// 0 表示使用 subagent 包默认（180s）。由 DelegateStream 读取，作为「判卡死」阈值；
 	// 硬上限 = 该值 ×3（派生，不写死）。看门狗判断真卡死而非固定超时。
 	AnalyzerStuckTimeout time.Duration
+	// AnalyzerMaxDuration 需求分析阶段「整轮总时长上限」。
+	// 兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；
+	// 超过该时长分析阶段整体失败（明确报错），前端可立即看到结果而非一直转圈。
+	AnalyzerMaxDuration time.Duration
 }
 
 // Setup 创建并装配工作流引擎的所有组件。
@@ -178,5 +182,6 @@ func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.M
 		AnalyzerTemperature: wc.AnalyzerTemperature,
 		AnalyzerMaxTokens:   analyzerMaxTokens(wc.AnalyzerMaxTokens, modelDef),
 		AnalyzerStuckTimeout: time.Duration(wc.AnalyzerStuckTimeoutMS) * time.Millisecond,
+		AnalyzerMaxDuration:  time.Duration(wc.AnalyzerMaxDurationMS) * time.Millisecond,
 	}
 }
