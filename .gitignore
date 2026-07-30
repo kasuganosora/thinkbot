@@ -39,6 +39,7 @@ workflow/integration_test.go
 
 # CodeBuddy
 .codebuddy/
+.workbuddy/
 .skills/tmp/
 tmp/
 
