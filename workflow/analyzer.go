@@ -116,13 +116,15 @@ const analyzerSystemPrompt = `你是一个任务分解专家。你的职责是�
 // 是否开启了目标模式，必须在任务侧显式说明。
 const goalModeAnalyzerHint = `## 本次为「目标模式」
 
-本任务开启了目标模式：最终产物必须迭代到达标才算完成。因此请额外遵守：
+本任务开启了目标模式：最终产物必须迭代到达标才算完成。请遵守：
 
-1. 在 DAG 末尾安排一个**独立的验收节点**（如"运行测试确认全部通过""检查构建无报错""通读全文核对是否满足全部要求"），
-   而不要把验收混在产出节点里。
-2. 该验收节点必须设置 "review": true，其 reviewPrompt 要写明**具体的合格标准**（可判定的通过/不通过条件，而非"质量良好"这类空泛描述）。
-3. 该验收节点的 "feedback" 填写**审查不通过时应当回退重做的工作节点 ID**（通常是产出/修改类节点，可以有多个）。
-   回退边不参与依赖关系、不会构成环，放心填写。`
+1. 在 DAG 末尾安排一个**独立的验收节点**（如"运行测试确认全部通过""通读全文核对是否满足全部要求"），不要把验收混在产出节点里。
+2. 该验收节点必须 "review": true，其 reviewPrompt 写明**具体可判定的合格标准**（通过/不通过，而非"质量良好"）。
+3. 该验收节点的 "feedback" 填审查不通过时应回退重做的工作节点 ID（回退边不参与依赖、不会构成环，可放心填多个）。
+4. **多模块 / 多阶段场景**（如"逐个审查 N 个模块，每个审查到没有新问题才进行下一个，最后整体审查"）：
+   - 把每个模块/阶段拆成**独立节点**，并**按顺序串联依赖**（m1 → m2 → ... → 整体审查），前一个收敛后下一个才会开始；
+   - 每个模块节点设 "review": true 并给出具体 reviewPrompt（例如"逐一核查本模块，仅当确认无遗留问题时 pass"）；目标模式会自动让每个节点反复审查自身直到通过，模块间互不干扰；
+   - 这类中间节点的 "feedback" **无需手动填写**（会自动自环），只需保证终点验收节点的 feedback 正确即可。`
 
 // dagSpec 是分析器输出的 DAG 规范（从 LLM JSON 解析）。
 type 	dagSpec struct {
@@ -351,23 +353,20 @@ func GenerateWorkflowID() string {
 const maxFeedbackEdges = 8
 
 // wireGoalMode 在目标模式下自动接线「目标模式闭环」：
-//   - 找出 DAG 的「终点节点」（无任何下游依赖的节点 = 最终产物节点）；
-//   - 为每个终点节点确保 review=true（作为目标质量检查点）；
-//   - 若其 feedback 未由 LLM 显式指定，则自动接线到它的直接上游工作节点
-//     （即 Dependencies），形成「工作→审查→修复→审查」的闭环。
-//
-// 单节点工作流（终点即起点、无依赖）时，feedback 指向自身，下一轮带审查意见
-// 重跑该节点。
+//   - 强制所有节点 review=true：目标模式下每个模块/阶段都应迭代到审查通过才算完成，
+//     而非一次产出即终态。这同时支持「单任务反复打磨」与「多模块逐模块门禁」——
+//     模块间由依赖链保证顺序（前一个收敛后下一个才开始），每个模块自带收敛循环。
+//   - 回退边（feedback）兜底：LLM 已显式指定的保留；否则按节点角色自动接线：
+//     · 非终点节点（有下游依赖它）→ 自环，闭环时仅重跑自身，不波及下游，
+//       从而支持「逐模块收敛后才进入下一步」的串联门禁；
+//     · 终点节点（无人依赖）→ 回退到直接上游工作节点（Dependencies），
+//       形成「工作→审查→修复→审查」的全局闭环；
+//     · 单节点工作流（终点即起点、无依赖）→ 回退到自身。
 //
 // 注意：feedback 边不写入 Dependencies，因此不影响拓扑排序与无环性校验。
 func wireGoalMode(nodes []*DAGNode) {
 	if len(nodes) == 0 {
 		return
-	}
-
-	index := make(map[string]*DAGNode, len(nodes))
-	for _, n := range nodes {
-		index[n.ID] = n
 	}
 
 	// 找出终点节点：没有任何其他节点以它为依赖。
@@ -379,36 +378,40 @@ func wireGoalMode(nodes []*DAGNode) {
 	}
 
 	for _, n := range nodes {
-		if isDependency[n.ID] {
-			continue // 有下游，跳过
-		}
-
-		// 终点节点作为目标质量检查点，必须开启 review。
+		// 目标模式下所有节点进入「收敛循环」：强制开启 review。
 		if !n.Review {
 			n.Review = true
 		}
 
-		// 回退边：LLM 已指定则保留；否则默认回到直接上游工作节点。
-		if len(n.Feedback) == 0 {
-			if len(n.Dependencies) == 0 {
-				// 单节点工作流：回退到自身（带审查意见重跑）。
-				n.Feedback = []string{n.ID}
-			} else {
-				// 复制直接上游（去重 + 上限防御）。
-				seen := make(map[string]bool, len(n.Dependencies))
-				fb := make([]string, 0, len(n.Dependencies))
-				for _, dep := range n.Dependencies {
-					if seen[dep] {
-						continue
-					}
-					seen[dep] = true
-					fb = append(fb, dep)
-					if len(fb) >= maxFeedbackEdges {
-						break
-					}
-				}
-				n.Feedback = fb
+		// 回退边：LLM 已指定则保留；否则按节点角色兜底。
+		if len(n.Feedback) > 0 {
+			continue
+		}
+		if isDependency[n.ID] {
+			// 非终点（有下游依赖它）：自环。闭环时只重跑自身，不波及下游，
+			// 支持「逐模块收敛后才进入下一步」的串联门禁。
+			n.Feedback = []string{n.ID}
+			continue
+		}
+		// 终点节点。
+		if len(n.Dependencies) == 0 {
+			// 单节点工作流：回退到自身（带审查意见重跑）。
+			n.Feedback = []string{n.ID}
+			continue
+		}
+		// 复制直接上游（去重 + 上限防御），形成「工作→审查→修复→审查」闭环。
+		seen := make(map[string]bool, len(n.Dependencies))
+		fb := make([]string, 0, len(n.Dependencies))
+		for _, dep := range n.Dependencies {
+			if seen[dep] {
+				continue
+			}
+			seen[dep] = true
+			fb = append(fb, dep)
+			if len(fb) >= maxFeedbackEdges {
+				break
 			}
 		}
+		n.Feedback = fb
 	}
 }

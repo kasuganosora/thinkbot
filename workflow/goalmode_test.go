@@ -181,7 +181,7 @@ func TestGoalMode_DisabledFailsImmediately(t *testing.T) {
 	}
 }
 
-// --- wireGoalMode：自动接线终点节点 review + feedback ---
+// --- wireGoalMode：终点节点 review + 回退上游；非终点节点强制 review 且自环 ---
 
 func TestWireGoalMode_AutoWiresSink(t *testing.T) {
 	nodes := []*DAGNode{
@@ -191,10 +191,7 @@ func TestWireGoalMode_AutoWiresSink(t *testing.T) {
 	}
 	wireGoalMode(nodes)
 
-	c, ok := findByID(nodes, "c")
-	if !ok {
-		t.Fatal("node c not found")
-	}
+	c, _ := findByID(nodes, "c")
 	if !c.Review {
 		t.Error("sink node c should have review=true auto-enabled")
 	}
@@ -202,12 +199,52 @@ func TestWireGoalMode_AutoWiresSink(t *testing.T) {
 		t.Errorf("sink node c feedback should point to its upstream 'b', got %v", c.Feedback)
 	}
 
+	// 目标模式下非终点节点也强制 review，且自环（支撑逐模块门禁）。
 	a, _ := findByID(nodes, "a")
-	if a.Review {
-		t.Error("non-sink node a should not be auto-reviewed")
+	if !a.Review {
+		t.Error("non-sink node a should be auto-reviewed in goal mode")
 	}
-	if len(a.Feedback) != 0 {
-		t.Error("non-sink node a should have no feedback")
+	if len(a.Feedback) != 1 || a.Feedback[0] != "a" {
+		t.Errorf("non-sink node a should self-loop in goal mode, got %v", a.Feedback)
+	}
+
+	b, _ := findByID(nodes, "b")
+	if !b.Review {
+		t.Error("non-sink node b should be auto-reviewed in goal mode")
+	}
+	if len(b.Feedback) != 1 || b.Feedback[0] != "b" {
+		t.Errorf("non-sink node b should self-loop in goal mode, got %v", b.Feedback)
+	}
+}
+
+// --- wireGoalMode：多模块逐模块门禁（m1 -> m2 -> m3 -> 整体）---
+
+func TestWireGoalMode_PerModuleConvergence(t *testing.T) {
+	nodes := []*DAGNode{
+		{ID: "m1", Dependencies: []string{}},
+		{ID: "m2", Dependencies: []string{"m1"}},
+		{ID: "m3", Dependencies: []string{"m2"}},
+		{ID: "overall", Dependencies: []string{"m3"}},
+	}
+	wireGoalMode(nodes)
+
+	for _, id := range []string{"m1", "m2", "m3", "overall"} {
+		n, _ := findByID(nodes, id)
+		if !n.Review {
+			t.Errorf("node %s should be auto-reviewed in goal mode", id)
+		}
+	}
+	// 中间模块自环：闭环时只重跑自身，不波及下游。
+	for _, id := range []string{"m1", "m2", "m3"} {
+		n, _ := findByID(nodes, id)
+		if len(n.Feedback) != 1 || n.Feedback[0] != id {
+			t.Errorf("module %s should self-loop, got %v", id, n.Feedback)
+		}
+	}
+	// 终点回退到直接上游。
+	ov, _ := findByID(nodes, "overall")
+	if len(ov.Feedback) != 1 || ov.Feedback[0] != "m3" {
+		t.Errorf("overall should feedback to its upstream 'm3', got %v", ov.Feedback)
 	}
 }
 
@@ -224,6 +261,67 @@ func TestWireGoalMode_SingleNodeSelfLoop(t *testing.T) {
 	}
 	if len(nodes[0].Feedback) != 1 || nodes[0].Feedback[0] != "only" {
 		t.Errorf("single node feedback should point to itself, got %v", nodes[0].Feedback)
+	}
+}
+
+// --- 目标模式：多模块逐模块门禁集成测试 ---
+//
+// 结构 m1 -> m2 -> m3 -> overall，每个节点第一轮 review 不通过、第二轮通过；
+// 终点 overall 在节点级迭代失败后还会触发一次终点闭环（重置 overall 与 m3）。
+// 验证：依赖链保证逐模块顺序门禁、每个模块通过自环收敛、整体审查后完成。
+
+func TestGoalMode_PerModuleSequentialGating(t *testing.T) {
+	wf := NewWorkflow("wf-permodule", "review program", []*DAGNode{
+		{ID: "m1", Name: "review mod1", Task: "review module 1", Review: true, MaxIterations: 1, Feedback: []string{"m1"}},
+		{ID: "m2", Name: "review mod2", Task: "review module 2", Dependencies: []string{"m1"}, Review: true, MaxIterations: 1, Feedback: []string{"m2"}},
+		{ID: "m3", Name: "review mod3", Task: "review module 3", Dependencies: []string{"m2"}, Review: true, MaxIterations: 1, Feedback: []string{"m3"}},
+		{ID: "overall", Name: "overall review", Task: "review whole program", Dependencies: []string{"m3"}, Review: true, MaxIterations: 1, Feedback: []string{"m3"}},
+	})
+	wf.GoalMode = true
+	wf.GoalMaxIterations = 5
+	wf.RebuildIndex()
+
+	// 4 个节点各需 2 次 review（fail→pass），共 8 次显式结果；之后默认通过。
+	exec := &mockExecutor{
+		execResult: "v",
+		fbResult:   "v-fixed",
+		reviewResults: []*ReviewResult{
+			{Passed: false, Feedback: "m1 issues"},
+			{Passed: true},
+			{Passed: false, Feedback: "m2 issues"},
+			{Passed: true},
+			{Passed: false, Feedback: "m3 issues"},
+			{Passed: true},
+			{Passed: false, Feedback: "overall issues"},
+			{Passed: true},
+		},
+	}
+	s := newMockScheduler(wf, exec)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	status := s.Run(ctx)
+	if status != WorkflowCompleted {
+		t.Fatalf("expected completed, got %s", status)
+	}
+
+	for _, id := range []string{"m1", "m2", "m3", "overall"} {
+		n, _ := wf.GetNode(id)
+		if n.Status != NodeCompleted {
+			t.Errorf("node %s should be completed, got %s", id, n.Status)
+		}
+		if n.LoopFeedback != "" {
+			t.Errorf("node %s LoopFeedback should be cleared after run, got %q", id, n.LoopFeedback)
+		}
+	}
+	// 顺序门禁由 Dependencies 结构性保证：m1/m2/m3 各自自环 1 次 + 终点闭环 1 次 = 4。
+	if wf.GoalIteration != 4 {
+		t.Errorf("expected 4 goal iterations (3 per-module self-loops + 1 sink loop), got %d", wf.GoalIteration)
+	}
+	// 每个节点至少经过 2 次 review（fail→pass），证明逐模块收敛确实发生。
+	if exec.revCalls.Load() < 8 {
+		t.Errorf("expected at least 8 reviews (2 per node), got %d", exec.revCalls.Load())
 	}
 }
 
