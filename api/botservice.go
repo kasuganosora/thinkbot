@@ -601,6 +601,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	//   （subagent、workflow、memory）也能通过 QuotaRecordingProvider 自动记账。
 	quotaResolver := pipeline.NewQuotaResolver(s.store)
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
+		// 捕获 LLM 回复为 L0 工作记忆笔记（category=exchange），供 dreaming 巩固。
+		// 必须放在最外层：在 LLMStage 产生 ActionReply 之后才补 ActionNote。
+		stages.NoteCaptureMiddleware("exchange"),
 		pipeline.VerificationGateMiddleware(pipeline.NewVerificationGateConfig()),
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig().WithExemptTools(
