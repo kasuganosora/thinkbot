@@ -30,6 +30,24 @@
         />
       </div>
 
+      <!-- 顶部分页哨兵：上翻到顶自动加载更早消息，不满一屏时可手动点击兜底 -->
+      <div v-if="store.hasMore" class="load-more-bar" data-testid="chat-load-more">
+        <span v-if="store.loadingMore" class="load-more-loading">
+          <t-loading size="small" />
+          <span>加载更早的消息…</span>
+        </span>
+        <button v-else type="button" class="load-more-btn" @click="triggerLoadMore">
+          加载更早的消息
+        </button>
+      </div>
+      <div
+        v-else-if="messages.length >= 20"
+        class="load-more-bar load-more-end"
+        data-testid="chat-history-start"
+      >
+        已经到最开始了
+      </div>
+
       <template v-if="messages.length">
         <div
           v-for="msg in messages"
@@ -289,9 +307,36 @@ function scrollToBottom() {
   })
 }
 
-/** 用户手动滚动时更新 atBottom 状态 */
+// ── 上翻分页：滚到顶部附近自动加载更早的一页（每页 20 条）──
+const LOAD_MORE_THRESHOLD = 80 // 距顶部多少 px 内触发加载
+
+/**
+ * 加载更早一页消息，并保持视觉滚动位置不跳动。
+ * 关键：prepend 会撑高内容，需按「新旧 scrollHeight 差值」补偿 scrollTop，
+ * 否则用户视野会被瞬间推走。
+ */
+async function triggerLoadMore() {
+  const el = scrollRef.value
+  if (!el || !store.hasMore || store.loadingMore) return
+  const prevHeight = el.scrollHeight
+  const prevTop = el.scrollTop
+  const added = await store.loadMoreMessages()
+  if (!added) return
+  await nextTick()
+  const cur = scrollRef.value
+  if (!cur) return
+  // 补偿新增内容的高度，保持原来那条消息仍停在同一视觉位置
+  cur.scrollTop = cur.scrollHeight - prevHeight + prevTop
+}
+
+/** 用户手动滚动时更新 atBottom 状态，并在接近顶部时触发上翻分页 */
 function onScroll() {
   checkAtBottom()
+  const el = scrollRef.value
+  if (!el) return
+  if (el.scrollTop < LOAD_MORE_THRESHOLD && store.hasMore && !store.loadingMore) {
+    triggerLoadMore()
+  }
 }
 
 /** 点击"回到底部"按钮 */
@@ -622,6 +667,38 @@ function onKeydown(value, { e }) {
   background: #fff;
   padding: 10px 32px 8px;
   border-bottom: 1px solid #f0f0f0;
+}
+/* 顶部分页条：加载更早消息 / 到达历史起点 */
+.load-more-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 32px 14px;
+  font-size: 13px;
+  color: #999;
+}
+.load-more-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.load-more-btn {
+  background: transparent;
+  border: 1px solid #e0e0e0;
+  border-radius: 14px;
+  padding: 4px 14px;
+  font-size: 13px;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.load-more-btn:hover {
+  border-color: #0052d9;
+  color: #0052d9;
+}
+.load-more-end {
+  color: #bbb;
 }
 .msg-row {
   display: flex;
