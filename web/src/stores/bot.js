@@ -14,8 +14,12 @@ export const useBotStore = defineStore('bot', () => {
 
   // ---- 消息 ----
   // 完全来自后端，不用 localStorage
+  // 每页消息数：首屏与上翻分页统一使用，与后端 defaultPageSize 保持一致
+  const PAGE_SIZE = 20
   const messages = ref([])
   const messagesLoading = ref(false)
+  // 上翻加载更早消息中（与首屏 messagesLoading 区分，供顶部加载指示器使用）
+  const loadingMore = ref(false)
   const hasMore = ref(false)
   const nextCursor = ref('')
 
@@ -196,8 +200,11 @@ export const useBotStore = defineStore('bot', () => {
       return
     }
     messagesLoading.value = true
+    // 重新加载首屏时重置分页游标，避免沿用上个会话的游标
+    hasMore.value = false
+    nextCursor.value = ''
     try {
-      const page = await chatApi.history(botId, null, 30, activeSessionId.value)
+      const page = await chatApi.history(botId, null, PAGE_SIZE, activeSessionId.value)
       // 后端返回倒序（最新在前），前端需要正序（旧在前）
       messages.value = (page.messages || []).reverse().map(buildPartsForMessage)
       hasMore.value = page.hasMore || false
@@ -212,20 +219,33 @@ export const useBotStore = defineStore('bot', () => {
     await resumeInFlightTasks()
   }
 
+  /**
+   * 向上翻页加载更早的一页消息（每页 PAGE_SIZE 条）。
+   * 返回实际新增的条数，供调用方（ChatWindow）判断是否需要恢复滚动位置。
+   */
   async function loadMoreMessages() {
     const botId = activeBotId.value
-    if (!botId || !hasMore.value || messagesLoading.value) return
-    messagesLoading.value = true
+    if (!botId || !hasMore.value || messagesLoading.value || loadingMore.value) return 0
+    loadingMore.value = true
+    // 记录发起请求时的会话，响应回来若已切换会话则整页丢弃，防止串会话
+    const reqBotId = botId
+    const reqSessionId = activeSessionId.value
     try {
-      const page = await chatApi.history(botId, nextCursor.value, 30, activeSessionId.value)
+      const page = await chatApi.history(botId, nextCursor.value, PAGE_SIZE, reqSessionId)
+      if (activeBotId.value !== reqBotId || activeSessionId.value !== reqSessionId) return 0
       const older = (page.messages || []).reverse().map(buildPartsForMessage)
-      messages.value = [...older, ...messages.value]
+      // 按 id 去重：游标边界可能返回与当前列表重叠的消息
+      const existing = new Set(messages.value.map(m => m.id))
+      const fresh = older.filter(m => !existing.has(m.id))
+      if (fresh.length) messages.value = [...fresh, ...messages.value]
       hasMore.value = page.hasMore || false
       nextCursor.value = page.nextCursor || ''
+      return fresh.length
     } catch (e) {
       console.error('加载更多消息失败', e)
+      return 0
     } finally {
-      messagesLoading.value = false
+      loadingMore.value = false
     }
   }
 
@@ -733,7 +753,7 @@ export const useBotStore = defineStore('bot', () => {
 
   return {
     bots, loading, error, replying, activeBotId,
-    activeBot, messages, messagesLoading, hasMore,
+    activeBot, messages, messagesLoading, loadingMore, hasMore,
     activeWorkflowId,
     activeWorkflowStatus,
     fetchBots, selectBot,
