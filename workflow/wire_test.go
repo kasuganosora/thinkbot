@@ -6,21 +6,34 @@ import (
 	"github.com/kasuganosora/thinkbot/config"
 )
 
-// TestAnalyzerMaxTokensResolution 锁定需求分析器 max_tokens 的推导优先级：
-// 1) 显式配置 workflow.analyzer_max_tokens（>0）→ 直接用；
-// 2) 否则回退到当前模型 ModelDef.MaxTokens；
-// 3) 连模型定义都缺失 → 代码兜底 analyzerMaxTokensFallback。
-// 验证「不写死固定值，跟随当时使用的模型配置」这一诉求。
+// TestAnalyzerMaxTokensResolution 锁定「单一来源」：分析器 max_tokens 只跟随
+// bot 所选模型的 MaxTokens，仅在拿不到模型定义时才走代码兜底。
+// 曾存在的 workflow.analyzer_max_tokens 独立旋钮优先级高于模型能力，
+// 被播种成 8192 后把 glm-5.2（128K）压死并截断 DAG JSON——不得回归。
 func TestAnalyzerMaxTokensResolution(t *testing.T) {
-	// 核心推导函数：显式 > 模型 > 兜底
-	if got := analyzerMaxTokens(0, &config.ModelDef{MaxTokens: 4096}); got != 4096 {
+	// 换模型即自动跟随
+	if got := analyzerMaxTokens(&config.ModelDef{MaxTokens: 4096}); got != 4096 {
 		t.Fatalf("model-driven expected 4096, got %d", got)
 	}
-	if got := analyzerMaxTokens(2048, &config.ModelDef{MaxTokens: 4096}); got != 2048 {
-		t.Fatalf("explicit override expected 2048, got %d", got)
+	if got := analyzerMaxTokens(&config.ModelDef{Model: "glm-5.2", MaxTokens: 128000}); got != 128000 {
+		t.Fatalf("model-driven expected 128000, got %d", got)
 	}
-	if got := analyzerMaxTokens(0, nil); got != analyzerMaxTokensFallback {
+	// 模型定义缺失/未填 maxTokens → 兜底
+	if got := analyzerMaxTokens(nil); got != analyzerMaxTokensFallback {
 		t.Fatalf("code fallback expected %d, got %d", analyzerMaxTokensFallback, got)
+	}
+	if got := analyzerMaxTokens(&config.ModelDef{Model: "x"}); got != analyzerMaxTokensFallback {
+		t.Fatalf("code fallback expected %d, got %d", analyzerMaxTokensFallback, got)
+	}
+}
+
+// TestAnalyzerMaxTokens_NoSeparateKnob 防回归：配置层不得再出现与模型能力
+// 竞争的分析器预算旋钮。若将来重新引入，此断言会失败以提醒收敛到单一来源。
+func TestAnalyzerMaxTokens_NoSeparateKnob(t *testing.T) {
+	for _, spec := range config.WorkflowMetaSpecs() {
+		if spec.Key == "workflow.analyzer_max_tokens" {
+			t.Fatalf("analyzer budget must follow the model's maxTokens, not a separate setting key %q", spec.Key)
+		}
 	}
 }
 

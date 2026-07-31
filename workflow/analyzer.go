@@ -257,8 +257,8 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 				logger.Warnw("analyzer output looks TRUNCATED by the output budget, will retry",
 					"attempt", attempt, "max_attempts", maxAttempts,
 					"raw_len", len(raw),
-					"analyzer_max_tokens", a.ec.AnalyzerMaxTokens,
-					"hint", "max_tokens is shared by reasoning + body on thinking models; raise workflow.analyzer_max_tokens",
+					"max_tokens", a.ec.AnalyzerMaxTokens,
+					"hint", "budget follows the bot's selected model maxTokens; it is shared by reasoning + body on thinking models. Raise maxTokens on that model in provider settings",
 					"error", perr)
 			} else {
 				logger.Warnw("analyzer parse failed, will retry",
