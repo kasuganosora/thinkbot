@@ -300,11 +300,24 @@ function checkAtBottom() {
   isAtBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
 }
 
-/** 滚动到底部（供外部调用） */
+/** 立即把容器贴到底部（单次尝试） */
+function forceScrollBottom() {
+  const el = scrollRef.value
+  if (!el) return
+  el.scrollTop = el.scrollHeight
+}
+
+/**
+ * 滚动到底部（供外部调用）。
+ * 单次 nextTick 不可靠：首屏消息含 markdown/代码块/图片等异步内容，
+ * 渲染完成前 scrollHeight 偏小，设完 scrollTop 后内容继续撑高会把视图留在中上部。
+ * 因此在 nextTick + requestAnimationFrame + 两次 setTimeout 兜底重试，确保最终贴底。
+ */
 function scrollToBottom() {
-  nextTick(() => {
-    if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
-  })
+  nextTick(forceScrollBottom)
+  requestAnimationFrame(forceScrollBottom)
+  setTimeout(forceScrollBottom, 60)
+  setTimeout(forceScrollBottom, 220)
 }
 
 // ── 上翻分页：滚到顶部附近自动加载更早的一页（每页 20 条）──
@@ -527,6 +540,14 @@ watch(() => messages.value.length, scrollToBottomIfAtBottom)
 watch(() => store.activeBotId, () => {
   isAtBottom.value = true
   scrollToBottom()
+})
+// 首屏加载完成（进入会话/刷新）：强制滚到最后一页=最新消息底部。
+// 由 store 在 loadMessages 末尾置位，避免依赖"是否在底部"的判据，确保进入即见最新。
+watch(() => store.scrollToBottomOnLoad, (v) => {
+  if (!v) return
+  isAtBottom.value = true
+  scrollToBottom()
+  store.scrollToBottomOnLoad = false
 })
 
 // 流式期间：仅在用户在底部时才持续跟滚；用户上翻即暂停

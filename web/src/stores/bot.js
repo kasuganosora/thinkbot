@@ -22,6 +22,9 @@ export const useBotStore = defineStore('bot', () => {
   const loadingMore = ref(false)
   const hasMore = ref(false)
   const nextCursor = ref('')
+  // 首屏加载（进入会话/切换会话）完成后置 true，驱动 ChatWindow 强制滚到底部。
+  // 与"上翻加载更早消息"区分——后者是 prepend，需保持当前滚动位置，不应触发滚底。
+  const scrollToBottomOnLoad = ref(false)
 
   // SSE 流式状态
   const replying = ref(false)
@@ -62,7 +65,16 @@ export const useBotStore = defineStore('bot', () => {
         if (String(activeSessionId.value) !== String(target)) {
           activeSessionId.value = target
           await loadMessages()
+        } else {
+          // 目标就是当前会话：仍刷新首屏（保证进入即展示最后一页=最新消息）
+          await loadMessages()
         }
+      } else {
+        // 没有任何会话：清空消息，避免残留上一个 bot/会话的内容
+        activeSessionId.value = null
+        messages.value = []
+        hasMore.value = false
+        nextCursor.value = ''
       }
     } catch (e) {
       console.error('loadSessions failed', e)
@@ -217,6 +229,8 @@ export const useBotStore = defineStore('bot', () => {
     }
     // 重连后恢复仍在后台运行的任务（断连不杀后台任务）：重连续流 + 允许手动终止
     await resumeInFlightTasks()
+    // 首屏加载完成：通知 ChatWindow 强制滚到底部（进入应展示最后一页=最新消息）
+    scrollToBottomOnLoad.value = true
   }
 
   /**
@@ -373,10 +387,9 @@ export const useBotStore = defineStore('bot', () => {
     }
   }
 
-  // 切换 bot 时重新加载消息
-  watch(() => activeBotId.value, () => {
-    loadMessages()
-  })
+  // 切换 bot 时由 loadSessions 统一负责加载对应会话的消息（含首屏滚底）。
+  // 早期此处额外挂了一个 loadMessages 的 watcher，会在 sessionId 尚未就绪时
+  // 用空 session 发起一次查询并与正确查询竞态覆盖，已移除。
 
   // ---- 中止流式 ----
   function _abortStreaming() {
@@ -756,6 +769,7 @@ export const useBotStore = defineStore('bot', () => {
     activeBot, messages, messagesLoading, loadingMore, hasMore,
     activeWorkflowId,
     activeWorkflowStatus,
+    scrollToBottomOnLoad,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
     loadMessages, loadMoreMessages, sendMessage, stopReply, appendToCurrentReply, resumeInFlightTasks,
