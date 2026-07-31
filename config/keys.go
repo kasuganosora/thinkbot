@@ -66,7 +66,11 @@ const (
 	KeyWorkflowRetryMaxMS        = "workflow.retry_max_ms"
 	KeyWorkflowScheduleInterval  = "workflow.schedule_interval_ms"
 	KeyWorkflowAnalyzerTemp      = "workflow.analyzer_temperature"
-	KeyWorkflowAnalyzerMaxTokens = "workflow.analyzer_max_tokens"
+	// 注意：这里曾有 workflow.analyzer_max_tokens，已移除。
+	// 分析器的输出预算不再单独配置，统一跟随 bot 所选模型的 maxTokens
+	// （provider.<x>.models[].maxTokens → ModelDef.MaxTokens）。
+	// 独立旋钮曾被播种为 8192，与 glm-5.2 的 128K 能力脱节，导致 DAG JSON
+	// 被硬截断、analyzer 连续 5 次解析失败，故取消该配置面。
 	// KeyWorkflowAnalyzerStuckTimeout 需求分析器（流式 LLM 调用）的卡死看门狗阈值（秒，默认 180，即 3 分钟）。
 	// 分析器改用流式委托 + 卡死看门狗：只要 LLM 持续输出 token（哪怕慢）就不杀，
 	// 只有连续无 token 超过该时长（且已过首 token 宽限期）才判卡死终止。硬上限 = 该值 ×3 派生。

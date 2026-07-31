@@ -414,8 +414,8 @@ type WorkflowConfig struct {
 	// AnalyzerTemperature 需求分析器 LLM 温度。
 	AnalyzerTemperature float64 `json:"analyzerTemperature"`
 
-	// AnalyzerMaxTokens 需求分析器 LLM 最大 token 数。
-	AnalyzerMaxTokens int `json:"analyzerMaxTokens"`
+	// 注意：这里曾有 AnalyzerMaxTokens（workflow.analyzer_max_tokens），已移除。
+	// 分析器输出预算统一跟随 bot 所选模型的 MaxTokens，不再单独配置。
 
 	// AnalyzerStuckTimeoutMS 需求分析器流式 LLM 调用的卡死看门狗阈值（毫秒）。
 	// 默认 180000（3 分钟）。连续性说明见 KeyWorkflowAnalyzerStuckTimeout。
@@ -442,10 +442,6 @@ func DefaultWorkflowConfig() WorkflowConfig {
 		RetryMaxMS:          10000,
 		ScheduleIntervalMS:  200,
 		AnalyzerTemperature: 0.3,
-		// AnalyzerMaxTokens 默认 0：表示「未显式配置」，由 resolveEngineConfig
-		// 回退到当前模型 ModelDef.MaxTokens；仅当连模型定义都缺失时兜底为 32768。
-		// 不再写死固定值，跟随实际使用的模型配置。
-		AnalyzerMaxTokens:   0,
 		AnalyzerStuckTimeoutMS: 180000,
 		AnalyzerMaxDurationMS:  600000,
 		GoalMaxIterations:       5,
@@ -463,7 +459,6 @@ func (b *Builder) GetWorkflowConfig() WorkflowConfig {
 		RetryMaxMS:          b.store.GetInt(KeyWorkflowRetryMaxMS, d.RetryMaxMS),
 		ScheduleIntervalMS:  b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
 		AnalyzerTemperature: b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
-		AnalyzerMaxTokens:   b.store.GetInt(KeyWorkflowAnalyzerMaxTokens, d.AnalyzerMaxTokens),
 		AnalyzerStuckTimeoutMS: b.store.GetInt(KeyWorkflowAnalyzerStuckTimeout, d.AnalyzerStuckTimeoutMS),
 		AnalyzerMaxDurationMS:  b.store.GetInt(KeyWorkflowAnalyzerMaxDuration, d.AnalyzerMaxDurationMS),
 		GoalMaxIterations:      b.store.GetInt(KeyWorkflowGoalMaxIterations, d.GoalMaxIterations),
@@ -480,7 +475,6 @@ func WorkflowMetaSpecs() []MetaSpec {
 		{Key: KeyWorkflowRetryMaxMS, Category: "Workflow", Description: "重试指数退避的最大等待毫秒（默认 10000）"},
 		{Key: KeyWorkflowScheduleInterval, Category: "Workflow", Description: "调度器主循环轮询间隔毫秒（默认 200）"},
 		{Key: KeyWorkflowAnalyzerTemp, Category: "Workflow", Description: "需求分析器 LLM 温度（默认 0.3）"},
-		{Key: KeyWorkflowAnalyzerMaxTokens, Category: "Workflow", Description: "需求分析器（生成 DAG JSON）的输出长度 cap，默认 32768。注意这是「思考 + 正文」共享的总输出预算：思考型模型（GLM-4.6+ 默认开启 thinking）的 reasoning 会先于正文扣掉大量 token，设得过小会导致 DAG JSON 中途被硬截断、解析报 unexpected end of JSON input。留空/0 时回退到当前模型真实最大输出（如 glm-5.2=128K）。"},
 		{Key: KeyWorkflowAnalyzerStuckTimeout, Category: "Workflow", Description: "需求分析器（流式 LLM）卡死看门狗阈值秒数（默认 180=3 分钟）。连续无 token 超该时长判卡死终止；硬上限=该值×3。靠看门狗判断真卡死，不写死固定超时。"},
 		{Key: KeyWorkflowAnalyzerMaxDuration, Category: "Workflow", Description: "需求分析阶段「整轮总时长上限」毫秒（默认 600000=10 分钟）。兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；超过该时长分析阶段整体失败并明确报错。"},
 		{Key: KeyWorkflowGoalMaxIterations, Category: "Workflow", Description: "目标模式（闭环循环）的全局最大迭代轮数（默认 5）。review 节点在节点级迭代仍不通过时，回退到其 Feedback 目标节点重跑并注入审查意见，形成「工作→审查→修复→审查」循环；达到该上限仍不通过则工作流失败。"},
@@ -969,7 +963,6 @@ func DefaultMap() map[string]string {
 		// 因此这里必须按「思考预算 + JSON 正文」之和留足余量：DAG JSON 本身通常数 KB，
 		// 32768 可覆盖复杂需求下的长思考，同时仍远低于模型 128K 上限，不会浪费预算。
 		// 留空/0 时回退到当前模型 ModelDef.MaxTokens（真实能力值，如 glm-5.2=128K）。
-		KeyWorkflowAnalyzerMaxTokens: "32768",
 		KeyWorkflowAnalyzerStuckTimeout: "180",
 		KeyWorkflowAnalyzerMaxDuration:   "600000",
 		KeyWorkflowGoalMaxIterations:      "5",
