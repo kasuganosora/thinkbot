@@ -560,3 +560,55 @@ func (p *cancelAwareMockProvider) DoStream(ctx context.Context, params llm.Gener
 	}
 	return p.countingMockProvider.DoStream(ctx, params)
 }
+
+// ============================================================================
+// WithSkipTools / hasSkipTools Tests
+// ============================================================================
+
+func TestHasSkipTools_DetectsOption(t *testing.T) {
+	// 无 WithSkipTools → false
+	if hasSkipTools(WithTemperature(0.5), WithMaxTokens(1024)) {
+		t.Error("expected false when WithSkipTools not present")
+	}
+
+	// 有 WithSkipTools → true
+	if !hasSkipTools(WithSkipTools()) {
+		t.Error("expected true when WithSkipTools is present")
+	}
+
+	// 混合选项中包含 WithSkipTools → true
+	if !hasSkipTools(WithSystemPrompt("test"), WithSkipTools(), WithMaxTokens(2048)) {
+		t.Error("expected true when WithSkipTools is mixed with other options")
+	}
+
+	// 空选项列表 → false
+	if hasSkipTools() {
+		t.Error("expected false for empty options")
+	}
+}
+
+func TestWithSkipTools_PreventsToolInjection(t *testing.T) {
+	provider := newMockProvider()
+	provider.responses[0] = &llm.GenerateResult{Text: "no-tools result", FinishReason: llm.FinishReasonStop}
+
+	mgr := NewSubAgentManager(provider, "test-model")
+
+	// 不带 WithSkipTools：正常工作
+	result, err := mgr.Delegate(context.Background(), "system", "task")
+	if err != nil {
+		t.Fatalf("Delegate without SkipTools failed: %v", err)
+	}
+	if result != "no-tools result" {
+		t.Errorf("unexpected result: %q", result)
+	}
+
+	// 带 WithSkipTools：同样正常工作（验证选项不影响基本功能）
+	provider.responses[1] = &llm.GenerateResult{Text: "skip-tools result", FinishReason: llm.FinishReasonStop}
+	result, err = mgr.Delegate(context.Background(), "system", "task", WithSkipTools())
+	if err != nil {
+		t.Fatalf("Delegate with SkipTools failed: %v", err)
+	}
+	if result != "skip-tools result" {
+		t.Errorf("unexpected result: %q", result)
+	}
+}

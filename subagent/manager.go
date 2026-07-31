@@ -163,8 +163,11 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 
 	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
-	if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入。
+	if !hasSkipTools(opts...) {
+		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+		}
 	}
 
 	// 创建临时 SubAgent 以提取 callTimeout 覆盖值
@@ -208,8 +211,12 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 
 	// 注入主 Agent 在子 Agent 场景可用的工具（如有）。
-	if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入，
+	// 避免误走 OrchestrateStream 多步编排循环导致卡死或延迟。
+	if !hasSkipTools(opts...) {
+		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+		}
 	}
 
 	sa := New(m.provider, m.model, allOpts...)
@@ -379,8 +386,11 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 
 	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
-	if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入。
+	if !hasSkipTools(opts...) {
+		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+		}
 	}
 
 	// 创建临时实例提取 callTimeout
@@ -581,4 +591,18 @@ func mergeOptionLists(defaultOpts []Option, systemPrompt string, opts ...Option)
 	}
 	allOpts = append(allOpts, opts...)
 	return allOpts
+}
+
+// hasSkipTools 检查选项列表中是否包含 WithSkipTools()。
+// 用于 Delegate/DelegateStream/DelegateMany 在注入工具前判断调用方是否要求跳过工具。
+func hasSkipTools(opts ...Option) bool {
+	for _, opt := range opts {
+		// 创建临时探测实例：仅应用当前 option，检查 skipTools 标志
+		probe := &SubAgent{}
+		opt(probe)
+		if probe.skipTools {
+			return true
+		}
+	}
+	return false
 }
