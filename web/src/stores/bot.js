@@ -34,6 +34,9 @@ export const useBotStore = defineStore('bot', () => {
 
   // 当前会话中由 bot 通过 task 工具创建的工作流 ID（驱动 SessionWorkflowPanel 展示）
   const activeWorkflowId = ref('')
+  // SSE 推送的最新工作流快照（来自 task_status 工具结果）
+  // SessionWorkflowPanel 监听此 ref 实时合并，避免纯轮询导致的头部卡片冻结
+  const activeWorkflowStatus = ref(null)
 
   async function loadSessions(botId) {
     const bid = botId || activeBotId.value
@@ -597,6 +600,7 @@ export const useBotStore = defineStore('bot', () => {
     if (!activeBot.value || replying.value) return
     // 新对话开始：清空上一轮工作流面板（task 触发时再重新显示）
     activeWorkflowId.value = ''
+    activeWorkflowStatus.value = null
     const botId = activeBotId.value
 
     const userTmpId = uid()
@@ -665,6 +669,11 @@ export const useBotStore = defineStore('bot', () => {
         // task 工具返回里携带 workflowId（如 "wf-xxxx"），提取后驱动工作流面板展示
         const wid = extractWorkflowId(payload)
         if (wid) activeWorkflowId.value = wid
+        // task_status 工具返回的是完整 GetStatus JSON（含 goalIteration/analyzeMessage/status 等）
+        // 将其写入 activeWorkflowStatus 供 SessionWorkflowPanel 实时合并，解决头部卡片与工具结果不同步
+        if (wid && payload && typeof payload === 'object' && payload.status) {
+          activeWorkflowStatus.value = { ...payload, _ts: Date.now() }
+        }
       },
       signal: _abortController.signal,
       attachments: attachments || [],
@@ -725,6 +734,7 @@ export const useBotStore = defineStore('bot', () => {
     bots, loading, error, replying, activeBotId,
     activeBot, messages, messagesLoading, hasMore,
     activeWorkflowId,
+    activeWorkflowStatus,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
     loadMessages, loadMoreMessages, sendMessage, stopReply, appendToCurrentReply, resumeInFlightTasks,

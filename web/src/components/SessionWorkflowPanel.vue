@@ -108,6 +108,7 @@
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { workflowApi } from '@/api/services'
+import { useBotStore } from '@/stores/bot'
 
 const props = defineProps({
   // 当前会话 id
@@ -121,6 +122,9 @@ const nodes = ref([])
 const expanded = ref(true)
 const retrying = ref('')
 let pollTimer = null
+
+// 接收 store 中 SSE 推送的最新工作流快照（task_status 工具结果）
+const botStore = useBotStore()
 
 const doneCount = computed(() => nodes.value.filter(n => n.status === 'completed').length)
 
@@ -189,7 +193,34 @@ async function load() {
   }
 }
 
-// 运行态轮询：每 1.5s 拉取最新节点状态，直到进入终态
+// ---- SSE 实时同步：task_status 工具结果推送的最新状态直接合并到面板 ----
+// 解决头部卡片（轮询）与下方工具调用结果（SSE 推流）不同步的问题
+watch(() => botStore.activeWorkflowStatus, (snap) => {
+  if (!snap || !props.workflowId) return
+  // 只合并当前工作流的快照（防止多会话串扰）
+  if (snap.ID !== props.workflowId && snap.id !== props.workflowId) return
+  // 合并关键字段到本地状态，立即反映在 UI 上
+  workflow.value = {
+    ...(workflow.value || {}),
+    status: snap.status,
+    requirement: snap.requirement || workflow.value?.requirement,
+    analyzeMessage: snap.analyzeMessage,
+    goalMode: snap.goalMode,
+    goalIteration: snap.goalIteration,
+    goalMaxIterations: snap.goalMaxIterations,
+    error: snap.error,
+  }
+  // 若 SSE 推送显示仍在运行但轮询已停，重启轮询保证持续刷新节点列表
+  if (isLive.value && !pollTimer) startLive()
+})
+
+// 运行态轮询：每 1.5s 拉取最新节点状态
+// 终态判定：只有真正结束的状态才停止轮询，避免瞬态非 live 导致轮询永久死亡
+const isTerminal = computed(() => {
+  const s = workflow.value?.status
+  return s === 'completed' || s === 'failed' || s === 'terminated'
+})
+
 async function tick() {
   if (!props.workflowId) return
   try {
@@ -197,7 +228,7 @@ async function tick() {
     if (!res) return
     workflow.value = res.status
     nodes.value = res.flat
-    if (!isLive.value) stopLive()
+    if (isTerminal.value) stopLive()
   } catch (e) {
     // 瞬态错误忽略，下次轮询重试
   }
