@@ -584,6 +584,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Store:          s.store,
 		ModelDef:       &bundle.MainDef,
 		EventBus:       s.eventBus,
+		// 让工作流内部 SubAgent（需求分析/节点执行/审查）继承本 bot 的工作空间工具
+		// （exec/读/写/列目录等），使其能像主 Agent 的 SubAgent 一样操作仓库——
+		// 例如「审查并修复代码」类目标模式可真正读取源码、运行 go build/vet、落地修改。
+		// 经 scope 自动排除 workflow/spawn/记忆工具，不会套娃。
+		ToolMgr:  toolMgr,
+		ToolBotID: id,
 	})
 	if err := workflow.RegisterTools(toolMgr, wfMgr); err != nil {
 		s.logger.Warnw("failed to register workflow tools", "err", err)
