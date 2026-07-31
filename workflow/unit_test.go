@@ -168,9 +168,9 @@ func TestDAGNode_ToFlat(t *testing.T) {
 // --- executor.go: parseReviewResult ---
 
 func TestParseReviewResult_Passed(t *testing.T) {
-	result, err := parseReviewResult(`{"passed": true}`)
-	if err != nil {
-		t.Fatalf("parseReviewResult failed: %v", err)
+	result, usedHeuristic := parseReviewResult(`{"passed": true}`)
+	if usedHeuristic {
+		t.Error("valid JSON should not use heuristic fallback")
 	}
 	if !result.Passed {
 		t.Error("expected passed=true")
@@ -178,9 +178,9 @@ func TestParseReviewResult_Passed(t *testing.T) {
 }
 
 func TestParseReviewResult_NotPassedWithFeedback(t *testing.T) {
-	result, err := parseReviewResult(`{"passed": false, "feedback": "fix the typo"}`)
-	if err != nil {
-		t.Fatalf("parseReviewResult failed: %v", err)
+	result, usedHeuristic := parseReviewResult(`{"passed": false, "feedback": "fix the typo"}`)
+	if usedHeuristic {
+		t.Error("valid JSON should not use heuristic fallback")
 	}
 	if result.Passed {
 		t.Error("expected passed=false")
@@ -191,18 +191,40 @@ func TestParseReviewResult_NotPassedWithFeedback(t *testing.T) {
 }
 
 func TestParseReviewResult_InvalidJSON(t *testing.T) {
-	_, err := parseReviewResult("not json at all")
-	if err == nil {
-		t.Error("expected error for invalid JSON")
+	// 纯文本且无明显信号：退化为启发式判定（usedHeuristic=true），保守按不通过处理，
+	// 不再错误地把"解析失败"当通过。
+	result, usedHeuristic := parseReviewResult("not json at all")
+	if !usedHeuristic {
+		t.Error("invalid JSON should trigger heuristic fallback")
+	}
+	if result.Passed {
+		t.Error("ambiguous text must NOT be silently treated as pass")
+	}
+}
+
+func TestParseReviewResult_PlainTextFailTreatedAsFail(t *testing.T) {
+	// 复现线上 bug：Review 子代理直接返回纯文本结论（含 "fail" 与"缺少源代码"），
+	// 解析失败后旧逻辑误判为通过。修复后必须识别为不通过，触发重跑/收敛。
+	raw := "fail\n\n待审查的产物并未完成对 `models/`, `db/`, `config/` 目录下代码的审查与修复。" +
+		"产物仅说明了由于缺少源代码无法执行任务，并请求提供源码，未提供任何实际的修复代码，因此未能满足原始任务需求。"
+	result, usedHeuristic := parseReviewResult(raw)
+	if !usedHeuristic {
+		t.Error("plain text must trigger heuristic fallback")
+	}
+	if result.Passed {
+		t.Fatal("plain-text 'fail' conclusion must be treated as NOT passed")
+	}
+	if result.Feedback == "" {
+		t.Error("heuristic fail should carry the raw text as feedback")
 	}
 }
 
 func TestParseReviewResult_JSONInMarkdown(t *testing.T) {
 	// Some LLMs wrap JSON in markdown code blocks
 	raw := "```json\n{\"passed\": true}\n```"
-	result, err := parseReviewResult(raw)
-	if err != nil {
-		t.Fatalf("should extract JSON from markdown: %v", err)
+	result, usedHeuristic := parseReviewResult(raw)
+	if usedHeuristic {
+		t.Error("markdown-wrapped JSON should be extracted without heuristic")
 	}
 	if !result.Passed {
 		t.Error("expected passed=true")
