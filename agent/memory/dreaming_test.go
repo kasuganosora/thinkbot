@@ -229,38 +229,69 @@ func TestDreamManager_REMPhase(t *testing.T) {
 	_ = report.REMThemes
 }
 
-func TestDreamManager_DeepPhaseNoPromotion(t *testing.T) {
-	scope := ChannelScope("deep-test")
+// TestDreamManager_DeepPhasePromotesValuable 验证修复后的核心行为：
+// 有价值的近期事实（即便没有任何白天召回信号）也应被晋升，
+// 不再因 MinRecallCount/MinUniqueQueries 硬门控而永远为 0。
+func TestDreamManager_DeepPhasePromotesValuable(t *testing.T) {
+	scope := ChannelScope("deep-promote-test")
 	dm, tm := newTestDreamManager(t, []Scope{scope})
 	ctx := context.Background()
 
-	_ = tm.WriteWorking(ctx, scope, "一些测试内容", "test")
+	// 写入两条同主题、近期、丰富、可复用的偏好事实（应被晋升）
+	_ = tm.WriteWorking(ctx, scope,
+		"用户使用 Go 语言进行后端开发，偏好简洁且可测试的代码风格", "test")
+	_ = tm.WriteWorking(ctx, scope,
+		"用户偏好 Go 标准库，尽量少引入第三方依赖", "test")
 
 	report, err := dm.Run(ctx)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
 
-	// 无召回数据 → RecallCount=0 → 不通过门控
-	if report.DeepPromoted != 0 {
-		t.Errorf("expected 0 promotions without recall data, got %d",
-			report.DeepPromoted)
+	if report.DeepPromoted == 0 {
+		t.Errorf("expected valuable recent facts to be promoted, got 0 (scored=%d)",
+			report.DeepScored)
 	}
 }
 
-func TestDreamManager_DeepPhaseWithRecall(t *testing.T) {
-	scope := ChannelScope("deep-promote-test")
+// TestDreamManager_DeepPhaseFiltersJunk 验证无价值内容仍被过滤。
+func TestDreamManager_DeepPhaseFiltersJunk(t *testing.T) {
+	scope := ChannelScope("deep-filter-test")
 	dm, tm := newTestDreamManager(t, []Scope{scope})
 	ctx := context.Background()
 
-	// 写入内容
-	_ = tm.WriteWorking(ctx, scope,
-		"用户使用 Go 语言进行后端开发，偏好简洁代码", "test")
+	// 极短内容（<10 runes）应在 Light 阶段被丢弃，不会晋升
+	_ = tm.WriteWorking(ctx, scope, "哦", "test")
 
-	// 第一次 Run → Light 提取候选
-	_, err := dm.Run(ctx)
+	report, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if report.DeepPromoted != 0 {
+		t.Errorf("expected junk content to be filtered, got %d promoted", report.DeepPromoted)
+	}
+}
+
+// TestDreamManager_DeepPhaseWithRecall 验证可选的「召回门控」在显式启用时生效：
+// 未注入召回信号 → 被过滤；注入足够召回信号后 → 通过门控晋升。
+// （默认配置下召回门控关闭，晋升由分数+近期+丰富度驱动，见 DefaultDreamConfig）
+func TestDreamManager_DeepPhaseWithRecall(t *testing.T) {
+	scope := ChannelScope("deep-recall-test")
+	dm, tm := newTestDreamManager(t, []Scope{scope})
+	dm.config.Deep.MinRecallCount = 3
+	dm.config.Deep.MinUniqueQueries = 3
+	ctx := context.Background()
+
+	_ = tm.WriteWorking(ctx, scope,
+		"用户使用 Go 语言进行后端开发，偏好简洁且可测试的代码风格", "test")
+
+	// 第一次 Run：无召回信号 → 被召回门控过滤
+	report1, err := dm.Run(ctx)
 	if err != nil {
 		t.Fatalf("first Run failed: %v", err)
+	}
+	if report1.DeepPromoted != 0 {
+		t.Errorf("expected 0 promotions without recall when gate enabled, got %d", report1.DeepPromoted)
 	}
 
 	// 手动模拟召回信号
@@ -270,15 +301,16 @@ func TestDreamManager_DeepPhaseWithRecall(t *testing.T) {
 		}
 	}
 
-	// 第二次 Run → Deep 应该有评分
+	// 第二次 Run：已有召回信号 → 通过门控晋升
 	report2, err := dm.Run(ctx)
 	if err != nil {
 		t.Fatalf("second Run failed: %v", err)
 	}
-
-	// 验证有候选被评分
 	if report2.DeepScored == 0 {
 		t.Error("expected some scored candidates in deep phase")
+	}
+	if report2.DeepPromoted == 0 {
+		t.Errorf("expected promotion after recall signals injected, got 0")
 	}
 }
 
@@ -377,8 +409,14 @@ func TestDreamConfig_Defaults(t *testing.T) {
 	if cfg.Schedule != "0 3 * * *" {
 		t.Errorf("unexpected schedule: %s", cfg.Schedule)
 	}
-	if cfg.Deep.MinScore != 0.8 {
+	if cfg.Deep.MinScore != 0.45 {
 		t.Errorf("unexpected minScore: %f", cfg.Deep.MinScore)
+	}
+	if cfg.Deep.MinRecallCount != 0 {
+		t.Errorf("unexpected MinRecallCount: %d (should default off to avoid promotion deadlock)", cfg.Deep.MinRecallCount)
+	}
+	if cfg.Deep.MinUniqueQueries != 0 {
+		t.Errorf("unexpected MinUniqueQueries: %d (should default off)", cfg.Deep.MinUniqueQueries)
 	}
 	if cfg.JaccardThreshold != 0.9 {
 		t.Errorf("unexpected threshold: %f", cfg.JaccardThreshold)
