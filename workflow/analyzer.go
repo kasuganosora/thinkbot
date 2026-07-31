@@ -227,6 +227,8 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 			subagent.WithTemperature(temp),
 			subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
 			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
+			subagent.WithSkipTools(), // Analyzer 是纯 LLM 任务（输出 JSON DAG），不需要工具；
+			                        // 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死。
 		)
 		if err != nil {
 			// 上下文被取消（分析被终止）：不再重试，直接返回清晰错误。
