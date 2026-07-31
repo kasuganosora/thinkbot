@@ -133,12 +133,13 @@ func (e *Executor) Review(ctx context.Context, node *DAGNode, product string) (*
 	}
 
 	// 解析 Review 结果（期望 LLM 返回 JSON）
-	result, err := parseReviewResult(raw)
-	if err != nil {
-		logger.Warnw("failed to parse review result, treating as pass",
-			"node_id", node.ID, "raw", strutil.Truncate(raw, 200), "error", err)
-		// 解析失败时默认通过，避免无限循环
-		return &ReviewResult{Passed: true, Feedback: ""}, nil
+	result, usedHeuristic := parseReviewResult(raw)
+	if usedHeuristic {
+		// 解析失败但已退化为文本启发式判定：宁可误判为不通过（触发重跑），
+		// 也绝不静默放行未真正审查的产物。轮次上限（节点 MaxIterations / 目标模式
+		// GoalMaxIterations）会防止无限循环。
+		logger.Warnw("review result not valid JSON, used heuristic verdict",
+			"node_id", node.ID, "passed", result.Passed, "raw", strutil.Truncate(raw, 200))
 	}
 
 	span.SetAttributes(attribute.Bool("review.passed", result.Passed))
@@ -185,10 +186,64 @@ func buildReviewTask(node *DAGNode, product string) string {
 }
 
 // parseReviewResult 解析 Review SubAgent 返回的 JSON。
-func parseReviewResult(raw string) (*ReviewResult, error) {
+// 若 JSON 解析失败，退化为文本启发式判定（见 heuristicReviewVerdict）。
+// 第二返回值 usedHeuristic 标记本次是否走了启发式兜底（用于日志告警）。
+func parseReviewResult(raw string) (*ReviewResult, bool) {
 	var result ReviewResult
-	if err := strutil.ExtractJSON(raw, &result); err != nil {
-		return nil, errs.Newf("cannot parse review result: %s", strutil.Truncate(raw, 100))
+	if err := strutil.ExtractJSON(raw, &result); err == nil {
+		return &result, false
 	}
-	return &result, nil
+	passed, feedback := heuristicReviewVerdict(raw)
+	return &ReviewResult{Passed: passed, Feedback: feedback}, true
+}
+
+// heuristicReviewVerdict 从纯文本审查结论中推断通过/不通过。
+//
+// 设计原则：宁可误判为「不通过」（触发重跑/收敛），也绝不静默放行未真正审查的产物。
+// 判定优先级：
+//  1. 不通过信号多于通过信号 → 不通过；
+//  2. 仅有明确通过信号 → 通过；
+//  3. 模糊或无明确信号 → 保守按不通过处理。
+//
+// 调用方（reviewLoop / 目标模式闭环）已用节点 MaxIterations 与全局 GoalMaxIterations
+// 兜底，故不会因「保守判 fail」而无限循环。
+func heuristicReviewVerdict(raw string) (bool, string) {
+	text := strings.ToLower(raw)
+
+	passSignals := []string{
+		"\"passed\":true", "\"passed\": true", "passed:true",
+		"all checks passed", "审查通过", "已通过", "已验收", "满足要求", "符合要求",
+		"符合需求", "验收通过", "全部通过", "通过审查", "无问题", "没有发现问题",
+		"未发现", "无遗留问题", "无遗留", "acceptable", "looks good", "no issues",
+		"passed review",
+	}
+	failSignals := []string{
+		"\"passed\":false", "\"passed\": false", "passed:false",
+		"fail", "failed", "不通过", "未通过", "不合格", "未满足", "未达标", "不达标",
+		"有问题", "未修复", "缺少", "缺失", "无法执行", "不合规", "未覆盖", "未完全",
+		"未成功", "未达成", "不符合", "需要改进", "建议修改", "不全面", "有遗漏",
+		"未提供", "未能满足", "cannot", "not met", "not satisfied", "incomplete",
+	}
+
+	failHits, passHits := 0, 0
+	for _, s := range failSignals {
+		if strings.Contains(text, s) {
+			failHits++
+		}
+	}
+	for _, s := range passSignals {
+		if strings.Contains(text, s) {
+			passHits++
+		}
+	}
+
+	switch {
+	case failHits > passHits:
+		return false, strutil.Truncate(raw, 500)
+	case passHits > 0 && failHits == 0:
+		return true, ""
+	default:
+		// 模糊 / 无明确信号：保守按不通过处理，避免放行未审查产物
+		return false, strutil.Truncate(raw, 500)
+	}
 }
