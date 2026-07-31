@@ -15,6 +15,7 @@ import (
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/workflow"
 )
 
 // ============================================================================
@@ -368,7 +369,17 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	if len(req.Attachments) > 0 {
 		extraMeta["attachments"] = req.Attachments
 	}
-	if err := webCh.Inject(c.Request.Context(), traceID, userID, req.Text, extraMeta); err != nil {
+
+	// 目标模式自动路由：若用户需求表达「反复打磨 / 审查直到没有新问题」等收敛性验收意图，
+	// 注入一条强制指令，要求模型必须用 task(goalMode: true) 提交、禁止用 subagent/delegate
+	// 内联处理。原始文本仍按 req.Text 落库（见上方 goroutine），此处仅放大注入模型的文本。
+	injectText := req.Text
+	if workflow.DetectGoalModeIntent(req.Text) {
+		injectText = workflow.GoalModeDirective(req.Text)
+		extraMeta["goal_mode_intent"] = true
+		s.logger.Infow("goal-mode auto-route", "bot_id", req.BotID, "trace_id", traceID, "text", req.Text)
+	}
+	if err := webCh.Inject(c.Request.Context(), traceID, userID, injectText, extraMeta); err != nil {
 		Fail(c, errs.Wrap(err, "failed to send message to bot"))
 		return
 	}
