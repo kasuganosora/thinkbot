@@ -179,6 +179,7 @@ async function fetchState() {
 
 async function load() {
   stopLive()
+  _lastSseTs = 0 // 重置 SSE 时间戳，防止上一轮的残留脏数据影响本轮
   workflow.value = null
   nodes.value = []
   if (!props.workflowId) return
@@ -195,10 +196,15 @@ async function load() {
 
 // ---- SSE 实时同步：task_status 工具结果推送的最新状态直接合并到面板 ----
 // 解决头部卡片（轮询）与下方工具调用结果（SSE 推流）不同步的问题
+let _lastSseTs = 0 // 最近一次 SSE 快照的时间戳，用于 tick() 判断是否应保留 SSE 数据
+
 watch(() => botStore.activeWorkflowStatus, (snap) => {
   if (!snap || !props.workflowId) return
   // 只合并当前工作流的快照（防止多会话串扰）
   if (snap.ID !== props.workflowId && snap.id !== props.workflowId) return
+  // 时间戳守卫：忽略比当前已知的 SSE 数据更旧的快照（防止 Pinia 残留脏数据覆盖新拉取的 API 数据）
+  if (snap._ts && snap._ts <= _lastSseTs) return
+  _lastSseTs = snap._ts || Date.now()
   // 合并关键字段到本地状态，立即反映在 UI 上
   workflow.value = {
     ...(workflow.value || {}),
@@ -226,9 +232,18 @@ async function tick() {
   try {
     const res = await fetchState()
     if (!res) return
-    workflow.value = res.status
+    // 节点列表始终以 API 为准（权威数据源）
     nodes.value = res.flat
-    if (isTerminal.value) stopLive()
+    // 状态字段：若 SSE 有更新（_lastSseTs > 0 且距上次 SSE 较近 5s 内），优先保留 SSE 数据
+    // 否则以 API 轮询结果为准。这解决了「轮询覆盖 SSE 实时状态」的竞态问题。
+    const sseFresherThanApi = _lastSseTs > 0 && (Date.now() - _lastSseTs < 5000)
+    if (sseFresherThanApi && workflow.value?.status) {
+      // 只更新节点相关字段，保留 SSE 推送的状态/进度信息
+      workflow.value = { ...workflow.value, error: res.status.error }
+    } else {
+      workflow.value = res.status
+    }
+    if (isTerminal.value) { stopLive(); _lastSseTs = 0 }
   } catch (e) {
     // 瞬态错误忽略，下次轮询重试
   }
