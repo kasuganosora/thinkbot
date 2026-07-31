@@ -79,13 +79,19 @@ type ScoreBreakdown struct {
 }
 
 // Scoring weights (合计 = 1.0)
+// 评分权重（合计 = 1.0）。
+// 设计修正：Relevance/Diversity 依赖白天的召回信号（RecallCount/UniqueQueries），
+// 而该信号仅在候选已被晋升到 L1 后、被检索系统召回时才会累积——
+// 但晋升门控又要求这些信号，形成死锁（见 DefaultDreamConfig 注释）。
+// 因此权重向「梦境管线自身可产出的信号」倾斜：Frequency(LightHits) /
+// Recency / Consolidation(REMHits) / Richness，使有价值的近期事实能被晋升。
 const (
-	WeightRelevance     = 0.30
-	WeightFrequency     = 0.24
-	WeightDiversity     = 0.15
-	WeightRecency       = 0.15
-	WeightConsolidation = 0.10
-	WeightRichness      = 0.06
+	WeightRelevance     = 0.10
+	WeightFrequency     = 0.30
+	WeightDiversity     = 0.05
+	WeightRecency       = 0.25
+	WeightConsolidation = 0.20
+	WeightRichness      = 0.10
 	LightEnhanceCap     = 0.05
 	REMEnhanceCap       = 0.08
 )
@@ -152,6 +158,9 @@ type DeepPhaseConfig struct {
 	MinScore            float64
 	MinRecallCount      int
 	MinUniqueQueries    int
+	// MinREMHits：候选需至少命中 N 个 REM 主题（跨候选反复出现）才晋升。
+	// 0 = 不要求（默认），仅作为可选的强约束门控。
+	MinREMHits          int
 	MaxPromotions       int
 	RecencyHalfLifeDays int
 	MaxAgeDays          int
@@ -174,10 +183,18 @@ func DefaultDreamConfig() DreamConfig {
 			MinPatternStrength: 0.75,
 		},
 		Deep: DeepPhaseConfig{
-			MinScore:            0.8,
-			MinRecallCount:      3,
-			MinUniqueQueries:    3,
-			MaxPromotions:       10,
+			// MinScore：基于「近期 + 丰富 + 反复出现」信号的晋升阈值。
+			// 旧值 0.8 要求 Relevance(召回) 与 Diversity(查询) 信号，但白天的召回信号
+			// 从未被写入生产代码（RecordRecall 无调用方），导致永远无法晋升。
+			// 0.45 使「近期、内容丰富的事实」稳定跨越阈值，同时过滤闲聊/临时调试。
+			MinScore: 0.45,
+			// 召回/查询门控默认关闭（0）。这些信号只有候选晋升后召回才会累积，
+			// 作为硬门控会造成死锁；保留配置项以便将来接入召回追踪后按需启用。
+			MinRecallCount:   0,
+			MinUniqueQueries: 0,
+			MinREMHits:       0,
+			MaxPromotions:    10,
+			// RecencyHalfLifeDays=14：约两周半衰期，超过 ~4 周的内容评分趋近 0。
 			RecencyHalfLifeDays: 14,
 			MaxAgeDays:          30,
 		},

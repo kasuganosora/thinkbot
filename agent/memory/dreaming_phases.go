@@ -444,16 +444,21 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 		return scored[i].score > scored[j].score
 	})
 
-	// 三重门控
+	// 三重门控（召回/查询/主题门控仅当配置 >0 时生效；
+	// 默认 0 = 不要求，仅依据分数 + 近期 + 丰富度晋升，
+	// 避免白天召回信号缺失时「永不晋升」的死锁）。
 	var passed []*DreamCandidate
 	for _, sc := range scored {
 		if sc.score < d.config.Deep.MinScore {
 			continue
 		}
-		if sc.candidate.RecallCount < d.config.Deep.MinRecallCount {
+		if d.config.Deep.MinRecallCount > 0 && sc.candidate.RecallCount < d.config.Deep.MinRecallCount {
 			continue
 		}
-		if sc.candidate.UniqueQueries < d.config.Deep.MinUniqueQueries {
+		if d.config.Deep.MinUniqueQueries > 0 && sc.candidate.UniqueQueries < d.config.Deep.MinUniqueQueries {
+			continue
+		}
+		if d.config.Deep.MinREMHits > 0 && sc.candidate.REMHits < d.config.Deep.MinREMHits {
 			continue
 		}
 		passed = append(passed, sc.candidate)
