@@ -115,6 +115,22 @@ func WithStuckTimeout(d time.Duration) Option {
 	}
 }
 
+// WithSkipTools 跳过 SubAgentManager 的工具注入。
+//
+// 正常情况下 SubAgentManager.SetToolResolver 后，所有 Delegate/DelegateStream/
+// DelegateMany 调用都会自动注入主 Agent 在子 Agent 场景可用的工具（exec/读/写等），
+// 使子 Agent 能操作工作空间。但某些场景是纯 LLM 任务（如工作流需求分析器 Analyzer），
+// 只需模型输出结构化 JSON，不需要任何工具能力；被注入工具后会误走
+// OrchestrateStream 多步编排循环，导致不必要的延迟或卡死。
+//
+// 传入此选项后，DelegateStream 即使在 SetToolResolver 生效的情况下也不会注入工具，
+// 等效于走无工具的简单 LLM 流式调用。
+func WithSkipTools() Option {
+	return func(sa *SubAgent) {
+		sa.skipTools = true
+	}
+}
+
 // String 返回 SubAgent 的可读描述。
 func (sa *SubAgent) String() string {
 	sa.mu.Lock()

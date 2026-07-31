@@ -82,6 +82,11 @@ type SubAgent struct {
 	// toolSteps 是带工具执行回路时的最大 LLM 步数预算（>0 启用 OrchestrateGenerate/Stream）。
 	// 0 = 使用包默认 defaultSubagentToolSteps。仅当 extraTools 非空时生效。
 	toolSteps int
+
+	// skipTools 为 true 时，SubAgentManager.ResolveTools 即使解析到了工具也不注入。
+	// 用于 Analyzer 等纯 LLM 任务（只需输出 JSON，不需要工具能力），
+	// 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死或延迟。
+	skipTools bool
 }
 
 // New 创建一个 SubAgent。
