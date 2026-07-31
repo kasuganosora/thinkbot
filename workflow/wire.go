@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -58,6 +59,20 @@ type WireConfig struct {
 	// EventBus 旁路事件总线（可为 nil，则不发布事件）。
 	// Web SSE 订阅端通过 workflow_id 订阅实时进度事件。
 	EventBus outbound.EventBus
+
+	// ToolMgr 主 Agent 的工具解析器（可选）。
+	// 非 nil 时，workflow 引擎内部的 SubAgent（需求分析 / 节点执行 / 审查）
+	// 将继承主 Agent 在 SubAgent 场景下可用的工具（exec / 读 / 写 / 列目录 / 搜索等），
+	// 从而能像主 Agent 的 SubAgent 一样操作工作空间——例如「审查并修复代码」类目标模式
+	// 任务可真正读取仓库、运行 go build/vet、落地修改，而非只会「缺少源代码」地空谈。
+	// 经 scope 自动排除 workflow 与 spawn 工具，不会形成「子 Agent 再触发工作流 / 再 spawn」
+	// 的套娃；记忆工具同为 private/group scope，亦被排除，避免工作流污染长期记忆。
+	// nil 表示保持旧行为（纯 LLM，无工具），即本修复前的状态。
+	ToolMgr *agenttools.ToolManager
+
+	// ToolBotID 解析工具时使用的 BotID，决定内部 SubAgent 操作哪个 bot 的工作空间。
+	// 通常传当前 bot 的 id，使其与主 Agent 共用同一 per-bot 沙箱（同一份仓库/目录）。
+	ToolBotID string
 }
 
 // EngineConfig 是从 config.Store 解析出的引擎运行时配置。
@@ -123,6 +138,20 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 		saOpts = append(saOpts, subagent.WithMaxTokens(cfg.ModelDef.MaxTokens))
 	}
 	saMgr := subagent.NewSubAgentManager(cfg.Provider, cfg.Model, saOpts...)
+
+	// 若提供了主 Agent 工具解析器，让 workflow 内部 SubAgent 继承工作空间工具，
+	// 使其能像主 Agent 的 SubAgent 一样读文件、跑命令、改代码（如「审查并修复代码」）。
+	// workflow 工具（scope=private/group）与 spawn 工具在 IsSubagent 场景被自动排除，
+	// 不会形成套娃；记忆工具同为 private/group，亦被排除，避免工作流污染长期记忆。
+	if cfg.ToolMgr != nil {
+		saMgr.SetToolResolver(cfg.ToolMgr, agenttools.ToolSessionContext{BotID: cfg.ToolBotID})
+		// 代码类任务（读多文件 + go build/vet + 多轮修改）放宽单步预算，
+		// 且子 Agent 重任务常超默认 120s，放宽委托超时到 10 分钟（对齐主 Agent 子 Agent）。
+		saMgr.SetDefaultToolSteps(25)
+		saMgr.SetDelegateTimeout(10 * time.Minute)
+		cfg.Logger.Debugw("workflow engine: tool resolver attached to internal subagents",
+			"botID", cfg.ToolBotID)
+	}
 
 	// 2. 持久化仓储
 	repo := NewRepository(cfg.DB, cfg.Logger)
