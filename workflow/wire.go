@@ -157,6 +157,13 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	repo := NewRepository(cfg.DB, cfg.Logger)
 
 	// 3. 需求分析器
+	//
+	// 显式记录分析器输出预算：该值过小会导致 DAG JSON 被硬截断（表现为
+	// "unexpected end of JSON input" 连续重试失败），而排查时若无日志只能翻 DB。
+	cfg.Logger.Infow("workflow engine: analyzer configured",
+		"max_tokens", ec.AnalyzerMaxTokens,
+		"temperature", ec.AnalyzerTemperature,
+		"note", "max_tokens is shared by reasoning + JSON body on thinking models")
 	analyzer := NewAnalyzer(saMgr, tp, ec, cfg.Logger)
 
 	// 4. 节点执行器
@@ -188,10 +195,18 @@ func resolveEngineConfig(store *config.Store, maxParallelFallback int, modelDef 
 	return ec
 }
 
+// analyzerMaxTokensFallback 是分析器输出预算的代码兜底值。
+//
+// 该预算由「思考(reasoning) + JSON 正文」共享，而非正文独占：思考型模型
+// （GLM-4.6+ 服务端默认开启 thinking）会先产出 reasoning 再写正文，两者
+// 都从 max_tokens 里扣。取值过小的直接后果是 DAG JSON 中途被硬截断，
+// 解析报 "unexpected end of JSON input" 并耗尽全部重试。
+const analyzerMaxTokensFallback = 32768
+
 // analyzerMaxTokens 推导分析器最大输出 token：
 //  1. 运营显式配置了 workflow.analyzer_max_tokens（>0）→ 直接用；
 //  2. 否则回退到当前模型 ModelDef.MaxTokens（模型自身配置，避免写死）；
-//  3. 两者都无 → 代码兜底默认 8192。
+//  3. 两者都无 → 代码兜底 analyzerMaxTokensFallback。
 func analyzerMaxTokens(cfgMaxTokens int, modelDef *config.ModelDef) int {
 	if cfgMaxTokens > 0 {
 		return cfgMaxTokens
@@ -199,7 +214,10 @@ func analyzerMaxTokens(cfgMaxTokens int, modelDef *config.ModelDef) int {
 	if modelDef != nil && modelDef.MaxTokens > 0 {
 		return modelDef.MaxTokens
 	}
-	return 8192
+	// 兜底值必须容纳「思考 + JSON 正文」：思考型模型（GLM-4.6+ 服务端默认开启
+	// thinking）的 reasoning 与正文共享同一 max_tokens 预算，且先于正文产出。
+	// 曾用 8192 导致 DAG JSON 被硬截断、analyzer 连续 5 次解析失败。
+	return analyzerMaxTokensFallback
 }
 
 func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.ModelDef) EngineConfig {
