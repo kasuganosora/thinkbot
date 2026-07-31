@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -311,7 +312,8 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 }
 
 // parseDAGSpec 解析 LLM 返回的 JSON 为 dagSpec。
-// 支持容错：提取 JSON 块、清理 markdown 包裹。
+// 支持容错：提取 JSON 块、清理 markdown 包裹、截断恢复（从被截断的
+// 数组中提取所有完整节点对象，丢弃不完整的尾部）。
 func parseDAGSpec(raw string) (*dagSpec, error) {
 	raw = strings.TrimSpace(raw)
 
@@ -338,15 +340,231 @@ func parseDAGSpec(raw string) (*dagSpec, error) {
 	}
 
 	var spec dagSpec
-	if err := strutil.ExtractJSON(raw, &spec); err != nil {
-		return nil, errs.Wrapf(err, "invalid JSON: %s", strutil.Truncate(raw, 200))
+	if err := strutil.ExtractJSON(raw, &spec); err == nil {
+		if len(spec.Nodes) == 0 {
+			return nil, errs.New("analyzer returned 0 nodes")
+		}
+		return &spec, nil
 	}
 
-	if len(spec.Nodes) == 0 {
-		return nil, errs.New("analyzer returned 0 nodes")
+	// ---- 截断恢复：LLM 输出因 max_tokens 限制被截断时，JSON 数组可能不完整。
+	// 策略：扫描原始输出，提取 nodes 数组中每个完整的 { } 对象（括号配平），
+	// 丢弃末尾截断的不完整对象，用完整对象重新组装成合法 JSON 再解析。
+	// 这能把「全量解析失败」降级为「少取最后一个节点」，显著提高成功率。
+	if recovered, ok := recoverTruncatedDAGNodes(raw); ok && len(recovered.Nodes) > 0 {
+		return recovered, nil
 	}
 
-	return &spec, nil
+	return nil, errs.Wrapf(strutil.ExtractJSON(raw, &spec), "invalid JSON: %s", strutil.Truncate(raw, 200))
+}
+
+// recoverTruncatedDAGNodes 从被截断的 LLM 输出中恢复完整的 DAG 节点。
+//
+// 当模型输出因 max_tokens 限制被截断时，JSON 数组的末尾通常不完整（缺少闭合的
+// } 或 ]）。本函数通过括号配平扫描提取 nodes 数组中每个结构完整的对象，
+// 丢弃尾部截断的部分，用恢复出的完整节点重新组装 dagSpec。
+//
+// 返回 (recoveredSpec, true) 表示成功恢复了至少一个节点；
+// 返回 (nil, false) 表示无法恢复（输出中不存在任何完整节点对象）。
+func recoverTruncatedDAGNodes(raw string) (*dagSpec, bool) {
+	// 先尝试用 ExtractJSON 提取最外层 { } 对象（可能 "nodes" 值被截断但外层完整）
+	var outer map[string]any
+	if err := strutil.ExtractJSON(raw, &outer); err == nil {
+		if nodesRaw, ok := outer["nodes"]; ok {
+			// nodes 可能是完整数组或截断数组
+			if arr, ok := nodesRaw.([]any); ok {
+				if recovered := extractCompleteObjects(arr); len(recovered) > 0 {
+					if nodes := mapsToDagNodes(recovered); len(nodes) > 0 {
+						return &dagSpec{Nodes: nodes}, true
+					}
+				}
+			}
+		}
+	}
+
+	// 外层对象也解析失败：直接在原始文本中扫描 [ ... ] 内的完整对象
+	// 找到 "nodes": [ 之后的内容，逐个提取完整 { ... } 块
+	arrStart := strings.Index(raw, `"nodes"`)
+	if arrStart < 0 {
+		return nil, false
+	}
+	bracketStart := strings.Index(raw[arrStart:], "[")
+	if bracketStart < 0 {
+		return nil, false
+	}
+	arrContent := raw[arrStart+bracketStart+1:]
+
+	var completeObjs []map[string]any
+	pos := 0
+	for pos < len(arrContent) {
+		// 跳过空白和逗号
+		for pos < len(arrContent) && (arrContent[pos] == ' ' || arrContent[pos] == '\n' || arrContent[pos] == '\r' || arrContent[pos] == '\t' || arrContent[pos] == ',') {
+			pos++
+		}
+		if pos >= len(arrContent) || arrContent[pos] != '{' {
+			break // 遇到了非 { 字符（可能是 ] 或 EOF），说明后续无更多完整对象
+		}
+
+		objStr, balanced := extractBalancedGo(arrContent[pos:], '{', '}')
+		if !balanced {
+			break // 当前对象不完整，后续也不会有完整的了
+		}
+
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(objStr), &obj); err != nil {
+			pos += len(objStr) + 1 // 跳过这个无法解析的对象
+			continue
+		}
+		completeObjs = append(completeObjs, obj)
+		pos += len(objStr)
+	}
+
+	if len(completeObjs) == 0 {
+		return nil, false
+	}
+	if nodes := mapsToDagNodes(completeObjs); len(nodes) > 0 {
+		return &dagSpec{Nodes: nodes}, true
+	}
+	return nil, false
+}
+
+// extractBalancedGo 是 Go 原生实现的括号配平扫描（与 strutil.extractBalanced 逻辑一致，
+// 但返回 (string, bool) 以便在 analyzer 包内使用，避免循环依赖）。
+func extractBalancedGo(s string, open, close byte) (string, bool) {
+	if len(s) == 0 || s[0] != open {
+		return "", false
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return s[:i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// extractCompleteObjects 从 []any 数组中提取所有可序列化为完整 JSON 的元素。
+// 对于截断场景，末尾元素通常是 map[string]any 且包含不完整的字符串值，
+// json.Marshal 会失败；这些元素将被丢弃。
+func extractCompleteObjects(arr []any) []map[string]any {
+	var result []map[string]any
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		// 验证该对象可以合法序列化（字段值都是完整类型）
+		if _, err := json.Marshal(obj); err != nil {
+			continue // 截断导致的半成品对象，丢弃
+		}
+		result = append(result, obj)
+	}
+	return result
+}
+
+func coalesceString(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func coalesceStringSlice(m map[string]any, key string) []string {
+	if v, ok := m[key].([]any); ok {
+		s := make([]string, 0, len(v))
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				s = append(s, str)
+			}
+		}
+		return s
+	}
+	if v, ok := m[key].(string); ok && v != "" {
+		return []string{v}
+	}
+	return nil
+}
+
+// mapsToDagNodes 将 []map[string]any 转换为 dagSpec.Nodes 的匿名结构体切片。
+// 用于截断恢复场景：从 LLM 截断输出中提取的完整对象需要映射到强类型节点。
+func mapsToDagNodes(objs []map[string]any) []struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Task          string   `json:"task"`
+	SystemPrompt  string   `json:"systemPrompt"`
+	Dependencies  []string `json:"dependencies"`
+	Review        bool     `json:"review"`
+	ReviewPrompt  string   `json:"reviewPrompt"`
+	MaxRetries    int      `json:"maxRetries"`
+	MaxIterations int      `json:"maxIterations"`
+	Feedback      []string `json:"feedback"`
+} {
+	nodes := make([]struct {
+		ID            string   `json:"id"`
+		Name          string   `json:"name"`
+		Task          string   `json:"task"`
+		SystemPrompt  string   `json:"systemPrompt"`
+		Dependencies  []string `json:"dependencies"`
+		Review        bool     `json:"review"`
+		ReviewPrompt  string   `json:"reviewPrompt"`
+		MaxRetries    int      `json:"maxRetries"`
+		MaxIterations int      `json:"maxIterations"`
+		Feedback      []string `json:"feedback"`
+	}, 0, len(objs))
+	for _, obj := range objs {
+		node := struct {
+			ID            string   `json:"id"`
+			Name          string   `json:"name"`
+			Task          string   `json:"task"`
+			SystemPrompt  string   `json:"systemPrompt"`
+			Dependencies  []string `json:"dependencies"`
+			Review        bool     `json:"review"`
+			ReviewPrompt  string   `json:"reviewPrompt"`
+			MaxRetries    int      `json:"maxRetries"`
+			MaxIterations int      `json:"maxIterations"`
+			Feedback      []string `json:"feedback"`
+		}{
+			ID:            coalesceString(obj, "id"),
+			Name:          coalesceString(obj, "name"),
+			Task:          coalesceString(obj, "task"),
+			SystemPrompt:   coalesceString(obj, "systemPrompt"),
+			ReviewPrompt:   coalesceString(obj, "reviewPrompt"),
+			Dependencies:  coalesceStringSlice(obj, "dependencies"),
+			Feedback:       coalesceStringSlice(obj, "feedback"),
+		}
+		if v, ok := obj["review"].(bool); ok {
+			node.Review = v
+		}
+		if v, ok := obj["maxRetries"].(float64); ok {
+			node.MaxRetries = int(v)
+		}
+		if v, ok := obj["maxIterations"].(float64); ok {
+			node.MaxIterations = int(v)
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes
 }
 
 // GenerateWorkflowID 生成工作流 ID。

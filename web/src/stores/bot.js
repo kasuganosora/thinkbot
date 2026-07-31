@@ -671,7 +671,8 @@ export const useBotStore = defineStore('bot', () => {
         if (wid) activeWorkflowId.value = wid
         // task_status 工具返回的是完整 GetStatus JSON（含 goalIteration/analyzeMessage/status 等）
         // 将其写入 activeWorkflowStatus 供 SessionWorkflowPanel 实时合并，解决头部卡片与工具结果不同步
-        if (wid && payload && typeof payload === 'object' && payload.status) {
+        // 守卫：只接受当前活跃 workflow 的状态快照，防止旧 workflow 的残留脏数据覆盖新状态
+        if (wid && payload && typeof payload === 'object' && payload.status && wid === activeWorkflowId.value) {
           activeWorkflowStatus.value = { ...payload, _ts: Date.now() }
         }
       },
