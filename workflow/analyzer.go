@@ -251,8 +251,20 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		spec, perr := parseDAGSpec(raw)
 		if perr != nil {
 			lastErr = errs.Wrapf(perr, "failed to parse analyzer output")
-			logger.Warnw("analyzer parse failed, will retry",
-				"attempt", attempt, "max_attempts", maxAttempts, "error", perr)
+			// 输出被 max_tokens 硬截断时，报错只是笼统的 "unexpected end of JSON input"，
+			// 极易被误判成「模型不听话」。这里显式点名预算，让日志直接指向可调参数。
+			if looksTruncated(perr) {
+				logger.Warnw("analyzer output looks TRUNCATED by the output budget, will retry",
+					"attempt", attempt, "max_attempts", maxAttempts,
+					"raw_len", len(raw),
+					"analyzer_max_tokens", a.ec.AnalyzerMaxTokens,
+					"hint", "max_tokens is shared by reasoning + body on thinking models; raise workflow.analyzer_max_tokens",
+					"error", perr)
+			} else {
+				logger.Warnw("analyzer parse failed, will retry",
+					"attempt", attempt, "max_attempts", maxAttempts,
+					"raw_len", len(raw), "error", perr)
+			}
 			continue
 		}
 
@@ -356,6 +368,20 @@ func parseDAGSpec(raw string) (*dagSpec, error) {
 	}
 
 	return nil, errs.Wrapf(strutil.ExtractJSON(raw, &spec), "invalid JSON: %s", strutil.Truncate(raw, 200))
+}
+
+// looksTruncated 判断解析错误是否源于「输出被硬截断」而非「模型格式不对」。
+//
+// 被 max_tokens 截断时 encoding/json 只会报 "unexpected end of JSON input"
+// 一类的输入提前结束错误，和「模型返回了说明文字」在日志里长得几乎一样。
+// 区分开来，才能把排查方向直接指向输出预算而不是提示词。
+func looksTruncated(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unexpected end of json") ||
+		strings.Contains(msg, "unexpected eof")
 }
 
 // recoverTruncatedDAGNodes 从被截断的 LLM 输出中恢复完整的 DAG 节点。
