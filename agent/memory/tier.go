@@ -131,7 +131,16 @@ func DefaultTierConfigs() map[MemoryTier]TierConfig {
 			MaxEntries: 200,
 			// 工作记忆需保留到下次梦境运行（每天 03:00）并为 2 天 lookback 留余量。
 			// 原 30min TTL 会导致白天产生的笔记到半夜被 GC 清掉，dreaming 因此永远空跑。
-			TTL:                  48 * time.Hour,
+			//
+			// 为何是 14 天而不是刚好覆盖一次调度的 48h：
+			// TTL 同时是「服务宕机容错窗口」。loadFromDB 会跳过 ExpiresAt<now 的 L0，
+			// 不载入内存 buckets → discoverScopes 扫不到 scope → dreaming 静默空跑
+			// （报 "no scopes to process"），未固化的工作记忆就此永久丢失。
+			// 48h 意味着服务停机超过 2 天（周末 / 机器休眠 / 忘记拉起）就丢记忆，
+			// 2026-08-03 即因此丢失过一批待固化 L0。放宽到 14 天以覆盖此类停机。
+			// 代价可控：MaxEntries=200 仍限制内存占用，且已固化条目会带
+			// dream_processed 标记被 Light 阶段跳过，不会重复晋升。
+			TTL:                  14 * 24 * time.Hour,
 			ConsolidateThreshold: 20,
 		},
 		Tier1LongTerm: {
