@@ -29,11 +29,19 @@ func ToModel(wf *Workflow) (*dao.WorkflowModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	// UpdatedAt 命中 gorm 的 autoUpdateTime 约定，经 db.Save 时会被 gorm 用自己的
+	// time.Now() 覆盖；Repository.Save 会把 gorm 回填的真实时间戳同步回缓存快照，
+	// 以保证 Get 的新鲜度比对不会误判。此处的兜底是给「不经 gorm 直接使用 model」的
+	// 场景用的，保证字段非零。
+	updatedAt := wf.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
 	return &dao.WorkflowModel{
 		ID:        wf.ID,
 		Data:      string(data),
 		CreatedAt: wf.CreatedAt,
-		UpdatedAt: time.Now(),
+		UpdatedAt: updatedAt,
 	}, nil
 }
 
