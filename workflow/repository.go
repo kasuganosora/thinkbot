@@ -71,6 +71,15 @@ func (r *Repository) Save(wf *Workflow) error {
 				"workflow_id", wf.ID, "error", err)
 			return errs.Wrapf(err, "failed to save workflow %s to DB", wf.ID)
 		}
+		// 用 DB 实际写入的时间戳校准缓存快照。
+		//
+		// WorkflowModel.UpdatedAt 命中 gorm 的 autoUpdateTime 约定，保存时会被 gorm
+		// 用自己的 time.Now() 覆盖，比上面赋的值略晚。若不校准，Get 的新鲜度比对会
+		// 认为「自己刚写的缓存已过期」，每次读都白白重新从 DB 反序列化一遍。
+		if !model.UpdatedAt.IsZero() {
+			snapshot.UpdatedAt = model.UpdatedAt
+			wf.UpdatedAt = model.UpdatedAt
+		}
 	}
 
 	return nil
@@ -101,35 +110,72 @@ func (r *Repository) evictTerminal() {
 	}
 }
 
-// Get 从内存缓存获取工作流，缓存未命中时回退到 DB。
+// Get 获取工作流。
+//
+// 内存缓存只作为「本实例写过的快照」的快速通道，命中后仍需与 DB 的 updated_at 比对，
+// 因为**同一进程里存在多个 Repository 实例**：
+//   - api/botservice.go 为每个 bot 建一个引擎（带工作空间工具），它才是真正执行工作流、写 DB 的那个
+//   - api/workflow_service.go 另建一个引擎，专门服务 HTTP 查询
+//
+// 两者各有独立缓存。若无条件信任缓存，API 侧会永远返回自己创建工作流那一刻的快照
+// （status=analyzing、nodeCount=0），而实际执行进度只存在于 bot 侧缓存与 DB 中——
+// 表现为「后端在跑、UI 永远显示分析中」，且刷新、清缓存都无效。
 func (r *Repository) Get(id string) (*Workflow, error) {
 	r.mu.RLock()
-	if wf, ok := r.cache[id]; ok {
-		// 返回深拷贝，确保调用方的修改不影响缓存中的快照
-		clone := cloneWorkflow(wf)
-		r.mu.RUnlock()
-		return clone, nil
+	cached, hit := r.cache[id]
+	var cachedAt time.Time
+	if hit {
+		cachedAt = cached.UpdatedAt
 	}
 	r.mu.RUnlock()
 
-	// 回退到 DB
-	if r.db != nil {
-		var model dao.WorkflowModel
-		if err := r.db.First(&model, "id = ?", id).Error; err != nil {
-			return nil, errs.Wrapf(err, "workflow %s not found", id)
+	// 纯内存模式（db == nil）：缓存即唯一数据源。
+	if r.db == nil {
+		if hit {
+			r.mu.RLock()
+			clone := cloneWorkflow(cached)
+			r.mu.RUnlock()
+			return clone, nil
 		}
-		wf, err := FromModel(&model)
-		if err != nil {
-			return nil, errs.Wrapf(err, "failed to deserialize workflow %s", id)
-		}
-		// 填充缓存（存入 clone），FromModel 返回的 wf 已是独立对象，可直接返回
-		r.mu.Lock()
-		r.cache[id] = cloneWorkflow(wf)
-		r.mu.Unlock()
-		return wf, nil
+		return nil, errs.Newf("workflow %s not found", id)
 	}
 
-	return nil, errs.Newf("workflow %s not found", id)
+	if hit {
+		// 只取 updated_at 做新鲜度判断，避免每次都反序列化整个 Data。
+		var head dao.WorkflowModel
+		err := r.db.Model(&dao.WorkflowModel{}).
+			Select("id", "updated_at").
+			First(&head, "id = ?", id).Error
+		if err != nil {
+			// DB 不可用时退回缓存，保证可用性（宁可旧也不要报错）。
+			r.mu.RLock()
+			clone := cloneWorkflow(cached)
+			r.mu.RUnlock()
+			return clone, nil
+		}
+		// 缓存不比 DB 旧 → 直接用缓存。
+		if !head.UpdatedAt.After(cachedAt) {
+			r.mu.RLock()
+			clone := cloneWorkflow(cached)
+			r.mu.RUnlock()
+			return clone, nil
+		}
+		// 否则落到下面重新从 DB 载入。
+	}
+
+	var model dao.WorkflowModel
+	if err := r.db.First(&model, "id = ?", id).Error; err != nil {
+		return nil, errs.Wrapf(err, "workflow %s not found", id)
+	}
+	wf, err := FromModel(&model)
+	if err != nil {
+		return nil, errs.Wrapf(err, "failed to deserialize workflow %s", id)
+	}
+	// 填充缓存（存入 clone），FromModel 返回的 wf 已是独立对象，可直接返回
+	r.mu.Lock()
+	r.cache[id] = cloneWorkflow(wf)
+	r.mu.Unlock()
+	return wf, nil
 }
 
 // FindNonTerminal 从 DB 中查找所有非终态工作流（analyzing/running/interrupted）。
