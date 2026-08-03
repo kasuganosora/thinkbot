@@ -435,16 +435,16 @@ type WorkflowConfig struct {
 // DefaultWorkflowConfig 返回引擎默认配置值。
 func DefaultWorkflowConfig() WorkflowConfig {
 	return WorkflowConfig{
-		MaxParallel:         3,
-		MaxRetries:          2,
-		MaxIterations:       3,
-		RetryInitialMS:      500,
-		RetryMaxMS:          10000,
-		ScheduleIntervalMS:  200,
-		AnalyzerTemperature: 0.3,
+		MaxParallel:            3,
+		MaxRetries:             2,
+		MaxIterations:          3,
+		RetryInitialMS:         500,
+		RetryMaxMS:             10000,
+		ScheduleIntervalMS:     200,
+		AnalyzerTemperature:    0.3,
 		AnalyzerStuckTimeoutMS: 180000,
 		AnalyzerMaxDurationMS:  600000,
-		GoalMaxIterations:       5,
+		GoalMaxIterations:      5,
 	}
 }
 
@@ -452,13 +452,13 @@ func DefaultWorkflowConfig() WorkflowConfig {
 func (b *Builder) GetWorkflowConfig() WorkflowConfig {
 	d := DefaultWorkflowConfig()
 	return WorkflowConfig{
-		MaxParallel:         b.store.GetInt(KeyWorkflowMaxParallel, d.MaxParallel),
-		MaxRetries:          b.store.GetInt(KeyWorkflowMaxRetries, d.MaxRetries),
-		MaxIterations:       b.store.GetInt(KeyWorkflowMaxIterations, d.MaxIterations),
-		RetryInitialMS:      b.store.GetInt(KeyWorkflowRetryInitialMS, d.RetryInitialMS),
-		RetryMaxMS:          b.store.GetInt(KeyWorkflowRetryMaxMS, d.RetryMaxMS),
-		ScheduleIntervalMS:  b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
-		AnalyzerTemperature: b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
+		MaxParallel:            b.store.GetInt(KeyWorkflowMaxParallel, d.MaxParallel),
+		MaxRetries:             b.store.GetInt(KeyWorkflowMaxRetries, d.MaxRetries),
+		MaxIterations:          b.store.GetInt(KeyWorkflowMaxIterations, d.MaxIterations),
+		RetryInitialMS:         b.store.GetInt(KeyWorkflowRetryInitialMS, d.RetryInitialMS),
+		RetryMaxMS:             b.store.GetInt(KeyWorkflowRetryMaxMS, d.RetryMaxMS),
+		ScheduleIntervalMS:     b.store.GetInt(KeyWorkflowScheduleInterval, d.ScheduleIntervalMS),
+		AnalyzerTemperature:    b.store.GetFloat64(KeyWorkflowAnalyzerTemp, d.AnalyzerTemperature),
 		AnalyzerStuckTimeoutMS: b.store.GetInt(KeyWorkflowAnalyzerStuckTimeout, d.AnalyzerStuckTimeoutMS),
 		AnalyzerMaxDurationMS:  b.store.GetInt(KeyWorkflowAnalyzerMaxDuration, d.AnalyzerMaxDurationMS),
 		GoalMaxIterations:      b.store.GetInt(KeyWorkflowGoalMaxIterations, d.GoalMaxIterations),
@@ -946,13 +946,13 @@ func DefaultMap() map[string]string {
 		// System
 		KeySystemTimezone: defaultTimezoneName(),
 		// Workflow
-		KeyWorkflowMaxParallel:       "3",
-		KeyWorkflowMaxRetries:        "2",
-		KeyWorkflowMaxIterations:     "3",
-		KeyWorkflowRetryInitialMS:    "500",
-		KeyWorkflowRetryMaxMS:        "10000",
-		KeyWorkflowScheduleInterval:  "200",
-		KeyWorkflowAnalyzerTemp:      "0.3",
+		KeyWorkflowMaxParallel:      "3",
+		KeyWorkflowMaxRetries:       "2",
+		KeyWorkflowMaxIterations:    "3",
+		KeyWorkflowRetryInitialMS:   "500",
+		KeyWorkflowRetryMaxMS:       "10000",
+		KeyWorkflowScheduleInterval: "200",
+		KeyWorkflowAnalyzerTemp:     "0.3",
 		// 需求分析器输出长度 cap（针对「生成 DAG JSON」这一具体任务的输出上限）。
 		//
 		// 注意：这是「思考 + 正文」共享的总输出预算，不是「正文可用长度」。
@@ -964,8 +964,8 @@ func DefaultMap() map[string]string {
 		// 32768 可覆盖复杂需求下的长思考，同时仍远低于模型 128K 上限，不会浪费预算。
 		// 留空/0 时回退到当前模型 ModelDef.MaxTokens（真实能力值，如 glm-5.2=128K）。
 		KeyWorkflowAnalyzerStuckTimeout: "180",
-		KeyWorkflowAnalyzerMaxDuration:   "600000",
-		KeyWorkflowGoalMaxIterations:      "5",
+		KeyWorkflowAnalyzerMaxDuration:  "600000",
+		KeyWorkflowGoalMaxIterations:    "5",
 		// Engagement
 		KeyEngagementEnabled:            "false",
 		KeyEngagementReplyProbability:   "0.15",

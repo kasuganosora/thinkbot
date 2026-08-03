@@ -214,13 +214,13 @@ func (s *Server) registerRoutes() {
 		chat := authed.Group("/chat")
 		chat.Use(requirePermission(auth.PermBotUse))
 		{
-			chat.GET("/bots", s.handleChatBots)       // 可聊天的 Bot 列表
-			chat.GET("/history", s.handleChatHistory) // 聊天历史（游标分页）
-			chat.POST("/send", s.handleChatSend)      // SSE 流式聊天
-			chat.POST("/abort", s.handleChatAbort)    // 中止正在执行的聊天
-			chat.POST("/append", s.handleChatAppend)  // 生成中追加用户补充（同一轮）
+			chat.GET("/bots", s.handleChatBots)          // 可聊天的 Bot 列表
+			chat.GET("/history", s.handleChatHistory)    // 聊天历史（游标分页）
+			chat.POST("/send", s.handleChatSend)         // SSE 流式聊天
+			chat.POST("/abort", s.handleChatAbort)       // 中止正在执行的聊天
+			chat.POST("/append", s.handleChatAppend)     // 生成中追加用户补充（同一轮）
 			chat.GET("/active", s.handleChatActiveTasks) // 查询后台仍在执行的任务 traceID
-			chat.GET("/resume", s.handleChatResume)     // 按 traceID 重连续流（SSE）
+			chat.GET("/resume", s.handleChatResume)      // 按 traceID 重连续流（SSE）
 
 			// 运营操作（admin）：重置 token 预算，解除预算永久卡死导致 bot 无响应
 			chatAdmin := chat.Group("")

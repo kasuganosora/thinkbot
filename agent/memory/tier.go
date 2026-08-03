@@ -747,18 +747,18 @@ func tieredEntryToModel(e TieredEntry) dao.TieredMemoryModel {
 		}
 	}
 	return dao.TieredMemoryModel{
-		ID:            e.ID,
-		Tier:          int(e.Tier),
-		ScopeKind:     string(e.Scope.Kind),
-		ScopeID:       e.Scope.ID,
-		Content:       e.Content,
-		Category:      e.Category,
-		Source:        e.Source,
-		Importance:    e.Importance,
-		MetadataJSON:  metadataJSON,
-		ExpiresAt:     e.ExpiresAt,
-		PromotedFrom:  int(e.PromotedFrom),
-		CreatedAt:     e.CreatedAt,
+		ID:             e.ID,
+		Tier:           int(e.Tier),
+		ScopeKind:      string(e.Scope.Kind),
+		ScopeID:        e.Scope.ID,
+		Content:        e.Content,
+		Category:       e.Category,
+		Source:         e.Source,
+		Importance:     e.Importance,
+		MetadataJSON:   metadataJSON,
+		ExpiresAt:      e.ExpiresAt,
+		PromotedFrom:   int(e.PromotedFrom),
+		CreatedAt:      e.CreatedAt,
 		LastAccessedAt: e.LastAccessedAt,
 	}
 }
@@ -771,14 +771,14 @@ func modelToTiedEntry(m dao.TieredMemoryModel) TieredEntry {
 	}
 	return TieredEntry{
 		Entry: Entry{
-			ID:            m.ID,
-			Scope:         Scope{Kind: ScopeKind(m.ScopeKind), ID: m.ScopeID},
-			Content:       m.Content,
-			Category:      m.Category,
-			Source:        m.Source,
-			Importance:    m.Importance,
-			Metadata:      metadata,
-			CreatedAt:     m.CreatedAt,
+			ID:             m.ID,
+			Scope:          Scope{Kind: ScopeKind(m.ScopeKind), ID: m.ScopeID},
+			Content:        m.Content,
+			Category:       m.Category,
+			Source:         m.Source,
+			Importance:     m.Importance,
+			Metadata:       metadata,
+			CreatedAt:      m.CreatedAt,
 			LastAccessedAt: m.LastAccessedAt,
 		},
 		Tier:         MemoryTier(m.Tier),

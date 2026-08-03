@@ -59,13 +59,13 @@ const (
 
 // Workflow 键。
 const (
-	KeyWorkflowMaxParallel       = "workflow.max_parallel"
-	KeyWorkflowMaxRetries        = "workflow.max_retries"
-	KeyWorkflowMaxIterations     = "workflow.max_iterations"
-	KeyWorkflowRetryInitialMS    = "workflow.retry_initial_ms"
-	KeyWorkflowRetryMaxMS        = "workflow.retry_max_ms"
-	KeyWorkflowScheduleInterval  = "workflow.schedule_interval_ms"
-	KeyWorkflowAnalyzerTemp      = "workflow.analyzer_temperature"
+	KeyWorkflowMaxParallel      = "workflow.max_parallel"
+	KeyWorkflowMaxRetries       = "workflow.max_retries"
+	KeyWorkflowMaxIterations    = "workflow.max_iterations"
+	KeyWorkflowRetryInitialMS   = "workflow.retry_initial_ms"
+	KeyWorkflowRetryMaxMS       = "workflow.retry_max_ms"
+	KeyWorkflowScheduleInterval = "workflow.schedule_interval_ms"
+	KeyWorkflowAnalyzerTemp     = "workflow.analyzer_temperature"
 	// 注意：这里曾有 workflow.analyzer_max_tokens，已移除。
 	// 分析器的输出预算不再单独配置，统一跟随 bot 所选模型的 maxTokens
 	// （provider.<x>.models[].maxTokens → ModelDef.MaxTokens）。

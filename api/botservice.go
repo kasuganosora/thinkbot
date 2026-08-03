@@ -63,14 +63,14 @@ type BotService struct {
 	eventBus      outbound.EventBus
 	statsRecorder llm.UsageRecorder // 可选，nil 时不记录 token 统计
 
-	mu              sync.RWMutex
-	channels        map[string]*WebChannel         // botID → WebChannel
-	botInstances    map[string]*bot.Bot            // botID → running Bot
-	dreamingBundles map[string]*bot.DreamingBundle // botID → DreamingBundle
-	cancelFuncs     map[string]context.CancelFunc  // botID → bot context cancel
-	closeFuncs      map[string]func()              // botID → sub-agent managers cleanup
-	messageCancels  map[string]context.CancelFunc  // "botID:traceID" → message context cancel
-	messageInterrupts map[string]chan string        // "botID:traceID" → 用户中途追加通道（生成中补充）
+	mu                sync.RWMutex
+	channels          map[string]*WebChannel         // botID → WebChannel
+	botInstances      map[string]*bot.Bot            // botID → running Bot
+	dreamingBundles   map[string]*bot.DreamingBundle // botID → DreamingBundle
+	cancelFuncs       map[string]context.CancelFunc  // botID → bot context cancel
+	closeFuncs        map[string]func()              // botID → sub-agent managers cleanup
+	messageCancels    map[string]context.CancelFunc  // "botID:traceID" → message context cancel
+	messageInterrupts map[string]chan string         // "botID:traceID" → 用户中途追加通道（生成中补充）
 
 	tokenBudget *pipeline.TokenBudgetState // 共享 token 预算状态（支持空闲自动重置 / 手动重置）
 }
@@ -87,20 +87,20 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
 	return &BotService{
-		db:              db,
-		store:           store,
-		mgr:             mgr,
-		logger:          logger.With("component", "bot_service"),
-		tp:              tp,
-		mp:              mp,
-		eventBus:        eventBus,
-		statsRecorder:   statsRecorder,
-		channels:        make(map[string]*WebChannel),
-		botInstances:    make(map[string]*bot.Bot),
-		dreamingBundles: make(map[string]*bot.DreamingBundle),
-		cancelFuncs:     make(map[string]context.CancelFunc),
-		closeFuncs:      make(map[string]func()),
-		messageCancels:  make(map[string]context.CancelFunc),
+		db:                db,
+		store:             store,
+		mgr:               mgr,
+		logger:            logger.With("component", "bot_service"),
+		tp:                tp,
+		mp:                mp,
+		eventBus:          eventBus,
+		statsRecorder:     statsRecorder,
+		channels:          make(map[string]*WebChannel),
+		botInstances:      make(map[string]*bot.Bot),
+		dreamingBundles:   make(map[string]*bot.DreamingBundle),
+		cancelFuncs:       make(map[string]context.CancelFunc),
+		closeFuncs:        make(map[string]func()),
+		messageCancels:    make(map[string]context.CancelFunc),
 		messageInterrupts: make(map[string]chan string),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
@@ -408,7 +408,7 @@ const (
 // HardMaxSteps(hard，面向用户「步数限制」设置)：
 //   - > 0  → 有限硬上限（用户设置的具体步数）。
 //   - == 0 → 不限制（无限）：用户未设上限，Bot 跑到任务完成为止，
-//            不会因步数预算耗尽被腰斩。这是默认行为。
+//     不会因步数预算耗尽被腰斩。这是默认行为。
 //   - < 0  → 内置默认安全网（soft * defaultHardMultiplier），历史/内部语义。
 //
 // 返回值中 hard==0 表示不限制，交由 loopController 解释为无限。
@@ -588,7 +588,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// （exec/读/写/列目录等），使其能像主 Agent 的 SubAgent 一样操作仓库——
 		// 例如「审查并修复代码」类目标模式可真正读取源码、运行 go build/vet、落地修改。
 		// 经 scope 自动排除 workflow/spawn/记忆工具，不会套娃。
-		ToolMgr:  toolMgr,
+		ToolMgr:   toolMgr,
 		ToolBotID: id,
 	})
 	if err := workflow.RegisterTools(toolMgr, wfMgr); err != nil {

@@ -7,9 +7,9 @@ import (
 
 func deferTestTool(name string, deferred bool) Tool {
 	return Tool{
-		Name:        name,
-		Description: "desc for " + name,
-		Parameters:  map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
+		Name:         name,
+		Description:  "desc for " + name,
+		Parameters:   map[string]any{"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}}},
 		DeferredLoad: deferred,
 		Execute: func(ctx *ToolExecContext, input any) (any, error) {
 			return "ok", nil
