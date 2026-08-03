@@ -879,24 +879,31 @@ func (m *Manager) Control(ctx context.Context, wfID string, req ControlRequest) 
 		if _, exists := wf.GetNode(req.NodeID); !exists {
 			return nil, errs.Newf("node %q not found in workflow %q", req.NodeID, wfID)
 		}
-		// 工作流已完成时 inst 为 nil，先检查 ok 防止 nil pointer panic
-		if !ok {
-			return nil, errs.New("workflow is not actively running, cannot retry")
+
+		// 工作流仍在跑：交给活跃 scheduler 处理（它掌握当前的并发与依赖状态）。
+		if ok {
+			m.mu.RLock()
+			scheduler := inst.scheduler
+			m.mu.RUnlock()
+			if scheduler != nil {
+				scheduler.SubmitRetry(req.NodeID)
+				return &ControlResult{
+					WorkflowID: wfID,
+					Action:     "retry",
+					Success:    true,
+					Message:    fmt.Sprintf("节点 %s 的重试请求已提交", req.NodeID),
+				}, nil
+			}
+			// 已注册实例但 scheduler 尚未创建（analyzing 阶段）：此时还没有节点可重试。
+			return nil, errs.New("任务仍在分析中，暂无可重试的子任务")
 		}
-		m.mu.RLock()
-		scheduler := inst.scheduler
-		m.mu.RUnlock()
-		if scheduler != nil {
-			scheduler.SubmitRetry(req.NodeID)
-		} else {
-			return nil, errs.New("workflow is not actively running, cannot retry")
-		}
-		return &ControlResult{
-			WorkflowID: wfID,
-			Action:     "retry",
-			Success:    true,
-			Message:    fmt.Sprintf("节点 %s 的重试请求已提交", req.NodeID),
-		}, nil
+
+		// 工作流已进入终态（failed/terminated/completed）：调度器早已退出、running
+		// 实例被 cleanupRunning 清理。旧逻辑在此直接报
+		// "workflow is not actively running, cannot retry"，使 UI 上的「重试」按钮
+		// 恰好在最需要它的时刻（节点失败、工作流收尾之后）完全不可用。
+		// 正确做法是重新拉起调度，从该节点续跑。
+		return m.restartFromNode(wf, req.NodeID)
 
 	default:
 		return nil, errs.Newf("unknown action: %s (use 'retry' or 'terminate')", req.Action)
@@ -906,6 +913,127 @@ func (m *Manager) Control(ctx context.Context, wfID string, req ControlRequest) 
 // ============================================================================
 // 内部辅助
 // ============================================================================
+
+// resetForRetry 把目标节点及被级联跳过的下游节点重置为pending，返回复活的下游数量。
+//
+// 抽成独立函数是为了让「重置了哪些状态」可以被单独验证——一旦调度 goroutine 起来，
+// 它会立刻改写这些字段，测试再去断言就变成和后台抢时序。
+//
+// 已 completed 的节点**刻意不动**：重试一个失败节点不该让前面成功的工作重跑，
+// 那会白烧大量模型调用。
+func resetForRetry(wf *Workflow, nodeID string) int {
+	revived := 0
+	for _, n := range wf.Nodes {
+		switch {
+		case n.ID == nodeID:
+			n.Status = NodePending
+			n.Error = ""
+			n.RetryCount = 0
+			n.IterationCount = 0
+			n.StartedAt = nil
+			n.CompletedAt = nil
+		case n.Status == NodeSkipped:
+			// 级联跳过的下游必须复活，否则目标节点跑完后它们仍是终态，
+			// 调度器会直接收尾，整个重试等于白做。
+			n.Status = NodePending
+			n.Error = ""
+			n.RetryCount = 0
+			n.StartedAt = nil
+			n.CompletedAt = nil
+			revived++
+		}
+	}
+	return revived
+}
+
+// restartFromNode 对已进入终态的工作流重新拉起调度，从指定节点续跑。
+//
+// 适用场景：节点失败 → 工作流被判failed → 调度器退出、running 实例被清理。
+// 此时用户点「重试」，不能只把该节点标回 pending 就完事——没有调度器在跑，
+// 没人会去执行它。必须重建调度实例。
+//
+// 重置范围不止目标节点：节点失败时下游会被**级联 skip**，若只重置目标节点，
+// 它跑完后下游仍是 skipped 终态，调度器会直接收尾，整个重试等于白做。
+// 因此这里同时把所有 skipped 节点放回 pending，让它们随依赖满足重新参与调度。
+func (m *Manager) restartFromNode(wf *Workflow, nodeID string) (*ControlResult, error) {
+	if _, exists := wf.GetNode(nodeID); !exists {
+		return nil, errs.Newf("node %q not found in workflow %q", nodeID, wf.ID)
+	}
+
+	// 防止与已有实例重复启动（例如用户连点两次重试）。
+	m.mu.RLock()
+	_, alreadyRunning := m.running[wf.ID]
+	m.mu.RUnlock()
+	if alreadyRunning {
+		return nil, errs.New("工作流已在运行中，无需重启调度")
+	}
+
+	wf.EnsureIndex()
+	// 反序列化得到的 workflow 没有编译缓存，调度前必须重新编译。
+	if !wf.Compiled() {
+		if err := wf.Compile(); err != nil {
+			return nil, errs.Wrapf(err, "DAG 编译失败，无法重试")
+		}
+	}
+
+	// 重置目标节点及被级联跳过的下游。
+	revived := resetForRetry(wf, nodeID)
+
+	wf.Status = WorkflowRunning
+	wf.Error = ""
+	wf.FinishedAt = nil
+	if err := m.repo.Save(wf); err != nil {
+		return nil, errs.Wrapf(err, "failed to persist workflow before retry")
+	}
+
+	// 重建调度实例（与崩溃恢复同一套模式：先注册再启动，确保 runScheduler 能找到 instance）。
+	bgCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	m.mu.Lock()
+	m.running[wf.ID] = &runningInstance{
+		wf:     wf,
+		cancel: cancel,
+		done:   done,
+	}
+	m.mu.Unlock()
+
+	go func(wf *Workflow) {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				m.logger.Errorw("panic in retry workflow goroutine",
+					"workflow_id", wf.ID, "panic", r)
+				wf.Status = WorkflowFailed
+				wf.Error = fmt.Sprintf("internal error: %v", r)
+				_ = m.repo.Save(wf)
+				m.metrics.Failed.Add(1)
+				m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
+					"error": wf.Error,
+				})
+				m.cleanupRunning(wf.ID)
+			}
+		}()
+		m.metrics.Running.Add(1)
+		defer m.metrics.Running.Add(-1)
+
+		m.runScheduler(bgCtx, wf, 0)
+	}(wf)
+
+	m.logger.Infow("restarted terminal workflow for node retry",
+		"workflow_id", wf.ID, "node_id", nodeID, "revived_skipped", revived)
+
+	msg := fmt.Sprintf("已重新启动任务并重试节点 %s", nodeID)
+	if revived > 0 {
+		msg += fmt.Sprintf("（同时恢复 %d 个此前被跳过的子任务）", revived)
+	}
+	return &ControlResult{
+		WorkflowID: wf.ID,
+		Action:     "retry",
+		Success:    true,
+		Message:    msg,
+	}, nil
+}
 
 func (m *Manager) cleanupRunning(wfID string) {
 	m.mu.Lock()
