@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -41,9 +43,36 @@ var workflowToolPromptSection = &tools.ToolPromptSection{
 ## 使用流程
 
 1. **提交任务**：使用 ` + "`task`" + ` 提交任务需求，获取 task_id
-2. **轮询进度**：使用 ` + "`task_status`" + ` 查询任务状态（analyzing → running → completed/failed/terminated）
+2. **等待完成**：使用 ` + "`task_status`" + ` 并传 ` + "`wait: true`" + `，服务端会阻塞直到任务进入终态才返回
 3. **查看详情**：使用 ` + "`task_detail`" + ` 查看各子任务的执行状态和结果（支持平铺和树状视图）
 4. **流程控制**：节点失败时用 ` + "`task_control`" + ` 重试，或终止整个任务
+
+## 等待任务完成：必须用 wait，禁止自行轮询
+
+任务的分析与执行通常需要数分钟到数十分钟。**服务端已提供等待能力，不要自己轮询。**
+
+判断口诀：**想知道任务结果 → 一次 ` + "`task_status(wait: true)`" + ` → 拿到终态再继续。**
+
+正例：
+` + "```" + `
+task(...)                             → 得到 task_id
+task_status(taskId, wait: true)       → 阻塞直到 completed/failed/terminated
+（若返回 timedOut: true，说明仍在跑，可再调一次继续等）
+` + "```" + `
+
+反例（**严禁**，会浪费大量调用轮次并让对话被无意义的进度卡片淹没）：
+` + "```" + `
+task_status(taskId)                   → "仍在分析中，让我继续等待"
+执行命令 sleep 90
+task_status(taskId)                   → "仍在分析中…"
+执行命令 sleep 120
+task_status(taskId)                   → …（重复十几次）
+` + "```" + `
+
+要点：
+- **不要用 ` + "`sleep`" + ` 等待任务**。等待交给 ` + "`task_status(wait: true)`" + `。
+- 不带 wait 的 ` + "`task_status`" + ` 只用于「顺便看一眼当前进度」，不要用它做循环等待。
+- 超时返回不是失败：` + "`timedOut: true`" + ` 表示任务仍在进行，直接再调一次即可。
 
 ## 何时必须优先使用 task（而非逐步手动执行工具）
 
@@ -107,7 +136,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
 			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
 			// 否则模型无从得知该参数的存在。
-			Description: "提交复杂多步任务。对于包含多个步骤、多文件改动、有依赖关系或需要质量审查的复杂任务，你应优先使用此工具而非逐步手动调用工具——它会自动分析需求、拆解为子任务 DAG 图并异步并行执行，且支持结果审查与重试。**当需求出现「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」等验收式表述时，你【必须】传 goalMode: true 提交，且【禁止】用 subagent/delegate 自行内联处理**——目标模式会在审查不通过时自动回退重做，形成「工作→审查→修复→审查」循环直到达标，专为「修复所有 X 直到全部通过」「审查每个模块直到没有新问题」这类有明确验收标准的任务设计。立即返回 task_id，后续通过 task_status 轮询进度。",
+			Description: "提交复杂多步任务。对于包含多个步骤、多文件改动、有依赖关系或需要质量审查的复杂任务，你应优先使用此工具而非逐步手动调用工具——它会自动分析需求、拆解为子任务 DAG 图并异步并行执行，且支持结果审查与重试。**当需求出现「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」等验收式表述时，你【必须】传 goalMode: true 提交，且【禁止】用 subagent/delegate 自行内联处理**——目标模式会在审查不通过时自动回退重做，形成「工作→审查→修复→审查」循环直到达标，专为「修复所有 X 直到全部通过」「审查每个模块直到没有新问题」这类有明确验收标准的任务设计。立即返回 task_id；随后调用一次 task_status(taskId, wait: true) 即可阻塞等到任务结束，**不要自己反复轮询或用 sleep 等待**。",
 			Keywords: []string{
 				"目标模式", "goal mode", "闭环", "迭代", "反复打磨", "直到通过",
 				"直到…为止", "验收", "达标", "审查到没有", "review 到没有", "收敛",
@@ -180,14 +209,33 @@ func statusToolDef(mgr *Manager) tools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "task_status",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description:  "查询任务的当前状态和进度。返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。若任务开启了目标模式，还会返回 goalMode/goalIteration/goalMaxIterations，表示当前处于第几轮闭环迭代。",
-			Keywords:     []string{"任务状态", "进度", "轮询", "目标模式", "闭环轮次", "workflow"},
+			// 注意：DeferredLoad 工具在未加载时只暴露 Name + Description（Parameters 被隐藏），
+			// 因此 wait 这个关键能力必须写进 Description，否则模型根本不知道它存在，
+			// 只会退回到「自己反复调用 + sleep」的低效轮询。
+			Description: "查询任务的当前状态和进度，**并可让服务端代为等待任务结束**。" +
+				"返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。" +
+				"若任务开启了目标模式，还会返回 goalMode/goalIteration/goalMaxIterations，表示当前处于第几轮闭环迭代。\n" +
+				"**强烈建议传 wait: true**：服务端会阻塞直到任务进入终态（成功/失败/终止）才返回，" +
+				"你只需调用一次就能拿到最终结果。**禁止自己反复调用本工具轮询、也禁止用 sleep 等待**——" +
+				"那会浪费大量调用轮次并让对话被无意义的进度卡片淹没。" +
+				"若返回中 timedOut 为 true，表示等待超时而任务仍在进行，此时可再调用一次继续等待。",
+			Keywords: []string{"任务状态", "进度", "轮询", "等待", "阻塞等待", "目标模式", "闭环轮次", "workflow"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"taskId": map[string]any{
 						"type":        "string",
 						"description": "任务 ID（由 task 工具返回）",
+					},
+					"wait": map[string]any{
+						"type": "boolean",
+						"description": "是否由服务端阻塞等待任务进入终态后再返回。默认 false（立即返回当前快照）。" +
+							"等待任务完成时应传 true，这样只需一次调用，避免自行轮询。",
+					},
+					"timeoutSeconds": map[string]any{
+						"type": "integer",
+						"description": "wait=true 时的最长等待秒数。默认 600（10 分钟），上限 1800（30 分钟）。" +
+							"超时不算失败，会返回当前快照并置 timedOut=true。",
 					},
 				},
 				"required": []string{"taskId"},
@@ -201,10 +249,69 @@ func statusToolDef(mgr *Manager) tools.ToolDef {
 				if wfID == "" {
 					return nil, fmt.Errorf("taskId is required")
 				}
-				return mgr.GetStatus(wfID)
+
+				if !asBool(m["wait"]) {
+					return mgr.GetStatus(wfID)
+				}
+
+				// wait 模式：服务端代为轮询，agent 只在终态/超时时被唤醒。
+				timeout := time.Duration(asInt(m["timeoutSeconds"])) * time.Second
+
+				// 等待期间向前端推送进度，避免界面看起来卡死。
+				// SendProgress 仅在流式模式下可用，非流式时为 nil。
+				var onProgress func(*StatusResult, time.Duration)
+				if ctx.SendProgress != nil {
+					onProgress = func(st *StatusResult, waited time.Duration) {
+						ctx.SendProgress(map[string]any{
+							"stream": "stdout",
+							"chunk": fmt.Sprintf("等待任务完成… 状态=%s 已完成 %d/%d 子任务（已等待 %s）\n",
+								st.Status, st.Progress.Completed, st.NodeCount,
+								waited.Truncate(time.Second)),
+						})
+					}
+				}
+
+				return waitForTerminal(ctx, mgr, wfID, timeout, onProgress)
 			}),
 		},
 	}
+}
+
+// asBool 宽松解析布尔入参。
+//
+// LLM 生成的 JSON 里布尔值经常写成字符串（"true"）或数字（1），
+// 严格断言会让参数被静默忽略、功能看似「没生效」。
+func asBool(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "true" || x == "True" || x == "1" || x == "yes"
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	}
+	return false
+}
+
+// asInt 宽松解析整数入参（JSON 数字会被解成 float64，LLM 也可能给字符串）。
+func asInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case string:
+		n, err := strconv.Atoi(x)
+		if err != nil {
+			return 0
+		}
+		return n
+	}
+	return 0
 }
 
 // ============================================================================
