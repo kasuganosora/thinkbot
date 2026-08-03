@@ -211,21 +211,21 @@ func TestParseOOMKill_Missing(t *testing.T) {
 
 func TestIsVerificationCommand(t *testing.T) {
 	cases := map[string]bool{
-		"golangci-lint run ./...":                    true,
-		"go test ./...":                              true,
-		"go build -o app .":                          true,
-		"go vet ./...":                               true,
-		"pytest -q":                                  true,
-		"npm run build":                              true,
-		"yarn test":                                  true,
-		"make test":                                  true,
-		"cargo test":                                 true,
-		"grep -c 'func' *.go":                        true,
-		"wc -l report.txt":                           true,
-		"echo hello":                                 false,
-		"ls -la":                                     false,
-		"cat README.md":                              false,
-		"curl https://example.com":                  false,
+		"golangci-lint run ./...":  true,
+		"go test ./...":            true,
+		"go build -o app .":        true,
+		"go vet ./...":             true,
+		"pytest -q":                true,
+		"npm run build":            true,
+		"yarn test":                true,
+		"make test":                true,
+		"cargo test":               true,
+		"grep -c 'func' *.go":      true,
+		"wc -l report.txt":         true,
+		"echo hello":               false,
+		"ls -la":                   false,
+		"cat README.md":            false,
+		"curl https://example.com": false,
 	}
 	for cmd, want := range cases {
 		if got := isVerificationCommand(cmd); got != want {

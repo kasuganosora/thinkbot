@@ -65,7 +65,7 @@ func TestDelegateStream_Stuck(t *testing.T) {
 	provider := &scriptedStreamProvider{
 		name: "script",
 		steps: []streamStep{
-			{wait: 0, token: "hi"},         // 首 token
+			{wait: 0, token: "hi"},               // 首 token
 			{wait: 100 * time.Second, token: ""}, // 之后永久沉默（尊重 ctx 取消）
 		},
 	}

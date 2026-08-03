@@ -505,7 +505,7 @@ func (m *Manager) forceFailStale(wf *Workflow, age time.Duration) {
 	}
 	m.metrics.Failed.Add(1)
 	m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
-		"error": wf.Error,
+		"error":  wf.Error,
 		"reason": "stuck_watchdog",
 	})
 	m.cleanupRunning(wf.ID)
@@ -687,8 +687,8 @@ type StatusResult struct {
 	Error          string         `json:"error,omitempty"`
 	AnalyzeMessage string         `json:"analyzeMessage,omitempty"`
 	// 目标模式相关（前端展示闭环进度）
-	GoalMode         bool `json:"goalMode,omitempty"`
-	GoalIteration    int  `json:"goalIteration,omitempty"`
+	GoalMode          bool `json:"goalMode,omitempty"`
+	GoalIteration     int  `json:"goalIteration,omitempty"`
 	GoalMaxIterations int  `json:"goalMaxIterations,omitempty"`
 }
 
@@ -735,16 +735,16 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 	}
 
 	return &StatusResult{
-		ID:             wf.ID,
-		Status:         wf.Status,
-		Requirement:    wf.Requirement,
-		NodeCount:      len(wf.Nodes),
-		Progress:       progress,
-		CreatedAt:      createdAt,
-		Error:          wf.Error,
-		AnalyzeMessage: wf.AnalyzeMessage,
-		GoalMode:         wf.GoalMode,
-		GoalIteration:    wf.GoalIteration,
+		ID:                wf.ID,
+		Status:            wf.Status,
+		Requirement:       wf.Requirement,
+		NodeCount:         len(wf.Nodes),
+		Progress:          progress,
+		CreatedAt:         createdAt,
+		Error:             wf.Error,
+		AnalyzeMessage:    wf.AnalyzeMessage,
+		GoalMode:          wf.GoalMode,
+		GoalIteration:     wf.GoalIteration,
 		GoalMaxIterations: wf.GoalMaxIterations,
 	}, nil
 }

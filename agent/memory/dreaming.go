@@ -155,9 +155,9 @@ type REMPhaseConfig struct {
 
 // DeepPhaseConfig 深睡眠阶段配置。
 type DeepPhaseConfig struct {
-	MinScore            float64
-	MinRecallCount      int
-	MinUniqueQueries    int
+	MinScore         float64
+	MinRecallCount   int
+	MinUniqueQueries int
 	// MinREMHits：候选需至少命中 N 个 REM 主题（跨候选反复出现）才晋升。
 	// 0 = 不要求（默认），仅作为可选的强约束门控。
 	MinREMHits          int

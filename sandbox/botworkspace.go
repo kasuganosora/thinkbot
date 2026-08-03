@@ -216,12 +216,13 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 //
 // 适用场景：golangci-lint / go test 等内存饥饿的验证型命令在默认 2G 容器下被 OOM 杀死，
 // 仅拿到半份结果（见 docs/shell_reliable_result_design.md）。提升到的上限为 oomRetryElevatedMB
-//（6GB，实测足以跑完 community 80 包）。
+// （6GB，实测足以跑完 community 80 包）。
 //
 // 安全性：
 //   - 仅作用于内存中的容器内存上限（不落库；bot 重启后恢复默认），避免「无限内存」风险。
 //   - 仅在命令被判定为 OOMKilled 时才触发，且只重试一次。
 //   - 任何内部错误均无害回退：返回首次的不可信结果（含警告），绝不丢弃已有输出。
+//
 // RetryOOMWithElevatedMemory 在首次执行（由调用方已完成）判定为 OOM 后，
 // 临时提升沙箱内存上限、重建容器并重试一次（仅对 docker 持久容器生效）。
 // 注意：首次 ExecStream 已在 tools.go 的 sandbox_exec.Execute 中执行过，

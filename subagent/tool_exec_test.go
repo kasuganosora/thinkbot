@@ -50,9 +50,9 @@ func TestSubAgentExecutesInjectedTools(t *testing.T) {
 		Name:        "echo_tool",
 		Description: "echo the input back",
 		Parameters: map[string]any{
-			"type":     "object",
+			"type":       "object",
 			"properties": map[string]any{"msg": map[string]any{"type": "string"}},
-			"required": []string{"msg"},
+			"required":   []string{"msg"},
 		},
 		Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
 			atomic.AddInt32(&executed, 1)
@@ -106,7 +106,7 @@ type recordingProvider struct {
 	calls    int32
 	mu       sync.Mutex
 	callMsgs [][]llm.Message
-	echoRan bool
+	echoRan  bool
 }
 
 func (p *recordingProvider) Name() string { return "rec" }
@@ -163,7 +163,7 @@ func TestSubAgentToolPathPersistsUserMessageAcrossTurns(t *testing.T) {
 		Name:        "echo_tool",
 		Description: "echo",
 		Parameters: map[string]any{
-			"type":     "object",
+			"type":       "object",
 			"properties": map[string]any{"msg": map[string]any{"type": "string"}},
 		},
 		Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {

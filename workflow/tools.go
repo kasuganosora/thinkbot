@@ -102,7 +102,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 		Category: "workflow",
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
-			Name:        "task",
+			Name:         "task",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
 			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
 			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
@@ -178,10 +178,10 @@ func statusToolDef(mgr *Manager) tools.ToolDef {
 		Category: "workflow",
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
-			Name:        "task_status",
+			Name:         "task_status",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description: "查询任务的当前状态和进度。返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。若任务开启了目标模式，还会返回 goalMode/goalIteration/goalMaxIterations，表示当前处于第几轮闭环迭代。",
-			Keywords:    []string{"任务状态", "进度", "轮询", "目标模式", "闭环轮次", "workflow"},
+			Description:  "查询任务的当前状态和进度。返回任务状态（analyzing/running/completed/failed/terminated）、各状态子任务数量统计。若任务开启了目标模式，还会返回 goalMode/goalIteration/goalMaxIterations，表示当前处于第几轮闭环迭代。",
+			Keywords:     []string{"任务状态", "进度", "轮询", "目标模式", "闭环轮次", "workflow"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -217,9 +217,9 @@ func nodesToolDef(mgr *Manager) tools.ToolDef {
 		Category: "workflow",
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
-			Name:        "task_detail",
+			Name:         "task_detail",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description: "查询任务中各子任务的详细状态，包括任务描述、执行结果、错误信息、依赖关系等。支持两种返回格式：flat（顺序平铺列表）和 tree（按依赖关系构建的树状结构，适合前端展示）。",
+			Description:  "查询任务中各子任务的详细状态，包括任务描述、执行结果、错误信息、依赖关系等。支持两种返回格式：flat（顺序平铺列表）和 tree（按依赖关系构建的树状结构，适合前端展示）。",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -264,9 +264,9 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 		Category: "workflow",
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
-			Name:        "task_control",
+			Name:         "task_control",
 			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			Description: "对任务执行控制操作。支持两种操作：1) retry - 重试指定的失败/跳过子任务；2) terminate - 终止整个任务（所有未完成子任务标记为跳过）。\n\n⚠️ 不要在分析阶段（status=analyzing）调用 terminate：此时工作流正在等待模型推理以分解任务，会较久没有进度输出（尤其推理模型首 token 延迟可达数十秒），这是正常现象，并非卡死。此时终止会杀掉一个本可成功的工作流。请等待其进入 running（已生成子任务）后，若确有节点卡住再考虑 terminate；若只是需求有误，应修正后重新提交，而非终止。",
+			Description:  "对任务执行控制操作。支持两种操作：1) retry - 重试指定的失败/跳过子任务；2) terminate - 终止整个任务（所有未完成子任务标记为跳过）。\n\n⚠️ 不要在分析阶段（status=analyzing）调用 terminate：此时工作流正在等待模型推理以分解任务，会较久没有进度输出（尤其推理模型首 token 延迟可达数十秒），这是正常现象，并非卡死。此时终止会杀掉一个本可成功的工作流。请等待其进入 running（已生成子任务）后，若确有节点卡住再考虑 terminate；若只是需求有误，应修正后重新提交，而非终止。",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
