@@ -129,9 +129,12 @@ const botStore = useBotStore()
 const doneCount = computed(() => nodes.value.filter(n => n.status === 'completed').length)
 
 // 进度计数文案：分析阶段尚未生成子任务时显示分析进度（或"分析中…"）而非"0/0"，避免误判卡死
+// 注意：只有 status 真的是 analyzing 才显示分析文案。曾经用 isLive（含 running）判断，
+// 导致 running 且节点已拆出但列表尚未拉到时，仍渲染残留的 analyzeMessage → 假「分析中」。
 const progressLabel = computed(() => {
-  if (!nodes.value.length) return isLive.value ? (workflow.value?.analyzeMessage || '分析中…') : '0/0'
-  return `${doneCount.value}/${nodes.value.length}`
+  if (nodes.value.length) return `${doneCount.value}/${nodes.value.length}`
+  if (workflow.value?.status === 'analyzing') return workflow.value?.analyzeMessage || '分析中…'
+  return '0/0'
 })
 
 // 进行中（需轮询刷新）
@@ -188,7 +191,11 @@ async function load() {
     if (!res) return
     workflow.value = res.status
     nodes.value = res.flat
-    if (isLive.value) startLive()
+    // 只要不是终态就必须轮询。
+    // 曾用 isLive（running/analyzing/interrupted 白名单）判断，于是面板挂载时若工作流
+    // 恰好是 pending 等白名单外的瞬态，轮询永不启动 → UI 永久停在首帧快照，
+    // 叠加 Pinia 里分析阶段的 SSE 残留，表现为「节点已拆出但 UI 仍在分析中」。
+    if (!isTerminal.value) startLive()
   } catch (e) {
     MessagePlugin.error(`加载工作流失败：${e.message || e}`)
   }
@@ -206,18 +213,22 @@ watch(() => botStore.activeWorkflowStatus, (snap) => {
   if (snap._ts && snap._ts <= _lastSseTs) return
   _lastSseTs = snap._ts || Date.now()
   // 合并关键字段到本地状态，立即反映在 UI 上
+  //
+  // analyzeMessage 只在 analyzing 阶段有意义：task_status 快照是 bot 调用那一刻的状态，
+  // 分析阶段取到的文案会随快照一路带到 running 之后。此处按快照自身的 status 归零，
+  // 避免「已拆出节点却仍显示第 N/5 次尝试」。
   workflow.value = {
     ...(workflow.value || {}),
     status: snap.status,
     requirement: snap.requirement || workflow.value?.requirement,
-    analyzeMessage: snap.analyzeMessage,
+    analyzeMessage: snap.status === 'analyzing' ? snap.analyzeMessage : '',
     goalMode: snap.goalMode,
     goalIteration: snap.goalIteration,
     goalMaxIterations: snap.goalMaxIterations,
     error: snap.error,
   }
-  // 若 SSE 推送显示仍在运行但轮询已停，重启轮询保证持续刷新节点列表
-  if (isLive.value && !pollTimer) startLive()
+  // 若快照显示尚未结束但轮询已停，重启轮询保证持续刷新节点列表
+  if (!isTerminal.value && !pollTimer) startLive()
 })
 
 // 运行态轮询：每 1.5s 拉取最新节点状态
@@ -238,8 +249,14 @@ async function tick() {
     // 否则以 API 轮询结果为准。这解决了「轮询覆盖 SSE 实时状态」的竞态问题。
     const sseFresherThanApi = _lastSseTs > 0 && (Date.now() - _lastSseTs < 5000)
     if (sseFresherThanApi && workflow.value?.status) {
-      // 只更新节点相关字段，保留 SSE 推送的状态/进度信息
-      workflow.value = { ...workflow.value, error: res.status.error }
+      // 只更新节点相关字段，保留 SSE 推送的状态/进度信息。
+      // 但 analyzeMessage 必须服从权威 API：一旦后端已离开分析阶段（字段被清空），
+      // 就不能因为「SSE 更新」而继续保留旧文案，否则 UI 会一直停在「分析中」。
+      workflow.value = {
+        ...workflow.value,
+        error: res.status.error,
+        analyzeMessage: res.status.analyzeMessage || '',
+      }
     } else {
       workflow.value = res.status
     }
