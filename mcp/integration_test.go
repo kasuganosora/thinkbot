@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/llm/openai"
 	"github.com/kasuganosora/thinkbot/util/log"
@@ -33,41 +36,74 @@ import (
 //	  → 结果回传 LLM
 //	  → 最终回复
 //
-// 运行命令：
+// 运行命令（需先配置 mcp/.env.test，否则用例自动 Skip）：
 //
+//	cp mcp/.env.test.example mcp/.env.test   # 填入自己的凭据
 //	go test -v -run TestIntegration ./mcp/ -timeout 180s
 // ============================================================================
 
-// 这些集成测试依赖**真实的外部 MCP 服务器与 LLM API**，因此默认跳过：
-// 直接 `go test ./...` 时它们不参与，避免 CI / 本地全量测试因缺少外部依赖
-// 或凭据而必然失败（此前即如此，报 "parse initialize result: unexpected end
-// of JSON input"）。
+// 这些集成测试依赖**真实的外部 MCP 服务器与 LLM API**。凭据一律从测试 .env
+// 读取，**不得硬编码进源码**（此前本文件提交过真实 token/API key）。
 //
-// 启用方式（需自备凭据，勿写回源码）：
+// 配置来源（优先级从高到低）：
+//  1. 进程环境变量；
+//  2. mcp/.env.test；
+//  3. 仓库根 .env。
 //
-//	export MCP_INTEGRATION=1
-//	export MCP_INTEG_AUTH_TOKEN="Bearer <your-mcp-token>"
-//	export MCP_INTEG_LLM_API_KEY="<your-llm-api-key>"
-//	go test -v -run TestIntegration ./mcp/ -timeout 180s
+// 三者都没有凭据时，相关用例整体 Skip —— 这样 `go test ./...` 不会因缺少外部
+// 依赖而失败（此前会报 "parse initialize result: unexpected end of JSON input"）。
 //
-// 端点/模型等非敏感项有默认值，可用同名环境变量覆盖。
-var (
-	// MCP web-search-prime 服务器
-	integMCPServerName = envOrDefault("MCP_INTEG_SERVER_NAME", "web-search-prime")
-	integMCPURL        = envOrDefault("MCP_INTEG_URL", "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp")
-	// 凭据无默认值：未提供则跳过测试，避免把密钥硬编码进仓库。
-	integMCPAuthToken = os.Getenv("MCP_INTEG_AUTH_TOKEN")
-
-	// LLM API
-	integLLMAPIKey   = os.Getenv("MCP_INTEG_LLM_API_KEY")
-	integLLMBaseURL  = envOrDefault("MCP_INTEG_LLM_BASE_URL", "https://open.bigmodel.cn/api/coding/paas")
-	integLLMChatPath = envOrDefault("MCP_INTEG_LLM_CHAT_PATH", "/v4/chat/completions")
-	integLLMModel    = envOrDefault("MCP_INTEG_LLM_MODEL", "glm-5.2")
+// 用法：cp mcp/.env.test.example mcp/.env.test 后填入自己的凭据。
+// 两个 .env 文件均已被 .gitignore 排除。
+const (
+	envKeyMCPServerName = "MCP_INTEG_SERVER_NAME"
+	envKeyMCPURL        = "MCP_INTEG_URL"
+	envKeyMCPAuthToken  = "MCP_INTEG_AUTH_TOKEN"
+	envKeyLLMAPIKey     = "MCP_INTEG_LLM_API_KEY"
+	envKeyLLMBaseURL    = "MCP_INTEG_LLM_BASE_URL"
+	envKeyLLMChatPath   = "MCP_INTEG_LLM_CHAT_PATH"
+	envKeyLLMModel      = "MCP_INTEG_LLM_MODEL"
 )
 
-// envOrDefault 返回环境变量值，为空时返回默认值。
-func envOrDefault(key, def string) string {
+var (
+	// MCP web-search-prime 服务器（端点/名称属非敏感项，保留默认值）
+	integMCPServerName = integEnv(envKeyMCPServerName, "web-search-prime")
+	integMCPURL        = integEnv(envKeyMCPURL, "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp")
+	// 凭据无默认值：缺失即跳过测试。
+	integMCPAuthToken = integEnv(envKeyMCPAuthToken, "")
+
+	// LLM API
+	integLLMAPIKey   = integEnv(envKeyLLMAPIKey, "")
+	integLLMBaseURL  = integEnv(envKeyLLMBaseURL, "https://open.bigmodel.cn/api/coding/paas")
+	integLLMChatPath = integEnv(envKeyLLMChatPath, "/v4/chat/completions")
+	integLLMModel    = integEnv(envKeyLLMModel, "glm-5.2")
+)
+
+// integEnvFiles 惰性加载测试 .env，仅解析一次。
+// 后出现的文件不覆盖先出现的键，因此 mcp/.env.test 优先于仓库根 .env。
+var integEnvFiles = sync.OnceValue(func() map[string]string {
+	merged := make(map[string]string)
+	for _, path := range []string{".env.test", filepath.Join("..", ".env")} {
+		values, err := config.LoadEnvFile(path)
+		if err != nil {
+			// 测试辅助路径：读取失败不致命，退化为「无该配置源」。
+			continue
+		}
+		for k, v := range values {
+			if _, exists := merged[k]; !exists {
+				merged[k] = v
+			}
+		}
+	}
+	return merged
+})
+
+// integEnv 按「进程环境变量 → 测试 .env → 默认值」的优先级取配置。
+func integEnv(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	if v := integEnvFiles()[key]; v != "" {
 		return v
 	}
 	return def
@@ -75,19 +111,17 @@ func envOrDefault(key, def string) string {
 
 // skipIfShort 在以下任一情况下跳过集成测试：
 //   - `-short` 模式；
-//   - 未显式设置 MCP_INTEGRATION=1（默认即此，故全量测试不会被外部依赖拖垮）；
-//   - 已开启但缺少必要凭据（明确提示缺哪个变量，而不是让请求失败后报解析错误）。
+//   - 未配置 MCP 凭据（默认即此，故 `go test ./...` 不会被外部依赖拖垮）。
+//
+// 明确提示缺哪个配置项，而不是让请求发出去后报难懂的解析错误。
 func skipIfShort(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	if os.Getenv("MCP_INTEGRATION") != "1" {
-		t.Skip("skipping MCP integration test: set MCP_INTEGRATION=1 to enable " +
-			"(requires a reachable MCP server and LLM API)")
-	}
 	if integMCPAuthToken == "" {
-		t.Skip("skipping MCP integration test: MCP_INTEG_AUTH_TOKEN is not set")
+		t.Skipf("skipping MCP integration test: %s not set "+
+			"(put it in mcp/.env.test — see mcp/.env.test.example)", envKeyMCPAuthToken)
 	}
 }
 
@@ -95,7 +129,8 @@ func skipIfShort(t *testing.T) {
 func skipIfNoLLM(t *testing.T) {
 	t.Helper()
 	if integLLMAPIKey == "" {
-		t.Skip("skipping MCP+LLM integration test: MCP_INTEG_LLM_API_KEY is not set")
+		t.Skipf("skipping MCP+LLM integration test: %s not set "+
+			"(put it in mcp/.env.test — see mcp/.env.test.example)", envKeyLLMAPIKey)
 	}
 }
 
