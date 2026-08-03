@@ -52,6 +52,8 @@ static/
 *.db-shm
 *.db-wal
 *.db.bak
+# 带时间戳后缀的手工 DB 备份（如 thinkbot.db.bak-20260803-102458）
+*.db.bak-*
 # Compiled server binary
 /thinkbot
 
