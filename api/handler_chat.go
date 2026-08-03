@@ -34,6 +34,13 @@ const (
 	ssePing         = "ping"          // 心跳
 )
 
+// streamPersistInterval 是流式回复增量落库的最小间隔。
+//
+// 文本增量事件每个 token 触发一次，逐条写库会打满 SQLite 并与历史查询争锁，
+// 因此按此间隔合并写入。工具调用等稀疏关键节点会强制立即落库，不受该间隔限制。
+// 取值权衡：太大则刷新后丢失的尾部内容多，太小则写放大明显。2s 下最坏丢约 2s 文本。
+const streamPersistInterval = 2 * time.Second
+
 // handleChatBots 返回当前可聊天的 Bot 列表（状态为 running）。
 // GET /api/chat/bots
 //
@@ -450,7 +457,13 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	// saveAssistant 将本轮 assistant 回复（文本 + 工具调用 + 有序 parts）持久化到 DB。
 	// 供「正常完成」与「客户端断开」两条路径共用，确保工具调用终态（success/error/killed）
 	// 都能落库，避免重连后卡片停留在 running。
-	saveAssistant := func() {
+	//
+	// 落库走 UpsertAssistantByTrace（以 traceID 为幂等键），因此本函数可被安全地重复调用：
+	// 流式过程中的增量落库与收尾落库写的是同一行。
+	//
+	// streaming=true 表示这是流式中间态；收尾时必须传 false，否则前端会把 running
+	// 工具卡片当成「仍在跑」而永久转圈。
+	saveAssistant := func(streaming bool) {
 		if fullText == "" && len(toolCalls) == 0 {
 			return
 		}
@@ -466,16 +479,36 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				partsJSON = string(b)
 			}
 		}
-		go func(content, tcJSON, pJSON string) {
+		go func(content, tcJSON, pJSON string, streaming bool) {
 			defer func() {
 				if r := recover(); r != nil {
 					s.logger.Errorw("panic saving assistant message", "err", r)
 				}
 			}()
-			if err := s.chatHistory.SaveMessageWithParts(botID, userID, "assistant", content, traceID, tcJSON, pJSON, req.SessionID); err != nil {
+			if err := s.chatHistory.UpsertAssistantByTrace(botID, userID, content, traceID, tcJSON, pJSON, req.SessionID, streaming); err != nil {
 				s.logger.Warnw("failed to save assistant message", "err", err)
 			}
-		}(fullText, toolCallsJSON, partsJSON)
+		}(fullText, toolCallsJSON, partsJSON, streaming)
+	}
+
+	// ---- 流式增量落库 ----
+	//
+	// 目的：用户在 bot 回复过程中刷新页面，也能看到已经产出的内容。
+	// 旧行为只在整轮结束时落库一次，中途刷新会丢掉全部流式内容（体验很差）。
+	//
+	// 为什么要节流：文本增量事件非常密集（每个 token 一次），逐条写库会把 SQLite 打满，
+	// 并与同连接的历史查询争锁。这里按最小间隔合并写入；工具调用等关键节点强制立即落库，
+	// 因为它们稀疏且信息量大，延迟落库最容易在刷新后丢状态。
+	var lastFlush time.Time
+	flushStream := func(force bool) {
+		if fullText == "" && len(toolCalls) == 0 {
+			return
+		}
+		if !force && time.Since(lastFlush) < streamPersistInterval {
+			return
+		}
+		lastFlush = time.Now()
+		saveAssistant(true)
 	}
 
 	// accumulate 将一条 EventBus 事件合并进本轮 assistant 回复的累积结构
@@ -584,12 +617,12 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		for {
 			select {
 			case <-bgCtx.Done():
-				saveAssistant()
+				saveAssistant(false)
 				unsubscribeEventSub()
 				return
 			case event, ok := <-eventSub.C():
 				if !ok {
-					saveAssistant()
+					saveAssistant(false)
 					unsubscribeEventSub()
 					return
 				}
@@ -597,7 +630,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				switch event.Type {
 				case outbound.EventMessageDone, outbound.EventMessageError,
 					outbound.EventMessageDropped, outbound.EventDispatchError:
-					saveAssistant()
+					saveAssistant(false)
 					unsubscribeEventSub()
 					return
 				}
@@ -647,6 +680,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					} else {
 						parts = append(parts, map[string]any{"type": "text", "content": delta})
 					}
+					// 节流落库：让中途刷新页面的用户能看到已产出的文本。
+					flushStream(false)
 				}
 
 			case outbound.EventLLMToolCall:
@@ -686,6 +721,9 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					}
 					parts = append(parts, part)
 				}
+				// 工具调用是稀疏且高信息量的节点，强制立即落库：
+				// 若等节流窗口，刷新后最容易丢失「正在调用哪个工具」这类关键状态。
+				flushStream(true)
 
 			case outbound.EventLLMToolProgress:
 				toolCallID, _ := event.Data["toolCallId"].(string)
@@ -761,6 +799,9 @@ func (s *Server) handleChatSend(c *gin.Context) {
 					}
 					syncPartTool(toolCallID)
 				}
+				// 工具终态（success/error/killed）必须立即落库：
+				// 否则刷新后卡片会停留在 running，用户以为还在跑。
+				flushStream(true)
 			}
 
 		// 完成信号：从 WebChannel 收到最终 Action
@@ -794,7 +835,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				flusher.Flush()
 
 				// 保存 Bot 回复到 DB（含工具调用信息 + 有序 parts）
-				saveAssistant()
+				saveAssistant(false)
 				unsubscribeEventSub()
 				return
 			}

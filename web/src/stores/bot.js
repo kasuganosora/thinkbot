@@ -197,15 +197,31 @@ export const useBotStore = defineStore('bot', () => {
    */
   function buildPartsForMessage(msg) {
     if (msg.role !== 'assistant') return msg
-    if (Array.isArray(msg.parts) && msg.parts.length) return msg  // 已有有序 parts（来自新格式 API 或流式构建）
+    // 历史消息中的 running 工具需要按 streaming 标记区分：
+    //   - streaming=true：该轮仍在产出（用户刷新页面回来），running 是真实状态，保留转圈。
+    //   - 否则：该轮已收尾，仍是 running 说明进程中途死了、终态没写回来。
+    //     必须降级掉，否则卡片会永久转圈。
+    // 用 'killed' 而非自造的 'interrupted'：ToolCallCard/ToolCallGroup 只为
+    // success/error/killed/timeout 提供了图标与配色，未知状态会掉到 default 显示异常。
+    const settleRunning = (item) => (
+      item && item.status === 'running' && !msg.streaming
+        ? { ...item, status: 'killed', summary: item.summary || '回复已中断' }
+        : item
+    )
+
+    if (Array.isArray(msg.parts) && msg.parts.length) {
+      // 已有有序 parts（来自新格式 API 或流式构建）
+      const parts = msg.parts.map(p => (p.type === 'tool' ? settleRunning(p) : p))
+      const toolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.map(settleRunning) : msg.toolCalls
+      return { ...msg, parts, toolCalls }
+    }
     const parts = []
     if (msg.content) parts.push({ type: 'text', content: msg.content })
-    if (Array.isArray(msg.toolCalls)) {
-      for (const tc of msg.toolCalls) {
-        parts.push({ type: 'tool', ...tc })
-      }
+    const calls = Array.isArray(msg.toolCalls) ? msg.toolCalls.map(settleRunning) : []
+    for (const tc of calls) {
+      parts.push({ type: 'tool', ...tc })
     }
-    return { ...msg, parts }
+    return { ...msg, parts, toolCalls: calls.length ? calls : msg.toolCalls }
   }
 
   async function loadMessages() {

@@ -40,6 +40,16 @@ type ChatMessage struct {
 	// TraceID 追踪 ID，用于关联请求-回复对。
 	TraceID string `gorm:"size:128" json:"traceId"`
 
+	// Streaming 标记该 assistant 消息是否仍在流式产出中。
+	//
+	// 流式回复采用增量落库（按 traceID upsert），因此 DB 中会出现「未完成」的中间态行，
+	// 让用户中途刷新页面也能看到已产出的内容。该字段用于把这种中间态告知前端：
+	//   - true：本轮尚未结束，其中 status="running" 的工具卡片是**真的还在跑**。
+	//   - false：本轮已收尾（正常完成或断连收尾）。此时若仍有 running 工具，
+	//     说明进程在中途终止，前端应将其显示为中断而非无限转圈。
+	// 历史数据默认 false，语义与旧行为一致（旧逻辑只在收尾时写一次）。
+	Streaming bool `gorm:"not null;default:false" json:"streaming"`
+
 	// CreatedAt 创建时间（游标的主排序键）。
 	CreatedAt time.Time `gorm:"not null;index:idx_chat_session_time,priority:3,sort:desc" json:"createdAt"`
 }

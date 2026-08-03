@@ -44,6 +44,10 @@ type ChatHistoryService struct {
 }
 
 // NewChatHistoryService 创建聊天历史服务。
+//
+// 注意：不要在此处访问数据库。依赖注入阶段 dao.Migrate 尚未执行，表/列可能还不存在
+// （曾因此让启动清理拿到 "no such column: streaming" 而静默失效）。需要读写 DB 的
+// 初始化逻辑请放到 OnStart 钩子里，见 newChatHistoryService。
 func NewChatHistoryService(db *gorm.DB, logger *zap.SugaredLogger) *ChatHistoryService {
 	return &ChatHistoryService{
 		db:     db,
@@ -80,6 +84,79 @@ func (s *ChatHistoryService) SaveMessageWithParts(botID, userID, role, content, 
 		return fmt.Errorf("chat_history: save message: %w", err)
 	}
 	return nil
+}
+
+// UpsertAssistantByTrace 按 traceID 写入或更新一条 assistant 消息。
+//
+// 用途：流式回复的**增量落库**。一轮对话的 traceID 全程唯一且稳定，因此可作幂等键——
+// 回复过程中可以反复调用本方法刷新同一行，用户中途刷新页面也能读到已产出的内容，
+// 而不必等整轮结束。旧行为（只在收尾 Insert 一次）会让中途刷新丢失全部流式内容。
+//
+// streaming 表示本轮是否仍在产出：中间态传 true，收尾时传 false。前端据此区分
+// 「工具真的还在跑」与「进程中途死了但状态没来得及更新」。
+//
+// 语义：
+//   - traceID 对应的行不存在 → 插入（CreatedAt 取当前时间，保证历史排序正确）。
+//   - 已存在 → 只更新 content / tool_calls / parts_json / streaming，**不改 created_at**，
+//     否则同一条消息会在按时间排序的历史里不断跳到末尾。
+//
+// traceID 为空时退化为普通 Insert（无幂等键可用）。
+func (s *ChatHistoryService) UpsertAssistantByTrace(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID string, streaming bool) error {
+	if traceID == "" {
+		return s.SaveMessageWithParts(botID, userID, dao.ChatRoleAssistant, content, traceID, toolCallsJSON, partsJSON, sessionID)
+	}
+
+	// 先尝试更新已有行：命中则结束，避免 Insert 冲突。
+	res := s.db.Model(&dao.ChatMessage{}).
+		Where("trace_id = ? AND role = ?", traceID, dao.ChatRoleAssistant).
+		Updates(map[string]any{
+			"content":    content,
+			"tool_calls": toolCallsJSON,
+			"parts_json": partsJSON,
+			"streaming":  streaming,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("chat_history: upsert assistant (update): %w", res.Error)
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+
+	// 无既有行 → 插入。
+	//
+	// 注意并发：同一 traceID 只由单个请求处理循环写入，不存在多写者竞争。
+	// 即便极端情况下重复插入，也仅表现为多一条历史，不会破坏数据一致性。
+	msg := dao.ChatMessage{
+		BotID:     botID,
+		UserID:    userID,
+		SessionID: sessionID,
+		Role:      dao.ChatRoleAssistant,
+		Content:   content,
+		ToolCalls: toolCallsJSON,
+		PartsJSON: partsJSON,
+		TraceID:   traceID,
+		Streaming: streaming,
+		CreatedAt: time.Now(),
+	}
+	if err := s.db.Create(&msg).Error; err != nil {
+		return fmt.Errorf("chat_history: upsert assistant (insert): %w", err)
+	}
+	return nil
+}
+
+// MarkStreamingStale 把所有仍标记为 streaming 的 assistant 消息置为已结束。
+//
+// 服务重启时调用：进程被中断的那些流式回复不可能再继续产出，若继续标记 streaming=true，
+// 前端会把它们的 running 工具卡片渲染成永久转圈。启动时统一收敛，是这类「进程死掉留下
+// 中间态」问题唯一可靠的清理时机。
+func (s *ChatHistoryService) MarkStreamingStale() (int64, error) {
+	res := s.db.Model(&dao.ChatMessage{}).
+		Where("streaming = ?", true).
+		Update("streaming", false)
+	if res.Error != nil {
+		return 0, fmt.Errorf("chat_history: mark streaming stale: %w", res.Error)
+	}
+	return res.RowsAffected, nil
 }
 
 // PaginateHistory 游标分页查询聊天历史（向更旧的方向翻页）。
