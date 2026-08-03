@@ -532,3 +532,27 @@ func testTracerProvider() trace.TracerProvider {
 func testLogger() *zap.SugaredLogger {
 	return zap.NewNop().Sugar()
 }
+
+// TestTier0TTL_SurvivesServiceDowntime 锁定 L0 TTL 的「宕机容错」语义。
+//
+// 背景（2026-08-03 真实故障）：TTL 曾为 48h。服务停机超过 2 天后，
+// loadFromDB 会跳过 ExpiresAt<now 的 L0 而不载入内存 buckets，
+// 导致 discoverScopes 扫不到任何 scope，dreaming 静默空跑
+// （报 "no scopes to process"），未固化的工作记忆永久丢失。
+//
+// 因此 L0 TTL 不只是「够跑一次 03:00 调度」，它同时是宕机容错窗口，
+// 必须显著大于一次调度间隔。此测试防止有人把它改回过短的值。
+func TestTier0TTL_SurvivesServiceDowntime(t *testing.T) {
+	cfg, ok := DefaultTierConfigs()[Tier0Working]
+	if !ok {
+		t.Fatal("Tier0Working config missing from DefaultTierConfigs")
+	}
+
+	// 至少要能容忍一个周末 + 余量的停机（远大于 24h 调度间隔）。
+	const minTolerance = 7 * 24 * time.Hour
+	if cfg.TTL < minTolerance {
+		t.Errorf("Tier0 TTL = %v, want >= %v；TTL 同时是服务宕机容错窗口，"+
+			"过短会导致停机期间未固化的 L0 过期丢失（dreaming 静默空跑）",
+			cfg.TTL, minTolerance)
+	}
+}
