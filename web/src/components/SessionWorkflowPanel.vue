@@ -203,7 +203,13 @@ async function load() {
 
 // ---- SSE 实时同步：task_status 工具结果推送的最新状态直接合并到面板 ----
 // 解决头部卡片（轮询）与下方工具调用结果（SSE 推流）不同步的问题
-let _lastSseTs = 0 // 最近一次 SSE 快照的时间戳，用于 tick() 判断是否应保留 SSE 数据
+let _lastSseTs = 0 // 最近一次 SSE 快照的时间戳，用于丢弃乱序到达的旧快照
+
+// 工作流状态的阶段序：数值只表示「推进程度」，用于拒绝让状态倒退的快照。
+// task_status 的返回是 bot 调用那一刻的时点快照，可能比本地轮询结果更旧；
+// 若不设防，一个分析阶段的迟到快照会把已经 running 的 UI 打回「分析中」。
+const WF_PHASE = { analyzing: 1, interrupted: 2, running: 3, completed: 4, failed: 4, terminated: 4 }
+const wfPhase = (s) => WF_PHASE[s] || 0
 
 watch(() => botStore.activeWorkflowStatus, (snap) => {
   if (!snap || !props.workflowId) return
@@ -211,12 +217,13 @@ watch(() => botStore.activeWorkflowStatus, (snap) => {
   if (snap.ID !== props.workflowId && snap.id !== props.workflowId) return
   // 时间戳守卫：忽略比当前已知的 SSE 数据更旧的快照（防止 Pinia 残留脏数据覆盖新拉取的 API 数据）
   if (snap._ts && snap._ts <= _lastSseTs) return
+  // 阶段守卫：只接受「不比当前更早」的状态，避免 UI 从 running 倒退回 analyzing。
+  if (wfPhase(snap.status) < wfPhase(workflow.value?.status)) return
   _lastSseTs = snap._ts || Date.now()
   // 合并关键字段到本地状态，立即反映在 UI 上
   //
-  // analyzeMessage 只在 analyzing 阶段有意义：task_status 快照是 bot 调用那一刻的状态，
-  // 分析阶段取到的文案会随快照一路带到 running 之后。此处按快照自身的 status 归零，
-  // 避免「已拆出节点却仍显示第 N/5 次尝试」。
+  // analyzeMessage 只在 analyzing 阶段有意义：分析阶段取到的文案会随快照一路带到
+  // running 之后，故按快照自身的 status 归零，避免「已拆出节点却仍显示第 N/5 次尝试」。
   workflow.value = {
     ...(workflow.value || {}),
     status: snap.status,
@@ -243,23 +250,16 @@ async function tick() {
   try {
     const res = await fetchState()
     if (!res) return
-    // 节点列表始终以 API 为准（权威数据源）
+    // 节点列表与状态一律以 API 为准：它是权威数据源，且 1.5s 轮询比 SSE 快照更新。
+    //
+    // 这里曾经做过「5s 内优先保留 SSE 数据」的处理，但那个前提是错的：
+    // task_status 工具的返回是 bot 调用那一刻的**时点快照**，不是实时流。用它压制
+    // 轮询结果，会让工作流早已 running（节点都跑完两个了）而头部仍显示分析阶段的
+    // status='analyzing' + 「第 N/5 次尝试」——即后端在推进、UI 永久停在分析中。
+    // SSE 的价值是让状态变化「更早」出现，而不是「更久」留存，所以它只在 watch 里
+    // 即时合并一次，不参与与轮询的优先级竞争。
     nodes.value = res.flat
-    // 状态字段：若 SSE 有更新（_lastSseTs > 0 且距上次 SSE 较近 5s 内），优先保留 SSE 数据
-    // 否则以 API 轮询结果为准。这解决了「轮询覆盖 SSE 实时状态」的竞态问题。
-    const sseFresherThanApi = _lastSseTs > 0 && (Date.now() - _lastSseTs < 5000)
-    if (sseFresherThanApi && workflow.value?.status) {
-      // 只更新节点相关字段，保留 SSE 推送的状态/进度信息。
-      // 但 analyzeMessage 必须服从权威 API：一旦后端已离开分析阶段（字段被清空），
-      // 就不能因为「SSE 更新」而继续保留旧文案，否则 UI 会一直停在「分析中」。
-      workflow.value = {
-        ...workflow.value,
-        error: res.status.error,
-        analyzeMessage: res.status.analyzeMessage || '',
-      }
-    } else {
-      workflow.value = res.status
-    }
+    workflow.value = res.status
     if (isTerminal.value) { stopLive(); _lastSseTs = 0 }
   } catch (e) {
     // 瞬态错误忽略，下次轮询重试
