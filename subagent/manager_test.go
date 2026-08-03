@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -610,5 +611,63 @@ func TestWithSkipTools_PreventsToolInjection(t *testing.T) {
 	}
 	if result != "skip-tools result" {
 		t.Errorf("unexpected result: %q", result)
+	}
+}
+
+// TestToolResolver_NoDataRace 验证 SetToolResolver 与工具解析并发时无 data race。
+//
+// 背景：aeb5731 引入 SetToolResolver 后，resolveTools 裸读 m.toolMgr/m.baseCtx，
+// 而 SetToolResolver 在写锁下修改它们 —— 二者构成 data race（-race 可复现）。
+// 修复后读路径改为 RLock 快照。此测试需配合 -race 才有意义。
+func TestToolResolver_NoDataRace(t *testing.T) {
+	provider := newMockProvider()
+	mgr := NewSubAgentManager(provider, "test-model")
+	tm := tools.NewToolManager(nil, nil, nil)
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			mgr.SetToolResolver(tm, tools.ToolSessionContext{BotID: "bot-a"})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_, _ = mgr.resolveTools(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			mgr.SetDefaultToolSteps(i % 7)
+			_ = mgr.toolStepsSnapshot()
+		}
+	}()
+	wg.Wait()
+}
+
+// TestSpawn_RespectsSkipTools 锁定 Spawn 与 Delegate 系对 WithSkipTools 的一致语义。
+//
+// 0835652 只给 Delegate/DelegateStream/DelegateMany 加了 skipTools 判断，
+// Spawn 被漏掉：调用方传 WithSkipTools() 时工具仍会被注入，违背选项契约。
+func TestSpawn_RespectsSkipTools(t *testing.T) {
+	provider := newMockProvider()
+	mgr := NewSubAgentManager(provider, "test-model")
+
+	// 带 WithSkipTools 的 Spawn 不应携带任何工具
+	idSkip, err := mgr.Spawn("system", "skip", WithSkipTools())
+	if err != nil {
+		t.Fatalf("Spawn with SkipTools failed: %v", err)
+	}
+	mgr.mu.RLock()
+	saSkip := mgr.subagents[idSkip]
+	mgr.mu.RUnlock()
+	if saSkip == nil {
+		t.Fatal("spawned subagent not found")
+	}
+	if got := len(saSkip.extraTools); got != 0 {
+		t.Errorf("Spawn with WithSkipTools: extraTools = %d, want 0", got)
 	}
 }
