@@ -108,8 +108,29 @@ func newBotService(p APIParams, eventBus outbound.EventBus) *BotService {
 }
 
 // newChatHistoryService 创建聊天历史服务。
-func newChatHistoryService(db *gorm.DB, logger *zap.SugaredLogger) *ChatHistoryService {
-	return NewChatHistoryService(db, logger)
+//
+// 在 OnStart 中把遗留的 streaming=true 行收敛为 false：这些是上次进程被中断时留下的
+// 流式中间态，不可能再继续产出；不清理的话，前端会把其中 status="running" 的工具卡片
+// 渲染成永久转圈。服务启动是唯一能可靠判定「这些流已经死了」的时机。
+//
+// 必须放在 OnStart 而非构造函数：dao.Migrate 同样在启动阶段执行，构造期访问 DB 会因
+// 表/列尚未创建而失败（曾出现 "no such column: streaming"，清理静默不生效）。
+func newChatHistoryService(lc fx.Lifecycle, db *gorm.DB, logger *zap.SugaredLogger) *ChatHistoryService {
+	s := NewChatHistoryService(db, logger)
+
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			// 清理失败不阻断启动：最坏情况只是少数历史卡片仍显示 running。
+			if n, err := s.MarkStreamingStale(); err != nil {
+				s.logger.Warnw("failed to clear stale streaming flags", "err", err)
+			} else if n > 0 {
+				s.logger.Infow("cleared stale streaming assistant messages", "count", n)
+			}
+			return nil
+		},
+	})
+
+	return s
 }
 
 // newWorkflowService 创建工作流服务。
