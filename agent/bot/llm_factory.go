@@ -14,11 +14,23 @@ import (
 	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
-// llmClientTimeout 是 LLM  Provider 底层 HTTP 客户端的超时。
-// 全局默认（util/http）仅 30s，对 bigmodel/智谱 等偶尔首字节较慢的模型会导致
-// "Client.Timeout exceeded while awaiting headers" 而回复失败。这里单独放宽到 5 分钟
-// （流式由 SSE 看门狗负责检测卡死，过长的整体超时不会掩盖真实 stall）。
-const llmClientTimeout = 5 * time.Minute
+// llmClientTimeout 是 LLM Provider 底层 HTTP 客户端的超时。
+//
+// 全局默认（util/http）仅 30s，对 bigmodel/智谱 等首字节较慢的模型会导致
+// "Client.Timeout exceeded while awaiting headers" 而回复失败。
+//
+// 为什么需要给到 20 分钟：
+//   - 该超时是**整个请求**的上限（含等待首字节）。**非流式**请求
+//     （`llm.OrchestrateGenerate`，workflow 的 SubAgent 走这条路）必须等模型把整段回复
+//     生成完才返回响应头，所以「生成大量代码 / 长篇审查报告」这类调用天然耗时很久。
+//   - 实测 5 分钟明显不够：workflow 节点执行曾连续 3 次尝试全部精准卡在 5 分钟超时
+//     （17:01 / 17:06 / 17:12），把本可完成的任务判为失败，并级联 skip 掉全部下游节点。
+//   - 注意：SSE 看门狗只保护**流式**路径，对非流式的 OrchestrateGenerate 不生效，
+//     因此这里不能依赖「看门狗会兜底」而把超时压短。
+//
+// 过长的整体超时不会掩盖真实 stall：流式路径由 SSE 看门狗按「无输出时长」判卡死，
+// 而非流式路径本就没有比「整体超时」更细的可用信号。
+const llmClientTimeout = 20 * time.Minute
 
 // llmRetryMaxRetries 是 LLM Provider 遇到可恢复错误（429 限流 / 5xx）时的重试次数。
 // 非流式请求由底层 httputil 自动重试；流式（SSE）请求在连接建立阶段（首字节前）
