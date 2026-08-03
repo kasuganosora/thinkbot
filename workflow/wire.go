@@ -8,8 +8,8 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"
@@ -233,16 +233,16 @@ func analyzerMaxTokens(modelDef *config.ModelDef) int {
 
 func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.ModelDef) EngineConfig {
 	return EngineConfig{
-		MaxParallel:         wc.MaxParallel,
-		MaxRetries:          wc.MaxRetries,
-		MaxIterations:       wc.MaxIterations,
-		RetryInitial:        time.Duration(wc.RetryInitialMS) * time.Millisecond,
-		RetryMax:            time.Duration(wc.RetryMaxMS) * time.Millisecond,
-		ScheduleInterval:    time.Duration(wc.ScheduleIntervalMS) * time.Millisecond,
-		AnalyzerTemperature: wc.AnalyzerTemperature,
-		AnalyzerMaxTokens:   analyzerMaxTokens(modelDef),
+		MaxParallel:          wc.MaxParallel,
+		MaxRetries:           wc.MaxRetries,
+		MaxIterations:        wc.MaxIterations,
+		RetryInitial:         time.Duration(wc.RetryInitialMS) * time.Millisecond,
+		RetryMax:             time.Duration(wc.RetryMaxMS) * time.Millisecond,
+		ScheduleInterval:     time.Duration(wc.ScheduleIntervalMS) * time.Millisecond,
+		AnalyzerTemperature:  wc.AnalyzerTemperature,
+		AnalyzerMaxTokens:    analyzerMaxTokens(modelDef),
 		AnalyzerStuckTimeout: time.Duration(wc.AnalyzerStuckTimeoutMS) * time.Millisecond,
 		AnalyzerMaxDuration:  time.Duration(wc.AnalyzerMaxDurationMS) * time.Millisecond,
-		GoalMaxIterations:     wc.GoalMaxIterations,
+		GoalMaxIterations:    wc.GoalMaxIterations,
 	}
 }

@@ -222,10 +222,10 @@ func DefaultConfig() Config {
 		MemoryLimit:     "2g",
 		CPULimit:        "1.0",
 		NetworkDisabled: false,
-		Timeout:         0, // 硬上限兜底：0 表示自动 = StuckTimeout × 3（见 resolveExecTimeouts / hardTimeoutFactor），可由 sandbox.timeout 配置显式覆盖
+		Timeout:         0,               // 硬上限兜底：0 表示自动 = StuckTimeout × 3（见 resolveExecTimeouts / hardTimeoutFactor），可由 sandbox.timeout 配置显式覆盖
 		StuckTimeout:    5 * time.Minute, // 卡死看门狗阈值：连续 5 分钟无输出即判定卡死，可由 sandbox.stuck_timeout 配置覆盖
-		MaxOutput:       1 << 20,  // 1 MB
-		MaxFileWrite:    10 << 20, // 10 MB
+		MaxOutput:       1 << 20,         // 1 MB
+		MaxFileWrite:    10 << 20,        // 10 MB
 		Timezone:        "UTC",
 	}
 }

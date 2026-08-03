@@ -52,7 +52,7 @@ type Manager struct {
 	clients        map[string]*Client // name → client
 	configs        map[string]ServerConfig
 	logger         *zap.SugaredLogger
-	onServerChange func() // 服务器状态变更回调（由 Provider 设置以失效缓存）
+	onServerChange func()   // 服务器状态变更回调（由 Provider 设置以失效缓存）
 	reconnectMu    sync.Map // server name → *sync.Mutex（按服务器串行化重连，避免并发重连风暴）
 }
 

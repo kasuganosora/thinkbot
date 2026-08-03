@@ -590,7 +590,6 @@ func TestExtractText(t *testing.T) {
 	}
 }
 
-
 // TestStdioTransportHealthy 验证 stdio 传输层的健康探测：进程存活时为 true，
 // 被杀后为 false（断线自动重连依赖此信号）。
 func TestStdioTransportHealthy(t *testing.T) {

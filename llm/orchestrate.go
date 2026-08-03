@@ -698,15 +698,15 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				break
 			}
 
-		// No tool calls or not a tool-calls finish → done
-		if lastFinishReason != FinishReasonToolCalls || len(stepToolCalls) == 0 || !hasExecutableTools(stepToolCalls, toolMap) {
-			// 收尾前再给一次「中途追加」机会：若用户在本步流式输出期间补充了
-			// 内容，则作为用户消息加入上下文并继续循环，让模型结合新内容重新
-			// 生成（无需先终止当前生成再补充）。
-			if drainInterruptMessages(cfg.InterruptCh, &messages) > 0 {
-				continue
-			}
-			stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, nil, &stepUsage)
+			// No tool calls or not a tool-calls finish → done
+			if lastFinishReason != FinishReasonToolCalls || len(stepToolCalls) == 0 || !hasExecutableTools(stepToolCalls, toolMap) {
+				// 收尾前再给一次「中途追加」机会：若用户在本步流式输出期间补充了
+				// 内容，则作为用户消息加入上下文并继续循环，让模型结合新内容重新
+				// 生成（无需先终止当前生成再补充）。
+				if drainInterruptMessages(cfg.InterruptCh, &messages) > 0 {
+					continue
+				}
+				stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, nil, &stepUsage)
 				stepR := StepResult{
 					Text:            stepText,
 					Reasoning:       stepReasoning,
@@ -749,20 +749,20 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				send(&ErrorPart{Error: err})
 				break
 			}
-		toolsExecuted = true
+			toolsExecuted = true
 
-		// Keep loaded deferred tools that were just executed "fresh" so they
-		// are not idle-evicted while still relevant.
-		if deferActive {
-			for _, tc := range stepToolCalls {
-				if t, ok := toolMap[tc.ToolName]; ok && t != nil && t.DeferredLoad {
-					cfg.ToolDeferral.Touch(tc.ToolName)
+			// Keep loaded deferred tools that were just executed "fresh" so they
+			// are not idle-evicted while still relevant.
+			if deferActive {
+				for _, tc := range stepToolCalls {
+					if t, ok := toolMap[tc.ToolName]; ok && t != nil && t.DeferredLoad {
+						cfg.ToolDeferral.Touch(tc.ToolName)
+					}
 				}
 			}
-		}
 
-		// Update the dynamic loop controller with this step's tool-call
-		// signature (same rationale as the non-streaming path).
+			// Update the dynamic loop controller with this step's tool-call
+			// signature (same rationale as the non-streaming path).
 			loop.recordStep(step, toolCallSignature(stepToolCalls))
 
 			// Apply post-execution result processing (e.g., truncation).
@@ -812,7 +812,6 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 		})
 
 		logToolCallSummary(ctx, allSteps)
-
 
 		if cfg.OnFinish != nil {
 			cfg.OnFinish(&GenerateResult{

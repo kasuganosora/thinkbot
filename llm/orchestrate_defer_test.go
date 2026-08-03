@@ -58,9 +58,9 @@ func TestOrchestrateDeferredToolsEndToEnd(t *testing.T) {
 	prov := new(deferFakeProvider)
 
 	deferred := Tool{
-		Name:        "mcp__weather",
-		Description: "Get weather for a city",
-		Parameters:  map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}, "required": []any{"city"}},
+		Name:         "mcp__weather",
+		Description:  "Get weather for a city",
+		Parameters:   map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}, "required": []any{"city"}},
 		DeferredLoad: true,
 		Execute: func(ctx *ToolExecContext, input any) (any, error) {
 			return "weather-ok", nil

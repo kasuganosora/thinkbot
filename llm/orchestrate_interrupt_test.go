@@ -18,11 +18,11 @@ import (
 // It records the message list it received on each DoStream call so the test can
 // assert the appended user message made it into the next step's context.
 type interruptFakeProvider struct {
-	mu          sync.Mutex
-	calls       int
+	mu           sync.Mutex
+	calls        int
 	callMessages [][]Message
-	step0Wait   chan struct{}
-	started     chan struct{}
+	step0Wait    chan struct{}
+	started      chan struct{}
 }
 
 func (p *interruptFakeProvider) Name() string { return "fake" }

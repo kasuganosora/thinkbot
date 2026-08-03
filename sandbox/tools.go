@@ -507,9 +507,9 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 
 func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
-		Name:        "sandbox_delete_file",
+		Name:         "sandbox_delete_file",
 		DeferredLoad: true, // 破坏性操作，非日常高频，初始仅暴露名称+描述
-		Description: "删除 bot 工作空间中的文件或目录（递归删除目录）。",
+		Description:  "删除 bot 工作空间中的文件或目录（递归删除目录）。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -560,9 +560,9 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 
 func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
-		Name:        "sandbox_move_file",
+		Name:         "sandbox_move_file",
 		DeferredLoad: true, // 重命名/移动，非日常高频，初始仅暴露名称+描述
-		Description: "移动或重命名 bot 工作空间中的文件或目录。",
+		Description:  "移动或重命名 bot 工作空间中的文件或目录。",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -782,7 +782,7 @@ func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 
 func buildHealthTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
-		Name: "sandbox_health",
+		Name:         "sandbox_health",
 		DeferredLoad: true, // 诊断工具，非常规使用，初始仅暴露名称+描述
 		Description: "检查 bot 工作空间的健康状态。" +
 			"返回工作空间是否可用、后端类型（docker/local）、状态和详细信息。" +
@@ -955,7 +955,9 @@ func isVerificationCommand(cmd string) bool {
 }
 
 // outputLimitPipeRE 匹配命令末尾用于「限制输出行数」的管道段，例如：
-//   | head -300   | head -n 300   | head   | tail -20   | tail -n 20
+//
+//	| head -300   | head -n 300   | head   | tail -20   | tail -n 20
+//
 // golangci-lint / go test 等命令经 LLM 自行追加这类管道时，若被测进程被 OOM /
 // 信号杀死，子进程可能仍持有管道写端，导致 head/tail 永不退出、命令永久挂起
 // （即「执行中」永不停）。而 sandbox 已按 MaxOutput 字节截断输出，该管道既冗余
@@ -974,7 +976,6 @@ func stripOutputLimitingPipe(cmd string) (string, bool) {
 	}
 	return cmd, false
 }
-
 
 // searchMatch 是 search_content 单条匹配结果。
 type searchMatch struct {

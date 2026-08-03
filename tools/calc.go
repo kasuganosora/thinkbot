@@ -431,7 +431,7 @@ func randomToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Category: "utility",
 		Tool: llm.Tool{
-			Name: "random",
+			Name:         "random",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "生成随机数。可以生成指定范围内的随机整数或浮点数，" +
 				"也可以随机选择列表中的元素。",
@@ -585,7 +585,7 @@ func uuidToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Category: "utility",
 		Tool: llm.Tool{
-			Name: "uuid",
+			Name:         "uuid",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "生成 UUID（Universally Unique Identifier）。生成基于加密安全的随机 UUID v4。" +
 				"适用于生成唯一标识符、会话 ID、临时令牌等场景。",

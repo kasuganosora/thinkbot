@@ -144,83 +144,83 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 					return nil, fmt.Errorf("tasks must contain at least one non-empty string")
 				}
 
-			systemPrompt, _ := m["system_prompt"].(string)
+				systemPrompt, _ := m["system_prompt"].(string)
 
-			// 诊断日志：记录本次 spawn 实际派发的任务数，便于观察模型是否把独立子任务
-			// 合并进单次调用（并行）还是分多次调用（串行）。
-			if l := traceid.L(ctx); l != nil {
-				l.Infow("spawn: delegate many", "tasks", len(tasks), "system_prompt_set", systemPrompt != "")
-			}
+				// 诊断日志：记录本次 spawn 实际派发的任务数，便于观察模型是否把独立子任务
+				// 合并进单次调用（并行）还是分多次调用（串行）。
+				if l := traceid.L(ctx); l != nil {
+					l.Infow("spawn: delegate many", "tasks", len(tasks), "system_prompt_set", systemPrompt != "")
+				}
 
-			// 心跳保活：spawn 是同步阻塞调用（DelegateMany 返回整个子 Agent 的最终结果），
-			// 重任务（读大量文件 + 多轮模型推理）很容易超过前端 3 分钟「卡死看门狗」阈值，
-			// 触发误报「执行超时：连接可能已中断」。周期性发送 heartbeat 进度以重置前端计时器。
-			stopHeartbeat := make(chan struct{})
-			if ctx.SendProgress != nil {
-				go func() {
-					ticker := time.NewTicker(30 * time.Second)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-stopHeartbeat:
-							return
-						case <-ticker.C:
-							ctx.SendProgress(map[string]any{
-								"stream": "heartbeat",
-								"chunk":  "子 Agent 仍在执行中（读取文件 / 模型推理）…\n",
-							})
+				// 心跳保活：spawn 是同步阻塞调用（DelegateMany 返回整个子 Agent 的最终结果），
+				// 重任务（读大量文件 + 多轮模型推理）很容易超过前端 3 分钟「卡死看门狗」阈值，
+				// 触发误报「执行超时：连接可能已中断」。周期性发送 heartbeat 进度以重置前端计时器。
+				stopHeartbeat := make(chan struct{})
+				if ctx.SendProgress != nil {
+					go func() {
+						ticker := time.NewTicker(30 * time.Second)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-stopHeartbeat:
+								return
+							case <-ticker.C:
+								ctx.SendProgress(map[string]any{
+									"stream": "heartbeat",
+									"chunk":  "子 Agent 仍在执行中（读取文件 / 模型推理）…\n",
+								})
+							}
+						}
+					}()
+				}
+
+				// 流式进度：把 DelegateMany 内每个子 Agent 的「启动/完成」实时推到 UI，
+				// 让并行的多个 subagent 可见（否则 spawn 同步阻塞期间 UI 只有心跳，看不出并行）。
+				progressHandler := func(phase string, index, total int, task string, elapsed time.Duration, res *TaskResult) {
+					if l := traceid.L(ctx); l != nil {
+						success := res == nil || res.Success
+						fields := []any{
+							"phase", phase,
+							"index", index,
+							"total", total,
+							"task", task,
+							"elapsed", elapsed.String(),
+							"success", success,
+						}
+						if res != nil && !res.Success && res.Error != "" {
+							fields = append(fields, "error", res.Error)
+						}
+						// 失败用 Warn 让其从日志中凸显，便于排障。
+						if success {
+							l.Infow("spawn: subagent progress", fields...)
+						} else {
+							l.Warnw("spawn: subagent progress", fields...)
 						}
 					}
-				}()
-			}
-
-			// 流式进度：把 DelegateMany 内每个子 Agent 的「启动/完成」实时推到 UI，
-			// 让并行的多个 subagent 可见（否则 spawn 同步阻塞期间 UI 只有心跳，看不出并行）。
-			progressHandler := func(phase string, index, total int, task string, elapsed time.Duration, res *TaskResult) {
-				if l := traceid.L(ctx); l != nil {
-					success := res == nil || res.Success
-					fields := []any{
-						"phase", phase,
-						"index", index,
-						"total", total,
-						"task", task,
-						"elapsed", elapsed.String(),
-						"success", success,
+					if ctx.SendProgress == nil {
+						return
 					}
-					if res != nil && !res.Success && res.Error != "" {
-						fields = append(fields, "error", res.Error)
+					var chunk string
+					switch phase {
+					case "start":
+						chunk = fmt.Sprintf("🔄 子 Agent %d/%d 启动：%s", index, total, task)
+					case "done":
+						status := "✅"
+						if res != nil && !res.Success {
+							status = "❌"
+						}
+						chunk = fmt.Sprintf("%s 子 Agent %d/%d 完成（耗时 %s）：%s",
+							status, index, total, elapsed.Round(time.Second), task)
 					}
-					// 失败用 Warn 让其从日志中凸显，便于排障。
-					if success {
-						l.Infow("spawn: subagent progress", fields...)
-					} else {
-						l.Warnw("spawn: subagent progress", fields...)
-					}
+					ctx.SendProgress(map[string]any{
+						"stream": "subagent",
+						"chunk":  chunk,
+					})
 				}
-				if ctx.SendProgress == nil {
-					return
-				}
-				var chunk string
-				switch phase {
-				case "start":
-					chunk = fmt.Sprintf("🔄 子 Agent %d/%d 启动：%s", index, total, task)
-				case "done":
-					status := "✅"
-					if res != nil && !res.Success {
-						status = "❌"
-					}
-					chunk = fmt.Sprintf("%s 子 Agent %d/%d 完成（耗时 %s）：%s",
-						status, index, total, elapsed.Round(time.Second), task)
-				}
-				ctx.SendProgress(map[string]any{
-					"stream": "subagent",
-					"chunk":  chunk,
-				})
-			}
 
-			results := mgr.DelegateMany(WithDelegateProgress(ctx, progressHandler), systemPrompt, tasks)
+				results := mgr.DelegateMany(WithDelegateProgress(ctx, progressHandler), systemPrompt, tasks)
 
-			close(stopHeartbeat)
+				close(stopHeartbeat)
 
 				return map[string]any{
 					"success": true,

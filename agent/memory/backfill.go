@@ -62,11 +62,11 @@ func BackfillFromChatHistory(ctx context.Context, store Store, db *gorm.DB, botI
 			Category: "conversation",
 			Source:   "chat_history",
 			Metadata: map[string]any{
-				"chat_message_id":    m.ID,
-				"role":               m.Role,
+				"chat_message_id":     m.ID,
+				"role":                m.Role,
 				"original_created_at": m.CreatedAt.Format(time.RFC3339),
 			},
-			CreatedAt:     now,
+			CreatedAt:      now,
 			LastAccessedAt: now,
 		}
 		if err := store.Append(ctx, entry); err != nil {

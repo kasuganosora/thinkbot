@@ -402,16 +402,16 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	// Phase 2: Review 自循环（仅 review=true 的节点）
 	// ================================================================
 	if node.Review {
-	finalResult, err := s.reviewLoop(ctx, node, result)
-	if err != nil {
-		// 目标模式闭环哨兵：review 不通过但仍有闭环额度，节点已被回退为 pending，
-		// 由主调度循环重新执行 Feedback 目标节点。此处直接返回，不标记失败、不级联跳过。
-		if errors.Is(err, errGoalFeedback) {
-			return
-		}
-		if s.isTerminated() {
-			return
-		}
+		finalResult, err := s.reviewLoop(ctx, node, result)
+		if err != nil {
+			// 目标模式闭环哨兵：review 不通过但仍有闭环额度，节点已被回退为 pending，
+			// 由主调度循环重新执行 Feedback 目标节点。此处直接返回，不标记失败、不级联跳过。
+			if errors.Is(err, errGoalFeedback) {
+				return
+			}
+			if s.isTerminated() {
+				return
+			}
 			span.RecordError(err)
 			span.SetAttributes(
 				attribute.String("node.final_status", "failed"),

@@ -133,7 +133,7 @@ const goalModeAnalyzerHint = `## 本次为「目标模式」
    - 这类中间节点的 "feedback" **无需手动填写**（会自动自环），只需保证终点验收节点的 feedback 正确即可。`
 
 // dagSpec 是分析器输出的 DAG 规范（从 LLM JSON 解析）。
-type 	dagSpec struct {
+type dagSpec struct {
 	Nodes []struct {
 		ID            string   `json:"id"`
 		Name          string   `json:"name"`
@@ -228,7 +228,7 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 			subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
 			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
 			subagent.WithSkipTools(), // Analyzer 是纯 LLM 任务（输出 JSON DAG），不需要工具；
-			                        // 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死。
+			// 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死。
 		)
 		if err != nil {
 			// 上下文被取消（分析被终止）：不再重试，直接返回清晰错误。
@@ -573,13 +573,13 @@ func mapsToDagNodes(objs []map[string]any) []struct {
 			MaxIterations int      `json:"maxIterations"`
 			Feedback      []string `json:"feedback"`
 		}{
-			ID:            coalesceString(obj, "id"),
-			Name:          coalesceString(obj, "name"),
-			Task:          coalesceString(obj, "task"),
-			SystemPrompt:   coalesceString(obj, "systemPrompt"),
-			ReviewPrompt:   coalesceString(obj, "reviewPrompt"),
-			Dependencies:  coalesceStringSlice(obj, "dependencies"),
-			Feedback:       coalesceStringSlice(obj, "feedback"),
+			ID:           coalesceString(obj, "id"),
+			Name:         coalesceString(obj, "name"),
+			Task:         coalesceString(obj, "task"),
+			SystemPrompt: coalesceString(obj, "systemPrompt"),
+			ReviewPrompt: coalesceString(obj, "reviewPrompt"),
+			Dependencies: coalesceStringSlice(obj, "dependencies"),
+			Feedback:     coalesceStringSlice(obj, "feedback"),
 		}
 		if v, ok := obj["review"].(bool); ok {
 			node.Review = v
@@ -609,9 +609,9 @@ const maxFeedbackEdges = 8
 //     模块间由依赖链保证顺序（前一个收敛后下一个才开始），每个模块自带收敛循环。
 //   - 回退边（feedback）兜底：LLM 已显式指定的保留；否则按节点角色自动接线：
 //     · 非终点节点（有下游依赖它）→ 自环，闭环时仅重跑自身，不波及下游，
-//       从而支持「逐模块收敛后才进入下一步」的串联门禁；
+//     从而支持「逐模块收敛后才进入下一步」的串联门禁；
 //     · 终点节点（无人依赖）→ 回退到直接上游工作节点（Dependencies），
-//       形成「工作→审查→修复→审查」的全局闭环；
+//     形成「工作→审查→修复→审查」的全局闭环；
 //     · 单节点工作流（终点即起点、无依赖）→ 回退到自身。
 //
 // 注意：feedback 边不写入 Dependencies，因此不影响拓扑排序与无环性校验。
