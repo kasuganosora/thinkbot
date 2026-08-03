@@ -36,6 +36,9 @@ workflow/integration_test.go
 
 # .env files (contain secrets)
 .env
+# 集成测试凭据（仅提交 *.env.test.example 模板）
+.env.test
+*/.env.test
 
 # CodeBuddy
 .codebuddy/
