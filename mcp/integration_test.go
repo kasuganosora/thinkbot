@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -37,23 +38,64 @@ import (
 //	go test -v -run TestIntegration ./mcp/ -timeout 180s
 // ============================================================================
 
-const (
+// 这些集成测试依赖**真实的外部 MCP 服务器与 LLM API**，因此默认跳过：
+// 直接 `go test ./...` 时它们不参与，避免 CI / 本地全量测试因缺少外部依赖
+// 或凭据而必然失败（此前即如此，报 "parse initialize result: unexpected end
+// of JSON input"）。
+//
+// 启用方式（需自备凭据，勿写回源码）：
+//
+//	export MCP_INTEGRATION=1
+//	export MCP_INTEG_AUTH_TOKEN="Bearer <your-mcp-token>"
+//	export MCP_INTEG_LLM_API_KEY="<your-llm-api-key>"
+//	go test -v -run TestIntegration ./mcp/ -timeout 180s
+//
+// 端点/模型等非敏感项有默认值，可用同名环境变量覆盖。
+var (
 	// MCP web-search-prime 服务器
-	integMCPServerName = "web-search-prime"
-	integMCPURL        = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
-	integMCPAuthToken  = "Bearer bb38b92431b14dafab606e46c18279e8.E8pQRkp2Qlk3IFp2"
+	integMCPServerName = envOrDefault("MCP_INTEG_SERVER_NAME", "web-search-prime")
+	integMCPURL        = envOrDefault("MCP_INTEG_URL", "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp")
+	// 凭据无默认值：未提供则跳过测试，避免把密钥硬编码进仓库。
+	integMCPAuthToken = os.Getenv("MCP_INTEG_AUTH_TOKEN")
 
-	// LLM API（复用 agent/bot 集成测试相同的凭据）
-	integLLMAPIKey   = "8f58d5ad12d7409d85cd540f5f229453.8pG7VnMIM18Aarc4"
-	integLLMBaseURL  = "https://open.bigmodel.cn/api/coding/paas"
-	integLLMChatPath = "/v4/chat/completions"
-	integLLMModel    = "glm-5.2"
+	// LLM API
+	integLLMAPIKey   = os.Getenv("MCP_INTEG_LLM_API_KEY")
+	integLLMBaseURL  = envOrDefault("MCP_INTEG_LLM_BASE_URL", "https://open.bigmodel.cn/api/coding/paas")
+	integLLMChatPath = envOrDefault("MCP_INTEG_LLM_CHAT_PATH", "/v4/chat/completions")
+	integLLMModel    = envOrDefault("MCP_INTEG_LLM_MODEL", "glm-5.2")
 )
 
+// envOrDefault 返回环境变量值，为空时返回默认值。
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// skipIfShort 在以下任一情况下跳过集成测试：
+//   - `-short` 模式；
+//   - 未显式设置 MCP_INTEGRATION=1（默认即此，故全量测试不会被外部依赖拖垮）；
+//   - 已开启但缺少必要凭据（明确提示缺哪个变量，而不是让请求失败后报解析错误）。
 func skipIfShort(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
+	}
+	if os.Getenv("MCP_INTEGRATION") != "1" {
+		t.Skip("skipping MCP integration test: set MCP_INTEGRATION=1 to enable " +
+			"(requires a reachable MCP server and LLM API)")
+	}
+	if integMCPAuthToken == "" {
+		t.Skip("skipping MCP integration test: MCP_INTEG_AUTH_TOKEN is not set")
+	}
+}
+
+// skipIfNoLLM 供额外依赖 LLM API 的用例使用（MCP 凭据之外还需 LLM key）。
+func skipIfNoLLM(t *testing.T) {
+	t.Helper()
+	if integLLMAPIKey == "" {
+		t.Skip("skipping MCP+LLM integration test: MCP_INTEG_LLM_API_KEY is not set")
 	}
 }
 
@@ -266,6 +308,7 @@ func TestIntegration_MCP_ToolResolution(t *testing.T) {
 
 func TestIntegration_MCP_LLMOrchestration(t *testing.T) {
 	skipIfShort(t)
+	skipIfNoLLM(t)
 	log.Logger = zap.NewNop().Sugar()
 
 	mgr := setupIntegrationMCP(t)
@@ -491,6 +534,7 @@ func TestIntegration_MCP_ListServers(t *testing.T) {
 
 func TestIntegration_MCP_LLM_RealSearch(t *testing.T) {
 	skipIfShort(t)
+	skipIfNoLLM(t)
 	log.Logger = zap.NewNop().Sugar()
 
 	mgr := setupIntegrationMCP(t)
