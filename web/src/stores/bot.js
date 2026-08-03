@@ -408,6 +408,8 @@ export const useBotStore = defineStore('bot', () => {
             finishToolCall(assistantTmpId, toolCallId, payload)
             const wid = extractWorkflowId(payload)
             if (wid) activeWorkflowId.value = wid
+            // 重连续流同样要合并状态快照，否则刷新后面板拿不到工作流实时状态
+            mergeWorkflowSnapshot(wid, payload)
           },
         })
         // 重连续流正常结束：把占位消息转正
@@ -667,6 +669,28 @@ export const useBotStore = defineStore('bot', () => {
     return ''
   }
 
+  // 只有 task_status 的返回才是工作流状态快照。
+  //
+  // 两个关键区分：
+  //
+  // 1. task 工具（创建工作流）也会返回一个含 status 的对象，形如
+  //      { message: "工作流已创建，正在分析需求并分解任务...", status: "analyzing", workflowId: "wf-..." }
+  //    那是**创建时刻的固定值**，不是实时状态。早期守卫只判断 payload.status 是否存在，
+  //    于是这个永远为 "analyzing" 的创建返回被当成状态快照写进 activeWorkflowStatus，
+  //    把面板头部永久钉在「分析中」——即便工作流早已 running、节点都跑完好几个。
+  //
+  // 2. payload.status 不是工作流状态，而是**工具执行状态**（success/error）：
+  //    SSE 层在构造 tool_result 时会覆写它。工作流状态在 payload.output 里。
+  function mergeWorkflowSnapshot(wid, payload) {
+    if (!wid || !payload || typeof payload !== 'object') return
+    if (payload.tool !== 'task_status') return
+    // 防止旧 workflow 的残留快照覆盖当前活跃 workflow 的状态
+    if (wid !== activeWorkflowId.value) return
+    const snap = payload.output
+    if (!snap || typeof snap !== 'object' || !snap.status) return
+    activeWorkflowStatus.value = { ...snap, _ts: Date.now() }
+  }
+
   function sendMessage(content, attachments) {
     if (!activeBot.value || replying.value) return
     // 新对话开始：清空上一轮工作流面板（task 触发时再重新显示）
@@ -740,12 +764,7 @@ export const useBotStore = defineStore('bot', () => {
         // task 工具返回里携带 workflowId（如 "wf-xxxx"），提取后驱动工作流面板展示
         const wid = extractWorkflowId(payload)
         if (wid) activeWorkflowId.value = wid
-        // task_status 工具返回的是完整 GetStatus JSON（含 goalIteration/analyzeMessage/status 等）
-        // 将其写入 activeWorkflowStatus 供 SessionWorkflowPanel 实时合并，解决头部卡片与工具结果不同步
-        // 守卫：只接受当前活跃 workflow 的状态快照，防止旧 workflow 的残留脏数据覆盖新状态
-        if (wid && payload && typeof payload === 'object' && payload.status && wid === activeWorkflowId.value) {
-          activeWorkflowStatus.value = { ...payload, _ts: Date.now() }
-        }
+        mergeWorkflowSnapshot(wid, payload)
       },
       signal: _abortController.signal,
       attachments: attachments || [],
