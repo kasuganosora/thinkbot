@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -341,22 +342,26 @@ func TestSyncExecutor_OverflowInline(t *testing.T) {
 func TestBackgroundSyncManager_Debounce(t *testing.T) {
 	logger := testLogger()
 	mgr := NewBackgroundSyncManager(logger, BackgroundSyncConfig{
-		BufferSize:   8,
-		SyncDebounce: 100, // 100ms debounce
+		BufferSize: 8,
+		// 必须带单位：SyncDebounce 是 time.Duration，裸写 100 等于 100ns，
+		// 防抖窗口几乎为 0，本测试会退化成「什么都没验证」。
+		SyncDebounce: 100 * time.Millisecond,
 	})
 	defer mgr.Shutdown()
 
-	count := 0
+	// 回调在后台 goroutine 执行，主 goroutine 随后读取，必须用原子计数，
+	// 否则 -race 会报 data race（曾经如此）。
+	var count atomic.Int64
 
 	// 快速提交两次同一 scope
-	mgr.SubmitSync("scope-1", func() { count++ })
-	mgr.SubmitSync("scope-1", func() { count++ }) // should be debounced
+	mgr.SubmitSync("scope-1", func() { count.Add(1) })
+	mgr.SubmitSync("scope-1", func() { count.Add(1) }) // should be debounced
 
 	// 等待执行
 	mgr.FlushPending(2)
 
-	if count > 1 {
-		t.Errorf("expected at most 1 execution due to debounce, got %d", count)
+	if got := count.Load(); got > 1 {
+		t.Errorf("expected at most 1 execution due to debounce, got %d", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -539,12 +540,22 @@ func TestSchedule_UsesBotTimezone(t *testing.T) {
 func TestScheduler_TraceIDInjected(t *testing.T) {
 	store := NewStore(t.TempDir() + "/cron.json")
 
+	// executor 在 scheduler 的 goroutine 中执行，主 goroutine 轮询/读取，
+	// 必须加锁，否则 -race 报 data race（曾经如此）。
+	var capturedMu sync.Mutex
 	var capturedTraceIDs []string
 	executor := ExecutorFunc(func(ctx context.Context, job *Job) (*ExecuteResult, error) {
 		tid := traceid.FromContext(ctx)
+		capturedMu.Lock()
 		capturedTraceIDs = append(capturedTraceIDs, tid)
+		capturedMu.Unlock()
 		return &ExecuteResult{Output: "ok"}, nil
 	})
+	capturedLen := func() int {
+		capturedMu.Lock()
+		defer capturedMu.Unlock()
+		return len(capturedTraceIDs)
+	}
 
 	loc := time.UTC
 	sched := NewScheduler(store, executor, SchedulerConfig{
@@ -571,18 +582,20 @@ func TestScheduler_TraceIDInjected(t *testing.T) {
 	// Wait for execution
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(capturedTraceIDs) > 0 {
+		if capturedLen() > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	sched.Stop()
 
-	if len(capturedTraceIDs) == 0 {
+	if capturedLen() == 0 {
 		t.Fatal("expected at least one execution")
 	}
 	// Verify trace_id is valid
+	capturedMu.Lock()
 	tid := capturedTraceIDs[0]
+	capturedMu.Unlock()
 	if !traceid.IsValid(tid) {
 		t.Errorf("expected valid trace_id, got %q", tid)
 	}
@@ -593,12 +606,32 @@ func TestScheduler_TraceIDInjected(t *testing.T) {
 // ============================================================================
 
 // mockRecorder is a test llm.UsageRecorder.
+//
+// RecordUsage 由 scheduler 的执行 goroutine 调用，而测试主 goroutine 会轮询/
+// 读取 metrics，因此必须加锁（曾因裸读裸写被 -race 判定 data race）。
 type mockRecorder struct {
+	mu      sync.Mutex
 	metrics []llm.UsageMetric
 }
 
 func (m *mockRecorder) RecordUsage(_ context.Context, metric llm.UsageMetric) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.metrics = append(m.metrics, metric)
+}
+
+// count 返回已记录的指标数（加锁）。
+func (m *mockRecorder) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.metrics)
+}
+
+// at 返回第 i 条指标的副本（加锁）。
+func (m *mockRecorder) at(i int) llm.UsageMetric {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.metrics[i]
 }
 
 func TestScheduler_RecordsTokenUsage(t *testing.T) {
@@ -642,18 +675,18 @@ func TestScheduler_RecordsTokenUsage(t *testing.T) {
 	// Wait for execution
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(rec.metrics) > 0 {
+		if rec.count() > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	sched.Stop()
 
-	if len(rec.metrics) != 1 {
-		t.Fatalf("expected 1 usage metric, got %d", len(rec.metrics))
+	if rec.count() != 1 {
+		t.Fatalf("expected 1 usage metric, got %d", rec.count())
 	}
 
-	m := rec.metrics[0]
+	m := rec.at(0)
 	if m.BotID != "bot-001" {
 		t.Errorf("expected BotID 'bot-001', got %q", m.BotID)
 	}
@@ -715,8 +748,8 @@ func TestScheduler_NoUsageWhenZeroTokens(t *testing.T) {
 	}
 	sched.Stop()
 
-	if len(rec.metrics) != 0 {
-		t.Errorf("expected 0 metrics for zero-usage execution, got %d", len(rec.metrics))
+	if rec.count() != 0 {
+		t.Errorf("expected 0 metrics for zero-usage execution, got %d", rec.count())
 	}
 }
 
@@ -758,17 +791,17 @@ func TestScheduler_DefaultFeatureCron(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(rec.metrics) > 0 {
+		if rec.count() > 0 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	sched.Stop()
 
-	if len(rec.metrics) != 1 {
-		t.Fatalf("expected 1 metric, got %d", len(rec.metrics))
+	if rec.count() != 1 {
+		t.Fatalf("expected 1 metric, got %d", rec.count())
 	}
-	if rec.metrics[0].Feature != "cron" {
-		t.Errorf("expected default Feature 'cron', got %q", rec.metrics[0].Feature)
+	if rec.at(0).Feature != "cron" {
+		t.Errorf("expected default Feature 'cron', got %q", rec.at(0).Feature)
 	}
 }

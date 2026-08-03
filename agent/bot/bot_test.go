@@ -218,13 +218,18 @@ func TestBot_BotIDInMessage(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	// 自定义 Stage：验证 envelope 中的 BotID
+	// 注意：Fn 在 pipeline 的后台 worker goroutine 中执行，主 goroutine 随后读取，
+	// 因此这两个变量必须加锁保护，否则 -race 会报 data race（曾经如此）。
+	var capturedMu sync.Mutex
 	var capturedBotID string
 	var capturedSource string
 	captureStage := &core.StageFunc{
 		StageName: "capture",
 		Fn: func(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+			capturedMu.Lock()
 			capturedBotID = env.Message.BotID
 			capturedSource = env.Message.Source
+			capturedMu.Unlock()
 			return env, nil
 		},
 	}
@@ -259,11 +264,14 @@ func TestBot_BotIDInMessage(t *testing.T) {
 	})
 	time.Sleep(200 * time.Millisecond)
 
-	if capturedBotID != "bot-a" {
-		t.Errorf("expected BotID=bot-a, got %q", capturedBotID)
+	capturedMu.Lock()
+	gotBotID, gotSource := capturedBotID, capturedSource
+	capturedMu.Unlock()
+	if gotBotID != "bot-a" {
+		t.Errorf("expected BotID=bot-a, got %q", gotBotID)
 	}
-	if capturedSource != "misskey-bot-a" {
-		t.Errorf("expected Source=misskey-bot-a, got %q", capturedSource)
+	if gotSource != "misskey-bot-a" {
+		t.Errorf("expected Source=misskey-bot-a, got %q", gotSource)
 	}
 
 	cancel()
@@ -274,11 +282,15 @@ func TestBot_BotConfigInEnvelope(t *testing.T) {
 	tp := noop_trace.NewTracerProvider()
 	logger := zap.NewNop().Sugar()
 
+	// Fn 在 pipeline worker goroutine 执行，主 goroutine 随后读取，需加锁保护。
+	var capturedMu sync.Mutex
 	var capturedBotID string
 	var capturedConfig BotConfig
 	captureStage := &core.StageFunc{
 		StageName: "capture-config",
 		Fn: func(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+			capturedMu.Lock()
+			defer capturedMu.Unlock()
 			if v, ok := env.Get("bot.id"); ok {
 				capturedBotID = v.(string)
 			}
@@ -312,14 +324,17 @@ func TestBot_BotConfigInEnvelope(t *testing.T) {
 	_ = memCh.Inject(context.Background(), core.Message{ID: "1", Text: "hi"})
 	time.Sleep(200 * time.Millisecond)
 
-	if capturedBotID != "cfg-bot" {
-		t.Errorf("expected bot.id=cfg-bot, got %q", capturedBotID)
+	capturedMu.Lock()
+	gotBotID, gotConfig := capturedBotID, capturedConfig
+	capturedMu.Unlock()
+	if gotBotID != "cfg-bot" {
+		t.Errorf("expected bot.id=cfg-bot, got %q", gotBotID)
 	}
-	if capturedConfig.SystemPrompt != "You are helpful" {
-		t.Errorf("expected SystemPrompt, got %q", capturedConfig.SystemPrompt)
+	if gotConfig.SystemPrompt != "You are helpful" {
+		t.Errorf("expected SystemPrompt, got %q", gotConfig.SystemPrompt)
 	}
-	if capturedConfig.Model != "gpt-4o" {
-		t.Errorf("expected Model=gpt-4o, got %q", capturedConfig.Model)
+	if gotConfig.Model != "gpt-4o" {
+		t.Errorf("expected Model=gpt-4o, got %q", gotConfig.Model)
 	}
 
 	cancel()
@@ -1028,11 +1043,17 @@ func TestBot_CallbackPipeline(t *testing.T) {
 	}
 
 	// 注册回调
+	// 回调在 dispatcher 的 goroutine 中执行，主 goroutine 随后读取结果，
+	// 因此需加锁保护；并用 channel 通知完成，避免忙等轮询共享变量（曾报 data race）。
+	var callbackMu sync.Mutex
 	var callbackResult outbound.CallbackResult
-	var callbackCalled bool
+	callbackDone := make(chan struct{})
+	var callbackOnce sync.Once
 	callbackRegistry.Register("parent-task-1", func(ctx context.Context, result outbound.CallbackResult) error {
+		callbackMu.Lock()
 		callbackResult = result
-		callbackCalled = true
+		callbackMu.Unlock()
+		callbackOnce.Do(func() { close(callbackDone) })
 		return nil
 	})
 
@@ -1065,25 +1086,24 @@ func TestBot_CallbackPipeline(t *testing.T) {
 	})
 
 	// 等待回调被调用
-	deadline := time.After(3 * time.Second)
-	for !callbackCalled {
-		select {
-		case <-deadline:
-			t.Fatal("timeout waiting for callback")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	select {
+	case <-callbackDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for callback")
 	}
 
 	// 验证回调结果
-	if callbackResult.CallbackID != "parent-task-1" {
-		t.Errorf("callback_id = %q", callbackResult.CallbackID)
+	callbackMu.Lock()
+	got := callbackResult
+	callbackMu.Unlock()
+	if got.CallbackID != "parent-task-1" {
+		t.Errorf("callback_id = %q", got.CallbackID)
 	}
-	if callbackResult.Payload != "task result: analysis complete" {
-		t.Errorf("payload = %v", callbackResult.Payload)
+	if got.Payload != "task result: analysis complete" {
+		t.Errorf("payload = %v", got.Payload)
 	}
-	if callbackResult.Status != "success" {
-		t.Errorf("status = %q", callbackResult.Status)
+	if got.Status != "success" {
+		t.Errorf("status = %q", got.Status)
 	}
 
 	// Channel Sender 不应收到任何消息（回调不走 Channel 输出）
