@@ -77,21 +77,23 @@ func NewBotWorkspaceManager(baseDir string, cfg Config, logger *zap.SugaredLogge
 	var b string
 	switch backend {
 	case "docker":
-		if !dockerAvailable() {
-			return nil, errs.New("bot_workspace: Docker backend requested but Docker is not available")
+		if ok, reason := dockerAvailability(); !ok {
+			return nil, errs.Newf("bot_workspace: Docker backend requested but Docker is not available: %s", reason)
 		}
 		b = "docker"
 		logger.Info("bot_workspace: command execution via docker (ephemeral containers)")
 	case "auto":
-		if dockerAvailable() {
+		ok, reason := dockerAvailability()
+		if ok {
 			b = "docker"
 			logger.Info("bot_workspace: command execution via docker (auto-detect)")
 		} else {
 			if cfg.RequireDocker {
-				return nil, errs.New("bot_workspace: RequireDocker is set but Docker is not available")
+				return nil, errs.Newf("bot_workspace: RequireDocker is set but Docker is not available: %s", reason)
 			}
 			b = "local"
-			logger.Warn("bot_workspace: command execution via local process (no Docker isolation)")
+			logger.Warnw("bot_workspace: command execution via local process (no Docker isolation)",
+				"reason", reason)
 		}
 	case "local":
 		b = "local"

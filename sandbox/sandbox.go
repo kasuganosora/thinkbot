@@ -17,6 +17,7 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -305,8 +306,8 @@ func NewSandbox(cfg Config, logger *zap.SugaredLogger) (Sandbox, error) {
 
 	switch backend {
 	case "docker":
-		if !dockerAvailable() {
-			return nil, errs.New("sandbox: Docker backend requested but Docker is not available")
+		if ok, reason := dockerAvailability(); !ok {
+			return nil, errs.Newf("sandbox: Docker backend requested but Docker is not available: %s", reason)
 		}
 		logger.Info("sandbox backend: docker (forced)")
 		return newDockerSandbox(cfg, logger)
@@ -316,16 +317,18 @@ func NewSandbox(cfg Config, logger *zap.SugaredLogger) (Sandbox, error) {
 		return newLocalSandbox(cfg, logger)
 
 	case "auto":
-		if dockerAvailable() {
+		ok, reason := dockerAvailability()
+		if ok {
 			logger.Info("sandbox backend: docker (auto-detect)")
 			return newDockerSandbox(cfg, logger)
 		}
 		// Docker 不可用 → 降级或报错
 		if cfg.RequireDocker {
-			return nil, errs.New("sandbox: RequireDocker is set but Docker is not available")
+			return nil, errs.Newf("sandbox: RequireDocker is set but Docker is not available: %s", reason)
 		}
-		logger.Warn("sandbox backend: local (Docker not available, fallback) — " +
-			"WARNING: local mode has NO container isolation, LLM commands run directly on host")
+		logger.Warnw("sandbox backend: local (Docker not available, fallback) — "+
+			"WARNING: local mode has NO container isolation, LLM commands run directly on host",
+			"reason", reason)
 		return newLocalSandbox(cfg, logger)
 
 	default:
@@ -339,18 +342,35 @@ func NewSandbox(cfg Config, logger *zap.SugaredLogger) (Sandbox, error) {
 
 // dockerAvailable 探测当前环境中 Docker 是否可用。
 func dockerAvailable() bool {
-	_, err := exec.LookPath("docker")
-	if err != nil {
-		return false
+	ok, _ := dockerAvailability()
+	return ok
+}
+
+// dockerAvailability 探测 Docker 可用性，并在不可用时返回可读原因。
+//
+// 返回原因是为了让「静默降级到 local」变得可诊断：曾发生过 launchd 启动时 PATH 被裁剪
+// （不含 /opt/homebrew/bin）导致 LookPath 失败、沙箱悄悄退化为宿主直跑的事故。
+func dockerAvailability() (bool, string) {
+	// 先尝试自愈 PATH：服务管理器（launchd/systemd）常把 PATH 裁剪成最小集。
+	ensureDockerPath()
+
+	if _, err := exec.LookPath("docker"); err != nil {
+		return false, "docker executable not found in PATH (PATH=" + os.Getenv("PATH") +
+			"); if docker is installed elsewhere, set " + EnvDockerBinDir
 	}
 	// 快速探测 Docker daemon 是否运行（带 3s 超时，防止 daemon 无响应时无限阻塞）
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
-	if err := cmd.Run(); err != nil {
-		return false
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		reason := "docker daemon not responding: " + err.Error()
+		if s := strings.TrimSpace(string(out)); s != "" {
+			reason += " (" + s + ")"
+		}
+		return false, reason
 	}
-	return true
+	return true, ""
 }
 
 // VirtualRoot 是 agent（bot）面向的统一工作目录虚拟根。
