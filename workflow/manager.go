@@ -284,6 +284,14 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	}
 
 	nodes, err := m.analyzer.Analyze(analyzeCtx, wf.Requirement, wf.GoalMode, onProgress)
+
+	// 无论分析成功与否，都必须清掉分析阶段的进度文案：它只在分析阶段有意义。
+	// 残留会让前端把已结束的工作流一直渲染成「正在调用模型分析需求（第 N/5 次尝试）」，
+	// 表现为后端 failed 而 UI 永远转圈的假卡死。
+	m.mu.Lock()
+	wf.ClearAnalyzeMessage()
+	m.mu.Unlock()
+
 	if err != nil {
 		// 分析阶段被显式终止（bgCtx 被 Control(terminate) 取消）：标记为 terminated 而非 failed，
 		// 避免把"用户/bot 主动终止"误报成"分析失败"。
