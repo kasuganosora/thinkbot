@@ -34,7 +34,10 @@ const DefaultMaxConcurrency = 5
 
 // SubAgentManager 管理主 Agent 可调用的 SubAgent 实例。
 type SubAgentManager struct {
-	mu              sync.Mutex
+	// mu 用 RWMutex：toolMgr/baseCtx/defaultToolSteps 属读多写少
+	// （SetToolResolver 通常只在装配期写一次，而每次 Delegate 都要读），
+	// 读路径用 RLock 可避免与写入构成 data race 又不串行化并发委托。
+	mu              sync.RWMutex
 	provider        llm.Provider // 从主 Agent 继承
 	model           string       // 从主 Agent 继承
 	subagents       map[string]*SubAgent
@@ -126,13 +129,41 @@ func (m *SubAgentManager) SetDefaultToolSteps(n int) {
 
 // resolveTools 解析子 Agent 场景下可用的工具列表（IsSubagent=true）。
 // toolMgr 为 nil 时返回 nil（子 Agent 不带工具）。
+//
+// 并发安全：toolMgr/baseCtx 由 SetToolResolver 在写锁下修改，这里必须先在
+// 读锁内快照，再到锁外调用 ResolveTools（外部调用可能耗时，不宜持锁）。
+// 早期版本裸读这两个字段，与 SetToolResolver 构成 data race（-race 可复现）。
+//
+// 注意：本方法自带加锁，**不可**在已持有 m.mu 的路径中调用；
+// 持锁路径（如 Spawn）请改用 resolveToolsLocked。
 func (m *SubAgentManager) resolveTools(ctx context.Context) ([]llm.Tool, error) {
-	if m.toolMgr == nil {
+	m.mu.RLock()
+	toolMgr, sctx := m.toolMgr, m.baseCtx
+	m.mu.RUnlock()
+	return resolveToolsWith(ctx, toolMgr, sctx)
+}
+
+// resolveToolsLocked 与 resolveTools 等价，但假定调用方已持有 m.mu（读或写锁），
+// 因此自身不再加锁，避免重入死锁。
+func (m *SubAgentManager) resolveToolsLocked(ctx context.Context) ([]llm.Tool, error) {
+	return resolveToolsWith(ctx, m.toolMgr, m.baseCtx)
+}
+
+// resolveToolsWith 是解析逻辑的无状态实现，供加锁/已持锁两个入口复用。
+func resolveToolsWith(ctx context.Context, toolMgr *tools.ToolManager, base tools.ToolSessionContext) ([]llm.Tool, error) {
+	if toolMgr == nil {
 		return nil, nil
 	}
-	sctx := m.baseCtx
+	sctx := base
 	sctx.IsSubagent = true
-	return m.toolMgr.ResolveTools(ctx, &sctx)
+	return toolMgr.ResolveTools(ctx, &sctx)
+}
+
+// toolStepsSnapshot 在读锁下读取 defaultToolSteps，避免与 SetDefaultToolSteps 竞态。
+func (m *SubAgentManager) toolStepsSnapshot() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.defaultToolSteps
 }
 
 // ============================================================================
@@ -166,7 +197,7 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入。
 	if !hasSkipTools(opts...) {
 		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.toolStepsSnapshot()))
 		}
 	}
 
@@ -215,7 +246,7 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	// 避免误走 OrchestrateStream 多步编排循环导致卡死或延迟。
 	if !hasSkipTools(opts...) {
 		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.toolStepsSnapshot()))
 		}
 	}
 
@@ -389,7 +420,7 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入。
 	if !hasSkipTools(opts...) {
 		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.toolStepsSnapshot()))
 		}
 	}
 
@@ -502,8 +533,12 @@ func (m *SubAgentManager) Spawn(systemPrompt, name string, opts ...Option) (stri
 	allOpts = append(allOpts, opts...)
 
 	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
-	if tools, err := m.resolveTools(context.Background()); err == nil && len(tools) > 0 {
-		allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+	// 与 Delegate 系保持一致：调用方显式 WithSkipTools() 时不注入工具。
+	// Spawn 已持有 m.mu 写锁，故使用 resolveToolsLocked 避免重入死锁。
+	if !hasSkipTools(opts...) {
+		if tools, err := m.resolveToolsLocked(context.Background()); err == nil && len(tools) > 0 {
+			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
+		}
 	}
 
 	sa := New(m.provider, m.model, allOpts...)
