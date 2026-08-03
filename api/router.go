@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -331,10 +332,33 @@ func (s *Server) registerRoutes() {
 				return
 			}
 			indexPath := filepath.Join(staticDir, "index.html")
+			// index.html 绝不能被缓存：它引用的是带内容哈希的 chunk 文件名。
+			// 若浏览器复用旧 index.html，就会继续加载旧 chunk，用户「刷新了也没生效」。
+			// http.FileServer / c.File 默认只发 Last-Modified，浏览器对 HTML 会启用
+			// 启发式缓存，因此必须显式声明 no-store。
+			setNoStore(c)
 			c.File(indexPath)
 		})
 	}
 }
+
+// setNoStore 声明响应不可缓存。
+//
+// 用于 index.html 这类「入口文档」：它引用带内容哈希的资源文件名，一旦被浏览器缓存，
+// 前端发版后用户即使刷新也会继续加载旧 chunk，表现为「代码改了但页面没变」。
+func setNoStore(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+}
+
+// hashedAssetRE 匹配 Vite 构建产物中带内容哈希的文件名，如：
+//
+//	index-BymryakM.js / Chat-B3U2oJJs.js / style-a1b2c3d4.css / index-BymryakM.js.map
+//
+// 这类文件名随内容变化，可以安全地长期缓存。
+// 末尾允许一个可选的 .map，因为 sourcemap 形如 <name>-<hash>.js.map。
+var hashedAssetRE = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.(js|css|woff2?|ttf|otf|eot|svg|png|jpe?g|gif|webp|avif)(\.map)?$`)
 
 // serveStatic 返回静态文件中间件。
 // 匹配 static 目录下的实际文件，不存在的路径交给后续 NoRoute 处理。
@@ -347,8 +371,18 @@ func serveStatic(staticDir string) gin.HandlerFunc {
 			return
 		}
 		// 检查文件是否存在
-		filePath := filepath.Join(staticDir, filepath.Clean(c.Request.URL.Path))
+		urlPath := c.Request.URL.Path
+		filePath := filepath.Join(staticDir, filepath.Clean(urlPath))
 		if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+			// 缓存策略分两类：
+			//   - 带内容哈希的资源：文件名即版本，可放心长缓存（immutable 免去重复校验）。
+			//   - 其余（index.html 等无哈希入口文档）：必须每次校验，否则前端发版后
+			//     用户刷新仍会加载旧 chunk。
+			if hashedAssetRE.MatchString(urlPath) {
+				c.Header("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				setNoStore(c)
+			}
 			fs.ServeHTTP(c.Writer, c.Request)
 			c.Abort()
 			return
