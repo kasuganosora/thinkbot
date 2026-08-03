@@ -467,6 +467,70 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		"retries", node.RetryCount, "iterations", node.IterationCount)
 }
 
+// reviewInfraMaxAttempts 是单次审查在遇到基础设施错误时的最大尝试次数。
+// 3 次配合退避足以吃掉常见的模型网关抖动，又不至于把失败无限拖长。
+const reviewInfraMaxAttempts = 3
+
+// reviewInfraRetryBaseDelay 是基础设施错误重试的基础退避间隔（指数增长）。
+const reviewInfraRetryBaseDelay = 2 * time.Second
+
+// reviewWithInfraRetry 执行一次审查，并对「基础设施类错误」就地重试。
+//
+// 区分两类错误至关重要（见 review_error.go）：
+//   - 基础设施错误（LLM 超时 / 限流 / 网关抖动）：模型没能给出结论 → 重试审查本身。
+//   - 其他错误：原样上抛，交由调用方判失败。
+//
+// 审查「结论为不通过」不走这里——那是正常返回值（ReviewResult.Passed=false），
+// 由 reviewLoop 触发带反馈的重新执行。
+func (s *Scheduler) reviewWithInfraRetry(ctx context.Context, node *DAGNode, product string, iteration int) (*ReviewResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= reviewInfraMaxAttempts; attempt++ {
+		if s.isTerminated() {
+			return nil, errs.New("terminated during review")
+		}
+
+		res, err := s.executor.Review(ctx, node, product)
+		if err == nil {
+			if attempt > 1 {
+				s.logger.Infow("review succeeded after infra retry",
+					"node_id", node.ID, "iteration", iteration, "attempt", attempt)
+			}
+			return res, nil
+		}
+		lastErr = err
+
+		// 非基础设施错误：不重试，立刻上抛。
+		if !isReviewInfraError(err) {
+			return nil, err
+		}
+		// 上层 ctx 已结束（终止或整体超时）：继续重试没有意义。
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// 已是最后一次尝试：不再等待，直接上抛。
+		if attempt == reviewInfraMaxAttempts {
+			break
+		}
+
+		delay := reviewInfraRetryBaseDelay * time.Duration(1<<(attempt-1))
+		s.logger.Warnw("review hit infrastructure error, retrying",
+			"node_id", node.ID, "iteration", iteration,
+			"attempt", attempt, "max_attempts", reviewInfraMaxAttempts,
+			"delay", delay.String(), "err", err)
+
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(delay):
+		}
+	}
+
+	s.logger.Errorw("review failed after exhausting infra retries",
+		"node_id", node.ID, "iteration", iteration,
+		"attempts", reviewInfraMaxAttempts, "err", lastErr)
+	return nil, lastErr
+}
+
 // reviewLoop 执行 Review 自循环：
 // 反复 Review → 不通过则带反馈重新执行 → 直到通过或超过 MaxIterations。
 //
@@ -518,8 +582,12 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 			"iteration": iter + 1,
 		})
 
-		// 执行 Review
-		reviewResult, err := s.executor.Review(ctx, node, result)
+		// 执行 Review（带基础设施错误重试）
+		//
+		// 「模型没能给出审查结论」≠「审查结论是不通过」。LLM 超时/限流/网关抖动属于前者，
+		// 直接判失败会把好产物连同整个 workflow 一起废掉（下游全部 skipped）。
+		// 这里对基础设施类错误就地重试若干次；仍失败才上抛。
+		reviewResult, err := s.reviewWithInfraRetry(ctx, node, result, iter+1)
 		if err != nil {
 			return result, errs.Wrapf(err, "review error at iteration %d", iter+1)
 		}
