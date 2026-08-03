@@ -32,6 +32,9 @@ export const useBotStore = defineStore('bot', () => {
   let _abortController = null
   // 当前流式请求 traceId（用于后端主动中止）
   let _activeTraceId = ''
+  // loadMessages 请求代号：单调递增，用于识别「已被更晚请求取代」的过期响应。
+  // 多数调用方 fire-and-forget，快速切会话时慢响应会覆盖新会话消息。
+  let _loadMessagesGen = 0
 
   // ---- 会话（Session） ----
   const sessions = ref([])
@@ -208,27 +211,46 @@ export const useBotStore = defineStore('bot', () => {
   async function loadMessages() {
     const botId = activeBotId.value
     if (!botId) {
+      // 同样推进代号，作废在途请求，避免其响应回来后又把消息填回来
+      _loadMessagesGen++
       messages.value = []
       return
     }
+    // 记录发起请求时的 bot/会话与请求序号：多数调用方（selectSession /
+    // createSession / deleteSession）是 fire-and-forget，快速切换会话时慢响应
+    // 可能后到并覆盖新会话的消息（点了会话 B 却显示 A 的内容）。
+    // 与 loadMoreMessages 保持同一防护思路。
+    const reqBotId = botId
+    const reqSessionId = activeSessionId.value
+    const myGen = ++_loadMessagesGen
+    // 仅「本次请求已被更晚的请求取代」才算过期；只比对 bot/session 会在
+    // 「切走再切回同一会话」时误判为未过期，故以单调递增序号为准。
+    const isStale = () => myGen !== _loadMessagesGen
+
     messagesLoading.value = true
     // 重新加载首屏时重置分页游标，避免沿用上个会话的游标
     hasMore.value = false
     nextCursor.value = ''
     try {
-      const page = await chatApi.history(botId, null, PAGE_SIZE, activeSessionId.value)
+      const page = await chatApi.history(botId, null, PAGE_SIZE, reqSessionId)
+      if (isStale()) return
       // 后端返回倒序（最新在前），前端需要正序（旧在前）
       messages.value = (page.messages || []).reverse().map(buildPartsForMessage)
       hasMore.value = page.hasMore || false
       nextCursor.value = page.nextCursor || ''
     } catch (e) {
       console.error('加载消息历史失败', e)
-      messages.value = []
+      if (!isStale()) messages.value = []
     } finally {
-      messagesLoading.value = false
+      // 只有最新一次请求负责关闭 loading：旧请求提前返回时不得误关，
+      // 否则新会话仍在加载中却先显示空列表。
+      if (!isStale()) messagesLoading.value = false
     }
+    // 已被取代的请求不再触发续流与滚动副作用
+    if (isStale()) return
     // 重连后恢复仍在后台运行的任务（断连不杀后台任务）：重连续流 + 允许手动终止
     await resumeInFlightTasks()
+    if (isStale()) return
     // 首屏加载完成：通知 ChatWindow 强制滚到底部（进入应展示最后一页=最新消息）
     scrollToBottomOnLoad.value = true
   }
