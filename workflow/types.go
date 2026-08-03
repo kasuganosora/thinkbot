@@ -109,6 +109,11 @@ type Workflow struct {
 	// AnalyzeMessage 分析阶段的实时进度文案（如「模型返回异常，第 2/5 次重试」）。
 	// 用于前端在分析阶段展示进展，避免「分析中…」长期无变化被误判为卡死。
 	// 由 Manager 在 Analyze 的 onProgress 回调中更新并持久化。
+	//
+	// 注意：它**只在分析阶段有意义**。一旦离开分析阶段（分析成功进入调度，或工作流进入
+	// failed/terminated 等终态），必须调用 ClearAnalyzeMessage() 清空，否则残留文案会让
+	// 前端把已结束的工作流一直渲染成「正在调用模型分析需求（第 1/5 次尝试）」——
+	// 即后端早已 failed、UI 仍在转圈的假卡死。
 	AnalyzeMessage string `json:"analyzeMessage,omitempty"`
 	// UpdatedAt 最后落库时间（由 Repository.Save 维护，与 DB 的 updated_at 列一致）。
 	// 供卡死看门狗（Sweeper）判断工作流是否长时间无进展。
@@ -159,6 +164,17 @@ func NewWorkflow(id, requirement string, nodes []*DAGNode) *Workflow {
 func (wf *Workflow) GetNode(id string) (*DAGNode, bool) {
 	n, ok := wf.nodeIndex[id]
 	return n, ok
+}
+
+// ClearAnalyzeMessage 清空分析阶段的进度文案。
+//
+// 必须在离开分析阶段时调用（分析成功进入调度，或工作流转入 failed/terminated 终态）。
+// 否则残留的「正在调用模型分析需求（第 N/5 次尝试）」会被前端当作实时进度持续渲染，
+// 造成「后端早已结束、UI 仍在转圈」的假卡死。
+//
+// 调用方需自行保证并发安全（Manager 侧持有 m.mu）。
+func (wf *Workflow) ClearAnalyzeMessage() {
+	wf.AnalyzeMessage = ""
 }
 
 // EnsureIndex 确保节点索引已初始化（反序列化后调用）。
