@@ -72,7 +72,6 @@ func (c Config) defaults() Config {
 //   - random:       生成随机数
 //   - uuid:         生成 UUID
 //   - datetime_calc: 日期时间计算
-//   - list_files:   列出目录内容
 //   - text_hash:    计算文本哈希
 //   - text_encode:  Base64 编解码
 //   - text_diff:    文本差异比较
