@@ -82,18 +82,19 @@ func searchToolDef(cfg SearchConfig) agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "web_search",
-			Description: "搜索互联网获取信息。返回相关网页的标题、URL和摘要。" +
-				"适用于查找最新信息、事实核查、获取不了解的概念解释。",
+			Description: "Search the internet for information. Returns the title, URL and snippet of relevant pages. " +
+				"Use this for recent or time-sensitive information, fact checking, and concepts you are unsure about. " +
+				"Follow up with web_fetch when a result's snippet is not detailed enough.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"query": map[string]any{
 						"type":        "string",
-						"description": "搜索关键词",
+						"description": "The search query. Use concise keywords rather than a full sentence.",
 					},
 					"max_results": map[string]any{
 						"type":        "integer",
-						"description": "最大返回结果数（默认5）",
+						"description": "Maximum number of results to return. Defaults to 5.",
 					},
 				},
 				"required": []string{"query"},

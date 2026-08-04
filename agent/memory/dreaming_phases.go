@@ -168,11 +168,12 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 	}
 
 	var sb strings.Builder
-	sb.WriteString("以下是对话/观察记录。请提取 5-20 条简短、原子、可复用的候选事实。\n")
-	sb.WriteString("每条不超过 100 字。过滤闲聊、问候、临时调试。\n")
-	sb.WriteString("输出纯 JSON 数组: [{\"content\":\"...\",\"category\":\"fact|preference|observation\"}]\n\n")
+	sb.WriteString("Below are conversation and observation records. Extract 5-20 short, atomic, reusable candidate facts.\n")
+	sb.WriteString("Keep each one under 100 characters. Filter out small talk, greetings and throwaway debugging.\n")
+	sb.WriteString("Write each content value in Chinese (中文).\n")
+	sb.WriteString("Output a raw JSON array: [{\"content\":\"...\",\"category\":\"fact|preference|observation\"}]\n\n")
 	for i, s := range snippets {
-		fmt.Fprintf(&sb, "--- 片段 %d ---\n%s\n\n", i+1, strutil.Truncate(s.content, 500))
+		fmt.Fprintf(&sb, "--- snippet %d ---\n%s\n\n", i+1, strutil.Truncate(s.content, 500))
 	}
 
 	maxTokens := d.config.MaxDreamTokens
@@ -245,13 +246,14 @@ func (d *DreamManager) extractCandidatesRuleBased(snippets []rawSnippet) []Dream
 	return out
 }
 
-const defaultLightExtractPrompt = `你是一个记忆提取助手。从对话和观察记录中提取原子、具体的候选事实和偏好。
+const defaultLightExtractPrompt = `You are a memory extractor, an analysis component that pulls atomic, concrete candidate facts and preferences out of conversation and observation records.
 
-规则：
-1. 只提取有长期价值的信息
-2. 过滤闲聊、问候、临时调试、路径/ID 噪音
-3. 每条简短具体（≤100字）
-4. 输出纯 JSON 数组`
+Rules:
+1. Extract only information with long-term value.
+2. Filter out small talk, greetings, throwaway debugging, and path/ID noise.
+3. Keep each item short and specific (≤100 characters).
+4. Output a raw JSON array and nothing else.
+5. Write each content value in Chinese (中文).`
 
 // ============================================================================
 // Phase 2: REM Sleep — 主题提取 + 模式识别
@@ -324,7 +326,8 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 	}
 
 	var sb strings.Builder
-	sb.WriteString("为以下候选记忆分配 1-3 个主题标签。输出 JSON: [{\"key\":\"候选key\",\"tags\":[\"标签\"]}]\n\n")
+	sb.WriteString("Assign 1-3 theme tags to each candidate memory below. Reuse the exact key you are given.\n")
+	sb.WriteString("Output JSON: [{\"key\":\"candidate key\",\"tags\":[\"标签\"]}]\n\n")
 	for i, c := range candidates {
 		if i >= 50 {
 			break
@@ -338,7 +341,7 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 	}
 	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_cluster"), llm.GenerateParams{
 		Model:     llm.ChatModel(model),
-		System:    "你是记忆主题分类助手。",
+		System:    "You are a memory theme classifier. You assign concise topical tags to memory entries. Write tags in Chinese (中文).",
 		Messages:  []llm.Message{llm.UserMessage(sb.String())},
 		MaxTokens: &maxTokens,
 	})

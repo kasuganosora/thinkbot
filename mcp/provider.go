@@ -114,11 +114,13 @@ func RegisterTools(toolMgr *tools.ToolManager, mgr *Manager) error {
 	toolMgr.SetRulesSection(&tools.ToolPromptSection{
 		Name:  "mcp_rules",
 		Order: 305,
-		Content: `## MCP 工具
+		Content: `## MCP Tools
 
-部分工具来自外部 MCP 服务器（名称格式: mcp__<server>__<tool>）。
-这些工具的参数 schema 由 MCP 服务器定义，请严格按照 schema 调用。
-MCP 工具的执行结果为纯文本格式。`,
+Some of your tools are provided by external MCP servers. Their names follow the pattern ` + "`mcp__<server>__<tool>`" + `.
+
+- Their parameter schemas are defined by the MCP server. You MUST call them exactly as the schema specifies — never invent or omit fields.
+- MCP tool results are returned as plain text. Parse them yourself before relying on the content.
+- If an MCP tool fails or its server is unavailable, do NOT retry it repeatedly. Fall back to another tool, or tell the user what could not be reached.`,
 		Enabled: true,
 	})
 

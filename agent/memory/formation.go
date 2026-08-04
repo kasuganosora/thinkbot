@@ -254,20 +254,21 @@ func (f *FormationPipeline) ProcessTurn(
 // extractFacts 调用 LLM 从对话中提取事实。
 func (f *FormationPipeline) extractFacts(ctx context.Context, userContent, assistantContent string) ([]FactItem, error) {
 	var sb strings.Builder
-	sb.WriteString("## 对话内容\n\n")
-	sb.WriteString("用户: ")
+	sb.WriteString("## Conversation\n\n")
+	sb.WriteString("User: ")
 	sb.WriteString(StripThinking(userContent))
-	sb.WriteString("\n助手: ")
+	sb.WriteString("\nAssistant: ")
 	sb.WriteString(StripThinking(assistantContent))
-	sb.WriteString("\n\n## 任务\n")
-	sb.WriteString("从上述对话中提取值得长期记忆的事实。只提取有信息量的内容，忽略闲聊/问候/客套。\n")
-	sb.WriteString("输出 JSON 数组:\n")
+	sb.WriteString("\n\n## Task\n")
+	sb.WriteString("Extract facts from the conversation above that are worth remembering long term. Keep only informative content; ignore small talk, greetings and pleasantries.\n")
+	sb.WriteString("Write each content value in the same language as the conversation.\n")
+	sb.WriteString("Output a JSON array:\n")
 	sb.WriteString("```json\n")
 	sb.WriteString(`[{"content":"用户使用 Go 语言","category":"fact","importance":0.8}]`)
 	sb.WriteString("\n```")
-	sb.WriteString("\ncategory: fact(事实) / preference(偏好) / event(事件) / observation(观察)")
-	sb.WriteString("\nimportance: 0.0~1.0，越高越重要。闲聊/问候/客套不输出。\n")
-	sb.WriteString("如果对话中没有值得记忆的内容，输出空数组 []")
+	sb.WriteString("\ncategory: fact | preference | event | observation")
+	sb.WriteString("\nimportance: 0.0~1.0, higher means more important. NEVER emit small talk, greetings or pleasantries.\n")
+	sb.WriteString("If the conversation contains nothing worth remembering, output an empty array [].")
 
 	maxTokens := 2048
 	resp, err := f.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_formation"), llm.GenerateParams{
@@ -314,7 +315,7 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## 新提取的事实\n\n")
+	sb.WriteString("## Newly extracted facts\n\n")
 	for _, fact := range facts {
 		sb.WriteString(strings.Repeat("-", 20))
 		sb.WriteString("\n")
@@ -322,7 +323,7 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("\n## 已有的长期记忆（供去重参考）\n\n")
+	sb.WriteString("\n## Existing long-term memory (for deduplication)\n\n")
 	for _, e := range existing {
 		sb.WriteString("[")
 		sb.WriteString(e.ID)
@@ -331,13 +332,13 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("\n## 任务\n")
-	sb.WriteString("对每条新事实做出决策。输出 JSON 数组:\n")
+	sb.WriteString("\n## Task\n")
+	sb.WriteString("Decide what to do with each new fact. Output a JSON array:\n")
 	sb.WriteString("```json\n")
-	sb.WriteString(`[{"fact":{"content":"...","category":"fact","importance":0.8},"action":"ADD","reason":"新事实"}]`)
+	sb.WriteString(`[{"fact":{"content":"...","category":"fact","importance":0.8},"action":"ADD","reason":"new fact"}]`)
 	sb.WriteString("\n```\n")
-	sb.WriteString("action: ADD(全新) / UPDATE(更新已有，需提供 target_id) / SKIP(已存在或无价值)\n")
-	sb.WriteString("事实顺序与输入顺序一致。")
+	sb.WriteString("action: ADD (brand new) | UPDATE (supersedes an existing entry, MUST include target_id) | SKIP (already known or worthless)\n")
+	sb.WriteString("IMPORTANT: emit one decision per input fact, in the exact same order as the input.")
 
 	maxTokens := 4096
 	resp, err := f.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_formation"), llm.GenerateParams{
@@ -445,16 +446,17 @@ func (f *FormationPipeline) appendAsNew(ctx context.Context, store *TieredStore,
 	result.Added++
 }
 
-const defaultFormationPrompt = `你是一个记忆提取助手。你的任务是从对话中提取值得长期保存的事实。
+const defaultFormationPrompt = `You are a memory extractor, an analysis component that pulls durable facts out of a conversation.
 
-规则：
-1. 只提取有信息量的内容（事实、偏好、事件、重要观察）
-2. 忽略闲聊、问候、客套、确认等无实质内容的对话
-3. 评估每条事实的重要度（0.0~1.0）
-4. 输出纯 JSON，不要其他文本
+Rules:
+1. Extract only informative content: facts, preferences, events and significant observations.
+2. IGNORE small talk, greetings, pleasantries and bare acknowledgements. They carry no substance.
+3. Score the importance of each fact from 0.0 to 1.0.
+4. Output raw JSON and nothing else — no prose, no code fences.
+5. Write each content value in the same language as the conversation.
 
-分类：
-- fact: 客观事实（"用户使用 Go 语言"）
-- preference: 偏好（"用户偏好简洁的回复"）
-- event: 事件（"用户完成了部署"）
-- observation: 观察（"用户对 Rust 感兴趣"）`
+Categories:
+- fact: an objective fact ("用户使用 Go 语言")
+- preference: a preference ("用户偏好简洁的回复")
+- event: something that happened ("用户完成了部署")
+- observation: an inferred observation ("用户对 Rust 感兴趣")`

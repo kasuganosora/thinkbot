@@ -30,24 +30,24 @@ import (
 var memoryToolsPromptSection = &tools.ToolPromptSection{
 	Name:  "memory_tools",
 	Order: 310,
-	Content: `# 记忆管理
+	Content: `# Memory management
 
-你拥有持久记忆能力。使用 ` + "`memory`" + ` 工具保存、搜索和管理跨会话的记忆。
+You have persistent memory. Use the ` + "`memory`" + ` tool to save, search and curate memories that survive across sessions.
 
-## 何时使用
+## When to use it
 
-- **主动保存**：当用户陈述偏好、纠正或个人信息时，主动保存
-- **搜索记忆**：当你需要回忆之前对话中的信息时搜索
-- **删除过时记忆**：当发现记忆过时或不准确时删除
-- **批量整理**：当需要同时添加+删除多个条目时，用 batch 操作一次完成
+- **Save proactively**: whenever the user states a preference, corrects you, or shares personal information, save it without being asked.
+- **Search**: whenever you need to recall something from an earlier conversation.
+- **Delete stale entries**: whenever you find a memory that is outdated or wrong.
+- **Curate in bulk**: when you need to add and remove several entries, do it in a single ` + "`batch`" + ` operation.
 
-## 最佳实践
+## Best practices
 
-- 写入的记忆会在**下一轮对话**的系统提示中自动生效
-- 只存储有长期价值的信息：用户偏好 > 环境事实 > 流程
-- **子串操作**：replace 和 remove 使用唯一子串匹配条目，不需要 ID
-- 当记忆库满时，用 batch 操作：先 remove/replace 旧条目释放空间，再 add 新条目
-- 不要存储可轻松重新发现的信息、原始数据转储、临时 TODO`,
+- A write takes effect in the system prompt of the **next** turn, not the current one.
+- Store only what has long-term value. Priority: user preferences > environment facts > procedures.
+- **Substring operations**: ` + "`replace`" + ` and ` + "`remove`" + ` match an entry by a unique substring. Do NOT pass an ID.
+- When the store is full, use ` + "`batch`" + `: remove or replace old entries to free space first, then add the new ones.
+- NEVER store information that is trivially rediscoverable, raw data dumps, or short-lived TODOs.`,
 	Enabled: true,
 }
 
@@ -407,7 +407,7 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		}
 		return map[string]any{
 			"success":   true,
-			"message":   "记忆已删除",
+			"message":   "Memory deleted.",
 			"memory_id": memoryID,
 			"scope":     scope.Key(),
 		}, nil
@@ -732,7 +732,7 @@ func formatEntries(entries []Entry, queryType string) any {
 	if len(entries) == 0 {
 		return map[string]any{
 			"count":   0,
-			"message": "没有找到匹配的记忆",
+			"message": "No matching memory found.",
 			"entries": []any{},
 		}
 	}

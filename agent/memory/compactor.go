@@ -246,7 +246,7 @@ func (c *SemanticCompactor) Compact(
 // clusterAndMerge 调用 LLM 对记忆进行聚类合并。
 func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []TieredEntry) ([]ClusterResult, error) {
 	var sb strings.Builder
-	sb.WriteString("## 需要整理的长期记忆\n\n")
+	sb.WriteString("## Long-term memory entries to compact\n\n")
 	for _, e := range entries {
 		sb.WriteString("[")
 		sb.WriteString(e.ID)
@@ -261,17 +261,18 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 		sb.WriteByte('\n')
 	}
 
-	sb.WriteString("\n## 任务\n")
-	sb.WriteString("将语义相似的记忆条目聚类合并为信息更密集的条目。\n")
-	sb.WriteString("- 相似的条目合并为一条（如多条关于同一主题的事实合为一句话）\n")
-	sb.WriteString("- 互补的条目合并（如'用户用Go' + '用户用Gin框架' → '用户使用Go+Gin做后端开发'）\n")
-	sb.WriteString("- 独立无关联的条目保持不变\n")
-	sb.WriteString("- 至少合并2条才输出一个 cluster\n\n")
-	sb.WriteString("输出 JSON 数组:\n")
+	sb.WriteString("\n## Task\n")
+	sb.WriteString("Cluster semantically similar entries and merge each cluster into one denser entry.\n")
+	sb.WriteString("- Merge near-duplicates into a single entry (several facts about the same topic become one sentence).\n")
+	sb.WriteString("- Merge complementary entries (e.g. '用户用Go' + '用户用Gin框架' → '用户使用Go+Gin做后端开发').\n")
+	sb.WriteString("- Leave unrelated, standalone entries untouched.\n")
+	sb.WriteString("- A cluster MUST contain at least 2 source entries. NEVER emit a cluster of one.\n")
+	sb.WriteString("- Write merged_content in the same language as its source entries.\n\n")
+	sb.WriteString("Output a JSON array:\n")
 	sb.WriteString("```json\n")
 	sb.WriteString(`[{"merged_content":"用户使用Go+Gin框架做后端开发","category":"fact","importance":0.8,"source_ids":["mem-1","mem-2"]}]`)
 	sb.WriteString("\n```")
-	sb.WriteString("\n如果没有任何可合并的条目，输出空数组 []")
+	sb.WriteString("\nIf nothing can be merged, output an empty array [] and nothing else.")
 
 	resp, err := c.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), llm.GenerateParams{
 		Model:    c.config.Model,
@@ -355,22 +356,25 @@ func (c *SemanticCompactor) PurgeArchived(ctx context.Context, store *TieredStor
 	return removed, nil
 }
 
-const defaultCompactionPrompt = `你是一个记忆整理助手。你的任务是将语义相似的记忆条目聚类合并为更简洁的信息密集条目。
+const defaultCompactionPrompt = `You are a memory compactor, a deduplication component that clusters semantically similar memory entries and merges each cluster into a single, denser entry.
 
-规则：
-1. 只有语义确实相似的条目才合并（不要强行合并无关条目）
-2. 合并时保留所有关键信息，不要遗漏
-3. 合并后的内容应该是一条简洁、完整的事实
-4. source_ids 必须包含所有被合并条目的 ID
-5. 输出纯 JSON 数组，不要其他文本
-6. 如果没有可合并的条目，输出空数组 []
+Rules:
+1. Merge ONLY entries that are genuinely similar. NEVER force unrelated entries together.
+2. Preserve every key detail when merging. Losing information is a failure.
+3. Each merged_content MUST be one concise, self-contained fact.
+4. source_ids MUST list the IDs of every entry folded into that cluster.
+5. Output a raw JSON array and nothing else — no prose, no code fences.
+6. If nothing can be merged, output an empty array [].
+7. Write merged_content in the same language as its source entries.
 
-示例：
-输入:
+<example>
+Input:
 [mem-1] 用户使用 Go 语言
 [mem-2] 用户使用 Gin 框架
 [mem-3] 用户喜欢猫
 
-输出:
+Output:
 [{"merged_content":"用户使用Go语言和Gin框架进行开发","category":"fact","importance":0.8,"source_ids":["mem-1","mem-2"]}]
-(mem-3 保持独立，不输出)`
+
+mem-3 is unrelated, so it stays standalone and is not emitted.
+</example>`

@@ -52,7 +52,7 @@ func TestGoalModeDirective(t *testing.T) {
 	if !goalContains(d, "goalMode: true") {
 		t.Errorf("directive must mention goalMode: true; got %q", d)
 	}
-	if !goalContains(d, "禁止") {
+	if !goalContains(d, "NEVER") {
 		t.Errorf("directive must forbid subagent/delegate; got %q", d)
 	}
 }

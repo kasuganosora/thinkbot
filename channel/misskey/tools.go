@@ -34,14 +34,14 @@ func (c *MisskeyChannel) followUserTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_follow_user",
-			Description: "在 Misskey 平台上关注一个用户。" +
-				"需要提供目标用户的 userId（可从 misskey_search_user 获取）。",
+			Description: "Follow a user on Misskey. Requires the target userId. " +
+				"IMPORTANT: A username is NOT a valid userId — resolve it with misskey_search_user first.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"userId": map[string]any{
 						"type":        "string",
-						"description": "目标用户的 ID（可从 misskey_search_user 结果中获取）",
+						"description": "ID of the target user (obtain it from misskey_search_user results)",
 					},
 				},
 				"required": []string{"userId"},
@@ -73,14 +73,14 @@ func (c *MisskeyChannel) unfollowUserTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_unfollow_user",
-			Description: "在 Misskey 平台上取消关注一个用户。" +
-				"需要提供目标用户的 userId。",
+			Description: "Unfollow a user on Misskey. Requires the target userId. " +
+				"IMPORTANT: A username is NOT a valid userId — resolve it with misskey_search_user first.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"userId": map[string]any{
 						"type":        "string",
-						"description": "要取消关注的用户 ID",
+						"description": "ID of the user to unfollow",
 					},
 				},
 				"required": []string{"userId"},
@@ -112,23 +112,24 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_create_note",
-			Description: "在 Misskey 平台上发布一条帖子（Note）。" +
-				"支持设置可见性（public/home/followers）和 CW（内容折叠）。",
+			Description: "Publish a note (post) on Misskey. " +
+				"Supports visibility control (public/home/followers) and a CW (content warning) title. " +
+				"IMPORTANT: The note is published to end users. You must write the note text in Chinese (中文).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"text": map[string]any{
 						"type":        "string",
-						"description": "帖子文本内容",
+						"description": "Body text of the note. Write it in Chinese (中文)",
 					},
 					"visibility": map[string]any{
 						"type":        "string",
-						"description": "帖子可见性：public（公开，默认）、home（首页）、followers（仅关注者）",
+						"description": "Note visibility: public (default), home (home timeline), or followers (followers only)",
 						"enum":        []string{"public", "home", "followers"},
 					},
 					"cw": map[string]any{
 						"type":        "string",
-						"description": "CW（内容折叠）标题，如 \"剧透警告\"",
+						"description": "CW (content warning) title that collapses the note body, e.g. \"剧透警告\"",
 					},
 				},
 				"required": []string{"text"},
@@ -172,18 +173,18 @@ func (c *MisskeyChannel) createRenoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_create_renote",
-			Description: "在 Misskey 平台上转发（Renote/Boost）一条帖子。" +
-				"需要提供原帖子的 noteId。",
+			Description: "Renote (boost) an existing note on Misskey. " +
+				"Requires the noteId of the original note.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"noteId": map[string]any{
 						"type":        "string",
-						"description": "要转发的原帖子 ID",
+						"description": "ID of the original note to renote",
 					},
 					"visibility": map[string]any{
 						"type":        "string",
-						"description": "转发的可见性：public（公开，默认）、home（首页）、followers（仅关注者）",
+						"description": "Renote visibility: public (default), home (home timeline), or followers (followers only)",
 						"enum":        []string{"public", "home", "followers"},
 					},
 				},
@@ -227,14 +228,14 @@ func (c *MisskeyChannel) deleteNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_delete_note",
-			Description: "删除自己在 Misskey 平台上发送的帖子（Note）。" +
-				"只能删除自己发送的帖子，需要提供帖子的 noteId。",
+			Description: "Delete a note (post) that this bot published on Misskey. Requires the noteId. " +
+				"CRITICAL: You can ONLY delete notes the bot posted itself — NEVER attempt to delete another user's note.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"noteId": map[string]any{
 						"type":        "string",
-						"description": "要删除的帖子 ID",
+						"description": "ID of the note to delete",
 					},
 				},
 				"required": []string{"noteId"},
@@ -266,18 +267,18 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_react_to_note",
-			Description: "对 Misskey 平台上的一条帖子添加 emoji 反应。" +
-				"需要提供帖子的 noteId 和 reaction（如 :heart:）。",
+			Description: "Add an emoji reaction to a note on Misskey. " +
+				"Requires the noteId and a reaction (for example :heart:).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"noteId": map[string]any{
 						"type":        "string",
-						"description": "目标帖子 ID",
+						"description": "ID of the target note",
 					},
 					"reaction": map[string]any{
 						"type":        "string",
-						"description": "反应内容，格式为 emoji 或 :name:，如 \"👍\" 或 \":heart:\"",
+						"description": "Reaction content, either a Unicode emoji or the :name: form, e.g. \"👍\" or \":heart:\"",
 					},
 				},
 				"required": []string{"noteId", "reaction"},
@@ -312,14 +313,14 @@ func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_unreact_to_note",
-			Description: "移除自己在 Misskey 平台上对一条帖子添加的 emoji 反应。" +
-				"只需要提供帖子的 noteId（自动移除当前 Bot 的反应）。",
+			Description: "Remove the bot's own emoji reaction from a note on Misskey. " +
+				"Requires only the noteId — the bot's existing reaction on that note is removed automatically.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"noteId": map[string]any{
 						"type":        "string",
-						"description": "目标帖子 ID",
+						"description": "ID of the target note",
 					},
 				},
 				"required": []string{"noteId"},
@@ -352,18 +353,19 @@ func (c *MisskeyChannel) searchUserTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_search_user",
-			Description: "在 Misskey 平台上搜索用户。" +
-				"返回匹配的用户列表（含 userId、username、displayName 等信息）。",
+			Description: "Search for users on Misskey. " +
+				"Returns matching users with userId, username, displayName, and related fields. " +
+				"ALWAYS use this to resolve a userId before calling misskey_follow_user or misskey_unfollow_user.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"query": map[string]any{
 						"type":        "string",
-						"description": "搜索关键词（用户名或显示名）",
+						"description": "Search keyword (username or display name)",
 					},
 					"limit": map[string]any{
 						"type":        "integer",
-						"description": "返回结果数量上限（默认 10）",
+						"description": "Maximum number of results to return (default 10)",
 					},
 				},
 				"required": []string{"query"},
@@ -417,18 +419,18 @@ func (c *MisskeyChannel) listFollowingTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "misskey_list_following",
-			Description: "获取指定用户的关注列表。" +
-				"如果不指定 userId，默认获取当前 Bot 的关注列表。",
+			Description: "List the accounts a user follows on Misskey. " +
+				"When userId is omitted, returns the bot's own following list.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"userId": map[string]any{
 						"type":        "string",
-						"description": "要查看关注列表的用户 ID。不指定则查看 Bot 自身的关注列表。",
+						"description": "ID of the user whose following list to fetch. Omit to list the bot's own following",
 					},
 					"limit": map[string]any{
 						"type":        "integer",
-						"description": "返回结果数量上限（默认 10）",
+						"description": "Maximum number of results to return (default 10)",
 					},
 				},
 			},

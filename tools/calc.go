@@ -21,15 +21,17 @@ func calculateToolDef() agenttools.ToolDef {
 		Category: "utility",
 		Tool: llm.Tool{
 			Name: "calculate",
-			Description: "安全计算数学表达式。支持四则运算（+ - * /）、取余（%）、幂运算（^）、" +
-				"括号和常用数学函数（sqrt, abs, round, floor, ceil, sin, cos, ln, log10, min, max）。" +
-				"常量：pi, e。当需要精确数值计算时使用。",
+			Description: "Safely evaluate a math expression. Supports arithmetic (+ - * /), modulo (%), " +
+				"exponentiation (^), parentheses and common functions " +
+				"(sqrt, abs, round, floor, ceil, sin, cos, tan, ln, log10, exp, min, max). " +
+				"Constants: pi, e. " +
+				"ALWAYS use this tool when a result must be numerically exact — never compute it yourself.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"expression": map[string]any{
 						"type":        "string",
-						"description": "数学表达式，如 \"(1 + 2) * 3\"、\"sqrt(16) + 2^3\"、\"sin(pi/2)\"",
+						"description": "The expression to evaluate, e.g. \"(1 + 2) * 3\", \"sqrt(16) + 2^3\", \"sin(pi/2)\"",
 					},
 				},
 				"required": []string{"expression"},
@@ -433,35 +435,35 @@ func randomToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "random",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description: "生成随机数。可以生成指定范围内的随机整数或浮点数，" +
-				"也可以随机选择列表中的元素。",
+			Description: "Generate random values: random integers or floats within a range, " +
+				"or a random pick from a list of choices.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"min": map[string]any{
 						"type":        "number",
-						"description": "最小值（含），默认 0",
+						"description": "Lower bound, inclusive. Defaults to 0.",
 						"default":     0,
 					},
 					"max": map[string]any{
 						"type":        "number",
-						"description": "最大值（含）",
+						"description": "Upper bound, inclusive.",
 					},
 					"type": map[string]any{
 						"type":        "string",
 						"enum":        []string{"int", "float"},
-						"description": "随机数类型：int（整数，默认）或 float（浮点数）",
+						"description": "Value type: int (default) or float.",
 						"default":     "int",
 					},
 					"count": map[string]any{
 						"type":        "integer",
-						"description": "生成数量（默认 1，大于 1 时返回数组）",
+						"description": "How many values to generate. Defaults to 1; values greater than 1 return an array. Capped at 1000.",
 						"default":     1,
 					},
 					"choices": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "从中随机选择的列表（设置后忽略 min/max/type/count）",
+						"description": "List to pick from. When set, min/max/type/count are ignored.",
 					},
 				},
 			},
@@ -587,14 +589,14 @@ func uuidToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "uuid",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description: "生成 UUID（Universally Unique Identifier）。生成基于加密安全的随机 UUID v4。" +
-				"适用于生成唯一标识符、会话 ID、临时令牌等场景。",
+			Description: "Generate cryptographically random UUID v4 identifiers. " +
+				"Use for unique IDs, session IDs, temporary tokens and similar cases.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"count": map[string]any{
 						"type":        "integer",
-						"description": "生成数量（默认 1，最大 100）",
+						"description": "How many UUIDs to generate. Defaults to 1, maximum 100.",
 						"default":     1,
 					},
 				},

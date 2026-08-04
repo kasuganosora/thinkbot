@@ -32,26 +32,27 @@ func (c *TelegramChannel) banMemberTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_ban_member",
-			Description: "在 Telegram 群组/频道中封禁一个成员。默认永久封禁。" +
-				"需要提供 chatId 和 userId（均为数字 ID）。",
+			Description: "Ban a member from a Telegram group or channel. " +
+				"Requires chatId and userId (both numeric IDs). " +
+				"IMPORTANT: The ban is permanent unless untilDate is set.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标群组/频道的 ID",
+						"description": "ID of the target group or channel",
 					},
 					"userId": map[string]any{
 						"type":        "integer",
-						"description": "要封禁的用户 ID",
+						"description": "ID of the user to ban",
 					},
 					"untilDate": map[string]any{
 						"type":        "integer",
-						"description": "解封时间（Unix 时间戳）。0 或不传表示永久封禁",
+						"description": "Unix timestamp at which the ban is lifted. 0 or omitted means a permanent ban",
 					},
 					"revokeMessages": map[string]any{
 						"type":        "boolean",
-						"description": "是否同时删除该用户所有消息。默认 false",
+						"description": "Whether to also delete all messages from this user. Defaults to false",
 					},
 				},
 				"required": []string{"chatId", "userId"},
@@ -86,22 +87,23 @@ func (c *TelegramChannel) unbanMemberTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_unban_member",
-			Description: "在 Telegram 群组/频道中解除一个成员的封禁。" +
-				"需要提供 chatId 和 userId（均为数字 ID）。默认仅在被封状态下执行。",
+			Description: "Lift a ban on a member in a Telegram group or channel. " +
+				"Requires chatId and userId (both numeric IDs). " +
+				"IMPORTANT: By default this only acts on users who are currently banned.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标群组/频道的 ID",
+						"description": "ID of the target group or channel",
 					},
 					"userId": map[string]any{
 						"type":        "integer",
-						"description": "要解除封禁的用户 ID",
+						"description": "ID of the user to unban",
 					},
 					"onlyIfBanned": map[string]any{
 						"type":        "boolean",
-						"description": "仅当用户当前被封禁时才执行。默认 true（安全模式）",
+						"description": "Only run if the user is currently banned. Defaults to true (safe mode)",
 					},
 				},
 				"required": []string{"chatId", "userId"},
@@ -138,18 +140,19 @@ func (c *TelegramChannel) deleteMessageTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_delete_message",
-			Description: "在 Telegram 群组/频道中删除一条消息。" +
-				"Bot 必须有删除消息的权限。需要提供 chatId 和 messageId。",
+			Description: "Delete a message in a Telegram group or channel. " +
+				"Requires chatId and messageId. " +
+				"IMPORTANT: The bot MUST hold delete-message permission in that chat, otherwise the call fails.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标群组/频道的 ID",
+						"description": "ID of the target group or channel",
 					},
 					"messageId": map[string]any{
 						"type":        "integer",
-						"description": "要删除的消息 ID",
+						"description": "ID of the message to delete",
 					},
 				},
 				"required": []string{"chatId", "messageId"},
@@ -182,14 +185,14 @@ func (c *TelegramChannel) getChatMemberCountTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_get_chat_member_count",
-			Description: "获取 Telegram 群组/频道的成员数量。" +
-				"比 getChatInfo 更轻量，仅返回成员数。需要提供 chatId。",
+			Description: "Get the member count of a Telegram group or channel. Requires chatId. " +
+				"ALWAYS prefer this over telegram_get_chat_info when the member count is all you need — it returns only that number.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标群组/频道的 ID",
+						"description": "ID of the target group or channel",
 					},
 				},
 				"required": []string{"chatId"},
@@ -222,14 +225,14 @@ func (c *TelegramChannel) getChatAdministratorsTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_get_chat_administrators",
-			Description: "获取 Telegram 群组/频道的管理员列表。" +
-				"返回管理员的 user ID、username、角色（creator/administrator）等信息。需要提供 chatId。",
+			Description: "List the administrators of a Telegram group or channel. Requires chatId. " +
+				"Returns each administrator's user ID, username, and role (creator/administrator).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标群组/频道的 ID",
+						"description": "ID of the target group or channel",
 					},
 				},
 				"required": []string{"chatId"},
@@ -280,14 +283,14 @@ func (c *TelegramChannel) getChatInfoTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_get_chat_info",
-			Description: "获取 Telegram 群组、频道或私聊的详细信息。" +
-				"需要提供 chatId（数字 ID）。",
+			Description: "Get detailed information about a Telegram group, channel, or private chat. " +
+				"Requires chatId (numeric ID).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标聊天的 ID",
+						"description": "ID of the target chat",
 					},
 				},
 				"required": []string{"chatId"},
@@ -326,22 +329,22 @@ func (c *TelegramChannel) pinMessageTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "telegram_pin_message",
-			Description: "在 Telegram 群组/频道中置顶一条消息。" +
-				"需要提供 chatId 和 messageId（均为数字 ID）。",
+			Description: "Pin a message in a Telegram group or channel. " +
+				"Requires chatId and messageId (both numeric IDs).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"chatId": map[string]any{
 						"type":        "integer",
-						"description": "目标群组/频道的 ID",
+						"description": "ID of the target group or channel",
 					},
 					"messageId": map[string]any{
 						"type":        "integer",
-						"description": "要置顶的消息 ID",
+						"description": "ID of the message to pin",
 					},
 					"disableNotification": map[string]any{
 						"type":        "boolean",
-						"description": "是否静默置顶（不发通知）。默认 false",
+						"description": "Whether to pin silently without notifying members. Defaults to false",
 					},
 				},
 				"required": []string{"chatId", "messageId"},

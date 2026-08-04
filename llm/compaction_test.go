@@ -480,8 +480,8 @@ func TestOutputTruncator_Truncation(t *testing.T) {
 	if !ok {
 		t.Fatal("expected string output")
 	}
-	if !strings.Contains(outputStr, "中间省略") {
-		t.Error("expected truncation marker (中间省略) in truncated output")
+	if !strings.Contains(outputStr, "middle omitted") {
+		t.Error("expected truncation marker (middle omitted) in truncated output")
 	}
 }
 
@@ -523,8 +523,8 @@ func TestOutputTruncator_HeadAndTailKept(t *testing.T) {
 	if !strings.Contains(outputStr, "LAST_LINE_MARKER") {
 		t.Error("expected tail (last line) to be kept")
 	}
-	if !strings.Contains(outputStr, "中间省略") {
-		t.Error("expected truncation marker (中间省略)")
+	if !strings.Contains(outputStr, "middle omitted") {
+		t.Error("expected truncation marker (middle omitted)")
 	}
 }
 
@@ -555,8 +555,8 @@ func TestOutputTruncator_SingleHugeLine(t *testing.T) {
 	if kept == len(huge) {
 		t.Error("expected content to be omitted (not full passthrough)")
 	}
-	if !strings.Contains(outputStr, "中间省略") {
-		t.Error("expected truncation marker (中间省略)")
+	if !strings.Contains(outputStr, "middle omitted") {
+		t.Error("expected truncation marker (middle omitted)")
 	}
 }
 
