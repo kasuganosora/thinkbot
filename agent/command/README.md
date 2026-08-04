@@ -15,9 +15,11 @@ CommandStage 以 **Order=5** 注册在 Pipeline 最前端，在所有其他 Stag
 
 ### 核心机制
 
-- **命令拦截**：消息以 `/` 开头时，解析命令名和参数，在 Registry 中查找 handler
-- **权限检查**：`AdminOnly` 命令需通过 `AdminChecker` 验证
-- **Pipeline 中止**：命令执行后调用 `env.Abort(nil)`，跳过后续 Stage（不调用 LLM），但保留 `ActionReply` 供 Dispatcher 正常派发
+- **命令解析**：`Parse(text)` 返回 `*ParsedCommand{Name, Args}`；文本不以 `/` 开头或命令名为空时返回 nil，命令名统一转小写
+- **命令拦截**：解析成功后在 Registry 中查找 handler
+- **权限检查**：`AdminOnly` 命令需通过 `AdminChecker` 验证；`checker` 为 nil 时一律拒绝（安全默认）
+- **Pipeline 中止**：命令执行（或被拒绝 / 执行出错）后调用 `env.Abort(nil)`，跳过后续 Stage（不调用 LLM），但保留 `ActionReply` 供 Dispatcher 正常派发
+- **回复目标**：优先取 `Message.Metadata["reply_target"]`，缺省回退到 `Message.Channel`
 - **未知命令**：未注册的 `/xxx` 命令会被放行，交给 LLM 自然处理
 
 ## 内建命令
@@ -26,8 +28,11 @@ CommandStage 以 **Order=5** 注册在 Pipeline 最前端，在所有其他 Stag
 |------|--------|------|
 | `/help` | 否 | 显示所有可用命令 |
 | `/clear` | 是 | 清空当前会话上下文（工作记忆） |
-| `/compact [N]` | 是 | 压缩上下文，保留最近 N 条消息（默认 3） |
-| `/status` | 否 | 显示当前会话状态 |
+| `/compact [N]` | 是 | 压缩上下文，保留最近 N 条消息（`DefaultKeepRecent` = 3） |
+| `/status` | 否 | 显示当前会话状态（ID、状态、消息数、话题、创建/最后活动时间） |
+
+`RegisterBuiltins(registry, accessor, keepRecent)` 负责注册以上命令。
+`/help` 始终注册；`accessor` 为 nil 时跳过依赖 session 的 `/clear`、`/compact`、`/status`。
 
 ## 使用方式
 
@@ -49,9 +54,10 @@ cmdStage := command.NewCommandStageWithBuiltins(
 
 // 加入 Pipeline
 stages := []core.StageInfo{
-    {Stage: cmdStage, Order: command.DefaultOrder, Enabled: true},
+    command.AsStageInfo(cmdStage), // 等价于 {Stage: cmdStage, Order: command.DefaultOrder, Enabled: true}
     // ... 其他 stage
 }
+// 需要自定义 Order 时用 command.AsStageInfoWithOrder(cmdStage, 8)
 ```
 
 ### 方式二：自定义命令
@@ -74,14 +80,23 @@ stage := command.NewCommandStage("command", registry, checker, tp, logger)
 
 ### 方式三：fx 模块
 
+`command.Module` 提供 `*Registry`、一个**默认拒绝所有 AdminOnly 命令**的 `AdminChecker`，
+以及通过 `NewCommandStageFromDeps` 构造并已注册内建命令的 `*CommandStage`。
+`CommandStageParams.Accessor`（`*SessionManagerAccessor`）为可选依赖，提供后才会注册
+`/clear`、`/compact`、`/status`。
+
 ```go
 app := fx.New(
     command.Module,
+    // 提供 SessionAccessor 以启用 session 相关命令
+    fx.Provide(func(mgr *session.SessionManager, r session.SessionResolver) *command.SessionManagerAccessor {
+        return &command.SessionManagerAccessor{Mgr: mgr, Resolver: r}
+    }),
     // 覆盖默认 AdminChecker
-    fx.Provide(func() command.AdminChecker {
+    fx.Decorate(func(command.AdminChecker) command.AdminChecker {
         return command.NewStaticAdminChecker("telegram:admin-id-1", "telegram:admin-id-2")
     }),
-    // 通过 pipeline 注册
+    // 注册到 "pipeline_stages" 分组
     command.ProvideStage(command.DefaultOrder),
 )
 ```
@@ -126,3 +141,17 @@ type CommandHandler interface {
     Execute(ctx context.Context, env *core.Envelope, args string) (*CommandResult, error)
 }
 ```
+
+`CommandResult{Reply string, OK bool}`：`Reply` 为空表示不回复。
+`CommandFunc` 是把函数适配为 `CommandHandler` 的结构体（字段 `CmdName` / `CmdDesc` / `CmdAdminOnly` / `Fn`）。
+
+### SessionAccessor
+
+```go
+type SessionAccessor interface {
+    GetFromEnvelope(env *core.Envelope) *session.Session
+}
+```
+
+内建实现 `SessionManagerAccessor` 先读 Envelope KV 中的 `session.id`（上游 SessionStage 注入），
+未命中则用 `Resolver` 自行解析并 `GetOrCreate`。

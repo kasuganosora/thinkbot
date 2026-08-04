@@ -4,49 +4,53 @@
 
 ## 设计原则
 
-- **配置管理走 API，运行时控制走 Agent 工具**：Bot 配置、定时任务、技能开关等基础设施管理通过 REST API 暴露；工作流的创建和控制由 Agent 通过 `task` 系列工具完成，API 只提供只读监控
+- **配置管理走 API，运行时控制走 Agent 工具**：Bot 配置、定时任务、技能开关等基础设施管理通过 REST API 暴露；工作流的创建和控制由 Agent 通过 `task` 系列工具完成，API 只提供只读监控 + 崩溃恢复 + 节点重试
 - **最小暴露面**：每个端点都有明确的存在理由，避免与 Agent 工具链重复暴露运行时控制接口
 - **统一日志管道**：Gin 的所有输出（请求日志、panic 恢复、内部警告）通过 `zapRecovery` 和 `zapWriter` 集成到 `util/log` 配置的 zap 管道
-- **审计追踪**：所有写操作通过 `auditLog()` 记录操作者、动作、关键参数；`requestLogger` 中间件自动附加 Trace ID 和用户身份
+- **审计追踪**：写操作通过 `auditLog()` 记录操作者、动作、关键参数；`requestLogger` 中间件自动附加 Trace ID、用户身份和脱敏后的请求体预览
 
 ## 功能
 
-- **RESTful API**：认证、用户管理、Bot 管理（CRUD + 启停）、Channel 配置、统计数据
-- **SSE 流式聊天**：`WebChannel` 将用户消息注入 Bot Pipeline，回复以 SSE 事件流推送
-- **认证中间件**：Cookie + Session 会话管理，按角色权限控制接口访问
-- **SPA 静态服务**：自动检测 `static/` 目录并提供前端单页应用
+- **RESTful API**：认证、用户管理、Bot 管理（CRUD + 启停）、平台配置、Provider/模型管理、统计数据
+- **SSE 流式聊天**：`WebChannel` 将用户消息注入 Bot Pipeline，回复以 SSE 事件流推送；支持中止、追加、按 traceID 断线重连
+- **认证中间件**：Cookie + JWT 会话管理，按角色权限控制接口访问
+- **SPA 静态服务**：自动检测 `static/` 目录并提供前端单页应用；带内容哈希的资源长缓存，`index.html` 强制 `no-store`
 - **梦境巩固管理**：按 Bot 配置/触发/监控梦境巩固管线
 - **定时任务管理**：按 Bot 创建/暂停/恢复/触发 cron jobs
-- **工作流监控**：只读查询工作流状态/节点/指标 + 崩溃恢复（创建和控制由 Agent 工具完成）
-- **技能管理**：列出/启用/禁用已注册技能
-- **记忆查询**：只读访问 Bot 的分层记忆（L0~L3）
+- **工作流监控**：查询工作流状态/节点/指标、节点重试 + 崩溃恢复
+- **技能与 MCP 管理**：全局技能启停、Bot 级技能与 MCP 服务器管理
+- **记忆管理**：查询/新增/更新/删除 Bot 记忆条目及统计
+- **容器与沙箱运维**：容器启停、快照、导入导出、终端执行、文件浏览与上传
 - **系统监控**：运行时健康检查、事件总线指标
 
 ## Pipeline 集成
 
-BotService 在装配 Pipeline 时自动接入以下增强中间件：
+BotService 在装配 Pipeline 时，用以下中间件包装 LLMStage（`pipeline.WithMiddleware`，从外到内）：
 
 | 中间件 | 职责 |
 |--------|------|
-| `TokenQuotaMiddlewareWithState` | Token 月度配额：按 Bot/Channel/Chat 维度限额，超额拦截（最外层优先检查） |
-| `LoopDetectionMiddleware` | 检测重复工具调用模式，注入软/硬警告 |
-| `TokenBudgetMiddleware` | 按 Channel 追踪累计 Token，阈值告警和硬限制 |
-| `RunJournalRecorder` | 异步缓冲记录 LLM 用量到 `run_journals` 表 |
+| `stages.NoteCaptureMiddleware("exchange")` | 捕获 LLM 回复为 L0 工作记忆笔记，供 dreaming 巩固 |
+| `VerificationGateMiddleware` | 结果校验闸门 |
+| `TokenQuotaMiddlewareWithState` | Token 月度配额：按 Bot/Channel/Chat 维度限额，超额拦截 |
+| `LoopDetectionMiddleware` | 检测重复工具调用模式（`task_status` 豁免），注入软/硬警告 |
+| `LazyResponseMiddleware` | 检测敷衍/偷懒回复 |
+| `TokenBudgetMiddlewareWithState` | 按 Channel 追踪累计 Token，阈值告警和硬限制 |
 
-执行顺序为 `quota → journal → loop → budget → LLM → budget(after) → loop(after) → journal(after) → quota(after)`。Token 配额放在最外层，确保配额耗尽时立即拦截，不浪费后续中间件的计算。LLMRoute Stage 消费软警告并合并到 System Prompt。
-
-**全链路 Token 记账**：BotService 在装配时创建共享 `TokenQuotaState`，用 `llm.NewQuotaRecordingProvider` 包裹 LLM Provider（`bundle.Main` 和 `bundle.Light`）。配额中间件通过 `llm.WithQuotaDimension(ctx, dim)` 将 dimension 注入 context，所有经过 Provider 的 LLM 调用（包括 SubAgent、Workflow、Memory 等绕过 pipeline 的调用点）都自动记账，防止漏记。
+**全链路 Token 记账**：BotService 在装配时创建共享 `pipeline.NewTokenQuotaState()`（绑定 `statsRecorder`），并用 `llm.NewQuotaRecordingProvider` 包裹 LLM Provider（`bundle.Main`、`bundle.Light`、`bundle.Vision`）。配额中间件将 dimension 注入 context，所有经过 Provider 的 LLM 调用（包括 SubAgent、Workflow、Memory 等绕过 pipeline 的调用点）都自动记账，防止漏记。用量最终聚合到 `stats_usage_daily` 表。
 
 ## 关键类型
 
 | 类型 | 说明 |
 |------|------|
-| `Server` | Gin HTTP 服务器封装 |
+| `Server` | Gin HTTP 服务器封装，持有全部 handler 依赖 |
 | `BotService` | Bot 业务服务层（CRUD + 运行时生命周期 + 子系统访问） |
-| `WorkflowService` | 工作流引擎服务（懒初始化，从 BotService 获取 LLM Provider；提供只读监控和崩溃恢复） |
+| `WorkflowService` | 工作流引擎服务（懒初始化；提供只读监控、崩溃恢复与卡死看门狗） |
 | `WebChannel` | Web 聊天 Channel（输入端 + 输出端） |
-| `CookieManager` | Cookie/会话管理（JWT） |
-| `ChatHistoryService` | 聊天历史持久化与分页查询 |
+| `CookieManager` | Cookie/会话管理（JWT，`SessionClaims`） |
+| `ChatHistoryService` | 聊天历史持久化与游标分页查询（`HistoryPage`） |
+
+fx 模块 `api.Module` 提供 EventBus、CookieManager、BotService、ChatHistoryService、WorkflowService、SkillManager 和 Server；
+`OnStart` 时启动 `status=running` 的 Bot、恢复中断工作流、启动看门狗并在后台运行 HTTP Server。
 
 ## 中间件链
 
@@ -59,9 +63,9 @@ zapRecovery → traceIDMiddleware → requestLogger → corsMiddleware → cooki
 |--------|------|
 | `zapRecovery` | 替代 `gin.Recovery()`，panic 时通过 zap 记录堆栈和请求上下文 |
 | `traceIDMiddleware` | 为每个请求注入或复用 Trace ID（`X-Trace-ID`） |
-| `requestLogger` | 记录 method/path/status/duration/ip/user/traceId，4xx+5xx 用 Warn |
+| `requestLogger` | 记录 method/path/status/duration/ip/user/traceId 与脱敏 body，4xx+5xx 用 Warn |
 | `corsMiddleware` | CORS 处理，空白名单时允许 localhost |
-| `cookieAuth` | Cookie + JWT 会话认证 |
+| `cookieAuth` | Cookie + JWT 会话认证，回查 DB 校验角色/状态实时性 |
 | `requirePermission` | 基于角色的权限检查 |
 
 ## 主要路由
@@ -80,7 +84,16 @@ GET  /api/auth/me                  — 当前用户信息
 PUT  /api/auth/password            — 修改密码
 ```
 
-### 用户管理（admin）
+### 授权码与身份绑定（需登录）
+
+```
+POST   /api/bindcode               — 生成一次性绑定码
+GET    /api/bindcode               — 列出自己的绑定码
+GET    /api/bindings               — 列出已绑定的平台身份
+DELETE /api/bindings/:id           — 解除绑定
+```
+
+### 用户管理（admin，`user.manage`）
 
 ```
 GET    /api/users                  — 用户列表
@@ -106,15 +119,19 @@ POST   /api/bots/:id/start         — 启动 Bot（admin）
 POST   /api/bots/:id/stop          — 停止 Bot（admin）
 ```
 
-### Channel 配置（admin，嵌套在 Bot 下）
+以下 Bot 子资源均需 `bot.manage` 权限。
+
+### 平台配置（admin，嵌套在 Bot 下）
 
 ```
-GET    /api/bots/:id/channels         — 列出 Bot 的 Channel 配置
-POST   /api/bots/:id/channels         — 创建 Channel 配置
-PUT    /api/bots/:id/channels/:cid    — 更新 Channel 配置
-DELETE /api/bots/:id/channels/:cid    — 删除 Channel 配置
-GET    /api/channels/types            — Channel 类型列表（所有登录用户，驱动前端表单）
+GET    /api/bots/:id/platforms         — 列出 Bot 的平台配置
+POST   /api/bots/:id/platforms         — 创建平台配置
+PUT    /api/bots/:id/platforms/:pid    — 更新平台配置
+DELETE /api/bots/:id/platforms/:pid    — 删除平台配置
+GET    /api/bots/platforms/tool-catalog — 平台工具目录（所有登录用户，驱动前端表单）
 ```
+
+> 旧的 `/api/bots/:id/channels` 与 `/api/channels/types` 已废弃并从路由中移除，统一由上述 Platform API 取代。
 
 ### 定时任务（admin，嵌套在 Bot 下）
 
@@ -138,23 +155,132 @@ GET  /api/bots/:id/dreaming/status  — 梦境运行时状态（cron job + 调�
 POST /api/bots/:id/dreaming/trigger — 手动触发一次梦境巩固
 ```
 
-### 记忆查询（admin，嵌套在 Bot 下）
+### 记忆管理（admin，嵌套在 Bot 下）
 
 ```
-GET  /api/bots/:id/memory          — 查询分层记忆（?tier=L1&limit=20）
-GET  /api/bots/:id/memory/stats    — 记忆统计
+GET    /api/bots/:id/memory         — 查询分层记忆
+POST   /api/bots/:id/memory         — 新增记忆条目
+PUT    /api/bots/:id/memory/:mid    — 更新记忆条目
+DELETE /api/bots/:id/memory/:mid    — 删除记忆条目
+GET    /api/bots/:id/memory/stats   — 记忆统计
 ```
 
-### 工作流监控（admin，只读 + 恢复）
-
-> 工作流的创建（Submit）、流程控制（retry/terminate）由 Agent 通过 `task` / `task_control` 工具完成，不通过 REST API 暴露。终止操作由 session 生命周期信号触发，连通 pipeline 一起终止。
+### 文件与容器（admin，嵌套在 Bot 下）
 
 ```
-GET  /api/workflows                — 列出工作流
-POST /api/workflows/recover        — 恢复中断的工作流
-GET  /api/workflows/metrics        — 工作流引擎指标
-GET  /api/workflows/:wfId          — 查询工作流状态
-GET  /api/workflows/:wfId/nodes    — 查询节点列表（?format=flat|tree）
+GET    /api/bots/:id/files                 — 列出工作空间文件
+GET    /api/bots/:id/files/download        — 下载文件
+POST   /api/bots/:id/files/mkdir           — 新建目录
+POST   /api/bots/:id/files/upload          — 上传文件
+
+GET    /api/bots/:id/container             — 容器信息
+PUT    /api/bots/:id/container/config      — 更新容器配置
+DELETE /api/bots/:id/container             — 移除容器
+POST   /api/bots/:id/container/start       — 启动容器
+POST   /api/bots/:id/container/stop        — 停止容器
+GET    /api/bots/:id/container/snapshots   — 快照列表
+POST   /api/bots/:id/container/snapshots   — 创建快照
+POST   /api/bots/:id/container/export      — 导出容器
+POST   /api/bots/:id/container/import      — 导入容器
+POST   /api/bots/:id/container/restore     — 从快照恢复
+
+GET    /api/bots/:id/runtime-checks        — 运行时检查（真实 sandbox 状态）
+GET    /api/bots/:id/terminal              — 终端信息
+POST   /api/bots/:id/terminal/exec         — 在容器中执行命令
+```
+
+### Bot 运行时配置（admin，嵌套在 Bot 下）
+
+```
+GET    /api/bots/:id/access                 — 访问控制（默认行为 + 规则）
+PUT    /api/bots/:id/access                 — 更新访问控制
+
+GET    /api/bots/:id/heartbeat              — 心跳配置
+PUT    /api/bots/:id/heartbeat              — 更新心跳配置
+GET    /api/bots/:id/heartbeat/logs         — 心跳日志
+DELETE /api/bots/:id/heartbeat/logs         — 清空心跳日志
+
+GET    /api/bots/:id/compaction             — 上下文压缩配置
+PUT    /api/bots/:id/compaction             — 更新压缩配置
+GET    /api/bots/:id/compaction/history     — 压缩历史
+DELETE /api/bots/:id/compaction/history     — 清空压缩历史
+
+GET    /api/bots/:id/chat-rhythm            — 群聊回复节奏配置
+PUT    /api/bots/:id/chat-rhythm            — 更新回复节奏
+```
+
+### Bot 技能与 MCP（admin，嵌套在 Bot 下）
+
+```
+GET    /api/bots/:id/skills          — Bot 技能列表
+GET    /api/bots/:id/skills/:sid     — 技能详情
+POST   /api/bots/:id/skills          — 添加技能
+PUT    /api/bots/:id/skills/:sid     — 更新技能
+DELETE /api/bots/:id/skills/:sid     — 移除技能
+
+GET    /api/bots/:id/mcp             — MCP 服务器列表
+POST   /api/bots/:id/mcp             — 添加 MCP 服务器
+PUT    /api/bots/:id/mcp/:mid        — 更新 MCP 服务器
+DELETE /api/bots/:id/mcp/:mid        — 移除 MCP 服务器
+POST   /api/bots/:id/mcp/import      — 批量导入 MCP 配置
+```
+
+### 会话管理（admin）
+
+```
+GET    /api/bots/:id/sessions        — 列出 Bot 的会话
+POST   /api/bots/:id/sessions        — 新建会话
+PUT    /api/sessions/:sid            — 更新会话（重命名等）
+DELETE /api/sessions/:sid            — 删除会话
+
+GET    /api/sessions/:sid/status             — 会话状态
+POST   /api/sessions/:sid/compact            — 手动触发上下文压缩
+GET    /api/sessions/:sid/terminal           — 会话终端信息
+POST   /api/sessions/:sid/terminal/exec      — 会话内执行命令
+GET    /api/sessions/:sid/files              — 会话工作目录文件列表
+GET    /api/sessions/:sid/files/download     — 下载文件
+POST   /api/sessions/:sid/files/mkdir        — 新建目录
+POST   /api/sessions/:sid/files/upload       — 上传文件
+```
+
+### Provider 与模型管理（admin）
+
+```
+GET    /api/providers                       — Provider 列表
+POST   /api/providers                       — 创建 Provider
+PUT    /api/providers/:pid                  — 更新 Provider
+DELETE /api/providers/:pid                  — 删除 Provider
+POST   /api/providers/:pid/test             — 连通性测试
+POST   /api/providers/:pid/models           — 添加模型
+PUT    /api/providers/:pid/models/:mid      — 更新模型
+DELETE /api/providers/:pid/models/:mid      — 删除模型
+POST   /api/providers/:pid/models/import    — 批量导入模型
+```
+
+### 搜索提供方（admin）
+
+```
+GET    /api/search/providers          — 列表
+POST   /api/search/providers          — 创建
+PUT    /api/search/providers/:id      — 更新
+DELETE /api/search/providers/:id      — 删除
+PUT    /api/search/providers/:id/toggle — 启用/禁用
+```
+
+### 工作流监控
+
+> 工作流的创建（Submit）与流程控制由 Agent 通过 `task` / `task_control` 工具完成。
+> 状态/节点查询与节点重试对**任意已登录用户**开放（对话中的 workflow 卡片需要）；
+> 列表、崩溃恢复、指标属运营操作，需 `bot.manage`。
+
+```
+GET  /api/workflows/:wfId                      — 查询工作流状态（登录用户）
+GET  /api/workflows/:wfId/nodes                — 查询节点列表（登录用户）
+POST /api/workflows/:wfId/nodes/:nodeId/retry  — 重试节点（登录用户）
+
+GET  /api/workflows                — 列出工作流（admin）
+POST /api/workflows/recover        — 恢复中断的工作流（admin）
+GET  /api/workflows/metrics        — 工作流引擎指标（admin）
 ```
 
 ### 技能管理（admin）
@@ -166,15 +292,21 @@ PUT  /api/skills/:name/enable      — 启用技能
 PUT  /api/skills/:name/disable     — 禁用技能
 ```
 
-### 聊天（需 bot.use 权限）
+### 聊天（需 `bot.use` 权限）
 
 ```
 GET  /api/chat/bots                — 可聊天 Bot 列表
 GET  /api/chat/history             — 聊天历史（游标分页）
 POST /api/chat/send                — SSE 流式聊天
+POST /api/chat/abort               — 中止正在执行的聊天
+POST /api/chat/append              — 生成中追加用户补充（同一轮）
+GET  /api/chat/active              — 查询后台仍在执行的任务 traceID
+GET  /api/chat/resume              — 按 traceID 重连续流（SSE）
+
+POST /api/chat/token-budget/reset  — 重置 token 预算（admin，解除预算卡死）
 ```
 
-### 系统配置（admin）
+### 系统配置（admin，`system.config`）
 
 ```
 GET  /api/config                   — 获取全部配置
@@ -183,28 +315,32 @@ PUT  /api/config/:key              — 设置配置项
 PUT  /api/config                   — 批量设置配置项
 ```
 
-### 统计数据（admin）
+### 统计数据（admin，`user.manage`）
 
 ```
 GET  /api/stats/overview           — 统计概览
+GET  /api/stats/daily              — 按日区间统计
+GET  /api/stats/daily-by-bot       — 按日 + Bot 维度统计
+GET  /api/stats/records            — 明细记录
+GET  /api/stats/by-bot-model       — 按 Bot + 模型聚合
 GET  /api/stats/bots/:id           — Bot 统计
 GET  /api/stats/bots/:id/daily     — Bot 每日统计
 ```
 
-### 系统监控（admin）
+### 系统监控
 
 ```
-GET  /api/system/health            — 详细健康检查（内存/goroutine/运行时间）
-GET  /api/system/events/metrics    — 事件总线指标
+GET  /api/system/health            — 详细健康检查（admin，`system.config`）
+GET  /api/system/events/metrics    — 事件总线指标（admin，`system.config`）
 GET  /health                       — 健康检查（公开，仅返回 ok）
 ```
 
 ### Swagger API 文档
 
 ```
-GET  /swagger/index.html           — Swagger UI（交互式 API 文档）
-GET  /swagger/swagger.json         — OpenAPI 3.0 JSON 规范
-GET  /swagger/swagger.yaml         — OpenAPI 3.0 YAML 规范
+GET  /swagger/*any                 — Swagger UI 与规范文件
+GET  /swagger/index.html           — 交互式 API 文档
+GET  /swagger/doc.json             — OpenAPI 规范 JSON
 ```
 
 启动服务后访问 `http://localhost:8080/swagger/index.html` 即可查看完整的交互式 API 文档。
@@ -215,8 +351,8 @@ GET  /swagger/swagger.yaml         — OpenAPI 3.0 YAML 规范
 # 安装 swag CLI（仅需一次）
 go install github.com/swaggo/swag/cmd/swag@latest
 
-# 生成文档
+# 生成文档（输出到 docs/）
 swag init -g cmd/main.go -o docs --parseDependency --parseInternal
 ```
 
-每个 handler 函数上方的 `// @Summary`、`// @Param`、`// @Router` 等注解会被 swag 解析，自动生成 OpenAPI 3.0 规范。
+每个 handler 函数上方的 `// @Summary`、`// @Param`、`// @Router` 等注解会被 swag 解析，自动生成规范文件。

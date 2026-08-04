@@ -94,40 +94,60 @@ GROUP BY feature;
                                    └──────────────┘
 ```
 
-- **Store**: JSON 文件存储，原子写入（tmp → rename），读写锁保护
-- **Scheduler**: 每 60s 扫描活跃 Job，到期则异步执行，自动注入 trace_id
+- **Store**: JSON 文件存储，首次访问时懒加载，原子写入（tmp → rename），读写锁保护
+- **Scheduler**: 每 60s 扫描活跃 Job，到期则异步执行，自动注入 trace_id；同一 Job 不会重叠执行
 - **Manager**: Job 的 CRUD 接口（创建/查询/更新/删除/暂停/恢复/触发）
 - **Executor**: 执行抽象接口，返回 `ExecuteResult`（含 token 用量）
+
+### SchedulerConfig
+
+`DefaultSchedulerConfig()` 返回下列默认值；`NewScheduler` 也会把非法/零值补齐为默认值。
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `TickInterval` | 60s | 调度循环间隔 |
+| `MaxConcurrent` | 3 | 同时执行的最大 Job 数（信号量） |
+| `JobTimeout` | 5m | 单个 Job 执行超时 |
+| `OnceGracePeriod` | 120s | 一次性 Job 的宽限窗口，超期则直接标记 Done |
+| `Location` | `time.Local` | cron/ISO 解析时区 |
+| `BotID` | `"unknown"` | token 统计归属 |
+
+`Scheduler` 还提供 `WithLogger()` 与 `Summary()`（返回 jobs/active/done/failed/paused 计数的可读摘要）。
+
+### Job 状态
+
+`active` / `paused` / `done` / `failed` / `disabled`；调度类型为 `cron` / `interval` / `once`。
+`MaxRuns > 0` 且 `RunCount` 达到上限时：成功转 `done`，失败转 `failed`。
 
 ## 使用示例
 
 ```go
 // 1. 创建存储和执行器
-store := cron.NewStore(filepath.Join(dataDir, "cron.json"))
+store := cron.NewStore(filepath.Join(dataDir, botID+"_cron.json"))
 
 executor := cron.ExecutorFunc(func(ctx context.Context, job *cron.Job) (*cron.ExecuteResult, error) {
-    // 向 bot 发送合成消息，获取 token 用量
-    result := bot.TriggerCronJob(ctx, job.Prompt, job.Model)
+    // 自行实现：把 job.Prompt 投递给 bot 执行，并回填 token 用量
     return &cron.ExecuteResult{
-        Output:    result.Summary,
-        Usage:     result.Usage,     // llm.Usage
-        ToolCalls: result.ToolCalls,
-        Steps:     result.Steps,
+        Output:    summary,   // string，会被截断到 500 字符存入 LastResult
+        Usage:     usage,     // llm.Usage
+        ToolCalls: toolCalls,
+        Steps:     steps,
     }, nil
 })
 
 // 2. 创建调度器（使用 bot 时区）
 loc := bot.Config.Location()
-scheduler := cron.NewScheduler(store, executor, cron.SchedulerConfig{
-    Location:  loc,
-    BotID:     bot.ID,
-}).
+schedCfg := cron.DefaultSchedulerConfig()
+schedCfg.Location = loc
+schedCfg.BotID = botID
+
+scheduler := cron.NewScheduler(store, executor, schedCfg).
     WithUsageRecorder(statsRecorder) // 启用 token 统计
 
-// 3. 启动
+// 3. 启动（非阻塞）
 ctx := context.Background()
 scheduler.Start(ctx)
-defer scheduler.Stop()
+defer scheduler.Stop() // 等待正在执行的 Job 完成
 
 // 4. 管理任务
 mgr := cron.NewManager(store, loc)
@@ -170,11 +190,17 @@ mgr := cron.NewManager(store, loc)
 cron.RegisterTools(toolMgr, mgr) // 注册单个 cron 工具
 ```
 
+工具参数：`action`（必填）、`job_id`、`name`、`prompt`、`schedule`、`model`、`skills`、
+`max_runs`、`tags`、`state`（list 过滤）、`enabled`（update）。
+工具标记 `DeferredLoad`，初始只暴露名称+描述；同时挂载 `cron_tools` 提示词段落（order 320）。
+
 ### 安全特性
 
-- **Prompt 安全扫描**：创建/更新时自动扫描 prompt 中的注入和 exfiltration 模式（参考 `prompt_scan.go` 设计）
-- **按名称查找**：job_id 参数也接受任务名称（大小写不敏感），多匹配时报错
-- **反嵌套**：Scopes 限制子 agent 不可用，防止 cron 任务递归创建
+- **Prompt 安全扫描**：创建/更新时由 `tools.go` 的 `scanCronPrompt` 扫描不可见 Unicode、
+  提示注入（ignore previous instructions / system prompt override 等）与
+  凭据 exfiltration（curl 携带 `$TOKEN`/`$SECRET` 等）模式，命中即拒绝
+- **按名称查找**：job_id 参数也接受任务名称（大小写不敏感），多匹配时报错并要求改用 ID
+- **反嵌套**：`Scopes: ["private", "group"]` 限制子 agent 不可用，防止 cron 任务递归创建
 
 ## 文件结构
 
@@ -185,5 +211,5 @@ cron.RegisterTools(toolMgr, mgr) // 注册单个 cron 工具
 | `store.go` | JSON 文件持久化（原子写入） |
 | `scheduler.go` | 调度循环 + 执行器 + Manager CRUD + 日志 + 统计 |
 | `tools.go` | Agent 工具定义（单一压缩工具 + prompt 安全扫描） |
-| `cron_test.go` | 调度器/解析器/存储单元测试（22 个） |
-| `tools_test.go` | Agent 工具单元测试（27 个） |
+| `cron_test.go` | 调度器/解析器/存储单元测试（24 个） |
+| `tools_test.go` | Agent 工具单元测试（25 个） |

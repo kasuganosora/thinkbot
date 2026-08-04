@@ -80,12 +80,20 @@ log.Output{
 | `Stderr()` | stderr | console（彩色） |
 | `File(dir, name)` | file | json（JSONL） |
 
+快捷构造返回的是 `Output` 结构体值，需要覆盖字段时直接赋值：
+
 ```go
+fileOut := log.File("/var/log/thinkbot", "app")
+fileOut.Level = "info" // 文件只记 info+
+
 outputs := []log.Output{
-    log.Stdout(),                     // 控制台看 debug
-    log.File("/var/log/thinkbot", "app").Level("info"),  // 文件记 info+
+    log.Stdout(), // 控制台看 debug（继承全局 Level）
+    fileOut,
 }
 ```
+
+> 注意：`stdout` / `stderr` 输出源始终使用 console 编码器（彩色级别），
+> 对它们设置 `Format: FormatJSON` 不会生效。`Format` 仅对 `file` 输出源有实际区分。
 
 ---
 
@@ -123,13 +131,15 @@ err := log.InitWithConfig(log.Config{
 
 文件输出源通过 [Lumberjack](https://github.com/natefinch/lumberjack) 实现自动滚动：
 
+`File(dir, name)` 已预填一组默认值：
+
 ```go
-log.File("./logs", "thinkbot").
-    // 以下均为 File() 的默认值，可按需覆盖
-    // MaxSize:    100,    // 单文件最大 100MB
-    // MaxBackups: 7,      // 保留 7 个旧文件
-    // MaxAge:     30,     // 旧文件保留 30 天
-    // Compress:   true,   // gzip 压缩旧文件
+out := log.File("./logs", "thinkbot")
+// out.FileExt    == ".log"
+// out.MaxSize    == 100    // 单文件最大 100MB
+// out.MaxBackups == 7      // 保留 7 个旧文件
+// out.MaxAge     == 30     // 旧文件保留 30 天
+// out.Compress   == true   // gzip 压缩旧文件
 ```
 
 也可以通过 `Output` 结构体完全自定义：
@@ -156,9 +166,10 @@ log.Output{
 | `MaxSize` | `100` | 单文件最大体积（MB），超出后滚动 |
 | `MaxBackups` | `7` | 保留旧文件数量 |
 | `MaxAge` | `30` | 旧文件最大保留天数 |
-| `Compress` | `true` | 是否 gzip 压缩旧文件 |
+| `Compress` | `false` | 是否 gzip 压缩旧文件（`File()` 构造时预设为 `true`） |
 
-时间戳使用 `LocalTime`（非 UTC）。
+上表默认值在字段为零值（数值 ≤ 0 / 字符串为空）时由构建逻辑兜底，`Compress` 除外（布尔无兜底）。
+滚动文件时间戳使用 `LocalTime`（非 UTC）。
 
 ---
 
@@ -178,8 +189,10 @@ log.Output{
 | 级别 | `level` | 大写（`INFO` / `ERROR`），console 模式带颜色 |
 | 调用方 | `caller` | 短路径（`pkg/file.go:42`） |
 | 消息 | `msg` | — |
-| 堆栈 | `stacktrace` | 仅 Error 及以上 |
+| 堆栈 | `stacktrace` | 保留了 key，但未启用 `zap.AddStacktrace`，需显式传字段才会输出 |
 | 耗时 | — | 秒级浮点数 |
+
+Logger 通过 `zap.New(core, zap.AddCaller())` 构建，并调用 `zap.ReplaceGlobals` 覆盖全局实例。
 
 ---
 
@@ -219,19 +232,20 @@ db, err := gorm.Open(sqlite.Open("test.db"), &gorm.Config{
 
 ```go
 gormLog := log.NewGormLogger(log.GormConfig{
-    Level:                     log.GormInfo,     // silent / error / warn / info
+    Level:                     log.GormInfo,           // silent / error / warn / info
     SlowThreshold:             500 * time.Millisecond, // 慢查询阈值
-    IgnoreRecordNotFoundError: true,              // 忽略 ErrRecordNotFound
-    ParameterizedQueries:      false,             // 不展示参数值（安全）
+    IgnoreRecordNotFoundError: true,                   // 忽略 ErrRecordNotFound
 })
 ```
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `Level` | `warn` | silent / error / warn / info |
-| `SlowThreshold` | `200ms` | 超过此值的查询以 Warn 记录 |
-| `IgnoreRecordNotFoundError` | `true` | 忽略 `ErrRecordNotFound`（避免噪音） |
-| `ParameterizedQueries` | `false` | 是否在日志中展示 SQL 参数值 |
+| `Level` | `warn` | silent / error / warn / info（`DefaultGormConfig()` 为 `warn`；未识别的值也回落到 `warn`） |
+| `SlowThreshold` | `200ms` | 超过此值的查询以 Warn 记录（≤ 0 时兜底为 200ms） |
+| `IgnoreRecordNotFoundError` | `false` | 是否忽略 `ErrRecordNotFound`（`DefaultGormConfig()` 设为 `true`） |
+| `ParameterizedQueries` | `false` | 预留字段，当前实现未使用 |
+
+`DefaultGormConfig()` 返回 `{Level: warn, SlowThreshold: 200ms, IgnoreRecordNotFoundError: true}`。
 
 ### 日志输出
 
@@ -239,7 +253,9 @@ gormLog := log.NewGormLogger(log.GormConfig{
 |------|------|----------|
 | 查询错误 | Error | sql, rows, elapsed, err, caller, trace_id |
 | 慢查询 | Warn | sql, rows, elapsed, threshold, caller, trace_id |
-| 正常查询 | Debug | sql, rows, elapsed, caller, trace_id |
+| 正常查询（`Level: info`） | Debug | sql, rows, elapsed, caller, trace_id |
+
+`context.Canceled` / `context.DeadlineExceeded`（客户端断开、超时取消）属于预期中断，不会记为 Error。
 
 **真实 caller 捕获**：GORM logger 禁用了 zap 内置的 caller（只会指向 `gorm.go`），改为通过 `runtime.Callers` 遍历调用栈，跳过 `gorm.io` 和 `util/log` 帧，返回真正的业务调用方文件和行号。
 
@@ -300,22 +316,8 @@ err := log.InitWithConfig(log.Config{
 
 ## Gin 集成
 
-Gin 的内部输出（请求日志、panic 恢复）可以通过写入器重定向到 zap 管道：
-
-```go
-import (
-    "github.com/gin-gonic/gin"
-    "github.com/kasuganosora/thinkbot/util/log"
-)
-
-// Gin 内部输出重定向到 zap
-gin.DefaultWriter = log.NewZapWriter(log.Logger.Desugar(), zapcore.InfoLevel)
-gin.DefaultErrorWriter = log.NewZapWriter(log.Logger.Desugar(), zapcore.ErrorLevel)
-
-r := gin.Default()
-```
-
-> 注意：`api` 包中的 `zapRecovery` 和 `zapWriter` 已封装了此集成。
+本包不提供 Gin 适配器。Gin 的请求日志与 panic 恢复重定向到 zap 的实现位于 `api` 包
+（`zapWriter` / `zapRecovery`），它们直接复用 `log.Logger`。
 
 ---
 

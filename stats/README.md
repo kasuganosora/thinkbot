@@ -8,7 +8,7 @@
 LLM 调用完成
     │
     ▼
-UsageMetric                          ← llm.UsageMetric（Bot/Model/Feature/Usage/ToolCalls/Steps）
+UsageMetric                          ← llm.UsageMetric（Bot/Model/Feature/Channel/Usage/ToolCalls/Steps）
     │
     ▼
 Recorder.RecordUsage()               ← 非阻塞写入 channel（满则丢弃+告警）
@@ -17,7 +17,7 @@ Recorder.RecordUsage()               ← 非阻塞写入 channel（满则丢弃+
 后台 goroutine                       ← 5s 定时 或 100 条批量触发
     │
     ▼
-flushBatch()                         ← 按 (bot_id, model, feature, date) 聚合
+flushBatch()                         ← 按 (bot_id, model, feature, channel, date) 聚合
     │
     ▼
 SQLite UPSERT → stats_usage_daily    ← ON CONFLICT 累加
@@ -55,6 +55,7 @@ recorder.RecordUsage(ctx, llm.UsageMetric{
     BotID:   "bot-1",
     Model:   "glm-5.2",
     Feature: "reply",
+    Channel: "telegram", // 可选，非 pipeline 路径（dream/memory 等）为空
     Usage: llm.Usage{
         InputTokens:  150,
         OutputTokens: 80,
@@ -91,17 +92,18 @@ recorder.RecordUsage(ctx, llm.UsageMetric{
 
 ### 聚合策略
 
-同一批次（batch）中的指标按 **(bot_id, model, feature, date)** 四元组聚合后逐行 upsert：
+同一批次（batch）中的指标按 **(bot_id, model, feature, channel, date)** 五元组聚合后逐行 upsert：
 
 ```sql
 INSERT INTO stats_usage_daily (...) VALUES (...)
-ON CONFLICT(bot_id, model, feature, date) DO UPDATE SET
+ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
     total_requests = total_requests + excluded.total_requests,
     input_tokens   = input_tokens   + excluded.input_tokens,
     ...
 ```
 
-日期截断到 UTC 零点（`truncateToDate`），确保同一天的数据汇总到同一行。
+`date` 取 **flush 时刻**的当天零点（`truncateToDate(time.Now())`，UTC），
+确保同一天的数据汇总到同一行。
 
 ---
 
@@ -109,13 +111,14 @@ ON CONFLICT(bot_id, model, feature, date) DO UPDATE SET
 
 ### stats_usage_daily 表
 
-按日聚合的 LLM 使用统计表，维度组合 `(bot_id, model, feature, date)` 唯一。
+按日聚合的 LLM 使用统计表（`dao.UsageDaily`），维度组合 `(bot_id, model, feature, channel, date)` 唯一。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `bot_id` | string | Bot 标识 |
 | `model` | string | 模型标识（如 `glm-5.2`） |
-| `feature` | string | 功能维度（如 `reply`/`chat`/`vision`/`memory_compress`） |
+| `feature` | string | 功能维度（如 `reply`/`chat`/`vision`/`memory_compress`/`cron`） |
+| `channel` | string | 来源渠道（如 `telegram`/`web`/`misskey`），非 pipeline 路径为空串 |
 | `date` | date | 聚合日期（UTC 零点截断） |
 | `total_requests` | int | 总请求数 |
 | `cache_hit_requests` | int | 缓存命中请求数（当次调用有 CacheRead > 0） |
@@ -138,6 +141,7 @@ type llm.UsageMetric struct {
     BotID     string         // 哪个 Bot
     Model     string         // 哪个模型
     Feature   string         // 哪个功能场景
+    Channel   string         // 来源渠道（可为空）
     Usage     llm.Usage      // Token 用量（含缓存明细）
     ToolCalls int            // 工具调用次数
     Steps     int            // 编排步数
@@ -154,10 +158,13 @@ type llm.UsageMetric struct {
 
 | 函数 | 维度 | 用途 |
 |------|------|------|
-| `GetBotModelStats(db, botID, from, to)` | Bot × Model | 某 Bot 各模型的用量汇总 |
+| `GetBotModelStats(db, botID, from, to)` | Bot × Model | 某 Bot 各模型的用量汇总（按 total_tokens 降序） |
 | `GetModelFeatureStats(db, botID, model, from, to)` | Model × Feature | 某 Bot + 模型在各功能中的分布 |
-| `GetDailyStats(db, botID, from, to)` | Date | 某 Bot 按天的用量趋势 |
+| `GetDailyStats(db, botID, from, to)` | Date | 某 Bot 按天的用量趋势（date 降序） |
 | `GetAllBotsModelStats(db, from, to)` | Bot × Model | 管理面板：全部 Bot 的用量 |
+| `GetDailyStatsGlobal(db, botID, from, to)` | Date | 全局按天趋势（`botID` 为空则不限 Bot，date 升序） |
+| `GetDailyByBotStats(db, from, to)` | Date × Bot | 按日×Bot 的 token 量（堆叠图表用） |
+| `GetUsageRecords(db, botID, from, to, page, pageSize)` | 明细 | 分页查询用量流水，返回 `([]UsageRecord, total, error)` |
 
 ### 使用示例
 
@@ -223,7 +230,36 @@ type DailyStat struct {
     TotalRequests     int
     CacheHitRequests  int
     CacheMissRequests int
+    CacheReadTokens   int
+    CacheWriteTokens  int
+    NonCacheTokens    int
     TotalTokens       int
+}
+```
+
+#### DailyByBotEntry — 按日 × Bot
+
+```go
+type DailyByBotEntry struct {
+    Date   time.Time
+    BotID  string
+    Tokens int   // 列 total_tokens
+}
+```
+
+#### UsageRecord — 流水明细
+
+```go
+type UsageRecord struct {
+    ID              uint      // 取自 rowid
+    Date            time.Time // JSON 字段名为 time
+    BotID           string
+    Model           string
+    Feature         string
+    CacheReadTokens int
+    InputTokens     int
+    OutputTokens    int
+    TotalRequests   int
 }
 ```
 

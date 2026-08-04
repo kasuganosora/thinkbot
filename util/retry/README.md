@@ -44,7 +44,7 @@ if result.Err != nil {
 | `Backoff` | `*Backoff` | nil | 退避配置，nil 时使用 `FixedInterval` |
 | `FixedInterval` | `time.Duration` | 200ms | 无 Backoff 时的固定间隔 |
 | `RecoverPanic` | `*bool` | true | 是否自动 recover panic 并视为可重试错误 |
-| `ShouldRetry` | `func(int, error) bool` | nil | 判断错误是否可重试（nil = 所有错误都重试） |
+| `ShouldRetry` | `func(int, error) bool` | nil | 判断错误是否可重试（nil = 所有错误都重试）。返回 false 时立即返回原始错误，不包装 `retry exhausted` |
 | `OnRetry` | `func(int, error, Duration)` | nil | 每次重试前回调 |
 | `GetRetryDelay` | `func(error) Duration` | nil | 从错误中提取服务端建议延迟（如 Retry-After），取与退避计算的较大值 |
 | `OnPanic` | `func(int, any, []byte)` | nil | Panic 捕获回调（attempt, panic 值, 堆栈） |
@@ -72,7 +72,10 @@ backoff := retry.Backoff{
 | `Initial` | 200ms | 初始间隔 |
 | `Max` | 30s | 等待上限（封顶值） |
 | `Factor` | 2.0 | 指数因子 |
-| `Jitter` | false | 随机抖动 ±50%（避免惊群） |
+| `Jitter` | false | 随机抖动到 `[0.5×wait, 1.5×wait)`（避免惊群） |
+
+`DefaultBackoff()` 返回默认退避配置（fixed / 200ms / Max 30s / Factor 2.0 / 无抖动）。
+`Backoff.Calc(attempt)` 可单独调用来计算第 `attempt` 次（从 1 开始）的等待时长。
 
 ## Result 返回值
 
@@ -90,6 +93,14 @@ type Result struct {
 ### HTTPStatusError
 
 携带 HTTP 状态码、响应头和 Body 的错误类型，供 `ShouldRetry` 和 `GetRetryDelay` 使用。
+
+配套的判定函数（均基于 `errors.As` 在错误链中查找 `*HTTPStatusError`）：
+
+| 函数 | 判定条件 |
+|------|---------|
+| `IsRateLimitError(err)` | 429 |
+| `IsOverloadedError(err)` | 529 / 503 |
+| `IsServerError(err)` | ≥ 500 |
 
 ### HTTPShouldRetry
 
@@ -121,7 +132,9 @@ type Result struct {
 resp, err := retry.DoHTTPRequest(ctx, client, req, cfg)
 ```
 
-一行完成 HTTP 请求 + 自动重试。内部克隆请求避免 Body 复用问题。
+一行完成 HTTP 请求 + 自动重试。每次尝试通过 `req.Clone(ctx)` 派生新请求；
+当响应状态码为 5xx / 429 / 408 时构造 `*HTTPStatusError`（携带状态码与响应头）交由 `cfg` 决定是否重试。
+返回最近一次的 `*http.Response`（可能非 nil 且同时带 error），响应体由调用方负责关闭。
 
 ## 预设配置
 

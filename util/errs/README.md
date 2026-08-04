@@ -7,11 +7,12 @@
 ```go
 import "github.com/kasuganosora/thinkbot/util/errs"
 
-// HTTP 快捷构造
+// HTTP 快捷构造（均为单个 string 参数）
 err := errs.BadRequest("invalid input")
-err := errs.NotFound("user %q not found", userID)
+err := errs.NotFound("user not found")
 
-// 自定义状态码
+// 需要格式化时用 HTTPErrorf
+err := errs.HTTPErrorf(404, "user %q not found", userID)
 err := errs.HTTPErrorf(409, "conflict: version mismatch")
 
 // 包装底层错误 + 追加上下文

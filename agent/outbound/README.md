@@ -30,7 +30,7 @@ Pipeline 产出 []core.Action
 | `note_handler.go` | `NoteHandler` — 将 ActionNote 写入统一记忆仓储 |
 | `callback_handler.go` | `CallbackRegistry` + `CallbackHandler` — 回调注册与调用 |
 | `silent_handler.go` | `SilentHandler` — ActionSilent 处理（仅 trace，无外部 I/O） |
-| `eventbus.go` | `EventBus` 事件总线 + `EventEmitter` 发射器 + `EventStore` 事件回放 |
+| `eventbus.go` | `EventBus` 接口 + `MemoryEventBus` 实现 + 内部环形缓冲事件存储（回放） |
 | `event_emitter.go` | `EventEmitter` — 类型化的事件发射便捷封装 |
 | `module.go` | fx 依赖注入模块定义 |
 
@@ -53,7 +53,7 @@ type Dispatcher interface {
 ```go
 dispatcher := outbound.NewMultiDispatcher(logger, tp)
 
-// 注册处理器
+// 注册处理器（Register 覆盖已有；MustRegister 在重复注册时 panic）
 dispatcher.Register(core.ActionReply, channelReplyHandler)
 dispatcher.Register(core.ActionNote, noteHandler)
 dispatcher.Register(core.ActionSilent, silentHandler)
@@ -68,9 +68,14 @@ if len(missing) > 0 {
     log.Fatal("missing handlers:", missing)
 }
 
-// 派发
+// 派发：逐个 Action 路由，失败不中断，最终返回聚合错误（errors.Join）
 err := dispatcher.Dispatch(ctx, actions)
+
+// 运行指标
+m := dispatcher.Metrics() // DispatcherMetrics{ActionsDispatched, ActionsErrors, ActionsNoHandler, RegisteredTypes}
 ```
+
+`ActionHandlerFunc` 可将普通函数适配为 `ActionHandler`；`RegisteredTypes()` 列出已注册的 ActionType。
 
 ### LogDispatcher
 
@@ -103,6 +108,9 @@ handler.Register("tg-bot", telegramChannel)
 dispatcher.Register(core.ActionReply, handler)
 ```
 
+`source_channel` 缺失或未找到对应 Sender 时返回 error（不静默丢弃）。
+另提供 `Unregister(channelName)` 与 `RegisteredCount()`。
+
 ### NoteHandler
 
 将 `ActionNote` 转换为 `NoteEntry` 写入统一记忆仓储。Bot 的自主备注因此可被后续 LLM 检索回忆。
@@ -118,6 +126,11 @@ Action 字段约定：
 | `Metadata["message_id"]` | 触发此备注的原始消息 ID |
 
 Scope 确定逻辑：`Action.Channel` 非空 → `channel` scope；否则有 `bot_id` → `bot` scope；否则 → `global` scope。
+
+写入的 `NoteEntry.Source` 固定为 `"note"`，ID 由 `idgen.New("note")` 生成。
+`Action.Metadata` 中的内部路由字段（`source_channel`、`action_type`、`routing_key`、
+`dispatch_id`、`trace_id` 以及已单独处理的 `bot_id`/`message_id`/`category`/`importance`）
+不会写入 Entry 的 Metadata。空 Payload 会被跳过。
 
 ### CallbackHandler
 
@@ -159,6 +172,13 @@ Pipeline / Workflow 在处理过程中通过 EventBus 发布进度事件，Web �
 ```go
 type EventBus interface {
     Publish(ctx context.Context, event Event)
+
+    // 流式便捷方法
+    PublishTextDelta(ctx context.Context, traceID, botID, text string)
+    PublishToolCall(ctx context.Context, traceID, botID, toolCallID, toolName string, input any)
+    PublishToolProgress(ctx context.Context, traceID, botID, toolCallID, toolName, invocationID string, payload any)
+    PublishToolResult(ctx context.Context, traceID, botID, toolCallID, toolName, invocationID string, output any, errMsg string)
+
     Subscribe(traceID string) *Subscription
     SubscribeBot(botID string) *Subscription
     SubscribeWithReplay(traceID string, sinceSeq uint64) *Subscription  // 断线重连
@@ -168,17 +188,20 @@ type EventBus interface {
 }
 ```
 
+内存实现为 `MemoryEventBus`（`NewMemoryEventBus(config, logger)`），
+另提供 `ActiveSubscriptions()` 和 `Metrics()`（`EventBusMetrics{ActiveSubscriptions, EventsPublished, EventsDropped}`）。
+
 ### 事件类型
 
 | 分类 | 事件 | 说明 |
 |------|------|------|
 | **消息生命周期** | `message.received` / `message.dropped` / `message.done` / `message.error` | 消息进出 Pipeline |
 | **Stage** | `stage.enter` / `stage.exit` / `stage.skip` / `stage.error` | Pipeline 各阶段 |
-| **LLM** | `llm.start` / `llm.text_delta` / `llm.reason_delta` / `llm.tool_call` / `llm.tool_result` / `llm.step_done` / `llm.done` / `llm.error` | LLM 流式输出 |
+| **LLM** | `llm.start` / `llm.text_delta` / `llm.reason_delta` / `llm.tool_call` / `llm.tool_progress` / `llm.tool_result` / `llm.step_done` / `llm.done` / `llm.error` | LLM 流式输出 |
 | **决策** | `decision` | ReplyDecider 输出 |
 | **Dispatch** | `dispatch.start` / `dispatch.done` / `dispatch.error` | Action 派发 |
-| **Workflow** | `workflow.submitted` / `.analyzed` / `.completed` / `.failed` / `.terminated` / `.recovered` | 工作流生命周期 |
-| **Workflow 节点** | `workflow.node.started` / `.completed` / `.failed` / `.reviewing` / `.retrying` | DAG 节点状态 |
+| **Workflow** | `workflow.submitted` / `.analyzed` / `.running` / `.completed` / `.failed` / `.terminated` / `.recovered` | 工作流生命周期 |
+| **Workflow 节点** | `workflow.node.started` / `.completed` / `.failed` / `.reviewing` / `.retrying` / `.skipped` | DAG 节点状态 |
 
 所有事件都携带全局单调递增的 `Seq` 序列号，用于断线重连。
 
@@ -202,19 +225,23 @@ outbound.EmitterFromContext(ctx).EmitLLMError(ctx, traceID, err)
 
 ### 断线重连（EventStore）
 
-EventBus 内置 `EventStore`（环形缓冲 + TTL），解决用户关闭页面再打开后 SSE 历史事件丢失的问题。
+`MemoryEventBus` 内置环形缓冲事件存储（容量 + TTL），解决用户关闭页面再打开后 SSE 历史事件丢失的问题。
+
+`MemoryEventBusConfig`（`DefaultMemoryEventBusConfig()`）：
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `StoreCapacity` | 10000 | 环形缓冲最大事件数，超出后最旧事件被覆盖 |
+| `SubscriptionBufferSize` | 64 | 每个订阅 channel 的缓冲大小 |
+| `MaxSubscriptions` | 1000 | 最大订阅数，超出后返回一个已关闭的订阅 |
+| `StoreCapacity` | 10000 | 环形缓冲最大事件数，超出后最旧事件被覆盖；设为 0 禁用回放 |
 | `StoreTTL` | 30 min | 超过此时间的事件在回放时被跳过 |
 
 **工作流程**：
 
 1. 每次 `Publish` 时，事件自动写入 EventStore 并分配 `Seq`
 2. 前端建立/重连 SSE 时，携带 `Last-Event-ID`（即上次收到的 `Seq`）
-3. 后端调用 `SubscribeWithReplay(traceID, sinceSeq)`：先回放 `Seq > sinceSeq` 的历史事件，再转入实时推送
-4. 回放在**写锁保护**下执行，保证与实时推送之间**无间隙、无重复**
+3. 后端调用 `SubscribeWithReplay(traceID, sinceSeq)`：先回放 `Seq > sinceSeq` 且未超 TTL 的历史事件，再转入实时推送
+4. 回放在**写锁保护**下执行，保证与实时推送之间**无间隙、无重复**；单次回放上限 1000 条（取最新的部分），避免长时间持锁
 
 ```go
 // SSE Handler — 支持断线重连

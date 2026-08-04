@@ -7,7 +7,7 @@
 | 子包 | 说明 | 关键能力 |
 |------|------|---------|
 | [errs](errs/) | 结构化错误处理 | HTTP 状态码映射、堆栈捕获、链式 With/WithCode、日志分级集成 |
-| [http](http/) | HTTP 客户端 | 自动重试（Retry-After）、SSE 流式解析、WebSocket、Multipart 上传、代理、Dump 调试 |
+| [http](http/) | HTTP / WebSocket 客户端 | 自动重试（Retry-After）、SSE 流式解析、原始流式读取、WebSocket、Multipart 上传、看门狗超时、代理、Dump 调试 |
 | [idgen](idgen/) | 唯一 ID 生成器 | crypto/rand 安全随机、带前缀 ID、96 位随机空间 |
 | [log](log/) | 结构化日志 | Zap + GORM 桥接、多输出源、Lumberjack 文件轮转、Context 字段注入 |
 | [retry](retry/) | 重试执行器 | 指数/线性/固定退避、Panic 恢复、HTTP 智能重试、LLM/流式预设 |
@@ -18,13 +18,14 @@
 ## 子包依赖关系
 
 ```
-traceid ──→ log
+log      ──→（无项目内依赖）
+idgen    ──→（无项目内依赖）
+strutil  ──→（无项目内依赖）
+traceid  ──→ log
 errs     ──→ log
 retry    ──→ errs, traceid
 watchdog ──→ traceid
-http     ──→（独立，可选集成 retry）
-idgen    ──→（无依赖）
-strutil  ──→（无依赖）
+http     ──→ errs, log, retry, traceid, watchdog, strutil
 ```
 
-`log` 是最底层基础包，`traceid` 和 `errs` 依赖它。`retry` 和 `watchdog` 依赖 `traceid` + `errs`。`idgen` 和 `strutil` 零依赖。
+`log` 是最底层基础包，`traceid` 和 `errs` 依赖它；`traceid` 在 `init()` 中反向注册 GORM 上下文字段提取器（回调解耦，避免 `log` 导入 `traceid`）。`retry` 依赖 `errs` + `traceid`，`watchdog` 依赖 `traceid`。`http` 位于最上层，聚合以上能力。`idgen` 和 `strutil` 零依赖。
