@@ -547,7 +547,7 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		result.OOMKilled = true
 		result.Aborted = true
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("进程可能被 OOM 杀死（cgroup oom_kill 增加 %d→%d），结果不完整", snap0, snap1))
+			fmt.Sprintf("Process was likely OOM-killed (cgroup oom_kill rose %d→%d); the result is incomplete", snap0, snap1))
 	}
 	result.Reliable = !result.Aborted && !result.OOMKilled
 

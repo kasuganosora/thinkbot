@@ -257,7 +257,7 @@ func TestBuildReviewSystemPrompt_CustomPrompt(t *testing.T) {
 
 func TestBuildReviewSystemPrompt_Default(t *testing.T) {
 	result := buildReviewSystemPrompt("")
-	if !strings.Contains(result, "审查") {
+	if !strings.Contains(result, "reviewer") {
 		t.Error("default prompt should contain review instructions")
 	}
 }

@@ -174,26 +174,27 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 func (c *LLMConsolidator) buildPrompt(l0Entries []TieredEntry, existing []TieredEntry) string {
 	var sb strings.Builder
 
-	sb.WriteString("## 待处理的工作记忆（L0）\n\n")
+	sb.WriteString("## Working memory to process (L0)\n\n")
 	for _, e := range l0Entries {
 		content := StripThinking(e.Content)
 		fmt.Fprintf(&sb, "[%s] %s\n", e.ID, content)
 	}
 
 	if len(existing) > 0 {
-		sb.WriteString("\n## 已有的长期记忆（L1，供去重参考）\n\n")
+		sb.WriteString("\n## Existing long-term memory (L1, for deduplication)\n\n")
 		for _, e := range existing {
 			fmt.Fprintf(&sb, "[%s] (%s) %s\n", e.ID, e.Category, e.Content)
 		}
 	}
 
-	sb.WriteString("\n## 任务\n")
-	sb.WriteString("对每条 L0 记忆做出决策。输出 JSON 数组，每个元素：\n")
+	sb.WriteString("\n## Task\n")
+	sb.WriteString("Make one decision per L0 entry. Output a JSON array of objects:\n")
 	sb.WriteString("```json\n")
 	sb.WriteString(`[{"source_id":"mem-xxx","decision":"ADD","category":"fact","content":"...","importance":0.8,"reason":"..."}]`)
 	sb.WriteString("\n```\n")
-	sb.WriteString("decision 可选: ADD(新事实) / UPDATE(更新已有) / MERGE(补充已有) / SKIP(无价值)\n")
-	sb.WriteString("当 decision=UPDATE/MERGE 时需额外提供 target_id 指向要修改的 L1 条目 ID。\n")
+	sb.WriteString("decision: ADD (new fact) | UPDATE (supersede an existing entry) | MERGE (enrich an existing entry) | SKIP (no value)\n")
+	sb.WriteString("CRITICAL: when decision is UPDATE or MERGE you MUST also set target_id to the ID of the L1 entry being changed.\n")
+	sb.WriteString("Write each content value in the same language as the source entry.\n")
 
 	return sb.String()
 }
@@ -210,20 +211,21 @@ func (c *LLMConsolidator) parseResult(text string) []ConsolidateResult {
 	return results
 }
 
-const defaultConsolidatePrompt = `你是一个记忆提取助手。你的任务是从 Bot 的工作记忆（原始对话/观察）中提取值得长期保存的结构化事实。
+const defaultConsolidatePrompt = `You are a memory consolidator, an analysis component that turns a bot's raw working memory (conversations and observations) into structured facts worth keeping long term.
 
-规则：
-1. 提取事实、偏好、事件和重要观察
-2. 与已有记忆重复时使用 UPDATE 或 MERGE，而非 ADD
-3. 闲聊、问候、无实质内容的使用 SKIP
-4. 评估每条记忆的重要度（0.0~1.0），越高越重要
-5. 输出纯 JSON 数组，不要其他文本
+Rules:
+1. Extract facts, preferences, events and significant observations.
+2. When an entry overlaps something already stored, use UPDATE or MERGE — NEVER ADD a duplicate.
+3. Use SKIP for small talk, greetings and anything without substance.
+4. Score importance from 0.0 to 1.0; higher means more important.
+5. Output a raw JSON array and nothing else — no prose, no code fences.
+6. Write each content value in the same language as the source entry.
 
-分类建议：
-- fact: 客观事实（"用户使用 Go 语言"）
-- preference: 偏好（"用户偏好简洁的回复风格"）
-- event: 事件（"用户完成了项目部署"）
-- observation: 观察（"用户似乎对 Rust 感兴趣"）`
+Categories:
+- fact: an objective fact ("用户使用 Go 语言")
+- preference: a preference ("用户偏好简洁的回复风格")
+- event: something that happened ("用户完成了项目部署")
+- observation: an inferred observation ("用户似乎对 Rust 感兴趣")`
 
 // ============================================================================
 // RuleConsolidator — 基于规则的巩固器（无 LLM 依赖，用于测试/降级）

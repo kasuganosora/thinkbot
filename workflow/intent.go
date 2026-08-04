@@ -81,11 +81,17 @@ func DetectGoalModeIntent(text string) bool {
 // 该指令要求模型必须使用 task(goalMode: true) 提交，禁止用 subagent/delegate 内联处理。
 // 调用方应将原始需求原文保留（用于持久化），仅把本指令 + 原文作为注入模型的文本。
 func GoalModeDirective(original string) string {
-	const head = `[目标模式指令 / GOAL MODE DIRECTIVE]
-本任务有「做到达标才算完成、需反复打磨或审查直到没有新问题」的明确验收要求。
-你【必须】使用 task 工具提交，并显式传入 goalMode: true，把下面的原始需求作为 requirement。
-【禁止】用 subagent / delegate / 一次性内联处理来完成，也【不要】一轮跑完就结束——
-目标模式会在审查不通过时自动回退重做，直到通过或达到最大轮数（默认 5 轮）。
-原始需求如下：`
+	const head = `[GOAL MODE DIRECTIVE]
+This request carries an explicit acceptance bar: it is not complete until it meets the
+standard, and it requires repeated refinement or review until no new issues remain.
+
+- You MUST submit it with the task tool and explicitly pass goalMode: true, using the
+  original requirement below as the requirement argument.
+- NEVER complete it with subagent / delegate / a one-shot inline attempt, and NEVER stop
+  after a single pass — goal mode automatically rolls back and redoes the work whenever
+  review fails, until it passes or the maximum number of rounds (default 5) is reached.
+- You must respond to the user in Chinese (中文).
+
+The original requirement follows:`
 	return head + "\n\n" + original
 }

@@ -337,18 +337,25 @@ func (m *SkillManager) skillSectionName(name string) string {
 //
 // 格式：
 //
-//	## 可用技能
-//	当用户请求需要特定技能时，调用 use_skill 工具加载技能指令。
-//	- pdf：处理 PDF 文件（提取文本、合并、拆分等）。
-//	- xlsx：处理 Excel 表格。
+//	## Available Skills
+//	When a request falls into one of the domains below, call `use_skill` ...
+//	- pdf — 处理 PDF 文件（提取文本、合并、拆分等）。
+//	- xlsx — 处理 Excel 表格。
 func (m *SkillManager) BuildTriggerPrompt() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var buf strings.Builder
-	buf.WriteString("## 可用技能\n\n")
-	buf.WriteString("当用户请求涉及以下技能领域时，调用 `use_skill` 工具（传入技能名称）加载完整指令。\n")
-	buf.WriteString("加载后必须严格遵循技能指令。如果用户请求涉及某个技能领域，应立即调用，不要先尝试其他方式。\n\n")
+	buf.WriteString("## Available Skills\n\n")
+	buf.WriteString("A Skill is a package of specialized instructions for a specific domain, system or data format.\n")
+	buf.WriteString("When a user request falls into one of the domains listed below, call the `use_skill` tool with that skill's name to load its full instructions.\n\n")
+	buf.WriteString("Rules:\n")
+	buf.WriteString("- CRITICAL: Call `use_skill` as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
+	buf.WriteString("- After loading, you MUST follow the skill's instructions exactly. They override your general defaults for that task.\n")
+	buf.WriteString("- NEVER mention a skill to the user without actually loading it.\n")
+	buf.WriteString("- If no listed skill matches the request, proceed normally without calling `use_skill`.\n")
+	buf.WriteString("- You must respond to the user in Chinese (中文), even though these instructions are in English.\n\n")
+	buf.WriteString("Skills available now:\n")
 
 	enabled := make([]*Skill, 0, len(m.skills))
 	for _, s := range m.skills {
@@ -361,7 +368,7 @@ func (m *SkillManager) BuildTriggerPrompt() string {
 	for _, s := range enabled {
 		buf.WriteString("- ")
 		buf.WriteString(s.Name)
-		buf.WriteString("：")
+		buf.WriteString(" — ")
 		buf.WriteString(s.Description)
 		buf.WriteString("\n")
 	}

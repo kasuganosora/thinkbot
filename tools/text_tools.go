@@ -25,17 +25,17 @@ func textHashToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "text_hash",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description:  "计算文本的哈希值（支持 MD5 和 SHA256）。",
+			Description:  "Compute the hash digest of a text string. Supports MD5 and SHA256.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"text": map[string]any{
 						"type":        "string",
-						"description": "要计算哈希的文本",
+						"description": "The text to hash.",
 					},
 					"algorithm": map[string]any{
 						"type":        "string",
-						"description": "哈希算法：md5 或 sha256",
+						"description": "Hash algorithm: md5 or sha256. Defaults to sha256.",
 						"enum":        []string{"md5", "sha256"},
 					},
 				},
@@ -85,17 +85,17 @@ func textEncodeToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "text_encode",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description:  "Base64 编码或解码文本。",
+			Description:  "Encode text to Base64, or decode a Base64 string back to text.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"text": map[string]any{
 						"type":        "string",
-						"description": "要处理的文本",
+						"description": "The text to encode, or the Base64 string to decode.",
 					},
 					"operation": map[string]any{
 						"type":        "string",
-						"description": "操作：encode（编码）或 decode（解码）",
+						"description": "Direction: encode or decode.",
 						"enum":        []string{"encode", "decode"},
 					},
 				},
@@ -146,17 +146,18 @@ func textDiffToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "text_diff",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description:  "比较两段文本的差异，返回行级别的增删改。",
+			Description: "Compare two texts and return a line-level diff of additions, removals and unchanged lines. " +
+				"Limited to 5000 lines per side.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"text1": map[string]any{
 						"type":        "string",
-						"description": "第一段文本（原始）",
+						"description": "The first text (the original).",
 					},
 					"text2": map[string]any{
 						"type":        "string",
-						"description": "第二段文本（修改后）",
+						"description": "The second text (the modified version).",
 					},
 				},
 				"required": []string{"text1", "text2"},
@@ -191,13 +192,13 @@ func textStatsToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "text_stats",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description:  "统计文本的行数、词数、字符数等信息。",
+			Description:  "Count lines, words, characters, paragraphs and estimated tokens in a text.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"text": map[string]any{
 						"type":        "string",
-						"description": "要统计的文本",
+						"description": "The text to analyze.",
 					},
 				},
 				"required": []string{"text"},

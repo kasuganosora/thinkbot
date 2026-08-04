@@ -37,8 +37,9 @@ func buildNowTool(timezone string) llm.Tool {
 
 	return llm.Tool{
 		Name: "now",
-		Description: "获取当前日期和时间。返回本地时间、UTC 时间、时区、星期几等信息。" +
-			"当用户询问当前时间、日期相关问题时使用此工具。",
+		Description: "Get the current date and time. Returns local time, UTC time, timezone, weekday, " +
+			"Unix timestamp, ISO-8601 form and a weekend flag. " +
+			"ALWAYS use this tool when the answer depends on the current date or time — never guess it.",
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},

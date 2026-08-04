@@ -29,7 +29,7 @@ import (
 // UseSkillInput 是 use_skill 工具的输入参数。
 type UseSkillInput struct {
 	// Command 是技能名称（无参数）。如 "pdf"、"xlsx"、"agent-browser"。
-	Command string `json:"command" jsonschema:"The skill name (no arguments). E.g., \"pdf\", \"xlsx\""`
+	Command string `json:"command" jsonschema:"The exact skill name as listed in Available Skills, with no arguments. E.g., \"pdf\", \"xlsx\""`
 }
 
 // UseSkill 激活指定技能并返回其完整指令内容。
@@ -71,18 +71,25 @@ func (m *SkillManager) UseSkill(name string) (*Skill, error) {
 func (m *SkillManager) BuildUseSkillTool() llm.Tool {
 	mgr := m
 	return llm.NewTool("use_skill",
-		`Load a Skill to get specialized domain knowledge, workflows, or tool instructions.
+		`Load a Skill to obtain specialized domain knowledge, workflows, or tool instructions.
 
-Only use this tool when ALL of the following conditions are met:
+Use this tool when ALL of the following are true:
 1. The request involves a specific domain, system, or data format.
-2. A relevant Skill is listed in the available skills section.
-3. Using the Skill would improve correctness, efficiency, or quality.
+2. A matching Skill is listed in the "Available Skills" section.
+3. Loading the Skill would improve correctness, efficiency, or quality.
 
-After loading a Skill, you MUST follow its instructions. The Skill may define
-required workflows or expose executable scripts via its base directory path.
+Rules:
+- CRITICAL: Call this tool IMMEDIATELY as your first action when a relevant Skill exists. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded.
+- After loading, you MUST follow the Skill's instructions. They override your general defaults for that task.
+- The result may include `+"`baseDir`"+`, `+"`scripts`"+` and `+"`references`"+`. Prefer the Skill's own scripts over improvising an equivalent yourself.
+- NEVER mention or describe a Skill without actually loading it.
+- Load each Skill at most once per task. Do NOT reload a Skill that is already active.
+- If the call fails because the Skill does not exist, the error lists the available names. Pick the correct one, or continue without a Skill — do NOT invent skill names.
 
-Call this tool IMMEDIATELY as your first action when a relevant skill exists.
-Do NOT attempt the task without loading the skill first.`,
+<example>
+user: 帮我把这个 PDF 里的表格提取出来
+assistant: [calls use_skill with command "pdf", then follows the loaded instructions]
+</example>`,
 		func(ctx *llm.ToolExecContext, input UseSkillInput) (any, error) {
 			s, err := mgr.UseSkill(input.Command)
 			if err != nil {

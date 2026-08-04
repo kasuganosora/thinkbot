@@ -642,13 +642,13 @@ func TestRunNode_InjectsUpstreamContext(t *testing.T) {
 		t.Fatalf("expected 1 Execute call, got %d", len(exec.capturedTasks))
 	}
 	task := exec.capturedTasks[0]
-	if !contains(task, "[上游任务汇总]") {
+	if !contains(task, "[Upstream Task Results]") {
 		t.Errorf("expected upstream context injection in task, got: %s", task)
 	}
 	if !contains(task, "营收增长") {
 		t.Errorf("expected upstream result content, got: %s", task)
 	}
-	if !contains(task, "[你的任务]") {
+	if !contains(task, "[Your Task]") {
 		t.Errorf("expected task separator, got: %s", task)
 	}
 }

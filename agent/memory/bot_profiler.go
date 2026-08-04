@@ -138,28 +138,28 @@ func (p *BotProfileProfiler) ExtractProfile(ctx context.Context, l1Entries, l2En
 func (p *BotProfileProfiler) buildPrompt(l1, l2, existing []TieredEntry) string {
 	var sb strings.Builder
 
-	sb.WriteString("## Bot 自身的行为历史（L1 长期记忆）\n\n")
+	sb.WriteString("## The bot's own behavioral history (L1 long-term memory)\n\n")
 	for _, e := range l1 {
 		fmt.Fprintf(&sb, "- (%s) %s\n", e.Category, StripThinking(e.Content))
 	}
 
 	if len(l2) > 0 {
-		sb.WriteString("\n## Bot 的交互场景记忆（L2）\n\n")
+		sb.WriteString("\n## The bot's episodic interaction memory (L2)\n\n")
 		for _, e := range l2 {
 			fmt.Fprintf(&sb, "- %s\n", StripThinking(e.Content))
 		}
 	}
 
 	if len(existing) > 0 {
-		sb.WriteString("\n## 已有画像（参考，避免矛盾）\n\n")
+		sb.WriteString("\n## Existing profile (for reference — do NOT contradict it)\n\n")
 		for _, e := range existing {
 			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
-	sb.WriteString("\n## 任务\n")
-	sb.WriteString("从 Bot 自身的行为历史中提取 Bot 的「自我画像」。\n")
-	sb.WriteString("输出纯 JSON：\n")
+	sb.WriteString("\n## Task\n")
+	sb.WriteString("Derive the bot's self-profile from its own behavioral history.\n")
+	sb.WriteString("Output raw JSON matching this schema exactly:\n")
 	sb.WriteString(`{
   "energy_level": 0.0-1.0,
   "patience": 0.0-1.0,
@@ -168,13 +168,14 @@ func (p *BotProfileProfiler) buildPrompt(l1, l2, existing []TieredEntry) string 
   "personality": "人格标签",
   "confidence": 0.0-1.0
 }`)
-	sb.WriteString("\n\n规则：\n")
-	sb.WriteString("- energy_level: Bot 参与讨论的积极程度\n")
-	sb.WriteString("- patience: Bot 面对重复/无意义问题的耐心\n")
-	sb.WriteString("- preferred_topics: Bot 频繁参与的话题\n")
-	sb.WriteString("- verbosity: Bot 回复长度偏好（0=惜字如金，1=滔滔不绝）\n")
-	sb.WriteString("- personality: 一两句话描述 Bot 的行为风格\n")
-	sb.WriteString("- confidence: 基于记忆样本量评估画像可信度\n")
+	sb.WriteString("\n\nField definitions:\n")
+	sb.WriteString("- energy_level: how actively the bot engages in discussion\n")
+	sb.WriteString("- patience: how well the bot tolerates repetitive or pointless questions\n")
+	sb.WriteString("- preferred_topics: the topics the bot engages with most often\n")
+	sb.WriteString("- verbosity: the bot's reply-length preference (0 = terse, 1 = long-winded)\n")
+	sb.WriteString("- personality: one or two sentences describing the bot's behavioral style\n")
+	sb.WriteString("- confidence: how trustworthy this profile is given the memory sample size\n")
+	sb.WriteString("\nWrite preferred_topics and personality in Chinese (中文).\n")
 
 	return sb.String()
 }
@@ -215,13 +216,14 @@ func (p *BotProfileProfiler) parseResult(text string) *BotProfileResult {
 	return &result
 }
 
-const defaultBotProfilePrompt = `你是一个 Bot 自我画像分析助手。从 Bot 自身的行为历史中提取其稳定的人格特征。
+const defaultBotProfilePrompt = `You are a bot self-profiler, an analysis component that derives a bot's stable personality traits from its own behavioral history.
 
-规则：
-1. 从 Bot 与用户的交互模式中推断自我画像
-2. energy_level: Bot 主动参与讨论的频率和积极性
-3. patience: Bot 面对重复问题/无理要求时的容忍度
-4. preferred_topics: Bot 最常参与讨论的话题领域
-5. verbosity: Bot 回复的详细程度偏好
-6. personality: 用一两句话的风格化描述
-7. 输出纯 JSON，不要其他文本`
+Rules:
+1. Infer the self-profile from how the bot actually interacts with users, not from how it describes itself.
+2. energy_level: how often and how eagerly the bot joins discussions.
+3. patience: how much the bot tolerates repetitive questions and unreasonable requests.
+4. preferred_topics: the topic areas the bot engages with most.
+5. verbosity: how detailed the bot's replies tend to be.
+6. personality: one or two sentences of stylized description.
+7. Output raw JSON and nothing else — no prose, no code fences.
+8. Write preferred_topics and personality in Chinese (中文).`

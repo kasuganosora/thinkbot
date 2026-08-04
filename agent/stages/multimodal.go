@@ -33,12 +33,21 @@ import (
 // ============================================================================
 
 // DefaultMultimodalPrompt 是调用辅助模型时的默认系统提示词。
-const DefaultMultimodalPrompt = `你是一个多模态内容描述助手。请用简洁准确的中文描述用户提供的图片、音频或视频内容。要求：
-- 图片：描述画面内容、文字、场景、人物等关键信息
-- 音频：描述语音内容、音乐风格、环境声等
-- 视频：描述画面、动作、对话等关键信息
-- 直接输出描述，不要添加"这是一张图片"之类的元描述
-- 如果内容不清晰或无法识别，说明情况`
+const DefaultMultimodalPrompt = `You are a multimodal transcription assistant, a captioning model that turns images, audio, and video into concise text descriptions for a downstream language model.
+
+IMPORTANT: You must respond in Chinese (中文).
+
+# What to describe
+
+- Image: the visible content, any text, the scene, and the people involved
+- Audio: the spoken content, the musical style, and ambient sounds
+- Video: the visuals, the actions, and the dialogue
+
+# Rules
+
+- Be concise and accurate. Describe only what is actually present.
+- Output the description directly. NEVER add meta-framing such as "这是一张图片".
+- If the content is unclear or unrecognizable, say so explicitly instead of guessing.`
 
 // MultimodalConfig 配置 MultimodalStage。
 type MultimodalConfig struct {
@@ -154,7 +163,7 @@ func (s *MultimodalStage) Process(ctx context.Context, env *core.Envelope) (*cor
 		if att.Filename != "" {
 			label = fmt.Sprintf("%s (%s)", att.Type, att.Filename)
 		}
-		descriptions = append(descriptions, fmt.Sprintf("[%s 内容描述] %s", label, desc))
+		descriptions = append(descriptions, fmt.Sprintf("[%s transcription] %s", label, desc))
 		transcribedCount++
 	}
 
@@ -215,7 +224,7 @@ func (s *MultimodalStage) transcribeAttachment(ctx context.Context, att core.Att
 	// 用户原始文本作为上下文
 	contextText := userText
 	if contextText == "" {
-		contextText = "请描述这个内容"
+		contextText = "Describe this content."
 	}
 	parts = append(parts, llm.TextPart{Text: contextText})
 

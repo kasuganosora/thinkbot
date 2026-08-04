@@ -69,11 +69,11 @@ func TestWorkflowPromptSectionExplainsGoalMode(t *testing.T) {
 	}
 
 	// 必须有独立小节，而不是塞在开头长句里——LLM 对结构化决策规则的遵循度明显更高。
-	if !strings.Contains(content, "## 目标模式") {
-		t.Error("提示词应包含独立的「## 目标模式」小节")
+	if !strings.Contains(content, "## Goal Mode") {
+		t.Error("提示词应包含独立的「## Goal Mode」小节")
 	}
 	// 必须同时给出正例与反例，否则模型容易无差别开启。
-	for _, marker := range []string{"应当开启", "不要开启", "goalMode: true"} {
+	for _, marker := range []string{"Enable it", "NEVER handle it inline", "goalMode: true"} {
 		if !strings.Contains(content, marker) {
 			t.Errorf("提示词缺少关键说明: %q", marker)
 		}
@@ -90,12 +90,12 @@ func TestStatusToolDescribesGoalIteration(t *testing.T) {
 func TestGoalModeAnalyzerHintRequestsVerificationNode(t *testing.T) {
 	// 分析器的 system prompt 是静态的，模型无法判断本次是否开启目标模式，
 	// 因此必须靠这段任务侧提示告知，并要求产出可闭环的验收节点。
-	for _, marker := range []string{"验收节点", "review", "feedback"} {
+	for _, marker := range []string{"acceptance node", "review", "feedback"} {
 		if !strings.Contains(goalModeAnalyzerHint, marker) {
 			t.Errorf("目标模式分析提示缺少 %q", marker)
 		}
 	}
-	if !strings.Contains(goalModeAnalyzerHint, "不会构成环") {
+	if !strings.Contains(goalModeAnalyzerHint, "never form a cycle") {
 		t.Error("提示应明确回退边不构成环，避免模型因担心成环而拒填 feedback")
 	}
 }

@@ -198,7 +198,7 @@ func (c *LLMCompressor) buildCompressContent(entries []Entry) (content string, e
 	var sb strings.Builder
 	entryIDs = make([]string, 0, len(entries))
 
-	sb.WriteString("以下是需要压缩的记忆条目，每条以 [ID] 标识：\n\n")
+	sb.WriteString("## Memory entries to compress\n\nEach entry is prefixed with its [ID].\n\n")
 
 	for _, entry := range entries {
 		entryIDs = append(entryIDs, entry.ID)
@@ -207,8 +207,9 @@ func (c *LLMCompressor) buildCompressContent(entries []Entry) (content string, e
 		tokenEstimate += estimateTokens(entry.Content)
 	}
 
-	sb.WriteString("\n请生成一份结构化摘要。在摘要中，对每个要点标注其来源 Entry ID（格式：`[ref:ID]`），")
-	sb.WriteString("以便后续需要详细信息时可按 ID 回溯原文。")
+	sb.WriteString("\n## Task\nProduce one structured summary of the entries above. ")
+	sb.WriteString("You MUST annotate every bullet with the Entry IDs it came from, using the exact format `[ref:ID]`, ")
+	sb.WriteString("so the original entry can be reloaded later when full detail is needed.")
 
 	return sb.String(), entryIDs, tokenEstimate
 }
@@ -250,9 +251,9 @@ func (n *NoopCompressor) Compress(_ context.Context, entries []Entry) (*Compress
 
 	return &CompressedBlock{
 		ID:                 idgen.New("mem"),
-		Summary:            fmt.Sprintf("(已省略 %d 条较早的记忆，可通过 ID 加载原文)", len(entries)),
+		Summary:            fmt.Sprintf("(%d older memory entries omitted; load them by ID to see the originals)", len(entries)),
 		EntryIDs:           entryIDs,
-		TokenCount:         estimateTokens(fmt.Sprintf("(已省略 %d 条较早的记忆)", len(entries))),
+		TokenCount:         estimateTokens(fmt.Sprintf("(%d older memory entries omitted)", len(entries))),
 		OriginalTokenCount: totalTokens,
 		CompressionRatio:   0,
 		CreatedAt:          time.Now(),
@@ -263,17 +264,19 @@ func (n *NoopCompressor) Compress(_ context.Context, entries []Entry) (*Compress
 // Default compress prompt
 // ============================================================================
 
-const defaultCompressPrompt = `你是一个记忆压缩助手。你的任务是将多条记忆条目压缩为一份简洁的结构化摘要。
+const defaultCompressPrompt = `You are a memory compressor, a summarization component that condenses many memory entries into one dense, structured summary.
 
-规则：
-1. 保留关键事实、决策和偏好，删除冗余和过时信息
-2. 对每个要点标注来源 Entry ID，格式为 [ref:ID]
-3. 按主题分组组织摘要
-4. 使用简练的表述，避免冗余
-5. 重要度高的内容优先保留
-6. 输出纯文本，不要使用 markdown 标题
+Rules:
+1. Keep key facts, decisions and preferences. Drop redundant and outdated information.
+2. ALWAYS annotate each bullet with its source Entry IDs using the exact format [ref:ID]. NEVER invent an ID that was not given to you.
+3. Group bullets by topic.
+4. Be terse. No filler, no repetition.
+5. When you must drop something, drop the least important entries first.
+6. Output plain text bullets only. NEVER use markdown headings.
+7. Write each bullet in the same language as the source entry.
 
-输出格式示例：
+<example>
 - 用户偏好Go语言开发，使用Gin框架 [ref:mem-abc123]
 - 项目使用Bazel构建系统，proto生成Go代码 [ref:mem-def456]
-- 已完成用户注册接口的软删除逻辑修复 [ref:mem-ghi789] [ref:mem-jkl012]`
+- 已完成用户注册接口的软删除逻辑修复 [ref:mem-ghi789] [ref:mem-jkl012]
+</example>`

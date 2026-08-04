@@ -24,36 +24,37 @@ func datetimeCalcToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "datetime_calc",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
-			Description: "日期时间计算工具。支持日期加减、日期差计算、星期查询、格式转换。" +
-				"输入日期格式：YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS。",
+			Description: "Perform date and time calculations: shift a date, compute the difference between two dates, " +
+				"look up the weekday, or convert a date to another format. " +
+				"Accepted input formats: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"operation": map[string]any{
 						"type":        "string",
-						"description": "操作类型：add（日期加减）、diff（日期差）、weekday（星期几）、format（格式转换）",
+						"description": "What to compute: add (shift a date), diff (difference between two dates), weekday (day of week), format (convert format).",
 						"enum":        []string{"add", "diff", "weekday", "format"},
 					},
 					"date": map[string]any{
 						"type":        "string",
-						"description": "基准日期，格式 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS。留空使用当前时间。",
+						"description": "Base date, formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS. Leave empty to use the current time.",
 					},
 					"value": map[string]any{
 						"type":        "integer",
-						"description": "加减的值（operation=add 时使用，正数加负数减）",
+						"description": "Amount to shift by. Required when operation=add. Positive adds, negative subtracts.",
 					},
 					"unit": map[string]any{
 						"type":        "string",
-						"description": "加减的单位：days、weeks、months、years、hours、minutes",
+						"description": "Unit for the shift: days, weeks, months, years, hours or minutes.",
 						"enum":        []string{"days", "weeks", "months", "years", "hours", "minutes"},
 					},
 					"date2": map[string]any{
 						"type":        "string",
-						"description": "第二个日期（operation=diff 时使用）",
+						"description": "The second date. Required when operation=diff.",
 					},
 					"format": map[string]any{
 						"type":        "string",
-						"description": "目标格式（operation=format 时使用），如 2006-01-02、01/02/2006、Jan 2, 2006",
+						"description": "Target layout, using Go reference-time syntax. Required when operation=format, e.g. 2006-01-02, 01/02/2006, Jan 2, 2006",
 					},
 				},
 				"required": []string{"operation"},

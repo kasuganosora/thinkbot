@@ -25,28 +25,29 @@ func webFetchToolDef(cfg Config) agenttools.ToolDef {
 		Category: "utility",
 		Tool: llm.Tool{
 			Name: "web_fetch",
-			Description: "获取指定 URL 的内容（默认 HTTP GET）。" +
-				"可通过 method/headers/body 参数发送自定义请求（POST/PUT/DELETE 等）。" +
-				"返回 HTTP 状态码、Content-Type、响应头和截断后的响应正文。",
+			Description: "Fetch the content of a URL over HTTP (GET by default). " +
+				"Set method/headers/body to send other request types (POST/PUT/DELETE/PATCH/HEAD). " +
+				"Returns the HTTP status code, Content-Type and a truncated response body. " +
+				"IMPORTANT: The url MUST be one the user provided or one you obtained from a tool result — never invent URLs.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"url": map[string]any{
 						"type":        "string",
-						"description": "要获取的 URL（必须包含 http:// 或 https:// 前缀）",
+						"description": "The URL to request. MUST start with http:// or https://",
 					},
 					"method": map[string]any{
 						"type":        "string",
-						"description": "HTTP 方法，默认 GET。可选 GET/POST/PUT/DELETE/PATCH/HEAD 等",
+						"description": "HTTP method. Defaults to GET. One of GET/POST/PUT/DELETE/PATCH/HEAD.",
 						"default":     "GET",
 					},
 					"headers": map[string]any{
 						"type":        "object",
-						"description": "自定义请求头键值对（可选）",
+						"description": "Optional custom request headers as key/value pairs.",
 					},
 					"body": map[string]any{
 						"type":        "string",
-						"description": "请求体内容（可选，用于 POST/PUT/PATCH 等）",
+						"description": "Optional request body, used with POST/PUT/PATCH.",
 					},
 				},
 				"required": []string{"url"},

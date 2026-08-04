@@ -34,34 +34,41 @@ import (
 var cronToolPromptSection = &agenttools.ToolPromptSection{
 	Name:  "cron_tools",
 	Order: 320,
-	Content: `# 定时任务
+	Content: `# Scheduled Jobs
 
-使用 ` + "`cron`" + ` 工具创建和管理定时任务，让 bot 在指定时间自动执行预设指令。
+Use the ` + "`cron`" + ` tool to create and manage scheduled jobs so the bot runs a preset instruction automatically at a given time.
 
-## 调度格式
+## Schedule formats
 
-| 格式 | 示例 | 说明 |
-|------|------|------|
-| Cron 表达式 | ` + "`0 9 * * 1-5`" + ` | 标准 5 段（分 时 日 月 周），工作日 9:00 |
-| 间隔循环 | ` + "`every 30m`" + ` | 每 30 分钟 |
-| 相对延迟 | ` + "`2h`" + ` / ` + "`1d`" + ` | 延迟后执行一次 |
-| ISO 时间戳 | ` + "`2026-03-20T14:00`" + ` | 指定时刻执行一次 |
+| Format | Example | Meaning |
+|--------|---------|---------|
+| Cron expression | ` + "`0 9 * * 1-5`" + ` | Standard 5 fields (min hour dom mon dow) — 9:00 on weekdays |
+| Recurring interval | ` + "`every 30m`" + ` | Every 30 minutes |
+| Relative delay | ` + "`2h`" + ` / ` + "`1d`" + ` | Run once after the delay |
+| ISO timestamp | ` + "`2026-03-20T14:00`" + ` | Run once at that exact moment |
 
-## 使用流程
+## Workflow
 
-1. **创建**：` + "`cron(action='create')`" + ` — 必须提供 name、prompt、schedule
-2. **查看**：` + "`cron(action='list')`" + ` 列出任务，或 ` + "`cron(action='get')`" + ` 查看详情
-3. **控制**：` + "`cron(action='pause/resume/trigger')`" + ` — 需要 job_id
-4. **修改**：` + "`cron(action='update')`" + ` — 修改属性
-5. **删除**：` + "`cron(action='remove')`" + ` — 需要 job_id
+1. **Create** — ` + "`cron(action='create')`" + `; name, prompt and schedule are all required
+2. **Inspect** — ` + "`cron(action='list')`" + ` to list jobs, or ` + "`cron(action='get')`" + ` for details
+3. **Control** — ` + "`cron(action='pause/resume/trigger')`" + `; requires job_id
+4. **Modify** — ` + "`cron(action='update')`" + ` to change attributes
+5. **Delete** — ` + "`cron(action='remove')`" + `; requires job_id
 
-## 重要规则
+## Rules
 
-- **prompt 必须自包含**：cron 任务在独立会话中执行，没有当前对话上下文。提示词应包含所有必要信息和期望结果。
-- **先列出再操作**：不要猜测 job_id。始终先 ` + "`action='list'`" + ` 获取正确的 job_id，再执行 update/remove/pause 等操作。
-- **支持按名称查找**：job_id 也接受任务名称（大小写不敏感）。如果多个任务同名会报错，此时需用实际 ID。
-- **cron 任务自主执行**：没有用户在场交互，无法提问或请求澄清。最终输出会自动发送到目标渠道。
-- **安全限制**：cron 执行的会话不应递归创建更多 cron 任务。`,
+- **The prompt MUST be self-contained.** A cron job runs in its own session with none of the current conversation context. Put every necessary detail and the expected result into the prompt itself.
+- **ALWAYS list before you act.** NEVER guess a job_id. Run ` + "`action='list'`" + ` to obtain the correct job_id before update/remove/pause and similar operations.
+- **Lookup by name is supported.** job_id also accepts a job name (case-insensitive). If several jobs share the same name the call fails — use the actual ID in that case.
+- **Cron jobs run unattended.** No user is present, so you cannot ask questions or request clarification. The final output is delivered to the target channel automatically.
+- **Anti-nesting.** A session started by a cron job MUST NOT create further cron jobs.
+- **Language.** Cron output is delivered to the user, so you must respond to the user in Chinese (中文). Write job prompts in Chinese too.
+
+<example>
+user: 每天早上 9 点给我发一份 A 股收盘复盘
+assistant: [calls cron(action='create', name='A股每日复盘', schedule='0 9 * * *', prompt='汇总昨日 A 股三大指数涨跌幅、成交额与领涨领跌板块，输出 200 字以内的中文复盘。')]
+assistant: 已创建定时任务「A股每日复盘」，每天 9:00 执行。
+</example>`,
 	Enabled: true,
 }
 
@@ -205,65 +212,65 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "cron",
 			DeferredLoad: true, // 定时任务非日常任务，初始仅暴露名称+描述
-			Description: "管理定时任务。使用 action 参数选择操作：create（创建）、list（列表）、get（详情）、" +
-				"update（更新）、remove（删除）、pause（暂停）、resume（恢复）、trigger（立即触发）。" +
+			Description: "Manage scheduled jobs. Pick the operation with the action parameter: create, list, get, " +
+				"update, remove, pause, resume, trigger (run now)." +
 				"\n\n" +
-				"创建任务时需要 name、prompt 和 schedule。schedule 支持：cron 表达式（\"0 9 * * 1-5\"）、" +
-				"间隔循环（\"every 30m\"）、相对延迟（\"2h\"/\"1d\"）、ISO 时间戳（\"2026-03-20T14:00\"）。" +
+				"Creating a job requires name, prompt and schedule. schedule accepts: a cron expression (\"0 9 * * 1-5\"), " +
+				"a recurring interval (\"every 30m\"), a relative delay (\"2h\"/\"1d\"), or an ISO timestamp (\"2026-03-20T14:00\")." +
 				"\n\n" +
-				"注意：cron 任务在独立会话中自主执行，prompt 必须自包含（没有当前对话上下文）。" +
-				"不要猜测 job_id — 始终先 list 获取。job_id 也接受任务名称。",
+				"IMPORTANT: a cron job runs unattended in its own session, so the prompt MUST be self-contained — it has none of the current conversation context. " +
+				"NEVER guess a job_id; always list first. job_id also accepts a job name.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"action": map[string]any{
 						"type":        "string",
-						"description": "操作类型。create=创建新任务（需 name+prompt+schedule）; list=列出任务; get=查看详情（需 job_id）; update=更新属性（需 job_id）; remove=删除（需 job_id）; pause=暂停（需 job_id）; resume=恢复（需 job_id）; trigger=立即触发（需 job_id）",
+						"description": "Operation to perform. create=create a new job (needs name+prompt+schedule); list=list jobs; get=show details (needs job_id); update=change attributes (needs job_id); remove=delete (needs job_id); pause=pause (needs job_id); resume=resume (needs job_id); trigger=run now (needs job_id)",
 						"enum":        []string{"create", "list", "get", "update", "remove", "pause", "resume", "trigger"},
 					},
 					"job_id": map[string]any{
 						"type":        "string",
-						"description": "任务 ID 或名称。get/update/remove/pause/resume/trigger 时必填。可通过 action=list 获取。",
+						"description": "Job ID or job name. Required for get/update/remove/pause/resume/trigger. Obtain it with action=list.",
 					},
 					"name": map[string]any{
 						"type":        "string",
-						"description": "create 时必填：任务名称。update 时可选：新名称。",
+						"description": "Required for create: the job name. Optional for update: the new name.",
 					},
 					"prompt": map[string]any{
 						"type":        "string",
-						"description": "create 时必填：任务触发时执行的完整指令。必须自包含（独立会话无上下文）。update 时可选。",
+						"description": "Required for create: the complete instruction to execute when the job fires. MUST be self-contained — it runs in a separate session with no conversation context. Optional for update.",
 					},
 					"schedule": map[string]any{
 						"type":        "string",
-						"description": "create 时必填，update 时可选。调度表达式。示例：\"0 9 * * 1-5\"（工作日9点）、\"every 30m\"（每30分钟）、\"2h\"（2小时后执行一次）、\"2026-03-20T14:00\"（指定时刻）",
+						"description": "Required for create, optional for update. The schedule expression. Examples: \"0 9 * * 1-5\" (9:00 on weekdays), \"every 30m\" (every 30 minutes), \"2h\" (once, two hours from now), \"2026-03-20T14:00\" (at that exact moment)",
 					},
 					"model": map[string]any{
 						"type":        "string",
-						"description": "可选：覆盖默认模型。create/update 时可用。",
+						"description": "Optional: override the default model. Available on create and update.",
 					},
 					"skills": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "可选：执行时激活的技能列表。update 时传空数组清除。",
+						"description": "Optional: skills to activate during execution. Pass an empty array on update to clear them.",
 					},
 					"max_runs": map[string]any{
 						"type":        "integer",
-						"description": "可选：最大执行次数。0 或不填表示无限循环。一次性任务（延迟/ISO）默认 1 次。",
+						"description": "Optional: maximum number of runs. 0 or omitted means run indefinitely. One-shot jobs (relative delay / ISO timestamp) default to 1.",
 						"default":     0,
 					},
 					"tags": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "可选：自定义标签（便于分类管理）。",
+						"description": "Optional: custom tags for organizing jobs.",
 					},
 					"state": map[string]any{
 						"type":        "string",
-						"description": "list 时可选：按状态过滤。active/paused/done/failed/disabled。",
+						"description": "Optional for list: filter by state. One of active/paused/done/failed/disabled.",
 						"enum":        []string{"active", "paused", "done", "failed", "disabled"},
 					},
 					"enabled": map[string]any{
 						"type":        "boolean",
-						"description": "update 时可选：是否启用（false 禁用任务）。",
+						"description": "Optional for update: whether the job is enabled (false disables it).",
 					},
 				},
 				"required": []string{"action"},

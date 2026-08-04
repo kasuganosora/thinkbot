@@ -54,21 +54,33 @@ type PromptConfig struct {
 func DefaultPromptConfig() PromptConfig {
 	return PromptConfig{
 		BotName:    "Bot",
-		BotPersona: "一个友好的聊天机器人",
+		BotPersona: "a friendly chat bot",
 		Interests:  []string{},
 	}
 }
 
 // BuildJudgePrompt 构建 LLM 快判的 system prompt 和 user prompt（传统 YES/NO 模式）。
 func BuildJudgePrompt(config PromptConfig, msg *core.Message) (system, user string) {
-	system = fmt.Sprintf(`你是 %s 的人格判断器。
-你的人设：%s
-你关注的话题：%s
+	system = fmt.Sprintf(`You are the persona judge for %s, a gatekeeper that decides whether this bot would naturally want to join a conversation.
 
-你正在浏览时间线，看到了一条帖子。
-判断你是否会自然地想回复这条帖子（不是必须回复，是"有兴趣参与"）。
-只输出一行：YES 或 NO，后面跟一句话理由。
-不要输出其他任何内容。`,
+Persona: %s
+Topics of interest: %s
+
+You are browsing a timeline and have just seen one post. Decide whether you would naturally want to reply to it — not whether you are obligated to reply, but whether you are genuinely interested in participating.
+
+# Output format
+
+Output exactly one line: YES or NO, followed by a one-sentence reason.
+
+<example>
+YES the post is a deep discussion about golang, which is squarely my area
+</example>
+
+<example>
+NO the post is small talk unrelated to anything I follow
+</example>
+
+CRITICAL: NEVER output anything other than that single line.`,
 		config.BotName,
 		config.BotPersona,
 		strings.Join(config.Interests, "、"))
@@ -85,20 +97,32 @@ func BuildJudgePrompt(config PromptConfig, msg *core.Message) (system, user stri
 //
 // LLM 返回格式：分数 + 理由（如 "85 这是关于 golang 的深入讨论"）
 func BuildScoredJudgePrompt(config PromptConfig, msg *core.Message) (system, user string) {
-	system = fmt.Sprintf(`你是 %s 的人格判断器。
-你的人设：%s
-你关注的话题：%s
+	system = fmt.Sprintf(`You are the persona judge for %s, a scorer that rates how interested this bot would be in a post.
 
-你正在浏览时间线，看到了一条帖子。
-评估你对这条帖子的兴趣程度（0-100 分）：
-- 90-100: 非常想参与，话题正是你关注的领域
-- 70-89:  比较想参与，有相关的知识点或看法可以分享
-- 50-69:  有点兴趣，但不确定是否有价值回复
-- 30-49:  不太想参与，话题与你关系不大
-- 0-29:   完全不感兴趣
+Persona: %s
+Topics of interest: %s
 
-只输出一行：分数 + 一句话理由（如 "85 这是关于 golang 的深入讨论"）
-不要输出其他任何内容。`,
+You are browsing a timeline and have just seen one post. Score your interest in it from 0 to 100:
+
+- 90-100: Strongly want to engage — the topic is squarely in your area of interest
+- 70-89:  Want to engage — you have relevant knowledge or a view worth sharing
+- 50-69:  Mildly interested, but unsure a reply would add value
+- 30-49:  Not really interested — the topic has little to do with you
+- 0-29:   Not interested at all
+
+# Output format
+
+Output exactly one line: the score, then a one-sentence reason.
+
+<example>
+85 这是关于 golang 的深入讨论
+</example>
+
+<example>
+20 话题与我关注的领域无关
+</example>
+
+CRITICAL: NEVER output anything other than that single line.`,
 		config.BotName,
 		config.BotPersona,
 		strings.Join(config.Interests, "、"))

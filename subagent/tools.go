@@ -24,56 +24,56 @@ import (
 var spawnToolPromptSection = &tools.ToolPromptSection{
 	Name:  "subagent_spawn",
 	Order: 305,
-	Content: `# 子 Agent 委托
+	Content: `# SubAgent Delegation
 
-你可以使用 ` + "`spawn`" + ` 工具将任务委托给拥有独立上下文的子 Agent 执行。
+You can use the ` + "`spawn`" + ` tool to delegate work to sub-agents that run with their own isolated context.
 
-## 何时使用
+## When to use it
 
-- **任务复杂、需要大量中间推理**：委托给子 Agent 可以避免中间步骤污染你的对话上下文
-- **需要不同角色/视角**：为子 Agent 设置专门的系统提示词（如"你是安全审计专家"）
-- **多个独立子任务**：可以一次性 spawn 多个子 Agent 并行处理
-- **需要隔离上下文**：子 Agent 的对话历史与你完全隔离
+- **The task is complex and needs a lot of intermediate reasoning**: delegating keeps those intermediate steps from polluting your own conversation context.
+- **A different role or perspective is needed**: give the sub-agent a dedicated system prompt (e.g. "你是安全审计专家").
+- **Several independent sub-tasks**: spawn multiple sub-agents at once and run them in parallel.
+- **Context isolation is required**: a sub-agent's conversation history is fully isolated from yours.
 
-## 子 Agent 的能力边界
+## Sub-agent capability boundary
 
-- **可以使用全部工作空间工具**：子 Agent 运行在与你相同的 per-bot 工作空间（同一沙箱），
-  因此 exec、读/写/列目录等文件操作工具对它**完全可用**——它可以真正创建文件、运行命令、
-  产出可落地的产物，而不只是返回文本建议。需要文件操作时直接委托，不必自己代劳。
-- **不能 spawn 子 Agent**：为防止无限嵌套（套娃），子 Agent 无法再调用 spawn。
-  这是它唯一的工具限制；其余你有权使用的工具它都能用。
+- **It can use every workspace tool**: sub-agents run in the same per-bot workspace (the same sandbox) as you, so exec and the file tools (read / write / list directory) are **fully available** to them. A sub-agent can genuinely create files, run commands, and produce real artifacts — not just return textual suggestions. Delegate file work directly instead of doing it yourself.
+- **It CANNOT spawn sub-agents**: to prevent unbounded nesting, a sub-agent may not call spawn. This is its only tool restriction; every other tool you may use is available to it.
 
-## 使用方式
+## Usage
 
-` + "```" + `
+<example>
 spawn({
   tasks: ["分析这段代码的安全风险", "同时检查性能瓶颈"],
   system_prompt: "你是一个代码审查专家"
 })
-` + "```" + `
-- tasks: 要执行的任务列表，每个任务在独立的子 Agent 中执行
-- system_prompt: 子 Agent 的角色定义（可选）
+</example>
 
-## 使用原则
+- tasks: the list of tasks to run; each task executes in its own sub-agent.
+- system_prompt: the sub-agent's role definition (optional).
 
-- 简单任务直接回答，不要过度委托
-- **独立子任务必须合并进同一次 spawn**：如果你能把任务拆成 N 个互相独立、互不依赖的子任务，必须把它们全部放进**同一次** spawn 的 tasks 数组（最多 5 个）。同一次调用中的多个任务会**自动并行**执行；**禁止**为了"分批"而多次调用 spawn 工具——多次调用会被主 Agent 串行执行，反而更慢。
-- **仅当后一步依赖前一步的结果时**，才分多次调用 spawn。
-- 在 system_prompt 中清晰描述子 Agent 的角色和职责
+## Rules
 
-正确示例（一次并行审查三个模块）：
-` + "```" + `
+- Answer simple questions yourself. Do not over-delegate.
+- **Independent sub-tasks MUST be merged into a single spawn call**: if you can split the work into N mutually independent sub-tasks, you MUST put all of them in the tasks array of **one** spawn call (max 5). Tasks in the same call run **in parallel automatically**. NEVER call spawn multiple times just to "batch" the work — separate calls are executed sequentially by the main agent and are therefore slower.
+- Only split into multiple spawn calls **when a later step depends on an earlier step's result**.
+- Describe the sub-agent's role and responsibilities clearly in system_prompt.
+- IMPORTANT: the sub-agent's output is surfaced to the end user, so instruct it in system_prompt to respond in Chinese (中文).
+
+<example>
+Correct — review three modules in parallel with one call:
 spawn({
   tasks: ["审查模块A的安全风险", "审查模块B的性能瓶颈", "审查模块C的可维护性"],
   system_prompt: "你是一个代码审查专家"
 })
-` + "```" + `
-错误示例（拆成三次调用 → 串行、更慢，不要这样做）：
-` + "```" + `
-spawn({ tasks: ["审查模块A"] })   // 主 Agent 等它返回
-spawn({ tasks: ["审查模块B"] })   // 再等
-spawn({ tasks: ["审查模块C"] })   // 再等
-` + "```" + `
+</example>
+
+<example>
+NEVER do this — three separate calls run sequentially and are slower:
+spawn({ tasks: ["审查模块A"] })   // the main agent waits for it to return
+spawn({ tasks: ["审查模块B"] })   // waits again
+spawn({ tasks: ["审查模块C"] })   // waits again
+</example>
 `,
 	Enabled: true,
 }
@@ -88,18 +88,18 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:        "spawn",
-			Description: "创建一个或多个子 Agent 来执行任务。每个子 Agent 拥有独立的对话上下文和指定的角色（通过 system_prompt 定义）。支持并行执行多个任务，结果同步返回。适合需要隔离上下文或并行处理的复杂任务。",
+			Description: "Create one or more sub-agents to execute tasks. Each sub-agent has its own isolated conversation context and a role you define via system_prompt. Multiple tasks run in parallel and their results are returned synchronously. Use it for complex work that needs context isolation or parallel processing.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"tasks": map[string]any{
 						"type":        "array",
-						"description": "要委托给子 Agent 执行的任务列表。每个任务在独立的子 Agent 中并行执行。最多 " + fmt.Sprintf("%d", maxTasksPerSpawn) + " 个任务。",
+						"description": "The list of tasks to delegate. Each task runs in its own sub-agent, in parallel. At most " + fmt.Sprintf("%d", maxTasksPerSpawn) + " tasks. IMPORTANT: put all mutually independent sub-tasks in this one array instead of making several spawn calls.",
 						"items":       map[string]any{"type": "string"},
 					},
 					"system_prompt": map[string]any{
 						"type":        "string",
-						"description": "子 Agent 的系统提示词，定义其角色、专业领域和行为规范。例如：\"你是一个专业的代码审查专家\"。如果留空，子 Agent 将使用通用助手角色。",
+						"description": "System prompt for the sub-agent, defining its role, domain expertise, and behavioral rules — for example \"你是一个专业的代码审查专家\". Write it in Chinese (中文), since the sub-agent's output is surfaced to Chinese end users. If left empty, the sub-agent falls back to a generic assistant role.",
 					},
 				},
 				"required": []string{"tasks"},

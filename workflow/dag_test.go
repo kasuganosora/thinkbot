@@ -707,7 +707,7 @@ func TestBuildUpstreamContext_SingleUpstream(t *testing.T) {
 	if ctx == "" {
 		t.Fatal("expected non-empty upstream context")
 	}
-	if !contains(ctx, "[上游任务汇总]") {
+	if !contains(ctx, "[Upstream Task Results]") {
 		t.Error("expected upstream header")
 	}
 	if !contains(ctx, "extract") {
@@ -716,7 +716,7 @@ func TestBuildUpstreamContext_SingleUpstream(t *testing.T) {
 	if !contains(ctx, "营收增长") {
 		t.Error("expected upstream result content")
 	}
-	if !contains(ctx, "[你的任务]") {
+	if !contains(ctx, "[Your Task]") {
 		t.Error("expected task separator")
 	}
 }

@@ -437,21 +437,33 @@ func PrefixDecider(_ context.Context, _ core.Message, result *llm.GenerateResult
 func SystemPromptWithDecision(basePrompt string) string {
 	return basePrompt + `
 
-## Output Format Rules
+# Output Format Rules
 
-You MUST prefix your response with ONE of these tags to indicate your decision:
+IMPORTANT: You MUST begin every response with exactly ONE of these decision tags:
 
-- [REPLY] — Normal reply to the user. Use this when you have something meaningful to say.
-- [NOTE] — Internal note only. The user will NOT see this. Use when you observe something worth remembering but don't need to respond (e.g., the conversation doesn't need your input, or the topic is irrelevant to you).
-- [REPLY+NOTE] — Reply to the user AND record a private note. Separate them with [---]. Use when you want to reply but also remember something for later.
-- [SKIP] — Do nothing. Use when the message is completely irrelevant.
+- [REPLY] — Reply to the user. Use this when you have something meaningful to say.
+- [NOTE] — Internal note only. The user will NEVER see this. Use it when you observe something worth remembering but a response is not needed (e.g. the conversation does not need your input, or the topic is irrelevant to you).
+- [REPLY+NOTE] — Reply to the user AND record a private note, separated by [---]. Use it when you want to reply and also remember something for later.
+- [SKIP] — Do nothing. Use it when the message is completely irrelevant.
 
-Examples:
-- "[REPLY] Sure, I can help with that!"
-- "[NOTE] User seems frustrated about the deployment. Keep this in mind for future interactions."
-- "[REPLY+NOTE] Here's the code fix you asked for.[---]User's codebase uses Go 1.21 with generics heavily."
-- "[SKIP]"
+You must respond to the user in Chinese (中文). Notes are internal and may be written in English.
 
-IMPORTANT: Always include the prefix tag. If unsure, default to [REPLY].
+<example>
+[REPLY] 好的，这个我可以帮你搞定。
+</example>
+
+<example>
+[NOTE] User seems frustrated about the deployment. Keep this in mind for future interactions.
+</example>
+
+<example>
+[REPLY+NOTE] 这是你要的代码修复。[---]User's codebase uses Go 1.21 with generics heavily.
+</example>
+
+<example>
+[SKIP]
+</example>
+
+CRITICAL: ALWAYS emit the tag — never omit it, and never emit more than one. If unsure, default to [REPLY].
 `
 }
