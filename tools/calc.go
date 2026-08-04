@@ -437,6 +437,7 @@ func randomToolDef() agenttools.ToolDef {
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "Generate random values: random integers or floats within a range, " +
 				"or a random pick from a list of choices.",
+			Keywords: []string{"随机数", "随机", "抽签", "抽取", "掷骰", "random"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -591,6 +592,7 @@ func uuidToolDef() agenttools.ToolDef {
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "Generate cryptographically random UUID v4 identifiers. " +
 				"Use for unique IDs, session IDs, temporary tokens and similar cases.",
+			Keywords: []string{"唯一标识", "唯一ID", "生成ID", "标识符", "uuid", "guid"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

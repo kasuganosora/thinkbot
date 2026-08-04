@@ -27,7 +27,7 @@ func TestRunCommandWithStreaming_StuckKilled(t *testing.T) {
 	if !res.Aborted {
 		t.Error("want Aborted true")
 	}
-	if !containsWarning(res.Warnings, "卡死") {
+	if !containsWarning(res.Warnings, "stuck watchdog") {
 		t.Errorf("want stuck warning, got %v", res.Warnings)
 	}
 }
@@ -73,7 +73,7 @@ func TestRunCommandWithStreaming_HardCeiling(t *testing.T) {
 	if !res.Aborted {
 		t.Error("want Aborted true")
 	}
-	if !containsWarning(res.Warnings, "硬上限") {
+	if !containsWarning(res.Warnings, "hard time limit") {
 		t.Errorf("want hard-ceiling warning, got %v", res.Warnings)
 	}
 }

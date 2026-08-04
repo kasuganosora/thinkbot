@@ -354,7 +354,7 @@ func (m *SkillManager) BuildTriggerPrompt() string {
 	buf.WriteString("- After loading, you MUST follow the skill's instructions exactly. They override your general defaults for that task.\n")
 	buf.WriteString("- NEVER mention a skill to the user without actually loading it.\n")
 	buf.WriteString("- If no listed skill matches the request, proceed normally without calling `use_skill`.\n")
-	buf.WriteString("- You must respond to the user in Chinese (中文), even though these instructions are in English.\n\n")
+	buf.WriteString("- These instructions are in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.\n\n")
 	buf.WriteString("Skills available now:\n")
 
 	enabled := make([]*Skill, 0, len(m.skills))

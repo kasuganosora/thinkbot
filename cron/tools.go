@@ -220,6 +220,12 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 				"\n\n" +
 				"IMPORTANT: a cron job runs unattended in its own session, so the prompt MUST be self-contained — it has none of the current conversation context. " +
 				"NEVER guess a job_id; always list first. job_id also accepts a job name.",
+			// Description 为英文，但用户通常用中文询问定时能力。tool_search仅对
+			// name/description/keywords 做子串匹配，故显式保留中文检索词。
+			Keywords: []string{
+				"定时任务", "定时", "计划任务", "周期任务", "提醒", "闹钟",
+				"每天", "每周", "每小时", "延迟执行", "cron", "schedule",
+			},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

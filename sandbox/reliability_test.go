@@ -70,7 +70,7 @@ func TestFinalizeExecResult_Timeout(t *testing.T) {
 	if res.Reliable {
 		t.Error("expected reliable=false for timeout")
 	}
-	if !containsWarning(res.Warnings, "超时") {
+	if !containsWarning(res.Warnings, "timed out") {
 		t.Errorf("expected timeout warning, got %v", res.Warnings)
 	}
 }
@@ -96,7 +96,7 @@ func TestFinalizeExecResult_OOMTextScan(t *testing.T) {
 	if res.Reliable {
 		t.Error("expected reliable=false when fatal text detected")
 	}
-	if !containsWarning(res.Warnings, "OOM/中止特征") {
+	if !containsWarning(res.Warnings, "OOM/abort signature") {
 		t.Errorf("expected fatal-text warning, got %v", res.Warnings)
 	}
 }
