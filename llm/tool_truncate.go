@@ -172,14 +172,16 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 // removedBytes 为必填（估算省略的字节数）；removedLines 为 -1 表示未知行数
 // （字节级兜底场景，因不按行截断）。提示面向 LLM，告知输出被裁剪并建议更精确的参数。
 func truncationHint(removedBytes, removedLines int) string {
-	marker := "... [中间省略"
+	marker := "... [middle omitted"
 	if removedLines >= 0 {
-		marker += fmt.Sprintf(" %d 行 / 约 %d 字节", removedLines, removedBytes)
+		marker += fmt.Sprintf(": %d lines / ~%d bytes", removedLines, removedBytes)
 	} else {
-		marker += fmt.Sprintf(" 约 %d 字节", removedBytes)
+		marker += fmt.Sprintf(": ~%d bytes", removedBytes)
 	}
-	marker += "，已保留头部和尾部] ..."
+	marker += "; head and tail preserved] ..."
 	return "\n\n" + marker + "\n\n" +
-		"⚠️ 输出已截断（保留头尾，省略中间）。请使用更精确的参数（如更小的搜索范围、offset/limit 分页读取、grep 关键词）获取聚焦结果。" +
-		"不要以相同参数重试期望获取完整输出。"
+		"IMPORTANT: This output was truncated — the head and tail are shown, the middle was omitted. " +
+		"To reach the omitted content you MUST narrow the request: use a smaller search scope, " +
+		"read in pages with offset/limit, or grep for a specific keyword. " +
+		"NEVER retry the same call with identical parameters expecting the full output."
 }

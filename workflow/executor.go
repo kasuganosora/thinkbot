@@ -155,11 +155,11 @@ func (e *Executor) Review(ctx context.Context, node *DAGNode, product string) (*
 func buildIterationTask(originalTask, prevResult, feedback string) string {
 	var sb strings.Builder
 	sb.WriteString(originalTask)
-	sb.WriteString("\n\n---\n上一轮产物：\n")
+	sb.WriteString("\n\n---\nPrevious output:\n")
 	sb.WriteString(prevResult)
-	sb.WriteString("\n\n---\n审查意见：\n")
+	sb.WriteString("\n\n---\nReview feedback:\n")
 	sb.WriteString(feedback)
-	sb.WriteString("\n\n---\n请根据审查意见修改你的产出，确保满足原始要求。")
+	sb.WriteString("\n\n---\nRevise your output according to the review feedback above. You MUST address every point raised and satisfy the original requirement. You must respond to the user in Chinese (中文).")
 	return sb.String()
 }
 
@@ -168,21 +168,26 @@ func buildReviewSystemPrompt(customPrompt string) string {
 	if customPrompt != "" {
 		return customPrompt
 	}
-	return `你是一个严格的质量审查专家。你的职责是审查任务执行结果是否满足原始需求。
+	return `You are a strict quality reviewer, a verification agent that decides whether a task's output satisfies the original requirement.
 
-## 审查规则
-1. 仔细对照原始需求，检查产物是否完整、准确、高质量
-2. 如果产物完全满足要求，返回 {"passed": true}
-3. 如果产物有任何不足，返回 {"passed": false, "feedback": "具体的修改意见"}，意见应具体且可执行
+## Review Rules
 
-## 输出格式
-必须返回 JSON：
-{"passed": true}  或  {"passed": false, "feedback": "需要改进的地方..."}`
+1. Compare the output against the original requirement carefully and check that it is complete, accurate, and high quality.
+2. If the output fully satisfies the requirement, return {"passed": true}.
+3. If the output has ANY shortcoming, return {"passed": false, "feedback": "具体的修改意见"}. The feedback MUST be specific and actionable.
+
+## Output Format
+
+You MUST return JSON, and nothing else:
+{"passed": true}  or  {"passed": false, "feedback": "需要改进的地方..."}
+
+IMPORTANT: output JSON only — no preamble, no explanation, no markdown code fence.
+Write the "feedback" value in Chinese (中文); preserve the JSON keys exactly as shown.`
 }
 
 // buildReviewTask 构建审查任务输入。
 func buildReviewTask(node *DAGNode, product string) string {
-	return fmt.Sprintf("## 原始任务需求\n%s\n\n## 节点名称\n%s\n\n## 待审查的产物\n%s\n\n请审查以上产物是否满足原始任务需求。", node.Task, node.Name, product)
+	return fmt.Sprintf("## Original Task Requirement\n%s\n\n## Node Name\n%s\n\n## Output Under Review\n%s\n\nReview the output above and decide whether it satisfies the original task requirement.", node.Task, node.Name, product)
 }
 
 // parseReviewResult 解析 Review SubAgent 返回的 JSON。

@@ -18,11 +18,11 @@ func TestAnalyzerPrompt_PushesForParallelism(t *testing.T) {
 		fragment string
 		why      string
 	}{
-		{"最大化并行", "需要一个显式的并行小节，而不是把规则埋在依赖说明里"},
-		{"默认无依赖", "必须给出默认立场：先假设无依赖，有真实数据依赖才加"},
-		{"真的需要读取", "需要可操作的判定口诀，让模型自问是否存在数据依赖"},
-		{"反例", "正例/反例对照比单纯描述有效得多"},
-		{"串成一条链", "必须点名最常见的误判形态"},
+		{"Maximize Parallelism", "需要一个显式的并行小节，而不是把规则埋在依赖说明里"},
+		{"Default to running sub-tasks in parallel", "必须给出默认立场：先假设无依赖，有真实数据依赖才加"},
+		{"must read the earlier task's output", "需要可操作的判定口诀，让模型自问是否存在数据依赖"},
+		{"The most common mistake", "正例/反例对照比单纯描述有效得多"},
+		{"single chain", "必须点名最常见的误判形态"},
 	}
 	for _, r := range required {
 		if !strings.Contains(analyzerSystemPrompt, r.fragment) {
@@ -35,7 +35,7 @@ func TestAnalyzerPrompt_PushesForParallelism(t *testing.T) {
 //
 // 原文是中性的「识别哪些串行、哪些并行」，模型容易偏向串行；改为明确的默认并行立场。
 func TestAnalyzerPrompt_DecompositionDefaultsToParallel(t *testing.T) {
-	if !strings.Contains(analyzerSystemPrompt, "默认让子任务并行") {
+	if !strings.Contains(analyzerSystemPrompt, "Default to running sub-tasks in parallel") {
 		t.Error("分解原则应明确主张默认并行，否则模型倾向于按顺序串联子任务")
 	}
 }

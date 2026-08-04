@@ -95,12 +95,12 @@ func DefaultToolHeaderSection(toolNames []string) *ToolPromptSection {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("# 可用工具\n\n")
-	sb.WriteString("你可以使用以下工具来完成任务。请在合适的场景主动调用工具：\n\n")
+	sb.WriteString("# Available Tools\n\n")
+	sb.WriteString("You have access to the tools below. Call them proactively whenever a task needs real data or a real action:\n\n")
 	for _, name := range toolNames {
 		fmt.Fprintf(&sb, "- `%s`\n", name)
 	}
-	sb.WriteString("\n调用工具时，确保参数符合 schema 要求。工具结果会自动返回给你用于后续推理。")
+	sb.WriteString("\nWhen calling a tool, make sure the arguments conform to its JSON schema. Tool results are returned to you automatically for further reasoning.")
 
 	return &ToolPromptSection{
 		Name:    "_header",
@@ -115,22 +115,22 @@ func DefaultToolRulesSection() *ToolPromptSection {
 	return &ToolPromptSection{
 		Name:  "_rules",
 		Order: 301,
-		Content: "# 工具使用规则\n\n" +
-			"## 强制调用（必须遵守）\n" +
-			"- **涉及环境状态的问题必须先调工具验证再回答**。例如：\n" +
-			"  - 是否安装了某软件 / 某命令是否存在 → 必须先执行 shell 命令（如 which、type、command -v）确认\n" +
-			"  - 文件/目录是否存在、内容是什么 → 必须先调用 read_file / list_dir\n" +
-			"  - 系统信息（OS 版本、内存、磁盘等） → 必须先执行对应查询命令\n" +
-			"  - 网络连通性 / DNS 解析等 → 必须先执行实际探测\n" +
-			"  - **绝对禁止凭知识或经验猜测环境状态**——sandbox 环境可能与你训练数据中的任何环境都不同\n" +
-			"- 如果你需要判断某个事实才能回答用户问题，**优先调用工具获取真实数据**，而不是基于猜测给出答案\n\n" +
-			"## 一般规则\n" +
-			"- **你可以在一次回复中并行调用多个独立的工具**，大幅提高效率\n" +
-			"- 对于纯知识性、创意性、分析性问题（不依赖当前环境状态），可以直接回答\n" +
-			"- 工具调用失败时，向用户说明失败原因并尝试替代方案\n" +
-			"- 不要编造工具结果，只使用实际返回的数据\n" +
-			"- 对于需要审批的工具，等待用户确认后再执行\n" +
-			"- 如果工具输出被截断（出现 truncated 标记），使用更精确的参数重新调用，不要重复相同的大范围查询",
+		Content: "# Tool Usage Policy\n\n" +
+			"## Mandatory Verification (non-negotiable)\n" +
+			"- **ALWAYS verify with a tool before answering any question about environment state.** For example:\n" +
+			"  - Whether a program is installed / whether a command exists → run a shell command first (`which`, `type`, `command -v`)\n" +
+			"  - Whether a file or directory exists and what it contains → call `read_file` / `list_dir` first\n" +
+			"  - System information (OS version, memory, disk, ...) → run the corresponding query command first\n" +
+			"  - Network reachability / DNS resolution → run an actual probe first\n" +
+			"  - **NEVER guess environment state from prior knowledge or experience** — the sandbox may differ from any environment in your training data\n" +
+			"- IMPORTANT: If you must establish a fact in order to answer the user, **call a tool to get real data** instead of answering from assumption\n\n" +
+			"## General Rules\n" +
+			"- **You can call multiple independent tools in a single response** — batch them for a large efficiency win\n" +
+			"- For purely knowledge-based, creative, or analytical questions that do not depend on current environment state, answer directly\n" +
+			"- When a tool call fails, tell the user why it failed and try an alternative approach\n" +
+			"- NEVER fabricate tool results. Use only the data actually returned\n" +
+			"- For tools that require approval, wait for the user's confirmation before executing\n" +
+			"- If tool output is truncated (a `truncated` marker appears), re-run with narrower parameters. Do NOT repeat the same broad query",
 		Enabled: true,
 	}
 }
@@ -143,20 +143,20 @@ func BuildToolDescriptionSection(def *ToolDef) *ToolPromptSection {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "## 工具：%s\n\n", def.Name)
+	fmt.Fprintf(&sb, "## Tool: %s\n\n", def.Name)
 	if def.Description != "" {
 		sb.WriteString(def.Description)
 		sb.WriteString("\n\n")
 	}
 
 	if len(def.Scopes) > 0 {
-		sb.WriteString("适用场景：")
+		sb.WriteString("Applicable scopes: ")
 		sb.WriteString(strings.Join(def.Scopes, ", "))
 		sb.WriteString("\n\n")
 	}
 
 	if def.RequireApproval {
-		sb.WriteString("⚠️ 此工具需要用户确认后才能执行。\n\n")
+		sb.WriteString("⚠️ IMPORTANT: This tool requires explicit user confirmation before it can be executed.\n\n")
 	}
 
 	return &ToolPromptSection{

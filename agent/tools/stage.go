@@ -103,13 +103,13 @@ func CurrentTimeTool() ToolDef {
 		Scopes:   []string{}, // 全场景
 		Tool: BuildTool(
 			"current_time",
-			"获取当前的日期和时间。当用户询问时间相关问题时使用此工具。",
+			"Get the current date and time. Use this tool whenever the user asks a time-related question.",
 			map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"timezone": map[string]any{
 						"type":        "string",
-						"description": "时区（IANA 格式，如 Asia/Shanghai）。可选，默认使用服务器时区。",
+						"description": "IANA timezone name (e.g. Asia/Shanghai). Optional; defaults to the server timezone.",
 					},
 				},
 			},
@@ -135,11 +135,11 @@ func CurrentTimeTool() ToolDef {
 		PromptSection: &ToolPromptSection{
 			Name:  "current_time",
 			Order: 320,
-			Content: `## 工具：current_time
+			Content: `## Tool: current_time
 
-使用 ` + "`current_time`" + ` 工具获取当前时间。
-- 当用户问"现在几点"、"今天日期"等时间问题时调用
-- 可以指定时区参数获取特定时区的时间`,
+Use the ` + "`current_time`" + ` tool to get the current date and time.
+- Call it when the user asks a time question, e.g. "现在几点"、"今天日期"
+- Pass the ` + "`timezone`" + ` argument to get the time in a specific timezone`,
 			Enabled: true,
 		},
 	}
@@ -151,13 +151,13 @@ func EchoTool() ToolDef {
 		Category: "utility",
 		Tool: BuildTool(
 			"echo",
-			"回显输入内容。主要用于测试工具调用是否正常工作。",
+			"Echo the input back unchanged. Used to verify that tool calling works end to end.",
 			map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"message": map[string]any{
 						"type":        "string",
-						"description": "要回显的消息内容。",
+						"description": "The message content to echo back.",
 					},
 				},
 				"required": []string{"message"},

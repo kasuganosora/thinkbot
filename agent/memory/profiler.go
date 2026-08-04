@@ -205,30 +205,31 @@ func (p *LLMProfiler) extractWithClustering(ctx context.Context, l1, l2, existin
 func (p *LLMProfiler) buildPrompt(l1, l2, existing []TieredEntry) string {
 	var sb strings.Builder
 
-	sb.WriteString("## 长期记忆（L1）\n\n")
+	sb.WriteString("## Long-term memory (L1)\n\n")
 	for _, e := range l1 {
 		fmt.Fprintf(&sb, "- (%s) %s\n", e.Category, e.Content)
 	}
 
 	if len(l2) > 0 {
-		sb.WriteString("\n## 场景记忆（L2）\n\n")
+		sb.WriteString("\n## Episodic memory (L2)\n\n")
 		for _, e := range l2 {
 			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
 	if len(existing) > 0 {
-		sb.WriteString("\n## 已有画像（供参考，不要重复）\n\n")
+		sb.WriteString("\n## Existing profile items (for reference — do NOT repeat these)\n\n")
 		for _, e := range existing {
 			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
-	sb.WriteString("\n## 任务\n")
-	sb.WriteString("从以上记忆中提取稳定的用户画像。输出 JSON 数组：\n")
+	sb.WriteString("\n## Task\n")
+	sb.WriteString("Extract stable user profile traits from the memories above. Output a JSON array:\n")
 	sb.WriteString(`[{"type":"trait","content":"...","confidence":0.9}]`)
-	sb.WriteString("\ntype: trait(性格特征) / fact(稳定事实) / preference(沟通偏好) / behavior(交互行为模式)\n")
-	sb.WriteString("只提取高置信度的稳定特征，忽略一次性行为。\n")
+	sb.WriteString("\ntype: trait (personality) | fact (stable fact) | preference (communication preference) | behavior (interaction pattern)\n")
+	sb.WriteString("Emit only high-confidence, stable traits. IGNORE one-off behavior.\n")
+	sb.WriteString("Write each content value in Chinese (中文).\n")
 
 	return sb.String()
 }
@@ -237,9 +238,9 @@ func (p *LLMProfiler) buildPrompt(l1, l2, existing []TieredEntry) string {
 func (p *LLMProfiler) buildClusterPrompt(cluster profileCluster, l2, existing []TieredEntry) string {
 	var sb strings.Builder
 
-	sb.WriteString("## 相关记忆集群")
+	sb.WriteString("## Related memory cluster")
 	if cluster.keyword != "" {
-		fmt.Fprintf(&sb, "（主题: %s）", cluster.keyword)
+		fmt.Fprintf(&sb, " (topic: %s)", cluster.keyword)
 	}
 	sb.WriteString("\n\n")
 	for _, e := range cluster.entries {
@@ -247,24 +248,25 @@ func (p *LLMProfiler) buildClusterPrompt(cluster profileCluster, l2, existing []
 	}
 
 	if len(l2) > 0 {
-		sb.WriteString("\n## 场景记忆（L2，上下文参考）\n\n")
+		sb.WriteString("\n## Episodic memory (L2, background context)\n\n")
 		for _, e := range l2 {
 			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
 	if len(existing) > 0 {
-		sb.WriteString("\n## 已有画像（供参考，不要重复）\n\n")
+		sb.WriteString("\n## Existing profile items (for reference — do NOT repeat these)\n\n")
 		for _, e := range existing {
 			fmt.Fprintf(&sb, "- %s\n", e.Content)
 		}
 	}
 
-	sb.WriteString("\n## 任务\n")
-	sb.WriteString("从以上记忆集群中提取该主题相关的稳定用户画像。输出 JSON 数组：\n")
+	sb.WriteString("\n## Task\n")
+	sb.WriteString("Extract stable user profile traits related to this cluster's topic. Output a JSON array:\n")
 	sb.WriteString(`[{"type":"trait","content":"...","confidence":0.9}]`)
-	sb.WriteString("\ntype: trait(性格特征) / fact(稳定事实) / preference(沟通偏好) / behavior(交互行为模式)\n")
-	sb.WriteString("只提取与该集群主题强相关的稳定特征。\n")
+	sb.WriteString("\ntype: trait (personality) | fact (stable fact) | preference (communication preference) | behavior (interaction pattern)\n")
+	sb.WriteString("Emit only stable traits strongly tied to this cluster's topic.\n")
+	sb.WriteString("Write each content value in Chinese (中文).\n")
 
 	return sb.String()
 }
@@ -295,19 +297,20 @@ func (p *LLMProfiler) parseResult(text string) []ProfileItem {
 	return items
 }
 
-const defaultProfilePrompt = `你是一个用户画像分析助手。从 AI 助手的长期记忆中提取用户的稳定特征。
+const defaultProfilePrompt = `You are a user profiler, an analysis component that derives a user's stable traits from an AI assistant's long-term memory.
 
-规则：
-1. 只提取跨多次对话一致的稳定特征
-2. 忽略一次性行为和临时状态
-3. 评估置信度：多次确认的特征 > 0.8，单次观察 < 0.5
-4. 输出纯 JSON 数组
+Rules:
+1. Extract only traits that hold consistently across multiple conversations.
+2. IGNORE one-off behavior and temporary states.
+3. Calibrate confidence: repeatedly confirmed traits > 0.8, single observations < 0.5.
+4. Output a raw JSON array and nothing else.
+5. Write every content value in Chinese (中文).
 
-画像类型：
-- trait: 性格特征（"用户性格偏理性"、"用户喜欢深入分析"）
-- fact: 稳定事实（"用户使用 Go 语言"、"用户在做区块链项目"）
-- preference: 沟通偏好（"用户偏好简洁回复"、"用户喜欢有代码示例"）
-- behavior: 交互行为模式（"用户倾向先问可行性再要方案"、"用户经常切换话题"、"用户习惯在深夜活跃"）`
+Profile types:
+- trait: personality ("用户性格偏理性", "用户喜欢深入分析")
+- fact: stable fact ("用户使用 Go 语言", "用户在做区块链项目")
+- preference: communication preference ("用户偏好简洁回复", "用户喜欢有代码示例")
+- behavior: interaction pattern ("用户倾向先问可行性再要方案", "用户经常切换话题", "用户习惯在深夜活跃")`
 
 // ============================================================================
 // ProfileBuilder — 将 ProfileItem 组装为 system prompt 片段

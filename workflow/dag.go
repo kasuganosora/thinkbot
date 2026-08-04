@@ -369,7 +369,7 @@ func BuildUpstreamContext(wf *Workflow, node *DAGNode) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("[上游任务汇总]\n")
+	sb.WriteString("[Upstream Task Results]\n")
 	totalChars := 0
 	included := 0
 
@@ -379,7 +379,7 @@ func BuildUpstreamContext(wf *Workflow, node *DAGNode) string {
 			continue
 		}
 		if totalChars >= maxUpstreamContextChars {
-			fmt.Fprintf(&sb, "\n... (其余 %d 个上游节点结果已省略)\n", len(node.Dependencies)-included)
+			fmt.Fprintf(&sb, "\n... (%d more upstream node results omitted)\n", len(node.Dependencies)-included)
 			break
 		}
 		line := fmt.Sprintf("%s(%s): %s\n", dep.ID, dep.Name, strings.TrimSpace(dep.Result))
@@ -396,7 +396,7 @@ func BuildUpstreamContext(wf *Workflow, node *DAGNode) string {
 		return ""
 	}
 
-	sb.WriteString("\n[你的任务]\n")
+	sb.WriteString("\n[Your Task]\n")
 	sb.WriteString(node.Task)
 	return sb.String()
 }

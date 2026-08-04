@@ -136,7 +136,7 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 	botName := e.ctxProv.BotName()
 
 	// 获取上次心跳信息
-	lastBeat := "无记录"
+	lastBeat := "none on record"
 	logs, _ := e.store.LoadLogs(e.botID)
 	if logs != nil && len(logs.Logs) > 0 {
 		lastBeat = logs.Logs[0].Time + " (" + logs.Logs[0].Status + ")"
@@ -144,7 +144,7 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 
 	// 2. 构建 prompt
 	prompt := fmt.Sprintf(
-		"当前时间：%s\n距上次心跳：%s\n最近 %d 分钟消息数：%d\nChannel 状态：%s\n未处理消息：%d",
+		"Current time: %s\nLast heartbeat: %s\nMessages in the last %d minutes: %d\nChannel status: %s\nUnprocessed messages: %d",
 		now.Format("2006/1/2 15:04:05"),
 		lastBeat,
 		interval,
@@ -213,16 +213,34 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 	}, nil
 }
 
-const heartbeatSystemPrompt = `你是 %s 的内省系统。你的任务是定期检查 Bot 的运行状态。
+const heartbeatSystemPrompt = `You are the introspection system for %s, a monitor that periodically assesses the bot's runtime health.
 
-评估规则：
-- 如果一切正常（channel 在线、无消息积压），简要描述当前状态
-- 如果发现异常（channel 断连、消息积压严重、长时间无活动但有待处理任务），以 "ALERT:" 开头报告
+Assessment rules:
+- If everything is fine (channel online, no message backlog), briefly describe the current state.
+- If something is wrong (channel disconnected, severe message backlog, long inactivity while work is pending), you MUST begin your reply with "ALERT:".
 
-注意：
-- 回复控制在 80 字以内
-- 使用自然语言，简洁明了
-- 不需要格式化，纯文本即可`
+Output requirements:
+- You must respond to the user in Chinese (中文).
+- Keep the reply under 80 characters.
+- Use plain, natural language. NEVER use markdown or any other formatting.
+
+<example>
+Current time: 2026/8/4 03:00:00
+Last heartbeat: 2026/8/4 02:30:00 (normal)
+Messages in the last 30 minutes: 12
+Channel status: online
+Unprocessed messages: 0
+assistant: 运行正常，channel 在线，近 30 分钟 12 条消息，无积压。
+</example>
+
+<example>
+Current time: 2026/8/4 03:00:00
+Last heartbeat: 2026/8/4 02:30:00 (normal)
+Messages in the last 30 minutes: 0
+Channel status: disconnected
+Unprocessed messages: 47
+assistant: ALERT: channel 已断连，47 条消息积压未处理，需要立即检查连接。
+</example>`
 
 // Bundle 封装心跳子系统的完整组件。
 type Bundle struct {

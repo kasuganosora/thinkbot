@@ -22,54 +22,57 @@ import (
 var botWorkspaceToolPromptSection = &tools.ToolPromptSection{
 	Name:  "bot_workspace_tools",
 	Order: 310,
-	Content: `# Bot 工作空间
+	Content: `# Bot Workspace
 
-你拥有一个持久化的工作空间，可以读写文件、执行命令。
-每个 Bot 有独立的工作空间，文件在其中持久保存（不会因会话结束而丢失）。
+You have a persistent workspace where you can read and write files and run shell commands.
+Every bot gets its own isolated workspace, and its files survive across sessions — nothing is lost when a conversation ends.
 
-## 可用工具
+## Available tools
 
-### 命令执行
-- **exec** — 执行 shell 命令，返回 stdout/stderr/exitCode
+### Command execution
+- **exec** — run a shell command; returns stdout, stderr and exitCode
 
-### 文件操作
-- **read_file** — 读取文件内容（支持 offset/limit 分段读取，返回带行号的内容）
-- **write_file** — 写入文件（纯文本内容，自动创建父目录）
-- **replace_in_file** — 精确替换文件中的字符串片段（old_str → new_str，要求唯一匹配）
-- **delete_file** — 删除文件或目录
-- **move_file** — 移动/重命名文件或目录
-- **list_dir** — 列出目录内容
+### File operations
+- **read_file** — read file contents (supports offset/limit paging, returns line-numbered content)
+- **write_file** — write a file (plain text; parent directories are created automatically)
+- **replace_in_file** — replace an exact string in a file (old_str → new_str, match must be unique)
+- **delete_file** — delete a file or directory
+- **move_file** — move or rename a file or directory
+- **list_dir** — list directory contents
 
-### 搜索
-- **search_content** — 在文件中搜索内容（类似 grep -rn）
+### Search
+- **search_content** — search inside files (similar to grep -rn)
 
-### 诊断
-- **health** — 检查工作空间的健康状态（容器是否存活、目录是否可用、Docker 是否可用）
+### Diagnostics
+- **health** — check workspace health (is the container alive, is the directory usable, is Docker available)
 
-## 使用原则
+## Rules
 
-### 文件操作
-- **优先使用 replace_in_file 做小修改**，避免重写整个文件
-- 读取大文件时使用 offset/limit 参数分段读取，避免一次性读取过多
-- 如果不确定文件路径，先用 list_dir 列出目录内容
-- 路径相对于工作空间根目录，禁止使用 .. 目录遍历
-- 你可以在一次回复中并行调用多个工具来提高效率
+### File operations
+- **ALWAYS prefer replace_in_file for small edits.** Do not rewrite an entire file to change a few lines.
+- Page through large files with offset/limit instead of reading everything at once.
+- If you are unsure of a path, run list_dir first. NEVER guess file paths.
+- Paths are relative to the workspace root. NEVER use ".." to traverse outside it.
+- You can call several independent tools in parallel within a single reply.
 
-### 命令执行
-- exec 用于终端操作（如构建、测试、git 等）
-- **不要用 exec 做文件操作**（读写、搜索文件），使用专用工具
-- 命令有超时限制（默认 30 秒）
-- 如果命令执行失败或行为异常，先用 health 工具诊断
+### Command execution
+- Use exec for terminal work: builds, tests, git, package managers.
+- **NEVER use exec for file operations** (reading, writing, searching). Use the dedicated file tools instead.
+- Commands are subject to a timeout (30 seconds by default).
+- If a command fails or the workspace behaves unexpectedly, run health first to diagnose.
 
-### 搜索
-- search_content 支持正则表达式，类似 grep -rn
-- 使用更精确的搜索模式可以获得更聚焦的结果
-- 如果结果太多，缩小搜索范围或使用更具体的 pattern
+### Search
+- search_content accepts regular expressions, similar to grep -rn.
+- A more precise pattern gives more focused results.
+- If there are too many matches, narrow the search path or tighten the pattern.
 
-### 通用
-- 工作空间是持久化的，重要数据（笔记、配置等）可以保存到文件中
-- 不要编造工具结果，只使用实际返回的数据
-- 工具调用失败时，说明失败原因并尝试替代方案`,
+### General
+- The workspace is persistent — store anything worth keeping (notes, configs, intermediate results) in files.
+- CRITICAL: NEVER invent tool results. Use only data a tool actually returned.
+- When a tool call fails, state why it failed and try a concrete alternative.
+
+### Language
+- These tool descriptions are written in English, but you must respond to the user in Chinese (中文).`,
 	Enabled: true,
 }
 
@@ -124,38 +127,38 @@ func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
 func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_exec",
-		Description: "在工作空间中执行 shell 命令，返回 stdout、stderr 和 exitCode。" +
-			"用于终端操作（如构建、测试、git、包管理等）。" +
-			"不要用它做文件操作（读写、搜索文件），应使用专用工具。" +
-			"命令执行受「卡死看门狗」保护：只要命令持续有输出（哪怕缓慢）就不会被杀；" +
-			"仅当连续无输出超过卡死阈值（默认 180 秒，可配置 stuck_timeout）才判定卡死并终止。" +
-			"另有硬上限兜底（默认 600 秒，可配置 timeout）——超过它无论如何都会终止，防止无限挂起。" +
-			"【重要】不要为了限制输出而在命令末尾追加 `| head` / `| tail` / `| less` 等管道——" +
-			"沙箱已按 MaxOutput 字节自动截断输出，这类管道既冗余，又会在被测进程异常时" +
-			"导致命令永久挂起（子进程持有管道写端不退出）。如需更少输出，请用 timeout 或" +
-			"让命令自身限制（如 golangci-lint 的 --out-format）。" +
-			"返回还包含可靠性信号：reliable(命令是否完整可信)、aborted(是否中途失败)、" +
-			"oomKilled(是否被 OOM 杀死)、warnings(不可信原因)。" +
-			"若 reliable 为 false，说明命令未完整/可信地执行（可能因 OOM、超时或被杀死），" +
-			"请勿将其当作完整结果使用，应提高沙箱内存上限或更换执行方式后重试。",
+		Description: "Run a shell command in the workspace and return stdout, stderr and exitCode. " +
+			"Use it for terminal work such as builds, tests, git and package managers. " +
+			"NEVER use it for file operations (reading, writing, searching files) — use the dedicated file tools instead. " +
+			"Execution is protected by a stuck watchdog: a command that keeps producing output is never killed, however slow it is; " +
+			"it is only declared stuck and terminated after it produces no output for longer than the stuck threshold (180s by default, override with stuck_timeout). " +
+			"A hard ceiling acts as a backstop (600s by default, override with timeout) — once exceeded the command is terminated unconditionally to prevent an infinite hang. " +
+			"IMPORTANT: NEVER append `| head` / `| tail` / `| less` or similar pipes just to limit output. " +
+			"The sandbox already truncates output at MaxOutput bytes, so such a pipe is redundant, and it can hang the command forever " +
+			"when the inspected process dies (a child process keeps the write end of the pipe open). For less output, lower timeout or " +
+			"let the command limit itself (e.g. golangci-lint --out-format). " +
+			"The result also carries reliability signals: reliable (was the command complete and trustworthy), aborted (did it fail midway), " +
+			"oomKilled (was it killed by the OOM killer), warnings (why it is untrustworthy). " +
+			"CRITICAL: when reliable is false the command did NOT run to completion (OOM, timeout, or killed) — " +
+			"do not treat its output as a full result; raise the sandbox memory limit or change the approach, then retry.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"command": map[string]any{
 					"type":        "string",
-					"description": "要执行的 shell 命令",
+					"description": "The shell command to run.",
 				},
 				"workdir": map[string]any{
 					"type":        "string",
-					"description": "命令的工作目录（相对于工作空间根目录）。可选，默认为工作空间根目录。",
+					"description": "Working directory for the command, relative to the workspace root. Optional; defaults to the workspace root.",
 				},
 				"timeout": map[string]any{
 					"type":        "integer",
-					"description": "硬上限时间（秒）。可选，默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟，由 sandbox.timeout 配置控制）。这是命令最长可运行的总时长兜底，超过即强制终止；正常慢命令（持续有输出）不会因本值被杀，由卡死看门狗放行。",
+					"description": "Hard ceiling in seconds. Optional; 0 (the default) means automatic = stuck threshold × 3 (15 minutes by default, controlled by the sandbox.timeout config). This is the backstop on total run time: once exceeded the command is force-terminated. A normal slow command that keeps producing output is never killed by this value — the stuck watchdog lets it through.",
 				},
 				"stuck_timeout": map[string]any{
 					"type":        "integer",
-					"description": "卡死看门狗阈值（秒）。可选，默认 300 秒（5 分钟，由 sandbox.stuck_timeout 配置控制）。命令连续无输出超过该时长即判定卡死并终止；只要命令持续有输出（哪怕慢）就不杀。用于区分「编译慢」与「死锁卡死」。",
+					"description": "Stuck-watchdog threshold in seconds. Optional; defaults to 300 (5 minutes, controlled by the sandbox.stuck_timeout config). A command that produces no output for longer than this is declared stuck and terminated; as long as it keeps producing output, however slowly, it is left alone. Use it to distinguish a slow compile from a deadlock.",
 				},
 			},
 			"required": []string{"command"},
@@ -228,7 +231,7 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			// 若剥离了 `| head`/`| tail` 管道，提示 bot 该操作已被自动处理。
 			if stripped {
 				res.Warnings = append(res.Warnings,
-					"已自动剥离命令末尾的 `| head`/`| tail` 输出限制管道（沙箱已按 MaxOutput 截断输出，且此类管道可能导致命令挂死）")
+					"Stripped a trailing `| head`/`| tail` output-limiting pipe from the command (the sandbox already truncates output at MaxOutput, and such pipes can hang the command).")
 			}
 
 			return execResultToToolOutput(res, ws.WorkDir()), nil
@@ -243,26 +246,26 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildReadFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_read_file",
-		Description: "读取工作空间中的文件内容，返回带行号的纯文本。" +
-			"支持通过 offset（起始行号，从 1 开始）和 limit（读取行数）分段读取大文件。" +
-			"如果省略 offset/limit，则读取整个文件。" +
-			"在需要读取多个文件时，可以并行调用此工具。" +
-			"避免读取过小的片段（如 30 行），需要更多上下文时读取更大的范围。" +
-			"如果需要在大文件中查找特定内容，使用 search_content 工具更高效。",
+		Description: "Read a file from the workspace and return its contents as line-numbered plain text. " +
+			"Use offset (start line, 1-based) and limit (number of lines) to page through large files. " +
+			"Omit both to read the entire file. " +
+			"Call this tool in parallel when you need to read several files. " +
+			"Avoid tiny reads (e.g. 30 lines) — read a wider range when you need more context. " +
+			"To locate specific content inside a large file, use search_content instead; it is far more efficient.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "文件路径（相对于工作空间根目录）",
+					"description": "File path, relative to the workspace root.",
 				},
 				"offset": map[string]any{
 					"type":        "integer",
-					"description": "起始行号（从 1 开始）。可选，默认为 1。",
+					"description": "Start line, 1-based. Optional; defaults to 1.",
 				},
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "读取的行数。可选，默认读取全部。",
+					"description": "Number of lines to read. Optional; reads to the end of the file by default.",
 				},
 			},
 			"required": []string{"path"},
@@ -338,19 +341,19 @@ func buildReadFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_write_file",
-		Description: "向工作空间写入文件（纯文本内容）。" +
-			"如果父目录不存在会自动创建。会覆盖已有文件。" +
-			"优先使用 replace_in_file 做小修改，只有创建新文件或需要完全重写时才用此工具。",
+		Description: "Write a file into the workspace (plain text content). " +
+			"Missing parent directories are created automatically. An existing file is overwritten. " +
+			"IMPORTANT: prefer replace_in_file for small edits; use this tool only to create a new file or to rewrite one completely.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "文件路径（相对于工作空间根目录）",
+					"description": "File path, relative to the workspace root.",
 				},
 				"content": map[string]any{
 					"type":        "string",
-					"description": "文件内容（纯文本）",
+					"description": "File content (plain text).",
 				},
 			},
 			"required": []string{"path", "content"},
@@ -399,29 +402,29 @@ func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_replace_in_file",
-		Description: "在文件中进行精确字符串替换。" +
-			"将文件中的 old_str 替换为 new_str。" +
-			"默认 old_str 必须在文件中唯一存在；设置 replace_all=true 可替换所有匹配。" +
-			"这是做小范围修改的首选方式，避免重写整个文件。" +
-			"注意：确保 old_str 精确匹配文件内容（包括空白和缩进）。",
+		Description: "Perform an exact string replacement inside a file. " +
+			"Replaces old_str with new_str. " +
+			"By default old_str MUST occur exactly once in the file; set replace_all=true to replace every occurrence. " +
+			"This is the preferred way to make small edits — it avoids rewriting the whole file. " +
+			"IMPORTANT: old_str must match the file content exactly, including whitespace and indentation.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "文件路径（相对于工作空间根目录）",
+					"description": "File path, relative to the workspace root.",
 				},
 				"old_str": map[string]any{
 					"type":        "string",
-					"description": "要替换的原始字符串（必须精确匹配，包括空白和缩进）。默认必须在文件中唯一。",
+					"description": "The original string to replace. Must match exactly, including whitespace and indentation. Must be unique in the file unless replace_all is true.",
 				},
 				"new_str": map[string]any{
 					"type":        "string",
-					"description": "替换后的新字符串。传入空字符串表示删除 old_str。",
+					"description": "The replacement string. Pass an empty string to delete old_str.",
 				},
 				"replace_all": map[string]any{
 					"type":        "boolean",
-					"description": "是否替换所有匹配项（而非仅唯一匹配）。默认 false。用于批量替换如变量重命名。",
+					"description": "Replace every match instead of requiring a unique match. Defaults to false. Use it for bulk edits such as renaming a variable.",
 				},
 			},
 			"required": []string{"path", "old_str", "new_str"},
@@ -509,13 +512,13 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name:         "sandbox_delete_file",
 		DeferredLoad: true, // 破坏性操作，非日常高频，初始仅暴露名称+描述
-		Description:  "删除 bot 工作空间中的文件或目录（递归删除目录）。",
+		Description:  "Delete a file or directory in the bot workspace (directories are removed recursively).",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "要删除的文件或目录路径（相对于工作空间根目录）",
+					"description": "Path of the file or directory to delete, relative to the workspace root.",
 				},
 			},
 			"required": []string{"path"},
@@ -562,17 +565,17 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name:         "sandbox_move_file",
 		DeferredLoad: true, // 重命名/移动，非日常高频，初始仅暴露名称+描述
-		Description:  "移动或重命名 bot 工作空间中的文件或目录。",
+		Description:  "Move or rename a file or directory in the bot workspace.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"src": map[string]any{
 					"type":        "string",
-					"description": "源路径（相对于工作空间根目录）",
+					"description": "Source path, relative to the workspace root.",
 				},
 				"dst": map[string]any{
 					"type":        "string",
-					"description": "目标路径（相对于工作空间根目录）",
+					"description": "Destination path, relative to the workspace root.",
 				},
 			},
 			"required": []string{"src", "dst"},
@@ -622,15 +625,15 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildListDirTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_list_dir",
-		Description: "列出工作空间中指定目录的内容，返回文件和子目录列表。" +
-			"如果不确定文件路径，先用此工具查看目录结构。" +
-			"默认列出根目录。",
+		Description: "List the contents of a directory in the workspace, returning its files and subdirectories. " +
+			"ALWAYS run this first when you are unsure of a path — do not guess the directory structure. " +
+			"Lists the workspace root by default.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"path": map[string]any{
 					"type":        "string",
-					"description": "目录路径（相对于工作空间根目录）。默认为根目录。",
+					"description": "Directory path, relative to the workspace root. Defaults to the root.",
 				},
 			},
 		},
@@ -676,29 +679,29 @@ func buildListDirTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: "sandbox_search_content",
-		Description: "在工作空间的文件中搜索内容（基于 ripgrep，能力远强于 BusyBox grep）。" +
-			"支持完整正则表达式（如 \"log.*Error\"、\"function\\s+\\w+\"、\"\\d{4}-\\d{2}\"），" +
-			"递归搜索目录并包含隐藏文件。返回匹配的文件名、行号和匹配行内容。" +
-			"使用更精确的 pattern 可以获得更聚焦的结果。" +
-			"如果需要按文件名查找文件，先用 list_dir 列出目录。",
+		Description: "Search file contents in the workspace, backed by ripgrep (far more capable than BusyBox grep). " +
+			"Supports full regular expressions (e.g. \"log.*Error\", \"function\\s+\\w+\", \"\\d{4}-\\d{2}\"), " +
+			"searches directories recursively and includes hidden files. Returns the matching file name, line number and line content. " +
+			"A more precise pattern gives more focused results. " +
+			"To find files by name rather than by content, use list_dir instead.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{
 					"type":        "string",
-					"description": "搜索模式（正则表达式）",
+					"description": "Search pattern (regular expression).",
 				},
 				"path": map[string]any{
 					"type":        "string",
-					"description": "搜索路径（文件或目录）。默认为工作空间根目录。",
+					"description": "File or directory to search. Defaults to the workspace root.",
 				},
 				"case_sensitive": map[string]any{
 					"type":        "boolean",
-					"description": "是否区分大小写。默认 false（不区分）。",
+					"description": "Match case-sensitively. Defaults to false (case-insensitive).",
 				},
 				"max_results": map[string]any{
 					"type":        "integer",
-					"description": "最大返回结果数。默认 100。",
+					"description": "Maximum number of matches to return. Defaults to 100.",
 				},
 			},
 			"required": []string{"pattern"},
@@ -784,9 +787,9 @@ func buildHealthTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name:         "sandbox_health",
 		DeferredLoad: true, // 诊断工具，非常规使用，初始仅暴露名称+描述
-		Description: "检查 bot 工作空间的健康状态。" +
-			"返回工作空间是否可用、后端类型（docker/local）、状态和详细信息。" +
-			"当命令执行失败或行为异常时，先调用此工具诊断问题。",
+		Description: "Check the health of the bot workspace. " +
+			"Returns whether the workspace is usable, the backend type (docker/local), its status and details. " +
+			"ALWAYS call this tool first to diagnose when a command fails or the workspace behaves unexpectedly.",
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -918,19 +921,19 @@ func execResultToToolOutput(res *ExecResult, workdir string) map[string]any {
 // buildReliabilityWarning 生成面向 LLM 的不可信警告文案。
 func buildReliabilityWarning(res *ExecResult) string {
 	var b strings.Builder
-	b.WriteString("⚠️ [工具结果不完整/不可信] ")
+	b.WriteString("⚠️ [INCOMPLETE / UNTRUSTWORTHY TOOL RESULT] ")
 	switch {
 	case res.OOMKilled:
-		b.WriteString("命令疑似被 OOM 杀死（沙箱内存不足），只拿到部分输出。")
+		b.WriteString("The command was likely OOM-killed (the sandbox ran out of memory); only partial output was captured.")
 	case res.Aborted:
-		b.WriteString("命令中途失败（可能被信号杀死或超时），只拿到部分输出。")
+		b.WriteString("The command failed midway (killed by a signal or timed out); only partial output was captured.")
 	default:
-		b.WriteString("命令执行结果不可信。")
+		b.WriteString("The command result is not trustworthy.")
 	}
 	if len(res.Warnings) > 0 {
-		b.WriteString(" 原因: " + strings.Join(res.Warnings, "; "))
+		b.WriteString(" Reason: " + strings.Join(res.Warnings, "; "))
 	}
-	b.WriteString(" 请勿将其当作完整结果使用；如需完整结果，请提高沙箱内存上限或更换执行方式后重试。")
+	b.WriteString(" Do NOT treat this as a complete result; to obtain one, raise the sandbox memory limit or change the execution approach, then retry.")
 	return b.String()
 }
 

@@ -108,7 +108,7 @@ func waitForTerminal(
 				StatusResult: st,
 				Waited:       time.Since(start).Truncate(time.Second).String(),
 				TimedOut:     true,
-				Hint:         "等待被取消（用户停止或连接断开），任务仍在后台运行。",
+				Hint:         "The wait was canceled (the user stopped it or the connection dropped). The task is still running in the background.",
 			}, nil
 
 		case <-deadline:
@@ -116,8 +116,8 @@ func waitForTerminal(
 				StatusResult: st,
 				Waited:       time.Since(start).Truncate(time.Second).String(),
 				TimedOut:     true,
-				Hint: "等待超时，任务仍在进行中。可再次调用 task_status(wait=true) 继续等待，" +
-					"或用 task_detail 查看各子任务进展。请勿改用高频轮询。",
+				Hint: "The wait timed out, but the task is still running. Call task_status(wait=true) again to keep waiting, " +
+					"or use task_detail to inspect sub-task progress. NEVER switch to high-frequency polling.",
 			}, nil
 
 		case <-ticker.C:
