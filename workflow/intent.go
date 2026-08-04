@@ -90,7 +90,7 @@ standard, and it requires repeated refinement or review until no new issues rema
 - NEVER complete it with subagent / delegate / a one-shot inline attempt, and NEVER stop
   after a single pass — goal mode automatically rolls back and redoes the work whenever
   review fails, until it passes or the maximum number of rounds (default 5) is reached.
-- You must respond to the user in Chinese (中文).
+- Pass the requirement through in its original wording (Chinese stays Chinese); do NOT translate it.
 
 The original requirement follows:`
 	return head + "\n\n" + original

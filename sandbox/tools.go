@@ -72,7 +72,7 @@ Every bot gets its own isolated workspace, and its files survive across sessions
 - When a tool call fails, state why it failed and try a concrete alternative.
 
 ### Language
-- These tool descriptions are written in English, but you must respond to the user in Chinese (中文).`,
+- These tool descriptions are written in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.`,
 	Enabled: true,
 }
 
@@ -513,6 +513,9 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Name:         "sandbox_delete_file",
 		DeferredLoad: true, // 破坏性操作，非日常高频，初始仅暴露名称+描述
 		Description:  "Delete a file or directory in the bot workspace (directories are removed recursively).",
+		// Description 已英文化，而用户常用中文提问。tool_search 只对
+		// name/description/keywords 做子串匹配，故必须显式保留中文检索词。
+		Keywords: []string{"删除文件", "删除目录", "移除文件", "清理文件", "delete file"},
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -566,6 +569,7 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Name:         "sandbox_move_file",
 		DeferredLoad: true, // 重命名/移动，非日常高频，初始仅暴露名称+描述
 		Description:  "Move or rename a file or directory in the bot workspace.",
+		Keywords:     []string{"移动文件", "重命名", "改名", "move file", "rename"},
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -790,6 +794,7 @@ func buildHealthTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Description: "Check the health of the bot workspace. " +
 			"Returns whether the workspace is usable, the backend type (docker/local), its status and details. " +
 			"ALWAYS call this tool first to diagnose when a command fails or the workspace behaves unexpectedly.",
+		Keywords: []string{"沙箱健康", "工作空间状态", "环境诊断", "容器状态", "health", "诊断"},
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
