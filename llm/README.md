@@ -4,9 +4,10 @@
 
 - **一套 API，多家 Provider** — OpenAI / Anthropic / Google / Grok 等 provider 实现同一个 `Provider` 接口，上层代码不关心底层差异。
 - **类型安全** — Message、Tool、Stream 全部强类型，告别 `map[string]any` 地狱。
-- **多步编排** — 内置工具自动执行循环（Agent loop），支持流式输出、审批、并行执行。
+- **多步编排** — 内置工具自动执行循环（Agent loop），支持流式输出、审批、并行执行、动态步数控制与循环检测。
 - **零外部依赖** — Schema 推断用纯反射实现，不引入 jsonschema 库。
-- **上下文安全** — 内置 `PatchToolCalls`（修补悬挂工具调用）和 `ContextReduction`（超限工具结果截断），保障多步编排的健壮性。
+- **上下文安全** — 内置 `PatchToolCalls`（修补悬挂工具调用）、`TruncateOutput`（工具输出截断）、`Reduction`（轻量压缩）与 `Compactor`（对话级摘要压缩）多层防护。
+- **统一错误分类** — 所有 provider 适配器将错误包装为 `*LLMError`，按 `ErrorReason` 归类以支持智能重试/路由。
 
 ---
 
@@ -20,6 +21,11 @@
 - [流式输出](#流式输出)
 - [多步编排](#多步编排)
 - [上下文安全](#上下文安全)
+- [Prompt 缓存策略](#prompt-缓存策略)
+- [工具延迟加载（Tool Deferral）](#工具延迟加载tool-deferral)
+- [统一错误处理](#统一错误处理)
+- [Token 估算](#token-估算)
+- [使用统计与配额记账](#使用统计与配额记账)
 - [文件结构](#文件结构)
 - [如何写一个新 Provider](#如何写一个新-provider)
 
@@ -59,8 +65,8 @@ func main() {
     }
 
     fmt.Println(result.Text)
-    fmt.Printf("Token 用量: input=%d output=%d\n",
-        result.Usage.InputTokens, result.Usage.OutputTokens)
+    fmt.Printf("Token 用量: input=%d output=%d total=%d\n",
+        result.Usage.InputTokens, result.Usage.OutputTokens, result.Usage.TotalTokens)
 }
 ```
 
@@ -217,18 +223,51 @@ provider 可以选择性实现以下接口，上层代码通过类型断言探�
 
 | 接口 | 方法 | 用途 |
 |---|---|---|
-| `ModelLister` | `ListModels(ctx)` | 列出可用模型 |
-| `TestableProvider` | `Test(ctx)` / `TestModel(ctx, id)` | 健康检查 |
-| `EmbeddingProvider` | `DoEmbed(ctx, params)` | 文本嵌入 |
-| `SpeechProvider` | `DoSpeech(ctx, params)` | 文字转语音 |
-| `TranscriptionProvider` | `DoTranscribe(ctx, params)` | 语音转文字 |
+| `ModelLister` | `ListModels(ctx) ([]Model, error)` | 列出可用模型 |
+| `TestableProvider` | `Test(ctx) *ProviderTestResult` / `TestModel(ctx, id) (*ModelTestResult, error)` | 健康检查 |
+| `EmbeddingProvider` | `DoEmbed(ctx, EmbedParams) (*EmbedResult, error)` | 文本嵌入 |
+| `SpeechProvider` | `DoSpeech(ctx, SpeechParams) (*SpeechResult, error)` | 文字转语音 |
+| `TranscriptionProvider` | `DoTranscribe(ctx, TranscriptionParams) (*TranscriptionResult, error)` | 语音转文字 |
 
 ```go
 // 探测能力
 if lister, ok := prov.(llm.ModelLister); ok {
     models, _ := lister.ListModels(ctx)
 }
+
+// 健康检查
+if tp, ok := prov.(llm.TestableProvider); ok {
+    res := tp.Test(ctx)
+    switch res.Status { // llm.ProviderStatusOK / ProviderStatusUnhealthy / ProviderStatusUnreachable
+    case llm.ProviderStatusOK:
+        // ...
+    }
+}
 ```
+
+`ProviderStatus` 常量：`ProviderStatusOK` / `ProviderStatusUnhealthy` / `ProviderStatusUnreachable`。多模态/嵌入/语音相关参数与结果类型见下表：
+
+| 类型 | 关键字段 |
+|---|---|
+| `EmbedParams` | `Model *Model`、`Values []string`、`Dimensions *int` |
+| `EmbedResult` | `Embeddings [][]float64`、`Tokens int` |
+| `SpeechParams` | `Model`、`Text`、`Voice`、`Format`、`Speed *float64`、`Instructions`、`Extra map[string]any` |
+| `SpeechResult` | `Audio []byte`、`ContentType string` |
+| `TranscriptionParams` | `Model`、`Audio []byte`、`Filename`、`ContentType`、`Language`、`Prompt`、`Extra map[string]any` |
+| `TranscriptionResult` | `Text`、`Language`、`DurationSeconds`、`Words []TranscriptionWord`、`ProviderMetadata` |
+| `TranscriptionWord` | `Text`、`Start`、`End`、`SpeakerID` |
+
+### Model 类型
+
+```go
+// 聊天模型
+model := llm.ChatModel("gpt-4o")
+
+// 嵌入模型
+model := llm.EmbeddingModel("text-embedding-3-small")
+```
+
+`Model` 含 `ID`、`DisplayName`、`Type` 三个字段；`Type` 为 `ModelTypeChat` 或 `ModelTypeEmbedding`。`GenerateParams.Model` 接受 `*Model`（聊天/多模态生成）。
 
 ### GenerateParams
 
@@ -236,32 +275,88 @@ if lister, ok := prov.(llm.ModelLister); ok {
 
 ```go
 type GenerateParams struct {
-    Model    *Model          // 模型 ID（用 llm.ChatModel("gpt-4o") 创建）
-    System   string          // System prompt
-    Messages []Message       // 对话消息
-    Tools    []Tool          // 可用工具列表
-    ToolChoice any           // "auto" | "none" | "required"
-    ResponseFormat *ResponseFormat // JSON 输出格式
-    Temperature  *float64
-    MaxTokens    *int
-    // ... 更多参数
+    Model    *Model    // 模型 ID（用 llm.ChatModel("gpt-4o") 创建）
+    System   string    // System prompt
+    Messages []Message // 对话消息
+
+    Tools      []Tool // 可用工具列表
+    ToolChoice any    // "auto" | "none" | "required" | {"type":"function","function":{"name":"..."}}
+
+    ResponseFormat *ResponseFormat // JSON 输出格式（text / json_object / json_schema）
+
+    Temperature      *float64
+    TopP             *float64
+    MaxTokens        *int
+    StopSequences    []string
+    FrequencyPenalty *float64
+    PresencePenalty  *float64
+    Seed             *int
+    ReasoningEffort  *string // 推理强度（如 "low" / "medium" / "high"）
+
+    // CachePolicy 控制 prompt 缓存断点放置方式：
+    //   ""     = provider 默认（anthropic 用 auto，其余用 none）
+    //   "none" = 清除所有缓存标记
+    //   "auto" = 在稳定前缀上自动放置断点
+    CachePolicy CachePolicy
+    // CacheKey 透传给支持缓存键提示的 provider（如 OpenAI promptCacheKey）。
+    CacheKey string
+    // SystemCacheControl 由缓存策略写入，标记 system 应携带缓存断点。
+    SystemCacheControl *CacheControl
 }
 ```
+
+`ResponseFormat` 通过 `Type`（`ResponseFormatText` / `ResponseFormatJSONObject` / `ResponseFormatJSONSchema`）与可选的 `JSONSchema any` 控制结构化输出。
 
 ### GenerateResult
 
 ```go
 type GenerateResult struct {
-    Text         string        // 生成的文本
-    Reasoning    string        // 推理过程（o1/o3/Claude thinking）
-    FinishReason FinishReason  // 停止原因
-    Usage        Usage         // Token 用量
-    ToolCalls    []ToolCall    // 模型请求的工具调用
-    ToolResults  []ToolResult  // 工具执行结果（多步模式下）
-    Steps        []StepResult  // 每一步的结果（多步模式下）
-    Messages     []Message     // 所有输出消息（多步模式下）
+    Text                      string         // 生成的文本
+    Reasoning                 string         // 推理过程（o1/o3/Claude thinking）
+    ReasoningProviderMetadata map[string]any // 推理相关的 provider 元数据
+    FinishReason              FinishReason   // 停止原因
+    RawFinishReason           string         // provider 原始停止原因
+    Usage                     Usage          // Token 用量
+    Sources                   []Source       // 引用来源
+    Files                     []GeneratedFile // 模型生成的文件
+    ToolCalls                 []ToolCall     // 模型请求的工具调用
+    ToolResults               []ToolResult   // 工具执行结果（多步模式下）
+    Response                  ResponseMetadata // 响应级元数据（id/modelId/timestamp/headers）
+    DeferredToolApproval      *ToolApprovalResult // 被 defer 的审批结果
+
+    Steps   []StepResult // 每一步的结果（多步模式下）
+    Messages []Message   // 所有输出消息（多步模式下，不含原始输入）
+
+    // LoopStoppedByGuard / LoopStopReason 仅运行时有效（json:"-"），
+    // 标记本次编排循环是否因步数守卫（撞硬上限或陷入重复循环）停止，
+    // 而非模型自然收尾。
+    LoopStoppedByGuard bool
+    LoopStopReason     string
 }
 ```
+
+`FinishReason` 取值：`FinishReasonStop` / `FinishReasonLength` / `FinishReasonContentFilter` / `FinishReasonToolCalls` / `FinishReasonError` / `FinishReasonOther` / `FinishReasonUnknown`。
+
+`StepResult` 的字段与 `GenerateResult` 类似：`Text`、`Reasoning`、`FinishReason`、`RawFinishReason`、`Usage`、`ToolCalls`、`ToolResults`、`Response`、`DeferredToolApproval`、`Messages`。
+
+### Usage（Token 用量）
+
+```go
+type Usage struct {
+    InputTokens        int
+    OutputTokens       int
+    TotalTokens        int
+    ReasoningTokens    int
+    CachedInputTokens  int
+    InputTokenDetails  InputTokenDetail  // NoCacheTokens / CacheReadTokens / CacheWriteTokens / ...
+    OutputTokenDetails OutputTokenDetail // TextTokens / ReasoningTokens
+}
+
+// 累加另一个 Usage（编排时汇总各步）
+usage.Add(&stepUsage)
+```
+
+`InputTokenDetail` 含 `NoCacheTokens`、`CacheReadTokens`、`CacheWriteTokens`、`CacheWrite5mTokens`、`CacheWrite1hTokens`。
 
 ---
 
@@ -307,12 +402,12 @@ msg := llm.Message{
 
 | 类型 | 字段 | 说明 |
 |---|---|---|
-| `TextPart` | `Text`, `CacheControl` | 文本 |
-| `ReasoningPart` | `Text` | 模型推理/思考过程 |
-| `ImagePart` | `Image`, `MediaType` | 图片（URL 或 base64） |
-| `FilePart` | `Data`, `MediaType`, `Filename` | 任意文件 |
-| `ToolCallPart` | `ToolCallID`, `ToolName`, `Input` | 工具调用（assistant 消息） |
-| `ToolResultPart` | `ToolCallID`, `Result`, `IsError` | 工具结果（tool 消息） |
+| `TextPart` | `Text`, `CacheControl`, `ProviderMetadata` | 文本 |
+| `ReasoningPart` | `Text`, `Signature`, `ProviderMetadata` | 模型推理/思考过程（`Signature` 为 Anthropic 扩展思考的加密签名，后续请求须原样回传） |
+| `ImagePart` | `Image`, `MediaType`, `CacheControl` | 图片（URL 或 base64） |
+| `FilePart` | `Data`, `MediaType`, `Filename`, `CacheControl` | 任意文件 |
+| `ToolCallPart` | `ToolCallID`, `ToolName`, `Input`, `ProviderMetadata` | 工具调用（assistant 消息） |
+| `ToolResultPart` | `ToolCallID`, `ToolName`, `InvocationID`, `Result`, `IsError` | 工具结果（tool 消息） |
 
 ### JSON 序列化
 
@@ -331,6 +426,8 @@ llm.TextPart{
     CacheControl: llm.EphemeralCacheControl(), // 5 分钟缓存
 }
 ```
+
+> 缓存断点的自动放置由 `CachePolicy` 控制（见 [Prompt 缓存策略](#prompt-缓存策略)）。仅在 Anthropic 系 provider 生效；OpenAI / Google 使用隐式前缀缓存，无需显式断点。
 
 ---
 
@@ -390,6 +487,17 @@ deleteTool.RequireApproval = true
 ```
 
 在编排时注册审批处理器（见[多步编排](#多步编排)）。
+
+### 工具延迟加载标记
+
+`Tool` 还有两个与延迟加载相关的字段（详见[工具延迟加载](#工具延迟加载tool-deferral)）：
+
+```go
+tool.DeferredLoad = true // 初始只向模型展示名称+描述，按需加载完整 schema
+tool.Keywords = []string{"search", "web"} // 供 tool_search 匹配
+```
+
+`ToolExecContext` 提供 `ToolCallID`、`ToolName`、`InvocationID`（服务端本次执行唯一标识）与 `SendProgress(content any)`（流式进度回调，非流式时为 nil）。
 
 ---
 
@@ -507,8 +615,12 @@ for part := range sr.Stream {
 }
 
 // 流结束后可以读取汇总数据
-fmt.Printf("共 %d 步, %d tokens\n", len(sr.Steps), sr.Messages)
+fmt.Printf("共 %d 步, %d tokens\n", len(sr.Steps), sr.Usage.TotalTokens)
 ```
+
+### 动态步数控制（loopController）
+
+`MaxSteps` 是“软预算”：模型持续发起**新的**工具调用时，循环可在 `MaxSteps` 基础上自动延展，直到 `HardMaxSteps` 绝对上限（默认 `MaxSteps * 3`）；若检测到模型在重复同样的工具调用（陷入循环），则提前停止。`GenerateResult.LoopStoppedByGuard` / `LoopStopReason` 标记是否因守卫停止（撞硬上限或重复循环），供上游向用户给出明确提示，避免把“步数预算耗尽”误判为 Bot 卡死。
 
 ### 工具审批
 
@@ -537,34 +649,29 @@ result, err := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
 |---|---|
 | `ToolApprovalApproved` | 执行工具 |
 | `ToolApprovalRejected` | 跳过，告知模型被拒绝 |
-| `ToolApprovalDeferred` | 暂停循环，等待外部确认后恢复 |
+| `ToolApprovalDeferred` | 暂停循环，通过 `ErrToolApprovalDeferred` / `ToolApprovalDeferredError` 返回 `DeferredToolApproval`，等待外部确认后恢复 |
 
-### 回调一览
+### 回调与配置一览
 
-| 选项 | 时机 | 用途 |
+`OrchestrateConfig` 字段：
+
+| 字段 | 类型 | 说明 |
 |---|---|---|
-| `WithMaxSteps(n)` | — | 0=单次, >0=最多 N 步, -1=无限 |
-| `WithOnStep(fn)` | 每步完成后 | 观察/修改下一步参数 |
-| `WithOnFinish(fn)` | 全部完成后 | 最终汇总 |
-| `WithPrepareStep(fn)` | 每步开始前 | 动态调整参数 |
-| `WithApprovalHandler(fn)` | 工具需要审批时 | 人工确认 |
+| `Params` | `GenerateParams` | 基础请求参数 |
+| `MaxSteps` | `int` | 软步数预算（0=单次, >0=上限, -1=无限） |
+| `HardMaxSteps` | `int` | 绝对步数上限（<=0 表示自动 = MaxSteps*3） |
+| `OnFinish` | `func(*GenerateResult)` | 全部完成后调用 |
+| `OnStep` | `func(*StepResult) *GenerateParams` | 每步完成后，返回非空则覆盖下一步参数 |
+| `PrepareStep` | `func(*GenerateParams) *GenerateParams` | 每步开始前（第二步起），返回非空则覆盖参数 |
+| `OnToolResults` | `func(int, []ToolResultPart) []ToolResultPart` | 工具执行后、写入历史前，可修改/截断结果 |
+| `ApprovalHandler` | `func(ctx, ToolCall) (ToolApprovalResult, error)` | 工具需要审批时调用 |
+| `ToolChoiceForStep` | `func(step int, toolsExecuted bool) any` | 按步覆盖 `tool_choice`（如验证门控：首步强制 "required"） |
+| `ToolDeferral` | `*ToolDeferral` | 工具延迟加载（见[工具延迟加载](#工具延迟加载tool-deferral)） |
+| `InterruptCh` | `chan string` | 生成过程中用户中途追加内容（Claude-CLI 风格），建议带缓冲（如 cap=16） |
 
-### StepResult
+对应 `WithXxx` Option：`WithMaxSteps`、`WithHardMaxSteps`、`WithOnFinish`、`WithOnStep`、`WithPrepareStep`、`WithOnToolResults`、`WithApprovalHandler`、`WithInterruptChannel`。
 
-每一步的结果都记录在 `StepResult` 中：
-
-```go
-type StepResult struct {
-    Text         string       // 该步生成的文本
-    Reasoning    string       // 推理过程
-    ToolCalls    []ToolCall   // 该步请求的工具调用
-    ToolResults  []ToolResult // 工具执行结果
-    Usage        Usage        // 该步的 token 用量
-    Messages     []Message    // 该步产生的消息
-}
-```
-
-`GenerateResult.Steps` 是所有步骤的 `StepResult` 数组，`GenerateResult.Messages` 是所有步骤消息的汇总。
+`SandboxToolPrefix`（`"sandbox_"`）会在编排时被剥离，使模型看到通用工具名（如 `exec`、`read_file`），而不感知沙箱实现细节。
 
 ---
 
@@ -581,23 +688,213 @@ params.Messages = llm.PatchToolCalls(params.Messages)
 
 `OrchestrateGenerate` 和 `OrchestrateStream` 已内置此调用（包括单步快速路径）。
 
-### ContextReduction — 工具结果截断
+### TruncateOutput — 工具输出截断
 
-多步编排中，工具执行结果可能累积到超长上下文。`ContextReduction` 在 `PrepareStep` 回调中自动截断过长的 tool result 消息，将超出阈值的部分替换为摘要预览：
+每次工具执行后，`runTool` 会用 `DefaultTruncationConfig()` 对结果做字节/行级截断（保留头部+尾部，中间省略），避免单个超长结果撑爆上下文：
 
 ```go
+cfg := llm.DefaultTruncationConfig() // MaxLines=500, MaxBytes=50KB
+res := llm.TruncateOutput(output, cfg)
+// res.Output any; res.Truncated bool; res.OriginalSize int
+```
+
+`TruncationConfig` 字段：`MaxLines int`（默认 500）、`MaxBytes int`（默认 50×1024）。
+
+### Reduction — 编排内轻量压缩
+
+`Reduction` 在编排循环内提供两阶段“安全网”，与重量级的 `Compactor` 互补：
+
+- **阶段 1（TruncateToolResults）**：工具执行后，单个结果 token 估算超过 `MaxOutputTokens` 时替换为预览+摘要（token 级，区别于 `TruncateOutput` 的字节级）。
+- **阶段 2（ReduceHistory）**：每步 LLM 调用前，若总消息 token 超过 `ClearThresholdTokens`，将较早的工具结果替换为紧凑占位符（零成本，无额外 LLM 调用）。
+
+```go
+reductionCfg := llm.DefaultReductionConfig() // MaxOutputTokens=7500, ClearThresholdTokens=100000, RetainRecentSteps=4
 result, err := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
     Params:   params,
     MaxSteps: 10,
-    PrepareStep: llm.NewContextReduction(llm.ReductionConfig{
-        MaxOutputTokens: 7500, // 超过此 token 估算的工具结果会被截断
-    }).PrepareStep,
+    OnToolResults: llm.NewOnToolResultsCallback(reductionCfg),   // 阶段 1
+    PrepareStep:   llm.NewReducePrepareStepCallback(reductionCfg), // 阶段 2
 })
 ```
 
-截断策略：
-- 每个 tool result 保留前 `MaxOutputTokens` 字符（≈1/4 的 token 值）+ `... (truncated)` 标记
-- 每步最多截断一个最长的 tool result，避免一次性修改过多历史
+`ReductionConfig` 字段：`MaxOutputTokens int`、`ClearThresholdTokens int`、`RetainRecentSteps int`、`ExcludeTools []string`（这些工具的结果永不被截断/压缩）。也可直接调用 `llm.TruncateToolResults(results, cfg)` / `llm.ReduceHistory(messages, cfg)`。
+
+> 注意：旧文档曾使用 `NewContextReduction(...).PrepareStep`，该 API 已不存在，请改用上面的回调工厂函数。
+
+### Compactor — 对话级摘要压缩
+
+`Compactor` 实现四层上下文压缩策略：
+
+1. **Pruning**：从最新消息向回扫描，保护区（`PruneProtect`=40000 tokens）外的旧工具输出替换为 `"[compacted]"` 占位符；可裁剪量须超过 `PruneMinimum`（20000）才执行；`ProtectedTools`（如 `skill`）的输出永不裁剪。
+2. **Compaction**：总 token 超阈值时，用 LLM 生成旧消息的结构化增量摘要（保留最近 `TailTurns` 轮完整对话 + 摘要替代旧消息）。
+3. **Error-triggered**：provider 返回 context overflow 错误时自动触发压缩流程。
+4. **Mid-conversation system message**：在对话中插入系统消息（如日期变更提醒），而非修改 system prompt。
+
+```go
+compactor := llm.NewCompactor(llm.DefaultCompactionConfig())
+// 仅裁剪（无 LLM）：
+result, _ := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
+    Params:      params,
+    MaxSteps:    10,
+    PrepareStep: llm.CompactionPrepareStep(compactor), // func(*GenerateParams) *GenerateParams
+})
+```
+
+`DefaultCompactionConfig()` 默认值（保守的上下文窗口预算）：`MaxTokens=64000`、`ReservedTokens=20000`、`TailTokens=8000`、`TailTurns=2`、`MinMessagesToCompact=6`、`SummaryMaxTokens=4096`、`ToolOutputThreshold=500`、`Auto=true`。`Compactor` 还提供 `IsOverflow` / `IsOverflowByUsage` / `ShouldCompact` / `PruneToolOutputs` / `Compact(ctx, params, provider)`，并通过 `DoomLoopThreshold`（连续压缩上限 3 次）防止无限压缩循环。
+
+`CompactionPrepareStepWithProvider(compactor, provider)` 返回 `func(context.Context) func(*GenerateParams) *GenerateParams`，可提供 LLM 摘要能力（provider-backed compaction）。
+
+错误触发压缩时可借助检测函数：
+
+```go
+if llm.IsContextOverflowError(err) {
+    // 触发压缩重试
+}
+```
+
+`IsContextOverflow(message string)` 直接匹配错误消息；`IsContextOverflowError(err error)` 兼容 `*LLMError`（`ErrorReasonContextOverflow`）与原始 error。
+
+中间对话系统消息：
+
+```go
+mid := llm.NewDateChangeMessage("2026-08-03") // MidConversationMessage{Type, Content, Timestamp}
+msgs := llm.InsertMidConversationMessages(history, mid)
+```
+
+---
+
+## Prompt 缓存策略
+
+`CachePolicy` 控制 prompt 缓存断点的放置方式：
+
+```go
+type CachePolicy string // "none" | "auto"
+
+const MaxCacheBreakpoints = 4 // Anthropic 单次请求允许的最大断点数
+```
+
+- **Anthropic / Bedrock / Alibaba**：显式断点（`cache_control: {type:"ephemeral"}`），最多 4 个。
+- **OpenAI / Azure / Copilot**：隐式前缀缓存，无需显式断点；可用 `GenerateParams.CacheKey` 透传缓存键提示（如 session ID）。
+- **Google / Gemini**：隐式缓存，自动处理。
+
+`GenerateParams.CachePolicy` 取值：`""`（provider 默认：anthropic 用 auto，其余 none）、`"none"`（清除所有缓存标记）、`"auto"`（在 system / 最后工具 / 最后用户消息上自动放置断点）。编排时 `OrchestrateGenerate`/`OrchestrateStream` 会根据 provider 名自动应用合适的策略（`ShouldApplyCacheBreakpoints("anthropic")` 等返回 true 的 provider 使用显式断点）。`ApplyCachePolicy(params, policy)` 也可手动调用。
+
+---
+
+## 工具延迟加载（Tool Deferral）
+
+`ToolDeferral` 模仿 Anthropic 的 `defer_loading` / `tool_search` 行为：被标记 `DeferredLoad` 的工具初始只向模型展示**名称+描述**（隐藏 `Parameters`/输入 schema），直到被“加载”；模型通过注入的 `tool_search` 工具发现延迟工具，或在引用其名称时被自动加载。加载后完整 schema 才可见，模型方可带参数调用。
+
+加载状态**非永久**：`DefaultIdleEvictSteps`（6 步）未使用的加载工具会被卸载（schema 重新隐藏）；`DefaultMaxLoaded`（12）软上限在同时加载过多时按 LRU 淘汰，使模型可见上下文有界而非无限增长。
+
+```go
+// 每个 bot/session 创建一个 DeferralStore，按 session 隔离加载状态
+store := llm.NewDeferralStore(true) // enabled=true
+deferral := store.ForSession("session-123")
+
+// 在编排配置中启用
+cfg := &llm.OrchestrateConfig{
+    Params:      params,
+    MaxSteps:    10,
+    ToolDeferral: deferral,
+}
+```
+
+`ToolDeferral` 关键方法：`NewToolDeferral(enabled)`、`SetTools(full)`、`HasDeferred()`、`View() []Tool`（返回给模型的工具视图+按需注入 `tool_search`）、`Search(query) []Tool`、`Load(name)`、`IsLoaded(name)`、`SetCapacity(maxLoaded, idleEvict)`、`SetStep(step)`、`Touch(name)`、`Unload(name)`、`SetLogger(l)`。
+
+`DeferralStore`：`NewDeferralStore(enabled)`、`ForSession(sid) *ToolDeferral`（空 sid 回退到共享 deferral；`enabled=false` 时返回 nil，绕过延迟加载）。
+
+在 `Tool` 上通过 `DeferredLoad bool` 与 `Keywords []string`（供 `tool_search` 匹配）配合启用。
+
+---
+
+## 统一错误处理
+
+所有 provider 适配器应将 API 错误包装为 `*LLMError`，使编排层能基于结构化的 `Reason` 做智能重试/路由，而非解析原始错误字符串。
+
+```go
+// 构造错误
+err := llm.NewLLMError(llm.ErrorReasonRateLimit, "openai", "rate limited",
+    llm.WithRetryAfter(2*time.Second),
+    llm.WithHTTPContext(&llm.HTTPContext{StatusCode: 429, URL: "..."}),
+)
+
+// 提取与判断
+if llmErr, ok := llm.AsLLMError(err); ok {
+    fmt.Println(llmErr.Reason, llmErr.ProviderName, llmErr.Retryable)
+}
+if llm.IsRetryableLLMError(err) {
+    // 可重试
+}
+```
+
+`ErrorReason` 取值：`ErrorReasonInvalidRequest` / `ErrorReasonContextOverflow` / `ErrorReasonAuthentication` / `ErrorReasonRateLimit` / `ErrorReasonQuotaExceeded` / `ErrorReasonContentPolicy` / `ErrorReasonProviderInternal` / `ErrorReasonTransport` / `ErrorReasonInvalidProviderOutput` / `ErrorReasonUnknownProvider` / `ErrorReasonNoRoute`。`ErrorReason.IsRetryable()` 对 `rate_limit` / `provider_internal` / `transport` 返回 true。
+
+`LLMError` 字段：`Reason`、`Message`、`ProviderName`、`Retryable`、`RetryAfterMs`、`HTTPContext *HTTPContext`。`LLMErrorOpt`：`WithCause(err)`、`WithRetryAfter(d)`、`WithHTTPContext(*HTTPContext)`、`WithRetryable(bool)`。`RetryAfter()` 返回 `time.Duration`。
+
+---
+
+## Token 估算
+
+`token_count.go` 提供轻量级 token 计数估算（无需外部 tokenizer，精度约 ±15%），仅用于触发上下文压缩的阈值判断，不用于精确计费。
+
+```go
+n := llm.EstimateTokens("hello 世界")        // 混合策略估算
+n = llm.EstimateMessageTokens(msg)           // 单条消息（含角色开销）
+n = llm.EstimateMessagesTokens(messages)     // 消息列表（含分隔开销）
+n = llm.EstimateParamsTokens(params)         // 完整 GenerateParams（system + messages）
+n = llm.EstimateSystemTokens(system)         // system prompt
+runes := llm.CountRunes(s)                   // Unicode 字符数（非字节数）
+```
+
+`TokenCountConfig{Mode}` 支持 `"exact"` / `"chars"` / `"hybrid"`（默认混合：区分 CJK 与非 CJK）。`DefaultTokenCountConfig()` 返回混合模式。
+
+---
+
+## 使用统计与配额记账
+
+### StatsRecordingProvider — 使用统计
+
+装饰器包裹任意 `Provider`，在每次 `DoGenerate` / `DoStream` 完成后记录 token 使用统计。
+
+```go
+wrapped := llm.NewStatsRecordingProvider(originalProv, recorder, botID)
+// recorder 实现 llm.UsageRecorder（RecordUsage(ctx, UsageMetric)）
+
+// 通过 context 控制记录行为
+ctx = llm.WithStatsFeature(ctx, "vision") // 标记功能维度（如 "reply"/"chat"/"vision"）
+// ctx = llm.WithStatsSkip(ctx)           // 跳过记录（由调用方自行记录，避免重复计数）
+```
+
+`UsageMetric` 维度：`BotID`、`Model`、`Feature`、`Channel`、`Usage`、`ToolCalls`、`Steps`。`WithStatsFeature` 会同时清除 `WithStatsSkip` 标记（显式指定 feature 即表示希望记录）。
+
+### QuotaRecordingProvider — 全链路 Token 记账
+
+装饰器模式包裹任意 `Provider`，在每次 `DoGenerate` / `DoStream` 完成后自动从 context 读取配额维度并记账。确保 SubAgent、Workflow、Memory 等绕过 pipeline 中间件的调用也能被追踪。
+
+```go
+// 1. 准备 recorder（签名与 pipeline.TokenQuotaState.AddUsage 兼容）
+recorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
+
+// 2. 包裹 Provider
+wrappedProv := llm.NewQuotaRecordingProvider(originalProv, recorder)
+
+// 3. 在调用链上游注入 dimension（通常由 pipeline 中间件完成）
+ctx = llm.WithQuotaDimension(ctx, "bot:bot1:chat:telegram:-123")
+
+// 之后所有经过 wrappedProv 的调用都会自动记账
+result, err := wrappedProv.DoGenerate(ctx, params)
+// → recorder("bot:bot1:chat:telegram:-123", result.Usage.TotalTokens)
+```
+
+Context 辅助函数：
+
+| 函数 | 说明 |
+|------|------|
+| `WithQuotaDimension(ctx, dim)` | 将配额维度字符串注入 context |
+| `QuotaDimensionFromContext(ctx)` | 从 context 读取配额维度（未设置时返回空串） |
+
+`QuotaRecordingProvider` 在 `DoStream` 时通过拦截 `FinishPart` 的 `TotalUsage.TotalTokens` 完成记账。如果 context 中没有 dimension（未设置），则跳过记账，不影响正常调用。
 
 ---
 
@@ -606,18 +903,29 @@ result, err := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
 ```
 llm/
 ├── llm.go              # Provider 接口 + 可选能力接口 + Embedding/Speech/Transcription
-├── generate.go         # GenerateParams / GenerateResult / StepResult / ResponseMetadata
+├── model.go            # Model / ModelType
+├── usage.go            # Usage / Token 统计
+├── generate.go         # GenerateParams / GenerateResult / StepResult / ResponseFormat / ResponseMetadata / Source
 ├── stream.go           # StreamResult + 所有 StreamPart 类型
 ├── message.go          # Message / MessagePart 类型 + 构造函数
 ├── message_json.go     # Message 的自定义 JSON 序列化
 ├── tool.go             # Tool / ToolCall / ToolResult + 审批类型
 ├── tool_schema.go      # NewTool[T] 泛型 + struct→JSONSchema 反射推断
 ├── orchestrate.go      # 多步编排：OrchestrateGenerate / OrchestrateStream
+├── orchestrate_loop.go # 动态步数控制 loopController
 ├── patchtoolcalls.go   # PatchToolCalls — 修补悬挂工具调用
-├── reduction.go        # ContextReduction — 工具结果超限截断
-├── quota_provider.go   # QuotaRecordingProvider — 拦截所有 LLM 调用自动记账 Token 用量
-├── model.go            # Model 类型
-├── usage.go            # Usage / Token 统计
+├── reduction.go        # Reduction — 编排内轻量压缩（TruncateToolResults / ReduceHistory）
+├── tool_truncate.go    # TruncateOutput — 工具输出字节/行级截断
+├── compaction.go       # Compactor — 对话级摘要压缩 + 上下文溢出检测 + 中间系统消息
+├── cache_policy.go     # CachePolicy / 断点自动放置
+├── errors.go           # 统一错误分类（LLMError / ErrorReason）
+├── token_count.go      # EstimateTokens 等 token 估算
+├── tool_defer.go       # ToolDeferral / DeferralStore — 工具延迟加载
+├── quota_provider.go   # QuotaRecordingProvider — 全链路 Token 记账
+├── stats.go            # UsageMetric / UsageRecorder
+├── stats_provider.go   # StatsRecordingProvider — 使用统计记录
+├── invocation.go       # 调用标识工具
+├── media.go            # 媒体类型工具
 ├── openai/             # OpenAI provider 实现
 ├── anthropic/          # Anthropic (Claude) provider 实现
 ├── google/             # Google (Gemini) provider 实现
@@ -661,7 +969,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 }
 ```
 
-3. 可选实现 `ModelLister`、`TestableProvider` 等接口。
+3. 可选实现 `ModelLister`、`TestableProvider` 等接口；建议将所有错误用 `llm.NewLLMError` 包装为 `*LLMError`。
 
 参考 `llm/openai/adapter.go` 了解完整实现。
 
@@ -683,31 +991,3 @@ FinishPart
 多步编排时，每个步骤重复 `StartStepPart...FinishStepPart`，最后只有一个 `FinishPart`。
 
 ---
-
-## QuotaRecordingProvider — 全链路 Token 记账
-
-装饰器模式包裹任意 `Provider`，在每次 `DoGenerate` / `DoStream` 完成后自动从 context 读取配额维度并记账。确保 SubAgent、Workflow、Memory 等绕过 pipeline 中间件的调用也能被追踪。
-
-```go
-// 1. 准备 recorder（签名与 pipeline.TokenQuotaState.AddUsage 兼容）
-recorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
-
-// 2. 包裹 Provider
-wrappedProv := llm.NewQuotaRecordingProvider(originalProv, recorder)
-
-// 3. 在调用链上游注入 dimension（通常由 pipeline 中间件完成）
-ctx = llm.WithQuotaDimension(ctx, "bot:bot1:chat:telegram:-123")
-
-// 之后所有经过 wrappedProv 的调用都会自动记账
-result, err := wrappedProv.DoGenerate(ctx, params)
-// → recorder("bot:bot1:chat:telegram:-123", result.Usage.TotalTokens)
-```
-
-### Context 辅助函数
-
-| 函数 | 说明 |
-|------|------|
-| `WithQuotaDimension(ctx, dim)` | 将配额维度字符串注入 context |
-| `QuotaDimensionFromContext(ctx)` | 从 context 读取配额维度（未设置时返回空串） |
-
-`QuotaRecordingProvider` 在 `DoStream` 时通过拦截 `FinishPart` 的 `TotalUsage.TotalTokens` 完成记账。如果 context 中没有 dimension（未设置），则跳过记账，不影响正常调用。

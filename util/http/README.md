@@ -16,9 +16,11 @@
 - [WebSocket](#websocket)
 - [Multipart 表单](#multipart-表单)
 - [看门狗超时](#看门狗超时)
+- [流式错误与重试策略](#流式错误与重试策略)
 - [代理支持](#代理支持)
 - [Clone 共享连接池](#clone-共享连接池)
 - [Dump 调试](#dump-调试)
+- [Trace ID 集成](#trace-id-集成)
 - [文件结构](#文件结构)
 
 ---
@@ -82,9 +84,12 @@ client := httputil.New(
         "X-Custom": "value",
     }),
     httputil.WithRetry(retry.Config{                   // 重试配置
-        MaxRetries:    3,
-        BaseDelay:     time.Second,
-        MaxDelay:      30 * time.Second,
+        MaxRetries: 3,
+        Backoff: &retry.Backoff{
+            Strategy: retry.StrategyExponential,
+            Initial:  time.Second,
+            Max:      30 * time.Second,
+        },
     }),
     httputil.WithRetrySimple(3, 2*time.Second),        // 简单重试（固定间隔）
     httputil.WithMaxBodySize(50*1024*1024),            // 响应体上限（默认 10MB，-1=无限）
@@ -93,7 +98,14 @@ client := httputil.New(
     httputil.WithDump(),                               // 全局开启 dump 日志
     httputil.WithHTTPClient(customHTTPClient),         // 自定义底层 http.Client
 )
+
+// 全默认配置（30s 超时，无 baseURL / 无重试）
+client := httputil.DefaultClient()
 ```
+
+> `WithMaxBodySize` 超限时不会报错，而是截断 Body 并打印一条 warn 日志。
+> 流式接口（SSE / Stream / WS）不受该上限约束，并使用零超时的客户端副本，
+> 因此 `WithTimeout` 不会中断长连接。
 
 ---
 
@@ -132,20 +144,27 @@ resp.JSON(&v)    // JSON 反序列化
 
 ## 重试机制
 
-配置重试后，对 **可重试状态码**（429 / 5xx）和网络错误自动重试：
+配置重试后，对 **可重试状态码**（429 / 5xx，其中 502/503/504 显式命中）和网络错误（无状态码）自动重试：
 
 ```go
 client := httputil.New(
+    // 完整配置
     httputil.WithRetry(retry.Config{
-        MaxRetries:    3,
-        BaseDelay:     time.Second,
-        MaxDelay:      30 * time.Second,
-        // ShouldRetry: 可选自定义（默认 429/5xx/网络错误）
+        MaxRetries: 3,
+        Backoff: &retry.Backoff{
+            Strategy: retry.StrategyExponential,
+            Initial:  time.Second,
+            Max:      30 * time.Second,
+        },
+        // ShouldRetry: 可选自定义（默认按上述状态码判断）
     }),
+    // 或快捷方式：固定次数 + 固定间隔
+    httputil.WithRetrySimple(3, 2*time.Second),
 )
 ```
 
-**Retry-After 头支持**：收到 429 时自动解析 `Retry-After` 响应头（秒数或 HTTP-date），作为下次重试的最小等待时间。
+**Retry-After 头支持**：收到 429 时自动解析 `Retry-After` 响应头（秒数或 HTTP-date），
+与退避计算出的间隔取较大值作为下次重试的等待时间。若自行提供了 `GetRetryDelay`，同样取二者较大值。
 
 **per-request 覆盖**：
 
@@ -211,6 +230,10 @@ if err := <-errCh; err != nil {
 
 **Last-Event-ID 自动重连**：重试时自动携带 `Last-Event-ID` 请求头，支持 SSE 规范的断点续传。
 
+**重试限制**：仅 `DoSSE`（回调模式）支持自动重试；channel 模式（`DoSSEStream` / `DoSSEStreamWithErr`）
+不支持，因为已发出的事件无法撤回。此外传入外部 `Watchdog` 时重试也会被忽略并打印警告
+（每次重试需要全新的看门狗）。默认 `ShouldRetry` 为 `DefaultStreamShouldRetry`。
+
 ---
 
 ## 原始流式响应
@@ -237,7 +260,10 @@ err := client.Post("/logs").DoStream(httputil.StreamConfig{
 })
 ```
 
-Channel 变体：`DoStreamChunks`、`DoStreamChunksWithErr`、`DoStreamLines`、`DoStreamLinesWithErr`。
+`BufferSize` 控制 chunk 模式的读取缓冲（默认 32KB）；行模式固定使用 64KB 的 `bufio.Reader`。
+
+Channel 变体：`DoStreamChunks`、`DoStreamChunksWithErr`、`DoStreamLines`、`DoStreamLinesWithErr`
+（与 SSE 一样，channel 变体不支持自动重试）。
 
 ---
 
@@ -299,9 +325,40 @@ conn.WriteBinary([]byte{0x01, 0x02})
 | `Ping()` | 发送 Ping 帧 |
 | `Close()` / `CloseWithCode(code, text)` | 优雅关闭 |
 | `IsClosed()` | 连接是否已关闭 |
+| `URL()` | 连接的 URL |
+| `Watchdog()` | 关联的看门狗（可能为 nil） |
 | `Underlying()` | 获取底层 `*websocket.Conn` |
 
-URL 协议自动转换：`http://` → `ws://`、`https://` → `wss://`。
+### 手动模式
+
+`DialWS(cfg)` 只建立连接并返回 `*WSConn`，读取循环由调用方自行控制：
+
+```go
+conn, err := client.Get("/ws").DialWS(httputil.WSConfig{
+    WatchdogTimeout: 120 * time.Second,
+    ReadLimit:       1 << 20,
+})
+defer conn.Close()
+```
+
+### 常量与辅助函数
+
+消息类型常量与 gorilla/websocket 对齐：`WSTextMessage`、`WSBinaryMessage`、
+`WSCloseMessage`、`WSPingMessage`、`WSPongMessage`。
+
+| 函数 | 说明 |
+|------|------|
+| `FormatWSCloseMessage(code, text)` | 构造关闭帧负载 |
+| `IsWSCloseError(err, codes...)` | 是否为指定关闭码的关闭错误 |
+| `IsWSUnexpectedCloseError(err)` | 是否为意外关闭 |
+| `WSCloseCode(err)` | 提取关闭码，非关闭错误返回 -1 |
+
+其他行为：
+
+- URL 协议自动转换：`http://` → `ws://`、`https://` → `wss://`（已是 `ws(s)://` 则原样使用）
+- 默认注册 Pong handler：收到 Pong 自动 Feed 看门狗
+- 后台监听 context：用户取消或看门狗超时会自动发送 Close 帧并关闭连接，使阻塞的读取立即返回
+- `HandshakeTimeout` 为 0 时由 gorilla 使用其默认值（45s）
 
 ---
 
@@ -349,7 +406,42 @@ if httputil.IsWatchdogTimeout(err) {
 }
 ```
 
-`WatchdogTimeoutError` 包含诊断信息：URL、收到的事件/数据块数、字节数、耗时。
+`WatchdogTimeoutError` 包含诊断信息：`URL`、`ItemsReceived`、`BytesReceived`、`Elapsed`、`WatchdogName`。
+它的 `Unwrap()` 返回 `watchdog.ErrWatchdogTimeout`，因此 `errors.Is(err, watchdog.ErrWatchdogTimeout)` 同样成立。
+
+---
+
+## 流式错误与重试策略
+
+### StreamHTTPError
+
+流式连接在**建立阶段**收到非预期状态码时返回（SSE 要求严格 200，Stream 允许 2xx）。
+保留原始错误响应体（最多 64KB），便于上层 SDK 解析为具体的 API 错误：
+
+```go
+var se *httputil.StreamHTTPError
+if errors.As(err, &se) {
+    log.Printf("status=%d body=%s", se.StatusCode, se.Body)
+}
+```
+
+字段：`StatusCode` / `Body` / `Headers` / `URL`。
+
+### 可复用的 ShouldRetry / GetRetryDelay
+
+| 函数 | 策略 |
+|------|------|
+| `DefaultStreamShouldRetry` | 仅当「看门狗超时且本次连接未收到任何数据」时重试；其他一律不重试 |
+| `StreamShouldRetry` | 在上者基础上：context 取消不重试；`StreamHTTPError` 状态码 ∈ {408,429,500,502,503,504,529} 重试，其余 4xx 不重试；其他网络层错误默认重试 |
+| `StreamGetRetryDelay` | 从 `StreamHTTPError` 的 `Retry-After-MS`（优先）/ `Retry-After`（秒数或 HTTP-date）解析建议延迟 |
+
+```go
+cfg := retry.Config{
+    MaxRetries:    3,
+    ShouldRetry:   httputil.StreamShouldRetry,
+    GetRetryDelay: httputil.StreamGetRetryDelay,
+}
+```
 
 ---
 
@@ -384,15 +476,13 @@ base := httputil.New(
     httputil.WithRetry(retry.Config{MaxRetries: 3}),
 )
 
-// Clone 后共享 Transport，但 header/baseURL 独立
-openai := base.Clone()
-openai.SetBaseURL // ... 通过 New(opts...) 或直接修改
-
-// 实际用法：llm 包的 WithSharedClient
-sharedHTTP := httputil.New(httputil.WithTimeout(60*time.Second))
-prov1 := openai.New(openai.WithSharedClient(sharedHTTP))
-prov2 := anthropic.New(anthropic.WithSharedClient(sharedHTTP))
+// Clone 为浅拷贝：共享底层 *http.Client（Transport / 连接池 / TLS），
+// 但 headers 是独立副本，baseURL / retryCfg / maxBodySize / dumpEnabled 各自持有
+c1 := base.Clone()
+c2 := base.Clone()
 ```
+
+`Clone()` 不接受 Option 参数；如需修改 baseURL 等配置，请在 `New(opts...)` 时一次性指定。
 
 ---
 
@@ -414,13 +504,16 @@ resp, err := client.Post("/api").Dump().Do()
 
 ## Trace ID 集成
 
-如果 context 中包含 Trace ID（通过 `util/traceid` 包），会自动注入到请求头 `X-Trace-ID` 中（可配置 header name），实现全链路追踪。
+如果 context 中包含 Trace ID（通过 `util/traceid` 包），构建请求时会自动注入到请求头
+`X-Trace-ID`（即 `traceid.HeaderKey`），实现全链路追踪。若已手动设置该头则不覆盖。
 
 ```go
-ctx = traceid.With(ctx, "req-abc-123")
-// 后续通过此 ctx 发出的所有请求自动携带 X-Trace-ID: req-abc-123
+ctx = traceid.WithTraceID(ctx, "4bf92f3577b34da6a3ce929d0e0e4736")
+// 后续通过此 ctx 发出的所有请求自动携带 X-Trace-ID
 resp, err := client.Get("/data").SetContext(ctx).Do()
 ```
+
+请求/响应日志同样通过 `traceid.L(ctx)` 输出，自动带上 `trace_id` 字段。
 
 ---
 
@@ -429,7 +522,8 @@ resp, err := client.Get("/data").SetContext(ctx).Do()
 ```
 util/http/
 ├── client.go       # Client + Option + Request 链式构造 + Response + 便捷方法 + Dump
-├── errors.go       # WatchdogTimeoutError + DefaultStreamShouldRetry + IsWatchdogTimeout
+├── errors.go       # WatchdogTimeoutError / IsWatchdogTimeout + DefaultStreamShouldRetry
+│                   # + StreamShouldRetry + StreamGetRetryDelay
 ├── sse.go          # SSE 事件流：DoSSE / DoSSEStream / DoSSEStreamWithErr
 ├── stream.go       # 原始流式响应：DoStream / DoStreamChunks / DoStreamLines
 ├── stream_conn.go  # 流式连接共用逻辑：streamConnect + StreamHTTPError + classifyStreamError

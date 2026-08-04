@@ -65,6 +65,22 @@ wd := watchdog.NewWithName(ctx, 30*time.Second, "misskey-ws")
 
 ## 超时判断
 
+### ErrWatchdogTimeout
+
+包级 sentinel error，供上层封装自己的超时错误类型时通过 `Unwrap()` 关联：
+
+```go
+var ErrWatchdogTimeout = errors.New("watchdog timeout")
+
+// 判断
+if errors.Is(err, watchdog.ErrWatchdogTimeout) { ... }
+```
+
+> `util/http` 的 `WatchdogTimeoutError` 即通过 `Unwrap()` 返回该 sentinel。
+> 注意：`Watchdog` 本身不会返回 error，超时表现为 `Context()` 被取消 + `TimedOut() == true`。
+
+### TimedOut()
+
 `TimedOut()` 用于区分 context 被取消的原因：
 
 | `TimedOut()` | 含义 | 典型处理 |

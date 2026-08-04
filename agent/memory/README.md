@@ -180,18 +180,26 @@ L0 工作记忆
 
 ### 6 信号加权评分
 
+权重常量定义于 `dreaming.go`，合计 = 1.0：
+
 | 信号 | 权重 | 含义 |
 |------|------|------|
-| Relevance | 0.30 | 检索召回质量 |
-| Frequency | 0.24 | Light 阶段累积命中次数 |
-| Diversity | 0.15 | 触发召回的不同查询数 |
-| Recency | 0.15 | 时间衰减新鲜度（14 天半衰期） |
-| Consolidation | 0.10 | 跨多次梦境重现强度 |
-| Richness | 0.06 | 内容具体性和原子性 |
+| Relevance | 0.10 | 检索召回质量 |
+| Frequency | 0.30 | Light 阶段累积命中次数 |
+| Diversity | 0.05 | 触发召回的不同查询数 |
+| Recency | 0.25 | 时间衰减新鲜度（14 天半衰期） |
+| Consolidation | 0.20 | 跨多次梦境重现强度 |
+| Richness | 0.10 | 内容具体性和原子性 |
 
 ### 3 门控阈值
 
-候选必须**同时通过**才能晋升：`minScore ≥ 0.8`、`recallCount ≥ 3`、`uniqueQueries ≥ 3`
+候选需通过 `DeepPhaseConfig` 中配置的门控才能晋升。默认值（见 `DefaultDreamConfig`）：
+
+- `MinScore`：综合评分阈值，默认 **0.45**。
+- `MinRecallCount`：召回次数门控，默认 **0**（关闭）。
+- `MinUniqueQueries`：唯一查询数门控，默认 **0**（关闭）。
+
+> 注：召回/查询类门控默认关闭。这些信号仅在候选晋升后召回时才会累积，作为硬门控会造成死锁，因此保留配置项供将来按需启用。另有 `MinREMHits`、`MaxPromotions`、`RecencyHalfLifeDays`(默认 14)、`MaxAgeDays`(默认 30) 等可调项。
 
 ### 集成示例
 

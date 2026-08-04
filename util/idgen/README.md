@@ -12,8 +12,8 @@ msgID   := idgen.New("msg")      // → "msg-a3f1b2c4d5e6f7a8b9c0d1e2"
 memID   := idgen.New("mem")      // → "mem-9e8d7c6b5a4f3e2d1c0b9a8f"
 noteID  := idgen.New("note")     // → "note-7c6b5a4f3e2d1c0b9a8f7e6d"
 
-// 无前缀
-rawID := idgen.New("")           // → "a3f1b2c4d5e6f7a8b9c0d1e2"
+// 空前缀（分隔符 "-" 仍会保留）
+rawID := idgen.New("")           // → "-a3f1b2c4d5e6f7a8b9c0d1e2"
 ```
 
 ## 设计细节
@@ -23,7 +23,7 @@ rawID := idgen.New("")           // → "a3f1b2c4d5e6f7a8b9c0d1e2"
 | 随机源 | `crypto/rand`（密码学安全，非 `math/rand`） |
 | 随机字节数 | 12 字节 = 96 位随机空间（碰撞概率 ≈ 2⁻⁹⁶） |
 | 编码 | hex（24 字符，全小写） |
-| 格式 | `{prefix}-{hex}`，prefix 为空时不含 `-` |
+| 格式 | `{prefix}-{hex}`，前缀与随机段之间恒定使用 `-` 连接 |
 | 失败回退 | `crypto/rand` 极端失败时回退到 `{prefix}-{unix-nano}` |
 
 ## 前缀命名规范（约定）

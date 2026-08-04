@@ -50,12 +50,26 @@
 
 | 工具 | 说明 |
 |------|------|
-| `task` | 提交需求，异步创建工作流，立即返回 `task_id` |
-| `task_status` | 查询工作流状态（analyzing → running → completed/failed/terminated）和进度统计 |
-| `task_detail` | 查询子任务列表（`flat` 平铺 / `tree` 树状） |
-| `task_control` | 控制操作：重试指定失败节点 / 终止整个工作流 |
+| `task` | 提交需求，异步创建工作流，立即返回 `task_id`。支持 `goalMode` 目标模式（闭环迭代直到审查通过）与 `maxParallel` 并发度覆盖 |
+| `task_status` | 查询工作流状态（analyzing → running → completed/failed/terminated）和进度统计。支持 `wait: true` 服务端阻塞等待：传 `wait=true` 后服务端在函数内轮询，直到工作流进入终态才返回，禁止 LLM 自行 `sleep` 轮询；可用 `timeoutSeconds`（默认 600，上限 1800）限定最长等待 |
+| `task_detail` | 查询子任务列表（`flat` 平铺 / `tree` 树状）；开启目标模式时额外返回 `goalMode`/`goalIteration`/`goalMaxIterations` |
+| `task_control` | 控制操作：对 **运行中** 工作流重试指定失败节点 / 终止；对 **已终态** 工作流通过 `ActionRetry` 从指定节点重新拉起调度（`restartFromNode`） |
 
 > 工具命名与主流 LLM 预训练中的 agentic 工具名（如 Claude 的 Task、LangChain 的 TaskTool）对齐，降低 LLM 适配成本。
+
+## 等待模式（wait）
+
+`task_status` 提供服务端阻塞等待能力。`wait: true` 时，工具调用在引擎侧 `waitForTerminal` 内持续轮询，直到工作流进入 `completed` / `failed` / `terminated` 才返回，避免 LLM 用 `sleep` 反复轮询：
+
+- `timeoutSeconds`（整数，秒）：最长等待时长，默认 `600`（10 分钟），上限 `1800`（30 分钟，由 `statusWaitMaxTimeout` 约束，超出被截断）。
+- 超时返回 `TimedOut: true` 且携带最新快照，而非报错；调用方可再次 `task_status(wait: true)` 续等。
+- 内部轮询间隔 `statusWaitPollInterval = 3s`，并响应 `ctx` 取消。
+
+判断口诀：**想知道结果 → 一次 `task_status(wait: true)` → 拿到终态再继续**；不带 `wait` 的查询仅用于「顺便看一眼进度」。
+
+## 并行 DAG（默认并行）
+
+Analyzer 的系统提示词明确要求：**默认让子任务并行**，仅当存在真实数据依赖（如「B 依赖 A 的输出」）才建 `dependencies`。因此 Scheduler 按编译后的拓扑序调度，所有无依赖关系的节点并发执行（受 `MaxParallel` 信号量限流），而非串行。好的需求拆分应尽量减少依赖边，以最大化并行度。
 
 ## 图编译 (Compile)
 
@@ -106,6 +120,23 @@ pending → ready → running ──→ completed
                     └──→ failed (重试耗尽) ──→ 下游级联 skipped
 ```
 
+## 从终态重试（restartFromNode）
+
+`task_control` 的 `ActionRetry` 对**已终态**（`completed`/`failed`/`terminated`）的工作流同样可用：
+
+- 当工作流处于终态时，`Control` 会调用 `restartFromNode(wf, nodeID)` 重新拉起调度。
+- 目标节点的状态被重置为 `pending`，其因终态而被级联 `skipped` 的下游节点一并恢复为 `pending`，并重建运行实例；其他已完成节点状态保留。
+- 这使得「修复后从某一节点续跑」成为可能，无需从头重跑整个 DAG。
+
+运行中（`running`/`interrupted`）工作流的重试则交由活跃 Scheduler 就地处理，不触发 `restartFromNode`。
+
+## Review 错误分类（基础设施 vs 业务）
+
+Review 阶段会区分两类错误，决定重试还是失败迭代：
+
+- **基础设施错误（可重试）**：网络/服务抖动类，如 `context deadline exceeded`、超时、`connection refused`、502/503/504、限流等。由 `isReviewInfraError` 判定，`context.Canceled` 不算基础设施错误。这类错误触发 `reviewWithInfraRetry` 就地重试（最多 `reviewInfraMaxAttempts=3`，间隔 `reviewInfraRetryBaseDelay=2s`）。
+- **业务判定（失败迭代）**：模型正常给出了「不通过」结论（只是任务没达标）。这类按节点 `max_iterations` 走 Review 自循环带反馈重执行；目标模式下回退到 `Feedback` 目标节点形成「工作→审查→修复→审查」闭环，直到 `goal_max_iterations` 上限。
+
 ## 配置
 
 通过 `config.Store` 管理，支持运行时动态调整。未配置时使用默认值。
@@ -119,7 +150,11 @@ pending → ready → running ──→ completed
 | `workflow.retry_max_ms` | `10000` | 重试最大退避间隔（毫秒） |
 | `workflow.schedule_interval_ms` | `200` | 调度器轮询间隔（毫秒） |
 | `workflow.analyzer_temperature` | `0.3` | 分析器 LLM temperature |
-| `workflow.analyzer_max_tokens` | `4096` | 分析器 LLM max_tokens |
+| `workflow.analyzer_stuck_timeout` | `180` | 分析器（流式 LLM）卡死看门狗阈值（秒）。连续无 token 超过该时长判卡死并终止；硬上限 = 该值 × 3 |
+| `workflow.analyzer_max_duration_ms` | `600000` | 分析阶段整轮总时长上限（毫秒，即 10 分钟）。兜底防止分析器无限重试把「分析中」拖成黑洞；超时则分析阶段整体失败并报错 |
+| `workflow.goal_max_iterations` | `5` | 目标模式（闭环循环）全局最大迭代轮数；达到上限仍不通过则工作流失败 |
+
+> 分析器 LLM 的 `max_tokens` **不再由独立配置键控制**（`workflow.analyzer_max_tokens` 已移除），改为跟随所用模型的 `MaxTokens` 能力（如模型未显式给出则代码兜底，见 `wire.go` 的 `analyzerMaxTokens`）。
 
 ## 快速接入
 
@@ -151,6 +186,8 @@ Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中
 ## 持久化
 
 采用 JSON 全量序列化策略：整个 `Workflow` 对象序列化为 `WorkflowModel.Data` 字段。读操作优先从内存缓存获取（O(1)），写操作同时更新内存和 DB。表名 `workflow_workflows`。
+
+> **两个 Repository 实例 + DB 新鲜度检查**：`api/botservice.go` 在每 bot 建引擎时持有写入实例（真正执行 DB 写），`api/workflow_service.go` 持有独立的只读查询实例，二者缓存互不共享。因此 `Repository.Get(id)` 即便命中内存缓存，仍会用 `updated_at` 与 DB 比对新鲜度；DB 不可用时退回内存缓存快照，避免读到已被其他实例改写的陈旧数据。写操作 `Save` 存入的是工作流的深拷贝快照；缓存上限 `maxCacheSize=500`，终态工作流会被优先淘汰。
 
 ## 崩溃恢复
 

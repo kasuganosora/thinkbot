@@ -1,33 +1,69 @@
 # tools — Bot 工具管理
 
-注册、管理和执行 Bot 可用的工具（Tool/Function Call），支持工具策略控制、提示词生成和流水线集成。
+管理 LLM 可调用的工具（Function Call）及其提示词。支持静态注册与动态提供、场景过滤、权限策略，
+并通过 `prompt.Registry` 的 Section 机制自动把工具说明注入 system prompt。
 
 ## 功能
 
-- **工具注册**：通过 `ToolManager` 注册工具，自动生成 JSON Schema 描述
-- **策略控制**：基于 Pattern 的允许/拒绝策略（`PatternPolicy`），限制工具使用范围
-- **提示词生成**：自动将工具描述拼接为系统提示词段落
-- **流水线集成**：`ToolStage`（Order=30）在 Pipeline 中注入工具能力
+- **工具注册**：`ToolManager.Register(ToolDef)` 静态注册；`AddProvider(ToolProvider)` 按请求动态提供
+- **Channel 专属工具**：Channel 实现 `ChannelToolProvider`，`BotService` 在 StartBot 时一次性收集注册
+- **场景过滤**：`ToolDef.Scopes`（`private` / `group` / `subagent`），空表示全场景可用
+- **权限策略**：`ToolPolicy`（黑名单模式）与 `PatternPolicy`（glob 通配 + allow/deny/ask）
+- **提示词生成**：工具描述段落自动注册到 `prompt.Registry`（header=300、rules=301、单工具描述=310）
+- **流水线集成**：`ToolsStage`（Order=150）为可选诊断 Stage，仅提前解析工具用于 trace/日志
+
+> 注意：工具注入 LLM 并不依赖 `ToolsStage`，`LLMConfig.ToolResolver` 会在 LLM 调用时自动解析。
 
 ## 关键类型
 
 | 类型 | 说明 |
 |------|------|
-| `ToolManager` | 工具注册中心 |
-| `Policy` | 工具使用策略接口 |
-| `PatternPolicy` | 基于 glob pattern 的允许/拒绝策略 |
-| `ToolStage` | Pipeline Stage（Order=30） |
-| `ToolPromptSection` | 工具提示词段落 |
+| `ToolManager` | 统一入口，整合 `ToolRegistry` + `ToolPromptManager` + 策略 |
+| `ToolRegistry` | 线程安全注册中心，管理静态工具与动态 Provider |
+| `ToolDef` | 工具完整定义：内嵌 `llm.Tool` + `Category`/`Scopes`/`PromptSection`/`RequireApproval` |
+| `ToolProvider` / `ToolFunc` | 动态工具提供者接口及其函数适配器 |
+| `ChannelToolProvider` | Channel 提供专属工具（返回 `[]ToolDef`） |
+| `ToolSessionContext` | 每次解析的会话上下文（BotID/Channel/ChatType/UserID/IsSubagent/SourceChannelType/Extra） |
+| `ToolPolicy` / `ToolRule` | 黑名单策略：按 channel + chatType 限定，支持用户白名单绕过 |
+| `ToolPolicyProvider` / `ToolPolicyFunc` | 运行时动态获取策略；`NewStorePolicyProvider` 从配置实时读取 |
+| `PatternPolicy` / `PatternRule` | glob 模式策略，决策为 `PermAllow`/`PermDeny`/`PermAsk`，后匹配规则覆盖前者 |
+| `ToolPromptManager` | 将 `ToolPromptSection` 注册到 `prompt.Registry` |
+| `ToolsStage` | Pipeline Stage（Order=150，诊断用途） |
+| `ToolInfo` | 已注册工具的只读快照，供列表展示 / 自省 |
+
+## 权限策略
+
+两套策略并存，均实现 `FilterTools`：
+
+- `ToolPolicy`：默认全放行，`Rules[].Disabled` 列出禁用工具，`AllowedUsers` 可放行特定用户。
+  存储键为 `tools.<botID>.policy`（JSON）。
+- `PatternPolicy`：支持 `*` 通配与 `a|b` 或语法，`DefaultDecision` 缺省为 `PermAllow`。
+  存储键为 `tools.pattern.<botID>.policy`。
+  预设工厂：`ReadOnlyPolicy()`、`SafePolicy()`、`SubagentPolicy()`、`GroupChatPolicy()`。
+
+`ToolManager` 目前在 `ResolveTools` 中应用 `ToolPolicyProvider`；构造时若传入 `PolicyStore`
+则自动接入 `NewStorePolicyProvider`，无需手动 `SetPolicyProvider`。
 
 ## 使用示例
 
 ```go
-mgr := tools.NewToolManager(logger)
-mgr.Register("calc", "计算器", calcSchema, calcExecute)
+mgr := tools.NewToolManager(promptReg, cfgStore, logger)
 
-policy := tools.NewPatternPolicy().
-    Allow("calc").
-    Allow("web_search").
-    Deny("file_delete")
-mgr.SetPolicy(policy)
+// 注册内置工具
+_ = mgr.RegisterMany(tools.CurrentTimeTool(), tools.EchoTool())
+
+// 自定义工具
+_ = mgr.Register(tools.ToolDef{
+    Category: "utility",
+    Scopes:   []string{"private"},
+    Tool: tools.BuildTool("calculate", "计算表达式", schema,
+        func(ctx *llm.ToolExecContext, input any) (any, error) { ... }),
+})
+
+// 全局提示词段落
+mgr.SetHeaderSection(tools.DefaultToolHeaderSection([]string{"current_time", "echo"}))
+mgr.SetRulesSection(tools.DefaultToolRulesSection())
+
+// 解析当前会话可用工具
+list, _ := mgr.ResolveForEnvelope(ctx, env)
 ```
