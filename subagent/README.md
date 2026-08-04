@@ -26,7 +26,7 @@ SubAgent 是一个**轻量级 LLM 调用封装**，核心目的是 **隔离上�
 | 记忆系统 | 有（MemoryStage） | **无** |
 | Pipeline | 有 | **无** |
 | Channel 监听 | 有 | **无**（只能被调用） |
-| 工具执行 | 有（ToolManager） | **无**（仅传递定义给 LLM） |
+| 工具执行 | 有（ToolManager） | **可选**：`SubAgentManager.SetToolResolver` 注入主 Agent 工作空间工具后，子 Agent 可经多步编排回路执行（自动排除 spawn 防套娃）；独立 SubAgent 也能用 `WithTools`+`WithToolSteps` 启用 |
 | 生命周期 | 长期运行 | **临时 / 持久化**（取决于使用模式） |
 
 ---
@@ -181,6 +181,10 @@ spawn({
 | `WithResponseFormat(fmt)` | `nil` | 响应格式（如 JSON 模式） |
 | `WithID(id)` | `""` | 标识符 |
 | `WithName(name)` | `""` | 显示名称 |
+| `WithToolSteps(n)` | `0` | 带工具执行回路时的最大 LLM 步数预算（0 = 包默认 20；需配合 `WithTools`） |
+| `WithCallTimeout(d)` | `0` | 覆盖 `Delegate`/`DelegateMany` 的固定超时（对 `DelegateStream` 无效） |
+| `WithStuckTimeout(d)` | `0` | `DelegateStream` 卡死看门狗阈值（默认 180s，对固定超时的一刀切替代） |
+| `WithSkipTools()` | — | 跳过 `SubAgentManager` 的工具注入（纯 LLM 任务，避免误走多步编排循环） |
 
 ---
 
@@ -201,7 +205,7 @@ spawn({
 | 方法 | 默认值 | 说明 |
 |------|--------|------|
 | `SetDelegateTimeout(d)` | 120s | Delegate/DelegateMany 的单任务超时 |
-| `SetMaxConcurrency(n)` | 2 | DelegateMany 的最大并发数（0 = 不限制） |
+| `SetMaxConcurrency(n)` | 5 | DelegateMany 的最大并发数（0 = 不限制） |
 | `List()` | — | 返回所有活跃 SubAgent 信息 |
 | `CloseAll()` | — | 关闭所有持久化 SubAgent |
 
@@ -211,11 +215,14 @@ spawn({
 |------|------|
 | `Delegate(ctx, systemPrompt, task, opts...)` | 一次性委托，返回 `(string, error)` |
 | `DelegateMany(ctx, systemPrompt, tasks[], opts...)` | 并发批量委托，返回 `[]TaskResult` |
+| `DelegateStream(ctx, systemPrompt, task, opts...)` | 流式委托，卡死看门狗保护，返回 `(string, error)` |
 | `Spawn(systemPrompt, name, opts...)` | 创建持久化 SubAgent，返回 `(id, error)` |
 | `Chat(ctx, id, message)` | 向持久化 SubAgent 发消息，返回 `(reply, turns, error)` |
 | `Close(id)` | 关闭并移除指定 SubAgent |
 | `List()` | 列出所有活跃 SubAgent |
 | `CloseAll()` | 关闭全部 |
+| `SetToolResolver(toolMgr, base)` | 让委托创建的子 Agent 继承主 Agent 工作空间工具（自动排除 spawn 防套娃） |
+| `SetDefaultToolSteps(n)` | 带工具回路时的默认最大 LLM 步数预算（0 = 包默认） |
 
 ### TaskResult
 
@@ -252,7 +259,7 @@ results := mgr.DelegateMany(ctx, "翻译为英文", []string{
 
 - 每个 SubAgent 有独立的超时 context
 - 结果顺序与输入一致（通过 index 映射）
-- 默认并发 2，可通过 `SetMaxConcurrency` 调整
+- 默认并发 5，可通过 `SetMaxConcurrency` 调整
 
 ---
 

@@ -4,7 +4,7 @@
 
 ## 功能
 
-- `Bot` 组合 Engine，自动注册内建 Handler（Reply/Note/Callback/Silent）
+- `Bot` 组合 Engine，自动注册内建 Handler 到 `MultiDispatcher`：`ChannelReplyHandler`（Reply/Forward/Broadcast）、`NoteHandler`、`CallbackHandler`、`SilentHandler`
 - `BotManager` 管理多 Bot 的注册、启停和状态查询
 - `Channel` / `Sender` 双向通信接口（输入 + 输出）
 - `BotConfig` / `AgentConfig` 分层配置（基础设施 + 行为参数）
@@ -12,6 +12,9 @@
 - 持久化工作空间（文件操作 + SOUL.md 热重载）
 - 技能系统装配（`SetupSkills` 组合根）
 - 梦境巩固子系统（`DreamingBundle` 按 Bot 独立配置，cron 调度定时整理记忆）
+- LLM 实例集构建（`CreateLLMBundle` / `CreateProvider`，按 `bot.<id>.main|light|vision` 装配 Provider）
+- `MemoryChannel`：内存双向 Channel（测试用，`NewMemoryChannel` + `Inject`/`SentActions`）
+- `bot.Module` fx 模块：提供 `BotManager` 并绑定生命周期（`OnStart` 启动全部 Bot、`OnStop` 停止），`ProvideBot` 辅助注册
 
 ## 关键类型
 

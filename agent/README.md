@@ -31,7 +31,7 @@ agent/
 ├── outbound/               # 消息派发层
 │   ├── dispatcher.go       #   Dispatcher 接口 + LogDispatcher + MultiDispatcher
 │   ├── channel_handler.go  #   ChannelReplyHandler（Reply/Forward/Broadcast → Sender.Send）
-│   ├── note_handler.go     #   NoteHandler（ActionNote → NoteStore 持久化）
+│   ├── note_handler.go     #   NoteHandler（ActionNote → NoteWriter 持久化）
 │   ├── callback_handler.go #   CallbackHandler（ActionCallback → 回传父 Agent）
 │   ├── silent_handler.go   #   SilentHandler（ActionSilent → trace/log only）
 │   ├── eventbus.go         #   EventBus 旁路事件总线
@@ -112,7 +112,7 @@ agent/
     │                Outbound (Dispatcher)                    │
     │   按 ActionType 路由到对应 Handler：                      │
     │     ActionReply/Forward/Broadcast → ChannelReplyHandler │
-    │     ActionNote       → NoteHandler → NoteStore          │
+    │     ActionNote       → NoteHandler → NoteWriter         │
     │     ActionCallback   → CallbackHandler → 回传父 Agent   │
     │     ActionSilent     → SilentHandler → trace only       │
     └─────────────────────────────────────────────────────────┘
@@ -133,13 +133,15 @@ agent/
 ```go
 type Message struct {
     ID        string         // 唯一标识
+    TraceID   string         // 请求追踪 ID（Ingress 入口自动生成，贯穿全链路可观测性）
     BotID     string         // 目标 Bot ID
-    Source    string         // 来源（"webhook" / "websocket" / ...）
+    Source    string         // 来源（"webhook" / "websocket" / "polling" / "memory" ...）
     Channel   string         // 会话空间标识（频道/群/私聊 ID）
-    ChatType  string         // 会话类型（"private" / "group" / "channel"）
+    ChatType  string         // 会话类型（"private" / "group" / "supergroup" / "channel"）
     UserID    string         // 发送者 ID
     Text      string         // 文本内容
-    MediaType string         // 媒体类型
+    Mentioned bool           // 是否显式 @提及了 Bot（群聊中用于判断是否需回复）
+    MediaType string         // 媒体类型（text/plain, image/png ...）
     RawData   []byte         // 原始载荷
     Metadata  map[string]any // 扩展元数据
     CreatedAt time.Time      // 创建时间
@@ -400,7 +402,7 @@ wrapped := pipeline.WithMiddleware(myStage,
 
 ### 设计哲学
 
-采用 DDD 领域驱动 + CQRS 读写分离架构。`Entry` 是核心聚合根，记忆按 `Scope` 分桶隔离。当前为纯内存实现（`map[string][]Entry`），接口设计面向未来持久化后端替换（SQLite / Redis / 向量 DB）。
+采用 DDD 领域驱动 + CQRS 读写分离架构。`Entry` 是核心聚合根，记忆按 `Scope` 分桶隔离。当前实现为分层记忆（`TieredStore` / `TieredManager`，L0 工作记忆 → L3 用户画像），可选 SQLite 持久化（进程重启可恢复）。详细的分层架构、巩固与梦境管线见 `agent/memory/README.md`。
 
 ### Scope 分层
 
@@ -416,12 +418,25 @@ wrapped := pipeline.WithMiddleware(myStage,
 ```go
 // Store — 写侧（只负责存储）
 type Store interface {
-    Save(ctx context.Context, entry Entry) error
+    Append(ctx context.Context, entry Entry) error                  // 追加一条记忆
+    Delete(ctx context.Context, scope Scope, entryID string) error  // 按 ID 删除
+    Clear(ctx context.Context, scope Scope) error                   // 清空某个 scope
 }
 
 // Retriever — 读侧（只负责检索）
 type Retriever interface {
-    Retrieve(ctx context.Context, scope Scope, opts ...RetrieveOption) ([]Entry, error)
+    Retrieve(ctx context.Context, query Query) ([]Entry, error)            // 按条件检索
+    Recent(ctx context.Context, scope Scope, limit int) ([]Entry, error)   // 最近 N 条
+    Count(ctx context.Context, scope Scope) (int, error)                   // 计数
+}
+
+// Query — 检索请求
+type Query struct {
+    Scopes        []Scope // 检索范围（可多个 scope 联合）
+    Text          string  // 关键词（当前为子串匹配）
+    Category      string  // 分类过滤
+    Limit         int     // 最多返回条目数（默认 10）
+    MinImportance float64 // 最小重要度（0 表示不过滤）
 }
 
 // Repository — 聚合 Store + Retriever（完整仓储）
@@ -548,34 +563,33 @@ md.Validate()
 
 ### ChannelReplyHandler
 
-处理 Reply / Forward / Broadcast，通过注册的 `Sender` 发送到 Channel：
+处理 Reply / Forward / Broadcast，通过注册的 `ChannelSender` 回写到对应 Channel：
 
 ```go
 handler := outbound.NewChannelReplyHandler(logger, tracerProvider)
-handler.RegisterSender("misskey-ws", misskeyClient)
-handler.RegisterSender("telegram", telegramClient)
+handler.Register("misskey-ws", misskeyClient) // Channel 需实现 ChannelSender
+handler.Register("telegram", telegramClient)
 
-// Sender 接口
-type Sender interface {
-    Send(ctx context.Context, channel string, payload any) error
+// ChannelSender 接口（Channel 只需实现 Send 即可同时满足 bot.Sender）
+type ChannelSender interface {
+    Send(ctx context.Context, action core.Action) error
 }
 ```
 
 ### NoteHandler
 
-处理 ActionNote，将备注持久化到 NoteStore：
+处理 ActionNote，将备注转换为 `NoteEntry` 经 `NoteWriter` 写入记忆仓储：
 
 ```go
-handler := outbound.NewNoteHandler(noteStore, logger, tracerProvider)
+handler := outbound.NewNoteHandler(writer, logger, tracerProvider)
 
-// NoteStore 接口
-type NoteStore interface {
-    Save(ctx context.Context, note Note) error
-    List(ctx context.Context, botID string, opts ...NoteListOption) ([]Note, error)
+// NoteWriter 接口（最小接口，memory.Store 经适配器隐式满足）
+type NoteWriter interface {
+    WriteNote(ctx context.Context, entry NoteEntry) error
 }
 ```
 
-内置 `MemoryNoteStore`（带 MaxNotes + TTL 容量控制）。
+`memory.Store`（`MemoryRepository` / `storage.SQLiteRepository`）经适配器桥接后均隐式满足 `NoteWriter`。
 
 ### CallbackHandler
 
@@ -584,9 +598,9 @@ type NoteStore interface {
 ```go
 handler := outbound.NewCallbackHandler(registry, logger, tracerProvider)
 
-// 注册回调
-registry.Register("task-123", func(ctx context.Context, result any) error {
-    // 处理 sub-agent 返回的结果
+// 注册回调（返回 callbackID，供 ActionCallback.Metadata["callback_id"] 路由）
+id := registry.Register("task-123", func(ctx context.Context, result outbound.CallbackResult) error {
+    // 处理 sub-agent 返回的结果（result.Payload 为双方约定的结构）
     return nil
 })
 ```
@@ -596,12 +610,12 @@ registry.Register("task-123", func(ctx context.Context, result any) error {
 非阻塞的事件广播机制，供 SSE/WebSocket 实时推送 Bot 状态：
 
 ```go
-bus := outbound.NewEventBus(outbound.EventBusConfig{
-    BufferSize: 256,
+bus := outbound.NewMemoryEventBus(outbound.MemoryEventBusConfig{
+    SubscriptionBufferSize: 256,
 }, logger)
 
-// 订阅
-sub := bus.Subscribe()
+// 订阅（按 traceID 关联）
+sub := bus.Subscribe(traceID)
 defer sub.Unsubscribe()
 for event := range sub.C() {
     // event.Type: "message.received" / "llm.text_delta" / ...
@@ -640,11 +654,9 @@ bot, err := bot.New(bot.BotParams{
     Name: "客服小助手",
     Config: bot.BotConfig{
         SystemPrompt: "你是一个友好的客服机器人...",
-        LLM: bot.LLMParams{
-            Model:       &model,
-            Temperature: &temp,
-            MaxTokens:   &maxTokens,
-        },
+        Model:        "gpt-4o",  // 主力模型 ID
+        Temperature:  &temp,
+        MaxTokens:    maxTokens,
     },
     Pipeline:   myPipeline,
     Dispatcher: multiDispatcher,
@@ -716,24 +728,27 @@ Bot 通过实现 `EngineHook` 接口注入行为，无需修改 Engine 代码：
 
 ```go
 type EngineHook interface {
-    OnStart(ctx context.Context) error            // Engine 启动时
-    OnStop(ctx context.Context) error             // Engine 停止时
-    OnEnvelopeReceived(ctx context.Context, env *core.Envelope) // 收到消息
-    OnEnvelopeProcessed(ctx context.Context, env *core.Envelope, err error) // 处理完成
-    OnActionDispatched(ctx context.Context, actions []core.Action, err error) // 派发完成
-    OnWorkerPanic(ctx context.Context, r any, stack []byte) // Worker panic
+    OnBeforeProcess(ctx context.Context, env *core.Envelope) context.Context // 处理前注入 context / KV
+    OnPipelineError(ctx context.Context, env *core.Envelope, err error)      // Pipeline 返回错误
+    OnMessageDropped(ctx context.Context, env *core.Envelope)                // Pipeline 返回 nil（消息被丢弃）
+    OnBeforeDispatch(ctx context.Context, env *core.Envelope, actions []core.Action) // 派发前
+    OnDispatchError(ctx context.Context, env *core.Envelope, err error)      // 派发失败
+    OnMessageDone(ctx context.Context, env *core.Envelope, actions []core.Action, duration time.Duration) // 处理完成
 }
 ```
+
+所有方法都是可选的 —— 嵌入 `NoopEngineHook` 即可只覆盖需要的方法。
 
 **处理流程：**
 
 1. N 个 worker goroutine 从 `Ingress.C()` 并发取 Envelope
-2. 调用 `Hook.OnEnvelopeReceived`
+2. 调用 `Hook.OnBeforeProcess`（返回的 context 用于后续处理流程）
 3. `Pipeline.Execute()` 按序过 Stage 链
-4. 调用 `Hook.OnEnvelopeProcessed`
-5. `Dispatcher.Dispatch()` 派发 Action
-6. 调用 `Hook.OnActionDispatched`
-7. `ctx` 取消时：关闭 Ingress → 排空缓冲区 → 等待 worker 退出 → 超时兜底
+4. Pipeline 返回 `nil` → 调用 `Hook.OnMessageDropped` 后结束
+5. Pipeline 返回 error → 调用 `Hook.OnPipelineError` 后结束
+6. 否则 `Hook.OnBeforeDispatch` → `Dispatcher.Dispatch()` 派发 Action
+7. 派发失败 → `Hook.OnDispatchError`；成功 → `Hook.OnMessageDone`
+8. `ctx` 取消时：关闭 Ingress → 排空缓冲区 → 等待 worker 退出 → 超时兜底
 
 ## 内置 Stage
 
@@ -995,9 +1010,9 @@ func (ws *WSChannel) Listen(ctx context.Context) error {
     }
 }
 
-// 实现 Sender 接口（可选，用于 Outbound 回写）
-func (ws *WSChannel) Send(ctx context.Context, channel string, payload any) error {
-    return ws.conn.WriteJSON(payload)
+// 实现 ChannelSender 接口（可选，用于 Outbound 回写）
+func (ws *WSChannel) Send(ctx context.Context, action core.Action) error {
+    return ws.conn.WriteJSON(action.Payload)
 }
 ```
 
@@ -1045,7 +1060,10 @@ Pipeline 中各 Stage 通过 Envelope KV 传递数据，以下是已使用的 ke
 | `memory.context` | MemoryStage | PromptStage | `string` | 格式化后的记忆上下文文本 |
 | `memory.entries_used` | MemoryStage | — | `int` | 使用的记忆条目数 |
 | `memory.compressed` | MemoryStage | — | `bool` | 是否触发了压缩 |
+| `memory.written` | MemoryWriteStage | — | `int` | 本轮写入的记忆条目数 |
 | `system.prompt` | PromptStage | LLMStage/ReplyStage | `string` | 组装好的完整 system prompt |
+| `system.prompt.sections_used` | PromptStage | — | `int` | 实际生效的 Section 数 |
+| `system.prompt.length` | PromptStage | — | `int` | 提示词字符长度 |
 | `bot.id` | Bot/Engine | PromptStage | `string` | 当前 Bot ID |
 | `bot.config` | Bot | PromptStage | `BotConfig` | Bot 配置 |
 | `llm.result` | LLMStage | MemoryWriteStage | `*llm.GenerateResult` | LLM 调用结果 |
