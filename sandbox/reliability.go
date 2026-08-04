@@ -46,24 +46,24 @@ func finalizeExecResult(result *ExecResult, killReason string) {
 		switch killReason {
 		case "stuck":
 			result.Warnings = append(result.Warnings,
-				"命令被卡死看门狗终止（长时间无输出/无进展），结果不完整")
+				"the command was killed by the stuck watchdog (no output/progress for a long time); the result is incomplete")
 		case "hard":
 			result.Warnings = append(result.Warnings,
-				"命令超过硬上限被强制终止，结果不完整")
+				"the command exceeded the hard time limit and was force-killed; the result is incomplete")
 		default:
-			result.Warnings = append(result.Warnings, "命令超时未跑完，结果不完整")
+			result.Warnings = append(result.Warnings, "the command timed out before finishing; the result is incomplete")
 		}
 	}
 	// 退出码 137 = 128 + SIGKILL：docker 下 OOM 即返回 137；本地进程被杀死也可能落到此区间。
 	if result.ExitCode == 137 {
 		result.Aborted = true
 		result.Warnings = append(result.Warnings,
-			"命令被信号杀死(exit=137)，结果可能不完整（可能因内存不足被 OOM 终止）")
+			"the command was killed by a signal (exit=137); the result may be incomplete (possibly OOM-killed)")
 	}
 	// 输出文本特征扫描（兜底，覆盖管道掩盖 exit=0 的情况）
 	if msg := scanFatalText(result.Stdout + "\n" + result.Stderr); msg != "" {
 		result.Aborted = true
-		result.Warnings = append(result.Warnings, "输出中出现 OOM/中止特征: "+msg)
+		result.Warnings = append(result.Warnings, "OOM/abort signature found in output: "+msg)
 	}
 	result.Reliable = !result.Aborted && !result.OOMKilled
 }

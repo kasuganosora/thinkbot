@@ -27,6 +27,10 @@ func datetimeCalcToolDef() agenttools.ToolDef {
 			Description: "Perform date and time calculations: shift a date, compute the difference between two dates, " +
 				"look up the weekday, or convert a date to another format. " +
 				"Accepted input formats: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.",
+			Keywords: []string{
+				"日期计算", "时间计算", "相差几天", "星期几", "日期格式转换",
+				"几天后", "几天前", "date", "datetime",
+			},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

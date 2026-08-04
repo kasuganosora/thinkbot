@@ -159,7 +159,7 @@ func buildIterationTask(originalTask, prevResult, feedback string) string {
 	sb.WriteString(prevResult)
 	sb.WriteString("\n\n---\nReview feedback:\n")
 	sb.WriteString(feedback)
-	sb.WriteString("\n\n---\nRevise your output according to the review feedback above. You MUST address every point raised and satisfy the original requirement. You must respond to the user in Chinese (中文).")
+	sb.WriteString("\n\n---\nRevise your output according to the review feedback above. You MUST address every point raised and satisfy the original requirement. Write your revised output in Chinese (中文).")
 	return sb.String()
 }
 

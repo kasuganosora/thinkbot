@@ -26,6 +26,7 @@ func textHashToolDef() agenttools.ToolDef {
 			Name:         "text_hash",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description:  "Compute the hash digest of a text string. Supports MD5 and SHA256.",
+			Keywords:     []string{"哈希", "散列", "摘要", "校验值", "md5", "sha256", "hash"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -86,6 +87,7 @@ func textEncodeToolDef() agenttools.ToolDef {
 			Name:         "text_encode",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description:  "Encode text to Base64, or decode a Base64 string back to text.",
+			Keywords:     []string{"编码", "解码", "base64", "转码", "encode", "decode"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -148,6 +150,7 @@ func textDiffToolDef() agenttools.ToolDef {
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description: "Compare two texts and return a line-level diff of additions, removals and unchanged lines. " +
 				"Limited to 5000 lines per side.",
+			Keywords: []string{"文本对比", "比较差异", "差异对比", "diff", "对比"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -193,6 +196,7 @@ func textStatsToolDef() agenttools.ToolDef {
 			Name:         "text_stats",
 			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
 			Description:  "Count lines, words, characters, paragraphs and estimated tokens in a text.",
+			Keywords:     []string{"字数统计", "统计字数", "行数", "词数", "token估算", "文本统计"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
