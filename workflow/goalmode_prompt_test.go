@@ -80,10 +80,10 @@ func TestWorkflowPromptSectionExplainsGoalMode(t *testing.T) {
 	}
 }
 
-func TestStatusToolDescribesGoalIteration(t *testing.T) {
-	def := statusToolDef(nil)
+func TestSubmitToolDescribesGoalIteration(t *testing.T) {
+	def := submitToolDef(nil)
 	if !strings.Contains(def.Tool.Description, "goalIteration") {
-		t.Errorf("task_status 描述应说明目标模式轮次字段，便于模型解读返回值\nDescription: %s", def.Tool.Description)
+		t.Errorf("task 描述应说明目标模式轮次字段，便于模型解读返回值\nDescription: %s", def.Tool.Description)
 	}
 }
 
