@@ -23,13 +23,6 @@
       aria-live="polite"
       @scroll="onScroll"
     >
-      <div v-if="sessionWorkflowId" class="wf-sticky">
-        <SessionWorkflowPanel
-          :session-id="store.activeBotId"
-          :workflow-id="sessionWorkflowId"
-        />
-      </div>
-
       <!-- 顶部分页哨兵：上翻到顶自动加载更早消息，不满一屏时可手动点击兜底 -->
       <div v-if="store.hasMore" class="load-more-bar" data-testid="chat-load-more">
         <span v-if="store.loadingMore" class="load-more-loading">
@@ -161,6 +154,14 @@
             {{ chip }}
           </div>
         </div>
+      </div>
+
+      <!-- 工作流面板：内嵌在对话末尾（它由 bot 在本轮对话中创建，位置即其时间位置） -->
+      <div v-if="sessionWorkflowId" class="wf-inline">
+        <SessionWorkflowPanel
+          :session-id="store.activeBotId"
+          :workflow-id="sessionWorkflowId"
+        />
       </div>
 
       <!-- 回到底部按钮：流式期间用户上翻时显示 -->
@@ -536,6 +537,12 @@ function scrollToBottomIfAtBottom() {
 
 // 消息列表长度变化时（新消息到达）智能滚动
 watch(() => messages.value.length, scrollToBottomIfAtBottom)
+
+// 工作流面板已改为内嵌在对话末尾（不再 sticky 悬浮），它出现时会把内容顶高，
+// 若用户正处于底部需跟着滚下去，否则新出现的面板会落在视口下方看不到。
+watch(sessionWorkflowId, (id) => {
+  if (id) scrollToBottomIfAtBottom()
+})
 // bot 切换时强制滚到底部
 watch(() => store.activeBotId, () => {
   isAtBottom.value = true
@@ -680,14 +687,12 @@ function onKeydown(value, { e }) {
   opacity: 0;
   transform: translateY(8px) scale(0.9);
 }
-/* workflow 面板：固定在聊天区顶部，任务进行中始终可见（避免被长对话滚出视口） */
-.wf-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 6;
-  background: #fff;
-  padding: 10px 32px 8px;
-  border-bottom: 1px solid #f0f0f0;
+/* workflow 面板：作为普通内容块内嵌在消息流中（与 .msg-row 同宽同边距），
+   不再 sticky 悬浮——悬浮会遮挡消息、且脱离了它在对话中的时间位置。 */
+.wf-inline {
+  max-width: 820px;
+  margin: 18px auto 0;
+  padding: 0 32px;
 }
 /* 顶部分页条：加载更早消息 / 到达历史起点 */
 .load-more-bar {
