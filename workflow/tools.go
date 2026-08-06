@@ -12,11 +12,13 @@ import (
 // ============================================================================
 // Workflow 工具定义
 //
-// 暴露 4 个 LLM 工具给主 Agent：
-//   - task:          提交需求，异步创建工作流
-//   - task_status:   查询工作流状态和进度
+// 暴露 3 个 LLM 工具给主 Agent：
+//   - task:          提交需求并**阻塞**到工作流进入终态（completed/failed/terminated）才返回
 //   - task_detail:   查询节点列表（flat / tree）
 //   - task_control:  控制操作（重试节点 / 终止工作流）
+//
+// task 对工作流是「阻塞式」工具：提交后服务端代为等待直到终态再返回最终状态，
+// agent 无需再轮询。旧的 task_status(wait:true) 轮询机制已移除。
 //
 // ── 工具命名策略 ────────────────────────────────────────────────────
 // 主工具命名为 "task"，与主流 LLM 预训练中的 agentic 工具名对齐
@@ -42,37 +44,31 @@ You can use the ` + "`task`" + ` tool to handle complex, multi-step work. The ta
 
 ## Workflow
 
-1. **Submit**: call ` + "`task`" + ` with the requirement and get back a task_id.
-2. **Wait**: call ` + "`task_status`" + ` with ` + "`wait: true`" + `; the server blocks until the task reaches a terminal state before returning.
-3. **Inspect**: call ` + "`task_detail`" + ` to see each sub-task's execution status and result (flat and tree views are supported).
-4. **Control**: when a node fails, use ` + "`task_control`" + ` to retry it, or to terminate the whole task.
+1. **Submit**: call ` + "`task`" + ` with the requirement. This call **blocks** — the server runs the workflow to a terminal state (completed / failed / terminated) and returns the final status and progress. No further waiting call is needed.
+2. **Inspect (optional)**: call ` + "`task_detail`" + ` to see each sub-task's execution status and result (flat and tree views are supported).
+3. **Control**: when a node fails, use ` + "`task_control`" + ` to retry it, or to terminate the whole task.
 
-## Waiting for completion: ALWAYS use wait, NEVER poll yourself
+## task is a blocking tool — never poll, never sleep
 
-Analysis plus execution usually takes minutes to tens of minutes. **The server already provides the waiting capability — do not poll.**
+Submitting with ` + "`task`" + ` already waits on your behalf until the task is done; the call returns the final result. **There is no separate status-polling tool**, so do not try to call one, and never use ` + "`sleep`" + ` to wait.
 
-Rule of thumb: **want the task result → one ` + "`task_status(wait: true)`" + ` call → continue once it is terminal.**
+Rule of thumb: **want the task result → one ` + "`task`" + ` call → continue once it returns.**
 
 <example>
 Correct:
-task(...)                             → returns task_id
-task_status(taskId, wait: true)       → blocks until completed/failed/terminated
-(if it returns timedOut: true, the task is still running — call it again to keep waiting)
+task(...)   → blocks until completed/failed/terminated, then returns the final status
+(use task_detail to inspect individual sub-task results if needed)
 </example>
 
 <example>
-NEVER do this. It burns a huge number of tool-call turns and floods the conversation with meaningless progress cards:
-task_status(taskId)                   → "still analyzing, let me keep waiting"
-run command: sleep 90
-task_status(taskId)                   → "still analyzing…"
-run command: sleep 120
-task_status(taskId)                   → … (repeated a dozen times)
+NEVER do this:
+task_status(...)        → there is no such tool; task already blocks while it runs
+run command: sleep 120  → never sleep to wait for a task
 </example>
 
 Key points:
-- **NEVER use ` + "`sleep`" + ` to wait for a task.** Delegate waiting to ` + "`task_status(wait: true)`" + `.
-- ` + "`task_status`" + ` without wait is only for glancing at current progress. NEVER use it as a polling loop.
-- A timeout is not a failure: ` + "`timedOut: true`" + ` means the task is still running, so just call again.
+- A timeout is not a failure: if the returned ` + "`timedOut`" + ` is true, the task is still running in the background. Do NOT call ` + "`task`" + ` again (that would start a NEW task). Use ` + "`task_detail`" + ` to inspect progress, or simply tell the user the task is still in progress.
+- The ` + "`task`" + ` call may take minutes to tens of minutes; that is expected. The UI shows live progress while it runs.
 
 ## When you MUST prefer task over running tools step by step
 
@@ -109,7 +105,7 @@ Passing ` + "`goalMode: true`" + ` to ` + "`task`" + ` enables **closed-loop ite
 
 Rule of thumb: **does the task have a "not done until it passes" acceptance condition? Yes → goal mode. Just get the work done → no goal mode.**
 
-Once enabled, ` + "`task_status`" + ` reports ` + "`goalIteration`" + ` / ` + "`goalMaxIterations`" + ` so you can see which loop round is running. IMPORTANT: goal mode consumes more time and turns because it iterates repeatedly — NEVER abuse it on simple tasks.
+Once enabled, ` + "`task`" + ` reports ` + "`goalIteration`" + ` / ` + "`goalMaxIterations`" + ` in its return value so you can see which loop round is running. IMPORTANT: goal mode consumes more time and turns because it iterates repeatedly — NEVER abuse it on simple tasks.
 
 ## When to use
 
@@ -136,7 +132,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
 			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
 			// 否则模型无从得知该参数的存在。
-			Description: "Submit complex, multi-step work. For tasks with several steps, multi-file changes, dependencies, or a need for quality review, you MUST prefer this tool over calling tools step by step yourself — it analyzes the requirement, decomposes it into a DAG of sub-tasks, and executes them asynchronously in parallel, with result review and retries. **When the requirement uses acceptance-style wording such as 「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」, you MUST submit with goalMode: true, and you MUST NOT handle it inline with subagent/delegate** — goal mode automatically rolls back and redoes the work when review fails, forming a 「工作→审查→修复→审查」 loop until the bar is met. It is designed exactly for tasks with an explicit acceptance bar, such as 「修复所有 X 直到全部通过」 or 「审查每个模块直到没有新问题」. Returns task_id immediately; then call task_status(taskId, wait: true) once to block until the task finishes. **NEVER poll repeatedly and NEVER use sleep to wait.**",
+			Description: "Submit complex, multi-step work. For tasks with several steps, multi-file changes, dependencies, or a need for quality review, you MUST prefer this tool over calling tools step by step yourself — it analyzes the requirement, decomposes it into a DAG of sub-tasks, and executes them asynchronously in parallel, with result review and retries. **When the requirement uses acceptance-style wording such as 「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」, you MUST submit with goalMode: true, and you MUST NOT handle it inline with subagent/delegate** — goal mode automatically rolls back and redoes the work when review fails, forming a 「工作→审查→修复→审查」 loop until the bar is met. It is designed exactly for tasks with an explicit acceptance bar, such as 「修复所有 X 直到全部通过」 or 「审查每个模块直到没有新问题」. **This call is BLOCKING**: the server runs the workflow to a terminal state (completed / failed / terminated) and returns the final status and progress, so you do NOT need — and there is no — a separate status-polling call. When goalMode is enabled, the returned status carries goalIteration / goalMaxIterations so you can see which closed-loop round is running. **NEVER poll and NEVER use sleep to wait; just submit and continue once it returns.**",
 			Keywords: []string{
 				"目标模式", "goal mode", "闭环", "迭代", "反复打磨", "直到通过",
 				"直到…为止", "验收", "达标", "审查到没有", "review 到没有", "收敛",
@@ -190,90 +186,48 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 				if err != nil {
 					return nil, err
 				}
-				return result, nil
+
+				// 提交即阻塞：服务端把工作流跑到终态（completed/failed/terminated）再返回，
+				// 对agent 来说 task 就是一个阻塞工具——无需再调轮询工具。
+				// 复用与旧 task_status(wait:true) 相同的服务端等待逻辑，并推送进度避免界面卡死。
+				var onProgress func(*StatusResult, time.Duration)
+				if ctx.SendProgress != nil {
+					// 关键：必须在阻塞开始前立刻推一次带 workflowId 的进度。
+					//
+					// 前端的工作流面板只从工具事件里提取 workflowId 来决定显示哪个工作流。
+					// task 改为阻塞后，tool_result 要等工作流全部跑完（可能数十分钟）才到达，
+					// 若只依赖 result，整个执行期间面板都不会出现——用户完全看不到进度。
+					ctx.SendProgress(taskProgressPayload(result.WorkflowID,
+						fmt.Sprintf("工作流已创建（%s），正在分析需求并分解任务…\n", result.WorkflowID)))
+
+					onProgress = func(st *StatusResult, waited time.Duration) {
+						ctx.SendProgress(taskProgressPayload(result.WorkflowID,
+							fmt.Sprintf("工作流执行中… 状态=%s 已完成 %d/%d 子任务（已等待 %s）\n",
+								st.Status, st.Progress.Completed, st.NodeCount,
+								waited.Truncate(time.Second))))
+					}
+				}
+				return waitForTerminal(ctx, mgr, result.WorkflowID, taskBlockingMaxTimeout, onProgress)
 			}),
 		},
 		PromptSection: workflowToolPromptSection,
 	}
 }
 
-// ============================================================================
-// workflow_status
-// ============================================================================
-
-// statusToolDef 创建 task_status 工具。
-func statusToolDef(mgr *Manager) tools.ToolDef {
-	return tools.ToolDef{
-		Category: "workflow",
-		Scopes:   []string{"private", "group"},
-		Tool: llm.Tool{
-			Name:         "task_status",
-			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
-			// 注意：DeferredLoad 工具在未加载时只暴露 Name + Description（Parameters 被隐藏），
-			// 因此 wait 这个关键能力必须写进 Description，否则模型根本不知道它存在，
-			// 只会退回到「自己反复调用 + sleep」的低效轮询。
-			Description: "Query a task's current status and progress, **and optionally let the server wait for the task to finish on your behalf**. " +
-				"Returns the task status (analyzing/running/completed/failed/terminated) and sub-task counts per status. " +
-				"If the task runs in goal mode, it also returns goalMode/goalIteration/goalMaxIterations, telling you which closed-loop round is running.\n" +
-				"**You SHOULD pass wait: true**: the server blocks until the task reaches a terminal state (completed/failed/terminated) before returning, " +
-				"so a single call gives you the final result. **NEVER poll by calling this tool repeatedly, and NEVER use sleep to wait** — " +
-				"that burns a huge number of tool-call turns and floods the conversation with meaningless progress cards. " +
-				"If timedOut is true in the response, the wait timed out but the task is still running; call this tool again to keep waiting.",
-			Keywords: []string{"任务状态", "进度", "轮询", "等待", "阻塞等待", "目标模式", "闭环轮次", "workflow"},
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"taskId": map[string]any{
-						"type":        "string",
-						"description": "Task ID (returned by the task tool).",
-					},
-					"wait": map[string]any{
-						"type": "boolean",
-						"description": "Whether the server should block until the task reaches a terminal state before returning. Default false (returns the current snapshot immediately). " +
-							"ALWAYS pass true when you are waiting for the task to finish, so a single call suffices and you never poll yourself.",
-					},
-					"timeoutSeconds": map[string]any{
-						"type": "integer",
-						"description": "Maximum seconds to wait when wait=true. Default 600 (10 minutes), capped at 1800 (30 minutes). " +
-							"A timeout is not a failure: the current snapshot is returned with timedOut=true.",
-					},
-				},
-				"required": []string{"taskId"},
-			},
-			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
-				m, ok := input.(map[string]any)
-				if !ok {
-					return nil, fmt.Errorf("invalid input: expected object")
-				}
-				wfID, _ := m["taskId"].(string)
-				if wfID == "" {
-					return nil, fmt.Errorf("taskId is required")
-				}
-
-				if !asBool(m["wait"]) {
-					return mgr.GetStatus(wfID)
-				}
-
-				// wait 模式：服务端代为轮询，agent 只在终态/超时时被唤醒。
-				timeout := time.Duration(asInt(m["timeoutSeconds"])) * time.Second
-
-				// 等待期间向前端推送进度，避免界面看起来卡死。
-				// SendProgress 仅在流式模式下可用，非流式时为 nil。
-				var onProgress func(*StatusResult, time.Duration)
-				if ctx.SendProgress != nil {
-					onProgress = func(st *StatusResult, waited time.Duration) {
-						ctx.SendProgress(map[string]any{
-							"stream": "stdout",
-							"chunk": fmt.Sprintf("等待任务完成… 状态=%s 已完成 %d/%d 子任务（已等待 %s）\n",
-								st.Status, st.Progress.Completed, st.NodeCount,
-								waited.Truncate(time.Second)),
-						})
-					}
-				}
-
-				return waitForTerminal(ctx, mgr, wfID, timeout, onProgress)
-			}),
-		},
+// taskProgressPayload 构造 task 工具的进度事件 payload。
+//
+// 三个字段都不可缺：
+//   - stream/chunk：前端 appendToolProgress 消费的既有字段，用于往工具卡片追加输出；
+//   - workflowId：**前端工作流面板挂载的唯一来源**。task 是阻塞工具，tool_result 要等
+//     工作流跑到终态才到达，若进度事件不带它，整个执行期间面板都不会出现。
+//
+// 前端 SSE 层会原样展开该 payload（services.js 里`...parts.payload`），
+// 因此自定义字段能安全透传。
+func taskProgressPayload(workflowID, chunk string) map[string]any {
+	return map[string]any{
+		"stream":     "stdout",
+		"workflowId": workflowID,
+		"chunk":      chunk,
 	}
 }
 
@@ -423,8 +377,7 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 // RegisterTools 将工作流工具注册到 ToolManager。
 //
 // 注册的工具：
-//   - task:          提交复杂多步骤任务
-//   - task_status:   查询任务状态和进度
+//   - task:          提交复杂多步骤任务；该调用会**阻塞**到工作流进入终态才返回
 //   - task_detail:   查询子任务详情
 //   - task_control:  控制操作（重试/终止）
 //
@@ -435,7 +388,6 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 func RegisterTools(mgr *tools.ToolManager, wfMgr *Manager) error {
 	return mgr.RegisterMany(
 		submitToolDef(wfMgr),
-		statusToolDef(wfMgr),
 		nodesToolDef(wfMgr),
 		controlToolDef(wfMgr),
 	)
