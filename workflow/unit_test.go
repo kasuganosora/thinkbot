@@ -231,6 +231,96 @@ func TestParseReviewResult_JSONInMarkdown(t *testing.T) {
 	}
 }
 
+// TestParseReviewResult_CodeSnippetNotTreatedAsVerdict 防回归：
+// 审查报告正文里的代码片段（合法 JSON 但无 passed 字段）绝不能被当成审查结论。
+//
+// 线上事故（2026-08-04 定位）：ExtractJSON 从第一个 `{` 起括号配平，审查报告常含
+// 代码片段；encoding/json 对未知字段宽容，于是 `{"timeout":5000}` 会「解析成功」
+// 并得到 Passed=false（bool 零值），旧代码认为这是可信 JSON、连 WARN 都不打，
+// 静默把产物判为不通过。必须先探测 passed 字段是否真实存在。
+func TestParseReviewResult_CodeSnippetNotTreatedAsVerdict(t *testing.T) {
+	raw := "# 审查结论：PASS\n\n代码中的配置对象如下：\n\n```json\n{ \"timeout\": 5000, \"retries\": 3 }\n```\n\n全部检查项均满足。"
+	result, usedHeuristic := parseReviewResult(raw)
+	if !usedHeuristic {
+		t.Fatal("JSON without a 'passed' field must NOT be accepted as a verdict")
+	}
+	if result.Source == ReviewSourceJSON {
+		t.Errorf("source must not be json, got %s", result.Source)
+	}
+	if !result.Passed {
+		t.Error("explicit '审查结论：PASS' must be recognized as passed")
+	}
+}
+
+// TestParseReviewResult_VerdictLine 防回归：模型的标准输出格式必须被正确识别。
+//
+// 线上事故：passSignals 缺少裸词 "pass"（failSignals 却有裸词 "fail"），
+// 而模型稳定输出「审查结论：PASS ✅」→ 两侧信号同时为 0，落 default 判FAIL。
+// 53 条线上样本中 6 条模型判 PASS 的被误杀 5 条。
+func TestParseReviewResult_VerdictLine(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"中文PASS带emoji", "# 审查结论：PASS ✅\n\n我以最高标准通审了提交的修复方案。", true},
+		{"markdown强调PASS", "# 审查报告\n\n## 判定结果：**PASS**\n\n5 条标准全部满足。", true},
+		{"最终结论PASS", "# 审查报告 v3\n\n## 最终结论：✅ PASS\n\n可以放行。", true},
+		{"PASS附非阻断", "# 审查结论：**PASS（附 3 项非阻断观察）**\n\n按 5 条判据逐项核查，全部满足。", true},
+		{"三级标题PASS", "### 审查结果：✅ **PASS**\n\n审查员已对交付的4 份源码进行了逐行核查。", true},
+		{"中文FAIL", "## 审查结论：❌ FAIL\n\n### 根本原因：待审查产物不存在", false},
+		{"小写fail", "## 审查结论：**fail**\n\n### 核心问题：产物未交付任何可审查的内容", false},
+		{"结论不通过", "## 审查结论：不通过\n\n存在多处逻辑缺陷。", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			result, _ := parseReviewResult(c.raw)
+			if result.Passed != c.want {
+				t.Errorf("verdict = %v, want %v (source=%s)", result.Passed, c.want, result.Source)
+			}
+			if result.Source != ReviewSourceVerdictLine {
+				t.Errorf("source = %s, want verdict_line", result.Source)
+			}
+		})
+	}
+}
+
+// TestParseReviewResult_JSONOnLastLine 防回归：新 prompt 要求模型「先分析、
+// 最后一行输出 JSON」，解析必须优先取末行，否则正文里的代码花括号会先被抓到。
+func TestParseReviewResult_JSONOnLastLine(t *testing.T) {
+	raw := "## 审查分析\n\n配置片段 `{\"retries\": 3}` 看起来没问题。\n逐项核查全部满足。\n\n{\"passed\": true, \"notes\": \"命名可以更统一\"}"
+	result, usedHeuristic := parseReviewResult(raw)
+	if usedHeuristic {
+		t.Fatalf("trailing JSON must be parsed as authoritative verdict, source=%s", result.Source)
+	}
+	if !result.Passed {
+		t.Error("expected passed=true from trailing JSON")
+	}
+}
+
+// TestNormalizeVerdictText_NegationNotMiscounted 防回归：含否定前缀的短语
+// 必须先被规范化，否则「不通过」里的「通过」会同时点亮 pass 信号，
+// 「没有问题」里的「有问题」会点亮 fail 信号。
+func TestNormalizeVerdictText_NegationNotMiscounted(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"没有问题应判通过", "产物符合要求，代码没有问题，已验收。", true},
+		{"存在问题应判不通过", "产物存在问题，缺少错误处理。", false},
+		{"failure-free不应误判", "The build is failure-free and satisfies 符合要求.", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, _ := heuristicReviewVerdict(c.raw)
+			if got != c.want {
+				t.Errorf("heuristicReviewVerdict = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // --- executor.go: buildIterationTask ---
 
 func TestBuildIterationTask(t *testing.T) {

@@ -127,6 +127,11 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
+	// WireConfig 文档承诺 Logger 可为 nil（走 noop），但此前并未兜底——
+	// Setup 内多处直接 cfg.Logger.Infow/Warnw，nil 时会 panic。补齐契约。
+	if cfg.Logger == nil {
+		cfg.Logger = zap.NewNop().Sugar()
+	}
 
 	// 从 config.Store 读取引擎配置，Store 为 nil 时使用默认值
 	ec := resolveEngineConfig(cfg.Store, cfg.MaxParallel, cfg.ModelDef)
@@ -139,18 +144,32 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	}
 	saMgr := subagent.NewSubAgentManager(cfg.Provider, cfg.Model, saOpts...)
 
+	// 代码类任务（读多文件 + go build/vet + 多轮修改）放宽单步预算，
+	// 且子 Agent 重任务常超默认 120s，放宽委托超时到 10 分钟（对齐主 Agent 子 Agent）。
+	//
+	// 这两项**必须无条件执行**（2026-08-04 修复）：
+	// 它们原先写在下面的 `if cfg.ToolMgr != nil` 分支内，导致 workflow_service
+	// 那个实例（ToolMgr=nil，服务于启动 Recover / Sweeper / UI 重试）保持120s 默认值。
+	// 后果：同一条工作流被 Recover 从bot 侧实例接管后，委托超时从 10min骤降到 120s，
+	// 线上出现 30 次 elapsed=120.000s 的硬超时。超时预算与「有没有工具」无关。
+	saMgr.SetDefaultToolSteps(25)
+	saMgr.SetDelegateTimeout(10 * time.Minute)
+
 	// 若提供了主 Agent 工具解析器，让 workflow 内部 SubAgent 继承工作空间工具，
 	// 使其能像主 Agent 的 SubAgent 一样读文件、跑命令、改代码（如「审查并修复代码」）。
 	// workflow 工具（scope=private/group）与 spawn 工具在 IsSubagent 场景被自动排除，
 	// 不会形成套娃；记忆工具同为 private/group，亦被排除，避免工作流污染长期记忆。
 	if cfg.ToolMgr != nil {
 		saMgr.SetToolResolver(cfg.ToolMgr, agenttools.ToolSessionContext{BotID: cfg.ToolBotID})
-		// 代码类任务（读多文件 + go build/vet + 多轮修改）放宽单步预算，
-		// 且子 Agent 重任务常超默认 120s，放宽委托超时到 10 分钟（对齐主 Agent 子 Agent）。
-		saMgr.SetDefaultToolSteps(25)
-		saMgr.SetDelegateTimeout(10 * time.Minute)
 		cfg.Logger.Debugw("workflow engine: tool resolver attached to internal subagents",
 			"botID", cfg.ToolBotID)
+	} else {
+		// 静默降级是故障的温床——这次没有日志，排查耗掉了大半天。
+		// 内部 SubAgent 拿不到工具时，代码/文件类任务只能产出「计划」而非「结果」，
+		// 表现为审查反馈「产物仅包含初步调查计划，并未执行实际任务」。
+		cfg.Logger.Warnw("workflow engine: no tool resolver provided, internal subagents cannot touch the workspace",
+			"impact", "code/file tasks will only produce plans, not actual results",
+			"hint", "pass WireConfig.ToolMgr (see api/botservice.go) or reuse the bot-side engine")
 	}
 
 	// 2. 持久化仓储

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/config"
 )
@@ -62,4 +63,37 @@ func TestEngineConfig_ModelDrivenMaxTokens(t *testing.T) {
 	if ec.AnalyzerMaxTokens != 4096 {
 		t.Fatalf("expected model-driven 4096, got %d", ec.AnalyzerMaxTokens)
 	}
+}
+
+// TestSetup_DelegateTimeoutIndependentOfToolMgr 防回归：委托超时与工具步数
+// 必须与 ToolMgr 是否存在**解耦**。
+//
+// 线上事故（2026-08-04）：SetDelegateTimeout(10min) / SetDefaultToolSteps(25)
+// 被写在 `if cfg.ToolMgr != nil` 分支内，导致 workflow_service 实例（ToolMgr=nil，
+// 服务于启动 Recover / Sweeper / UI 重试）保持 subagent 默认的 120s。
+// 同一条工作流被 Recover 接管后超时从 10min 骤降到 120s，
+// 线上出现 30 次 elapsed=120.000s 的硬超时。超时预算与「有没有工具」无关。
+func TestSetup_DelegateTimeoutIndependentOfToolMgr(t *testing.T) {
+	// ToolMgr 为 nil（即 workflow_service 的装配方式）
+	_, saMgr := Setup(WireConfig{Model: "test-model"})
+	if saMgr == nil {
+		t.Fatal("Setup returned nil SubAgentManager")
+	}
+	defer saMgr.CloseAll()
+
+	timeout := saMgr.DelegateTimeout()
+	if timeout != 10*time.Minute {
+		t.Errorf("delegate timeout = %v, want 10m even when ToolMgr is nil "+
+			"(timeout budget must not depend on tool availability)", timeout)
+	}
+}
+
+// TestSetup_NilLoggerDoesNotPanic 防回归：WireConfig 文档承诺 Logger 可为 nil，
+// 但 Setup 内多处直接调用 cfg.Logger.Infow/Warnw——此前缺少兜底会 panic。
+func TestSetup_NilLoggerDoesNotPanic(t *testing.T) {
+	mgr, saMgr := Setup(WireConfig{Model: "test-model"}) // Logger 未设置
+	if mgr == nil || saMgr == nil {
+		t.Fatal("Setup must succeed with a nil logger")
+	}
+	saMgr.CloseAll()
 }
