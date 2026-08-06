@@ -47,7 +47,7 @@ func NewAnalyzer(saMgr *subagent.SubAgentManager, tp trace.TracerProvider, ec En
 		saMgr:  saMgr,
 		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/workflow/analyzer"),
 		ec:     ec,
-		logger: logger.With("component", "workflow_analyzer"),
+		logger: logger.With("stage", "workflow_analyzer"),
 	}
 }
 
