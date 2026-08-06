@@ -59,6 +59,8 @@ static/
 *.db.bak-*
 # Compiled server binary
 /thinkbot
+# thinkbot binary backups (e.g. thinkbot.bak-prev)
+/thinkbot.bak*
 
 # Runtime data (bot workspaces, uploads, sqlite, etc.)
 /data/
