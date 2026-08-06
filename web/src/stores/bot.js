@@ -403,7 +403,12 @@ export const useBotStore = defineStore('bot', () => {
         await chatApi.resume(botId, traceId, {
           onTextDelta: (delta) => appendTextPart(assistantTmpId, delta),
           onToolCall: (call) => upsertToolCall(assistantTmpId, call),
-          onToolProgress: (toolCallId, payload) => appendToolProgress(assistantTmpId, toolCallId, payload),
+          onToolProgress: (toolCallId, payload) => {
+            appendToolProgress(assistantTmpId, toolCallId, payload)
+            // 同上：阻塞式 task 的 workflowId 只能从进度事件拿到（result 要等到终态）
+            const pid = extractWorkflowId(payload)
+            if (pid) activeWorkflowId.value = pid
+          },
           onToolResult: (toolCallId, payload) => {
             finishToolCall(assistantTmpId, toolCallId, payload)
             const wid = extractWorkflowId(payload)
@@ -758,6 +763,10 @@ export const useBotStore = defineStore('bot', () => {
       },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
+        // task 工具「提交即阻塞」：tool_result 要等工作流跑完（可能数十分钟）才到达，
+        // 因此必须从进度事件里就取到 workflowId，否则整个执行期间面板都不会出现。
+        const pid = extractWorkflowId(payload)
+        if (pid) activeWorkflowId.value = pid
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)

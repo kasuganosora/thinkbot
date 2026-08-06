@@ -665,9 +665,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		stages.NoteCaptureMiddleware("exchange"),
 		pipeline.VerificationGateMiddleware(pipeline.NewVerificationGateConfig()),
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
-		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig().WithExemptTools(
-			"task_status", // 工作流进度轮询：分析/执行可能持续数分钟，重复调用属正常等待，不应被误判为死循环
-		)),
+		// 不豁免任何工具：workflow 的 task 已改为「提交即阻塞」，一次调用就等到终态，
+		// 因此**重复调用 task 属于真异常**（每次都会新建一个工作流），必须保留循环检测守卫。
+		// 历史上豁免的task_status 轮询工具已随阻塞化移除。
+		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
 		pipeline.LazyResponseMiddleware(pipeline.NewLazyResponseConfig()),
 		pipeline.TokenBudgetMiddlewareWithState(pipeline.NewTokenBudgetConfig().WithStatsRecorder(s.statsRecorder), s.tokenBudget),
 	)
