@@ -203,14 +203,40 @@ func (e *Executor) Review(ctx context.Context, node *DAGNode, product string) (*
 
 	// 解析 Review 结果（期望 LLM 在最后一行返回 JSON）
 	result, usedHeuristic := parseReviewResult(raw)
+
+	// 判定降级到 heuristic 意味着「我们没拿到模型的结论」，而不是「结论是失败」。
+	// heuristic 设计上保守判FAIL，若放任它，节点会被无谓地重跑到迭代耗尽——
+	// 线上实测90%（19/21）的 review 都掉进这条路径，工作流几乎无法收敛。
+	//
+	// 根因：Review 走 DelegateStream 且**注入了工具**，因此跑的是多步编排循环。
+	// 模型把输出预算花在「我来核实一下…」的中途叙述上，最后一步常以工具调用收尾，
+	// 压根没产出约定的 JSON 判定行。
+	//
+	// 对策：**追加一次无工具的收尾调用**，只要判定，不要过程。
+	// 这是「拿不到结论 → 去把结论要回来」，而非「猜一个结论」。
+	if result.Source == ReviewSourceHeuristic {
+		logger.Warnw("review verdict missing, asking for verdict-only follow-up",
+			"heuristic_guess", result.Passed, "raw_tail", reviewRawTail(raw))
+		if r2, err2 := e.reviewVerdictOnly(ctx, node, raw); err2 == nil {
+			result, usedHeuristic = r2, r2.Source != ReviewSourceJSON
+			logger.Infow("verdict-only follow-up succeeded",
+				"passed", result.Passed, "source", string(result.Source))
+		} else {
+			// 收尾调用也失败：保持 heuristic 结论（保守 FAIL），但必须留下原因，
+			// 否则又变成静默降级。
+			logger.Warnw("verdict-only follow-up failed, keeping heuristic verdict",
+				"error", err2, "passed", result.Passed)
+		}
+	}
+
 	if usedHeuristic {
 		// 判定不是模型明确给出的 JSON，而是从文本推断的。
-		// 宁可误判为不通过（触发重跑），也绝不静默放行未真正审查的产物；
-		// 轮次上限（节点 MaxIterations / 目标模式 GoalMaxIterations）会防止无限循环。
 		// source 区分 verdict_line（可信）与 heuristic（不可信），便于评估判定质量。
+		// 注意日志取的是**末尾**片段：约定的判定 JSON 在结尾，截开头等于把
+		// 最关键的证据丢掉（2026-08-06 排查时因此误判了根因，别再改回head）。
 		logger.Warnw("review verdict not from JSON, inferred from text",
 			"passed", result.Passed,
-			"source", string(result.Source), "raw", strutil.Truncate(raw, 200))
+			"source", string(result.Source), "raw_tail", reviewRawTail(raw))
 	}
 
 	span.SetAttributes(
@@ -225,6 +251,98 @@ func (e *Executor) Review(ctx context.Context, node *DAGNode, product string) (*
 // ============================================================================
 // 内部辅助函数
 // ============================================================================
+
+// verdictOnlyStuckTimeout 是「收尾判定」调用的卡死阈值。
+// 这一步不带工具、只让模型基于已有分析吐一行 JSON，属于轻量纯 LLM 调用，
+// 无需与节点执行同量级的3min 预算。
+const verdictOnlyStuckTimeout = 90 * time.Second
+
+// reviewVerdictOnlyMaxAnalysis 是回灌给收尾调用的审查分析文本上限。
+// 取末尾而非开头：结论性内容在后面。
+const reviewVerdictOnlyMaxAnalysis = 6000
+
+// reviewVerdictOnly 在主审查调用没能给出可信判定时，追加一次**无工具**的收尾调用，
+// 只索取判定 JSON。
+//
+// 为什么必须无工具（`WithSkipTools`）：主审查之所以拿不到判定，正是因为它带工具走了
+// 多步编排循环、把输出预算花在中途叙述上、最后一步以工具调用收尾。收尾调用若再带工具，
+// 会重复同一个失败模式；纯 LLM 单步调用才能保证「这一轮的输出就是最终答案」。
+//
+// 语义定位：这是「拿不到结论 → 去把结论要回来」，**不是**「猜一个结论」。
+// 与 heuristic 兜底的区别在于判定仍由模型给出，可信度回到 ReviewSourceJSON 级别。
+func (e *Executor) reviewVerdictOnly(ctx context.Context, node *DAGNode, priorAnalysis string) (*ReviewResult, error) {
+	analysis := strings.TrimSpace(priorAnalysis)
+	if analysis == "" {
+		return nil, errs.Newf("node %q: no prior review analysis to derive a verdict from", node.ID)
+	}
+	// 取末尾片段：审查结论在后面，截开头会把最有价值的部分丢掉。
+	if len(analysis) > reviewVerdictOnlyMaxAnalysis {
+		analysis = analysis[len(analysis)-reviewVerdictOnlyMaxAnalysis:]
+	}
+
+	sysPrompt := `You convert a code-review analysis into a single machine-readable verdict.
+
+You are given a reviewer's analysis of a task output. The reviewer failed to emit the
+required verdict. Your ONLY job is to read that analysis and decide the verdict.
+
+Rules:
+- Fail (passed=false) ONLY if the analysis reports a blocking defect: compile/syntax/type
+  errors, logic bugs, race conditions, resource leaks, security vulnerabilities, an
+  explicitly stated requirement not met, or output that is empty / only a plan.
+- Do NOT fail for style, naming, optional refactors, performance suggestions, or minor
+  documentation gaps. Those are non-blocking.
+- If the analysis shows the build and tests pass and no blocking defect is described,
+  the verdict is passed=true.
+- Judge ONLY from the analysis given. Do not call tools. Do not re-review the code.
+
+Reply with EXACTLY ONE line of JSON and nothing else:
+{"passed": true, "notes": "非阻断观察（可为空）"}
+or
+{"passed": false, "feedback": "具体的、可操作的修改意见", "notes": ""}
+Write "feedback" and "notes" in Chinese (中文); keep the JSON keys exactly as shown.`
+
+	task := fmt.Sprintf("## Reviewed Task\n%s\n\n## Reviewer Analysis (tail)\n%s\n\n"+
+		"Output the verdict JSON on a single line now.", node.Name, analysis)
+
+	raw, err := e.saMgr.DelegateStream(ctx, sysPrompt, task,
+		subagent.WithSkipTools(),
+		subagent.WithStuckTimeout(verdictOnlyStuckTimeout))
+	if err != nil {
+		return nil, errs.Wrapf(err, "node %q verdict-only review failed", node.ID)
+	}
+
+	// 收尾调用只认真正的 JSON 与显式判定行。若它也没给出，就不要再退化到
+	// heuristic——那等于用两次 LLM 调用换一个同样不可信的猜测。
+	if r, ok := reviewResultFromJSON(lastNonEmptyLine(raw)); ok {
+		return r, nil
+	}
+	if r, ok := reviewResultFromJSON(raw); ok {
+		return r, nil
+	}
+	if passed, ok := verdictFromLine(raw); ok {
+		feedback := ""
+		if !passed {
+			feedback = strutil.Truncate(raw, 500)
+		}
+		return &ReviewResult{Passed: passed, Feedback: feedback, Source: ReviewSourceVerdictLine}, nil
+	}
+	return nil, errs.Newf("node %q: verdict-only review returned no parseable verdict (tail=%s)",
+		node.ID, reviewRawTail(raw))
+}
+
+// reviewRawTail 返回审查原文的**末尾**片段用于日志。
+//
+// 必须取末尾：约定的判定 JSON 在最后一行。历史上这里用的是
+// `strutil.Truncate(raw, 200)`（取开头），导致日志里全是「我来核实一下…」的开场白，
+// 判定为何缺失完全不可诊断——2026-08-06 排查时因此误判了根因。别再改回 head。
+func reviewRawTail(raw string) string {
+	const maxTail = 300
+	s := strings.TrimSpace(raw)
+	if len(s) <= maxTail {
+		return s
+	}
+	return "..." + s[len(s)-maxTail:]
+}
 
 // buildIterationTask 构建带反馈的迭代执行任务。
 func buildIterationTask(originalTask, prevResult, feedback string) string {
@@ -271,6 +389,12 @@ You MUST end your reply with a single JSON object on the LAST line, and nothing 
 {"passed": true, "notes": "非阻断观察（可为空）"}
 or
 {"passed": false, "feedback": "具体的、可操作的修改意见", "notes": "非阻断观察（可为空）"}
+
+CRITICAL — the verdict JSON is the only part of your reply that is machine-read. If you
+omit it, your entire review is discarded and the task is needlessly re-run. Therefore:
+- Budget your tool use. Verify the few claims that actually matter, then stop and decide.
+- NEVER end your reply with a tool call. The verdict JSON must be the final thing you emit.
+- Even if your verification was incomplete, still emit a verdict based on what you found.
 
 You MAY write your analysis before that final JSON line. The JSON line itself must be
 valid JSON with no markdown code fence around it.
