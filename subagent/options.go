@@ -107,8 +107,9 @@ func WithCallTimeout(d time.Duration) Option {
 //   - 只要 LLM 持续输出 token（哪怕很慢）就不杀——正常处理超长 prompt（如 86 个 lint 问题）
 //     不会因固定超时被迫中断；
 //   - 只有连续 stuckTimeout 无任何 token（且已过首 token 宽限期）才判定「卡死」并终止；
-//   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），作为绝对兜底，
-//     防止无限挂起（如模型以极小间隔吐 token 骗过卡死检测）。
+//   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死）是「总运行时间」的
+//     绝对兜底上限（墙钟），只拦「永远在吐 token 但永不结束」的失控流；正常持续吐 token
+//     的 agent 不会被 hard 杀掉（倍数取较大值，避免误杀慢任务，见 delegateHardTimeoutFactor）。
 func WithStuckTimeout(d time.Duration) Option {
 	return func(sa *SubAgent) {
 		sa.stuckTimeout = d
