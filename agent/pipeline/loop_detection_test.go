@@ -338,17 +338,17 @@ func TestToolCallsDigest(t *testing.T) {
 	}
 }
 
-// TestToolCallsDigest_ExemptTools 验证豁免工具（如 task_status 轮询）不计入 digest。
+// TestToolCallsDigest_ExemptTools 验证豁免工具（如 task 阻塞提交）不计入 digest。
 func TestToolCallsDigest_ExemptTools(t *testing.T) {
-	// 仅含豁免工具 task_status 的调用 → 视为无工具调用（空 digest）
+	// 仅含豁免工具 task 的调用 → 视为无工具调用（空 digest）
 	onlyPoll := &llm.GenerateResult{
 		Steps: []llm.StepResult{{
 			ToolCalls: []llm.ToolCall{
-				{ToolCallID: "tc1", ToolName: "task_status", Input: "wf-123"},
+				{ToolCallID: "tc1", ToolName: "task", Input: "fix all lint errors"},
 			},
 		}},
 	}
-	if toolCallsDigest(onlyPoll, map[string]bool{"task_status": true}) != "" {
+	if toolCallsDigest(onlyPoll, map[string]bool{"task": true}) != "" {
 		t.Error("exempt-only tool calls should produce empty digest")
 	}
 
@@ -356,12 +356,12 @@ func TestToolCallsDigest_ExemptTools(t *testing.T) {
 	mixed := &llm.GenerateResult{
 		Steps: []llm.StepResult{{
 			ToolCalls: []llm.ToolCall{
-				{ToolCallID: "tc1", ToolName: "task_status", Input: "wf-123"},
+				{ToolCallID: "tc1", ToolName: "task", Input: "fix all lint errors"},
 				{ToolCallID: "tc2", ToolName: "search", Input: "hello"},
 			},
 		}},
 	}
-	exemptSet := map[string]bool{"task_status": true}
+	exemptSet := map[string]bool{"task": true}
 	if got := toolCallsDigest(mixed, exemptSet); got == "" {
 		t.Error("mixed call with a non-exempt tool should produce non-empty digest")
 	}

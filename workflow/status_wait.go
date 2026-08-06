@@ -12,7 +12,7 @@ package workflow
 //     · LLM 自行决定的等待间隔既不稳定也不合理
 //
 // 解法：把轮询下沉到服务端。
-//   agent 调一次 task_status(wait=true)，服务端在函数内阻塞轮询，直到工作流进入终态
+//   agent 调一次 task（提交即阻塞），服务端在函数内阻塞轮询，直到工作流进入终态
 //   （completed / failed / terminated）或超时才返回。agent 只在「成功/失败」时被唤醒。
 //
 // 三条必须守住的边界：
@@ -43,6 +43,16 @@ const (
 	//
 	// 即使调用方传了更大的值也会被截断——无上限等待等于把 agent 挂死。
 	statusWaitMaxTimeout = 30 * time.Minute
+
+	// taskBlockingMaxTimeout 是 task 工具「提交即阻塞」的等待上限。
+	//
+	// 必须 **小于** api/handler_chat.go 里 drainAndSaveInBackground 的 bgCtx 超时（20min）：
+	// 客户端断开后由后台 goroutine 继续消费事件并落库，若本阻塞超过那个上限，
+	// bgCtx 会先到期→ 最终 assistant 回复（含工作流结果）永远不落库，
+	// 用户重连后看到的是一条被腰斩的消息。留 2 分钟余量给落库本身。
+	//
+	// 改这个值前务必先确认 handler_chat 的 bgCtx 上限，两者必须保持这个偏序关系。
+	taskBlockingMaxTimeout = 18 * time.Minute
 )
 
 // waitStatusResult 是 wait 模式的返回结构。
@@ -116,8 +126,9 @@ func waitForTerminal(
 				StatusResult: st,
 				Waited:       time.Since(start).Truncate(time.Second).String(),
 				TimedOut:     true,
-				Hint: "The wait timed out, but the task is still running. Call task_status(wait=true) again to keep waiting, " +
-					"or use task_detail to inspect sub-task progress. NEVER switch to high-frequency polling.",
+				Hint: "The wait timed out, but the task is still running in the background. Do NOT call task again — " +
+					"that would start a NEW task. Use task_detail to inspect sub-task progress, " +
+					"or simply tell the user the task is still in progress. NEVER switch to high-frequency polling.",
 			}, nil
 
 		case <-ticker.C:

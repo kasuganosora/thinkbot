@@ -45,8 +45,8 @@ type LoopDetectionConfig struct {
 	HardLimit int
 	// WindowSize 滑动窗口大小（记录最近 N 次的工具调用模式）。默认 20。
 	WindowSize int
-	// ExemptTools 这些工具（通常是进度轮询类，如 task_status）的重复调用
-	// 不计入循环检测。工作流分析/执行可能持续数十秒到数分钟，bot 轮询进度
+	// ExemptTools 这些工具（通常是阻塞式长任务类，如 task）的重复调用
+	// 不计入循环检测。工作流分析/执行可能持续数十秒到数分钟，bot 提交后阻塞等待
 	// 属正常行为，不应被误判为死循环而强制收尾。
 	ExemptTools []string
 }
@@ -129,7 +129,7 @@ func (w *loopWindow) push(hash string) int {
 
 // toolCallsDigest 从 GenerateResult 的 Steps 中提取工具调用信息，生成稳定 hash。
 // 返回空字符串表示没有（非豁免的）工具调用。
-// exempt 为需要排除的工具名集合（如轮询类工具 task_status），其调用不计入循环检测。
+// exempt 为需要排除的工具名集合（如阻塞式长任务工具 task），其调用不计入循环检测。
 func toolCallsDigest(result *llm.GenerateResult, exempt map[string]bool) string {
 	if result == nil || len(result.Steps) == 0 {
 		return ""
