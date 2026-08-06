@@ -113,9 +113,11 @@ func TestDelegateStream_Live(t *testing.T) {
 	}
 }
 
-// TestDelegateStream_HardCap 持续输出但永不结束，应被总时长硬上限（stuck×3）强制终止。
+// TestDelegateStream_HardCap 持续输出但永不结束，应被总运行时长的绝对硬上限（stuck×factor）强制终止。
+// 注意：硬上限是「墙钟总时长」的绝对兜底，只拦「永远在吐 token 但永不结束」的失控流；
+// 正常持续吐 token 的 agent 不会被它杀掉（见 TestDelegateStream_ActiveSurvivesPastOldHard）。
 func TestDelegateStream_HardCap(t *testing.T) {
-	// stuck=1s, hard=3s；每 0.5s 输出 token 且永不停止 → 总时长超 hard 后强杀。
+	// stuck=1s, hard=10s（factor=10）；每 0.5s 输出 token 且永不停止 → 总时长超 hard 后强杀。
 	provider := &scriptedStreamProvider{
 		name: "script",
 		steps: []streamStep{
@@ -138,8 +140,33 @@ func TestDelegateStream_HardCap(t *testing.T) {
 	if !strings.Contains(err.Error(), "硬上限") {
 		t.Errorf("expected 硬上限 error, got %q", err.Error())
 	}
-	if elapsed > 15*time.Second {
+	if elapsed > 25*time.Second {
 		t.Errorf("hard cap took too long: %s", elapsed)
+	}
+}
+
+// TestDelegateStream_ActiveSurvivesPastOldHard 持续输出 token 的总时长即便超过
+// 旧版「硬上限 = stuck×3」的窗口，只要 agent 仍在吐 token 就不应被杀，应正常完成返回。
+// 复现 wf-00806b0d n1 节点被 9m 墙钟硬上限误杀的问题：节点在持续产出片段，却被墙钟
+// 硬上限一刀切终止。修复后硬上限改为很大的绝对兜底（stuck×10），正常慢任务不再被误杀。
+func TestDelegateStream_ActiveSurvivesPastOldHard(t *testing.T) {
+	// stuck=1s（旧 hard=3s）；每 0.4s 输出一个 token，共 12 个（总时长 ~4.8s，
+	// 超过旧 hard 3s 但仍 < 新 hard 10s）→ 应正常完成，不被硬上限杀掉。
+	steps := make([]streamStep, 12)
+	for i := range steps {
+		steps[i] = streamStep{wait: 400 * time.Millisecond, token: "x"}
+	}
+	provider := &scriptedStreamProvider{name: "script", steps: steps}
+	mgr := NewSubAgentManager(provider, "test-model")
+
+	text, err := mgr.DelegateStream(context.Background(), "", "task",
+		WithStuckTimeout(1*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("active stream should survive past old hard window, got error: %v", err)
+	}
+	if len(text) != 12 {
+		t.Errorf("expected 12 tokens, got %d (%q)", len(text), text)
 	}
 }
 

@@ -98,6 +98,15 @@ func (m *SubAgentManager) SetDelegateTimeout(d time.Duration) {
 	m.mu.Unlock()
 }
 
+// DelegateTimeout 返回当前的委托超时配置。
+// 供上层（如 workflow.Setup）与测试校验装配结果——曾因该值被写在条件分支内
+// 导致部分引擎实例静默保持 120s 默认值，故需要可断言。
+func (m *SubAgentManager) DelegateTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.delegateTimeout
+}
+
 // SetMaxConcurrency 设置 DelegateMany 的最大并发数。
 // 应在 DelegateMany 调用前设置。
 func (m *SubAgentManager) SetMaxConcurrency(n int) {
@@ -174,9 +183,19 @@ const (
 	// defaultDelegateStuckTimeout DelegateStream 卡死看门狗默认阈值：
 	// 流式 LLM 调用连续无 token 输出超过该时长即判定卡死并终止。默认 180s。
 	defaultDelegateStuckTimeout = 180 * time.Second
-	// delegateHardTimeoutFactor 硬上限 = 卡死阈值 × 该系数，派生而非写死。
-	// 与 sandbox 的硬兜底策略一致（看门狗时间 ×3）。
-	delegateHardTimeoutFactor = 3
+	// delegateHardTimeoutFactor 硬上限相对卡死阈值的倍数，作为绝对兜底。
+	//
+	// 关键语义区分（曾踩坑）：卡死看门狗 stuck 是基于「连续无 token 输出的静默时长」，
+	// 而硬上限 hard 是「总运行时间」的绝对上限（墙钟）。两者必须不同义：
+	//   - 持续吐 token 的 agent 永不会被 stuck 杀掉（哪怕很慢）——这是看门狗的本意；
+	//   - 硬上限只作为最后的绝对兜底，拦住「永远在吐 token 但永不结束」的失控流，
+	//     防止工作流节点无限挂起。
+	//
+	// 倍数取较大值（stuck×10）：stuck=3min 时硬上限=30min，给正常慢任务充足余量。
+	// 之前用 ×3=9min，会误杀正常在干活的 review 节点（实测 wf-00806b0d n1 节点
+	// 持续产出片段却被 9m 墙钟硬上限强制终止）。需要更激进的绝对兜底可调小此倍数，
+	// 但务必保证 > 正常单节点最大耗时。
+	delegateHardTimeoutFactor = 10
 	// delegateWatchdogTick 看门狗轮询间隔。
 	delegateWatchdogTick = 5 * time.Second
 	// delegateMaxStartupGrace 首 token 宽限期上限：尚未收到任何 token 时，
@@ -226,8 +245,10 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 //   - 只要 LLM 持续输出 token（哪怕很慢）就不杀——正常处理超长 prompt（如 86 个 lint 问题）
 //     不会因固定超时被迫中断；
 //   - 只有连续 stuckTimeout 无任何 token（且已过首 token 宽限期）才判定「卡死」并终止；
-//   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），作为绝对兜底，
-//     防止无限挂起（如模型以极小间隔吐 token 骗过卡死检测）。
+//   - 硬上限 = stuckTimeout × delegateHardTimeoutFactor（派生，不写死），是「总运行时间」的
+//     绝对兜底上限（墙钟），只拦住「永远在吐 token 但永不结束」的失控流；
+//     正常持续吐 token 的 agent 不会被 hard 杀掉，只有到达很大的绝对上限才终止
+//     （倍数取较大值，避免误杀正常慢任务，见 delegateHardTimeoutFactor）。
 //
 // 带工具的场景（子 Agent 注入主 Agent 工作空间工具）：同样启用看门狗，但任意流片段
 // （含工具调用/结果）都算活跃信号——长 exec 在首尾产生工具片段、且自身有超时保护，
@@ -275,7 +296,8 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 //     正常处理超长 prompt 或慢思考模型不会被中断；带工具时，长 exec 在首尾产生工具
 //     片段、且其自身有 sandbox 超时保护，也不会被误判卡死；
 //   - 仅当连续 stuck 无任何片段输出（且已过首片段宽限期）才判定卡死并终止；
-//   - 硬上限 = stuck × delegateHardTimeoutFactor 作为绝对兜底，防止无限挂起。
+//   - 硬上限 = stuck × delegateHardTimeoutFactor 是「总运行时间」的绝对兜底上限（墙钟），
+//     只拦住「永远在吐片段但永不结束」的失控流；正常持续产出的 agent 不会被 hard 杀掉。
 //
 // DelegateStream 与 DelegateMany 共用此方法，使 spawn 等带工具的子 Agent 也能真正
 // 享受看门狗保护，而非被旧的工具分支逻辑绕过。
