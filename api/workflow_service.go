@@ -54,6 +54,15 @@ func NewWorkflowService(db *gorm.DB, store *config.Store, tp trace.TracerProvide
 }
 
 // Manager 返回工作流管理器（懒初始化）。
+//
+// **优先复用 BotService 已装配工作区工具的引擎**，只有在没有任何 bot 启动时
+// 才退化为自建实例。
+//
+// 为什么这个优先级至关重要（2026-08-06 线上事故）：本服务负责 Recover /
+// Sweeper / UI 重试。自建实例的 WireConfig 没有 ToolMgr，工作流内部 SubAgent
+// 因此碰不到工作区 —— 进程重启后 Recover 接管工作流，节点产出从 5000~10000 字的
+// 真实审查报告退化成 48~117 字的「我将先探索项目结构…」纯计划，
+// 且照样通过 review 被判 completed，等于静默把工作成果丢掉。
 func (ws *WorkflowService) Manager() (*workflow.Manager, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -62,13 +71,21 @@ func (ws *WorkflowService) Manager() (*workflow.Manager, error) {
 		return ws.mgr, nil
 	}
 
+	// 优先复用 bot 侧已装配工具的引擎。
+	// **刻意不缓存到 ws.mgr**：bot 可能重启或切换模型，每次取当前最新的那个，
+	// 避免长期持有一个已被 StopBot 关闭的引擎。
+	if shared := ws.botSvc.WorkflowEngine(); shared != nil {
+		return shared, nil
+	}
+
 	// 从 BotService 获取 LLM Provider（含当前主模型定义，用于推导分析器 max_tokens）
 	provider, model, modelDef, err := ws.botSvc.CreateLLMProvider()
 	if err != nil {
 		return nil, err
 	}
 
-	// 创建工作流引擎
+	// 退化路径：没有任何 bot 启动。此时引擎拿不到工作区工具，
+	// 代码/文件类节点只能产出计划——workflow.Setup 内部已就此打 WARN。
 	mgr, saMgr := workflow.Setup(workflow.WireConfig{
 		Provider:       provider,
 		Model:          model,
@@ -82,7 +99,10 @@ func (ws *WorkflowService) Manager() (*workflow.Manager, error) {
 
 	ws.mgr = mgr
 	ws.saMgr = saMgr
-	ws.logger.Infow("workflow engine initialized", "model", model)
+	ws.logger.Warnw("workflow engine initialized without workspace tools",
+		"model", model,
+		"reason", "no started bot exposed an equipped engine",
+		"impact", "code/file nodes will only produce plans, not actual results")
 
 	return mgr, nil
 }

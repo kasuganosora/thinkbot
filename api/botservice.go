@@ -72,6 +72,16 @@ type BotService struct {
 	messageCancels    map[string]context.CancelFunc  // "botID:traceID" → message context cancel
 	messageInterrupts map[string]chan string         // "botID:traceID" → 用户中途追加通道（生成中补充）
 
+	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
+	//
+	// 存在意义（2026-08-06 线上事故）：WorkflowService 原先自己 Setup 一个
+	// ToolMgr=nil 的引擎来跑 Recover / Sweeper / UI 重试。进程重启后 Recover
+	// 接管工作流，节点执行的 SubAgent 拿不到工作区工具 → 产出从 5000~10000字的
+	// 真实审查报告退化成 48~117 字的「我将先探索项目结构…」纯计划，
+	// 且照样被 review 判 completed（空壳产物混进终态，等于静默丢工作成果）。
+	// → WorkflowService 必须优先复用这里的引擎，而不是自建残废实例。
+	wfEngines map[string]*workflow.Manager // botID → 已装配 ToolMgr 的工作流引擎
+
 	tokenBudget *pipeline.TokenBudgetState // 共享 token 预算状态（支持空闲自动重置 / 手动重置）
 }
 
@@ -102,6 +112,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		closeFuncs:        make(map[string]func()),
 		messageCancels:    make(map[string]context.CancelFunc),
 		messageInterrupts: make(map[string]chan string),
+		wfEngines:         make(map[string]*workflow.Manager),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -393,6 +404,37 @@ func (s *BotService) ResetTokenBudgets() {
 	s.tokenBudget.ResetAll()
 }
 
+// publishWorkflowEngine 登记某bot 已装配工作区工具的工作流引擎。
+func (s *BotService) publishWorkflowEngine(botID string, mgr *workflow.Manager) {
+	if mgr == nil {
+		return
+	}
+	s.mu.Lock()
+	s.wfEngines[botID] = mgr
+	s.mu.Unlock()
+}
+
+// WorkflowEngine 返回任意一个已装配工作区工具的工作流引擎（无则返回 nil）。
+//
+// 供 WorkflowService 的 Recover / Sweeper / UI 重试路径复用，避免自建
+// ToolMgr=nil 的残废引擎——后者会让节点执行的 SubAgent 碰不到工作区，
+// 产出退化成纯计划（2026-08-06 线上事故，详见 wfEngines 字段注释）。
+//
+// 为什么可以「任意一个」：引擎是按 bot 装配的，而工作流记录目前**没有落bot_id**
+// （已挂账待办），因此无法精确匹配来源 bot。在单bot / 同工作区的实际部署下，
+// 任取一个已装配实例远优于用一个碰不到工作区的实例。
+// ⚠️ 等 bot_id 落库后，这里应改为按 workflow.bot_id 精确查找。
+func (s *BotService) WorkflowEngine() *workflow.Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, mgr := range s.wfEngines {
+		if mgr != nil {
+			return mgr
+		}
+	}
+	return nil
+}
+
 // 工具调用步数预算的全局默认值。
 // soft：常规任务在此内自然收尾；hard：复杂任务持续产生新调用时自动延长至该安全网。
 const (
@@ -594,6 +636,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if err := workflow.RegisterTools(toolMgr, wfMgr); err != nil {
 		s.logger.Warnw("failed to register workflow tools", "err", err)
 	}
+
+	// 发布这个**已装配工具**的引擎，供 WorkflowService（Recover / Sweeper / UI 重试）复用。
+	// 不发布的话它会自建 ToolMgr=nil 的残废引擎，重启后接管的工作流只能产出计划而非结果。
+	s.publishWorkflowEngine(id, wfMgr)
 
 	// 注册 SubAgent 工具
 	// 将当前模型的 MaxTokens 作为默认输出上限注入，避免 SubAgent 写死 4096：
@@ -1162,6 +1208,9 @@ func (s *BotService) StopBot(id string) {
 		dreamBundle.Stop()
 		delete(s.dreamingBundles, id)
 	}
+	// 该 bot 的工作流引擎随 bot 停止而失效（其 SubAgent 管理器已由 closeFuncs 关闭），
+	// 必须摘掉，否则 WorkflowService 会复用一个已关闭的引擎。
+	delete(s.wfEngines, id)
 	pendingCancels := make([]context.CancelFunc, 0)
 	prefix := id + ":"
 	for key, cancel := range s.messageCancels {
