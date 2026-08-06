@@ -215,19 +215,36 @@ func (lc *loopController) describeLoopStop(steps int) string {
 	}
 }
 
-// logLoopStop 在编排循环结束后记录停止原因。仅当循环因步数守卫（撞硬顶
-// 或陷入重复循环）而停止时才 Warn，便于排查「任务被腰斩 / 死循环」；模型
-// 自然收尾则不噪声。
+// logLoopStop 在编排循环结束后记录停止原因。
+//
+// 分两级，避免「静默降级」又「日志刷屏」：
+//   - 撞硬顶 / 陷入重复循环 → Warn（任务被腰斩，必须能查到）；
+//   - 模型自然收尾但已越过软预算 → Debug（说明这次编排跑得很长，
+//     判断「产出是否被步数挤掉」时需要这个数据）。
+//
+// 2026-08-06 教训：原实现只在 `steps >= hard` 才打日志，而实际编排大多停在
+// soft..hard 区间或自然收尾 —— 线上 `grep` 该Warn **0 次命中**，
+// 导致排查 review 判定缺失时完全没有步数线索，误判了根因。
 func logLoopStop(ctx context.Context, lc *loopController, steps int) {
-	if lc == nil || !lc.stoppedByGuard(steps) {
+	if lc == nil {
 		return
 	}
-	if logger := traceid.L(ctx); logger != nil {
-		logger.Warnw("orchestration loop stopped by step guard",
-			"reason", lc.describeLoopStop(steps),
-			"steps", steps,
-			"soft_max", lc.soft,
-			"hard_max", lc.hard,
-		)
+	logger := traceid.L(ctx)
+	if logger == nil {
+		return
 	}
+	if !lc.stoppedByGuard(steps) {
+		// 自然收尾：只在越过软预算时留一条 Debug，正常短编排不产生噪声。
+		if lc.soft > 0 && steps >= lc.soft {
+			logger.Debugw("orchestration loop finished past soft budget",
+				"steps", steps, "soft_max", lc.soft, "hard_max", lc.hard)
+		}
+		return
+	}
+	logger.Warnw("orchestration loop stopped by step guard",
+		"reason", lc.describeLoopStop(steps),
+		"steps", steps,
+		"soft_max", lc.soft,
+		"hard_max", lc.hard,
+	)
 }
