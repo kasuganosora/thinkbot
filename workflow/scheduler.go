@@ -101,7 +101,7 @@ func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg Sch
 		ec:            ec,
 		maxParallel:   maxParallel,
 		tracer:        tp.Tracer("github.com/kasuganosora/thinkbot/workflow/scheduler"),
-		logger:        logger.With("component", "workflow_scheduler", "workflow_id", wf.ID),
+		logger:        logger.With("stage", "workflow_scheduler", "workflow_id", wf.ID),
 		emitter:       emitter,
 		metrics:       metrics,
 		sem:           make(chan struct{}, maxParallel),
@@ -113,6 +113,10 @@ func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg Sch
 // Run 阻塞执行工作流直到所有节点到达终态，或被 Terminate。
 // 返回最终的工作流状态。
 func (s *Scheduler) Run(ctx context.Context) WorkflowStatus {
+	// 把 workflow_id 注入 ctx，使下游 Executor 的日志能关联到具体工作流。
+	// （executor 是无状态的，其 logger 不持有 workflow_id）
+	ctx = withWorkflowID(ctx, s.wf.ID)
+
 	ctx, span := s.tracer.Start(ctx, "workflow.scheduler.run",
 		trace.WithAttributes(
 			attribute.String("workflow.id", s.wf.ID),

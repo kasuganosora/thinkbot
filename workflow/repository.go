@@ -38,7 +38,7 @@ func NewRepository(db *gorm.DB, logger *zap.SugaredLogger) *Repository {
 	return &Repository{
 		cache:  make(map[string]*Workflow),
 		db:     db,
-		logger: logger.With("component", "workflow_repo"),
+		logger: logger.With("stage", "workflow_repo"),
 	}
 }
 

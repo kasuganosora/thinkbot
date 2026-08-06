@@ -129,7 +129,7 @@ func NewManager(repo *Repository, analyzer *Analyzer, executor *Executor, tp tra
 		ec:       ec,
 		tracer:   tp.Tracer("github.com/kasuganosora/thinkbot/workflow/manager"),
 		tp:       tp,
-		logger:   logger.With("component", "workflow_manager"),
+		logger:   logger.With("stage", "workflow_manager"),
 		emitter:  outbound.NewEventEmitter(bus, ""),
 		running:  make(map[string]*runningInstance),
 	}
