@@ -61,6 +61,32 @@ func TestStatusWaitTimeouts_SaneBounds(t *testing.T) {
 	}
 }
 
+// TestTaskBlockingTimeout_FitsInsideBackgroundDrain 守住一条跨包偏序不变量。
+//
+// task 工具「提交即阻塞」，而 api/handler_chat.go 的 drainAndSaveInBackground 在客户端
+// 断开后只用一个 20 分钟的 bgCtx 继续消费事件并落库。若阻塞上限 >= 那个值，
+// bgCtx 会先到期 → 最终 assistant 回复（含工作流结果）永不落库，用户重连只看到腰斩的消息。
+//
+// 这里把 20 分钟写死作为「契约副本」：任何一侧被改动都会让本测试失败，迫使同步复核。
+func TestTaskBlockingTimeout_FitsInsideBackgroundDrain(t *testing.T) {
+	const backgroundDrainTimeout = 20 * time.Minute // 必须与 api/handler_chat.go 的 bgCtx 保持一致
+
+	if taskBlockingMaxTimeout <= 0 {
+		t.Fatal("taskBlockingMaxTimeout must be positive, otherwise task never blocks")
+	}
+	if taskBlockingMaxTimeout >= backgroundDrainTimeout {
+		t.Errorf("taskBlockingMaxTimeout = %v must stay below the background drain timeout %v, "+
+			"otherwise a disconnected client loses the final workflow result",
+			taskBlockingMaxTimeout, backgroundDrainTimeout)
+	}
+	// 留够落库余量：至少比后台上限少 1 分钟。
+	if backgroundDrainTimeout-taskBlockingMaxTimeout < time.Minute {
+		t.Errorf("taskBlockingMaxTimeout = %v leaves less than 1min headroom before %v; "+
+			"saving the assistant reply needs slack",
+			taskBlockingMaxTimeout, backgroundDrainTimeout)
+	}
+}
+
 // newWaitTestManager 造一个只带内存仓库的 Manager，够 GetStatus 用。
 func newWaitTestManager(t *testing.T, wf *Workflow) *Manager {
 	t.Helper()
@@ -155,5 +181,65 @@ func TestWaitForTerminal_UnknownWorkflowErrors(t *testing.T) {
 	mgr := newWaitTestManager(t, NewWorkflow("wf-exists", "req", nil))
 	if _, err := waitForTerminal(context.Background(), mgr, "wf-missing", time.Second, nil); err == nil {
 		t.Fatal("expected an error for an unknown workflow id")
+	}
+}
+
+// TestWaitForTerminal_ProgressCarriesWorkflowID 守住前端面板能在执行期显示的前提。
+//
+// 背景（真实回归）：task 改为「提交即阻塞」后，tool_result 要等工作流跑到终态才到达。
+// 前端只从工具事件里提取 workflowId 来挂载工作流面板，若进度事件不带 workflowId，
+// 整个执行期间（可能数十分钟）面板都不会出现，用户完全看不到进度。
+//
+// 因此：onProgress 推送的 payload 必须携带 workflowId。
+func TestWaitForTerminal_ProgressCarriesWorkflowID(t *testing.T) {
+	const wfID = "wf-progress"
+	wf := NewWorkflow(wfID, "req", nil)
+	wf.Status = WorkflowRunning
+	mgr := newWaitTestManager(t, wf)
+
+	var gotWorkflowID string
+	sawProgress := false
+
+	// 模拟 submitToolDef 里的 onProgress：必须走 taskProgressPayload，把 workflowId 一起推给前端。
+	onProgress := func(st *StatusResult, waited time.Duration) {
+		sawProgress = true
+		payload := taskProgressPayload(wfID, "工作流执行中… 状态="+string(st.Status))
+		if v, ok := payload["workflowId"].(string); ok {
+			gotWorkflowID = v
+		}
+	}
+
+	// 用一个略大于轮询间隔的超时，确保至少触发一次 onProgress回调。
+	ctx, cancel := context.WithTimeout(context.Background(), statusWaitPollInterval+2*time.Second)
+	defer cancel()
+	if _, err := waitForTerminal(ctx, mgr, wfID, statusWaitPollInterval+2*time.Second, onProgress); err != nil {
+		t.Fatalf("waitForTerminal: %v", err)
+	}
+
+	if !sawProgress {
+		t.Fatal("onProgress was never invoked; the frontend would get no progress at all")
+	}
+	if gotWorkflowID != wfID {
+		t.Errorf("progress payload must carry workflowId = %q, got %q; "+
+			"without it the workflow panel never mounts during execution", wfID, gotWorkflowID)
+	}
+}
+
+// TestTaskProgressPayload_CarriesWorkflowID 直接验证 task 工具进度事件的构造契约。
+//
+// 这是上一条不变量的单元版本：前端只从工具事件里提取 workflowId 来挂载面板，
+// 因此每条进度 payload 都必须带上它；同时 stream/chunk 是前端消费的既有字段，不能丢。
+func TestTaskProgressPayload_CarriesWorkflowID(t *testing.T) {
+	const wfID = "wf-abc123"
+	p := taskProgressPayload(wfID, "工作流执行中…")
+
+	if got, _ := p["workflowId"].(string); got != wfID {
+		t.Errorf("payload workflowId = %q, want %q; without it the panel never mounts during execution", got, wfID)
+	}
+	if got, _ := p["stream"].(string); got != "stdout" {
+		t.Errorf("payload stream = %q, want \"stdout\" (frontend routes output by this field)", got)
+	}
+	if got, _ := p["chunk"].(string); got == "" {
+		t.Error("payload chunk must be non-empty; the frontend appends it to the tool card output")
 	}
 }
