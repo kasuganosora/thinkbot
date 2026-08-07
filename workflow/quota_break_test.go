@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -102,5 +103,42 @@ func TestQuotaBreaker_NoRetryAmplification(t *testing.T) {
 	// Execute 应只被调用 1 次（ShouldRetry 在首次配额错误即返回 false）。
 	if got := exec.execCalls.Load(); got != 1 {
 		t.Errorf("Execute calls = %d, want 1 (no retry amplification on quota exhaustion)", got)
+	}
+}
+
+// TestQuotaBreaker_RespectsResetTime 验证：服务端明确告知了未来的重置时刻时，
+// 熔断器的等待时长**尊重该真实时刻**（不被任何固定上限截断），从而实现
+// 「遇到 429 等待到对应时间再重试」的无职守续跑。这是本优化的核心回归。
+//
+// 旧实现把 maxQuotaWait 硬编码为 90min，GLM 说 20:06 重置也只等 90min 就中奖式
+// 续跑、立刻又撞墙——本测试杜绝回归。
+func TestQuotaBreaker_RespectsResetTime(t *testing.T) {
+	const hours = 4
+	reset := time.Now().Add(hours * time.Hour).Format("2006-01-02 15:04:05")
+	err := fmt.Errorf("HTTP 429: 您在当前时间段的请求已达到 5 小时的使用上限，限额将在 %s 重置", reset)
+
+	now := time.Now()
+	wait := quotaWaitFor(err, now).Sub(now)
+
+	want := time.Duration(hours) * time.Hour
+	if wait < want-time.Minute || wait > want+time.Minute {
+		t.Fatalf("quotaWaitFor did not honor server reset time: wait=%v, want≈%v", wait, want)
+	}
+}
+
+// TestQuotaBreaker_ClampsAbsurdResetTime 验证：服务端给出的重置时刻离谱地远
+// （解析异常）时，仍被 hardQuotaWaitCap 收住，避免工作流无限挂起。
+func TestQuotaBreaker_ClampsAbsurdResetTime(t *testing.T) {
+	const hours = 100 // 远超 hardQuotaWaitCap=12h
+	reset := time.Now().Add(hours * time.Hour).Format("2006-01-02 15:04:05")
+	err := fmt.Errorf("HTTP 429: 已达到使用上限，限额将在 %s 重置", reset)
+
+	now := time.Now()
+	wait := quotaWaitFor(err, now).Sub(now)
+	if wait > hardQuotaWaitCap+time.Minute {
+		t.Fatalf("quotaWaitFor exceeded hardQuotaWaitCap: wait=%v", wait)
+	}
+	if wait < minQuotaWait {
+		t.Fatalf("quotaWaitFor absurd-clamp fell below min: wait=%v", wait)
 	}
 }
