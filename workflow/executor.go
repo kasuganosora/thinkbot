@@ -463,9 +463,55 @@ func parseReviewResult(raw string) (*ReviewResult, bool) {
 	return &ReviewResult{Passed: passed, Feedback: feedback, Source: ReviewSourceHeuristic}, true
 }
 
+// verdictBoolFromProbe 从解析出的 JSON 对象里提取判定布尔值。
+//
+// 为什么要认多个字段名（2026-08-06 线上实测）：prompt 明确要求 `{"passed": ...}`，
+// 但模型实际大量输出别名 —— 40 条「判定缺失」样本里 `verdict` 出现 23 次、`pass` 4 次，
+// 而旧实现只认 `passed`，于是这些**明明给了判定**的回复统统落进 heuristic 兜底，
+// 被保守判FAIL、触发无谓重跑。
+//
+// 同时接受两种值形态：
+//   - bool：`{"passed": true}` / `{"pass": false}`
+//   - string：`{"verdict": "pass"}` / `{"verdict": "FAIL"}`（模型偏爱这种）
+//
+// 第二返回值为 false 表示「这个对象里没有可识别的判定字段」——**必须保留这个语义**，
+// 否则代码片段里的 `{"timeout":5000}` 会被当成判定（bool 零值 = false），
+// 静默把产物判为不通过（2026-08-04 踩过）。
+func verdictBoolFromProbe(probe map[string]any) (bool, bool) {
+	// 顺序即优先级：先认 prompt 约定的 passed，再认实测常见别名。
+	for _, key := range []string{"passed", "pass", "verdict", "result", "status"} {
+		v, exists := probe[key]
+		if !exists {
+			continue
+		}
+		switch val := v.(type) {
+		case bool:
+			return val, true
+		case string:
+			if passed, ok := verdictFromWord(val); ok {
+				return passed, true
+			}
+		}
+	}
+	return false, false
+}
+
+// verdictFromWord 解析判定词（"pass"/"fail"/"通过"/"不通过" 等）。
+// 无法识别时第二返回值为 false —— 不认识的词绝不能当成判定，
+// 否则又变成「猜一个结论」。
+func verdictFromWord(s string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "pass", "passed", "true", "ok", "success", "通过", "已通过":
+		return true, true
+	case "fail", "failed", "false", "不通过", "未通过", "失败":
+		return false, true
+	}
+	return false, false
+}
+
 // reviewResultFromJSON 尝试把 s 解析成审查结论。
-// 只有解析出的对象**确实含bool 类型的 passed 字段**才算成功——这是防「代码片段被
-// 当成判定」的关键校验，不可省略。
+// 只有解析出的对象**确实含可识别的判定字段**才算成功——这是防「代码片段被
+// 当成判定」的关键校验，不可省略。字段名/值形态的兼容见 verdictBoolFromProbe。
 func reviewResultFromJSON(s string) (*ReviewResult, bool) {
 	if strings.TrimSpace(s) == "" {
 		return nil, false
@@ -474,11 +520,15 @@ func reviewResultFromJSON(s string) (*ReviewResult, bool) {
 	if err := strutil.ExtractJSON(s, &probe); err != nil {
 		return nil, false
 	}
-	passed, ok := probe["passed"].(bool)
+	passed, ok := verdictBoolFromProbe(probe)
 	if !ok {
 		return nil, false
 	}
+	// feedback 也认别名：模型常用 reason 说明失败原因。
 	feedback, _ := probe["feedback"].(string)
+	if feedback == "" {
+		feedback, _ = probe["reason"].(string)
+	}
 	return &ReviewResult{Passed: passed, Feedback: feedback, Source: ReviewSourceJSON}, true
 }
 
