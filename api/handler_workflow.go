@@ -38,7 +38,9 @@ import (
 func (s *Server) handleGetSessionWorkflow(c *gin.Context) {
 	botID := c.Query("botId")
 	if botID == "" {
-		Fail(c, errs.New("botId is required"))
+		// 参数缺失是客户端问题，必须 400 —— 用 errs.New 会落成 500，
+		// 让调用方误判为服务端故障。
+		Fail(c, errs.BadRequest("botId is required"))
 		return
 	}
 
