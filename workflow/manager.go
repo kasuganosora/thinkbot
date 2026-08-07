@@ -49,11 +49,27 @@ type Manager struct {
 	mu      sync.RWMutex
 	running map[string]*runningInstance
 
+	// onWorkflowCompleted 是工作流进入终态后的回调（由 api 层注入），
+	// 用于唤醒 agent 继续后续流程。仅当阻塞等待方（task 工具的 waitForTerminal）
+	// 已退出（超时/取消）时才触发，避免与正常阻塞返回路径重复唤醒。
+	onWorkflowCompleted func(wf *Workflow)
+
+	// consumeMu 保护 consumed 与 needsContinuation 映射。
+	consumeMu sync.Mutex
+	// consumed 记录「终态结果已由阻塞等待方交付」或「事件路径已触发续跑」的工作流，
+	// 用于两条唤醒路径的去重：谁先标记谁负责唤醒，另一方放弃。
+	consumed map[string]bool
+	// needsContinuation 标记工作流终态后已注入续跑消息，供前端 status 轮询感知。
+	needsContinuation map[string]bool
+
 	// recoverOnce 确保 Recover 只执行一次。
 	recoverOnce sync.Once
 
 	// sweeperOnce 确保卡死看门狗只启动一次。
 	sweeperOnce sync.Once
+
+	// quotaWatchOnce 确保配额续跑看门狗只启动一次。
+	quotaWatchOnce sync.Once
 
 	// 原子计数器 — 可观测性指标
 	metrics ManagerMetrics
@@ -132,6 +148,8 @@ func NewManager(repo *Repository, analyzer *Analyzer, executor *Executor, tp tra
 		logger:   logger.With("stage", "workflow_manager"),
 		emitter:  outbound.NewEventEmitter(bus, ""),
 		running:  make(map[string]*runningInstance),
+		consumed: make(map[string]bool),
+		needsContinuation: make(map[string]bool),
 	}
 }
 
@@ -260,6 +278,61 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 // emitWorkflowEvent 发布工作流级事件（workflow_id 作为 TraceID，供 SSE 订阅端筛选）。
 func (m *Manager) emitWorkflowEvent(ctx context.Context, wfID string, eventType outbound.EventType, data map[string]any) {
 	m.emitter.Emit(ctx, eventType, wfID, data)
+}
+
+// SetOnWorkflowCompleted 设置工作流终态回调（api 层注入）。
+// 回调仅在「阻塞等待方已退出（超时/取消）」时被触发（Manager 已做去重），
+// 用于把工作流结果注入原会话、唤醒 agent 继续后续流程。
+func (m *Manager) SetOnWorkflowCompleted(fn func(wf *Workflow)) {
+	m.mu.Lock()
+	m.onWorkflowCompleted = fn
+	m.mu.Unlock()
+}
+
+// markDelivered 标记某工作流终态已由阻塞等待方（waitForTerminal）交付给 agent。
+// 正常路径下调用，使事件路径的 tryDeliverToAgent 跳过，避免重复唤醒。
+func (m *Manager) markDelivered(wfID string) {
+	m.consumeMu.Lock()
+	m.consumed[wfID] = true
+	m.consumeMu.Unlock()
+}
+
+// tryDeliverToAgent 终态后尝试唤醒 agent 续跑。
+// 去重：若阻塞等待方已交付（或事件路径已先触发），立即返回；否则标记并调用回调。
+func (m *Manager) tryDeliverToAgent(wf *Workflow) {
+	m.consumeMu.Lock()
+	if m.consumed[wf.ID] {
+		m.consumeMu.Unlock()
+		return
+	}
+	m.consumed[wf.ID] = true
+	fn := m.onWorkflowCompleted
+	m.consumeMu.Unlock()
+	if fn != nil {
+		fn(wf)
+	}
+}
+
+// SetNeedsContinuation 标记工作流终态后已注入续跑消息（供前端 status 轮询感知）。
+func (m *Manager) SetNeedsContinuation(wfID string, v bool) {
+	m.consumeMu.Lock()
+	if v {
+		m.needsContinuation[wfID] = true
+	} else {
+		delete(m.needsContinuation, wfID)
+	}
+	m.consumeMu.Unlock()
+}
+
+// consumeNeedsContinuation 读取并清除续跑标记（前端一次轮询即消费）。
+func (m *Manager) consumeNeedsContinuation(wfID string) bool {
+	m.consumeMu.Lock()
+	defer m.consumeMu.Unlock()
+	if m.needsContinuation[wfID] {
+		delete(m.needsContinuation, wfID)
+		return true
+	}
+	return false
 }
 
 // analyzeAndRun 后台执行：分析需求 → 构建 DAG → 调度执行。
@@ -416,6 +489,10 @@ func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel in
 		m.metrics.Terminated.Add(1)
 	}
 
+	// 唤醒 agent 续跑：仅当阻塞等待方已退出（超时/取消/历史或外部触发的工作流）
+	// 才会真正触发——正常阻塞返回路径已在 waitForTerminal 内 markDelivered，此处跳过。
+	m.tryDeliverToAgent(wf)
+
 	m.cleanupRunning(wf.ID)
 }
 
@@ -489,6 +566,11 @@ func (m *Manager) SweepStale(ctx context.Context) {
 	}
 	now := time.Now()
 	for _, wf := range wfs {
+		// 配额暂停窗口内：不按「无进展」判死。工作流在等上游配额恢复，
+		// 由配额续跑看门狗（StartQuotaWatch）到点拉起，强行判死会丢掉已完成的产物。
+		if wf.QuotaResumeAt != nil && now.Before(*wf.QuotaResumeAt) {
+			continue
+		}
 		maxAge := staleThreshold(wf.Status)
 		if maxAge <= 0 {
 			continue
@@ -499,6 +581,146 @@ func (m *Manager) SweepStale(ctx context.Context) {
 		}
 		m.forceFailStale(wf, age)
 	}
+}
+
+// ============================================================================
+// Quota-watchdog — 配额熔断后的续跑看门狗
+// ============================================================================
+
+// quotaWatchInterval 是配额续跑看门狗的扫描周期。
+//
+// 取 30s 远小于单轮最大等待（maxQuotaWait=90min），保证到点后很快续跑；
+// 同时避免过于频繁扫描。恢复时刻由熔断器写入 wf.QuotaResumeAt。
+const quotaWatchInterval = 30 * time.Second
+
+// StartQuotaWatch 启动配额续跑看门狗（进程级，应在服务启动时调用一次）。
+//
+// 职责：周期性扫描处于 interrupted 且 QuotaResumeAt 已到期的工流，把它们重新拉起
+// 调度（重置 pending 节点、清掉配额错误），让配额恢复后的工作流原地续跑、保留已完成产物。
+// 与 StartSweeper 互补：Sweeper 把「卡死」的工作流判死，本看门狗把「等配额恢复」的
+// 工作流续跑——二者通过 wf.QuotaResumeAt 区分。
+func (m *Manager) StartQuotaWatch(ctx context.Context) {
+	m.quotaWatchOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(quotaWatchInterval)
+			defer ticker.Stop()
+			m.logger.Infow("workflow quota-watchdog started", "interval", quotaWatchInterval.String())
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					m.ResumeQuotaInterrupted(context.Background())
+				}
+			}
+		}()
+	})
+}
+
+// ResumeQuotaInterrupted 扫描并续跑所有「配额窗口已到期」的 interrupted 工作流。
+// 供 StartQuotaWatch 周期调用，也可手动触发调试。
+func (m *Manager) ResumeQuotaInterrupted(ctx context.Context) {
+	wfs, err := m.repo.FindNonTerminal()
+	if err != nil {
+		m.logger.Warnw("quota-watchdog: failed to list workflows", "error", err)
+		return
+	}
+	now := time.Now()
+	for _, wf := range wfs {
+		if wf.Status != WorkflowInterrupted {
+			continue
+		}
+		if wf.QuotaResumeAt == nil || !now.After(*wf.QuotaResumeAt) {
+			continue
+		}
+		m.resumeQuotaInterrupted(wf)
+	}
+}
+
+// resumeQuotaInterrupted 把单个配额暂停到期的工作流重新拉起调度。
+//
+// 关键：只清掉配额暂停标记和 pending 节点的配额错误，已 completed 节点的产物
+// 原样保留；清空 QuotaResumeAt 让 Sweeper 恢复常规无进展监控。若 DAG 编译失败
+// （极少见）则按失败收尾。
+func (m *Manager) resumeQuotaInterrupted(wf *Workflow) {
+	// 已有在跑实例则不重复拉起（防止与 Recover / 手动重试撞车）。
+	m.mu.Lock()
+	if _, ok := m.running[wf.ID]; ok {
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+
+	wf.EnsureIndex()
+	if !wf.Compiled() {
+		if err := wf.Compile(); err != nil {
+			m.logger.Errorw("quota-watchdog: failed to compile, marking failed",
+				"workflow_id", wf.ID, "error", err)
+			wf.Status = WorkflowFailed
+			wf.Error = fmt.Sprintf("DAG 编译失败: %s", err.Error())
+			wf.QuotaResumeAt = nil
+			if err := m.repo.Save(wf); err != nil {
+				m.logger.Errorw("quota-watchdog: failed to persist failed workflow", "error", err)
+			}
+			m.metrics.Failed.Add(1)
+			return
+		}
+	}
+
+	// 重置：清掉配额暂停标记、恢复 pending 节点状态。
+	wf.Status = WorkflowRunning
+	wf.QuotaResumeAt = nil
+	resetCount := 0
+	for _, n := range wf.Nodes {
+		if n.Status == NodePending {
+			// 配额暂停期间被设回 pending 的节点：清掉配额错误信息即可续跑。
+			if n.Error != "" {
+				n.Error = ""
+				n.StartedAt = nil
+				n.CompletedAt = nil
+				resetCount++
+			}
+		}
+	}
+	if err := m.repo.Save(wf); err != nil {
+		m.logger.Errorw("quota-watchdog: failed to persist resumed workflow", "error", err)
+		return
+	}
+
+	// 重新拉起调度（与崩溃恢复同一套模式：先注册再启动）。
+	bgCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.mu.Lock()
+	m.running[wf.ID] = &runningInstance{
+		wf:     wf,
+		cancel: cancel,
+		done:   done,
+	}
+	m.mu.Unlock()
+
+	go func(wf *Workflow) {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				m.logger.Errorw("panic in quota-resume workflow goroutine",
+					"workflow_id", wf.ID, "panic", r)
+				wf.Status = WorkflowFailed
+				wf.Error = fmt.Sprintf("internal error: %v", r)
+				_ = m.repo.Save(wf)
+				m.metrics.Failed.Add(1)
+				m.emitWorkflowEvent(context.Background(), wf.ID, outbound.EventWorkflowFailed, map[string]any{
+					"error": wf.Error,
+				})
+				m.cleanupRunning(wf.ID)
+			}
+		}()
+		m.metrics.Running.Add(1)
+		defer m.metrics.Running.Add(-1)
+		m.runScheduler(bgCtx, wf, 0)
+	}(wf)
+
+	m.logger.Infow("quota-watchdog: resumed workflow for continued execution",
+		"workflow_id", wf.ID, "reset_pending", resetCount)
 }
 
 // forceFailStale 强制终止一个长时间无进展的工作流。
@@ -705,6 +927,8 @@ type StatusResult struct {
 	GoalMode          bool `json:"goalMode,omitempty"`
 	GoalIteration     int  `json:"goalIteration,omitempty"`
 	GoalMaxIterations int  `json:"goalMaxIterations,omitempty"`
+	// NeedsContinuation 标记工作流终态后后端已注入续跑消息，前端据此 resume 接收流式回复。
+	NeedsContinuation bool `json:"needsContinuation,omitempty"`
 }
 
 // ProgressInfo 是工作流进度信息。
@@ -761,6 +985,7 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 		GoalMode:          wf.GoalMode,
 		GoalIteration:     wf.GoalIteration,
 		GoalMaxIterations: wf.GoalMaxIterations,
+		NeedsContinuation: m.consumeNeedsContinuation(wf.ID),
 	}, nil
 }
 
@@ -1046,6 +1271,10 @@ func (m *Manager) cleanupRunning(wfID string) {
 	m.mu.Lock()
 	delete(m.running, wfID)
 	m.mu.Unlock()
+	// 终态已交付/已续跑，清理去重标记，避免映射无限增长。
+	m.consumeMu.Lock()
+	delete(m.consumed, wfID)
+	m.consumeMu.Unlock()
 }
 
 // GetWorkflow 获取工作流领域对象（内部使用）。

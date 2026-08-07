@@ -62,6 +62,14 @@ type Scheduler struct {
 	terminate  chan struct{} // 终止信号（close to broadcast）
 	terminated bool
 
+	// 上游配额熔断（详见 quota_break.go）。
+	// 与 terminate 刻意分开：terminated 语义是「用户主动终止」，会把节点设为 skipped、
+	// 最终状态置 terminated；配额熔断则要保留节点为 pending 以便恢复后原地续跑。
+	quotaTripped  bool
+	quotaResumeAt time.Time
+	quotaErr      string
+	quotaBreakCh  chan struct{} // 熔断广播（close to broadcast）
+
 	// 手动重试请求
 	retryRequests chan string // nodeID
 
@@ -106,6 +114,7 @@ func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg Sch
 		metrics:       metrics,
 		sem:           make(chan struct{}, maxParallel),
 		terminate:     make(chan struct{}),
+		quotaBreakCh:  make(chan struct{}),
 		retryRequests: make(chan string, 16),
 	}
 }
@@ -165,6 +174,12 @@ func (s *Scheduler) Run(ctx context.Context) WorkflowStatus {
 			break
 		}
 
+		// 配额熔断：一旦运行期间触发，立即收尾（节点已退回 pending 等待恢复，
+		// 不应再被主循环挑出来反复执行）。最终态由下方配额分支统一置 interrupted。
+		if s.quotaBroken() {
+			break
+		}
+
 		// 检查是否全部完成
 		s.mu.Lock()
 		allTerminal := IsAllTerminal(s.wf)
@@ -206,8 +221,19 @@ func (s *Scheduler) Run(ctx context.Context) WorkflowStatus {
 done:
 	s.wg.Wait()
 
-	// 计算最终状态
-	finalStatus := s.computeFinalStatus()
+	// 配额熔断：运行期间触发过 → 整条工作流置 interrupted 并写回恢复时刻，
+	// 由 Manager 的配额看门狗到点自动续跑；已完成节点的产物完整保留。
+	// 熔断次数耗尽（QuotaBreaks > 上限）→ 按失败收尾。
+	var finalStatus WorkflowStatus
+	if s.quotaBroken() {
+		if s.applyQuotaBreak() {
+			finalStatus = WorkflowInterrupted
+		} else {
+			finalStatus = WorkflowFailed
+		}
+	} else {
+		finalStatus = s.computeFinalStatus()
+	}
 	s.mu.Lock()
 	finishedAt := time.Now()
 	s.wf.FinishedAt = &finishedAt
@@ -293,6 +319,11 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 
 	retryRes := retry.Do(ctx, "workflow_node_"+node.ID, retry.Config{
 		MaxRetries: maxRetries,
+		// 配额耗尽（429/403 + 额度用尽特征）在窗口重置前重试必然失败且会加重限流，
+		// 立即放弃，交予断路器统一处理；其它错误按默认指数退避重试。
+		ShouldRetry: func(attempt int, err error) bool {
+			return !isQuotaExhausted(err)
+		},
 		Backoff: &retry.Backoff{
 			Strategy: retry.StrategyExponential,
 			Initial:  s.ec.RetryInitial,
@@ -365,6 +396,12 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		if s.isTerminated() {
 			return
 		}
+		// 上游配额耗尽：熔断整条工作流，节点退回 pending 等待恢复，不级联跳过、
+		// 不记为 failed（它压根没真正执行过）。
+		if isQuotaExhausted(lastErr) {
+			s.handleQuotaBreak(ctx, node, lastErr)
+			return
+		}
 		// 所有重试耗尽
 		span.RecordError(lastErr)
 		span.SetAttributes(
@@ -414,6 +451,11 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 				return
 			}
 			if s.isTerminated() {
+				return
+			}
+			// 上游配额耗尽：熔断整条工作流（审查失败同样不算节点真正执行过）。
+			if isQuotaExhausted(err) {
+				s.handleQuotaBreak(ctx, node, err)
 				return
 			}
 			span.RecordError(err)

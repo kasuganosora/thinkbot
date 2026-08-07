@@ -73,6 +73,13 @@ func isReviewInfraError(err error) bool {
 		return false
 	}
 
+	// 配额耗尽：在窗口重置前重试注定失败，还会加重限流。绝不能当成基础设施抖动重试
+	// （那正是 2026-08-07 事故里「单节点撞墙 15 次」的来源之一）。立即上抛，由
+	// Scheduler 的配额断路器统一处理。
+	if isQuotaExhausted(err) {
+		return false
+	}
+
 	// 超时：最典型的可重试基础设施故障。
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true

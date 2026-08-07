@@ -94,7 +94,11 @@ func newWaitTestManager(t *testing.T, wf *Workflow) *Manager {
 	if err := repo.Save(wf); err != nil {
 		t.Fatalf("seed workflow: %v", err)
 	}
-	return &Manager{repo: repo}
+	return &Manager{
+		repo:              repo,
+		consumed:          make(map[string]bool),
+		needsContinuation: make(map[string]bool),
+	}
 }
 
 // TestWaitForTerminal_ReturnsImmediatelyWhenAlreadyTerminal 验证已完成的任务不白等。
