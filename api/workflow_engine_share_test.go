@@ -16,7 +16,7 @@ import (
 func TestWorkflowEngine_PrefersEquippedEngine(t *testing.T) {
 	s := &BotService{wfEngines: make(map[string]*workflow.Manager)}
 
-	if got := s.WorkflowEngine(); got != nil {
+	if got := s.WorkflowEngine(""); got != nil {
 		t.Fatalf("没有任何 bot 启动时应返回 nil，实际%v", got)
 	}
 
@@ -25,7 +25,7 @@ func TestWorkflowEngine_PrefersEquippedEngine(t *testing.T) {
 	equipped := &workflow.Manager{}
 	s.publishWorkflowEngine("bot-1", equipped)
 
-	got := s.WorkflowEngine()
+	got := s.WorkflowEngine("")
 	if got == nil {
 		t.Fatal("已发布装配好的引擎，WorkflowEngine() 却返回 nil —— " +
 			"WorkflowService 会退化去自建 ToolMgr=nil 的残废实例")
@@ -44,7 +44,7 @@ func TestPublishWorkflowEngine_IgnoresNil(t *testing.T) {
 	if len(s.wfEngines) != 0 {
 		t.Errorf("nil 引擎不应被登记，实际 map 有 %d 项", len(s.wfEngines))
 	}
-	if got := s.WorkflowEngine(); got != nil {
+	if got := s.WorkflowEngine(""); got != nil {
 		t.Errorf("期望 nil，实际 %v", got)
 	}
 }
@@ -59,7 +59,36 @@ func TestWorkflowEngine_SkipsNilEntries(t *testing.T) {
 		"bot-ok":  equipped,
 	}}
 
-	if got := s.WorkflowEngine(); got != equipped {
+	if got := s.WorkflowEngine(""); got != equipped {
 		t.Errorf("应跳过 nil 项返回可用引擎：want %p got %p", equipped, got)
+	}
+}
+
+// TestWorkflowEngine_MatchesByBotID 验证 botID 非空时精确匹配该 bot 的引擎。
+// 工作流已落 BotID，多bot 部署下必须用来源 bot 的引擎（它才持有对应工作空间）。
+func TestWorkflowEngine_MatchesByBotID(t *testing.T) {
+	e1, e2 := &workflow.Manager{}, &workflow.Manager{}
+	s := &BotService{wfEngines: map[string]*workflow.Manager{
+		"bot-1": e1,
+		"bot-2": e2,
+	}}
+
+	if got := s.WorkflowEngine("bot-2"); got != e2 {
+		t.Errorf("应精确匹配 bot-2 的引擎：want %p got %p", e2, got)
+	}
+	if got := s.WorkflowEngine("bot-1"); got != e1 {
+		t.Errorf("应精确匹配 bot-1 的引擎：want %p got %p", e1, got)
+	}
+}
+
+// TestWorkflowEngine_FallsBackWhenBotUnknown 验证匹配不到指定 bot 时退回任取一个。
+// 场景：该 bot 已停止，或工作流是历史数据（没有 BotID）。
+// 退回一个装配好的引擎，仍远优于让 WorkflowService 自建 ToolMgr=nil 的残废实例。
+func TestWorkflowEngine_FallsBackWhenBotUnknown(t *testing.T) {
+	only := &workflow.Manager{}
+	s := &BotService{wfEngines: map[string]*workflow.Manager{"bot-1": only}}
+
+	if got := s.WorkflowEngine("bot-does-not-exist"); got != only {
+		t.Errorf("未知 bot 应退回已装配实例：want %p got %p", only, got)
 	}
 }

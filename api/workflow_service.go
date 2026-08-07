@@ -74,7 +74,7 @@ func (ws *WorkflowService) Manager() (*workflow.Manager, error) {
 	// 优先复用 bot 侧已装配工具的引擎。
 	// **刻意不缓存到 ws.mgr**：bot 可能重启或切换模型，每次取当前最新的那个，
 	// 避免长期持有一个已被 StopBot 关闭的引擎。
-	if shared := ws.botSvc.WorkflowEngine(); shared != nil {
+	if shared := ws.botSvc.WorkflowEngine(""); shared != nil {
 		return shared, nil
 	}
 

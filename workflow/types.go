@@ -106,6 +106,20 @@ type Workflow struct {
 	FinishedAt  *time.Time     `json:"finishedAt,omitempty"`
 	Error       string         `json:"error,omitempty"`
 
+	// BotID / SessionID 记录工作流的**来源**：由哪个 bot、在哪个会话里提交的。
+	//
+	// 为什么必须落库：
+	//  1. 前端刷新页面后，`activeWorkflowId` 只能从实时 SSE 事件里拿到，刷新即丢，
+	//     工作流卡片随之消失（工作流本身还在后台跑）。落库后可按会话查回来。
+	//  2. 排查时无法判断某条工作流跑在哪个 bot 的工作空间上。
+	//  3. `BotService.WorkflowEngine()` 目前只能「任取一个已装配引擎」，
+	//     有了 BotID 才能精确匹配来源 bot 的引擎。
+	//
+	// 两者都可能为空：历史数据没有这两个字段，非 web渠道也可能没有 SessionID。
+	// 因此所有消费方都必须容忍空值，不能因为空就拒绝调度。
+	BotID     string `json:"botId,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+
 	// AnalyzeMessage 分析阶段的实时进度文案（如「模型返回异常，第 2/5 次重试」）。
 	// 用于前端在分析阶段展示进展，避免「分析中…」长期无变化被误判为卡死。
 	// 由 Manager 在 Analyze 的 onProgress 回调中更新并持久化。
