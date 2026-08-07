@@ -17,6 +17,50 @@ import (
 // 终止操作由 session 生命周期信号触发，连通 pipeline 一起终止。
 // ============================================================================
 
+// handleGetSessionWorkflow 返回指定 bot + 会话最近提交的一条工作流。
+// GET /api/session-workflow?botId=xxx&sessionId=yyy
+//
+// 用途：前端刷新页面后 activeWorkflowId 会丢失（它只能从实时 SSE 事件里拿到），
+// 工作流卡片随之消失，而工作流本身仍在后台运行。前端载入会话后调用本接口恢复卡片。
+//
+// 没有匹配时返回 200 + workflow:null（不是 404）——「这个会话没有工作流」是正常状态，
+// 不是错误，前端不该为此打印错误日志。
+//
+// @Summary      会话工作流
+// @Description  查询指定 bot + 会话最近提交的工作流（用于页面刷新后恢复卡片）
+// @Tags         工作流
+// @Produce      json
+// @Param        botId      query     string  true   "Bot ID"
+// @Param        sessionId  query     string  false  "会话 ID"
+// @Success      200        {object}  Response
+// @Security     CookieAuth
+// @Router       /api/session-workflow [get]
+func (s *Server) handleGetSessionWorkflow(c *gin.Context) {
+	botID := c.Query("botId")
+	if botID == "" {
+		Fail(c, errs.New("botId is required"))
+		return
+	}
+
+	mgr, err := s.workflowSvc.Manager()
+	if err != nil {
+		Fail(c, errs.Wrap(err, "workflow engine not available"))
+		return
+	}
+
+	wf := mgr.LatestWorkflowForSession(botID, c.Query("sessionId"))
+	if wf == nil {
+		OK(c, gin.H{"workflow": nil})
+		return
+	}
+	OK(c, gin.H{"workflow": gin.H{
+		"id":        wf.ID,
+		"status":    wf.Status,
+		"nodeCount": len(wf.Nodes),
+		"createdAt": wf.CreatedAt,
+	}})
+}
+
 // handleListWorkflows 列出最近的工作流。
 // GET /api/workflows?limit=20
 //

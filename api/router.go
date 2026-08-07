@@ -267,6 +267,12 @@ func (s *Server) registerRoutes() {
 			wfRead.POST("/:wfId/nodes/:nodeId/retry", s.handleRetryWorkflowNode)
 		}
 
+		// 按会话查最近一条工作流：前端刷新页面后用它恢复工作流卡片
+		// （activeWorkflowId 只存在于内存，刷新即丢，而工作流仍在后台运行）。
+		// 刻意**不挂在 /workflows 组下**：它与 `/workflows/:wfId` 属同级路径，
+		// gin 对同级「静态段 + 通配段」的注册会 panic。
+		authed.GET("/session-workflow", s.handleGetSessionWorkflow)
+
 		wfAdmin := authed.Group("/workflows")
 		wfAdmin.Use(requirePermission(auth.PermBotManage))
 		{

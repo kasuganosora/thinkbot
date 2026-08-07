@@ -175,6 +175,10 @@ type SubmitRequest struct {
 	GoalMode bool
 	// GoalMaxIterations 目标模式最大闭环轮数（0 表示使用引擎默认配置）。
 	GoalMaxIterations int
+	// BotID / SessionID 工作流来源（哪个 bot、哪个会话提交的）。
+	// 可为空（非 web 渠道 / 历史调用），落库后供前端刷新页面时按会话恢复卡片。
+	BotID     string
+	SessionID string
 }
 
 // SubmitResult 是提交工作流的立即返回结果。
@@ -201,6 +205,9 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	wf := NewWorkflow(wfID, req.Requirement, nil)
 	wf.GoalMode = req.GoalMode
 	wf.GoalMaxIterations = req.GoalMaxIterations
+	// 记录来源，供前端刷新后按会话恢复卡片、以及排查时定位工作空间。
+	wf.BotID = req.BotID
+	wf.SessionID = req.SessionID
 
 	// 持久化初始状态
 	if err := m.repo.Save(wf); err != nil {
@@ -1053,6 +1060,41 @@ func (m *Manager) ListWorkflows(limit int) []*Workflow {
 		m.logger.Errorw("failed to list workflows", "error", err)
 	}
 	return result
+}
+
+// sessionWorkflowScanLimit 是按会话查找工作流时扫描的最近工作流条数。
+// 工作流以 JSON blob 存储，botId/sessionId 不是独立列，无法下推到 SQL，
+// 只能取最近 N 条在内存里过滤。取 200 足够覆盖「当前会话最近一条」的场景，
+// 又不至于把整表读进内存。
+const sessionWorkflowScanLimit = 200
+
+// LatestWorkflowForSession 返回指定 bot + 会话最近提交的一条工作流（没有则返回 nil）。
+//
+// 用途：前端刷新页面后 `activeWorkflowId` 会丢失（它只能从实时 SSE 事件里拿到），
+// 工作流卡片随之消失，而工作流本身仍在后台运行。前端载入会话后调用本查询把卡片恢复出来。
+//
+// sessionID 为空时只按 botID 匹配 —— 非 web渠道提交的工作流没有会话概念。
+// 历史工作流没有这两个字段，会被直接跳过（不会误配到别的会话）。
+func (m *Manager) LatestWorkflowForSession(botID, sessionID string) *Workflow {
+	if botID == "" {
+		return nil
+	}
+	all, err := m.repo.List(sessionWorkflowScanLimit)
+	if err != nil {
+		m.logger.Errorw("failed to list workflows for session lookup", "error", err)
+		return nil
+	}
+	// repo.List 已按 created_at 降序，第一个命中的就是最近的一条。
+	for _, wf := range all {
+		if wf == nil || wf.BotID != botID {
+			continue
+		}
+		if sessionID != "" && wf.SessionID != sessionID {
+			continue
+		}
+		return wf
+	}
+	return nil
 }
 
 // nodeSummaries 生成节点的摘要信息（用于事件 payload）。
