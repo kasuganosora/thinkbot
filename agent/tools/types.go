@@ -63,6 +63,43 @@ type ChannelToolProvider interface {
 // ToolSessionContext — 工具会话上下文
 // ============================================================================
 
+// ExtraKeyChatSessionID 是ToolSessionContext.Extra 中前端会话 ID 的 key。
+//
+// 由 web侧在注入消息时写进 message metadata，再由 envelopeToSessionContext
+// 搬进 Extra。工具需要知道「当前是哪个前端会话」时用它——例如工作流提交时
+// 记录来源会话，好让前端刷新页面后能把工作流卡片恢复出来。
+const ExtraKeyChatSessionID = "chat_session_id"
+
+// CallOrigin 标识「本次工具调用来自哪个 bot 的哪个前端会话」。
+//
+// 为什么需要它：工具是**静态注册**的（进程/bot 启动时注册一次），而 bot 与会话是
+// **每次调用才确定**的。想在工具执行时知道来源，只有两条路：
+//   - 会话感知 Provider：不可行——`ToolRegistry.Resolve` 里**同名时静态工具优先**，
+//     Provider 提供的同名工具会被直接丢弃；
+//   - 由调用链在执行前注入 context：即本类型的做法。
+//
+// 两个字段都可能为空（非 web渠道没有会话概念），消费方必须容忍空值。
+type CallOrigin struct {
+	BotID     string
+	SessionID string
+}
+
+// callOriginCtxKey 是 CallOrigin 在 context 中的 key。
+type callOriginCtxKey struct{}
+
+// ContextWithCallOrigin 把工具调用来源注入 context，供工具执行时读取。
+func ContextWithCallOrigin(ctx context.Context, origin CallOrigin) context.Context {
+	return context.WithValue(ctx, callOriginCtxKey{}, origin)
+}
+
+// CallOriginFromContext 从 context 取工具调用来源（没有则返回零值）。
+func CallOriginFromContext(ctx context.Context) CallOrigin {
+	if v, ok := ctx.Value(callOriginCtxKey{}).(CallOrigin); ok {
+		return v
+	}
+	return CallOrigin{}
+}
+
 // ToolSessionContext 是每次工具列表请求的上下文。
 // 携带当前消息的元信息，供 ToolProvider 做场景感知决策。
 type ToolSessionContext struct {

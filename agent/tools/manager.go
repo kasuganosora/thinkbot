@@ -264,6 +264,14 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 		if ct, ok := env.Message.Metadata["channel_type"].(string); ok {
 			sctx.SourceChannelType = ct
 		}
+		// 前端会话 ID（web 渠道注入）。搬进 Extra 供工具按会话归属做决策，
+		// 例如工作流提交时记录来源会话，使前端刷新后能恢复工作流卡片。
+		if sid, ok := env.Message.Metadata[ExtraKeyChatSessionID].(string); ok && sid != "" {
+			if sctx.Extra == nil {
+				sctx.Extra = make(map[string]any, 1)
+			}
+			sctx.Extra[ExtraKeyChatSessionID] = sid
+		}
 	}
 
 	return sctx

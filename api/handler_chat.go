@@ -12,6 +12,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
@@ -33,6 +34,11 @@ const (
 	sseToolResult   = "tool_result"   // 工具结果
 	ssePing         = "ping"          // 心跳
 )
+
+// metaKeyChatSessionID 是注入消息 metadata 时前端会话 ID 的 key。
+// 与 agenttools.ExtraKeyChatSessionID 同名——后者负责把它从 metadata 搬进
+// ToolSessionContext.Extra，供工具（如工作流提交）记录来源会话。
+const metaKeyChatSessionID = agenttools.ExtraKeyChatSessionID
 
 // streamPersistInterval 是流式回复增量落库的最小间隔。
 //
@@ -375,6 +381,11 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	}
 	if len(req.Attachments) > 0 {
 		extraMeta["attachments"] = req.Attachments
+	}
+	// 前端会话 ID：让工作流提交时能记录「这条工作流属于哪个会话」，
+	// 前端刷新页面后据此把工作流卡片恢复出来（activeWorkflowId 只存在于内存，刷新即丢）。
+	if req.SessionID != "" {
+		extraMeta[metaKeyChatSessionID] = req.SessionID
 	}
 
 	// 目标模式自动路由：若用户需求表达「反复打磨 / 审查直到没有新问题」等收敛性验收意图，
