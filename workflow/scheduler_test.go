@@ -88,6 +88,7 @@ func newMockScheduler(wf *Workflow, exec NodeExecutor) *Scheduler {
 		metrics:       &ManagerMetrics{},
 		sem:           make(chan struct{}, 3),
 		terminate:     make(chan struct{}),
+		quotaBreakCh:  make(chan struct{}),
 		retryRequests: make(chan string, 16),
 	}
 }

@@ -147,3 +147,26 @@ func (ws *WorkflowService) StartSweeper(ctx context.Context) {
 		}
 	}()
 }
+
+// StartQuotaWatch 启动配额续跑看门狗（进程级）。委派给底层 workflow.Manager，
+// 引擎未就绪时跳过本轮。应在服务启动时调用一次。
+func (ws *WorkflowService) StartQuotaWatch(ctx context.Context) {
+	ws.logger.Infow("workflow quota-watchdog starting", "interval", "30s")
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				mgr, err := ws.Manager()
+				if err != nil {
+					// 引擎尚未初始化（未配置 LLM），下一轮再试。
+					continue
+				}
+				mgr.ResumeQuotaInterrupted(ctx)
+			}
+		}
+	}()
+}

@@ -143,6 +143,24 @@ type Workflow struct {
 	// GoalMaxIterations 目标模式最大闭环轮数（0 表示使用引擎默认配置）。
 	GoalMaxIterations int `json:"goalMaxIterations,omitempty"`
 
+	// --- 上游配额熔断（quota circuit breaker）---
+	//
+	// 背景（真实事故 wf-71f5988de878028d6a3dcb6a，2026-08-07）：GLM 5 小时滚动配额
+	// 打满后返回 429/1308，28 个节点各自撞满「HTTP 层 5 次 × 节点层 3 次 = 15 次」
+	// 注定失败的请求，8 个节点集体 failed 并级联跳过下游，19 个已完成节点的产物
+	// 也就此停在半途。
+	//
+	// 现在的策略：**首个节点判定为配额耗尽即熔断整条工作流**——把该节点退回 pending
+	// （它压根没真正执行过，不该记为 failed）、不级联跳过、工作流置 interrupted，
+	// 并记录恢复时刻。看门狗到点后自动续跑，已完成节点的产物完整保留。
+	//
+	// QuotaResumeAt 为 nil 表示当前没有配额暂停。**看门狗必须先看这个字段**：
+	// 暂停期内不能按「无进展」把工作流判死（配额窗口可能长达数小时）。
+	QuotaResumeAt *time.Time `json:"quotaResumeAt,omitempty"`
+	// QuotaBreaks 累计熔断次数。用于防止「恢复 → 立刻又被限流 → 再熔断」无限循环，
+	// 超过上限后按失败收尾（见 maxQuotaBreaks）。
+	QuotaBreaks int `json:"quotaBreaks,omitempty"`
+
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
 
