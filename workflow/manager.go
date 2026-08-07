@@ -596,10 +596,15 @@ const quotaWatchInterval = 30 * time.Second
 
 // StartQuotaWatch 启动配额续跑看门狗（进程级，应在服务启动时调用一次）。
 //
-// 职责：周期性扫描处于 interrupted 且 QuotaResumeAt 已到期的工流，把它们重新拉起
-// 调度（重置 pending 节点、清掉配额错误），让配额恢复后的工作流原地续跑、保留已完成产物。
+// 职责（双保险）：
+//  1. 对 QuotaResumeAt 仍在未来的 interrupted 工作流**投喂心跳**（刷新 UpdatedAt），
+//     避免卡死看门狗 SweepStale 在等待期间（尤其 QuotaResumeAt 刚到期的竞态窗口）把
+//     工作流误判为卡死（interruptedStaleMaxAge=30min）而丢弃已完成产物；
+//  2. 对 QuotaResumeAt 已到期的工作流拉起续跑（重置 pending 节点、清掉配额错误），
+//     让配额恢复后的工作流原地续跑、保留已完成产物。
+//
 // 与 StartSweeper 互补：Sweeper 把「卡死」的工作流判死，本看门狗把「等配额恢复」的
-// 工作流续跑——二者通过 wf.QuotaResumeAt 区分。
+// 工作流续跑——二者通过 wf.QuotaResumeAt 区分（SweepStale 在窗口内显式跳过 + 心跳投喂）。
 func (m *Manager) StartQuotaWatch(ctx context.Context) {
 	m.quotaWatchOnce.Do(func() {
 		go func() {
@@ -631,10 +636,31 @@ func (m *Manager) ResumeQuotaInterrupted(ctx context.Context) {
 		if wf.Status != WorkflowInterrupted {
 			continue
 		}
-		if wf.QuotaResumeAt == nil || !now.After(*wf.QuotaResumeAt) {
+		if wf.QuotaResumeAt == nil {
+			// 异常态：interrupted 却无恢复时刻，交回 SweepStale 常规判死处理。
 			continue
 		}
+		if now.Before(*wf.QuotaResumeAt) {
+			// 仍在配额等待窗口内：向卡死看门狗（SweepStale）**投喂心跳**——
+			// 仅刷新 UpdatedAt，不改动任何业务状态。否则一旦越过 QuotaResumeAt，
+			// SweepStale 的 now.Before 保护失效，而 UpdatedAt 仍是几小时前的旧值，
+			// age 远超 interruptedStaleMaxAge=30min，工作流会被误判为卡死丢弃产物。
+			m.feedQuotaWatchdog(wf)
+			continue
+		}
+		// 配额窗口已到期：拉起续跑（resumeQuotaInterrupted 内部 Save 同样刷新 UpdatedAt）。
 		m.resumeQuotaInterrupted(wf)
+	}
+}
+
+// feedQuotaWatchdog 在配额等待期间向卡死看门狗（SweepStale）投喂心跳：仅调用
+// repo.Save 刷新 UpdatedAt，不改动任何业务状态。SweepStale 据此看到工作流「仍在
+// 活跃等待」，不会按 interruptedStaleMaxAge=30min 误判为卡死；而续跑仍由
+// ResumeQuotaInterrupted 的到期分支按 QuotaResumeAt 触发。这是「无职守」续跑的
+// 双保险（第一道是 SweepStale 的 now.Before(QuotaResumeAt) 跳过）。
+func (m *Manager) feedQuotaWatchdog(wf *Workflow) {
+	if err := m.repo.Save(wf); err != nil {
+		m.logger.Warnw("quota-watchdog: failed to feed heartbeat", "workflow_id", wf.ID, "error", err)
 	}
 }
 
