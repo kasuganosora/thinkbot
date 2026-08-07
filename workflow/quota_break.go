@@ -42,9 +42,11 @@ const (
 	// 好让调用方能区分「服务端明确告知」和「我猜的」。
 	defaultQuotaWait = 15 * time.Minute
 
-	// maxQuotaWait 是单次熔断的最长等待。即便服务端说 5 小时后才恢复，也不会
-	// 让工作流静默挂那么久——到点先试一次，不行再熔断一轮（有 maxQuotaBreaks 兜底）。
-	maxQuotaWait = 90 * time.Minute
+	// hardQuotaWaitCap 是「服务端明确告知重置时刻」时的绝对安全上限，
+	// 仅用于防止解析异常导致的离谱未来时间戳（如 2099-xx）。正常情况下**尊重**
+	// 服务端给出的真实重置时刻，实现「等到对应时间再重试」的无职守续跑——
+	// 即便服务端说 5 小时后才恢复，工作流也会挂到那个时刻再续跑，而非中途反复撞墙。
+	hardQuotaWaitCap = 12 * time.Hour
 
 	// minQuotaWait 防止服务端给出的重置时刻近乎当下导致空转重试。
 	minQuotaWait = 30 * time.Second
@@ -64,20 +66,28 @@ func isQuotaExhausted(err error) bool {
 
 // quotaWaitFor 计算本次熔断应等待多久，并返回恢复时刻。
 //
-// 优先采用服务端告知的重置时刻（Retry-After 头或 body 里的绝对时间），
-// 拿不到时退回 defaultQuotaWait。结果被夹在 [minQuotaWait, maxQuotaWait] 之间。
+// **服务端明确告知重置时刻时，尊重它**——这就是「遇到 429 等待到对应时间再重试」的
+// 无职守语义：GLM 说 20:06 重置，工作流就挂到 20:06 续跑，而不是被硬截断到 90 分钟
+// 后中奖式续跑、立刻又撞墙。只在两种极端情况下兜底：
+//   - 重置时刻近乎当下（< minQuotaWait）→ 不足以真正恢复，退回 defaultQuotaWait 再试；
+//   - 解析异常给出离谱未来时间（> hardQuotaWaitCap）→ 用安全上限，避免无限挂起。
+//
+// 服务端没告知（纯兜底）时，用 defaultQuotaWait，避免空转重试。
 func quotaWaitFor(err error, now time.Time) time.Time {
-	wait := defaultQuotaWait
 	if resetAt, ok := utilhttp.QuotaResetAtLoose(err); ok {
-		wait = resetAt.Sub(now)
+		wait := resetAt.Sub(now)
+		if wait < minQuotaWait {
+			// 重置时刻近乎当下，不足以真正恢复，退回到保守兜底再试。
+			return now.Add(defaultQuotaWait)
+		}
+		if wait > hardQuotaWaitCap {
+			// 解析异常给出离谱未来时间，用安全上限兜底，避免无限挂起。
+			return now.Add(hardQuotaWaitCap)
+		}
+		return resetAt
 	}
-	if wait < minQuotaWait {
-		wait = minQuotaWait
-	}
-	if wait > maxQuotaWait {
-		wait = maxQuotaWait
-	}
-	return now.Add(wait)
+	// 服务端没告知：用保守兜底等待，避免空转重试。
+	return now.Add(defaultQuotaWait)
 }
 
 // quotaBroken 报告熔断器是否已跳闸。

@@ -589,8 +589,9 @@ func (m *Manager) SweepStale(ctx context.Context) {
 
 // quotaWatchInterval 是配额续跑看门狗的扫描周期。
 //
-// 取 30s 远小于单轮最大等待（maxQuotaWait=90min），保证到点后很快续跑；
-// 同时避免过于频繁扫描。恢复时刻由熔断器写入 wf.QuotaResumeAt。
+// 取 30s 远小于单轮最长等待（hardQuotaWaitCap=12h，但正常情况下尊重服务端给出的
+// 真实重置时刻），保证到点后很快续跑；同时避免过于频繁扫描。
+// 恢复时刻由熔断器写入 wf.QuotaResumeAt。
 const quotaWatchInterval = 30 * time.Second
 
 // StartQuotaWatch 启动配额续跑看门狗（进程级，应在服务启动时调用一次）。
