@@ -12,6 +12,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/session"
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -41,6 +42,18 @@ type StreamPublisher interface {
 // ToolManager.ResolveForEnvelope 自然满足此接口，无需额外适配。
 type ToolResolver interface {
 	ResolveForEnvelope(ctx context.Context, env *core.Envelope) ([]llm.Tool, error)
+}
+
+// chatSessionIDFromEnvelope 取前端会话 ID（web渠道在注入消息时写进 metadata）。
+// 非 web 渠道没有这个概念，返回空串。
+func chatSessionIDFromEnvelope(env *core.Envelope) string {
+	if env == nil || env.Message.Metadata == nil {
+		return ""
+	}
+	if sid, ok := env.Message.Metadata[agenttools.ExtraKeyChatSessionID].(string); ok {
+		return sid
+	}
+	return ""
 }
 
 // resolveTools 解析工具列表：优先用 ToolResolver 动态解析，回退到静态 Tools。
@@ -168,6 +181,14 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	defer span.End()
 
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
+
+	// 注入工具调用来源（bot + 前端会话）。工具是**静态注册**的、自身拿不到会话，
+	// 需要按会话归属做事的工具从 context 读取它 —— 例如工作流提交要记录来源会话，
+	// 好让前端刷新页面后把工作流卡片恢复出来。
+	ctx = agenttools.ContextWithCallOrigin(ctx, agenttools.CallOrigin{
+		BotID:     env.Message.BotID,
+		SessionID: chatSessionIDFromEnvelope(env),
+	})
 
 	// 构建消息
 	var messages []llm.Message

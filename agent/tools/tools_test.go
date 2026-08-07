@@ -534,3 +534,37 @@ func TestSessionContext_GetBool(t *testing.T) {
 		t.Error("expected false for nonexistent key")
 	}
 }
+
+// TestEnvelopeToSessionContext_CarriesChatSessionID 验证前端会话 ID 从消息 metadata
+// 搬进 ToolSessionContext.Extra。
+//
+// 这是「刷新页面后工作流卡片消失」修复链路的一环：工具需要知道自己属于哪个前端会话，
+// 才能把来源落到工作流上，供前端刷新后按会话查回来。
+func TestEnvelopeToSessionContext_CarriesChatSessionID(t *testing.T) {
+	env := &core.Envelope{Message: core.Message{
+		BotID:    "bot-1",
+		Metadata: map[string]any{ExtraKeyChatSessionID: "sess-9"},
+	}}
+	sctx := envelopeToSessionContext(env)
+	if got := sctx.GetString(ExtraKeyChatSessionID); got != "sess-9" {
+		t.Errorf("want sess-9, got %q", got)
+	}
+}
+
+// TestEnvelopeToSessionContext_NoChatSessionID 验证没有会话 ID 时不创建空 Extra 项，
+// 也不 panic（非 web 渠道的常态）。
+func TestEnvelopeToSessionContext_NoChatSessionID(t *testing.T) {
+	env := &core.Envelope{Message: core.Message{BotID: "bot-1"}}
+	sctx := envelopeToSessionContext(env)
+	if got := sctx.GetString(ExtraKeyChatSessionID); got != "" {
+		t.Errorf("应为空串，实际 %q", got)
+	}
+	// 空字符串不应被写入
+	env2 := &core.Envelope{Message: core.Message{
+		BotID:    "bot-1",
+		Metadata: map[string]any{ExtraKeyChatSessionID: ""},
+	}}
+	if sctx2 := envelopeToSessionContext(env2); sctx2.GetString(ExtraKeyChatSessionID) != "" {
+		t.Error("空会话 ID 不该被写入 Extra")
+	}
+}
