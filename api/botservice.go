@@ -82,11 +82,14 @@ type BotService struct {
 	// → WorkflowService 必须优先复用这里的引擎，而不是自建残废实例。
 	wfEngines map[string]*workflow.Manager // botID → 已装配 ToolMgr 的工作流引擎
 
+	// chatHistory 用于续跑注入时加载会话历史并落库续跑指令。
+	chatHistory *ChatHistoryService
+
 	tokenBudget *pipeline.TokenBudgetState // 共享 token 预算状态（支持空闲自动重置 / 手动重置）
 }
 
 // NewBotService 创建 BotService。
-func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder) *BotService {
+func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, chatHistory *ChatHistoryService) *BotService {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
@@ -113,6 +116,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageCancels:    make(map[string]context.CancelFunc),
 		messageInterrupts: make(map[string]chan string),
 		wfEngines:         make(map[string]*workflow.Manager),
+		chatHistory:       chatHistory,
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -412,6 +416,88 @@ func (s *BotService) publishWorkflowEngine(botID string, mgr *workflow.Manager) 
 	s.mu.Lock()
 	s.wfEngines[botID] = mgr
 	s.mu.Unlock()
+	// 注入终态回调：工作流跑完且阻塞等待方已退出（超时/取消）时，唤醒 agent 续跑。
+	mgr.SetOnWorkflowCompleted(s.onWorkflowCompleted)
+}
+
+// onWorkflowCompleted 是工作流进入终态后的回调。
+//
+// 仅当阻塞等待方（task 工具的 waitForTerminal）已退出（超时/取消/历史或外部触发）
+// 时才会被 Manager 调用（Manager 已做去重）。此时 agent 回合已结束，需要把工作流
+// 结果作为一条系统消息注入原会话，唤醒 agent 继续后续流程——否则长工作流（>18min）
+// 超时后 agent 会被告知「别再等」，工作流在后台跑完后无人接手，表现为「跑完了但
+// agent 没继续」。
+//
+// 续跑以 sessionID 作为 traceID 注入，便于前端在 workflow 卡片终态时按会话 resume
+// 收到 agent 续跑的流式回复。
+func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
+	botID := wf.BotID
+	sessionID := wf.SessionID
+	if botID == "" || sessionID == "" {
+		s.logger.Warnw("workflow completed but missing bot/session, skip continuation",
+			"workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID)
+		return
+	}
+	ch, ok := s.GetWebChannel(botID)
+	if !ok {
+		s.logger.Warnw("workflow completed but web channel unavailable, skip continuation",
+			"workflow_id", wf.ID, "bot_id", botID)
+		return
+	}
+
+	// 续跑以「系统通知」形式注入：traceID 用 sessionID，便于前端按会话 resume 收到流式回复。
+	traceID := sessionID
+	const userID = "system"
+
+	// 按会话加载聊天历史作为上下文，让 agent 续跑时保有完整背景。
+	limit := s.store.GetInt(config.KeyChatContextLimit, 20)
+	history, err := s.chatHistory.LoadContextBySession(botID, sessionID, limit)
+	if err != nil {
+		s.logger.Warnw("failed to load context for workflow continuation", "err", err)
+		history = nil
+	}
+
+	done := 0
+	for _, n := range wf.Nodes {
+		if n.Status == workflow.NodeCompleted {
+			done++
+		}
+	}
+	text := fmt.Sprintf(
+		"系统通知：你此前通过 task 工具提交的工作流 %s 已执行完成（共 %d 个节点，%d 个已完成）。"+
+			"请基于工作流各节点的实际产出，继续完成用户最初的需求：%s。"+
+			"若需求已经被工作流结果满足，请向用户做简明总结；若还需要进一步操作，请直接继续执行。",
+		wf.ID, len(wf.Nodes), done, wf.Requirement,
+	)
+
+	extraMeta := map[string]any{
+		agenttools.ExtraKeyChatSessionID: sessionID,
+	}
+	if len(history) > 0 {
+		extraMeta["chat_history"] = history
+	}
+
+	// 落库续跑指令（作为 user 消息），保证会话连贯、刷新后可回溯。
+	if s.chatHistory != nil {
+		if err := s.chatHistory.SaveMessage(botID, userID, "user", text, traceID, sessionID); err != nil {
+			s.logger.Warnw("failed to save workflow continuation message", "err", err)
+		}
+	}
+
+	if err := ch.Inject(context.Background(), traceID, userID, text, extraMeta); err != nil {
+		s.logger.Warnw("failed to inject workflow continuation", "err", err, "workflow_id", wf.ID)
+		return
+	}
+
+	// 标记供前端 status 轮询感知，触发 resume 接收流式回复。
+	s.mu.RLock()
+	mgr := s.wfEngines[botID]
+	s.mu.RUnlock()
+	if mgr != nil {
+		mgr.SetNeedsContinuation(wf.ID, true)
+	}
+
+	s.logger.Infow("workflow continuation injected", "workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID)
 }
 
 // WorkflowEngine 返回一个已装配工作区工具的工作流引擎（无则返回 nil）。

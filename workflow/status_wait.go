@@ -102,6 +102,8 @@ func waitForTerminal(
 		return nil, err
 	}
 	if st.Status.IsTerminal() {
+		// 阻塞路径已拿到终态并准备返回给 agent —— 标记交付，避免终态事件重复唤醒。
+		mgr.markDelivered(wfID)
 		return &waitStatusResult{StatusResult: st}, nil
 	}
 
@@ -139,6 +141,8 @@ func waitForTerminal(
 			}
 			st = next
 			if st.Status.IsTerminal() {
+				// 阻塞路径已拿到终态并准备返回给 agent —— 标记交付，避免终态事件重复唤醒。
+				mgr.markDelivered(wfID)
 				return &waitStatusResult{
 					StatusResult: st,
 					Waited:       time.Since(start).Truncate(time.Second).String(),
