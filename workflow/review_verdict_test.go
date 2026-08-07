@@ -343,3 +343,82 @@ func TestReviewPrompt_DemandsVerdictNotToolCall(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewResultFromJSON_AcceptsRealWorldFieldAliases 用**线上真实形态**守住判定字段
+// 别名兼容。
+//
+// 2026-08-06 实测：prompt 明确要求 `{"passed": ...}`，但 40 条「判定缺失」样本里
+// 模型实际用的是 `verdict`(23 次)和 `pass`(4 次)。旧实现只认 bool 型`passed`，
+// 于是这些**明明给了判定**的回复全部落进 heuristic 兜底、被保守判 FAIL、触发无谓重跑。
+// 用同一批样本回归验证：旧逻辑命中 0/40，扩展别名后命中 28/40。
+func TestReviewResultFromJSON_AcceptsRealWorldFieldAliases(t *testing.T) {
+	cases := []struct {
+		name       string
+		raw        string
+		wantPassed bool
+	}{
+		// 以下 raw 均取自线上真实样本的结尾形态
+		{"verdict字符串fail", "分析若干。\n```json\n{\"verdict\": \"fail\"}\n```", false},
+		{"verdict字符串pass", "分析若干。\n```json\n{\"verdict\": \"pass\"}\n```", true},
+		{"verdict大写FAIL", "分析若干。\n```json\n{\"verdict\": \"FAIL\"}\n```", false},
+		{"pass布尔false带reason", `{"pass": false, "reason": "输出只是意图声明"}`, false},
+		{"passed布尔true", `{"passed": true, "notes": ""}`, true},
+		{"中文通过", `{"verdict": "通过"}`, true},
+		{"中文不通过", `{"verdict": "不通过"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := reviewResultFromJSON(lastNonEmptyLine(tc.raw))
+			if !ok {
+				// 末行取不到时允许全文扫描（与 parseReviewResult 同策略）
+				r, ok = reviewResultFromJSON(tc.raw)
+			}
+			if !ok {
+				t.Fatalf("未识别出判定 —— 会退化到 heuristic 保守判 FAIL 并触发重跑\nraw=%q", tc.raw)
+			}
+			if r.Passed != tc.wantPassed {
+				t.Errorf("判定错误：want passed=%v got %v", tc.wantPassed, r.Passed)
+			}
+			if r.Source != ReviewSourceJSON {
+				t.Errorf("Source 应为 json，实际 %q", r.Source)
+			}
+		})
+	}
+}
+
+// TestReviewResultFromJSON_RejectsNonVerdictObjects 守住「解析成功 ≠ 解析对了」这条底线。
+//
+// 扩展字段别名后风险变大：`status` / `result` 这类键在普通 JSON 里很常见。
+// 必须确认——**只有值能被识别成判定词时才算判定**，否则代码片段/配置对象会被
+// 当成判定（bool 零值 = false），静默把产物判为不通过（2026-08-04 踩过）。
+func TestReviewResultFromJSON_RejectsNonVerdictObjects(t *testing.T) {
+	for _, raw := range []string{
+		`{"timeout": 5000}`,                    // 无判定字段
+		`{"status": "running"}`,                // status 存在但值不是判定词
+		`{"result": 42}`,                       // result 存在但值是数字
+		`{"status": "ok", "extra": 1}`,         // ok 是可识别的通过词 —— 这条应被接受
+		`func main() { fmt.Println("hello") }`, // 根本不是 JSON
+	} {
+		r, ok := reviewResultFromJSON(raw)
+		if raw == `{"status": "ok", "extra": 1}` {
+			if !ok || !r.Passed {
+				t.Errorf(`{"status":"ok"} 应被识别为通过，实际 ok=%v r=%+v`, ok, r)
+			}
+			continue
+		}
+		if ok {
+			t.Errorf("不含判定的对象被误判为判定：raw=%q → %+v\n"+
+				"这会让代码片段/配置被当成 FAIL，静默丢弃产物", raw, r)
+		}
+	}
+}
+
+// TestVerdictFromWord_UnknownWordsRejected 验证不认识的词不会被当成判定。
+// 「拿不到结论」必须走收尾调用/兜底，绝不能猜。
+func TestVerdictFromWord_UnknownWordsRejected(t *testing.T) {
+	for _, w := range []string{"maybe", "partial", "运行中", "", "unknown"} {
+		if _, ok := verdictFromWord(w); ok {
+			t.Errorf("不认识的判定词 %q 不应被接受", w)
+		}
+	}
+}
