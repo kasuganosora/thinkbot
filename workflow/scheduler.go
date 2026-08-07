@@ -15,6 +15,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/retry"
+	utilhttp "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -329,6 +330,10 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 			Initial:  s.ec.RetryInitial,
 			Max:      s.ec.RetryMax,
 		},
+		// 瞬时限流（非配额耗尽）的 429/5xx 若带 Retry-After 头，按服务端建议延迟等待
+		// 再重试，而非盲目指数退避——「遇到 429 等待到对应时间再重试」。
+		// 配额耗尽（1308）已被 ShouldRetry 拦掉，不会走到这里。
+		GetRetryDelay: utilhttp.StreamGetRetryDelay,
 		OnRetry: func(attempt int, err error, wait time.Duration) {
 			s.mu.Lock()
 			node.RetryCount = attempt
