@@ -122,6 +122,10 @@ Once enabled, ` + "`task`" + ` reports ` + "`goalIteration`" + ` / ` + "`goalMax
 // ============================================================================
 
 // submitToolDef 创建 task 工具。
+//
+// 提交来源（BotID / 前端会话 ID）在**执行时**从 context 读取
+// （`tools.CallOriginFromContext`），由 LLMStage 在编排前注入。
+// 不能在注册时捕获：工具是静态注册的（bot 启动时一次），而 bot/会话每次调用才确定。
 func submitToolDef(mgr *Manager) tools.ToolDef {
 	return tools.ToolDef{
 		Category: "workflow",
@@ -178,10 +182,16 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 					}
 				}
 
+				// 提交来源由 LLMStage 在编排前注入 context（静态注册拿不到会话）。
+				origin := tools.CallOriginFromContext(ctx)
+
 				result, err := mgr.Submit(ctx, SubmitRequest{
 					Requirement: requirement,
 					MaxParallel: maxParallel,
 					GoalMode:    goalMode,
+					// 记录来源，供前端刷新后按会话恢复卡片、排查时定位工作空间。
+					BotID:     origin.BotID,
+					SessionID: origin.SessionID,
 				})
 				if err != nil {
 					return nil, err

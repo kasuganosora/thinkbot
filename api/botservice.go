@@ -414,19 +414,23 @@ func (s *BotService) publishWorkflowEngine(botID string, mgr *workflow.Manager) 
 	s.mu.Unlock()
 }
 
-// WorkflowEngine 返回任意一个已装配工作区工具的工作流引擎（无则返回 nil）。
+// WorkflowEngine 返回一个已装配工作区工具的工作流引擎（无则返回 nil）。
 //
 // 供 WorkflowService 的 Recover / Sweeper / UI 重试路径复用，避免自建
 // ToolMgr=nil 的残废引擎——后者会让节点执行的 SubAgent 碰不到工作区，
 // 产出退化成纯计划（2026-08-06 线上事故，详见 wfEngines 字段注释）。
 //
-// 为什么可以「任意一个」：引擎是按 bot 装配的，而工作流记录目前**没有落bot_id**
-// （已挂账待办），因此无法精确匹配来源 bot。在单bot / 同工作区的实际部署下，
-// 任取一个已装配实例远优于用一个碰不到工作区的实例。
-// ⚠️ 等 bot_id 落库后，这里应改为按 workflow.bot_id 精确查找。
-func (s *BotService) WorkflowEngine() *workflow.Manager {
+// botID 非空时优先精确匹配该 bot 的引擎（工作流已落 BotID，见 workflow.Workflow）；
+// 匹配不到（bot 已停止/ 历史工作流没有 BotID）则退回任取一个已装配实例——
+// 那仍然远优于用一个碰不到工作区的引擎。
+func (s *BotService) WorkflowEngine(botID string) *workflow.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if botID != "" {
+		if mgr := s.wfEngines[botID]; mgr != nil {
+			return mgr
+		}
+	}
 	for _, mgr := range s.wfEngines {
 		if mgr != nil {
 			return mgr

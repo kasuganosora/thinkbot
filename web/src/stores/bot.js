@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { botApi, chatApi, sessionApi } from '@/api/services'
+import { botApi, chatApi, sessionApi, workflowApi } from '@/api/services'
 import toolLabels from '@/i18n/toolLabels'
 
 let idSeed = Date.now()
@@ -267,8 +267,37 @@ export const useBotStore = defineStore('bot', () => {
     // 重连后恢复仍在后台运行的任务（断连不杀后台任务）：重连续流 + 允许手动终止
     await resumeInFlightTasks()
     if (isStale()) return
+    // 恢复本会话的工作流卡片（刷新页面后 activeWorkflowId 会丢，见函数注释）
+    await restoreSessionWorkflow(reqBotId, reqSessionId, isStale)
+    if (isStale()) return
     // 首屏加载完成：通知 ChatWindow 强制滚到底部（进入应展示最后一页=最新消息）
     scrollToBottomOnLoad.value = true
+  }
+
+  /**
+   * 恢复当前会话的工作流卡片。
+   *
+   * 为什么需要：`activeWorkflowId`只在 SSE 的 tool_progress / tool_result 里赋值，
+   * 是纯内存态—— 刷新页面后它变回空串，工作流卡片就消失了，
+   * 但工作流本身仍在后台运行（可能还要跑几十分钟）。
+   * 这里在会话消息载入后按bot+会话查回最近一条工作流，把卡片挂回来。
+   *
+   * 只在当前没有 activeWorkflowId 时才恢复：实时 SSE 拿到的 ID 永远比查询结果新，
+   * 不能被这个异步查询覆盖掉（用户可能已经开了新一轮工作流）。
+   */
+  async function restoreSessionWorkflow(reqBotId, reqSessionId, isStale) {
+    if (!reqBotId) return
+    if (activeWorkflowId.value) return
+    try {
+      const res = await workflowApi.sessionWorkflow(reqBotId, reqSessionId)
+      // 请求期间可能已切走会话/新工作流已由 SSE 赋值，两种情况都不能覆盖
+      if (isStale && isStale()) return
+      if (activeWorkflowId.value) return
+      const wid = res?.workflow?.id
+      if (wid) activeWorkflowId.value = wid
+    } catch {
+      // 查不到工作流是常态（大多数会话没有工作流），静默即可
+    }
   }
 
   /**

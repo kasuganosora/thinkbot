@@ -654,6 +654,15 @@ export const workflowApi = {
     if (USE_MOCK) return mockResolve(() => { const workflows = db().workflows.map(w => ({ ...w })); return { workflows, total: workflows.length } })
     return request('GET', '/api/workflows')
   },
+  // 查会话最近一条工作流：页面刷新后用它恢复工作流卡片。
+  // activeWorkflowId 只从实时 SSE 事件赋值，刷新即丢，而工作流仍在后台跑。
+  // 无匹配时后端返回 { workflow: null }（不是 404），属正常状态。
+  sessionWorkflow(botId, sessionId) {
+    if (USE_MOCK) return mockResolve(() => ({ workflow: null }))
+    const qs = new URLSearchParams({ botId })
+    if (sessionId) qs.set('sessionId', sessionId)
+    return request('GET', `/api/session-workflow?${qs.toString()}`)
+  },
   metrics() {
     if (USE_MOCK) return mockResolve(() => ({ submitted: 10, completed: 7, failed: 1, terminated: 0, running: 2, nodeExecuted: 50, nodeFailed: 3, nodeRetries: 5, nodeReviews: 8, nodeSkipped: 2, persistErrors: 0 }))
     return request('GET', '/api/workflows/metrics')
