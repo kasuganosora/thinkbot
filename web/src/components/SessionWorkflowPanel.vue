@@ -402,7 +402,16 @@ async function tick() {
     // 即时合并一次，不参与与轮询的优先级竞争。
     rawNodes.value = res.flat
     workflow.value = res.status
-    if (isTerminal.value) { stopLive(); _lastSseTs = 0 }
+    if (isTerminal.value) {
+      stopLive()
+      _lastSseTs = 0
+      // 后端已在阻塞等待方超时/取消场景下注入续跑消息（traceID=sessionID），
+      // 这里按会话 resume 接收 agent 续跑的流式回复。needsContinuation 由后端
+      // 注入后通过 status 接口给出，前端消费一次即清除，不会重复触发。
+      if (res.status && res.status.needsContinuation) {
+        botStore.resumeContinuation(props.sessionId)
+      }
+    }
   } catch (e) {
     // 瞬态错误忽略，下次轮询重试
   }

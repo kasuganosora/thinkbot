@@ -244,6 +244,33 @@ func (s *ChatHistoryService) LoadContext(botID, userID string, limit int, sessio
 	return messages, nil
 }
 
+// LoadContextBySession 与 LoadContext 类似，但只按 sessionID 过滤（不限定 userID）。
+// 用于后端续跑注入场景：续跑是系统行为，没有真实 userID，需按会话取回完整历史作为
+// agent 续跑的上下文，否则 agent 会丢失对话背景。
+func (s *ChatHistoryService) LoadContextBySession(botID, sessionID string, limit int) ([]dao.ChatMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > maxPageSize {
+		limit = maxPageSize
+	}
+
+	var messages []dao.ChatMessage
+	if err := s.db.Model(&dao.ChatMessage{}).
+		Where("bot_id = ? AND session_id = ?", botID, sessionID).
+		Order("created_at DESC, id DESC").
+		Limit(limit).
+		Find(&messages).Error; err != nil {
+		return nil, fmt.Errorf("chat_history: load context by session: %w", err)
+	}
+
+	// 反转为正序（旧→新）
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+	return messages, nil
+}
+
 // --- 游标编解码 ---
 
 // encodeCursor 将时间戳和 ID 编码为游标字符串。

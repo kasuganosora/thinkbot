@@ -95,7 +95,7 @@ func newCookieManager(lc fx.Lifecycle, store *config.Store) *CookieManager {
 }
 
 // newBotService 创建 BotService。
-func newBotService(p APIParams, eventBus outbound.EventBus) *BotService {
+func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHistoryService) *BotService {
 	tp := p.TP
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
@@ -104,7 +104,7 @@ func newBotService(p APIParams, eventBus outbound.EventBus) *BotService {
 	if mp == nil {
 		mp = noop_metric.NewMeterProvider()
 	}
-	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus, p.StatsRecorder)
+	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus, p.StatsRecorder, chatHistory)
 }
 
 // newChatHistoryService 创建聊天历史服务。
@@ -192,6 +192,9 @@ func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc
 
 			// 启动卡死工作流看门狗（进程内卡死回收，与 Recover 互补）
 			wfSvc.StartSweeper(srvCtx)
+
+			// 启动配额续跑看门狗（配额熔断的工作流到点自动恢复执行）
+			wfSvc.StartQuotaWatch(srvCtx)
 
 			// 在后台启动 HTTP Server（使用独立 context）
 			go func() {
