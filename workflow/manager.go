@@ -594,6 +594,14 @@ func (m *Manager) SweepStale(ctx context.Context) {
 // 恢复时刻由熔断器写入 wf.QuotaResumeAt。
 const quotaWatchInterval = 30 * time.Second
 
+// quotaHeartbeatMinInterval 是心跳投喂的最小间隔。
+//
+// 卡死看门狗以 interruptedStaleMaxAge=30min 判定「无进展」，心跳只需保证
+// age 稳定小于该阈值即可——无需每轮（30s）都重写整条工作流。取 10min：即便心跳延迟，
+// age 也稳定 < 10min+扫描抖动 << 30min，安全余量充足；同时把 5h 等待期内的全量写库
+// 从 ~600 次降到 ~30 次。
+const quotaHeartbeatMinInterval = 10 * time.Minute
+
 // StartQuotaWatch 启动配额续跑看门狗（进程级，应在服务启动时调用一次）。
 //
 // 职责（双保险）：
@@ -659,6 +667,11 @@ func (m *Manager) ResumeQuotaInterrupted(ctx context.Context) {
 // ResumeQuotaInterrupted 的到期分支按 QuotaResumeAt 触发。这是「无职守」续跑的
 // 双保险（第一道是 SweepStale 的 now.Before(QuotaResumeAt) 跳过）。
 func (m *Manager) feedQuotaWatchdog(wf *Workflow) {
+	// 仅在距上次落库超过最小心跳间隔时才重写，避免 5h 等待期内每 30s 全量写库。
+	// 间隔（10min）远小于卡死阈值（30min），安全性不受影响。
+	if time.Since(wf.UpdatedAt) < quotaHeartbeatMinInterval {
+		return
+	}
 	if err := m.repo.Save(wf); err != nil {
 		m.logger.Warnw("quota-watchdog: failed to feed heartbeat", "workflow_id", wf.ID, "error", err)
 	}
@@ -796,6 +809,17 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 		if isRunning {
 			m.logger.Infow("workflow already running, skipping recovery",
 				"workflow_id", wf.ID)
+			continue
+		}
+
+		// 配额暂停窗口内：不打断恢复流程去立即续跑。崩溃重启后，处于 interrupted 且
+		// QuotaResumeAt 仍在未来的工作流应当留给配额续跑看门狗到点再拉起——否则会无视
+		// 「遇到 429 等待到对应时间再重试」的语义，在配额仍耗尽的窗口里立刻重整续跑、白白
+		// 撞墙（且重置等待时钟）。SweepStale 已对 QuotaResumeAt 未来者跳过氧化，故此处
+		// 直接跳过即可，看门狗会接管。
+		if wf.Status == WorkflowInterrupted && wf.QuotaResumeAt != nil && time.Now().Before(*wf.QuotaResumeAt) {
+			m.logger.Infow("crash recovery: leaving quota-parked workflow for watchdog",
+				"workflow_id", wf.ID, "resume_at", wf.QuotaResumeAt.Format(time.RFC3339))
 			continue
 		}
 
