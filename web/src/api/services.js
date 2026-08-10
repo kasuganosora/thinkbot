@@ -1487,6 +1487,55 @@ export const botAccessApi = {
   }
 }
 
+// ---- 工具权限（bot 维度的工具/平台/用户 白名单+黑名单） ----
+const _botToolPerm = {}
+function ensureToolPerm(botId) {
+  if (!_botToolPerm[botId]) {
+    _botToolPerm[botId] = [
+      { id: 'tp-mock-1', botId, tool: '*', platform: 'web', userIds: ['*'], decision: 'allow', enabled: true, sort: 0 }
+    ]
+  }
+  return _botToolPerm[botId]
+}
+export const botToolPermApi = {
+  list(botId) {
+    if (USE_MOCK) return mockResolve(() => ensureToolPerm(botId).map(r => ({ ...r })))
+    return request('GET', `/api/bots/${botId}/tool-permissions`)
+  },
+  create(botId, payload) {
+    if (USE_MOCK) {
+      return mockResolve(() => {
+        const list = ensureToolPerm(botId)
+        const r = { id: 'tp-mock-' + Date.now(), botId, userIds: ['*'], decision: 'allow', enabled: true, sort: list.length, ...payload }
+        list.push(r); return { ...r }
+      })
+    }
+    return request('POST', `/api/bots/${botId}/tool-permissions`, payload)
+  },
+  update(botId, ruleId, payload) {
+    if (USE_MOCK) {
+      return mockResolve(() => {
+        const list = ensureToolPerm(botId)
+        const r = list.find(x => x.id === ruleId); if (r) Object.assign(r, payload)
+        return r ? { ...r } : null
+      })
+    }
+    return request('PUT', `/api/bots/${botId}/tool-permissions/${ruleId}`, payload)
+  },
+  remove(botId, ruleId) {
+    if (USE_MOCK) {
+      return mockResolve(() => { const list = ensureToolPerm(botId); const i = list.findIndex(x => x.id === ruleId); if (i >= 0) list.splice(i, 1) })
+    }
+    return request('DELETE', `/api/bots/${botId}/tool-permissions/${ruleId}`)
+  },
+  resetDefaults(botId) {
+    if (USE_MOCK) {
+      return mockResolve(() => { _botToolPerm[botId] = [{ id: 'tp-mock-1', botId, tool: '*', platform: 'web', userIds: ['*'], decision: 'allow', enabled: true, sort: 0 }] })
+    }
+    return request('POST', `/api/bots/${botId}/tool-permissions/reset-defaults`)
+  }
+}
+
 // ---- 文件（图4：/data 目录文件管理器） ----
 const _botFS = {}
 function ensureFS(botId) {
