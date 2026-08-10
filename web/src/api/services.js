@@ -1533,6 +1533,59 @@ export const botToolPermApi = {
       return mockResolve(() => { _botToolPerm[botId] = [{ id: 'tp-mock-1', botId, tool: '*', platform: 'web', userIds: ['*'], decision: 'allow', enabled: true, sort: 0 }] })
     }
     return request('POST', `/api/bots/${botId}/tool-permissions/reset-defaults`)
+  },
+  listTools(botId) {
+    if (USE_MOCK) {
+      return mockResolve(() => [
+        { name: 'web_search', description: '搜索互联网获取实时信息', category: '信息检索', risk: 'sensitive' },
+        { name: 'web_fetch', description: '抓取指定网址的页面内容', category: '通用工具', risk: 'sensitive' },
+        { name: 'calculate', description: '计算数学表达式', category: '通用工具', risk: 'basic' },
+        { name: 'datetime_calc', description: '日期时间计算与格式转换', category: '通用工具', risk: 'basic' },
+        { name: 'now', description: '获取当前日期时间', category: '通用工具', risk: 'basic' },
+        { name: 'random', description: '生成随机数或随机选择', category: '通用工具', risk: 'basic' },
+        { name: 'uuid', description: '生成随机 UUID 标识符', category: '通用工具', risk: 'basic' },
+        { name: 'text_diff', description: '比较两段文本的行级差异', category: '通用工具', risk: 'basic' },
+        { name: 'text_encode', description: 'Base64 编码 / 解码', category: '通用工具', risk: 'basic' },
+        { name: 'text_hash', description: '计算文本哈希摘要', category: '通用工具', risk: 'basic' },
+        { name: 'text_stats', description: '统计字数、行数与阅读时长', category: '通用工具', risk: 'basic' },
+        { name: 'memory', description: '管理跨会话的持久化记忆', category: '记忆', risk: 'basic' },
+        { name: 'spawn', description: '创建子智能体并行执行任务', category: '子智能体', risk: 'sensitive' },
+        { name: 'task', description: '提交复杂多步任务（含审查）', category: '任务与工作流', risk: 'sensitive' },
+        { name: 'task_control', description: '控制任务运行（暂停/取消等）', category: '任务与工作流', risk: 'sensitive' },
+        { name: 'task_detail', description: '查询任务各子步骤的详细状态', category: '任务与工作流', risk: 'basic' },
+        { name: 'sandbox_exec', description: '在沙箱容器中执行命令', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_read_file', description: '读取工作空间文件内容', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_write_file', description: '写入或创建文件', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_replace_in_file', description: '在文件中替换文本', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_delete_file', description: '删除文件', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_move_file', description: '移动或重命名文件', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_list_dir', description: '列出目录内容', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_search_content', description: '在文件中搜索文本', category: '沙箱与文件', risk: 'sensitive' },
+        { name: 'sandbox_health', description: '检查沙箱健康状态', category: '沙箱与文件', risk: 'basic' },
+      ])
+    }
+    return request('GET', `/api/bots/${botId}/tools`)
+  },
+
+  /** 查询各渠道的「只看不发」状态 */
+  getOutbound(botId) {
+    if (USE_MOCK) {
+      return mockResolve(() => [
+        { platform: '*', readOnly: false },
+        { platform: 'web', readOnly: false },
+        { platform: 'telegram', readOnly: false },
+        { platform: 'misskey', readOnly: false }
+      ])
+    }
+    return request('GET', `/api/bots/${botId}/outbound`)
+  },
+
+  /** 设置某渠道是否只看不发 */
+  setOutbound(botId, platform, readOnly) {
+    if (USE_MOCK) {
+      return mockResolve(() => ({ platform, readOnly }))
+    }
+    return request('PUT', `/api/bots/${botId}/outbound`, { platform, readOnly })
   }
 }
 
