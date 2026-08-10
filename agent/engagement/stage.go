@@ -232,7 +232,7 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 		attribute.String("engagement.tier", string(decision.Tier)),
 	)
 
-	// 3. 评估未通过 → 退还预扣的限流令牌，消息继续流转（不修改 Mentioned）
+	// 3. 评估未通过 → 退还预扣的限流令牌，抑制对外回复，但消息继续流转
 	if !decision.Engage {
 		// 退还 RateLimitRule 在 Allow() 中预扣的令牌
 		if cp, ok := s.policy.(*CompositePolicy); ok && cp.rules != nil {
@@ -242,7 +242,18 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 				}
 			}
 		}
-		logger.Debugw("engagement declined",
+		// 关键：显式标记「本轮不要发送回复」。
+		//
+		// 早期版本只写engagement.engage 这个 KV 就return，而下游 LLMStage
+		// 既不读它、也无条件产出 ActionReply —— 于是「判定不该说话」对实际发送
+		// 毫无约束力，Bot 的内心独白会被原样投递到群里。
+		//
+		// 这里不 Abort 整条 Pipeline 是有意的：Bot 仍要「听到并思考」这条消息，
+		// 记忆写入等下游 Stage 需要继续跑。被抑制的只是对外发送。
+		env.Set(core.KVSuppressReply, true)
+		env.Set(core.KVSuppressReplyReason, reasonOrDefault(decision.Reason, string(decision.Action)))
+		span.SetAttributes(attribute.Bool("engagement.suppress_reply", true))
+		logger.Debugw("engagement declined: reply suppressed, message still processed",
 			"message_id", env.Message.ID,
 			"action", decision.Action,
 			"tier", decision.Tier,
@@ -256,12 +267,17 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 
 	// 确保 reply_target 存在（Bot 回复时需要知道回复到哪条帖子）
 	// Misskey 等 channel 已在 metadata 中设置了 reply_target，
-	// 但其他 channel 可能需要在这里补充
-	if _, ok := env.Message.Metadata["reply_target"]; !ok {
-		// 使用消息 ID 作为 reply_target（channel outbound 自行解释）
-		if env.Message.ID != "" {
-			env.Message.Metadata["reply_target"] = env.Message.ID
+	// 但其他 channel 可能需要在这里补充。
+	//
+	// 注意必须判nil：读 nil map 返回零值不会panic，但**写入 nil map 会 panic**。
+	// Metadata 是可选字段，并非所有 Channel/测试路径都会初始化它——
+	// 曾因此在主动参与分支直接崩掉整条 pipeline。
+	if _, ok := env.Message.Metadata["reply_target"]; !ok && env.Message.ID != "" {
+		if env.Message.Metadata == nil {
+			env.Message.Metadata = make(map[string]any, 1)
 		}
+		// 使用消息 ID 作为 reply_target（channel outbound 自行解释）
+		env.Message.Metadata["reply_target"] = env.Message.ID
 	}
 
 	// 消耗限流令牌
@@ -349,4 +365,15 @@ func EngagementSummary(env *core.Envelope) string {
 		return fmt.Sprintf("engaged (tier=%s, reason=%s)", d.Tier, d.Reason)
 	}
 	return fmt.Sprintf("declined (tier=%s, reason=%s)", d.Tier, d.Reason)
+}
+
+// reasonOrDefault 返回非空的抑制原因，避免日志/trace 里出现空字符串。
+func reasonOrDefault(reason, fallback string) string {
+	if reason != "" {
+		return reason
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "engagement_declined"
 }
