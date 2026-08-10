@@ -272,42 +272,64 @@ func (d *DreamManager) runREM(ctx context.Context) (*remResult, error) {
 	d.logger.Debug("dreaming: REM phase started")
 
 	d.mu.Lock()
-	staged := make([]*DreamCandidate, 0, len(d.candidates))
+	unthemed := make([]*DreamCandidate, 0, len(d.candidates))
+	themed := make([]*DreamCandidate, 0)
 	for _, c := range d.candidates {
-		staged = append(staged, c)
+		// 已晋升的候选不再参与 REM 聚类（与 runDeep 对称），
+		// 避免每晚对已固化记忆重复调用 LLM 聚类、并无意义累加 REMHits。
+		if c.Promoted {
+			continue
+		}
+		if c.Theme == "" {
+			unthemed = append(unthemed, c)
+		} else {
+			themed = append(themed, c)
+		}
 	}
 	d.mu.Unlock()
 
-	if len(staged) == 0 {
+	if len(unthemed) == 0 && len(themed) == 0 {
 		return &remResult{}, nil
 	}
 
-	themes := d.clusterByTheme(ctx, staged)
+	// 聚类只对新候选（Theme==""）调用一次 LLM；已聚类候选（Theme 已设）复用其既有主题，
+	// 不再每晚重新聚类。旧实现每晚对全部未晋升候选重跑聚类，导致主题抖动（themes 3→10）、
+	// co-occurrence 判定漂移、REMHits 不稳定，进而使同一批候选的晋升在多个夜晚间反复横跳
+	//（"延迟晋升"现象）。稳定主题后，跨夜 co-occurrence 一致，REMHits 可靠累加，晋升可预期。
+	themeMap := make(map[string][]*DreamCandidate, len(themed))
+	for _, c := range themed {
+		themeMap[c.Theme] = append(themeMap[c.Theme], c)
+	}
+	if len(unthemed) > 0 {
+		for _, cl := range d.clusterByTheme(ctx, unthemed) {
+			themeMap[cl.tag] = append(themeMap[cl.tag], cl.items...)
+		}
+	}
 
 	now := time.Now()
 	lookback := time.Duration(d.config.REM.LookbackDays) * 24 * time.Hour
 	cutoff := now.Add(-lookback)
 
-	for _, theme := range themes {
-		if len(theme.items) < 2 {
+	for tag, items := range themeMap {
+		if len(items) < 2 {
 			continue
 		}
-		for _, item := range theme.items {
+		for _, item := range items {
 			if item.LastSeen.After(cutoff) {
 				item.REMHits++
 				if item.Theme == "" {
-					item.Theme = theme.tag
+					item.Theme = tag
 				}
 			}
 		}
 	}
 
 	d.logger.Debugw("dreaming: REM complete",
-		"staged", len(staged), "themes", len(themes))
+		"staged", len(unthemed)+len(themed), "themes", len(themeMap))
 
 	return &remResult{
-		themes:     len(themes),
-		candidates: len(staged),
+		themes:     len(themeMap),
+		candidates: len(unthemed) + len(themed),
 	}, nil
 }
 
