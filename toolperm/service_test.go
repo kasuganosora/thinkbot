@@ -271,7 +271,8 @@ func TestEvaluator_FilterTools(t *testing.T) {
 		}
 	}
 
-	// 平台「有规则但无命中」→ 默认禁止：用仅含 telegram deny(sandbox) 规则的新 bot 演示
+	// 平台「有规则但无命中」→ 按风险区分：敏感工具禁止、基础工具放行。
+	// 用仅含 telegram deny(sandbox) 规则的新 bot 演示。
 	svc2 := newTestService(t)
 	if _, err := svc2.CreateRule("bot-ev2", RuleReq{
 		Tool: "sandbox_exec", Platform: "telegram", UserIDs: []string{"*"},
@@ -280,14 +281,15 @@ func TestEvaluator_FilterTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	ev2 := svc2.NewEvaluator()
-	// telegram：sandbox_exec 命中 deny 被禁；web_search/now 平台有规则但无命中 → 默认禁止
+	// telegram：sandbox_exec 命中 deny 被禁；web_search 为敏感工具且无命中 → 禁止；
+	// now 是基础工具 → 即便平台进入白名单模式仍保留（见 risk.go）。
 	tg2Ctx := &agenttools.ToolSessionContext{BotID: "bot-ev2", SourceChannelType: "telegram", UserID: "u1"}
 	tg2Out, err := ev2.FilterTools(context.Background(), tools, tg2Ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tg2Out) != 0 {
-		t.Fatalf("telegram with only a sandbox deny should drop all non-matching tools, got %d: %+v", len(tg2Out), tg2Out)
+	if len(tg2Out) != 1 || tg2Out[0].Name != "now" {
+		t.Fatalf("only the basic tool `now` should survive, got %d: %+v", len(tg2Out), tg2Out)
 	}
 }
 
