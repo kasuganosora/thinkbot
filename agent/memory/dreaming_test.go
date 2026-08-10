@@ -209,6 +209,102 @@ func TestJaccardSimilarity(t *testing.T) {
 	}
 }
 
+func TestDreamManager_REMPhaseSkipsPromoted(t *testing.T) {
+	scope := ChannelScope("rem-skip-promoted")
+	dm, _ := newTestDreamManager(t, []Scope{scope})
+	ctx := context.Background()
+	now := time.Now()
+
+	// 注入 3 个候选：1 个已晋升，2 个待处理（同 category 以便落同一 theme）。
+	dm.candidates["promoted-a"] = &DreamCandidate{
+		Key: "promoted-a", Content: "已晋升事实", Scope: scope,
+		Category: "catX", Theme: "known", REMHits: 3, Promoted: true, LastSeen: now,
+	}
+	dm.candidates["pending-b"] = &DreamCandidate{
+		Key: "pending-b", Content: "待处理事实 b", Scope: scope,
+		Category: "catX", REMHits: 0, Promoted: false, LastSeen: now,
+	}
+	dm.candidates["pending-c"] = &DreamCandidate{
+		Key: "pending-c", Content: "待处理事实 c", Scope: scope,
+		Category: "catX", REMHits: 0, Promoted: false, LastSeen: now,
+	}
+
+	res, err := dm.runREM(ctx)
+	if err != nil {
+		t.Fatalf("runREM failed: %v", err)
+	}
+
+	// 已晋升候选不应进入 REM 聚类：staged 只含未晋升的 2 个。
+	if res.candidates != 2 {
+		t.Errorf("expected REM to process only 2 un-promoted candidates, got %d", res.candidates)
+	}
+	// 已晋升候选的 REMHits / Theme 不应被改动。
+	if a := dm.candidates["promoted-a"]; a.REMHits != 3 || a.Theme != "known" {
+		t.Errorf("promoted candidate was mutated by REM: REMHits=%d Theme=%q", a.REMHits, a.Theme)
+	}
+	// 未晋升候选仍正常聚类：同 category → 1 theme size=2 → 各 REMHits++。
+	if b := dm.candidates["pending-b"]; b.REMHits != 1 {
+		t.Errorf("pending-b expected REMHits=1, got %d", b.REMHits)
+	}
+	if c := dm.candidates["pending-c"]; c.REMHits != 1 {
+		t.Errorf("pending-c expected REMHits=1, got %d", c.REMHits)
+	}
+}
+
+func TestDreamManager_REMPhaseReusesThemed(t *testing.T) {
+	scope := ChannelScope("rem-reuse-themed")
+	dm, _ := newTestDreamManager(t, []Scope{scope})
+	ctx := context.Background()
+	now := time.Now()
+
+	// 两个已带主题的未晋升候选，但 category 不同：
+	// 旧实现会按 category 重新聚类把它们拆开；新实现应按既有 Theme 复用聚到一起。
+	dm.candidates["themed-x"] = &DreamCandidate{
+		Key: "themed-x", Content: "运维事实 x", Scope: scope,
+		Category: "ops", Theme: "t-ops", REMHits: 2, Promoted: false, LastSeen: now,
+	}
+	dm.candidates["themed-y"] = &DreamCandidate{
+		Key: "themed-y", Content: "运维事实 y", Scope: scope,
+		Category: "other", Theme: "t-ops", REMHits: 1, Promoted: false, LastSeen: now,
+	}
+	// 两个新候选（Theme==""）同 category，应走一次聚类形成多成员簇。
+	dm.candidates["new-z"] = &DreamCandidate{
+		Key: "new-z", Content: "新事实 z", Scope: scope,
+		Category: "ops", Theme: "", REMHits: 0, Promoted: false, LastSeen: now,
+	}
+	dm.candidates["new-w"] = &DreamCandidate{
+		Key: "new-w", Content: "新事实 w", Scope: scope,
+		Category: "ops", Theme: "", REMHits: 0, Promoted: false, LastSeen: now,
+	}
+
+	res, err := dm.runREM(ctx)
+	if err != nil {
+		t.Fatalf("runREM failed: %v", err)
+	}
+
+	// 已带主题的候选按既有 Theme 复用聚类：t-ops 双成员 → 各 REMHits++，主题不被 category 覆盖。
+	if x := dm.candidates["themed-x"]; x.REMHits != 3 || x.Theme != "t-ops" {
+		t.Errorf("themed-x: REMHits=%d Theme=%q, want 3/t-ops", x.REMHits, x.Theme)
+	}
+	if y := dm.candidates["themed-y"]; y.REMHits != 2 || y.Theme != "t-ops" {
+		t.Errorf("themed-y: REMHits=%d Theme=%q, want 2/t-ops", y.REMHits, y.Theme)
+	}
+	// 新候选仍被聚类：同 category 形成多成员簇 → 各 REMHits++ 且主题被赋为 category。
+	if z := dm.candidates["new-z"]; z.REMHits != 1 || z.Theme != "ops" {
+		t.Errorf("new-z: REMHits=%d Theme=%q, want 1/ops", z.REMHits, z.Theme)
+	}
+	if w := dm.candidates["new-w"]; w.REMHits != 1 || w.Theme != "ops" {
+		t.Errorf("new-w: REMHits=%d Theme=%q, want 1/ops", w.REMHits, w.Theme)
+	}
+	// 已带主题的候选未触发重新 LLM 聚类，themes 数=既有不同主题数（t-ops + 新聚类 ops）。
+	if res.candidates != 4 {
+		t.Errorf("expected REM to process 4 candidates, got %d", res.candidates)
+	}
+	if res.themes != 2 {
+		t.Errorf("expected 2 themes (reused t-ops + fresh ops), got %d", res.themes)
+	}
+}
+
 func TestDreamManager_REMPhase(t *testing.T) {
 	scope := ChannelScope("rem-test")
 	dm, tm := newTestDreamManager(t, []Scope{scope})
