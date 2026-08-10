@@ -36,6 +36,12 @@ type ToolManager struct {
 	// 构造时从 PolicyStore 自动接入，运行时实时读取。
 	policyProvider ToolPolicyProvider
 
+	// accessEval 基于完整会话上下文的工具访问控制（nil 表示不启用）。
+	// 若设置，ResolveTools 优先使用它（取代 legacy policyProvider），
+	// 因为它能感知 platform（SourceChannelType）与 userID，匹配 bot 维度的
+	// 工具权限表（bot_tool_permissions）。
+	accessEval ToolAccessEvaluator
+
 	// 是否在注册工具时自动生成描述段落
 	autoDescribe bool
 }
@@ -176,20 +182,44 @@ func (m *ToolManager) SetPolicyProvider(pp ToolPolicyProvider) {
 	m.policyProvider = pp
 }
 
+// ToolAccessEvaluator 是基于完整会话上下文的工具访问控制。
+// 相比旧 ToolPolicyProvider（只看 channel/chatType），它能感知
+// platform（SourceChannelType）与 userID，用于匹配 bot 维度的工具权限表。
+type ToolAccessEvaluator interface {
+	// FilterTools 按当前会话上下文过滤工具列表，仅返回允许使用的工具。
+	FilterTools(ctx context.Context, tools []llm.Tool, sctx *ToolSessionContext) ([]llm.Tool, error)
+}
+
+// SetAccessEvaluator 设置基于完整上下文的工具访问控制。
+// 设置后，ResolveTools 优先使用它（取代 legacy policyProvider）。
+// 传入 nil 可取消。
+func (m *ToolManager) SetAccessEvaluator(e ToolAccessEvaluator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accessEval = e
+}
+
 // ResolveTools 解析当前会话上下文下的工具列表。
 // 返回可供 LLM 使用的 []llm.Tool。
-// 如果设置了 ToolPolicyProvider，会根据策略过滤掉被禁用的工具。
+// 若设置了 ToolAccessEvaluator，按完整上下文过滤；否则回退到 legacy ToolPolicyProvider。
 func (m *ToolManager) ResolveTools(ctx context.Context, sctx *ToolSessionContext) ([]llm.Tool, error) {
 	tools, err := m.registry.Resolve(ctx, sctx)
 	if err != nil {
 		return nil, err
 	}
+	if len(tools) == 0 {
+		return tools, nil
+	}
 
 	m.mu.RLock()
+	ae := m.accessEval
 	pp := m.policyProvider
 	m.mu.RUnlock()
 
-	if pp != nil && len(tools) > 0 {
+	if ae != nil {
+		return ae.FilterTools(ctx, tools, sctx)
+	}
+	if pp != nil {
 		policy := pp.GetPolicy(sctx.BotID)
 		tools = policy.FilterTools(tools, sctx)
 	}

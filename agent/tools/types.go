@@ -122,6 +122,11 @@ type ToolSessionContext struct {
 	// SubAgent 场景通常不应返回联邦工具或记忆相关工具。
 	IsSubagent bool
 
+	// IsSystem 标记内部/系统会话（cron、心跳、梦境巩固等）。
+	// 置为 true 时，工具权限评估（toolperm）直接放行全部工具，
+	// 不受 bot_tool_permissions 约束。常规用户渠道（web/telegram/misskey）应为 false。
+	IsSystem bool
+
 	// SourceChannelType 消息来源 Channel 的类型（"telegram"/"misskey"/"web"）。
 	// 由 Channel 在构建消息时注入到 Metadata["channel_type"]，
 	// envelopeToSessionContext 读取后设置。供工具提供者做场景感知决策。
