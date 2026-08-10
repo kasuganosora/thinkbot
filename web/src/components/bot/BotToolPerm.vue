@@ -20,8 +20,8 @@
         <div class="ex-item">
           <div class="ex-badge ex-lock"><t-icon name="lock-on" /></div>
           <div class="ex-body">
-            <div class="ex-h">平台有规则但未命中 → 禁止</div>
-            <div class="ex-t">一旦为某平台配了规则，该平台就进入白名单模式：没被任何规则命中的工具将被拒绝。</div>
+            <div class="ex-h">平台有规则但未命中 → 仅禁敏感工具</div>
+            <div class="ex-t">为某平台配了规则后，<b>敏感工具</b>（联网/ 命令执行 / 文件读写 / 子智能体）进入白名单模式；<b>基础工具</b>（计算、文本、记忆、只读查询）仍默认开放，Bot 不会失去基本能力。</div>
           </div>
         </div>
         <div class="ex-item">
@@ -41,7 +41,52 @@
       </div>
       <div class="ex-note">
         <t-icon name="info-circle" />
-        <span>系统内部会话（定时任务 / 心跳 / 梦境巩固）不受这些规则约束，始终可使用全部工具。</span>
+        <span>系统内部会话（定时任务 / 心跳 / 梦境巩固）不受这些规则约束，始终可使用全部工具。若确实要连基础工具一起锁死，配一条 <code>工具 = *</code> 的「禁止」规则即可 —— 显式规则优先级高于默认开放。</span>
+      </div>
+    </div>
+
+    <!-- 渠道发言权限（只看不发） -->
+    <div class="tp-card">
+      <div class="card-title">
+        渠道发言
+        <span class="ob-badge">独立于工具权限</span>
+      </div>
+      <div class="card-sub">
+        关闭发言后，Bot 在该渠道<b>被@ 也不会回复</b>，但仍照常接收消息、思考、记忆。
+        这是「潜水/ 只看不发」模式 —— Bot 的自动回复走消息出站链路，不受下方工具规则约束，因此需要单独开关。
+      </div>
+
+      <div v-if="obLoading" class="ob-loading">
+        <t-icon name="loading" class="spin" /> 加载中…
+      </div>
+      <div v-else class="ob-grid">
+        <div
+          v-for="o in outbound"
+          :key="o.platform"
+          class="ob-item"
+          :class="{ 'is-mute': o.readOnly }"
+        >
+          <div class="ob-left">
+            <span class="ob-plat" :class="`pf-${platClass(o.platform)}`">
+              {{ o.platform === '*' ? '全部渠道' : o.platform }}
+            </span>
+            <span class="ob-state">{{ o.readOnly ? '只看不发' : '可发言' }}</span>
+          </div>
+          <t-switch
+            size="small"
+            :value="!o.readOnly"
+            :loading="obSaving === o.platform"
+            @change="(v) => toggleOutbound(o, v)"
+          />
+        </div>
+      </div>
+      <div class="ob-note">
+        <t-icon name="error-circle" />
+        <span>
+          「全部渠道」开关会一次性覆盖所有渠道；单渠道开关只影响该渠道。
+          若要禁止 Bot <b>主动</b>发帖但保留被动回复，请改用下方工具规则禁掉
+          <code>misskey_create_*</code> 等发言类工具。
+        </span>
       </div>
     </div>
 
@@ -72,11 +117,11 @@
           :key="p.name"
           class="ps-chip"
           :class="p.constrained ? 'ps-limited' : 'ps-open'"
-          :title="p.constrained ? `${p.name}：已有 ${p.count} 条启用规则，未命中的工具将被禁止` : `${p.name}：无启用规则，全部工具开放`"
+          :title="p.constrained ? `${p.name}：已有 ${p.count} 条启用规则，未命中的敏感工具将被禁止（基础工具仍开放）` : `${p.name}：无启用规则，全部工具开放`"
         >
           <i class="ps-dot" />
           {{ p.name }}
-          <em>{{ p.constrained ? `受限 · ${p.count}` : '全开放' }}</em>
+          <em>{{ p.constrained ? `管控中 · ${p.count}` : '全开放' }}</em>
         </span>
       </div>
 
@@ -127,9 +172,17 @@
           </span>
 
           <span class="c-tool">
-            <code class="tool-code">{{ r.tool || '*' }}</code>
-            <span v-if="(r.tool || '*') === '*'" class="tool-meta">全部工具</span>
-            <span v-else-if="r.tool.includes('*')" class="tool-meta">通配</span>
+            <template v-if="r.tool === OUTBOUND_TOOL">
+              <span class="tool-outbound" title="渠道发言开关（由上方「渠道发言」卡片管理）">
+                <t-icon name="chat-bubble-1" /> 渠道发言
+              </span>
+            </template>
+            <template v-else>
+              <code class="tool-code">{{ r.tool || '*' }}</code>
+              <span v-if="(r.tool || '*') === '*'" class="tool-meta">全部工具</span>
+              <span v-else-if="r.tool.includes('*')" class="tool-meta">通配</span>
+              <span v-else-if="basicToolNames.has(r.tool)" class="tool-meta tm-basic" title="基础工具默认已开放，此规则通常只在需要显式禁止时才必要">基础</span>
+            </template>
           </span>
 
           <span class="c-plat">
@@ -179,7 +232,7 @@
       <div v-else class="tp-empty">
         <div class="em-icon"><t-icon name="lock-off" /></div>
         <div class="em-title">尚未配置任何规则</div>
-        <div class="em-desc">当前所有平台下的工具均默认开放。添加规则后，被涉及的平台会切换为白名单模式。</div>
+        <div class="em-desc">当前所有平台下的工具均默认开放。添加规则后，被涉及平台的<b>敏感工具</b>会切换为白名单模式，基础工具（计算/文本/记忆）仍保持开放。</div>
         <t-button theme="primary" variant="outline" @click="openAdd">
           <template #icon><t-icon name="add" /></template>添加第一条规则
         </t-button>
@@ -190,15 +243,109 @@
     <t-dialog
       v-model:visible="dialogVisible"
       :header="editing ? '编辑规则' : '添加规则'"
-      :width="560"
+      :width="620"
+      class="tp-dialog"
       :confirm-btn="{ content: editing ? '保存' : '添加', loading: saving }"
       @confirm="confirmSave"
     >
       <t-form :data="form" label-align="top" class="tp-form">
         <t-form-item label="工具">
-          <t-input v-model="form.tool" placeholder="如 sandbox_exec / web_search，* 表示全部" />
-          <div class="field-hint">支持 <code>*</code> 通配，例如 <code>sandbox_*</code> 匹配所有沙箱工具。</div>
-        </t-form-item>
+ <!-- 工具选择器：当前选择 + 通配快捷 + 搜索 + 分组列表 -->
+       <div class="tool-picker">
+    <!-- 当前选择态 -->
+     <div class="tp-current">
+       <span class="tpc-label">已选</span>
+     <code class="tpc-value" :class="{ 'is-wild': form.tool.includes('*') }">{{ form.tool || '*' }}</code>
+          <span class="tpc-desc">{{ currentToolDesc }}</span>
+      </div>
+
+   <!-- 通配快捷入口 -->
+   <div class="tp-quick">
+      <button
+     v-for="q in wildcardPresets"
+           :key="q.value"
+     type="button"
+     class="tq-btn"
+ :class="{ 'is-active': form.tool === q.value }"
+        :title="q.hint"
+            @click="form.tool = q.value"
+>{{ q.label }}</button>
+        </div>
+
+          <!-- 搜索框 -->
+          <div class="tp-search-row">
+            <t-input
+              v-model="toolQuery"
+              placeholder="搜索工具名或说明，也可直接输入自定义通配符"
+              clearable
+              class="tp-search"
+            >
+              <template #prefix-icon><t-icon name="search" /></template>
+            </t-input>
+            <label class="tp-only-sens" title="基础工具（计算/文本/记忆/只读查询）默认始终开放，通常无需为它们配规则">
+              <t-switch v-model="onlySensitive" size="small" />
+              <span>仅敏感</span>
+            </label>
+          </div>
+
+  <!-- 自定义输入提示：搜索词是通配符且未匹配到工具时，允许直接采用 -->
+         <div v-if="showCustomHint" class="tp-custom">
+              <span>使用自定义模式 <code>{{ toolQuery.trim() }}</code></span>
+  <t-button size="small" variant="outline" @click="applyCustomTool">采用</t-button>
+            </div>
+
+      <!-- 分组工具列表 -->
+      <div class="tp-list">
+              <div v-if="toolsLoading" class="tp-loading">
+                <t-icon name="loading" class="spin" /> 正在加载工具…
+   </div>
+              <div v-else-if="!groupedTools.length" class="tp-none">
+                <template v-if="onlySensitive">
+                  没有匹配的敏感工具。可关闭「只看敏感工具」查看基础工具，或直接输入通配符。
+                </template>
+                <template v-else>
+                  没有匹配的工具。可直接在上方输入通配符，或清空搜索词。
+                </template>
+              </div>
+        <template v-else>
+            <div v-for="g in groupedTools" :key="g.name" class="tp-group">
+        <div class="tg-head">
+              <span class="tg-name">{{ g.name }}</span>
+                <span class="tg-count">{{ g.items.length }}</span>
+       <button
+        type="button"
+ class="tg-wild"
+       :title="`选择该分组的通配模式 ${g.wildcard}`"
+         v-if="g.wildcard"
+     @click="form.tool = g.wildcard"
+           >{{ g.wildcard }}</button>
+          </div>
+         <div class="tg-items">
+                <button
+                  v-for="t in g.items"
+                  :key="t.name"
+                  type="button"
+                  class="ti-card"
+                  :class="{'is-active': form.tool === t.name, 'is-basic': t.risk === 'basic' }"
+                  @click="form.tool = t.name"
+                >
+                  <span class="ti-top">
+                    <span class="ti-name">{{ t.name }}</span>
+                    <span v-if="t.risk === 'basic'" class="ti-risk rk-basic" title="基础工具：无对外副作用，默认始终开放">基础</span>
+                    <span v-else class="ti-risk rk-sens" title="敏感工具：有实际危害面，受权限规则约束">敏感</span>
+                  </span>
+                  <span class="ti-desc">{{ t.description }}</span>
+                  <t-icon v-if="form.tool === t.name" name="check" class="ti-check" />
+                </button>
+         </div>
+      </div>
+ </template>
+          </div>
+       </div>
+          <div class="field-hint">
+ 点选工具，或使用 <code>*</code> 通配（如 <code>sandbox_*</code> 匹配所有沙箱工具）。
+        </div>
+   </t-form-item>
 
         <t-form-item label="平台">
           <t-select v-model="form.platform" filterable creatable placeholder="选择或输入平台" :options="platformOptions" />
@@ -259,6 +406,10 @@ const resetting = ref(false)
 
 // 已知平台（用于概览与下拉）；后端不限制取值，故下拉可自由输入
 const KNOWN_PLATFORMS = ['web', 'telegram', 'misskey']
+
+// 后端用这个保留工具名把「渠道发言」建模成一条可授权能力（见 toolperm/outbound.go）。
+// 它不是真实工具，在规则列表里需要特殊渲染，也不应出现在工具选择器中。
+const OUTBOUND_TOOL = '__outbound_reply'
 const platformOptions = [
   { label: '全部平台 (*)', value: '*' },
   { label: 'web', value: 'web' },
@@ -274,8 +425,10 @@ function platClass(p) {
 
 // 平台覆盖概览：与后端 platformHasEnabledRule 语义保持一致
 // —— 平台被任意启用规则覆盖（精确匹配或 platform=*）即进入「受限」白名单模式。
+// 出站规则（__outbound_reply）不算工具管控，需排除，否则开了「只看不发」
+// 会让所有平台显示成「管控中」，与工具权限的实际状态不符。
 const platformSummary = computed(() => {
-  const active = rules.value.filter(r => r.enabled)
+  const active = rules.value.filter(r => r.enabled && r.tool !== OUTBOUND_TOOL)
   const names = new Set(KNOWN_PLATFORMS)
   active.forEach(r => { if (r.platform && r.platform !== '*') names.add(r.platform) })
   return [...names].map(name => {
@@ -317,7 +470,49 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => {
+  load()
+  loadTools() // 规则列表需要 risk 信息来标注基础工具
+  loadOutbound()
+})
+
+// ---- 渠道发言（只看不发）----
+// 与工具权限分开：Bot 的自动回复走Pipeline Action → Channel.Send，
+// 完全不经过ToolManager，所以禁用发言类工具拦不住「被 @ 后自动回帖」。
+const outbound = ref([])
+const obLoading = ref(false)
+const obSaving = ref('')
+
+async function loadOutbound() {
+  obLoading.value = true
+  try {
+    outbound.value = await botToolPermApi.getOutbound(props.botId)
+  } catch (e) {
+    console.warn('[toolperm] load outbound failed:', e)
+    outbound.value = []
+  } finally {
+    obLoading.value = false
+  }
+}
+
+// v 是开关值（true=可发言），readOnly 与之相反
+async function toggleOutbound(o, v) {
+  const readOnly = !v
+  obSaving.value = o.platform
+  try {
+    await botToolPermApi.setOutbound(props.botId, o.platform, readOnly)
+    o.readOnly = readOnly
+    MessagePlugin.success(readOnly? `已关闭 ${o.platform} 的发言` : `已恢复 ${o.platform} 的发言`)
+    // 「全部渠道」与单渠道规则是两条独立规则，改动后重新拉取以反映真实合并结果
+    if (o.platform === '*') await loadOutbound()
+    // 出站规则也存在规则表里，同步刷新列表
+    await load()
+  } catch (e) {
+    MessagePlugin.error('设置失败：' + (e.message || e))
+  } finally {
+    obSaving.value = ''
+  }
+}
 
 async function toggleEnabled(r, v) {
   r.enabled = v
@@ -461,13 +656,130 @@ const editingId = ref(null)
 const userIdsText = ref('*')
 const form = ref({ tool: '*', platform: 'web', decision: 'allow', enabled: true, sort: 0 })
 
+// ---- 工具选择器 ----
+// 用分组卡片列表代替下拉自动补全：工具数量多、名字长、说明需要换行，
+// 窄下拉框里 "name — desc" 单行会挤成一团（曾出现文字重叠），
+// 且用户无法概览「系统里到底有哪些工具」。
+const allTools = ref([])     // { name, description, category, risk }[]
+const toolsLoading = ref(false)
+const toolQuery = ref('')
+// 默认只看敏感工具：基础工具始终开放，管理员基本不需要为它们配规则
+const onlySensitive = ref(true)
+
+// 通配快捷入口：覆盖最常用的几种批量授权意图
+const wildcardPresets = [
+  { label: '全部工具 *', value: '*', hint: '匹配系统中的所有工具' },
+  { label: 'sandbox_*', value: 'sandbox_*', hint: '所有沙箱与文件工具' },
+  { label: 'web_*', value: 'web_*', hint: '所有联网工具（搜索、抓取）' },
+  { label: 'task_*', value: 'task_*', hint: '所有任务/工作流工具' },
+  { label: 'text_*', value: 'text_*', hint: '所有文本处理工具' }
+]
+
+// 当前选中工具的说明文案
+const currentToolDesc = computed(() => {
+  const v = (form.value.tool || '*').trim()
+  if (v === '*') return '匹配系统中的所有工具（含基础工具）'
+  if (v.includes('*')) {
+    const n = allTools.value.filter(t => matchWildcard(t.name, v)).length
+    return `通配模式 · 当前匹配 ${n} 个工具`
+  }
+  const hit = allTools.value.find(t => t.name === v)
+  if (!hit) return '自定义工具名（不在当前已注册列表中）'
+  return hit.risk === 'basic'
+    ? `${hit.description} · 基础工具，默认已开放`
+    : hit.description
+})
+
+// 与后端 matchGlob 对齐的前缀/后缀/中缀通配匹配，仅用于展示匹配数量
+function matchWildcard(name, pattern) {
+  if (pattern === '*') return true
+  if (!pattern.includes('*')) return name === pattern
+  const parts = pattern.split('*')
+  if (parts.length === 2) {
+    const [pre, suf] = parts
+    return name.startsWith(pre) && name.endsWith(suf) && name.length >= pre.length + suf.length
+  }
+  return name.includes(pattern.replace(/\*/g, ''))
+}
+
+// 按 category 分组 + 搜索过滤 + 风险筛选
+// 敏感工具分组排在前面：管理员配规则的目标基本都是敏感工具。
+const groupedTools = computed(() => {
+  const q = toolQuery.value.trim().toLowerCase()
+  let filtered = allTools.value
+  if (onlySensitive.value) {
+    filtered = filtered.filter(t => t.risk !== 'basic')
+  }
+  if (q) {
+    filtered = filtered.filter(t =>
+      t.name.toLowerCase().includes(q) ||
+      (t.description || '').toLowerCase().includes(q))
+  }
+
+  const map = new Map()
+  for (const t of filtered) {
+    const cat = t.category || '其他'
+    if (!map.has(cat)) map.set(cat, [])
+    map.get(cat).push(t)
+  }
+  const groups = [...map.entries()].map(([name, items]) => ({
+    name,
+    items,
+    wildcard: groupWildcard(items),
+    // 组内只要有敏感工具就算敏感组，用于排序
+    sensitive: items.some(t => t.risk !== 'basic')
+  }))
+  // 敏感组优先
+  groups.sort((a, b) => Number(b.sensitive) - Number(a.sensitive))
+  return groups
+})
+
+// 若分组内工具共享同一 "xxx_" 前缀，给出该分组的通配建议
+function groupWildcard(items) {
+  if (items.length < 2) return ''
+  const first = items[0].name
+  const idx = first.indexOf('_')
+  if (idx <= 0) return ''
+  const prefix = first.slice(0, idx + 1)
+  return items.every(t => t.name.startsWith(prefix)) ? `${prefix}*` : ''
+}
+
+// 搜索词本身是通配符且没匹配到具体工具时，提供「采用自定义模式」入口
+const showCustomHint = computed(() => {
+  const q = toolQuery.value.trim()
+  return q.includes('*') && q !== form.value.tool
+})
+function applyCustomTool() {
+  form.value.tool = toolQuery.value.trim()
+}
+
+async function loadTools() {
+  toolsLoading.value = true
+  try {
+    allTools.value = await botToolPermApi.listTools(props.botId)
+  } catch (e) {
+    // 静默失败：仍可通过搜索框输入自定义工具名，不阻断核心功能
+    console.warn('[toolperm] load tools failed:', e)
+    allTools.value = []
+  } finally {
+    toolsLoading.value = false
+  }
+}
+
+// 基础工具名集合，用于在规则列表里标注「该规则针对的是默认已开放的基础工具」
+const basicToolNames = computed(
+  () => new Set(allTools.value.filter(t => t.risk === 'basic').map(t => t.name))
+)
+
 function openAdd() {
   editing.value = false
   editingId.value = null
   const maxSort = rules.value.reduce((m, r) => Math.max(m, Number(r.sort || 0)), -1)
   form.value = { tool: '*', platform: 'web', decision: 'allow', enabled: true, sort: maxSort + 1 }
   userIdsText.value = '*'
+  toolQuery.value = ''
   dialogVisible.value = true
+  loadTools()
 }
 function openEdit(r) {
   editing.value = true
@@ -480,7 +792,9 @@ function openEdit(r) {
     sort: Number(r.sort || 0)
   }
   userIdsText.value = usersToText(r.userIds)
+  toolQuery.value = ''
   dialogVisible.value = true
+  loadTools()
 }
 
 async function confirmSave() {
@@ -626,6 +940,9 @@ async function confirmSave() {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
 .tool-meta { font-size: 11px; color: #b0b0b4; flex-shrink: 0; }
+.tm-basic {
+  background: #edf6ee; color: #4a9c3f; padding: 1px 6px; border-radius: 4px; font-size: 10px;
+}
 
 .c-plat { width: 100px; flex-shrink: 0; }
 .plat-tag {
@@ -677,8 +994,65 @@ async function confirmSave() {
 .em-title { font-size: 14px; font-weight: 600; color: #444; }
 .em-desc { font-size: 12.5px; color: #999; margin: 6px auto 18px; max-width: 420px; line-height: 1.7; }
 
+/* ---- 渠道发言（只看不发）---- */
+.ob-badge {
+  font-size: 10.5px; font-weight: 500; color: #a86a12;
+  background: #fff6e6; border: 1px solid #ffe4bf;
+  border-radius: 4px; padding: 1px 6px;
+}
+.ob-loading { padding: 18px 2px; font-size: 12.5px; color: #aaa; }
+.ob-grid {
+  margin-top: 14px; display: grid; gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+.ob-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 9px 12px; border: 1px solid #ececef; border-radius: 8px; background: #fff;
+  transition: border-color .15s, background .15s;
+}
+.ob-item.is-mute { border-color: #f3d3d0; background: #fffafa; }
+.ob-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ob-plat {
+  font-size: 11.5px; padding: 2px 9px; border-radius: 5px; font-weight: 500; flex-shrink: 0;
+}
+.ob-state { font-size: 11.5px; color: #9a9aa0; }
+.ob-item.is-mute .ob-state { color: #c8443c; }
+.ob-note {
+  margin-top: 12px; padding: 9px 12px; border-radius: 8px; background: #f7f8fa;
+  font-size: 11.5px; color: #7a7a7e; display: flex; align-items: flex-start; gap: 7px;
+  line-height: 1.6;
+}
+.ob-note code {
+  background: #f1f2f4; padding: 0 4px; border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 规则列表里的出站规则标记 */
+.tool-outbound {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: #a86a12; background: #fff6e6;
+  border: 1px solid #ffe4bf; border-radius: 5px; padding: 2px 8px;
+}
+
 /* ---- 弹窗表单 ---- */
 .tp-form { padding-top: 4px; }
+
+/* TDesign 的 .t-form__controls-content 默认是 flex row，
+   而我们把 .field-hint 作为控件的兄弟节点放在同一个 controls 里，
+   会被排到控件右侧并溢出弹窗（曾出现提示文字跑到弹窗外的布局 bug）。
+   这里强制纵向堆叠，让提示文字老老实实待在控件下方。 */
+.tp-form :deep(.t-form__controls-content) {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+/* 控件本身占满可用宽度 */
+.tp-form :deep(.t-form__controls-content > .t-input),
+.tp-form :deep(.t-form__controls-content > .t-select),
+.tp-form :deep(.t-form__controls-content > .t-select-input) {
+  width: 100%;
+}
+
 .field-hint { font-size: 11.5px; color: #aaa; margin-top: 5px; line-height: 1.5; }
 .field-hint code {
   background: #f1f2f4; padding: 0 4px; border-radius: 3px;
@@ -690,6 +1064,139 @@ async function confirmSave() {
 .dot-allow { background: #34c759; }
 .dot-deny { background: #e5544b; }
 
+/* ---- 工具选择器 ---- */
+.tool-picker {
+  border: 1px solid #e7e7ea; border-radius: 10px; background: #fcfcfd; overflow: hidden;
+}
+
+/* 当前选择态 */
+.tp-current {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; background: #f4f6fb; border-bottom: 1px solid #e9ebf2;
+}
+.tpc-label { font-size: 11px; color: #8a8a8e; flex-shrink: 0; }
+.tpc-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; font-weight: 600; color: #3b4ea8;
+  background: #e6ebfa; padding: 3px 9px; border-radius: 5px; flex-shrink: 0;
+}
+.tpc-value.is-wild { color: #7a5bc7; background: #f0eafb; }
+.tpc-desc { font-size: 11.5px; color: #9a9a9e; line-height: 1.5; min-width: 0; }
+
+/* 通配快捷入口 */
+.tp-quick {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px 0;
+}
+.tq-btn {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; padding: 3px 9px; border-radius: 20px; cursor: pointer;
+  border: 1px solid #e2e3e8; background: #fff; color: #6a6a70;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.tq-btn:hover { border-color: #b9c2e6; color: #4b62c9; }
+.tq-btn.is-active { background: #eef1fb; border-color: #9daaea; color: #3b4ea8; font-weight: 600; }
+
+/* 搜索行 */
+.tp-search-row { display: flex; align-items: center; gap: 10px; margin: 10px 12px; }
+.tp-search { flex: 1; min-width: 0; }
+.tp-only-sens {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  font-size: 11.5px; color: #7a7a80; cursor: pointer; user-select: none;
+}
+
+/* 自定义模式提示 */
+.tp-custom {
+  margin: 0 12px 10px; padding: 7px 11px; border-radius: 7px;
+  background: #fffaf0; border: 1px solid #ffe9c9;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 12px; color: #a86a12;
+}
+.tp-custom code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #fff1d9; padding: 1px 6px; border-radius: 4px; font-weight: 600;
+}
+
+/* 分组列表：固定高度 + 滚动，避免弹窗被撑爆 */
+.tp-list {
+  max-height: 300px; overflow-y: auto; padding: 4px 12px 12px;
+  border-top: 1px solid #f0f0f2; background: #fff;
+  scrollbar-width: thin;
+}
+.tp-list::-webkit-scrollbar { width: 8px; }
+.tp-list::-webkit-scrollbar-thumb { background: #dcdce0; border-radius: 4px; }
+.tp-list::-webkit-scrollbar-thumb:hover { background: #c8c8cd; }
+.tp-loading, .tp-none {
+  padding: 24px 4px; text-align: center; font-size: 12.5px; color: #aaa; line-height: 1.7;
+}
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg) } }
+
+.tp-group { margin-top: 10px; }
+.tp-group:first-child { margin-top: 4px; }
+/* 分组标题吸顶：长列表滚动时始终知道当前在看哪个分类 */
+.tg-head {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 6px;
+  position: sticky; top: 0; z-index: 1;
+  background: #fff; padding: 4px 0;
+}
+.tg-name { font-size: 12px; font-weight: 600; color: #55555a; }
+.tg-count {
+  font-size: 10.5px; color: #a0a0a6; background: #f0f1f3;
+  border-radius: 8px; padding: 0 6px; line-height: 16px;
+}
+.tg-wild {
+  margin-left: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: #8a7bc0; background: #f5f2fc; border: 1px solid #e6dff7;
+  border-radius: 5px; padding: 1px 7px; cursor: pointer; transition: background .15s;
+}
+.tg-wild:hover { background: #ece5fa; }
+
+/* 工具卡片：单列列表。
+   两列网格会把 task_control / web_fetch 这类稍长的工具名挤成 "task_co…"——
+   权限配置界面看不清工具全名是不可接受的。单列下 name 有足够宽度完整显示，
+   desc 跟在右侧同一行，卡片高度也天然统一。 */
+.tg-items { display: flex; flex-direction: column; gap: 5px; }
+.ti-card {
+  position: relative; text-align: left; cursor: pointer; width: 100%;
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 8px 30px 8px 11px; border-radius: 7px;
+  border: 1px solid #ececef; background: #fff;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.ti-card:hover { border-color: #c3cbe9; background: #fafbff; }
+.ti-card.is-active {
+  border-color: #7d8fe0; background: #f2f5fe;
+  box-shadow: 0 0 0 2px rgba(125, 143, 224, .14);
+}
+.ti-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; font-weight: 600; color: #3a3a40; line-height: 1.5;
+  white-space: nowrap; /* 单列有足够宽度，不再截断 */
+}
+.ti-card.is-active .ti-name { color: #3b4ea8; }
+
+/* 风险标记 */
+.ti-top { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.ti-risk {
+  flex-shrink: 0; font-size: 10px; line-height: 15px; padding: 0 5px;
+  border-radius: 4px; font-weight: 500;
+}
+.rk-basic { background: #edf6ee; color: #4a9c3f; }
+.rk-sens  { background: #fdf0ec; color: #cf6a3f; }
+/* 基础工具整体降饱和度：它们默认就是开放的，不是配置重点 */
+.ti-card.is-basic { background: #fcfcfc; }
+.ti-card.is-basic .ti-name { color: #6a6a70; }
+
+/* desc 跟在名字右侧，单行省略 */
+.ti-desc {
+  font-size: 11px; color: #9c9ca2; line-height: 1.5; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ti-check {
+  position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+  color: #4b62c9; font-size: 13px;
+}
+
 .preview {
   margin-top: 6px; padding: 11px 13px; border-radius: 9px; font-size: 12.5px;
   display: flex; align-items: center; gap: 8px; line-height: 1.6;
@@ -698,4 +1205,14 @@ async function confirmSave() {
 .pv-strong { padding: 0 2px; }
 .pv-allow { background: #f0faf4; color: #1e8a54; }
 .pv-deny { background: #fdf1f0; color: #c8443c; }
+</style>
+
+<!-- t-dialog 的 body 挂在组件外层，scoped 选择器命中不了，故用全局样式。
+     规则弹窗内容较高（工具选择面板+ 5 个字段），必须限制高度并让 body 内部滚动，
+     否则在笔记本屏幕上底部的「决策 / 排序 / 预览」会被视口截断、按钮点不到。 -->
+<style>
+.tp-dialog .t-dialog__body {
+  max-height: calc(90vh - 180px);
+  overflow-y: auto;
+}
 </style>
