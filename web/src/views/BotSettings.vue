@@ -51,6 +51,8 @@
           <BotPlatforms v-else-if="activeKey === 'platform'" :bot-id="bot.id" />
           <!-- 访问控制 -->
           <BotAccess v-else-if="activeKey === 'access'" :bot-id="bot.id" />
+          <!-- 工具权限 -->
+          <BotToolPerm v-else-if="activeKey === 'toolperm'" :bot-id="bot.id" />
           <!-- 邮件（占位） -->
           <Placeholder v-else-if="activeKey === 'email'" title="邮件" desc="配置邮件收发渠道（待完善）。" />
           <!-- 终端 -->
@@ -94,6 +96,7 @@ import BotCronJobs from '@/components/bot/BotCronJobs.vue'
 import BotPlatforms from '@/components/bot/BotPlatforms.vue'
 import BotMemoryFiles from '@/components/bot/BotMemoryFiles.vue'
 import BotAccess from '@/components/bot/BotAccess.vue'
+import BotToolPerm from '@/components/bot/BotToolPerm.vue'
 import BotFiles from '@/components/bot/BotFiles.vue'
 import BotRhythm from '@/components/bot/BotRhythm.vue'
 import BotOverview from '@/components/bot/BotOverview.vue'
@@ -127,6 +130,7 @@ const navItems = [
   { key: 'memory', label: '记忆' },
   { key: 'platform', label: '平台' },
   { key: 'access', label: '访问控制' },
+  { key: 'toolperm', label: '工具权限' },
   { key: 'email', label: '邮件' },
   { key: 'terminal', label: '终端' },
   { key: 'files', label: '文件' },
