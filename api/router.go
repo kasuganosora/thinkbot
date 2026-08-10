@@ -138,16 +138,20 @@ func (s *Server) registerRoutes() {
 				// 运行时检查（概览页，接入真实 sandbox 状态）
 				botsAdmin.GET("/:id/runtime-checks", s.handleBotRuntimeChecks)
 
-			// 访问控制（默认行为 + 规则列表）
-			botsAdmin.GET("/:id/access", s.handleGetBotAccess)
-			botsAdmin.PUT("/:id/access", s.handleUpdateBotAccess)
+				// 访问控制（默认行为 + 规则列表）
+				botsAdmin.GET("/:id/access", s.handleGetBotAccess)
+				botsAdmin.PUT("/:id/access", s.handleUpdateBotAccess)
 
-			// 工具权限（按 bot 维度的工具/平台/用户白名单+黑名单）
-			botsAdmin.GET("/:id/tool-permissions", s.handleListBotToolPerms)
-			botsAdmin.POST("/:id/tool-permissions", s.handleCreateBotToolPerm)
-			botsAdmin.PUT("/:id/tool-permissions/:rid", s.handleUpdateBotToolPerm)
-			botsAdmin.DELETE("/:id/tool-permissions/:rid", s.handleDeleteBotToolPerm)
-			botsAdmin.POST("/:id/tool-permissions/reset-defaults", s.handleResetBotToolPermDefaults)
+				// 工具权限（按 bot 维度的工具/平台/用户白名单+黑名单）
+				botsAdmin.GET("/:id/tool-permissions", s.handleListBotToolPerms)
+				botsAdmin.POST("/:id/tool-permissions", s.handleCreateBotToolPerm)
+				botsAdmin.PUT("/:id/tool-permissions/:rid", s.handleUpdateBotToolPerm)
+				botsAdmin.DELETE("/:id/tool-permissions/:rid", s.handleDeleteBotToolPerm)
+				botsAdmin.POST("/:id/tool-permissions/reset-defaults", s.handleResetBotToolPermDefaults)
+				botsAdmin.GET("/:id/tools", s.handleListBotTools)
+				// 渠道出站（只看不发）开关：Pipeline 自动回复不经过工具权限，需单独管控
+				botsAdmin.GET("/:id/outbound", s.handleGetBotOutbound)
+				botsAdmin.PUT("/:id/outbound", s.handleSetBotOutbound)
 
 				// 终端（容器 shell，接入真实 sandbox exec）
 				botsAdmin.GET("/:id/terminal", s.handleBotTerminal)
