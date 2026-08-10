@@ -219,6 +219,11 @@ type ToolInfo struct {
 	RequireApproval  bool     `json:"requireApproval"`
 	HasPromptSection bool     `json:"hasPromptSection"`
 	Parameters       any      `json:"parameters,omitempty"`
+
+	// Risk 工具风险级别（"basic" / "sensitive"），由 API 层按 toolperm 的
+	// 分级规则填充，用于权限配置界面区分「无害基础工具」与「需要管控的敏感工具」。
+	// 空值表示调用方未做分级。
+	Risk string `json:"risk,omitempty"`
 }
 
 // appliesTo 检查工具是否适用于给定场景。
