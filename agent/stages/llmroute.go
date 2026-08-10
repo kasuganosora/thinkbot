@@ -3,6 +3,7 @@ package stages
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/session"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -65,6 +67,28 @@ func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.
 		}
 	}
 	return cfg.Tools
+}
+
+// replySuppressed 检查上游 Stage 是否要求本轮不要发送回复。
+//
+// 返回 (是否抑制, 原因)。原因仅用于日志与 trace —— 静默丢弃必须可解释，
+// 否则运维会把「有意不回复」误判成 Bot 故障。
+func replySuppressed(env *core.Envelope) (bool, string) {
+	v, ok := env.Get(core.KVSuppressReply)
+	if !ok {
+		return false, ""
+	}
+	b, ok := v.(bool)
+	if !ok || !b {
+		return false, ""
+	}
+	reason := "unspecified"
+	if rv, ok := env.Get(core.KVSuppressReplyReason); ok {
+		if s, ok := rv.(string); ok && s != "" {
+			reason = s
+		}
+	}
+	return true, reason
 }
 
 // ============================================================================
@@ -395,11 +419,46 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
+	// 抑制检查：上游（如 engagement 参与度评估）判定「此刻不该说话」时，
+	// 不产出 ActionReply —— 但 LLM 已经跑完、结果仍存进 KV，
+	// 供记忆写入等下游 Stage 使用。即「照样听、照样想、照样记，只是不说出口」。
+	//
+	// 这一步是必要的：本Stage 是全项目唯一产出 ActionReply 的地方，
+	// 若不在此拦截，上游的静默决策对实际发送没有任何约束力。
+	if suppressed, reason := replySuppressed(env); suppressed {
+		span.SetAttributes(
+			attribute.Bool("reply.suppressed", true),
+			attribute.String("reply.suppress_reason", reason),
+		)
+		logger.Infow("reply suppressed: not sending to channel",
+			"message_id", env.Message.ID,
+			"reason", reason,
+			"text_len", len(result.Text))
+		env.Set("llm.result", result)
+		return env, nil
+	}
+
+	// 清洗思考内容：部分模型（DeepSeek-R1/ GLM / QwQ 等）把推理过程以
+	// <think>...</think> 内联在正文里，而非放进结构化的 Reasoning 字段。
+	// 这些内容属于「心里话」，绝不能发给用户。
+	// 注意：项目原先只在记忆写入侧清洗，出站链路完全没清 —— 必须在此补上。
+	replyText := memory.StripThinking(result.Text)
+	if strings.TrimSpace(replyText) == "" {
+		// 清洗后为空说明模型这轮只输出了思考内容，没有真正要说的话。
+		// 此时发送空消息毫无意义（且部分 Channel 会报错），跳过发送。
+		span.SetAttributes(attribute.Bool("reply.empty_after_strip", true))
+		logger.Infow("reply skipped: empty after stripping thinking content",
+			"message_id", env.Message.ID,
+			"raw_len", len(result.Text))
+		env.Set("llm.result", result)
+		return env, nil
+	}
+
 	env.AddAction(core.Action{
 		Type:    core.ActionReply,
 		Channel: replyTarget,
 		UserID:  env.Message.UserID,
-		Payload: result.Text,
+		Payload: replyText,
 		Metadata: map[string]any{
 			"source_channel": env.Message.Source,  // ChannelReplyHandler 路由必需
 			"trace_id":       env.Message.TraceID, // WebChannel 路由必需
