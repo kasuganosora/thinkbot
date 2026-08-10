@@ -19,6 +19,7 @@ import (
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/skill"
+	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -45,6 +46,7 @@ type Server struct {
 	skillMgr       *skill.SkillManager
 	bindSvc        *identity.BindService
 	heartbeatStore *heartbeat.Store
+	permSvc        *toolperm.Service
 }
 
 // NewServer 创建并配置 Gin Server。
@@ -59,6 +61,7 @@ func NewServer(
 	workflowSvc *WorkflowService,
 	skillMgr *skill.SkillManager,
 	bindSvc *identity.BindService,
+	permSvc *toolperm.Service,
 ) *Server {
 	gin.SetMode(gin.ReleaseMode)
 
@@ -94,6 +97,7 @@ func NewServer(
 		skillMgr:       skillMgr,
 		bindSvc:        bindSvc,
 		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
+		permSvc:        permSvc,
 	}
 
 	// 注册所有路由

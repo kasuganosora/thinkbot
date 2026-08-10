@@ -21,6 +21,7 @@ import (
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/skill"
+	"github.com/kasuganosora/thinkbot/toolperm"
 )
 
 // ============================================================================
@@ -51,6 +52,7 @@ var Module = fx.Module("api",
 		newChatHistoryService,
 		newWorkflowService,
 		newSkillManager,
+		newToolPermService,
 		newAPIServer,
 	),
 	fx.Invoke(registerAPILifecycle),
@@ -95,7 +97,7 @@ func newCookieManager(lc fx.Lifecycle, store *config.Store) *CookieManager {
 }
 
 // newBotService 创建 BotService。
-func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHistoryService) *BotService {
+func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHistoryService, permSvc *toolperm.Service) *BotService {
 	tp := p.TP
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
@@ -104,7 +106,12 @@ func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHis
 	if mp == nil {
 		mp = noop_metric.NewMeterProvider()
 	}
-	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus, p.StatsRecorder, chatHistory)
+	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus, p.StatsRecorder, chatHistory, permSvc)
+}
+
+// newToolPermService 创建 bot 工具权限服务。
+func newToolPermService(p APIParams, logger *zap.SugaredLogger) *toolperm.Service {
+	return toolperm.NewService(p.DB, logger)
 }
 
 // newChatHistoryService 创建聊天历史服务。
@@ -166,8 +173,9 @@ func newAPIServer(
 	workflowSvc *WorkflowService,
 	skillMgr *skill.SkillManager,
 	bindSvc *identity.BindService,
+	permSvc *toolperm.Service,
 ) *Server {
-	return NewServer(authSvc, botSvc, cookie, chatHistory, store, db, logger, workflowSvc, skillMgr, bindSvc)
+	return NewServer(authSvc, botSvc, cookie, chatHistory, store, db, logger, workflowSvc, skillMgr, bindSvc, permSvc)
 }
 
 // registerAPILifecycle 绑定 Server 和 BotService 的生命周期。

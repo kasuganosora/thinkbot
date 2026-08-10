@@ -38,6 +38,7 @@ import (
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/tools"
+	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/workflow"
 )
@@ -86,10 +87,13 @@ type BotService struct {
 	chatHistory *ChatHistoryService
 
 	tokenBudget *pipeline.TokenBudgetState // 共享 token 预算状态（支持空闲自动重置 / 手动重置）
+
+	// permSvc bot 工具权限服务（按 bot 维度控制工具可用性）。
+	permSvc *toolperm.Service
 }
 
 // NewBotService 创建 BotService。
-func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, chatHistory *ChatHistoryService) *BotService {
+func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, chatHistory *ChatHistoryService, permSvc *toolperm.Service) *BotService {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
@@ -121,6 +125,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
 		tokenBudget: pipeline.NewTokenBudgetState(time.Hour),
+		permSvc:     permSvc,
 	}
 }
 
@@ -689,6 +694,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 创建 Prompt Registry + Tool Manager
 	promptReg := prompt.NewRegistry()
 	toolMgr := agenttools.NewToolManager(promptReg, s.store, s.logger)
+
+	// 接入 bot 维度的工具权限控制（按 platform + userID 过滤）。
+	// 设置后取代 legacy ToolPolicyProvider，所有工具解析都走权限表裁决。
+	if s.permSvc != nil {
+		toolMgr.SetAccessEvaluator(s.permSvc.NewEvaluator())
+	}
 
 	// 注册通用工具（web_fetch, calculate, now, web_search 等）
 	// 注意：shell 命令执行与文件列举工具（sandbox_exec / sandbox_read_file 等）

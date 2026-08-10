@@ -84,6 +84,9 @@ func (c *WebChannel) Inject(ctx context.Context, traceID, userID, text string, e
 		"source_channel": c.name,
 	}
 	maps.Copy(metadata, extraMetadata)
+	// Channel 类型，供 ToolSessionContext.SourceChannelType 使用（工具权限按平台匹配）。
+	// 放在 maps.Copy 之后，确保不被 extraMetadata 覆盖。
+	metadata["channel_type"] = "web"
 
 	msg := core.Message{
 		ID:        traceID,
