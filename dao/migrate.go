@@ -23,6 +23,7 @@ func Migrate(database *gorm.DB) error {
 		&BindCode{},
 		&IdentityMapping{},
 		&TieredMemoryModel{},
+		&BotToolPermission{},
 	); err != nil {
 		return err
 	}
