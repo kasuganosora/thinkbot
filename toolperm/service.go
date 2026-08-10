@@ -5,11 +5,16 @@
 //
 // 核心语义（与前端「工具权限」配置页一致）：
 //   - 仅 enabled=true 的规则参与评估；
-//   - 按 sort 升序遍历，第一个同时匹配 tool/platform/user 的规则决定最终决策；
+//   - 按 sort 升序遍历，第一个同时匹配 tool/platform/user 的规则决定最终决策
+//     （管理员的显式规则永远优先，包括对基础工具的 deny）；
 //   - 一个平台（渠道）若「完全没有任何启用规则覆盖它」→ 默认「允许」
 //     （平台开放基线：未被管理员约束的渠道不应被锁死）；web 即此情形，
-//     且另有一条 tool=* platform=web 的显式基线规则用于 UI 展示与「恢复默认」；
-//   - 一个平台「已有规则」但没有任何规则命中当前 (tool,user) → 默认「禁止」（安全默认值）；
+//
+// 且另有一条 tool=* platform=web 的显式基线规则用于 UI 展示与「恢复默认」；
+//   - 一个平台「已有规则」但没有任何规则命中当前 (tool,user) → **按工具风险区分**：
+//     基础工具（计算、文本处理、记忆、只读状态查询，见 risk.go）默认放行；
+//     敏感工具（联网、执行命令、读写文件、派生子智能体）默认禁止。
+//     这样管理员只需为想限制的危险工具配规则，不必为每个无害工具补 allow；
 //   - 系统/内部会话（cron、心跳、梦境巩固等，sctx.IsSystem=true）不受本模块约束，直接放行全部工具；
 //   - 双重防线：① ResolveTools 过滤工具列表（LLM 看不到未授权工具）；
 //     ② 每个工具被执行时（call-time）用同一会话上下文再复核一次权限，防止列表过滤被绕过。
@@ -199,15 +204,23 @@ func (s *Service) evalRules(botID string) ([]RuleDTO, error) {
 }
 
 // Evaluate 判定某 bot 在给定工具/平台/用户下是否允许使用。
-// 无匹配规则时：若该平台「完全没有任何启用规则覆盖它」→ 默认放行（开放基线）；
-// 若该平台已有规则但均未命中 → 默认禁止（安全默认值）。
+//
+// 判定顺序：
+//  1. 按 sort 升序遍历启用规则，首条同时匹配 (tool, platform, user) 的规则决定结果
+//     —— 管理员的显式配置永远优先，包括对基础工具的 deny；
+//  2. 无规则命中时，该平台完全没有启用规则 → 放行（开放基线）；
+//  3. 无规则命中且该平台已有规则 → **区分工具风险**：
+//     基础工具（计算/文本/记忆/只读查询）放行，敏感工具（联网/命令/文件写/子智能体）禁止。
+//
+// 第 3 步的风险区分是关键：早期版本此处一律禁止，导致管理员只想禁 sandbox_exec
+// 配一条 deny 后，calculate / now / memory 等无害工具被连带锁死，Bot 变成哑巴。
 func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
 	rules, err := s.evalRules(botID)
 	if err != nil {
 		s.logger.Warnw("evaluate tool perm failed", "bot", botID, "err", err)
 		return false // 评估失败时保守拒绝
 	}
-	// 首条匹配生效
+	// 首条匹配生效（管理员显式规则优先于任何默认值）
 	for _, r := range rules {
 		if !matchTool(r.Tool, tool) {
 			continue
@@ -220,13 +233,13 @@ func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
 		}
 		return r.Decision == DecisionAllow
 	}
-	// 无匹配规则：
-	//   - 该平台「完全没有规则」→ 开放基线，放行；
-	//   - 该平台「已有规则」但都未命中（例如 tool 维度不匹配）→ 安全默认，禁止。
+	// 无匹配规则：该平台完全没有规则 → 开放基线，放行
 	if !platformHasEnabledRule(rules, platform) {
 		return true
 	}
-	return false
+	// 该平台已进入白名单模式，但基础工具不受牵连 ——
+	// 权限管理的目标是限制有危害面的能力，而非让 Bot 失去基本表达能力。
+	return IsBasicTool(tool)
 }
 
 // ----------------------------------------------------------------------------
@@ -580,15 +593,15 @@ type evaluator struct {
 // FilterTools 按 (botID, 工具名, 平台=SourceChannelType, userID) 过滤工具，
 // 并对每个放行的工具包裹一层「调用时二次复核」的防御，确保即便工具列表过滤被绕过，
 // 实际执行前仍会用同一会话上下文复核权限。
-// 系统/内部会话（cron、心跳、梦境巩固等）直接放行全部工具，不受权限表约束。
+//
+// 系统/内部会话（cron、心跳、梦境巩固等）放行**除对外发言工具以外**的全部工具：
+// 这些会话没有真人在场审阅输出，若连发帖/转发/表态也一并豁免，等于给定时任务
+// 开了一条无人监督的对外广播通道。因此 broadcast 类工具即便 IsSystem 也必须走
+// 权限表评估 —— 想让 cron 定时发帖，就为该工具配一条显式 allow 规则。
 func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *tools.ToolSessionContext) ([]llm.Tool, error) {
 	if sctx == nil {
 		// 无会话上下文时无法判定归属维度，保守放行（与「无规则 → 开放基线」一致）。
-		// 注意：不可panic —— ResolveTools 的调用方可能传入零值上下文。
-		return toolList, nil
-	}
-	if sctx.IsSystem {
-		// 内部会话绕过 bot 维度的工具权限评估
+		// 注意：不可 panic —— ResolveTools 的调用方可能传入零值上下文。
 		return toolList, nil
 	}
 	platform := sctx.SourceChannelType
@@ -597,10 +610,10 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 	}
 	// 快照会话维度：sctx 是指针，调用方后续可能复用/改写它，
 	// 而 call-time 复核发生在本函数返回之后，必须捕获值而非解引用指针。
-	botID, userID := sctx.BotID, sctx.UserID
+	botID, userID, isSystem := sctx.BotID, sctx.UserID, sctx.IsSystem
 	out := make([]llm.Tool, 0, len(toolList))
 	for _, t := range toolList {
-		if !e.svc.Evaluate(botID, t.Name, platform, userID) {
+		if !e.allow(botID, t.Name, platform, userID, isSystem) {
 			continue
 		}
 		// 二次防御：调用时再用会话上下文复核权限，防止列表过滤被绕过
@@ -609,7 +622,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		orig := t.Execute
 		wt := t
 		wt.Execute = func(ctx *llm.ToolExecContext, input any) (any, error) {
-			if !e.svc.Evaluate(botID, toolName, platform, userID) {
+			if !e.allow(botID, toolName, platform, userID, isSystem) {
 				return nil, fmt.Errorf("tool %q is not permitted for bot %q on platform %q", toolName, botID, platform)
 			}
 			if orig == nil {
@@ -620,4 +633,24 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		out = append(out, wt)
 	}
 	return out, nil
+}
+
+// allow 是单工具判定，统一处理两处豁免边界：
+//
+//  1. 系统会话（cron / 心跳 / 梦境巩固）豁免一切**除对外发言之外**的工具；
+//     对外发言工具一律走权限表，防止无人监督的定时任务偷偷发帖。
+//  2. 平台未知（platform 为空）时，对外发言工具**一律拒绝**。
+//     这是必要的兜底：子智能体的会话上下文由 SetToolResolver 传入，历史上只带
+//     BotID 而不带 SourceChannelType（见 botservice.go），空平台会落进
+//     Evaluate 的「平台无规则 → 开放基线」分支，等于让子智能体绕过主会话的
+//     禁发帖配置。非发言工具仍按开放基线处理，避免误伤工作空间操作。
+func (e *evaluator) allow(botID, tool, platform, userID string, isSystem bool) bool {
+	broadcast := IsBroadcastTool(tool)
+	if broadcast && platform == "" {
+		return false
+	}
+	if isSystem && !broadcast {
+		return true
+	}
+	return e.svc.Evaluate(botID, tool, platform, userID)
 }
