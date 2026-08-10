@@ -28,6 +28,26 @@ type ChannelSender interface {
 }
 
 // ============================================================================
+// OutboundGuard —渠道级只读守卫
+// ============================================================================
+
+// OutboundGuard 决定某个渠道当前是否允许对外发送。
+//
+// 为什么需要它：Bot 的自动回复走 Pipeline Action（ActionReply → Channel.Send），
+// **完全不经过工具权限（toolperm）**。因此仅靠禁用 misskey_create_note 等工具
+// 只能阻止 LLM「主动发帖」，拦不住「被 @ 后自动回帖」。想做真正的潜水bot
+// （只看不发），必须在出站链路这一层拦。
+//
+// 由 api 层注入实现（通常查询 bot 的工具权限配置），outbound 包只依赖此接口，
+// 避免反向依赖 toolperm / api 造成循环依赖。
+type OutboundGuard interface {
+	// AllowOutbound 返回该渠道是否允许发出此 Action。
+	// channelName 为 Channel.Name()，action 为待发送动作。
+	// 返回 false 时 Action 被静默丢弃（记录日志，不返回错误）。
+	AllowOutbound(ctx context.Context, channelName string, action core.Action) bool
+}
+
+// ============================================================================
 // ChannelReplyHandler — 桥接 Dispatcher → Channel 的回写路径
 // ============================================================================
 
@@ -39,16 +59,19 @@ type ChannelSender interface {
 // 路由逻辑：
 //  1. Action.Metadata["source_channel"] 指定来源 Channel 名称
 //  2. 通过 Channel Name 在注册表中查找对应的 Sender
-//  3. 调用 Sender.Send(ctx, action) 完成实际发送
+//  3. 若设置了 OutboundGuard，先询问该渠道是否允许发送（只读渠道在此被拦截）
+//  4. 调用 Sender.Send(ctx, action) 完成实际发送
 //
 // 使用方式：
 //
 //	handler := outbound.NewChannelReplyHandler(logger, tp)
 //	handler.Register("my-tg-bot", tgChannel)  // Channel 同时实现 Sender
+//	handler.SetGuard(myGuard)                 // 可选：渠道只读控制
 //	dispatcher.Register(core.ActionReply, handler)
 type ChannelReplyHandler struct {
 	mu      sync.RWMutex
 	senders map[string]ChannelSender // channelName → Sender
+	guard   OutboundGuard            // 可选：出站前的只读检查
 	logger  *zap.SugaredLogger
 	tracer  trace.Tracer
 }
@@ -85,6 +108,14 @@ func (h *ChannelReplyHandler) Unregister(channelName string) {
 	h.logger.Infow("channel sender unregistered", "channel_name", channelName)
 }
 
+// SetGuard 设置出站守卫（传 nil 表示不做只读检查）。
+// 用于实现「渠道只读 / 潜水模式」：守卫返回 false 时 Action 被丢弃。
+func (h *ChannelReplyHandler) SetGuard(g OutboundGuard) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.guard = g
+}
+
 // Handle 处理一个 Action，将其路由到对应 Channel 的 Sender。
 //
 // 路由策略：
@@ -116,6 +147,7 @@ func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) er
 	// 查找 Sender
 	h.mu.RLock()
 	sender, ok := h.senders[sourceChannel]
+	guard := h.guard
 	h.mu.RUnlock()
 
 	if !ok {
@@ -125,6 +157,21 @@ func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) er
 			"action_type", action.Type,
 			"registered_channels", h.registeredChannelNames())
 		return fmt.Errorf("channel_reply: no sender for channel %q", sourceChannel)
+	}
+
+	// 只读渠道拦截：潜水模式下丢弃对外动作。
+	// 这里**不返回 error** —— 只读是管理员有意的配置，不是故障；
+	// 返回错误会让 Dispatcher 记为发送失败并可能触发重试/告警。
+	// 但必须留下WARN 级日志：静默降级不打日志会让人误以为 bot 挂了。
+	if guard != nil && !guard.AllowOutbound(ctx, sourceChannel, action) {
+		span.SetAttributes(attribute.Bool("outbound.blocked", true))
+		span.SetStatus(codes.Ok, "blocked by read-only guard")
+		h.logger.Warnw("outbound action dropped: channel is read-only",
+			"source_channel", sourceChannel,
+			"action_type", action.Type,
+			"action_channel", action.Channel,
+			"reason", "read_only_channel")
+		return nil
 	}
 
 	// 执行发送

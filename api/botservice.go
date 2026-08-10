@@ -37,8 +37,8 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/subagent"
-	"github.com/kasuganosora/thinkbot/tools"
 	"github.com/kasuganosora/thinkbot/toolperm"
+	"github.com/kasuganosora/thinkbot/tools"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/workflow"
 )
@@ -65,13 +65,14 @@ type BotService struct {
 	statsRecorder llm.UsageRecorder // 可选，nil 时不记录 token 统计
 
 	mu                sync.RWMutex
-	channels          map[string]*WebChannel         // botID → WebChannel
-	botInstances      map[string]*bot.Bot            // botID → running Bot
-	dreamingBundles   map[string]*bot.DreamingBundle // botID → DreamingBundle
-	cancelFuncs       map[string]context.CancelFunc  // botID → bot context cancel
-	closeFuncs        map[string]func()              // botID → sub-agent managers cleanup
-	messageCancels    map[string]context.CancelFunc  // "botID:traceID" → message context cancel
-	messageInterrupts map[string]chan string         // "botID:traceID" → 用户中途追加通道（生成中补充）
+	channels          map[string]*WebChannel            // botID → WebChannel
+	botInstances      map[string]*bot.Bot               // botID → running Bot
+	toolManagers      map[string]agenttools.ToolManager // botID → tool manager (for listing)
+	dreamingBundles   map[string]*bot.DreamingBundle    // botID → DreamingBundle
+	cancelFuncs       map[string]context.CancelFunc     // botID → bot context cancel
+	closeFuncs        map[string]func()                 // botID → sub-agent managers cleanup
+	messageCancels    map[string]context.CancelFunc     // "botID:traceID" → message context cancel
+	messageInterrupts map[string]chan string            // "botID:traceID" → 用户中途追加通道（生成中补充）
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
 	//
@@ -124,8 +125,9 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
-		tokenBudget: pipeline.NewTokenBudgetState(time.Hour),
-		permSvc:     permSvc,
+		tokenBudget:  pipeline.NewTokenBudgetState(time.Hour),
+		permSvc:      permSvc,
+		toolManagers: make(map[string]agenttools.ToolManager),
 	}
 }
 
@@ -1138,6 +1140,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	sbCfg := sandbox.DefaultConfig()
 	sbCfg.Timezone = builder.GetTimezone()
 
+	// 出站只读守卫：Pipeline 自动回复（ActionReply → Channel.Send）不经过工具权限，
+	// 因此「只看不发」的潜水bot 必须在出站链路拦。
+	// 权限规则按**渠道类型**（misskey/telegram/web）配置，而 Action 只带 Channel 名称，
+	// 故在此建立 name → type 的快照映射供守卫查询。
+	var outboundGuard outbound.OutboundGuard
+	if s.permSvc != nil {
+		chanTypes := make(map[string]string, len(allChannels))
+		for _, ch := range allChannels {
+			chanTypes[ch.Name()] = ch.Type()
+		}
+		outboundGuard = s.permSvc.NewOutboundGuard(id, func(name string) string {
+			return chanTypes[name]
+		})
+	}
+
 	b, err := bot.New(bot.BotParams{
 		ID:                id,
 		Name:              def.Name,
@@ -1148,6 +1165,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Channels:          allChannels,
 		EventBus:          s.eventBus,
 		MemoryStore:       memStore,
+		OutboundGuard:     outboundGuard,
 		Logger:            s.logger,
 		TP:                s.tp,
 		DreamScheduler:    dreamScheduler,
@@ -1274,6 +1292,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.mu.Lock()
 	s.channels[id] = webCh
 	s.botInstances[id] = b
+	s.toolManagers[id] = *toolMgr
 	s.cancelFuncs[id] = botCancel
 	s.closeFuncs[id] = func() {
 		wfCleanup()
@@ -1296,6 +1315,7 @@ func (s *BotService) StopBot(id string) {
 	s.mu.Lock()
 	b, exists := s.botInstances[id]
 	delete(s.botInstances, id)
+	delete(s.toolManagers, id)
 	delete(s.channels, id)
 	if cancel, ok := s.cancelFuncs[id]; ok {
 		cancel()
@@ -1409,6 +1429,19 @@ func (s *BotService) GetBotInfo(id string) (*bot.BotInfo, error) {
 		}
 	}
 	return nil, fmt.Errorf("bot %q not found or not running", id)
+}
+
+// ListBotTools 返回某 Bot 已注册的全部工具列表（名称+描述+分类），
+// 用于工具权限管理页面的工具名自动补全。
+// 若 Bot 未在运行，返回空列表而非错误（管理页面仍可用）。
+func (s *BotService) ListBotTools(botID string) []agenttools.ToolInfo {
+	s.mu.RLock()
+	tm, ok := s.toolManagers[botID]
+	s.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return tm.ListTools()
 }
 
 // --- ChannelDefinition CRUD ---

@@ -116,8 +116,15 @@ type BotParams struct {
 	MemoryStore      memory.Store              // 可选：记忆写入后端（供 NoteHandler 使用）。nil 时使用内存仓储。
 	CallbackRegistry outbound.CallbackRegistry // 可选：回调注册表。nil 时使用 MemoryCallbackRegistry。
 	EventBus         outbound.EventBus         // 可选：旁路事件总线。nil 时禁用 SSE 事件推送。
-	Logger           *zap.SugaredLogger
-	TP               trace.TracerProvider
+
+	// OutboundGuard 可选：出站前的「渠道只读」检查。
+	// 非 nil 时，ActionReply / ActionForward 等对外动作在发送前会先询问守卫，
+	// 被拒绝的动作静默丢弃（记WARN 日志）。用于实现「只看不发」的潜水bot ——
+	// 注意 Pipeline 自动回复不经过工具权限，只能在这一层拦。
+	OutboundGuard outbound.OutboundGuard
+
+	Logger *zap.SugaredLogger
+	TP     trace.TracerProvider
 
 	// --- 持久化工作空间 ---
 
@@ -221,6 +228,11 @@ func New(params BotParams) (*Bot, error) {
 
 	// 创建 ChannelReplyHandler
 	replyHandler := outbound.NewChannelReplyHandler(botLogger, params.TP)
+	// 装上只读守卫（若配置）：Pipeline 自动回复不经过工具权限，
+	// 「潜水 bot」只能在出站这一层拦住。
+	if params.OutboundGuard != nil {
+		replyHandler.SetGuard(params.OutboundGuard)
+	}
 
 	// 创建 NoteHandler（写入统一记忆仓储）
 	memStore := params.MemoryStore
