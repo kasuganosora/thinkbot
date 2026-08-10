@@ -165,6 +165,12 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	// 为新 bot 播种 web 平台默认全开规则（bot 尚无任何规则时才写入）。
+	if s.permSvc != nil {
+		if err := s.permSvc.SeedWebDefault(def.ID); err != nil {
+			s.logger.Warnw("failed to seed web default tool permission", "bot_id", def.ID, "err", err)
+		}
+	}
 	auditLog(c, s.logger, "create_bot", "bot_id", def.ID, "name", req.Name)
 	OK(c, def)
 }
@@ -266,6 +272,12 @@ func (s *Server) handleDeleteBot(c *gin.Context) {
 	if err := s.botSvc.DeleteDefinition(id); err != nil {
 		Fail(c, err)
 		return
+	}
+	// 清理该 bot 的工具权限规则，避免留下孤儿行
+	if s.permSvc != nil {
+		if err := s.permSvc.DeleteAllForBot(id); err != nil {
+			s.logger.Warnw("delete bot tool perms failed", "bot", id, "err", err)
+		}
 	}
 	auditLog(c, s.logger, "delete_bot", "bot_id", id)
 	OKMsg(c, "bot deleted", nil)
