@@ -886,8 +886,38 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			"auto_adjust_freq", engCfg.AutoAdjustFrequency)
 	}
 
+	// 潜水检测 enricher：渠道只读（潜水）时标记 envelope，供 LLMStage 切换为
+	// 「观察者模式」——正常思考但只写内部学习笔记、绝不发帖。
+	// 必须在 LLMStage（Order=100）之前运行；engagement 在 40，本 enricher 放 45。
+	lurkEnricher := stages.NewEnricherStage("lurk-detect", func(ctx context.Context, env *core.Envelope) error {
+		platform := ""
+		if env.Message.Metadata != nil {
+			if ct, ok := env.Message.Metadata["channel_type"]; ok {
+				if s, ok := ct.(string); ok {
+					platform = s
+				}
+			}
+		}
+		if platform == "" {
+			platform = env.Message.Source
+		}
+		if platform != "" && s.permSvc != nil && s.permSvc.IsReadOnly(id, platform) {
+			env.Set(core.KVLurkMode, true)
+		}
+		return nil
+	}, s.logger)
+
+	// 记忆召回 stage：每轮对话前按 [bot, channel, user] 三 scope 检索长期记忆
+	// （含潜水学到的经验），注入 system prompt，让 bot 在真人交互时带「实时经验」。
+	// memRepo（函数前面 717 行已创建）即 SQLite 仓储（实现 memory.Retriever），
+	// 潜水笔记经 MultiStore 代理写入其中，故这里能直接召回。非 nil 时生效；
+	// 检索失败属非致命，内部 WARN 跳过。
+	recallStage := stages.NewRecallStage("memory-recall", memRepo, s.logger)
+
 	// 创建 Pipeline
 	stages := []core.StageInfo{
+		{Stage: lurkEnricher, Order: 45, Enabled: true},
+		{Stage: recallStage, Order: 90, Enabled: true},
 		{Stage: wrappedLLM, Order: 100, Enabled: true},
 	}
 	if engagementStage != nil {
@@ -1096,7 +1126,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		tieredAdapter := memory.NewTieredStoreAdapter(dreamBundle.TieredStore)
 		// ThinkFilterStore 在写入前清理 <think> 标签
 		filtered := memory.NewThinkFilterStore(tieredAdapter)
-		repo := storage.NewSQLiteRepository(s.db)
+		repo := memRepo // 复用前面已创建的 SQLite 仓储（同时持有潜水笔记）
 		memStore = memory.NewMultiStore(filtered, repo)
 	}
 
