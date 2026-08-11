@@ -637,6 +637,14 @@ func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.C
 	env.Set("bot.id", b.ID)
 	env.Set("bot.config", b.Config)
 
+	// 注入 SOUL.md 人格文本，供潜水观察者模式（lurk-learn）结合人格分析。
+	// 仅在 soul 已加载时注入，避免每轮空写；LLMStage 读取后拼到观察者 prompt 前。
+	if b.soulLoader != nil && b.soulLoader.Loaded() {
+		if sc := b.soulLoader.Content(); sc != "" {
+			env.Set(core.KVSoulContent, sc)
+		}
+	}
+
 	// 旁路事件：消息接收
 	b.emitter.EmitMessageReceived(ctx, env.Message)
 

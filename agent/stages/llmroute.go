@@ -91,6 +91,69 @@ func replySuppressed(env *core.Envelope) (bool, string) {
 	return true, reason
 }
 
+// isLurkMode 判断当前消息是否处于潜水（只读）渠道。
+func isLurkMode(env *core.Envelope) bool {
+	if v, ok := env.Get(core.KVLurkMode); ok {
+		if b, ok := v.(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+// lurkObserverInstruction 是潜水观察者模式的系统提示词后缀（英文，遵循 LLM 提示词约定）。
+// 它把 LLM 的产出从「回复」重新导向「从帖子里学到什么」，并要求无价值时显式输出 [NONE]。
+const lurkObserverInstruction = `[OBSERVER MODE — LURK / READ-ONLY]
+You are in lurk mode. You are silently observing a public social timeline and you will NOT send any reply to anyone. No message leaves this session.
+Your job is to learn, not to respond. Analyze the post you just read through the lens of your own identity and values (defined above). Decide whether it contains anything worth remembering for future interaction with this person or community, for example:
+- the speaker's technical preferences, stack, or current projects
+- explicit needs, questions, or requests
+- mood, relationship, or how they expect you to help
+- anything that would make you more useful next time
+If something is worth keeping, write a concise first-person internal note (for your own future reference — never sent). If there is nothing worth remembering, output exactly: [NONE]`
+
+// buildLurkPrompt 构建潜水观察者 prompt：优先用 SOUL.md 人格内容，否则回退到已注入的
+// base prompt，再拼接观察者指令。保证「结合 soul.md 模块分析」。
+func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string {
+	if v, ok := env.Get(core.KVSoulContent); ok {
+		if soul, ok := v.(string); ok {
+			if sc := strings.TrimSpace(soul); sc != "" {
+				return sc + "\n\n" + lurkObserverInstruction
+			}
+		}
+	}
+	if bp := strings.TrimSpace(basePrompt); bp != "" {
+		return bp + "\n\n" + lurkObserverInstruction
+	}
+	return lurkObserverInstruction
+}
+
+// emitLurkNote 在潜水模式下把 LLM 的思考结果作为内部学习笔记（ActionNote）写入 L0。
+// 仅当模型产出有价值内容（非 [NONE] / 非空）时才发 ActionNote，避免污染工作记忆。
+func (s *LLMStage) emitLurkNote(env *core.Envelope, result *llm.GenerateResult) {
+	note := memory.StripThinking(result.Text)
+	note = strings.TrimSpace(note)
+	if note == "" || strings.EqualFold(note, "[NONE]") {
+		s.logger.Debugw("lurk: nothing worth remembering, skip note",
+			"message_id", env.Message.ID)
+		return
+	}
+	env.AddAction(core.Action{
+		Type:    core.ActionNote,
+		Channel: "", // 潜水学习笔记以 bot 全局 scope 落库（note_handler 据 bot_id 判 scope），跨渠道可用
+		UserID:  env.Message.UserID,
+		Payload: note,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+			"category":       "lurk",
+		},
+	})
+	s.logger.Infow("lurk: learning note captured to L0",
+		"message_id", env.Message.ID, "note_len", len(note))
+}
+
 // ============================================================================
 // LLMStage — 调用 LLM Provider 生成回复
 // ============================================================================
@@ -233,8 +296,31 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 	systemPrompt = core.MergeWarnings(env, systemPrompt)
 
+	// 潜水（只读）模式：切换为「观察者」prompt —— 结合 SOUL.md 人格，把思考
+	// 导向「从这条帖子里学到什么」，而非「如何回复」。仍可正常调用 LLM。
+	lurkMode := isLurkMode(env)
+	if lurkMode {
+		// INFO 级：让「潜水模式激活」在默认日志下清晰可观测，而非只能靠下游 skip/captured 间接推断。
+		logger.Infow("lurk: observing read-only channel",
+			"channel", env.Message.Source,
+			"platform", env.Message.Channel)
+		systemPrompt = s.buildLurkPrompt(env, systemPrompt)
+	} else if v, ok := env.Get(core.KVMemoryRecall); ok {
+		// 非潜水模式：把召回的长期记忆（含潜水学到的经验）拼入 system prompt，
+		// 让 bot 在真人交互时带「实时经验」——这是「人味」闭环的读侧。
+		// 潜水模式下不注入，避免观察者自身陷入记忆回环。
+		if recall, ok := v.(string); ok && recall != "" {
+			systemPrompt = systemPrompt + "\n\n" + recall
+		}
+	}
+
 	// 解析工具列表
 	tools := resolveTools(ctx, s.config, env)
+	// 潜水观察者不调用任何工具：纯推理，杜绝副作用（如经工具发帖），
+	// 确保「只看不发」在工具层也成立。
+	if lurkMode {
+		tools = nil
+	}
 
 	// 构建参数
 	params := llm.GenerateParams{
@@ -406,6 +492,14 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		// 强制结束。置为 stop 以免前端把 finish_reason=tool-calls 误判为
 		// 「Bot 仍在调用工具 / 卡住」。
 		result.FinishReason = llm.FinishReasonStop
+	}
+
+	// 潜水模式：只记不发 —— 把思考结果作为内部学习笔记写入 L0，绝不发帖。
+	// 这一支在「回复抑制」判定之前返回：无论 engagement 是否判定发言，
+	// 潜水都保持「看而学」，不产出任何 ActionReply（避免 outbound 守卫的 dropped 告警）。
+	if lurkMode {
+		s.emitLurkNote(env, result)
+		return env, nil
 	}
 
 	// 将回复添加为 Action
