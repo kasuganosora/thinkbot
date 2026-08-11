@@ -88,6 +88,29 @@ const (
 	// KVSuppressReplyReason 记录抑制原因（字符串），供日志与 trace 排查。
 	// 静默降级必须可解释，否则会被误判为 Bot 故障。
 	KVSuppressReplyReason = "reply.suppress_reason"
+
+	// KVLurkMode 标记当前消息来自「潜水 / 只读」渠道。
+	//
+	// 由 lurk-detect enricher 在渠道只读（permSvc.IsReadOnly 为 true）时设置。
+	// LLMStage 读取后切换为「观察者模式」：仍然正常调用 LLM 思考，
+	// 但把结果作为内部学习笔记（ActionNote）写入 L0 工作记忆，绝不发帖。
+	//
+	// 语义：潜水 = 说（speak）关闭，学（learn）开启。这与 KVSuppressReply 不同——
+	// 后者只是「本轮不发送」，仍可能因为没有 ActionNote 而什么都没记住；
+	// 本标志确保潜水时「看而学」，思考结果沉淀为长期记忆。
+	// 值类型 bool；仅 true 生效。
+	KVLurkMode = "lurk.mode"
+
+	// KVSoulContent 携带 bot 的 SOUL.md 人格文本（由 Bot.OnBeforeProcess 注入），
+	// 供 LLMStage 在潜水模式下结合人格构建观察者 prompt（「结合 soul.md 模块分析」）。
+	KVSoulContent = "bot.soul.content"
+
+	// KVMemoryRecall 携带从长期记忆检索出的「对话上下文记忆」文本（由 RecallStage 注入），
+	// 供 LLMStage 拼入 system prompt。这是「潜水学到的经验在真人交互里浮现」闭环的读侧：
+	// 写入侧由潜水观察者（LLMStage lurk 分支）产出 ActionNote 沉淀进 L0/L1，
+	// 读取侧由 RecallStage 在每轮对话前按 [bot, channel, user] 三 scope 召回并注入。
+	// 值类型 string；空串表示无相关记忆。
+	KVMemoryRecall = "memory.recall"
 )
 
 // ============================================================================
