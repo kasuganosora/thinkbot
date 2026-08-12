@@ -295,11 +295,8 @@ type BotMemoryEntry struct {
 	UpdatedAt string `json:"updatedAt"`
 }
 
-// handleListBotMemoryEntries 列出 Bot 的记忆条目。
-// GET /api/bots/:id/memory（注意：此接口与现有 handleQueryMemory 重叠，但结构不同）
-// 此 handler 返回前端 botMemoryApi.list 需要的格式
-//
-//nolint:unused // 预留接口，计划后续注册到路由
+// handleListBotMemoryEntries 列出 Bot 的手动记忆条目（纯数组，供记忆文件页 BotMemoryFiles 使用）。
+// GET /api/bots/:id/memory-entries
 func (s *Server) handleListBotMemoryEntries(c *gin.Context) {
 	botID := c.Param("id")
 	entries := s.getBotMemoryEntries(botID)
@@ -322,7 +319,8 @@ func (s *Server) handleCreateBotMemoryEntry(c *gin.Context) {
 
 	entries := s.getBotMemoryEntries(botID)
 	entry := BotMemoryEntry{
-		ID:        fmt.Sprintf("mem_%d", len(entries)+1),
+		// 用纳秒时间戳生成 ID，避免「删除后重建」导致 ID 复用冲突
+		ID:        fmt.Sprintf("mem_%d", time.Now().UnixNano()),
 		Title:     req.Title,
 		Content:   req.Content,
 		UpdatedAt: nowRFC3339(),
