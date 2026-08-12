@@ -24,13 +24,16 @@ import (
 // retriever 为 nil 或非致命错误时静默跳过（不阻断对话）。
 type RecallStage struct {
 	retriever memory.Retriever
+	window    *memory.Window
 	logger    *zap.SugaredLogger
 }
 
 // NewRecallStage 创建记忆召回 stage。retriever 为 nil 时 stage 为空操作。
-func NewRecallStage(name string, retriever memory.Retriever, logger *zap.SugaredLogger) *RecallStage {
+// window 可选：注入后记忆块字符上限由 Window.MemoryBudget()*3 派生，
+// 取代硬编码的 2200，与 context.go 使用 window 模块的口径一致。
+func NewRecallStage(name string, retriever memory.Retriever, window *memory.Window, logger *zap.SugaredLogger) *RecallStage {
 	_ = name // 名称保留给 future 多实例场景；Process 使用固定 Name()
-	return &RecallStage{retriever: retriever, logger: logger}
+	return &RecallStage{retriever: retriever, window: window, logger: logger}
 }
 
 // Name 返回 stage 名称。
@@ -65,7 +68,12 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	}
 
 	// ModeFrozen：每次对话新建快照并立即检索，不跨轮缓存（对话频次低，开销可控）。
-	snap := memory.NewSnapshot(memory.SnapshotConfig{Mode: memory.ModeFrozen})
+	// 注入 Window 使记忆块字符上限随模型上下文窗口自适应（window 模块）。
+	snapCfg := memory.SnapshotConfig{Mode: memory.ModeFrozen}
+	if s.window != nil {
+		snapCfg.Window = s.window
+	}
+	snap := memory.NewSnapshot(snapCfg)
 	if err := snap.Init(ctx, s.retriever, scopes); err != nil {
 		if s.logger != nil {
 			s.logger.Warnw("recall: snapshot init failed, skip memory injection",

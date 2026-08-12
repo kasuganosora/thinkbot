@@ -99,6 +99,39 @@ func StripThinking(text string) string {
 }
 
 // ============================================================================
+// 内部状态泄露过滤器 — 防止系统提示中的内部指标外泄到公开回复
+// ============================================================================
+
+// internalCharsRe 匹配形如 "(2,206/2,200 字符)" 的内部用量标记
+// （来自记忆块头部的 [current/limit chars]）。
+var internalCharsRe = regexp.MustCompile(`\(\s*\d[\d,]*\s*\/\s*\d[\d,]*\s*字符\s*\)`)
+
+// internalCharsEnRe 匹配形如 "2,206/2,200 chars" 的英文内部用量标记。
+var internalCharsEnRe = regexp.MustCompile(`\d[\d,]*\s*\/\s*\d[\d,]*\s*chars?`)
+
+// internalPhraseRe 匹配直接复述内部状态的固定短语（模型可能把系统提示里的
+// 记忆容量指标 paraphrase 成中文写进公开回复）。
+var internalPhraseRe = regexp.MustCompile(`当前记忆已接近容量上限|记忆容量上限|记忆已接近容量上限|接近容量上限`)
+
+// multiSpaceRe 折叠剥离后残留的多余空白。
+var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
+
+// StripInternalState 从最终回复文本中剥离内部系统状态（记忆用量指标等），
+// 防止「心里话 / 内部指标」泄漏到公开帖文。
+//
+// 典型泄漏案例：bot 把系统提示里的 "[2,206/2,200 chars]" 复述成
+// 「当前记忆已接近容量上限（2,206/2,200 字符）」公开发到时间线。
+// 本函数在 llmroute 出站清洗阶段（StripThinking 之后）调用，作为纵深防御。
+func StripInternalState(text string) string {
+	text = internalCharsRe.ReplaceAllString(text, "")
+	text = internalCharsEnRe.ReplaceAllString(text, "")
+	text = internalPhraseRe.ReplaceAllString(text, "")
+	// 清理剥离后可能残留的多余空白
+	text = multiSpaceRe.ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
+}
+
+// ============================================================================
 // ThinkFilterStore — 自动清理思考内容的 Store 装饰器
 // ============================================================================
 
