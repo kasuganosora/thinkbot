@@ -242,3 +242,57 @@ func (a *apiClient) listFollowing(ctx context.Context, userID string, limit int)
 	}
 	return following, nil
 }
+
+// getUserNotes 获取指定用户最近发布的帖子列表。
+// userId 可通过 misskey_search_user 解析得到。includeReplies 同时返回该用户的回复。
+func (a *apiClient) getUserNotes(ctx context.Context, userID string, limit int) ([]Note, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	resp, err := a.client.Post("users/notes").
+		SetContext(ctx).
+		SetJSONBody(userNotesRequest{
+			I:              a.token,
+			UserID:         userID,
+			Limit:          limit,
+			IncludeReplies: true,
+		}).
+		Do()
+	if err != nil {
+		return nil, errs.Wrap(err, "misskey getUserNotes")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("misskey getUserNotes: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
+	var notes []Note
+	if err := resp.JSON(&notes); err != nil {
+		return nil, errs.Wrap(err, "misskey getUserNotes parse")
+	}
+	return notes, nil
+}
+
+// searchNotes 按关键词在实例内搜索帖子。
+func (a *apiClient) searchNotes(ctx context.Context, query string, limit int) ([]Note, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	resp, err := a.client.Post("notes/search").
+		SetContext(ctx).
+		SetJSONBody(noteSearchRequest{
+			I:     a.token,
+			Query: query,
+			Limit: limit,
+		}).
+		Do()
+	if err != nil {
+		return nil, errs.Wrap(err, "misskey searchNotes")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("misskey searchNotes: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
+	var notes []Note
+	if err := resp.JSON(&notes); err != nil {
+		return nil, errs.Wrap(err, "misskey searchNotes parse")
+	}
+	return notes, nil
+}
