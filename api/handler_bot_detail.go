@@ -36,13 +36,14 @@ import (
 
 // BotPlatform 平台绑定定义（存储在 config store）。
 type BotPlatform struct {
-	ID         string         `json:"id"`
-	Type       string         `json:"type"`
-	Name       string         `json:"name"`
-	Enabled    bool           `json:"enabled"`
-	Configured bool           `json:"configured"`
-	Config     map[string]any `json:"config"`
-	Tools      []string       `json:"tools"`
+	ID         string            `json:"id"`
+	Type       string            `json:"type"`
+	Name       string            `json:"name"`
+	Enabled    bool              `json:"enabled"`
+	Configured bool              `json:"configured"`
+	Config     map[string]any    `json:"config"`
+	Tools      []string          `json:"tools"`
+	Rhythm     *BotRhythmConfig  `json:"rhythm,omitempty"`
 }
 
 // ToolCatalogGroup 工具分组目录。
@@ -196,17 +197,28 @@ func (s *Server) handleUpdateBotPlatform(c *gin.Context) {
 			p.Config = m
 		}
 	}
-	if v, ok := req["tools"]; ok {
-		if arr, ok := v.([]any); ok {
-			tools := make([]string, 0, len(arr))
-			for _, item := range arr {
-				if s, ok := item.(string); ok {
-					tools = append(tools, s)
+		if v, ok := req["tools"]; ok {
+			if arr, ok := v.([]any); ok {
+				tools := make([]string, 0, len(arr))
+				for _, item := range arr {
+					if s, ok := item.(string); ok {
+						tools = append(tools, s)
+					}
+				}
+				p.Tools = tools
+			}
+		}
+		// 聊天节奏已合并进平台对象：随平台设置一起读写，无需独立入口。
+		if v, ok := req["rhythm"]; ok && v != nil {
+			if m, ok := v.(map[string]any); ok {
+				if data, err := json.Marshal(m); err == nil {
+					var rc BotRhythmConfig
+					if json.Unmarshal(data, &rc) == nil {
+						p.Rhythm = &rc
+					}
 				}
 			}
-			p.Tools = tools
 		}
-	}
 	p.Configured = true
 
 	if err := s.saveBotPlatforms(c, botID, platforms); err != nil {
@@ -1374,63 +1386,39 @@ func isValidRhythmPlatform(p string) bool {
 	return false
 }
 
-// handleGetBotRhythm 获取全部支持平台的聊天节奏配置（map）。
-// GET /api/bots/:id/chat-rhythm
-func (s *Server) handleGetBotRhythm(c *gin.Context) {
-	botID := c.Param("id")
-	out := map[string]*BotRhythmConfig{}
-	for _, p := range botRhythmPlatforms {
-		out[p] = s.botSvc.getBotRhythmConfig(botID, p)
-	}
-	OK(c, out)
-}
-
-// handleGetBotRhythmPlatform 获取单个平台聊天节奏配置。
-// GET /api/bots/:id/chat-rhythm/:platform
-func (s *Server) handleGetBotRhythmPlatform(c *gin.Context) {
-	botID := c.Param("id")
-	platform := c.Param("platform")
-	if !isValidRhythmPlatform(platform) {
-		Fail(c, errs.BadRequest("unsupported platform: "+platform))
-		return
-	}
-	OK(c, s.botSvc.getBotRhythmConfig(botID, platform))
-}
-
-// handleUpdateBotRhythmPlatform 更新单个平台聊天节奏配置。
-// PUT /api/bots/:id/chat-rhythm/:platform
-func (s *Server) handleUpdateBotRhythmPlatform(c *gin.Context) {
-	botID := c.Param("id")
-	platform := c.Param("platform")
-	if !isValidRhythmPlatform(platform) {
-		Fail(c, errs.BadRequest("unsupported platform: "+platform))
-		return
-	}
-	var req BotRhythmConfig
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
-		return
-	}
-	if err := s.botSvc.saveBotRhythmConfig(c, botID, platform, &req); err != nil {
-		Fail(c, err)
-		return
-	}
-	OK(c, nil)
-}
-
+// getBotRhythmConfig 从平台对象读取聊天节奏配置（节奏已合并进平台设置）。
+// 优先读 bot.<id>.detail.platforms 中 type==platform 的 BotPlatform.Rhythm；
+// 若该字段为空（历史数据），回退读旧独立 key bot.<id>.rhythm.<platform>，
+// 待用户下一次保存平台设置时自然迁移覆盖。两者皆空则返回默认。
 func (s *BotService) getBotRhythmConfig(botID, platform string) *BotRhythmConfig {
 	if !isValidRhythmPlatform(platform) {
 		return defaultBotRhythmConfigForPlatform(platform)
 	}
-	raw, ok := s.store.Get(botRhythmKey(botID, platform))
-	if !ok || raw == "" {
-		return defaultBotRhythmConfigForPlatform(platform)
+	// 优先：节奏已合并进平台对象（bot.<id>.detail.platforms）
+	if raw, ok := s.store.Get(botDetailKey(botID, "platforms")); ok && raw != "" {
+		var plats []BotPlatform
+		if err := json.Unmarshal([]byte(raw), &plats); err == nil {
+			for _, p := range plats {
+				if p.Type == platform && p.Rhythm != nil {
+					fillRhythmDefaults(p.Rhythm, platform)
+					return p.Rhythm
+				}
+			}
+		}
 	}
-	var cfg BotRhythmConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return defaultBotRhythmConfigForPlatform(platform)
+	// 回退：历史独立 key（bot.<id>.rhythm.<platform>），待用户下一次保存平台设置时自然迁移覆盖
+	if raw, ok := s.store.Get(botRhythmKey(botID, platform)); ok && raw != "" {
+		var cfg BotRhythmConfig
+		if err := json.Unmarshal([]byte(raw), &cfg); err == nil {
+			fillRhythmDefaults(&cfg, platform)
+			return &cfg
+		}
 	}
-	// 部分字段缺失（如旧配置）用默认补齐，保证下游不空指针
+	return defaultBotRhythmConfigForPlatform(platform)
+}
+
+// fillRhythmDefaults 补齐缺失的子配置（private/group/channel），避免下游空指针。
+func fillRhythmDefaults(cfg *BotRhythmConfig, platform string) {
 	def := defaultBotRhythmConfigForPlatform(platform)
 	if cfg.Private == (BotRhythmParams{}) {
 		cfg.Private = def.Private
@@ -1441,12 +1429,6 @@ func (s *BotService) getBotRhythmConfig(botID, platform string) *BotRhythmConfig
 	if cfg.Channel == (BotRhythmParams{}) {
 		cfg.Channel = def.Channel
 	}
-	return &cfg
-}
-
-func (s *BotService) saveBotRhythmConfig(c *gin.Context, botID, platform string, cfg *BotRhythmConfig) error {
-	data, _ := json.Marshal(cfg)
-	return s.store.Set(c.Request.Context(), botRhythmKey(botID, platform), string(data))
 }
 
 // selectRhythmParams 按会话类型选取参数；supergroup 归入 group，未知回退 group（更保守）。
