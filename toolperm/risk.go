@@ -77,6 +77,8 @@ var basicTools = map[string]struct{}{
 	// Channel 只读查询：只是看，不留痕迹
 	"misskey_search_user":              {},
 	"misskey_list_following":           {},
+	"misskey_get_user_notes":           {}, // 拉取某人帖子，只读
+	"misskey_search_notes":            {}, // 按关键词搜帖子，只读
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},
@@ -139,6 +141,8 @@ var sensitivePrefixExceptions = map[string]struct{}{
 	"sandbox_health":                   {}, // 纯健康探测
 	"misskey_search_user":              {}, // 只读查询
 	"misskey_list_following":           {},
+	"misskey_get_user_notes":           {}, // 只读查询
+	"misskey_search_notes":            {}, // 只读查询
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},
