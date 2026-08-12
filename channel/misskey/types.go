@@ -204,6 +204,25 @@ type followingListRequest struct {
 	Limit  int    `json:"limit,omitempty"`
 }
 
+// ----------------------------------------------------------------------------
+// 帖子读取 API 类型
+// ----------------------------------------------------------------------------
+
+// userNotesRequest 对应 users/notes（获取某用户发布的帖子列表）。
+type userNotesRequest struct {
+	I              string `json:"i"`
+	UserID         string `json:"userId"`
+	Limit          int    `json:"limit,omitempty"`
+	IncludeReplies bool   `json:"includeReplies,omitempty"`
+}
+
+// noteSearchRequest 对应 notes/search（按关键词搜索帖子）。
+type noteSearchRequest struct {
+	I      string `json:"i"`
+	Query  string `json:"query"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
 // FollowingUser 是关注列表中的用户条目。
 type FollowingUser struct {
 	ID       string `json:"id"`
