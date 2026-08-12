@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,16 @@ import (
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
+// compactCooldown 同一 scope 两次压缩之间的最小间隔，避免 LLM 无可合并项时
+// 每轮写入都触发一次无意义的 LLM 调用。
+const compactCooldown = 5 * time.Minute
+
+// MemoryCompactor 在 scope 字符数超过预算阈值时触发记忆压缩（压缩后入库）。
+// SQLiteCompactor 实现该接口；生产路径通过 SQLiteRepository 的 Compactor 字段注入。
+type MemoryCompactor interface {
+	CompactScope(ctx context.Context, scope memory.Scope) error
+}
+
 // ============================================================================
 // SQLiteRepository — memory.Repository 的 SQLite 实现
 // ============================================================================
@@ -27,6 +38,15 @@ type SQLiteRepositoryConfig struct {
 	MaxEntriesPerScope int
 	// DefaultLimit 检索时的默认返回条数（默认 10）。
 	DefaultLimit int
+	// Window 可选动态窗口，用于按模型上下文派生各 scope 的字符预算。
+	// 注入后记忆块字符上限由 Window.MemoryBudget()*3 派生（与 snapshot 口径一致），
+	// 并在超过预算时触发 Compactor 压缩后入库。nil 表示不限制、不压缩。
+	Window *memory.Window
+	// Compactor 可选记忆压缩器；当某 scope 字符数超过预算阈值时异步触发，
+	// 将相似条目语义合并、归档来源（压缩后入库），取代简单的截断。
+	Compactor MemoryCompactor
+	// CompressThreshold 触发压缩的预算占用比例（默认 0.85）。
+	CompressThreshold float64
 }
 
 // DefaultSQLiteRepositoryConfig 返回默认配置。
@@ -34,6 +54,7 @@ func DefaultSQLiteRepositoryConfig() SQLiteRepositoryConfig {
 	return SQLiteRepositoryConfig{
 		MaxEntriesPerScope: 1000,
 		DefaultLimit:       10,
+		CompressThreshold:  0.85,
 	}
 }
 
@@ -44,6 +65,15 @@ func DefaultSQLiteRepositoryConfig() SQLiteRepositoryConfig {
 type SQLiteRepository struct {
 	db     *gorm.DB
 	config SQLiteRepositoryConfig
+
+	// window 可选动态窗口，用于推导各 scope 字符预算
+	window *memory.Window
+	// compactor 可选压缩器，超出预算时异步触发
+	compactor MemoryCompactor
+
+	// 压缩并发/冷却控制（零值即可用）
+	compacting  sync.Map // scope.Key() -> true（压缩进行中）
+	lastCompact sync.Map // scope.Key() -> time.Time（上次压缩时间，用于冷却）
 
 	// metrics
 	entriesAppended atomic.Int64
@@ -56,16 +86,28 @@ type SQLiteRepository struct {
 func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRepository {
 	cfg := DefaultSQLiteRepositoryConfig()
 	if len(opts) > 0 {
-		if opts[0].MaxEntriesPerScope > 0 {
-			cfg.MaxEntriesPerScope = opts[0].MaxEntriesPerScope
+		o := opts[0]
+		if o.MaxEntriesPerScope > 0 {
+			cfg.MaxEntriesPerScope = o.MaxEntriesPerScope
 		}
-		if opts[0].DefaultLimit > 0 {
-			cfg.DefaultLimit = opts[0].DefaultLimit
+		if o.DefaultLimit > 0 {
+			cfg.DefaultLimit = o.DefaultLimit
+		}
+		if o.Window != nil {
+			cfg.Window = o.Window
+		}
+		if o.Compactor != nil {
+			cfg.Compactor = o.Compactor
+		}
+		if o.CompressThreshold > 0 && o.CompressThreshold <= 1.0 {
+			cfg.CompressThreshold = o.CompressThreshold
 		}
 	}
 	return &SQLiteRepository{
-		db:     db,
-		config: cfg,
+		db:        db,
+		config:    cfg,
+		window:    cfg.Window,
+		compactor: cfg.Compactor,
 	}
 }
 
@@ -94,12 +136,23 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 
 	r.entriesAppended.Add(1)
 
-	// 容量限制：异步检查并淘汰最旧条目
+	// 容量限制（按条数）：异步检查并淘汰最旧条目
 	go func() {
 		evictCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		r.evictIfNeeded(evictCtx, entry.Scope)
 	}()
+
+	// 字符预算（按 window 派生）：超出阈值时异步触发语义压缩（压缩后入库），
+	// 取代简单的截断。渲染层仍保留截断作为兜底，但正常情况下存储已自行收敛。
+	if r.compactor != nil && r.window != nil {
+		scope := entry.Scope
+		go func() {
+			cmpCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			r.maybeCompact(cmpCtx, scope)
+		}()
+	}
 
 	return nil
 }
@@ -288,6 +341,148 @@ func (r *SQLiteRepository) evictIfNeeded(ctx context.Context, scope memory.Scope
 			r.entriesDeleted.Add(result.RowsAffected)
 		}
 	}
+}
+
+// ============================================================================
+// auto-compaction — 到达字符预算时压缩后入库（取代截断）
+// ============================================================================
+
+// charBudget 返回指定 scope 的字符预算（按 window 派生）。
+// 与 snapshot.renderBlock 的口径完全一致：budget = Window.MemoryBudget()*3，
+// user 类 scope 保持原 2200/1375 比例。返回 0 表示不限制（未注入 window）。
+func (r *SQLiteRepository) charBudget(scope memory.Scope) int {
+	if r.window == nil {
+		return 0
+	}
+	budget := r.window.MemoryBudget()
+	if budget <= 0 {
+		return 0
+	}
+	budgetChars := budget * 3
+	if scope.Kind == memory.ScopeUser {
+		// 保持原 2200/1375 的比例（≈0.625），让 user 块占 memory 块的一部分
+		return budgetChars * 1375 / 2200
+	}
+	return budgetChars
+}
+
+// maybeCompact 在 scope 字符数超过预算阈值时触发异步压缩。
+// 非阻塞调用方；内部已做并发重入保护与冷却，压缩失败不影响正常写入。
+func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope) {
+	budget := r.charBudget(scope)
+	if budget <= 0 {
+		return
+	}
+	total, err := r.totalChars(ctx, scope)
+	if err != nil {
+		return
+	}
+	threshold := int(float64(budget) * r.config.CompressThreshold)
+	if total <= threshold {
+		return
+	}
+
+	key := scope.Key()
+
+	// 冷却：避免 LLM 无可合并项时每轮都打 LLM
+	if v, ok := r.lastCompact.Load(key); ok {
+		if t, ok := v.(time.Time); ok && time.Since(t) < compactCooldown {
+			return
+		}
+	}
+
+	// 并发重入保护：同一 scope 压缩进行中则跳过
+	if _, loaded := r.compacting.LoadOrStore(key, true); loaded {
+		return
+	}
+	defer r.compacting.Delete(key)
+
+	r.lastCompact.Store(key, time.Now())
+
+	if err := r.compactor.CompactScope(ctx, scope); err != nil {
+		// 非致命：压缩失败不影响正常写入；渲染层仍有截断兜底
+	}
+}
+
+// totalChars 统计指定 scope 下所有「活跃（未归档）」记忆的字符总数。
+// 用于判断是否需要触发压缩。归档条目（archived=true）不计入。
+func (r *SQLiteRepository) totalChars(ctx context.Context, scope memory.Scope) (int, error) {
+	var models []dao.EntryModel
+	if err := r.db.WithContext(ctx).
+		Where("scope_kind = ? AND scope_id = ? AND (metadata_json IS NULL OR metadata_json NOT LIKE ?)",
+			string(scope.Kind), scope.ID, "%\"archived\":true%").
+		Find(&models).Error; err != nil {
+		return 0, errs.Wrap(err, "sqlite_repository: totalChars failed")
+	}
+	total := 0
+	for _, m := range models {
+		total += len([]rune(m.Content))
+	}
+	return total, nil
+}
+
+// GetAllActive 返回指定 scope 下所有未归档（活跃）的记忆条目，按创建时间升序。
+// 供压缩器读取待合并的来源。
+func (r *SQLiteRepository) GetAllActive(ctx context.Context, scope memory.Scope) ([]memory.Entry, error) {
+	var models []dao.EntryModel
+	if err := r.db.WithContext(ctx).
+		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
+		Order("created_at ASC").
+		Find(&models).Error; err != nil {
+		return nil, errs.Wrap(err, "sqlite_repository: get all active failed")
+	}
+	out := make([]memory.Entry, 0, len(models))
+	for _, m := range models {
+		e := modelToEntry(m)
+		if isEntryArchived(e.Metadata) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// ArchiveByID 将指定条目标记为已归档（保留可追溯，不物理删除）。
+// 压缩后的来源条目通过此方法归档，避免重复记忆持续累积。
+func (r *SQLiteRepository) ArchiveByID(ctx context.Context, scope memory.Scope, entryID string) bool {
+	var model dao.EntryModel
+	if err := r.db.WithContext(ctx).
+		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
+		First(&model).Error; err != nil {
+		return false
+	}
+	var meta map[string]any
+	if model.MetadataJSON != "" {
+		_ = json.Unmarshal([]byte(model.MetadataJSON), &meta)
+	}
+	if meta == nil {
+		meta = make(map[string]any)
+	}
+	if v, ok := meta["archived"].(bool); ok && v {
+		return true // 已归档，幂等
+	}
+	meta["archived"] = true
+	meta["archived_at"] = time.Now()
+	meta["archived_by"] = "compactor"
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return false
+	}
+	if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
+		Where("id = ?", entryID).
+		Update("metadata_json", string(b)).Error; err != nil {
+		return false
+	}
+	return true
+}
+
+// isEntryArchived 检查元数据中是否有 archived=true 标记。
+func isEntryArchived(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	archived, ok := meta["archived"].(bool)
+	return ok && archived
 }
 
 // ============================================================================
