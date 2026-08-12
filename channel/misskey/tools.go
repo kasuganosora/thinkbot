@@ -13,6 +13,23 @@ import (
 // ChannelToolProvider 实现 — Misskey 平台专属工具
 // ============================================================================
 
+// channelToolAwarenessSection 纠正 bot 的自我认知：它在 Misskey 上并非「只写不读」。
+// 它既会被动接收 mention/reply/timeline 消息，也拥有主动读取帖子的工具。
+// 挂在新读取工具的 PromptSection 上，随 misskey 通道一起注入系统提示。
+var channelToolAwarenessSection = &agenttools.ToolPromptSection{
+	Name:    "misskey_observability",
+	Order:   300,
+	Enabled: true,
+	Content: `# Misskey Observability
+
+You are NOT "write-only" on Misskey. Besides the action tools (post, renote, react, follow, search user), you ALSO receive Misskey content automatically as normal incoming messages — no tool call is needed to "see" them:
+
+- Direct mentions and replies addressed to you always arrive, so you can respond.
+- The bot subscribes to the home, local, and hybrid timelines; notes from those timelines are delivered to you as [Timeline] messages that you can observe, learn from, or react to.
+
+For on-demand reading — e.g. "what did @user post recently" or "search notes about X" — use the misskey_get_user_notes and misskey_search_notes tools below. Prefer them when you need specific history that has not streamed by yet. Do NOT claim you cannot read Misskey; you can both observe and act.`,
+}
+
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
 // 工具通过闭包捕获 Channel 的 API 客户端，支持跨 Channel 调用。
 func (c *MisskeyChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDef, error) {
@@ -26,7 +43,136 @@ func (c *MisskeyChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDef
 		c.unreactToNoteTool(),
 		c.searchUserTool(),
 		c.listFollowingTool(),
+		c.getUserNotesTool(),
+		c.searchNotesTool(),
 	}, nil
+}
+
+// formatNotes 把帖子列表渲染为易读文本（含作者、时间、正文、链接）。
+func formatNotes(notes []Note, host string) string {
+	if len(notes) == 0 {
+		return "（没有找到符合条件的嘟文）"
+	}
+	var b strings.Builder
+	base := strings.TrimRight(host, "/")
+	for i, n := range notes {
+		user := "@" + n.User.Username
+		if n.User.Host != "" {
+			user += "@" + n.User.Host
+		}
+		text := strings.TrimSpace(n.Text)
+		if text == "" && n.Renote != nil {
+			text = "[Renote] " + strings.TrimSpace(n.Renote.Text)
+		}
+		if text == "" {
+			text = "[空贴/仅媒体]"
+		}
+		url := base + "/notes/" + n.ID
+		b.WriteString(fmt.Sprintf("%d. %s · %s\n%s\n🔗 %s\n\n", i+1, user, n.CreatedAt, text, url))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// getUserNotesTool 返回 misskey_get_user_notes 工具定义。
+func (c *MisskeyChannel) getUserNotesTool() agenttools.ToolDef {
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "misskey_get_user_notes",
+			Description: "Fetch a Misskey user's recent notes (their posted posts). " +
+				"Requires the target userId — resolve it first with misskey_search_user if you only have a username. " +
+				"Use this when you need to read what a specific user posted (e.g. \"what did @user say recently\"), " +
+				"as opposed to notes that already arrived via the timeline stream.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"userId": map[string]any{
+						"type":        "string",
+						"description": "ID of the user whose notes to fetch",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Maximum number of notes to return (default 10)",
+					},
+				},
+				"required": []string{"userId"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("misskey_get_user_notes: invalid input type")
+				}
+				userID, _ := args["userId"].(string)
+				if userID == "" {
+					return nil, fmt.Errorf("misskey_get_user_notes: userId is required")
+				}
+				limit := 10
+				if l, ok := args["limit"].(float64); ok {
+					limit = int(l)
+				}
+				notes, err := c.api.getUserNotes(ctx, userID, limit)
+				if err != nil {
+					return nil, fmt.Errorf("get user notes failed: %w", err)
+				}
+				return map[string]any{
+					"notes":  formatNotes(notes, c.cfg.Host),
+					"count":  len(notes),
+					"userId": userID,
+				}, nil
+			}),
+		},
+		Category:      "misskey",
+		PromptSection: channelToolAwarenessSection,
+	}
+}
+
+// searchNotesTool 返回 misskey_search_notes 工具定义。
+func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "misskey_search_notes",
+			Description: "Search Misskey notes across the instance by keyword. " +
+				"Use this to find posts about a topic, hashtag, or phrase that may not have appeared in your timeline stream yet.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Search keyword or phrase",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "Maximum number of notes to return (default 10)",
+					},
+				},
+				"required": []string{"query"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("misskey_search_notes: invalid input type")
+				}
+				query, _ := args["query"].(string)
+				if query == "" {
+					return nil, fmt.Errorf("misskey_search_notes: query is required")
+				}
+				limit := 10
+				if l, ok := args["limit"].(float64); ok {
+					limit = int(l)
+				}
+				notes, err := c.api.searchNotes(ctx, query, limit)
+				if err != nil {
+					return nil, fmt.Errorf("search notes failed: %w", err)
+				}
+				return map[string]any{
+					"notes": formatNotes(notes, c.cfg.Host),
+					"count": len(notes),
+					"query": query,
+				}, nil
+			}),
+		},
+		Category:      "misskey",
+		PromptSection: channelToolAwarenessSection,
+	}
 }
 
 // followUserTool 返回 misskey_follow_user 工具定义。
