@@ -146,6 +146,11 @@ func (s *Server) handleCreateBotPlatform(c *gin.Context) {
 	}
 
 	OK(c, platform)
+
+	// 新平台默认 disabled，不会构建 channel；仅当用户以 enabled 创建时才需热重载。
+	if platform.Enabled {
+		s.reloadBotIfRunning(botID)
+	}
 }
 
 // handleUpdateBotPlatform 更新 Bot 的平台绑定。
@@ -208,6 +213,9 @@ func (s *Server) handleUpdateBotPlatform(c *gin.Context) {
 		return
 	}
 	OK(c, *p)
+
+	// 平台配置/启停变更会改变运行中的 channel，热重载使其立即生效（无需重启服务）。
+	s.reloadBotIfRunning(botID)
 }
 
 // handleDeleteBotPlatform 删除 Bot 的平台绑定。
@@ -235,6 +243,27 @@ func (s *Server) handleDeleteBotPlatform(c *gin.Context) {
 		return
 	}
 	OK(c, nil)
+
+	// 平台被删除会改变运行中的 channel 集合，热重载使其立即生效（无需重启服务）。
+	s.reloadBotIfRunning(botID)
+}
+
+// reloadBotIfRunning 在平台配置变更后，若 Bot 正在运行则后台热重载（停→启），
+// 让 channel 增删/配置修改/启停立即生效，无需重启整个 thinkbot 服务。
+// 后台异步执行，不阻塞 API 响应；若 Bot 未运行则无需操作（下次启动自然生效）。
+func (s *Server) reloadBotIfRunning(botID string) {
+	if s.botSvc == nil || !s.botSvc.IsRunning(botID) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		if err := s.botSvc.StartBot(ctx, botID); err != nil {
+			s.logger.Errorw("platform change hot-reload failed", "bot_id", botID, "err", err)
+			return
+		}
+		s.logger.Infow("platform change hot-reloaded bot", "bot_id", botID)
+	}()
 }
 
 // --- 记忆管理 (Memory CRUD) ---
