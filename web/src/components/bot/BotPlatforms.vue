@@ -81,6 +81,47 @@
         </div>
       </div>
 
+      <!-- 聊天节奏：合并进平台设置，避免用户在两个入口间跳 -->
+      <div v-if="cur.type !== 'web'" class="rhythm-box">
+        <h4 class="sec-title">聊天节奏</h4>
+        <div class="rh-note">Web 渠道不参与节奏控制，此配置仅对「{{ cur.name }}」生效。单聊默认即时回复，群聊 / 频道默认受控防刷屏。</div>
+        <div class="rh-top">
+          <div>
+            <div class="rh-top-title">启用「{{ cur.name }}」聊天节奏</div>
+            <div class="rh-top-desc">关闭后该平台所有会话类型均不应用节奏控制</div>
+          </div>
+          <t-switch v-model="cur.rhythm.enabled" size="large" />
+        </div>
+        <template v-if="cur.rhythm.enabled">
+          <div v-for="ct in rhythmChatTypes" :key="ct.key" class="rh-card">
+            <div class="rh-row">
+              <div>
+                <div class="rh-card-title">{{ ct.label }}</div>
+                <div class="rh-card-desc">{{ ct.key === 'private' ? '关闭 = 即时回复（推荐）；开启 = 受节奏控制' : '建议开启：避免刷屏' }}</div>
+              </div>
+              <t-switch v-model="cur.rhythm[ct.key].enabled" size="large" />
+            </div>
+            <template v-if="cur.rhythm[ct.key].enabled">
+              <div class="rh-card-desc" style="margin-top:12px">发言倾向（0.01 = 安静，1.0 = 回复所有消息）</div>
+              <div class="rh-slider">
+                <t-slider v-model="cur.rhythm[ct.key].speakTendency" :min="0.01" :max="1" :step="0.01" style="flex:1" />
+                <span class="rh-slider-val">{{ (cur.rhythm[ct.key].speakTendency || 0).toFixed(2) }}</span>
+              </div>
+              <div class="rh-grid2" style="margin-top:14px">
+                <div class="rh-field">
+                  <label>防抖静默等待（秒）</label>
+                  <t-input-number v-model="cur.rhythm[ct.key].debounce.quietWait" :min="0" theme="normal" style="width:100%" />
+                </div>
+                <div class="rh-field">
+                  <label>连续发言上限（0 = 不限）</label>
+                  <t-input-number v-model="cur.rhythm[ct.key].interrupt.maxConsecutive" :min="0" theme="normal" style="width:100%" />
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
       <div class="pd-footer">
         <t-button variant="outline" @click="save(false)">仅保存</t-button>
         <t-button theme="primary" @click="save(true)">立即启用</t-button>
@@ -131,6 +172,39 @@ const fields = computed(() => types.value.find(t => t.type === cur.value?.type)?
 const curMeta = computed(() => types.value.find(t => t.type === cur.value?.type))
 function metaOf(type) { return types.value.find(t => t.type === type) }
 
+// 聊天节奏：合并进平台设置（private/group/channel 三套参数），与后端 BotRhythmConfig 对齐。
+const rhythmChatTypes = [
+  { key: 'private', label: '单聊（1对1）' },
+  { key: 'group', label: '群聊 / 超级群' },
+  { key: 'channel', label: '频道' }
+]
+function defaultRhythm() {
+  const mk = (enabled, speakTendency) => ({
+    enabled,
+    debounce: { quietWait: 3, maxWait: 15 },
+    timing: { enabled: true },
+    speakTendency,
+    interrupt: { enabled: true, maxConsecutive: 3, maxRounds: 5 },
+    idleComp: { enabled: false, idleWindow: 30, minIdle: 10 }
+  })
+  return { enabled: true, private: mk(false, 0.4), group: mk(true, 0.4), channel: mk(true, 0.4) }
+}
+// 补齐缺失的节奏子配置，避免空指针
+function ensureRhythmDefaults(p) {
+  if (!p) return
+  if (!p.rhythm || typeof p.rhythm !== 'object') p.rhythm = defaultRhythm()
+  const def = defaultRhythm()
+  if (!p.rhythm.private) p.rhythm.private = def.private
+  if (!p.rhythm.group) p.rhythm.group = def.group
+  if (!p.rhythm.channel) p.rhythm.channel = def.channel
+  for (const ct of ['private', 'group', 'channel']) {
+    const s = p.rhythm[ct]
+    if (!s.debounce) s.debounce = { quietWait: 3, maxWait: 15 }
+    if (!s.interrupt) s.interrupt = { enabled: true, maxConsecutive: 3, maxRounds: 5 }
+    if (typeof s.speakTendency !== 'number') s.speakTendency = 0.4
+  }
+}
+
 // 图标文案：后端 icon 多为平台英文名（如 "misskey"），整串塞进小圆圈会溢出。
 // 规则：icon 为单个字符/emoji 时直接用；否则（多字符或缺省）取首字母大写。
 function iconText(meta, fallbackName) {
@@ -173,15 +247,16 @@ async function load() {
   list.value = l
   cur.value = l[0] || null
   ensureConfigDefaults(cur.value)
+  ensureRhythmDefaults(cur.value)
 }
 onMounted(load)
 
-function select(p) { cur.value = p; ensureConfigDefaults(p) }
+function select(p) { cur.value = p; ensureConfigDefaults(p); ensureRhythmDefaults(p) }
 
 async function save(enable) {
   if (enable) cur.value.enabled = true
   await botPlatformApi.update(props.botId, cur.value.id, {
-    enabled: cur.value.enabled, config: cur.value.config, tools: cur.value.tools, name: cur.value.name
+    enabled: cur.value.enabled, config: cur.value.config, tools: cur.value.tools, name: cur.value.name, rhythm: cur.value.rhythm
   })
   cur.value.configured = true
   MessagePlugin.success(enable ? '已保存并启用' : '平台配置已保存')
@@ -209,6 +284,7 @@ async function confirmAdd() {
   await load()
   cur.value = list.value.find(p => p.id === created.id) || cur.value
   ensureConfigDefaults(cur.value)
+  ensureRhythmDefaults(cur.value)
   MessagePlugin.success('平台已添加')
 }
 </script>
@@ -264,6 +340,20 @@ async function confirmAdd() {
 .pd-footer { margin-top: 20px; padding-top: 18px; border-top: 1px solid #f0f0f0; display: flex; justify-content: flex-end; gap: 12px; align-items: center; }
 .pd-del { margin-right: auto; }
 .plat-empty { margin: 60px auto; }
+/* 聊天节奏（内嵌于平台详情） */
+.rhythm-box { margin-top: 8px; }
+.rh-note { font-size: 13px; color: #666; background: #f6f8fa; border: 1px solid #ececec; border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; line-height: 1.6; }
+.rh-top { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 22px; }
+.rh-top-title { font-size: 15px; font-weight: 600; }
+.rh-top-desc { font-size: 13px; color: #888; margin-top: 4px; }
+.rh-card { border: 1px solid #ececec; border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; background: #fff; }
+.rh-card-title { font-size: 14px; font-weight: 600; }
+.rh-card-desc { font-size: 12px; color: #999; margin-top: 4px; }
+.rh-row { display: flex; align-items: flex-start; justify-content: space-between; }
+.rh-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
+.rh-field label { display: block; font-size: 13px; color: #555; margin-bottom: 6px; }
+.rh-slider { display: flex; align-items: center; gap: 16px; margin-top: 16px; }
+.rh-slider-val { font-size: 14px; color: #333; width: 42px; text-align: right; }
 /* 添加平台弹窗 */
 .add-list {
   display: flex; flex-direction: column; gap: 2px;

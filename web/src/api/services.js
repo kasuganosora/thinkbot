@@ -1335,7 +1335,7 @@ export const sessionApi = {
 //   记忆      GET        /api/bots/:id/memory                 POST/PUT/DELETE /api/bots/:id/memory[/:mid]
 //   访问控制  GET/PUT    /api/bots/:id/access                 （default + rules[]）
 //   文件      GET        /api/bots/:id/files?path=            POST /files/mkdir  POST /files/upload
-//   聊天节奏  GET /api/bots/:id/chat-rhythm  → 平台 map；GET/PUT /api/bots/:id/chat-rhythm/:platform
+//   聊天节奏  GET/PUT /api/bots/:id/platforms[/:pid] 的 rhythm 字段（已合并进平台设置）
 // ============================================================================
 
 // 平台可分配的工具目录（图1 工具权限矩阵）
@@ -1650,51 +1650,6 @@ export const botFileApi = {
       })
     }
     return request('POST', `/api/bots/${botId}/files/upload`, { path, name, size })
-  }
-}
-
-// ---- 聊天节奏（按平台 + 会话类型细分） ----
-// 后端契约：
-//   GET    /api/bots/:id/chat-rhythm            → 返回所有支持平台配置(map: {telegram, misskey})
-//   GET    /api/bots/:id/chat-rhythm/:platform  → 单个平台配置
-//   PUT    /api/bots/:id/chat-rhythm/:platform  → 保存单个平台配置
-// web 平台不参与节奏控制（后端硬禁用，前端也不提供配置入口）。
-const _botRhythm = {}
-function defaultRhythmPlatform() {
-  return {
-    enabled: true,
-    private: { enabled: false, debounce: { quietWait: 1, maxWait: 5 }, timing: { enabled: false }, speakTendency: 1.0, interrupt: { enabled: false, maxConsecutive: 0, maxRounds: 0 }, idleComp: { enabled: false, idleWindow: 30, minIdle: 10 } },
-    group: { enabled: true, debounce: { quietWait: 3, maxWait: 15 }, timing: { enabled: true }, speakTendency: 0.4, interrupt: { enabled: true, maxConsecutive: 3, maxRounds: 5 }, idleComp: { enabled: false, idleWindow: 30, minIdle: 10 } },
-    channel: { enabled: true, debounce: { quietWait: 3, maxWait: 15 }, timing: { enabled: true }, speakTendency: 0.4, interrupt: { enabled: true, maxConsecutive: 3, maxRounds: 5 }, idleComp: { enabled: false, idleWindow: 30, minIdle: 10 } }
-  }
-}
-function ensureRhythm(botId) {
-  if (!_botRhythm[botId]) {
-    _botRhythm[botId] = { telegram: defaultRhythmPlatform(), misskey: defaultRhythmPlatform() }
-  }
-  return _botRhythm[botId]
-}
-export const botRhythmApi = {
-  // 返回全部平台配置 map
-  get(botId) {
-    if (USE_MOCK) return mockResolve(() => JSON.parse(JSON.stringify(ensureRhythm(botId))))
-    return request('GET', `/api/bots/${botId}/chat-rhythm`)
-  },
-  // 获取单个平台配置
-  getPlatform(botId, platform) {
-    if (USE_MOCK) return mockResolve(() => JSON.parse(JSON.stringify(ensureRhythm(botId)[platform] || defaultRhythmPlatform())))
-    return request('GET', `/api/bots/${botId}/chat-rhythm/${platform}`)
-  },
-  // 保存单个平台配置
-  updatePlatform(botId, platform, payload) {
-    if (USE_MOCK) {
-      return mockResolve(() => {
-        const m = ensureRhythm(botId)
-        m[platform] = JSON.parse(JSON.stringify(payload))
-        return null
-      })
-    }
-    return request('PUT', `/api/bots/${botId}/chat-rhythm/${platform}`, payload)
   }
 }
 
