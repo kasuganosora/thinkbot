@@ -811,6 +811,29 @@ func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 	// 截断长文本
 	text = truncateRunes(strings.TrimSpace(text), misskeyMaxNoteLength)
 
+	// 回复时自动补全 @host：联邦/远程用户必须带 host 才能被正确提及并收到通知。
+	// 若只写 @username，bot 在 maid.lat 上发的会指向本实例同名用户，远程用户收不到。
+	// （outbound 走 Send 而非 ReplyWithVisibility，故此处需自行补全，不要依赖调用方。）
+	if noteID != "" {
+		if replyNote, err := c.api.getNote(ctx, noteID); err == nil && replyNote != nil {
+			if prefix := c.buildReplyMentionPrefix(replyNote); prefix != "" {
+				// 去除 LLM 文本开头可能重复写的裸 @被回复者（不带 host），避免重复 mention
+				t := strings.TrimSpace(text)
+				if replyNote.User.Username != "" {
+					bare := "@" + replyNote.User.Username
+					if strings.HasPrefix(t, bare+" ") || t == bare {
+						t = strings.TrimSpace(strings.TrimPrefix(t, bare))
+					}
+				}
+				text = prefix + t
+				text = truncateRunes(text, misskeyMaxNoteLength) // 加前缀后再次裁切，防止超长
+			}
+		} else if err != nil {
+			traceid.L(ctx).Debugw("misskey: getNote for send mention prefix skipped",
+				"channel", c.name, "note_id", noteID, "err", err)
+		}
+	}
+
 	// 构建回复
 	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, cw, nil)
 	if err != nil {
