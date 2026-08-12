@@ -1,117 +1,132 @@
 <template>
-  <div v-if="cfg" class="rhythm-wrap" data-testid="bot-rhythm">
-    <!-- 总开关 -->
-    <div class="rh-top">
-      <div>
-        <div class="rh-top-title">启用智能聊天节奏</div>
-        <div class="rh-top-desc">控制机器人在群聊中何时以及如何回复（防抖、时机判断、发言值、中断）</div>
-      </div>
-      <t-switch v-model="cfg.enabled" size="large" />
+  <div v-if="map && map[activePlatform]" class="rhythm-wrap" data-testid="bot-rhythm">
+    <div class="rh-note">
+      Web 渠道不参与聊天节奏控制（始终即时回复）。节奏仅对 Telegram / Misskey 生效，且按会话类型细分：
+      <b>单聊默认关闭</b>（即时回复），<b>群聊 / 频道默认开启</b>（受控不刷屏）。
     </div>
 
-    <template v-if="cfg.enabled">
-      <!-- 消息防抖 -->
-      <div class="rh-card">
-        <div class="rh-card-title">消息防抖</div>
-        <div class="rh-grid2">
-          <div class="rh-field">
-            <label>静默等待（秒）</label>
-            <t-input-number v-model="cfg.debounce.quietWait" :min="0" theme="normal" style="width:100%" />
-          </div>
-          <div class="rh-field">
-            <label>最大等待（秒）</label>
-            <t-input-number v-model="cfg.debounce.maxWait" :min="0" theme="normal" style="width:100%" />
-          </div>
-        </div>
-      </div>
+    <!-- 平台 tab -->
+    <div class="rh-tabs">
+      <div
+        v-for="p in platforms"
+        :key="p.key"
+        class="rh-tab"
+        :class="{ active: activePlatform === p.key }"
+        @click="activePlatform = p.key"
+      >{{ p.label }}</div>
+    </div>
 
-      <!-- 时机判断 -->
-      <div class="rh-card rh-row">
-        <div>
-          <div class="rh-card-title">时机判断</div>
-          <div class="rh-card-desc">使用 LLM 判断机器人是否应立即回复或等待</div>
-        </div>
-        <t-switch v-model="cfg.timing.enabled" size="large" />
+    <!-- 平台总开关 -->
+    <div class="rh-top">
+      <div>
+        <div class="rh-top-title">启用「{{ activePlatformLabel }}」聊天节奏</div>
+        <div class="rh-top-desc">关闭后该平台所有会话类型均不应用节奏控制</div>
       </div>
+      <t-switch v-model="platformCfg.enabled" size="large" />
+    </div>
 
-      <!-- 发言倾向 -->
-      <div class="rh-card">
-        <div class="rh-card-title">发言倾向</div>
-        <div class="rh-card-desc">机器人在群聊中的活跃程度（0.01 = 安静，1.0 = 回复所有消息）</div>
-        <div class="rh-slider">
-          <t-slider v-model="cfg.speakTendency" :min="0.01" :max="1" :step="0.01" style="flex:1" />
-          <span class="rh-slider-val">{{ cfg.speakTendency.toFixed(2) }}</span>
-        </div>
-      </div>
-
-      <!-- 计划中断 -->
-      <div class="rh-card">
+    <template v-if="platformCfg.enabled">
+      <div v-for="ct in chatTypes" :key="ct.key" class="rh-card">
         <div class="rh-row">
           <div>
-            <div class="rh-card-title">计划中断</div>
-            <div class="rh-card-desc">收到新的相关消息时取消正在进行的回复</div>
+            <div class="rh-card-title">{{ ct.label }}</div>
+            <div class="rh-card-desc">
+              {{ ct.key === 'private' ? '关闭 = 即时回复（推荐）；开启 = 受节奏控制' : '建议开启：避免刷屏' }}
+            </div>
           </div>
-          <t-switch v-model="cfg.interrupt.enabled" size="large" />
+          <t-switch v-model="platformCfg[ct.key].enabled" size="large" />
         </div>
-        <div v-if="cfg.interrupt.enabled" class="rh-grid2" style="margin-top:14px">
-          <div class="rh-field">
-            <label>最大连续中断次数</label>
-            <t-input-number v-model="cfg.interrupt.maxConsecutive" :min="0" theme="normal" style="width:100%" />
-          </div>
-          <div class="rh-field">
-            <label>最大中断轮次</label>
-            <t-input-number v-model="cfg.interrupt.maxRounds" :min="0" theme="normal" style="width:100%" />
-          </div>
-        </div>
-      </div>
 
-      <!-- 空闲补偿 -->
-      <div class="rh-card">
-        <div class="rh-row">
-          <div>
-            <div class="rh-card-title">空闲补偿</div>
-            <div class="rh-card-desc">在长时间沉默后给予机器人更多发言机会</div>
+        <template v-if="platformCfg[ct.key].enabled">
+          <div class="rh-card-desc" style="margin-top: 12px">
+            发言倾向（0.01 = 安静，1.0 = 回复所有消息）
           </div>
-          <t-switch v-model="cfg.idleComp.enabled" size="large" />
-        </div>
-        <div v-if="cfg.idleComp.enabled" class="rh-grid2" style="margin-top:14px">
-          <div class="rh-field">
-            <label>空闲窗口（分钟）</label>
-            <t-input-number v-model="cfg.idleComp.idleWindow" :min="0" theme="normal" style="width:100%" />
+          <div class="rh-slider">
+            <t-slider
+              v-model="platformCfg[ct.key].speakTendency"
+              :min="0.01"
+              :max="1"
+              :step="0.01"
+              style="flex: 1"
+            />
+            <span class="rh-slider-val">{{ platformCfg[ct.key].speakTendency.toFixed(2) }}</span>
           </div>
-          <div class="rh-field">
-            <label>最低空闲时长（分钟）</label>
-            <t-input-number v-model="cfg.idleComp.minIdle" :min="0" theme="normal" style="width:100%" />
+
+          <div class="rh-grid2" style="margin-top: 14px">
+            <div class="rh-field">
+              <label>防抖静默等待（秒）</label>
+              <t-input-number
+                v-model="platformCfg[ct.key].debounce.quietWait"
+                :min="0"
+                theme="normal"
+                style="width: 100%"
+              />
+            </div>
+            <div class="rh-field">
+              <label>连续发言上限（0 = 不限）</label>
+              <t-input-number
+                v-model="platformCfg[ct.key].interrupt.maxConsecutive"
+                :min="0"
+                theme="normal"
+                style="width: 100%"
+              />
+            </div>
           </div>
-        </div>
+        </template>
       </div>
     </template>
 
     <div class="rh-footer">
-      <t-button theme="primary" @click="save">保存设置</t-button>
+      <t-button theme="primary" @click="save">保存设置（{{ activePlatformLabel }}）</t-button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { botRhythmApi } from '@/api/services'
 
 const props = defineProps({ botId: { type: String, required: true } })
-const cfg = ref(null)
 
-async function load() { cfg.value = await botRhythmApi.get(props.botId) }
+const map = ref({})
+const activePlatform = ref('telegram')
+
+const platforms = [
+  { key: 'telegram', label: 'Telegram' },
+  { key: 'misskey', label: 'Misskey' }
+]
+const chatTypes = [
+  { key: 'private', label: '单聊（1对1）' },
+  { key: 'group', label: '群聊 / 超级群' },
+  { key: 'channel', label: '频道' }
+]
+
+const platformCfg = computed(() => map.value[activePlatform.value])
+const activePlatformLabel = computed(
+  () => (platforms.find((p) => p.key === activePlatform.value) || {}).label || activePlatform.value
+)
+
+async function load() {
+  map.value = await botRhythmApi.get(props.botId)
+  if (!map.value[activePlatform.value]) {
+    map.value[activePlatform.value] = await botRhythmApi.getPlatform(props.botId, activePlatform.value)
+  }
+}
 onMounted(load)
 
 async function save() {
-  await botRhythmApi.update(props.botId, cfg.value)
-  MessagePlugin.success('聊天节奏已保存')
+  await botRhythmApi.updatePlatform(props.botId, activePlatform.value, platformCfg.value)
+  MessagePlugin.success('聊天节奏已保存（' + activePlatformLabel.value + '）')
 }
 </script>
 
 <style scoped>
 .rhythm-wrap { max-width: 900px; }
+.rh-note { font-size: 13px; color: #666; background: #f6f8fa; border: 1px solid #ececec; border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; line-height: 1.6; }
+.rh-tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+.rh-tab { padding: 8px 18px; border: 1px solid #e3e3e3; border-radius: 999px; cursor: pointer; font-size: 14px; color: #555; background: #fff; }
+.rh-tab.active { background: #0052d9; color: #fff; border-color: #0052d9; }
 .rh-top { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 22px; }
 .rh-top-title { font-size: 15px; font-weight: 600; }
 .rh-top-desc { font-size: 13px; color: #888; margin-top: 4px; }
