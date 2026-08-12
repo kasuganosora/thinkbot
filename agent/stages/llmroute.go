@@ -128,12 +128,35 @@ func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string
 	return lurkObserverInstruction
 }
 
+// lurkSkipMarkers 为「无笔记」语义标记集合。LLM 在认为没有值得记的内容时可能返回
+// [NONE] / [无] / [没有] / 暂无 等标记。归一化（去首尾空格与常见标点、转小写）后
+// 精确匹配任一标记即视为空笔记，跳过写入，避免把「无」当有效记忆污染工作记忆。
+var lurkSkipMarkers = []string{
+	"[none]", "none", "n/a", "na", "null", "nil",
+	"无", "[无]", "（无）", "(无)", "没有", "[没有]", "暂无", "无内容", "无笔记", "无东西可记",
+	"nothing", "skip", "pass",
+}
+
+// isEmptyLurkNote 判断 LLM 潜水产出是否为「无笔记」语义（空串或语义空标记）。
+func isEmptyLurkNote(note string) bool {
+	s := strings.ToLower(strings.TrimSpace(note))
+	s = strings.Trim(s, "。.，,、()（）[]【】\"' \t\n")
+	if s == "" {
+		return true
+	}
+	for _, m := range lurkSkipMarkers {
+		if s == m {
+			return true
+		}
+	}
+	return false
+}
+
 // emitLurkNote 在潜水模式下把 LLM 的思考结果作为内部学习笔记（ActionNote）写入 L0。
-// 仅当模型产出有价值内容（非 [NONE] / 非空）时才发 ActionNote，避免污染工作记忆。
+// 仅当模型产出有价值内容（非 [NONE]/[无]/[没有] 等空语义标记、且非空）时才发 ActionNote，避免污染工作记忆。
 func (s *LLMStage) emitLurkNote(env *core.Envelope, result *llm.GenerateResult) {
 	note := memory.StripThinking(result.Text)
-	note = strings.TrimSpace(note)
-	if note == "" || strings.EqualFold(note, "[NONE]") {
+	if isEmptyLurkNote(note) {
 		s.logger.Debugw("lurk: nothing worth remembering, skip note",
 			"message_id", env.Message.ID)
 		return
