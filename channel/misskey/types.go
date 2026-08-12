@@ -74,6 +74,7 @@ type User struct {
 	Name     string `json:"name,omitempty"`
 	Username string `json:"username"`
 	Host     string `json:"host,omitempty"`
+	IsBot    bool   `json:"isBot,omitempty"`
 }
 
 // Visibility 可见性常量。
@@ -218,9 +219,9 @@ type userNotesRequest struct {
 
 // noteSearchRequest 对应 notes/search（按关键词搜索帖子）。
 type noteSearchRequest struct {
-	I      string `json:"i"`
-	Query  string `json:"query"`
-	Limit  int    `json:"limit,omitempty"`
+	I     string `json:"i"`
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
 }
 
 // FollowingUser 是关注列表中的用户条目。

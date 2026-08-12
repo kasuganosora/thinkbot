@@ -43,6 +43,9 @@ type Message struct {
 	// 在群聊中，Pipeline 可据此决定是否只处理被 @ 的消息。
 	// 私聊中通常恒为 true。
 	Mentioned bool `json:"mentioned"`
+	// FromIsBot 表示发送者是否为 Bot 账号。
+	// agent 可据此感知对方身份，自行决定是否/如何回复（不强制拦截）。
+	FromIsBot bool `json:"fromIsBot,omitempty"`
 	// MediaType 媒体类型（text/plain, image/png, ...）。
 	MediaType string `json:"mediaType,omitempty"`
 	// RawData 原始载荷（可选）。

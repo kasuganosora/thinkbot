@@ -296,3 +296,23 @@ func (a *apiClient) searchNotes(ctx context.Context, query string, limit int) ([
 	}
 	return notes, nil
 }
+
+// getNote 获取单条帖子详情（notes/show）。
+// 用于回复时提取被回复者的 @ 信息，自动拼接 @ 前缀。
+func (a *apiClient) getNote(ctx context.Context, noteID string) (*Note, error) {
+	resp, err := a.client.Post("notes/show").
+		SetContext(ctx).
+		SetJSONBody(map[string]any{"i": a.token, "noteId": noteID}).
+		Do()
+	if err != nil {
+		return nil, errs.Wrap(err, "misskey getNote")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("misskey getNote: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
+	var note Note
+	if err := resp.JSON(&note); err != nil {
+		return nil, errs.Wrap(err, "misskey getNote parse")
+	}
+	return &note, nil
+}
