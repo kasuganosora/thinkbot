@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/sandbox"
@@ -1283,17 +1284,37 @@ func (s *Server) saveBotCompactionHistory(c *gin.Context, botID string, records 
 // 聊天节奏 (Rhythm)
 // ============================================================================
 
-// BotRhythmConfig 聊天节奏配置。
+// ============================================================================
+// 聊天节奏（按平台 + 会话类型细分）
+// GET    /api/bots/:id/chat-rhythm            → 返回所有支持平台的配置(map)
+// GET    /api/bots/:id/chat-rhythm/:platform  → 单个平台配置
+// PUT    /api/bots/:id/chat-rhythm/:platform  → 保存单个平台配置
+// 存储键：bot.<id>.rhythm.<platform>
+// web 平台明确不参与节奏控制（在消费方 RhythmStage 硬性跳过）。
+// ============================================================================
+
+// botRhythmPlatforms 支持节奏配置的平台（web 不在列，永不参与）。
+var botRhythmPlatforms = []string{"telegram", "misskey"}
+
+// BotRhythmConfig 按平台配置的聊天节奏。每个平台一份。
 type BotRhythmConfig struct {
-	Enabled       bool               `json:"enabled"`
-	Debounce      BotRhythmDebounce  `json:"debounce"`
-	Timing        BotRhythmToggle    `json:"timing"`
-	SpeakTendency float64            `json:"speakTendency"`
+	Enabled bool             `json:"enabled"` // 平台级总开关
+	Private BotRhythmParams `json:"private"` // 单聊（1对1）参数
+	Group   BotRhythmParams `json:"group"`   // 群聊 / 超级群参数
+	Channel BotRhythmParams `json:"channel"` // 频道（只读广播）参数
+}
+
+// BotRhythmParams 某个会话类型的节奏参数。
+type BotRhythmParams struct {
+	Enabled       bool              `json:"enabled"`       // 该会话类型是否启用节奏控制（false=完全关闭，即时回复）
+	Debounce      BotRhythmDebounce `json:"debounce"`
+	Timing        BotRhythmToggle   `json:"timing"`
+	SpeakTendency float64           `json:"speakTendency"`
 	Interrupt     BotRhythmInterrupt `json:"interrupt"`
 	IdleComp      BotRhythmIdleComp  `json:"idleComp"`
 }
 
-// BotRhythmDebounce 消息防抖。
+// BotRhythmDebounce 消息防抖：频道内两次发言间隔小于 QuietWait 视为连发，合并跳过。
 type BotRhythmDebounce struct {
 	QuietWait int `json:"quietWait"`
 	MaxWait   int `json:"maxWait"`
@@ -1304,7 +1325,7 @@ type BotRhythmToggle struct {
 	Enabled bool `json:"enabled"`
 }
 
-// BotRhythmInterrupt 计划中断。
+// BotRhythmInterrupt 连续发言中断。
 type BotRhythmInterrupt struct {
 	Enabled        bool `json:"enabled"`
 	MaxConsecutive int  `json:"maxConsecutive"`
@@ -1318,58 +1339,128 @@ type BotRhythmIdleComp struct {
 	MinIdle    int  `json:"minIdle"`
 }
 
-// defaultBotRhythmConfig 返回聊天节奏默认配置。
-func defaultBotRhythmConfig() *BotRhythmConfig {
-	return &BotRhythmConfig{
+// defaultBotRhythmConfigForPlatform 返回某平台的默认节奏配置。
+// 设计：单聊(private)默认关闭节奏（即时回复，不受控）；群聊/频道默认开启（受控不刷屏）。
+func defaultBotRhythmConfigForPlatform(platform string) *BotRhythmConfig {
+	group := BotRhythmParams{
 		Enabled:       true,
 		Debounce:      BotRhythmDebounce{QuietWait: 3, MaxWait: 15},
 		Timing:        BotRhythmToggle{Enabled: true},
-		SpeakTendency: 0.5,
+		SpeakTendency: 0.4,
 		Interrupt:     BotRhythmInterrupt{Enabled: true, MaxConsecutive: 3, MaxRounds: 5},
 		IdleComp:      BotRhythmIdleComp{Enabled: false, IdleWindow: 30, MinIdle: 10},
 	}
+	private := BotRhythmParams{
+		Enabled:       false, // 单聊默认关闭节奏：即时回复
+		Debounce:      BotRhythmDebounce{QuietWait: 1, MaxWait: 5},
+		Timing:        BotRhythmToggle{Enabled: false},
+		SpeakTendency: 1.0,
+		Interrupt:     BotRhythmInterrupt{Enabled: false, MaxConsecutive: 0, MaxRounds: 0},
+		IdleComp:      BotRhythmIdleComp{Enabled: false},
+	}
+	return &BotRhythmConfig{Enabled: true, Private: private, Group: group, Channel: group}
 }
 
-// handleGetBotRhythm 获取 Bot 聊天节奏配置。
+func botRhythmKey(botID, platform string) string {
+	return "bot." + botID + ".rhythm." + platform
+}
+
+func isValidRhythmPlatform(p string) bool {
+	for _, x := range botRhythmPlatforms {
+		if x == p {
+			return true
+		}
+	}
+	return false
+}
+
+// handleGetBotRhythm 获取全部支持平台的聊天节奏配置（map）。
 // GET /api/bots/:id/chat-rhythm
 func (s *Server) handleGetBotRhythm(c *gin.Context) {
 	botID := c.Param("id")
-	OK(c, s.getBotRhythmConfig(botID))
+	out := map[string]*BotRhythmConfig{}
+	for _, p := range botRhythmPlatforms {
+		out[p] = s.botSvc.getBotRhythmConfig(botID, p)
+	}
+	OK(c, out)
 }
 
-// handleUpdateBotRhythm 更新 Bot 聊天节奏配置。
-// PUT /api/bots/:id/chat-rhythm
-func (s *Server) handleUpdateBotRhythm(c *gin.Context) {
+// handleGetBotRhythmPlatform 获取单个平台聊天节奏配置。
+// GET /api/bots/:id/chat-rhythm/:platform
+func (s *Server) handleGetBotRhythmPlatform(c *gin.Context) {
 	botID := c.Param("id")
+	platform := c.Param("platform")
+	if !isValidRhythmPlatform(platform) {
+		Fail(c, errs.BadRequest("unsupported platform: "+platform))
+		return
+	}
+	OK(c, s.botSvc.getBotRhythmConfig(botID, platform))
+}
 
+// handleUpdateBotRhythmPlatform 更新单个平台聊天节奏配置。
+// PUT /api/bots/:id/chat-rhythm/:platform
+func (s *Server) handleUpdateBotRhythmPlatform(c *gin.Context) {
+	botID := c.Param("id")
+	platform := c.Param("platform")
+	if !isValidRhythmPlatform(platform) {
+		Fail(c, errs.BadRequest("unsupported platform: "+platform))
+		return
+	}
 	var req BotRhythmConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
-
-	if err := s.saveBotRhythmConfig(c, botID, &req); err != nil {
+	if err := s.botSvc.saveBotRhythmConfig(c, botID, platform, &req); err != nil {
 		Fail(c, err)
 		return
 	}
 	OK(c, nil)
 }
 
-func (s *Server) getBotRhythmConfig(botID string) *BotRhythmConfig {
-	raw, ok := s.store.Get(botDetailKey(botID, "rhythm"))
+func (s *BotService) getBotRhythmConfig(botID, platform string) *BotRhythmConfig {
+	if !isValidRhythmPlatform(platform) {
+		return defaultBotRhythmConfigForPlatform(platform)
+	}
+	raw, ok := s.store.Get(botRhythmKey(botID, platform))
 	if !ok || raw == "" {
-		return defaultBotRhythmConfig()
+		return defaultBotRhythmConfigForPlatform(platform)
 	}
 	var cfg BotRhythmConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return defaultBotRhythmConfig()
+		return defaultBotRhythmConfigForPlatform(platform)
+	}
+	// 部分字段缺失（如旧配置）用默认补齐，保证下游不空指针
+	def := defaultBotRhythmConfigForPlatform(platform)
+	if cfg.Private == (BotRhythmParams{}) {
+		cfg.Private = def.Private
+	}
+	if cfg.Group == (BotRhythmParams{}) {
+		cfg.Group = def.Group
+	}
+	if cfg.Channel == (BotRhythmParams{}) {
+		cfg.Channel = def.Channel
 	}
 	return &cfg
 }
 
-func (s *Server) saveBotRhythmConfig(c *gin.Context, botID string, cfg *BotRhythmConfig) error {
+func (s *BotService) saveBotRhythmConfig(c *gin.Context, botID, platform string, cfg *BotRhythmConfig) error {
 	data, _ := json.Marshal(cfg)
-	return s.store.Set(c.Request.Context(), botDetailKey(botID, "rhythm"), string(data))
+	return s.store.Set(c.Request.Context(), botRhythmKey(botID, platform), string(data))
+}
+
+// selectRhythmParams 按会话类型选取参数；supergroup 归入 group，未知回退 group（更保守）。
+func selectRhythmParams(cfg *BotRhythmConfig, chatType string) BotRhythmParams {
+	switch chatType {
+	case core.ChatPrivate:
+		return cfg.Private
+	case core.ChatGroup, core.ChatSupergroup:
+		return cfg.Group
+	case core.ChatChannel:
+		return cfg.Channel
+	default:
+		return cfg.Group
+	}
 }
 
 // nowRFC3339 返回当前时间的 RFC3339 格式字符串。
