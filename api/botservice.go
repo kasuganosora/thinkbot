@@ -714,7 +714,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	// 注册记忆工具（SQLite 持久化，记忆可跨重启累积）
-	memRepo := storage.NewSQLiteRepository(s.db)
+	//
+	// memWindow：动态上下文窗口，记忆块字符上限由 Window.MemoryBudget()*3 派生
+	// （随模型上下文窗口自适应），与 context.go / snapshot.renderBlock 口径一致。
+	// memCompactor：到达字符预算时对该 scope 做语义合并、归档来源（压缩后入库），
+	// 取代简单的截断。repo 通过 SetRepository 注入，打破构造循环依赖。
+	memWindow := memory.NewWindow(memory.WindowConfig{})
+	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
+		Provider: bundle.Main,
+		Model:    &llm.Model{ID: bundle.MainDef.Model},
+	}, s.logger)
+	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
+		Window:    memWindow,
+		Compactor: memCompactor,
+	})
+	memCompactor.SetRepository(memRepo)
 	if err := memory.RegisterTools(toolMgr, memory.DefaultToolConfig(memRepo)); err != nil {
 		s.logger.Warnw("failed to register memory tools", "err", err)
 	}
@@ -912,7 +926,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// memRepo（函数前面 717 行已创建）即 SQLite 仓储（实现 memory.Retriever），
 	// 潜水笔记经 MultiStore 代理写入其中，故这里能直接召回。非 nil 时生效；
 	// 检索失败属非致命，内部 WARN 跳过。
-	recallStage := stages.NewRecallStage("memory-recall", memRepo, s.logger)
+	//
+	// memWindow：函数前部已创建并注入 memRepo，此处复用于召回 stage。
+	// 使记忆块字符上限由 Window.MemoryBudget()*3 派生（随模型上下文窗口自适应），
+	// 取代此前硬编码的 2200，与 context.go 使用 window 模块的口径一致。
+	recallStage := stages.NewRecallStage("memory-recall", memRepo, memWindow, s.logger)
 
 	// 聊天节奏 stage：按「平台 + 会话类型」抑制过度发言。
 	// web 平台硬禁用；单聊(private)默认关闭节奏（即时回复）；群聊/频道默认受控。

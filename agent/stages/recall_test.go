@@ -32,7 +32,7 @@ func TestRecallStage_InjectsBotScopeMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stage := NewRecallStage("memory-recall", repo, zap.NewNop().Sugar())
+	stage := NewRecallStage("memory-recall", repo, nil, zap.NewNop().Sugar())
 	env := core.NewEnvelope(core.Message{ID: "r1", BotID: botID, Channel: "web", UserID: "u1"})
 	if _, err := stage.Process(context.Background(), env); err != nil {
 		t.Fatalf("process err: %v", err)
@@ -55,7 +55,7 @@ func TestRecallStage_InjectsBotScopeMemory(t *testing.T) {
 
 // TestRecallStage_SkipsWhenNilRetriever 验证 retriever 为 nil 时安全空操作。
 func TestRecallStage_SkipsWhenNilRetriever(t *testing.T) {
-	stage := NewRecallStage("memory-recall", nil, zap.NewNop().Sugar())
+	stage := NewRecallStage("memory-recall", nil, nil, zap.NewNop().Sugar())
 	env := core.NewEnvelope(core.Message{ID: "r2", BotID: "b"})
 	if _, err := stage.Process(context.Background(), env); err != nil {
 		t.Fatalf("process err: %v", err)
@@ -68,7 +68,7 @@ func TestRecallStage_SkipsWhenNilRetriever(t *testing.T) {
 // TestRecallStage_SkipsWhenNoScopes 验证无 bot/channel/user 标识时安全跳过。
 func TestRecallStage_SkipsWhenNoScopes(t *testing.T) {
 	repo := memory.NewMemoryRepository()
-	stage := NewRecallStage("memory-recall", repo, zap.NewNop().Sugar())
+	stage := NewRecallStage("memory-recall", repo, nil, zap.NewNop().Sugar())
 	env := core.NewEnvelope(core.Message{ID: "r3"}) // 全部为空
 	if _, err := stage.Process(context.Background(), env); err != nil {
 		t.Fatalf("process err: %v", err)
