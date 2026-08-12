@@ -46,7 +46,7 @@
           <!-- 容器 -->
           <div v-else-if="activeKey === 'container'" class="pad"><BotContainer :bot-id="bot.id" /></div>
           <!-- 记忆 -->
-          <BotMemoryFiles v-else-if="activeKey === 'memory'" :bot-id="bot.id" />
+          <BotMemory v-else-if="activeKey === 'memory'" :bot-id="bot.id" />
           <!-- 平台 -->
           <BotPlatforms v-else-if="activeKey === 'platform'" :bot-id="bot.id" />
           <!-- 访问控制 -->
@@ -92,7 +92,7 @@ import { botApi, providerApi } from '@/api/services'
 import BotBasicForm from '@/components/bot/BotBasicForm.vue'
 import BotCronJobs from '@/components/bot/BotCronJobs.vue'
 import BotPlatforms from '@/components/bot/BotPlatforms.vue'
-import BotMemoryFiles from '@/components/bot/BotMemoryFiles.vue'
+import BotMemory from '@/components/bot/BotMemory.vue'
 import BotAccess from '@/components/bot/BotAccess.vue'
 import BotToolPerm from '@/components/bot/BotToolPerm.vue'
 import BotFiles from '@/components/bot/BotFiles.vue'
