@@ -914,10 +914,35 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 检索失败属非致命，内部 WARN 跳过。
 	recallStage := stages.NewRecallStage("memory-recall", memRepo, s.logger)
 
+	// 聊天节奏 stage：按「平台 + 会话类型」抑制过度发言。
+	// web 平台硬禁用；单聊(private)默认关闭节奏（即时回复）；群聊/频道默认受控。
+	// 解析逻辑在 provider 内完成（从 config store 读取按平台配置），保持 stages 包与 api 解耦。
+	rhythmProvider := func(platform, chatType string) stages.RhythmPolicy {
+		if platform == "web" {
+			return stages.RhythmPolicy{Apply: false} // web 永不参与节奏控制
+		}
+		cfg := s.getBotRhythmConfig(id, platform)
+		if cfg == nil || !cfg.Enabled {
+			return stages.RhythmPolicy{Apply: false}
+		}
+		params := selectRhythmParams(cfg, chatType)
+		if !params.Enabled {
+			return stages.RhythmPolicy{Apply: false}
+		}
+		return stages.RhythmPolicy{
+			Apply:          true,
+			QuietWait:      params.Debounce.QuietWait,
+			SpeakTendency:  params.SpeakTendency,
+			MaxConsecutive: params.Interrupt.MaxConsecutive,
+		}
+	}
+	rhythmStage := stages.NewRhythmStage("chat-rhythm", rhythmProvider, s.logger)
+
 	// 创建 Pipeline
 	stages := []core.StageInfo{
 		{Stage: lurkEnricher, Order: 45, Enabled: true},
 		{Stage: recallStage, Order: 90, Enabled: true},
+		{Stage: rhythmStage, Order: 95, Enabled: true},
 		{Stage: wrappedLLM, Order: 100, Enabled: true},
 	}
 	if engagementStage != nil {
