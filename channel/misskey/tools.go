@@ -301,15 +301,21 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 					return nil, fmt.Errorf("misskey_create_note: invalid input type")
 				}
 
-				// 直接回复语境（对方 @ 了你或回复了你）：禁止用本工具「回复」。
-				// 否则会发成一条孤立新帖（不成串接），且与框架自动串接回复重复。
+				// 回复语境拦截：禁止用本工具「回复」。覆盖两种场景：
+				//   1. IsDirectReply —— 对方 @ 了你或回复了你（Mentioned=true）。
+				//   2. IsFrameworkReplyContext —— 本轮由本渠道入站帖驱动、框架会串接回复
+				//      （含未 @ Bot 的普通 timeline 帖）。手动发孤立帖会与框架自动回复重复。
 				// 直接让 Bot 用普通文本回复即可，框架会自动带 @ 前缀并以串接回复发出。
-				if llm.IsDirectReply(ctx) {
+				if llm.IsDirectReply(ctx) || llm.IsFrameworkReplyContext(ctx, c.name) {
+					reason := "reply_context"
+					if llm.IsFrameworkReplyContext(ctx, c.name) && !llm.IsDirectReply(ctx) {
+						reason = "inbound_reply_context"
+					}
 					return map[string]any{
 						"success": false,
 						"blocked": true,
-						"reason":  "reply_context",
-						"message": "你正处于「直接回复某人」的语境（对方 @ 了你或回复了你）。" +
+						"reason":  reason,
+						"message": "你正处于「对一条已有帖子进行回复」的语境（对方 @ 了你、回复了你，或对某条时间线帖串接回复）。" +
 							"此时不要调用 misskey_create_note 来回复——它会发成一条孤立的新帖、与原帖不成串接，还会和系统的自动回复重复。" +
 							"请直接用你的普通文本回复即可：系统会把你的回复作为带 @ 前缀的串接回复自动发出。",
 					}, nil
