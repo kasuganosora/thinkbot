@@ -26,6 +26,9 @@ type rawSnippet struct {
 	content  string
 	sourceID string
 	scope    Scope
+	// speaker 标记该片段的说话人："user"=用户原话，"assistant"=bot 自身回复，
+	// ""=未知。用于防止 dreaming 把 bot 自己的发言误归为用户事实。
+	speaker string
 }
 
 // runLight 执行浅睡眠：从 L0 摄取 → LLM 提取候选 → Jaccard 去重 → 暂存。
@@ -74,8 +77,16 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 			if content == "" {
 				continue
 			}
+			// 读取说话人标签（note_capture 写入的 speaker 字段）。
+			// 缺失时视为未知，交由提取器按规则保守处理。
+			spk := ""
+			if e.Metadata != nil {
+				if v, ok := e.Metadata["speaker"].(string); ok {
+					spk = v
+				}
+			}
 			snippets = append(snippets, rawSnippet{
-				content: content, sourceID: e.ID, scope: scope,
+				content: content, sourceID: e.ID, scope: scope, speaker: spk,
 			})
 			ids = append(ids, e.ID)
 		}
@@ -172,8 +183,19 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 	sb.WriteString("Keep each one under 100 characters. Filter out small talk, greetings and throwaway debugging.\n")
 	sb.WriteString("Write each content value in Chinese (中文).\n")
 	sb.WriteString("Output a raw JSON array: [{\"content\":\"...\",\"category\":\"fact|preference|observation\"}]\n\n")
+	sb.WriteString("CRITICAL attribution rules (violating these creates false memories):\n")
+	sb.WriteString("- Only extract facts the USER explicitly stated or clearly implied in THEIR OWN messages.\n")
+	sb.WriteString("- Each snippet is labeled with its speaker. If speaker is \"assistant\", the text is the BOT's own reply.\n")
+	sb.WriteString("  NEVER treat the assistant's statements, opinions, or knowledge as the user's. Do NOT conclude\n")
+	sb.WriteString("  \"the user knows/likes/is familiar with X\" from an assistant snippet. Skip assistant snippets entirely.\n")
+	sb.WriteString("- If speaker is \"user\" or unknown, extract only what that message literally conveys about the user.\n")
+	sb.WriteString("- Do not infer the user's familiarity, taste, or evaluation of something merely because the assistant discussed it.\n\n")
 	for i, s := range snippets {
-		fmt.Fprintf(&sb, "--- snippet %d ---\n%s\n\n", i+1, strutil.Truncate(s.content, 500))
+		spk := s.speaker
+		if spk == "" {
+			spk = "unknown"
+		}
+		fmt.Fprintf(&sb, "--- snippet %d (speaker: %s) ---\n%s\n\n", i+1, spk, strutil.Truncate(s.content, 500))
 	}
 
 	maxTokens := d.config.MaxDreamTokens
@@ -232,6 +254,10 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 func (d *DreamManager) extractCandidatesRuleBased(snippets []rawSnippet) []DreamCandidate {
 	out := make([]DreamCandidate, 0, len(snippets))
 	for _, s := range snippets {
+		// 规则降级路径同样排除 bot 自身的回复，避免把 bot 发言误存为用户事实。
+		if s.speaker == "assistant" {
+			continue
+		}
 		if len([]rune(s.content)) < 10 {
 			continue
 		}

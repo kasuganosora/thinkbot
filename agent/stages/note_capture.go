@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"strings"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
@@ -43,16 +44,26 @@ func NoteCaptureMiddleware(category string) func(next core.Stage) core.Stage {
 					if a.Payload == "" {
 						continue
 					}
+					// 捕获「用户说了什么」作为 L0 对话记忆，供 dreaming 学习用户偏好/事实。
+					// 注意：不要捕获 bot 自己的回复（a.Payload 是 bot 生成的）——否则 dreaming
+					// 会把 bot 的发言误当成用户的事实（说话人归属错误，见历史 bug：
+					// 把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
+					// 因此这里写入的是用户入站原文 env.Message.Text，并打 speaker:"user" 标签。
+					userText := strings.TrimSpace(env.Message.Text)
+					if userText == "" {
+						continue
+					}
 					out.AddAction(core.Action{
 						Type:    core.ActionNote,
 						Channel: env.Message.Channel, // 会话空间标识（记忆关联）
 						UserID:  env.Message.UserID,
-						Payload: a.Payload,
+						Payload: userText,
 						Metadata: map[string]any{
 							"source_channel": env.Message.Source,
 							"bot_id":         env.Message.BotID,
 							"message_id":     env.Message.ID,
 							"category":       category,
+							"speaker":        "user",
 						},
 					})
 				}
