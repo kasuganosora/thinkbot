@@ -18,6 +18,48 @@ func IsDirectReply(ctx context.Context) bool {
 	return ok && v
 }
 
+// ctxKeyInboundReply 标记「本轮由某个入站帖/消息驱动、框架会自动串接回复」。
+//
+// 与 ctxKeyDirectReply 的区别：DirectReply 只在「被 @ / 被回复」时为真，
+// 但框架对**任何**有回复目标的入站帖都会自动串接回复（社交时间线上未 @ Bot 的
+// 普通帖同样如此）。此时若 Channel 工具再手动发一条新帖，同一条入站帖就会收到
+// 两条发文（典型表现：正文手动加 "@某人" 前缀假装回复，实际是条孤立帖）。
+// 因此需要一个比 DirectReply 更宽的判据。
+type ctxKeyInboundReply struct{}
+
+// InboundReply 描述「本轮由哪个入站渠道的消息驱动」。
+// Source 为 core.Message.Source（渠道实例名），Channel 工具用它确认
+// 该入站消息是否来自**自己所属的渠道**——跨渠道场景（如在 Web 会话里
+// 指示 Bot 去 Misskey 发帖）不应被拦截。
+type InboundReply struct {
+	// Source 入站渠道实例名。
+	Source string
+	// HasReplyTarget 框架是否持有该消息的回复目标（能串接回复）。
+	HasReplyTarget bool
+}
+
+// WithInboundReply 把「入站回复语境」注入 ctx。
+func WithInboundReply(ctx context.Context, v InboundReply) context.Context {
+	return context.WithValue(ctx, ctxKeyInboundReply{}, v)
+}
+
+// InboundReplyFrom 读取「入站回复语境」。未设置时返回零值 + false。
+func InboundReplyFrom(ctx context.Context) (InboundReply, bool) {
+	v, ok := ctx.Value(ctxKeyInboundReply{}).(InboundReply)
+	return v, ok
+}
+
+// IsFrameworkReplyContext 判断本轮是否「由 source 渠道的入站消息驱动、且框架会串接回复」。
+// source 传入调用方渠道自身的实例名；不匹配（或未注入）时返回 false，
+// 保证跨渠道主动发帖能力不被误伤。
+func IsFrameworkReplyContext(ctx context.Context, source string) bool {
+	if source == "" {
+		return false
+	}
+	v, ok := InboundReplyFrom(ctx)
+	return ok && v.HasReplyTarget && v.Source == source
+}
+
 // ToolExecuteFunc is the signature for a tool's execution handler.
 // input is the parsed arguments from the LLM. The return value becomes the
 // tool result output sent back to the model.
