@@ -929,11 +929,26 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if !params.Enabled {
 			return stages.RhythmPolicy{Apply: false}
 		}
+		// 连续中断需 Interrupt.Enabled 显式开启；关闭时上限传 0（stage 内视为不限），
+		// 否则用户在 UI 关掉「连续发言中断」仍会被限制。
+		maxConsec := 0
+		interruptWindow := 0
+		if params.Interrupt.Enabled {
+			maxConsec = params.Interrupt.MaxConsecutive
+			// 中断计数窗口：优先用 MaxRounds（轮次语义近似秒级窗口不合适），
+			// 这里按「限流间隔 × 上限 + 缓冲」推导一个与限流解耦的默认窗口，
+			// 保证窗口至少覆盖一轮正常往返，且不随 QuietWait 线性放大沉默。
+			interruptWindow = params.Debounce.MaxWait
+			if interruptWindow <= 0 {
+				interruptWindow = 15
+			}
+		}
 		return stages.RhythmPolicy{
-			Apply:          true,
-			QuietWait:      params.Debounce.QuietWait,
-			SpeakTendency:  params.SpeakTendency,
-			MaxConsecutive: params.Interrupt.MaxConsecutive,
+			Apply:           true,
+			QuietWait:       params.Debounce.QuietWait,
+			SpeakTendency:   params.SpeakTendency,
+			MaxConsecutive:  maxConsec,
+			InterruptWindow: interruptWindow,
 		}
 	}
 	rhythmStage := stages.NewRhythmStage("chat-rhythm", rhythmProvider, s.logger)

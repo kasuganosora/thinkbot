@@ -36,14 +36,14 @@ import (
 
 // BotPlatform 平台绑定定义（存储在 config store）。
 type BotPlatform struct {
-	ID         string            `json:"id"`
-	Type       string            `json:"type"`
-	Name       string            `json:"name"`
-	Enabled    bool              `json:"enabled"`
-	Configured bool              `json:"configured"`
-	Config     map[string]any    `json:"config"`
-	Tools      []string          `json:"tools"`
-	Rhythm     *BotRhythmConfig  `json:"rhythm,omitempty"`
+	ID         string           `json:"id"`
+	Type       string           `json:"type"`
+	Name       string           `json:"name"`
+	Enabled    bool             `json:"enabled"`
+	Configured bool             `json:"configured"`
+	Config     map[string]any   `json:"config"`
+	Tools      []string         `json:"tools"`
+	Rhythm     *BotRhythmConfig `json:"rhythm,omitempty"`
 }
 
 // ToolCatalogGroup 工具分组目录。
@@ -197,28 +197,34 @@ func (s *Server) handleUpdateBotPlatform(c *gin.Context) {
 			p.Config = m
 		}
 	}
-		if v, ok := req["tools"]; ok {
-			if arr, ok := v.([]any); ok {
-				tools := make([]string, 0, len(arr))
-				for _, item := range arr {
-					if s, ok := item.(string); ok {
-						tools = append(tools, s)
-					}
-				}
-				p.Tools = tools
-			}
-		}
-		// 聊天节奏已合并进平台对象：随平台设置一起读写，无需独立入口。
-		if v, ok := req["rhythm"]; ok && v != nil {
-			if m, ok := v.(map[string]any); ok {
-				if data, err := json.Marshal(m); err == nil {
-					var rc BotRhythmConfig
-					if json.Unmarshal(data, &rc) == nil {
-						p.Rhythm = &rc
-					}
+	if v, ok := req["tools"]; ok {
+		if arr, ok := v.([]any); ok {
+			tools := make([]string, 0, len(arr))
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					tools = append(tools, s)
 				}
 			}
+			p.Tools = tools
 		}
+	}
+	// 聊天节奏已合并进平台对象：随平台设置一起读写，无需独立入口。
+	if v, ok := req["rhythm"]; ok && v != nil {
+		if m, ok := v.(map[string]any); ok {
+			if data, err := json.Marshal(m); err == nil {
+				var rc BotRhythmConfig
+				if json.Unmarshal(data, &rc) == nil {
+					// 保存侧即补齐缺失子配置：BotRhythmParams 是值类型，
+					// 「用户显式关闭(enabled=false 其余零值)」与「前端未提交该子项」
+					// 在零值上无法区分。若只在读取侧补默认，用户的关闭会被
+					// 默认值(group.Enabled=true)静默撤销。这里落库前就补全，
+					// 使存储始终是完整结构，读取侧不再需要猜测意图。
+					fillRhythmDefaults(&rc, p.Type)
+					p.Rhythm = &rc
+				}
+			}
+		}
+	}
 	p.Configured = true
 
 	if err := s.saveBotPlatforms(c, botID, platforms); err != nil {
@@ -1310,7 +1316,7 @@ var botRhythmPlatforms = []string{"telegram", "misskey"}
 
 // BotRhythmConfig 按平台配置的聊天节奏。每个平台一份。
 type BotRhythmConfig struct {
-	Enabled bool             `json:"enabled"` // 平台级总开关
+	Enabled bool            `json:"enabled"` // 平台级总开关
 	Private BotRhythmParams `json:"private"` // 单聊（1对1）参数
 	Group   BotRhythmParams `json:"group"`   // 群聊 / 超级群参数
 	Channel BotRhythmParams `json:"channel"` // 频道（只读广播）参数
@@ -1318,10 +1324,10 @@ type BotRhythmConfig struct {
 
 // BotRhythmParams 某个会话类型的节奏参数。
 type BotRhythmParams struct {
-	Enabled       bool              `json:"enabled"`       // 该会话类型是否启用节奏控制（false=完全关闭，即时回复）
-	Debounce      BotRhythmDebounce `json:"debounce"`
-	Timing        BotRhythmToggle   `json:"timing"`
-	SpeakTendency float64           `json:"speakTendency"`
+	Enabled       bool               `json:"enabled"` // 该会话类型是否启用节奏控制（false=完全关闭，即时回复）
+	Debounce      BotRhythmDebounce  `json:"debounce"`
+	Timing        BotRhythmToggle    `json:"timing"`
+	SpeakTendency float64            `json:"speakTendency"`
 	Interrupt     BotRhythmInterrupt `json:"interrupt"`
 	IdleComp      BotRhythmIdleComp  `json:"idleComp"`
 }
@@ -1418,6 +1424,11 @@ func (s *BotService) getBotRhythmConfig(botID, platform string) *BotRhythmConfig
 }
 
 // fillRhythmDefaults 补齐缺失的子配置（private/group/channel），避免下游空指针。
+//
+// 判据是「全字段零值 = 未配置」。这在读取侧是一个**近似**判断：
+// 用户显式关闭某会话类型（enabled=false）时，只要其它字段非零（前端始终提交
+// 完整结构，如 quietWait=3）就不会被误判。为不依赖前端行为，
+// handleUpdateBotPlatform 在**保存前**也会调用本函数，使落库数据始终完整。
 func fillRhythmDefaults(cfg *BotRhythmConfig, platform string) {
 	def := defaultBotRhythmConfigForPlatform(platform)
 	if cfg.Private == (BotRhythmParams{}) {
