@@ -430,7 +430,11 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			if note.Text == "" && len(note.Files) == 0 && note.Renote == nil {
 				return nil
 			}
-			c.handleNote(ctx, note, "timeline", false) // Mentioned = false
+			// timeline 上的帖子若直接 @ 了本 Bot，视为被真人提及（Mentioned=true）。
+			// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention 事件因
+			// 去重晚到被丢弃时，@bot 会被当成普通时间线消息，被聊天节奏按概率
+			// 降频，用户体感即「@ 了没反应」。
+			c.handleNote(ctx, note, "timeline", c.timelineMentioned(note))
 		default:
 			// 忽略其他 timeline 事件
 		}
@@ -438,6 +442,16 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 	}
 
 	return nil
+}
+
+// timelineMentioned 判断一条时间线帖子是否直接 @ 了本 Bot。
+// 复用初始化时按 bot 用户名编译的 mentionRe（匹配 @username 或 @username@host），
+// 与 handleNote 中剥离 @bot 文本的正则保持一致，避免误判。
+func (c *MisskeyChannel) timelineMentioned(note Note) bool {
+	if c.mentionRe == nil {
+		return false
+	}
+	return c.mentionRe.MatchString(note.Text)
 }
 
 // handleNote 将一条 Misskey Note 转换为 core.Message 并注入 Ingress。
