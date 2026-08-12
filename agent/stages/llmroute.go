@@ -305,6 +305,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 强制走框架自动串接回复，避免重复发文。该值在 Orchestrate 全程透传到工具执行。
 	ctx = llm.WithDirectReply(ctx, env.Message.Mentioned)
 
+	// 注入更宽的「入站回复语境」标记：框架对**任何**带 reply_target 的入站帖
+	// 都会自动串接回复（含未 @ Bot 的普通 timeline 帖）。此时若 Channel 工具再手动
+	// 发一条新帖，同一条入站帖就会收到两条发文。据此让工具层禁用「手动发孤立帖」，
+	// 强制走框架自动串接回复，避免重复发文。覆盖 IsDirectReply 未触达的未 @ 场景。
+	ctx = llm.WithInboundReply(ctx, llm.InboundReply{
+		Source:         env.Message.Source,
+		HasReplyTarget: env.Message.Metadata["reply_target"] != "",
+	})
+
 	// 构建消息
 	var messages []llm.Message
 	if s.config.MessageBuilder != nil {
