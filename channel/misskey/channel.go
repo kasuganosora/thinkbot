@@ -35,6 +35,9 @@ const (
 	mainConnID = "main-1"
 )
 
+// mentionAnyRe 匹配文本中的 @username 或 @username@host 提及（不分用户）。
+var mentionAnyRe = regexp.MustCompile(`@[A-Za-z0-9_]+(@[A-Za-z0-9.\-]+)?`)
+
 // timelineConnID 返回某个 timeline 频道的 streaming 连接 ID（如 "tl:homeTimeline"）。
 func timelineConnID(channel string) string { return "tl:" + channel }
 
@@ -536,6 +539,11 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		text = fmt.Sprintf("[Timeline] @%s: %s", note.User.Username, text)
 	}
 
+	// 对方是 Bot 账号：在文本前标注，让 LLM 感知并自行决定是否/如何回复
+	if note.User.IsBot {
+		text = fmt.Sprintf("[对方是 Bot 账号 %s] %s", username, text)
+	}
+
 	// 确定 Channel 标识：
 	// - timeline 事件（社交时间线）→ 共享的社交空间，所有用户共享同一 channel scope
 	// - mention/reply 事件（直接互动）→ 按 user ID 隔离，视为 1:1 对话
@@ -554,6 +562,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		UserID:    note.User.ID,
 		Text:      text,
 		Mentioned: mentioned,
+		FromIsBot: note.User.IsBot,
 		MediaType: "text/plain",
 		Metadata:  metadata,
 		CreatedAt: createdAt,
@@ -658,12 +667,73 @@ func (c *MisskeyChannel) Reply(ctx context.Context, noteID, text string) error {
 func (c *MisskeyChannel) ReplyWithVisibility(ctx context.Context, noteID, text, visibility string) error {
 	text = truncateRunes(strings.TrimSpace(text), misskeyMaxNoteLength)
 
+	// 回复时自动 @ 被回复者及其他被 @ 的人（排除 Bot 自身）
+	if noteID != "" {
+		if replyNote, err := c.api.getNote(ctx, noteID); err == nil && replyNote != nil {
+			if prefix := c.buildReplyMentionPrefix(replyNote); prefix != "" {
+				text = prefix + text
+				text = truncateRunes(text, misskeyMaxNoteLength) // 加前缀后再次裁切，防止超长
+			}
+		} else if err != nil {
+			traceid.L(ctx).Debugw("misskey: getNote for reply mention prefix skipped",
+				"channel", c.name, "note_id", noteID, "err", err)
+		}
+	}
+
 	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, "", nil)
 	if err != nil {
 		traceid.L(ctx).Warnw("misskey: reply failed, target note may be deleted",
 			"channel", c.name, "note_id", noteID, "err", err)
 	}
 	return err
+}
+
+// buildReplyMentionPrefix 构造回复时的 @ 前缀。
+// 规则：至少 @ 被回复者（被回复 note 的作者）；若被回复 note 文本里还有其他 @ 账号，
+// 排除 Bot 自身后一并 @ 上。返回形如 "@alice @bob " 的前缀（含末尾空格），无则空字符串。
+func (c *MisskeyChannel) buildReplyMentionPrefix(replyNote *Note) string {
+	if replyNote == nil {
+		return ""
+	}
+	seen := make(map[string]bool)
+	var handles []string
+	add := func(handle string) {
+		handle = strings.TrimSpace(handle)
+		if handle == "" {
+			return
+		}
+		// 提取纯用户名（去掉 @ 和 host）用于排除自身判断
+		bare := strings.TrimPrefix(handle, "@")
+		if at := strings.Index(bare, "@"); at >= 0 {
+			bare = bare[:at]
+		}
+		if bare == c.botUsername {
+			return // 排除 Bot 自身
+		}
+		if seen[handle] {
+			return
+		}
+		seen[handle] = true
+		handles = append(handles, handle)
+	}
+
+	// 被回复者（note 作者）必带
+	if replyNote.User.Username != "" {
+		h := "@" + replyNote.User.Username
+		if replyNote.User.Host != "" {
+			h += "@" + replyNote.User.Host
+		}
+		add(h)
+	}
+	// 被回复 note 文本里其他被 @ 的人
+	for _, m := range mentionAnyRe.FindAllString(replyNote.Text, -1) {
+		add(m)
+	}
+
+	if len(handles) == 0 {
+		return ""
+	}
+	return strings.Join(handles, " ") + " "
 }
 
 // React 对帖子添加 emoji 反应。
