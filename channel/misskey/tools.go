@@ -41,7 +41,8 @@ You are NOT "write-only" and NOT "tool-less" on Misskey. You both RECEIVE and CA
 - 想搜某个关键词的帖子：用 misskey_search_notes。
 
 ## 主动发布新帖（非回复时才用工具）
-只有当你想**主动开一条全新的、不属于任何回复的帖子**时，才调用 misskey_create_note。回复场景请用上面的「直接文本回复」。`,
+只有当你想**主动开一条全新的、不属于任何回复的帖子**时，才调用 misskey_create_note。回复场景请用上面的「直接文本回复」。
+- 若帖文中需要 @ 某人：**本实例（maid.lat）用户直接写 @username 即可；非本实例的远程/联邦用户必须写 @username@host（如 @alice@example.com）**，对话上下文里出现的 @username@host 就是正确写法，照搬即可，否则对方收不到。`,
 }
 
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
