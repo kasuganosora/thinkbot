@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +12,9 @@ import (
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 )
+
+// volatileMetricRe 匹配易失的项目指标/自指进度汇报，规则降级路径据此跳过。
+var volatileMetricRe = regexp.MustCompile(`\d+\s*(个|文件|测试|行|次|files?|tests?|builds?)|(created|passed|测试文件|编译通过|编译失败|build\s*(pass|fail)|CI)`)
 
 // ============================================================================
 // Phase 1: Light Sleep — 摄取 + 去重
@@ -189,7 +193,13 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 	sb.WriteString("  NEVER treat the assistant's statements, opinions, or knowledge as the user's. Do NOT conclude\n")
 	sb.WriteString("  \"the user knows/likes/is familiar with X\" from an assistant snippet. Skip assistant snippets entirely.\n")
 	sb.WriteString("- If speaker is \"user\" or unknown, extract only what that message literally conveys about the user.\n")
-	sb.WriteString("- Do not infer the user's familiarity, taste, or evaluation of something merely because the assistant discussed it.\n\n")
+	sb.WriteString("- Do not infer the user's familiarity, taste, or evaluation of something merely because the assistant discussed it.\n")
+	sb.WriteString("- Ephemeral / self-referential output from the assistant must NOT be promoted. Explicitly skip and never emit:\n")
+	sb.WriteString("  * volatile metrics and transient project stats (file counts, test counts, line counts, version/build numbers,\n")
+	sb.WriteString("    \"X files created/passed\", progress reports, CI status) — these go stale immediately and are not durable facts.\n")
+	sb.WriteString("  * the assistant describing its own work product, plans, or status (\"I created/fixed/ran ...\").\n")
+	sb.WriteString("  * trivia with no lasting value (counts, timestamps, one-off task results).\n")
+	sb.WriteString("- Prefer durable, reusable context: stable user preferences, persistent project facts, recurring topics, known constraints.\n\n")
 	for i, s := range snippets {
 		spk := s.speaker
 		if spk == "" {
@@ -256,6 +266,10 @@ func (d *DreamManager) extractCandidatesRuleBased(snippets []rawSnippet) []Dream
 	for _, s := range snippets {
 		// 规则降级路径同样排除 bot 自身的回复，避免把 bot 发言误存为用户事实。
 		if s.speaker == "assistant" {
+			continue
+		}
+		// 易失指标 / 瞬时进度汇报（如「153 个测试文件已创建」）不值得固化。
+		if volatileMetricRe.MatchString(s.content) {
 			continue
 		}
 		if len([]rune(s.content)) < 10 {
