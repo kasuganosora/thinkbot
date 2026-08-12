@@ -2,6 +2,22 @@ package llm
 
 import "context"
 
+// ctxKeyDirectReply 标记「当前消息是否处于直接回复语境」（对方 @ 了 Bot 或回复了 Bot）。
+// 由 llmroute 在编排前注入，供 Channel 工具（如 Misskey 的发布工具）判断：
+// 在直接回复语境下应改用「文本回复」（框架会自动串接回复），而非手动发孤立帖，避免重复发文。
+type ctxKeyDirectReply struct{}
+
+// WithDirectReply 把「是否直接回复语境」注入 ctx。
+func WithDirectReply(ctx context.Context, v bool) context.Context {
+	return context.WithValue(ctx, ctxKeyDirectReply{}, v)
+}
+
+// IsDirectReply 读取「是否直接回复语境」。未设置时返回 false。
+func IsDirectReply(ctx context.Context) bool {
+	v, ok := ctx.Value(ctxKeyDirectReply{}).(bool)
+	return ok && v
+}
+
 // ToolExecuteFunc is the signature for a tool's execution handler.
 // input is the parsed arguments from the LLM. The return value becomes the
 // tool result output sent back to the model.
