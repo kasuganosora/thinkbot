@@ -13,21 +13,35 @@ import (
 // ChannelToolProvider 实现 — Misskey 平台专属工具
 // ============================================================================
 
-// channelToolAwarenessSection 纠正 bot 的自我认知：它在 Misskey 上并非「只写不读」。
-// 它既会被动接收 mention/reply/timeline 消息，也拥有主动读取帖子的工具。
-// 挂在新读取工具的 PromptSection 上，随 misskey 通道一起注入系统提示。
+// channelToolAwarenessSection 纠正 bot 的自我认知：它在 Misskey 上既能接收也能发言。
+// 它既会被动接收 mention/reply/timeline 消息，也拥有主动读取与发布帖子的工具。
+// 同时明确「回复」的正确姿势：直接用文本回复即可，框架会自动把回复作为带 @ 前缀的串接回复发出，
+// 不需要、也不应该为了回复而去调用 misskey_create_note（那会发成孤立帖子，且可能与框架回复重复）。
+// 挂在新读取工具与发布工具上，随 misskey 通道一起注入系统提示。
 var channelToolAwarenessSection = &agenttools.ToolPromptSection{
 	Name:    "misskey_observability",
 	Order:   300,
 	Enabled: true,
-	Content: `# Misskey Observability
+	Content: `# Misskey 能力说明
 
-You are NOT "write-only" on Misskey. Besides the action tools (post, renote, react, follow, search user), you ALSO receive Misskey content automatically as normal incoming messages — no tool call is needed to "see" them:
+You are NOT "write-only" and NOT "tool-less" on Misskey. You both RECEIVE and CAN POST.
 
-- Direct mentions and replies addressed to you always arrive, so you can respond.
-- The bot subscribes to the home, local, and hybrid timelines; notes from those timelines are delivered to you as [Timeline] messages that you can observe, learn from, or react to.
+## 接收（无需工具）
+- 直接 @ 你或回复你的消息总会送达，你可以直接回应。
+- Bot 订阅了 home / local / hybrid timeline，这些时间线的帖子会作为 [Timeline] 消息送达，你可以观察、学习或对其表态。
 
-For on-demand reading — e.g. "what did @user post recently" or "search notes about X" — use the misskey_get_user_notes and misskey_search_notes tools below. Prefer them when you need specific history that has not streamed by yet. Do NOT claim you cannot read Misskey; you can both observe and act.`,
+## 回复（直接用文本，不要调用工具）
+当有人 @ 你或回复你时，**直接用你的正常文本回复即可**——系统会自动把你的回复作为「串接回复」发出（并自动带上 @ 对方 的前缀）。
+- 你**不需要**、也**不应该**为了回复而去调用 misskey_create_note：那会发成一条孤立的新帖子，而不是对原帖的回复，还可能与框架自动回复重复。
+- 因此任何时候都不要说「我没有可以回复的工具」——你永远可以用文本回复，框架会替你发出去。
+- 你的最终回复文本**就是**会发给对方的帖子正文。请直接写回复内容（例如「收到！回复来啦～」），**不要写**「我已经回复了 / 我加了反应 / 我发布了帖子」之类的操作汇报——那些动作由系统处理，不是你要说给用户听的话。
+
+## 主动读取（按需调用工具）
+- 想看某人最近发了什么：用 misskey_get_user_notes（先 misskey_search_user 拿到 userId）。
+- 想搜某个关键词的帖子：用 misskey_search_notes。
+
+## 主动发布新帖（非回复时才用工具）
+只有当你想**主动开一条全新的、不属于任何回复的帖子**时，才调用 misskey_create_note。回复场景请用上面的「直接文本回复」。`,
 }
 
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
@@ -285,6 +299,21 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 				if !ok {
 					return nil, fmt.Errorf("misskey_create_note: invalid input type")
 				}
+
+				// 直接回复语境（对方 @ 了你或回复了你）：禁止用本工具「回复」。
+				// 否则会发成一条孤立新帖（不成串接），且与框架自动串接回复重复。
+				// 直接让 Bot 用普通文本回复即可，框架会自动带 @ 前缀并以串接回复发出。
+				if llm.IsDirectReply(ctx) {
+					return map[string]any{
+						"success": false,
+						"blocked": true,
+						"reason":  "reply_context",
+						"message": "你正处于「直接回复某人」的语境（对方 @ 了你或回复了你）。" +
+							"此时不要调用 misskey_create_note 来回复——它会发成一条孤立的新帖、与原帖不成串接，还会和系统的自动回复重复。" +
+							"请直接用你的普通文本回复即可：系统会把你的回复作为带 @ 前缀的串接回复自动发出。",
+					}, nil
+				}
+
 				text, _ := args["text"].(string)
 				if text == "" {
 					return nil, fmt.Errorf("misskey_create_note: text is required")
@@ -311,6 +340,7 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 			}),
 		},
 		Category: "misskey",
+		PromptSection: channelToolAwarenessSection,
 	}
 }
 
