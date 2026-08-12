@@ -565,6 +565,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 这些内容属于「心里话」，绝不能发给用户。
 	// 注意：项目原先只在记忆写入侧清洗，出站链路完全没清 —— 必须在此补上。
 	replyText := memory.StripThinking(result.Text)
+
+	// 纵深防御：剥离模型从系统提示里复述出来的内部状态（记忆用量指标等），
+	// 例如把 "[2,206/2,200 chars]" 写成「当前记忆已接近容量上限（2,206/2,200 字符）」
+	// 公开发到时间线。思考清洗后再次过滤内部指标，确保不泄漏。
+	replyText = memory.StripInternalState(replyText)
 	if strings.TrimSpace(replyText) == "" {
 		// 清洗后为空说明模型这轮只输出了思考内容，没有真正要说的话。
 		// 此时发送空消息毫无意义（且部分 Channel 会报错），跳过发送。

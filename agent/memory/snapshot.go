@@ -52,9 +52,15 @@ type SnapshotConfig struct {
 	// Mode 刷新模式（默认 ModeLive）。
 	Mode RefreshMode
 	// MaxMemoryChars memory（agent 笔记）的字符上限（默认 2200）。
+	// 若注入了 Window，则实际上限由 Window.MemoryBudget()*3 动态派生，
+	// 与 context.go 的 maxChars := maxTokens*3 口径一致；此字段仅作 fallback。
 	MaxMemoryChars int
 	// MaxUserChars user（用户画像）的字符上限（默认 1375）。
 	MaxUserChars int
+	// Window 动态上下文窗口管理器（可选）。注入后记忆块字符上限由
+	// Window.MemoryBudget()*3 派生，取代硬编码的 MaxMemoryChars/MaxUserChars，
+	// 使记忆预算随模型上下文窗口自适应（与其他使用 window 模块的地方一致）。
+	Window *Window
 	// Header 记忆块的头部模板。
 	// 占位符：{usage} → "45% — 990/2200 chars"。
 	Header string
@@ -124,6 +130,9 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		}
 		if config[0].RefreshTurns > 0 {
 			cfg.RefreshTurns = config[0].RefreshTurns
+		}
+		if config[0].Window != nil {
+			cfg.Window = config[0].Window
 		}
 	}
 	return &Snapshot{config: cfg}
@@ -304,6 +313,22 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	limit := s.config.MaxMemoryChars
 	if target == "user" {
 		limit = s.config.MaxUserChars
+	}
+
+	// 若注入了 Window（生产路径），记忆块字符上限改为由 window 模块派生：
+	// MemoryBudget() 返回 token 预算，×3 估算字符（与 context.go 的
+	// maxChars := maxTokens*3 口径一致），从而避免硬编码魔法数、随模型
+	// 上下文窗口自适应。未注入 Window 时回退到上面的硬编码默认值。
+	if s.config.Window != nil {
+		if budget := s.config.Window.MemoryBudget(); budget > 0 {
+			budgetChars := budget * 3
+			if target == "user" {
+				// 保持原 2200/1375 的比例（≈0.625），让 user 块占 memory 块的一部分
+				limit = budgetChars * 1375 / 2200
+			} else {
+				limit = budgetChars
+			}
+		}
 	}
 
 	var sanitized []string

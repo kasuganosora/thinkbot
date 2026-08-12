@@ -244,7 +244,49 @@ func (c *SemanticCompactor) Compact(
 }
 
 // clusterAndMerge 调用 LLM 对记忆进行聚类合并。
+// 复用包级 ClusterMerge，仅在其基础上施加本压缩器的大小约束。
 func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []TieredEntry) ([]ClusterResult, error) {
+	inputs := make([]ClusterInput, 0, len(entries))
+	for _, e := range entries {
+		inputs = append(inputs, ClusterInput{
+			ID:       e.ID,
+			Category: e.Category,
+			Content:  e.Content,
+		})
+	}
+	raw, err := ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs)
+	if err != nil {
+		return nil, err
+	}
+
+	// 应用本压缩器的大小约束
+	var valid []ClusterResult
+	for _, cl := range raw {
+		if len(cl.SourceIDs) >= c.config.MinClusterSize {
+			if len(cl.SourceIDs) > c.config.MaxClusterSize {
+				cl.SourceIDs = cl.SourceIDs[:c.config.MaxClusterSize]
+			}
+			valid = append(valid, cl)
+		}
+	}
+	return valid, nil
+}
+
+// ClusterInput 是语义压缩聚类合并的输入条目。
+type ClusterInput struct {
+	ID       string `json:"id"`
+	Category string `json:"category"`
+	Content  string `json:"content"`
+}
+
+// ClusterMerge 调用 LLM 将相似记忆条目聚类合并为更密集的条目。
+// 抽离为包级函数，供 SemanticCompactor（TieredStore）与 SQLiteCompactor
+// （SQLiteRepository）复用，避免两套重复的 prompt 构造与 JSON 解析逻辑。
+//
+// 返回的 cluster 已通过基础合法性校验（至少 2 个来源、合并内容非空、
+// 来源数上限 50），调用方可按需再施加自身的大小约束（MinClusterSize/MaxClusterSize）。
+// LLM 返回无法解析的 JSON 时返回 (nil, nil)，表示「无可合并项」，不报错。
+func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput) ([]ClusterResult, error) {
 	var sb strings.Builder
 	sb.WriteString("## Long-term memory entries to compact\n\n")
 	for _, e := range entries {
@@ -274,9 +316,9 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 	sb.WriteString("\n```")
 	sb.WriteString("\nIf nothing can be merged, output an empty array [] and nothing else.")
 
-	resp, err := c.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), llm.GenerateParams{
-		Model:    c.config.Model,
-		System:   c.config.SystemPrompt,
+	resp, err := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), llm.GenerateParams{
+		Model:    model,
+		System:   systemPrompt,
 		Messages: []llm.Message{llm.UserMessage(sb.String())},
 	})
 	if err != nil {
@@ -285,18 +327,15 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 
 	var clusters []ClusterResult
 	if err := strutil.ExtractJSON(resp.Text, &clusters); err != nil {
-		c.logger.Warnw("compactor: failed to parse clusters JSON",
-			"err", err,
-			"preview", strutil.Truncate(resp.Text, 200))
-		return nil, nil // 解析失败返回空，不报错
+		return nil, nil // 解析失败返回空，不报错（与 clusterAndMerge 旧行为一致）
 	}
 
-	// 过滤无效 cluster
+	// 基础合法性校验
 	var valid []ClusterResult
 	for _, cl := range clusters {
-		if len(cl.SourceIDs) >= c.config.MinClusterSize && strings.TrimSpace(cl.MergedContent) != "" {
-			if len(cl.SourceIDs) > c.config.MaxClusterSize {
-				cl.SourceIDs = cl.SourceIDs[:c.config.MaxClusterSize]
+		if len(cl.SourceIDs) >= 2 && strings.TrimSpace(cl.MergedContent) != "" {
+			if len(cl.SourceIDs) > 50 {
+				cl.SourceIDs = cl.SourceIDs[:50]
 			}
 			valid = append(valid, cl)
 		}
