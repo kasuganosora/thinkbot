@@ -101,16 +101,13 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/cron/:jobId/resume", s.handleResumeCronJob)
 				botsAdmin.POST("/:id/cron/:jobId/trigger", s.handleTriggerCronJob)
 
-			// 记忆查询（嵌套在 Bot 下）
-			// 注意：/memory 由 handleQueryMemory 返回 {entries,total,tier}（供 BotDreaming 的分层记忆查看器使用，
-			// 对应前端 memoryApi.query）；手动记忆文件的 CRUD 列表单独走 /memory-entries，返回纯数组
-			// （供 BotMemoryFiles 使用，对应前端 botMemoryApi.list），两者结构不同不可混用。
+			// 分层记忆（嵌套在 Bot 下，真实存储为数据库 tiered_memories 表，按 L0~L3 分层）
+			// GET  /:id/memory        → handleQueryMemory：返回合并/分层的记忆条目（前端 memoryApi.query）
+			// GET  /:id/memory/stats  → handleMemoryStats：L1/L2 计数
+			// DELETE /:id/memory/entry → handleDeleteTieredMemoryEntry：按 id+tier+scope 删除单条记忆
 			botsAdmin.GET("/:id/memory", s.handleQueryMemory)
-			botsAdmin.GET("/:id/memory-entries", s.handleListBotMemoryEntries)
-			botsAdmin.POST("/:id/memory", s.handleCreateBotMemoryEntry)
-			botsAdmin.PUT("/:id/memory/:mid", s.handleUpdateBotMemoryEntry)
-			botsAdmin.DELETE("/:id/memory/:mid", s.handleDeleteBotMemoryEntry)
 			botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
+			botsAdmin.DELETE("/:id/memory/entry", s.handleDeleteTieredMemoryEntry)
 
 				// Channel 配置管理 — 已废弃，统一使用 Platform API（/api/bots/:id/platforms）
 				// 旧 Channel API 路由已移除

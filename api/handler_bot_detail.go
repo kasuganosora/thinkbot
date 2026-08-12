@@ -24,7 +24,7 @@ import (
 //
 // 前端契约（均按 botId 归属）：
 //   botPlatformApi  — /api/bots/:id/platforms[/:pid], /api/bots/platforms/tool-catalog
-//   botMemoryApi    — /api/bots/:id/memory[/:mid]
+//   memoryApi       — GET /api/bots/:id/memory (分层记忆查询), GET /api/bots/:id/memory/stats, DELETE /api/bots/:id/memory/entry
 //   botAccessApi    — /api/bots/:id/access
 //   botFileApi      — /api/bots/:id/files[/mkdir|upload]
 //   botRhythmApi    — /api/bots/:id/chat-rhythm
@@ -283,125 +283,6 @@ func (s *Server) reloadBotIfRunning(botID string) {
 		}
 		s.logger.Infow("platform change hot-reloaded bot", "bot_id", botID)
 	}()
-}
-
-// --- 记忆管理 (Memory CRUD) ---
-
-// BotMemoryEntry 记忆条目（用于 Bot 详情面板的 CRUD）。
-type BotMemoryEntry struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Content   string `json:"content"`
-	UpdatedAt string `json:"updatedAt"`
-}
-
-// handleListBotMemoryEntries 列出 Bot 的手动记忆条目（纯数组，供记忆文件页 BotMemoryFiles 使用）。
-// GET /api/bots/:id/memory-entries
-func (s *Server) handleListBotMemoryEntries(c *gin.Context) {
-	botID := c.Param("id")
-	entries := s.getBotMemoryEntries(botID)
-	OK(c, entries)
-}
-
-// handleCreateBotMemoryEntry 创建记忆条目。
-// POST /api/bots/:id/memory
-func (s *Server) handleCreateBotMemoryEntry(c *gin.Context) {
-	botID := c.Param("id")
-
-	var req struct {
-		Title   string `json:"title"`
-		Content string `json:"content"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
-		return
-	}
-
-	entries := s.getBotMemoryEntries(botID)
-	entry := BotMemoryEntry{
-		// 用纳秒时间戳生成 ID，避免「删除后重建」导致 ID 复用冲突
-		ID:        fmt.Sprintf("mem_%d", time.Now().UnixNano()),
-		Title:     req.Title,
-		Content:   req.Content,
-		UpdatedAt: nowRFC3339(),
-	}
-	entries = append([]BotMemoryEntry{entry}, entries...)
-
-	if err := s.saveBotMemoryEntries(c, botID, entries); err != nil {
-		Fail(c, err)
-		return
-	}
-	OK(c, entry)
-}
-
-// handleUpdateBotMemoryEntry 更新记忆条目。
-// PUT /api/bots/:id/memory/:mid
-func (s *Server) handleUpdateBotMemoryEntry(c *gin.Context) {
-	botID := c.Param("id")
-	mid := c.Param("mid")
-
-	entries := s.getBotMemoryEntries(botID)
-	idx := -1
-	for i, e := range entries {
-		if e.ID == mid {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		Fail(c, errs.NotFound("memory entry not found"))
-		return
-	}
-
-	var req struct {
-		Title   *string `json:"title"`
-		Content *string `json:"content"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
-		return
-	}
-
-	if req.Title != nil {
-		entries[idx].Title = *req.Title
-	}
-	if req.Content != nil {
-		entries[idx].Content = *req.Content
-	}
-	entries[idx].UpdatedAt = nowRFC3339()
-
-	if err := s.saveBotMemoryEntries(c, botID, entries); err != nil {
-		Fail(c, err)
-		return
-	}
-	OK(c, entries[idx])
-}
-
-// handleDeleteBotMemoryEntry 删除记忆条目。
-// DELETE /api/bots/:id/memory/:mid
-func (s *Server) handleDeleteBotMemoryEntry(c *gin.Context) {
-	botID := c.Param("id")
-	mid := c.Param("mid")
-
-	entries := s.getBotMemoryEntries(botID)
-	found := false
-	for i, e := range entries {
-		if e.ID == mid {
-			entries = append(entries[:i], entries[i+1:]...)
-			found = true
-			break
-		}
-	}
-	if !found {
-		Fail(c, errs.NotFound("memory entry not found"))
-		return
-	}
-
-	if err := s.saveBotMemoryEntries(c, botID, entries); err != nil {
-		Fail(c, err)
-		return
-	}
-	OK(c, nil)
 }
 
 // --- 访问控制 (Access) ---
@@ -919,23 +800,6 @@ func (s *Server) getBotPlatforms(botID string) []BotPlatform {
 func (s *Server) saveBotPlatforms(c *gin.Context, botID string, platforms []BotPlatform) error {
 	data, _ := json.Marshal(platforms)
 	return s.store.Set(c.Request.Context(), botDetailKey(botID, "platforms"), string(data))
-}
-
-func (s *Server) getBotMemoryEntries(botID string) []BotMemoryEntry {
-	raw, ok := s.store.Get(botDetailKey(botID, "memory_entries"))
-	if !ok || raw == "" {
-		return []BotMemoryEntry{}
-	}
-	var result []BotMemoryEntry
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		return []BotMemoryEntry{}
-	}
-	return result
-}
-
-func (s *Server) saveBotMemoryEntries(c *gin.Context, botID string, entries []BotMemoryEntry) error {
-	data, _ := json.Marshal(entries)
-	return s.store.Set(c.Request.Context(), botDetailKey(botID, "memory_entries"), string(data))
 }
 
 // botWorkspaceRoot 返回指定 bot 的工作目录根路径 {workspaceDir}/{botID}，

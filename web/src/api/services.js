@@ -460,6 +460,12 @@ export const memoryApi = {
       })
     }
     return request('GET', `/api/bots/${botId}/memory/stats`)
+  },
+  // 删除单条分层记忆（按 id + tier + scope 精确定位）
+  remove(botId, id, tier, scope) {
+    if (USE_MOCK) return mockResolve(() => null)
+    const q = new URLSearchParams({ id, tier, scope })
+    return request('DELETE', `/api/bots/${botId}/memory/entry?${q}`)
   }
 }
 
@@ -1435,39 +1441,6 @@ function ensureMem(botId) {
     })
   }
   return _botMem[botId]
-}
-
-export const botMemoryApi = {
-  list(botId) {
-    if (USE_MOCK) return mockResolve(() => ensureMem(botId).map(m => ({ ...m })))
-    // 注意：手动记忆文件列表走 /memory-entries（返回纯数组）；
-    // /memory 返回 {entries,total,tier} 结构，是给 BotDreaming 分层记忆查看器用的，别混用。
-    return request('GET', `/api/bots/${botId}/memory-entries`)
-  },
-  create(botId, payload) {
-    if (USE_MOCK) {
-      return mockResolve(() => {
-        const now = new Date()
-        const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-        const m = { id: genId('mem'), title: payload.title || ts, content: payload.content || '', updatedAt: ts }
-        ensureMem(botId).unshift(m)
-        return { ...m }
-      })
-    }
-    return request('POST', `/api/bots/${botId}/memory`, payload)
-  },
-  update(botId, mid, payload) {
-    if (USE_MOCK) {
-      return mockResolve(() => { const m = ensureMem(botId).find(x => x.id === mid); if (m) Object.assign(m, payload); return { ...m } })
-    }
-    return request('PUT', `/api/bots/${botId}/memory/${mid}`, payload)
-  },
-  remove(botId, mid) {
-    if (USE_MOCK) {
-      return mockResolve(() => { const l = ensureMem(botId); const i = l.findIndex(x => x.id === mid); if (i > -1) l.splice(i, 1); return null })
-    }
-    return request('DELETE', `/api/bots/${botId}/memory/${mid}`)
-  }
 }
 
 // ---- 访问控制（图3：默认行为 + 规则列表） ----
