@@ -22,10 +22,11 @@
         >
           <t-icon name="file" class="mi-icon" />
           <div class="mi-main">
-            <div class="mi-title">{{ m.title }}</div>
-            <div class="mi-preview">{{ m.content }}</div>
+            <div class="mi-title">{{ m.title || '未命名记忆' }}</div>
+            <div class="mi-preview">{{ m.content || '（无内容）' }}</div>
           </div>
         </div>
+        <div v-if="filtered.length === 0" class="ml-empty">暂无记忆文件</div>
       </div>
       <button class="mem-new" @click="createNew"><t-icon name="add" /> 新建记忆</button>
     </div>
@@ -33,15 +34,13 @@
     <!-- 右编辑 -->
     <div v-if="cur" class="mem-editor">
       <div class="me-head">
-        <t-icon name="file" />
-        <div class="me-title">
-          <div class="me-name">{{ cur.title }}</div>
-          <div class="me-id">ID: {{ cur.id }} <t-icon name="copy" style="cursor:pointer" @click="copyId" /></div>
-        </div>
+        <t-icon name="file" class="me-file" />
+        <t-input v-model="cur.title" class="me-title-input" placeholder="记忆标题" @input="dirty = true" />
+        <span class="me-id">ID: {{ cur.id }} <t-icon name="copy" style="cursor:pointer" @click="copyId" /></span>
         <t-icon name="delete" class="me-del" @click="remove" />
         <t-button theme="primary" :disabled="!dirty" @click="save">保存</t-button>
       </div>
-      <t-textarea v-model="cur.content" :autosize="{ minRows: 18 }" class="me-area" @change="dirty = true" @input="dirty = true" />
+      <t-textarea v-model="cur.content" :autosize="{ minRows: 18 }" class="me-area" placeholder="在此输入记忆内容…" @change="dirty = true" @input="dirty = true" />
     </div>
     <t-empty v-else description="选择左侧记忆查看或编辑" class="mem-empty" />
   </div>
@@ -75,17 +74,18 @@ onMounted(load)
 function select(m) { cur.value = { ...m }; dirty.value = false }
 
 async function save() {
-  await botMemoryApi.update(props.botId, cur.value.id, { content: cur.value.content })
+  await botMemoryApi.update(props.botId, cur.value.id, { title: cur.value.title || '', content: cur.value.content || '' })
   const item = list.value.find(m => m.id === cur.value.id)
-  if (item) item.content = cur.value.content
+  if (item) { item.content = cur.value.content; item.title = cur.value.title }
   dirty.value = false
   MessagePlugin.success('记忆已保存')
 }
 
 async function createNew() {
-  const m = await botMemoryApi.create(props.botId, { content: '' })
+  const m = await botMemoryApi.create(props.botId, { title: '新建记忆', content: '' })
   await load()
   cur.value = { ...m }
+  dirty.value = false
 }
 
 function remove() {
@@ -117,6 +117,7 @@ function copyId() {
 .ml-ops :deep(.t-icon) { cursor: pointer; }
 .ml-search { padding: 0 12px 10px; }
 .ml-scroll { flex: 1; overflow-y: auto; padding: 0 8px; }
+.ml-empty { text-align: center; color: #bbb; font-size: 13px; padding: 40px 0; }
 .ml-item { display: flex; gap: 10px; padding: 10px 10px; border-radius: 8px; cursor: pointer; }
 .ml-item:hover { background: #f6f6f6; }
 .ml-item.active { background: #f0f1f3; }
@@ -133,10 +134,10 @@ function copyId() {
 /* 右编辑 */
 .mem-editor { flex: 1; min-width: 0; border: 1px solid #ececec; border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
 .me-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #f0f0f0; }
-.me-title { flex: 1; min-width: 0; }
-.me-name { font-size: 14px; font-weight: 600; }
-.me-id { font-size: 12px; color: #999; margin-top: 2px; display: flex; align-items: center; gap: 6px; }
-.me-del { color: #e34d59; cursor: pointer; }
+.me-file { color: #999; flex-shrink: 0; }
+.me-title-input { flex: 1; min-width: 0; }
+.me-id { font-size: 12px; color: #999; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.me-del { color: #e34d59; cursor: pointer; flex-shrink: 0; }
 .me-area { flex: 1; padding: 12px 16px; }
 .me-area :deep(.t-textarea__inner) { border: none; box-shadow: none; font-size: 13px; line-height: 1.7; }
 .mem-empty { margin: 60px auto; }

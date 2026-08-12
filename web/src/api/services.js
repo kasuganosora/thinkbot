@@ -1440,7 +1440,9 @@ function ensureMem(botId) {
 export const botMemoryApi = {
   list(botId) {
     if (USE_MOCK) return mockResolve(() => ensureMem(botId).map(m => ({ ...m })))
-    return request('GET', `/api/bots/${botId}/memory`)
+    // 注意：手动记忆文件列表走 /memory-entries（返回纯数组）；
+    // /memory 返回 {entries,total,tier} 结构，是给 BotDreaming 分层记忆查看器用的，别混用。
+    return request('GET', `/api/bots/${botId}/memory-entries`)
   },
   create(botId, payload) {
     if (USE_MOCK) {
