@@ -271,6 +271,16 @@ func (s *ChatHistoryService) LoadContextBySession(botID, sessionID string, limit
 	return messages, nil
 }
 
+// ClearSessionMessages 清空指定会话的所有聊天消息（保留会话记录本身）。
+// 返回被删除的消息数量。
+func (s *ChatHistoryService) ClearSessionMessages(sessionID string) (int64, error) {
+	res := s.db.Where("session_id = ?", sessionID).Delete(&dao.ChatMessage{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("chat_history: clear session messages: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
 // --- 游标编解码 ---
 
 // encodeCursor 将时间戳和 ID 编码为游标字符串。
