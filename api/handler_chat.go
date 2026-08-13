@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/agent/command"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
@@ -307,6 +309,12 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	var req ChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// ---- 斜杠命令拦截（在 pipeline 之前处理，避免 /clear 等被当聊天文本送入 LLM）----
+	if cmd := command.Parse(req.Text); cmd != nil {
+		s.handleSlashCommand(c, cmd, &req)
 		return
 	}
 
@@ -861,4 +869,119 @@ func writeSSE(w io.Writer, eventType string, data any) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
+}
+
+// ---- 斜杠命令处理 ----
+
+// handleSlashCommand 处理 Web 聊天中的斜杠命令（/clear、/help 等）。
+// 命令在 pipeline 之前拦截，通过 SSE 返回结果，不经过 LLM。
+func (s *Server) handleSlashCommand(c *gin.Context, cmd *command.ParsedCommand, req *ChatReq) {
+	user := currentUser(c)
+	if user == nil {
+		Fail(c, errs.Unauthorized("not logged in"))
+		return
+	}
+
+	switch cmd.Name {
+	case "clear":
+		s.cmdClear(c, req.SessionID)
+	case "help":
+		s.cmdHelp(c)
+	default:
+		// 未知命令：走正常 LLM 流程（不放行——避免 /xxx 被 bot 当普通文本回复）
+		s.cmdUnknown(c, cmd.Name)
+	}
+}
+
+// cmdClear 清空当前会话的聊天历史（仅删消息，保留会话记录）。
+func (s *Server) cmdClear(c *gin.Context, sessionID string) {
+	if sessionID == "" {
+		s.replyCommandError(c, "⚠️ 没有活跃会话，无法执行 /clear。请先在一个会话中发送消息。")
+		return
+	}
+
+	count, err := s.chatHistory.ClearSessionMessages(sessionID)
+	if err != nil {
+		s.logger.Warnw("cmd clear failed", "session_id", sessionID, "err", err)
+		s.replyCommandError(c, "❌ 清空会话失败，请稍后重试。")
+		return
+	}
+
+	reply := fmt.Sprintf("✅ 已清空会话上下文（移除 %d 条消息）。", count)
+	s.replyCommandSSE(c, reply, map[string]any{"command": "clear", "cleared": count})
+}
+
+// cmdHelp 列出所有可用的斜杠命令。
+func (s *Server) cmdHelp(c *gin.Context) {
+	var sb strings.Builder
+	sb.WriteString("📋 **可用命令列表**\n\n")
+	sb.WriteString("- `/clear` — 清空当前会话上下文\n")
+	sb.WriteString("- `/help` — 显示本帮助信息\n\n")
+	sb.WriteString("_在聊天输入框输入命令即可执行_")
+
+	s.replyCommandSSE(c, sb.String(), map[string]any{"command": "help"})
+}
+
+// cmdUnknown 未知命令提示。
+func (s *Server) cmdUnknown(c *gin.Context, name string) {
+	s.replyCommandSSE(c, fmt.Sprintf("ℹ️ 未知命令 `/%s`。输入 `/help` 查看可用命令。", name),
+		map[string]any{"command": "unknown", "name": name})
+}
+
+// replyCommandSSE 通过 SSE 返回命令执行结果（与正常聊天的 SSE 格式一致）。
+// 前端收到 command 类型响应后可做特殊处理（如 /clear 后清空本地消息列表）。
+func (s *Server) replyCommandSSE(c *gin.Context, text string, extra map[string]any) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		Fail(c, errs.Internal("streaming not supported"))
+		return
+	}
+
+	traceID := idgen.New("web")
+
+	// start 事件
+	writeSSE(c.Writer, sseStart, map[string]any{"traceId": traceID})
+	flusher.Flush()
+
+	// 文本内容（一次性返回完整命令回复）
+	writeSSE(c.Writer, sseTextDelta, map[string]any{"text": text})
+	flusher.Flush()
+
+	// done 事件：携带 command 标识和额外元数据
+	donePayload := map[string]any{
+		"text":    text,
+		"command": true,
+	}
+	for k, v := range extra {
+		donePayload[k] = v
+	}
+	writeSSE(c.Writer, sseDone, donePayload)
+	flusher.Flush()
+
+	s.logger.Infow("slash command executed",
+		"command", extra["command"],
+		"trace_id", traceID,
+		"user_id", fmt.Sprintf("%d", currentUser(c).ID))
+}
+
+// replyCommandSSE 错误响应（无 start 事件，前端按 error 处理）。
+func (s *Server) replyCommandError(c *gin.Context, msg string) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		Fail(c, errs.Internal("streaming not supported"))
+		return
+	}
+
+	writeSSE(c.Writer, sseError, map[string]any{"message": msg})
+	flusher.Flush()
 }
