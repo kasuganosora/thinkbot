@@ -605,6 +605,36 @@ func (c *botContainer) WriteFile(ctx context.Context, path string, data []byte) 
 	return nil
 }
 
+// writeFileUnbounded 同 WriteFile，但跳过 MaxFileWrite 限制。
+// 仅供框架内部转储（工具输出 offload）使用：offload 承载的是超截断阈值的
+// 完整输出，体积可能较大，受调用方截断上限与 PruneToolOutput 清理约束，
+// 不应被普通工具的写文件大小限制阻断。
+func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data []byte) error {
+	validated, err := validatePath(containerWorkDir, path)
+	if err != nil {
+		return err
+	}
+	if err := c.ensure(ctx); err != nil {
+		return err
+	}
+	dir := pathDir(validated)
+	quoted := shellQuote(validated)
+	var command string
+	if dir != "" && dir != containerWorkDir {
+		command = fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(dir), quoted)
+	} else {
+		command = fmt.Sprintf("cat > %s", quoted)
+	}
+	res, err := c.execInContainer(ctx, "", command, data)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return errs.Newf("bot_container: write tool output %q failed: %s", path, res.Stderr)
+	}
+	return nil
+}
+
 // ListDir 列出容器内目录。
 func (c *botContainer) ListDir(ctx context.Context, path string) ([]FileEntry, error) {
 	validated, err := validatePath(containerWorkDir, path)

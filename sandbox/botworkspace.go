@@ -301,6 +301,39 @@ func (m *BotWorkspaceManager) BotDir(botID string) (string, error) {
 	return ws.WorkDir(), nil
 }
 
+// WriteToolOutput 写入框架内部转储文件（工具输出 offload 用），绕过普通工具的
+// MaxFileWrite 限制。offload 承载的是超截断阈值的完整输出，体积可能较大，但受
+// 调用方截断上限与 PruneToolOutput 清理约束。按 backend 分流：docker 持久容器模式
+// 经 docker exec 写入容器内 volume（/data），local 模式写入宿主工作目录——两者都
+// 走 sandbox 执行通道，主进程不直接操作隔离的文件系统。
+// 调用方应传入相对工作空间根的路径（如 "tool-output/<id>.txt"）。
+func (m *BotWorkspaceManager) WriteToolOutput(botID, relPath string, data []byte) error {
+	ws, err := m.GetOrCreate(botID)
+	if err != nil {
+		return err
+	}
+	bw, ok := ws.(*botWorkspace)
+	if !ok {
+		return errs.New("bot_workspace: unexpected workspace implementation")
+	}
+	return bw.writeToolOutput(relPath, data)
+}
+
+// PruneToolOutput 清理 offload 子目录下超出 maxFiles 的最旧文件（按 mtime）。
+// 走 sandbox 执行通道（docker 容器内 / local 宿主统一），避免主进程直接操作隔离的
+// 文件系统。失败静默忽略（清理是尽力而为，不影响主流程）。
+func (m *BotWorkspaceManager) PruneToolOutput(botID, subdir string, maxFiles int) {
+	ws, err := m.GetOrCreate(botID)
+	if err != nil {
+		return
+	}
+	bw, ok := ws.(*botWorkspace)
+	if !ok {
+		return
+	}
+	bw.pruneToolOutput(subdir, maxFiles)
+}
+
 // CloseAll 清除内存中的工作空间引用（不删除文件）。
 func (m *BotWorkspaceManager) CloseAll() {
 	m.mu.Lock()
@@ -656,6 +689,33 @@ func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) 
 		return errs.Wrapf(err, "bot_workspace: write file %q", path)
 	}
 	return nil
+}
+
+// writeToolOutput 写入框架内部转储，绕过 MaxFileWrite。docker 持久容器模式走
+// container.writeFileUnbounded（经 docker exec 写进 volume），local 模式走宿主文件系统。
+func (w *botWorkspace) writeToolOutput(relPath string, data []byte) error {
+	if w.container != nil {
+		return w.container.writeFileUnbounded(context.Background(), relPath, data)
+	}
+	validated, err := validatePath(w.root, relPath)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(validated)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return errs.Wrapf(err, "bot_workspace: mkdir for tool output %q", relPath)
+	}
+	if err := os.WriteFile(validated, data, 0o644); err != nil {
+		return errs.Wrapf(err, "bot_workspace: write tool output %q", relPath)
+	}
+	return nil
+}
+
+// pruneToolOutput 经 sandbox 执行通道清理：列出子目录按 mtime 倒序，超出部分删除。
+func (w *botWorkspace) pruneToolOutput(subdir string, maxFiles int) {
+	ctx := context.Background()
+	cmd := fmt.Sprintf("cd %s && ls -t | tail -n +%d | xargs -r rm -f", shellQuote(subdir), maxFiles+1)
+	_, _ = w.Exec(ctx, ExecRequest{Command: cmd})
 }
 
 func (w *botWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, error) {
