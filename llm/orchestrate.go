@@ -881,6 +881,27 @@ func logToolCallSummary(ctx context.Context, steps []StepResult) {
 	}
 	sort.Strings(uniqueTools)
 
+	// 可观测：把每次工具调用的「名称=结果片段」列出，失败也会以输出字符串
+	// 形式落在 Output 里（如搜索 500 的错误文本），便于事后定位工具问题。
+	details := make([]string, 0, totalCalls)
+	for _, step := range steps {
+		for _, tc := range step.ToolCalls {
+			entry := tc.ToolName
+			for _, tr := range step.ToolResults {
+				if tr.ToolCallID != tc.ToolCallID {
+					continue
+				}
+				s := fmt.Sprintf("%v", tr.Output)
+				if len(s) > 200 {
+					s = s[:200] + "...(truncated)"
+				}
+				entry += "=" + s
+				break
+			}
+			details = append(details, entry)
+		}
+	}
+
 	logger := traceid.L(ctx)
 	if logger == nil {
 		return
@@ -890,6 +911,7 @@ func logToolCallSummary(ctx context.Context, steps []StepResult) {
 		"total_calls", totalCalls,
 		"unique_tools", uniqueTools,
 		"steps", len(steps),
+		"details", details,
 	)
 }
 
