@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1862,68 +1861,29 @@ func (s *BotService) EventBus() outbound.EventBus {
 // 避免长期运行无限增长（落盘文件是一次性中间产物，过期即无用）。
 const maxOffloadFiles = 200
 
-// buildToolOutputOffloadSink 构造落盘指针接收器：把完整工具输出写入
-// {workspaceDir}/{botID}/{subdir}/{toolCallID}.txt，返回工作空间相对路径。
-// 任何失败都返回 error，由截断层 fail-safe 退化成纯 head+tail 截断。
+// buildToolOutputOffloadSink 构造落盘指针接收器：把完整工具输出经 sandbox 写入
+// bot 工作空间（docker 模式写入容器内 volume 的 /data/<subdir>/<id>.txt，local 模式
+// 写入宿主目录），返回工作空间相对路径。子 agent（spawn 派生的 sub-agent）的 read
+// 工具同样在 sandbox 内执行，据此相对路径即可读到——从而把深挖代码的完整 dump
+// 隔离在子 agent 上下文，主上下文只留预览+指针。任何失败都返回 error，由截断层
+// fail-safe 退化成纯 head+tail 截断。
 func buildToolOutputOffloadSink(wm *sandbox.BotWorkspaceManager, subdir string) llm.ToolOutputOffloadSink {
 	var mu sync.Mutex // 串行化同 bot 的落盘 + 清理，避免并行工具调用竞争同一目录。
 	return func(botID, toolCallID string, content []byte) (string, error) {
-		base, err := wm.BotDir(botID)
-		if err != nil {
-			return "", err
-		}
 		// 工具调用 ID 由模型下发，可能含路径分隔符或 ".."，必须净化避免穿越出 subdir。
 		fname := filepath.Base(toolCallID)
 		if fname == "" || fname == "." || fname == string(os.PathSeparator) {
 			return "", fmt.Errorf("invalid toolCallID for offload: %q", toolCallID)
 		}
-		fname += ".txt"
-		dir := filepath.Join(base, subdir)
+		rel := filepath.Join(subdir, fname+".txt")
 		mu.Lock()
 		defer mu.Unlock()
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		// 经 sandbox 写入：docker 模式落到容器内 named volume（/data），local 模式落宿主目录。
+		// 主进程不直接操作系统隔离的文件系统，子 agent 的 read 才能在同一 sandbox 内读到。
+		if err := wm.WriteToolOutput(botID, rel, content); err != nil {
 			return "", err
 		}
-		cleanupOffloadDir(dir, maxOffloadFiles)
-		if err := os.WriteFile(filepath.Join(dir, fname), content, 0o644); err != nil {
-			return "", err
-		}
-		// 返回工作空间相对路径，主 agent 与子 agent（spawn 派生的 sub-agent）均据此读取。
-		return filepath.Join(subdir, fname), nil
-	}
-}
-
-// cleanupOffloadDir 限制落盘目录文件数：超过 maxFiles 时删除最旧的若干（按 mtime），
-// 每次多删 20 留余量，避免每次调用都触发删除。
-func cleanupOffloadDir(dir string, maxFiles int) {
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) <= maxFiles {
-		return
-	}
-	type fileInfo struct {
-		path string
-		mod  time.Time
-	}
-	infos := make([]fileInfo, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		infos = append(infos, fileInfo{path: filepath.Join(dir, e.Name()), mod: info.ModTime()})
-	}
-	if len(infos) <= maxFiles {
-		return
-	}
-	sort.Slice(infos, func(i, j int) bool { return infos[i].mod.Before(infos[j].mod) })
-	toDelete := len(infos) - maxFiles + 20
-	if toDelete < 1 {
-		toDelete = 1
-	}
-	for i := 0; i < toDelete && i < len(infos); i++ {
-		_ = os.Remove(infos[i].path)
+		wm.PruneToolOutput(botID, subdir, maxOffloadFiles)
+		return rel, nil
 	}
 }
