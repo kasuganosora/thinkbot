@@ -490,11 +490,17 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		attribute.String("llm.finish_reason", string(result.FinishReason)),
 	)
 
+	// 可观测：把 bot 最终回复正文落日志，便于事后 grep「bot 到底说了什么」。
+	replyLog := result.Text
+	if len(replyLog) > 4000 {
+		replyLog = replyLog[:4000] + "...(truncated)"
+	}
 	logger.Infow("llm stage: generation complete",
 		"message_id", env.Message.ID,
 		"steps", len(result.Steps),
 		"tokens", result.Usage.TotalTokens,
-		"finish_reason", result.FinishReason)
+		"finish_reason", result.FinishReason,
+		"reply", replyLog)
 
 	// 可观测：若编排层因工具审批被 defer（RequireApproval + ApprovalHandler
 	// 返回 deferred），记录信号，便于排查“工具在等确认却没有续跑入口”的情况。
