@@ -22,36 +22,36 @@ var channelToolAwarenessSection = &agenttools.ToolPromptSection{
 	Name:    "misskey_observability",
 	Order:   300,
 	Enabled: true,
-	Content: `# Misskey 能力说明
+	Content: `# Misskey Capabilities
 
 You are NOT "write-only" and NOT "tool-less" on Misskey. You both RECEIVE and CAN POST.
 
-## 接收（无需工具）
-- 直接 @ 你或回复你的消息总会送达，你可以直接回应。
-- Bot 订阅了 home / local / hybrid timeline，这些时间线的帖子会作为 [Timeline] 消息送达，你可以观察、学习或对其表态。
+## Receiving (no tool needed)
+- Direct @mentions or replies to you always arrive, and you can respond directly.
+- The bot subscribes to home / local / hybrid timelines; posts on those timelines arrive as [Timeline] messages, which you may observe, learn from, or react to.
 
-## 回复（直接用文本，不要调用工具）
-当有人 @ 你或回复你时，**直接用你的正常文本回复即可**——系统会自动把你的回复作为「串接回复」发出（并自动带上 @ 对方 的前缀）。
-- 你**不需要**、也**不应该**为了回复而去调用 misskey_create_note：那会发成一条孤立的新帖子，而不是对原帖的回复，还可能与框架自动回复重复。
-- 因此任何时候都不要说「我没有可以回复的工具」——你永远可以用文本回复，框架会替你发出去。
-- 你的最终回复文本**就是**会发给对方的帖子正文。请直接写回复内容（例如「收到！回复来啦～」），**不要写**「我已经回复了 / 我加了反应 / 我发布了帖子」之类的操作汇报——那些动作由系统处理，不是你要说给用户听的话。
+## Replying (just use text, do NOT call a tool)
+When someone @mentions or replies to you, simply reply with your normal text — the system automatically sends your reply as a threaded reply (with an @mention prefix added automatically).
+- You do NOT need, and should NOT, call misskey_create_note to reply: that would post an isolated new note instead of a reply to the original, and may be duplicated by the system's automatic reply.
+- Therefore never say "I have no tool to reply" — you can always reply with text, and the framework sends it for you.
+- Your final reply text IS the post body that will be sent to the other party. Write the reply content directly (e.g. "Got it! Here's my reply~"), and do NOT write operational reports like "I have replied / I added a reaction / I published a post" — those actions are handled by the system, not something you say to the user.
 
-## 主动读取（按需调用工具）
-- 想看某人最近发了什么：用 misskey_get_user_notes（先 misskey_search_user 拿到 userId）。
-- 想搜某个关键词的帖子：用 misskey_search_notes。
+## Proactive reading (call tools on demand)
+- To see what someone recently posted: use misskey_get_user_notes (resolve userId first with misskey_search_user).
+- To search posts by keyword: use misskey_search_notes.
 
-## 主动发布新帖（非回复时才用工具）
-只有当你想**主动开一条全新的、不属于任何回复的帖子**时，才调用 misskey_create_note。回复场景请用上面的「直接文本回复」。
-- 若帖文中需要 @ 某人：**本实例（maid.lat）用户直接写 @username 即可；非本实例的远程/联邦用户必须写 @username@host（如 @alice@example.com）**，对话上下文里出现的 @username@host 就是正确写法，照搬即可，否则对方收不到。
+## Proactively publishing a new note (only when NOT replying)
+Only call misskey_create_note when you want to start a brand-new note that is not a reply to anything. For replies, use the "reply with text" above.
+- If the note needs to @ someone: for users on THIS instance (maid.lat) just write @username; for remote/federated users on other instances you MUST write @username@host (e.g. @alice@example.com). The @username@host that appears in the conversation context is the correct form — copy it as-is, otherwise the other party won't receive it.
 
-## 当前帖 ID（仅供工具调用）
-你收到的消息末尾可能带一行 '[note_id: xxxxx]'，那就是**当前这条帖子的 ID**。要给这条帖加反应（misskey_react_to_note）或引用时，直接用它，**不要去调用 misskey_search_notes 搜索**——本实例的搜索后端（Meilisearch）经常不可用，搜了也会失败。
+## Current note ID (for tool calls only)
+The message you receive may end with a line '[note_id: xxxxx]' — that is the ID of the CURRENT note. To add a reaction (misskey_react_to_note) or quote it, use it directly, and do NOT call misskey_search_notes to look it up — this instance's search backend (Meilisearch) is often unavailable and will fail.
 
-## 绝对不要说给用户的内部信息（红线）
-- 无论工具调用成功还是失败，**都不要**向用户（或时间线）透露任何内部过程：不要写「我去搜一下」「我来互动一下」「noteId 没有正确传入」「搜索服务暂时不可用」「HTTP 500」「工具调用失败」这类话。
-- 工具失败时：**默默换种自然方式回应，或直接不提**——就像真人遇到麻烦不会把后台报错念给对方听。你的最终回复只写「人话」。
-- 收到 '[note_id: ...]' 这样的技术标记时，它是给你调用工具用的，**绝不要**原样写进你的回复正文。
-- 直接 @ 你或回复你的 casual 帖子（比如「查房」「在吗」「哈哈」），**直接用文本回一句轻松的话即可**，不要为了显得积极而去搜、去建帖、去加一堆反应。`,
+## Internal information you must NEVER tell the user (hard rules)
+- Whether a tool call succeeds or fails, NEVER reveal any internal process to the user (or timeline): do NOT write things like "let me search", "let me interact", "noteId was not passed correctly", "search service is unavailable", "HTTP 500", "tool call failed".
+- When a tool fails: quietly respond in another natural way, or simply don't mention it — just like a real person wouldn't read backend errors aloud to the other party. Your final reply should only contain plain human language.
+- When you receive a technical marker like '[note_id: ...]', it is for you to call tools with — NEVER write it verbatim into your reply body.
+- For casual posts that directly @ you or reply to you (e.g. "checking in", "anyone there", "haha"), just reply with a relaxed line of text — don't search, create notes, or pile on reactions just to seem active.`,
 }
 
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
@@ -75,7 +75,7 @@ func (c *MisskeyChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDef
 // formatNotes 把帖子列表渲染为易读文本（含作者、时间、正文、链接）。
 func formatNotes(notes []Note, host string) string {
 	if len(notes) == 0 {
-		return "（没有找到符合条件的嘟文）"
+		return "No matching notes found."
 	}
 	var b strings.Builder
 	base := strings.TrimRight(host, "/")
@@ -89,7 +89,7 @@ func formatNotes(notes []Note, host string) string {
 			text = "[Renote] " + strings.TrimSpace(n.Renote.Text)
 		}
 		if text == "" {
-			text = "[空贴/仅媒体]"
+			text = "[empty post / media only]"
 		}
 		url := base + "/notes/" + n.ID
 		b.WriteString(fmt.Sprintf("%d. %s · %s\n%s\n🔗 %s\n\n", i+1, user, n.CreatedAt, text, url))
@@ -187,7 +187,7 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 			if err != nil {
 				// 实例搜索后端（Meilisearch）常不可用；返回干净文案，不把裸 HTTP 错误抛给 LLM，
 				// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
-				return nil, fmt.Errorf("搜索服务暂时不可用（实例搜索后端故障），请改用其他方式或直接回复")
+				return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
 			}
 				return map[string]any{
 					"notes": formatNotes(notes, c.cfg.Host),
@@ -232,7 +232,7 @@ func (c *MisskeyChannel) followUserTool() agenttools.ToolDef {
 				}
 				return map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("已关注用户 %s", userID),
+					"message": fmt.Sprintf("Followed user %s", userID),
 				}, nil
 			}),
 		},
@@ -271,7 +271,7 @@ func (c *MisskeyChannel) unfollowUserTool() agenttools.ToolDef {
 				}
 				return map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("已取消关注用户 %s", userID),
+					"message": fmt.Sprintf("Unfollowed user %s", userID),
 				}, nil
 			}),
 		},
@@ -326,9 +326,9 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 						"success": false,
 						"blocked": true,
 						"reason":  reason,
-						"message": "你正处于「对一条已有帖子进行回复」的语境（对方 @ 了你、回复了你，或对某条时间线帖串接回复）。" +
-							"此时不要调用 misskey_create_note 来回复——它会发成一条孤立的新帖、与原帖不成串接，还会和系统的自动回复重复。" +
-							"请直接用你的普通文本回复即可：系统会把你的回复作为带 @ 前缀的串接回复自动发出。",
+						"message": "You are in a 'replying to an existing note' context (the other party @mentioned you, replied to you, or is threading a reply on a timeline note). " +
+							"Do NOT call misskey_create_note to reply — it would post an isolated new note that is not threaded to the original, and would duplicate the system's automatic reply. " +
+							"Just reply with your normal text: the system will automatically send your reply as a threaded reply with an @ prefix.",
 					}, nil
 				}
 
@@ -353,7 +353,7 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 					"noteId":     noteID,
 					"noteUrl":    noteURL,
 					"visibility": visibility,
-					"message":    fmt.Sprintf("帖子已发布: %s", noteURL),
+					"message":    fmt.Sprintf("Note published: %s", noteURL),
 				}, nil
 			}),
 		},
@@ -409,7 +409,7 @@ func (c *MisskeyChannel) createRenoteTool() agenttools.ToolDef {
 					"noteId":     newNoteID,
 					"noteUrl":    noteURL,
 					"visibility": visibility,
-					"message":    fmt.Sprintf("已转发帖子: %s", noteURL),
+					"message":    fmt.Sprintf("Renoted note: %s", noteURL),
 				}, nil
 			}),
 		},
@@ -448,7 +448,7 @@ func (c *MisskeyChannel) deleteNoteTool() agenttools.ToolDef {
 				}
 				return map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("帖子 %s 已删除", noteID),
+					"message": fmt.Sprintf("Note %s deleted", noteID),
 				}, nil
 			}),
 		},
@@ -494,7 +494,7 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 					"success":  true,
 					"noteId":   noteID,
 					"reaction": reaction,
-					"message":  fmt.Sprintf("已对帖子 %s 添加反应 %s", noteID, reaction),
+					"message":  fmt.Sprintf("Added reaction %s to note %s", noteID, reaction),
 				}, nil
 			}),
 		},
@@ -534,7 +534,7 @@ func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
 				return map[string]any{
 					"success": true,
 					"noteId":  noteID,
-					"message": fmt.Sprintf("已移除对帖子 %s 的反应", noteID),
+					"message": fmt.Sprintf("Removed reaction from note %s", noteID),
 				}, nil
 			}),
 		},
