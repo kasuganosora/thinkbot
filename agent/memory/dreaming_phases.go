@@ -16,6 +16,30 @@ import (
 // volatileMetricRe 匹配易失的项目指标/自指进度汇报，规则降级路径据此跳过。
 var volatileMetricRe = regexp.MustCompile(`\d+\s*(个|文件|测试|行|次|files?|tests?|builds?)|(created|passed|测试文件|编译通过|编译失败|build\s*(pass|fail)|CI)`)
 
+// isEphemeralEntry 判断一条 L0 条目是否被标记为「时效性内容」，命中则不晋升长期记忆。
+//
+// 判定依据是**结构化标记** metadata["ephemeral"]，由捕获层（潜水观察者的契约 JSON）
+// 直接给出，与内容语言完全无关。入参取 metadata map 而非具体条目类型，
+// 以便 TieredEntry / Entry 两种载体共用。
+//
+// 设计背景（勿回退）：早期这里用正则枚举「无需记忆 / 不值得记 / なし / [NONE]」等
+// 自然语言短语来拦截易失内容。那是打地鼠 —— 补掉中日英，印地语等仍会漏进 L1。
+// 现在「是否易失」由模型在捕获时以布尔字段声明，本函数只读该布尔。
+// 因此这里 **不得** 重新引入任何自然语言短语匹配。
+func isEphemeralEntry(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	switch v := metadata["ephemeral"].(type) {
+	case bool:
+		return v
+	case string:
+		// 经 JSON 序列化往返后布尔可能退化成字符串，兼容处理。
+		return v == "true"
+	}
+	return false
+}
+
 // ============================================================================
 // Phase 1: Light Sleep — 摄取 + 去重
 // ============================================================================
@@ -79,6 +103,12 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 			}
 			content := strings.TrimSpace(StripThinking(e.Content))
 			if content == "" {
+				continue
+			}
+			// 时效性内容不进候选：由捕获层的结构化 ephemeral 布尔判定（语言无关），
+			// 避免「开播日程 / 一次性新闻」这类很快失效的内容晋升为长期记忆。
+			// 它们仍留在 L0 短期可召回，只是不进 L1。
+			if isEphemeralEntry(e.Metadata) {
 				continue
 			}
 			// 读取说话人标签（note_capture 写入的 speaker 字段）。
@@ -193,6 +223,11 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 	sb.WriteString("  NEVER treat the assistant's statements, opinions, or knowledge as the user's. Do NOT conclude\n")
 	sb.WriteString("  \"the user knows/likes/is familiar with X\" from an assistant snippet. Skip assistant snippets entirely.\n")
 	sb.WriteString("- If speaker is \"user\" or unknown, extract only what that message literally conveys about the user.\n")
+	sb.WriteString("- If speaker is \"observer\", the snippet is the bot's own note written while silently observing a\n")
+	sb.WriteString("  PUBLIC timeline. It describes a THIRD PARTY, not the bot and not the person it chats with.\n")
+	sb.WriteString("  Such snippets ARE valid memories: keep them, but preserve the author's @handle exactly as written.\n")
+	sb.WriteString("  NEVER rewrite an @handle into a generic word like \"用户\" / \"此人\" / \"the user\" — losing the handle\n")
+	sb.WriteString("  makes the memory unattributable and it can no longer be matched to that person later.\n")
 	sb.WriteString("- Do not infer the user's familiarity, taste, or evaluation of something merely because the assistant discussed it.\n")
 	sb.WriteString("- Ephemeral / self-referential output from the assistant must NOT be promoted. Explicitly skip and never emit:\n")
 	sb.WriteString("  * volatile metrics and transient project stats (file counts, test counts, line counts, version/build numbers,\n")

@@ -174,6 +174,87 @@ func TestDreamManager_LightIngestsConsolidatedL0(t *testing.T) {
 	}
 }
 
+// TestDreamManager_LightSkipsEphemeral 验证被结构化标记 ephemeral=true 的 L0 条目
+// 不进入晋升候选，因此不会成为长期记忆。
+//
+// 这是「语言无关护栏」的关键回归测试：判定只看 metadata 里的布尔，
+// 不依赖内容语言。历史上这里靠正则枚举「无需记忆 / なし / [NONE]」等短语，
+// 补一种语言漏下一种，已彻底移除，勿回退。
+func TestDreamManager_LightSkipsEphemeral(t *testing.T) {
+	scope := ChannelScope("ephemeral-test")
+	dm, _ := newTestDreamManager(t, []Scope{scope})
+	ctx := context.Background()
+
+	// 3 条时效性内容（多语言，均标 ephemeral=true）——应全部被跳过。
+	ephemeral := []string{
+		"TANK CHAIR というアニメが4月7日から放送開始。",                    // 日语
+		"@dev ने कहा कि नया मॉडल कल रिलीज़ होगा।",             // 印地语
+		"某模型今天开源发布，来源 IT 之家。",                              // 中文
+	}
+	for _, c := range ephemeral {
+		if err := dm.manager.store.Append(ctx, TieredEntry{
+			Entry: Entry{
+				Scope:    scope,
+				Content:  c,
+				Source:   "note",
+				Category: "lurk",
+				Metadata: map[string]any{"speaker": "observer", "ephemeral": true},
+			},
+			Tier: Tier0Working,
+		}); err != nil {
+			t.Fatalf("append ephemeral failed: %v", err)
+		}
+	}
+
+	// 1 条持久内容（ephemeral=false）——应被正常摄取。
+	if err := dm.manager.store.Append(ctx, TieredEntry{
+		Entry: Entry{
+			Scope:    scope,
+			Content:  "@blogtalk 在学 Rust，卡在所有权概念上，偏好用 sqlite。",
+			Source:   "note",
+			Category: "lurk",
+			Metadata: map[string]any{"speaker": "observer", "ephemeral": false},
+		},
+		Tier: Tier0Working,
+	}); err != nil {
+		t.Fatalf("append durable failed: %v", err)
+	}
+
+	report, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	// 只有那 1 条非 ephemeral 的应被摄取。
+	if report.LightIngested != 1 {
+		t.Errorf("expected only 1 non-ephemeral entry ingested, got %d", report.LightIngested)
+	}
+}
+
+// TestIsEphemeralEntry 直接覆盖结构化 ephemeral 判定的各种取值形态。
+func TestIsEphemeralEntry(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]any
+		want bool
+	}{
+		{"nil_metadata", nil, false},
+		{"missing_key", map[string]any{"speaker": "observer"}, false},
+		{"bool_true", map[string]any{"ephemeral": true}, true},
+		{"bool_false", map[string]any{"ephemeral": false}, false},
+		// JSON 往返后布尔可能退化成字符串
+		{"string_true", map[string]any{"ephemeral": "true"}, true},
+		{"string_false", map[string]any{"ephemeral": "false"}, false},
+		{"unexpected_type", map[string]any{"ephemeral": 1}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEphemeralEntry(tc.meta); got != tc.want {
+				t.Errorf("isEphemeralEntry(%v)=%v want=%v", tc.meta, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDreamManager_JaccardDedup(t *testing.T) {
 	candidates := []DreamCandidate{
 		{Content: "用户偏好使用 Go 语言"},
