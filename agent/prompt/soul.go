@@ -270,6 +270,23 @@ func (l *SoulLoader) Path() string {
 	return l.config.Path
 }
 
+// ReadRaw 读取 SOUL.md 原始内容（含 front matter，未截断），供 soul 工具编辑使用。
+// 与 Load() 走同一 SoulStore 后端（local 落宿主文件，docker 落容器 named volume 真实文件）。
+func (l *SoulLoader) ReadRaw(ctx context.Context) ([]byte, error) {
+	return l.config.Store.ReadSoul(ctx, l.config.Path)
+}
+
+// WriteRaw 覆盖写入 SOUL.md 原始内容。写入后调用方应手动 Load() 触发热重载
+// （或等待后台 watcher 在 ReloadInterval 内自动检测 mtime 变更重载）。
+func (l *SoulLoader) WriteRaw(ctx context.Context, data []byte) error {
+	return l.config.Store.WriteSoul(ctx, l.config.Path, data)
+}
+
+// ScanMode 返回当前安全扫描模式（off / warn / block）。
+func (l *SoulLoader) ScanMode() ScanMode {
+	return l.config.ScanMode
+}
+
 // createDefault 创建默认 SOUL.md 文件（父目录由 Store 实现负责创建）。
 func (l *SoulLoader) createDefault() error {
 	return l.config.Store.WriteSoul(context.Background(), l.config.Path, []byte(DefaultSoulContent))
