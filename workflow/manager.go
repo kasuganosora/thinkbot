@@ -1377,6 +1377,40 @@ func (m *Manager) LatestWorkflowForSession(botID, sessionID string) *Workflow {
 	return nil
 }
 
+// DissociateSessionWorkflows 解除指定会话下所有工作流的会话关联（把 SessionID 置空）。
+//
+// 用途：配合 `/clear` 命令——清空会话聊天上下文时，工作流卡片也应一起消失，
+// 否则前端刷新页面后 `GET /api/session-workflow` 会按旧的 SessionID 把卡片恢复回来。
+//
+// 仅置空 SessionID，不终止工作流本身（仍在后台运行，只是不再绑定到这个会话）。
+// 终态工作流置空后永久不再关联；运行中的工作流若后续被调度器再次落库，可能重新带上
+// SessionID（属边缘情况，/clear 的语义是清「聊天上下文」，不保证杀掉后台任务）。
+//
+// 返回被解除关联的工作流数量。
+func (m *Manager) DissociateSessionWorkflows(botID, sessionID string) (int, error) {
+	if botID == "" || sessionID == "" {
+		return 0, nil
+	}
+	all, err := m.repo.List(sessionWorkflowScanLimit)
+	if err != nil {
+		return 0, errs.Wrap(err, "failed to list workflows for dissociation")
+	}
+	count := 0
+	for _, wf := range all {
+		if wf == nil || wf.BotID != botID || wf.SessionID != sessionID {
+			continue
+		}
+		wf.SessionID = ""
+		if err := m.repo.Save(wf); err != nil {
+			m.logger.Warnw("failed to dissociate workflow from session",
+				"workflow_id", wf.ID, "session_id", sessionID, "error", err)
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
 // nodeSummaries 生成节点的摘要信息（用于事件 payload）。
 func nodeSummaries(nodes []*DAGNode) []map[string]any {
 	result := make([]map[string]any, len(nodes))
