@@ -231,6 +231,17 @@ type LLMConfig struct {
 	// 从而节省 token 并减少工具选择错误。其状态按会话（session）隔离，
 	// 使已发现的工具在同一会话内跨轮持久可用，且不会串扰到其它并发会话。
 	ToolDeferral *llm.DeferralStore
+
+	// ToolOutputSink 落盘指针接收器（见 llm.ToolOutputOffloadSink）。
+	// 非 nil 时，被截断的工具输出会把完整原文写入 bot 工作空间，主上下文仅留
+	// 预览+指针+子 agent 委托提示，从而把深挖代码的代价隔离到独立子 agent 上下文。
+	// 由 Bot 装配时注入（仅当 tool_output.offload 开启）。
+	ToolOutputSink llm.ToolOutputOffloadSink
+
+	// ToolOutput 工具输出截断阈值（行/字节），透传到 OrchestrateConfig.ToolOutput。
+	// 零值字段由 runTool 回退到 llm.DefaultToolOutputConfig()；由 Bot 装配时从
+	// tool_output.{max_lines,max_bytes} 配置填充。
+	ToolOutput llm.ToolOutputConfig
 }
 
 // ============================================================================
@@ -264,6 +275,13 @@ func NewLLMStage(name string, provider llm.Provider, config LLMConfig, tp trace.
 
 // Name 返回 Stage 名称。
 func (s *LLMStage) Name() string { return s.name }
+
+// SetToolOutputSink 注入落盘指针接收器。在 Bot 装配完成后、真正编排前调用，
+// 避免改动 NewLLMStage 签名（其测试调用方众多）。
+func (s *LLMStage) SetToolOutputSink(sink llm.ToolOutputOffloadSink) { s.config.ToolOutputSink = sink }
+
+// SetToolOutputConfig 注入工具输出截断阈值（行/字节）。同上，避免改动 NewLLMStage 签名。
+func (s *LLMStage) SetToolOutputConfig(cfg llm.ToolOutputConfig) { s.config.ToolOutput = cfg }
 
 // reasoningEffortPtr 将非空字符串转为 *string，空字符串返回 nil。
 func reasoningEffortPtr(s string) *string {
@@ -395,6 +413,16 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if s.config.ToolDeferral != nil {
 		cfg.ToolDeferral = s.config.ToolDeferral.ForSession(session.SessionIDFromEnvelope(env))
 	}
+
+	// 注入落盘指针接收器：被截断的工具输出把完整原文写入工作空间，主上下文
+	// 仅留预览+指针+子 agent 委托提示，把深挖代码的代价隔离到独立子 agent 上下文。
+	if s.config.ToolOutputSink != nil {
+		cfg.ToolOutputSink = s.config.ToolOutputSink
+		// botID 直接用消息归属（env.Message.BotID），比依赖 ctx 透传的 CallOrigin 更稳健。
+		cfg.BotID = env.Message.BotID
+	}
+	// 截断阈值：从 LLMConfig.ToolOutput 透传（零值字段在 runTool 内回退默认）。
+	cfg.ToolOutput = s.config.ToolOutput
 
 	// 防偷懒门禁：环境类问题确定性强制"先调工具再作答"。
 	// VerificationGateMiddleware 已在 LLMStage 之前对用户问题做确定性分类，

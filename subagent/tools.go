@@ -89,6 +89,12 @@ func SpawnToolDef(mgr *SubAgentManager) tools.ToolDef {
 		Tool: llm.Tool{
 			Name:        "spawn",
 			Description: "Create one or more sub-agents to execute tasks. Each sub-agent has its own isolated conversation context and a role you define via system_prompt. Multiple tasks run in parallel and their results are returned synchronously. Use it for complex work that needs context isolation or parallel processing.",
+			// 延迟加载：spawn 是「按需委托」的 Heavy 工具，非每轮必需。初始仅暴露
+			// 名称+描述，完整 schema 由模型经 tool_search 或直接引用触发加载（同时其
+			// 提示词段 spawnToolPromptSection 始终注入，教模型如何调用）。这与 offload
+			// 指针提示「委托 spawn 读落盘文件」协同：深挖代码的代价隔离到子 agent 上下文。
+			DeferredLoad: true,
+			Keywords:     []string{"子代理", "子agent", "委托", "delegate", "sub-agent", "spawn", "并行任务", "子任务"},
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
