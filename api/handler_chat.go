@@ -884,7 +884,7 @@ func (s *Server) handleSlashCommand(c *gin.Context, cmd *command.ParsedCommand, 
 
 	switch cmd.Name {
 	case "clear":
-		s.cmdClear(c, req.SessionID)
+		s.cmdClear(c, req.BotID, req.SessionID)
 	case "help":
 		s.cmdHelp(c)
 	default:
@@ -893,22 +893,33 @@ func (s *Server) handleSlashCommand(c *gin.Context, cmd *command.ParsedCommand, 
 	}
 }
 
-// cmdClear 清空当前会话的聊天历史（仅删消息，保留会话记录）。
-func (s *Server) cmdClear(c *gin.Context, sessionID string) {
+// cmdClear 清空当前会话的聊天历史（仅删消息，保留会话记录），
+// 并解除该会话关联的工作流（避免刷新后卡片重新出现）。
+func (s *Server) cmdClear(c *gin.Context, botID, sessionID string) {
 	if sessionID == "" {
 		s.replyCommandError(c, "⚠️ 没有活跃会话，无法执行 /clear。请先在一个会话中发送消息。")
 		return
 	}
 
-	count, err := s.chatHistory.ClearSessionMessages(sessionID)
+	msgCount, err := s.chatHistory.ClearSessionMessages(sessionID)
 	if err != nil {
 		s.logger.Warnw("cmd clear failed", "session_id", sessionID, "err", err)
 		s.replyCommandError(c, "❌ 清空会话失败，请稍后重试。")
 		return
 	}
 
-	reply := fmt.Sprintf("✅ 已清空会话上下文（移除 %d 条消息）。", count)
-	s.replyCommandSSE(c, reply, map[string]any{"command": "clear", "cleared": count})
+	// 解除该会话下工作流的关联（置空 SessionID）。失败不影响清消息主流程。
+	wfCount := 0
+	if mgr, merr := s.workflowSvc.Manager(); merr == nil {
+		if n, derr := mgr.DissociateSessionWorkflows(botID, sessionID); derr == nil {
+			wfCount = n
+		} else {
+			s.logger.Warnw("cmd clear: dissociate workflows failed", "session_id", sessionID, "err", derr)
+		}
+	}
+
+	reply := fmt.Sprintf("✅ 已清空会话上下文（移除 %d 条消息，解除 %d 个工作流关联）。", msgCount, wfCount)
+	s.replyCommandSSE(c, reply, map[string]any{"command": "clear", "cleared": msgCount})
 }
 
 // cmdHelp 列出所有可用的斜杠命令。
