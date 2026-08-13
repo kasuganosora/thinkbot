@@ -831,6 +831,9 @@ async function resumeContinuation(sessionId) {
         if (resp?.command === 'clear') {
           // 清空本地消息列表（DB 已在后端清完）
           messages.value = []
+          // 同时重置工作流面板状态，避免旧工作流卡片残留
+          activeWorkflowId.value = ''
+          activeWorkflowStatus.value = null
           return
         }
         // 其他命令（help 等）正常显示回复文本，走下方常规流程
