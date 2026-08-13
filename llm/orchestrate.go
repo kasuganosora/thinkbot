@@ -87,6 +87,18 @@ type OrchestrateConfig struct {
 	// 无需先终止当前生成再重新发起。nil 表示不启用。建议带缓冲（如 cap=16），
 	// 避免上游在无人消费时阻塞。
 	InterruptCh chan string
+
+	// ToolOutput 工具输出截断阈值（行/字节）。零值回退默认。
+	ToolOutput ToolOutputConfig
+
+	// ToolOutputSink 落盘指针接收器：当工具输出被截断时把完整原文写入 bot 工作空间，
+	// 仅在返回给 LLM 的预览里附指针 + 子 agent 委托提示。nil 表示不启用落盘
+	// （退化成 head+tail 截断）。由 Bot 装配时注入（仅当 tool_output.offload 开启）。
+	ToolOutputSink ToolOutputOffloadSink
+
+	// BotID 当前编排所属的 bot 标识（仅用于落盘指针的路径定位）。
+	// 由调用方（llmroute）从工具调用来源的 ctx 取值后注入，避免 llm 反向依赖 agent/tools。
+	BotID string
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -142,6 +154,11 @@ func WithOnToolResults(fn func(int, []ToolResultPart) []ToolResultPart) Orchestr
 // call marked with RequireApproval.
 func WithApprovalHandler(fn func(ctx context.Context, call ToolCall) (ToolApprovalResult, error)) OrchestrateOption {
 	return func(c *OrchestrateConfig) { c.ApprovalHandler = fn }
+}
+
+// WithToolOutputSink 注入落盘指针接收器（见 OrchestrateConfig.ToolOutputSink）。
+func WithToolOutputSink(sink ToolOutputOffloadSink) OrchestrateOption {
+	return func(c *OrchestrateConfig) { c.ToolOutputSink = sink }
 }
 
 // ErrToolApprovalDeferred is returned when a tool approval is deferred.
@@ -307,7 +324,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 				}
 				ready := filterToolCalls(result.ToolCalls, exclude)
 				if len(ready) > 0 {
-					readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, nil)
+					readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, nil, cfg)
 					if rerr != nil {
 						var deferred *ToolApprovalDeferredError
 						if errors.As(rerr, &deferred) {
@@ -379,7 +396,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		}
 
 		// Execute tools
-		toolResults, err := executeTools(ctx, result.ToolCalls, toolMap, cfg.ApprovalHandler, nil)
+		toolResults, err := executeTools(ctx, result.ToolCalls, toolMap, cfg.ApprovalHandler, nil, cfg)
 		if err != nil {
 			var deferred *ToolApprovalDeferredError
 			if errors.As(err, &deferred) {
@@ -642,7 +659,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 					ready := filterToolCalls(stepToolCalls, exclude)
 					if len(ready) > 0 {
 						sendProgress := func(part StreamPart) { send(part) }
-						readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, sendProgress)
+						readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, sendProgress, cfg)
 						if rerr != nil {
 							var deferred *ToolApprovalDeferredError
 							if errors.As(rerr, &deferred) {
@@ -725,7 +742,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			// Execute tools
 			sendProgress := func(part StreamPart) { send(part) }
-			toolResults, err := executeTools(ctx, stepToolCalls, toolMap, cfg.ApprovalHandler, sendProgress)
+			toolResults, err := executeTools(ctx, stepToolCalls, toolMap, cfg.ApprovalHandler, sendProgress, cfg)
 			if err != nil {
 				var deferred *ToolApprovalDeferredError
 				if errors.As(err, &deferred) {
@@ -1071,6 +1088,7 @@ func executeTools(
 	toolMap map[string]*Tool,
 	approvalHandler func(context.Context, ToolCall) (ToolApprovalResult, error),
 	sendProgress func(StreamPart),
+	cfg *OrchestrateConfig,
 ) ([]ToolResultPart, error) {
 	results := make([]ToolResultPart, len(toolCalls))
 	pending := make([]pendingToolExec, 0, len(toolCalls))
@@ -1126,14 +1144,14 @@ func executeTools(
 
 	// Phase 2: execute approved tools in parallel.
 	if len(pending) == 1 {
-		results[pending[0].idx] = runTool(ctx, pending[0].tc, pending[0].tool, sendProgress)
+		results[pending[0].idx] = runTool(ctx, pending[0].tc, pending[0].tool, sendProgress, cfg)
 	} else if len(pending) > 1 {
 		var wg sync.WaitGroup
 		wg.Add(len(pending))
 		for _, p := range pending {
 			go func(p pendingToolExec) {
 				defer wg.Done()
-				results[p.idx] = runTool(ctx, p.tc, p.tool, sendProgress)
+				results[p.idx] = runTool(ctx, p.tc, p.tool, sendProgress, cfg)
 			}(p)
 		}
 		wg.Wait()
@@ -1149,7 +1167,7 @@ func rejectedToolResultText(approval ToolApprovalResult) string {
 	return "tool execution denied by user"
 }
 
-func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart)) ToolResultPart {
+func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart), cfg *OrchestrateConfig) ToolResultPart {
 	// invocationID：本次「实际执行」的服务端唯一标识。它与模型下发的
 	// ToolCallID 相互独立，用于在日志与前端稳定地区分「来自哪次调用」。
 	invocationID := newInvocationID()
@@ -1194,7 +1212,20 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 	}
 
 	// Apply output truncation to prevent context bloat.
-	truncResult := TruncateOutput(output, DefaultTruncationConfig())
+	// 阈值优先用编排配置，零值回退默认；落盘指针仅在注入了 sink 且能取到
+	// botID（工具调用来源）时启用——完整原文写入工作空间，主上下文只留预览+指针。
+	truncCfg := cfg.ToolOutput
+	if truncCfg.MaxLines <= 0 {
+		truncCfg.MaxLines = DefaultToolOutputConfig().MaxLines
+	}
+	if truncCfg.MaxBytes <= 0 {
+		truncCfg.MaxBytes = DefaultToolOutputConfig().MaxBytes
+	}
+	var truncOpts []TruncateOption
+	if cfg.ToolOutputSink != nil && cfg.BotID != "" {
+		truncOpts = append(truncOpts, WithOffload(cfg.BotID, tc.ToolCallID, cfg.ToolOutputSink))
+	}
+	truncResult := TruncateOutput(output, TruncationConfig{MaxLines: truncCfg.MaxLines, MaxBytes: truncCfg.MaxBytes}, truncOpts...)
 	finalOutput := truncResult.Output
 
 	if sendProgress != nil {
