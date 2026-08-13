@@ -42,7 +42,16 @@ You are NOT "write-only" and NOT "tool-less" on Misskey. You both RECEIVE and CA
 
 ## 主动发布新帖（非回复时才用工具）
 只有当你想**主动开一条全新的、不属于任何回复的帖子**时，才调用 misskey_create_note。回复场景请用上面的「直接文本回复」。
-- 若帖文中需要 @ 某人：**本实例（maid.lat）用户直接写 @username 即可；非本实例的远程/联邦用户必须写 @username@host（如 @alice@example.com）**，对话上下文里出现的 @username@host 就是正确写法，照搬即可，否则对方收不到。`,
+- 若帖文中需要 @ 某人：**本实例（maid.lat）用户直接写 @username 即可；非本实例的远程/联邦用户必须写 @username@host（如 @alice@example.com）**，对话上下文里出现的 @username@host 就是正确写法，照搬即可，否则对方收不到。
+
+## 当前帖 ID（仅供工具调用）
+你收到的消息末尾可能带一行 '[note_id: xxxxx]'，那就是**当前这条帖子的 ID**。要给这条帖加反应（misskey_react_to_note）或引用时，直接用它，**不要去调用 misskey_search_notes 搜索**——本实例的搜索后端（Meilisearch）经常不可用，搜了也会失败。
+
+## 绝对不要说给用户的内部信息（红线）
+- 无论工具调用成功还是失败，**都不要**向用户（或时间线）透露任何内部过程：不要写「我去搜一下」「我来互动一下」「noteId 没有正确传入」「搜索服务暂时不可用」「HTTP 500」「工具调用失败」这类话。
+- 工具失败时：**默默换种自然方式回应，或直接不提**——就像真人遇到麻烦不会把后台报错念给对方听。你的最终回复只写「人话」。
+- 收到 '[note_id: ...]' 这样的技术标记时，它是给你调用工具用的，**绝不要**原样写进你的回复正文。
+- 直接 @ 你或回复你的 casual 帖子（比如「查房」「在吗」「哈哈」），**直接用文本回一句轻松的话即可**，不要为了显得积极而去搜、去建帖、去加一堆反应。`,
 }
 
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
@@ -174,10 +183,12 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 				if l, ok := args["limit"].(float64); ok {
 					limit = int(l)
 				}
-				notes, err := c.api.searchNotes(ctx, query, limit)
-				if err != nil {
-					return nil, fmt.Errorf("search notes failed: %w", err)
-				}
+			notes, err := c.api.searchNotes(ctx, query, limit)
+			if err != nil {
+				// 实例搜索后端（Meilisearch）常不可用；返回干净文案，不把裸 HTTP 错误抛给 LLM，
+				// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
+				return nil, fmt.Errorf("搜索服务暂时不可用（实例搜索后端故障），请改用其他方式或直接回复")
+			}
 				return map[string]any{
 					"notes": formatNotes(notes, c.cfg.Host),
 					"count": len(notes),
