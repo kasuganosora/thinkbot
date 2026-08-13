@@ -101,17 +101,6 @@ func isLurkMode(env *core.Envelope) bool {
 	return false
 }
 
-// lurkObserverInstruction 是潜水观察者模式的系统提示词后缀（英文，遵循 LLM 提示词约定）。
-// 它把 LLM 的产出从「回复」重新导向「从帖子里学到什么」，并要求无价值时显式输出 [NONE]。
-const lurkObserverInstruction = `[OBSERVER MODE — LURK / READ-ONLY]
-You are in lurk mode. You are silently observing a public social timeline and you will NOT send any reply to anyone. No message leaves this session.
-Your job is to learn, not to respond. Analyze the post you just read through the lens of your own identity and values (defined above). Decide whether it contains anything worth remembering for future interaction with this person or community, for example:
-- the speaker's technical preferences, stack, or current projects
-- explicit needs, questions, or requests
-- mood, relationship, or how they expect you to help
-- anything that would make you more useful next time
-If something is worth keeping, write a concise first-person internal note (for your own future reference — never sent). If there is nothing worth remembering, output exactly: [NONE]`
-
 // buildLurkPrompt 构建潜水观察者 prompt：优先用 SOUL.md 人格内容，否则回退到已注入的
 // base prompt，再拼接观察者指令。保证「结合 soul.md 模块分析」。
 func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string {
@@ -128,53 +117,57 @@ func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string
 	return lurkObserverInstruction
 }
 
-// lurkSkipMarkers 为「无笔记」语义标记集合。LLM 在认为没有值得记的内容时可能返回
-// [NONE] / [无] / [没有] / 暂无 等标记。归一化（去首尾空格与常见标点、转小写）后
-// 精确匹配任一标记即视为空笔记，跳过写入，避免把「无」当有效记忆污染工作记忆。
-var lurkSkipMarkers = []string{
-	"[none]", "none", "n/a", "na", "null", "nil",
-	"无", "[无]", "（无）", "(无)", "没有", "[没有]", "暂无", "无内容", "无笔记", "无东西可记",
-	"nothing", "skip", "pass",
-}
-
-// isEmptyLurkNote 判断 LLM 潜水产出是否为「无笔记」语义（空串或语义空标记）。
-func isEmptyLurkNote(note string) bool {
-	s := strings.ToLower(strings.TrimSpace(note))
-	s = strings.Trim(s, "。.，,、()（）[]【】\"' \t\n")
-	if s == "" {
-		return true
-	}
-	for _, m := range lurkSkipMarkers {
-		if s == m {
-			return true
-		}
-	}
-	return false
-}
-
-// emitLurkNote 在潜水模式下把 LLM 的思考结果作为内部学习笔记（ActionNote）写入 L0。
-// 仅当模型产出有价值内容（非 [NONE]/[无]/[没有] 等空语义标记、且非空）时才发 ActionNote，避免污染工作记忆。
+// emitLurkNote 在潜水模式下把 LLM 的结构化产出作为内部学习笔记（ActionNote）写入 L0。
+//
+// 判定完全依赖契约 JSON 的 remember 布尔（见 lurk_contract.go），与模型的思考语言无关。
+// 这里 **刻意不做** 任何自然语言兜底：解析失败由上游重试处理，重试耗尽即放弃不落库。
+// 历史上这里曾枚举 [NONE]/[无]/[なし]/「无需记忆」等标记，属打地鼠，已彻底移除，勿回退。
 func (s *LLMStage) emitLurkNote(env *core.Envelope, result *llm.GenerateResult) {
-	note := memory.StripThinking(result.Text)
-	if isEmptyLurkNote(note) {
-		s.logger.Debugw("lurk: nothing worth remembering, skip note",
+	out, outcome := parseLurkOutput(result.Text)
+	switch outcome {
+	case lurkParseSkip:
+		s.logger.Debugw("lurk: model reported nothing worth remembering, skip note",
 			"message_id", env.Message.ID)
 		return
+	case lurkParseInvalid:
+		// 走到这里说明重试已耗尽（重试在 Process 内完成）。安全失败：宁可丢一条
+		// 观察，也不把无法解析的半成品写进记忆。计数用于观测「昨晚丢了多少条」。
+		s.logger.Warnw("lurk: json contract unsatisfied after retries, abandon note",
+			"message_id", env.Message.ID,
+			"finish_reason", result.FinishReason,
+			"raw_len", len(result.Text))
+		return
 	}
+
 	env.AddAction(core.Action{
 		Type:    core.ActionNote,
 		Channel: "", // 潜水学习笔记以 bot 全局 scope 落库（note_handler 据 bot_id 判 scope），跨渠道可用
 		UserID:  env.Message.UserID,
-		Payload: note,
+		Payload: out.Note,
 		Metadata: map[string]any{
 			"source_channel": env.Message.Source,
 			"bot_id":         env.Message.BotID,
 			"message_id":     env.Message.ID,
 			"category":       "lurk",
+			// speaker=observer：标明这是 bot 的「观察」而非用户原话，也不是 bot 的自述产出。
+			// dreaming 归因护栏据此保留观察记忆、且不把 @handle 洗成「用户/此人」。
+			"speaker": "observer",
+			// ephemeral 由模型结构化给出，替代过去按「开播/放送」等短语正则判时效（语言枚举）。
+			// dreaming 晋升阶段据此决定不进 L1。
+			"ephemeral": out.Ephemeral,
+			// importance 需为 0.0~1.0 的 float64：note_handler 只接受 float64，
+			// 且 Entry.Importance 语义是 0~1（参与召回打分）。模型给的是 1~5 整数，
+			// 这里做量纲转换，不可直接透传 int（会被静默忽略并落回默认 0.5）。
+			"importance":     lurkImportanceToScore(out.Importance),
+			"speaker_handle": out.SpeakerHandle,
 		},
 	})
 	s.logger.Infow("lurk: learning note captured to L0",
-		"message_id", env.Message.ID, "note_len", len(note))
+		"message_id", env.Message.ID,
+		"note_len", len(out.Note),
+		"ephemeral", out.Ephemeral,
+		"importance", out.Importance,
+		"speaker_handle", out.SpeakerHandle)
 }
 
 // ============================================================================
@@ -370,6 +363,18 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		ReasoningEffort: reasoningEffortPtr(s.config.ReasoningEffort),
 	}
 
+	// 潜水模式：强制结构化 JSON 输出，使「是否值得记忆」成为一个与语言无关的布尔，
+	// 而非需要代码去枚举匹配的自然语言标记（[NONE]/[なし]/「无需记忆」……）。
+	//
+	// 用 json_object 而非 json_schema：实测 bigmodel 接受 json_schema 但 **不强制**
+	// required 字段（少返字段照样 200），依赖它会得到虚假的安全感 —— 字段校验一律
+	// 在 Go 侧做（parseLurkOutput）。
+	// 同时把采样温度压低：结构化输出不需要创造性，低温显著提升格式合规率。
+	if lurkMode {
+		params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
+		params.Temperature = lurkTemperature()
+	}
+
 	cfg := &llm.OrchestrateConfig{
 		Params:       params,
 		MaxSteps:     s.config.MaxSteps,
@@ -424,7 +429,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// WithStatsSkip: StatsRecordingProvider 会跳过 Orchestrate 内部的每次调用，
 	// 由下方 recordUsage() 统一记录合并后的总用量到 journal + stats
 	statsCtx := llm.WithStatsSkip(ctx)
-	if s.config.StreamPublisher != nil {
+	// 潜水模式强制走非流式：潜水产出没有实时观众（不发帖、只落库），
+	// 流式只会让「解析 JSON → 不合规则重试」的控制流复杂化。
+	if s.config.StreamPublisher != nil && !lurkMode {
 		var err error
 		result, err = s.processStream(statsCtx, env, cfg, logger)
 		if err != nil {
@@ -511,9 +518,16 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 记录使用统计
 	recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, result)
 
+	// 潜水模式：校验结构化产出，不合规则重试。必须放在下方 FinishReasonLength
+	// 提示语拼接之前 —— 那段会污染 result.Text，破坏 JSON 解析。
+	if lurkMode {
+		result = s.retryLurkUntilValid(statsCtx, cfg, result, logger, env)
+	}
+
 	// 若 LLM 因达到输出 token 上限（length）被截断，追加提示，
 	// 避免用户误以为任务已完成（实际可能只生成了半成品回复）。
-	if result.FinishReason == llm.FinishReasonLength {
+	// 潜水模式不拼接：产出是给机器解析的 JSON，不是给人看的回复。
+	if result.FinishReason == llm.FinishReasonLength && !lurkMode {
 		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。" +
 			"请回复「继续」让我接着完成剩余工作。"
 	}
