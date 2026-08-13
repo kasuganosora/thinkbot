@@ -564,6 +564,13 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		text = fmt.Sprintf("[对方是 Bot 账号 %s] %s", username, text)
 	}
 
+	// 把当前帖的 ID 附在消息末尾，仅供 LLM 调用反应/引用类工具时使用，
+	// 避免它为了拿 noteId 去搜索（实例搜索服务 Meilisearch 常不可用）。
+	// 这是给模型看的上下文，不是给用户的内容；prompt 已要求不得写进回复。
+	if nid, ok := metadata["note_id"].(string); ok && nid != "" {
+		text = fmt.Sprintf("%s\n[note_id: %s]", text, nid)
+	}
+
 	// 确定 Channel 标识：
 	// - timeline 事件（社交时间线）→ 共享的社交空间，所有用户共享同一 channel scope
 	// - mention/reply 事件（直接互动）→ 按 user ID 隔离，视为 1:1 对话
