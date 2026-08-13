@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1278,6 +1279,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Wrap(err, "bot_service: create bot")
 	}
 
+	// 注入工具输出落盘指针接收器（借鉴 opencode 的 token 优化）：
+	// 当工具输出被截断时，把完整原文写入 bot 工作空间的 tool-output 子目录，
+	// 主上下文仅留预览+指针+子 agent 委托提示，把深挖代码的代价隔离到独立子 agent 上下文。
+	if wm := b.WorkspaceMgr(); wm != nil {
+		toolOutCfg := builder.GetToolOutputConfig()
+		// 阈值透传到 LLMConfig.ToolOutput（runTool 内零值回退默认；这里传 0 即「用默认」）。
+		llmStage.SetToolOutputConfig(llm.ToolOutputConfig{
+			MaxLines: toolOutCfg.MaxLines,
+			MaxBytes: toolOutCfg.MaxBytes,
+		})
+		if toolOutCfg.OffloadEnabled && toolOutCfg.OffloadSubdir != "" {
+			llmStage.SetToolOutputSink(buildToolOutputOffloadSink(wm, toolOutCfg.OffloadSubdir))
+		}
+	}
+
 	// 注册 Soul 人格维护工具：让 bot 能读/改写自己的 SOUL.md 并热生效。
 	// 仅当该 bot 启用了 SoulLoader（即配置了工作空间人格文件）时注册；
 	// 无 SoulLoader 的 bot 注册会无意义（无文件可写），故跳过。
@@ -1836,4 +1852,78 @@ func (s *BotService) CreateLLMProvider() (llm.Provider, string, *config.ModelDef
 // EventBus 返回事件总线。
 func (s *BotService) EventBus() outbound.EventBus {
 	return s.eventBus
+}
+
+// ============================================================================
+// 工具输出落盘指针（借鉴 opencode 的 token 优化）
+// ============================================================================
+
+// maxOffloadFiles 单个 bot 的落盘目录文件数上限。超过则清理最旧的若干，
+// 避免长期运行无限增长（落盘文件是一次性中间产物，过期即无用）。
+const maxOffloadFiles = 200
+
+// buildToolOutputOffloadSink 构造落盘指针接收器：把完整工具输出写入
+// {workspaceDir}/{botID}/{subdir}/{toolCallID}.txt，返回工作空间相对路径。
+// 任何失败都返回 error，由截断层 fail-safe 退化成纯 head+tail 截断。
+func buildToolOutputOffloadSink(wm *sandbox.BotWorkspaceManager, subdir string) llm.ToolOutputOffloadSink {
+	var mu sync.Mutex // 串行化同 bot 的落盘 + 清理，避免并行工具调用竞争同一目录。
+	return func(botID, toolCallID string, content []byte) (string, error) {
+		base, err := wm.BotDir(botID)
+		if err != nil {
+			return "", err
+		}
+		// 工具调用 ID 由模型下发，可能含路径分隔符或 ".."，必须净化避免穿越出 subdir。
+		fname := filepath.Base(toolCallID)
+		if fname == "" || fname == "." || fname == string(os.PathSeparator) {
+			return "", fmt.Errorf("invalid toolCallID for offload: %q", toolCallID)
+		}
+		fname += ".txt"
+		dir := filepath.Join(base, subdir)
+		mu.Lock()
+		defer mu.Unlock()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+		cleanupOffloadDir(dir, maxOffloadFiles)
+		if err := os.WriteFile(filepath.Join(dir, fname), content, 0o644); err != nil {
+			return "", err
+		}
+		// 返回工作空间相对路径，主 agent 与子 agent（spawn 派生的 sub-agent）均据此读取。
+		return filepath.Join(subdir, fname), nil
+	}
+}
+
+// cleanupOffloadDir 限制落盘目录文件数：超过 maxFiles 时删除最旧的若干（按 mtime），
+// 每次多删 20 留余量，避免每次调用都触发删除。
+func cleanupOffloadDir(dir string, maxFiles int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) <= maxFiles {
+		return
+	}
+	type fileInfo struct {
+		path string
+		mod  time.Time
+	}
+	infos := make([]fileInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		infos = append(infos, fileInfo{path: filepath.Join(dir, e.Name()), mod: info.ModTime()})
+	}
+	if len(infos) <= maxFiles {
+		return
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].mod.Before(infos[j].mod) })
+	toDelete := len(infos) - maxFiles + 20
+	if toDelete < 1 {
+		toDelete = 1
+	}
+	for i := 0; i < toDelete && i < len(infos); i++ {
+		_ = os.Remove(infos[i].path)
+	}
 }

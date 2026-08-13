@@ -16,6 +16,14 @@ import (
 //   - 透明：工具执行逻辑不受影响，截断发生在结果返回给 LLM 之前
 //   - 可配置：支持全局配置 MaxLines / MaxBytes
 //   - 智能提示：截断时告知 LLM 输出被裁剪，建议用更精确的参数重新调用
+//
+// 落盘指针（offload，借鉴 opencode 的 token 优化）：
+//   - 当输出被截断且提供了 OffloadSink 时，会把【完整原文】写入 bot 的工作空间，
+//     仅在返回给 LLM 的预览里附上「工作空间相对路径 + 指向 spawn 的委托提示」。
+//   - 这样深入挖掘（grep 上万命中、读超长文件）的代价被隔离：主上下文只留预览+指针，
+//     真正需要中间内容时，由 spawn 派生的子 agent 带着 grep/read(offset/limit)
+//     去读取该文件——子 agent 在独立上下文工作，完整 dump 不会污染主线。
+//   - 落盘失败不影响工具结果：退化成原有的 head+tail 截断（fail-safe）。
 // ============================================================================
 
 // TruncationConfig 控制工具输出的截断行为。
@@ -37,6 +45,30 @@ func DefaultTruncationConfig() TruncationConfig {
 	}
 }
 
+// ToolOutputConfig 工具输出截断 + 落盘指针的可配置项。
+// 阈值部分由编排层（OrchestrateConfig.ToolOutput）携带；落盘开关与子目录在 Bot
+// 装配时消费——关闭落盘时直接不注入 sink，行为等价于纯 head+tail 截断。
+type ToolOutputConfig struct {
+	// MaxLines 截断行数阈值（默认 500）。
+	MaxLines int
+	// MaxBytes 截断字节阈值（默认 50KB）。
+	MaxBytes int
+	// OffloadEnabled 是否启用落盘指针（默认 true）。
+	OffloadEnabled bool
+	// OffloadSubdir 落盘子目录（相对工作空间根，默认 "tool-output"）。
+	OffloadSubdir string
+}
+
+// DefaultToolOutputConfig 返回合理的默认配置。
+func DefaultToolOutputConfig() ToolOutputConfig {
+	return ToolOutputConfig{
+		MaxLines:       500,
+		MaxBytes:       50 * 1024,
+		OffloadEnabled: true,
+		OffloadSubdir:  "tool-output",
+	}
+}
+
 // TruncationResult 是截断后的结果。
 type TruncationResult struct {
 	// Output 截断后的输出（可能是原始值或截断后的字符串）。
@@ -47,13 +79,44 @@ type TruncationResult struct {
 
 	// OriginalSize 原始输出的字节数（估算）。
 	OriginalSize int
+
+	// OffloadPath 当启用落盘指针时，完整原文写入工作空间后的相对路径；
+	// 空字符串表示未落盘（输出在阈值内、或 sink 未提供/写入失败）。
+	OffloadPath string
+}
+
+// ToolOutputOffloadSink 把完整工具输出落盘到 bot 工作空间，返回供模型/子 agent
+// 读取的「工作空间相对路径」（如 "tool-output/abc123.txt"）。
+// botID 用于定位工作空间；toolCallID 用于生成唯一文件名。
+// 返回错误时调用方应 fail-safe 退化成原有 head+tail 截断。
+type ToolOutputOffloadSink func(botID, toolCallID string, content []byte) (savedRelPath string, err error)
+
+// truncateOption 是 TruncateOutput 的可选行为修饰器。
+type truncateOption struct {
+	offloadBotID     string
+	offloadToolCall  string
+	offloadSink      ToolOutputOffloadSink
+}
+
+// TruncateOption 修饰 TruncateOutput 的行为。
+type TruncateOption func(*truncateOption)
+
+// WithOffload 启用落盘指针：当输出被截断时，把完整原文通过 sink 写入 bot 工作空间。
+func WithOffload(botID, toolCallID string, sink ToolOutputOffloadSink) TruncateOption {
+	return func(o *truncateOption) {
+		o.offloadBotID = botID
+		o.offloadToolCall = toolCallID
+		o.offloadSink = sink
+	}
 }
 
 // TruncateOutput 对工具输出应用截断。
 //
 // 如果输出是字符串，直接截断；如果是其他类型，先 JSON 序列化再截断。
 // 当输出在阈值内时原样返回。
-func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
+//
+// opts 可携带 WithOffload 以启用落盘指针（见包文档）。
+func TruncateOutput(output any, cfg TruncationConfig, opts ...TruncateOption) TruncationResult {
 	if cfg.MaxLines <= 0 {
 		cfg.MaxLines = DefaultTruncationConfig().MaxLines
 	}
@@ -74,17 +137,23 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 		}
 	}
 
+	// 完整原文（落盘用），在截断前捕获，确保写入的是未裁剪内容。
+	fullText := text
+
 	totalBytes := len(text)
 	lines := strings.Split(text, "\n")
 
+	result := TruncationResult{
+		OriginalSize: totalBytes,
+	}
+
 	// 在阈值内，不需要截断
 	if len(lines) <= cfg.MaxLines && totalBytes <= cfg.MaxBytes {
-		return TruncationResult{
-			Output:       output,
-			Truncated:    false,
-			OriginalSize: totalBytes,
-		}
+		result.Output = output
+		return result
 	}
+
+	result.Truncated = true
 
 	// 执行截断 — 头部 + 尾部保留，中间省略。
 	// 相比纯头部截断，保留尾部能让 LLM 看到输出的结尾（如错误信息、
@@ -140,17 +209,15 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 		if tailBytes > totalBytes-headBytes {
 			tailBytes = totalBytes - headBytes
 		}
-		headText := text[:headBytes]
+		headText := fullText[:headBytes]
 		tailText := ""
 		if tailBytes > 0 {
-			tailText = text[totalBytes-tailBytes:]
+			tailText = fullText[totalBytes-tailBytes:]
 		}
 		hint := truncationHint(totalBytes-headBytes-tailBytes, -1)
-		return TruncationResult{
-			Output:       headText + hint + "\n\n" + tailText,
-			Truncated:    true,
-			OriginalSize: totalBytes,
-		}
+		preview := headText + hint + "\n\n" + tailText
+		result.Output = applyOffload(fullText, preview, opts, &result)
+		return result
 	}
 
 	removedLines := len(lines) - len(head) - len(tail)
@@ -161,11 +228,38 @@ func TruncateOutput(output any, cfg TruncationConfig) TruncationResult {
 
 	hint := truncationHint(removedBytes, removedLines)
 
-	return TruncationResult{
-		Output:       headText + hint + "\n\n" + tailText,
-		Truncated:    true,
-		OriginalSize: totalBytes,
+	preview := headText + hint + "\n\n" + tailText
+	result.Output = applyOffload(fullText, preview, opts, &result)
+	return result
+}
+
+// applyOffload 在输出被截断的前提下，尝试把完整原文落盘到工作空间。
+// 成功则将指针 + 子 agent 委托提示追加到 preview；任何失败都 fail-safe 返回原 preview。
+func applyOffload(fullText, preview string, opts []TruncateOption, result *TruncationResult) string {
+	o := &truncateOption{}
+	for _, opt := range opts {
+		opt(o)
 	}
+	if o.offloadSink == nil || o.offloadBotID == "" || o.offloadToolCall == "" {
+		return preview
+	}
+	relPath, err := o.offloadSink(o.offloadBotID, o.offloadToolCall, []byte(fullText))
+	if err != nil || relPath == "" {
+		return preview
+	}
+	result.OffloadPath = relPath
+	return preview + "\n\n" + offloadPointer(relPath, len(fullText))
+}
+
+// offloadPointer 生成落盘指针 + 子 agent 委托提示（面向 LLM，英文，与既有 hint 一致）。
+func offloadPointer(relPath string, fullBytes int) string {
+	return fmt.Sprintf(
+		"[Full output (%d bytes) saved to workspace file: %s. "+
+			"To inspect the omitted middle WITHOUT bloating this context, delegate to a sub-agent via the spawn tool "+
+			"and have it grep/read this file with offset/limit. "+
+			"You may also read it directly with the read tool using offset/limit.]",
+		fullBytes, relPath,
+	)
 }
 
 // truncationHint 生成统一的截断提示。

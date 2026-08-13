@@ -159,6 +159,24 @@ const (
 	KeySandboxStuckTimeout = "sandbox.stuck_timeout"
 )
 
+// ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。
+const (
+	// KeyToolOutputMaxLines 工具输出截断的行数阈值（默认 500）。
+	// 超过此行数且超过字节阈值时，输出被截断为「头+尾预览+指针」。
+	KeyToolOutputMaxLines = "tool_output.max_lines"
+
+	// KeyToolOutputMaxBytes 工具输出截断的字节阈值（默认 51200，即 50KB）。
+	KeyToolOutputMaxBytes = "tool_output.max_bytes"
+
+	// KeyToolOutputOffload 是否启用落盘指针（默认 true）。
+	// 开启且输出被截断时，完整原文写入 bot 工作空间的 tool_output 子目录，
+	// 主上下文仅留预览+指针+子 agent 委托提示；关闭则纯 head+tail 截断。
+	KeyToolOutputOffload = "tool_output.offload"
+
+	// KeyToolOutputSubdir 落盘文件所在的子目录（相对工作空间根，默认 "tool-output"）。
+	KeyToolOutputSubdir = "tool_output.subdir"
+)
+
 // System 键。
 const (
 	// KeySystemTimezone 系统时区（IANA 时区标识符，如 "Asia/Shanghai"、"UTC"）。

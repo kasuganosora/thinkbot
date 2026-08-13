@@ -663,6 +663,42 @@ func WorkspaceMetaSpecs() []MetaSpec {
 	}
 }
 
+// --- ToolOutput 配置（工具输出截断 + 落盘指针）---
+
+// ToolOutputConfig 是工具输出截断 + 落盘指针的可序列化配置（与 llm 包的同名
+// 结构字段对齐，但定义在 config 包内以避免 config↔llm 循环依赖；调用方负责转换）。
+type ToolOutputConfig struct {
+	// MaxLines 截断行数阈值（0=回退默认）。
+	MaxLines int
+	// MaxBytes 截断字节阈值（0=回退默认）。
+	MaxBytes int
+	// OffloadEnabled 是否启用落盘指针。
+	OffloadEnabled bool
+	// OffloadSubdir 落盘子目录（相对工作空间根）。
+	OffloadSubdir string
+}
+
+// GetToolOutputConfig 返回工具输出截断 + 落盘指针的配置。
+// 零值字段由调用方回退到 llm.DefaultToolOutputConfig() 的默认值。
+func (b *Builder) GetToolOutputConfig() ToolOutputConfig {
+	return ToolOutputConfig{
+		MaxLines:       b.store.GetInt(KeyToolOutputMaxLines, 0),
+		MaxBytes:       b.store.GetInt(KeyToolOutputMaxBytes, 0),
+		OffloadEnabled: b.store.GetBool(KeyToolOutputOffload, true),
+		OffloadSubdir:  b.store.GetString(KeyToolOutputSubdir, "tool-output"),
+	}
+}
+
+// ToolOutputMetaSpecs 返回工具输出配置项的元数据。
+func ToolOutputMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyToolOutputMaxLines, Category: "ToolOutput", Description: "工具输出截断的行数阈值（默认 500）。超过此行数且超过字节阈值时，输出被截断为头+尾预览+指针。"},
+		{Key: KeyToolOutputMaxBytes, Category: "ToolOutput", Description: "工具输出截断的字节阈值（默认 51200，即 50KB）。"},
+		{Key: KeyToolOutputOffload, Category: "ToolOutput", Description: "是否启用落盘指针（默认 true）。开启且输出被截断时，完整原文写入工作空间 tool-output 子目录，主上下文仅留预览+指针+子 agent 委托提示；关闭则纯 head+tail 截断。"},
+		{Key: KeyToolOutputSubdir, Category: "ToolOutput", Description: "落盘文件所在子目录（相对工作空间根，默认 tool-output）。"},
+	}
+}
+
 // --- System 配置 ---
 
 // GetTimezone 返回系统时区标识符（IANA 格式，如 "Asia/Shanghai"）。
