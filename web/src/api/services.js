@@ -1143,7 +1143,11 @@ export const chatApi = {
                   }
                 }
               }
-              return { traceId: currentEvent, text: fullText, toolCalls }
+              // 透传命令响应元数据（/clear、/help 等斜杠命令在 done 中携带 command:true）
+              const resp = { traceId: currentEvent, text: fullText, toolCalls }
+              if (parts.command) resp.command = parts.command
+              if (parts.cleared != null) resp.cleared = parts.cleared
+              return resp
 
             case 'error':
               throw new Error(parts.message || '请求失败')
