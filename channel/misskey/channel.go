@@ -538,13 +538,19 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	}
 
 	// Mentioned 由调用方传入：mention/reply 事件为 true，timeline 事件为 false。
-	// ChatType 方面，Misskey 没有传统意义上的 "群组" 概念：
-	// - visibility=specified → 类似私聊（仅指定对象可见）
-	// - visibility=followers → 类似受限群组
-	// - visibility=public/home → 公开社交时间线
-	// 我们将 specified 映射为 private，其余映射为 group（社交场景）。
+	// ChatType 方面，Misskey 没有传统意义上的 "群组" 概念，但我们按「交互性质」
+	// 而非「帖子可见性」来判定单聊/群聊：
+	//   被 @ / 被回复（Mentioned=true）→ 视为「单聊」（1:1 对话）：对方明确叫名，
+	//     由 Bot 自行判断如何/是否回复（engagement 时序门控与节奏抑制都已对此放行）。
+	//     无论原帖是 public/home/followers 还是 specified，一律归为 private（单聊语义），
+	//     让 prompt 以「直接对话」而非「群聊广播」的语境组装。
+	//   未被 @ 的时间线帖子（Mentioned=false）→ 视为「群聊/社交广播」（group），
+	//     由 engagement + 节奏控制决定是否插话；其中 visibility=specified 的主动私信
+	//     仍归为 private。
+	// 注意：ChatType 只影响节奏策略键与 prompt 语境，不改变回复可见性
+	// （回复可见性由 ReplyWithVisibility 取原帖 visibility 决定，公开 @ 仍是公开串接回复）。
 	chatType := core.ChatGroup
-	if note.Visibility == VisibilitySpecified {
+	if mentioned || note.Visibility == VisibilitySpecified {
 		chatType = core.ChatPrivate
 	}
 
