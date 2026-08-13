@@ -60,12 +60,17 @@ func (d *LogDispatcher) Dispatch(ctx context.Context, actions []core.Action) err
 	defer span.End()
 
 	for i, a := range actions {
+		payloadStr := fmt.Sprintf("%v", a.Payload)
+		if len(payloadStr) > 2000 {
+			payloadStr = payloadStr[:2000] + "...(truncated)"
+		}
 		d.logger.Infow("dispatch action",
 			"index", i,
 			"type", string(a.Type),
 			"channel", a.Channel,
 			"user_id", a.UserID,
-			"payload_type", fmt.Sprintf("%T", a.Payload))
+			"payload_type", fmt.Sprintf("%T", a.Payload),
+			"payload", payloadStr)
 
 		span.AddEvent("action.dispatched",
 			trace.WithAttributes(

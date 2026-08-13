@@ -192,10 +192,15 @@ func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) er
 	}
 
 	span.SetStatus(codes.Ok, "sent")
-	h.logger.Debugw("action sent via channel",
+	payloadStr := fmt.Sprintf("%v", action.Payload)
+	if len(payloadStr) > 2000 {
+		payloadStr = payloadStr[:2000] + "...(truncated)"
+	}
+	h.logger.Infow("action sent via channel",
 		"source_channel", sourceChannel,
 		"action_type", action.Type,
-		"action_channel", action.Channel)
+		"action_channel", action.Channel,
+		"payload", payloadStr)
 
 	return nil
 }
