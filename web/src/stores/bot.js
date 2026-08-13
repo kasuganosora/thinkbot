@@ -826,6 +826,15 @@ async function resumeContinuation(sessionId) {
     })
       .then((resp) => {
         if (resp?.traceId) _activeTraceId = resp.traceId
+
+        // 斜杠命令响应：/clear 等命令在 done 事件中携带 command:true
+        if (resp?.command === 'clear') {
+          // 清空本地消息列表（DB 已在后端清完）
+          messages.value = []
+          return
+        }
+        // 其他命令（help 等）正常显示回复文本，走下方常规流程
+
         const updated = [...messages.value]
         const aIdx = updated.findIndex(m => m.id === assistantTmpId)
         if (aIdx >= 0) {
