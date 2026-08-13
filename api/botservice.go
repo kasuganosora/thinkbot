@@ -1278,6 +1278,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Wrap(err, "bot_service: create bot")
 	}
 
+	// 注册 Soul 人格维护工具：让 bot 能读/改写自己的 SOUL.md 并热生效。
+	// 仅当该 bot 启用了 SoulLoader（即配置了工作空间人格文件）时注册；
+	// 无 SoulLoader 的 bot 注册会无意义（无文件可写），故跳过。
+	if b.SoulLoader() != nil {
+		if regErr := toolMgr.Register(bot.NewSoulTool(b.SoulLoader())); regErr != nil {
+			s.logger.Warnw("failed to register soul tool", "err", regErr)
+		}
+	}
+
 	// Wire BurstBuffer reenqueue——需要 bot 创建后才能访问 Ingress
 	if engagementStage != nil && burstBuf != nil {
 		engagementStage.WithBurstBuffer(burstBuf, func(env *core.Envelope) {
