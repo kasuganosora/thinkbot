@@ -21,6 +21,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/engagement"
+	"github.com/kasuganosora/thinkbot/agent/heartbeat"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
@@ -69,6 +70,7 @@ type BotService struct {
 	botInstances      map[string]*bot.Bot               // botID → running Bot
 	toolManagers      map[string]agenttools.ToolManager // botID → tool manager (for listing)
 	dreamingBundles   map[string]*bot.DreamingBundle    // botID → DreamingBundle
+	heartbeatBundles  map[string]*heartbeat.Bundle      // botID → HeartbeatBundle
 	cancelFuncs       map[string]context.CancelFunc     // botID → bot context cancel
 	closeFuncs        map[string]func()                 // botID → sub-agent managers cleanup
 	messageCancels    map[string]context.CancelFunc     // "botID:traceID" → message context cancel
@@ -91,6 +93,10 @@ type BotService struct {
 
 	// permSvc bot 工具权限服务（按 bot 维度控制工具可用性）。
 	permSvc *toolperm.Service
+
+	// heartbeatStore 心跳配置/日志存储。由 BotService 持有并共享给 API Server，
+	// 保证「运行时执行器写日志」与「HTTP 读写配置」用的是同一把 per-bot 锁。
+	heartbeatStore *heartbeat.Store
 }
 
 // NewBotService 创建 BotService。
@@ -116,6 +122,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		channels:          make(map[string]*WebChannel),
 		botInstances:      make(map[string]*bot.Bot),
 		dreamingBundles:   make(map[string]*bot.DreamingBundle),
+		heartbeatBundles:  make(map[string]*heartbeat.Bundle),
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		closeFuncs:        make(map[string]func()),
 		messageCancels:    make(map[string]context.CancelFunc),
@@ -125,10 +132,19 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
-		tokenBudget:  pipeline.NewTokenBudgetState(time.Hour),
-		permSvc:      permSvc,
-		toolManagers: make(map[string]agenttools.ToolManager),
+		tokenBudget:    pipeline.NewTokenBudgetState(time.Hour),
+		permSvc:        permSvc,
+		toolManagers:   make(map[string]agenttools.ToolManager),
+		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
 	}
+}
+
+// HeartbeatStore 返回心跳存储，供 API Server 复用同一实例（共享 per-bot 锁）。
+func (s *BotService) HeartbeatStore() *heartbeat.Store {
+	if s == nil {
+		return nil
+	}
+	return s.heartbeatStore
 }
 
 // --- BotDefinition CRUD ---
@@ -689,7 +705,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				}
 			}
 		}
-		messages = append(messages, llm.UserMessage(msg.Text))
+		// 心跳等触发源：Text 故意留空（防 L0 污染），真正内容在 InjectContext。
+		// 必须 fallback 到它，否则会拼出空 user message → GLM 400 拒收，心跳静默失败。
+		content := msg.Text
+		if content == "" && msg.InjectContext != "" {
+			content = msg.InjectContext
+		}
+		messages = append(messages, llm.UserMessage(content))
 		return messages
 	}
 
@@ -971,12 +993,49 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 	rhythmStage := stages.NewRhythmStage("chat-rhythm", rhythmProvider, s.logger)
 
+	// 创建心跳子系统（周期性「自主唤醒」，见 docs/heartbeat-redesign.md）。
+	// 必须在 pipeline 组装前创建：pipeline 要挂一个极轻量 stage，把「真实外部活动」
+	// 回传给心跳频控以重置连续唤醒预算（§9.3）。
+	// 真实编排入口（Engine）在 bot.New 内部创建 → 走后置注入 SetRunner。
+	hbBundle := heartbeat.NewBundle(heartbeat.BundleConfig{
+		BotID:    id,
+		Store:    s.heartbeatStore,
+		Location: builder.GetBotTimezoneLocation(id),
+		Logger:   s.logger,
+		// 准入关卡信号源：自上次唤醒以来是否有新消息 / 新记忆条目。
+		AdmissionFn: s.newHeartbeatAdmissionFn(id),
+		// 枚举本 bot 可主动发帖的真实渠道/会话（供心跳 LLM 决策选择）。
+		ChannelLister: s.heartbeatChannelLister(id),
+		// 把决策内容发到选定真实渠道（绕过伪频道 "heartbeat" 的 dispatcher）。
+		ChannelPoster: s.heartbeatChannelPoster(id),
+		// 把决策的内部笔记写入本 bot 长期记忆（DecisionNote 时调用，复用 ActionNote 链路）。
+		NoteSaver: s.heartbeatNoteSaver(id),
+	})
+
 	// 创建 Pipeline
 	stages := []core.StageInfo{
 		{Stage: lurkEnricher, Order: 45, Enabled: true},
 		{Stage: recallStage, Order: 90, Enabled: true},
 		{Stage: rhythmStage, Order: 95, Enabled: true},
 		{Stage: wrappedLLM, Order: 100, Enabled: true},
+	}
+	if hbBundle != nil {
+		// 心跳频控预算重置：任何真实外部入站消息（非心跳自身）都说明 bot 不在自激真空，
+		// 立即恢复连续唤醒预算。纯内存操作，置于链首，不影响任何既有语义。
+		hb := hbBundle
+		stages = append(stages, core.StageInfo{
+			Order:   5,
+			Enabled: true,
+			Stage: &core.StageFunc{
+				StageName: "heartbeat-activity",
+				Fn: func(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+					if env.Message.Source != core.SourceHeartbeat && env.Message.UserID != "" {
+						hb.NotifyUserActivity()
+					}
+					return env, nil
+				},
+			},
+		})
 	}
 	if engagementStage != nil {
 		// Engagement 放在 LLM 之前——先决定是否参与，再生成回复
@@ -1278,6 +1337,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return errs.Wrap(err, "bot_service: create bot")
 	}
 
+	// 心跳后置接线：把真实编排入口（Engine：pipeline + dispatcher 全链路）交给心跳执行器。
+	// 必须在 bot.Run 启动 Scheduler 之前完成，否则首次唤醒会以 runner=nil 失败。
+	if hbBundle != nil {
+		hbBundle.SetRunner(b.Engine())
+		s.logger.Infow("heartbeat wired to engine", "bot_id", id)
+	}
+
 	// 注入工具输出落盘指针接收器（借鉴 opencode 的 token 优化）：
 	// 当工具输出被截断时，把完整原文写入 bot 工作空间的 tool-output 子目录，
 	// 主上下文仅留预览+指针+子 agent 委托提示，把深挖代码的代价隔离到独立子 agent 上下文。
@@ -1366,6 +1432,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 用独立 context 启动 Bot，避免 HTTP 请求结束后 ctx 被取消导致 Bot 立即关闭
 	botCtx, botCancel := context.WithCancel(context.Background())
 
+	// 启动心跳调度器（若启用）：在 bot 主循环之前启动，共享 botCtx，
+	// 随 bot 停止（ctx 取消）一起收尾；StopBot 再显式 Stop 兜底。
+	if hbBundle != nil {
+		hbBundle.Start(botCtx)
+	}
+
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
 		defer func() {
@@ -1412,6 +1484,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if dreamBundle != nil {
 		s.dreamingBundles[id] = dreamBundle
 	}
+	if hbBundle != nil {
+		s.heartbeatBundles[id] = hbBundle
+	}
 	s.mu.Unlock()
 
 	// 更新定义状态
@@ -1440,6 +1515,10 @@ func (s *BotService) StopBot(id string) {
 	if dreamBundle, ok := s.dreamingBundles[id]; ok {
 		dreamBundle.Stop()
 		delete(s.dreamingBundles, id)
+	}
+	if hbBundle, ok := s.heartbeatBundles[id]; ok {
+		hbBundle.Stop()
+		delete(s.heartbeatBundles, id)
 	}
 	// 该 bot 的工作流引擎随 bot 停止而失效（其 SubAgent 管理器已由 closeFuncs 关闭），
 	// 必须摘掉，否则 WorkflowService 会复用一个已关闭的引擎。

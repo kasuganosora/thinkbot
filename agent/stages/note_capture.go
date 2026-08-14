@@ -32,6 +32,11 @@ func NoteCaptureMiddleware(category string) func(next core.Stage) core.Stage {
 				if out == nil {
 					return out, err
 				}
+				// 心跳自主唤醒的消息不写入 L0 记忆：其 InjectContext 不是用户原文，
+				// 且「心跳唤醒」本身不应成为长期记忆的一部分（避免污染 dreaming 学习）。
+				if out.Message.Source == core.SourceHeartbeat {
+					return out, nil
+				}
 				for _, a := range out.Actions() {
 					if a.Type != core.ActionNote && a.Type != core.ActionReply {
 						continue

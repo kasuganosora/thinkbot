@@ -1940,8 +1940,9 @@ export const botSkillApi = {
 
 // ============================ Bot 心跳（图：心跳） ============================
 //   配置读  GET     /api/bots/:id/heartbeat
-//   配置写  PUT     /api/bots/:id/heartbeat        { enabled, interval }
-//   日志    GET     /api/bots/:id/heartbeat/logs   ?status=all|normal|alert
+//   配置写  PUT     /api/bots/:id/heartbeat
+//           { enabled, interval, allow_post, max_consecutive_wakes, cooldown_min, idle_wake_every }
+//   日志    GET     /api/bots/:id/heartbeat/logs   ?status=all|acted|note|silent|suppressed|error
 //   清空    DELETE  /api/bots/:id/heartbeat/logs
 const _botHb = {}
 function fmtHbTime(t) {
@@ -1951,23 +1952,47 @@ function ensureHeartbeat(botId) {
   if (!_botHb[botId]) {
     const interval = 30
     const base = Date.now()
+    // 新语义日志样本：status ∈ acted|note|silent|suppressed|error
+    // 含 actions([]string) / admitted(bool) / traceId(string)
     const samples = [
-      { status: 'alert', cost: 18.6, result: '没什么需要发警报的。周三下午四点，一切照旧，直接过了。' },
-      { status: 'alert', cost: 17.7, result: '（这是我自己刚输出的心跳结论，不用再处理一遍了。15:30 BJT 一切太平，无事发生。）' },
-      { status: 'alert', cost: 12.6, result: '没错，就是这结果。周三下午3点，一切照旧，风平浪静。不发送警报。收工。' },
-      { status: 'normal', cost: 11.2, result: '14:30 BJT，周三下午。上次心跳（14:00 BJT）以来的半个小时里，搜了一圈——无新用户消息、无@提及、无新对话、无活跃聊天会话。Misskey 时间线继续无波澜。HEARTBEAT_OK。' },
-      { status: 'normal', cost: 6.8, result: '14:00 BJT，周三下午。上次心跳（13:30 BJT）以来的半个小时里，搜了一圈——无新用户消息、无@提及、无新对话、无活跃聊天会话。Misskey 时间线继续无波澜。HEARTBEAT_OK。' },
-      { status: 'normal', cost: 7.4, result: '13:30 BJT，周三正午刚过。上次心跳（13:00 BJT）以来无新消息、无@提及、无新对话、无活跃会话。系统一切正常。HEARTBEAT_OK。' },
-      { status: 'normal', cost: 9.1, result: '13:00 BJT，周三午间。半小时内无用户互动、无平台新事件。Misskey 时间线平静。HEARTBEAT_OK。' }
+      { status: 'acted', cost: 18.6, actions: ['reply'], admitted: true,
+        result: '检测到 Misskey 时间线有人问「周末有什么活动」，回了一句活动预告。' },
+      { status: 'note', cost: 12.6, actions: ['note'], admitted: true,
+        result: '发现自己定的周报待办临近，记了条笔记提醒自己，未对外发言。' },
+      { status: 'suppressed', cost: 0, actions: [], admitted: true, reason: 'platform_policy',
+        result: '本轮有信号但 allow_post=false（平台策略第一级闸门），已压制发言，仅思考+笔记。' },
+      { status: 'suppressed', cost: 0, actions: [], admitted: true, reason: 'frequency_cap',
+        result: '连续行动达上限，频控降级（第二级闸门），本轮不发言。' },
+      { status: 'silent', cost: 6.8, actions: [], admitted: true,
+        result: '14:00 BJT，半小时内无新消息、无@提及、无新对话。一切照旧，静默。' },
+      { status: 'silent', cost: 7.4, actions: [], admitted: true,
+        result: '13:30 BJT 以来无新消息、无平台新事件。系统正常，静默。' },
+      { status: 'acted', cost: 9.1, actions: ['reply'], admitted: true,
+        result: '早上自定的「关注某话题」到期，发了一条摘要。' },
+      { status: 'error', cost: 3.2, actions: [], admitted: true,
+        result: '编排执行异常：dispatcher 返回 timeout，本轮未产出有效行动。' }
     ]
     const logs = samples.map((s, i) => ({
       id: genId('hb'),
       status: s.status,
       time: fmtHbTime(new Date(base - i * interval * 60_000)),
       cost: s.cost,
+      actions: s.actions,
+      admitted: s.admitted,
+      traceId: 'hb-trace-' + (1000 + i),
       result: s.result
     }))
-    _botHb[botId] = { config: { enabled: true, interval }, logs }
+    _botHb[botId] = {
+      config: {
+        enabled: true,
+        interval,
+        allow_post: false,
+        max_consecutive_wakes: 3,
+        cooldown_min: 0,
+        idle_wake_every: 4
+      },
+      logs
+    }
   }
   return _botHb[botId]
 }
@@ -1981,6 +2006,10 @@ export const botHeartbeatApi = {
       const hb = ensureHeartbeat(botId)
       if (payload.enabled !== undefined) hb.config.enabled = payload.enabled
       if (payload.interval !== undefined) hb.config.interval = payload.interval
+      if (payload.allow_post !== undefined) hb.config.allow_post = payload.allow_post
+      if (payload.max_consecutive_wakes !== undefined) hb.config.max_consecutive_wakes = payload.max_consecutive_wakes
+      if (payload.cooldown_min !== undefined) hb.config.cooldown_min = payload.cooldown_min
+      if (payload.idle_wake_every !== undefined) hb.config.idle_wake_every = payload.idle_wake_every
       return { ...hb.config }
     })
     return request('PUT', `/api/bots/${botId}/heartbeat`, payload)

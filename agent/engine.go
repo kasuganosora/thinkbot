@@ -297,8 +297,24 @@ func (e *Engine) safeProcessEnvelope(ctx context.Context, workerID int, env *cor
 	e.processEnvelope(ctx, workerID, env)
 }
 
+// ProcessSync 同步处理单个 Envelope，走与 worker 完全相同的链路
+// （hook → pipeline.Execute → dispatcher.Dispatch），并把结果同步返回。
+//
+// 用途：架构层「主动触发」场景（如心跳自主唤醒）需要同步拿到本轮产出的 Action，
+// 以生成确定性日志。这类触发不经 Ingress 队列，因此不受入站去重/自消息过滤影响。
+//
+// 返回：加工后的 Envelope（被 pipeline 丢弃时为 nil）、已派发的 Action 列表、错误。
+func (e *Engine) ProcessSync(ctx context.Context, env *core.Envelope) (*core.Envelope, []core.Action, error) {
+	return e.processEnvelopeWithResult(ctx, -1, env)
+}
+
 // processEnvelope 处理单个消息信封的完整生命周期。
 func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.Envelope) {
+	_, _, _ = e.processEnvelopeWithResult(ctx, workerID, env)
+}
+
+// processEnvelopeWithResult 是 processEnvelope 的带返回值版本，供同步触发路径复用。
+func (e *Engine) processEnvelopeWithResult(ctx context.Context, workerID int, env *core.Envelope) (*core.Envelope, []core.Action, error) {
 	traceID := env.Message.TraceID
 	ctx = traceid.WithTraceID(ctx, traceID)
 
@@ -332,7 +348,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 			"err", err,
 			"duration", time.Since(start))
 		e.hook.OnPipelineError(ctx, env, err)
-		return
+		return nil, nil, err
 	}
 
 	// Pipeline 返回 nil → 消息被丢弃
@@ -342,7 +358,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 			"worker_id", workerID,
 			"message_id", messageID)
 		e.hook.OnMessageDropped(ctx, env)
-		return
+		return nil, nil, nil
 	}
 
 	// 收集 Action 并派发
@@ -353,7 +369,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 			"worker_id", workerID,
 			"message_id", messageID)
 		e.hook.OnMessageDone(ctx, env, nil, time.Since(start))
-		return
+		return result, nil, nil
 	}
 
 	span.SetAttributes(attribute.Int("actions.count", len(actions)))
@@ -371,7 +387,7 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 			"err", dispErr,
 			"duration", time.Since(start))
 		e.hook.OnDispatchError(ctx, env, dispErr)
-		return
+		return result, actions, dispErr
 	}
 
 	duration := time.Since(start)
@@ -383,4 +399,6 @@ func (e *Engine) processEnvelope(ctx context.Context, workerID int, env *core.En
 		"duration", duration)
 
 	e.hook.OnMessageDone(ctx, env, actions, duration)
+
+	return result, actions, nil
 }
