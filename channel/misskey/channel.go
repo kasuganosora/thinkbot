@@ -803,6 +803,32 @@ func (c *MisskeyChannel) Unreact(ctx context.Context, noteID string) error {
 // 行为：
 //   - ActionReply：回复目标帖子（文本超长自动截断到 3000 rune）
 //   - 其他 ActionType：当前也按回复处理（后续扩展）
+// PostTimeline 向本频道时间线发布一条顶层新帖（不回复任何已有帖子）。
+//
+// 与 Send（必须带 noteID 作为回复目标）不同，本方法用于「主动说点什么」场景
+// （如心跳自主唤醒决定对外发声）。可见性默认 "home"，调用方可显式指定
+// "public" / "home" / "followers" / "specified"。
+// 返回新建帖子 ID。
+func (c *MisskeyChannel) PostTimeline(ctx context.Context, text, visibility, cw string) (string, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", fmt.Errorf("misskey post: empty text")
+	}
+	if visibility == "" {
+		visibility = VisibilityHome
+	}
+	text = truncateRunes(text, misskeyMaxNoteLength)
+	noteID, err := c.api.createNoteFull(ctx, text, "", "", visibility, cw, nil)
+	if err != nil {
+		traceid.L(ctx).Warnw("misskey: post to timeline failed",
+			"channel", c.name, "err", err)
+		return "", err
+	}
+	traceid.L(ctx).Infow("misskey: posted to timeline",
+		"channel", c.name, "note_id", noteID, "visibility", visibility)
+	return noteID, nil
+}
+
 func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 	noteID := action.Channel
 	if noteID == "" {

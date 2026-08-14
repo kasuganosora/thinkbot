@@ -83,20 +83,22 @@ func NewServer(
 	engine.Use(corsMiddleware(corsOrigins))
 
 	s := &Server{
-		engine:         engine,
-		httpSrv:        &http.Server{Addr: addr, Handler: engine},
-		logger:         logger.With("component", "api_server"),
-		addr:           addr,
-		authSvc:        authSvc,
-		botSvc:         botSvc,
-		cookie:         cookie,
-		chatHistory:    chatHistory,
-		store:          store,
-		db:             db,
-		workflowSvc:    workflowSvc,
-		skillMgr:       skillMgr,
-		bindSvc:        bindSvc,
-		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
+		engine:      engine,
+		httpSrv:     &http.Server{Addr: addr, Handler: engine},
+		logger:      logger.With("component", "api_server"),
+		addr:        addr,
+		authSvc:     authSvc,
+		botSvc:      botSvc,
+		cookie:      cookie,
+		chatHistory: chatHistory,
+		store:       store,
+		db:          db,
+		workflowSvc: workflowSvc,
+		skillMgr:    skillMgr,
+		bindSvc:     bindSvc,
+		// 复用 BotService 持有的实例：运行时执行器与 HTTP 读写必须共享同一把 per-bot 锁，
+		// 否则「执行器追加日志」与「前端拉取日志」可能读到写坏的半个 JSON。
+		heartbeatStore: heartbeatStoreOf(botSvc),
 		permSvc:        permSvc,
 	}
 

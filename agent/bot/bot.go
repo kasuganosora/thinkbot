@@ -86,9 +86,6 @@ type Bot struct {
 	// 梦境巩固（nil=未启用，默认禁用）
 	dreamScheduler *cron.Scheduler // 梦境巩固的 cron 调度器
 
-	// 心跳自省（nil=未启用）
-	heartbeatScheduler *cron.Scheduler // 心跳的 cron 调度器
-
 	// 自适应 Engagement（可选）
 	adaptiveSyncer *engagement.AdaptiveEngagementSyncer // 画像→参数映射器（nil=未启用）
 
@@ -149,10 +146,6 @@ type BotParams struct {
 	// DreamScheduler 梦境巩固的 cron 调度器（可选，nil=不启用梦境巩固）。
 	// 调度器需要在调用方创建并注入，Bot.Run 会自动 Start 它，Bot.Close 会自动 Stop。
 	DreamScheduler *cron.Scheduler
-
-	// HeartbeatScheduler 心跳自省的 cron 调度器（可选，nil=不启用心跳）。
-	// 调度器需要在调用方创建并注入，Bot.Run 会自动 Start 它，Bot.Close 会自动 Stop。
-	HeartbeatScheduler *cron.Scheduler
 
 	// SelfIDSet Bot 自身用户 ID 的共享集合（可选）。
 	// 如果提供，Bot 内部的 Ingress 会使用它来存储和检查自消息，
@@ -381,9 +374,6 @@ func New(params BotParams) (*Bot, error) {
 	// 注入梦境巩固调度器
 	bot.dreamScheduler = params.DreamScheduler
 
-	// 注入心跳调度器
-	bot.heartbeatScheduler = params.HeartbeatScheduler
-
 	// 注入自适应 Engagement 组件
 	bot.adaptiveSyncer = params.AdaptiveSyncer
 
@@ -442,12 +432,6 @@ func (b *Bot) Run(ctx context.Context) error {
 			"tz", b.dreamScheduler.Summary())
 	}
 
-	// 启动心跳调度器（如果配置了）
-	if b.heartbeatScheduler != nil {
-		b.heartbeatScheduler.Start(ctx)
-		b.logger.Infow("heartbeat scheduler started", "bot_id", b.ID)
-	}
-
 	// 启动 Engine（会阻塞直到 ctx 取消）
 	err := b.engine.Run(ctx)
 
@@ -477,10 +461,6 @@ func (b *Bot) Close() {
 		// 停止梦境巩固调度器
 		if b.dreamScheduler != nil {
 			b.dreamScheduler.Stop()
-		}
-		// 停止心跳调度器
-		if b.heartbeatScheduler != nil {
-			b.heartbeatScheduler.Stop()
 		}
 		if b.ownRegistry {
 			if r, ok := b.callbackHandler.Registry().(interface{ Close() }); ok {
@@ -563,6 +543,24 @@ func (b *Bot) Metrics() BotMetrics {
 		MessagesErrors:    em.MessagesErrors,
 		DispatchErrors:    b.dispatchErrors.Load(),
 	}
+}
+
+// SaveNote 将一条内部笔记写入本 bot 的长期记忆（bot 全局 scope）。
+// 供心跳等自主场景在决策 DecisionNote 时复用与 ActionNote 完全相同的记忆写入链路，
+// 使 bot 自主记下的笔记可跨渠道召回。
+func (b *Bot) SaveNote(ctx context.Context, content string) error {
+	if b.noteHandler == nil {
+		return fmt.Errorf("bot %q: note handler not initialized", b.ID)
+	}
+	return b.noteHandler.Handle(ctx, core.Action{
+		Type:    core.ActionNote,
+		Payload: content,
+		Metadata: map[string]any{
+			"bot_id":   b.ID,
+			"category": "heartbeat",
+			"source":   "heartbeat",
+		},
+	})
 }
 
 // stopChannels 停止所有 Channel（尽力而为）。

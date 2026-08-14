@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -39,6 +40,13 @@ type Message struct {
 	UserID string `json:"userId"`
 	// Text 消息文本内容。
 	Text string `json:"text"`
+	// InjectContext 模型可见但不作为「对话内容」的注入上下文（如心跳唤醒提示）。
+	//
+	// 与 Text 的区别：Text 是用户原文，会被 note_capture 捕获为 L0 长期记忆
+	// （speaker:"user"）；InjectContext 由特定触发源（如心跳）设置，仅在本轮
+	// pipeline 内对 LLM 可见（拼入 user/system 消息），不参与记忆捕获、不进对话历史。
+	// 这避免了「把系统唤醒提示当成用户原话写进长期记忆」的污染（见 docs/heartbeat-redesign.md §7）。
+	InjectContext string `json:"injectContext,omitempty"`
 	// Mentioned 表示此消息是否显式 @提及了 Bot。
 	// 在群聊中，Pipeline 可据此决定是否只处理被 @ 的消息。
 	// 私聊中通常恒为 true。
@@ -67,6 +75,15 @@ const (
 	ChatSupergroup string = "supergroup"
 	// ChatChannel 频道/公告板（仅管理员可发言）。
 	ChatChannel string = "channel"
+)
+
+// Source 常量：消息来源标识（Message.Source 的取值）。
+const (
+	// SourceHeartbeat 系统自主心跳唤醒。
+	// bot 被周期性触发自我审视（看有什么事做），不是用户发来的消息。
+	// 心跳消息走与 @bot 相同的 pipeline，但由准入/闸门控制其自主行为，
+	// 且不参与 L0 记忆捕获（见 note_capture / llmroute）。
+	SourceHeartbeat string = "heartbeat"
 )
 
 // ============================================================================
@@ -114,7 +131,55 @@ const (
 	// 读取侧由 RecallStage 在每轮对话前按 [bot, channel, user] 三 scope 召回并注入。
 	// 值类型 string；空串表示无相关记忆。
 	KVMemoryRecall = "memory.recall"
+
+	// KVHeartbeatMode 标记当前消息为「心跳自主唤醒」决策模式。
+	//
+	// 由心跳 Executor 在构造唤醒消息时设置。LLMStage 读取后强制 JSON 结构化输出
+	// （与潜水模式同机制：ResponseFormat=json_object + 低温），使心跳决策
+	// （silent / post / note + 目标渠道 + 内容）成为结构化字段，杜绝自由文本歧义
+	// （LLM 换个说法表达「静默」就被程序解析失败的老问题）。
+	//
+	// 心跳恒设 KVSuppressReply=true：LLM 照常思考（记忆/工具/SOUL 全在线），
+	// 但不走伪频道 "heartbeat" 的通用出站；决策产出的真实发帖由 Executor 经
+	// ChannelPoster 手动路由到选定渠道，绕开 "no sender for channel heartbeat" 死路。
+	// 值类型 bool；仅 true 生效。
+	KVHeartbeatMode = "heartbeat.mode"
+
+	// KVHeartbeatTargets 携带本次心跳「可发帖目标」列表（[]heartbeat.ChannelTarget，
+	// 由心跳包设置，core 仅持有 string 键）。供唤醒提示词展示给 LLM 选择，
+	// 并由 Executor 校验 LLM 选定的目标合法性——只认列表内存在的真实渠道/会话。
+	KVHeartbeatTargets = "heartbeat.targets"
 )
+
+// ============================================================================
+// Channel 能力接口（供自主心跳等场景枚举发帖目标 / 直接发帖）
+//
+// 定义在 core 低层包，避免 heartbeat → channel 的循环依赖：
+// channel 实现这些接口，heartbeat / botservice 通过接口消费，互不 import。
+// ============================================================================
+
+// ChatRef 描述一个可发帖的会话引用，由 Channel 在入站时记录，
+// 供自主心跳等场景枚举「能在哪些会话主动发言」。
+type ChatRef struct {
+	// ID 平台会话 ID（如 Telegram chatID）。
+	ID int64 `json:"id"`
+	// Title 会话标题（群名等），可能为空。
+	Title string `json:"title,omitempty"`
+}
+
+// RecentChatLister 由 Channel 实现，返回近期活跃会话列表。
+// 心跳据此把「近期聊过的 Telegram 群 / Misskey 对话」作为可选发帖目标呈现给 LLM。
+type RecentChatLister interface {
+	RecentChats() []ChatRef
+}
+
+// TimelinePoster 由 Channel 实现，支持向自身时间线 / 动态发顶层新帖
+// （如 Misskey 时间线）。心跳「想对大家说点什么」时走此路径，
+// 而非回复某条具体帖子（回复走通用 Sender.Send + noteID 目标）。
+type TimelinePoster interface {
+	// PostTimeline 发布一条顶层新帖，返回新帖 ID。
+	PostTimeline(ctx context.Context, text, visibility, cw string) (string, error)
+}
 
 // ============================================================================
 // Action — 输出动作
