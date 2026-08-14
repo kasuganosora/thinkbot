@@ -76,6 +76,12 @@ type TelegramChannel struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	stopped bool
+
+	// recentChats 记录本 Bot 近期收到消息的会话（chatID → 标题），
+	// 供自主心跳等场景枚举「可在哪些群 / 私聊主动发言」。
+	// 仅追加记录，不入站逻辑依赖；读侧由 RecentChats 暴露。
+	recentChats  map[int64]core.ChatRef
+	recentChatMu sync.Mutex
 }
 
 // NewChannel 创建一个 TelegramChannel。
@@ -232,6 +238,8 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 
 	// 转换 chat ID 为字符串 channel
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)
+	// 记录近期会话，供心跳等自主发帖场景枚举目标（无副作用，失败不影响消息处理）。
+	c.recordChat(msg.Chat.ID, msg.Chat.Title)
 	userID := ""
 	if msg.From != nil {
 		userID = fmt.Sprintf("%d", msg.From.ID)
@@ -495,6 +503,44 @@ func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
 
 	// 执行发送
 	return c.ReplyWithMode(ctx, chatID, text, parseMode, replyToMessageID)
+}
+
+// recordChat 记录一个近期活跃会话（供 RecentChats 枚举）。
+// 线程安全；容量上限 50，超出时淘汰最早插入的一项（仅用于展示枚举，无一致性要求）。
+func (c *TelegramChannel) recordChat(id int64, title string) {
+	if id == 0 {
+		return
+	}
+	c.recentChatMu.Lock()
+	defer c.recentChatMu.Unlock()
+	if c.recentChats == nil {
+		c.recentChats = make(map[int64]core.ChatRef)
+	}
+	c.recentChats[id] = core.ChatRef{ID: id, Title: title}
+	if len(c.recentChats) > 50 {
+		for k := range c.recentChats { // 删第一个即足够（map 遍历顺序随机，无影响）
+			delete(c.recentChats, k)
+			break
+		}
+	}
+}
+
+// RecentChats 返回近期活跃会话列表（实现 core.RecentChatLister），
+// 供心跳等自主发帖场景枚举目标。最多返回近 20 个，无则返回 nil。
+func (c *TelegramChannel) RecentChats() []core.ChatRef {
+	c.recentChatMu.Lock()
+	defer c.recentChatMu.Unlock()
+	if len(c.recentChats) == 0 {
+		return nil
+	}
+	refs := make([]core.ChatRef, 0, len(c.recentChats))
+	for _, r := range c.recentChats {
+		refs = append(refs, r)
+	}
+	if len(refs) > 20 {
+		refs = refs[len(refs)-20:]
+	}
+	return refs
 }
 
 // splitMessage 将长文本按 maxLen 拆分为多条消息。
