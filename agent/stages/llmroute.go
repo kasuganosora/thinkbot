@@ -101,6 +101,18 @@ func isLurkMode(env *core.Envelope) bool {
 	return false
 }
 
+// isHeartbeatMode 判断当前消息是否为心跳自主唤醒决策（KVHeartbeatMode=true）。
+// 心跳决策是机器解析的 JSON（silent/post/note + 目标），与潜水模式同理：
+// 生成结果不得追加人类可读的截断/步数守卫提示语，否则会污染 JSON 导致解析失败。
+func isHeartbeatMode(env *core.Envelope) bool {
+	if v, ok := env.Get(core.KVHeartbeatMode); ok {
+		if b, ok := v.(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
 // buildLurkPrompt 构建潜水观察者 prompt：优先用 SOUL.md 人格内容，否则回退到已注入的
 // base prompt，再拼接观察者指令。保证「结合 soul.md 模块分析」。
 func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string {
@@ -330,7 +342,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if s.config.MessageBuilder != nil {
 		messages = s.config.MessageBuilder(env.Message)
 	} else {
-		messages = []llm.Message{llm.UserMessage(env.Message.Text)}
+		content := env.Message.Text
+		// 心跳等触发源用独立 InjectContext 作为对话内容：Text 故意留空，
+		// 避免被 note_capture 当作「用户原文」写入 L0 长期记忆（见 docs/heartbeat-redesign.md §7）。
+		if content == "" && env.Message.InjectContext != "" {
+			content = env.Message.InjectContext
+		}
+		messages = []llm.Message{llm.UserMessage(content)}
 	}
 
 	// 解析 system prompt：优先从 Envelope KV 读取动态组装的 prompt（PromptStage 注入），
@@ -347,6 +365,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 潜水（只读）模式：切换为「观察者」prompt —— 结合 SOUL.md 人格，把思考
 	// 导向「从这条帖子里学到什么」，而非「如何回复」。仍可正常调用 LLM。
 	lurkMode := isLurkMode(env)
+	heartbeatMode := isHeartbeatMode(env)
 	if lurkMode {
 		// INFO 级：让「潜水模式激活」在默认日志下清晰可观测，而非只能靠下游 skip/captured 间接推断。
 		logger.Infow("lurk: observing read-only channel",
@@ -391,6 +410,18 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if lurkMode {
 		params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
 		params.Temperature = lurkTemperature()
+	}
+
+	// 心跳自主唤醒决策模式：与潜水模式同机制——强制 JSON 结构化输出 + 低温，
+	// 使「是否发言 / 发到哪个渠道 / 发什么」成为结构化字段，杜绝自由文本歧义
+	// （LLM 换个说法表达「静默」就被程序解析失败）。仅心跳消息（KVHeartbeatMode=true）
+	// 生效，正常对话无影响。决策产出的真实发帖由心跳 Executor 经 ChannelPoster 路由，
+	// 不走通用出站（心跳恒设 KVSuppressReply）。
+	if v, ok := env.Get(core.KVHeartbeatMode); ok {
+		if b, ok := v.(bool); ok && b {
+			params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
+			params.Temperature = lurkTemperature()
+		}
 	}
 
 	cfg := &llm.OrchestrateConfig{
@@ -459,7 +490,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	statsCtx := llm.WithStatsSkip(ctx)
 	// 潜水模式强制走非流式：潜水产出没有实时观众（不发帖、只落库），
 	// 流式只会让「解析 JSON → 不合规则重试」的控制流复杂化。
-	if s.config.StreamPublisher != nil && !lurkMode {
+	if s.config.StreamPublisher != nil && !lurkMode && !heartbeatMode {
 		var err error
 		result, err = s.processStream(statsCtx, env, cfg, logger)
 		if err != nil {
@@ -561,7 +592,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 若 LLM 因达到输出 token 上限（length）被截断，追加提示，
 	// 避免用户误以为任务已完成（实际可能只生成了半成品回复）。
 	// 潜水模式不拼接：产出是给机器解析的 JSON，不是给人看的回复。
-	if result.FinishReason == llm.FinishReasonLength && !lurkMode {
+	if result.FinishReason == llm.FinishReasonLength && !lurkMode && !heartbeatMode {
 		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。" +
 			"请回复「继续」让我接着完成剩余工作。"
 	}
@@ -569,7 +600,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 若编排循环因步数守卫（撞硬上限或陷入重复循环）而停止，追加提示，
 	// 避免用户把「步数预算耗尽、Bot 主动停下」误判为卡死。实际上任务
 	// 可能尚未跑完，回复「继续」即可让 Bot 接着处理剩余工作。
-	if result.LoopStoppedByGuard {
+	if result.LoopStoppedByGuard && !heartbeatMode {
 		result.Text += "\n\n⚠️ 提示：本次任务因达到工具调用步数上限（" +
 			result.LoopStopReason + "）被暂停，可能尚未全部完成。" +
 			"请回复「继续」让我接着完成剩余工作。"
