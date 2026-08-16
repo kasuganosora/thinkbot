@@ -213,10 +213,19 @@ func BotMemoryBackfillEnabledKey(botID string) string {
 	return "bot." + botID + ".memory.backfill.enabled"
 }
 
-// BotMemoryBackfillWatermarkKey 返回指定 bot 的回灌水位线键。
-// 值为已补灌进 L0 的最大 chat_message.id（十进制字符串），独立于 tiered_memories。
+// BotMemoryBackfillWatermarkKey 返回指定 bot 的回灌水位线键（chat_messages 时代遗留）。
+// 注意：事件流改造后回灌改用 BotMemoryBackfillEventWatermarkKey（事件流 id 空间），
+// 本键不再用于回灌，保留仅为兼容旧部署已写入的配置项。
 func BotMemoryBackfillWatermarkKey(botID string) string {
 	return "bot." + botID + ".memory.backfill.watermark"
+}
+
+// BotMemoryBackfillEventWatermarkKey 返回指定 bot 的事件流回灌水位线键。
+// 值为已补灌进 L0 的最大 user_message_events.id（十进制字符串），独立于 tiered_memories。
+// 与旧 chat_messages 时代的水位线键（BotMemoryBackfillWatermarkKey）隔离，避免 id 空间
+// 冲突导致首次回灌漏读历史。
+func BotMemoryBackfillEventWatermarkKey(botID string) string {
+	return "bot." + botID + ".memory.backfill.event_watermark"
 }
 
 // ToolPolicyKey 返回指定 bot 的工具权限策略 JSON 的数据库键。

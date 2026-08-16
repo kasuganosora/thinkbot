@@ -20,6 +20,7 @@ func Migrate(database *gorm.DB) error {
 		&ChannelDefinition{},
 		&ChatSession{},
 		&ChatMessage{},
+		&UserMessageEvent{},
 		&BindCode{},
 		&IdentityMapping{},
 		&TieredMemoryModel{},
