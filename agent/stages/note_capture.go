@@ -7,8 +7,28 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
 
+// CapturedUserMessage 是一条已摄取的入站用户消息（写入事件流的最小单元）。
+// 与 dao.UserMessageEvent 解耦，避免 agent/stages 直接依赖存储层。
+type CapturedUserMessage struct {
+	BotID     string
+	Channel   string
+	UserID    string
+	MessageID string
+	Content   string
+}
+
+// UserMessageEventWriter 将摄取到的用户入站消息写入持久化事件流
+// （user_message_events 表），供 dreaming 回灌（backfill）作为权威数据源消费。
+// 由 Bot 装配时注入；nil 表示不写入（仅依赖实时 NoteCapture 落 L0）。
+type UserMessageEventWriter interface {
+	WriteUserMessageEvent(ctx context.Context, msg CapturedUserMessage) error
+}
+
 // NoteCaptureMiddleware 在 LLM 生成回复后，将回复文本作为 L0 工作记忆笔记
 // （category 默认 "exchange"）自动捕获，供梦境巩固（dreaming）管线后续分析。
+//
+// 同时，在捕获「用户说了什么」时并行写入持久化事件流（writer 非 nil 时），
+// 使 dreaming 回灌能从事件流消费、而非扫描原始 chat_messages（根治回灌陷阱）。
 //
 // 背景：生产 pipeline 使用 LLMStage（而非 ReplyStage）产出 ActionReply，
 // 而 ReplyStage 里的自动记笔记分支不会被走到，导致分层记忆库 L0 长期为空、
@@ -17,7 +37,7 @@ import (
 // ActionNote，经由已注册的 NoteHandler 落入 TieredStore 的 L0 层。
 //
 // 仅当存在非空 ActionReply 时才写笔记；不修改任何回复行为，对下游透明。
-func NoteCaptureMiddleware(category string) func(next core.Stage) core.Stage {
+func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(next core.Stage) core.Stage {
 	if category == "" {
 		category = "exchange"
 	}
@@ -71,6 +91,17 @@ func NoteCaptureMiddleware(category string) func(next core.Stage) core.Stage {
 							"speaker":        "user",
 						},
 					})
+					// 并行写入事件流（best-effort：writer 内部自行记日志，这里忽略错误，
+					// 因为 backfill 有 chat_messages 一次性 seed 作为兜底）。
+					if writer != nil {
+						_ = writer.WriteUserMessageEvent(ctx, CapturedUserMessage{
+							BotID:     env.Message.BotID,
+							Channel:   env.Message.Channel,
+							UserID:    env.Message.UserID,
+							MessageID: env.Message.ID,
+							Content:   userText,
+						})
+					}
 				}
 				return out, nil
 			},

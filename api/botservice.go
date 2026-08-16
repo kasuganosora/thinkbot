@@ -852,10 +852,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	//   TokenQuotaMiddlewareWithState 使用共享的 quotaState，使嵌套 LLM 调用
 	//   （subagent、workflow、memory）也能通过 QuotaRecordingProvider 自动记账。
 	quotaResolver := pipeline.NewQuotaResolver(s.store)
+	// userMessageEventWriter 把摄取到的入站用户消息并行写入持久化事件流
+	// （user_message_events 表），使 dreaming 回灌消费事件流而非扫描 chat_messages。
+	umeWriter := &userMessageEventWriter{db: s.db}
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		// 捕获 LLM 回复为 L0 工作记忆笔记（category=exchange），供 dreaming 巩固。
 		// 必须放在最外层：在 LLMStage 产生 ActionReply 之后才补 ActionNote。
-		stages.NoteCaptureMiddleware("exchange"),
+		// 同时把用户入站原文并行写入事件流（writer 非 nil 时）。
+		stages.NoteCaptureMiddleware("exchange", umeWriter),
 		pipeline.VerificationGateMiddleware(pipeline.NewVerificationGateConfig()),
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
 		// 不豁免任何工具：workflow 的 task 已改为「提交即阻塞」，一次调用就等到终态，
@@ -1269,18 +1273,31 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		memStore = memory.NewMultiStore(filtered, repo)
 	}
 
-	// 历史对话回灌：若分层记忆为空，则把该 bot 的历史 chat_messages 补灌进 L0，
-	// 让 dreaming 能处理此前从未进入记忆系统的历史 backlog（详见 memory.BackfillFromChatHistory）。
+	// 历史对话回灌：若分层记忆为空，则把该 bot 的历史消息补灌进 L0，
+	// 让 dreaming 能处理此前从未进入记忆系统的历史 backlog。
 	//
-	// 守卫（根治回灌陷阱）：水位线独立于 tiered_memories 持久化于 config 键
-	// bot.<id>.memory.backfill.watermark，记录已补灌的最大 chat_message.id。
+	// 数据源（根治回灌陷阱）：回灌消费的是「入站用户消息事件流」(user_message_events)，
+	// 而非原始 chat_messages 表。运行期由 NoteCaptureMiddleware 直接写入事件流；
+	// 历史部分由 SeedUserMessageEvents 一次性幂等补齐（仅当事件流为空时）。
+	// 此后清空 tiered/memory 表，重启也因事件流与水位线仍在而跳过回灌，不再扫 chat_messages。
+	//
+	// 守卫：水位线独立于 tiered_memories 持久化于 config 键
+	// bot.<id>.memory.backfill.event_watermark，记录已补灌的最大事件流 id。
 	// 一旦 bootstrap 完成，即使后续清空 tiered/memory 表，重启也因水位线仍在而跳过
 	// 回灌——测试 spam 不再回潮、无需「三表同清」。要强制重新回灌只需删除该水位线键。
 	if dreamBundle != nil && memStore != nil {
+		cfg := config.NewBuilder(s.store, s.logger)
+		wmKey := config.BotMemoryBackfillEventWatermarkKey(id)
+		// 一次性补齐事件流（仅当为空；幂等；独立于 L0 是否为空）。
+		// 即使 L0 已存在历史数据，也确保事件流被补齐，使未来的 L0 清空仍能从事件流回灌。
+		if seeded, serr := memory.SeedUserMessageEvents(context.Background(), s.db, id, s.logger); serr != nil {
+			s.logger.Warnw("memory event stream seed failed", "err", serr, "bot_id", id)
+		} else if seeded > 0 {
+			s.logger.Infow("memory event stream seeded", "bot_id", id, "seeded", seeded)
+		}
+		// 仅当 L0 为空时从事件流回灌（bootstrap）。
 		var l0Count int64
 		if err := s.db.Table("tiered_memories").Count(&l0Count).Error; err == nil && l0Count == 0 {
-			cfg := config.NewBuilder(s.store, s.logger)
-			wmKey := config.BotMemoryBackfillWatermarkKey(id)
 			sinceID := uint64(s.store.GetInt(wmKey, 0))
 			switch {
 			case !cfg.GetMemoryBackfillEnabled(id):
@@ -1288,8 +1305,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			case sinceID > 0:
 				s.logger.Infow("memory backfill skipped (already bootstrapped)", "bot_id", id, "watermark", sinceID)
 			default:
+				// 从事件流回灌 L0（带 id 水位线，增量幂等）。
 				n, maxID, berr := memory.BackfillFromChatHistory(
-					context.Background(), memStore, s.db, id, 0, s.logger,
+					context.Background(), memStore, memory.NewDBUserMessageSource(s.db), id, 0, s.logger,
 				)
 				if berr != nil {
 					s.logger.Warnw("memory backfill failed", "err", berr, "bot_id", id)
@@ -2020,4 +2038,31 @@ func buildToolOutputOffloadSink(wm *sandbox.BotWorkspaceManager, subdir string) 
 		wm.PruneToolOutput(botID, subdir, maxOffloadFiles)
 		return rel, nil
 	}
+}
+
+// ============================================================================
+// userMessageEventWriter — 入站用户消息事件流写入器
+// ============================================================================
+
+// userMessageEventWriter 实现 stages.UserMessageEventWriter：把摄取到的入站用户消息
+// 写入 user_message_events 表，作为 dreaming 回灌（backfill）的权威数据源，
+// 取代此前直接扫 chat_messages 的做法（根治回灌陷阱）。
+type userMessageEventWriter struct {
+	db *gorm.DB
+}
+
+// WriteUserMessageEvent 将一条已摄取的入站用户消息持久化到事件流。
+func (w *userMessageEventWriter) WriteUserMessageEvent(ctx context.Context, msg stages.CapturedUserMessage) error {
+	if w.db == nil {
+		return nil
+	}
+	rec := dao.UserMessageEvent{
+		BotID:     msg.BotID,
+		Channel:   msg.Channel,
+		UserID:    msg.UserID,
+		MessageID: msg.MessageID,
+		Content:   msg.Content,
+		CreatedAt: time.Now(),
+	}
+	return w.db.WithContext(ctx).Create(&rec).Error
 }

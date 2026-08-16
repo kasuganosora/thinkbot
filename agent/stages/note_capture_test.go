@@ -46,7 +46,7 @@ func (f fakeReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.
 }
 
 func TestNoteCaptureMiddleware_Isolated(t *testing.T) {
-	mw := NoteCaptureMiddleware("exchange")
+	mw := NoteCaptureMiddleware("exchange", nil)
 	next := core.Stage(fakeReplyStage{text: "hi there"})
 	stage := mw(next)
 
@@ -85,7 +85,7 @@ func TestNoteCaptureMiddleware_OnRealLLMStage(t *testing.T) {
 		HardMaxSteps: 1,
 	}, noop.NewTracerProvider(), zap.NewNop().Sugar())
 
-	stage := NoteCaptureMiddleware("exchange")(llmStage)
+	stage := NoteCaptureMiddleware("exchange", nil)(llmStage)
 
 	msg := core.Message{ID: "m2", BotID: "bot-y", Source: "web", Channel: "ch-y", UserID: "u2", Text: "ping"}
 	env := core.NewEnvelope(msg)
