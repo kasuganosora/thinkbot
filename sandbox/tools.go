@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 )
@@ -117,6 +118,7 @@ func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
 		buildListDirTool(mgr, botID),
 		buildSearchContentTool(mgr, botID),
 		buildHealthTool(mgr, botID),
+		buildRunCodeTool(mgr, botID),
 	}
 }
 
@@ -236,6 +238,150 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 
 			return execResultToToolOutput(res, ws.WorkDir()), nil
 		}),
+	}
+}
+
+// ============================================================================
+// run_code — 编程式工具调用（Programmatic Tool Calling，对应 harness 的 code 模式）
+// ============================================================================
+//
+// 让模型把「多轮工具编排」下推成一段脚本，在沙箱内一次执行，只把最终 curated 结果
+// 回传给模型上下文；中间过程（命令输出、文件读写）留在沙箱，不进上下文 → 大幅压低
+// 多步骤任务的 token 成本（这正是 harness code 模式的 PTC 思想）。
+// 与 sandbox_exec 同隔离级别、同等权限，始终可用；要强制只走代码编排可把 pipeline 模式
+// 设为 "code"（配置 pipeline.mode / bot.<id>.pipeline_mode）。
+//
+// 注意：harness 的 run_code 是让模型在 async 函数体里 `await tools.x()` 调其它工具
+// （in-process 函数）；thinkbot 没有该调度器，故退化为「在沙箱跑脚本、脚本内部自行调用
+// 命令/文件工具」——语义等价（多步归一并只回结果），且复用既有 Workspace.Exec 隔离。
+
+func buildRunCodeTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
+	return llm.Tool{
+		Name: "run_code",
+		Description: "Run a multi-step script in the workspace and return ONLY its final curated output. " +
+			"Use it to orchestrate several dependent operations (shell commands, file reads/writes, searches) in ONE call: " +
+			"write the whole sequence as code and print ONLY what you actually need back — intermediate output stays in the " +
+			"sandbox and is NOT returned, keeping the conversation small (Programmatic Tool Calling). " +
+			"lang is 'bash' (default), 'python', or 'node'. " +
+			"Prefer this over emitting many separate tool calls when later steps depend on earlier results.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"code": map[string]any{
+					"type":        "string",
+					"description": "The script source. For bash: a sequence of shell commands. For python/node: a program that prints the final result to stdout.",
+				},
+				"lang": map[string]any{
+					"type":        "string",
+					"description": "Script language: 'bash' (default), 'python', or 'node'.",
+				},
+				"workdir": map[string]any{
+					"type":        "string",
+					"description": "Working directory relative to workspace root. Optional; defaults to workspace root.",
+				},
+				"timeout": map[string]any{
+					"type":        "integer",
+					"description": "Hard ceiling in seconds. Optional; 0 means automatic (stuck threshold x3, backstop ~600s).",
+				},
+				"stuck_timeout": map[string]any{
+					"type":        "integer",
+					"description": "Stuck-watchdog threshold in seconds. Optional; default 300.",
+				},
+			},
+			"required": []string{"code"},
+		},
+		Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+			m, ok := input.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid input: expected object")
+			}
+			code, _ := m["code"].(string)
+			if strings.TrimSpace(code) == "" {
+				return nil, fmt.Errorf("code is required")
+			}
+			lang, _ := m["lang"].(string)
+			if lang == "" {
+				lang = "bash"
+			}
+			ext, interp, err := runCodeLang(lang)
+			if err != nil {
+				return nil, err
+			}
+
+			ws, err := mgr.GetOrCreate(botID)
+			if err != nil {
+				return nil, err
+			}
+
+			// 事件轨迹（append-only）：tool/call（log-only，不进模型）。
+			core.EventSinkFromContext(ctx).Emit(ctx, core.Event{
+				Kind:    core.EventToolCall,
+				Source:  "tool:run_code",
+				Surface: false,
+				Payload: map[string]any{"lang": lang},
+			})
+
+			fileName := fmt.Sprintf("tool-output/run_code_%d%s", time.Now().UnixNano(), ext)
+			if err := ws.WriteFile(ctx, fileName, []byte(code)); err != nil {
+				return nil, fmt.Errorf("write script: %w", err)
+			}
+
+			req := ExecRequest{Command: interp + " " + fileName}
+			if wd, _ := m["workdir"].(string); wd != "" {
+				req.WorkDir = wd
+			}
+			if timeoutSec, ok := toInt(m["timeout"]); ok && timeoutSec > 0 {
+				req.Timeout = durationFromSeconds(timeoutSec)
+			}
+			if stuckSec, ok := toInt(m["stuck_timeout"]); ok && stuckSec > 0 {
+				req.StuckTimeout = durationFromSeconds(stuckSec)
+			}
+
+			res, err := ws.Exec(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+
+			// 仅回 curated 结果（surface）：stdout 为主体；失败时附简短 stderr 尾。
+			out := map[string]any{
+				"exit_code": res.ExitCode,
+				"stdout":    res.Stdout,
+			}
+			if res.ExitCode != 0 && res.Stderr != "" {
+				stderr := res.Stderr
+				if len(stderr) > 2000 {
+					stderr = stderr[len(stderr)-2000:]
+				}
+				out["stderr_tail"] = stderr
+			}
+			if !res.Reliable {
+				out["reliable"] = false
+				out["warnings"] = res.Warnings
+			}
+
+			// 事件轨迹（append-only）：tool/result（进入模型上下文，surface=true）。
+			core.EventSinkFromContext(ctx).Emit(ctx, core.Event{
+				Kind:    core.EventToolResult,
+				Source:  "tool:run_code",
+				Surface: true,
+				Payload: map[string]any{"exit_code": res.ExitCode, "stdout_len": len(res.Stdout)},
+			})
+			return out, nil
+		}),
+	}
+}
+
+// runCodeLang 将 lang 映射到脚本文件扩展名与解释器命令。
+func runCodeLang(lang string) (ext, interp string, err error) {
+	switch lang {
+	case "bash", "sh":
+		return ".sh", "bash", nil
+	case "python", "py":
+		return ".py", "python3", nil
+	case "node", "js":
+		return ".js", "node", nil
+	default:
+		return "", "", fmt.Errorf("unsupported lang %q (want bash/python/node)", lang)
 	}
 }
 

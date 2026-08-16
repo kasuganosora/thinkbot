@@ -2,7 +2,9 @@ package stages
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -254,6 +256,15 @@ type LLMConfig struct {
 	// 零值字段由 runTool 回退到 llm.DefaultToolOutputConfig()；由 Bot 装配时从
 	// tool_output.{max_lines,max_bytes} 配置填充。
 	ToolOutput llm.ToolOutputConfig
+
+	// DeferredApprovalStore HITL 续跑锚点存储。非 nil 时，工具审批被 defer 会持久化
+	// 一条待确认记录，供人类确认后由 ResumeDeferredApproval 续跑恢复。为 nil 时不持久化
+	// （仅记日志），仍不阻断默认路径（默认无 ApprovalHandler，此分支不触发）。
+	DeferredApprovalStore DeferredApprovalStore
+
+	// ResumeDispatch HITL 续跑入口：给定原始入站消息，重新走完整编排管线。
+	// 由 Bot 装配时接入 Engine.ProcessSync，使 ResumeDeferredApproval 能真正重跑该消息。
+	ResumeDispatch func(ctx context.Context, msg core.Message) (*core.Envelope, error)
 }
 
 // ============================================================================
@@ -294,6 +305,17 @@ func (s *LLMStage) SetToolOutputSink(sink llm.ToolOutputOffloadSink) { s.config.
 
 // SetToolOutputConfig 注入工具输出截断阈值（行/字节）。同上，避免改动 NewLLMStage 签名。
 func (s *LLMStage) SetToolOutputConfig(cfg llm.ToolOutputConfig) { s.config.ToolOutput = cfg }
+
+// SetDeferredApprovalStore 注入 HITL 续跑锚点存储（nil 表示不持久化，仅记日志）。
+func (s *LLMStage) SetDeferredApprovalStore(store DeferredApprovalStore) {
+	s.config.DeferredApprovalStore = store
+}
+
+// SetResumeDispatch 注入 HITL 续跑入口（重新编排原始消息）。通常由 Bot 装配时接入
+// Engine.ProcessSync，使 ResumeDeferredApproval 能真正重跑被 defer 的消息。
+func (s *LLMStage) SetResumeDispatch(fn func(ctx context.Context, msg core.Message) (*core.Envelope, error)) {
+	s.config.ResumeDispatch = fn
+}
 
 // reasoningEffortPtr 将非空字符串转为 *string，空字符串返回 nil。
 func reasoningEffortPtr(s string) *string {
@@ -562,20 +584,42 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"reply", replyLog)
 
 	// 可观测：若编排层因工具审批被 defer（RequireApproval + ApprovalHandler
-	// 返回 deferred），记录信号，便于排查“工具在等确认却没有续跑入口”的情况。
-	// 当前默认无 ApprovalHandler，此分支通常不触发；保留用于将来接入 HITL。
+	// 返回 deferred），记录信号并落锚点，供人类确认后续跑恢复。
+	// 当前默认无 ApprovalHandler，此分支通常不触发（见下方注释）。
 	if result.DeferredToolApproval != nil {
-		logger.Warnw("llm stage: tool approval deferred (no resume path wired yet)",
+		da := result.DeferredToolApproval
+		logger.Warnw("llm stage: tool approval deferred (HITL pending)",
 			"message_id", env.Message.ID,
-			"approval_id", result.DeferredToolApproval.ApprovalID,
-			"decision", result.DeferredToolApproval.Decision,
-			"reason", result.DeferredToolApproval.Reason)
+			"approval_id", da.ApprovalID,
+			"tool", da.ToolName,
+			"reason", da.Reason)
 
-		// TODO(HITL): 工具审批被 defer 时，编排已暂停（工具未执行），result.Text 是
-		// 半成品回复。在接入确认流之前，这里必须阻断——不能把未完成回复发给用户，
-		// 也不能产生 Action。将来通过「持久化 DeferredToolApproval → 用户确认 →
-		// 重新编排（携带 approval 结果）」的续跑入口恢复，而非在此直接发射。
-		// 正常路径下（无 ApprovalHandler）此分支不触发，故不影响当前行为。
+		// 锚点：持久化被 defer 的审批，供续跑恢复（resume 入口）。
+		// store 为 nil 时安全跳过（仅记日志）；默认路径无 ApprovalHandler，此分支不触发。
+		if s.config.DeferredApprovalStore != nil {
+			if rec, berr := BuildDeferredApproval(da, env.Message); berr != nil {
+				logger.Warnw("hitl: build deferred record failed", "err", berr, "approval_id", da.ApprovalID)
+			} else if berr := s.config.DeferredApprovalStore.Persist(context.Background(), rec); berr != nil {
+				logger.Warnw("hitl: persist deferred approval failed", "err", berr, "approval_id", da.ApprovalID)
+			}
+		}
+		// 事件锚点（进入可观测轨迹）。
+		if sink := core.EventSinkFromContext(ctx); sink != nil {
+			sink.Emit(ctx, core.Event{
+				Kind:   core.EventHitlDeferred,
+				Source: "hitl",
+				Payload: map[string]any{
+					"approval_id": da.ApprovalID,
+					"tool":        da.ToolName,
+					"message_id":  env.Message.ID,
+					"reason":      da.Reason,
+				},
+			})
+		}
+
+		// 阻断半成品回复：本 Stage 是唯一产出 ActionReply 之处，下方 return 已在
+		// ActionReply 生成（见文件末尾）之前，故回复天然被阻断；标记供下游/可观测识别。
+		env.Set(core.KVLLMDeferred, true)
 		env.Set("llm.result", result)
 		return env, nil
 	}
@@ -688,6 +732,75 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	env.Set("llm.result", result)
 
 	return env, nil
+}
+
+// ResumeDeferredApproval 是 HITL 续跑入口：人类确认（approve/reject）后调用。
+//
+// 流程：加载被 defer 的审批记录 → 标记 resolved → 把人类决策按「工具名」注入预批准
+// context → 通过 ResumeDispatch 重新编排原始消息（携带该 context）。重新编排时，
+// 编排层在 executeTools 中命中预批准表，直接采用该决策而不再二次挂起，从而真正
+// 完成此前被暂停的工具调用并产出最终回复。
+//
+// decision 取值："approved" / "rejected"。
+func (s *LLMStage) ResumeDeferredApproval(ctx context.Context, approvalID, decision, reason string) error {
+	store := s.config.DeferredApprovalStore
+	if store == nil {
+		return fmt.Errorf("hitl: no deferred approval store configured")
+	}
+	rec, err := store.Load(ctx, approvalID)
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		return fmt.Errorf("hitl: approval %s not found", approvalID)
+	}
+	if rec.Status == "resolved" {
+		return fmt.Errorf("hitl: approval %s already resolved", approvalID)
+	}
+	if err := store.MarkResolved(ctx, approvalID, decision, reason); err != nil {
+		return err
+	}
+
+	// 重建原始入站消息（保留 Metadata / reply_target 等下游路由字段）。
+	var msg core.Message
+	if err := json.Unmarshal([]byte(rec.MessageJSON), &msg); err != nil {
+		return fmt.Errorf("hitl: restore message failed: %w", err)
+	}
+
+	// 人类决策 → 按工具名预批准。
+	dec := llm.ToolApprovalApproved
+	if decision == "rejected" {
+		dec = llm.ToolApprovalRejected
+	}
+	pre := llm.PreApprovalMap{
+		rec.ToolName: {
+			Decision:   dec,
+			ApprovalID: approvalID,
+			Reason:     reason,
+		},
+	}
+	rctx := llm.WithPreApproval(ctx, pre)
+
+	if sink := core.EventSinkFromContext(rctx); sink != nil {
+		sink.Emit(rctx, core.Event{
+			Kind:   core.EventHitlResumed,
+			Source: "hitl",
+			Payload: map[string]any{
+				"approval_id": approvalID,
+				"tool":        rec.ToolName,
+				"decision":    decision,
+				"reason":      reason,
+			},
+		})
+	}
+
+	if s.config.ResumeDispatch == nil {
+		return fmt.Errorf("hitl: no resume dispatch configured for approval %s", approvalID)
+	}
+	if _, err := s.config.ResumeDispatch(rctx, msg); err != nil {
+		return fmt.Errorf("hitl: resume dispatch failed: %w", err)
+	}
+	return nil
 }
 
 // processStream 使用 OrchestrateStream 执行流式生成，

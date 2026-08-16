@@ -141,6 +141,22 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 			"entries", result.EntriesUsed,
 			"compressed", result.Compressed,
 			"duration", duration)
+
+		// 可观测性：向模型上下文注入内容的边界事件（append-only 轨迹）。
+		// Surface=true 标记该内容确实进入模型 surface（system/上下文），
+		// 供可观测性 / 回放区分「进模型的上下文」与纯日志事件。
+		core.EventSinkFromContext(ctx).Emit(ctx, core.Event{
+			Kind:    core.EventContextInject,
+			Source:  "memory-recall",
+			Surface: true,
+			Payload: map[string]any{
+				"context_len":  len(result.ContextText),
+				"tokens_est":   result.TokenEstimate,
+				"entries_used": result.EntriesUsed,
+				"compressed":   result.Compressed,
+				"duration_ms":  duration.Milliseconds(),
+			},
+		})
 	} else {
 		span.SetAttributes(attribute.Bool("memory.empty", true))
 	}

@@ -143,6 +143,13 @@ type BotParams struct {
 	// 为空时使用 sandbox.DefaultConfig()。
 	SandboxConfig sandbox.Config
 
+	// Mode 装配模式（pipeline.PipelineMode：standard / lurk-only / code）。
+	// 仅用于门控「工作空间/代码工具组」的注册：lurk-only 下 bot 不执行任何动作，
+	// 跳过 sandbox 工具（sandbox_exec / read_file / run_code 等）的注册；
+	// 工作空间目录本身仍会创建（SOUL.md / 工具输出落盘仍可用）。
+	// 空值或未知模式按 standard 处理（注册全部工具）。
+	Mode pipeline.PipelineMode
+
 	// DreamScheduler 梦境巩固的 cron 调度器（可选，nil=不启用梦境巩固）。
 	// 调度器需要在调用方创建并注入，Bot.Run 会自动 Start 它，Bot.Close 会自动 Stop。
 	DreamScheduler *cron.Scheduler
@@ -348,12 +355,16 @@ func New(params BotParams) (*Bot, error) {
 			bot.soulLoader = soul
 		}
 
-		// 注册工作空间工具（sandbox_exec/read_file/write_file 等）
-		if params.ToolManager != nil {
+		// 注册工作空间工具（sandbox_exec/read_file/write_file/run_code 等）。
+		// lurk-only 模式下 bot 只学不说、不执行任何动作，跳过整组代码工具注册
+		// （GroupCode 关闭）；工作空间目录/SOUL.md/工具输出落盘不受影响。
+		if params.ToolManager != nil && params.Mode != pipeline.ModeLurkOnly {
 			if err := sandbox.RegisterBotWorkspaceTools(params.ToolManager, wsMgr); err != nil {
 				return nil, errs.Wrapf(err, "bot %q: register workspace tools", params.ID)
 			}
-			botLogger.Debugw("workspace tools registered")
+			botLogger.Debugw("workspace tools registered", "mode", params.Mode)
+		} else if params.Mode == pipeline.ModeLurkOnly {
+			botLogger.Debugw("workspace tools skipped (lurk-only mode)", "bot_id", params.ID)
 		}
 	}
 

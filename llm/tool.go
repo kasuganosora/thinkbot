@@ -90,6 +90,11 @@ type ToolApprovalResult struct {
 	ApprovalID string               `json:"approvalId,omitempty"`
 	Reason     string               `json:"reason,omitempty"`
 	Metadata   map[string]any       `json:"metadata,omitempty"`
+
+	// 以下字段由编排层在 defer 时自动补全，用于 HITL 续跑锚点（按工具名预批准）：
+	ToolName   string `json:"toolName,omitempty"`   // 触发审批的工具名
+	ToolCallID string `json:"toolCallId,omitempty"` // 本次工具调用 ID
+	Input      any    `json:"-"`                    // 工具入参（不序列化，仅用于续跑重建）
 }
 
 // Tool describes a function tool that the model can call.

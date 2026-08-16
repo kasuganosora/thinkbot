@@ -839,6 +839,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger,
 	)
 
+	// HITL 续跑锚点存储：默认接入主库（自动迁移 deferred_approvals 表）。
+	// 为 nil 时不持久化（仅记日志），不影响默认路径（默认无 ApprovalHandler）。
+	if hitlStore, herr := stages.NewDeferredApprovalStore(s.db); herr != nil {
+		s.logger.Warnw("hitl: init deferred approval store failed", "err", herr)
+	} else {
+		llmStage.SetDeferredApprovalStore(hitlStore)
+	}
+
 	// 用安全中间件包装 LLMStage：
 	//   执行顺序（从外到内）：Token 配额(月) → 循环检测 → Token 预算 → LLMStage
 	//   TokenQuotaMiddlewareWithState 使用共享的 quotaState，使嵌套 LLM 调用
@@ -1012,39 +1020,49 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		NoteSaver: s.heartbeatNoteSaver(id),
 	})
 
-	// 创建 Pipeline
-	stages := []core.StageInfo{
-		{Stage: lurkEnricher, Order: 45, Enabled: true},
-		{Stage: recallStage, Order: 90, Enabled: true},
-		{Stage: rhythmStage, Order: 95, Enabled: true},
-		{Stage: wrappedLLM, Order: 100, Enabled: true},
+	// 创建 Pipeline：用声明式 Builder 累积各 Stage，取代此前手写字面量 +
+	// 条件 append/prepend 的易漂移写法。每个 Stage 的 Order 即其在链路中的相对位置，
+	// Builder.Build() 与 pipeline.New 都会按 Order 排序，顺序由 Order 唯一决定，
+	// 与 Add 调用次序无关——新增 Stage 只需加一行 Add/AddIf。
+	// 模式词汇见 pipeline.PipelineMode（standard/lurk-only/code），由配置
+	// pipeline.mode / bot.<id>.pipeline_mode 驱动（C2-b 接线）。模式通过
+	// pipeline.ModeGroups 真正门控 stage/tool 花名册（#4）：engagement/heartbeat/
+	// code 各组在 lurk-only 下整体关闭，standard/code 下全部启用；标准模式行为
+	// 与旧实现逐字节等价（Order 45/90/95/100 + 可选 5/40 不变）。
+	mode := pipeline.ModeStandard
+	switch builder.GetPipelineMode(id) {
+	case "lurk-only":
+		mode = pipeline.ModeLurkOnly
+	case "code":
+		mode = pipeline.ModeCode
 	}
-	if hbBundle != nil {
+	groups := pipeline.ModeGroups(mode)
+	pb := pipeline.NewBuilder().WithMode(mode)
+	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
+	pb.Add(45, lurkEnricher)
+	pb.Add(90, recallStage)
+	pb.Add(95, rhythmStage)
+	pb.Add(100, wrappedLLM)
+	if hbBundle != nil && groups[pipeline.GroupHeartbeat] {
 		// 心跳频控预算重置：任何真实外部入站消息（非心跳自身）都说明 bot 不在自激真空，
-		// 立即恢复连续唤醒预算。纯内存操作，置于链首，不影响任何既有语义。
+		// 立即恢复连续唤醒预算。纯内存操作，置于链首（Order=5），不影响任何既有语义。
+		// lurk-only 下关闭（bot 不自主发帖，无需唤醒预算）。
 		hb := hbBundle
-		stages = append(stages, core.StageInfo{
-			Order:   5,
-			Enabled: true,
-			Stage: &core.StageFunc{
-				StageName: "heartbeat-activity",
-				Fn: func(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
-					if env.Message.Source != core.SourceHeartbeat && env.Message.UserID != "" {
-						hb.NotifyUserActivity()
-					}
-					return env, nil
-				},
+		pb.Add(5, &core.StageFunc{
+			StageName: "heartbeat-activity",
+			Fn: func(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+				if env.Message.Source != core.SourceHeartbeat && env.Message.UserID != "" {
+					hb.NotifyUserActivity()
+				}
+				return env, nil
 			},
 		})
 	}
-	if engagementStage != nil {
-		// Engagement 放在 LLM 之前——先决定是否参与，再生成回复
-		stages = append([]core.StageInfo{
-			{Stage: engagementStage, Order: 40, Enabled: true},
-		}, stages...)
-	}
+	// Engagement 放在 LLM 之前（Order=40）——先决定是否参与，再生成回复。
+	// lurk-only 下关闭（bot 只学不说，不进入「是否回复」决策）。
+	pb.AddIf(engagementStage != nil && groups[pipeline.GroupEngagement], 40, engagementStage)
 	p, err := pipeline.New(
-		stages,
+		pb.Build(),
 		s.tp,
 		s.mp,
 		s.logger,
@@ -1053,6 +1071,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		rollback()
 		return errs.Wrap(err, "bot_service: create pipeline")
 	}
+	// 注入事件轨迹接收器（append-only，有界内存环）：供可观测性 / HITL 续跑锚点 /
+	// 记忆回灌去扫库消费。默认 NoopSink 零开销，此处用有界实现（每 bot 独立，
+	// bot 停止后随 Pipeline 一起回收），不影响任何既有语义。
+	p.SetSink(core.NewMemorySink(2048))
 
 	// 创建 Dispatcher（bot.New 内部会自动创建 handler 并注册）
 	dispatcher := outbound.NewMultiDispatcher(s.logger, s.tp)
@@ -1249,16 +1271,39 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 历史对话回灌：若分层记忆为空，则把该 bot 的历史 chat_messages 补灌进 L0，
 	// 让 dreaming 能处理此前从未进入记忆系统的历史 backlog（详见 memory.BackfillFromChatHistory）。
-	// 仅在 tiered_memories 尚无任何条目时执行，避免每次启动重复灌入。
+	//
+	// 守卫（根治回灌陷阱）：水位线独立于 tiered_memories 持久化于 config 键
+	// bot.<id>.memory.backfill.watermark，记录已补灌的最大 chat_message.id。
+	// 一旦 bootstrap 完成，即使后续清空 tiered/memory 表，重启也因水位线仍在而跳过
+	// 回灌——测试 spam 不再回潮、无需「三表同清」。要强制重新回灌只需删除该水位线键。
 	if dreamBundle != nil && memStore != nil {
 		var l0Count int64
 		if err := s.db.Table("tiered_memories").Count(&l0Count).Error; err == nil && l0Count == 0 {
-			if n, berr := memory.BackfillFromChatHistory(
-				context.Background(), memStore, s.db, id, s.logger,
-			); berr != nil {
-				s.logger.Warnw("memory backfill failed", "err", berr, "bot_id", id)
-			} else if n > 0 {
-				s.logger.Infow("memory backfill completed", "bot_id", id, "written", n)
+			cfg := config.NewBuilder(s.store, s.logger)
+			wmKey := config.BotMemoryBackfillWatermarkKey(id)
+			sinceID := uint64(s.store.GetInt(wmKey, 0))
+			switch {
+			case !cfg.GetMemoryBackfillEnabled(id):
+				s.logger.Infow("memory backfill skipped (disabled)", "bot_id", id)
+			case sinceID > 0:
+				s.logger.Infow("memory backfill skipped (already bootstrapped)", "bot_id", id, "watermark", sinceID)
+			default:
+				n, maxID, berr := memory.BackfillFromChatHistory(
+					context.Background(), memStore, s.db, id, 0, s.logger,
+				)
+				if berr != nil {
+					s.logger.Warnw("memory backfill failed", "err", berr, "bot_id", id)
+				} else {
+					if n > 0 {
+						s.logger.Infow("memory backfill completed", "bot_id", id, "written", n, "max_id", maxID)
+					}
+					// 持久化水位线，阻断未来回灌回潮
+					if maxID > 0 {
+						if serr := s.store.Set(context.Background(), wmKey, strconv.FormatUint(maxID, 10)); serr != nil {
+							s.logger.Warnw("memory backfill watermark persist failed", "err", serr, "bot_id", id)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -1331,6 +1376,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		},
 		WorkspaceDir:  workspaceDir,
 		SandboxConfig: sbCfg,
+		Mode:          mode,
 	})
 	if err != nil {
 		rollback()
@@ -1477,6 +1523,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.channels[id] = webCh
 	s.botInstances[id] = b
 	s.toolManagers[id] = *toolMgr
+
+	// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
+	// 走完整 Engine 管线（Recall → LLM → 工具），并在 ctx 中携带预批准，使被 defer
+	// 的工具直接采用人类决策而非再次挂起。默认路径无 ApprovalHandler，此闭包不会被调用。
+	llmStage.SetResumeDispatch(func(ctx context.Context, msg core.Message) (*core.Envelope, error) {
+		env := &core.Envelope{Message: msg}
+		res, _, err := b.Engine().ProcessSync(ctx, env)
+		return res, err
+	})
 	s.cancelFuncs[id] = botCancel
 	s.closeFuncs[id] = func() {
 		wfCleanup()
