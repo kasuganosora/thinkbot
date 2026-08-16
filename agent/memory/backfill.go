@@ -38,10 +38,15 @@ type UserMessageSource interface {
 // dreaming 每天 03:00 面对的 L0 永远是空的、ingested 恒为 0。此函数把事件流中
 // 的历史消息补灌进 L0，补齐这个 backlog。
 //
-// 增量幂等（sinceID）：只处理 id > sinceID 的事件流消息。调用方应把已补灌的最大 id
-// 作为水位线持久化（见 config.BotMemoryBackfillWatermarkKey），下次传入该水位线即可
-// 跳过已处理消息。这同时做到：① 进程启动重启不会重复灌入；② 清空 tiered/memory 表后，
-// 只要事件流与水位线仍在，就不会从历史消息回潮（根治回灌陷阱）。
+// 增量幂等（sinceID）：只处理 id > sinceID 的事件流消息。调用方把已补灌的最大 id 作为水位线
+// 持久化（见 config.BotMemoryBackfillEventWatermarkKey）。
+//
+// 本函数是「一次性 bootstrap」而非每轮增量回灌：仅当 L0 为空且水位线未设置时，由调用方以
+// sinceID=0 调用一次，随后写入水位线；后续启动因水位线已存在而整体跳过本函数
+// （见 api/botservice.go 的守卫）。原因：运行期 NoteCapture 已把新用户消息实时写入 L0 与事件流，
+// 若每轮都按水位线增量重跑，会把实时路径已落入 L0 的同一条消息再次追加，造成重复。因此生产
+// 调用点刻意以 0 传入、并以水位线作「已完成」标志，而非持续增量。这也彻底阻断
+// 「清空 tiered/memory 表后从 chat_messages 回潮」：事件流由 seed + 实时写入填充，回灌仅发生一次。
 //
 // 写入细节：
 //   - 每条消息作为一个 L0 条目写入 store（生产为 memStore：

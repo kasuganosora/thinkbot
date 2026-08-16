@@ -57,25 +57,33 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 				if out.Message.Source == core.SourceHeartbeat {
 					return out, nil
 				}
-				for _, a := range out.Actions() {
+			// 捕获「用户说了什么」作为 L0 对话记忆与事件流记录，供 dreaming 学习
+			// 用户偏好/事实。注意：不要捕获 bot 自己的回复（env.Message.Text 才是用户
+			// 入站原文）——否则 dreaming 会把 bot 的发言误当成用户的事实（说话人归属错误，
+			// 见历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
+			// 一条用户消息只捕获一次：若一轮产出多个 ActionReply（如主回复 + ChannelPoster
+			// 转发），原先会在循环里对每个回复各写一份，导致 L0 笔记与事件流记录重复。
+			userText := strings.TrimSpace(env.Message.Text)
+			if userText != "" {
+				// 快照 actions，避免遍历过程中 AddAction 改变切片长度引发意外。
+				actions := make([]core.Action, len(out.Actions()))
+				copy(actions, out.Actions())
+				captured := false
+				for _, a := range actions {
 					if a.Type != core.ActionNote && a.Type != core.ActionReply {
 						continue
 					}
-					// 已经显式记过笔记（DecisionReplyWithNote / DecisionNoteOnly）
-					// 的，不再重复捕获，避免重复写入。
+					// 已经显式记过笔记（DecisionReplyWithNote / DecisionNoteOnly）的，
+					// 视为已捕获，不再重复写入用户发言。
 					if a.Type == core.ActionNote {
+						captured = true
 						continue
 					}
 					if a.Payload == "" {
 						continue
 					}
-					// 捕获「用户说了什么」作为 L0 对话记忆，供 dreaming 学习用户偏好/事实。
-					// 注意：不要捕获 bot 自己的回复（a.Payload 是 bot 生成的）——否则 dreaming
-					// 会把 bot 的发言误当成用户的事实（说话人归属错误，见历史 bug：
-					// 把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
-					// 因此这里写入的是用户入站原文 env.Message.Text，并打 speaker:"user" 标签。
-					userText := strings.TrimSpace(env.Message.Text)
-					if userText == "" {
+					if captured {
+						// 本条消息已捕获过用户发言，跳过后续回复动作，避免重复。
 						continue
 					}
 					out.AddAction(core.Action{
@@ -102,7 +110,9 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 							Content:   userText,
 						})
 					}
+					captured = true
 				}
+			}
 				return out, nil
 			},
 		}
