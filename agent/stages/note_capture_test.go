@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel/trace/noop"
@@ -113,5 +114,60 @@ func TestNoteCaptureMiddleware_OnRealLLMStage(t *testing.T) {
 	}
 	if !hasNote {
 		t.Fatalf("expected ActionNote captured from real LLMStage reply")
+	}
+}
+
+// spyEventWriter 记录事件流写入次数与最后一次内容，用于验证「一条用户消息只写一次」。
+type spyEventWriter struct {
+	mu    sync.Mutex
+	count int
+	last  CapturedUserMessage
+}
+
+func (s *spyEventWriter) WriteUserMessageEvent(_ context.Context, msg CapturedUserMessage) error {
+	s.mu.Lock()
+	s.count++
+	s.last = msg
+	s.mu.Unlock()
+	return nil
+}
+
+// twoReplyStage 一次性发出两个 ActionReply，用于验证多回复不会被重复捕获。
+type twoReplyStage struct{}
+
+func (twoReplyStage) Name() string { return "two-reply" }
+
+func (twoReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	env.AddAction(core.Action{Type: core.ActionReply, Channel: env.Message.Channel, UserID: env.Message.UserID, Payload: "reply-1"})
+	env.AddAction(core.Action{Type: core.ActionReply, Channel: env.Message.Channel, UserID: env.Message.UserID, Payload: "reply-2"})
+	return env, nil
+}
+
+func TestNoteCaptureMiddleware_OneCapturePerMessage(t *testing.T) {
+	spy := &spyEventWriter{}
+	mw := NoteCaptureMiddleware("exchange", spy)
+	stage := mw(twoReplyStage{})
+
+	msg := core.Message{ID: "m9", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "hello"}
+	env := core.NewEnvelope(msg)
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	notes := 0
+	for _, a := range out.Actions() {
+		if a.Type == core.ActionNote {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("expected exactly 1 ActionNote per user message, got %d", notes)
+	}
+	if spy.count != 1 {
+		t.Fatalf("expected exactly 1 event-stream write per user message, got %d", spy.count)
+	}
+	if spy.last.MessageID != "m9" || spy.last.Content != "hello" {
+		t.Fatalf("event payload mismatch: %+v", spy.last)
 	}
 }
