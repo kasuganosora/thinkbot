@@ -185,6 +185,40 @@ const (
 	KeySystemTimezone = "system.timezone"
 )
 
+// Pipeline 键：pipeline 装配模式（对应 deepseek-harness 的 agent preset / 插件花名册）。
+const (
+	// KeyPipelineMode 全局默认 pipeline 模式（当 bot 未单独配置时生效）。
+	// 取值："standard"（默认）/ "lurk-only" / "code"。
+	KeyPipelineMode = "pipeline.mode"
+)
+
+// BotPipelineModeKey 返回指定 bot 的 pipeline 模式键：bot.<bot_id>.pipeline_mode。
+func BotPipelineModeKey(botID string) string {
+	return "bot." + botID + ".pipeline_mode"
+}
+
+// Memory 回灌（backfill）键：历史 chat_messages → L0 守卫。
+// 回灌是一次性 bootstrap：把历史对话补灌进记忆 L0，使 dreaming 能处理从未进入记忆
+// 系统的历史 backlog。陷阱在于「清空 tiered/memory 表后，每次启动若 tiered 为空又会从
+// chat_messages 回潮」。水位线（watermark）独立于 tiered_memories 持久化，记录已补灌的
+// 最大 chat_message.id，使上述回潮彻底阻断；要强制重新回灌只需删除该水位线键。
+const (
+	// KeyMemoryBackfillEnabled 全局回灌总开关默认值。
+	// per-bot 键 bot.<bot_id>.memory.backfill.enabled 可覆盖。
+	KeyMemoryBackfillEnabled = "memory.backfill.enabled"
+)
+
+// BotMemoryBackfillEnabledKey 返回指定 bot 的回灌开关键。
+func BotMemoryBackfillEnabledKey(botID string) string {
+	return "bot." + botID + ".memory.backfill.enabled"
+}
+
+// BotMemoryBackfillWatermarkKey 返回指定 bot 的回灌水位线键。
+// 值为已补灌进 L0 的最大 chat_message.id（十进制字符串），独立于 tiered_memories。
+func BotMemoryBackfillWatermarkKey(botID string) string {
+	return "bot." + botID + ".memory.backfill.watermark"
+}
+
 // ToolPolicyKey 返回指定 bot 的工具权限策略 JSON 的数据库键。
 // 格式：tools.<bot_id>.policy
 // 值为 ToolPolicy 的 JSON 字符串。

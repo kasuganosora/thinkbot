@@ -36,7 +36,7 @@ func TestBackfillFromChatHistory(t *testing.T) {
 	// 纯内存 store（不持久化），专注验证 L0 填充与 bot 过滤
 	ts := NewTieredStore(nil)
 	store := NewTieredStoreAdapter(ts)
-	written, err := BackfillFromChatHistory(context.Background(), store, db, "bot-x", zap.NewNop().Sugar())
+	written, maxID, err := BackfillFromChatHistory(context.Background(), store, db, "bot-x", 0, zap.NewNop().Sugar())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,15 @@ func TestBackfillFromChatHistory(t *testing.T) {
 
 	// 空消息表的 bot 不应写入任何内容
 	store2 := NewTieredStoreAdapter(NewTieredStore(nil))
-	if n, err := BackfillFromChatHistory(context.Background(), store2, db, "nobody", zap.NewNop().Sugar()); err != nil || n != 0 {
+	if n, _, err := BackfillFromChatHistory(context.Background(), store2, db, "nobody", 0, zap.NewNop().Sugar()); err != nil || n != 0 {
 		t.Fatalf("expected 0 written for unknown bot, got n=%d err=%v", n, err)
+	}
+
+	// 增量幂等：以 maxID 为水位线再次回灌，不应重复写入任何内容
+	store3 := NewTieredStoreAdapter(NewTieredStore(nil))
+	if n, wm, err := BackfillFromChatHistory(context.Background(), store3, db, "bot-x", maxID, zap.NewNop().Sugar()); err != nil || n != 0 {
+		t.Fatalf("incremental backfill above watermark should write 0, got n=%d wm=%d err=%v", n, wm, err)
+	} else if wm != maxID {
+		t.Fatalf("incremental backfill should preserve watermark, got %d want %d", wm, maxID)
 	}
 }

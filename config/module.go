@@ -735,6 +735,38 @@ func SystemMetaSpecs() []MetaSpec {
 	}
 }
 
+// --- Pipeline 模式配置 ---
+
+// GetPipelineMode 返回指定 bot 的 pipeline 装配模式。
+// 优先读取 per-bot 键 bot.<bot_id>.pipeline_mode，缺失时回退全局 pipeline.mode（默认 "standard"）。
+// 取值："standard"（默认，完整链路）/ "lurk-only"（只学习不发言）/ "code"（启用 run_code 式代码编排工具）。
+// 该模式经由 pipeline.Builder.WithMode 传入装配器，是 stage / tool 花名册的驱动源
+// （对应 harness 的 agent preset / agent.cordis.yml 插件清单）。
+func (b *Builder) GetPipelineMode(botID string) string {
+	if m := b.store.GetString(BotPipelineModeKey(botID), ""); m != "" {
+		return m
+	}
+	return b.store.GetString(KeyPipelineMode, "standard")
+}
+
+// GetMemoryBackfillEnabled 读取指定 bot 的回灌开关：per-bot 优先，否则取全局
+// memory.backfill.enabled（默认 true）。关闭后即使 tiered 记忆被清空也不会从历史
+// chat_messages 回灌（除非显式删除水位线键强制重灌）。
+func (b *Builder) GetMemoryBackfillEnabled(botID string) bool {
+	return b.store.GetBool(
+		BotMemoryBackfillEnabledKey(botID),
+		b.store.GetBool(KeyMemoryBackfillEnabled, true),
+	)
+}
+
+// PipelineModeMetaSpecs 返回 pipeline 模式配置项的元数据。
+func PipelineModeMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyPipelineMode, Category: "Pipeline", Description: "全局默认 pipeline 装配模式（默认 standard）。取值 standard / lurk-only / code。可用 bot.<botID>.pipeline_mode 按 bot 覆盖。"},
+		{Key: "bot.<botID>.pipeline_mode", Category: "Pipeline", Description: "单 bot 覆盖 pipeline 模式。取值同 pipeline.mode；未设置时回退全局默认值。"},
+	}
+}
+
 // --- Soul 配置 ---
 
 // SoulConfig 描述 SOUL.md 人格文件的配置。
