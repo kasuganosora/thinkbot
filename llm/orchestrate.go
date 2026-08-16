@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -178,6 +179,31 @@ func (e *ToolApprovalDeferredError) Error() string {
 
 func (e *ToolApprovalDeferredError) Is(target error) bool {
 	return target == ErrToolApprovalDeferred
+}
+
+// --- HITL 预批准（续跑注入） ---------------------------------------------------
+//
+// ResumeDeferredApproval 在续跑时把人类决策按「工具名」注入 context，使编排层在
+// 重新执行被 defer 的工具时直接采用该决策，而不再二次触发 ApprovalHandler 挂起。
+// 与 per-call 的 ApprovalHandler 正交：仅当 context 中存在预批准且命中工具名时才生效，
+// 默认路径（context 无预批准）行为完全不变。
+
+type ctxKeyPreApproval struct{}
+
+// PreApprovalMap 预批准表：键为工具名，值为人类对该工具的决策。
+type PreApprovalMap map[string]ToolApprovalResult
+
+// WithPreApproval 返回一个携带预批准表的 context。
+func WithPreApproval(ctx context.Context, m PreApprovalMap) context.Context {
+	return context.WithValue(ctx, ctxKeyPreApproval{}, m)
+}
+
+// PreApprovalFromContext 取出预批准表（无则返回 nil）。
+func PreApprovalFromContext(ctx context.Context) PreApprovalMap {
+	if m, ok := ctx.Value(ctxKeyPreApproval{}).(PreApprovalMap); ok {
+		return m
+	}
+	return nil
 }
 
 // --- Orchestrated generate (non-streaming) ---
@@ -1117,10 +1143,45 @@ func executeTools(
 				continue
 			}
 
+			// HITL 续跑：若 context 中携带针对该工具名的预批准，直接采用，
+			// 不再调用 ApprovalHandler（避免二次 defer 挂起）。默认路径无预批准，行为不变。
+			if pre := PreApprovalFromContext(ctx); pre != nil {
+				if r, ok := pre[tc.ToolName]; ok {
+					approval := r
+					if approval.ToolName == "" {
+						approval.ToolName = tc.ToolName
+					}
+					approval.ToolCallID = tc.ToolCallID
+					approval.Input = tc.Input
+					switch approval.Decision {
+					case "", ToolApprovalApproved:
+						// 放行执行
+					case ToolApprovalRejected:
+						results[i] = ToolResultPart{
+							ToolCallID: tc.ToolCallID,
+							ToolName:   tc.ToolName,
+							Result:     rejectedToolResultText(approval),
+							IsError:    true,
+						}
+						continue
+					case ToolApprovalDeferred:
+						return nil, &ToolApprovalDeferredError{Approval: approval}
+					}
+					pending = append(pending, pendingToolExec{idx: i, tc: tc, tool: tool})
+					continue
+				}
+			}
+
 			approval, err := approvalHandler(ctx, tc)
 			if err != nil {
 				return nil, errs.Wrapf(err, "llm: approval handler for %q", tc.ToolName)
 			}
+			// 补全工具上下文，供 HITL 续跑锚点按工具名预批准 / 重建调用。
+			if approval.ToolName == "" {
+				approval.ToolName = tc.ToolName
+			}
+			approval.ToolCallID = tc.ToolCallID
+			approval.Input = tc.Input
 			switch approval.Decision {
 			case "", ToolApprovalApproved:
 				// Continue to execution below.
@@ -1167,6 +1228,15 @@ func rejectedToolResultText(approval ToolApprovalResult) string {
 	return "tool execution denied by user"
 }
 
+// inputPreview 将工具入参压缩为短预览，用于事件轨迹审计，避免大载荷进入内存 sink。
+func inputPreview(v any) string {
+	s := fmt.Sprintf("%v", v)
+	if len(s) > 300 {
+		return s[:300] + "...(truncated)"
+	}
+	return s
+}
+
 func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart), cfg *OrchestrateConfig) ToolResultPart {
 	// invocationID：本次「实际执行」的服务端唯一标识。它与模型下发的
 	// ToolCallID 相互独立，用于在日志与前端稳定地区分「来自哪次调用」。
@@ -1192,8 +1262,25 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		SendProgress: progressFn,
 	}
 
+	// 事件轨迹（append-only，C1 深层集成）：记录工具「调用发起」与「返回」。
+	// call 为 log-only（不进模型上下文，仅供审计/可观测）；
+	// result 为 surface（工具返回会进入模型上下文，与 harness 的 surface 语义一致）。
+	sink := core.EventSinkFromContext(ctx)
+	sink.Emit(ctx, core.Event{
+		Kind:    core.EventToolCall,
+		Source:  "tool:" + tc.ToolName,
+		Surface: false,
+		Payload: map[string]any{"invocation_id": invocationID, "input_preview": inputPreview(tc.Input)},
+	})
+
 	output, err := tool.Execute(execCtx, tc.Input)
 	if err != nil {
+		sink.Emit(ctx, core.Event{
+			Kind:    core.EventToolResult,
+			Source:  "tool:" + tc.ToolName,
+			Surface: true,
+			Payload: map[string]any{"invocation_id": invocationID, "is_error": true, "error": err.Error()},
+		})
 		if sendProgress != nil {
 			sendProgress(&StreamToolErrorPart{
 				ToolCallID:   tc.ToolCallID,
@@ -1210,6 +1297,12 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 			IsError:      true,
 		}
 	}
+	sink.Emit(ctx, core.Event{
+		Kind:    core.EventToolResult,
+		Source:  "tool:" + tc.ToolName,
+		Surface: true,
+		Payload: map[string]any{"invocation_id": invocationID, "is_error": false, "output_len": len(fmt.Sprintf("%v", output))},
+	})
 
 	// Apply output truncation to prevent context bloat.
 	// 阈值优先用编排配置，零值回退默认；落盘指针仅在注入了 sink 且能取到
