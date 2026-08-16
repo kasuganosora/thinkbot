@@ -28,12 +28,36 @@ type Pipeline struct {
 	stages []core.StageInfo
 	tracer trace.Tracer
 	logger *zap.SugaredLogger
+	// sink 接收各 stage 边界事件（append-only 轨迹），默认 NoopSink 零开销。
+	sink core.EventSink
 
 	// metrics
 	msgProcessed metric.Int64Counter
 	msgErrors    metric.Int64Counter
 	msgDropped   metric.Int64Counter
 	stageLatency metric.Float64Histogram
+}
+
+// SetSink 注入事件接收器（append-only 轨迹）。传 nil 恢复为 NoopSink。
+// 调用方应在 New 之后、Execute 之前设置；运行期切换亦可（仅影响后续事件）。
+func (p *Pipeline) SetSink(sink core.EventSink) {
+	if sink == nil {
+		sink = core.NoopSink
+	}
+	p.sink = sink
+}
+
+// emit 记录一条事件（sink 为 Noop 时零成本）。
+func (p *Pipeline) emit(ctx context.Context, kind core.EventKind, source string, surface bool, payload any) {
+	if p.sink == nil {
+		return
+	}
+	p.sink.Emit(ctx, core.Event{
+		Kind:    kind,
+		Source:  source,
+		Surface: surface,
+		Payload: payload,
+	})
 }
 
 // New 创建 Pipeline 实例。
@@ -78,6 +102,7 @@ func New(stages []core.StageInfo, tp trace.TracerProvider, mp metric.MeterProvid
 		stages:       sorted,
 		tracer:       tracer,
 		logger:       logger,
+		sink:         core.NoopSink,
 		msgProcessed: processed,
 		msgErrors:    errCounter,
 		msgDropped:   dropped,
@@ -94,6 +119,10 @@ func New(stages []core.StageInfo, tp trace.TracerProvider, mp metric.MeterProvid
 //   - Stage 返回其他 error → 记录错误后 Pipeline 继续
 //   - Envelope.Aborted() == true → Pipeline 终止
 func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	// 把事件轨迹 sink 注入 context，使下游 Stage / 工具循环（如 LLM 工具执行）
+	// 能通过 EventSinkFromContext(ctx) 取到并追加事件（C1 深层集成）。
+	ctx = core.WithEventSink(ctx, p.sink)
+
 	// 从 context 中提取 trace ID，用于日志关联
 	logger := traceid.WithLoggerFrom(ctx, p.logger)
 
@@ -132,7 +161,9 @@ func (p *Pipeline) Execute(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 
 		var err error
+		p.emit(ctx, core.EventStageStart, si.Stage.Name(), false, nil)
 		env, err = p.executeStage(ctx, si.Stage, env)
+		p.emit(ctx, core.EventStageEnd, si.Stage.Name(), false, nil)
 		if err != nil {
 			if core.IsAbortError(err) {
 				span.SetStatus(codes.Error, "aborted")

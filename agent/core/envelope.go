@@ -132,6 +132,11 @@ const (
 	// 值类型 string；空串表示无相关记忆。
 	KVMemoryRecall = "memory.recall"
 
+	// KVLLMDeferred 标记「本轮因工具审批被 defer 而暂停」——LLMStage 已阻断半成品回复，
+	// 等待人类确认后由 ResumeDeferredApproval 续跑。供下游 Stage / 可观测层识别此状态。
+	// 值类型 bool；仅 true 生效。
+	KVLLMDeferred = "llm.deferred"
+
 	// KVHeartbeatMode 标记当前消息为「心跳自主唤醒」决策模式。
 	//
 	// 由心跳 Executor 在构造唤醒消息时设置。LLMStage 读取后强制 JSON 结构化输出
