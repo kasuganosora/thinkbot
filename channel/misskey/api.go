@@ -3,6 +3,7 @@ package misskey
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
@@ -23,7 +24,11 @@ type apiClient struct {
 // host 是 Misskey 实例的基础 URL（如 https://misskey.io）。
 // token 是用户 API Token。
 func newAPIClient(host, token string, opts ...http.Option) *apiClient {
-	opts = append([]http.Option{http.WithBaseURL(host + "/api")}, opts...)
+	opts = append([]http.Option{
+		http.WithBaseURL(host + "/api"),
+		// 429/5xx + 网络错误自动按 Retry-After 退避重试；批量删帖不会再因限流硬失败。
+		http.WithRetrySimple(5, 500*time.Millisecond),
+	}, opts...)
 	return &apiClient{
 		client: http.New(opts...),
 		host:   host,
