@@ -41,6 +41,25 @@ func StripThinkTags(text string) string {
 	return strings.TrimSpace(cleaned)
 }
 
+// internalTagRe 匹配 <internal>...</internal> 块（回复控制协议要求的私有心里话标签）。
+// 标志与 thinkTagRe 一致：i 不区分大小写，s 使 . 匹配换行（心里话通常多行）。
+var internalTagRe = regexp.MustCompile(`(?is)<internal>\s*.*?\s*</internal>`)
+
+// unclosedInternalRe 匹配只有开标签没有闭标签的 <internal>（流式截断场景）。
+// 注意：调用方只会把「控制块之前的内容」传入，故 .*$ 不会吞掉 @@REPLY_CONTROL@@ 控制行。
+var unclosedInternalRe = regexp.MustCompile(`(?is)<internal>.*$`)
+
+// StripInternalTags 从文本中移除 <internal>...</internal> 私有心里话标签及其内容。
+//
+// 出站链路用它确保模型写在 <internal> 里的判断、吐槽、内部备注永不外发——
+// 这是「同时输出心里话和想说的话」场景下防止心里话泄漏的关键一道。
+// 与 StripThinkTags 同范式：先去完整标签对，再去未闭合开标签，最后清理空白。
+func StripInternalTags(text string) string {
+	cleaned := internalTagRe.ReplaceAllString(text, "")
+	cleaned = unclosedInternalRe.ReplaceAllString(cleaned, "")
+	return strings.TrimSpace(cleaned)
+}
+
 // reasoningPart 对应某些 API（如智谱 GLM）在 content 字段中发出的 JSON 推理数组。
 type reasoningPart struct {
 	Text string `json:"text"`

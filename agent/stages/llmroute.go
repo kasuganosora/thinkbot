@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -157,7 +158,10 @@ After your reply text, you MUST append EXACTLY ONE control line as the final out
   @@REPLY_CONTROL@@{"send": false}   — when you decide NOT to reply/interact (e.g. you observed but choose not to engage, or have nothing useful to add)
 Rules:
 - The control line is MANDATORY. If it is missing or malformed, NOTHING will be posted (fail-closed).
-- When send:false, do NOT narrate "I won't reply" as a public message — just set send:false. Any text you write before the control line in this case is a private note and will NOT be posted.
+- WRAP ALL private reasoning (judgments, complaints, internal notes, "what I really think") in <internal>...</internal> tags. NEVER write private thoughts as bare text outside tags.
+- You MUST wrap the public reply in <public>...</public> tags. IMPORTANT: if your output contains <internal> private tags but NO <public> block, NOTHING is posted (the whole reply is dropped, fail-closed). So whenever you have private thoughts, you MUST also emit a <public> block for anything you actually want to say.
+- A reply with no tags at all is also fine: when send:true, the plain text is posted (subject to the control block above).
+- When send:false, do NOT narrate "I won't reply" as a public message — just set send:false. Any text before the control line (inside or outside tags) is treated as a private note and will NOT be posted.
 - The control line itself is stripped before posting; users never see it.
 - Put the actual reply text BEFORE the control line. The control line must be the very last thing you output.`
 
@@ -194,6 +198,44 @@ func parseReplyControl(text string) (send bool, clean string, ok bool) {
 	// 干净正文 = 控制块之前的内容（去除尾部空白），控制块本身不发出。
 	clean = strings.TrimRight(text[:idx], " \t\n\r")
 	return sig.Send, clean, true
+}
+
+// publicTagRe 匹配 <public>...</public> 显式公开回复区（回复控制协议的 opt-in 标签）。
+// 模型用它明确「只发这段」，门控据此丢弃其余所有内容（含 <internal> 心里话），彻底防泄漏。
+var publicTagRe = regexp.MustCompile(`(?is)<public>\s*(.*?)\s*</public>`)
+
+// internalOnlyRe 匹配「含 <internal> 私密标签但未用 <public> 标出公开区」的情形：
+// 完整对 <internal>...</internal>，或裸开标签 <internal>（未闭合/流式截断）。
+// 命中即视为模型泄露了私密意图却没给出公开出口 —— 整段 fail-closed 不发，
+// 避免把 internal 之外的文本也带出去（取巧逻辑：<internal> 是强私密信号，无 <public> 则整段沉）。
+var internalOnlyRe = regexp.MustCompile(`(?is)<internal>.*?</internal>|<internal>`)
+
+// extractPublicReply 从清洗后的干净正文里提取「应公开发送」的内容（取巧三态）：
+//
+//  1. 有 <public> 标签 → 只拼接各 <public> 区块内文（模型明确"就发这些"，
+//     其余包括任何 <internal> 心里话一律丢弃，最防泄漏）；
+//  2. 含 <internal> 但无 <public> → 返回空（整段 fail-closed 不发——既然暴露了私密意图
+//     又没给公开出口，连 internal 之外的文本也不该带出）；
+//  3. 纯文本（无任何标签）→ 原样返回，由上层 control 块决定（send:true 发全文）。
+//
+// 无论哪条路径，私有标签（心里话）都不会进入出站 payload。
+func extractPublicReply(clean string) string {
+	// 路径 1：<public> 公开区优先，只发其内文（最防泄漏）。
+	if blocks := publicTagRe.FindAllStringSubmatch(clean, -1); len(blocks) > 0 {
+		var b strings.Builder
+		for _, m := range blocks {
+			b.WriteString(m[1])
+			b.WriteString("\n")
+		}
+		// 公开区内也可能夹带 <internal>，再剥一次确保心里话不外发。
+		return memory.StripInternalTags(strings.TrimSpace(b.String()))
+	}
+	// 路径 2：含 <internal> 私密标签却没给 <public> 公开出口 → 整段不发。
+	if internalOnlyRe.MatchString(clean) {
+		return ""
+	}
+	// 路径 3：纯文本（无标签）→ 原样返回，由上层 control 块决定。
+	return strings.TrimSpace(clean)
 }
 
 // emitLurkNote 在潜水模式下把 LLM 的结构化产出作为内部学习笔记（ActionNote）写入 L0。
@@ -337,7 +379,13 @@ type LLMConfig struct {
 	//   @@REPLY_CONTROL@@{"send": false}   —— 决定不互动/不回复（正文不会被发出）
 	// 缺失控制块 / 解析失败 / send:false → 一律不出站（fail-closed），与用户要求的
 	// 「读取失败，或者没有则不会出站」一致。用于治理「模型决定不互动却把独白当回复发出」。
-	// 仅对显式开启的 bot 生效，避免影响其它 bot 的回复路径。
+	//
+	// 标签协议（replyControlInstruction）：所有私有心里话必须包进 <internal>...</internal>，
+	// 公开回复可包进 <public>...</public>。出站时门控按三态提取（见 extractPublicReply）：
+	//   - 有 <public> → 只发其内文；
+	//   - 含 <internal> 但无 <public> → 整段不发（<internal> 是强私密信号，无公开出口即沉）；
+	//   - 纯文本无标签 → send:true 发全文。
+	// 既防泄漏又不吞真实回复，仅对显式开启的 bot 生效。
 	RequireReplyControl bool
 }
 
@@ -804,7 +852,17 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			env.Set("llm.result", result)
 			return env, nil
 		}
-		replyText = clean
+		// send:true —— 提取应公开发送的内容（见 extractPublicReply 的三态逻辑）。
+		replyText = extractPublicReply(clean)
+		if strings.TrimSpace(replyText) == "" {
+			// send:true 但提取不到公开内容：模型只写了 <internal>（忘了 <public>），
+			// 或正文确实为空。两种情况都不应外发（fail-closed，绝不泄漏私密）。
+			span.SetAttributes(attribute.Bool("reply.internal_only_no_public", true))
+			logger.Infow("reply suppressed: send:true but no public content (internal-only or empty)",
+				"message_id", env.Message.ID)
+			env.Set("llm.result", result)
+			return env, nil
+		}
 	}
 
 	if strings.TrimSpace(replyText) == "" {
