@@ -808,6 +808,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 该值后续同时用于 LLMStage 装配与 AgentConfig.MaxSteps，保证两处一致。
 	softSteps, hardSteps := effectiveStepBudgets(def)
 
+	// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效。
+	requireReplyControl := builder.Store().GetBool(config.BotReplyControlKey(id), false)
+	if requireReplyControl {
+		s.logger.Infow("reply control gate enabled", "bot_id", id)
+	}
+
 	// 延迟加载工具（defer_loading）：MCP 等"多工具"类工具初始仅暴露名称 +
 	// 描述，完整 input schema 经注入的 tool_search 工具或「模型直接引用」按需
 	// 加载，节省 token 并减少工具选择错误。按会话隔离（DeferralStore），
@@ -825,6 +831,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			ReasoningEffort: def.ReasoningEffort,
 			MessageBuilder:  messageBuilder,
 			ToolResolver:    toolMgr,
+			// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效，
+			// 治理「模型决定不互动却把独白当回复发出」。默认关闭。
+			RequireReplyControl: requireReplyControl,
 			// 动态步数预算：常规任务在 soft 内自然收尾；复杂任务（如大规模
 			// 代码修复）在持续产生新工具调用时自动延长至 hard 安全网，
 			// 陷入重复循环则提前停止。详见 llm.loopController。
