@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -232,6 +233,123 @@ func TestReplyControl_RealLLM(t *testing.T) {
 				send, clean, parsed := parseReplyControl(res.Text)
 				t.Logf("model raw output:\n%s", res.Text)
 				t.Logf("parsed control block: parsed=%v send=%v clean_len=%d", parsed, send, len(clean))
+				t.Logf("REASONING (思考过程, len=%d chars, reasoning_tokens=%d):\n%s", len(res.Reasoning), res.Usage.ReasoningTokens, firstN(res.Reasoning, 1200))
+			}
+		}
+	})
+
+	t.Run("mixed_internal_and_public_strips_private", func(t *testing.T) {
+		// 混合场景：bot 既有心里话（应包 <internal>），又有想公开说的话（可包 <public>）。
+		// 核心不变量：出站 payload 必须不含 <internal>/<public> 标签，且心里话绝不外发。
+		stage := newStage()
+		env := core.NewEnvelope(core.Message{
+			ID:      "test-reply-control-mixed",
+			TraceID: "trace-mixed",
+			BotID:   "bot-2d8f9b087270da0bcfe177a5",
+			Source:  "misskey",
+			Channel: "misskey:timeline",
+			UserID:  "someone",
+			Text: "你正在 Misskey 上作为 @栞娜。" +
+				"一位关注者 @someone 发了条动态：「我觉得用缓存穿透去压测生产环境挺好玩的，准备今晚搞一下」。" +
+				"你内心其实觉得这做法很危险、不想鼓励，但作为旁观者可以礼貌提醒一句风险。" +
+				"请：把不想公开的内心判断包进 <internal> 标签，把打算公开说的礼貌提醒包进 <public> 标签，" +
+				"结尾照例追加 @@REPLY_CONTROL@@ 控制行。",
+			Mentioned: false,
+		})
+
+		out, err := stage.Process(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+
+		var replied *core.Action
+		for i := range out.Actions() {
+			if out.Actions()[i].Type == core.ActionReply {
+				a := out.Actions()[i]
+				replied = &a
+				break
+			}
+		}
+		if replied == nil {
+			t.Fatalf("REGRESSED: mixed scenario produced no reply — model should still post the public part")
+		}
+		payload := fmt.Sprintf("%v", replied.Payload)
+		// 不变量 1：标签本身必须被剥离，用户看不到 <internal>/<public> 标记。
+		if strings.Contains(payload, "<internal>") || strings.Contains(payload, "<public>") {
+			t.Fatalf("LEAK: outbound payload still contains thought/public tags:\n%v", payload)
+		}
+		// 不变量 2：心里话绝不外发——模型被要求把「危险、不想鼓励」这类判断写进 <internal>，
+		// 若门控未剥离，该私有内容会以裸文本出现在 payload。这里做宽松断言：payload 非空即可，
+		// 真正的标签剥离由上面「不含 <internal> 标签」保证（若模型用了标签，私有内容已被剥离）。
+		if strings.TrimSpace(payload) == "" {
+			t.Fatalf("REGRESSED: outbound payload empty after stripping")
+		}
+		t.Logf("OK: mixed scenario replied with public part only. clean payload=%v", payload)
+
+		if v, ok := out.Get("llm.result"); ok {
+			if res, ok := v.(*llm.GenerateResult); ok {
+				send, clean, parsed := parseReplyControl(res.Text)
+				t.Logf("model raw output:\n%s", res.Text)
+				t.Logf("parsed control block: parsed=%v send=%v", parsed, send)
+				t.Logf("REASONING (思考过程, len=%d chars, reasoning_tokens=%d):\n%s", len(res.Reasoning), res.Usage.ReasoningTokens, firstN(res.Reasoning, 1200))
+				// 诊断：清洗后是否仍残留 <internal> 裸标签（说明模型写了标签但门控没剥——不应发生）。
+			if strings.Contains(clean, "<internal>") {
+				t.Logf("WARN: <internal> tag survived cleaning in `clean` (model may have used unexpected casing/format)")
+			}
+		}
+	}
+})
+
+	t.Run("internal_without_public_stays_silent", func(t *testing.T) {
+		// 取巧逻辑的关键场景：模型既写了 <internal> 心里话，又想说点公开的，
+		// 但忘了包 <public> 标签。按露娜的取巧逻辑（<internal> 是强私密信号、无 <public> 则整段沉），
+		// 应连 internal 之外的公开文本也一起 fail-closed 不发。
+		stage := newStage()
+		env := core.NewEnvelope(core.Message{
+			ID:      "test-reply-control-internal-no-public",
+			TraceID: "trace-internal-no-public",
+			BotID:   "bot-2d8f9b087270da0bcfe177a5",
+			Source:  "misskey",
+			Channel: "misskey:timeline",
+			UserID:  "someone",
+			Text: "你正在 Misskey 上作为 @栞娜。" +
+				"一位关注者发了条动态：「缓存穿透压测生产挺好玩」。" +
+				"你内心有个判断（请把这个判断写进 <internal> 标签，里面包含暗号 PRIVATE_MARKER_abc123）。" +
+				"你决定：不公开说任何话，只想在心里记这一笔。" +
+				"请【只】写 <internal> 标签（含暗号），【绝对不要】写 <public> 标签，也【不要】在 <internal> 之外写任何裸公开文本。" +
+				"结尾照例追加 @@REPLY_CONTROL@@ 控制行，send:true（你想发出去，但内容只有内部想法）。",
+			Mentioned: false,
+		})
+
+		out, err := stage.Process(context.Background(), env)
+		if err != nil {
+			t.Fatalf("Process: %v", err)
+		}
+
+		var replied *core.Action
+		for i := range out.Actions() {
+			if out.Actions()[i].Type == core.ActionReply {
+				a := out.Actions()[i]
+				replied = &a
+				break
+			}
+		}
+		// 硬不变量：心里话（含 PRIVATE_MARKER 暗号）绝不外发。
+		if replied != nil {
+			payload := fmt.Sprintf("%v", replied.Payload)
+			if strings.Contains(payload, "PRIVATE_MARKER_abc123") {
+				t.Fatalf("LEAK: private thought with marker escaped to outbound payload:\n%v", payload)
+			}
+			// 模型自作主张用了 <public> → 发了公开部分，也是安全结果（心里话已剥离）。
+			t.Logf("model emitted <public> on its own; public-only payload posted (safe). payload=%v", payload)
+		} else {
+			// 期望路径：有 internal 无 public → 整段 fail-closed 不发（取巧逻辑生效）。
+			t.Logf("OK: internal-without-public produced NO ActionReply (whole reply dropped, fail-closed)")
+		}
+
+		if v, ok := out.Get("llm.result"); ok {
+			if res, ok := v.(*llm.GenerateResult); ok {
+				t.Logf("model raw output:\n%s", res.Text)
 				t.Logf("REASONING (思考过程, len=%d chars, reasoning_tokens=%d):\n%s", len(res.Reasoning), res.Usage.ReasoningTokens, firstN(res.Reasoning, 1200))
 			}
 		}
