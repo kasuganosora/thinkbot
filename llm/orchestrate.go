@@ -627,11 +627,21 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				stepToolCalls     []ToolCall
 				stepUsage         Usage
 				stepResponse      ResponseMetadata
+				stepRepGuard      = NewRepetitionGuard() // 每步独立检测器
 			)
 
 			for part := range provSR.Stream {
 				switch p := part.(type) {
 				case *TextDeltaPart:
+					// 重复退化检测：增量检查，触发后停止消费本步流
+					if p.Text != "" && !stepRepGuard.Feed(p.Text) {
+						stepText = stepRepGuard.Text()
+						if logger := traceid.L(ctx); logger != nil {
+							logger.Warnw("repetition collapse in orchestrate stream step, truncating",
+								"step", step)
+						}
+						break // 跳出内层 for range provSR.Stream，不再消费后续 delta
+					}
 					stepText += p.Text
 				case *ReasoningDeltaPart:
 					stepReasoning += p.Text
