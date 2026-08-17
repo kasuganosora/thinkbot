@@ -461,6 +461,8 @@ func (m *TieredManager) WriteEpisodic(ctx context.Context, entry Entry, entryIDs
 }
 
 // WriteProfile 写入一条用户画像记忆（L3）。
+// 对于单值画像（如 bot_personality），写入前会清除同一 scope 下已有的同分类记录，
+// 避免每次固化都堆积一份几乎相同的新版本。
 func (m *TieredManager) WriteProfile(ctx context.Context, entry Entry) error {
 	te := TieredEntry{
 		Entry:        entry,
@@ -470,7 +472,31 @@ func (m *TieredManager) WriteProfile(ctx context.Context, entry Entry) error {
 	if te.Category == "" {
 		te.Category = "profile"
 	}
+	if te.Category == "bot_personality" {
+		if err := m.dedupeStaleProfiles(ctx, te.Scope, te.Category); err != nil {
+			m.logger.Warnw("WriteProfile: dedupe stale profiles failed", "err", err)
+		}
+	}
 	return m.store.Append(ctx, te)
+}
+
+// dedupeStaleProfiles 删除指定 scope+category 下已存在的 L3 画像记录，
+// 仅保留随后 Append 写入的那一条（调用方负责写入）。
+// 当前用于 bot_personality 等单值画像，防止固化反复堆叠重复版本。
+func (m *TieredManager) dedupeStaleProfiles(ctx context.Context, scope Scope, category string) error {
+	existing, err := m.store.Retrieve(ctx, Tier3Profile, []Scope{scope}, 1000)
+	if err != nil {
+		return errs.Wrap(err, "retrieve existing L3 for dedupe")
+	}
+	for _, e := range existing {
+		if e.Category != category {
+			continue
+		}
+		if err := m.store.Delete(ctx, Tier3Profile, scope, e.ID); err != nil {
+			m.logger.Warnw("WriteProfile: delete stale profile failed", "id", e.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 // Consolidate 执行 L0→L1 巩固。
