@@ -197,6 +197,14 @@ func BotPipelineModeKey(botID string) string {
 	return "bot." + botID + ".pipeline_mode"
 }
 
+// BotReplyControlKey 返回指定 bot 的「回复控制门控」开关键：bot.<bot_id>.reply_control。
+// 取值 "true" 时启用：模型必须在回复结尾追加结构化控制 JSON（@@REPLY_CONTROL@@{"send":bool}），
+// 缺失/解析失败/send:false → 不出站（fail-closed）。用于治理「模型决定不互动却把独白当回复发出」。
+// 默认关闭（"false"），避免影响未显式开启的 bot。
+func BotReplyControlKey(botID string) string {
+	return "bot." + botID + ".reply_control"
+}
+
 // Memory 回灌（backfill）键：历史 chat_messages → L0 守卫。
 // 回灌是一次性 bootstrap：把历史对话补灌进记忆 L0，使 dreaming 能处理从未进入记忆
 // 系统的历史 backlog。陷阱在于「清空 tiered/memory 表后，每次启动若 tiered 为空又会从

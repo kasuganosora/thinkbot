@@ -131,6 +131,71 @@ func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string
 	return lurkObserverInstruction
 }
 
+// ============================================================================
+// 回复控制门控（Reply Control Gate）
+// ============================================================================
+//
+// 设计背景（重要，勿回退）：
+// 普通回复路径原本「无条件」把 LLM 文本当作 ActionReply 发出——唯一已有的静默出口
+// 是「模型纯粹输出了 <think> 思考、清洗后变空」。当模型用自然语言写下「我决定不互动」
+// 的独白时，它既不是思考标签、也非空，于是被原样发到公开时间线（见 2026-08-17 故障：
+// 频道从只读改为可写后，bot 把内心独白当公开回复发出）。
+//
+// 修复参照其他门控（lurk 的 {"remember":bool} / heartbeat 的机器解析 JSON）的同一范式：
+// 让模型在回复结尾追加一个结构化的「是否出站」控制 JSON，由代码解析裁决。缺失 / 解析
+// 失败 / send:false 一律不出站（fail-closed）。这与 lurk_contract.go 的「不靠自然语言
+// 枚举、用定义好的布尔信号」哲学一致，且不引入任何语言相关的兜底匹配。
+
+// replyControlDelimiter 是控制块的起始分隔符。选罕见串，避免与普通回复正文冲突。
+const replyControlDelimiter = "@@REPLY_CONTROL@@"
+
+// replyControlInstruction 是开启门控时追加到 system prompt 的协议说明（英文，遵循 LLM 约定）。
+// 它把「是否出站」的决定从模型的内心独白，变成一条可被代码解析的确定性信号。
+const replyControlInstruction = `[REPLY CONTROL PROTOCOL]
+After your reply text, you MUST append EXACTLY ONE control line as the final output:
+  @@REPLY_CONTROL@@{"send": true}    — when you want the reply above to be posted
+  @@REPLY_CONTROL@@{"send": false}   — when you decide NOT to reply/interact (e.g. you observed but choose not to engage, or have nothing useful to add)
+Rules:
+- The control line is MANDATORY. If it is missing or malformed, NOTHING will be posted (fail-closed).
+- When send:false, do NOT narrate "I won't reply" as a public message — just set send:false. Any text you write before the control line in this case is a private note and will NOT be posted.
+- The control line itself is stripped before posting; users never see it.
+- Put the actual reply text BEFORE the control line. The control line must be the very last thing you output.`
+
+// replyControlSignal 是回复控制块的结构化产出。
+type replyControlSignal struct {
+	Send bool `json:"send"`
+}
+
+// parseReplyControl 从模型回复中提取结尾的控制 JSON。
+//
+// 返回 (send, clean, ok)：
+//   - ok=false：找不到分隔符，或分隔符后 JSON 解析失败 → 调用方应 fail-closed 不出站。
+//   - ok=true, send=false：模型显式声明不回复 → 调用方抑制出站。
+//   - ok=true, send=true：clean 为去除控制块后的干净正文，由调用方发出。
+//
+// 容错仅限于与语言无关的格式噪音（markdown 围栏、前后多余文本），复用 lurk 契约的同款
+// 辅助函数。绝不做任何自然语言兜底——解析失败即 fail-closed，与「不靠枚举」原则一致。
+func parseReplyControl(text string) (send bool, clean string, ok bool) {
+	idx := strings.LastIndex(text, replyControlDelimiter)
+	if idx < 0 {
+		return false, text, false
+	}
+	rest := text[idx+len(replyControlDelimiter):]
+	rest = stripCodeFence(rest)
+	rest = strings.TrimSpace(rest)
+	obj := extractFirstJSONObject(rest)
+	if obj == "" {
+		return false, text, false
+	}
+	var sig replyControlSignal
+	if err := json.Unmarshal([]byte(obj), &sig); err != nil {
+		return false, text, false
+	}
+	// 干净正文 = 控制块之前的内容（去除尾部空白），控制块本身不发出。
+	clean = strings.TrimRight(text[:idx], " \t\n\r")
+	return sig.Send, clean, true
+}
+
 // emitLurkNote 在潜水模式下把 LLM 的结构化产出作为内部学习笔记（ActionNote）写入 L0。
 //
 // 判定完全依赖契约 JSON 的 remember 布尔（见 lurk_contract.go），与模型的思考语言无关。
@@ -265,6 +330,15 @@ type LLMConfig struct {
 	// ResumeDispatch HITL 续跑入口：给定原始入站消息，重新走完整编排管线。
 	// 由 Bot 装配时接入 Engine.ProcessSync，使 ResumeDeferredApproval 能真正重跑该消息。
 	ResumeDispatch func(ctx context.Context, msg core.Message) (*core.Envelope, error)
+
+	// RequireReplyControl 回复控制门控（opt-in，默认 false）。
+	// 开启后，模型必须在回复正文之后追加一个结构化控制 JSON：
+	//   @@REPLY_CONTROL@@{"send": true}    —— 允许将上文作为回复发出
+	//   @@REPLY_CONTROL@@{"send": false}   —— 决定不互动/不回复（正文不会被发出）
+	// 缺失控制块 / 解析失败 / send:false → 一律不出站（fail-closed），与用户要求的
+	// 「读取失败，或者没有则不会出站」一致。用于治理「模型决定不互动却把独白当回复发出」。
+	// 仅对显式开启的 bot 生效，避免影响其它 bot 的回复路径。
+	RequireReplyControl bool
 }
 
 // ============================================================================
@@ -401,6 +475,12 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		if recall, ok := v.(string); ok && recall != "" {
 			systemPrompt = systemPrompt + "\n\n" + recall
 		}
+	}
+
+	// 回复控制门控（opt-in）：开启时追加协议说明，让模型在回复结尾追加结构化
+	// 「是否出站」控制 JSON。仅对显式开启的 bot 生效，不影响其它 bot。
+	if s.config.RequireReplyControl {
+		systemPrompt = systemPrompt + "\n\n" + replyControlInstruction
 	}
 
 	// 解析工具列表
@@ -702,6 +782,31 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 例如把 "[2,206/2,200 chars]" 写成「当前记忆已接近容量上限（2,206/2,200 字符）」
 	// 公开发到时间线。思考清洗后再次过滤内部指标，确保不泄漏。
 	replyText = memory.StripInternalState(replyText)
+
+	// 回复控制门控（opt-in）：解析结尾控制 JSON，失败/缺失/send:false 一律不出站。
+	// 放在「清洗后空检查」之前——若模型 send:true 但正文为空，后续空检查会照常拦截；
+	// 若 send:false，这里已提前 return，独白绝不外发。
+	if s.config.RequireReplyControl {
+		send, clean, parsed := parseReplyControl(replyText)
+		if !parsed {
+			// 控制块缺失或解析失败 → fail-closed，不出站（与用户要求一致）。
+			span.SetAttributes(attribute.Bool("reply.control_missing", true))
+			logger.Infow("reply suppressed: missing/invalid reply-control block (fail-closed)",
+				"message_id", env.Message.ID,
+				"raw_len", len(result.Text))
+			env.Set("llm.result", result)
+			return env, nil
+		}
+		if !send {
+			span.SetAttributes(attribute.Bool("reply.model_declined", true))
+			logger.Infow("reply suppressed: model declared send=false",
+				"message_id", env.Message.ID)
+			env.Set("llm.result", result)
+			return env, nil
+		}
+		replyText = clean
+	}
+
 	if strings.TrimSpace(replyText) == "" {
 		// 清洗后为空说明模型这轮只输出了思考内容，没有真正要说的话。
 		// 此时发送空消息毫无意义（且部分 Channel 会报错），跳过发送。
