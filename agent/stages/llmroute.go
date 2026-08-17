@@ -690,6 +690,18 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
+	// ── 重复退化安检（流式 + 非流式共用）───────────────────────────────
+	// 流式路径已在 processStream 内做增量检测，此处作为兜底再次检查
+	// （防御流式检测阈值未触发但完整文本已明显退化的边界情况）。
+	// 非流式路径则完全依赖此处的静态检测。
+	if cleaned, truncated := llm.DetectStaticRepetition(result.Text); truncated {
+		logger.Warnw("repetition collapse detected in final output, truncating",
+			"message_id", env.Message.ID,
+			"original_len", len(result.Text),
+			"truncated_len", len(cleaned))
+		result.Text = cleaned
+	}
+
 	// 记录 OTel 属性
 	span.SetAttributes(
 		attribute.Int("llm.steps", len(result.Steps)),
@@ -983,6 +995,10 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 
 	result := &llm.GenerateResult{}
 
+	// 重复退化检测器：增量检测流式输出中的重复 collapse（如 "NN BB NN BB..."）。
+	// 触发后立即停止消费 stream channel，截断已累积文本至最后正常位置。
+	repGuard := llm.NewRepetitionGuard()
+
 	// 单次消费 stream channel，同时转发 text delta 到 EventBus
 	for {
 		select {
@@ -995,6 +1011,17 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 			switch p := part.(type) {
 			case *llm.TextDeltaPart:
 				result.Text += p.Text
+				// 重复退化检测：在发布到前端之前先检查增量是否导致 collapse
+				if p.Text != "" && !repGuard.Feed(p.Text) {
+					// 检测到重复退化：截断已累积文本，停止消费流
+					result.Text = repGuard.Text()
+					logger.Warnw("repetition collapse detected in stream, truncating",
+						"message_id", env.Message.ID,
+						"cut_index", repGuard.CutIndex(),
+						"original_len", len(result.Text)+len(p.Text),
+						"truncated_len", len(result.Text))
+					goto streamDone
+				}
 				if p.Text != "" {
 					publisher.PublishTextDelta(ctx, traceID, botID, p.Text)
 				}
