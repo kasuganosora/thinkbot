@@ -45,50 +45,55 @@
       </div>
     </div>
 
-    <!-- 渠道发言权限（只看不发） -->
-    <div class="tp-card">
-      <div class="card-title">
-        渠道发言
-        <span class="ob-badge">独立于工具权限</span>
-      </div>
-      <div class="card-sub">
-        关闭发言后，Bot 在该渠道<b>被@ 也不会回复</b>，但仍照常接收消息、思考、记忆。
-        这是「潜水/ 只看不发」模式 —— Bot 的自动回复走消息出站链路，不受下方工具规则约束，因此需要单独开关。
-      </div>
+      <!-- 渠道发言权限（可发言 / 仅被动回复 / 只看不发） -->
+      <div class="tp-card">
+        <div class="card-title">
+          渠道发言
+          <span class="ob-badge">独立于工具权限</span>
+        </div>
+        <div class="card-sub">
+          控制此 Bot 在各渠道的对外发言策略。被动回复走消息出站链路，不受下方工具规则约束，因此需要单独开关。
+        </div>
 
-      <div v-if="obLoading" class="ob-loading">
-        <t-icon name="loading" class="spin" /> 加载中…
-      </div>
-      <div v-else class="ob-grid">
-        <div
-          v-for="o in outbound"
-          :key="o.platform"
-          class="ob-item"
-          :class="{ 'is-mute': o.readOnly }"
-        >
-          <div class="ob-left">
-            <span class="ob-plat" :class="`pf-${platClass(o.platform)}`">
-              {{ o.platform === '*' ? '全部渠道' : o.platform }}
-            </span>
-            <span class="ob-state">{{ o.readOnly ? '只看不发' : '可发言' }}</span>
+        <div v-if="obLoading" class="ob-loading">
+          <t-icon name="loading" class="spin" /> 加载中…
+        </div>
+        <div v-else class="ob-grid">
+          <div
+            v-for="o in outbound"
+            :key="o.platform"
+            class="ob-item"
+            :class="{ 'is-mute': o.mode === 'mute', 'is-passive': o.mode === 'passive' }"
+          >
+            <div class="ob-head">
+              <span class="ob-plat" :class="`pf-${platClass(o.platform)}`">
+                {{ o.platform === '*' ? '全部渠道' : o.platform }}
+              </span>
+              <span class="ob-state" :class="`st-${o.mode}`">{{ modeLabel(o.mode) }}</span>
+            </div>
+            <t-radio-group
+              :value="o.mode"
+              variant="default-filled"
+              size="small"
+              class="ob-modes"
+              :disabled="obSaving === o.platform"
+              @change="(m) => setMode(o, m)"
+            >
+              <t-radio-button value="active">可发言</t-radio-button>
+              <t-radio-button value="passive">仅被动回复</t-radio-button>
+              <t-radio-button value="mute">只看不发</t-radio-button>
+            </t-radio-group>
           </div>
-          <t-switch
-            size="small"
-            :value="!o.readOnly"
-            :loading="obSaving === o.platform"
-            @change="(v) => toggleOutbound(o, v)"
-          />
+        </div>
+        <div class="ob-note">
+          <t-icon name="info-circle" />
+          <span>
+            <b>可发言</b>：主动发帖与被 @ 回复都可以；
+            <b>仅被动回复</b>：被 @ 才回复，不主动发帖（自动禁掉主动发文工具 + 心跳不在该渠道主动发言）；
+            <b>只看不发</b>：被 @ 也不回，仅接收与记忆。单渠道设置只影响该渠道，「全部渠道」一次性覆盖所有渠道。
+          </span>
         </div>
       </div>
-      <div class="ob-note">
-        <t-icon name="error-circle" />
-        <span>
-          「全部渠道」开关会一次性覆盖所有渠道；单渠道开关只影响该渠道。
-          若要禁止 Bot <b>主动</b>发帖但保留被动回复，请改用下方工具规则禁掉
-          <code>misskey_create_*</code> 等发言类工具。
-        </span>
-      </div>
-    </div>
 
     <!-- 规则列表 -->
     <div class="tp-card">
@@ -463,7 +468,11 @@ const previewUsers = computed(() => {
 async function load() {
   loading.value = true
   try {
-    rules.value = await botToolPermApi.list(props.botId)
+    // 过滤掉由「发言模式」便捷开关自动维护的规则（auto=true）：
+    // 它们是 active / passive / mute 的副作用，已在「渠道发言」卡片统一管理，
+    // 不应混入手动规则列表（避免误删 / 排序混乱，也与平台概览隔离）。
+    const all = await botToolPermApi.list(props.botId)
+    rules.value = all.filter(r => !r.auto)
   } catch (e) {
     MessagePlugin.error('加载工具权限失败：' + (e.message || e))
   } finally {
@@ -495,23 +504,37 @@ async function loadOutbound() {
   }
 }
 
-// v 是开关值（true=可发言），readOnly 与之相反
-async function toggleOutbound(o, v) {
-  const readOnly = !v
+// mode 是发言模式（active / passive / mute）
+async function setMode(o, mode) {
+  if (o.mode === mode) return
+  const prev = o.mode
+  o.mode = mode // 乐观更新
   obSaving.value = o.platform
   try {
-    await botToolPermApi.setOutbound(props.botId, o.platform, readOnly)
-    o.readOnly = readOnly
-    MessagePlugin.success(readOnly? `已关闭 ${o.platform} 的发言` : `已恢复 ${o.platform} 的发言`)
+    await botToolPermApi.setOutbound(props.botId, o.platform, mode)
+    MessagePlugin.success(modeHint(mode))
     // 「全部渠道」与单渠道规则是两条独立规则，改动后重新拉取以反映真实合并结果
     if (o.platform === '*') await loadOutbound()
     // 出站规则也存在规则表里，同步刷新列表
     await load()
   } catch (e) {
+    o.mode = prev // 回滚
     MessagePlugin.error('设置失败：' + (e.message || e))
   } finally {
     obSaving.value = ''
   }
+}
+
+function modeLabel(m) {
+  return { active: '可发言', passive: '仅被动回复', mute: '只看不发' }[m] || '可发言'
+}
+
+function modeHint(m) {
+  return {
+    active: '已设为「可发言」',
+    passive: '已设为「仅被动回复」—— 被 @ 才回，不主动发帖',
+    mute: '已设为「只看不发」—— 被 @ 也不回'
+  }[m] || '已更新发言模式'
 }
 
 async function toggleEnabled(r, v) {
@@ -994,7 +1017,7 @@ async function confirmSave() {
 .em-title { font-size: 14px; font-weight: 600; color: #444; }
 .em-desc { font-size: 12.5px; color: #999; margin: 6px auto 18px; max-width: 420px; line-height: 1.7; }
 
-/* ---- 渠道发言（只看不发）---- */
+/* ---- 渠道发言（三态）---- */
 .ob-badge {
   font-size: 10.5px; font-weight: 500; color: #a86a12;
   background: #fff6e6; border: 1px solid #ffe4bf;
@@ -1006,17 +1029,23 @@ async function confirmSave() {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }
 .ob-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 9px 12px; border: 1px solid #ececef; border-radius: 8px; background: #fff;
+  display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+  padding: 11px 12px; border: 1px solid #ececef; border-radius: 8px; background: #fff;
   transition: border-color .15s, background .15s;
 }
 .ob-item.is-mute { border-color: #f3d3d0; background: #fffafa; }
-.ob-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ob-item.is-passive { border-color: #e3e9f7; background: #fafbff; }
+.ob-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .ob-plat {
   font-size: 11.5px; padding: 2px 9px; border-radius: 5px; font-weight: 500; flex-shrink: 0;
 }
-.ob-state { font-size: 11.5px; color: #9a9aa0; }
-.ob-item.is-mute .ob-state { color: #c8443c; }
+.ob-state { font-size: 11.5px; color: #9a9aa0; flex-shrink: 0; }
+.ob-state.st-active { color: #21935a; }
+.ob-state.st-passive { color: #4b62c9; }
+.ob-state.st-mute { color: #c8443c; }
+.ob-modes { width: 100%; }
+.ob-modes :deep(.t-radio-group__slot) { display: flex; width: 100%; }
+.ob-modes :deep(.t-radio-button) { flex: 1; text-align: center; }
 .ob-note {
   margin-top: 12px; padding: 9px 12px; border-radius: 8px; background: #f7f8fa;
   font-size: 11.5px; color: #7a7a7e; display: flex; align-items: flex-start; gap: 7px;
