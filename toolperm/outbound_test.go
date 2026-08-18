@@ -136,3 +136,147 @@ func TestAllowOutbound_PerUser(t *testing.T) {
 		t.Error("other users should still get replies")
 	}
 }
+
+// TestSpeakMode_ThreeStates 验证三态发言模式的闭环：
+//   - active：默认，主动 + 被动都允许；
+//   - passive：仅被动回复（出站放行，但主动发帖工具被禁、心跳不主动发帖）；
+//   - mute：潜水（出站拦截，被 @ 也不回）。
+func TestSpeakMode_ThreeStates(t *testing.T) {
+	svc := newTestService(t)
+	const bot = "bot-speak"
+
+	// 默认 active
+	if svc.SpeakMode(bot, "misskey") != ModeActive {
+		t.Fatal("default speak mode should be active")
+	}
+	if !svc.AllowOutbound(bot, "misskey", "u1") {
+		t.Error("active: outbound replies should be allowed")
+	}
+	if !svc.AllowProactivePost(bot, "misskey") {
+		t.Error("active: proactive posting should be allowed")
+	}
+	if !svc.Evaluate(bot, "misskey_create_note", "misskey", "u1") {
+		t.Error("active: proactive post tool should be allowed")
+	}
+
+	// 切到 passive
+	if err := svc.SetSpeakMode(bot, "misskey", ModePassive); err != nil {
+		t.Fatal(err)
+	}
+	if svc.SpeakMode(bot, "misskey") != ModePassive {
+		t.Error("should be passive after set")
+	}
+	// 被动回复仍放行（被 @ 后 ActionReply 出站）
+	if !svc.AllowOutbound(bot, "misskey", "u1") {
+		t.Error("passive: outbound replies must still be allowed")
+	}
+	// 主动发帖被禁：心跳
+	if svc.AllowProactivePost(bot, "misskey") {
+		t.Error("passive: heartbeat proactive posting must be blocked")
+	}
+	// 主动发帖被禁：工具
+	if svc.Evaluate(bot, "misskey_create_note", "misskey", "u1") {
+		t.Error("passive: proactive post tool must be denied")
+	}
+	// 其它平台不受影响（单渠道只影响该渠道）
+	if svc.SpeakMode(bot, "telegram") != ModeActive {
+		t.Error("passive on misskey must not affect telegram")
+	}
+	if !svc.AllowProactivePost(bot, "telegram") {
+		t.Error("telegram should still be active")
+	}
+
+	// 切到 mute
+	if err := svc.SetSpeakMode(bot, "misskey", ModeMute); err != nil {
+		t.Fatal(err)
+	}
+	if svc.SpeakMode(bot, "misskey") != ModeMute {
+		t.Error("should be mute after set")
+	}
+	if !svc.IsReadOnly(bot, "misskey") {
+		t.Error("mute implies read-only")
+	}
+	if svc.AllowOutbound(bot, "misskey", "u1") {
+		t.Error("mute: outbound replies must be blocked")
+	}
+
+	// 切回 active：所有 auto 规则应被清理
+	if err := svc.SetSpeakMode(bot, "misskey", ModeActive); err != nil {
+		t.Fatal(err)
+	}
+	if svc.SpeakMode(bot, "misskey") != ModeActive {
+		t.Error("should be active after reset")
+	}
+	if !svc.AllowOutbound(bot, "misskey", "u1") {
+		t.Error("active: outbound should be allowed again")
+	}
+	if !svc.AllowProactivePost(bot, "misskey") {
+		t.Error("active: proactive posting restored")
+	}
+	if !svc.Evaluate(bot, "misskey_create_note", "misskey", "u1") {
+		t.Error("active: proactive post tool restored")
+	}
+}
+
+// TestSpeakMode_WildcardCoversAll 验证 platform=* 的 passive 覆盖所有渠道。
+func TestSpeakMode_WildcardCoversAll(t *testing.T) {
+	svc := newTestService(t)
+	const bot = "bot-speak-wild"
+	if err := svc.SetSpeakMode(bot, "*", ModePassive); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"misskey", "telegram", "web"} {
+		if svc.SpeakMode(bot, p) != ModePassive {
+			t.Errorf("wildcard passive should cover %s", p)
+		}
+		if svc.AllowProactivePost(bot, p) {
+			t.Errorf("wildcard passive should block proactive post on %s", p)
+		}
+	}
+}
+
+// TestSpeakMode_AutoRulesIsolatedFromManual 验证切回 active 只清 auto 规则，
+// 不误删用户在「规则列表」手动配置的工具 deny。
+func TestSpeakMode_AutoRulesIsolatedFromManual(t *testing.T) {
+	svc := newTestService(t)
+	const bot = "bot-speak-iso"
+
+	// 用户手动禁掉 misskey_create_note（非 auto）
+	enabled := true
+	if _, err := svc.CreateRule(bot, RuleReq{
+		Tool: "misskey_create_note", Platform: "misskey", UserIDs: []string{"*"},
+		Decision: DecisionDeny, Enabled: &enabled, Sort: intp(5),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 切到 passive（会写 auto 规则）
+	if err := svc.SetSpeakMode(bot, "misskey", ModePassive); err != nil {
+		t.Fatal(err)
+	}
+	// 切回 active（只清 auto 规则）
+	if err := svc.SetSpeakMode(bot, "misskey", ModeActive); err != nil {
+		t.Fatal(err)
+	}
+
+	// 用户手动的 deny 应仍在
+	rules, err := svc.ListRules(bot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualStillThere := false
+	for _, r := range rules {
+		if r.Tool == "misskey_create_note" && r.Platform == "misskey" && !r.Auto {
+			manualStillThere = true
+		}
+	}
+	if !manualStillThere {
+		t.Error("manual deny rule must survive speak-mode switching")
+	}
+	// 不应残留任何 auto 规则
+	for _, r := range rules {
+		if r.Auto {
+			t.Errorf("auto rule %q should have been cleaned up", r.Tool)
+		}
+	}
+}

@@ -86,6 +86,14 @@ func (s *BotService) heartbeatChannelLister(botID string) heartbeat.ChannelListe
 			return nil, nil
 		}
 		var targets []heartbeat.ChannelTarget
+		// 按发言模式过滤：仅 active 平台允许心跳主动发帖；
+		// passive（仅被动回复）/ mute（潜水）都禁止心跳在该渠道主动发声。
+		allowed := func(t heartbeat.ChannelTarget) bool {
+			if s.permSvc == nil {
+				return true
+			}
+			return s.permSvc.AllowProactivePost(botID, t.Type)
+		}
 		for _, ch := range b.Channels() {
 			switch ch.Type() {
 			case "misskey":
@@ -116,7 +124,14 @@ func (s *BotService) heartbeatChannelLister(botID string) heartbeat.ChannelListe
 				// 其它类型暂不枚举。
 			}
 		}
-		return targets, nil
+		// 剔除 passive/mute 平台：心跳不在这些渠道主动发帖（仅 active 允许）。
+		filtered := targets[:0]
+		for _, t := range targets {
+			if allowed(t) {
+				filtered = append(filtered, t)
+			}
+		}
+		return filtered, nil
 	}
 }
 

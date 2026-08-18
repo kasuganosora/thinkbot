@@ -59,6 +59,7 @@ type RuleDTO struct {
 	Decision  string    `json:"decision"`
 	Enabled   bool      `json:"enabled"`
 	Sort      int       `json:"sort"`
+	Auto      bool      `json:"auto"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -90,6 +91,10 @@ type RuleReq struct {
 
 	// Sort 排序权重；nil 时由服务端给默认值（创建=追加到末尾，更新=保持原值）。
 	Sort *int `json:"sort"`
+
+	// Auto 标记该规则是否由「发言模式」便捷开关自动维护。
+	// nil 时由服务端给默认值（创建=false，更新=保持原值）。
+	Auto *bool `json:"auto"`
 }
 
 // Service 是 bot 工具权限服务。
@@ -356,6 +361,7 @@ func toDTO(m *dao.BotToolPermission) RuleDTO {
 		Decision:  m.Decision,
 		Enabled:   m.Enabled,
 		Sort:      m.Sort,
+		Auto:      m.Auto,
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
 	}
@@ -376,6 +382,9 @@ func (s *Service) buildModel(botID string, req RuleReq, create bool) (*dao.BotTo
 			m.Enabled = *req.Enabled
 		} else {
 			m.Enabled = true
+		}
+		if req.Auto != nil {
+			m.Auto = *req.Auto
 		}
 	}
 	return m, nil
@@ -453,6 +462,9 @@ func applyReq(m *dao.BotToolPermission, req RuleReq) {
 	}
 	if req.Enabled != nil {
 		m.Enabled = *req.Enabled
+	}
+	if req.Auto != nil {
+		m.Auto = *req.Auto
 	}
 }
 

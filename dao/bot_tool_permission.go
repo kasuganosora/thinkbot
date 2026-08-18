@@ -49,6 +49,11 @@ type BotToolPermission struct {
 	// Sort 排序权重；升序遍历，数字越小越先评估（首条匹配生效）。
 	Sort int `gorm:"default:0;index" json:"sort"`
 
+	// Auto 标记该规则是否由「发言模式」便捷开关（active/passive/mute）自动维护。
+	// true=系统自动创建（三态切换时整体清理），false=管理员在「规则列表」手动创建。
+	// 区分二者是为了：切换回 active 时只删除自动规则，绝不误删用户手动配置的 deny。
+	Auto bool `gorm:"not null;default:false" json:"auto"`
+
 	// CreatedAt 创建时间。
 	CreatedAt time.Time `gorm:"autoCreateTime" json:"createdAt"`
 
