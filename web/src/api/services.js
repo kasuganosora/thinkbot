@@ -1546,25 +1546,25 @@ export const botToolPermApi = {
     return request('GET', `/api/bots/${botId}/tools`)
   },
 
-  /** 查询各渠道的「只看不发」状态 */
+  /** 查询各渠道的「发言模式」：active=可发言 / passive=仅被动回复 / mute=只看不发 */
   getOutbound(botId) {
     if (USE_MOCK) {
       return mockResolve(() => [
-        { platform: '*', readOnly: false },
-        { platform: 'web', readOnly: false },
-        { platform: 'telegram', readOnly: false },
-        { platform: 'misskey', readOnly: false }
+        { platform: '*', mode: 'active' },
+        { platform: 'web', mode: 'active' },
+        { platform: 'telegram', mode: 'active' },
+        { platform: 'misskey', mode: 'active' }
       ])
     }
     return request('GET', `/api/bots/${botId}/outbound`)
   },
 
-  /** 设置某渠道是否只看不发 */
-  setOutbound(botId, platform, readOnly) {
+  /** 设置某渠道的发言模式：active / passive / mute */
+  setOutbound(botId, platform, mode) {
     if (USE_MOCK) {
-      return mockResolve(() => ({ platform, readOnly }))
+      return mockResolve(() => ({ platform, mode }))
     }
-    return request('PUT', `/api/bots/${botId}/outbound`, { platform, readOnly })
+    return request('PUT', `/api/bots/${botId}/outbound`, { platform, mode })
   }
 }
 

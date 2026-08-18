@@ -97,44 +97,44 @@ func (s *Server) handleResetBotToolPermDefaults(c *gin.Context) {
 	OK(c, nil)
 }
 
-// handleGetBotOutbound 查询某bot 各渠道的「只读（潜水）」状态。
+// handleGetBotOutbound 查询某bot 各渠道的「发言模式」（active/passive/mute）。
 // GET /api/bots/:id/outbound
 func (s *Server) handleGetBotOutbound(c *gin.Context) {
 	botID := c.Param("id")
 	out := make([]outboundState, 0, len(outboundPlatforms))
 	for _, p := range outboundPlatforms {
-		out = append(out, outboundState{Platform: p, ReadOnly: s.permSvc.IsReadOnly(botID, p)})
+		out = append(out, outboundState{Platform: p, Mode: s.permSvc.SpeakMode(botID, p)})
 	}
 	OK(c, out)
 }
 
-// handleSetBotOutbound 设置某渠道是否只读。
+// handleSetBotOutbound 设置某渠道的发言模式（active/passive/mute）。
 // PUT /api/bots/:id/outbound
 func (s *Server) handleSetBotOutbound(c *gin.Context) {
 	botID := c.Param("id")
 	var req struct {
 		Platform string `json:"platform"`
-		ReadOnly *bool  `json:"readOnly"`
+		Mode     string `json:"mode"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
-	if req.ReadOnly == nil {
-		Fail(c, errs.BadRequest("readOnly is required"))
+	if req.Mode == "" {
+		Fail(c, errs.BadRequest("mode is required"))
 		return
 	}
-	if err := s.permSvc.SetReadOnly(botID, req.Platform, *req.ReadOnly); err != nil {
+	if err := s.permSvc.SetSpeakMode(botID, req.Platform, req.Mode); err != nil {
 		Fail(c, err)
 		return
 	}
-	OK(c, outboundState{Platform: req.Platform, ReadOnly: *req.ReadOnly})
+	OK(c, outboundState{Platform: req.Platform, Mode: s.permSvc.SpeakMode(botID, req.Platform)})
 }
 
-// outboundState 是单个渠道的出站状态视图。
+// outboundState 是单个渠道的发言模式视图。
 type outboundState struct {
 	Platform string `json:"platform"`
-	ReadOnly bool   `json:"readOnly"`
+	Mode     string `json:"mode"`
 }
 
 // outboundPlatforms 是出站开关覆盖的渠道类型。
