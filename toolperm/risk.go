@@ -78,7 +78,7 @@ var basicTools = map[string]struct{}{
 	"misskey_search_user":              {},
 	"misskey_list_following":           {},
 	"misskey_get_user_notes":           {}, // 拉取某人帖子，只读
-	"misskey_search_notes":            {}, // 按关键词搜帖子，只读
+	"misskey_search_notes":             {}, // 按关键词搜帖子，只读
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},
@@ -119,6 +119,7 @@ var broadcastTools = map[string]struct{}{
 var broadcastPrefixes = []string{
 	"misskey_",
 	"telegram_",
+	"browser__", // 浏览器工具（MCP server 名为 browser，工具名 browser__navigate 等）可对外发帖（x.com 发推/小红书评论），必须过 SpeakMode 门，否则绕过发言三态开第四条路径
 }
 
 // sensitivePrefixes 是敏感工具的名称前缀。
@@ -142,7 +143,7 @@ var sensitivePrefixExceptions = map[string]struct{}{
 	"misskey_search_user":              {}, // 只读查询
 	"misskey_list_following":           {},
 	"misskey_get_user_notes":           {}, // 只读查询
-	"misskey_search_notes":            {}, // 只读查询
+	"misskey_search_notes":             {}, // 只读查询
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},

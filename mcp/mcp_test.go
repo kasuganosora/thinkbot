@@ -90,6 +90,17 @@ func (t *mockTransport) Close() error {
 	return nil
 }
 
+func (t *mockTransport) Send(_ context.Context, data []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var req rpcRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+	t.calls = append(t.calls, req.Method)
+	return nil
+}
+
 func (t *mockTransport) Healthy() bool { return true }
 
 func (t *mockTransport) wasCalled(method string) bool {
@@ -596,7 +607,7 @@ func TestStdioTransportHealthy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires subprocess")
 	}
-	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil)
+	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil, nil)
 	if err != nil {
 		t.Fatalf("newStdioTransport: %v", err)
 	}

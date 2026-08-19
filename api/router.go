@@ -184,6 +184,16 @@ func (s *Server) registerRoutes() {
 				botsAdmin.DELETE("/:id/mcp/:mid", s.handleRemoveBotMcp)
 				botsAdmin.POST("/:id/mcp/import", s.handleImportBotMcp)
 
+				// Bot 浏览器 Cookie 管理（注入 / 编辑 / 删除 / 导入 / 导出）
+				botsAdmin.GET("/:id/browser/cookies", s.handleListBotBrowserCookies)
+				botsAdmin.GET("/:id/browser/cookies/:cid", s.handleGetBotBrowserCookie)
+				botsAdmin.POST("/:id/browser/cookies", s.handleCreateBotBrowserCookie)
+				botsAdmin.PUT("/:id/browser/cookies/:cid", s.handleUpdateBotBrowserCookie)
+				botsAdmin.DELETE("/:id/browser/cookies/:cid", s.handleDeleteBotBrowserCookie)
+				botsAdmin.DELETE("/:id/browser/cookies", s.handleClearBotBrowserCookies)
+				botsAdmin.POST("/:id/browser/cookies/import", s.handleImportBotBrowserCookies)
+				botsAdmin.GET("/:id/browser/cookies/export", s.handleExportBotBrowserCookies)
+
 				// 会话管理（Session 列表 / 新建）
 				botsAdmin.GET("/:id/sessions", s.handleListSessions)
 				botsAdmin.POST("/:id/sessions", s.handleCreateSession)

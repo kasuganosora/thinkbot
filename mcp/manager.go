@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	"go.uber.org/zap"
@@ -28,6 +29,10 @@ type ServerConfig struct {
 
 	// Env stdio 模式下的环境变量（"KEY=VALUE" 格式）。
 	Env []string
+
+	// Stderr stdio 模式下子进程的标准错误输出去向。nil 时丢弃（默认行为）。
+	// 建议传入回写 thinkbot 日志系统的 io.Writer，便于排障（否则子进程错误被静默丢弃）。
+	Stderr io.Writer
 
 	// URL HTTP 模式下的服务器地址。
 	URL string
@@ -277,7 +282,7 @@ func (m *Manager) createClient(ctx context.Context, cfg ServerConfig) (*Client, 
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("mcp: server %q: stdio transport requires command", cfg.Name)
 		}
-		tp, err = newStdioTransport(ctx, cfg.Command, cfg.Args, cfg.Env)
+		tp, err = newStdioTransport(ctx, cfg.Command, cfg.Args, cfg.Env, cfg.Stderr)
 	case "http":
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("mcp: server %q: http transport requires url", cfg.Name)
