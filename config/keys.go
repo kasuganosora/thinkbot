@@ -157,6 +157,16 @@ const (
 	// 则判定为「卡死（无进展）」并终止。这是区分「编译慢」与「死锁卡死」的关键：
 	// 正常运行的慢命令（持续输出）靠本阈值放行，不会误杀。
 	KeySandboxStuckTimeout = "sandbox.stuck_timeout"
+
+	// KeySandboxBrowserEnabled 是否为 docker 持久容器模式的 bot 接入 per-bot 浏览器
+	// MCP 服务（需配合浏览器镜像使用）。默认 false。
+	KeySandboxBrowserEnabled = "sandbox.browser.enabled"
+
+	// KeySandboxBrowserProxy 浏览器 MCP 服务的出口代理（URL 形式，如 "http://user:pass@host:port"）。
+	// 仅当 sandbox.browser.enabled=true 时生效，透传给容器内 wrapper 的 BOT_BROWSER_PROXY 环境变量，
+	// 使浏览器流量经部署侧自有代理出口（IP 归部署侧，符合「指纹归 thinkbot、IP 归部署侧」的责任边界）。
+	// 空值表示直连（默认）。
+	KeySandboxBrowserProxy = "sandbox.browser.proxy"
 )
 
 // ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。

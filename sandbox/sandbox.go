@@ -212,6 +212,17 @@ type Config struct {
 	// 为 false 时（旧行为）：每条命令起一个临时容器（docker run --rm），文件走宿主机 bind mount。
 	// 仅影响 BotWorkspaceManager 的 Docker 后端；local 后端不受影响。
 	PersistentContainer bool
+
+	// BrowserEnabled 为 true 时，docker 持久容器模式下为该 bot 接入 per-bot 浏览器
+	// MCP 服务（见 docs/sandbox-browser-image-design.md）。浏览器进程随 MCP server
+	// 经 `docker exec -i` 运行在该 bot 的容器内（thinkbot-bot-<id>），与 Web 面板
+	// 管理的 cookie 双向同步。默认 false（需配合浏览器镜像使用）。
+	BrowserEnabled bool
+
+	// BrowserProxy 浏览器 MCP 服务的出口代理 URL（如 "http://user:pass@host:port"）。
+	// 仅 BrowserEnabled=true 时生效，透传给容器内 wrapper（BOT_BROWSER_PROXY 环境变量），
+	// 使浏览器流量走部署侧自有代理（IP 归部署侧）。空值表示直连。
+	BrowserProxy string
 }
 
 // DefaultConfig 返回默认配置。
@@ -228,6 +239,7 @@ func DefaultConfig() Config {
 		MaxOutput:       1 << 20,         // 1 MB
 		MaxFileWrite:    10 << 20,        // 10 MB
 		Timezone:        "UTC",
+		BrowserEnabled:  false,
 	}
 }
 

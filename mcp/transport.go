@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -25,6 +26,8 @@ import (
 type transport interface {
 	// RoundTrip 发送一条 JSON-RPC 请求并返回原始响应字节。
 	RoundTrip(ctx context.Context, data []byte) ([]byte, error)
+	// Send 仅写入一条 JSON-RPC 消息（用于通知，不需要响应）。
+	Send(ctx context.Context, data []byte) error
 	// Close 关闭传输层。
 	Close() error
 	// Healthy 返回传输层是否仍存活（用于断线检测 / 自动重连）。
@@ -44,7 +47,7 @@ type stdioTransport struct {
 	wg     sync.WaitGroup
 }
 
-func newStdioTransport(ctx context.Context, command string, args []string, env []string) (*stdioTransport, error) {
+func newStdioTransport(ctx context.Context, command string, args, env []string, stderr io.Writer) (*stdioTransport, error) {
 	cmdCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cmdCtx, command, args...)
 	if len(env) > 0 {
@@ -61,7 +64,8 @@ func newStdioTransport(ctx context.Context, command string, args []string, env [
 		cancel()
 		return nil, errs.Wrap(err, "mcp: create stdout pipe")
 	}
-	cmd.Stderr = nil
+	// stderr 为 nil 时丢弃（默认）；非 nil 时回写到调用方提供的 io.Writer（如 thinkbot 日志）。
+	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -90,6 +94,23 @@ func (t *stdioTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, er
 		return nil, errs.Wrap(err, "mcp: write to stdin")
 	}
 
+	// 读取响应：跳过服务器提前发来的通知（如启动 log 通知，含 method 但无 id），
+	// 直到拿到真正的响应行，避免把通知误当响应解析（此前报
+	// "parse initialize result: unexpected end of JSON input"）。
+	for {
+		line, err := t.readLine(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if isNotificationLine(line) {
+			continue
+		}
+		return line, nil
+	}
+}
+
+// readLine 从 stdout 读取一行（去除首尾空白）。
+func (t *stdioTransport) readLine(ctx context.Context) ([]byte, error) {
 	type result struct {
 		line []byte
 		err  error
@@ -109,6 +130,32 @@ func (t *stdioTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, er
 		}
 		return bytes.TrimSpace(r.line), nil
 	}
+}
+
+// isNotificationLine 判断一行 JSON-RPC 消息是否为通知（有 method 但无 id）。
+// 空行或无法解析的噪声行也视为可跳过。
+func isNotificationLine(line []byte) bool {
+	if len(bytes.TrimSpace(line)) == 0 {
+		return true
+	}
+	var probe struct {
+		Method string           `json:"method"`
+		ID     *json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(line, &probe); err != nil {
+		return true
+	}
+	return probe.Method != "" && probe.ID == nil
+}
+
+// Send 仅写入一条消息（用于通知），不等待响应。
+func (t *stdioTransport) Send(ctx context.Context, data []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
+		return errs.Wrap(err, "mcp: write to stdin")
+	}
+	return nil
 }
 
 func (t *stdioTransport) Close() error {
@@ -191,6 +238,17 @@ func (t *httpTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, err
 }
 
 func (t *httpTransport) Close() error { return nil }
+
+// Send 仅发送一条消息（用于通知），不等待响应（fire-and-forget POST）。
+func (t *httpTransport) Send(ctx context.Context, data []byte) error {
+	req := t.client.Post(t.url).
+		SetContext(ctx).
+		SetHeader("Content-Type", "application/json").
+		SetHeader("Accept", "application/json, text/event-stream").
+		SetBody(bytes.NewReader(data))
+	_, err := req.Do()
+	return err
+}
 
 // Healthy HTTP 传输始终返回 true；连接错误由调用方在请求失败时驱动重连。
 func (t *httpTransport) Healthy() bool { return true }

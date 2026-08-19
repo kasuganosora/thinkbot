@@ -25,6 +25,7 @@ func Migrate(database *gorm.DB) error {
 		&IdentityMapping{},
 		&TieredMemoryModel{},
 		&BotToolPermission{},
+		&BotBrowserCookie{},
 	); err != nil {
 		return err
 	}

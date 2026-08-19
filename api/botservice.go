@@ -41,6 +41,7 @@ import (
 	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/tools"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/workflow"
 )
 
@@ -303,6 +304,11 @@ func (s *BotService) UpdateDefinition(id string, updates map[string]any) error {
 func (s *BotService) DeleteDefinition(id string) error {
 	// 先停止运行中的实例
 	s.StopBot(id)
+
+	// 清理该 bot 的浏览器 cookie（凭据残留，删除 bot 后不应遗留）。
+	if err := s.db.Where("bot_id = ?", id).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
+		s.logger.Warnw("delete bot browser cookies failed", "bot_id", id, "err", err)
+	}
 
 	if err := s.db.Delete(&dao.BotDefinition{}, "id = ?", id).Error; err != nil {
 		return errs.Wrap(err, "bot_service: delete definition")
@@ -1358,6 +1364,18 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	workspaceDir := builder.GetWorkspaceDir()
 	sbCfg := sandbox.DefaultConfig()
 	sbCfg.Timezone = builder.GetTimezone()
+	// 镜像与后端必须从这个 sbCfg 读取：bot.New 会用它自建 BotWorkspaceManager 并据此
+	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的 alpine:latest。
+	if img := s.store.GetString(config.KeySandboxImage, ""); img != "" {
+		sbCfg.Image = img
+	}
+	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
+		sbCfg.Backend = backend
+	}
+	// 浏览器 MCP 服务开关（per-bot，docker 持久容器模式 + 浏览器镜像时启用）。
+	sbCfg.BrowserEnabled = s.store.GetBool(config.KeySandboxBrowserEnabled, false)
+	// 浏览器出口代理（IP 归部署侧）：空值直连。
+	sbCfg.BrowserProxy = s.store.GetString(config.KeySandboxBrowserProxy, "")
 
 	// 出站只读守卫：Pipeline 自动回复（ActionReply → Channel.Send）不经过工具权限，
 	// 因此「只看不发」的潜水bot 必须在出站链路拦。
@@ -1371,6 +1389,42 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 		outboundGuard = s.permSvc.NewOutboundGuard(id, func(name string) string {
 			return chanTypes[name]
+		})
+	}
+
+	// 浏览器 cookie 投递/回收桥：把 Web 面板管理的 cookie 在会话前写入容器内状态文件，
+	// 并在会话结束（bot 关闭、wrapper 回写）后读回持久化到 DB。bot 不直接依赖 dao，
+	// 通过注入的闭包解耦（见 agent/bot/browser.go）。
+	browserCookieLoader := func(ctx context.Context) ([]byte, error) {
+		var cookies []dao.BotBrowserCookie
+		if err := s.db.Where("bot_id = ?", id).Order("domain, name").Find(&cookies).Error; err != nil {
+			return nil, errs.Wrap(err, "load browser cookies")
+		}
+		return json.Marshal(buildStorageState(cookies))
+	}
+	browserCookieSaver := func(ctx context.Context, stateJSON []byte) error {
+		parsed, err := parseBrowserCookieImport(string(stateJSON))
+		if err != nil {
+			return errs.Wrap(err, "parse browser cookies from session")
+		}
+		// 以浏览器会话实际产生的 cookie 为准，全量替换该 bot 的 cookie。
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Where("bot_id = ?", id).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
+				return err
+			}
+			now := time.Now().UTC()
+			for i := range parsed {
+				parsed[i].ID = idgen.New("bc")
+				parsed[i].BotID = id
+				parsed[i].CreatedAt = now
+				parsed[i].UpdatedAt = now
+			}
+			if len(parsed) > 0 {
+				if err := tx.Create(&parsed).Error; err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	}
 
@@ -1404,6 +1458,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		WorkspaceDir:  workspaceDir,
 		SandboxConfig: sbCfg,
 		Mode:          mode,
+
+		BrowserCookieLoader: browserCookieLoader,
+		BrowserCookieSaver:  browserCookieSaver,
 	})
 	if err != nil {
 		rollback()
