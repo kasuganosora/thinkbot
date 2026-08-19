@@ -247,6 +247,12 @@ func (c *botContainer) ensure(ctx context.Context) error {
 
 // create 创建并启动长期容器。
 func (c *botContainer) create(ctx context.Context) error {
+	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
+	image, err := resolveBotImage(ctx, c.cfg.Image, c.logger)
+	if err != nil {
+		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
+	}
+
 	args := []string{
 		"run", "-d",
 		"--name", c.container,
@@ -275,7 +281,7 @@ func (c *botContainer) create(ctx context.Context) error {
 		args = append(args, "--network", "none")
 	}
 
-	args = append(args, c.cfg.Image, "sleep", "infinity")
+	args = append(args, image, "sleep", "infinity")
 
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -302,7 +308,7 @@ func (c *botContainer) create(ctx context.Context) error {
 
 	c.ready = true
 	c.logger.Infow("bot container created",
-		"container", c.container, "volume", c.volume, "image", c.cfg.Image)
+		"container", c.container, "volume", c.volume, "image", image)
 	return nil
 }
 
