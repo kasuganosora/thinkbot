@@ -16,6 +16,12 @@ if id bot >/dev/null 2>&1; then
   chmod 664 /data/.browser-state.json 2>/dev/null || true
 fi
 
+# 杀掉可能残留的旧 wrapper（SIGTERM 会触发其 saveState 落盘），避免孤儿 wrapper 与本次
+# 新进程抢写同一状态文件、或持有会话 cookie 却不被新 thinkbot 回收。docker exec 起的进程
+# 不受 thinkbot 生命周期约束，硬重启会孤儿化，故在此兜底清理。
+pkill -f thinkbot-browser-mcp 2>/dev/null || true
+sleep 1
+
 if command -v runuser >/dev/null 2>&1; then
   exec runuser -u bot -- env HOME=/home/bot xvfb-run -a -s "-screen 0 1920x1080x24" node /usr/local/bin/thinkbot-browser-mcp
 elif command -v su >/dev/null 2>&1; then

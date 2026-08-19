@@ -75,7 +75,7 @@ func (s *Server) handleCreateBotBrowserCookie(c *gin.Context) {
 		SameSite string `json:"sameSite"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: " + err.Error()))
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
 	if req.Domain == "" || req.Name == "" {
@@ -86,16 +86,16 @@ func (s *Server) handleCreateBotBrowserCookie(c *gin.Context) {
 		req.Path = "/"
 	}
 	ck := dao.BotBrowserCookie{
-		ID:        idgen.New("bc"),
-		BotID:     botID,
-		Domain:    req.Domain,
-		Name:      req.Name,
-		Value:     req.Value,
-		Path:      req.Path,
-		Expires:   req.Expires,
-		HTTPOnly:  req.HTTPOnly,
-		Secure:    req.Secure,
-		SameSite:  req.SameSite,
+		ID:       idgen.New("bc"),
+		BotID:    botID,
+		Domain:   req.Domain,
+		Name:     req.Name,
+		Value:    req.Value,
+		Path:     req.Path,
+		Expires:  req.Expires,
+		HTTPOnly: req.HTTPOnly,
+		Secure:   req.Secure,
+		SameSite: req.SameSite,
 	}
 	if err := s.db.Create(&ck).Error; err != nil {
 		Fail(c, errs.Wrap(err, "create browser cookie"))
@@ -129,7 +129,7 @@ func (s *Server) handleUpdateBotBrowserCookie(c *gin.Context) {
 		SameSite *string `json:"sameSite"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: " + err.Error()))
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
 	if req.Domain != nil {
@@ -210,7 +210,7 @@ func (s *Server) handleImportBotBrowserCookies(c *gin.Context) {
 		Clear bool   `json:"clear"` // 导入前是否先清空
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, errs.BadRequest("invalid request body: " + err.Error()))
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
 	if strings.TrimSpace(req.Raw) == "" {
@@ -270,15 +270,15 @@ func (s *Server) handleExportBotBrowserCookies(c *gin.Context) {
 
 // rawCookie 是多种来源的 cookie 通用解析结构。
 type rawCookie struct {
-	Name      string `json:"name"`
-	Value     string `json:"value"`
-	Domain    string `json:"domain"`
-	Path      string `json:"path"`
-	Expires   int64  `json:"expires"`        // Playwright storageState
-	ExpDate   int64  `json:"expirationDate"` // Chrome 扩展导出
-	HTTPOnly  bool   `json:"httpOnly"`
-	Secure    bool   `json:"secure"`
-	SameSite  string `json:"sameSite"` // no_restriction / lax / strict / none / ""
+	Name     string  `json:"name"`
+	Value    string  `json:"value"`
+	Domain   string  `json:"domain"`
+	Path     string  `json:"path"`
+	Expires  float64 `json:"expires"`        // Playwright storageState（浮点秒级时间戳）
+	ExpDate  float64 `json:"expirationDate"` // Chrome 扩展导出（亦可能为浮点）
+	HTTPOnly bool    `json:"httpOnly"`
+	Secure   bool    `json:"secure"`
+	SameSite string  `json:"sameSite"` // no_restriction / lax / strict / none / ""
 }
 
 // parseBrowserCookieImport 解析三种导入格式为 BotBrowserCookie 切片。
@@ -331,12 +331,12 @@ func parseNetscapeCookies(raw string) ([]dao.BotBrowserCookie, error) {
 			continue
 		}
 		out = append(out, dao.BotBrowserCookie{
-			Domain:   f[0],
-			Path:     f[2],
-			Secure:   strings.EqualFold(f[3], "TRUE"),
-			Expires:  parseInt64(f[4]),
-			Name:     f[5],
-			Value:    f[6],
+			Domain:  f[0],
+			Path:    f[2],
+			Secure:  strings.EqualFold(f[3], "TRUE"),
+			Expires: parseInt64(f[4]),
+			Name:    f[5],
+			Value:   f[6],
 		})
 	}
 	if len(out) == 0 {
@@ -349,9 +349,10 @@ func parseNetscapeCookies(raw string) ([]dao.BotBrowserCookie, error) {
 func toCookies(in []rawCookie) []dao.BotBrowserCookie {
 	out := make([]dao.BotBrowserCookie, 0, len(in))
 	for _, c := range in {
-		exp := c.Expires
+		// Playwright / Chrome 导出的 expires 为浮点秒，DB 以 int64 存储，截断取整。
+		exp := int64(c.Expires)
 		if exp == 0 {
-			exp = c.ExpDate
+			exp = int64(c.ExpDate)
 		}
 		ss := c.SameSite
 		switch strings.ToLower(ss) {
