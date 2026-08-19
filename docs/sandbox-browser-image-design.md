@@ -317,6 +317,6 @@ cookie 等于账号本体，比 API token 更敏感（可绕过二次验证）�
 ### 已知接线坑（P2 thinkbot 侧已落地）
 - MCP server 命名：框架统一为 `<server>__<tool>`，故 risk.go 登记 `browser__`（非 `mcp__browser__`，运行时工具名实为 `browser__navigate` 等）。✅ 已在 `setupBrowserMCP` 用固定 server 名 `browser`。
 - 容器名来源：docker 名 `thinkbot-bot-<id>`（确定值，不依赖容器是否已创建），经 `wsMgr.ContainerInfo(ctx, botID).ContainerName` 取得，`docker exec` 接受容器名。✅
-- cookie 文件投递/回收：会话前 `ws.WriteFile("/data/.browser-state.json", dbCookies)`；`Bot.Close` 先 `browserMCP.Close()`（触发 wrapper 回写）→ `ws.ReadFile` 回收。✅
+- cookie 文件投递/回收：会话前 `ws.WriteFile("/data/.browser-state.json", dbCookies)`；`Bot.Close` 先 **优雅调用 `browser__close` 工具**（`wrapper.saveState` 落盘后回包）→ 再 `browserMCP.Close()` 关传输 → `ws.ReadFile` 回收。⚠️ 坑：`docker exec -i` 默认不代理信号，直接 `browserMCP.Close()` 的 SIGKILL 不会触发 wrapper 的 `shutdown/saveState`，cookie 会丢；故必须显式 flush。兜底：wrapper 在每次 `navigate` 后及每 30s 周期落盘，即便被硬杀也只丢当前页瞬时态。状态文件权限：thinkbot 经 `WriteFile`（root，`cat >` 保留 inode owner）写入，故 launch 脚本降权前先 `chown bot:bot` 浏览器目录/状态文件，否则降权 wrapper 回写 EACCES。✅
 - `cmd.Stderr=nil`（`mcp/transport.go:64`）吞错 → **已解决**：`ServerConfig.Stderr io.Writer` 字段 + `newStdioTransport` 透传；`agent/bot/browser.go` 注入 `mcpStdioStderr` 把 wrapper 的 stderr 回写到 bot 日志（wrapper 仅打诊断信息、绝不打印 cookie 值）。`EnableServer` 握手错误与进程内 chromium 崩溃细节均可见。
 - `docker exec` cancel 只杀本地客户端，容器内 node/chromium 孤儿 → wrapper 已注册 SIGTERM/SIGINT/stdin-EOF 自清理，且 `transport.Close` 通过 `cancel()+stdin.Close()` 触发 EOF。✅ 另：wrapper 仅首个工具调用才起浏览器，空闲时零资源。
