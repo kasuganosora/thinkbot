@@ -75,4 +75,18 @@ export default {
   react:                  '表情回应',
   get_contacts:           '获取联系人',
   search_memory:          '检索记忆',
+
+  // ── 浏览器（MCP browser__ 前缀）──
+  browser__navigate:      '打开网页',
+  browser__click:         '点击元素',
+  browser__fill:          '填写表单',
+  browser__screenshot:    '截图',
+  browser__get_text:      '读取页面文本',
+  browser__get_a11y:      '获取无障碍树',
+  browser__wait:          '等待元素',
+  browser__back:          '后退',
+  browser__forward:       '前进',
+  browser__cookies_list:  '查看 Cookie',
+  browser__close:         '关闭浏览器',
+  browser__fetch:         'HTTP 请求',
 }

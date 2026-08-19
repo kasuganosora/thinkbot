@@ -530,6 +530,27 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		saveAssistant(true)
 	}
 
+	// isEmptyInput 检测工具入参是否为空占位（LLM 流式输出中间态产生的 phantom call）。
+	// 某些 LLM（如 GLM）流式调用工具时会先发一个空参数占位 call，再发真实参数 call，
+	// 空参数 call 永远不会收到执行结果，导致前端卡在「执行中」。
+	isEmptyInput := func(input any) bool {
+		m, ok := input.(map[string]any)
+		return ok && len(m) == 0
+	}
+
+	// suppressPhantomToolCall 当同名工具的新调用到达时，若存在空参数的 phantom running call，
+	// 将其标记为 superseded（被后续真实调用取代），避免前端永久卡在「执行中」。
+	suppressPhantomToolCall := func(toolName string, newInput any) {
+		for i, tc := range toolCalls {
+			if tc["name"] == toolName && tc["status"] == "running" && isEmptyInput(tc["input"]) && !isEmptyInput(newInput) {
+				toolCalls[i]["status"] = "superseded"
+				toolCalls[i]["output"] = "已被后续同工具调用取代（LLM 流式中间态）"
+				syncPartTool(tc["id"].(string))
+				break // 只取代最新的一个 phantom
+			}
+		}
+	}
+
 	// accumulate 将一条 EventBus 事件合并进本轮 assistant 回复的累积结构
 	//（fullText / toolCalls / parts），供「断连后后台继续落库」与「正常完成落库」共用。
 	// 仅更新累积结构，不负责向客户端写 SSE。
@@ -551,6 +572,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			if toolCallID == "" {
 				toolCallID = idgen.New("tool")
 			}
+			// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代
+			suppressPhantomToolCall(toolName, event.Data["input"])
 			if _, ok := toolCallIdx[toolCallID]; !ok {
 				toolCalls = append(toolCalls, map[string]any{
 					"id":     toolCallID,
@@ -709,6 +732,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				if toolCallID == "" {
 					toolCallID = idgen.New("tool")
 				}
+				// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代
+				suppressPhantomToolCall(toolName, event.Data["input"])
 				writeSSE(c.Writer, sseToolCall, map[string]any{
 					"toolCallId": toolCallID,
 					"tool":       toolName,
