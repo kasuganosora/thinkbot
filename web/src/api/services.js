@@ -1802,8 +1802,8 @@ export const botBrowserCookieApi = {
     const q = domain ? `?domain=${encodeURIComponent(domain)}` : ''
     return request('DELETE', `/api/bots/${botId}/browser/cookies${q}`)
   },
-  import(botId, { raw, clear }) {
-    return request('POST', `/api/bots/${botId}/browser/cookies/import`, { raw, clear })
+  import(botId, { raw, clear, domain }) {
+    return request('POST', `/api/bots/${botId}/browser/cookies/import`, { raw, clear, domain })
   },
   export(botId) {
     return request('GET', `/api/bots/${botId}/browser/cookies/export?confirm=1`)
