@@ -151,6 +151,23 @@ const tools = [
     description: '关闭当前页面并保存 cookie 状态后退出本 MCP 进程。',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
+  {
+    name: 'fetch',
+    description: '轻量 HTTP 抓取（纯请求，不启完整浏览器渲染，快速取静态页/API/JSON）。返回 status、响应头、body 文本。不走代理；登录态用 cookie 参数或随 headers 传入。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '目标 URL' },
+        method: { type: 'string', enum: ['GET','POST','PUT','DELETE','HEAD','PATCH'], default: 'GET' },
+        headers: { type: 'object', description: '额外请求头（key/value 字符串）' },
+        body: { type: 'string', description: '请求体（POST/PUT/PATCH 时）' },
+        cookie: { type: 'string', description: 'Cookie 字符串，注入请求头（headers 未显式给 Cookie 时生效）' },
+        maxChars: { type: 'number', description: 'body 截断字符数', default: 8000 },
+        redirect: { type: 'string', enum: ['follow','manual'], default: 'follow' },
+      },
+      required: ['url'],
+    },
+  },
 ];
 
 function textResult(s) { return { content: [{ type: 'text', text: String(s) }] }; }
@@ -219,6 +236,29 @@ async function callTool(name, args) {
     case 'close': {
       await shutdown('tool');
       return textResult('closed');
+    }
+    case 'fetch': {
+      const url = args.url;
+      if (!url) throw new Error('fetch requires url');
+      const method = (args.method || 'GET').toUpperCase();
+      const headers = Object.assign({}, args.headers || {});
+      if (args.cookie && !('cookie' in headers) && !('Cookie' in headers)) headers['Cookie'] = args.cookie;
+      const init = { method, headers, redirect: args.redirect || 'follow' };
+      if (args.body && !['GET', 'HEAD'].includes(method)) init.body = args.body;
+      let res;
+      try {
+        res = await fetch(url, init);
+      } catch (e) {
+        return textResult('fetch error: ' + e.message);
+      }
+      const status = res.status;
+      const respHeaders = {};
+      res.headers.forEach((v, k) => { respHeaders[k] = v; });
+      let body = '';
+      try { body = await res.text(); } catch (e) { body = '[body read error: ' + e.message + ']'; }
+      const max = args.maxChars || 8000;
+      const hdrStr = Object.keys(respHeaders).map(k => `${k}: ${respHeaders[k]}`).join('\n');
+      return textResult(`status=${status}\nheaders:\n${hdrStr}\n\nbody:\n${body.slice(0, max)}`);
     }
     default:
       throw new Error('unknown tool: ' + name);

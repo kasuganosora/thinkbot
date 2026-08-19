@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -51,7 +52,8 @@ func newStdioTransport(ctx context.Context, command string, args, env []string, 
 	cmdCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cmdCtx, command, args...)
 	if len(env) > 0 {
-		cmd.Env = env
+		// 追加而非替换，避免丢掉 PATH 等基础环境导致命令（如 docker）找不到。
+		cmd.Env = append(os.Environ(), env...)
 	}
 
 	stdin, err := cmd.StdinPipe()

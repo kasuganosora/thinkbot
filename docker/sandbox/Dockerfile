@@ -53,3 +53,22 @@ RUN mkdir -p /data/.browser-profile && chmod 777 /data/.browser-profile
 # 手写 JSON-RPC（不依赖 MCP SDK），驱动 patchright + 系统 chromium。
 COPY browser-mcp.js /usr/local/bin/thinkbot-browser-mcp
 RUN chmod +x /usr/local/bin/thinkbot-browser-mcp
+
+# ---------- 非 root 加固（仅浏览器 MCP 降权；agent 沙箱与 volume 仍 root 兼容）----------
+# 容器默认用户仍是 root（保持 agent 代码执行沙箱与 named volume 权限兼容），
+# 但浏览器 MCP 经 launch 脚本以非 root `bot` 用户运行，缩小 --no-sandbox + root 的提权面。
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -s /bin/bash bot
+
+# 浏览器状态/缓存/截图目录：预创建并归属 bot。named volume 首次初始化时会复制这些
+# 文件（含 owner），新 bot 自动生效；既有 volume 需在部署时对现有容器做一次 chown。
+RUN mkdir -p /data/.browser-profile /data/browser-screenshots \
+    && touch /data/.browser-state.json \
+    && chown -R bot:bot /home/bot /data/.browser-profile /data/browser-screenshots /data/.browser-state.json \
+    && chmod 777 /data/.browser-profile /data/browser-screenshots \
+    && chmod 664 /data/.browser-state.json
+
+# 浏览器 MCP 启动器：以非 root 用户运行 xvfb + node wrapper（保留环境，透传 BOT_BROWSER_PROXY 等）。
+COPY browser-launch.sh /usr/local/bin/thinkbot-browser-launch
+RUN chmod +x /usr/local/bin/thinkbot-browser-launch

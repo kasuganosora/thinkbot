@@ -4,7 +4,7 @@
 > 已完成并验证：P1 Dockerfile + 镜像构建；P1 thinkbot 改造（`--shm-size`/ripgrep 双发行版）；P0 spike（x.com/小红书 经 patchright 落地页 200 + `__cf_bm`/`web_session` cookie 过反 bot）；**P2 浏览器 MCP wrapper（`docker/sandbox/browser-mcp.js`）+ 经 `docker exec -i` 链路端到端验证通过**；P2.5 Cookie 后端+前端；risk.go 登记 `browser__`（broadcast 守卫）进 broadcast。
 > **P2 thinkbot 侧接线已完成（2026-08-19）**：`agent/bot/bot.go` + 新文件 `agent/bot/browser.go` 在 docker 后端 + `sandbox.browser.enabled=true` 时，按确定容器名 `thinkbot-bot-<id>` 动态 `AddServer` 一个 stdio MCP server（`docker exec -i <cid> xvfb-run -a -s "-screen 0 1920x1080x24" node /usr/local/bin/thinkbot-browser-mcp`），`EnableServer` 连接 + `mcp.RegisterTools` 注入该 bot 的 per-bot ToolManager（工具名 `browser__<tool>`）；会话前经 `wsMgr.WriteFile` 投递 DB cookie 到 `/data/.browser-state.json`，`Bot.Close` 时先关 MCP（wrapper 回写 cookie）再 `ReadFile` 回收持久化；`botservice.go` 注入 cookie loader/saver 闭包解耦 dao；`sandbox.Config.BrowserEnabled` + 配置键 `sandbox.browser.enabled` 落地。全量 `go build ./...` 通过。
 > **P3（2026-08-19）已完成**：① stderr 接管（`mcp.ServerConfig.Stderr` + `newStdioTransport` 透传 + `agent/bot/browser.go` 注入回写 bot 日志的 writer，浏览器子进程错误不再静音）；② `BOT_BROWSER_PROXY` 配置键（`sandbox.browser.proxy`）+ `sandbox.Config.BrowserProxy` + `botservice` 读取 + `browser.go` 透传为 wrapper 的 `BOT_BROWSER_PROXY` 环境变量，IP 归部署侧；③ 删 bot 同步清 cookie（`DeleteDefinition` 删 `BotBrowserCookie`，杜绝凭据残留）。
-> 剩余 P3（可选/低风险）：非 root 加固（`--no-sandbox`+root 提权面，靠无 `--privileged` 兜底）、`browser_fetch` 轻量工具（直接 `chromium --headless --dump-dom`，不起 MCP）。
+> 剩余 P3 全部完成（2026-08-19）：非 root 加固（浏览器 MCP 经 `docker/sandbox/browser-launch.sh` 以非 root `bot` 用户运行，缩小 `--no-sandbox`+root 提权面；agent 沙箱与 named volume 仍 root 兼容，不动既有 volume 权限）、`browser_fetch` 轻量工具（在 `docker/sandbox/browser-mcp.js` 实现为 `fetch` 工具，纯 Node fetch 不启 chromium，经 MCP 暴露为 `browser__fetch`）。
 > 作者：thinkbot agent（栞娜）
 > 日期：2026-08-18
 > 前置调研：opencode（anomalyco/opencode）浏览器控制机制 —— 本体不内置浏览器，靠 MCP 外挂 `@playwright/mcp`，工具调用统一过权限层，截图走 image attachment 喂多模态。
@@ -154,7 +154,7 @@ WORKDIR /data   # 与 sandbox.VirtualRoot 一致（sandbox/sandbox.go:379）；n
 | 9 | 权限（**位置纠正：`toolperm/risk.go`，不在 `sandbox/`**）：`browser_` 前缀登记进 `sensitivePrefixes`；**能发帖的浏览器工具（x.com 发推、小红书评论）必须进 `broadcastPrefixes`/`broadcastTools`**——否则绕过发言三态（`SpeakMode` mute/passive 只拦 `misskey_create_*` 和 `__outbound_reply`，管不到浏览器发帖，等于开了第四条发言路径）；只读类（navigate/screenshot/read）走 `sensitivePrefixExceptions` 或留 sensitive；外加工具层限速。**且不得注册任何读 cookie 的工具**（§10.4） | `toolperm/risk.go` | **P2（不能拖到 P3）** |
 | 10 | **Cookie 管理后端**：DB 表 `bot_browser_cookies` + `api/handler_bot_browser.go`（7 个端点，见 §10.2）+ 导入解析（storageState / cookies.txt / 扩展 JSON）+ 掩码与审计 | `dao/`、`api/`、`api/router.go` | **P2.5** |
 | 11 | **Cookie 管理前端**：`web/src/components/bot/BotBrowser.vue` + 挂进 `BotSettings.vue` 导航（参照 `BotMcp.vue`/`BotFiles.vue`） | `web/src/` | **P2.5** |
-| 12 | 轻量补充：`browser_fetch` 工具直接 Exec `chromium --headless --dump-dom`，不起 MCP | `sandbox/tools.go` | P3（可选） |
+| 12 | 轻量补充：`browser_fetch` 工具（实现为 `browser-mcp.js` 的 `fetch` 工具，纯 Node fetch 不启 chromium，暴露为 `browser__fetch`；非独立 Exec） | `docker/sandbox/browser-mcp.js` | **P3 ✅ 已完成** |
 | 13 | `BOT_BROWSER_PROXY` 配置键 → 封装层 launch `proxy` 参数透传（机房部署接住宅代理） | config keys + P2 封装 | P3 |
 | 14 | 删 bot 时同步清 cookie 表（`DestroyBot` 只删 volume，DB 凭据会留，见 §8#12） | `sandbox/botworkspace.go` + dao | P3 |
 
@@ -222,7 +222,7 @@ x.com / 小红书属于上表"高"档甚至更高，且难度是**四层叠加**
 - **P1（镜像）**：Dockerfile + 本地 arm64 build + 单容器手动验证（chromium 截图中文不豆腐、xvfb-run headful 可用、patchright 能起浏览器、**ripgrep 引导兼容改造生效**）。
 - **P2（MCP 桥）**：复用 `mcp/` 现有 stdio transport（command=docker exec，见 §4）+ 会话级 MCP 注册/注销 + stderr 接管 + 容器内孤儿清理 + 工具注册 + `toolperm/risk.go` 登记（发帖类进 broadcast，**安全前置不可拖**）+ 截图落盘走文本结果（方案 A）+ Patchright 薄封装（user-data-dir→`/data/.browser-profile`、BOT_BROWSER_* env、代理透传、单会话互斥）+ 工具调用 Infow 日志。先用 @playwright/mcp 跑通链路再换封装。测试 bot 端到端：agent 说"打开 X 页面并总结"→ 文本+截图路径回会话。
 - **P2.5（Cookie 管理，本需求主体）**：DB 表 + API（`api/handler_bot_browser.go`）+ `BotBrowser.vue`，见 §10。优先级高于 P3——没有 cookie 管理，x.com/小红书场景基本不可用。
-- **P3（打磨）**：工具层限速细化、browser_fetch 轻量工具、非 root 加固（含 create/exec `--user` + volume 权限初始化）、`BOT_BROWSER_PROXY` 配置键落地、viewport/语言配置入口、（可选）ToolResultPart attachment 通道即截图方案 B。
+- **P3（打磨）**：~~browser_fetch 轻量工具~~（✅ 已实现 `browser__fetch`）、~~非 root 加固~~（✅ 仅浏览器 MCP 降权至 `bot` 用户，未切全容器 `USER` 以兼容 volume/沙箱）、`BOT_BROWSER_PROXY` 配置键落地（✅ 已修 `docker exec -e` 透传——此前经 `cfg.Env` 传给 docker 进程但进不了容器，从未真正生效）、工具层限速细化、viewport/语言配置入口、（可选）ToolResultPart attachment 通道即截图方案 B。
 
 P0 不通过则整案降级为"普通站浏览器工具"，主战场（x.com/小红书）改走别的路线（App 协议逆向 / 第三方数据源），另立方案讨论。
 
