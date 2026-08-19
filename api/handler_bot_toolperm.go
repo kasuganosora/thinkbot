@@ -148,7 +148,7 @@ var outboundPlatforms = []string{"*", "web", "telegram", "misskey"}
 // GET /api/bots/:id/tools
 func (s *Server) handleListBotTools(c *gin.Context) {
 	botID := c.Param("id")
-	tools := s.botSvc.ListBotTools(botID)
+	tools := s.botSvc.ListBotTools(c.Request.Context(), botID)
 	if len(tools) == 0 {
 		tools = fallbackToolList()
 	}
@@ -193,6 +193,23 @@ var userToolDesc = map[string]string{
 	"sandbox_list_dir":        "列出目录内容",
 	"sandbox_search_content":  "在文件中搜索文本",
 	"sandbox_health":          "检查沙箱健康状态",
+
+	// 浏览器（MCP 动态工具，名称形如 browser__<tool>）
+	"browser__navigate":      "打开指定网址",
+	"browser__click":         "点击页面元素",
+	"browser__fill":          "填写表单输入框",
+	"browser__get_text":      "读取页面文本内容",
+	"browser__get_a11y":      "获取页面无障碍结构树",
+	"browser__screenshot":    "截取页面截图",
+	"browser__wait":          "等待页面元素出现",
+	"browser__back":          "浏览器后退",
+	"browser__forward":       "浏览器前进",
+	"browser__cookies_list":  "查看浏览器 Cookie",
+	"browser__close":         "关闭浏览器页面",
+	"browser__fetch":         "以浏览器身份发起 HTTP 请求",
+	"browser__evaluate":      "在页面中执行 JavaScript",
+	"browser__hover":         "鼠标悬停元素",
+	"browser__select_option": "选择下拉框选项",
 }
 
 // toolCategoryLabel 把工具注册时使用的英文 category 映射为中文分组名，
@@ -204,6 +221,8 @@ var toolCategoryLabel = map[string]string{
 	"sandbox":  "沙箱与文件",
 	"subagent": "子智能体",
 	"workflow": "任务与工作流",
+	// 动态工具（MCP / 浏览器等）没有静态 category，由 ListAllTools 统一打标
+	agenttools.DynamicCategory: "浏览器与外部工具",
 }
 
 // presentToolList 把内部工具列表整理成适合前端展示的形态：

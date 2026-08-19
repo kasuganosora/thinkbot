@@ -55,6 +55,94 @@ func TestIsBroadcastTool_Classification(t *testing.T) {
 	}
 }
 
+// TestBrowserTools_AreBroadcast 锁死浏览器工具的分级与可管控性。
+//
+// 背景：浏览器工具名由 MCP 命名规则拼成 browser__<tool>（不是 web_*），
+// 因此 web_* 规则管不到它们；而它们能在 x.com / 小红书等站点发帖评论，
+// 必须落在 broadcast 级别（受 SpeakMode 门控、系统会话也不自动放行）。
+func TestBrowserTools_AreBroadcast(t *testing.T) {
+	browserTools := []string{
+		"browser__navigate", "browser__click", "browser__fill",
+		"browser__get_text", "browser__screenshot", "browser__cookies_list",
+		// 前缀兜底：将来 MCP 新增的浏览器工具默认也应是最严级别
+		"browser__evaluate", "browser__upload_file",
+	}
+	for _, name := range browserTools {
+		if !IsBroadcastTool(name) {
+			t.Errorf("expected %q to be broadcast", name)
+		}
+		if got := ToolRisk(name); got != RiskBroadcast {
+			t.Errorf("ToolRisk(%q): got %s, want broadcast", name, got)
+		}
+		if IsBasicTool(name) {
+			t.Errorf("%q must not be classified as basic", name)
+		}
+	}
+
+	// web_* 与 browser__* 是两个独立命名空间，不能相互误判
+	if IsBroadcastTool("web_search") || IsBroadcastTool("web_fetch") {
+		t.Error("web_* tools must not be classified as broadcast")
+	}
+}
+
+// TestEvaluate_BrowserRuleTakesEffect 验证管理员能真正用规则管控浏览器：
+// 配一条 browser__* deny 后所有浏览器工具被拦，其它工具不受牵连。
+//
+// 这是「规则里可以设置是否允许使用浏览器」的端到端语义保证。
+func TestEvaluate_BrowserRuleTakesEffect(t *testing.T) {
+	svc := newTestService(t)
+	if _, err := svc.CreateRule("bot-nb", RuleReq{
+		Tool: "browser__*", Platform: "web", UserIDs: []string{"*"},
+		Decision: DecisionDeny, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 通配 deny 命中全部浏览器工具
+	for _, tool := range []string{
+		"browser__navigate", "browser__click", "browser__get_text", "browser__screenshot",
+	} {
+		if svc.Evaluate("bot-nb", tool, "web", "u1") {
+			t.Errorf("%q should be denied by browser__* rule", tool)
+		}
+	}
+
+	// 基础工具不受牵连（bot 不会因为禁浏览器而变哑巴）
+	for _, tool := range []string{"calculate", "memory", "now"} {
+		if !svc.Evaluate("bot-nb", tool, "web", "u1") {
+			t.Errorf("basic tool %q should stay allowed", tool)
+		}
+	}
+
+	// 其它平台未配规则 → 仍开放（规则按 platform 隔离）
+	if !svc.Evaluate("bot-nb", "browser__navigate", "telegram", "u1") {
+		t.Error("browser tool on unconfigured platform telegram should stay allowed")
+	}
+}
+
+// TestEvaluate_BrowserExplicitAllow 验证「显式允许浏览器」也能配：
+// 平台进入白名单模式后，只有显式 allow 的浏览器工具可用。
+func TestEvaluate_BrowserExplicitAllow(t *testing.T) {
+	svc := newTestService(t)
+	// 只放开「看」，不放开「操作」
+	if _, err := svc.CreateRule("bot-ro", RuleReq{
+		Tool: "browser__get_text", Platform: "web", UserIDs: []string{"*"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !svc.Evaluate("bot-ro", "browser__get_text", "web", "u1") {
+		t.Error("browser__get_text should be allowed by explicit rule")
+	}
+	// 平台已有规则 + broadcast 未命中 → 禁止
+	for _, tool := range []string{"browser__click", "browser__fill", "browser__navigate"} {
+		if svc.Evaluate("bot-ro", tool, "web", "u1") {
+			t.Errorf("%q should be denied by whitelist default", tool)
+		}
+	}
+}
+
 // TestEvaluate_BroadcastDeniedInWhitelistMode 验证只读 bot 的核心场景：
 // misskey 上配一条「禁止发帖」规则后，发帖类工具被拦，只读查询与基础工具照常可用。
 func TestEvaluate_BroadcastDeniedInWhitelistMode(t *testing.T) {
