@@ -519,18 +519,18 @@ func (b *Bot) Close() {
 				b.logger.Warnw("browser graceful close failed, will force close", "err", cerr)
 			}
 			closeCancel()
-			_ = b.browserMCP.Close()
+			// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再把状态文件持久化到 DB。
+			//
+			// 竞态修复（根因）：wrapper 的 close 工具在回包前已完成 saveState 落盘，故应在
+			// 关闭传输层【之前】读取状态文件，此时文件必然已含 cookie。若因极端时序未命中，
+			// 再关闭传输层触发容器内 wrapper 的 shutdown 落盘（docker exec 连接关闭 → wrapper
+			// 收到 stdin EOF → shutdown → saveState），随后轮询读取，确保不丢 cookie。
+			// （注意：docker exec 被 SIGKILL 后立即退出，不等容器内 wrapper 结束，故不能“先关再读”。）
 			if b.browserCookieSaver != nil && b.workspaceMgr != nil {
-				rctx := context.Background()
-				if ws, werr := b.workspaceMgr.GetOrCreate(b.ID); werr == nil {
-					if data, rerr := ws.ReadFile(rctx, "/data/.browser-state.json"); rerr == nil && len(data) > 0 {
-						if serr := b.browserCookieSaver(rctx, data); serr != nil {
-							b.logger.Warnw("browser cookie recover failed", "err", serr)
-						} else {
-							b.logger.Infow("browser cookies recovered from session")
-						}
-					}
-				}
+				b.recoverBrowserCookies(context.Background())
+			}
+			if b.browserMCP != nil {
+				_ = b.browserMCP.Close()
 			}
 		}
 		// 关闭工作空间管理器（文件持久化，不删除）
@@ -545,6 +545,48 @@ func (b *Bot) Close() {
 // Ready 返回一个 channel，该 channel 在 Bot 完成初始化（Channel 已启动、Engine 已就绪）后关闭。
 func (b *Bot) Ready() <-chan struct{} {
 	return b.engine.Ready()
+}
+
+// recoverBrowserCookies 在 bot 关闭时把浏览器会话 cookie 从容器内状态文件回收进 DB。
+// 先读一次（close 工具回包前已 saveState 落盘）；未命中则关闭传输层触发 wrapper shutdown 落盘并轮询。
+func (b *Bot) recoverBrowserCookies(ctx context.Context) {
+	const maxAttempts = 6
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if b.tryRecoverOnce(ctx) {
+			return
+		}
+		// 首次未命中：关闭传输层，触发容器内 wrapper 的 shutdown 落盘（EOF → saveState → exit）。
+		if attempt == 1 && b.browserMCP != nil {
+			_ = b.browserMCP.Close()
+			b.browserMCP = nil // 标记已关闭，避免外层重复关闭
+		}
+		if attempt < maxAttempts {
+			time.Sleep(120 * time.Millisecond)
+		}
+	}
+	b.logger.Warnw("browser cookie recover failed: state file never populated")
+}
+
+// tryRecoverOnce 读取一次状态文件并尝试持久化到 DB；成功返回 true。
+func (b *Bot) tryRecoverOnce(ctx context.Context) bool {
+	if b.workspaceMgr == nil || b.browserCookieSaver == nil {
+		return true // 无回收依赖则视为无需处理
+	}
+	ws, werr := b.workspaceMgr.GetOrCreate(b.ID)
+	if werr != nil {
+		b.logger.Warnw("browser workspace unavailable", "err", werr)
+		return false
+	}
+	data, rerr := ws.ReadFile(ctx, "/data/.browser-state.json")
+	if rerr != nil || len(data) == 0 {
+		return false
+	}
+	if serr := b.browserCookieSaver(ctx, data); serr != nil {
+		b.logger.Warnw("browser cookie recover failed", "err", serr)
+		return false
+	}
+	b.logger.Infow("browser cookies recovered from session")
+	return true
 }
 
 // Ingress 返回 Bot 私有的 Ingress 实例。
