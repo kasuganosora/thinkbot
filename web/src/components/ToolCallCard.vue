@@ -188,6 +188,7 @@ watch(() => props.call, armStuckTimer)
 
 const state = computed(() => {
   if (stuck.value && props.call.status === 'running') return 'timeout'
+  // superseded = 被后续同名调用取代的 phantom call（LLM 流式中间态），不显示为错误
   return props.call.status || 'success'
 })
 
@@ -199,7 +200,10 @@ const invocationShort = computed(() => {
   return id.replace(/-/g, '').slice(0, 8)
 })
 
-const runningLabel = computed(() => props.call.runningText || props.call.title || toolLabel(props.call.name) || props.call.name || '执行中')
+const runningLabel = computed(() => {
+  if (props.call.status === 'superseded') return '已取代'
+  return props.call.runningText || props.call.title || toolLabel(props.call.name) || props.call.name || '执行中'
+})
 
 // 已完成的文件数（running 时全部显示为待处理/执行中，完成后全标完成）
 const doneFileCount = computed(() => {
@@ -341,6 +345,8 @@ const headIcon = computed(() => {
     case 'killed':
     case 'timeout':
       return 'stop-circle'
+    case 'superseded':
+      return 'minus-circle' // 被取代的 phantom call
     default: return 'tools'
   }
 })
@@ -371,6 +377,7 @@ function onUndo() {
 .tc-error { border-color: #f3c9c9; background: #fff8f8; }
 .tc-running { border-color: #c5d8f7; background: #f5f9ff; }
 .tc-killed, .tc-timeout { border-color: #f3ddaa; background: #fffaf0; }
+.tc-superseded { border-color: #e0e0e0; background: #fafafa; }
 
 .tc-head {
   display: flex;
@@ -384,6 +391,7 @@ function onUndo() {
 .tc-icon { display: flex; align-items: center; font-size: 15px; }
 .icon-success { color: #00a870; }
 .icon-error { color: #d63c3c; }
+.icon-superseded { color: #999; }
 
 .tc-spinner, .file-spinner {
   width: 13px;
