@@ -71,6 +71,8 @@
           <div v-else-if="activeKey === 'cron'" class="pad"><BotCronJobs :bot-id="bot.id" /></div>
           <!-- 技能 -->
           <div v-else-if="activeKey === 'skills'" class="pad"><BotSkills :bot-id="bot.id" /></div>
+          <!-- 浏览器 Cookie -->
+          <div v-else-if="activeKey === 'browser'" class="pad"><BotBrowser :bot-id="bot.id" /></div>
         </section>
       </div>
     </template>
@@ -103,6 +105,7 @@ import BotMcp from '@/components/bot/BotMcp.vue'
 import BotSkills from '@/components/bot/BotSkills.vue'
 import BotHeartbeat from '@/components/bot/BotHeartbeat.vue'
 import BotTerminal from '@/components/bot/BotTerminal.vue'
+import BotBrowser from '@/components/bot/BotBrowser.vue'
 
 // 占位组件（11 项未实现面板的统一空态）
 const Placeholder = {
@@ -136,7 +139,8 @@ const navItems = [
   { key: 'compact', label: '上下文压缩' },
   { key: 'persona', label: '人格' },
   { key: 'cron', label: '定时任务' },
-  { key: 'skills', label: '技能' }
+  { key: 'skills', label: '技能' },
+  { key: 'browser', label: '浏览器' }
 ]
 const activeKey = ref('overview')
 

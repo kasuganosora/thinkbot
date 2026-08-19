@@ -21,6 +21,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/cron"
+	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -92,6 +93,11 @@ type Bot struct {
 	// 资源管理（Close 时释放）
 	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
 	closerOnce  sync.Once // 确保 Close 只执行一次
+
+	// 浏览器 MCP 管理器（per-bot，docker 后端 + BrowserEnabled 时创建；nil=未启用）。
+	browserMCP *mcp.Manager
+	// browserCookieSaver 会话结束后回收容器内 cookie 状态文件时调用。
+	browserCookieSaver func(ctx context.Context, stateJSON []byte) error
 
 	// botMetrics 是 Bot 层额外的指标（Engine 层有自己的基础指标）
 	dispatchErrors atomic.Int64
@@ -169,6 +175,15 @@ type BotParams struct {
 	// RejectionDetector 被无视检测器（可选，nil=禁用）。
 	// 注入后，Bot 会在发送回复时通知检测器，并在 TimingGate 中考虑自闭模式。
 	RejectionDetector *engagement.RejectionDetector
+
+	// BrowserCookieLoader 返回该 bot 当前 cookie 状态文件 JSON（Web 面板管理的 cookie），
+	// 用于会话前投递进容器内的浏览器 MCP 进程。返回 nil/空表示无 cookie 或不启用投递。
+	// 仅当沙箱配置 BrowserEnabled=true 且为 docker 后端时才会被调用。
+	BrowserCookieLoader func(ctx context.Context) ([]byte, error)
+
+	// BrowserCookieSaver 将浏览器会话结束后回写的 cookie 状态文件 JSON 持久化回 DB。
+	// 由 Bot.Close 在浏览器 MCP 进程优雅退出后调用，回收容器内浏览器实际产生的 cookie。
+	BrowserCookieSaver func(ctx context.Context, stateJSON []byte) error
 
 	// OnMessageStart 在单条消息开始处理时回调，提供可取消的 message context
 	// 以及本消息生命周期内的「用户中途追加」通道（interruptCh，用于 Claude-CLI
@@ -366,6 +381,18 @@ func New(params BotParams) (*Bot, error) {
 		} else if params.Mode == pipeline.ModeLurkOnly {
 			botLogger.Debugw("workspace tools skipped (lurk-only mode)", "bot_id", params.ID)
 		}
+
+		// 接入 per-bot 浏览器 MCP 服务（docker 后端 + BrowserEnabled + 有 ToolManager 时）。
+		// 浏览器进程经 `docker exec -i` 运行在该 bot 容器内，工具命名 browser__<tool>，
+		// 随 bot 生命周期启停，并与 Web 面板管理的 cookie 双向同步（会话前投递 / 会话后回收）。
+		if params.ToolManager != nil && wsMgr.Backend() == "docker" && params.SandboxConfig.BrowserEnabled {
+			if err := setupBrowserMCP(bot, params, wsMgr); err != nil {
+				botLogger.Warnw("browser mcp setup failed, browser tools disabled",
+					"err", err, "bot_id", params.ID)
+			} else {
+				bot.browserCookieSaver = params.BrowserCookieSaver
+			}
+		}
 	}
 
 	// 创建 Engine，注入 Bot 的 hook
@@ -481,6 +508,23 @@ func (b *Bot) Close() {
 		// 停止 SoulLoader 热重载
 		if b.soulLoader != nil {
 			b.soulLoader.Stop()
+		}
+		// 浏览器会话回收：先关闭 MCP（触发容器内 wrapper 把 cookie 回写到 /data/.browser-state.json），
+		// 再读回状态文件持久化到 DB。必须在工作空间管理器关闭（容器销毁）之前完成。
+		if b.browserMCP != nil {
+			_ = b.browserMCP.Close()
+			if b.browserCookieSaver != nil && b.workspaceMgr != nil {
+				rctx := context.Background()
+				if ws, werr := b.workspaceMgr.GetOrCreate(b.ID); werr == nil {
+					if data, rerr := ws.ReadFile(rctx, "/data/.browser-state.json"); rerr == nil && len(data) > 0 {
+						if serr := b.browserCookieSaver(rctx, data); serr != nil {
+							b.logger.Warnw("browser cookie recover failed", "err", serr)
+						} else {
+							b.logger.Infow("browser cookies recovered from session")
+						}
+					}
+				}
+			}
 		}
 		// 关闭工作空间管理器（文件持久化，不删除）
 		if b.workspaceMgr != nil {

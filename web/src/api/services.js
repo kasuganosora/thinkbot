@@ -1782,6 +1782,34 @@ function newMcpServer(payload = {}) {
     updatedAt: nowISO()
   }
 }
+export const botBrowserCookieApi = {
+  list(botId) {
+    return request('GET', `/api/bots/${botId}/browser/cookies`)
+  },
+  get(botId, cid, reveal = false) {
+    return request('GET', `/api/bots/${botId}/browser/cookies/${cid}${reveal ? '?reveal=true' : ''}`)
+  },
+  create(botId, payload) {
+    return request('POST', `/api/bots/${botId}/browser/cookies`, payload)
+  },
+  update(botId, cid, payload) {
+    return request('PUT', `/api/bots/${botId}/browser/cookies/${cid}`, payload)
+  },
+  remove(botId, cid) {
+    return request('DELETE', `/api/bots/${botId}/browser/cookies/${cid}`)
+  },
+  clear(botId, domain) {
+    const q = domain ? `?domain=${encodeURIComponent(domain)}` : ''
+    return request('DELETE', `/api/bots/${botId}/browser/cookies${q}`)
+  },
+  import(botId, { raw, clear }) {
+    return request('POST', `/api/bots/${botId}/browser/cookies/import`, { raw, clear })
+  },
+  export(botId) {
+    return request('GET', `/api/bots/${botId}/browser/cookies/export?confirm=1`)
+  }
+}
+
 export const botMcpApi = {
   list(botId) {
     if (USE_MOCK) return mockResolve(() => ({ servers: JSON.parse(JSON.stringify(ensureMcp(botId))) }))

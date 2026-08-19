@@ -265,6 +265,9 @@ func (c *botContainer) create(ctx context.Context) error {
 	if mem := c.effectiveMemoryLocked(); mem != "" {
 		args = append(args, "--memory", mem)
 	}
+	// 浏览器场景需要较大的 /dev/shm，否则 Chromium 渲染大页面必崩。
+	// 见 docs/sandbox-browser-image-design.md §5（--shm-size 优先于 --disable-dev-shm-usage）。
+	args = append(args, "--shm-size", "512m")
 	if c.cfg.CPULimit != "" {
 		args = append(args, "--cpus", c.cfg.CPULimit)
 	}
@@ -291,7 +294,7 @@ func (c *botContainer) create(ctx context.Context) error {
 	// 支持真正的正则、PCRE2、更快）。幂等：已存在则跳过；失败（非 alpine 镜像 / 无网络）
 	// 静默忽略，搜索工具会自动回退到容器内的 grep。
 	_ = exec.CommandContext(ctx, "docker", "exec", c.container,
-		"sh", "-c", "command -v rg >/dev/null 2>&1 || apk add --no-cache ripgrep >/dev/null 2>&1 || true").Run()
+		"sh", "-c", "command -v rg >/dev/null 2>&1 || (apk add --no-cache ripgrep 2>/dev/null || apt-get install -y --no-install-recommends ripgrep 2>/dev/null) || true").Run()
 
 	if err := c.ensureNetwork(ctx); err != nil {
 		return err
