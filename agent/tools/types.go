@@ -23,6 +23,12 @@ import (
 // ToolProvider — 动态工具提供者
 // ============================================================================
 
+// DynamicCategory 是动态 ToolProvider（MCP / 浏览器等）提供的工具的分类标记。
+//
+// 动态工具只有 llm.Tool（名称/描述/参数），没有静态 ToolDef 的 Category 元数据，
+// 因此在 ListAllTools 中统一打上此分类，供 API 层映射为中文分组名。
+const DynamicCategory = "dynamic"
+
 // ToolProvider 为 LLM 动态提供工具列表。
 // 实现者可以根据请求上下文返回不同的工具集（场景感知）。
 //

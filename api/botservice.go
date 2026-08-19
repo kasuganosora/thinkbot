@@ -1823,14 +1823,18 @@ func (s *BotService) GetBotInfo(id string) (*bot.BotInfo, error) {
 // ListBotTools 返回某 Bot 已注册的全部工具列表（名称+描述+分类），
 // 用于工具权限管理页面的工具名自动补全。
 // 若 Bot 未在运行，返回空列表而非错误（管理页面仍可用）。
-func (s *BotService) ListBotTools(botID string) []agenttools.ToolInfo {
+//
+// 包含动态 ToolProvider 提供的工具（MCP / 浏览器等）：这些工具在
+// ResolveTools 中同样会过 toolperm 评估，若管理界面看不到它们，
+// 管理员就无法为其配置允许/禁止规则。
+func (s *BotService) ListBotTools(ctx context.Context, botID string) []agenttools.ToolInfo {
 	s.mu.RLock()
 	tm, ok := s.toolManagers[botID]
 	s.mu.RUnlock()
 	if !ok {
 		return nil
 	}
-	return tm.ListTools()
+	return tm.ListAllTools(ctx)
 }
 
 // --- ChannelDefinition CRUD ---

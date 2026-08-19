@@ -337,6 +337,7 @@
                   <span class="ti-top">
                     <span class="ti-name">{{ t.name }}</span>
                     <span v-if="t.risk === 'basic'" class="ti-risk rk-basic" title="基础工具：无对外副作用，默认始终开放">基础</span>
+                    <span v-else-if="t.risk === 'broadcast'" class="ti-risk rk-bcast" title="对外发言工具：会留下他人可见且不可撤回的痕迹（发帖/评论/关注），系统会话也不自动放行">对外</span>
                     <span v-else class="ti-risk rk-sens" title="敏感工具：有实际危害面，受权限规则约束">敏感</span>
                   </span>
                   <span class="ti-desc">{{ t.description }}</span>
@@ -692,6 +693,7 @@ const onlySensitive = ref(true)
 // 通配快捷入口：覆盖最常用的几种批量授权意图
 const wildcardPresets = [
   { label: '全部工具 *', value: '*', hint: '匹配系统中的所有工具' },
+  { label: 'browser__*', value: 'browser__*', hint: '所有浏览器工具（开网页、点击、填表、截图）' },
   { label: 'sandbox_*', value: 'sandbox_*', hint: '所有沙箱与文件工具' },
   { label: 'web_*', value: 'web_*', hint: '所有联网工具（搜索、抓取）' },
   { label: 'task_*', value: 'task_*', hint: '所有任务/工作流工具' },
@@ -1212,6 +1214,8 @@ async function confirmSave() {
 }
 .rk-basic { background: #edf6ee; color: #4a9c3f; }
 .rk-sens  { background: #fdf0ec; color: #cf6a3f; }
+/* 对外发言工具用更强的红色：后果不可撤回，比普通敏感工具更需要注意 */
+.rk-bcast { background: #fdeaea; color: #c5352f; }
 /* 基础工具整体降饱和度：它们默认就是开放的，不是配置重点 */
 .ti-card.is-basic { background: #fcfcfc; }
 .ti-card.is-basic .ti-name { color: #6a6a70; }
