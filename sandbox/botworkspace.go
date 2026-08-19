@@ -102,8 +102,8 @@ func NewBotWorkspaceManager(baseDir string, cfg Config, logger *zap.SugaredLogge
 		return nil, errs.Newf("bot_workspace: unknown backend %q", backend)
 	}
 
-	// Docker 可用时预拉取镜像
-	if b == "docker" {
+	// Docker 可用时预拉取镜像。builtin 镜像由 thinkbot 本地构建，无需拉取。
+	if b == "docker" && !isBuiltinImage(cfg.Image) {
 		go func() {
 			cmd := exec.Command("docker", "pull", cfg.Image)
 			if err := cmd.Run(); err != nil {
