@@ -509,9 +509,16 @@ func (b *Bot) Close() {
 		if b.soulLoader != nil {
 			b.soulLoader.Stop()
 		}
-		// 浏览器会话回收：先关闭 MCP（触发容器内 wrapper 把 cookie 回写到 /data/.browser-state.json），
-		// 再读回状态文件持久化到 DB。必须在工作空间管理器关闭（容器销毁）之前完成。
+		// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再关闭传输层、读回状态文件持久化到 DB。
+		// 必须在工作空间管理器关闭（容器销毁）之前完成。
+		// 注意：直接 Close() 会 SIGKILL 掉 docker exec 子进程，而 `docker exec -i` 默认不代理信号，
+		// wrapper 的 shutdown 钩子不会跑，cookie 将丢。故先调 close 工具触发其 saveState 再回包。
 		if b.browserMCP != nil {
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 8*time.Second)
+			if _, cerr := b.browserMCP.CallTool(closeCtx, "browser", "close", map[string]any{}); cerr != nil {
+				b.logger.Warnw("browser graceful close failed, will force close", "err", cerr)
+			}
+			closeCancel()
 			_ = b.browserMCP.Close()
 			if b.browserCookieSaver != nil && b.workspaceMgr != nil {
 				rctx := context.Background()
