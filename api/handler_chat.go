@@ -37,6 +37,47 @@ const (
 	ssePing         = "ping"          // 心跳
 )
 
+// phantomSupersededMsg 是 phantom tool call 被真实调用取代时展示的说明。
+//
+// phantom call 指某些 LLM（如 GLM）流式输出工具调用时先发的空参数占位 call：
+// 它永远不会被执行、也永远收不到结果，若不主动收敛就会永久停在「执行中」。
+const phantomSupersededMsg = "已被后续同工具调用取代（LLM 流式中间态）"
+
+// isEmptyToolInput 判断工具入参是否为空占位。
+//
+// 空参数是 phantom call 的判定特征：真实调用必然带参数（url / maxChars 等），
+// 而流式中间态的占位调用参数恒为 {}。注意必须是「解析出 map 且长度为 0」，
+// nil 或非 map 不算 —— 那是事件缺字段，不能据此断定为 phantom。
+func isEmptyToolInput(input any) bool {
+	m, ok := input.(map[string]any)
+	return ok && len(m) == 0
+}
+
+// isPhantomRunning 判断一条累积的工具调用是否为「仍在 running 的空参数 phantom」。
+func isPhantomRunning(tc map[string]any) bool {
+	return tc["status"] == "running" && isEmptyToolInput(tc["input"])
+}
+
+// findPhantomToolCall 在累积列表中查找应被 newInput 这次真实调用取代的 phantom 下标。
+// 返回 -1 表示无需取代（newInput 本身是空参数，或不存在同名 phantom）。
+func findPhantomToolCall(toolCalls []map[string]any, toolName string, newInput any) int {
+	if isEmptyToolInput(newInput) {
+		return -1
+	}
+	for i, tc := range toolCalls {
+		if tc["name"] == toolName && isPhantomRunning(tc) {
+			return i // 只取代最先命中的一个 phantom
+		}
+	}
+	return -1
+}
+
+// markToolCallSuperseded 把一条工具调用标记为已被取代。
+func markToolCallSuperseded(tc map[string]any) {
+	tc["status"] = "superseded"
+	tc["output"] = phantomSupersededMsg
+}
+
 // metaKeyChatSessionID 是注入消息 metadata 时前端会话 ID 的 key。
 // 与 agenttools.ExtraKeyChatSessionID 同名——后者负责把它从 metadata 搬进
 // ToolSessionContext.Extra，供工具（如工作流提交）记录来源会话。
@@ -530,23 +571,46 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		saveAssistant(true)
 	}
 
-	// isEmptyInput 检测工具入参是否为空占位（LLM 流式输出中间态产生的 phantom call）。
-	// 某些 LLM（如 GLM）流式调用工具时会先发一个空参数占位 call，再发真实参数 call，
-	// 空参数 call 永远不会收到执行结果，导致前端卡在「执行中」。
-	isEmptyInput := func(input any) bool {
-		m, ok := input.(map[string]any)
-		return ok && len(m) == 0
-	}
-
 	// suppressPhantomToolCall 当同名工具的新调用到达时，若存在空参数的 phantom running call，
 	// 将其标记为 superseded（被后续真实调用取代），避免前端永久卡在「执行中」。
-	suppressPhantomToolCall := func(toolName string, newInput any) {
+	//
+	// 返回被取代的 toolCallID（无则为空串）：仅改服务端累积结构不足以让**当前正在看**
+	// 页面的用户看到状态变化 —— 前端卡片靠 SSE 驱动，不补发事件的话只有刷新页面
+	// （重新从 DB 读 parts）才会变。因此 SSE 路径必须据此补发一条 tool_result。
+	suppressPhantomToolCall := func(toolName string, newInput any) string {
+		idx := findPhantomToolCall(toolCalls, toolName, newInput)
+		if idx < 0 {
+			return ""
+		}
+		markToolCallSuperseded(toolCalls[idx])
+		id, _ := toolCalls[idx]["id"].(string)
+		syncPartTool(id)
+		return id
+	}
+
+	// sweepPhantomToolCalls 在本轮结束时收敛所有残留的空参数 phantom call。
+	//
+	// 为什么 suppressPhantomToolCall 不够：它依赖「后续有同名真实调用到达」来触发。
+	// 若 phantom 恰好是本轮最后一个工具调用（LLM 收尾时发的占位），就没有后继事件
+	// 来取代它，卡片会永久停在「执行中」。这里在 done 之前做一次兜底清扫。
+	//
+	// 只清空参数的 running 项：真实调用即使超时也应保留 running 语义交由前端超时提示，
+	// 不能误判成已取代而掩盖真正的卡死。
+	sweepPhantomToolCalls := func() {
 		for i, tc := range toolCalls {
-			if tc["name"] == toolName && tc["status"] == "running" && isEmptyInput(tc["input"]) && !isEmptyInput(newInput) {
-				toolCalls[i]["status"] = "superseded"
-				toolCalls[i]["output"] = "已被后续同工具调用取代（LLM 流式中间态）"
-				syncPartTool(tc["id"].(string))
-				break // 只取代最新的一个 phantom
+			if !isPhantomRunning(tc) {
+				continue
+			}
+			markToolCallSuperseded(toolCalls[i])
+			id, _ := tc["id"].(string)
+			syncPartTool(id)
+			if id != "" {
+				writeSSE(c.Writer, sseToolResult, map[string]any{
+					"toolCallId": id,
+					"tool":       tc["name"],
+					"status":     "superseded",
+					"output":     phantomSupersededMsg,
+				})
 			}
 		}
 	}
@@ -572,8 +636,9 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			if toolCallID == "" {
 				toolCallID = idgen.New("tool")
 			}
-			// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代
-			suppressPhantomToolCall(toolName, event.Data["input"])
+			// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代。
+			// accumulate 只负责累积（供断连后台落库），不发 SSE，故忽略返回值。
+			_ = suppressPhantomToolCall(toolName, event.Data["input"])
 			if _, ok := toolCallIdx[toolCallID]; !ok {
 				toolCalls = append(toolCalls, map[string]any{
 					"id":     toolCallID,
@@ -732,8 +797,18 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				if toolCallID == "" {
 					toolCallID = idgen.New("tool")
 				}
-				// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代
-				suppressPhantomToolCall(toolName, event.Data["input"])
+				// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代。
+				// 必须补发 tool_result，否则前端那张「执行中」卡片收不到任何事件，
+				// 只有刷新页面才会变成已取代。
+				if phantomID := suppressPhantomToolCall(toolName, event.Data["input"]); phantomID != "" {
+					writeSSE(c.Writer, sseToolResult, map[string]any{
+						"toolCallId": phantomID,
+						"tool":       toolName,
+						"status":     "superseded",
+						"output":     phantomSupersededMsg,
+					})
+					flusher.Flush()
+				}
 				writeSSE(c.Writer, sseToolCall, map[string]any{
 					"toolCallId": toolCallID,
 					"tool":       toolName,
@@ -853,6 +928,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			resetIdle()
 			if !ok {
 				// channel 关闭，结束
+				sweepPhantomToolCalls()
 				writeSSE(c.Writer, sseDone, map[string]any{"text": fullText})
 				flusher.Flush()
 				unsubscribeEventSub()
@@ -871,6 +947,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 						flusher.Flush()
 					}
 				}
+				// 收敛残留 phantom：避免最后一个空参数占位调用永久停在「执行中」
+				sweepPhantomToolCalls()
 				donePayload := map[string]any{"text": fullText}
 				if len(toolCalls) > 0 {
 					donePayload["toolCalls"] = toolCalls
