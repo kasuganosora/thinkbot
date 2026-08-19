@@ -163,6 +163,44 @@ func (r *ToolRegistry) Resolve(ctx context.Context, sctx *ToolSessionContext) ([
 	return result, nil
 }
 
+// ListDynamic 枚举所有动态 ToolProvider 当前提供的工具（llm.Tool 形态）。
+//
+// 与 Resolve 的区别：Resolve 面向「某次会话实际可用的工具」，会做 Scopes 过滤、
+// 与静态工具去重、并交给上层做权限过滤；ListDynamic 面向**管理界面自省** ——
+// 回答「这个 bot 目前挂载了哪些动态工具（MCP / 浏览器等）」，
+// 因此不做去重也不做权限过滤，由调用方决定如何呈现。
+//
+// 权限配置界面必须能看到动态工具，否则管理员无法为它们配置规则
+// （动态工具在 ResolveTools 里同样会过 toolperm 评估，只是名字不在静态注册表里）。
+//
+// provider 出错时跳过（与 Resolve 一致），不因单个 MCP 服务器不可用而整体失败。
+func (r *ToolRegistry) ListDynamic(ctx context.Context, sctx *ToolSessionContext) []llm.Tool {
+	r.mu.RLock()
+	providers := make([]ToolProvider, len(r.providers))
+	copy(providers, r.providers)
+	r.mu.RUnlock()
+
+	var result []llm.Tool
+	seen := make(map[string]bool)
+	for _, p := range providers {
+		dynamic, err := p.Tools(ctx, sctx)
+		if err != nil {
+			continue
+		}
+		for _, t := range dynamic {
+			if seen[t.Name] {
+				continue
+			}
+			seen[t.Name] = true
+			result = append(result, t)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
 // ResolveDefs 解析当前会话上下文下的工具定义（包含元数据）。
 // 仅返回静态注册的工具定义（动态提供者只返回 llm.Tool）。
 func (r *ToolRegistry) ResolveDefs(sctx *ToolSessionContext) []ToolDef {
