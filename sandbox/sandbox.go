@@ -165,6 +165,10 @@ type Config struct {
 	Backend string
 
 	// Image Docker 镜像（仅 Docker 后端使用）。
+	// 特殊值 "builtin" 表示使用 thinkbot 内置浏览器沙箱镜像，由 thinkbot 在启动 bot 时
+	// 按需自行构建（构建上下文已 go:embed 进二进制，随二进制更新自动保持一致）；
+	// 空值等同于 "builtin"。其他任意值（如 alpine:latest、私有仓库镜像）作为预构建镜像
+	// 原样使用，不经过自构建。
 	Image string
 
 	// BaseDir Local 后端的根目录。空则使用系统临时目录。
@@ -229,7 +233,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Backend:         "auto",
-		Image:           "alpine:latest",
+		Image:           "builtin", // thinkbot 内置浏览器沙箱镜像，启动 bot 时按需自构建（兼容预构建镜像）
 		BaseDir:         "",
 		MemoryLimit:     "2g",
 		CPULimit:        "1.0",
