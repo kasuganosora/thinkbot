@@ -202,8 +202,8 @@ func (c *Client) notify(ctx context.Context, method string, params any) error {
 		return err
 	}
 
-	_, err = c.transport.RoundTrip(ctx, data)
-	return err
+	// 通知无需响应：仅写入，避免 stdio 传输在等待不存在的回包时阻塞。
+	return c.transport.Send(ctx, data)
 }
 
 // ============================================================================
