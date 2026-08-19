@@ -69,21 +69,19 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 
 	browserMgr := mcp.NewManager(b.logger.With("component", "browser_mcp"))
 	// 代理透传：部署侧自有出口（IP 归部署侧），空值直连。
-	env := []string{}
+	// 注意：docker exec 不继承 docker 客户端进程的 env，必须把代理以 `-e` 注入容器内。
+	dockerArgs := []string{"exec", "-i", containerName}
 	if params.SandboxConfig.BrowserProxy != "" {
-		env = append(env, "BOT_BROWSER_PROXY="+params.SandboxConfig.BrowserProxy)
+		dockerArgs = append(dockerArgs, "-e", "BOT_BROWSER_PROXY="+params.SandboxConfig.BrowserProxy)
 	}
+	// 经 launch 脚本以非 root 用户运行 wrapper（见 Dockerfile / browser-launch.sh）。
+	dockerArgs = append(dockerArgs, "/usr/local/bin/thinkbot-browser-launch")
 	cfg := mcp.ServerConfig{
 		Name:      "browser",
 		Transport: "stdio",
 		Command:   "docker",
-		Args: []string{
-			"exec", "-i", containerName,
-			"xvfb-run", "-a", "-s", "-screen 0 1920x1080x24",
-			"node", "/usr/local/bin/thinkbot-browser-mcp",
-		},
-		Env:     env,
-		Enabled: true,
+		Args:      dockerArgs,
+		Enabled:   true,
 		// 把 wrapper 的 stderr 回写 thinkbot 日志，否则子进程错误被静默丢弃，排障困难。
 		Stderr: &mcpStdioStderr{log: b.logger},
 	}
