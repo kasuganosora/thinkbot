@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
@@ -109,11 +110,10 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 		if ws, werr := wsMgr.GetOrCreate(params.ID); werr == nil {
 			if data, rerr := ws.ReadFile(ctx, "/data/.browser-state.json"); rerr == nil && len(data) > 0 {
 				// 仅当文件确实含 cookie 时才回收，避免空状态文件（{"cookies":[]}）误报。
-				if strings.Contains(string(data), "\"name\"") {
+				if bytes.Contains(data, []byte("\"name\"")) {
+					// 成功日志（含 created/updated 条数）由回收实现打印，此处只记失败。
 					if serr := params.BrowserCookieStartupRecover(ctx, data); serr != nil {
 						b.logger.Warnw("browser cookie startup recover failed", "err", serr)
-					} else {
-						b.logger.Infow("browser cookies recovered at startup")
 					}
 				}
 			}

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1407,8 +1408,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if err != nil {
 			return errs.Wrap(err, "parse browser cookies from session")
 		}
+		// 空结果保护：绝不用空集合触发下面的全量替换，否则一次退化的状态文件
+		// （如 close 时浏览器从未启动、saveState 未落盘）会把面板管理的 cookie 全部抹掉。
+		if len(parsed) == 0 {
+			s.logger.Warnw("browser cookie recover skipped: session state has no cookie", "bot_id", id)
+			return nil
+		}
 		// 以浏览器会话实际产生的 cookie 为准，全量替换该 bot 的 cookie。
-		return s.db.Transaction(func(tx *gorm.DB) error {
+		err = s.db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Where("bot_id = ?", id).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
 				return err
 			}
@@ -1426,6 +1433,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			}
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+		// 可观测性：只记条数，绝不记 cookie 值（凭据本体）。
+		s.logger.Infow("browser cookies recovered from session", "bot_id", id, "count", len(parsed))
+		return nil
 	}
 
 	// browserCookieStartupRecover 在 bot 启动期、loader 覆盖写状态文件之前调用：
@@ -1442,7 +1455,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			return nil
 		}
 		now := time.Now().UTC()
-		return s.db.Transaction(func(tx *gorm.DB) error {
+		var created, updated int
+		err = s.db.Transaction(func(tx *gorm.DB) error {
 			for i := range parsed {
 				ck := parsed[i]
 				ck.ID = idgen.New("bc")
@@ -1451,10 +1465,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				ck.UpdatedAt = now
 				var existing dao.BotBrowserCookie
 				res := tx.Where("bot_id = ? AND domain = ? AND name = ? AND path = ?", id, ck.Domain, ck.Name, ck.Path).First(&existing)
-				if res.Error == gorm.ErrRecordNotFound {
+				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
 					if err := tx.Create(&ck).Error; err != nil {
 						return err
 					}
+					created++
 				} else if res.Error == nil {
 					existing.Value = ck.Value
 					existing.Expires = ck.Expires
@@ -1465,12 +1480,20 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 					if err := tx.Save(&existing).Error; err != nil {
 						return err
 					}
+					updated++
 				} else {
 					return res.Error
 				}
 			}
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+		// 可观测性：只记条数与域，绝不记 cookie 值（凭据本体）。
+		s.logger.Infow("browser cookies recovered at startup",
+			"bot_id", id, "created", created, "updated", updated, "total", len(parsed))
+		return nil
 	}
 
 	b, err := bot.New(bot.BotParams{
