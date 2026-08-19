@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"go.uber.org/zap"
@@ -264,6 +265,41 @@ func (m *ToolManager) ListTools() []ToolInfo {
 			Parameters:       d.Parameters,
 		})
 	}
+	return result
+}
+
+// ListAllTools 返回静态工具 + 动态 provider 工具的合并快照（按名称排序）。
+//
+// 用于工具权限管理界面：动态工具（MCP / 浏览器等）在 ResolveTools 中同样会过
+// toolperm 评估，若管理界面看不到它们，管理员就无法为其配置允许/禁止规则 ——
+// 表现为「工具确实受管控，但 UI 上无从下手」。
+//
+// 动态工具只有 llm.Tool（名称/描述/参数），没有 Category / Scopes 等静态元数据，
+// 因此 Category 统一置为 dynamicCategory，由 API 层映射为中文分组名。
+// 同名时静态工具优先（与 Resolve 的去重语义保持一致）。
+func (m *ToolManager) ListAllTools(ctx context.Context) []ToolInfo {
+	result := m.ListTools()
+	staticNames := make(map[string]bool, len(result))
+	for i := range result {
+		staticNames[result[i].Name] = true
+	}
+
+	// sctx 传空上下文：管理界面要看到「全部挂载的动态工具」，
+	// 而非某个具体会话可见的子集。
+	for _, t := range m.registry.ListDynamic(ctx, &ToolSessionContext{}) {
+		if staticNames[t.Name] {
+			continue
+		}
+		result = append(result, ToolInfo{
+			Name:        t.Name,
+			Description: t.Description,
+			Category:    DynamicCategory,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Name < result[j].Name
+	})
 	return result
 }
 
