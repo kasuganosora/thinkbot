@@ -65,14 +65,14 @@ func (s *Server) handleGetBotBrowserCookie(c *gin.Context) {
 func (s *Server) handleCreateBotBrowserCookie(c *gin.Context) {
 	botID := c.Param("id")
 	var req struct {
-		Domain   string `json:"domain"`
-		Name     string `json:"name"`
-		Value    string `json:"value"`
-		Path     string `json:"path"`
-		Expires  int64  `json:"expires"`
-		HTTPOnly bool   `json:"httpOnly"`
-		Secure   bool   `json:"secure"`
-		SameSite string `json:"sameSite"`
+		Domain   string  `json:"domain"`
+		Name     string  `json:"name"`
+		Value    string  `json:"value"`
+		Path     string  `json:"path"`
+		Expires  float64 `json:"expires"` // 与 import/recovery 一致，接受浮点秒（浏览器导出常带小数）
+		HTTPOnly bool    `json:"httpOnly"`
+		Secure   bool    `json:"secure"`
+		SameSite string  `json:"sameSite"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
@@ -92,7 +92,7 @@ func (s *Server) handleCreateBotBrowserCookie(c *gin.Context) {
 		Name:     req.Name,
 		Value:    req.Value,
 		Path:     req.Path,
-		Expires:  req.Expires,
+		Expires:  int64(req.Expires),
 		HTTPOnly: req.HTTPOnly,
 		Secure:   req.Secure,
 		SameSite: req.SameSite,
@@ -119,14 +119,14 @@ func (s *Server) handleUpdateBotBrowserCookie(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Domain   *string `json:"domain"`
-		Name     *string `json:"name"`
-		Value    *string `json:"value"`
-		Path     *string `json:"path"`
-		Expires  *int64  `json:"expires"`
-		HTTPOnly *bool   `json:"httpOnly"`
-		Secure   *bool   `json:"secure"`
-		SameSite *string `json:"sameSite"`
+		Domain   *string  `json:"domain"`
+		Name     *string  `json:"name"`
+		Value    *string  `json:"value"`
+		Path     *string  `json:"path"`
+		Expires  *float64 `json:"expires"` // 与 import/recovery 一致，接受浮点秒
+		HTTPOnly *bool    `json:"httpOnly"`
+		Secure   *bool    `json:"secure"`
+		SameSite *string  `json:"sameSite"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
@@ -145,7 +145,7 @@ func (s *Server) handleUpdateBotBrowserCookie(c *gin.Context) {
 		ck.Path = *req.Path
 	}
 	if req.Expires != nil {
-		ck.Expires = *req.Expires
+		ck.Expires = int64(*req.Expires)
 	}
 	if req.HTTPOnly != nil {
 		ck.HTTPOnly = *req.HTTPOnly

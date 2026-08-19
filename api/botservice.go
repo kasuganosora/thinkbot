@@ -1428,6 +1428,51 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		})
 	}
 
+	// browserCookieStartupRecover 在 bot 启动期、loader 覆盖写状态文件之前调用：
+	// 把容器内「上一轮残留」的 cookie 状态文件合并回 DB，修复非优雅关闭（SIGKILL / 崩溃 / OOM）
+	// 导致 Close() 未跑、cookie 永不进 DB 的缺口。
+	// 采用合并（upsert）而非全量替换：保留 DB 中独有项（如 Web 面板新增/编辑），对文件与 DB
+	// 同键项以文件为准更新；优雅重启时文件==DB，此步幂等。空状态文件直接视为成功，避免误报。
+	browserCookieStartupRecover := func(ctx context.Context, stateJSON []byte) error {
+		parsed, err := parseBrowserCookieImport(string(stateJSON))
+		if err != nil {
+			return errs.Wrap(err, "parse browser cookies from session")
+		}
+		if len(parsed) == 0 {
+			return nil
+		}
+		now := time.Now().UTC()
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			for i := range parsed {
+				ck := parsed[i]
+				ck.ID = idgen.New("bc")
+				ck.BotID = id
+				ck.CreatedAt = now
+				ck.UpdatedAt = now
+				var existing dao.BotBrowserCookie
+				res := tx.Where("bot_id = ? AND domain = ? AND name = ? AND path = ?", id, ck.Domain, ck.Name, ck.Path).First(&existing)
+				if res.Error == gorm.ErrRecordNotFound {
+					if err := tx.Create(&ck).Error; err != nil {
+						return err
+					}
+				} else if res.Error == nil {
+					existing.Value = ck.Value
+					existing.Expires = ck.Expires
+					existing.HTTPOnly = ck.HTTPOnly
+					existing.Secure = ck.Secure
+					existing.SameSite = ck.SameSite
+					existing.UpdatedAt = now
+					if err := tx.Save(&existing).Error; err != nil {
+						return err
+					}
+				} else {
+					return res.Error
+				}
+			}
+			return nil
+		})
+	}
+
 	b, err := bot.New(bot.BotParams{
 		ID:                id,
 		Name:              def.Name,
@@ -1459,8 +1504,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		SandboxConfig: sbCfg,
 		Mode:          mode,
 
-		BrowserCookieLoader: browserCookieLoader,
-		BrowserCookieSaver:  browserCookieSaver,
+		BrowserCookieLoader:         browserCookieLoader,
+		BrowserCookieSaver:          browserCookieSaver,
+		BrowserCookieStartupRecover: browserCookieStartupRecover,
 	})
 	if err != nil {
 		rollback()
