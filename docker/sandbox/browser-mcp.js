@@ -21,6 +21,7 @@ let browser = null;
 let context = null;
 let page = null;
 let shuttingDown = false;
+let stateSaver = null; // 周期落盘定时器（兜底，避免进程被非优雅终止时丢 cookie）
 
 function log(...a) {
   // 仅打到 stderr 并被 thinkbot 侧收集（若已修复 cmd.Stderr=nil）；绝不打 cookie 值。
@@ -78,12 +79,18 @@ async function initBrowser() {
   const n = await loadState();
   log('context ready, injected cookies:', n);
   page = await context.newPage();
+  // 周期落盘：登录态常随导航/重定向落地，进程若被非优雅终止（如 docker exec 被 SIGKILL），
+  // shutdown 钩子不会触发，故用定时器兜底，确保 cookie 不丢。
+  if (!stateSaver) {
+    stateSaver = setInterval(() => { saveState().catch(() => {}); }, 30000);
+  }
 }
 
 async function shutdown(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
   log('shutdown', sig);
+  if (stateSaver) { clearInterval(stateSaver); stateSaver = null; }
   try { await saveState(); } catch (e) {}
   try { if (page) await page.close(); } catch (e) {}
   try { if (context) await context.close(); } catch (e) {}
@@ -188,6 +195,8 @@ async function callTool(name, args) {
           if (a11y) summary = summarizeA11y(a11y, 600);
         }
       } catch (e) { summary = ''; }
+      // 登录态常随导航（重定向/Set-Cookie）落地，导航后即落盘，避免进程被非优雅终止时丢 cookie。
+      saveState().catch(() => {});
       return textResult(`status=${status}\ntitle=${title}\nurl=${url}\na11y_summary=${summary}`);
     }
     case 'click': {
@@ -234,7 +243,10 @@ async function callTool(name, args) {
       return textResult(`cookie count=${cs.length}\n${names}`);
     }
     case 'close': {
-      await shutdown('tool');
+      // 先落盘并回包，再退出：thinkbot 侧 Close 会调用本工具触发优雅回收，
+      // 必须在回包前完成 saveState，否则回收读到的是旧状态文件。
+      await saveState().catch(() => {});
+      setTimeout(() => shutdown('tool'), 60);
       return textResult('closed');
     }
     case 'fetch': {
@@ -245,12 +257,16 @@ async function callTool(name, args) {
       if (args.cookie && !('cookie' in headers) && !('Cookie' in headers)) headers['Cookie'] = args.cookie;
       const init = { method, headers, redirect: args.redirect || 'follow' };
       if (args.body && !['GET', 'HEAD'].includes(method)) init.body = args.body;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 30000);
       let res;
       try {
-        res = await fetch(url, init);
+        res = await fetch(url, Object.assign({ signal: ctrl.signal }, init));
       } catch (e) {
+        clearTimeout(timer);
         return textResult('fetch error: ' + e.message);
       }
+      clearTimeout(timer);
       const status = res.status;
       const respHeaders = {};
       res.headers.forEach((v, k) => { respHeaders[k] = v; });
@@ -317,6 +333,13 @@ function handleLine(line) {
     const { name, arguments: args } = msg.params || {};
     (async () => {
       try {
+        // fetch / close 不需要浏览器实例：fetch 应是轻量纯 HTTP，close 只做落盘，
+        // 避免为它们拉起完整 chromium（既省资源，也避免 shutdown 时反复起浏览器）。
+        if (name === 'fetch' || name === 'close') {
+          const result = await callTool(name, args || {});
+          send({ jsonrpc: '2.0', id, result });
+          return;
+        }
         if (!browser) await initBrowser();
         const result = await callTool(name, args || {});
         send({ jsonrpc: '2.0', id, result });
