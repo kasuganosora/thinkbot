@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -589,11 +590,16 @@ func (b *Bot) tryRecoverOnce(ctx context.Context) bool {
 	if rerr != nil || len(data) == 0 {
 		return false
 	}
+	// 「有内容但无 cookie」（如 {"cookies":[]}）视为尚未落盘：saver 对空结果是安全 no-op，
+	// 若在此判成功会提前结束轮询，等不到 wrapper 后续 shutdown 落盘。
+	if !bytes.Contains(data, []byte("\"name\"")) {
+		return false
+	}
 	if serr := b.browserCookieSaver(ctx, data); serr != nil {
 		b.logger.Warnw("browser cookie recover failed", "err", serr)
 		return false
 	}
-	b.logger.Infow("browser cookies recovered from session")
+	// 成功日志（含条数）由回收实现打印，避免重复。
 	return true
 }
 
