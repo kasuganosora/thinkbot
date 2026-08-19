@@ -98,6 +98,8 @@ type Bot struct {
 	browserMCP *mcp.Manager
 	// browserCookieSaver 会话结束后回收容器内 cookie 状态文件时调用。
 	browserCookieSaver func(ctx context.Context, stateJSON []byte) error
+	// browserCookieStartupRecover 启动期合并回收容器内残留 cookie 状态文件时调用。
+	browserCookieStartupRecover func(ctx context.Context, stateJSON []byte) error
 
 	// botMetrics 是 Bot 层额外的指标（Engine 层有自己的基础指标）
 	dispatchErrors atomic.Int64
@@ -184,6 +186,11 @@ type BotParams struct {
 	// BrowserCookieSaver 将浏览器会话结束后回写的 cookie 状态文件 JSON 持久化回 DB。
 	// 由 Bot.Close 在浏览器 MCP 进程优雅退出后调用，回收容器内浏览器实际产生的 cookie。
 	BrowserCookieSaver func(ctx context.Context, stateJSON []byte) error
+
+	// BrowserCookieStartupRecover 启动期合并回收容器内「上一轮残留」的 cookie 状态文件。
+	// 在 loader 覆盖写状态文件前调用，修复非优雅关闭（SIGKILL/崩溃）导致 Close 未跑、
+	// cookie 永不进 DB 的缺口。采用 upsert 合并，保留 DB 独有项、幂等于优雅重启。
+	BrowserCookieStartupRecover func(ctx context.Context, stateJSON []byte) error
 
 	// OnMessageStart 在单条消息开始处理时回调，提供可取消的 message context
 	// 以及本消息生命周期内的「用户中途追加」通道（interruptCh，用于 Claude-CLI
@@ -391,6 +398,7 @@ func New(params BotParams) (*Bot, error) {
 					"err", err, "bot_id", params.ID)
 			} else {
 				bot.browserCookieSaver = params.BrowserCookieSaver
+				bot.browserCookieStartupRecover = params.BrowserCookieStartupRecover
 			}
 		}
 	}

@@ -101,6 +101,27 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 	b.browserMCP = browserMgr
 	b.logger.Infow("browser mcp wired", "container", containerName, "bot_id", params.ID)
 
+	// 启动期回收：在 loader 覆盖写状态文件之前，先把容器内「上一轮残留」的 cookie 合并回 DB。
+	// 非优雅关闭（SIGKILL/崩溃）时 Close() 未跑、cookie 仅落在 wrapper 周期 saveState 文件里，
+	// 若不在此回收，下方 loader 会用（可能为空）的 DB 内容覆盖该文件，导致孤儿 cookie 永久丢失。
+	// 优雅重启时文件==DB，此步幂等；DB 独有项（面板编辑）被保留。
+	if params.BrowserCookieStartupRecover != nil {
+		if ws, werr := wsMgr.GetOrCreate(params.ID); werr == nil {
+			if data, rerr := ws.ReadFile(ctx, "/data/.browser-state.json"); rerr == nil && len(data) > 0 {
+				// 仅当文件确实含 cookie 时才回收，避免空状态文件（{"cookies":[]}）误报。
+				if strings.Contains(string(data), "\"name\"") {
+					if serr := params.BrowserCookieStartupRecover(ctx, data); serr != nil {
+						b.logger.Warnw("browser cookie startup recover failed", "err", serr)
+					} else {
+						b.logger.Infow("browser cookies recovered at startup")
+					}
+				}
+			}
+		} else {
+			b.logger.Warnw("browser workspace unavailable for startup recover", "err", werr)
+		}
+	}
+
 	// 会话前投递 cookie：把 Web 面板管理的 cookie 注入容器内状态文件，
 	// 浏览器进程首次 tools/call 时读取并 addCookies。
 	if params.BrowserCookieLoader != nil {
