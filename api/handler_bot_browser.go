@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -33,7 +34,7 @@ import (
 func (s *Server) handleListBotBrowserCookies(c *gin.Context) {
 	botID := c.Param("id")
 	var cookies []dao.BotBrowserCookie
-	if err := s.db.Where("bot_id = ?", botID).Order("domain, name").Find(&cookies).Error; err != nil {
+	if err := s.db.WithContext(c.Request.Context()).Where("bot_id = ?", botID).Order("domain, name").Find(&cookies).Error; err != nil {
 		Fail(c, errs.Wrap(err, "list browser cookies"))
 		return
 	}
@@ -49,7 +50,7 @@ func (s *Server) handleGetBotBrowserCookie(c *gin.Context) {
 	botID := c.Param("id")
 	cid := c.Param("cid")
 	var ck dao.BotBrowserCookie
-	if err := s.db.Where("id = ? AND bot_id = ?", cid, botID).First(&ck).Error; err != nil {
+	if err := s.db.WithContext(c.Request.Context()).Where("id = ? AND bot_id = ?", cid, botID).First(&ck).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			Fail(c, errs.NotFound("cookie 不存在"))
 			return
@@ -97,7 +98,12 @@ func (s *Server) handleCreateBotBrowserCookie(c *gin.Context) {
 		Secure:   req.Secure,
 		SameSite: req.SameSite,
 	}
-	if err := s.db.Create(&ck).Error; err != nil {
+	// 同键（bot_id,domain,name,path）视为同一 cookie：面板重复新增等价于更新其值，
+	// 而非插入重复行（有 DB 唯一索引兜底，直接 Create 会撞约束报错）。
+	if err := s.db.WithContext(c.Request.Context()).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "bot_id"}, {Name: "domain"}, {Name: "name"}, {Name: "path"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value", "expires", "http_only", "secure", "same_site", "updated_at"}),
+	}).Create(&ck).Error; err != nil {
 		Fail(c, errs.Wrap(err, "create browser cookie"))
 		return
 	}
@@ -110,7 +116,7 @@ func (s *Server) handleUpdateBotBrowserCookie(c *gin.Context) {
 	botID := c.Param("id")
 	cid := c.Param("cid")
 	var ck dao.BotBrowserCookie
-	if err := s.db.Where("id = ? AND bot_id = ?", cid, botID).First(&ck).Error; err != nil {
+	if err := s.db.WithContext(c.Request.Context()).Where("id = ? AND bot_id = ?", cid, botID).First(&ck).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			Fail(c, errs.NotFound("cookie 不存在"))
 			return
@@ -156,7 +162,13 @@ func (s *Server) handleUpdateBotBrowserCookie(c *gin.Context) {
 	if req.SameSite != nil {
 		ck.SameSite = *req.SameSite
 	}
-	if err := s.db.Save(&ck).Error; err != nil {
+	if err := s.db.WithContext(c.Request.Context()).Save(&ck).Error; err != nil {
+		// 把 domain/name/path 改成与同 bot 下另一条相同会撞唯一索引，
+		// 原始 SQL 错误对用户不可读，这里转成明确提示。
+		if errors.Is(err, gorm.ErrDuplicatedKey) || strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			Fail(c, errs.BadRequest("同 bot 下已存在相同 domain + name + path 的 cookie"))
+			return
+		}
 		Fail(c, errs.Wrap(err, "update browser cookie"))
 		return
 	}
@@ -168,7 +180,7 @@ func (s *Server) handleUpdateBotBrowserCookie(c *gin.Context) {
 func (s *Server) handleDeleteBotBrowserCookie(c *gin.Context) {
 	botID := c.Param("id")
 	cid := c.Param("cid")
-	res := s.db.Where("id = ? AND bot_id = ?", cid, botID).Delete(&dao.BotBrowserCookie{})
+	res := s.db.WithContext(c.Request.Context()).Where("id = ? AND bot_id = ?", cid, botID).Delete(&dao.BotBrowserCookie{})
 	if res.Error != nil {
 		Fail(c, errs.Wrap(res.Error, "delete browser cookie"))
 		return
@@ -185,7 +197,7 @@ func (s *Server) handleDeleteBotBrowserCookie(c *gin.Context) {
 func (s *Server) handleClearBotBrowserCookies(c *gin.Context) {
 	botID := c.Param("id")
 	domain := c.Query("domain")
-	q := s.db.Where("bot_id = ?", botID)
+	q := s.db.WithContext(c.Request.Context()).Where("bot_id = ?", botID)
 	if domain != "" {
 		q = q.Where("domain = ?", domain)
 	}
@@ -227,7 +239,7 @@ func (s *Server) handleImportBotBrowserCookies(c *gin.Context) {
 		return
 	}
 	if req.Clear {
-		if err := s.db.Where("bot_id = ?", botID).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
+		if err := s.db.WithContext(c.Request.Context()).Where("bot_id = ?", botID).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
 			Fail(c, errs.Wrap(err, "clear before import"))
 			return
 		}
@@ -239,7 +251,13 @@ func (s *Server) handleImportBotBrowserCookies(c *gin.Context) {
 		parsed[i].CreatedAt = now
 		parsed[i].UpdatedAt = now
 	}
-	if err := s.db.Create(&parsed).Error; err != nil {
+	// 原子 upsert：(bot_id,domain,name,path) 是浏览器判定「同一 cookie」的键，且有 DB 唯一索引。
+	// 同键重复导入视为「用新值覆盖」而非新增一行——同一 cookie 存多行会被 addCookies 注入成
+	// 相互覆盖的重复项，登录态表现为随机失效。
+	if err := s.db.WithContext(c.Request.Context()).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "bot_id"}, {Name: "domain"}, {Name: "name"}, {Name: "path"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value", "expires", "http_only", "secure", "same_site", "updated_at"}),
+	}).Create(&parsed).Error; err != nil {
 		Fail(c, errs.Wrap(err, "import browser cookies"))
 		return
 	}
@@ -255,7 +273,7 @@ func (s *Server) handleExportBotBrowserCookies(c *gin.Context) {
 		return
 	}
 	var cookies []dao.BotBrowserCookie
-	if err := s.db.Where("bot_id = ?", botID).Find(&cookies).Error; err != nil {
+	if err := s.db.WithContext(c.Request.Context()).Where("bot_id = ?", botID).Find(&cookies).Error; err != nil {
 		Fail(c, errs.Wrap(err, "export browser cookies"))
 		return
 	}
