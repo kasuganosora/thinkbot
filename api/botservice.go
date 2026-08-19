@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -1398,7 +1398,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 通过注入的闭包解耦（见 agent/bot/browser.go）。
 	browserCookieLoader := func(ctx context.Context) ([]byte, error) {
 		var cookies []dao.BotBrowserCookie
-		if err := s.db.Where("bot_id = ?", id).Order("domain, name").Find(&cookies).Error; err != nil {
+		if err := s.db.WithContext(ctx).Where("bot_id = ?", id).Order("domain, name").Find(&cookies).Error; err != nil {
 			return nil, errs.Wrap(err, "load browser cookies")
 		}
 		return json.Marshal(buildStorageState(cookies))
@@ -1415,7 +1415,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			return nil
 		}
 		// 以浏览器会话实际产生的 cookie 为准，全量替换该 bot 的 cookie。
-		err = s.db.Transaction(func(tx *gorm.DB) error {
+		err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if err := tx.Where("bot_id = ?", id).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
 				return err
 			}
@@ -1444,8 +1444,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// browserCookieStartupRecover 在 bot 启动期、loader 覆盖写状态文件之前调用：
 	// 把容器内「上一轮残留」的 cookie 状态文件合并回 DB，修复非优雅关闭（SIGKILL / 崩溃 / OOM）
 	// 导致 Close() 未跑、cookie 永不进 DB 的缺口。
-	// 采用合并（upsert）而非全量替换：保留 DB 中独有项（如 Web 面板新增/编辑），对文件与 DB
+	// 采用合并 upsert 而非全量替换：保留 DB 中独有项（如 Web 面板新增/编辑），对文件与 DB
 	// 同键项以文件为准更新；优雅重启时文件==DB，此步幂等。空状态文件直接视为成功，避免误报。
+	// 冲突键 (bot_id,domain,name,path) 由 DB 唯一索引保证，故用原子 upsert 而非「先查后改」，
+	// 避免并发/重试下产生重复行。
 	browserCookieStartupRecover := func(ctx context.Context, stateJSON []byte) error {
 		parsed, err := parseBrowserCookieImport(string(stateJSON))
 		if err != nil {
@@ -1455,44 +1457,32 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			return nil
 		}
 		now := time.Now().UTC()
-		var created, updated int
-		err = s.db.Transaction(func(tx *gorm.DB) error {
-			for i := range parsed {
-				ck := parsed[i]
-				ck.ID = idgen.New("bc")
-				ck.BotID = id
-				ck.CreatedAt = now
-				ck.UpdatedAt = now
-				var existing dao.BotBrowserCookie
-				res := tx.Where("bot_id = ? AND domain = ? AND name = ? AND path = ?", id, ck.Domain, ck.Name, ck.Path).First(&existing)
-				if errors.Is(res.Error, gorm.ErrRecordNotFound) {
-					if err := tx.Create(&ck).Error; err != nil {
-						return err
-					}
-					created++
-				} else if res.Error == nil {
-					existing.Value = ck.Value
-					existing.Expires = ck.Expires
-					existing.HTTPOnly = ck.HTTPOnly
-					existing.Secure = ck.Secure
-					existing.SameSite = ck.SameSite
-					existing.UpdatedAt = now
-					if err := tx.Save(&existing).Error; err != nil {
-						return err
-					}
-					updated++
-				} else {
-					return res.Error
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
+		for i := range parsed {
+			parsed[i].ID = idgen.New("bc")
+			parsed[i].BotID = id
+			parsed[i].CreatedAt = now
+			parsed[i].UpdatedAt = now
 		}
-		// 可观测性：只记条数与域，绝不记 cookie 值（凭据本体）。
+		// 先数一下已存在多少条同键项，用于日志区分 created / updated（仅计数，不读 value）。
+		var existed int64
+		if err := s.db.WithContext(ctx).Model(&dao.BotBrowserCookie{}).
+			Where("bot_id = ?", id).Count(&existed).Error; err != nil {
+			return errs.Wrap(err, "count existing browser cookies")
+		}
+		if err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "bot_id"}, {Name: "domain"}, {Name: "name"}, {Name: "path"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value", "expires", "http_only", "secure", "same_site", "updated_at"}),
+		}).Create(&parsed).Error; err != nil {
+			return errs.Wrap(err, "upsert browser cookies from session")
+		}
+		var total int64
+		if err := s.db.WithContext(ctx).Model(&dao.BotBrowserCookie{}).
+			Where("bot_id = ?", id).Count(&total).Error; err != nil {
+			return errs.Wrap(err, "count browser cookies")
+		}
+		// 可观测性：只记条数与增量，绝不记 cookie 值（凭据本体）。
 		s.logger.Infow("browser cookies recovered at startup",
-			"bot_id", id, "created", created, "updated", updated, "total", len(parsed))
+			"bot_id", id, "from_session", len(parsed), "created", total-existed, "rows_total", total)
 		return nil
 	}
 

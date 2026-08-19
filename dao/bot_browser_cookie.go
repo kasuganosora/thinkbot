@@ -8,6 +8,11 @@ import "time"
 // httpOnly / secure / sameSite。运行时由浏览器封装层读取并注入（addCookies），
 // 会话结束再导出回写（见 docs/sandbox-browser-image-design.md §10）。
 //
+// 唯一性：(bot_id, domain, name, path) 唯一——这正是浏览器判定「同一个 cookie」的键。
+// 有了 DB 层约束，回收/导入可用原子 upsert（clause.OnConflict）替代「先查后改」，
+// 既消除并发竞态，也杜绝同一 cookie 产生多行（多行会被 addCookies 注入成相互覆盖
+// 的重复项，登录态表现为随机失效）。
+//
 // 安全约束（与现有 provider apikey 一致——当前无凭据加密工具）：
 //   - value 明文存储，列表接口默认掩码，单条 reveal 才返回完整值；
 //   - 任何日志路径都不得记录 value（仅记 domain + 条数）；
@@ -18,19 +23,19 @@ type BotBrowserCookie struct {
 	ID string `gorm:"primaryKey;size:36" json:"id"`
 
 	// BotID 所属 Bot ID。
-	BotID string `gorm:"size:64;index;not null" json:"botId"`
+	BotID string `gorm:"size:64;index;not null;uniqueIndex:uk_bot_cookie" json:"botId"`
 
 	// Domain cookie 所属域（如 .x.com / www.xiaohongshu.com）。
-	Domain string `gorm:"size:255;index;not null;default:''" json:"domain"`
+	Domain string `gorm:"size:255;index;not null;default:'';uniqueIndex:uk_bot_cookie" json:"domain"`
 
 	// Name cookie 名。
-	Name string `gorm:"size:255;not null;default:''" json:"name"`
+	Name string `gorm:"size:255;not null;default:'';uniqueIndex:uk_bot_cookie" json:"name"`
 
 	// Value cookie 值（凭据本体）。json:"-" 使其永不进入列表/默认序列化。
 	Value string `gorm:"type:text;not null" json:"-"`
 
 	// Path cookie 路径，默认 "/"。
-	Path string `gorm:"size:255;not null;default:'/'" json:"path"`
+	Path string `gorm:"size:255;not null;default:'/';uniqueIndex:uk_bot_cookie" json:"path"`
 
 	// Expires 过期时间（epoch 秒）；0 表示会话级（session cookie）。
 	Expires int64 `gorm:"not null;default:0" json:"expires"`
