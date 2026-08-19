@@ -49,6 +49,7 @@ const aggState = computed(() => {
   if (calls.some(c => c.status === 'running')) return 'running'
   if (calls.some(c => c.status === 'killed')) return 'killed'
   if (calls.some(c => c.status === 'error')) return 'error'
+  // superseded 是被后续同名调用取代的 phantom call，视为已结束
   return 'success'
 })
 
@@ -66,7 +67,9 @@ const aggMeta = computed(() => {
   const n = calls.length
   if (aggState.value === 'running') return '执行中'
   const errs = calls.filter(c => c.status === 'error').length
+  const superseded = calls.filter(c => c.status === 'superseded').length
   if (errs > 0) return `${n} 次 · ${errs} 失败`
+  if (superseded > 0) return `已完成 ${n - superseded} 次 · ${superseded} 已取代`
   return `已完成 ${n} 次`
 })
 
