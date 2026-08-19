@@ -37,20 +37,29 @@ func newDockerSandbox(cfg Config, logger *zap.SugaredLogger) (*dockerSandbox, er
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
-	// 预拉取镜像（非致命，拉取失败时仍继续，容器创建时可能自动拉取）
-	go func() {
-		cmd := exec.Command("docker", "pull", cfg.Image)
-		if err := cmd.Run(); err != nil {
-			logger.Debugw("docker image pull failed (non-fatal)",
-				"image", cfg.Image, "err", err)
-		}
-	}()
+	// 预拉取镜像（非致命，拉取失败时仍继续，容器创建时可能自动拉取）。
+	// builtin 镜像由 thinkbot 本地构建，无需也不能从 registry 拉取。
+	if !isBuiltinImage(cfg.Image) {
+		go func() {
+			cmd := exec.Command("docker", "pull", cfg.Image)
+			if err := cmd.Run(); err != nil {
+				logger.Debugw("docker image pull failed (non-fatal)",
+					"image", cfg.Image, "err", err)
+			}
+		}()
+	}
 	return &dockerSandbox{cfg: cfg, logger: logger}, nil
 }
 
 func (d *dockerSandbox) Backend() string { return "docker" }
 
 func (d *dockerSandbox) Create(id string) (Workspace, error) {
+	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
+	image, err := resolveBotImage(context.Background(), d.cfg.Image, d.logger)
+	if err != nil {
+		return nil, errs.Wrapf(err, "sandbox/docker: resolve image for %q", id)
+	}
+
 	containerName := "thinkbot-sandbox-" + id
 
 	// 构建 docker run 命令
@@ -79,7 +88,7 @@ func (d *dockerSandbox) Create(id string) (Workspace, error) {
 
 	// 工作目录
 	const workDir = "/workspace"
-	args = append(args, "-w", workDir, d.cfg.Image, "sleep", "infinity")
+	args = append(args, "-w", workDir, image, "sleep", "infinity")
 
 	d.logger.Debugw("creating docker container",
 		"container", containerName, "image", d.cfg.Image)
