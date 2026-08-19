@@ -211,15 +211,18 @@ func (s *Server) handleClearBotBrowserCookies(c *gin.Context) {
 }
 
 // handleImportBotBrowserCookies POST 批量导入。
-// 支持三种格式（见 parseBrowserCookieImport）：
+// 支持四种格式（见 parseBrowserCookieImport）：
 //  1. Playwright storageState JSON: {"cookies":[{...}],"origins":[...]}
 //  2. Netscape cookies.txt（# Netscape HTTP Cookie File，TAB 分隔）
 //  3. 浏览器扩展导出的 JSON 数组：[{name,value,domain,path,...}]
+//  4. HTTP Cookie 请求头：k=v; k2=v2（DevTools Network → Headers → Cookie 直接复制；
+//     该格式不含域名，需请求体额外带 domain）
 func (s *Server) handleImportBotBrowserCookies(c *gin.Context) {
 	botID := c.Param("id")
 	var req struct {
-		Raw   string `json:"raw"`
-		Clear bool   `json:"clear"` // 导入前是否先清空
+		Raw    string `json:"raw"`
+		Clear  bool   `json:"clear"`  // 导入前是否先清空
+		Domain string `json:"domain"` // 仅 Cookie header 格式需要（该格式不含域名）
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
@@ -229,7 +232,7 @@ func (s *Server) handleImportBotBrowserCookies(c *gin.Context) {
 		Fail(c, errs.BadRequest("raw 不能为空"))
 		return
 	}
-	parsed, err := parseBrowserCookieImport(req.Raw)
+	parsed, err := parseBrowserCookieImport(req.Raw, req.Domain)
 	if err != nil {
 		Fail(c, errs.BadRequest("解析失败: "+err.Error()))
 		return
@@ -299,13 +302,117 @@ type rawCookie struct {
 	SameSite string  `json:"sameSite"` // no_restriction / lax / strict / none / ""
 }
 
-// parseBrowserCookieImport 解析三种导入格式为 BotBrowserCookie 切片。
-func parseBrowserCookieImport(raw string) ([]dao.BotBrowserCookie, error) {
+// parseBrowserCookieImport 解析四种导入格式为 BotBrowserCookie 切片。
+// defaultDomain 仅用于「Cookie header」格式（该格式不含域名信息），其余格式忽略此参数。
+func parseBrowserCookieImport(raw string, defaultDomain string) ([]dao.BotBrowserCookie, error) {
 	raw = strings.TrimSpace(raw)
 	if isNetscape(raw) {
 		return parseNetscapeCookies(raw)
 	}
+	// DevTools「Copy value」拿到的请求头形态：k=v; k=v; ...（既非 JSON 也非 TAB 分隔）
+	if isCookieHeader(raw) {
+		return parseCookieHeader(raw, defaultDomain)
+	}
 	return parseJSONCookies(raw)
+}
+
+// isCookieHeader 判断是否为 HTTP Cookie 请求头形态（DevTools Network → Headers → Cookie）。
+// 特征：非 JSON 起始、无 TAB 分隔，且至少含一个 name=value 对。
+// 允许开头带 "Cookie:" 前缀（直接从 DevTools 连字段名一起复制）。
+func isCookieHeader(raw string) bool {
+	s := strings.TrimSpace(strings.TrimPrefix(trimCookieHeaderPrefix(raw), "\n"))
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") || strings.Contains(s, "\t") {
+		return false
+	}
+	// 必须存在 "=" 且等号前是合法 cookie 名（不含空格/分号）
+	for _, seg := range strings.Split(s, ";") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		i := strings.Index(seg, "=")
+		if i <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(seg[:i])
+		if name != "" && !strings.ContainsAny(name, " \t;") {
+			return true
+		}
+	}
+	return false
+}
+
+// trimCookieHeaderPrefix 去掉可能被一起复制进来的 "Cookie:" / "cookie:" 字段名前缀。
+func trimCookieHeaderPrefix(raw string) string {
+	s := strings.TrimSpace(raw)
+	low := strings.ToLower(s)
+	if strings.HasPrefix(low, "cookie:") {
+		return strings.TrimSpace(s[len("cookie:"):])
+	}
+	return s
+}
+
+// parseCookieHeader 解析 "k=v; k2=v2" 请求头形态。
+// 该格式只携带 name/value，没有域名/过期/属性信息，故：
+//   - domain 取调用方传入的 defaultDomain（必填，否则无法注入到正确站点）；
+//   - path 固定 "/"，expires=0（会话级），属性留空。
+//
+// 会跳过 cookie 属性关键字（Path/Domain/Expires/Max-Age/Secure/HttpOnly/SameSite），
+// 因为用户可能误把 Set-Cookie 的内容贴进来。
+func parseCookieHeader(raw string, defaultDomain string) ([]dao.BotBrowserCookie, error) {
+	domain := strings.TrimSpace(defaultDomain)
+	if domain == "" {
+		return nil, fmt.Errorf("Cookie header 格式不含域名，请填写「适用域名」后再导入")
+	}
+	attrKeys := map[string]bool{
+		"path": true, "domain": true, "expires": true, "max-age": true,
+		"secure": true, "httponly": true, "samesite": true, "priority": true,
+		"partitioned": true,
+	}
+	seen := make(map[string]bool)
+	out := make([]dao.BotBrowserCookie, 0)
+	for _, seg := range strings.Split(trimCookieHeaderPrefix(raw), ";") {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		i := strings.Index(seg, "=")
+		if i <= 0 {
+			continue
+		}
+		name := strings.TrimSpace(seg[:i])
+		value := strings.TrimSpace(seg[i+1:])
+		if name == "" || strings.ContainsAny(name, " \t") {
+			continue
+		}
+		if attrKeys[strings.ToLower(name)] {
+			continue
+		}
+		// 同名后出现的覆盖前一个（与浏览器行为一致），并保持原有顺序
+		if seen[name] {
+			for j := range out {
+				if out[j].Name == name {
+					out[j].Value = value
+					break
+				}
+			}
+			continue
+		}
+		seen[name] = true
+		out = append(out, dao.BotBrowserCookie{
+			Domain: domain,
+			Name:   name,
+			Value:  value,
+			Path:   "/",
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("Cookie header 格式未解析到 name=value 对")
+	}
+	return out, nil
 }
 
 // isNetscape 判断是否为 Netscape cookies.txt 格式。

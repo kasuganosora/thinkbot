@@ -1404,7 +1404,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return json.Marshal(buildStorageState(cookies))
 	}
 	browserCookieSaver := func(ctx context.Context, stateJSON []byte) error {
-		parsed, err := parseBrowserCookieImport(string(stateJSON))
+		parsed, err := parseBrowserCookieImport(string(stateJSON), "")
 		if err != nil {
 			return errs.Wrap(err, "parse browser cookies from session")
 		}
@@ -1449,7 +1449,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 冲突键 (bot_id,domain,name,path) 由 DB 唯一索引保证，故用原子 upsert 而非「先查后改」，
 	// 避免并发/重试下产生重复行。
 	browserCookieStartupRecover := func(ctx context.Context, stateJSON []byte) error {
-		parsed, err := parseBrowserCookieImport(string(stateJSON))
+		parsed, err := parseBrowserCookieImport(string(stateJSON), "")
 		if err != nil {
 			return errs.Wrap(err, "parse browser cookies from session")
 		}
