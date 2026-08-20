@@ -294,7 +294,10 @@ export const useBotStore = defineStore('bot', () => {
       if (isStale && isStale()) return
       if (activeWorkflowId.value) return
       const wid = res?.workflow?.id
-      if (wid) activeWorkflowId.value = wid
+      if (wid) {
+        activeWorkflowId.value = wid
+        findAndTagWorkflowMessage(wid)
+      }
     } catch {
       // 查不到工作流是常态（大多数会话没有工作流），静默即可
     }
@@ -429,12 +432,18 @@ async function _resumeTrace(traceId) {
         appendToolProgress(assistantTmpId, toolCallId, payload)
         // 同上：阻塞式 task 的 workflowId 只能从进度事件拿到（result 要等到终态）
         const pid = extractWorkflowId(payload)
-        if (pid) activeWorkflowId.value = pid
+        if (pid) {
+          activeWorkflowId.value = pid
+          tagMessageWorkflow(assistantTmpId, pid)
+        }
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
         const wid = extractWorkflowId(payload)
-        if (wid) activeWorkflowId.value = wid
+        if (wid) {
+          activeWorkflowId.value = wid
+          tagMessageWorkflow(assistantTmpId, wid)
+        }
         // 重连续流同样要合并状态快照，否则刷新后面板拿不到工作流实时状态
         mergeWorkflowSnapshot(wid, payload)
       },
@@ -689,6 +698,37 @@ async function resumeContinuation(sessionId) {
     messages.value = updated
   }
 
+  // 把 workflowId 锚定到创建它的那条 assistant 消息，使工作流卡片内联渲染在该轮之后，
+  // 而不是永远钉在整段对话最底部（先前的 hover 行为）。
+  function tagMessageWorkflow(messageId, wid) {
+    if (!wid) return
+    const mIdx = messages.value.findIndex(m => m.id === messageId)
+    if (mIdx < 0) return
+    const updated = [...messages.value]
+    const msg = { ...updated[mIdx] }
+    if (msg.workflowId === wid) return
+    msg.workflowId = wid
+    updated[mIdx] = msg
+    messages.value = updated
+  }
+
+  // 刷新后消息从 DB 载入、activeWorkflowId 已恢复时，反向扫描消息找到承载该工作流的
+  // 助手消息并锚定，否则内联卡片因无 message.workflowId 匹配而不显示。
+  function findAndTagWorkflowMessage(wid) {
+    if (!wid) return
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const m = messages.value[i]
+      if (m.role !== 'assistant') continue
+      const tcs = m.toolCalls || (m.parts || []).filter(p => p.type === 'tool')
+      for (const tc of tcs) {
+        if (extractWorkflowId(tc) === wid) {
+          tagMessageWorkflow(m.id, wid)
+          return
+        }
+      }
+    }
+  }
+
   /** 同步 parts 数组中指定工具 part 的状态（供 appendToolProgress / finishToolCall 复用） */
   function syncPartFromToolCall(msg, toolCallId, call) {
     const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
@@ -812,13 +852,19 @@ async function resumeContinuation(sessionId) {
         // task 工具「提交即阻塞」：tool_result 要等工作流跑完（可能数十分钟）才到达，
         // 因此必须从进度事件里就取到 workflowId，否则整个执行期间面板都不会出现。
         const pid = extractWorkflowId(payload)
-        if (pid) activeWorkflowId.value = pid
+        if (pid) {
+          activeWorkflowId.value = pid
+          tagMessageWorkflow(assistantTmpId, pid)
+        }
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
         // task 工具返回里携带 workflowId（如 "wf-xxxx"），提取后驱动工作流面板展示
         const wid = extractWorkflowId(payload)
-        if (wid) activeWorkflowId.value = wid
+        if (wid) {
+          activeWorkflowId.value = wid
+          tagMessageWorkflow(assistantTmpId, wid)
+        }
         mergeWorkflowSnapshot(wid, payload)
       },
       signal: _abortController.signal,

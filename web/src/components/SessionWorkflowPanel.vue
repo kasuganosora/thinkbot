@@ -405,9 +405,6 @@ async function tick() {
     if (isTerminal.value) {
       stopLive()
       _lastSseTs = 0
-      // 工作流终态后延迟清空卡片，避免"阴魂不散"地粘在后续回复下方。
-      // 用户已看到完成状态（completed/failed），几秒后自动收起。
-      scheduleAutoClear()
       // 后端已在阻塞等待方超时/取消场景下注入续跑消息（traceID=sessionID），
       // 这里按会话 resume 接收 agent 续跑的流式回复。needsContinuation 由后端
       // 注入后通过 status 接口给出，前端消费一次即清除，不会重复触发。
@@ -426,25 +423,6 @@ function startLive() {
 }
 function stopLive() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-}
-
-// ---- 终态自动收起：避免已完成的工作流卡片长期粘在消息流中 ----
-let _autoClearTimer = null
-const AUTO_CLEAR_MS = 8000 // 终态后 8 秒自动隐藏卡片
-
-function scheduleAutoClear() {
-  clearAutoClear()
-  _autoClearTimer = setTimeout(() => {
-    _autoClearTimer = null
-    // 仅在当前面板对应的 workflow 仍活跃时才清（防止竞态误清新 workflow）
-    if (botStore.activeWorkflowId === props.workflowId) {
-      botStore.activeWorkflowId = ''
-      botStore.activeWorkflowStatus = null
-    }
-  }, AUTO_CLEAR_MS)
-}
-function clearAutoClear() {
-  if (_autoClearTimer) { clearTimeout(_autoClearTimer); _autoClearTimer = null }
 }
 
 async function retry(node) {
@@ -468,7 +446,7 @@ async function retry(node) {
 
 watch(() => props.workflowId, load, { immediate: true })
 
-onBeforeUnmount(() => { stopLive(); clearAutoClear() })
+onBeforeUnmount(stopLive)
 </script>
 
 <style scoped>
