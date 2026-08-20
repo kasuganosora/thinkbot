@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
+	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -27,6 +29,11 @@ type WebChannel struct {
 	name    string
 	botID   string
 	ingress *inbound.Ingress
+
+	// chatHistory 用于「无人实时订阅时兜底落库」：当 bot 回复找不到对应的 SSE 订阅
+	// （如 workflow 续跑时前端已断开/未 resume），把 assistant 回复写入 chat_messages，
+	// 用户刷新或 resume 时即可看到，避免「bot 跑完没汇报」的体感。
+	chatHistory *ChatHistoryService
 
 	mu        sync.RWMutex
 	responses map[string]chan core.Action // traceID → response channel
@@ -149,6 +156,11 @@ func (c *WebChannel) Send(ctx context.Context, action core.Action) error {
 	ch, ok := c.responses[traceID]
 	c.mu.RUnlock()
 	if !ok {
+		// 无人实时订阅（如 workflow 续跑时 SSE 已断开 / 前端尚未 resume）：
+		// 兜底落库，用户刷新或 resume 时即可看到 bot 的回复，避免「bot 没继续干活」的体感。
+		// 注意：正常路径（前端持有 SSE）走上面的 ok 分支并实时投递，由 SSE handler
+		// 负责落库，二者互斥，不会重复写库。
+		c.persistReplyFallback(ctx, action, traceID)
 		return nil
 	}
 
@@ -159,4 +171,54 @@ func (c *WebChannel) Send(ctx context.Context, action core.Action) error {
 			"channel", c.name, "trace_id", traceID, "action_type", action.Type)
 	}
 	return nil
+}
+
+// persistReplyFallback 在无人实时订阅（找不到对应 traceID 的 SSE 订阅）时，
+// 把 bot 的 assistant 回复兜底落库到 chat_messages，确保用户刷新 / resume 后可见。
+//
+// 仅处理终态回复（ActionReply），忽略工具回调等其他 action 类型。
+// 幂等：以 traceID 作为 UpsertAssistantByTrace 的幂等键，重复调用只会刷新同一行。
+func (c *WebChannel) persistReplyFallback(ctx context.Context, action core.Action, traceID string) {
+	if c.chatHistory == nil {
+		return
+	}
+	if action.Type != core.ActionReply {
+		return
+	}
+	content, _ := action.Payload.(string)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return
+	}
+	// 剥掉出站协议标记（@@REPLY_CONTROL@@{...}），与正常路径 saveAssistant 保持一致。
+	content = stages.StripReplyControlBlock(content)
+	if content == "" {
+		return
+	}
+
+	// 定位会话：优先从 metadata 取 session_id，否则退回 traceID
+	// （workflow 续跑以 sessionID 作 traceID 注入，二者相等）。
+	sessionID := traceID
+	if action.Metadata != nil {
+		if sid, ok := action.Metadata["session_id"].(string); ok && sid != "" {
+			sessionID = sid
+		}
+	}
+	if sessionID == "" {
+		sessionID = traceID
+	}
+
+	// 续跑无真实请求用户，沿用 continuation 命令的 "system" 归属，与 onWorkflowCompleted 保持对称。
+	const userID = "system"
+
+	c.chatHistory.logger.Infow("webchannel: reply persisted as fallback (no live subscriber)",
+		"channel", c.name, "trace_id", traceID, "session_id", sessionID, "len", len(content))
+
+	go func() {
+		// 用独立 context，避免上游 SSE context 取消导致落库失败。
+		if err := c.chatHistory.UpsertAssistantByTrace(c.botID, userID, content, traceID, "", "", sessionID, false); err != nil {
+			traceid.L(context.Background()).Warnw("webchannel: fallback persist assistant reply failed",
+				"channel", c.name, "trace_id", traceID, "session_id", sessionID, "err", err)
+		}
+	}()
 }

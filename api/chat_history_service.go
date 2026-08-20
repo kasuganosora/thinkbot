@@ -171,8 +171,13 @@ func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit
 		limit = maxPageSize
 	}
 
+	// 系统/续跑等无真实归属用户的消息（user_id='system'）按会话归属，对会话所有者可见：
+	// workflow 续跑的指令(user)与 bot 总结(assistant)都以 'system' 落库，否则会被 user_id
+	// 过滤掉，导致「刷新后看不到 bot 续跑结果」。单用户部署下 'system' 为保留哨兵，不与
+	// 真实数字 user_id 冲突。
+	const systemUserID = "system"
 	q := s.db.Model(&dao.ChatMessage{}).
-		Where("bot_id = ? AND user_id = ? AND session_id = ?", botID, userID, sessionID)
+		Where("bot_id = ? AND session_id = ? AND (user_id = ? OR user_id = ?)", botID, sessionID, userID, systemUserID)
 
 	if cursor != "" {
 		ts, id, err := decodeCursor(cursor)
