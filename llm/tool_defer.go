@@ -285,9 +285,9 @@ func (d *ToolDeferral) searchTool() Tool {
 				d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", names)
 			}
 			var b strings.Builder
-			b.WriteString(fmt.Sprintf("Found %d tool(s). They are now available for direct use:\n", len(hits)))
+			fmt.Fprintf(&b, "Found %d tool(s). They are now available for direct use:\n", len(hits))
 			for _, t := range hits {
-				b.WriteString(fmt.Sprintf("- %s: %s\n", t.Name, t.Description))
+				fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Description)
 			}
 			return b.String(), nil
 		},
