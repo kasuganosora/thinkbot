@@ -100,16 +100,27 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
-import { botCompactionApi } from '@/api/services'
+import { botCompactionApi, providerApi } from '@/api/services'
 
 const props = defineProps({ botId: { type: String, required: true } })
 
-const modelOptions = [
-  { label: 'deepseek-v4-flash', value: 'deepseek-v4-flash' },
-  { label: 'gpt-4o-mini', value: 'gpt-4o-mini' },
-  { label: 'claude-3.5-haiku', value: 'claude-3.5-haiku' },
-  { label: 'gemini-1.5-flash', value: 'gemini-1.5-flash' }
-]
+const modelOptions = ref([])
+
+async function loadModelOptions() {
+  try {
+    const providers = await providerApi.list()
+    const opts = []
+    for (const p of providers) {
+      if (!p.enabled) continue
+      for (const m of (p.models || [])) {
+        opts.push({ label: `${m.name} (${p.name})`, value: m.id })
+      }
+    }
+    modelOptions.value = opts
+  } catch (e) {
+    console.error('加载模型列表失败:', e)
+  }
+}
 
 const cfg = reactive({ enabled: true, threshold: 131072, ratio: 37, model: '' })
 const saving = ref(false)
@@ -171,7 +182,7 @@ function clearHistory() {
   })
 }
 
-onMounted(() => { loadConfig(); loadHistory() })
+onMounted(() => { loadModelOptions(); loadConfig(); loadHistory() })
 </script>
 
 <style scoped>
