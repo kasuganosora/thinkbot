@@ -199,7 +199,6 @@ var userToolDesc = map[string]string{
 	"browser__click":         "点击页面元素",
 	"browser__fill":          "填写表单输入框",
 	"browser__get_text":      "读取页面文本内容",
-	"browser__get_a11y":      "获取页面无障碍结构树",
 	"browser__screenshot":    "截取页面截图",
 	"browser__wait":          "等待页面元素出现",
 	"browser__back":          "浏览器后退",
