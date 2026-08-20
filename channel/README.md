@@ -10,7 +10,7 @@
 
 - WebSocket 长连接（自动重连 + 看门狗）
 - 事件归一化（note → `core.Message`）
-- HTTP API 客户端（发帖/用户信息/文件上传）
+- HTTP API 客户端（发帖/反应/关注/用户与帖子搜索/文件类型定义）
 - 消息去重（基于 note ID 的 TTL 缓存）
 
 ### telegram/

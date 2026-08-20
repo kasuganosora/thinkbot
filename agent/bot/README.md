@@ -9,10 +9,11 @@
 - `Channel` / `Sender` 双向通信接口（输入 + 输出）
 - `BotConfig` / `AgentConfig` 分层配置（基础设施 + 行为参数）
 - `LLMBundle` 从配置构建多层级 LLM 实例集（主力/轻量/多模态）
-- 持久化工作空间（文件操作 + SOUL.md 热重载）
+- 持久化工作空间（文件操作 + SOUL.md 热重载；docker 后端经 `NewWorkspaceSoulStore` 直读容器 named volume，`NewSoulTool` 注册 `soul` 工具供 Bot 自读/自改人格文件）
 - 技能系统装配（`SetupSkills` 组合根）
 - 梦境巩固子系统（`DreamingBundle` 按 Bot 独立配置，cron 调度定时整理记忆）
-- LLM 实例集构建（`CreateLLMBundle` / `CreateProvider`，按 `bot.<id>.main|light|vision` 装配 Provider）
+- LLM 实例集构建（`CreateLLMBundle` / `CreateProvider`，按 `bot.<id>.main|light|vision` 装配 Provider，Light 未配置时回退 Main）
+- 自适应 Engagement 组件注入（`AdaptiveSyncer` / `RejectionDetector`）与 per-bot 浏览器 MCP（docker 后端 + `BrowserEnabled` 时，工具命名 `browser__<tool>`，cookie 与 Web 面板双向同步）
 - `MemoryChannel`：内存双向 Channel（测试用，`NewMemoryChannel` + `Inject`/`SentActions`）
 - `bot.Module` fx 模块：提供 `BotManager` 并绑定生命周期（`OnStart` 启动全部 Bot、`OnStop` 停止），`ProvideBot` 辅助注册
 
@@ -29,6 +30,8 @@
 | `LLMBundle` | LLM 实例集（Main/Light/Vision） |
 | `DreamingBundle` | 梦境巩固子系统封装（DreamManager + cron Scheduler） |
 | `DreamExecutor` | cron.Executor 实现，桥接 cron 触发和 DreamManager.Run() |
+| `BotMetrics` | Bot 运行指标快照（`Metrics()` 返回，含 Engine 指标 + 派发错误数） |
+| `MemoryChannel` | 内存双向 Channel（测试用） |
 
 ## 使用示例
 
@@ -62,15 +65,17 @@ dreamCfg.Enabled = true
 bundle := bot.NewDreamingBundle(
     dreamCfg,         // memory.DreamConfig
     llmProvider,      // LLM 提供商
+    modelName,        // LLM 模型名（从 bot 主模型/经济模型读取）
     location,         // 时区
     tp,               // TracerProvider
     logger,           // 日志
     botID,            // Bot ID
     cronFilePath,     // cron Job 持久化路径
+    db,               // *gorm.DB（SQLite 持久化，重启可恢复）
 )
 
 // Bot.Run 中启动调度器
-bundle.Scheduler.Start()
+bundle.Scheduler.Start(ctx)
 
 // Bot 关闭时优雅停止
 defer bundle.Stop()
@@ -82,4 +87,4 @@ defer bundle.Stop()
 | `DreamExecutor` | cron.Executor 实现，触发 DreamManager.Run() |
 | `Scheduler` | cron 调度器，按 `dreamCfg.Schedule` 定时触发 |
 | `CronStore` | cron Job 持久化（JSON 文件） |
-| `TieredMgr` | 独立的分层记忆管理器（梦境管线专用） |
+| `TieredMgr` / `TieredStore` | 独立的分层记忆管理器/存储（梦境管线专用，SQLite 持久化） |
