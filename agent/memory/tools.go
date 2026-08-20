@@ -383,13 +383,18 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map
 			return nil, errs.Wrap(err, "replace failed")
 		}
 	} else {
-		// 降级路径：先 Append，成功后 Delete
+		// 降级路径：后端没有原子替换能力时，先删旧条目再写新条目。
+		// 顺序不能颠倒 —— 新条目复用同一个 ID，先 Append 走的是 INSERT，
+		// 必然撞上主键唯一约束而永久失败。写入失败则把原条目插回，避免记忆丢失。
 		newEntry.ID = old.ID
-		if err := repo.Append(ctx, newEntry); err != nil {
-			return nil, errs.Wrap(err, "replace write failed")
-		}
 		if err := repo.Delete(ctx, scope, old.ID); err != nil {
-			return nil, errs.Wrap(err, "cleanup of old entry failed")
+			return nil, errs.Wrap(err, "replace: delete of old entry failed")
+		}
+		if err := repo.Append(ctx, newEntry); err != nil {
+			if restoreErr := repo.Append(ctx, old); restoreErr != nil {
+				return nil, errs.Wrap(err, "replace write failed and the original entry could not be restored")
+			}
+			return nil, errs.Wrap(err, "replace write failed (original entry restored)")
 		}
 	}
 
@@ -656,12 +661,14 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 						commitErrorCount++
 					}
 				} else {
-					// 降级路径：先 Append，成功后 Delete
+					// 降级路径：同 handleReplace —— 必须先删后写，否则复用同一 ID
+					// 的 INSERT 必然违反唯一约束。写入失败则把原条目插回。
 					updatedEntry.ID = ch.target
-					if err := repo.Append(ctx, updatedEntry); err != nil {
+					if err := repo.Delete(ctx, scope, ch.target); err != nil {
 						commitErrorCount++
-					} else {
-						_ = repo.Delete(ctx, scope, ch.target)
+					} else if err := repo.Append(ctx, updatedEntry); err != nil {
+						commitErrorCount++
+						_ = repo.Append(ctx, *e)
 					}
 				}
 			}
@@ -672,12 +679,18 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 		}
 	}
 
-	msg := fmt.Sprintf("Applied %d operation(s).", appliedCount)
+	// 提交阶段有失败就不能报成功：successResponse 会附带「写入已保存，别重复」的
+	// 提示，若此时谎报成功，模型会认为记忆已更新而不再重试，导致静默丢数据。
 	if commitErrorCount > 0 {
-		msg += fmt.Sprintf(" %d commit error(s) occurred.", commitErrorCount)
+		return map[string]any{
+			"success": false,
+			"scope":   scope.Key(),
+			"error": fmt.Sprintf("%d of %d operation(s) failed to persist; %d succeeded. Retry the failed ones.",
+				commitErrorCount, appliedCount, appliedCount-commitErrorCount),
+		}, nil
 	}
 
-	return successResponse(scope, msg, true), nil
+	return successResponse(scope, fmt.Sprintf("Applied %d operation(s).", appliedCount), true), nil
 }
 
 // ============================================================================

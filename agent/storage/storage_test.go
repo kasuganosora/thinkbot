@@ -114,6 +114,100 @@ func TestSQLiteRepository_NoteSource(t *testing.T) {
 	}
 }
 
+// TestSQLiteRepository_ReplaceSameID 复现线上故障：记忆工具改写一条已有记忆时，
+// 新条目复用原 ID（保留 created_at），旧实现走「先 Append 再 Delete」的降级路径，
+// INSERT 直接撞上 memory_entries.id 唯一约束 → 更新永久失败。
+// Replace 必须在单事务内先删后插，使就地改写成功。
+func TestSQLiteRepository_ReplaceSameID(t *testing.T) {
+	db := testDB(t)
+	repo := NewSQLiteRepository(db)
+	ctx := context.Background()
+	scope := memory.ChannelScope("ch-replace")
+
+	created := time.Now().Add(-24 * time.Hour)
+	orig := memory.Entry{
+		ID:         "mem-fixed-id",
+		Scope:      scope,
+		Content:    "旧内容",
+		Category:   "observation",
+		Source:     "tool",
+		Importance: 0.5,
+		CreatedAt:  created,
+	}
+	if err := repo.Append(ctx, orig); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	updated := orig
+	updated.Content = "新内容"
+	if err := repo.Replace(ctx, scope, orig.ID, updated); err != nil {
+		t.Fatalf("Replace with identical ID must succeed, got: %v", err)
+	}
+
+	entries, err := repo.Recent(ctx, scope, 10)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 entry after replace, got %d", len(entries))
+	}
+	if entries[0].Content != "新内容" {
+		t.Errorf("content = %q, want %q", entries[0].Content, "新内容")
+	}
+	if entries[0].ID != "mem-fixed-id" {
+		t.Errorf("ID = %q, want it preserved as %q", entries[0].ID, "mem-fixed-id")
+	}
+	// created_at 必须沿用原值，否则记忆会「变新」而打乱时序与淘汰顺序。
+	if delta := entries[0].CreatedAt.Sub(created); delta > time.Second || delta < -time.Second {
+		t.Errorf("created_at drifted by %v, want it preserved", delta)
+	}
+}
+
+// TestSQLiteRepository_ReplaceMissingTargetAppends 校验 deleteID 不存在时退化为纯追加，
+// 不因找不到目标而丢掉新内容。
+func TestSQLiteRepository_ReplaceMissingTargetAppends(t *testing.T) {
+	db := testDB(t)
+	repo := NewSQLiteRepository(db)
+	ctx := context.Background()
+	scope := memory.ChannelScope("ch-missing")
+
+	if err := repo.Replace(ctx, scope, "mem-does-not-exist", memory.Entry{
+		Scope:   scope,
+		Content: "仅追加",
+	}); err != nil {
+		t.Fatalf("Replace with missing target: %v", err)
+	}
+
+	entries, _ := repo.Recent(ctx, scope, 10)
+	if len(entries) != 1 || entries[0].Content != "仅追加" {
+		t.Fatalf("expected the new entry to be appended, got %d entries", len(entries))
+	}
+	if entries[0].ID == "" {
+		t.Error("expected auto-generated ID when new entry has none")
+	}
+}
+
+// TestSQLiteRepository_ReplaceScopeIsolation 确认 Replace 不会跨 scope 删除同 ID 条目。
+func TestSQLiteRepository_ReplaceScopeIsolation(t *testing.T) {
+	db := testDB(t)
+	repo := NewSQLiteRepository(db)
+	ctx := context.Background()
+	mine := memory.ChannelScope("ch-mine")
+	other := memory.ChannelScope("ch-other")
+
+	if err := repo.Append(ctx, memory.Entry{ID: "shared-id", Scope: other, Content: "别人的"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := repo.Replace(ctx, mine, "shared-id", memory.Entry{Scope: mine, Content: "我的"}); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+
+	otherEntries, _ := repo.Recent(ctx, other, 10)
+	if len(otherEntries) != 1 || otherEntries[0].Content != "别人的" {
+		t.Fatalf("Replace leaked across scopes: other scope has %d entries", len(otherEntries))
+	}
+}
+
 func TestSQLiteRepository_ScopeIsolation(t *testing.T) {
 	db := testDB(t)
 	repo := NewSQLiteRepository(db)
