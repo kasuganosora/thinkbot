@@ -24,11 +24,13 @@ import (
 )
 
 func main() {
+	// 注意：不要再额外注册 stderr core。stdout core 已覆盖全部级别（含 WARN/ERROR），
+	// 而守护进程以 `> log 2>&1` 启动会把 stdout 与 stderr 合流到同一个文件，
+	// 额外的 stderr core 会让每条 WARN/ERROR 落盘两份，凭日志统计错误频率时直接翻倍。
 	if err := log.InitWithConfig(log.Config{
 		Level: "debug",
 		Outputs: []log.Output{
 			log.Stdout(),
-			{Type: log.OutputStderr, Level: "warn", Format: log.FormatConsole},
 			log.File("./logs", "thinkbot"),
 		},
 	}); err != nil {
