@@ -467,9 +467,8 @@ func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope)
 
 	r.lastCompact.Store(key, time.Now())
 
-	if err := r.compactor.CompactScope(ctx, scope); err != nil {
-		// 非致命：压缩失败不影响正常写入；渲染层仍有截断兜底
-	}
+	// 非致命：压缩失败不影响正常写入；渲染层仍有截断兜底
+	_ = r.compactor.CompactScope(ctx, scope)
 }
 
 // totalChars 统计指定 scope 下所有「活跃（未归档）」记忆的字符总数。

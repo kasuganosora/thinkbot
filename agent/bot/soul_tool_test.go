@@ -23,7 +23,7 @@ func newTestSoulLoader(t *testing.T, path string, mode prompt.ScanMode) *prompt.
 func execSoul(t *testing.T, loader *prompt.SoulLoader, input map[string]any) (map[string]any, error) {
 	t.Helper()
 	tool := NewSoulTool(loader)
-	out, err := tool.Tool.Execute(&llm.ToolExecContext{Context: context.Background()}, input)
+	out, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()}, input)
 	if err != nil {
 		return nil, err
 	}

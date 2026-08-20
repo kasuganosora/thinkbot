@@ -311,13 +311,9 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 	if !e.lastActionAt.IsZero() && now.Sub(e.lastActionAt) >= resetWindow {
 		e.consecutiveWakes = 0
 	}
-	degraded := false
-	if maxWakes > 0 && e.consecutiveWakes >= maxWakes {
-		degraded = true // 超阈：降级为纯 inject（不发言）
-	}
-	if !e.lastActionAt.IsZero() && now.Sub(e.lastActionAt) < resetWindow {
-		degraded = true // 冷却窗内：降级
-	}
+	// 超阈或冷却窗内：降级为纯 inject（不发言）
+	degraded := (maxWakes > 0 && e.consecutiveWakes >= maxWakes) ||
+		(!e.lastActionAt.IsZero() && now.Sub(e.lastActionAt) < resetWindow)
 	e.wakeMu.Unlock()
 
 	// 3. 准入关卡（Admission Guard，见设计文档 §5.5）。
@@ -700,7 +696,7 @@ func buildHeartbeatPrompt(targets []ChannelTarget) string {
 	} else {
 		b.WriteString("\n当前你可以主动发帖的渠道/会话（post 时 channel/conversation_id 必须取下列之一）：\n")
 		for _, t := range targets {
-			b.WriteString(fmt.Sprintf("- channel=%q, conversation_id=%q, 说明=%q\n", t.Channel, t.ConversationID, t.Label))
+			fmt.Fprintf(&b, "- channel=%q, conversation_id=%q, 说明=%q\n", t.Channel, t.ConversationID, t.Label)
 		}
 	}
 	b.WriteString("\n决策指引：\n")

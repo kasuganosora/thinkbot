@@ -339,7 +339,7 @@ func (s *Server) handleDeleteTieredMemoryEntry(c *gin.Context) {
 		return
 	}
 
-	scope := memory.Scope{}
+	var scope memory.Scope
 	if i := strings.Index(scopeStr, ":"); i >= 0 {
 		scope = memory.Scope{Kind: memory.ScopeKind(scopeStr[:i]), ID: scopeStr[i+1:]}
 	} else {
