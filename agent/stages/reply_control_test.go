@@ -162,12 +162,77 @@ func TestExtractPublicReply(t *testing.T) {
 			input: "<public>公开说：<internal>但我不爽</internal>还是帮你吧</public>",
 			want:  "公开说：还是帮你吧",
 		},
+		{
+			// 真实故障样本：GLM 输出了重复的 <public> 开标签。非贪婪匹配会把内层那个
+			// 字面标签当正文捕获，若不剥离就会把 "<public>" 文本发到帖子里。
+			name:  "duplicated public open tag -> stray literal tag stripped",
+			input: "<internal>心里话</internal><public>\n<public>正文在这里</public>",
+			want:  "正文在这里",
+		},
+		{
+			name:  "trailing stray close tag stripped",
+			input: "<public>正文</public></public>",
+			want:  "正文",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := extractPublicReply(c.input)
 			if got != c.want {
 				t.Fatalf("extractPublicReply: got %q want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestExplicitPublicReply 锁定「控制块缺失时的降级出站判定」语义。
+//
+// 背景（真实故障）：模型漏掉结尾 @@REPLY_CONTROL@@ 控制行，但已用 <public> 标好公开区。
+// 原实现一律 fail-closed，导致真人 @ 提及后 bot 完全没回复。降级判定只认**成对闭合**的
+// <public> 区块——它与控制块存在时的路径 1 防泄漏强度完全相同（只发 public 内文）；
+// 而「只有 <internal>」「未闭合 <public>」「纯文本无标签」三种情况仍旧返回空，保持 fail-closed。
+func TestExplicitPublicReply(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "explicit public block -> returned (fallback allowed)",
+			input: "<internal>心里话</internal><public>想说的话</public>",
+			want:  "想说的话",
+		},
+		{
+			name:  "duplicated open tag -> normalized and returned",
+			input: "<internal>心里话</internal><public>\n<public>想说的话</public>",
+			want:  "想说的话",
+		},
+		{
+			name:  "internal only, no public -> empty (stay fail-closed)",
+			input: "<internal>只有心里话，不想说</internal>",
+			want:  "",
+		},
+		{
+			name:  "unclosed public (possible stream truncation) -> empty (stay fail-closed)",
+			input: "<internal>心里话</internal><public>话说到一半就断了",
+			want:  "",
+		},
+		{
+			name:  "plain text with no tags -> empty (must NOT bypass the gate)",
+			input: "这是一段没有任何标签的纯文本，不该借降级通道出站。",
+			want:  "",
+		},
+		{
+			name:  "empty public block -> empty",
+			input: "<internal>心里话</internal><public>   </public>",
+			want:  "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := explicitPublicReply(c.input)
+			if got != c.want {
+				t.Fatalf("explicitPublicReply: got %q want %q", got, c.want)
 			}
 		})
 	}
