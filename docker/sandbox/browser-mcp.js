@@ -129,11 +129,6 @@ const tools = [
     inputSchema: { type: 'object', properties: { maxChars: { type: 'number', default: 8000 } }, required: [] },
   },
   {
-    name: 'get_a11y',
-    description: '返回当前页面的无障碍树（accessibility snapshot），含可点击元素与角色，便于定位交互点。',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-  },
-  {
     name: 'wait',
     description: '等待指定 CSS 选择器出现（或超时）。',
     inputSchema: { type: 'object', properties: { selector: { type: 'string' }, timeout: { type: 'number', default: 15000 } }, required: ['selector'] },
@@ -188,16 +183,9 @@ async function callTool(name, args) {
       const status = resp ? resp.status() : 'n/a';
       const title = await page.title();
       const url = page.url();
-      let summary = '';
-      try {
-        if (page.accessibility && typeof page.accessibility.snapshot === 'function') {
-          const a11y = await page.accessibility.snapshot().catch(() => null);
-          if (a11y) summary = summarizeA11y(a11y, 600);
-        }
-      } catch (e) { summary = ''; }
       // 登录态常随导航（重定向/Set-Cookie）落地，导航后即落盘，避免进程被非优雅终止时丢 cookie。
       saveState().catch(() => {});
-      return textResult(`status=${status}\ntitle=${title}\nurl=${url}\na11y_summary=${summary}`);
+      return textResult(`status=${status}\ntitle=${title}\nurl=${url}`);
     }
     case 'click': {
       await page.click(args.selector, { timeout: args.timeout || 15000 });
@@ -219,17 +207,6 @@ async function callTool(name, args) {
       const t = await page.locator('body').innerText().catch(() => '');
       const max = args.maxChars || 8000;
       return textResult(t.slice(0, max));
-    }
-    case 'get_a11y': {
-      try {
-        if (!page.accessibility || typeof page.accessibility.snapshot !== 'function') {
-          return textResult('a11y snapshot unavailable in this driver');
-        }
-        const a = await page.accessibility.snapshot().catch(() => null);
-        return textResult(a ? JSON.stringify(a).slice(0, 8000) : 'no a11y tree');
-      } catch (e) {
-        return textResult('a11y snapshot error: ' + e.message);
-      }
     }
     case 'wait': {
       await page.waitForSelector(args.selector, { timeout: args.timeout || 15000 });
@@ -279,20 +256,6 @@ async function callTool(name, args) {
     default:
       throw new Error('unknown tool: ' + name);
   }
-}
-
-function summarizeA11y(node, limit) {
-  if (!node) return '';
-  const parts = [];
-  const walk = (n, depth) => {
-    if (parts.join('').length > limit) return;
-    const role = n.role || '?';
-    const name = n.name ? ` "${n.name}"` : '';
-    parts.push(`${'  '.repeat(Math.min(depth, 6))}${role}${name}`);
-    (n.children || []).forEach(c => walk(c, depth + 1));
-  };
-  walk(node, 0);
-  return parts.join('\n');
 }
 
 let buf = '';
