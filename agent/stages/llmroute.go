@@ -800,10 +800,20 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		result = s.retryLurkUntilValid(statsCtx, cfg, result, logger, env)
 	}
 
-	// 若 LLM 因达到输出 token 上限（length）被截断，追加提示，
+	// 若 LLM 因达到输出 token 上限被截断，追加提示，
 	// 避免用户误以为任务已完成（实际可能只生成了半成品回复）。
 	// 潜水模式不拼接：产出是给机器解析的 JSON，不是给人看的回复。
-	if result.FinishReason == llm.FinishReasonLength && !lurkMode && !heartbeatMode {
+	//
+	// 注意：部分 provider（如 GLM-5.2）在「思考+正文」共享预算耗尽时，
+	// 把 finish_reason 报成 "stop" 而非 "length"，但 usage.outputTokens 已达
+	// max_tokens 上限。因此不能只看 FinishReasonLength，还要用 usage 触顶兜底，
+	// 否则会被静默截断（回复写到一半断掉、毫无提示）。
+	hitCap := result.FinishReason == llm.FinishReasonLength
+	if !hitCap && s.config.MaxTokens != nil && *s.config.MaxTokens > 0 &&
+		result.Usage.OutputTokens >= *s.config.MaxTokens {
+		hitCap = true
+	}
+	if hitCap && !lurkMode && !heartbeatMode {
 		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。" +
 			"请回复「继续」让我接着完成剩余工作。"
 	}
