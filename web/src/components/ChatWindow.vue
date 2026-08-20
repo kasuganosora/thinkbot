@@ -133,6 +133,13 @@
             </div>
             </template>
           </div>
+          <!-- 工作流卡片：内联锚定在创建它的那一轮助手消息之后，而非钉在对话底部 -->
+          <div
+            v-if="msg.role === 'assistant' && msg.workflowId && msg.workflowId === store.activeWorkflowId"
+            class="wf-inline"
+          >
+            <SessionWorkflowPanel :session-id="store.activeBotId" :workflow-id="msg.workflowId" />
+          </div>
         </div>
 
       </template>
@@ -154,14 +161,6 @@
             {{ chip }}
           </div>
         </div>
-      </div>
-
-      <!-- 工作流面板：内嵌在对话末尾（它由 bot 在本轮对话中创建，位置即其时间位置） -->
-      <div v-if="sessionWorkflowId" class="wf-inline">
-        <SessionWorkflowPanel
-          :session-id="store.activeBotId"
-          :workflow-id="sessionWorkflowId"
-        />
       </div>
 
       <!-- 回到底部按钮：流式期间用户上翻时显示 -->
@@ -538,8 +537,8 @@ function scrollToBottomIfAtBottom() {
 // 消息列表长度变化时（新消息到达）智能滚动
 watch(() => messages.value.length, scrollToBottomIfAtBottom)
 
-// 工作流面板已改为内嵌在对话末尾（不再 sticky 悬浮），它出现时会把内容顶高，
-// 若用户正处于底部需跟着滚下去，否则新出现的面板会落在视口下方看不到。
+// 工作流面板内联锚定在创建它的那一轮助手消息之后；当它首次出现时若用户已在底部，
+// 跟随滚到底部以免新面板落在视口下方（用户上翻阅读时不打扰）。
 watch(sessionWorkflowId, (id) => {
   if (id) scrollToBottomIfAtBottom()
 })
