@@ -180,8 +180,8 @@ import httputil "github.com/kasuganosora/thinkbot/util/http"
 sharedHTTP := httputil.New(
     httputil.WithTimeout(60 * time.Second),
     httputil.WithRetry(retry.Config{
-        MaxRetries: 3,
-        BaseDelay:  time.Second,
+        MaxRetries:    3,
+        FixedInterval: time.Second,
     }),
 )
 
@@ -690,7 +690,7 @@ params.Messages = llm.PatchToolCalls(params.Messages)
 
 ### TruncateOutput — 工具输出截断
 
-每次工具执行后，`runTool` 会用 `DefaultTruncationConfig()` 对结果做字节/行级截断（保留头部+尾部，中间省略），避免单个超长结果撑爆上下文：
+每次工具执行后，`runTool` 会按 `OrchestrateConfig.ToolOutput`（零值回退 `DefaultToolOutputConfig()`，默认 MaxLines=500 / MaxBytes=50KB）对结果做字节/行级截断（保留头部+尾部，中间省略），避免单个超长结果撑爆上下文：
 
 ```go
 cfg := llm.DefaultTruncationConfig() // MaxLines=500, MaxBytes=50KB
@@ -913,6 +913,7 @@ llm/
 ├── tool_schema.go      # NewTool[T] 泛型 + struct→JSONSchema 反射推断
 ├── orchestrate.go      # 多步编排：OrchestrateGenerate / OrchestrateStream
 ├── orchestrate_loop.go # 动态步数控制 loopController
+├── repetition_guard.go # RepetitionGuard — 重复退化检测（流式增量/一次性）
 ├── patchtoolcalls.go   # PatchToolCalls — 修补悬挂工具调用
 ├── reduction.go        # Reduction — 编排内轻量压缩（TruncateToolResults / ReduceHistory）
 ├── tool_truncate.go    # TruncateOutput — 工具输出字节/行级截断
@@ -924,8 +925,8 @@ llm/
 ├── quota_provider.go   # QuotaRecordingProvider — 全链路 Token 记账
 ├── stats.go            # UsageMetric / UsageRecorder
 ├── stats_provider.go   # StatsRecordingProvider — 使用统计记录
-├── invocation.go       # 调用标识工具
-├── media.go            # 媒体类型工具
+├── invocation.go       # newInvocationID — 工具执行唯一标识生成
+├── media.go            # 媒体校验（ValidateImagePart / ValidateFilePart 等）
 ├── openai/             # OpenAI provider 实现
 ├── anthropic/          # Anthropic (Claude) provider 实现
 ├── google/             # Google (Gemini) provider 实现

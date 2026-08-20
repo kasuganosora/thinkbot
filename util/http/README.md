@@ -432,7 +432,7 @@ if errors.As(err, &se) {
 | 函数 | 策略 |
 |------|------|
 | `DefaultStreamShouldRetry` | 仅当「看门狗超时且本次连接未收到任何数据」时重试；其他一律不重试 |
-| `StreamShouldRetry` | 在上者基础上：context 取消不重试；`StreamHTTPError` 状态码 ∈ {408,429,500,502,503,504,529} 重试，其余 4xx 不重试；其他网络层错误默认重试 |
+| `StreamShouldRetry` | 在上者基础上：context 取消不重试；`StreamHTTPError` 状态码 ∈ {408,429,500,502,503,504,529} 重试（429/403 且 body 命中额度耗尽特征时除外），其余 4xx 不重试；其他网络层错误默认重试 |
 | `StreamGetRetryDelay` | 从 `StreamHTTPError` 的 `Retry-After-MS`（优先）/ `Retry-After`（秒数或 HTTP-date）解析建议延迟 |
 
 ```go
@@ -442,6 +442,18 @@ cfg := retry.Config{
     GetRetryDelay: httputil.StreamGetRetryDelay,
 }
 ```
+
+### 配额耗尽识别（quota exhausted）
+
+429 有两种语义：瞬时限流（可退避重试）与配额/额度耗尽（重置前重试必然失败）。
+`StreamShouldRetry` 对后者自动短路不重试，由以下函数支撑：
+
+| 函数 | 说明 |
+|------|------|
+| `IsQuotaExhausted(err)` | 仅对 `*StreamHTTPError` 且状态码为 429/403 生效；body 命中额度耗尽特征（如 `insufficient_quota`、`"code":"1308"`、`使用上限`、`余额不足` 等）时返回 true |
+| `IsQuotaExhaustedLoose(err)` | 纯文本兜底：错误链中拿不到 `*StreamHTTPError` 时，从 `err.Error()` 文本判断（需同时出现 429/403 与额度措辞） |
+| `QuotaResetAt(err)` | 尽力解析配额恢复时刻：优先 `Retry-After` 响应头，其次 body 中的绝对时间戳；拿不到或已过期返回 `ok=false`（不编造默认值） |
+| `QuotaResetAtLoose(err)` | `QuotaResetAt` 的纯文本兜底版本 |
 
 ---
 
@@ -523,7 +535,7 @@ resp, err := client.Get("/data").SetContext(ctx).Do()
 util/http/
 ├── client.go       # Client + Option + Request 链式构造 + Response + 便捷方法 + Dump
 ├── errors.go       # WatchdogTimeoutError / IsWatchdogTimeout + DefaultStreamShouldRetry
-│                   # + StreamShouldRetry + StreamGetRetryDelay
+│                   # + StreamShouldRetry + StreamGetRetryDelay + 配额耗尽识别（IsQuotaExhausted 等）
 ├── sse.go          # SSE 事件流：DoSSE / DoSSEStream / DoSSEStreamWithErr
 ├── stream.go       # 原始流式响应：DoStream / DoStreamChunks / DoStreamLines
 ├── stream_conn.go  # 流式连接共用逻辑：streamConnect + StreamHTTPError + classifyStreamError

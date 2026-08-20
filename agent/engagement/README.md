@@ -14,6 +14,7 @@
 - **预设角色 Profiles**：observer/lurker/moderator/active，一键切换参与风格
 - **自适应频率 AutoAdjust**：根据群组活跃度自动调整参与频率
 - **对话阶段感知**：推断 divergent/convergent/idle 阶段，动态调整策略
+- **自适应画像**：`BotProfileTraits` 从 SOUL.md 解析量化人格，经 `AdaptiveEngagementSyncer` 映射为 per-channel engagement 参数；`RejectionDetector` 检测「被无视」触发短期自闭模式
 - `EngagementStage` Pipeline 集成（Order=40）
 
 ## 关键类型
@@ -26,6 +27,7 @@
 | `TimingGate` | 有状态时序门控（退避/突发/概率/等待/自适应） |
 | `BurstBuffer` | 消息突发缓冲器 |
 | `LLMJudge` / `SimpleJudge` | Tier 2 LLM 快判（传统 + 评分模式） |
+| `BotProfileTraits` / `AdaptiveEngagementSyncer` / `RejectionDetector` | SOUL.md 画像解析、画像 → engagement 参数动态映射（含 per-channel 覆盖）、「被无视」检测（自闭模式） |
 | `EngagementProfile` | 预设角色配置文件 |
 | `ConversationPhase` | 对话阶段推断（idle/divergent/convergent） |
 | `TokenBucket` / `SlidingWindow` | 限流器实现 |

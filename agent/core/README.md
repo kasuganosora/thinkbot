@@ -12,6 +12,7 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 - 定义 Pipeline 控制流错误类型（`PipelineError`/`AbortError`/`SkipError`）
 - 定义多模态附件类型 `Attachment`
 - **警告系统**（`warning.go`）：允许中间件向 Envelope 注入软/硬警告，Stage 可消费并合并到 System Prompt
+- **活动轨迹**（`events.go`）：`EventSink` append-only 事件流（stage 边界、工具调用/结果、LLM 请求/响应、上下文注入、子 Agent 派生、HITL defer/resume），默认零侵入 `NoopSink`，可注入 `MemorySink`（有界环，供回放/自检）；经 `WithEventSink`/`EventSinkFromContext` 在 context 中传递
 
 ## 源文件
 
@@ -23,6 +24,7 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 | `errors.go` | `PipelineError`、`AbortError`、`SkipError` 及判定函数 |
 | `attachment.go` | `Attachment` 及类型判定/提取辅助函数 |
 | `warning.go` | `Warning` 与延迟警告注入 |
+| `events.go` | `Event`/`EventKind`、`EventSink` 接口 + `NoopSink`/`MemorySink`、context 传递辅助 |
 
 ## 关键类型
 
@@ -36,6 +38,8 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 | `Predicate` / `PredicateFunc` | Envelope 条件匹配器 + 函数适配器 |
 | `Attachment` | 多模态附件（image/audio/video/file） |
 | `Warning` | 中间件注入的运行时警告（`WarningLevelSoft` / `WarningLevelHard` 两级） |
+| `Event` / `EventKind` | 活动轨迹事件（`stage/start`、`tool/call`、`llm/request`、`hitl/deferred` 等） |
+| `EventSink` / `MemorySink` | 事件接收接口与有界内存实现（`NoopSink` 为默认零侵入实现） |
 
 ### Envelope 方法
 

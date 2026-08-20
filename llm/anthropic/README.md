@@ -4,7 +4,7 @@ Anthropic Claude Messages API 的 `llm.Provider` 实现。
 
 ## 功能概览
 
-- 实现 `llm.Provider` 接口（`DoGenerate` / `DoStream`），并额外实现 `llm.ModelLister`（`ListModelsUnified`）
+- 实现 `llm.Provider` 接口（`DoGenerate` / `DoStream`）；提供 `ListModelsUnified` 直接方法，但**未实现**统一接口 `llm.ModelLister`
 - Messages API 流式与非流式调用
 - Extended Thinking（扩展思考）及签名（Signature）保留，支持多轮验证
 - Prompt Caching（`cache_control` 断点，单请求最多 4 个断点，超出自动静默丢弃）

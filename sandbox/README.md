@@ -84,6 +84,9 @@ type StreamWorkspace interface {
 | `sandbox_list_dir` | 列目录 | — |
 | `sandbox_search_content` | 内容搜索（ripgrep，回退 grep） | — |
 | `sandbox_health` | 健康检查（backend/状态/原因） | `DeferredLoad: true` |
+| `run_code` | 在沙箱内一次执行多步脚本（bash/python/node），只回传最终 curated 输出（Programmatic Tool Calling） | 与 `sandbox_exec` 同隔离级别；支持 `workdir`/`timeout`/`stuck_timeout` |
+
+> 完整工具提示词段落见 `tools.go` 的 `botWorkspaceToolPromptSection`。
 
 `sandbox_exec` 参数：`command`（必填）、`workdir`、`timeout`（硬上限秒，0=卡死阈值×3）、`stuck_timeout`（卡死看门狗秒，默认 300）。返回额外字段：`truncated`、`reliable`、`aborted`、`oomKilled`、`warnings`、`workdir`；当 `reliable=false` 时还带 `reliabilityWarning`，提示 LLM 结果不完整不可信。
 
@@ -106,11 +109,11 @@ type StreamWorkspace interface {
 | `sandbox.stuck_timeout` | `300` | 卡死看门狗阈值（秒） |
 | `sandbox.timeout` | `0` | 单命令硬上限（秒），0 = 卡死阈值 × 3 |
 | `sandbox.require_docker` | `false` | auto 模式下强制要求 Docker，否则报错 |
-| `sandbox.image` | `alpine:latest` | Docker 镜像 |
+| `sandbox.image` | `builtin` | Docker 镜像；`builtin`/空 = thinkbot 内置浏览器沙箱镜像（启动 bot 时按需自构建），其他值（如 `alpine:latest`）作为预构建镜像原样使用 |
 | `workspace.dir` | `data/workspaces` | per-bot 工作空间根目录 |
 | `system.timezone` | 服务器本地 | 容器/进程 TZ |
 
-`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`、`Timezone`、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB）、`PersistentContainer`。
+`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
 
 ## 安全隔离
 

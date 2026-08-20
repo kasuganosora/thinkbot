@@ -26,46 +26,49 @@
 2. **Compile** — 编译工作流图：校验 DAG 完整性（无环、无悬空引用）+ 计算拓扑排序 + 构建邻接表和入度缓存
 3. **Scheduler** — 按拓扑序调度，同层无依赖节点并行执行（semaphore 限流）；下游节点自动注入上游产物上下文
 4. **Executor** — 每个节点由独立 SubAgent 执行；`review=true` 的节点执行后启动 Review 自循环
-5. **全程异步** — 提交后立即返回 `task_id`，LLM 通过工具轮询进度
+5. **提交即阻塞** — `task` 调用在服务端等待工作流进入终态才返回最终状态与进度，LLM 无需轮询
 
 ## 架构
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `Manager` | `manager.go` | 统一入口：Submit / GetStatus / ListNodes / Control / Recover |
+| `Manager` | `manager.go` | 统一入口：Submit / GetStatus / ListNodes / Control / Recover；另有 StartSweeper（过期清理）/ StartQuotaWatch（429 配额暂停与到点续跑看门狗） |
 | `Analyzer` | `analyzer.go` | LLM 需求分析 + DAG 生成 |
 | `Compile` | `dag.go` | DAG 编译：校验 + 拓扑排序 + 邻接表/入度缓存 + 上游结果聚合 |
 | `Scheduler` | `scheduler.go` | DAG 拓扑调度、并行限流、重试/Review 循环、级联跳过、上游结果注入 |
-| `Executor` | `executor.go` | 节点执行（SubAgent Delegate）、Review 审查、带反馈迭代 |
+| `Executor` | `executor.go` | 节点执行（SubAgent `DelegateStream`）、Review 审查、带反馈迭代 |
 | `DAG` | `dag.go` | 纯领域算法：校验、环检测、就绪节点计算、级联跳过、树构建 |
 | `Repository` | `repository.go` | 内存优先 + DB 双写持久化 |
 | `Models` | `models.go` | GORM 模型（JSON 全量序列化策略） |
 | `Wire` | `wire.go` | 组合根：`Setup()` 统一装配 |
 | `Tools` | `tools.go` | 暴露给主 Agent 的 LLM 工具 |
 | `Types` | `types.go` | 领域模型、枚举、视图结构 |
+| `Intent` | `intent.go` | `DetectGoalModeIntent` 识别「反复打磨直到达标」类收敛性意图，命中则强制 goalMode |
+| `ReviewError` | `review_error.go` | `isReviewInfraError` 区分基础设施错误与业务判定 |
+| `StatusWait` | `status_wait.go` | `waitForTerminal` 服务端阻塞等待（task 提交即阻塞的底层） |
+| `QuotaBreak` | `quota_break.go` | 429 配额熔断：暂停调度、标记 `interrupted` 等待到点续跑 |
 
 ## LLM 工具
 
-引擎向主 Agent 注册 4 个工具：
+引擎向主 Agent 注册 3 个工具：
 
 | 工具 | 说明 |
 |------|------|
-| `task` | 提交需求，异步创建工作流，立即返回 `task_id`。支持 `goalMode` 目标模式（闭环迭代直到审查通过）与 `maxParallel` 并发度覆盖 |
-| `task_status` | 查询工作流状态（analyzing → running → completed/failed/terminated）和进度统计。支持 `wait: true` 服务端阻塞等待：传 `wait=true` 后服务端在函数内轮询，直到工作流进入终态才返回，禁止 LLM 自行 `sleep` 轮询；可用 `timeoutSeconds`（默认 600，上限 1800）限定最长等待 |
+| `task` | 提交需求并**阻塞**到工作流进入终态（completed/failed/terminated）才返回最终状态与进度，LLM 无需也不存在单独的轮询调用。支持 `goalMode` 目标模式（闭环迭代直到审查通过）与 `maxParallel` 并发度覆盖；阻塞等待上限 `taskBlockingMaxTimeout=18m`，超时返回 `timedOut: true`（工作流仍在后台运行，可用 `task_detail` 查看进度，**不要**重复提交 `task`） |
 | `task_detail` | 查询子任务列表（`flat` 平铺 / `tree` 树状）；开启目标模式时额外返回 `goalMode`/`goalIteration`/`goalMaxIterations` |
-| `task_control` | 控制操作：对 **运行中** 工作流重试指定失败节点 / 终止；对 **已终态** 工作流通过 `ActionRetry` 从指定节点重新拉起调度（`restartFromNode`） |
+| `task_control` | 控制操作：对 **运行中** 工作流重试指定失败节点 / 终止（`analyzing` 阶段禁止终止，会被拒绝）；对 **已终态** 工作流通过 `ActionRetry` 从指定节点重新拉起调度（`restartFromNode`） |
 
-> 工具命名与主流 LLM 预训练中的 agentic 工具名（如 Claude 的 Task、LangChain 的 TaskTool）对齐，降低 LLM 适配成本。
+> 工具命名与主流 LLM 预训练中的 agentic 工具名（如 Claude 的 Task、LangChain 的 TaskTool）对齐，降低 LLM 适配成本。旧的 `task_status(wait: true)` 轮询工具已移除。
 
-## 等待模式（wait）
+## 提交即阻塞（task 的服务端等待）
 
-`task_status` 提供服务端阻塞等待能力。`wait: true` 时，工具调用在引擎侧 `waitForTerminal` 内持续轮询，直到工作流进入 `completed` / `failed` / `terminated` 才返回，避免 LLM 用 `sleep` 反复轮询：
+`task` 是阻塞式工具：提交后在引擎侧 `waitForTerminal` 内持续轮询（复用原 `task_status(wait:true)` 的服务端等待逻辑），直到工作流进入 `completed` / `failed` / `terminated` 才返回，避免 LLM 用 `sleep` 反复轮询：
 
-- `timeoutSeconds`（整数，秒）：最长等待时长，默认 `600`（10 分钟），上限 `1800`（30 分钟，由 `statusWaitMaxTimeout` 约束，超出被截断）。
-- 超时返回 `TimedOut: true` 且携带最新快照，而非报错；调用方可再次 `task_status(wait: true)` 续等。
-- 内部轮询间隔 `statusWaitPollInterval = 3s`，并响应 `ctx` 取消。
+- 阻塞等待上限 `taskBlockingMaxTimeout = 18m`（必须小于 api/handler_chat.go 后台落库的 20min bgCtx 上限，否则最终回复无法落库）。
+- 超时返回 `TimedOut: true` 且携带最新快照，而非报错；工作流仍在后台运行——**不要**再调 `task`（那会提交新任务），用 `task_detail` 查看进度或直接告知用户任务仍在进行。
+- 内部轮询间隔 `statusWaitPollInterval = 3s`，并响应 `ctx` 取消；等待期间通过 `ctx.SendProgress` 推送进度（payload 带 `workflowId`，前端工作流面板靠它挂载）。
 
-判断口诀：**想知道结果 → 一次 `task_status(wait: true)` → 拿到终态再继续**；不带 `wait` 的查询仅用于「顺便看一眼进度」。
+判断口诀：**想知道结果 → 一次 `task` 调用 → 返回即终态再继续**；`task_detail` 仅用于「事后查看各子任务明细」。
 
 ## 并行 DAG（默认并行）
 
@@ -181,13 +184,13 @@ workflow.RegisterTools(toolMgr, wfMgr)
 
 ## 反嵌套保证
 
-Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中不可见，无法递归创建工作流。此外，引擎内部使用独立的 `SubAgentManager`，通过 `Delegate` 一次性调用执行，不经过主 Agent 的 ToolManager，无法访问任何工具。
+Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中不可见，无法递归创建工作流。此外，引擎内部使用独立的 `SubAgentManager`，通过 `DelegateStream` 一次性调用执行（看门狗 `WithStuckTimeout`，只杀真卡死），不经过主 Agent 的 ToolManager，无法访问任何工具。
 
 ## 持久化
 
 采用 JSON 全量序列化策略：整个 `Workflow` 对象序列化为 `WorkflowModel.Data` 字段。读操作优先从内存缓存获取（O(1)），写操作同时更新内存和 DB。表名 `workflow_workflows`。
 
-> **两个 Repository 实例 + DB 新鲜度检查**：`api/botservice.go` 在每 bot 建引擎时持有写入实例（真正执行 DB 写），`api/workflow_service.go` 持有独立的只读查询实例，二者缓存互不共享。因此 `Repository.Get(id)` 即便命中内存缓存，仍会用 `updated_at` 与 DB 比对新鲜度；DB 不可用时退回内存缓存快照，避免读到已被其他实例改写的陈旧数据。写操作 `Save` 存入的是工作流的深拷贝快照；缓存上限 `maxCacheSize=500`，终态工作流会被优先淘汰。
+> **两个 Manager 实例 + 引擎复用**：`api/botservice.go` 在每 bot 启动时构建带工作区工具（`ToolMgr`）的引擎并发布；`api/workflow_service.go` 优先复用 BotService 已装配的引擎（不缓存，避免持有关闭的引擎），仅在没有任何 bot 启动时退化为自建实例（此时工作流 SubAgent 拿不到工作区工具，代码/文件类节点只能产出计划）。因此 `Repository.Get(id)` 即便命中内存缓存，仍会用 `updated_at` 与 DB 比对新鲜度；DB 不可用时退回内存缓存快照，避免读到已被其他实例改写的陈旧数据。写操作 `Save` 存入的是工作流的深拷贝快照；缓存上限 `maxCacheSize=500`，终态工作流会被优先淘汰。
 
 ## 崩溃恢复
 
@@ -213,6 +216,15 @@ result, err := wfMgr.Recover(context.Background())
 - **中间状态重置**：被中断的 `running`/`reviewing` 节点清零 retry/iteration 计数，重置为 `pending` 等待重新调度
 - **幂等安全**：重复调用 `Recover()` 会跳过已经在运行中的工作流
 
+## 配额熔断与到点续跑（quota_break）
+
+上游 LLM 配额耗尽（HTTP 429 / body code 1308 等）时不再逐节点撞墙重试，而是三级联动：HTTP 流式层与节点层识别配额错误后立即放弃重试；工作流层**首个**配额失败即熔断整条工作流（`tripQuotaBreak`）：
+
+- 配额失败的节点退回 `pending`（不记 `failed`、不级联跳过），已有成果保留；
+- 工作流置 `interrupted` 并记录 `QuotaResumeAt`（服务端告知的重置时刻；未知时兜底 `defaultQuotaWait=15m`，解析异常封顶 `hardQuotaWaitCap=12h`）；
+- `Manager.StartQuotaWatch` 看门狗到点自动 `ResumeQuotaInterrupted` 续跑；`SweepStale`/`Recover` 对仍在等待窗口内的工作流跳过，交给看门狗接管；
+- 累计熔断超过 `maxQuotaBreaks=5` 次按失败收尾。
+
 ## 实时进度事件（旁路输出集成）
 
 Workflow 引擎通过 `EventBus` 发布实时进度事件，Web 端可通过 SSE 订阅指定 `workflow_id` 的事件流。
@@ -233,6 +245,7 @@ wfMgr, saMgr := workflow.Setup(workflow.WireConfig{
 |---------|---------|-----------|
 | `workflow.submitted` | 工作流已提交 | `requirement` |
 | `workflow.analyzed` | DAG 分析完成 | `node_count`, `nodes[]` |
+| `workflow.running` | 工作流开始执行调度 | `node_count`, `max_parallel` |
 | `workflow.completed` | 工作流全部成功 | `node_count` |
 | `workflow.failed` | 工作流失败 | `error` |
 | `workflow.terminated` | 工作流被终止 | — |
@@ -240,7 +253,8 @@ wfMgr, saMgr := workflow.Setup(workflow.WireConfig{
 | `workflow.node.completed` | 节点完成 | `node_id`, `retry_count`, `iteration_count`, `result_preview` |
 | `workflow.node.failed` | 节点失败 | `node_id`, `retry_count`, `error` |
 | `workflow.node.reviewing` | 节点进入 Review | `node_id`, `iteration` |
-| `workflow.node.retrying` | 节点执行重试 | `node_id`, `attempt`, `error` |
+| `workflow.node.retrying` | 节点执行重试 | `node_id`, `attempt`, `max_retries`, `error` |
+| `workflow.node.skipped` | 节点被级联跳过 | `caused_by`, `skipped_ids` |
 
 > 所有事件的 `trace_id` 字段 = `workflow_id`，Web SSE 端通过 `bus.Subscribe(workflowID)` 筛选。
 

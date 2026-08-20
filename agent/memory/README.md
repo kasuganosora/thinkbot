@@ -30,7 +30,7 @@
 | `Scope` | 记忆作用域（Channel/User/Bot/Global） |
 | `LLMConsolidator` | LLM 驱动的记忆巩固器 |
 | `Expander` | 上下文展开器 |
-| `ThinkFilter` | 笔记价值过滤器 |
+| `ThinkFilterStore` | Store 装饰器：写入前用 `StripThinking` 系列函数清理 `<think>`/内部标签 |
 | `Window` | 对话窗口管理器 |
 | `LLMProfiler` | 用户画像提取器（TF-IDF 聚类 + 语义验证） |
 | `Snapshot` | 快照管理器（实时/冻结/定期刷新） |
@@ -92,7 +92,7 @@
 
 ### Profiler 画像提取
 
-Dreaming 系统的 `discoverScopes()` 会自动发现所有活跃 scope（包括 `user:*` 和 `channel:*`），然后对每个 scope 独立运行 Profiler。因此：
+Dreaming 系统的 `discoverScopes()` 会自动发现所有活跃 scope（包括 `user:*`、`channel:*`、`bot:*`），但其中仅 `bot:*` scope 会进入画像提取（`extractBotProfiles` 注入的 `BotProfileProfiler`，蒸馏 Bot 的 L3 自我认知）。用户画像由 `TieredManager.ExtractProfile`（配 `LLMProfiler`）按 scope 独立提取，与 dreaming 调度无关。因此：
 
 - `user:A` scope 的记忆 → 提取用户 A 的专属画像
 - `user:B` scope 的记忆 → 提取用户 B 的专属画像

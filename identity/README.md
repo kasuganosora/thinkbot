@@ -30,8 +30,8 @@ Telegram/Misskey → 发送授权码 → BindStage(Order=3) 拦截
 TB-XXXX-XXXX
 ```
 
-- 安全字母表：`23456789ABCDEFGHJKMNPQRSTVWXYZ`（排除 0/O/1/I/L 等易混淆字符）
-- 搜索空间：29^8 ≈ 2×10^11
+- 安全字母表：`23456789ABCDEFGHJKMNPQRSTVWXYZ`（30 个字符，排除 0/O/1/I/L 等易混淆字符）
+- 搜索空间：30^8 ≈ 6.6×10^11
 - 有效期：5 分钟
 - 一次性：使用后不可重复
 

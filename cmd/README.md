@@ -5,9 +5,9 @@ thinkbot 的主程序入口（`cmd/main.go`，`package main`），初始化日�
 ## 功能
 
 - 初始化 Zap 结构化日志（`log.InitWithConfig`，level=debug）
-  - `stdout` — 全量输出
-  - `stderr` — 仅 `warn` 及以上，console 格式
-  - 文件 — `./logs/thinkbot*`，由 lumberjack 轮转
+  - `stdout` — 全量输出，console 格式（不额外注册 stderr core，
+    避免守护进程 `> log 2>&1` 合流后 WARN/ERROR 重复落盘）
+  - 文件 — `./logs/thinkbot.log`，JSONL 格式，由 lumberjack 轮转
 - 打开 SQLite 数据库 `thinkbot.db`（`db.OpenSQLiteWithLogger`，慢查询阈值 200ms，忽略 RecordNotFound）
 - 执行 `dao.Migrate(db)` 完成建表迁移
 - 通过 `go.uber.org/fx` 组装所有功能模块并 `app.Run()`
