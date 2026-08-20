@@ -365,7 +365,7 @@ func trimCookieHeaderPrefix(raw string) string {
 func parseCookieHeader(raw string, defaultDomain string) ([]dao.BotBrowserCookie, error) {
 	domain := strings.TrimSpace(defaultDomain)
 	if domain == "" {
-		return nil, fmt.Errorf("Cookie header 格式不含域名，请填写「适用域名」后再导入")
+		return nil, fmt.Errorf("导入失败：cookie header 未携带域名，请填写「适用域名」后再导入")
 	}
 	attrKeys := map[string]bool{
 		"path": true, "domain": true, "expires": true, "max-age": true,
@@ -410,7 +410,7 @@ func parseCookieHeader(raw string, defaultDomain string) ([]dao.BotBrowserCookie
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("Cookie header 格式未解析到 name=value 对")
+		return nil, fmt.Errorf("导入失败：cookie header 未解析到 name=value 对")
 	}
 	return out, nil
 }
@@ -465,7 +465,7 @@ func parseNetscapeCookies(raw string) ([]dao.BotBrowserCookie, error) {
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("Netscape 格式未解析到 cookie")
+		return nil, fmt.Errorf("导入失败：netscape 格式未解析到 cookie")
 	}
 	return out, nil
 }

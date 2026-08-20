@@ -611,7 +611,7 @@ func TestStdioTransportHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newStdioTransport: %v", err)
 	}
-	defer tp.Close()
+	defer func() { _ = tp.Close() }()
 
 	if !tp.Healthy() {
 		t.Fatal("fresh stdio transport should be healthy")

@@ -105,7 +105,7 @@ func ensureImageOnce(ctx context.Context, logger *zap.SugaredLogger, tag string)
 	if err != nil {
 		return "", errs.Wrap(err, "botsandbox: create build temp dir")
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	for _, name := range buildFiles {
 		data, err := buildContext.ReadFile(name)

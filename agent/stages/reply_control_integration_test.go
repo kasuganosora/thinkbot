@@ -100,7 +100,7 @@ func loadGLMFromDB(t *testing.T) (apiKey, baseURL, model string) {
 	if err != nil {
 		return "", "", ""
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// provider JSON 含 apiKey / baseUrl
 	var provJSON string
