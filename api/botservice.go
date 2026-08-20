@@ -1137,6 +1137,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建 WebChannel（始终自动添加）
 	webCh := NewWebChannel("web-"+id, id)
+	// 挂载 chatHistory，使续跑等无人实时订阅的回复能兜底落库（见 webchannel.Send 的 fallback 路径）。
+	webCh.chatHistory = s.chatHistory
 
 	// 从 config store 加载平台配置（前端 BotPlatforms 组件写入）并实例化为 Channel
 	// 注意：旧的 DB ChannelDefinition 路径已废弃，统一使用 Platform API 管理
