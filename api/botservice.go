@@ -971,6 +971,41 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return nil
 	}, s.logger)
 
+	// 被动回复 enricher：仅被动回复（被 @ 才回）。
+	// 发言模式三态里，① LLM 调工具主动发帖由 misskey_create_* deny 拦截（outbound.go），
+	// ③ 心跳主动发帖由 AllowProactivePost 拦截（outbound.go）；唯独 ② Pipeline 产出
+	// ActionReply → Channel.Send 这条路径「不经工具层」，且 OutboundGuard 只能拦 mute
+	// （看不到「是否被 @」）。因此路径②必须在 LLMStage 产出 ActionReply 之前做门控——
+	// 非真人 @ 的消息一律设 KVSuppressReply，复用 llmroute.go 既有的 replySuppressed 出口。
+	// 顺序 46，紧接 lurk-detect(45) / engagement(40) 之后，此时 engagement.proactive 已就绪，
+	// 可正确识别「engagement 升级的伪提及」（Mentioned=true 但非真人 @）。
+	passiveEnricher := stages.NewEnricherStage("passive-speak", func(ctx context.Context, env *core.Envelope) error {
+		platform := ""
+		if env.Message.Metadata != nil {
+			if ct, ok := env.Message.Metadata["channel_type"]; ok {
+				if s, ok := ct.(string); ok {
+					platform = s
+				}
+			}
+		}
+		if platform == "" {
+			platform = env.Message.Source
+		}
+		if platform == "" || s.permSvc == nil {
+			return nil
+		}
+		if s.permSvc.SpeakMode(id, platform) != toolperm.ModePassive {
+			return nil
+		}
+		// 仅「真人显式 @」才允许被动回复；engagement 升级的伪提及视为非真人 @。
+		isHumanMention := env.Message.Mentioned && !isEngagementProactive(env)
+		if !isHumanMention {
+			env.Set(core.KVSuppressReply, true)
+			env.Set(core.KVSuppressReplyReason, "passive_mode_unmentioned")
+		}
+		return nil
+	}, s.logger)
+
 	// 记忆召回 stage：每轮对话前按 [bot, channel, user] 三 scope 检索长期记忆
 	// （含潜水学到的经验），注入 system prompt，让 bot 在真人交互时带「实时经验」。
 	// memRepo（函数前面 717 行已创建）即 SQLite 仓储（实现 memory.Retriever），
@@ -1060,6 +1095,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	pb := pipeline.NewBuilder().WithMode(mode)
 	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
 	pb.Add(45, lurkEnricher)
+	pb.Add(46, passiveEnricher)
 	pb.Add(90, recallStage)
 	pb.Add(95, rhythmStage)
 	pb.Add(100, wrappedLLM)
@@ -2194,4 +2230,16 @@ func (w *userMessageEventWriter) WriteUserMessageEvent(ctx context.Context, msg 
 		CreatedAt: time.Now(),
 	}
 	return w.db.WithContext(ctx).Create(&rec).Error
+}
+
+// isEngagementProactive 判定当前 envelope 是否由 engagement 子系统升级而来的
+// 「伪提及」（Mentioned=true 但 bot 是主动决定参与，而非真人显式 @）。
+// 被动回复门控必须排除这类情况——engagement 主动插话不属于「被 @ 回复」。
+func isEngagementProactive(env *core.Envelope) bool {
+	if v, ok := env.Get("engagement.proactive"); ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
 }
