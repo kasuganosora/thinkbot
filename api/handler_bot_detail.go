@@ -1129,7 +1129,7 @@ func (s *Server) saveBotContainerInfo(c *gin.Context, botID string, info *BotCon
 func (s *Server) getBotCompactionConfig(botID string) *BotCompactionConfig {
 	raw, ok := s.store.Get(botDetailKey(botID, "compaction"))
 	if !ok || raw == "" {
-		return &BotCompactionConfig{Enabled: true, Threshold: 131072, Ratio: 37, Model: "deepseek-v4-flash"}
+		return &BotCompactionConfig{Enabled: true, Threshold: 131072, Ratio: 37}
 	}
 	var cfg BotCompactionConfig
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
