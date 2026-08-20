@@ -16,14 +16,14 @@ func TestSubmitToolDescriptionMentionsGoalMode(t *testing.T) {
 	def := submitToolDef(nil)
 
 	// Description 是延迟加载未展开时模型唯一可见的信息。
-	if !strings.Contains(def.Tool.Description, "goalMode") {
-		t.Errorf("task 工具的 Description 必须提到 goalMode，否则延迟加载状态下模型无从得知该能力\nDescription: %s", def.Tool.Description)
+	if !strings.Contains(def.Description, "goalMode") {
+		t.Errorf("task 工具的 Description 必须提到 goalMode，否则延迟加载状态下模型无从得知该能力\nDescription: %s", def.Description)
 	}
 
 	// 参数 schema 里仍需保留完整定义。
-	params, ok := def.Tool.Parameters.(map[string]any)
+	params, ok := def.Parameters.(map[string]any)
 	if !ok {
-		t.Fatalf("Parameters 类型异常: %T", def.Tool.Parameters)
+		t.Fatalf("Parameters 类型异常: %T", def.Parameters)
 	}
 	props, ok := params["properties"].(map[string]any)
 	if !ok {
@@ -49,14 +49,14 @@ func TestSubmitToolKeywordsCoverGoalMode(t *testing.T) {
 	want := []string{"目标模式", "闭环"}
 	for _, w := range want {
 		found := false
-		for _, k := range def.Tool.Keywords {
+		for _, k := range def.Keywords {
 			if strings.Contains(k, w) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("task 工具的 Keywords 应包含 %q，否则 tool_search 搜不到；当前: %v", w, def.Tool.Keywords)
+			t.Errorf("task 工具的 Keywords 应包含 %q，否则 tool_search 搜不到；当前: %v", w, def.Keywords)
 		}
 	}
 }
@@ -82,8 +82,8 @@ func TestWorkflowPromptSectionExplainsGoalMode(t *testing.T) {
 
 func TestSubmitToolDescribesGoalIteration(t *testing.T) {
 	def := submitToolDef(nil)
-	if !strings.Contains(def.Tool.Description, "goalIteration") {
-		t.Errorf("task 描述应说明目标模式轮次字段，便于模型解读返回值\nDescription: %s", def.Tool.Description)
+	if !strings.Contains(def.Description, "goalIteration") {
+		t.Errorf("task 描述应说明目标模式轮次字段，便于模型解读返回值\nDescription: %s", def.Description)
 	}
 }
 

@@ -223,7 +223,7 @@ func (s *TieredStore) loadFromDB() {
 	loaded := 0
 	for _, m := range models {
 		// 跳过已过期条目（L0 TTL 已过）
-		if m.ExpiresAt.IsZero() == false && now.After(m.ExpiresAt) {
+		if !m.ExpiresAt.IsZero() && now.After(m.ExpiresAt) {
 			continue
 		}
 		te := modelToTiedEntry(m)
