@@ -70,7 +70,7 @@ type BotService struct {
 	mu                sync.RWMutex
 	channels          map[string]*WebChannel            // botID → WebChannel
 	botInstances      map[string]*bot.Bot               // botID → running Bot
-	toolManagers      map[string]agenttools.ToolManager // botID → tool manager (for listing)
+	toolManagers      map[string]*agenttools.ToolManager // botID → tool manager (for listing)
 	dreamingBundles   map[string]*bot.DreamingBundle    // botID → DreamingBundle
 	heartbeatBundles  map[string]*heartbeat.Bundle      // botID → HeartbeatBundle
 	cancelFuncs       map[string]context.CancelFunc     // botID → bot context cancel
@@ -136,7 +136,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		// 也可通过 ResetTokenBudgets() 手动重置。
 		tokenBudget:    pipeline.NewTokenBudgetState(time.Hour),
 		permSvc:        permSvc,
-		toolManagers:   make(map[string]agenttools.ToolManager),
+		toolManagers:   make(map[string]*agenttools.ToolManager),
 		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
 	}
 }
@@ -1701,7 +1701,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.mu.Lock()
 	s.channels[id] = webCh
 	s.botInstances[id] = b
-	s.toolManagers[id] = *toolMgr
+	s.toolManagers[id] = toolMgr
 
 	// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
 	// 走完整 Engine 管线（Recall → LLM → 工具），并在 ctx 中携带预批准，使被 defer

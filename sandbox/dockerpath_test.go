@@ -89,7 +89,7 @@ func TestDockerSearchDirs_HonorsEnvOverride(t *testing.T) {
 // /opt/homebrew/bin，导致 dockerAvailable() 判假、沙箱静默降级为 local。
 // 因此 darwin 上的候选目录必须覆盖 Homebrew 路径。
 func TestDockerSearchDirs_IncludesHomebrewOnDarwin(t *testing.T) {
-	os.Unsetenv(EnvDockerBinDir)
+	_ = os.Unsetenv(EnvDockerBinDir)
 	dirs := dockerSearchDirs()
 
 	want := map[string]bool{
