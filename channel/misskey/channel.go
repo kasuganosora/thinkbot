@@ -777,6 +777,61 @@ func (c *MisskeyChannel) buildReplyMentionPrefix(replyNote *Note) string {
 	return strings.Join(handles, " ") + " "
 }
 
+// resolveBareMentions 解析出站文本中不带 host 的裸 @username 提及，
+// 通过 Misskey API 查询是否为远程用户，若是则补全为 @username@host。
+//
+// 背景：LLM 从记忆里取出远程账号时只记了 username（如 @hko_en），
+// Misskey 联邦协议要求跨站提及必须带 host，否则解析为 ?（未找到）。
+// 本方法作为出站安全网：对每个裸 mention 做 searchUser，有 Host 则补全；
+// 本站用户 Host 为空、查不到的用户、API 错误均原样保留（不丢数据）。
+func (c *MisskeyChannel) resolveBareMentions(ctx context.Context, text string) string {
+	matches := mentionAnyRe.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+
+	// 收集所有裸 mention（不含 @host 部分）并去重
+	bareSet := make(map[string]bool)
+	for _, m := range matches {
+		trimmed := strings.TrimPrefix(m, "@")
+		if !strings.Contains(trimmed, "@") {
+			bareSet[trimmed] = true
+		}
+	}
+	if len(bareSet) == 0 {
+		return text
+	}
+
+	// 逐个查询并构建替换映射
+	replacements := make(map[string]string) // bare username → full @username@host
+	for username := range bareSet {
+		users, err := c.api.searchUser(ctx, username, 1)
+		if err != nil || len(users) == 0 {
+			continue // 查不到 / API 错误 → 原样保留
+		}
+		u := users[0]
+		if u.Host != "" {
+			replacements[username] = "@" + username + "@" + u.Host
+		}
+		// Host=="" 是本站用户，@username 已足够，无需替换
+	}
+	if len(replacements) == 0 {
+		return text
+	}
+
+	// 执行替换（按长匹配优先排序，避免短名截断长名前缀）
+	var pairs []struct{ old, new string }
+	for old, new := range replacements {
+		pairs = append(pairs, struct{ old, new string }{old, new})
+	}
+	slices := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		slices = append(slices, p.old, p.new)
+	}
+	replacer := strings.NewReplacer(slices...)
+	return replacer.Replace(text)
+}
+
 // React 对帖子添加 emoji 反应。
 func (c *MisskeyChannel) React(ctx context.Context, noteID, emoji string) error {
 	// Misskey 反应格式：自定义 emoji 用 :name:，unicode emoji 直接使用
@@ -803,6 +858,7 @@ func (c *MisskeyChannel) Unreact(ctx context.Context, noteID string) error {
 // 行为：
 //   - ActionReply：回复目标帖子（文本超长自动截断到 3000 rune）
 //   - 其他 ActionType：当前也按回复处理（后续扩展）
+//
 // PostTimeline 向本频道时间线发布一条顶层新帖（不回复任何已有帖子）。
 //
 // 与 Send（必须带 noteID 作为回复目标）不同，本方法用于「主动说点什么」场景
@@ -886,6 +942,11 @@ func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 				"channel", c.name, "note_id", noteID, "err", err)
 		}
 	}
+
+	// 解析裸 @mention 的 host：LLM 从记忆取出的远程账号可能只有 @username（如 @hko_en），
+	// Misskey 联邦要求跨站提及带 host，否则显示为 ?。
+	// 本站用户 Host 为空则不替换；查不到 / API 错误均原样保留。
+	text = c.resolveBareMentions(ctx, text)
 
 	// 构建回复
 	_, err := c.api.createNoteFull(ctx, text, noteID, "", visibility, cw, nil)
