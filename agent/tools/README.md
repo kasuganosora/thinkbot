@@ -23,13 +23,15 @@
 | `ToolDef` | 工具完整定义：内嵌 `llm.Tool` + `Category`/`Scopes`/`PromptSection`/`RequireApproval` |
 | `ToolProvider` / `ToolFunc` | 动态工具提供者接口及其函数适配器 |
 | `ChannelToolProvider` | Channel 提供专属工具（返回 `[]ToolDef`） |
-| `ToolSessionContext` | 每次解析的会话上下文（BotID/Channel/ChatType/UserID/IsSubagent/SourceChannelType/Extra） |
+| `ToolSessionContext` | 每次解析的会话上下文（BotID/Channel/ChatType/UserID/MessageID/IsSubagent/IsSystem/SourceChannelType/Extra） |
 | `ToolPolicy` / `ToolRule` | 黑名单策略：按 channel + chatType 限定，支持用户白名单绕过 |
 | `ToolPolicyProvider` / `ToolPolicyFunc` | 运行时动态获取策略；`NewStorePolicyProvider` 从配置实时读取 |
 | `PatternPolicy` / `PatternRule` | glob 模式策略，决策为 `PermAllow`/`PermDeny`/`PermAsk`，后匹配规则覆盖前者 |
 | `ToolPromptManager` | 将 `ToolPromptSection` 注册到 `prompt.Registry` |
 | `ToolsStage` | Pipeline Stage（Order=150，诊断用途） |
 | `ToolInfo` | 已注册工具的只读快照，供列表展示 / 自省 |
+| `ToolAccessEvaluator` | 基于完整会话上下文（platform + userID）的访问控制，设置后取代 legacy `ToolPolicyProvider` |
+| `DynamicCategory` | 动态 ToolProvider（MCP/浏览器）工具的统一分类标记（"dynamic"） |
 
 ## 权限策略
 
@@ -41,8 +43,8 @@
   存储键为 `tools.pattern.<botID>.policy`。
   预设工厂：`ReadOnlyPolicy()`、`SafePolicy()`、`SubagentPolicy()`、`GroupChatPolicy()`。
 
-`ToolManager` 目前在 `ResolveTools` 中应用 `ToolPolicyProvider`；构造时若传入 `PolicyStore`
-则自动接入 `NewStorePolicyProvider`，无需手动 `SetPolicyProvider`。
+`ToolManager` 在 `ResolveTools` 中优先应用 `ToolAccessEvaluator`（经 `SetAccessEvaluator` 注入，能感知 platform 与 userID），未设置时回退到 legacy `ToolPolicyProvider`；构造时若传入 `PolicyStore`
+则自动接入 `NewStorePolicyProvider`，无需手动 `SetPolicyProvider`。`ListTools`/`ListAllTools` 返回静态（或含动态 provider）工具的 `[]ToolInfo` 快照，供权限管理界面自省。
 
 ## 使用示例
 

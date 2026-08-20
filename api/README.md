@@ -29,14 +29,14 @@ BotService 在装配 Pipeline 时，用以下中间件包装 LLMStage（`pipelin
 
 | 中间件 | 职责 |
 |--------|------|
-| `stages.NoteCaptureMiddleware("exchange")` | 捕获 LLM 回复为 L0 工作记忆笔记，供 dreaming 巩固 |
+| `stages.NoteCaptureMiddleware("exchange", umeWriter)` | 捕获 LLM 回复为 L0 工作记忆笔记（供 dreaming 巩固），并把用户入站原文写入 `user_message_events` 事件流 |
 | `VerificationGateMiddleware` | 结果校验闸门 |
 | `TokenQuotaMiddlewareWithState` | Token 月度配额：按 Bot/Channel/Chat 维度限额，超额拦截 |
-| `LoopDetectionMiddleware` | 检测重复工具调用模式（`task_status` 豁免），注入软/硬警告 |
+| `LoopDetectionMiddleware` | 检测重复工具调用模式（不豁免任何工具），注入软/硬警告 |
 | `LazyResponseMiddleware` | 检测敷衍/偷懒回复 |
 | `TokenBudgetMiddlewareWithState` | 按 Channel 追踪累计 Token，阈值告警和硬限制 |
 
-**全链路 Token 记账**：BotService 在装配时创建共享 `pipeline.NewTokenQuotaState()`（绑定 `statsRecorder`），并用 `llm.NewQuotaRecordingProvider` 包裹 LLM Provider（`bundle.Main`、`bundle.Light`、`bundle.Vision`）。配额中间件将 dimension 注入 context，所有经过 Provider 的 LLM 调用（包括 SubAgent、Workflow、Memory 等绕过 pipeline 的调用点）都自动记账，防止漏记。用量最终聚合到 `stats_usage_daily` 表。
+**全链路 Token 记账**：BotService 在装配时创建共享 `pipeline.NewTokenQuotaState().WithStatsRecorder(statsRecorder)`，并用 `llm.NewQuotaRecordingProvider` 包裹 LLM Provider（`bundle.Main`、`bundle.Light`、`bundle.Vision`，外层再套 `llm.NewStatsRecordingProvider`）。配额中间件将 dimension 注入 context，所有经过 Provider 的 LLM 调用（包括 SubAgent、Workflow、Memory 等绕过 pipeline 的调用点）都自动记账，防止漏记。用量最终聚合到 `stats_usage_daily` 表。
 
 ## 关键类型
 
@@ -49,8 +49,8 @@ BotService 在装配 Pipeline 时，用以下中间件包装 LLMStage（`pipelin
 | `CookieManager` | Cookie/会话管理（JWT，`SessionClaims`） |
 | `ChatHistoryService` | 聊天历史持久化与游标分页查询（`HistoryPage`） |
 
-fx 模块 `api.Module` 提供 EventBus、CookieManager、BotService、ChatHistoryService、WorkflowService、SkillManager 和 Server；
-`OnStart` 时启动 `status=running` 的 Bot、恢复中断工作流、启动看门狗并在后台运行 HTTP Server。
+fx 模块 `api.Module` 提供 EventBus、CookieManager、BotService、ChatHistoryService、WorkflowService、SkillManager、ToolPerm 服务和 Server；
+`OnStart` 时启动 `status=running` 的 Bot、恢复中断工作流、启动看门狗（卡死回收 + 配额续跑）并在后台运行 HTTP Server。
 
 ## 中间件链
 
@@ -133,6 +133,33 @@ GET    /api/bots/platforms/tool-catalog — 平台工具目录（所有登录用
 
 > 旧的 `/api/bots/:id/channels` 与 `/api/channels/types` 已废弃并从路由中移除，统一由上述 Platform API 取代。
 
+### 工具权限与发言模式（admin，嵌套在 Bot 下）
+
+```
+GET    /api/bots/:id/tool-permissions               — 列出工具权限规则
+POST   /api/bots/:id/tool-permissions               — 创建规则
+PUT    /api/bots/:id/tool-permissions/:rid          — 更新规则
+DELETE /api/bots/:id/tool-permissions/:rid          — 删除规则
+POST   /api/bots/:id/tool-permissions/reset-defaults — 恢复默认规则
+GET    /api/bots/:id/tools                          — Bot 已注册的工具列表
+
+GET    /api/bots/:id/outbound                       — 各渠道发言模式（active/passive/mute）
+PUT    /api/bots/:id/outbound                       — 设置发言模式
+```
+
+### 浏览器 Cookie 管理（admin，嵌套在 Bot 下）
+
+```
+GET    /api/bots/:id/browser/cookies            — 列表（value 掩码）
+GET    /api/bots/:id/browser/cookies/:cid       — 单条（?reveal=true 返回完整值）
+POST   /api/bots/:id/browser/cookies            — 新增单条
+PUT    /api/bots/:id/browser/cookies/:cid       — 编辑单条
+DELETE /api/bots/:id/browser/cookies/:cid       — 删除单条
+DELETE /api/bots/:id/browser/cookies            — 清空（?domain= 可按域清）
+POST   /api/bots/:id/browser/cookies/import     — 批量导入
+GET    /api/bots/:id/browser/cookies/export     — 导出 storageState（?confirm=1）
+```
+
 ### 定时任务（admin，嵌套在 Bot 下）
 
 ```
@@ -158,11 +185,9 @@ POST /api/bots/:id/dreaming/trigger — 手动触发一次梦境巩固
 ### 记忆管理（admin，嵌套在 Bot 下）
 
 ```
-GET    /api/bots/:id/memory         — 查询分层记忆
-POST   /api/bots/:id/memory         — 新增记忆条目
-PUT    /api/bots/:id/memory/:mid    — 更新记忆条目
-DELETE /api/bots/:id/memory/:mid    — 删除记忆条目
-GET    /api/bots/:id/memory/stats   — 记忆统计
+GET    /api/bots/:id/memory         — 查询分层记忆（?tier=L0/L1/L2/L3&limit=）
+GET    /api/bots/:id/memory/stats   — 记忆统计（L1 计数 / L2 估算）
+DELETE /api/bots/:id/memory/entry   — 删除单条分层记忆（?id=&tier=&scope=）
 ```
 
 ### 文件与容器（admin，嵌套在 Bot 下）
@@ -204,10 +229,9 @@ GET    /api/bots/:id/compaction             — 上下文压缩配置
 PUT    /api/bots/:id/compaction             — 更新压缩配置
 GET    /api/bots/:id/compaction/history     — 压缩历史
 DELETE /api/bots/:id/compaction/history     — 清空压缩历史
-
-GET    /api/bots/:id/chat-rhythm            — 群聊回复节奏配置
-PUT    /api/bots/:id/chat-rhythm            — 更新回复节奏
 ```
+
+聊天节奏（rhythm）已合并进平台配置：作为 `rhythm` 字段随 `GET/PUT /api/bots/:id/platforms` 读写（支持 telegram / misskey，web 不参与）。
 
 ### Bot 技能与 MCP（admin，嵌套在 Bot 下）
 
@@ -277,6 +301,7 @@ PUT    /api/search/providers/:id/toggle — 启用/禁用
 GET  /api/workflows/:wfId                      — 查询工作流状态（登录用户）
 GET  /api/workflows/:wfId/nodes                — 查询节点列表（登录用户）
 POST /api/workflows/:wfId/nodes/:nodeId/retry  — 重试节点（登录用户）
+GET  /api/session-workflow                     — 按会话查最近一条工作流（登录用户）
 
 GET  /api/workflows                — 列出工作流（admin）
 POST /api/workflows/recover        — 恢复中断的工作流（admin）

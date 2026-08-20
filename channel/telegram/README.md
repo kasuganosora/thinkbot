@@ -7,7 +7,7 @@
 | 类型 | 说明 |
 |------|------|
 | `Config` | Telegram 渠道配置（见下） |
-| `TelegramChannel` | Telegram 平台适配器，实现 `channel.Channel` 接口 |
+| `TelegramChannel` | Telegram 平台适配器，实现 `bot.Channel` / `bot.Sender` 接口 |
 
 ### Config
 
@@ -37,13 +37,14 @@ ch.ReplyWithMode(ctx, chatID, "**粗体**", "MarkdownV2", replyToMessageID)
 ch.EditMessage(ctx, chatID, messageID, "编辑后的内容")         // 编辑已发送消息
 ch.SendTyping(ctx, chatID)                                     // 发送"正在输入"动作
 ch.Send(ctx, action)                                          // 按 core.Action 发送
+ch.RecentChats()                                          // 近期活跃会话列表（最多 20 个，实现 core.RecentChatLister）
 ch.Name() / ch.Type() / ch.BotID()                            // 元信息，Type() 返回 "telegram"
 ch.ChannelTools(ctx)                                          // 返回平台专属工具（见下）
 ```
 
 ## 特性
 
-- **消息识别**：自动识别 @提及、`/`命令、回复 Bot、以及 `text_mention`（offset=0）的消息
+- **消息识别**：自动识别 @提及、`/`命令（offset=0）、回复 Bot、以及 `text_mention`（无 username 的用户提及）的消息
 - **长消息拆分**：超过 4096 字符（`telegramMaxMessageLength`）的消息按换行/rune 自动拆分多条发送
 - **Markdown 支持**：通过 `ParseMode` 指定 `MarkdownV2` 或 `HTML`
 

@@ -26,7 +26,7 @@ Pipeline 产出 []core.Action
 | 文件 | 职责 |
 |------|------|
 | `dispatcher.go` | `Dispatcher` 接口、`LogDispatcher`（开发用）、`MultiDispatcher`（按 ActionType 路由） |
-| `channel_handler.go` | `ChannelReplyHandler` — 将 Action 路由到对应 Channel 的 Sender |
+| `channel_handler.go` | `ChannelReplyHandler`、`ChannelSender` / `OutboundGuard` 接口 — 将 Action 路由到对应 Channel 的 Sender（含只读渠道守卫） |
 | `note_handler.go` | `NoteHandler` — 将 ActionNote 写入统一记忆仓储 |
 | `callback_handler.go` | `CallbackRegistry` + `CallbackHandler` — 回调注册与调用 |
 | `silent_handler.go` | `SilentHandler` — ActionSilent 处理（仅 trace，无外部 I/O） |
@@ -97,7 +97,7 @@ type ActionHandler interface {
 
 将 `ActionReply` / `ActionForward` 等回写型 Action 路由到对应 Channel 的 `Sender`。
 
-路由键：`Action.Metadata["source_channel"]` → 在 Sender 注册表中查找 → 调用 `Send(ctx, action)`。
+路由键：`Action.Metadata["source_channel"]` → 在 Sender 注册表中查找 → 若设置了 `OutboundGuard` 先做渠道只读检查 → 调用 `Send(ctx, action)`。
 
 ```go
 handler := outbound.NewChannelReplyHandler(logger, tp)
@@ -110,6 +110,11 @@ dispatcher.Register(core.ActionReply, handler)
 
 `source_channel` 缺失或未找到对应 Sender 时返回 error（不静默丢弃）。
 另提供 `Unregister(channelName)` 与 `RegisteredCount()`。
+
+**只读渠道守卫**：`OutboundGuard` 接口（`AllowOutbound(ctx, channelName, action) bool`）
+由 api 层注入实现，`handler.SetGuard(g)` 设置。Bot 的自动回复走 Pipeline Action、不经过
+工具权限，因此「潜水 bot / 渠道只读」必须在出站层拦截；守卫返回 false 时 Action 被静默丢弃
+（记录 WARN 日志，不返回错误，避免被 Dispatcher 记为发送失败）。
 
 ### NoteHandler
 

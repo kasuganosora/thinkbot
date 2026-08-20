@@ -7,13 +7,13 @@
 | 类型 | 说明 |
 |------|------|
 | `Config` | Misskey 渠道配置（见下） |
-| `MisskeyChannel` | Misskey 平台适配器，实现 `channel.Channel` 接口 |
+| `MisskeyChannel` | Misskey 平台适配器，实现 `bot.Channel` / `bot.Sender` 接口 |
 
 ### Config
 
 ```go
 type Config struct {
-    Host             string        // Misskey 实例主机名（如 "misskey.io"）
+    Host             string        // Misskey 实例 URL（如 "https://misskey.io"）
     Token            string        // 账号访问令牌
     WatchdogTimeout  time.Duration // WebSocket 看门狗超时，0 = 默认 120s
     PingInterval     time.Duration // 自动 Ping 间隔，0 = 默认 30s
@@ -38,7 +38,7 @@ type Config struct {
 
 ```go
 ch := misskey.NewChannel("misskey-main", "bot1", misskey.Config{
-    Host: "misskey.example.com",
+    Host: "https://misskey.example.com",
     Token: "your-token",
     TimelineChannels: []string{"homeTimeline", "localTimeline"},
 })
@@ -50,6 +50,7 @@ ch.ReplyWithVisibility(ctx, noteID, "私密回复", misskey.VisibilityFollowers)
 ch.React(ctx, noteID, "👍")                            // 添加反应
 ch.Unreact(ctx, noteID)                              // 取消自己的反应
 ch.Send(ctx, action)                                 // 按 core.Action 发送
+ch.PostTimeline(ctx, "主动发帖", misskey.VisibilityHome, "") // 发布顶层新帖（心跳自主发声）
 ch.Name() / ch.Type() / ch.BotID()                   // 元信息，Type() 返回 "misskey"
 ch.ChannelTools(ctx)                                 // 返回平台专属工具（见下）
 ```
@@ -73,6 +74,8 @@ ch.ChannelTools(ctx)                                 // 返回平台专属工具
 | `misskey_delete_note` | 删除帖子 |
 | `misskey_react_to_note` | 对帖子添加反应 |
 | `misskey_unreact_to_note` | 取消对帖子的反应 |
+| `misskey_get_user_notes` | 获取指定用户的最近帖子 |
+| `misskey_search_notes` | 按关键词搜索实例内帖子 |
 | `misskey_search_user` | 搜索用户 |
 | `misskey_list_following` | 列出正在关注的用户 |
 
@@ -84,7 +87,7 @@ Misskey WS Streaming → types.go (Note 解析) → channel.go (归一化 + 去�
                          api.go (回帖/反应/取消反应/发送) ← Outbound Action
 ```
 
-- **api.go** — Misskey REST API 封装（createNote、react、unreact、deleteNote 等）
+- **api.go** — Misskey REST API 封装（createNote、getNote、react、unreact、deleteNote、follow/unfollow、searchUser、getUserNotes、searchNotes 等）
 - **channel.go** — WebSocket 连接管理、消息归一化、重连与去重逻辑
 - **types.go** — Misskey API 数据结构（`Note`、`File`、`User`）
 - **tools.go** — 平台专属工具定义（`ChannelTools`）
