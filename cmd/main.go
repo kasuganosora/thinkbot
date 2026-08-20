@@ -32,6 +32,9 @@ func main() {
 		Outputs: []log.Output{
 			log.Stdout(),
 			log.File("./logs", "thinkbot"),
+			// 可读且自动轮换的纯文本日志（文件名独立，与 JSON 文件各自独立轮换），
+			// 实时 tail 用这个，不要再依赖 daemon 重定向到 /tmp/thinkbot.log 的无轮换裸文件。
+			log.ConsoleFile("./logs", "thinkbot.console"),
 		},
 	}); err != nil {
 		panic(err)

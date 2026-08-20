@@ -87,6 +87,24 @@ func File(dir, name string) Output {
 	}
 }
 
+// ConsoleFile 快捷构造「console 格式 + 文件滚动」输出源。
+// 产出可读且自动轮换的纯文本日志（如 ./logs/thinkbot.console.log），
+// 适合实时 tail；与 File（JSONL）写入不同文件、各自独立轮换，互不冲突。
+// 注意：写文件时不带 ANSI 颜色（见 buildCore），以保证纯文本可读性。
+func ConsoleFile(dir, name string) Output {
+	return Output{
+		Type:       OutputFile,
+		Format:     FormatConsole,
+		FileDir:    dir,
+		FileName:   name,
+		FileExt:    ".log",
+		MaxSize:    100,
+		MaxBackups: 7,
+		MaxAge:     30,
+		Compress:   true,
+	}
+}
+
 // ============================================================================
 // 全局配置
 // ============================================================================
@@ -218,7 +236,12 @@ func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore
 		encoder = zapcore.NewJSONEncoder(baseEncCfg)
 	default: // console
 		consoleEncCfg := baseEncCfg
-		consoleEncCfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		if out.Type == OutputFile {
+			// 写文件时不带 ANSI 颜色，保证纯文本可读（供 tail / 日志分析）
+			consoleEncCfg.EncodeLevel = zapcore.CapitalLevelEncoder
+		} else {
+			consoleEncCfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		}
 		encoder = zapcore.NewConsoleEncoder(consoleEncCfg)
 	}
 
