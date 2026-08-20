@@ -201,6 +201,30 @@ func parseReplyControl(text string) (send bool, clean string, ok bool) {
 	return sig.Send, clean, true
 }
 
+// StripReplyControlBlock 从文本末尾剥离 reply-control 协议控制块
+// （@@REPLY_CONTROL@@{"send": ...}），返回干净正文。
+//
+// 用途：SSE 流式路径的 fullText 是从 EventLLMTextDelta 逐字累积的原始文本，
+// 包含控制块。在发送 sseDone 事件前调用此函数剥离，避免内部协议标记泄漏到前端。
+func StripReplyControlBlock(text string) string {
+	idx := strings.LastIndex(text, replyControlDelimiter)
+	if idx < 0 {
+		return text
+	}
+	rest := text[idx+len(replyControlDelimiter):]
+	rest = stripCodeFence(rest)
+	rest = strings.TrimSpace(rest)
+	obj := extractFirstJSONObject(rest)
+	if obj == "" {
+		return text
+	}
+	var sig replyControlSignal
+	if err := json.Unmarshal([]byte(obj), &sig); err != nil {
+		return text
+	}
+	return strings.TrimRight(text[:idx], " \t\n\r")
+}
+
 // publicTagRe 匹配 <public>...</public> 显式公开回复区（回复控制协议的 opt-in 标签）。
 // 模型用它明确「只发这段」，门控据此丢弃其余所有内容（含 <internal> 心里话），彻底防泄漏。
 var publicTagRe = regexp.MustCompile(`(?is)<public>\s*(.*?)\s*</public>`)
