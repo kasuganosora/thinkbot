@@ -14,6 +14,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/command"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/agent/stages"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -929,7 +930,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			if !ok {
 				// channel 关闭，结束
 				sweepPhantomToolCalls()
-				writeSSE(c.Writer, sseDone, map[string]any{"text": fullText})
+				writeSSE(c.Writer, sseDone, map[string]any{"text": stages.StripReplyControlBlock(fullText)})
 				flusher.Flush()
 				unsubscribeEventSub()
 				return
@@ -942,6 +943,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				if fullText == "" {
 					text, _ := action.Payload.(string)
 					if text != "" {
+						text = stages.StripReplyControlBlock(text)
 						fullText = text
 						writeSSE(c.Writer, sseTextDelta, map[string]any{"text": text})
 						flusher.Flush()
@@ -949,7 +951,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				}
 				// 收敛残留 phantom：避免最后一个空参数占位调用永久停在「执行中」
 				sweepPhantomToolCalls()
-				donePayload := map[string]any{"text": fullText}
+				donePayload := map[string]any{"text": stages.StripReplyControlBlock(fullText)}
 				if len(toolCalls) > 0 {
 					donePayload["toolCalls"] = toolCalls
 				}
