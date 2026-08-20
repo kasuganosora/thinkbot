@@ -287,8 +287,8 @@ func TestTool_BotWorkspaceToolDefs_Count(t *testing.T) {
 	defer cleanup()
 
 	defs := botWorkspaceToolDefs(mgr, "test-bot")
-	if len(defs) != 9 {
-		t.Errorf("expected 9 tools, got %d", len(defs))
+	if len(defs) != 10 {
+		t.Errorf("expected 10 tools, got %d", len(defs))
 	}
 
 	expectedNames := map[string]bool{
@@ -301,6 +301,7 @@ func TestTool_BotWorkspaceToolDefs_Count(t *testing.T) {
 		"sandbox_list_dir":        true,
 		"sandbox_search_content":  true,
 		"sandbox_health":          true,
+		"run_code":                true,
 	}
 	for _, tool := range defs {
 		if !expectedNames[tool.Name] {
