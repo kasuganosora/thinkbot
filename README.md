@@ -23,7 +23,7 @@ git clone https://github.com/kasuganosora/thinkbot.git
 cd thinkbot
 
 # 配置环境变量
-cp config/config.example .env
+cp .env.example .env
 # 编辑 .env 填入 API Key 等配置
 
 # 编译运行
