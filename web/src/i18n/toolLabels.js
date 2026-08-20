@@ -82,7 +82,6 @@ export default {
   browser__fill:          '填写表单',
   browser__screenshot:    '截图',
   browser__get_text:      '读取页面文本',
-  browser__get_a11y:      '获取无障碍树',
   browser__wait:          '等待元素',
   browser__back:          '后退',
   browser__forward:       '前进',
