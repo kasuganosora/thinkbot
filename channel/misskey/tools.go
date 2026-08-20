@@ -183,12 +183,12 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 				if l, ok := args["limit"].(float64); ok {
 					limit = int(l)
 				}
-			notes, err := c.api.searchNotes(ctx, query, limit)
-			if err != nil {
-				// 实例搜索后端（Meilisearch）常不可用；返回干净文案，不把裸 HTTP 错误抛给 LLM，
-				// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
-				return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
-			}
+				notes, err := c.api.searchNotes(ctx, query, limit)
+				if err != nil {
+					// 实例搜索后端（Meilisearch）常不可用；返回干净文案，不把裸 HTTP 错误抛给 LLM，
+					// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
+					return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
+				}
 				return map[string]any{
 					"notes": formatNotes(notes, c.cfg.Host),
 					"count": len(notes),
@@ -357,7 +357,7 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 				}, nil
 			}),
 		},
-		Category: "misskey",
+		Category:      "misskey",
 		PromptSection: channelToolAwarenessSection,
 	}
 }
@@ -462,7 +462,10 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "misskey_react_to_note",
 			Description: "Add an emoji reaction to a note on Misskey. " +
-				"Requires the noteId and a reaction (for example :heart:).",
+				"Requires the noteId and a reaction (for example :heart:). " +
+				"NOTE: Misskey forbids reacting to a Renote (a pure re-post). " +
+				"If the target is a Renote the tool skips and returns reason=cannot_react_to_renote; " +
+				"react to the original note (renoteId) instead.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -486,6 +489,16 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 				reaction, _ := args["reaction"].(string)
 				if noteID == "" || reaction == "" {
 					return nil, fmt.Errorf("misskey_react_to_note: noteId and reaction are required")
+				}
+				// Misskey 不允许对 Renote（转贴）加反应，服务端会返回 400 CANNOT_REACT_TO_RENOTE。
+				// 加反应前先拉取帖子，若是 Renote 则直接友好跳过，避免无谓的 400 错误。
+				if note, gerr := c.api.getNote(ctx, noteID); gerr == nil && note != nil && note.RenoteID != "" {
+					return map[string]any{
+						"success": false,
+						"skipped": true,
+						"reason":  "cannot_react_to_renote",
+						"message": "目标帖子是 Renote（转贴），Misskey 不允许对其加反应，已跳过。如需表达态度，请对原帖（renoteId）操作。",
+					}, nil
 				}
 				if err := c.api.createReaction(ctx, noteID, reaction); err != nil {
 					return nil, fmt.Errorf("react failed: %w", err)
