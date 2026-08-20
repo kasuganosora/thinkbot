@@ -92,7 +92,7 @@ func formatNotes(notes []Note, host string) string {
 			text = "[empty post / media only]"
 		}
 		url := base + "/notes/" + n.ID
-		b.WriteString(fmt.Sprintf("%d. %s · %s\n%s\n🔗 %s\n\n", i+1, user, n.CreatedAt, text, url))
+		fmt.Fprintf(&b, "%d. %s · %s\n%s\n🔗 %s\n\n", i+1, user, n.CreatedAt, text, url)
 	}
 	return strings.TrimSpace(b.String())
 }
