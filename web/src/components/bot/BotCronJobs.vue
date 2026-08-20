@@ -191,7 +191,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { cronApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
@@ -456,6 +456,8 @@ function remove(row) {
     onConfirm: async () => { await cronApi.remove(props.botId, row.id); dlg.destroy(); MessagePlugin.success('已删除'); load() }
   })
 }
+
+onMounted(() => { load() })
 </script>
 
 <style scoped>

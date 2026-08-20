@@ -112,7 +112,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { botHeartbeatApi } from '@/api/services'
 
@@ -213,6 +213,8 @@ async function loadLogs() {
     loadingLogs.value = false
   }
 }
+
+onMounted(() => { loadLogs() })
 
 function clearLogs() {
   const dlg = DialogPlugin.confirm({
