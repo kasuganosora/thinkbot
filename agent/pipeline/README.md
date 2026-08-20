@@ -20,6 +20,7 @@
 | `Middleware` | `func(next core.Stage) core.Stage`，用 `WithMiddleware` 组合 |
 | `Predicate` / `PredicateFunc` | `core.Predicate` 的类型别名（向后兼容） |
 | `Route` / `Router` | 条件路由规则与分发 Stage |
+| `Builder` / `PipelineMode` / `StageGroup` | 声明式 Stage 装配器（`Add` / `AddIf` / `WithMode` / `Build`）与模式门控词汇（`ModeGroups`） |
 | `ObservableStage` | 发射 `stage.enter` / `stage.exit` / `stage.skip` 事件的包装器 |
 | `Instruments` | Pipeline 所需 OTel 仪器集合 |
 | `LoopDetectionConfig` | 循环检测配置（滑窗 + tool-call digest 重复检测） |
@@ -38,7 +39,9 @@
 | 其他 `error` | 记录 warn 日志后**继续**执行 |
 | `env.Aborted() == true` | 下一轮循环开始时终止 |
 
-辅助方法：`StageNames()`（已启用 Stage 名，按执行顺序）、`Len()`（含未启用的总数）。
+辅助方法：`StageNames()`（已启用 Stage 名，按执行顺序）、`Len()`（含未启用的总数）、
+`SetSink(core.EventSink)`（注入 append-only 事件轨迹接收器，nil 恢复 NoopSink；
+sink 会通过 `core.WithEventSink` 注入 ctx 供下游 Stage / 工具循环追加事件）。
 
 ## 使用示例
 

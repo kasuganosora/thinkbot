@@ -18,6 +18,9 @@
 - **工作流**：`WorkflowModel` — 工作流 JSON 全量序列化存储
 - **授权码**：`BindCode` — 一次性跨平台绑定授权码（5 分钟过期）
 - **身份映射**：`IdentityMapping` — 平台用户 ID 到内部用户的映射
+- **用户消息事件**：`UserMessageEvent` — 入站用户消息事件流（dreaming 回灌数据源，id 兼作水位线）
+- **Bot 工具权限**：`BotToolPermission` — bot 维度 tool/platform/user_ids 三维权限规则（首条匹配生效）
+- **浏览器 Cookie**：`BotBrowserCookie` — bot 浏览器 Cookie 持久化（(bot_id, domain, name, path) 唯一；`BrowserCookieView` 提供掩码视图）
 - **自动迁移**：`Migrate(*gorm.DB) error` — 启动时自动建表，并幂等补齐存量表缺失列
 
 ## 表结构
@@ -37,6 +40,9 @@
 | `workflow_workflows` | `WorkflowModel` | 工作流 |
 | `bind_codes` | `BindCode` | 授权码（一次性，5 分钟有效） |
 | `identity_mappings` | `IdentityMapping` | 平台身份映射 |
+| `user_message_events` | `UserMessageEvent` | 入站用户消息事件流 |
+| `bot_tool_permissions` | `BotToolPermission` | Bot 工具权限规则 |
+| `bot_browser_cookies` | `BotBrowserCookie` | Bot 浏览器 Cookie |
 
 ## 状态常量
 
@@ -51,4 +57,4 @@ dao.ChatRoleUser / dao.ChatRoleAssistant             // 消息角色
 `Migrate()` 先执行 GORM `AutoMigrate`，再调用内部 `ensureColumns`：
 SQLite 上 `AutoMigrate` 不会为存量表 ALTER 加列，因此新增列（如
 `bot_definitions.max_steps`、`hard_max_steps`、`memory_limit_mb`、
-`chat_messages.session_id`）需手动幂等补齐，避免写入时报 “no such column”。
+`chat_messages.session_id`、`bot_tool_permissions.auto`）需手动幂等补齐，避免写入时报 “no such column”。

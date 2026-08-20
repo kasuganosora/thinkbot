@@ -177,7 +177,7 @@ spawn({
 | `WithTemperature(temp)` | `0.7` | LLM 温度（0.0 ~ 2.0） |
 | `WithMaxTokens(n)` | `4096` | 最大输出 token |
 | `WithMaxMessages(n)` | `20` | 滑动窗口大小（0 = 无限制） |
-| `WithTools(tools...)` | `nil` | 工具定义（仅传递给 LLM，SubAgent 不执行） |
+| `WithTools(tools...)` | `nil` | 注入带 Execute 的工具；配合 `WithToolSteps(>0)` 时经多步编排回路自动执行，无步数预算则仅作为定义传给 LLM |
 | `WithResponseFormat(fmt)` | `nil` | 响应格式（如 JSON 模式） |
 | `WithID(id)` | `""` | 标识符 |
 | `WithName(name)` | `""` | 显示名称 |
@@ -205,7 +205,8 @@ spawn({
 | 方法 | 默认值 | 说明 |
 |------|--------|------|
 | `SetDelegateTimeout(d)` | 120s | Delegate/DelegateMany 的单任务超时 |
-| `SetMaxConcurrency(n)` | 5 | DelegateMany 的最大并发数（0 = 不限制） |
+| `DelegateTimeout()` | — | 返回当前委托超时（供上层装配断言） |
+| `SetMaxConcurrency(n)` | 5 | DelegateMany 的最大并发数（仅接受 >0；可用全局配置 `subagent.max_concurrency` 覆盖） |
 | `List()` | — | 返回所有活跃 SubAgent 信息 |
 | `CloseAll()` | — | 关闭所有持久化 SubAgent |
 
@@ -286,7 +287,7 @@ type ContextManager struct {
 [u2, a2, u3, a3]  ← 保留最近 2 轮
 ```
 
-截断保证**不切断半轮对话**：如果截断点恰好是 assistant 消息，会继续向后找到下一个 user 消息作为起始点，确保上下文总是从 user 消息开始。
+截断保证**不切断半轮对话**：如果截断点恰好是 assistant 消息，会继续向后找到下一个 user 消息作为起始点，确保上下文总是从 user 消息开始（找不到 user 消息时退化为保留最后 `maxMessages` 条）。
 
 ### ContextManager API
 
@@ -309,7 +310,7 @@ type ContextManager struct {
 | `SubAgentManager` | ✓ | `sync.Mutex`（Spawn/Chat/Close/List 互斥） |
 | `ContextManager` | ✓ | `sync.Mutex`（所有方法互斥） |
 
-`SubAgentManager.List()` 采用两段式锁（先快照引用，释放锁后再读 Sa 内部状态），避免锁层级依赖。
+`SubAgentManager.List()` 采用两段式锁（先在锁内快照 SubAgent 引用，释放锁后再读 Sa 内部状态），避免锁层级依赖。
 
 ---
 

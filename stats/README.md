@@ -307,5 +307,5 @@ Token 节省 = (InputTokens - CacheReadTokens) 的比例变化
 | 文件 | 职责 |
 |------|------|
 | `recorder.go` | `Recorder` 类型、异步 channel 写入、批量聚合、SQLite UPSERT |
-| `repository.go` | 查询函数（`GetBotModelStats` / `GetModelFeatureStats` / `GetDailyStats` / `GetAllBotsModelStats`）、结果类型 |
+| `repository.go` | 查询函数（`GetBotModelStats` / `GetModelFeatureStats` / `GetDailyStats` / `GetAllBotsModelStats` / `GetDailyStatsGlobal` / `GetDailyByBotStats` / `GetUsageRecords`）、结果类型 |
 | `module.go` | fx Module 定义、`NewRecorderModule`、生命周期钩子 |
