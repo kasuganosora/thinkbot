@@ -430,10 +430,11 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			if note.Text == "" && len(note.Files) == 0 && note.Renote == nil {
 				return nil
 			}
-			// timeline 上的帖子若直接 @ 了本 Bot，视为被真人提及（Mentioned=true）。
-			// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention 事件因
-			// 去重晚到被丢弃时，@bot 会被当成普通时间线消息，被聊天节奏按概率
-			// 降频，用户体感即「@ 了没反应」。
+			// timeline 上的帖子若明确指向本 Bot（字面 @ / 回复了 Bot 帖子 / mentions 含 Bot），
+			// 视为被真人提及（Mentioned=true），走单聊路径由 Bot 自行决定回复。
+			// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention/reply 事件因
+			// 去重晚到被丢弃时，指向 Bot 的回复会被当成普通时间线消息，被聊天节奏按概率
+			// 降频，用户体感即「回复了 Bot 却没反应」。详见 timelineMentioned。
 			c.handleNote(ctx, note, "timeline", c.timelineMentioned(note))
 		default:
 			// 忽略其他 timeline 事件
@@ -444,14 +445,36 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 	return nil
 }
 
-// timelineMentioned 判断一条时间线帖子是否直接 @ 了本 Bot。
-// 复用初始化时按 bot 用户名编译的 mentionRe（匹配 @username 或 @username@host），
-// 与 handleNote 中剥离 @bot 文本的正则保持一致，避免误判。
+// timelineMentioned 判断一条时间线帖子是否明确指向本 Bot。
+// 命中任一条件即视为被真人提及（Mentioned=true），走单聊路径由 Bot 自行决定回复：
+//  1. 正文字面 @botUsername（@username 或 @username@host）；
+//  2. 回复目标就是 Bot 的帖子（点了 Bot 帖子的「回复」：Misskey 把 replyId 指向 Bot 帖，
+//     但正文不一定写 @bot，纯靠字面 @ 会漏判）；
+//  3. mentions 数组包含 Bot 的 userID（联邦/客户端显式 mention）。
+//
+// 仅依赖正文字面 @ 会漏判情形 2：时间线上先到达、main 通道 reply 事件后到的回复帖被当普通
+// 时间线消息，按节奏概率降频，用户体感即「回复了 Bot 却没反应」。
+// 复用初始化时按 bot 用户名编译的 mentionRe，与 handleNote 中剥离 @bot 文本的正则保持一致，避免误判。
 func (c *MisskeyChannel) timelineMentioned(note Note) bool {
-	if c.mentionRe == nil {
+	// 1) 正文字面 @bot
+	if c.mentionRe != nil && c.mentionRe.MatchString(note.Text) {
+		return true
+	}
+	// botUserID 未就绪（理论上 Start 后即有）则跳过后续判断
+	if c.botUserID == "" {
 		return false
 	}
-	return c.mentionRe.MatchString(note.Text)
+	// 2) 回复目标就是 Bot 的帖子
+	if note.Reply != nil && note.Reply.User.ID == c.botUserID {
+		return true
+	}
+	// 3) mentions 数组含 Bot
+	for _, m := range note.Mentions {
+		if m == c.botUserID {
+			return true
+		}
+	}
+	return false
 }
 
 // handleNote 将一条 Misskey Note 转换为 core.Message 并注入 Ingress。
@@ -554,8 +577,8 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		chatType = core.ChatPrivate
 	}
 
-	// timeline 消息加上来源前缀
-	if eventType == "timeline" {
+	// timeline 消息加上来源前缀（被明确提及的回复不标 [Timeline]，避免误导模型当作群聊广播）
+	if eventType == "timeline" && !mentioned {
 		text = fmt.Sprintf("[Timeline] @%s: %s", note.User.Username, text)
 	}
 
