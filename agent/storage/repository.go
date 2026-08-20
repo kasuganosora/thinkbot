@@ -31,6 +31,13 @@ type MemoryCompactor interface {
 // SQLiteRepository — memory.Repository 的 SQLite 实现
 // ============================================================================
 
+// 编译期契约：生产路径的记忆仓储必须同时满足 Repository 与 Replacer。
+// Replacer 一旦丢失，记忆工具会静默降级到非原子的替换路径，务必让此处先编译失败。
+var (
+	_ memory.Repository = (*SQLiteRepository)(nil)
+	_ memory.Replacer   = (*SQLiteRepository)(nil)
+)
+
 // SQLiteRepositoryConfig 配置 SQLite 记忆仓储。
 type SQLiteRepositoryConfig struct {
 	// MaxEntriesPerScope 每个 scope 的最大记忆条目数（默认 1000）。
@@ -169,6 +176,67 @@ func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entry
 	if result.RowsAffected > 0 {
 		r.entriesDeleted.Add(result.RowsAffected)
 	}
+	return nil
+}
+
+// Replace 原子性地替换指定 scope 下的一条记忆（实现 memory.Replacer）。
+//
+// 「删除旧条目 + 写入新条目」在同一个事务内完成，因此允许 newEntry.ID 与
+// deleteID 相同 —— 这正是记忆工具 replace / batch-update 的语义（就地改写内容、
+// 保留原 ID 与 created_at）。deleteID 为空或指向不存在的条目时退化为纯追加。
+//
+// 本方法缺失时调用方会降级为「先 Append 再 Delete」，而复用同一 ID 的 Append
+// 走的是 INSERT，必然撞上 memory_entries.id 唯一约束，使记忆更新永久失败。
+func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, deleteID string, newEntry memory.Entry) error {
+	if newEntry.ID == "" {
+		newEntry.ID = idgen.New("mem")
+	}
+	if newEntry.CreatedAt.IsZero() {
+		newEntry.CreatedAt = time.Now()
+	}
+	if newEntry.LastAccessedAt.IsZero() {
+		newEntry.LastAccessedAt = newEntry.CreatedAt
+	}
+	newEntry.Scope = scope
+
+	model := entryToModel(newEntry)
+
+	var deleted int64
+	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if deleteID != "" {
+			res := tx.Where("id = ? AND scope_kind = ? AND scope_id = ?",
+				deleteID, string(scope.Kind), scope.ID).
+				Delete(&dao.EntryModel{})
+			if res.Error != nil {
+				return res.Error
+			}
+			deleted = res.RowsAffected
+		}
+		return tx.Create(&model).Error
+	}); err != nil {
+		return errs.Wrap(err, "sqlite_repository: replace failed")
+	}
+
+	if deleted > 0 {
+		r.entriesDeleted.Add(deleted)
+	}
+	r.entriesAppended.Add(1)
+
+	// 与 Append 保持一致的收敛行为：替换后字符总量可能上涨（deleteID 不存在时
+	// 条目数也会 +1），仍需异步做容量淘汰与预算压缩。
+	go func() {
+		evictCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		r.evictIfNeeded(evictCtx, scope)
+	}()
+	if r.compactor != nil && r.window != nil {
+		go func() {
+			cmpCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			r.maybeCompact(cmpCtx, scope)
+		}()
+	}
+
 	return nil
 }
 
