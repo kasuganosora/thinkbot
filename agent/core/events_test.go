@@ -51,7 +51,8 @@ func TestEventSinkContextRoundTrip(t *testing.T) {
 		t.Fatal("sink not retrievable from context")
 	}
 	// nil context / 未设置 → Noop
-	if EventSinkFromContext(nil) != NoopSink {
+	var nilCtx context.Context
+	if EventSinkFromContext(nilCtx) != NoopSink {
 		t.Fatal("nil ctx should yield NoopSink")
 	}
 	// WithEventSink(nil) 不应 panic，应回退 Noop
