@@ -1715,7 +1715,7 @@ const _botCompaction = {}
 function ensureCompaction(botId) {
   if (!_botCompaction[botId]) {
     _botCompaction[botId] = {
-      config: { enabled: true, threshold: 131072, ratio: 37, model: 'deepseek-v4-flash' },
+      config: { enabled: true, threshold: 131072, ratio: 37, model: '' },
       history: [
         { id: genId('cmp'), status: 'success', time: '2026/6/14 11:46:45', cost: 8.0, error: '' },
         { id: genId('cmp'), status: 'success', time: '2026/6/14 10:41:32', cost: 12.7, error: '' },
