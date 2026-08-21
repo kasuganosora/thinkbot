@@ -356,7 +356,7 @@ func capRetriesAndIterations(maxRetries, maxIterations int) (int, int) {
 
 // 通过 parseDAGSpec 验证完整路径（LLM 返回极端值 → 被截断）
 func TestParseDAGSpec_ExtremeValuesCapped(t *testing.T) {
-	raw := `{"nodes":[{"id":"n1","name":"t","task":"do","dependencies":[],"review":false,"maxRetries":9999,"maxIterations":9999}]}`
+	raw := `<result>{"nodes":[{"id":"n1","name":"t","task":"do","dependencies":[],"review":false,"maxRetries":9999,"maxIterations":9999}]}</result>`
 	spec, err := parseDAGSpec(raw)
 	if err != nil {
 		t.Fatalf("parseDAGSpec failed: %v", err)
