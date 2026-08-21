@@ -658,6 +658,39 @@ func InsertMidConversationMessages(messages []Message, midMsgs ...MidConversatio
 	return result
 }
 
+// SummarizeHead 将给定的一组旧消息（通常是滑窗溢出要丢弃的最早整轮）压缩为
+// 一段结构化摘要文本，供 ContextManager 在消息数超过滑窗上限时，用单条摘要消息
+// 替代删除这些整轮，避免纯删除导致早期上下文永久丢失（持久 subagent 多轮对话场景）。
+//
+// 与 Compact 的区别：
+//   - 只做「摘要生成」，不裁剪工具输出、不保护 tail；
+//   - 不维护全局 previousSummary 增量状态（每次独立摘要传入的 head），因此可安全
+//     嵌入 ContextManager 的裁剪流程，而不会污染主 Agent 的增量锚定摘要；
+//   - model 指定摘要所用 LLM 模型（通常与 subagent 同模型）。
+func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model string, head []Message) (string, error) {
+	if len(head) == 0 {
+		return "", nil
+	}
+	if provider == nil {
+		return "", fmt.Errorf("compactor: no provider for head summarization")
+	}
+	prompt := c.buildSummaryPrompt(head)
+	maxTokens := c.config.SummaryMaxTokens
+	temp := 0.3
+	params := GenerateParams{
+		Model:       ChatModel(model),
+		System:      CompactionSystemPrompt,
+		Messages:    []Message{UserMessage(prompt)},
+		MaxTokens:   &maxTokens,
+		Temperature: &temp,
+	}
+	result, err := provider.DoGenerate(ctx, params)
+	if err != nil {
+		return "", err
+	}
+	return result.Text, nil
+}
+
 // ============================================================================
 // PrepareStep hook：自动上下文压缩
 // ============================================================================

@@ -231,6 +231,9 @@ const (
 	// 启动后不足该时长不判卡死，容忍 LLM「思考」阶段（读长输入 + 推理）无输出。
 	// 实际宽限期取 stuckTimeout/2，并受此上限约束。
 	delegateMaxStartupGrace = 60 * time.Second
+	// delegateLeakGrace 看门狗取消后，等待违规 provider（不响应 ctx 取消、不关闭
+	// 流 channel）主动结束的宽限时长。超时则强制停止 drain，避免消费 goroutine 泄漏。
+	delegateLeakGrace = 30 * time.Second
 )
 
 // computeDelegateManyBounds 计算 DelegateMany 单个子任务的卡死看门狗阈值(stuck)
@@ -261,39 +264,15 @@ func computeDelegateManyBounds(stuckTimeout, effectiveTimeout time.Duration) (st
 	return stuck, hard
 }
 
-// Delegate 创建一个临时 SubAgent，执行任务后自动关闭。
-// 这是一次性委托模式，适合不需要多轮交互的场景。
+// Delegate 创建一个临时 SubAgent，执行任务后自动关闭（一次性委托模式）。
+//
+// 已收敛为 DelegateStream 的薄封装：同样享有卡死看门狗保护，并消除了旧版
+// 「context.WithTimeout 一刀切（120s）」的死路径——旧路径遇到慢但活着的子 Agent
+// （如处理超长输入）会被强制中断，且工具挂死时也无看门狗探活。
+// 如需调整阈值请用 WithStuckTimeout；WithCallTimeout 对本方法不再生效
+// （已由卡死看门狗取代，见 DelegateStream 注释）。
 func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
-	timeout, _, defaultOpts := m.snapshotConfig()
-
-	// 合并选项（WithCallTimeout 可能覆盖默认超时）
-	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
-
-	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
-	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入。
-	if !hasSkipTools(opts...) {
-		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
-			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.toolStepsSnapshot()))
-		}
-	}
-
-	// 创建临时 SubAgent 以提取 callTimeout 覆盖值
-	sa := New(m.provider, m.model, allOpts...)
-	defer sa.Close()
-
-	// 使用 callTimeout 覆盖或回退到管理器默认值
-	effectiveTimeout := timeout
-	if sa.callTimeout > 0 {
-		effectiveTimeout = sa.callTimeout
-	}
-
-	if effectiveTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, effectiveTimeout)
-		defer cancel()
-	}
-
-	return sa.Chat(ctx, task)
+	return m.DelegateStream(ctx, systemPrompt, task, opts...)
 }
 
 // DelegateStream 创建临时 SubAgent，流式执行任务，并用卡死看门狗保护。
@@ -421,7 +400,26 @@ func (m *SubAgentManager) streamWithWatchdog(ctx context.Context, sa *SubAgent, 
 
 	var textBuf strings.Builder
 	var streamErr error
-	for part := range stream.Stream {
+	var forceStopped bool
+	// 泄漏兜底：看门狗在 hard 上限处 cancel 后，合规 provider 会关闭流 channel，
+	// 循环随之退出；但若 provider 忽略 ctx 取消、拒不关闭 channel（非合规实现），
+	// 消费 goroutine 会永久阻塞——故在 hard+delegateLeakGrace 处强制停止 drain。
+	leakGuard := time.NewTimer(hard + delegateLeakGrace)
+	defer leakGuard.Stop()
+loop:
+	for {
+		var part llm.StreamPart
+		var ok bool
+		select {
+		case part, ok = <-stream.Stream:
+		case <-leakGuard.C:
+			forceStopped = true
+			cancel() // 强制中止底层流
+			break loop
+		}
+		if !ok {
+			break loop // 流正常结束
+		}
 		// 任意片段都刷新活跃时间戳：文本/推理 token 与工具调用/结果都算活着，
 		// 避免一段较长的 exec（仅在首尾产生工具片段）被误判卡死。
 		atomic.StoreInt64(&lastActivity, time.Now().UnixNano())
@@ -434,9 +432,17 @@ func (m *SubAgentManager) streamWithWatchdog(ctx context.Context, sa *SubAgent, 
 			cancel() // 流内错误：停止消费，触发看门狗退出
 		}
 	}
-	// 流已正常结束（或已被看门狗取消）：通知看门狗退出，避免其阻塞在 ticker 上。
+	// 流已正常结束（或已被看门狗取消/泄漏兜底强制停止）：通知看门狗退出，避免其阻塞在 ticker 上。
 	cancel()
 	<-watchdogDone
+
+	// 非合规 provider 未响应 ctx 取消、拒不关闭流 channel：leakGuard 强制截断 drain。
+	// 此时无论看门狗此前是否已因 stuck/hard 取消，都应归因为 provider 泄漏，
+	// 给出明确且可排障的错误（而非被 "hard" 兜底信息掩盖根因）。
+	if forceStopped {
+		killReason = "leak"
+		streamErr = errs.Newf("subagent 流未在硬上限后正常关闭（provider 未响应取消），已强制截断 drain")
+	}
 
 	// 可观测性：看门狗终止（stuck/hard）是子 Agent 失控的关键失败信号，必须落日志。
 	// 否则 DelegateMany 直接调用（无进度回调）时该原因会被吞掉，排障时只见
@@ -458,6 +464,8 @@ func (m *SubAgentManager) streamWithWatchdog(ctx context.Context, sa *SubAgent, 
 		return "", errs.Newf("subagent LLM 卡死：连续 %s 无输出（卡死看门狗终止）", stuck)
 	case killReason == "hard":
 		return "", errs.Newf("subagent 超过硬上限 %s 被强制终止（看门狗兜底）", hard)
+	case killReason == "leak":
+		return "", errs.Newf("subagent 流未在硬上限后正常关闭（provider 未响应取消），已强制截断 drain")
 	case streamErr != nil:
 		return "", errs.Wrapf(streamErr, "subagent stream failed")
 	}
@@ -651,6 +659,11 @@ func (m *SubAgentManager) Spawn(systemPrompt, name string, opts ...Option) (stri
 }
 
 // Chat 向持久化 SubAgent 发送消息并返回回复。
+//
+// 防御：若传入 ctx 无截止时间，则套一层 chatTimeout 墙钟硬上限（默认 10min，
+// 可经 WithChatTimeout 覆盖）。持久 subagent 的 Chat 此前无任何超时/看门狗，
+// 一旦工具挂死或 LLM 假活会无限阻塞调用方 goroutine——这是与 DelegateMany
+// 同类但更隐蔽的卡死隐患，现统一由硬上限兜底。
 func (m *SubAgentManager) Chat(ctx context.Context, id, message string) (string, int, error) {
 	m.mu.Lock()
 	sa, ok := m.subagents[id]
@@ -659,7 +672,14 @@ func (m *SubAgentManager) Chat(ctx context.Context, id, message string) (string,
 		return "", 0, fmt.Errorf("subagent %q not found", id)
 	}
 
-	reply, err := sa.Chat(ctx, message)
+	chatCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && sa.chatTimeout > 0 {
+		var cancel context.CancelFunc
+		chatCtx, cancel = context.WithTimeout(ctx, sa.chatTimeout)
+		defer cancel()
+	}
+
+	reply, err := sa.Chat(chatCtx, message)
 	if err != nil {
 		return "", 0, err
 	}
