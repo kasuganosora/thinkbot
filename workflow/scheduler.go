@@ -58,6 +58,11 @@ type Scheduler struct {
 	emitter     *outbound.EventEmitter // 可为 nil
 	metrics     *ManagerMetrics        // 可为 nil（测试时）
 
+	// 自愈：失败节点根因诊断 + 局部重分析。nil 表示关闭自愈（测试/轻量场景）。
+	analyzer *Analyzer
+	// healCache 按 nodeID 缓存诊断结论与细化次数，避免同一节点被反复诊断/无限细化。
+	healCache sync.Map // nodeID -> healCacheEntry
+
 	mu         sync.Mutex    // 保护 wf.Nodes 状态读写
 	sem        chan struct{} // 并发限流 semaphore
 	terminate  chan struct{} // 终止信号（close to broadcast）
@@ -83,7 +88,7 @@ type SchedulerConfig struct {
 }
 
 // NewScheduler 创建调度器。
-func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg SchedulerConfig, ec EngineConfig, tp trace.TracerProvider, logger *zap.SugaredLogger, emitter *outbound.EventEmitter, metrics *ManagerMetrics) *Scheduler {
+func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg SchedulerConfig, ec EngineConfig, tp trace.TracerProvider, logger *zap.SugaredLogger, emitter *outbound.EventEmitter, metrics *ManagerMetrics, analyzer *Analyzer) *Scheduler {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
@@ -113,6 +118,7 @@ func NewScheduler(wf *Workflow, executor NodeExecutor, repo *Repository, cfg Sch
 		logger:        logger.With("stage", "workflow_scheduler", "workflow_id", wf.ID),
 		emitter:       emitter,
 		metrics:       metrics,
+		analyzer:      analyzer,
 		sem:           make(chan struct{}, maxParallel),
 		terminate:     make(chan struct{}),
 		quotaBreakCh:  make(chan struct{}),
@@ -417,6 +423,14 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 			attribute.Int64("node.duration_ms", time.Since(nodeStart).Milliseconds()),
 		)
 		s.metrics.NodeFailed.Add(1)
+
+		// 自愈：仅对「硬上限强杀」这类歧义失败触发根因诊断 + 局部重分析。
+		// 成功接管（细化并动态替换节点）则直接返回——不标记 failed、不级联跳过，
+		// 下游节点会自然重连到新子图叶子续跑；不影响其它正常节点。
+		if s.trySelfHeal(ctx, node, lastErr) {
+			return
+		}
+
 		s.mu.Lock()
 		node.Status = NodeFailed
 		node.Error = lastErr.Error()
