@@ -270,9 +270,12 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 	// 显著提高"跨过退化窗口后自动恢复"的概率；退避可被 ctx 取消打断。
 	const maxAttempts = 5
 	var lastErr error
-	// redoHint 在解析失败（尤其是缺失 <result> 标签）时累积纠正提示，
-	// 于下一轮重试附加到任务末尾，使「打回重做」真正生效而非盲目重试。
-	var redoHint string
+	// analyzerRedoFmtHint：缺失 <result> 包裹标签时的固定格式提醒。一旦触发即持久保留，
+	// 跨多次重试只出现一次，提醒模型必须把最终 DAG JSON 放在 <result>...</result> 之间。
+	var analyzerRedoFmtHint string
+	// analyzerRedoReasons：跨重试累积的【具体】失败原因（解析错误 / 校验违规 / 截断），
+	// 去重后逐条回传给模型，让模型明确知道上一轮哪里错了、怎么改，而不是盲目重试。
+	var analyzerRedoReasons []string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// 分析阶段被显式终止（如外部调用 Control(terminate) 取消了 bgCtx）：
 		// 立刻返回，不重试、不污染错误信息。上层会据此标记为 terminated 而非 failed。
@@ -312,9 +315,13 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		// 从而把大范围任务拆成能在 ~30min 硬上限内完成的细颗粒度节点。
 		// 工具回路由 streamWithWatchdog + SetAutoCompact 兜底（见 subagent/manager.go），
 		// 历史上"注入工具会卡死"的顾虑已不成立。
+		// 组装重试时的纠错提示：固定格式提醒（缺失 <result>）+ 累积的具体失败原因。
+		// 仅在第 2 次及以后附加，且只在确有可反馈内容时附加。
 		effectiveTask := task
-		if attempt > 1 && redoHint != "" {
-			effectiveTask = task + "\n\n" + redoHint
+		if attempt > 1 {
+			if hint := buildAnalyzerRedoHint(analyzerRedoFmtHint, analyzerRedoReasons); hint != "" {
+				effectiveTask = task + "\n\n" + hint
+			}
 		}
 		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, effectiveTask,
 			subagent.WithTemperature(temp),
@@ -344,10 +351,23 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		spec, perr := parseDAGSpec(raw)
 		if perr != nil {
 			lastErr = errs.Wrapf(perr, "failed to parse analyzer output")
-			// 缺失 <result> 标签是明确的输出格式违规：累积纠正提示，下一轮重试时
-			// 附加到任务末尾，让模型补上标签（「打回重做」真正生效）。
+			// 按失败类型把【具体原因】累积进重试提示，下一轮让模型知道错在哪、怎么改：
 			if errors.Is(perr, errNoResultTag) {
-				redoHint = analyzerResultTagRedoHint
+				// 缺失 <result> 标签：固定格式提醒（持久，不随次数叠加）。
+				analyzerRedoFmtHint = analyzerResultTagRedoHint
+			} else if looksTruncated(perr) {
+				// 被 max_tokens 硬截断：明确告诉模型要缩小 DAG，否则重跑仍会被截。
+				appendAnalyzerReason(&analyzerRedoReasons,
+					"上一轮输出被 token 上限截断了（JSON 不完整，无法解析）。请减少节点数量、精简每个节点的 task/systemPrompt，确保整段 JSON 能在一次输出内完整结束。")
+			} else if strings.Contains(perr.Error(), "0 nodes") {
+				// 解析成功但节点列表为空：提示至少生成一个节点。
+				appendAnalyzerReason(&analyzerRedoReasons,
+					"上一轮输出虽然能被解析，但 nodes 数组为空（没有任何节点）。请至少生成一个节点，把需求拆成可执行的子任务列表。")
+			} else {
+				// 其它解析错误（非法 JSON 语法）：把具体语法错误回传给模型。
+				reason := "上一轮输出在 <result> 内的 JSON 解析失败：" + jsonErrorText(raw) +
+					"。请修正为合法 JSON（键名加双引号、数组/对象括号配平、不要留尾随逗号、不要用 markdown 代码块包裹）。"
+				appendAnalyzerReason(&analyzerRedoReasons, reason)
 			}
 			// 输出被 max_tokens 硬截断时，报错只是笼统的 "unexpected end of JSON input"，
 			// 极易被误判成「模型不听话」。这里显式点名预算，让日志直接指向可调参数。
@@ -403,6 +423,11 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		// 校验 DAG（feedback 边不计入 Dependencies，故不影响无环性校验）
 		if err := ValidateDAG(nodes); err != nil {
 			lastErr = errs.Wrap(err, "generated DAG is invalid")
+			// 把具体的 DAG 契约违规原因回传给模型（重复 ID / 依赖未知节点 / 自依赖 / 环等），
+			// 让模型知道错在哪个节点、怎么改，而不是盲目重试。
+			reason := "上一轮生成的 DAG 未通过结构校验：" + err.Error() +
+				"。请检查：每个节点的 id 是否唯一且非空；dependencies 引用的节点 id 是否都真实存在；是否存在循环依赖（环）。"
+			appendAnalyzerReason(&analyzerRedoReasons, reason)
 			logger.Warnw("generated DAG invalid, will retry",
 				"attempt", attempt, "max_attempts", maxAttempts, "error", err)
 			continue
@@ -511,6 +536,69 @@ func looksTruncated(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unexpected end of json") ||
 		strings.Contains(msg, "unexpected eof")
+}
+
+// appendAnalyzerReason 去重地把一条失败原因加入累积列表（同一原因跨多次重试只保留一条）。
+func appendAnalyzerReason(reasons *[]string, reason string) {
+	for _, r := range *reasons {
+		if r == reason {
+			return
+		}
+	}
+	*reasons = append(*reasons, reason)
+}
+
+// buildAnalyzerRedoHint 把「缺失 <result> 的固定格式提醒」+「跨重试累积的具体失败原因」
+// 拼成回传给模型的中文纠错提示。两者皆空时返回空串（不附加任何内容）。
+func buildAnalyzerRedoHint(fmtHint string, reasons []string) string {
+	if fmtHint == "" && len(reasons) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	if fmtHint != "" {
+		sb.WriteString(fmtHint)
+	}
+	if len(reasons) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString("## 上一轮输出未通过解析/校验，请针对以下问题逐条修正后重做\n")
+		for _, r := range reasons {
+			sb.WriteString("- ")
+			sb.WriteString(r)
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
+// jsonErrorText 从 LLM 输出中提取干净、可操作的 JSON 语法错误文本。
+// 优先取 <result> 内部内容；剥离 markdown 代码块后交给 ExtractJSON 取真实语法错误，
+// 并截到合理长度，避免把大段原始输出塞回模型提示里。
+func jsonErrorText(raw string) string {
+	inner := raw
+	if s, ok := extractResultTag(raw); ok {
+		inner = s
+	}
+	inner = strings.TrimSpace(inner)
+	if strings.HasPrefix(inner, "```") {
+		if i := strings.Index(inner, "\n"); i >= 0 {
+			inner = inner[i+1:]
+		}
+		if j := strings.LastIndex(inner, "```"); j >= 0 {
+			inner = inner[:j]
+		}
+		inner = strings.TrimSpace(inner)
+	}
+	var spec dagSpec
+	if err := strutil.ExtractJSON(inner, &spec); err != nil {
+		msg := err.Error()
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return msg
+	}
+	return "unknown JSON error"
 }
 
 // recoverTruncatedDAGNodes 从被截断的 LLM 输出中恢复完整的 DAG 节点。
