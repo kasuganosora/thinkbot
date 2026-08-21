@@ -90,13 +90,25 @@ func WithResponseFormat(format *llm.ResponseFormat) Option {
 	}
 }
 
-// WithCallTimeout 设置本次 Delegate/DelegateMany 调用的超时时间（固定一刀切）。
-// 覆盖 SubAgentManager 的默认 delegateTimeout（120s）。
-// 设为 0 表示不覆盖（使用管理器默认值）。
-// 注意：对 DelegateStream 无效——流式委托用卡死看门狗（WithStuckTimeout）替代固定超时。
+// WithCallTimeout 设置 DelegateMany 调用的超时时间（固定一刀切），覆盖
+// SubAgentManager 的默认 delegateTimeout（120s）。设为 0 表示不覆盖（用管理器默认）。
+// 注意：仅对 DelegateMany 生效——Delegate 已收敛为 DelegateStream 的薄封装，
+// 受卡死看门狗保护（WithStuckTimeout），不再受此一刀切超时约束。
 func WithCallTimeout(d time.Duration) Option {
 	return func(sa *SubAgent) {
 		sa.callTimeout = d
+	}
+}
+
+// WithChatTimeout 设置持久 subagent（Spawn/Chat）单次交互的墙钟硬上限。
+// 覆盖默认的 defaultChatHardTimeout（10min）。防止工具挂死/LLM 假活时 Chat
+// 无限阻塞调用方 goroutine。仅对持久 subagent 的 Chat 生效；
+// Delegate/DelegateStream/DelegateMany 走各自的卡死看门狗，不受此影响。
+func WithChatTimeout(d time.Duration) Option {
+	return func(sa *SubAgent) {
+		if d > 0 {
+			sa.chatTimeout = d
+		}
 	}
 }
 
