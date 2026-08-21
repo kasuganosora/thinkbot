@@ -151,6 +151,35 @@ func StripInternalState(text string) string {
 }
 
 // ============================================================================
+// 上下文标记过滤器 — 防止入站注入的上下文标记泄漏到对外回复
+// ============================================================================
+
+// contextMarkerRe 匹配入站阶段注入的「上下文标记」整行，形态有三种：
+//   - [Reply to <sender>: <quoted>]  —— noteContext 在用户回复某帖时前置，告知模型"用户在回复谁/回复了啥"
+//   - [Renote from <sender>: <quoted>] —— 同上，引用转发场景
+//   - [note_id: <id>] —— 当前帖 ID，供模型调引用/反应类工具
+//
+// 这些标记仅供模型理解上下文，绝不应出现在对外发送的回复正文里。
+// 模型偶发会把入站文本里的 [Reply to ...] / [Renote from ...] 原样回显到自己的回复开头
+// （实测 GLM 在 reply 场景把 `[Reply to @luna: 嘿嘿]` 直接复制成了回复首行），
+// 导致对外帖子出现诡异的方括号前缀。这与 StripThinking / StripInternalState 同一思路：
+// 在出站清洗阶段兜底剥离，而非完全依赖模型遵守提示词。
+//
+// 匹配整行（允许行首尾空白），不误伤正文里普通出现的方括号内容。
+var contextMarkerRe = regexp.MustCompile(
+	`(?m)^\s*\[(?:(?:Reply to|Renote from) .*?: .*?|note_id: .*?)\]\s*$`,
+)
+
+// StripContextMarkers 从最终回复文本中剥离入站注入的上下文标记整行，
+// 防止 `[Reply to ...]` / `[Renote from ...]` / `[note_id: ...]` 泄漏到公开帖文。
+//
+// 在 llmroute 出站清洗阶段（StripThinking / StripInternalState 之后）调用，
+// 作为纵深防御的最后一道兜底。
+func StripContextMarkers(text string) string {
+	return strings.TrimSpace(contextMarkerRe.ReplaceAllString(text, ""))
+}
+
+// ============================================================================
 // ThinkFilterStore — 自动清理思考内容的 Store 装饰器
 // ============================================================================
 

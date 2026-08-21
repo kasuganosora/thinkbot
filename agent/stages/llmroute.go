@@ -904,6 +904,12 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 公开发到时间线。思考清洗后再次过滤内部指标，确保不泄漏。
 	replyText = memory.StripInternalState(replyText)
 
+	// 纵深防御：剥离入站阶段注入的上下文标记（[Reply to ...] / [Renote from ...] /
+	// [note_id: ...]）。这些标记仅供模型理解上下文，但模型偶发会原样回显到回复开头，
+	// 导致对外帖子出现诡异方括号前缀。在出站前兜底剥离（与 StripThinking / StripInternalState 同一思路）。
+	// 由于后续 clean / pub 均由 replyText 派生，此处一处调用即可覆盖所有出站路径。
+	replyText = memory.StripContextMarkers(replyText)
+
 	// 回复控制门控（opt-in）：解析结尾控制 JSON，失败/缺失/send:false 一律不出站。
 	// 放在「清洗后空检查」之前——若模型 send:true 但正文为空，后续空检查会照常拦截；
 	// 若 send:false，这里已提前 return，独白绝不外发。
