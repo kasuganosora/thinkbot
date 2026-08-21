@@ -139,16 +139,16 @@ func NewManager(repo *Repository, analyzer *Analyzer, executor *Executor, tp tra
 		tp = noop_trace.NewTracerProvider()
 	}
 	return &Manager{
-		repo:     repo,
-		analyzer: analyzer,
-		executor: executor,
-		ec:       ec,
-		tracer:   tp.Tracer("github.com/kasuganosora/thinkbot/workflow/manager"),
-		tp:       tp,
-		logger:   logger.With("stage", "workflow_manager"),
-		emitter:  outbound.NewEventEmitter(bus, ""),
-		running:  make(map[string]*runningInstance),
-		consumed: make(map[string]bool),
+		repo:              repo,
+		analyzer:          analyzer,
+		executor:          executor,
+		ec:                ec,
+		tracer:            tp.Tracer("github.com/kasuganosora/thinkbot/workflow/manager"),
+		tp:                tp,
+		logger:            logger.With("stage", "workflow_manager"),
+		emitter:           outbound.NewEventEmitter(bus, ""),
+		running:           make(map[string]*runningInstance),
+		consumed:          make(map[string]bool),
 		needsContinuation: make(map[string]bool),
 	}
 }
@@ -344,7 +344,7 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 	defer m.metrics.Running.Add(-1)
 
 	// Phase 1: 分析需求
-	// 分析阶段总时长上限：防止 GLM 退化时分析器反复重试（每次最坏 stuck×3≈9 分钟）
+	// 分析阶段总时长上限：防止 GLM 退化时分析器反复重试（每次最坏 stuck×10≈30 分钟）
 	// 把「分析中」拖成数十分钟的黑洞。超过该时长整轮分析失败并给出明确报错，
 	// 前端可立即看到结果而非一直转圈。
 	analyzeCtx := ctx
