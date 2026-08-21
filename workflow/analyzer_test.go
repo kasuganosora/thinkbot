@@ -3,6 +3,8 @@ package workflow
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,6 +101,114 @@ func TestAnalyzer_ExhaustsThenFails(t *testing.T) {
 	_, err := a.Analyze(ctx, "请修复若干 lint 问题", false)
 	if err == nil {
 		t.Fatal("expected error when GLM keeps returning empty")
+	}
+}
+
+// reasonRecordingProvider 按 responses 顺序逐次返回，并完整记录每次请求里
+// 所有消息的文本内容（用于断言「重试时是否把失败原因回传给了模型」）。
+type reasonRecordingProvider struct {
+	mu        sync.Mutex
+	calls     int
+	responses []string
+	allText   []string
+}
+
+func (p *reasonRecordingProvider) Name() string { return "reason-rec" }
+
+func (p *reasonRecordingProvider) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	return &llm.GenerateResult{Text: "", FinishReason: llm.FinishReasonStop}, nil
+}
+
+func (p *reasonRecordingProvider) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
+	p.mu.Lock()
+	idx := p.calls
+	p.calls++
+	var resp string
+	if idx < len(p.responses) {
+		resp = p.responses[idx]
+	} else if len(p.responses) > 0 {
+		resp = p.responses[len(p.responses)-1]
+	}
+	var sb strings.Builder
+	for _, m := range params.Messages {
+		for _, part := range m.Content {
+			if tp, ok := part.(llm.TextPart); ok {
+				sb.WriteString(tp.Text)
+				sb.WriteString("\n")
+			}
+		}
+	}
+	p.allText = append(p.allText, sb.String())
+	p.mu.Unlock()
+
+	ch := make(chan llm.StreamPart, 1)
+	go func() {
+		defer close(ch)
+		select {
+		case <-ctx.Done():
+		case ch <- &llm.TextDeltaPart{Text: resp}:
+		}
+	}()
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
+// TestAnalyzer_RetryCarriesValidateReason 验证：当生成的 DAG 未通过结构校验
+// （如存在环）时，重试请求里必须带上具体的校验失败原因，让模型知道错在哪、怎么改。
+func TestAnalyzer_RetryCarriesValidateReason(t *testing.T) {
+	cycleJSON := `<result>{"nodes":[
+		{"id":"n1","name":"A","task":"t","dependencies":["n2"]},
+		{"id":"n2","name":"B","task":"t","dependencies":["n1"]}
+	]}</result>`
+	prov := &reasonRecordingProvider{responses: []string{cycleJSON, "<result>" + testDAGJSON + "</result>"}}
+	saMgr := subagent.NewSubAgentManager(prov, "test-model")
+	a := NewAnalyzer(saMgr, nil, EngineConfig{AnalyzerTemperature: 0.3, AnalyzerMaxTokens: 8192, AnalyzerStuckTimeout: 5 * time.Second}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	nodes, err := a.Analyze(ctx, "把需求拆成 DAG", false)
+	if err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("unexpected nodes: %+v", nodes)
+	}
+	if got := prov.calls; got != 2 {
+		t.Fatalf("expected 2 calls, got %d", got)
+	}
+	if len(prov.allText) < 2 {
+		t.Fatalf("expected at least 2 captured requests, got %d", len(prov.allText))
+	}
+	second := prov.allText[1]
+	if !strings.Contains(second, "未通过结构校验") || !strings.Contains(second, "cycle detected") {
+		t.Fatalf("retry task missing validate reason:\n%s", second)
+	}
+}
+
+// TestAnalyzer_RetryCarriesMissingTagReason 验证：当输出缺失 <result> 标签时，
+// 重试请求里必须带上「用 <result> 包裹」的格式纠正提示。
+func TestAnalyzer_RetryCarriesMissingTagReason(t *testing.T) {
+	prov := &reasonRecordingProvider{responses: []string{testDAGJSON, "<result>" + testDAGJSON + "</result>"}}
+	saMgr := subagent.NewSubAgentManager(prov, "test-model")
+	a := NewAnalyzer(saMgr, nil, EngineConfig{AnalyzerTemperature: 0.3, AnalyzerMaxTokens: 8192, AnalyzerStuckTimeout: 5 * time.Second}, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	nodes, err := a.Analyze(ctx, "把需求拆成 DAG", false)
+	if err != nil {
+		t.Fatalf("expected success after retry, got: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("unexpected nodes: %+v", nodes)
+	}
+	if got := prov.calls; got != 2 {
+		t.Fatalf("expected 2 calls, got %d", got)
+	}
+	if len(prov.allText) < 2 {
+		t.Fatalf("expected at least 2 captured requests, got %d", len(prov.allText))
+	}
+	second := prov.allText[1]
+	if !strings.Contains(second, "缺少") || !strings.Contains(second, "<result>") {
+		t.Fatalf("retry task missing missing-tag hint:\n%s", second)
 	}
 }
 
