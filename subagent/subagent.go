@@ -87,6 +87,73 @@ type SubAgent struct {
 	// 用于 Analyzer 等纯 LLM 任务（只需输出 JSON，不需要工具能力），
 	// 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死或延迟。
 	skipTools bool
+
+	// compactor 可选的语义压缩器（LLM 摘要）。非空时在每步编排前检测 token
+	// 溢出并自动用 LLM 摘要旧消息，避免 context 爆炸把 subagent 养到硬上限看门狗
+	// （默认 30min）仍无法收敛。注意：语义压缩按「对话轮次」切分旧头部，单轮委托
+	// （如工作流「审查 X 目录」只有 1 个 user 轮）几乎触发不到——它主要服务多轮场景。
+	// 单轮工具循环的 context 爆炸靠下方的 reducer（工具输出缩减）压住。
+	// 建议通过 WithAutoCompact 让每个 subagent 各自持有一个独立实例——Compactor
+	// 内部有 previousSummary / compactionCount 等跨调用状态，跨 subagent 共享会
+	// 互相污染（DelegateMany 并发场景下尤其危险）。
+	compactor *llm.Compactor
+
+	// autoCompact 为 true 且未显式 WithCompactor 时，New 自动建一个独立
+	// Compactor（DefaultCompactionConfig）。经 manager 的 defaultOpts 注入，
+	// 让所有委托/派生的 subagent 默认开启压缩，而无需逐个显式传实例。
+	autoCompact bool
+
+	// reductionConfig 可选的「工具输出缩减」配置（in-loop 轻量压缩）。
+	// 非空时，每步编排前把超大/过旧的工具结果截断或替换为占位符，按 step 而非
+	// 轮次裁剪——因此单轮委托（工作流子 Agent 读大文件→跑命令的循环）也能压住
+	// context 爆炸。这是根治「context 爆炸 → 30min 硬上限」失控流的核心机制
+	// （主 Agent 的 llmroute 已用 NewReducePrepareStepCallback 接同一套）。
+	// 零值 ReductionConfig 表示关闭（MaxOutputTokens/ClearThresholdTokens 均为 0）。
+	reductionConfig llm.ReductionConfig
+
+	// reducer 由 reductionConfig 预构建的 PrepareStep 回调（无 ctx 依赖，可在 New 时构建）。
+	// 对应 Reduction 阶段 2：每步 LLM 调用前压缩历史中过旧的大工具结果。
+	reducer func(*llm.GenerateParams) *llm.GenerateParams
+
+	// reducerOnToolResults 由 reductionConfig 预构建的 OnToolResults 回调（无 ctx 依赖）。
+	// 对应 Reduction 阶段 1：工具执行后、结果写入历史前，把超阈值单条工具结果截断为预览+摘要。
+	// 与 reducer（阶段 2）配套，共同压住单轮工具循环的 context 爆炸。
+	reducerOnToolResults func(int, []llm.ToolResultPart) []llm.ToolResultPart
+}
+
+// WithCompactor 显式注入一个语义压缩器。为空时可通过 WithAutoCompact 让
+// New 自动创建独立实例。强烈建议每个 subagent 各自持有一个（Compactor 内部
+// 有跨调用状态，共享会互相污染）。
+func WithCompactor(c *llm.Compactor) Option {
+	return func(sa *SubAgent) { sa.compactor = c }
+}
+
+// isZeroReductionConfig 判断缩减配置是否为零值（MaxOutputTokens /
+// ClearThresholdTokens / RetainRecentSteps 均为 0 且无 ExcludeTools）。
+// ReductionConfig 含 []string 字段，不能用 == 比较，故用此辅助函数。
+func isZeroReductionConfig(rc llm.ReductionConfig) bool {
+	return rc.MaxOutputTokens == 0 && rc.ClearThresholdTokens == 0 &&
+		rc.RetainRecentSteps == 0 && len(rc.ExcludeTools) == 0
+}
+
+// WithAutoCompact 让 New 在 compactor 为空时自动创建一个独立 Compactor，
+// 并默认开启 in-loop 缩减（WithReduction(DefaultReductionConfig)）——二者针对
+// 不同失控模式（语义摘要服务多轮、缩减压住单轮工具循环），一并开启才是完整的
+// 自动上下文管理。用户显式 WithReduction(rc) 会覆盖此默认缩减配置。
+func WithAutoCompact() Option {
+	return func(sa *SubAgent) {
+		sa.autoCompact = true
+		// 仅在用户未显式 WithReduction 时播种默认缩减配置，避免覆盖用户选择。
+		if isZeroReductionConfig(sa.reductionConfig) {
+			sa.reductionConfig = llm.DefaultReductionConfig()
+		}
+	}
+}
+
+// WithReduction 开启「工具输出缩减」in-loop 压缩（按 step 裁剪超大/过旧工具结果），
+// 是单轮委托 context 爆炸的核心防线。rc 为零值时等同于关闭。
+func WithReduction(rc llm.ReductionConfig) Option {
+	return func(sa *SubAgent) { sa.reductionConfig = rc }
 }
 
 // New 创建一个 SubAgent。
@@ -103,6 +170,19 @@ func New(provider llm.Provider, model string, opts ...Option) *SubAgent {
 	}
 	for _, opt := range opts {
 		opt(sa)
+	}
+	// autoCompact 且无显式实例时，为每个 subagent 创建独立 Compactor，
+	// 避免并发 subagent 共享内部状态互相污染。
+	if sa.autoCompact && sa.compactor == nil {
+		sa.compactor = llm.NewCompactor(llm.DefaultCompactionConfig())
+	}
+	// 工具输出缩减：零值配置视为关闭（NewReducePrepareStepCallback /
+	// NewOnToolResultsCallback 内部对零阈值不做任何裁剪）。
+	// 阶段 2（PrepareStep，历史压缩）+ 阶段 1（OnToolResults，单条结果截断）
+	// 配套使用，与主 Agent 的 llmroute 接同一套机制。
+	if !isZeroReductionConfig(sa.reductionConfig) {
+		sa.reducer = llm.NewReducePrepareStepCallback(sa.reductionConfig)
+		sa.reducerOnToolResults = llm.NewOnToolResultsCallback(sa.reductionConfig)
 	}
 	return sa
 }
@@ -149,6 +229,19 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 			// 延迟加载：子 Agent 与主 Agent 共用同一批工具（含可能延迟的
 			// MCP 工具），按需经 tool_search / 直接引用加载完整 schema。
 			ToolDeferral: llm.NewToolDeferral(true),
+		}
+		// 自动上下文防御（同主 Agent 的 llmroute 机制）：
+		//   - PrepareStep：reducer 阶段 2（历史压缩）+ compactor 语义摘要（多轮场景）。
+		//   - OnToolResults：reducer 阶段 1（单条工具结果截断，单轮循环核心防线）。
+		// 二者按 step 工作，即使单轮委托（工作流子 Agent 读大文件→跑命令）也能压住
+		// context 爆炸，避免养到 30min 硬上限仍无法收敛、纯浪费 token。
+		if prepareStep, onToolResults := sa.buildOrchestrateHooks(ctx); prepareStep != nil || onToolResults != nil {
+			if prepareStep != nil {
+				cfg.PrepareStep = prepareStep
+			}
+			if onToolResults != nil {
+				cfg.OnToolResults = onToolResults
+			}
 		}
 		result, err := llm.OrchestrateGenerate(ctx, sa.provider, cfg)
 		if err != nil {
@@ -217,6 +310,15 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 			// MCP 工具），按需经 tool_search / 直接引用加载完整 schema。
 			// 与 ChatWithResult 路径保持一致，避免流式下延迟工具暴露完整 schema。
 			ToolDeferral: llm.NewToolDeferral(true),
+		}
+		// 自动上下文防御（同 ChatWithResult 路径）：PrepareStep + OnToolResults 双钩子。
+		if prepareStep, onToolResults := sa.buildOrchestrateHooks(ctx); prepareStep != nil || onToolResults != nil {
+			if prepareStep != nil {
+				cfg.PrepareStep = prepareStep
+			}
+			if onToolResults != nil {
+				cfg.OnToolResults = onToolResults
+			}
 		}
 		result, err := llm.OrchestrateStream(ctx, sa.provider, cfg)
 		if err != nil {
@@ -349,6 +451,42 @@ func (sa *SubAgent) Close() {
 	defer sa.mu.Unlock()
 	sa.closed = true
 	sa.ctxMgr = nil
+}
+
+// buildOrchestrateHooks 构建工具编排回路（OrchestrateGenerate/Stream）的上下文压缩钩子：
+//
+//   - PrepareStep：串联 reducer（阶段 2 历史压缩）与 compactor（LLM 语义摘要，多轮场景）。
+//     二者都满足「func(*GenerateParams) *GenerateParams」签名，故合并为单步钩子：
+//     先跑 reducer（原地压缩历史），再交给 compactor 判断是否需 LLM 摘要——无需摘要则返回
+//     已缩减的 p，需摘要则返回 compactor 新生成的 params。
+//   - OnToolResults：串联 reducer 阶段 1（工具执行后、结果入史前，把超阈值单条工具结果截断
+//     为预览+摘要），这是单轮委托 context 爆炸的核心防线（语义压缩在单轮下几乎触发不到）。
+//
+// 任一钩子为 nil（未启用对应能力）时即不挂载，保证零开销。
+func (sa *SubAgent) buildOrchestrateHooks(ctx context.Context) (
+	prepareStep func(*llm.GenerateParams) *llm.GenerateParams,
+	onToolResults func(int, []llm.ToolResultPart) []llm.ToolResultPart,
+) {
+	if sa.reducer != nil {
+		prepareStep = sa.reducer
+	}
+	if sa.reducerOnToolResults != nil {
+		onToolResults = sa.reducerOnToolResults
+	}
+	if sa.compactor != nil {
+		compactHook := llm.CompactionPrepareStepWithProvider(sa.compactor, sa.provider)(ctx)
+		basePrepare := prepareStep
+		prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {
+			if basePrepare != nil {
+				basePrepare(p)
+			}
+			if cp := compactHook(p); cp != nil {
+				return cp
+			}
+			return p
+		}
+	}
+	return prepareStep, onToolResults
 }
 
 // buildParams 根据当前配置和消息构建 GenerateParams。
