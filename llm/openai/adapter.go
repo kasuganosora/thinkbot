@@ -390,14 +390,18 @@ func convertUnifiedToOpenAITools(tools []llm.Tool) ([]json.RawMessage, error) {
 	out := make([]json.RawMessage, 0, len(tools))
 	for _, t := range tools {
 		// Deferred tools expose a nil Parameters; emit a valid minimal schema
-		// ({"type":"object"}) rather than {} so providers that require a type
-		// (e.g. Anthropic) accept the tool definition.
-		var params json.RawMessage = []byte(`{"type":"object"}`)
+		// ({"type":"object","properties":{}}) rather than {} so providers that
+		// require a type (e.g. Anthropic) accept the tool definition. GLM is
+		// stricter: a function schema without a `properties` key is rejected
+		// with 1210 "API 调用参数有误". normalizeToolParameters guarantees
+		// `properties` is present on every object node.
+		var params json.RawMessage = []byte(`{"type":"object","properties":{}}`)
 		if t.Parameters != nil {
 			if b, err := json.Marshal(t.Parameters); err == nil {
 				params = b
 			}
 		}
+		params = normalizeToolParameters(params)
 		tool := FunctionTool{
 			Type:        ToolTypeFunction,
 			Name:        t.Name,

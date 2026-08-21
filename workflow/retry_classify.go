@@ -12,6 +12,8 @@ import (
 //	节点执行错误经 retry.Do 重试，但 ShouldRetry 只排除了「额度耗尽」，
 //	对以下两类「重试必然再次失败」的确定性错误无脑重试 max_retries=2：
 //	  · GLM 400 code 1214「messages 参数非法」—— 同一任务上下文必然再次越界；
+//	  · GLM 400 code 1210「API 调用参数有误」—— 工具 schema 缺 properties 等
+//	    请求体结构问题，相同请求必然再次被拒（真实根因见 llm/openai/chat.go）；
 //	  · subagent 30m 硬上限被强制终止 —— 同模型同预算重试必再次跑满 30m 被硬杀。
 //	→ 单节点最坏 3×30m=90min 卡在 running，前端一直轮询转圈。
 //
@@ -32,6 +34,13 @@ var nonRetryablePatterns = []string{
 	`"code":"1214"`,
 	`"code": "1214"`,
 	"messages 参数非法",
+	// —— GLM 工具/请求参数非法（HTTP 400 code 1210 "API 调用参数有误"） ——
+	// 真实事故 wf-75adc58e5e08d704411a3fd0：延迟加载工具被剥离 Parameters 后
+	// 发出缺 properties 的 {"type":"object"}，GLM 整请求拒收。该错误对相同请求
+	// 必然复现，重试无意义；修复见 llm/openai/chat.go normalizeToolParameters。
+	`"code":"1210"`,
+	`"code": "1210"`,
+	"api 调用参数有误",
 	"prompt is too long",
 	"prompt too long",
 	"input is too long for requested model",
