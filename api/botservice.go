@@ -560,6 +560,12 @@ func (s *BotService) WorkflowEngine(botID string) *workflow.Manager {
 const (
 	defaultSoftMaxSteps = 30
 	defaultHardMaxSteps = 90 // = defaultSoftMaxSteps * 3
+	// defaultLLMHardTimeout 主 Agent 编排回路的墙钟硬上限。
+	// 仅当处理 ctx 无 deadline 时生效（后台渠道如 Misskey 无客户端可取消），
+	// 兜底「工具/LLM 流假活不返回」导致的单条消息永久挂起。远大于单步 LLM
+	// 客户端超时（~120s）与正常任务耗时；要跑更久应拆细而非靠单次长编排。
+	// 可用 agent.hard_timeout 配置（秒）覆盖。
+	defaultLLMHardTimeout = 15 * time.Minute
 )
 
 // effectiveStepBudgets 计算 per-bot 的工具调用步数预算。
@@ -592,6 +598,17 @@ func effectiveStepBudgets(def *dao.BotDefinition) (soft, hard int) {
 		hard = soft
 	}
 	return soft, hard
+}
+
+// effectiveLLMHardTimeout 解析主 Agent 编排回路的墙钟硬上限。
+// agent.hard_timeout（秒）> 0 时采用；否则回退默认 defaultLLMHardTimeout(15min)。
+// 0 值配置不表示「关闭」——这里只做阈值覆盖，是否启用由 LLMConfig.HardTimeout>0
+// 决定（装配时始终赋该值，故默认即启用）。
+func effectiveLLMHardTimeout(store *config.Store) time.Duration {
+	if secs := store.GetInt("agent.hard_timeout", 0); secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return defaultLLMHardTimeout
 }
 
 // StartBot 从定义创建并启动 Bot 实例。
@@ -857,7 +874,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			StreamPublisher: s.eventBus,
 			UsageRecorder:   s.statsRecorder, // 统一记账到 stats
 			ReductionConfig: llm.DefaultReductionConfigPtr(),
-			ToolDeferral:    deferralStore,
+			// 墙钟硬上限（仅当上游处理 ctx 无 deadline 时生效）：兜底后台渠道
+			// （如 Misskey）消息因工具/LLM 流假活不返回而永久挂起。可用
+			// agent.hard_timeout（秒）覆盖，默认 15min。
+			HardTimeout:  effectiveLLMHardTimeout(s.store),
+			ToolDeferral: deferralStore,
 		},
 		s.tp,
 		s.logger,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -390,6 +391,16 @@ type LLMConfig struct {
 	// 为 nil 时禁用压缩（仅依赖 PatchToolCalls 安全网）。
 	ReductionConfig *llm.ReductionConfig
 
+	// HardTimeout 主 Agent 编排回路的墙钟硬上限（0=不启用）。
+	// 仅当传入的 ctx 本身没有 deadline 时才生效（若上游 worker/channel 已设
+	// 了 deadline，则尊重上游、不覆盖）——这与 subagent 的 chatWithHardTimeout
+	// 同源设计：兜底「无客户端的后台渠道（如 Misskey）ctx 永不取消」导致的
+	// 编排永久挂起（如某工具/LLM 流假活不返回）。启用后，编排总时长超过该值即
+	// 被强制终止（context.DeadlineExceeded），避免单条消息无限占用 goroutine
+	// 与下游资源。典型值 15min，远大于单步 LLM 客户端超时（~120s）与绝大多数
+	// 正常任务耗时；真要跑更久的任务应拆细而非依赖单次长编排。
+	HardTimeout time.Duration
+
 	// ApprovalHandler 可选的工具审批处理器（HITL 门禁）。
 	// 非 nil 时，标记了 RequireApproval 的工具在执行前会调用此处理器决策
 	// （approved/rejected/deferred）。为 nil 时不做审批拦截——这是当前默认，
@@ -686,9 +697,20 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"streaming", s.config.StreamPublisher != nil)
 
 	var result *llm.GenerateResult
+	// 墙钟硬上限兜底：仅当传入 ctx 无 deadline 时才叠加（尊重上游已有的
+	// deadline，不覆盖）。这与 subagent.chatWithHardTimeout 同源——后台渠道
+	//（Misskey）的 ctx 无客户端可取消，若编排内某工具/LLM 流假活不返回，
+	// 会导致单条消息永久挂起 + goroutine/资源泄漏。此处用墙钟 deadline 收口。
+	workCtx, workCancel := ctx, func() {}
+	if s.config.HardTimeout > 0 {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			workCtx, workCancel = context.WithTimeout(ctx, s.config.HardTimeout)
+		}
+	}
+	defer workCancel()
 	// WithStatsSkip: StatsRecordingProvider 会跳过 Orchestrate 内部的每次调用，
 	// 由下方 recordUsage() 统一记录合并后的总用量到 journal + stats
-	statsCtx := llm.WithStatsSkip(ctx)
+	statsCtx := llm.WithStatsSkip(workCtx)
 	// 潜水模式强制走非流式：潜水产出没有实时观众（不发帖、只落库），
 	// 流式只会让「解析 JSON → 不合规则重试」的控制流复杂化。
 	if s.config.StreamPublisher != nil && !lurkMode && !heartbeatMode {
@@ -703,6 +725,19 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				return env, &core.PipelineError{
 					Stage:   s.name,
 					Message: "LLM stream orchestrate canceled",
+					Cause:   err,
+				}
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				// 墙钟硬上限触发（HardTimeout）：编排总时长超限被强制终止，
+				// 避免后台渠道消息无限挂起。明确归因，区别于普通 provider 错误。
+				logger.Warnw("llm stage: stream orchestrate hard-timeout (wall-clock cap exceeded)",
+					"message_id", env.Message.ID,
+					"hard_timeout", s.config.HardTimeout.String(),
+					"err", err)
+				return env, &core.PipelineError{
+					Stage:   s.name,
+					Message: "LLM stream orchestrate exceeded hard timeout",
 					Cause:   err,
 				}
 			}
@@ -727,6 +762,18 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				return env, &core.PipelineError{
 					Stage:   s.name,
 					Message: "LLM orchestrate canceled",
+					Cause:   err,
+				}
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				// 墙钟硬上限触发（HardTimeout）：编排总时长超限被强制终止。
+				logger.Warnw("llm stage: orchestrate hard-timeout (wall-clock cap exceeded)",
+					"message_id", env.Message.ID,
+					"hard_timeout", s.config.HardTimeout.String(),
+					"err", err)
+				return env, &core.PipelineError{
+					Stage:   s.name,
+					Message: "LLM orchestrate exceeded hard timeout",
 					Cause:   err,
 				}
 			}
