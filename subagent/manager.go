@@ -233,6 +233,34 @@ const (
 	delegateMaxStartupGrace = 60 * time.Second
 )
 
+// computeDelegateManyBounds 计算 DelegateMany 单个子任务的卡死看门狗阈值(stuck)
+// 与总运行时长的绝对硬上限(hard)。
+//
+// 设计要点：
+//   - stuck 默认 defaultDelegateStuckTimeout(180s)，**绝不**用 effectiveTimeout/factor
+//     推导。旧实现 stuck=effectiveTimeout/10 在默认 120s 管理超时下退化为 12s、bot
+//     10min 配置下为 60s，会把任何「单条工具调用耗时 >阈值」的子 Agent 误判卡死杀掉
+//     （工具执行期间编排循环不吐流片段，沉默时长=工具执行时长，见 llm/orchestrate.go
+//     runTool）。DelegateStream 已固定 180s 默认，此处对齐以避免同类误杀。
+//   - hard = stuck * delegateHardTimeoutFactor，作为「总运行时间」的绝对兜底；若
+//     effectiveTimeout>0 且 hard 超过它，则收口到 effectiveTimeout（delegateTimeout）。
+//   - 保证 stuck <= hard 恒成立（若 effectiveTimeout 极小导致 hard<stuck）。
+func computeDelegateManyBounds(stuckTimeout, effectiveTimeout time.Duration) (stuck, hard time.Duration) {
+	if stuckTimeout <= 0 {
+		stuck = defaultDelegateStuckTimeout
+	} else {
+		stuck = stuckTimeout
+	}
+	hard = stuck * delegateHardTimeoutFactor
+	if effectiveTimeout > 0 && hard > effectiveTimeout {
+		hard = effectiveTimeout
+	}
+	if stuck > hard {
+		stuck = hard
+	}
+	return stuck, hard
+}
+
 // Delegate 创建一个临时 SubAgent，执行任务后自动关闭。
 // 这是一次性委托模式，适合不需要多轮交互的场景。
 func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
@@ -410,6 +438,21 @@ func (m *SubAgentManager) streamWithWatchdog(ctx context.Context, sa *SubAgent, 
 	cancel()
 	<-watchdogDone
 
+	// 可观测性：看门狗终止（stuck/hard）是子 Agent 失控的关键失败信号，必须落日志。
+	// 否则 DelegateMany 直接调用（无进度回调）时该原因会被吞掉，排障时只见
+	// 「failed=1」而看不到为什么被杀。
+	if killReason != "" {
+		if l := traceid.L(ctx); l != nil {
+			l.Warnw("subagent: watchdog killed task",
+				"reason", killReason,
+				"stuck", stuck.String(),
+				"hard", hard.String(),
+				"name", sa.name,
+				"model", sa.model,
+			)
+		}
+	}
+
 	switch {
 	case killReason == "stuck":
 		return "", errs.Newf("subagent LLM 卡死：连续 %s 无输出（卡死看门狗终止）", stuck)
@@ -519,22 +562,32 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 			sa := New(m.provider, m.model, allOpts...)
 			defer sa.Close()
 
-			// 用卡死看门狗替代原先的 context.WithTimeout 一刀切：
-			// 慢但活着（持续产出片段）不杀，只有彻底沉默超过 stuck 才终止，hard 兜底。
-			// 这样带工具的 spawn 子 Agent（如代码审查专家）也能真正享受看门狗保护。
-			stuck := effectiveTimeout / delegateHardTimeoutFactor
-			if stuck <= 0 {
-				stuck = defaultDelegateStuckTimeout
-			}
-			hard := stuck * delegateHardTimeoutFactor
-			if effectiveTimeout > 0 && hard > effectiveTimeout {
-				hard = effectiveTimeout // 硬上限不超过 delegateTimeout
-			}
+			// 卡死看门狗（与 DelegateStream 同一套语义）：慢但活着不杀，只有彻底
+			// 沉默超过 stuck 才终止，hard 作总运行时长的绝对兜底。
+			// stuck 默认 defaultDelegateStuckTimeout(180s)，**绝不**用
+			// effectiveTimeout/factor 推导——旧实现 stuck=effectiveTimeout/10
+			// 在默认 120s 管理超时下退化为 12s、bot 10min 配置下为 60s，会把任何
+			// 「单条工具调用 >阈值」的子 Agent 误判卡死杀掉（看门狗自己成了杀手）。
+			stuck, hard := computeDelegateManyBounds(sa.stuckTimeout, effectiveTimeout)
 
 			reply, err := m.streamWithWatchdog(taskCtx, sa, t, stuck, hard)
 			res := TaskResult{Task: t, Text: reply, Success: err == nil}
 			if err != nil {
 				res.Error = err.Error()
+			}
+			// 服务端审计日志：即便无进度回调（非 spawn 直接调用 DelegateMany），
+			// 也能在日志里看到每个子 Agent 的成败与耗时，便于排障。
+			if l := traceid.L(ctx); l != nil {
+				if res.Success {
+					l.Infow("subagent: task done",
+						"index", idx+1, "total", len(tasks),
+						"elapsed", time.Since(startAt).String(), "task", t)
+				} else {
+					l.Warnw("subagent: task failed",
+						"index", idx+1, "total", len(tasks),
+						"elapsed", time.Since(startAt).String(),
+						"error", res.Error, "task", t)
+				}
 			}
 			// 进度：子 Agent 完成，推实时结果，让前端看见「多个在并行、逐个完成」
 			if ph := delegateProgressFromCtx(ctx); ph != nil {
