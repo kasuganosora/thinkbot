@@ -357,8 +357,18 @@ func convertUnifiedToChatMessages(system string, messages []llm.Message) ([]Chat
 	if system != "" {
 		out = append(out, ChatMessage{
 			Role:    RoleSystem,
-			Content: json.RawMessage(quoteJSONString(system)),
+			Content: nonEmptyContent(system),
 		})
+	}
+
+	// GLM（BigModel）严格要求对话首条消息 role 必须是 user 或 system。
+	// 若历史首条为 assistant/tool（如从某段对话接管），前置一条占位 user 消息，
+	// 避免触发 1214 "messages[0] role must be user"。
+	if system == "" && len(messages) > 0 {
+		switch messages[0].Role {
+		case llm.MessageRoleAssistant, llm.MessageRoleTool:
+			out = append(out, ChatMessage{Role: RoleUser, Content: nonEmptyContent("（对话历史续接）")})
+		}
 	}
 
 	for _, msg := range messages {
@@ -397,6 +407,9 @@ func convertUnifiedToChatMessages(system string, messages []llm.Message) ([]Chat
 				switch pp := p.(type) {
 				case llm.TextPart:
 					textContent += pp.Text
+				case llm.ReasoningPart:
+					// 思考（reasoning_content）在 GLM 请求侧行为不确定，不回传：
+					// 历史里的 ReasoningPart 仅用于本地上下文，发给模型时丢弃（保持现状）。
 				case llm.ToolCallPart:
 					args, _ := json.Marshal(pp.Input)
 					m.ToolCalls = append(m.ToolCalls, ChatToolCall{
@@ -413,24 +426,43 @@ func convertUnifiedToChatMessages(system string, messages []llm.Message) ([]Chat
 			if len(m.ToolCalls) > 0 && textContent == "" {
 				m.Content = json.RawMessage("null")
 			} else {
-				m.Content = json.RawMessage(quoteJSONString(textContent))
+				m.Content = nonEmptyContent(textContent)
 			}
 			out = append(out, m)
 
 		case llm.MessageRoleTool:
 			for _, p := range msg.Content {
 				if trp, ok := p.(llm.ToolResultPart); ok {
+					// resultStr 已是合法 JSON；直接作为 RawMessage，避免二次编码
+					// （旧实现先 json.Marshal 再 quoteJSONString 导致 GLM 收到的 tool
+					// 结果是多包一层的转义字符串，属于功能错误）。
 					resultStr, _ := json.Marshal(trp.Result)
+					c := json.RawMessage(resultStr)
+					// 空结果（nil / 空字符串 / 空字节）补占位符，避免 GLM 1214（拒绝空 content）。
+					s := string(resultStr)
+					if len(s) == 0 || s == "null" || s == "\"\"" {
+						c = nonEmptyContent("（工具无输出）")
+					}
 					out = append(out, ChatMessage{
 						Role:       RoleTool,
 						ToolCallID: trp.ToolCallID,
-						Content:    json.RawMessage(quoteJSONString(string(resultStr))),
+						Content:    c,
 					})
 				}
 			}
 		}
 	}
 	return out, nil
+}
+
+// nonEmptyContent 将文本包装为合法的 Chat Completions content。
+// GLM（BigModel）拒绝空字符串 content（报 1214 "messages 参数非法"），
+// 因此当文本为空（或仅空白）时回退为占位符，保证 content 永不为空字符串。
+func nonEmptyContent(text string) json.RawMessage {
+	if strings.TrimSpace(text) == "" {
+		text = "（无内容）"
+	}
+	return json.RawMessage(quoteJSONString(text))
 }
 
 func convertUnifiedToChatTools(tools []llm.Tool) []ChatTool {
