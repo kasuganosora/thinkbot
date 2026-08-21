@@ -14,8 +14,8 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/util/errs"
-	"github.com/kasuganosora/thinkbot/util/retry"
 	utilhttp "github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/retry"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -323,7 +323,10 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 		// 配额耗尽（429/403 + 额度用尽特征）在窗口重置前重试必然失败且会加重限流，
 		// 立即放弃，交予断路器统一处理；其它错误按默认指数退避重试。
 		ShouldRetry: func(attempt int, err error) bool {
-			return !isQuotaExhausted(err)
+			// 确定性失败（额度耗尽 / GLM 1214 上下文超长 / subagent 硬上限被强杀 /
+			// 主 Agent 墙钟硬上限）重试必然再次失败，立即放弃交由上层按失败收尾，
+			// 避免 3×30m=90min 雪崩把工作流卡在 running。
+			return !isNonRetryable(err)
 		},
 		Backoff: &retry.Backoff{
 			Strategy: retry.StrategyExponential,
