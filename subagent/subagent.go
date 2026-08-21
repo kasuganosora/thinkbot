@@ -38,6 +38,11 @@ import (
 // 仅当通过 WithTools 注入了可执行工具、且 toolSteps != 0 时启用多步编排回路。
 const defaultSubagentToolSteps = 20
 
+// defaultChatHardTimeout 是持久 subagent（Spawn/Chat）单次交互的墙钟硬上限。
+// 防止工具挂死/LLM 假活时 Chat 无限阻塞调用方 goroutine（该路径此前无任何超时/看门狗）。
+// 可用 WithChatTimeout 覆盖。
+const defaultChatHardTimeout = 10 * time.Minute
+
 // SubAgent 是一个上下文隔离的轻量 Agent。
 // 它复用主 Agent 的 LLM Provider，但维护独立的对话历史。
 //
@@ -68,6 +73,12 @@ type SubAgent struct {
 	// stuckTimeout 卡死看门狗阈值（0 = 使用默认 defaultDelegateStuckTimeout）。
 	// 由 WithStuckTimeout 设置，仅对 DelegateStream（流式委托）生效。
 	stuckTimeout time.Duration
+
+	// chatTimeout 持久 subagent（Spawn/Chat）单次交互的墙钟硬上限。
+	// 0 = 使用默认 defaultChatHardTimeout。防止工具挂死/LLM 假活时
+	// Chat 无限阻塞调用方 goroutine（此前该路径无任何超时/看门狗）。
+	// 由 WithChatTimeout 覆盖。
+	chatTimeout time.Duration
 
 	closed bool
 
@@ -162,11 +173,12 @@ func WithReduction(rc llm.ReductionConfig) Option {
 // 可通过 opts 自定义系统提示词、温度、滑动窗口等参数。
 func New(provider llm.Provider, model string, opts ...Option) *SubAgent {
 	sa := &SubAgent{
-		provider:  provider,
-		model:     model,
-		temp:      0.7, // 默认与 BotConfig 一致
-		maxTokens: 4096,
-		ctxMgr:    NewContextManager(20), // 默认保留最近 20 条消息（10 轮）
+		provider:    provider,
+		model:       model,
+		temp:        0.7, // 默认与 BotConfig 一致
+		maxTokens:   4096,
+		ctxMgr:      NewContextManager(20), // 默认保留最近 20 条消息（10 轮）
+		chatTimeout: defaultChatHardTimeout,
 	}
 	for _, opt := range opts {
 		opt(sa)
@@ -175,6 +187,24 @@ func New(provider llm.Provider, model string, opts ...Option) *SubAgent {
 	// 避免并发 subagent 共享内部状态互相污染。
 	if sa.autoCompact && sa.compactor == nil {
 		sa.compactor = llm.NewCompactor(llm.DefaultCompactionConfig())
+	}
+	// 持久 subagent 多轮对话超滑窗时，用 LLM 摘要替代纯删除（压缩优先），
+	// 避免早期上下文永久丢失。仅当 compactor+provider 齐备时启用；
+	// summarizeHead 内部独立摘要传入的 head，不污染主 Agent 的增量锚定摘要状态。
+	if sa.compactor != nil && sa.provider != nil {
+		compactor := sa.compactor
+		provider := sa.provider
+		model := sa.model
+		sa.ctxMgr.summarizeHead = func(ctx context.Context, head []llm.Message) (llm.Message, bool) {
+			if len(head) < compactor.Config().MinMessagesToCompact {
+				return llm.Message{}, false
+			}
+			summary, err := compactor.SummarizeHead(ctx, provider, model, head)
+			if err != nil || summary == "" {
+				return llm.Message{}, false
+			}
+			return llm.SystemMessage(fmt.Sprintf("[Conversation Summary]\n%s\n[End of Summary]", summary)), true
+		}
 	}
 	// 工具输出缩减：零值配置视为关闭（NewReducePrepareStepCallback /
 	// NewOnToolResultsCallback 内部对零阈值不做任何裁剪）。
@@ -250,11 +280,13 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 		// 持久化完整输出消息（含工具调用/结果），保证多轮上下文连贯。
 		// 注意：result.Messages 仅含本轮的 assistant/tool 消息，不含本轮 user 消息，
 		// 必须先把 user 消息写回上下文，否则下一轮会丢失 user 导致对话错乱。
+		// 用 AppendWithCtx：溢出滑窗时以 LLM 摘要保留早期上下文（压缩优先），
+		// 而非纯删除。
 		sa.mu.Lock()
 		if !sa.closed {
-			sa.ctxMgr.Append(llm.UserMessage(text))
+			sa.ctxMgr.AppendWithCtx(ctx, llm.UserMessage(text))
 			for _, m := range result.Messages {
-				sa.ctxMgr.Append(m)
+				sa.ctxMgr.AppendWithCtx(ctx, m)
 			}
 			sa.totalTurns++
 		}
@@ -272,7 +304,7 @@ func (sa *SubAgent) ChatWithResult(ctx context.Context, text string) (*llm.Gener
 	// 更新上下文
 	sa.mu.Lock()
 	if !sa.closed {
-		sa.ctxMgr.AppendTurn(text, result.Text)
+		sa.ctxMgr.AppendTurnWithCtx(ctx, text, result.Text)
 		sa.totalTurns++
 	}
 	sa.mu.Unlock()
@@ -338,11 +370,12 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 					return
 				}
 			}
+			// 流结束后持久化：AppendWithCtx 在溢出滑窗时以 LLM 摘要保留早期上下文。
 			sa.mu.Lock()
 			if !sa.closed {
-				sa.ctxMgr.Append(llm.UserMessage(text))
+				sa.ctxMgr.AppendWithCtx(ctx, llm.UserMessage(text))
 				for _, m := range result.Messages {
-					sa.ctxMgr.Append(m)
+					sa.ctxMgr.AppendWithCtx(ctx, m)
 				}
 				sa.totalTurns++
 			}
@@ -376,11 +409,11 @@ func (sa *SubAgent) Stream(ctx context.Context, text string) (*llm.StreamResult,
 				return // context 取消，退出避免 goroutine 泄漏
 			}
 		}
-		// 流结束后更新上下文
+		// 流结束后更新上下文：AppendTurnWithCtx 在溢出滑窗时以 LLM 摘要保留早期上下文。
 		if textBuf != "" {
 			sa.mu.Lock()
 			if !sa.closed {
-				sa.ctxMgr.AppendTurn(text, textBuf)
+				sa.ctxMgr.AppendTurnWithCtx(ctx, text, textBuf)
 				sa.totalTurns++
 			}
 			sa.mu.Unlock()
