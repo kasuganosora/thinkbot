@@ -96,8 +96,10 @@ func (e *Executor) nodeLogger(ctx context.Context, node *DAGNode) *zap.SugaredLo
 // 旧代码用 Delegate（context.WithTimeout 一刀切），叠加 workflow_service 实例
 // 未拿到 10min 配置的问题，线上出现 30 次 elapsed=120.000s 的硬超时。
 //
-// 硬上限由 subagent 内部按 stuck × delegateHardTimeoutFactor(3) 派生 = 9min，
-// 与 bot 侧的 10min 委托超时量级一致。
+// 硬上限由 subagent 内部按 stuck × delegateHardTimeoutFactor(10) 派生 = 30min，
+// 是「总运行时间」的绝对兜底（见 subagent/manager.go:delegateHardTimeoutFactor）。
+// 注意这是 30min 量级、远大于 bot 侧 10min 委托超时——前者是失控流兜底，
+// 后者是单次委托的软超时，二者职责不同，不要混为一谈。
 // 注意：**WithCallTimeout 对 DelegateStream 无效**，必须用 WithStuckTimeout。
 const nodeStuckTimeout = 3 * time.Minute
 

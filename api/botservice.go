@@ -805,6 +805,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 提高子 Agent 并发上限：默认对齐单次 spawn 任务上限（5），避免一次派多任务时
 	// 被默认 2 的信号量限流成"分批"。可通过全局配置 subagent.max_concurrency 覆盖。
 	saMgr.SetMaxConcurrency(s.store.GetInt("subagent.max_concurrency", subagent.DefaultMaxConcurrency))
+	// 默认开启 subagent 上下文压缩：每步前检测 token 溢出并 LLM 摘要旧消息，
+	// 根治「context 爆炸 → 卡死看门狗养到 30min 硬上限仍无法收敛」的失控流
+	//（如工作流子 Agent 审查超大目录）。压缩失败时自动降级为 prune-only，安全。
+	saMgr.SetAutoCompact(true)
 	if err := subagent.RegisterTools(toolMgr, saMgr); err != nil {
 		s.logger.Warnw("failed to register subagent tools", "err", err)
 	}

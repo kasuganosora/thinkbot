@@ -136,6 +136,35 @@ func (m *SubAgentManager) SetDefaultToolSteps(n int) {
 	m.defaultToolSteps = n
 }
 
+// SetAutoCompact 为所有委托/派生的 subagent 默认开启上下文压缩。
+// 应在 Delegate/Spawn 前调用（装配期）。实现上把无状态的 WithAutoCompact
+// 与 WithReduction 选项追加进 defaultOpts——所有创建站点都经
+// mergeOptionLists(defaultOpts, ...) 继承它，且 mergeOptionLists 会拷贝成新切片、
+// 不污染原数组。
+//
+// 同时开启两层防御（二者针对的是不同失控模式，缺一不可）：
+//   - WithAutoCompact：每个 subagent 各自 new 一个独立 Compactor
+//     （DefaultCompactionConfig），内部 previousSummary/compactionCount 状态互不
+//     污染（DelegateMany 并发安全）。它按「对话轮次」切分旧头部做 LLM 摘要，
+//     主要服务多轮场景。
+//   - WithReduction(DefaultReductionConfig)：in-loop 轻量缩减（按 step 而非轮次
+//     裁剪超大/过旧工具结果），这是单轮委托（工作流子 Agent 读大文件→跑命令的
+//     循环）context 爆炸的核心防线——语义压缩在单轮下几乎触发不到，而 reducer
+//     按 step 工作，真正压住「context 爆炸 → 30min 硬上限」失控流。
+//
+// enable=false 时为空操作（保持关闭）。
+func (m *SubAgentManager) SetAutoCompact(enable bool) {
+	if !enable {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.defaultOpts = append([]Option(nil), append(m.defaultOpts,
+		WithAutoCompact(),
+		WithReduction(llm.DefaultReductionConfig()),
+	)...)
+}
+
 // resolveTools 解析子 Agent 场景下可用的工具列表（IsSubagent=true）。
 // toolMgr 为 nil 时返回 nil（子 Agent 不带工具）。
 //

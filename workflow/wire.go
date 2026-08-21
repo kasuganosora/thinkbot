@@ -88,7 +88,7 @@ type EngineConfig struct {
 	AnalyzerMaxTokens   int
 	// AnalyzerStuckTimeout 需求分析器流式 LLM 调用的卡死看门狗阈值。
 	// 0 表示使用 subagent 包默认（180s）。由 DelegateStream 读取，作为「判卡死」阈值；
-	// 硬上限 = 该值 ×3（派生，不写死）。看门狗判断真卡死而非固定超时。
+	// 硬上限 = 该值 ×10（subagent.delegateHardTimeoutFactor=10，派生不写死）。看门狗判断真卡死而非固定超时。
 	AnalyzerStuckTimeout time.Duration
 	// AnalyzerMaxDuration 需求分析阶段「整轮总时长上限」。
 	// 兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；
@@ -154,6 +154,10 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	// 线上出现 30 次 elapsed=120.000s 的硬超时。超时预算与「有没有工具」无关。
 	saMgr.SetDefaultToolSteps(25)
 	saMgr.SetDelegateTimeout(10 * time.Minute)
+	// 默认开启内部 subagent 上下文压缩：每步前检测 token 溢出并 LLM 摘要旧
+	// 消息，避免审查超大目录时 context 爆炸、被 30min 硬上限看门狗杀掉却零产出。
+	// 压缩失败时自动降级为 prune-only，不影响主流程。
+	saMgr.SetAutoCompact(true)
 
 	// 若提供了主 Agent 工具解析器，让 workflow 内部 SubAgent 继承工作空间工具，
 	// 使其能像主 Agent 的 SubAgent 一样读文件、跑命令、改代码（如「审查并修复代码」）。
