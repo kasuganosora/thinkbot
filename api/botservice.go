@@ -68,15 +68,15 @@ type BotService struct {
 	statsRecorder llm.UsageRecorder // 可选，nil 时不记录 token 统计
 
 	mu                sync.RWMutex
-	channels          map[string]*WebChannel            // botID → WebChannel
-	botInstances      map[string]*bot.Bot               // botID → running Bot
+	channels          map[string]*WebChannel             // botID → WebChannel
+	botInstances      map[string]*bot.Bot                // botID → running Bot
 	toolManagers      map[string]*agenttools.ToolManager // botID → tool manager (for listing)
-	dreamingBundles   map[string]*bot.DreamingBundle    // botID → DreamingBundle
-	heartbeatBundles  map[string]*heartbeat.Bundle      // botID → HeartbeatBundle
-	cancelFuncs       map[string]context.CancelFunc     // botID → bot context cancel
-	closeFuncs        map[string]func()                 // botID → sub-agent managers cleanup
-	messageCancels    map[string]context.CancelFunc     // "botID:traceID" → message context cancel
-	messageInterrupts map[string]chan string            // "botID:traceID" → 用户中途追加通道（生成中补充）
+	dreamingBundles   map[string]*bot.DreamingBundle     // botID → DreamingBundle
+	heartbeatBundles  map[string]*heartbeat.Bundle       // botID → HeartbeatBundle
+	cancelFuncs       map[string]context.CancelFunc      // botID → bot context cancel
+	closeFuncs        map[string]func()                  // botID → sub-agent managers cleanup
+	messageCancels    map[string]context.CancelFunc      // "botID:traceID" → message context cancel
+	messageInterrupts map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
 	//
@@ -758,7 +758,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Compactor: memCompactor,
 	})
 	memCompactor.SetRepository(memRepo)
-	if err := memory.RegisterTools(toolMgr, memory.DefaultToolConfig(memRepo)); err != nil {
+	memCfg := memory.DefaultToolConfig(memRepo)
+	// 开启跨平台记忆镜像：channel 作用域的记忆会额外写入 bot 全局作用域，
+	// 使任意频道的会话都能在召回时看到其他平台的活动（如 web 频道上的「苦力活」）。
+	memCfg.BotID = id
+	if err := memory.RegisterTools(toolMgr, memCfg); err != nil {
 		s.logger.Warnw("failed to register memory tools", "err", err)
 	}
 
