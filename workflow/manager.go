@@ -455,7 +455,7 @@ func (m *Manager) runScheduler(ctx context.Context, wf *Workflow, maxParallel in
 	defer span.End()
 
 	cfg := SchedulerConfig{MaxParallel: maxParallel}
-	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger, m.emitter, &m.metrics)
+	scheduler := NewScheduler(wf, m.executor, m.repo, cfg, m.ec, m.tp, m.logger, m.emitter, &m.metrics, m.analyzer)
 
 	m.mu.Lock()
 	if inst, ok := m.running[wf.ID]; ok {
