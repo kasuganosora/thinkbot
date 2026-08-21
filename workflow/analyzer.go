@@ -115,6 +115,31 @@ Cases that genuinely require sequencing (only these get dependencies):
 - "Design the database schema first" → "then write the query layer against that schema".
 - "Final verification / aggregation / submission" → depends on every work node it verifies (like n5 above).
 
+## Use Your Tools to Scope the Work
+
+You are NOT limited to guessing. You have workspace tools (read files, list directories, search/grep, run read-only commands). **Before decomposing, actually inspect the codebase**: measure how large each module or directory is, count files, look at the structure. Decompose based on what you OBSERVE, not on assumptions — this is exactly how you avoid creating a single node that is far too large to finish.
+
+## Execution Budget (CRITICAL — prevents nodes from being force-killed)
+
+Each sub-task node runs in an isolated SubAgent with a HARD wall-clock cap of about 30 minutes (enforced by the system; exceeding it kills the node with NO output). A node that breaches the cap can NEVER succeed, and retrying it with the same budget only hits the same cap again.
+
+Therefore:
+- If a scope is large — reviewing / analyzing / refactoring an entire big package, a whole top-level directory tree, or hundreds of files in one pass — it will likely breach the cap. **Decompose into finer granules**: one node per module, per sub-directory, or per bounded file set, each small enough to finish comfortably inside the budget.
+- Prefer MANY small nodes running **in parallel** over one giant sequential node.
+- Keep each node's "task" and "systemPrompt" CONCISE. Verbose nodes bloat the DAG JSON and risk exceeding the output budget.
+
+<example>
+Too large — one node reviewing the whole "agent/" tree will blow the 30-min cap:
+n1 review agent/   deps: []   ← wrong: scope too large for one node
+Better — split per sub-package, all in parallel:
+n1 review "agent/session/"     deps: []
+n2 review "agent/stages/"      deps: []
+n3 review "agent/memory/"      deps: []
+n4 review "agent/engagement/"  deps: []
+n5 overall re-review + integrate   deps: ["n1","n2","n3","n4"]
+Execution: (n1∥n2∥n3∥n4) → n5
+</example>
+
 ## Node Fields
 
 - id: unique identifier, e.g. "n1", "n2", ...
@@ -134,7 +159,7 @@ Cases that genuinely require sequencing (only these get dependencies):
 
 ## Output Format
 
-You MUST return JSON with exactly this structure:
+You MUST return the DAG wrapped in <result> tags, with exactly this JSON structure inside:
 {
   "nodes": [
     {
@@ -155,11 +180,14 @@ IMPORTANT: this bot serves Chinese end users. Write the "name", "task", "systemP
 "reviewPrompt" values in Chinese (中文). Preserve all JSON keys and node IDs exactly as
 specified above.
 
-## Strict Output Discipline (violations cause a parse failure and a retry)
+## Strict Output Discipline (violations cause a parse failure and a redo)
 
-- Output **JSON only**. NEVER emit any explanation, preamble, or closing remarks.
-- NEVER wrap the output in a markdown code fence (three backticks), and NEVER append any note outside the JSON.
-- Start with the opening brace and end with the closing brace, so the output is plain text a JSON parser can consume directly.`
+- Wrap the ENTIRE DAG JSON in <result> and </result> tags. The machine-readable output is ONLY what is inside those tags; anything outside is ignored.
+- Inside the tags, output **JSON only**. NEVER append any explanation, preamble, or closing remarks inside the tags.
+- You MAY include a short line of reasoning BEFORE the <result> opening tag, but the JSON itself must be clean.
+- NEVER wrap the inner JSON in a markdown code fence (three backticks).
+- The JSON inside <result>...</result> must start with { and end with }, so it is plain text a JSON parser can consume directly.
+- If you omit the <result> tags, the system cannot parse your output and will ask you to redo it.`
 
 // goalModeAnalyzerHint 在目标模式下追加到分析任务末尾，告知模型本次需要
 // 一个可闭环的验收节点。system prompt 是静态的，模型无法从中判断当前请求
@@ -176,6 +204,13 @@ standard. You MUST follow these rules:
    - Split each module/stage into a **separate node** and **chain them with dependencies in order** (m1 → m2 → ... → overall review), so the next one starts only after the previous one converges;
    - Set "review": true on every module node with a concrete reviewPrompt (e.g. "check this module item by item; pass only when no issue remains"). Goal mode makes each node review itself repeatedly until it passes, and modules do not interfere with each other;
    - You do NOT need to fill "feedback" on these intermediate nodes (a self-loop is wired automatically) — you only need the final acceptance node's feedback to be correct.`
+
+// analyzerResultTagRedoHint 在解析失败（缺失 <result> 标签）时附加到下一轮重试的任务末尾，
+// 明确告诉模型必须严格用 <result>...</result> 包裹最终 DAG JSON，使「打回重做」真正生效。
+const analyzerResultTagRedoHint = `上一轮你的输出缺少 <result>...</result> 标签，系统无法解析。必须严格把最终 DAG JSON 放在 <result> 和 </result> 之间，例如：
+<result>
+{ "nodes": [ ... ] }
+</result>`
 
 // dagSpec 是分析器输出的 DAG 规范（从 LLM JSON 解析）。
 type dagSpec struct {
@@ -235,6 +270,9 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 	// 显著提高"跨过退化窗口后自动恢复"的概率；退避可被 ctx 取消打断。
 	const maxAttempts = 5
 	var lastErr error
+	// redoHint 在解析失败（尤其是缺失 <result> 标签）时累积纠正提示，
+	// 于下一轮重试附加到任务末尾，使「打回重做」真正生效而非盲目重试。
+	var redoHint string
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// 分析阶段被显式终止（如外部调用 Control(terminate) 取消了 bgCtx）：
 		// 立刻返回，不重试、不污染错误信息。上层会据此标记为 terminated 而非 failed。
@@ -268,12 +306,20 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 
 		fireProgress(attempt, fmt.Sprintf("正在调用模型分析需求（第 %d/%d 次尝试）", attempt, maxAttempts))
 
-		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, task,
+		// 注意：不再传 WithSkipTools()。分析器现在是一个带工具的规划 Agent——
+		// 经 scope 自动排除 workflow/spawn/记忆工具、经 ToolPolicy 排除用户禁用项后，
+		// 它拿到的是「除工作流与禁用项之外的完整工具链」，能用 read/grep/列目录探查代码库规模，
+		// 从而把大范围任务拆成能在 ~30min 硬上限内完成的细颗粒度节点。
+		// 工具回路由 streamWithWatchdog + SetAutoCompact 兜底（见 subagent/manager.go），
+		// 历史上"注入工具会卡死"的顾虑已不成立。
+		effectiveTask := task
+		if attempt > 1 && redoHint != "" {
+			effectiveTask = task + "\n\n" + redoHint
+		}
+		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, effectiveTask,
 			subagent.WithTemperature(temp),
 			subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
 			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
-			subagent.WithSkipTools(), // Analyzer 是纯 LLM 任务（输出 JSON DAG），不需要工具；
-			// 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死。
 		)
 		if err != nil {
 			// 上下文被取消（分析被终止）：不再重试，直接返回清晰错误。
@@ -294,10 +340,15 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 			continue
 		}
 
-		// 解析 JSON（支持 markdown 包裹与混合文本容错提取）
+		// 解析 JSON（支持 <result> 包裹、markdown 包裹与混合文本容错提取）
 		spec, perr := parseDAGSpec(raw)
 		if perr != nil {
 			lastErr = errs.Wrapf(perr, "failed to parse analyzer output")
+			// 缺失 <result> 标签是明确的输出格式违规：累积纠正提示，下一轮重试时
+			// 附加到任务末尾，让模型补上标签（「打回重做」真正生效）。
+			if errors.Is(perr, errNoResultTag) {
+				redoHint = analyzerResultTagRedoHint
+			}
 			// 输出被 max_tokens 硬截断时，报错只是笼统的 "unexpected end of JSON input"，
 			// 极易被误判成「模型不听话」。这里显式点名预算，让日志直接指向可调参数。
 			if looksTruncated(perr) {
@@ -370,11 +421,42 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 	return nil, lastErr
 }
 
+// errNoResultTag 表示 LLM 输出缺少 <result>...</result> 包裹标签。
+// 这是明确的格式违规，应触发上层重试（打回重做），而非当作截断静默吞掉。
+var errNoResultTag = errors.New("analyzer output missing <result>...</result> tags")
+
+// extractResultTag 从文本中提取最后一个 <result>...</result> 包裹的内容。
+// 取最后一个闭合对（最可能是最终答案），避免把中间推理步骤里的标签误当作结果。
+// 找不到合法配对时返回 ("", false)。
+func extractResultTag(s string) (string, bool) {
+	lower := strings.ToLower(s)
+	const closeTag = "</result>"
+	ci := strings.LastIndex(lower, closeTag)
+	if ci < 0 {
+		return "", false
+	}
+	const openTag = "<result>"
+	oi := strings.LastIndex(lower[:ci], openTag)
+	if oi < 0 {
+		return "", false
+	}
+	inner := s[oi+len(openTag) : ci]
+	return inner, true
+}
+
 // parseDAGSpec 解析 LLM 返回的 JSON 为 dagSpec。
-// 支持容错：提取 JSON 块、清理 markdown 包裹、截断恢复（从被截断的
-// 数组中提取所有完整节点对象，丢弃不完整的尾部）。
+// 支持容错：先提取 <result> 包裹、再提取 JSON 块、清理 markdown 包裹、
+// 截断恢复（从被截断的数组中提取所有完整节点对象，丢弃不完整的尾部）。
 func parseDAGSpec(raw string) (*dagSpec, error) {
 	raw = strings.TrimSpace(raw)
+
+	// 提取 <result>...</result> 包裹的 DAG JSON。分析器被要求把机器可读结果
+	// 放在该标签内；缺失标签说明模型未遵守输出约束，返回明确错误让上层重试。
+	if inner, ok := extractResultTag(raw); ok {
+		raw = strings.TrimSpace(inner)
+	} else {
+		return nil, errNoResultTag
+	}
 
 	// 清理 markdown 代码块包裹
 	if strings.HasPrefix(raw, "```") {
