@@ -8,6 +8,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
@@ -63,6 +64,10 @@ type ToolConfig struct {
 	// DefaultScopeID 默认 scope ID（默认空，使用会话的 channel/user ID）。
 	// 通常留空，让 LLM 在参数中提供。
 	DefaultScopeID string
+	// BotID 当前 bot 标识。设置后，写入 channel 作用域的记忆会额外镜像一份到
+	// bot 全局作用域（BotScope），使任意频道的会话都能在召回时看到其他平台的活动，
+	// 解决跨平台记忆不可见问题。空值则不做镜像（保持旧行为）。
+	BotID string
 	// MaxMemoryChars memory（agent 笔记）的字符上限（默认 2200）。
 	MaxMemoryChars int
 	// MaxUserChars user（用户画像）的字符上限（默认 1375）。
@@ -200,21 +205,21 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					return handleSearch(ctx, repo, scope, m)
 
 				case "add":
-					result, err := handleAdd(ctx, repo, scope, m)
+					result, err := handleAdd(ctx, repo, config, scope, m)
 					if err == nil {
 						config.markDirty()
 					}
 					return result, err
 
 				case "replace":
-					result, err := handleReplace(ctx, repo, scope, m)
+					result, err := handleReplace(ctx, repo, config, scope, m)
 					if err == nil {
 						config.markDirty()
 					}
 					return result, err
 
 				case "remove":
-					result, err := handleRemove(ctx, repo, scope, m)
+					result, err := handleRemove(ctx, repo, config, scope, m)
 					if err == nil {
 						config.markDirty()
 					}
@@ -227,7 +232,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					return handleCount(ctx, repo, scope)
 
 				case "batch":
-					result, err := handleBatch(ctx, repo, scope, m)
+					result, err := handleBatch(ctx, repo, config, scope, m)
 					if err == nil {
 						config.markDirty()
 					}
@@ -280,7 +285,7 @@ func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 	return formatEntries(entries, "search"), nil
 }
 
-func handleAdd(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+func handleAdd(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
 	content, _ := m["content"].(string)
 	if content == "" {
 		return nil, fmt.Errorf("content is required for 'add' action")
@@ -314,14 +319,19 @@ func handleAdd(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[str
 		Importance: importance,
 	}
 
+	// 预生成 ID，供跨平台镜像使用确定性镜像 ID（Append 对非空 ID 直接沿用）。
+	entry.ID = idgen.New("mem")
 	if err := repo.Append(ctx, entry); err != nil {
 		return nil, errs.Wrap(err, "memory write failed")
 	}
 
+	// 跨平台镜像：channel 记忆额外写入 bot 全局作用域，使其他频道也能召回。
+	mirrorChannelMemoryToBot(ctx, repo, cfg, entry.ID, entry)
+
 	return successResponse(scope, "Entry added.", true), nil
 }
 
-func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
 	oldText, _ := m["old_text"].(string)
 	content, _ := m["content"].(string)
 
@@ -368,6 +378,7 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map
 	// 替换：优先使用原子性 Replace（如果实现支持），否则降级为 Append-before-Delete
 	old := matches[0]
 	newEntry := Entry{
+		ID:             old.ID,
 		Scope:          scope,
 		Content:        content,
 		Category:       old.Category,
@@ -398,10 +409,13 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map
 		}
 	}
 
+	// 跨平台镜像：更新 bot 全局作用域下对应的镜像（不存在则新建）。
+	mirrorChannelMemoryToBot(ctx, repo, cfg, old.ID, newEntry)
+
 	return successResponse(scope, "Entry replaced.", true), nil
 }
 
-func handleRemove(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
 	// 支持 memory_id（向后兼容）和 old_text（子串匹配）两种方式
 	memoryID, _ := m["memory_id"].(string)
 	oldText, _ := m["old_text"].(string)
@@ -409,6 +423,10 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 	if memoryID != "" {
 		if err := repo.Delete(ctx, scope, memoryID); err != nil {
 			return nil, errs.Wrap(err, "memory delete failed")
+		}
+		// 跨平台镜像：同步删除 bot 全局作用域下的镜像。
+		if scope.Kind == ScopeChannel {
+			unmirrorChannelMemoryFromBot(ctx, repo, cfg, memoryID)
 		}
 		return map[string]any{
 			"success":   true,
@@ -449,6 +467,11 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		return nil, errs.Wrap(err, "delete failed")
 	}
 
+	// 跨平台镜像：同步删除 bot 全局作用域下的镜像。
+	if scope.Kind == ScopeChannel {
+		unmirrorChannelMemoryFromBot(ctx, repo, cfg, matches[0].ID)
+	}
+
 	return successResponse(scope, "Entry removed.", true), nil
 }
 
@@ -481,7 +504,7 @@ func handleCount(ctx *llm.ToolExecContext, repo Repository, scope Scope) (any, e
 	}, nil
 }
 
-func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
 	opsRaw, ok := m["operations"]
 	if !ok {
 		return nil, fmt.Errorf("operations is required for 'batch' action")
@@ -639,14 +662,19 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 	for _, ch := range changes {
 		switch ch.op {
 		case "add":
+			// 预生成 ID 供跨平台镜像使用确定性镜像 ID。
+			ch.entry.ID = idgen.New("mem")
 			if err := repo.Append(ctx, *ch.entry); err != nil {
 				commitErrorCount++
+			} else {
+				mirrorChannelMemoryToBot(ctx, repo, cfg, ch.entry.ID, *ch.entry)
 			}
 		case "update":
 			// 使用保存的原始条目元数据，避免重复查询
 			if ch.origEntry != nil {
 				e := ch.origEntry
 				updatedEntry := Entry{
+					ID:             ch.target,
 					Scope:          ch.entry.Scope,
 					Content:        ch.entry.Content,
 					Category:       ch.entry.Category,
@@ -659,6 +687,8 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 				if replacer, ok := repo.(Replacer); ok {
 					if err := replacer.Replace(ctx, scope, ch.target, updatedEntry); err != nil {
 						commitErrorCount++
+					} else {
+						mirrorChannelMemoryToBot(ctx, repo, cfg, ch.target, updatedEntry)
 					}
 				} else {
 					// 降级路径：同 handleReplace —— 必须先删后写，否则复用同一 ID
@@ -669,12 +699,16 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[s
 					} else if err := repo.Append(ctx, updatedEntry); err != nil {
 						commitErrorCount++
 						_ = repo.Append(ctx, *e)
+					} else {
+						mirrorChannelMemoryToBot(ctx, repo, cfg, ch.target, updatedEntry)
 					}
 				}
 			}
 		case "delete":
 			if err := repo.Delete(ctx, scope, ch.target); err != nil {
 				commitErrorCount++
+			} else if scope.Kind == ScopeChannel {
+				unmirrorChannelMemoryFromBot(ctx, repo, cfg, ch.target)
 			}
 		}
 	}
@@ -707,6 +741,52 @@ func parseScope(m map[string]any, defaultKind ScopeKind, defaultID string) Scope
 		id = defaultID
 	}
 	return Scope{Kind: ScopeKind(kindStr), ID: id}
+}
+
+// ============================================================================
+// 跨平台镜像：把 channel 作用域的记忆同步到 bot 全局作用域
+// ============================================================================
+
+// crossChannelMirrorPrefix 跨平台镜像条目 ID 的前缀。镜像 ID 由前缀 + 原始
+// channel 条目 ID 组成，因此增/改/删都能稳定定位到同一条镜像，避免重复累积。
+const crossChannelMirrorPrefix = "xch:"
+
+// mirrorChannelMemoryToBot 将一条 channel 作用域的记忆镜像到 bot 全局作用域，
+// 使任意频道的会话在召回（已加载 BotScope）时都能看到其他平台的活动。
+//
+// 仅在目标 scope 为 channel 且配置提供了 BotID 时生效；其他 scope 直接跳过。
+// originalID 为原始 channel 记忆的条目 ID；entry 为要镜像的内容（原始或更新后）。
+// 镜像正文以 [<channel>] 前缀标注来源频道，避免跨频道串台时丢失上下文。
+func mirrorChannelMemoryToBot(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, originalID string, entry Entry) {
+	if cfg.BotID == "" || originalID == "" || entry.Scope.Kind != ScopeChannel {
+		return
+	}
+	botScope := BotScope(cfg.BotID)
+	mirror := Entry{
+		ID:             crossChannelMirrorPrefix + originalID,
+		Scope:          botScope,
+		Content:        fmt.Sprintf("[%s] %s", entry.Scope.ID, entry.Content),
+		Category:       entry.Category,
+		Source:         entry.Source,
+		Importance:     entry.Importance,
+		Metadata:       entry.Metadata,
+		CreatedAt:      entry.CreatedAt,
+		LastAccessedAt: entry.LastAccessedAt,
+	}
+	// 镜像已存在则就地更新，不存在则退化为纯追加（Replace 对不存在的 deleteID 不报错）。
+	if replacer, ok := repo.(Replacer); ok {
+		_ = replacer.Replace(ctx, botScope, mirror.ID, mirror)
+	} else {
+		_ = repo.Append(ctx, mirror)
+	}
+}
+
+// unmirrorChannelMemoryFromBot 删除 bot 全局作用域下对应的跨平台镜像（remove 时调用）。
+func unmirrorChannelMemoryFromBot(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, originalID string) {
+	if cfg.BotID == "" || originalID == "" {
+		return
+	}
+	_ = repo.Delete(ctx, BotScope(cfg.BotID), crossChannelMirrorPrefix+originalID)
 }
 
 func findSubstringMatches(entries []Entry, substr string) []Entry {
