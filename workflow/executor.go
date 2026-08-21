@@ -96,12 +96,17 @@ func (e *Executor) nodeLogger(ctx context.Context, node *DAGNode) *zap.SugaredLo
 // 旧代码用 Delegate（context.WithTimeout 一刀切），叠加 workflow_service 实例
 // 未拿到 10min 配置的问题，线上出现 30 次 elapsed=120.000s 的硬超时。
 //
-// 硬上限由 subagent 内部按 stuck × delegateHardTimeoutFactor(10) 派生 = 30min，
-// 是「总运行时间」的绝对兜底（见 subagent/manager.go:delegateHardTimeoutFactor）。
-// 注意这是 30min 量级、远大于 bot 侧 10min 委托超时——前者是失控流兜底，
+// 硬上限由 subagent 内部按 stuck × delegateHardTimeoutFactor(10) 派生。
+// 原值 3min → 硬上限 30min，实测 review 大模块节点（整模块组 2000~7450 行、
+// 单次 100~209 次工具调用）在 GLM 慢/瞬断重试时确定性触顶被强杀，且重试必再次
+// 跑满硬上限（retry_classify.go），形成空转、token 白白烧完却永不收敛。
+// 现提到 12min → 硬上限 120min：覆盖最重节点在 GLM 抖动下的耗时，让重节点能
+// 真正跑完收敛。stuck 同时是「连续无 token 卡死阈值」，12min 对读大文件的 review
+// 足够宽容；真卡死由 loop_detection(HardLimit=5)/token_budget 在编排层先拦下。
+// 注意这是分钟量级、远大于 bot 侧 10min 委托超时——前者是失控流兜底，
 // 后者是单次委托的软超时，二者职责不同，不要混为一谈。
 // 注意：**WithCallTimeout 对 DelegateStream 无效**，必须用 WithStuckTimeout。
-const nodeStuckTimeout = 3 * time.Minute
+const nodeStuckTimeout = 12 * time.Minute
 
 // Execute 通过 SubAgent 执行节点任务，返回产物文本。
 // 自动注入已完成的依赖节点的产物作为上下文，提升 SubAgent 输出质量。
