@@ -24,7 +24,10 @@ let initialized = false
 
 async function initializeBotFromRoute() {
   const requestedId = String(route.params.botId || '')
-  const requestedSessionId = route.params.sessionId ? Number(route.params.sessionId) : null
+  // 会话 ID 一律按字符串处理：后端可能返回非数字 ID（如 "sess-xxx"），
+  // 早期用 Number() 强转会得到 NaN，与列表里的 id 严格比较永远匹配不上，
+  // 表现为深链接进来选不中会话。
+  const requestedSessionId = route.params.sessionId ? String(route.params.sessionId) : null
   if (!store.bots.length) await store.fetchBots()
 
   const requestedBot = store.bots.find(bot => String(bot.id) === requestedId)
@@ -63,7 +66,7 @@ watch(() => route.params.botId, () => {
 // 同一 bot 下通过 URL 切换 session（如 /chat/bot/:botId/:sessionId）
 watch(() => route.params.sessionId, (sid) => {
   if (!initialized || syncingRoute) return
-  if (sid) store.openSessionById(Number(sid))
+  if (sid) store.openSessionById(String(sid))
 })
 
 watch(() => store.activeBotId, (botId) => {

@@ -46,6 +46,10 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 		} else if dv, ok := defaults[spec.Key]; ok {
 			val = dv
 		}
+		// 敏感键在列表中仅以掩码展示，避免 JWT 密钥/渠道 token 经列表接口泄露。
+		if config.IsSensitiveKey(spec.Key) {
+			val = "***"
+		}
 		items = append(items, config.Setting{
 			Key:         spec.Key,
 			Value:       val,
@@ -60,6 +64,13 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 // GET /api/config/:key
 func (s *Server) handleGetConfigKey(c *gin.Context) {
 	key := c.Param("key")
+
+	// 敏感键（JWT 密钥、渠道 token、DB 凭据等）禁止经读取接口原文回显，
+	// 防止密钥经 GET /api/config/:key 泄露。
+	if config.IsSensitiveKey(key) {
+		Fail(c, errs.Forbidden("config key is sensitive and cannot be read via API"))
+		return
+	}
 
 	val, ok := s.store.Get(key)
 	if !ok {

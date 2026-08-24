@@ -97,10 +97,14 @@ function botMenu(bot) {
           header: '删除 Bot',
           body: `确认删除「${bot.name}」？该操作不可恢复。`,
           theme: 'warning',
-          onConfirm: () => {
-            store.deleteBot(bot.id)
-            MessagePlugin.success('已删除')
-            dlg.destroy()
+          onConfirm: async () => {
+            try {
+              await store.deleteBot(bot.id)
+              MessagePlugin.success('已删除')
+              dlg.destroy()
+            } catch (e) {
+              MessagePlugin.error(`删除失败：${e?.message || e || '未知错误'}`)
+            }
           }
         })
       }

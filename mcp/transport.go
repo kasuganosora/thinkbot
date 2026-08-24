@@ -161,9 +161,27 @@ func (t *stdioTransport) Send(ctx context.Context, data []byte) error {
 }
 
 func (t *stdioTransport) Close() error {
-	t.cancel()
+	if t.cmd != nil && t.cmd.Process != nil {
+		// 先优雅发送 SIGTERM，给子进程机会做退出清理（如发送 exit 通知）。
+		_ = t.cmd.Process.Signal(syscall.SIGTERM)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// 子进程已在宽限期内自行退出
+	case <-time.After(3 * time.Second):
+		// 优雅退出超时，强制取消（SIGKILL）并等待进程真正退出。
+		t.cancel()
+		<-done
+	}
+
 	_ = t.stdin.Close()
-	t.wg.Wait()
 	return nil
 }
 

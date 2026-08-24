@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -27,7 +28,7 @@ func execTool(t *testing.T, tool llm.Tool, input map[string]any) map[string]any 
 	if tool.Execute == nil {
 		t.Fatalf("tool has no Execute")
 	}
-	result, err := tool.Execute(&llm.ToolExecContext{}, input)
+	result, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()}, input)
 	if err != nil {
 		t.Fatalf("tool execute error: %v", err)
 	}

@@ -195,9 +195,13 @@ func (r *Request) doSSEWithRetry(cfg SSEConfig) error {
 //   - context.Canceled: 用户主动取消（非看门狗）
 //   - 其他 error: 连接错误、回调错误等
 func (r *Request) doSSEInternal(cfg SSEConfig) error {
-	// --- 设置 SSE 必需头 ---
-	r.headers["Accept"] = "text/event-stream"
-	r.headers["Cache-Control"] = "no-cache"
+	// --- 设置 SSE 必需头（仅在用户未自定义时覆盖，避免强制改写 Accept/Cache-Control）---
+	if _, ok := r.headers["Accept"]; !ok {
+		r.headers["Accept"] = "text/event-stream"
+	}
+	if _, ok := r.headers["Cache-Control"]; !ok {
+		r.headers["Cache-Control"] = "no-cache"
+	}
 
 	// --- 建立连接（共用逻辑）---
 	conn, err := r.streamConnect("SSE", cfg.Watchdog, cfg.WatchdogTimeout, true, cfg.OnError)

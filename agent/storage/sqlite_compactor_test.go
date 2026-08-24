@@ -230,3 +230,76 @@ func TestSQLiteRepository_AppendTriggersCompaction(t *testing.T) {
 		t.Errorf("expected Append to trigger compaction, got %d calls", c)
 	}
 }
+
+// TestSQLiteCompactor_CompactScopeBatchesWhenExceedsMaxInput 是「记忆压缩积压」bug 的回归测试。
+// 根因：活跃条目超过 MaxInputEntries 时，旧代码 entries[:MaxInputEntries] 截断丢弃超额部分，
+// 而 GetAllActive 按 created_at ASC 排序，导致较新记忆永远轮不到压缩、活跃数只增不减
+// （生产日志见 "sqlite_compactor exceeds MaxInputEntries"，大 scope 从 343 涨到 367 且持续）。
+// 修复：按 MaxInputEntries 切块循环处理全部活跃条目。本测试验证这一点。
+func TestSQLiteCompactor_CompactScopeBatchesWhenExceedsMaxInput(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	scope := memory.ChannelScope("batch-compact")
+
+	// spy 防 Append 的 maybeCompact 干扰，且 nil-safe
+	spy := &spyCompactor{}
+	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{Compactor: spy})
+
+	const n = 120
+	for i := 0; i < n; i++ {
+		if err := repo.Append(ctx, memory.Entry{
+			Scope:    scope,
+			Content:  fmt.Sprintf("记忆条目编号 %d 用于验证分批压缩", i),
+			Category: "fact",
+			Source:   "conversation",
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	before, err := repo.GetAllActive(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != n {
+		t.Fatalf("expected %d active before compaction, got %d", n, len(before))
+	}
+
+	provider := &mockClusterProvider{}
+	const maxInput = 50
+	compactor := NewSQLiteCompactor(SQLiteCompactorConfig{
+		Provider:        provider,
+		Model:           &llm.Model{ID: "mock"},
+		MaxInputEntries: maxInput,
+		MinClusterSize:  2,
+	}, zap.NewNop().Sugar())
+	compactor.SetRepository(repo)
+
+	if err := compactor.CompactScope(ctx, scope); err != nil {
+		t.Fatalf("CompactScope: %v", err)
+	}
+
+	// 回归核心：超过 MaxInputEntries(50) 应分批处理全部 120 条，
+	// 分批次数 = ceil(120/50) = 3。旧逻辑只调 1 次 LLM（处理前 50 条）。
+	if provider.calls != 3 {
+		t.Errorf("expected 3 batch LLM calls (ceil(120/50)), got %d", provider.calls)
+	}
+
+	active, err := repo.GetAllActive(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 旧逻辑(entries[:50])：只处理前 50 -> 1 条 merged + 后 70 活跃残留 ≈71。
+	// 新逻辑：120 条源全归档 + 3 条 merged，活跃应≈3。
+	if len(active) >= 50 {
+		t.Errorf("regression: %d active remain (expected ~3); old truncation bug would leave ~71", len(active))
+	}
+	var merged int
+	for _, e := range active {
+		if e.Source == "compactor" {
+			merged++
+		}
+	}
+	if merged != 3 {
+		t.Errorf("expected 3 merged entries (one per batch), got %d", merged)
+	}
+}

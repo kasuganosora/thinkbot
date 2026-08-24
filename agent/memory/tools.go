@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -46,7 +47,8 @@ You have persistent memory. Use the ` + "`memory`" + ` tool to save, search and 
 
 - A write takes effect in the system prompt of the **next** turn, not the current one.
 - Store only what has long-term value. Priority: user preferences > environment facts > procedures.
-- **Substring operations**: ` + "`replace`" + ` and ` + "`remove`" + ` match an entry by a unique substring. Do NOT pass an ID.
+- **Delete by ID is preferred**: ` + "`remove`" + ` accepts ` + "`id`" + ` (or ` + "`memory_id`" + `) for an unambiguous delete; this works even if the entry lives in a different scope (e.g. a bot-scope heartbeat note seen from a channel session). Use ` + "`search`" + ` first to get the exact ` + "`id`" + `.
+- **Substring remove**: if ` + "`old_text`" + ` matches nothing in the current scope but DOES match in another scope, the tool tells you the ` + "`id`" + ` and ` + "`scope`" + ` to retry with — do not give up.
 - When the store is full, use ` + "`batch`" + `: remove or replace old entries to free space first, then add the new ones.
 - NEVER store information that is trivially rediscoverable, raw data dumps, or short-lived TODOs.`,
 	Enabled: true,
@@ -416,28 +418,38 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 }
 
 func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
-	// 支持 memory_id（向后兼容）和 old_text（子串匹配）两种方式
+	// 支持 memory_id / id（按 ID 删除，跨 scope 解析）和 old_text（子串匹配）两种方式
 	memoryID, _ := m["memory_id"].(string)
+	if memoryID == "" {
+		memoryID, _ = m["id"].(string)
+	}
 	oldText, _ := m["old_text"].(string)
 
 	if memoryID != "" {
-		if err := repo.Delete(ctx, scope, memoryID); err != nil {
+		homeScope, ok := resolveRemoveByID(ctx, repo, cfg, scope, memoryID)
+		if !ok {
+			return map[string]any{
+				"success": false,
+				"error":   fmt.Sprintf("No memory with id '%s' found in scope %s or other accessible scopes (bot/global).", memoryID, scope.Key()),
+			}, nil
+		}
+		if err := repo.Delete(ctx, homeScope, memoryID); err != nil {
 			return nil, errs.Wrap(err, "memory delete failed")
 		}
 		// 跨平台镜像：同步删除 bot 全局作用域下的镜像。
-		if scope.Kind == ScopeChannel {
+		if homeScope.Kind == ScopeChannel {
 			unmirrorChannelMemoryFromBot(ctx, repo, cfg, memoryID)
 		}
 		return map[string]any{
 			"success":   true,
 			"message":   "Memory deleted.",
 			"memory_id": memoryID,
-			"scope":     scope.Key(),
+			"scope":     homeScope.Key(),
 		}, nil
 	}
 
 	if oldText == "" {
-		return nil, fmt.Errorf("old_text or memory_id is required for 'remove' action")
+		return nil, fmt.Errorf("old_text or id/memory_id is required for 'remove' action")
 	}
 
 	entries, err := repo.Retrieve(ctx, Query{
@@ -450,6 +462,13 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sco
 
 	matches := findSubstringMatches(entries, oldText)
 	if len(matches) == 0 {
+		// 子串在别的 scope（如 bot 全局）命中时给出可执行指引，避免死路。
+		if others := probeOtherScopesForSubstring(ctx, repo, cfg, scope, oldText); len(others) > 0 {
+			return map[string]any{
+				"success": false,
+				"error":   removeScopeHint(scope, oldText, others),
+			}, nil
+		}
 		return map[string]any{
 			"success": false,
 			"error":   fmt.Sprintf("No entry matched '%s'.", oldText),
@@ -555,10 +574,11 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 
 	// 提交变更：记录需要添加、修改、删除的条目
 	type batchChange struct {
-		op        string // "add", "update", "delete"
-		entry     *Entry // new entry for add/update
-		target    string // existing entry ID for delete/update
-		origEntry *Entry // original entry for update (preserves metadata)
+		op          string // "add", "update", "delete"
+		entry       *Entry // new entry for add/update
+		target      string // existing entry ID for delete/update
+		targetScope Scope  // home scope for delete (may differ from requested scope)
+		origEntry   *Entry // original entry for update (preserves metadata)
 	}
 	var changes []batchChange
 
@@ -630,11 +650,35 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 			appliedCount++
 
 		case "remove":
+			opID, _ := op["id"].(string)
+			if opID == "" {
+				opID, _ = op["memory_id"].(string)
+			}
+			if opID != "" {
+				homeScope, ok := resolveRemoveByID(ctx, repo, cfg, scope, opID)
+				if !ok {
+					return batchError(scope, pos+": no entry with id '"+opID+"' in any accessible scope (requested "+scope.Key()+", bot, global)"), nil
+				}
+				changes = append(changes, batchChange{op: "delete", target: opID, targetScope: homeScope})
+				// 更新 working 副本以支持后续操作匹配
+				newWorking := make([]Entry, 0, len(working))
+				for _, e := range working {
+					if e.ID != opID {
+						newWorking = append(newWorking, e)
+					}
+				}
+				working = newWorking
+				appliedCount++
+				break
+			}
 			if opOldText == "" {
-				return batchError(scope, pos+": old_text is required"), nil
+				return batchError(scope, pos+": old_text or id is required"), nil
 			}
 			matches := findSubstringMatches(working, opOldText)
 			if len(matches) == 0 {
+				if others := probeOtherScopesForSubstring(ctx, repo, cfg, scope, opOldText); len(others) > 0 {
+					return batchError(scope, pos+": "+removeScopeHint(scope, opOldText, others)), nil
+				}
 				return batchError(scope, pos+": no entry matched '"+opOldText+"'"), nil
 			}
 			if len(matches) > 1 {
@@ -705,9 +749,13 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 				}
 			}
 		case "delete":
-			if err := repo.Delete(ctx, scope, ch.target); err != nil {
+			delScope := ch.targetScope
+			if delScope.Kind == "" {
+				delScope = scope
+			}
+			if err := repo.Delete(ctx, delScope, ch.target); err != nil {
 				commitErrorCount++
-			} else if scope.Kind == ScopeChannel {
+			} else if delScope.Kind == ScopeChannel {
 				unmirrorChannelMemoryFromBot(ctx, repo, cfg, ch.target)
 			}
 		}
@@ -810,6 +858,88 @@ func previewEntries(entries []Entry) []string {
 		previews = append(previews, p)
 	}
 	return previews
+}
+
+// ============================================================================
+// 跨 scope 删除辅助：让 bot 能清理自己写在别的 scope（如 bot 全局）的记忆
+// ============================================================================
+//
+// 记忆工具按 scope 隔离：channel 会话默认只能读/写 channel scope，bot 心跳等机制
+// 写入的记忆落在 bot scope。若 remove 只在请求 scope 内找，bot 无法清理自己别的
+// scope 下的虚假/过期记忆（表现为 "no entry matched" 死路）。以下辅助在显式给出
+// 确切 ID 时跨 scope 解析（授权明确，因为 ID 是 bot 经 search 拿到的），并在子串
+// 匹配失败时给出可执行的 scope/id 指引，把死路变成可恢复操作。
+
+// resolveRemoveByID locates a memory entry by exact ID, searching the requested scope
+// first, then the bot and global scopes. Returning the entry's home scope lets the
+// caller delete an entry that lives outside the current session scope.
+func resolveRemoveByID(ctx context.Context, repo Repository, cfg ToolConfig, requested Scope, id string) (Scope, bool) {
+	if _, ok := findEntryByIDInScope(ctx, repo, requested, id); ok {
+		return requested, true
+	}
+	if cfg.BotID != "" {
+		botScope := BotScope(cfg.BotID)
+		if botScope.Key() != requested.Key() {
+			if _, ok := findEntryByIDInScope(ctx, repo, botScope, id); ok {
+				return botScope, true
+			}
+		}
+	}
+	globalScope := Scope{Kind: ScopeGlobal, ID: ""}
+	if globalScope.Key() != requested.Key() {
+		if _, ok := findEntryByIDInScope(ctx, repo, globalScope, id); ok {
+			return globalScope, true
+		}
+	}
+	return Scope{}, false
+}
+
+func findEntryByIDInScope(ctx context.Context, repo Repository, scope Scope, id string) (Entry, bool) {
+	entries, err := repo.Retrieve(ctx, Query{Scopes: []Scope{scope}, Limit: 1000})
+	if err != nil {
+		return Entry{}, false
+	}
+	for _, e := range entries {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
+// probeOtherScopesForSubstring searches bot (and global) scopes for a substring that did
+// not match in the requested scope, so callers can guide the model to the correct scope/id.
+func probeOtherScopesForSubstring(ctx context.Context, repo Repository, cfg ToolConfig, requested Scope, substr string) []Entry {
+	var out []Entry
+	candidates := []Scope{}
+	if cfg.BotID != "" {
+		botScope := BotScope(cfg.BotID)
+		if botScope.Key() != requested.Key() {
+			candidates = append(candidates, botScope)
+		}
+	}
+	globalScope := Scope{Kind: ScopeGlobal, ID: ""}
+	if globalScope.Key() != requested.Key() {
+		candidates = append(candidates, globalScope)
+	}
+	for _, s := range candidates {
+		entries, err := repo.Retrieve(ctx, Query{Scopes: []Scope{s}, Limit: 1000})
+		if err != nil {
+			continue
+		}
+		out = append(out, findSubstringMatches(entries, substr)...)
+	}
+	return out
+}
+
+// removeScopeHint builds an actionable error when a substring matches in another scope.
+func removeScopeHint(requested Scope, substr string, others []Entry) string {
+	hints := make([]string, 0, len(others))
+	for _, o := range others {
+		hints = append(hints, fmt.Sprintf("id=%s scope=%s", o.ID, o.Scope.Key()))
+	}
+	return fmt.Sprintf("No entry matched '%s' in scope %s. Found %d in other scope(s): %s. Retry with id='<id>' (delete by exact ID works across scopes) or scope_kind='%s' scope_id='%s'.",
+		substr, requested.Key(), len(others), strings.Join(hints, "; "), others[0].Scope.Kind, others[0].Scope.ID)
 }
 
 // EntryResult 是单条记忆的序列化结构。

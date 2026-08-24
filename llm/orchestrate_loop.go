@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -53,6 +54,8 @@ type loopController struct {
 	lastSig     string // 上一步的工具调用签名
 	repeatCount int    // 当前签名连续出现次数
 	stalled     bool   // 是否已判定陷入重复循环
+	derailed    bool   // 是否已判定脱轨（边说停边调的循环）
+	derailCount int    // 连续出现「自我纠正文本 + 仍在调工具」的步数
 }
 
 // newLoopController 根据 soft(MaxSteps) 与 hard(HardMaxSteps) 构造控制器。
@@ -65,6 +68,34 @@ type loopController struct {
 //	hard < 0  ：内置默认安全网（soft * defaultHardMultiplier），历史/内部语义。
 //	hard > 0  ：有限硬上限。
 //	hard < soft（且 hard != -1）：夹紧为 soft（hard 不得小于 soft）。
+//
+// derailThreshold：连续多少步出现「自我纠正文本 + 仍在调工具」判定为脱轨。
+// 阈值设为 3，避免正常任务中偶发一次「回到正题」被误杀。
+const derailThreshold = 3
+
+// derailPhrases：模型自我纠正/脱轨的高精度信号。当助手文本含这些短语且仍在发出
+// 工具调用时，说明模型已意识到自己在跑偏却停不下来（2026-08 实测：cfblog 任务中
+// 模型反复「停止这些无效调用，回到任务」却继续调 misskey 工具）。
+var derailPhrases = []string{
+	"与任务无关", "无关且无效", "无效调用", "无意义的工具调用", "停止这些",
+	"停止所有无关", "不相关的工具调用", "回到正题", "回到任务", "回到实际任务",
+	"回到真正的任务", "stop calling", "return to the task", "irrelevant",
+}
+
+// textContainsDerail 判断助手文本是否含脱轨自我纠正信号。
+func textContainsDerail(text string) bool {
+	if text == "" {
+		return false
+	}
+	low := strings.ToLower(text)
+	for _, p := range derailPhrases {
+		if strings.Contains(low, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
 func newLoopController(soft, hard int) *loopController {
 	lc := &loopController{
 		soft:        soft,
@@ -108,11 +139,16 @@ func (lc *loopController) atHardLimit(step int) bool {
 
 // shouldContinue 判断第 step 步（0-based）是否可以开始执行。
 func (lc *loopController) shouldContinue(step int) bool {
+	// 死循环检测必须优先于任何模式 shortcut：无限模式下若已判定 stalled，
+	// 仍要立刻停止，否则重复死循环检测在无限模式（soft<0 或 hard<0）下完全失效。
+	if lc.stalled {
+		return false // 已检测到死循环（无限模式同样生效）
+	}
+	if lc.derailed {
+		return false // 已检测到脱轨循环（模型边说停边调工具）
+	}
 	if lc.soft < 0 || lc.hard < 0 {
 		return true // 无限模式（soft=-1 或 hard=0→不限制）
-	}
-	if lc.stalled {
-		return false // 已检测到死循环
 	}
 	if step < lc.soft {
 		return true // 软预算内无条件放行
@@ -127,10 +163,11 @@ func (lc *loopController) shouldContinue(step int) bool {
 // 重复容忍度随进度收紧：软预算内允许连续 repeatLimit 次相同签名（容错重试），
 // 超出软预算后收紧为 tightRepeatLimit 次即判定 stalled——已经跑了很多步，
 // 不再容忍原地打转。
-func (lc *loopController) recordStep(step int, sig string) {
+func (lc *loopController) recordStep(step int, sig, text string) {
 	if sig == "" {
 		lc.lastSig = ""
 		lc.repeatCount = 0
+		lc.derailCount = 0
 		return
 	}
 	if sig == lc.lastSig {
@@ -146,6 +183,19 @@ func (lc *loopController) recordStep(step int, sig string) {
 	}
 	if limit > 0 && lc.repeatCount >= limit {
 		lc.stalled = true
+	}
+
+	// 脱轨检测（Layer A）：助手文本含自我纠正信号且仍在调工具 → 计步；否则重置。
+	// 与「同签名重复」检测互补——2026-08 事故中模型每一步调的 misskey 工具/参数
+	// 都不同（签名每步都变），旧检测完全失明；但模型文本反复「停止、回到任务」却
+	// 停不下来，正是脱轨循环的高精度信号。
+	if textContainsDerail(text) {
+		lc.derailCount++
+	} else {
+		lc.derailCount = 0
+	}
+	if lc.derailCount >= derailThreshold {
+		lc.derailed = true
 	}
 }
 
@@ -197,6 +247,9 @@ func (lc *loopController) stoppedByGuard(steps int) bool {
 	if lc.stalled {
 		return true
 	}
+	if lc.derailed {
+		return true
+	}
 	if lc.hard < 0 {
 		return false // 不限制：不会因步数上限停止
 	}
@@ -208,6 +261,8 @@ func (lc *loopController) describeLoopStop(steps int) string {
 	switch {
 	case lc.stalled:
 		return fmt.Sprintf("stalled: same tool calls repeated %d times", lc.repeatCount)
+	case lc.derailed:
+		return fmt.Sprintf("derailed: model self-corrects but keeps calling tools (%d steps)", lc.derailCount)
 	case lc.soft >= 0 && steps >= lc.hard:
 		return fmt.Sprintf("reached hard cap %d", lc.hard)
 	default:

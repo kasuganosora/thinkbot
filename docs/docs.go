@@ -1377,31 +1377,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/api/channels/types": {
-            "get": {
-                "security": [
-                    {
-                        "CookieAuth": []
-                    }
-                ],
-                "description": "返回系统支持的 Channel 类型及其配置字段",
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "Channel 管理"
-                ],
-                "summary": "Channel 类型",
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/api.Response"
-                        }
-                    }
-                }
-            }
-        },
         "/api/chat/bots": {
             "get": {
                 "security": [

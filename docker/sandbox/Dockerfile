@@ -46,8 +46,9 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
 WORKDIR /data
 
 # 预创建浏览器 profile 目录（封装层 launchPersistentContext 指向此路径，指纹/缓存持久化）。
-# 777 便于后续非 root 加固时仍可写（P1 仍以 root 跑，权限兼容过渡）。
-RUN mkdir -p /data/.browser-profile && chmod 777 /data/.browser-profile
+# 此处仅建目录（默认 755、root 属主），最终属主与权限在下方非 root 加固阶段统一设置，
+# 不再使用 777 这种全局可写权限。
+RUN mkdir -p /data/.browser-profile
 
 # ---------- 浏览器 MCP server（运行在容器内，thinkbot 经 `docker exec -i` 走 stdio 调用）----------
 # 手写 JSON-RPC（不依赖 MCP SDK），驱动 patchright + 系统 chromium。
@@ -57,6 +58,8 @@ RUN chmod +x /usr/local/bin/thinkbot-browser-mcp
 # ---------- 非 root 加固（仅浏览器 MCP 降权；agent 沙箱与 volume 仍 root 兼容）----------
 # 容器默认用户仍是 root（保持 agent 代码执行沙箱与 named volume 权限兼容），
 # 但浏览器 MCP 经 launch 脚本以非 root `bot` 用户运行，缩小 --no-sandbox + root 的提权面。
+# 浏览器相关目录统一归属 `bot`，且不再开放 777：profile 仅 bot 可读写（含登录态/指纹，
+# 属敏感数据），screenshots 仅 owner 访问（root 仍可越权读，供 API 取图）。
 RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash bot
@@ -66,7 +69,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
 RUN mkdir -p /data/.browser-profile /data/browser-screenshots \
     && touch /data/.browser-state.json \
     && chown -R bot:bot /home/bot /data/.browser-profile /data/browser-screenshots /data/.browser-state.json \
-    && chmod 777 /data/.browser-profile /data/browser-screenshots \
+    && chmod 700 /data/.browser-profile /data/browser-screenshots \
     && chmod 664 /data/.browser-state.json
 
 # 浏览器 MCP 启动器：以非 root 用户运行 xvfb + node wrapper（保留环境，透传 BOT_BROWSER_PROXY 等）。

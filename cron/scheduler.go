@@ -32,6 +32,59 @@ import (
 //   - NextRunAt 以 UTC 存储，比较时转换
 // ============================================================================
 
+// ============================================================================
+// 代码级反嵌套（anti-nesting）上下文标记 — 报告 5373
+//
+// 调度器在执行一个 cron Job 时，会把它触发的无人监督会话标记到 ctx 中。
+// cron 工具在 action=create 时检查该标记：cron 触发的会话不得再创建新的
+// cron 任务，从代码层面（而非仅提示词）强制反嵌套。
+// ============================================================================
+
+type cronSessionCtxKey struct{}
+
+// WithCronSession 将「当前为 cron 调度的无人监督会话」标记注入 ctx。
+func WithCronSession(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cronSessionCtxKey{}, true)
+}
+
+// IsCronSession 判断 ctx 是否来自 cron 调度的会话。
+// 安全控制采用 fail-closed：上下文无效（nil 或无法取值）时按「是 cron 会话」
+// 处理，阻止嵌套创建，而非放行。
+func IsCronSession(ctx context.Context) (is bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			is = true
+		}
+	}()
+	if ctx == nil {
+		return true
+	}
+	v, ok := ctx.Value(cronSessionCtxKey{}).(bool)
+	return ok && v
+}
+
+// maxConsecutiveFailures 是失败熔断阈值：达到该连续失败次数后，Job 转为
+// StateFailed 不再重试（报告 5333）。
+const maxConsecutiveFailures = 8
+
+// computeFailureBackoff 计算第 N 次连续失败后的重试退避时长（指数退避 2^n）。
+// 基础退避 1 分钟，封顶 1 小时，避免无限放大。
+func computeFailureBackoff(failures int) time.Duration {
+	base := time.Minute
+	exp := failures - 1
+	if exp < 0 {
+		exp = 0
+	}
+	if exp > 6 {
+		exp = 6
+	}
+	d := base * (1 << uint(exp)) // 1m, 2m, 4m, 8m, 16m, 32m, 64m
+	if d > time.Hour {
+		d = time.Hour
+	}
+	return d
+}
+
 // ExecuteResult 是 Job 执行的返回结果。
 // 包含输出摘要和可选的 token 用量信息（用于统计）。
 type ExecuteResult struct {
@@ -240,8 +293,15 @@ func (s *Scheduler) tick(ctx context.Context) {
 		s.runningJobs[j.ID] = true
 		s.mu.Unlock()
 
-		// 异步执行
+		// 异步执行：sync.WaitGroup.Go 不 recover panic，必须自行兜底，
+		// 否则任一 job（含心跳自主发帖）panic 会击穿整个进程。
 		s.wg.Go(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.logger.Errorw("job panicked, recovered to protect process",
+						"job_id", j.ID, "panic", r)
+				}
+			}()
 			s.executeJob(ctx, j)
 		})
 	}
@@ -271,8 +331,9 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	// 为每次执行生成独立 trace_id，注入 context
-	execCtx := traceid.NewContext(ctx)
+	// 为每次执行生成独立 trace_id，注入 context，并标记这是一个
+	// cron 调度的无人监督会话（供 cron 工具做代码级反嵌套检查，报告 5373）
+	execCtx := WithCronSession(traceid.NewContext(ctx))
 	logger := traceid.L(execCtx)
 
 	// 执行超时控制
@@ -297,20 +358,41 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 	if err != nil {
 		latest.LastError = err.Error()
 		latest.LastResult = ""
+		latest.ConsecutiveFailures++
 
 		logger.Errorw("cron: job failed",
 			"job_id", job.ID,
 			"job_name", job.Name,
 			"duration", duration.String(),
-			"err", err)
+			"err", err,
+			"consecutive_failures", latest.ConsecutiveFailures)
 
-		// 检查是否超过最大执行次数
-		if latest.MaxRuns > 0 && latest.RunCount >= latest.MaxRuns {
+		// 一次性任务失败不重试（报告 5333 修正）：直接转 failed，
+		// 避免带副作用的任务（已发帖但回写失败）被重复执行。
+		if latest.ScheduleKind == ScheduleOnce {
 			latest.State = StateFailed
 			latest.NextRunAt = nil
+			latest.NextRetryAt = nil
+			latest.LastResult = "failed: one-shot job error; not retried"
+		} else if latest.MaxRuns > 0 && latest.RunCount >= latest.MaxRuns {
+			latest.State = StateFailed
+			latest.NextRunAt = nil
+			latest.NextRetryAt = nil
+		} else if latest.ConsecutiveFailures >= maxConsecutiveFailures {
+			// 连续失败达到熔断阈值：停止重试，转 failed 状态等待人工干预
+			latest.State = StateFailed
+			latest.NextRunAt = nil
+			latest.NextRetryAt = nil
+			latest.LastResult = "failed: exceeded max consecutive failures; manual intervention required"
+			logger.Errorw("cron: job circuit-broken after consecutive failures",
+				"job_id", job.ID, "job_name", job.Name,
+				"consecutive_failures", latest.ConsecutiveFailures)
 		} else {
-			// 计算下一次执行时间
-			s.computeNextRun(latest, now)
+			// 指数退避：以 2^N 递增重试间隔，避免失败任务紧循环刷爆
+			backoff := computeFailureBackoff(latest.ConsecutiveFailures)
+			nr := now.Add(backoff)
+			latest.NextRunAt = &nr
+			latest.NextRetryAt = &nr
 		}
 	} else {
 		output := ""
@@ -319,6 +401,7 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 		}
 		latest.LastResult = output
 		latest.LastError = ""
+		latest.ConsecutiveFailures = 0 // 成功即重置连续失败计数
 
 		logger.Infow("cron: job completed",
 			"job_id", job.ID,
@@ -340,6 +423,7 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 				}
 				s.recorder.RecordUsage(jobCtx, llm.UsageMetric{
 					BotID:     botID,
+					At:        time.Now(),
 					Model:     job.Model,
 					Feature:   feature,
 					Usage:     usage,
@@ -353,16 +437,33 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 		if latest.MaxRuns > 0 && latest.RunCount >= latest.MaxRuns {
 			latest.State = StateDone
 			latest.NextRunAt = nil
+			latest.NextRetryAt = nil
 		} else if latest.ScheduleKind == ScheduleOnce {
 			// 一次性任务执行成功 → Done
 			latest.State = StateDone
 			latest.NextRunAt = nil
+			latest.NextRetryAt = nil
 		} else {
 			s.computeNextRun(latest, now)
 		}
 	}
 
-	_ = s.store.Save(latest)
+	// 重新读取磁盘/内存中最新版本，仅合并本执行产生的运行时字段，
+	// 避免覆盖并发的 TriggerJob / UpdateJob 写入（读-改-写竞态，报告 5365）。
+	cur, ok := s.store.Get(job.ID)
+	if !ok {
+		// 执行期间任务已被删除：不写回，避免已删除任务被复活。
+		return
+	}
+	cur.RunCount = latest.RunCount
+	cur.LastRunAt = latest.LastRunAt
+	cur.LastResult = latest.LastResult
+	cur.LastError = latest.LastError
+	cur.State = latest.State
+	cur.NextRunAt = latest.NextRunAt
+	cur.NextRetryAt = latest.NextRetryAt
+	cur.ConsecutiveFailures = latest.ConsecutiveFailures
+	_ = s.store.Save(cur)
 }
 
 // markDone 将 Job 标记为完成状态并记录原因。
@@ -477,6 +578,11 @@ func (m *Manager) CreateJob(req CreateJobRequest) (*Job, error) {
 		return nil, errs.New("job schedule is required")
 	}
 
+	// 安全扫描：对所有创建路径（工具 + REST API）统一执行 prompt 注入/exfil 检测（报告 5381）
+	if blocked := scanCronPrompt(req.Prompt); blocked != "" {
+		return nil, errs.New(blocked)
+	}
+
 	kind, display, cronE, nextRun, err := parseSchedule(req.Schedule, m.loc)
 	if err != nil {
 		return nil, errs.Wrapf(err, "invalid schedule %q", req.Schedule)
@@ -545,6 +651,10 @@ func (m *Manager) UpdateJob(id string, updates map[string]any) (*Job, error) {
 		job.Description = desc
 	}
 	if prompt, ok := updates["prompt"].(string); ok {
+		// 安全扫描：更新 prompt 时同样对所有路径统一执行检测（报告 5381）
+		if blocked := scanCronPrompt(prompt); blocked != "" {
+			return nil, errs.New(blocked)
+		}
 		job.Prompt = prompt
 	}
 	if model, ok := updates["model"].(string); ok {
@@ -603,6 +713,13 @@ func (m *Manager) PauseJob(id string) error {
 	return m.setState(id, StatePaused)
 }
 
+// resumeFailureState 在任务被恢复/重新激活时清空失败计数与重试时间，
+// 否则熔断后第一次失败会立即再次熔断，退避机制形同虚设（报告 5333）。
+func resumeFailureState(job *Job) {
+	job.ConsecutiveFailures = 0
+	job.NextRetryAt = nil
+}
+
 // ResumeJob 恢复一个暂停的 Job 并重新计算下次执行时间。
 func (m *Manager) ResumeJob(id string) error {
 	job, ok := m.store.Get(id)
@@ -629,6 +746,7 @@ func (m *Manager) ResumeJob(id string) error {
 		}
 	}
 	job.State = StateActive
+	resumeFailureState(job)
 	return m.store.Save(job)
 }
 
@@ -644,6 +762,7 @@ func (m *Manager) TriggerJob(id string) error {
 	job.NextRunAt = &now
 	if job.State == StateDone || job.State == StateFailed {
 		job.State = StateActive
+		resumeFailureState(job)
 	}
 	return m.store.Save(job)
 }
@@ -654,6 +773,9 @@ func (m *Manager) setState(id string, state JobState) error {
 		return errs.Newf("job %q not found", id)
 	}
 	job.State = state
+	if state == StateActive {
+		resumeFailureState(job)
+	}
 	return m.store.Save(job)
 }
 

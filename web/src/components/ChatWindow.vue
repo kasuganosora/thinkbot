@@ -111,7 +111,12 @@
                 class="stream-caret"
                 data-testid="chat-stream-caret"
               ></span></template>
-              <template v-else>{{ msg.content }}</template>
+              <template v-else>{{ msg.content }}<span
+                v-if="msg._appendUnconfirmed"
+                class="append-unconfirmed"
+                data-testid="chat-append-unconfirmed"
+                title="这条补充的投递结果未确认（网络异常），如未被回复请手动重发"
+              >投递未确认</span></template>
             </div>
             <div
               v-if="msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length"
@@ -138,7 +143,12 @@
             v-if="msg.role === 'assistant' && msg.workflowId && msg.workflowId === store.activeWorkflowId"
             class="wf-inline"
           >
-            <SessionWorkflowPanel :session-id="store.activeBotId" :workflow-id="msg.workflowId" />
+            <!-- session-id 必须是当前会话 ID：面板终态时会用它按会话 resume 续跑，
+                 早期误传 activeBotId，导致续跑请求带着 botId 当 traceId 永远打不中 -->
+            <SessionWorkflowPanel
+              :session-id="String(store.activeSessionId || '')"
+              :workflow-id="msg.workflowId"
+            />
           </div>
         </div>
 
@@ -262,8 +272,7 @@
 
 <script setup>
 import { ref, computed, nextTick, watch, onUnmounted } from 'vue'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
+import { renderMarkdown } from '@/utils/markdown'
 import { useBotStore } from '@/stores/bot'
 import { useUserStore } from '@/stores/user'
 import { loadUserPreferences } from '@/utils/userPreferences'
@@ -271,12 +280,9 @@ import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
 import ToolCallGroup from '@/components/ToolCallGroup.vue'
 
-marked.setOptions({ breaks: true, gfm: true })
-function renderMarkdown(text) {
-  if (!text) return ''
-  return DOMPurify.sanitize(marked.parse(text))
-}
-
+// markdown 渲染统一走 utils/markdown：
+// 内置渲染缓存（模板每帧都会重新调用，历史消息不必反复 parse + sanitize）
+// 与收紧后的净化策略（禁 javascript: 等伪协议、外链强制 noopener）。
 const store = useBotStore()
 const userStore = useUserStore()
 const userPreferences = computed(() => loadUserPreferences(userStore.user?.id))
@@ -359,6 +365,12 @@ function scrollToBottomManual() {
 }
 const attachments = ref([])  // { name, type, size, dataUrl (base64) }[]
 
+// 附件上限：单文件 20MB、单次总大小 60MB、最多 10 个。
+// 仅单文件限制时，用户批量塞入大文件会让 base64 全量驻留内存直至发送。
+const MAX_ATTACH_FILE_BYTES = 20 * 1024 * 1024
+const MAX_ATTACH_TOTAL_BYTES = 60 * 1024 * 1024
+const MAX_ATTACH_COUNT = 10
+
 /** 根据 MIME type 返回图标名 */
 function fileIcon(mimeType) {
   if (mimeType?.startsWith('image')) return 'image'
@@ -371,12 +383,22 @@ function fileIcon(mimeType) {
 /** 文件选择 → 读为 base64 data URL */
 async function onFileSelect(e) {
   const files = Array.from(e.target.files || [])
+  let total = attachments.value.reduce((s, a) => s + (a.size || 0), 0)
   for (const f of files) {
+    if (attachments.value.length >= MAX_ATTACH_COUNT) {
+      alert(`最多只能添加 ${MAX_ATTACH_COUNT} 个附件，已停止添加`)
+      break
+    }
     // 单文件上限 20MB
-    if (f.size > 20 * 1024 * 1024) {
+    if (f.size > MAX_ATTACH_FILE_BYTES) {
       alert(`文件 "${f.name}" 超过 20MB 上限，已跳过`)
       continue
     }
+    if (total + f.size > MAX_ATTACH_TOTAL_BYTES) {
+      alert(`附件总大小超过 ${Math.round(MAX_ATTACH_TOTAL_BYTES / 1024 / 1024)}MB 上限，已停止添加`)
+      break
+    }
+    total += f.size
     const dataUrl = await readFileAsDataURL(f)
     attachments.value.push({
       name: f.name,
@@ -888,6 +910,18 @@ function onKeydown(value, { e }) {
 .typing-text {
   color: #8a8a8a;
   font-size: 13px;
+}
+/* 补充消息投递结果未确认的角标（网络异常时不自动重发，避免重复） */
+.append-unconfirmed {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 17px;
+  color: #b06a00;
+  background: rgba(224, 158, 0, 0.14);
+  vertical-align: middle;
 }
 .stream-caret {
   display: inline-block;

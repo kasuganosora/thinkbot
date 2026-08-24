@@ -186,6 +186,7 @@ func (s *TokenQuotaState) recordQuotaBlocked(botID, channel, dim string, current
 	}
 	s.statsRecorder.RecordUsage(context.Background(), llm.UsageMetric{
 		BotID:   botID,
+		At:      time.Now(),
 		Feature: "quota_blocked",
 		Channel: channel,
 	})

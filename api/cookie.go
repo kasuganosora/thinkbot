@@ -83,8 +83,12 @@ func (m *CookieManager) EncodeToken(user *dao.User) (string, error) {
 func (m *CookieManager) DecodeToken(tokenStr string) (*SessionClaims, error) {
 	claims := &SessionClaims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
+		// 算法白名单：仅允许签发的 HS256，防止 none / RSA 等 alg-confusion 伪造。
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
 		return m.secret, nil
-	})
+	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil || !token.Valid {
 		return nil, err
 	}

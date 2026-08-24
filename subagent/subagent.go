@@ -56,11 +56,15 @@ type SubAgent struct {
 	mu sync.Mutex
 
 	// LLM 配置（从主 Agent 继承）
-	provider  llm.Provider
-	model     string
-	system    string
-	temp      float64
-	maxTokens int
+	provider llm.Provider
+	model    string
+	system   string
+	temp     float64
+	// frequencyPenalty/presencePenalty 重复抑制（GLM-5.x 推荐 0.1/0.05），
+	// 抑制 agent 长工具链下反复输出相同 token 的退化。
+	frequencyPenalty float64
+	presencePenalty  float64
+	maxTokens        int
 
 	// 上下文管理
 	ctxMgr     *ContextManager
@@ -173,12 +177,14 @@ func WithReduction(rc llm.ReductionConfig) Option {
 // 可通过 opts 自定义系统提示词、温度、滑动窗口等参数。
 func New(provider llm.Provider, model string, opts ...Option) *SubAgent {
 	sa := &SubAgent{
-		provider:    provider,
-		model:       model,
-		temp:        0.7, // 默认与 BotConfig 一致
-		maxTokens:   4096,
-		ctxMgr:      NewContextManager(20), // 默认保留最近 20 条消息（10 轮）
-		chatTimeout: defaultChatHardTimeout,
+		provider:         provider,
+		model:            model,
+		temp:             0.7,  // 默认与 BotConfig 一致
+		frequencyPenalty: 0.1,  // GLM-5.x 官方推荐重复抑制
+		presencePenalty:  0.05, // GLM-5.x 官方推荐存在惩罚
+		maxTokens:        4096,
+		ctxMgr:           NewContextManager(20), // 默认保留最近 20 条消息（10 轮）
+		chatTimeout:      defaultChatHardTimeout,
 	}
 	for _, opt := range opts {
 		opt(sa)
@@ -529,13 +535,17 @@ func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
 
 	temp := sa.temp
 	maxTokens := sa.maxTokens
+	freqPen := sa.frequencyPenalty
+	presPen := sa.presencePenalty
 
 	params := llm.GenerateParams{
-		Model:       llm.ChatModel(sa.model),
-		System:      sa.system,
-		Messages:    msgs,
-		Temperature: &temp,
-		MaxTokens:   &maxTokens,
+		Model:            llm.ChatModel(sa.model),
+		System:           sa.system,
+		Messages:         msgs,
+		Temperature:      &temp,
+		FrequencyPenalty: &freqPen,
+		PresencePenalty:  &presPen,
+		MaxTokens:        &maxTokens,
 	}
 
 	if len(sa.extraTools) > 0 {

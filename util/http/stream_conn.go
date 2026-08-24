@@ -75,6 +75,15 @@ func (r *Request) streamConnect(
 	if wd == nil && wdTimeout > 0 {
 		wd = watchdog.NewWithName(origCtx, wdTimeout, kind+"-watchdog")
 		wdOwned = true
+	} else if wd == nil && wdTimeout <= 0 {
+		// 防挂起保护：没有任何看门狗/超时、且原始 context 自身也没有 deadline 时，
+		// 创建一个默认看门狗，避免 DoSSE/DoStream 在对端连上后长期不发数据的情况下无限挂起（DoS）。
+		// 读取过程中每收到数据都会 Feed，因此正常的持续数据流不会触发；
+		// 若调用方显式设置了 WatchdogTimeout / Watchdog 或 context deadline，本默认值不生效。
+		if _, hasDeadline := origCtx.Deadline(); !hasDeadline {
+			wd = watchdog.NewWithName(origCtx, defaultStreamWatchdogTimeout, kind+"-watchdog")
+			wdOwned = true
+		}
 	}
 
 	// 关键：使用看门狗的 context 作为 HTTP 请求的 context。
@@ -166,10 +175,18 @@ func (r *Request) streamConnect(
 	}, nil
 }
 
+// defaultStreamWatchdogTimeout 是流式连接在"无任何其他超时保护"时的看门狗超时安全网。
+// 仅当调用方未设置 Watchdog/WatchdogTimeout 且原始 context 无 deadline 时生效，
+// 用于防止对端连上后长期不发数据导致 DoSSE/DoStream 无限挂起（DoS）。
+// 读取过程中每收到数据都会 Feed 看门狗，因此正常的持续数据流不会触发。
+const defaultStreamWatchdogTimeout = 5 * time.Minute
+
 // newStreamClient 创建一个零超时的 HTTP 客户端副本（用于流式长连接）。
 func (c *Client) newStreamClient() *http.Client {
 	sc := &http.Client{}
-	*sc = *c.httpClient
+	if c.httpClient != nil {
+		*sc = *c.httpClient
+	}
 	sc.Timeout = 0
 	return sc
 }
@@ -178,7 +195,7 @@ func (c *Client) newStreamClient() *http.Client {
 func readErrorBody(resp *http.Response) []byte {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, streamErrorBodyLimit))
 	if err != nil {
-		log.Logger.Warnw("failed to read stream error body", "url", resp.Request.URL.String(), "err", err)
+		log.Logger.Warnw("failed to read stream error body", "url", SanitizeURL(resp.Request.URL.String()), "err", err)
 		return nil
 	}
 	return body

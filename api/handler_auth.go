@@ -48,6 +48,11 @@ func (s *Server) handleLogin(c *gin.Context) {
 			Fail(c, errs.Unauthorized("invalid username or password"))
 			return
 		}
+		// 空库首登自举被禁用：返回 403 并指引显式初始化（修复 5193）
+		if errors.Is(err, auth.ErrBootstrapDisabled) {
+			Fail(c, errs.Forbidden(err.Error()))
+			return
+		}
 		Fail(c, err)
 		return
 	}

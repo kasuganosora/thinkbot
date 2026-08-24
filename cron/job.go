@@ -69,6 +69,10 @@ type Job struct {
 	LastResult string     `json:"last_result,omitempty"` // 上次执行结果摘要
 	LastError  string     `json:"last_error,omitempty"`  // 上次执行错误
 
+	// 失败退避 / 熔断（报告 5333）
+	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"` // 连续失败次数
+	NextRetryAt         *time.Time `json:"next_retry_at,omitempty"`       // 计划重试时间（UTC）
+
 	// 元数据
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

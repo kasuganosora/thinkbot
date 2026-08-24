@@ -84,6 +84,11 @@ const (
 	// 心跳消息走与 @bot 相同的 pipeline，但由准入/闸门控制其自主行为，
 	// 且不参与 L0 记忆捕获（见 note_capture / llmroute）。
 	SourceHeartbeat string = "heartbeat"
+
+	// SourceCron 用户级定时任务触发。
+	// 由 cron 调度器在 Job 到期时自动注入，bot 以「无人监督」模式跑一次 Job.Prompt。
+	// 与心跳类似走完整 pipeline，但目的是产出并投递结果到指定渠道（Channel 非空时）。
+	SourceCron string = "cron"
 )
 
 // ============================================================================

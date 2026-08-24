@@ -268,6 +268,11 @@ func (c *botContainer) create(ctx context.Context) error {
 	}
 	args = append(args, "-e", "TZ="+tz)
 
+	// 全局出口代理：注入到容器环境变量，使容器内请求统一走部署侧代理。
+	if c.cfg.Proxy != "" {
+		args = append(args, "-e", "HTTP_PROXY="+c.cfg.Proxy, "-e", "HTTPS_PROXY="+c.cfg.Proxy)
+	}
+
 	if mem := c.effectiveMemoryLocked(); mem != "" {
 		args = append(args, "--memory", mem)
 	}

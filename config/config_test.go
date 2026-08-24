@@ -153,14 +153,15 @@ func TestStore_Priority_OverrideWins(t *testing.T) {
 	}
 }
 
-func TestStore_Priority_EnvFileOverDB(t *testing.T) {
+func TestStore_Priority_DBOverEnvFile(t *testing.T) {
 	db := testDB(t)
 	store := NewStore(db)
 	_ = store.Set(context.Background(), "test.key", "db_value")
 	store.LoadEnvMap(map[string]string{"test.key": "env_value"})
 
-	if got := store.GetString("test.key", ""); got != "env_value" {
-		t.Errorf("expected env_value, got %q", got)
+	// 修复后：数据库（UI 显式配置）优先级高于 .env 种子值。
+	if got := store.GetString("test.key", ""); got != "db_value" {
+		t.Errorf("expected db_value, got %q", got)
 	}
 }
 

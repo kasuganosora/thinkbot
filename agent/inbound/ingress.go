@@ -21,6 +21,14 @@ import (
 // Ingress — 消息入口网关
 // ============================================================================
 
+const (
+	// ingressDedupTTL 是消息 ID 去重窗口：相同 msg.ID 在窗口内重复出现只处理一次。
+	// 覆盖 Misskey 多事件源（main + 多个 timeline 通道）与 WS 重连重放导致的重复投递。
+	ingressDedupTTL = 2 * time.Minute
+	// ingressDedupCleanupEvery 是去重缓存清理间隔。
+	ingressDedupCleanupEvery = 30 * time.Second
+)
+
 // Ingress 是 Inbound 层的公共入口。
 // 任何 channel（Webhook handler、WebSocket handler、Polling loop、测试等）
 // 都通过调用 Ingress.Receive() 将消息注入 Pipeline。
@@ -47,6 +55,13 @@ type Ingress struct {
 	// 确保两层防线引用同一份数据，无需时序协调。
 	selfIDs     *SelfIDSet
 	selfIDsOnce sync.Once
+
+	// seenIDs 记录近期已处理的消息 ID（msg.ID），用于跨通道/跨连接去重，
+	// 防止同一条消息被多个输入端（如 Misskey 的 main + 多个 timeline 通道、
+	// 或 WS 重连重放）重复投递导致多次处理/多次回复。去重窗口见 ingressDedupTTL。
+	seenMu  sync.Mutex
+	seenIDs map[string]time.Time
+	done    chan struct{}
 }
 
 // IngressConfig 控制 Ingress 行为参数。
@@ -85,12 +100,16 @@ func NewIngress(
 		selfIDs = NewSelfIDSet()
 	}
 
-	return &Ingress{
+	g := &Ingress{
 		ch:      make(chan *core.Envelope, cfg.BufferSize),
 		tracer:  tp.Tracer("github.com/kasuganosora/thinkbot/agent/inbound"),
 		logger:  logger,
 		selfIDs: selfIDs,
+		seenIDs: make(map[string]time.Time),
+		done:    make(chan struct{}),
 	}
+	go g.seenCleanup()
+	return g
 }
 
 // Receive 将一条消息注入 Pipeline。
@@ -136,6 +155,22 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 
 	// 将 trace ID 注入 context，供下游 OTel span 和日志使用
 	ctx = traceid.WithTraceID(ctx, msg.TraceID)
+
+	// 跨通道/跨连接去重：相同 msg.ID 在窗口内只处理一次，
+	// 防止 Misskey 多事件源 + WS 重连重放导致的重复处理/重复回复。
+	if g.seen(msg.ID) {
+		// 必须留日志：重复投递是上游异常信号（多事件源/重连重放/多实例），
+		// 静默丢弃会让"是否真的重复过"无法观测，只能靠 trace_id 事后反推。
+		g.logger.Warnw("ingress: duplicate message dropped",
+			"message_id", msg.ID,
+			"source", msg.Source,
+			"channel", msg.Channel,
+			"user_id", msg.UserID,
+			"trace_id", msg.TraceID,
+			"entry", "Receive",
+		)
+		return nil
+	}
 
 	// 封装 Envelope
 	env := core.NewEnvelope(msg)
@@ -199,6 +234,19 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 		msg.TraceID = traceid.New()
 	}
 
+	// 跨通道/跨连接去重：与 Receive 一致，相同 msg.ID 只处理一次。
+	if g.seen(msg.ID) {
+		g.logger.Warnw("ingress: duplicate message dropped",
+			"message_id", msg.ID,
+			"source", msg.Source,
+			"channel", msg.Channel,
+			"user_id", msg.UserID,
+			"trace_id", msg.TraceID,
+			"entry", "TryReceive",
+		)
+		return true
+	}
+
 	env := core.NewEnvelope(msg)
 
 	sent := false
@@ -219,10 +267,52 @@ func (g *Ingress) C() <-chan *core.Envelope {
 	return g.ch
 }
 
+// seen 以「检查并设置」的原子方式记录某消息 ID 已处理。
+// 若窗口内已出现过同一 msg.ID，返回 true（调用方应跳过，避免重复处理）；
+// 否则标记并返回 false（继续处理）。
+// 仅对带非空 ID 的消息生效；无 ID 的消息无法去重，按正常流程放行。
+func (g *Ingress) seen(id string) bool {
+	if id == "" {
+		return false
+	}
+	g.seenMu.Lock()
+	defer g.seenMu.Unlock()
+	if ts, ok := g.seenIDs[id]; ok && time.Since(ts) < ingressDedupTTL {
+		return true
+	}
+	g.seenIDs[id] = time.Now()
+	return false
+}
+
+// seenCleanup 定期清理过期的去重记录，避免 seenIDs 无限增长。
+// 由 NewIngress 启动，Ingress.Close 时通过 done channel 退出。
+func (g *Ingress) seenCleanup() {
+	ticker := time.NewTicker(ingressDedupCleanupEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-g.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			g.seenMu.Lock()
+			for id, ts := range g.seenIDs {
+				if now.Sub(ts) > ingressDedupTTL {
+					delete(g.seenIDs, id)
+				}
+			}
+			g.seenMu.Unlock()
+		}
+	}
+}
+
 // Close 关闭 Ingress，停止接收新消息。
 // 已在缓冲区中的消息仍可被消费。
 func (g *Ingress) Close() {
 	if g.closed.CompareAndSwap(false, true) {
+		if g.done != nil {
+			close(g.done)
+		}
 		close(g.ch)
 		g.logger.Infow("ingress closed")
 	}

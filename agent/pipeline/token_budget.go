@@ -213,6 +213,7 @@ func TokenBudgetMiddlewareWithState(cfg TokenBudgetConfig, shared *TokenBudgetSt
 					if cfg.StatsRecorder != nil {
 						cfg.StatsRecorder.RecordUsage(ctx, llm.UsageMetric{
 							BotID:   env.Message.BotID,
+							At:      time.Now(),
 							Feature: "budget_warning",
 							Channel: channel,
 						})

@@ -180,8 +180,12 @@ func InitWithConfig(cfg Config) error {
 	// --- 为每个输出源构建 Core ---
 	var cores []zapcore.Core
 
+	// 文件路径 → lumberjack 实例 的复用表，避免多个输出源指向同一文件时
+	// 各自创建独立的 rotator 互相破坏轮转。
+	fileCache := map[string]zapcore.WriteSyncer{}
+
 	for _, out := range outputs {
-		core, err := buildCore(out, baseEncCfg, level)
+		core, err := buildCore(out, baseEncCfg, level, fileCache)
 		if err != nil {
 			return err
 		}
@@ -209,7 +213,8 @@ func InitWithConfig(cfg Config) error {
 // ============================================================================
 
 // buildCore 为单个输出源构建 zapcore.Core。
-func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore.Level) (zapcore.Core, error) {
+// fileCache 复用同一文件路径的 lumberjack 实例，避免重复轮转冲突。
+func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore.Level, fileCache map[string]zapcore.WriteSyncer) (zapcore.Core, error) {
 	// --- 确定该输出源的级别 ---
 	outLevel := globalLevel
 	if out.Level != "" {
@@ -248,13 +253,14 @@ func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore
 	// --- 构建 writer + core ---
 	switch out.Type {
 	case OutputStdout:
-		return makeConsoleCore(baseEncCfg, os.Stdout, outLevel), nil
+		// 尊重 out.Format（如显式 JSON），而非强制 console。
+		return zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), outLevel), nil
 
 	case OutputStderr:
-		return makeConsoleCore(baseEncCfg, os.Stderr, outLevel), nil
+		return zapcore.NewCore(encoder, zapcore.Lock(os.Stderr), outLevel), nil
 
 	case OutputFile:
-		return buildFileCore(out, encoder, outLevel)
+		return buildFileCore(out, encoder, outLevel, fileCache)
 
 	default:
 		return nil, fmt.Errorf("unknown output type: %s", out.Type)
@@ -273,7 +279,9 @@ func makeConsoleCore(baseEncCfg zapcore.EncoderConfig, w zapcore.WriteSyncer, le
 }
 
 // buildFileCore 创建文件输出 Core（JSONL，带滚动）。
-func buildFileCore(out Output, encoder zapcore.Encoder, level zapcore.Level) (zapcore.Core, error) {
+// fileCache 按完整文件路径复用 lumberjack 实例，避免多个输出源指向同一文件时
+// 各自独立轮转、互相破坏。
+func buildFileCore(out Output, encoder zapcore.Encoder, level zapcore.Level, fileCache map[string]zapcore.WriteSyncer) (zapcore.Core, error) {
 	dir := out.FileDir
 	if dir == "" {
 		dir = "."
@@ -292,17 +300,25 @@ func buildFileCore(out Output, encoder zapcore.Encoder, level zapcore.Level) (za
 	if ext == "" {
 		ext = ".log"
 	}
+	path := filepath.Join(logPath, name+ext)
+
+	if ws, ok := fileCache[path]; ok {
+		// 同一文件复用已有 rotator
+		return zapcore.NewCore(encoder, ws, level), nil
+	}
 
 	lj := &lumberjack.Logger{
-		Filename:   filepath.Join(logPath, name+ext),
+		Filename:   path,
 		MaxSize:    orDefault(out.MaxSize, 100),
 		MaxBackups: orDefault(out.MaxBackups, 7),
 		MaxAge:     orDefault(out.MaxAge, 30),
 		Compress:   out.Compress,
 		LocalTime:  true,
 	}
+	ws := zapcore.AddSync(lj)
+	fileCache[path] = ws
 
-	return zapcore.NewCore(encoder, zapcore.AddSync(lj), level), nil
+	return zapcore.NewCore(encoder, ws, level), nil
 }
 
 // ============================================================================

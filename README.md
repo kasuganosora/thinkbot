@@ -17,20 +17,31 @@
 
 ## 快速开始
 
+thinkbot 推荐以 **DooD（Docker-out-of-Docker）** 方式部署：主容器经挂载的 `docker.sock` 指挥宿主 Docker 为各 Bot 创建兄弟容器（沙箱），因此 `sandbox.backend` 必须为 `docker`。
+
 ```bash
 # 克隆仓库
 git clone https://github.com/kasuganosora/thinkbot.git
 cd thinkbot
 
-# 配置环境变量
+# 准备配置
 cp .env.example .env
-# 编辑 .env 填入 API Key 等配置
+# 编辑 .env：填入 LLM 供应商 API Key，确认 sandbox.backend=docker（已默认）
 
-# 编译运行
-go build -o thinkbot ./cmd && ./thinkbot
+# 启动（后台运行，含健康检查）
+docker compose up -d
 ```
 
-访问 `http://localhost:8080` 打开 Web 管理界面。
+访问 `http://localhost:8080` 打开 Web 管理界面。`.env` 中的 `sandbox.backend` 已默认 `docker`、`sandbox.image` 默认 `builtin`，与 `docker-compose.yml` 的 DooD 挂载联动；如需改用已存在的预构建镜像，改 `sandbox.image` 即可。
+
+### 不使用 Docker（裸机运行）
+
+```bash
+# 重新生成 swagger 文档（如需）后编译
+go build -ldflags="-s -w" -o thinkbot ./cmd && ./thinkbot
+```
+
+> 提示：默认 `go build` 产物约 50MB；加上 `-ldflags="-s -w"` 可剥离调试符号与 DWARF 信息，体积显著减小（与 Docker 构建路径一致）。二进制需能访问宿主 `docker` 才能使用 `sandbox.backend=docker`，否则请将 `sandbox.backend` 改为 `local`。
 
 ## 项目结构
 

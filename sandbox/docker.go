@@ -75,6 +75,11 @@ func (d *dockerSandbox) Create(id string) (Workspace, error) {
 	}
 	args = append(args, "-e", "TZ="+tz)
 
+	// 全局出口代理：注入到容器环境变量，使容器内请求统一走部署侧代理。
+	if d.cfg.Proxy != "" {
+		args = append(args, "-e", "HTTP_PROXY="+d.cfg.Proxy, "-e", "HTTPS_PROXY="+d.cfg.Proxy)
+	}
+
 	// 资源限制
 	if d.cfg.MemoryLimit != "" {
 		args = append(args, "--memory", d.cfg.MemoryLimit)

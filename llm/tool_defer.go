@@ -174,6 +174,39 @@ func (d *ToolDeferral) Search(query string) []Tool {
 	return hits
 }
 
+// matchAvailable returns tools in the full list that are ALREADY directly
+// callable (non-deferred, or deferred-but-already-loaded) and whose name,
+// description, or keywords match query. Unlike Search, it does not load
+// anything and it surfaces the always-available tools (e.g. exec / read_file /
+// replace_in_file) that tool_search would otherwise report as missing.
+//
+// This exists to prevent a misleading false negative: when the model calls
+// tool_search for a capability that is already in its tool list, a bare "No
+// matching tools found" reads as "that tool does not exist", so the model may
+// abandon perfectly good tools mid-task and spiral into search loops.
+func (d *ToolDeferral) matchAvailable(query string) []Tool {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []Tool
+	for i := range d.full {
+		t := d.full[i]
+		// Skip unloaded deferred tools: those are the job of Search() (load on
+		// demand). Here we only surface tools already directly callable.
+		if t.DeferredLoad && !d.loaded[t.Name] {
+			continue
+		}
+		if toolMatches(t, q) {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 func toolMatches(t Tool, q string) bool {
 	if strings.Contains(strings.ToLower(t.Name), q) {
 		return true
@@ -187,6 +220,60 @@ func toolMatches(t Tool, q string) bool {
 		}
 	}
 	return false
+}
+
+// toolAliasTerms 把模型在 tool_search 里常用的自然语言能力词，映射到「已经直接可用」
+// 的工具名（子串匹配）。模型常搜 "edit file" / "run git" / "shell command" / "list
+// directory"，这些根本不该走延迟加载搜索——它们对应的 exec/read_file/replace_in_file
+// 本就在工具列表里。若 tool_search 对这些词返回「No matching」，模型会误以为工具不存在
+// 而放弃（cfblog 长任务反复踩坑）。aliasMatches 让这类查询回指到已可用工具。
+var toolAliasTerms = []struct {
+	terms []string
+	tools []string // 匹配的可用工具名（子串）
+}{
+	{[]string{"edit", "write", "modify", "change", "create file", "new file", "save file", "rewrite", "append"}, []string{"read_file", "replace_in_file", "write_file"}},
+	{[]string{"read", "cat", "view file", "show file", "open file", "dump"}, []string{"read_file"}},
+	{[]string{"list", "ls", "directory", "folder", "tree", "files in"}, []string{"list_dir"}},
+	{[]string{"git", "commit", "push", "branch", "clone", "pull", "diff", "status", "rebase"}, []string{"exec"}},
+	{[]string{"shell", "terminal", "bash", "command", "run", "execute", "cmd"}, []string{"exec"}},
+	{[]string{"search", "grep", "find", "locate", "ag"}, []string{"exec", "read_file"}},
+	{[]string{"note", "remember", "save memory", "recall", "memorize"}, []string{"memory"}},
+}
+
+// aliasMatches 返回「查询包含某能力别名、且该能力已由某个已可用工具提供」的工具集合。
+func (d *ToolDeferral) aliasMatches(query string) []Tool {
+	q := strings.ToLower(query)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []Tool
+	seen := make(map[string]bool)
+	for _, a := range toolAliasTerms {
+		hit := false
+		for _, term := range a.terms {
+			if strings.Contains(q, term) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		for _, want := range a.tools {
+			for i := range d.full {
+				t := d.full[i]
+				// 只回指「已直接可用」的工具（排除未加载的延迟工具）
+				if t.DeferredLoad && !d.loaded[t.Name] {
+					continue
+				}
+				if strings.Contains(strings.ToLower(t.Name), want) && !seen[t.Name] {
+					seen[t.Name] = true
+					out = append(out, t)
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // View builds the tool list shown to the model:
@@ -271,25 +358,53 @@ func (d *ToolDeferral) searchTool() Tool {
 				}
 			}
 			hits := d.Search(query)
-			if len(hits) == 0 {
+			if len(hits) > 0 {
 				if d.logger != nil {
-					d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", []string{})
+					names := make([]string, len(hits))
+					for i, h := range hits {
+						names[i] = h.Name
+					}
+					d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", names)
 				}
-				return "No matching tools found. Try different keywords, or describe the capability you need.", nil
+				var b strings.Builder
+				fmt.Fprintf(&b, "Found %d tool(s). They are now available for direct use:\n", len(hits))
+				for _, t := range hits {
+					fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Description)
+				}
+				return b.String(), nil
+			}
+			// No lazily-loaded (deferred) tool matched. Before reporting
+			// anything, check whether the capability is already provided by an
+			// always-available tool (substring match on existing tools, plus
+			// natural-language alias matching for "edit file" / "run git" /
+			// "shell command" etc.). A misleading "No matching tools found"
+			// here makes the model believe its file/exec tools don't exist and
+			// abandon them mid-task (observed repeatedly on the cfblog a11y
+			// task). Point the model back to the tools it already has.
+			avail := d.matchAvailable(query)
+			avail = append(avail, d.aliasMatches(query)...)
+			if len(avail) > 0 {
+				if d.logger != nil {
+					names := make([]string, len(avail))
+					for i, a := range avail {
+						names[i] = a.Name
+					}
+					d.logger.Debugw("defer_loading: tool_search", "query", query, "already_available", names)
+				}
+				var b strings.Builder
+				b.WriteString("No lazily-loaded tool matched, but these tools are ALREADY in your current tool list — call them directly with their parameters (do NOT use tool_search for them):\n")
+				for _, t := range avail {
+					fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Description)
+				}
+				return b.String(), nil
 			}
 			if d.logger != nil {
-				names := make([]string, len(hits))
-				for i, h := range hits {
-					names[i] = h.Name
-				}
-				d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", names)
+				d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", []string{})
 			}
-			var b strings.Builder
-			fmt.Fprintf(&b, "Found %d tool(s). They are now available for direct use:\n", len(hits))
-			for _, t := range hits {
-				fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Description)
-			}
-			return b.String(), nil
+			// 真正的「无匹配」：绝不说「No matching tools found」这种会被模型
+			// 解读为「工具不存在」的话。明确提醒：exec/read_file/replace_in_file/
+			// list_dir 等常驻工具不经过延迟加载搜索、始终可直接按名调用。
+			return fmt.Sprintf("No lazily-loaded tool matches %q. Reminder: your always-available tools (exec, read_file, replace_in_file, list_dir, browser_*, memory, etc.) are NOT indexed by tool_search and are ready to call directly by name — if one of them does what you need, call it now. Otherwise rephrase the need or tell the user it is out of scope.", query), nil
 		},
 	}
 }

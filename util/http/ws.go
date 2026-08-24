@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -147,6 +148,18 @@ func (c *WSConn) WriteBinary(data []byte) error {
 	return c.WriteMessage(WSBinaryMessage, data)
 }
 
+// defaultWSWriteTimeout 是 WebSocket 写操作的默认超时安全网。
+// 当 WSConfig.WriteTimeout 为 0（未显式设置）时生效，防止写操作因对端不读而永久阻塞（DoS）。
+const defaultWSWriteTimeout = 30 * time.Second
+
+// writeTimeoutOr 返回生效的写超时：显式设置优先，否则使用默认安全网。
+func (c *WSConn) writeTimeoutOr() time.Duration {
+	if c.writeTimeout > 0 {
+		return c.writeTimeout
+	}
+	return defaultWSWriteTimeout
+}
+
 // WriteMessage 发送原始 WebSocket 消息（线程安全）。
 func (c *WSConn) WriteMessage(msgType int, data []byte) error {
 	c.writeMu.Lock()
@@ -154,10 +167,8 @@ func (c *WSConn) WriteMessage(msgType int, data []byte) error {
 	if c.closed.Load() {
 		return errs.New("ws connection already closed")
 	}
-	if c.writeTimeout > 0 {
-		_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
-	} else {
-		_ = c.conn.SetWriteDeadline(time.Time{}) // no deadline
+	if err := c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeoutOr())); err != nil {
+		return errs.Wrap(err, "ws set write deadline")
 	}
 	if err := c.conn.WriteMessage(msgType, data); err != nil {
 		return errs.Wrap(err, "ws write message")
@@ -172,8 +183,8 @@ func (c *WSConn) Ping() error {
 	if c.closed.Load() {
 		return errs.New("ws connection already closed")
 	}
-	if c.writeTimeout > 0 {
-		_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	if err := c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeoutOr())); err != nil {
+		return errs.Wrap(err, "ws set write deadline")
 	}
 	if err := c.conn.WriteMessage(WSPingMessage, nil); err != nil {
 		return errs.Wrap(err, "ws ping")
@@ -298,22 +309,22 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 			wd.Stop(true)
 		}
 		if resp != nil {
-			_ = resp.Body.Close()
+			drainAndCloseWS(resp)
 		}
 
 		// 看门狗超时
 		if wd != nil && wd.TimedOut() {
 			log.Logger.Warnw("ws dial failed (watchdog timeout)",
-				"url", fullURL, "elapsed", time.Since(start))
+				"url", SanitizeURL(fullURL), "elapsed", time.Since(start))
 			return nil, &WatchdogTimeoutError{
-				URL:          fullURL,
+				URL:          SanitizeURL(fullURL),
 				Elapsed:      time.Since(start),
 				WatchdogName: wd.Name(),
 			}
 		}
 		// 用户主动取消
 		if origCtx.Err() != nil {
-			log.Logger.Debugw("ws dial canceled by user", "url", fullURL)
+			log.Logger.Debugw("ws dial canceled by user", "url", SanitizeURL(fullURL))
 			return nil, context.Canceled
 		}
 		// 普通 HTTP 错误（如 401/403）
@@ -322,7 +333,7 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 				cfg.OnError(err)
 			}
 			return nil, errs.HTTPErrorf(resp.StatusCode,
-				"ws dial to %s returned status %d", fullURL, resp.StatusCode)
+				"ws dial to %s returned status %d", SanitizeURL(fullURL), resp.StatusCode)
 		}
 		if cfg.OnError != nil {
 			cfg.OnError(err)
@@ -330,7 +341,7 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 		return nil, errs.Wrapf(err, "ws dial failed")
 	}
 	if resp != nil {
-		_ = resp.Body.Close()
+		drainAndCloseWS(resp)
 	}
 
 	// --- 配置连接 ---
@@ -382,7 +393,7 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 	}()
 
 	log.Logger.Debugw("ws connected",
-		"url", fullURL, "elapsed", time.Since(start))
+		"url", SanitizeURL(fullURL), "elapsed", time.Since(start))
 
 	if cfg.OnConnect != nil {
 		cfg.OnConnect(wsc)
@@ -611,6 +622,15 @@ func (r *Request) buildWSURL() string {
 		return fullURL // 已经是 WebSocket URL
 	default:
 		return fullURL
+	}
+}
+
+// drainAndCloseWS 先排空握手失败/完成的响应体再关闭，
+// 避免未读取的响应体导致底层连接无法复用（连接泄漏）。
+func drainAndCloseWS(resp *http.Response) {
+	if resp != nil && resp.Body != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
 	}
 }
 

@@ -73,6 +73,10 @@ type ToolExecContext struct {
 	ToolName     string
 	InvocationID string            // 服务端生成的本次执行唯一标识，用于日志追踪/前端区分
 	SendProgress func(content any) // nil when not in streaming mode
+
+	// UserRequest 触发本轮编排的用户请求文本（或子代理任务描述）。
+	// 供标记了 RequiresUserIntent 的写工具做「是否根植于用户显式意图」的护栏判定。
+	UserRequest string
 }
 
 // ToolApprovalDecision controls how a tool call requiring approval is handled.
@@ -113,6 +117,16 @@ type Tool struct {
 	// RequireApproval, when true, causes the orchestration layer to call the
 	// configured ApprovalHandler before executing this tool.
 	RequireApproval bool `json:"-"`
+
+	// RequiresUserIntent, when true, marks this tool as a *user-intent-gated
+	// write action* (e.g. Misskey follow/unfollow/post/react). It is only
+	// executed when the triggering user request (cfg.UserRequest) explicitly
+	// references that social action; otherwise the orchestration layer refuses
+	// to run it *before* execution. This blocks the model from spontaneously
+	// issuing external side-effects mid-unrelated-task (a 2026-08 incident had
+	// the model derail during a code task and spam Misskey write tools), while
+	// still allowing legitimate, user-requested social calls from any channel.
+	RequiresUserIntent bool `json:"-"`
 
 	// DeferredLoad marks this tool as lazily loaded (Claude-style defer_loading).
 	// When true, the orchestration layer initially shows the model only the

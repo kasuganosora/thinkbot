@@ -157,8 +157,7 @@
 <script setup>
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
+import { renderMarkdown, clearMarkdownCache } from '@/utils/markdown'
 import { workflowApi } from '@/api/services'
 import { useBotStore } from '@/stores/bot'
 
@@ -179,21 +178,9 @@ let pollTimer = null
 // 节点 result 往往是模型产出的长篇 markdown 审查报告（数千字），
 // 直接内联成纯文本会把卡片撑爆且完全不可读。这里默认折叠成单行摘要，
 // 展开后才按 markdown 渲染并限高滚动。
-marked.setOptions({ breaks: true, gfm: true })
-
-// markdown 渲染缓存：面板每 1.5s 轮询整体替换节点列表，若不缓存则会对
-// 数千字的报告反复做 parse + sanitize，展开态下明显卡顿。
-const _mdCache = new Map()
-function renderMarkdown(text) {
-  if (!text) return ''
-  const hit = _mdCache.get(text)
-  if (hit !== undefined) return hit
-  const html = DOMPurify.sanitize(marked.parse(text))
-  // 只缓存当前可见节点量级的内容，避免长轮询下无限增长
-  if (_mdCache.size > 40) _mdCache.clear()
-  _mdCache.set(text, html)
-  return html
-}
+//
+// 渲染与缓存统一走 utils/markdown（面板每 1.5s 轮询整体替换节点列表，
+// 不缓存会对数千字的报告反复 parse + sanitize，展开态下明显卡顿）。
 
 // 超过该长度即视为「长文」，需要折叠
 const DETAIL_FOLD_THRESHOLD = 120
@@ -326,7 +313,7 @@ async function load() {
   workflow.value = null
   rawNodes.value = []
   openDetails.value = new Set() // 切换工作流时清空详情展开态
-  _mdCache.clear()
+  clearMarkdownCache()
   if (!props.workflowId) return
   try {
     const res = await fetchState()
@@ -387,10 +374,31 @@ const isTerminal = computed(() => {
   return s === 'completed' || s === 'failed' || s === 'terminated'
 })
 
+// ---- 轮询节流与退避 ----
+// 原实现固定 1.5s 一跳、每跳两个请求（status + nodes），错误全静默，
+// 页面切到后台也照打。这里做三件事：
+//   1. 文档不可见时暂停（visibilitychange 恢复时立刻补一跳）；
+//   2. 连续失败指数退避（1.5s → 3s → 6s …，上限 30s），成功即复位；
+//   3. 失败到一定次数后给一次可见提示，不再永远静默。
+const POLL_BASE_MS = 1500
+const POLL_MAX_MS = 30_000
+const FAIL_NOTIFY_AT = 3
+let pollFails = 0
+let failNotified = false
+
+function nextDelay() {
+  if (!pollFails) return POLL_BASE_MS
+  return Math.min(POLL_BASE_MS * 2 ** pollFails, POLL_MAX_MS)
+}
+
 async function tick() {
   if (!props.workflowId) return
+  // 后台标签页不轮询：工作流状态在切回来时补拉即可
+  if (typeof document !== 'undefined' && document.hidden) return
   try {
     const res = await fetchState()
+    pollFails = 0
+    failNotified = false
     if (!res) return
     // 节点列表与状态一律以 API 为准：它是权威数据源，且 1.5s 轮询比 SSE 快照更新。
     //
@@ -409,20 +417,57 @@ async function tick() {
       // 这里按会话 resume 接收 agent 续跑的流式回复。needsContinuation 由后端
       // 注入后通过 status 接口给出，前端消费一次即清除，不会重复触发。
       if (res.status && res.status.needsContinuation) {
-        botStore.resumeContinuation(props.sessionId)
+        // sessionId 为空说明调用方没把会话 ID 传进来（历史上误传过 botId），
+        // 此时续跑请求必然打不中，宁可留一条告警也不要静默失败。
+        if (props.sessionId) botStore.resumeContinuation(props.sessionId)
+        else console.warn('workflow needsContinuation 但 sessionId 为空，已跳过续跑')
       }
     }
   } catch (e) {
-    // 瞬态错误忽略，下次轮询重试
+    pollFails++
+    // 一直失败下去要让用户知道（例如工作流已被清理、或登录态失效）
+    if (pollFails >= FAIL_NOTIFY_AT && !failNotified) {
+      failNotified = true
+      MessagePlugin.warning('工作流状态刷新失败，正在降低频率重试')
+    }
   }
+}
+
+let pollStopped = true
+
+// 自调度轮询：用 setTimeout 串联而非 setInterval，才能在失败时拉长间隔，
+// 也避免上一跳未返回就重复发起（两个请求叠加会放大后端压力）。
+function scheduleNext() {
+  if (pollStopped) return
+  pollTimer = setTimeout(async () => {
+    pollTimer = null
+    if (pollStopped) return
+    await tick()
+    if (pollStopped || isTerminal.value) return
+    scheduleNext()
+  }, nextDelay())
 }
 
 function startLive() {
   stopLive()
-  pollTimer = setInterval(tick, 1500)
+  pollStopped = false
+  pollFails = 0
+  failNotified = false
+  scheduleNext()
 }
+
 function stopLive() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  pollStopped = true
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+}
+
+// 切回前台立刻补一跳，把后台期间落下的状态追上
+function onVisibilityChange() {
+  if (document.hidden || pollStopped) return
+  pollFails = 0
+  tick().then(() => {
+    if (!pollStopped && !isTerminal.value && !pollTimer) scheduleNext()
+  })
 }
 
 async function retry(node) {
@@ -446,7 +491,12 @@ async function retry(node) {
 
 watch(() => props.workflowId, load, { immediate: true })
 
-onBeforeUnmount(stopLive)
+document.addEventListener('visibilitychange', onVisibilityChange)
+
+onBeforeUnmount(() => {
+  stopLive()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
 </script>
 
 <style scoped>

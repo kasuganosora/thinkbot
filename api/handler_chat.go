@@ -760,9 +760,15 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			return
 
 		case <-idleTimer.C:
+			// 空闲超时不应腰斩后台长任务：与「客户端断开」路径一致，
+			// 把 EventBus 订阅移交给后台 goroutine 续跑并落库（见 c.Request.Context().Done() 分支），
+			// 本 SSE 写端关闭即可，bot 生成跑在独立 msgCtx 上不依赖请求 context，不受影响。
+			// 真正卡死由 bot 自身工具/生成超时与 stop 按钮控制，不应由 SSE 空闲判定直接杀进程。
 			writeSSE(c.Writer, sseError, map[string]any{"message": "idle timeout"})
 			flusher.Flush()
-			unsubscribeEventSub()
+			if eventSub != nil {
+				go drainAndSaveInBackground()
+			}
 			return
 
 		case <-heartbeat.C:

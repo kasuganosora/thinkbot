@@ -36,7 +36,10 @@ var Module = fx.Module("auth",
 
 // NewModule 创建 AuthService。
 func NewModule(p AuthParams) *AuthService {
-	return New(p.DB)
+	// AUTH_BOOTSTRAP_TOKEN：空库首登自举令牌。非空时空库首次登录必须以该令牌
+	// 作为密码才能创建首位管理员；为空则禁用空库首登自举，强制用
+	// AUTH_BOOTSTRAP_ADMIN/PASSWORD 显式初始化（修复 5193）。
+	return New(p.DB, strings.TrimSpace(os.Getenv("AUTH_BOOTSTRAP_TOKEN")))
 }
 
 // LifecycleParams 用于注册生命周期钩子。

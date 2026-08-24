@@ -231,7 +231,7 @@ func applyDateRange(q *gorm.DB, from, to *time.Time) *gorm.DB {
 		q = q.Where("date >= ?", truncateToDate(*from))
 	}
 	if to != nil {
-		q = q.Where("date <= ?", truncateToDate(to.AddDate(0, 0, 1)))
+		q = q.Where("date <= ?", truncateToDate(*to))
 	}
 	return q
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -49,14 +50,32 @@ type LoopDetectionConfig struct {
 	// 不计入循环检测。工作流分析/执行可能持续数十秒到数分钟，bot 提交后阻塞等待
 	// 属正常行为，不应被误判为死循环而强制收尾。
 	ExemptTools []string
+
+	// LowValueTools 这些工具即使被反复调用也不代表任务推进（统计类 text_stats、
+	// 健康检查 health、记忆读取 memory、延迟工具搜索 tool_search、计算类 calculate，
+	// 以及跨渠道只读 misskey_* 等）。当「连续多步仅由这些工具构成、且其间没有任何
+	// 其它工具调用」时，视为「无进展的混乱调用循环」，触发硬警告强制收尾。
+	// 用于弥补「完全相同 hash≥N 才触发」无法捕捉的「每次参数都不同的多变混乱调用」
+	// （退化模型交替调 text_stats/memory/misskey_* 直到被打断，正是 cfblog 长任务
+	// 做不完的根因之一）。支持通配后缀 "*"（如 "misskey_*" 匹配所有 Misskey 工具）。
+	LowValueTools []string
+
+	// ChaosThreshold 连续多少步「仅低价值工具」后触发硬警告。默认 5。≤0 表示禁用。
+	ChaosThreshold int
 }
 
 // NewLoopDetectionConfig 返回默认循环检测配置。
 func NewLoopDetectionConfig() LoopDetectionConfig {
 	return LoopDetectionConfig{
-		WarnThreshold: 3,
-		HardLimit:     5,
-		WindowSize:    20,
+		WarnThreshold:  3,
+		HardLimit:      5,
+		WindowSize:     20,
+		ChaosThreshold: 5,
+		LowValueTools: []string{
+			"text_stats", "text_hash", "text_entities",
+			"health", "memory", "tool_search", "calculate", "calculator",
+			"misskey_*",
+		},
 	}
 }
 
@@ -84,6 +103,18 @@ func (c LoopDetectionConfig) WithWindowSize(n int) LoopDetectionConfig {
 	return c
 }
 
+// WithChaosThreshold 设置多变混乱调用触发的连续步数阈值。
+func (c LoopDetectionConfig) WithChaosThreshold(n int) LoopDetectionConfig {
+	c.ChaosThreshold = n
+	return c
+}
+
+// WithLowValueTools 设置低价值（不代表推进）工具列表。
+func (c LoopDetectionConfig) WithLowValueTools(tools ...string) LoopDetectionConfig {
+	c.LowValueTools = append(c.LowValueTools, tools...)
+	return c
+}
+
 // IsZero 判断配置是否为空。
 func (c LoopDetectionConfig) IsZero() bool {
 	return c.WarnThreshold == 0 && c.HardLimit == 0 && c.WindowSize == 0
@@ -91,9 +122,10 @@ func (c LoopDetectionConfig) IsZero() bool {
 
 // loopDetectionState 是 LoopDetectionMiddleware 的内部状态。
 type loopDetectionState struct {
-	mu         sync.Mutex
-	windows    map[string]*loopWindow // key: channel
-	hardWarned map[string]bool        // key: channel，防止重复硬警告
+	mu          sync.Mutex
+	windows     map[string]*loopWindow // key: channel
+	hardWarned  map[string]bool        // key: channel，防止重复硬警告
+	chaosStreak map[string]int         // key: channel，连续「仅低价值工具」步数
 }
 
 // loopWindow 是 per-channel 的滑动窗口。
@@ -184,6 +216,42 @@ func toolCallsDigest(result *llm.GenerateResult, exempt map[string]bool) string 
 	return hex.EncodeToString(h.Sum(nil))[:16] // 取前 16 字符足够
 }
 
+// isLowValue 判断工具名是否属于「低价值（不代表任务推进）」集合。
+// 支持通配后缀 "*"（如 "misskey_*" 匹配所有以 "misskey_" 开头的工具）。
+func (c LoopDetectionConfig) isLowValue(name string) bool {
+	for _, t := range c.LowValueTools {
+		if t == name {
+			return true
+		}
+		if strings.HasSuffix(t, "*") {
+			prefix := strings.TrimSuffix(t, "*")
+			if prefix != "" && strings.HasPrefix(name, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// nonExemptToolNames 提取本次 GenerateResult 中所有非豁免工具调用的名称。
+// 返回空切片表示没有任何（非豁免的）工具调用。供多变混乱调用检测判定
+// 「这一步是否仅由低价值工具构成」。
+func nonExemptToolNames(result *llm.GenerateResult, exempt map[string]bool) []string {
+	names := make([]string, 0)
+	if result == nil || len(result.Steps) == 0 {
+		return names
+	}
+	for _, step := range result.Steps {
+		for _, tc := range step.ToolCalls {
+			if exempt[tc.ToolName] {
+				continue
+			}
+			names = append(names, tc.ToolName)
+		}
+	}
+	return names
+}
+
 // LoopDetectionMiddleware 返回一个 Middleware，检测 LLM 工具调用的重复循环。
 func LoopDetectionMiddleware(cfg LoopDetectionConfig) Middleware {
 	if cfg.IsZero() {
@@ -191,8 +259,9 @@ func LoopDetectionMiddleware(cfg LoopDetectionConfig) Middleware {
 	}
 
 	state := &loopDetectionState{
-		windows:    make(map[string]*loopWindow),
-		hardWarned: make(map[string]bool),
+		windows:     make(map[string]*loopWindow),
+		hardWarned:  make(map[string]bool),
+		chaosStreak: make(map[string]int),
 	}
 
 	// 构建豁免工具集合（轮询类工具不计入循环检测）
@@ -226,6 +295,32 @@ func LoopDetectionMiddleware(cfg LoopDetectionConfig) Middleware {
 					if v, ok := result.Get("llm.result"); ok {
 						if genResult, ok := v.(*llm.GenerateResult); ok && genResult != nil {
 							digest := toolCallsDigest(genResult, exempt)
+
+							// 多变混乱调用检测：连续多步「仅低价值工具」且无任何推进 → 强制收尾。
+							// 弥补「完全相同 hash≥N 才触发」无法捕捉的「每次参数都不同的混乱调用」
+							// （退化模型交替调 text_stats/memory/misskey_* 直到被打断）。
+							lowValueOnly := false
+							if cfg.ChaosThreshold > 0 && len(cfg.LowValueTools) > 0 {
+								names := nonExemptToolNames(genResult, exempt)
+								if len(names) > 0 {
+									lowValueOnly = true
+									for _, n := range names {
+										if !cfg.isLowValue(n) {
+											lowValueOnly = false
+											break
+										}
+									}
+								}
+							}
+							state.mu.Lock()
+							if lowValueOnly {
+								state.chaosStreak[channel]++
+							} else {
+								state.chaosStreak[channel] = 0
+							}
+							chaosStreak := state.chaosStreak[channel]
+							state.mu.Unlock()
+
 							if digest != "" {
 								state.mu.Lock()
 
@@ -263,6 +358,23 @@ func LoopDetectionMiddleware(cfg LoopDetectionConfig) Middleware {
 									state.mu.Unlock()
 								}
 							}
+
+							// 多变混乱调用 → 硬警告（独立判定，仅当本步前尚未硬警告）
+							if chaosStreak >= cfg.ChaosThreshold && cfg.ChaosThreshold > 0 && !hard {
+								state.mu.Lock()
+								if !state.hardWarned[channel] {
+									state.hardWarned[channel] = true
+									state.mu.Unlock()
+									core.QueueWarning(result, core.Warning{
+										Source: "loop_detection",
+										Level:  core.WarningLevelHard,
+										Message: fmt.Sprintf("You have spent %d consecutive steps calling only non-progress tools (stats/health/memory/search/notes) without advancing the task. You appear stuck in a confused loop. STOP making tool calls and produce your final answer NOW with whatever results you have. IMPORTANT: your current system-prompt tool list is the ONLY source of truth. If you did NOT receive a real tool error this turn (e.g. \"No such tool\" / \"tool not found\" / a resolve or parse error), do NOT conclude tools \"disappeared\" or \"vanished\" — a past failure does NOT mean the current tool set is broken.",
+											chaosStreak),
+									})
+								} else {
+									state.mu.Unlock()
+								}
+							}
 						}
 					}
 				}
@@ -279,4 +391,5 @@ func (s *loopDetectionState) ResetChannel(channel string) {
 	defer s.mu.Unlock()
 	delete(s.windows, channel)
 	delete(s.hardWarned, channel)
+	delete(s.chaosStreak, channel)
 }

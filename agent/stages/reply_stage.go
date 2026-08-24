@@ -168,6 +168,8 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		Params:       params,
 		MaxSteps:     s.config.LLM.MaxSteps,
 		HardMaxSteps: s.config.LLM.HardMaxSteps,
+		// 写操作意图护栏（Layer B）：透传用户请求文本，供 RequiresUserIntent 写工具判定。
+		UserRequest: env.Message.Text,
 	}
 
 	logger.Debugw("reply stage: calling LLM",

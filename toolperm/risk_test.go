@@ -114,9 +114,19 @@ func TestEvaluate_BrowserRuleTakesEffect(t *testing.T) {
 		}
 	}
 
-	// 其它平台未配规则 → 仍开放（规则按 platform 隔离）
+	// 其它平台未配规则 → 保守默认（修复 5142）：规则按 platform 隔离，
+	// 敏感工具（sandbox/web 等）在「无规则平台」默认禁止；但对外发言类工具
+	// （browser__* 属 broadcast 分级）与基础工具在开放基线仍放行。
 	if !svc.Evaluate("bot-nb", "browser__navigate", "telegram", "u1") {
-		t.Error("browser tool on unconfigured platform telegram should stay allowed")
+		t.Error("browser (broadcast-class) tool on unconfigured platform should stay allowed")
+	}
+	// 敏感工具在其它平台无规则时被默认禁止
+	if svc.Evaluate("bot-nb", "sandbox_exec", "telegram", "u1") {
+		t.Error("sensitive sandbox_exec on unconfigured platform must be denied by default")
+	}
+	// 基础工具在其它平台无规则时仍开放
+	if !svc.Evaluate("bot-nb", "calculate", "telegram", "u1") {
+		t.Error("basic tool on unconfigured platform should stay allowed")
 	}
 }
 
@@ -259,6 +269,7 @@ func TestEvaluator_UnknownPlatformBlocksBroadcast(t *testing.T) {
 	toolList := []llm.Tool{
 		{Name: "misskey_create_note", Execute: func(*llm.ToolExecContext, any) (any, error) { return "posted", nil }},
 		{Name: "sandbox_exec", Execute: func(*llm.ToolExecContext, any) (any, error) { return "ran", nil }},
+		{Name: "now", Execute: func(*llm.ToolExecContext, any) (any, error) { return "now", nil }},
 	}
 
 	// 子智能体上下文：只有 BotID，platform 为空
@@ -268,7 +279,7 @@ func TestEvaluator_UnknownPlatformBlocksBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var hasExec bool
+	var hasExec, hasBasic bool
 	for _, tl := range out {
 		if tl.Name == "misskey_create_note" {
 			t.Error("subagent with unknown platform must not receive broadcast tools")
@@ -276,10 +287,19 @@ func TestEvaluator_UnknownPlatformBlocksBroadcast(t *testing.T) {
 		if tl.Name == "sandbox_exec" {
 			hasExec = true
 		}
+		if tl.Name == "now" {
+			hasBasic = true
+		}
 	}
-	// 工作空间工具仍可用：子智能体的正常用途（读写文件、跑命令）不该被误伤
-	if !hasExec {
-		t.Error("non-broadcast tools should still resolve for subagents")
+	// 广播工具被拦截（不变）
+	// 敏感非广播工具（sandbox_exec）在「无规则平台」按保守默认禁止（修复 5142）：
+	// 子智能体不应天然持有代码执行能力，需显式放开。
+	if hasExec {
+		t.Error("sensitive sandbox_exec must be denied for subagent without explicit rules")
+	}
+	// 基础工具（now）仍可用：子智能体的基本表达能力不受牵连
+	if !hasBasic {
+		t.Error("basic tool `now` should still resolve for subagents")
 	}
 }
 
@@ -395,9 +415,10 @@ func TestEvaluate_ExplicitDenyBeatsBasicDefault(t *testing.T) {
 	}
 }
 
-// TestEvaluate_NoRulePlatformStillAllowsSensitive 确认「平台完全无规则 → 全开放」
-// 的既有语义未被风险分级破坏（未被约束的渠道不锁死）。
-func TestEvaluate_NoRulePlatformStillAllowsSensitive(t *testing.T) {
+// TestEvaluate_NoRulePlatformDeniesSensitive 确认「平台完全无规则 → 保守默认」
+// （修复 5142）：未被管理员约束的渠道不再自动全开放，敏感工具默认禁止，
+// 仅基础工具默认放行。基础表达能力的 Bot 不会被锁死。
+func TestEvaluate_NoRulePlatformDeniesSensitive(t *testing.T) {
 	svc := newTestService(t)
 	if _, err := svc.CreateRule("bot-x", RuleReq{
 		Tool: "sandbox_exec", Platform: "telegram", UserIDs: []string{"*"},
@@ -405,8 +426,12 @@ func TestEvaluate_NoRulePlatformStillAllowsSensitive(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// misskey 无任何规则 → 连敏感工具也放行
-	if !svc.Evaluate("bot-x", "sandbox_exec", "misskey", "u1") {
-		t.Error("platform without any rule should allow even sensitive tools")
+	// misskey 无任何规则 → 敏感工具默认禁止（不再全开放）
+	if svc.Evaluate("bot-x", "sandbox_exec", "misskey", "u1") {
+		t.Error("platform without any rule must deny sensitive tools by default")
+	}
+	// misskey 无任何规则 → 基础工具仍默认放行
+	if !svc.Evaluate("bot-x", "now", "misskey", "u1") {
+		t.Error("platform without any rule must still allow basic tools")
 	}
 }

@@ -59,6 +59,7 @@ type Manager struct {
 	logger         *zap.SugaredLogger
 	onServerChange func()   // 服务器状态变更回调（由 Provider 设置以失效缓存）
 	reconnectMu    sync.Map // server name → *sync.Mutex（按服务器串行化重连，避免并发重连风暴）
+	connectMu      sync.Map // server name → *sync.Mutex（按服务器串行化 connectOne，避免 TOCTOU 双重连接）
 }
 
 // NewManager 创建 MCP 管理器。
@@ -237,14 +238,28 @@ func (m *Manager) Connect(ctx context.Context) error {
 	return nil
 }
 
+// connectLock 返回指定服务器的连接锁（惰性创建，按服务器隔离），
+// 用于串行化 connectOne，避免并发 EnableServer/Connect 触发 TOCTOU 双重连接（泄漏 stdio 子进程）。
+func (m *Manager) connectLock(server string) *sync.Mutex {
+	v, _ := m.connectMu.LoadOrStore(server, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // connectOne 连接单个服务器。
+// 使用按服务器粒度的锁串行化，获取锁后二次检查，避免并发调用时
+// 两个 goroutine 都通过「已连接」判断、各自拉起一个 stdio 子进程（TOCTOU）。
 func (m *Manager) connectOne(ctx context.Context, cfg ServerConfig) error {
-	m.mu.Lock()
+	mu := m.connectLock(cfg.Name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 二次检查：获取锁期间可能已有其他 goroutine 完成连接
+	m.mu.RLock()
 	if _, exists := m.clients[cfg.Name]; exists {
-		m.mu.Unlock()
+		m.mu.RUnlock()
 		return nil // 已连接
 	}
-	m.mu.Unlock()
+	m.mu.RUnlock()
 
 	client, err := m.createClient(ctx, cfg)
 	if err != nil {
@@ -347,8 +362,9 @@ func (m *Manager) CallTool(ctx context.Context, server, toolName string, args ma
 		return "", err
 	}
 	res, callErr := c.CallTool(ctx, toolName, args)
-	if callErr != nil && !c.IsHealthy() {
-		// 调用期间连接失效，尝试重连并重试一次
+	if callErr != nil && isTransportError(callErr) {
+		// 调用期间连接层失效（而非业务报错），重连后重试一次。
+		// 仅对传输层错误重试，避免对非幂等工具在「业务已执行」时重复调用。
 		if rc, rerr := m.reconnect(ctx, server); rerr == nil {
 			return rc.CallTool(ctx, toolName, args)
 		}
@@ -427,15 +443,24 @@ func (m *Manager) ListAllTools(ctx context.Context) (map[string][]mcpTool, error
 	m.mu.RUnlock()
 
 	result := make(map[string][]mcpTool)
+	var firstErr error
 	for name, c := range clients {
 		tools, err := c.ListTools(ctx)
 		if err != nil {
 			m.logger.Warnw("failed to list tools",
 				"server", name,
 				"err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		result[name] = tools
+	}
+	if firstErr != nil {
+		// 至少一个服务器失败：返回错误，交由上层决定是否保留旧缓存，
+		// 避免用残缺结果直接覆盖缓存导致其余服务器的工具「消失」。
+		return result, fmt.Errorf("mcp: partial tools list failure: %w", firstErr)
 	}
 	return result, nil
 }

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/agent/prompt"
@@ -227,6 +228,111 @@ func TestMemoryTool_Remove_ByID(t *testing.T) {
 	count, _ := repo.Count(context.Background(), ChannelScope("ch1"))
 	if count != 0 {
 		t.Errorf("expected count=0 after delete, got %d", count)
+	}
+}
+
+// TestMemoryTool_Remove_CrossScopeByID 验证：从 channel 会话按 ID 删除一条
+// 落在 bot 全局作用域的记忆时，工具能跨 scope 解析并真正删掉（修复假记忆无法自清理）。
+func TestMemoryTool_Remove_CrossScopeByID(t *testing.T) {
+	repo := NewMemoryRepository()
+	botScope := BotScope("botX")
+	_ = repo.Append(context.Background(), Entry{
+		Scope:   botScope,
+		Content: "bot 作用域下的过期心跳记忆",
+	})
+	entries, _ := repo.Recent(context.Background(), botScope, 1)
+	if len(entries) != 1 {
+		t.Fatal("expected 1 bot-scope entry")
+	}
+	entryID := entries[0].ID
+
+	// 从 channel 会话删除该 bot-scope 记忆（按 ID 跨 scope）
+	defs := Tools(ToolConfig{Repo: repo, BotID: "botX"})
+	tool := defs[0].Tool
+	result, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{
+		"action":     "remove",
+		"id":         entryID,
+		"scope_kind": "channel",
+		"scope_id":   "ch1",
+	})
+	if err != nil {
+		t.Fatalf("remove failed: %v", err)
+	}
+	m := result.(map[string]any)
+	if !m["success"].(bool) {
+		t.Fatalf("expected success=true, got %v", m)
+	}
+	// 确认已从 bot scope 删除
+	left, _ := repo.Count(context.Background(), botScope)
+	if left != 0 {
+		t.Errorf("expected bot-scope count=0 after cross-scope delete, got %d", left)
+	}
+}
+
+// TestMemoryTool_Remove_SubstringHintsOtherScope 验证：子串在请求 scope 内无匹配、
+// 但在 bot scope 命中时，工具返回带 id+scope 的可执行指引，而不是死路 "no entry matched"。
+func TestMemoryTool_Remove_SubstringHintsOtherScope(t *testing.T) {
+	repo := NewMemoryRepository()
+	botScope := BotScope("botX")
+	_ = repo.Append(context.Background(), Entry{
+		Scope:   botScope,
+		Content: "cfblog a11y 任务仍未完成收尾",
+	})
+	defs := Tools(ToolConfig{Repo: repo, BotID: "botX"})
+	tool := defs[0].Tool
+	result, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{
+		"action":     "remove",
+		"old_text":   "cfblog a11y 任务仍未完成收尾",
+		"scope_kind": "channel",
+		"scope_id":   "ch1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := result.(map[string]any)
+	if m["success"].(bool) {
+		t.Fatal("expected success=false (substring not in channel scope)")
+	}
+	errMsg := m["error"].(string)
+	if !strings.Contains(errMsg, "Found") || !strings.Contains(errMsg, "scope=") {
+		t.Errorf("expected cross-scope hint with id+scope, got: %s", errMsg)
+	}
+}
+
+// TestMemoryTool_BatchRemove_CrossScopeByID 验证：batch 的 remove 支持 id 跨 scope 删除。
+func TestMemoryTool_BatchRemove_CrossScopeByID(t *testing.T) {
+	repo := NewMemoryRepository()
+	botScope := BotScope("botX")
+	_ = repo.Append(context.Background(), Entry{
+		Scope:   botScope,
+		Content: "要批量删除的 bot 记忆",
+	})
+	entries, _ := repo.Recent(context.Background(), botScope, 1)
+	if len(entries) != 1 {
+		t.Fatal("expected 1 bot-scope entry")
+	}
+	entryID := entries[0].ID
+
+	defs := Tools(ToolConfig{Repo: repo, BotID: "botX"})
+	tool := defs[0].Tool
+	result, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{
+		"action":     "batch",
+		"scope_kind": "channel",
+		"scope_id":   "ch1",
+		"operations": []any{
+			map[string]any{"action": "remove", "id": entryID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("batch remove failed: %v", err)
+	}
+	m := result.(map[string]any)
+	if !m["success"].(bool) {
+		t.Fatalf("expected success=true, got %v", m)
+	}
+	left, _ := repo.Count(context.Background(), botScope)
+	if left != 0 {
+		t.Errorf("expected bot-scope count=0 after batch cross-scope delete, got %d", left)
 	}
 }
 

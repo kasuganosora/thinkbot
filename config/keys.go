@@ -138,8 +138,8 @@ const (
 	KeySandboxImage = "sandbox.image"
 
 	// KeySandboxRequireDocker 是否在 auto 模式下强制要求 Docker 可用。
-	// true：auto 模式下探测不到 Docker 直接报错，不降级到 local（避免无隔离裸跑）；
-	// false（默认）：auto 模式下探测不到 Docker 则降级 local 进程执行。
+	// true（默认）：auto 模式下探测不到 Docker 直接报错，不降级到 local（避免无隔离裸跑）；
+	// false：auto 模式下探测不到 Docker 则降级 local 进程执行。
 	// 注意：Backend 显式设为 "docker" 时本就强制要求 Docker，与本键无关。
 	KeySandboxRequireDocker = "sandbox.require_docker"
 
@@ -193,6 +193,16 @@ const (
 	// 为空时使用服务器本地时区（time.Local）。
 	// 影响范围：bot 的时间感知、Docker 沙箱容器的 TZ 环境变量。
 	KeySystemTimezone = "system.timezone"
+
+	// KeySystemProxy 全局出口代理（URL 形式，如 "http://user:pass@host:port"、
+	// "https://host:port"、"socks5://host:port"、"socks5h://host:port"）。
+	// 空值表示直连（默认）。设置后：
+	//   - 主机侧所有使用默认 Transport 的 HTTP 客户端（LLM、channel 等）统一走代理
+	//     （通过写入 HTTP_PROXY/HTTPS_PROXY 环境变量生效）；
+	//   - 启动的 bot Docker 容器会注入 HTTP_PROXY/HTTPS_PROXY 环境变量，
+	//     使容器内请求（curl、python requests、node fetch、容器内 thinkbot 等）也走代理。
+	// 这是「全站级 SSRF/出口收敛」的最简开关：部署侧自有出口代理即所有流量归部署侧 IP。
+	KeySystemProxy = "system.proxy"
 )
 
 // Pipeline 键：pipeline 装配模式（对应 deepseek-harness 的 agent preset / 插件花名册）。
@@ -347,4 +357,32 @@ func ValidateKey(key string) error {
 		}
 	}
 	return nil
+}
+
+// SensitiveConfigKeys 是「绝不应经配置读取接口原文回显」的敏感键集合。
+// 含：JWT 签名密钥、各渠道 token/secret、数据库/代理凭据等。匹配前缀即可，
+// 因此 bot.<id>.xxx 这类按 bot 隔离的密钥也会被覆盖（如 channel token）。
+var SensitiveConfigKeys = map[string]bool{
+	"auth.jwt_secret": true,
+	"db.password":     true,
+	"db.path":         false, // 非敏感（已在死键修复中处理），仅占位说明
+}
+
+// IsSensitiveKey 判断配置键是否敏感（含精确匹配与前缀匹配）。
+// 用于配置读取接口拒绝原文回显，避免密钥经 GET /api/config/:key 泄露。
+func IsSensitiveKey(key string) bool {
+	if SensitiveConfigKeys[key] {
+		return true
+	}
+	// 前缀匹配：任何以这些前缀开头的键都视为敏感（如各渠道 token/secret）。
+	for _, prefix := range []string{"auth.", "channel.", "db."} {
+		if strings.HasPrefix(key, prefix) {
+			// db.path 等明确非敏感的已在上表标 false，这里需排除。
+			if key == "db.path" {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }

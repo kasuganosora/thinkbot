@@ -88,7 +88,8 @@
             {{ row.status === 'success' ? '成功' : '失败' }}
           </t-tag>
         </template>
-        <template #cost="{ row }">{{ row.cost.toFixed(1) }}s</template>
+        <!-- cost 可能为 null（记录尚未收尾 / 旧数据），直接 toFixed 会抛错整表渲染失败 -->
+        <template #cost="{ row }">{{ formatCost(row.cost) }}</template>
         <template #error="{ row }">
           <span :class="{ 'err-text': row.error }">{{ row.error || '—' }}</span>
         </template>
@@ -126,8 +127,13 @@ const cfg = reactive({ enabled: true, threshold: 131072, ratio: 37, model: '' })
 const saving = ref(false)
 
 async function loadConfig() {
-  const c = await botCompactionApi.getConfig(props.botId)
-  Object.assign(cfg, c)
+  try {
+    const c = await botCompactionApi.getConfig(props.botId)
+    Object.assign(cfg, c)
+  } catch (e) {
+    // 不提示的话用户会把默认值当成真实配置，随手一保存就覆盖了后端的真配置
+    MessagePlugin.error(`加载压缩配置失败：${e.message || e}`)
+  }
 }
 
 async function save() {
@@ -158,11 +164,19 @@ const columns = [
 const history = ref([])
 const histLoading = ref(false)
 
+/** 耗时格式化：null / 非数字一律显示占位符，避免 toFixed 崩溃 */
+function formatCost(cost) {
+  const n = Number(cost)
+  return Number.isFinite(n) ? `${n.toFixed(1)}s` : '—'
+}
+
 async function loadHistory() {
   histLoading.value = true
   try {
     const res = await botCompactionApi.history(props.botId, filter.value)
     history.value = res.records || []
+  } catch (e) {
+    MessagePlugin.error(`加载压缩记录失败：${e.message || e}`)
   } finally {
     histLoading.value = false
   }
@@ -174,7 +188,13 @@ function clearHistory() {
     body: '确认清空全部压缩记录？该操作不可恢复。',
     theme: 'warning',
     onConfirm: async () => {
-      await botCompactionApi.clearHistory(props.botId)
+      // 失败时既不能关弹窗也不能提示「已清空」——那是在骗用户
+      try {
+        await botCompactionApi.clearHistory(props.botId)
+      } catch (e) {
+        MessagePlugin.error(`清空失败：${e.message || e}`)
+        return
+      }
       dlg.destroy()
       MessagePlugin.success('已清空')
       loadHistory()

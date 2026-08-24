@@ -40,7 +40,7 @@ type WatchdogTimeoutError struct {
 
 func (e *WatchdogTimeoutError) Error() string {
 	return fmt.Sprintf("watchdog timeout after %v on %s: received %d items, %d bytes",
-		e.Elapsed, e.URL, e.ItemsReceived, e.BytesReceived)
+		e.Elapsed, SanitizeURL(e.URL), e.ItemsReceived, e.BytesReceived)
 }
 
 // Unwrap 支持 errors.Is，返回 watchdog.ErrWatchdogTimeout。
@@ -305,7 +305,9 @@ func parseQuotaResetText(s string) (time.Time, bool) {
 	if len(m) != 3 {
 		return time.Time{}, false
 	}
-	t, e := time.ParseInLocation("2006-01-02 15:04:05", m[1]+" "+m[2], time.Local)
+	// 服务端返回的时间戳应按 UTC 解析（而非运行时本地时区），
+	// 否则在跨时区部署时 QuotaResetAt 会出现数小时偏差。
+	t, e := time.ParseInLocation("2006-01-02 15:04:05", m[1]+" "+m[2], time.UTC)
 	if e != nil || time.Until(t) <= 0 {
 		return time.Time{}, false
 	}

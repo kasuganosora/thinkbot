@@ -48,6 +48,12 @@ export const useBotStore = defineStore('bot', () => {
   // SessionWorkflowPanel 监听此 ref 实时合并，避免纯轮询导致的头部卡片冻结
   const activeWorkflowStatus = ref(null)
 
+  /** 按 ID 查找会话（字符串比较，兼容数字/字符串两种 ID 形态） */
+  function findSession(sid) {
+    if (sid == null || sid === '') return undefined
+    return sessions.value.find(s => String(s.id) === String(sid))
+  }
+
   async function loadSessions(botId) {
     const bid = botId || activeBotId.value
     if (!bid) return
@@ -58,9 +64,11 @@ export const useBotStore = defineStore('bot', () => {
       // 自动选中优先级：URL 指定(pendingSessionId) > 已选中的 > 列表第一个
       if (sessions.value.length > 0) {
         let target = null
-        if (pendingSessionId.value && sessions.value.find(s => s.id === pendingSessionId.value)) {
+        // ID 一律按字符串比较：URL 里带来的 sessionId 是字符串，列表里的可能是数字，
+        // 严格相等会漏匹配（表现为深链接指定的会话选不中）。
+        if (pendingSessionId.value && findSession(pendingSessionId.value)) {
           target = pendingSessionId.value
-        } else if (activeSessionId.value && sessions.value.find(s => s.id === activeSessionId.value)) {
+        } else if (activeSessionId.value && findSession(activeSessionId.value)) {
           target = activeSessionId.value
         } else {
           target = sessions.value[0].id
@@ -104,8 +112,8 @@ export const useBotStore = defineStore('bot', () => {
 
   async function deleteSession(sid) {
     await sessionApi.remove(sid)
-    sessions.value = sessions.value.filter(s => s.id !== sid)
-    if (activeSessionId.value === sid) {
+    sessions.value = sessions.value.filter(s => String(s.id) !== String(sid))
+    if (String(activeSessionId.value) === String(sid)) {
       activeSessionId.value = sessions.value.length > 0 ? sessions.value[0].id : null
       // 切到其他会话后加载消息
       if (activeSessionId.value) loadMessages()
@@ -114,7 +122,7 @@ export const useBotStore = defineStore('bot', () => {
   }
 
   function selectSession(sid) {
-    if (activeSessionId.value === sid) return
+    if (String(activeSessionId.value) === String(sid)) return
     activeSessionId.value = sid
     loadMessages()
   }
@@ -131,9 +139,10 @@ export const useBotStore = defineStore('bot', () => {
       await loadSessions(activeBotId.value)
       return
     }
-    const exists = sessions.value.find(s => s.id === sid)
+    const exists = findSession(sid)
     if (exists && String(activeSessionId.value) !== String(sid)) {
-      selectSession(sid)
+      // 用列表里的原始 ID，避免把字符串 ID 混进原本是数字的会话集合
+      selectSession(exists.id)
     }
   }
 
@@ -195,6 +204,14 @@ export const useBotStore = defineStore('bot', () => {
    *  - 后端返回 msg.parts（有序 parts 数组）→ 直接使用（保留文本/工具交错顺序）
    *  - 旧消息无 parts 字段 → 从 content + toolCalls 构建（降级：文本在前、工具在后）
    */
+  // 无 streaming 标记时的兜底判据：消息创建时间已超过该窗口才认为不可能再有产出。
+  const RUNNING_GRACE_MS = 60 * 1000
+  function isMessageCold(msg) {
+    const ts = Date.parse(msg.createdAt || msg.created_at || '')
+    if (!Number.isFinite(ts)) return true // 连时间都没有 → 只能按历史数据处理
+    return Date.now() - ts > RUNNING_GRACE_MS
+  }
+
   function buildPartsForMessage(msg) {
     if (msg.role !== 'assistant') return msg
     // 历史消息中的 running 工具需要按 streaming 标记区分：
@@ -203,11 +220,21 @@ export const useBotStore = defineStore('bot', () => {
     //     必须降级掉，否则卡片会永久转圈。
     // 用 'killed' 而非自造的 'interrupted'：ToolCallCard/ToolCallGroup 只为
     // success/error/killed/timeout 提供了图标与配色，未知状态会掉到 default 显示异常。
-    const settleRunning = (item) => (
-      item && item.status === 'running' && !msg.streaming
-        ? { ...item, status: 'killed', summary: item.summary || '回复已中断' }
-        : item
-    )
+    //
+    // 注意 streaming **缺失**（旧数据 / mock / 非分页接口）不等于「本轮已收尾」：
+    // 早期实现用 `!msg.streaming` 一刀切，把没带该标记的消息里真正在跑的工具
+    // 直接判死。这里区分三种情况：
+    //   - streaming === true            → 明确仍在产出，保留 running
+    //   - streaming === false           → 后端明确已收尾，running 属残留，降级
+    //   - streaming 缺失（undefined/null）→ 无法判断，仅当消息已「冷却」才降级
+    // 另外正在重连续流（_resuming）的 trace 一律不降级，它的进度还会推过来。
+    const settleRunning = (item) => {
+      if (!item || item.status !== 'running') return item
+      if (msg.streaming === true) return item
+      if (msg.streaming == null && !isMessageCold(msg)) return item
+      if (msg.traceId && _resuming.has(msg.traceId)) return item
+      return { ...item, status: 'killed', summary: item.summary || '回复已中断' }
+    }
 
     if (Array.isArray(msg.parts) && msg.parts.length) {
       // 已有有序 parts（来自新格式 API 或流式构建）
@@ -335,6 +362,18 @@ export const useBotStore = defineStore('bot', () => {
 
   // 正在重连续流中的 traceID（防止 loadMessages 被多次触发时重复 resume）
   const _resuming = new Set()
+  // 每个续流的 AbortController：切换 bot / 点「停止生成」/ 组件销毁时可中断，
+  // 否则这些 fetch 会一直挂在后台（SSE 长连接），既泄漏连接也继续往已切走的
+  // 会话里写消息。
+  const _resumeControllers = new Map()
+
+  /** 中断全部重连续流（切 bot、停止生成时调用） */
+  function _abortResumes() {
+    for (const ctrl of _resumeControllers.values()) {
+      try { ctrl.abort() } catch { /* 已中断可忽略 */ }
+    }
+    _resumeControllers.clear()
+  }
 
   // 断连后重连：恢复仍在后台运行的任务（断连不腰斩后台长任务）。
   // 查询 activeTasks，对每条仍在跑的 traceID 重连续流并把进度渲染进一个占位 assistant 消息，
@@ -424,8 +463,11 @@ async function _resumeTrace(traceId) {
 
   replying.value = true
   _activeTraceId = traceId
+  const ctrl = new AbortController()
+  _resumeControllers.set(traceId, ctrl)
   try {
     await chatApi.resume(botId, traceId, {
+      signal: ctrl.signal,
       onTextDelta: (delta) => appendTextPart(assistantTmpId, delta),
       onToolCall: (call) => upsertToolCall(assistantTmpId, call),
       onToolProgress: (toolCallId, payload) => {
@@ -454,11 +496,15 @@ async function _resumeTrace(traceId) {
     if (idx >= 0) updated[idx] = { ...updated[idx], _temp: false }
     messages.value = updated
   } catch (e) {
-    console.warn('resume trace failed', traceId, e)
+    // 主动中断（切 bot / 停止生成 / 卸载）不是错误，不必刷警告
+    if (e?.name !== 'AbortError') console.warn('resume trace failed', traceId, e)
   } finally {
-    replying.value = false
-    _activeTraceId = ''
+    _resumeControllers.delete(traceId)
     _resuming.delete(traceId)
+    // 可能有多个续流并发，只有全部结束（且发送主路径也不在跑）才复位 replying，
+    // 否则先结束的那条会把仍在流式的 UI 提前切回「可发送」态。
+    if (!_resuming.size && !_abortController) replying.value = false
+    if (_activeTraceId === traceId) _activeTraceId = ''
   }
 }
 
@@ -474,8 +520,11 @@ async function resumeInFlightTasks() {
   traceIds = traceIds.filter(id => id && !_resuming.has(id))
   if (!traceIds.length) return
 
+  // 不能串行 await：每个续流是 SSE 长连接，会一直挂到该任务结束（可能几十分钟），
+  // 串行等待会把 loadMessages 后面的工作流恢复与首屏滚底整个卡死。
+  // 这里只负责把续流拉起来，各自独立推进；错误已在 _resumeTrace 内部处理。
   for (const traceId of traceIds) {
-    await _resumeTrace(traceId)
+    _resumeTrace(traceId).catch(() => {})
   }
 }
 
@@ -504,6 +553,8 @@ async function resumeContinuation(sessionId) {
       _abortController.abort()
       _abortController = null
     }
+    // 重连续流也要一起断，否则「停止生成」后后台 SSE 仍在往列表里写内容
+    _abortResumes()
     const updated = [...messages.value]
     for (let i = updated.length - 1; i >= 0; i--) {
       const m = updated[i]
@@ -559,18 +610,56 @@ async function resumeContinuation(sessionId) {
       _appended: true,
     }
     messages.value = [...messages.value, userMsg]
-    chatApi.append(botId, traceId, text, activeSessionId.value)
-      .then((resp) => {
-        if (!resp || resp.accepted === false) {
-          // 本轮已结束，降级为普通发送
-          messages.value = messages.value.filter(m => m.id !== userMsg.id)
-          sendMessage(text)
-        }
-      })
-      .catch(() => {
-        messages.value = messages.value.filter(m => m.id !== userMsg.id)
+
+    const dropLocalBubble = () => {
+      messages.value = messages.value.filter(m => m.id !== userMsg.id)
+    }
+
+    /**
+     * 降级为普通发送。必须等本轮真正结束：sendMessage 开头有
+     * `if (replying.value) return`，在流式未结束时直接调用会被静默丢弃，
+     * 用户的这句补充就凭空消失了。这里挂一次性 watch 等 replying 落下再发。
+     */
+    let fallbackDone = false
+    const fallbackSend = () => {
+      if (fallbackDone) return
+      fallbackDone = true
+      if (!replying.value) { sendMessage(text); return }
+      const stop = watch(replying, (v) => {
+        if (v) return
+        stop()
         sendMessage(text)
       })
+    }
+
+    chatApi.append(botId, traceId, text, activeSessionId.value)
+      .then((resp) => {
+        // 只有后端**明确回绝**（accepted === false）才降级重发：此时可以确定
+        // 这条补充没有进入本轮，不会重复。
+        if (resp && resp.accepted === false) {
+          dropLocalBubble()
+          fallbackSend()
+          return
+        }
+        // resp 为空/字段缺失属于「结果未知」，与网络错误同等处理（见下）
+        if (!resp) markAppendUnconfirmed(userMsg.id)
+      })
+      .catch((e) => {
+        // 网络/超时错误无法区分「请求没发出去」和「后端已收下但响应丢了」，
+        // 盲目重发会把同一句补充发两遍（原实现的重复消息来源）。
+        // 这里保留本地气泡并打上未确认标记，交由用户决定是否重发。
+        console.warn('append to current reply failed', e)
+        markAppendUnconfirmed(userMsg.id)
+      })
+  }
+
+  /** 标记某条补充消息「投递结果未知」，供 UI 提示用户自行确认/重发 */
+  function markAppendUnconfirmed(msgId) {
+    const idx = messages.value.findIndex(m => m.id === msgId)
+    if (idx < 0) return
+    const updated = [...messages.value]
+    updated[idx] = { ...updated[idx], _appendUnconfirmed: true }
+    messages.value = updated
   }
 
   function truncateTail(text, max = 200 * 1024) {
