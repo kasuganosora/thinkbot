@@ -340,5 +340,9 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 		}
 	}
 
+	// 任务意图分类：社交写工具（"social" scope）仅在用户消息明确为社交操作时暴露，
+	// 从架构上根绝「长任务退化导致模型拿社交工具乱测」的跑偏（详见 types.go 的 appliesTo）。
+	sctx.TaskIntent = ClassifyTaskIntent(env.Message.Text)
+
 	return sctx
 }

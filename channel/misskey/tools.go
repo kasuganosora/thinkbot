@@ -52,7 +52,10 @@ The message you receive may end with a line '[note_id: xxxxx]' — that is the I
 - When a tool fails: quietly respond in another natural way, or simply don't mention it — just like a real person wouldn't read backend errors aloud to the other party. Your final reply should only contain plain human language.
 - When you receive a technical marker like '[note_id: ...]', it is for you to call tools with — NEVER write it verbatim into your reply body.
 - The message context may also contain reply/renote context markers like '[Reply to @user: original text]' or '[Renote from @user: original text]'. These are ONLY context telling you what the other person is replying to or quoting — they are NOT part of the user's actual message. NEVER copy them into your reply body; just respond naturally to the actual content.
-- For casual posts that directly @ you or reply to you (e.g. "checking in", "anyone there", "haha"), just reply with a relaxed line of text — don't search, create notes, or pile on reactions just to seem active.`,
+- For casual posts that directly @ you or reply to you (e.g. "checking in", "anyone there", "haha"), just reply with a relaxed line of text — don't search, create notes, or pile on reactions just to seem active.
+
+## Task boundary (hard rule)
+**Misskey social tools (follow/unfollow/react/create_note/delete_note/renote) MUST ONLY be used when the current task is explicitly about Misskey social operations.** When working on code, files, data analysis, or any non-social task, these tools are completely off-limits — do NOT call them even if they appear in your tool list. Read-only Misskey tools (search_user/get_user_notes/search_notes) may be used for context-gathering when relevant to the conversation topic.`,
 }
 
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
@@ -205,10 +208,13 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 // followUserTool 返回 misskey_follow_user 工具定义。
 func (c *MisskeyChannel) followUserTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_follow_user",
-			Description: "Follow a user on Misskey. Requires the target userId. " +
-				"IMPORTANT: A username is NOT a valid userId — resolve it with misskey_search_user first.",
+			Description: "Follow a user on Misskey. " +
+				"ONLY use this when the user explicitly asks you to follow someone on Misskey. " +
+				"NEVER call this during code editing, file operations, or any non-social task — it performs a real social action that cannot be undone automatically. " +
+				"Requires the target userId (resolve it with misskey_search_user first).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -244,10 +250,13 @@ func (c *MisskeyChannel) followUserTool() agenttools.ToolDef {
 // unfollowUserTool 返回 misskey_unfollow_user 工具定义。
 func (c *MisskeyChannel) unfollowUserTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_unfollow_user",
-			Description: "Unfollow a user on Misskey. Requires the target userId. " +
-				"IMPORTANT: A username is NOT a valid userId — resolve it with misskey_search_user first.",
+			Description: "Unfollow a user on Misskey. " +
+				"ONLY use this when the user explicitly asks you to unfollow someone on Misskey. " +
+				"NEVER call this during code editing, file operations, or any non-social task — it performs a real social action that cannot be undone automatically. " +
+				"Requires the target userId (resolve it with misskey_search_user first).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -283,9 +292,12 @@ func (c *MisskeyChannel) unfollowUserTool() agenttools.ToolDef {
 // createNoteTool 返回 misskey_create_note 工具定义。
 func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_create_note",
 			Description: "Publish a note (post) on Misskey. " +
+				"ONLY use when the user explicitly asks you to post something on Misskey. " +
+				"NEVER call this during code editing, file operations, or any non-social task. " +
 				"Supports visibility control (public/home/followers) and a CW (content warning) title. " +
 				"IMPORTANT: The note is published to end users. You must write the note text in Chinese (中文).",
 			Parameters: map[string]any{
@@ -366,9 +378,12 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 // createRenoteTool 返回 misskey_create_renote 工具定义。
 func (c *MisskeyChannel) createRenoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_create_renote",
 			Description: "Renote (boost) an existing note on Misskey. " +
+				"ONLY use when the user explicitly asks you to renote/boost a post. " +
+				"NEVER call this during code editing, file operations, or any non-social task. " +
 				"Requires the noteId of the original note.",
 			Parameters: map[string]any{
 				"type": "object",
@@ -421,10 +436,13 @@ func (c *MisskeyChannel) createRenoteTool() agenttools.ToolDef {
 // deleteNoteTool 返回 misskey_delete_note 工具定义。
 func (c *MisskeyChannel) deleteNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_delete_note",
-			Description: "Delete a note (post) that this bot published on Misskey. Requires the noteId. " +
-				"CRITICAL: You can ONLY delete notes the bot posted itself — NEVER attempt to delete another user's note.",
+			Description: "Delete a note (post) that this bot published on Misskey. " +
+				"ONLY use when the user explicitly asks you to delete a note. " +
+				"NEVER call this during code editing, file operations, or any non-social task. " +
+				"CRITICAL: You can ONLY delete notes the bot posted itself — NEVER attempt to delete another user's note. Requires the noteId.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -460,9 +478,12 @@ func (c *MisskeyChannel) deleteNoteTool() agenttools.ToolDef {
 // reactToNoteTool 返回 misskey_react_to_note 工具定义。
 func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_react_to_note",
 			Description: "Add an emoji reaction to a note on Misskey. " +
+				"ONLY use when the user explicitly asks you to react to a post, or when reacting is a natural social response to a casual/interactive message. " +
+				"NEVER call this during code editing, file operations, or any non-social task. " +
 				"Requires the noteId and a reaction (for example :heart:). " +
 				"NOTE: Misskey forbids reacting to a Renote (a pure re-post). " +
 				"If the target is a Renote the tool skips and returns reason=cannot_react_to_renote; " +
@@ -519,9 +540,12 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 // unreactToNoteTool 返回 misskey_unreact_to_note 工具定义。
 func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
+		Scopes: []string{"social"},
 		Tool: llm.Tool{
 			Name: "misskey_unreact_to_note",
 			Description: "Remove the bot's own emoji reaction from a note on Misskey. " +
+				"ONLY use when the user explicitly asks you to remove a reaction. " +
+				"NEVER call this during code editing, file operations, or any non-social task. " +
 				"Requires only the noteId — the bot's existing reaction on that note is removed automatically.",
 			Parameters: map[string]any{
 				"type": "object",
