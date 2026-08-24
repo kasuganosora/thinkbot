@@ -114,7 +114,7 @@ func TestQuotaBreaker_NoRetryAmplification(t *testing.T) {
 // 续跑、立刻又撞墙——本测试杜绝回归。
 func TestQuotaBreaker_RespectsResetTime(t *testing.T) {
 	const hours = 4
-	reset := time.Now().Add(hours * time.Hour).Format("2006-01-02 15:04:05")
+	reset := time.Now().Add(hours * time.Hour).UTC().Format("2006-01-02 15:04:05")
 	err := fmt.Errorf("HTTP 429: 您在当前时间段的请求已达到 5 小时的使用上限，限额将在 %s 重置", reset)
 
 	now := time.Now()
@@ -130,7 +130,7 @@ func TestQuotaBreaker_RespectsResetTime(t *testing.T) {
 // （解析异常）时，仍被 hardQuotaWaitCap 收住，避免工作流无限挂起。
 func TestQuotaBreaker_ClampsAbsurdResetTime(t *testing.T) {
 	const hours = 100 // 远超 hardQuotaWaitCap=12h
-	reset := time.Now().Add(hours * time.Hour).Format("2006-01-02 15:04:05")
+	reset := time.Now().Add(hours * time.Hour).UTC().Format("2006-01-02 15:04:05")
 	err := fmt.Errorf("HTTP 429: 已达到使用上限，限额将在 %s 重置", reset)
 
 	now := time.Now()

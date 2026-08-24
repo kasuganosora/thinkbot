@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -20,6 +21,12 @@ const apiURL = "https://api.telegram.org"
 type apiClient struct {
 	client *http.Client
 	token  string
+
+	// 出站限流（令牌桶式）：Telegram 对发送频率有严格限制（群聊约 1 条/秒、广播约 30 条/秒），
+	// 无限制会导致 429 并造成拆分消息部分丢失。sendMu 保护 lastSend，sendInterval 为最小发送间隔。
+	sendMu       sync.Mutex
+	lastSend     time.Time
+	sendInterval time.Duration
 }
 
 // newAPIClient 创建一个 Telegram Bot API 客户端。
@@ -38,12 +45,36 @@ func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Op
 	defaultOpts := []http.Option{
 		http.WithBaseURL(fmt.Sprintf("%s/bot%s", baseURL, token)),
 		http.WithTimeout(time.Duration(httpTimeout) * time.Second),
+		// 429/5xx + 网络错误自动按 Retry-After 退避重试，避免出站消息因限流而部分丢失。
+		http.WithRetrySimple(5, 500*time.Millisecond),
 	}
 	opts = append(defaultOpts, opts...)
 	return &apiClient{
-		client: http.New(opts...),
-		token:  token,
+		client:       http.New(opts...),
+		token:        token,
+		sendInterval: 250 * time.Millisecond, // 约 4 条/秒，低于 Telegram 群聊限制且对私聊足够
 	}
+}
+
+// throttle 在每次出站发送前做最小间隔限流，平滑发送速率以规避 429。
+// 返回 ctx 被取消时立即报错；否则等待到允许发送的下一个时间槽。
+func (a *apiClient) throttle(ctx context.Context) error {
+	a.sendMu.Lock()
+	elapsed := time.Since(a.lastSend)
+	if elapsed < a.sendInterval {
+		wait := a.sendInterval - elapsed
+		a.lastSend = a.lastSend.Add(wait)
+		a.sendMu.Unlock()
+		select {
+		case <-time.After(wait):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	a.lastSend = time.Now()
+	a.sendMu.Unlock()
+	return nil
 }
 
 // getMe 获取当前 Bot 的信息。常用于验证 token 是否有效。
@@ -90,6 +121,9 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 
 // sendMessageFull 发送文本消息，支持 parseMode。
 func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, parseMode string, replyTo int64) (int64, error) {
+	if err := a.throttle(ctx); err != nil {
+		return 0, errs.Wrap(err, "telegram sendMessage throttle")
+	}
 	req := a.client.Post("sendMessage").
 		SetContext(ctx).
 		SetJSONBody(sendMessageRequest{
@@ -116,6 +150,9 @@ func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, par
 
 // sendChatAction 发送聊天状态（如"正在输入..."）。
 func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action string) error {
+	if err := a.throttle(ctx); err != nil {
+		return errs.Wrap(err, "telegram sendChatAction throttle")
+	}
 	req := a.client.Post("sendChatAction").
 		SetContext(ctx).
 		SetJSONBody(sendChatActionRequest{
@@ -140,6 +177,9 @@ func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action str
 
 // editMessageText 编辑已发送的文本消息。
 func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64, text, parseMode string) error {
+	if err := a.throttle(ctx); err != nil {
+		return errs.Wrap(err, "telegram editMessageText throttle")
+	}
 	req := a.client.Post("editMessageText").
 		SetContext(ctx).
 		SetJSONBody(editMessageTextRequest{
@@ -260,6 +300,9 @@ func (a *apiClient) sendPhoto(ctx context.Context, chatID int64, photoURL, capti
 
 // simplePost 发送带 JSON body 的 POST 请求并检查 OK 状态。
 func (a *apiClient) simplePost(ctx context.Context, endpoint string, body any) error {
+	if err := a.throttle(ctx); err != nil {
+		return errs.Wrapf(err, "telegram %s throttle", endpoint)
+	}
 	resp, err := a.client.Post(endpoint).
 		SetContext(ctx).
 		SetJSONBody(body).

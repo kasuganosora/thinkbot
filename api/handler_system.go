@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/kasuganosora/thinkbot/internal/buildinfo"
 )
 
 // ============================================================================
@@ -30,6 +32,17 @@ func (s *Server) handleHealthDetailed(c *gin.Context) {
 
 	host, _ := os.Hostname()
 
+	bi := buildinfo.Get()
+	build := gin.H{
+		"version":       bi.Version,
+		"gitRevision":   bi.GitRevision,
+		"gitShort":      bi.GitShort,
+		"buildTime":     bi.BuildTime,
+		"buildTimeUnix": bi.BuildTimeUnix,
+		"source":        bi.Source,
+		"goVersion":     bi.GoVersion,
+	}
+
 	OK(c, gin.H{
 		"status":     "ok",
 		"host":       host,
@@ -42,6 +55,7 @@ func (s *Server) handleHealthDetailed(c *gin.Context) {
 			"sysMB":        m.Sys / 1024 / 1024,
 			"gcCount":      m.NumGC,
 		},
+		"build":     build,
 		"goVersion": runtime.Version(),
 		"bots": gin.H{
 			"running": s.botSvc.RunningCount(),

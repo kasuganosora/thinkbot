@@ -133,6 +133,13 @@ func (s *Store) Delete(id string) error {
 
 // saveLocked 在持有锁的情况下序列化并写入磁盘（由 Save/Delete 调用）。
 func (s *Store) saveLocked() error {
+	return withFileLock(s.filePath, func() error {
+		return s.writeLocked()
+	})
+}
+
+// writeLocked 执行实际的序列化与原子写盘（在 withFileLock 内调用）。
+func (s *Store) writeLocked() error {
 	jobs := make([]*Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		jobs = append(jobs, j)

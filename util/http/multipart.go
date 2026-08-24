@@ -39,13 +39,13 @@ func NewMultipartForm() *MultipartForm {
 
 // AddField 添加一个普通文本字段。
 func (f *MultipartForm) AddField(name, value string) *MultipartForm {
-	_ = f.writer.WriteField(name, value)
+	_ = f.writer.WriteField(sanitizeMultipartToken(name), value)
 	return f
 }
 
 // AddFile 添加一个文件字段，MIME 类型默认为 application/octet-stream。
 func (f *MultipartForm) AddFile(name, filename string, reader io.Reader) *MultipartForm {
-	part, err := f.writer.CreateFormFile(name, filename)
+	part, err := f.writer.CreateFormFile(sanitizeMultipartToken(name), sanitizeMultipartToken(filename))
 	if err != nil {
 		return f // bytes.Buffer 不会出错
 	}
@@ -58,7 +58,8 @@ func (f *MultipartForm) AddFileWithMIME(name, filename, mimeType string, reader 
 	h := make(textproto.MIMEHeader)
 	h.Set("Content-Disposition",
 		fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-			escapeMultipartQuotes(name), escapeMultipartQuotes(filename)))
+			escapeMultipartQuotes(sanitizeMultipartToken(name)),
+			escapeMultipartQuotes(sanitizeMultipartToken(filename))))
 	if mimeType != "" {
 		h.Set("Content-Type", mimeType)
 	} else {
@@ -92,6 +93,17 @@ func (f *MultipartForm) bytes() []byte {
 // escapeMultipartQuotes 转义 multipart 头值中的双引号和反斜杠。
 func escapeMultipartQuotes(s string) string {
 	return multipartQuoteEscaper.Replace(s)
+}
+
+// sanitizeMultipartToken 去除 multipart 头参数（name/filename）中的
+// 换行符（CR/LF）及不可见控制字符，防止通过这些字符注入额外 HTTP 头。
+func sanitizeMultipartToken(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r < 0x20 {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 var multipartQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)

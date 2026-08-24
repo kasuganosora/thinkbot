@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
@@ -186,6 +187,7 @@ func (p *StatsRecordingProvider) record(ctx context.Context, params GeneratePara
 	}
 	p.recorder.RecordUsage(ctx, UsageMetric{
 		BotID:     p.botID,
+		At:        time.Now(),
 		Model:     modelID,
 		Feature:   feature,
 		Usage:     result.Usage,

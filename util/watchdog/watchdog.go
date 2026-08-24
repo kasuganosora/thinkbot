@@ -26,6 +26,7 @@ type Watchdog struct {
 
 	mu        sync.Mutex
 	timer     *time.Timer
+	generation uint64 // 递增代际：每次（重）设定时器时 +1，用于忽略已失效的过期触发
 	ctx       context.Context
 	cancel    context.CancelFunc
 	stopped   bool
@@ -51,7 +52,7 @@ func NewWithName(parent context.Context, timeout time.Duration, name string) *Wa
 		logger:  traceid.L(parent),
 	}
 	w.resetCtx()
-	w.timer = time.AfterFunc(timeout, w.fire)
+	w.timer = time.AfterFunc(timeout, func() { w.fire(0) })
 	w.logger.Infow("watchdog started", "name", name, "timeout", timeout)
 	return w
 }
@@ -74,7 +75,7 @@ func NewWithNameAndCallback(parent context.Context, timeout time.Duration, name 
 		onTimeout: onTimeout,
 	}
 	w.resetCtx()
-	w.timer = time.AfterFunc(timeout, w.fire)
+	w.timer = time.AfterFunc(timeout, func() { w.fire(0) })
 	w.logger.Infow("watchdog started", "name", name, "timeout", timeout)
 	return w
 }
@@ -93,12 +94,16 @@ func (w *Watchdog) Feed() {
 	if w.stopped {
 		return
 	}
-	// 如果看门狗自身已超时，不再重建 context，保持 TimedOut() == true 语义。
-	// 仅当 context 因 parent 取消而失效（非超时）时才重建。
-	if w.ctx.Err() != nil && !w.timedOut.Load() {
+	// 已超时：不再重设定时器，保持 TimedOut() == true 语义，
+	// 避免超时后继续 Feed 导致周期重复触发 fire/onTimeout（4824/4831）。
+	if w.timedOut.Load() {
+		return
+	}
+	// 如果 context 因 parent 取消而失效（非超时），则重建 context 重新开始。
+	if w.ctx.Err() != nil {
 		w.resetCtx()
 	}
-	w.timer.Reset(w.timeout)
+	w.armTimer(w.timeout)
 	w.logger.Debugw("watchdog fed", "name", w.name, "timeout", w.timeout)
 }
 
@@ -111,12 +116,32 @@ func (w *Watchdog) FeedWithTimeout(timeout time.Duration) {
 	}
 	old := w.timeout
 	w.timeout = timeout
-	if w.ctx.Err() != nil && !w.timedOut.Load() {
+	// 已超时：仅更新超时值，不再重设定时器，保持 TimedOut() == true 语义。
+	if w.timedOut.Load() {
+		w.logger.Debugw("watchdog fed (timeout updated, but already timed out)",
+			"name", w.name, "old_timeout", old, "new_timeout", timeout)
+		return
+	}
+	if w.ctx.Err() != nil {
 		w.resetCtx()
 	}
-	w.timer.Reset(timeout)
+	w.armTimer(timeout)
 	w.logger.Debugw("watchdog fed (timeout updated)",
 		"name", w.name, "old_timeout", old, "new_timeout", timeout)
+}
+
+// armTimer 停掉旧定时器并以新的代际重新设定（调用方须持有锁）。
+// 通过递增 generation，使任何在重设前已触发/正在触发的旧定时器回调被 fire 忽略，
+// 从根本上消除 time.Timer 复用竞态（4824）。
+func (w *Watchdog) armTimer(d time.Duration) {
+	w.generation++
+	gen := w.generation
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	w.timer = time.AfterFunc(d, func() {
+		w.fire(gen)
+	})
 }
 
 // Stop 停止看门狗并取消 context。
@@ -188,10 +213,12 @@ func (w *Watchdog) resetCtx() {
 	}()
 }
 
-// fire 是定时器到期时的回调。
-func (w *Watchdog) fire() {
+// fire 是定时器到期时的回调。gen 为本次定时触发所属代际，
+// 与当前 generation 不一致（已被后续 Feed 重设）或已停止时直接忽略，
+// 避免 Timer 复用竞态导致的误杀与重复触发（4824/4831）。
+func (w *Watchdog) fire(gen uint64) {
 	w.mu.Lock()
-	if w.stopped {
+	if w.stopped || gen != w.generation {
 		w.mu.Unlock()
 		return
 	}

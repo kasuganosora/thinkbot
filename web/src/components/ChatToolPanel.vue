@@ -366,8 +366,31 @@ async function confirmMkdir() {
   }
 }
 function triggerUpload() { uploadInputRef.value?.click() }
+
+// 上传限制：单文件 20MB、单次总量 60MB。
+// 没有限制时用户随手拖个几百 MB 的文件进来，前端整块读进内存 + 后端拒收，
+// 结果是浏览器先卡死，报错还落在最后。
+const MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
+const MAX_UPLOAD_TOTAL_BYTES = 60 * 1024 * 1024
+
 async function onUpload(e) {
-  const list = Array.from(e.target.files || [])
+  const picked = Array.from(e.target.files || [])
+  const list = []
+  let total = 0
+  for (const f of picked) {
+    if (f.size > MAX_UPLOAD_FILE_BYTES) {
+      MessagePlugin.warning(`${f.name} 超过单文件 ${fmtSize(MAX_UPLOAD_FILE_BYTES)} 上限，已跳过`)
+      continue
+    }
+    if (total + f.size > MAX_UPLOAD_TOTAL_BYTES) {
+      MessagePlugin.warning(`单次上传总量超过 ${fmtSize(MAX_UPLOAD_TOTAL_BYTES)}，${f.name} 及后续文件已跳过`)
+      break
+    }
+    total += f.size
+    list.push(f)
+  }
+  if (!list.length) { e.target.value = ''; return }
+
   const failed = []
   for (const f of list) {
     try {
@@ -396,7 +419,7 @@ async function doCompact() {
     await sessionToolApi.compact(sid.value)
     MessagePlugin.success('已触发上下文压缩')
   } catch (e) {
-    MessagePlugin.error('压缩失败')
+    MessagePlugin.error(`压缩失败：${e?.message || e || '未知错误'}`)
   }
 }
 

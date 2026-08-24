@@ -72,9 +72,14 @@ func WithHeaders(headers map[string]string) Option {
 }
 
 // WithHTTPClient 使用自定义的 *http.Client。
+// 如果 hc 为 nil，则回退到 http.DefaultClient，避免后续使用 nil 客户端导致 panic。
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
-		c.httpClient = hc
+		if hc != nil {
+			c.httpClient = hc
+		} else {
+			c.httpClient = http.DefaultClient
+		}
 	}
 }
 
@@ -179,9 +184,22 @@ func (c *Client) Clone() *Client {
 	return clone
 }
 
+// httpClientOr 返回底层 *http.Client，若未设置则回退到 http.DefaultClient。
+// 防止零值 Client 或 WithHTTPClient(nil) 后使用 nil 客户端导致 panic。
+func (c *Client) httpClientOr() *http.Client {
+	if c.httpClient != nil {
+		return c.httpClient
+	}
+	return http.DefaultClient
+}
+
 // ensureTransport 确保 httpClient 有一个 *http.Transport，如果没有则创建。
 // 如果 Transport 已被设置为非 *http.Transport 类型，则替换为新的 Transport。
 func (c *Client) ensureTransport() *http.Transport {
+	// 防御：httpClient 为 nil 时回退到默认客户端
+	if c.httpClient == nil {
+		c.httpClient = http.DefaultClient
+	}
 	if t, ok := c.httpClient.Transport.(*http.Transport); ok {
 		return t
 	}
@@ -202,6 +220,7 @@ type Request struct {
 	headers        map[string]string
 	query          url.Values
 	body           any
+	bodyBuf        []byte        // io.Reader body 缓冲后的字节，供重试时复用（避免空 body）
 	ctx            context.Context
 	retryCfg       *retry.Config // per-request 重试覆盖（可选）
 	dump           bool          // 是否 dump 本请求的详细信息
@@ -393,22 +412,26 @@ func (r *Request) doOnce() (*Response, error) {
 	}
 
 	start := time.Now()
-	resp, err := r.client.httpClient.Do(req)
+	resp, err := r.client.httpClientOr().Do(req)
 	if err != nil {
+		// Do 返回错误时 resp 有时非空（如部分 TLS/代理错误），必须关闭以释放连接
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		traceid.L(r.ctx).Warnw("http request failed",
-			"method", r.method, "url", req.URL.String(), "err", err, "elapsed", time.Since(start))
+			"method", r.method, "url", SanitizeURL(req.URL.String()), "err", err, "elapsed", time.Since(start))
 		return nil, errs.Wrap(err, "http request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// 响应体大小限制
-	bodyReader := resp.Body
+	var bodyReader io.Reader = resp.Body
 	maxSize := r.client.maxBodySize
 	if maxSize == 0 {
 		maxSize = defaultMaxBodySize
 	}
 	if maxSize > 0 {
-		bodyReader = io.NopCloser(io.LimitReader(resp.Body, maxSize+1))
+		bodyReader = io.LimitReader(resp.Body, maxSize+1)
 	}
 
 	body, err := io.ReadAll(bodyReader)
@@ -416,8 +439,10 @@ func (r *Request) doOnce() (*Response, error) {
 		return nil, errs.Wrap(err, "failed to read response body")
 	}
 	if maxSize > 0 && int64(len(body)) > maxSize {
+		// 超限：截断到 maxSize，并排空剩余响应体以保持连接可复用（避免重试泄漏连接）
+		_, _ = io.Copy(io.Discard, resp.Body)
 		traceid.L(r.ctx).Warnw("http response body truncated",
-			"url", req.URL.String(), "max_size", maxSize, "actual_size", len(body))
+			"url", SanitizeURL(req.URL.String()), "max_size", maxSize, "actual_size", len(body))
 		body = body[:maxSize]
 	}
 
@@ -428,7 +453,7 @@ func (r *Request) doOnce() (*Response, error) {
 	}
 
 	traceid.L(r.ctx).Debugw("http response",
-		"method", r.method, "url", req.URL.String(),
+		"method", r.method, "url", SanitizeURL(req.URL.String()),
 		"status", resp.StatusCode, "body_len", len(body), "elapsed", time.Since(start))
 
 	// dump 响应
@@ -438,7 +463,7 @@ func (r *Request) doOnce() (*Response, error) {
 
 	if !result.IsSuccess() {
 		return result, errs.HTTPErrorf(resp.StatusCode,
-			"http %s %s -> %d: %s", r.method, req.URL.String(), resp.StatusCode, truncate(string(body), 500))
+			"http %s %s -> %d: %s", r.method, SanitizeURL(req.URL.String()), resp.StatusCode, truncate(string(body), 500))
 	}
 
 	return result, nil
@@ -510,7 +535,16 @@ func (r *Request) buildHTTPRequest() (*http.Request, error) {
 	if r.body != nil {
 		switch v := r.body.(type) {
 		case io.Reader:
-			bodyReader = v
+			// 缓冲 io.Reader 到内存，使重试（多次 buildHTTPRequest）能复用完整 body，
+			// 否则首次发送后 reader 已耗尽，重试会发送空 body。
+			if r.bodyBuf == nil {
+				data, err := io.ReadAll(v)
+				if err != nil {
+					return nil, errs.Wrap(err, "failed to buffer request body")
+				}
+				r.bodyBuf = data
+			}
+			bodyReader = bytes.NewReader(r.bodyBuf)
 		case []byte:
 			bodyReader = bytes.NewReader(v)
 		case string:
@@ -642,7 +676,7 @@ func truncate(s string, maxLen int) string {
 func (r *Request) dumpRequest(req *http.Request) {
 	var b strings.Builder
 	b.WriteString("\n========== HTTP Request Dump ==========\n")
-	fmt.Fprintf(&b, "%s %s\n", req.Method, req.URL.String())
+	fmt.Fprintf(&b, "%s %s\n", req.Method, SanitizeURL(req.URL.String()))
 	b.WriteString("--- Headers ---\n")
 	for k, vs := range req.Header {
 		for _, v := range vs {

@@ -43,13 +43,6 @@
           </div>
           <div class="panel-card">
             <t-form label-align="left" :label-width="120">
-              <t-form-item label="主题模式">
-                <t-radio-group v-model="settings.theme">
-                  <t-radio-button value="light">浅色</t-radio-button>
-                  <t-radio-button value="dark">深色</t-radio-button>
-                  <t-radio-button value="auto">跟随系统</t-radio-button>
-                </t-radio-group>
-              </t-form-item>
               <t-form-item label="主题色">
                 <t-radio-group v-model="settings.primaryColor">
                   <t-radio-button value="green">绿色</t-radio-button>
@@ -57,8 +50,18 @@
                   <t-radio-button value="purple">紫色</t-radio-button>
                 </t-radio-group>
               </t-form-item>
+              <!-- 主题模式 / 界面语言：产品尚未提供深色样式与 i18n 运行时，
+                   保留为禁用态并说明，避免做成「点了保存却毫无变化」的假控件 -->
+              <t-form-item label="主题模式">
+                <t-radio-group v-model="settings.theme" disabled>
+                  <t-radio-button value="light">浅色</t-radio-button>
+                  <t-radio-button value="dark">深色</t-radio-button>
+                </t-radio-group>
+                <span class="form-hint">深色主题尚未提供，目前仅支持浅色</span>
+              </t-form-item>
               <t-form-item label="界面语言">
-                <t-select v-model="settings.language" :options="langOptions" style="width: 200px" />
+                <t-select v-model="settings.language" :options="langOptions" style="width: 200px" disabled />
+                <span class="form-hint">当前仅提供简体中文</span>
               </t-form-item>
             </t-form>
           </div>
@@ -116,20 +119,23 @@
           </div>
         </div>
 
-        <!-- 管理后台：整合进系统设置页内 -->
-        <div v-show="activeKey === 'admin-users'" class="panel panel-wide" data-testid="system-panel-admin-users">
+        <!-- 管理后台：整合进系统设置页内。
+             这里必须用 v-if 而非 v-show——v-show 只切 display，组件仍会挂载并在
+             onMounted 里请求 /api/admin/* ，非管理员进来就会预加载一堆 403 的管理接口。
+             叠加 isAdmin 判断，即使 activeKey 被异常置为 admin-* 也不会挂载。 -->
+        <div v-if="isAdmin && activeKey === 'admin-users'" class="panel panel-wide" data-testid="system-panel-admin-users">
           <UsersView embedded />
         </div>
-        <div v-show="activeKey === 'admin-skills'" class="panel panel-wide" data-testid="system-panel-admin-skills">
+        <div v-if="isAdmin && activeKey === 'admin-skills'" class="panel panel-wide" data-testid="system-panel-admin-skills">
           <SkillsView embedded />
         </div>
-        <div v-show="activeKey === 'admin-config'" class="panel panel-wide" data-testid="system-panel-admin-config">
+        <div v-if="isAdmin && activeKey === 'admin-config'" class="panel panel-wide" data-testid="system-panel-admin-config">
           <ConfigView embedded />
         </div>
-        <div v-show="activeKey === 'admin-stats'" class="panel panel-wide" data-testid="system-panel-admin-stats">
+        <div v-if="isAdmin && activeKey === 'admin-stats'" class="panel panel-wide" data-testid="system-panel-admin-stats">
           <StatsView embedded />
         </div>
-        <div v-show="activeKey === 'admin-system'" class="panel panel-wide" data-testid="system-panel-admin-system">
+        <div v-if="isAdmin && activeKey === 'admin-system'" class="panel panel-wide" data-testid="system-panel-admin-system">
           <SystemMonitorView embedded />
         </div>
       </section>
@@ -138,7 +144,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { useUserStore } from '@/stores/user'
 import SettingsShell from '@/components/SettingsShell.vue'
@@ -154,7 +160,14 @@ import SystemMonitorView from '@/views/admin/SystemMonitorView.vue'
 
 const userStore = useUserStore()
 
-const isAdmin = computed(() => userStore.user?.role === 'admin')
+// 只认服务端确认过的角色：localStorage 里的 role 可被随意伪造，
+// 用它决定是否渲染管理面板等于把前端鉴权交给攻击者。
+const isAdmin = computed(() => userStore.isAdmin)
+
+onMounted(() => {
+  // 向服务端确认角色，确认后管理入口与面板才会出现（失败即按非管理员处理）
+  userStore.ensureProfile().catch(() => {})
+})
 
 const navItems = [
   { key: 'bots', label: 'Bots', icon: 'application' },
@@ -196,10 +209,46 @@ const defaults = {
   apiKey: ''
 }
 
-const settings = ref({ ...defaults, ...JSON.parse(localStorage.getItem('bp_system') || '{}') })
+function readSettings() {
+  try {
+    return { ...defaults, ...JSON.parse(localStorage.getItem('bp_system') || '{}') }
+  } catch {
+    return { ...defaults }
+  }
+}
+
+const settings = ref(readSettings())
+
+// 主题色调色板：写入 TDesign 的品牌色 CSS 变量，组件与自定义样式（均引用
+// var(--td-brand-color, …)）会立即跟随变化——这是「保存」真正生效的部分。
+const BRAND_PALETTES = {
+  green: { base: '#00a870', hover: '#00915f', active: '#007a4f', light: '#e3f9f0' },
+  blue: { base: '#0052d9', hover: '#0047ba', active: '#003cab', light: '#e0ebff' },
+  purple: { base: '#7c3aed', hover: '#6d28d9', active: '#5b21b6', light: '#f0e7ff' }
+}
+
+function applyPrimaryColor(name) {
+  const p = BRAND_PALETTES[name] || BRAND_PALETTES.green
+  const style = document.documentElement.style
+  style.setProperty('--td-brand-color', p.base)
+  style.setProperty('--td-brand-color-hover', p.hover)
+  style.setProperty('--td-brand-color-active', p.active)
+  style.setProperty('--td-brand-color-light', p.light)
+}
+
+// 进入页面即按已保存的偏好生效（此前保存只写 localStorage，刷新后毫无变化）
+onMounted(() => applyPrimaryColor(settings.value.primaryColor))
+// 选中即预览，无需等保存
+watch(() => settings.value.primaryColor, applyPrimaryColor)
 
 function save() {
-  localStorage.setItem('bp_system', JSON.stringify(settings.value))
+  try {
+    localStorage.setItem('bp_system', JSON.stringify(settings.value))
+  } catch (e) {
+    MessagePlugin.error(`保存失败：${e.message || e}`)
+    return
+  }
+  applyPrimaryColor(settings.value.primaryColor)
   MessagePlugin.success('系统设置已保存')
 }
 </script>
@@ -283,6 +332,11 @@ function save() {
   font-size: 13px;
   color: #888;
   margin: 0;
+}
+.form-hint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: #999;
 }
 .panel-card {
   background: #fff;

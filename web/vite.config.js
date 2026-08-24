@@ -5,7 +5,9 @@ import { execSync } from 'node:child_process'
 
 function getGitCommit() {
   try {
-    return execSync('git rev-parse --short HEAD').toString().trim()
+    // stdio: 忽略 stdin/stderr，避免无 git 或仓库异常时把报错刷进构建日志
+    const out = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    return out || 'unknown'
   } catch (_) {
     return 'unknown'
   }

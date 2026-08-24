@@ -80,7 +80,7 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const userStore = useUserStore()
   if (!to.meta.public && !userStore.isLoggedIn) {
     return { name: 'login', query: { redirect: to.fullPath } }
@@ -88,10 +88,22 @@ router.beforeEach((to) => {
   if (to.name === 'login' && userStore.isLoggedIn) {
     return { name: 'chat' }
   }
-  // admin 页面权限校验
-  if (to.meta.admin && userStore.user?.role !== 'admin') {
-    MessagePlugin.warning('该功能仅管理员可访问')
-    return { name: 'chat' }
+  // admin 页面权限校验。
+  //
+  // 不能只看 userStore.user.role：那份资料来自 localStorage 缓存，改一行就能
+  // 伪造成 admin。这里先向服务端确认角色（基于 HttpOnly cookie），确认失败或
+  // 非管理员一律挡回。后端接口本身也有鉴权，这层只是避免无谓的 403 与误导性 UI。
+  if (to.meta.admin) {
+    try {
+      await userStore.ensureProfile()
+    } catch {
+      MessagePlugin.warning('登录状态已失效，请重新登录')
+      return { name: 'login', query: { redirect: to.fullPath } }
+    }
+    if (!userStore.isAdmin) {
+      MessagePlugin.warning('该功能仅管理员可访问')
+      return { name: 'chat' }
+    }
   }
 })
 

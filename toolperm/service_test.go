@@ -44,9 +44,12 @@ func TestEvaluate_NoRulePlatformAllows(t *testing.T) {
 	if svc.Evaluate("bot-x", "web_search", "telegram", "u1") {
 		t.Fatal("telegram web_search should be denied (platform has rule, no match)")
 	}
-	// misskey 平台完全无规则 → 开放基线，放行
-	if !svc.Evaluate("bot-x", "web_search", "misskey", "u1") {
-		t.Fatal("misskey has no rule → must allow (open baseline)")
+	// misskey 平台完全无规则 → 保守默认（修复 5142）：敏感工具禁止、基础工具放行
+	if svc.Evaluate("bot-x", "web_search", "misskey", "u1") {
+		t.Fatal("misskey has no rule → sensitive web_search must be denied by default")
+	}
+	if !svc.Evaluate("bot-x", "now", "misskey", "u1") {
+		t.Fatal("misskey has no rule → basic tool `now` must still be allowed")
 	}
 	// web 平台会被惰性播种 allow 基线 → 放行
 	if !svc.Evaluate("bot-x", "sandbox_exec", "web", "u1") {
@@ -72,9 +75,12 @@ func TestSeedWebDefault_WebAllowedAndEmptyPlatformsAllowed(t *testing.T) {
 	if !svc.Evaluate("bot-web", "sandbox_exec", "web", "anyone") {
 		t.Fatal("web should allow all by default")
 	}
-	// telegram 平台无任何规则覆盖 → 开放基线，放行（非 web 不再默认禁止）
-	if !svc.Evaluate("bot-web", "sandbox_exec", "telegram", "anyone") {
-		t.Fatal("telegram with no rule should be allowed (open baseline)")
+	// telegram 平台无任何规则覆盖 → 保守默认（修复 5142）：敏感工具禁止、基础工具放行
+	if svc.Evaluate("bot-web", "sandbox_exec", "telegram", "anyone") {
+		t.Fatal("telegram with no rule → sensitive sandbox_exec must be denied by default")
+	}
+	if !svc.Evaluate("bot-web", "now", "telegram", "anyone") {
+		t.Fatal("telegram with no rule → basic tool `now` must still be allowed")
 	}
 }
 
@@ -135,9 +141,13 @@ func TestEvaluate_DisabledRuleIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 禁用的 deny 不应造成禁止：telegram 上仍放行（平台无活动规则）
-	if !svc.Evaluate("bot3", "web_search", "telegram", "u1") {
-		t.Fatal("disabled deny rule must be ignored; platform has no active rule → allow")
+	// 禁用的 deny 规则被忽略 → 平台无活动规则 → 保守默认（修复 5142）：敏感工具禁止
+	if svc.Evaluate("bot3", "web_search", "telegram", "u1") {
+		t.Fatal("disabled deny rule ignored; sensitive web_search must be denied by default")
+	}
+	// 基础工具仍放行
+	if !svc.Evaluate("bot3", "now", "telegram", "u1") {
+		t.Fatal("disabled deny rule ignored; basic tool `now` must still be allowed")
 	}
 }
 
@@ -316,9 +326,12 @@ func TestEvaluate_WebDefaultAllowRegardlessOfOtherPlatformRules(t *testing.T) {
 	if svc.Evaluate("bot-mix", "sandbox_exec", "telegram", "u1") {
 		t.Fatal("telegram deny rule must still hold")
 	}
-	// 其他非 web 平台（无规则）→ 开放基线，放行
-	if !svc.Evaluate("bot-mix", "web_search", "misskey", "u1") {
-		t.Fatal("misskey with no rule must be allowed (open baseline)")
+	// 其他非 web 平台（无规则）→ 保守默认（修复 5142）：敏感工具禁止、基础工具放行
+	if svc.Evaluate("bot-mix", "web_search", "misskey", "u1") {
+		t.Fatal("misskey with no rule → sensitive web_search must be denied by default")
+	}
+	if !svc.Evaluate("bot-mix", "now", "misskey", "u1") {
+		t.Fatal("misskey with no rule → basic tool `now` must still be allowed")
 	}
 }
 

@@ -113,13 +113,48 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 	if len(entries) < c.config.MinClusterSize {
 		return nil
 	}
-	if len(entries) > c.config.MaxInputEntries {
-		c.logger.Warnw("sqlite_compactor: input exceeds MaxInputEntries, excess entries will not be processed this run",
-			"total", len(entries), "max", c.config.MaxInputEntries)
-		entries = entries[:c.config.MaxInputEntries]
+
+	// 2. 分批循环压缩：无论活跃条目多少都全部处理。
+	//    原来超额时只取前 MaxInputEntries 条、其余本轮直接丢弃，导致
+	//    GetAllActive 按 created_at ASC 排序下，较新的记忆永远轮不到压缩、
+	//    活跃记忆只增不减（见日志 sqlite_compactor exceeds MaxInputEntries）。
+	//    现改为按 MaxInputEntries 切块循环处理，单批内独立聚类合并。
+	batchSize := c.config.MaxInputEntries
+	totalBatches := (len(entries) + batchSize - 1) / batchSize
+	if totalBatches > 1 {
+		c.logger.Infow("sqlite_compactor: input exceeds MaxInputEntries, processing in batches",
+			"total", len(entries), "max", batchSize, "batches", totalBatches)
 	}
 
-	// 2. LLM 聚类合并
+	mergedTotal, archivedTotal := 0, 0
+	for i := 0; i < len(entries); i += batchSize {
+		end := i + batchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		m, a := c.compactBatch(ctx, scope, entries[i:end])
+		mergedTotal += m
+		archivedTotal += a
+	}
+
+	c.logger.Infow("sqlite semantic compaction complete",
+		"scope", scope.Key(),
+		"input", len(entries),
+		"batches", totalBatches,
+		"merged", mergedTotal,
+		"archived", archivedTotal,
+		"duration", time.Since(start))
+
+	return nil
+}
+
+// compactBatch 对一批活跃记忆执行 LLM 聚类合并 + 归档来源。
+// 单批失败（如 LLM 抖动）不影响其他批次，返回已合并/已归档计数。
+func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, entries []memory.Entry) (merged, archived int) {
+	if len(entries) < c.config.MinClusterSize {
+		return 0, 0
+	}
+
 	inputs := make([]memory.ClusterInput, 0, len(entries))
 	for _, e := range entries {
 		inputs = append(inputs, memory.ClusterInput{
@@ -130,13 +165,14 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 	}
 	clusters, err := memory.ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs)
 	if err != nil {
-		return errs.Wrap(err, "sqlite_compactor: LLM cluster+merge")
+		c.logger.Warnw("sqlite_compactor: LLM cluster+merge failed, skipping batch",
+			"err", err, "batch_size", len(entries))
+		return 0, 0
 	}
 	if len(clusters) == 0 {
-		return nil // 无可合并项
+		return 0, 0 // 无可合并项
 	}
 
-	// 3. 写入合并条目 + 归档原始来源
 	mergedIDs := make(map[string]bool)
 	mergedCount, archivedCount := 0, 0
 	for _, cl := range clusters {
@@ -172,13 +208,5 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 		}
 	}
 
-	c.logger.Infow("sqlite semantic compaction complete",
-		"scope", scope.Key(),
-		"input", len(entries),
-		"clusters", len(clusters),
-		"merged", mergedCount,
-		"archived", archivedCount,
-		"duration", time.Since(start))
-
-	return nil
+	return mergedCount, archivedCount
 }

@@ -28,8 +28,13 @@
         </t-form-item>
 
         <div class="login-options">
-          <t-checkbox v-model="remember">记住我</t-checkbox>
-          <t-link theme="primary" hover="color">忘记密码？</t-link>
+          <!-- 记住我：勾选则把展示资料写 localStorage（跨会话保留），
+               不勾选只写 sessionStorage，关掉标签页即失效 -->
+          <t-checkbox v-model="remember" data-testid="login-remember">记住我</t-checkbox>
+          <!-- 平台未提供自助重置密码接口，这里如实引导找管理员，不做成假入口 -->
+          <t-link theme="primary" hover="color" data-testid="login-forgot" @click="onForgotPassword">
+            忘记密码？
+          </t-link>
         </div>
 
         <t-button theme="primary" type="submit" size="large" block :loading="loading" data-testid="login-submit">
@@ -65,11 +70,17 @@ const rules = {
   password: [{ required: true, message: '请输入密码', type: 'error' }]
 }
 
+function onForgotPassword() {
+  MessagePlugin.info('暂不支持自助重置，请联系管理员在「用户管理」中重置密码')
+}
+
 function onSubmit({ validateResult }) {
   if (validateResult !== true) return
   loading.value = true
   authApi.login(form.value.username, form.value.password)
     .then((resp) => {
+      // 只保留服务端真实返回的字段：早期这里凭用户名拼了假 email 和一句假签名，
+      // 个人资料页会把它们当成真数据展示（甚至可能被提交回后端）。
       userStore.login({
         id: resp.id,
         username: resp.username,
@@ -77,9 +88,9 @@ function onSubmit({ validateResult }) {
         displayName: resp.displayName || resp.username,
         role: resp.role,
         avatar: resp.avatar || '',
-        email: `${resp.username}@thinkbot.dev`,
-        bio: '这个人很懒，什么都没留下'
-      })
+        email: resp.email || '',
+        bio: resp.bio || ''
+      }, { remember: remember.value })
       MessagePlugin.success('登录成功')
       const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
         ? route.query.redirect

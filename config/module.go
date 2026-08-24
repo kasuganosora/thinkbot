@@ -75,12 +75,39 @@ func registerConfigLifecycle(lc fx.Lifecycle, store *Store, logger *zap.SugaredL
 				logger.Warnw("config: failed to load from database", "err", err)
 			}
 			logger.Infow("config store initialized")
+
+			// 全局出口代理：若配置了 system.proxy，则写入 HTTP_PROXY/HTTPS_PROXY
+			// 环境变量，使主机侧所有使用默认 Transport 的 HTTP 客户端（LLM、channel 等）
+			// 统一走部署侧代理。NO_PROXY 默认放行本地地址，避免自环请求被代理拦截。
+			// 须在配置加载完成后、发起任何出站请求前执行一次。
+			if proxy := GlobalProxy(store); proxy != "" {
+				_ = os.Setenv("HTTP_PROXY", proxy)
+				_ = os.Setenv("HTTPS_PROXY", proxy)
+				_ = os.Setenv("http_proxy", proxy)
+				_ = os.Setenv("https_proxy", proxy)
+				if os.Getenv("NO_PROXY") == "" {
+					_ = os.Setenv("NO_PROXY", "localhost,127.0.0.1")
+					_ = os.Setenv("no_proxy", "localhost,127.0.0.1")
+				}
+				logger.Infow("global proxy enabled (host side)", "proxy", proxy)
+			}
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
 			return nil
 		},
 	})
+}
+
+// GlobalProxy 返回生效的全局出口代理 URL。
+// 优先取数据库配置 system.proxy；若为空则回退到同名环境变量 SYSTEM_PROXY
+// （EnvKeyToConfigKey("SYSTEM_PROXY") == "system.proxy"），兼容 .env 直接注入。
+// 两者皆空时返回 ""（表示直连）。
+func GlobalProxy(store *Store) string {
+	if p := store.GetString(KeySystemProxy, ""); p != "" {
+		return p
+	}
+	return os.Getenv(ConfigKeyToEnvKey(KeySystemProxy))
 }
 
 // ============================================================================
@@ -379,11 +406,13 @@ func (b *Builder) GetBotSettings() BotSettings {
 // --- 数据库 & 日志 ---
 
 // GetDBPath 返回数据库文件路径。
+// 默认 data/thinkbot.db（落在 data 卷，配合 docker 的 ./data:/app/data 持久化）。
+// 主程序在 cmd/main.go 打开数据库时经环境变量 DB_PATH（⇄ db.path）实际消费本键。
 func (b *Builder) GetDBPath() string {
-	return b.store.GetString(KeyDBPath, "thinkbot.db")
+	return b.store.GetString(KeyDBPath, "data/thinkbot.db")
 }
 
-// GetLogLevel 返回日志级别。
+// GetLogLevel 返回日志级别（默认 info，由 cmd/main.go 经 LOG_LEVEL 环境变量消费）。
 func (b *Builder) GetLogLevel() string {
 	return b.store.GetString(KeyLogLevel, "info")
 }
@@ -732,6 +761,7 @@ func (b *Builder) GetTimezoneLocation() *time.Location {
 func SystemMetaSpecs() []MetaSpec {
 	return []MetaSpec{
 		{Key: KeySystemTimezone, Category: "System", Description: "系统时区（IANA 标识符，如 Asia/Shanghai、UTC）。为空时使用服务器本地时区。影响 bot 时间感知和 Docker 沙箱容器时区。"},
+		{Key: KeySystemProxy, Category: "System", Description: "全局出口代理（URL，如 http://user:pass@host:port、socks5://host:port）。为空时直连（默认）。设置后主机侧所有出站请求（LLM、channel 等）与 bot Docker 容器内的请求统一走该代理，是「全站出口收敛 / SSRF 防护」的最简开关。"},
 	}
 }
 
@@ -939,7 +969,7 @@ func APIMetaSpecs() []MetaSpec {
 	return []MetaSpec{
 		{Key: KeyAPIAddr, Category: "API", Description: "HTTP 服务器监听地址（默认 :8080）"},
 		{Key: KeyAPICORSOrigins, Category: "API", Description: "允许的 CORS 来源列表（逗号分隔，为空时仅允许 localhost）"},
-		{Key: KeyAPICookieSecure, Category: "API", Description: "Cookie 是否仅通过 HTTPS 传输（默认 false）"},
+		{Key: KeyAPICookieSecure, Category: "API", Description: "Cookie 是否仅通过 HTTPS 传输（默认 true）"},
 		{Key: KeyChatContextLimit, Category: "API", Description: "LLM 上下文加载的最大历史消息数（默认 20）"},
 	}
 }
@@ -958,7 +988,7 @@ func BotMetaSpecs() []MetaSpec {
 // DBMetaSpecs 返回数据库配置项的元数据。
 func DBMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeyDBPath, Category: "Database", Description: "SQLite 数据库文件路径（默认 thinkbot.db）"},
+		{Key: KeyDBPath, Category: "Database", Description: "SQLite 数据库文件路径（默认 data/thinkbot.db，落在 data 卷）"},
 	}
 }
 
@@ -999,7 +1029,7 @@ func DefaultMap() map[string]string {
 		// API
 		KeyAPIAddr:          ":8080",
 		KeyAPICORSOrigins:   "",
-		KeyAPICookieSecure:  "false",
+		KeyAPICookieSecure:  "true",
 		KeyChatContextLimit: "20",
 		// Bot
 		KeyBotSystemPrompt: "",
@@ -1008,7 +1038,7 @@ func DefaultMap() map[string]string {
 		KeyBotMaxTokens:    "4096",
 		KeyBotWorkers:      "4",
 		// Database
-		KeyDBPath: "thinkbot.db",
+		KeyDBPath: "data/thinkbot.db",
 		// Log
 		KeyLogLevel: "info",
 		// System
@@ -1052,7 +1082,7 @@ func DefaultMap() map[string]string {
 		KeyWorkspaceDir:         "data/workspaces",
 		KeySandboxBackend:       "auto",
 		KeySandboxImage:         "alpine:latest",
-		KeySandboxRequireDocker: "false",
+		KeySandboxRequireDocker: "true",
 		KeySandboxTimeout:       "0",
 		KeySandboxStuckTimeout:  "300",
 		// Dreaming
