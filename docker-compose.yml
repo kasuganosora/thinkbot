@@ -38,9 +38,9 @@ services:
     # environment:
     #   CONFIG_FILE: /app/.env
     healthcheck:
-      # 检查 docker.sock 可用 + 二进制存在（无需依赖特定 HTTP 端点）
-      test: ["CMD-SHELL", "test -S /var/run/docker.sock && test -x /app/thinkbot || exit 1"]
+      # 探活应用本身：请求 /health 端点，而非仅检查 docker.sock/二进制。
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s

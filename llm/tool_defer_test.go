@@ -54,6 +54,145 @@ func TestToolDeferral_ViewStripsUnloaded(t *testing.T) {
 	}
 }
 
+// TestToolDeferral_MatchAvailableRedirectsNonDeferred verifies that
+// matchAvailable surfaces always-available (non-deferred) tools so tool_search
+// can steer the model back to them instead of reporting a misleading
+// "No matching tools found" (which previously made the model abandon file
+// tools mid-task).
+func TestToolDeferral_MatchAvailableRedirectsNonDeferred(t *testing.T) {
+	d := NewToolDeferral(true)
+	exec := deferTestTool("exec", false)      // always available, non-deferred
+	read := deferTestTool("read_file", false) // always available, non-deferred
+	deferred := deferTestTool("mcp__srv__foo", true)
+	d.SetTools([]Tool{exec, read, deferred})
+
+	// A query matching an always-available tool must be reported.
+	got := d.matchAvailable("exec")
+	if len(got) != 1 || got[0].Name != "exec" {
+		t.Fatalf("expected exec reported as available, got %+v", got)
+	}
+	// Substring match on name/description also works.
+	got = d.matchAvailable("read")
+	if len(got) != 1 || got[0].Name != "read_file" {
+		t.Fatalf("expected read_file reported, got %+v", got)
+	}
+
+	// An unloaded deferred tool must NOT be reported by matchAvailable — that
+	// is Search()'s job (load on demand).
+	if got := d.matchAvailable("mcp__srv__foo"); len(got) != 0 {
+		t.Fatalf("unloaded deferred tool should not be in matchAvailable, got %+v", got)
+	}
+
+	// A truly unknown query returns nothing.
+	if got := d.matchAvailable("nonexistent-xyz"); got != nil {
+		t.Fatalf("expected nil for unknown query, got %+v", got)
+	}
+
+	// Once a deferred tool is loaded it becomes directly callable, so
+	// matchAvailable should surface it too.
+	d.Load("mcp__srv__foo")
+	if got := d.matchAvailable("mcp__srv__foo"); len(got) != 1 {
+		t.Fatalf("loaded deferred tool should be reported as available, got %+v", got)
+	}
+}
+
+// TestToolDeferral_SearchExecReportsAvailable ensures the search closure points
+// the model at an already-available tool rather than a false "No matching".
+func TestToolDeferral_SearchExecReportsAvailable(t *testing.T) {
+	d := NewToolDeferral(true)
+	exec := deferTestTool("exec", false)
+	read := deferTestTool("read_file", false)
+	deferred := deferTestTool("mcp__srv__foo", true)
+	d.SetTools([]Tool{exec, read, deferred})
+
+	out, err := d.searchTool().Execute(&ToolExecContext{}, map[string]any{"query": "exec"})
+	if err != nil {
+		t.Fatalf("searchTool.Execute error: %v", err)
+	}
+	s, ok := out.(string)
+	if !ok {
+		t.Fatalf("expected string result, got %T", out)
+	}
+	if !contains(s, "exec") || !contains(s, "ALREADY") {
+		t.Fatalf("expected search to redirect to available exec tool, got: %q", s)
+	}
+	if contains(s, "No matching tools found") {
+		t.Fatalf("search must not report false negative for available tool, got: %q", s)
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && (indexOf(haystack, needle) >= 0)
+}
+
+// TestToolDeferral_SearchAliasRedirectsToAvailable 验证：模型用自然语言能力词
+// （"edit file" / "run git" / "shell command"）搜 tool_search 时，应当回指到已经
+// 直接可用的 exec/read_file/replace_in_file，而不是返回误导性的「No matching」。
+// 这是 cfblog 长任务反复「工具消失」幻觉的根因修复。
+func TestToolDeferral_SearchAliasRedirectsToAvailable(t *testing.T) {
+	d := NewToolDeferral(true)
+	exec := deferTestTool("exec", false)
+	read := deferTestTool("read_file", false)
+	replace := deferTestTool("replace_in_file", false)
+	d.SetTools([]Tool{exec, read, replace})
+
+	cases := []struct {
+		query   string
+		mustSee []string // 返回里应出现的已可用工具名
+	}{
+		{"edit file", []string{"read_file", "replace_in_file"}},
+		{"write a new file", []string{"read_file", "replace_in_file"}},
+		{"run git commit", []string{"exec"}},
+		{"execute a shell command", []string{"exec"}},
+		{"list directory", []string{"read_file"}}, // list_dir 未注册，但 read_file 也在别名映射里兜底
+	}
+	for _, c := range cases {
+		out, err := d.ExecTool().Execute(&ToolExecContext{}, map[string]any{"query": c.query})
+		if err != nil {
+			t.Fatalf("query %q: Execute error: %v", c.query, err)
+		}
+		s := out.(string)
+		if contains(s, "No matching tools found") {
+			t.Fatalf("query %q: must not emit misleading 'No matching tools found', got: %q", c.query, s)
+		}
+		for _, name := range c.mustSee {
+			if !contains(s, name) {
+				t.Fatalf("query %q: expected redirect to available tool %q, got: %q", c.query, name, s)
+			}
+		}
+	}
+}
+
+// TestToolDeferral_SearchUnknownCapabilityNoFalseNegative 验证：对真正未知的能力，
+// 兜底消息不再使用「No matching tools found」这种会被模型解读为「工具不存在」的措辞，
+// 而是提醒常驻工具（exec/read_file 等）始终可直接调用。
+func TestToolDeferral_SearchUnknownCapabilityNoFalseNegative(t *testing.T) {
+	d := NewToolDeferral(true)
+	exec := deferTestTool("exec", false)
+	d.SetTools([]Tool{exec})
+
+	out, err := d.ExecTool().Execute(&ToolExecContext{}, map[string]any{"query": "post to twitter"})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	s := out.(string)
+	if contains(s, "No matching tools found") {
+		t.Fatalf("must not emit misleading 'No matching tools found', got: %q", s)
+	}
+	if !contains(s, "exec") {
+		t.Fatalf("fallback should remind that exec is always callable, got: %q", s)
+	}
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestToolDeferral_SearchLoadsAndShowsFull(t *testing.T) {
 	d := NewToolDeferral(true)
 	deferred := deferTestTool("mcp__srv__weather", true)

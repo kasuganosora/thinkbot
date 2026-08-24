@@ -227,6 +227,12 @@ type Config struct {
 	// 仅 BrowserEnabled=true 时生效，透传给容器内 wrapper（BOT_BROWSER_PROXY 环境变量），
 	// 使浏览器流量走部署侧自有代理（IP 归部署侧）。空值表示直连。
 	BrowserProxy string
+
+	// Proxy 全局出口代理 URL（如 "http://user:pass@host:port"、"socks5://host:port"）。
+	// 注入到 bot Docker 容器的 HTTP_PROXY/HTTPS_PROXY 环境变量，使容器内所有出站请求
+	// （curl、python requests、node fetch、容器内 thinkbot 等）统一走部署侧代理。
+	// 空值表示直连（默认）。通常取自全局配置 system.proxy。
+	Proxy string
 }
 
 // DefaultConfig 返回默认配置。

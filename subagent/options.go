@@ -29,6 +29,20 @@ func WithTemperature(temp float64) Option {
 	}
 }
 
+// WithFrequencyPenalty 设置重复惩罚（GLM-5.x 推荐 0.1）：抑制模型反复输出相同 token。
+func WithFrequencyPenalty(pen float64) Option {
+	return func(sa *SubAgent) {
+		sa.frequencyPenalty = pen
+	}
+}
+
+// WithPresencePenalty 设置存在惩罚（GLM-5.x 推荐 0.05）：抑制已出现 token 再次出现。
+func WithPresencePenalty(pen float64) Option {
+	return func(sa *SubAgent) {
+		sa.presencePenalty = pen
+	}
+}
+
 // WithMaxTokens 设置 LLM 最大输出 token 数。
 func WithMaxTokens(tokens int) Option {
 	return func(sa *SubAgent) {

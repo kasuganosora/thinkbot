@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -287,14 +288,23 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 					return nil, fmt.Errorf("invalid input: expected object")
 				}
 
-				action := strings.ToLower(strings.TrimSpace(getString(m, "action")))
-				if action == "" {
-					return toolErr("action is required"), nil
-				}
+			action := strings.ToLower(strings.TrimSpace(getString(m, "action")))
+			if action == "" {
+				return toolErr("action is required"), nil
+			}
 
+			// 代码级反嵌套（报告 5373）：cron 触发的无人监督会话不得变更
+			// cron 任务（create/update/remove/pause/resume/trigger），防止自调用循环。
+			if IsCronSession(ctx) {
 				switch action {
+				case "create", "update", "remove", "pause", "resume", "trigger":
+					return toolErr("anti-nesting: a cron-triggered session cannot mutate cron jobs"), nil
+				}
+			}
+
+			switch action {
 				case "create":
-					return cronActionCreate(mgr, m)
+					return cronActionCreate(mgr, m, ctx)
 				case "list":
 					return cronActionList(mgr, m)
 				case "get":
@@ -322,7 +332,7 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 // Action handlers
 // ============================================================================
 
-func cronActionCreate(mgr *Manager, m map[string]any) (any, error) {
+func cronActionCreate(mgr *Manager, m map[string]any, ctx context.Context) (any, error) {
 	prompt := getString(m, "prompt")
 	schedule := getString(m, "schedule")
 	name := getString(m, "name")
@@ -337,9 +347,10 @@ func cronActionCreate(mgr *Manager, m map[string]any) (any, error) {
 		return toolErr("name is required for action=create"), nil
 	}
 
-	// 安全扫描
-	if scanErr := scanCronPrompt(prompt); scanErr != "" {
-		return toolErr(scanErr), nil
+	// 代码级反嵌套：cron 触发的无人监督会话不得再创建新的 cron 任务（报告 5373）。
+	// 扫描本身已由 Manager.CreateJob 统一执行（含 REST 路径），此处仅做反嵌套强制。
+	if IsCronSession(ctx) {
+		return toolErr("anti-nesting: a cron-triggered session cannot create nested cron jobs"), nil
 	}
 
 	req := CreateJobRequest{
@@ -447,10 +458,7 @@ func cronActionUpdate(mgr *Manager, m map[string]any) (any, error) {
 		updates["name"] = v
 	}
 	if v, ok := m["prompt"].(string); ok && v != "" {
-		// 安全扫描
-		if scanErr := scanCronPrompt(v); scanErr != "" {
-			return toolErr(scanErr), nil
-		}
+		// 安全扫描已由 Manager.UpdateJob 统一执行（含 REST 路径，报告 5381）
 		updates["prompt"] = v
 	}
 	if v, ok := m["schedule"]; ok {

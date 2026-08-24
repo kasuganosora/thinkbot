@@ -133,15 +133,6 @@ type ToolSessionContext struct {
 	// 不受 bot_tool_permissions 约束。常规用户渠道（web/telegram/misskey）应为 false。
 	IsSystem bool
 
-	// TaskIntent 本轮任务意图，由 envelopeToSessionContext 根据本轮用户消息文本分类。
-	//
-	// 用于按「任务意图」而非仅「频道」收口工具——例如 Misskey 会话里的代码任务，
-	// 本不应暴露 follow/unfollow/create_note 等社交写工具。此前（2026-08 实测）
-	// 出现过模型在长代码任务中途丢失焦点、拿 dummy 参数乱测 misskey 写工具的事件，
-	// 根因正是社交写工具 scopes:[]（全场景可见）。本字段配合 "social" scope 从架构上根绝此类跑偏。
-	// 取值见 TaskIntent* 常量；空串表示未知/模糊意图（社交写工具默认隐藏）。
-	TaskIntent string
-
 	// SourceChannelType 消息来源 Channel 的类型（"telegram"/"misskey"/"web"）。
 	// 由 Channel 在构建消息时注入到 Metadata["channel_type"]，
 	// envelopeToSessionContext 读取后设置。供工具提供者做场景感知决策。
@@ -241,27 +232,6 @@ type ToolInfo struct {
 	Risk string `json:"risk,omitempty"`
 }
 
-// ============================================================================
-// 任务意图（TaskIntent）— 按任务类型收口工具
-// ============================================================================
-
-// 任务意图常量，供 ToolDef.Scopes 中的 "social" scope 与 ToolSessionContext.TaskIntent 联动。
-//
-// 设计目标：社交写工具（follow/unfollow/create_note/delete_note/create_renote/react/unreact）
-// 仅在「本轮任务明确是社交操作」时才暴露给模型。代码/文件/模糊意图的会话一律不暴露，
-// 从架构上根绝「长任务退化导致模型拿社交工具乱测」的跑偏（2026-08 实测案例）。
-const (
-	// TaskIntentSocial 本轮任务明确为社交操作（关注/发帖/点赞/提及等）。
-	// 设了 "social" scope 的工具仅在此意图下暴露。
-	TaskIntentSocial = "social"
-
-	// TaskIntentNonsocial 本轮任务明确为非社交（代码/文件/查询等）。
-	// 社交写工具隐藏。
-	TaskIntentNonsocial = "nonsocial"
-	// 空串 "" 表示未知/模糊意图：社交写工具默认隐藏，
-	// 仅当用户消息命中社交关键词（见 ClassifyTaskIntent）才暴露，避免误杀正常社交。
-)
-
 // appliesTo 检查工具是否适用于给定场景。
 func (d *ToolDef) appliesTo(sctx *ToolSessionContext) bool {
 	if len(d.Scopes) == 0 {
@@ -281,31 +251,6 @@ func (d *ToolDef) appliesTo(sctx *ToolSessionContext) bool {
 			if sctx.ChatType == "group" && !sctx.IsSubagent {
 				return true
 			}
-		case "social":
-			// 社交写工具仅在「本轮任务意图为社交操作」时暴露。
-			//
-			// 根因修复：2026-08 实测，Misskey 会话里的代码任务（如「给 cfblog 加无障碍」）
-			// 因社交写工具 scopes:[]（全场景可见），模型在长任务中途丢失焦点后拿
-			// dummy 参数乱测 follow/unfollow。将这类工具收口到 "social" scope，
-			// 由 TaskIntent 决定是否暴露，从架构上根绝跑偏。
-			//
-			// 放行规则：
-			//   - 系统会话（心跳/cron 主动发帖）需要 → 兜底放行（心跳走 ChannelPoster 不经工具，此处仅兜底）；
-			//   - 子代理（spawn / workflow 内部执行）禁止社交写操作 —— 仅执行被分配的子任务，
-			//     与 wire.go 把 workflow/memory 工具在 subagent 场景排除防套娃的设计一致，
-			//     同时堵住「子代理绕过 channel 拿到 misskey_create_note 照发」的已知漏洞；
-			//   - 用户渠道中仅当 TaskIntent==social（用户消息命中社交关键词）才放行；
-			//   - 代码任务 / 模糊意图（TaskIntent 空或 nonsocial）→ 隐藏。
-			if sctx.IsSystem {
-				return true
-			}
-			if sctx.IsSubagent {
-				return false
-			}
-			if sctx.TaskIntent == TaskIntentSocial {
-				return true
-			}
-			return false
 		}
 	}
 	return false

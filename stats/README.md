@@ -102,8 +102,8 @@ ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
     ...
 ```
 
-`date` 取 **flush 时刻**的当天零点（`truncateToDate(time.Now())`，UTC），
-确保同一天的数据汇总到同一行。
+`date` 取 **指标发生时刻** `UsageMetric.At` 的当天零点（`truncateToDate`，UTC），
+确保同一天的数据汇总到同一行，避免延迟 flush / 跨日时错日；`At` 未填充时回退到 flush 时刻。
 
 ---
 

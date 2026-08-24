@@ -100,6 +100,11 @@ type OrchestrateConfig struct {
 	// BotID 当前编排所属的 bot 标识（仅用于落盘指针的路径定位）。
 	// 由调用方（llmroute）从工具调用来源的 ctx 取值后注入，避免 llm 反向依赖 agent/tools。
 	BotID string
+
+	// UserRequest 触发本轮编排的用户请求文本（或子代理任务描述）。
+	// 供标记了 RequiresUserIntent 的写工具做「是否根植于用户显式意图」的护栏判定。
+	// 由调用方（llmroute）注入 env.Message.Text。
+	UserRequest string
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -376,7 +381,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 						return nil, rerr
 					}
 					toolsExecuted = true
-					loop.recordStep(step, toolCallSignature(ready))
+					loop.recordStep(step, toolCallSignature(ready), result.Text)
 					if cfg.OnToolResults != nil {
 						readyResults = cfg.OnToolResults(step, readyResults)
 					}
@@ -461,7 +466,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		// Update the dynamic loop controller with this step's tool-call
 		// signature so it can extend past the soft budget while progressing
 		// and stop early if the model gets stuck repeating the same calls.
-		loop.recordStep(step, toolCallSignature(result.ToolCalls))
+		loop.recordStep(step, toolCallSignature(result.ToolCalls), result.Text)
 
 		// Apply post-execution result processing (e.g., truncation).
 		if cfg.OnToolResults != nil {
@@ -720,7 +725,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 							break
 						}
 						toolsExecuted = true
-						loop.recordStep(step, toolCallSignature(ready))
+						loop.recordStep(step, toolCallSignature(ready), stepText)
 						if cfg.OnToolResults != nil {
 							readyResults = cfg.OnToolResults(step, readyResults)
 						}
@@ -816,7 +821,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			// Update the dynamic loop controller with this step's tool-call
 			// signature (same rationale as the non-streaming path).
-			loop.recordStep(step, toolCallSignature(stepToolCalls))
+			loop.recordStep(step, toolCallSignature(stepToolCalls), stepText)
 
 			// Apply post-execution result processing (e.g., truncation).
 			if cfg.OnToolResults != nil {
@@ -912,6 +917,14 @@ func drainInterruptMessages(ch chan string, messages *[]Message) int {
 
 // logToolCallSummary 从所有步骤中汇总工具调用统计并记录日志。
 // 记录总调用次数和去重后的工具名称列表。
+// truncateStr 截断字符串到 maxRunes 用于日志预览，避免单条工具输出撑爆日志行。
+func truncateStr(s string, maxRunes int) string {
+	if len(s) <= maxRunes {
+		return s
+	}
+	return s[:maxRunes] + "...(truncated)"
+}
+
 func logToolCallSummary(ctx context.Context, steps []StepResult) {
 	totalCalls := 0
 	toolSet := make(map[string]struct{})
@@ -945,8 +958,8 @@ func logToolCallSummary(ctx context.Context, steps []StepResult) {
 					continue
 				}
 				s := fmt.Sprintf("%v", tr.Output)
-				if len(s) > 200 {
-					s = s[:200] + "...(truncated)"
+				if len(s) > 1000 {
+					s = s[:1000] + "...(truncated)"
 				}
 				entry += "=" + s
 				break
@@ -1247,6 +1260,35 @@ func inputPreview(v any) string {
 	return s
 }
 
+// userIntentSocialKeywords 用于「写操作意图护栏」：当工具标记了 RequiresUserIntent
+// （如 misskey 的 follow/unfollow/post/react 等写动作），仅当用户请求文本显式包含
+// 社交操作意图时才允许执行。覆盖频道名与社交动作动词（中英）。
+var userIntentSocialKeywords = []string{
+	"关注", "取关", "取消关注", "follow", "unfollow",
+	"发帖", "发动态", "发一条", "发布", "renote", "react", "反应", "点赞",
+	"提及", "提到", "私信", "dm", "post", "note", "转推", "转发",
+	"发到", "推送到", "同步到", "赞",
+}
+
+// isUserIntentGrounded 判断用户请求文本是否显式包含社交操作意图。
+func isUserIntentGrounded(userReq string) bool {
+	if userReq == "" {
+		return false
+	}
+	low := strings.ToLower(userReq)
+	for _, kw := range userIntentSocialKeywords {
+		if strings.Contains(low, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+// groundedRefusal 生成未根植写操作的拦截消息，明确告知模型原因，促其停止循环。
+func groundedRefusal(toolName string) string {
+	return fmt.Sprintf("⚠️ 工具 %q 需要用户的显式授权：当前用户请求中未包含任何社交操作意图（关注/发帖/点赞/renote 等），该写操作已被拦截。若确需执行，请明确告知要进行的社交动作。", toolName)
+}
+
 func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart), cfg *OrchestrateConfig) ToolResultPart {
 	// invocationID：本次「实际执行」的服务端唯一标识。它与模型下发的
 	// ToolCallID 相互独立，用于在日志与前端稳定地区分「来自哪次调用」。
@@ -1270,6 +1312,22 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		ToolName:     tc.ToolName,
 		InvocationID: invocationID,
 		SendProgress: progressFn,
+		UserRequest:  cfg.UserRequest,
+	}
+
+	// 写操作意图护栏（Layer B）：标记 RequiresUserIntent 的写工具（如 misskey
+	// follow/unfollow/post/react）仅在用户请求显式包含社交意图时才执行；否则视为
+	// 模型自发外发，在执行前拦截并明确告知原因。这样既保留 web 端用户明确要求的
+	// 社交调用，又根绝无关任务中途的脱轨写操作（2026-08 实测：cfblog 代码任务中模型
+	// 陷入脱轨循环，狂调 misskey 写工具，同时文本反复「停止、回到任务」却停不下来）。
+	if tool.RequiresUserIntent && !isUserIntentGrounded(execCtx.UserRequest) {
+		return ToolResultPart{
+			ToolCallID:   tc.ToolCallID,
+			ToolName:     tc.ToolName,
+			InvocationID: invocationID,
+			Result:       groundedRefusal(tool.Name),
+			IsError:      true,
+		}
 	}
 
 	// 事件轨迹（append-only，C1 深层集成）：记录工具「调用发起」与「返回」。
@@ -1291,6 +1349,11 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 			Surface: true,
 			Payload: map[string]any{"invocation_id": invocationID, "is_error": true, "error": err.Error()},
 		})
+		// 可观测性：每次工具返回都带 trace_id 落日志（server 端可实时按 trace 追踪，
+		// 不再只能等 turn 末聚合 summary）。
+		if lg := traceid.L(ctx); lg != nil {
+			lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", true, "error", err.Error())
+		}
 		if sendProgress != nil {
 			sendProgress(&StreamToolErrorPart{
 				ToolCallID:   tc.ToolCallID,
@@ -1313,6 +1376,10 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		Surface: true,
 		Payload: map[string]any{"invocation_id": invocationID, "is_error": false, "output_len": len(fmt.Sprintf("%v", output))},
 	})
+	// 可观测性：每次工具返回都带 trace_id 落日志（output 预览截断，避免日志膨胀）。
+	if lg := traceid.L(ctx); lg != nil {
+		lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", false, "output_preview", truncateStr(fmt.Sprintf("%v", output), 1000))
+	}
 
 	// Apply output truncation to prevent context bloat.
 	// 阈值优先用编排配置，零值回退默认；落盘指针仅在注入了 sink 且能取到

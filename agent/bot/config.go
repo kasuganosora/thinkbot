@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+// GLM-5.x 官方推荐的重复抑制参数（智谱 Review 明确点名，缺省会导致
+// "unstable output or excessive repetition"）。对所有 OpenAI 兼容提供商通用安全。
+const (
+	// DefaultFrequencyPenalty 重复惩罚：抑制模型反复输出相同 token。
+	DefaultFrequencyPenalty = 0.1
+	// DefaultPresencePenalty 存在惩罚：抑制已出现过的 token 再次出现。
+	DefaultPresencePenalty = 0.05
+)
+
 // ============================================================================
 // BotConfig — Bot 级别配置
 // ============================================================================
@@ -27,6 +36,14 @@ type BotConfig struct {
 
 	// Temperature LLM 温度参数。
 	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+
+	// FrequencyPenalty 重复惩罚：抑制模型反复输出相同 token（GLM-5.x 官方推荐 0.1）。
+	// nil 时由上游回退到 DefaultFrequencyPenalty。
+	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty" yaml:"frequencyPenalty,omitempty"`
+
+	// PresencePenalty 存在惩罚：抑制已出现过的 token 再次出现（GLM-5.x 官方推荐 0.05）。
+	// nil 时由上游回退到 DefaultPresencePenalty。
+	PresencePenalty *float64 `json:"presencePenalty,omitempty" yaml:"presencePenalty,omitempty"`
 
 	// MaxTokens LLM 最大输出 token 数。
 	MaxTokens int `json:"maxTokens" yaml:"maxTokens"`
@@ -75,10 +92,14 @@ func (c BotConfig) Location() *time.Location {
 // DefaultBotConfig 返回合理的默认配置。
 func DefaultBotConfig() BotConfig {
 	defaultTemp := 0.7
+	defaultFreqPen := DefaultFrequencyPenalty
+	defaultPresPen := DefaultPresencePenalty
 	return BotConfig{
 		Workers:           4,
 		IngressBufferSize: 256,
 		Temperature:       &defaultTemp,
+		FrequencyPenalty:  &defaultFreqPen,
+		PresencePenalty:   &defaultPresPen,
 		MaxTokens:         8192,
 	}
 }
@@ -100,6 +121,12 @@ func (c BotConfig) Merge(other BotConfig) BotConfig {
 	}
 	if other.Temperature != nil {
 		c.Temperature = other.Temperature
+	}
+	if other.FrequencyPenalty != nil {
+		c.FrequencyPenalty = other.FrequencyPenalty
+	}
+	if other.PresencePenalty != nil {
+		c.PresencePenalty = other.PresencePenalty
 	}
 	if other.MaxTokens > 0 {
 		c.MaxTokens = other.MaxTokens

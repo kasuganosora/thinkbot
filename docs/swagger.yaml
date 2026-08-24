@@ -1086,21 +1086,6 @@ paths:
       summary: 停止 Bot
       tags:
       - Bot 管理
-  /api/channels/types:
-    get:
-      description: 返回系统支持的 Channel 类型及其配置字段
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/api.Response'
-      security:
-      - CookieAuth: []
-      summary: Channel 类型
-      tags:
-      - Channel 管理
   /api/chat/bots:
     get:
       description: 返回当前处于运行状态的 Bot 列表

@@ -70,18 +70,20 @@ Key points:
 - A timeout is not a failure: if the returned ` + "`timedOut`" + ` is true, the task is still running in the background. Do NOT call ` + "`task`" + ` again (that would start a NEW task). Use ` + "`task_detail`" + ` to inspect progress, or simply tell the user the task is still in progress.
 - The ` + "`task`" + ` call may take minutes to tens of minutes; that is expected. The UI shows live progress while it runs.
 
-## When you MUST prefer task over running tools step by step
+## Default to task for any work that changes files — only read-only lookups are exempt
 
-Submit with the ` + "`task`" + ` tool instead of chaining tool calls yourself whenever **any** of these hold:
+**Rule (applies to ALL tasks, not just big ones): any task that edits, creates, or modifies files in a repository MUST be submitted with the ` + "`task`" + ` tool.** Do NOT hand-edit the repo by chaining ` + "`read_file`" + ` / ` + "`exec`" + ` / write calls yourself — let the task engine decompose and run it, so the work gets orchestration, progress tracking, and quality review.
 
-- The work has **3 or more relatively independent steps or sub-goals** (e.g. "修复所有 lint 问题", "重构多个模块", "批量处理多个文件").
-- Sub-tasks have **dependencies or a required order** that need orchestrating.
-- You expect **many steps or a long runtime** (e.g. possibly more than 10 tool calls).
-- It involves **editing / reading / analyzing multiple files**.
-- Key deliverables need **quality review or retries** (code changes, generated content, ...).
-- The user explicitly asks for "并行", "分批", or "自动化处理".
+This covers work of every size, including edits that look trivial:
+- editing or adding code, config, docs, styles, or assets in a project (e.g. "给 cfblog 加无障碍支持", "修 main.go 的拼写", "升级依赖版本")
+- work that spans one file or many — size alone is NOT a reason to go direct
+- anything the user will judge by its result (code changes, generated content, ...)
 
-Simple, single-step, immediate work (one command, one lookup) should just be done directly — do not route it through task.
+Only skip ` + "`task`" + ` and act directly when the work is **genuinely read-only and produces nothing**:
+- answering a question by inspecting existing files (` + "`read_file`" + ` / ` + "`list_dir`" + ` / grep)
+- running a single informational command whose output you only report (e.g. ` + "`git status`" + `, ` + "`which`" + `)
+
+When in doubt, submit with ` + "`task`" + `. Routing a small edit through task is cheap; hand-editing a repo and skipping review is not.
 
 ## Goal Mode (goalMode)
 
@@ -132,7 +134,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:         "task",
-			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
+			DeferredLoad: false, // 直接暴露工作流工具，避免被 deferred 加载队列排除导致 bot 永远搜不到
 			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
 			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
 			// 否则模型无从得知该参数的存在。
@@ -289,7 +291,7 @@ func nodesToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:         "task_detail",
-			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
+			DeferredLoad: false, // 直接暴露工作流工具，避免被 deferred 加载队列排除导致 bot 永远搜不到
 			Description:  "Query the detailed status of every sub-task in a task, including task description, execution result, error message, and dependencies. Two response formats are supported: flat (a sequential flat list) and tree (a tree built from the dependency graph, suited to UI rendering).",
 			Parameters: map[string]any{
 				"type": "object",
@@ -336,7 +338,7 @@ func controlToolDef(mgr *Manager) tools.ToolDef {
 		Scopes:   []string{"private", "group"},
 		Tool: llm.Tool{
 			Name:         "task_control",
-			DeferredLoad: true, // 工作流非日常任务，初始仅暴露名称+描述
+			DeferredLoad: false, // 直接暴露工作流工具，避免被 deferred 加载队列排除导致 bot 永远搜不到
 			Description:  "Perform a control operation on a task. Two actions are supported: 1) retry - rerun a specific failed/skipped sub-task; 2) terminate - terminate the whole task (all unfinished sub-tasks are marked as skipped).\n\nIMPORTANT: NEVER call terminate while the task is in the analysis phase (status=analyzing). During analysis the workflow is waiting on model inference to decompose the requirement, so there is no progress output for a while (first-token latency on reasoning models can reach tens of seconds). This is normal, not a hang, and terminating here kills a workflow that would have succeeded. Wait until it reaches running (sub-tasks generated), and only consider terminate if a node is genuinely stuck. If the requirement itself was wrong, fix it and submit again instead of terminating.",
 			Parameters: map[string]any{
 				"type": "object",

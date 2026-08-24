@@ -91,7 +91,7 @@ func TestIsValidRole(t *testing.T) {
 
 func TestCreateUser_Success(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, err := svc.CreateUser(ctx, CreateUserInput{
@@ -123,7 +123,7 @@ func TestCreateUser_Success(t *testing.T) {
 
 func TestCreateUser_Duplicate(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -145,7 +145,7 @@ func TestCreateUser_Duplicate(t *testing.T) {
 
 func TestCreateUser_DefaultRole(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, err := svc.CreateUser(ctx, CreateUserInput{
@@ -162,7 +162,7 @@ func TestCreateUser_DefaultRole(t *testing.T) {
 
 func TestCreateUser_InvalidRole(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -177,7 +177,7 @@ func TestCreateUser_InvalidRole(t *testing.T) {
 
 func TestCreateUser_ShortPassword(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -191,7 +191,7 @@ func TestCreateUser_ShortPassword(t *testing.T) {
 
 func TestCreateUser_EmptyUsername(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -205,7 +205,7 @@ func TestCreateUser_EmptyUsername(t *testing.T) {
 
 func TestAuthenticate_Success(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -230,7 +230,7 @@ func TestAuthenticate_Success(t *testing.T) {
 
 func TestAuthenticate_WrongPassword(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -249,7 +249,7 @@ func TestAuthenticate_WrongPassword(t *testing.T) {
 
 func TestAuthenticate_UserNotFound(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.Authenticate(ctx, "nobody", "whatever")
@@ -260,7 +260,7 @@ func TestAuthenticate_UserNotFound(t *testing.T) {
 
 func TestAuthenticate_DisabledUser(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, err := svc.CreateUser(ctx, CreateUserInput{
@@ -283,7 +283,7 @@ func TestAuthenticate_DisabledUser(t *testing.T) {
 
 func TestGetUser(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	created, err := svc.CreateUser(ctx, CreateUserInput{
@@ -305,7 +305,7 @@ func TestGetUser(t *testing.T) {
 
 func TestGetUser_NotFound(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.GetUser(ctx, 99999)
@@ -316,7 +316,7 @@ func TestGetUser_NotFound(t *testing.T) {
 
 func TestGetUserByUsername(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	_, err := svc.CreateUser(ctx, CreateUserInput{
@@ -338,7 +338,7 @@ func TestGetUserByUsername(t *testing.T) {
 
 func TestListUsers(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	for _, name := range []string{"user1", "user2", "user3"} {
@@ -362,7 +362,7 @@ func TestListUsers(t *testing.T) {
 
 func TestUpdateRole(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, err := svc.CreateUser(ctx, CreateUserInput{
@@ -385,7 +385,7 @@ func TestUpdateRole(t *testing.T) {
 
 func TestUpdateRole_Invalid(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, _ := svc.CreateUser(ctx, CreateUserInput{
@@ -401,7 +401,7 @@ func TestUpdateRole_Invalid(t *testing.T) {
 
 func TestUpdatePassword(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, _ := svc.CreateUser(ctx, CreateUserInput{
@@ -428,7 +428,7 @@ func TestUpdatePassword(t *testing.T) {
 
 func TestDisableEnableUser(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, _ := svc.CreateUser(ctx, CreateUserInput{
@@ -455,7 +455,7 @@ func TestDisableEnableUser(t *testing.T) {
 
 func TestDeleteUser(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, _ := svc.CreateUser(ctx, CreateUserInput{
@@ -475,7 +475,7 @@ func TestDeleteUser(t *testing.T) {
 
 func TestUpdateProfile(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	user, _ := svc.CreateUser(ctx, CreateUserInput{
@@ -503,7 +503,7 @@ func TestUpdateProfile(t *testing.T) {
 
 func TestCan(t *testing.T) {
 	db := newTestDB(t)
-	svc := New(db)
+	svc := New(db, "")
 	ctx := context.Background()
 
 	admin, _ := svc.CreateUser(ctx, CreateUserInput{

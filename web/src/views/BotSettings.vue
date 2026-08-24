@@ -212,16 +212,17 @@ watch(() => store.bots.length, () => { if (!bot.value) loadBot() })
 function goBack() { router.push({ name: 'system-settings' }) }
 
 function renameBot() {
+  const tmpName = ref(bot.value?.name || '')
   const dlg = DialogPlugin.confirm({
     header: '重命名 Bot',
     body: () => h('input', {
-      value: bot.value.name,
+      value: tmpName.value,
       class: 't-input__inner',
       style: 'width:100%;padding:8px;border:1px solid #ddd;border-radius:6px',
-      onInput: e => { bot.value._tmpName = e.target.value }
+      onInput: e => { tmpName.value = e.target.value }
     }),
     onConfirm: () => {
-      const name = (bot.value._tmpName ?? bot.value.name).trim()
+      const name = (tmpName.value ?? bot.value?.name || '').trim()
       if (name) { store.updateBot(bot.value.id, { name }); bot.value.name = name; form.value.name = name }
       dlg.destroy()
     }

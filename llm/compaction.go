@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // ============================================================================
@@ -117,6 +119,12 @@ func DefaultCompactionConfig() CompactionConfig {
 	}
 }
 
+// DefaultCompactionConfigPtr 返回 *CompactionConfig 指针（便于直接挂到 LLMConfig.Compaction）。
+func DefaultCompactionConfigPtr() *CompactionConfig {
+	c := DefaultCompactionConfig()
+	return &c
+}
+
 // CompactionSystemPrompt 是压缩摘要的系统提示词。
 const CompactionSystemPrompt = `You are an anchored context summarization assistant for coding sessions.
 
@@ -173,6 +181,13 @@ type Compactor struct {
 	mu              sync.Mutex
 	previousSummary string // 上次生成的摘要（用于增量更新）
 	compactionCount int    // 连续压缩次数（doom loop 预防）
+	logger          *zap.SugaredLogger
+}
+
+// SetLogger 设置压缩器日志（可选，用于观测压缩触发）。返回 receiver 便于链式调用。
+func (c *Compactor) SetLogger(l *zap.SugaredLogger) *Compactor {
+	c.logger = l
+	return c
 }
 
 // NewCompactor 创建上下文压缩器。
@@ -367,6 +382,14 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 	pruned := c.PruneToolOutputs(params.Messages)
 	params.Messages = pruned
 
+	if c.logger != nil {
+		c.logger.Debugw("compaction: running",
+			"messages", len(pruned),
+			"est_tokens", EstimateParamsTokens(params),
+			"usable_tokens", c.UsableTokens(),
+			"had_summary", c.previousSummary != "")
+	}
+
 	if !c.IsOverflow(params) {
 		return params, nil
 	}
@@ -443,6 +466,13 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 	summary := result.Text
 	if summary == "" {
 		return params, nil
+	}
+
+	if c.logger != nil {
+		c.logger.Infow("compaction: summarized",
+			"old_messages", len(oldMessages),
+			"tail_messages", len(tailMessages),
+			"summary_len", len(summary))
 	}
 
 	// 保存摘要供下次增量更新

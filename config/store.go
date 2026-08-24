@@ -26,8 +26,8 @@ type Setting = dao.Setting
 //
 // 配置读取优先级（从高到低）：
 //  1. 运行时覆盖（SetTemporary / overrides map）
-//  2. .env 文件
-//  3. 数据库（config_settings 表）
+//  2. 数据库（config_settings 表，UI 显式配置）
+//  3. .env 文件（部署期种子/默认值）
 //  4. 操作系统环境变量
 //  5. 默认值（调用方提供）
 //
@@ -73,19 +73,26 @@ func (s *Store) Get(key string) (string, bool) {
 }
 
 // getLocked 在已持锁的情况下按优先级返回配置值。
+// 优先级（从高到低）：
+//  1. 运行时覆盖（SetTemporary / overrides map）
+//  2. 数据库缓存（Set/Reload 后即生效，代表用户在 UI 中的显式配置）
+//  3. .env 文件（部署期种子/默认值）
+//  4. 操作系统环境变量（兜底）
+//
+// 注意：数据库优先级高于 .env，避免 .env 中的旧值静默遮蔽 UI 的修改。
 func (s *Store) getLocked(key string) (string, bool) {
 	// 1. 运行时覆盖
 	if v, ok := s.overrides[key]; ok {
 		return v, true
 	}
 
-	// 2. .env 文件
-	if v, ok := s.envFile[key]; ok {
+	// 2. 数据库缓存（UI 显式配置优先于 .env 种子值）
+	if v, ok := s.dbCache[key]; ok {
 		return v, true
 	}
 
-	// 3. 数据库缓存（Set/Reload 后即生效）
-	if v, ok := s.dbCache[key]; ok {
+	// 3. .env 文件
+	if v, ok := s.envFile[key]; ok {
 		return v, true
 	}
 
@@ -246,21 +253,11 @@ func (s *Store) GetByPrefix(prefix string) map[string]string {
 	check(s.envFile)
 	check(s.dbCache)
 
-	// 环境变量
-	// 去掉 prefix 尾部的分隔符，避免 ConfigKeyToEnvKey 转换后产生双下划线
-	envKeyPrefix := ConfigKeyToEnvKey(strings.TrimSuffix(prefix, ".")) + "_"
-	for _, kv := range os.Environ() {
-		envKey, envVal, found := strings.Cut(kv, "=")
-		if !found {
-			continue
-		}
-		if rest, ok := strings.CutPrefix(envKey, envKeyPrefix); ok {
-			rest = EnvKeyToConfigKey(rest)
-			if _, exists := result[rest]; !exists {
-				result[rest] = envVal
-			}
-		}
-	}
+	// 注意：不再直接扫描 os.Environ()。
+	// 进程环境变量经 EnvKeyToConfigKey 映射后会丢失前缀并引入下划线/点号歧义，
+	// 容易把无关的进程变量（如 PATH/HOME 的某种前缀匹配）折入配置。
+	// Store 的 .env 值已由 LoadEnvFile 写入 envFile，标量读取仍由 Get() 的
+	// os.LookupEnv 兜底，故此处仅返回 Store 受控的配置源。
 
 	return result
 }
@@ -552,7 +549,7 @@ func (s *Store) LoadEnvFile(path string) error {
 	}
 
 	s.mu.Lock()
-	maps.Copy(s.envFile, values)
+	maps.Copy(s.envFile, normalizeEnvKeys(values))
 	s.mu.Unlock()
 
 	return nil
@@ -562,7 +559,21 @@ func (s *Store) LoadEnvFile(path string) error {
 func (s *Store) LoadEnvMap(values map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	maps.Copy(s.envFile, values)
+	maps.Copy(s.envFile, normalizeEnvKeys(values))
+}
+
+// normalizeEnvKeys 将键统一小写化后返回新映射。
+// 配置键约定为小写（如 "llm.openai.api_key"），而 .env 文件中常写作大写
+// （如 "LLM.OPENAI.API_KEY"）。若不归一化，大写键无法命中配置查询而被静默忽略。
+func normalizeEnvKeys(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		out[strings.ToLower(k)] = v
+	}
+	return out
 }
 
 // ============================================================================\
