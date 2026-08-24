@@ -82,6 +82,12 @@ type TelegramChannel struct {
 	// 仅追加记录，不入站逻辑依赖；读侧由 RecentChats 暴露。
 	recentChats  map[int64]core.ChatRef
 	recentChatMu sync.Mutex
+
+	// editSeen 记录已处理的 edited_message（key = "chatID:messageID" → 上次见到的文本），
+	// 用于去重：Telegram 同一编辑可能被重复投递，未去重会导致同一条编辑重复触发完整 LLM 编排。
+	// 仅在「文本与上次相同」时跳过；用户真正再次编辑（文本变化）仍会正常处理。
+	editSeen map[string]string
+	editMu   sync.Mutex
 }
 
 // NewChannel 创建一个 TelegramChannel。
@@ -223,6 +229,12 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 
 	// 仍然无内容则跳过
 	if text == "" {
+		return
+	}
+
+	// edited_message 去重：同一编辑可能被重复投递，未去重会让同一条编辑重复触发完整 LLM 编排。
+	// 仅当「文本与上次处理时相同」才跳过；用户真正再次编辑（文本变化）仍会正常处理。
+	if upd.EditedMessage != nil && c.editSeenAlready(msg.Chat.ID, msg.MessageID, text) {
 		return
 	}
 
@@ -523,6 +535,27 @@ func (c *TelegramChannel) recordChat(id int64, title string) {
 			break
 		}
 	}
+}
+
+// editSeenAlready 记录并返回该 edited_message 是否已以相同文本处理过（用于去重）。
+// key 为 "chatID:messageID"，值为上次处理的文本：若本次文本与上次相同则视为重复投递，返回 true；
+// 若文本不同（用户再次编辑）则更新记录并返回 false，保证真实编辑仍会被处理。
+func (c *TelegramChannel) editSeenAlready(chatID, messageID int64, text string) bool {
+	key := fmt.Sprintf("%d:%d", chatID, messageID)
+	c.editMu.Lock()
+	defer c.editMu.Unlock()
+	if c.editSeen == nil {
+		c.editSeen = make(map[string]string)
+	}
+	if prev, ok := c.editSeen[key]; ok && prev == text {
+		return true
+	}
+	// 防止 map 无限增长：超过上限时整体重置（去重是尽力而为，不影响正确性）。
+	if len(c.editSeen) > 5000 {
+		c.editSeen = make(map[string]string)
+	}
+	c.editSeen[key] = text
+	return false
 }
 
 // RecentChats 返回近期活跃会话列表（实现 core.RecentChatLister），

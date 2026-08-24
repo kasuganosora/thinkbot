@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -474,4 +475,112 @@ func HasWarningLevel(env *core.Envelope, level string) bool {
 // ClearWarnings clears all warnings in the envelope for test isolation.
 func ClearWarnings(env *core.Envelope) {
 	core.ClearWarnings(env)
+}
+
+// ============================================================================
+// 多变混乱调用检测（ChaosLoop）测试
+// ============================================================================
+
+// lowValueStage 构造一个「仅含低价值工具、且每次参数不同」的 Step 结果，
+// 用于验证 ChaosLoop 能捕捉「完全相同 hash 检测捕捉不到」的多变混乱调用。
+func lowValueStage(name string, tools ...llm.ToolCall) core.Stage {
+	return llmResultStage(name, &llm.GenerateResult{
+		Steps: []llm.StepResult{{ToolCalls: tools}},
+	})
+}
+
+// TestLoopDetectionMiddleware_ChaosLoopTriggers 验证：连续 N 步仅调低价值工具
+// （text_stats/memory/misskey_* 等，且每次参数都不同）会触发硬警告强制收尾。
+// 这是「完全相同 hash≥N 才触发」无法捕捉的退化模式（cfblog 长任务根因之一）。
+func TestLoopDetectionMiddleware_ChaosLoopTriggers(t *testing.T) {
+	cfg := NewLoopDetectionConfig() // ChaosThreshold=5，LowValueTools 含 misskey_*/text_stats/...
+	mw := LoopDetectionMiddleware(cfg)
+
+	channel := "ch-chaos"
+	// 5 步：每步只调一个低价值工具，且每次参数都不同（确保 identical-hash 检测不触发）。
+	pairs := []struct {
+		name  string
+		input string
+	}{
+		{"text_stats", "aaa"},
+		{"memory", "bbb"},
+		{"misskey_get_user_notes", "ccc"},
+		{"text_stats", "ddd"},
+		{"memory", "eee"},
+	}
+	var last *core.Envelope
+	for i, p := range pairs {
+		stepStage := lowValueStage("step",
+			llm.ToolCall{ToolCallID: fmt.Sprintf("tc%d", i), ToolName: p.name, Input: p.input})
+		wrappedStep := mw(stepStage)
+		env := core.NewEnvelope(core.Message{ID: fmt.Sprintf("t%d", i), Channel: channel})
+		r, err := wrappedStep.Process(context.Background(), env)
+		if err != nil {
+			t.Fatalf("unexpected error at step %d: %v", i, err)
+		}
+		last = r
+		// 前 4 步不应触发（streak < 5）
+		if i < 4 && HasWarning(r, "loop_detection") {
+			t.Errorf("step %d: expected no warning yet (streak=%d < threshold)", i, i+1)
+		}
+	}
+	// 第 5 步：streak=5 ≥ ChaosThreshold → 硬警告
+	if !HasWarning(last, "loop_detection") {
+		t.Error("expected chaos-loop hard warning after 5 consecutive low-value-only steps")
+	}
+	if !HasWarningLevel(last, core.WarningLevelHard) {
+		t.Error("expected hard-level chaos warning")
+	}
+}
+
+// TestLoopDetectionMiddleware_ChaosLoopResetByProductiveTool 验证：混乱序列中
+// 一旦插入一个「推进型」工具调用（如 exec/read_file），streak 立即归零，不误杀正常任务。
+func TestLoopDetectionMiddleware_ChaosLoopResetByProductiveTool(t *testing.T) {
+	cfg := NewLoopDetectionConfig()
+	mw := LoopDetectionMiddleware(cfg)
+	wrapped := mw(lowValueStage("step"))
+
+	channel := "ch-reset"
+	// 3 步低价值
+	for i := 0; i < 3; i++ {
+		env := core.NewEnvelope(core.Message{ID: fmt.Sprintf("low%d", i), Channel: channel})
+		if _, err := wrapped.Process(context.Background(), env); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	// 第 4 步：插入 exec（推进型）→ streak 归零
+	execStage := llmResultStage("exec-step", &llm.GenerateResult{
+		Steps: []llm.StepResult{{
+			ToolCalls: []llm.ToolCall{{ToolCallID: "tc", ToolName: "exec", Input: "git status"}},
+		}},
+	})
+	wrappedExec := mw(execStage)
+	envExec := core.NewEnvelope(core.Message{ID: "exec1", Channel: channel})
+	rExec, err := wrappedExec.Process(context.Background(), envExec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if HasWarning(rExec, "loop_detection") {
+		t.Error("productive tool call should reset chaos streak (no false warning)")
+	}
+}
+
+// TestLoopDetectionMiddleware_ChaosDisabledWhenThresholdZero 验证：ChaosThreshold≤0 时
+// 混乱检测被禁用（保持原有「仅完全相同 hash」行为），不破坏既有调用方。
+func TestLoopDetectionMiddleware_ChaosDisabledWhenThresholdZero(t *testing.T) {
+	cfg := NewLoopDetectionConfig().WithChaosThreshold(0)
+	mw := LoopDetectionMiddleware(cfg)
+	wrapped := mw(lowValueStage("step"))
+
+	channel := "ch-nodisabled"
+	for i := 0; i < 6; i++ {
+		env := core.NewEnvelope(core.Message{ID: fmt.Sprintf("t%d", i), Channel: channel})
+		r, err := wrapped.Process(context.Background(), env)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if HasWarning(r, "loop_detection") {
+			t.Errorf("step %d: chaos disabled (threshold=0) → expected no warning", i)
+		}
+	}
 }

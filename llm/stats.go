@@ -1,6 +1,9 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // UsageMetric 描述一次 LLM 调用的使用统计维度。
 // 由各 Stage（reply / chat / vision / memory 等）在 LLM 调用完成后构建，
@@ -8,6 +11,10 @@ import "context"
 type UsageMetric struct {
 	// BotID 标识哪个 Bot 发起的调用（从 Envelope bot.id 提取）。
 	BotID string
+
+	// At 本次调用的发生时间（由构建方填充，默认零值将回退到 flush 时刻）。
+	// flush 按此时间（而非 flush 时刻）归到对应自然日，避免跨日/延迟 flush 错日。
+	At time.Time
 
 	// Model 模型标识符（如 claude-sonnet-4-20250514）。
 	Model string

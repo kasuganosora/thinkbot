@@ -168,7 +168,12 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 	aggregated := make(map[aggKey]*aggRow)
 
 	for _, m := range metrics {
-		date := truncateToDate(time.Now())
+		// 以指标的发生时间（At）归日；未填充时回退到 flush 时刻，兼容旧调用方。
+		at := m.At
+		if at.IsZero() {
+			at = time.Now()
+		}
+		date := truncateToDate(at)
 		key := aggKey{
 			botID:   m.BotID,
 			model:   m.Model,

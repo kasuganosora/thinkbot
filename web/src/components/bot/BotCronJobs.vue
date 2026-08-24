@@ -191,7 +191,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { cronApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
@@ -222,10 +222,14 @@ async function load() {
   try {
     const res = await cronApi.list(props.botId)
     list.value = res.jobs || []
+  } catch (e) {
+    // 静默失败会让「加载失败」和「一个任务都没有」长得一模一样
+    MessagePlugin.error(`加载定时任务失败：${e.message || e}`)
   } finally {
     loading.value = false
   }
 }
+// 只在 setup 里加载一次（早期这里与 onMounted 各调一次，进面板就打两趟请求）
 load()
 
 /* ---------------- 弹窗与表单 ---------------- */
@@ -446,18 +450,41 @@ async function submit() {
   }
 }
 
-async function trigger(row) { await cronApi.trigger(props.botId, row.id); MessagePlugin.success('已触发执行'); load() }
-async function pause(row) { await cronApi.pause(props.botId, row.id); MessagePlugin.success('已暂停'); load() }
-async function resume(row) { await cronApi.resume(props.botId, row.id); MessagePlugin.success('已恢复'); load() }
+/**
+ * 统一执行「操作 + 成功提示 + 刷新列表」。
+ * 失败时只报错、不提示成功，也不刷新（原实现无 catch：接口 403/500 时
+ * 照样弹「已暂停」，用户以为生效了，列表却还是原状）。
+ */
+async function runJobAction(action, successText) {
+  try {
+    await action()
+    MessagePlugin.success(successText)
+    await load()
+  } catch (e) {
+    MessagePlugin.error(e.message || '操作失败')
+  }
+}
+
+function trigger(row) { return runJobAction(() => cronApi.trigger(props.botId, row.id), '已触发执行') }
+function pause(row) { return runJobAction(() => cronApi.pause(props.botId, row.id), '已暂停') }
+function resume(row) { return runJobAction(() => cronApi.resume(props.botId, row.id), '已恢复') }
 
 function remove(row) {
   const dlg = DialogPlugin.confirm({
     header: '删除任务', body: `确认删除任务「${row.name}」？`, theme: 'warning',
-    onConfirm: async () => { await cronApi.remove(props.botId, row.id); dlg.destroy(); MessagePlugin.success('已删除'); load() }
+    onConfirm: async () => {
+      try {
+        await cronApi.remove(props.botId, row.id)
+      } catch (e) {
+        MessagePlugin.error(e.message || '删除失败')
+        return
+      }
+      dlg.destroy()
+      MessagePlugin.success('已删除')
+      load()
+    }
   })
 }
-
-onMounted(() => { load() })
 </script>
 
 <style scoped>

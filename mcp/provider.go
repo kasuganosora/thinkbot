@@ -73,6 +73,16 @@ func (p *Provider) InvalidateCache() {
 func (p *Provider) refresh(ctx context.Context) ([]llm.Tool, error) {
 	serverTools, err := p.manager.ListAllTools(ctx)
 	if err != nil {
+		// 部分服务器抖动导致列表残缺：保留旧缓存（若有），
+		// 避免工具整体「消失」或被残缺结果覆盖。
+		p.mu.RLock()
+		old := p.cache
+		p.mu.RUnlock()
+		if len(old) > 0 {
+			p.logger.Warnw("mcp tools refresh partial failure, keeping previous cache",
+				"err", err)
+			return old, nil
+		}
 		return nil, err
 	}
 
@@ -116,7 +126,7 @@ func RegisterTools(toolMgr *tools.ToolManager, mgr *Manager) error {
 		Order: 305,
 		Content: `## MCP Tools
 
-Some of your tools are provided by external MCP servers. Their names follow the pattern ` + "`mcp__<server>__<tool>`" + `.
+Some of your tools are provided by external MCP servers. Their names follow the pattern ` + "`<server>__<tool>`" + `.
 
 - Their parameter schemas are defined by the MCP server. You MUST call them exactly as the schema specifies — never invent or omit fields.
 - MCP tool results are returned as plain text. Parse them yourself before relying on the content.

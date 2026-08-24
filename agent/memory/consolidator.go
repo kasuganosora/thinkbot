@@ -123,11 +123,12 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 		return nil, nil
 	}
 
-	// 限制输入数量
+	// 不再超额截断丢弃：处理全部传入条目，避免未处理 L0 条目被永久遗漏而持续积压。
+	// 调用方（TieredManager.Consolidate）已从 store 分页取出未处理条目，
+	// 此处若再截断会导致被丢弃的条目永远得不到 processed 标记。
 	if len(l0Entries) > c.config.MaxInputEntries {
-		c.logger.Warnw("consolidator: input exceeds MaxInputEntries, excess entries will not be processed this run",
+		c.logger.Warnw("consolidator: input exceeds MaxInputEntries, processing all (no truncation)",
 			"total", len(l0Entries), "max", c.config.MaxInputEntries)
-		l0Entries = l0Entries[:c.config.MaxInputEntries]
 	}
 
 	ctx, span := c.tracer.Start(ctx, "memory.consolidate",

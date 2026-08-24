@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/auth"
 	_ "github.com/kasuganosora/thinkbot/docs" // Swagger 文档
+	"github.com/kasuganosora/thinkbot/internal/buildinfo"
 )
 
 // ============================================================================
@@ -22,9 +24,22 @@ import (
 func (s *Server) registerRoutes() {
 	r := s.engine
 
-	// 健康检查（公开，仅返回 ok）
+	// 健康检查（公开，供探针/监控调用，无需登录）
+	// 额外返回构建信息，便于确认运行实例是否含期望的修复。
 	r.GET("/health", func(c *gin.Context) {
-		OK(c, gin.H{"status": "ok"})
+		bi := buildinfo.Get()
+		OK(c, gin.H{
+			"status":        "ok",
+			"version":       bi.Version,
+			"gitRevision":   bi.GitRevision,
+			"gitShort":      bi.GitShort,
+			"buildTime":     bi.BuildTime,
+			"buildTimeUnix": bi.BuildTimeUnix,
+			"buildSource":   bi.Source,
+			"goVersion":     bi.GoVersion,
+			"uptime":        time.Since(startTime).String(),
+			"uptimeSec":     int64(time.Since(startTime).Seconds()),
+		})
 	})
 
 	// Swagger UI
@@ -101,13 +116,13 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/cron/:jobId/resume", s.handleResumeCronJob)
 				botsAdmin.POST("/:id/cron/:jobId/trigger", s.handleTriggerCronJob)
 
-			// 分层记忆（嵌套在 Bot 下，真实存储为数据库 tiered_memories 表，按 L0~L3 分层）
-			// GET  /:id/memory        → handleQueryMemory：返回合并/分层的记忆条目（前端 memoryApi.query）
-			// GET  /:id/memory/stats  → handleMemoryStats：L1/L2 计数
-			// DELETE /:id/memory/entry → handleDeleteTieredMemoryEntry：按 id+tier+scope 删除单条记忆
-			botsAdmin.GET("/:id/memory", s.handleQueryMemory)
-			botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
-			botsAdmin.DELETE("/:id/memory/entry", s.handleDeleteTieredMemoryEntry)
+				// 分层记忆（嵌套在 Bot 下，真实存储为数据库 tiered_memories 表，按 L0~L3 分层）
+				// GET  /:id/memory        → handleQueryMemory：返回合并/分层的记忆条目（前端 memoryApi.query）
+				// GET  /:id/memory/stats  → handleMemoryStats：L1/L2 计数
+				// DELETE /:id/memory/entry → handleDeleteTieredMemoryEntry：按 id+tier+scope 删除单条记忆
+				botsAdmin.GET("/:id/memory", s.handleQueryMemory)
+				botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
+				botsAdmin.DELETE("/:id/memory/entry", s.handleDeleteTieredMemoryEntry)
 
 				// Channel 配置管理 — 已废弃，统一使用 Platform API（/api/bots/:id/platforms）
 				// 旧 Channel API 路由已移除

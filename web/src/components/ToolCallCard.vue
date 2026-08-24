@@ -168,7 +168,29 @@ const expanded = ref(true)
 
 // 卡死看门狗：后端流式连接断开时，工具调用会永久停在 running（"执行中"）。
 // 若 running 状态超过阈值仍无更新，本地降级为 timeout，避免 UI 永久假死。
-const STUCK_TIMEOUT_MS = 3 * 60 * 1000
+//
+// 阈值不能一刀切：读文件几百毫秒，而容器里编译/跑测试、跑子工作流动辄几十分钟。
+// 早期固定 3 分钟，导致长任务明明还在跑却被标成 timeout（纯前端误判）。
+// 现在的判据是「多久没有任何活动」——每收到一次进度更新都会重置计时（见下面的
+// watch），因此阈值只需覆盖「两次输出之间的最长静默」，可以给得比较宽松。
+const DEFAULT_STUCK_TIMEOUT_MS = 15 * 60 * 1000
+// 已知的长耗时工具：允许更长的静默期
+const LONG_RUNNING_TIMEOUTS = {
+  exec: 60 * 60 * 1000,
+  bg_exec: 60 * 60 * 1000,
+  task: 4 * 60 * 60 * 1000,
+  task_status: 4 * 60 * 60 * 1000,
+}
+
+/** 本次调用允许的最长静默时间（可由 call.timeoutMs 显式指定） */
+function stuckTimeoutMs() {
+  const explicit = Number(props.call.timeoutMs)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  // sandbox_exec 与 exec 同源，去前缀后统一查表
+  const key = String(props.call.name || '').replace(/^sandbox_/, '')
+  return LONG_RUNNING_TIMEOUTS[key] || DEFAULT_STUCK_TIMEOUT_MS
+}
+
 const stuck = ref(false)
 let stuckTimer = null
 function clearStuckTimer() {
@@ -178,7 +200,7 @@ function clearStuckTimer() {
 function armStuckTimer() {
   clearStuckTimer()
   if (props.call.status === 'running') {
-    stuckTimer = setTimeout(() => { stuck.value = true }, STUCK_TIMEOUT_MS)
+    stuckTimer = setTimeout(() => { stuck.value = true }, stuckTimeoutMs())
   }
 }
 onMounted(armStuckTimer)

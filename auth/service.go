@@ -29,16 +29,25 @@ var (
 	ErrInvalidCredentials = errors.New("auth: invalid credentials")
 	ErrUserDisabled       = errors.New("auth: user is disabled")
 	ErrInvalidRole        = errors.New("auth: invalid role")
+	// ErrBootstrapDisabled 表示空库首登自举被禁用（未配置 bootstrap token）。
+	// 此时必须通过 AUTH_BOOTSTRAP_ADMIN/PASSWORD 在启动时显式初始化首位管理员，
+	// 避免任意可达 /auth/login 的客户端静默接管实例（修复 5193）。
+	ErrBootstrapDisabled = errors.New("auth: bootstrap disabled — set AUTH_BOOTSTRAP_TOKEN or AUTH_BOOTSTRAP_ADMIN/PASSWORD to initialize the first admin")
 )
 
 // AuthService 提供用户 CRUD 和认证能力。
 type AuthService struct {
 	db *gorm.DB
+	// bootstrapToken 空库首登自举令牌（来自 AUTH_BOOTSTRAP_TOKEN）。
+	// 非空时，首次登录必须以该令牌作为密码才能创建首位管理员；
+	// 为空时，空库首登自举被禁用（强制显式初始化）。
+	bootstrapToken string
 }
 
 // New 创建 AuthService。
-func New(db *gorm.DB) *AuthService {
-	return &AuthService{db: db}
+// bootstrapToken 为空表示禁用空库首登自动建 admin（修复 5193 的安全缺口）。
+func New(db *gorm.DB, bootstrapToken string) *AuthService {
+	return &AuthService{db: db, bootstrapToken: bootstrapToken}
 }
 
 // DB 返回底层 gorm.DB（仅供内部模块使用，如 module.go 的 bootstrap 检查）。
@@ -175,13 +184,21 @@ func (s *AuthService) AuthenticateOrBootstrap(ctx context.Context, username, pas
 			return ErrInvalidCredentials
 		}
 
-		// 校验输入
+		// 空库首登自举门槛（修复 5193）：不再接受任意登录静默成 admin。
+		// 必须配置 AUTH_BOOTSTRAP_TOKEN 且本次密码与之匹配，或预先用
+		// AUTH_BOOTSTRAP_ADMIN/PASSWORD 在启动时初始化。否则拒绝自举，
+		// 防止暴露在服务端口的任意客户端接管实例。
+		if s.bootstrapToken == "" {
+			return ErrBootstrapDisabled
+		}
+		if password != s.bootstrapToken {
+			return ErrInvalidCredentials
+		}
+
+		// 校验输入（此分支为空白库自举：密码即 bootstrap token，长度由管理员自定，不再强制 ≥6）
 		uname := strings.TrimSpace(username)
 		if uname == "" {
 			return errs.BadRequest("username is required")
-		}
-		if len(password) < 6 {
-			return errs.BadRequest("password must be at least 6 characters")
 		}
 
 		// 哈希密码

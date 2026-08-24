@@ -112,7 +112,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { botHeartbeatApi } from '@/api/services'
 
@@ -154,13 +154,18 @@ const cfg = reactive({
 const saving = ref(false)
 
 async function loadConfig() {
-  const c = await botHeartbeatApi.getConfig(props.botId)
-  cfg.enabled = c.enabled
-  cfg.interval = c.interval
-  if (typeof c.allow_post === 'boolean') cfg.allow_post = c.allow_post
-  if (typeof c.max_consecutive_wakes === 'number') cfg.max_consecutive_wakes = c.max_consecutive_wakes
-  if (typeof c.cooldown_min === 'number') cfg.cooldown_min = c.cooldown_min
-  if (typeof c.idle_wake_every === 'number') cfg.idle_wake_every = c.idle_wake_every
+  try {
+    const c = await botHeartbeatApi.getConfig(props.botId)
+    cfg.enabled = c.enabled
+    cfg.interval = c.interval
+    if (typeof c.allow_post === 'boolean') cfg.allow_post = c.allow_post
+    if (typeof c.max_consecutive_wakes === 'number') cfg.max_consecutive_wakes = c.max_consecutive_wakes
+    if (typeof c.cooldown_min === 'number') cfg.cooldown_min = c.cooldown_min
+    if (typeof c.idle_wake_every === 'number') cfg.idle_wake_every = c.idle_wake_every
+  } catch (e) {
+    // 静默失败会让用户对着一堆默认值以为这就是当前配置，一保存就把真配置覆盖掉
+    MessagePlugin.error(`加载心跳配置失败：${e.message || e}`)
+  }
 }
 async function saveConfig() {
   saving.value = true
@@ -209,12 +214,13 @@ async function loadLogs() {
   try {
     const res = await botHeartbeatApi.listLogs(props.botId, filter.value)
     logs.value = res.logs || []
+  } catch (e) {
+    // 请求失败时保持上一次的数据不动，只提示；避免「空列表」被误读为「没有心跳」
+    MessagePlugin.error(`加载心跳日志失败：${e.message || e}`)
   } finally {
     loadingLogs.value = false
   }
 }
-
-onMounted(() => { loadLogs() })
 
 function clearLogs() {
   const dlg = DialogPlugin.confirm({
@@ -226,6 +232,8 @@ function clearLogs() {
         dlg.destroy()
         MessagePlugin.success('已清空')
         await loadLogs()
+      } catch (e) {
+        MessagePlugin.error(`清空失败：${e.message || e}`)
       } finally {
         clearing.value = false
       }
@@ -233,6 +241,8 @@ function clearLogs() {
   })
 }
 
+// setup 里直接调用即可，早期这里同时挂了 onMounted(loadLogs) 与本处调用，
+// 每次进入面板都会打两次同样的日志查询。
 loadConfig()
 loadLogs()
 </script>

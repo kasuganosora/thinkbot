@@ -162,61 +162,76 @@ func (c *SemanticCompactor) Compact(
 		return report, nil
 	}
 
-	// 限制输入数量
-	if len(active) > c.config.MaxInputEntries {
-		c.logger.Warnw("compactor: input exceeds MaxInputEntries, excess entries will not be processed this run",
-			"total", len(active), "max", c.config.MaxInputEntries)
-		active = active[:c.config.MaxInputEntries]
+	// 分批循环压缩：超 MaxInputEntries 时切块，避免超额条目被丢弃导致记忆只增不减。
+	// （与 SQLiteCompactor 同源的缺陷：原实现超额即截断、其余本轮不处理。）
+	batchSize := c.config.MaxInputEntries
+	if batchSize < c.config.MinClusterSize {
+		batchSize = c.config.MinClusterSize
+	}
+	totalBatches := (len(active) + batchSize - 1) / batchSize
+	if totalBatches > 1 {
+		c.logger.Infow("compactor: input exceeds MaxInputEntries, processing in batches",
+			"total", len(active), "max", c.config.MaxInputEntries, "batches", totalBatches)
 	}
 
-	// 2. LLM 聚类合并
-	clusters, err := c.clusterAndMerge(ctx, active)
-	if err != nil {
-		span.RecordError(err)
-		return report, errs.Wrap(err, "compactor: LLM cluster+merge")
-	}
-	report.ClustersFound = len(clusters)
-
-	// 3. 应用合并结果
-	mergedIDs := make(map[string]bool)
-	for _, cluster := range clusters {
-		// 写入合并后的新条目（写入失败则跳过该 cluster，不归档源条目）
-		meta := map[string]any{
-			"compacted_at": time.Now(),
-			"source_ids":   cluster.SourceIDs,
-			"source_count": len(cluster.SourceIDs),
+	for i := 0; i < len(active); i += batchSize {
+		end := i + batchSize
+		if end > len(active) {
+			end = len(active)
 		}
-		if err := store.Append(ctx, TieredEntry{
-			Entry: Entry{
-				Scope:      scope,
-				Content:    cluster.MergedContent,
-				Category:   cluster.Category,
-				Source:     "compactor",
-				Importance: cluster.Importance,
-				Metadata:   meta,
-			},
-			Tier:         Tier1LongTerm,
-			PromotedFrom: Tier1LongTerm,
-		}); err != nil {
-			c.logger.Warnw("compactor: failed to write merged entry, skipping cluster",
-				"err", err, "source_ids", cluster.SourceIDs)
+		batch := active[i:end]
+
+		// LLM 聚类合并
+		clusters, err := c.clusterAndMerge(ctx, batch)
+		if err != nil {
+			span.RecordError(err)
+			c.logger.Warnw("compactor: LLM cluster+merge failed, skipping batch",
+				"err", err, "batch_size", len(batch))
 			continue
 		}
+		report.ClustersFound += len(clusters)
 
-		// 标记原始条目为待归档
-		for _, id := range cluster.SourceIDs {
-			mergedIDs[id] = true
-		}
-		report.MergedCount++
-	}
+		// 应用合并结果
+		mergedIDs := make(map[string]bool)
+		for _, cluster := range clusters {
+			// 写入合并后的新条目（写入失败则跳过该 cluster，不归档源条目）
+			meta := map[string]any{
+				"compacted_at": time.Now(),
+				"source_ids":   cluster.SourceIDs,
+				"source_count": len(cluster.SourceIDs),
+			}
+			if err := store.Append(ctx, TieredEntry{
+				Entry: Entry{
+					Scope:      scope,
+					Content:    cluster.MergedContent,
+					Category:   cluster.Category,
+					Source:     "compactor",
+					Importance: cluster.Importance,
+					Metadata:   meta,
+				},
+				Tier:         Tier1LongTerm,
+				PromotedFrom: Tier1LongTerm,
+			}); err != nil {
+				c.logger.Warnw("compactor: failed to write merged entry, skipping cluster",
+					"err", err, "source_ids", cluster.SourceIDs)
+				continue
+			}
 
-	// 4. 归档被合并的原始条目（标记 archived 而非删除）
-	for _, e := range active {
-		if !mergedIDs[e.ID] {
-			continue
+			// 标记原始条目为待归档
+			for _, id := range cluster.SourceIDs {
+				mergedIDs[id] = true
+			}
+			report.MergedCount++
 		}
-		if c.archiveEntry(ctx, store, scope, e) {
-			report.ArchivedCount++
+
+		// 归档被合并的原始条目（标记 archived 而非删除）
+		for _, e := range batch {
+			if !mergedIDs[e.ID] {
+				continue
+			}
+			if c.archiveEntry(ctx, store, scope, e) {
+				report.ArchivedCount++
+			}
 		}
 	}
 
@@ -235,6 +250,7 @@ func (c *SemanticCompactor) Compact(
 	c.logger.Infow("semantic compaction complete",
 		"scope", scope.Key(),
 		"input", report.InputCount,
+		"batches", totalBatches,
 		"clusters", report.ClustersFound,
 		"archived", report.ArchivedCount,
 		"reduced", report.ReducedCount,

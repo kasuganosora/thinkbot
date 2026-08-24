@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -10,6 +11,25 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"go.uber.org/zap"
 )
+
+// maxListToolsPages 单次 ListTools 分页遍历的页数上限，防止服务端返回
+// 永不结束的 NextCursor 导致客户端死循环。
+const maxListToolsPages = 1000
+
+// transportError 标记底层传输层失败（连接断开 / 读写错误），
+// 与「服务器正常响应但业务报错」区分，供上层决定是否可安全自动重试。
+type transportError struct {
+	err error
+}
+
+func (e *transportError) Error() string { return e.err.Error() }
+func (e *transportError) Unwrap() error { return e.err }
+
+// isTransportError 判断错误是否源于底层传输层失败。
+func isTransportError(err error) bool {
+	var te *transportError
+	return errors.As(err, &te)
+}
 
 // ============================================================================
 // Client — 单个 MCP 服务器的客户端
@@ -67,7 +87,12 @@ func (c *Client) Initialize(ctx context.Context) (*serverInfo, error) {
 func (c *Client) ListTools(ctx context.Context) ([]mcpTool, error) {
 	var allTools []mcpTool
 	cursor := ""
+	pages := 0
 	for {
+		pages++
+		if pages > maxListToolsPages {
+			return nil, fmt.Errorf("mcp: tools/list exceeded max pages (%d), possible infinite pagination", maxListToolsPages)
+		}
 		resp, err := c.call(ctx, "tools/list", listToolsParams{Cursor: cursor})
 		if err != nil {
 			return nil, errs.Wrapf(err, "mcp: list tools from %q", c.name)
@@ -165,7 +190,8 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 
 	respData, err := c.transport.RoundTrip(ctx, data)
 	if err != nil {
-		return nil, err
+		// 统一包装为传输层错误，便于上层区分「连接失败」与「业务报错」。
+		return nil, &transportError{err: err}
 	}
 
 	var resp rpcResponse

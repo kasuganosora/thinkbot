@@ -38,6 +38,14 @@ type BotDefinition struct {
 	// Temperature 温度参数。
 	Temperature float64 `gorm:"default:0.7" json:"temperature"`
 
+	// FrequencyPenalty 重复惩罚：抑制模型反复输出相同 token（GLM-5.x 官方推荐 0.1）。
+	// 0 = 由代码回退到默认 0.1。
+	FrequencyPenalty float64 `gorm:"default:0.1" json:"frequencyPenalty"`
+
+	// PresencePenalty 存在惩罚：抑制已出现过的 token 再次出现（GLM-5.x 官方推荐 0.05）。
+	// 0 = 由代码回退到默认 0.05。
+	PresencePenalty float64 `gorm:"default:0.05" json:"presencePenalty"`
+
 	// MaxTokens 最大输出 token 数。
 	MaxTokens int `gorm:"default:4096" json:"maxTokens"`
 

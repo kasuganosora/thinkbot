@@ -31,6 +31,14 @@ type AgentConfig struct {
 	// 为 nil 时使用 BotConfig.Temperature。
 	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
 
+	// FrequencyPenalty 重复惩罚（覆盖 BotConfig）。
+	// 为 nil 时回退 BotConfig.FrequencyPenalty / DefaultFrequencyPenalty。
+	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty" yaml:"frequencyPenalty,omitempty"`
+
+	// PresencePenalty 存在惩罚（覆盖 BotConfig）。
+	// 为 nil 时回退 BotConfig.PresencePenalty / DefaultPresencePenalty。
+	PresencePenalty *float64 `json:"presencePenalty,omitempty" yaml:"presencePenalty,omitempty"`
+
 	// TopP nucleus 采样参数。
 	TopP *float64 `json:"topP,omitempty" yaml:"topP,omitempty"`
 
@@ -82,6 +90,12 @@ func (c AgentConfig) Merge(other AgentConfig) AgentConfig {
 	if other.Temperature != nil {
 		result.Temperature = other.Temperature
 	}
+	if other.FrequencyPenalty != nil {
+		result.FrequencyPenalty = other.FrequencyPenalty
+	}
+	if other.PresencePenalty != nil {
+		result.PresencePenalty = other.PresencePenalty
+	}
 	if other.TopP != nil {
 		result.TopP = other.TopP
 	}
@@ -127,6 +141,30 @@ func (c AgentConfig) EffectiveTemperature(botCfg BotConfig) float64 {
 	return 0.7
 }
 
+// EffectiveFrequencyPenalty 返回有效的重复惩罚。
+// 优先级：AgentConfig > BotConfig > DefaultFrequencyPenalty（GLM-5.x 推荐 0.1）。
+func (c AgentConfig) EffectiveFrequencyPenalty(botCfg BotConfig) float64 {
+	if c.FrequencyPenalty != nil {
+		return *c.FrequencyPenalty
+	}
+	if botCfg.FrequencyPenalty != nil {
+		return *botCfg.FrequencyPenalty
+	}
+	return DefaultFrequencyPenalty
+}
+
+// EffectivePresencePenalty 返回有效的存在惩罚。
+// 优先级：AgentConfig > BotConfig > DefaultPresencePenalty（GLM-5.x 推荐 0.05）。
+func (c AgentConfig) EffectivePresencePenalty(botCfg BotConfig) float64 {
+	if c.PresencePenalty != nil {
+		return *c.PresencePenalty
+	}
+	if botCfg.PresencePenalty != nil {
+		return *botCfg.PresencePenalty
+	}
+	return DefaultPresencePenalty
+}
+
 // EffectiveSystemPrompt 返回有效 system prompt。
 func (c AgentConfig) EffectiveSystemPrompt(botCfg BotConfig) string {
 	if c.SystemPromptOverride != "" {
@@ -161,6 +199,20 @@ func (c AgentConfig) FilterTools(tools []llm.Tool) []llm.Tool {
 func (c AgentConfig) ApplyToParams(params *llm.GenerateParams) {
 	if c.Temperature != nil {
 		params.Temperature = c.Temperature
+	}
+	// 重复抑制：即便未被显式覆盖，也始终写入有效值（默认 GLM-5.x 推荐），
+	// 避免编排循环在长工具链下退化成重复自旋。
+	if c.FrequencyPenalty != nil {
+		params.FrequencyPenalty = c.FrequencyPenalty
+	} else if params.FrequencyPenalty == nil {
+		v := DefaultFrequencyPenalty
+		params.FrequencyPenalty = &v
+	}
+	if c.PresencePenalty != nil {
+		params.PresencePenalty = c.PresencePenalty
+	} else if params.PresencePenalty == nil {
+		v := DefaultPresencePenalty
+		params.PresencePenalty = &v
 	}
 	if c.TopP != nil {
 		params.TopP = c.TopP

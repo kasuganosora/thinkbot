@@ -257,9 +257,9 @@ func (r *Request) readStreamChunks(
 	chunksReceived := 0
 
 	for {
-		// 检查 context（非阻塞）
+		// 检查 context（非阻塞）——保留原始错误（如 DeadlineExceeded），而非一律折叠为 Canceled
 		if err := origCtx.Err(); err != nil {
-			return context.Canceled
+			return origCtx.Err()
 		}
 
 		n, err := body.Read(buf)
@@ -308,9 +308,9 @@ func (r *Request) readStreamLines(
 	totalBytes := 0
 
 	for {
-		// 检查 context（非阻塞）
+		// 检查 context（非阻塞）——保留原始错误（如 DeadlineExceeded），而非一律折叠为 Canceled
 		if err := origCtx.Err(); err != nil {
-			return context.Canceled
+			return origCtx.Err()
 		}
 
 		line, err := reader.ReadString('\n')

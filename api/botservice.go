@@ -67,16 +67,17 @@ type BotService struct {
 	eventBus      outbound.EventBus
 	statsRecorder llm.UsageRecorder // 可选，nil 时不记录 token 统计
 
-	mu                sync.RWMutex
-	channels          map[string]*WebChannel             // botID → WebChannel
-	botInstances      map[string]*bot.Bot                // botID → running Bot
-	toolManagers      map[string]*agenttools.ToolManager // botID → tool manager (for listing)
-	dreamingBundles   map[string]*bot.DreamingBundle     // botID → DreamingBundle
-	heartbeatBundles  map[string]*heartbeat.Bundle       // botID → HeartbeatBundle
-	cancelFuncs       map[string]context.CancelFunc      // botID → bot context cancel
-	closeFuncs        map[string]func()                  // botID → sub-agent managers cleanup
-	messageCancels    map[string]context.CancelFunc      // "botID:traceID" → message context cancel
-	messageInterrupts map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
+	mu                 sync.RWMutex
+	channels           map[string]*WebChannel             // botID → WebChannel
+	botInstances       map[string]*bot.Bot                // botID → running Bot
+	toolManagers       map[string]*agenttools.ToolManager // botID → tool manager (for listing)
+	dreamingBundles    map[string]*bot.DreamingBundle     // botID → DreamingBundle
+	heartbeatBundles   map[string]*heartbeat.Bundle       // botID → HeartbeatBundle
+	userCronSchedulers map[string]*cron.Scheduler         // botID → 用户级 cron 调度器
+	cancelFuncs        map[string]context.CancelFunc      // botID → bot context cancel
+	closeFuncs         map[string]func()                  // botID → sub-agent managers cleanup
+	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
+	messageInterrupts  map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
 	//
@@ -113,24 +114,25 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
 	return &BotService{
-		db:                db,
-		store:             store,
-		mgr:               mgr,
-		logger:            logger.With("component", "bot_service"),
-		tp:                tp,
-		mp:                mp,
-		eventBus:          eventBus,
-		statsRecorder:     statsRecorder,
-		channels:          make(map[string]*WebChannel),
-		botInstances:      make(map[string]*bot.Bot),
-		dreamingBundles:   make(map[string]*bot.DreamingBundle),
-		heartbeatBundles:  make(map[string]*heartbeat.Bundle),
-		cancelFuncs:       make(map[string]context.CancelFunc),
-		closeFuncs:        make(map[string]func()),
-		messageCancels:    make(map[string]context.CancelFunc),
-		messageInterrupts: make(map[string]chan string),
-		wfEngines:         make(map[string]*workflow.Manager),
-		chatHistory:       chatHistory,
+		db:                 db,
+		store:              store,
+		mgr:                mgr,
+		logger:             logger.With("component", "bot_service"),
+		tp:                 tp,
+		mp:                 mp,
+		eventBus:           eventBus,
+		statsRecorder:      statsRecorder,
+		channels:           make(map[string]*WebChannel),
+		botInstances:       make(map[string]*bot.Bot),
+		dreamingBundles:    make(map[string]*bot.DreamingBundle),
+		heartbeatBundles:   make(map[string]*heartbeat.Bundle),
+		userCronSchedulers: make(map[string]*cron.Scheduler),
+		cancelFuncs:        make(map[string]context.CancelFunc),
+		closeFuncs:         make(map[string]func()),
+		messageCancels:     make(map[string]context.CancelFunc),
+		messageInterrupts:  make(map[string]chan string),
+		wfEngines:          make(map[string]*workflow.Manager),
+		chatHistory:        chatHistory,
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -217,6 +219,8 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	builder := config.NewBuilder(s.store, s.logger)
 	cfg := sandbox.DefaultConfig()
 	cfg.Timezone = builder.GetTimezone()
+	// 全局出口代理：注入 bot 容器后，容器内请求统一走部署侧代理。
+	cfg.Proxy = config.GlobalProxy(s.store)
 	if img := s.store.GetString(config.KeySandboxImage, ""); img != "" {
 		cfg.Image = img
 	}
@@ -714,6 +718,18 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		maxTok = &mt
 	}
 
+	// 重复抑制（GLM-5.x 官方推荐）：缺省（DB 未设/迁移未回填）时回退到 0.1/0.05，
+	// 根治 agent 长工具链下反复输出相同 token 的退化（日志曾见单日 6 万次
+	// repetition collapse）。对所有 OpenAI 兼容提供商通用安全。
+	freqPen := def.FrequencyPenalty
+	if freqPen <= 0 {
+		freqPen = 0.1
+	}
+	presPen := def.PresencePenalty
+	if presPen <= 0 {
+		presPen = 0.05
+	}
+
 	// MessageBuilder：从 Message.Metadata["chat_history"] 加载历史上下文
 	messageBuilder := func(msg core.Message) []llm.Message {
 		var messages []llm.Message
@@ -812,7 +828,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 将当前模型的 MaxTokens 作为默认输出上限注入，避免 SubAgent 写死 4096：
 	// 调用方未显式 WithMaxTokens 时，自动跟随模型配置（如 glm-5.2=128K）。
 	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model,
-		subagent.WithMaxTokens(bundle.MainDef.MaxTokens))
+		subagent.WithMaxTokens(bundle.MainDef.MaxTokens),
+		// 重复抑制（GLM-5.x 推荐）：让 workflow 子代理与主 Agent 一致地抑制退化自旋。
+		subagent.WithFrequencyPenalty(freqPen),
+		subagent.WithPresencePenalty(presPen))
 	// 让子 Agent 继承主 Agent 在子 Agent 场景可用的工具（exec/读/写/列目录等），
 	// 使其能像主 Agent 一样操作工作空间。spawn 工具由 scope 排除防套娃。
 	saMgr.SetToolResolver(toolMgr, agenttools.ToolSessionContext{BotID: id})
@@ -856,13 +875,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		"llm",
 		bundle.Main,
 		stages.LLMConfig{
-			SystemPrompt:    "", // 由 PromptStage 从 SOUL.md 注入
-			Model:           mainModel,
-			Temperature:     temp,
-			MaxTokens:       maxTok,
-			ReasoningEffort: def.ReasoningEffort,
-			MessageBuilder:  messageBuilder,
-			ToolResolver:    toolMgr,
+			SystemPrompt:     "", // 由 PromptStage 从 SOUL.md 注入
+			Model:            mainModel,
+			Temperature:      temp,
+			FrequencyPenalty: &freqPen,
+			PresencePenalty:  &presPen,
+			MaxTokens:        maxTok,
+			ReasoningEffort:  def.ReasoningEffort,
+			MessageBuilder:   messageBuilder,
+			ToolResolver:     toolMgr,
 			// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效，
 			// 治理「模型决定不互动却把独白当回复发出」。默认关闭。
 			RequireReplyControl: requireReplyControl,
@@ -879,6 +900,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// agent.hard_timeout（秒）覆盖，默认 15min。
 			HardTimeout:  effectiveLLMHardTimeout(s.store),
 			ToolDeferral: deferralStore,
+			// 主链路对话历史自动压缩：修复「长会话退化成混乱调用、任务做不完」根因
+			// （此前只有 subagent 接了压缩钩子，主 bot 漏接）。超阈值时 LLM 生成
+			// 结构化摘要替代旧消息，按会话隔离、跨轮持久。
+			Compaction: llm.DefaultCompactionConfigPtr(),
 		},
 		s.tp,
 		s.logger,
@@ -1259,6 +1284,24 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 	}
 
+	// 用户级 cron 调度器：消费 data/cron/<id>_cron.json（与 GetCronManager 同一 store）。
+	// 此前该文件仅经 HTTP API 做 CRUD，从无运行中调度器消费 → 用户定时任务永不触发
+	// （修复 5300）。现与 dream/heartbeat 同构：建 Scheduler + Executor，注入 Engine 后
+	// 随 bot 生命周期启停；Job 到期时把 Prompt 注入真实编排链路执行并投递到 Channel。
+	var userCronScheduler *cron.Scheduler
+	var userCronExecutor *UserCronExecutor
+	{
+		cronFile := fmt.Sprintf("data/cron/%s_cron.json", id)
+		cronStore := cron.NewStore(cronFile)
+		userCronExecutor = NewUserCronExecutor(id, s.logger)
+		schedCfg := cron.DefaultSchedulerConfig()
+		schedCfg.BotID = id
+		schedCfg.Location = builder.GetBotTimezoneLocation(id)
+		userCronScheduler = cron.NewScheduler(cronStore, userCronExecutor, schedCfg).
+			WithUsageRecorder(s.statsRecorder)
+		s.logger.Infow("user cron scheduler created", "bot_id", id, "cron_file", cronFile)
+	}
+
 	// 创建自适应 Engagement 组件（Bot 自我画像 → 动态参数映射）
 	var adaptiveSyncer *engagement.AdaptiveEngagementSyncer
 	var rejectionDetector *engagement.RejectionDetector
@@ -1432,6 +1475,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	workspaceDir := builder.GetWorkspaceDir()
 	sbCfg := sandbox.DefaultConfig()
 	sbCfg.Timezone = builder.GetTimezone()
+	// 全局出口代理：注入 bot 容器后，容器内请求统一走部署侧代理。
+	sbCfg.Proxy = config.GlobalProxy(s.store)
 	// 镜像与后端必须从这个 sbCfg 读取：bot.New 会用它自建 BotWorkspaceManager 并据此
 	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的 alpine:latest。
 	if img := s.store.GetString(config.KeySandboxImage, ""); img != "" {
@@ -1443,7 +1488,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 浏览器 MCP 服务开关（per-bot，docker 持久容器模式 + 浏览器镜像时启用）。
 	sbCfg.BrowserEnabled = s.store.GetBool(config.KeySandboxBrowserEnabled, false)
 	// 浏览器出口代理（IP 归部署侧）：空值直连。
-	sbCfg.BrowserProxy = s.store.GetString(config.KeySandboxBrowserProxy, "")
+	// 未单独配置 sandbox.browser.proxy 时，继承全局出口代理 system.proxy，保证「全站走代理」一致。
+	browserProxy := s.store.GetString(config.KeySandboxBrowserProxy, "")
+	if browserProxy == "" {
+		browserProxy = config.GlobalProxy(s.store)
+	}
+	sbCfg.BrowserProxy = browserProxy
 
 	// 出站只读守卫：Pipeline 自动回复（ActionReply → Channel.Send）不经过工具权限，
 	// 因此「只看不发」的潜水bot 必须在出站链路拦。
@@ -1599,6 +1649,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		hbBundle.SetRunner(b.Engine())
 		s.logger.Infow("heartbeat wired to engine", "bot_id", id)
 	}
+	// 用户级 cron 执行器接入真实编排入口（与 heartbeat 同构，须在 Scheduler 启动前完成）。
+	if userCronExecutor != nil {
+		userCronExecutor.SetRunner(b.Engine())
+	}
 
 	// 注入工具输出落盘指针接收器（借鉴 opencode 的 token 优化）：
 	// 当工具输出被截断时，把完整原文写入 bot 工作空间的 tool-output 子目录，
@@ -1693,6 +1747,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if hbBundle != nil {
 		hbBundle.Start(botCtx)
 	}
+	// 启动用户级 cron 调度器（若已创建）：与心跳同构，共享 botCtx，
+	// 消费 data/cron/<id>_cron.json，到点的 Job 经 Executor 注入编排执行（修复 5300）。
+	if userCronScheduler != nil {
+		userCronScheduler.Start(botCtx)
+	}
 
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
@@ -1752,6 +1811,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if hbBundle != nil {
 		s.heartbeatBundles[id] = hbBundle
 	}
+	if userCronScheduler != nil {
+		s.userCronSchedulers[id] = userCronScheduler
+	}
 	s.mu.Unlock()
 
 	// 更新定义状态
@@ -1784,6 +1846,10 @@ func (s *BotService) StopBot(id string) {
 	if hbBundle, ok := s.heartbeatBundles[id]; ok {
 		hbBundle.Stop()
 		delete(s.heartbeatBundles, id)
+	}
+	if userCronScheduler, ok := s.userCronSchedulers[id]; ok {
+		userCronScheduler.Stop()
+		delete(s.userCronSchedulers, id)
 	}
 	// 该 bot 的工作流引擎随 bot 停止而失效（其 SubAgent 管理器已由 closeFuncs 关闭），
 	// 必须摘掉，否则 WorkflowService 会复用一个已关闭的引擎。

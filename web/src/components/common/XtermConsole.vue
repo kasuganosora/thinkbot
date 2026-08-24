@@ -53,6 +53,7 @@ let ro = null
 let inputBuf = ''
 let cwd = props.initialCwd
 let busy = false
+let pendingInput = ''  // 命令执行中缓存的按键，结束后回放，避免忙等丢键
 const history = []
 let histIdx = -1
 
@@ -92,6 +93,12 @@ async function runCommand(cmd) {
   } finally {
     busy = false
     writePrompt()
+    // 回放命令执行期间缓存的按键（避免忙等丢键）
+    if (pendingInput) {
+      const p = pendingInput
+      pendingInput = ''
+      handleData(p)
+    }
   }
 }
 
@@ -101,8 +108,23 @@ function replaceLine(text) {
   term.write(text)
 }
 
-function handleData(data) {
-  if (busy) return
+async function handleData(data) {
+  if (busy) {
+    // 命令执行中：缓存按键，结束后回放，避免忙等丢键
+    pendingInput += data
+    return
+  }
+  // 粘贴（多字符且含换行）：逐行顺序执行；单字符 \r 走下方回车逻辑
+  if (data.length > 1 && (data.includes('\n') || data.includes('\r'))) {
+    const lines = data.split(/\r\n|\r|\n/)
+    // 将执行前已输入的缓冲拼到第一行，避免粘贴时丢失已打字内容
+    if (inputBuf && lines.length) lines[0] = inputBuf + (lines[0] || '')
+    inputBuf = ''
+    for (const line of lines) {
+      if (line.length) await runCommand(line)
+    }
+    return
+  }
   const code = data.charCodeAt(0)
   if (data === '\r') {
     const cmd = inputBuf

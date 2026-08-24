@@ -782,6 +782,11 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		}
 		args = append(args, "-e", "TZ="+tz)
 
+		// 全局出口代理：注入到容器环境变量，使容器内请求统一走部署侧代理。
+		if w.cfg.Proxy != "" {
+			args = append(args, "-e", "HTTP_PROXY="+w.cfg.Proxy, "-e", "HTTPS_PROXY="+w.cfg.Proxy)
+		}
+
 		containerWorkDir := VirtualRoot
 		if req.WorkDir != "" {
 			validated, err := validatePath(VirtualRoot, req.WorkDir)

@@ -162,7 +162,6 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 	}
 
 	elapsed := time.Since(begin)
-	caller := captureGormCaller()
 	tf := l.ctxFields(ctx)
 
 	switch {
@@ -170,6 +169,8 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 		(!l.ignoreRecordNotFoundError || !errors.Is(err, gormlogger.ErrRecordNotFound)) &&
 		// 客户端断开 / 超时取消是预期中断，不应记为 ERROR（避免误报刷屏）
 		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded):
+		// 调用栈遍历仅在确实需要记录时才进行，避免每条 SQL 都付出 64 帧开销。
+		caller := captureGormCaller()
 		sql, rows := fc()
 		l.zl.Error("gorm query error",
 			append(tf, caller,
@@ -181,6 +182,7 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 		)
 
 	case l.slowThreshold > 0 && elapsed > l.slowThreshold && l.level >= gormlogger.Warn:
+		caller := captureGormCaller()
 		sql, rows := fc()
 		l.zl.Warn("gorm slow query",
 			append(tf, caller,
@@ -192,6 +194,7 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 		)
 
 	case l.level >= gormlogger.Info:
+		caller := captureGormCaller()
 		sql, rows := fc()
 		l.zl.Debug("gorm query",
 			append(tf, caller,
@@ -206,7 +209,8 @@ func (l *gormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql 
 // captureGormCaller 遍历调用栈，跳过 gorm.io 和本包内部帧，
 // 返回第一个业务调用方的 caller field。
 func captureGormCaller() zap.Field {
-	pcs := make([]uintptr, 64)
+	// 32 帧已足以跨越 gorm 内部栈找到业务调用方；相比 64 减少一半分配开销。
+	pcs := make([]uintptr, 32)
 	n := runtime.Callers(4, pcs) // 跳过 Callers / captureGormCaller / Trace / gorm 内部
 	if n == 0 {
 		return zap.String("caller", "unknown")

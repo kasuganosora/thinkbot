@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -368,6 +369,10 @@ type LLMConfig struct {
 	Model *llm.Model
 	// Temperature 采样温度。
 	Temperature *float64
+	// FrequencyPenalty 重复惩罚（GLM-5.x 推荐 0.1）：抑制模型反复输出相同 token。
+	FrequencyPenalty *float64
+	// PresencePenalty 存在惩罚（GLM-5.x 推荐 0.05）：抑制已出现 token 再次出现。
+	PresencePenalty *float64
 	// MaxTokens 最大 token 数。
 	MaxTokens *int
 	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
@@ -390,6 +395,14 @@ type LLMConfig struct {
 	//   Phase 2: 模型调用前压缩旧消息历史
 	// 为 nil 时禁用压缩（仅依赖 PatchToolCalls 安全网）。
 	ReductionConfig *llm.ReductionConfig
+
+	// Compaction 可选的主 Agent 对话历史自动压缩配置（nil=禁用，沿用
+	// ReductionConfig 的开关范式）。非 nil 时，主链路在每步编排前检测 token 用量，
+	// 超阈值（llm.DefaultCompactionConfig 保守取 ~44k 可用 token）自动用 LLM 生成
+	// 结构化摘要替代旧消息——修复「长会话退化成混乱调用循环、任务做不完」的根因
+	// （主生成链路此前漏接了压缩钩子，只有 subagent 有）。Compactor 状态按会话(sid)
+	// 隔离，使压缩摘要在同一会话内跨轮持久、且不串扰并发会话。
+	Compaction *llm.CompactionConfig
 
 	// HardTimeout 主 Agent 编排回路的墙钟硬上限（0=不启用）。
 	// 仅当传入的 ctx 本身没有 deadline 时才生效（若上游 worker/channel 已设
@@ -458,6 +471,28 @@ type LLMStage struct {
 	config   LLMConfig
 	tracer   trace.Tracer
 	logger   *zap.SugaredLogger
+	// compactors 按会话(sid)隔离的 *llm.Compactor 实例。主链路压缩钩子需要跨轮
+	// 持久化摘要状态（previousSummary 增量更新），故以 sid 为 key 惰性创建；
+	// sync.Map 免锁，生命周期与 bot 进程同寿（并发会话数有界，无泄漏风险）。
+	compactors sync.Map
+}
+
+// getCompactor 返回指定会话的 *llm.Compactor（惰性创建）。
+// 返回 (compactor, true)；当 s.config.Compaction 为 nil 时返回 (nil, false)。
+// 按 sid 隔离使压缩摘要状态在同一会话内跨轮持久、且不与并发会话串扰。
+func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
+	if s.config.Compaction == nil {
+		return nil, false
+	}
+	if sid == "" {
+		sid = "__default__"
+	}
+	if v, ok := s.compactors.Load(sid); ok {
+		return v.(*llm.Compactor), true
+	}
+	c := llm.NewCompactor(*s.config.Compaction).SetLogger(s.logger)
+	actual, _ := s.compactors.LoadOrStore(sid, c)
+	return actual.(*llm.Compactor), true
 }
 
 // NewLLMStage 创建 LLM Stage。
@@ -538,9 +573,16 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 都会自动串接回复（含未 @ Bot 的普通 timeline 帖）。此时若 Channel 工具再手动
 	// 发一条新帖，同一条入站帖就会收到两条发文。据此让工具层禁用「手动发孤立帖」，
 	// 强制走框架自动串接回复，避免重复发文。覆盖 IsDirectReply 未触达的未 @ 场景。
+	// HasReplyTarget：Metadata 是 map[string]any，缺失 key 时返回 any(nil)，
+	// 直接用 `!= ""` 比较会得到 any(nil) != any("") == true（永远为真），
+	// 导致工具层「手动发孤立帖」永远被禁。必须类型断言判非空字符串。
+	hasReplyTarget := false
+	if v, ok := env.Message.Metadata["reply_target"].(string); ok && v != "" {
+		hasReplyTarget = true
+	}
 	ctx = llm.WithInboundReply(ctx, llm.InboundReply{
 		Source:         env.Message.Source,
-		HasReplyTarget: env.Message.Metadata["reply_target"] != "",
+		HasReplyTarget: hasReplyTarget,
 	})
 
 	// 构建消息
@@ -603,13 +645,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 构建参数
 	params := llm.GenerateParams{
-		Model:           s.config.Model,
-		System:          systemPrompt,
-		Messages:        messages,
-		Tools:           tools,
-		Temperature:     s.config.Temperature,
-		MaxTokens:       s.config.MaxTokens,
-		ReasoningEffort: reasoningEffortPtr(s.config.ReasoningEffort),
+		Model:            s.config.Model,
+		System:           systemPrompt,
+		Messages:         messages,
+		Tools:            tools,
+		Temperature:      s.config.Temperature,
+		FrequencyPenalty: s.config.FrequencyPenalty,
+		PresencePenalty:  s.config.PresencePenalty,
+		MaxTokens:        s.config.MaxTokens,
+		ReasoningEffort:  reasoningEffortPtr(s.config.ReasoningEffort),
 	}
 
 	// 潜水模式：强制结构化 JSON 输出，使「是否值得记忆」成为一个与语言无关的布尔，
@@ -643,6 +687,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		// 把本轮的「用户中途追加」通道透传给编排循环（Claude-CLI 风格），
 		// 让生成中的用户补充能注入同一轮对话。
 		InterruptCh: bot.InterruptChannelFromContext(ctx),
+		// 写操作意图护栏（Layer B）：把触发本轮的用户请求文本透传，供标记了
+		// RequiresUserIntent 的写工具（如 misskey follow/post/react）判定调用
+		// 是否根植于用户显式意图。子代理场景下 env.Message.Text 即其任务描述。
+		UserRequest: env.Message.Text,
 	}
 
 	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。
@@ -682,11 +730,36 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
-	// Enable reduction if configured.
+	// 上下文压缩：两阶段。
+	//   阶段1（OnToolResults）：工具执行后截断超大单条输出（ReductionConfig）。
+	//   阶段2（PrepareStep）：模型调用前压缩旧消息历史。
+	//     - ReductionConfig → reducer 钩子（历史 pruning）。
+	//     - Compaction → compactor 钩子（超阈值时 LLM 摘要，修复长会话退化）。
+	//   二者可叠加：先跑 reducer 原地压缩，再交 compactor 判定是否需 LLM 摘要。
+	//   compactor 按会话隔离（getCompactor），摘要状态跨轮持久、不串扰并发会话。
+	var prepareStep func(*llm.GenerateParams) *llm.GenerateParams
 	if s.config.ReductionConfig != nil {
 		rc := *s.config.ReductionConfig
 		cfg.OnToolResults = llm.NewOnToolResultsCallback(rc)
-		cfg.PrepareStep = llm.NewReducePrepareStepCallback(rc)
+		prepareStep = llm.NewReducePrepareStepCallback(rc)
+	}
+	if s.config.Compaction != nil {
+		if compactor, ok := s.getCompactor(session.SessionIDFromEnvelope(env)); ok {
+			compactHook := llm.CompactionPrepareStepWithProvider(compactor, s.provider)(ctx)
+			base := prepareStep
+			prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {
+				if base != nil {
+					base(p)
+				}
+				if cp := compactHook(p); cp != nil {
+					return cp
+				}
+				return p
+			}
+		}
+	}
+	if prepareStep != nil {
+		cfg.PrepareStep = prepareStep
 	}
 
 	logger.Debugw("llm stage: starting orchestrate",
@@ -1248,6 +1321,7 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 	}
 	recorder.RecordUsage(ctx, llm.UsageMetric{
 		BotID:     botID,
+		At:        time.Now(),
 		Model:     modelID,
 		Feature:   feature,
 		Channel:   env.Message.Channel,

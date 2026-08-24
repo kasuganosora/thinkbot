@@ -148,10 +148,12 @@ func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 提取或生成 Trace ID
 		traceID := r.Header.Get(HeaderKey)
-		if traceID == "" {
+		// 仅当客户端传入的 Trace ID 合法（32 位十六进制）时才复用，
+		// 否则拒绝并重新生成，防止伪造/ CRLF/ 日志注入污染全链路追踪。
+		if !IsValid(traceID) {
 			traceID = FromContext(r.Context())
 		}
-		if traceID == "" {
+		if !IsValid(traceID) {
 			traceID = New()
 		}
 
