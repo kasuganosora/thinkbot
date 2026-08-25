@@ -171,3 +171,40 @@ func TestNoteCaptureMiddleware_OneCapturePerMessage(t *testing.T) {
 		t.Fatalf("event payload mismatch: %+v", spy.last)
 	}
 }
+
+// TestNoteCaptureMiddleware_CrossProcessDedup 验证同一条入站消息（相同 message_id）
+// 即便被多次 ingest（mention 流 + timeline 流 + 重连重放），也只落一条 exchange 记忆。
+// 对应 2026-08-25 排查：aqailbnedi7a0126 同 note 7 秒内被写 4 条 exchange 记忆。
+func TestNoteCaptureMiddleware_CrossProcessDedup(t *testing.T) {
+	spy := &spyEventWriter{}
+	mw := NoteCaptureMiddleware("exchange", spy)
+	stage := mw(twoReplyStage{})
+
+	msg := core.Message{ID: "m-dup", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "same message"}
+	env := core.NewEnvelope(msg)
+
+	if _, err := stage.Process(context.Background(), env); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spy.count != 1 {
+		t.Fatalf("first pass: expected 1 capture, got %d", spy.count)
+	}
+
+	// 第二次（同 message_id，模拟重放）：应被去重。
+	if _, err := stage.Process(context.Background(), env); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spy.count != 1 {
+		t.Fatalf("second pass (same message_id): expected still 1 capture, got %d", spy.count)
+	}
+
+	// 不同 message_id：应再捕获一条。
+	msg2 := core.Message{ID: "m-other", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "other message"}
+	env2 := core.NewEnvelope(msg2)
+	if _, err := stage.Process(context.Background(), env2); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spy.count != 2 {
+		t.Fatalf("different message_id: expected 2 captures, got %d", spy.count)
+	}
+}

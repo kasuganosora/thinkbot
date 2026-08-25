@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -11,6 +12,12 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
+
+// leadingMentionPrefixRE 匹配模型偶发在记忆正文前加的空 mention 前缀
+// （如 "[] " 或 "[] [] "）。这类前缀无语义，却会让同一观察因格式不一致产生
+// 近重复记忆（memory_entries 实测 ~80 条带 "[]" 前缀的噪音，甚至累积成 "[] []"）。
+// 写入前统一剥离，保证内容规范。
+var leadingMentionPrefixRE = regexp.MustCompile(`^(\[\]\s*)+`)
 
 // ============================================================================
 // 记忆管理工具 — 单一压缩工具设计
@@ -294,6 +301,10 @@ func handleAdd(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope 
 	}
 	content = StripThinking(content)
 	content = StripToolOutput(content)
+	// 归一化：剥离模型偶发在正文前加的空 mention 前缀（"[] " / "[] [] "），
+	// 避免同一观察因前缀不一致产生近重复记忆。
+	content = leadingMentionPrefixRE.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
 
 	// 威胁扫描
 	if findings := ScanMemoryThreats(content); len(findings) > 0 {
