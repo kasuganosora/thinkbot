@@ -1080,7 +1080,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// memWindow：函数前部已创建并注入 memRepo，此处复用于召回 stage。
 	// 使记忆块字符上限由 Window.MemoryBudget()*3 派生（随模型上下文窗口自适应），
 	// 取代此前硬编码的 2200，与 context.go 使用 window 模块的口径一致。
-	recallStage := stages.NewRecallStage("memory-recall", memRepo, memWindow, s.logger)
+	// 复合召回：memory_entries（原始笔记，memRepo）+ tiered_memories L1（梦境升华的
+	// 蒸馏知识）。L1 源排在最前，确保 Snapshot 字符预算截断时人物画像/项目事实不被
+	// 丢弃；两源按内容去重避免重复计权。此前 recall 只消费 memory_entries，导致
+	// dreaming 产出完全不可见（实测 110 条 L1 与 memory_entries 零重合）。
+	tieredL1 := storage.NewTieredL1Retriever(s.db)
+	mergedRecall := storage.NewMergedRetriever(tieredL1, memRepo)
+	recallStage := stages.NewRecallStage("memory-recall", mergedRecall, memWindow, s.logger)
 
 	// 聊天节奏 stage：按「平台 + 会话类型」抑制过度发言。
 	// web 平台硬禁用；单聊(private)默认关闭节奏（即时回复）；群聊/频道默认受控。
