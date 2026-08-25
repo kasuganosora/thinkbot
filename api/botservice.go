@@ -1066,7 +1066,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		isHumanMention := env.Message.Mentioned && !isEngagementProactive(env)
 		if !isHumanMention {
 			env.Set(core.KVSuppressReply, true)
-			env.Set(core.KVSuppressReplyReason, "passive_mode_unmentioned")
+			env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonPassive)
 		}
 		return nil
 	}, s.logger)

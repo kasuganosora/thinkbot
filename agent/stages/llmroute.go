@@ -83,8 +83,9 @@ func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.
 // 它表达的是「此消息未被 @，bot 无权限主动发言」的**硬策略权限**，
 // 与节奏/engagement 的「此刻该不该说」软启发式不同，绝不允许被模型的
 // REPLY_CONTROL send:true 放行覆盖（否则 bot 会对没 @ 它的消息发帖）。
-// 必须与 api/botservice.go passive-speak enricher 写入的 reason 字符串保持一致。
-const suppressReasonPassiveUnmentioned = "passive_mode_unmentioned"
+// 必须与 api/botservice.go passive-speak enricher 写入的 reason 字符串保持一致
+// （复用 core.KVSuppressReasonPassive，单一真源）。
+const suppressReasonPassiveUnmentioned = core.KVSuppressReasonPassive
 
 func replySuppressed(env *core.Envelope) (bool, string) {
 	v, ok := env.Get(core.KVSuppressReply)
