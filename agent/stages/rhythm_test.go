@@ -88,6 +88,34 @@ func TestRhythm_LurkModeBypasses(t *testing.T) {
 	}
 }
 
+// TestRhythm_PreservesHardPassiveGate 复现 2026-08-25 日志审计发现的回归：
+// ingress 的 passive-speak enricher 已对「未被真人 @」的消息设硬权限门
+// （KVSuppressReply=true + reason=passive_mode_unmentioned）。节奏 stage 若在 pipeline
+// 内再调用 suppress()，会把 reason 改写成 rhythm_speak_tendency，致下游 reply-control 误判为
+// 软节流、被模型 send:true 覆盖放行，被动 bot 于是对未 @ 消息发帖。
+// 节奏必须原样保留硬门、不得改写其 reason。
+func TestRhythm_PreservesHardPassiveGate(t *testing.T) {
+	s := NewRhythmStage("chat-rhythm", alwaysSuppressProvider, nil)
+	env := newRhythmEnv("misskey", core.ChatGroup, "c1", false)
+	// 模拟 passive-speak enricher 在 ingress 阶段已设的硬门：
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonPassive)
+	// engagement 随后把 Mentioned 升成 true（伪提及），节奏本应按软门处理——
+	// 但硬门优先，节奏不得触碰。
+	env.Message.Mentioned = true
+	env.Set("engagement.proactive", true)
+
+	if _, err := s.Process(context.Background(), env); err != nil {
+		t.Fatalf("Process error: %v", err)
+	}
+	if !isSuppressed(env) {
+		t.Fatal("硬 passive 门必须保持抑制")
+	}
+	if r, _ := env.Get(core.KVSuppressReplyReason); r != core.KVSuppressReasonPassive {
+		t.Fatalf("节奏改写了硬门 reason：got %v, want %v", r, core.KVSuppressReasonPassive)
+	}
+}
+
 // TestRhythm_PolicyNotApplyPasses 策略关闭（如单聊）时即时回复。
 func TestRhythm_PolicyNotApplyPasses(t *testing.T) {
 	s := NewRhythmStage("chat-rhythm", func(p, ct string) RhythmPolicy {
