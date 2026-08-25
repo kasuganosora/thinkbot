@@ -34,6 +34,22 @@ func TestIsNonRetryable(t *testing.T) {
 			err:  errors.New("node execution failed: subagent stream failed: messages 参数非法。请检查文档。"),
 			want: true,
 		},
+		// —— GLM 1301 内容安全审核 —— 确定性，不重试（与 1210/1214 同范式）
+		{
+			name: "glm 1301 content filter (no spaces)",
+			err:  errors.New(`subagent stream failed: openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/api/coding/paas/v4/chat/completions: {"error":{"code":"1301","message":"输出内容触发平台内容安全审核，请您更换话题或重新表达后再试。"}}`),
+			want: true,
+		},
+		{
+			name: "glm 1301 content filter (with spaces)",
+			err:  errors.New(`stream HTTP error 400: {"error":{"code": "1301","message":"输出内容触发平台内容安全审核"}}`),
+			want: true,
+		},
+		{
+			name: "glm 1301 wrapped (multi-layer)",
+			err: fmt.Errorf("workflow_node_n1: %w", errors.New(`subagent stream failed: openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1301","message":"触发平台内容安全审核"}}`)),
+			want: true,
+		},
 		{
 			name: "prompt is too long",
 			err:  errors.New("openai: prompt is too long for this model"),
