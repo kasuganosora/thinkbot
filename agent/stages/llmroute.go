@@ -96,6 +96,18 @@ func replySuppressed(env *core.Envelope) (bool, string) {
 	return true, reason
 }
 
+// modelExplicitlySends 轻量判定模型是否通过 REPLY_CONTROL 显式要求出站。
+// 仅用于「上游节奏/engagement 门」与「模型显式意图」冲突时的优先级裁定，
+// 不做完整内容清洗；解析失败一律返回 false（即不覆盖上游抑制，行为保守）。
+// 解析口径与下方出站链路一致：先剥离 <think> 思考标签，再解析控制块、提取公开内容。
+func modelExplicitlySends(text string) bool {
+	send, clean, ok := parseReplyControl(memory.StripThinking(text))
+	if !ok || !send {
+		return false
+	}
+	return strings.TrimSpace(extractPublicReply(clean)) != ""
+}
+
 // isLurkMode 判断当前消息是否处于潜水（只读）渠道。
 func isLurkMode(env *core.Envelope) bool {
 	if v, ok := env.Get(core.KVLurkMode); ok {
@@ -994,15 +1006,24 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
-	// 抑制检查：上游（如 engagement 参与度评估）判定「此刻不该说话」时，
-	// 不产出 ActionReply —— 但 LLM 已经跑完、结果仍存进 KV，
+	// 抑制检查：上游（如 engagement 参与度评估 / 节奏门）判定「此刻不该说话」时，
+	// 默认不产出 ActionReply —— 但 LLM 已经跑完、结果仍存进 KV，
 	// 供记忆写入等下游 Stage 使用。即「照样听、照样想、照样记，只是不说出口」。
 	//
 	// 这一步是必要的：本Stage 是全项目唯一产出 ActionReply 的地方，
 	// 若不在此拦截，上游的静默决策对实际发送没有任何约束力。
+	//
+	// 优先级裁定（重要，勿回退）：当 REPLY_CONTROL 协议开启、且模型在结尾显式给出
+	// send:true 并带有可公开发送的内容时，以模型的确定性信号为准、放行出站；
+	// 上游节奏/engagement 启发式门退化为「模型未显式 opt-in 时的兜底」。这与本项目
+	// 「出站与否由模型确定性信号裁决，而非启发式」的整体设计一致（见本文件
+	// REPLY_CONTROL 设计注释）。修复前节奏门（rhythm_speak_tendency）会在模型已用
+	// <public>+send:true 给出真实回复（如群内被问技术问题时）仍整条吞掉。
+	// 注：潜水(lurk)/全局静音(mute) 由更早分支或 OutboundGuard 兜底，不会因此漏出发。
 	if suppressed, reason := replySuppressed(env); suppressed {
-		span.SetAttributes(
-			attribute.Bool("reply.suppressed", true),
+		if !(s.config.RequireReplyControl && modelExplicitlySends(result.Text)) {
+			span.SetAttributes(
+				attribute.Bool("reply.suppressed", true),
 			attribute.String("reply.suppress_reason", reason),
 		)
 		logger.Infow("reply suppressed: not sending to channel",
@@ -1011,6 +1032,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			"text_len", len(result.Text))
 		env.Set("llm.result", result)
 		return env, nil
+		}
+		// 模型显式 send:true → 放行，继续走下方 REPLY_CONTROL 清洗 / 提取公开内容分支。
+		span.SetAttributes(attribute.Bool("reply.override_suppress_by_model", true))
+		logger.Infow("reply suppress overridden by model REPLY_CONTROL send:true",
+			"message_id", env.Message.ID, "original_reason", reason)
 	}
 
 	// 清洗思考内容：部分模型（DeepSeek-R1/ GLM / QwQ 等）把推理过程以

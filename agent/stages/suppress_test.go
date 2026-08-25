@@ -150,3 +150,110 @@ func TestLLMStage_EmptyAfterStripNotSent(t *testing.T) {
 		t.Fatalf("must not send empty/thinking-only reply, got %+v", got)
 	}
 }
+
+// newSuppressTestStageRC 构造可配置 RequireReplyControl 的测试 Stage。
+func newSuppressTestStageRC(p llm.Provider, requireRC bool) *LLMStage {
+	return NewLLMStage("llm", p, LLMConfig{
+		MessageBuilder: func(msg core.Message) []llm.Message {
+			return []llm.Message{llm.UserMessage(msg.Text)}
+		},
+		RequireReplyControl: requireRC,
+	}, nil, nil)
+}
+
+// TestLLMStage_ModelSendTrueOverridesRhythmSuppress 验证：REPLY_CONTROL 开启时，
+// 模型显式 send:true 且含公开内容，可覆盖上游节奏门（rhythm_speak_tendency）的抑制。
+// 这是 2026-08-25 日志审计发现的回归：群内被问技术问题时模型已用 <public>+send:true
+// 给出答案，却被节奏门整条吞掉。
+func TestLLMStage_ModelSendTrueOverridesRhythmSuppress(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<public>rssCloud 挺有年代感，现在更推荐 WebSub。</public>@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m5", Text: "RSS 实时推送现在用什么？", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, "rhythm_speak_tendency")
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	got := replyActions(out)
+	if len(got) != 1 {
+		t.Fatalf("model send:true must override rhythm suppress, got %d replies: %+v", len(got), got)
+	}
+	payload, _ := got[0].Payload.(string)
+	if !strings.Contains(payload, "WebSub") {
+		t.Errorf("public content lost after override, payload=%q", payload)
+	}
+}
+
+// TestLLMStage_ModelSendFalseStillSuppressed 验证：模型自己 send:false 时，
+// 即便上游已抑制，结果仍不出站（覆盖分支不改变模型的否决权）。
+func TestLLMStage_ModelSendFalseStillSuppressed(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<internal>这条是引流广告，不互动。</internal>@@REPLY_CONTROL@@{\"send\": false}",
+	}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m6", Text: "来看我家新品", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, "rhythm_speak_tendency")
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 0 {
+		t.Fatalf("model send:false must stay suppressed, got %+v", got)
+	}
+}
+
+// TestLLMStage_NoControlBlockFailClosed 验证：REPLY_CONTROL 开启但模型漏掉控制块时，
+// 仍 fail-closed 不出站（覆盖分支仅在模型显式 send:true 时生效）。
+func TestLLMStage_NoControlBlockFailClosed(t *testing.T) {
+	p := &suppressStubProvider{text: "我随便说点什么"}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m7", Text: "在吗", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, "engagement_declined")
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 0 {
+		t.Fatalf("missing control block must fail-closed, got %+v", got)
+	}
+}
+
+// TestLLMStage_RCGateOffRhythmWins 验证：REPLY_CONTROL 未开启时，
+// 上游节奏门仍绝对优先（即便模型文本里出现 send:true 字样也不解析）。
+func TestLLMStage_RCGateOffRhythmWins(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<public>答案</public>@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	stage := newSuppressTestStageRC(p, false)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m8", Text: "问题", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, "rhythm_speak_tendency")
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 0 {
+		t.Fatalf("RC off: rhythm gate must win, got %+v", got)
+	}
+}
