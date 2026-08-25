@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,31 @@ func (e *exchangeSeen) seen(id string) bool {
 }
 
 const exchangeCaptureDedupTTL = 10 * time.Minute
+
+// 以下正则在捕获「用户说了什么」为 L0 对话记忆前，剥离渠道层为 LLM prompt 注入的
+// 装饰噪声（channel/misskey/channel.go:580-595）。这些前缀/后缀是给模型看的上下文，
+// 不应作为长期记忆原文存储——否则会污染 recall 召回 prompt 与 dreaming 巩固输入。
+//
+// 注意只剥离「已知的固定装饰格式」，不碰用户真实内容（如 Misskey 渲染的
+// "[Reply to 栞娜: ...]" 是帖子正文的一部分，必须保留）。
+var (
+	reTimelinePrefix = regexp.MustCompile(`^\[Timeline\]\s*@\S+:\s*`)
+	reDMPrefix       = regexp.MustCompile(`^\[DM\]\s*@\S+:\s*`)
+	reBotPrefix      = regexp.MustCompile(`^\[对方是 Bot 账号 [^\]]+\]\s*`)
+	reNoteIDSuffix   = regexp.MustCompile(`(?m)\s*\[note_id: [^\]]+\]\s*$`)
+)
+
+// normalizeExchangeText 去除捕获文本里的渠道装饰前缀/后缀，返回干净的用户原文。
+func normalizeExchangeText(raw string) string {
+	s := raw
+	// 注意顺序：Bot 账号标注包裹在 Timeline/DM 前缀之外（见 channel.go 注入顺序），
+	// 故先剥 Bot 前缀，再剥来源前缀。
+	s = reBotPrefix.ReplaceAllString(s, "")
+	s = reTimelinePrefix.ReplaceAllString(s, "")
+	s = reDMPrefix.ReplaceAllString(s, "")
+	s = reNoteIDSuffix.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
 
 // CapturedUserMessage 是一条已摄取的入站用户消息（写入事件流的最小单元）。
 // 与 dao.UserMessageEvent 解耦，避免 agent/stages 直接依赖存储层。
@@ -116,7 +142,7 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 			// 见历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
 			// 一条用户消息只捕获一次：若一轮产出多个 ActionReply（如主回复 + ChannelPoster
 			// 转发），原先会在循环里对每个回复各写一份，导致 L0 笔记与事件流记录重复。
-			userText := strings.TrimSpace(env.Message.Text)
+			userText := normalizeExchangeText(env.Message.Text)
 			if userText != "" {
 				// 快照 actions，避免遍历过程中 AddAction 改变切片长度引发意外。
 				actions := make([]core.Action, len(out.Actions()))

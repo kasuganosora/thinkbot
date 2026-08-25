@@ -49,7 +49,11 @@ const (
 
 	// Tier2Episodic 场景记忆。
 	// 将相关的 L1 记忆聚类为主题场景，提供紧凑的导航摘要。
-	// 定期通过 LLM 聚合生成。
+	// 定期通过 LLM 聚合生成（依赖 TieredManagerConfig.Aggregator）。
+	//
+	// 设计说明（2026-08-25 收敛）：本仓库未提供 Aggregator 实现，
+	// 故生产中 L2 恒为空。L3 画像由 L1 经 Profiler 直接产出，有效管线为
+	// L0→L1→L3。L2 作为可选扩展点保留，不删除（避免破坏四层类型体系与文档契约）。
 	Tier2Episodic MemoryTier = 2
 
 	// Tier3Profile 用户画像（最长期）。

@@ -208,3 +208,31 @@ func TestNoteCaptureMiddleware_CrossProcessDedup(t *testing.T) {
 		t.Fatalf("different message_id: expected 2 captures, got %d", spy.count)
 	}
 }
+
+// TestNormalizeExchangeText 验证捕获为 L0 对话记忆前，渠道层为 LLM prompt 注入的
+// 装饰噪声（[Timeline]/[DM]/[对方是 Bot 账号]/[note_id: ...]）被剥离，且用户真实
+// 正文（含 Misskey 渲染的 "[Reply to ...]"）被保留。
+func TestNormalizeExchangeText(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// 时间线装饰前缀 + note_id 后缀
+		{"[Timeline] @luna: 来来 测试下你的记忆力\n[note_id: aq0uojwxdi7a00m]", "来来 测试下你的记忆力"},
+		// DM 装饰前缀
+		{"[DM] @kanna: 在吗", "在吗"},
+		// Bot 账号标注前缀
+		{"[对方是 Bot 账号 @ce_observe] [Timeline] @ce_observe: A 股股王长鑫科技", "A 股股王长鑫科技"},
+		// 多装饰叠加
+		{"[对方是 Bot 账号 @x] [Timeline] @x: hello\n[note_id: abc123]", "hello"},
+		// 无装饰：原样返回（含 Misskey 渲染的正文 "[Reply to ...]" 必须保留）
+		{"[Reply to 栞娜: @luna 来喵！我先下，占据中心 ✕", "[Reply to 栞娜: @luna 来喵！我先下，占据中心 ✕"},
+		// 普通正文
+		{"外面好像要下大雨的样子呢", "外面好像要下大雨的样子呢"},
+	}
+	for _, c := range cases {
+		if got := normalizeExchangeText(c.in); got != c.want {
+			t.Errorf("normalizeExchangeText(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
