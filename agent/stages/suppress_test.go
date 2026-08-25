@@ -191,6 +191,66 @@ func TestLLMStage_ModelSendTrueOverridesRhythmSuppress(t *testing.T) {
 	}
 }
 
+// TestLLMStage_ModelSendTrueDoesNotOverridePassive 验证：REPLY_CONTROL 开启时，
+// 模型即便显式 send:true 且含公开内容，也**不能**覆盖 passive（仅被动回复）模式的
+// passive_mode_unmentioned 硬权限门。这是 2026-08-25 日志审计发现、并在上一轮
+// reply-control 修复中误引入的回归：原本只为放行「节奏/engagement 软启发式门」，
+// 却一并放过了「未被 @ 不得发言」的硬策略权限，导致被动回复 bot 对没 @ 它的消息发帖。
+func TestLLMStage_ModelSendTrueDoesNotOverridePassive(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<public>这话题我也想说两句。</public>@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m-passive", Text: "群里的闲聊，没人 @ bot", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	// 模拟 passive-speak enricher：未被 @ 的消息设硬权限抑制。
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, "passive_mode_unmentioned")
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 0 {
+		t.Fatalf("passive hard-permission gate must NOT be overridden by model send:true, got %+v", got)
+	}
+	// LLM 仍被调用、结果仍写入 KV（「照样听、照样想」）。
+	if p.called != 1 {
+		t.Errorf("LLM should still be invoked, called=%d", p.called)
+	}
+	if _, ok := out.Get("llm.result"); !ok {
+		t.Error("llm.result should still be stored for downstream memory stages")
+	}
+}
+
+// TestLLMStage_ModelSendTrueOverridesEngagementSuppress 验证：engagement 的
+// engagement_declined 属「软启发式」门（active 模式下「此刻该不该说」的判断），
+// 与 passive 硬权限门不同，仍可被模型 REPLY_CONTROL send:true 覆盖。本测试锁定
+// 设计意图：上一轮修复仅把硬权限门（passive_mode_unmentioned）排除在覆盖之外，
+// 不应误伤软启发式门。
+func TestLLMStage_ModelSendTrueOverridesEngagementSuppress(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<public>这个问题我可以补充一点。</public>@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m-engage", Text: "有人问了个问题", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, "engagement_declined")
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 1 {
+		t.Fatalf("engagement soft gate must be overridable by model send:true, got %+v", got)
+	}
+}
+
 // TestLLMStage_ModelSendFalseStillSuppressed 验证：模型自己 send:false 时，
 // 即便上游已抑制，结果仍不出站（覆盖分支不改变模型的否决权）。
 func TestLLMStage_ModelSendFalseStillSuppressed(t *testing.T) {

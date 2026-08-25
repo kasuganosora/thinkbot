@@ -78,6 +78,14 @@ func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.
 //
 // 返回 (是否抑制, 原因)。原因仅用于日志与 trace —— 静默丢弃必须可解释，
 // 否则运维会把「有意不回复」误判成 Bot 故障。
+// suppressReasonPassiveUnmentioned 是 passive（仅被动回复）模式下，
+// passive-speak enricher 对非「真人显式 @」消息设置的抑制原因。
+// 它表达的是「此消息未被 @，bot 无权限主动发言」的**硬策略权限**，
+// 与节奏/engagement 的「此刻该不该说」软启发式不同，绝不允许被模型的
+// REPLY_CONTROL send:true 放行覆盖（否则 bot 会对没 @ 它的消息发帖）。
+// 必须与 api/botservice.go passive-speak enricher 写入的 reason 字符串保持一致。
+const suppressReasonPassiveUnmentioned = "passive_mode_unmentioned"
+
 func replySuppressed(env *core.Envelope) (bool, string) {
 	v, ok := env.Get(core.KVSuppressReply)
 	if !ok {
@@ -1021,19 +1029,27 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// <public>+send:true 给出真实回复（如群内被问技术问题时）仍整条吞掉。
 	// 注：潜水(lurk)/全局静音(mute) 由更早分支或 OutboundGuard 兜底，不会因此漏出发。
 	if suppressed, reason := replySuppressed(env); suppressed {
-		if !(s.config.RequireReplyControl && modelExplicitlySends(result.Text)) {
+		// 模型显式 send:true 仅覆盖「软启发式」抑制门（节奏/engagement 节流判断）：
+		// 这类门表达的是「此刻该不该说」，模型经 REPLY_CONTROL 给出确定性意图时放行合理。
+		// 但 passive 模式的 passive_mode_unmentioned 是**硬权限门**（「此消息未被 @，
+		// bot 无权主动发言」），性质不同，绝不被模型放行覆盖——否则被动回复 bot 会对
+		// 没 @ 它的消息发帖，违背「只被动回复」契约（见 2026-08-25 日志审计发现的回归）。
+		// 注：潜水(lurk)/mute 在更早分支已 return，不会到达本门（见上方 lurk 分支）。
+		override := s.config.RequireReplyControl && modelExplicitlySends(result.Text) &&
+			reason != suppressReasonPassiveUnmentioned
+		if !override {
 			span.SetAttributes(
 				attribute.Bool("reply.suppressed", true),
-			attribute.String("reply.suppress_reason", reason),
-		)
-		logger.Infow("reply suppressed: not sending to channel",
-			"message_id", env.Message.ID,
-			"reason", reason,
-			"text_len", len(result.Text))
-		env.Set("llm.result", result)
-		return env, nil
+				attribute.String("reply.suppress_reason", reason),
+			)
+			logger.Infow("reply suppressed: not sending to channel",
+				"message_id", env.Message.ID,
+				"reason", reason,
+				"text_len", len(result.Text))
+			env.Set("llm.result", result)
+			return env, nil
 		}
-		// 模型显式 send:true → 放行，继续走下方 REPLY_CONTROL 清洗 / 提取公开内容分支。
+		// 模型显式 send:true → 放行（仅软启发式门被覆盖，硬权限门已排除）。
 		span.SetAttributes(attribute.Bool("reply.override_suppress_by_model", true))
 		logger.Infow("reply suppress overridden by model REPLY_CONTROL send:true",
 			"message_id", env.Message.ID, "original_reason", reason)
