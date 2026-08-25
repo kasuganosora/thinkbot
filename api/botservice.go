@@ -100,6 +100,14 @@ type BotService struct {
 	// heartbeatStore 心跳配置/日志存储。由 BotService 持有并共享给 API Server，
 	// 保证「运行时执行器写日志」与「HTTP 读写配置」用的是同一把 per-bot 锁。
 	heartbeatStore *heartbeat.Store
+
+	// memRepos 保存每个已启动 bot 的 SQLite 记忆仓储（含 CompactScope），
+	// 供 /compact 等运维命令按需触发记忆压缩。
+	memRepos map[string]*storage.SQLiteRepository
+
+	// llmBundles 保存每个已启动 bot 的 LLM Bundle（provider + model），
+	// 供 /compact 等命令对聊天历史做 LLM 摘要。
+	llmBundles map[string]*bot.LLMBundle
 }
 
 // NewBotService 创建 BotService。
@@ -133,6 +141,9 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageInterrupts:  make(map[string]chan string),
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
+
+		memRepos:    make(map[string]*storage.SQLiteRepository),
+		llmBundles:  make(map[string]*bot.LLMBundle),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -1791,6 +1802,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.mu.Lock()
 	s.channels[id] = webCh
 	s.botInstances[id] = b
+	s.memRepos[id] = memRepo
+	s.llmBundles[id] = bundle
 	s.toolManagers[id] = toolMgr
 
 	// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
@@ -2260,6 +2273,24 @@ func (s *BotService) CreateLLMProvider() (llm.Provider, string, *config.ModelDef
 		return bundle.Main, bundle.MainDef.Model, &md, nil
 	}
 	return nil, "", nil, errs.New("no LLM provider available — configure at least one bot with an LLM")
+}
+
+// GetMemoryRepo 返回指定 bot 的 SQLite 记忆仓储（含 CompactScope 压缩能力）。
+// bot 未运行时返回 (nil, false)。
+func (s *BotService) GetMemoryRepo(botID string) (*storage.SQLiteRepository, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.memRepos[botID]
+	return r, ok
+}
+
+// GetLLMBundle 返回指定 bot 的 LLM Bundle（provider + model），
+// 供 /compact 等命令对聊天历史做 LLM 摘要。bot 未运行时返回 (nil, false)。
+func (s *BotService) GetLLMBundle(botID string) (*bot.LLMBundle, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.llmBundles[botID]
+	return b, ok
 }
 
 // EventBus 返回事件总线。
