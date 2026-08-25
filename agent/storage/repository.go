@@ -21,6 +21,18 @@ import (
 // 每轮写入都触发一次无意义的 LLM 调用。
 const compactCooldown = 5 * time.Minute
 
+// compactionLLMTimeout 是单次压缩（LLM 聚类合并）的上下文截止时间。
+//
+// 背景：压缩是写入路径上的 best-effort 后台任务，调用 main Provider（GLM/智谱
+// 等首字节较慢的模型）。旧值 30s 过短——BigModel 高负载时首 token 常 >30s，
+// 压缩 LLM 调用被 context deadline 精准卡死，导致 L1 记忆永远合并不了、只增不减
+// （实测一整晚 136 次 "sqlite_compactor: LLM cluster+merge failed"，且随时间恶化）。
+//
+// 该上限只需比「正常慢」宽裕、同时仍能兜底「真卡死」：main Provider 的 HTTP 客户端
+// 超时为 20min，这里取 5min 既给慢但活着的 BigModel 足够完成窗口，又不会让一个
+// 卡死的压缩 goroutine 无限期占用该 scope 的 compacting 锁。
+const compactionLLMTimeout = 5 * time.Minute
+
 // MemoryCompactor 在 scope 字符数超过预算阈值时触发记忆压缩（压缩后入库）。
 // SQLiteCompactor 实现该接口；生产路径通过 SQLiteRepository 的 Compactor 字段注入。
 type MemoryCompactor interface {
@@ -155,7 +167,7 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 	if r.compactor != nil && r.window != nil {
 		scope := entry.Scope
 		go func() {
-			cmpCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			cmpCtx, cancel := context.WithTimeout(context.Background(), compactionLLMTimeout)
 			defer cancel()
 			r.maybeCompact(cmpCtx, scope)
 		}()
@@ -231,7 +243,7 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 	}()
 	if r.compactor != nil && r.window != nil {
 		go func() {
-			cmpCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			cmpCtx, cancel := context.WithTimeout(context.Background(), compactionLLMTimeout)
 			defer cancel()
 			r.maybeCompact(cmpCtx, scope)
 		}()

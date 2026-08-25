@@ -11,6 +11,14 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
+const (
+	// compactLLMTimeout 单次压缩批调用 GLM 聚类合并的独立超时。
+	// 压缩是尽力而为的后台维护，必须脱离请求级短 deadline，否则大 prompt
+	// 下 GLM 调用会 context deadline exceeded（见日志 sqlite_compactor
+	// "LLM cluster+merge failed, skipping batch" 的 context deadline exceeded）。
+	compactLLMTimeout = 120 * time.Second
+)
+
 // ============================================================================
 // SQLiteCompactor — 生产路径的语义记忆压缩器
 //
@@ -58,8 +66,9 @@ type SQLiteCompactor struct {
 // 的构造循环依赖（两者互相引用）。
 func NewSQLiteCompactor(cfg SQLiteCompactorConfig, logger *zap.SugaredLogger) *SQLiteCompactor {
 	mc := memory.CompactionConfig{
-		Provider: cfg.Provider,
-		Model:    cfg.Model,
+		Provider:    cfg.Provider,
+		Model:       cfg.Model,
+		Precompress: true, // LLM 摘要前先做确定性瘦身（JSON 紧凑化+must-keep+回退校验）
 	}
 	if cfg.SystemPrompt != "" {
 		mc.SystemPrompt = cfg.SystemPrompt
@@ -126,15 +135,16 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 			"total", len(entries), "max", batchSize, "batches", totalBatches)
 	}
 
-	mergedTotal, archivedTotal := 0, 0
+	mergedTotal, archivedTotal, savedTotal := 0, 0, 0
 	for i := 0; i < len(entries); i += batchSize {
 		end := i + batchSize
 		if end > len(entries) {
 			end = len(entries)
 		}
-		m, a := c.compactBatch(ctx, scope, entries[i:end])
+		m, a, s := c.compactBatch(ctx, scope, entries[i:end])
 		mergedTotal += m
 		archivedTotal += a
+		savedTotal += s
 	}
 
 	c.logger.Infow("sqlite semantic compaction complete",
@@ -143,6 +153,7 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 		"batches", totalBatches,
 		"merged", mergedTotal,
 		"archived", archivedTotal,
+		"precompressed_saved", savedTotal,
 		"duration", time.Since(start))
 
 	return nil
@@ -150,27 +161,41 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 
 // compactBatch 对一批活跃记忆执行 LLM 聚类合并 + 归档来源。
 // 单批失败（如 LLM 抖动）不影响其他批次，返回已合并/已归档计数。
-func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, entries []memory.Entry) (merged, archived int) {
+func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, entries []memory.Entry) (merged, archived, saved int) {
 	if len(entries) < c.config.MinClusterSize {
-		return 0, 0
+		return 0, 0, 0
 	}
+
+	// 压缩是尽力而为的后台维护：聚类合并要调 GLM，可能耗时数秒到数十秒。
+	// 调用方传入的 ctx 通常来自请求链路、带较短 deadline，直接透传会导致
+	// "context deadline exceeded"（见日志 sqlite_compactor LLM cluster+merge
+	// failed）。这里派生一个「去掉请求 deadline、但保留 traceid 等上下文值」
+	// 的 ctx（context.WithoutCancel 仅剥离父 ctx 的 deadline/cancel，保留值），
+	// 再包一层独立长超时用于控制。服务关闭时父 ctx 取消防不住本批（best-effort），
+	// 但仍受 compactLLMTimeout 上限约束，不会无限挂起。
+	batchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compactLLMTimeout)
+	defer cancel()
 
 	inputs := make([]memory.ClusterInput, 0, len(entries))
 	for _, e := range entries {
+		pc := memory.PreprocessContent(e.Content, c.config.Precompress)
+		if c.config.Precompress {
+			saved += llm.EstimateTokens(e.Content) - llm.EstimateTokens(pc)
+		}
 		inputs = append(inputs, memory.ClusterInput{
 			ID:       e.ID,
 			Category: e.Category,
-			Content:  e.Content,
+			Content:  pc,
 		})
 	}
-	clusters, err := memory.ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs)
+	clusters, err := memory.ClusterMerge(batchCtx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs)
 	if err != nil {
 		c.logger.Warnw("sqlite_compactor: LLM cluster+merge failed, skipping batch",
 			"err", err, "batch_size", len(entries))
-		return 0, 0
+		return 0, 0, 0
 	}
 	if len(clusters) == 0 {
-		return 0, 0 // 无可合并项
+		return 0, 0, 0 // 无可合并项
 	}
 
 	mergedIDs := make(map[string]bool)
@@ -189,7 +214,7 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 			Importance: cl.Importance,
 			Metadata:   meta,
 		}
-		if err := c.repo.Append(ctx, merged); err != nil {
+		if err := c.repo.Append(batchCtx, merged); err != nil {
 			c.logger.Warnw("sqlite_compactor: failed to write merged entry, skipping cluster",
 				"err", err, "source_ids", cl.SourceIDs)
 			continue
@@ -203,10 +228,10 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 		if !mergedIDs[e.ID] {
 			continue
 		}
-		if c.repo.ArchiveByID(ctx, scope, e.ID) {
+		if c.repo.ArchiveByID(batchCtx, scope, e.ID) {
 			archivedCount++
 		}
 	}
 
-	return mergedCount, archivedCount
+	return mergedCount, archivedCount, saved
 }
