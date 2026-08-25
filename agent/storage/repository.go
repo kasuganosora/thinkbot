@@ -130,6 +130,16 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 	}
 }
 
+// CompactScope 对该 scope 执行语义压缩（委派给内部 MemoryCompactor，即带 pre-LLM
+// 预压缩的 SQLiteCompactor）。供 /compact 等命令按需手动触发记忆压缩。
+// compactor 未配置时为空操作（返回 nil），不影响调用方。
+func (r *SQLiteRepository) CompactScope(ctx context.Context, scope memory.Scope) error {
+	if r.compactor == nil {
+		return nil
+	}
+	return r.compactor.CompactScope(ctx, scope)
+}
+
 // ============================================================================
 // Store 实现（写入侧）
 // ============================================================================

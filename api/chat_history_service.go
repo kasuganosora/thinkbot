@@ -286,6 +286,39 @@ func (s *ChatHistoryService) ClearSessionMessages(sessionID string) (int64, erro
 	return res.RowsAffected, nil
 }
 
+// DeleteMessages 按 ID 删除指定会话的部分消息（用于 /compact 只压缩最旧的一段，
+// 而非清空整个会话）。bot_id / session_id 作为安全护栏，避免误删其他会话。
+// 返回被删除的消息数量。
+func (s *ChatHistoryService) DeleteMessages(botID, sessionID string, ids []uint64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := s.db.Where("bot_id = ? AND session_id = ? AND id IN ?", botID, sessionID, ids).
+		Delete(&dao.ChatMessage{})
+	if res.Error != nil {
+		return 0, fmt.Errorf("chat_history: delete messages: %w", res.Error)
+	}
+	return res.RowsAffected, nil
+}
+
+// SaveMessageAt 与 SaveMessage 类似，但允许指定 CreatedAt。用于 /compact 把历史摘要
+// 插入到「最近保留段」之前，保持时间顺序（摘要早于最近 N 条，而非追加到末尾）。
+func (s *ChatHistoryService) SaveMessageAt(botID, userID, role, content, traceID, sessionID string, createdAt time.Time) error {
+	msg := dao.ChatMessage{
+		BotID:     botID,
+		UserID:    userID,
+		SessionID: sessionID,
+		Role:      role,
+		Content:   content,
+		TraceID:   traceID,
+		CreatedAt: createdAt,
+	}
+	if err := s.db.Create(&msg).Error; err != nil {
+		return fmt.Errorf("chat_history: save message at: %w", err)
+	}
+	return nil
+}
+
 // --- 游标编解码 ---
 
 // encodeCursor 将时间戳和 ID 编码为游标字符串。

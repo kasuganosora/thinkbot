@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,10 +14,13 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/command"
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/stages"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/workflow"
@@ -996,6 +1000,8 @@ func (s *Server) handleSlashCommand(c *gin.Context, cmd *command.ParsedCommand, 
 	switch cmd.Name {
 	case "clear":
 		s.cmdClear(c, req.BotID, req.SessionID)
+	case "compact":
+		s.cmdCompact(c, req.BotID, req.SessionID, fmt.Sprintf("%d", user.ID), parseKeep(cmd.Args))
 	case "help":
 		s.cmdHelp(c)
 	default:
@@ -1042,6 +1048,126 @@ func (s *Server) cmdHelp(c *gin.Context) {
 	sb.WriteString("_在聊天输入框输入命令即可执行_")
 
 	s.replyCommandSSE(c, sb.String(), map[string]any{"command": "help"})
+}
+
+// parseKeep 解析 /compact 后的保留条数参数，非法或缺失时回退默认值 3。
+func parseKeep(args string) int {
+	if args == "" {
+		return 3
+	}
+	if n, err := strconv.Atoi(strings.TrimSpace(args)); err == nil && n > 0 {
+		return n
+	}
+	return 3
+}
+
+// cmdCompact 执行 /compact：LLM 摘要旧消息替代静默截断，并顺带触发该会话对应
+// scope 的记忆压缩（带 pre-LLM 预压缩的生产路径）。
+func (s *Server) cmdCompact(c *gin.Context, botID, sessionID, userID string, keep int) {
+	if sessionID == "" {
+		s.replyCommandError(c, "⚠️ 没有活跃会话，无法压缩。请先在一个会话中发送消息。")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), compactLLMTimeout)
+	defer cancel()
+
+	// ① 记忆压缩：当前 web 会话对应 scope = ChannelScope("web:"+userID)
+	//    异步执行，避免阻塞聊天响应（压缩可能耗时数分钟，单批上限见
+	//    sqlite_compactor.compactLLMTimeout）。结果记入日志，不阻塞 SSE 回复。
+	if memRepo, ok := s.botSvc.GetMemoryRepo(botID); ok {
+		scope := memory.ChannelScope("web:" + userID)
+		go func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer ccancel()
+			if err := memRepo.CompactScope(cctx, scope); err != nil {
+				s.logger.Warnw("cmd compact: memory compaction failed", "bot_id", botID, "scope", scope, "err", err)
+			} else {
+				s.logger.Infow("cmd compact: memory compaction done", "bot_id", botID, "scope", scope)
+			}
+		}()
+	}
+
+	// ② 聊天历史 LLM 摘要（替代截断）— 同步单次调用，结果随 SSE 回复返回
+	summary, kept, removed := s.compactChatHistory(ctx, botID, sessionID, userID, keep)
+
+	reply := fmt.Sprintf(
+		"✅ 已压缩会话上下文：保留最近 %d 条，摘要 %d 条旧消息；记忆压缩已后台触发。",
+		kept, removed,
+	)
+	if summary != "" {
+		reply += "\n\n📝 已生成历史摘要并保留在上下文开头。"
+	}
+	s.replyCommandSSE(c, reply, map[string]any{
+		"command":         "compact",
+		"kept":            kept,
+		"removed":         removed,
+		"memoryCompacted": true,
+	})
+}
+
+// compactChatHistory 加载会话历史，对最旧的 (总数-keep) 条用 bot 的 LLM 生成结构化
+// 摘要，删除旧段、把摘要插入到「最近保留段」之前，实现「摘要而非截断」。返回摘要
+// 文本、保留条数、删除条数。
+func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userID string, keep int) (string, int, int) {
+	history, err := s.chatHistory.LoadContextBySession(botID, sessionID, 1000)
+	if err != nil {
+		s.logger.Warnw("compact: load history failed", "err", err)
+		return "", 0, 0
+	}
+	if len(history) <= keep {
+		return "", len(history), 0
+	}
+
+	old := history[:len(history)-keep]
+	recent := history[len(history)-keep:]
+
+	// 组装待摘要的旧消息
+	var head []llm.Message
+	for _, m := range old {
+		role := llm.MessageRoleUser
+		if m.Role == dao.ChatRoleAssistant {
+			role = llm.MessageRoleAssistant
+		}
+		head = append(head, llm.Message{
+			Role:    role,
+			Content: []llm.MessagePart{llm.TextPart{Text: m.Content}},
+		})
+	}
+
+	summaryText := ""
+	if bundle, ok := s.botSvc.GetLLMBundle(botID); ok && len(head) > 0 {
+		compactor := llm.NewCompactor(llm.DefaultCompactionConfig())
+		if sum, serr := compactor.SummarizeHead(ctx, bundle.Main, bundle.MainDef.Model, head); serr == nil {
+			summaryText = sum
+		} else {
+			s.logger.Warnw("compact: summarize failed, fall back to truncation", "err", serr)
+		}
+	}
+
+	// 删除旧段（按 ID 精确删除，保留最近 keep 条）
+	ids := make([]uint64, 0, len(old))
+	for _, m := range old {
+		ids = append(ids, m.ID)
+	}
+	removed := 0
+	if n, derr := s.chatHistory.DeleteMessages(botID, sessionID, ids); derr != nil {
+		s.logger.Warnw("compact: delete old messages failed", "err", derr)
+	} else {
+		removed = int(n)
+	}
+
+	// 把摘要插入到最近保留段之前，保持时间顺序
+	if summaryText != "" {
+		_ = s.chatHistory.SaveMessageAt(
+			botID, userID, dao.ChatRoleAssistant,
+			"【历史摘要】\n"+summaryText,
+			idgen.New("compact"), sessionID,
+			recent[0].CreatedAt.Add(-time.Second),
+		)
+	}
+
+	return summaryText, len(recent), removed
 }
 
 // cmdUnknown 未知命令提示。
