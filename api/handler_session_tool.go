@@ -1,17 +1,24 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/util/errs"
-	"github.com/kasuganosora/thinkbot/util/idgen"
 )
+
+// compactLLMTimeout 手动 /compact 触发记忆压缩时给 LLM 调用的预算。
+// 必须与自动路径 maybeCompact 的 compactionLLMTimeout（5min）口径一致——
+// 不能用 HTTP 请求上下文（gin 默认 ~120s 会掐断慢速 GLM 首字）。
+const compactLLMTimeout = 5 * time.Minute
 
 // ============================================================================
 // Session Tool Handler — 会话级工具 API
@@ -220,7 +227,9 @@ func (s *Server) handleSessionStatus(c *gin.Context) {
 // handleSessionCompact 压缩会话上下文。
 // POST /api/sessions/:sid/compact
 //
-// session ID 即 bot ID。通过向运行中的 bot 注入 `/compact` admin 命令触发真实压缩；
+// 手动触发指定 bot 的记忆压缩（带 pre-LLM 预压缩的生产路径）。
+// 可选 query 参数 scope（格式 kind:id，如 channel:web:123 / bot:xyz / global）：
+// 指定则只压该 scope；不传则压该 bot 的主作用域（channel:<sid> + bot:<sid>）。
 // 若 bot 未运行则返回明确提示，不再假成功。
 func (s *Server) handleSessionCompact(c *gin.Context) {
 	sid := c.Param("sid")
@@ -229,24 +238,77 @@ func (s *Server) handleSessionCompact(c *gin.Context) {
 		Fail(c, errs.Internal("bot service unavailable"))
 		return
 	}
-	webCh, ok := s.botSvc.GetWebChannel(sid)
+	memRepo, ok := s.botSvc.GetMemoryRepo(sid)
 	if !ok {
-		Fail(c, errs.BadRequest("bot 未运行，无法压缩上下文"))
+		Fail(c, errs.BadRequest("bot 未运行，无法压缩记忆"))
 		return
 	}
 
-	userID := "admin"
-	if u := currentUser(c); u != nil {
-		userID = fmt.Sprintf("%d", u.ID)
-	}
-	traceID := idgen.New("compact")
-	if err := webCh.Inject(c.Request.Context(), traceID, userID, "/compact", map[string]any{"trigger": "manual_compact"}); err != nil {
-		Fail(c, errs.Internal("触发压缩失败: "+err.Error()))
+	scopes, err := resolveCompactScopes(sid, c.Query("scope"))
+	if err != nil {
+		Fail(c, errs.BadRequest("invalid scope: "+err.Error()))
 		return
 	}
+	scopeKeys := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		scopeKeys = append(scopeKeys, fmt.Sprintf("%s:%s", sc.Kind, sc.ID))
+	}
+
+	// 异步触发压缩：压缩可能耗时数分钟（每批 GLM 聚类合并上限见
+	// sqlite_compactor.compactLLMTimeout），若同步等待会拖垮 HTTP 请求——
+	// 此前曾因此让 curl 在 6min 处超时（HTTP_STATUS:000）。改为后台 goroutine
+	// 执行，与自动路径 maybeCompact 的「尽力而为、异步维护」语义一致。
+	go func() {
+		runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		for _, sc := range scopes {
+			if cerr := memRepo.CompactScope(runCtx, sc); cerr != nil {
+				s.logger.Warnw("api compact: scope failed", "scope", sc.Key(), "err", cerr)
+				continue
+			}
+			s.logger.Infow("api compact: scope done", "scope", sc.Key())
+		}
+	}()
 
 	auditLog(c, s.logger, "session_compact", "session", sid)
-	OK(c, gin.H{"ok": true, "message": "已触发上下文压缩"})
+	OK(c, gin.H{"ok": true, "message": "已触发记忆压缩（后台执行）", "scopes": scopeKeys})
+}
+
+// resolveCompactScopes 解析压缩范围：scope 参数为空时返回该 bot 的主作用域
+// （channel:<sid> + bot:<sid>）；否则按 kind:id 解析单个 scope。
+func resolveCompactScopes(botID, scopeParam string) ([]memory.Scope, error) {
+	if scopeParam == "" {
+		return []memory.Scope{
+			memory.ChannelScope(botID),
+			memory.BotScope(botID),
+		}, nil
+	}
+	sc, err := parseScopeParam(scopeParam)
+	if err != nil {
+		return nil, err
+	}
+	return []memory.Scope{sc}, nil
+}
+
+// parseScopeParam 解析 "kind:id" 形式的 scope 参数。
+func parseScopeParam(s string) (memory.Scope, error) {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return memory.Scope{}, fmt.Errorf("expected kind:id")
+	}
+	kind := memory.ScopeKind(parts[0])
+	id := parts[1]
+	switch kind {
+	case memory.ScopeChannel, memory.ScopeUser, memory.ScopeBot:
+		if id == "" {
+			return memory.Scope{}, fmt.Errorf("id required for %s", kind)
+		}
+		return memory.Scope{Kind: kind, ID: id}, nil
+	case memory.ScopeGlobal:
+		return memory.Scope{Kind: kind, ID: ""}, nil
+	default:
+		return memory.Scope{}, fmt.Errorf("unknown scope kind %q", parts[0])
+	}
 }
 
 // ============================================================================

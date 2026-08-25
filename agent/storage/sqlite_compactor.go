@@ -12,11 +12,21 @@ import (
 )
 
 const (
-	// compactLLMTimeout 单次压缩批调用 GLM 聚类合并的独立超时。
-	// 压缩是尽力而为的后台维护，必须脱离请求级短 deadline，否则大 prompt
-	// 下 GLM 调用会 context deadline exceeded（见日志 sqlite_compactor
-	// "LLM cluster+merge failed, skipping batch" 的 context deadline exceeded）。
-	compactLLMTimeout = 120 * time.Second
+	// compactLLMTimeout 单次压缩批调用 GLM 聚类合并的独立超时（兜底上限）。
+	//
+	// 为什么是 10 分钟而不是 120s：
+	// 压缩是「尽力而为」的后台维护，大 prompt 下 GLM（尤其 glm-5.3）首 token 延迟
+	// 可能超过 2 分钟。历史上此处设为 120s，导致 compactBatch 用
+	// context.WithoutCancel(ctx) 剥离调用方 deadline 后只给了 120s，GLM 还在
+	// 生成就被 context deadline exceeded 杀掉——无论自动路径（maybeCompact）还是
+	// 手动路径（/compact）的 LLM 聚类合并全部静默失败，只有本地 pre-LLM 预压缩
+	// 真正生效（见日志 "LLM cluster+merge failed, skipping batch"）。
+	//
+	// 这里给每个 batch 一个扁平的 10 分钟上限（与底层 HTTP 客户端 20min 超时留有
+	// 余量），既让慢 GLM 有充足时间返回，又通过 compactBatch 的逐批跳过逻辑保证
+	// 单批失败不影响其他批次、且不会无限挂起。HTTP 客户端超时为 20min（见
+	// agent/bot/llm_factory.go 的 llmClientTimeout），本值必须 < 它。
+	compactLLMTimeout = 10 * time.Minute
 )
 
 // ============================================================================
