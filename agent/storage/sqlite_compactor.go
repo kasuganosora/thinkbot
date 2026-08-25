@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
@@ -69,6 +70,10 @@ type SQLiteCompactor struct {
 	repo   *SQLiteRepository
 	config memory.CompactionConfig
 	logger *zap.SugaredLogger
+	// sf 按 scope.Key() 对压缩做单飞（singleflight）：同一 scope 同一时刻
+	// 只跑一个压缩，避免手动 /compact 与自动 maybeCompact 并发跑同一 scope
+	// 导致双倍 GLM 聚类合并消耗与重复归档。不同 scope 之间不受影响。
+	sf singleflight.Group
 }
 
 // NewSQLiteCompactor 创建 SQLite 记忆压缩器。
@@ -118,10 +123,23 @@ func (c *SQLiteCompactor) SetRepository(repo *SQLiteRepository) {
 
 // CompactScope 对该 scope 执行语义压缩（实现 storage.MemoryCompactor 接口）。
 // 返回 error 仅用于上层感知；压缩失败不影响正常写入流程。
+//
+// 同一 scope 通过 singleflight 串行化：手动 /compact（注入式 API / web 命令）
+// 与自动 maybeCompact 可能并发触发同一 scope，串行化可避免双倍 GLM 聚类合并
+// 消耗与重复归档。不同 scope 之间互不影响。
 func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) error {
 	if c.repo == nil {
 		return nil
 	}
+	_, err, _ := c.sf.Do(scope.Key(), func() (interface{}, error) {
+		return nil, c.compactScope(ctx, scope)
+	})
+	return err
+}
+
+// compactScope 执行单 scope 的语义压缩（由 CompactScope 经 singleflight 调用，
+// 保证同一 scope 同一时刻只有一个压缩在跑）。
+func (c *SQLiteCompactor) compactScope(ctx context.Context, scope memory.Scope) error {
 	start := time.Now()
 
 	// 1. 获取该 scope 所有活跃（未归档）记忆
