@@ -419,6 +419,14 @@ func (r *Request) DoWS(cfg WSConfig) error {
 	if err != nil {
 		return err
 	}
+	// 连接关闭/读循环结束时停止看门狗：避免已关闭（或正在重连）的连接上
+	// 看门狗仍 armed 并在重连期 fire，误打 "watchdog timeout" 日志。
+	// 真实的数据流僵死仍由 handleReadError 返回 WatchdogTimeoutError 触发重连，不受影响。
+	defer func() {
+		if conn.wdOwned && conn.wd != nil {
+			conn.wd.Stop(true)
+		}
+	}()
 
 	// 自动 Ping
 	if cfg.PingInterval > 0 {
@@ -499,6 +507,13 @@ func (r *Request) DoWSMessages(cfg WSConfig) (<-chan WSMessage, *WSConn, error) 
 	go func() {
 		defer close(ch)
 		defer func() { _ = conn.Close() }()
+		// 读循环结束时停止看门狗：避免已关闭（或正在重连）的连接上
+		// 看门狗仍 armed 并误打 "watchdog timeout" 日志。
+		defer func() {
+			if conn.wdOwned && conn.wd != nil {
+				conn.wd.Stop(true)
+			}
+		}()
 
 		start := time.Now()
 		messagesReceived := 0
