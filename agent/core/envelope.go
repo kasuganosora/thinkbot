@@ -114,6 +114,16 @@ const (
 	// 静默降级必须可解释，否则会被误判为 Bot 故障。
 	KVSuppressReplyReason = "reply.suppress_reason"
 
+	// KVSuppressReasonPassive 是「被动回复（仅被 @ 才回）模式下，此消息未被真人 @」
+	// 这一**硬权限门**的 reason 值。它与软节流原因（rhythm_*/engagement_*）有本质区别：
+	// 软原因是「此刻该不该说」的概率/节奏判断，可被模型显式 REPLY_CONTROL send:true 覆盖；
+	// 而本原因是「bot 根本没有在此消息上发言的权限」，绝不可被模型覆盖。
+	//
+	// 该 reason 在 ingress 阶段由 passive-speak enricher 写入，必须在整条 pipeline 中保持
+	// 不被节奏等软门改写（见 agent/stages/rhythm.go 的早退保护），否则会被 reply-control
+	// 的模型放行覆盖，导致被动 bot 对未 @ 的消息发帖。
+	KVSuppressReasonPassive = "passive_mode_unmentioned"
+
 	// KVLurkMode 标记当前消息来自「潜水 / 只读」渠道。
 	//
 	// 由 lurk-detect enricher 在渠道只读（permSvc.IsReadOnly 为 true）时设置。
