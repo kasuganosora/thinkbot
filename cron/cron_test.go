@@ -76,7 +76,7 @@ func TestCronExpr_NextWeekday(t *testing.T) {
 
 func TestParseSchedule_Cron(t *testing.T) {
 	loc := time.UTC
-	kind, _, cronE, nextRun, err := parseSchedule("0 9 * * 1-5", loc)
+	kind, _, cronE, nextRun, _, err := parseSchedule("0 9 * * 1-5", loc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestParseSchedule_Cron(t *testing.T) {
 
 func TestParseSchedule_Interval(t *testing.T) {
 	loc := time.UTC
-	kind, _, _, nextRun, err := parseSchedule("every 30m", loc)
+	kind, _, _, nextRun, _, err := parseSchedule("every 30m", loc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestParseSchedule_Interval(t *testing.T) {
 
 func TestParseSchedule_OnceDelay(t *testing.T) {
 	loc := time.UTC
-	kind, _, _, nextRun, err := parseSchedule("2h", loc)
+	kind, _, _, nextRun, _, err := parseSchedule("2h", loc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestParseSchedule_OnceDelay(t *testing.T) {
 
 func TestParseSchedule_OnceISO(t *testing.T) {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
-	kind, _, _, nextRun, err := parseSchedule("2026-12-25T09:00", loc)
+	kind, _, _, nextRun, _, err := parseSchedule("2026-12-25T09:00", loc)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestParseSchedule_OnceISO(t *testing.T) {
 }
 
 func TestParseSchedule_Invalid(t *testing.T) {
-	_, _, _, _, err := parseSchedule("garbage", time.UTC)
+	_, _, _, _, _, err := parseSchedule("garbage", time.UTC)
 	if err == nil {
 		t.Error("expected error for invalid schedule")
 	}

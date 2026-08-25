@@ -142,6 +142,11 @@ type SchedulerConfig struct {
 	// BotID 关联的 Bot ID，用于 token 统计归属。
 	// 为空时使用 "unknown"。
 	BotID string
+
+	// MissedRunGrace 漏跑检测的额外宽限窗口。
+	// 判定规则：活跃循环任务若「now - LastRunAt > 2×ExpectedInterval + MissedRunGrace」
+	// 则视为漏跑（错过 ≥2 个调度周期）并告警。0 表示仅用 2× 间隔本身。
+	MissedRunGrace time.Duration
 }
 
 // DefaultSchedulerConfig 返回合理的默认配置。
@@ -169,6 +174,11 @@ type Scheduler struct {
 	stopCh      chan struct{}
 	stopped     bool
 	runningJobs map[string]bool // 正在执行的 job IDs
+
+	// missedWarnedAt 记录每个 Job 上次已发出「漏跑告警」的时间，用于冷却，
+	// 避免每个 tick 都重复刷 Warning（报告：梦境 cron 漏跑无告警）。
+	missedMu       sync.Mutex
+	missedWarnedAt map[string]time.Time
 }
 
 // NewScheduler 创建调度器。
@@ -196,6 +206,7 @@ func NewScheduler(store *Store, executor Executor, config SchedulerConfig) *Sche
 		stopCh:      make(chan struct{}),
 		sem:         make(chan struct{}, config.MaxConcurrent),
 		runningJobs: make(map[string]bool),
+		missedWarnedAt: make(map[string]time.Time),
 	}
 }
 
@@ -263,6 +274,10 @@ func (s *Scheduler) tick(ctx context.Context) {
 	now := time.Now().UTC()
 	jobs := s.store.ListActive()
 
+	// 先检测「该跑却长期没跑」的漏跑（如进程宕机跨多个调度点、恢复后尚未补跑）。
+	// 必须在执行循环之前，以便恢复 tick 当轮就能先告警、再补跑。
+	s.checkMissedRuns(now, jobs)
+
 	for _, j := range jobs {
 		// 检查是否到达执行时间
 		if j.NextRunAt == nil {
@@ -304,6 +319,53 @@ func (s *Scheduler) tick(ctx context.Context) {
 			}()
 			s.executeJob(ctx, j)
 		})
+	}
+}
+
+// checkMissedRuns 检测活跃循环任务是否「上次成功运行过旧」——即漏跑（错过 ≥2 个
+// 调度周期）。典型场景：进程宕机跨多个调度点（如梦境 cron 每天 03:00，停机 2 天后
+// 恢复），期间 Job 从未执行；恢复后的首个 tick 在补跑之前即可据此发出告警，
+// 让运维从日志/可观测面板发现「记忆巩固曾中断」。
+//
+// 判定：now - LastRunAt > 2×ExpectedInterval + MissedRunGrace，且 Job 处于活跃/
+// 启用、非一次性、已有过成功运行记录。告警带冷却（每 ExpectedInterval 至多一次），
+// 避免每个 60s tick 重复刷屏。
+func (s *Scheduler) checkMissedRuns(now time.Time, jobs []*Job) {
+	for _, j := range jobs {
+		if !j.Enabled || j.State != StateActive {
+			continue
+		}
+		if j.ScheduleKind == ScheduleOnce || j.ExpectedInterval <= 0 {
+			continue // 一次性任务无「漏跑」概念
+		}
+		if j.LastRunAt == nil {
+			continue // 从未运行过（新建任务，NextRunAt 通常还在未来），不告警
+		}
+		age := now.Sub(j.LastRunAt.UTC())
+		threshold := j.ExpectedInterval*2 + s.config.MissedRunGrace
+		if age <= threshold {
+			continue
+		}
+
+		// 冷却：避免每个 tick 重复告警
+		s.missedMu.Lock()
+		last, cooled := s.missedWarnedAt[j.ID]
+		if cooled && now.Sub(last) < j.ExpectedInterval {
+			s.missedMu.Unlock()
+			continue
+		}
+		s.missedWarnedAt[j.ID] = now
+		s.missedMu.Unlock()
+
+		s.logger.Warnw("cron: job missed scheduled runs",
+			"job_id", j.ID,
+			"job_name", j.Name,
+			"schedule", j.Schedule,
+			"expected_interval", j.ExpectedInterval.String(),
+			"last_run_at", j.LastRunAt.UTC().Format(time.RFC3339),
+			"last_run_age", age.Round(time.Minute).String(),
+			"threshold", threshold.String(),
+			"bot_id", s.config.BotID)
 	}
 }
 
@@ -583,7 +645,7 @@ func (m *Manager) CreateJob(req CreateJobRequest) (*Job, error) {
 		return nil, errs.New(blocked)
 	}
 
-	kind, display, cronE, nextRun, err := parseSchedule(req.Schedule, m.loc)
+	kind, display, cronE, nextRun, expectedInterval, err := parseSchedule(req.Schedule, m.loc)
 	if err != nil {
 		return nil, errs.Wrapf(err, "invalid schedule %q", req.Schedule)
 	}
@@ -605,6 +667,7 @@ func (m *Manager) CreateJob(req CreateJobRequest) (*Job, error) {
 		Enabled:         true,
 		State:           StateActive,
 		NextRunAt:       nextRun,
+		ExpectedInterval: expectedInterval,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		Tags:            req.Tags,
@@ -667,7 +730,7 @@ func (m *Manager) UpdateJob(id string, updates map[string]any) (*Job, error) {
 		job.Feature = feature
 	}
 	if schedule, ok := updates["schedule"].(string); ok {
-		kind, display, cronE, nextRun, err := parseSchedule(schedule, m.loc)
+		kind, display, cronE, nextRun, expectedInterval, err := parseSchedule(schedule, m.loc)
 		if err != nil {
 			return nil, errs.Wrapf(err, "invalid schedule %q", schedule)
 		}
@@ -675,6 +738,7 @@ func (m *Manager) UpdateJob(id string, updates map[string]any) (*Job, error) {
 		job.ScheduleKind = kind
 		job.ScheduleDisplay = display
 		job.NextRunAt = nextRun
+		job.ExpectedInterval = expectedInterval
 		job.cronExpr = cronE
 		// 更新调度后重置状态
 		if job.Enabled && (job.State == StateDone || job.State == StateFailed) {
