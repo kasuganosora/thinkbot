@@ -85,3 +85,45 @@ func TestMemoryTool_CrossChannelMirrorDisabled(t *testing.T) {
 		t.Fatalf("without BotID no mirror should be created, got %d", len(mirrors))
 	}
 }
+
+// TestHandleAdd_StripsLeadingMentionPrefix 验证 handleAdd 会归一化模型偶发在正文前
+// 加的空 mention 前缀（"[] " / "[] [] "），避免同一观察因前缀不一致产生近重复记忆。
+func TestHandleAdd_StripsLeadingMentionPrefix(t *testing.T) {
+	repo := NewMemoryRepository()
+	cfg := ToolConfig{Repo: repo, BotID: "bot-test"}
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+	chScope := ChannelScope("web:1")
+
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"[] @onestarmg 分享动画消息", "@onestarmg 分享动画消息"},
+		{"[] [] @Tana_Gori_ 自述：19歳", "@Tana_Gori_ 自述：19歳"},
+		{"@blogtalk 是魔兽争霸3玩家", "@blogtalk 是魔兽争霸3玩家"},
+	}
+	for _, c := range cases {
+		if _, err := handleAdd(ctx, repo, cfg, chScope, map[string]any{"content": c.in}); err != nil {
+			t.Fatalf("add failed for %q: %v", c.in, err)
+		}
+		entries, err := repo.Retrieve(ctx, Query{Scopes: []Scope{chScope}, Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found, hasPrefix := false, false
+		for _, e := range entries {
+			if e.Content == c.want {
+				found = true
+			}
+			if strings.HasPrefix(e.Content, "[]") {
+				hasPrefix = true
+			}
+		}
+		if hasPrefix {
+			t.Errorf("handleAdd(%q): entry with unstripped '[]' prefix found in channel scope", c.in)
+		}
+		if !found {
+			t.Errorf("handleAdd(%q): stripped content %q not found in channel scope", c.in, c.want)
+		}
+	}
+}
