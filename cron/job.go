@@ -78,16 +78,23 @@ type Job struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Tags      []string  `json:"tags,omitempty"`
 
+	// ExpectedInterval 该 Job 的「标称执行间隔」，由调度表达式推导：
+	//   - interval：就是 "every 30m" 的时长
+	//   - cron：连续两次触发的时间差（next2 - next）
+	//   - once：0（不监控漏跑）
+	// 供调度器判断「上次成功运行是否过旧」（漏跑检测），不随 NextRunAt 重算而改变。
+	ExpectedInterval time.Duration `json:"expected_interval,omitempty"`
+
 	// 解析后的 cron 表达式（内部使用，不序列化）
 	cronExpr *cronExpr `json:"-"`
 }
 
 // parseSchedule 解析调度字符串，确定类型并预计算 NextRunAt。
 // loc 用于 cron/once 类型的时区计算。
-func parseSchedule(raw string, loc *time.Location) (kind ScheduleKind, display string, cronE *cronExpr, nextRun *time.Time, err error) {
+func parseSchedule(raw string, loc *time.Location) (kind ScheduleKind, display string, cronE *cronExpr, nextRun *time.Time, expectedInterval time.Duration, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", "", nil, nil, fmt.Errorf("empty schedule")
+		return "", "", nil, nil, 0, fmt.Errorf("empty schedule")
 	}
 
 	display = raw
@@ -103,6 +110,7 @@ func parseSchedule(raw string, loc *time.Location) (kind ScheduleKind, display s
 		now := time.Now().In(loc)
 		nr := now.Add(dur)
 		nextRun = &nr
+		expectedInterval = dur
 		return
 	}
 
@@ -120,6 +128,10 @@ func parseSchedule(raw string, loc *time.Location) (kind ScheduleKind, display s
 			return
 		}
 		nextRun = &nr
+		// 标称间隔 = 下一次触发的间隔（next2 - next）
+		if n2 := cronE.Next(nr.In(loc), loc); !n2.IsZero() {
+			expectedInterval = n2.Sub(nr)
+		}
 		return
 	}
 

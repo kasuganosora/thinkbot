@@ -339,6 +339,12 @@ type TieredManagerConfig struct {
 	// Consolidator L0→L1 巩固器（nil 使用 RuleConsolidator）。
 	Consolidator Consolidator
 	// Aggregator L1→L2 场景聚合器（可选）。
+	//
+	// 注意：本仓库目前【没有】提供 Aggregator 的具体实现（仅有接口定义），
+	// 因此生产环境的 TieredManager 从不设置该字段 → L2 场景层恒为空。
+	// 这是设计收敛后的状态，而非缺陷：L3 用户画像已由 Profiler 直接消费 L1 产出，
+	// 有效的记忆管线是 L0(原始)→L1(事实)→L3(画像) 两层半。若未来需要「主题场景」
+	// 中间层，应先实现 Aggregator 再在 dream_setup.go 注入，而非误以为 L2 空是 bug。
 	Aggregator Aggregator
 	// Profiler L2→L3 画像提取器（可选）。
 	Profiler Profiler
