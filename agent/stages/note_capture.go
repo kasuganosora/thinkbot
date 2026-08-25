@@ -3,9 +3,54 @@ package stages
 import (
 	"context"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
+
+// exchangeSeen 按 message_id 对「同一条入站消息」做跨 Process 去重。
+//
+// 背景（2026-08-25 排查实证）：同一条 Misskey 帖可能经 mention 流 + timeline 流 +
+// 重连重放被多次 ingest，每次 pipeline 都会写一条 exchange 记忆（memory_entries）；
+// 渠道层 dedupSeen 因去重状态未跨连接/流持久，未能并掉这类重复。此处用闭包级
+// （按 bot 持久，中间件每个 bot 只创建一次）seen 集兜底，确保同 message_id 只落
+// 一条 exchange 记忆 + 一条事件流记录。
+//
+// TTL 仅为防止 map 无限增长，并允许极久之后同一消息被重新捕获（正常不会发生）。
+type exchangeSeen struct {
+	mu     sync.Mutex
+	seenAt map[string]time.Time
+	ttl    time.Duration
+}
+
+func newExchangeSeen(ttl time.Duration) *exchangeSeen {
+	return &exchangeSeen{seenAt: make(map[string]time.Time), ttl: ttl}
+}
+
+// seen 报告 id 近期是否出现过，并将 id 标记为已见。返回 true 表示「已见过，应跳过」。
+func (e *exchangeSeen) seen(id string) bool {
+	if id == "" {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := time.Now()
+	if ts, ok := e.seenAt[id]; ok && now.Sub(ts) < e.ttl {
+		return true
+	}
+	if len(e.seenAt) > 8192 {
+		for k, ts := range e.seenAt {
+			if now.Sub(ts) >= e.ttl {
+				delete(e.seenAt, k)
+			}
+		}
+	}
+	e.seenAt[id] = now
+	return false
+}
+
+const exchangeCaptureDedupTTL = 10 * time.Minute
 
 // CapturedUserMessage 是一条已摄取的入站用户消息（写入事件流的最小单元）。
 // 与 dao.UserMessageEvent 解耦，避免 agent/stages 直接依赖存储层。
@@ -41,6 +86,8 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 	if category == "" {
 		category = "exchange"
 	}
+	// 按 bot 持久的跨 Process 去重集（中间件每个 bot 仅创建一次，故 seen 集跨重连/重放持久）。
+	seen := newExchangeSeen(exchangeCaptureDedupTTL)
 	return func(next core.Stage) core.Stage {
 		return &core.StageFunc{
 			StageName: "note-capture",
@@ -55,6 +102,12 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 				// 心跳自主唤醒的消息不写入 L0 记忆：其 InjectContext 不是用户原文，
 				// 且「心跳唤醒」本身不应成为长期记忆的一部分（避免污染 dreaming 学习）。
 				if out.Message.Source == core.SourceHeartbeat {
+					return out, nil
+				}
+				// 跨 Process 去重：同一条入站消息（按 message_id）只捕获一次。
+				// 见 exchangeSeen 注释——渠道层 dedupSeen 未跨连接/流持久，此处兜底，
+				// 避免同帖被 mention/timeline/重连多次 ingest 时写多条 exchange 记忆。
+				if seen.seen(env.Message.ID) {
 					return out, nil
 				}
 			// 捕获「用户说了什么」作为 L0 对话记忆与事件流记录，供 dreaming 学习
