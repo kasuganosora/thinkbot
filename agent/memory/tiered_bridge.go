@@ -3,7 +3,24 @@ package memory
 import (
 	"context"
 	"log"
+	"sync"
+	"time"
 )
+
+// l0DupTTL 是 L0 写入去重的窗口：同一 (scope, content) 在该窗口内的重复 Append
+// 视为冗余（如模型对同一条观察连续调用记忆工具两次、或同帖经多路 ingest 写入），
+// 直接丢弃，避免污染 memory_entries / tiered L0。窗口很短（30min），不伤害跨时段的
+// 合法重复（如用户隔天说了同样的话）。
+const l0DupTTL = 30 * time.Minute
+
+// MultiStore 将写入广播到多个 Store 后端。
+type MultiStore struct {
+	stores []Store
+
+	// dupMu/dupSeen 是 (scopeKey, content) → 上次写入时间的去重表（见 Append）。
+	dupMu    sync.Mutex
+	dupSeen  map[string]time.Time
+}
 
 // ============================================================================
 // TieredStoreAdapter — 将 TieredStore 适配为 memory.Store 接口
@@ -49,19 +66,42 @@ func (a *TieredStoreAdapter) Clear(ctx context.Context, scope Scope) error {
 // Append 失败不中断——某一路失败只记日志，不阻塞其他路。
 // ============================================================================
 
-// MultiStore 将写入广播到多个 Store 后端。
-type MultiStore struct {
-	stores []Store
-}
-
 // NewMultiStore 创建多路写入 Store。
 // 通常传入 MemoryRepository + TieredStoreAdapter。
 func NewMultiStore(stores ...Store) *MultiStore {
-	return &MultiStore{stores: stores}
+	return &MultiStore{stores: stores, dupSeen: make(map[string]time.Time)}
+}
+
+// scopeKey 返回记忆作用域的稳定字符串键（供去重表索引）。
+func scopeKey(s Scope) string {
+	return string(s.Kind) + "\x00" + s.ID
 }
 
 // Append 写入所有后端，失败仅记录日志不中断。
+//
+// 写入前做 (scope, content) 短窗口去重：窗口内完全相同的重复写入（模型对同一条观察
+// 连续调用记忆工具两次、或同帖经多路 ingest 落多条）直接丢弃，避免污染下游存储。
+// 去重仅基于「完全相同的正文」，不影响任何带差异的合法写入。
 func (m *MultiStore) Append(ctx context.Context, entry Entry) error {
+	key := scopeKey(entry.Scope) + "\x00" + entry.Content
+	m.dupMu.Lock()
+	if ts, ok := m.dupSeen[key]; ok {
+		if time.Since(ts) < l0DupTTL {
+			m.dupMu.Unlock()
+			return nil
+		}
+		// 过期项：顺手清理，避免 map 无限增长。
+		if len(m.dupSeen) > 4096 {
+			for k, t := range m.dupSeen {
+				if time.Since(t) >= l0DupTTL {
+					delete(m.dupSeen, k)
+				}
+			}
+		}
+	}
+	m.dupSeen[key] = time.Now()
+	m.dupMu.Unlock()
+
 	var firstErr error
 	for _, s := range m.stores {
 		if err := s.Append(ctx, entry); err != nil {
