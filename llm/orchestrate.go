@@ -633,19 +633,30 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				stepUsage         Usage
 				stepResponse      ResponseMetadata
 				stepRepGuard      = NewRepetitionGuard() // 每步独立检测器
+				stepRepCollapsed  bool                   // 仅记录一次截断，避免日志风暴
 			)
 
 			for part := range provSR.Stream {
 				switch p := part.(type) {
 				case *TextDeltaPart:
-					// 重复退化检测：增量检查，触发后停止消费本步流
+					// 重复退化检测：增量检查，触发后丢弃本次及后续 delta，
+					// 不再累积、不再透传给消费方（subagent/llmroute 等）。
+					//
+					// 注意：此处用 continue 而非 break —— break 在 switch 内只跳出
+					// switch，会导致每个后续 delta 仍被 send 透传（截断失效）且重复
+					// 打 WARN（单日可达数万条日志风暴）。continue 会继续消费流直到
+					// provider 自然结束（收到 FinishPart），避免编排 goroutine 在
+					// 64 缓冲上阻塞，同时只打一条 WARN。
 					if p.Text != "" && !stepRepGuard.Feed(p.Text) {
-						stepText = stepRepGuard.Text()
-						if logger := traceid.L(ctx); logger != nil {
-							logger.Warnw("repetition collapse in orchestrate stream step, truncating",
-								"step", step)
+						if !stepRepCollapsed {
+							stepText = stepRepGuard.Text()
+							if logger := traceid.L(ctx); logger != nil {
+								logger.Warnw("repetition collapse in orchestrate stream step, truncating",
+									"step", step)
+							}
+							stepRepCollapsed = true
 						}
-						break // 跳出内层 for range provSR.Stream，不再消费后续 delta
+						continue
 					}
 					stepText += p.Text
 				case *ReasoningDeltaPart:
