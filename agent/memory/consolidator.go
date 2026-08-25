@@ -16,6 +16,13 @@ import (
 	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
+// consolidateL1RefLimit 合并阶段传给 LLM 的「已有 L1 去重参考」上限。
+// 直接对齐 L1 每 scope 上限（见 DefaultTierConfigs 的 Tier1LongTerm.MaxEntries=500），
+// 确保任何已有 L1 都不会因被截断而进不了去重提示词——否则模型感知不到其存在，
+// 只能为同一实体新建条目，造成人物画像碎片化。合并是夜间低频/阈值触发的异步任务，
+// 多取数百条已有 L1 进 prompt 对 GLM 128k 上下文与成本均可接受。见 TieredManager.Consolidate。
+const consolidateL1RefLimit = 500
+
 // ============================================================================
 // Consolidator — L0→L1 巩固管道
 //
@@ -517,8 +524,13 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 		return 0, nil
 	}
 
-	// 获取已有 L1 记忆（供去重参考）
-	existing, err := m.store.Retrieve(ctx, Tier1LongTerm, []Scope{scope}, 50)
+	// 获取已有 L1 记忆（供去重参考）。
+	// 上限必须足够大：L1 每 scope 上限为 500（见 DefaultTierConfigs），而合并阶段
+	// 依赖 LLM 把新观察 UPDATE/MERGE 进已有条目。若此处只取 50，则超出部分的已有
+	// L1 根本不会进入去重提示词，模型无法感知其存在，只能为同一实体新建条目 →
+	// 人物画像碎片化（实测 bot scope 已有 60 条 L1，原 50 上限已藏住 10+ 条）。
+	// 故取一个显著大于常规规模、又不会撑爆 prompt 的窗口（200）。
+	existing, err := m.store.Retrieve(ctx, Tier1LongTerm, []Scope{scope}, consolidateL1RefLimit)
 	if err != nil {
 		m.logger.Warnw("failed to get existing L1 for consolidation", "err", err)
 		existing = nil
