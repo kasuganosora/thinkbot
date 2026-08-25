@@ -41,6 +41,15 @@ var nonRetryablePatterns = []string{
 	`"code":"1210"`,
 	`"code": "1210"`,
 	"api 调用参数有误",
+	// —— GLM 内容安全审核（HTTP 400 code 1301）——
+	// 输出触发平台内容安全策略被拒。该判定对相同 prompt 必然复现（同模型同预算
+	// 重试必再次被过滤），重试纯属浪费、还会把单次调用拖到数分钟（GLM 对审核类
+	// 请求常挂起到超时而非即时 400）。与 1210/1214 同属「确定性客户端错误」，
+	// 不应经 workflow 节点层无脑重试。
+	`"code":"1301"`,
+	`"code": "1301"`,
+	"内容安全审核",
+	"触发平台内容",
 	"prompt is too long",
 	"prompt too long",
 	"input is too long for requested model",
