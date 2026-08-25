@@ -46,6 +46,10 @@ type CompactionConfig struct {
 	MaxClusterSize int
 	// MaxInputEntries 单次压缩的最大输入条目数（默认 50）。
 	MaxInputEntries int
+	// Precompress 在调用 LLM 摘要前先做确定性瘦身（JSON 紧凑化、must-keep
+	// 保护、回退校验），降低喂给 LLM 的 token 量。默认开启；回退校验保证
+	// 不会因压缩失灵而退化。对应 headroom 的传输层压缩前置思路。
+	Precompress bool
 }
 
 // DefaultCompactionConfig 返回默认配置。
@@ -56,6 +60,7 @@ func DefaultCompactionConfig() CompactionConfig {
 		MinClusterSize:      2,
 		MaxClusterSize:      10,
 		MaxInputEntries:     50,
+		Precompress:         true,
 	}
 }
 
@@ -73,14 +78,16 @@ type ClusterResult struct {
 
 // CompactionReport 压缩报告。
 type CompactionReport struct {
-	StartedAt     time.Time     `json:"started_at"`
-	FinishedAt    time.Time     `json:"finished_at"`
-	InputCount    int           `json:"input_count"`
-	ClustersFound int           `json:"clusters_found"`
-	MergedCount   int           `json:"merged_count"`
-	ArchivedCount int           `json:"archived_count"`
-	ReducedCount  int           `json:"reduced_count"` // 减少的条目数
-	Duration      time.Duration `json:"-"`
+	StartedAt     time.Time `json:"started_at"`
+	FinishedAt    time.Time `json:"finished_at"`
+	InputCount    int       `json:"input_count"`
+	ClustersFound int       `json:"clusters_found"`
+	MergedCount   int       `json:"merged_count"`
+	ArchivedCount int       `json:"archived_count"`
+	ReducedCount  int       `json:"reduced_count"` // 减少的条目数
+	// PrecompressedSaved 前置压缩层（LLM 摘要前）节省的估算 token 数。
+	PrecompressedSaved int           `json:"precompressed_saved"`
+	Duration           time.Duration `json:"-"`
 }
 
 // SemanticCompactor 语义记忆压缩器。
@@ -181,8 +188,17 @@ func (c *SemanticCompactor) Compact(
 		}
 		batch := active[i:end]
 
+		// LLM 摘要前的确定性前置压缩：JSON 紧凑化 + must-keep 保护 + 回退校验。
+		// 让 GLM 吃更少、更聚焦的输入，降低 token 成本与延迟。
+		pre := c.preprocessBatch(batch)
+		for j := range batch {
+			if j < len(pre) {
+				report.PrecompressedSaved += llm.EstimateTokens(batch[j].Content) - llm.EstimateTokens(pre[j].Content)
+			}
+		}
+
 		// LLM 聚类合并
-		clusters, err := c.clusterAndMerge(ctx, batch)
+		clusters, err := c.clusterAndMerge(ctx, pre)
 		if err != nil {
 			span.RecordError(err)
 			c.logger.Warnw("compactor: LLM cluster+merge failed, skipping batch",
@@ -243,6 +259,7 @@ func (c *SemanticCompactor) Compact(
 	span.SetAttributes(
 		attribute.Int("input", report.InputCount),
 		attribute.Int("clusters", report.ClustersFound),
+		attribute.Int("precompressed_saved", report.PrecompressedSaved),
 		attribute.Int("archived", report.ArchivedCount),
 		attribute.Int("reduced", report.ReducedCount),
 	)
@@ -254,6 +271,7 @@ func (c *SemanticCompactor) Compact(
 		"clusters", report.ClustersFound,
 		"archived", report.ArchivedCount,
 		"reduced", report.ReducedCount,
+		"precompressed_saved", report.PrecompressedSaved,
 		"duration", report.Duration)
 
 	return report, nil
