@@ -82,7 +82,10 @@ func DefaultWindowConfig() WindowConfig {
 		OutputReserve:     4096,
 		MemoryBudgetRatio: 0.15,
 		CompressThreshold: 0.8,
-		MaxMemoryTokens:   3000, // 硬上限 ~9000 字符，防止 memory 膨胀
+		MaxMemoryTokens: 7281, // 记忆注入硬上限 ≈21843 字符（×3 估算）。
+		// 注：此值为生产部署实际运行值（GLM-5.2 上下文 128K），
+		// 比早期默认 3000（≈9000 字符）更宽松，以支持更丰富的 persona 记忆召回。
+		// 若需抑制 memory 膨胀、收紧召回，可改回 3000。
 	}
 }
 
