@@ -262,7 +262,7 @@ func BotMemoryBackfillEventWatermarkKey(botID string) string {
 const (
 	// KeyMemoryWindowMaxContextTokens 模型最大上下文窗口（token 数）。
 	// 记忆预算 = (MaxContextTokens - ReservedTokens - OutputReserve) × BudgetRatio，
-	// 再受 MaxMemoryTokens 硬上限约束。GLM-5.2 上下文 128K。
+	// 再受 MaxMemoryTokens 硬上限约束。GLM-5.2/5.3 上下文 1M（1000000）。
 	KeyMemoryWindowMaxContextTokens = "memorywindow.max_context_tokens"
 
 	// KeyMemoryWindowReservedTokens 为 system prompt / tool 定义等固定内容预留的 token 数。

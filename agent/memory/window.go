@@ -81,9 +81,9 @@ type WindowConfig struct {
 // 用户可在前端「系统配置」页的「记忆窗口」分类下调整。二者应保持同步。
 func DefaultWindowConfig() WindowConfig {
 	return WindowConfig{
-		MaxContextTokens:  128000,
+		MaxContextTokens:  1000000, // GLM-5.2/5.3 官方上下文窗口 1M。
 		ReservedTokens:    2000,
-		OutputReserve:     4096,
+		OutputReserve:     128000, // GLM-5.2/5.3 官方最大输出 128K（与 provider.maxTokens 对齐）。
 		MemoryBudgetRatio: 0.15,
 		CompressThreshold: 0.8,
 		MaxMemoryTokens:   7281, // 记忆注入硬上限 ≈21843 字符（×3 估算），与 config.DefaultMemoryWindowConfig() 对齐。
