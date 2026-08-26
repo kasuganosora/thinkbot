@@ -828,6 +828,146 @@ func MemoryWindowMetaSpecs() []MetaSpec {
 	}
 }
 
+// --- LLM 客户端可靠性配置（Provider HTTP 超时 / 重试 / 退避）---
+
+// LLMClientConfig 描述 LLM Provider 底层 HTTP 客户端与重试的全部可调参数。
+// 这些参数原硬编码在 agent/bot/llm_factory.go（const llmClientTimeout /
+// llmRetryMaxRetries + retry.LLMRetryConfig 的退避常量），现集中到配置模块，
+// 用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
+// 未配置的字段自动使用 DefaultLLMClientConfig() 的值。
+type LLMClientConfig struct {
+	// ClientTimeoutSeconds LLM Provider 底层 HTTP 客户端的整体超时（秒）。
+	// 见 KeyLLMClientTimeoutSeconds 注释：非流式长任务必须给足，下限 10 分钟。
+	ClientTimeoutSeconds int
+
+	// MaxRetries 遇到可恢复错误（429/5xx）时的重试次数。
+	MaxRetries int
+
+	// RetryInitialMS 指数退避初始等待毫秒。
+	RetryInitialMS int
+
+	// RetryFactor 指数退避倍增因子。
+	RetryFactor float64
+
+	// RetryMaxMS 指数退避最大等待毫秒。
+	RetryMaxMS int
+
+	// RetryJitter 退避是否加随机抖动（避免惊群）。
+	RetryJitter bool
+}
+
+// DefaultLLMClientConfig 返回 LLM 客户端可靠性的默认配置值（对齐生产现状：20min 超时 / 4 重试 / 指数退避）。
+// 这是集中后的唯一来源；llm_factory.go 不再写死常量，二者应保持同步。
+func DefaultLLMClientConfig() LLMClientConfig {
+	return LLMClientConfig{
+		ClientTimeoutSeconds: 1200, // 20 分钟。非流式长生成必须给足。
+		MaxRetries:           4,
+		RetryInitialMS:       2000, // 2s
+		RetryFactor:          2.0,
+		RetryMaxMS:           30000, // 30s
+		RetryJitter:          true,
+	}
+}
+
+// GetLLMClientConfig 从 Store 读取 LLM 客户端可靠性配置，未设置的字段自动填充默认值。
+func (b *Builder) GetLLMClientConfig() LLMClientConfig {
+	d := DefaultLLMClientConfig()
+	return LLMClientConfig{
+		ClientTimeoutSeconds: b.store.GetInt(KeyLLMClientTimeoutSeconds, d.ClientTimeoutSeconds),
+		MaxRetries:           b.store.GetInt(KeyLLMMaxRetries, d.MaxRetries),
+		RetryInitialMS:       b.store.GetInt(KeyLLMRetryInitialMS, d.RetryInitialMS),
+		RetryFactor:          b.store.GetFloat64(KeyLLMRetryFactor, d.RetryFactor),
+		RetryMaxMS:           b.store.GetInt(KeyLLMRetryMaxMS, d.RetryMaxMS),
+		RetryJitter:          b.store.GetBool(KeyLLMRetryJitter, d.RetryJitter),
+	}
+}
+
+// LLMClientMetaSpecs 返回 LLM 客户端可靠性配置项的元数据，用于注册到前端设置界面。
+func LLMClientMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyLLMClientTimeoutSeconds, Category: "LLM", Description: "LLM Provider 底层 HTTP 客户端整体超时（秒，默认 1200=20 分钟）。非流式请求（workflow SubAgent）必须等模型生成完整回复才返回响应头，长任务需给足；SSE 看门狗只管流式，对非流式不生效。下限 10 分钟（见 llm_factory_timeout_test.go）。修改后需重启 bot 生效。"},
+		{Key: KeyLLMMaxRetries, Category: "LLM", Description: "LLM 遇到可恢复错误（429 限流 / 5xx）时的重试次数（默认 4）。GLM/智谱高负载常返回 429，不重试会直接中断对话/工作流。修改后需重启 bot 生效。"},
+		{Key: KeyLLMRetryInitialMS, Category: "LLM", Description: "重试指数退避初始等待毫秒（默认 2000=2 秒）。修改后需重启 bot 生效。"},
+		{Key: KeyLLMRetryFactor, Category: "LLM", Description: "重试指数退避倍增因子（默认 2.0）。修改后需重启 bot 生效。"},
+		{Key: KeyLLMRetryMaxMS, Category: "LLM", Description: "重试指数退避最大等待毫秒（默认 30000=30 秒）。修改后需重启 bot 生效。"},
+		{Key: KeyLLMRetryJitter, Category: "LLM", Description: "重试退避是否加随机抖动以避免惊群（默认 true）。修改后需重启 bot 生效。"},
+	}
+}
+
+// --- Compaction（会话压缩）配置 ---
+
+// CompactionConfig 描述会话级上下文压缩的全部可调参数（与 llm.CompactionConfig 字段对齐，
+// 但定义在 config 包内以避免 config↔llm 循环依赖；调用方负责转换）。
+// 这些参数原硬编码在 llm/compaction.go 的 DefaultCompactionConfig()，
+// 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
+// 未配置的字段自动使用 DefaultCompactionConfig() 的值。
+//
+// 注意：这是「会话级」压缩预算，与 agent/memory/compactor.go 的「记忆聚类」压缩
+// （SimilarityThreshold 等）是两套不同配置，集成时分别处理、避免混淆。
+type CompactionConfig struct {
+	// MaxTokens 压缩模块假定的上下文窗口预算（token 数）。可用空间 = MaxTokens - ReservedTokens。
+	MaxTokens int
+	// ReservedTokens 为系统消息和新回复预留的 token 数。
+	ReservedTokens int
+	// TailTokens 压缩时保留的最近 token 数（不摘要化）。
+	TailTokens int
+	// TailTurns 保留的最近完整对话轮数。
+	TailTurns int
+	// MinMessagesToCompact 触发压缩的最小消息数。
+	MinMessagesToCompact int
+	// SummaryMaxTokens 摘要的最大 token 数。
+	SummaryMaxTokens int
+	// ToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。
+	ToolOutputThreshold int
+	// Auto 是否启用自动压缩。
+	Auto bool
+}
+
+// DefaultCompactionConfig 返回会话压缩的默认配置值（对齐 llm.DefaultCompactionConfig 现状）。
+// 这是集中后的唯一来源；llm/compaction.go 的 DefaultCompactionConfig() 仅作无配置时的内部兜底，
+// 二者应保持同步。
+func DefaultCompactionConfig() CompactionConfig {
+	return CompactionConfig{
+		MaxTokens:            64000,
+		ReservedTokens:       20000,
+		TailTokens:           8000,
+		TailTurns:            2,
+		MinMessagesToCompact: 6,
+		SummaryMaxTokens:     4096,
+		ToolOutputThreshold:  500,
+		Auto:                 true,
+	}
+}
+
+// GetCompactionConfig 从 Store 读取会话压缩配置，未设置的字段自动填充默认值。
+func (b *Builder) GetCompactionConfig() CompactionConfig {
+	d := DefaultCompactionConfig()
+	return CompactionConfig{
+		MaxTokens:            b.store.GetInt(KeyCompactionMaxTokens, d.MaxTokens),
+		ReservedTokens:       b.store.GetInt(KeyCompactionReservedTokens, d.ReservedTokens),
+		TailTokens:           b.store.GetInt(KeyCompactionTailTokens, d.TailTokens),
+		TailTurns:            b.store.GetInt(KeyCompactionTailTurns, d.TailTurns),
+		MinMessagesToCompact: b.store.GetInt(KeyCompactionMinMessagesToCompact, d.MinMessagesToCompact),
+		SummaryMaxTokens:     b.store.GetInt(KeyCompactionSummaryMaxTokens, d.SummaryMaxTokens),
+		ToolOutputThreshold:  b.store.GetInt(KeyCompactionToolOutputThreshold, d.ToolOutputThreshold),
+		Auto:                 b.store.GetBool(KeyCompactionAuto, d.Auto),
+	}
+}
+
+// CompactionMetaSpecs 返回会话压缩配置项的元数据，用于注册到前端设置界面。
+func CompactionMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyCompactionMaxTokens, Category: "Compaction", Description: "会话压缩假定的上下文窗口预算（token 数，默认 64000）。可用空间 = 此值 - reserved_tokens，超出即触发压缩。取比模型真实上限更小的保守值使压缩更早触发、预留安全余量。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionReservedTokens, Category: "Compaction", Description: "为系统消息和新回复预留的 token 数（默认 20000）。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionTailTokens, Category: "Compaction", Description: "压缩时保留的最近 token 数（不被摘要化，默认 8000）。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionMinMessagesToCompact, Category: "Compaction", Description: "触发压缩的最小消息数（默认 6，少于则不压缩）。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionSummaryMaxTokens, Category: "Compaction", Description: "LLM 生成摘要的最大 token 数（默认 4096）。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionToolOutputThreshold, Category: "Compaction", Description: "单个工具输出超过此 token 数（默认 500）在 pruning 阶段被裁剪为占位符。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionAuto, Category: "Compaction", Description: "是否启用自动会话压缩（默认 true）。关闭后仅做工具输出裁剪、不再 LLM 摘要。修改后需重启 bot 生效。"},
+	}
+}
+
 // --- Pipeline 模式配置 ---
 
 // GetPipelineMode 返回指定 bot 的 pipeline 装配模式。
@@ -1077,16 +1217,19 @@ func AllMetaSpecs() []MetaSpec {
 	specs = append(specs, DreamingMetaSpecs()...)
 	specs = append(specs, ToolPolicyMetaSpecs()...)
 	specs = append(specs, MemoryWindowMetaSpecs()...)
+	specs = append(specs, LLMClientMetaSpecs()...)
+	specs = append(specs, CompactionMetaSpecs()...)
 	return specs
 }
 
 // GlobalMetaSpecs 仅返回适合在系统设置页面展示的全局配置项。
 // 排除 Bot / Soul / Engagement / Dreaming / ToolPolicy 等 per-bot 配置，
 // 以及 Database / Workspace 等需要重启才生效的基础设施配置。
-// 记忆窗口（MemoryWindow）是全局共享的模型上下文预算配置，
-// 虽需重启 bot 生效，但属于用户应在前端可调的模型参数，故纳入。
+// 记忆窗口（MemoryWindow）、LLM 客户端可靠性（LLM）、会话压缩（Compaction）
+// 是全局共享的模型相关参数，虽需重启 bot 生效，但属于用户应在前端可调的模型参数，故纳入。
 func GlobalMetaSpecs() []MetaSpec {
-	return append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...)
+	return append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
+		append(LLMClientMetaSpecs(), CompactionMetaSpecs()...)...)
 }
 
 // DefaultMap 返回所有配置项的默认值映射，供前端设置界面填充空值。
@@ -1161,5 +1304,21 @@ func DefaultMap() map[string]string {
 		KeyMemoryWindowBudgetRatio:       "0.15",
 		KeyMemoryWindowMaxMemoryTokens:   "7281",
 		KeyMemoryWindowCompressThreshold: "0.8",
+		// LLM 客户端可靠性
+		KeyLLMClientTimeoutSeconds: "1200",
+		KeyLLMMaxRetries:           "4",
+		KeyLLMRetryInitialMS:       "2000",
+		KeyLLMRetryFactor:          "2.0",
+		KeyLLMRetryMaxMS:           "30000",
+		KeyLLMRetryJitter:          "true",
+		// Compaction 会话压缩
+		KeyCompactionMaxTokens:            "64000",
+		KeyCompactionReservedTokens:       "20000",
+		KeyCompactionTailTokens:           "8000",
+		KeyCompactionTailTurns:            "2",
+		KeyCompactionMinMessagesToCompact: "6",
+		KeyCompactionSummaryMaxTokens:     "4096",
+		KeyCompactionToolOutputThreshold:  "500",
+		KeyCompactionAuto:                 "true",
 	}
 }

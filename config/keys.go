@@ -187,6 +187,69 @@ const (
 	KeyToolOutputSubdir = "tool_output.subdir"
 )
 
+// LLM 客户端可靠性键：Provider 底层 HTTP 客户端超时、重试次数与指数退避参数。
+// 这些参数原硬编码在 agent/bot/llm_factory.go（const llmClientTimeout /
+// llmRetryMaxRetries），现集中到配置模块，用户可在前端「系统配置」页修改并持久化。
+// 未配置的字段自动使用 DefaultLLMClientConfig() 的值；修改后需重启 bot 生效。
+const (
+	// KeyLLMClientTimeoutSeconds LLM Provider 底层 HTTP 客户端的整体超时（秒）。
+	// 默认 1200（20 分钟）。这是**整个请求**的上限（含等待首字节），非流式请求
+	// （workflow 的 SubAgent 走 OrchestrateGenerate）必须等模型生成完整回复才返回响应头，
+	// 长任务（写大量代码 / 长篇审查报告）轻易超过数分钟，故需给足。SSE 看门狗只保护流式路径，
+	// 对非流式不生效，不能靠它把超时压短。下限守卫见 bot/llm_factory_timeout_test.go。
+	KeyLLMClientTimeoutSeconds = "llm.client_timeout_seconds"
+
+	// KeyLLMMaxRetries LLM Provider 遇到可恢复错误（429 限流 / 5xx）时的重试次数。
+	// 默认 4。GLM/智谱高负载时常返回 429，不重试会直接中断对话/工作流。
+	KeyLLMMaxRetries = "llm.max_retries"
+
+	// KeyLLMRetryInitialMS 重试指数退避的初始等待毫秒。默认 2000（2 秒）。
+	KeyLLMRetryInitialMS = "llm.retry_initial_ms"
+
+	// KeyLLMRetryFactor 重试指数退避的倍增因子。默认 2.0。
+	KeyLLMRetryFactor = "llm.retry_factor"
+
+	// KeyLLMRetryMaxMS 重试指数退避的最大等待毫秒。默认 30000（30 秒）。
+	KeyLLMRetryMaxMS = "llm.retry_max_ms"
+
+	// KeyLLMRetryJitter 重试退避是否加入随机抖动（避免惊群）。默认 true。
+	KeyLLMRetryJitter = "llm.retry_jitter"
+)
+
+// Compaction（会话压缩）键：上下文压缩预算配置。
+// 这些参数原硬编码在 llm/compaction.go 的 DefaultCompactionConfig()，
+// 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
+//
+// 注意：本套是「会话级」压缩预算（llm.CompactionConfig），与 agent/memory/compactor.go
+// 的「记忆聚类」压缩（SimilarityThreshold 等）是两套不同配置，集成时分别处理、避免混淆。
+const (
+	// KeyCompactionMaxTokens 压缩模块假定的上下文窗口预算（token 数）。
+	// 可用空间 = MaxTokens - ReservedTokens。超过此值时触发压缩。
+	// 取比模型真实上限更小的保守值，使压缩更早触发以预留安全余量。默认 64000。
+	KeyCompactionMaxTokens = "compaction.max_tokens"
+
+	// KeyCompactionReservedTokens 为系统消息和新回复预留的 token 数。默认 20000。
+	KeyCompactionReservedTokens = "compaction.reserved_tokens"
+
+	// KeyCompactionTailTokens 压缩时保留的最近 token 数（不摘要化）。默认 8000。
+	KeyCompactionTailTokens = "compaction.tail_tokens"
+
+	// KeyCompactionTailTurns 保留的最近完整对话轮数。默认 2。
+	KeyCompactionTailTurns = "compaction.tail_turns"
+
+	// KeyCompactionMinMessagesToCompact 触发压缩的最小消息数。默认 6。
+	KeyCompactionMinMessagesToCompact = "compaction.min_messages_to_compact"
+
+	// KeyCompactionSummaryMaxTokens 摘要的最大 token 数。默认 4096。
+	KeyCompactionSummaryMaxTokens = "compaction.summary_max_tokens"
+
+	// KeyCompactionToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。默认 500。
+	KeyCompactionToolOutputThreshold = "compaction.tool_output_threshold"
+
+	// KeyCompactionAuto 是否启用自动压缩。默认 true。
+	KeyCompactionAuto = "compaction.auto"
+)
+
 // System 键。
 const (
 	// KeySystemTimezone 系统时区（IANA 时区标识符，如 "Asia/Shanghai"、"UTC"）。
