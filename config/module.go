@@ -765,6 +765,69 @@ func SystemMetaSpecs() []MetaSpec {
 	}
 }
 
+// --- MemoryWindow 配置（记忆召回窗口 / 上下文预算）---
+
+// MemoryWindowConfig 描述记忆召回窗口的全部可调参数。
+// 这些参数原硬编码在 agent/memory/window.go 的 DefaultWindowConfig()，
+// 现集中到配置模块，用户可在前端「系统配置」页编辑并持久化。
+// 未配置的字段自动使用 DefaultMemoryWindowConfig() 的值。
+//
+// 注意：记忆窗口在 bot 初始化时（NewWindow）读取一次并缓存于 bot 生命周期内，
+// 因此修改后需重启 bot 才生效（与多数需要重启的基础设施配置一致）。
+type MemoryWindowConfig struct {
+	// MaxContextTokens 模型最大上下文窗口（token 数）。GLM-5.2=128000。
+	MaxContextTokens int
+	// ReservedTokens 为 system prompt / tool 定义等固定内容预留的 token 数。
+	ReservedTokens int
+	// OutputReserve 为 LLM 输出预留的 token 数。
+	OutputReserve int
+	// BudgetRatio memory 可使用的窗口比例（0.0~1.0）。
+	BudgetRatio float64
+	// MaxMemoryTokens memory 注入的硬上限（token 数）。
+	MaxMemoryTokens int
+	// CompressThreshold 触发压缩的阈值比例（0.0~1.0）。
+	CompressThreshold float64
+}
+
+// DefaultMemoryWindowConfig 返回记忆窗口的默认配置值（与 GLM-5.2 128K 对齐）。
+// 这是集中后的唯一来源；agent/memory/window.go 的 DefaultWindowConfig() 仅作
+// 无配置时的内部兜底，二者应保持同步。
+func DefaultMemoryWindowConfig() MemoryWindowConfig {
+	return MemoryWindowConfig{
+		MaxContextTokens:  128000,
+		ReservedTokens:    2000,
+		OutputReserve:     4096,
+		BudgetRatio:       0.15,
+		MaxMemoryTokens:   7281, // ≈21843 字符（×3 估算）的记忆注入硬上限。
+		CompressThreshold: 0.8,
+	}
+}
+
+// GetMemoryWindowConfig 从 Store 读取记忆窗口配置，未设置的字段自动填充默认值。
+func (b *Builder) GetMemoryWindowConfig() MemoryWindowConfig {
+	d := DefaultMemoryWindowConfig()
+	return MemoryWindowConfig{
+		MaxContextTokens:  b.store.GetInt(KeyMemoryWindowMaxContextTokens, d.MaxContextTokens),
+		ReservedTokens:    b.store.GetInt(KeyMemoryWindowReservedTokens, d.ReservedTokens),
+		OutputReserve:     b.store.GetInt(KeyMemoryWindowOutputReserve, d.OutputReserve),
+		BudgetRatio:       b.store.GetFloat64(KeyMemoryWindowBudgetRatio, d.BudgetRatio),
+		MaxMemoryTokens:   b.store.GetInt(KeyMemoryWindowMaxMemoryTokens, d.MaxMemoryTokens),
+		CompressThreshold: b.store.GetFloat64(KeyMemoryWindowCompressThreshold, d.CompressThreshold),
+	}
+}
+
+// MemoryWindowMetaSpecs 返回记忆窗口配置项的元数据，用于注册到前端设置界面。
+func MemoryWindowMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）。GLM-5.2=128000。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 4096）。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 7281，约 21843 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowCompressThreshold, Category: "MemoryWindow", Description: "触发记忆压缩的阈值比例 0.0~1.0（默认 0.8）。修改后需重启 bot 生效。"},
+	}
+}
+
 // --- Pipeline 模式配置 ---
 
 // GetPipelineMode 返回指定 bot 的 pipeline 装配模式。
@@ -1013,14 +1076,17 @@ func AllMetaSpecs() []MetaSpec {
 	specs = append(specs, SystemMetaSpecs()...)
 	specs = append(specs, DreamingMetaSpecs()...)
 	specs = append(specs, ToolPolicyMetaSpecs()...)
+	specs = append(specs, MemoryWindowMetaSpecs()...)
 	return specs
 }
 
 // GlobalMetaSpecs 仅返回适合在系统设置页面展示的全局配置项。
 // 排除 Bot / Soul / Engagement / Dreaming / ToolPolicy 等 per-bot 配置，
 // 以及 Database / Workspace 等需要重启才生效的基础设施配置。
+// 记忆窗口（MemoryWindow）是全局共享的模型上下文预算配置，
+// 虽需重启 bot 生效，但属于用户应在前端可调的模型参数，故纳入。
 func GlobalMetaSpecs() []MetaSpec {
-	return SystemMetaSpecs()
+	return append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...)
 }
 
 // DefaultMap 返回所有配置项的默认值映射，供前端设置界面填充空值。
@@ -1088,5 +1154,12 @@ func DefaultMap() map[string]string {
 		// Dreaming
 		"bot.dreaming.enabled":  "false",
 		"bot.dreaming.schedule": "0 3 * * *",
+		// MemoryWindow
+		KeyMemoryWindowMaxContextTokens:  "128000",
+		KeyMemoryWindowReservedTokens:    "2000",
+		KeyMemoryWindowOutputReserve:     "4096",
+		KeyMemoryWindowBudgetRatio:       "0.15",
+		KeyMemoryWindowMaxMemoryTokens:   "7281",
+		KeyMemoryWindowCompressThreshold: "0.8",
 	}
 }
