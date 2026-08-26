@@ -626,6 +626,22 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 	return defaultLLMHardTimeout
 }
 
+// compactionConfigFromConfig 将配置模块的会话压缩配置转换为 llm 包的 CompactionConfig。
+// 两包字段一一对齐；配置模块的 CompactionConfig 定义在 config 包内以避免 config↔llm
+// 循环依赖（与 ToolOutputConfig 同一手法）。
+func compactionConfigFromConfig(c config.CompactionConfig) *llm.CompactionConfig {
+	return &llm.CompactionConfig{
+		MaxTokens:            c.MaxTokens,
+		ReservedTokens:       c.ReservedTokens,
+		TailTokens:           c.TailTokens,
+		TailTurns:            c.TailTurns,
+		MinMessagesToCompact: c.MinMessagesToCompact,
+		SummaryMaxTokens:     c.SummaryMaxTokens,
+		ToolOutputThreshold:  c.ToolOutputThreshold,
+		Auto:                 c.Auto,
+	}
+}
+
 // StartBot 从定义创建并启动 Bot 实例。
 func (s *BotService) StartBot(ctx context.Context, id string) error {
 	def, err := s.GetDefinition(id)
@@ -852,7 +868,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		subagent.WithMaxTokens(bundle.MainDef.MaxTokens),
 		// 重复抑制（GLM-5.x 推荐）：让 workflow 子代理与主 Agent 一致地抑制退化自旋。
 		subagent.WithFrequencyPenalty(freqPen),
-		subagent.WithPresencePenalty(presPen))
+		subagent.WithPresencePenalty(presPen),
+		// 子 Agent 上下文压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
+		subagent.WithCompactor(llm.NewCompactor(
+			*compactionConfigFromConfig(builder.GetCompactionConfig()))))
 	// 让子 Agent 继承主 Agent 在子 Agent 场景可用的工具（exec/读/写/列目录等），
 	// 使其能像主 Agent 一样操作工作空间。spawn 工具由 scope 排除防套娃。
 	saMgr.SetToolResolver(toolMgr, agenttools.ToolSessionContext{BotID: id})
@@ -924,7 +943,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// 主链路对话历史自动压缩：修复「长会话退化成混乱调用、任务做不完」根因
 			// （此前只有 subagent 接了压缩钩子，主 bot 漏接）。超阈值时 LLM 生成
 			// 结构化摘要替代旧消息，按会话隔离、跨轮持久。
-			Compaction: llm.DefaultCompactionConfigPtr(),
+			// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
+			Compaction: compactionConfigFromConfig(builder.GetCompactionConfig()),
 		},
 		s.tp,
 		s.logger,
