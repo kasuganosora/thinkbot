@@ -775,7 +775,7 @@ func SystemMetaSpecs() []MetaSpec {
 // 注意：记忆窗口在 bot 初始化时（NewWindow）读取一次并缓存于 bot 生命周期内，
 // 因此修改后需重启 bot 才生效（与多数需要重启的基础设施配置一致）。
 type MemoryWindowConfig struct {
-	// MaxContextTokens 模型最大上下文窗口（token 数）。GLM-5.2=128000。
+	// MaxContextTokens 模型最大上下文窗口（token 数）。GLM-5.2/5.3=1M（1000000）。
 	MaxContextTokens int
 	// ReservedTokens 为 system prompt / tool 定义等固定内容预留的 token 数。
 	ReservedTokens int
@@ -789,14 +789,14 @@ type MemoryWindowConfig struct {
 	CompressThreshold float64
 }
 
-// DefaultMemoryWindowConfig 返回记忆窗口的默认配置值（与 GLM-5.2 128K 对齐）。
+// DefaultMemoryWindowConfig 返回记忆窗口的默认配置值（对齐 GLM-5.2/5.3 官方：1M 上下文 / 128K 输出）。
 // 这是集中后的唯一来源；agent/memory/window.go 的 DefaultWindowConfig() 仅作
 // 无配置时的内部兜底，二者应保持同步。
 func DefaultMemoryWindowConfig() MemoryWindowConfig {
 	return MemoryWindowConfig{
-		MaxContextTokens:  128000,
+		MaxContextTokens:  1000000, // GLM-5.2/5.3 官方上下文窗口 1M。
 		ReservedTokens:    2000,
-		OutputReserve:     4096,
+		OutputReserve:     128000, // GLM-5.2/5.3 官方最大输出 128K（与 provider.maxTokens 对齐）。
 		BudgetRatio:       0.15,
 		MaxMemoryTokens:   7281, // ≈21843 字符（×3 估算）的记忆注入硬上限。
 		CompressThreshold: 0.8,
@@ -819,7 +819,7 @@ func (b *Builder) GetMemoryWindowConfig() MemoryWindowConfig {
 // MemoryWindowMetaSpecs 返回记忆窗口配置项的元数据，用于注册到前端设置界面。
 func MemoryWindowMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）。GLM-5.2=128000。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）。GLM-5.2/5.3=1M（1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 4096）。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。修改后需重启 bot 生效。"},
@@ -1155,9 +1155,9 @@ func DefaultMap() map[string]string {
 		"bot.dreaming.enabled":  "false",
 		"bot.dreaming.schedule": "0 3 * * *",
 		// MemoryWindow
-		KeyMemoryWindowMaxContextTokens:  "128000",
+		KeyMemoryWindowMaxContextTokens:  "1000000",
 		KeyMemoryWindowReservedTokens:    "2000",
-		KeyMemoryWindowOutputReserve:     "4096",
+		KeyMemoryWindowOutputReserve:     "128000",
 		KeyMemoryWindowBudgetRatio:       "0.15",
 		KeyMemoryWindowMaxMemoryTokens:   "7281",
 		KeyMemoryWindowCompressThreshold: "0.8",
