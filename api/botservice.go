@@ -142,8 +142,8 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
 
-		memRepos:    make(map[string]*storage.SQLiteRepository),
-		llmBundles:  make(map[string]*bot.LLMBundle),
+		memRepos:   make(map[string]*storage.SQLiteRepository),
+		llmBundles: make(map[string]*bot.LLMBundle),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -792,7 +792,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// （随模型上下文窗口自适应），与 context.go / snapshot.renderBlock 口径一致。
 	// memCompactor：到达字符预算时对该 scope 做语义合并、归档来源（压缩后入库），
 	// 取代简单的截断。repo 通过 SetRepository 注入，打破构造循环依赖。
-	memWindow := memory.NewWindow(memory.WindowConfig{})
+	// 记忆窗口参数从配置模块读取（memorywindow.*），不再硬编码于
+	// agent/memory/window.go 的 DefaultWindowConfig()；用户可在前端「系统配置」页调整。
+	mw := builder.GetMemoryWindowConfig()
+	memWindow := memory.NewWindow(memory.WindowConfig{
+		MaxContextTokens:  mw.MaxContextTokens,
+		ReservedTokens:    mw.ReservedTokens,
+		OutputReserve:     mw.OutputReserve,
+		MemoryBudgetRatio: mw.BudgetRatio,
+		MaxMemoryTokens:   mw.MaxMemoryTokens,
+		CompressThreshold: mw.CompressThreshold,
+	})
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},

@@ -256,6 +256,32 @@ func BotMemoryBackfillEventWatermarkKey(botID string) string {
 	return "bot." + botID + ".memory.backfill.event_watermark"
 }
 
+// MemoryWindow 键：记忆召回窗口（上下文预算）配置。
+// 这些参数原硬编码在 agent/memory/window.go 的 DefaultWindowConfig()，
+// 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
+const (
+	// KeyMemoryWindowMaxContextTokens 模型最大上下文窗口（token 数）。
+	// 记忆预算 = (MaxContextTokens - ReservedTokens - OutputReserve) × BudgetRatio，
+	// 再受 MaxMemoryTokens 硬上限约束。GLM-5.2 上下文 128K。
+	KeyMemoryWindowMaxContextTokens = "memorywindow.max_context_tokens"
+
+	// KeyMemoryWindowReservedTokens 为 system prompt / tool 定义等固定内容预留的 token 数。
+	KeyMemoryWindowReservedTokens = "memorywindow.reserved_tokens"
+
+	// KeyMemoryWindowOutputReserve 为 LLM 输出预留的 token 数。
+	KeyMemoryWindowOutputReserve = "memorywindow.output_reserve"
+
+	// KeyMemoryWindowBudgetRatio memory 可使用的窗口比例（0.0~1.0）。
+	KeyMemoryWindowBudgetRatio = "memorywindow.budget_ratio"
+
+	// KeyMemoryWindowMaxMemoryTokens memory 注入的硬上限（token 数）。
+	// 无论可用空间多大，实际注入的 memory context 不超过此值。
+	KeyMemoryWindowMaxMemoryTokens = "memorywindow.max_memory_tokens"
+
+	// KeyMemoryWindowCompressThreshold 触发压缩的阈值比例（0.0~1.0）。
+	KeyMemoryWindowCompressThreshold = "memorywindow.compress_threshold"
+)
+
 // ToolPolicyKey 返回指定 bot 的工具权限策略 JSON 的数据库键。
 // 格式：tools.<bot_id>.policy
 // 值为 ToolPolicy 的 JSON 字符串。

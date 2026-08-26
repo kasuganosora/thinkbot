@@ -75,6 +75,10 @@ type WindowConfig struct {
 }
 
 // DefaultWindowConfig 返回默认窗口配置。
+//
+// 注意：这是无配置时的内部兜底。生产环境实际值由配置模块
+// config.DefaultMemoryWindowConfig() 提供（agent/memory/window.go 不再硬编码来源），
+// 用户可在前端「系统配置」页的「记忆窗口」分类下调整。二者应保持同步。
 func DefaultWindowConfig() WindowConfig {
 	return WindowConfig{
 		MaxContextTokens:  128000,
@@ -82,10 +86,7 @@ func DefaultWindowConfig() WindowConfig {
 		OutputReserve:     4096,
 		MemoryBudgetRatio: 0.15,
 		CompressThreshold: 0.8,
-		MaxMemoryTokens: 7281, // 记忆注入硬上限 ≈21843 字符（×3 估算）。
-		// 注：此值为生产部署实际运行值（GLM-5.2 上下文 128K），
-		// 比早期默认 3000（≈9000 字符）更宽松，以支持更丰富的 persona 记忆召回。
-		// 若需抑制 memory 膨胀、收紧召回，可改回 3000。
+		MaxMemoryTokens:   7281, // 记忆注入硬上限 ≈21843 字符（×3 估算），与 config.DefaultMemoryWindowConfig() 对齐。
 	}
 }
 
