@@ -1137,7 +1137,10 @@ func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userI
 
 	summaryText := ""
 	if bundle, ok := s.botSvc.GetLLMBundle(botID); ok && len(head) > 0 {
-		compactor := llm.NewCompactor(llm.DefaultCompactionConfig())
+		// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改；
+		// 未配置时回退 llm.DefaultCompactionConfig() 的内部兜底默认值。
+		compactor := llm.NewCompactor(*compactionConfigFromConfig(
+			config.NewBuilder(s.store, s.logger).GetCompactionConfig()))
 		if sum, serr := compactor.SummarizeHead(ctx, bundle.Main, bundle.MainDef.Model, head); serr == nil {
 			summaryText = sum
 		} else {

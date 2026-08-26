@@ -14,33 +14,27 @@ import (
 	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
-// llmClientTimeout 是 LLM Provider 底层 HTTP 客户端的超时。
-//
-// 全局默认（util/http）仅 30s，对 bigmodel/智谱 等首字节较慢的模型会导致
-// "Client.Timeout exceeded while awaiting headers" 而回复失败。
-//
-// 为什么需要给到 20 分钟：
-//   - 该超时是**整个请求**的上限（含等待首字节）。**非流式**请求
-//     （`llm.OrchestrateGenerate`，workflow 的 SubAgent 走这条路）必须等模型把整段回复
-//     生成完才返回响应头，所以「生成大量代码 / 长篇审查报告」这类调用天然耗时很久。
-//   - 实测 5 分钟明显不够：workflow 节点执行曾连续 3 次尝试全部精准卡在 5 分钟超时
-//     （17:01 / 17:06 / 17:12），把本可完成的任务判为失败，并级联 skip 掉全部下游节点。
-//   - 注意：SSE 看门狗只保护**流式**路径，对非流式的 OrchestrateGenerate 不生效，
-//     因此这里不能依赖「看门狗会兜底」而把超时压短。
-//
-// 过长的整体超时不会掩盖真实 stall：流式路径由 SSE 看门狗按「无输出时长」判卡死，
-// 而非流式路径本就没有比「整体超时」更细的可用信号。
-const llmClientTimeout = 20 * time.Minute
+// llmClientTimeout / 重试图由 config.LLMClientConfig 驱动（见 CreateProvider 的
+// llmCfg 参数与 buildRetryConfig）。这些参数原硬编码为 const，现集中到配置模块
+// （config.DefaultLLMClientConfig + /api/config 的 llm.* 键），用户可在前端「系统配置」
+// 页修改并持久化，默认值保持生产现状（20 分钟超时 / 4 重试 / 指数退避）。
 
-// llmRetryMaxRetries 是 LLM Provider 遇到可恢复错误（429 限流 / 5xx）时的重试次数。
-// 非流式请求由底层 httputil 自动重试；流式（SSE）请求在连接建立阶段（首字节前）
-// 遇到 429/5xx 时重试整条流是安全的。退避策略为指数退避 + 解析 Retry-After 头。
-const llmRetryMaxRetries = 4
-
-// llmRetryConfig 返回各 Provider 共用的重试配置。
+// buildRetryConfig 从 config.LLMClientConfig 构造各 Provider 共用的重试配置。
 // GLM/智谱经常在高负载时返回 429（访问量过大），若不重试会直接中断对话/工作流。
-func llmRetryConfig() retry.Config {
-	return retry.LLMRetryConfig(llmRetryMaxRetries)
+// 退避策略为指数退避 + 解析 Retry-After 头。
+func buildRetryConfig(cfg config.LLMClientConfig) retry.Config {
+	return retry.Config{
+		MaxRetries: cfg.MaxRetries,
+		Backoff: &retry.Backoff{
+			Strategy: retry.StrategyExponential,
+			Initial:  time.Duration(cfg.RetryInitialMS) * time.Millisecond,
+			Factor:   cfg.RetryFactor,
+			Max:      time.Duration(cfg.RetryMaxMS) * time.Millisecond,
+			Jitter:   cfg.RetryJitter,
+		},
+		ShouldRetry:   retry.HTTPShouldRetry,
+		GetRetryDelay: retry.HTTPGetRetryDelay,
+	}
 }
 
 // ============================================================================
@@ -51,7 +45,10 @@ func llmRetryConfig() retry.Config {
 // ============================================================================
 
 // CreateProvider 根据 ModelDef 创建对应的 llm.Provider 实例。
-func CreateProvider(def config.ModelDef) (llm.Provider, error) {
+// llmCfg 来自 config.Builder.GetLLMClientConfig()（超时 / 重试 / 退避），集中可配。
+func CreateProvider(def config.ModelDef, llmCfg config.LLMClientConfig) (llm.Provider, error) {
+	timeout := time.Duration(llmCfg.ClientTimeoutSeconds) * time.Second
+	retryCfg := buildRetryConfig(llmCfg)
 	switch def.Provider {
 	case "openai", "bigmodel":
 		opts := []openai.Option{openai.WithAPIKey(def.APIKey)}
@@ -65,8 +62,8 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 				opts = append(opts, openai.WithChatPath(def.ChatPath))
 			}
 		}
-		opts = append(opts, openai.WithTimeout(llmClientTimeout))
-		opts = append(opts, openai.WithRetry(llmRetryConfig()))
+		opts = append(opts, openai.WithTimeout(timeout))
+		opts = append(opts, openai.WithRetry(retryCfg))
 		return openai.New(opts...), nil
 
 	case "anthropic":
@@ -74,8 +71,8 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 		if def.BaseURL != "" {
 			opts = append(opts, anthropic.WithBaseURL(def.BaseURL))
 		}
-		opts = append(opts, anthropic.WithTimeout(llmClientTimeout))
-		opts = append(opts, anthropic.WithRetry(llmRetryConfig()))
+		opts = append(opts, anthropic.WithTimeout(timeout))
+		opts = append(opts, anthropic.WithRetry(retryCfg))
 		return anthropic.New(opts...), nil
 
 	case "google":
@@ -83,8 +80,8 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 		if def.BaseURL != "" {
 			opts = append(opts, google.WithBaseURL(def.BaseURL))
 		}
-		opts = append(opts, google.WithTimeout(llmClientTimeout))
-		opts = append(opts, google.WithRetry(llmRetryConfig()))
+		opts = append(opts, google.WithTimeout(timeout))
+		opts = append(opts, google.WithRetry(retryCfg))
 		return google.New(opts...), nil
 
 	case "grok":
@@ -92,8 +89,8 @@ func CreateProvider(def config.ModelDef) (llm.Provider, error) {
 		if def.BaseURL != "" {
 			opts = append(opts, grok.WithBaseURL(def.BaseURL))
 		}
-		opts = append(opts, grok.WithTimeout(llmClientTimeout))
-		opts = append(opts, grok.WithRetry(llmRetryConfig()))
+		opts = append(opts, grok.WithTimeout(timeout))
+		opts = append(opts, grok.WithRetry(retryCfg))
 		return grok.New(opts...), nil
 
 	default:
@@ -146,12 +143,15 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 		return nil, fmt.Errorf("bot %q: no main LLM assigned", botID)
 	}
 
+	// LLM 客户端可靠性配置（超时 / 重试 / 退避），集中可配。
+	llmCfg := b.GetLLMClientConfig()
+
 	// 解析主力 LLM
 	mainDef, ok := b.GetLLMModel(assignment.Main)
 	if !ok {
 		return nil, fmt.Errorf("bot %q: LLM %q not found in config", botID, assignment.Main)
 	}
-	mainProvider, err := CreateProvider(mainDef)
+	mainProvider, err := CreateProvider(mainDef, llmCfg)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot %q: create main LLM", botID)
 	}
@@ -165,25 +165,25 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	if assignment.Light != assignment.Main {
 		lightDef, ok := b.GetLLMModel(assignment.Light)
 		if ok {
-			lightProvider, err := CreateProvider(lightDef)
+			lightProvider, err := CreateProvider(lightDef, llmCfg)
 			if err != nil {
 				return nil, errs.Wrapf(err, "bot %q: create light LLM", botID)
 			}
 			bundle.Light = lightProvider
 			bundle.LightDef = lightDef
-			return bundle.withVision(b, botID, assignment)
+			return bundle.withVision(b, botID, assignment, llmCfg)
 		}
 	}
 
 	// Light 回退到 Main
 	bundle.LightDef = mainDef
-	return bundle.withVision(b, botID, assignment)
+	return bundle.withVision(b, botID, assignment, llmCfg)
 }
 
 // withVision 尝试创建多模态辅助 Provider。
 // 如果未配置 Vision，返回原 bundle 不变（nil error）。
 // 如果配置了 Vision 但创建失败，返回错误。
-func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment config.BotLLMAssignment) (*LLMBundle, error) {
+func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment config.BotLLMAssignment, llmCfg config.LLMClientConfig) (*LLMBundle, error) {
 	if assignment.Vision == "" {
 		return b, nil
 	}
@@ -191,7 +191,7 @@ func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment
 	if !ok {
 		return b, nil
 	}
-	visionProvider, err := CreateProvider(visionDef)
+	visionProvider, err := CreateProvider(visionDef, llmCfg)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot %q: create vision LLM", botID)
 	}
