@@ -216,6 +216,17 @@ const (
 	KeyLLMRetryJitter = "llm.retry_jitter"
 )
 
+// Agent 统一生成 max_tokens 键：所有 LLM 生成调用共享的单一 max_tokens 上限。
+// 原散落在 bot_definitions.max_tokens 以及 formation/profiler/consolidator/dreaming
+// 各处的硬编码魔法数（2048/4096/8192/10000），现统一到此处唯一来源。
+// 默认值取系统既有的主力生成上限 8192（天花板语义：模型按需生成，统一不增耗）。
+// 修改后需重启 bot 生效。
+const (
+	// KeyAgentMaxTokens 所有生成调用的统一 max_tokens 上限（token 数）。默认 8192。
+	// 覆盖：主 bot 回复、子 agent、记忆抽取/巩固、梦境各相位、BotProfileProfiler。
+	KeyAgentMaxTokens = "agent.max_tokens"
+)
+
 // Compaction（会话压缩）键：上下文压缩预算配置。
 // 这些参数原硬编码在 llm/compaction.go 的 DefaultCompactionConfig()，
 // 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
