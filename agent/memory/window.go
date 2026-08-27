@@ -86,7 +86,7 @@ func DefaultWindowConfig() WindowConfig {
 		OutputReserve:     128000, // GLM-5.2/5.3 官方最大输出 128K（与 provider.maxTokens 对齐）。
 		MemoryBudgetRatio: 0.15,
 		CompressThreshold: 0.8,
-		MaxMemoryTokens:   7281, // 记忆注入硬上限 ≈21843 字符（×3 估算），与 config.DefaultMemoryWindowConfig() 对齐。
+		MaxMemoryTokens:   4096, // 记忆注入硬上限 ≈12288 字符（×3 估算）。原 7281 在 1M 上下文模型下会把"最近 50 条原始笔记"灌满整段预算（实测每轮 ~52K 字节），既浪费上下文又诱发重复退化；降到 4096 仍保留充足人味，同时压住体积。
 	}
 }
 
