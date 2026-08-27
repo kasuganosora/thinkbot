@@ -412,6 +412,12 @@ func lookupModelPreset(model string) *ModelPreset {
 	return nil
 }
 
+// GetModelPreset 导出给 API 层使用的官方推荐配置查询入口。
+// 未命中（未知模型）返回 nil。
+func GetModelPreset(model string) *ModelPreset {
+	return lookupModelPreset(model)
+}
+
 // BotLLMAssignment 描述一个 Bot 的 LLM 角色分配。
 type BotLLMAssignment struct {
 	// Main 主力 LLM ID（深度对话、工具调用）。
