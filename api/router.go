@@ -244,6 +244,9 @@ func (s *Server) registerRoutes() {
 			providerGroup.POST("/:pid/models/import", s.handleImportModels)
 		}
 
+		// 模型官方推荐预设查询（驱动前端新增模型时自动填入推荐值）
+		authed.GET("/model-preset", requirePermission(auth.PermBotManage), s.handleModelPreset)
+
 		// --- 聊天（需要 bot.use 权限） ---
 		chat := authed.Group("/chat")
 		chat.Use(requirePermission(auth.PermBotUse))
