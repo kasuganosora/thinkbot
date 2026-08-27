@@ -245,7 +245,7 @@ func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnip
 
 	maxTokens := d.config.MaxDreamTokens
 	if maxTokens <= 0 {
-		maxTokens = 4096
+		maxTokens = DefaultGenerationMaxTokens
 	}
 	model := d.model
 	if model == "" {

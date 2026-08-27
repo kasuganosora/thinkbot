@@ -739,9 +739,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		t := def.Temperature
 		temp = &t
 	}
-	// 统一生成 max_tokens：主 LLM 阶段也遵从全局 agent.max_tokens，取消 per-bot 控制。
-	globalMaxTok := builder.GetAgentConfig().MaxTokens
-	maxTok := &globalMaxTok
+	// max_tokens 跟随「主模型」本身（ModelDef.MaxTokens），由 provider 模型配置页按每模型设置。
+	// 不采用 bot 级 max_tokens（bot_definitions.max_tokens），遵循「配置跟模型走，不跟 bot 走」：
+	// 例如主模型 GLM 无视觉能力、外挂 Grok 当视觉模型时，视觉调用走 Grok 自己的 MaxTokens。
+	mainMaxTok := bundle.MainDef.MaxTokens
+	var maxTok *int
+	if mainMaxTok > 0 {
+		mt := mainMaxTok
+		maxTok = &mt
+	}
 
 	// 重复抑制（GLM-5.x 官方推荐）：缺省（DB 未设/迁移未回填）时回退到 0.1/0.05，
 	// 根治 agent 长工具链下反复输出相同 token 的退化（日志曾见单日 6 万次
@@ -1309,8 +1315,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				Enabled:          dreamCfg.Enabled,
 				Schedule:         dreamCfg.Schedule,
 				JaccardThreshold: 0.9,
-				// 统一生成 max_tokens：梦境相位上限也遵从全局 agent.max_tokens。
-				MaxDreamTokens: builder.GetAgentConfig().MaxTokens,
+				// 梦境相位跟随主模型上限（ModelDef.MaxTokens），与全局 agent.max_tokens 解耦。
+				MaxDreamTokens: bundle.MainDef.MaxTokens,
 			},
 			bundle.Main,          // 使用 bot 的主 LLM
 			bundle.MainDef.Model, // 模型名从 bot 主模型配置读取
@@ -1390,8 +1396,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			memory.BotProfileProfilerConfig{
 				Provider: bundle.Main,
 				Model:    &llm.Model{ID: bundle.MainDef.Model},
-				// 统一生成 max_tokens：Bot 画像抽取上限也遵从全局 agent.max_tokens。
-				MaxTokens: builder.GetAgentConfig().MaxTokens,
+				// Bot 画像抽取上限跟随主模型（ModelDef.MaxTokens）。
+				MaxTokens: bundle.MainDef.MaxTokens,
 			},
 			s.tp,
 			s.logger,
@@ -1432,7 +1438,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		t := def.Temperature
 		botCfg.Temperature = &t
 	}
-	botCfg.MaxTokens = builder.GetAgentConfig().MaxTokens
+	// Bot 输出上限跟随主模型（ModelDef.MaxTokens），不采用 bot 级 max_tokens。
+	botCfg.MaxTokens = bundle.MainDef.MaxTokens
 
 	// 梦境开启时桥接 NoteHandler 写入到分层存储
 	//   NoteHandler → MultiStore → MemoryRepository (检索) + TieredStore (梦境管线)
