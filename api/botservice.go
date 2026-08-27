@@ -734,11 +734,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		mainModel.DisplayName = def.Model
 	}
 
-	var temp *float64
-	if def.Temperature > 0 {
-		t := def.Temperature
-		temp = &t
-	}
+	// 温度跟随「主模型」本身（ModelDef.Temperature），由 provider 模型配置页按每模型设置。
+	// 不采用 bot 级 temperature（bot_definitions.temperature），遵循「配置跟模型走，不跟 bot 走」：
+	// 例如主模型 GLM 无视觉能力、外挂 Grok 当视觉模型时，视觉调用的温度走 Grok 自己的配置。
+	// ModelDef.Temperature 经 fillModelDefaults 保证非空（缺省 0.7）。
+	temp := bundle.MainDef.Temperature
 	// max_tokens 跟随「主模型」本身（ModelDef.MaxTokens），由 provider 模型配置页按每模型设置。
 	// 不采用 bot 级 max_tokens（bot_definitions.max_tokens），遵循「配置跟模型走，不跟 bot 走」：
 	// 例如主模型 GLM 无视觉能力、外挂 Grok 当视觉模型时，视觉调用走 Grok 自己的 MaxTokens。
@@ -814,11 +814,22 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 取代简单的截断。repo 通过 SetRepository 注入，打破构造循环依赖。
 	// 记忆窗口参数从配置模块读取（memorywindow.*），不再硬编码于
 	// agent/memory/window.go 的 DefaultWindowConfig()；用户可在前端「系统配置」页调整。
+	// 其中「上下文窗口上限」与「输出预留」跟随主模型（而非全局写死的 GLM 值）：
+	// 不同模型上下文窗口/最大输出不同（如 GLM-5.2=1M/128K，小模型远小），全局写死
+	// 会让非 GLM 模型算错预算。模型未配置 contextLength / maxTokens 时回退全局默认值。
 	mw := builder.GetMemoryWindowConfig()
+	ctxTokens := mw.MaxContextTokens
+	if bundle.MainDef.ContextLength > 0 {
+		ctxTokens = bundle.MainDef.ContextLength
+	}
+	outReserve := mw.OutputReserve
+	if bundle.MainDef.MaxTokens > 0 {
+		outReserve = bundle.MainDef.MaxTokens
+	}
 	memWindow := memory.NewWindow(memory.WindowConfig{
-		MaxContextTokens:  mw.MaxContextTokens,
+		MaxContextTokens:  ctxTokens,
 		ReservedTokens:    mw.ReservedTokens,
-		OutputReserve:     mw.OutputReserve,
+		OutputReserve:     outReserve,
 		MemoryBudgetRatio: mw.BudgetRatio,
 		MaxMemoryTokens:   mw.MaxMemoryTokens,
 		CompressThreshold: mw.CompressThreshold,
@@ -868,14 +879,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 注册 SubAgent 工具
 	// 将当前模型的 MaxTokens 作为默认输出上限注入，避免 SubAgent 写死 4096：
 	// 调用方未显式 WithMaxTokens 时，自动跟随模型配置（如 glm-5.2=128K）。
-	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model,
+	// 温度 / TopP 同样跟随主模型（ModelDef），不归 bot/全局管。
+	saOpts := []subagent.Option{
 		subagent.WithMaxTokens(bundle.MainDef.MaxTokens),
+		subagent.WithTemperature(*bundle.MainDef.Temperature),
 		// 重复抑制（GLM-5.x 推荐）：让 workflow 子代理与主 Agent 一致地抑制退化自旋。
 		subagent.WithFrequencyPenalty(freqPen),
 		subagent.WithPresencePenalty(presPen),
 		// 子 Agent 上下文压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
 		subagent.WithCompactor(llm.NewCompactor(
-			*compactionConfigFromConfig(builder.GetCompactionConfig()))))
+			*compactionConfigFromConfig(builder.GetCompactionConfig()))),
+	}
+	if bundle.MainDef.TopP != nil {
+		saOpts = append(saOpts, subagent.WithTopP(*bundle.MainDef.TopP))
+	}
+	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model, saOpts...)
 	// 让子 Agent 继承主 Agent 在子 Agent 场景可用的工具（exec/读/写/列目录等），
 	// 使其能像主 Agent 一样操作工作空间。spawn 工具由 scope 排除防套娃。
 	saMgr.SetToolResolver(toolMgr, agenttools.ToolSessionContext{BotID: id})
@@ -922,6 +940,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			SystemPrompt:     "", // 由 PromptStage 从 SOUL.md 注入
 			Model:            mainModel,
 			Temperature:      temp,
+			TopP:             bundle.MainDef.TopP,
 			FrequencyPenalty: &freqPen,
 			PresencePenalty:  &presPen,
 			MaxTokens:        maxTok,
@@ -1434,10 +1453,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		SystemPrompt: "", // 由 PromptStage 从 SOUL.md 注入
 		Model:        def.Model,
 	}
-	if def.Temperature > 0 {
-		t := def.Temperature
-		botCfg.Temperature = &t
-	}
+	// Bot 温度跟随主模型（ModelDef.Temperature），不采用 bot 级 temperature。
+	botCfg.Temperature = bundle.MainDef.Temperature
 	// Bot 输出上限跟随主模型（ModelDef.MaxTokens），不采用 bot 级 max_tokens。
 	botCfg.MaxTokens = bundle.MainDef.MaxTokens
 

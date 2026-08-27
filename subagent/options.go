@@ -29,6 +29,14 @@ func WithTemperature(temp float64) Option {
 	}
 }
 
+// WithTopP 设置 LLM 核采样参数（nucleus sampling，0.0 ~ 1.0）。
+// 跟随模型（ModelDef.TopP）；不调用时 sa.topP 为 nil，由 Provider 使用默认 top_p。
+func WithTopP(topP float64) Option {
+	return func(sa *SubAgent) {
+		sa.topP = &topP
+	}
+}
+
 // WithFrequencyPenalty 设置重复惩罚（GLM-5.x 推荐 0.1）：抑制模型反复输出相同 token。
 func WithFrequencyPenalty(pen float64) Option {
 	return func(sa *SubAgent) {

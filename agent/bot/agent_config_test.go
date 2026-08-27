@@ -16,18 +16,18 @@ func TestDefaultAgentConfig(t *testing.T) {
 func TestAgentConfig_Merge(t *testing.T) {
 	base := DefaultAgentConfig()
 
-	temp := 0.5
+	freq := 0.1
 	other := AgentConfig{
-		MaxSteps:    20,
-		Temperature: &temp,
+		MaxSteps:         20,
+		FrequencyPenalty: &freq,
 	}
 
 	merged := base.Merge(other)
 	if merged.MaxSteps != 20 {
 		t.Errorf("expected MaxSteps=20, got %d", merged.MaxSteps)
 	}
-	if merged.Temperature == nil || *merged.Temperature != 0.5 {
-		t.Error("expected temperature=0.5")
+	if merged.FrequencyPenalty == nil || *merged.FrequencyPenalty != 0.1 {
+		t.Error("expected frequencyPenalty=0.1")
 	}
 }
 
@@ -37,13 +37,12 @@ func TestAgentConfig_EffectiveTemperature(t *testing.T) {
 	botCfg := BotConfig{Temperature: &botTemp}
 
 	if cfg.EffectiveTemperature(botCfg) != 0.7 {
-		t.Error("expected 0.7 from bot config")
+		t.Error("expected 0.7 from bot config (model temperature)")
 	}
 
-	temp := 0.3
-	cfg.Temperature = &temp
-	if cfg.EffectiveTemperature(botCfg) != 0.3 {
-		t.Error("expected 0.3 from agent config")
+	// 无 bot 温度时回退默认 0.7
+	if cfg.EffectiveTemperature(BotConfig{}) != 0.7 {
+		t.Error("expected default 0.7")
 	}
 }
 
@@ -110,12 +109,8 @@ func TestAgentConfig_FilterTools(t *testing.T) {
 }
 
 func TestAgentConfig_ApplyToParams(t *testing.T) {
-	temp := 0.5
-	topP := 0.9
 	effort := "high"
 	cfg := AgentConfig{
-		Temperature:     &temp,
-		TopP:            &topP,
 		ReasoningEffort: &effort,
 		StopSequences:   []string{"STOP"},
 	}
@@ -123,11 +118,12 @@ func TestAgentConfig_ApplyToParams(t *testing.T) {
 	params := &llm.GenerateParams{}
 	cfg.ApplyToParams(params)
 
-	if params.Temperature == nil || *params.Temperature != 0.5 {
-		t.Error("expected temperature applied")
+	// 采样参数 Temperature/TopP 不再由 AgentConfig 覆盖——它们跟随模型（ModelDef）。
+	if params.Temperature != nil {
+		t.Error("expected temperature NOT applied from agent config")
 	}
-	if params.TopP == nil || *params.TopP != 0.9 {
-		t.Error("expected topP applied")
+	if params.TopP != nil {
+		t.Error("expected topP NOT applied from agent config")
 	}
 	if params.ReasoningEffort == nil || *params.ReasoningEffort != "high" {
 		t.Error("expected reasoningEffort applied")

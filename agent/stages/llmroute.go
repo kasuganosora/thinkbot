@@ -388,8 +388,10 @@ type LLMConfig struct {
 	ToolResolver ToolResolver
 	// Model 指定使用的模型。
 	Model *llm.Model
-	// Temperature 采样温度。
+	// Temperature 采样温度。跟随模型（ModelDef.Temperature），不归 bot/全局管。
 	Temperature *float64
+	// TopP 核采样参数（nucleus sampling）。跟随模型（ModelDef.TopP），nil 时由 Provider 用默认。
+	TopP *float64
 	// FrequencyPenalty 重复惩罚（GLM-5.x 推荐 0.1）：抑制模型反复输出相同 token。
 	FrequencyPenalty *float64
 	// PresencePenalty 存在惩罚（GLM-5.x 推荐 0.05）：抑制已出现 token 再次出现。
@@ -671,6 +673,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		Messages:         messages,
 		Tools:            tools,
 		Temperature:      s.config.Temperature,
+		TopP:             s.config.TopP,
 		FrequencyPenalty: s.config.FrequencyPenalty,
 		PresencePenalty:  s.config.PresencePenalty,
 		MaxTokens:        s.config.MaxTokens,
