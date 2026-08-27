@@ -152,10 +152,22 @@ type ModelDef struct {
 	ChatPath string `json:"chat_path,omitempty"`
 
 	// Temperature 采样温度（默认 0.7，nil 表示使用默认值，0 表示确定性输出）。
+	// 跟随模型配置（provider.<x>.models[].temperature），不归 bot/全局管。
 	Temperature *float64 `json:"temperature,omitempty"`
 
+	// TopP 核采样参数（nucleus sampling）。
+	// nil 表示不设置，由 Provider 使用其默认 top_p；>0 时覆盖。
+	// 属于模型的采样能力，跟随模型配置（provider.<x>.models[].topP），不归 bot/全局管。
+	TopP *float64 `json:"top_p,omitempty"`
+
 	// MaxTokens 最大输出 token 数（默认 4096）。
+	// 跟随模型配置（provider.<x>.models[].maxTokens），不归 bot/全局管。
 	MaxTokens int `json:"max_tokens,omitempty"`
+
+	// ContextLength 模型上下文窗口大小（token 数），如 GLM-5.2=1M。
+	// 用于记忆窗口/上下文预算计算，跟随模型配置（provider.<x>.models[].contextLength），
+	// 不归全局 memorywindow.* 管。为 0 时回退到全局 memorywindow.max_context_tokens。
+	ContextLength int `json:"context_length,omitempty"`
 
 	// Multimodal 标记此模型是否支持多模态输入（图片/音频/视频）。
 	// 为 true 时，MultimodalStage 不会对此 bot 的消息做辅助转写。
@@ -186,6 +198,7 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 				ContextLength int      `json:"contextLength"`
 				Multimodal    bool     `json:"multimodal"`
 				Temperature   float64  `json:"temperature"`
+				TopP          float64  `json:"topP"`
 				MaxTokens     int      `json:"maxTokens"`
 				Capabilities  []string `json:"capabilities"`
 			} `json:"models"`
@@ -204,14 +217,16 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 					mt = 4096
 				}
 				return fillModelDefaults(ModelDef{
-					Provider:    mapClientType(prov.ClientType),
-					Model:       m.ID,
-					APIKey:      prov.APIKey,
-					BaseURL:     prov.BaseURL,
-					ChatPath:    resolveChatPath(prov.ClientType, prov.BaseURL),
-					Temperature: &t,
-					MaxTokens:   mt,
-					Multimodal:  m.Multimodal,
+					Provider:     mapClientType(prov.ClientType),
+					Model:        m.ID,
+					APIKey:       prov.APIKey,
+					BaseURL:      prov.BaseURL,
+					ChatPath:     resolveChatPath(prov.ClientType, prov.BaseURL),
+					Temperature:  &t,
+					TopP:         topPIfPositive(m.TopP),
+					MaxTokens:    mt,
+					ContextLength: m.ContextLength,
+					Multimodal:   m.Multimodal,
 				}), true
 			}
 		}
@@ -283,6 +298,14 @@ func fillModelDefaults(def ModelDef) ModelDef {
 // float64Ptr 返回 float64 的指针（用于 Temperature 默认值）。
 func float64Ptr(v float64) *float64 {
 	return &v
+}
+
+// topPIfPositive 仅当 top_p 为正时才返回指针，否则返回 nil（交由 Provider 使用默认 top_p）。
+func topPIfPositive(v float64) *float64 {
+	if v > 0 {
+		return &v
+	}
+	return nil
 }
 
 // BotLLMAssignment 描述一个 Bot 的 LLM 角色分配。
@@ -819,9 +842,9 @@ func (b *Builder) GetMemoryWindowConfig() MemoryWindowConfig {
 // MemoryWindowMetaSpecs 返回记忆窗口配置项的元数据，用于注册到前端设置界面。
 func MemoryWindowMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）。GLM-5.2/5.3=1M（1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）的回退值。优先采用主模型自身配置（provider.<x>.models[].contextLength），仅当模型未配置时才回退到此全局值（默认 GLM-5.2/5.3 的 1M=1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 4096）。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 4096）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 7281，约 21843 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowCompressThreshold, Category: "MemoryWindow", Description: "触发记忆压缩的阈值比例 0.0~1.0（默认 0.8）。修改后需重启 bot 生效。"},

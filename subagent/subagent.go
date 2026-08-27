@@ -60,6 +60,9 @@ type SubAgent struct {
 	model    string
 	system   string
 	temp     float64
+	// topP 核采样参数（nucleus sampling），跟随模型（ModelDef.TopP）。
+	// nil 时由 Provider 使用默认 top_p。
+	topP *float64
 	// frequencyPenalty/presencePenalty 重复抑制（GLM-5.x 推荐 0.1/0.05），
 	// 抑制 agent 长工具链下反复输出相同 token 的退化。
 	frequencyPenalty float64
@@ -543,6 +546,7 @@ func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
 		System:           sa.system,
 		Messages:         msgs,
 		Temperature:      &temp,
+		TopP:             sa.topP,
 		FrequencyPenalty: &freqPen,
 		PresencePenalty:  &presPen,
 		MaxTokens:        &maxTokens,
