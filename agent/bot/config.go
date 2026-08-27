@@ -9,7 +9,10 @@ import (
 // "unstable output or excessive repetition"）。对所有 OpenAI 兼容提供商通用安全。
 const (
 	// DefaultFrequencyPenalty 重复惩罚：抑制模型反复输出相同 token。
-	DefaultFrequencyPenalty = 0.1
+	// 0.2 在 GLM-5.x 推荐 0.1 基础上略升：日志显示重复退化（repetition collapse）在
+	// 大上下文（每轮灌入 ~7K token 长期记忆）下频发，适度提高可进一步压低循环概率，
+	// 同时 0.2 仍属温和区间、不至于损害回复多样性。
+	DefaultFrequencyPenalty = 0.2
 	// DefaultPresencePenalty 存在惩罚：抑制已出现过的 token 再次出现。
 	DefaultPresencePenalty = 0.05
 )

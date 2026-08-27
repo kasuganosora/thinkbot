@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -706,6 +707,11 @@ func buildHeartbeatPrompt(targets []ChannelTarget) string {
 	return b.String()
 }
 
+// trailingCommaRe 匹配出现在 } 或 ] 之前的尾随逗号（含可选空白），
+// 例如 {"decision":"silent",} 中 decision 后的逗号。LLM 偶发产出此类脏 JSON，
+// 标准 json.Unmarshal 会报 "invalid character ',' after top-level value"。
+var trailingCommaRe = regexp.MustCompile(`,\s*([}\]])`)
+
 // extractJSON 从 LLM 原始输出中 tolerant 抽取 JSON 子串（防 markdown 围栏/前后缀干扰）。
 func extractJSON(s string) string {
 	start := strings.Index(s, "{")
@@ -713,7 +719,13 @@ func extractJSON(s string) string {
 	if start < 0 || end <= start {
 		return s // 退化：原样返回，交给 json.Unmarshal 报错（上层会降级为 silent）
 	}
-	return s[start : end+1]
+	raw := s[start : end+1]
+	// 容错：剥离尾随逗号后再交给严格解析，避免心跳决策因脏 JSON 被降级为 silent。
+	cleaned := trailingCommaRe.ReplaceAllString(raw, "$1")
+	if cleaned != raw {
+		return cleaned
+	}
+	return raw
 }
 
 // heartbeatWakePrompt 心跳唤醒提示（作为 InjectContext 注入 LLM，不污染 L0 记忆）。
