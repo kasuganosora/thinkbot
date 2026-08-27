@@ -208,25 +208,50 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 		}
 		for _, m := range prov.Models {
 			if m.ID == modelID {
-				t := 0.7
+				preset := lookupModelPreset(m.ID)
+
+				// 温度：provider 显式值 > 模型官方推荐预设 > 全局默认 0.7。
+				temp := 0.7
 				if m.Temperature > 0 {
-					t = m.Temperature
+					temp = m.Temperature
+				} else if preset != nil {
+					temp = preset.Temperature
 				}
+
+				// max_tokens：provider 显式值 > 模型官方推荐预设 > 全局默认 4096。
 				mt := m.MaxTokens
+				if mt == 0 && preset != nil {
+					mt = preset.MaxTokens
+				}
 				if mt == 0 {
 					mt = 4096
 				}
+
+				// top_p：provider 显式值(>0) > 模型官方推荐预设 > nil（交由 Provider 默认）。
+				var topP *float64
+				if m.TopP > 0 {
+					topP = &m.TopP
+				} else if preset != nil {
+					topP = &preset.TopP
+				}
+
+				// context_length：provider 显式值 > 模型官方推荐预设 > 0（交由全局 memorywindow 兜底）。
+				ctx := m.ContextLength
+				if ctx == 0 && preset != nil {
+					ctx = preset.ContextLength
+				}
+
 				return fillModelDefaults(ModelDef{
-					Provider:     mapClientType(prov.ClientType),
-					Model:        m.ID,
-					APIKey:       prov.APIKey,
-					BaseURL:      prov.BaseURL,
-					ChatPath:     resolveChatPath(prov.ClientType, prov.BaseURL),
-					Temperature:  &t,
-					TopP:         topPIfPositive(m.TopP),
-					MaxTokens:    mt,
-					ContextLength: m.ContextLength,
-					Multimodal:   m.Multimodal,
+					Provider:      mapClientType(prov.ClientType),
+					Model:         m.ID,
+					APIKey:        prov.APIKey,
+					BaseURL:       prov.BaseURL,
+					ChatPath:      resolveChatPath(prov.ClientType, prov.BaseURL),
+					Temperature:   &temp,
+					TopP:          topP,
+					MaxTokens:     mt,
+					ContextLength: ctx,
+					Multimodal:    m.Multimodal,
 				}), true
 			}
 		}
@@ -300,10 +325,89 @@ func float64Ptr(v float64) *float64 {
 	return &v
 }
 
-// topPIfPositive 仅当 top_p 为正时才返回指针，否则返回 nil（交由 Provider 使用默认 top_p）。
-func topPIfPositive(v float64) *float64 {
-	if v > 0 {
-		return &v
+// ============================================================================
+// 模型官方推荐数值配置（预设）
+// ============================================================================
+// ModelPreset 记录某类模型的官方推荐数值配置（temperature / top_p / max_tokens / 上下文窗口）。
+// 当 provider.* 模型配置未显式给出对应字段时，回退到此处的推荐值，
+// 实现「用户/Provider 未设置时读取模型预设」的需求。
+//
+// 数据来源（截至 2026-08）：
+//   - 智谱 GLM：docs.z.ai / docs.bigmodel.cn
+//   - 百度文心 ERNIE：cloud.baidu.com 文心千帆模型文档
+//   - 腾讯混元 Hunyuan：cloud.tencent.com 混元文档
+//   - Moonshot / Kimi：platform.kimi.com/docs/api/models-overview
+//   - 阿里通义千问 Qwen：help.aliyun.com 百炼模型文档
+//   - DeepSeek：api-docs.deepseek.com
+//   - 字节豆包 Doubao：volcengine.com / BytePlus 文档
+type ModelPreset struct {
+	Temperature   float64 // 采样温度官方推荐值
+	TopP          float64 // 核采样 top_p 官方推荐值
+	MaxTokens     int     // 未显式设置时的默认最大输出 token 数
+	ContextLength int     // 模型上下文窗口（token），用于记忆预算
+}
+
+// modelPresetRules 按「最具体在前」的顺序对模型名做前缀匹配，命中即返回。
+// 因此更具体的型号（如 glm-4.5）必须排在更宽泛的家族前缀（如 glm-4）之前。
+var modelPresetRules = []struct {
+	prefixes []string
+	preset   ModelPreset
+}{
+	// ---- 智谱 GLM ----
+	// GLM-5 全系：temp 1.0 / top_p 0.95 / 输出 128K(默认 64K) / 上下文 1M
+	{[]string{"glm-5", "glm-z1"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 65536, ContextLength: 1_000_000}},
+	// GLM-4.7 / 4.6：与 5 系同推荐（temp 1.0 / top_p 0.95 / 输出 128K）
+	{[]string{"glm-4.7", "glm-4.6"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 65536, ContextLength: 200_000}},
+	// GLM-4.5 全系（含 Air/Flash）：temp 0.6 / top_p 0.95 / 输出 96K
+	{[]string{"glm-4.5"}, ModelPreset{Temperature: 0.6, TopP: 0.95, MaxTokens: 8192, ContextLength: 200_000}},
+	// GLM-4 全系：temp 0.75 / top_p 0.9
+	{[]string{"glm-4"}, ModelPreset{Temperature: 0.75, TopP: 0.9, MaxTokens: 4096, ContextLength: 128_000}},
+
+	// ---- 百度文心 ERNIE ----
+	// ERNIE 4.5-Turbo-VL / 4.5-VL：temp 0.2 / top_p 0.8（视觉版更确定）
+	{[]string{"ernie-4.5-turbo-vl", "ernie-4.5-vl"}, ModelPreset{Temperature: 0.2, TopP: 0.8, MaxTokens: 12288, ContextLength: 128_000}},
+	// ERNIE 5.0 / 4.5（非VL）/ 4.0 / 3.5：temp 0.8 / top_p 1.0（文心千帆旗舰默认）
+	{[]string{"ernie-5", "ernie-4.5", "ernie-4.0", "ernie-3.5"}, ModelPreset{Temperature: 0.8, TopP: 1.0, MaxTokens: 4096, ContextLength: 128_000}},
+	// 其余 ERNIE 系列兜底
+	{[]string{"ernie"}, ModelPreset{Temperature: 0.8, TopP: 1.0, MaxTokens: 2048, ContextLength: 128_000}},
+
+	// ---- 腾讯混元 Hunyuan ----
+	{[]string{"hunyuan"}, ModelPreset{Temperature: 1.0, TopP: 1.0, MaxTokens: 4096, ContextLength: 128_000}},
+
+	// ---- Moonshot / Kimi ----
+	{[]string{"kimi-k3"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 32768, ContextLength: 1_000_000}},
+	{[]string{"kimi-k2.7"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 32768, ContextLength: 256_000}},
+	{[]string{"kimi-k2.6"}, ModelPreset{Temperature: 0.6, TopP: 0.95, MaxTokens: 32768, ContextLength: 256_000}},
+	{[]string{"kimi-k2.5", "kimi-k2"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 32768, ContextLength: 256_000}},
+	{[]string{"moonshot-v1"}, ModelPreset{Temperature: 0.0, TopP: 1.0, MaxTokens: 4096, ContextLength: 8192}},
+	// Kimi / Moonshot 其余兜底
+	{[]string{"kimi", "moonshot"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 32768, ContextLength: 256_000}},
+
+	// ---- 阿里通义千问 Qwen ----
+	{[]string{"qwen3.5-omni-realtime"}, ModelPreset{Temperature: 0.7, TopP: 0.8, MaxTokens: 2048, ContextLength: 32_000}},
+	{[]string{"qwen3-omni-flash-realtime"}, ModelPreset{Temperature: 0.9, TopP: 1.0, MaxTokens: 2048, ContextLength: 32_000}},
+	{[]string{"qwen-omni-turbo-realtime"}, ModelPreset{Temperature: 1.0, TopP: 0.01, MaxTokens: 2048, ContextLength: 32_000}},
+	{[]string{"qwen"}, ModelPreset{Temperature: 0.7, TopP: 0.8, MaxTokens: 4096, ContextLength: 128_000}},
+
+	// ---- DeepSeek ----
+	{[]string{"deepseek"}, ModelPreset{Temperature: 1.0, TopP: 1.0, MaxTokens: 8192, ContextLength: 1_000_000}},
+
+	// ---- 字节豆包 Doubao（官方默认值在不同文档间有分歧，此处取 OpenAI 兼容层常见默认） ----
+	{[]string{"doubao-seed-2.0"}, ModelPreset{Temperature: 1.0, TopP: 0.5, MaxTokens: 4096, ContextLength: 256_000}},
+	{[]string{"doubao"}, ModelPreset{Temperature: 1.0, TopP: 0.7, MaxTokens: 4096, ContextLength: 256_000}},
+}
+
+// lookupModelPreset 根据模型名查找官方推荐配置，未命中返回 nil。
+// 匹配按 modelPresetRules 顺序对模型名做大小写无关的前缀匹配。
+func lookupModelPreset(model string) *ModelPreset {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for i := range modelPresetRules {
+		for _, p := range modelPresetRules[i].prefixes {
+			if strings.HasPrefix(m, strings.ToLower(p)) {
+				preset := modelPresetRules[i].preset
+				return &preset
+			}
+		}
 	}
 	return nil
 }
