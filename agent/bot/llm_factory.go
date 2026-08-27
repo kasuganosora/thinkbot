@@ -146,16 +146,13 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	// LLM 客户端可靠性配置（超时 / 重试 / 退避），集中可配。
 	llmCfg := b.GetLLMClientConfig()
 
-	// 统一生成 max_tokens：所有生成调用共享单一上限，取消 per-bot max_tokens 控制。
-	maxTok := b.GetAgentConfig().MaxTokens
-
 	// 解析主力 LLM
 	mainDef, ok := b.GetLLMModel(assignment.Main)
 	if !ok {
 		return nil, fmt.Errorf("bot %q: LLM %q not found in config", botID, assignment.Main)
 	}
-	// 统一生成 max_tokens：覆盖 per-bot 配置，遵从全局 agent.max_tokens。
-	mainDef.MaxTokens = maxTok
+	// max_tokens 跟随「模型」本身（ModelDef.MaxTokens），由 provider 模型配置页按每模型设置。
+	// 主模型若无视觉能力，外挂的视觉模型（vision）使用其各自的 MaxTokens，互不覆盖。
 	mainProvider, err := CreateProvider(mainDef, llmCfg)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot %q: create main LLM", botID)
@@ -170,7 +167,6 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	if assignment.Light != assignment.Main {
 		lightDef, ok := b.GetLLMModel(assignment.Light)
 		if ok {
-			lightDef.MaxTokens = maxTok
 			lightProvider, err := CreateProvider(lightDef, llmCfg)
 			if err != nil {
 				return nil, errs.Wrapf(err, "bot %q: create light LLM", botID)
@@ -197,7 +193,8 @@ func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment
 	if !ok {
 		return b, nil
 	}
-	visionDef.MaxTokens = builder.GetAgentConfig().MaxTokens
+	// 视觉模型使用自身的 ModelDef.MaxTokens（如 Grok / OpenAI 各自上限），
+	// 不继承主模型（GLM 等）的 max_tokens。
 	visionProvider, err := CreateProvider(visionDef, llmCfg)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot %q: create vision LLM", botID)

@@ -24,10 +24,11 @@ import (
 // 提取维度：energy_level, patience, preferred_topics, verbosity, personality
 // ============================================================================
 
-// DefaultGenerationMaxTokens 是生成类调用的统一 max_tokens 默认值（8192）。
-// 作为「天花板」语义：模型按需生成，统一上限不会多耗 token。
-// 运行时各生成调用应优先使用配置模块下发的 agent.max_tokens；
-// 此处常量仅作无配置/测试场景的兜底，与 config.DefaultAgentConfig().MaxTokens 保持同步。
+// DefaultGenerationMaxTokens 是生成类调用的 max_tokens 兜底默认值（8192）。
+// max_tokens 的权威来源是「模型」本身：每个 ModelDef 在 provider 模型配置页
+// 各自设置 MaxTokens（如 GLM=128K、Grok/OpenAI 各按其能力），各生成调用应
+// 使用所绑定模型的 MaxTokens。此常量仅在模型 MaxTokens 为 0（未配置）时兜底，
+// 与 config.fillModelDefaults 的默认值（8192）保持一致。
 const DefaultGenerationMaxTokens = 8192
 
 // BotProfileProfilerConfig 配置 Bot 画像提取器。
