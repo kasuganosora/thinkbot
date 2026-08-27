@@ -161,6 +161,7 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		Messages:    messages,
 		Tools:       tools,
 		Temperature: s.config.LLM.Temperature,
+		TopP:        s.config.LLM.TopP,
 		MaxTokens:   s.config.LLM.MaxTokens,
 	}
 

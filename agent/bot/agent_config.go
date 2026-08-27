@@ -27,10 +27,6 @@ type AgentConfig struct {
 	// >0 = 最多 N 步
 	MaxSteps int `json:"maxSteps" yaml:"maxSteps"`
 
-	// Temperature 采样温度。
-	// 为 nil 时使用 BotConfig.Temperature。
-	Temperature *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
-
 	// FrequencyPenalty 重复惩罚（覆盖 BotConfig）。
 	// 为 nil 时回退 BotConfig.FrequencyPenalty / DefaultFrequencyPenalty。
 	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty" yaml:"frequencyPenalty,omitempty"`
@@ -38,9 +34,6 @@ type AgentConfig struct {
 	// PresencePenalty 存在惩罚（覆盖 BotConfig）。
 	// 为 nil 时回退 BotConfig.PresencePenalty / DefaultPresencePenalty。
 	PresencePenalty *float64 `json:"presencePenalty,omitempty" yaml:"presencePenalty,omitempty"`
-
-	// TopP nucleus 采样参数。
-	TopP *float64 `json:"topP,omitempty" yaml:"topP,omitempty"`
 
 	// ReasoningEffort 推理强度（如 "low"、"medium"、"high"）。
 	// 仅对支持此参数的模型有效（如 o1 系列）。
@@ -87,17 +80,11 @@ func (c AgentConfig) Merge(other AgentConfig) AgentConfig {
 	if other.MaxSteps != 0 {
 		result.MaxSteps = other.MaxSteps
 	}
-	if other.Temperature != nil {
-		result.Temperature = other.Temperature
-	}
 	if other.FrequencyPenalty != nil {
 		result.FrequencyPenalty = other.FrequencyPenalty
 	}
 	if other.PresencePenalty != nil {
 		result.PresencePenalty = other.PresencePenalty
-	}
-	if other.TopP != nil {
-		result.TopP = other.TopP
 	}
 	if other.ReasoningEffort != nil {
 		result.ReasoningEffort = other.ReasoningEffort
@@ -130,11 +117,9 @@ func (c AgentConfig) Merge(other AgentConfig) AgentConfig {
 }
 
 // EffectiveTemperature 返回有效温度。
-// 优先使用 AgentConfig 的值，回退到 BotConfig 的值。
+// 采样温度跟随模型（BotConfig.Temperature 已由主模型 ModelDef.Temperature 填充），
+// AgentConfig 不再提供 bot 级温度覆盖——「配置跟模型走，不跟 bot 走」。
 func (c AgentConfig) EffectiveTemperature(botCfg BotConfig) float64 {
-	if c.Temperature != nil {
-		return *c.Temperature
-	}
 	if botCfg.Temperature != nil {
 		return *botCfg.Temperature
 	}
@@ -196,10 +181,10 @@ func (c AgentConfig) FilterTools(tools []llm.Tool) []llm.Tool {
 
 // ToGenerateOptions 将 AgentConfig 转换为 GenerateParams 的覆盖值。
 // 返回的闭包接收一个 GenerateParams 并返回修改后的版本。
+//
+// 注意：采样参数 Temperature / TopP 不再由 AgentConfig 覆盖——它们跟随模型
+// （ModelDef.Temperature / ModelDef.TopP），「配置跟模型走，不跟 bot 走」。
 func (c AgentConfig) ApplyToParams(params *llm.GenerateParams) {
-	if c.Temperature != nil {
-		params.Temperature = c.Temperature
-	}
 	// 重复抑制：即便未被显式覆盖，也始终写入有效值（默认 GLM-5.x 推荐），
 	// 避免编排循环在长工具链下退化成重复自旋。
 	if c.FrequencyPenalty != nil {
@@ -213,9 +198,6 @@ func (c AgentConfig) ApplyToParams(params *llm.GenerateParams) {
 	} else if params.PresencePenalty == nil {
 		v := DefaultPresencePenalty
 		params.PresencePenalty = &v
-	}
-	if c.TopP != nil {
-		params.TopP = c.TopP
 	}
 	if c.ReasoningEffort != nil {
 		params.ReasoningEffort = c.ReasoningEffort
