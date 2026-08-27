@@ -635,6 +635,92 @@ func TestBuilder_GetLLMModel(t *testing.T) {
 	}
 }
 
+// TestBuilder_GetLLMModel_ModelPreset 验证「用户/Provider 未设置时回退到模型官方推荐预设」。
+func TestBuilder_GetLLMModel_ModelPreset(t *testing.T) {
+	// glm-5.3 不显式设置任何数值参数，应命中 GLM-5 预设（temp 1.0 / top_p 0.95 / max 65536 / ctx 1M）。
+	// gpt-unknown 无任何预设，应回退到全局默认（temp 0.7 / max 4096 / top_p nil / ctx 0）。
+	store := NewStore(nil)
+	store.LoadEnvMap(map[string]string{
+		"provider.test": `{"enabled":true,"clientType":"OpenAI Compatible","baseUrl":"https://api.test.com","apiKey":"sk-test","models":[{"id":"glm-5.3"},{"id":"gpt-unknown"}]}`,
+	})
+	b := NewBuilder(store, testLogger())
+
+	glm, ok := b.GetLLMModel("glm-5.3")
+	if !ok {
+		t.Fatal("glm-5.3 not found")
+	}
+	if glm.Temperature == nil || *glm.Temperature != 1.0 {
+		t.Errorf("glm-5.3 temp: want 1.0 got %v", glm.Temperature)
+	}
+	if glm.TopP == nil || *glm.TopP != 0.95 {
+		t.Errorf("glm-5.3 top_p: want 0.95 got %v", glm.TopP)
+	}
+	if glm.MaxTokens != 65536 {
+		t.Errorf("glm-5.3 max_tokens: want 65536 got %d", glm.MaxTokens)
+	}
+	if glm.ContextLength != 1_000_000 {
+		t.Errorf("glm-5.3 context_length: want 1000000 got %d", glm.ContextLength)
+	}
+
+	// 预设不被显式 provider 值覆盖：同一 glm-5.3 显式设置 temp 后，应以显式值为准。
+	store2 := NewStore(nil)
+	store2.LoadEnvMap(map[string]string{
+		"provider.test": `{"enabled":true,"clientType":"OpenAI Compatible","baseUrl":"https://api.test.com","apiKey":"sk-test","models":[{"id":"glm-5.3","temperature":0.3,"maxTokens":2048,"topP":0.5,"contextLength":32000}]}`,
+	})
+	b2 := NewBuilder(store2, testLogger())
+	glm2, _ := b2.GetLLMModel("glm-5.3")
+	if glm2.Temperature == nil || *glm2.Temperature != 0.3 {
+		t.Errorf("glm-5.3 explicit temp: want 0.3 got %v", glm2.Temperature)
+	}
+	if glm2.MaxTokens != 2048 {
+		t.Errorf("glm-5.3 explicit max_tokens: want 2048 got %d", glm2.MaxTokens)
+	}
+
+	// 未知模型回退到全局默认。
+	unk, ok := b.GetLLMModel("gpt-unknown")
+	if !ok {
+		t.Fatal("gpt-unknown not found")
+	}
+	if unk.Temperature == nil || *unk.Temperature != 0.7 {
+		t.Errorf("gpt-unknown temp: want 0.7 got %v", unk.Temperature)
+	}
+	if unk.MaxTokens != 4096 {
+		t.Errorf("gpt-unknown max_tokens: want 4096 got %d", unk.MaxTokens)
+	}
+	if unk.TopP != nil {
+		t.Errorf("gpt-unknown top_p: want nil got %v", unk.TopP)
+	}
+	if unk.ContextLength != 0 {
+		t.Errorf("gpt-unknown context_length: want 0 got %d", unk.ContextLength)
+	}
+}
+
+// TestLookupModelPreset 验证前缀匹配与「最具体在前」的优先级。
+func TestLookupModelPreset(t *testing.T) {
+	if p := lookupModelPreset("glm-4.5-air"); p == nil || p.Temperature != 0.6 {
+		t.Errorf("glm-4.5-air: want temp 0.6, got %v", p)
+	}
+	if p := lookupModelPreset("glm-4.6"); p == nil || p.Temperature != 1.0 {
+		t.Errorf("glm-4.6: want temp 1.0, got %v", p)
+	}
+	if p := lookupModelPreset("glm-4.0"); p == nil || p.Temperature != 0.75 {
+		t.Errorf("glm-4.0: want temp 0.75, got %v", p)
+	}
+	// 视觉版 ERNIE 必须优先于通用 ERNIE 规则。
+	if p := lookupModelPreset("ernie-4.5-turbo-vl-abc"); p == nil || p.Temperature != 0.2 {
+		t.Errorf("ernie-4.5-turbo-vl-abc: want temp 0.2, got %v", p)
+	}
+	if p := lookupModelPreset("ernie-4.5-turbo"); p == nil || p.Temperature != 0.8 {
+		t.Errorf("ernie-4.5-turbo: want temp 0.8, got %v", p)
+	}
+	if p := lookupModelPreset("deepseek-chat"); p == nil || p.TopP != 1.0 {
+		t.Errorf("deepseek-chat: want top_p 1.0, got %v", p)
+	}
+	if p := lookupModelPreset("some-unknown-model"); p != nil {
+		t.Errorf("unknown model: want nil, got %v", p)
+	}
+}
+
 func TestBuilder_GetBotLLMAssignment(t *testing.T) {
 	store := NewStore(nil)
 	store.LoadEnvMap(map[string]string{
