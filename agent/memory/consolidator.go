@@ -149,7 +149,7 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 	prompt := c.buildPrompt(l0Entries, existing)
 
 	// 调用 LLM
-	maxTokens := 8192
+	maxTokens := DefaultGenerationMaxTokens
 	result, err := c.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_consolidation"), llm.GenerateParams{
 		Model:     c.config.Model,
 		System:    c.config.SystemPrompt,

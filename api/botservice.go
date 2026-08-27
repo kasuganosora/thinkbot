@@ -739,11 +739,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		t := def.Temperature
 		temp = &t
 	}
-	var maxTok *int
-	if def.MaxTokens > 0 {
-		mt := def.MaxTokens
-		maxTok = &mt
-	}
+	// 统一生成 max_tokens：主 LLM 阶段也遵从全局 agent.max_tokens，取消 per-bot 控制。
+	globalMaxTok := builder.GetAgentConfig().MaxTokens
+	maxTok := &globalMaxTok
 
 	// 重复抑制（GLM-5.x 官方推荐）：缺省（DB 未设/迁移未回填）时回退到 0.1/0.05，
 	// 根治 agent 长工具链下反复输出相同 token 的退化（日志曾见单日 6 万次
@@ -1311,7 +1309,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				Enabled:          dreamCfg.Enabled,
 				Schedule:         dreamCfg.Schedule,
 				JaccardThreshold: 0.9,
-				MaxDreamTokens:   10000,
+				// 统一生成 max_tokens：梦境相位上限也遵从全局 agent.max_tokens。
+				MaxDreamTokens: builder.GetAgentConfig().MaxTokens,
 			},
 			bundle.Main,          // 使用 bot 的主 LLM
 			bundle.MainDef.Model, // 模型名从 bot 主模型配置读取
@@ -1391,6 +1390,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			memory.BotProfileProfilerConfig{
 				Provider: bundle.Main,
 				Model:    &llm.Model{ID: bundle.MainDef.Model},
+				// 统一生成 max_tokens：Bot 画像抽取上限也遵从全局 agent.max_tokens。
+				MaxTokens: builder.GetAgentConfig().MaxTokens,
 			},
 			s.tp,
 			s.logger,
@@ -1431,9 +1432,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		t := def.Temperature
 		botCfg.Temperature = &t
 	}
-	if def.MaxTokens > 0 {
-		botCfg.MaxTokens = def.MaxTokens
-	}
+	botCfg.MaxTokens = builder.GetAgentConfig().MaxTokens
 
 	// 梦境开启时桥接 NoteHandler 写入到分层存储
 	//   NoteHandler → MultiStore → MemoryRepository (检索) + TieredStore (梦境管线)

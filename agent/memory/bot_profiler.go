@@ -24,11 +24,19 @@ import (
 // 提取维度：energy_level, patience, preferred_topics, verbosity, personality
 // ============================================================================
 
+// DefaultGenerationMaxTokens 是生成类调用的统一 max_tokens 默认值（8192）。
+// 作为「天花板」语义：模型按需生成，统一上限不会多耗 token。
+// 运行时各生成调用应优先使用配置模块下发的 agent.max_tokens；
+// 此处常量仅作无配置/测试场景的兜底，与 config.DefaultAgentConfig().MaxTokens 保持同步。
+const DefaultGenerationMaxTokens = 8192
+
 // BotProfileProfilerConfig 配置 Bot 画像提取器。
 type BotProfileProfilerConfig struct {
 	Provider     llm.Provider
 	Model        *llm.Model
 	SystemPrompt string
+	// MaxTokens 生成画像时的最大输出 token 数（0 时回退 DefaultGenerationMaxTokens）。
+	MaxTokens int
 }
 
 // BotProfileProfiler 使用 LLM 提取 Bot 自我画像。
@@ -90,7 +98,10 @@ func (p *BotProfileProfiler) ExtractProfile(ctx context.Context, l1Entries, l2En
 		"l2_count", len(l2Entries),
 		"prompt_len", len(prompt))
 
-	maxTokens := 2048
+	maxTokens := p.config.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = DefaultGenerationMaxTokens
+	}
 	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "bot_profiler"), llm.GenerateParams{
 		Model:     p.config.Model,
 		System:    p.config.SystemPrompt,

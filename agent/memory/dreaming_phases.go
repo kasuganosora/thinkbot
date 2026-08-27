@@ -432,9 +432,11 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 		fmt.Fprintf(&sb, "[key:%s] %s\n", c.Key, strutil.Truncate(c.Content, 100))
 	}
 
-	maxTokens := 2048
-	if d.config.MaxDreamTokens > 0 && d.config.MaxDreamTokens < 2048 {
-		maxTokens = d.config.MaxDreamTokens
+	// 统一生成 max_tokens：与其他梦境相位一致，直接遵从 MaxDreamTokens（=全局 agent.max_tokens）。
+	// maxTokens 为输出天花板语义，分类调用不会真产出那么多 token，放宽到统一上限无害。
+	maxTokens := d.config.MaxDreamTokens
+	if maxTokens <= 0 {
+		maxTokens = DefaultGenerationMaxTokens
 	}
 	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_cluster"), llm.GenerateParams{
 		Model:     llm.ChatModel(model),

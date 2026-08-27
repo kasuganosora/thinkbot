@@ -894,6 +894,43 @@ func LLMClientMetaSpecs() []MetaSpec {
 	}
 }
 
+// --- Agent 统一生成 max_tokens 配置 ---
+//
+// 所有 LLM 生成调用（主 bot 回复、子 agent、记忆子系统辅助调用 formation/profiler/
+// consolidator、梦境各相位、BotProfileProfiler）共享的单个 max_tokens 上限。
+// 原散落在 bot_definitions.max_tokens 以及上述各处硬编码的 2048/4096/8192/10000
+// 魔法数，现统一到此处唯一来源。默认值取系统既有的主力生成上限 8192；
+// 这是「天花板」语义——模型只按实际需要生成，统一到上限不会多耗 token。
+// 修改后需重启 bot 生效。
+
+// AgentConfig 是 Agent 级生成参数的统一配置。
+type AgentConfig struct {
+	// MaxTokens 所有生成调用的统一 max_tokens 上限（token 数）。
+	MaxTokens int
+}
+
+// DefaultAgentConfig 返回 Agent 生成参数的默认配置（统一上限 8192）。
+func DefaultAgentConfig() AgentConfig {
+	return AgentConfig{
+		MaxTokens: 8192,
+	}
+}
+
+// GetAgentConfig 从 Store 读取 Agent 生成配置，未设置的字段自动填充默认值。
+func (b *Builder) GetAgentConfig() AgentConfig {
+	d := DefaultAgentConfig()
+	return AgentConfig{
+		MaxTokens: b.store.GetInt(KeyAgentMaxTokens, d.MaxTokens),
+	}
+}
+
+// AgentMetaSpecs 返回 Agent 生成配置项的元数据。
+func AgentMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyAgentMaxTokens, Category: "Agent", Description: "所有 LLM 生成调用的统一 max_tokens 上限（token 数，默认 8192）。覆盖主 bot 回复、子 agent、记忆抽取/巩固、梦境各相位、BotProfileProfiler。原散落的 2048/4096/8192/10000 魔法数已统一至此。天花板语义——模型按需生成，统一不增耗。修改后需重启 bot 生效。"},
+	}
+}
+
 // --- Compaction（会话压缩）配置 ---
 
 // CompactionConfig 描述会话级上下文压缩的全部可调参数（与 llm.CompactionConfig 字段对齐，
@@ -1219,6 +1256,7 @@ func AllMetaSpecs() []MetaSpec {
 	specs = append(specs, MemoryWindowMetaSpecs()...)
 	specs = append(specs, LLMClientMetaSpecs()...)
 	specs = append(specs, CompactionMetaSpecs()...)
+	specs = append(specs, AgentMetaSpecs()...)
 	return specs
 }
 
@@ -1228,8 +1266,8 @@ func AllMetaSpecs() []MetaSpec {
 // 记忆窗口（MemoryWindow）、LLM 客户端可靠性（LLM）、会话压缩（Compaction）
 // 是全局共享的模型相关参数，虽需重启 bot 生效，但属于用户应在前端可调的模型参数，故纳入。
 func GlobalMetaSpecs() []MetaSpec {
-	return append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
-		append(LLMClientMetaSpecs(), CompactionMetaSpecs()...)...)
+	return append(append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
+		LLMClientMetaSpecs()...), CompactionMetaSpecs()...), AgentMetaSpecs()...)
 }
 
 // DefaultMap 返回所有配置项的默认值映射，供前端设置界面填充空值。
@@ -1303,6 +1341,8 @@ func DefaultMap() map[string]string {
 		KeyMemoryWindowOutputReserve:     "128000",
 		KeyMemoryWindowBudgetRatio:       "0.15",
 		KeyMemoryWindowMaxMemoryTokens:   "7281",
+		// Agent 统一生成 max_tokens
+		KeyAgentMaxTokens: "8192",
 		KeyMemoryWindowCompressThreshold: "0.8",
 		// LLM 客户端可靠性
 		KeyLLMClientTimeoutSeconds: "1200",
