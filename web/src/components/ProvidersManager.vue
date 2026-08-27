@@ -101,6 +101,8 @@
             <span v-if="m.multimodal" class="badge multimodal" title="多模态">👁</span>
             <span class="badge key" title="需要密钥">🔑</span>
             <span v-if="m.contextLength" class="ctx-tag">{{ ctxLabel(m.contextLength) }}</span>
+            <span v-if="m.temperature" class="cfg-tag" title="采样温度">T {{ m.temperature }}</span>
+            <span v-if="m.topP" class="cfg-tag" title="核采样 TopP">P {{ m.topP }}</span>
             <div class="model-card-ops">
               <t-icon name="refresh" class="op" title="刷新" @click="$forceUpdate()" />
               <t-icon name="setting" class="op" :data-testid="`model-edit-${m.id}`" title="设置" @click="openEditModel(m)" />
@@ -142,13 +144,26 @@
             <t-input-number v-model="modelDialog.form.maxTokens" :min="1" :step="512" style="width: 100%" />
           </t-form-item>
         </div>
+        <div class="dlg-row2">
+          <t-form-item label="Temperature">
+            <t-input-number v-model="modelDialog.form.temperature" :min="0" :max="2" :step="0.1" :decimal-places="2" style="width: 100%" data-testid="model-form-temperature" />
+          </t-form-item>
+          <t-form-item label="Top P">
+            <t-input-number v-model="modelDialog.form.topP" :min="0" :max="1" :step="0.05" :decimal-places="2" style="width: 100%" data-testid="model-form-topp" />
+          </t-form-item>
+        </div>
+        <div v-if="modelPreset" class="preset-hint" data-testid="model-preset-hint">
+          <t-icon name="bulb" />
+          <span>官方推荐：Temp {{ modelPreset.temperature }} · TopP {{ modelPreset.topP }} · MaxTokens {{ modelPreset.maxTokens }} · 上下文 {{ ctxLabel(modelPreset.contextLength) }}</span>
+          <t-link theme="primary" hover="color" data-testid="model-apply-preset" @click="applyPreset">一键填入</t-link>
+        </div>
       </t-form>
     </t-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { providerApi } from '@/api/services'
 
@@ -266,15 +281,64 @@ const CAP_OPTIONS = [
 
 const modelDialog = ref({ visible: false, isEdit: false, form: {} })
 function openAddModel() {
-  modelDialog.value = { visible: true, isEdit: false, form: { id: '', name: '', caps: ['chat'], contextLength: 0, maxTokens: 4096, multimodal: false } }
+  modelDialog.value = { visible: true, isEdit: false, form: { id: '', name: '', caps: ['chat'], contextLength: 0, maxTokens: 0, temperature: 0, topP: 0, multimodal: false } }
 }
 function openEditModel(m) {
   modelDialog.value = { visible: true, isEdit: true, form: { ...m, caps: [...(m.capabilities || [])] } }
 }
+
+// --- 官方推荐预设：降低配置难度（自动填入 + 可自定义） ---
+const modelPreset = ref(null)
+let presetTimer = null
+
+// 监听模型 ID：命中官方推荐预设时自动填入（仅新增模式，避免覆盖编辑模式的既有自定义）；
+// 编辑模式则仅展示推荐值，由用户点「一键填入」决定。
+watch(() => modelDialog.value.form?.id, (id) => {
+  if (presetTimer) clearTimeout(presetTimer)
+  modelPreset.value = null
+  const mid = (id || '').trim()
+  if (!mid) return
+  presetTimer = setTimeout(async () => {
+    try {
+      const r = await providerApi.preset(mid)
+      if (r && r.found) {
+        modelPreset.value = r
+        if (!modelDialog.value.isEdit) {
+          const f = modelDialog.value.form
+          if (f.contextLength === 0) f.contextLength = r.contextLength
+          if (f.maxTokens === 0) f.maxTokens = r.maxTokens
+          if (f.temperature === 0) f.temperature = r.temperature
+          if (f.topP === 0) f.topP = r.topP
+        }
+      }
+    } catch (e) { /* 静默：预设查询失败不影响手动配置 */ }
+  }, 400)
+})
+
+function applyPreset() {
+  const p = modelPreset.value
+  if (!p) return
+  const f = modelDialog.value.form
+  f.contextLength = p.contextLength
+  f.maxTokens = p.maxTokens
+  f.temperature = p.temperature
+  f.topP = p.topP
+  MessagePlugin.success('已填入官方推荐值')
+}
+
 async function submitModel() {
   const f = modelDialog.value.form
   const caps = Array.isArray(f.caps) ? f.caps : []
-  const payload = { id: f.id, name: f.name || f.id, capabilities: caps, contextLength: f.contextLength, maxTokens: f.maxTokens, multimodal: caps.includes('vision') }
+  const payload = {
+    id: f.id,
+    name: f.name || f.id,
+    capabilities: caps,
+    contextLength: f.contextLength,
+    maxTokens: f.maxTokens,
+    temperature: f.temperature || 0,
+    topP: f.topP || 0,
+    multimodal: caps.includes('vision')
+  }
   try {
     if (modelDialog.value.isEdit) {
       await providerApi.updateModel(active.value.id, f.id, payload)
@@ -391,6 +455,19 @@ function removeModel(m) {
 .model-card-ops .op { color: #99a; cursor: pointer; font-size: 15px; }
 .model-card-ops .op:hover { color: #0052d9; }
 .model-empty { grid-column: 1 / -1; text-align: center; color: #999; padding: 30px 0; }
+
+/* 模型卡片上的采样参数标签 */
+.cfg-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: rgba(0,82,217,0.10); color: #0052d9; font-weight: 600; }
+
+/* 官方推荐预设提示 */
+.preset-hint {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 4px; padding: 8px 12px;
+  background: rgba(255,153,0,0.08); border: 1px solid rgba(255,153,0,0.25);
+  border-radius: 8px; font-size: 12px; color: #8a5a00;
+}
+.preset-hint .t-icon { color: #e37318; }
+.preset-hint t-link { margin-left: 2px; }
 
 .dlg-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 

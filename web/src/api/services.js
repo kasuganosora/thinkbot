@@ -261,6 +261,7 @@ export const providerApi = {
           contextLength: payload.contextLength || 0,
           multimodal: payload.multimodal ?? false,
           temperature: payload.temperature ?? 0.7,
+          topP: payload.topP ?? 0,
           maxTokens: payload.maxTokens ?? 4096
         }
         p.models.push(m)
@@ -311,6 +312,11 @@ export const providerApi = {
       })
     }
     return request('POST', `/api/providers/${pid}/models/import`)
+  },
+  // 查询某模型 ID 的官方推荐数值配置（温度/top_p/max_tokens/上下文），供新增模型时自动填入。
+  preset(model) {
+    if (USE_MOCK) return mockResolve(() => ({ found: false }))
+    return request('GET', `/api/model-preset?model=${encodeURIComponent(model)}`)
   }
 }
 

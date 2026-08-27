@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -28,8 +29,9 @@ import (
 //   DELETE /api/providers/:pid/models/:mid       → null
 //   POST   /api/providers/:pid/models/import     → ModelResp[]
 //
-// ProviderResp = { id, name, clientType, baseUrl, apiKey(脱敏), enabled, models: ModelResp[] }
-// ModelResp    = { id, name, capabilities, contextLength, multimodal, temperature, maxTokens }
+// ProviderResp = { id, name, clientType, baseUrl, apiKey(脱敏), enabled, models: ProviderModel[] }
+// ProviderModel = { id, name, capabilities, contextLength, multimodal, temperature, topP, maxTokens }
+//   注：temperature/topP 为 0 时表示"未显式设置"，运行时回退到官方推荐预设（config.GetModelPreset）或全局默认。
 // ============================================================================
 
 // --- 存储模型 ---
@@ -54,6 +56,7 @@ type ProviderModel struct {
 	ContextLength int      `json:"contextLength"`
 	Multimodal    bool     `json:"multimodal"`
 	Temperature   float64  `json:"temperature"`
+	TopP          float64  `json:"topP"`
 	MaxTokens     int      `json:"maxTokens"`
 }
 
@@ -99,6 +102,7 @@ type AddModelReq struct {
 	ContextLength int      `json:"contextLength"`
 	Multimodal    bool     `json:"multimodal"`
 	Temperature   *float64 `json:"temperature"` // 指针类型区分"未设置"和"显式设0"
+	TopP          *float64 `json:"topP"`
 	MaxTokens     int      `json:"maxTokens"`
 }
 
@@ -109,6 +113,7 @@ type UpdateModelReq struct {
 	ContextLength *int     `json:"contextLength"`
 	Multimodal    *bool    `json:"multimodal"`
 	Temperature   *float64 `json:"temperature"`
+	TopP          *float64 `json:"topP"`
 	MaxTokens     *int     `json:"maxTokens"`
 }
 
@@ -350,18 +355,22 @@ func (s *Server) handleAddModel(c *gin.Context) {
 		}
 	}
 
-	// 默认值
+	// 默认值：未显式设置时存 0，交由运行时回退到官方推荐预设（config.GetModelPreset）或全局默认。
+	// 这样用户不填也能拿到推荐值，填了则尊重用户自定义（provider 显式值 > 预设 > 全局默认）。
 	caps := req.Capabilities
 	if caps == nil {
 		caps = []string{"chat"}
 	}
-	temp := 0.7 // 默认值
+	var temp, topP float64 // 0 表示未设置
 	if req.Temperature != nil {
 		temp = *req.Temperature // 尊重用户显式设置（包括 0）
 	}
-	maxTokens := req.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = 4096
+	if req.TopP != nil {
+		topP = *req.TopP
+	}
+	maxTokens := 0 // 0 表示未设置
+	if req.MaxTokens != 0 {
+		maxTokens = req.MaxTokens
 	}
 
 	model := ProviderModel{
@@ -371,6 +380,7 @@ func (s *Server) handleAddModel(c *gin.Context) {
 		ContextLength: req.ContextLength,
 		Multimodal:    req.Multimodal,
 		Temperature:   temp,
+		TopP:          topP,
 		MaxTokens:     maxTokens,
 	}
 
@@ -431,6 +441,9 @@ func (s *Server) handleUpdateModel(c *gin.Context) {
 	}
 	if req.Temperature != nil {
 		m.Temperature = *req.Temperature
+	}
+	if req.TopP != nil {
+		m.TopP = *req.TopP
 	}
 	if req.MaxTokens != nil {
 		m.MaxTokens = *req.MaxTokens
@@ -584,14 +597,20 @@ func (s *Server) handleImportModels(c *gin.Context) {
 			continue
 		}
 		exist[rm.id] = true
+		// 命中官方推荐预设则直接套用推荐值，降低用户配置成本；未知模型回退到默认 0.7/4096（运行时再按预设解析）。
+		temp, topP, mt, ctx := 0.7, 0.0, 4096, 0
+		if p := config.GetModelPreset(rm.id); p != nil {
+			temp, topP, mt, ctx = p.Temperature, p.TopP, p.MaxTokens, p.ContextLength
+		}
 		model := ProviderModel{
 			ID:            rm.id,
 			Name:          rm.id,
 			Capabilities:  []string{"chat"},
-			ContextLength: 0,
+			ContextLength: ctx,
 			Multimodal:    false,
-			Temperature:   0.7,
-			MaxTokens:     4096,
+			Temperature:   temp,
+			TopP:          topP,
+			MaxTokens:     mt,
 		}
 		def.Models = append(def.Models, model)
 		added = append(added, model)
@@ -652,4 +671,28 @@ func maskAPIKey(key string) string {
 		return strings.Repeat("*", len(key))
 	}
 	return key[:6] + strings.Repeat("*", len(key)-10) + key[len(key)-4:]
+}
+
+// handleModelPreset 返回某模型 ID 的官方推荐数值配置（温度/top_p/max_tokens/上下文）。
+// GET /api/model-preset?model=<id>
+// 命中预设返回 {found:true, temperature, topP, maxTokens, contextLength}；未命中返回 {found:false}。
+// 前端据此在新增模型时自动填入推荐值，降低配置难度，同时保留用户自定义（显式值优先）。
+func (s *Server) handleModelPreset(c *gin.Context) {
+	model := strings.TrimSpace(c.Query("model"))
+	if model == "" {
+		Fail(c, errs.BadRequest("model query param required"))
+		return
+	}
+	p := config.GetModelPreset(model)
+	if p == nil {
+		OK(c, gin.H{"found": false})
+		return
+	}
+	OK(c, gin.H{
+		"found":         true,
+		"temperature":   p.Temperature,
+		"topP":          p.TopP,
+		"maxTokens":     p.MaxTokens,
+		"contextLength": p.ContextLength,
+	})
 }

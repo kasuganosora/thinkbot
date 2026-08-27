@@ -222,7 +222,7 @@ function renameBot() {
       onInput: e => { tmpName.value = e.target.value }
     }),
     onConfirm: () => {
-      const name = (tmpName.value ?? bot.value?.name || '').trim()
+      const name = ((tmpName.value ?? bot.value?.name) || '').trim()
       if (name) { store.updateBot(bot.value.id, { name }); bot.value.name = name; form.value.name = name }
       dlg.destroy()
     }
