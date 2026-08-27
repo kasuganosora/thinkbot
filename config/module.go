@@ -931,7 +931,7 @@ func DefaultMemoryWindowConfig() MemoryWindowConfig {
 		ReservedTokens:    2000,
 		OutputReserve:     128000, // GLM-5.2/5.3 官方最大输出 128K（与 provider.maxTokens 对齐）。
 		BudgetRatio:       0.15,
-		MaxMemoryTokens:   7281, // ≈21843 字符（×3 估算）的记忆注入硬上限。
+		MaxMemoryTokens:   4096, // ≈12288 字符（×3 估算）的记忆注入硬上限。原 7281 在 1M 模型下会把"最近 50 条原始笔记"灌满整段预算（实测每轮 ~52K 字节），既浪费上下文又诱发重复退化；降到 4096 仍保留充足人味，同时压住体积。
 		CompressThreshold: 0.8,
 	}
 }
@@ -956,7 +956,7 @@ func MemoryWindowMetaSpecs() []MetaSpec {
 		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 4096）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 7281，约 21843 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 4096，约 12288 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。原默认 7281 在 1M 上下文模型下会把'最近 50 条原始笔记'灌满整段预算（实测每轮 ~52K 字节），既浪费上下文又诱发重复退化；降到 4096 仍保留充足人味，同时压住体积。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowCompressThreshold, Category: "MemoryWindow", Description: "触发记忆压缩的阈值比例 0.0~1.0（默认 0.8）。修改后需重启 bot 生效。"},
 	}
 }
@@ -1437,7 +1437,7 @@ func DefaultMap() map[string]string {
 		KeyMemoryWindowReservedTokens:    "2000",
 		KeyMemoryWindowOutputReserve:     "128000",
 		KeyMemoryWindowBudgetRatio:       "0.15",
-		KeyMemoryWindowMaxMemoryTokens:   "7281",
+		KeyMemoryWindowMaxMemoryTokens:   "4096",
 		KeyMemoryWindowCompressThreshold: "0.8",
 		// LLM 客户端可靠性
 		KeyLLMClientTimeoutSeconds: "1200",
