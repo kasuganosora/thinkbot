@@ -113,6 +113,12 @@ type MisskeyChannel struct {
 	dedupMu sync.Mutex
 	dedup   map[string]time.Time
 
+	// 锚点：最近一次成功处理的「提及 Bot」帖子的 noteID。
+	// 断线重连后用它作为 sinceId 拉取 notes/mentions，补发断连窗口内错过的 @提及/回复，
+	// 解决 Misskey streaming 不重放历史消息导致 mention 静默丢失的设计缺陷。
+	anchorMu      sync.Mutex
+	lastMentionID string
+
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -183,6 +189,16 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 	c.botUserID = me.ID
 	c.botUsername = me.Username
 	c.dedup = make(map[string]time.Time)
+
+	// 种子锚点：启动即拉取最新一条提及，作为后续重连 backfill 的基准。
+	// 这样即便启动时还无任何实时 mention，首次断线重连也能从「启动时刻」起恢复，
+	// 而非从空白开始（空白会导致首段历史全丢）。失败仅告警，不阻断启动。
+	if notes, err := c.api.getMentions(ctx, "", "", 1); err != nil {
+		traceid.L(ctx).Warnw("misskey: seed mention anchor failed (backfill baseline unavailable until first live mention)",
+			"channel", c.name, "err", err)
+	} else if len(notes) > 0 {
+		c.setMentionAnchor(notes[0].ID)
+	}
 
 	// 注册 Bot 自身用户 ID 到 Ingress，作为防止自回复循环的第二道防线。
 	// （第一道防线是本 channel 在 streaming 中过滤自帖，第 364、389 行）
@@ -289,6 +305,84 @@ func (c *MisskeyChannel) dedupSeen(noteID string) bool {
 	return false
 }
 
+// getMentionAnchor 返回当前锚点（最近一次成功处理的提及帖 noteID）。
+func (c *MisskeyChannel) getMentionAnchor() string {
+	c.anchorMu.Lock()
+	defer c.anchorMu.Unlock()
+	return c.lastMentionID
+}
+
+// setMentionAnchor 推进锚点为指定 noteID（空值不更新）。
+// 在实时 mention 处理与 backfill 处理两条路径上都会调用，保证锚点始终是
+// 已处理过的最新提及，重连时以此恢复断连窗口。
+func (c *MisskeyChannel) setMentionAnchor(noteID string) {
+	if noteID == "" {
+		return
+	}
+	c.anchorMu.Lock()
+	defer c.anchorMu.Unlock()
+	c.lastMentionID = noteID
+}
+
+// backfillMentions 重连后补发断连窗口内错过的 @提及/回复。
+//
+// Misskey streaming 在断线期间不会重放消息，导致那段时间内的 mention/reply 被静默丢弃。
+// 本方法以 lastMentionID 为锚（sinceId，不含自身），翻页拉取 notes/mentions 把错过的历史补齐。
+// 设计要点：
+//   - 复用 handleNote 走与实时 mention 完全相同的归一化/去重/注入路径，Mentioned=true（视为直接互动）。
+//   - 与实时流并发：backfill 期间新到的实时 mention 可能和本次拉取的帖子重叠，dedupSeen 去重兜底。
+//   - 每处理一条即推进锚点，长 outage 中途若再次断线也能从断点续传。
+//   - 翻页用 untilId 取更旧的一页（sinceId/untilId 均为开区间），封顶 maxTotal 防止极端长 outage 拉爆。
+//   - 端点直接查实例数据库，不依赖 Meilisearch，即便 notes/search 挂了 backfill 仍可用。
+func (c *MisskeyChannel) backfillMentions(ctx context.Context) {
+	anchor := c.getMentionAnchor()
+	if anchor == "" {
+		traceid.L(ctx).Debugw("misskey backfill: skipped (no anchor yet)",
+			"channel", c.name)
+		return
+	}
+	const pageSize = 100
+	const maxTotal = 300
+	total := 0
+	until := ""
+	for total < maxTotal {
+		notes, err := c.api.getMentions(ctx, anchor, until, pageSize)
+		if err != nil {
+			traceid.L(ctx).Warnw("misskey backfill: notes/mentions failed",
+				"channel", c.name, "anchor", anchor, "err", err)
+			return
+		}
+		if len(notes) == 0 {
+			break
+		}
+		// notes/mentions 最新在前；按时间正序（最旧→最新）处理，锚点自然推进到最新。
+		for i := len(notes) - 1; i >= 0; i-- {
+			n := notes[i]
+			if c.dedupSeen(n.ID) {
+				c.setMentionAnchor(n.ID)
+				continue
+			}
+			// 忽略 Bot 自己（理论上 notes/mentions 不会含自己，但保险）
+			if n.UserID == c.botUserID || (n.UserID == "" && n.User.ID == c.botUserID) {
+				c.setMentionAnchor(n.ID)
+				continue
+			}
+			c.handleNote(ctx, n, "backfill", true)
+			c.setMentionAnchor(n.ID)
+		}
+		total += len(notes)
+		if len(notes) < pageSize {
+			break
+		}
+		// 用本页最旧 note 作 until 上界，翻下一页更旧的提及。
+		until = notes[len(notes)-1].ID
+	}
+	if total > 0 {
+		traceid.L(ctx).Infow("misskey backfill: recovered missed mentions after reconnect",
+			"channel", c.name, "count", total, "anchor", anchor)
+	}
+}
+
 // connectAndServe 建立 WebSocket 连接并持续处理消息。
 // 阻塞直到连接断开或 ctx 被取消。
 func (c *MisskeyChannel) connectAndServe(ctx context.Context) error {
@@ -334,6 +428,9 @@ func (c *MisskeyChannel) connectAndServe(ctx context.Context) error {
 			}
 			traceid.L(ctx).Debugw("misskey stream: subscribed",
 				"channel", c.name, "channels", connectMsgs)
+			// 重连成功：补发断连窗口内错过的 @提及/回复（streaming 不重放历史消息）。
+			// 首次连接时锚点已是启动时刻最新提及，backfill 自然无副作用。
+			c.backfillMentions(ctx)
 		},
 		OnError: func(err error) {
 			traceid.L(ctx).Debugw("misskey ws error",
@@ -397,6 +494,8 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 				return nil
 			}
 			c.handleNote(ctx, note, chMsg.Type, true) // Mentioned = true
+			// 推进锚点：该 mention 已成功处理，后续断连以此 ID 为基准 backfill。
+			c.setMentionAnchor(note.ID)
 		default:
 			// 忽略其他 main 事件（follow, renote 等）
 		}

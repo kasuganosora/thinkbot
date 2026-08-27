@@ -7,6 +7,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
 // ============================================================================
@@ -16,8 +17,11 @@ import (
 // apiClient 封装了 Misskey HTTP API 调用。
 type apiClient struct {
 	client *http.Client
-	host   string
-	token  string
+	// searchClient 专用于 notes/search：实例搜索后端（Meilisearch）偶发 5xx，
+	// 用指数退避 + 抖动重试，让瞬时故障自愈，避免工具层直接失败。
+	searchClient *http.Client
+	host         string
+	token        string
 }
 
 // newAPIClient 创建一个 Misskey API 客户端。
@@ -31,8 +35,24 @@ func newAPIClient(host, token string, opts ...http.Option) *apiClient {
 	}, opts...)
 	return &apiClient{
 		client: http.New(opts...),
-		host:   host,
-		token:  token,
+		// 搜索后端是实例 Meilisearch，偶发 5xx。单独给一个客户端走指数退避（500ms→上限 8s）+ 抖动，
+		// 让瞬时故障自愈，避免每次搜索都直接失败。不继承 opts 里的 WithRetrySimple，避免双重重试层。
+		// 不设 ShouldRetry：http 客户端默认仅对 5xx/429/网络错误重试，4xx 不重试。
+		searchClient: http.New(
+			http.WithBaseURL(host+"/api"),
+			http.WithRetry(retry.Config{
+				MaxRetries: 5,
+			Backoff: &retry.Backoff{
+				Strategy: retry.StrategyExponential,
+				Initial:  500 * time.Millisecond,
+				Max:      8 * time.Second,
+				Factor:   2.0,
+				Jitter:   true,
+			},
+			}),
+		),
+		host:  host,
+		token: token,
 	}
 }
 
@@ -277,11 +297,12 @@ func (a *apiClient) getUserNotes(ctx context.Context, userID string, limit int) 
 }
 
 // searchNotes 按关键词在实例内搜索帖子。
+// 走专用 searchClient（指数退避 + 抖动重试），对 Meilisearch 后端瞬时 5xx 更鲁棒。
 func (a *apiClient) searchNotes(ctx context.Context, query string, limit int) ([]Note, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	resp, err := a.client.Post("notes/search").
+	resp, err := a.searchClient.Post("notes/search").
 		SetContext(ctx).
 		SetJSONBody(noteSearchRequest{
 			I:     a.token,
@@ -298,6 +319,43 @@ func (a *apiClient) searchNotes(ctx context.Context, query string, limit int) ([
 	var notes []Note
 	if err := resp.JSON(&notes); err != nil {
 		return nil, errs.Wrap(err, "misskey searchNotes parse")
+	}
+	return notes, nil
+}
+
+// mentionRequest 对应 notes/mentions（获取提及当前用户的所有帖子）。
+type mentionRequest struct {
+	I       string `json:"i"`
+	SinceID string `json:"sinceId,omitempty"` // 仅返回该 ID 之后创建的帖子（不含该 ID 本身）
+	UntilID string `json:"untilId,omitempty"` // 仅返回该 ID 之前创建的帖子（不含该 ID 本身）
+	Limit   int    `json:"limit,omitempty"`
+}
+
+// getMentions 获取提及当前用户（Bot）的帖子，按时间倒序（最新在前）。
+// sinceID/untilID 用于断线重连后的 backfill：传 sinceID 可拉取断连窗口内错过的 @提及/回复。
+// 该端点直接查实例数据库，不依赖 Meilisearch，即使 notes/search 不可用时也能用。
+func (a *apiClient) getMentions(ctx context.Context, sinceID, untilID string, limit int) ([]Note, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	resp, err := a.client.Post("notes/mentions").
+		SetContext(ctx).
+		SetJSONBody(mentionRequest{
+			I:       a.token,
+			SinceID: sinceID,
+			UntilID: untilID,
+			Limit:   limit,
+		}).
+		Do()
+	if err != nil {
+		return nil, errs.Wrap(err, "misskey getMentions")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("misskey getMentions: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
+	var notes []Note
+	if err := resp.JSON(&notes); err != nil {
+		return nil, errs.Wrap(err, "misskey getMentions parse")
 	}
 	return notes, nil
 }
