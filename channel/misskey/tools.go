@@ -98,6 +98,34 @@ func formatNotes(notes []Note, host string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// searchNotesByUserFallback 是 notes/search 不可用时的代码级兜底：
+// 当查询形如 @用户（显式 @handle）时，解析该用户并直接拉取其最近帖子。
+// users/notes 走实例数据库，不依赖 Meilisearch，因此搜索后端宕机时仍可用。
+// 返回 (格式化文本, 帖子数, 错误)。无 @ 前缀或解析失败时返回 count=0。
+func (c *MisskeyChannel) searchNotesByUserFallback(ctx context.Context, query string, limit int) (string, int, error) {
+	q := strings.TrimSpace(query)
+	if !strings.HasPrefix(q, "@") {
+		return "", 0, fmt.Errorf("not a user handle query")
+	}
+	// 去掉 @ 与可能的 @host 后缀，仅保留用户名用于搜索。
+	bare := strings.TrimPrefix(q, "@")
+	if at := strings.Index(bare, "@"); at >= 0 {
+		bare = bare[:at]
+	}
+	if bare == "" {
+		return "", 0, fmt.Errorf("empty username")
+	}
+	users, err := c.api.searchUser(ctx, bare, 1)
+	if err != nil || len(users) == 0 {
+		return "", 0, fmt.Errorf("user resolve failed: %w", err)
+	}
+	notes, err := c.api.getUserNotes(ctx, users[0].ID, limit)
+	if err != nil {
+		return "", 0, fmt.Errorf("user notes fetch failed: %w", err)
+	}
+	return formatNotes(notes, c.cfg.Host), len(notes), nil
+}
+
 // getUserNotesTool 返回 misskey_get_user_notes 工具定义。
 func (c *MisskeyChannel) getUserNotesTool() agenttools.ToolDef {
 	return agenttools.ToolDef{
@@ -184,12 +212,23 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 				if l, ok := args["limit"].(float64); ok {
 					limit = int(l)
 				}
-				notes, err := c.api.searchNotes(ctx, query, limit)
-				if err != nil {
-					// 实例搜索后端（Meilisearch）常不可用；返回干净文案，不把裸 HTTP 错误抛给 LLM，
-					// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
-					return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
+			notes, err := c.api.searchNotes(ctx, query, limit)
+			if err != nil {
+				// 实例搜索后端（Meilisearch）常不可用：先尝试代码级兜底——
+				// 若查询形如 @用户，则解析该用户并直接拉取其最近帖子（users/notes 不依赖 Meilisearch），
+				// 让「看某人最近发了什么」这类意图仍可用，而非仅靠 LLM 临场自救。
+				if fb, fbCount, ferr := c.searchNotesByUserFallback(ctx, query, limit); ferr == nil && fbCount > 0 {
+					return map[string]any{
+						"notes":   fb,
+						"count":   fbCount,
+						"query":   query,
+						"fallback": "user_notes", // 提示模型这是用户帖子兜底，非关键词搜索
+					}, nil
 				}
+				// 兜底也拿不到，返回干净文案，不把裸 HTTP 错误抛给 LLM，
+				// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
+				return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
+			}
 				return map[string]any{
 					"notes": formatNotes(notes, c.cfg.Host),
 					"count": len(notes),
