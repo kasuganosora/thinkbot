@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +62,14 @@ type SnapshotConfig struct {
 	// Window.MemoryBudget()*3 派生，取代硬编码的 MaxMemoryChars/MaxUserChars，
 	// 使记忆预算随模型上下文窗口自适应（与其他使用 window 模块的地方一致）。
 	Window *Window
+	// MaxEntries 注入上下文的记忆条目数硬上限（默认 20）。
+	// 人的注意力约 10 条上下文，给 20 条是富裕上限；无论候选池多大，
+	// 实际注入的记忆条目数不超过此值，超出部分按重要性降序截断。
+	MaxEntries int
+	// CompressTriggerRatio 记忆块字符数达到窗口 memory 预算的该比例时启动压缩（默认 0.2）。
+	// 即记忆上下文最多占用 20% 的窗口 memory 预算，超出即截断长条目压缩腾位。
+	// 与 MaxEntries 构成「双条件」：条数封顶 + 体积封顶，任一触顶即压缩。
+	CompressTriggerRatio float64
 	// Header 记忆块的头部模板。
 	// 占位符：{usage} → "45% — 990/2200 chars"。
 	Header string
@@ -78,6 +87,8 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		Mode:            ModeLive,
 		MaxMemoryChars:  2200,
 		MaxUserChars:    1375,
+		MaxEntries:      20,
+		CompressTriggerRatio: 0.2,
 		Separator:       "\n§\n",
 		RefreshInterval: 5 * time.Minute,
 		RefreshTurns:    10,
@@ -133,6 +144,12 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		}
 		if config[0].Window != nil {
 			cfg.Window = config[0].Window
+		}
+		if config[0].MaxEntries > 0 {
+			cfg.MaxEntries = config[0].MaxEntries
+		}
+		if config[0].CompressTriggerRatio > 0 {
+			cfg.CompressTriggerRatio = config[0].CompressTriggerRatio
 		}
 	}
 	return &Snapshot{config: cfg}
@@ -232,18 +249,30 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	var memoryEntries, userEntries []Entry
 
 	var lastErr error
+	var allEntries []Entry
 	for _, scope := range scopes {
 		entries, err := retriever.Recent(ctx, scope, 50)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		for _, e := range entries {
-			if e.Scope.Kind == ScopeUser {
-				userEntries = append(userEntries, e)
-			} else {
-				memoryEntries = append(memoryEntries, e)
-			}
+		allEntries = append(allEntries, entries...)
+	}
+
+	// 双条件之一：条数硬上限——合并 memory + user 后按重要性降序取前 MaxEntries 条，
+	// 作为整个注入上下文的总条数上限（人的注意力约 10 条，给 20 条是富裕上限）。
+	// 合并后再切分，保证最宝贵的 20 条（含用户画像）优先进入上下文。
+	if s.config.MaxEntries > 0 && len(allEntries) > s.config.MaxEntries {
+		sort.SliceStable(allEntries, func(i, j int) bool {
+			return allEntries[i].Importance > allEntries[j].Importance
+		})
+		allEntries = allEntries[:s.config.MaxEntries]
+	}
+	for _, e := range allEntries {
+		if e.Scope.Kind == ScopeUser {
+			userEntries = append(userEntries, e)
+		} else {
+			memoryEntries = append(memoryEntries, e)
 		}
 	}
 
@@ -310,6 +339,18 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 		return ""
 	}
 
+	// 按重要性降序稳定排序：固定的字符预算优先留给高价值记忆，而非最近的 N 条。
+	// 同等重要性保持原有顺序（约=时间倒序），不破坏召回的时效性直觉。
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Importance > entries[j].Importance
+	})
+
+	// 条数硬上限（双条件之一）：无论如何最多注入 MaxEntries 条。
+	// 人的注意力约 10 条上下文，给 20 条是富裕上限；超出部分按重要性降序截断。
+	if s.config.MaxEntries > 0 && len(entries) > s.config.MaxEntries {
+		entries = entries[:s.config.MaxEntries]
+	}
+
 	limit := s.config.MaxMemoryChars
 	if target == "user" {
 		limit = s.config.MaxUserChars
@@ -319,9 +360,13 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	// MemoryBudget() 返回 token 预算，×3 估算字符（与 context.go 的
 	// maxChars := maxTokens*3 口径一致），从而避免硬编码魔法数、随模型
 	// 上下文窗口自适应。未注入 Window 时回退到上面的硬编码默认值。
+	//
+	// 双条件之二（压缩触发）：记忆块预算取窗口 memory 预算的 CompressTriggerRatio
+	// 比例（默认 0.2），即记忆上下文最多占用 20% 的窗口 memory 预算；
+	// 超出即由下方逐条截断逻辑压缩长条目腾位。条数封顶 + 体积封顶共同约束注入体积。
 	if s.config.Window != nil {
 		if budget := s.config.Window.MemoryBudget(); budget > 0 {
-			budgetChars := budget * 3
+			budgetChars := int(float64(budget*3) * s.config.CompressTriggerRatio)
 			if target == "user" {
 				// 保持原 2200/1375 的比例（≈0.625），让 user 块占 memory 块的一部分
 				limit = budgetChars * 1375 / 2200
