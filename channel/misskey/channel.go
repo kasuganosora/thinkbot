@@ -960,7 +960,14 @@ func (c *MisskeyChannel) React(ctx context.Context, noteID, emoji string) error 
 	if !strings.HasPrefix(emoji, ":") && !isUnicodeEmoji(emoji) {
 		emoji = ":" + emoji + ":"
 	}
-	return c.api.createReaction(ctx, noteID, emoji)
+	if err := c.api.createReaction(ctx, noteID, emoji); err != nil {
+		// 幂等语义：已反应过视为成功，不向上层报错。
+		if errors.Is(err, ErrAlreadyReacted) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // Unreact 移除对帖子的反应。
