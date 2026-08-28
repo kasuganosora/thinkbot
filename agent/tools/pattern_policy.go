@@ -3,6 +3,7 @@ package tools
 import (
 	"strings"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
@@ -120,7 +121,9 @@ func (r *PatternRule) matchesContext(channel, chatType string) bool {
 	if r.Channel != "" && r.Channel != channel {
 		return false
 	}
-	if r.ChatType != "" && r.ChatType != chatType {
+	// 两侧都归一化：Telegram 超级群的 ChatType 是 "supergroup"，
+	// 精确比较会让配 "group" 的规则对超级群失效（反之亦然）。
+	if r.ChatType != "" && core.NormalizeChatType(r.ChatType) != core.NormalizeChatType(chatType) {
 		return false
 	}
 	return true

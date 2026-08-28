@@ -16,6 +16,7 @@ package tools
 import (
 	"context"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
@@ -237,6 +238,9 @@ func (d *ToolDef) appliesTo(sctx *ToolSessionContext) bool {
 	if len(d.Scopes) == 0 {
 		return true // 无限制
 	}
+	// 会话类型两侧都归一化：Telegram 超级群的 ChatType 是 "supergroup"，
+	// 若按字面量匹配 "group" 会把 Scopes 含 group 的工具（含 memory）整体剔除。
+	chatType := core.NormalizeChatType(sctx.ChatType)
 	for _, scope := range d.Scopes {
 		switch scope {
 		case "subagent":
@@ -244,11 +248,11 @@ func (d *ToolDef) appliesTo(sctx *ToolSessionContext) bool {
 				return true
 			}
 		case "private":
-			if sctx.ChatType == "private" && !sctx.IsSubagent {
+			if chatType == core.ChatPrivate && !sctx.IsSubagent {
 				return true
 			}
 		case "group":
-			if sctx.ChatType == "group" && !sctx.IsSubagent {
+			if chatType == core.ChatGroup && !sctx.IsSubagent {
 				return true
 			}
 		}

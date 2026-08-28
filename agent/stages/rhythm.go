@@ -90,12 +90,14 @@ func platformForMessage(msg core.Message) string {
 	return msg.Source
 }
 
-// normalizeChatType 归一化会话类型：supergroup 归入 group。
+// normalizeChatType 归一化会话类型：supergroup 归入 group，未识别的类型归为空串。
+// 会话类型归一化的公共部分（supergroup→group）复用 core.NormalizeChatType，
+// 此处只保留节奏模块特有的「未识别则归空」语义。
 func normalizeChatType(ct string) string {
-	switch ct {
+	switch core.NormalizeChatType(ct) {
 	case core.ChatPrivate:
 		return core.ChatPrivate
-	case core.ChatGroup, core.ChatSupergroup:
+	case core.ChatGroup:
 		return core.ChatGroup
 	case core.ChatChannel:
 		return core.ChatChannel
