@@ -174,6 +174,28 @@ func TestExtractPublicReply(t *testing.T) {
 			input: "<public>正文</public></public>",
 			want:  "正文",
 		},
+		{
+			// 2026-08-28 真实故障：模型偶发把 <public> 写成 /public>（丢了开头的 <）。
+			// 旧正则 </?public> 只认带 < 的形态，导致 "/public>" 既无法被提取为 public 内文、
+			// 也无法被当残留剥离，直接裸发到帖子。修复后应在路径 3 兜底剥离。
+			name: "malformed public tag /public> -> stripped, text posted",
+			input: "/public> 内存这东西基本就是周期性商品，现在这轮涨势大概率还是AI。",
+			want:  "内存这东西基本就是周期性商品，现在这轮涨势大概率还是AI。",
+		},
+		{
+			// 2026-08-28 真实故障：模型自创 <long> 标签包裹 HTML 内容，
+			// <long>/<p>/<ul>/<li>/<b> 均不在已知标签内，旧实现走路径 3 原样裸发。
+			// 修复后所有残留标签（含 HTML）应在出站前统一剥离。
+			name: "unknown long tag with HTML -> all tags stripped",
+			input: "<long><p>量产了。</p><ul><li><b>产能不够</b>：份额低。</li></ul></long>",
+			want:  "量产了。产能不够：份额低。",
+		},
+		{
+			// 正文里的普通英文不应被误伤（要求标签有明显起始符号 < 或 /）。
+			name: "plain english with > not stripped",
+			input: "the dog ran faster> 但 human 没追。",
+			want:  "the dog ran faster> 但 human 没追。",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
