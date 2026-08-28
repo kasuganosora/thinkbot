@@ -447,6 +447,18 @@ func (m *Manager) ListAllTools(ctx context.Context) (map[string][]mcpTool, error
 	for name, c := range clients {
 		tools, err := c.ListTools(ctx)
 		if err != nil {
+			// 连接已失效（如子进程被 SIGTERM 关闭、stdio 管道 file already closed）：
+			// 主动重连一次再试，让工具在缓存刷新 tick 即恢复，而非等到用户真正调用工具
+			// 才走 GetOrConnect 重连，同时消除重启窗口反复 WARN 刷屏。重连仍失败则保留
+			// 原 WARN 与「部分失败」语义，交由上层保留旧缓存，避免其余服务器工具消失。
+			if !c.IsHealthy() {
+				if rc, rerr := m.reconnect(ctx, name); rerr == nil {
+					if rtools, lerr := rc.ListTools(ctx); lerr == nil {
+						result[name] = rtools
+						continue
+					}
+				}
+			}
 			m.logger.Warnw("failed to list tools",
 				"server", name,
 				"err", err)
