@@ -258,13 +258,19 @@ var publicTagRe = regexp.MustCompile(`(?is)<public>\s*(.*?)\s*</public>`)
 // 避免把 internal 之外的文本也带出去（取巧逻辑：<internal> 是强私密信号，无 <public> 则整段沉）。
 var internalOnlyRe = regexp.MustCompile(`(?is)<internal>.*?</internal>|<internal>`)
 
-// strayPublicTagRe 匹配残留的 <public> / </public> 字面标签。
+// strayTagRe 兜底剥离所有残留的结构化 / HTML 标签（含模型偶发的畸形形态）。
 //
-// 模型偶发输出重复或嵌套的开标签，例如 `<public>\n<public>正文</public>`。此时
-// publicTagRe 的非贪婪匹配从第一个开标签起算，会把内层那个**字面** <public> 当作正文
-// 一起捕获 —— 不剥离就会把标签文本直接发到帖子里。这属于结构化标签层面的格式容错，
-// 与「不做自然语言兜底」原则不冲突。
-var strayPublicTagRe = regexp.MustCompile(`(?is)</?public>`)
+// 覆盖三类：
+//  1. 正常标签：<public> </public> <internal> <long> <p> <ul> <li> <b> ...
+//  2. 畸形开标签（缺 <）：模型偶发把 <public> 写成 /public>，首条内存回复就裸发了 "/public>"。
+//  3. 嵌套/重复开标签：<public>\n<public>正文</public> 内层字面 <public> 被 publicTagRe 当正文捕获。
+//
+// 必须兜底剥离的原因：Misskey / Telegram 不渲染裸 HTML，<p>/<ul>/<li> 会原样显示成奇怪标签；
+// 畸形 public 标签（/public>）同样会原样发出的帖子。与「不做自然语言兜底」原则不冲突——
+// 这里清洗的是结构化标签文本，不是做语义解析。
+//
+// 注意：起始符限定为 `<` 或 `/`，避免误伤正文里 "dog>" 这类正常英文（要求标签有明显起始符号）。
+var strayTagRe = regexp.MustCompile(`(?is)(?:</?|/)[a-zA-Z][a-zA-Z0-9_-]*[^>]*>`)
 
 // extractPublicReply 从清洗后的干净正文里提取「应公开发送」的内容（取巧三态）：
 //
@@ -285,15 +291,17 @@ func extractPublicReply(clean string) string {
 		}
 		// 公开区内也可能夹带 <internal>，再剥一次确保心里话不外发。
 		out := memory.StripInternalTags(strings.TrimSpace(b.String()))
-		// 再清掉重复/嵌套开标签留下的字面 <public>，避免标签文本外发。
-		return strings.TrimSpace(strayPublicTagRe.ReplaceAllString(out, ""))
+		// 再兜底剥离任何残留标签（含畸形 public / 嵌套字面标签 / HTML 标签），
+		// 避免标签文本外发到帖子或消息。
+		return strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
 	}
 	// 路径 2：含 <internal> 私密标签却没给 <public> 公开出口 → 整段不发。
 	if internalOnlyRe.MatchString(clean) {
 		return ""
 	}
-	// 路径 3：纯文本（无标签）→ 原样返回，由上层 control 块决定。
-	return strings.TrimSpace(clean)
+	// 路径 3：纯文本（无标签）→ 仍有概率含模型偶发的畸形标签（如 /public>）或 HTML，
+	// 出站前统一兜底剥离，避免任何标签文本裸发到帖子/消息。
+	return strings.TrimSpace(strayTagRe.ReplaceAllString(clean, ""))
 }
 
 // explicitPublicReply 仅当正文含**显式且成对**的 <public>...</public> 区块时，返回其公开
