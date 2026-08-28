@@ -24,15 +24,29 @@ thinkbot 推荐以 **DooD（Docker-out-of-Docker）** 方式部署：主容器�
 git clone https://github.com/kasuganosora/thinkbot.git
 cd thinkbot
 
-# 准备配置
+# 准备配置（必做）
 cp .env.example .env
 # 编辑 .env：填入 LLM 供应商 API Key，确认 sandbox.backend=docker（已默认）
 
-# 启动（后台运行，含健康检查）
-docker compose up -d
+# 启动（后台运行，含健康检查；镜像内自动完成 Go 与前端构建）
+docker compose up -d --build
 ```
 
+> ⚠️ `cp .env.example .env` 不可跳过。bind mount 不会自动创建缺失的文件——宿主没有 `.env` 时 Docker 会挂进来一个空目录，容器会在启动时直接报错退出（`entrypoint.sh` 已内置该检查）。
+
+数据落在 `./data/container`（SQLite 库与 bot 工作空间）、日志落在 `./logs/container`，均持久化到宿主目录。刻意使用 `container/` 子目录，避免容器启动时的 `chown -R` 影响宿主上裸机运行实例的数据属主。
+
 访问 `http://localhost:8080` 打开 Web 管理界面。`.env` 中的 `sandbox.backend` 已默认 `docker`、`sandbox.image` 默认 `builtin`，与 `docker-compose.yml` 的 DooD 挂载联动；如需改用已存在的预构建镜像，改 `sandbox.image` 即可。
+
+若需在镜像里带上精确版本号（供单实例协商与 `/health` 展示），构建时显式传入：
+
+```bash
+docker compose build \
+  --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --build-arg GIT_REVISION=$(git rev-parse HEAD) \
+  --build-arg VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+docker compose up -d
+```
 
 ### 不使用 Docker（裸机运行）
 
@@ -42,6 +56,8 @@ go build -ldflags="-s -w" -o thinkbot ./cmd && ./thinkbot
 ```
 
 > 提示：默认 `go build` 产物约 50MB；加上 `-ldflags="-s -w"` 可剥离调试符号与 DWARF 信息，体积显著减小（与 Docker 构建路径一致）。二进制需能访问宿主 `docker` 才能使用 `sandbox.backend=docker`，否则请将 `sandbox.backend` 改为 `local`。
+
+> ⚠️ **不要设置 `CGO_ENABLED=0`**。数据库驱动 `gorm.io/driver/sqlite` 底层为 `mattn/go-sqlite3`（C 实现），`CGO_ENABLED=0` 下仍能编译通过，但驱动会被替换成 stub，运行期打开数据库时报 `go-sqlite3 requires cgo to work. This is a stub` 而无法启动。交叉编译时需配置对应平台的 C 工具链。
 
 ## 项目结构
 
