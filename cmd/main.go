@@ -19,6 +19,7 @@ import (
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/db"
 	"github.com/kasuganosora/thinkbot/identity"
+	"github.com/kasuganosora/thinkbot/internal/singleinst"
 	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"go.uber.org/fx"
@@ -87,6 +88,7 @@ func main() {
 
 		// 模块
 		config.Module,
+		singleinst.Module, // 单实例版本协商，必须在 bot.Module 之前，避免双实例并发消费
 		auth.Module,
 		bot.Module,
 		identity.Module,
