@@ -118,3 +118,13 @@ func Get() Info {
 		GoVersion:     runtime.Version(),
 	}
 }
+
+// init 在进程加载阶段即固定构建信息。
+//
+// 关键：版本号（buildTimeUnix）用作单实例协商的「谁更新」判据。若等到首次
+// /health 调用时才 lazy 解析二进制 mtime，而部署恰好用「原地覆盖」方式替换二进制，
+// 旧进程读到的就会是新二进制的 mtime，导致版本号失真、协商误判。进程启动即固定
+// 可彻底规避该窗口——即便走 binary-mtime 兜底路径也准确。
+func init() {
+	resolve()
+}

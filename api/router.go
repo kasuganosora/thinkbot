@@ -30,6 +30,7 @@ func (s *Server) registerRoutes() {
 		bi := buildinfo.Get()
 		OK(c, gin.H{
 			"status":        "ok",
+			"pid":           os.Getpid(),
 			"version":       bi.Version,
 			"gitRevision":   bi.GitRevision,
 			"gitShort":      bi.GitShort,
