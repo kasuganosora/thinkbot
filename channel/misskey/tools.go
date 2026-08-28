@@ -2,6 +2,7 @@ package misskey
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -546,6 +547,17 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 					}, nil
 				}
 				if err := c.api.createReaction(ctx, noteID, reaction); err != nil {
+					// 幂等语义：帖子已被本 bot 反应过（Misskey 400 ALREADY_REACTED）。
+					// 视为「目标已达成」，返回成功而非报错，避免编排层重复重试/误判失败。
+					if errors.Is(err, ErrAlreadyReacted) {
+						return map[string]any{
+							"success":         true,
+							"already_reacted": true,
+							"noteId":          noteID,
+							"reaction":        reaction,
+							"message":         "已经对该帖子反应过了，跳过重复添加。",
+						}, nil
+					}
 					return nil, fmt.Errorf("react failed: %w", err)
 				}
 				return map[string]any{
