@@ -44,6 +44,16 @@ type Config struct {
 // telegramMaxMessageLength Telegram 单条消息最大长度。
 const telegramMaxMessageLength = 4096
 
+const (
+	// mediaGroupWindow 相册聚合窗口。Telegram 投递同一相册的多条消息间隔极短，
+	// 2s 足够覆盖；窗口采用滑动语义（每条命中都续期），
+	// 因此张数再多、只要连续到达就仍被视为同一组。
+	mediaGroupWindow = 2 * time.Second
+	// mediaGroupMaxEntries mediaGroupSeen 的容量上限，超出后清理过期项、
+	// 仍超限则整体重置（聚合是尽力而为，不影响正确性）。
+	mediaGroupMaxEntries = 500
+)
+
 // TelegramChannel 是 Telegram 平台的输入端实现。
 //
 // 它通过 Bot API 的 long polling 持续获取用户消息，
@@ -89,6 +99,15 @@ type TelegramChannel struct {
 	// 仅在「文本与上次相同」时跳过；用户真正再次编辑（文本变化）仍会正常处理。
 	editSeen map[string]string
 	editMu   sync.Mutex
+
+	// mediaGroupSeen 记录相册（media_group）首条入站消息的时间，
+	// 用于把一次发图聚合为一次消息：Telegram 把 N 图相册拆成 N 条独立 update，
+	// 每条 message_id 各不相同，ingress 按 msg.ID 的去重拦不住，
+	// 会导致同一次发图触发 N 次完整 LLM 编排并大概率回复 N 条
+	// （与 8/24 misskey「同一条消息重复回复 N+1」同形态，只是触发源不同）。
+	// 同组仅首条入站，窗口内的后续条直接跳过；说明文字（caption）由 Telegram 附在首条上。
+	mediaGroupSeen map[string]time.Time
+	mediaGroupMu   sync.Mutex
 }
 
 // NewChannel 创建一个 TelegramChannel。
@@ -211,14 +230,12 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		return // 忽略非消息更新
 	}
 
-	// 提取文本：优先 Text，其次 Caption（图片/文件附带的文字）
-	text := msg.Text
-	if text == "" {
-		text = msg.Caption
-	}
+	// 提取文本：优先 Text，其次 Caption（图片/文件附带的文字），实体与文本按来源配对。
+	text, entities := c.mentionTextAndEntities(msg)
 
-	// 如果没有文本但有附件，构造描述性文本
+	// 如果没有文本但有附件，构造描述性文本（占位文本不带实体，无法被提及）
 	if text == "" {
+		entities = nil
 		if msg.Photo != nil {
 			text = "[图片]"
 		} else if msg.Document != nil {
@@ -230,6 +247,15 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 
 	// 仍然无内容则跳过
 	if text == "" {
+		return
+	}
+
+	// 相册聚合：同一次发图的后续条直接跳过，避免 N 图触发 N 次编排与重复回复。
+	// 放在发 typing 与入站之前，后续条连「正在输入」都不该触发。
+	//
+	// 仅对新消息聚合：编辑相册说明文字时 edited_message 同样携带 media_group_id，
+	// 若一并参与聚合，窗口内的正常编辑会被误吞（编辑走下方 editSeen 独立去重）。
+	if upd.EditedMessage == nil && c.mediaGroupAlreadySeen(msg.MediaGroupID) {
 		return
 	}
 
@@ -277,9 +303,9 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.ID == c.botUserID {
 			mentioned = true
 		}
-		// 方式 2-4: 解析 entities
+		// 方式 2-4: 解析 entities（文本与实体按来源配对）
 		if !mentioned {
-			mentioned = c.detectMention(msg)
+			mentioned = c.detectMention(text, entities)
 		}
 	}
 
@@ -352,21 +378,40 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 	}
 }
 
+// mentionTextAndEntities 返回用于提及检测的「文本 + 实体」配对。
+//
+// Telegram 把正文的实体放在 Entities（对应 Text），把图片/文件等附件说明的实体放在
+// CaptionEntities（对应 Caption）。二者必须与对应文本配对取用：若固定取 Text+Entities，
+// 则带 "@bot 看看这个" 说明的图片消息实体为空，群里的图片互动会完全漏判提及。
+//
+// 无正文时降级取 Caption；两者都为空返回空串与 nil（此时由调用方构造附件占位文本）。
+func (c *TelegramChannel) mentionTextAndEntities(msg *Message) (string, []MessageEntity) {
+	if msg.Text != "" {
+		return msg.Text, msg.Entities
+	}
+	return msg.Caption, msg.CaptionEntities
+}
+
 // detectMention 通过解析消息 entities 判断是否 @提及了 Bot 或使用了 Bot 命令。
 // 检测规则：
 //   - mention: 文本含 @botUsername（如 "@mybot hello"）
 //   - text_mention: entity 中 User.ID == botUserID（无 username 的用户提及）
 //   - bot_command: offset=0 的 /command（群聊中命令视为直接对话 Bot）
 //
+// text 与 entities 必须是**配对**传入的：Telegram 把正文实体放在 entities（对应 text），
+// 而图片/文件等附件的说明文字实体放在 caption_entities（对应 caption）。
+// 若固定取 msg.Text + msg.Entities，则带 "@bot 看看" 说明的图片消息实体为空，
+// 会漏判提及导致 bot 在群里对图片互动毫无反应（详见 handleUpdate 中的配对逻辑）。
+//
 // 注意：Telegram API 中 entity 的 Offset/Length 使用 UTF-16 code unit 计量，
 // 而非 Go 字符串的字节偏移，因此需要通过 utf16Extract 转换。
-func (c *TelegramChannel) detectMention(msg *Message) bool {
-	for _, ent := range msg.Entities {
+func (c *TelegramChannel) detectMention(text string, entities []MessageEntity) bool {
+	for _, ent := range entities {
 		switch ent.Type {
 		case "mention":
 			// 提取实体文本，判断是否 @botUsername
 			if c.botUsername != "" {
-				mentionText := utf16Extract(msg.Text, ent.Offset, ent.Length)
+				mentionText := utf16Extract(text, ent.Offset, ent.Length)
 				if mentionText == "@"+c.botUsername {
 					return true
 				}
@@ -381,7 +426,7 @@ func (c *TelegramChannel) detectMention(msg *Message) bool {
 			// 但命令可能指向其他 bot：/cmd@otherbot —— 仅当不含 @ 或 @ 后用户名等于自身才触发，
 			// 避免被 /start@otherbot 这类指向他人 bot 的命令误触发（历史 misskey 同类 5007）。
 			if ent.Offset == 0 {
-				cmd := utf16Extract(msg.Text, ent.Offset, ent.Length)
+				cmd := utf16Extract(text, ent.Offset, ent.Length)
 				if at := strings.Index(cmd, "@"); at >= 0 {
 					target := strings.ToLower(strings.TrimPrefix(cmd[at:], "@"))
 					if c.botUsername != "" && target != strings.ToLower(c.botUsername) {
@@ -565,6 +610,44 @@ func (c *TelegramChannel) editSeenAlready(chatID, messageID int64, text string) 
 		c.editSeen = make(map[string]string)
 	}
 	c.editSeen[key] = text
+	return false
+}
+
+// mediaGroupAlreadySeen 判断该相册是否已有消息入站，用于把一次发图聚合成一条消息。
+// 返回 true 表示本条属于「同组后续条」，调用方应跳过（首条已入站并携带 caption 与附件信息）。
+// groupID 为空（非相册消息）直接返回 false，不参与聚合。
+//
+// 已知局限：只保留首条。updates 按 update_id 递增处理，而官方客户端把 caption 附在
+// 相册首条上，故绝大多数情况下说明文字不会丢；若某客户端把 caption 附在后续条，
+// 那条文字会被跳过（仅剩「[图片]」占位）。真要修得引入延迟缓冲窗口攒齐全组再入站，
+// 代价是所有相册消息都被推迟，权衡后选择保留现方案。
+func (c *TelegramChannel) mediaGroupAlreadySeen(groupID string) bool {
+	if groupID == "" {
+		return false
+	}
+	now := time.Now()
+	c.mediaGroupMu.Lock()
+	defer c.mediaGroupMu.Unlock()
+	if c.mediaGroupSeen == nil {
+		c.mediaGroupSeen = make(map[string]time.Time)
+	}
+
+	// 顺带清理过期项，防止 map 无限增长
+	for k, t := range c.mediaGroupSeen {
+		if now.Sub(t) > mediaGroupWindow {
+			delete(c.mediaGroupSeen, k)
+		}
+	}
+	if len(c.mediaGroupSeen) > mediaGroupMaxEntries {
+		c.mediaGroupSeen = make(map[string]time.Time)
+	}
+
+	if t, ok := c.mediaGroupSeen[groupID]; ok && now.Sub(t) <= mediaGroupWindow {
+		// 滑动续期：相册张数多时仍视为同一组
+		c.mediaGroupSeen[groupID] = now
+		return true
+	}
+	c.mediaGroupSeen[groupID] = now
 	return false
 }
 

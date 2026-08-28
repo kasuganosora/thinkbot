@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"testing"
+	"time"
 )
 
 func TestUtf16Extract(t *testing.T) {
@@ -172,11 +173,48 @@ func TestDetectMention(t *testing.T) {
 			},
 			expected: true,
 		},
+		// 附件说明（caption）场景：实体在 CaptionEntities，必须与 Caption 配对取用。
+		// 修复前 detectMention 固定读 msg.Text，这两类消息在群里会被完全漏判。
+		{
+			name: "caption mention matches bot username",
+			msg: &Message{
+				Caption: "@mybot 看看这个",
+				CaptionEntities: []MessageEntity{
+					{Type: "mention", Offset: 0, Length: 6},
+				},
+				Photo: []PhotoSize{{FileID: "p1"}},
+			},
+			expected: true,
+		},
+		{
+			name: "caption bot_command for another bot is ignored",
+			msg: &Message{
+				Caption: "/start@otherbot",
+				CaptionEntities: []MessageEntity{
+					{Type: "bot_command", Offset: 0, Length: 15},
+				},
+				Document: &Document{FileName: "a.pdf"},
+			},
+			expected: false,
+		},
+		{
+			name: "caption bot_command for this bot",
+			msg: &Message{
+				Caption: "/start@mybot",
+				CaptionEntities: []MessageEntity{
+					{Type: "bot_command", Offset: 0, Length: 12},
+				},
+				Photo: []PhotoSize{{FileID: "p2"}},
+			},
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ch.detectMention(tt.msg)
+			// 与 handleUpdate 一致：文本与实体按来源配对
+			text, entities := ch.mentionTextAndEntities(tt.msg)
+			result := ch.detectMention(text, entities)
 			if result != tt.expected {
 				t.Errorf("detectMention() = %v, want %v", result, tt.expected)
 			}
@@ -233,5 +271,66 @@ func TestSplitMessage(t *testing.T) {
 				t.Errorf("splitMessage lost text: got %q, want %q", joined, tt.text)
 			}
 		})
+	}
+}
+
+func TestMediaGroupAggregation(t *testing.T) {
+	ch := &TelegramChannel{}
+
+	// 非相册消息（groupID 为空）永不跳过
+	if ch.mediaGroupAlreadySeen("") {
+		t.Error("empty media group id must never be skipped")
+	}
+
+	// 相册首条必须放行，后续条全部跳过
+	if ch.mediaGroupAlreadySeen("album-1") {
+		t.Error("first message of an album must not be skipped")
+	}
+	for i := 0; i < 4; i++ {
+		if !ch.mediaGroupAlreadySeen("album-1") {
+			t.Fatalf("subsequent album message #%d must be skipped", i+2)
+		}
+	}
+
+	// 不同相册互不干扰
+	if ch.mediaGroupAlreadySeen("album-2") {
+		t.Error("a different album must not be skipped")
+	}
+
+	// 窗口过期后，同 ID 按新组处理（滑动窗口不应永久吞掉该 ID）
+	ch.mediaGroupMu.Lock()
+	ch.mediaGroupSeen["album-3"] = time.Now().Add(-mediaGroupWindow - time.Second)
+	ch.mediaGroupMu.Unlock()
+	if ch.mediaGroupAlreadySeen("album-3") {
+		t.Error("expired album entry must not skip the message")
+	}
+}
+
+// TestPollTimeouts 固化 long polling 的超时关系与单位正确性。
+//
+// 背景：httpTimeout 曾是 int 秒数，改为 time.Duration 后 WithTimeout 处仍
+// 多乘了一次 time.Second，使 45s 变成约 1425 年——编译通过但超时静默失效。
+// 本测试同时钉住「context 必须晚于客户端超时到期」这一不变量。
+func TestPollTimeouts(t *testing.T) {
+	const pollTimeout = 30
+
+	clientTimeout := time.Duration(pollTimeout)*time.Second + pollTimeoutBuffer
+	if clientTimeout != 45*time.Second {
+		t.Errorf("client timeout = %v, want 45s (unit bug?)", clientTimeout)
+	}
+
+	ctxTimeout := apiTimeoutMultiplier(pollTimeout)
+	if ctxTimeout != 50*time.Second {
+		t.Errorf("context timeout = %v, want 50s", ctxTimeout)
+	}
+
+	// 核心不变量：context 必须比客户端超时更晚到期，否则客户端超时形同虚设
+	if ctxTimeout <= clientTimeout {
+		t.Errorf("context timeout (%v) must outlive client timeout (%v)", ctxTimeout, clientTimeout)
+	}
+
+	// 合理量级保护：任何超过 1 小时的轮询超时都说明单位算错了
+	if ctxTimeout > time.Hour {
+		t.Errorf("context timeout %v is implausibly large — unit error", ctxTimeout)
 	}
 }
