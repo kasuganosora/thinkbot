@@ -768,16 +768,20 @@ func (c *botContainer) snapshot(ctx context.Context, tag string) (string, error)
 		return "", errs.Newf("bot_container: container %q does not exist", c.container)
 	}
 	ref := c.snapshotRepo() + ":" + tag
-	var out bytes.Buffer
+	// stdout 与 stderr 必须分开：commit 的镜像 ID 从 stdout 解析，而 docker CLI
+	// 可能往 stderr 打无关警告（如容器内 HOME 不可写时的 "Error loading config
+	// file"），合并后会被当成 ID 前缀解析出垃圾值。
+	var out, errb bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", "commit",
 		"--message", "thinkbot snapshot "+tag,
 		c.container, ref)
 	cmd.Stdout = &out
-	cmd.Stderr = &out
+	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
-		return "", errs.Wrapf(err, "bot_container: commit snapshot %q: %s", ref, strings.TrimSpace(out.String()))
+		return "", errs.Wrapf(err, "bot_container: commit snapshot %q: %s", ref, strings.TrimSpace(errb.String()))
 	}
-	id := strings.TrimSpace(out.String())
+	// 取最后一行非空输出：docker commit 正常只输出一行 sha256:<64hex>。
+	id := lastNonEmptyLine(out.String())
 	if i := strings.Index(id, ":"); i >= 0 {
 		id = id[i+1:]
 	}
@@ -785,6 +789,18 @@ func (c *botContainer) snapshot(ctx context.Context, tag string) (string, error)
 		id = id[:12]
 	}
 	return id, nil
+}
+
+// lastNonEmptyLine 返回文本中最后一行非空内容（已 TrimSpace）。
+// 用于从 docker CLI 输出里取「结果行」，避免前置的进度/警告行干扰解析。
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if v := strings.TrimSpace(lines[i]); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // listSnapshots 列出该 bot 的所有快照镜像。
