@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -477,7 +478,7 @@ func (r *Request) doWithRetry() (*Response, error) {
 		cfgPtr = r.client.retryCfg
 	}
 	cfg := *cfgPtr // copy
-	name := fmt.Sprintf("%s %s", r.method, r.url)
+	name := fmt.Sprintf("%s %s", r.method, redactTokenURL(r.url))
 
 	// 默认 ShouldRetry：仅对可重试 HTTP 状态码（5xx、429、网络错误）重试
 	if cfg.ShouldRetry == nil {
@@ -629,6 +630,15 @@ func isRetryableCode(code int) bool {
 	default:
 		return code >= 500
 	}
+}
+
+// botTokenRe 匹配 Bot API token（形如 bot123456:ABCdefGHI...），用于日志脱敏，
+// 避免带凭证的 URL 进入日志/错误输出（参考 channel 层 5035 token 外泄隐患）。
+var botTokenRe = regexp.MustCompile(`bot[0-9]+:[A-Za-z0-9_-]+`)
+
+// redactTokenURL 将 URL 中的 bot token 替换为脱敏占位符，防止凭证泄漏到日志。
+func redactTokenURL(u string) string {
+	return botTokenRe.ReplaceAllString(u, "bot***")
 }
 
 // parseRetryAfter 解析 HTTP Retry-After 响应头。
