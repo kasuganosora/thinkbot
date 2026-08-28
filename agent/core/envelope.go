@@ -77,6 +77,24 @@ const (
 	ChatChannel string = "channel"
 )
 
+// NormalizeChatType 归一化会话类型：把平台特有类型归入标准类型。
+//
+// 目前唯一需要归一是 Telegram 的 supergroup —— 普通群升级后即为 supergroup，
+// 绝大多数活跃群都是它。若下游按字面量 == ChatGroup 匹配，supergroup 会漏判，
+// 导致 Scopes 含 "group" 的工具（含 memory）在超级群里被整体剔除、bot 失忆。
+//
+// 凡是需要按会话类型做匹配的地方（工具 Scopes、权限策略规则等）都应调用本函数，
+// 且建议两侧（上下文值与规则配置值）都归一化，这样用户配 "group" 或 "supergroup" 都能命中。
+// 未识别的类型返回原值，不做假设。
+func NormalizeChatType(ct string) string {
+	switch ct {
+	case ChatSupergroup:
+		return ChatGroup
+	default:
+		return ct
+	}
+}
+
 // Source 常量：消息来源标识（Message.Source 的取值）。
 const (
 	// SourceHeartbeat 系统自主心跳唤醒。

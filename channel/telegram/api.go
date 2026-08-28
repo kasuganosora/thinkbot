@@ -18,6 +18,19 @@ import (
 // apiURL 是 Telegram Bot API 的基础地址。
 const apiURL = "https://api.telegram.org"
 
+const (
+	// pollTimeoutBuffer long polling 客户端超时在 pollTimeout 之上的固定余量。
+	// Telegram 服务端会挂起请求等待至 timeout 秒才返回，客户端必须给足余量，
+	// 否则正常的空轮询会被误判为超时。
+	pollTimeoutBuffer = 15 * time.Second
+	// pollCtxExtra context 超时在「客户端超时」之上再追加的余量。
+	//
+	// context 必须比客户端超时更晚到期：否则 context 会先取消请求，
+	// 客户端层面的超时形同虚设，重试也无从生效（此前 reqCtx 用 +10s、
+	// 客户端用 +15s，context 反而先到期，属于明确的不一致）。
+	pollCtxExtra = 5 * time.Second
+)
+
 // apiClient 封装了 Telegram Bot API 的 HTTP 调用。
 type apiClient struct {
 	client *http.Client
@@ -36,16 +49,16 @@ type apiClient struct {
 func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Option) *apiClient {
 	// HTTP 客户端超时需要覆盖 long polling 等待时间 + 网络余量。
 	// 设为 0（无超时）让 context 级别的超时来控制。
-	httpTimeout := 0
+	var httpTimeout time.Duration
 	if pollTimeout > 0 {
-		httpTimeout = pollTimeout + 15 // pollTimeout + 15s 余量
+		httpTimeout = time.Duration(pollTimeout)*time.Second + pollTimeoutBuffer
 	}
 	if baseURL == "" {
 		baseURL = apiURL
 	}
 	defaultOpts := []http.Option{
 		http.WithBaseURL(fmt.Sprintf("%s/bot%s", baseURL, token)),
-		http.WithTimeout(time.Duration(httpTimeout) * time.Second),
+		http.WithTimeout(httpTimeout),
 		// 429/5xx + 网络错误按 Retry-After 退避重试（无 Retry-After 时指数退避+抖动），
 		// 避免出站消息因限流而部分丢失。与 misskey searchClient 一致：util/http.WithRetry
 		// 会读取 429 的 Retry-After（见 client.go:489），不再用固定间隔无视限流。
@@ -216,10 +229,14 @@ func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64
 	return nil
 }
 
-// apiTimeoutMultiplier 将秒级 timeout 转为 context 超时时的缓冲余量。
-// Telegram long polling 会在服务端等待 timeout 秒，客户端需要额外等待。
+// apiTimeoutMultiplier 将秒级 timeout 转为 long polling 请求的 context 超时。
+// 取「客户端超时 + pollCtxExtra」，确保 context 不会先于客户端超时取消请求
+// （客户端超时见 newAPIClient，同样是 pollTimeout + pollTimeoutBuffer）。
+//
+// 注意：getUpdates 挂在带重试的 HTTP client 上，重试累计耗时可能超过本 context，
+// 故 long polling 的重试主要依赖 pollLoop 自身的 3s 退避，而非 HTTP 层的重试。
 func apiTimeoutMultiplier(timeoutSec int) time.Duration {
-	return time.Duration(timeoutSec+10) * time.Second
+	return time.Duration(timeoutSec)*time.Second + pollTimeoutBuffer + pollCtxExtra
 }
 
 // banChatMember 踢出群成员（封禁）。
