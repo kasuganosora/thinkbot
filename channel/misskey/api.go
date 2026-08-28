@@ -2,13 +2,19 @@ package misskey
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/retry"
 )
+
+// ErrAlreadyReacted 表示目标帖子已被 bot 反应过（Misskey 返回 400
+// ALREADY_REACTED）。属幂等成功语义，调用方据此视为「目标已达成」而非错误。
+var ErrAlreadyReacted = errors.New("misskey: already reacted to that note")
 
 // ============================================================================
 // API — Misskey HTTP API 客户端
@@ -136,7 +142,11 @@ func (a *apiClient) createReaction(ctx context.Context, noteID, reaction string)
 		return errs.Wrap(err, "misskey createReaction")
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("misskey createReaction: HTTP %d: %s", resp.StatusCode, resp.String())
+		body := resp.String()
+		if resp.StatusCode == 400 && strings.Contains(body, "ALREADY_REACTED") {
+			return fmt.Errorf("misskey createReaction: %w", ErrAlreadyReacted)
+		}
+		return fmt.Errorf("misskey createReaction: HTTP %d: %s", resp.StatusCode, body)
 	}
 	return nil
 }
