@@ -8,6 +8,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
 // ============================================================================
@@ -45,8 +46,19 @@ func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Op
 	defaultOpts := []http.Option{
 		http.WithBaseURL(fmt.Sprintf("%s/bot%s", baseURL, token)),
 		http.WithTimeout(time.Duration(httpTimeout) * time.Second),
-		// 429/5xx + 网络错误自动按 Retry-After 退避重试，避免出站消息因限流而部分丢失。
-		http.WithRetrySimple(5, 500*time.Millisecond),
+		// 429/5xx + 网络错误按 Retry-After 退避重试（无 Retry-After 时指数退避+抖动），
+		// 避免出站消息因限流而部分丢失。与 misskey searchClient 一致：util/http.WithRetry
+		// 会读取 429 的 Retry-After（见 client.go:489），不再用固定间隔无视限流。
+		http.WithRetry(retry.Config{
+			MaxRetries: 5,
+			Backoff: &retry.Backoff{
+				Strategy: retry.StrategyExponential,
+				Initial:  500 * time.Millisecond,
+				Max:      8 * time.Second,
+				Factor:   2.0,
+				Jitter:   true,
+			},
+		}),
 	}
 	opts = append(defaultOpts, opts...)
 	return &apiClient{

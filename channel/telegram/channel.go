@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf16"
@@ -376,8 +377,17 @@ func (c *TelegramChannel) detectMention(msg *Message) bool {
 				return true
 			}
 		case "bot_command":
-			// 群聊中，offset=0 的命令视为直接发往 Bot（如 "/help"）
+			// 群聊中，offset=0 的命令视为直接发往 Bot（如 "/help"）。
+			// 但命令可能指向其他 bot：/cmd@otherbot —— 仅当不含 @ 或 @ 后用户名等于自身才触发，
+			// 避免被 /start@otherbot 这类指向他人 bot 的命令误触发（历史 misskey 同类 5007）。
 			if ent.Offset == 0 {
+				cmd := utf16Extract(msg.Text, ent.Offset, ent.Length)
+				if at := strings.Index(cmd, "@"); at >= 0 {
+					target := strings.ToLower(strings.TrimPrefix(cmd[at:], "@"))
+					if c.botUsername != "" && target != strings.ToLower(c.botUsername) {
+						continue
+					}
+				}
 				return true
 			}
 		}

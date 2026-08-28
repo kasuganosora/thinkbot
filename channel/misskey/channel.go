@@ -1091,7 +1091,13 @@ func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 // isUnicodeEmoji 粗略判断字符串是否为 unicode emoji（非 ASCII 字符）。
 func isUnicodeEmoji(s string) bool {
 	for _, r := range s {
-		if r > 0x2B00 { // CJK 及 emoji 范围
+		// 排除 CJK 统一表意文字（0x4E00–0x9FFF）与日文假名（平假名 0x3040–0x309F、
+		// 片假名 0x30A0–0x30FF），否则中文/日文会被误判为 emoji，导致 React 给中文加
+		// 冒号变成 ":中文:" 而 400/无效反应（历史缺陷 5049）。
+		if (r >= 0x3040 && r <= 0x30FF) || (r >= 0x4E00 && r <= 0x9FFF) {
+			return false
+		}
+		if r > 0x2B00 { // emoji / 符号范围（➡️⭐✅ 等）
 			return true
 		}
 	}
