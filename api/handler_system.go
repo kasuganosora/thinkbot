@@ -45,6 +45,7 @@ func (s *Server) handleHealthDetailed(c *gin.Context) {
 
 	OK(c, gin.H{
 		"status":     "ok",
+		"pid":        os.Getpid(),
 		"host":       host,
 		"uptime":     time.Since(startTime).String(),
 		"uptimeSec":  int64(time.Since(startTime).Seconds()),
