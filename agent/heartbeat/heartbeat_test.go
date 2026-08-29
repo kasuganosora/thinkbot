@@ -561,3 +561,108 @@ func TestStore_LogRoundTripNewStatuses(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractJSON 覆盖 LLM 已知的畸形输出形态，确保心跳决策不被静默降级。
+func TestExtractJSON(t *testing.T) {
+	tests := []struct {
+		id string
+		in string
+		// want 为期望解析出的 decision 值；空串表示期望解析失败（原样返回）
+		want string
+	}{
+		{
+			id:   "规范对象",
+			in:   `{"decision": "silent", "reason": "无事可做"}`,
+			want: "silent",
+		},
+		{
+			id:   "尾随逗号",
+			in:   `{"decision": "silent",}`,
+			want: "silent",
+		},
+		{
+			id:   "markdown 围栏包裹",
+			in:   "```json\n" + `{"decision": "post", "content": "hi"}` + "\n```",
+			want: "post",
+		},
+		{
+			id:   "顶层数组：决策对象 + send 控制块",
+			in:   `[{"decision": "note", "content": "记忆缓冲超限"}, {"send": false}]`,
+			want: "note",
+		},
+		{
+			id:   "并列对象：决策对象 + send 控制块",
+			in:   `{"decision": "note", "content": "记忆缓冲超限"}, {"send": false}`,
+			want: "note",
+		},
+		{
+			id:   "数组内决策在后：仍应取到 decision",
+			in:   `[{"send": false}, {"decision": "post", "content": "hi"}]`,
+			want: "post",
+		},
+		{
+			id:   "数组元素带尾随逗号",
+			in:   `[{"decision": "note", "content": "x",}, {"send": false}]`,
+			want: "note",
+		},
+		{
+			id:   "带前导说明文字的数组",
+			in:   "我的决策如下：\n" + `[{"decision": "note", "content": "x"}, {"send": false}]`,
+			want: "note",
+		},
+		{
+			id:   "完全无 JSON",
+			in:   `我觉得现在没必要说话`,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		got := extractJSON(tt.in)
+		var d HeartbeatDecision
+		err := json.Unmarshal([]byte(got), &d)
+		if tt.want == "" {
+			if err == nil {
+				t.Errorf("id %q 期望解析失败，实际成功：%q", tt.id, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("id %q 解析失败：%v（提取结果 %q）", tt.id, err, got)
+			continue
+		}
+		if d.Decision != tt.want {
+			t.Errorf("id %q decision = %q, want %q（提取结果 %q）", tt.id, d.Decision, tt.want, got)
+		}
+	}
+}
+
+// TestExtractJSONMergesContent 数组/并列对象合并时必须保留前者的 content，
+// 后者（如 {"send":false} 控制块）只补齐缺失字段，不得覆盖决策内容。
+func TestExtractJSONMergesContent(t *testing.T) {
+	in := `[{"decision": "note", "content": "长期记忆缓冲已超限，需整理"}, {"send": false}]`
+
+	var d HeartbeatDecision
+	if err := json.Unmarshal([]byte(extractJSON(in)), &d); err != nil {
+		t.Fatalf("解析失败：%v", err)
+	}
+	if d.Decision != "note" {
+		t.Errorf("decision = %q, want %q", d.Decision, "note")
+	}
+	want := "长期记忆缓冲已超限，需整理"
+	if d.Content != want {
+		t.Errorf("content = %q, want %q", d.Content, want)
+	}
+}
+
+// TestTruncateForLog 截断不得越界，且短文本原样返回。
+func TestTruncateForLog(t *testing.T) {
+	if got := truncateForLog("abc", 10); got != "abc" {
+		t.Errorf("短文本被改写：%q", got)
+	}
+	const suffix = "…(truncated)"
+	got := truncateForLog("一二三四五六七八九十", 5)
+	if want := 5 + len([]rune(suffix)); len([]rune(got)) != want {
+		t.Errorf("截断长度 = %d, want %d（%q）", len([]rune(got)), want, got)
+	}
+}
