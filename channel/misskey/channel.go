@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -123,6 +124,10 @@ type MisskeyChannel struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	stopped bool
+
+	// streamConnects 累计成功建立的 streaming 连接次数。
+	// 用于区分首次连接与重连（>1 即为重连），并在日志中暴露重连是否真的成功。
+	streamConnects atomic.Int64
 }
 
 // NewChannel 创建一个 MisskeyChannel。
@@ -377,10 +382,15 @@ func (c *MisskeyChannel) backfillMentions(ctx context.Context) {
 		// 用本页最旧 note 作 until 上界，翻下一页更旧的提及。
 		until = notes[len(notes)-1].ID
 	}
+	// 无论补没补到都要留痕：只记「补发成功」会导致日志无法区分
+	// 「backfill 跑了但窗口内确实没丢」与「backfill 根本没跑」。
 	if total > 0 {
 		traceid.L(ctx).Infow("misskey backfill: recovered missed mentions after reconnect",
 			"channel", c.name, "count", total, "anchor", anchor)
+		return
 	}
+	traceid.L(ctx).Infow("misskey backfill: no missed mentions in disconnect window",
+		"channel", c.name, "anchor", anchor)
 }
 
 // connectAndServe 建立 WebSocket 连接并持续处理消息。
@@ -428,6 +438,14 @@ func (c *MisskeyChannel) connectAndServe(ctx context.Context) error {
 			}
 			traceid.L(ctx).Debugw("misskey stream: subscribed",
 				"channel", c.name, "channels", connectMsgs)
+
+			// 连接成功必须留痕：streamLoop 只在失败时打 WARN，
+			// 没有这条日志就无法从日志确认断连后是否真的重连成功。
+			n := c.streamConnects.Add(1)
+			traceid.L(ctx).Infow("misskey stream connected",
+				"channel", c.name, "connect_seq", n,
+				"reconnect", n > 1, "subscribed", len(connectMsgs))
+
 			// 重连成功：补发断连窗口内错过的 @提及/回复（streaming 不重放历史消息）。
 			// 首次连接时锚点已是启动时刻最新提及，backfill 自然无副作用。
 			c.backfillMentions(ctx)
