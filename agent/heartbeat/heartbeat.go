@@ -576,8 +576,11 @@ func (e *Executor) parseDecision(ctx context.Context, env *core.Envelope, target
 	jsonStr := extractJSON(raw)
 	var d HeartbeatDecision
 	if err := json.Unmarshal([]byte(jsonStr), &d); err != nil {
+		// raw 必须落盘：降级为 silent 意味着这轮心跳不产出任何东西，
+		// 若连原文都不留，LLM 想记的内部笔记（如状态告警）就彻底丢失了。
 		e.logger.Warnw("heartbeat: decision JSON parse failed, downgrade to silent",
-			"err", err, "trace_id", traceID, "raw_len", len(raw))
+			"err", err, "trace_id", traceID, "raw_len", len(raw),
+			"raw", truncateForLog(raw, 500), "extracted", truncateForLog(jsonStr, 200))
 		return HeartbeatDecision{Decision: DecisionSilent, Reason: "决策 JSON 解析失败，安全降级为静默"}
 	}
 	// 归一化 decision 枚举（小写、去空）。
@@ -712,20 +715,95 @@ func buildHeartbeatPrompt(targets []ChannelTarget) string {
 // 标准 json.Unmarshal 会报 "invalid character ',' after top-level value"。
 var trailingCommaRe = regexp.MustCompile(`,\s*([}\]])`)
 
-// extractJSON 从 LLM 原始输出中 tolerant 抽取 JSON 子串（防 markdown 围栏/前后缀干扰）。
+// extractJSON 从 LLM 原始输出中 tolerant 抽取可解析的 JSON 对象（防 markdown 围栏/前后缀干扰）。
+//
+// LLM 已知的三种畸形形态：
+//  1. 尾随逗号：{"decision":"silent",}
+//  2. 顶层数组：[{"decision":"note","content":"..."}, {"send":false}]
+//  3. 并列对象：{"decision":"note","content":"..."}, {"send":false}
+//     —— 由形态 2 截取掉方括号后自然产生，同样需要合并
+//
+// 多对象时按「先出现者优先」合并：后者只补齐前者缺失的字段，
+// 避免 {"send":false} 这类控制块覆盖真正的决策。
 func extractJSON(s string) string {
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start < 0 || end <= start {
-		return s // 退化：原样返回，交给 json.Unmarshal 报错（上层会降级为 silent）
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return s
 	}
-	raw := s[start : end+1]
-	// 容错：剥离尾随逗号后再交给严格解析，避免心跳决策因脏 JSON 被降级为 silent。
+
+	// 数组优先：若 [ 出现在 { 之前，说明是数组包裹（形态 2）。
+	arrIdx := strings.Index(trimmed, "[")
+	objIdx := strings.Index(trimmed, "{")
+
+	var raw string
+	switch {
+	case arrIdx >= 0 && (objIdx < 0 || arrIdx < objIdx):
+		end := strings.LastIndex(trimmed, "]")
+		if end <= arrIdx {
+			return s // 退化：原样返回，交给 json.Unmarshal 报错（上层会降级为 silent）
+		}
+		raw = trimmed[arrIdx : end+1]
+	case objIdx >= 0:
+		end := strings.LastIndex(trimmed, "}")
+		if end <= objIdx {
+			return s
+		}
+		raw = trimmed[objIdx : end+1]
+	default:
+		return s
+	}
+
+	// 容错 1：剥离尾随逗号后再交给严格解析。
 	cleaned := trailingCommaRe.ReplaceAllString(raw, "$1")
-	if cleaned != raw {
-		return cleaned
+	// 容错 2/3：数组或并列对象合并为单个对象。
+	if merged, ok := mergeJSONObjects(cleaned); ok {
+		return merged
 	}
-	return raw
+	return cleaned
+}
+
+// mergeJSONObjects 把数组或并列对象形态的 raw 合并为单个 JSON 对象字面量。
+// 无法合并时返回 ok=false，调用方应回退到原字符串。
+func mergeJSONObjects(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	// 并列对象形态（obj1, obj2）外层套上方括号后即可按数组解析。
+	candidates := []string{trimmed}
+	if !strings.HasPrefix(trimmed, "[") {
+		candidates = append(candidates, "["+trimmed+"]")
+	}
+
+	for _, c := range candidates {
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(c), &items); err != nil || len(items) == 0 {
+			continue
+		}
+		if len(items) == 1 {
+			return trimmed, true // 单对象无需改写，保持原样
+		}
+		merged := make(map[string]json.RawMessage, 8)
+		for _, it := range items { // 先出现者优先
+			for k, v := range it {
+				if _, exists := merged[k]; !exists {
+					merged[k] = v
+				}
+			}
+		}
+		b, err := json.Marshal(merged)
+		if err != nil {
+			continue
+		}
+		return string(b), true
+	}
+	return "", false
+}
+
+// truncateForLog 截断字符串用于日志，避免畸形/超长 LLM 输出刷屏。
+func truncateForLog(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "…(truncated)"
 }
 
 // heartbeatWakePrompt 心跳唤醒提示（作为 InjectContext 注入 LLM，不污染 L0 记忆）。
