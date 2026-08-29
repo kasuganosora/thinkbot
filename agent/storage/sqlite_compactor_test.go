@@ -193,10 +193,21 @@ func TestSQLiteRepository_AppendTriggersCompaction(t *testing.T) {
 	ctx := context.Background()
 	scope := memory.ChannelScope("auto-compact")
 
-	// 极小 window：MemoryBudget=1 token → 3 字符预算，超过即触发
+	// 极小 window：MemoryBudget=1 token → 3 字符预算，超过即触发。
+	//
+	// 构造时必须把三个扣减项都压到极小，否则预算为 0、压缩永不触发
+	// （本测试曾因此空转 3 秒后失败）：
+	//   - OutputReserve 默认 128000（GLM 1M 模型口径），远大于这里给的
+	//     MaxContextTokens=10000 → totalAvailable 为负 → MemoryBudget() 直接返回 0。
+	//   - ReservedTokens 默认 2000，同样会把小额 MaxContextTokens 吃穿。
+	//   - MemoryBudgetRatio 必须显式给值：MemoryBudget() 先算 totalAvailable*ratio，
+	//     再用 MaxMemoryTokens 做「上限」截断，ratio 为零时压根到不了上限分支。
 	win := memory.NewWindow(memory.WindowConfig{
-		MaxContextTokens: 10000,
-		MaxMemoryTokens:  1,
+		MaxContextTokens:  10000,
+		ReservedTokens:    1,
+		OutputReserve:     1,
+		MemoryBudgetRatio: 0.2,
+		MaxMemoryTokens:   1, // 上限 1 token → 3 字符
 	})
 	spy := &spyCompactor{}
 	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{
