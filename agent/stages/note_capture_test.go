@@ -32,6 +32,7 @@ func (fakeReplyProvider) DoStream(ctx context.Context, p llm.GenerateParams) (*l
 }
 
 // fakeReplyStage 只发出一个 ActionReply 的假 Stage，用于隔离测试中间件逻辑。
+// 注意其 text 刻意与入站 Message.Text 不同，以便区分「捕获的是用户原文还是 bot 回复」。
 type fakeReplyStage struct{ text string }
 
 func (f fakeReplyStage) Name() string { return "fake-reply" }
@@ -68,8 +69,15 @@ func TestNoteCaptureMiddleware_Isolated(t *testing.T) {
 	if note == nil {
 		t.Fatalf("expected an ActionNote to be captured, got none; actions=%d", len(out.Actions()))
 	}
-	if note.Payload != "hi there" {
-		t.Fatalf("note payload = %q, want %q", note.Payload, "hi there")
+	// 捕获的是**用户原文**（env.Message.Text="hello"），不是 bot 回复（"hi there"）。
+	// 这是刻意设计：捕获 bot 回复会让 dreaming 把 bot 的发言误记成用户的事实
+	// （说话人归属错误，历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
+	// 见 note_capture.go 中 NoteCaptureMiddleware 的注释。
+	if note.Payload != "hello" {
+		t.Fatalf("note payload = %q, want %q（应捕获用户原文）", note.Payload, "hello")
+	}
+	if strings.Contains(note.Payload.(string), "hi there") {
+		t.Fatalf("note payload 混入了 bot 回复：%q", note.Payload)
 	}
 	if note.Metadata["category"] != "exchange" {
 		t.Fatalf("note category = %v, want exchange", note.Metadata["category"])
@@ -105,7 +113,8 @@ func TestNoteCaptureMiddleware_OnRealLLMStage(t *testing.T) {
 		if a.Type == core.ActionReply && strings.Contains(payload, "hello from bot") {
 			hasReply = true
 		}
-		if a.Type == core.ActionNote && strings.Contains(payload, "hello from bot") {
+		// 捕获的是用户原文 msg.Text="ping"，不是 bot 回复 "hello from bot"。
+		if a.Type == core.ActionNote && strings.Contains(payload, "ping") {
 			hasNote = true
 		}
 	}
@@ -113,7 +122,17 @@ func TestNoteCaptureMiddleware_OnRealLLMStage(t *testing.T) {
 		t.Fatalf("expected ActionReply with bot text")
 	}
 	if !hasNote {
-		t.Fatalf("expected ActionNote captured from real LLMStage reply")
+		t.Fatalf("expected ActionNote capturing the user message, got none")
+	}
+	// 反向断言：note 里绝不能出现 bot 回复，否则说话人归属就错了。
+	for _, a := range out.Actions() {
+		if a.Type != core.ActionNote {
+			continue
+		}
+		payload, _ := a.Payload.(string)
+		if strings.Contains(payload, "hello from bot") {
+			t.Fatalf("ActionNote 捕获了 bot 回复而非用户原文：%q", payload)
+		}
 	}
 }
 
