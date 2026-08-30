@@ -694,6 +694,14 @@ func buildHeartbeatPrompt(targets []ChannelTarget) string {
 	b.WriteString("  \"conversation_id\": \"<目标会话ID，仅 post 时填，可留空表示时间线/默认>\",\n")
 	b.WriteString("  \"content\": \"<要发的内容，post 时必填>\",\n")
 	b.WriteString("  \"reason\": \"<你为什么这样决定，便于审计>\"\n}\n")
+	// 禁止条款是必需的：本任务的 InjectContext 与系统提示里的其他输出协议
+	// （如出站回复的 @@REPLY_CONTROL@@{"send":…}）可能同时出现，模型会试图
+	// 同时满足两者而产出 JSON 数组 [{decision…}, {"send":false}]。
+	// 2026-08-29 实测该形态曾导致整轮决策被静默降级丢弃，故在此显式点名禁止。
+	b.WriteString("\n严格禁止（违反会导致本轮决策被丢弃、什么都不落地）：\n")
+	b.WriteString("- 不要输出 JSON 数组，例如 [{...}, {...}]——只能有上面那一个 JSON 对象。\n")
+	b.WriteString("- 不要输出 \"send\" 字段，也不要追加 @@REPLY_CONTROL@@ 控制块：是否发声由 decision 表达（silent 即不发声），与本任务无关的其他协议在此不适用。\n")
+	b.WriteString("- 不要使用 markdown 代码块包裹，不要在 JSON 前后附加任何说明文字。\n")
 	if len(targets) == 0 {
 		b.WriteString("\n当前没有任何可主动发帖的渠道（未连接 Misskey/Telegram 或尚无可发会话），" +
 			"因此你只能输出 {\"decision\":\"silent\"} 或 {\"decision\":\"note\"}。\n")
