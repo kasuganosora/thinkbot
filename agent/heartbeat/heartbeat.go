@@ -906,6 +906,7 @@ func NewBundle(cfg BundleConfig) *Bundle {
 	schedCfg := cron.DefaultSchedulerConfig()
 	schedCfg.BotID = cfg.BotID
 	schedCfg.Location = cfg.Location
+	schedCfg.Name = "heartbeat" // 与 dreaming / user-cron 在日志中区分
 
 	scheduler := cron.NewScheduler(cronStore, executor, schedCfg)
 

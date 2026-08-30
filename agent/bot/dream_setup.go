@@ -127,6 +127,7 @@ func NewDreamingBundle(
 	schedCfg := cron.DefaultSchedulerConfig()
 	schedCfg.BotID = botID
 	schedCfg.Location = location
+	schedCfg.Name = "dreaming" // 与 heartbeat / user-cron 在日志中区分
 
 	scheduler := cron.NewScheduler(cronStore, executor, schedCfg)
 

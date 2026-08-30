@@ -1368,6 +1368,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		schedCfg := cron.DefaultSchedulerConfig()
 		schedCfg.BotID = id
 		schedCfg.Location = builder.GetBotTimezoneLocation(id)
+		schedCfg.Name = "user-cron" // 与 heartbeat / dreaming 在日志中区分
 		userCronScheduler = cron.NewScheduler(cronStore, userCronExecutor, schedCfg).
 			WithUsageRecorder(s.statsRecorder)
 		s.logger.Infow("user cron scheduler created", "bot_id", id, "cron_file", cronFile)
