@@ -314,3 +314,48 @@ func TestSQLiteCompactor_CompactScopeBatchesWhenExceedsMaxInput(t *testing.T) {
 		t.Errorf("expected 3 merged entries (one per batch), got %d", merged)
 	}
 }
+
+// TestSQLiteRepository_ZeroBudgetWarns 覆盖「预算算出 0」的告警路径。
+// 该状态危害在于完全静默：maybeCompact 每次提前返回，记忆只增不减，
+// 故障表现为存储缓慢膨胀而非报错，极难定位。
+// 构造方式与 TestSQLiteRepository_AppendTriggersCompaction 相反——
+// 这里刻意不覆盖 OutputReserve 默认值，使可用额度为负、预算归零。
+func TestSQLiteRepository_ZeroBudgetWarns(t *testing.T) {
+	db := testDB(t)
+	scope := memory.ChannelScope("zero-budget")
+
+	win := memory.NewWindow(memory.WindowConfig{
+		MaxContextTokens: 10000, // OutputReserve 保持默认 128000 → 可用额度为负
+	})
+	if win.MemoryBudget() != 0 {
+		t.Fatalf("构造前提不成立：MemoryBudget() = %d, want 0", win.MemoryBudget())
+	}
+
+	spy := &spyCompactor{}
+	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{Window: win, Compactor: spy})
+
+	repo.maybeCompact(context.Background(), scope)
+
+	if !repo.budgetWarned.Load() {
+		t.Error("预算为 0 时应置起告警标志")
+	}
+	spy.mu.Lock()
+	calls := spy.calls
+	spy.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("预算为 0 时不应触发压缩，实际调用 %d 次", calls)
+	}
+}
+
+// TestSQLiteRepository_NilWindowNoWarn window 未注入是设计上的「不限制」，
+// 不是配置错误，不应污染日志。
+func TestSQLiteRepository_NilWindowNoWarn(t *testing.T) {
+	db := testDB(t)
+	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{}) // 不注入 window
+
+	repo.maybeCompact(context.Background(), memory.ChannelScope("no-window"))
+
+	if repo.budgetWarned.Load() {
+		t.Error("window 未注入属设计上的不限制，不应置起告警标志")
+	}
+}
