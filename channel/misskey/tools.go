@@ -219,23 +219,23 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 				if l, ok := args["limit"].(float64); ok {
 					limit = int(l)
 				}
-			notes, err := c.api.searchNotes(ctx, query, limit)
-			if err != nil {
-				// 实例搜索后端（Meilisearch）常不可用：先尝试代码级兜底——
-				// 若查询形如 @用户，则解析该用户并直接拉取其最近帖子（users/notes 不依赖 Meilisearch），
-				// 让「看某人最近发了什么」这类意图仍可用，而非仅靠 LLM 临场自救。
-				if fb, fbCount, ferr := c.searchNotesByUserFallback(ctx, query, limit); ferr == nil && fbCount > 0 {
-					return map[string]any{
-						"notes":   fb,
-						"count":   fbCount,
-						"query":   query,
-						"fallback": "user_notes", // 提示模型这是用户帖子兜底，非关键词搜索
-					}, nil
+				notes, err := c.api.searchNotes(ctx, query, limit)
+				if err != nil {
+					// 实例搜索后端（Meilisearch）常不可用：先尝试代码级兜底——
+					// 若查询形如 @用户，则解析该用户并直接拉取其最近帖子（users/notes 不依赖 Meilisearch），
+					// 让「看某人最近发了什么」这类意图仍可用，而非仅靠 LLM 临场自救。
+					if fb, fbCount, ferr := c.searchNotesByUserFallback(ctx, query, limit); ferr == nil && fbCount > 0 {
+						return map[string]any{
+							"notes":    fb,
+							"count":    fbCount,
+							"query":    query,
+							"fallback": "user_notes", // 提示模型这是用户帖子兜底，非关键词搜索
+						}, nil
+					}
+					// 兜底也拿不到，返回干净文案，不把裸 HTTP 错误抛给 LLM，
+					// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
+					return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
 				}
-				// 兜底也拿不到，返回干净文案，不把裸 HTTP 错误抛给 LLM，
-				// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
-				return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
-			}
 				return map[string]any{
 					"notes": formatNotes(notes, c.cfg.Host),
 					"count": len(notes),
@@ -606,6 +606,16 @@ func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
 					return nil, fmt.Errorf("misskey_unreact_to_note: noteId is required")
 				}
 				if err := c.api.deleteReaction(ctx, noteID); err != nil {
+					// 幂等语义：本就没有反应可撤（Misskey 400 NOT_REACTED）。
+					// 目标状态（无反应）已达成，返回成功而非报错。
+					if errors.Is(err, ErrNotReacted) {
+						return map[string]any{
+							"success":     true,
+							"not_reacted": true,
+							"noteId":      noteID,
+							"message":     "本来就没有对该帖子的反应，无需撤销。",
+						}, nil
+					}
 					return nil, fmt.Errorf("unreact failed: %w", err)
 				}
 				return map[string]any{
