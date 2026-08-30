@@ -143,6 +143,14 @@ type SchedulerConfig struct {
 	// 为空时使用 "unknown"。
 	BotID string
 
+	// Name 调度器用途标识，仅用于日志区分。
+	//
+	// 同一个 bot 会同时跑多个调度器（心跳 heartbeat、梦境巩固 dreaming、
+	// 用户 cron user-cron），日志字段原本完全相同、只带 bot_id——
+	// 启动期连打 3 条 "cron: scheduler starting" 看起来像同一实例重复启动，
+	// 实为三个不同实例。留空时 Start 退化为 "unnamed"。
+	Name string
+
 	// MissedRunGrace 漏跑检测的额外宽限窗口。
 	// 判定规则：活跃循环任务若「now - LastRunAt > 2×ExpectedInterval + MissedRunGrace」
 	// 则视为漏跑（错过 ≥2 个调度周期）并告警。0 表示仅用 2× 间隔本身。
@@ -227,7 +235,12 @@ func (s *Scheduler) WithUsageRecorder(r llm.UsageRecorder) *Scheduler {
 
 // Start 启动调度循环（非阻塞）。
 func (s *Scheduler) Start(ctx context.Context) {
+	name := s.config.Name
+	if name == "" {
+		name = "unnamed"
+	}
 	s.logger.Infow("cron: scheduler starting",
+		"scheduler", name,
 		"tick_interval", s.config.TickInterval.String(),
 		"max_concurrent", s.config.MaxConcurrent,
 		"job_timeout", s.config.JobTimeout.String(),
