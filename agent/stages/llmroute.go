@@ -662,7 +662,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 回复控制门控（opt-in）：开启时追加协议说明，让模型在回复结尾追加结构化
 	// 「是否出站」控制 JSON。仅对显式开启的 bot 生效，不影响其它 bot。
-	if s.config.RequireReplyControl {
+	//
+	// 心跳唤醒例外：它是系统自主触发、不是回复用户消息，其出站由 heartbeat 的
+	// decision 字段经 ChannelPoster 单独处理，REPLY_CONTROL 的 send 对它无意义。
+	// 而心跳的 InjectContext 已经要求「只输出一个 JSON 对象」，两套协议同时出现时
+	// 模型会把它们合并成 [{decision…}, {"send":false}] 数组
+	// （2026-08-29 实测：决策被静默降级丢弃）。故心跳路径不注入本协议。
+	if s.config.RequireReplyControl && env.Message.Source != core.SourceHeartbeat {
 		systemPrompt = systemPrompt + "\n\n" + replyControlInstruction
 	}
 
