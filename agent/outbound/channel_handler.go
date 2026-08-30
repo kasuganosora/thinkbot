@@ -105,7 +105,11 @@ func (h *ChannelReplyHandler) Unregister(channelName string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.senders, channelName)
-	h.logger.Infow("channel sender unregistered", "channel_name", channelName)
+	// 措辞刻意用 deregistered + shutdown 语境：原文的 "unregistered"
+	// 易被误读为「从未注册 / 渠道缺失」，实为关停或渠道移除时的主动注销。
+	// 排查时曾因此把正常的关停清理误判成启动期 sender 未注册（2026-08-30）。
+	h.logger.Infow("channel sender deregistered (shutdown or channel removed)",
+		"channel_name", channelName)
 }
 
 // SetGuard 设置出站守卫（传 nil 表示不做只读检查）。
