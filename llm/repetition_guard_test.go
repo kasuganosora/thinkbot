@@ -165,3 +165,98 @@ func buildNNBB(n int) string {
 	}
 	return b.String()
 }
+
+// TestRepetitionGuard_MisskeyEmojiNotFalsePositive 是 2026-08-29 线上误报的回归测试。
+// 当时一条 528 字符的正常回复被判为重复退化（cut_index 526），
+// 触发源是 Misskey 自定义表情名 :ai_maze_hehehehehe: 里的 "he" 连续 5 次，
+// 恰好命中 cycleLen=2 + minRepeats=5。短周期阈值提高后不应再触发。
+func TestRepetitionGuard_MisskeyEmojiNotFalsePositive(t *testing.T) {
+	text := "<internal>タイムライン上の別のボットアカウントによる自動投稿「今日の迷路」です。" +
+		"内容自体は無害ですが、ボット同士のやり取りによるスパム的なノイズは避けたほうがよいでしょう。</internal>" +
+		"<internal>「:ai_maze_hehehehehe:@.gif:」というリアクションのみで完了しました。</internal>"
+	g := NewRepetitionGuard()
+	if !g.Feed(text) {
+		t.Fatalf("emoji 名中的短串重复不应触发退化：cut_index=%d", g.CutIndex())
+	}
+	if g.Triggered() {
+		t.Fatal("emoji 名中的短串重复不应触发退化")
+	}
+}
+
+// TestRepetitionGuard_LaughFiveTimesNotFalsePositive 「哈哈哈哈哈」这类 5 次短重复
+// 属正常表达，不应被截断（20 次仍应触发，见 TestRepetitionGuard_HahaPattern）。
+func TestRepetitionGuard_LaughFiveTimesNotFalsePositive(t *testing.T) {
+	g := NewRepetitionGuard()
+	if !g.Feed("这个段子太好笑了，我直接笑出声") {
+		t.Fatal("前置文本不应触发")
+	}
+	if !g.Feed("哈哈哈哈哈") {
+		t.Fatal("5 次短重复不应触发退化")
+	}
+}
+
+// TestMinRepeatsForCycle 校验各周期档位的阈值分档。
+func TestMinRepeatsForCycle(t *testing.T) {
+	cases := []struct {
+		cycleLen int
+		want     int
+	}{
+		{1, 15},
+		{2, 15},
+		{3, 10},
+		{4, 10},
+		{5, 5},
+		{14, 5},
+	}
+	for _, c := range cases {
+		if got := minRepeatsForCycle(c.cycleLen); got != c.want {
+			t.Errorf("minRepeatsForCycle(%d) = %d, want %d", c.cycleLen, got, c.want)
+		}
+	}
+}
+
+// TestDetectRepetitionStart_ThresholdPerCycle 逐档验证阈值边界：
+// 差一次不触发，达到次数即触发。绕过 minDetectLen 直接测检测核心。
+func TestDetectRepetitionStart_ThresholdPerCycle(t *testing.T) {
+	cases := []struct {
+		name     string
+		cycle    string
+		repeats  int
+		detected bool
+	}{
+		{"cycle2 x14 未达阈值", "ab", 14, false},
+		{"cycle2 x15 达到阈值", "ab", 15, true},
+		{"cycle1 x14 未达阈值", "a", 14, false},
+		{"cycle1 x15 达到阈值", "a", 15, true},
+		{"cycle3 x9 未达阈值", "abc", 9, false},
+		{"cycle3 x10 达到阈值", "abc", 10, true},
+		{"cycle6 x5 达到阈值", "abcdef", 5, true},
+	}
+	for _, c := range cases {
+		got := detectRepetitionStart(strings.Repeat(c.cycle, c.repeats))
+		if (got >= 0) != c.detected {
+			t.Errorf("%s: detected=%v, want %v (idx=%d)", c.name, got >= 0, c.detected, got)
+		}
+	}
+}
+
+// TestRepetitionGuard_RealCollapseStillDetected 确认真正的退化（长循环）
+// 在提高短周期阈值后仍被捕获，未因收紧而漏判。
+func TestRepetitionGuard_RealCollapseStillDetected(t *testing.T) {
+	cases := []string{
+		strings.Repeat("哈哈", 20),      // 短周期长循环
+		strings.Repeat("abc", 30),        // 中周期长循环
+		strings.Repeat("NN BB ", 20),     // 长周期长循环
+		strings.Repeat("。", 40),         // 单字符长循环
+	}
+	for i, s := range cases {
+		g := NewRepetitionGuard()
+		g.Feed("开场白，用于越过 minDetectLen 门槛，避免短输出直接跳过检测。")
+		if g.Feed(s) {
+			t.Errorf("case %d: 真退化应被捕获，实际未触发", i)
+		}
+		if !g.Triggered() {
+			t.Errorf("case %d: 真退化应被捕获，Triggered=false", i)
+		}
+	}
+}
