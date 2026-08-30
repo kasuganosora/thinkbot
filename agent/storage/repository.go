@@ -15,6 +15,7 @@ import (
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // compactCooldown 同一 scope 两次压缩之间的最小间隔，避免 LLM 无可合并项时
@@ -93,6 +94,10 @@ type SQLiteRepository struct {
 	// 压缩并发/冷却控制（零值即可用）
 	compacting  sync.Map // scope.Key() -> true（压缩进行中）
 	lastCompact sync.Map // scope.Key() -> time.Time（上次压缩时间，用于冷却）
+
+	// budgetWarned 字符预算为 0 的告警只打一次。
+	// 预算是 window 级配置，每个 scope 都告警会刷屏。
+	budgetWarned atomic.Bool
 
 	// metrics
 	entriesAppended atomic.Int64
@@ -461,6 +466,11 @@ func (r *SQLiteRepository) charBudget(scope memory.Scope) int {
 func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope) {
 	budget := r.charBudget(scope)
 	if budget <= 0 {
+		// window 未注入 = 设计上的「不限制」，不是故障；
+		// 注入了却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
+		if r.window != nil {
+			r.warnZeroBudget(ctx, scope)
+		}
 		return
 	}
 	total, err := r.totalChars(ctx, scope)
@@ -491,6 +501,25 @@ func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope)
 
 	// 非致命：压缩失败不影响正常写入；渲染层仍有截断兜底
 	_ = r.compactor.CompactScope(ctx, scope)
+}
+
+// warnZeroBudget 在字符预算为 0 时告警一次。
+//
+// 预算为 0 意味着自动压缩彻底静默失效：maybeCompact 每次提前返回，
+// 记忆只增不减，而日志里看不出任何异常——故障表现为「存储空间缓慢膨胀」
+// 而非「报错」，极难定位。
+//
+// 最常见的成因：Window 的 OutputReserve（默认 128000）+ ReservedTokens
+// （默认 2000）之和不小于 MaxContextTokens，使 MemoryBudget() 返回 0。
+// 把 MaxContextTokens 配到 13 万以下就会中招；生产默认 1000000 不受影响。
+func (r *SQLiteRepository) warnZeroBudget(ctx context.Context, scope memory.Scope) {
+	if r.budgetWarned.Swap(true) {
+		return
+	}
+	traceid.L(ctx).Warnw("sqlite_repository: char budget is 0, auto-compaction will never trigger",
+		"scope", scope.Key(),
+		"memory_budget", r.window.MemoryBudget(),
+		"hint", "检查 memory window 配置：OutputReserve + ReservedTokens 必须小于 MaxContextTokens")
 }
 
 // totalChars 统计指定 scope 下所有「活跃（未归档）」记忆的字符总数。
