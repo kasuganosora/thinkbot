@@ -115,14 +115,37 @@ const (
 	// 不视为「退化」，而是正常的内容相似性（如排比句）。
 	maxCycle = 14
 
-	// minRepeats 判定退化的最小连续重复次数。一个模式必须连续出现
-	// 这么多次才触发截断——降低误判率（正常文本也可能偶然重复 2~3 次）。
+	// minRepeats 判定退化的最小连续重复次数（长周期默认值）。
+	// 一个模式必须连续出现这么多次才触发截断——降低误判率
+	// （正常文本也可能偶然重复 2~3 次）。
 	minRepeats = 5
 
 	// tailWindowSize 尾部窗口大小。只检查最近这些字符内的重复，
 	// 因为退化总是发生在输出的末尾（模型从某处开始「卡死」）。
 	tailWindowSize = 300
 )
+
+// minRepeatsForCycle 返回给定周期长度下判定退化所需的连续重复次数。
+//
+// 背景：统一按 minRepeats=5 判定时，短周期（1–2 字符）在正常文本里
+// 频繁偶然命中——笑声「哈哈哈哈哈」、Misskey 自定义表情名
+// （:ai_maze_hehehehehe: 含 5 个 "he"）、重复标点「。。。。。」。
+// 2026-08-29 实测因此误截断一条 528 字符的正常回复（cut_index 526，
+// 只截掉 2 字符但污染了判定与告警噪音）。
+//
+// 周期越短越容易误报，故要求越多次；周期 ≥5 时重复 5 次已足够异常，
+// 保持原阈值。真正的退化（如 "NN BB NN BB…" 循环几十次）远超各档阈值，
+// 仍会被正常捕获。
+func minRepeatsForCycle(cycleLen int) int {
+	switch {
+	case cycleLen <= 2:
+		return 15
+	case cycleLen <= 4:
+		return 10
+	default:
+		return minRepeats
+	}
+}
 
 // detectRepetitionStart 在 text 中寻找重复退化的起始位置。
 // 返回 ≥0 表示找到，值为重复起点的字节偏移；返回 -1 表示未发现退化。
@@ -135,15 +158,16 @@ func detectRepetitionStart(text string) int {
 
 	// 按周期长度从短到长尝试（短周期更可能是真正的退化信号）
 	for cycleLen := 1; cycleLen <= maxCycle; cycleLen++ {
-		// 所需最小长度：cycleLen × minRepeats
-		minLen := cycleLen * minRepeats
+		// 所需最小长度：cycleLen × 该周期档位要求的重复次数
+		repeats := minRepeatsForCycle(cycleLen)
+		minLen := cycleLen * repeats
 		if len(tail) < minLen {
 			continue
 		}
 
 		// 从后往前扫描，找第一个满足条件的重复起点
 		for start := len(tail) - minLen; start >= 0; start-- {
-			if isRepeatingCycle(tail, start, cycleLen) {
+			if isRepeatingCycle(tail, start, cycleLen, repeats) {
 				// 找到一个匹配后，向左扩展找到重复区域的**真正**起始位置
 				// （避免在重复区域内部截断，保留更多正常文本）
 				start = extendRepetitionLeft(tail, start, cycleLen)
@@ -160,10 +184,11 @@ func detectRepetitionStart(text string) int {
 }
 
 // isRepeatingCycle 检查 s 从 start 位置开始是否由 pattern（s[start:start+cycleLen]）
-// 连续重复构成（至少 minRepeats-1 次后续完整匹配）。
+// 连续重复构成（至少 repeats-1 次后续完整匹配）。
+// repeats 由 minRepeatsForCycle 按周期长度给出，短周期要求更多次以压误报。
 //
-// 前置条件：len(s) >= start + cycleLen * minRepeats。
-func isRepeatingCycle(s string, start, cycleLen int) bool {
+// 前置条件：len(s) >= start + cycleLen * repeats。
+func isRepeatingCycle(s string, start, cycleLen, repeats int) bool {
 	pattern := s[start : start+cycleLen]
 
 	// 排除纯空白模式（如连续空格/换行——属于格式问题而非语义退化）
@@ -171,8 +196,8 @@ func isRepeatingCycle(s string, start, cycleLen int) bool {
 		return false
 	}
 
-	// 验证后续 minRepeats-1 次完整匹配
-	for i := 1; i < minRepeats; i++ {
+	// 验证后续 repeats-1 次完整匹配
+	for i := 1; i < repeats; i++ {
 		pos := start + i*cycleLen
 		end := pos + cycleLen
 		if end > len(s) {
@@ -187,7 +212,7 @@ func isRepeatingCycle(s string, start, cycleLen int) bool {
 
 // extendRepetitionLeft 从已确认的重复位置 start 向左扩展，找到重复区域的真正左边界。
 //
-// 前置：s[start: start+cycleLen*minRepeats] 已通过 isRepeatingCycle 验证。
+// 前置：s[start: start+cycleLen*minRepeatsForCycle(cycleLen)] 已通过 isRepeatingCycle 验证。
 // 返回向左扩展后的新起点（≤ start）。
 func extendRepetitionLeft(s string, start, cycleLen int) int {
 	if start == 0 {
