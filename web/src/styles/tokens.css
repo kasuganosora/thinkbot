@@ -1,0 +1,143 @@
+/* ThinkBot visual language — Apple HIG / macOS Settings inspired.
+   Tokens only. TDesign stays; components consume these via var(). */
+
+:root {
+  /* Surfaces */
+  --bp-bg: #f5f5f7;
+  --bp-bg-subtle: #fbfbfd;
+  --bp-surface: #ffffff;
+  --bp-surface-elevated: #ffffff;
+  --bp-surface-fill: rgba(120, 120, 128, 0.08);
+  --bp-surface-fill-hover: rgba(120, 120, 128, 0.12);
+  --bp-surface-fill-active: rgba(120, 120, 128, 0.18);
+  --bp-surface-translucent: rgba(246, 246, 247, 0.72);
+  --bp-surface-toolbar: rgba(255, 255, 255, 0.72);
+  --bp-chat-bg: #fbfbfd;
+
+  /* Labels */
+  --bp-label: #1d1d1f;
+  --bp-label-secondary: #6e6e73;
+  --bp-label-tertiary: #86868b;
+  --bp-label-quaternary: #aeaeb2;
+  --bp-label-on-accent: #ffffff;
+
+  /* Separators & hairlines */
+  --bp-separator: rgba(60, 60, 67, 0.12);
+  --bp-separator-opaque: #e5e5ea;
+  --bp-hairline: 0.5px solid var(--bp-separator);
+
+  /* Accent — calm system blue (overridden by appearance palette) */
+  --bp-accent: #0071e3;
+  --bp-accent-hover: #0077ed;
+  --bp-accent-active: #0060c2;
+  --bp-accent-soft: rgba(0, 113, 227, 0.1);
+  --bp-accent-soft-strong: rgba(0, 113, 227, 0.16);
+
+  /* Semantic */
+  --bp-success: #30a46c;
+  --bp-success-soft: rgba(48, 164, 108, 0.12);
+  --bp-warning: #e37318;
+  --bp-warning-soft: rgba(227, 115, 24, 0.12);
+  --bp-danger: #d14747;
+  --bp-danger-soft: rgba(209, 71, 71, 0.12);
+
+  /* Radii */
+  --bp-radius-xs: 6px;
+  --bp-radius-sm: 8px;
+  --bp-radius-md: 10px;
+  --bp-radius-lg: 12px;
+  --bp-radius-xl: 16px;
+  --bp-radius-2xl: 20px;
+  --bp-radius-pill: 999px;
+
+  /* Spacing */
+  --bp-space-1: 4px;
+  --bp-space-2: 8px;
+  --bp-space-3: 12px;
+  --bp-space-4: 16px;
+  --bp-space-5: 20px;
+  --bp-space-6: 24px;
+  --bp-space-8: 32px;
+
+  /* Shadows — soft, not outlined */
+  --bp-shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.03);
+  --bp-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.03);
+  --bp-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --bp-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.1), 0 2px 8px rgba(0, 0, 0, 0.04);
+  --bp-shadow-composer: 0 8px 28px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+
+  /* Blur */
+  --bp-blur: 20px;
+  --bp-blur-strong: 28px;
+
+  /* Motion */
+  --bp-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --bp-duration: 180ms;
+  --bp-duration-fast: 120ms;
+  --bp-press-scale: 0.97;
+
+  /* Type */
+  --bp-font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+  --bp-font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --bp-tracking-display: -0.03em;
+  --bp-tracking-title: -0.022em;
+  --bp-tracking-body: -0.011em;
+  --bp-tracking-caption: 0.01em;
+  --bp-leading-title: 1.15;
+  --bp-leading-body: 1.47;
+
+  /* Chrome widths */
+  --bp-sidebar-width: 232px;
+  --bp-session-width: 256px;
+
+  /* TDesign bridge — keep components in the same language */
+  --td-font-family: var(--bp-font);
+  --td-brand-color: var(--bp-accent);
+  --td-brand-color-hover: var(--bp-accent-hover);
+  --td-brand-color-active: var(--bp-accent-active);
+  --td-brand-color-light: var(--bp-accent-soft);
+  --td-brand-color-focus: var(--bp-accent-soft-strong);
+  --td-brand-color-light-hover: var(--bp-accent-soft-strong);
+  --td-success-color: var(--bp-success);
+  --td-warning-color: var(--bp-warning);
+  --td-error-color: var(--bp-danger);
+  --td-bg-color-page: var(--bp-bg);
+  --td-bg-color-container: var(--bp-surface);
+  --td-bg-color-container-hover: var(--bp-surface-fill-hover);
+  --td-bg-color-secondarycontainer: var(--bp-bg-subtle);
+  --td-text-color-primary: var(--bp-label);
+  --td-text-color-secondary: var(--bp-label-secondary);
+  --td-text-color-placeholder: var(--bp-label-tertiary);
+  --td-text-color-disabled: var(--bp-label-quaternary);
+  --td-border-level-1-color: var(--bp-separator);
+  --td-component-border: var(--bp-separator);
+  --td-component-stroke: var(--bp-separator);
+  --td-radius-default: var(--bp-radius-sm);
+  --td-radius-medium: var(--bp-radius-md);
+  --td-radius-large: var(--bp-radius-lg);
+  --td-radius-extraLarge: var(--bp-radius-xl);
+  --td-shadow-1: var(--bp-shadow-sm);
+  --td-shadow-2: var(--bp-shadow-md);
+  --td-shadow-3: var(--bp-shadow-lg);
+
+  /* Legacy sidebar aliases — now light, for files still referencing them */
+  --bp-sidebar-bg: var(--bp-surface-translucent);
+  --bp-sidebar-hover: var(--bp-surface-fill-hover);
+  --bp-sidebar-active: var(--bp-surface-fill-active);
+  --bp-sidebar-text: var(--bp-label);
+  --bp-sidebar-muted: var(--bp-label-secondary);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --bp-surface-translucent: #f2f2f4;
+    --bp-surface-toolbar: #ffffff;
+    --bp-blur: 0px;
+    --bp-blur-strong: 0px;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  /* Theme toggle is currently light-only; do not auto-invert. */
+}

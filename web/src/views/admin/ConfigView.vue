@@ -144,7 +144,7 @@ async function saveAll() {
   align-items: center;
   margin-bottom: 20px;
 }
-.hint { color: #888; font-size: 13px; max-width: 70%; }
+.hint { color: var(--bp-label-tertiary); font-size: 13px; max-width: 70%; }
 .group { margin-bottom: 24px; }
 .group-title {
   font-weight: 600;
@@ -154,5 +154,5 @@ async function saveAll() {
   border-left: 3px solid var(--td-brand-color, #00a870);
 }
 .field { display: flex; align-items: center; gap: 12px; }
-.key-name { color: #bbb; font-size: 12px; font-family: monospace; }
+.key-name { color: var(--bp-label-quaternary); font-size: 12px; font-family: monospace; }
 </style>
