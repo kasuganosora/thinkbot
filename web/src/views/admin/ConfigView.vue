@@ -151,7 +151,7 @@ async function saveAll() {
   font-size: 14px;
   margin-bottom: 12px;
   padding-left: 8px;
-  border-left: 3px solid var(--td-brand-color, #00a870);
+  border-left: 3px solid var(--bp-accent);
 }
 .field { display: flex; align-items: center; gap: 12px; }
 .key-name { color: var(--bp-label-quaternary); font-size: 12px; font-family: monospace; }

@@ -218,7 +218,7 @@ function renameBot() {
     body: () => h('input', {
       value: tmpName.value,
       class: 't-input__inner',
-      style: 'width:100%;padding:8px;border:1px solid #ddd;border-radius:6px',
+      style: 'width:100%;padding:8px;border:var(--bp-hairline);border-radius:6px',
       onInput: e => { tmpName.value = e.target.value }
     }),
     onConfirm: () => {
@@ -301,7 +301,7 @@ function removeBot() {
   display: inline-block; margin-top: 6px; font-size: 12px; padding: 3px 12px; border-radius: 6px;
   background: var(--bp-surface-fill); color: var(--bp-label-tertiary);
 }
-.bh-status.running { background: #1d1d1f; color: #fff; }
+.bh-status.running { background: var(--bp-label); color: var(--bp-label-on-accent); }
 
 .bot-body { flex: 1; display: flex; min-height: 0; border-top: var(--bp-hairline); }
 .bot-nav {

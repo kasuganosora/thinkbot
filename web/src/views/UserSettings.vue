@@ -2,7 +2,7 @@
   <SettingsShell title="用户设置">
     <t-card title="个人资料" :bordered="false" class="card">
       <div class="avatar-row">
-        <t-avatar size="64px" :style="{ background: '#00a870', color: '#fff', fontSize: '28px' }">
+        <t-avatar size="64px" :style="{ background: 'var(--bp-accent)', color: 'var(--bp-label-on-accent)', fontSize: '28px' }">
           {{ (form.nickname || 'U').charAt(0).toUpperCase() }}
         </t-avatar>
         <div class="avatar-tip">

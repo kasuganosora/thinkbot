@@ -408,8 +408,10 @@ function onUndo() {
   padding: 9px 12px;
   cursor: pointer;
   font-size: 13px;
+  transition: background var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
 }
 .tc-head:hover { background: var(--bp-surface-fill-hover); }
+.tc-head:active { transform: scale(var(--bp-press-scale)); }
 .tc-icon { display: flex; align-items: center; font-size: 15px; }
 .icon-success { color: var(--bp-success); }
 .icon-error { color: var(--bp-danger); }
@@ -519,7 +521,7 @@ function onUndo() {
   color: var(--bp-label);
 }
 .file-status { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--bp-surface-fill); color: var(--bp-label-secondary); }
-.fs-added { background: rgba(0, 168, 112, 0.12); color: var(--bp-success); }
+.fs-added { background: var(--bp-success-soft); color: var(--bp-success); }
 .fs-deleted { background: var(--bp-danger-soft); color: var(--bp-danger); }
 .fs-doing { background: var(--bp-accent-soft); color: var(--bp-accent); }
 .file-diff { font-size: 12px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
