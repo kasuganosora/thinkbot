@@ -113,57 +113,60 @@ function onSubmit({ validateResult }) {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  background: var(--bp-bg);
 }
+/* 安静的浅色底：极淡的品牌光晕，不抢主体层级 */
 .login-bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, #0b1020 0%, #1b2440 45%, #0d2818 100%);
-}
-.login-bg::after {
-  content: '';
-  position: absolute;
-  inset: 0;
   background:
-    radial-gradient(circle at 20% 20%, rgba(0, 168, 112, 0.25), transparent 40%),
-    radial-gradient(circle at 80% 70%, rgba(64, 128, 255, 0.25), transparent 40%);
+    radial-gradient(circle at 18% 12%, rgba(0, 113, 227, 0.07), transparent 46%),
+    radial-gradient(circle at 82% 82%, rgba(94, 92, 230, 0.06), transparent 48%),
+    linear-gradient(180deg, #fbfbfd 0%, #f4f4f7 100%);
 }
 .login-card {
   position: relative;
   z-index: 1;
-  width: 400px;
-  padding: 40px 36px;
-  background: rgba(255, 255, 255, 0.97);
-  border-radius: 20px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  width: 384px;
+  padding: 40px 36px 32px;
+  background: var(--bp-surface);
+  border-radius: var(--bp-radius-2xl);
+  box-shadow: var(--bp-shadow-lg);
 }
 .brand {
   text-align: center;
   margin-bottom: 28px;
 }
 .brand-logo {
-  font-size: 48px;
+  font-size: 44px;
   line-height: 1;
 }
 .brand-title {
-  margin-top: 12px;
+  margin-top: 14px;
   font-size: 26px;
-  font-weight: 700;
+  font-weight: 600;
+  letter-spacing: var(--bp-tracking-display);
+  line-height: var(--bp-leading-title);
+  color: var(--bp-label);
 }
 .brand-sub {
   margin-top: 8px;
   font-size: 13px;
-  color: #888;
+  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-secondary);
 }
 .login-options {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 18px;
+  margin-bottom: 20px;
+  font-size: 13px;
 }
 .login-tip {
-  margin-top: 16px;
+  margin-top: 18px;
   text-align: center;
   font-size: 12px;
-  color: #aaa;
+  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-tertiary);
 }
 </style>

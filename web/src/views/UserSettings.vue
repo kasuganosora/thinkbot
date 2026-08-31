@@ -286,7 +286,7 @@ onMounted(() => {
   margin-bottom: 4px;
 }
 .gen-hint {
-  color: #8a8a8a;
+  color: var(--bp-label-tertiary);
   font-size: 13px;
 }
 </style>
