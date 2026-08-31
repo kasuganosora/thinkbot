@@ -1,25 +1,24 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/internal/searchproviders"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
-// 搜索提供方管理 Handler
+// 搜索提供方配置 Handler
 //
-// 管理系统级别的搜索引擎提供方配置。
+// 管理系统级的搜索提供方配置。
 // 数据存储在 data/search/providers.json。
+// web_search 工具在每次调用时读取此文件中已启用的提供方。
 //
-// 路由：
+// 路径：
 //   GET    /api/search/providers              → 列表
 //   POST   /api/search/providers              → 新增
 //   PUT    /api/search/providers/:id          → 更新
@@ -27,87 +26,18 @@ import (
 //   PUT    /api/search/providers/:id/toggle   → 切换启用/禁用
 // ============================================================================
 
-// searchProviderEntry 搜索提供方实体。
-type searchProviderEntry struct {
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Name       string `json:"name"`
-	Letter     string `json:"letter"`
-	Color      string `json:"color"`
-	Enabled    bool   `json:"enabled"`
-	APIKey     string `json:"apiKey"`
-	SearchType string `json:"searchType"`
-	Timeout    int    `json:"timeout"`
-	BaseURL    string `json:"baseUrl"`
-	CreatedAt  string `json:"createdAt"`
-	UpdatedAt  string `json:"updatedAt"`
-}
+type searchProviderEntry = searchproviders.Provider
 
-// searchProvidersFile 返回搜索提供方配置文件路径。
-func searchProvidersFile() string {
-	return filepath.Join("data", "search", "providers.json")
-}
-
-// loadSearchProviders 从文件加载搜索提供方列表。
 func loadSearchProviders() ([]searchProviderEntry, error) {
-	path := searchProvidersFile()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var providers []searchProviderEntry
-	if err := json.Unmarshal(data, &providers); err != nil {
-		return nil, err
-	}
-	return providers, nil
+	return searchproviders.DefaultStore().List()
 }
 
-// saveSearchProviders 保存搜索提供方列表。
 func saveSearchProviders(providers []searchProviderEntry) error {
-	path := searchProvidersFile()
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(providers, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
-// searchProviderTypeMeta 返回搜索类型的默认 letter 和 color。
-var searchProviderTypeMap = map[string]struct {
-	Label  string
-	Letter string
-	Color  string
-}{
-	"brave":      {"Brave", "B", "#fb542b"},
-	"bing":       {"Bing", "b", "#0078d4"},
-	"google":     {"Google", "G", "#4285f4"},
-	"tavily":     {"Tavily", "T", "#3aa675"},
-	"sogou":      {"搜狗", "S", "#fa5000"},
-	"serper":     {"Serper", "S", "#5468ff"},
-	"searxng":    {"SearXNG", "X", "#3050ff"},
-	"jina":       {"Jina", "J", "#e0245e"},
-	"exa":        {"Exa", "E", "#1a73e8"},
-	"bocha":      {"博查", "B", "#00a870"},
-	"duckduckgo": {"DuckDuckGo", "D", "#de5833"},
-	"yandex":     {"Yandex", "Y", "#fc3f1d"},
+	return searchproviders.DefaultStore().Save(providers)
 }
 
 func getSearchTypeMeta(t string) (label, letter, color string) {
-	if m, ok := searchProviderTypeMap[t]; ok {
-		return m.Label, m.Letter, m.Color
-	}
-	l := "?"
-	if len(t) > 0 {
-		l = string([]rune(t)[0])
-	}
-	return t, l, "#888"
+	return searchproviders.TypeMeta(t)
 }
 
 // handleListSearchProviders 列出所有搜索提供方。
@@ -123,7 +53,7 @@ func (s *Server) handleListSearchProviders(c *gin.Context) {
 	OK(c, gin.H{"providers": providers})
 }
 
-// handleCreateSearchProvider 创建搜索提供方。
+// handleCreateSearchProvider 新增搜索提供方。
 func (s *Server) handleCreateSearchProvider(c *gin.Context) {
 	var req struct {
 		Type       string `json:"type"`
@@ -241,7 +171,7 @@ func (s *Server) handleUpdateSearchProvider(c *gin.Context) {
 	OK(c, *p)
 }
 
-// handleToggleSearchProvider 切换搜索提供方的启用/禁用。
+// handleToggleSearchProvider 切换搜索提供方启用/禁用。
 func (s *Server) handleToggleSearchProvider(c *gin.Context) {
 	id := c.Param("id")
 
