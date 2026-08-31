@@ -3,7 +3,7 @@
     <div class="login-bg"></div>
     <div class="login-card">
       <div class="brand">
-        <div class="brand-logo">🤖</div>
+        <BrandMark class="brand-logo" />
         <h1 class="brand-title">Bot 平台</h1>
         <p class="brand-sub">智能对话 · 多 Bot 管理 · 一站式工作台</p>
       </div>
@@ -50,6 +50,7 @@
 </template>
 
 <script setup>
+import BrandMark from '@/components/BrandMark.vue'
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
@@ -138,8 +139,10 @@ function onSubmit({ validateResult }) {
   margin-bottom: 28px;
 }
 .brand-logo {
-  font-size: 44px;
-  line-height: 1;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto;
+  color: var(--bp-label);
 }
 .brand-title {
   margin-top: 14px;
