@@ -16,7 +16,7 @@
     <div class="section-label">
       <span>我的 Bot</span>
       <t-tooltip content="新建 Bot">
-        <t-icon name="add" class="add-btn" data-testid="bot-create-btn" aria-label="新建 Bot" @click="onCreateBot" />
+        <t-icon name="add" class="add-btn pressable" data-testid="bot-create-btn" aria-label="新建 Bot" @click="onCreateBot" />
       </t-tooltip>
     </div>
 
@@ -24,7 +24,7 @@
       <div
         v-for="bot in filteredBots"
         :key="bot.id"
-        class="bot-item"
+        class="bot-item pressable"
         :class="{ active: bot.id === store.activeBotId }"
         :data-testid="`bot-item-${bot.id}`"
         :data-bot-name="bot.name"
@@ -45,7 +45,7 @@
 
     <div class="sidebar-bottom">
       <t-dropdown :options="userMenu" trigger="click" placement="top" :min-column-width="160">
-        <div class="user-card" data-testid="sidebar-user-card" role="button" aria-label="打开用户与系统设置菜单">
+        <div class="user-card pressable" data-testid="sidebar-user-card" role="button" aria-label="打开用户与系统设置菜单">
           <div class="sidebar-avatar">{{ userInitial }}</div>
           <div class="user-name" data-testid="sidebar-user-name">{{ userStore.user?.nickname || '用户' }}</div>
           <t-icon name="setting" class="user-setting" data-testid="sidebar-user-menu" />
@@ -132,16 +132,19 @@ const userMenu = computed(() => {
 
 <style scoped>
 .bot-sidebar {
-  width: 240px;
+  width: var(--bp-sidebar-width);
   flex-shrink: 0;
   height: 100%;
-  background: var(--bp-sidebar-bg);
-  color: var(--bp-sidebar-text);
+  background: var(--bp-surface-translucent);
+  color: var(--bp-label);
   display: flex;
   flex-direction: column;
+  backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  -webkit-backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  border-right: var(--bp-hairline);
 }
 .sidebar-top {
-  padding: 16px 16px 8px;
+  padding: 18px 16px 6px;
 }
 .logo-row {
   display: flex;
@@ -152,52 +155,57 @@ const userMenu = computed(() => {
   font-size: 22px;
 }
 .logo-text {
-  font-size: 16px;
-  font-weight: 600;
-  color: #fff;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: var(--bp-tracking-title);
+  color: var(--bp-label);
 }
 .sidebar-search {
-  padding: 8px 12px;
+  padding: 8px 12px 10px;
 }
 .section-label {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px 6px;
-  font-size: 12px;
-  color: var(--bp-sidebar-muted);
+  padding: 8px 16px 6px;
+  font-size: 11px;
+  font-weight: 590;
+  letter-spacing: 0.04em;
+  color: var(--bp-label-secondary);
 }
 .add-btn {
   cursor: pointer;
   font-size: 16px;
-  transition: color 0.2s;
+  color: var(--bp-label-secondary);
+  border-radius: 6px;
+  padding: 2px;
 }
 .add-btn:hover {
-  color: #00a870;
+  color: var(--bp-accent);
+  background: var(--bp-accent-soft);
 }
 .bot-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0 8px;
+  padding: 0 8px 8px;
 }
 .bot-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 8px;
-  border-radius: 8px;
+  padding: 8px 8px;
+  border-radius: var(--bp-radius-md);
   cursor: pointer;
-  transition: background 0.15s;
 }
 .bot-item:hover {
-  background: var(--bp-sidebar-hover);
+  background: var(--bp-surface-fill-hover);
 }
 .bot-item.active {
-  background: var(--bp-sidebar-active);
+  background: var(--bp-surface-fill-active);
 }
 .bot-avatar {
-  font-size: 22px;
-  width: 32px;
+  font-size: 20px;
+  width: 30px;
   text-align: center;
   flex-shrink: 0;
 }
@@ -206,15 +214,18 @@ const userMenu = computed(() => {
   min-width: 0;
 }
 .bot-name {
-  font-size: 14px;
-  color: #fff;
+  font-size: 13.5px;
+  font-weight: 510;
+  color: var(--bp-label);
+  letter-spacing: var(--bp-tracking-body);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .bot-desc {
   font-size: 11px;
-  color: var(--bp-sidebar-muted);
+  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-tertiary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -222,49 +233,50 @@ const userMenu = computed(() => {
 .bot-more {
   opacity: 0;
   cursor: pointer;
-  transition: opacity 0.15s;
+  color: var(--bp-label-tertiary);
 }
 .bot-item:hover .bot-more {
   opacity: 1;
 }
 .sidebar-bottom {
-  padding: 10px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 10px 12px 12px;
+  border-top: var(--bp-hairline);
 }
 .user-card {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 6px;
-  border-radius: 8px;
+  border-radius: var(--bp-radius-md);
   cursor: pointer;
 }
 .user-card:hover {
-  background: var(--bp-sidebar-hover);
+  background: var(--bp-surface-fill-hover);
 }
 .sidebar-avatar {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: #00a870;
-  color: #fff;
+  background: var(--bp-accent);
+  color: var(--bp-label-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
 }
 .user-name {
   flex: 1;
-  font-size: 14px;
-  color: #fff;
+  font-size: 13px;
+  font-weight: 510;
+  color: var(--bp-label);
 }
 .user-setting {
   cursor: pointer;
-  color: var(--bp-sidebar-muted);
+  color: var(--bp-label-tertiary);
 }
 .user-setting:hover {
-  color: #fff;
+  color: var(--bp-label);
 }
 </style>

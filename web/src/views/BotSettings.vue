@@ -282,38 +282,40 @@ function removeBot() {
 </script>
 
 <style scoped>
-.bot-shell { flex: 1; width: 100%; min-width: 0; display: flex; flex-direction: column; height: 100%; background: #fff; }
-.bot-topbar { height: 52px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0; }
-.back-btn { display: flex; align-items: center; gap: 4px; border: none; background: transparent; cursor: pointer; font-size: 15px; font-weight: 600; color: #1d1d1f; }
-.back-btn:hover { color: #555; }
+.bot-shell { flex: 1; width: 100%; min-width: 0; display: flex; flex-direction: column; height: 100%; background: var(--bp-surface); }
+.bot-topbar { height: 52px; display: flex; align-items: center; padding: 0 20px; border-bottom: var(--bp-hairline); flex-shrink: 0; }
+.back-btn { display: flex; align-items: center; gap: 4px; border: none; background: transparent; cursor: pointer; font-size: 15px; font-weight: 600; color: var(--bp-label); }
+.back-btn:hover { color: var(--bp-label-secondary); }
 
 .bot-head { display: flex; align-items: center; gap: 14px; padding: 18px 24px; flex-shrink: 0; }
 .bh-avatar {
-  width: 56px; height: 56px; border-radius: 50%; background: #f1f1f3; overflow: hidden;
-  display: flex; align-items: center; justify-content: center; font-size: 16px; color: #666; font-weight: 600;
+  width: 56px; height: 56px; border-radius: 50%; background: var(--bp-surface-fill); overflow: hidden;
+  display: flex; align-items: center; justify-content: center; font-size: 16px; color: var(--bp-label-secondary); font-weight: 600;
 }
 .bh-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .bh-name-row { display: flex; align-items: center; gap: 8px; }
-.bh-name { font-size: 18px; font-weight: 700; color: #1d1d1f; }
-.bh-edit { color: #aaa; cursor: pointer; }
-.bh-edit:hover { color: #555; }
+.bh-name { font-size: 18px; font-weight: 700; color: var(--bp-label); }
+.bh-edit { color: var(--bp-label-tertiary); cursor: pointer; }
+.bh-edit:hover { color: var(--bp-label-secondary); }
 .bh-status {
   display: inline-block; margin-top: 6px; font-size: 12px; padding: 3px 12px; border-radius: 6px;
-  background: #f2f3f5; color: #888;
+  background: var(--bp-surface-fill); color: var(--bp-label-tertiary);
 }
 .bh-status.running { background: #1d1d1f; color: #fff; }
 
-.bot-body { flex: 1; display: flex; min-height: 0; border-top: 1px solid #f0f0f0; }
+.bot-body { flex: 1; display: flex; min-height: 0; border-top: var(--bp-hairline); }
 .bot-nav {
   width: 180px; flex-shrink: 0; padding: 16px 12px; overflow-y: auto;
-  border-right: 1px solid #f0f0f0; display: flex; flex-direction: column; gap: 2px;
+  border-right: var(--bp-hairline); display: flex; flex-direction: column; gap: 2px;
 }
 .bn-item {
   text-align: left; padding: 9px 14px; border: none; background: transparent; border-radius: 8px;
-  font-size: 14px; color: #666; cursor: pointer;
+  font-size: 14px; color: var(--bp-label-secondary); cursor: pointer;
 }
-.bn-item:hover { background: #f5f5f5; }
-.bn-item.active { background: #f0f1f3; color: #1d1d1f; font-weight: 600; }
+.bn-item:hover { background: var(--bp-surface-fill-hover); }
+.bn-item:active { transform: scale(var(--bp-press-scale)); }
+.bn-item { transition: background var(--bp-duration) var(--bp-ease-out), color var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out); }
+.bn-item.active { background: var(--bp-surface-fill-active); color: var(--bp-label); font-weight: 600; }
 
 .bot-content { flex: 1; min-width: 0; overflow-y: auto; padding: 24px 28px; }
 .bot-content .pad { width: 100%; }
@@ -322,9 +324,9 @@ function removeBot() {
 
 :deep(.ph) { width: 100%; }
 :deep(.ph-title) { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
-:deep(.ph-desc) { font-size: 13px; color: #888; margin: 0 0 20px; }
+:deep(.ph-desc) { font-size: 13px; color: var(--bp-label-tertiary); margin: 0 0 20px; }
 :deep(.ph-box) {
-  border: 1px dashed #e0e0e0; border-radius: 12px; padding: 60px; text-align: center;
-  color: #bbb; font-size: 14px; background: #fafafa;
+  border: 1px dashed var(--bp-separator-opaque); border-radius: 12px; padding: 60px; text-align: center;
+  color: var(--bp-label-quaternary); font-size: 14px; background: var(--bp-bg-subtle);
 }
 </style>

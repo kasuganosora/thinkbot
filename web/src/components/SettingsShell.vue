@@ -28,26 +28,31 @@ defineProps({
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #f3f3f5;
+  background: var(--bp-bg);
 }
 .settings-topbar {
-  height: 56px;
+  height: 52px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 20px;
-  background: #fff;
-  border-bottom: 1px solid #ececec;
+  padding: 0 16px;
+  background: var(--bp-surface-toolbar);
+  backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  -webkit-backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  border-bottom: var(--bp-hairline);
+  z-index: 2;
 }
 .settings-title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
+  letter-spacing: var(--bp-tracking-title);
+  color: var(--bp-label);
 }
 .settings-content {
   flex: 1;
   overflow-y: auto;
-  padding: 28px 20px;
+  padding: 28px 24px 48px;
 }
 .settings-content.is-wide {
   padding: 0;
