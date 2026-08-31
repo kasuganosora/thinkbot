@@ -1,0 +1,149 @@
+# ============================================================================
+# ThinkBot 部署编排（单服务，SQLite + DooD）
+#
+# 架构：
+#   thinkbot 容器本身只跑主程序（Go 二进制，内含 Web 控制台与 HTTP API）。
+#   它经挂载的 /var/run/docker.sock 指挥宿主 Docker daemon，为每个 bot 创建
+#   独立的「兄弟容器」作为沙箱；bot 命令在兄弟容器内 docker exec 执行，文件
+#   落 named volume，与主程序隔离。兄弟容器由沙箱代码设置资源限制与
+#   --network none，不属于本 compose 项目。
+#
+# 依赖：
+#   无外部服务。数据全部落在 SQLite（容器内 data/thinkbot.db，WAL 模式）与
+#   data/workspaces，因此不需要 db / redis / mq 等附加服务。
+#
+# 前提：
+#   1) 宿主已安装并运行 Docker daemon；
+#   2) 运行 compose 的用户对 docker.sock 有读写权限；
+#   3) ⚠️ 【必做】先创建配置文件：cp .env.example .env 并填入 LLM API Key。
+#      bind mount 不会自动创建缺失的文件——宿主没有 .env 时，Docker 会挂进来一个
+#      【空目录】，主程序读取失败后只打一条 WARN 就用内置默认值继续跑（沙箱镜像
+#      退化为 alpine 无浏览器、LLM Key 缺失），表现为「起来了但功能残缺」。
+#      entrypoint.sh 已加防呆：检测到 /app/.env 是目录时直接报错退出。
+#   4) 宿主 8080 端口空闲。若宿主另有裸跑的 thinkbot 实例（如 launchd/守护脚本
+#      拉起的），必须先停掉它或改下面的宿主端口映射，否则容器报
+#      "bind: address already in use" 起不来。注意容器内的 singleinst 单实例
+#      探测的是容器自己的 localhost，无法发现宿主上的那个实例。
+#
+# 首次运行：
+#   cp .env.example .env && vim .env
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# 常用命令：
+#   更新（改代码后）：docker compose up -d --build
+#   停服：            docker compose down          # 保留 data/container 与 logs/container
+#   查看健康状态：    docker compose ps
+#
+# 数据落点：容器内 /app/data、/app/logs 分别映射到宿主的 ./data/container 与
+# ./logs/container（刻意挂子目录，理由见下方 volumes 注释）。容器与宿主裸跑实例
+# 的数据彼此独立，互不影响。
+# ============================================================================
+
+name: thinkbot
+
+services:
+  thinkbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 版本信息注入（可选，不填则回退到二进制 mtime，功能不受影响）。
+      # 刻意不写成 ${BUILD_TIME} 之类的插值：compose 默认把项目根 .env 当作变量
+      # 替换文件读取，而本项目的 .env 是【应用配置】，键名形如 api.addr（含点，
+      # 非合法 shell 变量名），混用容易踩坑。需要精确版本号时用 CLI 显式传：
+      #   docker compose build \
+      #     --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+      #     --build-arg GIT_REVISION=$(git rev-parse HEAD) \
+      #     --build-arg VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+      #   docker compose up -d
+    image: thinkbot:local
+    container_name: thinkbot
+    restart: unless-stopped
+
+    ports:
+      # 宿主端口:容器端口。容器端口需与 .env 的 api.addr 保持一致（默认 :8080）。
+      - "8080:8080"
+
+    volumes:
+      # 【关键·DooD】挂载宿主 docker.sock，容器内 docker CLI 借此创建 bot 沙箱兄弟容器。
+      #
+      # 为什么不需要 privileged：这里 DooD 而非 DinD——沙箱是「兄弟容器」，由宿主
+      # daemon 创建，与本容器平级；容器内不跑 dockerd，也就不存在嵌套容器所需的
+      # 内核能力。沙箱的实际约束由 sandbox/botcontainer.go create() 在创建时施加
+      # （--memory / --cpus / --shm-size 512m / --network none，无 --privileged、
+      # 无 --cap-add）；浏览器场景靠镜像内 Chromium 的 --no-sandbox 解决，而非提权
+      # 整个容器。主容器需要的只是 socket 的组读写权限，由 entrypoint.sh 按 socket
+      # 实际 gid 建组 + usermod + setpriv 降权完成。
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # 应用数据持久化：数据库（data/thinkbot.db 及 -wal/-shm）与 bot 工作空间
+      # （data/workspaces）。删掉这个挂载等于删库，请纳入备份。
+      #
+      # 必须挂 container/ 子目录而非 ./data 根：entrypoint.sh 启动时会
+      # `chown -R thinkbot:thinkbot /app/data`（uid 1000），直接挂根会把宿主
+      # data/ 的属主整棵改掉，导致宿主裸跑的 thinkbot 实例失去读写权限。
+      # 挂子目录后容器与宿主各自独立一份数据，互不影响。
+      - ./data/container:/app/data
+
+      # 日志持久化：主程序写入 ./logs（thinkbot.log 为 JSONL，thinkbot.console.log
+      # 为可读文本）。两者均由 lumberjack 轮转，不挂出来会随容器销毁丢失。
+      # 挂到 container/ 子目录而非 ./logs 根：entrypoint 启动时会对日志目录做
+      # chown -R，隔离后不会连带改掉宿主 logs/ 下的其他文件属主。
+      - ./logs/container:/app/logs
+
+      # 配置文件：应用读取相对工作目录的 .env（容器 WORKDIR 为 /app，即 /app/.env），
+      # 可用环境变量 CONFIG_FILE 覆盖。只读挂载，避免容器内误写。
+      - ./.env:/app/.env:ro
+
+      # 前端静态资源已由镜像的 frontend 构建阶段打进 /app/static，无需挂载。
+      # 若要在不重新构建镜像的前提下热替换前端，先 `cd web && npm run build`
+      # （产物输出到项目根 static/），再取消下面一行注释（会覆盖镜像内产物）：
+      # - ./static:/app/static:ro
+
+      # 技能目录（可选）。代码读取的 skills/ 是【运行时用户数据目录】，与仓库里
+      # 的 skill/（Go 源码包）同名但无关，仓库内本就不该有它。目录缺失时
+      # skill/loader.go 静默返回 0 条、不打错误日志，属正常行为，不是故障。
+      # 若要在容器里启用文件系统技能，在项目根建 skills/<技能名>/SKILL.md 后
+      # 取消下面一行注释（只读挂载即可，技能由主程序读取、无需写入）：
+      # - ./skills:/app/skills:ro
+
+    environment:
+      # 影响 bot 的时间感知与日志时间戳，需与 .env 的 system.timezone 保持一致。
+      TZ: Asia/Shanghai
+
+      # DB_PATH / LOG_LEVEL 会被 config 层映射为 db.path / log.level。
+      # 一般留在 .env 里配置即可，此处仅作为容器级兜底提示，无需改动。
+      # DB_PATH: data/thinkbot.db
+      # LOG_LEVEL: info
+
+    security_opt:
+      # 禁止容器内经 setuid / 文件 capabilities 提权。
+      # 「防提权」≠「禁止降权」：entrypoint 的 setpriv --reuid=1000 是 root→1000 的
+      # 降权，不受本项影响。已实测验证——在 --security-opt no-new-privileges:true 下
+      # 完整跑通 groupadd / usermod -aG / setpriv --init-groups 降权，结果与不加本项
+      # 完全一致（uid=1000 且附加组生效）。沙箱容器不由 compose 创建，不受本项约束。
+      - no-new-privileges:true
+
+    # SQLite 为 WAL 模式，停机时需要时间做 checkpoint 并释放 bot 沙箱容器，
+    # 默认的 10s 宽限期偏短，放宽到 45s 保证优雅退出。
+    stop_grace_period: 45s
+
+    healthcheck:
+      # 探活应用本身（请求 /health），而非仅检查 docker.sock 或二进制是否存在。
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      # 应用日志文件本身已轮转，这里限制的是容器 stdout 的 docker 日志驱动输出，
+      # 避免长时间运行把宿主磁盘撑满。
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # 主容器不设内存硬限制：其峰值随 bot 数量波动，被 cgroup OOM kill 的代价
+    # 高于占用偏高。沙箱侧资源由 sandbox 代码对每个兄弟容器单独限制
+    # （--memory / --cpus / --network none），不受本设置影响。

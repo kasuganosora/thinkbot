@@ -1,0 +1,217 @@
+package memory
+
+import (
+	"context"
+	"encoding/json"
+	"regexp"
+	"strings"
+)
+
+// ============================================================================
+// Think 标签过滤器 — 在记忆写入前清理 LLM 深度思考内容
+//
+// 某些 LLM（如 DeepSeek-R1、GLM、QwQ 等）会将推理过程以 <think>...</think>
+// 或 <thinking>...</thinking> 标签嵌入到回复文本中。这些推理内容对人类用户
+// 没有直接价值，存储到记忆中会浪费存储空间和检索时的 token 预算。
+//
+// 本模块在写入记忆前移除这些标签及其内容，仅保留最终回复文本。
+// 实现参考了 Memoh 项目的 FilterThinkingTags / FilterReasoningArray。
+// ============================================================================
+
+// thinkTagRe 匹配 <think>...</think> 和 <thinking>...</thinking> 块。
+// 标志说明：
+//   - i: 不区分大小写（某些模型输出 <Think> 或 <THINKING>）
+//   - s: 使 . 匹配换行符（思考内容通常是多行的）
+var thinkTagRe = regexp.MustCompile(`(?is)<think(?:ing)?>\s*.*?\s*</think(?:ing)?>`)
+
+// unclosedThinkRe 匹配只有开标签没有闭标签的 <think>/<thinking>（流式截断场景）。
+var unclosedThinkRe = regexp.MustCompile(`(?is)<think(?:ing)?>.*$`)
+
+// StripThinkTags 从文本中移除 <think>...</think> 和 <thinking>...</thinking> 块。
+//
+// 处理逻辑：
+//  1. 移除完整的 think/thinking 标签对及其内容
+//  2. 移除未闭合的 think/thinking 开标签（截断的流式输出）
+//  3. 清理多余空白，返回 TrimSpace 后的结果
+//
+// 如果移除后内容为空（即文本只包含思考内容），返回空字符串。
+func StripThinkTags(text string) string {
+	cleaned := thinkTagRe.ReplaceAllString(text, "")
+	cleaned = unclosedThinkRe.ReplaceAllString(cleaned, "")
+	return strings.TrimSpace(cleaned)
+}
+
+// internalTagRe 匹配 <internal>...</internal> 块（回复控制协议要求的私有心里话标签）。
+// 标志与 thinkTagRe 一致：i 不区分大小写，s 使 . 匹配换行（心里话通常多行）。
+var internalTagRe = regexp.MustCompile(`(?is)<internal>\s*.*?\s*</internal>`)
+
+// unclosedInternalRe 匹配只有开标签没有闭标签的 <internal>（流式截断场景）。
+// 注意：调用方只会把「控制块之前的内容」传入，故 .*$ 不会吞掉 @@REPLY_CONTROL@@ 控制行。
+var unclosedInternalRe = regexp.MustCompile(`(?is)<internal>.*$`)
+
+// StripInternalTags 从文本中移除 <internal>...</internal> 私有心里话标签及其内容。
+//
+// 出站链路用它确保模型写在 <internal> 里的判断、吐槽、内部备注永不外发——
+// 这是「同时输出心里话和想说的话」场景下防止心里话泄漏的关键一道。
+// 与 StripThinkTags 同范式：先去完整标签对，再去未闭合开标签，最后清理空白。
+func StripInternalTags(text string) string {
+	cleaned := internalTagRe.ReplaceAllString(text, "")
+	cleaned = unclosedInternalRe.ReplaceAllString(cleaned, "")
+	return strings.TrimSpace(cleaned)
+}
+
+// reasoningPart 对应某些 API（如智谱 GLM）在 content 字段中发出的 JSON 推理数组。
+type reasoningPart struct {
+	Text string `json:"text"`
+	Type string `json:"type"`
+}
+
+// StripReasoningArray 检测并剥离原始 JSON 推理数组。
+//
+// 某些 API（如智谱 GLM）在上下文溢出或特殊模式下，会在 content 字段中
+// 发出形如 [{"text":"...","type":"reasoning"},{"text":"...","type":"text"}]
+// 的 JSON 数组，而非普通文本。
+//
+// 本函数提取其中 type="text" 的部分并用换行连接；
+// 如果输入不是推理数组格式，则原样返回。
+func StripReasoningArray(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "[{") || !strings.HasSuffix(trimmed, "}]") {
+		return text
+	}
+
+	var parts []reasoningPart
+	if err := json.Unmarshal([]byte(trimmed), &parts); err != nil {
+		return text
+	}
+	if len(parts) == 0 {
+		return text
+	}
+
+	hasReasoning := false
+	var texts []string
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			texts = append(texts, p.Text)
+		case "reasoning":
+			hasReasoning = true
+		default:
+			// 未知类型，不是推理数组
+			return text
+		}
+	}
+
+	if !hasReasoning {
+		return text
+	}
+
+	return strings.Join(texts, "\n")
+}
+
+// StripThinking 对文本执行完整的思考内容清理。
+// 依次应用 StripReasoningArray → StripThinkTags。
+// 这是记忆写入前应调用的主入口。
+func StripThinking(text string) string {
+	text = StripReasoningArray(text)
+	return StripThinkTags(text)
+}
+
+// ============================================================================
+// 内部状态泄露过滤器 — 防止系统提示中的内部指标外泄到公开回复
+// ============================================================================
+
+// internalCharsRe 匹配形如 "(2,206/2,200 字符)" 的内部用量标记
+// （来自记忆块头部的 [current/limit chars]）。
+var internalCharsRe = regexp.MustCompile(`\(\s*\d[\d,]*\s*\/\s*\d[\d,]*\s*字符\s*\)`)
+
+// internalCharsEnRe 匹配形如 "2,206/2,200 chars" 的英文内部用量标记。
+var internalCharsEnRe = regexp.MustCompile(`\d[\d,]*\s*\/\s*\d[\d,]*\s*chars?`)
+
+// internalPhraseRe 匹配直接复述内部状态的固定短语（模型可能把系统提示里的
+// 记忆容量指标 paraphrase 成中文写进公开回复）。
+var internalPhraseRe = regexp.MustCompile(`当前记忆已接近容量上限|记忆容量上限|记忆已接近容量上限|接近容量上限`)
+
+// multiSpaceRe 折叠剥离后残留的多余空白。
+var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
+
+// StripInternalState 从最终回复文本中剥离内部系统状态（记忆用量指标等），
+// 防止「心里话 / 内部指标」泄漏到公开帖文。
+//
+// 典型泄漏案例：bot 把系统提示里的 "[2,206/2,200 chars]" 复述成
+// 「当前记忆已接近容量上限（2,206/2,200 字符）」公开发到时间线。
+// 本函数在 llmroute 出站清洗阶段（StripThinking 之后）调用，作为纵深防御。
+func StripInternalState(text string) string {
+	text = internalCharsRe.ReplaceAllString(text, "")
+	text = internalCharsEnRe.ReplaceAllString(text, "")
+	text = internalPhraseRe.ReplaceAllString(text, "")
+	// 清理剥离后可能残留的多余空白
+	text = multiSpaceRe.ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
+}
+
+// ============================================================================
+// 上下文标记过滤器 — 防止入站注入的上下文标记泄漏到对外回复
+// ============================================================================
+
+// contextMarkerRe 匹配入站阶段注入的「上下文标记」整行，形态有三种：
+//   - [Reply to <sender>: <quoted>]  —— noteContext 在用户回复某帖时前置，告知模型"用户在回复谁/回复了啥"
+//   - [Renote from <sender>: <quoted>] —— 同上，引用转发场景
+//   - [note_id: <id>] —— 当前帖 ID，供模型调引用/反应类工具
+//
+// 这些标记仅供模型理解上下文，绝不应出现在对外发送的回复正文里。
+// 模型偶发会把入站文本里的 [Reply to ...] / [Renote from ...] 原样回显到自己的回复开头
+// （实测 GLM 在 reply 场景把 `[Reply to @luna: 嘿嘿]` 直接复制成了回复首行），
+// 导致对外帖子出现诡异的方括号前缀。这与 StripThinking / StripInternalState 同一思路：
+// 在出站清洗阶段兜底剥离，而非完全依赖模型遵守提示词。
+//
+// 匹配整行（允许行首尾空白），不误伤正文里普通出现的方括号内容。
+var contextMarkerRe = regexp.MustCompile(
+	`(?m)^\s*\[(?:(?:Reply to|Renote from) .*?: .*?|note_id: .*?)\]\s*$`,
+)
+
+// StripContextMarkers 从最终回复文本中剥离入站注入的上下文标记整行，
+// 防止 `[Reply to ...]` / `[Renote from ...]` / `[note_id: ...]` 泄漏到公开帖文。
+//
+// 在 llmroute 出站清洗阶段（StripThinking / StripInternalState 之后）调用，
+// 作为纵深防御的最后一道兜底。
+func StripContextMarkers(text string) string {
+	return strings.TrimSpace(contextMarkerRe.ReplaceAllString(text, ""))
+}
+
+// ============================================================================
+// ThinkFilterStore — 自动清理思考内容的 Store 装饰器
+// ============================================================================
+
+// ThinkFilterStore 包装一个底层 Store，在 Append 前自动对 Entry.Content
+// 执行 StripThinking 清理。
+//
+// 使用方式：
+//
+//	repo := memory.NewMemoryRepository()
+//	filtered := memory.NewThinkFilterStore(repo)
+//	// filtered 满足 Store 接口，后续所有 Append 都会自动清理 think 标签
+type ThinkFilterStore struct {
+	inner Store
+}
+
+// NewThinkFilterStore 创建思考内容过滤 Store 装饰器。
+func NewThinkFilterStore(inner Store) *ThinkFilterStore {
+	return &ThinkFilterStore{inner: inner}
+}
+
+// Append 在写入前清理 Entry.Content 中的思考内容。
+func (s *ThinkFilterStore) Append(ctx context.Context, entry Entry) error {
+	entry.Content = StripThinking(entry.Content)
+	return s.inner.Append(ctx, entry)
+}
+
+// Delete 透传到底层 Store。
+func (s *ThinkFilterStore) Delete(ctx context.Context, scope Scope, entryID string) error {
+	return s.inner.Delete(ctx, scope, entryID)
+}
+
+// Clear 透传到底层 Store。
+func (s *ThinkFilterStore) Clear(ctx context.Context, scope Scope) error {
+	return s.inner.Clear(ctx, scope)
+}

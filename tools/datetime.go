@@ -1,0 +1,209 @@
+package tools
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/llm"
+)
+
+// ============================================================================
+// datetime_calc — 日期时间计算工具
+//
+// 提供：
+//   - 日期加减（天/周/月）
+//   - 日期差计算
+//   - 星期几查询
+//   - 格式转换
+// ============================================================================
+
+func datetimeCalcToolDef() agenttools.ToolDef {
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name:         "datetime_calc",
+			DeferredLoad: true, // 低频通用工具，初始仅暴露名称+描述
+			Description: "Perform date and time calculations: shift a date, compute the difference between two dates, " +
+				"look up the weekday, or convert a date to another format. " +
+				"Accepted input formats: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.",
+			Keywords: []string{
+				"日期计算", "时间计算", "相差几天", "星期几", "日期格式转换",
+				"几天后", "几天前", "date", "datetime",
+			},
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"operation": map[string]any{
+						"type":        "string",
+						"description": "What to compute: add (shift a date), diff (difference between two dates), weekday (day of week), format (convert format).",
+						"enum":        []string{"add", "diff", "weekday", "format"},
+					},
+					"date": map[string]any{
+						"type":        "string",
+						"description": "Base date, formatted as YYYY-MM-DD or YYYY-MM-DD HH:MM:SS. Leave empty to use the current time.",
+					},
+					"value": map[string]any{
+						"type":        "integer",
+						"description": "Amount to shift by. Required when operation=add. Positive adds, negative subtracts.",
+					},
+					"unit": map[string]any{
+						"type":        "string",
+						"description": "Unit for the shift: days, weeks, months, years, hours or minutes.",
+						"enum":        []string{"days", "weeks", "months", "years", "hours", "minutes"},
+					},
+					"date2": map[string]any{
+						"type":        "string",
+						"description": "The second date. Required when operation=diff.",
+					},
+					"format": map[string]any{
+						"type":        "string",
+						"description": "Target layout, using Go reference-time syntax. Required when operation=format, e.g. 2006-01-02, 01/02/2006, Jan 2, 2006",
+					},
+				},
+				"required": []string{"operation"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				m, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("invalid input: expected object")
+				}
+				operation, _ := m["operation"].(string)
+
+				// 解析日期
+				dateStr, _ := m["date"].(string)
+				baseTime, err := parseDateTime(dateStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid date format: %w", err)
+				}
+
+				switch operation {
+				case "add":
+					value, ok := toIntSearch(m["value"])
+					if !ok {
+						return nil, fmt.Errorf("value is required for add operation")
+					}
+					unit, _ := m["unit"].(string)
+					result := addDuration(baseTime, value, unit)
+					return map[string]any{
+						"operation": "add",
+						"original":  baseTime.Format("2006-01-02 15:04:05"),
+						"result":    result.Format("2006-01-02 15:04:05"),
+						"weekday":   result.Weekday().String(),
+					}, nil
+
+				case "diff":
+					date2Str, _ := m["date2"].(string)
+					if date2Str == "" {
+						return nil, fmt.Errorf("date2 is required for diff operation")
+					}
+					time2, err := parseDateTime(date2Str)
+					if err != nil {
+						return nil, fmt.Errorf("invalid date2 format: %w", err)
+					}
+					diff := baseTime.Sub(time2)
+					hours := int(diff.Hours())
+					days := hours / 24
+					return map[string]any{
+						"operation":     "diff",
+						"date1":         baseTime.Format("2006-01-02 15:04:05"),
+						"date2":         time2.Format("2006-01-02 15:04:05"),
+						"days":          days,
+						"hours":         hours,
+						"minutes":       int(diff.Minutes()),
+						"absolute_days": absInt(days),
+					}, nil
+
+				case "weekday":
+					return map[string]any{
+						"operation":    "weekday",
+						"date":         baseTime.Format("2006-01-02"),
+						"weekday":      baseTime.Weekday().String(),
+						"weekday_cn":   weekdayCN(baseTime.Weekday()),
+						"week_of_year": weekOfYear(baseTime),
+					}, nil
+
+				case "format":
+					formatStr, _ := m["format"].(string)
+					if formatStr == "" {
+						formatStr = "2006-01-02"
+					}
+					return map[string]any{
+						"operation": "format",
+						"original":  baseTime.Format(time.RFC3339),
+						"result":    baseTime.Format(formatStr),
+						"format":    formatStr,
+					}, nil
+
+				default:
+					return nil, fmt.Errorf("unknown operation: %s", operation)
+				}
+			}),
+		},
+		Category: "utility",
+	}
+}
+
+func parseDateTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Now(), nil
+	}
+
+	// 尝试常见格式
+	formats := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+		"2006/01/02",
+		"01/02/2006",
+		"Jan 2, 2006",
+		time.RFC3339,
+	}
+
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("unrecognized date format: %s", s)
+}
+
+func addDuration(t time.Time, value int, unit string) time.Time {
+	switch unit {
+	case "days":
+		return t.AddDate(0, 0, value)
+	case "weeks":
+		return t.AddDate(0, 0, value*7)
+	case "months":
+		return t.AddDate(0, value, 0)
+	case "years":
+		return t.AddDate(value, 0, 0)
+	case "hours":
+		return t.Add(time.Duration(value) * time.Hour)
+	case "minutes":
+		return t.Add(time.Duration(value) * time.Minute)
+	default:
+		return t.AddDate(0, 0, value) // 默认天
+	}
+}
+
+func weekdayCN(w time.Weekday) string {
+	names := []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+	return names[w]
+}
+
+func weekOfYear(t time.Time) int {
+	_, week := t.ISOWeek()
+	return week
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}

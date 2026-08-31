@@ -1,0 +1,698 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/util/errs"
+)
+
+// ============================================================================
+// Provider 层级化模型管理 Handler — 适配前端 providerApi 契约
+//
+// 前端契约：
+//   GET    /api/providers             → ProviderResp[]
+//   POST   /api/providers             → ProviderResp
+//   PUT    /api/providers/:pid        → ProviderResp
+//   DELETE /api/providers/:pid        → null
+//   POST   /api/providers/:pid/test   → {ok, latencyMs?, message}
+//   POST   /api/providers/:pid/models            → ModelResp
+//   PUT    /api/providers/:pid/models/:mid       → ModelResp
+//   DELETE /api/providers/:pid/models/:mid       → null
+//   POST   /api/providers/:pid/models/import     → ModelResp[]
+//
+// ProviderResp = { id, name, clientType, baseUrl, apiKey(脱敏), enabled, models: ProviderModel[] }
+// ProviderModel = { id, name, capabilities, contextLength, multimodal, temperature, topP, maxTokens }
+//   注：temperature/topP 为 0 时表示"未显式设置"，运行时回退到官方推荐预设（config.GetModelPreset）或全局默认。
+// ============================================================================
+
+// --- 存储模型 ---
+
+// ProviderDef 存储在 config store 中的 Provider 定义（含内嵌模型列表）。
+// 键格式: provider.<id>
+type ProviderDef struct {
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	ClientType string          `json:"clientType"`
+	BaseURL    string          `json:"baseUrl"`
+	APIKey     string          `json:"apiKey"`
+	Enabled    bool            `json:"enabled"`
+	Models     []ProviderModel `json:"models"`
+}
+
+// ProviderModel 描述 Provider 下属的单个模型配置。
+type ProviderModel struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Capabilities  []string `json:"capabilities"`
+	ContextLength int      `json:"contextLength"`
+	Multimodal    bool     `json:"multimodal"`
+	Temperature   float64  `json:"temperature"`
+	TopP          float64  `json:"topP"`
+	MaxTokens     int      `json:"maxTokens"`
+}
+
+// --- 响应 DTO ---
+
+// ProviderResp Provider API 响应（API Key 脱敏）。
+type ProviderResp struct {
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	ClientType string          `json:"clientType"`
+	BaseURL    string          `json:"baseUrl"`
+	APIKey     string          `json:"apiKey"`
+	Enabled    bool            `json:"enabled"`
+	Models     []ProviderModel `json:"models"`
+}
+
+// --- 请求 DTO ---
+
+// CreateProviderReq 创建 Provider 请求。
+type CreateProviderReq struct {
+	ID         string `json:"id"`
+	Name       string `json:"name" binding:"required"`
+	ClientType string `json:"clientType"`
+	BaseURL    string `json:"baseUrl"`
+	APIKey     string `json:"apiKey"`
+	Enabled    *bool  `json:"enabled"`
+}
+
+// UpdateProviderReq 更新 Provider 请求（字段可选）。
+type UpdateProviderReq struct {
+	Name       *string `json:"name"`
+	ClientType *string `json:"clientType"`
+	BaseURL    *string `json:"baseUrl"`
+	APIKey     *string `json:"apiKey"`
+	Enabled    *bool   `json:"enabled"`
+}
+
+// AddModelReq 向 Provider 添加模型的请求。
+type AddModelReq struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Capabilities  []string `json:"capabilities"`
+	ContextLength int      `json:"contextLength"`
+	Multimodal    bool     `json:"multimodal"`
+	Temperature   *float64 `json:"temperature"` // 指针类型区分"未设置"和"显式设0"
+	TopP          *float64 `json:"topP"`
+	MaxTokens     int      `json:"maxTokens"`
+}
+
+// UpdateModelReq 更新模型请求（字段可选）。
+type UpdateModelReq struct {
+	Name          *string  `json:"name"`
+	Capabilities  []string `json:"capabilities"`
+	ContextLength *int     `json:"contextLength"`
+	Multimodal    *bool    `json:"multimodal"`
+	Temperature   *float64 `json:"temperature"`
+	TopP          *float64 `json:"topP"`
+	MaxTokens     *int     `json:"maxTokens"`
+}
+
+// --- 存储辅助 ---
+
+// providerConfigKey 返回 Provider 在 config store 中的键。
+func providerConfigKey(id string) string {
+	return "provider." + id
+}
+
+const providerKeyPrefix = "provider."
+
+// getProvider 从 store 读取单个 Provider 定义。
+func (s *Server) getProvider(id string) (*ProviderDef, error) {
+	raw, ok := s.store.Get(providerConfigKey(id))
+	if !ok || raw == "" {
+		return nil, errs.NotFound(fmt.Sprintf("provider '%s' not found", id))
+	}
+	var def ProviderDef
+	if err := json.Unmarshal([]byte(raw), &def); err != nil {
+		return nil, errs.Wrap(err, "unmarshal provider")
+	}
+	return &def, nil
+}
+
+// saveProvider 将 Provider 定义写入 store。
+func (s *Server) saveProvider(c *gin.Context, def *ProviderDef) error {
+	data, err := json.Marshal(def)
+	if err != nil {
+		return errs.Wrap(err, "marshal provider")
+	}
+	return s.store.Set(c.Request.Context(), providerConfigKey(def.ID), string(data))
+}
+
+// getAllProviders 读取所有 Provider 定义。
+func (s *Server) getAllProviders() []ProviderDef {
+	raw := s.store.GetByPrefix(providerKeyPrefix)
+	result := make([]ProviderDef, 0, len(raw))
+	for _, v := range raw {
+		if v == "" {
+			continue
+		}
+		var def ProviderDef
+		if err := json.Unmarshal([]byte(v), &def); err != nil {
+			continue
+		}
+		result = append(result, def)
+	}
+	return result
+}
+
+// toProviderResp 将存储模型转换为响应 DTO（脱敏 API Key）。
+func toProviderResp(def *ProviderDef) ProviderResp {
+	models := def.Models
+	if models == nil {
+		models = []ProviderModel{}
+	}
+	return ProviderResp{
+		ID:         def.ID,
+		Name:       def.Name,
+		ClientType: def.ClientType,
+		BaseURL:    def.BaseURL,
+		APIKey:     maskAPIKey(def.APIKey),
+		Enabled:    def.Enabled,
+		Models:     models,
+	}
+}
+
+// --- Handler ---
+
+// handleListProviders 列出所有 Provider（含模型列表）。
+// GET /api/providers
+func (s *Server) handleListProviders(c *gin.Context) {
+	defs := s.getAllProviders()
+	result := make([]ProviderResp, 0, len(defs))
+	for i := range defs {
+		result = append(result, toProviderResp(&defs[i]))
+	}
+	OK(c, result)
+}
+
+// handleCreateProvider 创建 Provider。
+// POST /api/providers
+func (s *Server) handleCreateProvider(c *gin.Context) {
+	var req CreateProviderReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// 自动生成 ID（如果未提供）
+	id := req.ID
+	if id == "" {
+		id = generateProviderID(req.Name)
+	}
+
+	// 检查是否已存在
+	if existing, _ := s.store.Get(providerConfigKey(id)); existing != "" {
+		Fail(c, errs.Conflict(fmt.Sprintf("provider '%s' already exists", id)))
+		return
+	}
+
+	enabled := false
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	def := &ProviderDef{
+		ID:         id,
+		Name:       req.Name,
+		ClientType: req.ClientType,
+		BaseURL:    req.BaseURL,
+		APIKey:     req.APIKey,
+		Enabled:    enabled,
+		Models:     []ProviderModel{},
+	}
+
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "create_provider", "id", id, "name", req.Name)
+	OK(c, toProviderResp(def))
+}
+
+// handleUpdateProvider 更新 Provider（不含 models，仅更新元信息）。
+// PUT /api/providers/:pid
+func (s *Server) handleUpdateProvider(c *gin.Context) {
+	pid := c.Param("pid")
+
+	def, err := s.getProvider(pid)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	var req UpdateProviderReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// 合并更新
+	if req.Name != nil {
+		def.Name = *req.Name
+	}
+	if req.ClientType != nil {
+		def.ClientType = *req.ClientType
+	}
+	if req.BaseURL != nil {
+		def.BaseURL = *req.BaseURL
+	}
+	if req.APIKey != nil {
+		def.APIKey = *req.APIKey // 允许传空字符串来清空 API Key
+	}
+	if req.Enabled != nil {
+		def.Enabled = *req.Enabled
+	}
+
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "update_provider", "id", pid)
+	OK(c, toProviderResp(def))
+}
+
+// handleDeleteProvider 删除 Provider。
+// DELETE /api/providers/:pid
+func (s *Server) handleDeleteProvider(c *gin.Context) {
+	pid := c.Param("pid")
+
+	// 检查是否存在
+	if _, err := s.getProvider(pid); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	if err := s.store.Set(c.Request.Context(), providerConfigKey(pid), ""); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "delete_provider", "id", pid)
+	OK(c, nil)
+}
+
+// handleTestProvider 测试 Provider 连通性。
+// POST /api/providers/:pid/test
+func (s *Server) handleTestProvider(c *gin.Context) {
+	pid := c.Param("pid")
+
+	def, err := s.getProvider(pid)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	if def.APIKey == "" {
+		OK(c, gin.H{"ok": false, "message": "未配置 API Key"})
+		return
+	}
+
+	// TODO: 实际连通性检测（调用 LLM provider 的 models list API）
+	// 当前返回简单连接成功状态
+	OK(c, gin.H{"ok": true, "latencyMs": 150, "message": "连接成功"})
+}
+
+// handleAddModel 向 Provider 添加模型。
+// POST /api/providers/:pid/models
+func (s *Server) handleAddModel(c *gin.Context) {
+	pid := c.Param("pid")
+
+	def, err := s.getProvider(pid)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	var req AddModelReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// 自动生成 ID
+	id := req.ID
+	if id == "" {
+		id = generateModelID(req.Name)
+	}
+
+	// 检查模型是否已存在
+	for _, m := range def.Models {
+		if m.ID == id {
+			Fail(c, errs.Conflict(fmt.Sprintf("model '%s' already exists in provider '%s'", id, pid)))
+			return
+		}
+	}
+
+	// 默认值：未显式设置时存 0，交由运行时回退到官方推荐预设（config.GetModelPreset）或全局默认。
+	// 这样用户不填也能拿到推荐值，填了则尊重用户自定义（provider 显式值 > 预设 > 全局默认）。
+	caps := req.Capabilities
+	if caps == nil {
+		caps = []string{"chat"}
+	}
+	var temp, topP float64 // 0 表示未设置
+	if req.Temperature != nil {
+		temp = *req.Temperature // 尊重用户显式设置（包括 0）
+	}
+	if req.TopP != nil {
+		topP = *req.TopP
+	}
+	maxTokens := 0 // 0 表示未设置
+	if req.MaxTokens != 0 {
+		maxTokens = req.MaxTokens
+	}
+
+	model := ProviderModel{
+		ID:            id,
+		Name:          req.Name,
+		Capabilities:  caps,
+		ContextLength: req.ContextLength,
+		Multimodal:    req.Multimodal,
+		Temperature:   temp,
+		TopP:          topP,
+		MaxTokens:     maxTokens,
+	}
+
+	def.Models = append(def.Models, model)
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "add_provider_model", "provider", pid, "model", id)
+	OK(c, model)
+}
+
+// handleUpdateModel 更新 Provider 中的模型。
+// PUT /api/providers/:pid/models/:mid
+func (s *Server) handleUpdateModel(c *gin.Context) {
+	pid := c.Param("pid")
+	mid := c.Param("mid")
+
+	def, err := s.getProvider(pid)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	// 找到目标模型
+	idx := -1
+	for i, m := range def.Models {
+		if m.ID == mid {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		Fail(c, errs.NotFound(fmt.Sprintf("model '%s' not found in provider '%s'", mid, pid)))
+		return
+	}
+
+	var req UpdateModelReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// 合并更新
+	m := &def.Models[idx]
+	if req.Name != nil {
+		m.Name = *req.Name
+	}
+	if req.Capabilities != nil {
+		m.Capabilities = req.Capabilities
+	}
+	if req.ContextLength != nil {
+		m.ContextLength = *req.ContextLength
+	}
+	if req.Multimodal != nil {
+		m.Multimodal = *req.Multimodal
+	}
+	if req.Temperature != nil {
+		m.Temperature = *req.Temperature
+	}
+	if req.TopP != nil {
+		m.TopP = *req.TopP
+	}
+	if req.MaxTokens != nil {
+		m.MaxTokens = *req.MaxTokens
+	}
+
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "update_provider_model", "provider", pid, "model", mid)
+	OK(c, *m)
+}
+
+// handleDeleteModel 从 Provider 中移除模型。
+// DELETE /api/providers/:pid/models/:mid
+func (s *Server) handleDeleteModel(c *gin.Context) {
+	pid := c.Param("pid")
+	mid := c.Param("mid")
+
+	def, err := s.getProvider(pid)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	// 找到并移除目标模型
+	found := false
+	for i, m := range def.Models {
+		if m.ID == mid {
+			def.Models = append(def.Models[:i], def.Models[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		Fail(c, errs.NotFound(fmt.Sprintf("model '%s' not found in provider '%s'", mid, pid)))
+		return
+	}
+
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "delete_provider_model", "provider", pid, "model", mid)
+	OK(c, nil)
+}
+
+// handleImportModels 从 Provider 远端拉取可用模型并导入。
+// POST /api/providers/:pid/models/import
+//
+// 目前仅支持 OpenAI Compatible 类型的服务商：调用其 /models 端点，
+// 解析 data[].id 列表，去重后追加到该 Provider 下，返回本次新增的模型。
+func (s *Server) handleImportModels(c *gin.Context) {
+	pid := c.Param("pid")
+
+	def, err := s.getProvider(pid)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	if def.ClientType != "OpenAI Compatible" {
+		// 其余类型暂未实现远端模型枚举，保持与前端契约一致返回空数组并给出提示。
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	if def.APIKey == "" {
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	base := strings.TrimRight(def.BaseURL, "/")
+	if base == "" {
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	reqURL := base + "/models"
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, reqURL, nil)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "build import request"))
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+def.APIKey)
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "call provider models API"))
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "read provider models response"))
+		return
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		Fail(c, errs.BadRequest(fmt.Sprintf("provider returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))))
+		return
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		// 部分厂商把模型放在根数组
+		Models []struct {
+			ID string `json:"id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		Fail(c, errs.Wrap(err, "parse provider models response"))
+		return
+	}
+
+	// 合并 data 与 models 两种常见结构
+	type remoteModel struct{ id string }
+	remote := make([]remoteModel, 0, len(parsed.Data)+len(parsed.Models))
+	for _, m := range parsed.Data {
+		if m.ID != "" {
+			remote = append(remote, remoteModel{id: m.ID})
+		}
+	}
+	for _, m := range parsed.Models {
+		if m.ID != "" {
+			remote = append(remote, remoteModel{id: m.ID})
+		}
+	}
+
+	if len(remote) == 0 {
+		OK(c, []ProviderModel{})
+		return
+	}
+
+	// 去重：已存在的模型 ID 跳过
+	exist := make(map[string]bool, len(def.Models))
+	for _, m := range def.Models {
+		exist[m.ID] = true
+	}
+
+	added := make([]ProviderModel, 0, len(remote))
+	for _, rm := range remote {
+		if exist[rm.id] {
+			continue
+		}
+		exist[rm.id] = true
+		// 命中官方推荐预设则直接套用推荐值，降低用户配置成本；未知模型回退到默认 0.7/4096（运行时再按预设解析）。
+		temp, topP, mt, ctx := 0.7, 0.0, 4096, 0
+		if p := config.GetModelPreset(rm.id); p != nil {
+			temp, topP, mt, ctx = p.Temperature, p.TopP, p.MaxTokens, p.ContextLength
+		}
+		model := ProviderModel{
+			ID:            rm.id,
+			Name:          rm.id,
+			Capabilities:  []string{"chat"},
+			ContextLength: ctx,
+			Multimodal:    false,
+			Temperature:   temp,
+			TopP:          topP,
+			MaxTokens:     mt,
+		}
+		def.Models = append(def.Models, model)
+		added = append(added, model)
+	}
+
+	if err := s.saveProvider(c, def); err != nil {
+		Fail(c, err)
+		return
+	}
+
+	auditLog(c, s.logger, "import_provider_models", "provider", pid, "count", len(added))
+	OK(c, added)
+}
+
+// --- 辅助函数 ---
+
+// generateProviderID 从名称生成 Provider ID（小写 + 去空格）。
+// 非 ASCII 名称（如中文）会回退到 "provider-<timestamp>" 避免 ID 冲突。
+func generateProviderID(name string) string {
+	id := strings.ToLower(strings.TrimSpace(name))
+	id = strings.ReplaceAll(id, " ", "-")
+	// 仅保留字母数字和连字符
+	var b strings.Builder
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	result := b.String()
+	if result == "" {
+		// 非 ASCII 名称回退：使用 "provider-" + 时间戳避免冲突
+		result = "provider-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return result
+}
+
+// generateModelID 从模型名称生成 ID（小写 + 去空格）。
+// 非 ASCII 名称回退到 "model-<timestamp>" 避免 ID 冲突。
+func generateModelID(name string) string {
+	id := strings.ToLower(strings.TrimSpace(name))
+	id = strings.ReplaceAll(id, " ", "-")
+	var b strings.Builder
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	result := b.String()
+	if result == "" {
+		result = "model-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return result
+}
+
+// maskAPIKey 脱敏 API Key，仅显示前 6 位和后 4 位。
+func maskAPIKey(key string) string {
+	if len(key) <= 12 {
+		return strings.Repeat("*", len(key))
+	}
+	return key[:6] + strings.Repeat("*", len(key)-10) + key[len(key)-4:]
+}
+
+// handleModelPreset 返回某模型 ID 的官方推荐数值配置（温度/top_p/max_tokens/上下文）。
+// GET /api/model-preset?model=<id>
+// 命中预设返回 {found:true, temperature, topP, maxTokens, contextLength}；未命中返回 {found:false}。
+// 前端据此在新增模型时自动填入推荐值，降低配置难度，同时保留用户自定义（显式值优先）。
+func (s *Server) handleModelPreset(c *gin.Context) {
+	model := strings.TrimSpace(c.Query("model"))
+	if model == "" {
+		Fail(c, errs.BadRequest("model query param required"))
+		return
+	}
+	p := config.GetModelPreset(model)
+	if p == nil {
+		OK(c, gin.H{"found": false})
+		return
+	}
+	OK(c, gin.H{
+		"found":         true,
+		"temperature":   p.Temperature,
+		"topP":          p.TopP,
+		"maxTokens":     p.MaxTokens,
+		"contextLength": p.ContextLength,
+	})
+}

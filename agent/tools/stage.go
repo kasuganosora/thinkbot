@@ -1,0 +1,188 @@
+package tools
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	noop_trace "go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
+)
+
+// ============================================================================
+// ToolsStage — Pipeline 工具预热 Stage（可选）
+// ============================================================================
+
+// ToolsStage 是一个可选的诊断 Stage，在 Pipeline 中提前解析工具列表用于 tracing/logging。
+//
+// 注意：工具注入到 LLM function calling 不依赖此 Stage。
+// LLMConfig.ToolResolver 会在 LLM 调用时自动解析工具。
+// 此 Stage 仅用于提前记录可用工具数量，便于在 trace 中观察。
+//
+// 执行位置：Order=150（在 PromptStage(200) 之前）
+type ToolsStage struct {
+	name    string
+	manager *ToolManager
+	tracer  trace.Tracer
+	logger  *zap.SugaredLogger
+}
+
+// NewToolsStage 创建工具预热 Stage（可选）。
+func NewToolsStage(
+	name string,
+	manager *ToolManager,
+	tp trace.TracerProvider,
+	logger *zap.SugaredLogger,
+) *ToolsStage {
+	if name == "" {
+		name = "tools"
+	}
+	if tp == nil {
+		tp = noop_trace.NewTracerProvider()
+	}
+	if logger == nil {
+		logger = zap.NewNop().Sugar()
+	}
+	return &ToolsStage{
+		name:    name,
+		manager: manager,
+		tracer:  tp.Tracer("github.com/kasuganosora/thinkbot/agent/tools"),
+		logger:  logger.With("component", "tools_stage"),
+	}
+}
+
+// Name 返回 Stage 名称。
+func (s *ToolsStage) Name() string { return s.name }
+
+// Process 提前解析工具列表并记录到 trace（诊断用途）。
+func (s *ToolsStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	ctx, span := s.tracer.Start(ctx, "stage.tools.resolve",
+		trace.WithAttributes(
+			attribute.String("message.id", env.Message.ID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
+		))
+	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
+
+	sctx := envelopeToSessionContext(env)
+
+	tools, err := s.manager.ResolveTools(ctx, sctx)
+	if err != nil {
+		span.RecordError(err)
+		logger.Errorw("tool resolution failed",
+			"message_id", env.Message.ID,
+			"err", err)
+		return env, nil
+	}
+
+	span.SetAttributes(attribute.Int("tools.count", len(tools)))
+
+	logger.Debugw("tools resolved",
+		"message_id", env.Message.ID,
+		"count", len(tools),
+	)
+
+	return env, nil
+}
+
+// ============================================================================
+// Built-in Tools — 示例/常用工具
+// ============================================================================
+
+// CurrentTimeTool 返回一个获取当前时间的工具。
+func CurrentTimeTool() ToolDef {
+	return ToolDef{
+		Category: "utility",
+		Scopes:   []string{}, // 全场景
+		Tool: BuildTool(
+			"current_time",
+			"Get the current date and time. Use this tool whenever the user asks a time-related question.",
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"timezone": map[string]any{
+						"type":        "string",
+						"description": "IANA timezone name (e.g. Asia/Shanghai). Optional; defaults to the server timezone.",
+					},
+				},
+			},
+			func(ctx *llm.ToolExecContext, input any) (any, error) {
+				loc := time.Local
+				if m, ok := input.(map[string]any); ok {
+					if tz, ok := m["timezone"].(string); ok && tz != "" {
+						loaded, err := time.LoadLocation(tz)
+						if err != nil {
+							return nil, fmt.Errorf("invalid timezone %q: %w", tz, err)
+						}
+						loc = loaded
+					}
+				}
+				now := time.Now().In(loc)
+				return map[string]any{
+					"time":     now.Format(time.RFC3339),
+					"unix":     now.Unix(),
+					"timezone": now.Location().String(),
+				}, nil
+			},
+		),
+		PromptSection: &ToolPromptSection{
+			Name:  "current_time",
+			Order: 320,
+			Content: `## Tool: current_time
+
+Use the ` + "`current_time`" + ` tool to get the current date and time.
+- Call it when the user asks a time question, e.g. "现在几点"、"今天日期"
+- Pass the ` + "`timezone`" + ` argument to get the time in a specific timezone`,
+			Enabled: true,
+		},
+	}
+}
+
+// EchoTool 返回一个回显工具（主要用于测试和调试）。
+func EchoTool() ToolDef {
+	return ToolDef{
+		Category: "utility",
+		Tool: BuildTool(
+			"echo",
+			"Echo the input back unchanged. Used to verify that tool calling works end to end.",
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"message": map[string]any{
+						"type":        "string",
+						"description": "The message content to echo back.",
+					},
+				},
+				"required": []string{"message"},
+			},
+			func(ctx *llm.ToolExecContext, input any) (any, error) {
+				m, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("invalid input: expected object")
+				}
+				msg, _ := m["message"].(string)
+				return map[string]any{
+					"echo":   msg,
+					"length": len(msg),
+				}, nil
+			},
+		),
+	}
+}
+
+// BuildTool 是一个辅助函数，快速构建 llm.Tool。
+func BuildTool(name, description string, params map[string]any, exec func(ctx *llm.ToolExecContext, input any) (any, error)) llm.Tool {
+	return llm.Tool{
+		Name:        name,
+		Description: description,
+		Parameters:  params,
+		Execute:     llm.ToolExecuteFunc(exec),
+	}
+}

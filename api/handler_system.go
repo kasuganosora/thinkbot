@@ -1,0 +1,102 @@
+package api
+
+import (
+	"os"
+	"runtime"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/kasuganosora/thinkbot/internal/buildinfo"
+)
+
+// ============================================================================
+// 系统监控 Handler — 健康检查 / 运行时信息 / 事件总线指标
+// ============================================================================
+
+var startTime = time.Now()
+
+// handleHealthDetailed 详细健康检查（含运行时信息）。
+// GET /health/detailed
+//
+// @Summary      系统健康检查
+// @Description  返回详细的系统运行时信息（内存、goroutine、运行时间等）
+// @Tags         系统
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/system/health [get]
+func (s *Server) handleHealthDetailed(c *gin.Context) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	host, _ := os.Hostname()
+
+	bi := buildinfo.Get()
+	build := gin.H{
+		"version":       bi.Version,
+		"gitRevision":   bi.GitRevision,
+		"gitShort":      bi.GitShort,
+		"buildTime":     bi.BuildTime,
+		"buildTimeUnix": bi.BuildTimeUnix,
+		"source":        bi.Source,
+		"goVersion":     bi.GoVersion,
+	}
+
+	OK(c, gin.H{
+		"status":     "ok",
+		"pid":        os.Getpid(),
+		"host":       host,
+		"uptime":     time.Since(startTime).String(),
+		"uptimeSec":  int64(time.Since(startTime).Seconds()),
+		"goroutines": runtime.NumGoroutine(),
+		"memory": gin.H{
+			"allocMB":      m.Alloc / 1024 / 1024,
+			"totalAllocMB": m.TotalAlloc / 1024 / 1024,
+			"sysMB":        m.Sys / 1024 / 1024,
+			"gcCount":      m.NumGC,
+		},
+		"build":     build,
+		"goVersion": runtime.Version(),
+		"bots": gin.H{
+			"running": s.botSvc.RunningCount(),
+		},
+	})
+}
+
+// handleEventBusMetrics 事件总线指标。
+// GET /api/system/events/metrics
+//
+// @Summary      事件总线指标
+// @Description  返回事件总线的运行时指标
+// @Tags         系统
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/system/events/metrics [get]
+func (s *Server) handleEventBusMetrics(c *gin.Context) {
+	bus := s.botSvc.EventBus()
+	if bus == nil {
+		OK(c, gin.H{"enabled": false})
+		return
+	}
+
+	// MemoryEventBus 实现 Metrics() 方法
+	type metricser interface {
+		Metrics() any
+		ActiveSubscriptions() int
+		LatestSeq() uint64
+	}
+
+	if m, ok := bus.(metricser); ok {
+		OK(c, gin.H{
+			"enabled":             true,
+			"activeSubscriptions": m.ActiveSubscriptions(),
+			"latestSeq":           m.LatestSeq(),
+			"metrics":             m.Metrics(),
+		})
+		return
+	}
+
+	OK(c, gin.H{"enabled": true})
+}
