@@ -1,0 +1,22 @@
+.git
+.gitignore
+data
+logs
+*.db
+*.db-shm
+*.db-wal
+# 历史二进制/db 备份：仓库根堆积了 20+ 个 thinkbot.bak-*（各 ~55MB）与十几个
+# thinkbot.db.bak-*（各 ~40MB），是构建上下文一度达 1.6GB 的主因。.gitignore 已忽略
+# 它们，但 .dockerignore 独立生效，此前漏配导致每次 build 白传 1.5GB+。
+/thinkbot
+/thinkbot.bak*
+*.db.bak*
+*.log
+docs
+docker_sandbox_test
+deploy
+# 前端：node_modules 与本地构建产物不进上下文，镜像内由 frontend 阶段重新 npm ci/build
+web/node_modules
+static
+# 用户真实配置不进镜像（由 compose 挂载 ./.env）
+.env

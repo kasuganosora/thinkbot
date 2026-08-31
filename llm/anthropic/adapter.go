@@ -1,0 +1,659 @@
+package anthropic
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/errs"
+)
+
+// ============================================================================
+// Provider 接口适配器
+// ============================================================================
+
+// Name 实现 llm.Provider。
+func (c *Client) Name() string { return "anthropic" }
+
+// DoGenerate 将统一 GenerateParams 转换为 Anthropic Messages API 请求并返回统一 GenerateResult。
+func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	if params.Model == nil {
+		return nil, fmt.Errorf("anthropic: model is required")
+	}
+
+	req, err := paramsToAnthropicRequest(&params)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.CreateMessage(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+
+	return anthropicResponseToResult(resp), nil
+}
+
+// DoStream 将统一 GenerateParams 转换为 Anthropic 流式请求并返回统一 StreamResult。
+func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
+	if params.Model == nil {
+		return nil, fmt.Errorf("anthropic: model is required")
+	}
+
+	req, err := paramsToAnthropicRequest(&params)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan llm.StreamPart, 64)
+
+	go func() {
+		defer close(ch)
+
+		send := func(part llm.StreamPart) bool {
+			select {
+			case ch <- part:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		if !send(&llm.StartPart{}) {
+			return
+		}
+		if !send(&llm.StartStepPart{}) {
+			return
+		}
+
+		var (
+			textStarted      bool
+			reasoningStarted bool
+			finishReason     llm.FinishReason
+			usage            llm.Usage
+			responseID       string
+			responseModel    string
+
+			pendingToolCalls = map[int]*streamingToolCall{}
+			textBlockIDs     = map[int]string{}
+
+			// Track signature deltas for thinking blocks.
+			thinkingSignatures = map[int]string{}
+		)
+
+		flush := func() {
+			if reasoningStarted {
+				send(&llm.ReasoningEndPart{ID: responseID})
+				reasoningStarted = false
+			}
+			if textStarted {
+				send(&llm.TextEndPart{ID: responseID})
+				textStarted = false
+			}
+		}
+
+		streamErr := c.StreamMessage(ctx, *req, func(event StreamEvent) error {
+			switch event.Type {
+			case EventMessageStart:
+				if event.Message != nil {
+					responseID = event.Message.ID
+					responseModel = event.Message.Model
+					if event.Message.Usage.InputTokens > 0 || event.Message.Usage.OutputTokens > 0 {
+						// Anthropic input_tokens = non-cached only at message_start.
+						nonCached := event.Message.Usage.InputTokens
+						cacheRead := event.Message.Usage.CacheReadTokens
+						cacheWrite := event.Message.Usage.CacheCreationTokens
+						usage.InputTokens = nonCached + cacheRead + cacheWrite
+						usage.OutputTokens = event.Message.Usage.OutputTokens
+						usage.InputTokenDetails = llm.InputTokenDetail{
+							NoCacheTokens:    nonCached,
+							CacheReadTokens:  cacheRead,
+							CacheWriteTokens: cacheWrite,
+						}
+					}
+				}
+
+			case EventContentBlockStart:
+				if event.Index == nil || event.ContentBlock == nil {
+					return nil
+				}
+				idx := *event.Index
+				switch event.ContentBlock.Type {
+				case ContentTypeText:
+					if !textStarted {
+						send(&llm.TextStartPart{ID: event.ContentBlock.ID})
+						textStarted = true
+						textBlockIDs[idx] = event.ContentBlock.ID
+					}
+				case ContentTypeThinking:
+					if !reasoningStarted {
+						send(&llm.ReasoningStartPart{ID: event.ContentBlock.ID})
+						reasoningStarted = true
+					}
+				case ContentTypeToolUse:
+					flush()
+					pendingToolCalls[idx] = &streamingToolCall{
+						id:   event.ContentBlock.ID,
+						name: event.ContentBlock.Name,
+					}
+					send(&llm.ToolInputStartPart{
+						ID:       event.ContentBlock.ID,
+						ToolName: event.ContentBlock.Name,
+					})
+				}
+
+			case EventContentBlockDelta:
+				if event.Index == nil || event.Delta == nil {
+					return nil
+				}
+				idx := *event.Index
+				switch event.Delta.Type {
+				case "text_delta":
+					send(&llm.TextDeltaPart{ID: textBlockIDs[idx], Text: event.Delta.Text})
+				case "thinking_delta":
+					if !reasoningStarted {
+						send(&llm.ReasoningStartPart{})
+						reasoningStarted = true
+					}
+					send(&llm.ReasoningDeltaPart{Text: event.Delta.Thinking})
+				case "signature_delta":
+					// Accumulate the signature; it will be needed for the next
+					// request if this thinking block is included in context.
+					thinkingSignatures[idx] += event.Delta.Signature
+				case "input_json_delta":
+					if stc, ok := pendingToolCalls[idx]; ok {
+						stc.args += event.Delta.PartialJSON
+						send(&llm.ToolInputDeltaPart{ID: stc.id, Delta: event.Delta.PartialJSON})
+					}
+				}
+
+			case EventContentBlockStop:
+				if event.Index == nil {
+					return nil
+				}
+				idx := *event.Index
+				if stc, ok := pendingToolCalls[idx]; ok && !stc.finished {
+					var input any
+					if stc.args != "" {
+						_ = json.Unmarshal([]byte(stc.args), &input)
+					}
+					send(&llm.ToolInputEndPart{ID: stc.id})
+					send(&llm.StreamToolCallPart{
+						ToolCallID: stc.id,
+						ToolName:   stc.name,
+						Input:      input,
+					})
+					stc.finished = true
+				}
+
+			case EventMessageDelta:
+				if event.Delta != nil {
+					switch event.Delta.StopReason {
+					case StopReasonEndTurn:
+						finishReason = llm.FinishReasonStop
+					case StopReasonMaxTokens:
+						finishReason = llm.FinishReasonLength
+					case StopReasonToolUse:
+						finishReason = llm.FinishReasonToolCalls
+					case StopReasonStopSequence:
+						finishReason = llm.FinishReasonStop
+					}
+				}
+				if event.Usage != nil {
+					// Anthropic reports non-cached input tokens; compute inclusive total.
+					nonCached := event.Usage.InputTokens
+					if nonCached == 0 {
+						nonCached = usage.InputTokenDetails.NoCacheTokens
+					}
+					cacheRead := event.Usage.CacheReadTokens
+					cacheWrite := event.Usage.CacheCreationTokens
+					totalInput := nonCached + cacheRead + cacheWrite
+
+					usage.InputTokens = totalInput
+					usage.OutputTokens = event.Usage.OutputTokens
+					usage.CachedInputTokens = cacheRead
+					usage.InputTokenDetails = llm.InputTokenDetail{
+						NoCacheTokens:    nonCached,
+						CacheReadTokens:  cacheRead,
+						CacheWriteTokens: cacheWrite,
+					}
+					if event.Usage.CacheCreation != nil {
+						usage.InputTokenDetails.CacheWrite5mTokens = event.Usage.CacheCreation.Ephemeral5mTokens
+						usage.InputTokenDetails.CacheWrite1hTokens = event.Usage.CacheCreation.Ephemeral1hTokens
+					}
+				}
+
+			case EventMessageStop:
+				// 正常结束
+
+			case EventError:
+				if event.Error != nil {
+					return event.Error
+				}
+			}
+			return nil
+		})
+
+		flush()
+
+		// Flush any pending tool calls (e.g. stream ended before EventContentBlockStop)
+		for _, stc := range pendingToolCalls {
+			if !stc.finished {
+				var input any
+				if stc.args != "" {
+					_ = json.Unmarshal([]byte(stc.args), &input)
+				}
+				send(&llm.ToolInputEndPart{ID: stc.id})
+				send(&llm.StreamToolCallPart{
+					ToolCallID: stc.id,
+					ToolName:   stc.name,
+					Input:      input,
+				})
+				stc.finished = true
+			}
+		}
+
+		if finishReason == "" {
+			finishReason = llm.FinishReasonStop
+		}
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+
+		send(&llm.FinishStepPart{
+			FinishReason: finishReason,
+			Usage:        usage,
+			Response: llm.ResponseMetadata{
+				ID:      responseID,
+				ModelID: responseModel,
+			},
+		})
+
+		if streamErr != nil && streamErr != context.Canceled {
+			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "anthropic: stream failed")})
+		}
+
+		send(&llm.FinishPart{
+			FinishReason: finishReason,
+			TotalUsage:   usage,
+		})
+	}()
+
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
+// ListModelsUnified 返回统一 llm.Model 列表。
+func (c *Client) ListModelsUnified(ctx context.Context) ([]llm.Model, error) {
+	resp, err := c.ListModels(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]llm.Model, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		models = append(models, llm.Model{
+			ID:          m.ID,
+			DisplayName: m.DisplayName,
+			Type:        llm.ModelTypeChat,
+		})
+	}
+	return models, nil
+}
+
+// ============================================================================
+// 类型转换
+// ============================================================================
+
+type streamingToolCall struct {
+	id       string
+	name     string
+	args     string
+	finished bool
+}
+
+// Reasoning budget token values for Anthropic extended thinking.
+const (
+	reasoningBudgetHigh   = 32000
+	reasoningBudgetMedium = 16000
+	reasoningBudgetLow    = 8000
+)
+
+// DefaultMaxTokens is the default max_tokens when params.MaxTokens is not set.
+const DefaultMaxTokens = 4096
+
+// anthropicBreakpointCap is the maximum number of cache_control breakpoints
+// Anthropic allows per request. Beyond this, the API returns a 400 error.
+const anthropicBreakpointCap = 4
+
+// breakpointTracker tracks remaining cache breakpoints and silently drops
+// excess markers, enforcing the breakpoint cap.
+type breakpointTracker struct {
+	remaining int
+}
+
+func newBreakpointTracker() *breakpointTracker {
+	return &breakpointTracker{remaining: anthropicBreakpointCap}
+}
+
+// cacheControl converts a unified CacheControl, consuming a breakpoint slot.
+// Returns nil if the cap has been reached.
+func (bt *breakpointTracker) cacheControl(cc *llm.CacheControl) *CacheControl {
+	if cc == nil {
+		return nil
+	}
+	if bt.remaining <= 0 {
+		return nil
+	}
+	bt.remaining--
+	return convertCacheControl(cc)
+}
+
+func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, error) {
+	bt := newBreakpointTracker()
+
+	req := &MessageRequest{
+		Model:       params.Model.ID,
+		Temperature: params.Temperature,
+		TopP:        params.TopP,
+	}
+
+	if params.System != "" {
+		// Use SystemTextWithCache when the cache policy has set a breakpoint
+		// on the system prompt.
+		cc := bt.cacheControl(params.SystemCacheControl)
+		if cc != nil {
+			req.System = SystemTextWithCache(params.System, cc)
+		} else {
+			req.System = SystemText(params.System)
+		}
+	}
+
+	if params.MaxTokens != nil {
+		req.MaxTokens = *params.MaxTokens
+	} else {
+		req.MaxTokens = DefaultMaxTokens
+	}
+
+	if len(params.StopSequences) > 0 {
+		req.StopSequences = params.StopSequences
+	}
+
+	// 消息转换
+	messages, err := convertUnifiedMessages(params.Messages, bt)
+	if err != nil {
+		return nil, err
+	}
+	req.Messages = messages
+
+	// 工具转换
+	if len(params.Tools) > 0 {
+		req.Tools = convertUnifiedTools(params.Tools, bt)
+		if params.ToolChoice != nil {
+			req.ToolChoice = convertUnifiedToolChoice(params.ToolChoice)
+		}
+	}
+
+	// 推理配置
+	if params.ReasoningEffort != nil {
+		effort := strings.ToLower(*params.ReasoningEffort)
+		var budget int
+		switch effort {
+		case "high":
+			budget = reasoningBudgetHigh
+		case "medium":
+			budget = reasoningBudgetMedium
+		case "low", "minimal":
+			budget = reasoningBudgetLow
+		default:
+			budget = reasoningBudgetMedium
+		}
+		req.Thinking = ThinkingEnabled(budget)
+	}
+
+	return req, nil
+}
+
+func convertUnifiedMessages(messages []llm.Message, bt *breakpointTracker) ([]Message, error) {
+	var out []Message
+	for _, msg := range messages {
+		switch msg.Role {
+		case llm.MessageRoleSystem:
+			// Anthropic uses a top-level `system` field for the system prompt.
+			// Mid-conversation system messages are degraded to user text wrapped
+			// in <system-update> tags to avoid silently dropping them.
+			text := llm.TextFromParts(msg.Content)
+			if text != "" {
+				out = append(out, Message{
+					Role: RoleUser,
+					Content: MessageContent{
+						ContentBlock{Type: ContentTypeText, Text: "<system-update>\n" + text + "\n</system-update>"},
+					},
+				})
+			}
+
+		case llm.MessageRoleTool:
+			// 工具结果消息
+			for _, part := range msg.Content {
+				if trp, ok := part.(llm.ToolResultPart); ok {
+					out = append(out, Message{
+						Role: RoleUser,
+						Content: MessageContent{{
+							Type:          ContentTypeToolResult,
+							ToolUseID:     trp.ToolCallID,
+							ResultContent: toolResultToContent(trp.Result),
+							IsError:       trp.IsError,
+						}},
+					})
+				}
+			}
+
+		case llm.MessageRoleUser:
+			var blocks []ContentBlock
+			for _, part := range msg.Content {
+				switch p := part.(type) {
+				case llm.TextPart:
+					blocks = append(blocks, ContentBlock{Type: ContentTypeText, Text: p.Text, CacheControl: bt.cacheControl(p.CacheControl)})
+				case llm.ImagePart:
+					blocks = append(blocks, ContentBlock{Type: ContentTypeImage, Source: convertImageSource(p)})
+				case llm.FilePart:
+					blocks = append(blocks, ContentBlock{Type: ContentTypeDocument, Source: convertFileSource(p)})
+				}
+			}
+			if len(blocks) > 0 {
+				out = append(out, Message{Role: RoleUser, Content: MessageContent(blocks)})
+			}
+
+		case llm.MessageRoleAssistant:
+			var blocks []ContentBlock
+			for _, part := range msg.Content {
+				switch p := part.(type) {
+				case llm.TextPart:
+					blocks = append(blocks, ContentBlock{Type: ContentTypeText, Text: p.Text})
+				case llm.ReasoningPart:
+					// Preserve the signature so Anthropic can validate the
+					// thinking block in multi-turn extended-thinking sessions.
+					blocks = append(blocks, ContentBlock{
+						Type:      ContentTypeThinking,
+						Thinking:  p.Text,
+						Signature: p.Signature,
+					})
+				case llm.ToolCallPart:
+					blocks = append(blocks, ContentBlock{
+						Type:  ContentTypeToolUse,
+						ID:    p.ToolCallID,
+						Name:  p.ToolName,
+						Input: toJSONRaw(p.Input),
+					})
+				}
+			}
+			if len(blocks) > 0 {
+				out = append(out, Message{Role: RoleAssistant, Content: MessageContent(blocks)})
+			}
+		}
+	}
+	return out, nil
+}
+
+func convertUnifiedTools(tools []llm.Tool, bt *breakpointTracker) []Tool {
+	out := make([]Tool, 0, len(tools))
+	for _, t := range tools {
+		// Deferred tools expose a nil Parameters; emit a valid minimal schema
+		// ({"type":"object"}) rather than {} so Anthropic accepts the tool
+		// definition (its API requires input_schema.type == "object").
+		inputSchema := any(map[string]any{"type": "object"})
+		if t.Parameters != nil {
+			inputSchema = t.Parameters
+		}
+		out = append(out, Tool{
+			Name:         t.Name,
+			Description:  t.Description,
+			InputSchema:  inputSchema,
+			CacheControl: bt.cacheControl(t.CacheControl),
+		})
+	}
+	return out
+}
+
+func convertUnifiedToolChoice(choice any) *ToolChoice {
+	switch v := choice.(type) {
+	case string:
+		switch v {
+		case "auto":
+			return &ToolChoice{Type: ToolChoiceAuto}
+		case "none":
+			return &ToolChoice{Type: ToolChoiceNone}
+		case "required":
+			return &ToolChoice{Type: ToolChoiceAny}
+		}
+	case map[string]any:
+		if fn, ok := v["function"].(map[string]any); ok {
+			if name, ok := fn["name"].(string); ok {
+				return &ToolChoice{Type: ToolChoiceTool, Name: name}
+			}
+		}
+	}
+	return &ToolChoice{Type: ToolChoiceAuto}
+}
+
+func convertImageSource(p llm.ImagePart) *ImageSource {
+	if strings.HasPrefix(p.Image, "http://") || strings.HasPrefix(p.Image, "https://") {
+		return URLImageSource(p.Image)
+	}
+	return Base64ImageSource(p.MediaType, p.Image)
+}
+
+func convertFileSource(p llm.FilePart) *ImageSource {
+	return Base64ImageSource(p.MediaType, p.Data)
+}
+
+func convertCacheControl(cc *llm.CacheControl) *CacheControl {
+	if cc == nil {
+		return nil
+	}
+	return &CacheControl{Type: cc.Type, TTL: cc.TTL}
+}
+
+func anthropicResponseToResult(resp *MessageResponse) *llm.GenerateResult {
+	result := &llm.GenerateResult{
+		Response: llm.ResponseMetadata{
+			ID:      resp.ID,
+			ModelID: resp.Model,
+		},
+	}
+
+	// Anthropic reports input_tokens as non-cached tokens only.
+	// Compute the inclusive total: nonCached + cacheRead + cacheWrite.
+	nonCached := resp.Usage.InputTokens
+	cacheRead := resp.Usage.CacheReadTokens
+	cacheWrite := resp.Usage.CacheCreationTokens
+	totalInput := nonCached + cacheRead + cacheWrite
+
+	result.Usage = llm.Usage{
+		InputTokens:       totalInput,
+		OutputTokens:      resp.Usage.OutputTokens,
+		TotalTokens:       totalInput + resp.Usage.OutputTokens,
+		CachedInputTokens: cacheRead,
+		InputTokenDetails: llm.InputTokenDetail{
+			NoCacheTokens:    nonCached,
+			CacheReadTokens:  cacheRead,
+			CacheWriteTokens: cacheWrite,
+		},
+	}
+
+	// Propagate TTL-specific cache creation breakdown if available.
+	if resp.Usage.CacheCreation != nil {
+		result.Usage.InputTokenDetails.CacheWrite5mTokens = resp.Usage.CacheCreation.Ephemeral5mTokens
+		result.Usage.InputTokenDetails.CacheWrite1hTokens = resp.Usage.CacheCreation.Ephemeral1hTokens
+	}
+
+	var hasToolCall bool
+	for _, block := range resp.Content {
+		switch block.Type {
+		case ContentTypeText:
+			result.Text += block.Text
+		case ContentTypeThinking:
+			result.Reasoning += block.Thinking
+			// Preserve the signature for multi-turn extended thinking.
+			if block.Signature != "" {
+				if result.ReasoningProviderMetadata == nil {
+					result.ReasoningProviderMetadata = map[string]any{}
+				}
+				result.ReasoningProviderMetadata["signature"] = block.Signature
+			}
+		case ContentTypeToolUse:
+			hasToolCall = true
+			var input any
+			if len(block.Input) > 0 {
+				_ = json.Unmarshal(block.Input, &input)
+			}
+			result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
+				ToolCallID: block.ID,
+				ToolName:   block.Name,
+				Input:      input,
+			})
+		}
+	}
+
+	switch resp.StopReason {
+	case StopReasonEndTurn:
+		if hasToolCall {
+			result.FinishReason = llm.FinishReasonToolCalls
+		} else {
+			result.FinishReason = llm.FinishReasonStop
+		}
+	case StopReasonMaxTokens:
+		result.FinishReason = llm.FinishReasonLength
+	case StopReasonToolUse:
+		result.FinishReason = llm.FinishReasonToolCalls
+	default:
+		result.FinishReason = llm.FinishReasonStop
+	}
+	result.RawFinishReason = string(resp.StopReason)
+
+	return result
+}
+
+func toJSONRaw(v any) json.RawMessage {
+	if v == nil {
+		return nil
+	}
+	data, _ := json.Marshal(v)
+	return data
+}
+
+// toolResultToContent converts a tool result value into the JSON format expected
+// by the Anthropic API for tool_result content blocks.
+//
+// The API requires content to be either a string or an array of content blocks.
+//   - If the result is already a string, it is used directly.
+//   - Otherwise, the value is JSON-encoded and wrapped as a string so the API
+//     never receives a raw JSON object in the content field.
+func toolResultToContent(result any) json.RawMessage {
+	if result == nil {
+		return nil
+	}
+	if s, ok := result.(string); ok {
+		return toJSONRaw(s)
+	}
+	data, _ := json.Marshal(result)
+	return toJSONRaw(string(data))
+}

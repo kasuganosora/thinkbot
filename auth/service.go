@@ -1,0 +1,408 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/util/errs"
+)
+
+// ============================================================================
+// AuthService — 用户管理 & 认证服务
+// ============================================================================
+
+// User status 常量。
+const (
+	StatusActive   = "active"
+	StatusDisabled = "disabled"
+)
+
+// 领域错误。
+var (
+	ErrUserNotFound       = errors.New("auth: user not found")
+	ErrUserExists         = errors.New("auth: user already exists")
+	ErrInvalidCredentials = errors.New("auth: invalid credentials")
+	ErrUserDisabled       = errors.New("auth: user is disabled")
+	ErrInvalidRole        = errors.New("auth: invalid role")
+	// ErrBootstrapDisabled 表示空库首登自举被禁用（未配置 bootstrap token）。
+	// 此时必须通过 AUTH_BOOTSTRAP_ADMIN/PASSWORD 在启动时显式初始化首位管理员，
+	// 避免任意可达 /auth/login 的客户端静默接管实例（修复 5193）。
+	ErrBootstrapDisabled = errors.New("auth: bootstrap disabled — set AUTH_BOOTSTRAP_TOKEN or AUTH_BOOTSTRAP_ADMIN/PASSWORD to initialize the first admin")
+)
+
+// AuthService 提供用户 CRUD 和认证能力。
+type AuthService struct {
+	db *gorm.DB
+	// bootstrapToken 空库首登自举令牌（来自 AUTH_BOOTSTRAP_TOKEN）。
+	// 非空时，首次登录必须以该令牌作为密码才能创建首位管理员；
+	// 为空时，空库首登自举被禁用（强制显式初始化）。
+	bootstrapToken string
+}
+
+// New 创建 AuthService。
+// bootstrapToken 为空表示禁用空库首登自动建 admin（修复 5193 的安全缺口）。
+func New(db *gorm.DB, bootstrapToken string) *AuthService {
+	return &AuthService{db: db, bootstrapToken: bootstrapToken}
+}
+
+// DB 返回底层 gorm.DB（仅供内部模块使用，如 module.go 的 bootstrap 检查）。
+func (s *AuthService) DB() *gorm.DB {
+	return s.db
+}
+
+// ----------------------------------------------------------------------------
+// 创建用户
+// ----------------------------------------------------------------------------
+
+// CreateUserInput 创建用户参数。
+type CreateUserInput struct {
+	Username    string
+	Password    string
+	Email       string // 可选
+	Role        string // admin | member，空时默认 member
+	DisplayName string // 可选
+}
+
+// CreateUser 创建一个新用户。
+func (s *AuthService) CreateUser(ctx context.Context, input CreateUserInput) (*dao.User, error) {
+	input.Username = strings.TrimSpace(input.Username)
+	if input.Username == "" {
+		return nil, errs.BadRequest("username is required")
+	}
+	if len(input.Password) < 6 {
+		return nil, errs.BadRequest("password must be at least 6 characters")
+	}
+
+	role := input.Role
+	if role == "" {
+		role = RoleMember
+	}
+	if !IsValidRole(role) {
+		return nil, errs.BadRequest("invalid role: " + role)
+	}
+
+	// 检查用户名是否已存在
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&dao.User{}).
+		Where("username = ?", input.Username).
+		Count(&count).Error; err != nil {
+		return nil, errs.Wrap(err, "auth: check username existence")
+	}
+	if count > 0 {
+		return nil, errs.Conflict("username already exists")
+	}
+
+	// 哈希密码
+	hash, err := HashPassword(input.Password)
+	if err != nil {
+		return nil, errs.Wrap(err, "auth: hash password")
+	}
+
+	user := &dao.User{
+		Username:     input.Username,
+		Email:        strings.TrimSpace(input.Email),
+		PasswordHash: hash,
+		Role:         role,
+		Status:       StatusActive,
+		DisplayName:  strings.TrimSpace(input.DisplayName),
+	}
+
+	if err := s.db.WithContext(ctx).Create(user).Error; err != nil {
+		return nil, errs.Wrap(err, "auth: create user")
+	}
+
+	return user, nil
+}
+
+// ----------------------------------------------------------------------------
+// 认证（登录）
+// ----------------------------------------------------------------------------
+
+// Authenticate 验证用户名+密码，返回用户信息。
+// 成功时自动更新 LastLoginAt。
+func (s *AuthService) Authenticate(ctx context.Context, username, password string) (*dao.User, error) {
+	var user dao.User
+	err := s.db.WithContext(ctx).Where("username = ?", strings.TrimSpace(username)).First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrInvalidCredentials
+		}
+		return nil, errs.Wrap(err, "auth: query user")
+	}
+
+	// 先检查状态（避免通过响应差异泄露密码正确性）
+	if user.Status != StatusActive {
+		return nil, ErrUserDisabled
+	}
+
+	if !VerifyPassword(user.PasswordHash, password) {
+		return nil, ErrInvalidCredentials
+	}
+
+	// 更新最后登录时间（失败不影响登录流程）
+	now := time.Now()
+	if err := s.db.WithContext(ctx).Model(&user).Update("last_login_at", &now).Error; err == nil {
+		user.LastLoginAt = &now
+	}
+
+	return &user, nil
+}
+
+// AuthenticateOrBootstrap 尝试登录；如果数据库中一个用户都没有，则自动以 admin
+// 角色注册当前提交的凭据并完成登录。仅用于首次初始化场景。
+//
+// 整个 bootstrap 路径在数据库事务中执行，防止 TOCTOU 竞态
+// （两个并发请求同时检测到数据库为空，各自创建 admin）。
+func (s *AuthService) AuthenticateOrBootstrap(ctx context.Context, username, password string) (*dao.User, bool, error) {
+	// 先尝试正常认证
+	user, err := s.Authenticate(ctx, username, password)
+	if err == nil {
+		return user, false, nil
+	}
+
+	// 只有 ErrInvalidCredentials（用户不存在/密码错误）才可能触发 bootstrap
+	if !errors.Is(err, ErrInvalidCredentials) {
+		return nil, false, err
+	}
+
+	// 在事务中执行 bootstrap，防止 TOCTOU 竞态
+	var bootstrapped *dao.User
+	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 事务内重新检查用户数
+		var total int64
+		if err := tx.Model(&dao.User{}).Count(&total).Error; err != nil {
+			return errs.Wrap(err, "auth: count users for bootstrap")
+		}
+
+		if total > 0 {
+			// 已有用户但认证失败
+			return ErrInvalidCredentials
+		}
+
+		// 空库首登自举门槛（修复 5193）：不再接受任意登录静默成 admin。
+		// 必须配置 AUTH_BOOTSTRAP_TOKEN 且本次密码与之匹配，或预先用
+		// AUTH_BOOTSTRAP_ADMIN/PASSWORD 在启动时初始化。否则拒绝自举，
+		// 防止暴露在服务端口的任意客户端接管实例。
+		if s.bootstrapToken == "" {
+			return ErrBootstrapDisabled
+		}
+		if password != s.bootstrapToken {
+			return ErrInvalidCredentials
+		}
+
+		// 校验输入（此分支为空白库自举：密码即 bootstrap token，长度由管理员自定，不再强制 ≥6）
+		uname := strings.TrimSpace(username)
+		if uname == "" {
+			return errs.BadRequest("username is required")
+		}
+
+		// 哈希密码
+		hash, err := HashPassword(password)
+		if err != nil {
+			return errs.Wrap(err, "auth: hash password")
+		}
+
+		// 创建 admin 用户
+		now := time.Now()
+		u := &dao.User{
+			Username:     uname,
+			PasswordHash: hash,
+			Role:         RoleAdmin,
+			Status:       StatusActive,
+			LastLoginAt:  &now,
+		}
+		if err := tx.Create(u).Error; err != nil {
+			return errs.Wrap(err, "auth: bootstrap create user")
+		}
+
+		bootstrapped = u
+		return nil
+	})
+
+	if txErr != nil {
+		// 如果事务因 ErrInvalidCredentials 回滚（已有用户），返回该错误
+		return nil, false, txErr
+	}
+	return bootstrapped, true, nil
+}
+
+// ----------------------------------------------------------------------------
+// 查询
+// ----------------------------------------------------------------------------
+
+// GetUser 根据 ID 获取用户。
+func (s *AuthService) GetUser(ctx context.Context, id uint) (*dao.User, error) {
+	var user dao.User
+	err := s.db.WithContext(ctx).First(&user, id).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, errs.Wrap(err, "auth: get user")
+	}
+	return &user, nil
+}
+
+// GetUserByUsername 根据用户名获取用户。
+func (s *AuthService) GetUserByUsername(ctx context.Context, username string) (*dao.User, error) {
+	var user dao.User
+	err := s.db.WithContext(ctx).Where("username = ?", username).First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, errs.Wrap(err, "auth: get user by username")
+	}
+	return &user, nil
+}
+
+// ListUsers 返回所有用户（按创建时间降序）。
+func (s *AuthService) ListUsers(ctx context.Context) ([]dao.User, error) {
+	var users []dao.User
+	err := s.db.WithContext(ctx).Order("created_at DESC").Find(&users).Error
+	if err != nil {
+		return nil, errs.Wrap(err, "auth: list users")
+	}
+	return users, nil
+}
+
+// ----------------------------------------------------------------------------
+// 修改用户
+// ----------------------------------------------------------------------------
+
+// UpdateRole 修改用户角色。
+func (s *AuthService) UpdateRole(ctx context.Context, id uint, role string) error {
+	if !IsValidRole(role) {
+		return ErrInvalidRole
+	}
+	result := s.db.WithContext(ctx).Model(&dao.User{}).
+		Where("id = ?", id).
+		Update("role", role)
+	if result.Error != nil {
+		return errs.Wrap(result.Error, "auth: update role")
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdatePassword 修改用户密码。
+func (s *AuthService) UpdatePassword(ctx context.Context, id uint, newPassword string) error {
+	if len(newPassword) < 6 {
+		return errs.BadRequest("password must be at least 6 characters")
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return errs.Wrap(err, "auth: hash password")
+	}
+	result := s.db.WithContext(ctx).Model(&dao.User{}).
+		Where("id = ?", id).
+		Update("password_hash", hash)
+	if result.Error != nil {
+		return errs.Wrap(result.Error, "auth: update password")
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdateProfile 更新用户资料（邮箱、显示名、头像）。
+type UpdateProfileInput struct {
+	Email       *string
+	DisplayName *string
+	Avatar      *string
+}
+
+// UpdateProfile 修改用户资料，仅更新非 nil 的字段。
+func (s *AuthService) UpdateProfile(ctx context.Context, id uint, input UpdateProfileInput) error {
+	updates := map[string]any{}
+	if input.Email != nil {
+		updates["email"] = strings.TrimSpace(*input.Email)
+	}
+	if input.DisplayName != nil {
+		updates["display_name"] = strings.TrimSpace(*input.DisplayName)
+	}
+	if input.Avatar != nil {
+		updates["avatar"] = strings.TrimSpace(*input.Avatar)
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	result := s.db.WithContext(ctx).Model(&dao.User{}).
+		Where("id = ?", id).
+		Updates(updates)
+	if result.Error != nil {
+		return errs.Wrap(result.Error, "auth: update profile")
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// 启用 / 禁用用户
+// ----------------------------------------------------------------------------
+
+// DisableUser 禁用用户。
+func (s *AuthService) DisableUser(ctx context.Context, id uint) error {
+	result := s.db.WithContext(ctx).Model(&dao.User{}).
+		Where("id = ?", id).
+		Update("status", StatusDisabled)
+	if result.Error != nil {
+		return errs.Wrap(result.Error, "auth: disable user")
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// EnableUser 启用用户。
+func (s *AuthService) EnableUser(ctx context.Context, id uint) error {
+	result := s.db.WithContext(ctx).Model(&dao.User{}).
+		Where("id = ?", id).
+		Update("status", StatusActive)
+	if result.Error != nil {
+		return errs.Wrap(result.Error, "auth: enable user")
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// 删除用户
+// ----------------------------------------------------------------------------
+
+// DeleteUser 删除用户。
+func (s *AuthService) DeleteUser(ctx context.Context, id uint) error {
+	result := s.db.WithContext(ctx).Delete(&dao.User{}, id)
+	if result.Error != nil {
+		return errs.Wrap(result.Error, "auth: delete user")
+	}
+	if result.RowsAffected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// 权限检查（便捷方法）
+// ----------------------------------------------------------------------------
+
+// Can 对指定用户检查是否拥有指定权限。
+func (s *AuthService) Can(user *dao.User, permission string) bool {
+	if user == nil || user.Status != StatusActive {
+		return false
+	}
+	return HasPermission(user.Role, permission)
+}

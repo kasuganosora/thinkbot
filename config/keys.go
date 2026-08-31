@@ -1,0 +1,477 @@
+package config
+
+import (
+	"fmt"
+	"strings"
+)
+
+// 标准配置键前缀。
+const (
+	PrefixDB         = "db"
+	PrefixBot        = "bot"
+	PrefixChannel    = "channel"
+	PrefixLog        = "log"
+	PrefixMemory     = "memory"
+	PrefixTracing    = "tracing"
+	PrefixWorkflow   = "workflow"
+	PrefixEngagement = "engagement"
+	PrefixSoul       = "soul"
+	PrefixTools      = "tools"
+	PrefixWorkspace  = "workspace"
+	PrefixSystem     = "system"
+	PrefixAPI        = "api"
+)
+
+// API 键。
+const (
+	// KeyAPIAddr HTTP 服务器监听地址（默认 ":8080"）。
+	KeyAPIAddr = "api.addr"
+
+	// KeyAPICORSOrigins 允许的 CORS 来源列表，逗号分隔。
+	// 为空时仅允许 localhost 来源（开发模式）。
+	KeyAPICORSOrigins = "api.cors_origins"
+
+	// KeyAPICookieSecure Cookie 是否仅通过 HTTPS 传输（默认 false）。
+	KeyAPICookieSecure = "api.cookie_secure"
+
+	// KeyChatContextLimit LLM 上下文加载的最大历史消息数（默认 20）。
+	KeyChatContextLimit = "api.chat_context_limit"
+)
+
+// Bot 键。
+const (
+	KeyBotSystemPrompt = "bot.system_prompt"
+	KeyBotModel        = "bot.model"
+	KeyBotTemperature  = "bot.temperature"
+	KeyBotMaxTokens    = "bot.max_tokens"
+	KeyBotWorkers      = "bot.workers"
+)
+
+// 数据库键。
+const (
+	KeyDBPath = "db.path"
+)
+
+// 日志键。
+const (
+	KeyLogLevel = "log.level"
+)
+
+// Workflow 键。
+const (
+	KeyWorkflowMaxParallel      = "workflow.max_parallel"
+	KeyWorkflowMaxRetries       = "workflow.max_retries"
+	KeyWorkflowMaxIterations    = "workflow.max_iterations"
+	KeyWorkflowRetryInitialMS   = "workflow.retry_initial_ms"
+	KeyWorkflowRetryMaxMS       = "workflow.retry_max_ms"
+	KeyWorkflowScheduleInterval = "workflow.schedule_interval_ms"
+	KeyWorkflowAnalyzerTemp     = "workflow.analyzer_temperature"
+	// 注意：这里曾有 workflow.analyzer_max_tokens，已移除。
+	// 分析器的输出预算不再单独配置，统一跟随 bot 所选模型的 maxTokens
+	// （provider.<x>.models[].maxTokens → ModelDef.MaxTokens）。
+	// 独立旋钮曾被播种为 8192，与 glm-5.2 的 128K 能力脱节，导致 DAG JSON
+	// 被硬截断、analyzer 连续 5 次解析失败，故取消该配置面。
+	// KeyWorkflowAnalyzerStuckTimeout 需求分析器（流式 LLM 调用）的卡死看门狗阈值（秒，默认 180，即 3 分钟）。
+	// 分析器改用流式委托 + 卡死看门狗：只要 LLM 持续输出 token（哪怕慢）就不杀，
+	// 只有连续无 token 超过该时长（且已过首 token 宽限期）才判卡死终止。硬上限 = 该值 ×10 派生（subagent.delegateHardTimeoutFactor=10，非 3）。
+	// 这是「看门狗判断真卡死」而非「固定超时一刀切」——正常处理超长 prompt（如 86 个 lint 问题）不会被打断。
+	KeyWorkflowAnalyzerStuckTimeout = "workflow.analyzer_stuck_timeout"
+	// KeyWorkflowAnalyzerMaxDuration 需求分析阶段的「总时长上限」（毫秒，默认 600000=10 分钟）。
+	// 与上面的「卡死看门狗」（单次调用无 token 才杀）不同，这是分析阶段整轮的硬上限：
+	// GLM 频繁退化时空分析器会反复重试，最坏可达数十分钟「分析中」黑洞。该上限保证
+	// 整轮分析无论重试多少次都在该时长内结束（成功或明确失败），前端不再无限转圈。
+	KeyWorkflowAnalyzerMaxDuration = "workflow.analyzer_max_duration_ms"
+	// KeyWorkflowGoalMaxIterations 目标模式（闭环循环）的全局最大迭代轮数（默认 5）。
+	// review 节点在节点级迭代（MaxIterations）仍不通过时，回退到 Feedback 目标节点重新执行，
+	// 每轮闭环计数 +1；达到该上限仍不通过则工作流失败。0 表示使用代码兜底默认（5）。
+	KeyWorkflowGoalMaxIterations = "workflow.goal_max_iterations"
+)
+
+// Engagement 键。
+const (
+	KeyEngagementEnabled            = "engagement.enabled"
+	KeyEngagementChannels           = "engagement.channels"
+	KeyEngagementReplyProbability   = "engagement.reply_probability"
+	KeyEngagementCooldown           = "engagement.cooldown"
+	KeyEngagementRateLimitCapacity  = "engagement.rate_limit_capacity"
+	KeyEngagementRateLimitInterval  = "engagement.rate_limit_interval"
+	KeyEngagementKeywords           = "engagement.keywords"
+	KeyEngagementLLMJudgeEnabled    = "engagement.llm_judge_enabled"
+	KeyEngagementBlockedUsers       = "engagement.blocked_users"
+	KeyEngagementBlockedSources     = "engagement.blocked_sources"
+	KeyEngagementMinLength          = "engagement.min_length"
+	KeyEngagementMaxLength          = "engagement.max_length"
+	KeyEngagementBackoffBaseSeconds = "engagement.backoff_base_seconds"
+	KeyEngagementBackoffCapSeconds  = "engagement.backoff_cap_seconds"
+	KeyEngagementBackoffStartCount  = "engagement.backoff_start_count"
+	KeyEngagementBurstInterval      = "engagement.burst_interval_seconds"
+	KeyEngagementWaitTimeout        = "engagement.wait_timeout_seconds"
+	KeyEngagementBackoffBypass      = "engagement.backoff_bypass_pending"
+	KeyEngagementProfile            = "engagement.profile"
+	KeyEngagementThreshold          = "engagement.engagement_threshold"
+	KeyEngagementAutoAdjustFreq     = "engagement.auto_adjust_frequency"
+)
+
+// Soul 键。
+//
+// 约定优于配置：SOUL.md 默认从二进制目录自动加载，文件存在即生效，
+// 无需 enabled 开关。以下配置项仅用于可选的运行时调整。
+const (
+	// KeySoulReloadInterval 文件变更检测轮询间隔（默认 5s，0=禁用热重载）。
+	KeySoulReloadInterval = "soul.reload_interval"
+
+	// KeySoulPromptDir 额外 prompt 段落目录（可选，存放 {order}_{name}.md 文件）。
+	KeySoulPromptDir = "soul.prompt_dir"
+)
+
+// Workspace 键。
+const (
+	// KeyWorkspaceDir bot 工作空间根目录的物理路径（默认 "data/workspaces"）。
+	// 每个 Bot 在此目录下拥有独立的子目录（{dir}/{botID}/），持久化存储文件。
+	// SOUL.md、笔记、配置等数据保存在此目录，重启后不丢失。
+	KeyWorkspaceDir = "workspace.dir"
+
+	// KeySandboxBackend 沙箱后端："auto"（默认，有 Docker 用容器隔离否则 local）|"docker"|"local"。
+	KeySandboxBackend = "sandbox.backend"
+
+	// KeySandboxImage 沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用）。
+	KeySandboxImage = "sandbox.image"
+
+	// KeySandboxRequireDocker 是否在 auto 模式下强制要求 Docker 可用。
+	// true（默认）：auto 模式下探测不到 Docker 直接报错，不降级到 local（避免无隔离裸跑）；
+	// false：auto 模式下探测不到 Docker 则降级 local 进程执行。
+	// 注意：Backend 显式设为 "docker" 时本就强制要求 Docker，与本键无关。
+	KeySandboxRequireDocker = "sandbox.require_docker"
+
+	// KeySandboxTimeout bot 在沙箱里执行单条命令的「硬上限」秒数。
+	// 默认 0 表示自动 = 卡死阈值 × 3（见 hardTimeoutFactor），不写死固定时长；
+	// 设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：即便命令一直在输出，
+	// 超过它也会被强制终止，防止无限挂起。
+	// 注意：单条命令默认不再用固定超时一刀切杀掉——真正决定是否终止的是卡死看门狗
+	// （见 KeySandboxStuckTimeout）：只要命令持续有输出（哪怕慢）就不杀，只有长时间无输出
+	// 才判定卡死。本键是「无论如何都不能超过」的总时长上限。
+	KeySandboxTimeout = "sandbox.timeout"
+
+	// KeySandboxStuckTimeout 卡死看门狗阈值（秒，默认 300，即 5 分钟）。
+	// 命令连续无 stdout/stderr 输出超过该时长，且已过启动宽限期、进程仍存活，
+	// 则判定为「卡死（无进展）」并终止。这是区分「编译慢」与「死锁卡死」的关键：
+	// 正常运行的慢命令（持续输出）靠本阈值放行，不会误杀。
+	KeySandboxStuckTimeout = "sandbox.stuck_timeout"
+
+	// KeySandboxBrowserEnabled 是否为 docker 持久容器模式的 bot 接入 per-bot 浏览器
+	// MCP 服务（需配合浏览器镜像使用）。默认 false。
+	KeySandboxBrowserEnabled = "sandbox.browser.enabled"
+
+	// KeySandboxBrowserProxy 浏览器 MCP 服务的出口代理（URL 形式，如 "http://user:pass@host:port"）。
+	// 仅当 sandbox.browser.enabled=true 时生效，透传给容器内 wrapper 的 BOT_BROWSER_PROXY 环境变量，
+	// 使浏览器流量经部署侧自有代理出口（IP 归部署侧，符合「指纹归 thinkbot、IP 归部署侧」的责任边界）。
+	// 空值表示直连（默认）。
+	KeySandboxBrowserProxy = "sandbox.browser.proxy"
+)
+
+// ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。
+const (
+	// KeyToolOutputMaxLines 工具输出截断的行数阈值（默认 500）。
+	// 超过此行数且超过字节阈值时，输出被截断为「头+尾预览+指针」。
+	KeyToolOutputMaxLines = "tool_output.max_lines"
+
+	// KeyToolOutputMaxBytes 工具输出截断的字节阈值（默认 51200，即 50KB）。
+	KeyToolOutputMaxBytes = "tool_output.max_bytes"
+
+	// KeyToolOutputOffload 是否启用落盘指针（默认 true）。
+	// 开启且输出被截断时，完整原文写入 bot 工作空间的 tool_output 子目录，
+	// 主上下文仅留预览+指针+子 agent 委托提示；关闭则纯 head+tail 截断。
+	KeyToolOutputOffload = "tool_output.offload"
+
+	// KeyToolOutputSubdir 落盘文件所在的子目录（相对工作空间根，默认 "tool-output"）。
+	KeyToolOutputSubdir = "tool_output.subdir"
+)
+
+// LLM 客户端可靠性键：Provider 底层 HTTP 客户端超时、重试次数与指数退避参数。
+// 这些参数原硬编码在 agent/bot/llm_factory.go（const llmClientTimeout /
+// llmRetryMaxRetries），现集中到配置模块，用户可在前端「系统配置」页修改并持久化。
+// 未配置的字段自动使用 DefaultLLMClientConfig() 的值；修改后需重启 bot 生效。
+const (
+	// KeyLLMClientTimeoutSeconds LLM Provider 底层 HTTP 客户端的整体超时（秒）。
+	// 默认 1200（20 分钟）。这是**整个请求**的上限（含等待首字节），非流式请求
+	// （workflow 的 SubAgent 走 OrchestrateGenerate）必须等模型生成完整回复才返回响应头，
+	// 长任务（写大量代码 / 长篇审查报告）轻易超过数分钟，故需给足。SSE 看门狗只保护流式路径，
+	// 对非流式不生效，不能靠它把超时压短。下限守卫见 bot/llm_factory_timeout_test.go。
+	KeyLLMClientTimeoutSeconds = "llm.client_timeout_seconds"
+
+	// KeyLLMMaxRetries LLM Provider 遇到可恢复错误（429 限流 / 5xx）时的重试次数。
+	// 默认 4。GLM/智谱高负载时常返回 429，不重试会直接中断对话/工作流。
+	KeyLLMMaxRetries = "llm.max_retries"
+
+	// KeyLLMRetryInitialMS 重试指数退避的初始等待毫秒。默认 2000（2 秒）。
+	KeyLLMRetryInitialMS = "llm.retry_initial_ms"
+
+	// KeyLLMRetryFactor 重试指数退避的倍增因子。默认 2.0。
+	KeyLLMRetryFactor = "llm.retry_factor"
+
+	// KeyLLMRetryMaxMS 重试指数退避的最大等待毫秒。默认 30000（30 秒）。
+	KeyLLMRetryMaxMS = "llm.retry_max_ms"
+
+	// KeyLLMRetryJitter 重试退避是否加入随机抖动（避免惊群）。默认 true。
+	KeyLLMRetryJitter = "llm.retry_jitter"
+)
+
+// Compaction（会话压缩）键：上下文压缩预算配置。
+// 这些参数原硬编码在 llm/compaction.go 的 DefaultCompactionConfig()，
+// 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
+//
+// 注意：本套是「会话级」压缩预算（llm.CompactionConfig），与 agent/memory/compactor.go
+// 的「记忆聚类」压缩（SimilarityThreshold 等）是两套不同配置，集成时分别处理、避免混淆。
+const (
+	// KeyCompactionMaxTokens 压缩模块假定的上下文窗口预算（token 数）。
+	// 可用空间 = MaxTokens - ReservedTokens。超过此值时触发压缩。
+	// 取比模型真实上限更小的保守值，使压缩更早触发以预留安全余量。默认 64000。
+	KeyCompactionMaxTokens = "compaction.max_tokens"
+
+	// KeyCompactionReservedTokens 为系统消息和新回复预留的 token 数。默认 20000。
+	KeyCompactionReservedTokens = "compaction.reserved_tokens"
+
+	// KeyCompactionTailTokens 压缩时保留的最近 token 数（不摘要化）。默认 8000。
+	KeyCompactionTailTokens = "compaction.tail_tokens"
+
+	// KeyCompactionTailTurns 保留的最近完整对话轮数。默认 2。
+	KeyCompactionTailTurns = "compaction.tail_turns"
+
+	// KeyCompactionMinMessagesToCompact 触发压缩的最小消息数。默认 6。
+	KeyCompactionMinMessagesToCompact = "compaction.min_messages_to_compact"
+
+	// KeyCompactionSummaryMaxTokens 摘要的最大 token 数。默认 4096。
+	KeyCompactionSummaryMaxTokens = "compaction.summary_max_tokens"
+
+	// KeyCompactionToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。默认 500。
+	KeyCompactionToolOutputThreshold = "compaction.tool_output_threshold"
+
+	// KeyCompactionAuto 是否启用自动压缩。默认 true。
+	KeyCompactionAuto = "compaction.auto"
+)
+
+// System 键。
+const (
+	// KeySystemTimezone 系统时区（IANA 时区标识符，如 "Asia/Shanghai"、"UTC"）。
+	// 为空时使用服务器本地时区（time.Local）。
+	// 影响范围：bot 的时间感知、Docker 沙箱容器的 TZ 环境变量。
+	KeySystemTimezone = "system.timezone"
+
+	// KeySystemProxy 全局出口代理（URL 形式，如 "http://user:pass@host:port"、
+	// "https://host:port"、"socks5://host:port"、"socks5h://host:port"）。
+	// 空值表示直连（默认）。设置后：
+	//   - 主机侧所有使用默认 Transport 的 HTTP 客户端（LLM、channel 等）统一走代理
+	//     （通过写入 HTTP_PROXY/HTTPS_PROXY 环境变量生效）；
+	//   - 启动的 bot Docker 容器会注入 HTTP_PROXY/HTTPS_PROXY 环境变量，
+	//     使容器内请求（curl、python requests、node fetch、容器内 thinkbot 等）也走代理。
+	// 这是「全站级 SSRF/出口收敛」的最简开关：部署侧自有出口代理即所有流量归部署侧 IP。
+	KeySystemProxy = "system.proxy"
+)
+
+// Pipeline 键：pipeline 装配模式（对应 deepseek-harness 的 agent preset / 插件花名册）。
+const (
+	// KeyPipelineMode 全局默认 pipeline 模式（当 bot 未单独配置时生效）。
+	// 取值："standard"（默认）/ "lurk-only" / "code"。
+	KeyPipelineMode = "pipeline.mode"
+)
+
+// BotPipelineModeKey 返回指定 bot 的 pipeline 模式键：bot.<bot_id>.pipeline_mode。
+func BotPipelineModeKey(botID string) string {
+	return "bot." + botID + ".pipeline_mode"
+}
+
+// BotReplyControlKey 返回指定 bot 的「回复控制门控」开关键：bot.<bot_id>.reply_control。
+// 取值 "true" 时启用：模型必须在回复结尾追加结构化控制 JSON（@@REPLY_CONTROL@@{"send":bool}），
+// 缺失/解析失败/send:false → 不出站（fail-closed）。用于治理「模型决定不互动却把独白当回复发出」。
+// 默认关闭（"false"），避免影响未显式开启的 bot。
+func BotReplyControlKey(botID string) string {
+	return "bot." + botID + ".reply_control"
+}
+
+// Memory 回灌（backfill）键：历史 chat_messages → L0 守卫。
+// 回灌是一次性 bootstrap：把历史对话补灌进记忆 L0，使 dreaming 能处理从未进入记忆
+// 系统的历史 backlog。陷阱在于「清空 tiered/memory 表后，每次启动若 tiered 为空又会从
+// chat_messages 回潮」。水位线（watermark）独立于 tiered_memories 持久化，记录已补灌的
+// 最大 chat_message.id，使上述回潮彻底阻断；要强制重新回灌只需删除该水位线键。
+const (
+	// KeyMemoryBackfillEnabled 全局回灌总开关默认值。
+	// per-bot 键 bot.<bot_id>.memory.backfill.enabled 可覆盖。
+	KeyMemoryBackfillEnabled = "memory.backfill.enabled"
+)
+
+// BotMemoryBackfillEnabledKey 返回指定 bot 的回灌开关键。
+func BotMemoryBackfillEnabledKey(botID string) string {
+	return "bot." + botID + ".memory.backfill.enabled"
+}
+
+// BotMemoryBackfillWatermarkKey 返回指定 bot 的回灌水位线键（chat_messages 时代遗留）。
+// 注意：事件流改造后回灌改用 BotMemoryBackfillEventWatermarkKey（事件流 id 空间），
+// 本键不再用于回灌，保留仅为兼容旧部署已写入的配置项。
+func BotMemoryBackfillWatermarkKey(botID string) string {
+	return "bot." + botID + ".memory.backfill.watermark"
+}
+
+// BotMemoryBackfillEventWatermarkKey 返回指定 bot 的事件流回灌水位线键。
+// 值为已补灌进 L0 的最大 user_message_events.id（十进制字符串），独立于 tiered_memories。
+// 与旧 chat_messages 时代的水位线键（BotMemoryBackfillWatermarkKey）隔离，避免 id 空间
+// 冲突导致首次回灌漏读历史。
+func BotMemoryBackfillEventWatermarkKey(botID string) string {
+	return "bot." + botID + ".memory.backfill.event_watermark"
+}
+
+// MemoryWindow 键：记忆召回窗口（上下文预算）配置。
+// 这些参数原硬编码在 agent/memory/window.go 的 DefaultWindowConfig()，
+// 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
+const (
+	// KeyMemoryWindowMaxContextTokens 模型最大上下文窗口（token 数）。
+	// 记忆预算 = (MaxContextTokens - ReservedTokens - OutputReserve) × BudgetRatio，
+	// 再受 MaxMemoryTokens 硬上限约束。GLM-5.2/5.3 上下文 1M（1000000）。
+	KeyMemoryWindowMaxContextTokens = "memorywindow.max_context_tokens"
+
+	// KeyMemoryWindowReservedTokens 为 system prompt / tool 定义等固定内容预留的 token 数。
+	KeyMemoryWindowReservedTokens = "memorywindow.reserved_tokens"
+
+	// KeyMemoryWindowOutputReserve 为 LLM 输出预留的 token 数。
+	KeyMemoryWindowOutputReserve = "memorywindow.output_reserve"
+
+	// KeyMemoryWindowBudgetRatio memory 可使用的窗口比例（0.0~1.0）。
+	KeyMemoryWindowBudgetRatio = "memorywindow.budget_ratio"
+
+	// KeyMemoryWindowMaxMemoryTokens memory 注入的硬上限（token 数）。
+	// 无论可用空间多大，实际注入的 memory context 不超过此值。
+	KeyMemoryWindowMaxMemoryTokens = "memorywindow.max_memory_tokens"
+
+	// KeyMemoryWindowCompressThreshold 触发压缩的阈值比例（0.0~1.0）。
+	KeyMemoryWindowCompressThreshold = "memorywindow.compress_threshold"
+)
+
+// ToolPolicyKey 返回指定 bot 的工具权限策略 JSON 的数据库键。
+// 格式：tools.<bot_id>.policy
+// 值为 ToolPolicy 的 JSON 字符串。
+func ToolPolicyKey(botID string) string {
+	return "tools." + botID + ".policy"
+}
+
+// BotDreamingKey 返回指定 bot 的梦境巩固配置键。
+// sub 为具体配置项名称（如 "enabled"、"schedule"）。
+// 格式：bot.<bot_id>.dreaming.<sub>
+// 例如：bot.mybot.dreaming.enabled → "true"
+func BotDreamingKey(botID, sub string) string {
+	return "bot." + botID + ".dreaming." + sub
+}
+
+// BotLLMKey 返回 Bot 的 LLM 角色分配键。
+// role 为 "main" 或 "light"。
+// 格式：bot.<bot_id>.<role>
+// 例如：bot.mybot.main、bot.mybot.light
+func BotLLMKey(botID, role string) string {
+	return "bot." + botID + "." + role
+}
+
+// BotTimezoneKey 返回指定 Bot 的时区配置键。
+// 格式：bot.<bot_id>.timezone
+// 例如：bot.mybot.timezone → "Asia/Shanghai"
+func BotTimezoneKey(botID string) string {
+	return "bot." + botID + ".timezone"
+}
+
+// BotTokenQuotaKey 返回 Bot 级月 Token 额度配置键。
+// 格式：bot.<bot_id>.token_quota
+// 值为 int64（tokens/月），0 = 不限制。
+func BotTokenQuotaKey(botID string) string {
+	return "bot." + botID + ".token_quota"
+}
+
+// BotTokenQuotaChannelKey 返回 channel 级 Token 额度配置键。
+// 格式：bot.<bot_id>.token_quota.channel.<channel_type>
+// 例如：bot.mybot.token_quota.channel.telegram → "500000"
+func BotTokenQuotaChannelKey(botID, channelType string) string {
+	return "bot." + botID + ".token_quota.channel." + channelType
+}
+
+// BotTokenQuotaChatKey 返回 chat 级 Token 额度配置键（最细粒度）。
+// 格式：bot.<bot_id>.token_quota.channel.<channel_type>.<chat_id>
+// 例如：bot.mybot.token_quota.channel.telegram.-123456 → "100000"
+func BotTokenQuotaChatKey(botID, channelType, chatID string) string {
+	return "bot." + botID + ".token_quota.channel." + channelType + "." + chatID
+}
+
+// SystemTokenQuotaKey 返回系统级月 Token 额度配置键。
+// 格式：system.token_quota
+// 例如：system.token_quota → "2000000"
+func SystemTokenQuotaKey() string {
+	return "system.token_quota"
+}
+
+// BotAdaptiveEngagementKey 返回 Bot 级自适应 engagement 配置键。
+// sub 为具体配置项名称（如 "enabled"、"channel.<type>.enabled"）。
+// 格式：bot.<bot_id>.engagement.adaptive.<sub>
+// 例如：bot.mybot.engagement.adaptive.enabled → "true"
+//
+// 层级继承关系（从粗到细）：
+//
+//	bot.<id>.engagement.adaptive.enabled                     → Bot 全局开关
+//	bot.<id>.engagement.adaptive.channel.<type>.enabled      → Channel 类型级开关
+//	bot.<id>.engagement.adaptive.channel.<type>.<chatid>.enabled → 具体群/单聊级开关
+func BotAdaptiveEngagementKey(botID, sub string) string {
+	return "bot." + botID + ".engagement.adaptive." + sub
+}
+
+// EnvKeyToConfigKey 将环境变量名转换为配置键。
+// 规则：小写化，下划线 _ → 点号 .
+func EnvKeyToConfigKey(envKey string) string {
+	lower := strings.ToLower(envKey)
+	return strings.ReplaceAll(lower, "_", ".")
+}
+
+// ConfigKeyToEnvKey 将配置键转换为环境变量名。
+func ConfigKeyToEnvKey(configKey string) string {
+	upper := strings.ToUpper(configKey)
+	return strings.ReplaceAll(upper, ".", "_")
+}
+
+// ErrInvalidKey 配置键格式错误。
+var ErrInvalidKey = fmt.Errorf("config: invalid key format")
+
+// ValidateKey 检查配置键是否符合规范（小写字母/数字/点号/连字符/下划线）。
+func ValidateKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("%w: empty key", ErrInvalidKey)
+	}
+	for _, ch := range key {
+		if (ch < 'a' || ch > 'z') &&
+			(ch < '0' || ch > '9') &&
+			ch != '.' && ch != '_' && ch != '-' {
+			return fmt.Errorf("%w: key %q contains invalid character %q", ErrInvalidKey, key, ch)
+		}
+	}
+	return nil
+}
+
+// SensitiveConfigKeys 是「绝不应经配置读取接口原文回显」的敏感键集合。
+// 含：JWT 签名密钥、各渠道 token/secret、数据库/代理凭据等。匹配前缀即可，
+// 因此 bot.<id>.xxx 这类按 bot 隔离的密钥也会被覆盖（如 channel token）。
+var SensitiveConfigKeys = map[string]bool{
+	"auth.jwt_secret": true,
+	"db.password":     true,
+	"db.path":         false, // 非敏感（已在死键修复中处理），仅占位说明
+}
+
+// IsSensitiveKey 判断配置键是否敏感（含精确匹配与前缀匹配）。
+// 用于配置读取接口拒绝原文回显，避免密钥经 GET /api/config/:key 泄露。
+func IsSensitiveKey(key string) bool {
+	if SensitiveConfigKeys[key] {
+		return true
+	}
+	// 前缀匹配：任何以这些前缀开头的键都视为敏感（如各渠道 token/secret）。
+	for _, prefix := range []string{"auth.", "channel.", "db."} {
+		if strings.HasPrefix(key, prefix) {
+			// db.path 等明确非敏感的已在上表标 false，这里需排除。
+			if key == "db.path" {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}

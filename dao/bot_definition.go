@@ -1,0 +1,89 @@
+package dao
+
+import "time"
+
+// BotDefinition 持久化的 Bot 定义。
+// 管理员通过 API 创建/编辑 Bot 定义，系统启动时从 DB 加载并实例化。
+type BotDefinition struct {
+	// ID Bot 唯一标识（如 "customer-service"）。
+	ID string `gorm:"primaryKey;size:64" json:"id"`
+
+	// Name 显示名称。
+	Name string `gorm:"size:128;not null" json:"name"`
+
+	// Avatar 头像（emoji 或 URL）。
+	Avatar string `gorm:"size:256;default:''" json:"avatar"`
+
+	// Description 简短描述。
+	Description string `gorm:"size:512;default:''" json:"description"`
+
+	// Timezone 时区标识（如 "Asia/Shanghai"），为空继承系统默认。
+	Timezone string `gorm:"size:64;default:''" json:"timezone"`
+
+	// SecurityPolicy 安全策略（allow_all | whitelist | private_only）。
+	SecurityPolicy string `gorm:"size:32;default:'allow_all'" json:"securityPolicy"`
+
+	// SystemPrompt 系统提示词。
+	SystemPrompt string `gorm:"type:text" json:"systemPrompt"`
+
+	// LLMMain 主力 LLM 模型 ID（对应 config llm.models.<id>）。
+	LLMMain string `gorm:"size:64;default:''" json:"llmMain"`
+
+	// LLMLight 低成本 LLM 模型 ID。
+	LLMLight string `gorm:"size:64;default:''" json:"llmLight"`
+
+	// Model 模型标识（如 "gpt-4o"），兼容 BotConfig.Model。
+	Model string `gorm:"size:128;default:''" json:"model"`
+
+	// Temperature 温度参数。
+	Temperature float64 `gorm:"default:0.7" json:"temperature"`
+
+	// FrequencyPenalty 重复惩罚：抑制模型反复输出相同 token（GLM-5.x 官方推荐 0.1）。
+	// 0 = 由代码回退到默认 0.1。
+	FrequencyPenalty float64 `gorm:"default:0.1" json:"frequencyPenalty"`
+
+	// PresencePenalty 存在惩罚：抑制已出现过的 token 再次出现（GLM-5.x 官方推荐 0.05）。
+	// 0 = 由代码回退到默认 0.05。
+	PresencePenalty float64 `gorm:"default:0.05" json:"presencePenalty"`
+
+	// MaxTokens 最大输出 token 数。
+	MaxTokens int `gorm:"default:4096" json:"maxTokens"`
+
+	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
+	ReasoningEffort string `gorm:"size:16;default:''" json:"reasoningEffort"`
+
+	// Workers 并发 worker 数量。
+	Workers int `gorm:"default:4" json:"workers"`
+
+	// MaxSteps 工具调用循环的软上限（soft budget）。
+	// 0 = 使用全局默认（当前 30）。>0 时该 Bot 独立覆盖全局默认。
+	// 编排器在 soft 内自然收尾；超出后若仍在产生新的工具调用则自动延长至 HardMaxSteps。
+	MaxSteps int `gorm:"default:0" json:"maxSteps,omitempty"`
+
+	// HardMaxSteps 工具调用循环的硬上限（safety net）。
+	// 0 = 使用全局默认（当前 soft×3 = 90）。必须大于等于 MaxSteps。
+	HardMaxSteps int `gorm:"default:0" json:"hardMaxSteps,omitempty"`
+
+	// MemoryLimitMB 容器内存限制（MB）。
+	// 0 = 不限制（docker run 不加 --memory）；>0 = 限制该 MB 数；缺省/未配置 = 2G（2048MB）。
+	// 仅 Docker 后端生效，创建/重建容器时读取此值。
+	MemoryLimitMB int64 `gorm:"default:2048" json:"memoryLimitMB"`
+
+	// Status 运行状态：stopped | running。
+	Status string `gorm:"size:32;not null;default:'stopped'" json:"status"`
+
+	// CreatedAt 创建时间。
+	CreatedAt time.Time `gorm:"autoCreateTime" json:"createdAt"`
+
+	// UpdatedAt 更新时间。
+	UpdatedAt time.Time `gorm:"autoUpdateTime" json:"updatedAt"`
+}
+
+// TableName 指定 GORM 表名。
+func (BotDefinition) TableName() string { return "bot_definitions" }
+
+// Bot 定义状态常量。
+const (
+	BotStatusStopped = "stopped"
+	BotStatusRunning = "running"
+)

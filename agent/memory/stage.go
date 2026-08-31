@@ -1,0 +1,323 @@
+package memory
+
+import (
+	"context"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/util/traceid"
+)
+
+// ============================================================================
+// MemoryStage — Pipeline 记忆集成 Stage
+// ============================================================================
+
+// MemoryStage 是一个 Pipeline Stage，在消息处理过程中：
+//  1. [读取] 从 Repository 检索与当前消息相关的记忆
+//  2. [注入] 将格式化后的记忆上下文注入 Envelope KV（供下游 Stage 使用）
+//
+// MemoryStage 通常放在 Pipeline 靠前的位置（如 Order=100），在 LLM 调用之前完成。
+// 下游的 ReplyStage/LLMStage 可以从 Envelope.Get("memory.context") 获取记忆上下文，
+// 拼入 system prompt 或 messages 中。
+//
+// 旁路事件：
+//   - memory.retrieved: 检索完成（含命中数量和耗时）
+//
+// Envelope KV 注入：
+//   - "memory.context": string — 格式化后的记忆上下文文本
+//   - "memory.entries": []Entry — 原始记忆条目（供高级 Stage 使用）
+//
+// 使用示例：
+//
+//	memStage := memory.NewMemoryStage("memory", repo, memory.MemoryStageConfig{
+//	    Context: memory.DefaultContextManagerConfig(),
+//	})
+//	pipeline.AddStage(core.StageInfo{Stage: memStage, Order: 100, Enabled: true})
+type MemoryStage struct {
+	name   string
+	mgr    *ContextManager
+	repo   Repository
+	config MemoryStageConfig
+	tracer trace.Tracer
+	logger *zap.SugaredLogger
+}
+
+// MemoryStageConfig 配置记忆 Stage。
+type MemoryStageConfig struct {
+	// Context 上下文管理器配置。
+	Context ContextManagerConfig
+	// Builder 上下文格式化配置。
+	Builder ContextBuilderConfig
+	// Window 动态窗口管理器（可选，nil 使用静态 token 限制）。
+	Window *Window
+	// Compressor 压缩器（可选，nil 时超限直接截断）。
+	Compressor Compressor
+}
+
+// NewMemoryStage 创建记忆 Pipeline Stage。
+func NewMemoryStage(
+	name string,
+	repo Repository,
+	config MemoryStageConfig,
+	tp trace.TracerProvider,
+	logger *zap.SugaredLogger,
+) *MemoryStage {
+	builder := NewContextBuilder(config.Builder)
+	mgr := NewContextManager(repo, builder, config.Window, config.Compressor, config.Context)
+
+	return &MemoryStage{
+		name:   name,
+		mgr:    mgr,
+		repo:   repo,
+		config: config,
+		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/agent/memory"),
+		logger: logger.With("component", "memory_stage"),
+	}
+}
+
+// Name 返回 Stage 名称。
+func (s *MemoryStage) Name() string { return s.name }
+
+// Process 从记忆中检索上下文并注入到 Envelope。
+func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	ctx, span := s.tracer.Start(ctx, "stage.memory.process",
+		trace.WithAttributes(
+			attribute.String("message.id", env.Message.ID),
+			attribute.String("message.channel", env.Message.Channel),
+			attribute.String("message.user_id", env.Message.UserID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
+		))
+	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
+
+	start := time.Now()
+
+	// 组装记忆上下文
+	result, err := s.mgr.AssembleContext(
+		ctx,
+		env.Message.Channel,
+		env.Message.UserID,
+		env.Message.Text,
+	)
+	if err != nil {
+		// 记忆检索失败不应阻塞消息处理，降级为无记忆继续
+		logger.Warnw("memory retrieval failed, proceeding without context",
+			"message_id", env.Message.ID,
+			"err", err)
+		span.RecordError(err)
+		return env, nil
+	}
+
+	duration := time.Since(start)
+
+	// 注入到 Envelope KV
+	if result.ContextText != "" {
+		env.Set("memory.context", result.ContextText)
+		env.Set("memory.entries_used", result.EntriesUsed)
+		env.Set("memory.compressed", result.Compressed)
+
+		// 如果有压缩块，存储引用 ID（供 Expander 使用）
+		if result.CompressedBlock != nil {
+			env.Set("memory.compressed_block", result.CompressedBlock)
+		}
+
+		span.SetAttributes(
+			attribute.Int("memory.context_len", len(result.ContextText)),
+			attribute.Int("memory.token_estimate", result.TokenEstimate),
+			attribute.Int("memory.entries_used", result.EntriesUsed),
+			attribute.Bool("memory.compressed", result.Compressed),
+			attribute.Int64("memory.duration_ms", duration.Milliseconds()),
+		)
+		logger.Debugw("memory context injected",
+			"message_id", env.Message.ID,
+			"context_len", len(result.ContextText),
+			"tokens_est", result.TokenEstimate,
+			"entries", result.EntriesUsed,
+			"compressed", result.Compressed,
+			"duration", duration)
+
+		// 可观测性：向模型上下文注入内容的边界事件（append-only 轨迹）。
+		// Surface=true 标记该内容确实进入模型 surface（system/上下文），
+		// 供可观测性 / 回放区分「进模型的上下文」与纯日志事件。
+		core.EventSinkFromContext(ctx).Emit(ctx, core.Event{
+			Kind:    core.EventContextInject,
+			Source:  "memory-recall",
+			Surface: true,
+			Payload: map[string]any{
+				"context_len":  len(result.ContextText),
+				"tokens_est":   result.TokenEstimate,
+				"entries_used": result.EntriesUsed,
+				"compressed":   result.Compressed,
+				"duration_ms":  duration.Milliseconds(),
+			},
+		})
+	} else {
+		span.SetAttributes(attribute.Bool("memory.empty", true))
+	}
+
+	// 旁路事件：记忆检索完成
+	emitter := outbound.EmitterFromContext(ctx)
+	emitter.Emit(ctx, "memory.retrieved", env.Message.TraceID, map[string]any{
+		"context_len":    len(result.ContextText),
+		"token_estimate": result.TokenEstimate,
+		"entries_used":   result.EntriesUsed,
+		"compressed":     result.Compressed,
+		"duration_ms":    duration.Milliseconds(),
+		"has_context":    result.ContextText != "",
+	})
+
+	return env, nil
+}
+
+// ContextManager 返回 Stage 内部的上下文管理器。
+// 外部可调用 mgr.UpdateUsage() 来反馈 LLM token 消耗。
+func (s *MemoryStage) ContextManager() *ContextManager {
+	return s.mgr
+}
+
+// ============================================================================
+// MemoryWriteStage — Pipeline 记忆写入 Stage
+// ============================================================================
+
+// MemoryWriteStage 是一个 Pipeline Stage，在消息处理的后期阶段：
+// 检查 Envelope 中是否有需要写入记忆的内容（如 ActionNote 产出的备注），
+// 并将其转存为 Memory Entry。
+//
+// MemoryWriteStage 通常放在 Pipeline 靠后的位置（如 Order=900），
+// 在 ReplyStage/决策 Stage 之后执行。
+//
+// 它会检查 Envelope 中累积的 ActionNote 并将备注文本转为记忆条目存储。
+// 这使得 NoteHandler（outbound 侧）负责立即持久化备注，
+// 而 MemoryWriteStage（pipeline 侧）负责将备注转化为可检索的长期记忆。
+//
+// Envelope KV 注入：
+//   - "memory.written": int — 本次写入的记忆条目数
+//
+// 旁路事件：
+//   - memory.written: 记忆写入完成
+type MemoryWriteStage struct {
+	name   string
+	store  Store
+	tracer trace.Tracer
+	logger *zap.SugaredLogger
+}
+
+// NewMemoryWriteStage 创建记忆写入 Stage。
+func NewMemoryWriteStage(
+	name string,
+	store Store,
+	tp trace.TracerProvider,
+	logger *zap.SugaredLogger,
+) *MemoryWriteStage {
+	return &MemoryWriteStage{
+		name:   name,
+		store:  store,
+		tracer: tp.Tracer("github.com/kasuganosora/thinkbot/agent/memory"),
+		logger: logger.With("component", "memory_write_stage"),
+	}
+}
+
+// Name 返回 Stage 名称。
+func (s *MemoryWriteStage) Name() string { return s.name }
+
+// Process 将 Envelope 中的 ActionNote 转存为记忆条目。
+func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	ctx, span := s.tracer.Start(ctx, "stage.memory_write.process",
+		trace.WithAttributes(
+			attribute.String("message.id", env.Message.ID),
+			attribute.String("trace.id", traceid.FromContext(ctx)),
+		))
+	defer span.End()
+
+	logger := traceid.WithLoggerFrom(ctx, s.logger)
+
+	// 提取 ActionNote 类型的 action
+	actions := env.Actions()
+	var written int
+
+	for _, action := range actions {
+		if action.Type != core.ActionNote {
+			continue
+		}
+
+		text, ok := action.Payload.(string)
+		if !ok || text == "" {
+			continue
+		}
+
+		// 确定存储 scope — 群聊场景下同时写入 Channel 和 User scope
+		// ChannelScope 记录会话/群组上下文（"这个群里发生了什么"）
+		// UserScope 用于跨会话的用户画像提取（"这个用户是谁、偏好什么"）
+		// 当 Channel == UserID（私聊/直接互动）时，两者指向同一人，只写一次
+		var scopes []Scope
+		if env.Message.Channel != "" {
+			scopes = append(scopes, ChannelScope(env.Message.Channel))
+		}
+		if env.Message.UserID != "" && env.Message.UserID != env.Message.Channel {
+			scopes = append(scopes, UserScope(env.Message.UserID))
+		}
+		if len(scopes) == 0 {
+			continue
+		}
+
+		// 提取分类
+		category := "observation"
+		if action.Metadata != nil {
+			if c, ok := action.Metadata["category"]; ok {
+				if cs, ok := c.(string); ok && cs != "" {
+					category = cs
+				}
+			}
+		}
+
+		// 写入每个 scope
+		for _, scope := range scopes {
+			entry := Entry{
+				Scope:      scope,
+				Content:    StripThinking(text),
+				Category:   category,
+				Source:     "note",
+				Importance: 0.5, // 默认中等重要度
+				Metadata: map[string]any{
+					"message_id": env.Message.ID,
+					"user_id":    env.Message.UserID,
+					"bot_id":     env.Message.BotID,
+				},
+			}
+
+			if err := s.store.Append(ctx, entry); err != nil {
+				logger.Warnw("memory write failed",
+					"message_id", env.Message.ID,
+					"scope", scope.Key(),
+					"err", err)
+				span.RecordError(err)
+				// 写入失败不阻塞 pipeline
+				continue
+			}
+			written++
+		}
+	}
+
+	if written > 0 {
+		env.Set("memory.written", written)
+		span.SetAttributes(attribute.Int("memory.written", written))
+
+		logger.Debugw("memory entries written",
+			"message_id", env.Message.ID,
+			"count", written)
+
+		// 旁路事件
+		emitter := outbound.EmitterFromContext(ctx)
+		emitter.Emit(ctx, "memory.written", env.Message.TraceID, map[string]any{
+			"count": written,
+		})
+	}
+
+	return env, nil
+}

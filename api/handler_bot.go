@@ -1,0 +1,324 @@
+package api
+
+import (
+	"github.com/gin-gonic/gin"
+
+	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
+	"github.com/kasuganosora/thinkbot/util/strutil"
+)
+
+// ============================================================================
+// Bot 管理 Handler — CRUD / 启停（admin）
+// ============================================================================
+
+// handleListBots 列出所有 Bot 定义。
+// GET /api/bots
+//
+// @Summary      Bot 列表
+// @Description  列出所有 Bot 定义及其运行状态
+// @Tags         Bot 管理
+// @Produce      json
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots [get]
+func (s *Server) handleListBots(c *gin.Context) {
+	defs, err := s.botSvc.ListDefinitions()
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	// 附加运行状态
+	type botListItem struct {
+		dao.BotDefinition
+		Running bool `json:"running"`
+	}
+
+	result := make([]botListItem, len(defs))
+	for i, def := range defs {
+		result[i].BotDefinition = def
+		result[i].Running = s.botSvc.IsRunning(def.ID)
+	}
+
+	OK(c, result)
+}
+
+// handleGetBot 获取单个 Bot 定义。
+// GET /api/bots/:id
+//
+// @Summary      获取 Bot
+// @Description  获取指定 Bot 的定义和运行时信息
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id   path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Failure      404  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id} [get]
+func (s *Server) handleGetBot(c *gin.Context) {
+	id := c.Param("id")
+
+	def, err := s.botSvc.GetDefinition(id)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+
+	// 尝试获取运行时信息
+	type botDetail struct {
+		dao.BotDefinition
+		Running bool `json:"running"`
+		Info    *any `json:"info,omitempty"`
+	}
+
+	detail := botDetail{
+		BotDefinition: *def,
+		Running:       s.botSvc.IsRunning(id),
+	}
+
+	if info, err := s.botSvc.GetBotInfo(id); err == nil && info != nil {
+		i := any(info)
+		detail.Info = &i
+	}
+
+	OK(c, detail)
+}
+
+// handleCreateBot 创建 Bot 定义。
+// POST /api/bots
+//
+// @Summary      创建 Bot
+// @Description  创建新的 Bot 定义（需要 bot.manage 权限）
+// @Tags         Bot 管理
+// @Accept       json
+// @Produce      json
+// @Param        body  body      CreateBotReq  true  "创建 Bot 请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots [post]
+func (s *Server) handleCreateBot(c *gin.Context) {
+	var req CreateBotReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	// 决定头像：前端可能传 avatarUrl（URL）或 avatar（emoji），优先 avatarUrl
+	avatar := req.Avatar
+	if req.AvatarUrl != "" {
+		avatar = req.AvatarUrl
+	}
+
+	// 安全策略默认值
+	secPolicy := req.SecurityPolicy
+	if secPolicy == "" {
+		secPolicy = "allow_all"
+	}
+
+	// 数值默认值
+	temperature := 0.7
+	if req.Temperature != nil {
+		temperature = *req.Temperature
+	}
+	maxTokens := 4096
+	if req.MaxTokens != nil {
+		maxTokens = *req.MaxTokens
+	}
+	workers := 4
+	if req.Workers != nil {
+		workers = *req.Workers
+	}
+	// 步数预算：0 = 不限制（无限，默认）。hardMaxSteps 即用户「步数限制」设置，
+	// 0 表示 Bot 跑到任务完成为止，不被步数上限腰斩；由 effectiveStepBudgets 解析。
+	maxSteps := 0
+	if req.MaxSteps != nil {
+		maxSteps = *req.MaxSteps
+	}
+	hardMaxSteps := 0
+	if req.HardMaxSteps != nil {
+		hardMaxSteps = *req.HardMaxSteps
+	}
+
+	def := &dao.BotDefinition{
+		ID:              idgen.New("bot"),
+		Name:            req.Name,
+		Avatar:          avatar,
+		Description:     req.Description,
+		Timezone:        req.Timezone,
+		SecurityPolicy:  secPolicy,
+		LLMMain:         req.LLMMain,
+		LLMLight:        req.LLMLight,
+		Model:           req.Model,
+		Temperature:     temperature,
+		MaxTokens:       maxTokens,
+		MaxSteps:        maxSteps,
+		HardMaxSteps:    hardMaxSteps,
+		Workers:         workers,
+		ReasoningEffort: req.ReasoningEffort,
+		Status:          dao.BotStatusStopped,
+	}
+
+	if err := s.botSvc.CreateDefinition(def); err != nil {
+		Fail(c, err)
+		return
+	}
+	// 为新 bot 播种 web 平台默认全开规则（bot 尚无任何规则时才写入）。
+	if s.permSvc != nil {
+		if err := s.permSvc.SeedWebDefault(def.ID); err != nil {
+			s.logger.Warnw("failed to seed web default tool permission", "bot_id", def.ID, "err", err)
+		}
+	}
+	auditLog(c, s.logger, "create_bot", "bot_id", def.ID, "name", req.Name)
+	OK(c, def)
+}
+
+// handleUpdateBot 更新 Bot 定义。
+// PUT /api/bots/:id
+//
+// @Summary      更新 Bot
+// @Description  更新指定 Bot 的配置（字段可选，需要 bot.manage 权限）
+// @Tags         Bot 管理
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string        true  "Bot ID"
+// @Param        body  body      UpdateBotReq  true  "更新 Bot 请求"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id} [put]
+func (s *Server) handleUpdateBot(c *gin.Context) {
+	id := c.Param("id")
+
+	var req UpdateBotReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	updates := map[string]any{}
+	if req.Name != nil {
+		updates["name"] = *req.Name
+	}
+	if req.Avatar != nil {
+		updates["avatar"] = *req.Avatar
+	}
+	if req.Description != nil {
+		updates["description"] = *req.Description
+	}
+	if req.Timezone != nil {
+		updates["timezone"] = *req.Timezone
+	}
+	if req.SecurityPolicy != nil {
+		updates["security_policy"] = *req.SecurityPolicy
+	}
+	if req.LLMMain != nil {
+		updates["llm_main"] = *req.LLMMain
+	}
+	if req.LLMLight != nil {
+		updates["llm_light"] = *req.LLMLight
+	}
+	if req.Model != nil {
+		updates["model"] = *req.Model
+	}
+	if req.Temperature != nil {
+		updates["temperature"] = *req.Temperature
+	}
+	if req.MaxTokens != nil {
+		updates["max_tokens"] = *req.MaxTokens
+	}
+	if req.MaxSteps != nil {
+		updates["max_steps"] = *req.MaxSteps
+	}
+	if req.HardMaxSteps != nil {
+		updates["hard_max_steps"] = *req.HardMaxSteps
+	}
+	if req.Workers != nil {
+		updates["workers"] = *req.Workers
+	}
+	if req.ReasoningEffort != nil {
+		updates["reasoning_effort"] = *req.ReasoningEffort
+	}
+
+	if len(updates) == 0 {
+		OKMsg(c, "no changes", nil)
+		return
+	}
+
+	if err := s.botSvc.UpdateDefinition(id, updates); err != nil {
+		Fail(c, err)
+		return
+	}
+	auditLog(c, s.logger, "update_bot", "bot_id", id, "fields", strutil.MapKeys(updates))
+	OKMsg(c, "bot updated", nil)
+}
+
+// handleDeleteBot 删除 Bot 定义。
+// DELETE /api/bots/:id
+//
+// @Summary      删除 Bot
+// @Description  删除指定 Bot 定义
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id} [delete]
+func (s *Server) handleDeleteBot(c *gin.Context) {
+	id := c.Param("id")
+
+	if err := s.botSvc.DeleteDefinition(id); err != nil {
+		Fail(c, err)
+		return
+	}
+	// 清理该 bot 的工具权限规则，避免留下孤儿行
+	if s.permSvc != nil {
+		if err := s.permSvc.DeleteAllForBot(id); err != nil {
+			s.logger.Warnw("delete bot tool perms failed", "bot", id, "err", err)
+		}
+	}
+	auditLog(c, s.logger, "delete_bot", "bot_id", id)
+	OKMsg(c, "bot deleted", nil)
+}
+
+// handleStartBot 启动 Bot。
+// POST /api/bots/:id/start
+//
+// @Summary      启动 Bot
+// @Description  启动指定 Bot
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/start [post]
+func (s *Server) handleStartBot(c *gin.Context) {
+	id := c.Param("id")
+
+	if err := s.botSvc.StartBot(c.Request.Context(), id); err != nil {
+		Fail(c, err)
+		return
+	}
+	auditLog(c, s.logger, "start_bot", "bot_id", id)
+	OKMsg(c, "bot started", nil)
+}
+
+// handleStopBot 停止 Bot。
+// POST /api/bots/:id/stop
+//
+// @Summary      停止 Bot
+// @Description  停止指定 Bot
+// @Tags         Bot 管理
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/stop [post]
+func (s *Server) handleStopBot(c *gin.Context) {
+	id := c.Param("id")
+	s.botSvc.StopBot(id)
+	auditLog(c, s.logger, "stop_bot", "bot_id", id)
+	OKMsg(c, "bot stopped", nil)
+}

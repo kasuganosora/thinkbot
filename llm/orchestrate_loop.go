@@ -1,0 +1,305 @@
+package llm
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/kasuganosora/thinkbot/util/traceid"
+)
+
+// ============================================================================
+// loopController — 动态步数控制器
+//
+// 背景：orchestration 循环原先只有一个静态硬上限 MaxSteps，导致复杂任务
+// （如大规模代码修复）在还没跑完时就被腰斩，而简单任务又无法从更小的上限
+// 中获益。loopController 用「软/硬双层预算 + 进展感知」取代单一硬上限：
+//
+//   - soft  (= MaxSteps)     ：常规预算。step < soft 时无条件放行。
+//   - hard  (= HardMaxSteps) ：绝对安全网。任何情况都不会突破。
+//   - 单次内重复检测          ：soft 之后，只要模型仍在发出「不同」的工具调用
+//                              （说明还在推进），就一路放行到 hard；一旦连续
+//                              repeatLimit 步产生「完全相同」的工具调用签名
+//                              （原地打转 / 死循环），立即停止，不浪费到 hard。
+//
+// 关键洞察：orchestration 循环只有在「上一步产生了可执行工具调用」时才会进入
+// 下一轮（否则 FinishReason != tool-calls 会直接 break）。因此在 soft..hard
+// 区间内，唯一值得停下的理由就是「陷入重复循环」。这样即可做到：
+//   复杂但持续推进的任务  → 自动延长到 hard
+//   原地打转的死循环      → 提前拦截
+// 无需人工为每种任务猜测一个合适的步数上限。
+// ============================================================================
+
+// defaultRepeatLimit 是软预算内判定「陷入重复循环」的连续相同签名步数阈值。
+// 软预算内容忍少量重复（可能是合理的重试）。
+const defaultRepeatLimit = 3
+
+// tightRepeatLimit 是超出软预算后收紧的重复阈值。任务已消耗大量步数，
+// 此时对原地打转零容忍：连续 2 步相同签名即判定 stalled。
+const tightRepeatLimit = 2
+
+// defaultHardMultiplier 是未显式设置 HardMaxSteps 时，hard 相对 soft 的倍数。
+const defaultHardMultiplier = 3
+
+// loopController 追踪单次 orchestration 的步数预算与重复循环状态。
+// 非并发安全：每次 orchestration 独占一个实例，循环本身是串行推进的。
+type loopController struct {
+	soft        int    // 软预算 = MaxSteps（<0 表示无限）
+	hard        int    // 硬上限 = HardMaxSteps
+	repeatLimit int    // 连续相同签名达到此值判定 stalled
+	lastSig     string // 上一步的工具调用签名
+	repeatCount int    // 当前签名连续出现次数
+	stalled     bool   // 是否已判定陷入重复循环
+	derailed    bool   // 是否已判定脱轨（边说停边调的循环）
+	derailCount int    // 连续出现「自我纠正文本 + 仍在调工具」的步数
+}
+
+// newLoopController 根据 soft(MaxSteps) 与 hard(HardMaxSteps) 构造控制器。
+//
+//	soft < 0  ：无限模式（对应 MaxSteps == -1），永不因步数上限停止。
+//	soft == 0 ：单步 fast path 已在 orchestrate 上游处理，不会进入循环，
+//	            此处退化为「最多 1 步」以保证安全。
+//	hard == 0 ：不限制（无限）。用户未设步数上限，Bot 跑到任务完成为止，
+//	           不会因步数预算耗尽而被腰斩（见 effectiveStepBudgets 注释）。
+//	hard < 0  ：内置默认安全网（soft * defaultHardMultiplier），历史/内部语义。
+//	hard > 0  ：有限硬上限。
+//	hard < soft（且 hard != -1）：夹紧为 soft（hard 不得小于 soft）。
+//
+// derailThreshold：连续多少步出现「自我纠正文本 + 仍在调工具」判定为脱轨。
+// 阈值设为 3，避免正常任务中偶发一次「回到正题」被误杀。
+const derailThreshold = 3
+
+// derailPhrases：模型自我纠正/脱轨的高精度信号。当助手文本含这些短语且仍在发出
+// 工具调用时，说明模型已意识到自己在跑偏却停不下来（2026-08 实测：cfblog 任务中
+// 模型反复「停止这些无效调用，回到任务」却继续调 misskey 工具）。
+var derailPhrases = []string{
+	"与任务无关", "无关且无效", "无效调用", "无意义的工具调用", "停止这些",
+	"停止所有无关", "不相关的工具调用", "回到正题", "回到任务", "回到实际任务",
+	"回到真正的任务", "stop calling", "return to the task", "irrelevant",
+}
+
+// textContainsDerail 判断助手文本是否含脱轨自我纠正信号。
+func textContainsDerail(text string) bool {
+	if text == "" {
+		return false
+	}
+	low := strings.ToLower(text)
+	for _, p := range derailPhrases {
+		if strings.Contains(low, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+func newLoopController(soft, hard int) *loopController {
+	lc := &loopController{
+		soft:        soft,
+		repeatLimit: defaultRepeatLimit,
+	}
+
+	if soft < 0 {
+		lc.hard = -1 // 无限
+		return lc
+	}
+	if soft == 0 {
+		lc.hard = 1
+		return lc
+	}
+
+	switch {
+	case hard < 0:
+		// 内置默认安全网
+		hard = soft * defaultHardMultiplier
+	case hard == 0:
+		// 0 = 不限制（无限）
+		hard = -1
+	}
+	// 有限硬上限时保证 >= soft；无限（-1）不夹紧
+	if hard != -1 && hard < soft {
+		hard = soft
+	}
+	lc.hard = hard
+	return lc
+}
+
+// atHardLimit 报告第 step 步是否已触及（或超过）硬上限。
+// 用于「中途追加」场景：当用户在生成中补充内容时，我们需要判断能否为了
+// 服务这次补充而强制再多跑一步，而不突破 HardMaxSteps 安全网。
+func (lc *loopController) atHardLimit(step int) bool {
+	if lc.hard < 0 {
+		return false // 无限模式
+	}
+	return step >= lc.hard
+}
+
+// shouldContinue 判断第 step 步（0-based）是否可以开始执行。
+func (lc *loopController) shouldContinue(step int) bool {
+	// 死循环检测必须优先于任何模式 shortcut：无限模式下若已判定 stalled，
+	// 仍要立刻停止，否则重复死循环检测在无限模式（soft<0 或 hard<0）下完全失效。
+	if lc.stalled {
+		return false // 已检测到死循环（无限模式同样生效）
+	}
+	if lc.derailed {
+		return false // 已检测到脱轨循环（模型边说停边调工具）
+	}
+	if lc.soft < 0 || lc.hard < 0 {
+		return true // 无限模式（soft=-1 或 hard=0→不限制）
+	}
+	if step < lc.soft {
+		return true // 软预算内无条件放行
+	}
+	// soft..hard 区间：尚在推进（未 stalled）且未触及硬上限则继续。
+	return step < lc.hard
+}
+
+// recordStep 在第 step 步（0-based）的工具调用完成后调用，用工具调用签名
+// 更新重复检测状态。签名为空（该步无工具调用）时重置连续计数。
+//
+// 重复容忍度随进度收紧：软预算内允许连续 repeatLimit 次相同签名（容错重试），
+// 超出软预算后收紧为 tightRepeatLimit 次即判定 stalled——已经跑了很多步，
+// 不再容忍原地打转。
+func (lc *loopController) recordStep(step int, sig, text string) {
+	if sig == "" {
+		lc.lastSig = ""
+		lc.repeatCount = 0
+		lc.derailCount = 0
+		return
+	}
+	if sig == lc.lastSig {
+		lc.repeatCount++
+	} else {
+		lc.lastSig = sig
+		lc.repeatCount = 1
+	}
+
+	limit := lc.repeatLimit
+	if lc.soft > 0 && step >= lc.soft {
+		limit = tightRepeatLimit
+	}
+	if limit > 0 && lc.repeatCount >= limit {
+		lc.stalled = true
+	}
+
+	// 脱轨检测（Layer A）：助手文本含自我纠正信号且仍在调工具 → 计步；否则重置。
+	// 与「同签名重复」检测互补——2026-08 事故中模型每一步调的 misskey 工具/参数
+	// 都不同（签名每步都变），旧检测完全失明；但模型文本反复「停止、回到任务」却
+	// 停不下来，正是脱轨循环的高精度信号。
+	if textContainsDerail(text) {
+		lc.derailCount++
+	} else {
+		lc.derailCount = 0
+	}
+	if lc.derailCount >= derailThreshold {
+		lc.derailed = true
+	}
+}
+
+// toolCallSignature 从一组工具调用生成稳定签名（name+args 排序后 hash）。
+// 参数顺序不影响结果。无工具调用时返回空字符串。
+//
+// 与 agent/pipeline/loop_detection.go 的 toolCallsDigest 思路一致，但作用域
+// 不同：此函数用于「单次 orchestration 内、逐步」的重复检测，且位于 llm 包，
+// 不能反向依赖 pipeline 包，故独立实现。
+func toolCallSignature(calls []ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+
+	type key struct {
+		name string
+		args string
+	}
+	keys := make([]key, 0, len(calls))
+	for _, tc := range calls {
+		argsJSON, err := json.Marshal(tc.Input)
+		if err != nil {
+			argsJSON = []byte("{}")
+		}
+		keys = append(keys, key{name: tc.ToolName, args: string(argsJSON)})
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].name != keys[j].name {
+			return keys[i].name < keys[j].name
+		}
+		return keys[i].args < keys[j].args
+	})
+
+	h := sha256.New()
+	for _, k := range keys {
+		h.Write([]byte(k.name))
+		h.Write([]byte{0})
+		h.Write([]byte(k.args))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// stoppedByGuard 报告循环是否因步数守卫（重复循环或硬上限）而停止，
+// 而非模型自然收尾（不再产生工具调用）。无限模式（hard<0，即 0=不限制）
+// 永远不会因步数上限停止。
+func (lc *loopController) stoppedByGuard(steps int) bool {
+	if lc.stalled {
+		return true
+	}
+	if lc.derailed {
+		return true
+	}
+	if lc.hard < 0 {
+		return false // 不限制：不会因步数上限停止
+	}
+	return lc.soft >= 0 && steps >= lc.hard
+}
+
+// describeLoopStop 返回控制器停止原因的可读描述，用于日志。
+func (lc *loopController) describeLoopStop(steps int) string {
+	switch {
+	case lc.stalled:
+		return fmt.Sprintf("stalled: same tool calls repeated %d times", lc.repeatCount)
+	case lc.derailed:
+		return fmt.Sprintf("derailed: model self-corrects but keeps calling tools (%d steps)", lc.derailCount)
+	case lc.soft >= 0 && steps >= lc.hard:
+		return fmt.Sprintf("reached hard cap %d", lc.hard)
+	default:
+		return "no more tool calls"
+	}
+}
+
+// logLoopStop 在编排循环结束后记录停止原因。
+//
+// 分两级，避免「静默降级」又「日志刷屏」：
+//   - 撞硬顶 / 陷入重复循环 → Warn（任务被腰斩，必须能查到）；
+//   - 模型自然收尾但已越过软预算 → Debug（说明这次编排跑得很长，
+//     判断「产出是否被步数挤掉」时需要这个数据）。
+//
+// 2026-08-06 教训：原实现只在 `steps >= hard` 才打日志，而实际编排大多停在
+// soft..hard 区间或自然收尾 —— 线上 `grep` 该Warn **0 次命中**，
+// 导致排查 review 判定缺失时完全没有步数线索，误判了根因。
+func logLoopStop(ctx context.Context, lc *loopController, steps int) {
+	if lc == nil {
+		return
+	}
+	logger := traceid.L(ctx)
+	if logger == nil {
+		return
+	}
+	if !lc.stoppedByGuard(steps) {
+		// 自然收尾：只在越过软预算时留一条 Debug，正常短编排不产生噪声。
+		if lc.soft > 0 && steps >= lc.soft {
+			logger.Debugw("orchestration loop finished past soft budget",
+				"steps", steps, "soft_max", lc.soft, "hard_max", lc.hard)
+		}
+		return
+	}
+	logger.Warnw("orchestration loop stopped by step guard",
+		"reason", lc.describeLoopStop(steps),
+		"steps", steps,
+		"soft_max", lc.soft,
+		"hard_max", lc.hard,
+	)
+}

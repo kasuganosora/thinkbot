@@ -1,0 +1,201 @@
+package api
+
+// ============================================================================
+// 请求 / 响应 DTO 定义
+// ============================================================================
+
+// --- 认证 ---
+
+// LoginReq 登录请求。
+type LoginReq struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// LoginResp 登录响应。
+type LoginResp struct {
+	ID          uint    `json:"id"`
+	Username    string  `json:"username"`
+	Role        string  `json:"role"`
+	DisplayName string  `json:"displayName"`
+	Avatar      string  `json:"avatar"`
+	LastLoginAt *string `json:"lastLoginAt,omitempty"`
+}
+
+// ChangePasswordReq 修改密码请求。
+type ChangePasswordReq struct {
+	OldPassword string `json:"oldPassword" binding:"required"`
+	NewPassword string `json:"newPassword" binding:"required,min=6"`
+}
+
+// --- 用户管理 ---
+
+// CreateUserReq 创建用户请求（admin）。
+type CreateUserReq struct {
+	Username    string `json:"username" binding:"required,min=3"`
+	Password    string `json:"password" binding:"required,min=6"`
+	Email       string `json:"email"`
+	Role        string `json:"role"`
+	DisplayName string `json:"displayName"`
+}
+
+// UpdateUserReq 更新用户资料请求（admin）。
+type UpdateUserReq struct {
+	Email       *string `json:"email"`
+	DisplayName *string `json:"displayName"`
+	Avatar      *string `json:"avatar"`
+}
+
+// UpdateRoleReq 修改角色请求（admin）。
+type UpdateRoleReq struct {
+	Role string `json:"role" binding:"required"`
+}
+
+// --- Bot 管理 ---
+
+// CreateBotReq 创建 Bot 请求（admin）。
+// 系统提示词由 SOUL.md 管理，不通过 API 设置。
+type CreateBotReq struct {
+	Name            string   `json:"name" binding:"required"`
+	Avatar          string   `json:"avatar"`
+	AvatarUrl       string   `json:"avatarUrl"` // 前端兼容字段，优先级高于 Avatar
+	Description     string   `json:"description"`
+	Timezone        string   `json:"timezone"`
+	SecurityPolicy  string   `json:"securityPolicy"`
+	LLMMain         string   `json:"llmMain"`
+	LLMLight        string   `json:"llmLight"`
+	Model           string   `json:"model"`
+	Temperature     *float64 `json:"temperature"`
+	MaxTokens       *int     `json:"maxTokens"`
+	MaxSteps        *int     `json:"maxSteps"`
+	HardMaxSteps    *int     `json:"hardMaxSteps"`
+	Workers         *int     `json:"workers"`
+	ReasoningEffort string   `json:"reasoningEffort"`
+}
+
+// UpdateBotReq 更新 Bot 请求（admin）。
+type UpdateBotReq struct {
+	Name            *string  `json:"name"`
+	Avatar          *string  `json:"avatar"`
+	Description     *string  `json:"description"`
+	Timezone        *string  `json:"timezone"`
+	SecurityPolicy  *string  `json:"securityPolicy"`
+	LLMMain         *string  `json:"llmMain"`
+	LLMLight        *string  `json:"llmLight"`
+	Model           *string  `json:"model"`
+	Temperature     *float64 `json:"temperature"`
+	MaxTokens       *int     `json:"maxTokens"`
+	MaxSteps        *int     `json:"maxSteps"`
+	HardMaxSteps    *int     `json:"hardMaxSteps"`
+	Workers         *int     `json:"workers"`
+	ReasoningEffort *string  `json:"reasoningEffort"`
+}
+
+// --- 聊天 ---
+
+// ChatReq 发送聊天消息请求。
+type ChatReq struct {
+	BotID       string           `json:"botId" binding:"required"`
+	Text        string           `json:"text" binding:"required"`
+	SessionID   string           `json:"sessionId,omitempty"`
+	Attachments []ChatAttachment `json:"attachments,omitempty"`
+}
+
+// ChatAbortReq 中止一条流式聊天请求。
+type ChatAbortReq struct {
+	BotID   string `json:"botId" binding:"required"`
+	TraceID string `json:"traceId" binding:"required"`
+}
+
+// ChatAppendReq 在一条正在执行的聊天（生成中）过程中，用户中途追加的内容。
+// 与 /send 不同：它不会开启新一轮，而是把 text 注入 botID+traID 这同一轮对话，
+// 让 agent 在继续生成时结合这条补充（Claude-CLI 风格）。
+type ChatAppendReq struct {
+	BotID     string `json:"botId" binding:"required"`
+	TraceID   string `json:"traceId" binding:"required"`
+	Text      string `json:"text" binding:"required"`
+	SessionID string `json:"sessionId,omitempty"`
+}
+
+// ChatAttachment 表示用户上传的附件（图片/音频/视频等）。
+// DataUrl 格式为 "data:<mime>;base64,<base64-encoded-data>"。
+type ChatAttachment struct {
+	Name    string `json:"name"`              // 文件名（如 "photo.jpg"）
+	Type    string `json:"type"`              // MIME type（如 "image/jpeg"）
+	Size    int64  `json:"size"`              // 字节数
+	DataUrl string `json:"dataUrl,omitempty"` // base64 data URL
+}
+
+// --- Channel 管理 ---
+
+// CreateChannelReq 创建 Channel 配置请求。
+type CreateChannelReq struct {
+	Name   string `json:"name" binding:"required"`
+	Type   string `json:"type" binding:"required"`
+	Config string `json:"config"` // JSON 字符串
+}
+
+// UpdateChannelReq 更新 Channel 配置请求。
+type UpdateChannelReq struct {
+	Name    *string `json:"name"`
+	Config  *string `json:"config"`
+	Enabled *bool   `json:"enabled"`
+}
+
+// --- 梦境巩固配置 ---
+
+// DreamingConfigResp 梦境巩固配置响应。
+type DreamingConfigResp struct {
+	Enabled  bool   `json:"enabled"`
+	Schedule string `json:"schedule"`
+}
+
+// UpdateDreamingConfigReq 更新梦境巩固配置请求。
+// 所有字段可选，只更新提供的字段。
+type UpdateDreamingConfigReq struct {
+	Enabled  *bool   `json:"enabled"`
+	Schedule *string `json:"schedule"`
+}
+
+// --- 配置 ---
+
+// SetConfigReq 设置单个配置项请求。
+type SetConfigReq struct {
+	Value string `json:"value" binding:"required"`
+}
+
+// BatchSetConfigReq 批量设置配置项请求。
+type BatchSetConfigReq struct {
+	Items map[string]string `json:"items" binding:"required"`
+}
+
+// --- 定时任务 ---
+
+// CreateCronJobReq 创建定时任务请求。
+type CreateCronJobReq struct {
+	Name        string   `json:"name" binding:"required"`
+	Description string   `json:"description,omitempty"`
+	Prompt      string   `json:"prompt" binding:"required"`
+	Schedule    string   `json:"schedule" binding:"required"`
+	Model       string   `json:"model,omitempty"`
+	Channel     string   `json:"channel,omitempty"`
+	Skills      []string `json:"skills,omitempty"`
+	Feature     string   `json:"feature,omitempty"`
+	MaxRuns     int      `json:"maxRuns,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// UpdateCronJobReq 更新定时任务请求（字段可选）。
+type UpdateCronJobReq struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	Prompt      *string `json:"prompt"`
+	Schedule    *string `json:"schedule"`
+	Model       *string `json:"model"`
+	Channel     *string `json:"channel"`
+	Feature     *string `json:"feature"`
+	MaxRuns     *int    `json:"maxRuns"`
+	Enabled     *bool   `json:"enabled"`
+}
+
+// --- 定时任务 ---

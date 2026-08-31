@@ -1,0 +1,229 @@
+package bot
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+
+	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/cron"
+	"github.com/kasuganosora/thinkbot/llm"
+)
+
+// ============================================================================
+// DreamExecutor — 将 cron.Scheduler 与 memory.DreamManager 桥接
+//
+// 实现 cron.Executor 接口。当 cron Job 触发时，调用 DreamManager.Run()
+// 执行三相位梦境巩固管线。
+// ============================================================================
+
+// DreamExecutor 桥接 cron 调度器和 DreamManager。
+type DreamExecutor struct {
+	dreamManager *memory.DreamManager
+	logger       *zap.SugaredLogger
+}
+
+// NewDreamExecutor 创建梦境执行器。
+func NewDreamExecutor(dreamManager *memory.DreamManager, logger *zap.SugaredLogger) *DreamExecutor {
+	return &DreamExecutor{
+		dreamManager: dreamManager,
+		logger:       logger.With("component", "dream_executor"),
+	}
+}
+
+// Execute 实现 cron.Executor 接口。
+func (e *DreamExecutor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResult, error) {
+	report, err := e.dreamManager.Run(ctx)
+	if err != nil {
+		e.logger.Errorw("dream execution failed", "err", err)
+		return nil, err
+	}
+
+	output := fmt.Sprintf("dream complete: ingested=%d promoted=%d themes=%d",
+		report.LightIngested, report.DeepPromoted, report.REMThemes)
+
+	e.logger.Infow("dream execution completed",
+		"ingested", report.LightIngested,
+		"promoted", report.DeepPromoted,
+		"duration", report.Duration())
+
+	return &cron.ExecuteResult{
+		Output: output,
+	}, nil
+}
+
+// DreamingBundle 封装梦境巩固子系统的完整组件。
+type DreamingBundle struct {
+	Manager     *memory.DreamManager
+	Executor    *DreamExecutor
+	Scheduler   *cron.Scheduler
+	CronStore   *cron.Store
+	CronJob     *cron.Job
+	TieredMgr   *memory.TieredManager
+	TieredStore *memory.TieredStore // 供桥接层将 NoteHandler 写入同步到分层存储
+
+	// BotProfiler Bot 自我画像提取器（可选）。
+	// 注入后，梦境管线会在每次运行时对 BotScope 执行画像提取。
+	BotProfiler *memory.BotProfileProfiler
+}
+
+// NewDreamingBundle 为单个 Bot 创建完整的梦境巩固子系统。
+//
+// 参数：
+//   - dreamCfg: 梦境配置（从 config.GetDreamingConfig 构建），Model 字段从 bot 主模型读取
+//   - provider: LLM 提供商（用于 Light 相位提取和画像验证）
+//   - model: LLM 模型名（从 bot 主模型/经济模型读取）
+//   - location: 时区（用于 cron 调度）
+//   - tp: TracerProvider
+//   - logger: 日志
+//   - botID: Bot ID（用于日志和 cron Job 标识）
+//   - cronFilePath: cron Job 的 JSON 持久化文件路径
+//
+// 返回的 bundle 中 Scheduler 已注册好 Job 但尚未 Start（由 Bot.Run 负责启动）。
+// 如果 dreamCfg.Enabled 为 false，返回 nil。
+func NewDreamingBundle(
+	dreamCfg memory.DreamConfig,
+	provider llm.Provider,
+	model string,
+	location *time.Location,
+	tp trace.TracerProvider,
+	logger *zap.SugaredLogger,
+	botID string,
+	cronFilePath string,
+	db *gorm.DB,
+) *DreamingBundle {
+	if !dreamCfg.Enabled {
+		return nil
+	}
+
+	// 合并相位默认值：生产接线通常只设置 Enabled/Schedule，
+	// 若不补 Light/REM/Deep 的默认配置，LookbackDays 等字段会保持 0，
+	// 导致 Light 相位的 cutoff=now，把全部历史 L0 记忆判为过期而跳过，
+	// 梦境实质上不做任何巩固。这里用 DefaultDreamConfig 补齐缺失项。
+	applyDreamPhaseDefaults(&dreamCfg)
+
+	// 1. 创建分层记忆管理器（带 SQLite 持久化，重启可恢复）
+	store := memory.NewTieredStoreWithDB(nil, db)
+	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{
+		Store:                 store,
+		EnableAutoConsolidate: true,
+	}, tp, logger)
+
+	// 2. 创建 DreamManager（注入 bot 的 LLM 模型名 + 活跃度阈值）
+	dreamCfg.Model = model
+	if dreamCfg.ActiveThresholdHours == 0 {
+		dreamCfg.ActiveThresholdHours = 24 // 默认仅处理 24h 内有记忆写入的 scope
+	}
+	dreamMgr := memory.NewDreamManager(dreamCfg, tieredMgr, provider, tp, logger)
+
+	// 3. 创建 cron Store + Executor + Scheduler
+	cronStore := cron.NewStore(cronFilePath)
+	executor := NewDreamExecutor(dreamMgr, logger)
+
+	schedCfg := cron.DefaultSchedulerConfig()
+	schedCfg.BotID = botID
+	schedCfg.Location = location
+	schedCfg.Name = "dreaming" // 与 heartbeat / user-cron 在日志中区分
+
+	scheduler := cron.NewScheduler(cronStore, executor, schedCfg)
+
+	// 4. 创建并注册 cron Job
+	mgr := cron.NewManager(cronStore, location)
+
+	// 幂等：先清理该 bot 既有的 dreaming cron job，避免每次进程启动都新建一条
+	// （CreateJob 用随机 UUID，不清理会导致 data/cron/<botID>_dream.json 累积多个同名
+	//  job，且 scheduler 按 store.ListActive() 全量触发 → 每天 03:00 被重复执行）。
+	for _, existing := range mgr.ListJobs() {
+		if existing.Name == "dreaming-"+botID {
+			if derr := mgr.DeleteJob(existing.ID); derr != nil {
+				logger.Warnw("dreaming: failed to prune stale job", "job_id", existing.ID, "err", derr)
+			}
+		}
+	}
+
+	job, err := mgr.CreateJob(cron.CreateJobRequest{
+		Name:     "dreaming-" + botID,
+		Prompt:   "trigger dreaming consolidation",
+		Schedule: dreamCfg.Schedule,
+		Feature:  "dreaming",
+		Tags:     []string{"dreaming", "memory"},
+	})
+	if err != nil {
+		logger.Errorw("failed to create dream cron job", "err", err)
+		return nil
+	}
+
+	logger.Infow("dreaming bundle created",
+		"bot_id", botID,
+		"schedule", dreamCfg.Schedule,
+		"job_id", job.ID)
+
+	return &DreamingBundle{
+		Manager:     dreamMgr,
+		Executor:    executor,
+		Scheduler:   scheduler,
+		CronStore:   cronStore,
+		CronJob:     job,
+		TieredMgr:   tieredMgr,
+		TieredStore: store,
+	}
+}
+
+// applyDreamPhaseDefaults 用 DefaultDreamConfig 补齐 dreamCfg 中缺失的相位配置。
+// 仅当对应字段为零值（未设置）时才用默认值覆盖，避免覆盖显式配置。
+func applyDreamPhaseDefaults(dreamCfg *memory.DreamConfig) {
+	def := memory.DefaultDreamConfig()
+	if dreamCfg.Light.LookbackDays == 0 {
+		dreamCfg.Light.LookbackDays = def.Light.LookbackDays
+	}
+	if dreamCfg.Light.MaxCandidates == 0 {
+		dreamCfg.Light.MaxCandidates = def.Light.MaxCandidates
+	}
+	if dreamCfg.REM.LookbackDays == 0 {
+		dreamCfg.REM.LookbackDays = def.REM.LookbackDays
+	}
+	if dreamCfg.REM.MaxThemes == 0 {
+		dreamCfg.REM.MaxThemes = def.REM.MaxThemes
+	}
+	if dreamCfg.REM.MinPatternStrength == 0 {
+		dreamCfg.REM.MinPatternStrength = def.REM.MinPatternStrength
+	}
+	if dreamCfg.Deep.MinScore == 0 {
+		dreamCfg.Deep.MinScore = def.Deep.MinScore
+	}
+	if dreamCfg.Deep.MinRecallCount == 0 {
+		dreamCfg.Deep.MinRecallCount = def.Deep.MinRecallCount
+	}
+	if dreamCfg.Deep.MinUniqueQueries == 0 {
+		dreamCfg.Deep.MinUniqueQueries = def.Deep.MinUniqueQueries
+	}
+	if dreamCfg.Deep.MaxPromotions == 0 {
+		dreamCfg.Deep.MaxPromotions = def.Deep.MaxPromotions
+	}
+	if dreamCfg.Deep.RecencyHalfLifeDays == 0 {
+		dreamCfg.Deep.RecencyHalfLifeDays = def.Deep.RecencyHalfLifeDays
+	}
+	if dreamCfg.Deep.MaxAgeDays == 0 {
+		dreamCfg.Deep.MaxAgeDays = def.Deep.MaxAgeDays
+	}
+	if dreamCfg.JaccardThreshold == 0 {
+		dreamCfg.JaccardThreshold = def.JaccardThreshold
+	}
+	if dreamCfg.MaxDreamTokens == 0 {
+		dreamCfg.MaxDreamTokens = def.MaxDreamTokens
+	}
+}
+
+// Stop 优雅关闭梦境巩固子系统。
+func (b *DreamingBundle) Stop() {
+	if b == nil {
+		return
+	}
+	if b.Scheduler != nil {
+		b.Scheduler.Stop()
+	}
+}

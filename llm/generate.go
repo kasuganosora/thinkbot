@@ -1,0 +1,138 @@
+package llm
+
+import "time"
+
+// FinishReason is a normalized explanation of why generation stopped.
+type FinishReason string
+
+const (
+	FinishReasonStop          FinishReason = "stop"
+	FinishReasonLength        FinishReason = "length"
+	FinishReasonContentFilter FinishReason = "content-filter"
+	FinishReasonToolCalls     FinishReason = "tool-calls"
+	FinishReasonError         FinishReason = "error"
+	FinishReasonOther         FinishReason = "other"
+	FinishReasonUnknown       FinishReason = "unknown"
+)
+
+// ResponseFormatType controls structured output.
+type ResponseFormatType string
+
+const (
+	ResponseFormatText       ResponseFormatType = "text"
+	ResponseFormatJSONObject ResponseFormatType = "json_object"
+	ResponseFormatJSONSchema ResponseFormatType = "json_schema"
+)
+
+// ResponseFormat specifies how the model should format its output.
+type ResponseFormat struct {
+	Type       ResponseFormatType `json:"type"`
+	JSONSchema any                `json:"jsonSchema,omitempty"` // *jsonschema.Schema or map[string]any
+}
+
+// GenerateParams holds all parameters for a text-generation request.
+// Providers translate these into their own wire formats.
+type GenerateParams struct {
+	Model    *Model    `json:"model,omitempty"`
+	System   string    `json:"system,omitempty"`
+	Messages []Message `json:"messages,omitempty"`
+
+	Tools      []Tool `json:"tools,omitempty"`
+	ToolChoice any    `json:"toolChoice,omitempty"` // "auto" | "none" | "required" | {"type":"function","function":{"name":"..."}}
+
+	ResponseFormat *ResponseFormat `json:"responseFormat,omitempty"`
+
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"topP,omitempty"`
+	MaxTokens        *int     `json:"maxTokens,omitempty"`
+	StopSequences    []string `json:"stopSequences,omitempty"`
+	FrequencyPenalty *float64 `json:"frequencyPenalty,omitempty"`
+	PresencePenalty  *float64 `json:"presencePenalty,omitempty"`
+	Seed             *int     `json:"seed,omitempty"`
+	ReasoningEffort  *string  `json:"reasoningEffort,omitempty"`
+
+	// CachePolicy controls how prompt-caching breakpoints are placed.
+	// Only Anthropic-family providers use explicit breakpoints; other
+	// providers (OpenAI, Google) have implicit prefix caching.
+	//   ""     = provider default (auto for anthropic, none otherwise)
+	//   "none" = strip all cache markers
+	//   "auto" = auto-place breakpoints on the stable prefix
+	CachePolicy CachePolicy `json:"cachePolicy,omitempty"`
+
+	// CacheKey is passed to providers that support a cache key hint
+	// (OpenAI promptCacheKey, OpenRouter prompt_cache_key). It typically
+	// holds the session ID to improve cross-request cache hit rates.
+	CacheKey string `json:"cacheKey,omitempty"`
+
+	// SystemCacheControl is set by the cache policy to indicate that the
+	// system prompt should carry a cache breakpoint. Provider adapters that
+	// support system-level caching (Anthropic) read this field.
+	SystemCacheControl *CacheControl `json:"-"`
+}
+
+// ResponseMetadata carries response-level metadata from the provider.
+type ResponseMetadata struct {
+	ID        string            `json:"id,omitempty"`
+	ModelID   string            `json:"modelId,omitempty"`
+	Timestamp time.Time         `json:"timestamp,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+// Source represents a citation or reference returned by the provider.
+type Source struct {
+	SourceType       string         `json:"sourceType"`
+	ID               string         `json:"id"`
+	URL              string         `json:"url"`
+	Title            string         `json:"title,omitempty"`
+	ProviderMetadata map[string]any `json:"providerMetadata,omitempty"`
+}
+
+// GenerateResult is the unified result of a text-generation call.
+type GenerateResult struct {
+	Text                      string              `json:"text"`
+	Reasoning                 string              `json:"reasoning,omitempty"`
+	ReasoningProviderMetadata map[string]any      `json:"-"`
+	FinishReason              FinishReason        `json:"finishReason"`
+	RawFinishReason           string              `json:"rawFinishReason,omitempty"`
+	Usage                     Usage               `json:"usage"`
+	Sources                   []Source            `json:"sources,omitempty"`
+	Files                     []GeneratedFile     `json:"files,omitempty"`
+	ToolCalls                 []ToolCall          `json:"toolCalls,omitempty"`
+	ToolResults               []ToolResult        `json:"toolResults,omitempty"`
+	Response                  ResponseMetadata    `json:"response,omitempty"`
+	DeferredToolApproval      *ToolApprovalResult `json:"deferredToolApproval,omitempty"`
+	// Steps holds the result of each step in a multi-step execution.
+	Steps []StepResult `json:"steps,omitempty"`
+	// Messages holds all output messages across all steps (assistant + tool),
+	// excluding the original input messages.
+	Messages []Message `json:"messages,omitempty"`
+	// LoopStoppedByGuard 报告本次编排循环是否因步数守卫（撞硬上限或陷入
+	// 重复循环）而停止，而非模型自然收尾。上游据此向用户给出明确提示，
+	// 避免把「步数预算耗尽」误判为 Bot 卡死。json:"-" 不进入持久化结果。
+	LoopStoppedByGuard bool `json:"-"`
+	// LoopStopReason 是守卫停止的可读原因（如 "reached hard cap 150"
+	// 或 "stalled: same tool calls repeated 2 times"）。
+	LoopStopReason string `json:"-"`
+}
+
+// StepResult represents the outcome of a single step (one LLM call + tool execution round).
+type StepResult struct {
+	Text                 string              `json:"text"`
+	Reasoning            string              `json:"reasoning,omitempty"`
+	FinishReason         FinishReason        `json:"finishReason"`
+	RawFinishReason      string              `json:"rawFinishReason,omitempty"`
+	Usage                Usage               `json:"usage"`
+	ToolCalls            []ToolCall          `json:"toolCalls,omitempty"`
+	ToolResults          []ToolResult        `json:"toolResults,omitempty"`
+	Response             ResponseMetadata    `json:"response,omitempty"`
+	DeferredToolApproval *ToolApprovalResult `json:"deferredToolApproval,omitempty"`
+	// Messages holds the messages produced by this step (assistant + tool),
+	// excluding any prior context from earlier steps.
+	Messages []Message `json:"messages,omitempty"`
+}
+
+// GeneratedFile represents a file produced by the model.
+type GeneratedFile struct {
+	Data      string `json:"data"`
+	MediaType string `json:"mediaType"`
+}

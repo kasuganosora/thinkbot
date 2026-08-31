@@ -1,0 +1,66 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Project-local dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# JetBrains IDEs
+.idea/
+
+# VS Code
+.vscode/
+logs/
+*.db
+
+# Integration test files (contain real API keys or depend on them, do not commit)
+agent/bot/integration_test.go
+agent/bot/multiturn_test.go
+agent/bot/functioncall_integration_test.go
+agent/bot/subagent_integration_test.go
+agent/memory/integration_test.go
+agent/stages/functioncall_integration_test.go
+workflow/integration_test.go
+
+# .env files (contain secrets)
+.env
+# 集成测试凭据（仅提交 *.env.test.example 模板）
+.env.test
+*/.env.test
+
+# CodeBuddy
+.codebuddy/
+.workbuddy/
+.skills/tmp/
+tmp/
+
+# Frontend (web/)
+web/node_modules/
+static/
+
+# Runtime logs & DB temp files
+*.log
+*.db-shm
+*.db-wal
+*.db.bak
+# 带时间戳后缀的手工 DB 备份（如 thinkbot.db.bak-20260803-102458）
+*.db.bak-*
+# Compiled server binary
+/thinkbot
+# thinkbot binary backups (e.g. thinkbot.bak-prev)
+/thinkbot.bak*
+
+# Runtime data (bot workspaces, uploads, sqlite, etc.)
+/data/
