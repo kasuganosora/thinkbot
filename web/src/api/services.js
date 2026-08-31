@@ -2068,21 +2068,187 @@ export const botHeartbeatApi = {
 //   更新  PUT     /api/search/providers/:id
 //   删除  DELETE  /api/search/providers/:id
 //   启用  PUT     /api/search/providers/:id/toggle  { enabled }
-// 支持的提供方类型（下拉选项，含图标字母与主题色）
+// 支持的提供方类型（下拉选项 + 各平台字段 schema，与 backends.go 对齐）
+// fields: apiKey / searchType / baseUrl / timeout
+//   { show, required, label, placeholder, help }
+function _spTimeout() {
+  return { show: true, required: false, label: '超时（秒）', placeholder: '', help: '请求超时时间，默认 15 秒' }
+}
+function _spHidden() {
+  return { show: false, required: false, label: '', placeholder: '', help: '' }
+}
+function _spApiKey({ required = true, label = 'API Key', placeholder = '输入 API Key', help = '该平台的 API 密钥' } = {}) {
+  return { show: true, required, label, placeholder, help }
+}
+function _spBaseUrl({ required = false, defaultBaseUrl = '', help } = {}) {
+  return {
+    show: true,
+    required,
+    label: 'Base URL',
+    placeholder: defaultBaseUrl || 'https://...',
+    help: help || (required ? '必须填写实例地址' : (defaultBaseUrl ? `留空则使用默认地址：${defaultBaseUrl}` : '可选自定义端点')),
+  }
+}
+function _spKeyTimeoutBase(defaultBaseUrl, { apiKeyHelp, requiredTip } = {}) {
+  return {
+    defaultBaseUrl,
+    requiredTip: requiredTip || '需要 API Key',
+    fields: {
+      apiKey: _spApiKey({ help: apiKeyHelp || '该平台的 API 密钥' }),
+      searchType: _spHidden(),
+      baseUrl: _spBaseUrl({ defaultBaseUrl }),
+      timeout: _spTimeout(),
+    },
+  }
+}
+
 export const SEARCH_PROVIDER_TYPES = [
-  { type: 'brave', label: 'Brave', letter: 'B', color: '#fb542b' },
-  { type: 'bing', label: 'Bing', letter: 'b', color: '#0078d4' },
-  { type: 'google', label: 'Google', letter: 'G', color: '#4285f4' },
-  { type: 'tavily', label: 'Tavily', letter: 'T', color: '#3aa675' },
-  { type: 'sogou', label: '搜狗', letter: 'S', color: '#fa5000' },
-  { type: 'serper', label: 'Serper', letter: 'S', color: '#5468ff' },
-  { type: 'searxng', label: 'SearXNG', letter: 'X', color: '#3050ff' },
-  { type: 'jina', label: 'Jina', letter: 'J', color: '#e0245e' },
-  { type: 'exa', label: 'Exa', letter: 'E', color: '#1a73e8' },
-  { type: 'bocha', label: '博查', letter: 'B', color: '#00a870' },
-  { type: 'duckduckgo', label: 'DuckDuckGo', letter: 'D', color: '#de5833' },
-  { type: 'yandex', label: 'Yandex', letter: 'Y', color: '#fc3f1d' }
+  {
+    type: 'brave', label: 'Brave', letter: 'B', color: '#fb542b',
+    ..._spKeyTimeoutBase('https://api.search.brave.com/res/v1/web/search', {
+      apiKeyHelp: 'Brave Search 订阅令牌（X-Subscription-Token）',
+    }),
+  },
+  {
+    type: 'bing', label: 'Bing', letter: 'b', color: '#0078d4',
+    ..._spKeyTimeoutBase('https://api.bing.microsoft.com/v7.0/search', {
+      apiKeyHelp: 'Bing Web Search 订阅密钥（Ocp-Apim-Subscription-Key）',
+    }),
+  },
+  {
+    type: 'google', label: 'Google', letter: 'G', color: '#4285f4',
+    defaultBaseUrl: 'https://customsearch.googleapis.com/customsearch/v1',
+    requiredTip: '需要 API Key 与 Programmable Search Engine ID（cx）',
+    fields: {
+      apiKey: _spApiKey({ help: 'Google Custom Search JSON API 密钥' }),
+      searchType: {
+        show: true, required: true,
+        label: 'Programmable Search Engine ID / cx',
+        placeholder: '输入 cx（可编程搜索引擎 ID）',
+        help: 'Google CSE 的 cx，不要填 SEARCH_TYPE_* 占位值',
+      },
+      baseUrl: _spBaseUrl({ defaultBaseUrl: 'https://customsearch.googleapis.com/customsearch/v1' }),
+      timeout: _spTimeout(),
+    },
+  },
+  {
+    type: 'tavily', label: 'Tavily', letter: 'T', color: '#3aa675',
+    ..._spKeyTimeoutBase('https://api.tavily.com/search', {
+      apiKeyHelp: 'Tavily API Key',
+    }),
+  },
+  {
+    type: 'sogou', label: '搜狗', letter: 'S', color: '#fa5000',
+    defaultBaseUrl: 'https://wsa.tencentcloudapi.com',
+    requiredTip: '需要腾讯云 SecretId 与 SecretKey',
+    fields: {
+      apiKey: _spApiKey({ label: 'SecretKey', placeholder: '输入腾讯云 SecretKey', help: '腾讯云 SecretKey（存于 API Key 字段）' }),
+      searchType: {
+        show: true, required: true,
+        label: 'SecretId',
+        placeholder: 'AKIDxxxxxxxx',
+        help: '腾讯云 SecretId（存于 Search Type 字段）',
+      },
+      baseUrl: _spBaseUrl({ defaultBaseUrl: 'https://wsa.tencentcloudapi.com' }),
+      timeout: _spTimeout(),
+    },
+  },
+  {
+    type: 'serper', label: 'Serper', letter: 'S', color: '#5468ff',
+    ..._spKeyTimeoutBase('https://google.serper.dev/search', {
+      apiKeyHelp: 'Serper.dev API Key',
+    }),
+  },
+  {
+    type: 'searxng', label: 'SearXNG', letter: 'X', color: '#3050ff',
+    defaultBaseUrl: '',
+    requiredTip: '需要自建实例的 Base URL',
+    fields: {
+      apiKey: _spApiKey({ required: false, help: '若实例启用了鉴权可填写，一般可留空' }),
+      searchType: {
+        show: true, required: false,
+        label: '搜索语言',
+        placeholder: 'zh-CN',
+        help: '可选 language 参数，如 zh-CN、en；不要填 SEARCH_TYPE_*',
+      },
+      baseUrl: _spBaseUrl({
+        required: true,
+        help: '自建 SearXNG 实例的搜索 URL，例如 http://localhost:8080/search',
+      }),
+      timeout: _spTimeout(),
+    },
+  },
+  {
+    type: 'jina', label: 'Jina', letter: 'J', color: '#e0245e',
+    ..._spKeyTimeoutBase('https://s.jina.ai/', {
+      apiKeyHelp: 'Jina Search API Key',
+    }),
+  },
+  {
+    type: 'exa', label: 'Exa', letter: 'E', color: '#1a73e8',
+    ..._spKeyTimeoutBase('https://api.exa.ai/search', {
+      apiKeyHelp: 'Exa API Key',
+    }),
+  },
+  {
+    type: 'bocha', label: '博查', letter: 'B', color: '#00a870',
+    ..._spKeyTimeoutBase('https://api.bochaai.com/v1/web-search', {
+      apiKeyHelp: '博查 Web Search API Key',
+    }),
+  },
+  {
+    type: 'duckduckgo', label: 'DuckDuckGo', letter: 'D', color: '#de5833',
+    defaultBaseUrl: 'https://html.duckduckgo.com/html/',
+    requiredTip: '无需密钥，可直接启用',
+    fields: {
+      apiKey: _spHidden(),
+      searchType: _spHidden(),
+      baseUrl: _spBaseUrl({
+        defaultBaseUrl: 'https://html.duckduckgo.com/html/',
+        help: '留空则抓取 html.duckduckgo.com；自定义时请指向 HTML 搜索页',
+      }),
+      timeout: _spTimeout(),
+    },
+  },
+  {
+    type: 'yandex', label: 'Yandex', letter: 'Y', color: '#fc3f1d',
+    defaultBaseUrl: 'https://searchapi.api.cloud.yandex.net/v2/web/search',
+    requiredTip: '需要 API Key；搜索类型默认 SEARCH_TYPE_RU',
+    searchTypeOptions: [
+      { value: 'SEARCH_TYPE_RU', label: '俄语 SEARCH_TYPE_RU' },
+      { value: 'SEARCH_TYPE_TR', label: '土耳其语 SEARCH_TYPE_TR' },
+      { value: 'SEARCH_TYPE_COM', label: '国际/英语 SEARCH_TYPE_COM' },
+      { value: 'SEARCH_TYPE_KK', label: '哈萨克语 SEARCH_TYPE_KK' },
+      { value: 'SEARCH_TYPE_BE', label: '白俄罗斯语 SEARCH_TYPE_BE' },
+      { value: 'SEARCH_TYPE_UZ', label: '乌兹别克语 SEARCH_TYPE_UZ' },
+    ],
+    fields: {
+      apiKey: _spApiKey({ help: 'Yandex Cloud Search API Key' }),
+      searchType: {
+        show: true, required: false,
+        label: '搜索类型',
+        placeholder: 'SEARCH_TYPE_RU',
+        help: 'Yandex 搜索区域类型，默认 SEARCH_TYPE_RU',
+      },
+      baseUrl: _spBaseUrl({ defaultBaseUrl: 'https://searchapi.api.cloud.yandex.net/v2/web/search' }),
+      timeout: _spTimeout(),
+    },
+  },
 ]
+export function searchProviderSchema(type) {
+  const t = SEARCH_PROVIDER_TYPES.find(x => x.type === type)
+  if (t) return t
+  return {
+    type, label: type || '', letter: ((type && type[0]) || '?').toUpperCase(), color: '#888',
+    defaultBaseUrl: '', requiredTip: '',
+    fields: {
+      apiKey: _spApiKey({ required: false }),
+      searchType: _spHidden(),
+      baseUrl: _spBaseUrl(),
+      timeout: _spTimeout(),
+    },
+  }
+}
 function searchTypeMeta(type) {
   return SEARCH_PROVIDER_TYPES.find(t => t.type === type) || { type, label: type, letter: (type[0] || '?').toUpperCase(), color: '#888' }
 }
@@ -2107,7 +2273,7 @@ function ensureSearchProviders() {
       mk('searxng', { baseUrl: 'http://localhost:8080/search' }),
       mk('sogou'),
       mk('tavily'),
-      mk('google', { searchType: 'SEARCH_TYPE_WEB' }),
+      mk('google'),  // CSE 需要真实 cx，不能用 SEARCH_TYPE_WEB
       mk('bing'),
       mk('brave')
     ]
