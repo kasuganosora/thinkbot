@@ -2,7 +2,7 @@
   <aside class="bot-sidebar" data-testid="bot-sidebar" aria-label="Bot 列表侧边栏">
     <div class="sidebar-top">
       <div class="logo-row">
-        <span class="logo-icon">🤖</span>
+        <BrandMark class="logo-icon" />
         <span class="logo-text">Bot 平台</span>
       </div>
     </div>
@@ -56,6 +56,7 @@
 </template>
 
 <script setup>
+import BrandMark from '@/components/BrandMark.vue'
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { DialogPlugin, MessagePlugin } from 'tdesign-vue-next'
@@ -152,7 +153,9 @@ const userMenu = computed(() => {
   gap: 8px;
 }
 .logo-icon {
-  font-size: 22px;
+  width: 22px;
+  height: 22px;
+  color: var(--bp-label);
 }
 .logo-text {
   font-size: 15px;
