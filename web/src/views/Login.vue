@@ -120,9 +120,9 @@ function onSubmit({ validateResult }) {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 18% 12%, rgba(0, 113, 227, 0.07), transparent 46%),
-    radial-gradient(circle at 82% 82%, rgba(94, 92, 230, 0.06), transparent 48%),
-    linear-gradient(180deg, #fbfbfd 0%, #f4f4f7 100%);
+    radial-gradient(circle at 18% 12%, var(--bp-accent-soft), transparent 46%),
+    radial-gradient(circle at 82% 82%, var(--bp-accent-soft), transparent 48%),
+    linear-gradient(180deg, var(--bp-bg-subtle) 0%, var(--bp-bg) 100%);
 }
 .login-card {
   position: relative;

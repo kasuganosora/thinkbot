@@ -315,7 +315,20 @@ h3 { font-size: 17px; }
     scroll-behavior: auto !important;
   }
   .pressable:active,
-  .t-button:active:not(.t-is-disabled) {
+  .t-button:active:not(.t-is-disabled),
+  .tcg-head:active,
+  .tc-head:active,
+  .wf-head:active,
+  .plat-item:active,
+  .plat-add:active,
+  .add-item:active,
+  .srv-item:active,
+  .bf-row.clickable:active,
+  .bc-group-head:active,
+  .chip:active,
+  .emoji:active,
+  .ti-card:active,
+  .bn-item:active {
     transform: none;
   }
 }

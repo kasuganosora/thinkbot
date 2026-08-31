@@ -463,10 +463,10 @@ function removeModel(m) {
 .preset-hint {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 4px; padding: 8px 12px;
-  background: rgba(255,153,0,0.08); border: 1px solid rgba(255,153,0,0.25);
+  background: var(--bp-warning-soft); border: 1px solid var(--bp-warning-soft);
   border-radius: 8px; font-size: 12px; color: var(--bp-warning);
 }
-.preset-hint .t-icon { color: #e37318; }
+.preset-hint .t-icon { color: var(--bp-warning); }
 .preset-hint t-link { margin-left: 2px; }
 
 .dlg-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
