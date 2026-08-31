@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -67,12 +68,21 @@ func (s *Server) handleCreateSearchProvider(c *gin.Context) {
 		Fail(c, errs.BadRequest("invalid request body"))
 		return
 	}
+	req.Type = strings.ToLower(strings.TrimSpace(req.Type))
 	if req.Type == "" {
 		Fail(c, errs.BadRequest("type is required"))
 		return
 	}
+	if !searchproviders.KnownType(req.Type) {
+		Fail(c, errs.BadRequest(fmt.Sprintf("unsupported search provider type %q", req.Type)))
+		return
+	}
 
-	providers, _ := loadSearchProviders()
+	providers, err := loadSearchProviders()
+	if err != nil {
+		Fail(c, errs.Wrap(err, "load search providers"))
+		return
+	}
 
 	label, letter, color := getSearchTypeMeta(req.Type)
 	name := req.Name

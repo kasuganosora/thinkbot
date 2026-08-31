@@ -77,23 +77,23 @@ func searchToolDef(cfg SearchConfig) agenttools.ToolDef {
 					maxResults = v
 				}
 
-				provider, err := store.Enabled()
+				outcome, err := searchproviders.SearchEnabled(ctx, store, query, maxResults)
 				if err != nil {
 					return nil, err
 				}
 
-				results, err := searchproviders.Search(ctx, *provider, query, maxResults)
-				if err != nil {
-					return nil, err
-				}
-
-				return map[string]any{
+				out := map[string]any{
 					"query":       query,
-					"engine":      provider.Type,
-					"provider":    provider.Name,
-					"resultCount": len(results),
-					"results":     results,
-				}, nil
+					"engine":      outcome.Provider.Type,
+					"provider":    outcome.Provider.Name,
+					"resultCount": len(outcome.Results),
+					"results":     outcome.Results,
+					"fallback":    outcome.Fallback,
+				}
+				if len(outcome.Attempted) > 0 {
+					out["attempted"] = outcome.Attempted
+				}
+				return out, nil
 			}),
 		},
 		Category: "search",
