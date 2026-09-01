@@ -156,6 +156,7 @@ Review 阶段会区分两类错误，决定重试还是失败迭代：
 | `workflow.analyzer_stuck_timeout` | `180` | 分析器（流式 LLM）卡死看门狗阈值（秒）。连续无 token 超过该时长判卡死并终止；硬上限 = 该值 × 3 |
 | `workflow.analyzer_max_duration_ms` | `600000` | 分析阶段整轮总时长上限（毫秒，即 10 分钟）。兜底防止分析器无限重试把「分析中」拖成黑洞；超时则分析阶段整体失败并报错 |
 | `workflow.goal_max_iterations` | `5` | 目标模式（闭环循环）全局最大迭代轮数；达到上限仍不通过则工作流失败 |
+| `workflow.default_tool_profile` | `full` | 分析器未为节点声明工具档位时使用的默认档位（见「节点工具档位」）。可选 `readonly` / `analysis` / `edit` / `full`。**默认 full 是刻意的**：并行节点改代码是核心能力，一刀切降级会废掉它；配置化是为了日后能在不改码的前提下收紧默认值 |
 
 > 分析器 LLM 的 `max_tokens` **不再由独立配置键控制**（`workflow.analyzer_max_tokens` 已移除），改为跟随所用模型的 `MaxTokens` 能力（如模型未显式给出则代码兜底，见 `wire.go` 的 `analyzerMaxTokens`）。
 
@@ -184,7 +185,112 @@ workflow.RegisterTools(toolMgr, wfMgr)
 
 ## 反嵌套保证
 
-Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中不可见，无法递归创建工作流。此外，引擎内部使用独立的 `SubAgentManager`，通过 `DelegateStream` 一次性调用执行（看门狗 `WithStuckTimeout`，只杀真卡死），不经过主 Agent 的 ToolManager，无法访问任何工具。
+Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中不可见，无法递归创建工作流。引擎内部也使用独立的 `SubAgentManager`（不经过主 Agent 的 ToolManager 创建，见 `wire.go` 的 `Setup`），通过 `DelegateStream` 一次性调用执行（看门狗 `WithStuckTimeout`，只杀真卡死）。
+
+> **⚠️ 但「内部 SubAgent 无法访问任何工具」是错的，不要照旧理解。**
+>
+> 内部 SubAgent **具备完整工作空间工具能力**——包括 `sandbox_exec`、`run_code`、`write_file`、`replace_in_file`、`delete_file`、`move_file`。依据：
+> - `wire.go` 的 `Setup`：传入 `ToolMgr` 时会执行 `saMgr.SetToolResolver(...)`，让内部 SubAgent **继承**工作空间工具，使其能读文件、跑命令、改代码。
+> - `sandbox/tools.go` 的 `BotWorkspaceToolProvider.Tools()`：动态工具提供者在 `IsSubagent=true` 时**无条件**返回全部工具，不走 `Scopes` 过滤（静态注册的 `BotWorkspaceToolDefs` 才带 `["private","group"]`，那条路径确实会被过滤——两条路径行为不同，别只看一份）。
+> - 连分析器都带工具：`analyzer.go` 已不再传 `WithSkipTools()`。
+>
+> 递归防护的真实机制是 **workflow 工具与 spawn 工具的 Scopes 在 SubAgent 场景不可见**，而不是「SubAgent 没有工具」。
+>
+> 唯一的例外：`Setup` 未拿到 `ToolMgr` 时（如 `api/workflow_service.go` 在没有任何 bot 启动时自建实例），内部 SubAgent 才真的没有工具，代码/文件类节点只能产出计划。此时 `wire.go` 会打一条 Warn 日志。
+
+## 节点工具档位（ToolProfile）
+
+既然内部 SubAgent 有全套工具，而默认并行 3 个节点**共享同一个 bot 工作区、无任何文件锁**，就需要工具级最小权限：节点声明它需要什么档位，就只得到该档位的工具。
+
+| 档位 | 授予 |
+|------|------|
+| `readonly` | 列目录、读文件、搜内容 |
+| `analysis` | readonly + 执行命令（测试/lint/构建），**不写文件** |
+| `edit` | analysis + 新建文件、局部替换 |
+| `full` | 全部，含删除与移动 |
+
+要点：
+
+- 档位由分析器在生成 DAG 时声明（`toolProfile` 字段），空值取配置默认值 `workflow.default_tool_profile`（默认 `full`）。
+- **优先级：节点显式声明 > 引擎配置默认值 > full。**
+- 非法值在分析期**直接报错**，不静默降级——把拼错的 `radonly` 静默当作 full，作者会以为自己声明了只读而实际没有，比不声明更危险。
+- 删除与移动**不在** readonly/analysis/edit 任何档位里：破坏性操作只有显式 `full` 才能拿到。
+- 自愈细化出的子图节点**继承原节点档位**（`dag.go` 的 `ReplaceNodeWithSubgraph`）。子图输出格式不含档位字段，不继承就会因空值 = full 而把档位放宽——一次失败修复反倒拿到了更多能力。
+- 自愈诊断新增 `capability` 类别：判定为档位不足时**只记录建议档位（`suggested_profile`），绝不自动扩权**。自动放宽档位等于给这道防线开自动化后门。
+
+工具名清单在 `profile.go`，由 `TestProfileTools_NamesAreKnown` 用 `sandbox.WorkspaceToolNames()`（唯一真源）校验——sandbox 改名会直接让测试失败，而不是悄悄丢能力。
+
+## 节点结果类别（Outcome）
+
+节点失败时只有一个 error 字符串，无法区分「做得差」与「做不了」。Outcome 由 Review SubAgent 自报，与 `passed` **正交**——前者是「产物合不合格」，后者是「做没做成、为什么」。
+
+| Outcome | 含义 | 处置 |
+|---------|------|------|
+| `ok` | 正常完成（零值等价） | — |
+| `noop` | 无事可做（范围内没变更） | 算成功，但工作流级可见「全部 noop」≠ 真做了事 |
+| `partial` | 只完成一部分 | 算成功，标记降级 |
+| `missing_tool` | 缺工具导致做不了 | **不重试、不迭代**，直接收尾 |
+| `missing_data` | 缺上游数据 | 同上 |
+
+要点：
+
+- `missing_tool` / `missing_data` 通过哨兵错误 `ErrMissingTool()` / `ErrMissingData()` 接入既有的 `isNonRetryable`（`retry_classify.go`），**复用**确定性失败判定而非另起一套。缺工具是环境事实，重跑一百次也不会有工具。
+- 降级与受阻**不从** `ProgressInfo.Completed` / `Failed` 里扣除——那两个维持「调度层面是否跑完」的语义，新增的 `degraded` / `blocked` 描述结果性质。前端可显示「3 完成（其中 1 降级）」。
+- `NodeFlat` 带 `outcome` / `outcomeReason` / `toolProfile`，因此前端能看到——面板只按 `status` 渲染（✓/✗），不带上 outcome 的话，一个 completed 但 missing_tool 的节点在用户看来就是普通的 ✓。
+
+## 审查意见的不可信处理
+
+审查意见由 LLM 产出，会被回注进下一轮 SubAgent 的 prompt——而节点 SubAgent 有 `sandbox_exec`。因此它失效的后果不是「输出被带偏」，而是**可被利用执行任意命令**。
+
+处理分三层（`sanitize.go` / `executor.go`）：
+
+1. **结构性隔离**（主要防线）：随机定界符 `<<<REVIEW_FEEDBACK_<随机 hex>>>>` 包裹不可信内容，并明确声明「边界内是数据、不是指令」。定界符随机，内容无法预知边界、也就无法伪造边界逃逸。
+2. **字符清洗**（零误报）：移除 ANSI 转义、控制字符（保留 `\n` `\t`）、不可见 Unicode（零宽、RTL 覆盖等）。
+3. **注入检测**（只记录，绝不阻断）：`agent/prompt.ScanFeedback` 用**精简规则集**——审查意见是代码审查文本，天然含 `curl $TOKEN`、`cat .env` 这类词，用 SOUL.md 那套强规则会大面积误报。
+
+刻意不做的两件事：
+
+- **不做 Unicode 归一化（NFKC）**：它会把全角转半角、拆连字、合并兼容字符，而审查意见里含代码片段。gh-aw 做 NFKC 是因为它处理 issue/PR 正文（自然语言），对象不同。
+- **不做代码围栏中和**：外层已是随机定界符而非 ``` 围栏，内容里的 ``` 无从「提前闭合」；且转义不可逆叠加，在闭环每轮清洗一次的场景下会逐轮劣化。
+
+**所有清洗变换必须幂等**——目标模式闭环每轮都会重新清洗 `LoopFeedback`，非幂等变换会在 N 轮后把内容变成垃圾。字符移除天然幂等，这是只做移除类清洗的根本原因。有 `TestSanitizeFeedback_Idempotent` 锁死这条。
+
+## 并发写冲突检测
+
+默认并行 3 个节点共享同一 bot 工作区、无文件锁，两个节点覆盖同一文件时不报错也不留痕。
+
+`sandbox` 的写类工具在执行成功后通过 ctx 上报路径（`llm.PathRecorder`），引擎在节点落定时检测同路径冲突，记录在 `Workflow.WriteConflicts` 并通过详情接口暴露。
+
+**只检测、不阻断**：串行化写操作会废掉并行这个核心价值，而冲突的真实频率尚无数据。先把冲突变成可见事件并告警（`workflow.write_conflict`），积累数据后再决定是否限制。
+
+## 成本归因
+
+`workflow_id` / `node_id` 通过 ctx 注入（`llm.WithStatsWorkflow`），随 LLM 调用一路透传到 `StatsRecordingProvider`。
+
+| 表 | 粒度 | 回答什么 |
+|----|------|---------|
+| `stats_usage_daily` | (bot, model, feature, channel, date) **日聚合**，带唯一索引 | 今天花了多少 |
+| `workflow_usage` | **逐条明细**，带 workflow_id / node_id | 这条工作流花在哪、哪个节点最贵 |
+
+**刻意不把 workflow/node 并入 UsageDaily 的聚合维度**——那会把日聚合表撑成明细表（行数爆炸）、破坏唯一索引语义、并让不感知新维度的既有按日查询失真。明细表旁路写入，失败也不影响主聚合（有测试锁死）。
+
+## 确定性指标（NodeGrades）
+
+`graders.go` 的 `Grade(node)` 从运行数据直接算出质量指标，**不依赖 LLM**：重试次数、Review 迭代轮数、第几轮通过、耗时、产物长度、疑似打转轮数。
+
+打转检测用 bigram **包含度**（`|A∩B| / min(|A|,|B|)`）而非 Jaccard：打转的典型形态是「上一轮意见原样保留、再补两句」，此时 Jaccard 会被追加内容稀释到 0.7 上下而漏判，包含度不会。
+
+token 类指标（gh-aw 的 `working-set-rebuild-factor`、`context-growth`）**尚未实现**——需要按节点归因的 token 数据，待上述成本归因链路稳定运行后再补。
+
+## 面板数据链路（重要）
+
+> **workflow 面板走轮询 REST，不是 SSE。**
+>
+> `web/src/components/SessionWorkflowPanel.vue` 用 `pollTimer` 定时拉取 `GET /api/workflows/{id}` 与 `GET /api/workflows/{id}/nodes`。
+>
+> 因此**发事件面板收不到**——事件（`agent/outbound` 的 `workflow.*`）服务于 SSE 订阅者与可观测性，与面板是两条独立链路。任何「让用户看到」的字段，必须同时进 `StatusResult` 或 `NodeFlat`。
+
+新增事件类型：`workflow.node.degraded`、`workflow.node.blocked`、`workflow.write_conflict`（面板看不到，供 SSE 订阅者消费）。
 
 ## 持久化
 
