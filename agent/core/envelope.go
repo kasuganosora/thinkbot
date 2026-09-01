@@ -132,6 +132,21 @@ const (
 	// 静默降级必须可解释，否则会被误判为 Bot 故障。
 	KVSuppressReplyReason = "reply.suppress_reason"
 
+	// KVCaptureSuppressedExchange 标记「本轮回复虽被门禁抑制（不说出口），
+	// 用户原文仍须捕获为 L0 对话记忆」。
+	//
+	// 由 LLMStage 的抑制分支（passive 未@、节奏门等软/硬门禁）在跳过 ActionReply
+	// 时设置；NoteCaptureMiddleware 读取后照常捕获用户入站原文。
+	// 背景（2026-09-01 生产事故）：抑制分支不产出 ActionReply，而 note-capture
+	// 原先只在存在 ActionReply 时才捕获——导致 passive 模式下「bot 看到了、想了，
+	// 却什么都没记住」，连续三天记忆零写入。本键把「说」与「记」解耦：
+	// 不说出口 ≠ 不记住（设计本意即「照样听、照样想、照样记，只是不说出口」）。
+	//
+	// 潜水（lurk）与心跳路径不设置本键：潜水有自己的 curated 笔记契约
+	// （模型判定「不值得记」时应尊重），心跳的 InjectContext 不是用户原文。
+	// 值类型 bool；仅 true 生效。
+	KVCaptureSuppressedExchange = "memory.capture_suppressed_exchange"
+
 	// KVSuppressReasonPassive 是「被动回复（仅被 @ 才回）模式下，此消息未被真人 @」
 	// 这一**硬权限门**的 reason 值。它与软节流原因（rhythm_*/engagement_*）有本质区别：
 	// 软原因是「此刻该不该说」的概率/节奏判断，可被模型显式 REPLY_CONTROL send:true 覆盖；
