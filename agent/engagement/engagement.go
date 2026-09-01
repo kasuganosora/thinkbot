@@ -234,6 +234,12 @@ func (p *CompositePolicy) Evaluate(ctx context.Context, msg *core.Message) Decis
 			})
 		}
 
+		// 注意：判定结果的落库不在这里，而在 SimpleJudge.Judge 内部。
+		// 放在这里会漏掉「judge 为其它 LLMJudge 实现」的场景，且让
+		// CompositePolicy 多承担一个与漏斗职责无关的负担。
+		// 记录的是**原始判定**（engage/score），阈值判断是 Policy 层的事——
+		// 保留原始值才能事后评估阈值定得合不合理。
+
 		// 评分模式：使用 engagementThreshold 做阈值判断
 		// 参考 Houde et al. (2025)：评分制 + 可配置阈值比二元判断更受用户认可
 		if p.engagementThreshold > 0 && judgeResult.Score > 0 {

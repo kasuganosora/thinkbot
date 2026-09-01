@@ -15,12 +15,14 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
+	"github.com/kasuganosora/thinkbot/agent/engagement"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/skill"
+	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/toolperm"
 )
 
@@ -40,6 +42,8 @@ type APIParams struct {
 	TP            trace.TracerProvider `optional:"true"`
 	MP            metric.MeterProvider `optional:"true"`
 	StatsRecorder llm.UsageRecorder    `optional:"true"`
+	// JudgeRecorder LLM 快判结果落库器。未提供时判定结果不落库（改动前行为）。
+	JudgeRecorder *stats.JudgeRecorder `optional:"true"`
 	Lifecycle     fx.Lifecycle
 }
 
@@ -106,7 +110,13 @@ func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHis
 	if mp == nil {
 		mp = noop_metric.NewMeterProvider()
 	}
-	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus, p.StatsRecorder, chatHistory, permSvc)
+	// JudgeRecorder 可为 nil（fx 未提供）——此时不挂 sink，判定结果不落库。
+	var judgeSink engagement.JudgeRecordSink
+	if p.JudgeRecorder != nil {
+		judgeSink = stats.NewJudgeSink(p.JudgeRecorder)
+	}
+	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus,
+		p.StatsRecorder, judgeSink, chatHistory, permSvc)
 }
 
 // newToolPermService 创建 bot 工具权限服务。

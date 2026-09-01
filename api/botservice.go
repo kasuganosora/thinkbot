@@ -66,6 +66,8 @@ type BotService struct {
 	mp            metric.MeterProvider
 	eventBus      outbound.EventBus
 	statsRecorder llm.UsageRecorder // 可选，nil 时不记录 token 统计
+	// judgeSink LLM 快判结果落库目标。可选，nil 时判定结果用完即弃。
+	judgeSink engagement.JudgeRecordSink
 
 	mu                 sync.RWMutex
 	channels           map[string]*WebChannel             // botID → WebChannel
@@ -111,7 +113,7 @@ type BotService struct {
 }
 
 // NewBotService 创建 BotService。
-func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, chatHistory *ChatHistoryService, permSvc *toolperm.Service) *BotService {
+func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, judgeSink engagement.JudgeRecordSink, chatHistory *ChatHistoryService, permSvc *toolperm.Service) *BotService {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
@@ -130,6 +132,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		mp:                 mp,
 		eventBus:           eventBus,
 		statsRecorder:      statsRecorder,
+		judgeSink:          judgeSink,
 		channels:           make(map[string]*WebChannel),
 		botInstances:       make(map[string]*bot.Bot),
 		dreamingBundles:    make(map[string]*bot.DreamingBundle),
@@ -1032,10 +1035,19 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				Interests:  engCfg.Keywords,
 			}
 
+			// 模型标识与落库目标一并注入：前者让判定结果可按模型归因
+			// （换模型后是变好还是变坏），后者让判定质量可观测。
+			judgeOpts := []engagement.JudgeModelOption{
+				engagement.WithJudgeModel(modelID),
+			}
+			if s.judgeSink != nil {
+				judgeOpts = append(judgeOpts, engagement.WithJudgeSink(s.judgeSink))
+			}
+
 			if engCfg.EngagementThreshold > 0 {
-				judge = engagement.NewScoredSimpleJudge(adapter, promptCfg)
+				judge = engagement.NewScoredSimpleJudge(adapter, promptCfg, judgeOpts...)
 			} else {
-				judge = engagement.NewSimpleJudge(adapter, promptCfg)
+				judge = engagement.NewSimpleJudge(adapter, promptCfg, judgeOpts...)
 			}
 		}
 

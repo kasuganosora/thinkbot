@@ -324,7 +324,10 @@ func TestNormalizeVerdictText_NegationNotMiscounted(t *testing.T) {
 // --- executor.go: buildIterationTask ---
 
 func TestBuildIterationTask(t *testing.T) {
-	task := buildIterationTask("original task", "previous result", "fix this")
+	task, sr, err := buildIterationTask("original task", "previous result", "fix this")
+	if err != nil {
+		t.Fatalf("buildIterationTask: %v", err)
+	}
 	if !strings.Contains(task, "original task") {
 		t.Error("should contain original task")
 	}
@@ -333,6 +336,10 @@ func TestBuildIterationTask(t *testing.T) {
 	}
 	if !strings.Contains(task, "fix this") {
 		t.Error("should contain feedback")
+	}
+	// 干净输入不应产生任何净化信号——否则说明清洗逻辑误伤了正常内容
+	if len(sr.Removed) != 0 || len(sr.Injected) != 0 || sr.Emptied {
+		t.Errorf("clean input should produce no sanitize signals, got %+v", sr)
 	}
 }
 

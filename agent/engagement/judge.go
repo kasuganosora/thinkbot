@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -13,6 +14,37 @@ import (
 // ============================================================================
 // LLMJudge — Tier 2 LLM 快判
 // ============================================================================
+
+// JudgeRecord 一次判定的结果快照，供落库观测判定质量。
+//
+// 为什么需要：判定结果此前只用于派生「参不参与」的决策，用完即弃——
+// 改了 prompt、换了模型，无从判断变好还是变坏。落库后可以按 bot / model
+// 分组统计判定率与分数分布，把「调 prompt」从拍脑袋变成可度量。
+//
+// 刻意不做统计检验（p 值 / 显著性）：这里的样本量支撑不了 A/B 结论，
+// 用小样本算 p 值是制造虚假确定性。只做描述性统计（率与分布），
+// 判断交给人。
+type JudgeRecord struct {
+	BotID     string
+	Channel   string
+	Model     string // 可能为空，见 SimpleJudge.modelID
+	Engage    bool
+	Score     int // 0 = 未使用评分模式
+	Reason    string
+	Tier      string
+	LatencyMS int64
+}
+
+// JudgeRecordSink 判定结果的落库目标。
+//
+// 接口定义在**消费方**（本包）而非实现方，实现由 stats 包提供——
+// 这样本包不必依赖 stats，包边界保持清晰。
+//
+// 实现必须满足：非阻塞、失败不影响主决策。落库是旁路观测，
+// 不能让它把参与决策拖垮。
+type JudgeRecordSink interface {
+	RecordJudge(ctx context.Context, rec JudgeRecord)
+}
 
 // JudgeResult 是 LLM 快判的结果。
 type JudgeResult struct {
@@ -25,6 +57,15 @@ type JudgeResult struct {
 	// 1-100 表示 LLM 评估的兴趣程度（越高越值得参与）。
 	// 参考 Houde et al. (2025) 论文：评分制 + 可配置阈值比二元 YES/NO 更受用户认可。
 	Score int
+
+	// Model 实际使用的模型标识（可能为空——SimpleLLMClient 接口不暴露模型）。
+	// 供落库后按模型分组评估判定质量：换模型后判定率是变好还是变坏，
+	// 没有这一列就无从归因。
+	Model string
+
+	// LatencyMS 本次判定的耗时（毫秒）。
+	// 快判在主链路的关键路径上，耗时本身就是需要观测的指标。
+	LatencyMS int64
 }
 
 // LLMJudge 使用轻量 LLM 调用快速判断消息是否值得主动参与。
@@ -232,24 +273,59 @@ type SimpleJudge struct {
 	client SimpleLLMClient
 	config PromptConfig
 	scored bool // true = 使用评分模式
+	// modelID 快判所用模型的标识，仅用于落库归因。
+	// 为空表示调用方未提供——SimpleLLMClient 接口不暴露模型，
+	// 故只能由构造方显式传入。落库时该列为空不影响其余字段。
+	modelID string
+	// sink 判定结果落库目标（可选，nil 则不落库）。
+	sink JudgeRecordSink
 }
 
+// JudgeModelOption 配置 SimpleJudge 的可选项。
+type JudgeModelOption func(*SimpleJudge)
+
+// WithJudgeModel 设置快判所用模型的标识，用于判定结果的落库归因。
+// 不设置时 Model 列为空，判定结果仍会落库（其余维度可用）。
+func WithJudgeModel(modelID string) JudgeModelOption {
+	return func(j *SimpleJudge) { j.modelID = modelID }
+}
+
+// WithJudgeSink 设置判定结果的落库目标。
+//
+// 不设置则判定结果用完即弃——改动前的行为。设置后每次判定都会落库，
+// 使「改 prompt / 换模型后判定质量是变好还是变坏」成为可回答的问题。
+func WithJudgeSink(sink JudgeRecordSink) JudgeModelOption {
+	return func(j *SimpleJudge) { j.sink = sink }
+}
+
+// ModelID 返回快判所用模型标识（可能为空）。
+func (j *SimpleJudge) ModelID() string { return j.modelID }
+
 // NewSimpleJudge 创建基于 SimpleLLMClient 的传统 YES/NO 快判器。
-func NewSimpleJudge(client SimpleLLMClient, config PromptConfig) *SimpleJudge {
-	return &SimpleJudge{
+// opts 可设置模型标识（WithJudgeModel）与落库目标（WithJudgeSink）。
+func NewSimpleJudge(client SimpleLLMClient, config PromptConfig, opts ...JudgeModelOption) *SimpleJudge {
+	j := &SimpleJudge{
 		client: client,
 		config: config,
 	}
+	for _, o := range opts {
+		o(j)
+	}
+	return j
 }
 
 // NewScoredSimpleJudge 创建基于 SimpleLLMClient 的评分快判器。
 // 返回 0-100 分数，配合 CompositePolicy 的 engagementThreshold 使用。
-func NewScoredSimpleJudge(client SimpleLLMClient, config PromptConfig) *SimpleJudge {
-	return &SimpleJudge{
+func NewScoredSimpleJudge(client SimpleLLMClient, config PromptConfig, opts ...JudgeModelOption) *SimpleJudge {
+	j := &SimpleJudge{
 		client: client,
 		config: config,
 		scored: true,
 	}
+	for _, o := range opts {
+		o(j)
+	}
+	return j
 }
 
 // IsScored 返回是否使用评分模式。
@@ -266,13 +342,39 @@ func (j *SimpleJudge) Judge(ctx context.Context, msg *core.Message) (JudgeResult
 		system, user = BuildJudgePrompt(j.config, msg)
 	}
 
+	start := time.Now()
 	resp, err := j.client.Chat(ctx, system, user)
+	latencyMS := time.Since(start).Milliseconds()
 	if err != nil {
 		return JudgeResult{}, errs.Wrap(err, "llm judge")
 	}
 
+	var res JudgeResult
 	if j.scored {
-		return ParseScoredResponse(resp), nil
+		res = ParseScoredResponse(resp)
+	} else {
+		res = ParseJudgeResponse(resp)
 	}
-	return ParseJudgeResponse(resp), nil
+	res.Model = j.modelID
+	res.LatencyMS = latencyMS
+
+	// 落库放在这里而非 Policy 层：判定与记录在一起才不会漏，
+	// 也不要求调用方记得额外接线。记录的是**原始判定**（engage/score），
+	// 不含阈值判断——保留原始值才能事后评估阈值定得合不合理。
+	//
+	// 非阻塞且失败不影响返回：落库是旁路观测，不能拖垮参与决策。
+	if j.sink != nil {
+		j.sink.RecordJudge(ctx, JudgeRecord{
+			BotID:     msg.BotID,
+			Channel:   msg.Channel,
+			Model:     res.Model,
+			Engage:    res.Engage,
+			Score:     res.Score,
+			Reason:    res.Reason,
+			Tier:      string(TierLLM),
+			LatencyMS: res.LatencyMS,
+		})
+	}
+
+	return res, nil
 }

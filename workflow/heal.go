@@ -39,12 +39,24 @@ type Diagnosis struct {
 	//   endpoint      —— LLM 端点变慢/瞬断累积（应退避重试，非细化）
 	//   context_bloat —— 上下文膨胀导致每步变慢（细化可降低上下文，也可归 granularity）
 	//   quota         —— 额度墙（已有独立自愈，理论上不会到此）
+	//   capability    —— 工具档位不足：任务需要的能力超出节点被授予的档位
 	//   other         —— 其它/不确定（走现有 failed 路径，交由外部决策）
+	//
+	// 注意 trySelfHeal 只对 granularity / context_bloat 做自动细化，
+	// capability **刻意不自动扩权**——见 SuggestedProfile 的说明。
 	Category        string  `json:"category"`
 	Confidence      float64 `json:"confidence"`
 	Reason          string  `json:"reason"`
 	SuggestedAction string  `json:"suggested_action"` // refine | backoff_retry | wait_quota | escalate
-	RefineHint      string  `json:"refine_hint"`      // 仅 granularity 时：给分析器的细化建议
+	RefineHint      string  `json:"refine_hint"`      // 仅 granularity/context_bloat 时：给分析器的细化建议
+
+	// SuggestedProfile 仅在 category=capability 时给出：诊断认为该节点需要的最低档位。
+	//
+	// **只记录，绝不自动应用**。自动扩权会与工具档位的整个设计目标相悖——
+	// 档位存在的意义就是让节点只拿到任务必需的能力，让自愈有能力自行放宽它，
+	// 等于给这道防线开了一个自动化后门。这里只把建议写进诊断结果，
+	// 是否提档由人决定。
+	SuggestedProfile string `json:"suggested_profile,omitempty"`
 }
 
 // healDiagnoseSystemPrompt 根因诊断专家的 system prompt。
@@ -70,11 +82,30 @@ const healDiagnoseSystemPrompt = `你是一个工作流失败根因诊断专家�
 4. quota（额度墙）：日志出现 429 / 配额耗尽类错误。
    → suggested_action = "wait_quota"。
 
-5. other（不确定）：证据不足或多种原因混合无法判定。
+5. capability（工具档位不足）：节点被授予的工具档位不足以完成它的任务。判定依据见下方「工具档位」一节——典型证据是日志里出现工具不可用/未找到，或任务明确需要执行、写入能力而当前档位不含。
+   → suggested_action = "escalate"，并在 suggested_profile 里给出你认为需要的最低档位。
+   **不要**因为档位不足而判成 granularity：拆细节点解决不了缺工具，只会白白多跑一轮。
+
+6. other（不确定）：证据不足或多种原因混合无法判定。
    → suggested_action = "escalate"。
 
+## 工具档位
+
+节点可能被限定在以下档位之一（失败节点的当前档位见任务描述）：
+
+- readonly —— 只能列目录、读文件、搜内容
+- analysis —— readonly + 执行命令（跑测试/lint/构建），但不能写文件
+- edit     —— analysis + 新建文件、局部替换，但**不能删除或移动**
+- full     —— 全部工具
+
+判定要点：
+- 先确认任务本身需要什么能力（读？执行？写？删除？），再看当前档位是否覆盖。
+- 任务要跑测试/构建而档位是 readonly → capability
+- 任务要改文件而档位是 analysis → capability
+- 代码规模巨大但档位够用 → 那是 granularity，不是 capability
+
 把最终 JSON 放在 <result>...</result> 之间，格式：
-{"category":"granularity|endpoint|context_bloat|quota|other","confidence":0.0~1.0,"reason":"基于真实证据的一句话说明","suggested_action":"refine|backoff_retry|wait_quota|escalate","refine_hint":"仅 granularity/context_bloat 时给出"}
+{"category":"granularity|endpoint|context_bloat|quota|capability|other","confidence":0.0~1.0,"reason":"基于真实证据的一句话说明","suggested_action":"refine|backoff_retry|wait_quota|escalate","refine_hint":"仅 granularity/context_bloat 时给出","suggested_profile":"仅 capability 时给出：readonly|analysis|edit|full"}
 
 confidence 是你对判定的把握（0~1）。证据不足时不要虚高。`
 
@@ -94,12 +125,21 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 	defer span.End()
 
 	logger := traceid.WithLoggerFrom(ctx, a.logger)
-	logger.Infow("healing: diagnosing failed node", "node_id", node.ID, "node_name", node.Name, "error", node.Error)
+	logger.Infow("healing: diagnosing failed node",
+		"node_id", node.ID, "node_name", node.Name, "tool_profile", node.ToolProfile, "error", node.Error)
+
+	// 档位必须告诉诊断 agent：否则它看不到「节点被限制了工具」这个事实，
+	// 会把档位不足误判成 granularity，然后白白细化一次——拆细节点解决不了缺工具。
+	profile := node.ToolProfile
+	if profile == "" {
+		profile = ProfileFull
+	}
 
 	task := fmt.Sprintf(`失败节点诊断任务：
 
 节点 id: %s
 节点名: %s
+当前工具档位: %s
 节点任务描述:
 %s
 
@@ -110,8 +150,9 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 %s
 
 请先 read/grep/glob 探查该节点任务覆盖的真实代码规模（文件数、总行数），再读 /tmp/thinkbot.log 按节点 id 提取它的 tool call summary 与 GLM 延迟证据，然后判定根因。
+特别注意：若失败源于「当前工具档位不足以完成任务」，请判为 capability 并给出建议档位，**不要**判成 granularity。
 输出格式见 system prompt，放在 <result>...</result> 之间。`,
-		node.ID, node.Name, node.Task, node.Error, node.RetryCount, wf.Requirement)
+		node.ID, node.Name, profile, node.Task, node.Error, node.RetryCount, wf.Requirement)
 
 	raw, err := a.saMgr.DelegateStream(ctx, healDiagnoseSystemPrompt, task,
 		subagent.WithTemperature(0),
@@ -304,6 +345,28 @@ func (s *Scheduler) trySelfHeal(ctx context.Context, node *DAGNode, lastErr erro
 		}
 		diag = d
 		s.healCache.Store(node.ID, healCacheEntry{diagnosis: diag})
+	}
+
+	// capability（工具档位不足）**刻意不自动扩权**，只把建议留痕。
+	//
+	// 自动放宽档位会让整道最小权限防线形同虚设：档位的意义就在于
+	// 「只给任务必需的能力」，若自愈能自行放宽，等于给这道防线开了后门——
+	// 一次注入或一次误判就能让节点拿到它本不该有的 exec / 删除能力。
+	// 因此这里只记录建议，是否提档由人决定。
+	//
+	// 注意它也不会落到下面的 refine 分支（那里只认 granularity / context_bloat），
+	// 于是自然走 escalate 交外部决策——正是期望的行为。
+	if diag.Category == "capability" {
+		current := node.ToolProfile
+		if current == "" {
+			current = ProfileFull
+		}
+		s.healLog(ctx, "diagnosed as capability gap, NOT auto-escalating",
+			zap.String("node_id", node.ID),
+			zap.String("current_profile", string(current)),
+			zap.String("suggested_profile", diag.SuggestedProfile),
+			zap.Float64("confidence", diag.Confidence),
+			zap.String("reason", diag.Reason))
 	}
 
 	// 仅 granularity / context_bloat 且高置信 → 局部重分析 + 动态替换 DAG。

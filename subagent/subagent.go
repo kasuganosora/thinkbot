@@ -102,9 +102,20 @@ type SubAgent struct {
 	toolSteps int
 
 	// skipTools 为 true 时，SubAgentManager.ResolveTools 即使解析到了工具也不注入。
-	// 用于 Analyzer 等纯 LLM 任务（只需输出 JSON，不需要工具能力），
+	// 用于纯 LLM 任务（只需输出 JSON，不需要工具能力），
 	// 避免被注入工具后误走 OrchestrateStream 多步编排循环导致卡死或延迟。
 	skipTools bool
+
+	// toolAllowlist 限制本 SubAgent 可用的工具名。空 = 不限制（保持默认行为）。
+	//
+	// 这是**工具级最小权限**：节点声明「我只需要读」，就拿不到 exec / write / delete。
+	// 与 skipTools 的区别：skipTools 是全关（连多步回路都不走），
+	// toolAllowlist 是部分放行（仍可走多步回路，但只看到白名单内的工具）。
+	//
+	// 由 WithToolAllowlist 设置，在 SubAgentManager 注入工具时生效（过滤发生在
+	// 注入前，未列出的工具对 SubAgent 完全不可见，而非调用时拒绝）。
+	// skipTools 优先：两者同时存在时以 skipTools 为准。
+	toolAllowlist []string
 
 	// compactor 可选的语义压缩器（LLM 摘要）。非空时在每步编排前检测 token
 	// 溢出并自动用 LLM 摘要旧消息，避免 context 爆炸把 subagent 养到硬上限看门狗
