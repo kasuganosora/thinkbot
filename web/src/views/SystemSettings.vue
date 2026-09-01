@@ -157,6 +157,7 @@ import SkillsView from '@/views/admin/SkillsView.vue'
 import ConfigView from '@/views/admin/ConfigView.vue'
 import StatsView from '@/views/admin/StatsView.vue'
 import SystemMonitorView from '@/views/admin/SystemMonitorView.vue'
+import { applyPrimaryColor } from '@/utils/brand'
 
 const userStore = useUserStore()
 
@@ -203,7 +204,7 @@ const langOptions = [
 
 const defaults = {
   theme: 'light',
-  primaryColor: 'green',
+  primaryColor: 'blue',
   language: 'zh-CN',
   apiBase: 'https://api.example.com/v1',
   apiKey: ''
@@ -218,23 +219,6 @@ function readSettings() {
 }
 
 const settings = ref(readSettings())
-
-// 主题色调色板：写入 TDesign 的品牌色 CSS 变量，组件与自定义样式（均引用
-// var(--td-brand-color, …)）会立即跟随变化——这是「保存」真正生效的部分。
-const BRAND_PALETTES = {
-  green: { base: '#00a870', hover: '#00915f', active: '#007a4f', light: '#e3f9f0' },
-  blue: { base: '#0052d9', hover: '#0047ba', active: '#003cab', light: '#e0ebff' },
-  purple: { base: '#7c3aed', hover: '#6d28d9', active: '#5b21b6', light: '#f0e7ff' }
-}
-
-function applyPrimaryColor(name) {
-  const p = BRAND_PALETTES[name] || BRAND_PALETTES.green
-  const style = document.documentElement.style
-  style.setProperty('--td-brand-color', p.base)
-  style.setProperty('--td-brand-color-hover', p.hover)
-  style.setProperty('--td-brand-color-active', p.active)
-  style.setProperty('--td-brand-color-light', p.light)
-}
 
 // 进入页面即按已保存的偏好生效（此前保存只写 localStorage，刷新后毫无变化）
 onMounted(() => applyPrimaryColor(settings.value.primaryColor))
@@ -263,8 +247,8 @@ function save() {
   width: 200px;
   flex-shrink: 0;
   padding: 20px 12px;
-  border-right: 1px solid #ececec;
-  background: #fafafa;
+  border-right: var(--bp-hairline);
+  background: var(--bp-bg-subtle);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -280,17 +264,18 @@ function save() {
   background: transparent;
   border-radius: 8px;
   font-size: 14px;
-  color: #555;
+  color: var(--bp-label-secondary);
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--bp-duration) var(--bp-ease-out), color var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
 }
-.nav-item:hover { background: #efefef; }
+.nav-item:hover { background: var(--bp-surface-fill-hover); }
+.nav-item:active { transform: scale(var(--bp-press-scale)); }
 .nav-item.active {
-  background: #fff;
-  color: #1d1d1f;
+  background: var(--bp-surface);
+  color: var(--bp-label);
   font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--bp-shadow-sm);
 }
 .nav-icon { font-size: 16px; }
 
@@ -326,31 +311,31 @@ function save() {
   font-size: 18px;
   font-weight: 600;
   margin: 0 0 4px;
-  color: #1d1d1f;
+  color: var(--bp-label);
 }
 .panel-desc {
   font-size: 13px;
-  color: #888;
+  color: var(--bp-label-tertiary);
   margin: 0;
 }
 .form-hint {
   margin-left: 10px;
   font-size: 12px;
-  color: #999;
+  color: var(--bp-label-tertiary);
 }
 .panel-card {
-  background: #fff;
-  border: 1px solid #ececec;
+  background: var(--bp-surface);
+  border: none; box-shadow: var(--bp-shadow-sm);
   border-radius: 12px;
   padding: 20px 24px;
 }
 .about-row {
   display: flex;
   padding: 10px 0;
-  border-bottom: 1px solid #f2f2f2;
+  border-bottom: var(--bp-hairline);
   font-size: 14px;
 }
 .about-row:last-child { border-bottom: none; }
-.about-k { width: 120px; color: #888; }
-.about-v { color: #1d1d1f; }
+.about-k { width: 120px; color: var(--bp-label-tertiary); }
+.about-v { color: var(--bp-label); }
 </style>

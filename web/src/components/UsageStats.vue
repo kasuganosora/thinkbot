@@ -118,7 +118,7 @@ const loadingRec = ref(false)
 const page = ref(1)
 const pageSize = 20
 
-const PALETTE = ['#4b6ef5', '#b6d94c', '#f5934b', '#9b6ef5', '#23c8b0', '#e85d8a', '#9aa0b0', '#f5c54b']
+const PALETTE = ['var(--bp-accent)', 'var(--bp-success)', 'var(--bp-warning)', 'var(--bp-accent-active)', 'var(--bp-accent-hover)', 'var(--bp-danger)', 'var(--bp-label-quaternary)', 'var(--bp-label-tertiary)']
 function colorOf(i) { return PALETTE[i % PALETTE.length] }
 
 // ---- Cache Breakdown 堆叠柱（按 bot 堆叠）----
@@ -291,27 +291,27 @@ onMounted(() => {
 <style scoped>
 .usage { padding: 4px 2px 24px; }
 .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
-.chart-card { background: #fff; border: 1px solid #ececec; border-radius: 12px; padding: 16px 18px; }
+.chart-card { background: var(--bp-surface); border: none; box-shadow: var(--bp-shadow-sm); border-radius: 12px; padding: 16px 18px; }
 .chart-title { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
 .chart-svg { width: 100%; height: 220px; display: block; }
-.grid-line { stroke: #eee; stroke-width: 1; }
-.axis-text { fill: #9aa; font-size: 10px; }
-.seg-read { fill: #4b6ef5; }
-.seg-write { fill: #b6d94c; }
-.seg-no { fill: #9aa0b0; opacity: 0.75; }
-.hit-line { fill: none; stroke: #4b6ef5; stroke-width: 2; }
-.hit-dot { fill: #fff; stroke: #4b6ef5; stroke-width: 2; }
+.grid-line { stroke: var(--bp-separator); stroke-width: 1; }
+.axis-text { fill: var(--bp-label-tertiary); font-size: 10px; }
+.seg-read { fill: var(--bp-accent); }
+.seg-write { fill: var(--bp-success); }
+.seg-no { fill: var(--bp-label-quaternary); opacity: 0.75; }
+.hit-line { fill: none; stroke: var(--bp-accent); stroke-width: 2; }
+.hit-dot { fill: var(--bp-surface); stroke: var(--bp-accent); stroke-width: 2; }
 .legend { display: flex; gap: 18px; margin-top: 8px; }
-.lg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #667; }
+.lg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bp-label-secondary); }
 .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-.dot.read { background: #4b6ef5; }
-.dot.write { background: #b6d94c; }
-.dot.no { background: #9aa0b0; }
+.dot.read { background: var(--bp-accent); }
+.dot.write { background: var(--bp-success); }
+.dot.no { background: var(--bp-label-quaternary); }
 
-.panel-block { background: #fff; border: 1px solid #ececec; border-radius: 12px; padding: 16px 18px; margin-bottom: 18px; }
+.panel-block { background: var(--bp-surface); border: none; box-shadow: var(--bp-shadow-sm); border-radius: 12px; padding: 16px 18px; margin-bottom: 18px; }
 .block-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .block-title { font-size: 15px; font-weight: 600; margin: 0; }
-.block-sub { font-size: 12px; color: #9aa; }
-.muted { color: #8a93a6; }
+.block-sub { font-size: 12px; color: var(--bp-label-tertiary); }
+.muted { color: var(--bp-label-tertiary); }
 .pager { display: flex; justify-content: flex-end; margin-top: 12px; }
 </style>

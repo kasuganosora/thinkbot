@@ -647,21 +647,27 @@ function onKeydown(value, { e }) {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--bp-chat-bg);
   min-width: 0;
 }
 .chat-topbar {
-  height: 56px;
+  height: 52px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 24px;
-  border-bottom: 1px solid #f0f0f0;
+  padding: 0 20px;
+  background: var(--bp-surface-toolbar);
+  backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  -webkit-backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  border-bottom: var(--bp-hairline);
+  z-index: 2;
 }
 .topbar-title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
+  letter-spacing: var(--bp-tracking-title);
+  color: var(--bp-label);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -670,9 +676,8 @@ function onKeydown(value, { e }) {
   flex: 1;
   overflow-y: auto;
   padding: 20px 0;
-  position: relative; /* 为悬浮按钮提供定位上下文 */
+  position: relative;
 }
-/* 回到底部悬浮按钮 */
 .scroll-to-bottom-btn {
   position: absolute;
   bottom: 16px;
@@ -680,42 +685,43 @@ function onKeydown(value, { e }) {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  background: var(--bp-surface);
+  border: none;
+  box-shadow: var(--bp-shadow-md);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: #666;
+  color: var(--bp-label-secondary);
   font-size: 18px;
-  transition: all 0.2s ease;
+  transition: transform var(--bp-duration) var(--bp-ease-out),
+              opacity var(--bp-duration) var(--bp-ease-out),
+              color var(--bp-duration) var(--bp-ease-out),
+              background var(--bp-duration) var(--bp-ease-out);
   z-index: 10;
 }
 .scroll-to-bottom-btn:hover {
-  background: #0052d9;
-  border-color: #0052d9;
-  color: #fff;
-  box-shadow: 0 4px 16px rgba(0, 82, 217, 0.3);
+  background: var(--bp-accent);
+  color: var(--bp-label-on-accent);
 }
-/* 按钮淡入淡出 */
+.scroll-to-bottom-btn:active {
+  transform: scale(var(--bp-press-scale));
+}
 .scroll-bottom-fade-enter-active,
 .scroll-bottom-fade-leave-active {
-  transition: opacity 0.25s ease, transform 0.25s ease;
+  transition: opacity var(--bp-duration) var(--bp-ease-out),
+              transform var(--bp-duration) var(--bp-ease-out);
 }
 .scroll-bottom-fade-enter-from,
 .scroll-bottom-fade-leave-to {
   opacity: 0;
-  transform: translateY(8px) scale(0.9);
+  transform: translateY(8px) scale(0.96);
 }
-/* workflow 面板：作为普通内容块内嵌在消息流中（与 .msg-row 同宽同边距），
-   不再 sticky 悬浮——悬浮会遮挡消息、且脱离了它在对话中的时间位置。 */
 .wf-inline {
   max-width: 820px;
   margin: 18px auto 0;
   padding: 0 32px;
 }
-/* 顶部分页条：加载更早消息 / 到达历史起点 */
 .load-more-bar {
   display: flex;
   align-items: center;
@@ -723,7 +729,8 @@ function onKeydown(value, { e }) {
   gap: 8px;
   padding: 10px 32px 14px;
   font-size: 13px;
-  color: #999;
+  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-tertiary);
 }
 .load-more-loading {
   display: inline-flex;
@@ -731,21 +738,26 @@ function onKeydown(value, { e }) {
   gap: 8px;
 }
 .load-more-btn {
-  background: transparent;
-  border: 1px solid #e0e0e0;
-  border-radius: 14px;
-  padding: 4px 14px;
+  background: var(--bp-surface-fill);
+  border: none;
+  border-radius: var(--bp-radius-pill);
+  padding: 5px 14px;
   font-size: 13px;
-  color: #666;
+  color: var(--bp-label-secondary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background var(--bp-duration) var(--bp-ease-out),
+              color var(--bp-duration) var(--bp-ease-out),
+              transform var(--bp-duration) var(--bp-ease-out);
 }
 .load-more-btn:hover {
-  border-color: #0052d9;
-  color: #0052d9;
+  background: var(--bp-accent-soft);
+  color: var(--bp-accent);
+}
+.load-more-btn:active {
+  transform: scale(var(--bp-press-scale));
 }
 .load-more-end {
-  color: #bbb;
+  color: var(--bp-label-quaternary);
 }
 .msg-row {
   display: flex;
@@ -768,7 +780,7 @@ function onKeydown(value, { e }) {
   width: 30px;
   height: 30px;
   border-radius: 50%;
-  background: #e6f4ef;
+  background: var(--bp-accent-soft);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -778,14 +790,16 @@ function onKeydown(value, { e }) {
 .msg-header-name {
   font-size: 15px;
   font-weight: 600;
-  color: #1d1d1f;
+  letter-spacing: var(--bp-tracking-title);
+  color: var(--bp-label);
 }
 .msg-row.user {
   justify-content: flex-end;
 }
 .msg-bubble {
   font-size: 15px;
-  line-height: 1.75;
+  line-height: var(--bp-leading-body);
+  letter-spacing: var(--bp-tracking-body);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -810,22 +824,22 @@ function onKeydown(value, { e }) {
   margin: 2px 0;
 }
 .msg-row.user .msg-bubble {
-  background: #f0f1f3;
-  color: #1d1d1f;
-  border-radius: 14px;
+  background: var(--bp-surface-fill-active);
+  color: var(--bp-label);
+  border-radius: 18px;
   padding: 10px 16px;
 }
 .msg-row.assistant .msg-bubble {
   background: transparent;
-  color: #1d1d1f;
+  color: var(--bp-label);
   padding: 4px 0;
   width: 100%;
 }
-/* markdown 渲染内容样式（v-html，需用 deep 穿透 scoped） */
 .markdown-body {
   white-space: normal;
   font-size: 15px;
-  line-height: 1.75;
+  line-height: var(--bp-leading-body);
+  letter-spacing: var(--bp-tracking-body);
   word-break: break-word;
 }
 .markdown-body :deep(h1),
@@ -833,10 +847,12 @@ function onKeydown(value, { e }) {
 .markdown-body :deep(h3),
 .markdown-body :deep(h4) {
   font-weight: 600;
-  line-height: 1.4;
+  line-height: var(--bp-leading-title);
+  letter-spacing: var(--bp-tracking-title);
   margin: 16px 0 8px;
+  color: var(--bp-label);
 }
-.markdown-body :deep(h1) { font-size: 20px; }
+.markdown-body :deep(h1) { font-size: 20px; letter-spacing: var(--bp-tracking-display); }
 .markdown-body :deep(h2) { font-size: 18px; }
 .markdown-body :deep(h3) { font-size: 16px; }
 .markdown-body :deep(h4) { font-size: 15px; }
@@ -848,26 +864,26 @@ function onKeydown(value, { e }) {
 .markdown-body :deep(strong) { font-weight: 600; }
 .markdown-body :deep(hr) {
   border: none;
-  border-top: 1px solid #e7e7e7;
+  border-top: var(--bp-hairline);
   margin: 16px 0;
 }
 .markdown-body :deep(blockquote) {
   margin: 8px 0;
   padding: 2px 12px;
-  border-left: 3px solid #d0d0d0;
-  color: #666;
+  border-left: 3px solid var(--bp-separator-opaque);
+  color: var(--bp-label-secondary);
 }
 .markdown-body :deep(code) {
-  background: #f2f3f5;
+  background: var(--bp-surface-fill);
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: var(--bp-radius-xs);
   font-size: 13px;
-  font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+  font-family: var(--bp-font-mono);
 }
 .markdown-body :deep(pre) {
-  background: #f6f7f9;
+  background: var(--bp-surface-fill);
   padding: 12px 14px;
-  border-radius: 8px;
+  border-radius: var(--bp-radius-md);
   overflow-x: auto;
   margin: 10px 0;
 }
@@ -876,7 +892,7 @@ function onKeydown(value, { e }) {
   padding: 0;
   font-size: 13px;
 }
-.markdown-body :deep(a) { color: #0052d9; text-decoration: none; }
+.markdown-body :deep(a) { color: var(--bp-accent); text-decoration: none; }
 .markdown-body :deep(a:hover) { text-decoration: underline; }
 .markdown-body :deep(table) {
   border-collapse: collapse;
@@ -885,13 +901,12 @@ function onKeydown(value, { e }) {
 }
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid #e0e0e0;
+  border: var(--bp-hairline);
   padding: 6px 10px;
   text-align: left;
 }
 .markdown-body :deep(> *:first-child) { margin-top: 0; }
 .markdown-body :deep(> *:last-child) { margin-bottom: 0; }
-/* bot 持续输出时的 loading 指示 */
 .typing-indicator {
   display: inline-flex;
   gap: 4px;
@@ -902,16 +917,15 @@ function onKeydown(value, { e }) {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #00a870;
+  background: var(--bp-accent);
   animation: chat-blink 1.2s infinite ease-in-out;
 }
 .typing-indicator i:nth-child(2) { animation-delay: 0.2s; }
 .typing-indicator i:nth-child(3) { animation-delay: 0.4s; }
 .typing-text {
-  color: #8a8a8a;
+  color: var(--bp-label-tertiary);
   font-size: 13px;
 }
-/* 补充消息投递结果未确认的角标（网络异常时不自动重发，避免重复） */
 .append-unconfirmed {
   display: inline-block;
   margin-left: 6px;
@@ -919,8 +933,8 @@ function onKeydown(value, { e }) {
   border-radius: 8px;
   font-size: 11px;
   line-height: 17px;
-  color: #b06a00;
-  background: rgba(224, 158, 0, 0.14);
+  color: var(--bp-warning);
+  background: var(--bp-warning-soft);
   vertical-align: middle;
 }
 .stream-caret {
@@ -928,7 +942,7 @@ function onKeydown(value, { e }) {
   width: 2px;
   height: 14px;
   margin-left: 2px;
-  background: #00a870;
+  background: var(--bp-accent);
   vertical-align: text-bottom;
   animation: chat-caret 1s steps(1) infinite;
 }
@@ -955,11 +969,15 @@ function onKeydown(value, { e }) {
   margin-top: 16px;
   font-size: 26px;
   font-weight: 600;
+  letter-spacing: var(--bp-tracking-display);
+  line-height: var(--bp-leading-title);
+  color: var(--bp-label);
 }
 .greet-sub {
   margin-top: 8px;
-  color: #999;
+  color: var(--bp-label-secondary);
   font-size: 13px;
+  letter-spacing: var(--bp-tracking-caption);
 }
 .greet-chips {
   margin-top: 28px;
@@ -971,33 +989,43 @@ function onKeydown(value, { e }) {
 }
 .greet-chip {
   padding: 10px 18px;
-  background: #f5f5f5;
-  border-radius: 20px;
+  background: var(--bp-surface);
+  box-shadow: var(--bp-shadow-sm);
+  border-radius: var(--bp-radius-pill);
   font-size: 13px;
+  color: var(--bp-label);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: transform var(--bp-duration) var(--bp-ease-out),
+              background var(--bp-duration) var(--bp-ease-out),
+              color var(--bp-duration) var(--bp-ease-out);
 }
 .greet-chip:hover {
-  background: #e6f4ef;
-  color: #00a870;
+  background: var(--bp-accent-soft);
+  color: var(--bp-accent);
+}
+.greet-chip:active {
+  transform: scale(var(--bp-press-scale));
 }
 .chat-input-area {
   flex-shrink: 0;
-  padding: 0 24px 16px;
+  padding: 0 24px 18px;
 }
 .input-box {
   max-width: 820px;
   margin: 0 auto;
-  border: 1px solid #e7e7e7;
-  border-radius: 16px;
-  padding: 8px 12px;
-  background: #fff;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+  border: none;
+  border-radius: var(--bp-radius-xl);
+  padding: 10px 14px;
+  background: var(--bp-surface);
+  box-shadow: var(--bp-shadow-composer);
 }
 .input-box :deep(.t-textarea__inner) {
   font-size: 14px;
   padding: 6px 4px;
   resize: none;
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
 }
 .input-toolbar {
   display: flex;
@@ -1016,16 +1044,28 @@ function onKeydown(value, { e }) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px; height: 32px;
-  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--bp-radius-sm);
   cursor: pointer;
-  color: #666;
+  color: var(--bp-label-secondary);
   font-size: 18px;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--bp-duration) var(--bp-ease-out),
+              color var(--bp-duration) var(--bp-ease-out),
+              transform var(--bp-duration) var(--bp-ease-out);
 }
-.attach-btn:hover { background: #f2f3f5; color: #333; }
+.attach-btn:hover {
+  background: var(--bp-surface-fill-hover);
+  color: var(--bp-label);
+}
+.attach-btn:active {
+  transform: scale(var(--bp-press-scale));
+}
 .attach-input {
-  position: absolute; inset: 0; opacity: 0; cursor: pointer;
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
   font-size: 0;
 }
 .attach-strip {
@@ -1042,18 +1082,24 @@ function onKeydown(value, { e }) {
   align-items: center;
   gap: 4px;
   padding: 3px 8px 3px 6px;
-  border-radius: 6px;
-  background: #eef1f5;
+  border-radius: var(--bp-radius-xs);
+  background: var(--bp-surface-fill);
   font-size: 12px;
-  color: #444;
+  color: var(--bp-label-secondary);
   white-space: nowrap;
   max-width: 160px;
 }
-.attach-chip .t-icon:first-child { color: #4b8bf5; font-size: 14px; }
+.attach-chip .t-icon:first-child {
+  color: var(--bp-accent);
+  font-size: 14px;
+}
 .attach-chip .attach-remove {
-  font-size: 12px; color: #aaa; cursor: pointer; opacity: 0;
-  transition: opacity 0.12s;
+  font-size: 12px;
+  color: var(--bp-label-quaternary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--bp-duration-fast) var(--bp-ease-out);
 }
 .attach-chip:hover .attach-remove { opacity: 1; }
-.attach-chip:hover .attach-remove:hover { color: #e06a6a; }
+.attach-chip:hover .attach-remove:hover { color: var(--bp-danger); }
 </style>

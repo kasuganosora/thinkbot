@@ -22,7 +22,7 @@
         <div
           v-for="s in store.sessions"
           :key="s.id"
-          class="session-item"
+          class="session-item pressable"
           :class="{ active: s.id === store.activeSessionId }"
           :data-testid="`session-item-${s.id}`"
           role="option"
@@ -117,11 +117,11 @@ function formatTime(iso) {
 
 <style scoped>
 .session-panel {
-  width: 260px;
+  width: var(--bp-session-width);
   flex-shrink: 0;
   height: 100%;
-  background: #fafafa;
-  border-right: 1px solid #ececec;
+  background: var(--bp-bg-subtle);
+  border-right: var(--bp-hairline);
   display: flex;
   flex-direction: column;
 }
@@ -129,8 +129,14 @@ function formatTime(iso) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 14px;
-  border-bottom: 1px solid #ececec;
+  gap: 8px;
+  padding: 0 12px 0 14px;
+  height: 52px;
+  flex-shrink: 0;
+  border-bottom: var(--bp-hairline);
+  background: var(--bp-surface-toolbar);
+  backdrop-filter: saturate(180%) blur(var(--bp-blur));
+  -webkit-backdrop-filter: saturate(180%) blur(var(--bp-blur));
 }
 .cur-bot {
   display: flex;
@@ -139,11 +145,13 @@ function formatTime(iso) {
   min-width: 0;
 }
 .cur-bot-avatar {
-  font-size: 20px;
+  font-size: 18px;
 }
 .cur-bot-name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
+  letter-spacing: var(--bp-tracking-title);
+  color: var(--bp-label);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -151,7 +159,8 @@ function formatTime(iso) {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+  flex-shrink: 0;
 }
 .session-list {
   flex: 1;
@@ -162,19 +171,19 @@ function formatTime(iso) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px;
-  border-radius: 8px;
+  padding: 9px 10px;
+  border-radius: var(--bp-radius-md);
   cursor: pointer;
-  transition: background 0.15s;
 }
 .session-item:hover {
-  background: #f0f0f0;
+  background: var(--bp-surface-fill-hover);
 }
 .session-item:hover .sess-delete {
   opacity: 1;
 }
 .session-item.active {
-  background: #e6f4ef;
+  background: var(--bp-surface);
+  box-shadow: var(--bp-shadow-sm);
 }
 .sess-body {
   flex: 1;
@@ -182,7 +191,9 @@ function formatTime(iso) {
 }
 .sess-title {
   font-size: 13px;
-  color: #1d1d1f;
+  font-weight: 510;
+  letter-spacing: var(--bp-tracking-body);
+  color: var(--bp-label);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -191,22 +202,23 @@ function formatTime(iso) {
   display: flex;
   gap: 8px;
   font-size: 11px;
-  color: #aaa;
+  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-tertiary);
   margin-top: 2px;
 }
 .sess-count {
-  color: #888;
+  color: var(--bp-label-tertiary);
 }
 .sess-time {
   flex-shrink: 0;
 }
 .sess-delete {
   opacity: 0;
-  transition: opacity 0.15s;
-  color: #999 !important;
+  transition: opacity var(--bp-duration) var(--bp-ease-out);
+  color: var(--bp-label-tertiary) !important;
 }
 .sess-delete:hover {
-  color: #d63c3c !important;
+  color: var(--bp-danger) !important;
 }
 .loading-wrap {
   display: flex;

@@ -210,25 +210,25 @@ onMounted(() => { loadModelOptions(); loadConfig(); loadHistory() })
 
 /* 配置区 */
 .cfg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-.ch-title { font-size: 15px; font-weight: 600; color: #1d1d1f; }
-.ch-desc { font-size: 13px; color: #888; margin-top: 4px; }
+.ch-title { font-size: 15px; font-weight: 600; color: var(--bp-label); }
+.ch-desc { font-size: 13px; color: var(--bp-label-tertiary); margin-top: 4px; }
 
 .cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 24px; margin-bottom: 20px; }
 .field { display: flex; flex-direction: column; }
 .field.full { grid-column: auto; }
-.lbl { font-size: 13px; font-weight: 600; color: #1d1d1f; margin-bottom: 8px; }
-.sub { font-size: 12px; color: #999; margin: -2px 0 10px; }
+.lbl { font-size: 13px; font-weight: 600; color: var(--bp-label); margin-bottom: 8px; }
+.sub { font-size: 12px; color: var(--bp-label-tertiary); margin: -2px 0 10px; }
 
 .ratio-row { display: flex; align-items: center; gap: 16px; }
 .ratio-slider { flex: 1; min-width: 0; }
-.ratio-val { width: 44px; text-align: right; font-size: 14px; color: #1d1d1f; font-variant-numeric: tabular-nums; }
+.ratio-val { width: 44px; text-align: right; font-size: 14px; color: var(--bp-label); font-variant-numeric: tabular-nums; }
 
 .cfg-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
 
-.divider { height: 1px; background: #f0f0f0; margin: 28px 0; }
+.divider { height: 1px; background: var(--bp-separator); margin: 28px 0; }
 
 /* 记录区 */
 .hist-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-.hh-title { font-size: 16px; font-weight: 600; color: #1d1d1f; }
-.err-text { color: #c0392b; }
+.hh-title { font-size: 16px; font-weight: 600; color: var(--bp-label); }
+.err-text { color: var(--bp-danger); }
 </style>

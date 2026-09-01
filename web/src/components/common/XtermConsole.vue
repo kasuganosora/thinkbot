@@ -237,12 +237,12 @@ defineExpose({ reconnect, clearScreen, fit })
   margin-bottom: 12px;
 }
 .xc-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.xc-title { font-size: 15px; font-weight: 600; color: #1d1d1f; }
-.xc-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #999; }
-.xc-status .dot { width: 7px; height: 7px; border-radius: 50%; background: #c0c4cc; display: inline-block; }
-.xc-status.ok { color: #00a870; }
-.xc-status.ok .dot { background: #00a870; }
-.xc-host { font-size: 12px; color: #8a8a8a; font-family: Menlo, Monaco, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xc-title { font-size: 15px; font-weight: 600; color: var(--bp-label); }
+.xc-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bp-label-tertiary); }
+.xc-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bp-label-quaternary); display: inline-block; }
+.xc-status.ok { color: var(--bp-success); }
+.xc-status.ok .dot { background: var(--bp-success); }
+.xc-host { font-size: 12px; color: var(--bp-label-tertiary); font-family: Menlo, Monaco, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .xc-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 .xc-body {
@@ -254,9 +254,9 @@ defineExpose({ reconnect, clearScreen, fit })
 .xc-body :deep(.xterm) { height: 100%; }
 .xc-body :deep(.xterm-viewport) { background: transparent !important; }
 
-.xc-tip { margin-top: 10px; font-size: 12px; color: #999; }
+.xc-tip { margin-top: 10px; font-size: 12px; color: var(--bp-label-tertiary); }
 .xc-tip :deep(code) {
-  background: #f2f3f5; padding: 1px 6px; border-radius: 4px;
-  font-family: Menlo, Monaco, monospace; color: #444;
+  background: var(--bp-surface-fill); padding: 1px 6px; border-radius: 4px;
+  font-family: Menlo, Monaco, monospace; color: var(--bp-label);
 }
 </style>

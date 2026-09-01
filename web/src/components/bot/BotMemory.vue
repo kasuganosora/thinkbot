@@ -105,6 +105,6 @@ onMounted(load)
 
 <style scoped>
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
-.hint { color: #888; font-size: 13px; }
+.hint { color: var(--bp-label-tertiary); font-size: 13px; }
 .guide { margin-bottom: 16px; }
 </style>

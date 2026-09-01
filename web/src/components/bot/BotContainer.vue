@@ -325,58 +325,58 @@ async function onCreateSnapshot() {
 
 /* 头部 */
 .ctn-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.ch-title { font-size: 18px; font-weight: 700; margin: 0; color: #1d1d1f; }
-.ch-desc { font-size: 13px; color: #999; margin: 6px 0 0; }
+.ch-title { font-size: 18px; font-weight: 700; margin: 0; color: var(--bp-label); }
+.ch-desc { font-size: 13px; color: var(--bp-label-tertiary); margin: 6px 0 0; }
 .ch-actions { display: flex; gap: 10px; flex-shrink: 0; }
 
 /* 信息卡 */
-.info-card { border: 1px solid #ececec; border-radius: 14px; padding: 22px 26px; }
+.info-card { border: none; box-shadow: var(--bp-shadow-sm); border-radius: 14px; padding: 22px 26px; background: var(--bp-surface); }
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; row-gap: 18px; column-gap: 40px; }
-.ic-label { font-size: 13px; color: #999; margin-bottom: 4px; }
-.ic-value { font-size: 14px; color: #1d1d1f; word-break: break-all; }
+.ic-label { font-size: 13px; color: var(--bp-label-tertiary); margin-bottom: 4px; }
+.ic-value { font-size: 14px; color: var(--bp-label); word-break: break-all; }
 .ic-value.mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; }
 
 /* 内存限制单元格 */
 .mem-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.mem-unit { font-size: 13px; color: #888; }
+.mem-unit { font-size: 13px; color: var(--bp-label-tertiary); }
 .mem-hint { font-size: 11px; white-space: nowrap; }
-.mem-hint.saving { color: #e6a23c; }
-.mem-hint.ok { color: #52c41a; }
-.mem-hint.dirty { color: #e6a23c; }
-.mem-hint.tip { color: #bbb; }
+.mem-hint.saving { color: var(--bp-warning); }
+.mem-hint.ok { color: var(--bp-success); }
+.mem-hint.dirty { color: var(--bp-warning); }
+.mem-hint.tip { color: var(--bp-label-quaternary); }
 
 /* 容器设置保存区 */
 .ctn-config-actions {
   display: flex; align-items: center; gap: 12px;
   margin-top: 20px; padding-top: 18px;
-  border-top: 1px dashed #ececec;
+  border-top: 1px dashed var(--bp-separator);
 }
 
 /* 提示条 */
 .ctn-tip {
-  border: 1px solid #ececec; border-radius: 12px; padding: 14px 18px;
-  font-size: 13px; color: #888; background: #fafafa;
+  border: var(--bp-hairline); border-radius: 12px; padding: 14px 18px;
+  font-size: 13px; color: var(--bp-label-tertiary); background: var(--bp-bg-subtle);
 }
 
 /* 区块 */
 .block { display: flex; flex-direction: column; }
-.blk-title { font-size: 15px; font-weight: 700; margin: 0 0 4px; color: #1d1d1f; }
-.blk-title.danger { color: #d54941; }
-.blk-desc { font-size: 13px; color: #999; margin: 0 0 14px; }
-.blk-desc code { background: #f2f3f5; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #555; }
+.blk-title { font-size: 15px; font-weight: 700; margin: 0 0 4px; color: var(--bp-label); }
+.blk-title.danger { color: var(--bp-danger); }
+.blk-desc { font-size: 13px; color: var(--bp-label-tertiary); margin: 0 0 14px; }
+.blk-desc code { background: var(--bp-surface-fill); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--bp-label-secondary); }
 .btn-row { display: flex; gap: 12px; flex-wrap: wrap; }
 
 /* 创建快照 */
 .snap-create { padding-top: 4px; }
 .sc-row { display: flex; gap: 14px; align-items: center; }
 .sc-input { max-width: 360px; }
-.sc-btn { background: #1d1d1f; border-color: #1d1d1f; color: #fff; }
-.sc-btn:hover { background: #333; border-color: #333; }
+.sc-btn { background: var(--bp-label); border-color: var(--bp-label); color: var(--bp-label-on-accent); }
+.sc-btn:hover { opacity: 0.86; }
 .snap-create .blk-desc { margin-top: 10px; }
 
 /* 快照表格 */
 .snap-table { margin-top: 4px; }
-.snap-table :deep(.snap-name) { font-weight: 600; color: #1d1d1f; word-break: break-all; }
-.snap-table :deep(.snap-parent) { color: #555; word-break: break-all; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
-.snap-table :deep(.t-table th) { background: #fafafa; color: #888; font-weight: 600; }
+.snap-table :deep(.snap-name) { font-weight: 600; color: var(--bp-label); word-break: break-all; }
+.snap-table :deep(.snap-parent) { color: var(--bp-label-secondary); word-break: break-all; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
+.snap-table :deep(.t-table th) { background: var(--bp-bg-subtle); color: var(--bp-label-tertiary); font-weight: 600; }
 </style>

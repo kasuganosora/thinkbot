@@ -82,5 +82,5 @@ async function trigger() {
 
 <style scoped>
 .card { margin-bottom: 20px; }
-.tip { margin-left: 12px; color: #999; font-size: 13px; }
+.tip { margin-left: 12px; color: var(--bp-label-tertiary); font-size: 13px; }
 </style>

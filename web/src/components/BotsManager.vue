@@ -188,27 +188,27 @@ async function submit(ctx) {
   align-items: center;
   gap: 14px;
   padding: 18px 20px;
-  border: 1px solid #ececec;
+  border: none; box-shadow: var(--bp-shadow-sm);
   border-radius: 14px;
-  background: #fff;
+  background: var(--bp-surface);
   cursor: pointer;
-  transition: box-shadow 0.15s, border-color 0.15s;
+  transition: transform var(--bp-duration) var(--bp-ease-out), box-shadow var(--bp-duration) var(--bp-ease-out);
 }
 .bot-card:hover {
-  border-color: #d9d9d9;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+  border-color: transparent;
+  box-shadow: var(--bp-shadow-md);
 }
 .bc-avatar {
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: #f1f1f3;
+  background: var(--bp-surface-fill);
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  color: #666;
+  color: var(--bp-label-secondary);
   overflow: hidden;
 }
 .bc-avatar img { width: 100%; height: 100%; object-fit: cover; }
@@ -216,37 +216,37 @@ async function submit(ctx) {
 .bc-name {
   font-size: 15px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--bp-label);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.bc-time { font-size: 12px; color: #999; margin-top: 4px; }
+.bc-time { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 4px; }
 .bc-status {
   flex-shrink: 0;
   font-size: 12px;
   padding: 3px 10px;
   border-radius: 6px;
-  background: #f2f3f5;
-  color: #888;
+  background: var(--bp-surface-fill);
+  color: var(--bp-label-tertiary);
 }
 .bc-status.running {
-  background: #1d1d1f;
-  color: #fff;
+  background: var(--bp-label);
+  color: var(--bp-label-on-accent);
 }
 .bm-empty { margin-top: 60px; }
 
 /* 弹窗表单 */
 .bm-form { padding-top: 4px; }
-.lbl-opt { color: #aaa; font-weight: 400; margin-left: 4px; }
-.lbl-help { color: #bbb; margin-left: 4px; cursor: help; }
-.form-hint { font-size: 12px; color: #999; margin-top: 6px; }
+.lbl-opt { color: var(--bp-label-tertiary); font-weight: 400; margin-left: 4px; }
+.lbl-help { color: var(--bp-label-quaternary); margin-left: 4px; cursor: help; }
+.form-hint { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 6px; }
 .dlg-note {
   margin-top: 4px;
   padding: 12px 14px;
-  background: #f7f8fa;
+  background: var(--bp-surface-fill);
   border-radius: 8px;
   font-size: 13px;
-  color: #999;
+  color: var(--bp-label-tertiary);
 }
 </style>

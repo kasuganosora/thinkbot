@@ -379,7 +379,7 @@ function removeModel(m) {
 .prov-list {
   width: 220px;
   flex-shrink: 0;
-  border-right: 1px solid #ececec;
+  border-right: var(--bp-hairline);
   padding: 12px;
   overflow-y: auto;
   display: flex;
@@ -397,41 +397,41 @@ function removeModel(m) {
   border-radius: 10px;
   cursor: pointer;
   font-size: 14px;
-  color: #333;
+  color: var(--bp-label);
   text-align: left;
 }
-.prov-item:hover { background: #f3f3f5; }
-.prov-item.active { background: #fff; border-color: #d0d0d0; box-shadow: 0 1px 4px rgba(0,0,0,0.08); font-weight: 600; }
+.prov-item:hover { background: var(--bp-surface-fill-hover); }
+.prov-item.active { background: var(--bp-surface); border-color: transparent; box-shadow: var(--bp-shadow-sm); font-weight: 600; }
 .prov-avatar {
   width: 26px; height: 26px; flex-shrink: 0;
-  border-radius: 7px; background: #e8eaf0; color: #555;
+  border-radius: 7px; background: var(--bp-surface-fill); color: var(--bp-label-secondary);
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 600;
 }
 .prov-avatar.lg { width: 34px; height: 34px; font-size: 15px; }
 .prov-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.prov-dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
-.prov-dot.on { background: #00a870; }
+.prov-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bp-label-quaternary); flex-shrink: 0; }
+.prov-dot.on { background: var(--bp-success); }
 .prov-add {
-  margin-top: 6px; padding: 9px; border: 1px dashed #ccc; background: transparent;
-  border-radius: 10px; color: #666; cursor: pointer; font-size: 13px;
+  margin-top: 6px; padding: 9px; border: 1px dashed var(--bp-separator-opaque); background: transparent;
+  border-radius: 10px; color: var(--bp-label-secondary); cursor: pointer; font-size: 13px;
 }
-.prov-add:hover { border-color: #0052d9; color: #0052d9; }
+.prov-add:hover { border-color: var(--bp-accent); color: var(--bp-accent); }
 
 /* 详情 */
 .prov-detail { flex: 1; overflow-y: auto; padding: 24px 28px; }
-.prov-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: #999; }
+.prov-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--bp-label-tertiary); }
 .detail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .head-left { display: flex; align-items: center; gap: 12px; }
 .detail-title { font-size: 18px; font-weight: 600; margin: 0; }
 .head-right { display: flex; align-items: center; gap: 8px; }
-.enable-label { font-size: 13px; color: #666; }
+.enable-label { font-size: 13px; color: var(--bp-label-secondary); }
 
 .detail-form { margin-bottom: 28px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .field { margin-bottom: 16px; }
-.field label { display: block; font-size: 13px; color: #444; margin-bottom: 6px; font-weight: 500; }
-.field label.req::after { content: ' *'; color: #d63c3c; }
+.field label { display: block; font-size: 13px; color: var(--bp-label-secondary); margin-bottom: 6px; font-weight: 500; }
+.field label.req::after { content: ' *'; color: var(--bp-danger); }
 .form-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
 .actions-right { display: flex; gap: 8px; }
 
@@ -442,31 +442,31 @@ function removeModel(m) {
 
 .model-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .model-card {
-  border: 1px solid #ececec; border-radius: 12px; padding: 14px 16px; background: #fff;
+  border: none; box-shadow: var(--bp-shadow-sm); border-radius: 12px; padding: 14px 16px; background: var(--bp-surface);
   display: flex; flex-direction: column; gap: 14px; min-height: 96px; justify-content: space-between;
 }
 .model-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.model-name { font-size: 14px; font-weight: 600; color: #1d1d1f; }
-.cap-tag { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: #f0f1f3; color: #667085; }
+.model-name { font-size: 14px; font-weight: 600; color: var(--bp-label); }
+.cap-tag { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--bp-surface-fill); color: var(--bp-label-secondary); }
 .model-bottom { display: flex; align-items: center; gap: 8px; }
 .badge { font-size: 13px; }
-.ctx-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: rgba(0,168,112,0.12); color: #00a870; font-weight: 600; }
+.ctx-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: var(--bp-success-soft); color: var(--bp-success); font-weight: 600; }
 .model-card-ops { margin-left: auto; display: flex; gap: 10px; }
-.model-card-ops .op { color: #99a; cursor: pointer; font-size: 15px; }
-.model-card-ops .op:hover { color: #0052d9; }
-.model-empty { grid-column: 1 / -1; text-align: center; color: #999; padding: 30px 0; }
+.model-card-ops .op { color: var(--bp-label-tertiary); cursor: pointer; font-size: 15px; }
+.model-card-ops .op:hover { color: var(--bp-accent); }
+.model-empty { grid-column: 1 / -1; text-align: center; color: var(--bp-label-tertiary); padding: 30px 0; }
 
 /* 模型卡片上的采样参数标签 */
-.cfg-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: rgba(0,82,217,0.10); color: #0052d9; font-weight: 600; }
+.cfg-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: var(--bp-accent-soft); color: var(--bp-accent); font-weight: 600; }
 
 /* 官方推荐预设提示 */
 .preset-hint {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   margin-top: 4px; padding: 8px 12px;
-  background: rgba(255,153,0,0.08); border: 1px solid rgba(255,153,0,0.25);
-  border-radius: 8px; font-size: 12px; color: #8a5a00;
+  background: var(--bp-warning-soft); border: 1px solid var(--bp-warning-soft);
+  border-radius: 8px; font-size: 12px; color: var(--bp-warning);
 }
-.preset-hint .t-icon { color: #e37318; }
+.preset-hint .t-icon { color: var(--bp-warning); }
 .preset-hint t-link { margin-left: 2px; }
 
 .dlg-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
