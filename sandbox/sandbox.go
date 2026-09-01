@@ -268,8 +268,17 @@ const (
 	// hardTimeoutFactor 硬上限兜底 = 卡死阈值 × 该系数（默认 3 倍）。
 	// 硬上限不再写死为固定时长，而是随卡死阈值联动：StuckTimeout 越大，硬上限越长。
 	hardTimeoutFactor = 3
-	// watchdogTick 看门狗轮询间隔。
+	// watchdogTick 看门狗轮询间隔（上限）。
+	//
+	// 实际间隔按卡死阈值收紧为 stuck/2，但不超过此值——默认 stuck=5min 时
+	// 5s 精度已足够，没必要更频繁地唤醒。见 watchdogTickFor。
 	watchdogTick = 5 * time.Second
+	// minWatchdogTick 看门狗轮询间隔的下限。
+	//
+	// 间隔按 stuck/2 收紧后不得小于此值：调用方（LLM 工具入参 stuck_timeout）
+	// 可以把 stuck 传成 1s，再收紧到 500ms 以下只是空耗 CPU。
+	// 此时宁可牺牲判定精度——阈值小到这个量级本身就说明用法不合理。
+	minWatchdogTick = 100 * time.Millisecond
 	// heartbeatInterval 前端保活心跳间隔：命令「安静」（距上次真实输出已超过该时长）
 	// 时，向前端发一次「活着」信号。远小于前端卡死看门狗阈值（默认 3 分钟），
 	// 保证前端不会把「编译慢 / 长时间无输出但仍在跑」误报为「连接已中断」。
@@ -302,6 +311,45 @@ func resolveExecTimeouts(req ExecRequest, cfg Config) (stuck, hard time.Duration
 		hard = stuck * hardTimeoutFactor
 	}
 	return stuck, hard
+}
+
+// watchdogTickFor 按卡死阈值与硬上限共同推导看门狗的轮询间隔。
+//
+// 曾经固定用 watchdogTick(5s)，这有一个真实缺陷：**看门狗无法检测比轮询间隔
+// 更短的阈值**。而 stuck 来自 LLM 工具入参（`stuck_timeout`），只校验
+// `> 0`（sandbox/tools.go:232、:378），没有下限保护——模型传 1 就得到 1s 阈值
+// 配 5s 轮询，首次唤醒已在 5s 后，用户显式要的「1s 快速失败」完全失效，
+// 短阈值统统退化成约 5s 粒度。
+//
+// **两个阈值都在同一个 tick 循环里判定**（docker.go 的 stuckWatch）：
+// 卡死判定看 stuck，硬上限判定看 hard。因此间隔必须同时小于二者——
+// 只按 stuck 推导时，`stuck=30s, hard=1s` 这类组合（测试里就有）会让硬上限
+// 判定滞后到 5s，1s 的硬上限形同虚设。故取二者较小值。
+//
+// 取 min/2 保证在较窄的那个窗口内至少醒两次，既能按时判定，又留出一次调度
+// 抖动的余量。两端都收口：
+//   - 上限 watchdogTick：阈值很大时（默认 5min）没必要频繁唤醒
+//   - 下限 minWatchdogTick：避免阈值极小时每秒醒十次空耗 CPU
+//
+// 注：subagent 包有一份同名近似实现（那里的 stuck 语义是 LLM 流沉默时长）。
+// 两处刻意不共用——分属不同抽象层，各自的上下限取值依据也不同；
+// 为消除十几行重复而引入跨层依赖不值得。
+func watchdogTickFor(stuck, hard time.Duration) time.Duration {
+	// 取两个阈值中较窄的那个——间隔必须能同时满足二者的判定精度。
+	// 忽略非正值：0 表示该阈值未设置（由调用方回退为默认），不应参与收紧。
+	narrowest := stuck
+	if hard > 0 && (narrowest <= 0 || hard < narrowest) {
+		narrowest = hard
+	}
+
+	tick := watchdogTick
+	if half := narrowest / 2; narrowest > 0 && half < tick {
+		tick = half
+	}
+	if tick < minWatchdogTick {
+		tick = minWatchdogTick
+	}
+	return tick
 }
 
 // ============================================================================

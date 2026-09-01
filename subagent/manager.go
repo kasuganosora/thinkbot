@@ -226,8 +226,17 @@ const (
 	// 持续产出片段却被 9m 墙钟硬上限强制终止）。需要更激进的绝对兜底可调小此倍数，
 	// 但务必保证 > 正常单节点最大耗时。
 	delegateHardTimeoutFactor = 10
-	// delegateWatchdogTick 看门狗轮询间隔。
+	// delegateWatchdogTick 看门狗轮询间隔（上限）。
+	//
+	// 实际间隔会按卡死阈值收紧为 stuck/2，但不超过此值——默认 stuck=180s 时
+	// 5s 精度（约 2.8% 误差）已足够，没必要更频繁地唤醒。
 	delegateWatchdogTick = 5 * time.Second
+	// delegateMinWatchdogTick 看门狗轮询间隔的下限。
+	//
+	// 间隔按 stuck/2 收紧后不得小于此值：stuck 配得极小时（如 200ms），
+	// 收紧到 100ms 会让看门狗每秒唤醒 10 次，纯属空耗 CPU。
+	// 此时宁可牺牲判定精度——stuck 小到这个量级本身就说明配置不合理。
+	delegateMinWatchdogTick = 100 * time.Millisecond
 	// delegateMaxStartupGrace 首 token 宽限期上限：尚未收到任何 token 时，
 	// 启动后不足该时长不判卡死，容忍 LLM「思考」阶段（读长输入 + 推理）无输出。
 	// 实际宽限期取 stuckTimeout/2，并受此上限约束。
@@ -263,6 +272,41 @@ func computeDelegateManyBounds(stuckTimeout, effectiveTimeout time.Duration) (st
 		stuck = hard
 	}
 	return stuck, hard
+}
+
+// watchdogTickFor 按卡死阈值与硬上限共同推导看门狗的轮询间隔。
+//
+// 曾经固定用 delegateWatchdogTick(5s)，这有一个真实缺陷：**看门狗无法检测比
+// 轮询间隔更短的阈值**。stuck=2s 时每 5s 才醒一次，等它醒来流可能早已自行
+// 结束，判定形同虚设（TestDelegateMany_ExplicitStuckStillKills 因此长期
+// flaky——它设 stuck=2s，能否判定取决于 tick 与流结束的竞速）。
+//
+// **两个阈值都在同一个 tick 循环里判定**（streamWithWatchdog）：
+// 卡死判定看 stuck，硬上限判定看 hard。因此间隔必须同时小于二者。
+// 通常 hard = stuck × 10 更宽松，但 computeDelegateManyBounds 会把 hard
+// 收口到 effectiveTimeout，届时 hard 可能反而比 stuck 更窄。故取二者较小值。
+//
+// 取 min/2 保证在较窄的那个窗口内至少醒两次，既能按时判定，又留出一次调度
+// 抖动的余量。两端都收口：
+//   - 上限 delegateWatchdogTick：阈值很大时（默认 180s）没必要频繁唤醒
+//   - 下限 delegateMinWatchdogTick：阈值配得极小时（如 200ms）避免每秒醒
+//     十次空耗 CPU。此时宁可牺牲判定精度——小到该量级本身就是配置问题
+func watchdogTickFor(stuck, hard time.Duration) time.Duration {
+	// 取两个阈值中较窄的那个——间隔必须能同时满足二者的判定精度。
+	// 忽略非正值：0 表示该阈值未设置（由调用方回退为默认），不应参与收紧。
+	narrowest := stuck
+	if hard > 0 && (narrowest <= 0 || hard < narrowest) {
+		narrowest = hard
+	}
+
+	tick := delegateWatchdogTick
+	if half := narrowest / 2; narrowest > 0 && half < tick {
+		tick = half
+	}
+	if tick < delegateMinWatchdogTick {
+		tick = delegateMinWatchdogTick
+	}
+	return tick
 }
 
 // Delegate 创建一个临时 SubAgent，执行任务后自动关闭（一次性委托模式）。
@@ -376,7 +420,11 @@ func (m *SubAgentManager) streamWithWatchdog(ctx context.Context, sa *SubAgent, 
 	watchdogDone := make(chan struct{})
 	go func() {
 		defer close(watchdogDone)
-		ticker := time.NewTicker(delegateWatchdogTick)
+
+		// 轮询间隔按两个阈值中较窄的那个收紧（见 watchdogTickFor）：
+		// 固定 5s 会让比 5s 更短的阈值根本检测不到。下面卡死与硬上限
+		// 两个判定都受此间隔支配，故二者都要参与推导。
+		ticker := time.NewTicker(watchdogTickFor(stuck, hard))
 		defer ticker.Stop()
 		grace := stuck / 2
 		if grace > delegateMaxStartupGrace {

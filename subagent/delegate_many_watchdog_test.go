@@ -37,6 +37,63 @@ func TestComputeDelegateManyBounds(t *testing.T) {
 	}
 }
 
+// TestWatchdogTickFor 锁定看门狗轮询间隔的推导规则。
+//
+// 这是**防回归测试**：曾经固定用 delegateWatchdogTick(5s)，导致看门狗无法检测
+// 比 5s 更短的卡死阈值——下面的 TestDelegateMany_ExplicitStuckStillKills 设
+// stuck=2s，能否判定取决于 tick 与流结束的竞速，因此长期 flaky。
+//
+// 硬上限也在同一个 tick 循环里判定，故间隔必须同时小于二者。
+// 若有人把间隔改回固定值、或只按其中一个阈值推导，本测试会失败。
+func TestWatchdogTickFor(t *testing.T) {
+	cases := []struct {
+		name        string
+		stuck, hard time.Duration
+		want        time.Duration
+	}{
+		// 阈值较大：用上限，没必要频繁唤醒
+		{"默认 180s → 5s 上限", defaultDelegateStuckTimeout,
+			defaultDelegateStuckTimeout * delegateHardTimeoutFactor, delegateWatchdogTick},
+		{"60s → 5s 上限", 60 * time.Second, 600 * time.Second, delegateWatchdogTick},
+		{"正好 10s → 5s（stuck/2 = 上限）", 10 * time.Second, 100 * time.Second, delegateWatchdogTick},
+
+		// stuck 较窄：收紧到 stuck/2，保证一个窗口内至少醒两次
+		{"stuck 2s → 1s", 2 * time.Second, 20 * time.Second, time.Second},
+		{"stuck 1s → 500ms", time.Second, 10 * time.Second, 500 * time.Millisecond},
+		{"stuck 400ms → 200ms", 400 * time.Millisecond, 4 * time.Second, 200 * time.Millisecond},
+
+		// hard 比 stuck 更窄：computeDelegateManyBounds 把 hard 收口到
+		// effectiveTimeout 时会出现，此时必须按 hard 收紧
+		{"hard 2s 小于 stuck 60s → 按 hard 收紧", 60 * time.Second, 2 * time.Second, time.Second},
+
+		// 阈值极小：收口到下限，避免空耗 CPU
+		{"200ms → 100ms 下限", 200 * time.Millisecond, 2 * time.Second, delegateMinWatchdogTick},
+		{"50ms → 100ms 下限", 50 * time.Millisecond, 500 * time.Millisecond, delegateMinWatchdogTick},
+
+		// 未设置（0）的阈值不参与收紧
+		{"两者皆 0 → 5s 上限", 0, 0, delegateWatchdogTick},
+		{"stuck=0 时只看 hard", 0, 2 * time.Second, time.Second},
+		{"hard=0 时只看 stuck", 2 * time.Second, 0, time.Second},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := watchdogTickFor(c.stuck, c.hard)
+			if got != c.want {
+				t.Errorf("watchdogTickFor(stuck=%s, hard=%s): got %s, want %s",
+					c.stuck, c.hard, got, c.want)
+			}
+			// 核心不变式：间隔必须严格小于每个已设置的阈值，
+			// 否则可能整个判定窗口都没醒过
+			for name, threshold := range map[string]time.Duration{"stuck": c.stuck, "hard": c.hard} {
+				if threshold > delegateMinWatchdogTick*2 && got >= threshold {
+					t.Errorf("tick %s must be < %s %s, otherwise detection can be missed",
+						got, name, threshold)
+				}
+			}
+		})
+	}
+}
+
 // TestDelegateMany_NoFalseStuckKill 端到端回归：DelegateMany 不应把「沉默较长时间
 // （模拟单条长工具调用，期间编排循环不吐流片段）」的子 Agent 误判卡死。
 //

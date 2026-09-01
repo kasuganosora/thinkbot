@@ -413,7 +413,10 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 	}
 	stuckWatchDone := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(watchdogTick)
+		// 轮询间隔按两个阈值中较窄的那个收紧（见 watchdogTickFor）：
+		// 固定 5s 会让比 5s 更短的阈值根本检测不到，而 stuck 可由工具入参
+		// 传成 1s，hard 也可能远小于 stuck。下面两个判定都受此间隔支配。
+		ticker := time.NewTicker(watchdogTickFor(stuckTimeout, hardTimeout))
 		defer ticker.Stop()
 		for {
 			select {
