@@ -9,7 +9,7 @@
         :class="{ active: cur && cur.id === p.id }"
         @click="select(p)"
       >
-        <div class="pi-icon" :style="{ background: (metaOf(p.type)?.color || '#ccc') + '22', color: metaOf(p.type)?.color || '#888' }">{{ iconText(metaOf(p.type), p.name) }}</div>
+        <div class="pi-icon" :style="iconTint(metaOf(p.type)?.color)">{{ iconText(metaOf(p.type), p.name) }}</div>
         <div class="pi-main">
           <div class="pi-name">{{ p.name }}</div>
           <div class="pi-sub">{{ p.configured ? '已配置' : '未配置' }}</div>
@@ -23,7 +23,7 @@
     <!-- 右：详情 -->
     <div v-if="cur" class="plat-detail">
       <div class="pd-head">
-        <div class="pd-avatar" :style="{ background: (curMeta?.color || '#f0f0f0') + '22', color: curMeta?.color || '#666' }">{{ iconText(curMeta, cur.name) }}</div>
+        <div class="pd-avatar" :style="iconTint(curMeta?.color)">{{ iconText(curMeta, cur.name) }}</div>
         <div class="pd-title">
           <div class="pd-name">{{ cur.name }}</div>
           <div class="pd-id">平台标识：{{ cur.type }}</div>
@@ -141,7 +141,7 @@
           @click="addType = t.type"
           @dblclick="confirmAdd"
         >
-          <div class="ai-icon" :style="{ background: (t.color || '#ccc') + '22', color: t.color || '#888' }">{{ iconText(t, t.name) }}</div>
+          <div class="ai-icon" :style="iconTint(t.color)">{{ iconText(t, t.name) }}</div>
           <div class="ai-body">
             <span class="ai-name">{{ t.name }}</span>
             <span v-if="t.description" class="ai-desc">{{ t.description }}</span>
@@ -212,6 +212,10 @@ function iconText(meta, fallbackName) {
   const chars = Array.from(String(raw).trim())
   if (chars.length <= 1) return raw || '?'
   return chars[0].toUpperCase()
+}
+function iconTint(color) {
+  if (color) return { background: color + '22', color }
+  return { background: 'var(--bp-surface-fill)', color: 'var(--bp-label-tertiary)' }
 }
 
 // 兼容后端 "boolean" 与 mock "switch" 两种开关类型名
@@ -294,27 +298,31 @@ async function confirmAdd() {
 /* 左列表 */
 .plat-list {
   width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;
-  border-right: 1px solid #f0f0f0; padding-right: 16px;
+  border-right: var(--bp-hairline); padding-right: 16px;
 }
 .plat-item {
   display: flex; align-items: center; gap: 10px; padding: 12px 14px;
-  border: 1px solid #ececec; border-radius: 10px; cursor: pointer; background: #fff;
+  border: var(--bp-hairline); border-radius: 10px; cursor: pointer; background: var(--bp-surface);
+  transition: background var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out), box-shadow var(--bp-duration) var(--bp-ease-out);
 }
-.plat-item.active { border-color: #d9d9d9; box-shadow: 0 2px 8px rgba(0,0,0,.05); background: #fafafa; }
+.plat-item:active { transform: scale(var(--bp-press-scale)); }
+.plat-item.active { border-color: var(--bp-separator); box-shadow: var(--bp-shadow-md); background: var(--bp-bg-subtle); }
 .pi-icon {
   width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   font-size: 16px; font-weight: 700; line-height: 1; overflow: hidden; text-transform: uppercase;
 }
 .pi-main { flex: 1; min-width: 0; }
-.pi-name { font-size: 14px; font-weight: 600; color: #1d1d1f; }
-.pi-sub { font-size: 12px; color: #999; margin-top: 2px; }
+.pi-name { font-size: 14px; font-weight: 600; color: var(--bp-label); }
+.pi-sub { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 2px; }
 .plat-add {
   display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 11px; border: 1px dashed #d0d0d0; border-radius: 10px; background: #fff;
-  color: #555; font-size: 14px; cursor: pointer;
+  padding: 11px; border: 1px dashed var(--bp-separator); border-radius: 10px; background: var(--bp-surface);
+  color: var(--bp-label-secondary); font-size: 14px; cursor: pointer;
+  transition: border-color var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out), background var(--bp-duration) var(--bp-ease-out);
 }
-.plat-add:hover { border-color: #999; }
+.plat-add:hover { border-color: var(--bp-label-tertiary); }
+.plat-add:active { transform: scale(var(--bp-press-scale)); }
 /* 右详情 */
 .plat-detail { flex: 1; min-width: 0; overflow-y: auto; padding-right: 4px; }
 .pd-head { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
@@ -325,56 +333,57 @@ async function confirmAdd() {
 }
 .pd-title { flex: 1; }
 .pd-name { font-size: 16px; font-weight: 600; }
-.pd-id { font-size: 12px; color: #999; margin-top: 2px; }
-.sec-title { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: #1d1d1f; }
+.pd-id { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 2px; }
+.sec-title { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: var(--bp-label); }
 .cred-form { display: flex; flex-direction: column; gap: 18px; margin-bottom: 28px; }
 .cred-item label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-.cred-item label .opt { font-weight: 400; color: #999; font-size: 12px; margin-left: 4px; }
-.cred-help { font-size: 12px; color: #999; margin-bottom: 8px; }
+.cred-item label .opt { font-weight: 400; color: var(--bp-label-tertiary); font-size: 12px; margin-left: 4px; }
+.cred-help { font-size: 12px; color: var(--bp-label-tertiary); margin-bottom: 8px; }
 /* 开关型字段：标签左、开关右，垂直居中 */
 .cred-item-inline { padding: 4px 0; }
 .cred-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .cred-switch-label { flex: 1; min-width: 0; }
 .cred-switch-label label { margin-bottom: 2px; }
 .cred-switch-label .cred-help { margin-bottom: 0; }
-.pd-footer { margin-top: 20px; padding-top: 18px; border-top: 1px solid #f0f0f0; display: flex; justify-content: flex-end; gap: 12px; align-items: center; }
+.pd-footer { margin-top: 20px; padding-top: 18px; border-top: var(--bp-hairline); display: flex; justify-content: flex-end; gap: 12px; align-items: center; }
 .pd-del { margin-right: auto; }
 .plat-empty { margin: 60px auto; }
 /* 聊天节奏（内嵌于平台详情） */
 .rhythm-box { margin-top: 8px; }
-.rh-note { font-size: 13px; color: #666; background: #f6f8fa; border: 1px solid #ececec; border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; line-height: 1.6; }
+.rh-note { font-size: 13px; color: var(--bp-label-secondary); background: var(--bp-bg-subtle); border: var(--bp-hairline); border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; line-height: 1.6; }
 .rh-top { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 22px; }
 .rh-top-title { font-size: 15px; font-weight: 600; }
-.rh-top-desc { font-size: 13px; color: #888; margin-top: 4px; }
-.rh-card { border: 1px solid #ececec; border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; background: #fff; }
+.rh-top-desc { font-size: 13px; color: var(--bp-label-tertiary); margin-top: 4px; }
+.rh-card { border: none; box-shadow: var(--bp-shadow-sm); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; background: var(--bp-surface); }
 .rh-card-title { font-size: 14px; font-weight: 600; }
-.rh-card-desc { font-size: 12px; color: #999; margin-top: 4px; }
+.rh-card-desc { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 4px; }
 .rh-row { display: flex; align-items: flex-start; justify-content: space-between; }
 .rh-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 14px; }
-.rh-field label { display: block; font-size: 13px; color: #555; margin-bottom: 6px; }
+.rh-field label { display: block; font-size: 13px; color: var(--bp-label-secondary); margin-bottom: 6px; }
 .rh-slider { display: flex; align-items: center; gap: 16px; margin-top: 16px; }
-.rh-slider-val { font-size: 14px; color: #333; width: 42px; text-align: right; }
+.rh-slider-val { font-size: 14px; color: var(--bp-label); width: 42px; text-align: right; }
 /* 添加平台弹窗 */
 .add-list {
   display: flex; flex-direction: column; gap: 2px;
   max-height: 420px; overflow-y: auto;
 }
 .add-list::-webkit-scrollbar { width: 6px; }
-.add-list::-webkit-scrollbar-thumb { background: #e0e0e0; border-radius: 3px; }
+.add-list::-webkit-scrollbar-thumb { background: var(--bp-separator); border-radius: 3px; }
 .add-item {
   display: flex; align-items: center; gap: 12px; padding: 8px 12px;
-  border-radius: 10px; cursor: pointer; transition: background .15s;
+  border-radius: 10px; cursor: pointer; transition: background var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
 }
-.add-item:hover { background: #f7f7f8; }
-.add-item.active { background: #f0f1f3; }
+.add-item:hover { background: var(--bp-bg-subtle); }
+.add-item:active { transform: scale(var(--bp-press-scale)); }
+.add-item.active { background: var(--bp-surface-fill); }
 .ai-icon {
   width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   font-size: 17px; font-weight: 700; line-height: 1; overflow: hidden; text-transform: uppercase;
 }
-.ai-name { font-size: 15px; color: #1d1d1f; }
+.ai-name { font-size: 15px; color: var(--bp-label); }
 .ai-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.ai-desc { font-size: 12px; color: #999; line-height: 1.3; }
+.ai-desc { font-size: 12px; color: var(--bp-label-tertiary); line-height: 1.3; }
 </style>
 
 <!-- 弹窗渲染在 body 下，scoped 命中不到，用全局样式 -->

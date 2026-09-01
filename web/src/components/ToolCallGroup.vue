@@ -93,11 +93,12 @@ function toggle() {
 
 <style scoped>
 .tool-call-group {
-  border: 1px solid var(--td-component-border, #e0e0e0);
+  border: none;
   border-radius: 8px;
   margin: 4px 0;
   overflow: hidden;
-  background: var(--td-bg-color-container, #fff);
+  background: var(--bp-surface);
+  box-shadow: var(--bp-shadow-sm);
 }
 .tcg-head {
   display: flex;
@@ -106,38 +107,40 @@ function toggle() {
   padding: 8px 10px;
   cursor: pointer;
   user-select: none;
-  background: var(--td-bg-color-container-hover, #f5f5f5);
+  background: var(--bp-surface-fill-hover);
+  transition: background var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
 }
+.tcg-head:active { transform: scale(var(--bp-press-scale)); }
 .tcg-icon { display: inline-flex; }
 .tcg-title { font-weight: 600; }
 .tcg-count {
-  color: var(--td-text-color-placeholder, #999);
+  color: var(--bp-label-tertiary);
   font-weight: 400;
   margin-left: 2px;
 }
 .tcg-meta {
   flex: 1;
   text-align: right;
-  color: var(--td-text-color-placeholder, #999);
+  color: var(--bp-label-tertiary);
   font-size: 12px;
 }
-.tcg-chevron { color: var(--td-text-color-placeholder, #999); }
+.tcg-chevron { color: var(--bp-label-tertiary); }
 
-.tcg-running .tcg-icon { color: var(--td-brand-color, #0052d9); }
-.tcg-success .tcg-icon { color: var(--td-success-color, #2ba471); }
-.tcg-error .tcg-icon { color: var(--td-error-color, #d54941); }
-.tcg-killed .tcg-icon { color: var(--td-warning-color, #e37318); }
+.tcg-running .tcg-icon { color: var(--bp-accent); }
+.tcg-success .tcg-icon { color: var(--bp-success); }
+.tcg-error .tcg-icon { color: var(--bp-danger); }
+.tcg-killed .tcg-icon { color: var(--bp-warning); }
 
 .tcg-body { padding: 4px 8px; }
 .tcg-body .tc-group-item { margin: 4px 0 4px 6px; }
 .tcg-body .tc-group-item :deep(.tool-call) {
-  border-left: 2px solid var(--td-component-border, #e0e0e0);
+  border-left: 2px solid var(--bp-separator);
   border-radius: 0 6px 6px 0;
 }
 .tcg-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid var(--td-brand-color, #0052d9);
+  border: 2px solid var(--bp-accent);
   border-top-color: transparent;
   border-radius: 50%;
   display: inline-block;
