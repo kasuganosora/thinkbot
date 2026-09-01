@@ -156,6 +156,30 @@ Execution: (n1∥n2∥n3∥n4) → n5
   "work → review → fix → review" loop. It only takes effect when goal mode is enabled for
   the whole task. If you leave it empty, the system automatically wires the final node's
   feedback to its direct upstream work nodes.
+- toolProfile: [optional] the workspace-tool tier this node needs — one of
+  "readonly" | "analysis" | "edit" | "full". See the section below.
+
+## Tool Profile (least privilege)
+
+Each node runs in a SubAgent that **by default receives the full workspace toolset**,
+including shell execution and file deletion. Declare only what the task actually needs:
+
+| profile    | grants                                                        |
+|------------|---------------------------------------------------------------|
+| readonly   | list dir, read file, search content                            |
+| analysis   | readonly + run commands (tests / lint / build), no writes      |
+| edit       | analysis + create file, replace in file                        |
+| full       | everything, including delete and move (use only when required) |
+
+Rules:
+
+- **Default to the narrowest tier that still lets the node finish.**
+- Analysis / review / reporting tasks that only read code → "readonly".
+- Tasks that must run tests, lint, or builds but must not modify files → "analysis".
+- Tasks that create or modify files → "edit".
+- Use "full" **only** when the task genuinely needs to delete or move files.
+- If you omit this field, the node gets "full" (current behavior). Declaring a narrower
+  tier is always preferred when the task allows it.
 
 ## Output Format
 
@@ -171,7 +195,8 @@ You MUST return the DAG wrapped in <result> tags, with exactly this JSON structu
       "review": false,
       "maxRetries": 2,
       "maxIterations": 3,
-      "feedback": []
+      "feedback": [],
+      "toolProfile": "edit"
     }
   ]
 }
@@ -212,20 +237,33 @@ const analyzerResultTagRedoHint = `上一轮你的输出缺少 <result>...</resu
 { "nodes": [ ... ] }
 </result>`
 
+// dagNodeSpec 是分析器输出的单个节点规范。
+//
+// 刻意定义为**具名类型**而非匿名结构体：截断恢复路径（mapsToDagNodes）构造的是
+// 同一批字段，此前那里用匿名结构体重复了一份字段列表（返回类型、make、循环内共三处）。
+// 加一个字段就要同步改四处，漏一处就是编译错误或静默丢字段——本次加 toolProfile
+// 即踩中。统一成具名类型后，字段只有一处定义。
+type dagNodeSpec struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Task         string   `json:"task"`
+	SystemPrompt string   `json:"systemPrompt"`
+	Dependencies []string `json:"dependencies"`
+	Review       bool     `json:"review"`
+	ReviewPrompt string   `json:"reviewPrompt"`
+	MaxRetries   int      `json:"maxRetries"`
+	// MaxIterations Review 迭代上限。
+	MaxIterations int `json:"maxIterations"`
+	Feedback      []string `json:"feedback"`
+	// ToolProfile 工具档位（readonly / analysis / edit / full）。
+	// 空值合法，表示 full（不过滤）——存量数据与未声明场景都依赖这个默认。
+	// 非空但非法的取值在下方 convert 阶段直接报错，不静默降级。
+	ToolProfile string `json:"toolProfile"`
+}
+
 // dagSpec 是分析器输出的 DAG 规范（从 LLM JSON 解析）。
 type dagSpec struct {
-	Nodes []struct {
-		ID            string   `json:"id"`
-		Name          string   `json:"name"`
-		Task          string   `json:"task"`
-		SystemPrompt  string   `json:"systemPrompt"`
-		Dependencies  []string `json:"dependencies"`
-		Review        bool     `json:"review"`
-		ReviewPrompt  string   `json:"reviewPrompt"`
-		MaxRetries    int      `json:"maxRetries"`
-		MaxIterations int      `json:"maxIterations"`
-		Feedback      []string `json:"feedback"`
-	} `json:"nodes"`
+	Nodes []dagNodeSpec `json:"nodes"`
 }
 
 // Analyze 分析需求并生成 DAG 节点列表。
@@ -401,6 +439,24 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 			} else if maxIter > maxNodeIterations {
 				maxIter = maxNodeIterations
 			}
+
+			// 档位解析：节点未声明时回退到引擎配置的默认档位（配置为空 → full，
+			// 向后兼容）；非空非法值 → **报错**。
+			//
+			// 这里刻意不静默降级：若把 "radonly" 这类拼写错误静默当作 full，
+			// 作者会以为自己声明了只读限制而实际没有——这比不声明更危险。
+			// 借鉴 gh-aw CTR-023 的精神：拒绝提供虚假安全感的配置。
+			//
+			// 优先级：节点显式声明 > 引擎配置默认值 > full。
+			rawProfile := sn.ToolProfile
+			if rawProfile == "" {
+				rawProfile = a.ec.DefaultToolProfile
+			}
+			profile, perr := ParseToolProfile(rawProfile)
+			if perr != nil {
+				return nil, errs.Wrapf(perr, "node %q has invalid toolProfile", sn.ID)
+			}
+
 			nodes = append(nodes, &DAGNode{
 				ID:            sn.ID,
 				Name:          sn.Name,
@@ -412,6 +468,7 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 				MaxRetries:    maxRetries,
 				MaxIterations: maxIter,
 				Feedback:      sn.Feedback,
+				ToolProfile:   profile,
 			})
 		}
 
@@ -751,43 +808,10 @@ func coalesceStringSlice(m map[string]any, key string) []string {
 
 // mapsToDagNodes 将 []map[string]any 转换为 dagSpec.Nodes 的匿名结构体切片。
 // 用于截断恢复场景：从 LLM 截断输出中提取的完整对象需要映射到强类型节点。
-func mapsToDagNodes(objs []map[string]any) []struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Task          string   `json:"task"`
-	SystemPrompt  string   `json:"systemPrompt"`
-	Dependencies  []string `json:"dependencies"`
-	Review        bool     `json:"review"`
-	ReviewPrompt  string   `json:"reviewPrompt"`
-	MaxRetries    int      `json:"maxRetries"`
-	MaxIterations int      `json:"maxIterations"`
-	Feedback      []string `json:"feedback"`
-} {
-	nodes := make([]struct {
-		ID            string   `json:"id"`
-		Name          string   `json:"name"`
-		Task          string   `json:"task"`
-		SystemPrompt  string   `json:"systemPrompt"`
-		Dependencies  []string `json:"dependencies"`
-		Review        bool     `json:"review"`
-		ReviewPrompt  string   `json:"reviewPrompt"`
-		MaxRetries    int      `json:"maxRetries"`
-		MaxIterations int      `json:"maxIterations"`
-		Feedback      []string `json:"feedback"`
-	}, 0, len(objs))
+func mapsToDagNodes(objs []map[string]any) []dagNodeSpec {
+	nodes := make([]dagNodeSpec, 0, len(objs))
 	for _, obj := range objs {
-		node := struct {
-			ID            string   `json:"id"`
-			Name          string   `json:"name"`
-			Task          string   `json:"task"`
-			SystemPrompt  string   `json:"systemPrompt"`
-			Dependencies  []string `json:"dependencies"`
-			Review        bool     `json:"review"`
-			ReviewPrompt  string   `json:"reviewPrompt"`
-			MaxRetries    int      `json:"maxRetries"`
-			MaxIterations int      `json:"maxIterations"`
-			Feedback      []string `json:"feedback"`
-		}{
+		node := dagNodeSpec{
 			ID:           coalesceString(obj, "id"),
 			Name:         coalesceString(obj, "name"),
 			Task:         coalesceString(obj, "task"),
@@ -795,6 +819,7 @@ func mapsToDagNodes(objs []map[string]any) []struct {
 			ReviewPrompt: coalesceString(obj, "reviewPrompt"),
 			Dependencies: coalesceStringSlice(obj, "dependencies"),
 			Feedback:     coalesceStringSlice(obj, "feedback"),
+			ToolProfile:  coalesceString(obj, "toolProfile"),
 		}
 		if v, ok := obj["review"].(bool); ok {
 			node.Review = v

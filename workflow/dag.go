@@ -448,6 +448,17 @@ func (wf *Workflow) ReplaceNodeWithSubgraph(oldID string, sub []*DAGNode) error 
 		rn.Error = ""
 		rn.RetryCount = 0
 		rn.IterationCount = 0
+
+		// 工具档位**强制继承原节点**，不采用子图自带的值。
+		//
+		// RefineNode 的输出格式（heal.go:165）不含 toolProfile 字段，
+		// 浅拷贝后该字段为零值（空串）。而空档位的语义是 "full"（不过滤，
+		// 向后兼容所需）——于是自愈一趟反而把档位从 readonly 放宽成 full，
+		// 属于安全倒退：一次失败修复让节点拿到了它原本不该有的 exec/删除能力。
+		//
+		// 子图是同一任务拆细而来，权限面理应一致，不能被自愈放大。
+		rn.ToolProfile = old.ToolProfile
+
 		rn.Dependencies = make([]string, len(sn.Dependencies))
 		for j, dep := range sn.Dependencies {
 			switch dep {

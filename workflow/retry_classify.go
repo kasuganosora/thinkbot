@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"errors"
 	"strings"
 )
 
@@ -74,6 +75,28 @@ func isNonRetryable(err error) bool {
 	}
 	// 额度耗尽已由专用判定覆盖（其判定更严格，仅限 429/403 + 明确额度特征）。
 	if isQuotaExhausted(err) {
+		return true
+	}
+	// 工具缺失是**环境事实**而非随机故障：只要节点档位不变，重跑多少次
+	// 都拿不到工具。与额度耗尽同理，走快速失败，别把预算烧在注定失败的重试上。
+	//
+	// 用 errors.Is 而非文本匹配——这是类型化的哨兵错误，文本匹配会把
+	// 恰好包含同字样式的无关错误一起吞掉。
+	//
+	// ⚠️ 关于生效范围（2026-09-01 核查确认）：本函数只被 retry.Do 的
+	// ShouldRetry 调用，而 retry.Do 的执行体**只包裹 Execute /
+	// ExecuteWithFeedback**，不包含 reviewLoop（见 scheduler.go 的 runNode）。
+	// 因此当前 errMissingTool 实际由 reviewLoop 产生、也不会进入重试——
+	// 「不重试」是靠它压根不在重试范围内达成的，不是靠本分支。
+	//
+	// 保留本分支的理由：一旦执行阶段自身也能产出这类错误（例如 subagent
+	// 在编排中检测到工具缺失），或 reviewLoop 日后被移进 retry.Do，
+	// 这里就是唯一能拦住无效重试的地方。删掉它会留下一个静默的退化路径。
+	if errors.Is(err, errMissingTool) {
+		return true
+	}
+	// 上游数据缺失：问题在上游，重跑本节点拿不到数据。
+	if errors.Is(err, errMissingData) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

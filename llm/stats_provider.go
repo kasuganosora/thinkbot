@@ -54,6 +54,71 @@ func statsFeatureFromContext(ctx context.Context) string {
 }
 
 // ============================================================================
+// 工作流维度（workflow / node）
+//
+// 与 statsFeatureKey 同构，但**不参与 UsageDaily 的聚合维度**——
+// 那条聚合链按 (bot, model, feature, channel, date) 归并，加入工作流维度
+// 会把日聚合表撑成明细表（每条工作流每节点每天一行）。
+//
+// 这里的取值只用于**旁路写入逐条明细表**（stats.WorkflowUsage），
+// 让「一条工作流花在哪、哪个节点最贵」可回答，同时不污染日聚合语义。
+// ============================================================================
+
+type statsWorkflowIDKey struct{}
+type statsNodeIDKey struct{}
+
+// WithStatsWorkflow 标记本次 LLM 调用属于哪条工作流的哪个节点。
+//
+// 与 WithStatsFeature 不同，本函数**不清除** WithStatsSkip 标志：
+// 它的职责只是给已决定要记录的调用补充归因维度，
+// 是否记录仍由 skip / feature 那一套决定。
+func WithStatsWorkflow(ctx context.Context, workflowID, nodeID string) context.Context {
+	ctx = context.WithValue(ctx, statsWorkflowIDKey{}, workflowID)
+	return context.WithValue(ctx, statsNodeIDKey{}, nodeID)
+}
+
+func statsWorkflowFromContext(ctx context.Context) (workflowID, nodeID string) {
+	wf, _ := ctx.Value(statsWorkflowIDKey{}).(string)
+	n, _ := ctx.Value(statsNodeIDKey{}).(string)
+	return wf, n
+}
+
+// ============================================================================
+// 工作区写操作记录
+//
+// 用途：并发写冲突检测。工作流默认并行 3 个节点、共享同一个 bot 工作区、
+// 无任何文件锁。若不记录谁写了什么，两个节点覆盖同一文件时毫无痕迹。
+//
+// 接口定义在 llm 包（两个使用方都依赖它）：
+//   - sandbox 的写类工具：执行时上报路径
+//   - workflow 引擎：注入 recorder，事后读取并检测冲突
+//
+// 刻意**不回传执行结果**——工具只上报「我写了哪里」，是否冲突由引擎判定，
+// 工具不关心、也不该关心调度语义。
+// ============================================================================
+
+// PathRecorder 记录工作区写操作的发生。
+type PathRecorder interface {
+	// RecordWrite 上报一次写操作。op 为操作类型（write/replace/delete/move）。
+	// 实现必须线程安全：并行节点会并发调用。
+	RecordWrite(path string, op string)
+}
+
+type pathRecorderKey struct{}
+
+// WithPathRecorder 把写操作记录器放进 ctx。
+func WithPathRecorder(ctx context.Context, rec PathRecorder) context.Context {
+	return context.WithValue(ctx, pathRecorderKey{}, rec)
+}
+
+// PathRecorderFromContext 取出写操作记录器，不存在时返回 nil。
+// 调用方必须判空——非工作流路径不会注入。
+func PathRecorderFromContext(ctx context.Context) PathRecorder {
+	rec, _ := ctx.Value(pathRecorderKey{}).(PathRecorder)
+	return rec
+}
+
+// ============================================================================
 // StatsRecordingProvider
 // ============================================================================
 
@@ -185,14 +250,19 @@ func (p *StatsRecordingProvider) record(ctx context.Context, params GeneratePara
 	for _, step := range result.Steps {
 		toolCalls += len(step.ToolCalls)
 	}
+	// 工作流维度：非 workflow 路径两者均为空，不影响既有统计。
+	// 注意它们**不进 UsageDaily 的聚合维度**，仅供旁路明细写入。
+	workflowID, nodeID := statsWorkflowFromContext(ctx)
 	p.recorder.RecordUsage(ctx, UsageMetric{
-		BotID:     p.botID,
-		At:        time.Now(),
-		Model:     modelID,
-		Feature:   feature,
-		Usage:     result.Usage,
-		ToolCalls: toolCalls,
-		Steps:     len(result.Steps),
+		BotID:      p.botID,
+		At:         time.Now(),
+		Model:      modelID,
+		Feature:    feature,
+		Usage:      result.Usage,
+		ToolCalls:  toolCalls,
+		Steps:      len(result.Steps),
+		WorkflowID: workflowID,
+		NodeID:     nodeID,
 	})
 }
 

@@ -592,6 +592,16 @@ type WorkflowConfig struct {
 	// review 节点在节点级迭代仍不通过时回退到 Feedback 目标节点重跑，每轮 +1；
 	// 达到上限仍不通过则工作流失败。0 表示使用代码兜底默认。
 	GoalMaxIterations int `json:"goalMaxIterations"`
+
+	// DefaultToolProfile 分析器未为节点声明工具档位时使用的默认档位。
+	// 可选值：readonly / analysis / edit / full。默认 "full"（不过滤）。
+	//
+	// 默认 full 是刻意的选择：并行节点改代码是工作流的核心能力，一刀切降级
+	// 会直接废掉它。配置化是为了日后能在不改码的前提下收紧默认值——
+	// 先让分析器有能力表达更严的档位、积累数据，再决定是否整体收紧。
+	//
+	// 非法值在启动时即报错，不静默降级。
+	DefaultToolProfile string `json:"defaultToolProfile"`
 }
 
 // DefaultWorkflowConfig 返回引擎默认配置值。
@@ -607,6 +617,7 @@ func DefaultWorkflowConfig() WorkflowConfig {
 		AnalyzerStuckTimeoutMS: 180000,
 		AnalyzerMaxDurationMS:  600000,
 		GoalMaxIterations:      5,
+		DefaultToolProfile:     "full",
 	}
 }
 

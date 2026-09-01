@@ -34,6 +34,7 @@ type StatsParams struct {
 //   - OnStop: 停止后台 goroutine，刷新剩余指标
 var Module = fx.Module("stats",
 	fx.Provide(NewRecorderModule),
+	fx.Provide(NewJudgeRecorderModule),
 	fx.Invoke(RegisterLifecycle),
 )
 
@@ -43,13 +44,19 @@ func NewRecorderModule(p StatsParams) (*Recorder, llm.UsageRecorder) {
 	return r, llm.UsageRecorder(r)
 }
 
+// NewJudgeRecorderModule 创建判���记录器。
+func NewJudgeRecorderModule(p StatsParams) *JudgeRecorder {
+	return NewJudgeRecorder(p.DB, p.Logger)
+}
+
 // LifecycleParams 用于注册生命周期钩子。
 type LifecycleParams struct {
 	fx.In
 
-	Recorder  *Recorder
-	Lifecycle fx.Lifecycle
-	Logger    *zap.SugaredLogger
+	Recorder      *Recorder
+	JudgeRecorder *JudgeRecorder
+	Lifecycle     fx.Lifecycle
+	Logger        *zap.SugaredLogger
 }
 
 // RegisterLifecycle 在 fx.Module 中通过 Invoke 调用。
@@ -58,16 +65,22 @@ func RegisterLifecycle(p LifecycleParams) {
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			// AutoMigrate
-			if err := p.Recorder.db.AutoMigrate(&dao.UsageDaily{}); err != nil {
+			//
+			// 建表在两处注册：本处（stats 模块自己的启动钩子）与 dao.Migrate()
+			// 的统一列表。前者是既有做法，后者保证不经过 stats 模块的启动路径
+			// 也能建表。AutoMigrate 幂等，重复无害。
+			if err := p.Recorder.db.AutoMigrate(&dao.UsageDaily{}, &dao.JudgeRecord{}, &dao.WorkflowUsage{}); err != nil {
 				p.Logger.Errorw("stats: migrate failed", "err", err)
 				return err
 			}
 			p.Recorder.Start()
+			p.JudgeRecorder.Start()
 			p.Logger.Infow("stats recorder started")
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
 			p.Recorder.Stop()
+			p.JudgeRecorder.Stop()
 			p.Logger.Infow("stats recorder stopped")
 			return nil
 		},
