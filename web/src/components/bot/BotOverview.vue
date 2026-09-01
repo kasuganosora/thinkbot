@@ -73,20 +73,20 @@ load()
 
 <style scoped>
 .ov-wrap { width: 100%; }
-.ov-card { border: 1px solid #ececec; border-radius: 12px; padding: 20px 24px; }
+.ov-card { border: none; box-shadow: var(--bp-shadow-sm); border-radius: 12px; padding: 20px 24px; background: var(--bp-surface); }
 .ov-head { display: flex; align-items: flex-start; justify-content: space-between; }
 .ov-title { font-size: 15px; font-weight: 600; }
-.ov-desc { font-size: 12px; color: #999; margin-top: 4px; }
-.ov-summary { display: inline-block; margin: 16px 0 8px; padding: 5px 16px; border-radius: 8px; background: #1d1d1f; color: #fff; font-size: 13px; }
-.ov-summary.bad { background: #e34d59; }
-.ov-warn { margin: 4px 0 12px; padding: 10px 14px; border: 1px solid #f5c6cb; border-radius: 8px; background: #fdecea; color: #d93026; font-size: 13px; line-height: 1.6; }
-.ov-warn b { color: #b71c1c; }
+.ov-desc { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 4px; }
+.ov-summary { display: inline-block; margin: 16px 0 8px; padding: 5px 16px; border-radius: 8px; background: var(--bp-label); color: var(--bp-label-on-accent); font-size: 13px; }
+.ov-summary.bad { background: var(--bp-danger); }
+.ov-warn { margin: 4px 0 12px; padding: 10px 14px; border: none; border-radius: 8px; background: var(--bp-danger-soft); color: var(--bp-danger); font-size: 13px; line-height: 1.6; }
+.ov-warn b { color: var(--bp-danger); }
 .ov-list { margin-top: 8px; }
-.ov-item { display: flex; align-items: flex-start; justify-content: space-between; padding: 16px 0; border-top: 1px solid #f2f2f2; }
-.oi-name { font-size: 14px; font-weight: 600; color: #1d1d1f; }
+.ov-item { display: flex; align-items: flex-start; justify-content: space-between; padding: 16px 0; border-top: var(--bp-hairline); }
+.oi-name { font-size: 14px; font-weight: 600; color: var(--bp-label); }
 .oi-name.mono { font-family: monospace; }
-.oi-sub { font-size: 12px; color: #999; margin-top: 2px; }
-.oi-msg { font-size: 13px; color: #444; margin-top: 6px; }
-.oi-extra { font-size: 12px; color: #aaa; margin-top: 3px; font-family: monospace; }
+.oi-sub { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 2px; }
+.oi-msg { font-size: 13px; color: var(--bp-label); margin-top: 6px; }
+.oi-extra { font-size: 12px; color: var(--bp-label-quaternary); margin-top: 3px; font-family: monospace; }
 .oi-tag { flex-shrink: 0; }
 </style>

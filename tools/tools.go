@@ -109,7 +109,7 @@ func RegisterTools(mgr *agenttools.ToolManager, cfg Config) error {
 			return err
 		}
 	} else {
-		// 默认使用 DuckDuckGo
+		// 默认读取 Web UI 配置的已启用搜索提供方
 		if err := RegisterSearchTools(mgr, DefaultSearchConfig()); err != nil {
 			return err
 		}

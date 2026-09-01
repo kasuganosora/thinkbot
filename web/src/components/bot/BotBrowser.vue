@@ -512,12 +512,12 @@ onMounted(load)
 /* 顶部 */
 .bc-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
 .bc-toolbar-left { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.bc-hint { display: flex; align-items: flex-start; gap: 6px; color: #8a8a8a; font-size: 12px; line-height: 1.5; }
-.bc-hint :deep(.t-icon) { margin-top: 2px; color: #d9a300; flex-shrink: 0; }
-.bc-stats { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8a8a8a; }
-.bc-stats b { color: #1d1d1f; font-weight: 600; }
-.bc-stats .stat-warn b { color: #d9a300; }
-.bc-stats .stat-sep { color: #ddd; }
+.bc-hint { display: flex; align-items: flex-start; gap: 6px; color: var(--bp-label-tertiary); font-size: 12px; line-height: 1.5; }
+.bc-hint :deep(.t-icon) { margin-top: 2px; color: var(--bp-warning); flex-shrink: 0; }
+.bc-stats { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bp-label-tertiary); }
+.bc-stats b { color: var(--bp-label); font-weight: 600; }
+.bc-stats .stat-warn b { color: var(--bp-warning); }
+.bc-stats .stat-sep { color: var(--bp-separator); }
 .bc-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 /* 搜索 */
@@ -525,40 +525,42 @@ onMounted(load)
 .bc-search { max-width: 320px; }
 
 /* 空态 / 加载 */
-.bc-loading, .bc-empty { padding: 44px 0; text-align: center; color: #aaa; }
-.bc-empty .empty-icon { width: 56px; height: 56px; border-radius: 50%; background: #f5f5f7; display: inline-flex; align-items: center; justify-content: center; color: #bbb; margin-bottom: 8px; }
-.bc-empty .empty-title { font-weight: 600; color: #555; margin-bottom: 6px; }
+.bc-loading, .bc-empty { padding: 44px 0; text-align: center; color: var(--bp-label-quaternary); }
+.bc-empty .empty-icon { width: 56px; height: 56px; border-radius: 50%; background: var(--bp-bg); display: inline-flex; align-items: center; justify-content: center; color: var(--bp-label-quaternary); margin-bottom: 8px; }
+.bc-empty .empty-title { font-weight: 600; color: var(--bp-label-secondary); margin-bottom: 6px; }
 .bc-empty .empty-desc { font-size: 13px; line-height: 1.7; }
 .bc-empty .empty-ops { margin-top: 14px; display: flex; gap: 8px; justify-content: center; }
 
 /* 分组 */
 .bc-groups { display: flex; flex-direction: column; gap: 12px; }
-.bc-group { border: 1px solid #ececec; border-radius: 10px; overflow: hidden; background: #fff; }
-.bc-group-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #fafafa; border-bottom: 1px solid #f0f0f0; cursor: pointer; user-select: none; }
-.bc-group-head:hover { background: #f5f6f8; }
-.gh-caret { color: #999; flex-shrink: 0; }
-.gh-domain { font-size: 13px; font-weight: 600; color: #1d1d1f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gh-count { font-size: 11px; color: #888; background: #eef0f3; border-radius: 9px; padding: 1px 7px; flex-shrink: 0; }
+.bc-group { border: var(--bp-hairline); border-radius: 10px; overflow: hidden; background: var(--bp-surface); }
+.bc-group-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--bp-bg-subtle); border-bottom: var(--bp-hairline); cursor: pointer; user-select: none;
+  transition: background var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out); }
+.bc-group-head:hover { background: var(--bp-surface-fill-hover); }
+.bc-group-head:active { transform: scale(var(--bp-press-scale)); }
+.gh-caret { color: var(--bp-label-tertiary); flex-shrink: 0; }
+.gh-domain { font-size: 13px; font-weight: 600; color: var(--bp-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-count { font-size: 11px; color: var(--bp-label-tertiary); background: var(--bp-surface-fill); border-radius: 9px; padding: 1px 7px; flex-shrink: 0; }
 .gh-spacer { flex: 1; }
-.gh-clear { opacity: 0; transition: opacity .15s; }
+.gh-clear { opacity: 0; transition: opacity var(--bp-duration) var(--bp-ease-out); }
 .bc-group-head:hover .gh-clear { opacity: 1; }
 
 /* 条目 */
 .bc-list { list-style: none; margin: 0; padding: 0; }
-.bc-item { display: flex; align-items: flex-start; gap: 12px; padding: 11px 14px; border-bottom: 1px solid #f5f5f5; }
+.bc-item { display: flex; align-items: flex-start; gap: 12px; padding: 11px 14px; border-bottom: var(--bp-hairline); }
 .bc-item:last-child { border-bottom: none; }
-.bc-item:hover { background: #fcfcfd; }
-.bc-item.is-expired { background: #fffdf5; }
+.bc-item:hover { background: var(--bp-bg-subtle); }
+.bc-item.is-expired { background: var(--bp-warning-soft); }
 .bc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .bc-line1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.bc-name { font-size: 13px; font-weight: 600; color: #1d1d1f; word-break: break-all; }
-.bc-value { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+.bc-name { font-size: 13px; font-weight: 600; color: var(--bp-label); word-break: break-all; }
+.bc-value { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--bp-label-tertiary); }
 .bc-value-text { font-family: ui-monospace, Menlo, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
-.bc-value.revealed .bc-value-text { color: #1d1d1f; white-space: normal; word-break: break-all; max-width: 100%; background: #f7f8fa; padding: 4px 6px; border-radius: 4px; }
-.bc-linkbtn { border: none; background: none; color: #0052d9; cursor: pointer; font-size: 12px; padding: 0; flex-shrink: 0; }
+.bc-value.revealed .bc-value-text { color: var(--bp-label); white-space: normal; word-break: break-all; max-width: 100%; background: var(--bp-bg-subtle); padding: 4px 6px; border-radius: 4px; }
+.bc-linkbtn { border: none; background: none; color: var(--bp-accent); cursor: pointer; font-size: 12px; padding: 0; flex-shrink: 0; }
 .bc-linkbtn:hover { text-decoration: underline; }
 .bc-sub { display: flex; align-items: center; gap: 12px; }
-.bc-sub-item { font-size: 11px; color: #aaa; }
+.bc-sub-item { font-size: 11px; color: var(--bp-label-quaternary); }
 .bc-ops { display: flex; gap: 2px; flex-shrink: 0; }
 </style>
 
@@ -568,14 +570,14 @@ onMounted(load)
 .browser-edit-dialog .bc-form .t-form__controls-content { flex-direction: column; align-items: stretch; }
 .browser-import-dialog .t-dialog__body { max-height: 70vh; overflow-y: auto; }
 .browser-import-dialog .bc-field { margin-bottom: 14px; }
-.browser-import-dialog .lbl { display: block; font-size: 13px; color: #555; margin-bottom: 6px; }
-.browser-import-dialog .lbl .req { color: #d54941; font-size: 12px; margin-left: 2px; }
-.browser-import-dialog .bc-help { font-size: 12px; color: #999; margin-top: 6px; line-height: 1.5; }
-.browser-import-dialog .bc-imp-tip { display: flex; gap: 8px; padding: 10px 12px; background: #f3f7ff; border: 1px solid #dbe7ff; border-radius: 8px; font-size: 12px; color: #4a5468; line-height: 1.6; margin-bottom: 14px; }
-.browser-import-dialog .bc-imp-tip .t-icon { color: #0052d9; flex-shrink: 0; margin-top: 2px; }
-.browser-import-dialog .bc-imp-tip b { color: #1d1d1f; }
+.browser-import-dialog .lbl { display: block; font-size: 13px; color: var(--bp-label-secondary); margin-bottom: 6px; }
+.browser-import-dialog .lbl .req { color: var(--bp-danger); font-size: 12px; margin-left: 2px; }
+.browser-import-dialog .bc-help { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 6px; line-height: 1.5; }
+.browser-import-dialog .bc-imp-tip { display: flex; gap: 8px; padding: 10px 12px; background: var(--bp-accent-soft); border: var(--bp-hairline); border-radius: 8px; font-size: 12px; color: var(--bp-label-secondary); line-height: 1.6; margin-bottom: 14px; }
+.browser-import-dialog .bc-imp-tip .t-icon { color: var(--bp-accent); flex-shrink: 0; margin-top: 2px; }
+.browser-import-dialog .bc-imp-tip b { color: var(--bp-label); }
 .browser-import-dialog .bc-detect { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-height: 22px; }
-.browser-import-dialog .bc-detect .dt-desc { font-size: 12px; color: #888; }
-.browser-import-dialog .bc-detect .dt-muted { font-size: 12px; color: #bbb; }
+.browser-import-dialog .bc-detect .dt-desc { font-size: 12px; color: var(--bp-label-tertiary); }
+.browser-import-dialog .bc-detect .dt-muted { font-size: 12px; color: var(--bp-label-quaternary); }
 .browser-import-dialog textarea { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
 </style>

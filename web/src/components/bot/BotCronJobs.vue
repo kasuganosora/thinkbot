@@ -489,19 +489,19 @@ function remove(row) {
 
 <style scoped>
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.title { font-size: 16px; font-weight: 600; color: #1d1d1f; }
+.title { font-size: 16px; font-weight: 600; color: var(--bp-label); }
 
 /* 空状态 */
 .empty {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; padding: 80px 0; color: #999;
+  gap: 12px; padding: 80px 0; color: var(--bp-label-tertiary);
 }
 .empty-icon {
   width: 56px; height: 56px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
-  background: #f5f5f7; color: #999;
+  background: var(--bp-bg); color: var(--bp-label-tertiary);
 }
-.empty-text { font-size: 14px; color: #999; }
+.empty-text { font-size: 14px; color: var(--bp-label-tertiary); }
 
 /* 表单 */
 .cron-form { display: flex; flex-direction: column; gap: 16px; }
@@ -509,12 +509,12 @@ function remove(row) {
 .field-row { display: flex; align-items: flex-end; gap: 16px; }
 .field-row .grow { flex: 1; }
 .enable-box { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
-.lbl { font-size: 13px; font-weight: 600; color: #1d1d1f; margin-bottom: 6px; }
-.opt { font-weight: 400; color: #999; }
-.tip { font-size: 12px; color: #999; margin-top: 6px; }
+.lbl { font-size: 13px; font-weight: 600; color: var(--bp-label); margin-bottom: 6px; }
+.opt { font-weight: 400; color: var(--bp-label-tertiary); }
+.tip { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 6px; }
 .section-title {
-  font-size: 14px; font-weight: 600; color: #1d1d1f;
-  border-top: 1px solid #f0f0f0; margin-top: 4px; padding-top: 16px;
+  font-size: 14px; font-weight: 600; color: var(--bp-label);
+  border-top: var(--bp-hairline); margin-top: 4px; padding-top: 16px;
 }
 
 /* 小时 / 星期 chip */
@@ -523,28 +523,29 @@ function remove(row) {
 .chip-grid.week { grid-template-columns: repeat(7, 1fr); }
 .chip {
   height: 36px; display: flex; align-items: center; justify-content: center;
-  border: 1px solid #e0e0e0; border-radius: 8px; font-size: 13px; cursor: pointer;
-  font-family: 'SF Mono', Menlo, monospace; color: #555; user-select: none;
-  transition: all .15s;
+  border: var(--bp-hairline); border-radius: 8px; font-size: 13px; cursor: pointer;
+  font-family: 'SF Mono', Menlo, monospace; color: var(--bp-label-secondary); user-select: none;
+  transition: transform var(--bp-duration) var(--bp-ease-out), background var(--bp-duration) var(--bp-ease-out), color var(--bp-duration) var(--bp-ease-out), border-color var(--bp-duration) var(--bp-ease-out), opacity var(--bp-duration) var(--bp-ease-out);
 }
-.chip:hover { border-color: #999; }
-.chip.active { background: #2a2a32; color: #fff; border-color: #2a2a32; }
+.chip:hover { border-color: var(--bp-label-tertiary); }
+.chip:active { transform: scale(var(--bp-press-scale)); }
+.chip.active { background: var(--bp-label); color: var(--bp-label-on-accent); border-color: var(--bp-label); }
 
 /* cron 预览卡片 */
 .cron-preview {
-  border: 1px solid #eee; border-radius: 10px; padding: 14px 16px; background: #fafafa;
+  border: var(--bp-hairline); border-radius: 10px; padding: 14px 16px; background: var(--bp-bg-subtle);
 }
-.cp-label { font-size: 13px; color: #555; margin-bottom: 6px; }
-.cp-expr { font-family: 'SF Mono', Menlo, monospace; font-size: 15px; color: #1d1d1f; letter-spacing: 1px; }
-.cp-desc { font-size: 13px; color: #1d1d1f; margin-top: 8px; }
-.cp-divider { height: 1px; background: #eee; margin: 12px 0; }
-.cp-next-title { font-size: 13px; color: #888; margin-bottom: 6px; }
+.cp-label { font-size: 13px; color: var(--bp-label-secondary); margin-bottom: 6px; }
+.cp-expr { font-family: 'SF Mono', Menlo, monospace; font-size: 15px; color: var(--bp-label); letter-spacing: 1px; }
+.cp-desc { font-size: 13px; color: var(--bp-label); margin-top: 8px; }
+.cp-divider { height: 1px; background: var(--bp-separator); margin: 12px 0; }
+.cp-next-title { font-size: 13px; color: var(--bp-label-tertiary); margin-bottom: 6px; }
 .cp-next { list-style: none; padding: 0; margin: 0; }
 .cp-next li {
-  font-family: 'SF Mono', Menlo, monospace; font-size: 13px; color: #555; padding: 2px 0;
+  font-family: 'SF Mono', Menlo, monospace; font-size: 13px; color: var(--bp-label-secondary); padding: 2px 0;
 }
-.cp-next li::before { content: '· '; color: #aaa; }
-.cp-empty { color: #c0392b; }
+.cp-next li::before { content: '· '; color: var(--bp-label-quaternary); }
+.cp-empty { color: var(--bp-danger); }
 </style>
 
 <!-- 弹窗在 body 下，scoped 命中不到 -->

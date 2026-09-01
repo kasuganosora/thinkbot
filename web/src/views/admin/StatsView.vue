@@ -207,7 +207,7 @@ onMounted(loadOverview)
 }
 .metric-label {
   font-size: 13px;
-  color: #8a8a8a;
+  color: var(--bp-label-tertiary);
   margin-bottom: 8px;
 }
 .metric-value {
