@@ -1065,6 +1065,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				"reason", reason,
 				"text_len", len(result.Text))
 			env.Set("llm.result", result)
+			// 告知 note-capture：本条虽被门禁抑制（不说出口），用户原文仍须落 L0
+			// 记忆——「照样记，只是不说出口」。修复前抑制分支不产出 ActionReply，
+			// note-capture 无 reply 可据 → passive 模式下记忆零写入（2026-09-01 定位）。
+			env.Set(core.KVCaptureSuppressedExchange, true)
 			return env, nil
 		}
 		// 模型显式 send:true → 放行（仅软启发式门被覆盖，硬权限门已排除）。

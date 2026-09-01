@@ -107,7 +107,9 @@ type UserMessageEventWriter interface {
 // 补齐这一捕获：LLMStage 把回复写入 ActionReply 后，本中间件据此补一个
 // ActionNote，经由已注册的 NoteHandler 落入 TieredStore 的 L0 层。
 //
-// 仅当存在非空 ActionReply 时才写笔记；不修改任何回复行为，对下游透明。
+// 捕获时机：存在非空 ActionReply（正常回复路径），或 LLMStage 抑制分支置了
+// core.KVCaptureSuppressedExchange（回复被门禁拦下但仍须记住用户说了什么——
+// 「不说出口 ≠ 不记住」）。不修改任何回复行为，对下游透明。
 func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(next core.Stage) core.Stage {
 	if category == "" {
 		category = "exchange"
@@ -136,62 +138,64 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 				if seen.seen(env.Message.ID) {
 					return out, nil
 				}
-			// 捕获「用户说了什么」作为 L0 对话记忆与事件流记录，供 dreaming 学习
-			// 用户偏好/事实。注意：不要捕获 bot 自己的回复（env.Message.Text 才是用户
-			// 入站原文）——否则 dreaming 会把 bot 的发言误当成用户的事实（说话人归属错误，
-			// 见历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
-			// 一条用户消息只捕获一次：若一轮产出多个 ActionReply（如主回复 + ChannelPoster
-			// 转发），原先会在循环里对每个回复各写一份，导致 L0 笔记与事件流记录重复。
-			userText := normalizeExchangeText(env.Message.Text)
-			if userText != "" {
-				// 快照 actions，避免遍历过程中 AddAction 改变切片长度引发意外。
-				actions := make([]core.Action, len(out.Actions()))
-				copy(actions, out.Actions())
-				captured := false
-				for _, a := range actions {
-					if a.Type != core.ActionNote && a.Type != core.ActionReply {
-						continue
+				// 捕获「用户说了什么」作为 L0 对话记忆与事件流记录，供 dreaming 学习
+				// 用户偏好/事实。注意：不要捕获 bot 自己的回复（env.Message.Text 才是用户
+				// 入站原文）——否则 dreaming 会把 bot 的发言误当成用户的事实（说话人归属错误，
+				// 见历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
+				// 一条用户消息只捕获一次。
+				userText := normalizeExchangeText(env.Message.Text)
+				if userText != "" {
+					// 已经显式记过笔记（DecisionReplyWithNote / DecisionNoteOnly / 潜水笔记）
+					// 的，视为已捕获，不再重复写入用户发言。
+					hasNote := false
+					hasReply := false
+					for _, a := range out.Actions() {
+						if a.Type == core.ActionNote {
+							hasNote = true
+							break
+						}
+						if a.Type == core.ActionReply && a.Payload != "" {
+							hasReply = true
+						}
 					}
-					// 已经显式记过笔记（DecisionReplyWithNote / DecisionNoteOnly）的，
-					// 视为已捕获，不再重复写入用户发言。
-					if a.Type == core.ActionNote {
-						captured = true
-						continue
-					}
-					if a.Payload == "" {
-						continue
-					}
-					if captured {
-						// 本条消息已捕获过用户发言，跳过后续回复动作，避免重复。
-						continue
-					}
-					out.AddAction(core.Action{
-						Type:    core.ActionNote,
-						Channel: env.Message.Channel, // 会话空间标识（记忆关联）
-						UserID:  env.Message.UserID,
-						Payload: userText,
-						Metadata: map[string]any{
-							"source_channel": env.Message.Source,
-							"bot_id":         env.Message.BotID,
-							"message_id":     env.Message.ID,
-							"category":       category,
-							"speaker":        "user",
-						},
-					})
-					// 并行写入事件流（best-effort：writer 内部自行记日志，这里忽略错误，
-					// 因为 backfill 有 chat_messages 一次性 seed 作为兜底）。
-					if writer != nil {
-						_ = writer.WriteUserMessageEvent(ctx, CapturedUserMessage{
-							BotID:     env.Message.BotID,
-							Channel:   env.Message.Channel,
-							UserID:    env.Message.UserID,
-							MessageID: env.Message.ID,
-							Content:   userText,
-						})
-					}
-					captured = true
+					// 捕获时机（满足其一）：
+					//  1. 正常路径：LLMStage 产出了非空 ActionReply；
+					//  2. 抑制路径：回复被门禁（passive 未@、节奏门等）拦下、不产出 ActionReply，
+					//     但 LLMStage 抑制分支置了 KVCaptureSuppressedExchange——「不说出口」
+					//     不等于「不记住」。修复前此路径直接丢记忆：passive 模式下 bot 看到了、
+					//     想了，却什么都没记住（2026-09-01 生产排查：连续三天记忆零写入）。
+					// 潜水/心跳不置该键（潜水有模型 curated 笔记契约，心跳无用户原文），不受影响。
+					captureSuppressed := false
+				if v, ok := out.Get(core.KVCaptureSuppressedExchange); ok {
+					captureSuppressed, _ = v.(bool)
 				}
-			}
+					if !hasNote && (hasReply || captureSuppressed) {
+						out.AddAction(core.Action{
+							Type:    core.ActionNote,
+							Channel: env.Message.Channel, // 会话空间标识（记忆关联）
+							UserID:  env.Message.UserID,
+							Payload: userText,
+							Metadata: map[string]any{
+								"source_channel": env.Message.Source,
+								"bot_id":         env.Message.BotID,
+								"message_id":     env.Message.ID,
+								"category":       category,
+								"speaker":        "user",
+							},
+						})
+						// 并行写入事件流（best-effort：writer 内部自行记日志，这里忽略错误，
+						// 因为 backfill 有 chat_messages 一次性 seed 作为兜底）。
+						if writer != nil {
+							_ = writer.WriteUserMessageEvent(ctx, CapturedUserMessage{
+								BotID:     env.Message.BotID,
+								Channel:   env.Message.Channel,
+								UserID:    env.Message.UserID,
+								MessageID: env.Message.ID,
+								Content:   userText,
+							})
+						}
+					}
+				}
 				return out, nil
 			},
 		}
