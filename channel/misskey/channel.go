@@ -320,12 +320,21 @@ func (c *MisskeyChannel) getMentionAnchor() string {
 // setMentionAnchor 推进锚点为指定 noteID（空值不更新）。
 // 在实时 mention 处理与 backfill 处理两条路径上都会调用，保证锚点始终是
 // 已处理过的最新提及，重连时以此恢复断连窗口。
+//
+// 单调递增守卫：Misskey aid 定长且按时间字典序递增，锚点只允许向更新的 ID
+// 推进。timeline 路径的帖子可能与 main/backfill 并发到达，若允许回退，
+// 一条乱序的旧帖会把锚点拉回去，下次 backfill 就会重复拉取已处理的提及
+// （2026-09-01 生产事故：timeline 路径不推进锚点 + 锚点被旧值卡住，
+// 两次断连把整晚的 mention 重放了两轮，重复回复外发）。
 func (c *MisskeyChannel) setMentionAnchor(noteID string) {
 	if noteID == "" {
 		return
 	}
 	c.anchorMu.Lock()
 	defer c.anchorMu.Unlock()
+	if c.lastMentionID != "" && noteID <= c.lastMentionID {
+		return
+	}
 	c.lastMentionID = noteID
 }
 
@@ -547,12 +556,20 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			if note.Text == "" && len(note.Files) == 0 && note.Renote == nil {
 				return nil
 			}
-			// timeline 上的帖子若明确指向本 Bot（字面 @ / 回复了 Bot 帖子 / mentions 含 Bot），
-			// 视为被真人提及（Mentioned=true），走单聊路径由 Bot 自行决定回复。
-			// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention/reply 事件因
-			// 去重晚到被丢弃时，指向 Bot 的回复会被当成普通时间线消息，被聊天节奏按概率
-			// 降频，用户体感即「回复了 Bot 却没反应」。详见 timelineMentioned。
-			c.handleNote(ctx, note, "timeline", c.timelineMentioned(note))
+		// timeline 上的帖子若明确指向本 Bot（字面 @ / 回复了 Bot 帖子 / mentions 含 Bot），
+		// 视为被真人提及（Mentioned=true），走单聊路径由 Bot 自行决定回复。
+		// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention/reply 事件因
+		// 去重晚到被丢弃时，指向 Bot 的回复会被当成普通时间线消息，被聊天节奏按概率
+		// 降频，用户体感即「回复了 Bot 却没反应」。详见 timelineMentioned。
+		mentioned := c.timelineMentioned(note)
+		c.handleNote(ctx, note, "timeline", mentioned)
+		// 指向本 Bot 的帖子经 timeline 路径成功处理后，同样必须推进 mention 锚点。
+		// 否则锚点停留在旧值，每次断连 backfill（sinceId=锚点）都会把这条及之后
+		// 所有 mention 重新拉取一遍——2 分钟的 dedupSeen 窗口挡不住几十分钟后的
+		// 重放，导致同一帖子被重复生成回复甚至重复外发（2026-09-01 事故根因）。
+		if mentioned {
+			c.setMentionAnchor(note.ID)
+		}
 		default:
 			// 忽略其他 timeline 事件
 		}
