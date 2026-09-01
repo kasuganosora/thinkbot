@@ -255,3 +255,108 @@ func TestNormalizeExchangeText(t *testing.T) {
 		}
 	}
 }
+
+// suppressedStage 模拟 LLMStage 的抑制分支：不产出任何 Action（回复被门禁拦下），
+// 但按约定置 KVCaptureSuppressedExchange（「不说出口 ≠ 不记住」）。
+type suppressedStage struct{ setFlag bool }
+
+func (s suppressedStage) Name() string { return "suppressed" }
+
+func (s suppressedStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	if s.setFlag {
+		env.Set(core.KVCaptureSuppressedExchange, true)
+	}
+	return env, nil
+}
+
+// TestNoteCaptureMiddleware_SuppressedReplyStillCaptured 回归 2026-09-01 生产事故：
+// passive 模式下回复被 passive_mode_unmentioned 抑制 → LLMStage 不产出 ActionReply →
+// 旧实现据此不写任何记忆，导致连续三天记忆零写入（luna 布置的任务 bot「看到却没记住」）。
+// 修复后：抑制分支置 KVCaptureSuppressedExchange，用户原文仍须落 L0 + 事件流。
+func TestNoteCaptureMiddleware_SuppressedReplyStillCaptured(t *testing.T) {
+	spy := &spyEventWriter{}
+	mw := NoteCaptureMiddleware("exchange", spy)
+	stage := mw(suppressedStage{setFlag: true})
+
+	msg := core.Message{ID: "m-sup", BotID: "bot-s", Source: "misskey", Channel: "ch-s", UserID: "u-luna", Text: "[Timeline] @luna: 布置「选项工具」任务"}
+	env := core.NewEnvelope(msg)
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var note *core.Action
+	for _, a := range out.Actions() {
+		if a.Type == core.ActionNote {
+			note = &a
+			break
+		}
+	}
+	if note == nil {
+		t.Fatalf("suppressed reply: expected ActionNote capturing user text, got none")
+	}
+	// 捕获的是剥离渠道装饰后的用户原文。
+	if note.Payload != "布置「选项工具」任务" {
+		t.Fatalf("note payload = %q, want %q", note.Payload, "布置「选项工具」任务")
+	}
+	if spy.count != 1 || spy.last.Content != "布置「选项工具」任务" {
+		t.Fatalf("event stream: count=%d last=%+v, want 1 write of user text", spy.count, spy.last)
+	}
+}
+
+// TestNoteCaptureMiddleware_SilentStageStillSkips 反向断言：未置标记的静默路径
+// （既无 ActionReply 也无 KVCaptureSuppressedExchange）仍不得捕获——
+// 潜水 curated「不值得记」与非 LLMStage 的静默 Stage 语义必须保持，防止旧行为回归。
+func TestNoteCaptureMiddleware_SilentStageStillSkips(t *testing.T) {
+	spy := &spyEventWriter{}
+	mw := NoteCaptureMiddleware("exchange", spy)
+	stage := mw(suppressedStage{setFlag: false})
+
+	msg := core.Message{ID: "m-silent", BotID: "bot-s", Source: "misskey", Channel: "ch-s", UserID: "u9", Text: "nothing to learn here"}
+	env := core.NewEnvelope(msg)
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, a := range out.Actions() {
+		if a.Type == core.ActionNote {
+			t.Fatalf("silent stage without capture flag: unexpected ActionNote %q", a.Payload)
+		}
+	}
+	if spy.count != 0 {
+		t.Fatalf("silent stage without capture flag: expected 0 event writes, got %d", spy.count)
+	}
+}
+
+// TestNoteCaptureMiddleware_SuppressedWithExplicitNoteNoDup 抑制路径上若已有显式
+// ActionNote（模型自己记了笔记），不得再重复捕获用户原文。
+func TestNoteCaptureMiddleware_SuppressedWithExplicitNoteNoDup(t *testing.T) {
+	spy := &spyEventWriter{}
+	mw := NoteCaptureMiddleware("exchange", spy)
+	stage := mw(&core.StageFunc{StageName: "suppressed-with-note", Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+		env.Set(core.KVCaptureSuppressedExchange, true)
+		env.AddAction(core.Action{Type: core.ActionNote, Channel: env.Message.Channel, UserID: env.Message.UserID, Payload: "curated note"})
+		return env, nil
+	}})
+
+	msg := core.Message{ID: "m-supnote", BotID: "bot-s", Source: "misskey", Channel: "ch-s", UserID: "u9", Text: "user said something"}
+	env := core.NewEnvelope(msg)
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	notes := 0
+	for _, a := range out.Actions() {
+		if a.Type == core.ActionNote {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("expected exactly the 1 explicit note, got %d", notes)
+	}
+	if spy.count != 0 {
+		t.Fatalf("explicit note present: expected 0 event writes, got %d", spy.count)
+	}
+}
