@@ -71,6 +71,20 @@
         <div class="todo-main">
           <span class="todo-name" :class="{ done: n.status === 'completed' }">{{ n.name }}</span>
           <span class="todo-status" :class="`st-${n.status}`">{{ statusText(n.status) }}</span>
+          <!-- 结果类别徽标：区分「跑完了」与「做成了」。
+               没有它，一个 completed 但 missing_tool 的节点看起来就是普通的 ✓。 -->
+          <t-tag
+            v-if="n.badge"
+            :theme="n.badge.theme"
+            variant="light"
+            size="small"
+            class="todo-outcome"
+            :title="n.badge.title"
+            :data-testid="`chat-workflow-node-outcome-${n.id}`"
+            :data-outcome="n.outcome"
+          >
+            {{ n.badge.text }}
+          </t-tag>
           <span v-if="n.retryCount" class="todo-retry-count">已重试 {{ n.retryCount }} 次</span>
           <!-- 节点详情（结果/错误）：默认折叠为单行摘要，展开后按 markdown 渲染 -->
           <div
@@ -232,8 +246,49 @@ function buildDetail(n) {
   }
 }
 
-// 给每个节点附加预计算的 detail，避免模板里多次调用导致重复 summarize
-const nodes = computed(() => rawNodes.value.map(n => ({ ...n, detail: buildDetail(n) })))
+// 节点结果类别徽标：区分「跑完了」与「做成了」。
+//
+// 后端 NodeFlat 已带 outcome / outcomeReason / toolProfile（见 workflow README）。
+// 不展示的话，一个 status=completed 但 outcome=missing_tool 的节点在用户看来
+// 就是普通的 ✓——而它实际上什么都没做成。这正是后端引入 Outcome 要解决的问题。
+//
+// 只在非 ok 时返回徽标：正常节点不加视觉噪音。
+function outcomeBadge(n) {
+  const reason = n.outcomeReason || ''
+  // 档位信息对「缺少工具」尤其有用：hover 即可看出被限制在哪个档位
+  const profileHint = n.toolProfile ? `（当前档位：${n.toolProfile}）` : ''
+  switch (n.outcome) {
+    case 'noop':
+      return {
+        kind: 'degraded', text: '无变更', theme: 'default',
+        title: reason || '范围内没有需要处理的变更'
+      }
+    case 'partial':
+      return {
+        kind: 'degraded', text: '部分完成', theme: 'warning',
+        title: reason || '只完成了任务的一部分，产物可能不完整'
+      }
+    case 'missing_tool':
+      return {
+        kind: 'blocked', text: '缺少工具', theme: 'danger',
+        title: `${reason || '完成任务所需的工具不可用'}${profileHint}`
+      }
+    case 'missing_data':
+      return {
+        kind: 'blocked', text: '上游数据缺失', theme: 'danger',
+        title: reason || '缺少必需的输入数据，问题通常在上游节点'
+      }
+    default:
+      return null // ok / 空值：不展示
+  }
+}
+
+// 给每个节点附加预计算的 detail 与结果徽标，避免模板里多次调用导致重复计算
+const nodes = computed(() => rawNodes.value.map(n => ({
+  ...n,
+  detail: buildDetail(n),
+  badge: outcomeBadge(n)
+})))
 
 async function copyDetail(text) {
   try {
@@ -249,6 +304,11 @@ const botStore = useBotStore()
 
 const doneCount = computed(() => nodes.value.filter(n => n.status === 'completed').length)
 
+// 降级（partial / noop）与受阻（missing_tool / missing_data）的节点数。
+// 这两类节点在 status 上仍是 completed / failed，计数不加进来用户就看不出质量差异。
+const degradedCount = computed(() => nodes.value.filter(n => n.badge?.kind === 'degraded').length)
+const blockedCount = computed(() => nodes.value.filter(n => n.badge?.kind === 'blocked').length)
+
 // 进度百分比（供顶部细进度条使用）
 const progressPercent = computed(() => {
   if (!nodes.value.length) return 0
@@ -259,7 +319,14 @@ const progressPercent = computed(() => {
 // 注意：只有 status 真的是 analyzing 才显示分析文案。曾经用 isLive（含 running）判断，
 // 导致 running 且节点已拆出但列表尚未拉到时，仍渲染残留的 analyzeMessage → 假「分析中」。
 const progressLabel = computed(() => {
-  if (nodes.value.length) return `${doneCount.value}/${nodes.value.length}`
+  if (nodes.value.length) {
+    const base = `${doneCount.value}/${nodes.value.length}`
+    // 有降级/受阻时一并标出，避免「3/5」这种汇总掩盖质量差异
+    const extra = []
+    if (degradedCount.value) extra.push(`${degradedCount.value} 降级`)
+    if (blockedCount.value) extra.push(`${blockedCount.value} 受阻`)
+    return extra.length ? `${base}（${extra.join('、')}）` : base
+  }
   if (workflow.value?.status === 'analyzing') return workflow.value?.analyzeMessage || '分析中…'
   return '0/0'
 })
@@ -682,6 +749,17 @@ onBeforeUnmount(() => {
 .st-reviewing { background: rgba(232, 130, 10, 0.12); color: #c2700a; }
 .st-terminated,
 .st-skipped { background: #f0f1f3; color: #9a9c9f; }
+
+/* 结果类别徽标：与 todo-status 同高，避免行高抖动 */
+.todo-outcome {
+  flex-shrink: 0;
+  height: 17px;
+  line-height: 17px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  cursor: help; /* 提示有 hover 说明 */
+}
+
 .todo-retry-count {
   font-size: 10.5px;
   color: #b06a00;
