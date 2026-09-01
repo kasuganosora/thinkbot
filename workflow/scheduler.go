@@ -268,6 +268,16 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 	nodeStart := time.Now()
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
+	// 并发写冲突检测放在 defer 里，覆盖**所有**出口。
+	//
+	// 曾经只在成功路径末尾调用，但失败的节点同样可能已经写过文件
+	// （executor 记录写操作时特意不区分成败，正是为此）——
+	// 而「一个节点改为另一个文件后失败」恰恰是最需要看见的冲突场景。
+	// 用 defer 可避免随着出口增多而逐个遗漏。
+	defer func() {
+		s.detectAndReportWriteConflicts(ctx, node)
+	}()
+
 	if s.isTerminated() {
 		return
 	}
@@ -533,6 +543,48 @@ func (s *Scheduler) runNode(ctx context.Context, node *DAGNode) {
 
 	logger.Infow("node completed", "node_id", node.ID,
 		"retries", node.RetryCount, "iterations", node.IterationCount)
+	// 写冲突检测由函数开头的 defer 统一执行（覆盖所有出口，不只是成功路径）。
+}
+
+// detectAndReportWriteConflicts 检测并上报本节点与其他节点之间的写路径冲突。
+//
+// 调用方必须已释放 s.mu（本函数内部会加锁）。
+func (s *Scheduler) detectAndReportWriteConflicts(ctx context.Context, node *DAGNode) {
+	if len(node.WrittenOps) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	conflicts := s.wf.detectWriteConflicts()
+	s.wf.WriteConflicts = conflicts
+	s.mu.Unlock()
+
+	// 只报与本节点相关的冲突，避免每个节点重复播报同一条
+	var mine []WriteConflict
+	for _, c := range conflicts {
+		for _, id := range c.NodeIDs {
+			if id == node.ID {
+				mine = append(mine, c)
+				break
+			}
+		}
+	}
+	if len(mine) == 0 {
+		return
+	}
+
+	for _, c := range mine {
+		s.logger.Warnw("concurrent write conflict detected",
+			"node_id", node.ID, "path", c.Path,
+			"involved_nodes", c.NodeIDs, "destructive", c.Destructive)
+		s.emitNodeEvent(ctx, outbound.EventWorkflowWriteConflict, map[string]any{
+			"node_id":     node.ID,
+			"path":        c.Path,
+			"node_ids":    c.NodeIDs,
+			"destructive": c.Destructive,
+		})
+	}
+	s.persist()
 }
 
 // reviewInfraMaxAttempts 是单次审查在遇到基础设施错误时的最大尝试次数。
@@ -660,17 +712,64 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 			return result, errs.Wrapf(err, "review error at iteration %d", iter+1)
 		}
 
-		// 记录 Review 历史
+		// 记录 Review 历史，同时落地节点自报的结果类别（Outcome）。
+		//
+		// Outcome 与 Passed 正交：Passed 是「产物合不合格」，Outcome 是
+		// 「做没做成、为什么」。二者都要记，缺一就只能靠猜。
 		s.mu.Lock()
 		node.ReviewHistory = append(node.ReviewHistory, ReviewRecord{
 			Iteration: iter + 1,
 			Passed:    reviewResult.Passed,
 			Feedback:  reviewResult.Feedback,
 		})
+		if oc, valid := ParseNodeOutcome(reviewResult.Outcome); valid {
+			node.Outcome = oc
+			node.OutcomeReason = reviewResult.OutcomeReason
+		} else if reviewResult.Outcome != "" {
+			// 模型给了无法识别的类别：不静默丢弃——记一条告警，
+			// 否则我们会以为节点正常完成，而实际上它报了一个我们没读懂的状态。
+			s.logger.Warnw("unrecognized node outcome, treating as ok",
+				"node_id", node.ID, "raw_outcome", reviewResult.Outcome)
+		}
+		blocked := node.Outcome.IsBlocked()
+		blockedReason := node.OutcomeReason
 		s.mu.Unlock()
+
+		// 硬失败（缺工具 / 缺上游数据）：**既不迭代也不重试**，直接收尾。
+		//
+		// 这两类失败是环境事实而非质量问题——重跑一百次也不会有工具、
+		// 也不会有上游数据。继续迭代只会把整条工作流的预算烧光。
+		// 返回哨兵错误让 isNonRetryable 生效，从而跳过 retry.Do 的重试。
+		if blocked {
+			if blockedReason == "" {
+				blockedReason = "no reason reported"
+			}
+			s.logger.Warnw("node blocked, stopping iteration (retrying will not help)",
+				"node_id", node.ID, "outcome", string(node.Outcome), "reason", blockedReason)
+			s.emitNodeEvent(ctx, outbound.EventWorkflowNodeBlocked, map[string]any{
+				"node_id":   node.ID,
+				"outcome":   string(node.Outcome),
+				"reason":    blockedReason,
+				"iteration": iter + 1,
+			})
+			return result, errs.Wrapf(errForBlocked(node.Outcome),
+				"node %q blocked: %s", node.ID, blockedReason)
+		}
 
 		if reviewResult.Passed {
 			s.logger.Infow("review passed", "node_id", node.ID, "iteration", iter+1)
+
+			// 降级完成（partial / noop）：仍算成功，但要留痕。
+			// 用户看到 ✓ 却不知道只做了一半，比看到失败更有害。
+			if node.Outcome.IsDegraded() {
+				s.logger.Infow("node completed with degraded outcome",
+					"node_id", node.ID, "outcome", string(node.Outcome), "reason", node.OutcomeReason)
+				s.emitNodeEvent(ctx, outbound.EventWorkflowNodeDegraded, map[string]any{
+					"node_id": node.ID,
+					"outcome": string(node.Outcome),
+					"reason":  node.OutcomeReason,
+				})
+			}
 			return result, nil
 		}
 
@@ -678,19 +777,37 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 		s.logger.Infow("review failed, re-executing",
 			"node_id", node.ID, "iteration", iter+1, "max_iterations", maxIter)
 
+		// 审查意见由 LLM 产出，属不可信内容：它会被回注进下一轮 SubAgent 的 prompt，
+		// 而节点 SubAgent 具备完整工作空间工具能力（含 sandbox_exec）。
+		// **在写入侧清洗**，一次覆盖两条路径：
+		//   1. 本处存进 node.ReviewFeedback → 目标模式闭环时作为 LoopFeedback 回注
+		//   2. 下方直接传给 ExecuteWithFeedback
+		// 若在读取侧清洗，两条路径要各洗一遍且容易漏；写入侧清洗则天然一致。
+		//
+		// 清洗信号必须留痕：静默降级会把「反馈被污染」伪装成「审查没给意见」。
+		fbClean := sanitizeFeedback(reviewResult.Feedback)
+		if len(fbClean.Removed) > 0 || len(fbClean.Injected) > 0 || fbClean.Emptied {
+			s.logger.Warnw("review feedback sanitized before storing",
+				"node_id", node.ID,
+				"removed_invisible", fbClean.Removed,
+				"injection_patterns", fbClean.Injected,
+				"emptied_after_sanitize", fbClean.Emptied)
+		}
+
 		s.mu.Lock()
 		if s.terminated {
 			s.mu.Unlock()
 			return result, errs.New("terminated during review")
 		}
 		node.IterationCount = iter + 1
-		node.ReviewFeedback = reviewResult.Feedback
+		node.ReviewFeedback = fbClean.Cleaned
 		node.Status = NodeRunning
 		s.mu.Unlock()
 		s.persist()
 
-		// 带反馈重新执行
-		newResult, execErr := s.executor.ExecuteWithFeedback(ctx, node, result, reviewResult.Feedback)
+		// 带反馈重新执行（buildIterationTask 内部会再清洗一次；
+		// 清洗幂等，重复无害，且保证任何调用路径都不会漏洗）
+		newResult, execErr := s.executor.ExecuteWithFeedback(ctx, node, result, fbClean.Cleaned)
 		if execErr != nil {
 			return result, errs.Wrapf(execErr, "re-execution failed at iteration %d", iter+1)
 		}
@@ -765,6 +882,11 @@ func (s *Scheduler) goalFeedbackReset(ctx context.Context, node *DAGNode, feedba
 	node.CompletedAt = nil
 
 	// 重置 Feedback 目标节点，并写入审查意见
+	//
+	// 这里不再重复清洗：调用方（reviewLoop）传入的 feedback 取自
+	// node.ReviewFeedback，而该字段在写入时**已经过 sanitizeFeedback 清洗**。
+	// 清洗是幂等的，重复调用无害但也无必要——真正的保证在写入侧，不在这里。
+	// 若将来出现绕过 reviewLoop 直接写 LoopFeedback 的路径，须在该处补清洗。
 	for _, fid := range node.Feedback {
 		fn, ok := s.wf.GetNode(fid)
 		if !ok {

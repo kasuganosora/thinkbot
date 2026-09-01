@@ -166,6 +166,74 @@ func WithSkipTools() Option {
 	}
 }
 
+// WithToolAllowlist 把 SubAgent 可用工具限制在白名单内。
+//
+// 空列表 = 不限制（保持现状行为）。未列出的工具在注入阶段就被过滤掉，
+// 对 SubAgent 完全不可见——不是调用时拒绝，而是它根本不知道有这些工具。
+//
+// 用途：工作流节点按任务性质声明工具档位（如「只需要读」的节点不注入
+// exec / write / delete），把 blast radius 收敛到任务实际需要的范围。
+// 本包不定义档位语义，只提供过滤能力；档位映射由调用方（workflow）维护。
+//
+// 与 WithSkipTools 的关系：skipTools 优先级更高——两者同时存在时以 skipTools 为准
+// （SubAgentManager 的工具注入整个被跳过，白名单无从生效）。
+func WithToolAllowlist(names ...string) Option {
+	// 拷贝一份，避免调用方后续修改切片影响已创建的 SubAgent。
+	cp := append([]string(nil), names...)
+	return func(sa *SubAgent) {
+		sa.toolAllowlist = cp
+	}
+}
+
+// toolAllowlistFrom 从选项列表中提取白名单，返回 nil 表示未设置。
+//
+// 与 hasSkipTools 同构：Option 是 func(*SubAgent)，无法直接读取，
+// 故用一个哨兵 SubAgent 应用所有选项后取其终值。
+func toolAllowlistFrom(opts ...Option) []string {
+	var probe SubAgent
+	for _, o := range opts {
+		o(&probe)
+	}
+	return probe.toolAllowlist
+}
+
+// filterToolsByName 按白名单过滤工具。
+//
+// allow 为空 → 原样返回（不限制）。
+// 白名单里不存在的名字被静默忽略——工具集可能随部署变化，
+// 硬报错会让旧配置在新环境直接崩掉。
+//
+// 注意：过滤后可能为空（如白名单全是过时名字）。调用方应在过滤后为空
+// 而原始非空时打日志告警，否则表现为「节点突然没有工具」且无任何线索。
+func filterToolsByName(tools []llm.Tool, allow []string) []llm.Tool {
+	if len(allow) == 0 {
+		return tools
+	}
+	want := make(map[string]bool, len(allow))
+	for _, n := range allow {
+		want[n] = true
+	}
+	filtered := make([]llm.Tool, 0, len(tools))
+	for _, t := range tools {
+		if want[t.Name] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+// applyToolAllowlist 按调用方声明的白名单过滤将要注入的工具。
+//
+// 返回过滤后的工具，以及 emptied 标志：过滤后为空但原始非空。
+// emptied 为 true 说明白名单与实际可用工具严重不匹配（工具改名、未注册、
+// 或档位映射表过时），**调用方必须告警**——否则表现为「节点突然没有工具」
+// 且日志里毫无线索，排查成本极高。
+func applyToolAllowlist(tools []llm.Tool, opts []Option) ([]llm.Tool, bool) {
+	allow := toolAllowlistFrom(opts...)
+	filtered := filterToolsByName(tools, allow)
+	return filtered, len(filtered) == 0 && len(tools) > 0
+}
+
 // String 返回 SubAgent 的可读描述。
 func (sa *SubAgent) String() string {
 	sa.mu.Lock()

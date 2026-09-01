@@ -105,6 +105,48 @@ func (p *BotWorkspaceToolProvider) Tools(ctx context.Context, sctx *tools.ToolSe
 // 工具定义
 // ============================================================================
 
+// recordWrite 向 ctx 中的记录器上报一次写操作。
+//
+// 用途：并发写冲突检测。工作流默认并行 3 个节点、共享同一 bot 工作区、
+// 无任何文件锁——两个节点覆盖同一文件时不会有任何痕迹，事后无从排查。
+//
+// 只在**操作成功之后**调用：失败的写入没有改变任何东西，记为写操作
+// 会产生虚假冲突。
+//
+// 未注入记录器时（非工作流路径，如主 Agent 直接调工具）静默跳过，
+// 零开销也零副作用。
+func recordWrite(ctx *llm.ToolExecContext, path, op string) {
+	if ctx == nil {
+		return
+	}
+	if rec := llm.PathRecorderFromContext(ctx); rec != nil {
+		rec.RecordWrite(path, op)
+	}
+}
+
+// WorkspaceToolNames 返回全部 bot 工作空间工具的名称。
+//
+// 这是工具名的**唯一真源**——供外部（如 workflow 的节点工具档位映射表）校验
+// 自己引用的名字确实存在。
+//
+// 为什么需要它：工具名在本包是以字面量硬编码的（各个 build*Tool 里），
+// 没有导出常量。外部若要按名字收敛工具集，只能再硬编码一份——两份清单
+// 会漂移，而漂移是**静默**的：名字对不上时工具被无声过滤掉，现象是
+// 「节点突然不能用某工具」且日志毫无线索。
+//
+// 因此外部应定期（至少在测试中）用本函数校验自己的名字清单。
+//
+// 实现说明：构造工具只组装 llm.Tool 结构体并捕获闭包，**不会解引用 mgr**
+// （mgr.GetOrCreate 等在 Execute 闭包内部才调用），故此处传 nil 是安全的。
+func WorkspaceToolNames() []string {
+	defs := botWorkspaceToolDefs(nil, "")
+	names := make([]string, 0, len(defs))
+	for _, d := range defs {
+		names = append(names, d.Name)
+	}
+	return names
+}
+
 // botWorkspaceToolDefs 返回全部 bot 工作空间工具定义。
 // botID 在闭包中捕获，确保工具执行时获取正确的 bot 工作空间。
 func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
@@ -525,6 +567,7 @@ func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if err := ws.WriteFile(ctx, path, data); err != nil {
 				return nil, err
 			}
+			recordWrite(ctx, path, "write")
 
 			lineCount := strings.Count(content, "\n") + 1
 			if content == "" {
@@ -638,6 +681,7 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if err := ws.WriteFile(ctx, path, []byte(newContent)); err != nil {
 				return nil, err
 			}
+			recordWrite(ctx, path, "replace")
 
 			return map[string]any{
 				"success":  true,
@@ -697,6 +741,7 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if result.ExitCode != 0 {
 				return nil, fmt.Errorf("delete failed: %s", result.Stderr)
 			}
+			recordWrite(ctx, path, "delete")
 
 			return map[string]any{
 				"success": true,
@@ -758,6 +803,10 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if result.ExitCode != 0 {
 				return nil, fmt.Errorf("move failed: %s", result.Stderr)
 			}
+			// 移动同时影响两个路径：源被移走、目标被覆盖。
+			// 两个都要记录，否则「A 移走 B 正在读的文件」这类冲突检测不到。
+			recordWrite(ctx, src, "move")
+			recordWrite(ctx, dst, "move")
 
 			return map[string]any{
 				"success": true,

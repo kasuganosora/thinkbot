@@ -34,6 +34,17 @@ type UsageMetric struct {
 
 	// Steps 编排步数。
 	Steps int
+
+	// WorkflowID / NodeID 标记调用来自哪条工作流的哪个节点。
+	//
+	// 非工作流路径（reply / dream / memory_compress 等）两者均为空。
+	//
+	// **重要**：这两项刻意**不参与 UsageDaily 的聚合维度**（那是
+	// bot/model/feature/channel/date 五维日聚合）。加入它们会把日聚合表
+	// 撑成明细表并破坏唯一索引语义。此处仅用于旁路写入逐条明细表
+	// （stats.WorkflowUsage），使「一条工作流花在哪」可回答。
+	WorkflowID string
+	NodeID     string
 }
 
 // UsageRecorder 是使用统计记录器的抽象接口。

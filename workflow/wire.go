@@ -96,6 +96,11 @@ type EngineConfig struct {
 	AnalyzerMaxDuration time.Duration
 	// GoalMaxIterations 目标模式（闭环循环）全局最大迭代轮数。0 表示代码兜底默认 5。
 	GoalMaxIterations int
+	// DefaultToolProfile 分析器未为节点声明工具档位时使用的默认档位。
+	// 空串视为 "full"（不过滤）。非法值在解析时报错，不静默降级。
+	// 默认 full 是刻意的：并行节点改代码是核心能力，一刀切降级会废掉它；
+	// 配置化是为了日后能在不改码的前提下收紧默认值。
+	DefaultToolProfile string
 }
 
 // Setup 创建并装配工作流引擎的所有组件。
@@ -267,5 +272,6 @@ func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.M
 		AnalyzerStuckTimeout: time.Duration(wc.AnalyzerStuckTimeoutMS) * time.Millisecond,
 		AnalyzerMaxDuration:  time.Duration(wc.AnalyzerMaxDurationMS) * time.Millisecond,
 		GoalMaxIterations:    wc.GoalMaxIterations,
+		DefaultToolProfile:   wc.DefaultToolProfile,
 	}
 }

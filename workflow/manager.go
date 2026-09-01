@@ -980,9 +980,17 @@ type StatusResult struct {
 	GoalMaxIterations int  `json:"goalMaxIterations,omitempty"`
 	// NeedsContinuation 标记工作流终态后后端已注入续跑消息，前端据此 resume 接收流式回复。
 	NeedsContinuation bool `json:"needsContinuation,omitempty"`
+
+	// WriteConflicts 检测到的并发写冲突。
+	// 面板走轮询 REST 拿到的是本结构，冲突必须在这里才能被用户看到。
+	WriteConflicts []WriteConflict `json:"writeConflicts,omitempty"`
 }
 
 // ProgressInfo 是工作流进度信息。
+//
+// Degraded / Blocked **不从** Completed / Failed 里扣除——那两个字段维持
+// 「调度层面是否跑完」的语义，新增的两个描述「结果性质」。
+// 前端据此可显示「3 完成（其中 1 降级）」，而不必改动既有进度条逻辑。
 type ProgressInfo struct {
 	Pending   int `json:"pending"`
 	Running   int `json:"running"`
@@ -990,6 +998,12 @@ type ProgressInfo struct {
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
 	Skipped   int `json:"skipped"`
+
+	// Degraded 已完成但结果降级（partial / noop）的节点数。
+	Degraded int `json:"degraded"`
+	// Blocked 因缺工具 / 缺上游数据而无法完成的节点数。
+	// 这类节点重跑无用，单独计数便于一眼看出「失败是环境问题还是质量问题」。
+	Blocked int `json:"blocked"`
 }
 
 // GetStatus 查询工作流状态。
@@ -1012,8 +1026,21 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 			progress.Reviewing++
 		case NodeCompleted:
 			progress.Completed++
+			// 降级与受阻**不**从 Completed 里扣除：它们确实跑完了，
+			// 单独计数的目的是让「3 完成」这类汇总不再掩盖质量差异。
+			// 前端可据此显示「3 完成（其中 1 降级）」。
+			switch {
+			case n.Outcome.IsBlocked():
+				progress.Blocked++
+			case n.Outcome.IsDegraded():
+				progress.Degraded++
+			}
 		case NodeFailed:
 			progress.Failed++
+			// 缺工具/缺数据的失败归入 Blocked，使「为什么失败」在汇总里可见
+			if n.Outcome.IsBlocked() {
+				progress.Blocked++
+			}
 		case NodeSkipped:
 			progress.Skipped++
 		}
@@ -1037,6 +1064,10 @@ func (m *Manager) GetStatus(wfID string) (*StatusResult, error) {
 		GoalIteration:     wf.GoalIteration,
 		GoalMaxIterations: wf.GoalMaxIterations,
 		NeedsContinuation: m.consumeNeedsContinuation(wf.ID),
+
+		// 并发写冲突：默认并行 3 节点共享同一工作区且无文件锁，
+		// 冲突必须能在详情接口看到，否则用户面对「结果莫名不对」毫无头绪。
+		WriteConflicts: wf.WriteConflicts,
 	}, nil
 }
 

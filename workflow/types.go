@@ -62,6 +62,18 @@ type DAGNode struct {
 	MaxRetries    int      `json:"maxRetries"`             // 执行错误最大重试次数（默认 2）
 	MaxIterations int      `json:"maxIterations"`          // Review 迭代上限（默认 3）
 
+	// ToolProfile 节点工具档位，决定该节点的 SubAgent 能拿到哪些工作空间工具。
+	//
+	// 这是**工具级最小权限**：节点 SubAgent 默认具备完整工作空间工具能力
+	// （含 sandbox_exec / delete_file，见 wire.go:162-169 与 sandbox/tools.go:86-89），
+	// 而默认 3 个节点并行、共享同一 bot 工作区、无任何文件锁。
+	// 按任务性质收敛工具面可以把 blast radius 限制在任务实际需要的范围。
+	// 详见 profile.go 的档位定义。
+	//
+	// 空值 = full（不过滤），保持存量数据与未声明场景的行为不变。
+	// 非法值在分析期即报错、不静默降级——见 ParseToolProfile。
+	ToolProfile ToolProfile `json:"toolProfile,omitempty"`
+
 	// Feedback 声明该节点 review 不通过时回退到的「上游节点」列表（目标模式闭环）。
 	// 仅当所属工作流开启 GoalMode 且本节点 Review=true 时生效。
 	// 反馈边是「受控闭环」：它不计入 DAG 的 Dependencies，因此不影响拓扑排序与环检测
@@ -86,6 +98,30 @@ type DAGNode struct {
 	// 供节点在下一轮执行（ExecuteWithFeedback）时作为修复依据。执行后立即清空。
 	// 运行时字段（不持久化语义依赖，但序列化无害）。
 	LoopFeedback string `json:"loopFeedback,omitempty"`
+
+	// Outcome 节点自报的结果类别（ok / noop / partial / missing_tool / missing_data）。
+	//
+	// 由 Review SubAgent 自报，与 Status **正交**：Status 是调度状态（是否跑完），
+	// Outcome 是结果性质（做没做成、为什么）。一个 completed 的节点也可能
+	// outcome=missing_tool——它确实"跑完了"，但什么都没做成。
+	//
+	// 空值等价 ok（向后兼容存量数据）。
+	// Workflow 整体 JSON 序列化进单列，故加此字段无需迁移。
+	Outcome NodeOutcome `json:"outcome,omitempty"`
+
+	// OutcomeReason 自报原因（一句话），供日志 / 事件 / 前端展示。
+	OutcomeReason string `json:"outcomeReason,omitempty"`
+
+	// WrittenOps 本节点执行期间对工作区的写操作：相对路径 → 操作类型列表
+	// （write / replace / delete / move）。
+	//
+	// 由 sandbox 的写类工具通过 ctx 上报（见 write_conflict.go）。
+	// 用于并发写冲突检测：默认并行 3 个节点共享同一工作区且无文件锁，
+	// 不记录就无从发现两个节点在覆盖同一文件。
+	//
+	// 存操作类型而非仅路径，是为了区分冲突的严重性——两个节点都「写」同一文件
+	// 与一个「删」另一个「读」，后者的损失不可逆，需要单独标出来。
+	WrittenOps map[string][]string `json:"writtenOps,omitempty"`
 }
 
 // ReviewRecord 记录一次 Review 的结果。
@@ -160,6 +196,13 @@ type Workflow struct {
 	// QuotaBreaks 累计熔断次数。用于防止「恢复 → 立刻又被限流 → 再熔断」无限循环，
 	// 超过上限后按失败收尾（见 maxQuotaBreaks）。
 	QuotaBreaks int `json:"quotaBreaks,omitempty"`
+
+	// WriteConflicts 检测到的并发写冲突。
+	//
+	// 默认并行 3 个节点共享同一 bot 工作区且无文件锁，多个节点覆盖同一路径
+	// 时不会报错也不会留痕。这里把冲突显式记录下来，供日志、事件与详情接口
+	// 消费——**只检测不阻断**，见 write_conflict.go 的说明。
+	WriteConflicts []WriteConflict `json:"writeConflicts,omitempty"`
 
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
@@ -267,6 +310,18 @@ type NodeFlat struct {
 	IterationCount int        `json:"iterationCount"`
 	StartedAt      *time.Time `json:"startedAt,omitempty"`
 	CompletedAt    *time.Time `json:"completedAt,omitempty"`
+
+	// Outcome 节点自报的结果类别。空值等价 ok。
+	//
+	// **必须暴露给前端**：workflow 面板走轮询 REST（GET /api/workflows/{id}/nodes），
+	// 拿到的是本结构。前端只按 status 渲染（✓/✗/◐），若不带上 outcome，
+	// 一个 completed 但 missing_tool 的节点在用户看来就是普通的 ✓——
+	// 而它实际上什么都没做成。这正是引入 Outcome 要解决的问题。
+	Outcome string `json:"outcome,omitempty"`
+	// OutcomeReason 自报原因（一句话），前端用于 hover 展示。
+	OutcomeReason string `json:"outcomeReason,omitempty"`
+	// ToolProfile 节点工具档位，供前端展示权限面。空值等价 full。
+	ToolProfile string `json:"toolProfile,omitempty"`
 }
 
 // ToFlat 将 DAGNode 转为精简的 NodeFlat 视图。
@@ -284,5 +339,8 @@ func (n *DAGNode) ToFlat() NodeFlat {
 		IterationCount: n.IterationCount,
 		StartedAt:      n.StartedAt,
 		CompletedAt:    n.CompletedAt,
+		Outcome:        n.Outcome.String(),
+		OutcomeReason:  n.OutcomeReason,
+		ToolProfile:    string(n.ToolProfile),
 	}
 }

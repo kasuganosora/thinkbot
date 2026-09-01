@@ -65,6 +65,17 @@ const (
 	EventWorkflowNodeRetrying  EventType = "workflow.node.retrying"  // 节点重试
 	EventWorkflowNodeSkipped   EventType = "workflow.node.skipped"   // 节点被级联跳过
 	EventWorkflowNodeHealed    EventType = "workflow.node.healed"    // 节点被自愈细化替换并续跑
+
+	// EventWorkflowNodeDegraded 节点完成但结果降级（partial / noop）。
+	// 与 completed 的区别：产物存在但不完整，或根本无事可做。
+	// 用户看到 ✓ 却不知道只做了一半，比看到失败更有害。
+	EventWorkflowNodeDegraded EventType = "workflow.node.degraded"
+	// EventWorkflowNodeBlocked 节点因缺工具 / 缺上游数据而无法完成。
+	// 这类失败不重试、不迭代——重跑解决不了环境事实。
+	EventWorkflowNodeBlocked EventType = "workflow.node.blocked"
+	// EventWorkflowWriteConflict 检测到同一工作流内多个节点写同一路径。
+	// 默认并发 3 且共享同一工作区、无文件锁，冲突需可见。
+	EventWorkflowWriteConflict EventType = "workflow.write_conflict"
 )
 
 // Event 是旁路事件总线中传递的事件。

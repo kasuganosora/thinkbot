@@ -8,6 +8,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
@@ -215,7 +216,52 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 			return err
 		}
 	}
+
+	// 工作流维度明细：旁路写入，与主聚合解耦。
+	//
+	// 刻意放在聚合**之后**且**不返回错误**：明细是可选的观测增强，
+	// 它失败绝不能影响日聚合这条主链路。代价是可能少几条明细，
+	// 这比让统计整体失败要划算得多。
+	r.flushWorkflowUsage(metrics)
+
 	return nil
+}
+
+// flushWorkflowUsage 把带工作流维度的调用写入逐条明细表。
+//
+// 只处理 WorkflowID 非空的指标——非工作流路径（reply / dream /
+// memory_compress 等）不产生任何明细，零额外开销。
+//
+// workflow / node 维度**不进**上面的聚合：那会破坏 UsageDaily 的日聚合粒度，
+// 详见 dao.WorkflowUsage 的说明。
+func (r *Recorder) flushWorkflowUsage(metrics []llm.UsageMetric) {
+	rows := make([]dao.WorkflowUsage, 0, len(metrics))
+	for _, m := range metrics {
+		if m.WorkflowID == "" {
+			continue
+		}
+		rows = append(rows, dao.WorkflowUsage{
+			WorkflowID:       m.WorkflowID,
+			NodeID:           m.NodeID,
+			BotID:            m.BotID,
+			Model:            m.Model,
+			Feature:          m.Feature,
+			InputTokens:      m.Usage.InputTokens,
+			OutputTokens:     m.Usage.OutputTokens,
+			TotalTokens:      m.Usage.TotalTokens,
+			CacheReadTokens:  m.Usage.InputTokenDetails.CacheReadTokens,
+			CacheWriteTokens: m.Usage.InputTokenDetails.CacheWriteTokens,
+			ToolCalls:        m.ToolCalls,
+			Steps:            m.Steps,
+		})
+	}
+	if len(rows) == 0 {
+		return
+	}
+	if err := r.db.CreateInBatches(rows, r.batchSize).Error; err != nil {
+		r.logger.Errorw("stats recorder: workflow usage flush failed",
+			"count", len(rows), "err", err)
+	}
 }
 
 // upsertRow 使用 SQLite 原生 UPSERT 语法插入或累加一行。

@@ -11,6 +11,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -301,8 +302,18 @@ func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task
 	// 注入主 Agent 在子 Agent 场景可用的工具（如有）。
 	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入，
 	// 避免误走 OrchestrateStream 多步编排循环导致卡死或延迟。
+	//
+	// 未跳过时按 WithToolAllowlist 的白名单收敛（空白名单 = 不过滤），
+	// 使调用方能按任务性质授予最小工具集。
 	if !hasSkipTools(opts...) {
-		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+		if resolved, err := m.resolveTools(ctx); err == nil && len(resolved) > 0 {
+			tools, emptied := applyToolAllowlist(resolved, opts)
+			if emptied {
+				if l := traceid.L(ctx); l != nil {
+					l.Warnw("subagent: tool allowlist filtered out every tool",
+						"allowlist", toolAllowlistFrom(opts...), "available", len(resolved))
+				}
+			}
 			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.toolStepsSnapshot()))
 		}
 	}
@@ -520,8 +531,16 @@ func (m *SubAgentManager) DelegateMany(ctx context.Context, systemPrompt string,
 
 	// 注入主 Agent 在子 Agent 场景可用的工具（如有），使其能操作工作空间。
 	// 但若调用方显式要求跳过工具（如 Analyzer 纯 LLM 任务），则不注入。
+	// 未跳过时按 WithToolAllowlist 的白名单收敛（空白名单 = 不过滤）。
 	if !hasSkipTools(opts...) {
-		if tools, err := m.resolveTools(ctx); err == nil && len(tools) > 0 {
+		if resolved, err := m.resolveTools(ctx); err == nil && len(resolved) > 0 {
+			tools, emptied := applyToolAllowlist(resolved, opts)
+			if emptied {
+				if l := traceid.L(ctx); l != nil {
+					l.Warnw("subagent: tool allowlist filtered out every tool",
+						"allowlist", toolAllowlistFrom(opts...), "available", len(resolved))
+				}
+			}
 			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.toolStepsSnapshot()))
 		}
 	}
@@ -648,7 +667,17 @@ func (m *SubAgentManager) Spawn(systemPrompt, name string, opts ...Option) (stri
 	// 与 Delegate 系保持一致：调用方显式 WithSkipTools() 时不注入工具。
 	// Spawn 已持有 m.mu 写锁，故使用 resolveToolsLocked 避免重入死锁。
 	if !hasSkipTools(opts...) {
-		if tools, err := m.resolveToolsLocked(context.Background()); err == nil && len(tools) > 0 {
+		if resolved, err := m.resolveToolsLocked(context.Background()); err == nil && len(resolved) > 0 {
+			tools, emptied := applyToolAllowlist(resolved, opts)
+			if emptied {
+				// Spawn 持锁路径传的是 Background ctx，traceid.L 取不到日志器，
+				// 退化为全局 logger（与 traceid.WithLoggerFrom 的兜底一致）。
+				// emptied 是配置错误级信号，不能静默丢弃。
+				if l := log.Logger; l != nil {
+					l.Warnw("subagent: tool allowlist filtered out every tool",
+						"allowlist", toolAllowlistFrom(opts...), "available", len(resolved))
+				}
+			}
 			allOpts = append(allOpts, WithTools(tools...), WithToolSteps(m.defaultToolSteps))
 		}
 	}
