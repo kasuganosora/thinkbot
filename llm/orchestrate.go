@@ -1363,7 +1363,7 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		// 可观测性：每次工具返回都带 trace_id 落日志（server 端可实时按 trace 追踪，
 		// 不再只能等 turn 末聚合 summary）。
 		if lg := traceid.L(ctx); lg != nil {
-			lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", true, "error", err.Error())
+			lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", true, "error", err.Error(), "input_preview", inputPreview(tc.Input))
 		}
 		if sendProgress != nil {
 			sendProgress(&StreamToolErrorPart{
@@ -1388,8 +1388,10 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		Payload: map[string]any{"invocation_id": invocationID, "is_error": false, "output_len": len(fmt.Sprintf("%v", output))},
 	})
 	// 可观测性：每次工具返回都带 trace_id 落日志（output 预览截断，避免日志膨胀）。
+	// input_preview 记入参（300 字符截断，与事件轨迹同函数）：2026-09-01 复盘
+	// 「bot 搜记忆答不上」时无法从日志还原查询关键词，自此可审计调用意图。
 	if lg := traceid.L(ctx); lg != nil {
-		lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", false, "output_preview", truncateStr(fmt.Sprintf("%v", output), 1000))
+		lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", false, "output_preview", truncateStr(fmt.Sprintf("%v", output), 1000), "input_preview", inputPreview(tc.Input))
 	}
 
 	// Apply output truncation to prevent context bloat.
