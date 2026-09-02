@@ -130,12 +130,23 @@ type MisskeyChannel struct {
 	// 用于区分首次连接与重连（>1 即为重连），并在日志中暴露重连是否真的成功。
 	streamConnects atomic.Int64
 
-	// pollNotes 追踪 bot 发出的投票帖 → interaction questionID。
-	// 当用户在 Misskey 上对投票帖投票时，WS 收到 pollVoted 事件，
-	// 通过此映射找到对应的 questionID 并调用 interaction.Resolve 唤醒等待。
+	// pollNotes 追踪 bot 发出的投票帖。单选首票即 ResolveFrom；多选累计 unique
+	// 下标，debounce 后一次性回填（Misskey 每个选项单独发 pollVoted，没有 done）。
 	pollNotesMu sync.Mutex
-	pollNotes   map[string]string // noteID → questionID
+	pollNotes   map[string]*pollNoteState
 }
+
+// pollNoteState 是一条 bot 投票帖的进行中状态。
+type pollNoteState struct {
+	QuestionID string
+	Multiple   bool
+	Selected   []int // unique choice indices
+	OptionN    int
+	LastVoter  string
+	timer      *time.Timer
+}
+
+const pollMultiDebounce = 3 * time.Second
 
 // NewChannel 创建一个 MisskeyChannel。
 func NewChannel(name, botID string, cfg Config) *MisskeyChannel {
@@ -155,7 +166,7 @@ func NewChannel(name, botID string, cfg Config) *MisskeyChannel {
 		cfg:       cfg,
 		hc:        http.New(),
 		api:       newAPIClient(cfg.Host, cfg.Token),
-		pollNotes: make(map[string]string),
+		pollNotes: make(map[string]*pollNoteState),
 	}
 }
 
@@ -571,20 +582,20 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			if note.Text == "" && len(note.Files) == 0 && note.Renote == nil {
 				return nil
 			}
-		// timeline 上的帖子若明确指向本 Bot（字面 @ / 回复了 Bot 帖子 / mentions 含 Bot），
-		// 视为被真人提及（Mentioned=true），走单聊路径由 Bot 自行决定回复。
-		// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention/reply 事件因
-		// 去重晚到被丢弃时，指向 Bot 的回复会被当成普通时间线消息，被聊天节奏按概率
-		// 降频，用户体感即「回复了 Bot 却没反应」。详见 timelineMentioned。
-		mentioned := c.timelineMentioned(note)
-		c.handleNote(ctx, note, "timeline", mentioned)
-		// 指向本 Bot 的帖子经 timeline 路径成功处理后，同样必须推进 mention 锚点。
-		// 否则锚点停留在旧值，每次断连 backfill（sinceId=锚点）都会把这条及之后
-		// 所有 mention 重新拉取一遍——2 分钟的 dedupSeen 窗口挡不住几十分钟后的
-		// 重放，导致同一帖子被重复生成回复甚至重复外发（2026-09-01 事故根因）。
-		if mentioned {
-			c.setMentionAnchor(note.ID)
-		}
+			// timeline 上的帖子若明确指向本 Bot（字面 @ / 回复了 Bot 帖子 / mentions 含 Bot），
+			// 视为被真人提及（Mentioned=true），走单聊路径由 Bot 自行决定回复。
+			// 否则当同一条帖子先以 timeline 形式到达、main 通道的 mention/reply 事件因
+			// 去重晚到被丢弃时，指向 Bot 的回复会被当成普通时间线消息，被聊天节奏按概率
+			// 降频，用户体感即「回复了 Bot 却没反应」。详见 timelineMentioned。
+			mentioned := c.timelineMentioned(note)
+			c.handleNote(ctx, note, "timeline", mentioned)
+			// 指向本 Bot 的帖子经 timeline 路径成功处理后，同样必须推进 mention 锚点。
+			// 否则锚点停留在旧值，每次断连 backfill（sinceId=锚点）都会把这条及之后
+			// 所有 mention 重新拉取一遍——2 分钟的 dedupSeen 窗口挡不住几十分钟后的
+			// 重放，导致同一帖子被重复生成回复甚至重复外发（2026-09-01 事故根因）。
+			if mentioned {
+				c.setMentionAnchor(note.ID)
+			}
 		default:
 			// 忽略其他 timeline 事件
 		}
@@ -1191,9 +1202,12 @@ func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID s
 		return "", errs.Wrap(err, "misskey CreatePollNote")
 	}
 
-	// Register mapping: noteID → questionID for pollVoted event handling
 	c.pollNotesMu.Lock()
-	c.pollNotes[noteID] = questionID
+	c.pollNotes[noteID] = &pollNoteState{
+		QuestionID: questionID,
+		Multiple:   multiple,
+		OptionN:    len(options),
+	}
 	c.pollNotesMu.Unlock()
 
 	traceid.L(ctx).Infow("misskey: poll note created",
@@ -1205,7 +1219,7 @@ func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID s
 
 // handlePollVoted handles Misskey WS pollVoted notification.
 // When a user votes on bot's poll note, this finds the associated questionID
-// via pollNotes map and calls interaction.Resolve to unblock user_choice.
+// via pollNotes map and calls interaction.ResolveFrom to unblock user_choice.
 func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessage) {
 	// Misskey pollVoted body: {"noteId":"...","choice":0,"userId":"..."}
 	var pv struct {
@@ -1222,31 +1236,153 @@ func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessa
 		return
 	}
 
-	// Look up associated questionID
 	c.pollNotesMu.Lock()
-	questionID, ok := c.pollNotes[pv.NoteID]
+	st, ok := c.pollNotes[pv.NoteID]
 	if !ok {
 		c.pollNotesMu.Unlock()
 		traceid.L(ctx).Debugw("misskey: pollVoted for unknown note (not our poll)",
 			"channel", c.name, "note_id", pv.NoteID)
 		return
 	}
-	// Remove mapping on first vote (single-choice; multi-choice handled by upper layer if needed)
-	delete(c.pollNotes, pv.NoteID)
-	c.pollNotesMu.Unlock()
-
-	// Resolve the interaction
-	ans := interaction.Answer{
-		Selected:    []int{pv.Choice},
-		CustomInput: "",
-		Via:         interaction.ViaMisskey,
+	action := applyPollVote(st, pv.Choice)
+	st.LastVoter = pv.UserID
+	switch action {
+	case pollVoteIgnore:
+		c.pollNotesMu.Unlock()
+		return
+	case pollVoteResolveNow:
+		qid := st.QuestionID
+		sel := append([]int(nil), st.Selected...)
+		voter := st.LastVoter
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		delete(c.pollNotes, pv.NoteID)
+		c.pollNotesMu.Unlock()
+		c.tryResolvePoll(ctx, pv.NoteID, qid, voter, sel, st)
+		return
+	case pollVoteDebounce:
+		noteID := pv.NoteID
+		if st.timer != nil {
+			st.timer.Stop()
+		}
+		st.timer = time.AfterFunc(pollMultiDebounce, func() {
+			c.flushMultiPoll(ctx, noteID)
+		})
+		c.pollNotesMu.Unlock()
+		return
+	default:
+		c.pollNotesMu.Unlock()
 	}
-	if err := interaction.Default().Resolve(questionID, ans); err != nil {
-		traceid.L(ctx).Warnw("misskey: pollVoted resolve failed",
-			"channel", c.name, "question_id", questionID, "choice", pv.Choice, "err", err)
+}
+
+type pollVoteAction int
+
+const (
+	pollVoteIgnore pollVoteAction = iota
+	pollVoteResolveNow
+	pollVoteDebounce
+)
+
+// addPollChoice 把 unique choice 记入 st.Selected；越界或重复返回 false。
+func addPollChoice(st *pollNoteState, choice int) bool {
+	if st == nil || choice < 0 || (st.OptionN > 0 && choice >= st.OptionN) {
+		return false
+	}
+	for _, s := range st.Selected {
+		if s == choice {
+			return false
+		}
+	}
+	st.Selected = append(st.Selected, choice)
+	return true
+}
+
+// applyPollVote 把一次 pollVoted 记入状态，决定立刻 Resolve / debounce / 忽略。
+func applyPollVote(st *pollNoteState, choice int) pollVoteAction {
+	if st == nil {
+		return pollVoteIgnore
+	}
+	if !st.Multiple {
+		if st.OptionN > 0 && choice >= st.OptionN {
+			return pollVoteIgnore
+		}
+		st.Selected = []int{choice}
+		return pollVoteResolveNow
+	}
+	if !addPollChoice(st, choice) {
+		return pollVoteIgnore
+	}
+	if st.OptionN > 0 && len(st.Selected) >= st.OptionN {
+		return pollVoteResolveNow
+	}
+	return pollVoteDebounce
+}
+
+func (c *MisskeyChannel) flushMultiPoll(ctx context.Context, noteID string) {
+	c.pollNotesMu.Lock()
+	st, ok := c.pollNotes[noteID]
+	if !ok {
+		c.pollNotesMu.Unlock()
 		return
 	}
+	qid := st.QuestionID
+	sel := append([]int(nil), st.Selected...)
+	voter := st.LastVoter
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	delete(c.pollNotes, noteID)
+	c.pollNotesMu.Unlock()
+	if len(sel) == 0 {
+		return
+	}
+	c.tryResolvePoll(ctx, noteID, qid, voter, sel, st)
+}
 
+// tryResolvePoll 在已从 pollNotes 摘掉 mapping 之后回填。voter 不匹配时把 mapping 放回去，
+// 好让真正的会话主人稍后还能投；已终态 / 找不到则丢弃。
+func (c *MisskeyChannel) tryResolvePoll(ctx context.Context, noteID, questionID, voterID string, selected []int, st *pollNoteState) {
+	if !c.resolvePollVote(ctx, questionID, voterID, selected, noteID) {
+		c.pollNotesMu.Lock()
+		if _, exists := c.pollNotes[noteID]; !exists && st != nil {
+			c.pollNotes[noteID] = st
+		}
+		c.pollNotesMu.Unlock()
+	}
+}
+
+// resolvePollVote 回填 user_choice。返回 true 表示 mapping 应丢弃。
+func (c *MisskeyChannel) resolvePollVote(ctx context.Context, questionID, voterID string, selected []int, noteID string) bool {
+	ans := interaction.Answer{
+		Selected: selected,
+		Via:      interaction.ViaMisskey,
+	}
+	q, err := interaction.Default().Lookup(questionID)
+	if err != nil {
+		traceid.L(ctx).Debugw("misskey: poll resolve lookup failed",
+			"channel", c.name, "question_id", questionID, "err", err)
+		return true
+	}
+	chatID := voterID
+	if q.ChatID != "" && q.ChatID != voterID {
+		traceid.L(ctx).Warnw("misskey: poll voter does not match question chat",
+			"channel", c.name, "question_id", questionID,
+			"chat_id", q.ChatID, "voter", voterID, "note_id", noteID)
+		return false
+	}
+	if q.ChatID == "" {
+		chatID = ""
+	}
+	if err := interaction.Default().ResolveFrom(questionID, chatID, ans); err != nil {
+		traceid.L(ctx).Warnw("misskey: pollVoted resolve failed",
+			"channel", c.name, "question_id", questionID, "selected", selected, "err", err)
+		return true
+	}
 	traceid.L(ctx).Infow("misskey: poll vote resolved user_choice",
-		"channel", c.name, "question_id", questionID, "note_id", pv.NoteID, "choice", pv.Choice, "user_id", pv.UserID)
+		"channel", c.name, "question_id", questionID, "note_id", noteID,
+		"selected", selected, "user_id", voterID)
+	return true
 }

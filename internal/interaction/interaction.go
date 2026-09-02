@@ -227,13 +227,14 @@ type Registry struct {
 // （而非返回 unsupported 降级为纯文本）。
 //
 // 参数与 MisskeyChannel.CreatePollNote 签名一致：
-//   ctx: 上下文
-//   question: 题目文本
-//   replyID: 回复目标帖子 ID（可选）
-//   options: 选项文本列表
-//   multiple: 是否多选
-//   timeoutSecs: 过期时间（秒）
-//   questionID: 关联的 interaction questionID
+//
+//	ctx: 上下文
+//	question: 题目文本
+//	replyID: 回复目标帖子 ID（可选）
+//	options: 选项文本列表
+//	multiple: 是否多选
+//	timeoutSecs: 过期时间（秒）
+//	questionID: 关联的 interaction questionID
 //
 // 返回新建帖子 ID（noteID），用于日志和追踪。
 type PollCreator func(ctx context.Context, question, replyID string, options []string, multiple bool, timeoutSecs int, questionID string) (string, error)
@@ -318,14 +319,16 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 func (r *Registry) Lookup(questionID string) (Question, error) {
 	r.mu.Lock()
 	e, ok := r.entries[questionID]
-	r.mu.Unlock()
 	if !ok {
+		r.mu.Unlock()
 		return Question{}, fmt.Errorf("%w: %s", ErrQuestionNotFound, questionID)
 	}
-	// 拷贝快照，防止外部通过共享切片改动内部状态。
+	// 必须在锁内拷贝 Status 与 Options：Resolve/finalize 会写 Status，
+	// 解锁后再读 e.question 会与并发 Resolve 形成 data race。
 	snap := e.question
 	opts := make([]Option, len(snap.Options))
 	copy(opts, snap.Options)
+	r.mu.Unlock()
 	snap.Options = opts
 	return snap, nil
 }
@@ -336,27 +339,8 @@ func (r *Registry) Lookup(questionID string) (Question, error) {
 // 校验失败返回对应错误且不改状态。
 func (r *Registry) Resolve(questionID string, ans Answer) error {
 	r.mu.Lock()
-	e, ok := r.entries[questionID]
-	if !ok {
-		r.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrQuestionNotFound, questionID)
-	}
-	if e.question.Status != StatusPending {
-		r.mu.Unlock()
-		return fmt.Errorf("%w: 当前状态 %s", ErrAlreadyResolved, e.question.Status)
-	}
-	if err := ans.validate(&e.question); err != nil {
-		r.mu.Unlock()
-		return err
-	}
-	// 拷贝 Selected，隔离调用方切片。
-	sel := make([]int, len(ans.Selected))
-	copy(sel, ans.Selected)
-	e.answer = Answer{Selected: sel, CustomInput: ans.CustomInput, Via: ans.Via}
-	e.question.Status = StatusAnswered
-	close(e.done)
-	r.mu.Unlock()
-	return nil
+	defer r.mu.Unlock()
+	return r.applyLocked(questionID, ans, "")
 }
 
 // ResolveFrom 是带「会话归属校验」的 Resolve：只有来自问题所属会话空间的
@@ -367,22 +351,39 @@ func (r *Registry) Resolve(questionID string, ans Answer) error {
 // chatID 传空表示调用方无法提供会话上下文（如内部调用），此时退回 Resolve
 // 的行为——**注意这是宽松分支，对外接口必须传值**。
 func (r *Registry) ResolveFrom(questionID, chatID string, ans Answer) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.applyLocked(questionID, ans, chatID)
+}
+
+// applyLocked 在持锁状态下校验并回填应答。
+// chatID 非空时做会话归属校验：Question.ChatID 为空则跳过（老数据/非会话场景），
+// 有则必须相等。ChatID 校验与 apply 在同一把锁内完成，避免
+// 「先检查再 Resolve」窗口里被偷来的 questionID 抢先回填。
+func (r *Registry) applyLocked(questionID string, ans Answer, chatID string) error {
+	e, ok := r.entries[questionID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrQuestionNotFound, questionID)
+	}
 	if chatID != "" {
-		r.mu.Lock()
-		e, ok := r.entries[questionID]
-		if !ok {
-			r.mu.Unlock()
-			return fmt.Errorf("%w: %s", ErrQuestionNotFound, questionID)
-		}
 		want := e.question.ChatID
-		r.mu.Unlock()
-		// 问题自身没记会话空间时不做校验（老数据/非会话场景），有则必须相等。
 		if want != "" && want != chatID {
 			return fmt.Errorf("%w: 应答来自会话 %q，问题属于会话 %q",
 				ErrQuestionNotFound, chatID, want)
 		}
 	}
-	return r.Resolve(questionID, ans)
+	if e.question.Status != StatusPending {
+		return fmt.Errorf("%w: 当前状态 %s", ErrAlreadyResolved, e.question.Status)
+	}
+	if err := ans.validate(&e.question); err != nil {
+		return err
+	}
+	sel := make([]int, len(ans.Selected))
+	copy(sel, ans.Selected)
+	e.answer = Answer{Selected: sel, CustomInput: ans.CustomInput, Via: ans.Via}
+	e.question.Status = StatusAnswered
+	close(e.done)
+	return nil
 }
 
 // IndicesForOptionIDs 把渲染层回填的选项 ID 列表翻译成内部下标列表。
@@ -441,7 +442,13 @@ func (r *Registry) Wait(ctx context.Context, questionID string) (Question, Answe
 		// 终态：answered / timeout / cancelled。
 		r.mu.Lock()
 		snap := e.question
+		opts := make([]Option, len(snap.Options))
+		copy(opts, snap.Options)
+		snap.Options = opts
 		ans := e.answer
+		sel := make([]int, len(ans.Selected))
+		copy(sel, ans.Selected)
+		ans.Selected = sel
 		status := snap.Status
 		r.mu.Unlock()
 		switch status {
@@ -516,6 +523,14 @@ func (r *Registry) cleanup(questionID string) {
 // 防止长跑进程的注册表无限增长。
 func (r *Registry) CleanupFinal(questionID string) {
 	r.cleanup(questionID)
+}
+
+// AbortPending 取消仍处于 pending 的问题并立刻从注册表移除。
+// 用于投票/消息创建失败：CleanupFinal 对 pending 是空操作（不能直接删 pending，
+// 否则 Wait 会永远卡在无人关闭的 done 上），必须先 Cancel 落到终态再清理。
+func (r *Registry) AbortPending(questionID string) {
+	_ = r.Cancel(questionID)
+	r.CleanupFinal(questionID)
 }
 
 // PendingCount 返回当前 pending 的问题数（测试与监控用）。

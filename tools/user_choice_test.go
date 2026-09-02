@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -252,5 +253,120 @@ func TestUserChoicePayloadJSON(t *testing.T) {
 	}
 	if back["questionId"] != "uc-x" || back["mode"] != "multi" {
 		t.Fatalf("json roundtrip mismatch: %s", b)
+	}
+}
+
+func TestCapTimeoutSecs(t *testing.T) {
+	if got := capTimeoutSecs(context.Background(), 0); got != interaction.DefaultTimeoutSecs {
+		t.Fatalf("no deadline, 0 → default, got %d", got)
+	}
+	if got := capTimeoutSecs(context.Background(), 120); got != 120 {
+		t.Fatalf("no deadline keeps 120, got %d", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if got := capTimeoutSecs(ctx, 600); got > 30 || got < userChoiceMinTimeoutSecs {
+		t.Fatalf("capped timeout = %d, want in [%d, 30]", got, userChoiceMinTimeoutSecs)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel2()
+	if got := capTimeoutSecs(ctx2, 600); got != userChoiceMinTimeoutSecs {
+		t.Fatalf("tiny remaining should floor to %d, got %d", userChoiceMinTimeoutSecs, got)
+	}
+}
+
+func TestUserChoiceMisskeyOneOptionUnsupported(t *testing.T) {
+	called := false
+	interaction.RegisterPollCreator("misskey", func(ctx context.Context, question, replyID string, options []string, multiple bool, timeoutSecs int, questionID string) (string, error) {
+		called = true
+		return "should-not-create", nil
+	})
+	t.Cleanup(func() { interaction.RegisterPollCreator("misskey", nil) })
+
+	ctx := agenttools.ContextWithMessageMeta(context.Background(),
+		agenttools.MessageMeta{BotID: "b1", ChatID: "user-1", ChannelType: "misskey"})
+	out, err := execUserChoice(&llm.ToolExecContext{Context: ctx}, choiceInputJSON("只有一项", 1, "single"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := out.(map[string]any)
+	if m["status"] != "unsupported" {
+		t.Fatalf("status = %v, want unsupported", m["status"])
+	}
+	if called {
+		t.Fatal("CreatePollNote must not be called with 1 option")
+	}
+}
+
+func TestUserChoicePollCreateFailureCleansUp(t *testing.T) {
+	var qid string
+	interaction.RegisterPollCreator("telegram", func(ctx context.Context, question, replyID string, options []string, multiple bool, timeoutSecs int, questionID string) (string, error) {
+		qid = questionID
+		return "", errors.New("send failed")
+	})
+	t.Cleanup(func() { interaction.RegisterPollCreator("telegram", nil) })
+
+	ctx := agenttools.ContextWithMessageMeta(context.Background(),
+		agenttools.MessageMeta{BotID: "b1", ChatID: "12345", ChannelType: "telegram"})
+	out, err := execUserChoice(&llm.ToolExecContext{Context: ctx}, choiceInputJSON("选一个", 3, "single"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := out.(map[string]any)
+	if m["status"] != "unsupported" {
+		t.Fatalf("status = %v, want unsupported", m["status"])
+	}
+	if qid == "" {
+		t.Fatal("PollCreator was not called")
+	}
+	if _, err := interaction.Default().Lookup(qid); !errors.Is(err, interaction.ErrQuestionNotFound) {
+		t.Fatalf("failed create leaked question %s: %v", qid, err)
+	}
+}
+
+func TestUserChoicePollCreatorAnswered(t *testing.T) {
+	gotID := make(chan string, 1)
+	interaction.RegisterPollCreator("telegram", func(ctx context.Context, question, replyID string, options []string, multiple bool, timeoutSecs int, questionID string) (string, error) {
+		select {
+		case gotID <- questionID:
+		default:
+		}
+		return "99", nil
+	})
+	t.Cleanup(func() { interaction.RegisterPollCreator("telegram", nil) })
+
+	ctx := agenttools.ContextWithMessageMeta(context.Background(),
+		agenttools.MessageMeta{BotID: "b1", ChatID: "12345", ChannelType: "telegram", ReplyTarget: "12345"})
+	done := make(chan any, 1)
+	go func() {
+		out, err := execUserChoice(&llm.ToolExecContext{Context: ctx}, choiceInputJSON("选一个", 3, "single"))
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- out
+	}()
+
+	var qid string
+	select {
+	case qid = <-gotID:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PollCreator was not called")
+	}
+	if err := interaction.Default().ResolveFrom(qid, "12345", interaction.Answer{
+		Selected: []int{0}, Via: interaction.ViaTelegram,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := <-done
+	if err, ok := res.(error); ok {
+		t.Fatal(err)
+	}
+	m, _ := res.(map[string]any)
+	if m["status"] != "answered" {
+		t.Fatalf("status = %v", m["status"])
+	}
+	if m["noteId"] != "99" {
+		t.Fatalf("noteId = %v", m["noteId"])
 	}
 }

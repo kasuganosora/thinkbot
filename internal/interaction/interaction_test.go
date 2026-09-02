@@ -256,3 +256,123 @@ func TestOptionsIsolation(t *testing.T) {
 		t.Fatal("options slice leaked to caller")
 	}
 }
+
+func TestLookupCopiesUnderLock(t *testing.T) {
+	r := NewRegistry()
+	if _, err := r.RegisterQuestion(validQuestion("lk-copy")); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := r.Lookup("lk-copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap.Options[0].Label = "篡改 Lookup 返回值"
+	snap.Status = StatusAnswered
+	again, err := r.Lookup("lk-copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Options[0].Label == "篡改 Lookup 返回值" {
+		t.Fatal("Lookup returned a shared Options slice")
+	}
+	if again.Status != StatusPending {
+		t.Fatalf("Lookup snapshot Status leaked mutation: %s", again.Status)
+	}
+
+	// concurrent Resolve must not race with Lookup (run with -race)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			s, _ := r.Lookup("lk-copy")
+			_ = s.Status
+			if len(s.Options) > 0 {
+				s.Options[0].Label = "x"
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		time.Sleep(time.Millisecond)
+		_ = r.Resolve("lk-copy", Answer{Selected: []int{0}, Via: ViaWeb})
+	}()
+	wg.Wait()
+	final, err := r.Lookup("lk-copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Status != StatusAnswered {
+		t.Fatalf("status after concurrent Lookup/Resolve = %s", final.Status)
+	}
+}
+
+func TestResolveFromWrongChatID(t *testing.T) {
+	r := NewRegistry()
+	if _, err := r.RegisterQuestion(validQuestion("rf-wrong")); err != nil {
+		t.Fatal(err)
+	}
+	err := r.ResolveFrom("rf-wrong", "other-chat", Answer{Selected: []int{0}, Via: ViaWeb})
+	if !errors.Is(err, ErrQuestionNotFound) {
+		t.Fatalf("want ErrQuestionNotFound, got %v", err)
+	}
+	snap, _ := r.Lookup("rf-wrong")
+	if snap.Status != StatusPending {
+		t.Fatalf("wrong-chat ResolveFrom mutated status: %s", snap.Status)
+	}
+
+	// concurrent rightful Resolve, then a stolen-chat ResolveFrom must still reject
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var rightErr, stolenErr error
+	go func() {
+		defer wg.Done()
+		rightErr = r.Resolve("rf-wrong", Answer{Selected: []int{1}, Via: ViaWeb})
+	}()
+	go func() {
+		defer wg.Done()
+		stolenErr = r.ResolveFrom("rf-wrong", "stolen-chat", Answer{Selected: []int{0}, Via: ViaWeb})
+	}()
+	wg.Wait()
+	if rightErr != nil && !errors.Is(rightErr, ErrAlreadyResolved) {
+		t.Fatalf("rightful Resolve: %v", rightErr)
+	}
+	if stolenErr == nil {
+		t.Fatal("stolen-chat ResolveFrom succeeded")
+	}
+	if !errors.Is(stolenErr, ErrQuestionNotFound) && !errors.Is(stolenErr, ErrAlreadyResolved) {
+		t.Fatalf("stolen-chat err = %v", stolenErr)
+	}
+	snap, _ = r.Lookup("rf-wrong")
+	if snap.Status != StatusAnswered {
+		t.Fatalf("status = %s, want answered", snap.Status)
+	}
+}
+
+func TestResolveFromMatchingChatID(t *testing.T) {
+	r := NewRegistry()
+	if _, err := r.RegisterQuestion(validQuestion("rf-ok")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ResolveFrom("rf-ok", "chat-1", Answer{Selected: []int{2}, Via: ViaTelegram}); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := r.Lookup("rf-ok")
+	if snap.Status != StatusAnswered {
+		t.Fatalf("status = %s", snap.Status)
+	}
+}
+
+func TestAbortPending(t *testing.T) {
+	r := NewRegistry()
+	if _, err := r.RegisterQuestion(validQuestion("ab")); err != nil {
+		t.Fatal(err)
+	}
+	r.AbortPending("ab")
+	if _, err := r.Lookup("ab"); !errors.Is(err, ErrQuestionNotFound) {
+		t.Fatalf("AbortPending should cancel+remove, got %v", err)
+	}
+	if n := r.PendingCount(); n != 0 {
+		t.Fatalf("pending after AbortPending = %d", n)
+	}
+}

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -15,21 +16,23 @@ import (
 // ============================================================================
 // user_choice 工具 — 阻塞式向用户提问并等待选择
 //
-// 平台支持现状（**以实现为准，勿按设想描述**）：
+// 平台支持现状（**以实现为准**）：
 //   - web：已支持。工具进度事件携带结构化 payload → 前端 ChoiceCard 内联卡片，
 //     点选/输入后经 POST /api/user-choice/{questionId}/answer 回填。
-//   - misskey：已支持。通过 Misskey 原生 poll（投票）功能实现，
-//     用户在 Misskey UI 上直接点选选项 → WS pollVoted 事件 → interaction.Resolve
-//     唤醒工具等待。体验与 web 端 ChoiceCard 对等。
-//   - telegram：**尚未实现回填通路**。该平台既没有把 payload 渲染成原生控件
-//     （inline keyboard），也没有把用户的后续输入解析回 interaction 注册表。
-//     因此在 telegram 上本工具仍快速失败（返回 unsupported），让模型改用纯文本提问。
+//   - misskey：已支持。通过 Misskey 原生 poll 实现；至少 2 个选项。
+//     用户在 Misskey UI 上点选 → WS pollVoted → interaction.ResolveFrom。
+//   - telegram：已支持。channel 发送 InlineKeyboardMarkup，callback_query
+//     经 interaction.ResolveFrom 回填（单选一点即决；多选需点「确认」）。
 // ============================================================================
 
 // userChoiceKeepaliveInterval 是等待用户作答期间重发卡片事件的间隔。
 // 必须明显小于 SSE 的空闲超时（api/handler_chat.go idleTimeout=120s），
 // 取 30s 留足余量（丢一两次事件也不至于触发空闲判定）。
 const userChoiceKeepaliveInterval = 30 * time.Second
+
+// userChoiceMinTimeoutSecs 是把 TimeoutSecs 钳到 ctx deadline 时的下限。
+// 剩 0~1 秒会被当成「立刻超时」，看起来像取消；留几秒让 Wait 能以 timeout 终态返回。
+const userChoiceMinTimeoutSecs = 5
 
 // userChoiceInput 是工具入参（LLM 生成）。
 type userChoiceInput struct {
@@ -72,15 +75,38 @@ type UserChoiceEventPayload struct {
 	ReplyTarget string `json:"replyTarget,omitempty"`
 }
 
+// capTimeoutSecs 若 ctx 带 deadline 且 timeoutSecs 超过剩余时间，则钳到剩余秒数
+// （至少 userChoiceMinTimeoutSecs）。无 deadline 时原样返回（0/负值留给 RegisterQuestion 默认化）。
+func capTimeoutSecs(ctx context.Context, timeoutSecs int) int {
+	if timeoutSecs <= 0 {
+		timeoutSecs = interaction.DefaultTimeoutSecs
+	}
+	if ctx == nil {
+		return timeoutSecs
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return timeoutSecs
+	}
+	remain := int(time.Until(dl) / time.Second)
+	if remain < userChoiceMinTimeoutSecs {
+		remain = userChoiceMinTimeoutSecs
+	}
+	if timeoutSecs > remain {
+		return remain
+	}
+	return timeoutSecs
+}
+
 // userChoiceToolDef 创建 user_choice 工具定义。
 func userChoiceToolDef() agenttools.ToolDef {
 	return agenttools.ToolDef{
 		Tool: llm.Tool{
 			Name: "user_choice",
 			Description: "Present a question with selectable options to the user and BLOCK until they answer. " +
-			"Rendered natively per platform (web: interactive card, misskey: native poll, telegram: inline buttons). " +
-			"Returns {status:\"answered\", selected:[...], custom_input:\"...\", via:\"...\"} or {status:\"timeout\"}. " +
-			"On timeout, gracefully continue without the user's input (make a sensible default decision or ask again later) — never loop waiting.",
+				"Rendered natively per platform (web: interactive card, misskey: native poll, telegram: inline buttons). " +
+				"Returns {status:\"answered\", selected:[...], custom_input:\"...\", via:\"...\"} or {status:\"timeout\"}. " +
+				"On timeout, gracefully continue without the user's input (make a sensible default decision or ask again later) — never loop waiting.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -145,6 +171,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 	if in.Mode != string(interaction.ModeSingle) && in.Mode != string(interaction.ModeMulti) {
 		return nil, fmt.Errorf("user_choice: mode 须为 single 或 multi")
 	}
+	in.TimeoutSecs = capTimeoutSecs(ctx.Context, in.TimeoutSecs)
 
 	// ---- 来源平台：从 CallOrigin / context 推断 ----
 	// interaction 包不依赖 api 层，这里用轻量 context key 读取本轮消息元信息
@@ -155,9 +182,17 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 	case "", "web":
 		// web，或无 channel 上下文的内部调用（子代理 / 单测）：走完整交互流程。
 	default:
-		// 非 web 平台：尝试使用平台原生的投票创建器（如 Misskey poll）。
-		// 若该平台已注册 PollCreator，创建投票帖 + 注册问题 + 阻塞等待投票结果，
-		// 体验与 web 端 ChoiceCard 对等（用户在平台 UI 上直接点选）。
+		// Misskey 原生 poll 至少 2 项；1 项在 CreatePollNote 也会失败，这里提前降级
+		// 避免先 RegisterQuestion 再踩雷留下 pending。
+		if meta.ChannelType == "misskey" && len(in.Options) < 2 {
+			return map[string]any{
+				"status":   "unsupported",
+				"platform": meta.ChannelType,
+				"message":  "Misskey 投票至少需要 2 个选项。请增加选项，或改用普通文本把问题列出来让用户直接回复；不要重试本工具。",
+			}, nil
+		}
+		// 非 web 平台：尝试使用平台原生的投票创建器（Misskey poll / Telegram inline keyboard）。
+		// 若该平台已注册 PollCreator，创建原生控件 + 注册问题 + 阻塞等待结果。
 		// 未注册的平台仍降级为 unsupported（让模型用纯文本提问）。
 		pollFn := interaction.GetPollCreator(meta.ChannelType)
 		if pollFn == nil {
@@ -202,12 +237,12 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 		multiple := in.Mode == string(interaction.ModeMulti)
 		noteID, err := pollFn(ctx.Context, in.Question, meta.ReplyTarget, optLabels, multiple, reg.TimeoutSecs, questionID)
 		if err != nil {
-			// 投票帖创建失败：清理已注册的问题，降级为 unsupported
-			interaction.Default().CleanupFinal(questionID)
+			// CleanupFinal 对 pending 是空操作；必须先 Cancel 再清理，否则问题泄漏。
+			interaction.Default().AbortPending(questionID)
 			return map[string]any{
 				"status":   "unsupported",
 				"platform": meta.ChannelType,
-				"message": fmt.Sprintf("投票帖创建失败: %v。请改用纯文本提问。", err),
+				"message":  fmt.Sprintf("投票帖创建失败: %v。请改用纯文本提问。", err),
 			}, nil
 		}
 
