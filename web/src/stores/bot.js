@@ -169,6 +169,32 @@ export const useBotStore = defineStore('bot', () => {
     tagMessageChoice(messageId, qid)
   }
 
+  /** 把 questionId 写进进行中的 tool call，刷新后 choicePayloadFromTool 才能恢复未完成的卡 */
+  function stampChoiceQuestionId(messageId, toolCallId, questionId) {
+    if (!messageId || !toolCallId || !questionId) return
+    const mIdx = messages.value.findIndex(m => m.id === messageId)
+    if (mIdx < 0) return
+    const updated = [...messages.value]
+    const msg = { ...updated[mIdx] }
+    const list = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
+    const idx = list.findIndex(x => x.id === toolCallId)
+    if (idx < 0) return
+    const prev = list[idx]
+    const out = (prev.output && typeof prev.output === 'object') ? { ...prev.output } : {}
+    out.questionId = questionId
+    const call = { ...prev, questionId, output: out }
+    list[idx] = call
+    msg.toolCalls = list
+    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+    const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === toolCallId)
+    if (pIdx >= 0) {
+      parts[pIdx] = { ...parts[pIdx], questionId, output: out }
+      msg.parts = parts
+    }
+    updated[mIdx] = msg
+    messages.value = updated
+  }
+
   /** 根据 toolCallId 查找对应的 choice questionId（内联渲染用） */
   function choiceIdByToolCallId(toolCallId) {
     if (!toolCallId) return null
@@ -538,7 +564,7 @@ export const useBotStore = defineStore('bot', () => {
     const looksLikeChoice = output.questionId != null && (Array.isArray(input.options) || input.question)
     if (!isChoiceTool && !looksLikeChoice) return null
     // questionId 依次从 output（落库历史/终态）、input（防御：未来若显式回传）里取
-    const qid = output.questionId ?? input.questionId
+    const qid = output.questionId ?? input.questionId ?? item.questionId
     if (qid == null || qid === '') return null
     return normalizeChoicePayload({
       questionId: qid,
@@ -750,6 +776,21 @@ async function _resumeTrace(traceId) {
     if (existing >= 0) toolCalls[existing] = { ...toolCalls[existing], ...call }
     else toolCalls.push(call)
     msg.toolCalls = toolCalls
+    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+    const merged = existing >= 0 ? toolCalls[existing] : call
+    const part = {
+      type: 'tool',
+      id: merged.id || call.id,
+      name: merged.name || call.name,
+      title: merged.title || call.title || call.name,
+      status: merged.status || call.status || 'running',
+      input: merged.input || call.input,
+      output: merged.output || call.output,
+    }
+    const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === part.id)
+    if (pIdx >= 0) parts[pIdx] = { ...parts[pIdx], ...part }
+    else parts.push(part)
+    msg.parts = parts
     updated[idx] = msg
     messages.value = updated
   }
@@ -816,7 +857,10 @@ async function _resumeTrace(traceId) {
         }
         // user_choice：重连续流中的进度事件同样可能刷新卡片（如剩余超时时间）
         const cp = extractChoicePayload(payload)
-        if (cp) registerChoice(assistantTmpId, cp, toolCallId)
+        if (cp) {
+          registerChoice(assistantTmpId, cp, toolCallId)
+          stampChoiceQuestionId(assistantTmpId, toolCallId, cp.questionId)
+        }
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
@@ -906,6 +950,7 @@ async function resumeContinuation(sessionId) {
       const m = updated[i]
       if (m.role !== 'assistant') continue
       if (!Array.isArray(m.toolCalls) || !m.toolCalls.length) break
+      const runningIds = new Set(m.toolCalls.filter(tc => tc.status === 'running').map(tc => tc.id))
       const calls = m.toolCalls.map(tc => tc.status === 'running'
         ? { ...tc, status: 'killed', summary: tc.summary || '用户已停止' }
         : tc)
@@ -920,6 +965,11 @@ async function resumeContinuation(sessionId) {
         }
       }
       if (changed) updated[i] = { ...updated[i], parts }
+      if (runningIds.size) {
+        for (const [qid, c] of choices.value) {
+          if (c && runningIds.has(c.toolCallId)) markChoiceTerminal(qid, 'cancelled')
+        }
+      }
       break
     }
     messages.value = updated
@@ -1305,7 +1355,10 @@ async function resumeContinuation(sessionId) {
         }
         // user_choice：进度事件也可能携带卡片负载（超时刷新等），同样注册
         const cp = extractChoicePayload(payload)
-        if (cp) registerChoice(assistantTmpId, cp, toolCallId)
+        if (cp) {
+          registerChoice(assistantTmpId, cp, toolCallId)
+          stampChoiceQuestionId(assistantTmpId, toolCallId, cp.questionId)
+        }
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)

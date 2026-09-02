@@ -106,7 +106,7 @@
         </div>
 
         <!-- user_choice 选项（防御性降级：ChoiceCard 未渲染时用户仍可见选项） -->
-        <div v-if="choiceOptions.length" class="tc-choice-opts" data-testid="toolcall-choice-options">
+        <div v-if="choiceOptions.length && !hasInlineChoice" class="tc-choice-opts" data-testid="toolcall-choice-options">
           <div class="tc-field-label">选项</div>
           <div v-for="opt in choiceOptions" :key="opt.id" class="tc-choice-opt">
             <span class="tc-opt-id">{{ opt.id }}</span>
@@ -162,10 +162,13 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import toolLabels from '@/i18n/toolLabels'
+import { useBotStore } from '@/stores/bot'
 
 const props = defineProps({
   call: { type: Object, required: true }
 })
+const store = useBotStore()
+const hasInlineChoice = computed(() => !!store.choiceIdByToolCallId(props.call.id))
 
 /** Resolve a tool name to its display label (Chinese). Returns null if unknown. */
 function toolLabel(name) {

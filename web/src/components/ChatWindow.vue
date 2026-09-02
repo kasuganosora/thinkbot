@@ -90,6 +90,17 @@
                       :key="part.id"
                       :call="part"
                     />
+                    <div
+                      v-for="qid in choiceIdsForToolPart(part)"
+                      :key="'choice-inline-' + qid"
+                      class="cc-inline"
+                    >
+                      <ChoiceCard
+                        :payload="store.choiceState(qid)?.payload || { questionId: qid }"
+                        :status="store.choiceState(qid)?.status || ''"
+                        :submitted="store.choiceState(qid)?.submitted || false"
+                      />
+                    </div>
                   </div>
                 </template>
               </div>
@@ -548,6 +559,19 @@ function flushGroup(out, g) {
     // 多个同名工具 → 带组的 tool part
     out.push({ type: 'tool', name: g.name, _group: g.calls })
   }
+}
+
+
+/** 工具 part（单卡或归并组）上挂着的 user_choice questionId，供内联 ChoiceCard */
+function choiceIdsForToolPart(part) {
+  if (!part) return []
+  const calls = Array.isArray(part._group) && part._group.length ? part._group : [part]
+  const ids = []
+  for (const c of calls) {
+    const qid = store.choiceIdByToolCallId(c && c.id)
+    if (qid) ids.push(qid)
+  }
+  return ids
 }
 
 // ── 降级：旧消息无 parts 时仍用此函数对 toolCalls 归并分组 ──
