@@ -76,6 +76,10 @@ export default {
   get_contacts:           '获取联系人',
   search_memory:          '检索记忆',
 
+  // ── 用户选择 ──
+  user_choice:            '向你提问',
+  sandbox_user_choice:    '向你提问',
+
   // ── 浏览器（MCP browser__ 前缀）──
   browser__navigate:      '打开网页',
   browser__click:         '点击元素',
