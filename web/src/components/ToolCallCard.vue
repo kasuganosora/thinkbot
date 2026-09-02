@@ -105,6 +105,16 @@
           </div>
         </div>
 
+        <!-- user_choice 选项（防御性降级：ChoiceCard 未渲染时用户仍可见选项） -->
+        <div v-if="choiceOptions.length" class="tc-choice-opts" data-testid="toolcall-choice-options">
+          <div class="tc-field-label">选项</div>
+          <div v-for="opt in choiceOptions" :key="opt.id" class="tc-choice-opt">
+            <span class="tc-opt-id">{{ opt.id }}</span>
+            <span class="tc-opt-label">{{ opt.label }}</span>
+            <span v-if="opt.description" class="tc-opt-desc">{{ opt.description }}</span>
+          </div>
+        </div>
+
         <div v-if="contentPreview" class="tc-content">
           <div class="tc-kv-label">内容</div>
           <pre class="tc-kv-val">{{ contentPreview }}</pre>
@@ -333,6 +343,20 @@ const inputFields = computed(() => {
     rows.push({ key: k, label: labels[k] || k, value: String(v) })
   }
   return rows
+})
+
+// user_choice 工具的选项列表（防御性降级：即使 ChoiceCard 因任何原因未渲染，
+// 用户仍能在 ToolCallCard 中看到可选项。inputFields 跳过数组/对象，
+// 导致 options 完全不可见——这是用户"这个卡片没有选项"投诉的直接根因之一。）
+const choiceOptions = computed(() => {
+  if (props.call.tool !== 'user_choice') return []
+  const opts = inputObj.value?.options
+  if (!Array.isArray(opts)) return []
+  return opts.filter(o => o && typeof o === 'object').map((o, i) => ({
+    id: o.id ?? `o${i}`,
+    label: o.label ?? `(选项 ${i + 1})`,
+    description: o.description || '',
+  }))
 })
 
 // 原始入参文本（兜底 / 无法结构化时）
@@ -615,6 +639,42 @@ function onUndo() {
 }
 .tc-kv-val.is-error { background: var(--bp-danger-soft); color: var(--bp-danger); }
 .tc-empty { font-size: 12px; color: var(--bp-label-tertiary); padding: 4px 2px; }
+
+/* user_choice 选项（ToolCallCard 防御性降级） */
+.tc-choice-opts {
+  margin-top: 4px;
+}
+.tc-choice-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.tc-opt-id {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--bp-accent-soft);
+  color: var(--bp-accent);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tc-opt-label {
+  color: var(--bp-label);
+  font-weight: 500;
+}
+.tc-opt-desc {
+  color: var(--bp-label-tertiary);
+  font-size: 12px;
+  margin-left: auto;
+}
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes flow { to { background-position: -200% 0; } }
