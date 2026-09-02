@@ -21,6 +21,7 @@ type choicePending struct {
 	Selected  map[string]bool // option IDs
 	Question  string
 	Options   []interaction.Option
+	timer     *time.Timer // 超时后拆键盘并丢掉 pending，避免无人点击时泄漏
 }
 
 const (
@@ -59,7 +60,7 @@ func (c *TelegramChannel) CreateChoiceMessage(ctx context.Context, question, rep
 		c.choicePending = make(map[string]*choicePending)
 	}
 	sel := make(map[string]bool)
-	c.choicePending[questionID] = &choicePending{
+	p := &choicePending{
 		ChatID:    chatID,
 		MessageID: msgID,
 		Multiple:  multiple,
@@ -67,11 +68,12 @@ func (c *TelegramChannel) CreateChoiceMessage(ctx context.Context, question, rep
 		Question:  question,
 		Options:   append([]interaction.Option(nil), q.Options...),
 	}
+	c.choicePending[questionID] = p
+	c.armChoiceTimeoutLocked(questionID, p, timeoutSecs)
 	c.choiceMu.Unlock()
 
 	_ = options
 	_ = replyID
-	_ = timeoutSecs
 	return strconv.FormatInt(msgID, 10), nil
 }
 
@@ -254,8 +256,60 @@ func (c *TelegramChannel) stripChoiceKeyboard(ctx context.Context, chatID, messa
 
 func (c *TelegramChannel) dropChoicePending(questionID string) {
 	c.choiceMu.Lock()
+	if p := c.choicePending[questionID]; p != nil && p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
 	delete(c.choicePending, questionID)
 	c.choiceMu.Unlock()
+}
+
+// armChoiceTimeoutLocked 必须在持有 choiceMu 且 p 已写入 choicePending 时调用。
+func (c *TelegramChannel) armChoiceTimeoutLocked(questionID string, p *choicePending, timeoutSecs int) {
+	if p == nil {
+		return
+	}
+	if timeoutSecs <= 0 {
+		timeoutSecs = interaction.DefaultTimeoutSecs
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	p.timer = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+		c.expireChoice(questionID)
+	})
+}
+
+// armChoiceTimeout 给测试用：给已有 pending 挂超时器。
+func (c *TelegramChannel) armChoiceTimeout(questionID string, timeoutSecs int) {
+	c.choiceMu.Lock()
+	defer c.choiceMu.Unlock()
+	p := c.choicePending[questionID]
+	if p == nil {
+		return
+	}
+	c.armChoiceTimeoutLocked(questionID, p, timeoutSecs)
+}
+
+// expireChoice 超时：拆 inline keyboard 并丢掉 pending。不得注入 Ingress。
+func (c *TelegramChannel) expireChoice(questionID string) {
+	c.choiceMu.Lock()
+	p := c.choicePending[questionID]
+	if p == nil {
+		c.choiceMu.Unlock()
+		return
+	}
+	chatID, messageID := p.ChatID, p.MessageID
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	delete(c.choicePending, questionID)
+	c.choiceMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	c.stripChoiceKeyboard(ctx, chatID, messageID, "")
 }
 
 func formatChoiceResolvedText(q interaction.Question, indices []int) string {

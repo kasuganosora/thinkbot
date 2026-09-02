@@ -115,6 +115,9 @@ export const useBotStore = defineStore('bot', () => {
       options,
       inputHint: src.inputHint || src.input_hint || '',
       timeoutAt: src.timeoutAt ?? src.timeout_at ?? null,
+      // pending 必须显式布尔：registerChoice 做 {...prev.payload, ...payload} 合并，
+      // 临时卡 pending:true 若被正式卡省略该字段，合并会一直保持 pending。
+      pending: Boolean(src.pending),
     }
   }
 
@@ -490,7 +493,9 @@ export const useBotStore = defineStore('bot', () => {
     for (const tc of calls) {
       const payload = choicePayloadFromTool(tc)
       if (!payload) continue
-      registerChoice(msg.id, payload)
+      // 历史 toolCalls / parts 落库字段是 id（与 ChatWindow g.call.id 一致）
+      const toolCallId = tc.id || tc.toolCallId || ''
+      registerChoice(msg.id, payload, toolCallId)
       found.push(payload.questionId)
       // 终态回填：落库的 status 就是这道题的最终状态
       const st = tc.status
@@ -566,6 +571,7 @@ export const useBotStore = defineStore('bot', () => {
       options: input.options,
       inputHint: input.inputHint ?? input.input_hint,
       timeoutAt: input.timeoutAt ?? null,
+      pending: true,
     })
   }
 

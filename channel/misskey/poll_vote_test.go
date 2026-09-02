@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/internal/interaction"
 )
@@ -207,5 +208,68 @@ func TestHandlePollVotedResolveFailureDropsMapping(t *testing.T) {
 	c.handlePollVoted(context.Background(), body)
 	if _, ok := c.pollNotes["note-5"]; ok {
 		t.Fatal("mapping should be dropped even if Resolve fails")
+	}
+}
+
+func TestExpirePollNoteDeletesMapping(t *testing.T) {
+	c := &MisskeyChannel{name: "mk", pollNotes: map[string]*pollNoteState{
+		"note-x": {QuestionID: "q-x", OptionN: 2},
+	}}
+	c.pollNotesMu.Lock()
+	st := c.pollNotes["note-x"]
+	c.armPollExpiryLocked(st, "note-x", 600)
+	if st.expire == nil {
+		c.pollNotesMu.Unlock()
+		t.Fatal("CreatePollNote path should store expire timer")
+	}
+	c.pollNotesMu.Unlock()
+
+	c.expirePollNote("note-x", "q-x")
+	if _, ok := c.pollNotes["note-x"]; ok {
+		t.Fatal("expirePollNote should delete mapping")
+	}
+}
+
+func TestExpirePollNoteDefaultTimeoutArmsTimer(t *testing.T) {
+	c := &MisskeyChannel{name: "mk", pollNotes: map[string]*pollNoteState{
+		"note-z": {QuestionID: "q-z", OptionN: 2},
+	}}
+	c.pollNotesMu.Lock()
+	st := c.pollNotes["note-z"]
+	c.armPollExpiryLocked(st, "note-z", 0)
+	if st.expire == nil {
+		c.pollNotesMu.Unlock()
+		t.Fatal("timeoutSecs<=0 should still arm expire timer")
+	}
+	st.expire.Stop()
+	st.expire = nil
+	c.pollNotesMu.Unlock()
+}
+
+func TestExpirePollNoteIgnoresMismatchedQuestion(t *testing.T) {
+	c := &MisskeyChannel{name: "mk", pollNotes: map[string]*pollNoteState{
+		"note-y": {QuestionID: "q-keep", OptionN: 2},
+	}}
+	c.expirePollNote("note-y", "q-other")
+	if c.pollNotes["note-y"] == nil {
+		t.Fatal("mismatched questionID must not delete mapping")
+	}
+}
+
+func TestExpirePollNoteStopsDebounceTimer(t *testing.T) {
+	c := &MisskeyChannel{name: "mk", pollNotes: map[string]*pollNoteState{
+		"note-d": {QuestionID: "q-d", Multiple: true, OptionN: 3},
+	}}
+	st := c.pollNotes["note-d"]
+	st.timer = time.AfterFunc(time.Hour, func() {})
+	c.pollNotesMu.Lock()
+	c.armPollExpiryLocked(st, "note-d", 600)
+	c.pollNotesMu.Unlock()
+	c.expirePollNote("note-d", "q-d")
+	if _, ok := c.pollNotes["note-d"]; ok {
+		t.Fatal("mapping should be gone")
+	}
+	if st.timer != nil || st.expire != nil {
+		t.Fatal("both debounce and expire timers should be stopped")
 	}
 }
