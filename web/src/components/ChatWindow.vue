@@ -795,6 +795,8 @@ function onKeydown(value, { e }) {
 /* 选择卡与工作流卡片同容器约定；多题连排时收紧间距，视觉上成组 */
 .cc-inline {
   margin-top: 0;
+  width: 100%;
+  display: block;
 }
 .cc-inline + .cc-inline {
   margin-top: 10px;
