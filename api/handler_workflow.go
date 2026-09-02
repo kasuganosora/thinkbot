@@ -2,6 +2,7 @@ package api
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -214,6 +215,49 @@ func (s *Server) handleWorkflowMetrics(c *gin.Context) {
 		"nodeSkipped":   snapshot.NodeSkipped,
 		"persistErrors": snapshot.PersistErrors,
 	})
+}
+
+// handleContinueWorkflow 手动重触发工作流续跑。
+// POST /api/workflows/:wfId/continue
+//
+// 用途：工作流已完成、但续跑 agent 的回复因服务重启丢失（续跑消息已注入、agent 上下文
+// 随引擎关闭丢失、回复从未落库）时，前端「继续」按钮或运维手动调用本接口，重新注入续跑
+// 消息唤醒 agent，把丢失的续跑回复补回来。也可用于启动期自动续跑未能覆盖的边界场景。
+//
+// 与节点重试不同：续跑作用于「已终态的工作流」，重新把工作流结果作为系统消息注入会话，
+// 让 agent 基于各节点真实产出继续完成最初需求。可被同一生命周期内多次调用（每次都重新注入）。
+//
+// @Summary      续跑工作流
+// @Description  重新注入续跑消息，唤醒 agent 继续完成最初需求（用于续跑回复因重启丢失的恢复）
+// @Tags         工作流
+// @Produce      json
+// @Param        wfId  path  string  true  "工作流 ID"
+// @Success      200   {object}  Response
+// @Failure      400   {object}  Response
+// @Failure      500   {object}  Response
+// @Security     CookieAuth
+// @Router       /api/workflows/{wfId}/continue [post]
+func (s *Server) handleContinueWorkflow(c *gin.Context) {
+	wfID := c.Param("wfId")
+
+	mgr, err := s.workflowSvc.Manager()
+	if err != nil {
+		Fail(c, errs.Wrap(err, "workflow engine not available"))
+		return
+	}
+
+	if err := mgr.TriggerContinuation(wfID); err != nil {
+		// 非终态（wfId 还在跑）属客户端误用 → 400；引擎未装配等属服务端问题 → 500。
+		if strings.Contains(err.Error(), "not terminal") {
+			Fail(c, errs.BadRequest(err.Error()))
+		} else {
+			Fail(c, errs.Wrap(err, "failed to continue workflow"))
+		}
+		return
+	}
+
+	auditLog(c, s.logger, "continue_workflow", "workflow", wfID)
+	OK(c, gin.H{"workflowId": wfID, "status": "continuing"})
 }
 
 // handleRetryWorkflowNode 重试工作流中的指定节点。
