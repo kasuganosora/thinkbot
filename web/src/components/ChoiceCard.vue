@@ -46,11 +46,11 @@
         :ref="(el) => setOptionRef(opt.id, el)"
         type="button"
         class="cc-opt"
-        :class="{ selected: selectedIds.includes(opt.id), locked: isLocked }"
+        :class="{ selected: selectedIds.includes(opt.id), locked: interactionLocked }"
         :role="multi ? 'checkbox' : 'radio'"
         :aria-checked="selectedIds.includes(opt.id) ? 'true' : 'false'"
-        :aria-disabled="isLocked ? 'true' : 'false'"
-        :tabindex="isLocked ? -1 : 0"
+        :aria-disabled="interactionLocked ? 'true' : 'false'"
+        :tabindex="interactionLocked ? -1 : 0"
         :data-testid="'choice-option-' + opt.id"
         :data-selected="selectedIds.includes(opt.id) ? 'true' : 'false'"
         @pointerdown="onOptionPointerDown($event, opt)"
@@ -77,7 +77,7 @@
     </div>
 
     <!-- 多选确认条：紧贴其影响的选项区（分组与映射），选了至少一项才可用 -->
-    <div v-if="multi && (phase === 'active' || phase === 'submitting')" class="cc-confirm-bar">
+    <div v-if="multi && !isPending && (phase === 'active' || phase === 'submitting')" class="cc-confirm-bar">
       <span class="cc-count" data-testid="choice-count">
         {{ selectedIds.length ? '已选 ' + selectedIds.length + ' 项' : '可勾选多项后确认' }}
       </span>
@@ -96,7 +96,7 @@
     </div>
 
     <!-- 底部常驻自由输入 + 提交按钮（placeholder 用 payload.inputHint） -->
-    <div v-if="phase === 'active' || phase === 'submitting'" class="cc-input-row">
+    <div v-if="!isPending && (phase === 'active' || phase === 'submitting')" class="cc-input-row">
       <input
         ref="inputRef"
         v-model="freeText"
@@ -124,8 +124,12 @@
       </button>
     </div>
 
+    <!-- pending：题目已展示但 questionId 仍是占位，禁止提交 -->
+    <div v-if="isPending && phase === 'active'" class="cc-foot" data-testid="choice-pending-foot">
+      <span class="cc-foot-text">题目准备中…</span>
+    </div>
     <!-- 终态脚注：显示所选内容 / 超时说明（锁定态唯一的信息出口） -->
-    <div v-if="isLocked" class="cc-foot" data-testid="choice-foot">
+    <div v-else-if="isLocked" class="cc-foot" data-testid="choice-foot">
       <template v-if="phase === 'answered'">
         <span class="cc-foot-mark ok" aria-hidden="true">✓</span>
         <span class="cc-foot-text" data-testid="choice-answered-summary">已选择：{{ answeredSummary }}</span>
@@ -224,6 +228,10 @@ const phase = computed(() => {
   return 'active'
 })
 const isLocked = computed(() => phase.value !== 'active')
+// pending：tool_call 临时卡（questionId=call.id 占位）。选项可见但不可提交，
+// 等 tool_progress 把 pending:false 合并进来后才允许 POST。无 vitest 覆盖。
+const isPending = computed(() => Boolean(props.payload?.pending))
+const interactionLocked = computed(() => isLocked.value || isPending.value)
 
 // ── 选中集合与自由文本 ──
 // 初始值优先取 store 里持久化的 answer（刷新后恢复用户已选内容），
@@ -232,6 +240,29 @@ const storeState = computed(() => store.choiceState(questionId.value))
 const restoredAnswer = computed(() => storeState.value?.answer || null)
 const selectedIds = ref(restoredAnswer.value ? [...restoredAnswer.value.selectedIds] : [])
 const freeText = ref(restoredAnswer.value ? restoredAnswer.value.freeText : '')
+
+// store.answer 可能在挂载后才写入（历史 restore / tool_result）。
+// 本地 selectedIds 只初始化一次，不 watch 的话终态脚会显示「已选择：（无）」。
+watch(
+  () => storeState.value?.answer,
+  (ans) => {
+    if (!ans) return
+    const storeIds = Array.isArray(ans.selectedIds) ? ans.selectedIds.map(String) : []
+    const storeText = typeof ans.freeText === 'string' ? ans.freeText : ''
+    const terminal = isLocked.value || props.submitted
+    if (terminal) {
+      selectedIds.value = storeIds
+      freeText.value = storeText
+      return
+    }
+    if (selectedIds.value.length === 0 && storeIds.length) {
+      selectedIds.value = storeIds
+    }
+    if (!String(freeText.value || '').trim() && storeText) {
+      freeText.value = storeText
+    }
+  },
+)
 
 // 终态回显摘要：所选 label 串联 + 补充文本（锁定态"显示所选内容"）
 const answeredSummary = computed(() => {
@@ -248,7 +279,7 @@ const answeredSummary = computed(() => {
 // ── 超时倒计时（仅展示；真正的超时判定以后端事件为准，前端不武断锁死） ──
 const nowTs = ref(Date.now())
 let timerRaf = 0
-const hasDeadline = computed(() => timeoutAt.value > 0 && phase.value === 'active')
+const hasDeadline = computed(() => timeoutAt.value > 0 && phase.value === 'active' && !isPending.value)
 const remainMs = computed(() => Math.max(0, timeoutAt.value - nowTs.value))
 const timerText = computed(() => {
   const s = Math.ceil(remainMs.value / 1000)
@@ -321,7 +352,7 @@ function scaleTo(el, to, response, then) {
   })
 }
 function onOptionPointerDown(e, opt) {
-  if (isLocked.value || submitting.value) return
+  if (interactionLocked.value || submitting.value) return
   if (e.button != null && e.button !== 0) return // 只响应主键
   pressingId.value = opt.id
   const el = optRefs.get(opt.id)
@@ -337,13 +368,13 @@ function onGlobalPointerUp() {
 }
 // 确认/发送按钮的按压：与选项同一套物理语言
 function onBarPointerDown(el) {
-  if (!el || isLocked.value || submitting.value) return
+  if (!el || interactionLocked.value || submitting.value) return
   scaleTo(el, 0.94, 0.16, () => scaleTo(el, 1, 0.4))
 }
 
 // ── 交互语义 ──
 function onOptionActivate(opt) {
-  if (isLocked.value || submitting.value) return
+  if (interactionLocked.value || submitting.value) return
   const el = optRefs.get(opt.id)
   if (multi.value) {
     // 多选：切换勾选，等"确认选择"统一提交
@@ -363,7 +394,7 @@ function onOptionActivate(opt) {
   }
 }
 function onOptionKeydown(e, opt) {
-  if (isLocked.value) return
+  if (interactionLocked.value) return
   if (e.key === ' ' && multi.value) {
     // 原生 button 已处理 Enter；Space 默认触发 click，此处不拦截
     return
@@ -381,7 +412,7 @@ function onOptionKeydown(e, opt) {
 
 // ── 提交（n7 端点：POST /api/user-choice/{questionId}/answer） ──
 async function submit() {
-  if (submitting.value || isLocked.value) return
+  if (submitting.value || interactionLocked.value) return
   if (!selectedIds.value.length && !freeText.value.trim()) return
   submitting.value = true
   localPhase.value = 'submitting'

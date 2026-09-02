@@ -143,7 +143,8 @@ type pollNoteState struct {
 	Selected   []int // unique choice indices
 	OptionN    int
 	LastVoter  string
-	timer      *time.Timer
+	timer      *time.Timer // 多选 debounce
+	expire     *time.Timer // 无人投票时丢掉 mapping，避免泄漏
 }
 
 const pollMultiDebounce = 3 * time.Second
@@ -1174,7 +1175,7 @@ func isUnicodeEmoji(s string) bool {
 //   - replyID: 回复目标帖子 ID（可选，用于回复某条消息）
 //   - options: 选项文本列表（2~10 个）
 //   - multiple: 是否多选
-//   - timeoutSecs: 投票过期时间（秒），0 = 不过期
+//   - timeoutSecs: 投票过期时间（秒）；<=0 时 Misskey poll 本身不过期，但本地 mapping 仍按 DefaultTimeoutSecs 回收
 //   - questionID: 关联的 interaction questionID（投票结果回填目标）
 //
 // 返回新建帖子 ID。
@@ -1203,11 +1204,13 @@ func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID s
 	}
 
 	c.pollNotesMu.Lock()
-	c.pollNotes[noteID] = &pollNoteState{
+	st := &pollNoteState{
 		QuestionID: questionID,
 		Multiple:   multiple,
 		OptionN:    len(options),
 	}
+	c.pollNotes[noteID] = st
+	c.armPollExpiryLocked(st, noteID, timeoutSecs)
 	c.pollNotesMu.Unlock()
 
 	traceid.L(ctx).Infow("misskey: poll note created",
@@ -1320,6 +1323,45 @@ func applyPollVote(st *pollNoteState, choice int) pollVoteAction {
 	return pollVoteDebounce
 }
 
+// armPollExpiryLocked 必须在持有 pollNotesMu 且 st 已写入 pollNotes 时调用。
+func (c *MisskeyChannel) armPollExpiryLocked(st *pollNoteState, noteID string, timeoutSecs int) {
+	if st == nil {
+		return
+	}
+	if timeoutSecs <= 0 {
+		timeoutSecs = interaction.DefaultTimeoutSecs
+	}
+	if st.expire != nil {
+		st.expire.Stop()
+	}
+	qid := st.QuestionID
+	st.expire = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+		c.expirePollNote(noteID, qid)
+	})
+}
+
+// expirePollNote 超时回收：确认同一 questionID/note 仍映射后删除，并停掉 debounce。
+func (c *MisskeyChannel) expirePollNote(noteID, questionID string) {
+	c.pollNotesMu.Lock()
+	defer c.pollNotesMu.Unlock()
+	st, ok := c.pollNotes[noteID]
+	if !ok {
+		return
+	}
+	if questionID != "" && st.QuestionID != questionID {
+		return
+	}
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	if st.expire != nil {
+		st.expire.Stop()
+		st.expire = nil
+	}
+	delete(c.pollNotes, noteID)
+}
+
 func (c *MisskeyChannel) flushMultiPoll(ctx context.Context, noteID string) {
 	c.pollNotesMu.Lock()
 	st, ok := c.pollNotes[noteID]
@@ -1337,6 +1379,10 @@ func (c *MisskeyChannel) flushMultiPoll(ctx context.Context, noteID string) {
 	delete(c.pollNotes, noteID)
 	c.pollNotesMu.Unlock()
 	if len(sel) == 0 {
+		if st.expire != nil {
+			st.expire.Stop()
+			st.expire = nil
+		}
 		return
 	}
 	c.tryResolvePoll(ctx, noteID, qid, voter, sel, st)
@@ -1351,6 +1397,12 @@ func (c *MisskeyChannel) tryResolvePoll(ctx context.Context, noteID, questionID,
 			c.pollNotes[noteID] = st
 		}
 		c.pollNotesMu.Unlock()
+		return
+	}
+	// 永久丢掉 mapping：停掉过期定时器，避免无人投票路径泄漏。
+	if st != nil && st.expire != nil {
+		st.expire.Stop()
+		st.expire = nil
 	}
 }
 
