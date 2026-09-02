@@ -349,7 +349,7 @@ const inputFields = computed(() => {
 // 用户仍能在 ToolCallCard 中看到可选项。inputFields 跳过数组/对象，
 // 导致 options 完全不可见——这是用户"这个卡片没有选项"投诉的直接根因之一。）
 const choiceOptions = computed(() => {
-  if (props.call.tool !== 'user_choice') return []
+  if (props.call.name !== 'user_choice') return []
   const opts = inputObj.value?.options
   if (!Array.isArray(opts)) return []
   return opts.filter(o => o && typeof o === 'object').map((o, i) => ({
