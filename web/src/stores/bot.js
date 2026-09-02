@@ -121,8 +121,11 @@ export const useBotStore = defineStore('bot', () => {
   /**
    * 注册/更新一张选择卡：写入 choices、并把 questionId 锚定到承载它的 assistant 消息
    * （与 tagMessageWorkflow 同构）。重复事件（SSE 重放）幂等。
+   * @param {string} messageId - assistant 消息 ID
+   * @param {object} payload - normalizeChoicePayload 产物（含 questionId）
+   * @param {string} [toolCallId] - 触发此卡的工具调用 ID（用于内联渲染到对应 ToolCallCard 后）
    */
-  function registerChoice(messageId, payload) {
+  function registerChoice(messageId, payload, toolCallId) {
     const qid = payload?.questionId
     if (!qid) return
     const next = new Map(choices.value)
@@ -131,9 +134,19 @@ export const useBotStore = defineStore('bot', () => {
       payload: { ...prev.payload, ...payload },
       submitted: prev.submitted || false,
       status: payload?.status || prev.status || '',
+      toolCallId: toolCallId || prev.toolCallId || '',
     })
     choices.value = next
     tagMessageChoice(messageId, qid)
+  }
+
+  /** 根据 toolCallId 查找对应的 choice questionId（内联渲染用） */
+  function choiceIdByToolCallId(toolCallId) {
+    if (!toolCallId) return null
+    for (const [qid, c] of choices.value) {
+      if (c.toolCallId === toolCallId) return qid
+    }
+    return null
   }
 
   /**
@@ -730,7 +743,7 @@ async function _resumeTrace(traceId) {
         upsertToolCall(assistantTmpId, call)
         // user_choice 工具：重连续流时同样注册选择卡（断连期间下发的题目不能丢）
         const cp = choicePayloadFromTool(call)
-        if (cp) registerChoice(assistantTmpId, cp)
+        if (cp) registerChoice(assistantTmpId, cp, call.id)
       },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
@@ -742,7 +755,7 @@ async function _resumeTrace(traceId) {
         }
         // user_choice：重连续流中的进度事件同样可能刷新卡片（如剩余超时时间）
         const cp = extractChoicePayload(payload)
-        if (cp) registerChoice(assistantTmpId, cp)
+        if (cp) registerChoice(assistantTmpId, cp, toolCallId)
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
@@ -756,7 +769,7 @@ async function _resumeTrace(traceId) {
         // user_choice 终态（超时/取消/完成）：重连后落定的终态必须同步进卡片
         const cst = extractChoiceTerminal(payload)
         if (cst) {
-          registerChoice(assistantTmpId, cst.payload)
+          registerChoice(assistantTmpId, cst.payload, toolCallId)
           if (cst.status === 'answered') markChoiceSubmitted(cst.payload.questionId, cst.answer)
           else markChoiceTerminal(cst.payload.questionId, cst.status)
         }
@@ -1209,7 +1222,7 @@ async function resumeContinuation(sessionId) {
         upsertToolCall(assistantTmpId, call)
         // user_choice 工具：调用即下发选择卡（进度/结果要等用户作答，可能很久）
         const cp = choicePayloadFromTool(call)
-        if (cp) registerChoice(assistantTmpId, cp)
+        if (cp) registerChoice(assistantTmpId, cp, call.id)
       },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
@@ -1222,7 +1235,7 @@ async function resumeContinuation(sessionId) {
         }
         // user_choice：进度事件也可能携带卡片负载（超时刷新等），同样注册
         const cp = extractChoicePayload(payload)
-        if (cp) registerChoice(assistantTmpId, cp)
+        if (cp) registerChoice(assistantTmpId, cp, toolCallId)
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
@@ -1236,7 +1249,7 @@ async function resumeContinuation(sessionId) {
         // user_choice 终态：超时/取消/已完成（用户可能已在别处作答）
         const cst = extractChoiceTerminal(payload)
         if (cst) {
-          registerChoice(assistantTmpId, cst.payload)
+          registerChoice(assistantTmpId, cst.payload, toolCallId)
           if (cst.status === 'answered') markChoiceSubmitted(cst.payload.questionId, cst.answer)
           else markChoiceTerminal(cst.payload.questionId, cst.status)
         }
@@ -1314,7 +1327,7 @@ async function resumeContinuation(sessionId) {
     activeWorkflowId,
     activeWorkflowStatus,
     // user_choice 选择卡（n7 契约）：渲染层用 choiceState(qid) 取每题状态
-    choices, submittedChoiceIds, choiceState,
+    choices, submittedChoiceIds, choiceState, choiceIdByToolCallId,
     registerChoice, markChoiceSubmitted, markChoiceTerminal, resetChoices,
     scrollToBottomOnLoad,
     fetchBots, selectBot,
