@@ -301,6 +301,7 @@ PUT    /api/search/providers/:id/toggle — 启用/禁用
 GET  /api/workflows/:wfId                      — 查询工作流状态（登录用户）
 GET  /api/workflows/:wfId/nodes                — 查询节点列表（登录用户）
 POST /api/workflows/:wfId/nodes/:nodeId/retry  — 重试节点（登录用户）
+POST /api/workflows/:wfId/continue             — 续跑（重注入续跑消息，用于续跑回复因重启丢失的恢复）（登录用户）
 GET  /api/session-workflow                     — 按会话查最近一条工作流（登录用户）
 
 GET  /api/workflows                — 列出工作流（admin）

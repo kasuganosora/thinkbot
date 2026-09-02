@@ -138,16 +138,21 @@
             </div>
             </template>
           </div>
-          <!-- 工作流卡片：内联锚定在创建它的那一轮助手消息之后，而非钉在对话底部 -->
+          <!-- 工作流卡片：内联锚定在创建它的那一轮助手消息之后，而非钉在对话底部。
+               渲染条件不再强依赖 msg.workflowId（刷新/历史会话里该字段不持久化、且
+                findAndTagWorkflowMessage 只在已加载页扫描，创建工作流的那条消息若在未加载的
+                ／更早分页页就会锚定失败导致面板永远不显示）。改为：只要本会话 activeWorkflowId
+                ／存在就渲染——优先锚到被标记 workflowId 的助手消息，否则兜底到最后一条助手消息，
+                ／保证已完成/历史工作流在刷新后依然可见。 -->
           <div
-            v-if="msg.role === 'assistant' && msg.workflowId && msg.workflowId === store.activeWorkflowId"
+            v-if="msg.role === 'assistant' && store.activeWorkflowId && (msg.workflowId === store.activeWorkflowId || msg.id === lastAssistantMsgId)"
             class="wf-inline"
           >
             <!-- session-id 必须是当前会话 ID：面板终态时会用它按会话 resume 续跑，
                  早期误传 activeBotId，导致续跑请求带着 botId 当 traceId 永远打不中 -->
             <SessionWorkflowPanel
               :session-id="String(store.activeSessionId || '')"
-              :workflow-id="msg.workflowId"
+              :workflow-id="msg.workflowId || store.activeWorkflowId"
             />
           </div>
         </div>
@@ -536,6 +541,17 @@ function groupToolCalls(calls) {
 
 // 工作流：由 bot 在对话中通过 task 工具创建后，从 store 拿到 workflowId 驱动面板展示
 const sessionWorkflowId = computed(() => store.activeWorkflowId)
+
+// 最后一条助手消息的 id：当 activeWorkflowId 存在但没有任何消息被锚定 workflowId 时
+// （刷新后历史会话、创建工作流的那条消息在未加载的分页页里），工作流面板兜底渲染到此处，
+// 保证已完成/历史工作流在刷新后仍然可见。
+const lastAssistantMsgId = computed(() => {
+  const list = messages.value
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].role === 'assistant') return list[i].id
+  }
+  return null
+})
 
 const userInitial = computed(() => {
   const name = userStore.user?.nickname || userStore.user?.username || 'U'

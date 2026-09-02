@@ -314,6 +314,8 @@ func (m *Manager) tryDeliverToAgent(wf *Workflow) {
 }
 
 // SetNeedsContinuation 标记工作流终态后已注入续跑消息（供前端 status 轮询感知）。
+// 同时持久化到 Workflow.NeedsContinuation，使重启后仍能识别「已注入续跑但未确认回复」
+// 的工作流并自动续跑（见 Manager.recoverContinuations）。
 func (m *Manager) SetNeedsContinuation(wfID string, v bool) {
 	m.consumeMu.Lock()
 	if v {
@@ -322,6 +324,39 @@ func (m *Manager) SetNeedsContinuation(wfID string, v bool) {
 		delete(m.needsContinuation, wfID)
 	}
 	m.consumeMu.Unlock()
+
+	// 持久化续跑标记（仅在值有变化时写库，避免无谓双写）。
+	if wf, err := m.repo.Get(wfID); err == nil && wf.NeedsContinuation != v {
+		wf.NeedsContinuation = v
+		if err := m.repo.Save(wf); err != nil {
+			m.logger.Warnw("failed to persist needs_continuation flag",
+				"workflow_id", wfID, "value", v, "error", err)
+		}
+	}
+}
+
+// TriggerContinuation 手动/自动重触发工作流续跑：重新注入续跑消息唤醒 agent。
+// 用于「工作流已完成但续跑回复因重启丢失」的恢复，也可由前端 resume 按钮调用。
+// 与 runScheduler 终态路径的 tryDeliverToAgent 不同，这里直接调用终态回调（绕过
+// m.consumed 去重），因此可被同一生命周期内多次调用——手动触发本就希望重新注入。
+// 非终态工作流不可触发（它尚未产出结果，没有可续跑的内容）。
+func (m *Manager) TriggerContinuation(wfID string) error {
+	wf, err := m.repo.Get(wfID)
+	if err != nil {
+		return errs.Wrapf(err, "workflow %s not found", wfID)
+	}
+	if !wf.Status.IsTerminal() {
+		return errs.Newf("workflow %s is not terminal (status=%s), cannot continue", wfID, wf.Status)
+	}
+	fn := m.onWorkflowCompleted
+	if fn == nil {
+		return errs.Newf("workflow engine has no continuation callback (bot not started?)")
+	}
+	fn(wf)
+	// 置位前端可感知的续跑标记（前端 resume 接收流式回复）。
+	m.SetNeedsContinuation(wfID, true)
+	m.logger.Infow("workflow continuation re-triggered", "workflow_id", wfID)
+	return nil
 }
 
 // consumeNeedsContinuation 读取并清除续跑标记（前端一次轮询即消费）。
@@ -506,6 +541,7 @@ type RecoveryResult struct {
 	Resumed     int      `json:"resumed"`     // 成功恢复调度的工作流数
 	Reanalyzed  int      `json:"reanalyzed"`  // 需要重新分析的工作流数
 	Failed      int      `json:"failed"`      // 恢复失败的工作流数
+	Continued   int      `json:"continued"`   // 自动续跑（重注入续跑消息）的工作流数
 	WorkflowIDs []string `json:"workflowIds"` // 涉及的工作流 ID
 }
 
@@ -951,13 +987,55 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 		result.Resumed++
 	}
 
+	// 续跑恢复：崩溃若发生在「工作流已完成、续跑 agent 回复尚未落库」之间，
+	// 重启后 agent 上下文随引擎关闭而丢失，续跑回复永远不会产生。扫描终态且
+	// NeedsContinuation==true 的工作流，重新注入续跑消息（仅一次），把丢失的
+	// 续跑补回来，避免「工作流跑完但 agent 没继续」的悬浮态。
+	m.recoverContinuations(ctx, result)
+
 	m.logger.Infow("crash recovery complete",
 		"total", result.Total,
 		"resumed", result.Resumed,
 		"reanalyzed", result.Reanalyzed,
-		"failed", result.Failed)
+		"failed", result.Failed,
+		"continued", result.Continued)
 
 	return result, nil
+}
+
+// recoverContinuations 续跑恢复：对终态且 NeedsContinuation==true 的工作流重新注入
+// 续跑消息，并清除持久化标记（保证自动续跑只发生一次，避免每次重启重复注入污染会话）。
+func (m *Manager) recoverContinuations(ctx context.Context, result *RecoveryResult) {
+	wfs, err := m.repo.FindNeedingContinuation()
+	if err != nil {
+		m.logger.Warnw("continuation recovery: failed to scan workflows", "error", err)
+		return
+	}
+	if len(wfs) == 0 {
+		return
+	}
+	m.logger.Infow("continuation recovery: found workflows needing continuation", "count", len(wfs))
+	for _, wf := range wfs {
+		fn := m.onWorkflowCompleted
+		if fn == nil {
+			m.logger.Warnw("continuation recovery: no continuation callback (bot not started?), skipping",
+				"workflow_id", wf.ID)
+			continue
+		}
+		m.logger.Infow("continuation recovery: re-injecting continuation message",
+			"workflow_id", wf.ID, "status", wf.Status, "bot_id", wf.BotID, "session_id", wf.SessionID)
+		fn(wf)
+
+		// 自动续跑只触发一次：清持久化标记，避免后续重启再次注入重复消息。
+		if wf.NeedsContinuation {
+			wf.NeedsContinuation = false
+			if err := m.repo.Save(wf); err != nil {
+				m.logger.Warnw("continuation recovery: failed to clear needs_continuation flag",
+					"workflow_id", wf.ID, "error", err)
+			}
+		}
+		result.Continued++
+	}
 }
 
 // ============================================================================

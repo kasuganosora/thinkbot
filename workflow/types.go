@@ -204,6 +204,12 @@ type Workflow struct {
 	// 消费——**只检测不阻断**，见 write_conflict.go 的说明。
 	WriteConflicts []WriteConflict `json:"writeConflicts,omitempty"`
 
+	// NeedsContinuation 标记工作流进入终态后后端已注入续跑消息，但续跑 agent 的
+	// 回复尚未确认落库。该标记持久化，用于服务崩溃重启后识别「续跑回复因重启丢失」
+	// 的工作流并自动重新注入续跑消息（仅一次），避免「工作流跑完但 agent 没继续」。
+	// 由 Manager.SetNeedsContinuation 维护；仅当 onWorkflowCompleted 真正注入成功时置位。
+	NeedsContinuation bool `json:"needsContinuation,omitempty"`
+
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
 
