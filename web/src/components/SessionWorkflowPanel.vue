@@ -1,47 +1,45 @@
 <template>
   <div
     v-if="workflow"
+    ref="rootRef"
     class="wf-panel"
     :class="`wf-${workflow.status}`"
     data-testid="chat-workflow-panel"
     role="region"
     aria-label="当前工作流任务清单"
   >
-    <!-- 头部：需求概览 + 折叠 -->
-    <div class="wf-head" data-testid="chat-workflow-head" @click="expanded = !expanded">
-      <span class="wf-icon">🧩</span>
+    <div
+      class="wf-head"
+      data-testid="chat-workflow-head"
+      role="button"
+      tabindex="0"
+      :aria-expanded="expanded"
+      @click="toggle"
+      @pointerdown="onHeadPointerDown"
+      @keydown.enter.prevent="toggle"
+      @keydown.space.prevent="toggle"
+    >
       <span class="wf-title" data-testid="chat-workflow-title">{{ workflow.requirement }}</span>
-      <t-tag
-        :theme="statusTheme(workflow.status)"
-        variant="light"
-        size="small"
+      <span
+        class="wf-status"
+        :class="`wf-st-${workflow.status || ''}`"
         data-testid="chat-workflow-status"
         :data-status="workflow.status"
       >
         <span v-if="isLive" class="live-dot" />{{ statusText(workflow.status) }}
-      </t-tag>
+      </span>
       <span class="wf-progress-text" data-testid="chat-workflow-progress">{{ progressLabel }}</span>
-      <t-tag
+      <span
         v-if="workflow && workflow.goalMode"
-        theme="warning"
-        variant="light"
-        size="small"
-        class="wf-goal-badge"
+        class="wf-goal"
         data-testid="chat-workflow-goal"
-      >
-        🎯 目标模式<span v-if="goalLabel"> · {{ goalLabel }}</span>
-      </t-tag>
-      <t-button
-        variant="text"
-        size="small"
-        shape="square"
-        class="wf-toggle"
+      >{{ goalLabel ? '目标 · ' + goalLabel : '目标模式' }}</span>
+      <t-icon
+        :name="expanded ? 'chevron-up' : 'chevron-down'"
+        class="wf-chevron"
         :data-testid="expanded ? 'chat-workflow-collapse' : 'chat-workflow-expand'"
-        :aria-label="expanded ? '收起任务清单' : '展开任务清单'"
-        @click.stop="expanded = !expanded"
-      >
-        <t-icon :name="expanded ? 'chevron-up' : 'chevron-down'" />
-      </t-button>
+        aria-hidden="true"
+      />
     </div>
 
     <!-- 进度条：节点已拆出时展示完成比例-->
@@ -50,7 +48,9 @@
     </div>
 
     <!-- 一维 TODO 清单 -->
-    <div v-show="expanded" class="wf-todo" data-testid="chat-workflow-nodes">
+    <div class="wf-body-wrap" :class="{ 'is-open': expanded }">
+      <div class="wf-body-inner">
+    <div class="wf-todo" data-testid="chat-workflow-nodes">
       <div
         v-for="(n, i) in nodes"
         :key="n.id"
@@ -73,18 +73,14 @@
           <span class="todo-status" :class="`st-${n.status}`">{{ statusText(n.status) }}</span>
           <!-- 结果类别徽标：区分「跑完了」与「做成了」。
                没有它，一个 completed 但 missing_tool 的节点看起来就是普通的 ✓。 -->
-          <t-tag
+          <span
             v-if="n.badge"
-            :theme="n.badge.theme"
-            variant="light"
-            size="small"
             class="todo-outcome"
+            :class="`outcome-${n.badge.theme}`"
             :title="n.badge.title"
             :data-testid="`chat-workflow-node-outcome-${n.id}`"
             :data-outcome="n.outcome"
-          >
-            {{ n.badge.text }}
-          </t-tag>
+          >{{ n.badge.text }}</span>
           <span v-if="n.retryCount" class="todo-retry-count">已重试 {{ n.retryCount }} 次</span>
           <!-- 节点详情（结果/错误）：默认折叠为单行摘要，展开后按 markdown 渲染 -->
           <div
@@ -165,11 +161,14 @@
         <template v-else>暂无子任务</template>
       </div>
     </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { animateSpring, prefersReducedMotion } from '@/utils/spring'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { renderMarkdown, clearMarkdownCache } from '@/utils/markdown'
 import { workflowApi } from '@/api/services'
@@ -182,9 +181,11 @@ const props = defineProps({
   workflowId: { type: String, default: '' }
 })
 
+const rootRef = ref(null)
 const workflow = ref(null)
 const rawNodes = ref([])
-const expanded = ref(true)
+const expanded = ref(false)
+const userToggled = ref(false)
 const retrying = ref('')
 let pollTimer = null
 
@@ -335,6 +336,51 @@ const progressLabel = computed(() => {
 const isLive = computed(() => {
   const s = workflow.value?.status
   return s === 'running' || s === 'analyzing' || s === 'interrupted'
+})
+
+watch(isLive, (live) => {
+  if (userToggled.value) return
+  expanded.value = !!live
+}, { immediate: true })
+
+function toggle() {
+  userToggled.value = true
+  expanded.value = !expanded.value
+}
+
+const pressing = ref(false)
+let stopSpring = null
+function scaleTo(el, to, response) {
+  if (!el) return
+  if (stopSpring) stopSpring()
+  stopSpring = animateSpring({
+    el,
+    from: 1,
+    to,
+    damping: 1.0,
+    response,
+    disabled: prefersReducedMotion(),
+    onUpdate: (v) => { el.style.transform = 'scale(' + v + ')' },
+  })
+}
+function onHeadPointerDown(e) {
+  if (prefersReducedMotion()) return
+  if (e.button != null && e.button !== 0) return
+  const el = rootRef.value
+  if (!el) return
+  pressing.value = true
+  scaleTo(el, 0.97, 0.16)
+}
+function onGlobalPointerUp() {
+  if (!pressing.value) return
+  pressing.value = false
+  const el = rootRef.value
+  if (el) scaleTo(el, 1, 0.4)
+}
+
+onMounted(() => {
+  window.addEventListener('pointerup', onGlobalPointerUp, { passive: true })
+  window.addEventListener('pointercancel', onGlobalPointerUp, { passive: true })
 })
 
 // 目标模式闭环进度文案：第 N/M 轮（M=0 时回退到引擎默认 5）
@@ -562,7 +608,10 @@ document.addEventListener('visibilitychange', onVisibilityChange)
 
 onBeforeUnmount(() => {
   stopLive()
+  if (stopSpring) stopSpring()
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  window.removeEventListener('pointerup', onGlobalPointerUp)
+  window.removeEventListener('pointercancel', onGlobalPointerUp)
 })
 </script>
 
@@ -574,6 +623,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   border: none;
   border-radius: 12px;
+  will-change: transform;
   background: var(--bp-surface);
   box-shadow: var(--bp-shadow-sm);
   transition: box-shadow var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
@@ -605,29 +655,37 @@ onBeforeUnmount(() => {
 .wf-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   cursor: pointer;
-  padding: 12px 14px;
+  user-select: none;
+  padding: 10px 14px;
   border-radius: 12px 12px 0 0;
-  transition: background var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
+  transition: background var(--bp-duration) var(--bp-ease-out);
 }
 .wf-head:hover { background: var(--bp-bg-subtle); }
-.wf-head:active { transform: scale(var(--bp-press-scale)); }
-.wf-icon {
-  font-size: 15px;
-  width: 26px;
-  height: 26px;
+.wf-status {
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 7px;
-  background: var(--bp-surface-fill);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-secondary);
 }
-.wf-panel.wf-running .wf-icon,
-.wf-panel.wf-analyzing .wf-icon { background: var(--bp-accent-soft); }
-.wf-panel.wf-completed .wf-icon { background: var(--bp-success-soft); }
-.wf-panel.wf-failed .wf-icon { background: var(--bp-danger-soft); }
+.wf-st-running, .wf-st-analyzing { color: var(--bp-accent); }
+.wf-st-completed { color: var(--bp-success); }
+.wf-st-failed { color: var(--bp-danger); }
+.wf-st-interrupted { color: var(--bp-warning); }
+.wf-st-terminated { color: var(--bp-label-tertiary); }
+.wf-goal {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--bp-warning);
+  font-variant-numeric: tabular-nums;
+}
+.wf-chevron {
+  color: var(--bp-label-tertiary);
+  flex-shrink: 0;
+  pointer-events: none;
+}
 .wf-title {
   font-weight: 600;
   font-size: 13.5px;
@@ -645,9 +703,14 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
-.wf-toggle { color: var(--bp-label-tertiary); flex-shrink: 0; }
-
-.wf-goal-badge { font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.wf-body-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  transition: grid-template-rows var(--bp-duration) var(--bp-ease-out);
+}
+.wf-body-wrap.is-open { grid-template-rows: 1fr; }
+.wf-body-inner { min-height: 0; overflow: hidden; }
 
 /* 进度条：节点已拆出时展示完成比例，长任务里比"3/10" 更直观 */
 .wf-progress-bar {
@@ -758,8 +821,14 @@ onBeforeUnmount(() => {
   line-height: 17px;
   padding: 0 6px;
   font-size: 10.5px;
-  cursor: help; /* 提示有 hover 说明 */
+  border-radius: 9px;
+  cursor: help;
+  background: var(--bp-surface-fill);
+  color: var(--bp-label-secondary);
 }
+.todo-outcome.outcome-warning { background: var(--bp-warning-soft); color: var(--bp-warning); }
+.todo-outcome.outcome-danger { background: var(--bp-danger-soft); color: var(--bp-danger); }
+.todo-outcome.outcome-default { background: var(--bp-surface-fill); color: var(--bp-label-secondary); }
 
 .todo-retry-count {
   font-size: 10.5px;
@@ -947,5 +1016,12 @@ onBeforeUnmount(() => {
   0% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.7); }
   100% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wf-body-wrap { transition: none; }
+  .wf-head { transition: none; }
+  .wf-panel.wf-running::before,
+  .wf-panel.wf-analyzing::before { animation: none; }
+  .live-dot { animation: none; }
 }
 </style>

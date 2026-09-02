@@ -97,7 +97,7 @@
                     >
                       <ChoiceCard
                         :payload="store.choiceState(qid)?.payload || { questionId: qid }"
-                        :status="store.choiceState(qid)?.status || ''"
+                        :status="choiceCardStatus(qid, part)"
                         :submitted="store.choiceState(qid)?.submitted || false"
                       />
                     </div>
@@ -154,7 +154,7 @@
                   >
                     <ChoiceCard
                       :payload="store.choiceState(store.choiceIdByToolCallId(g.call.id))?.payload || { questionId: store.choiceIdByToolCallId(g.call.id) }"
-                      :status="store.choiceState(store.choiceIdByToolCallId(g.call.id))?.status || ''"
+                      :status="choiceCardStatus(store.choiceIdByToolCallId(g.call.id), g.call)"
                       :submitted="store.choiceState(store.choiceIdByToolCallId(g.call.id))?.submitted || false"
                     />
                   </div>
@@ -170,7 +170,7 @@
                 ／存在就渲染——优先锚到被标记 workflowId 的助手消息，否则兜底到最后一条助手消息，
                 ／保证已完成/历史工作流在刷新后依然可见。 -->
           <div
-            v-if="msg.role === 'assistant' && store.activeWorkflowId && (msg.workflowId === store.activeWorkflowId || msg.id === lastAssistantMsgId)"
+            v-if="msg.role === 'assistant' && store.activeWorkflowId && msg.id === workflowAnchorMsgId"
             class="wf-inline"
           >
             <!-- session-id 必须是当前会话 ID：面板终态时会用它按会话 resume 续跑，
@@ -190,7 +190,7 @@
           >
             <ChoiceCard
               :payload="choiceState(qid)?.payload || { questionId: qid }"
-              :status="choiceState(qid)?.status || ''"
+              :status="choiceCardStatus(qid)"
               :submitted="choiceState(qid)?.submitted || false"
             />
           </div>
@@ -606,6 +606,16 @@ const lastAssistantMsgId = computed(() => {
   return null
 })
 
+const workflowAnchorMsgId = computed(() => {
+  const wid = store.activeWorkflowId
+  if (!wid) return null
+  const list = messages.value
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].role === 'assistant' && list[i].workflowId === wid) return list[i].id
+  }
+  return lastAssistantMsgId.value
+})
+
 // 选择卡（user_choice）：按 questionId 取该题的实时状态（payload/终态/提交标记）。
 // 与工作流面板同一模式——渲染层只读 store，不持有副本。
 const choiceState = (qid) => store.choiceState(qid)
@@ -613,16 +623,31 @@ const choiceState = (qid) => store.choiceState(qid)
 /** 过滤出无法关联到 toolCallId 的遗留选择卡（历史恢复 / toolCallId 丢失时兜底渲染） */
 function orphanQuestionIds(msg) {
   if (!msg.questionIds?.length) return []
-  const tcIds = new Set((msg.toolCalls || []).map(tc => tc.id))
+  const tcIds = new Set()
+  for (const tc of (msg.toolCalls || [])) {
+    if (tc && tc.id != null) tcIds.add(String(tc.id))
+  }
+  for (const p of (msg.parts || [])) {
+    if (p && p.type === 'tool' && p.id != null) tcIds.add(String(p.id))
+  }
   return msg.questionIds.filter(qid => {
     const c = store.choiceState(qid)
-    // 有 toolCallId 但对应工具调用不在本消息中 → 也算孤儿（跨消息异常安全兜底）
-    if (c?.toolCallId && !tcIds.has(c.toolCallId)) return true
-    // 完全没有 toolCallId → 遗留卡片，在底部兜底渲染
-    if (!c?.toolCallId) return true
-    // 有 toolCallId 且在本消息中 → 已内联渲染，跳过
-    return false
+    const linked = c?.toolCallId != null && String(c.toolCallId) !== '' && tcIds.has(String(c.toolCallId))
+    return !linked
   })
+}
+
+function choiceCardStatus(qid, part) {
+  const c = store.choiceState(qid)
+  if (c?.status) return c.status
+  const calls = (part && Array.isArray(part._group) && part._group.length) ? part._group : (part ? [part] : [])
+  const call = calls.find(x => store.choiceIdByToolCallId(x && x.id) === qid) || calls[0]
+  const st = call && call.status
+  if (st === 'timeout') return 'timeout'
+  if (st === 'killed' || st === 'cancelled') return 'cancelled'
+  if (st === 'error') return 'error'
+  if (st === 'success' || st === 'answered' || st === 'resolved') return 'answered'
+  return ''
 }
 
 // 新的选择题下发时（questionIds 首次出现），若用户停在底部则跟随滚底，
