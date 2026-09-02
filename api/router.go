@@ -311,6 +311,11 @@ func (s *Server) registerRoutes() {
 		// gin 对同级「静态段 + 通配段」的注册会 panic。
 		authed.GET("/session-workflow", s.handleGetSessionWorkflow)
 
+		// user_choice 选择卡回填：LLM 调 user_choice 工具后阻塞等待，用户在
+		// 前端卡片上点选/输入经此接口唤醒工具。属【任意已登录用户】——提问对象
+		// 就是当前对话的用户，要求 admin 会让普通成员点了没反应。
+		authed.POST("/user-choice/:questionId/answer", s.handleAnswerUserChoice)
+
 		wfAdmin := authed.Group("/workflows")
 		wfAdmin.Use(requirePermission(auth.PermBotManage))
 		{

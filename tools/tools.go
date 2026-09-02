@@ -93,6 +93,7 @@ func RegisterTools(mgr *agenttools.ToolManager, cfg Config) error {
 		textEncodeToolDef(),
 		textDiffToolDef(),
 		textStatsToolDef(),
+		userChoiceToolDef(),
 	}
 
 	if err := mgr.RegisterMany(staticDefs...); err != nil {

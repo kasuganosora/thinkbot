@@ -405,10 +405,11 @@ func TestRegisterTools_StaticCount(t *testing.T) {
 	// But hidden meta has scope __never__ so it won't show in tool list
 	staticCount := mgr.StaticCount()
 	// web_fetch, calculate, random, uuid, datetime_calc,
-	// text_hash, text_encode, text_diff, text_stats, web_search, __common_tools_meta = 11
+	// text_hash, text_encode, text_diff, text_stats, web_search,
+	// user_choice, __common_tools_meta = 12
 	// （shell / list_files 等 bot 工作空间工具由 sandbox 包注册，不在此列）
-	if staticCount != 11 {
-		t.Errorf("expected 11 static tools, got %d", staticCount)
+	if staticCount != 12 {
+		t.Errorf("expected 12 static tools, got %d", staticCount)
 	}
 }
 
