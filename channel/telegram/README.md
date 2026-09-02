@@ -47,6 +47,7 @@ ch.ChannelTools(ctx)                                          // 返回平台专
 - **消息识别**：自动识别 @提及、`/`命令（offset=0）、回复 Bot、以及 `text_mention`（无 username 的用户提及）的消息
 - **长消息拆分**：超过 4096 字符（`telegramMaxMessageLength`）的消息按换行/rune 自动拆分多条发送
 - **Markdown 支持**：通过 `ParseMode` 指定 `MarkdownV2` 或 `HTML`
+- **user_choice**：Start 时注册 `PollCreator`，发送 inline keyboard；`getUpdates` 默认含 `callback_query`，点击经 `ResolveFrom` 回填（不注入 Ingress）
 
 ## 平台专属工具
 
@@ -65,12 +66,14 @@ ch.ChannelTools(ctx)                                          // 返回平台专
 ## 架构
 
 ```
-Telegram getUpdates (long polling) → types.go (Update/Message 解析)
+Telegram getUpdates (long polling) → types.go (Update/Message/CallbackQuery 解析)
     → channel.go (归一化 + 提及识别) → Ingress
-    ← api.go (sendMessage/editMessage/sendChatAction)
+    → choice.go (inline keyboard / callback_query → interaction)
+    ← api.go (sendMessage/editMessage/answerCallbackQuery)
 ```
 
 - **api.go** — Telegram Bot API HTTP 封装（含 `APIBaseURL` 自定义）
 - **channel.go** — Long polling 循环、消息归一化、提及检测、拆分发送
-- **types.go** — Telegram API 数据结构（`Update`、`Message`、`ChatMemberUpdated`）
+- **types.go** — Telegram API 数据结构（`Update`、`Message`、`CallbackQuery`、`ChatMemberUpdated`）
+- **choice.go** — user_choice inline keyboard 与 callback_query 回填
 - **tools.go** — 平台专属工具定义（`ChannelTools`）

@@ -12,6 +12,27 @@ type Update struct {
 	Message       *Message           `json:"message,omitempty"`
 	EditedMessage *Message           `json:"edited_message,omitempty"`
 	MyChatMember  *ChatMemberUpdated `json:"my_chat_member,omitempty"`
+	CallbackQuery *CallbackQuery     `json:"callback_query,omitempty"`
+}
+
+// CallbackQuery 是 inline keyboard 按钮点击事件。
+type CallbackQuery struct {
+	ID           string   `json:"id"`
+	From         *User    `json:"from,omitempty"`
+	Message      *Message `json:"message,omitempty"` // inline 消息可能为 nil
+	Data         string   `json:"data,omitempty"`
+	ChatInstance string   `json:"chat_instance,omitempty"`
+}
+
+// InlineKeyboardMarkup 是 sendMessage / editMessage 的 inline keyboard。
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+// InlineKeyboardButton 单个 inline 按钮。CallbackData 上限 64 字节。
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data,omitempty"`
 }
 
 // Message 表示一条 Telegram 消息。
@@ -133,11 +154,12 @@ type getUpdatesRequest struct {
 
 // sendMessageRequest 对应 sendMessage 方法。
 type sendMessageRequest struct {
-	ChatID           int64  `json:"chat_id"`
-	Text             string `json:"text"`
-	ParseMode        string `json:"parse_mode,omitempty"`
-	ReplyToMessageID int64  `json:"reply_to_message_id,omitempty"`
-	DisablePreview   bool   `json:"disable_web_page_preview,omitempty"`
+	ChatID           int64                 `json:"chat_id"`
+	Text             string                `json:"text"`
+	ParseMode        string                `json:"parse_mode,omitempty"`
+	ReplyToMessageID int64                 `json:"reply_to_message_id,omitempty"`
+	DisablePreview   bool                  `json:"disable_web_page_preview,omitempty"`
+	ReplyMarkup      *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
 // sendMessageResult 是 sendMessage 返回的消息。
@@ -153,10 +175,23 @@ type sendChatActionRequest struct {
 
 // editMessageTextRequest 对应 editMessageText 方法。
 type editMessageTextRequest struct {
-	ChatID    int64  `json:"chat_id"`
-	MessageID int64  `json:"message_id"`
-	Text      string `json:"text"`
-	ParseMode string `json:"parse_mode,omitempty"`
+	ChatID      int64                 `json:"chat_id"`
+	MessageID   int64                 `json:"message_id"`
+	Text        string                `json:"text"`
+	ParseMode   string                `json:"parse_mode,omitempty"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
+type answerCallbackQueryRequest struct {
+	CallbackQueryID string `json:"callback_query_id"`
+	Text            string `json:"text,omitempty"`
+	ShowAlert       bool   `json:"show_alert,omitempty"`
+}
+
+type editMessageReplyMarkupRequest struct {
+	ChatID      int64                 `json:"chat_id"`
+	MessageID   int64                 `json:"message_id"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
 // ----------------------------------------------------------------------------

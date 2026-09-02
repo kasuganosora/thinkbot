@@ -13,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
+	"github.com/kasuganosora/thinkbot/internal/interaction"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -108,6 +109,10 @@ type TelegramChannel struct {
 	// 同组仅首条入站，窗口内的后续条直接跳过；说明文字（caption）由 Telegram 附在首条上。
 	mediaGroupSeen map[string]time.Time
 	mediaGroupMu   sync.Mutex
+
+	// choicePending 追踪 user_choice 多选的进行中点选（questionID → 状态）。
+	choiceMu      sync.Mutex
+	choicePending map[string]*choicePending
 }
 
 // NewChannel 创建一个 TelegramChannel。
@@ -156,6 +161,8 @@ func (c *TelegramChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 
 	c.botUserID = me.ID
 	c.botUsername = me.Username
+
+	interaction.RegisterPollCreator("telegram", c.CreateChoiceMessage)
 
 	// 注册 Bot 自身用户 ID 到 Ingress，作为防止自回复循环的第二道防线。
 	// （Telegram Bot API 天然不会通过 getUpdates 回传 Bot 自身消息，
@@ -220,6 +227,11 @@ func (c *TelegramChannel) pollLoop(ctx context.Context) {
 
 // handleUpdate 处理单个 Update，将其转换为 core.Message 注入 Ingress。
 func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
+	if upd.CallbackQuery != nil {
+		c.handleCallbackQuery(ctx, upd.CallbackQuery)
+		return
+	}
+
 	// 只处理消息和编辑消息
 	var msg *Message
 	if upd.Message != nil {
