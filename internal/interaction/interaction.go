@@ -221,6 +221,48 @@ type Registry struct {
 	entries map[string]*entry
 }
 
+// PollCreator 是平台原生的投票创建函数。
+// 各 channel（如 Misskey）在启动时注册自己的实现，
+// user_choice 工具对非 web 平台调用此函数创建原生投票帖
+// （而非返回 unsupported 降级为纯文本）。
+//
+// 参数与 MisskeyChannel.CreatePollNote 签名一致：
+//   ctx: 上下文
+//   question: 题目文本
+//   replyID: 回复目标帖子 ID（可选）
+//   options: 选项文本列表
+//   multiple: 是否多选
+//   timeoutSecs: 过期时间（秒）
+//   questionID: 关联的 interaction questionID
+//
+// 返回新建帖子 ID（noteID），用于日志和追踪。
+type PollCreator func(ctx context.Context, question, replyID string, options []string, multiple bool, timeoutSecs int, questionID string) (string, error)
+
+// pollCreators 按 platform 注册的投票创建器（如 "misskey" → MisskeyChannel.CreatePollNote）。
+var (
+	pollCreatorsMu sync.RWMutex
+	pollCreators   map[string]PollCreator
+)
+
+func init() {
+	pollCreators = make(map[string]PollCreator)
+}
+
+// RegisterPollCreator 为指定 platform 注册投票创建器。
+// 覆盖已有注册（同 platform 后注册胜出）。
+func RegisterPollCreator(platform string, fn PollCreator) {
+	pollCreatorsMu.Lock()
+	pollCreators[platform] = fn
+	pollCreatorsMu.Unlock()
+}
+
+// GetPollCreator 查找指定 platform 的投票创建器。未注册返回 nil。
+func GetPollCreator(platform string) PollCreator {
+	pollCreatorsMu.RLock()
+	defer pollCreatorsMu.RUnlock()
+	return pollCreators[platform]
+}
+
 // NewRegistry 创建注册表。
 func NewRegistry() *Registry {
 	return &Registry{entries: make(map[string]*entry)}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
+	"github.com/kasuganosora/thinkbot/internal/interaction"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/strutil"
@@ -128,6 +129,12 @@ type MisskeyChannel struct {
 	// streamConnects 累计成功建立的 streaming 连接次数。
 	// 用于区分首次连接与重连（>1 即为重连），并在日志中暴露重连是否真的成功。
 	streamConnects atomic.Int64
+
+	// pollNotes 追踪 bot 发出的投票帖 → interaction questionID。
+	// 当用户在 Misskey 上对投票帖投票时，WS 收到 pollVoted 事件，
+	// 通过此映射找到对应的 questionID 并调用 interaction.Resolve 唤醒等待。
+	pollNotesMu sync.Mutex
+	pollNotes   map[string]string // noteID → questionID
 }
 
 // NewChannel 创建一个 MisskeyChannel。
@@ -143,11 +150,12 @@ func NewChannel(name, botID string, cfg Config) *MisskeyChannel {
 	}
 	cfg.TimelineChannels = normalizeTimelineChannels(cfg)
 	return &MisskeyChannel{
-		name:  name,
-		botID: botID,
-		cfg:   cfg,
-		hc:    http.New(),
-		api:   newAPIClient(cfg.Host, cfg.Token),
+		name:      name,
+		botID:     botID,
+		cfg:       cfg,
+		hc:        http.New(),
+		api:       newAPIClient(cfg.Host, cfg.Token),
+		pollNotes: make(map[string]string),
 	}
 }
 
@@ -212,6 +220,10 @@ func (c *MisskeyChannel) Start(ctx context.Context, ingress *inbound.Ingress) er
 
 	// 编译 @bot 正则：匹配 @username 或 @username@host，确保后面不跟字母数字或下划线
 	c.mentionRe = regexp.MustCompile(`@` + regexp.QuoteMeta(me.Username) + `(?:@[\w.-]+)?\b`)
+
+	// 注册 Misskey 原生投票创建器，供 user_choice 工具在 misskey 平台使用
+	// （替代 unsupported 降级为纯文本的粗糙方案）
+	interaction.RegisterPollCreator("misskey", c.CreatePollNote)
 
 	// 派生可取消的 context
 	runCtx, cancel := context.WithCancel(ctx)
@@ -523,6 +535,9 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			c.handleNote(ctx, note, chMsg.Type, true) // Mentioned = true
 			// 推进锚点：该 mention 已成功处理，后续断连以此 ID 为基准 backfill。
 			c.setMentionAnchor(note.ID)
+		case "pollVoted":
+			// 用户对 bot 发出的投票帖进行了投票 → resolve user_choice
+			c.handlePollVoted(ctx, chMsg.Body)
 		default:
 			// 忽略其他 main 事件（follow, renote 等）
 		}
@@ -1137,4 +1152,101 @@ func isUnicodeEmoji(s string) bool {
 		}
 	}
 	return false
+}
+
+// CreatePollNote 发布一条带投票的帖子，并注册 noteID → questionID 的映射。
+// 当用户在 Misskey 上对此帖投票时，WS 收到 pollVoted 事件后会自动
+// 调用 interaction.Resolve 唤醒 user_choice 工具的等待。
+//
+// 参数：
+//   - question: 题目文本（会作为帖子正文）
+//   - replyID: 回复目标帖子 ID（可选，用于回复某条消息）
+//   - options: 选项文本列表（2~10 个）
+//   - multiple: 是否多选
+//   - timeoutSecs: 投票过期时间（秒），0 = 不过期
+//   - questionID: 关联的 interaction questionID（投票结果回填目标）
+//
+// 返回新建帖子 ID。
+func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID string, options []string, multiple bool, timeoutSecs int, questionID string) (string, error) {
+	if len(options) < 2 {
+		return "", fmt.Errorf("misskey CreatePollNote: at least 2 options required, got %d", len(options))
+	}
+	if len(options) > 10 {
+		options = options[:10]
+	}
+
+	var expiresAt int64
+	if timeoutSecs > 0 {
+		expiresAt = time.Now().Add(time.Duration(timeoutSecs) * time.Second).UnixMilli()
+	}
+
+	poll := &Poll{
+		Choices:   options,
+		Multiple:  multiple,
+		ExpiresAt: expiresAt,
+	}
+
+	noteID, err := c.api.createNoteWithPoll(ctx, question, replyID, VisibilityHome, "", poll)
+	if err != nil {
+		return "", errs.Wrap(err, "misskey CreatePollNote")
+	}
+
+	// Register mapping: noteID → questionID for pollVoted event handling
+	c.pollNotesMu.Lock()
+	c.pollNotes[noteID] = questionID
+	c.pollNotesMu.Unlock()
+
+	traceid.L(ctx).Infow("misskey: poll note created",
+		"channel", c.name, "note_id", noteID, "question_id", questionID,
+		"options", len(options), "multiple", multiple, "expires_in", timeoutSecs)
+
+	return noteID, nil
+}
+
+// handlePollVoted handles Misskey WS pollVoted notification.
+// When a user votes on bot's poll note, this finds the associated questionID
+// via pollNotes map and calls interaction.Resolve to unblock user_choice.
+func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessage) {
+	// Misskey pollVoted body: {"noteId":"...","choice":0,"userId":"..."}
+	var pv struct {
+		NoteID string `json:"noteId"`
+		Choice int    `json:"choice"`
+		UserID string `json:"userId"`
+	}
+	if err := json.Unmarshal(body, &pv); err != nil {
+		traceid.L(ctx).Debugw("misskey: failed to parse pollVoted",
+			"channel", c.name, "err", err)
+		return
+	}
+	if pv.NoteID == "" || pv.Choice < 0 {
+		return
+	}
+
+	// Look up associated questionID
+	c.pollNotesMu.Lock()
+	questionID, ok := c.pollNotes[pv.NoteID]
+	if !ok {
+		c.pollNotesMu.Unlock()
+		traceid.L(ctx).Debugw("misskey: pollVoted for unknown note (not our poll)",
+			"channel", c.name, "note_id", pv.NoteID)
+		return
+	}
+	// Remove mapping on first vote (single-choice; multi-choice handled by upper layer if needed)
+	delete(c.pollNotes, pv.NoteID)
+	c.pollNotesMu.Unlock()
+
+	// Resolve the interaction
+	ans := interaction.Answer{
+		Selected:    []int{pv.Choice},
+		CustomInput: "",
+		Via:         interaction.ViaMisskey,
+	}
+	if err := interaction.Default().Resolve(questionID, ans); err != nil {
+		traceid.L(ctx).Warnw("misskey: pollVoted resolve failed",
+			"channel", c.name, "question_id", questionID, "choice", pv.Choice, "err", err)
+		return
+	}
+
+	traceid.L(ctx).Infow("misskey: poll vote resolved user_choice",
+		"channel", c.name, "question_id", questionID, "note_id", pv.NoteID, "choice", pv.Choice, "user_id", pv.UserID)
 }

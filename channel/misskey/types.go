@@ -91,15 +91,24 @@ const (
 
 // createNoteRequest 对应 notes/create API。
 // 注意：根据 Misskey 源码，text 是条件必需的——仅在无 renoteId/fileIds/poll 时强制要求。
-// 纯转发或带文件帖子可以省略 text。
+// 纯转发或带文件帖子可以省略 text。带 poll 的帖子也可以省略 text。
 type createNoteRequest struct {
-	I          string   `json:"i"`
-	Text       string   `json:"text,omitempty"`
-	ReplyID    string   `json:"replyId,omitempty"`
-	RenoteID   string   `json:"renoteId,omitempty"`
-	Visibility string   `json:"visibility,omitempty"`
-	CW         string   `json:"cw,omitempty"`
+	I          string  `json:"i"`
+	Text       string  `json:"text,omitempty"`
+	ReplyID    string  `json:"replyId,omitempty"`
+	RenoteID   string  `json:"renoteId,omitempty"`
+	Visibility string  `json:"visibility,omitempty"`
+	CW         string  `json:"cw,omitempty"`
 	FileIDs    []string `json:"fileIds,omitempty"`
+	Poll       *Poll   `json:"poll,omitempty"`
+}
+
+// Poll 对应 Misskey notes/create 的 poll 参数。
+// 文档：https://misskey.io/api-doc#notes/create
+type Poll struct {
+	Choices   []string `json:"choices"`              // 选项文本列表（2~10 个）
+	Multiple  bool     `json:"multiple"`             // 是否多选
+	ExpiresAt int64    `json:"expiresAt,omitempty"`  // 过期时间（unix 毫秒），0=不过期
 }
 
 // createNoteResponse 对应 notes/create 响应中 createdNote 的内容。
