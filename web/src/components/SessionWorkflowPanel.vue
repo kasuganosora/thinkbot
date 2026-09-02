@@ -184,8 +184,7 @@ const props = defineProps({
 const rootRef = ref(null)
 const workflow = ref(null)
 const rawNodes = ref([])
-const expanded = ref(false)
-const userToggled = ref(false)
+const expanded = ref(true)
 const retrying = ref('')
 let pollTimer = null
 
@@ -338,13 +337,7 @@ const isLive = computed(() => {
   return s === 'running' || s === 'analyzing' || s === 'interrupted'
 })
 
-watch(isLive, (live) => {
-  if (userToggled.value) return
-  expanded.value = !!live
-}, { immediate: true })
-
 function toggle() {
-  userToggled.value = true
   expanded.value = !expanded.value
 }
 
