@@ -216,6 +216,43 @@ func (r *Repository) FindNonTerminal() ([]*Workflow, error) {
 	return result, nil
 }
 
+// FindNeedingContinuation 从 DB 扫描终态且 NeedsContinuation==true 的工作流。
+// 纯内存模式扫描缓存。用于启动续跑恢复：识别「工作流已完成但续跑回复因重启丢失」的
+// 工作流，重新注入续跑消息唤醒 agent（仅一次）。
+func (r *Repository) FindNeedingContinuation() ([]*Workflow, error) {
+	if r.db != nil {
+		var models []dao.WorkflowModel
+		// GORM 无法在 JSON 内查询，所以取出全部然后内存过滤。
+		if err := r.db.Find(&models).Error; err != nil {
+			return nil, errs.Wrap(err, "failed to query workflows from DB")
+		}
+		var result []*Workflow
+		for i := range models {
+			wf, err := FromModel(&models[i])
+			if err != nil {
+				r.logger.Warnw("failed to deserialize workflow during continuation scan",
+					"workflow_id", models[i].ID, "error", err)
+				continue
+			}
+			if wf.Status.IsTerminal() && wf.NeedsContinuation {
+				result = append(result, wf)
+			}
+		}
+		return result, nil
+	}
+
+	// 纯内存模式
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []*Workflow
+	for _, wf := range r.cache {
+		if wf.Status.IsTerminal() && wf.NeedsContinuation {
+			result = append(result, cloneWorkflow(wf))
+		}
+	}
+	return result, nil
+}
+
 // List 列出最近的工作流（按创建时间降序，最多 limit 条）。
 func (r *Repository) List(limit int) ([]*Workflow, error) {
 	if limit <= 0 {

@@ -302,6 +302,7 @@ func (s *Server) registerRoutes() {
 			wfRead.GET("/:wfId", s.handleGetWorkflowStatus)
 			wfRead.GET("/:wfId/nodes", s.handleGetWorkflowNodes)
 			wfRead.POST("/:wfId/nodes/:nodeId/retry", s.handleRetryWorkflowNode)
+			wfRead.POST("/:wfId/continue", s.handleContinueWorkflow)
 		}
 
 		// 按会话查最近一条工作流：前端刷新页面后用它恢复工作流卡片

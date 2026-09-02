@@ -512,11 +512,27 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 		}
 	}
 	text := fmt.Sprintf(
-		"系统通知：你此前通过 task 工具提交的工作流 %s 已执行完成（共 %d 个节点，%d 个已完成）。"+
-			"请基于工作流各节点的实际产出，继续完成用户最初的需求：%s。"+
-			"若需求已经被工作流结果满足，请向用户做简明总结；若还需要进一步操作，请直接继续执行。",
-		wf.ID, len(wf.Nodes), done, wf.Requirement,
+		"系统通知：你此前通过 task 工具提交的工作流 %s 已执行完成（共 %d 个节点，%d 个已完成）。",
+		wf.ID, len(wf.Nodes), done,
 	)
+	if wf.GoalMode {
+		// GoalMode 工作流已自主把任务执行完，续跑只需汇报产出，切勿重跑任务——
+		// 否则 agent 会重新实现整个需求，撞上 LLM stage 15 分钟硬超时（墙钟上限），
+		// 导致回复永不落库（2026-09-02 线上实证：wf-d4778e9bf34a2004f3cea7e1 续跑
+		// 跑满 15 分钟被 orchestrate hard-timeout 掐死，session 9 始终无回复）。
+		text += fmt.Sprintf(
+			"该工作流以 GoalMode 自主完成了用户需求：%s。"+
+				"请直接基于各节点的实际产出，向用户做一份简明总结汇报"+
+				"（做了什么、关键产出落在哪些文件/路径、是否还有遗留项），不要再重新执行任务。",
+			wf.Requirement,
+		)
+	} else {
+		text += fmt.Sprintf(
+			"请基于工作流各节点的实际产出，继续完成用户最初的需求：%s。"+
+				"若需求已经被工作流结果满足，请向用户做简明总结；若还需要进一步操作，请直接继续执行。",
+			wf.Requirement,
+		)
+	}
 
 	extraMeta := map[string]any{
 		agenttools.ExtraKeyChatSessionID: sessionID,
