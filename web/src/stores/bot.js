@@ -356,6 +356,47 @@ export const useBotStore = defineStore('bot', () => {
     return true // 成功
   }
 
+  function isPlaceholderTitle(t) {
+    const v = String(t || '').trim()
+    return !v || v === '新会话' || v === '默认会话'
+  }
+
+  function titleFromFirstMessage(text) {
+    let v = String(text || '').replace(/\s+/g, ' ').trim()
+    if (!v || v.startsWith('/')) return ''
+    if (v === '[附件]') return '附件'
+    const chars = Array.from(v)
+    return chars.length > 30 ? chars.slice(0, 30).join('') + '…' : v
+  }
+
+  function patchSession(sid, fields) {
+    const idx = sessions.value.findIndex(x => String(x.id) === String(sid))
+    if (idx < 0) return
+    const updated = [...sessions.value]
+    updated[idx] = { ...updated[idx], ...fields }
+    sessions.value = updated
+  }
+
+  async function renameSession(sid, title) {
+    const t = String(title || '').trim()
+    if (!sid || !t) return null
+    const capped = Array.from(t).slice(0, 40).join('')
+    const sess = await sessionApi.update(sid, { title: capped })
+    patchSession(sid, { title: (sess && sess.title) || capped })
+    return sess
+  }
+
+  function maybeAutoTitleActiveSession(text) {
+    const sid = activeSessionId.value
+    if (!sid) return
+    const sess = sessions.value.find(x => String(x.id) === String(sid))
+    if (!sess || !isPlaceholderTitle(sess.title)) return
+    const title = titleFromFirstMessage(text)
+    if (!title) return
+    patchSession(sid, { title })
+    renameSession(sid, title).catch(() => {})
+  }
+
   function selectSession(sid) {
     if (String(activeSessionId.value) === String(sid)) return
     activeSessionId.value = sid
@@ -1287,6 +1328,7 @@ async function resumeContinuation(sessionId) {
       _temp: true
     }
     messages.value = [...messages.value, userMsg]
+    maybeAutoTitleActiveSession(content)
 
     const assistantTmpId = uid()
     const assistantMsg = {
@@ -1451,7 +1493,7 @@ async function resumeContinuation(sessionId) {
     loadMessages, loadMoreMessages, sendMessage, stopReply, appendToCurrentReply, resumeInFlightTasks, resumeContinuation,
     // 会话管理
     sessions, sessionsLoading, activeSessionId,
-    loadSessions, createSession, deleteSession, selectSession,
+    loadSessions, createSession, deleteSession, renameSession, selectSession,
     setPendingSession, openSessionById
   }
 })
