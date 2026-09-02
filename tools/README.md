@@ -20,7 +20,7 @@
 | **text_encode** | `text_tools.go` | Base64 `encode` / `decode` |
 | **text_diff** | `text_tools.go` | 基于 LCS 的行级差异比较（每侧最多 5000 行） |
 | **text_stats** | `text_tools.go` | 统计行数、词数、字符数、段落数、估算 token |
-| **user_choice** | `user_choice.go` | 阻塞式向用户提问并等待选择（`question` + 1~8 个 `options` + `mode`），web 卡片 / Telegram inline keyboard / Misskey 编号列表三平台原生渲染，返回 `answered` / `timeout` 两态 JSON。仅 `private` scope 可用，详见下文专节 |
+| **user_choice** | `user_choice.go` | 阻塞式向用户提问并等待选择（`question` + 1~8 个 `options` + `mode`），web 卡片 / Telegram inline keyboard / Misskey 原生 poll 三平台原生渲染，返回 `answered` / `timeout` 两态 JSON。仅 `private` scope 可用，详见下文专节 |
 
 除 `now`、`web_fetch`、`web_search`、`calculate`、`user_choice` 外，其余工具均标记 `DeferredLoad`，
 初始只向模型暴露名称与描述，减少上下文开销。
@@ -85,11 +85,10 @@
 | 平台 | 渲染 | 用户交互 | 回填 |
 |------|------|----------|------|
 | web | `tool_progress` SSE 事件携带 `UserChoiceEventPayload`，前端 `ChoiceCard.vue` 渲染内联卡片 | 点选选项；multi 模式可多选并确认；底部输入框自由输入 | `POST /api/user-choice/{questionId}/answer`，body `{selectedIds, freeText}` |
-| telegram | channel 发送 `InlineKeyboardMarkup` 按钮组 | 点按钮即回填 | callback 经 interaction 注册表 resolve |
-| misskey | channel 发送纯文本编号列表（1. 2. 3. …） | 回复该帖：single 回复一个数字或文字；multi 回复多个数字（逗号分隔） | 解析回复文本（数字下标 / 自由文字）后 resolve |
+| telegram | channel 发 `InlineKeyboardMarkup`（`RegisterPollCreator`） | 单选：点按钮即回填；多选：toggle 后点「确认」 | `callback_query` → `interaction.ResolveFrom` |
+| misskey | channel 发原生 poll（至少 2 个选项） | 在 Misskey UI 点选；多选累计后 debounce ~3s 回填 | WS `pollVoted` → `interaction.ResolveFrom` |
 
-无论来源平台是什么，工具执行时都会发 progress 事件——web 前端据此渲染卡片，
-telegram / misskey 的 outbound 发送路径从事件流拿同一 payload 做原生渲染。
+web 路径发 progress 事件供前端渲染。telegram / misskey 走 `PollCreator` 原生控件，不经 SSE 卡片。
 
 ### 调用示例
 

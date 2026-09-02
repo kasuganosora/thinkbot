@@ -117,9 +117,7 @@ func (a *apiClient) getMe(ctx context.Context) (*User, error) {
 
 // getUpdates 使用 long polling 获取更新。timeout 为秒数。
 func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, allowedUpdates []string) ([]Update, error) {
-	if len(allowedUpdates) == 0 {
-		allowedUpdates = []string{"message", "edited_message", "my_chat_member"}
-	}
+	allowedUpdates = mergeCallbackQueryUpdate(allowedUpdates)
 	req := a.client.Post("getUpdates").
 		SetContext(ctx).
 		SetJSONBody(getUpdatesRequest{
@@ -144,8 +142,36 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 	return apiResp.Result, nil
 }
 
+// defaultAllowedUpdates 是 getUpdates 未指定时的默认类型；必须含 callback_query，
+// 否则 inline keyboard 点击永远不会送达。
+func defaultAllowedUpdates() []string {
+	return []string{"message", "edited_message", "my_chat_member", "callback_query"}
+}
+
+// mergeCallbackQueryUpdate 保证 allowed updates 含 callback_query。
+// 空列表 → 默认集合；调用方自定义列表则追加（已有则不动）。
+func mergeCallbackQueryUpdate(updates []string) []string {
+	if len(updates) == 0 {
+		return defaultAllowedUpdates()
+	}
+	for _, u := range updates {
+		if u == "callback_query" {
+			return updates
+		}
+	}
+	out := make([]string, len(updates)+1)
+	copy(out, updates)
+	out[len(updates)] = "callback_query"
+	return out
+}
+
 // sendMessageFull 发送文本消息，支持 parseMode。
 func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, parseMode string, replyTo int64) (int64, error) {
+	return a.sendMessageWithMarkup(ctx, chatID, text, parseMode, replyTo, nil)
+}
+
+// sendMessageWithMarkup 发送带 inline keyboard 的文本消息。markup 为 nil 时与 sendMessageFull 等价。
+func (a *apiClient) sendMessageWithMarkup(ctx context.Context, chatID int64, text, parseMode string, replyTo int64, markup *InlineKeyboardMarkup) (int64, error) {
 	if err := a.throttle(ctx); err != nil {
 		return 0, errs.Wrap(err, "telegram sendMessage throttle")
 	}
@@ -156,6 +182,7 @@ func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, par
 			Text:             text,
 			ParseMode:        parseMode,
 			ReplyToMessageID: replyTo,
+			ReplyMarkup:      markup,
 		})
 
 	resp, err := req.Do()
@@ -202,16 +229,21 @@ func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action str
 
 // editMessageText 编辑已发送的文本消息。
 func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64, text, parseMode string) error {
+	return a.editMessageTextWithMarkup(ctx, chatID, messageID, text, parseMode, nil)
+}
+
+func (a *apiClient) editMessageTextWithMarkup(ctx context.Context, chatID, messageID int64, text, parseMode string, markup *InlineKeyboardMarkup) error {
 	if err := a.throttle(ctx); err != nil {
 		return errs.Wrap(err, "telegram editMessageText throttle")
 	}
 	req := a.client.Post("editMessageText").
 		SetContext(ctx).
 		SetJSONBody(editMessageTextRequest{
-			ChatID:    chatID,
-			MessageID: messageID,
-			Text:      text,
-			ParseMode: parseMode,
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ParseMode:   parseMode,
+			ReplyMarkup: markup,
 		})
 
 	resp, err := req.Do()
@@ -324,6 +356,23 @@ func (a *apiClient) sendPhoto(ctx context.Context, chatID int64, photoURL, capti
 		ChatID:  chatID,
 		Photo:   photoURL,
 		Caption: caption,
+	})
+}
+
+// answerCallbackQuery 停止客户端按钮 spinner。text 可空。
+func (a *apiClient) answerCallbackQuery(ctx context.Context, callbackQueryID, text string) error {
+	return a.simplePost(ctx, "answerCallbackQuery", answerCallbackQueryRequest{
+		CallbackQueryID: callbackQueryID,
+		Text:            text,
+	})
+}
+
+// editMessageReplyMarkup 更新或清空 inline keyboard。
+func (a *apiClient) editMessageReplyMarkup(ctx context.Context, chatID, messageID int64, markup *InlineKeyboardMarkup) error {
+	return a.simplePost(ctx, "editMessageReplyMarkup", editMessageReplyMarkupRequest{
+		ChatID:      chatID,
+		MessageID:   messageID,
+		ReplyMarkup: markup,
 	})
 }
 

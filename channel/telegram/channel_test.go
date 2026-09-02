@@ -1,8 +1,15 @@
 package telegram
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace/noop"
+	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/agent/inbound"
+	"github.com/kasuganosora/thinkbot/internal/interaction"
 )
 
 func TestUtf16Extract(t *testing.T) {
@@ -332,5 +339,227 @@ func TestPollTimeouts(t *testing.T) {
 	// 合理量级保护：任何超过 1 小时的轮询超时都说明单位算错了
 	if ctxTimeout > time.Hour {
 		t.Errorf("context timeout %v is implausibly large — unit error", ctxTimeout)
+	}
+}
+
+func TestParseChoiceCallback(t *testing.T) {
+	qid := "uc-0123456789abcdef012345"
+	data := encodeChoiceCallback(qid, "o0")
+	if len(data) > 64 {
+		t.Fatalf("callback_data too long: %d %q", len(data), data)
+	}
+	gotQ, gotO, ok := parseChoiceCallback(data)
+	if !ok || gotQ != qid || gotO != "o0" {
+		t.Fatalf("parse %q → %q %q %v", data, gotQ, gotO, ok)
+	}
+	done := encodeChoiceCallback(qid, choiceDoneToken)
+	if len(done) > 64 {
+		t.Fatalf("done callback_data too long: %d", len(done))
+	}
+	_, tok, ok := parseChoiceCallback(done)
+	if !ok || tok != choiceDoneToken {
+		t.Fatalf("done token = %q", tok)
+	}
+	if _, _, ok := parseChoiceCallback("nope"); ok {
+		t.Fatal("unknown prefix must fail")
+	}
+	if _, _, ok := parseChoiceCallback("c|only"); ok {
+		t.Fatal("missing token must fail")
+	}
+}
+
+func TestBuildChoiceKeyboard(t *testing.T) {
+	opts := []interaction.Option{{ID: "o0", Label: "甲"}, {ID: "o1", Label: "乙"}}
+	kb := buildChoiceKeyboard("uc-abc", opts, false, nil)
+	if len(kb.InlineKeyboard) != 2 {
+		t.Fatalf("single rows = %d", len(kb.InlineKeyboard))
+	}
+	if kb.InlineKeyboard[0][0].CallbackData != "c|uc-abc|o0" {
+		t.Fatalf("data = %q", kb.InlineKeyboard[0][0].CallbackData)
+	}
+	kbM := buildChoiceKeyboard("uc-abc", opts, true, map[string]bool{"o1": true})
+	if len(kbM.InlineKeyboard) != 3 {
+		t.Fatalf("multi rows = %d (want options + 确认)", len(kbM.InlineKeyboard))
+	}
+	if kbM.InlineKeyboard[1][0].Text != "✓ 乙" {
+		t.Fatalf("selected label = %q", kbM.InlineKeyboard[1][0].Text)
+	}
+	if kbM.InlineKeyboard[2][0].CallbackData != "c|uc-abc|~" {
+		t.Fatalf("done data = %q", kbM.InlineKeyboard[2][0].CallbackData)
+	}
+	long := truncButtonText(string(make([]rune, 80)), 64)
+	if len([]rune(long)) != 64 {
+		t.Fatalf("trunc len = %d", len([]rune(long)))
+	}
+}
+
+func TestDefaultAllowedUpdatesIncludesCallbackQuery(t *testing.T) {
+	d := defaultAllowedUpdates()
+	found := false
+	for _, u := range d {
+		if u == "callback_query" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("default allowed updates missing callback_query: %v", d)
+	}
+	merged := mergeCallbackQueryUpdate([]string{"message"})
+	found = false
+	for _, u := range merged {
+		if u == "callback_query" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("merge did not add callback_query: %v", merged)
+	}
+	custom := []string{"message", "callback_query"}
+	got := mergeCallbackQueryUpdate(custom)
+	if len(got) != 2 {
+		t.Fatalf("should not duplicate: %v", got)
+	}
+}
+
+func TestHandleUpdateCallbackQueryDoesNotIngress(t *testing.T) {
+	ing := inbound.NewIngress(inbound.IngressConfig{BufferSize: 8}, zap.NewNop().Sugar(), noop.NewTracerProvider())
+	defer ing.Close()
+	ch := &TelegramChannel{name: "tg", botID: "b", ingress: ing}
+	ch.handleUpdate(context.Background(), Update{
+		CallbackQuery: &CallbackQuery{
+			ID:   "cb1",
+			Data: encodeChoiceCallback("uc-ghost", "o0"),
+			From: &User{ID: 1},
+			Message: &Message{
+				MessageID: 10,
+				Chat:      Chat{ID: 99},
+			},
+		},
+	})
+	if ing.Len() != 0 {
+		t.Fatalf("callback_query must not be injected as chat message, len=%d", ing.Len())
+	}
+}
+
+func TestHandleCallbackQuerySingleResolves(t *testing.T) {
+	qid := "uc-tg-" + t.Name()
+	q := interaction.Question{
+		ID: qid, BotID: "b", ChatID: "99",
+		Question: "选一个",
+		Options:  []interaction.Option{{ID: "o0", Label: "甲"}, {ID: "o1", Label: "乙"}},
+		Mode:     interaction.ModeSingle, TimeoutSecs: 30,
+	}
+	if _, err := interaction.Default().RegisterQuestion(q); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { interaction.Default().AbortPending(qid) })
+
+	ch := &TelegramChannel{name: "tg", botID: "b"}
+	ch.handleCallbackQuery(context.Background(), &CallbackQuery{
+		ID:   "cb2",
+		Data: encodeChoiceCallback(qid, "o1"),
+		From: &User{ID: 7},
+		Message: &Message{
+			MessageID: 10,
+			Chat:      Chat{ID: 99},
+		},
+	})
+	snap, err := interaction.Default().Lookup(qid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Status != interaction.StatusAnswered {
+		t.Fatalf("status = %s", snap.Status)
+	}
+}
+
+func TestHandleCallbackQueryWrongChatIgnored(t *testing.T) {
+	qid := "uc-tg-wrong-" + t.Name()
+	q := interaction.Question{
+		ID: qid, BotID: "b", ChatID: "99",
+		Question: "选一个",
+		Options:  []interaction.Option{{ID: "o0", Label: "甲"}, {ID: "o1", Label: "乙"}},
+		Mode:     interaction.ModeSingle, TimeoutSecs: 30,
+	}
+	if _, err := interaction.Default().RegisterQuestion(q); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { interaction.Default().AbortPending(qid) })
+
+	ch := &TelegramChannel{name: "tg", botID: "b"}
+	ch.handleCallbackQuery(context.Background(), &CallbackQuery{
+		ID:   "cb3",
+		Data: encodeChoiceCallback(qid, "o0"),
+		From: &User{ID: 7},
+		Message: &Message{
+			MessageID: 10,
+			Chat:      Chat{ID: 10001}, // different chat
+		},
+	})
+	snap, _ := interaction.Default().Lookup(qid)
+	if snap.Status != interaction.StatusPending {
+		t.Fatalf("wrong chat must not resolve, status = %s", snap.Status)
+	}
+}
+
+func TestHandleCallbackQueryMultiToggleThenDone(t *testing.T) {
+	qid := "uc-tg-multi-" + t.Name()
+	q := interaction.Question{
+		ID: qid, BotID: "b", ChatID: "99",
+		Question: "多选",
+		Options:  []interaction.Option{{ID: "o0", Label: "甲"}, {ID: "o1", Label: "乙"}, {ID: "o2", Label: "丙"}},
+		Mode:     interaction.ModeMulti, TimeoutSecs: 30,
+	}
+	if _, err := interaction.Default().RegisterQuestion(q); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { interaction.Default().AbortPending(qid) })
+
+	ch := &TelegramChannel{name: "tg", botID: "b"}
+	cq := func(tok string) *CallbackQuery {
+		return &CallbackQuery{
+			ID: "cb-" + tok, Data: encodeChoiceCallback(qid, tok),
+			From:    &User{ID: 7},
+			Message: &Message{MessageID: 10, Chat: Chat{ID: 99}},
+		}
+	}
+	ch.handleCallbackQuery(context.Background(), cq("o0"))
+	ch.handleCallbackQuery(context.Background(), cq("o2"))
+	snap, _ := interaction.Default().Lookup(qid)
+	if snap.Status != interaction.StatusPending {
+		t.Fatalf("toggle must not resolve, status = %s", snap.Status)
+	}
+	ch.handleCallbackQuery(context.Background(), cq(choiceDoneToken))
+	snap, err := interaction.Default().Lookup(qid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Status != interaction.StatusAnswered {
+		t.Fatalf("done should resolve, status = %s", snap.Status)
+	}
+}
+
+func TestHandleCallbackQueryMultiDoneEmptyHint(t *testing.T) {
+	qid := "uc-tg-empty-" + t.Name()
+	q := interaction.Question{
+		ID: qid, BotID: "b", ChatID: "99",
+		Question: "多选",
+		Options:  []interaction.Option{{ID: "o0", Label: "甲"}, {ID: "o1", Label: "乙"}},
+		Mode:     interaction.ModeMulti, TimeoutSecs: 30,
+	}
+	if _, err := interaction.Default().RegisterQuestion(q); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { interaction.Default().AbortPending(qid) })
+
+	ch := &TelegramChannel{name: "tg", botID: "b"}
+	ch.handleCallbackQuery(context.Background(), &CallbackQuery{
+		ID: "cb-empty", Data: encodeChoiceCallback(qid, choiceDoneToken),
+		From:    &User{ID: 7},
+		Message: &Message{MessageID: 10, Chat: Chat{ID: 99}},
+	})
+	snap, _ := interaction.Default().Lookup(qid)
+	if snap.Status != interaction.StatusPending {
+		t.Fatalf("empty done must not resolve, status = %s", snap.Status)
 	}
 }
