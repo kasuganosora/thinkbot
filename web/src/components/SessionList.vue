@@ -16,28 +16,45 @@
       </div>
     </div>
 
-    <!-- 会话列表 -->
     <div class="session-list" data-testid="session-list" role="listbox" aria-label="会话列表">
       <template v-if="store.sessions.length">
         <div
           v-for="s in store.sessions"
           :key="s.id"
           class="session-item pressable"
-          :class="{ active: s.id === store.activeSessionId }"
+          :class="{ active: s.id === store.activeSessionId, renaming: renamingId === s.id }"
           :data-testid="`session-item-${s.id}`"
           role="option"
           :aria-selected="s.id === store.activeSessionId"
           @click="onSelect(s)"
         >
           <div class="sess-body">
-            <div class="sess-title">{{ s.title || '新会话' }}</div>
+            <input
+              v-if="renamingId === s.id"
+              :ref="(el) => setRenameRef(s.id, el)"
+              v-model="renameDraft"
+              class="sess-rename"
+              :data-testid="`session-rename-input-${s.id}`"
+              maxlength="40"
+              @click.stop
+              @dblclick.stop
+              @keydown.enter.prevent="commitRename(s)"
+              @keydown.esc.prevent="cancelRename"
+              @blur="commitRename(s)"
+            />
+            <div
+              v-else
+              class="sess-title"
+              :data-testid="`session-title-${s.id}`"
+              @dblclick.stop="startRename(s)"
+            >{{ s.title || '新会话' }}</div>
             <div class="sess-meta">
               <span v-if="s.messageCount > 0" class="sess-count">{{ s.messageCount }} 条消息</span>
               <span class="sess-time">{{ formatTime(s.lastMsgAt || s.createdAt) }}</span>
             </div>
           </div>
           <t-button
-            v-if="s.id !== store.activeSessionId"
+            v-if="s.id !== store.activeSessionId && renamingId !== s.id"
             class="sess-delete"
             theme="default" variant="text" size="small" shape="circle"
             :data-testid="`session-delete-${s.id}`"
@@ -59,6 +76,7 @@
 </template>
 
 <script setup>
+import { nextTick, ref } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { useRouter } from 'vue-router'
 import { useBotStore } from '@/stores/bot'
@@ -66,10 +84,56 @@ import { useBotStore } from '@/stores/bot'
 const store = useBotStore()
 const router = useRouter()
 
+const renamingId = ref(null)
+const renameDraft = ref('')
+const renameInputs = new Map()
+let renameSaving = false
+
+function setRenameRef(id, el) {
+  if (el) renameInputs.set(id, el)
+  else renameInputs.delete(id)
+}
+
 function onSelect(s) {
+  if (renamingId.value === s.id) return
   store.selectSession(s.id)
-  // 同步 URL，使会话深链接可分享（#/chat/bot/:botId/:sessionId）
   router.push({ name: 'chat-bot', params: { botId: store.activeBotId, sessionId: s.id } })
+}
+
+function startRename(s) {
+  renamingId.value = s.id
+  renameDraft.value = s.title && s.title !== '新会话' && s.title !== '默认会话' ? s.title : ''
+  nextTick(() => {
+    const el = renameInputs.get(s.id)
+    if (el && typeof el.focus === 'function') {
+      el.focus()
+      el.select?.()
+    }
+  })
+}
+
+function cancelRename() {
+  renamingId.value = null
+  renameDraft.value = ''
+}
+
+async function commitRename(s) {
+  if (renameSaving) return
+  const next = String(renameDraft.value || '').trim()
+  const prev = s.title || '新会话'
+  if (!next || next === prev) {
+    cancelRename()
+    return
+  }
+  renameSaving = true
+  try {
+    await store.renameSession(s.id, next)
+  } catch (e) {
+    MessagePlugin.error(typeof e === 'string' ? e : e?.message || '改名失败')
+  } finally {
+    renameSaving = false
+    cancelRename()
+  }
 }
 
 async function onCreate() {
@@ -94,7 +158,6 @@ function onDelete(session) {
         console.error('onDelete failed', e)
         MessagePlugin.error(typeof e === 'string' ? e : e?.message || '删除失败')
       } finally {
-        // 无论成功失败都关闭对话框
         dialog.hide()
       }
     },
@@ -185,6 +248,9 @@ function formatTime(iso) {
   background: var(--bp-surface);
   box-shadow: var(--bp-shadow-sm);
 }
+.session-item.renaming {
+  cursor: text;
+}
 .sess-body {
   flex: 1;
   min-width: 0;
@@ -197,6 +263,20 @@ function formatTime(iso) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.sess-rename {
+  display: block;
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 510;
+  color: var(--bp-label);
+  background: var(--bp-surface);
+  border: var(--bp-hairline);
+  border-radius: var(--bp-radius-xs);
+  padding: 2px 6px;
+  outline: none;
+  box-shadow: 0 0 0 3px var(--bp-accent-soft);
 }
 .sess-meta {
   display: flex;

@@ -83,6 +83,7 @@ func (s *ChatHistoryService) SaveMessageWithParts(botID, userID, role, content, 
 	if err := s.db.Create(&msg).Error; err != nil {
 		return fmt.Errorf("chat_history: save message: %w", err)
 	}
+	s.touchSessionAfterSave(sessionID, role, content)
 	return nil
 }
 
@@ -141,6 +142,7 @@ func (s *ChatHistoryService) UpsertAssistantByTrace(botID, userID, content, trac
 	if err := s.db.Create(&msg).Error; err != nil {
 		return fmt.Errorf("chat_history: upsert assistant (insert): %w", err)
 	}
+	s.touchSessionAfterSave(sessionID, dao.ChatRoleAssistant, content)
 	return nil
 }
 
