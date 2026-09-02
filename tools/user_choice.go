@@ -18,14 +18,12 @@ import (
 // 平台支持现状（**以实现为准，勿按设想描述**）：
 //   - web：已支持。工具进度事件携带结构化 payload → 前端 ChoiceCard 内联卡片，
 //     点选/输入后经 POST /api/user-choice/{questionId}/answer 回填。
-//   - telegram / misskey：**尚未实现回填通路**。这两个 channel 既没有把
-//     payload 渲染成原生控件（inline keyboard / 编号列表），也没有把用户的
-//     后续输入解析回 interaction 注册表。
-//
-// 因此在非 web 平台上，本工具**快速失败**而不是阻塞等待：注册了问题却没有
-// 任何一方能 Resolve 它，只会白等到超时上限（默认 600s）把整轮编排拖死，
-// 对用户表现为「bot 卡住不回话」。返回 unsupported 让模型改用纯文本提问，
-// 是当前唯一诚实的降级方式。
+//   - misskey：已支持。通过 Misskey 原生 poll（投票）功能实现，
+//     用户在 Misskey UI 上直接点选选项 → WS pollVoted 事件 → interaction.Resolve
+//     唤醒工具等待。体验与 web 端 ChoiceCard 对等。
+//   - telegram：**尚未实现回填通路**。该平台既没有把 payload 渲染成原生控件
+//     （inline keyboard），也没有把用户的后续输入解析回 interaction 注册表。
+//     因此在 telegram 上本工具仍快速失败（返回 unsupported），让模型改用纯文本提问。
 // ============================================================================
 
 // userChoiceKeepaliveInterval 是等待用户作答期间重发卡片事件的间隔。
@@ -80,9 +78,9 @@ func userChoiceToolDef() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "user_choice",
 			Description: "Present a question with selectable options to the user and BLOCK until they answer. " +
-				"Rendered natively per platform (web: interactive card, telegram: inline buttons, misskey: numbered list). " +
-				"Returns {status:\"answered\", selected:[...], custom_input:\"...\", via:\"...\"} or {status:\"timeout\"}. " +
-				"On timeout, gracefully continue without the user's input (make a sensible default decision or ask again later) — never loop waiting.",
+			"Rendered natively per platform (web: interactive card, misskey: native poll, telegram: inline buttons). " +
+			"Returns {status:\"answered\", selected:[...], custom_input:\"...\", via:\"...\"} or {status:\"timeout\"}. " +
+			"On timeout, gracefully continue without the user's input (make a sensible default decision or ask again later) — never loop waiting.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -157,13 +155,101 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 	case "", "web":
 		// web，或无 channel 上下文的内部调用（子代理 / 单测）：走完整交互流程。
 	default:
-		// telegram / misskey 等：payload 无人渲染、用户输入无人解析回 Resolve，
-		// 注册问题只会白等到超时把整轮编排拖死。直接降级，别让 bot 装死。
+		// 非 web 平台：尝试使用平台原生的投票创建器（如 Misskey poll）。
+		// 若该平台已注册 PollCreator，创建投票帖 + 注册问题 + 阻塞等待投票结果，
+		// 体验与 web 端 ChoiceCard 对等（用户在平台 UI 上直接点选）。
+		// 未注册的平台仍降级为 unsupported（让模型用纯文本提问）。
+		pollFn := interaction.GetPollCreator(meta.ChannelType)
+		if pollFn == nil {
+			return map[string]any{
+				"status":   "unsupported",
+				"platform": meta.ChannelType,
+				"message": "当前平台暂不支持交互式选择卡。请改用普通文本消息把问题和候选项列出来（例如编号列表），" +
+					"让用户直接回复；不要重试本工具。",
+			}, nil
+		}
+
+		// ---- 非 web 平台：走原生投票路径 ----
+		// 1. 注册问题（与 web 路径相同，用于超时/取消等终态管理）
+		opts := make([]interaction.Option, len(in.Options))
+		for i, o := range in.Options {
+			opts[i] = interaction.Option{Label: o.Label, Description: o.Description}
+		}
+		questionID := idgen.New("uc")
+		q := interaction.Question{
+			ID:          questionID,
+			BotID:       meta.BotID,
+			ChatID:      meta.ChatID,
+			Question:    in.Question,
+			Options:     opts,
+			Mode:        interaction.Mode(in.Mode),
+			InputHint:   in.InputHint,
+			TimeoutSecs: in.TimeoutSecs,
+		}
+		reg, err := interaction.Default().RegisterQuestion(q)
+		if err != nil {
+			return nil, fmt.Errorf("user_choice: 注册问题失败: %w", err)
+		}
+		defer interaction.Default().CleanupFinal(questionID)
+
+		// 2. 提取选项文本列表（PollCreator 需要 []string，不是 []Option）
+		optLabels := make([]string, len(in.Options))
+		for i, o := range in.Options {
+			optLabels[i] = o.Label
+		}
+
+		// 3. 通过平台 PollCreator 创建原生投票帖
+		multiple := in.Mode == string(interaction.ModeMulti)
+		noteID, err := pollFn(ctx.Context, in.Question, meta.ReplyTarget, optLabels, multiple, reg.TimeoutSecs, questionID)
+		if err != nil {
+			// 投票帖创建失败：清理已注册的问题，降级为 unsupported
+			interaction.Default().CleanupFinal(questionID)
+			return map[string]any{
+				"status":   "unsupported",
+				"platform": meta.ChannelType,
+				"message": fmt.Sprintf("投票帖创建失败: %v。请改用纯文本提问。", err),
+			}, nil
+		}
+
+		// 4. 阻塞等待（与 web 路径相同的 Wait 机制）
+		//    唤醒来源：channel 层的 handlePollVoted → interaction.Resolve
+		snap, ans, err := interaction.Default().Wait(ctx.Context, questionID)
+		if err != nil {
+			if err == interaction.ErrTimeout {
+				return map[string]any{
+					"status":     "timeout",
+					"questionId": questionID,
+					"noteId":     noteID,
+					"message":    "等待用户投票超时。请基于已有信息给出合理的默认处理，或稍后再问；不要反复重试本工具。",
+				}, nil
+			}
+			return nil, fmt.Errorf("user_choice: 等待中断: %w", err)
+		}
+		_ = snap
+
+		// 5. 组装返回（与 web 路径格式一致）
+		renderOpts := reg.Options
+		selectedIDs := make([]string, 0, len(ans.Selected))
+		labels := make([]string, 0, len(ans.Selected))
+		for _, idx := range ans.Selected {
+			if idx >= 0 && idx < len(renderOpts) {
+				selectedIDs = append(selectedIDs, renderOpts[idx].ID)
+				labels = append(labels, renderOpts[idx].Label)
+			}
+		}
+		selected := make([]int, len(ans.Selected))
+		copy(selected, ans.Selected)
+
 		return map[string]any{
-			"status":   "unsupported",
-			"platform": meta.ChannelType,
-			"message": "当前平台暂不支持交互式选择卡。请改用普通文本消息把问题和候选项列出来（例如编号列表），" +
-				"让用户直接回复；不要重试本工具。",
+			"status":          "answered",
+			"questionId":      questionID,
+			"noteId":          noteID,
+			"via":             string(ans.Via),
+			"custom_input":    ans.CustomInput,
+			"freeText":        ans.CustomInput,
+			"selected":        selected,
+			"selected_labels": labels,
+			"selectedIds":     selectedIDs,
 		}, nil
 	}
 
