@@ -210,19 +210,20 @@ func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID,
 // createNoteWithPoll 发布带投票的帖子。
 // poll 参数不为 nil 时，Misskey 允许省略 text（纯投票帖）。
 // 返回新建帖子 ID。
-func (a *apiClient) createNoteWithPoll(ctx context.Context, text, replyID, visibility, cw string, poll *Poll) (string, error) {
+func (a *apiClient) createNoteWithPoll(ctx context.Context, text, replyID, visibility, cw string, poll *Poll, visibleUserIds []string) (string, error) {
 	if visibility == "" {
 		visibility = VisibilityPublic
 	}
 	resp, err := a.client.Post("notes/create").
 		SetContext(ctx).
 		SetJSONBody(createNoteRequest{
-			I:          a.token,
-			Text:       text,
-			ReplyID:    replyID,
-			Visibility: visibility,
-			CW:         cw,
-			Poll:       poll,
+			I:              a.token,
+			Text:           text,
+			ReplyID:        replyID,
+			Visibility:     visibility,
+			CW:             cw,
+			VisibleUserIds: visibleUserIds,
+			Poll:           poll,
 		}).
 		Do()
 	if err != nil {

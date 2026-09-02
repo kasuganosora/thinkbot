@@ -759,10 +759,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	// - timeline 事件（社交时间线）→ 共享的社交空间，所有用户共享同一 channel scope
 	// - mention/reply 事件（直接互动）→ 按 user ID 隔离，视为 1:1 对话
 	// UserID 始终为发言者 ID，记忆系统据此为每个用户独立构建画像
-	channelID := note.User.ID
-	if eventType == "timeline" {
-		channelID = "misskey:timeline"
-	}
+	channelID := misskeyIngressChannelID(eventType, mentioned, note.Visibility, note.User.ID)
 
 	coreMsg := core.Message{
 		ID:        note.ID,
@@ -1166,6 +1163,39 @@ func isUnicodeEmoji(s string) bool {
 	return false
 }
 
+// misskeyIngressChannelID 决定入站 Message.Channel。
+// timeline 上的普通帖共用 misskey:timeline；被 @ / specified 私信仍按用户隔离，
+// 否则 user_choice 会把 ChatID 记成 misskey:timeline，投票者 userId 对不上永远超时。
+func misskeyIngressChannelID(eventType string, mentioned bool, visibility, userID string) string {
+	if eventType == "timeline" && !mentioned && visibility != VisibilitySpecified {
+		return "misskey:timeline"
+	}
+	return userID
+}
+
+// pollVisibilityFromNote 把原帖可见性抄到投票回复上。specified 必须带 visibleUserIds，
+// 否则要么 400，要么误发成 home 把私信问题泄漏到主页。
+func pollVisibilityFromNote(note *Note) (visibility string, visibleUserIDs []string, err error) {
+	if note == nil {
+		return VisibilityHome, nil, nil
+	}
+	vis := note.Visibility
+	if vis == "" {
+		vis = VisibilityHome
+	}
+	if vis != VisibilitySpecified {
+		return vis, nil, nil
+	}
+	asker := note.User.ID
+	if asker == "" {
+		asker = note.UserID
+	}
+	if asker == "" {
+		return "", nil, fmt.Errorf("misskey specified note %s has no author id", note.ID)
+	}
+	return vis, []string{asker}, nil
+}
+
 // CreatePollNote 发布一条带投票的帖子，并注册 noteID → questionID 的映射。
 // 当用户在 Misskey 上对此帖投票时，WS 收到 pollVoted 事件后会自动
 // 调用 interaction.Resolve 唤醒 user_choice 工具的等待。
@@ -1198,7 +1228,20 @@ func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID s
 		ExpiresAt: expiresAt,
 	}
 
-	noteID, err := c.api.createNoteWithPoll(ctx, question, replyID, VisibilityHome, "", poll)
+	visibility := VisibilityHome
+	var visibleUserIDs []string
+	if replyID != "" {
+		orig, gerr := c.api.getNote(ctx, replyID)
+		if gerr != nil {
+			return "", fmt.Errorf("misskey CreatePollNote: lookup reply %s: %w", replyID, gerr)
+		}
+		var visErr error
+		visibility, visibleUserIDs, visErr = pollVisibilityFromNote(orig)
+		if visErr != nil {
+			return "", visErr
+		}
+	}
+	noteID, err := c.api.createNoteWithPoll(ctx, question, replyID, visibility, "", poll, visibleUserIDs)
 	if err != nil {
 		return "", errs.Wrap(err, "misskey CreatePollNote")
 	}
