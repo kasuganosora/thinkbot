@@ -150,6 +150,21 @@
               :workflow-id="msg.workflowId"
             />
           </div>
+
+          <!-- 选择卡片（user_choice）：复用工作流卡片的锚定机制——
+               按 questionId 关联到下发它的那轮助手消息，不与工作流卡片互斥，
+               多题并存时逐题内联渲染。 -->
+          <div
+            v-for="qid in msg.questionIds || []"
+            :key="'choice-' + qid"
+            class="wf-inline cc-inline"
+          >
+            <ChoiceCard
+              :payload="choiceState(qid)?.payload || { questionId: qid }"
+              :status="choiceState(qid)?.status || ''"
+              :submitted="choiceState(qid)?.submitted || false"
+            />
+          </div>
         </div>
 
       </template>
@@ -279,6 +294,7 @@ import { loadUserPreferences } from '@/utils/userPreferences'
 import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
 import ToolCallGroup from '@/components/ToolCallGroup.vue'
+import ChoiceCard from '@/components/ChoiceCard.vue'
 
 // markdown 渲染统一走 utils/markdown：
 // 内置渲染缓存（模板每帧都会重新调用，历史消息不必反复 parse + sanitize）
@@ -537,6 +553,16 @@ function groupToolCalls(calls) {
 // 工作流：由 bot 在对话中通过 task 工具创建后，从 store 拿到 workflowId 驱动面板展示
 const sessionWorkflowId = computed(() => store.activeWorkflowId)
 
+// 选择卡（user_choice）：按 questionId 取该题的实时状态（payload/终态/提交标记）。
+// 与工作流面板同一模式——渲染层只读 store，不持有副本。
+const choiceState = (qid) => store.choiceState(qid)
+
+// 新的选择题下发时（questionIds 首次出现），若用户停在底部则跟随滚底，
+// 避免卡片落在视口之外；用户上翻阅读时不打扰（与 workflowId watcher 同策略）。
+watch(() => store.choices, () => {
+  if (isAtBottom.value && store.replying) scrollToBottomIfAtBottom()
+}, { deep: true })
+
 const userInitial = computed(() => {
   const name = userStore.user?.nickname || userStore.user?.username || 'U'
   return String(name).trim().charAt(0).toUpperCase() || 'U'
@@ -721,6 +747,17 @@ function onKeydown(value, { e }) {
   max-width: 820px;
   margin: 18px auto 0;
   padding: 0 32px;
+}
+/* 选择卡与工作流卡片同容器约定；多题连排时收紧间距，视觉上成组 */
+.cc-inline {
+  margin-top: 0;
+}
+.cc-inline + .cc-inline {
+  margin-top: 10px;
+}
+.wf-inline + .cc-inline,
+.cc-inline + .wf-inline {
+  margin-top: 10px;
 }
 .load-more-bar {
   display: flex;

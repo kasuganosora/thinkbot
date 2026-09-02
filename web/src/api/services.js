@@ -1170,6 +1170,29 @@ export const chatApi = {
   }
 }
 
+// ============================ 8b. 用户选择卡片（user_choice 工具的 Web 下发） ============================
+// 对齐 n7 后端 internal/userchoice 包：
+//   POST /api/user-choice/{questionId}/answer  body { selectedIds: string[], freeText: string }
+//   → 统一响应 data: { accepted: true, questionId }
+//   业务失败（超时已失效 / 已提交过）后端返回非零 code + message，request() 会 throw。
+// 注意：这里不感知 SSE —— 卡片 payload 经 tool_call / tool_progress 事件下发（见 stores/bot.js），
+// 本 API 只负责"用户作答"这一下行回传。
+
+export const userChoiceApi = {
+  /**
+   * 提交用户选择。
+   * @param {string} questionId 问题 ID（卡片锚定键）
+   * @param {{ selectedIds: string[], freeText?: string }} body
+   * @returns {Promise<{accepted: boolean, questionId: string}>}
+   */
+  answer(questionId, body) {
+    return request('POST', `/api/user-choice/${encodeURIComponent(questionId)}/answer`, {
+      selectedIds: Array.isArray(body?.selectedIds) ? body.selectedIds : [],
+      freeText: String(body?.freeText || ''),
+    })
+  },
+}
+
 // ============================ 9. 会话工具栏（Terminal / 文件 / 状态） ============================
 // 主聊天右侧工具栏数据。后端就绪后按下列契约实现：
 //   GET  /api/sessions/:sid/terminal           → { host, connected, tabs:[{id,name,active}] }
