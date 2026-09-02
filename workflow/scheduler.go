@@ -707,8 +707,18 @@ func (s *Scheduler) reviewLoop(ctx context.Context, node *DAGNode, initialResult
 		// 「模型没能给出审查结论」≠「审查结论是不通过」。LLM 超时/限流/网关抖动属于前者，
 		// 直接判失败会把好产物连同整个 workflow 一起废掉（下游全部 skipped）。
 		// 这里对基础设施类错误就地重试若干次；仍失败才上抛。
-		reviewResult, err := s.reviewWithInfraRetry(ctx, node, result, iter+1)
+		//
+		// 整体超时：executor.Review 底层 LLM 调用可能长时间挂起（实测某 review 节点
+		// 卡在 reviewing 14+ 分钟），没有整体超时则节点永久停留在 reviewing、scheduler 卡死。
+		// 每次 review 迭代单独一个 timeout；超时则 reviewWithInfraRetry 返回 error，
+		// 交由下方现有 re-execute / 失败逻辑处理。
+		reviewCtx, reviewCancel := context.WithTimeout(ctx, s.reviewTimeout())
+		reviewResult, err := s.reviewWithInfraRetry(reviewCtx, node, result, iter+1)
+		reviewCancel()
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || reviewCtx.Err() == context.DeadlineExceeded {
+				return result, errs.Wrapf(err, "review timed out at iteration %d", iter+1)
+			}
 			return result, errs.Wrapf(err, "review error at iteration %d", iter+1)
 		}
 
@@ -1070,6 +1080,13 @@ func (s *Scheduler) emitCascadeSkipEvent(ctx context.Context, failedNodeID strin
 	}
 }
 
+// reviewTimeout 返回单次 Review 迭代的整体超时。executor.Review 的底层 LLM
+// 调用可能长时间挂起，没有整体超时则节点永久停留在 reviewing、scheduler 卡死。
+// 每个 review 迭代单独一个 timeout（见 reviewLoop 对 reviewWithInfraRetry 的包裹）。
+func (s *Scheduler) reviewTimeout() time.Duration {
+	return 10 * time.Minute
+}
+
 func (s *Scheduler) computeFinalStatus() WorkflowStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1083,7 +1100,12 @@ func (s *Scheduler) computeFinalStatus() WorkflowStatus {
 	allCompleted := true
 	for _, n := range s.wf.Nodes {
 		if n.Status == NodeFailed {
-			hasFailed = true
+			// 软失败（outcome=ok，已放行下游）不算工作流失败：它本质是「做完了但质量/
+			// 状态被上层判定为放行」，不应把整条工作流拖入 failed 终态。硬失败（缺工具/
+			// 缺上游数据等 blocked 类 outcome）仍要算 hasFailed。
+			if n.Outcome != OutcomeOK {
+				hasFailed = true
+			}
 		}
 		if n.Status != NodeCompleted && n.Status != NodeSkipped {
 			allCompleted = false
