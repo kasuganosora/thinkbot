@@ -207,6 +207,38 @@ func (a *apiClient) createNoteFull(ctx context.Context, text, replyID, renoteID,
 	return wrapper.CreatedNote.ID, nil
 }
 
+// createNoteWithPoll 发布带投票的帖子。
+// poll 参数不为 nil 时，Misskey 允许省略 text（纯投票帖）。
+// 返回新建帖子 ID。
+func (a *apiClient) createNoteWithPoll(ctx context.Context, text, replyID, visibility, cw string, poll *Poll) (string, error) {
+	if visibility == "" {
+		visibility = VisibilityPublic
+	}
+	resp, err := a.client.Post("notes/create").
+		SetContext(ctx).
+		SetJSONBody(createNoteRequest{
+			I:          a.token,
+			Text:       text,
+			ReplyID:    replyID,
+			Visibility: visibility,
+			CW:         cw,
+			Poll:       poll,
+		}).
+		Do()
+	if err != nil {
+		return "", errs.Wrap(err, "misskey createNoteWithPoll")
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("misskey createNoteWithPoll: HTTP %d: %s", resp.StatusCode, resp.String())
+	}
+
+	var wrapper createNoteAPIResponse
+	if err := resp.JSON(&wrapper); err != nil {
+		return "", errs.Wrap(err, "misskey createNoteWithPoll parse")
+	}
+	return wrapper.CreatedNote.ID, nil
+}
+
 // deleteNote 删除自己发送的帖子。
 func (a *apiClient) deleteNote(ctx context.Context, noteID string) error {
 	resp, err := a.client.Post("notes/delete").
