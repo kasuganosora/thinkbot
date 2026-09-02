@@ -21,19 +21,16 @@
     v-if="question"
     ref="rootRef"
     class="cc-card"
-    :class="['cc-' + phase, 'cc-' + mode]"
+    :class="['cc-' + phase, 'cc-' + mode, { 'cc-inert': interactionLocked }]"
     :data-testid="'choice-card-' + questionId"
     :data-phase="phase"
     :data-mode="mode"
     role="group"
     :aria-label="ariaLabel"
   >
-    <!-- 顶部状态色条：与 SessionWorkflowPanel 同一视觉语言 -->
     <div class="cc-rail" aria-hidden="true" />
 
-    <!-- 问题区 -->
     <div class="cc-head">
-      <span class="cc-icon" aria-hidden="true">🧭</span>
       <span class="cc-q" data-testid="choice-question">{{ question }}</span>
       <span v-if="multi" class="cc-multi-badge" data-testid="choice-multi-badge">可多选</span>
     </div>
@@ -95,8 +92,14 @@
       </button>
     </div>
 
-    <!-- 底部常驻自由输入 + 提交按钮（placeholder 用 payload.inputHint） -->
-    <div v-if="!isPending && (phase === 'active' || phase === 'submitting')" class="cc-input-row">
+    <button
+      v-if="showOtherAffordance"
+      type="button"
+      class="cc-other"
+      data-testid="choice-other"
+      @click="openFree"
+    >其他…</button>
+    <div v-if="showFreeRow" class="cc-input-row">
       <input
         ref="inputRef"
         v-model="freeText"
@@ -131,19 +134,15 @@
     <!-- 终态脚注：显示所选内容 / 超时说明（锁定态唯一的信息出口） -->
     <div v-else-if="isLocked" class="cc-foot" data-testid="choice-foot">
       <template v-if="phase === 'answered'">
-        <span class="cc-foot-mark ok" aria-hidden="true">✓</span>
         <span class="cc-foot-text" data-testid="choice-answered-summary">已选择：{{ answeredSummary }}</span>
       </template>
       <template v-else-if="phase === 'timeout'">
-        <span class="cc-foot-mark warn" aria-hidden="true">⏱</span>
         <span class="cc-foot-text">已超时，本次选择已失效</span>
       </template>
       <template v-else-if="phase === 'cancelled'">
-        <span class="cc-foot-mark warn" aria-hidden="true">–</span>
         <span class="cc-foot-text">已取消，本次选择未生效</span>
       </template>
       <template v-else-if="phase === 'failed'">
-        <span class="cc-foot-mark warn" aria-hidden="true">!</span>
         <span class="cc-foot-text">选择提交失败，本题已失效</span>
       </template>
     </div>
@@ -209,6 +208,22 @@ const timeoutAt = computed(() => {
   return Number.isFinite(t) && t > 0 ? t : 0
 })
 const inputPlaceholder = computed(() => inputHint.value || '补充说明（可选）')
+const freeOpen = ref(false)
+const showFreeRow = computed(() => {
+  if (isPending.value) return false
+  if (phase.value !== 'active' && phase.value !== 'submitting') return false
+  return !!inputHint.value || freeOpen.value
+})
+const showOtherAffordance = computed(() => {
+  if (isPending.value || interactionLocked.value) return false
+  if (phase.value !== 'active') return false
+  return !inputHint.value && !freeOpen.value
+})
+async function openFree() {
+  freeOpen.value = true
+  await nextTick()
+  if (inputRef.value) inputRef.value.focus()
+}
 const ariaLabel = computed(() => question.value + '（' + (multi.value ? '多选' : '单选') + '）')
 const freeAriaLabel = computed(() => '补充输入：' + inputPlaceholder.value)
 
@@ -509,7 +524,9 @@ onBeforeUnmount(() => {
   will-change: transform;
   width: 100%;
 }
-.cc-card:hover { box-shadow: var(--bp-shadow-md); }
+.cc-card:hover:not(.cc-inert) { box-shadow: var(--bp-shadow-md); }
+.cc-inert { box-shadow: var(--bp-shadow-sm); }
+.cc-inert:hover { box-shadow: var(--bp-shadow-sm); }
 
 /* 状态色条：active=accent、answered=success、timeout/cancelled/failed=warning */
 .cc-rail { position: absolute; inset: 0 0 auto; height: 2px; background: var(--bp-accent); }
@@ -519,12 +536,6 @@ onBeforeUnmount(() => {
 .cc-failed .cc-rail { background: var(--bp-warning); }
 
 .cc-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 6px; }
-.cc-icon {
-  width: 26px; height: 26px; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 14px; border-radius: 7px;
-  background: var(--bp-accent-soft);
-}
 .cc-q {
   flex: 1; min-width: 0;
   font-weight: 600; font-size: 13.5px; line-height: 1.5;
@@ -558,8 +569,14 @@ onBeforeUnmount(() => {
 .cc-opt:focus-visible { outline: 2px solid var(--bp-accent); outline-offset: 2px; }
 .cc-opt.selected { border-color: var(--bp-accent); background: var(--bp-accent-soft); }
 /* 锁定态：禁用一切交互（pointer-events 一并关掉，点击/悬停都不再有反应） */
-.cc-opt.locked { cursor: default; pointer-events: none; }
+.cc-opt.locked {
+  cursor: default;
+  pointer-events: none;
+  opacity: 0.72;
+  will-change: auto;
+}
 .cc-opt.locked .cc-opt-label { color: var(--bp-label-secondary); }
+.cc-inert .cc-opt { cursor: default; }
 
 /* 选中指示器 */
 .cc-glyph { width: 20px; height: 20px; flex-shrink: 0; display: block; }
@@ -604,6 +621,18 @@ onBeforeUnmount(() => {
 .cc-confirm:disabled { opacity: 0.4; cursor: default; }
 
 /* 自由输入行 */
+.cc-other {
+  margin: 4px 14px 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--bp-label-tertiary);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  letter-spacing: var(--bp-tracking-caption);
+}
+.cc-other:hover { color: var(--bp-accent); }
 .cc-input-row { display: flex; align-items: center; gap: 8px; padding: 10px 14px 0; }
 .cc-input {
   flex: 1; min-width: 0;

@@ -59,7 +59,7 @@
       <div class="tc-body-inner">
         <div class="tc-body">
           <div v-if="state === 'timeout'" class="tc-interrupt">
-            ⚠️ 执行超时：连接可能已中断，结果未回传。请刷新对话或重新执行该命令。
+            执行超时：连接可能已中断，结果未回传。请刷新对话或重新执行。
           </div>
 
           <div
@@ -119,7 +119,6 @@
             </div>
 
             <div v-if="state === 'running' && !structuredPath && !contentShown.text" class="cmd-output running">执行中<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
-
           </div>
 
           <div
@@ -127,19 +126,29 @@
             class="tc-generic"
             :data-testid="`chat-toolcall-generic-${call.id}`"
           >
-            <div v-if="inputShown.text" class="tc-kv">
-              <div class="tc-kv-label">参数</div>
-              <pre class="tc-kv-val">{{ inputShown.text }}</pre>
-              <div v-if="inputShown.truncated" class="cmd-note">（已截断）</div>
+            <div v-if="genericHits.length" class="tc-hits">
+              <div v-for="(hit, i) in genericHits" :key="i" class="tc-hit">
+                <span class="tc-hit-title">{{ hit.title }}</span>
+                <span v-if="hit.url" class="tc-hit-url">{{ hit.url }}</span>
+              </div>
+              <div v-if="genericHitsTruncated" class="cmd-note">（已截断）</div>
             </div>
-            <div v-if="state !== 'running' && outputShown.text" class="tc-kv">
-              <div class="tc-kv-label" :class="{ 'is-error': state === 'error' }">{{ state === 'error' ? '错误' : '结果' }}</div>
-              <pre class="tc-kv-val" :class="{ 'is-error': state === 'error' }">{{ outputShown.text }}</pre>
-              <div v-if="outputShown.truncated" class="cmd-note">（已截断）</div>
+            <div v-else-if="genericLines.length" class="tc-lines">
+              <div
+                v-for="(line, i) in genericLines"
+                :key="i"
+                class="tc-line"
+                :class="{ 'is-error': genericIsError }"
+              >{{ line }}</div>
             </div>
+            <pre
+              v-else-if="genericText"
+              class="tc-kv-val"
+              :class="{ 'is-error': genericIsError }"
+            >{{ genericText }}</pre>
             <div v-else-if="state === 'running'" class="cmd-output running">执行中<span class="dots"><i>.</i><i>.</i><i>.</i></span></div>
-            <div v-if="!inputShown.text && !outputShown.text && state !== 'running'" class="tc-empty">无输出</div>
-
+            <div v-else class="tc-empty">无输出</div>
+            <div v-if="genericTruncated && (genericText || genericLines.length)" class="cmd-note">（已截断）</div>
           </div>
 
           <button
@@ -184,6 +193,18 @@ const PREVIEW_CHARS = 800
 const PREVIEW_LINES = 12
 const HINT_CHARS = 48
 
+const HINT_KEYS = [
+  'query', 'q', 'keyword', 'search',
+  'url', 'href', 'finalURL', 'title',
+  'path', 'name', 'expression', 'prompt', 'requirement', 'text',
+]
+
+const COMMAND_TOOLS = new Set(['exec', 'shell', 'run_command', 'bg_exec'])
+const FILE_LIKE_TOOLS = new Set([
+  'read_file', 'write_file', 'edit_file', 'replace_in_file',
+  'list_dir', 'list_files', 'delete_file', 'move_file', 'search_content',
+])
+
 function asObject(v) {
   if (v == null) return null
   if (typeof v === 'object') return v
@@ -206,6 +227,11 @@ function compactText(v) {
   if (v == null || v === '') return ''
   if (typeof v === 'string') return v
   try { return JSON.stringify(v) } catch { return String(v) }
+}
+
+function looksLikeJsonBlob(s) {
+  const t = String(s || '').trim()
+  return (t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))
 }
 
 function truncateText(s, maxChars = PREVIEW_CHARS, maxLines = PREVIEW_LINES) {
@@ -238,6 +264,28 @@ function fileHasDiff(f) {
 
 function fileStatusText(s) {
   return { modified: '已修改', added: '新增', deleted: '删除', renamed: '重命名' }[s] || s || ''
+}
+
+function firstString(obj, keys) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return ''
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === 'string') {
+      const t = v.trim()
+      if (t && !looksLikeJsonBlob(t)) return t
+    }
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  }
+  return ''
+}
+
+function isBrowserName(name) {
+  return String(name || '').includes('browser__')
+}
+
+function isSearchName(name) {
+  const k = toolKey(name)
+  return k === 'web_search' || k === 'search_memory' || k === 'search_content' || k.endsWith('_search')
 }
 
 const expanded = ref(false)
@@ -314,6 +362,9 @@ const outputObj = computed(() => asObject(props.call.output))
 
 const cmdText = computed(() => {
   if (props.call.command) return props.call.command
+  const key = toolKey(props.call.name)
+  const isShell = COMMAND_TOOLS.has(key) || key.endsWith('_exec')
+  if (!isShell) return ''
   const inp = inputObj.value
   if (inp) {
     if (typeof inp.command === 'string') return inp.command
@@ -403,10 +454,13 @@ const choiceOptions = computed(() => {
   }))
 })
 
-const hasStructured = computed(() =>
-  !isCommand.value && !hasFiles.value &&
-  (!!structuredPath.value || !!contentPreview.value || (isChoiceTool.value && !hasInlineChoice.value))
-)
+const hasStructured = computed(() => {
+  if (isCommand.value || hasFiles.value) return false
+  if (isChoiceTool.value && !hasInlineChoice.value) return true
+  const key = toolKey(props.call.name)
+  if (!FILE_LIKE_TOOLS.has(key)) return false
+  return !!structuredPath.value || !!contentPreview.value
+})
 
 const showGeneric = computed(() =>
   !isCommand.value && !hasFiles.value && !hasStructured.value && !isChoiceTool.value
@@ -414,18 +468,195 @@ const showGeneric = computed(() =>
 
 const inputPretty = computed(() => prettyText(props.call.input))
 const outputPretty = computed(() => prettyText(props.call.output))
-const inputShown = computed(() => truncateText(compactText(props.call.input)))
 const outputShown = computed(() => truncateText(compactText(props.call.output)))
 
 const showDetailsToggle = computed(() =>
   (state.value === 'error' || state.value === 'timeout') && !!(inputPretty.value || outputPretty.value)
 )
 
+function collectHits(obj) {
+  if (!obj || typeof obj !== 'object') return []
+  const arr = obj.results || obj.entries || obj.hits || obj.items
+  if (!Array.isArray(arr)) return []
+  return arr.slice(0, 3).map((r) => {
+    if (r == null) return null
+    if (typeof r === 'string') return { title: r, url: '' }
+    if (typeof r !== 'object') return { title: String(r), url: '' }
+    const title = r.title || r.name || r.content || r.snippet || r.text || ''
+    const url = r.url || r.href || r.link || ''
+    if (!title && !url) return null
+    return { title: String(title), url: String(url) }
+  }).filter(Boolean)
+}
+
+function scalarLine(obj, keys) {
+  if (!obj || typeof obj !== 'object') return ''
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === 'string' && v.trim() && !looksLikeJsonBlob(v)) return v.trim()
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+    if (typeof v === 'boolean') return v ? 'true' : 'false'
+  }
+  return ''
+}
+
+const genericView = computed(() => {
+  const out = outputObj.value
+  const inp = inputObj.value
+  const key = toolKey(props.call.name)
+  const name = String(props.call.name || '')
+  const empty = { kind: 'empty', hits: [], lines: [], text: '', truncated: false, hitsTruncated: false }
+
+  const errStr = firstString(out, ['error', 'message', 'stderr'])
+    || (typeof props.call.error === 'string' ? props.call.error : '')
+  if ((state.value === 'error' || state.value === 'killed') && errStr) {
+    const cut = truncateText(errStr)
+    return { kind: 'error', hits: [], lines: cut.text.split('\n'), text: '', truncated: cut.truncated, hitsTruncated: false }
+  }
+
+  const rawHits = collectHits(out)
+  const searchLike = isSearchName(name) || key === 'memory' || key === 'web_search'
+    || Array.isArray(out?.results) || Array.isArray(out?.entries)
+  if (rawHits.length && searchLike) {
+    const src = out?.results || out?.entries || out?.hits || out?.items
+    return {
+      kind: 'hits',
+      hits: rawHits,
+      lines: [],
+      text: '',
+      truncated: false,
+      hitsTruncated: Array.isArray(src) && src.length > 3,
+    }
+  }
+
+  if (key === 'web_fetch' || name.endsWith('__fetch') || (out && (out.statusCode != null || out.finalURL || (out.status != null && (out.body != null || out.contentType))))) {
+    const lines = []
+    const title = firstString(out, ['title']) || firstString(inp, ['title'])
+    const url = firstString(out, ['finalURL', 'url', 'href']) || firstString(inp, ['url', 'href'])
+    const code = out?.statusCode != null ? String(out.statusCode) : (out?.status != null && String(out.status).match(/^\d+$/) ? String(out.status) : '')
+    if (title) lines.push(title)
+    if (url) lines.push(url)
+    if (code) lines.push('HTTP ' + code)
+    else if (out?.status != null && !code) lines.push(String(out.status))
+    if (lines.length) return { kind: 'lines', hits: [], lines, text: '', truncated: false, hitsTruncated: false }
+  }
+
+  if (key === 'calculate' || (out && ('expression' in out || (inp && inp.expression != null && 'result' in out)))) {
+    if (out?.error) {
+      const cut = truncateText(String(out.error))
+      return { kind: 'error', hits: [], lines: [cut.text], text: '', truncated: cut.truncated, hitsTruncated: false }
+    }
+    const expr = firstString(out, ['expression']) || firstString(inp, ['expression'])
+    if (out && 'result' in out && out.result != null) {
+      const line = expr ? `${expr} = ${out.result}` : String(out.result)
+      return { kind: 'lines', hits: [], lines: [line], text: '', truncated: false, hitsTruncated: false }
+    }
+  }
+
+  if (key === 'task' || key === 'task_status' || key === 'task_detail' || key === 'task_control') {
+    const lines = []
+    const st = out?.status || out?.Status
+    const progress = out?.progress || out?.Progress
+    const completed = progress?.completed ?? progress?.Completed ?? out?.completed
+    const total = out?.nodeCount ?? out?.NodeCount ?? progress?.total ?? progress?.Total
+    if (st) lines.push(String(st))
+    if (completed != null && total != null) lines.push(`${completed}/${total}`)
+    else if (completed != null) lines.push(String(completed))
+    if (out?.timedOut || out?.TimedOut) lines.push('仍在后台运行')
+    if (out?.error) lines.push(String(out.error))
+    if (out?.hint) lines.push(String(out.hint))
+    if (lines.length) return { kind: 'lines', hits: [], lines: lines.slice(0, PREVIEW_LINES), text: '', truncated: lines.length > PREVIEW_LINES, hitsTruncated: false }
+  }
+
+  if (key === 'cron') {
+    const lines = [
+      firstString(inp, ['action']),
+      firstString(out, ['name']) || firstString(inp, ['name']),
+      firstString(out, ['message', 'status']),
+    ].filter(Boolean)
+    if (lines.length) return { kind: 'lines', hits: [], lines, text: '', truncated: false, hitsTruncated: false }
+  }
+
+  if (key === 'memory' || key === 'search_memory') {
+    const msg = firstString(out, ['message', 'error'])
+    if (msg) return { kind: 'lines', hits: [], lines: [msg], text: '', truncated: false, hitsTruncated: false }
+  }
+
+  if (typeof props.call.output === 'string' && props.call.output && !looksLikeJsonBlob(props.call.output)) {
+    const cut = truncateText(props.call.output)
+    return { kind: 'text', hits: [], lines: [], text: cut.text, truncated: cut.truncated, hitsTruncated: false }
+  }
+  if (typeof props.call.output === 'number') {
+    return { kind: 'lines', hits: [], lines: [String(props.call.output)], text: '', truncated: false, hitsTruncated: false }
+  }
+
+  const short = scalarLine(out, [
+    'message', 'text', 'result', 'uuid', 'value', 'now', 'time', 'datetime',
+    'hash', 'encoded', 'diff', 'hint', 'output',
+  ])
+  if (short) {
+    const cut = truncateText(short)
+    return { kind: 'text', hits: [], lines: [], text: cut.text, truncated: cut.truncated, hitsTruncated: false }
+  }
+
+  const mcpText = (() => {
+    if (!out) return ''
+    if (Array.isArray(out.content)) {
+      return out.content.map((x) => {
+        if (typeof x === 'string') return x
+        if (x && typeof x === 'object') return x.text || x.title || ''
+        return ''
+      }).filter(Boolean).join('\n')
+    }
+    return ''
+  })()
+  if (mcpText && !looksLikeJsonBlob(mcpText)) {
+    const cut = truncateText(mcpText)
+    return { kind: 'text', hits: [], lines: [], text: cut.text, truncated: cut.truncated, hitsTruncated: false }
+  }
+
+  if (state.value === 'running') return empty
+  return empty
+})
+
+const genericHits = computed(() => genericView.value.hits || [])
+const genericHitsTruncated = computed(() => !!genericView.value.hitsTruncated)
+const genericLines = computed(() => genericView.value.lines || [])
+const genericText = computed(() => genericView.value.text || '')
+const genericIsError = computed(() => genericView.value.kind === 'error')
+const genericTruncated = computed(() => !!genericView.value.truncated)
+
 const headHintFull = computed(() => {
   if (isChoiceTool.value) return ''
   if (structuredPath.value) return structuredPath.value
   if (cmdText.value) return cmdText.value
-  if (props.call.summary) return String(props.call.summary)
+  if (props.call.summary && !looksLikeJsonBlob(props.call.summary)) return String(props.call.summary)
+
+  const inp = inputObj.value
+  const out = outputObj.value
+  const key = toolKey(props.call.name)
+  const name = String(props.call.name || '')
+  const prefer = []
+
+  if (isSearchName(name) || key === 'memory' || key === 'search_memory') {
+    prefer.push('query', 'q', 'keyword', 'search')
+  }
+  if (isBrowserName(name) || key === 'web_fetch') {
+    prefer.push('url', 'href', 'finalURL', 'title')
+  }
+  if (key === 'calculate') prefer.push('expression', 'result')
+  if (key === 'task' || key === 'task_detail' || key === 'task_control' || key === 'task_status') {
+    prefer.push('requirement', 'taskId', 'status')
+  }
+  if (key === 'cron') prefer.push('name', 'prompt', 'schedule', 'action')
+  if (key === 'use_skill' || key === 'skill_trigger') prefer.push('command', 'name')
+  if (key === 'spawn') prefer.push('system_prompt')
+  if (key === 'send' || key === 'reply') prefer.push('text', 'content', 'message')
+  prefer.push(...HINT_KEYS)
+
+  const fromTasks = Array.isArray(inp?.tasks) && inp.tasks[0] != null ? String(inp.tasks[0]) : ''
+  const picked = firstString(inp, prefer) || firstString(out, prefer) || fromTasks
+  if (picked && !looksLikeJsonBlob(picked)) return picked
   return ''
 })
 const headHint = computed(() => truncateOneLine(headHintFull.value, HINT_CHARS))
@@ -614,11 +845,8 @@ watch(() => props.call, armStuckTimer)
 .tc-interrupt {
   font-size: 12px;
   color: var(--bp-warning);
-  background: var(--bp-warning-soft);
-  border: none;
-  border-radius: var(--bp-radius-sm);
-  padding: 6px 10px;
-  margin: 2px 4px 6px;
+  padding: 4px 8px 6px;
+  line-height: 1.45;
 }
 .tc-file {
   display: flex;
@@ -714,14 +942,38 @@ watch(() => props.call, armStuckTimer)
 .tc-raw-toggle:hover { color: var(--bp-accent); }
 .tc-raw { display: flex; flex-direction: column; gap: 8px; padding: 0 8px 8px; }
 
-.tc-generic { padding: 4px 6px; display: flex; flex-direction: column; gap: 8px; }
+.tc-generic { padding: 4px 6px; display: flex; flex-direction: column; gap: 6px; }
+.tc-hits { display: flex; flex-direction: column; gap: 6px; }
+.tc-hit { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.tc-hit-title {
+  font-size: 13px;
+  color: var(--bp-label);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tc-hit-url {
+  font-size: 11.5px;
+  color: var(--bp-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tc-lines { display: flex; flex-direction: column; gap: 2px; }
+.tc-line {
+  font-size: 13px;
+  color: var(--bp-label-secondary);
+  line-height: 1.45;
+  word-break: break-word;
+}
+.tc-line.is-error { color: var(--bp-danger); }
 .tc-kv { display: flex; flex-direction: column; gap: 3px; }
 .tc-kv-label {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--bp-label-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: var(--bp-tracking-caption);
 }
 .tc-kv-label.is-error { color: var(--bp-danger); }
 .tc-kv-val {

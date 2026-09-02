@@ -92,4 +92,33 @@ export default {
   browser__cookies_list:  '查看 Cookie',
   browser__close:         '关闭浏览器',
   browser__fetch:         'HTTP 请求',
+  browser__snapshot:      '页面快照',
+  browser__type:          '输入文字',
+  browser__select:        '选择选项',
+  browser__hover:         '悬停元素',
+  browser__press:         '按键',
+  browser__scroll:        '滚动页面',
+  browser__tabs:          '标签页',
+  browser__evaluate:      '执行脚本',
+  browser__network:       '网络请求',
+  browser__pdf:           '导出 PDF',
+
+  // ── 任务 / 工作流 ──
+  task:                   '提交任务',
+  task_detail:            '任务详情',
+  task_control:           '任务控制',
+  task_status:            '任务状态',
+
+  // ── 记忆 / 定时 / 子代理 ──
+  memory:                 '记忆',
+  cron:                   '定时任务',
+  spawn:                  '子任务',
+  use_skill:              '加载技能',
+  dreaming:               '整理记忆',
+  heartbeat:              '心跳',
+
+  // ── 工具发现 ──
+  list_tools:             '列出工具',
+  tool_search:            '搜索工具',
+  list_all_tools:         '全部工具',
 }
