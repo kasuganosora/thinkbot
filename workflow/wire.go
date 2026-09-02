@@ -73,6 +73,21 @@ type WireConfig struct {
 	// ToolBotID 解析工具时使用的 BotID，决定内部 SubAgent 操作哪个 bot 的工作空间。
 	// 通常传当前 bot 的 id，使其与主 Agent 共用同一 per-bot 沙箱（同一份仓库/目录）。
 	ToolBotID string
+
+	// ToolChannel 内部 SubAgent 解析工具时使用的平台上下文（决定 toolperm 按哪套
+	// 平台规则评估）。为空时默认 "web"——绝大多数 bot 在 web 平台有 `*` 全开规则
+	// （SeedWebDefault 惰性播种），工作空间工具（exec/读/写/列目录等）因此被放开，
+	// 使「审查并修复代码」类节点能真正操作仓库。
+	//
+	// 为什么要带平台而非留空：历史上 baseCtx 只带 BotID（platform 为空），toolperm 的
+	// Evaluate 在「该平台无规则」分支会拒绝一切敏感工具（命令/文件/联网），于是 workflow
+	// 子代理只能拿到基础工具（如 sandbox_health），表现为节点自报「缺少文件系统工具」。
+	// 带上 web 平台后，敏感非发言工具按 web 的 `*` 规则放行，同时发帖工具仍被
+	// toolperm 的 isSubagent 安全闸拦截（见 toolperm/service.go 的 allow）。
+	//
+	// 若 bot 的 web 规则刻意收紧密感工具，其 workflow 子代理会随之受限——这符合预期
+	// （workflow 应遵守 bot 的工具策略，而非绕过）。
+	ToolChannel string
 }
 
 // EngineConfig 是从 config.Store 解析出的引擎运行时配置。
@@ -169,9 +184,16 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	// workflow 工具（scope=private/group）与 spawn 工具在 IsSubagent 场景被自动排除，
 	// 不会形成套娃；记忆工具同为 private/group，亦被排除，避免工作流污染长期记忆。
 	if cfg.ToolMgr != nil {
-		saMgr.SetToolResolver(cfg.ToolMgr, agenttools.ToolSessionContext{BotID: cfg.ToolBotID})
+		// 内部 SubAgent 解析工具时带上平台上下文（默认 web），使其按该平台的 toolperm
+		// 规则评估——web 的 `*` 规则放开工作空间工具，节点才能真正 exec/读写。
+		// 平台为空会落到「敏感工具默认禁止」分支，导致节点自报「缺少文件系统工具」。
+		channel := cfg.ToolChannel
+		if channel == "" {
+			channel = "web"
+		}
+		saMgr.SetToolResolver(cfg.ToolMgr, agenttools.ToolSessionContext{BotID: cfg.ToolBotID, Channel: channel})
 		cfg.Logger.Debugw("workflow engine: tool resolver attached to internal subagents",
-			"botID", cfg.ToolBotID)
+			"botID", cfg.ToolBotID, "channel", channel)
 	} else {
 		// 静默降级是故障的温床——这次没有日志，排查耗掉了大半天。
 		// 内部 SubAgent 拿不到工具时，代码/文件类任务只能产出「计划」而非「结果」，
