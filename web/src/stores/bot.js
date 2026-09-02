@@ -189,8 +189,10 @@ export const useBotStore = defineStore('bot', () => {
     const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === toolCallId)
     if (pIdx >= 0) {
       parts[pIdx] = { ...parts[pIdx], questionId, output: out }
-      msg.parts = parts
+    } else {
+      parts.push({ type: 'tool', ...call })
     }
+    msg.parts = parts
     updated[mIdx] = msg
     messages.value = updated
   }
@@ -198,8 +200,9 @@ export const useBotStore = defineStore('bot', () => {
   /** 根据 toolCallId 查找对应的 choice questionId（内联渲染用） */
   function choiceIdByToolCallId(toolCallId) {
     if (!toolCallId) return null
+    const want = String(toolCallId)
     for (const [qid, c] of choices.value) {
-      if (c.toolCallId === toolCallId) return qid
+      if (c && c.toolCallId != null && String(c.toolCallId) === want) return qid
     }
     return null
   }
@@ -468,9 +471,13 @@ export const useBotStore = defineStore('bot', () => {
       return { ...item, status: 'killed', summary: item.summary || '回复已中断' }
     }
 
-    if (Array.isArray(msg.parts) && msg.parts.length) {
-      // 已有有序 parts（来自新格式 API 或流式构建）
-      const parts = msg.parts.map(p => (p.type === 'tool' ? settleRunning(p) : p))
+    let rawParts = msg.parts
+    if (typeof rawParts === 'string' && rawParts.trim()) {
+      try { rawParts = JSON.parse(rawParts) } catch { rawParts = null }
+    }
+    if (Array.isArray(rawParts) && rawParts.length) {
+      // 已有有序 parts（来自新格式 API 或流式构建）—— 不要用 content+toolCalls 重排，否则交错顺序丢失。
+      const parts = ensureTextPartIds(rawParts.map(p => (p.type === 'tool' ? settleRunning(p) : p)))
       const toolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.map(settleRunning) : msg.toolCalls
       const settled = { ...msg, parts, toolCalls }
       // 历史恢复：从落库的工具调用里重建选择卡（含提交/超时终态）。
@@ -485,8 +492,9 @@ export const useBotStore = defineStore('bot', () => {
       }
       return settled
     }
+    // 旧消息无 parts：只能 content 在前、工具在后（交错顺序已不可恢复）。
     const parts = []
-    if (msg.content) parts.push({ type: 'text', content: msg.content })
+    if (msg.content) parts.push({ type: 'text', id: 'text-0', content: msg.content })
     const calls = Array.isArray(msg.toolCalls) ? msg.toolCalls.map(settleRunning) : []
     for (const tc of calls) {
       parts.push({ type: 'tool', ...tc })
@@ -766,85 +774,10 @@ async function _resumeTrace(traceId) {
   }
   messages.value = [...messages.value, assistantMsg]
 
-  // 与 sendMessage 一致的累积辅助函数（本地内联，避免改动发送主路径）
-  const appendTextPart = (tmpId, delta) => {
-    const idx = messages.value.findIndex(m => m.id === tmpId)
-    if (idx < 0) return
-    const updated = [...messages.value]
-    const msg = { ...updated[idx] }
-    msg.content = (msg.content || '') + delta
-    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
-    const last = parts[parts.length - 1]
-    if (last && last.type === 'text') {
-      parts[parts.length - 1] = { ...last, content: last.content + delta }
-    } else {
-      parts.push({ type: 'text', content: delta })
-    }
-    msg.parts = parts
-    updated[idx] = msg
-    messages.value = updated
-  }
-  const upsertToolCall = (tmpId, call) => {
-    const idx = messages.value.findIndex(m => m.id === tmpId)
-    if (idx < 0) return
-    const updated = [...messages.value]
-    const msg = { ...updated[idx] }
-    const toolCalls = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
-    const existing = toolCalls.findIndex(t => t.id === call.id)
-    if (existing >= 0) toolCalls[existing] = { ...toolCalls[existing], ...call }
-    else toolCalls.push(call)
-    msg.toolCalls = toolCalls
-    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
-    const merged = existing >= 0 ? toolCalls[existing] : call
-    const part = {
-      type: 'tool',
-      id: merged.id || call.id,
-      name: merged.name || call.name,
-      title: merged.title || call.title || call.name,
-      status: merged.status || call.status || 'running',
-      input: merged.input || call.input,
-      output: merged.output || call.output,
-    }
-    const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === part.id)
-    if (pIdx >= 0) parts[pIdx] = { ...parts[pIdx], ...part }
-    else parts.push(part)
-    msg.parts = parts
-    updated[idx] = msg
-    messages.value = updated
-  }
-  const appendToolProgress = (tmpId, toolCallId, payload) => {
-    const idx = messages.value.findIndex(m => m.id === tmpId)
-    if (idx < 0) return
-    const updated = [...messages.value]
-    const msg = { ...updated[idx] }
-    const toolCalls = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
-    const ti = toolCalls.findIndex(t => t.id === toolCallId)
-    if (ti >= 0) {
-      const t = { ...toolCalls[ti] }
-      const out = (typeof t.output === 'object' && t.output) ? { ...t.output } : { stdout: '', stderr: '', exitCode: null, truncated: false }
-      const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout'
-      out[stream] = (out[stream] || '') + (payload.chunk || '')
-      t.output = out
-      toolCalls[ti] = t
-      msg.toolCalls = toolCalls
-      updated[idx] = msg
-      messages.value = updated
-    }
-  }
-  const finishToolCall = (tmpId, toolCallId, payload) => {
-    const idx = messages.value.findIndex(m => m.id === tmpId)
-    if (idx < 0) return
-    const updated = [...messages.value]
-    const msg = { ...updated[idx] }
-    const toolCalls = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
-    const ti = toolCalls.findIndex(t => t.id === toolCallId)
-    if (ti >= 0) {
-      toolCalls[ti] = { ...toolCalls[ti], ...payload, status: payload.status || (payload.error != null ? 'error' : 'success') }
-      msg.toolCalls = toolCalls
-      updated[idx] = msg
-      messages.value = updated
-    }
-  }
+  // 文本/工具写入一律走 store 级 appendTextPart / upsertToolCall /
+  // appendToolProgress / finishToolCall，保证 parts 与 toolCalls 同步。
+  // （此前这里有一份私有副本，进度和终态只改 toolCalls，ChatWindow 在
+  // parts.length>0 时走交错渲染，卡片会一直 running、丢掉 stdout。）
 
   replying.value = true
   _activeTraceId = traceId
@@ -1095,6 +1028,49 @@ async function resumeContinuation(sessionId) {
     return { stdout: '', stderr: '', exitCode: null, truncated: false }
   }
 
+  function nextTextPartId(parts) {
+    const used = new Set()
+    for (const p of (parts || [])) {
+      if (p && p.type === 'text' && p.id != null && p.id !== '') used.add(String(p.id))
+    }
+    let n = 0
+    while (used.has('text-' + n)) n++
+    return 'text-' + n
+  }
+
+  function ensureTextPartIds(parts) {
+    if (!Array.isArray(parts)) return parts
+    const out = []
+    for (const p of parts) {
+      if (p && p.type === 'text' && (p.id == null || p.id === '')) {
+        out.push({ ...p, id: nextTextPartId(out) })
+      } else {
+        out.push(p)
+      }
+    }
+    return out
+  }
+
+  function appendTextPart(messageId, delta) {
+    if (delta == null || delta === '') return
+    const idx = messages.value.findIndex(m => m.id === messageId)
+    if (idx < 0) return
+    const updated = [...messages.value]
+    const msg = { ...updated[idx] }
+    msg.content = (msg.content || '') + delta
+    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+    const last = parts[parts.length - 1]
+    if (last && last.type === 'text') {
+      const id = last.id || nextTextPartId(parts.slice(0, -1))
+      parts[parts.length - 1] = { ...last, id, content: (last.content || '') + delta }
+    } else {
+      parts.push({ type: 'text', id: nextTextPartId(parts), content: delta })
+    }
+    msg.parts = parts
+    updated[idx] = msg
+    messages.value = updated
+  }
+
   function upsertToolCall(messageId, call) {
     const mIdx = messages.value.findIndex(m => m.id === messageId)
     if (mIdx < 0 || !call?.id) return
@@ -1102,32 +1078,29 @@ async function resumeContinuation(sessionId) {
     const msg = { ...updated[mIdx] }
     const list = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
     const idx = list.findIndex(x => x.id === call.id)
-    const part = {
+    const prev = idx >= 0 ? list[idx] : null
+    const incoming = {
+      ...prev,
+      ...call,
       id: call.id,
-      name: call.name,
-      title: call.title || call.name,
-      status: call.status || 'running',
-      input: call.input,
-      output: normalizeToolOutput(call.output),
+      name: call.name || (prev && prev.name) || call.tool,
+      title: call.title || (prev && prev.title) || call.name || (prev && prev.name) || call.tool,
+      status: call.status || (prev && prev.status) || 'running',
+      input: call.input !== undefined ? call.input : (prev && prev.input),
+      output: normalizeToolOutput(call.output, prev ? normalizeToolOutput(prev.output) : null),
     }
-    if (idx < 0) {
-      list.push(part)
-      // ── 有序 parts 追加工具 part ──
-      const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
-      parts.push({ type: 'tool', ...part })
-      msg.parts = parts
-    } else {
-      const prev = list[idx]
-      list[idx] = { ...prev, ...part, output: normalizeToolOutput(call.output, normalizeToolOutput(prev.output)) }
-      // 同步更新 parts 中的对应工具 part
-      const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
-      const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === call.id)
-      if (pIdx >= 0) {
-        parts[pIdx] = { ...parts[pIdx], ...list[idx] }
-        msg.parts = parts
-      }
-    }
+    if (idx < 0) list.push(incoming)
+    else list[idx] = incoming
     msg.toolCalls = list
+    const merged = idx < 0 ? list[list.length - 1] : list[idx]
+    const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
+    const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === call.id)
+    if (pIdx >= 0) {
+      parts[pIdx] = { ...parts[pIdx], ...merged, type: 'tool', id: call.id }
+    } else {
+      parts.push({ type: 'tool', ...merged, type: 'tool', id: call.id })
+    }
+    msg.parts = parts
     updated[mIdx] = msg
     messages.value = updated
   }
@@ -1138,8 +1111,17 @@ async function resumeContinuation(sessionId) {
     const updated = [...messages.value]
     const msg = { ...updated[mIdx] }
     const list = Array.isArray(msg.toolCalls) ? [...msg.toolCalls] : []
-    const idx = list.findIndex(x => x.id === toolCallId)
-    if (idx < 0) return
+    let idx = list.findIndex(x => x.id === toolCallId)
+    if (idx < 0) {
+      list.push({
+        id: toolCallId,
+        name: payload?.tool,
+        title: toolLabels[payload?.tool] || payload?.tool,
+        status: 'running',
+        output: normalizeToolOutput(null),
+      })
+      idx = list.length - 1
+    }
 
     const stream = payload?.stream === 'stderr' ? 'stderr' : 'stdout'
     const chunk = payload?.chunk || ''
@@ -1232,14 +1214,18 @@ async function resumeContinuation(sessionId) {
     }
   }
 
-  /** 同步 parts 数组中指定工具 part 的状态（供 appendToolProgress / finishToolCall 复用） */
+  /** 同步 parts 数组中指定工具 part 的状态（供 appendToolProgress / finishToolCall 复用）。
+   *  若 parts 里还没有这张卡（finish 先于 upsert、或只写了 toolCalls），补一条，避免交错视图丢卡。
+   */
   function syncPartFromToolCall(msg, toolCallId, call) {
     const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
     const pIdx = parts.findIndex(p => p.type === 'tool' && p.id === toolCallId)
     if (pIdx >= 0) {
-      parts[pIdx] = { ...parts[pIdx], ...call }
-      msg.parts = parts
+      parts[pIdx] = { ...parts[pIdx], ...call, type: 'tool', id: toolCallId }
+    } else {
+      parts.push({ type: 'tool', id: toolCallId, ...call, type: 'tool', id: toolCallId })
     }
+    msg.parts = parts
   }
 
   // ---- 发送消息 ----
@@ -1318,27 +1304,6 @@ async function resumeContinuation(sessionId) {
     _abortController = new AbortController()
     _activeTraceId = ''
 
-    /** 向 assistant 消息的有序 parts 中追加/合并文本内容 */
-    function appendTextPart(tmpId, delta) {
-      const idx = messages.value.findIndex(m => m.id === tmpId)
-      if (idx < 0) return
-      const updated = [...messages.value]
-      const msg = { ...updated[idx] }
-      // 始终同步更新 content 字段（向后兼容）
-      msg.content = (msg.content || '') + delta
-      // 有序 parts：合并到最后一个 text part 或新建
-      const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
-      const last = parts[parts.length - 1]
-      if (last && last.type === 'text') {
-        parts[parts.length - 1] = { ...last, content: last.content + delta }
-      } else {
-        parts.push({ type: 'text', content: delta })
-      }
-      msg.parts = parts
-      updated[idx] = msg
-      messages.value = updated
-    }
-
     chatApi.send(botId, content, {
       sessionId: activeSessionId.value,
       onStart: (traceId) => {
@@ -1415,17 +1380,27 @@ async function resumeContinuation(sessionId) {
         const updated = [...messages.value]
         const aIdx = updated.findIndex(m => m.id === assistantTmpId)
         if (aIdx >= 0) {
-          const finalContent = resp.text || updated[aIdx].content
-          const base = { ...updated[aIdx], content: finalContent, _temp: false }
-          // 确保.parts 中最后一个 text part 的内容与最终 content 一致
-          const parts = Array.isArray(base.parts) ? [...base.parts] : []
-          if (parts.length && parts[parts.length - 1].type === 'text') {
-            parts[parts.length - 1] = { ...parts[parts.length - 1], content: finalContent }
-          } else if (finalContent) {
-            parts.push({ type: 'text', content: finalContent })
+          // done.text 是整段拼接后的 assistant 文本（services.js 用 SSE done 覆盖
+          // 本地累积的 fullText）。不得写进最后一个 text part，否则「文本→工具→文本」
+          // 会变成「文本→工具→全文再倒一次」。
+          const prev = updated[aIdx]
+          const parts = Array.isArray(prev.parts) ? [...prev.parts] : []
+          const textIdxs = []
+          let hasTool = false
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i] && parts[i].type === 'text') textIdxs.push(i)
+            if (parts[i] && parts[i].type === 'tool') hasTool = true
           }
-          base.parts = parts
-          updated[aIdx] = base
+          let content = prev.content || ''
+          if (textIdxs.length === 0 && resp.text) {
+            parts.push({ type: 'text', id: nextTextPartId(parts), content: resp.text })
+            content = resp.text
+          } else if (textIdxs.length === 1 && !hasTool && resp.text) {
+            const i = textIdxs[0]
+            parts[i] = { ...parts[i], id: parts[i].id || nextTextPartId(parts.filter((_, j) => j !== i)), content: resp.text }
+            content = resp.text
+          }
+          updated[aIdx] = { ...prev, content, parts, _temp: false }
         }
         const uIdx = updated.findIndex(m => m.id === userTmpId)
         if (uIdx >= 0) {
@@ -1450,7 +1425,7 @@ async function resumeContinuation(sessionId) {
             ...updated[idx],
             content: failText,
             _temp: false,
-            parts: [{ type: 'text', content: failText }]
+            parts: [{ type: 'text', id: 'text-0', content: failText }]
           }
           messages.value = updated
         }
