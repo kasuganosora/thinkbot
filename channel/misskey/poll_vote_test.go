@@ -273,3 +273,33 @@ func TestExpirePollNoteStopsDebounceTimer(t *testing.T) {
 		t.Fatal("both debounce and expire timers should be stopped")
 	}
 }
+
+func TestMisskeyIngressChannelID(t *testing.T) {
+	if got := misskeyIngressChannelID("timeline", false, VisibilityHome, "u1"); got != "misskey:timeline" {
+		t.Fatalf("plain timeline: %s", got)
+	}
+	if got := misskeyIngressChannelID("timeline", true, VisibilityHome, "u1"); got != "u1" {
+		t.Fatalf("mentioned timeline should be user id, got %s", got)
+	}
+	if got := misskeyIngressChannelID("timeline", false, VisibilitySpecified, "u1"); got != "u1" {
+		t.Fatalf("specified timeline should be user id, got %s", got)
+	}
+	if got := misskeyIngressChannelID("mention", false, VisibilityHome, "u1"); got != "u1" {
+		t.Fatalf("mention event: %s", got)
+	}
+}
+
+func TestPollVisibilityFromNote(t *testing.T) {
+	vis, ids, err := pollVisibilityFromNote(&Note{Visibility: VisibilityPublic, User: User{ID: "u1"}})
+	if err != nil || vis != VisibilityPublic || len(ids) != 0 {
+		t.Fatalf("public: vis=%s ids=%v err=%v", vis, ids, err)
+	}
+	vis, ids, err = pollVisibilityFromNote(&Note{Visibility: VisibilitySpecified, User: User{ID: "u2"}})
+	if err != nil || vis != VisibilitySpecified || len(ids) != 1 || ids[0] != "u2" {
+		t.Fatalf("specified: vis=%s ids=%v err=%v", vis, ids, err)
+	}
+	_, _, err = pollVisibilityFromNote(&Note{ID: "n1", Visibility: VisibilitySpecified})
+	if err == nil {
+		t.Fatal("specified without author should error")
+	}
+}

@@ -425,11 +425,22 @@ async function submit() {
     store.markChoiceSubmitted(questionId.value, { selectedIds: chosen, freeText: extra })
     MessagePlugin.success({ message: '选择已提交', placement: 'top', duration: 1600 })
   } catch (e) {
-    // 提交失败必须回到可交互态：绝不能把用户锁死在"提交中"
     console.warn('[ChoiceCard] 提交失败', e)
-    localPhase.value = ''
+    const code = Number(e && e.code)
+    // 404 问题已过期/不存在；409 已结束。再点只会反复 toast，锁死卡片。
+    if (code === 404) {
+      localPhase.value = 'timeout'
+      store.markChoiceTerminal(questionId.value, 'timeout')
+      MessagePlugin.warning({ message: (e && e.message) || '本题已过期', placement: 'top' })
+    } else if (code === 409) {
+      localPhase.value = 'answered'
+      store.markChoiceSubmitted(questionId.value, { selectedIds: chosen, freeText: extra })
+      MessagePlugin.warning({ message: (e && e.message) || '本题已结束', placement: 'top' })
+    } else {
+      localPhase.value = ''
+      MessagePlugin.error({ message: (e && e.message) || '提交失败，请重试', placement: 'top' })
+    }
     submitting.value = false
-    MessagePlugin.error({ message: (e && e.message) || '提交失败，请重试', placement: 'top' })
   }
   submitting.value = false
 }
