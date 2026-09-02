@@ -155,7 +155,7 @@
       v-model:visible="addVisible"
       header="添加搜索提供方"
       :width="520"
-      :confirm-btn="{ content: '确认', disabled: !addForm.name || !addForm.type }"
+      :confirm-btn="{ content: '确认', disabled: !addCanSubmit }"
       :on-confirm="confirmAdd"
       dialogClassName="sp-add-dialog"
     >
@@ -164,7 +164,46 @@
           <label class="lbl">提供方类型</label>
           <t-select v-model="addForm.type" :options="typeOptions" placeholder="选择类型" />
         </div>
-        <div v-if="addForm.type" class="add-tip">{{ addRequiredTip }}</div>
+        <div v-if="addForm.type && addRequiredTip" class="add-tip">
+          <t-icon name="info-circle" size="14px" />
+          <span>{{ addRequiredTip }}</span>
+        </div>
+        <template v-if="addForm.type">
+          <!-- 必填字段：直接展示 -->
+          <template v-for="key in ['apiKey', 'searchType', 'baseUrl']" :key="'req-' + key">
+            <div v-if="addFieldMeta(key).show && addFieldMeta(key).required" class="field">
+              <label class="lbl">
+                {{ addFieldMeta(key).label }}
+                <span class="req">*</span>
+              </label>
+              <div v-if="addFieldMeta(key).help" class="hint">{{ addFieldMeta(key).help }}</div>
+              <t-input v-if="key === 'apiKey'" v-model="addForm.apiKey" type="password" :placeholder="addFieldMeta(key).placeholder" />
+              <t-select v-else-if="key === 'searchType' && addSchema.searchTypeOptions" v-model="addForm.searchType" :options="addSchema.searchTypeOptions" :placeholder="addFieldMeta(key).placeholder" />
+              <t-input v-else v-model="addForm[key]" :placeholder="addFieldMeta(key).placeholder" />
+            </div>
+          </template>
+          <!-- 可选字段：折叠，需要时展开填写 -->
+          <div v-if="addHasOptional" class="advanced">
+            <button type="button" class="adv-toggle" @click="showAddAdvanced = !showAddAdvanced">
+              可选配置
+              <t-icon :name="showAddAdvanced ? 'chevron-up' : 'chevron-down'" size="16px" />
+            </button>
+            <template v-if="showAddAdvanced">
+              <template v-for="key in ['apiKey', 'searchType', 'baseUrl']" :key="'opt-' + key">
+                <div v-if="addFieldMeta(key).show && !addFieldMeta(key).required" class="field adv-field">
+                  <label class="lbl">
+                    {{ addFieldMeta(key).label }}
+                    <span class="opt">（可选）</span>
+                  </label>
+                  <div v-if="addFieldMeta(key).help" class="hint">{{ addFieldMeta(key).help }}</div>
+                  <t-input v-if="key === 'apiKey'" v-model="addForm.apiKey" type="password" :placeholder="addFieldMeta(key).placeholder" />
+                  <t-select v-else-if="key === 'searchType' && addSchema.searchTypeOptions" v-model="addForm.searchType" :options="addSchema.searchTypeOptions" :placeholder="addFieldMeta(key).placeholder" />
+                  <t-input v-else v-model="addForm[key]" :placeholder="addFieldMeta(key).placeholder" />
+                </div>
+              </template>
+            </template>
+          </div>
+        </template>
         <div class="field">
           <label class="lbl">名称</label>
           <t-input v-model="addForm.name" placeholder="输入名称" @enter="confirmAdd" />
@@ -290,12 +329,30 @@ function remove() {
 
 /* 添加 */
 const addVisible = ref(false)
-const addForm = reactive({ name: '', type: '' })
-const addRequiredTip = computed(() => {
-  if (!addForm.type) return ''
-  return searchProviderSchema(addForm.type).requiredTip || ''
+const addForm = reactive({ name: '', type: '', apiKey: '', searchType: '', baseUrl: '' })
+const addSchema = computed(() => (addForm.type ? searchProviderSchema(addForm.type) : null))
+const addRequiredTip = computed(() => addSchema.value?.requiredTip || '')
+const showAddAdvanced = ref(false)
+function addFieldMeta(key) {
+  return addSchema.value?.fields?.[key] || { show: false, required: false, label: '', placeholder: '', help: '' }
+}
+// 有无可折叠的可选字段（show 但非 required）
+const addHasOptional = computed(() =>
+  ['apiKey', 'searchType', 'baseUrl'].some(k => addFieldMeta(k).show && !addFieldMeta(k).required)
+)
+const addCanSubmit = computed(() => {
+  if (!addForm.name.trim() || !addForm.type) return false
+  for (const key of ['apiKey', 'searchType', 'baseUrl']) {
+    if (addFieldMeta(key).required && !String(addForm[key] || '').trim()) return false
+  }
+  return true
 })
-function openAdd() { addForm.name = ''; addForm.type = ''; addVisible.value = true }
+function openAdd() {
+  addForm.name = ''; addForm.type = ''
+  addForm.apiKey = ''; addForm.searchType = ''; addForm.baseUrl = ''
+  showAddAdvanced.value = false
+  addVisible.value = true
+}
 watch(() => addForm.type, (type) => {
   if (!type) return
   const meta = searchProviderSchema(type)
@@ -303,10 +360,17 @@ watch(() => addForm.type, (type) => {
   if (!addForm.name.trim() || known.includes(addForm.name.trim())) {
     addForm.name = meta.label
   }
+  // 切换类型时清空上一类型填写的密钥类字段并收起可选区
+  addForm.apiKey = ''; addForm.searchType = ''; addForm.baseUrl = ''
+  showAddAdvanced.value = false
 })
 async function confirmAdd() {
-  if (!addForm.name.trim() || !addForm.type) return MessagePlugin.warning('请填写名称并选择类型')
-  const created = await searchProviderApi.create({ name: addForm.name.trim(), type: addForm.type })
+  if (!addCanSubmit.value) return MessagePlugin.warning('请填写名称、类型及必填配置项')
+  const payload = { name: addForm.name.trim(), type: addForm.type }
+  if (addForm.apiKey.trim()) payload.apiKey = addForm.apiKey.trim()
+  if (addForm.searchType.trim()) payload.searchType = addForm.searchType.trim()
+  if (addForm.baseUrl.trim()) payload.baseUrl = addForm.baseUrl.trim()
+  const created = await searchProviderApi.create(payload)
   addVisible.value = false
   await load(created.id)
   MessagePlugin.success('已添加')
@@ -380,9 +444,13 @@ load()
 
 .add-form .field { margin-bottom: 18px; }
 .add-tip {
-  font-size: 12px; color: var(--bp-label-secondary); background: var(--bp-surface-fill); border-radius: 8px;
-  padding: 8px 12px; margin-bottom: 16px; line-height: 1.5;
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 12px; color: var(--bp-label-tertiary);
+  margin: -6px 0 16px; line-height: 1.5;
 }
+.add-tip .t-icon { flex-shrink: 0; margin-top: 2px; }
+.add-form .advanced { margin-bottom: 4px; }
+.add-form .adv-field { margin-top: 14px; }
 </style>
 
 <style>

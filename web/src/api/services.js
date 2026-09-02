@@ -2291,8 +2291,10 @@ export const searchProviderApi = {
       const m = searchTypeMeta(payload.type)
       const p = {
         id: genId('sp'), type: payload.type, name: payload.name || m.label,
-        letter: m.letter, color: m.color, enabled: false, apiKey: '',
-        searchType: '', timeout: 15, baseUrl: '', createdAt: nowISO(), updatedAt: nowISO()
+        letter: m.letter, color: m.color, enabled: false,
+        apiKey: payload.apiKey || '', searchType: payload.searchType || '',
+        timeout: payload.timeout || 15, baseUrl: payload.baseUrl || '',
+        createdAt: nowISO(), updatedAt: nowISO()
       }
       ensureSearchProviders().push(p)
       return JSON.parse(JSON.stringify(p))
