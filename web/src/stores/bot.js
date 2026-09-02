@@ -121,6 +121,12 @@ export const useBotStore = defineStore('bot', () => {
   /**
    * 注册/更新一张选择卡：写入 choices、并把 questionId 锚定到承载它的 assistant 消息
    * （与 tagMessageWorkflow 同构）。重复事件（SSE 重放）幂等。
+   *
+   * 同一 toolCallId 可能先注册临时卡（onToolCall，questionId=call.id 占位）、
+   * 后被正式卡（onToolProgress，服务端生成的真实 questionId）覆盖。
+   * 此函数负责清理已被新 questionId 取代的旧条目，防止 choiceIdByToolCallId
+   * 命中过期的临时数据。
+   *
    * @param {string} messageId - assistant 消息 ID
    * @param {object} payload - normalizeChoicePayload 产物（含 questionId）
    * @param {string} [toolCallId] - 触发此卡的工具调用 ID（用于内联渲染到对应 ToolCallCard 后）
@@ -136,6 +142,26 @@ export const useBotStore = defineStore('bot', () => {
       status: payload?.status || prev.status || '',
       toolCallId: toolCallId || prev.toolCallId || '',
     })
+    // 清理同一 toolCallId 的旧条目（临时卡被正式卡取代时的遗留）
+    if (toolCallId) {
+      for (const [oldQid, c] of next) {
+        if (oldQid !== qid && c.toolCallId === toolCallId) {
+          next.delete(oldQid)
+          // 同步从消息的 questionIds 中移除旧条目，防止孤儿渲染或 choiceIdByToolCallId 命中过期数据
+          const mIdx = messages.value.findIndex(m => m.id === messageId)
+          if (mIdx >= 0) {
+            const updated = [...messages.value]
+            const msg = { ...updated[mIdx] }
+            if (Array.isArray(msg.questionIds)) {
+              msg.questionIds = msg.questionIds.filter(id => id !== oldQid)
+              updated[mIdx] = msg
+              messages.value = updated
+            }
+          }
+          break // 同一 toolCallId 最多一条旧条目
+        }
+      }
+    }
     choices.value = next
     tagMessageChoice(messageId, qid)
   }
@@ -519,6 +545,30 @@ export const useBotStore = defineStore('bot', () => {
     })
   }
 
+  /**
+   * 从 user_choice 工具的原始 input 构造临时选择卡（无 questionId 时用）。
+   * questionId 用 tempId 占位（通常是 call.id），等 tool_progress 携带正式
+   * questionId 到达后 registerChoice 会覆盖（同一 toolCallId →
+   * choiceIdByToolCallId 解析到新 qid，旧条目沦为 orphan）。
+   *
+   * 这消除了「工具调用已显示、但 ChoiceCard 要等首个 progress 事件才渲染」的空窗期，
+   * 解决用户反馈的"实时流式不显示选项、要刷新才看到"问题。
+   */
+  function tempChoiceFromInput(input, tempId) {
+    if (!input || typeof input !== 'object') return null
+    const hasOptions = Array.isArray(input.options) && input.options.length > 0
+    const hasQuestion = !!input.question
+    if (!hasOptions && !hasQuestion) return null
+    return normalizeChoicePayload({
+      questionId: tempId || '_pending_',
+      question: input.question,
+      mode: input.mode,
+      options: input.options,
+      inputHint: input.inputHint ?? input.input_hint,
+      timeoutAt: input.timeoutAt ?? null,
+    })
+  }
+
   async function loadMessages() {
     const botId = activeBotId.value
     if (!botId) {
@@ -743,7 +793,12 @@ async function _resumeTrace(traceId) {
         upsertToolCall(assistantTmpId, call)
         // user_choice 工具：重连续流时同样注册选择卡（断连期间下发的题目不能丢）
         const cp = choicePayloadFromTool(call)
-        if (cp) registerChoice(assistantTmpId, cp, call.id)
+        if (cp) {
+          registerChoice(assistantTmpId, cp, call.id)
+        } else if (call.name === 'user_choice' || call.name === 'sandbox_user_choice') {
+          const tmp = tempChoiceFromInput(call.input, call.id)
+          if (tmp) registerChoice(assistantTmpId, tmp, call.id)
+        }
       },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
@@ -1222,7 +1277,16 @@ async function resumeContinuation(sessionId) {
         upsertToolCall(assistantTmpId, call)
         // user_choice 工具：调用即下发选择卡（进度/结果要等用户作答，可能很久）
         const cp = choicePayloadFromTool(call)
-        if (cp) registerChoice(assistantTmpId, cp, call.id)
+        if (cp) {
+          registerChoice(assistantTmpId, cp, call.id)
+        } else if (call.name === 'user_choice' || call.name === 'sandbox_user_choice') {
+          // questionId 由服务端生成、仅在 tool_progress 中下发。
+          // 为避免「工具卡片已显示但 ChoiceCard 要等 progress 才出现」的空窗期，
+          // 从 input 构造临时选择卡（用 call.id 作占位 questionId），
+          // 等 progress 事件到达后会用正式 questionId 覆盖（同一 toolCallId）。
+          const tmp = tempChoiceFromInput(call.input, call.id)
+          if (tmp) registerChoice(assistantTmpId, tmp, call.id)
+        }
       },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
