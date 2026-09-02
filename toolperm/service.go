@@ -632,7 +632,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 	botID, userID, isSystem := sctx.BotID, sctx.UserID, sctx.IsSystem
 	out := make([]llm.Tool, 0, len(toolList))
 	for _, t := range toolList {
-		if !e.allow(botID, t.Name, platform, userID, isSystem) {
+		if !e.allow(botID, t.Name, platform, userID, isSystem, sctx.IsSubagent) {
 			continue
 		}
 		// 二次防御：调用时再用会话上下文复核权限，防止列表过滤被绕过
@@ -641,7 +641,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		orig := t.Execute
 		wt := t
 		wt.Execute = func(ctx *llm.ToolExecContext, input any) (any, error) {
-			if !e.allow(botID, toolName, platform, userID, isSystem) {
+			if !e.allow(botID, toolName, platform, userID, isSystem, sctx.IsSubagent) {
 				return nil, fmt.Errorf("tool %q is not permitted for bot %q on platform %q", toolName, botID, platform)
 			}
 			if orig == nil {
@@ -658,14 +658,16 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 //
 //  1. 系统会话（cron / 心跳 / 梦境巩固）豁免一切**除对外发言之外**的工具；
 //     对外发言工具一律走权限表，防止无人监督的定时任务偷偷发帖。
-//  2. 平台未知（platform 为空）时，对外发言工具**一律拒绝**。
-//     这是必要的兜底：子智能体的会话上下文由 SetToolResolver 传入，历史上只带
-//     BotID 而不带 SourceChannelType（见 botservice.go），空平台会落进
-//     Evaluate 的「平台无规则 → 开放基线」分支，等于让子智能体绕过主会话的
-//     禁发帖配置。非发言工具仍按开放基线处理，避免误伤工作空间操作。
-func (e *evaluator) allow(botID, tool, platform, userID string, isSystem bool) bool {
+//  2. 对外发言工具对子智能体（isSubagent）一律拒绝，与平台无关。
+//     这是必要的兜底：workflow 内部子代理现在会带上真实平台上下文（如 web，
+//     其 `*` 规则放开工作空间工具），若不显式拦发言，子代理会继承该平台的发帖
+//     权限、绕过主会话的禁发帖配置去发帖。空平台的历史逻辑（platform=="" 即拒
+//     发言）作为兜底保留——子代理无论平台为空还是带了 web，都不许发言。
+//     非发言工具按平台规则评估（web 的 `*` 放开工作空间，使「审查并修复代码」
+//     类节点能真正 exec/读写），不再被空平台的「敏感工具默认禁止」误伤。
+func (e *evaluator) allow(botID, tool, platform, userID string, isSystem, isSubagent bool) bool {
 	broadcast := IsBroadcastTool(tool)
-	if broadcast && platform == "" {
+	if broadcast && (platform == "" || isSubagent) {
 		return false
 	}
 	if isSystem && !broadcast {
