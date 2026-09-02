@@ -309,6 +309,22 @@ POST /api/workflows/recover        — 恢复中断的工作流（admin）
 GET  /api/workflows/metrics        — 工作流引擎指标（admin）
 ```
 
+### 交互式选择卡（user_choice）
+
+> LLM 调 `user_choice` 工具 → 工具注册问题并**阻塞等待** → `tool_progress` 事件把
+> 卡片 payload 推给前端 → 用户点选后经本接口唤醒工具。缺了本接口，卡片点了就 404，
+> 工具会一直等到超时（默认 600s），表现为「bot 卡住不说话」。
+>
+> 归属校验按**登录用户**做（问题的 ChatID 即 `web:<userID>`），不认客户端自报的会话 ID。
+> 非归属者一律 404，不泄漏问题是否存在。
+
+```
+POST /api/user-choice/:questionId/answer       — 回填选择卡作答（登录用户）
+     body { selectedIds: string[], freeText?: string }   // selectedIds 是选项 id，不是下标
+     200  { accepted: true, questionId }
+     404  问题不存在/已过期/不属于当前用户    409 已作答或已终态    400 选项 id 未知
+```
+
 ### 技能管理（admin）
 
 ```
