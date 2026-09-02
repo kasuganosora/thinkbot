@@ -513,14 +513,32 @@ export const useBotStore = defineStore('bot', () => {
   function restoreChoicesForMessage(msg) {
     const found = []
     if (!msg || msg.role !== 'assistant') return found
-    const calls = Array.isArray(msg.toolCalls) && msg.toolCalls.length
-      ? msg.toolCalls
-      : (Array.isArray(msg.parts) ? msg.parts.filter(p => p.type === 'tool') : [])
-    for (const tc of calls) {
-      const payload = choicePayloadFromTool(tc)
+    const byId = new Map()
+    const addCall = (tc) => {
+      if (!tc) return
+      const id = String(tc.id || tc.toolCallId || '')
+      if (id) byId.set(id, { ...tc, id })
+      else byId.set('anon-' + byId.size, tc)
+    }
+    for (const tc of (msg.toolCalls || [])) addCall(tc)
+    for (const p of (msg.parts || [])) {
+      if (p && p.type === 'tool') addCall(p)
+    }
+    for (const tc of byId.values()) {
+      let payload = choicePayloadFromTool(tc)
+      const toolCallId = String(tc.id || tc.toolCallId || '')
+      if (!payload) {
+        const name = String(tc.name || tc.tool || '')
+        const isChoice = name === 'user_choice' || name === 'sandbox_user_choice' || name.endsWith(':user_choice')
+        if (isChoice) {
+          payload = tempChoiceFromInput(tc.input, toolCallId || '_pending_')
+          if (payload) {
+            const st0 = tc.status
+            if (st0 && st0 !== 'running') payload.pending = false
+          }
+        }
+      }
       if (!payload) continue
-      // 历史 toolCalls / parts 落库字段是 id（与 ChatWindow g.call.id 一致）
-      const toolCallId = tc.id || tc.toolCallId || ''
       registerChoice(msg.id, payload, toolCallId)
       found.push(payload.questionId)
       // 终态回填：落库的 status 就是这道题的最终状态

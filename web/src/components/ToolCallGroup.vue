@@ -59,7 +59,11 @@ const props = defineProps({
 })
 
 const rootRef = ref(null)
-const displayName = computed(() => toolLabels[props.name] || props.name)
+const displayName = computed(() => {
+  const name = props.name
+  const key = String(name || "").replace(/^sandbox_/, "")
+  return toolLabels[name] || (key !== name ? toolLabels[key] : null) || name
+})
 
 const aggState = computed(() => {
   const calls = props.calls || []
