@@ -129,11 +129,25 @@
                   :name="g.name"
                   :calls="g.calls"
                 />
-                <ToolCallCard
-                  v-else
-                  :key="g.call.id"
-                  :call="g.call"
-                />
+                <template v-else>
+                  <ToolCallCard
+                    :key="g.call.id"
+                    :call="g.call"
+                  />
+                  <!-- user_choice：内联选择卡（按 LLM 发出顺序紧随工具卡片，
+                       而非堆到消息末尾）-->
+                  <div
+                    v-if="store.choiceIdByToolCallId(g.call.id)"
+                    :key="'choice-inline-' + g.call.id"
+                    class="cc-inline"
+                  >
+                    <ChoiceCard
+                      :payload="store.choiceState(store.choiceIdByToolCallId(g.call.id))?.payload || { questionId: store.choiceIdByToolCallId(g.call.id) }"
+                      :status="store.choiceState(store.choiceIdByToolCallId(g.call.id))?.status || ''"
+                      :submitted="store.choiceState(store.choiceIdByToolCallId(g.call.id))?.submitted || false"
+                    />
+                  </div>
+                </template>
               </template>
             </div>
             </template>
@@ -156,11 +170,10 @@
             />
           </div>
 
-          <!-- 选择卡片（user_choice）：复用工作流卡片的锚定机制——
-               按 questionId 关联到下发它的那轮助手消息，不与工作流卡片互斥，
-               多题并存时逐题内联渲染。 -->
+          <!-- 选择卡片（user_choice）遗留兜底：仅渲染无法关联到 toolCallId 的历史卡片。
+               新卡片已内联到对应 ToolCallCard 后面（见上方 msg-toolcalls 循环）。 -->
           <div
-            v-for="qid in msg.questionIds || []"
+            v-for="qid in orphanQuestionIds(msg) || []"
             :key="'choice-' + qid"
             class="wf-inline cc-inline"
           >
@@ -572,6 +585,21 @@ const lastAssistantMsgId = computed(() => {
 // 选择卡（user_choice）：按 questionId 取该题的实时状态（payload/终态/提交标记）。
 // 与工作流面板同一模式——渲染层只读 store，不持有副本。
 const choiceState = (qid) => store.choiceState(qid)
+
+/** 过滤出无法关联到 toolCallId 的遗留选择卡（历史恢复 / toolCallId 丢失时兜底渲染） */
+function orphanQuestionIds(msg) {
+  if (!msg.questionIds?.length) return []
+  const tcIds = new Set((msg.toolCalls || []).map(tc => tc.id))
+  return msg.questionIds.filter(qid => {
+    const c = store.choiceState(qid)
+    // 有 toolCallId 但对应工具调用不在本消息中 → 也算孤儿（跨消息异常安全兜底）
+    if (c?.toolCallId && !tcIds.has(c.toolCallId)) return true
+    // 完全没有 toolCallId → 遗留卡片，在底部兜底渲染
+    if (!c?.toolCallId) return true
+    // 有 toolCallId 且在本消息中 → 已内联渲染，跳过
+    return false
+  })
+}
 
 // 新的选择题下发时（questionIds 首次出现），若用户停在底部则跟随滚底，
 // 避免卡片落在视口之外；用户上翻阅读时不打扰（与 workflowId watcher 同策略）。
