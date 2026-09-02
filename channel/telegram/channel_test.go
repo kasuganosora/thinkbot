@@ -563,3 +563,67 @@ func TestHandleCallbackQueryMultiDoneEmptyHint(t *testing.T) {
 		t.Fatalf("empty done must not resolve, status = %s", snap.Status)
 	}
 }
+
+func TestChoiceTimeoutScheduled(t *testing.T) {
+	ch := &TelegramChannel{name: "tg", botID: "b", choicePending: map[string]*choicePending{
+		"q-timeout": {ChatID: 1, MessageID: 2},
+	}}
+	ch.armChoiceTimeout("q-timeout", 600)
+	ch.choiceMu.Lock()
+	p := ch.choicePending["q-timeout"]
+	ch.choiceMu.Unlock()
+	if p == nil || p.timer == nil {
+		t.Fatal("timeout timer should be set")
+	}
+	ch.dropChoicePending("q-timeout")
+	if p.timer != nil {
+		t.Fatal("dropChoicePending should Stop and clear timer")
+	}
+	if _, ok := ch.choicePending["q-timeout"]; ok {
+		t.Fatal("pending should be dropped")
+	}
+}
+
+func TestChoiceTimeoutZeroUsesDefault(t *testing.T) {
+	ch := &TelegramChannel{name: "tg", botID: "b", choicePending: map[string]*choicePending{
+		"q-zero": {ChatID: 1, MessageID: 2},
+	}}
+	ch.armChoiceTimeout("q-zero", 0)
+	ch.choiceMu.Lock()
+	p := ch.choicePending["q-zero"]
+	ch.choiceMu.Unlock()
+	if p == nil || p.timer == nil {
+		t.Fatal("timeoutSecs<=0 should still schedule DefaultTimeoutSecs")
+	}
+	ch.dropChoicePending("q-zero")
+}
+
+func TestExpireChoiceDropsPending(t *testing.T) {
+	ch := &TelegramChannel{name: "tg", botID: "b", choicePending: map[string]*choicePending{
+		"q-exp": {ChatID: 1, MessageID: 2},
+	}}
+	ch.expireChoice("q-exp")
+	if _, ok := ch.choicePending["q-exp"]; ok {
+		t.Fatal("expireChoice should drop pending")
+	}
+}
+
+func TestDropChoicePendingStopsTimer(t *testing.T) {
+	ch := &TelegramChannel{name: "tg", botID: "b", choicePending: map[string]*choicePending{
+		"q-stop": {ChatID: 1, MessageID: 2},
+	}}
+	fired := make(chan struct{}, 1)
+	ch.choiceMu.Lock()
+	ch.choicePending["q-stop"].timer = time.AfterFunc(40*time.Millisecond, func() {
+		fired <- struct{}{}
+		ch.expireChoice("q-stop")
+	})
+	ch.choiceMu.Unlock()
+	ch.dropChoicePending("q-stop")
+	time.Sleep(80 * time.Millisecond)
+	select {
+	case <-fired:
+		t.Fatal("timer should have been stopped so expire does not fire")
+	default:
+	}
+}
