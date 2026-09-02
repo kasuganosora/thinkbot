@@ -465,6 +465,7 @@ onBeforeUnmount(() => {
   padding-bottom: 12px;
   transition: box-shadow var(--bp-duration) var(--bp-ease-out);
   will-change: transform;
+  width: 100%;
 }
 .cc-card:hover { box-shadow: var(--bp-shadow-md); }
 
