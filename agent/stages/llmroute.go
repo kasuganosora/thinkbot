@@ -63,6 +63,34 @@ func chatSessionIDFromEnvelope(env *core.Envelope) string {
 	return ""
 }
 
+// messageChannelType 取消息来源平台类型（web/telegram/misskey）。
+// Channel 在构建消息时写入 Metadata["channel_type"]；缺失时返回空串，
+// 消费方（交互工具）按 web 兜底。
+func messageChannelType(msg *core.Message) string {
+	if msg == nil || msg.Metadata == nil {
+		return ""
+	}
+	if ct, ok := msg.Metadata["channel_type"].(string); ok {
+		return ct
+	}
+	return ""
+}
+
+// messageReplyTarget 取 outbound 回写目标。优先 Metadata["reply_target"]，
+// 缺失时回退 Message.Channel（与会话空间同址的平台，如 telegram chatID）。
+func messageReplyTarget(msg *core.Message) string {
+	if msg == nil {
+		return ""
+	}
+	if msg.Metadata != nil {
+		// 注意 any(nil) != "" 的类型陷阱（见上方 hasReplyTarget 注释）。
+		if rt, ok := msg.Metadata["reply_target"].(string); ok && rt != "" {
+			return rt
+		}
+	}
+	return msg.Channel
+}
+
 // resolveTools 解析工具列表：优先用 ToolResolver 动态解析，回退到静态 Tools。
 func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.Tool {
 	if cfg.ToolResolver != nil {
@@ -593,6 +621,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	ctx = agenttools.ContextWithCallOrigin(ctx, agenttools.CallOrigin{
 		BotID:     env.Message.BotID,
 		SessionID: chatSessionIDFromEnvelope(env),
+	})
+
+	// 注入本轮消息元信息（平台类型 / 会话空间 / 回写目标）：交互类工具
+	// （user_choice 等）据此判断应答平台与渲染路径。
+	ctx = agenttools.ContextWithMessageMeta(ctx, agenttools.MessageMeta{
+		BotID:       env.Message.BotID,
+		ChatID:      env.Message.Channel,
+		ChannelType: messageChannelType(&env.Message),
+		ReplyTarget: messageReplyTarget(&env.Message),
 	})
 
 	// 注入「直接回复语境」标记：对方 @ 了 Bot 或回复了 Bot（Mentioned=true）时，

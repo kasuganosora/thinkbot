@@ -48,6 +48,170 @@ export const useBotStore = defineStore('bot', () => {
   // SessionWorkflowPanel 监听此 ref 实时合并，避免纯轮询导致的头部卡片冻结
   const activeWorkflowStatus = ref(null)
 
+  // ---- 用户选择卡片（user_choice 工具，n7 契约）----
+  // choices: Map<questionId, { payload, submitted, status }>（reactive 包 Map，取值始终 .value.get(...)）
+  // 设计意图：
+  //  - 与 workflowId 锚定机制完全同构：消息上打 questionId 标记，渲染层据此内联卡片；
+  //  - 状态放 store 而非组件：提交成功/终态要在"刷新页面后"仍可恢复（submitStatus 持久化于消息），
+  //    且同题多卡片实例（理论上不该出现）共享同一状态源，不会各自为政。
+  const choices = ref(new Map())
+  // 本会话内已成功提交的 questionId 集合（内联渲染判重的轻量索引）
+  const submittedChoiceIds = ref(new Set())
+
+  /**
+   * 从 tool_progress 事件 payload 里提取 user_choice 卡片负载。
+   *
+   * 实际线上形态（**别按想象写**，踩过一次）：后端
+   * `PublishToolProgress` 发的是 `{toolCallId, tool, invocationId, payload:{...}}`，
+   * 而 services.js 的 tool_progress 分支把内层 `parts.payload` **展开**后
+   * 才交给回调（额外补 stream/chunk），且**不带** `tool` 字段。所以到这里的
+   * payload 是扁平的 UserChoiceEventPayload（见 tools/user_choice.go）：
+   *   { type:'user_choice', questionId, question, options:[{id,label,description}],
+   *     mode:'single'|'multi', inputHint, timeout, timeoutAt, via, ... }
+   * → 判别键是 **type**，不是 tool（曾按 tool 判，导致卡片永远不注册）。
+   *
+   * 另外两种形态作为兼容保留：显式 choice 包裹；以及 tool 字段确实存在的调用方。
+   * 提取失败返回 null（绝大多数工具进度事件都不是选择卡）。
+   */
+  function extractChoicePayload(payload) {
+    if (!payload || typeof payload !== 'object') return null
+    // 形态一：显式 choice 包裹
+    const c = payload.choice
+    if (c && typeof c === 'object' && c.questionId != null) {
+      return normalizeChoicePayload(c)
+    }
+    // 形态二：内层 payload 未被展开（防御：上游若改成整体透传也能认）
+    const inner = payload.payload
+    if (inner && typeof inner === 'object' && inner.type === 'user_choice' && inner.questionId != null) {
+      return normalizeChoicePayload(inner)
+    }
+    // 形态三：扁平展开（当前真实形态）
+    const isChoice = payload.type === 'user_choice' || payload.tool === 'user_choice'
+    if (isChoice && payload.questionId != null) {
+      return normalizeChoicePayload(payload)
+    }
+    return null
+  }
+
+  /**
+   * 把各形态的选择卡负载归一成 ChoiceCard 的 props 契约。
+   * mode 统一成 'single' | 'multiple'：后端枚举是 single/multi（见 user_choice 工具
+   * 的 mode enum），卡片组件按 'multiple' 判多选——不翻译的话多选题会退化成单选。
+   * options 统一成 [{id,label,description}]，缺 id 时按下标补 `o{i}`
+   * （与 interaction.RegisterQuestion 的补齐规则一致，见 internal/interaction）。
+   */
+  function normalizeChoicePayload(src) {
+    const rawMode = String(src.mode || '')
+    const mode = (rawMode === 'multi' || rawMode === 'multiple') ? 'multiple' : 'single'
+    const options = Array.isArray(src.options)
+      ? src.options.map((o, i) => (o && typeof o === 'object'
+        ? { id: String(o.id ?? `o${i}`), label: String(o.label ?? ''), description: o.description || '' }
+        : { id: `o${i}`, label: String(o ?? ''), description: '' }))
+      : []
+    return {
+      questionId: String(src.questionId),
+      question: src.question || '',
+      mode,
+      options,
+      inputHint: src.inputHint || src.input_hint || '',
+      timeoutAt: src.timeoutAt ?? src.timeout_at ?? null,
+    }
+  }
+
+  /**
+   * 注册/更新一张选择卡：写入 choices、并把 questionId 锚定到承载它的 assistant 消息
+   * （与 tagMessageWorkflow 同构）。重复事件（SSE 重放）幂等。
+   */
+  function registerChoice(messageId, payload) {
+    const qid = payload?.questionId
+    if (!qid) return
+    const next = new Map(choices.value)
+    const prev = next.get(qid) || {}
+    next.set(qid, {
+      payload: { ...prev.payload, ...payload },
+      submitted: prev.submitted || false,
+      status: payload?.status || prev.status || '',
+    })
+    choices.value = next
+    tagMessageChoice(messageId, qid)
+  }
+
+  /**
+   * 从 tool_result 载荷里提取 user_choice 的终态信息。
+   * n7 契约：user_choice 工具的 result.output 形如
+   *   { status: 'answered'|'timeout'|'cancelled', questionId, selectedIds, freeText }
+   * 提取不到时返回 null（绝大多数工具结果都不是选择卡）。
+   */
+  function extractChoiceTerminal(payload) {
+    if (!payload || typeof payload !== 'object') return null
+    // 只关心 user_choice 工具的结果：按工具名过滤，防止误伤其他工具
+    const tool = String(payload.tool || '')
+    const out = payload.output
+    const isChoiceResult = tool === 'user_choice' || tool.endsWith(':user_choice')
+      || (out && typeof out === 'object' && out.questionId != null && (out.status === 'answered' || out.status === 'timeout' || out.status === 'cancelled'))
+    if (!isChoiceResult) return null
+    if (!out || typeof out !== 'object') return null
+    const qid = out.questionId != null ? String(out.questionId) : ''
+    if (!qid) return null
+    return {
+      payload: { questionId: qid },
+      status: out.status || (payload.status === 'error' ? 'cancelled' : 'answered'),
+      // 用户实际作答内容（终态卡片回显用；本地已提交时通常与本地状态一致，仅作佐证）
+      answer: {
+        selectedIds: Array.isArray(out.selectedIds) ? out.selectedIds.map(String) : [],
+        freeText: typeof out.freeText === 'string' ? out.freeText : '',
+      },
+    }
+  }
+
+  /** 把 questionId 锚定到 assistant 消息（渲染层据此内联 ChoiceCard） */
+  function tagMessageChoice(messageId, qid) {
+    if (!qid) return
+    const mIdx = messages.value.findIndex(m => m.id === messageId)
+    if (mIdx < 0) return
+    const updated = [...messages.value]
+    const msg = { ...updated[mIdx] }
+    if (Array.isArray(msg.questionIds) && msg.questionIds.includes(qid)) return
+    msg.questionIds = Array.isArray(msg.questionIds) ? [...msg.questionIds, qid] : [qid]
+    updated[mIdx] = msg
+    messages.value = updated
+  }
+
+  /** 标记某题已成功提交（本地提交成功即调用；后端 tool_result 佐证时也调用） */
+  function markChoiceSubmitted(qid, answer) {
+    if (!qid) return
+    const next = new Set(submittedChoiceIds.value)
+    next.add(qid)
+    submittedChoiceIds.value = next
+    const nextMap = new Map(choices.value)
+    const prev = nextMap.get(qid)
+    // answer（用户实际所选）随状态一并保存：终态卡片要显示"选了什么"，
+    // 刷新后本地 ref 已丢，必须能在 tool_result 到达/历史恢复时回填
+    if (prev) nextMap.set(qid, { ...prev, submitted: true, status: 'answered', answer: answer || prev.answer || null })
+    choices.value = nextMap
+  }
+
+  /** 工具终态落库：timeout/cancelled/resolved 等终态同步到卡片状态 */
+  function markChoiceTerminal(qid, status) {
+    if (!qid || !choices.value.has(qid)) return
+    const next = new Map(choices.value)
+    const prev = next.get(qid)
+    next.set(qid, { ...prev, status })
+    choices.value = next
+  }
+
+  /** 切换 bot / 新对话时清空选择卡状态（防止旧会话卡片串门） */
+  function resetChoices() {
+    choices.value = new Map()
+    submittedChoiceIds.value = new Set()
+  }
+
+  /** 按 questionId 查询选择卡状态（渲染层消费） */
+  function choiceState(qid) {
+    return choices.value.get(String(qid)) || null
+  }
+
+
   /** 按 ID 查找会话（字符串比较，兼容数字/字符串两种 ID 形态） */
   function findSession(sid) {
     if (sid == null || sid === '') return undefined
@@ -240,7 +404,18 @@ export const useBotStore = defineStore('bot', () => {
       // 已有有序 parts（来自新格式 API 或流式构建）
       const parts = msg.parts.map(p => (p.type === 'tool' ? settleRunning(p) : p))
       const toolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.map(settleRunning) : msg.toolCalls
-      return { ...msg, parts, toolCalls }
+      const settled = { ...msg, parts, toolCalls }
+      // 历史恢复：从落库的工具调用里重建选择卡（含提交/超时终态）。
+      // 注意：此刻消息尚未写入 messages.value，tagMessageChoice 在旧数组里找不到
+      // 本条消息（必然 no-op），所以这里必须**直接把 qids 写进 settled**，
+      // 否则刷新后卡片因缺 questionIds 锚定而不渲染（实测踩过的坑）。
+      const qids = restoreChoicesForMessage(settled)
+      if (qids.length) {
+        settled.questionIds = Array.isArray(settled.questionIds)
+          ? Array.from(new Set([...settled.questionIds, ...qids]))
+          : qids
+      }
+      return settled
     }
     const parts = []
     if (msg.content) parts.push({ type: 'text', content: msg.content })
@@ -248,7 +423,87 @@ export const useBotStore = defineStore('bot', () => {
     for (const tc of calls) {
       parts.push({ type: 'tool', ...tc })
     }
-    return { ...msg, parts, toolCalls: calls.length ? calls : msg.toolCalls }
+    const settled = { ...msg, parts, toolCalls: calls.length ? calls : msg.toolCalls }
+    const qids = restoreChoicesForMessage(settled)
+    if (qids.length) {
+      settled.questionIds = Array.isArray(settled.questionIds)
+        ? Array.from(new Set([...settled.questionIds, ...qids]))
+        : qids
+    }
+    return settled
+  }
+
+  /**
+   * 从落库的 assistant 消息里恢复 user_choice 选择卡（刷新页面后重建卡片状态）。
+   * 与 restoreSessionWorkflow 同一动机：choices 是纯内存态，刷新即丢，
+   * 但题目与用户已作答的事实必须能从历史里还原。
+   * 判定来源：
+   *  - payload：tool 调用的 input（n7 工具参数：questionId/question/mode/options/...）
+   *  - 终态：该 tool call 的 status（success=已作答、timeout=已超时、killed/error=已取消）
+   * @returns {string[]} 本条消息上发现的选择卡 questionId 列表（供调用方锚定）
+   */
+  function restoreChoicesForMessage(msg) {
+    const found = []
+    if (!msg || msg.role !== 'assistant') return found
+    const calls = Array.isArray(msg.toolCalls) && msg.toolCalls.length
+      ? msg.toolCalls
+      : (Array.isArray(msg.parts) ? msg.parts.filter(p => p.type === 'tool') : [])
+    for (const tc of calls) {
+      const payload = choicePayloadFromTool(tc)
+      if (!payload) continue
+      registerChoice(msg.id, payload)
+      found.push(payload.questionId)
+      // 终态回填：落库的 status 就是这道题的最终状态
+      const st = tc.status
+      if (st === 'success' || st === 'answered' || st === 'resolved') {
+        // 落库的 tool_result output 里带有用户实际作答（selectedIds/freeText），
+        // 取出来回填 answer，刷新后的终态卡片才能显示"选了什么"
+        const out = (tc.output && typeof tc.output === 'object') ? tc.output : null
+        markChoiceSubmitted(payload.questionId, out ? {
+          selectedIds: Array.isArray(out.selectedIds) ? out.selectedIds.map(String) : [],
+          freeText: typeof out.freeText === 'string' ? out.freeText : '',
+        } : undefined)
+      }
+      else if (st === 'timeout') markChoiceTerminal(payload.questionId, 'timeout')
+      else if (st === 'killed' || st === 'error' || st === 'cancelled') markChoiceTerminal(payload.questionId, 'cancelled')
+    }
+    return found
+  }
+
+  /**
+   * 从工具调用（tool_call 事件或落库的 toolCalls 项）提取 user_choice 负载。
+   *
+   * 关键点：**questionId 不在 input 里**。input 是 LLM 生成的工具入参
+   * （question/options/mode/input_hint/timeout_secs，见 tools/user_choice.go 的
+   * userChoiceInput），questionId 是服务端 idgen 生成的，只出现在
+   * ① tool_progress 的渲染 payload（走 extractChoicePayload），
+   * ② tool_result 的 output（answered/timeout 都带）。
+   * 所以刷新后从历史恢复必须读 output.questionId —— 早先版本读 input.questionId，
+   * 结果历史里的卡片一张都恢复不出来。
+   *
+   * 同理 input.options 没有 id（id 是注册时按下标补的），这里交给
+   * normalizeChoicePayload 用同一规则 `o{i}` 补齐，才能和 output.selectedIds 对上。
+   */
+  function choicePayloadFromTool(item) {
+    if (!item || typeof item !== 'object') return null
+    const name = String(item.name || item.tool || '')
+    const input = (item.input && typeof item.input === 'object') ? item.input : {}
+    const output = (item.output && typeof item.output === 'object') ? item.output : {}
+    const isChoiceTool = name === 'user_choice' || name.endsWith(':user_choice') || name === 'sandbox_user_choice'
+    // 工具名认不出时的兜底：output 带 questionId 且 input 像一道选择题
+    const looksLikeChoice = output.questionId != null && (Array.isArray(input.options) || input.question)
+    if (!isChoiceTool && !looksLikeChoice) return null
+    // questionId 依次从 output（落库历史/终态）、input（防御：未来若显式回传）里取
+    const qid = output.questionId ?? input.questionId
+    if (qid == null || qid === '') return null
+    return normalizeChoicePayload({
+      questionId: qid,
+      question: input.question,
+      mode: input.mode,
+      options: input.options,
+      inputHint: input.inputHint ?? input.input_hint,
+      timeoutAt: input.timeoutAt ?? input.expiresAt ?? null,
+    })
   }
 
   async function loadMessages() {
@@ -274,6 +529,8 @@ export const useBotStore = defineStore('bot', () => {
     // 重新加载首屏时重置分页游标，避免沿用上个会话的游标
     hasMore.value = false
     nextCursor.value = ''
+    // 选择卡状态同样按会话隔离：换会话/换 bot 后旧题目不得串门渲染
+    resetChoices()
     try {
       const page = await chatApi.history(botId, null, PAGE_SIZE, reqSessionId)
       if (isStale()) return
@@ -469,7 +726,12 @@ async function _resumeTrace(traceId) {
     await chatApi.resume(botId, traceId, {
       signal: ctrl.signal,
       onTextDelta: (delta) => appendTextPart(assistantTmpId, delta),
-      onToolCall: (call) => upsertToolCall(assistantTmpId, call),
+      onToolCall: (call) => {
+        upsertToolCall(assistantTmpId, call)
+        // user_choice 工具：重连续流时同样注册选择卡（断连期间下发的题目不能丢）
+        const cp = choicePayloadFromTool(call)
+        if (cp) registerChoice(assistantTmpId, cp)
+      },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
         // 同上：阻塞式 task 的 workflowId 只能从进度事件拿到（result 要等到终态）
@@ -478,6 +740,9 @@ async function _resumeTrace(traceId) {
           activeWorkflowId.value = pid
           tagMessageWorkflow(assistantTmpId, pid)
         }
+        // user_choice：重连续流中的进度事件同样可能刷新卡片（如剩余超时时间）
+        const cp = extractChoicePayload(payload)
+        if (cp) registerChoice(assistantTmpId, cp)
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
@@ -488,6 +753,13 @@ async function _resumeTrace(traceId) {
         }
         // 重连续流同样要合并状态快照，否则刷新后面板拿不到工作流实时状态
         mergeWorkflowSnapshot(wid, payload)
+        // user_choice 终态（超时/取消/完成）：重连后落定的终态必须同步进卡片
+        const cst = extractChoiceTerminal(payload)
+        if (cst) {
+          registerChoice(assistantTmpId, cst.payload)
+          if (cst.status === 'answered') markChoiceSubmitted(cst.payload.questionId, cst.answer)
+          else markChoiceTerminal(cst.payload.questionId, cst.status)
+        }
       },
     })
     // 重连续流正常结束：把占位消息转正
@@ -935,6 +1207,9 @@ async function resumeContinuation(sessionId) {
       },
       onToolCall: (call) => {
         upsertToolCall(assistantTmpId, call)
+        // user_choice 工具：调用即下发选择卡（进度/结果要等用户作答，可能很久）
+        const cp = choicePayloadFromTool(call)
+        if (cp) registerChoice(assistantTmpId, cp)
       },
       onToolProgress: (toolCallId, payload) => {
         appendToolProgress(assistantTmpId, toolCallId, payload)
@@ -945,6 +1220,9 @@ async function resumeContinuation(sessionId) {
           activeWorkflowId.value = pid
           tagMessageWorkflow(assistantTmpId, pid)
         }
+        // user_choice：进度事件也可能携带卡片负载（超时刷新等），同样注册
+        const cp = extractChoicePayload(payload)
+        if (cp) registerChoice(assistantTmpId, cp)
       },
       onToolResult: (toolCallId, payload) => {
         finishToolCall(assistantTmpId, toolCallId, payload)
@@ -955,6 +1233,13 @@ async function resumeContinuation(sessionId) {
           tagMessageWorkflow(assistantTmpId, wid)
         }
         mergeWorkflowSnapshot(wid, payload)
+        // user_choice 终态：超时/取消/已完成（用户可能已在别处作答）
+        const cst = extractChoiceTerminal(payload)
+        if (cst) {
+          registerChoice(assistantTmpId, cst.payload)
+          if (cst.status === 'answered') markChoiceSubmitted(cst.payload.questionId, cst.answer)
+          else markChoiceTerminal(cst.payload.questionId, cst.status)
+        }
       },
       signal: _abortController.signal,
       attachments: attachments || [],
@@ -1028,6 +1313,9 @@ async function resumeContinuation(sessionId) {
     activeBot, messages, messagesLoading, loadingMore, hasMore,
     activeWorkflowId,
     activeWorkflowStatus,
+    // user_choice 选择卡（n7 契约）：渲染层用 choiceState(qid) 取每题状态
+    choices, submittedChoiceIds, choiceState,
+    registerChoice, markChoiceSubmitted, markChoiceTerminal, resetChoices,
     scrollToBottomOnLoad,
     fetchBots, selectBot,
     createBot, updateBot, deleteBot,
