@@ -62,7 +62,7 @@
                   <span class="typing-indicator" data-testid="chat-typing"><i></i><i></i><i></i></span>
                   <span class="typing-text">思考中…</span>
                 </template>
-                <template v-for="(part, pi) in renderParts(msg)" :key="pi">
+                <template v-for="(part, pi) in renderParts(msg)" :key="renderPartKey(part, pi)">
                   <!-- 文本 part → markdown -->
                   <div
                     v-if="part.type === 'text' && part.content"
@@ -503,15 +503,32 @@ function hasContentText(msg) {
   return msg.parts.some(p => p.type === 'text' && p.content)
 }
 
-/** 当前 text part 是否是最后一个 part（用于流式光标位置） */
+/** 当前 text part 是否是渲染列表中最后一个可见文本（用于流式光标位置）。
+ *  必须按 renderParts 下标判断：连续同名工具会归并，渲染列表短于 msg.parts，
+ *  用 parts 下标会对错块或丢光标。
+ */
 function isLastTextPart(msg, pi) {
-  if (!Array.isArray(msg.parts)) return true
-  // 检查之后是否还有非空 part
-  for (let i = pi + 1; i < msg.parts.length; i++) {
-    if (msg.parts[i].type === 'text' && msg.parts[i].content) return false
-    if (msg.parts[i].type === 'tool') return false
+  const list = renderParts(msg)
+  for (let i = pi + 1; i < list.length; i++) {
+    if (list[i].type === 'text') return false
+    if (list[i].type === 'tool') return false
   }
   return true
+}
+
+/** v-for 稳定 key：工具用 call id，文本用 part.id，归并用 group-name-firstId。 */
+function renderPartKey(part, pi) {
+  if (!part) return 'idx-' + pi
+  if (part.type === 'text') return part.id || ('text-' + pi)
+  if (part._group) {
+    const firstId = part._group[0] && part._group[0].id
+    return 'group-' + (part.name || 'tool') + '-' + (firstId || pi)
+  }
+  return part.id || ('tool-' + pi)
+}
+
+function isChoiceToolName(name) {
+  return name === 'user_choice' || name === 'sandbox_user_choice'
 }
 
 /**
@@ -536,6 +553,12 @@ function renderParts(msg) {
       continue
     }
     if (p.type === 'tool') {
+      // user_choice 必须保持单卡，ChoiceCard 才能紧挨对应调用；归并会把选择题堆到组尾。
+      if (isChoiceToolName(p.name)) {
+        if (groupAcc) { flushGroup(out, groupAcc); groupAcc = null }
+        out.push(p)
+        continue
+      }
       if (groupAcc && groupAcc.name === p.name) {
         // 同名连续 → 加入当前组
         groupAcc.calls.push(p)
@@ -579,6 +602,10 @@ function groupToolCalls(calls) {
   const list = Array.isArray(calls) ? calls : []
   const groups = []
   for (const c of list) {
+    if (isChoiceToolName(c && c.name)) {
+      groups.push({ type: 'single', call: c })
+      continue
+    }
     const last = groups[groups.length - 1]
     if (last && last.type === 'group' && last.name === c.name) {
       last.calls.push(c)
@@ -623,6 +650,7 @@ const choiceState = (qid) => store.choiceState(qid)
 /** 过滤出无法关联到 toolCallId 的遗留选择卡（历史恢复 / toolCallId 丢失时兜底渲染） */
 function orphanQuestionIds(msg) {
   if (!msg.questionIds?.length) return []
+  // 45bf51b：toolCalls ∪ parts 都能把选择题绑到对应卡片，避免刷新后落到消息底部。
   const tcIds = new Set()
   for (const tc of (msg.toolCalls || [])) {
     if (tc && tc.id != null) tcIds.add(String(tc.id))
@@ -630,7 +658,15 @@ function orphanQuestionIds(msg) {
   for (const p of (msg.parts || [])) {
     if (p && p.type === 'tool' && p.id != null) tcIds.add(String(p.id))
   }
+  // 已经由 choiceIdsForToolPart 内联渲染的 qid 不得再以 orphan 出现（双卡）。
+  const inlineQids = new Set()
+  for (const part of renderParts(msg)) {
+    if (part && part.type === 'tool') {
+      for (const qid of choiceIdsForToolPart(part)) inlineQids.add(qid)
+    }
+  }
   return msg.questionIds.filter(qid => {
+    if (inlineQids.has(qid)) return false
     const c = store.choiceState(qid)
     const linked = c?.toolCallId != null && String(c.toolCallId) !== '' && tcIds.has(String(c.toolCallId))
     return !linked
