@@ -235,20 +235,32 @@
     </div>
 
     <div class="chat-input-area" data-testid="chat-input-area">
-      <div class="input-box">
-        <t-textarea
-          v-model="draft"
-          :autosize="{ minRows: 1, maxRows: 6 }"
-          :placeholder="inputPlaceholder"
-          :bordered="false"
-          data-testid="chat-input-textarea"
-          :aria-label="inputAriaLabel"
-          @keydown="onKeydown"
+      <div ref="composerRef" class="composer">
+        <CommandPalette
+          v-if="slashOpen"
+          :query="slashQuery"
+          :items="slashItems"
+          :active-index="slashIndex"
+          @select="onSlashSelect"
+          @close="dismissSlash"
+          @highlight="slashIndex = $event"
         />
-        <div class="input-toolbar">
-          <div class="tool-left">
-            <label class="attach-btn" data-testid="chat-btn-attach" title="上传文件（图片、音频、视频）">
-              <t-icon name="attach" />
+        <div class="input-box">
+          <div v-if="attachments.length" class="attach-strip" data-testid="chat-attach-strip">
+            <span
+              v-for="(f, i) in attachments"
+              :key="i"
+              class="attach-chip"
+              :data-testid="`chat-attach-${i}`"
+            >
+              <t-icon :name="fileIcon(f.type)" />
+              {{ f.name }}
+              <t-icon name="close" class="attach-remove" @click.stop="removeAttach(i)" />
+            </span>
+          </div>
+          <div class="input-row">
+            <label class="attach-btn pressable" data-testid="chat-btn-attach" title="上传文件（图片、音频、视频）">
+              <t-icon name="add" />
               <input
                 ref="fileInputRef"
                 type="file"
@@ -258,56 +270,64 @@
                 @change="onFileSelect"
               />
             </label>
-            <!-- 附件预览条（有附件时显示） -->
-            <div v-if="attachments.length" class="attach-strip">
-              <span
-                v-for="(f, i) in attachments"
-                :key="i"
-                class="attach-chip"
-                :data-testid="`chat-attach-${i}`"
+            <t-textarea
+              v-model="draft"
+              :autosize="{ minRows: 1, maxRows: 6 }"
+              :placeholder="inputPlaceholder"
+              :bordered="false"
+              data-testid="chat-input-textarea"
+              :aria-label="inputAriaLabel"
+              :aria-expanded="slashOpen"
+              aria-autocomplete="list"
+              :aria-controls="slashOpen ? 'chat-command-palette' : undefined"
+              :aria-activedescendant="slashActiveId"
+              @keydown="onKeydown"
+            />
+            <div class="input-actions">
+              <button
+                v-if="!store.replying"
+                type="button"
+                class="composer-btn send pressable"
+                :disabled="!draft.trim() && !attachments.length"
+                data-testid="chat-btn-send"
+                aria-label="发送消息"
+                @click="send"
+                @pointerdown="onPressDown"
+                @pointerup="onPressUp"
+                @pointercancel="onPressUp"
               >
-                <t-icon :name="fileIcon(f.type)" />
-                {{ f.name }}
-                <t-icon name="close" class="attach-remove" @click.stop="removeAttach(i)" />
-              </span>
+                <t-icon name="send" />
+              </button>
+              <template v-else>
+                <button
+                  type="button"
+                  class="composer-btn send pressable"
+                  :disabled="!draft.trim() || attachments.length > 0"
+                  data-testid="chat-btn-append"
+                  aria-label="补充内容（同一轮）"
+                  title="把这段内容补充进当前回复，无需停止"
+                  @click="send"
+                  @pointerdown="onPressDown"
+                  @pointerup="onPressUp"
+                  @pointercancel="onPressUp"
+                >
+                  <t-icon name="arrow-up" />
+                </button>
+                <button
+                  type="button"
+                  class="composer-btn stop pressable"
+                  data-testid="chat-btn-stop"
+                  aria-label="停止生成"
+                  @click="store.stopReply()"
+                  @pointerdown="onPressDown"
+                  @pointerup="onPressUp"
+                  @pointercancel="onPressUp"
+                >
+                  <t-icon name="stop" />
+                </button>
+              </template>
             </div>
           </div>
-          <!-- 发送 / 中断 按钮 -->
-          <t-button
-            v-if="!store.replying"
-            theme="primary"
-            shape="circle"
-            :disabled="!draft.trim() && !attachments.length"
-            data-testid="chat-btn-send"
-            aria-label="发送消息"
-            @click="send"
-          >
-            <template #icon><t-icon name="send" /></template>
-          </t-button>
-          <template v-else>
-            <!-- 生成中：补充内容注入同一轮（Claude-CLI 风格） -->
-            <t-button
-              theme="primary"
-              shape="circle"
-              :disabled="!draft.trim() || attachments.length > 0"
-              data-testid="chat-btn-append"
-              aria-label="补充内容（同一轮）"
-              title="把这段内容补充进当前回复，无需停止"
-              @click="send"
-            >
-              <template #icon><t-icon name="arrow-up" /></template>
-            </t-button>
-            <t-button
-              theme="danger"
-              shape="circle"
-              variant="outline"
-              data-testid="chat-btn-stop"
-              aria-label="停止生成"
-              @click="store.stopReply()"
-            >
-              <template #icon><t-icon name="stop" /></template>
-            </t-button>
-          </template>
         </div>
       </div>
     </div>
@@ -315,7 +335,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch, onUnmounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import { renderMarkdown } from '@/utils/markdown'
 import { useBotStore } from '@/stores/bot'
 import { useUserStore } from '@/stores/user'
@@ -324,6 +344,9 @@ import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
 import ToolCallGroup from '@/components/ToolCallGroup.vue'
 import ChoiceCard from '@/components/ChoiceCard.vue'
+import CommandPalette from '@/components/CommandPalette.vue'
+import { botSkillApi } from '@/api/services'
+import { animateSpring, prefersReducedMotion } from '@/utils/spring'
 
 // markdown 渲染统一走 utils/markdown：
 // 内置渲染缓存（模板每帧都会重新调用，历史消息不必反复 parse + sanitize）
@@ -332,14 +355,144 @@ const store = useBotStore()
 const userStore = useUserStore()
 const userPreferences = computed(() => loadUserPreferences(userStore.user?.id))
 const inputPlaceholder = computed(() => userPreferences.value.sendKey === 'cmd-enter'
-  ? '有问题，尽管问，⌘ / Ctrl + Enter 发送'
-  : '有问题，尽管问，Shift + Enter 换行')
+  ? '有问题尽管问，输入 / 使用命令，⌘ / Ctrl + Enter 发送'
+  : '有问题尽管问，输入 / 使用命令')
 const inputAriaLabel = computed(() => userPreferences.value.sendKey === 'cmd-enter'
-  ? '消息输入框，Command 或 Control 加 Enter 发送，Enter 换行'
-  : '消息输入框，Enter 发送，Shift 加 Enter 换行')
+  ? '消息输入框，输入斜杠打开命令，Command 或 Control 加 Enter 发送，Enter 换行'
+  : '消息输入框，输入斜杠打开命令，Enter 发送，Shift 加 Enter 换行')
 const draft = ref('')
 const scrollRef = ref()
 const fileInputRef = ref()
+const composerRef = ref(null)
+
+const BUILTIN_COMMANDS = [
+  { id: 'cmd-help', name: 'help', description: '显示可用命令列表', icon: 'help-circle', category: '命令' },
+  { id: 'cmd-clear', name: 'clear', description: '清空当前会话上下文', icon: 'delete', category: '命令' },
+  { id: 'cmd-compact', name: 'compact', description: '压缩当前会话上下文（保留最近 N 条消息）', icon: 'folder-zip', category: '命令' },
+  { id: 'cmd-status', name: 'status', description: '显示当前会话状态', icon: 'info-circle', category: '命令' },
+]
+
+function truncateDesc(text, max = 40) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ')
+  if (!t) return ''
+  if (t.length <= max) return t
+  return t.slice(0, max - 1) + '…'
+}
+
+const skillItems = ref([])
+const slashDismissed = ref(false)
+const slashIndex = ref(0)
+
+/** Slash palette opens only for a leading `/` with no newline and no args yet. */
+const slashQuery = computed(() => {
+  const text = draft.value
+  if (!/^\/[^\n]*$/.test(text)) return null
+  const m = text.match(/^\/(\S*)$/)
+  return m ? m[1] : null
+})
+const slashOpen = computed(() => slashQuery.value !== null && !slashDismissed.value)
+
+const slashItems = computed(() => {
+  const q = (slashQuery.value || '').toLowerCase()
+  const skills = skillItems.value.filter((s) => s && s.name)
+  const all = [...BUILTIN_COMMANDS, ...skills]
+  if (!q) return all
+  return all.filter((item) => String(item.name).toLowerCase().startsWith(q))
+})
+const slashActiveId = computed(() => {
+  if (!slashOpen.value) return undefined
+  const item = slashItems.value[slashIndex.value]
+  return item ? 'cmd-opt-' + item.id : undefined
+})
+
+function dismissSlash() {
+  slashDismissed.value = true
+}
+
+async function loadBotSkills(botId) {
+  skillItems.value = []
+  if (!botId) return
+  try {
+    const res = await botSkillApi.list(botId)
+    const list = Array.isArray(res?.skills) ? res.skills : []
+    skillItems.value = list
+      .filter((s) => s && String(s.name || '').trim())
+      .map((s) => ({
+        id: 'skill-' + (s.id || s.name),
+        name: String(s.name).trim(),
+        description: truncateDesc(s.description || ''),
+        icon: 'extension',
+        category: '技能',
+      }))
+  } catch {
+    skillItems.value = []
+  }
+}
+
+watch(slashQuery, (q, prev) => {
+  if (q === null) slashDismissed.value = false
+  if (q !== prev) slashIndex.value = 0
+})
+watch(slashItems, (items) => {
+  if (slashIndex.value >= items.length) {
+    slashIndex.value = Math.max(0, items.length - 1)
+  }
+})
+watch(() => store.activeBotId, (id) => { loadBotSkills(id) }, { immediate: true })
+
+function onSlashSelect(item) {
+  if (!item || !item.name) return
+  draft.value = '/' + item.name
+  slashDismissed.value = true
+  nextTick(() => send())
+}
+
+function completeSlash(item) {
+  if (!item || !item.name) return
+  draft.value = '/' + item.name
+}
+
+function onDocPointerDown(e) {
+  if (!slashOpen.value) return
+  const root = composerRef.value
+  if (root && !root.contains(e.target)) dismissSlash()
+}
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocPointerDown, true)
+})
+
+function scalePress(el, to, response) {
+  if (!el || prefersReducedMotion()) {
+    if (el) el.style.transform = to === 1 ? '' : 'scale(' + to + ')'
+    return
+  }
+  animateSpring({
+    el,
+    from: 1,
+    to,
+    damping: 1.0,
+    response,
+    onUpdate: (v) => { el.style.transform = 'scale(' + v + ')' },
+    onComplete: () => {
+      if (to === 1) el.style.transform = ''
+    },
+  })
+}
+function onPressDown(e) {
+  if (e.button != null && e.button !== 0) return
+  const el = e.currentTarget
+  if (!el || el.disabled) return
+  if (el.setPointerCapture && e.pointerId != null) {
+    try { el.setPointerCapture(e.pointerId) } catch (_) {}
+  }
+  scalePress(el, 0.97, 0.16)
+}
+function onPressUp(e) {
+  const el = e.currentTarget
+  if (!el) return
+  scalePress(el, 1, 0.4)
+}
+
 // ── 智能滚动：用户在底部才自动滚，上翻时不干扰 ──
 const isAtBottom = ref(true)
 const SCROLL_THRESHOLD = 120 // 距底部多少 px 内视为"在底部"
@@ -751,6 +904,7 @@ let _scrollTimer = null
 
 // 组件卸载时清理定时器，防止内存泄漏
 onUnmounted(() => {
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
   if (_scrollTimer) {
     clearInterval(_scrollTimer)
     _scrollTimer = null
@@ -781,8 +935,42 @@ function quickSend(text) {
   store.sendMessage(text)
 }
 
-function onKeydown(value, { e }) {
-  if (e.key !== 'Enter' || e.isComposing) return
+function onKeydown(value, ctx) {
+  const e = (ctx && ctx.e) || ctx || value
+  if (!e || !e.key) return
+  if (e.isComposing) return
+
+  if (slashOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      if (slashIndex.value < slashItems.value.length - 1) slashIndex.value += 1
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (slashIndex.value > 0) slashIndex.value -= 1
+      return
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      const item = slashItems.value[slashIndex.value]
+      if (item) completeSlash(item)
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      dismissSlash()
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const item = slashItems.value[slashIndex.value]
+      if (item) onSlashSelect(item)
+      return
+    }
+  }
+
+  if (e.key !== 'Enter') return
 
   const useCommandEnter = userPreferences.value.sendKey === 'cmd-enter'
   const shouldSend = useCommandEnter
@@ -1178,34 +1366,84 @@ function onKeydown(value, { e }) {
   flex-shrink: 0;
   padding: 0 24px 18px;
 }
-.input-box {
+.composer {
+  position: relative;
   max-width: 820px;
   margin: 0 auto;
-  border: none;
-  border-radius: var(--bp-radius-xl);
-  padding: 10px 14px;
+}
+.input-box {
+  border-radius: var(--bp-radius-2xl);
+  padding: 8px 8px 8px 8px;
   background: var(--bp-surface);
   box-shadow: var(--bp-shadow-composer);
+  border: var(--bp-hairline);
+  transition: box-shadow var(--bp-duration) var(--bp-ease-out);
+}
+.input-box:focus-within {
+  box-shadow: 0 0 0 3px var(--bp-accent-soft), var(--bp-shadow-composer);
+}
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.input-row :deep(.t-textarea) {
+  flex: 1;
+  min-width: 0;
 }
 .input-box :deep(.t-textarea__inner) {
-  font-size: 14px;
-  padding: 6px 4px;
+  font-size: 15px;
+  line-height: 1.45;
+  letter-spacing: var(--bp-tracking-body);
+  padding: 7px 4px;
   resize: none;
   background: transparent !important;
-  border-color: transparent !important;
+  border: none !important;
   box-shadow: none !important;
+  color: var(--bp-label);
 }
-.input-toolbar {
+.input-box :deep(.t-textarea__inner::placeholder) {
+  color: var(--bp-label-tertiary);
+}
+.input-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-top: 4px;
+  gap: 6px;
+  flex-shrink: 0;
+  padding-bottom: 1px;
 }
-.tool-left {
-  display: flex;
+.composer-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-width: 0;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--bp-label-on-accent);
+  background: var(--bp-accent);
+  flex-shrink: 0;
+  transition: background var(--bp-duration) var(--bp-ease-out),
+              color var(--bp-duration) var(--bp-ease-out),
+              opacity var(--bp-duration) var(--bp-ease-out);
+}
+.composer-btn.send:hover:not(:disabled) {
+  background: var(--bp-accent-hover);
+}
+.composer-btn.send:disabled {
+  background: var(--bp-surface-fill);
+  color: var(--bp-label-quaternary);
+  cursor: default;
+}
+.composer-btn.stop {
+  background: var(--bp-surface);
+  color: var(--bp-danger);
+  box-shadow: inset 0 0 0 1px var(--bp-danger);
+}
+.composer-btn.stop:hover {
+  background: var(--bp-danger-soft);
 }
 .attach-btn {
   position: relative;
@@ -1214,10 +1452,13 @@ function onKeydown(value, { e }) {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--bp-radius-sm);
+  border-radius: 50%;
   cursor: pointer;
   color: var(--bp-label-secondary);
   font-size: 18px;
+  background: var(--bp-surface-fill);
+  flex-shrink: 0;
+  margin-bottom: 1px;
   transition: background var(--bp-duration) var(--bp-ease-out),
               color var(--bp-duration) var(--bp-ease-out),
               transform var(--bp-duration) var(--bp-ease-out);
@@ -1240,8 +1481,7 @@ function onKeydown(value, { e }) {
   display: flex;
   gap: 6px;
   overflow-x: auto;
-  padding: 2px 0;
-  max-width: 400px;
+  padding: 4px 6px 8px 38px;
   scrollbar-width: none;
 }
 .attach-strip::-webkit-scrollbar { display: none; }
@@ -1250,7 +1490,7 @@ function onKeydown(value, { e }) {
   align-items: center;
   gap: 4px;
   padding: 3px 8px 3px 6px;
-  border-radius: var(--bp-radius-xs);
+  border-radius: var(--bp-radius-pill);
   background: var(--bp-surface-fill);
   font-size: 12px;
   color: var(--bp-label-secondary);
@@ -1270,4 +1510,15 @@ function onKeydown(value, { e }) {
 }
 .attach-chip:hover .attach-remove { opacity: 1; }
 .attach-chip:hover .attach-remove:hover { color: var(--bp-danger); }
+@media (prefers-reduced-motion: reduce) {
+  .composer-btn,
+  .attach-btn {
+    transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+  }
+  .attach-btn:active,
+  .composer-btn:active {
+    transform: none;
+  }
+}
+
 </style>
