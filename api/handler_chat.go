@@ -809,7 +809,14 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				delta, _ := event.Data["text"].(string)
 				if delta != "" {
 					fullText += delta
-					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": delta})
+					// 剥离 reply-control 协议标记，避免前端渲染出 @@REPLY_CONTROL@@{...}
+					cleanDelta := stages.StripReplyControlBlock(delta)
+					if cleanDelta == "" {
+						// 整个 delta 都是控制标记（如最后一个 chunk），跳过不发
+						resetIdle()
+						break
+					}
+					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": cleanDelta})
 					flusher.Flush()
 					// 有序 parts：合并到最后一个 text part 或新建
 					if len(parts) > 0 && parts[len(parts)-1]["type"] == "text" {
@@ -1234,12 +1241,13 @@ func (s *Server) replyCommandSSE(c *gin.Context, text string, extra map[string]a
 	flusher.Flush()
 
 	// 文本内容（一次性返回完整命令回复）
-	writeSSE(c.Writer, sseTextDelta, map[string]any{"text": text})
+	cleanText := stages.StripReplyControlBlock(text)
+	writeSSE(c.Writer, sseTextDelta, map[string]any{"text": cleanText})
 	flusher.Flush()
 
 	// done 事件：携带 command 标识和额外元数据
 	donePayload := map[string]any{
-		"text":    text,
+		"text":    cleanText,
 		"command": true,
 	}
 	for k, v := range extra {
