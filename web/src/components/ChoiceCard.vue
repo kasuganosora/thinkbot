@@ -433,7 +433,7 @@ function onOptionKeydown(e, opt) {
 //
 // 返回值约定：
 //   - 非空且不以 'call_'/'_pending' 开头 → 真实服务端 ID，可直接提交
-//   - 空字符串 → 占位符尚未被进度事件替换，题目还在准备中，不可提交
+//   - 空字符串 → 占位符尚未被进度事件替换，需要等待
 const effectiveQuestionId = computed(() => {
   const raw = questionId.value
   if (!raw) return ''
@@ -445,32 +445,35 @@ const effectiveQuestionId = computed(() => {
   return resolved
 })
 
-async function submit() {
-  if (submitting.value || interactionLocked.value) return
-  if (!selectedIds.value.length && !freeText.value.trim()) return
+// 等待真实 questionId 到达的最大轮询时间（5 秒 × 500ms 间隔）
+const POLL_MAX_ATTEMPTS = 10
+const POLL_INTERVAL_MS = 500
 
-  const qid = effectiveQuestionId.value
-  // 占位符尚未被服务端真实 ID 替换：进度事件还未到达，此时提交必 404。
-  // 友好提示用户稍候，不上报无效请求。
-  if (!qid) {
-    MessagePlugin.info({ message: '题目正在准备中，请稍候再试', placement: 'top', duration: 2000 })
-    return
+/** 轮询等待真实 questionId 到达，返回真实 ID 或空字符串 */
+async function waitForRealQuestionId() {
+  // 先试一次（可能 progress 已经到了）
+  const immediate = effectiveQuestionId.value
+  if (immediate) return immediate
+  // 短轮询：progress 事件通常在 tool_call 后几百毫秒内到达
+  for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+    const qid = effectiveQuestionId.value
+    if (qid) return qid
   }
+  return ''
+}
 
-  submitting.value = true
-  localPhase.value = 'submitting'
+async function doSubmit(qid) {
   const chosen = [...selectedIds.value]
   const extra = freeText.value.trim()
   try {
     await userChoiceApi.answer(qid, { selectedIds: chosen, freeText: extra })
-    localPhase.value = 'answered' // 锁定为「已选择」态（终态入场弹簧见 watch）
-    // 同步写回 store：answer + submitted 持久化，刷新页面后终态卡片仍能回显所选内容
+    localPhase.value = 'answered'
     store.markChoiceSubmitted(qid, { selectedIds: chosen, freeText: extra })
     MessagePlugin.success({ message: '选择已提交', placement: 'top', duration: 1600 })
   } catch (e) {
     console.warn('[ChoiceCard] 提交失败', e)
     const code = Number(e && e.code)
-    // 404 问题已过期/不存在；409 已结束。再点只会反复 toast，锁死卡片。
     if (code === 404) {
       localPhase.value = 'timeout'
       store.markChoiceTerminal(qid, 'timeout')
@@ -483,8 +486,26 @@ async function submit() {
       localPhase.value = ''
       MessagePlugin.error({ message: (e && e.message) || '提交失败，请重试', placement: 'top' })
     }
-    submitting.value = false
   }
+}
+
+async function submit() {
+  if (submitting.value || interactionLocked.value) return
+  if (!selectedIds.value.length && !freeText.value.trim()) return
+
+  submitting.value = true
+  localPhase.value = 'submitting'
+
+  const qid = await waitForRealQuestionId()
+  if (!qid) {
+    // 5 秒内 progress 仍未到达（极端情况：后端取消/异常）
+    localPhase.value = ''
+    submitting.value = false
+    MessagePlugin.info({ message: '题目准备超时，请刷新页面重试', placement: 'top', duration: 3000 })
+    return
+  }
+
+  await doSubmit(qid)
   submitting.value = false
 }
 function onConfirm() {
