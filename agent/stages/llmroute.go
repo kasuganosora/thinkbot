@@ -824,7 +824,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			base := prepareStep
 			prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {
 				if base != nil {
-					base(p)
+					if bp := base(p); bp != nil {
+						p = bp
+					}
 				}
 				if cp := compactHook(p); cp != nil {
 					return cp
