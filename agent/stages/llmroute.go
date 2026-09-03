@@ -319,6 +319,10 @@ func extractPublicReply(clean string) string {
 		}
 		// 公开区内也可能夹带 <internal>，再剥一次确保心里话不外发。
 		out := memory.StripInternalTags(strings.TrimSpace(b.String()))
+		// 去重：LLM 偶发在多个 <public> 块里输出相同内容（如 tool_choice 解封后续生成
+		// 把回复写了两遍），导致最终帖子正文出现完全重复的两段文字。
+		// 检测「前半段 ≈ 后半段开头」的整段重复模式，只保留第一份。
+		out = deduplicatePublicContent(out)
 		// 再兜底剥离任何残留标签（含畸形 public / 嵌套字面标签 / HTML 标签），
 		// 避免标签文本外发到帖子或消息。
 		return strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
@@ -330,6 +334,57 @@ func extractPublicReply(clean string) string {
 	// 路径 3：纯文本（无标签）→ 仍有概率含模型偶发的畸形标签（如 /public>）或 HTML，
 	// 出站前统一兜底剥离，避免任何标签文本裸发到帖子/消息。
 	return strings.TrimSpace(strayTagRe.ReplaceAllString(clean, ""))
+}
+
+// deduplicatePublicContent 检测并去除 extractPublicReply 拼接多 <public> 块后
+// 可能产生的整段重复文本。
+//
+// 触发场景：LLM 在同一次输出中写出两个内容相同的 <public>...</public> 块
+//（例如 tool_choice 解封后续生成时把回复写了两遍），导致最终帖子正文
+// 出现完全重复的两段文字。
+//
+// 算法：检测 s = X + sep + X 模式（sep 为 0~2 字符的空白/换行）。
+// 从中点向外搜索分割点，找到两半完全一致则只保留第一份 X。
+// 最短匹配长度 40 字符，避免短句/签名等正常重复被误删。
+func deduplicatePublicContent(s string) string {
+	trimmed := strings.TrimRight(s, " \t\n\r")
+	if len(trimmed) < 80 {
+		return s
+	}
+
+	// 尝试 0~2 字符分隔符（\n 或空格），从中点附近搜索分割点
+	for sepLen := 0; sepLen <= 2; sepLen++ {
+		half := (len(trimmed) - sepLen) / 2
+		if half < 40 || half+sepLen+half > len(trimmed) {
+			continue
+		}
+		if trimmed[:half] == trimmed[half+sepLen:2*half+sepLen] {
+			return trimmed[:half]
+		}
+	}
+
+	// 宽松模式：允许尾部有少量不匹配字符（LLM 第二份可能略有差异）
+	// 在中点 ±10 字符范围内搜索最佳分割点
+	for offset := 0; offset <= 10; offset++ {
+		for _, mid := range []int{len(trimmed)/2 - offset, len(trimmed)/2 + offset} {
+			if mid < 40 || mid >= len(trimmed) {
+				continue
+			}
+			prefix := trimmed[:mid]
+			suffix := trimmed[mid:]
+			// 允许 suffix 比 prefix 长一点（第二份可能多了结尾标点）
+			minLen := min(len(prefix), len(suffix))
+			if minLen < 40 {
+				continue
+			}
+			// 检查前 minLen 字符是否完全一致
+			if prefix[:minLen] == suffix[:minLen] {
+				return prefix
+			}
+		}
+	}
+
+	return s
 }
 
 // explicitPublicReply 仅当正文含**显式且成对**的 <public>...</public> 区块时，返回其公开
