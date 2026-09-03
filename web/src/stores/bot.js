@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { botApi, chatApi, sessionApi, workflowApi } from '@/api/services'
+import { stripReplyControl } from '@/utils/markdown'
 import toolLabels from '@/i18n/toolLabels'
 
 let idSeed = Date.now()
@@ -1109,7 +1110,7 @@ async function resumeContinuation(sessionId) {
     if (idx < 0) return
     const updated = [...messages.value]
     const msg = { ...updated[idx] }
-    msg.content = (msg.content || '') + delta
+    msg.content = stripReplyControl((msg.content || '') + delta)
     const parts = Array.isArray(msg.parts) ? [...msg.parts] : []
     const last = parts[parts.length - 1]
     if (last && last.type === 'text') {
