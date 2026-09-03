@@ -134,6 +134,13 @@ type MisskeyChannel struct {
 	// 下标，debounce 后一次性回填（Misskey 每个选项单独发 pollVoted，没有 done）。
 	pollNotesMu sync.Mutex
 	pollNotes   map[string]*pollNoteState
+
+	// wsMu / wsConn 持有当前 streaming 连接的引用，便于在建立连接后
+	// 动态订阅/退订单条投票帖的 note capture 流。
+	// 关键：Misskey 的 pollVoted 事件只投递到 note 流（channel:"note",params:{noteId}），
+	// 不会出现在 main 流，因此必须显式订阅每条投票帖才能收到投票结果。
+	wsMu   sync.Mutex
+	wsConn *http.WSConn
 }
 
 // pollNoteState 是一条 bot 投票帖的进行中状态。
@@ -479,9 +486,22 @@ func (c *MisskeyChannel) connectAndServe(ctx context.Context) error {
 				"channel", c.name, "connect_seq", n,
 				"reconnect", n > 1, "subscribed", len(connectMsgs))
 
+			// 保存连接引用，供后续动态订阅/退订投票帖的 note capture 流。
+			c.wsMu.Lock()
+			c.wsConn = conn
+			c.wsMu.Unlock()
+			// 重连后 Misskey 不会保留旧订阅，重新订阅仍在进行的投票帖，
+			// 否则断连期间用户投的票会丢失、user_choice 再次超时。
+			c.resubscribePollNotes(ctx)
+
 			// 重连成功：补发断连窗口内错过的 @提及/回复（streaming 不重放历史消息）。
 			// 首次连接时锚点已是启动时刻最新提及，backfill 自然无副作用。
 			c.backfillMentions(ctx)
+		},
+		OnClose: func(code int, text string) {
+			c.wsMu.Lock()
+			c.wsConn = nil
+			c.wsMu.Unlock()
 		},
 		OnError: func(err error) {
 			traceid.L(ctx).Debugw("misskey ws error",
@@ -552,6 +572,19 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			c.handlePollVoted(ctx, chMsg.Body)
 		default:
 			// 忽略其他 main 事件（follow, renote 等）
+		}
+		return nil
+	}
+
+	// note capture 通道事件：bot 自己发出的投票帖订阅（连接 ID 形如 "note:<noteID>"）。
+	// 关键：Misskey 的 pollVoted 只投递到 note 流，main 流不含投票事件，
+	// 因此必须在此分支接收投票结果以解封 user_choice。
+	if strings.HasPrefix(chMsg.ID, "note:") {
+		switch chMsg.Type {
+		case "pollVoted":
+			c.handleNotePollVoted(ctx, chMsg.Body)
+		default:
+			// 忽略该帖的其他事件（reacted/deleted 等）
 		}
 		return nil
 	}
@@ -1260,10 +1293,74 @@ func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID s
 		"channel", c.name, "note_id", noteID, "question_id", questionID,
 		"options", len(options), "multiple", multiple, "expires_in", timeoutSecs)
 
+	// 订阅该投票帖的 note capture 流：pollVoted 只在此流投递，
+	// 不订阅就永远收不到投票结果（main 流不含 pollVote）。
+	c.subscribePollNoteWS(ctx, noteID)
+
 	return noteID, nil
 }
 
-// handlePollVoted handles Misskey WS pollVoted notification.
+// noteConnID 把投票帖 noteID 映射成 streaming 订阅连接 ID。
+// 用 "note:" 前缀与 main（main-1）/timeline（tl:xxx）订阅区分开。
+func noteConnID(noteID string) string { return "note:" + noteID }
+
+// subscribePollNoteWS 向当前 streaming 连接发送 connect，订阅单条投票帖的 note 流。
+// 连接尚未建立时静默跳过（建连时 OnConnect 会 resubscribePollNotes 补齐）。
+func (c *MisskeyChannel) subscribePollNoteWS(ctx context.Context, noteID string) {
+	c.wsMu.Lock()
+	conn := c.wsConn
+	c.wsMu.Unlock()
+	if conn == nil {
+		return
+	}
+	msg, _ := json.Marshal(streamMessage{
+		Type: "connect",
+		Body: mustJSON(connectBody{
+			Channel: "note",
+			ID:      noteConnID(noteID),
+			Params:  mustJSON(map[string]any{"noteId": noteID}),
+		}),
+	})
+	if err := conn.WriteText(string(msg)); err != nil {
+		traceid.L(ctx).Warnw("misskey: failed to subscribe poll note stream",
+			"channel", c.name, "note_id", noteID, "err", err)
+	}
+}
+
+// unsubscribePollNoteWS 退订单条投票帖的 note 流（投票已结算或超时后调用）。
+func (c *MisskeyChannel) unsubscribePollNoteWS(ctx context.Context, noteID string) {
+	c.wsMu.Lock()
+	conn := c.wsConn
+	c.wsMu.Unlock()
+	if conn == nil {
+		return
+	}
+	msg, _ := json.Marshal(streamMessage{
+		Type: "disconnect",
+		Body: mustJSON(connectBody{ID: noteConnID(noteID)}),
+	})
+	if err := conn.WriteText(string(msg)); err != nil {
+		traceid.L(ctx).Debugw("misskey: failed to unsubscribe poll note stream",
+			"channel", c.name, "note_id", noteID, "err", err)
+	}
+}
+
+// resubscribePollNotes 重连成功后，重新订阅所有仍在进行中的投票帖。
+// Misskey 不会在断线重连后保留旧订阅，不补齐会导致断连期间投票丢失。
+func (c *MisskeyChannel) resubscribePollNotes(ctx context.Context) {
+	c.pollNotesMu.Lock()
+	ids := make([]string, 0, len(c.pollNotes))
+	for id := range c.pollNotes {
+		ids = append(ids, id)
+	}
+	c.pollNotesMu.Unlock()
+	for _, id := range ids {
+		c.subscribePollNoteWS(ctx, id)
+	}
+}
+
+// handlePollVoted handles Misskey WS pollVoted from the main channel
+// （仅某些 Misskey 衍生版本可能在 main 投递；标准版在 note 流，见 handleNotePollVoted）。
 // When a user votes on bot's poll note, this finds the associated questionID
 // via pollNotes map and calls interaction.ResolveFrom to unblock user_choice.
 func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessage) {
@@ -1281,17 +1378,45 @@ func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessa
 	if pv.NoteID == "" || pv.Choice < 0 {
 		return
 	}
+	c.onPollVote(ctx, pv.NoteID, pv.Choice, pv.UserID)
+}
 
+// handleNotePollVoted handles pollVoted delivered on the note capture stream.
+// 标准 Misskey 把 pollVoted 发到 note 流，body 为嵌套结构：
+// {"id":"<noteID>","userId":"<帖主ID>","body":{"choice":N,"userId":"<投票人ID>"}}
+func (c *MisskeyChannel) handleNotePollVoted(ctx context.Context, body json.RawMessage) {
+	var pv struct {
+		ID     string `json:"id"` // noteID
+		UserID string `json:"userId"` // 帖主（bot），忽略
+		Body   struct {
+			Choice int    `json:"choice"`
+			UserID string `json:"userId"` // 真正的投票人
+		} `json:"body"`
+	}
+	if err := json.Unmarshal(body, &pv); err != nil {
+		traceid.L(ctx).Debugw("misskey: failed to parse note pollVoted",
+			"channel", c.name, "err", err)
+		return
+	}
+	if pv.ID == "" || pv.Body.Choice < 0 {
+		return
+	}
+	c.onPollVote(ctx, pv.ID, pv.Body.Choice, pv.Body.UserID)
+}
+
+// onPollVote 是投票结算核心：根据 choice/voter 推进 pollNotes 状态，
+// 单选首票即解封、多选 debounce 后回填、越界 choice 忽略。
+func (c *MisskeyChannel) onPollVote(ctx context.Context, noteID string, choice int, voter string) {
 	c.pollNotesMu.Lock()
-	st, ok := c.pollNotes[pv.NoteID]
+	st, ok := c.pollNotes[noteID]
 	if !ok {
 		c.pollNotesMu.Unlock()
 		traceid.L(ctx).Debugw("misskey: pollVoted for unknown note (not our poll)",
-			"channel", c.name, "note_id", pv.NoteID)
+			"channel", c.name, "note_id", noteID)
 		return
 	}
-	action := applyPollVote(st, pv.Choice)
-	st.LastVoter = pv.UserID
+	action := applyPollVote(st, choice)
+	st.LastVoter = voter
 	switch action {
 	case pollVoteIgnore:
 		c.pollNotesMu.Unlock()
@@ -1304,12 +1429,11 @@ func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessa
 			st.timer.Stop()
 			st.timer = nil
 		}
-		delete(c.pollNotes, pv.NoteID)
+		delete(c.pollNotes, noteID)
 		c.pollNotesMu.Unlock()
-		c.tryResolvePoll(ctx, pv.NoteID, qid, voter, sel, st)
+		c.tryResolvePoll(ctx, noteID, qid, voter, sel, st)
 		return
 	case pollVoteDebounce:
-		noteID := pv.NoteID
 		if st.timer != nil {
 			st.timer.Stop()
 		}
@@ -1386,12 +1510,13 @@ func (c *MisskeyChannel) armPollExpiryLocked(st *pollNoteState, noteID string, t
 // expirePollNote 超时回收：确认同一 questionID/note 仍映射后删除，并停掉 debounce。
 func (c *MisskeyChannel) expirePollNote(noteID, questionID string) {
 	c.pollNotesMu.Lock()
-	defer c.pollNotesMu.Unlock()
 	st, ok := c.pollNotes[noteID]
 	if !ok {
+		c.pollNotesMu.Unlock()
 		return
 	}
 	if questionID != "" && st.QuestionID != questionID {
+		c.pollNotesMu.Unlock()
 		return
 	}
 	if st.timer != nil {
@@ -1403,6 +1528,9 @@ func (c *MisskeyChannel) expirePollNote(noteID, questionID string) {
 		st.expire = nil
 	}
 	delete(c.pollNotes, noteID)
+	c.pollNotesMu.Unlock()
+	// 投票已过期，退订 note 流，避免订阅泄漏。
+	c.unsubscribePollNoteWS(context.Background(), noteID)
 }
 
 func (c *MisskeyChannel) flushMultiPoll(ctx context.Context, noteID string) {
@@ -1426,6 +1554,8 @@ func (c *MisskeyChannel) flushMultiPoll(ctx context.Context, noteID string) {
 			st.expire.Stop()
 			st.expire = nil
 		}
+		// 多选 debounce 窗口内无人投票，退订 note 流。
+		c.unsubscribePollNoteWS(ctx, noteID)
 		return
 	}
 	c.tryResolvePoll(ctx, noteID, qid, voter, sel, st)
@@ -1459,6 +1589,7 @@ func (c *MisskeyChannel) resolvePollVote(ctx context.Context, questionID, voterI
 	if err != nil {
 		traceid.L(ctx).Debugw("misskey: poll resolve lookup failed",
 			"channel", c.name, "question_id", questionID, "err", err)
+		c.unsubscribePollNoteWS(ctx, noteID) // mapping 已摘掉，退订 note 流
 		return true
 	}
 	chatID := voterID
@@ -1466,7 +1597,7 @@ func (c *MisskeyChannel) resolvePollVote(ctx context.Context, questionID, voterI
 		traceid.L(ctx).Warnw("misskey: poll voter does not match question chat",
 			"channel", c.name, "question_id", questionID,
 			"chat_id", q.ChatID, "voter", voterID, "note_id", noteID)
-		return false
+		return false // 保留 mapping 与订阅，等待真正的会话主人投票
 	}
 	if q.ChatID == "" {
 		chatID = ""
@@ -1474,10 +1605,12 @@ func (c *MisskeyChannel) resolvePollVote(ctx context.Context, questionID, voterI
 	if err := interaction.Default().ResolveFrom(questionID, chatID, ans); err != nil {
 		traceid.L(ctx).Warnw("misskey: pollVoted resolve failed",
 			"channel", c.name, "question_id", questionID, "selected", selected, "err", err)
+		c.unsubscribePollNoteWS(ctx, noteID)
 		return true
 	}
 	traceid.L(ctx).Infow("misskey: poll vote resolved user_choice",
 		"channel", c.name, "question_id", questionID, "note_id", noteID,
 		"selected", selected, "user_id", voterID)
+	c.unsubscribePollNoteWS(ctx, noteID)
 	return true
 }
