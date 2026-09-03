@@ -426,6 +426,16 @@ function onOptionKeydown(e, opt) {
 }
 
 // ── 提交（n7 端点：POST /api/user-choice/{questionId}/answer） ──
+
+// questionId 可能是 tempChoiceFromInput 生成的占位符（如 'call_xxx'），
+// 进度事件到达后 store 里会有真实的 uc-xxx 映射。提交时必须解析真实 ID，
+// 否则 POST /api/user-choice/call_xxx/answer → 404。
+const effectiveQuestionId = computed(() => {
+  const raw = questionId.value
+  if (!raw || !raw.startsWith('call_')) return raw
+  return store.choiceIdByToolCallId(raw) || raw
+})
+
 async function submit() {
   if (submitting.value || interactionLocked.value) return
   if (!selectedIds.value.length && !freeText.value.trim()) return
@@ -433,11 +443,12 @@ async function submit() {
   localPhase.value = 'submitting'
   const chosen = [...selectedIds.value]
   const extra = freeText.value.trim()
+  const qid = effectiveQuestionId.value
   try {
-    await userChoiceApi.answer(questionId.value, { selectedIds: chosen, freeText: extra })
+    await userChoiceApi.answer(qid, { selectedIds: chosen, freeText: extra })
     localPhase.value = 'answered' // 锁定为「已选择」态（终态入场弹簧见 watch）
     // 同步写回 store：answer + submitted 持久化，刷新页面后终态卡片仍能回显所选内容
-    store.markChoiceSubmitted(questionId.value, { selectedIds: chosen, freeText: extra })
+    store.markChoiceSubmitted(qid, { selectedIds: chosen, freeText: extra })
     MessagePlugin.success({ message: '选择已提交', placement: 'top', duration: 1600 })
   } catch (e) {
     console.warn('[ChoiceCard] 提交失败', e)
@@ -445,11 +456,11 @@ async function submit() {
     // 404 问题已过期/不存在；409 已结束。再点只会反复 toast，锁死卡片。
     if (code === 404) {
       localPhase.value = 'timeout'
-      store.markChoiceTerminal(questionId.value, 'timeout')
+      store.markChoiceTerminal(qid, 'timeout')
       MessagePlugin.warning({ message: (e && e.message) || '本题已过期', placement: 'top' })
     } else if (code === 409) {
       localPhase.value = 'answered'
-      store.markChoiceSubmitted(questionId.value, { selectedIds: chosen, freeText: extra })
+      store.markChoiceSubmitted(qid, { selectedIds: chosen, freeText: extra })
       MessagePlugin.warning({ message: (e && e.message) || '本题已结束', placement: 'top' })
     } else {
       localPhase.value = ''
