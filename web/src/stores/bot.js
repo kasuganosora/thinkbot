@@ -672,7 +672,9 @@ export const useBotStore = defineStore('bot', () => {
       options: input.options,
       inputHint: input.inputHint ?? input.input_hint,
       timeoutAt: input.timeoutAt ?? null,
-      pending: true,
+      // 不设 pending:true —— 临时卡也直接可交互。
+      // submit() 内部通过 effectiveQuestionId 智能解析真实 ID，
+      // 若 progress 尚未到达则短轮询等待（最多 5 秒），避免 404 和锁死。
     })
   }
 
