@@ -73,6 +73,12 @@
       </button>
     </div>
 
+    <!-- 提交中遮罩：单选点击后 / 多选确认后，等待真实 questionId 或 API 响应期间显示 -->
+    <div v-if="phase === 'submitting'" class="cc-submitting-overlay" data-testid="choice-submitting-overlay">
+      <t-icon name="loading" class="cc-spin" />
+      <span class="cc-submitting-text">正在提交…</span>
+    </div>
+
     <!-- 多选确认条：紧贴其影响的选项区（分组与映射），选了至少一项才可用 -->
     <div v-if="multi && !isPending && (phase === 'active' || phase === 'submitting')" class="cc-confirm-bar">
       <span class="cc-count" data-testid="choice-count">
@@ -466,6 +472,7 @@ async function waitForRealQuestionId() {
 async function doSubmit(qid) {
   const chosen = [...selectedIds.value]
   const extra = freeText.value.trim()
+  console.log('[ChoiceCard] doSubmit called with qid:', qid, 'selectedIds:', chosen)
   try {
     await userChoiceApi.answer(qid, { selectedIds: chosen, freeText: extra })
     localPhase.value = 'answered'
@@ -490,7 +497,10 @@ async function doSubmit(qid) {
 }
 
 async function submit() {
-  if (submitting.value || interactionLocked.value) return
+  if (submitting.value || interactionLocked.value) {
+    console.warn('[ChoiceCard] submit blocked: submitting=', submitting.value, 'locked=', interactionLocked.value)
+    return
+  }
   if (!selectedIds.value.length && !freeText.value.trim()) return
 
   submitting.value = true
@@ -498,10 +508,16 @@ async function submit() {
 
   const qid = await waitForRealQuestionId()
   if (!qid) {
-    // 5 秒内 progress 仍未到达（极端情况：后端取消/异常）
-    localPhase.value = ''
-    submitting.value = false
-    MessagePlugin.info({ message: '题目准备超时，请刷新页面重试', placement: 'top', duration: 3000 })
+    // 轮询 5 秒仍无真实 ID：用原始 questionId 碰碰运气（可能是 progress 已到但 computed 未及时更新）
+    const fallback = questionId.value
+    console.warn('[ChoiceCard] waitForRealQuestionId timed out, fallback to raw questionId:', fallback)
+    if (fallback && !fallback.startsWith('call_') && !fallback.startsWith('_pending')) {
+      await doSubmit(fallback)
+    } else {
+      localPhase.value = ''
+      submitting.value = false
+      MessagePlugin.info({ message: '题目准备超时，请刷新页面重试', placement: 'top', duration: 3000 })
+    }
     return
   }
 
@@ -703,6 +719,21 @@ onBeforeUnmount(() => {
 .cc-send.silent { background: var(--bp-surface-fill-active); color: var(--bp-label-tertiary); }
 .cc-spin { animation: cc-rotate 0.8s linear infinite; }
 @keyframes cc-rotate { to { transform: rotate(1turn); } }
+
+/* 提交中遮罩：覆盖选项区，显示 loading + 文字 */
+.cc-submitting-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px;
+  background: var(--bp-surface);
+  color: var(--bp-label-secondary);
+  font-size: 13.5px;
+}
+.cc-submitting-text {
+  letter-spacing: var(--tracking-body);
+}
 
 /* 终态脚注 */
 .cc-foot {
