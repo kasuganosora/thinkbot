@@ -430,20 +430,37 @@ function onOptionKeydown(e, opt) {
 // questionId 可能是 tempChoiceFromInput 生成的占位符（如 'call_xxx'），
 // 进度事件到达后 store 里会有真实的 uc-xxx 映射。提交时必须解析真实 ID，
 // 否则 POST /api/user-choice/call_xxx/answer → 404。
+//
+// 返回值约定：
+//   - 非空且不以 'call_'/'_pending' 开头 → 真实服务端 ID，可直接提交
+//   - 空字符串 → 占位符尚未被进度事件替换，题目还在准备中，不可提交
 const effectiveQuestionId = computed(() => {
   const raw = questionId.value
-  if (!raw || !raw.startsWith('call_')) return raw
-  return store.choiceIdByToolCallId(raw) || raw
+  if (!raw) return ''
+  // 已是真实 ID（uc-xxx 或其他非占位格式），直接使用
+  if (!raw.startsWith('call_') && !raw.startsWith('_pending')) return raw
+  // 占位符：尝试通过 toolCallId 解析真实 ID
+  const resolved = store.choiceIdByToolCallId(raw)
+  if (!resolved || resolved === raw || resolved.startsWith('_pending')) return ''
+  return resolved
 })
 
 async function submit() {
   if (submitting.value || interactionLocked.value) return
   if (!selectedIds.value.length && !freeText.value.trim()) return
+
+  const qid = effectiveQuestionId.value
+  // 占位符尚未被服务端真实 ID 替换：进度事件还未到达，此时提交必 404。
+  // 友好提示用户稍候，不上报无效请求。
+  if (!qid) {
+    MessagePlugin.info({ message: '题目正在准备中，请稍候再试', placement: 'top', duration: 2000 })
+    return
+  }
+
   submitting.value = true
   localPhase.value = 'submitting'
   const chosen = [...selectedIds.value]
   const extra = freeText.value.trim()
-  const qid = effectiveQuestionId.value
   try {
     await userChoiceApi.answer(qid, { selectedIds: chosen, freeText: extra })
     localPhase.value = 'answered' // 锁定为「已选择」态（终态入场弹簧见 watch）
