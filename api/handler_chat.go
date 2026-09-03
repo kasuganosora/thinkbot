@@ -878,14 +878,19 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				toolCallID, _ := event.Data["toolCallId"].(string)
 				toolName, _ := event.Data["tool"].(string)
 				invocationID, _ := event.Data["invocationId"].(string)
-				payload, _ := event.Data["payload"].(map[string]any)
+				// payload 是任意类型：user_choice 工具发 UserChoiceEventPayload 结构体，
+				// 代码/任务工具发 map[string]any（含 stream/chunk 文本增量）。原样透传
+				// （Go 的 json.Marshal 对结构体/map 均正确序列化）；切勿断言成
+				// map[string]any —— 结构体断言失败变 nil，前端拿到 null、永远注册不到
+				// 真实 questionId，提交全部 404（call_xxx 占位符）。
+				payload := event.Data["payload"]
 				stream := "stdout"
 				chunk := ""
-				if payload != nil {
-					if v, ok := payload["stream"].(string); ok && v != "" {
+				if pm, ok := payload.(map[string]any); ok {
+					if v, ok := pm["stream"].(string); ok && v != "" {
 						stream = v
 					}
-					if v, ok := payload["chunk"].(string); ok {
+					if v, ok := pm["chunk"].(string); ok {
 						chunk = v
 					}
 				}
