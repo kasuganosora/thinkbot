@@ -59,6 +59,9 @@ var basicTools = map[string]struct{}{
 	"random":        {},
 	"uuid":          {},
 
+	// 用户交互（纯 UI，不产生对外痕迹，不改变状态）
+	"user_choice": {},
+
 	// 文本处理（纯字符串运算，输入输出都在对话内）
 	"text_diff":   {},
 	"text_encode": {},
