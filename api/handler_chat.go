@@ -48,6 +48,25 @@ const (
 // 它永远不会被执行、也永远收不到结果，若不主动收敛就会永久停在「执行中」。
 const phantomSupersededMsg = "已被后续同工具调用取代（LLM 流式中间态）"
 
+// extractToolStatus 从工具返回的 output 中提取真实终态 status。
+// user_choice 等工具在 output map 里返回 status 字段（timeout/answered/cancelled），
+// 需要透传到 SSE 事件和落库的 toolCalls.status，否则前端刷新后无法区分
+// "工具成功完成"和"工具等待超时"，导致已过期的 choice 卡片被恢复为可交互态。
+func extractToolStatus(output any) string {
+	m, ok := output.(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := m["status"].(string)
+	// 只认已知的合法终态值，避免把无关字段当 status
+	switch s {
+	case "timeout", "cancelled", "killed", "answered", "resolved":
+		return s
+	default:
+		return ""
+	}
+}
+
 // isEmptyToolInput 判断工具入参是否为空占位。
 //
 // 空参数是 phantom call 的判定特征：真实调用必然带参数（url / maxChars 等），
@@ -903,14 +922,21 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				toolCallID, _ := event.Data["toolCallId"].(string)
 				toolName, _ := event.Data["tool"].(string)
 				invocationID, _ := event.Data["invocationId"].(string)
+				output := event.Data["output"]
 				payload := map[string]any{
 					"toolCallId":   toolCallID,
 					"tool":         toolName,
 					"invocationId": invocationID,
-					"output":       event.Data["output"],
+					"output":       output,
 				}
 				if errMsg, ok := event.Data["error"]; ok {
 					payload["error"] = errMsg
+				}
+				// 携带工具返回的真实 status（如 user_choice 的 timeout/answered），
+				// 让前端刷新后能正确恢复卡片终态。硬码 success/error 会导致
+				// 已超时的 choice 卡片被错误恢复为 active/answered。
+				if realStatus := extractToolStatus(output); realStatus != "" {
+					payload["status"] = realStatus
 				}
 				writeSSE(c.Writer, sseToolResult, payload)
 				flusher.Flush()
@@ -918,6 +944,9 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
 					if _, isErr := event.Data["error"]; isErr {
 						toolCalls[idx]["status"] = "error"
+					} else if realStatus := extractToolStatus(output); realStatus != "" {
+						// user_choice 等工具在 output 里返回真实终态（timeout/answered/cancelled）
+						toolCalls[idx]["status"] = realStatus
 					} else {
 						toolCalls[idx]["status"] = "success"
 					}
