@@ -482,9 +482,15 @@ async function doSubmit(qid) {
     console.warn('[ChoiceCard] 提交失败', e)
     const code = Number(e && e.code)
     if (code === 404) {
+      // questionId 是占位符（call_xxx）或已过期的 uc-xxx
+      const isPlaceholder = qid.startsWith('call_') || qid.startsWith('_pending')
       localPhase.value = 'timeout'
       store.markChoiceTerminal(qid, 'timeout')
-      MessagePlugin.warning({ message: (e && e.message) || '本题已过期', placement: 'top' })
+      MessagePlugin.warning({
+        message: isPlaceholder ? '连接同步中，请稍后刷新重试' : ((e && e.message) || '本题已过期'),
+        placement: 'top',
+        duration: 4000,
+      })
     } else if (code === 409) {
       localPhase.value = 'answered'
       store.markChoiceSubmitted(qid, { selectedIds: chosen, freeText: extra })
@@ -508,10 +514,11 @@ async function submit() {
 
   const qid = await waitForRealQuestionId()
   if (!qid) {
-    // 轮询 5 秒仍无真实 ID：用原始 questionId 碰碰运气（可能是 progress 已到但 computed 未及时更新）
+    // 轮询 5 秒仍无真实 ID：用原始 questionId 尝试提交（可能是 progress 事件丢失/延迟）。
+    // 之前会跳过 call_ 前缀导致用户完全无法提交；现在改为"尽力一试"，404 再提示。
     const fallback = questionId.value
     console.warn('[ChoiceCard] waitForRealQuestionId timed out, fallback to raw questionId:', fallback)
-    if (fallback && !fallback.startsWith('call_') && !fallback.startsWith('_pending')) {
+    if (fallback) {
       await doSubmit(fallback)
     } else {
       localPhase.value = ''
