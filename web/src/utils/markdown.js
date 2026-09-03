@@ -45,6 +45,21 @@ function installHooks() {
 const MAX_CACHE = 80
 const _cache = new Map()
 
+// 剥离 LLM 回复控制协议标记（@@REPLY_CONTROL@@{...}）。
+// 后端流式 SSE 可能将标记拆分到多个 delta，前端显示层必须兜底。
+const REPLY_CONTROL_RE = /@@REPLY_CONTROL@@\s*\{[^}]*\}\s*$/
+
+export function stripReplyControl(text) {
+  if (!text) return text
+  // 先试尾部完整匹配（常见形态：文本末尾独立一行）
+  const m = text.match(REPLY_CONTROL_RE)
+  if (m) return text.slice(0, m.index).trimEnd()
+  // 兜底：只要包含分隔符就截断（应对拆分/畸形）
+  const idx = text.lastIndexOf('@@REPLY_CONTROL@@')
+  if (idx >= 0) return text.slice(0, idx).trimEnd()
+  return text
+}
+
 /**
  * 把 markdown 文本渲染为可安全交给 v-html 的 HTML。
  * @param {string} text
@@ -52,6 +67,7 @@ const _cache = new Map()
  */
 export function renderMarkdown(text) {
   if (!text) return ''
+  text = stripReplyControl(text)
   const hit = _cache.get(text)
   if (hit !== undefined) return hit
   installHooks()
