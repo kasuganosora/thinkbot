@@ -536,6 +536,25 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 		return nil // 不中断连接
 	}
 
+	// noteUpdated：note capture 流事件，是**顶层消息**而非 channel 消息。
+	// Misskey 的 pollVoted 只经 note capture 投递（subNote 订阅），main 流不含投票事件，
+	// 因此必须在此分支接收投票结果，否则 user_choice 永远等不到答案（全 60s 超时）。
+	// 形如 {"type":"noteUpdated","body":{"id":"<noteId>","type":"pollVoted",
+	//        "body":{"choice":2,"userId":"..."}}}
+	if base.Type == "noteUpdated" {
+		// body 与 channelMessage 同构：{id, type, body}
+		var nu channelMessage
+		if err := json.Unmarshal(base.Body, &nu); err != nil {
+			traceid.L(ctx).Debugw("misskey stream: failed to parse noteUpdated",
+				"channel", c.name, "err", err)
+			return nil
+		}
+		if nu.Type == "pollVoted" {
+			c.handleNotePollVoted(ctx, nu.ID, nu.Body)
+		}
+		return nil
+	}
+
 	// 只处理 type=channel 的消息（服务端推送）
 	if base.Type != "channel" {
 		return nil
@@ -572,19 +591,6 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 			c.handlePollVoted(ctx, chMsg.Body)
 		default:
 			// 忽略其他 main 事件（follow, renote 等）
-		}
-		return nil
-	}
-
-	// note capture 通道事件：bot 自己发出的投票帖订阅（连接 ID 形如 "note:<noteID>"）。
-	// 关键：Misskey 的 pollVoted 只投递到 note 流，main 流不含投票事件，
-	// 因此必须在此分支接收投票结果以解封 user_choice。
-	if strings.HasPrefix(chMsg.ID, "note:") {
-		switch chMsg.Type {
-		case "pollVoted":
-			c.handleNotePollVoted(ctx, chMsg.Body)
-		default:
-			// 忽略该帖的其他事件（reacted/deleted 等）
 		}
 		return nil
 	}
@@ -1302,29 +1308,33 @@ func (c *MisskeyChannel) CreatePollNote(ctx context.Context, question, replyID s
 
 // noteConnID 把投票帖 noteID 映射成 streaming 订阅连接 ID。
 // 用 "note:" 前缀与 main（main-1）/timeline（tl:xxx）订阅区分开。
-func noteConnID(noteID string) string { return "note:" + noteID }
-
-// subscribePollNoteWS 向当前 streaming 连接发送 connect，订阅单条投票帖的 note 流。
+// subscribePollNoteWS 订阅单条投票帖的 note capture 流。
+//
+// 注意：note capture **不是** channel —— Misskey 的 getChannelConstructor 里没有
+// 名为 "note" 的 channel（connect{channel:"note"} 会被服务端 throw 掉、静默无订阅）。
+// 正确协议是顶层消息 {"type":"subNote","body":{"id":"<noteId>"}}，
+// 事件以顶层 {"type":"noteUpdated",...} 回来。
 // 连接尚未建立时静默跳过（建连时 OnConnect 会 resubscribePollNotes 补齐）。
 func (c *MisskeyChannel) subscribePollNoteWS(ctx context.Context, noteID string) {
 	c.wsMu.Lock()
 	conn := c.wsConn
 	c.wsMu.Unlock()
 	if conn == nil {
+		traceid.L(ctx).Warnw("misskey: poll note subscribe skipped (ws not connected)",
+			"channel", c.name, "note_id", noteID)
 		return
 	}
 	msg, _ := json.Marshal(streamMessage{
-		Type: "connect",
-		Body: mustJSON(connectBody{
-			Channel: "note",
-			ID:      noteConnID(noteID),
-			Params:  mustJSON(map[string]any{"noteId": noteID}),
-		}),
+		Type: "subNote",
+		Body: mustJSON(map[string]string{"id": noteID}),
 	})
 	if err := conn.WriteText(string(msg)); err != nil {
 		traceid.L(ctx).Warnw("misskey: failed to subscribe poll note stream",
 			"channel", c.name, "note_id", noteID, "err", err)
+		return
 	}
+	traceid.L(ctx).Infow("misskey: subscribed poll note capture stream",
+		"channel", c.name, "note_id", noteID)
 }
 
 // unsubscribePollNoteWS 退订单条投票帖的 note 流（投票已结算或超时后调用）。
@@ -1336,13 +1346,16 @@ func (c *MisskeyChannel) unsubscribePollNoteWS(ctx context.Context, noteID strin
 		return
 	}
 	msg, _ := json.Marshal(streamMessage{
-		Type: "disconnect",
-		Body: mustJSON(connectBody{ID: noteConnID(noteID)}),
+		Type: "unsubNote",
+		Body: mustJSON(map[string]string{"id": noteID}),
 	})
 	if err := conn.WriteText(string(msg)); err != nil {
 		traceid.L(ctx).Debugw("misskey: failed to unsubscribe poll note stream",
 			"channel", c.name, "note_id", noteID, "err", err)
+		return
 	}
+	traceid.L(ctx).Infow("misskey: unsubscribed poll note capture stream",
+		"channel", c.name, "note_id", noteID)
 }
 
 // resubscribePollNotes 重连成功后，重新订阅所有仍在进行中的投票帖。
@@ -1384,24 +1397,24 @@ func (c *MisskeyChannel) handlePollVoted(ctx context.Context, body json.RawMessa
 // handleNotePollVoted handles pollVoted delivered on the note capture stream.
 // 标准 Misskey 把 pollVoted 发到 note 流，body 为嵌套结构：
 // {"id":"<noteID>","userId":"<帖主ID>","body":{"choice":N,"userId":"<投票人ID>"}}
-func (c *MisskeyChannel) handleNotePollVoted(ctx context.Context, body json.RawMessage) {
+func (c *MisskeyChannel) handleNotePollVoted(ctx context.Context, noteID string, body json.RawMessage) {
+	// noteUpdated.body.body 形如 {"choice":2,"userId":"..."}；
+	// noteID 由外层 noteUpdated.body.id 给出。
 	var pv struct {
-		ID     string `json:"id"` // noteID
-		UserID string `json:"userId"` // 帖主（bot），忽略
-		Body   struct {
-			Choice int    `json:"choice"`
-			UserID string `json:"userId"` // 真正的投票人
-		} `json:"body"`
+		Choice int    `json:"choice"`
+		UserID string `json:"userId"`
 	}
 	if err := json.Unmarshal(body, &pv); err != nil {
 		traceid.L(ctx).Debugw("misskey: failed to parse note pollVoted",
-			"channel", c.name, "err", err)
+			"channel", c.name, "note_id", noteID, "err", err)
 		return
 	}
-	if pv.ID == "" || pv.Body.Choice < 0 {
+	if noteID == "" || pv.Choice < 0 {
 		return
 	}
-	c.onPollVote(ctx, pv.ID, pv.Body.Choice, pv.Body.UserID)
+	traceid.L(ctx).Infow("misskey: note pollVoted received",
+		"channel", c.name, "note_id", noteID, "choice", pv.Choice, "voter", pv.UserID)
+	c.onPollVote(ctx, noteID, pv.Choice, pv.UserID)
 }
 
 // onPollVote 是投票结算核心：根据 choice/voter 推进 pollNotes 状态，
