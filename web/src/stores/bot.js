@@ -1392,10 +1392,9 @@ async function resumeContinuation(sessionId) {
         // user_choice：进度事件也可能携带卡片负载（超时刷新等），同样注册
         const cp = extractChoicePayload(payload)
         if (cp) {
-          // 防御性清除 pending：tempChoiceFromInput 设了 pending:true，
-          // 进度事件的 normalizeChoicePayload 虽然会产出 pending:false，
-          // 但若 payload 经 SSE 透传后字段丢失/格式微差，合并可能保留旧值。
-          // 此处显式 false 确保进度到达后卡片一定解锁（不再显示"题目准备中…"）。
+          // 防御性清除 pending：临时卡（tempChoiceFromInput）已不再设 pending:true，
+          // normalizeChoicePayload 默认产出 pending:false。此处仍显式置 false，
+          // 作为双保险，确保任何来源到达的卡片都不会被锁死（不显示"题目准备中…"）。
           cp.pending = false
           registerChoice(assistantTmpId, cp, toolCallId)
           stampChoiceQuestionId(assistantTmpId, toolCallId, cp.questionId)
