@@ -965,7 +965,7 @@ func MemoryWindowMetaSpecs() []MetaSpec {
 	return []MetaSpec{
 		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）的回退值。优先采用主模型自身配置（provider.<x>.models[].contextLength），仅当模型未配置时才回退到此全局值（默认 GLM-5.2/5.3 的 1M=1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 4096）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 128000）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 4096，约 12288 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。原默认 7281 在 1M 上下文模型下会把'最近 50 条原始笔记'灌满整段预算（实测每轮 ~52K 字节），既浪费上下文又诱发重复退化；降到 4096 仍保留充足人味，同时压住体积。修改后需重启 bot 生效。"},
 		{Key: KeyMemoryWindowCompressThreshold, Category: "MemoryWindow", Description: "触发记忆压缩的阈值比例 0.0~1.0（默认 0.8）。修改后需重启 bot 生效。"},
