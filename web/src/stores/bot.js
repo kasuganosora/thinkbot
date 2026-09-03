@@ -145,6 +145,12 @@ export const useBotStore = defineStore('bot', () => {
       status: payload?.status || prev.status || '',
       toolCallId: toolCallId || prev.toolCallId || '',
     })
+    // 安全网：如果新 payload 带有真实的服务端生成 questionId（非 _ 开头占位符），
+    // 强制清除 pending。防止 SSE 透传/合并边界条件下 pending:true 残留导致卡片永久锁死。
+    const merged = next.get(qid)
+    if (merged && merged.payload && !merged.payload.questionId.startsWith('_')) {
+      merged.payload = { ...merged.payload, pending: false }
+    }
     // 清理同一 toolCallId 的旧条目（临时卡被正式卡取代时的遗留）
     if (toolCallId) {
       for (const [oldQid, c] of next) {
@@ -850,6 +856,7 @@ async function _resumeTrace(traceId) {
         // user_choice：重连续流中的进度事件同样可能刷新卡片（如剩余超时时间）
         const cp = extractChoicePayload(payload)
         if (cp) {
+          cp.pending = false
           registerChoice(assistantTmpId, cp, toolCallId)
           stampChoiceQuestionId(assistantTmpId, toolCallId, cp.questionId)
         }
@@ -1381,6 +1388,11 @@ async function resumeContinuation(sessionId) {
         // user_choice：进度事件也可能携带卡片负载（超时刷新等），同样注册
         const cp = extractChoicePayload(payload)
         if (cp) {
+          // 防御性清除 pending：tempChoiceFromInput 设了 pending:true，
+          // 进度事件的 normalizeChoicePayload 虽然会产出 pending:false，
+          // 但若 payload 经 SSE 透传后字段丢失/格式微差，合并可能保留旧值。
+          // 此处显式 false 确保进度到达后卡片一定解锁（不再显示"题目准备中…"）。
+          cp.pending = false
           registerChoice(assistantTmpId, cp, toolCallId)
           stampChoiceQuestionId(assistantTmpId, toolCallId, cp.questionId)
         }
