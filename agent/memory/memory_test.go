@@ -419,6 +419,10 @@ func TestWindow_Reset(t *testing.T) {
 	if m.RoundCount != 0 {
 		t.Errorf("expected 0 rounds after reset, got %d", m.RoundCount)
 	}
+	if m.TotalInputTokens != 0 || m.TotalOutputTokens != 0 || m.Compressions != 0 {
+		t.Errorf("expected zero metrics after reset, got in=%d out=%d compressions=%d",
+			m.TotalInputTokens, m.TotalOutputTokens, m.Compressions)
+	}
 }
 
 // ============================================================================
@@ -558,5 +562,32 @@ func TestEstimateTokens(t *testing.T) {
 		if got < tt.minToken || got > tt.maxToken {
 			t.Errorf("estimateTokens(%q) = %d, want in [%d, %d]", tt.text, got, tt.minToken, tt.maxToken)
 		}
+	}
+}
+
+func TestContextManager_ZeroBudgetSkipsMemory(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	scope := ChannelScope("zero-budget")
+	_ = repo.Append(ctx, Entry{Scope: scope, Content: "this memory must not be injected when the window is exhausted"})
+
+	builder := NewContextBuilder()
+	window := NewWindow(WindowConfig{
+		MaxContextTokens:  8000,
+		ReservedTokens:    2000,
+		OutputReserve:     8000,
+		MemoryBudgetRatio: 0.15,
+	})
+	if window.Available() != 0 {
+		t.Fatalf("expected zero available, got %d", window.Available())
+	}
+	mgr := NewContextManager(repo, builder, window, nil)
+
+	result, err := mgr.AssembleContext(ctx, "zero-budget", "user-1", "")
+	if err != nil {
+		t.Fatalf("assemble failed: %v", err)
+	}
+	if result.ContextText != "" {
+		t.Errorf("exhausted window must skip memory inject, got %q", result.ContextText)
 	}
 }

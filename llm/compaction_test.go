@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -629,5 +630,50 @@ func TestCompactionPrepareStep_Overflow(t *testing.T) {
 	// 应该触发 pruning
 	if result == nil {
 		t.Error("expected non-nil result for overflow")
+	}
+}
+
+func TestCompactor_DoomLoopResetsWhenNotOverflowing(t *testing.T) {
+	c := NewCompactor(CompactionConfig{
+		MaxTokens:            100000,
+		ReservedTokens:       1000,
+		TailTokens:           1000,
+		MinMessagesToCompact: 1,
+		Auto:                 true,
+	})
+	params := GenerateParams{
+		Messages: []Message{UserMessage("hi")},
+	}
+	if _, err := c.Compact(context.Background(), params, nil); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	c.mu.Lock()
+	count := c.compactionCount
+	c.mu.Unlock()
+	if count != 0 {
+		t.Errorf("successful prune must not count toward doom loop, got %d", count)
+	}
+}
+
+func TestCompactor_DoomLoopIncrementsOnlyOnOverflow(t *testing.T) {
+	c := NewCompactor(CompactionConfig{
+		MaxTokens:            50,
+		ReservedTokens:       20,
+		TailTokens:           10,
+		MinMessagesToCompact: 1,
+		Auto:                 true,
+	})
+	params := GenerateParams{
+		System:   strings.Repeat("x", 400),
+		Messages: []Message{UserMessage(strings.Repeat("a", 400))},
+	}
+	if _, err := c.Compact(context.Background(), params, nil); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	c.mu.Lock()
+	count := c.compactionCount
+	c.mu.Unlock()
+	if count != 1 {
+		t.Errorf("overflow without provider should count one attempt, got %d", count)
 	}
 }

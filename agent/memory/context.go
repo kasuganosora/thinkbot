@@ -386,6 +386,11 @@ type AssembleResult struct {
 // 返回完整的组装结果。
 // 无记忆时返回空 result（ContextText 为空字符串）。
 func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID, text string) (*AssembleResult, error) {
+	// 窗口已耗尽时不要回退到静态 MaxTokenEstimate：那会在已无预算时仍灌记忆。
+	if m.window != nil && m.window.Available() <= 0 {
+		return &AssembleResult{}, nil
+	}
+
 	// 1. 确定检索 scope
 	scopes := m.resolveScopes(channelID, userID)
 
@@ -422,22 +427,19 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 		return &AssembleResult{}, nil
 	}
 
-	// 4. 确定可用 token 预算
+	// 4. 确定可用 token 预算（此处 window 预算必 > 0，上面已早退）
 	maxTokens := m.builder.config.MaxTokenEstimate
 	if m.window != nil {
-		available := m.window.Available()
-		if available > 0 {
-			maxTokens = available
-		}
+		maxTokens = m.window.Available()
 	}
 
 	// 5. 估算所有记忆的 token 数
 	totalTokens := m.estimateEntriesTokens(allEntries)
 
-	// 6. 判断是否需要压缩
+	// 6. 判断是否需要压缩（用 80% 阈值，而不是等到 100% 才截断）
 	needCompress := false
 	if m.window != nil {
-		needCompress = m.window.NeedsTruncation(totalTokens)
+		needCompress = m.window.ShouldCompress(totalTokens)
 	} else {
 		needCompress = totalTokens > maxTokens
 	}

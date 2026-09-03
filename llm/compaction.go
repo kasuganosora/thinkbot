@@ -373,10 +373,7 @@ func (c *Compactor) compactMessageToolOutputs(msg Message) Message {
 //
 // provider 非空时使用 LLM 生成摘要；为 nil 时仅做 pruning。
 func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider Provider) (GenerateParams, error) {
-	// 增加压缩计数
-	c.mu.Lock()
-	c.compactionCount++
-	c.mu.Unlock()
+	// doom-loop 计数只在 prune 后仍溢出时增加；prune 成功则清零。
 
 	// Step 1: 裁剪工具输出
 	pruned := c.PruneToolOutputs(params.Messages)
@@ -391,8 +388,13 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 	}
 
 	if !c.IsOverflow(params) {
+		c.resetDoomLoop()
 		return params, nil
 	}
+
+	c.mu.Lock()
+	c.compactionCount++
+	c.mu.Unlock()
 
 	// Step 2: 需要摘要压缩
 	if provider == nil {
@@ -403,7 +405,9 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 	if err != nil {
 		return params, fmt.Errorf("compaction: %w", err)
 	}
-
+	if !c.IsOverflow(summaryParams) {
+		c.resetDoomLoop()
+	}
 	return summaryParams, nil
 }
 

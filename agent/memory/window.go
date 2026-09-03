@@ -30,7 +30,7 @@ type Window struct {
 	config WindowConfig
 
 	mu         sync.RWMutex
-	usedTokens int // 累计已消耗的 input tokens
+	usedTokens int // 最新一轮 LLM 调用的完整 prompt input tokens（覆盖写，非累计）
 	roundCount int // LLM 调用轮数
 
 	// metrics
@@ -52,7 +52,7 @@ type WindowConfig struct {
 
 	// OutputReserve 为 LLM 输出预留的 token 数。
 	// 确保 LLM 有足够空间生成回复。
-	// 默认 4096。
+	// 默认 128000（对齐 GLM-5.x 官方最大输出；生产路径优先用主模型 MaxTokens）。
 	OutputReserve int
 
 	// MemoryBudgetRatio memory 可使用的窗口比例（0.0 ~ 1.0）。
@@ -118,10 +118,12 @@ func NewWindow(opts ...WindowConfig) *Window {
 }
 
 // RecordUsage 记录一次 LLM 调用的 token 用量。
-// 每次 LLM 返回结果后调用此方法更新窗口状态。
+// usedTokens 取最新一轮的完整 prompt input（provider 报告值，覆盖写而非累计）。
+// Window 是 per-bot 共享的：跨会话调用会互相覆盖。主链路目前未接入 UpdateUsage，
+// 因此生产里 Available() 实际等于 MemoryBudget()；此方法仍供测试与后续接线使用。
 func (w *Window) RecordUsage(inputTokens, outputTokens int) {
 	w.mu.Lock()
-	w.usedTokens = inputTokens // 使用最新一轮的 input tokens 作为当前消耗
+	w.usedTokens = inputTokens // 覆盖为最新一轮 input，不是累加
 	w.roundCount++
 	w.mu.Unlock()
 
@@ -192,11 +194,15 @@ func (w *Window) RecordCompression() {
 }
 
 // Reset 重置窗口状态（新会话开始时调用）。
+// 同时清零累计指标，避免 Window 跨会话复用时 metrics 泄漏。
 func (w *Window) Reset() {
 	w.mu.Lock()
 	w.usedTokens = 0
 	w.roundCount = 0
 	w.mu.Unlock()
+	w.totalInputTokens.Store(0)
+	w.totalOutputTokens.Store(0)
+	w.compressions.Store(0)
 }
 
 // ============================================================================
