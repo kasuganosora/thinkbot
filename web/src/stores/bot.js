@@ -145,10 +145,12 @@ export const useBotStore = defineStore('bot', () => {
       status: payload?.status || prev.status || '',
       toolCallId: toolCallId || prev.toolCallId || '',
     })
-    // 安全网：如果新 payload 带有真实的服务端生成 questionId（非 _ 开头占位符），
+    // 安全网：如果新 payload 带有真实的服务端生成 questionId（uc- 前缀），
     // 强制清除 pending。防止 SSE 透传/合并边界条件下 pending:true 残留导致卡片永久锁死。
+    // 注意：call_ 前缀是 tempChoiceFromInput 的占位符，此时清 pending 会导致
+    // 卡片过早可交互、用户点击后仍 404（真实 ID 尚未到达），所以不在此处清除。
     const merged = next.get(qid)
-    if (merged && merged.payload && !merged.payload.questionId.startsWith('_')) {
+    if (merged && merged.payload && merged.payload.questionId.startsWith('uc-')) {
       merged.payload = { ...merged.payload, pending: false }
     }
     // 清理同一 toolCallId 的旧条目（临时卡被正式卡取代时的遗留）
