@@ -12,7 +12,7 @@
         <div class="pi-icon" :style="iconTint(metaOf(p.type)?.color)">{{ iconText(metaOf(p.type), p.name) }}</div>
         <div class="pi-main">
           <div class="pi-name">{{ p.name }}</div>
-          <div class="pi-sub">{{ p.configured ? '已配置' : '未配置' }}</div>
+          <div class="pi-sub" :class="{ on: p.enabled, off: p.configured && !p.enabled }">{{ statusText(p) }}</div>
         </div>
       </div>
       <button class="plat-add" data-testid="platform-add" @click="openAdd">
@@ -28,6 +28,14 @@
           <div class="pd-name">{{ cur.name }}</div>
           <div class="pd-id">平台标识：{{ cur.type }}</div>
         </div>
+      </div>
+
+      <div class="pd-enable">
+        <div>
+          <div class="pd-enable-title">启用此平台</div>
+          <div class="pd-enable-desc">关闭后 Bot 不会连接该平台，凭据与节奏配置仍保留</div>
+        </div>
+        <t-switch v-model="cur.enabled" size="large" data-testid="platform-enable" />
       </div>
 
       <h4 class="sec-title">凭据配置</h4>
@@ -123,8 +131,7 @@
       </div>
 
       <div class="pd-footer">
-        <t-button variant="outline" @click="save(false)">仅保存</t-button>
-        <t-button theme="primary" @click="save(true)">立即启用</t-button>
+        <t-button theme="primary" data-testid="platform-save" @click="save">保存</t-button>
         <t-button theme="danger" variant="text" class="pd-del" @click="remove">删除</t-button>
       </div>
     </div>
@@ -257,13 +264,20 @@ onMounted(load)
 
 function select(p) { cur.value = p; ensureConfigDefaults(p); ensureRhythmDefaults(p) }
 
-async function save(enable) {
-  if (enable) cur.value.enabled = true
+function statusText(p) {
+  if (p.enabled) return '已启用'
+  if (p.configured) return '已停用'
+  return '未配置'
+}
+
+async function save() {
   await botPlatformApi.update(props.botId, cur.value.id, {
-    enabled: cur.value.enabled, config: cur.value.config, tools: cur.value.tools, name: cur.value.name, rhythm: cur.value.rhythm
+    enabled: !!cur.value.enabled, config: cur.value.config, tools: cur.value.tools, name: cur.value.name, rhythm: cur.value.rhythm
   })
   cur.value.configured = true
-  MessagePlugin.success(enable ? '已保存并启用' : '平台配置已保存')
+  const i = list.value.findIndex(x => x.id === cur.value.id)
+  if (i >= 0) list.value[i] = { ...cur.value }
+  MessagePlugin.success(cur.value.enabled ? '已保存并启用' : '已保存（平台已停用）')
 }
 
 function remove() {
@@ -334,6 +348,11 @@ async function confirmAdd() {
 .pd-title { flex: 1; }
 .pd-name { font-size: 16px; font-weight: 600; }
 .pd-id { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 2px; }
+.pd-enable { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; padding: 14px 16px; border-radius: 12px; background: var(--bp-bg-subtle); border: var(--bp-hairline); }
+.pd-enable-title { font-size: 15px; font-weight: 600; color: var(--bp-label); }
+.pd-enable-desc { font-size: 12px; color: var(--bp-label-tertiary); margin-top: 4px; line-height: 1.45; }
+.pi-sub.on { color: var(--bp-accent, #0071e3); }
+.pi-sub.off { color: var(--bp-label-secondary); }
 .sec-title { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: var(--bp-label); }
 .cred-form { display: flex; flex-direction: column; gap: 18px; margin-bottom: 28px; }
 .cred-item label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
