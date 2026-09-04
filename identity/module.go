@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/dao"
 )
 
@@ -31,6 +32,11 @@ const DefaultOrder = 3
 var Module = fx.Module("identity",
 	fx.Provide(NewBindServiceFromDeps),
 	fx.Provide(NewBindStageFromDeps),
+	// 将 BindStage 注册进 pipeline 的 "pipeline_stages" 分组（Order=3，早于 CommandStage），
+	// 否则授权码消息会直接流入 LLM 被当作闲聊，绑定机制完全失效。
+	pipeline.ProvideStageInfo(func(s *BindStage) core.StageInfo {
+		return AsStageInfo(s)
+	}),
 	fx.Invoke(registerMigration),
 )
 

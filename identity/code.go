@@ -72,9 +72,12 @@ func NormalizeCode(text string) string {
 // extractPlatform 从 Source 字符串提取平台类型。
 // Source 示例: "telegram-bot1"、"misskey-bot1"、"web-bot1"。
 // 未知前缀时返回原值。
+// 注意：平台名大小写不敏感（入站 Source 可能是 "Telegram" 大写），统一归一为小写，
+// 否则身份映射会以 "Telegram" 存储，导致后续按 "telegram" 解析时查不到。
 func extractPlatform(source string) string {
+	lower := strings.ToLower(source)
 	for _, p := range knownPlatforms {
-		if strings.HasPrefix(source, p) {
+		if strings.HasPrefix(lower, p) {
 			return p
 		}
 	}
