@@ -101,7 +101,7 @@ func newCookieManager(lc fx.Lifecycle, store *config.Store) *CookieManager {
 }
 
 // newBotService 创建 BotService。
-func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHistoryService, permSvc *toolperm.Service) *BotService {
+func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHistoryService, permSvc *toolperm.Service, bindStage *identity.BindStage) *BotService {
 	tp := p.TP
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
@@ -116,7 +116,7 @@ func newBotService(p APIParams, eventBus outbound.EventBus, chatHistory *ChatHis
 		judgeSink = stats.NewJudgeSink(p.JudgeRecorder)
 	}
 	return NewBotService(p.DB, p.Store, p.BotMgr, p.Logger, tp, mp, eventBus,
-		p.StatsRecorder, judgeSink, chatHistory, permSvc)
+		p.StatsRecorder, judgeSink, chatHistory, permSvc, bindStage)
 }
 
 // newToolPermService 创建 bot 工具权限服务。
