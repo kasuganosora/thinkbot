@@ -51,6 +51,7 @@ ch.React(ctx, noteID, "👍")                            // 添加反应
 ch.Unreact(ctx, noteID)                              // 取消自己的反应
 ch.Send(ctx, action)                                 // 按 core.Action 发送
 ch.PostTimeline(ctx, "主动发帖", misskey.VisibilityHome, "") // 发布顶层新帖（心跳自主发声）
+ch.CreatePollNote(ctx, "今天吃什么？", "", []string{"A", "B"}, false, 600, "q1") // user_choice 原生投票帖
 ch.Name() / ch.Type() / ch.BotID()                   // 元信息，Type() 返回 "misskey"
 ch.ChannelTools(ctx)                                 // 返回平台专属工具（见下）
 ```
@@ -60,6 +61,14 @@ ch.ChannelTools(ctx)                                 // 返回平台专属工具
 - 重连采用 5s → 5min 指数退避
 - 消息去重：基于 note ID 的 TTL 缓存（2min），每 30s 清理一次
 - timeline 事件会加上 `[Timeline]` 前缀，并过滤 DM 与空帖
+
+## user_choice 原生投票
+
+`Start` 时通过 `interaction.RegisterPollCreator("misskey", c.CreatePollNote)` 注册平台投票创建器。LLM 调 `user_choice` 工具提问时，本 channel 发布**原生 poll 帖**（至少 2 个选项），用户直接在 Misskey UI 点选：
+
+- **投票事件协议**：pollVoted 只经 note capture 流投递，main 流不含投票事件。发帖后以顶层消息 `{"type":"subNote","body":{"id":"<noteId>"}}` 订阅该帖（**不是** channel 消息），事件以顶层 `{"type":"noteUpdated","body":{"id":..., "type":"pollVoted", "body":{"choice":N,"userId":...}}}` 返回；结束时发 `unsubNote` 退订。衍生版可能在 main 流投递 `pollVoted`（channel 消息体），两条路径都处理
+- **回填语义**：single 模式首票立即 `interaction.ResolveFrom` 回填；multiple 模式每票累计、debounce ~3s 后一次性回填（Misskey 每个选项单独发 pollVoted，没有 done 信号）
+- **过期**：poll 的 `expiresAt` 即问题超时；超时/未知帖子的投票事件忽略
 
 ## 平台专属工具
 
@@ -85,9 +94,10 @@ ch.ChannelTools(ctx)                                 // 返回平台专属工具
 Misskey WS Streaming → types.go (Note 解析) → channel.go (归一化 + 去重)
                                                         ↑
                          api.go (回帖/反应/取消反应/发送) ← Outbound Action
+user_choice: channel.go (CreatePollNote + subNote/noteUpdated pollVoted 捕获 + debounce 回填) → interaction
 ```
 
-- **api.go** — Misskey REST API 封装（createNote、getNote、react、unreact、deleteNote、follow/unfollow、searchUser、getUserNotes、searchNotes 等）
-- **channel.go** — WebSocket 连接管理、消息归一化、重连与去重逻辑
+- **api.go** — Misskey REST API 封装（createNote、getNote、react、unreact、deleteNote、follow/unfollow、searchUser、getUserNotes、searchNotes、createPoll 等）
+- **channel.go** — WebSocket 连接管理、消息归一化、重连与去重逻辑；user_choice 原生 poll 的创建、note capture 订阅与 pollVoted 回填
 - **types.go** — Misskey API 数据结构（`Note`、`File`、`User`）
 - **tools.go** — 平台专属工具定义（`ChannelTools`）

@@ -11,7 +11,7 @@
 - **上下文隔离**：系统标注包裹记忆上下文，防止记忆内容被误认为用户输入
 - **笔记过滤**：自动识别值得记住的信息（Think Filter）
 - **工具持久化**：将工具调用结果存入记忆供后续引用
-- **窗口管理**：基于 token 计数的滑动窗口，自动压缩旧消息
+- **窗口管理**：基于 token 计数的滑动窗口，自动压缩旧消息。窗口耗尽（`Available() <= 0`）时 `AssembleContext` 直接早退、不再注入记忆（避免无预算时仍灌记忆）；压缩判定用 `ShouldCompress`（80% 阈值提前压缩，而非等到 100% 才截断）。`OutputReserve` 默认 128000（对齐 GLM-5.x 官方最大输出；生产路径优先用主模型 MaxTokens）
 - **可插拔 Provider**：`MemoryProvider` 接口 + `ProviderManager` 编排器，支持外部记忆后端
 - **后台同步**：单 worker 串行写入，不阻塞对话循环；带 debounce 和 drain 超时
 - **预取缓存**：每轮结束后异步预取下一轮记忆，命中时零延迟
@@ -31,7 +31,7 @@
 | `LLMConsolidator` | LLM 驱动的记忆巩固器 |
 | `Expander` | 上下文展开器 |
 | `ThinkFilterStore` | Store 装饰器：写入前用 `StripThinking` 系列函数清理 `<think>`/内部标签 |
-| `Window` | 对话窗口管理器 |
+| `Window` | 对话窗口管理器（`RecordUsage` 覆盖写最新一轮 prompt input，非累计；`Reset` 同步清零累计指标） |
 | `LLMProfiler` | 用户画像提取器（TF-IDF 聚类 + 语义验证） |
 | `Snapshot` | 快照管理器（实时/冻结/定期刷新） |
 | `MemoryProvider` | 可插拔记忆后端接口 |

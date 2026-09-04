@@ -322,6 +322,15 @@ result, err := wfMgr.Recover(context.Background())
 - **中间状态重置**：被中断的 `running`/`reviewing` 节点清零 retry/iteration 计数，重置为 `pending` 等待重新调度
 - **幂等安全**：重复调用 `Recover()` 会跳过已经在运行中的工作流
 
+### 续跑恢复（continuation recovery）
+
+崩溃若发生在「工作流已完成、续跑 agent 回复尚未落库」之间，重启后 agent 上下文随引擎关闭而丢失，续跑回复永远不会产生。`Workflow.NeedsContinuation` 持久化标记 + `Manager.recoverContinuations` 解决这个悬浮态：
+
+- 引擎在终态回调真正注入续跑消息时置位 `NeedsContinuation`（仅值变化时写库，避免无谓双写）
+- `Recover()` 启动时扫描终态且 `NeedsContinuation==true` 的工作流（`Repository.FindNeedingContinuation`；GORM 无法查 JSON 内字段，取全量后内存过滤，纯内存模式扫缓存），重新注入续跑消息并**清除标记**——自动续跑只发生一次，避免每次重启重复注入污染会话
+- 恢复数量记入 `RecoveryResult.Continued`
+- `Manager.TriggerContinuation(wfID)` 支持手动重触发（前端 resume 按钮 / `POST /api/workflows/:wfId/continue`）：直接调用终态回调（绕过 `consumed` 去重），可多次调用；非终态工作流不可触发
+
 ## 配额熔断与到点续跑（quota_break）
 
 上游 LLM 配额耗尽（HTTP 429 / body code 1308 等）时不再逐节点撞墙重试，而是三级联动：HTTP 流式层与节点层识别配额错误后立即放弃重试；工作流层**首个**配额失败即熔断整条工作流（`tripQuotaBreak`）：

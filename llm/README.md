@@ -740,7 +740,7 @@ result, _ := llm.OrchestrateGenerate(ctx, prov, &llm.OrchestrateConfig{
 })
 ```
 
-`DefaultCompactionConfig()` 默认值（保守的上下文窗口预算）：`MaxTokens=64000`、`ReservedTokens=20000`、`TailTokens=8000`、`TailTurns=2`、`MinMessagesToCompact=6`、`SummaryMaxTokens=4096`、`ToolOutputThreshold=500`、`Auto=true`。`Compactor` 还提供 `IsOverflow` / `IsOverflowByUsage` / `ShouldCompact` / `PruneToolOutputs` / `Compact(ctx, params, provider)`，并通过 `DoomLoopThreshold`（连续压缩上限 3 次）防止无限压缩循环。
+`DefaultCompactionConfig()` 默认值（保守的上下文窗口预算）：`MaxTokens=64000`、`ReservedTokens=20000`、`TailTokens=8000`、`TailTurns=2`、`MinMessagesToCompact=6`、`SummaryMaxTokens=4096`、`ToolOutputThreshold=500`、`Auto=true`。`Compactor` 还提供 `IsOverflow` / `IsOverflowByUsage` / `ShouldCompact` / `PruneToolOutputs` / `Compact(ctx, params, provider)`，并通过 `DoomLoopThreshold`（连续压缩上限 3 次）防止无限压缩循环——doom-loop 计数只在 prune 后仍溢出时增加，prune 成功或摘要后不再溢出即清零，避免「每轮压缩都计数」造成的假性 doom-loop 卡死。
 
 `CompactionPrepareStepWithProvider(compactor, provider)` 返回 `func(context.Context) func(*GenerateParams) *GenerateParams`，可提供 LLM 摘要能力（provider-backed compaction）。
 
