@@ -86,9 +86,10 @@ WORKDIR /app
 COPY --from=builder /out/thinkbot /app/thinkbot
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
-# 日志目录（主程序以 ./logs 相对路径写入），预先建好并归属运行用户，
-# 否则非 root 运行的主程序在 MkdirAll 时因 /app 属 root 而失败 panic（报告 5870 关联）。
-RUN mkdir -p /app/logs && chown -R thinkbot:thinkbot /app/logs
+# 数据与日志目录（主程序以 ./data、./logs 相对路径写入），预先建好并归属运行用户。
+# 否则非 root 运行时 MkdirAll 会因 /app 属 root 而失败 panic（报告 5870 关联）。
+# compose 会把宿主目录挂到这两处；无挂载时镜像内目录也能直接落库。
+RUN mkdir -p /app/data /app/logs && chown -R thinkbot:thinkbot /app/data /app/logs
 
 # 前端构建产物（SPA，由 frontend 阶段产出）
 COPY --from=frontend /static /app/static

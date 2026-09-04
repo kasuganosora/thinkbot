@@ -14,6 +14,18 @@ if [ -d /app/.env ]; then
 	exit 1
 fi
 
+# 绑定挂载的数据/日志目录默认属主可能为 root，统一归属运行用户。
+# 注意这是 chown -R：部署时应把该目录挂到独立子目录（见 docker-compose.yml
+# 的 ./data/container 与 ./logs/container），直接挂宿主数据根会连带改掉宿主
+# 上其他文件（含裸跑实例在用数据库）的属主。
+# 与是否挂载 docker.sock 无关——即便无 DooD，主程序也要写 SQLite / 日志。
+if [ -d /app/data ] && [ "$(stat -c '%u' /app/data)" != "1000" ]; then
+	chown -R thinkbot:thinkbot /app/data 2>/dev/null || true
+fi
+if [ -d /app/logs ] && [ "$(stat -c '%u' /app/logs)" != "1000" ]; then
+	chown -R thinkbot:thinkbot /app/logs 2>/dev/null || true
+fi
+
 # DooD（Docker-outside-of-Docker）：主程序经挂载的 /var/run/docker.sock 指挥宿主 daemon。
 # 宿主 docker 组 gid 不固定，启动期按 socket 实际 gid 创建/复用同名组，把运行用户加入其中；
 # 若仍无法访问（权限位不足），兜底放宽 socket 权限位。
@@ -27,30 +39,13 @@ if [ -S /var/run/docker.sock ]; then
 	if command -v usermod >/dev/null 2>&1; then
 		usermod -aG "$sock_gid" thinkbot 2>/dev/null || true
 	fi
-	# 绑定挂载的数据目录默认属主可能为 root，统一归属运行用户。
-	# 注意这是 chown -R：部署时应把该目录挂到独立子目录（见 docker-compose.yml
-	# 的 ./data/container 与 ./logs/container），直接挂宿主数据根会连带改掉宿主
-	# 上其他文件（含裸跑实例在用数据库）的属主。
-	if [ -d /app/data ] && [ "$(stat -c '%u' /app/data)" != "1000" ]; then
-		chown -R thinkbot:thinkbot /app/data 2>/dev/null || true
-	fi
-	# 日志目录归属运行用户（镜像内已预建，此处兜底确保可写）。
-	if [ -d /app/logs ] && [ "$(stat -c '%u' /app/logs)" != "1000" ]; then
-		chown -R thinkbot:thinkbot /app/logs 2>/dev/null || true
-	fi
-	# 兜底放宽 socket 权限位。仅在上一步建组+usermod 仍未拿到访问权限时才执行，
-	# 且只对「属主 root:root 且权限位不足」的情形真正有效（放宽 other 位）。
-	#
-	# 已知局限与安全代价，部署前应知晓：
-	#   1. 改的是宿主 socket 文件本身（bind mount 非副本），宿主上所有用户此后
-	#      都能访问 docker daemon —— 等同于向宿主机所有用户开放宿主 root 能力。
-	#   2. 若 socket 属主为 root:docker 660 而容器建组 gid 与之不匹配，chmod 660
-	#      等于没有变化，此行无效（此时应让宿主 docker 组 gid 与容器内建组一致，
-	#      而不是放宽权限位）。
-	# 因此这行只作为「跑起来优先」的兜底保留；追求最小权限的部署可将其删除，
-	# 代价是上述 root:root 场景下容器无法访问 docker.sock、沙箱功能不可用。
-	if [ ! -r /var/run/docker.sock ] || [ ! -w /var/run/docker.sock ]; then
-		chmod 660 /var/run/docker.sock 2>/dev/null || true
+	# 必须以 uid 1000 + 附加组视角探测可读可写。此前用 root 检测几乎永远成功，
+	# 导致 root:root 660 等场景下兜底 chmod 永远不触发，降权后沙箱直接废掉。
+	if ! setpriv --reuid=1000 --regid=1000 --init-groups -- \
+		sh -c 'test -r /var/run/docker.sock && test -w /var/run/docker.sock'; then
+		echo "WARN: thinkbot(uid=1000) 仍无法访问 /var/run/docker.sock；放宽 other 读写位（宿主副作用）。" >&2
+		echo "      更稳妥的做法是让 socket 的组 gid 与容器内 dockersock 组一致，并删掉此兜底。" >&2
+		chmod o+rw /var/run/docker.sock 2>/dev/null || chmod 666 /var/run/docker.sock 2>/dev/null || true
 	fi
 fi
 

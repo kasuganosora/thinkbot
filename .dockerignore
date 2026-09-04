@@ -12,7 +12,9 @@ logs
 /thinkbot.bak*
 *.db.bak*
 *.log
-docs
+# Swagger 生成包 docs/docs.go + swagger.json/yaml 是 go build 编译依赖，不能整目录忽略。
+# 只排除设计文档 markdown，否则镜像构建会报 cannot find package docs。
+docs/*.md
 docker_sandbox_test
 deploy
 # 前端：node_modules 与本地构建产物不进上下文，镜像内由 frontend 阶段重新 npm ci/build
