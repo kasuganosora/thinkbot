@@ -35,6 +35,7 @@ import (
 	"github.com/kasuganosora/thinkbot/channel/telegram"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/cron"
+	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/sandbox"
@@ -110,10 +111,16 @@ type BotService struct {
 	// llmBundles 保存每个已启动 bot 的 LLM Bundle（provider + model），
 	// 供 /compact 等命令对聊天历史做 LLM 摘要。
 	llmBundles map[string]*bot.LLMBundle
+
+	// bindStage 授权码绑定拦截 Stage（Order=3，置于链路最前）。
+	// 命中 TB-XXXX-XXXX 授权码时消费并完成跨平台身份绑定、直接回复、中止 Pipeline，
+	// 不再流入 LLM。必须在每个 bot 的 pipeline builder 中显式 Add——多 bot 模式下
+	// pipeline 用 NewBuilder 显式拼接，不走 pipeline_stages fx 分组，漏加则绑定机制失效。
+	bindStage *identity.BindStage
 }
 
 // NewBotService 创建 BotService。
-func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, judgeSink engagement.JudgeRecordSink, chatHistory *ChatHistoryService, permSvc *toolperm.Service) *BotService {
+func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, judgeSink engagement.JudgeRecordSink, chatHistory *ChatHistoryService, permSvc *toolperm.Service, bindStage *identity.BindStage) *BotService {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
@@ -154,6 +161,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		permSvc:        permSvc,
 		toolManagers:   make(map[string]*agenttools.ToolManager),
 		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
+		bindStage:      bindStage,
 	}
 }
 
@@ -1245,6 +1253,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 	groups := pipeline.ModeGroups(mode)
 	pb := pipeline.NewBuilder().WithMode(mode)
+	// 授权码绑定拦截：链路最前（Order=3），命中 TB-XXXX-XXXX 即消费绑定并中止，
+	// 不流入 LLM。显式 Add——多 bot 模式 pipeline 不走 pipeline_stages 分组，漏加则失效。
+	if s.bindStage != nil {
+		pb.Add(3, s.bindStage)
+	}
 	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
 	pb.Add(45, lurkEnricher)
 	pb.Add(46, passiveEnricher)
