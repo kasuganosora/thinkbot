@@ -18,7 +18,7 @@ Telegram/Misskey → 发送授权码 → BindStage(Order=3) 拦截
 
 | 文件 | 职责 |
 |------|------|
-| `code.go` | 授权码生成（`TB-XXXX-XXXX` 格式，安全字母表）+ 格式匹配 |
+| `code.go` | 授权码生成（`TB-XXXX-XXXX` 格式，安全字母表）+ 格式匹配（`extractPlatform` 平台名大小写不敏感，统一归一为小写，避免 `"Telegram"` 大写 Source 导致映射查不到） |
 | `service.go` | `BindService`：生成码、消费码、查/删映射 |
 | `admin_checker.go` | `IdentityAdminChecker`：通过映射解析管理员身份 |
 | `bind_stage.go` | `BindStage`：Pipeline Stage（Order=3），拦截授权码消息 |
@@ -79,6 +79,11 @@ stages := []core.StageInfo{
     {Stage: llmStage, Order: 100, Enabled: true},
 }
 ```
+
+> `identity.Module` 已通过 `pipeline.ProvideStageInfo` 把 `BindStage` 自动注册进
+> pipeline 的 stage 分组（Order=3，早于 CommandStage）。若装配 pipeline 时遗漏
+> BindStage，授权码消息会直接流入 LLM 被当作闲聊，绑定机制完全失效——
+> multi-bot pipeline 务必确认该 Stage 已接线。
 
 ## AdminChecker 集成
 
