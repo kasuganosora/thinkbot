@@ -27,6 +27,7 @@
 #
 # 首次运行：
 #   cp .env.example .env && vim .env
+#   mkdir -p data/container logs/container
 #   docker compose up -d --build
 #   docker compose logs -f
 #
@@ -62,8 +63,8 @@ services:
 
     ports:
       # 宿主端口:容器端口。容器端口需与 .env 的 api.addr 保持一致（默认 :8080）。
+      # 若 8080 被占用，改左侧宿主端口即可，例如 "18080:8080"。
       - "8080:8080"
-
     volumes:
       # 【关键·DooD】挂载宿主 docker.sock，容器内 docker CLI 借此创建 bot 沙箱兄弟容器。
       #
@@ -130,11 +131,11 @@ services:
 
     healthcheck:
       # 探活应用本身（请求 /health），而非仅检查 docker.sock 或二进制是否存在。
-      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 40s
 
     logging:
       # 应用日志文件本身已轮转，这里限制的是容器 stdout 的 docker 日志驱动输出，
