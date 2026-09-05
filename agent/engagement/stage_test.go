@@ -555,3 +555,36 @@ func TestEngagementStage_EpisodeBoundaryStripsReplyTarget(t *testing.T) {
 		t.Fatalf("other users must keep reply_target, got %v", other.Message.Metadata["reply_target"])
 	}
 }
+
+func TestEngagementStage_ReactionResetsBreakerAndDoesNotPromote(t *testing.T) {
+	policy := NewCompositePolicy(AllowAll{})
+	breaker := NewOutreachBreaker(DefaultOutreachBreakerConfig(), testLogger())
+	declineUser(breaker, "ch-misskey", "user1")
+
+	stage := newTestStage(policy).WithOutreachBreaker(breaker)
+	env := newEnvelope(core.Message{
+		ID:        "react-1",
+		Channel:   "ch-misskey",
+		UserID:    "user1",
+		Text:      "",
+		Mentioned: false,
+		ChatType:  core.ChatGroup,
+		Metadata: map[string]any{
+			core.MetaEventType: core.MetaEventTypeReaction,
+			core.MetaAckOnly:   true,
+		},
+	})
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if out.Message.Mentioned {
+		t.Fatal("reaction must not be promoted to proactive")
+	}
+	if v, _ := out.Get("engagement.reaction"); v != true {
+		t.Fatal("expected engagement.reaction skip")
+	}
+	if breaker.IsDeclined("ch-misskey", "user1") {
+		t.Fatal("like must reset declined")
+	}
+}

@@ -111,6 +111,9 @@ func TestHandleNotification_ReactionBuildsAwarenessMessage(t *testing.T) {
 	if _, ok := msg.Metadata["reply_target"]; ok {
 		t.Fatal("reply_target must NOT be set")
 	}
+	if ids, _ := msg.Metadata["reactor_ids"].([]string); len(ids) != 1 || ids[0] != "user-alice" {
+		t.Fatalf("reactor_ids=%v", msg.Metadata["reactor_ids"])
+	}
 }
 
 func TestHandleNotification_IgnoresNonReactionTypes(t *testing.T) {
@@ -175,6 +178,10 @@ func TestHandleNotification_GroupedPacksReactors(t *testing.T) {
 	}
 	if msg.Metadata["event_type"] != "reaction" {
 		t.Fatalf("event_type=%v", msg.Metadata["event_type"])
+	}
+	ids, _ := msg.Metadata["reactor_ids"].([]string)
+	if len(ids) != 2 || ids[0] != "u1" || ids[1] != "u2" {
+		t.Fatalf("reactor_ids=%v, want [u1 u2]", msg.Metadata["reactor_ids"])
 	}
 	if ing.Len() != 0 {
 		t.Fatal("grouped must produce exactly one ingress message")

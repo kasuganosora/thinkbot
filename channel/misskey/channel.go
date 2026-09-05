@@ -799,6 +799,15 @@ func (c *MisskeyChannel) handleNotification(ctx context.Context, body json.RawMe
 		"ack_only":        true,
 		// 故意不设 reply_target：避免误串接到被表态的帖子。
 	}
+	reactorIDs := make([]string, 0, len(reactors))
+	for _, r := range reactors {
+		if r.user.ID != "" {
+			reactorIDs = append(reactorIDs, r.user.ID)
+		}
+	}
+	if len(reactorIDs) > 0 {
+		metadata["reactor_ids"] = reactorIDs
+	}
 
 	coreMsg := core.Message{
 		ID:            n.ID,

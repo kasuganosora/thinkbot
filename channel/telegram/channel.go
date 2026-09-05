@@ -443,13 +443,13 @@ func (c *TelegramChannel) handleMessageReaction(ctx context.Context, updateID in
 	}
 
 	metadata := map[string]any{
-		"chat_id":       mr.Chat.ID,
-		"message_id":    mr.MessageID,
-		"event_type":    "reaction",
-		"ack_only":      true,
-		"channel_type":  "telegram",
-		"reactions":     emojis,
-		"update_id":     updateID,
+		"chat_id":      mr.Chat.ID,
+		"message_id":   mr.MessageID,
+		"event_type":   "reaction",
+		"ack_only":     true,
+		"channel_type": "telegram",
+		"reactions":    emojis,
+		"update_id":    updateID,
 	}
 	// 故意不设 reply_target，避免误把 awareness 当成可回复消息。
 	if mr.Chat.Title != "" {
@@ -457,6 +457,9 @@ func (c *TelegramChannel) handleMessageReaction(ctx context.Context, updateID in
 	}
 	if mr.User != nil && mr.User.Username != "" {
 		metadata["username"] = mr.User.Username
+	}
+	if userID != "" {
+		metadata["reactor_ids"] = []string{userID}
 	}
 
 	coreMsg := core.Message{

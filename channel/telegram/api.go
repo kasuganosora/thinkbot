@@ -144,6 +144,9 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 
 // defaultAllowedUpdates 是 getUpdates 未指定时的默认类型。
 // 必须含 callback_query（inline keyboard）与 message_reaction（别人给 bot 消息表态）。
+//
+// Telegram Bot API：message_reaction 只在 bot 是该群管理员时才会推送。
+// 私聊 / 非管理员群通常收不到，订阅该类型是必要但不充分条件。
 func defaultAllowedUpdates() []string {
 	return []string{"message", "edited_message", "my_chat_member", "callback_query", "message_reaction"}
 }
