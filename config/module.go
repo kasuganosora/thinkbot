@@ -744,8 +744,8 @@ type EngagementConfig struct {
 	// 超时只把 pending 收成 declined，不会补发。
 	UnansweredSilence time.Duration `json:"unansweredSilence"`
 
-	// UnansweredEpisodeBoundary declined 之后仍禁止点名此人；超过此时长才允许房间级参与（默认 24h）。
-	// 完全恢复（可再对该人出价）只在对方 @ / 私聊开口。
+	// UnansweredEpisodeBoundary declined 之后仍禁止点名此人；超过此时长才允许房间级参与（默认 5h）。
+	// 完全恢复（可再对该人出价）只在对方 @ / 私聊开口。未设置时用默认值。
 	UnansweredEpisodeBoundary time.Duration `json:"unansweredEpisodeBoundary"`
 }
 
@@ -767,7 +767,7 @@ func DefaultEngagementConfig() EngagementConfig {
 		EngagementThreshold:       0,
 		AutoAdjustFrequency:       false,
 		UnansweredSilence:         3 * time.Minute,
-		UnansweredEpisodeBoundary: 24 * time.Hour,
+		UnansweredEpisodeBoundary: 5 * time.Hour,
 	}
 }
 
@@ -826,7 +826,7 @@ func EngagementMetaSpecs() []MetaSpec {
 		{Key: KeyEngagementThreshold, Category: "Engagement", Description: "LLM 快判评分阈值 0-100（默认 0=传统 YES/NO 模式，更高=更挑剔）"},
 		{Key: KeyEngagementAutoAdjustFreq, Category: "Engagement", Description: "是否自动根据群组活跃度调整参与频率（默认 false）"},
 		{Key: KeyEngagementUnansweredSilence, Category: "Engagement", Description: "主动回复后无人回应即视为拒绝的等待时长（默认 3m；超时只结算不补发）"},
-		{Key: KeyEngagementUnansweredEpisodeBoundary, Category: "Engagement", Description: "拒绝后仍禁止点名此人；超过此时长才允许房间级参与（默认 24h）。完全恢复需对方 @ / 私聊"},
+		{Key: KeyEngagementUnansweredEpisodeBoundary, Category: "Engagement", Description: "拒绝后仍禁止点名此人；超过此时长才允许房间级参与（如 5h，默认 5h）。未设置时用默认 5h。完全恢复需对方 @ / 私聊。修改后需重启 Bot"},
 	}
 }
 
@@ -1381,15 +1381,29 @@ func AllMetaSpecs() []MetaSpec {
 }
 
 // GlobalMetaSpecs 仅返回适合在系统设置页面展示的全局配置项。
-// 排除 Bot / Soul / Engagement / Dreaming / ToolPolicy 等 per-bot 配置，
+// 排除 Bot / Soul / Dreaming / ToolPolicy 等 per-bot 配置，
 // 以及 Database / Workspace 等需要重启才生效的基础设施配置。
 // 记忆窗口（MemoryWindow）、LLM 客户端可靠性（LLM）、会话压缩（Compaction）
 // 是全局共享的模型相关参数，虽需重启 bot 生效，但属于用户应在前端可调的模型参数，故纳入。
+// 主动参与的未回应情节边界（Engagement unanswered_*）同样是全局社交节奏，纳入系统设置。
 // 注意：max_tokens 不在此列——它跟随「模型」而非全局/bot，由各 ModelDef.MaxTokens
 // （provider 模型配置页的每模型 maxTokens 字段）独立设置。
 func GlobalMetaSpecs() []MetaSpec {
-	return append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
-		LLMClientMetaSpecs()...), CompactionMetaSpecs()...)
+	return append(append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
+		LLMClientMetaSpecs()...), CompactionMetaSpecs()...),
+		engagementUnansweredMetaSpecs()...)
+}
+
+// engagementUnansweredMetaSpecs 系统设置页展示的主动参与「未回应」节奏项。
+func engagementUnansweredMetaSpecs() []MetaSpec {
+	out := make([]MetaSpec, 0, 2)
+	for _, spec := range EngagementMetaSpecs() {
+		switch spec.Key {
+		case KeyEngagementUnansweredSilence, KeyEngagementUnansweredEpisodeBoundary:
+			out = append(out, spec)
+		}
+	}
+	return out
 }
 
 // DefaultMap 返回所有配置项的默认值映射，供前端设置界面填充空值。
@@ -1443,8 +1457,10 @@ func DefaultMap() map[string]string {
 		KeyEngagementBackoffStartCount:  "3",
 		KeyEngagementBurstInterval:      "5",
 		KeyEngagementWaitTimeout:        "30",
-		KeyEngagementBackoffBypass:      "0",
-		KeyEngagementThreshold:          "0",
+		KeyEngagementBackoffBypass:             "0",
+		KeyEngagementThreshold:                 "0",
+		KeyEngagementUnansweredSilence:         "3m",
+		KeyEngagementUnansweredEpisodeBoundary: "5h",
 		// Soul
 		KeySoulReloadInterval: "5s",
 		// Workspace

@@ -15,10 +15,7 @@ type testClock struct {
 
 func newTestBreaker() (*OutreachBreaker, *testClock) {
 	clk := &testClock{t: time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)}
-	b := NewOutreachBreaker(OutreachBreakerConfig{
-		SilenceWindow:   3 * time.Minute,
-		EpisodeBoundary: 24 * time.Hour,
-	}, zap.NewNop().Sugar())
+	b := NewOutreachBreaker(DefaultOutreachBreakerConfig(), zap.NewNop().Sugar())
 	b.nowFn = func() time.Time { return clk.t }
 	return b, clk
 }
@@ -188,9 +185,9 @@ func TestOutreachBreaker_TimePassingDoesNotLiftDeclined(t *testing.T) {
 	if s, _ := b.ShouldSuppress("room-1", "u1"); !s {
 		t.Fatal("30m must not lift declined — that would be a second bid")
 	}
-	clk.t = clk.t.Add(7 * time.Hour)
+	clk.t = clk.t.Add(4 * time.Hour)
 	if s, _ := b.ShouldSuppress("room-1", "u1"); !s {
-		t.Fatal("7h must not lift declined")
+		t.Fatal("4h must not lift declined — still within the 5h episode boundary")
 	}
 	if !b.IsDeclined("room-1", "u1") {
 		t.Fatal("declined flag must persist")
@@ -206,7 +203,7 @@ func TestOutreachBreaker_EpisodeBoundaryAllowsRoomLevelOnly(t *testing.T) {
 		t.Fatal("expected suppress within episode")
 	}
 
-	clk.t = clk.t.Add(24*time.Hour + time.Minute)
+	clk.t = clk.t.Add(DefaultOutreachBreakerConfig().EpisodeBoundary + time.Minute)
 	if s, _ := b.ShouldSuppress("room-1", "u1"); s {
 		t.Fatal("after episode boundary, room-level engage is allowed")
 	}
@@ -224,7 +221,7 @@ func TestOutreachBreaker_EpisodeBoundaryAllowsRoomLevelOnly(t *testing.T) {
 	}
 	b.OnInbound(talkPast("u1"))
 	if s, _ := b.ShouldSuppress("room-1", "u1"); s {
-		t.Fatal("talk-past of a room comment must not restart the 24h suppress")
+		t.Fatal("talk-past of a room comment must not restart the episode suppress")
 	}
 }
 
@@ -232,7 +229,7 @@ func TestOutreachBreaker_MentionAfterEpisodeFullyOpens(t *testing.T) {
 	b, clk := newTestBreaker()
 	b.RecordProactiveReply("room-1", "u1")
 	b.OnInbound(talkPast("u1"))
-	clk.t = clk.t.Add(25 * time.Hour)
+	clk.t = clk.t.Add(DefaultOutreachBreakerConfig().EpisodeBoundary + time.Hour)
 
 	b.OnInbound(mention("u1"))
 	if b.IsDeclined("room-1", "u1") {
@@ -354,7 +351,7 @@ func TestDefaultOutreachBreakerConfig(t *testing.T) {
 	if cfg.SilenceWindow != 3*time.Minute {
 		t.Errorf("SilenceWindow=%v", cfg.SilenceWindow)
 	}
-	if cfg.EpisodeBoundary != 24*time.Hour {
+	if cfg.EpisodeBoundary != 5*time.Hour {
 		t.Errorf("EpisodeBoundary=%v", cfg.EpisodeBoundary)
 	}
 }
