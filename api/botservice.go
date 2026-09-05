@@ -1166,6 +1166,22 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return nil
 	}, s.logger)
 
+	// reaction-ack enricher：Misskey 反应通知仅供 LLM 感知，硬抑制出站。
+	// 与 passive 不同——不论 SpeakMode 为何，反应事件一律不可被 REPLY_CONTROL send:true 覆盖。
+	// Order 47，紧接 passive-speak(46)，保证覆盖/锁定 reason 为 reaction_notification。
+	reactionAckEnricher := stages.NewEnricherStage("reaction-ack", func(ctx context.Context, env *core.Envelope) error {
+		if env.Message.Metadata == nil {
+			return nil
+		}
+		et, _ := env.Message.Metadata["event_type"].(string)
+		ackOnly, _ := env.Message.Metadata["ack_only"].(bool)
+		if et == "reaction" || ackOnly {
+			env.Set(core.KVSuppressReply, true)
+			env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonReaction)
+		}
+		return nil
+	}, s.logger)
+
 	// 记忆召回 stage：每轮对话前按 [bot, channel, user] 三 scope 检索长期记忆
 	// （含潜水学到的经验），注入 system prompt，让 bot 在真人交互时带「实时经验」。
 	// memRepo（函数前面 717 行已创建）即 SQLite 仓储（实现 memory.Retriever），
@@ -1267,6 +1283,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
 	pb.Add(45, lurkEnricher)
 	pb.Add(46, passiveEnricher)
+	pb.Add(47, reactionAckEnricher)
 	pb.Add(90, recallStage)
 	pb.Add(95, rhythmStage)
 	pb.Add(100, wrappedLLM)
