@@ -15,7 +15,7 @@
 - **自适应频率 AutoAdjust**：根据群组活跃度自动调整参与频率
 - **对话阶段感知**：推断 divergent/convergent/idle 阶段，动态调整策略
 - **自适应画像**：`BotProfileTraits` 从 SOUL.md 解析量化人格，经 `AdaptiveEngagementSyncer` 映射为 per-channel engagement 参数
-- **一次出价熔断 OutreachBreaker**：每个情节对该人只主动出击一次。talk-past / 冷场即视为拒绝，不再补枪（冷却后再敲等于追问，因此不做）。真人 @ / 私聊 / 对 bot 发言的表态（点赞）永远放行并复位。情节边界（默认 24h）后可房间级参与，但剥掉 `reply_target` 以免点名。随机噪声不能绕过
+- **一次出价熔断 OutreachBreaker**：每个情节对该人只主动出击一次。talk-past / 冷场即视为拒绝，不再补枪（冷却后再敲等于追问，因此不做）。真人 @ / 私聊 / 对 bot 发言的表态（点赞）永远放行并复位。情节边界（默认 5h，可配 `engagement.unanswered_episode_boundary`）后可房间级参与，但剥掉 `reply_target` 以免点名。随机噪声不能绕过
 - `EngagementStage` Pipeline 集成（Order=40）
 
 ## 关键类型
@@ -72,7 +72,7 @@
 | `engagement.wait_timeout_seconds` | float64 | 30.0 | Wait 超时 |
 | `engagement.backoff_bypass_pending` | int | 0 | 退避绕过阈值 |
 | `engagement.unanswered_silence` | duration | 3m | 主动回复后无人回应即视为拒绝（超时只结算，不补发） |
-| `engagement.unanswered_episode_boundary` | duration | 24h | 拒绝后仍禁止点名此人；超过此时长才允许房间级参与。完全恢复需对方 @ / 私聊 |
+| `engagement.unanswered_episode_boundary` | duration | 5h | 拒绝后仍禁止点名此人；超过此时长才允许房间级参与。完全恢复需对方 @ / 私聊。未设置时用默认 5h |
 
 `engagement.cooldown`（默认 15m）是房间级节流，**不是**对该人的第二次出价窗口。没接住就停，不会冷却后再敲。
 
