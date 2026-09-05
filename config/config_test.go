@@ -866,3 +866,31 @@ func TestBuilder_GetBotTimezoneLocation_Override(t *testing.T) {
 		t.Errorf("unset-bot: expected UTC, got %q", locGlobal.String())
 	}
 }
+
+func TestDefaultEngagementConfig_UnansweredEpisodeBoundary(t *testing.T) {
+	cfg := DefaultEngagementConfig()
+	if cfg.UnansweredEpisodeBoundary != 5*time.Hour {
+		t.Fatalf("default episode boundary = %v, want 5h", cfg.UnansweredEpisodeBoundary)
+	}
+
+	store := NewStore(nil)
+	got := NewBuilder(store, testLogger()).GetEngagementConfig()
+	if got.UnansweredEpisodeBoundary != 5*time.Hour {
+		t.Fatalf("unset store episode boundary = %v, want 5h", got.UnansweredEpisodeBoundary)
+	}
+
+	if DefaultMap()[KeyEngagementUnansweredEpisodeBoundary] != "5h" {
+		t.Fatalf("DefaultMap missing 5h for %s", KeyEngagementUnansweredEpisodeBoundary)
+	}
+
+	var found bool
+	for _, spec := range GlobalMetaSpecs() {
+		if spec.Key == KeyEngagementUnansweredEpisodeBoundary {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("GlobalMetaSpecs must include unanswered_episode_boundary for the settings UI")
+	}
+}

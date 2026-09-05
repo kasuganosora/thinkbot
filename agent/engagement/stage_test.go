@@ -532,7 +532,7 @@ func TestEngagementStage_EpisodeBoundaryStripsReplyTarget(t *testing.T) {
 		t.Fatal("must suppress within episode boundary")
 	}
 
-	clk.t = clk.t.Add(24*time.Hour + time.Minute)
+	clk.t = clk.t.Add(DefaultOutreachBreakerConfig().EpisodeBoundary + time.Minute)
 	out, err := stage.Process(context.Background(), newEnvelope(*timelineMsg("room comment ok", "user1", "misskey")))
 	if err != nil {
 		t.Fatalf("process err: %v", err)

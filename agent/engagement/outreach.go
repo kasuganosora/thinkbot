@@ -49,7 +49,7 @@ type OutreachBreakerConfig struct {
 	SilenceWindow time.Duration
 
 	// EpisodeBoundary declined 之后，允许对房间再说话、但仍禁止点名此人的等待时长。
-	// 默认 24 小时。完全恢复（可再对该人出价）只在对方 @ / 私聊开口。
+	// 默认 5 小时。完全恢复（可再对该人出价）只在对方 @ / 私聊开口。
 	EpisodeBoundary time.Duration
 }
 
@@ -57,7 +57,7 @@ type OutreachBreakerConfig struct {
 func DefaultOutreachBreakerConfig() OutreachBreakerConfig {
 	return OutreachBreakerConfig{
 		SilenceWindow:   3 * time.Minute,
-		EpisodeBoundary: 24 * time.Hour,
+		EpisodeBoundary: 5 * time.Hour,
 	}
 }
 

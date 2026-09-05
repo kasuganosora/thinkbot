@@ -192,7 +192,7 @@ func TestBuildOutreachBreakerConfig(t *testing.T) {
 	if ob.SilenceWindow != 3*time.Minute {
 		t.Errorf("SilenceWindow=%v", ob.SilenceWindow)
 	}
-	if ob.EpisodeBoundary != 24*time.Hour {
+	if ob.EpisodeBoundary != 5*time.Hour {
 		t.Errorf("EpisodeBoundary=%v", ob.EpisodeBoundary)
 	}
 }
