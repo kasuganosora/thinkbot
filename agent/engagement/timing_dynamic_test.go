@@ -4,9 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"go.opentelemetry.io/otel/trace/noop"
-	"go.uber.org/zap"
-
 	"github.com/kasuganosora/thinkbot/agent/core"
 )
 
@@ -133,37 +130,6 @@ func TestTimingGate_DynamicConfig_LowPatience(t *testing.T) {
 	if !inBackoff {
 		t.Error("low patience with backoff_start_count=1 should trigger backoff after 1 decline")
 	}
-}
-
-func TestTimingGate_RejectionDetector_Integration(t *testing.T) {
-	policy := newAlwaysEngagePolicy()
-	gate := NewTimingGate(policy, DefaultTimingGateConfig())
-	gate.SetRandomNoiseRate(0) // 关闭随机噪声
-
-	detector := NewRejectionDetector(RejectionDetectorConfig{
-		SilenceWindowSeconds: 120.0,
-		StreakThreshold:      1,
-		StreakDuration:       1,
-		BotName:              "testbot",
-	}, noop.NewTracerProvider(), zap.NewNop().Sugar())
-	gate.SetRejectionDetector(detector)
-
-	// 模拟被无视1次触发自闭
-	detector.RecordReply("telegram:-123")
-	// 等待后检查（需要 > silence window）
-	// 注意：这里不能 sleep too long in unit tests...
-	// 实际集成：TimingGate.ShouldEvaluate 会调用 detector.IsInStreak
-	// 这里只验证 detector 注入后不会 panic
-	msg := core.Message{
-		ID:       "msg-detector",
-		Text:     "hello",
-		Channel:  "telegram:-123",
-		ChatType: "group",
-	}
-
-	_, td := gate.ShouldEvaluate(&msg)
-	// 验证不 panic
-	_ = td
 }
 
 func TestTimingGate_RandomNoise_SkipsProfile(t *testing.T) {

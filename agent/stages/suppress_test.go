@@ -251,6 +251,27 @@ func TestLLMStage_ModelSendTrueOverridesEngagementSuppress(t *testing.T) {
 	}
 }
 
+func TestLLMStage_ModelSendTrueDoesNotOverrideUnanswered(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<public>我再跟一句。</public>@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m-unanswered", Text: "群里的闲聊", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonUnanswered)
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 0 {
+		t.Fatalf("unanswered outreach hard gate must NOT be overridden by model send:true, got %+v", got)
+	}
+}
+
 // TestLLMStage_ModelSendFalseStillSuppressed 验证：模型自己 send:false 时，
 // 即便上游已抑制，结果仍不出站（覆盖分支不改变模型的否决权）。
 func TestLLMStage_ModelSendFalseStillSuppressed(t *testing.T) {

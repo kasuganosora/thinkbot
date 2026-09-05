@@ -418,3 +418,140 @@ func TestEngagementThenSessionResolve(t *testing.T) {
 		t.Error("Mentioned should be true for session resolver to pick up")
 	}
 }
+
+func declineUser(b *OutreachBreaker, channel, user string) {
+	msg := &core.Message{Channel: channel, UserID: user, Text: "whatever", Mentioned: false, ChatType: core.ChatGroup}
+	b.RecordProactiveReply(channel, user)
+	b.OnInbound(msg)
+}
+
+func TestEngagementStage_OutreachBreakerMutesUser(t *testing.T) {
+	policy := NewCompositePolicy(AllowAll{})
+	breaker := NewOutreachBreaker(DefaultOutreachBreakerConfig(), testLogger())
+	declineUser(breaker, "ch-misskey", "user1")
+
+	stage := newTestStage(policy).WithOutreachBreaker(breaker)
+	env := newEnvelope(*timelineMsg("another post", "user1", "misskey"))
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if out.Message.Mentioned {
+		t.Fatal("declined user must not be promoted to proactive")
+	}
+	v, ok := out.Get(core.KVSuppressReply)
+	if !ok || v != true {
+		t.Fatal("declined user must set KVSuppressReply")
+	}
+	reason, _ := out.Get(core.KVSuppressReplyReason)
+	if reason != core.KVSuppressReasonUnanswered {
+		t.Fatalf("reason=%v, want %s", reason, core.KVSuppressReasonUnanswered)
+	}
+}
+
+func TestEngagementStage_OutreachBreakerMentionStillPasses(t *testing.T) {
+	policy := NewCompositePolicy(DenyAll{})
+	breaker := NewOutreachBreaker(DefaultOutreachBreakerConfig(), testLogger())
+	declineUser(breaker, "ch-misskey", "user1")
+
+	stage := newTestStage(policy).WithOutreachBreaker(breaker)
+	env := newEnvelope(*mentionedMsg("hey @bot", "user1", "misskey"))
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if !out.Message.Mentioned {
+		t.Fatal("@ must still pass through")
+	}
+	if v, ok := out.Get(core.KVSuppressReply); ok && v == true {
+		t.Fatal("@ must not be suppressed by outreach breaker")
+	}
+	if breaker.IsDeclined("ch-misskey", "user1") {
+		t.Fatal("@ must reset declined")
+	}
+}
+
+func TestEngagementStage_RandomNoiseCannotBypassMute(t *testing.T) {
+	policy := NewCompositePolicy(AllowAll{})
+	breaker := NewOutreachBreaker(DefaultOutreachBreakerConfig(), testLogger())
+	declineUser(breaker, "ch-misskey", "user1")
+
+	gate := NewTimingGate(policy, TimingGateConfig{ReplyProbability: 0})
+	gate.SetRandomNoiseRate(1.0)
+
+	stage := newTestStage(policy).WithTimingGate(gate).WithOutreachBreaker(breaker)
+	env := newEnvelope(*timelineMsg("noise should not help", "user1", "misskey"))
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if out.Message.Mentioned {
+		t.Fatal("random noise must not promote a declined user")
+	}
+	reason, _ := out.Get(core.KVSuppressReplyReason)
+	if reason != core.KVSuppressReasonUnanswered {
+		t.Fatalf("reason=%v, want unanswered_outreach", reason)
+	}
+}
+
+func TestEngagementStage_AwaitingBlocksSecondBid(t *testing.T) {
+	policy := NewCompositePolicy(AllowAll{})
+	breaker := NewOutreachBreaker(DefaultOutreachBreakerConfig(), testLogger())
+	breaker.RecordProactiveReply("ch-misskey", "user1")
+
+	gate := NewTimingGate(policy, TimingGateConfig{ReplyProbability: 0})
+	gate.SetRandomNoiseRate(1.0)
+	stage := newTestStage(policy).WithTimingGate(gate).WithOutreachBreaker(breaker)
+
+	out, err := stage.Process(context.Background(), newEnvelope(*timelineMsg("second bid", "user1", "misskey")))
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if out.Message.Mentioned {
+		t.Fatal("must not fire a second bid while awaiting")
+	}
+}
+
+func TestEngagementStage_EpisodeBoundaryStripsReplyTarget(t *testing.T) {
+	policy := NewCompositePolicy(AllowAll{})
+	clk := &testClock{t: time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)}
+	breaker := NewOutreachBreaker(DefaultOutreachBreakerConfig(), testLogger())
+	breaker.nowFn = func() time.Time { return clk.t }
+	declineUser(breaker, "ch-misskey", "user1")
+
+	stage := newTestStage(policy).WithOutreachBreaker(breaker)
+
+	stillMuted, err := stage.Process(context.Background(), newEnvelope(*timelineMsg("still declined", "user1", "misskey")))
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if stillMuted.Message.Mentioned {
+		t.Fatal("must suppress within episode boundary")
+	}
+
+	clk.t = clk.t.Add(24*time.Hour + time.Minute)
+	out, err := stage.Process(context.Background(), newEnvelope(*timelineMsg("room comment ok", "user1", "misskey")))
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if !out.Message.Mentioned {
+		t.Fatal("after episode boundary, room-level engage is allowed")
+	}
+	if _, ok := out.Message.Metadata["reply_target"]; ok {
+		t.Fatal("must strip reply_target so the reply does not pinpoint the user")
+	}
+	if v, _ := out.Get("engagement.strip_reply_target"); v != true {
+		t.Fatal("expected engagement.strip_reply_target")
+	}
+
+	other, err := stage.Process(context.Background(), newEnvelope(*timelineMsg("other user", "user2", "misskey")))
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if other.Message.Metadata["reply_target"] != "note-other user" {
+		t.Fatalf("other users must keep reply_target, got %v", other.Message.Metadata["reply_target"])
+	}
+}

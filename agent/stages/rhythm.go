@@ -152,14 +152,12 @@ func (s *RhythmStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		return env, nil
 	}
 
-	// 硬权限门保护：ingress 阶段的 passive-speak enricher 已对「未被真人 @」的消息
-	// 设 KVSuppressReply + reason=passive_mode_unmentioned（bot 无权在此消息发言）。
-	// 该 reason 是**硬策略权限**，与节奏的软节流（rhythm_*）本质不同。若此处再调用
-	// suppress() 会把 reason 改写成 rhythm_speak_tendency，致下游 reply-control 误以为只是
-	// 软节流、被模型 send:true 覆盖放行 → 被动 bot 对未 @ 消息发帖（2026-08-25 实测）。
+	// 硬权限门保护：passive-speak / 未回应熔断已设 KVSuppressReply 且 reason 为硬门
+	// （passive_mode_unmentioned、unanswered_*）。若此处再调用 suppress() 会把 reason
+	// 改写成 rhythm_speak_tendency，致下游 reply-control 误以为只是软节流。
 	// 因此一旦硬门已立，节奏必须原样保留、不得触碰。
 	if getBool(env, core.KVSuppressReply) {
-		if reason, _ := env.Get(core.KVSuppressReplyReason); reason == core.KVSuppressReasonPassive {
+		if reason, _ := env.Get(core.KVSuppressReplyReason); core.IsHardSuppressReason(reason) {
 			return env, nil
 		}
 	}
