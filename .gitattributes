@@ -1,0 +1,8 @@
+# Shell / Docker entrypoints must keep LF even on Windows checkouts.
+# CRLF shebangs become "#!/bin/sh\r" and fail at runtime with:
+#   exec /app/entrypoint.sh: no such file or directory
+*.sh text eol=lf
+Dockerfile text eol=lf
+**/Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+**/docker-compose*.yml text eol=lf

@@ -41,7 +41,7 @@
 # 的数据彼此独立，互不影响。
 # ============================================================================
 
-name: thinkbot
+# 项目名默认取目录名 thinkbot。不写顶层 name:，兼容 docker-compose 1.x（WSL apt docker.io 常见）。
 
 services:
   thinkbot:
