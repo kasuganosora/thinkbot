@@ -142,26 +142,35 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 	return apiResp.Result, nil
 }
 
-// defaultAllowedUpdates 是 getUpdates 未指定时的默认类型；必须含 callback_query，
-// 否则 inline keyboard 点击永远不会送达。
+// defaultAllowedUpdates 是 getUpdates 未指定时的默认类型。
+// 必须含 callback_query（inline keyboard）与 message_reaction（别人给 bot 消息表态）。
 func defaultAllowedUpdates() []string {
-	return []string{"message", "edited_message", "my_chat_member", "callback_query"}
+	return []string{"message", "edited_message", "my_chat_member", "callback_query", "message_reaction"}
 }
 
-// mergeCallbackQueryUpdate 保证 allowed updates 含 callback_query。
-// 空列表 → 默认集合；调用方自定义列表则追加（已有则不动）。
+// mergeCallbackQueryUpdate 保证 allowed updates 含 callback_query 与 message_reaction。
+// 空列表 → 默认集合；调用方自定义列表则按需追加（已有则不动）。
 func mergeCallbackQueryUpdate(updates []string) []string {
 	if len(updates) == 0 {
 		return defaultAllowedUpdates()
 	}
-	for _, u := range updates {
-		if u == "callback_query" {
-			return updates
+	return ensureAllowedUpdates(updates, "callback_query", "message_reaction")
+}
+
+func ensureAllowedUpdates(updates []string, required ...string) []string {
+	out := append([]string(nil), updates...)
+	for _, need := range required {
+		found := false
+		for _, u := range out {
+			if u == need {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, need)
 		}
 	}
-	out := make([]string, len(updates)+1)
-	copy(out, updates)
-	out[len(updates)] = "callback_query"
 	return out
 }
 

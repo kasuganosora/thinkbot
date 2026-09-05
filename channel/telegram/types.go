@@ -8,11 +8,12 @@ package telegram
 
 // Update 表示一个来自 Telegram 的更新事件。
 type Update struct {
-	UpdateID      int64              `json:"update_id"`
-	Message       *Message           `json:"message,omitempty"`
-	EditedMessage *Message           `json:"edited_message,omitempty"`
-	MyChatMember  *ChatMemberUpdated `json:"my_chat_member,omitempty"`
-	CallbackQuery *CallbackQuery     `json:"callback_query,omitempty"`
+	UpdateID        int64                   `json:"update_id"`
+	Message         *Message                `json:"message,omitempty"`
+	EditedMessage   *Message                `json:"edited_message,omitempty"`
+	MyChatMember    *ChatMemberUpdated      `json:"my_chat_member,omitempty"`
+	CallbackQuery   *CallbackQuery          `json:"callback_query,omitempty"`
+	MessageReaction *MessageReactionUpdated `json:"message_reaction,omitempty"`
 }
 
 // CallbackQuery 是 inline keyboard 按钮点击事件。
@@ -22,6 +23,25 @@ type CallbackQuery struct {
 	Message      *Message `json:"message,omitempty"` // inline 消息可能为 nil
 	Data         string   `json:"data,omitempty"`
 	ChatInstance string   `json:"chat_instance,omitempty"`
+}
+
+// MessageReactionUpdated 是别人对（通常是 bot 自己的）消息加减 emoji 反应。
+// Bot API 7.0+；对 bot 而言一般只会推送到自己发出的消息上的反应。
+type MessageReactionUpdated struct {
+	Chat        Chat           `json:"chat"`
+	MessageID   int64          `json:"message_id"`
+	User        *User          `json:"user,omitempty"`
+	ActorChat   *Chat          `json:"actor_chat,omitempty"`
+	Date        int64          `json:"date"`
+	OldReaction []ReactionType `json:"old_reaction"`
+	NewReaction []ReactionType `json:"new_reaction"`
+}
+
+// ReactionType 是一条反应（emoji / custom_emoji / paid）。
+type ReactionType struct {
+	Type          string `json:"type"`
+	Emoji         string `json:"emoji,omitempty"`
+	CustomEmojiID string `json:"custom_emoji_id,omitempty"`
 }
 
 // InlineKeyboardMarkup 是 sendMessage / editMessage 的 inline keyboard。

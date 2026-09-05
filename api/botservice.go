@@ -1166,7 +1166,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return nil
 	}, s.logger)
 
-	// reaction-ack enricher：Misskey 反应通知仅供 LLM 感知，硬抑制出站。
+	// reaction-ack enricher：Misskey/Telegram 反应通知仅供 LLM 感知，硬抑制出站。
 	// 与 passive 不同——不论 SpeakMode 为何，反应事件一律不可被 REPLY_CONTROL send:true 覆盖。
 	// Order 47，紧接 passive-speak(46)，保证覆盖/锁定 reason 为 reaction_notification。
 	reactionAckEnricher := stages.NewEnricherStage("reaction-ack", func(ctx context.Context, env *core.Envelope) error {
