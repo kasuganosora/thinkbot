@@ -187,6 +187,54 @@ func TestChannelReplyHandler_SenderError(t *testing.T) {
 	}
 }
 
+func TestChannelReplyHandler_OnSentAfterSuccess(t *testing.T) {
+	h := NewChannelReplyHandler(zap.NewNop().Sugar(), noop_trace.NewTracerProvider())
+	h.Register("ch-a", &mockSender{})
+
+	var got core.Action
+	var called int
+	h.SetOnSent(func(_ context.Context, action core.Action) {
+		called++
+		got = action
+	})
+
+	err := h.Handle(context.Background(), core.Action{
+		Type:    core.ActionReply,
+		UserID:  "u1",
+		Payload: "hi",
+		Metadata: map[string]any{
+			"source_channel":             "ch-a",
+			core.MetaEngagementProactive: true,
+			core.MetaEngagementChannel:   "room-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("OnSent called %d, want 1", called)
+	}
+	if got.UserID != "u1" {
+		t.Fatalf("OnSent user=%q", got.UserID)
+	}
+}
+
+func TestChannelReplyHandler_OnSentNotCalledOnError(t *testing.T) {
+	h := NewChannelReplyHandler(zap.NewNop().Sugar(), noop_trace.NewTracerProvider())
+	h.Register("ch-a", &mockSender{err: fmt.Errorf("boom")})
+
+	called := 0
+	h.SetOnSent(func(context.Context, core.Action) { called++ })
+
+	_ = h.Handle(context.Background(), core.Action{
+		Type:     core.ActionReply,
+		Metadata: map[string]any{"source_channel": "ch-a"},
+	})
+	if called != 0 {
+		t.Fatalf("OnSent must not run on send failure, called=%d", called)
+	}
+}
+
 func TestChannelReplyHandler_ConcurrentAccess(t *testing.T) {
 	tp := noop_trace.NewTracerProvider()
 	logger := zap.NewNop().Sugar()

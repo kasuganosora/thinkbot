@@ -35,8 +35,8 @@ import (
 	"github.com/kasuganosora/thinkbot/channel/telegram"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/cron"
-	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/subagent"
@@ -1040,6 +1040,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	engCfg := builder.GetEngagementConfig()
 	var engagementStage *engagement.EngagementStage
 	var burstBuf *engagement.BurstBuffer
+	var outreachBreaker *engagement.OutreachBreaker
 	if engCfg.Enabled {
 		// 构建 LLM Judge（Tier 2 快判）
 		var judge engagement.LLMJudge
@@ -1089,6 +1090,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if result.Gate != nil {
 			engagementStage = engagementStage.WithTimingGate(result.Gate)
 		}
+		outreachBreaker = engagement.NewOutreachBreaker(
+			engagement.BuildOutreachBreakerConfig(engCfg),
+			s.logger,
+		)
+		engagementStage = engagementStage.WithOutreachBreaker(outreachBreaker)
 		if engCfg.BurstIntervalSeconds > 0 {
 			burstBuf = engagement.NewBurstBuffer(
 				time.Duration(engCfg.BurstIntervalSeconds * float64(time.Second)),
@@ -1417,7 +1423,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建自适应 Engagement 组件（Bot 自我画像 → 动态参数映射）
 	var adaptiveSyncer *engagement.AdaptiveEngagementSyncer
-	var rejectionDetector *engagement.RejectionDetector
 
 	// 从 config store 读取自适应开关配置
 	adaptiveEnabled := s.store.GetBool(config.BotAdaptiveEngagementKey(id, "enabled"), false)
@@ -1433,19 +1438,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			InitialTraits:   initialTraits,
 			GlobalEnabled:   adaptiveEnabled,
 			EnabledChannels: adaptiveChannels,
-		},
-		s.tp,
-		s.logger,
-	)
-
-	// 创建被无视检测器
-	rejectionDetector = engagement.NewRejectionDetector(
-		engagement.RejectionDetectorConfig{
-			SilenceWindowSeconds: 120.0,
-			StreakThreshold:      3,
-			StreakDuration:       1 * time.Hour,
-			ChannelType:          "",
-			BotName:              def.Name,
 		},
 		s.tp,
 		s.logger,
@@ -1716,24 +1708,24 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	b, err := bot.New(bot.BotParams{
-		ID:                id,
-		Name:              def.Name,
-		Config:            botCfg,
-		AgentConfig:       agentCfg,
-		Pipeline:          p,
-		Dispatcher:        dispatcher,
-		Channels:          allChannels,
-		EventBus:          s.eventBus,
-		MemoryStore:       memStore,
-		OutboundGuard:     outboundGuard,
-		Logger:            s.logger,
-		TP:                s.tp,
-		DreamScheduler:    dreamScheduler,
-		SelfIDSet:         selfIDSet,
-		PromptRegistry:    promptReg,
-		ToolManager:       toolMgr,
-		AdaptiveSyncer:    adaptiveSyncer,
-		RejectionDetector: rejectionDetector,
+		ID:              id,
+		Name:            def.Name,
+		Config:          botCfg,
+		AgentConfig:     agentCfg,
+		Pipeline:        p,
+		Dispatcher:      dispatcher,
+		Channels:        allChannels,
+		EventBus:        s.eventBus,
+		MemoryStore:     memStore,
+		OutboundGuard:   outboundGuard,
+		Logger:          s.logger,
+		TP:              s.tp,
+		DreamScheduler:  dreamScheduler,
+		SelfIDSet:       selfIDSet,
+		PromptRegistry:  promptReg,
+		ToolManager:     toolMgr,
+		AdaptiveSyncer:  adaptiveSyncer,
+		OutreachBreaker: outreachBreaker,
 		OnMessageStart: func(botID, traceID string, cancel context.CancelFunc, interruptCh chan string) {
 			s.RegisterMessageCancel(botID, traceID, cancel)
 			s.RegisterMessageInterrupt(botID, traceID, interruptCh)
@@ -1800,7 +1792,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		})
 	}
 
-	// 接线自适应 Engagement：TimingGate + AdaptiveSyncer + RejectionDetector
+	// 接线自适应 Engagement：TimingGate + AdaptiveSyncer
 	if engagementStage != nil && engagementStage.TimingGate() != nil {
 		gate := engagementStage.TimingGate()
 
@@ -1809,12 +1801,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			gate.SetDynamicConfig(adaptiveSyncer.GetTimingConfigOverride)
 			gate.SetRandomNoiseRate(0.08) // 8% 随机跨界参与，模拟真人灵光乍现
 			s.logger.Infow("adaptive engagement: dynamic config wired to timing gate", "bot_id", id)
-		}
-
-		// 注入被无视检测器
-		if rejectionDetector != nil {
-			gate.SetRejectionDetector(rejectionDetector)
-			s.logger.Infow("adaptive engagement: rejection detector wired to timing gate", "bot_id", id)
 		}
 	}
 

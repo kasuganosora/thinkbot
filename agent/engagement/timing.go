@@ -74,11 +74,8 @@ type TimingGate struct {
 	// randomNoiseRate 随机噪声率（0.0~1.0）。默认 0.08（8%）。
 	// 当命中随机噪声时，Bot 即使在画像不匹配的情况下也会尝试参与，
 	// 模拟真人偶尔跨界聊天的行为。
+	// 一次出价熔断（OutreachBreaker）在 EngagementStage 升级前硬查，噪声不能绕过。
 	randomNoiseRate float64
-
-	// rejectionDetector 被无视检测器（可选）。
-	// 注入后，TimingGate 会在决策时考虑自闭模式。
-	rejectionDetector *RejectionDetector
 }
 
 type channelTimingState struct {
@@ -228,13 +225,6 @@ func (g *TimingGate) SetRandomNoiseRate(rate float64) {
 	g.randomNoiseRate = rate
 }
 
-// SetRejectionDetector 注入被无视检测器。
-func (g *TimingGate) SetRejectionDetector(detector *RejectionDetector) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.rejectionDetector = detector
-}
-
 // normalize 确保 TimingGateConfig 中未设置的字段使用合理默认值。
 func (c *TimingGateConfig) normalize() {
 	if c.ReplyProbability < 0 {
@@ -323,20 +313,6 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 		}
 	}
 
-	// 被无视检测：自闭模式下大幅降低参与
-	if g.rejectionDetector != nil && g.rejectionDetector.IsInStreak(channelKey) {
-		if adj := g.rejectionDetector.GetRejectionAdjustment(channelKey); adj != nil {
-			effectiveConfig = g.applyDynamicOverride(effectiveConfig, adj)
-			// 确保自闭模式下概率封顶 0.05
-			if effectiveConfig.ReplyProbability > 0.05 {
-				effectiveConfig.ReplyProbability = 0.05
-			}
-			if effectiveConfig.BackoffStartCount > 1 {
-				effectiveConfig.BackoffStartCount = 1
-			}
-		}
-	}
-
 	// 记录消息间隔
 	if !state.lastExternalMsgAt.IsZero() {
 		interval := now.Sub(state.lastExternalMsgAt).Seconds()
@@ -407,6 +383,7 @@ func (g *TimingGate) ShouldEvaluate(msg *core.Message) (shouldEval bool, td Timi
 	// --- Check 3.5: 随机噪声（灵光乍现） ---
 	// 5-10% 概率绕过画像约束，随机决定参与评估。
 	// 模拟真人偶尔跨界，打破刻板印象。
+	// 未回应熔断在 EngagementStage 升级前硬查，此处噪声不能让被禁用户再被升级。
 	if g.randomNoiseRate > 0 {
 		if rand.Float64() < g.randomNoiseRate {
 			state.lastEvalAt = now

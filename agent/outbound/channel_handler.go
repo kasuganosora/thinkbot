@@ -72,6 +72,7 @@ type ChannelReplyHandler struct {
 	mu      sync.RWMutex
 	senders map[string]ChannelSender // channelName → Sender
 	guard   OutboundGuard            // 可选：出站前的只读检查
+	onSent  func(ctx context.Context, action core.Action)
 	logger  *zap.SugaredLogger
 	tracer  trace.Tracer
 }
@@ -120,6 +121,14 @@ func (h *ChannelReplyHandler) SetGuard(g OutboundGuard) {
 	h.guard = g
 }
 
+// SetOnSent 注册发送成功后的回调（发送失败、被只读守卫丢弃时不调用）。
+// 典型用途：engagement 主动出击记账。在 Bot.Run 之前设置即可。
+func (h *ChannelReplyHandler) SetOnSent(fn func(ctx context.Context, action core.Action)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onSent = fn
+}
+
 // Handle 处理一个 Action，将其路由到对应 Channel 的 Sender。
 //
 // 路由策略：
@@ -152,6 +161,7 @@ func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) er
 	h.mu.RLock()
 	sender, ok := h.senders[sourceChannel]
 	guard := h.guard
+	onSent := h.onSent
 	h.mu.RUnlock()
 
 	if !ok {
@@ -205,6 +215,10 @@ func (h *ChannelReplyHandler) Handle(ctx context.Context, action core.Action) er
 		"action_type", action.Type,
 		"action_channel", action.Channel,
 		"payload", payloadStr)
+
+	if onSent != nil {
+		onSent(ctx, action)
+	}
 
 	return nil
 }

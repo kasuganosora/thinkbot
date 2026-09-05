@@ -230,3 +230,41 @@ func TestActionTypes(t *testing.T) {
 		t.Errorf("expected 7 action types, got %d — if you added a new ActionType, update this test", len(types))
 	}
 }
+
+func TestIsHardSuppressReason(t *testing.T) {
+	if !IsHardSuppressReason(KVSuppressReasonPassive) {
+		t.Error("passive should be hard")
+	}
+	if !IsHardSuppressReason(KVSuppressReasonUnanswered) {
+		t.Error("unanswered should be hard")
+	}
+	if !IsHardSuppressReason(KVSuppressReasonUnansweredCooldown) {
+		t.Error("unanswered cooldown should be hard")
+	}
+	if IsHardSuppressReason("engagement_declined") {
+		t.Error("engagement_declined is soft")
+	}
+	if IsHardSuppressReason(nil) || IsHardSuppressReason(42) {
+		t.Error("non-string must not be hard")
+	}
+}
+
+func TestCopyEngagementOutboundMeta(t *testing.T) {
+	env := NewEnvelope(Message{Channel: "room-1", Source: "telegram"})
+	meta := CopyEngagementOutboundMeta(env, map[string]any{"source_channel": "tg"})
+	if _, ok := meta[MetaEngagementProactive]; ok {
+		t.Fatal("non-proactive must not stamp")
+	}
+
+	env.Set(MetaEngagementProactive, true)
+	meta = CopyEngagementOutboundMeta(env, map[string]any{"source_channel": "tg"})
+	if meta[MetaEngagementProactive] != true {
+		t.Fatal("proactive flag missing")
+	}
+	if meta[MetaEngagementChannel] != "room-1" {
+		t.Fatalf("channel=%v, want room-1", meta[MetaEngagementChannel])
+	}
+	if meta["source_channel"] != "tg" {
+		t.Fatal("existing metadata must be kept")
+	}
+}
