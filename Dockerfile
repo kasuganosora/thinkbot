@@ -85,7 +85,8 @@ RUN mkdir -p /home/thinkbot/.docker && chown -R thinkbot:thinkbot /home/thinkbot
 WORKDIR /app
 COPY --from=builder /out/thinkbot /app/thinkbot
 COPY docker/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+# Windows checkout 可能把 .sh 检成 CRLF；去 \r 避免 shebang 变成 #!/bin/sh\r。
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 # 数据与日志目录（主程序以 ./data、./logs 相对路径写入），预先建好并归属运行用户。
 # 否则非 root 运行时 MkdirAll 会因 /app 属 root 而失败 panic（报告 5870 关联）。
 # compose 会把宿主目录挂到这两处；无挂载时镜像内目录也能直接落库。
