@@ -231,6 +231,10 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		c.handleCallbackQuery(ctx, upd.CallbackQuery)
 		return
 	}
+	if upd.MessageReaction != nil {
+		c.handleMessageReaction(ctx, upd.UpdateID, upd.MessageReaction)
+		return
+	}
 
 	// 只处理消息和编辑消息
 	var msg *Message
@@ -388,6 +392,154 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		traceid.L(ctx).Warnw("telegram ingress receive failed",
 			"channel", c.name, "message_id", msg.MessageID, "err", err)
 	}
+}
+
+// handleMessageReaction 将别人对 bot 消息的 emoji 反应归一化为 awareness-only 入站。
+// 只处理「新加」的反应（new - old）；撤赞忽略。硬抑制出站由 api 层 reaction-ack enricher 负责。
+func (c *TelegramChannel) handleMessageReaction(ctx context.Context, updateID int64, mr *MessageReactionUpdated) {
+	if mr == nil || mr.MessageID == 0 {
+		return
+	}
+	added := reactionDiff(mr.NewReaction, mr.OldReaction)
+	if len(added) == 0 {
+		return // 仅撤赞或无变化
+	}
+
+	// 自赞忽略（极端情况下 bot 账号改了自己的反应）
+	if mr.User != nil && c.botUserID != 0 && mr.User.ID == c.botUserID {
+		return
+	}
+
+	who := "有人"
+	userID := ""
+	fromIsBot := false
+	if mr.User != nil {
+		userID = fmt.Sprintf("%d", mr.User.ID)
+		who = displayNameOf(mr.User)
+		fromIsBot = mr.User.IsBot
+	} else if mr.ActorChat != nil {
+		userID = fmt.Sprintf("%d", mr.ActorChat.ID)
+		if mr.ActorChat.Title != "" {
+			who = mr.ActorChat.Title
+		} else if mr.ActorChat.Username != "" {
+			who = "@" + mr.ActorChat.Username
+		} else {
+			who = fmt.Sprintf("chat:%d", mr.ActorChat.ID)
+		}
+	}
+
+	emojis := make([]string, 0, len(added))
+	for _, r := range added {
+		emojis = append(emojis, formatReactionType(r))
+	}
+	emojiList := strings.Join(emojis, " ")
+	guidance := "只需要知道这件事即可：不要回复、不要回赞、也不要为此调用工具，除非对方同时还发了文字在找你。"
+	inject := fmt.Sprintf("[Telegram 反应] %s 对你的消息表态了 %s。%s\n[message_id: %d]", who, emojiList, guidance, mr.MessageID)
+
+	chatID := fmt.Sprintf("%d", mr.Chat.ID)
+	chatType := mr.Chat.Type
+	if chatType == "" {
+		chatType = core.ChatPrivate
+	}
+
+	metadata := map[string]any{
+		"chat_id":       mr.Chat.ID,
+		"message_id":    mr.MessageID,
+		"event_type":    "reaction",
+		"ack_only":      true,
+		"channel_type":  "telegram",
+		"reactions":     emojis,
+		"update_id":     updateID,
+	}
+	// 故意不设 reply_target，避免误把 awareness 当成可回复消息。
+	if mr.Chat.Title != "" {
+		metadata["chat_title"] = mr.Chat.Title
+	}
+	if mr.User != nil && mr.User.Username != "" {
+		metadata["username"] = mr.User.Username
+	}
+
+	coreMsg := core.Message{
+		ID:            fmt.Sprintf("tg-react:%d:%d:%d", mr.Chat.ID, mr.MessageID, updateID),
+		BotID:         c.botID,
+		Source:        c.name,
+		Channel:       chatID,
+		ChatType:      chatType,
+		UserID:        userID,
+		Text:          "", // 不污染 L0：不是用户原文
+		InjectContext: inject,
+		Mentioned:     false,
+		FromIsBot:     fromIsBot,
+		MediaType:     "text/plain",
+		Metadata:      metadata,
+		CreatedAt:     time.Unix(mr.Date, 0),
+	}
+	if coreMsg.CreatedAt.IsZero() || mr.Date == 0 {
+		coreMsg.CreatedAt = time.Now()
+	}
+
+	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
+		traceid.L(ctx).Warnw("telegram reaction ingress receive failed",
+			"channel", c.name, "message_id", mr.MessageID, "err", err)
+	}
+}
+
+func displayNameOf(u *User) string {
+	if u == nil {
+		return "有人"
+	}
+	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	name = strings.TrimSpace(name)
+	if u.Username != "" {
+		if name != "" {
+			return name + " (@" + u.Username + ")"
+		}
+		return "@" + u.Username
+	}
+	if name != "" {
+		return name
+	}
+	return fmt.Sprintf("user:%d", u.ID)
+}
+
+func formatReactionType(r ReactionType) string {
+	switch r.Type {
+	case "emoji":
+		if r.Emoji != "" {
+			return r.Emoji
+		}
+	case "custom_emoji":
+		if r.CustomEmojiID != "" {
+			return ":custom:" + r.CustomEmojiID
+		}
+	case "paid":
+		return "⭐"
+	}
+	if r.Emoji != "" {
+		return r.Emoji
+	}
+	return "?"
+}
+
+// reactionDiff 返回 new 中有而 old 中没有的反应（按 type+emoji/id 去重）。
+func reactionDiff(newer, older []ReactionType) []ReactionType {
+	seen := map[string]struct{}{}
+	for _, r := range older {
+		seen[reactionKey(r)] = struct{}{}
+	}
+	var out []ReactionType
+	for _, r := range newer {
+		k := reactionKey(r)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func reactionKey(r ReactionType) string {
+	return r.Type + "|" + r.Emoji + "|" + r.CustomEmojiID
 }
 
 // mentionTextAndEntities 返回用于提及检测的「文本 + 实体」配对。

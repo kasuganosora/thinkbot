@@ -395,28 +395,32 @@ func TestBuildChoiceKeyboard(t *testing.T) {
 
 func TestDefaultAllowedUpdatesIncludesCallbackQuery(t *testing.T) {
 	d := defaultAllowedUpdates()
-	found := false
+	need := map[string]bool{"callback_query": false, "message_reaction": false}
 	for _, u := range d {
-		if u == "callback_query" {
-			found = true
+		if _, ok := need[u]; ok {
+			need[u] = true
 		}
 	}
-	if !found {
-		t.Fatalf("default allowed updates missing callback_query: %v", d)
+	for k, ok := range need {
+		if !ok {
+			t.Fatalf("default allowed updates missing %s: %v", k, d)
+		}
 	}
 	merged := mergeCallbackQueryUpdate([]string{"message"})
-	found = false
+	need = map[string]bool{"callback_query": false, "message_reaction": false}
 	for _, u := range merged {
-		if u == "callback_query" {
-			found = true
+		if _, ok := need[u]; ok {
+			need[u] = true
 		}
 	}
-	if !found {
-		t.Fatalf("merge did not add callback_query: %v", merged)
+	for k, ok := range need {
+		if !ok {
+			t.Fatalf("merge did not add %s: %v", k, merged)
+		}
 	}
-	custom := []string{"message", "callback_query"}
+	custom := []string{"message", "callback_query", "message_reaction"}
 	got := mergeCallbackQueryUpdate(custom)
-	if len(got) != 2 {
+	if len(got) != 3 {
 		t.Fatalf("should not duplicate: %v", got)
 	}
 }
