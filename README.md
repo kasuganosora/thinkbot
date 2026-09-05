@@ -99,7 +99,7 @@ thinkbot/
 
 | 组件 | 技术 |
 |------|------|
-| 语言 | Go 1.25 |
+| 语言 | Go 1.27 |
 | Web 框架 | Gin |
 | ORM | GORM + SQLite |
 | 依赖注入 | go.uber.org/fx |

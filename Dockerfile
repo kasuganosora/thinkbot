@@ -23,7 +23,7 @@ COPY web/ ./
 RUN npm run build
 
 # ---- 构建阶段 ----
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27-bookworm AS builder
 WORKDIR /src
 
 # 必须 CGO：本项目 db/db.go 用 gorm.io/driver/sqlite，其底层驱动是
