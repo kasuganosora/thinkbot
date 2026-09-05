@@ -678,7 +678,7 @@ type EngagementConfig struct {
 	// ReplyProbability 主动参与概率（0.0~1.0，默认 0.15）。
 	ReplyProbability float64 `json:"replyProbability"`
 
-	// Cooldown 同一用户冷却时间（默认 0，不限制）。
+	// Cooldown 同一用户冷却时间（默认 15m）。
 	Cooldown time.Duration `json:"cooldown"`
 
 	// RateLimitCapacity 令牌桶容量——每小时最多主动参与次数（默认 3）。
@@ -739,6 +739,14 @@ type EngagementConfig struct {
 	// 启用后 TimingGate 会基于观察到的消息间隔动态调整 FrequencyMultiplier，
 	// 使 Bot 在活跃群组更积极、在安静群组更低调。
 	AutoAdjustFrequency bool `json:"autoAdjustFrequency"`
+
+	// UnansweredSilence 主动回复后无人回应即视为拒绝的等待时长（默认 3m）。
+	// 超时只把 pending 收成 declined，不会补发。
+	UnansweredSilence time.Duration `json:"unansweredSilence"`
+
+	// UnansweredEpisodeBoundary declined 之后仍禁止点名此人；超过此时长才允许房间级参与（默认 24h）。
+	// 完全恢复（可再对该人出价）只在对方 @ / 私聊开口。
+	UnansweredEpisodeBoundary time.Duration `json:"unansweredEpisodeBoundary"`
 }
 
 // DefaultEngagementConfig 返回主动参与模块的默认配置值。
@@ -746,7 +754,7 @@ func DefaultEngagementConfig() EngagementConfig {
 	return EngagementConfig{
 		Enabled:                   false,
 		ReplyProbability:          0.15,
-		Cooldown:                  0,
+		Cooldown:                  15 * time.Minute,
 		RateLimitCapacity:         3,
 		RateLimitInterval:         1 * time.Hour,
 		BackoffBaseSeconds:        10.0,
@@ -758,6 +766,8 @@ func DefaultEngagementConfig() EngagementConfig {
 		Profile:                   "",
 		EngagementThreshold:       0,
 		AutoAdjustFrequency:       false,
+		UnansweredSilence:         3 * time.Minute,
+		UnansweredEpisodeBoundary: 24 * time.Hour,
 	}
 }
 
@@ -786,6 +796,8 @@ func (b *Builder) GetEngagementConfig() EngagementConfig {
 		Profile:                   b.store.GetString(KeyEngagementProfile, d.Profile),
 		EngagementThreshold:       b.store.GetInt(KeyEngagementThreshold, d.EngagementThreshold),
 		AutoAdjustFrequency:       b.store.GetBool(KeyEngagementAutoAdjustFreq, d.AutoAdjustFrequency),
+		UnansweredSilence:         b.store.GetDuration(KeyEngagementUnansweredSilence, d.UnansweredSilence),
+		UnansweredEpisodeBoundary: b.store.GetDuration(KeyEngagementUnansweredEpisodeBoundary, d.UnansweredEpisodeBoundary),
 	}
 }
 
@@ -795,7 +807,7 @@ func EngagementMetaSpecs() []MetaSpec {
 		{Key: KeyEngagementEnabled, Category: "Engagement", Description: "是否启用主动参与功能（总开关，默认关闭）"},
 		{Key: KeyEngagementChannels, Category: "Engagement", Description: "允许主动参与的渠道列表（逗号分隔，如 misskey,telegram）"},
 		{Key: KeyEngagementReplyProbability, Category: "Engagement", Description: "主动参与概率 0.0~1.0（默认 0.15）"},
-		{Key: KeyEngagementCooldown, Category: "Engagement", Description: "同一用户冷却时间（如 10m，默认 0=不限制）"},
+		{Key: KeyEngagementCooldown, Category: "Engagement", Description: "同一用户冷却时间（如 15m，默认 15m）"},
 		{Key: KeyEngagementRateLimitCapacity, Category: "Engagement", Description: "令牌桶容量——最多主动参与次数（默认 3）"},
 		{Key: KeyEngagementRateLimitInterval, Category: "Engagement", Description: "令牌桶补充间隔（如 1h，默认 1小时）"},
 		{Key: KeyEngagementKeywords, Category: "Engagement", Description: "兴趣关键词列表（逗号分隔，为空则不做关键词过滤）"},
@@ -813,6 +825,8 @@ func EngagementMetaSpecs() []MetaSpec {
 		{Key: KeyEngagementProfile, Category: "Engagement", Description: "参与预设角色名（observer/lurker/active/moderator，空=不自定义角色）"},
 		{Key: KeyEngagementThreshold, Category: "Engagement", Description: "LLM 快判评分阈值 0-100（默认 0=传统 YES/NO 模式，更高=更挑剔）"},
 		{Key: KeyEngagementAutoAdjustFreq, Category: "Engagement", Description: "是否自动根据群组活跃度调整参与频率（默认 false）"},
+		{Key: KeyEngagementUnansweredSilence, Category: "Engagement", Description: "主动回复后无人回应即视为拒绝的等待时长（默认 3m；超时只结算不补发）"},
+		{Key: KeyEngagementUnansweredEpisodeBoundary, Category: "Engagement", Description: "拒绝后仍禁止点名此人；超过此时长才允许房间级参与（默认 24h）。完全恢复需对方 @ / 私聊"},
 	}
 }
 

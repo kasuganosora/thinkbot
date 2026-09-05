@@ -125,7 +125,7 @@ agent/
 │   ├── timing.go           #   Timing Gate（发言时机）
 │   ├── ratelimit.go        #   TokenBucket 限流
 │   ├── adaptive_syncer.go  #   画像 → 参数动态映射
-│   ├── rejection_detector.go # 被无视检测
+│   ├── outreach.go         #   OutreachBreaker（一次出价：没接住就停）
 │   ├── bot_profile.go / profiles.go # Bot 自我画像 / 参与行为预设
 │   ├── phase.go            #   对话阶段推断
 │   ├── stage.go            #   EngagementStage
@@ -179,6 +179,7 @@ agent/
     │     10  LoggerStage      — 入口日志                      │
     │     20  FilterStage      — 谓词过滤                      │
     │     30  EnricherStage    — 消息富化                      │
+    │     40  EngagementStage  — 主动参与 + OutreachBreaker    │
     │    100  MemoryStage      — 记忆检索 → env.Set            │
     │    200  PromptStage      — 组装 system prompt → env.Set  │
     │    500  ReplyStage/LLM   — LLM 调用 + 输出决策           │
@@ -1173,6 +1174,8 @@ Pipeline 中各 Stage 通过 Envelope KV 传递数据，以下是已使用的 ke
 | `llm.result` | LLMStage/ReplyStage | pipeline 中间件（token 预算/配额、循环检测、懒惰响应）与 heartbeat | `*llm.GenerateResult` | LLM 调用结果 |
 | `session.active` / `session.id` / `session.is_new` / `session.message_count` / `session.context` | SessionStage | 下游 Stage | `bool`/`string`/`string`/`int`/`string` | 会话解析结果与上下文（见 session/README.md） |
 | `reply.suppress` 等 core 约定键 | 各 Stage | LLMStage 等 | — | 见 core 包 `envelope.go` KV 约定（`KVSuppressReply`/`KVLurkMode`/`KVHeartbeatMode` 等） |
+| `engagement.proactive` | EngagementStage | LLMStage/ReplyStage → Action.Metadata | `bool` | 本轮为主动出击；出站成功后 OutreachBreaker 记账 |
+| `KVSuppressReplyReason=unanswered_outreach` | EngagementStage | LLMStage / RhythmStage | `string` | 一次出价硬门，不可被 `send:true` 覆盖 |
 
 ## 依赖
 
@@ -1211,7 +1214,7 @@ go test ./agent/ -v             # Engine 集成测试
 - **engine**: 端到端集成、多 Source、优雅关闭、EngineHook
 - **session**: Session 实体/解析器/Manager/Stage/Runner 串行化
 - **command**: 命令解析、注册表、Stage 透传
-- **engagement**: 参与度分层决策、规则、限流、画像同步
+- **engagement**: 参与度分层决策、规则、限流、画像同步、OutreachBreaker 一次出价熔断
 - **heartbeat**: 心跳决策管线、平台闸门
 - **storage**: SQLite 仓储与压缩器
 - **tools**: 工具注册/解析/权限策略

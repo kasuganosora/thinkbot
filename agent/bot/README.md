@@ -13,7 +13,8 @@
 - 技能系统装配（`SetupSkills` 组合根）
 - 梦境巩固子系统（`DreamingBundle` 按 Bot 独立配置，cron 调度定时整理记忆）
 - LLM 实例集构建（`CreateLLMBundle` / `CreateProvider`，按 `bot.<id>.main|light|vision` 装配 Provider，Light 未配置时回退 Main）
-- 自适应 Engagement 组件注入（`AdaptiveSyncer` / `RejectionDetector`）与 per-bot 浏览器 MCP（docker 后端 + `BrowserEnabled` 时，工具命名 `browser__<tool>`，cookie 与 Web 面板双向同步）
+- 自适应 Engagement 组件注入（`AdaptiveSyncer` / `OutreachBreaker`）：`BotParams.OutreachBreaker` 非空时，`Bot.New` 把它接到 `ChannelReplyHandler.SetOnSent`，仅发送成功才记一次主动出价。入站硬拦在 `EngagementStage`（同一实例，由 `api/botservice.go` 注入）
+- per-bot 浏览器 MCP（docker 后端 + `BrowserEnabled` 时，工具命名 `browser__<tool>`，cookie 与 Web 面板双向同步）
 - `MemoryChannel`：内存双向 Channel（测试用，`NewMemoryChannel` + `Inject`/`SentActions`）
 - `bot.Module` fx 模块：提供 `BotManager` 并绑定生命周期（`OnStart` 启动全部 Bot、`OnStop` 停止），`ProvideBot` 辅助注册
 

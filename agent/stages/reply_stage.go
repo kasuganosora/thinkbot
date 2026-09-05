@@ -271,14 +271,14 @@ func (s *ReplyStage) addReplyAction(env *core.Envelope, replyTarget, sourceChann
 		Channel: replyTarget,
 		UserID:  env.Message.UserID,
 		Payload: text,
-		Metadata: map[string]any{
+		Metadata: core.CopyEngagementOutboundMeta(env, map[string]any{
 			"source_channel": sourceChannel,
 			"bot_id":         env.Message.BotID,
 			"message_id":     env.Message.ID,
 			"finish_reason":  string(result.FinishReason),
 			"usage":          result.Usage,
 			"steps":          len(result.Steps),
-		},
+		}),
 	})
 }
 

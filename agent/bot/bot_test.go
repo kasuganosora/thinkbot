@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/engagement"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
@@ -652,6 +653,126 @@ func TestBot_OutboundFullPipeline(t *testing.T) {
 	}
 	if a.Metadata["source_channel"] != "test-outbound" {
 		t.Errorf("source_channel: got %v, want test-outbound", a.Metadata["source_channel"])
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("bot error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bot did not stop in time")
+	}
+}
+
+// proactiveReplyStage 模拟 LLM 出站：把 engagement.proactive 拷进 Action，
+// 并遵守 KVSuppressReply（与 llmroute 一致）。用于锁死熔断器出站接线。
+type proactiveReplyStage struct{}
+
+func (s *proactiveReplyStage) Name() string { return "proactive-reply" }
+func (s *proactiveReplyStage) Process(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
+	if v, ok := env.Get(core.KVSuppressReply); ok {
+		if b, _ := v.(bool); b {
+			return env, nil
+		}
+	}
+	env.AddAction(core.Action{
+		Type:    core.ActionReply,
+		Channel: env.Message.Channel,
+		UserID:  env.Message.UserID,
+		Payload: "proactive hi",
+		Metadata: core.CopyEngagementOutboundMeta(env, map[string]any{
+			"source_channel": env.Message.Source,
+		}),
+	})
+	return env, nil
+}
+
+func waitSent(ch *MemoryChannel, n int, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	for len(ch.SentActions()) < n {
+		select {
+		case <-deadline:
+			return false
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	return true
+}
+
+func TestBot_OutreachBreakerWiredThroughSend(t *testing.T) {
+	// 锁死主链路：Breaker 必须同时挂在 EngagementStage（入站硬拦）和
+	// Bot.New → ChannelReplyHandler.SetOnSent（出站成功才记账）。
+	// 上次 RejectionDetector 就是模块写了、生产路径从未调用。
+	tp := noop_trace.NewTracerProvider()
+	logger := zap.NewNop().Sugar()
+	breaker := engagement.NewOutreachBreaker(engagement.DefaultOutreachBreakerConfig(), logger)
+	engStage := engagement.NewEngagementStage(
+		"engagement",
+		engagement.NewCompositePolicy(engagement.AllowAll{}),
+		engagement.DefaultStageConfig(),
+		tp,
+		logger,
+	).WithOutreachBreaker(breaker)
+
+	multiDisp := outbound.NewMultiDispatcher(logger, tp)
+	p := buildTestPipeline(t,
+		core.StageInfo{Stage: engStage, Order: 40, Enabled: true},
+		core.StageInfo{Stage: &proactiveReplyStage{}, Order: 100, Enabled: true},
+	)
+	memCh := NewMemoryChannel("ch-misskey", "outreach-bot")
+
+	b, err := New(BotParams{
+		ID:              "outreach-bot",
+		Config:          BotConfig{Workers: 1, IngressBufferSize: 8},
+		Pipeline:        p,
+		Dispatcher:      multiDisp,
+		Channels:        []Channel{memCh},
+		Logger:          logger,
+		TP:              tp,
+		OutreachBreaker: breaker,
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- b.Run(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	timeline := func(id, text string) core.Message {
+		return core.Message{
+			ID:        id,
+			Channel:   "room-1",
+			UserID:    "u1",
+			Text:      text,
+			Mentioned: false,
+			ChatType:  core.ChatGroup,
+		}
+	}
+	if err := memCh.Inject(context.Background(), timeline("m1", "interesting topic")); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if !waitSent(memCh, 1, 3*time.Second) {
+		t.Fatal("first proactive reply never reached ChannelReplyHandler — outbound not wired")
+	}
+	if !breaker.IsPending("room-1", "u1") {
+		t.Fatal("Send success must RecordProactiveReply; OutreachBreaker is not on the live send path")
+	}
+
+	if err := memCh.Inject(context.Background(), timeline("m2", "anyway lunch")); err != nil {
+		t.Fatalf("inject 2: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := len(memCh.SentActions()); n != 1 {
+		t.Fatalf("second inbound from same user must not send, got %d actions", n)
+	}
+	if !breaker.IsDeclined("room-1", "u1") {
+		t.Fatal("talk-past on live pipeline must decline")
 	}
 
 	cancel()

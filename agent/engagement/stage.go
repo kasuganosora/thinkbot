@@ -40,6 +40,7 @@ type EngagementStage struct {
 	policy   EngagementPolicy
 	gate     *TimingGate  // 有状态时序门控（可选，nil 则跳过时序控制）
 	burstBuf *BurstBuffer // 突发缓冲器（可选，nil 则不缓冲）
+	breaker  *OutreachBreaker
 	config   StageConfig
 	tracer   trace.Tracer
 	logger   *zap.SugaredLogger
@@ -101,6 +102,13 @@ func (s *EngagementStage) TimingGate() *TimingGate {
 	return s.gate
 }
 
+// WithOutreachBreaker 注入按人一次出价熔断。升级为主动参与前硬查；
+// 随机噪声 / 概率门不能绕过。真人 @ / 私聊仍直接放行并复位。
+func (s *EngagementStage) WithOutreachBreaker(breaker *OutreachBreaker) *EngagementStage {
+	s.breaker = breaker
+	return s
+}
+
 // WithBurstBuffer 注入突发缓冲器。
 // 调用后，Stage 在处理每条消息前先经过 BurstBuffer 检查：
 //   - 突发期间的消息被缓存，Stage 直接返回（不评估）
@@ -154,6 +162,12 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 	// 派生携带 trace_id 的 logger，使所有日志可通过 trace_id 关联
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
+	// 入站先交给熔断器：结算冷场、识别 talk-past / @回应。
+	// 必须在把 Mentioned 升成 true 之前，才能读到渠道原始的「是否真人 @」。
+	if s.breaker != nil {
+		s.breaker.OnInbound(&env.Message)
+	}
+
 	// 1. 被直接 @ 的消息直接放行——不需要 engagement 决策
 	//    参考 MaiBot 的 _arm_force_next_timing_continue：@ 消息直接跳过 Timing Gate
 	if env.Message.Mentioned {
@@ -164,6 +178,28 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 		span.SetAttributes(attribute.Bool("engagement.skipped", true))
 		env.Set("engagement.evaluated", false)
 		return env, nil
+	}
+
+	// 1.25 一次出价熔断：awaiting / declined（情节边界内）不再主动升级。
+	// 放在 TimingGate 之前，随机噪声也不能绕过。
+	if s.breaker != nil {
+		if suppress, reason := s.breaker.ShouldSuppress(channelKeyForMessage(&env.Message), env.Message.UserID); suppress {
+			env.Set("engagement.evaluated", true)
+			env.Set("engagement.engage", false)
+			env.Set("engagement.action", string(ActionNoAction))
+			env.Set("engagement.reason", reason)
+			env.Set(core.KVSuppressReply, true)
+			env.Set(core.KVSuppressReplyReason, reason)
+			span.SetAttributes(
+				attribute.Bool("engagement.suppress_reply", true),
+				attribute.String("engagement.reason", reason),
+			)
+			logger.Infow("engagement declined: unanswered outreach breaker",
+				"message_id", env.Message.ID,
+				"user_id", env.Message.UserID,
+				"reason", reason)
+			return env, nil
+		}
 	}
 
 	// 1.5 BurstBuffer 突发缓冲（可选）
@@ -274,14 +310,23 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 	env.Message.Mentioned = true
 	env.Set("engagement.proactive", true)
 
-	// 确保 reply_target 存在（Bot 回复时需要知道回复到哪条帖子）
-	// Misskey 等 channel 已在 metadata 中设置了 reply_target，
-	// 但其他 channel 可能需要在这里补充。
-	//
-	// 注意必须判nil：读 nil map 返回零值不会panic，但**写入 nil map 会 panic**。
-	// Metadata 是可选字段，并非所有 Channel/测试路径都会初始化它——
-	// 曾因此在主动参与分支直接崩掉整条 pipeline。
-	if _, ok := env.Message.Metadata["reply_target"]; !ok && env.Message.ID != "" {
+	// declined 越过情节边界后可以房间级发言，但不得把回复钉到该用户帖子上
+	// （Lee CSCW：不要当众点名被拒绝过的人）。真人 @ 已在上方复位，不会走到这里。
+	stripPinpoint := s.breaker != nil &&
+		s.breaker.ShouldStripReplyTarget(channelKeyForMessage(&env.Message), env.Message.UserID)
+	if stripPinpoint {
+		if env.Message.Metadata != nil {
+			delete(env.Message.Metadata, "reply_target")
+		}
+		env.Set("engagement.strip_reply_target", true)
+	} else if _, ok := env.Message.Metadata["reply_target"]; !ok && env.Message.ID != "" {
+		// 确保 reply_target 存在（Bot 回复时需要知道回复到哪条帖子）
+		// Misskey 等 channel 已在 metadata 中设置了 reply_target，
+		// 但其他 channel 可能需要在这里补充。
+		//
+		// 注意必须判nil：读 nil map 返回零值不会panic，但**写入 nil map 会 panic**。
+		// Metadata 是可选字段，并非所有 Channel/测试路径都会初始化它——
+		// 曾因此在主动参与分支直接崩掉整条 pipeline。
 		if env.Message.Metadata == nil {
 			env.Message.Metadata = make(map[string]any, 1)
 		}

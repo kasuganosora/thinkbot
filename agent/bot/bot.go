@@ -175,9 +175,9 @@ type BotParams struct {
 	// 实现 Bot 自我画像 → Engagement 参数的动态映射。
 	AdaptiveSyncer *engagement.AdaptiveEngagementSyncer
 
-	// RejectionDetector 被无视检测器（可选，nil=禁用）。
-	// 注入后，Bot 会在发送回复时通知检测器，并在 TimingGate 中考虑自闭模式。
-	RejectionDetector *engagement.RejectionDetector
+	// OutreachBreaker 按人一次出价熔断：没接住就停（可选，nil=禁用）。
+	// 注入后，Bot 在 ChannelReplyHandler 发送成功时记账。
+	OutreachBreaker *engagement.OutreachBreaker
 
 	// BrowserCookieLoader 返回该 bot 当前 cookie 状态文件 JSON（Web 面板管理的 cookie），
 	// 用于会话前投递进容器内的浏览器 MCP 进程。返回 nil/空表示无 cookie 或不启用投递。
@@ -255,6 +255,12 @@ func New(params BotParams) (*Bot, error) {
 	// 「潜水 bot」只能在出站这一层拦住。
 	if params.OutboundGuard != nil {
 		replyHandler.SetGuard(params.OutboundGuard)
+	}
+	if params.OutreachBreaker != nil {
+		breaker := params.OutreachBreaker
+		replyHandler.SetOnSent(func(_ context.Context, action core.Action) {
+			engagement.NotifyProactiveSent(breaker, action)
+		})
 	}
 
 	// 创建 NoteHandler（写入统一记忆仓储）

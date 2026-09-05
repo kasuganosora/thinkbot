@@ -106,15 +106,6 @@ func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.
 //
 // 返回 (是否抑制, 原因)。原因仅用于日志与 trace —— 静默丢弃必须可解释，
 // 否则运维会把「有意不回复」误判成 Bot 故障。
-// suppressReasonPassiveUnmentioned 是 passive（仅被动回复）模式下，
-// passive-speak enricher 对非「真人显式 @」消息设置的抑制原因。
-// 它表达的是「此消息未被 @，bot 无权限主动发言」的**硬策略权限**，
-// 与节奏/engagement 的「此刻该不该说」软启发式不同，绝不允许被模型的
-// REPLY_CONTROL send:true 放行覆盖（否则 bot 会对没 @ 它的消息发帖）。
-// 必须与 api/botservice.go passive-speak enricher 写入的 reason 字符串保持一致
-// （复用 core.KVSuppressReasonPassive，单一真源）。
-const suppressReasonPassiveUnmentioned = core.KVSuppressReasonPassive
-
 func replySuppressed(env *core.Envelope) (bool, string) {
 	v, ok := env.Get(core.KVSuppressReply)
 	if !ok {
@@ -340,7 +331,7 @@ func extractPublicReply(clean string) string {
 // 可能产生的整段重复文本。
 //
 // 触发场景：LLM 在同一次输出中写出两个内容相同的 <public>...</public> 块
-//（例如 tool_choice 解封后续生成时把回复写了两遍），导致最终帖子正文
+// （例如 tool_choice 解封后续生成时把回复写了两遍），导致最终帖子正文
 // 出现完全重复的两段文字。
 //
 // 算法：检测 s = X + sep + X 模式（sep 为 0~2 字符的空白/换行）。
@@ -1143,12 +1134,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if suppressed, reason := replySuppressed(env); suppressed {
 		// 模型显式 send:true 仅覆盖「软启发式」抑制门（节奏/engagement 节流判断）：
 		// 这类门表达的是「此刻该不该说」，模型经 REPLY_CONTROL 给出确定性意图时放行合理。
-		// 但 passive 模式的 passive_mode_unmentioned 是**硬权限门**（「此消息未被 @，
-		// bot 无权主动发言」），性质不同，绝不被模型放行覆盖——否则被动回复 bot 会对
-		// 没 @ 它的消息发帖，违背「只被动回复」契约（见 2026-08-25 日志审计发现的回归）。
-		// 注：潜水(lurk)/mute 在更早分支已 return，不会到达本门（见上方 lurk 分支）。
+		// 硬权限门（passive_mode_unmentioned、unanswered_outreach / unanswered_cooldown）
+		// 绝不被模型放行覆盖。
 		override := s.config.RequireReplyControl && modelExplicitlySends(result.Text) &&
-			reason != suppressReasonPassiveUnmentioned
+			!core.IsHardSuppressReason(reason)
 		if !override {
 			span.SetAttributes(
 				attribute.Bool("reply.suppressed", true),
@@ -1258,14 +1247,14 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		Channel: replyTarget,
 		UserID:  env.Message.UserID,
 		Payload: replyText,
-		Metadata: map[string]any{
+		Metadata: core.CopyEngagementOutboundMeta(env, map[string]any{
 			"source_channel": env.Message.Source,  // ChannelReplyHandler 路由必需
 			"trace_id":       env.Message.TraceID, // WebChannel 路由必需
 			"finish_reason":  string(result.FinishReason),
 			"usage":          result.Usage,
 			"tool_calls":     result.ToolCalls,
 			"steps":          len(result.Steps),
-		},
+		}),
 	})
 
 	// 在 Envelope KV 中存储完整结果

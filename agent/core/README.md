@@ -18,7 +18,7 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 
 | 文件 | 内容 |
 |------|------|
-| `envelope.go` | `Message`、`Action`/`ActionType`、`Envelope` |
+| `envelope.go` | `Message`、`Action`/`ActionType`、`Envelope`；`KVSuppressReply` / `IsHardSuppressReason` / `CopyEngagementOutboundMeta` |
 | `stage.go` | `Stage`、`StageFunc`、`StageInfo` |
 | `predicate.go` | `Predicate`、`PredicateFunc` |
 | `errors.go` | `PipelineError`、`AbortError`、`SkipError` 及判定函数 |
@@ -45,6 +45,8 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 
 `Set` / `Get` / `MustGet`（KV 存储）、`AddAction` / `Actions`（Action 累积，`Actions()` 返回深拷贝）、
 `Abort` / `Aborted`（中止控制）、`Err` / `SetErr`（错误状态）。
+
+`IsHardSuppressReason` 识别不可被模型 `send:true` 覆盖的抑制原因（被动模式、`unanswered_outreach` 等）。`CopyEngagementOutboundMeta` 把本轮是否为 engagement 主动出击拷进 `Action.Metadata`，供出站成功后按人记账。
 
 ### ChatType 常量
 

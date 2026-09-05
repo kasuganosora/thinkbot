@@ -185,3 +185,14 @@ func TestBuildFromConfig_Disabled(t *testing.T) {
 		t.Error("disabled config should reject all messages")
 	}
 }
+
+func TestBuildOutreachBreakerConfig(t *testing.T) {
+	cfg := config.DefaultEngagementConfig()
+	ob := BuildOutreachBreakerConfig(cfg)
+	if ob.SilenceWindow != 3*time.Minute {
+		t.Errorf("SilenceWindow=%v", ob.SilenceWindow)
+	}
+	if ob.EpisodeBoundary != 24*time.Hour {
+		t.Errorf("EpisodeBoundary=%v", ob.EpisodeBoundary)
+	}
+}

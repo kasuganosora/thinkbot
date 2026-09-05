@@ -97,7 +97,9 @@ type ActionHandler interface {
 
 将 `ActionReply` / `ActionForward` 等回写型 Action 路由到对应 Channel 的 `Sender`。
 
-路由键：`Action.Metadata["source_channel"]` → 在 Sender 注册表中查找 → 若设置了 `OutboundGuard` 先做渠道只读检查 → 调用 `Send(ctx, action)`。
+路由键：`Action.Metadata["source_channel"]` → 在 Sender 注册表中查找 → 若设置了 `OutboundGuard` 先做渠道只读检查 → 调用 `Send(ctx, action)` → **Send 成功后**调用 `SetOnSent` 回调（失败或被只读守卫丢弃不调用）。
+
+`SetOnSent` 由 `bot.New` 接上 `engagement.NotifyProactiveSent`：只对带 `engagement.proactive` 的 `ActionReply` 记账。这是 OutreachBreaker 的出站挂钩，不要只在测试里调 `RecordProactiveReply`。
 
 ```go
 handler := outbound.NewChannelReplyHandler(logger, tp)

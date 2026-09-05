@@ -157,6 +157,24 @@ const (
 	// 的模型放行覆盖，导致被动 bot 对未 @ 的消息发帖。
 	KVSuppressReasonPassive = "passive_mode_unmentioned"
 
+	// KVSuppressReasonUnanswered 是「对该用户的主动出击未被接住」硬熔断原因。
+	// 与 passive 一样不可被模型 REPLY_CONTROL send:true 覆盖：对方已经用沉默表态，
+	// 不能再靠模型「还想说」继续追人。一次出价，没接住就是 No。
+	KVSuppressReasonUnanswered = "unanswered_outreach"
+
+	// KVSuppressReasonUnansweredCooldown 曾是分级熔断的第一级，现已不再发出。
+	// 保留常量与硬门判定，避免旧 envelope / 配置残留被 send:true 绕过。
+	KVSuppressReasonUnansweredCooldown = "unanswered_cooldown"
+
+	// MetaEngagementProactive 标记本条出站来自 engagement 主动升级（非真人 @）。
+	// 写入 Action.Metadata，供出站成功后按人记一次「主动出击」。
+	MetaEngagementProactive = "engagement.proactive"
+
+	// MetaEngagementChannel 主动出击对应的会话空间（Message.Channel），
+	// 与 TimingGate / OutreachBreaker 的 channelKey 对齐。Action.Channel 是
+	// reply_target，不能当会话 key。
+	MetaEngagementChannel = "engagement.channel"
+
 	// KVLurkMode 标记当前消息来自「潜水 / 只读」渠道。
 	//
 	// 由 lurk-detect enricher 在渠道只读（permSvc.IsReadOnly 为 true）时设置。
@@ -398,4 +416,49 @@ func (e *Envelope) SetErr(err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.err = err
+}
+
+// IsHardSuppressReason 判断 KVSuppressReplyReason 是否为硬权限门。
+//
+// 硬门不可被模型 REPLY_CONTROL send:true 覆盖，也不可被节奏等软门改写。
+// reason 来自 Envelope.Get，可能是 string 以外的类型——非 string 一律视为非硬门。
+func IsHardSuppressReason(reason any) bool {
+	s, ok := reason.(string)
+	if !ok || s == "" {
+		return false
+	}
+	switch s {
+	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown:
+		return true
+	default:
+		return false
+	}
+}
+
+// CopyEngagementOutboundMeta 把「本轮是否为 engagement 主动出击」拷进 Action.Metadata。
+// 出站成功后 OutreachBreaker 靠这两项把记录钉到正确的 (channel, user)。
+func CopyEngagementOutboundMeta(env *Envelope, meta map[string]any) map[string]any {
+	if env == nil {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]any, 2)
+	}
+	v, ok := env.Get(MetaEngagementProactive)
+	if !ok {
+		return meta
+	}
+	proactive, _ := v.(bool)
+	if !proactive {
+		return meta
+	}
+	meta[MetaEngagementProactive] = true
+	ch := env.Message.Channel
+	if ch == "" {
+		ch = env.Message.Source
+	}
+	if ch != "" {
+		meta[MetaEngagementChannel] = ch
+	}
+	return meta
 }

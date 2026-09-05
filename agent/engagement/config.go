@@ -216,3 +216,11 @@ func buildPolicyTail(cfg config.EngagementConfig, checker WritableChecker, rules
 		RateLimit: rateLimit,
 	}
 }
+
+// BuildOutreachBreakerConfig 从 EngagementConfig 构建一次出价熔断参数。
+func BuildOutreachBreakerConfig(cfg config.EngagementConfig) OutreachBreakerConfig {
+	return OutreachBreakerConfig{
+		SilenceWindow:   cfg.UnansweredSilence,
+		EpisodeBoundary: cfg.UnansweredEpisodeBoundary,
+	}
+}

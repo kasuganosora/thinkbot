@@ -14,7 +14,8 @@
 - **预设角色 Profiles**：observer/lurker/moderator/active，一键切换参与风格
 - **自适应频率 AutoAdjust**：根据群组活跃度自动调整参与频率
 - **对话阶段感知**：推断 divergent/convergent/idle 阶段，动态调整策略
-- **自适应画像**：`BotProfileTraits` 从 SOUL.md 解析量化人格，经 `AdaptiveEngagementSyncer` 映射为 per-channel engagement 参数；`RejectionDetector` 检测「被无视」触发短期自闭模式
+- **自适应画像**：`BotProfileTraits` 从 SOUL.md 解析量化人格，经 `AdaptiveEngagementSyncer` 映射为 per-channel engagement 参数
+- **一次出价熔断 OutreachBreaker**：每个情节对该人只主动出击一次。talk-past / 冷场即视为拒绝，不再补枪（冷却后再敲等于追问，因此不做）。真人 @ / 私聊永远放行并复位。情节边界（默认 24h）后可房间级参与，但剥掉 `reply_target` 以免点名。随机噪声不能绕过
 - `EngagementStage` Pipeline 集成（Order=40）
 
 ## 关键类型
@@ -27,7 +28,8 @@
 | `TimingGate` | 有状态时序门控（退避/突发/概率/等待/自适应） |
 | `BurstBuffer` | 消息突发缓冲器 |
 | `LLMJudge` / `SimpleJudge` | Tier 2 LLM 快判（传统 + 评分模式） |
-| `BotProfileTraits` / `AdaptiveEngagementSyncer` / `RejectionDetector` | SOUL.md 画像解析、画像 → engagement 参数动态映射（含 per-channel 覆盖）、「被无视」检测（自闭模式） |
+| `BotProfileTraits` / `AdaptiveEngagementSyncer` | SOUL.md 画像解析、画像 → engagement 参数动态映射（含 per-channel 覆盖） |
+| `OutreachBreaker` | 按人一次出价：没接住就停；真人 @ / 私聊解除；情节边界后仅房间级（剥 reply_target） |
 | `EngagementProfile` | 预设角色配置文件 |
 | `ConversationPhase` | 对话阶段推断（idle/divergent/convergent） |
 | `TokenBucket` / `SlidingWindow` | 限流器实现 |
@@ -42,6 +44,7 @@
 | HOW: 角色选择 | 4 个内置 Profile，一键切换全部参数 | `engagement.profile` |
 | WHEN: 外部决策逻辑 | 三层漏斗本身就是外部控制 | — |
 | WHEN: 突发/退避 | TimingGate BurstBuffer | `engagement.burst_interval_seconds` |
+| WHEN: 未回应则退 | `OutreachBreaker` 一次出价、没接住就停 | `engagement.unanswered_silence` / `engagement.unanswered_episode_boundary` |
 
 ## 配置项
 
@@ -53,7 +56,7 @@
 | `engagement.profile` | string | — | 预设角色（observer/lurker/moderator/active） |
 | `engagement.engagement_threshold` | int | 0 | LLM 评分阈值（0=传统YES/NO模式） |
 | `engagement.auto_adjust_frequency` | bool | false | 自动频率调整 |
-| `engagement.cooldown` | duration | 0 | 用户冷却 |
+| `engagement.cooldown` | duration | 15m | 同一用户冷却 |
 | `engagement.rate_limit_capacity` | int | 3 | 令牌桶容量 |
 | `engagement.rate_limit_interval` | duration | 1h | 令牌桶补充间隔 |
 | `engagement.keywords` | []string | — | 兴趣关键词 |
@@ -68,3 +71,32 @@
 | `engagement.burst_interval_seconds` | float64 | 5.0 | 突发检测窗口 |
 | `engagement.wait_timeout_seconds` | float64 | 30.0 | Wait 超时 |
 | `engagement.backoff_bypass_pending` | int | 0 | 退避绕过阈值 |
+| `engagement.unanswered_silence` | duration | 3m | 主动回复后无人回应即视为拒绝（超时只结算，不补发） |
+| `engagement.unanswered_episode_boundary` | duration | 24h | 拒绝后仍禁止点名此人；超过此时长才允许房间级参与。完全恢复需对方 @ / 私聊 |
+
+`engagement.cooldown`（默认 15m）是房间级节流，**不是**对该人的第二次出价窗口。没接住就停，不会冷却后再敲。
+
+## OutreachBreaker 状态机
+
+```
+open ──proactive Send 成功──► awaiting
+awaiting ──talk-past / 冷场──► declined     // 立刻，不补枪
+awaiting / declined ──对方 @ 或私聊──► open
+declined 且超过情节边界 ──► 可房间级参与，剥掉 reply_target（禁止点名）
+```
+
+硬抑制原因：`KVSuppressReasonUnanswered`（`unanswered_outreach`）。rhythm / 模型 `send:true` 不能覆盖。
+
+## 主链路接线
+
+必须同时挂入站和出站，缺一即空转（历史上 `RejectionDetector` 只写了模块、生产路径未调用）。
+
+| 位置 | 做什么 |
+|------|--------|
+| `api/botservice.go` | `engagement.enabled` 时 `NewOutreachBreaker`，同一实例 `WithOutreachBreaker` + `BotParams.OutreachBreaker`；Stage 进 Pipeline Order=40 |
+| `EngagementStage.Process` | 升级 `Mentioned` 之前 `OnInbound` + `ShouldSuppress`（TimingGate 噪声不能绕过）；情节边界后剥 `reply_target` |
+| `bot.New` | `ChannelReplyHandler.SetOnSent` → `NotifyProactiveSent`（仅 Send 成功） |
+| `stages/llmroute.go` / `reply_stage.go` | `CopyEngagementOutboundMeta` 把 `engagement.proactive` 打进 Action |
+| `outbound/channel_handler.go` | Send 成功后调 `onSent`；失败 / 只读守卫丢弃不记账 |
+
+真人 `@` / 私聊走 Stage 早退并复位熔断，不注入「你无视我了」之类 prompt。
