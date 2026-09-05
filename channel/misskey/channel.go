@@ -589,6 +589,9 @@ func (c *MisskeyChannel) handleStreamMessage(ctx context.Context, text string) e
 		case "pollVoted":
 			// 用户对 bot 发出的投票帖进行了投票 → resolve user_choice
 			c.handlePollVoted(ctx, chMsg.Body)
+		case "notification":
+			// 反应等通知：仅 reaction / reaction:grouped 入站感知，其余忽略
+			c.handleNotification(ctx, chMsg.Body)
 		default:
 			// 忽略其他 main 事件（follow, renote 等）
 		}
@@ -675,6 +678,151 @@ func (c *MisskeyChannel) timelineMentioned(note Note) bool {
 		}
 	}
 	return false
+}
+
+// handleNotification 处理 main 流 notification 事件。
+// 仅将 reaction / reaction:grouped 归一化为 awareness-only 入站消息（空 Text + InjectContext），
+// 硬抑制出站由 api 层 reaction-ack enricher 负责。其它通知类型一律忽略。
+func (c *MisskeyChannel) handleNotification(ctx context.Context, body json.RawMessage) {
+	var n reactionNotification
+	if err := json.Unmarshal(body, &n); err != nil {
+		traceid.L(ctx).Debugw("misskey stream: failed to parse notification",
+			"channel", c.name, "err", err)
+		return
+	}
+	switch n.Type {
+	case "reaction", "reaction:grouped":
+	default:
+		return
+	}
+	if n.Note == nil || n.Note.ID == "" {
+		return
+	}
+	// 通知本应只针对 bot 自己的帖；再校验 note 作者，避免误入站。
+	noteOwner := n.Note.UserID
+	if noteOwner == "" {
+		noteOwner = n.Note.User.ID
+	}
+	if c.botUserID != "" && noteOwner != "" && noteOwner != c.botUserID {
+		return
+	}
+	if c.dedupSeen(n.ID) {
+		return
+	}
+
+	type reactor struct {
+		user     User
+		reaction string
+	}
+	var reactors []reactor
+	if n.Type == "reaction" {
+		uid := n.UserID
+		if uid == "" {
+			uid = n.User.ID
+		}
+		if uid == "" {
+			return
+		}
+		if c.botUserID != "" && uid == c.botUserID {
+			return // 忽略自赞
+		}
+		u := n.User
+		if u.ID == "" {
+			u.ID = uid
+		}
+		reactors = append(reactors, reactor{user: u, reaction: n.Reaction})
+	} else {
+		for _, r := range n.Reactions {
+			uid := r.User.ID
+			if uid == "" {
+				continue
+			}
+			if c.botUserID != "" && uid == c.botUserID {
+				continue
+			}
+			reactors = append(reactors, reactor{user: r.User, reaction: r.Reaction})
+		}
+		if len(reactors) == 0 {
+			return
+		}
+	}
+
+	primary := reactors[0]
+	username := "@" + primary.user.Username
+	if primary.user.Host != "" {
+		username += "@" + primary.user.Host
+	}
+	displayName := primary.user.Name
+	if displayName == "" {
+		displayName = primary.user.Username
+	}
+
+	var parts []string
+	for _, r := range reactors {
+		acct := "@" + r.user.Username
+		if r.user.Host != "" {
+			acct += "@" + r.user.Host
+		}
+		emoji := r.reaction
+		if emoji == "" {
+			emoji = "?"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s", acct, emoji))
+	}
+	list := strings.Join(parts, "、")
+	guidance := "只需要知道这件事即可：不要回复、不要转发、不要回赞、也不要为此调用工具，除非对方同时还发了文字在找你。"
+	inject := fmt.Sprintf("[Misskey 反应] %s 对你的帖子表态了。%s\n[note_id: %s]", list, guidance, n.Note.ID)
+
+	createdAt := time.Now()
+	if t, err := time.Parse(time.RFC3339, n.CreatedAt); err == nil {
+		createdAt = t
+	}
+
+	reactionMeta := primary.reaction
+	if n.Type == "reaction:grouped" && len(reactors) > 1 {
+		var rs []string
+		for _, r := range reactors {
+			rs = append(rs, r.reaction)
+		}
+		reactionMeta = strings.Join(rs, ",")
+	}
+
+	metadata := map[string]any{
+		"event_type":      "reaction",
+		"channel_type":    "misskey",
+		"note_id":         n.Note.ID,
+		"reaction":        reactionMeta,
+		"notification_id": n.ID,
+		"username":        primary.user.Username,
+		"display_name":    displayName,
+		"acct":            username,
+		"ack_only":        true,
+		// 故意不设 reply_target：避免误串接到被表态的帖子。
+	}
+
+	coreMsg := core.Message{
+		ID:            n.ID,
+		BotID:         c.botID,
+		Source:        c.name,
+		Channel:       primary.user.ID, // 1:1 会话；grouped 用首位反应器
+		ChatType:      core.ChatPrivate,
+		UserID:        primary.user.ID,
+		Text:          "", // 空 Text：不污染 L0（同心跳契约）
+		InjectContext: inject,
+		Mentioned:     false,
+		FromIsBot:     primary.user.IsBot,
+		MediaType:     "text/plain",
+		Metadata:      metadata,
+		CreatedAt:     createdAt,
+	}
+
+	if c.ingress == nil {
+		return
+	}
+	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
+		traceid.L(ctx).Warnw("misskey reaction notification ingress receive failed",
+			"channel", c.name, "notification_id", n.ID, "err", err)
+	}
 }
 
 // handleNote 将一条 Misskey Note 转换为 core.Message 并注入 Ingress。

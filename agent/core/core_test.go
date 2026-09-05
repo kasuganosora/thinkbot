@@ -241,6 +241,9 @@ func TestIsHardSuppressReason(t *testing.T) {
 	if !IsHardSuppressReason(KVSuppressReasonUnansweredCooldown) {
 		t.Error("unanswered cooldown should be hard")
 	}
+	if !IsHardSuppressReason(KVSuppressReasonReaction) {
+		t.Error("reaction_notification should be hard")
+	}
 	if IsHardSuppressReason("engagement_declined") {
 		t.Error("engagement_declined is soft")
 	}
