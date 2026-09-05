@@ -759,7 +759,8 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	tools := resolveTools(ctx, s.config, env)
 	// 潜水观察者不调用任何工具：纯推理，杜绝副作用（如经工具发帖），
 	// 确保「只看不发」在工具层也成立。
-	if lurkMode {
+	// 反应/点赞同样 awareness-only：软 prompt 挡不住 function calling，必须在这里卸工具。
+	if lurkMode || core.IsReactionAck(&env.Message) {
 		tools = nil
 	}
 
@@ -1134,7 +1135,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if suppressed, reason := replySuppressed(env); suppressed {
 		// 模型显式 send:true 仅覆盖「软启发式」抑制门（节奏/engagement 节流判断）：
 		// 这类门表达的是「此刻该不该说」，模型经 REPLY_CONTROL 给出确定性意图时放行合理。
-		// 硬权限门（passive_mode_unmentioned、unanswered_outreach / unanswered_cooldown）
+		// 硬权限门（passive_mode_unmentioned、unanswered_outreach、reaction_notification）
 		// 绝不被模型放行覆盖。
 		override := s.config.RequireReplyControl && modelExplicitlySends(result.Text) &&
 			!core.IsHardSuppressReason(reason)

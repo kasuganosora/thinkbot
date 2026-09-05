@@ -49,10 +49,10 @@ func TestHandleMessageReaction_BuildsAwareness(t *testing.T) {
 	ch.handleUpdate(context.Background(), Update{
 		UpdateID: 42,
 		MessageReaction: &MessageReactionUpdated{
-			Chat:      Chat{ID: 1001, Type: "private"},
-			MessageID: 77,
-			User:      &User{ID: 55, FirstName: "Luna", Username: "luna"},
-			Date:      1700000000,
+			Chat:        Chat{ID: 1001, Type: "private"},
+			MessageID:   77,
+			User:        &User{ID: 55, FirstName: "Luna", Username: "luna"},
+			Date:        1700000000,
 			OldReaction: nil,
 			NewReaction: []ReactionType{{Type: "emoji", Emoji: "❤️"}},
 		},
@@ -73,6 +73,9 @@ func TestHandleMessageReaction_BuildsAwareness(t *testing.T) {
 	}
 	if msg.Metadata["event_type"] != "reaction" || msg.Metadata["ack_only"] != true {
 		t.Fatalf("metadata=%v", msg.Metadata)
+	}
+	if ids, _ := msg.Metadata["reactor_ids"].([]string); len(ids) != 1 || ids[0] != "55" {
+		t.Fatalf("reactor_ids=%v", msg.Metadata["reactor_ids"])
 	}
 	if _, ok := msg.Metadata["reply_target"]; ok {
 		t.Fatal("reply_target must not be set")

@@ -81,7 +81,7 @@ stage := stages.NewLLMStage("llm", provider, stages.LLMConfig{
 - 若 Envelope 带 `verify.required` 且有可用工具，首步强制 `tool_choice=required`（防偷懒门禁）。
 - `StreamPublisher` 非 nil 时走 `llm.OrchestrateStream`，否则 `llm.OrchestrateGenerate`。
 - 完成后写入 `ActionReply`（outbound 目标取 `Metadata["reply_target"]`，回退 `Message.Channel`），经 `CopyEngagementOutboundMeta` 拷贝 `engagement.proactive` / `engagement.channel` 供出站熔断记账，并把 `*llm.GenerateResult` 存入 KV `llm.result`。
-- `KVSuppressReply` 为真时默认不出站。软原因（节奏/engagement 节流）可被模型 `send:true` 覆盖；硬原因（`passive_mode_unmentioned`、`unanswered_outreach`）不可覆盖。`RhythmStage` 遇到硬原因必须原样保留，不得改写成 `rhythm_*`。
+- `KVSuppressReply` 为真时默认不出站。软原因（节奏/engagement 节流）可被模型 `send:true` 覆盖；硬原因（`passive_mode_unmentioned`、`unanswered_outreach`、`reaction_notification`）不可覆盖。`RhythmStage` 遇到硬原因必须原样保留，不得改写成 `rhythm_*`。反应/点赞入站会卸掉工具列表，避免模型回赞或发帖。
 - 公开回复经 `extractPublicReply` 提取：仅当正文含显式且成对的 `<public>...</public>` 区块时取其内文（再剥一次 `<internal>` 残留）；随后 `deduplicatePublicContent` 做整段去重——检测「前半段 ≈ 后半段开头」的完全重复模式（LLM 偶发把回复写两遍，如 tool_choice 解封续生成场景），只保留第一份。最短匹配 40 字符，中点 ±10 字符宽松搜索，短句/签名等正常重复不会被误删。最后剥离任何残留标签（含畸形 public / 嵌套字面标签 / HTML 标签），避免标签文本外发。
 
 ### ReplyStage

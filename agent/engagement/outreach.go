@@ -12,14 +12,14 @@ import (
 // ============================================================================
 // OutreachBreaker — 一次出价：没接住就是 No
 //
-// 只作用于 engagement.proactive。真人 @ / 私聊对方先开口永远放行。
+// 只作用于 engagement.proactive。真人 @ / 私聊 / 对 bot 发言的表态（点赞）永远视为接住。
 //
 // 主动回复是相邻对的第一句。对方不接（talk-past 或冷场）即视为已完成的拒绝，
 // 不得对该人再发同一话轮。冷却后再敲是追问–回避，这里不做。
 //
 //   open ──Send 成功──► awaiting
 //   awaiting ──talk-past / 冷场──► declined（立刻，不补枪）
-//   awaiting / declined ──对方 @ 或私聊──► open
+//   awaiting / declined ──对方 @、私聊、或点赞/反应──► open
 //   declined 且超过情节边界 ──► 可参与房间，但禁止 reply_target 点名此人
 //
 // TimingGate 的随机噪声 / 概率门不能绕过：EngagementStage 在升级前硬查。
@@ -126,6 +126,16 @@ func (b *OutreachBreaker) OnInbound(msg *core.Message) {
 
 	userID := msg.UserID
 
+	if core.IsReactionAck(msg) {
+		// 点赞/反应 = 接住了。Misskey 反应的 Channel 是 userID，而时间线出价记在
+		// misskey:timeline，所以按 user 清掉所有 channel 上的 pending/declined。
+		for _, uid := range responseUserIDs(msg) {
+			b.resetUserAllChannelsLocked(uid)
+		}
+		b.settleExpiredLocked(channelKey)
+		return
+	}
+
 	if isUserResponse(msg) && userID != "" {
 		b.resetLocked(channelKey, userID)
 		b.settleExpiredLocked(channelKey)
@@ -230,6 +240,38 @@ func isUserResponse(msg *core.Message) bool {
 	return msg.ChatType == core.ChatPrivate
 }
 
+func responseUserIDs(msg *core.Message) []string {
+	seen := make(map[string]struct{}, 4)
+	var ids []string
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	add(msg.UserID)
+	if msg.Metadata == nil {
+		return ids
+	}
+	switch v := msg.Metadata[core.MetaReactorIDs].(type) {
+	case []string:
+		for _, id := range v {
+			add(id)
+		}
+	case []any:
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				add(s)
+			}
+		}
+	}
+	return ids
+}
+
 func (b *OutreachBreaker) lookupLocked(channelKey, userID string) *userOutreachState {
 	users, ok := b.channels[channelKey]
 	if !ok {
@@ -270,6 +312,15 @@ func (b *OutreachBreaker) resetLocked(channelKey, userID string) {
 	st.declined = false
 	st.declinedAt = time.Time{}
 	st.lastActiveAt = b.now()
+}
+
+func (b *OutreachBreaker) resetUserAllChannelsLocked(userID string) {
+	if userID == "" {
+		return
+	}
+	for ch := range b.channels {
+		b.resetLocked(ch, userID)
+	}
 }
 
 func (b *OutreachBreaker) settleExpiredLocked(channelKey string) {
