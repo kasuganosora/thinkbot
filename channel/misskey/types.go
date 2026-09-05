@@ -240,3 +240,24 @@ type FollowingUser struct {
 	Followee User   `json:"followee"`
 	Follower User   `json:"follower"`
 }
+
+// ----------------------------------------------------------------------------
+// Notification（通知）类型 — 入站 reaction 感知
+// ----------------------------------------------------------------------------
+
+// reactionNotification 是 main 流 type=notification 且 Type 为 reaction /
+// reaction:grouped 时 body 的字段子集（packed Notification）。
+type reactionNotification struct {
+	ID        string `json:"id"`
+	CreatedAt string `json:"createdAt"`
+	Type      string `json:"type"`
+	UserID    string `json:"userId,omitempty"`
+	User      User   `json:"user"`
+	Reaction  string `json:"reaction,omitempty"`
+	Note      *Note  `json:"note,omitempty"`
+	// Reactions 仅 reaction:grouped：多个反应器的用户 + 表情。
+	Reactions []struct {
+		User     User   `json:"user"`
+		Reaction string `json:"reaction"`
+	} `json:"reactions,omitempty"`
+}

@@ -166,6 +166,11 @@ const (
 	// 保留常量与硬门判定，避免旧 envelope / 配置残留被 send:true 绕过。
 	KVSuppressReasonUnansweredCooldown = "unanswered_cooldown"
 
+	// KVSuppressReasonReaction 是「Misskey 反应通知」硬抑制原因。
+	// 反应入站仅供 LLM 感知「有人对我的帖表态了」；不得回复、转发、回赞或为此调工具，
+	// 也不可被模型 REPLY_CONTROL send:true 覆盖。由 reaction-ack enricher 写入。
+	KVSuppressReasonReaction = "reaction_notification"
+
 	// MetaEngagementProactive 标记本条出站来自 engagement 主动升级（非真人 @）。
 	// 写入 Action.Metadata，供出站成功后按人记一次「主动出击」。
 	MetaEngagementProactive = "engagement.proactive"
@@ -428,7 +433,7 @@ func IsHardSuppressReason(reason any) bool {
 		return false
 	}
 	switch s {
-	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown:
+	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown, KVSuppressReasonReaction:
 		return true
 	default:
 		return false
