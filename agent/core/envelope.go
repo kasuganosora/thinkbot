@@ -166,7 +166,7 @@ const (
 	// 保留常量与硬门判定，避免旧 envelope / 配置残留被 send:true 绕过。
 	KVSuppressReasonUnansweredCooldown = "unanswered_cooldown"
 
-	// KVSuppressReasonReaction 是「Misskey 反应通知」硬抑制原因。
+	// KVSuppressReasonReaction 是「Misskey / Telegram 反应通知」硬抑制原因。
 	// 反应入站仅供 LLM 感知「有人对我的帖表态了」；不得回复、转发、回赞或为此调工具，
 	// 也不可被模型 REPLY_CONTROL send:true 覆盖。由 reaction-ack enricher 写入。
 	KVSuppressReasonReaction = "reaction_notification"
@@ -179,6 +179,16 @@ const (
 	// 与 TimingGate / OutreachBreaker 的 channelKey 对齐。Action.Channel 是
 	// reply_target，不能当会话 key。
 	MetaEngagementChannel = "engagement.channel"
+
+	// MetaEventType 入站事件类型。反应通知为 "reaction"。
+	MetaEventType         = "event_type"
+	MetaEventTypeReaction = "reaction"
+
+	// MetaAckOnly 为 true 时，本条入站仅供感知，不得当对话回复处理。
+	MetaAckOnly = "ack_only"
+
+	// MetaReactorIDs 反应通知里所有表态用户的 ID（含 grouped）。
+	MetaReactorIDs = "reactor_ids"
 
 	// KVLurkMode 标记当前消息来自「潜水 / 只读」渠道。
 	//
@@ -466,4 +476,17 @@ func CopyEngagementOutboundMeta(env *Envelope, meta map[string]any) map[string]a
 		meta[MetaEngagementChannel] = ch
 	}
 	return meta
+}
+
+// IsReactionAck 判断入站是否为「别人对 bot 发言的表态」（点赞/反应）。
+// 这类事件是积极接话，但不得当普通聊天去回复。
+func IsReactionAck(msg *Message) bool {
+	if msg == nil || msg.Metadata == nil {
+		return false
+	}
+	if et, _ := msg.Metadata[MetaEventType].(string); et == MetaEventTypeReaction {
+		return true
+	}
+	ack, _ := msg.Metadata[MetaAckOnly].(bool)
+	return ack
 }

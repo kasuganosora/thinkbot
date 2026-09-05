@@ -168,6 +168,14 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 		s.breaker.OnInbound(&env.Message)
 	}
 
+	// 反应/点赞：熔断器已当作接住处理；本条本身不得升级为主动参与。
+	if core.IsReactionAck(&env.Message) {
+		span.SetAttributes(attribute.Bool("engagement.skipped", true))
+		env.Set("engagement.evaluated", false)
+		env.Set("engagement.reaction", true)
+		return env, nil
+	}
+
 	// 1. 被直接 @ 的消息直接放行——不需要 engagement 决策
 	//    参考 MaiBot 的 _arm_force_next_timing_continue：@ 消息直接跳过 Timing Gate
 	if env.Message.Mentioned {

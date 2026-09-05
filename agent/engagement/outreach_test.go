@@ -43,6 +43,21 @@ func mention(userID string) *core.Message {
 	}
 }
 
+func reactionFrom(channel, userID string) *core.Message {
+	return &core.Message{
+		Channel:   channel,
+		UserID:    userID,
+		Text:      "",
+		Mentioned: false,
+		ChatType:  core.ChatGroup, // Telegram 群表态：不是 @ 也不是私聊
+		Metadata: map[string]any{
+			core.MetaEventType:  core.MetaEventTypeReaction,
+			core.MetaAckOnly:    true,
+			core.MetaReactorIDs: []string{userID},
+		},
+	}
+}
+
 func TestOutreachBreaker_OneTalkPastDeclinesImmediately(t *testing.T) {
 	b, _ := newTestBreaker()
 	b.RecordProactiveReply("room-1", "u1")
@@ -264,6 +279,64 @@ func TestNotifyProactiveSent_OnlyProactiveReply(t *testing.T) {
 	b2.OnInbound(talkPast("u1"))
 	if b2.IsDeclined("room-1", "u1") {
 		t.Fatal("non-proactive reply must not be recorded")
+	}
+}
+
+func TestOutreachBreaker_ReactionCountsAsUptakeNotTalkPast(t *testing.T) {
+	b, _ := newTestBreaker()
+	b.RecordProactiveReply("room-1", "u1")
+
+	b.OnInbound(reactionFrom("room-1", "u1"))
+	if b.IsPending("room-1", "u1") || b.IsDeclined("room-1", "u1") {
+		t.Fatal("like/reaction must open, not talk-past into declined")
+	}
+	if s, _ := b.ShouldSuppress("room-1", "u1"); s {
+		t.Fatal("reaction must lift awaiting")
+	}
+}
+
+func TestOutreachBreaker_ReactionResetsMisskeyTimelineKey(t *testing.T) {
+	b, _ := newTestBreaker()
+	b.RecordProactiveReply("misskey:timeline", "u1")
+	b.OnInbound(&core.Message{
+		Channel:   "misskey:timeline",
+		UserID:    "u1",
+		Text:      "whatever",
+		Mentioned: false,
+		ChatType:  core.ChatGroup,
+	})
+	if !b.IsDeclined("misskey:timeline", "u1") {
+		t.Fatal("setup: declined on timeline")
+	}
+
+	// Misskey 反应入站 Channel 是 userID，不是 misskey:timeline
+	b.OnInbound(reactionFrom("u1", "u1"))
+	if b.IsDeclined("misskey:timeline", "u1") {
+		t.Fatal("reaction must reset declined even when Channel ≠ timeline key")
+	}
+	if s, _ := b.ShouldSuppress("misskey:timeline", "u1"); s {
+		t.Fatal("timeline suppress must lift after like")
+	}
+}
+
+func TestOutreachBreaker_GroupedReactionResetsAllReactors(t *testing.T) {
+	b, _ := newTestBreaker()
+	b.RecordProactiveReply("misskey:timeline", "u1")
+	b.RecordProactiveReply("misskey:timeline", "u2")
+
+	b.OnInbound(&core.Message{
+		Channel:   "u1",
+		UserID:    "u1",
+		Mentioned: false,
+		ChatType:  core.ChatPrivate,
+		Metadata: map[string]any{
+			core.MetaEventType:  core.MetaEventTypeReaction,
+			core.MetaAckOnly:    true,
+			core.MetaReactorIDs: []string{"u1", "u2"},
+		},
+	})
+	if b.IsPending("misskey:timeline", "u1") || b.IsPending("misskey:timeline", "u2") {
+		t.Fatal("grouped reaction must reset every reactor")
 	}
 }
 

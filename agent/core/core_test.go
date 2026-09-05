@@ -271,3 +271,18 @@ func TestCopyEngagementOutboundMeta(t *testing.T) {
 		t.Fatal("existing metadata must be kept")
 	}
 }
+
+func TestIsReactionAck(t *testing.T) {
+	if IsReactionAck(nil) || IsReactionAck(&Message{}) {
+		t.Fatal("empty must not be reaction")
+	}
+	if !IsReactionAck(&Message{Metadata: map[string]any{MetaEventType: MetaEventTypeReaction}}) {
+		t.Fatal("event_type=reaction")
+	}
+	if !IsReactionAck(&Message{Metadata: map[string]any{MetaAckOnly: true}}) {
+		t.Fatal("ack_only")
+	}
+	if IsReactionAck(&Message{Metadata: map[string]any{MetaEventType: "timeline"}}) {
+		t.Fatal("timeline is not reaction")
+	}
+}

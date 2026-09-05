@@ -28,7 +28,7 @@ var channelToolAwarenessSection = &agenttools.ToolPromptSection{
 You are NOT "write-only" and NOT "tool-less" on Telegram. You both RECEIVE and CAN REPLY.
 
 ## Reactions on your messages
-When someone reacts to your message you may receive a [Telegram 反应] InjectContext. That is awareness only — do not reply, react back, or call tools for it. Just know they reacted.
+When someone reacts to your message you may receive a [Telegram 反应] InjectContext. That is awareness only — do not reply, react back, or call tools for it. Just know they reacted. Telegram only delivers these updates when the bot is a group administrator; DMs and non-admin groups typically never see them.
 
 ## Replying (just use text, do NOT call a tool)
 When someone @mentions you, replies to you, or sends you a command, simply reply with your normal text — the system sends it for you.

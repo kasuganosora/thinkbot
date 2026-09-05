@@ -14,12 +14,14 @@ import (
 type suppressStubProvider struct {
 	text   string
 	called int
+	last   llm.GenerateParams
 }
 
 func (p *suppressStubProvider) Name() string { return "stub" }
 
-func (p *suppressStubProvider) DoGenerate(_ context.Context, _ llm.GenerateParams) (*llm.GenerateResult, error) {
+func (p *suppressStubProvider) DoGenerate(_ context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
 	p.called++
+	p.last = params
 	return &llm.GenerateResult{
 		Text:         p.text,
 		FinishReason: llm.FinishReasonStop,
@@ -269,6 +271,52 @@ func TestLLMStage_ModelSendTrueDoesNotOverrideUnanswered(t *testing.T) {
 	}
 	if got := replyActions(out); len(got) != 0 {
 		t.Fatalf("unanswered outreach hard gate must NOT be overridden by model send:true, got %+v", got)
+	}
+}
+
+func TestLLMStage_ModelSendTrueDoesNotOverrideReaction(t *testing.T) {
+	p := &suppressStubProvider{
+		text: "<public>谢谢点赞！</public>@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	stage := newSuppressTestStageRC(p, true)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m-react", Text: "", Source: "misskey-ch", Channel: "room-1", UserID: "u1",
+		Metadata: map[string]any{core.MetaEventType: core.MetaEventTypeReaction, core.MetaAckOnly: true},
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonReaction)
+
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if got := replyActions(out); len(got) != 0 {
+		t.Fatalf("reaction_notification hard gate must NOT be overridden by model send:true, got %+v", got)
+	}
+}
+
+func TestLLMStage_ReactionAckStripsTools(t *testing.T) {
+	p := &suppressStubProvider{text: "ok"}
+	stage := NewLLMStage("llm", p, LLMConfig{
+		MessageBuilder: func(msg core.Message) []llm.Message {
+			return []llm.Message{llm.UserMessage(msg.Text)}
+		},
+		Tools: []llm.Tool{{Name: "misskey_react_to_note"}},
+	}, nil, nil)
+
+	env := core.NewEnvelope(core.Message{
+		ID: "m-react-tools", Source: "misskey-ch", Channel: "u1", UserID: "u1",
+		Metadata: map[string]any{core.MetaEventType: core.MetaEventTypeReaction, core.MetaAckOnly: true},
+	})
+	env.Set(core.KVSuppressReply, true)
+	env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonReaction)
+
+	if _, err := stage.Process(context.Background(), env); err != nil {
+		t.Fatalf("process err: %v", err)
+	}
+	if len(p.last.Tools) != 0 {
+		t.Fatalf("reaction ack must strip tools, got %d", len(p.last.Tools))
 	}
 }
 
