@@ -1182,6 +1182,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return nil
 	}, s.logger)
 
+	// pure-renote enricher：回复目标为「纯 Renote」（无正文的转推）时硬抑制回复。
+	// Misskey 拒绝把文本回复挂到纯 Renote 上（API 返回 CANNOT_REPLY_TO_A_PURE_RENOTE），
+	// 属物理不可行，故作为硬权限门：不可被模型 REPLY_CONTROL send:true 覆盖（见 IsHardSuppressReason）。
+	// handleNote 已对纯 Renote 打 is_pure_renote 标记，这里据此抑制，避免生成注定失败的回复请求。
+	// Order 48，紧接 reaction-ack(47)，在 LLMStage(100) 产出 ActionReply 之前锁定 reason。
+	pureRenoteEnricher := stages.NewEnricherStage("pure-renote", pureRenoteEnrichFn, s.logger)
+
 	// 记忆召回 stage：每轮对话前按 [bot, channel, user] 三 scope 检索长期记忆
 	// （含潜水学到的经验），注入 system prompt，让 bot 在真人交互时带「实时经验」。
 	// memRepo（函数前面 717 行已创建）即 SQLite 仓储（实现 memory.Retriever），
@@ -1284,6 +1291,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	pb.Add(45, lurkEnricher)
 	pb.Add(46, passiveEnricher)
 	pb.Add(47, reactionAckEnricher)
+	pb.Add(48, pureRenoteEnricher)
 	pb.Add(90, recallStage)
 	pb.Add(95, rhythmStage)
 	pb.Add(100, wrappedLLM)
@@ -2474,4 +2482,18 @@ func isEngagementProactive(env *core.Envelope) bool {
 		}
 	}
 	return false
+}
+
+// pureRenoteEnrichFn 是 pure-renote enricher 的逻辑体：入站消息被标记为纯 Renote 时，
+// 设硬权限抑制（不可被模型 REPLY_CONTROL send:true 覆盖），避免对纯 Renote 发起注定失败的回复。
+// 抽成包级函数便于单测（见 pure_renote_enricher_test.go）。
+func pureRenoteEnrichFn(ctx context.Context, env *core.Envelope) error {
+	if env.Message.Metadata == nil {
+		return nil
+	}
+	if isPure, _ := env.Message.Metadata[core.MetaIsPureRenote].(bool); isPure {
+		env.Set(core.KVSuppressReply, true)
+		env.Set(core.KVSuppressReplyReason, core.KVSuppressReasonPureRenote)
+	}
+	return nil
 }

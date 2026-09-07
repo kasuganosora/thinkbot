@@ -895,6 +895,12 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	// 分类帖子类型
 	noteType := classifyNoteType(note)
 
+	// 纯 Renote（Renote 指向的帖子、本身无正文）：Misskey 禁止对它发起文本回复
+	// （API 返回 CANNOT_REPLY_TO_A_PURE_RENOTE）。标记后经 pure-renote enricher 抑制回复，
+	// 避免生成注定失败的回复请求。注意 renoteFallback 已把被 Renote 帖的正文作为对话内容，
+	// 所以 bot 仍能「看到并思考」这条纯 Renote，只是不回复。
+	isPureRenote := note.Renote != nil && strings.TrimSpace(note.Text) == ""
+
 	metadata := map[string]any{
 		"note_id":      note.ID,
 		"reply_target": note.ID, // outbound 回写时使用的精确目标（noteID）
@@ -908,6 +914,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		"acct":         username,
 		"note_type":    noteType,
 		"channel_type": "misskey", // Channel 类型，供 ToolSessionContext 使用
+		core.MetaIsPureRenote: isPureRenote,
 	}
 	if len(note.Files) > 0 {
 		metadata["file_count"] = len(note.Files)

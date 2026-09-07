@@ -244,6 +244,9 @@ func TestIsHardSuppressReason(t *testing.T) {
 	if !IsHardSuppressReason(KVSuppressReasonReaction) {
 		t.Error("reaction_notification should be hard")
 	}
+	if !IsHardSuppressReason(KVSuppressReasonPureRenote) {
+		t.Error("target_is_pure_renote should be hard (Misskey 物理不可回复纯 Renote)")
+	}
 	if IsHardSuppressReason("engagement_declined") {
 		t.Error("engagement_declined is soft")
 	}
