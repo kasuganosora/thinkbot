@@ -809,6 +809,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if content == "" && msg.InjectContext != "" {
 			content = msg.InjectContext
 		}
+		// 引用回复（如 Telegram 引用上一条消息）：把被引用内容作为引用块前缀，
+		// 让模型看到被引用的上文（否则模型只能看到「这句话」，语境断层）。
+		if q := buildQuoteBlock(msg.Metadata); q != "" {
+			content = q + "\n\n" + content
+		}
 		messages = append(messages, llm.UserMessage(content))
 		return messages
 	}
@@ -1189,6 +1194,85 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// Order 48，紧接 reaction-ack(47)，在 LLMStage(100) 产出 ActionReply 之前锁定 reason。
 	pureRenoteEnricher := stages.NewEnricherStage("pure-renote", pureRenoteEnrichFn, s.logger)
 
+	// inbound-chat-history enricher：让 Telegram 等「非 Web」入站也拥有按会话隔离的
+	// 对话历史上下文（此前 chat_history 机制只为 Web 接线，导致 tg 单聊/群聊上下文串不起来）。
+	// 做法与 Web（handler_chat.go）对齐：入站时按会话加载最近 N 条写入 metadata["chat_history"]
+	// （messageBuilder 会渲染成多轮对话），并异步把当前用户消息落库，供后续轮次作为上下文。
+	// 群聊整群共享一条历史：sessionID 取 "tg:<chatID>"，群里所有人近期消息都进入同一历史，
+	// bot 被 @ 时才带着群聊语境回复（决策：整群共享一条历史）。
+	// 去重：Web 已在注入前自行写好 chat_history，这里直接跳过，避免重复加载/落库。
+	// Order 40，在 lurk(45)/recall(90)/LLM(100) 之前完成历史注入。
+	inboundHistoryEnricher := stages.NewEnricherStage("inbound-chat-history", func(ctx context.Context, env *core.Envelope) error {
+		// Web 等已自行写好 chat_history 的来源跳过
+		if _, ok := env.Message.Metadata["chat_history"]; ok {
+			return nil
+		}
+		// 仅处理有正文的 Telegram 消息（反应/心跳等非文本事件不进历史）
+		if strings.TrimSpace(env.Message.Text) == "" {
+			return nil
+		}
+		sid, ok := inboundSessionID(&env.Message)
+		if !ok {
+			return nil
+		}
+		env.Message.Metadata[agenttools.ExtraKeyChatSessionID] = sid
+		// 标记本消息的历史由本 enricher 托管，出站 enricher 据此只保存 Telegram 回复
+		env.Message.Metadata["__history_managed"] = true
+
+		limit := s.store.GetInt(config.KeyChatContextLimit, 20)
+		history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
+		if err != nil {
+			s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
+		} else if len(history) > 0 {
+			env.Message.Metadata["chat_history"] = history
+		}
+
+		// 异步落库当前用户消息（顺序：先加载再保存，避免当前消息进入本轮历史造成重复）
+		botID := env.Message.BotID
+		userID := sid
+		text := env.Message.Text
+		traceID := env.Message.TraceID
+		go func() {
+			if err := s.chatHistory.SaveMessage(botID, userID, "user", text, traceID, sid); err != nil {
+				s.logger.Warnw("inbound chat history save user failed", "err", err, "session", sid)
+			}
+		}()
+		return nil
+	}, s.logger)
+
+	// outbound-chat-history enricher：把本轮 Bot 的 ActionReply 落库到同一会话，
+	// 使下一轮对话历史包含 Bot 的回复。仅在 inbound 托管的历史会话上生效
+	// （由 __history_managed 标记，Web 等已自行落库的不重复保存）。
+	// Order 850，在 LLM(100) 产出 ActionReply 之后、记忆回写(900) 之前。
+	outboundHistoryEnricher := stages.NewEnricherStage("outbound-chat-history", func(ctx context.Context, env *core.Envelope) error {
+		if _, ok := env.Message.Metadata["__history_managed"]; !ok {
+			return nil
+		}
+		sid, _ := env.Message.Metadata[agenttools.ExtraKeyChatSessionID].(string)
+		if sid == "" {
+			return nil
+		}
+		var replyText string
+		for _, action := range env.Actions() {
+			if action.Type != core.ActionReply {
+				continue
+			}
+			if t, ok := action.Payload.(string); ok && strings.TrimSpace(t) != "" {
+				replyText = t
+				break
+			}
+		}
+		if replyText == "" {
+			return nil
+		}
+		if err := s.chatHistory.UpsertAssistantByTrace(
+			env.Message.BotID, sid, replyText, env.Message.TraceID, "", "", sid, false,
+		); err != nil {
+			s.logger.Warnw("outbound chat history save assistant failed", "err", err, "session", sid)
+		}
+		return nil
+	}, s.logger)
+
 	// 记忆召回 stage：每轮对话前按 [bot, channel, user] 三 scope 检索长期记忆
 	// （含潜水学到的经验），注入 system prompt，让 bot 在真人交互时带「实时经验」。
 	// memRepo（函数前面 717 行已创建）即 SQLite 仓储（实现 memory.Retriever），
@@ -1288,6 +1372,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		pb.Add(3, s.bindStage)
 	}
 	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
+	pb.Add(40, inboundHistoryEnricher)
 	pb.Add(45, lurkEnricher)
 	pb.Add(46, passiveEnricher)
 	pb.Add(47, reactionAckEnricher)
@@ -1295,6 +1380,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	pb.Add(90, recallStage)
 	pb.Add(95, rhythmStage)
 	pb.Add(100, wrappedLLM)
+	pb.Add(850, outboundHistoryEnricher)
 	if hbBundle != nil && groups[pipeline.GroupHeartbeat] {
 		// 心跳频控预算重置：任何真实外部入站消息（非心跳自身）都说明 bot 不在自激真空，
 		// 立即恢复连续唤醒预算。纯内存操作，置于链首（Order=5），不影响任何既有语义。
@@ -2497,3 +2583,37 @@ func pureRenoteEnrichFn(ctx context.Context, env *core.Envelope) error {
 	}
 	return nil
 }
+
+// inboundSessionID 为一条入站消息派生其「会话历史」session ID。
+// 仅 Telegram 入站拥有按会话隔离的历史上下文（与 Web 的 chat_history 机制对齐）；
+// 其它来源（Web 已自行处理 / 心跳 / cron / 反应）返回 ok=false 跳过。
+// Telegram 一个 chat（私聊或群聊）即一个会话：私聊的 chatID 即对话双方，
+// 群聊的 chatID 对全群共享，从而「整群共享一条历史」。
+func inboundSessionID(msg *core.Message) (string, bool) {
+	if ct, _ := msg.Metadata["channel_type"].(string); ct == "telegram" {
+		if msg.Channel == "" {
+			return "", false
+		}
+		return "tg:" + msg.Channel, true
+	}
+	return "", false
+}
+
+// buildQuoteBlock 把「引用回复」中被引用的上文渲染成引用块前缀。
+// Telegram 渠道在 metadata 写入 reply_to_text（被引用原文）与 reply_to_from（被引用者昵称）。
+// 用于让模型看到被引用的上文——否则模型只看到当前这句话，语境断层（问题：引用回复看不到内容）。
+func buildQuoteBlock(meta map[string]any) string {
+	if meta == nil {
+		return ""
+	}
+	rt, _ := meta["reply_to_text"].(string)
+	rt = strings.TrimSpace(rt)
+	if rt == "" {
+		return ""
+	}
+	if from, _ := meta["reply_to_from"].(string); from != "" {
+		return fmt.Sprintf("[引用 %s 的消息]\n%s", from, rt)
+	}
+	return fmt.Sprintf("[引用消息]\n%s", rt)
+}
+
