@@ -14,10 +14,11 @@ import (
 
 // ChatIDHandler 处理 /chatid 命令。
 // 返回当前会话的标识信息（群/会话 ID、发送者 ID、平台账号名），
-// 便于管理员把群 ID 直接粘进「工具权限」规则的「会话/群 ID」字段，
+// 便于用户把群 ID 直接粘进「工具权限」规则的「会话/群 ID」字段，
 // 从而实现「仅对某个 tg 群单独配置工具权限」。
 //
-// 仅管理员可执行（AdminOnly），避免普通成员在群里暴露自己的平台 ID。
+// 要求发送者已绑定 thinkbot 内部账号（RequireBound）：只有绑定过的用户
+// 才需要、也才配得上这套权限配置能力，未绑定者拿不到任何标识信息。
 type ChatIDHandler struct{}
 
 // NewChatIDHandler 创建 /chatid 命令处理器。
@@ -27,10 +28,15 @@ func NewChatIDHandler() *ChatIDHandler { return &ChatIDHandler{} }
 func (h *ChatIDHandler) Name() string { return "chatid" }
 
 // Description 返回命令描述。
-func (h *ChatIDHandler) Description() string { return "显示当前会话/群的 ID（用于工具权限按群配置）" }
+func (h *ChatIDHandler) Description() string {
+	return "显示当前会话/群的 ID（需绑定账号，用于工具权限按群配置）"
+}
 
 // AdminOnly 命令是否需要管理员权限。
-func (h *ChatIDHandler) AdminOnly() bool { return true }
+func (h *ChatIDHandler) AdminOnly() bool { return false }
+
+// RequireBound 命令是否要求绑定账号。
+func (h *ChatIDHandler) RequireBound() bool { return true }
 
 // Execute 执行 /chatid 命令。
 func (h *ChatIDHandler) Execute(_ context.Context, env *core.Envelope, _ string) (*CommandResult, error) {
