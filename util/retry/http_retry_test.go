@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 func TestHTTPStatusError(t *testing.T) {
@@ -78,6 +80,33 @@ func TestHTTPShouldRetry(t *testing.T) {
 		result := HTTPShouldRetry(1, err)
 		if result != tc.expected {
 			t.Errorf("status %d: expected %v, got %v", tc.statusCode, tc.expected, result)
+		}
+	}
+}
+
+// TestHTTPShouldRetry_ErrsError 回归：HTTPShouldRetry 必须识别 *errs.Error 携带的
+// HTTP 状态码，不能把确定性 4xx（如 BigModel 1301 内容过滤 / 1210 / 1214）误判为
+// “非 HTTP 错误”而无限重试。修复前 *errs.Error 因类型不匹配会被当成网络错误重试。
+func TestHTTPShouldRetry_ErrsError(t *testing.T) {
+	tests := []struct {
+		code     int
+		expected bool
+	}{
+		{400, false}, // 确定性客户端错误，不重试
+		{1301, false}, // BigModel 内容安全过滤，不重试
+		{1210, false}, // BigModel 参数错误，不重试
+		{1214, false}, // BigModel messages 非法，不重试
+		{401, false},
+		{429, true},  // 限流，重试
+		{500, true},  // 服务端错误，重试
+		{503, true},  // 过载，重试
+		{0, true},    // 无状态码（网络错误），重试
+	}
+	for _, tc := range tests {
+		err := errs.HTTPErrorf(tc.code, "simulated http error code %d", tc.code)
+		result := HTTPShouldRetry(1, err)
+		if result != tc.expected {
+			t.Errorf("errs.Error code %d: expected retry=%v, got %v", tc.code, tc.expected, result)
 		}
 	}
 }
