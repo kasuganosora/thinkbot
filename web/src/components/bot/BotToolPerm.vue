@@ -192,6 +192,7 @@
 
           <span class="c-plat">
             <span class="plat-tag" :class="`pf-${platClass(r.platform)}`">{{ r.platform || '*' }}</span>
+            <span v-if="r.chatId" class="chat-tag" :title="`仅对该会话生效：${r.chatId}`">群 {{ r.chatId }}</span>
           </span>
 
           <span class="c-users">
@@ -358,6 +359,14 @@
           <div class="field-hint">常见值：web / telegram / misskey。<code>*</code> 表示所有平台。</div>
         </t-form-item>
 
+        <t-form-item label="会话/群 ID">
+          <t-input v-model="form.chatId" placeholder="留空或 * = 全部会话；tg 群填 -1001234567890" />
+          <div class="field-hint">
+            不填则对该平台全部会话生效。仅对某个 tg 群单独配置时，填该群 chat ID（形如 <code>-100xxxx</code>）。
+            在群里发送 <code>/chatid</code> 命令即可拿到当前群的 ID。
+          </div>
+        </t-form-item>
+
         <t-form-item label="用户">
           <t-input v-model="userIdsText" placeholder="逗号分隔，如 123456789,luna_tg,luna；* 表示全部用户" />
           <div class="field-hint">
@@ -392,6 +401,7 @@
           <span>
             在
             <b>{{ form.platform === '*' ? '所有平台' : form.platform || '所有平台' }}</b>
+            <template v-if="form.chatId">（会话 <code>{{ form.chatId }}</code>）</template>
             上，对
             <b>{{ previewUsers }}</b>
             <b class="pv-strong">{{ form.decision === 'allow' ? '开放' : '禁止' }}</b>
@@ -561,6 +571,7 @@ function toPayload(r) {
   return {
     tool: r.tool || '*',
     platform: r.platform || '*',
+    chatId: r.chatId || '',
     userIds: isAllUsers(r.userIds) ? ['*'] : r.userIds,
     decision: r.decision === 'deny' ? 'deny' : 'allow',
     enabled: !!r.enabled,
@@ -683,7 +694,7 @@ const dialogVisible = ref(false)
 const editing = ref(false)
 const editingId = ref(null)
 const userIdsText = ref('*')
-const form = ref({ tool: '*', platform: 'web', decision: 'allow', enabled: true, sort: 0 })
+const form = ref({ tool: '*', platform: 'web', chatId: '', decision: 'allow', enabled: true, sort: 0 })
 
 // ---- 工具选择器 ----
 // 用分组卡片列表代替下拉自动补全：工具数量多、名字长、说明需要换行，
@@ -817,6 +828,7 @@ function openEdit(r) {
   form.value = {
     tool: r.tool || '*',
     platform: r.platform || '*',
+    chatId: r.chatId || '',
     decision: r.decision || 'allow',
     enabled: !!r.enabled,
     sort: Number(r.sort || 0)
@@ -831,6 +843,7 @@ async function confirmSave() {
   const payload = {
     tool: (form.value.tool || '').trim() || '*',
     platform: (form.value.platform || '').trim() || '*',
+    chatId: (form.value.chatId || '').trim(),
     userIds: textToUsers(userIdsText.value),
     decision: form.value.decision === 'deny' ? 'deny' : 'allow',
     enabled: form.value.enabled,
@@ -983,6 +996,12 @@ async function confirmSave() {
 .pf-misskey  { background: var(--bp-success-soft); color: var(--bp-success); }
 .pf-all      { background: var(--bp-accent-soft); color: var(--bp-accent); }
 .pf-other    { background: var(--bp-surface-fill); color: var(--bp-label-tertiary); }
+
+.chat-tag {
+  display: inline-block; margin-top: 3px; font-size: 10.5px; padding: 1px 7px; border-radius: 4px;
+  background: var(--bp-surface-fill); color: var(--bp-label-tertiary); max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .c-users { flex: 1.4; min-width: 0; display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; overflow: hidden; }
 .user-all { font-size: 12px; color: var(--bp-label-tertiary); }
