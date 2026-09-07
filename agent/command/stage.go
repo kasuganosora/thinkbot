@@ -32,6 +32,7 @@ type CommandStage struct {
 	name     string
 	registry *Registry
 	checker  AdminChecker
+	binder   BindingChecker
 	tracer   trace.Tracer
 	logger   *zap.SugaredLogger
 }
@@ -72,6 +73,13 @@ func (s *CommandStage) Name() string { return s.name }
 
 // Registry 返回命令注册表（便于外部注册自定义命令）。
 func (s *CommandStage) Registry() *Registry { return s.registry }
+
+// SetBinder 设置绑定账号检查器（RequireBound 命令使用）。
+// 返回 *CommandStage 以支持链式调用。
+func (s *CommandStage) SetBinder(b BindingChecker) *CommandStage {
+	s.binder = b
+	return s
+}
 
 // Process 执行命令拦截逻辑。
 func (s *CommandStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
@@ -121,6 +129,21 @@ func (s *CommandStage) Process(ctx context.Context, env *core.Envelope) (*core.E
 		}
 	}
 
+	// 绑定账号检查（与 AdminOnly 正交）
+	if handler.RequireBound() {
+		if !s.isBound(ctx, env.Message.Source, env.Message.UserID) {
+			span.SetAttributes(attribute.Bool("command.denied", true))
+			logger.Infow("command denied: not bound",
+				"command", parsed.Name,
+				"message_id", env.Message.ID,
+				"source", env.Message.Source,
+				"user_id", env.Message.UserID)
+			s.reply(env, fmt.Sprintf("⚠️ 命令 /%s 需要已绑定 thinkbot 账号才能使用。请先通过授权码完成账号绑定。", parsed.Name))
+			env.Abort(nil)
+			return env, nil
+		}
+	}
+
 	// 执行命令
 	result, err := handler.Execute(ctx, env, parsed.Args)
 	if err != nil {
@@ -157,6 +180,14 @@ func (s *CommandStage) isAdmin(ctx context.Context, source, userID string) bool 
 		return false
 	}
 	return s.checker.IsAdmin(ctx, source, userID)
+}
+
+// isBound 检查当前用户是否已绑定 thinkbot 内部账号。
+func (s *CommandStage) isBound(ctx context.Context, source, userID string) bool {
+	if s.binder == nil {
+		return false
+	}
+	return s.binder.IsBound(ctx, source, userID)
 }
 
 // reply 添加回复 Action 到 Envelope。

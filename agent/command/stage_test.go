@@ -46,6 +46,7 @@ func (m *mockAccessor) GetFromEnvelope(_ *core.Envelope) *session.Session {
 type collectHandler struct {
 	name         string
 	adminOnly    bool
+	requireBound bool
 	executed     bool
 	receivedEnv  *core.Envelope
 	receivedArgs string
@@ -56,6 +57,7 @@ type collectHandler struct {
 func (h *collectHandler) Name() string        { return h.name }
 func (h *collectHandler) Description() string { return "test handler for " + h.name }
 func (h *collectHandler) AdminOnly() bool     { return h.adminOnly }
+func (h *collectHandler) RequireBound() bool  { return h.requireBound }
 func (h *collectHandler) Execute(_ context.Context, env *core.Envelope, args string) (*CommandResult, error) {
 	h.executed = true
 	h.receivedEnv = env
@@ -312,6 +314,54 @@ func TestStage_AdminOnly_DeniedForNonAdmin(t *testing.T) {
 	}
 	if !result.Aborted() {
 		t.Error("Envelope should be aborted")
+	}
+}
+
+func TestStage_RequireBound_DeniedForUnbound(t *testing.T) {
+	r := NewRegistry()
+	h := &collectHandler{name: "chatid", requireBound: true}
+	r.MustRegister(h)
+
+	binder := BindingCheckerFunc(func(_ context.Context, _, userID string) bool {
+		return userID == "bound-user"
+	})
+	stage := NewCommandStage("command", r, nil, testTP(), testLogger()).SetBinder(binder)
+
+	// 未绑定用户：不应执行，envelope 被 abort
+	env := makeEnvelope("/chatid", "stranger")
+	result, _ := stage.Process(context.Background(), env)
+	if h.executed {
+		t.Error("Handler should not execute for unbound user")
+	}
+	if !result.Aborted() {
+		t.Error("Envelope should be aborted when binding check fails")
+	}
+
+	// 已绑定用户：应执行（并执行后中止 Pipeline 跳过 LLM，符合命令短路语义）
+	env2 := makeEnvelope("/chatid", "bound-user")
+	result2, _ := stage.Process(context.Background(), env2)
+	if !h.executed {
+		t.Error("Handler should execute for bound user")
+	}
+	if !result2.Aborted() {
+		t.Error("Envelope should be aborted after command executes (short-circuit)")
+	}
+}
+
+func TestStage_RequireBound_DeniedWhenNoBinder(t *testing.T) {
+	r := NewRegistry()
+	h := &collectHandler{name: "chatid", requireBound: true}
+	r.MustRegister(h)
+
+	// 未配置 binder：默认拒绝（安全默认）
+	stage := NewCommandStage("command", r, nil, testTP(), testLogger())
+	env := makeEnvelope("/chatid", "anyone")
+	result, _ := stage.Process(context.Background(), env)
+	if h.executed {
+		t.Error("Handler must not execute when binder is nil")
+	}
+	if !result.Aborted() {
+		t.Error("Envelope should be aborted when binder is nil")
 	}
 }
 

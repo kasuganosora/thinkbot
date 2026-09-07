@@ -57,6 +57,27 @@ type AllowAllChecker struct{}
 func (AllowAllChecker) IsAdmin(context.Context, string, string) bool { return true }
 
 // ============================================================================
+// BindingChecker — 绑定账号检查接口
+// ============================================================================
+
+// BindingChecker 检查指定平台用户是否已绑定 thinkbot 内部账号。
+// 调用方可提供基于 identity.BindService 的实现，将 platform userID 解析为内部用户。
+// 未绑定（无映射或解析失败）视为 false。
+type BindingChecker interface {
+	// IsBound 返回指定来源的用户是否已绑定 thinkbot 账号。
+	// source 是消息来源标识（如 "telegram"、"web:1"），userID 是平台侧用户 ID。
+	IsBound(ctx context.Context, source, userID string) bool
+}
+
+// BindingCheckerFunc 将函数适配为 BindingChecker 接口。
+type BindingCheckerFunc func(ctx context.Context, source, userID string) bool
+
+// IsBound 实现 BindingChecker 接口。
+func (f BindingCheckerFunc) IsBound(ctx context.Context, source, userID string) bool {
+	return f(ctx, source, userID)
+}
+
+// ============================================================================
 // CommandHandler — 命令处理器接口
 // ============================================================================
 
@@ -76,6 +97,10 @@ type CommandHandler interface {
 	Description() string
 	// AdminOnly 是否仅管理员可执行。
 	AdminOnly() bool
+	// RequireBound 是否要求发送者已绑定 thinkbot 内部账号。
+	// 绑定判定走 BindingChecker（基于 identity.BindService 的平台→内部账号映射）。
+	// 与 AdminOnly 正交：可同时要求两者，也可只要求其一。
+	RequireBound() bool
 	// Execute 执行命令。
 	// args 是命令后面的参数文本（已 trim）。
 	// env 是当前消息信封，可通过 env.Set/Get 读取 session 等 KV。
@@ -143,10 +168,11 @@ func (r *Registry) List() []CommandHandler {
 
 // CommandFunc 将函数适配为 CommandHandler 接口。
 type CommandFunc struct {
-	CmdName      string
-	CmdDesc      string
-	CmdAdminOnly bool
-	Fn           func(ctx context.Context, env *core.Envelope, args string) (*CommandResult, error)
+	CmdName         string
+	CmdDesc         string
+	CmdAdminOnly    bool
+	CmdRequireBound bool
+	Fn              func(ctx context.Context, env *core.Envelope, args string) (*CommandResult, error)
 }
 
 // Name 实现 CommandHandler 接口。
@@ -157,6 +183,9 @@ func (c *CommandFunc) Description() string { return c.CmdDesc }
 
 // AdminOnly 实现 CommandHandler 接口。
 func (c *CommandFunc) AdminOnly() bool { return c.CmdAdminOnly }
+
+// RequireBound 实现 CommandHandler 接口。
+func (c *CommandFunc) RequireBound() bool { return c.CmdRequireBound }
 
 // Execute 实现 CommandHandler 接口。
 func (c *CommandFunc) Execute(ctx context.Context, env *core.Envelope, args string) (*CommandResult, error) {

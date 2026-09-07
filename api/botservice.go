@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
+	"github.com/kasuganosora/thinkbot/agent/command"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/engagement"
 	"github.com/kasuganosora/thinkbot/agent/heartbeat"
@@ -117,10 +118,12 @@ type BotService struct {
 	// 不再流入 LLM。必须在每个 bot 的 pipeline builder 中显式 Add——多 bot 模式下
 	// pipeline 用 NewBuilder 显式拼接，不走 pipeline_stages fx 分组，漏加则绑定机制失效。
 	bindStage *identity.BindStage
+	// bindSvc 身份绑定服务，供命令子系统（如 /chatid）的绑定校验使用。
+	bindSvc *identity.BindService
 }
 
 // NewBotService 创建 BotService。
-func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, judgeSink engagement.JudgeRecordSink, chatHistory *ChatHistoryService, permSvc *toolperm.Service, bindStage *identity.BindStage) *BotService {
+func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger *zap.SugaredLogger, tp trace.TracerProvider, mp metric.MeterProvider, eventBus outbound.EventBus, statsRecorder llm.UsageRecorder, judgeSink engagement.JudgeRecordSink, chatHistory *ChatHistoryService, permSvc *toolperm.Service, bindStage *identity.BindStage, bindSvc *identity.BindService) *BotService {
 	if tp == nil {
 		tp = noop_trace.NewTracerProvider()
 	}
@@ -162,6 +165,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		toolManagers:   make(map[string]*agenttools.ToolManager),
 		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
 		bindStage:      bindStage,
+		bindSvc:        bindSvc,
 	}
 }
 
@@ -1370,6 +1374,25 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 不流入 LLM。显式 Add——多 bot 模式 pipeline 不走 pipeline_stages 分组，漏加则失效。
 	if s.bindStage != nil {
 		pb.Add(3, s.bindStage)
+	}
+	// 命令拦截 Stage（Order=4，置于链路最前、LLM 之前）：拦截以 / 开头的命令消息，
+	// 命中则执行命令并中止 Pipeline（不发 LLM）。仅注册 /chatid 命令——它返回当前
+	// 会话/群 ID，供用户在「工具权限」里按群配置；其余内建命令（/clear 等）依赖
+	// web 会话，tg/misskey 入站无对应会话，故不注册，避免无效命令暴露。
+	// 绑定校验走 bindSvc.ResolveBySource：未绑定 thinkbot 账号者发 /chatid 会被拒绝。
+	if s.bindSvc != nil {
+		cmdRegistry := command.NewRegistry()
+		cmdRegistry.MustRegister(command.NewChatIDHandler())
+		cmdBinder := command.BindingCheckerFunc(func(ctx context.Context, source, userID string) bool {
+			mapping, err := s.bindSvc.ResolveBySource(ctx, source, userID)
+			if err != nil {
+				return false
+			}
+			return mapping != nil
+		})
+		cmdStage := command.NewCommandStage("command", cmdRegistry, nil, s.tp, s.logger).
+			SetBinder(cmdBinder)
+		pb.Add(4, cmdStage)
 	}
 	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
 	pb.Add(40, inboundHistoryEnricher)
@@ -2616,4 +2639,3 @@ func buildQuoteBlock(meta map[string]any) string {
 	}
 	return fmt.Sprintf("[引用消息]\n%s", rt)
 }
-
