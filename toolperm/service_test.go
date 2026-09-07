@@ -498,3 +498,97 @@ func TestUpdateRule_PartialDoesNotResetFields(t *testing.T) {
 		t.Errorf("userIds should be replaced, got %v", upd3.UserIDs)
 	}
 }
+
+// TestEvaluator_FilterTools_UserIdentityOR 验证工具权限的「用户」字段支持三种身份的
+// OR 匹配：平台数字 ID、平台账号名（tg/misskey 英文账号名）、以及已绑定的 thinkbot
+// 账号名。只要规则里配的任一身份命中当前用户的任一候选身份，即视为匹配。
+//
+// 场景：telegram 上 sandbox_exec 对所有人 deny，但允许「身份识别为用户 luna 的人」
+// 使用（allow 规则排序更靠前、首条匹配生效）。然后分别用三种身份逼近该用户。
+func TestEvaluator_FilterTools_UserIdentityOR(t *testing.T) {
+	svc := newTestService(t)
+	// 1) 全员 deny sandbox_exec（telegram）
+	if _, err := svc.CreateRule("bot-or", RuleReq{
+		Tool: "sandbox_exec", Platform: "telegram", UserIDs: []string{"*"},
+		Decision: DecisionDeny, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 2) 允许「任一身份等于 123456789 / luna_tg / luna」的用户（首条匹配优先）
+	if _, err := svc.CreateRule("bot-or", RuleReq{
+		Tool: "sandbox_exec", Platform: "telegram",
+		UserIDs:  []string{"123456789", "luna_tg", "luna"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(-1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := svc.NewEvaluator()
+	tools := []llm.Tool{{Name: "sandbox_exec"}}
+
+	// (a) 平台数字 ID 命中
+	tgNum := &agenttools.ToolSessionContext{
+		BotID: "bot-or", SourceChannelType: "telegram", UserID: "123456789",
+		UserIdentifiers: []string{"123456789", "someone_else"},
+	}
+	out, err := ev.FilterTools(context.Background(), tools, tgNum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("(a) numeric ID should match allow rule, got %d tools", len(out))
+	}
+
+	// (b) 平台账号名命中（无需 thinkbot 绑定）
+	tgUname := &agenttools.ToolSessionContext{
+		BotID: "bot-or", SourceChannelType: "telegram", UserID: "777",
+		UserIdentifiers: []string{"777", "luna_tg"},
+	}
+	out, err = ev.FilterTools(context.Background(), tools, tgUname)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("(b) platform username should match allow rule, got %d tools", len(out))
+	}
+
+	// (c) thinkbot 账号名命中：构造绑定关系 telegram 数字ID=555 → users.luna
+	if err := svc.db.Create(&dao.User{
+		Username: "luna", Role: "member", Status: "active", PasswordHash: "x",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var u dao.User
+	if err := svc.db.Where("username = ?", "luna").First(&u).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.Create(&dao.IdentityMapping{
+		UserID: u.ID, Platform: "telegram", PlatformUserID: "555",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	tgTB := &agenttools.ToolSessionContext{
+		BotID: "bot-or", SourceChannelType: "telegram", UserID: "555",
+		UserIdentifiers: []string{"555", "someone"},
+	}
+	out, err = ev.FilterTools(context.Background(), tools, tgTB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("(c) bound thinkbot username should match via identity_mappings, got %d tools", len(out))
+	}
+
+	// (d) 未绑定 thinkbot 账号、且数字 ID / 平台账号名都不在白名单 → 仍被 deny
+	tgNone := &agenttools.ToolSessionContext{
+		BotID: "bot-or", SourceChannelType: "telegram", UserID: "999",
+		UserIdentifiers: []string{"999", "stranger"},
+	}
+	out, err = ev.FilterTools(context.Background(), tools, tgNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("(d) no identity should match → denied, got %d tools", len(out))
+	}
+}
