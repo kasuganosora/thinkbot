@@ -62,6 +62,7 @@ ch.ChannelTools(ctx)                                          // 返回平台专
 | `telegram_get_chat_member_count` | 获取群成员数量 |
 | `telegram_get_chat_administrators` | 获取群管理员列表 |
 | `telegram_pin_message` | 置顶消息 |
+| `telegram_send_document` | 发送工作空间文件（multipart 上传 sendDocument；文件源经 `SetFileSource` 注入，缺省发当前会话） |
 
 ## 架构
 

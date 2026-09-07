@@ -18,6 +18,8 @@ func TestIsBroadcastTool_Classification(t *testing.T) {
 		"telegram_ban_member", "telegram_unban_member",
 		// 前缀兜底：未登记的新 Channel 写工具也应判为对外发言
 		"misskey_quote_note", "telegram_promote_member",
+		// 显式登记的文件投递工具
+		"telegram_send_document",
 	}
 	for _, name := range broadcast {
 		if !IsBroadcastTool(name) {
