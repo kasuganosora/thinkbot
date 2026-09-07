@@ -77,6 +77,9 @@ func (h *ClearHandler) Description() string { return "清空当前会话上下�
 // AdminOnly 命令是否需要管理员权限。
 func (h *ClearHandler) AdminOnly() bool { return true }
 
+// RequireBound 命令是否要求绑定账号。
+func (h *ClearHandler) RequireBound() bool { return false }
+
 // Execute 执行 /clear 命令。
 func (h *ClearHandler) Execute(_ context.Context, env *core.Envelope, _ string) (*CommandResult, error) {
 	if h.accessor == nil {
@@ -127,6 +130,9 @@ func (h *CompactHandler) Description() string {
 
 // AdminOnly 命令是否需要管理员权限。
 func (h *CompactHandler) AdminOnly() bool { return true }
+
+// RequireBound 命令是否要求绑定账号。
+func (h *CompactHandler) RequireBound() bool { return false }
 
 // Execute 执行 /compact 命令。
 func (h *CompactHandler) Execute(_ context.Context, env *core.Envelope, args string) (*CommandResult, error) {
@@ -180,6 +186,9 @@ func (h *HelpHandler) Description() string { return "显示可用命令列表" }
 // AdminOnly 命令是否需要管理员权限。
 func (h *HelpHandler) AdminOnly() bool { return false }
 
+// RequireBound 命令是否要求绑定账号。
+func (h *HelpHandler) RequireBound() bool { return false }
+
 // Execute 执行 /help 命令。
 func (h *HelpHandler) Execute(_ context.Context, _ *core.Envelope, _ string) (*CommandResult, error) {
 	commands := h.registry.List()
@@ -191,14 +200,45 @@ func (h *HelpHandler) Execute(_ context.Context, _ *core.Envelope, _ string) (*C
 	sb.WriteString("📋 **可用命令列表**\n\n")
 	for _, cmd := range commands {
 		prefix := ""
-		if cmd.AdminOnly() {
+		if cmd.RequireBound() {
+			prefix = " 🔗"
+		} else if cmd.AdminOnly() {
 			prefix = " 🔒"
 		}
 		fmt.Fprintf(&sb, "- `/%s`%s — %s\n", cmd.Name(), prefix, cmd.Description())
 	}
-	sb.WriteString("\n_🔒 = 仅管理员可用_")
+	notes := []string{}
+	if anyBound(commands) {
+		notes = append(notes, "_🔗 = 需已绑定 thinkbot 账号_")
+	}
+	if anyAdmin(commands) {
+		notes = append(notes, "_🔒 = 仅管理员可用_")
+	}
+	if len(notes) > 0 {
+		sb.WriteString("\n" + strings.Join(notes, "；") + "\n")
+	}
 
 	return &CommandResult{Reply: sb.String(), OK: true}, nil
+}
+
+// anyBound 返回命令列表中是否存在需要绑定账号的命令。
+func anyBound(cmds []CommandHandler) bool {
+	for _, c := range cmds {
+		if c.RequireBound() {
+			return true
+		}
+	}
+	return false
+}
+
+// anyAdmin 返回命令列表中是否存在仅管理员可用的命令。
+func anyAdmin(cmds []CommandHandler) bool {
+	for _, c := range cmds {
+		if c.AdminOnly() {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================
@@ -224,6 +264,9 @@ func (h *StatusHandler) Description() string { return "显示当前会话状态"
 
 // AdminOnly 命令是否需要管理员权限。
 func (h *StatusHandler) AdminOnly() bool { return false }
+
+// RequireBound 命令是否要求绑定账号。
+func (h *StatusHandler) RequireBound() bool { return false }
 
 // Execute 执行 /status 命令。
 func (h *StatusHandler) Execute(_ context.Context, env *core.Envelope, _ string) (*CommandResult, error) {
