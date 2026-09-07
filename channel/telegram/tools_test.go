@@ -130,6 +130,50 @@ func TestSendDocumentTool_UploadsWorkspaceFile(t *testing.T) {
 	}
 }
 
+func TestSendDocumentTool_FilenameWithQuoteIsEscaped(t *testing.T) {
+	srv, got := newSendDocTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		if path != `demo/re"port.txt` {
+			return nil, errors.New("unexpected path " + path)
+		}
+		return []byte("quoted name"), nil
+	})
+	defs, _ := ch.ChannelTools(context.Background())
+	var docTool *llm.Tool
+	for i := range defs {
+		if defs[i].Name == "telegram_send_document" {
+			docTool = &defs[i].Tool
+		}
+	}
+
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{
+		BotID:       "test-bot",
+		ChatID:      "777",
+		ChannelType: "telegram",
+	})
+	// 文件名含双引号：必须被 multipart 正确转义，否则 Content-Disposition 头部损坏。
+	res, err := docTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": `demo/re"port.txt`,
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	m, _ := res.(map[string]any)
+	if m["fileName"] != `re"port.txt` {
+		t.Errorf("fileName = %v, want re\"port.txt", m["fileName"])
+	}
+	if len(*got) != 1 {
+		t.Fatalf("server received %d requests, want 1", len(*got))
+	}
+	if (*got)[0]["__filename"] != `re"port.txt` {
+		t.Errorf("uploaded filename = %q, want re\"port.txt (quote must survive escaping)", (*got)[0]["__filename"])
+	}
+	if (*got)[0]["__content"] != "quoted name" {
+		t.Errorf("uploaded content = %q", (*got)[0]["__content"])
+	}
+}
+
 func TestSendDocumentTool_RequiresChatContext(t *testing.T) {
 	srv, _ := newSendDocTestServer(t)
 	ch := newSendDocTestChannel(srv)

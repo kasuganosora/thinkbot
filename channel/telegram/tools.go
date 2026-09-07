@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -500,11 +501,10 @@ func (c *TelegramChannel) sendDocumentTool() agenttools.ToolDef {
 						caption = string(runes[:1024])
 					}
 				}
-				filename := path
-				if i := strings.LastIndex(filename, "/"); i >= 0 {
-					filename = filename[i+1:]
-				}
-				if filename == "" {
+				// 取路径最后一段作为文件名。统一处理 / 与 \ 分隔符
+				// （与 sandbox.validatePath 的归一化一致），并兜住尾部斜杠。
+				filename := filepath.Base(strings.ReplaceAll(path, "\\", "/"))
+				if filename == "" || filename == "." {
 					filename = "file"
 				}
 				msgID, err := c.api.sendDocument(ctx, chatID, filename, caption, "", data)
