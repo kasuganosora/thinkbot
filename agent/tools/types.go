@@ -120,7 +120,20 @@ type ToolSessionContext struct {
 	ChatType string
 
 	// UserID 发送者 ID。
+	// 通常为平台数字 ID（字符串形式，如 Telegram 的 "123456789"）。
 	UserID string
+
+	// UserIdentifiers 当前用户的所有可识别身份（候选集），用于权限匹配时的 OR 判定。
+	// 由 envelopeToSessionContext 在构建时填充，至少包含：
+	//   - UserID（平台数字 ID，如 "123456789"）
+	//   - 平台账号名（Telegram/Misskey 的 username，无 @ 前缀，如 "luna"）
+	// thinkbot 内部账号名（若该平台账号已绑定 thinkbot 账号）由 toolperm 评估层
+	// 经 identity_mappings + users 反查后并入候选集。
+	//
+	// 权限规则（bot_tool_permissions.user_ids / ToolRule.AllowedUsers）中的任一身份，
+	// 只要命中候选集中的一个即视为匹配（OR 语义）。这样管理员可填数字 ID、
+	// 平台账号名或 thinkbot 账号名中的任意一种，都能正确识别同一用户。
+	UserIdentifiers []string
 
 	// MessageID 消息 ID。
 	MessageID string

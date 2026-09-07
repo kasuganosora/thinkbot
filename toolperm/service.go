@@ -29,6 +29,7 @@ package toolperm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -209,9 +210,19 @@ func (s *Service) evalRules(botID string) ([]RuleDTO, error) {
 	return out, nil
 }
 
-// Evaluate 判定某 bot 在给定工具/平台/用户下是否允许使用。
+// Evaluate 是单用户版本的兼容包装：将单个 userID 包成候选集后委托 EvaluateUsers。
+// 新增的多身份 OR 匹配请使用 EvaluateUsers。
+func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
+	return s.EvaluateUsers(botID, tool, platform, []string{userID})
+}
+
+// EvaluateUsers 判定某 bot 在给定工具/平台/用户候选身份下是否允许使用。
 //
-// 判定顺序：
+// candidateIDs 是当前用户的全部可识别身份（OR 语义）：平台数字 ID、平台账号名，
+// 以及（若该平台账号已绑定 thinkbot 账号）thinkbot 内部账号名。规则中的任一
+// user_id 只要命中候选集中的任意一个即视为匹配（详见 matchUserIDs）。
+//
+// 判定顺序与 Evaluate 完全一致：
 //  1. 按 sort 升序遍历启用规则，首条同时匹配 (tool, platform, user) 的规则决定结果
 //     —— 管理员的显式配置永远优先，包括对基础工具的 deny；
 //  2. 无规则命中时，该平台完全没有启用规则 → **保守默认（风险分级，修复 5142）**：
@@ -224,7 +235,7 @@ func (s *Service) evalRules(botID string) ([]RuleDTO, error) {
 //
 // 第 3 步的白名单模式是关键：管理员一旦开始配置某平台，未命中的工具即按最严
 // 默认处理，避免「配一条 deny 反而放开其它」的提权；基础工具仍不受牵连。
-func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
+func (s *Service) EvaluateUsers(botID, tool, platform string, candidateIDs []string) bool {
 	rules, err := s.evalRules(botID)
 	if err != nil {
 		s.logger.Warnw("evaluate tool perm failed", "bot", botID, "err", err)
@@ -238,7 +249,7 @@ func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
 		if !matchPlatform(r.Platform, platform) {
 			continue
 		}
-		if !matchUser(r.UserIDs, userID) {
+		if !matchUserIDs(r.UserIDs, candidateIDs) {
 			continue
 		}
 		return r.Decision == DecisionAllow
@@ -538,6 +549,7 @@ func matchPlatform(pattern, platform string) bool {
 }
 
 // matchUser 用户匹配：列表含 "*" 匹配全部；否则按精确（或 * 通配）匹配 userID。
+// 保留给发言权限（outbound）等单身份场景；多身份 OR 匹配见 matchUserIDs。
 func matchUser(userIDs []string, userID string) bool {
 	if len(userIDs) == 0 {
 		return false
@@ -551,6 +563,86 @@ func matchUser(userIDs []string, userID string) bool {
 		}
 	}
 	return false
+}
+
+// matchUserIDs 多身份 OR 匹配：规则中的任一 user_id 命中候选集（candidateIDs）
+// 中的任意一个即返回 true。user_id 含 "*" 匹配全部；否则按精确（或 * 通配）匹配。
+// 两侧均去除前导 @，使管理员填的 "luna" 与平台侧 "@luna" 等价。
+func matchUserIDs(ruleUserIDs, candidateIDs []string) bool {
+	if len(ruleUserIDs) == 0 {
+		return false
+	}
+	for _, ru := range ruleUserIDs {
+		ru = normalizeIdentity(ru)
+		if ru == "*" || ru == "" {
+			return true
+		}
+		for _, cu := range candidateIDs {
+			cu = normalizeIdentity(cu)
+			if cu != "" && matchGlob(ru, cu) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// normalizeIdentity 归一化用户标识：去除首尾空白与前导 @，使 "luna" 与 "@luna" 等价。
+func normalizeIdentity(s string) string {
+	s = strings.TrimSpace(s)
+	return strings.TrimPrefix(s, "@")
+}
+
+// dedupeIdentities 对标识符去重（保序），并丢弃空串。
+func dedupeIdentities(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = normalizeIdentity(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// resolveThinkbotUsernames 根据「平台类型 + 平台数字 ID」反查该用户绑定的
+// thinkbot 内部账号名。未绑定（identity_mappings 无记录）或无对应用户时返回 nil。
+// 用于在权限匹配中支持「填 thinkbot 账号名识别已绑定用户」的语义；
+// 未绑定的平台账号即使填了 thinkbot 账号名也不会命中。
+func (s *Service) resolveThinkbotUsernames(platform, platformUserID string) []string {
+	if platform == "" || platformUserID == "" {
+		return nil
+	}
+	var mapping dao.IdentityMapping
+	if err := s.db.Where("platform = ? AND platform_user_id = ?", platform, platformUserID).
+		First(&mapping).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warnw("resolve thinkbot username: identity mapping lookup failed",
+				"platform", platform, "err", err)
+		}
+		return nil
+	}
+	var u dao.User
+	if err := s.db.Where("id = ?", mapping.UserID).First(&u).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.Warnw("resolve thinkbot username: user lookup failed",
+				"user_id", mapping.UserID, "err", err)
+		}
+		return nil
+	}
+	if u.Username == "" {
+		return nil
+	}
+	return []string{u.Username}
 }
 
 // matchGlob 简易 glob：仅支持 * 作为多字符通配。
@@ -627,12 +719,15 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 	if platform == "" {
 		platform = sctx.Channel
 	}
+	// 组装当前用户的候选身份（数字 ID + 平台账号名 + 已绑定的 thinkbot 账号名），
+	// 供工具列表过滤与 call-time 复核共用，避免重复查库。
+	candidates := e.resolveCandidates(sctx)
 	// 快照会话维度：sctx 是指针，调用方后续可能复用/改写它，
 	// 而 call-time 复核发生在本函数返回之后，必须捕获值而非解引用指针。
-	botID, userID, isSystem := sctx.BotID, sctx.UserID, sctx.IsSystem
+	botID, isSystem := sctx.BotID, sctx.IsSystem
 	out := make([]llm.Tool, 0, len(toolList))
 	for _, t := range toolList {
-		if !e.allow(botID, t.Name, platform, userID, isSystem, sctx.IsSubagent) {
+		if !e.allow(botID, t.Name, platform, candidates, isSystem, sctx.IsSubagent) {
 			continue
 		}
 		// 二次防御：调用时再用会话上下文复核权限，防止列表过滤被绕过
@@ -641,7 +736,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		orig := t.Execute
 		wt := t
 		wt.Execute = func(ctx *llm.ToolExecContext, input any) (any, error) {
-			if !e.allow(botID, toolName, platform, userID, isSystem, sctx.IsSubagent) {
+			if !e.allow(botID, toolName, platform, candidates, isSystem, sctx.IsSubagent) {
 				return nil, fmt.Errorf("tool %q is not permitted for bot %q on platform %q", toolName, botID, platform)
 			}
 			if orig == nil {
@@ -652,6 +747,28 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		out = append(out, wt)
 	}
 	return out, nil
+}
+
+// resolveCandidates 收集当前用户在工具权限评估中的所有可识别身份（OR 匹配候选集）：
+//   - sctx.UserIdentifiers：已在 envelopeToSessionContext 中填充的平台数字 ID 与平台账号名
+//   - 若该平台账号已绑定 thinkbot 内部账号，追加 thinkbot 账号名（经 identity_mappings + users 反查）
+//
+// 所有身份经去 @ 前缀与去重归一化，保证「luna」与「@luna」等价。
+func (e *evaluator) resolveCandidates(sctx *tools.ToolSessionContext) []string {
+	ids := make([]string, 0, len(sctx.UserIdentifiers)+1)
+	// UserIdentifiers 已含数字 ID 与平台账号名，直接复用，避免重复收集。
+	ids = append(ids, sctx.UserIdentifiers...)
+	// 反查 thinkbot 账号名：需要平台 + 平台数字 ID。
+	platform := sctx.SourceChannelType
+	if platform == "" {
+		platform = sctx.Channel
+	}
+	if sctx.UserID != "" && platform != "" {
+		for _, name := range e.svc.resolveThinkbotUsernames(platform, sctx.UserID) {
+			ids = append(ids, name)
+		}
+	}
+	return dedupeIdentities(ids)
 }
 
 // allow 是单工具判定，统一处理两处豁免边界：
@@ -665,7 +782,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 //     发言）作为兜底保留——子代理无论平台为空还是带了 web，都不许发言。
 //     非发言工具按平台规则评估（web 的 `*` 放开工作空间，使「审查并修复代码」
 //     类节点能真正 exec/读写），不再被空平台的「敏感工具默认禁止」误伤。
-func (e *evaluator) allow(botID, tool, platform, userID string, isSystem, isSubagent bool) bool {
+func (e *evaluator) allow(botID, tool, platform string, candidates []string, isSystem, isSubagent bool) bool {
 	broadcast := IsBroadcastTool(tool)
 	if broadcast && (platform == "" || isSubagent) {
 		return false
@@ -673,5 +790,5 @@ func (e *evaluator) allow(botID, tool, platform, userID string, isSystem, isSuba
 	if isSystem && !broadcast {
 		return true
 	}
-	return e.svc.Evaluate(botID, tool, platform, userID)
+	return e.svc.EvaluateUsers(botID, tool, platform, candidates)
 }
