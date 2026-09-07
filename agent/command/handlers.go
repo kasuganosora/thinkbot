@@ -273,6 +273,9 @@ func RegisterBuiltins(registry *Registry, accessor SessionAccessor, keepRecent i
 	// /help 始终注册
 	registry.MustRegister(NewHelpHandler(registry))
 
+	// /chatid 始终注册（不依赖 session），便于在群里直接获取群 ID 用于权限配置
+	registry.MustRegister(NewChatIDHandler())
+
 	if accessor != nil {
 		registry.MustRegister(NewClearHandler(accessor))
 		registry.MustRegister(NewCompactHandler(accessor, keepRecent))

@@ -116,6 +116,11 @@ type ToolSessionContext struct {
 	// Channel 当前消息所属会话空间。
 	Channel string
 
+	// ChatID 当前会话/群的标识（telegram 下为群/私聊 chat ID，如 "-1001234567890"；
+	// 其它平台为其会话/渠道标识）。用于工具权限规则按「某个具体会话」收窄，
+	// 与 bot_tool_permissions.chat_id 维度对应。空值表示该维度不参与匹配。
+	ChatID string
+
 	// ChatType 会话类型（private/group/...）。
 	ChatType string
 

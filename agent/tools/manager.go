@@ -309,6 +309,7 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 	sctx := &ToolSessionContext{
 		BotID:     env.Message.BotID,
 		Channel:   env.Message.Channel,
+		ChatID:    env.Message.Channel,
 		ChatType:  env.Message.ChatType,
 		UserID:    env.Message.UserID,
 		MessageID: env.Message.ID,

@@ -57,6 +57,7 @@ type RuleDTO struct {
 	BotID     string    `json:"botId"`
 	Tool      string    `json:"tool"`
 	Platform  string    `json:"platform"`
+	ChatID    string    `json:"chatId"`
 	UserIDs   []string  `json:"userIds"`
 	Decision  string    `json:"decision"`
 	Enabled   bool      `json:"enabled"`
@@ -81,6 +82,10 @@ type RuleReq struct {
 
 	// Platform 平台类型（"*" = 全部）。更新时留空表示不修改。
 	Platform string `json:"platform"`
+
+	// ChatID 会话/群标识（"*" 或空 = 全部会话；填具体 tg 群 ID 如 "-1001234567890" 仅对该群生效）。
+	// 更新时留空表示不修改。
+	ChatID string `json:"chatId"`
 
 	// UserIDs 用户 ID 列表；含 "*" 表示全部。更新时为空表示不修改。
 	UserIDs []string `json:"userIds"`
@@ -213,17 +218,21 @@ func (s *Service) evalRules(botID string) ([]RuleDTO, error) {
 // Evaluate 是单用户版本的兼容包装：将单个 userID 包成候选集后委托 EvaluateUsers。
 // 新增的多身份 OR 匹配请使用 EvaluateUsers。
 func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
-	return s.EvaluateUsers(botID, tool, platform, []string{userID})
+	// 发言权限等单身份场景无会话维度：chatID 传空表示匹配全部会话。
+	return s.EvaluateUsers(botID, tool, platform, "", []string{userID})
 }
 
-// EvaluateUsers 判定某 bot 在给定工具/平台/用户候选身份下是否允许使用。
+// EvaluateUsers 判定某 bot 在给定工具/平台/会话/用户候选身份下是否允许使用。
+//
+// chatID 是当前会话标识（telegram 下为群/私聊 chat ID）。规则可按 chatID 进一步
+// 收窄到某个具体会话（如某个 tg 群），空值或 "*" 表示该规则匹配全部会话。
 //
 // candidateIDs 是当前用户的全部可识别身份（OR 语义）：平台数字 ID、平台账号名，
 // 以及（若该平台账号已绑定 thinkbot 账号）thinkbot 内部账号名。规则中的任一
 // user_id 只要命中候选集中的任意一个即视为匹配（详见 matchUserIDs）。
 //
 // 判定顺序与 Evaluate 完全一致：
-//  1. 按 sort 升序遍历启用规则，首条同时匹配 (tool, platform, user) 的规则决定结果
+//  1. 按 sort 升序遍历启用规则，首条同时匹配 (tool, platform, chatID, user) 的规则决定结果
 //     —— 管理员的显式配置永远优先，包括对基础工具的 deny；
 //  2. 无规则命中时，该平台完全没有启用规则 → **保守默认（风险分级，修复 5142）**：
 //     基础工具与对外发言工具放行，敏感工具（联网/命令执行/文件写/派生子智能体）
@@ -235,7 +244,7 @@ func (s *Service) Evaluate(botID, tool, platform, userID string) bool {
 //
 // 第 3 步的白名单模式是关键：管理员一旦开始配置某平台，未命中的工具即按最严
 // 默认处理，避免「配一条 deny 反而放开其它」的提权；基础工具仍不受牵连。
-func (s *Service) EvaluateUsers(botID, tool, platform string, candidateIDs []string) bool {
+func (s *Service) EvaluateUsers(botID, tool, platform, chatID string, candidateIDs []string) bool {
 	rules, err := s.evalRules(botID)
 	if err != nil {
 		s.logger.Warnw("evaluate tool perm failed", "bot", botID, "err", err)
@@ -247,6 +256,9 @@ func (s *Service) EvaluateUsers(botID, tool, platform string, candidateIDs []str
 			continue
 		}
 		if !matchPlatform(r.Platform, platform) {
+			continue
+		}
+		if !matchChat(r.ChatID, chatID) {
 			continue
 		}
 		if !matchUserIDs(r.UserIDs, candidateIDs) {
@@ -375,6 +387,7 @@ func toDTO(m *dao.BotToolPermission) RuleDTO {
 		BotID:     m.BotID,
 		Tool:      m.Tool,
 		Platform:  m.Platform,
+		ChatID:    m.ChatID,
 		UserIDs:   uids,
 		Decision:  m.Decision,
 		Enabled:   m.Enabled,
@@ -422,6 +435,12 @@ func applyCommon(m *dao.BotToolPermission, req RuleReq) {
 	}
 	m.Platform = platform
 
+	chatID := strings.TrimSpace(req.ChatID)
+	if chatID == "*" {
+		chatID = "" // 归一化：* 与空等价（均表示全部会话）
+	}
+	m.ChatID = chatID
+
 	uids := req.UserIDs
 	if len(uids) == 0 {
 		uids = []string{"*"}
@@ -465,6 +484,14 @@ func applyReq(m *dao.BotToolPermission, req RuleReq) {
 	}
 	if platform := strings.TrimSpace(req.Platform); platform != "" {
 		m.Platform = platform
+	}
+	// ChatID：仅当显式提供非空值时更新（空串视为「不修改」，保留原值，
+	// 与 userIds 的部分更新语义一致；清空到全部会话请重建规则或传 "*"）。
+	if chatID := strings.TrimSpace(req.ChatID); chatID != "" {
+		if chatID == "*" {
+			chatID = ""
+		}
+		m.ChatID = chatID
 	}
 	if len(req.UserIDs) > 0 {
 		m.UserIDs = marshalUserIDs(req.UserIDs)
@@ -546,6 +573,15 @@ func matchPlatform(pattern, platform string) bool {
 		return true
 	}
 	return pattern == platform
+}
+
+// matchChat 会话/群匹配：pattern 为 "*" 或空匹配全部会话；否则精确相等。
+// rule.ChatID 为空（存量规则 / 平台级规则）时恒匹配，保持「仅配 platform 即全群生效」的旧行为。
+func matchChat(pattern, actual string) bool {
+	if pattern == "" || pattern == "*" {
+		return true
+	}
+	return pattern == actual
 }
 
 // matchUser 用户匹配：列表含 "*" 匹配全部；否则按精确（或 * 通配）匹配 userID。
@@ -719,6 +755,8 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 	if platform == "" {
 		platform = sctx.Channel
 	}
+	// 当前会话标识（telegram 下为群/私聊 chat ID），供按会话/群收窄权限规则。
+	chatID := sctx.ChatID
 	// 组装当前用户的候选身份（数字 ID + 平台账号名 + 已绑定的 thinkbot 账号名），
 	// 供工具列表过滤与 call-time 复核共用，避免重复查库。
 	candidates := e.resolveCandidates(sctx)
@@ -727,7 +765,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 	botID, isSystem := sctx.BotID, sctx.IsSystem
 	out := make([]llm.Tool, 0, len(toolList))
 	for _, t := range toolList {
-		if !e.allow(botID, t.Name, platform, candidates, isSystem, sctx.IsSubagent) {
+		if !e.allow(botID, t.Name, platform, chatID, candidates, isSystem, sctx.IsSubagent) {
 			continue
 		}
 		// 二次防御：调用时再用会话上下文复核权限，防止列表过滤被绕过
@@ -736,7 +774,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		orig := t.Execute
 		wt := t
 		wt.Execute = func(ctx *llm.ToolExecContext, input any) (any, error) {
-			if !e.allow(botID, toolName, platform, candidates, isSystem, sctx.IsSubagent) {
+			if !e.allow(botID, toolName, platform, chatID, candidates, isSystem, sctx.IsSubagent) {
 				return nil, fmt.Errorf("tool %q is not permitted for bot %q on platform %q", toolName, botID, platform)
 			}
 			if orig == nil {
@@ -782,7 +820,7 @@ func (e *evaluator) resolveCandidates(sctx *tools.ToolSessionContext) []string {
 //     发言）作为兜底保留——子代理无论平台为空还是带了 web，都不许发言。
 //     非发言工具按平台规则评估（web 的 `*` 放开工作空间，使「审查并修复代码」
 //     类节点能真正 exec/读写），不再被空平台的「敏感工具默认禁止」误伤。
-func (e *evaluator) allow(botID, tool, platform string, candidates []string, isSystem, isSubagent bool) bool {
+func (e *evaluator) allow(botID, tool, platform, chatID string, candidates []string, isSystem, isSubagent bool) bool {
 	broadcast := IsBroadcastTool(tool)
 	if broadcast && (platform == "" || isSubagent) {
 		return false
@@ -790,5 +828,5 @@ func (e *evaluator) allow(botID, tool, platform string, candidates []string, isS
 	if isSystem && !broadcast {
 		return true
 	}
-	return e.svc.EvaluateUsers(botID, tool, platform, candidates)
+	return e.svc.EvaluateUsers(botID, tool, platform, chatID, candidates)
 }

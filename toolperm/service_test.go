@@ -592,3 +592,55 @@ func TestEvaluator_FilterTools_UserIdentityOR(t *testing.T) {
 		t.Fatalf("(d) no identity should match → denied, got %d tools", len(out))
 	}
 }
+
+// TestEvaluateUsers_ChatScopeOverride 验证「会话/群 ID」维度：
+// 平台级 deny 被单群 allow（sort 更小、优先评估）在同群内覆盖，
+// 其它群/私聊仍走平台级 deny。
+func TestEvaluateUsers_ChatScopeOverride(t *testing.T) {
+	svc := newTestService(t)
+	// 平台级 deny：telegram 上 web_search 默认禁止（chat_id 空 = 全部会话）
+	if _, err := svc.CreateRule("bot-grp", RuleReq{
+		Tool: "web_search", Platform: "telegram", UserIDs: []string{"*"},
+		Decision: DecisionDeny, Enabled: boolp(true), Sort: intp(10),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 单群 allow：仅对群 -100123 放开 web_search（sort 更小，优先评估）
+	if _, err := svc.CreateRule("bot-grp", RuleReq{
+		Tool: "web_search", Platform: "telegram", ChatID: "-100123", UserIDs: []string{"*"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(5),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 在群 -100123：命中单群 allow → 放行
+	if !svc.EvaluateUsers("bot-grp", "web_search", "telegram", "-100123", []string{"u1"}) {
+		t.Fatal("group -100123 should allow web_search")
+	}
+	// 在别的群 -999：单群规则不匹配，落到平台级 deny → 禁止
+	if svc.EvaluateUsers("bot-grp", "web_search", "telegram", "-999", []string{"u1"}) {
+		t.Fatal("other group -999 should deny web_search")
+	}
+	// 私有会话（正 ID）：同样不匹配单群规则 → 平台 deny → 禁止
+	if svc.EvaluateUsers("bot-grp", "web_search", "telegram", "76017910", []string{"u1"}) {
+		t.Fatal("private chat should deny web_search")
+	}
+}
+
+// TestEvaluateUsers_EmptyChatIDMatchesAll 验证存量规则（chat_id 空）对所有会话生效，
+// 即「只配 platform 不配群」的旧行为不变。
+func TestEvaluateUsers_EmptyChatIDMatchesAll(t *testing.T) {
+	svc := newTestService(t)
+	if _, err := svc.CreateRule("bot-ec", RuleReq{
+		Tool: "sandbox_exec", Platform: "telegram", UserIDs: []string{"u1"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.EvaluateUsers("bot-ec", "sandbox_exec", "telegram", "-100123", []string{"u1"}) {
+		t.Fatal("empty chat_id rule must match group -100123")
+	}
+	if !svc.EvaluateUsers("bot-ec", "sandbox_exec", "telegram", "999", []string{"u1"}) {
+		t.Fatal("empty chat_id rule must match chat 999")
+	}
+}

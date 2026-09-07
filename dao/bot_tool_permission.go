@@ -35,6 +35,12 @@ type BotToolPermission struct {
 	// Platform 平台类型（渠道类型：web / telegram / misskey / ...）；"*" 或空表示全部平台。
 	Platform string `gorm:"size:32;not null;default:'*'" json:"platform"`
 
+	// ChatID 会话/群标识维度（可选）。留空或 "*" 表示匹配该平台全部会话；
+	// 填写具体值（如 Telegram 群 chat_id "-1001234567890"）时仅对该会话生效。
+	// 与 platform 维度叠加，用于「针对某个 tg 群单独配置权限」。
+	// 入站时该值取自 core.Message.Channel（telegram 下即为群/私聊 chat ID）。
+	ChatID string `gorm:"size:64;not null;default:''" json:"chatId"`
+
 	// UserIDs 用户 ID 列表的 JSON 数组字符串；含 "*" 表示全部用户。
 	UserIDs string `gorm:"type:text;not null;default:'[\"*\"]'" json:"-"`
 
