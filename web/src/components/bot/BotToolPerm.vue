@@ -359,8 +359,13 @@
         </t-form-item>
 
         <t-form-item label="用户">
-          <t-input v-model="userIdsText" placeholder="逗号分隔，如 u1,u2；* 表示全部用户" />
-          <div class="field-hint">多个用户用英文逗号分隔；留空或 <code>*</code> 表示全部用户。</div>
+          <t-input v-model="userIdsText" placeholder="逗号分隔，如 123456789,luna_tg,luna；* 表示全部用户" />
+          <div class="field-hint">
+            多个用户用英文逗号分隔；留空或 <code>*</code> 表示全部用户。
+            同一用户的以下任一身份命中即生效（OR）：① 平台数字 ID（如 <code>123456789</code>）；
+            ② 平台账号名（telegram / misskey 的英文账号名，如 <code>luna_tg</code>）；
+            ③ 已绑定 thinkbot 的内部账号名（如 <code>luna</code>）。
+          </div>
         </t-form-item>
 
         <t-form-item label="决策">

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -313,6 +314,20 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 		MessageID: env.Message.ID,
 	}
 
+	// 收集当前用户的候选身份（权限匹配用 OR 语义）：
+	// 至少包含平台数字 ID（UserID）与平台账号名（Metadata["username"]）。
+	// thinkbot 内部账号名由 toolperm 评估层经 identity_mappings + users 反查后并入。
+	ids := make([]string, 0, 2)
+	if env.Message.UserID != "" {
+		ids = append(ids, env.Message.UserID)
+	}
+	if env.Message.Metadata != nil {
+		if uname, ok := env.Message.Metadata["username"].(string); ok && uname != "" {
+			ids = append(ids, normalizeUserIdentifier(uname))
+		}
+	}
+	sctx.UserIdentifiers = dedupeIdentifiers(ids)
+
 	// 从 Envelope KV 读取额外信息
 	if v, ok := env.Get("bot.id"); ok {
 		if s, ok := v.(string); ok {
@@ -341,4 +356,32 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 	}
 
 	return sctx
+}
+
+// normalizeUserIdentifier 归一化用户标识：去除前导 @ 与首尾空白，避免
+// 管理员填 "luna" 与平台侧 "luna"（或带 @ 前缀）无法匹配。
+func normalizeUserIdentifier(s string) string {
+	s = strings.TrimSpace(s)
+	return strings.TrimPrefix(s, "@")
+}
+
+// dedupeIdentifiers 对标识符去重（保序），丢弃空串。
+func dedupeIdentifiers(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = normalizeUserIdentifier(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }

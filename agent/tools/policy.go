@@ -63,13 +63,24 @@ type ToolPolicy struct {
 }
 
 // IsAllowed 检查指定工具在给定上下文下是否对指定用户可用。
+// 兼容单用户版本：内部委托 IsAllowedUsers（候选集仅含该 userID）。
+// 多身份 OR 匹配请使用 IsAllowedUsers。
+func (p ToolPolicy) IsAllowed(toolName, channel, chatType, userID string) bool {
+	return p.IsAllowedUsers(toolName, channel, chatType, userID)
+}
+
+// IsAllowedUsers 检查指定工具在给定上下文下是否对任一候选身份可用。
+//
+// candidateIDs 是当前用户的全部可识别身份（OR 语义）：平台数字 ID、平台账号名，
+// 以及（若已绑定）thinkbot 账号名。规则白名单（AllowedUsers）中的任一身份命中
+// 候选集中的一个即放行（与 toolperm.Service.matchUserIDs 行为一致）。
 //
 // 判定流程：
 //  1. 找到所有匹配 channel+chatType 的规则
 //  2. 如果没有任何匹配规则禁用了该工具 → 允许
-//  3. 如果有匹配规则禁用了该工具，检查用户是否在任一匹配规则的白名单中
-//  4. 用户在白名单中 → 允许；否则 → 拒绝
-func (p ToolPolicy) IsAllowed(toolName, channel, chatType, userID string) bool {
+//  3. 如果有匹配规则禁用了该工具，检查任一候选身份是否在白名单中
+//  4. 命中任一 → 允许；否则 → 拒绝
+func (p ToolPolicy) IsAllowedUsers(toolName, channel, chatType string, candidateIDs ...string) bool {
 	if len(p.Rules) == 0 {
 		return true
 	}
@@ -84,9 +95,11 @@ func (p ToolPolicy) IsAllowed(toolName, channel, chatType, userID string) bool {
 		}
 		// 此规则禁用了该工具
 		disabled = true
-		// 检查用户是否在白名单中
-		if sliceContains(rule.AllowedUsers, userID) {
-			return true
+		// 任一候选身份命中白名单即放行
+		for _, uid := range candidateIDs {
+			if uid != "" && sliceContains(rule.AllowedUsers, uid) {
+				return true
+			}
 		}
 	}
 
@@ -99,13 +112,39 @@ func (p ToolPolicy) FilterTools(toolList []llm.Tool, sctx *ToolSessionContext) [
 	if len(p.Rules) == 0 {
 		return toolList
 	}
+	// 候选身份：UserID（平台数字 ID）+ UserIdentifiers（已在 envelopeToSessionContext
+	// 中填充平台数字 ID 与平台账号名）。thinkbot 账号名由 toolperm.Service 评估层
+	// 经 identity_mappings + users 反查后并入；legacy 策略路径若无该层注入，
+	// 此处仅依赖 sctx 已携带的身份。
+	candidates := collectUserIDs(sctx)
 	result := make([]llm.Tool, 0, len(toolList))
 	for _, t := range toolList {
-		if p.IsAllowed(t.Name, sctx.Channel, sctx.ChatType, sctx.UserID) {
+		if p.IsAllowedUsers(t.Name, sctx.Channel, sctx.ChatType, candidates...) {
 			result = append(result, t)
 		}
 	}
 	return result
+}
+
+// collectUserIDs 合并 sctx.UserID 与 sctx.UserIdentifiers，去重并丢弃空串。
+func collectUserIDs(sctx *ToolSessionContext) []string {
+	seen := make(map[string]struct{}, len(sctx.UserIdentifiers)+1)
+	out := make([]string, 0, len(sctx.UserIdentifiers)+1)
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	add(sctx.UserID)
+	for _, id := range sctx.UserIdentifiers {
+		add(id)
+	}
+	return out
 }
 
 // ToolPolicyJSON 将 ToolPolicy 序列化为 JSON 字符串。
