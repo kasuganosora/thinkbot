@@ -158,6 +158,24 @@ func isHeartbeatMode(env *core.Envelope) bool {
 	return false
 }
 
+// isPrivateChat 判断是否为单对单私聊（1:1 direct message）。
+//
+// 私聊场景不存在「把内心独白发到公共时间线」的泄露风险，且 bot 在私聊里一言不发
+// 会让用户以为 bot 坏了，故回复控制门控的 fail-closed（send:false / 缺块即沉默）在
+// 私聊下应反转为 fail-open——见下方 reply-suppress 与 reply-control 两段处理。
+//
+// 系统触发源（心跳 / 定时任务）即使被标成 private，也不走私聊 fail-open：它们由各自
+// 机制（heartbeat 的 decision 字段、cron 的投递目标）单独路由，不应被当作真人私聊强行回复。
+func isPrivateChat(env *core.Envelope) bool {
+	if env == nil || env.Message.ChatType == "" {
+		return false
+	}
+	if env.Message.Source == core.SourceHeartbeat || env.Message.Source == core.SourceCron {
+		return false
+	}
+	return core.NormalizeChatType(env.Message.ChatType) == core.ChatPrivate
+}
+
 // buildLurkPrompt 构建潜水观察者 prompt：优先用 SOUL.md 人格内容，否则回退到已注入的
 // base prompt，再拼接观察者指令。保证「结合 soul.md 模块分析」。
 func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string {
@@ -206,7 +224,8 @@ Rules:
 - A reply with no tags at all is also fine: when send:true, the plain text is posted (subject to the control block above).
 - When send:false, do NOT narrate "I won't reply" as a public message — just set send:false. Any text before the control line (inside or outside tags) is treated as a private note and will NOT be posted.
 - The control line itself is stripped before posting; users never see it.
-- Put the actual reply text BEFORE the control line. The control line must be the very last thing you output.`
+- Put the actual reply text BEFORE the control line. The control line must be the very last thing you output.
+- In a 1:1 private/direct chat (one person talking to you alone) you should almost always reply with send:true. A silent bot in a private chat looks broken to the user; only set send:false if the user explicitly asks you not to respond.`
 
 // replyControlSignal 是回复控制块的结构化产出。
 type replyControlSignal struct {
@@ -1083,32 +1102,54 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// <public>+send:true 给出真实回复（如群内被问技术问题时）仍整条吞掉。
 	// 注：潜水(lurk)/全局静音(mute) 由更早分支或 OutboundGuard 兜底，不会因此漏出发。
 	if suppressed, reason := replySuppressed(env); suppressed {
-		// 模型显式 send:true 仅覆盖「软启发式」抑制门（节奏/engagement 节流判断）：
-		// 这类门表达的是「此刻该不该说」，模型经 REPLY_CONTROL 给出确定性意图时放行合理。
-		// 硬权限门（passive_mode_unmentioned、unanswered_outreach、reaction_notification）
-		// 绝不被模型放行覆盖。
-		override := s.config.RequireReplyControl && modelExplicitlySends(result.Text) &&
-			!core.IsHardSuppressReason(reason)
-		if !override {
+		if core.IsHardSuppressReason(reason) {
+			// 硬权限门（passive_mode_unmentioned、unanswered_outreach、reaction_notification、
+			// target_is_pure_renote 等）绝不被覆盖——私聊亦然：物理不可回复（纯 Renote）
+			// 或不应自主发言（未@、未回应熔断）。只能 fail-closed。
 			span.SetAttributes(
 				attribute.Bool("reply.suppressed", true),
 				attribute.String("reply.suppress_reason", reason),
 			)
-			logger.Infow("reply suppressed: not sending to channel",
+			logger.Infow("reply suppressed: hard gate (not overridable)",
 				"message_id", env.Message.ID,
 				"reason", reason,
 				"text_len", len(result.Text))
 			env.Set("llm.result", result)
-			// 告知 note-capture：本条虽被门禁抑制（不说出口），用户原文仍须落 L0
-			// 记忆——「照样记，只是不说出口」。修复前抑制分支不产出 ActionReply，
-			// note-capture 无 reply 可据 → passive 模式下记忆零写入（2026-09-01 定位）。
 			env.Set(core.KVCaptureSuppressedExchange, true)
 			return env, nil
 		}
-		// 模型显式 send:true → 放行（仅软启发式门被覆盖，硬权限门已排除）。
-		span.SetAttributes(attribute.Bool("reply.override_suppress_by_model", true))
-		logger.Infow("reply suppress overridden by model REPLY_CONTROL send:true",
-			"message_id", env.Message.ID, "original_reason", reason)
+		if isPrivateChat(env) {
+			// 单对单私聊：软门（节奏/engagement 节流）一律不抑制——私聊里 bot 一言不发会让
+			// 用户以为 bot 坏了，且私聊无「刷屏打扰他人」顾虑。直接放行，继续往下走
+			// reply-control 解析（模型仍可通过 reply-control 决定实际发什么内容）。
+			// 注意：不设置 KVCaptureSuppressedExchange——私聊是要说话的，不是「想了不说」。
+			span.SetAttributes(attribute.Bool("reply.private_bypass_soft_gate", true))
+			logger.Infow("private chat: bypassing soft suppress gate (will reply)",
+				"message_id", env.Message.ID, "original_reason", reason)
+		} else {
+			// 非私聊软门：模型显式 send:true 可覆盖（确定性意图优先），否则 fail-closed 静默。
+			override := s.config.RequireReplyControl && modelExplicitlySends(result.Text)
+			if !override {
+				span.SetAttributes(
+					attribute.Bool("reply.suppressed", true),
+					attribute.String("reply.suppress_reason", reason),
+				)
+				logger.Infow("reply suppressed: not sending to channel",
+					"message_id", env.Message.ID,
+					"reason", reason,
+					"text_len", len(result.Text))
+				env.Set("llm.result", result)
+				// 告知 note-capture：本条虽被门禁抑制（不说出口），用户原文仍须落 L0
+				// 记忆——「照样记，只是不说出口」。修复前抑制分支不产出 ActionReply，
+				// note-capture 无 reply 可据 → passive 模式下记忆零写入（2026-09-01 定位）。
+				env.Set(core.KVCaptureSuppressedExchange, true)
+				return env, nil
+			}
+			// 模型显式 send:true → 放行（仅软启发式门被覆盖，硬权限门已在上层排除）。
+			span.SetAttributes(attribute.Bool("reply.override_suppress_by_model", true))
+			logger.Infow("reply suppress overridden by model REPLY_CONTROL send:true",
+				"message_id", env.Message.ID, "original_reason", reason)
+		}
 	}
 
 	// 清洗思考内容：部分模型（DeepSeek-R1/ GLM / QwQ 等）把推理过程以
@@ -1141,8 +1182,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			// 不做这个降级，就会因为一行格式噪音把「真人 @ 提及」的回复整条静默吞掉
 			// （实测 GLM 漏控制行 + 重复 <public> 开标签，导致被 @ 后完全没回复）。
 			pub := explicitPublicReply(replyText)
+			if pub == "" && isPrivateChat(env) {
+				// 私聊兜底：缺失控制块也不该让 bot 一言不发（用户会以为 bot 坏了），
+				// 把清洗后的纯文本当作回复发出（剥离 thinking/内部标记/私密标签）。
+				pub = extractPublicReply(clean)
+			}
 			if pub == "" {
-				// 无显式公开区 → fail-closed，不出站（独白绝不外发）。
+				// 无显式公开区、且私聊兜底也无内容 → fail-closed，不出站（独白绝不外发）。
 				span.SetAttributes(attribute.Bool("reply.control_missing", true))
 				logger.Infow("reply suppressed: missing/invalid reply-control block (fail-closed)",
 					"message_id", env.Message.ID,
@@ -1161,11 +1207,30 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			replyText = pub
 
 		case !send:
-			span.SetAttributes(attribute.Bool("reply.model_declined", true))
-			logger.Infow("reply suppressed: model declared send=false",
-				"message_id", env.Message.ID)
-			env.Set("llm.result", result)
-			return env, nil
+			if isPrivateChat(env) {
+				// 私聊（1:1）反转为 fail-open：私聊里 bot 一言不发会让用户以为 bot 坏了，
+				// 且私聊无「把内心独白发到公共时间线」的泄露风险。尽量提取可发内容（<public>
+				// 优先，否则清洗后的纯文本）；提取不到任何内容（如模型只写了 <internal> 私密
+				// 心话而无 <public>）时才仍不发出——那是「没话可说」，而非「拒绝回复」。
+				pub := extractPublicReply(clean)
+				if strings.TrimSpace(pub) == "" {
+					span.SetAttributes(attribute.Bool("reply.private_no_postable_content", true))
+					logger.Infow("reply suppressed: private chat but no postable content",
+						"message_id", env.Message.ID)
+					env.Set("llm.result", result)
+					return env, nil
+				}
+				span.SetAttributes(attribute.Bool("reply.private_fail_open", true))
+				logger.Infow("reply-control send:false overridden in private 1:1 chat (fail-open)",
+					"message_id", env.Message.ID)
+				replyText = pub
+			} else {
+				span.SetAttributes(attribute.Bool("reply.model_declined", true))
+				logger.Infow("reply suppressed: model declared send=false",
+					"message_id", env.Message.ID)
+				env.Set("llm.result", result)
+				return env, nil
+			}
 
 		default:
 			// send:true —— 提取应公开发送的内容（见 extractPublicReply 的三态逻辑）。
