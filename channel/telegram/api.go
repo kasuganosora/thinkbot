@@ -1,8 +1,10 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -369,6 +371,40 @@ func (a *apiClient) sendPhoto(ctx context.Context, chatID int64, photoURL, capti
 		Photo:   photoURL,
 		Caption: caption,
 	})
+}
+
+// sendDocument 发送文件（multipart 上传，支持任意二进制）。
+// caption 可空；返回发送成功的 message_id。
+// 文件大小上限由 Telegram 决定（bot 约 50MB），调用方负责事前校验。
+func (a *apiClient) sendDocument(ctx context.Context, chatID int64, filename, caption string, mimeType string, data []byte) (int64, error) {
+	if err := a.throttle(ctx); err != nil {
+		return 0, errs.Wrap(err, "telegram sendDocument throttle")
+	}
+	form := http.NewMultipartForm().
+		AddField("chat_id", strconv.FormatInt(chatID, 10)).
+		AddField("caption", caption)
+	if mimeType != "" {
+		form = form.AddFileWithMIME("document", filename, mimeType, bytes.NewReader(data))
+	} else {
+		form = form.AddFile("document", filename, bytes.NewReader(data))
+	}
+
+	resp, err := a.client.Post("sendDocument").
+		SetContext(ctx).
+		SetMultipart(form).
+		Do()
+	if err != nil {
+		return 0, errs.Wrap(err, "telegram sendDocument")
+	}
+
+	var apiResp apiResponse[sendMessageResult]
+	if err := resp.JSON(&apiResp); err != nil {
+		return 0, errs.Wrap(err, "telegram sendDocument parse")
+	}
+	if !apiResp.OK {
+		return 0, fmt.Errorf("telegram sendDocument failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
+	}
+	return apiResp.Result.MessageID, nil
 }
 
 // answerCallbackQuery 停止客户端按钮 spinner。text 可空。

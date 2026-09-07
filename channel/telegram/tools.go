@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -51,6 +52,7 @@ In groups you are only triggered when you are @mentioned, when someone replies t
 
 ## Tools you have
 - Read-only (safe, use freely): telegram_get_chat_info, telegram_get_chat_member_count, telegram_get_chat_administrators.
+- File delivery: telegram_send_document sends a workspace file to the user — after generating a file in the workspace, use it to actually deliver the file instead of saying you cannot.
 - Write operations (irreversible and visible to everyone — be certain before using): telegram_ban_member, telegram_unban_member, telegram_delete_message, telegram_pin_message.
 - Chat IDs are numeric. Use the chatId from the current conversation context when it is the same chat.
 
@@ -71,6 +73,7 @@ func (c *TelegramChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDe
 		c.getChatMemberCountTool(),
 		c.getChatAdministratorsTool(),
 		c.pinMessageTool(),
+		c.sendDocumentTool(),
 	}, nil
 }
 
@@ -416,6 +419,105 @@ func (c *TelegramChannel) pinMessageTool() agenttools.ToolDef {
 				return map[string]any{
 					"success": true,
 					"message": fmt.Sprintf("消息 %d 已置顶", messageID),
+				}, nil
+			}),
+		},
+		Category: "telegram",
+	}
+}
+
+// sendDocumentTool 返回 telegram_send_document 工具定义。
+//
+// 从 bot 工作空间读取文件并作为 Telegram 文档发送——弥合「工作空间里生成了文件
+// 却无法送达用户」的断链（工作空间工具能写，Channel 工具此前只能发文本）。
+// 文件源经 SetFileSource 注入（telegram 包不依赖 sandbox）。
+func (c *TelegramChannel) sendDocumentTool() agenttools.ToolDef {
+	const maxSendBytes = 45 << 20 // 45MB，低于 Telegram bot 50MB 上限，留传输余量
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "telegram_send_document",
+			Description: "Send a file from the bot workspace as a Telegram document. " +
+				"filePath is relative to the workspace root (e.g. \"demo/hello.txt\"). " +
+				"chatId is optional — it defaults to the current conversation; only pass it explicitly to send to a different chat. " +
+				"caption is optional (max 1024 chars). Use this to deliver files you generated in the workspace (reports, code, exports).",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"filePath": map[string]any{
+						"type":        "string",
+						"description": "File path, relative to the bot workspace root",
+					},
+					"chatId": map[string]any{
+						"type":        "integer",
+						"description": "ID of the target chat. Omit to send to the current conversation",
+					},
+					"caption": map[string]any{
+						"type":        "string",
+						"description": "Optional caption shown with the document",
+					},
+				},
+				"required": []string{"filePath"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("telegram_send_document: invalid input type")
+				}
+				path, _ := args["filePath"].(string)
+				if path == "" {
+					return nil, fmt.Errorf("telegram_send_document: filePath is required")
+				}
+				chatID := toInt64(args["chatId"])
+				if chatID == 0 {
+					// 缺省发到当前会话（MessageMeta.ChatID 由 LLMStage 注入）。
+					// 无法确定目标时拒绝执行，避免把文件发给错误的对象。
+					meta := agenttools.MessageMetaFromContext(ctx)
+					chatID = toInt64(meta.ChatID)
+					if chatID == 0 {
+						return nil, fmt.Errorf("telegram_send_document: chatId is required (no current conversation context)")
+					}
+				}
+				caption, _ := args["caption"].(string)
+
+				if c.fileSource == nil {
+					return nil, fmt.Errorf("telegram_send_document: workspace file source not configured")
+				}
+				data, err := c.fileSource(ctx, c.botID, path)
+				if err != nil {
+					return nil, fmt.Errorf("read workspace file %q failed: %w", path, err)
+				}
+				if len(data) == 0 {
+					return nil, fmt.Errorf("telegram_send_document: file %q is empty", path)
+				}
+				if len(data) > maxSendBytes {
+					return nil, fmt.Errorf("telegram_send_document: file %q is %d bytes, exceeds %d byte limit",
+						path, len(data), maxSendBytes)
+				}
+				if len(caption) > 1024 {
+					// 按字节截断可能砍断多字节 UTF-8 字符，先按 rune 数
+					runes := []rune(caption)
+					if len(runes) > 1024 {
+						caption = string(runes[:1024])
+					}
+				}
+				filename := path
+				if i := strings.LastIndex(filename, "/"); i >= 0 {
+					filename = filename[i+1:]
+				}
+				if filename == "" {
+					filename = "file"
+				}
+				msgID, err := c.api.sendDocument(ctx, chatID, filename, caption, "", data)
+				if err != nil {
+					return nil, fmt.Errorf("send document failed: %w", err)
+				}
+				return map[string]any{
+					"success":   true,
+					"messageId": msgID,
+					"chatId":    chatID,
+					"filePath":  path,
+					"fileName":  filename,
+					"fileSize":  len(data),
 				}, nil
 			}),
 		},

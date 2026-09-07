@@ -112,6 +112,9 @@ var broadcastTools = map[string]struct{}{
 	"telegram_delete_message": {}, // 删他人消息
 	"telegram_ban_member":     {}, // 封禁，可连带清空该用户历史消息
 	"telegram_unban_member":   {},
+
+	// Telegram：向会话投递文件（对外可见，且是工作空间数据外泄通道）
+	"telegram_send_document": {},
 }
 
 // broadcastPrefixes 兜住尚未逐个收录的 Channel 写操作工具。

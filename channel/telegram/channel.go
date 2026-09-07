@@ -113,6 +113,21 @@ type TelegramChannel struct {
 	// choicePending 追踪 user_choice 多选的进行中点选（questionID → 状态）。
 	choiceMu      sync.Mutex
 	choicePending map[string]*choicePending
+
+	// fileSource 读取 bot 工作空间文件（相对路径 → 内容），供 telegram_send_document 使用。
+	// 由 BotService 在 Channel 创建后、Start 前注入：telegram 包刻意不依赖 sandbox，
+	// 经闭包解耦（docker 持久容器 / local 后端由 workspace 抽象统一抹平）。
+	// nil 表示未注入（工作空间未启用），此时 send_document 工具会拒绝执行。
+	// 只在启动期写入、运行期只读，无需加锁。
+	fileSource FileSourceFunc
+}
+
+// FileSourceFunc 是 bot 工作空间文件读取器：按 botID + 工作空间相对路径返回文件内容。
+type FileSourceFunc func(ctx context.Context, botID, path string) ([]byte, error)
+
+// SetFileSource 注入工作空间文件源。必须在 Start 前调用（启动期单线程注入）。
+func (c *TelegramChannel) SetFileSource(fn FileSourceFunc) {
+	c.fileSource = fn
 }
 
 // NewChannel 创建一个 TelegramChannel。

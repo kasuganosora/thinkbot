@@ -1481,6 +1481,23 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("platform channel created", "type", p.Type, "name", p.Name)
 	}
 
+	// 注入工作空间文件源：telegram_send_document 等工具经此读取 bot 工作空间文件。
+	// telegram 包不依赖 sandbox，经闭包解耦；WorkspaceManagerForBot 会复用运行时
+	// 管理器（docker 持久容器 / local 后端语义统一），validatePath 防路径逃逸。
+	if tgc := findTelegramChannel(allChannels); tgc != nil {
+		tgc.SetFileSource(func(ctx context.Context, bid, path string) ([]byte, error) {
+			mgr, err := s.WorkspaceManagerForBot(bid)
+			if err != nil {
+				return nil, err
+			}
+			ws, err := mgr.GetOrCreate(bid)
+			if err != nil {
+				return nil, err
+			}
+			return ws.ReadFile(ctx, path)
+		})
+	}
+
 	// 注册 Channel 专属工具（每个 Channel 实现 ChannelToolProvider 接口）
 	// 通过闭包持有 Channel API 客户端，支持跨 Channel 工具调用
 	for _, ch := range allChannels {
@@ -2299,6 +2316,17 @@ func (s *BotService) createChannel(def dao.ChannelDefinition) (bot.Channel, erro
 	default:
 		return nil, fmt.Errorf("unsupported channel type: %s", def.Type)
 	}
+}
+
+// findTelegramChannel 返回 channels 中的第一个 Telegram Channel（无则 nil）。
+// 用于向其注入工作空间文件源等可选能力。
+func findTelegramChannel(channels []bot.Channel) *telegram.TelegramChannel {
+	for _, ch := range channels {
+		if tgc, ok := ch.(*telegram.TelegramChannel); ok {
+			return tgc
+		}
+	}
+	return nil
 }
 
 // createTelegramChannel 从 ChannelDefinition 创建 Telegram Channel。
