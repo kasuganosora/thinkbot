@@ -171,6 +171,12 @@ const (
 	// 也不可被模型 REPLY_CONTROL send:true 覆盖。由 reaction-ack enricher 写入。
 	KVSuppressReasonReaction = "reaction_notification"
 
+	// KVSuppressReasonPureRenote 是「回复目标为纯 Renote（无正文的转推）」硬抑制原因。
+	// Misskey 拒绝把文本回复挂到纯 Renote 上（API 返回 CANNOT_REPLY_TO_A_PURE_RENOTE），
+	// 属物理不可行而非「此刻该不该说」，故不可被模型 REPLY_CONTROL send:true 覆盖。
+	// 由 pure-renote enricher 写入。
+	KVSuppressReasonPureRenote = "target_is_pure_renote"
+
 	// MetaEngagementProactive 标记本条出站来自 engagement 主动升级（非真人 @）。
 	// 写入 Action.Metadata，供出站成功后按人记一次「主动出击」。
 	MetaEngagementProactive = "engagement.proactive"
@@ -189,6 +195,12 @@ const (
 
 	// MetaReactorIDs 反应通知里所有表态用户的 ID（含 grouped）。
 	MetaReactorIDs = "reactor_ids"
+
+	// MetaIsPureRenote 标记本条入站消息是「纯 Renote」（Renote 指向的帖子，本身无正文）。
+	// Misskey 禁止对纯 Renote 发起文本回复（API 返回 CANNOT_REPLY_TO_A_PURE_RENOTE），
+	// 由 pure-renote enricher 据此设硬权限抑制，避免生成注定失败的回复请求。
+	// 值类型 bool；仅 true 生效。
+	MetaIsPureRenote = "is_pure_renote"
 
 	// KVLurkMode 标记当前消息来自「潜水 / 只读」渠道。
 	//
@@ -443,7 +455,7 @@ func IsHardSuppressReason(reason any) bool {
 		return false
 	}
 	switch s {
-	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown, KVSuppressReasonReaction:
+	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown, KVSuppressReasonReaction, KVSuppressReasonPureRenote:
 		return true
 	default:
 		return false
