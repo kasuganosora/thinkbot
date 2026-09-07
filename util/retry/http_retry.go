@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -70,6 +72,17 @@ func IsServerError(err error) bool {
 	return false
 }
 
+// httpStatusRetryable 按 HTTP 状态码判定是否可重试。
+// 对 429（限流）、503（服务不可用）、529（过载）、500/502/504（服务器错误）、408 重试。
+func httpStatusRetryable(code int) bool {
+	switch code {
+	case 429, 503, 529, 500, 502, 504, 408:
+		return true
+	default:
+		return false
+	}
+}
+
 // HTTPShouldRetry 判断 HTTP 错误是否应该重试。
 // 对 429（限流）、503（服务不可用）、529（过载）、500/502/504（服务器错误）重试。
 func HTTPShouldRetry(attempt int, err error) bool {
@@ -82,20 +95,21 @@ func HTTPShouldRetry(attempt int, err error) bool {
 		return false
 	}
 
+	// 优先识别 retry 包自带的 HTTP 状态错误
 	var httpErr *HTTPStatusError
-	if !errors.As(err, &httpErr) {
-		// 非 HTTP 错误（如网络超时）也重试
-		return true
+	if errors.As(err, &httpErr) {
+		return httpStatusRetryable(httpErr.StatusCode)
 	}
 
-	switch httpErr.StatusCode {
-	case 429, 503, 529, 500, 502, 504:
-		return true
-	case 408: // Request Timeout
-		return true
-	default:
-		return false
+	// 兼容其他携带 HTTP 状态码的错误（如 util/errs.Error）。
+	// 若不识别，BigModel 的确定性 4xx（1301 内容过滤 / 1210 参数错误 / 1214 messages 非法）
+	// 会被误判为“非 HTTP 错误”而无限重试，单次浪费数分钟。
+	if code := errs.GetCode(err); code != 0 {
+		return httpStatusRetryable(code)
 	}
+
+	// 非 HTTP 错误（如网络超时）也重试
+	return true
 }
 
 // HTTPGetRetryDelay 从 HTTP 错误响应中提取 Retry-After 延迟。
