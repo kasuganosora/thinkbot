@@ -357,6 +357,17 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 	if msg.ReplyToMessage != nil {
 		metadata["reply_to_message_id"] = msg.ReplyToMessage.MessageID
 		metadata["reply_to_text"] = msg.ReplyToMessage.Text
+		if msg.ReplyToMessage.From != nil {
+			rf := msg.ReplyToMessage.From
+			fromName := rf.FirstName
+			if rf.LastName != "" {
+				fromName += " " + rf.LastName
+			}
+			if rf.Username != "" {
+				fromName += " (@" + rf.Username + ")"
+			}
+			metadata["reply_to_from"] = fromName
+		}
 	}
 	// 附件信息
 	if msg.Photo != nil {
