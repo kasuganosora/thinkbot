@@ -383,11 +383,10 @@ func (a *apiClient) sendDocument(ctx context.Context, chatID int64, filename, ca
 	form := http.NewMultipartForm().
 		AddField("chat_id", strconv.FormatInt(chatID, 10)).
 		AddField("caption", caption)
-	if mimeType != "" {
-		form = form.AddFileWithMIME("document", filename, mimeType, bytes.NewReader(data))
-	} else {
-		form = form.AddFile("document", filename, bytes.NewReader(data))
-	}
+	// 始终走 AddFileWithMIME：它会转义文件名中的双引号，避免文件名含引号时
+	// multipart 的 Content-Disposition 头部被截断（AddFile 不转义）。
+	// mimeType 为空时回落到 application/octet-stream，与 AddFile 默认行为一致。
+	form = form.AddFileWithMIME("document", filename, mimeType, bytes.NewReader(data))
 
 	resp, err := a.client.Post("sendDocument").
 		SetContext(ctx).
