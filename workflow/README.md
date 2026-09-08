@@ -45,6 +45,8 @@
 | `Types` | `types.go` | 领域模型、枚举、视图结构 |
 | `Intent` | `intent.go` | `DetectGoalModeIntent` 识别「反复打磨直到达标」类收敛性意图，命中则强制 goalMode |
 | `ReviewError` | `review_error.go` | `isReviewInfraError` 区分基础设施错误与业务判定 |
+| `RetryClassify` | `retry_classify.go` | `isNonRetryable` 确定性失败识别：重试必再失败的错误不盲重试 |
+| `Heal` | `heal.go` | `trySelfHeal` 失败根因诊断与子图细化自愈（capability 不自动扩权） |
 | `StatusWait` | `status_wait.go` | `waitForTerminal` 服务端阻塞等待（task 提交即阻塞的底层） |
 | `QuotaBreak` | `quota_break.go` | 429 配额熔断：暂停调度、标记 `interrupted` 等待到点续跑 |
 
@@ -139,6 +141,30 @@ Review 阶段会区分两类错误，决定重试还是失败迭代：
 
 - **基础设施错误（可重试）**：网络/服务抖动类，如 `context deadline exceeded`、超时、`connection refused`、502/503/504、限流等。由 `isReviewInfraError` 判定，`context.Canceled` 不算基础设施错误。这类错误触发 `reviewWithInfraRetry` 就地重试（最多 `reviewInfraMaxAttempts=3`，间隔 `reviewInfraRetryBaseDelay=2s`）。
 - **业务判定（失败迭代）**：模型正常给出了「不通过」结论（只是任务没达标）。这类按节点 `max_iterations` 走 Review 自循环带反馈重执行；目标模式下回退到 `Feedback` 目标节点形成「工作→审查→修复→审查」闭环，直到 `goal_max_iterations` 上限。
+- **审查卡死不放大为失败**：Review 本身同样由看门狗兜底——审查与收尾判定的 SubAgent 均以 `DelegateStream` + `WithStuckTimeout` 调用（节点执行 `nodeStuckTimeout=12m`，仅吐结论的收尾判定 `verdictOnlyStuckTimeout=90s`）。看门狗只杀「连续无 token 的真卡死」，慢而持续输出不杀；卡死被杀后的错误落入确定性失败分类（不再盲重试），由此「审查挂住」最多烧掉一次预算，不会把整条 DAG 拖进 running 黑洞。
+
+## 确定性失败不盲重试（retry_classify）
+
+节点重试统一走 `util/retry.Do`，但重试有一个前提：失败必须是**可能自愈的**。`isNonRetryable`（`retry_classify.go`）把「给定相同任务与预算、重试必然产出相同结果」的确定性失败在 `ShouldRetry` 里直接排除，节点立即 fail 而非雪崩重试：
+
+- GLM 400 code 1214（messages 超长/非法）、1210（请求参数非法）、1301（内容安全审核）——同一上下文重发必然再次被拒；
+- subagent 硬上限强杀（同模型同预算重试必再次跑满被杀）；
+- 主 Agent 墙钟硬上限、`ErrMissingTool()` / `ErrMissingData()`（缺工具/缺数据是环境事实，重跑一百次也不会变）；
+- 配额耗尽（429/403 + 额度特征）不在此列——由 `isQuotaExhausted` 单独熔断，交配额断路器暂停与到点续跑（见「配额熔断与到点续跑」）。
+
+判定哲学是 **Loose**：错误链跨「节点重试 → SubAgent → LLM 流式」多层包装后已退化为纯文本，`errors.As` 拿不到结构化类型，只能用小写宽松字符串匹配。收录标准极严——**只收确定性特征**，任何可能表达「瞬时限流 / 可恢复抖动」的措辞都不得加入，否则会把可恢复故障误判为终态而放弃重试。
+
+同一原则在传输层独立成环：`util/retry.HTTPShouldRetry` 按状态码判定（429/503/529/500/502/504/408 可重试，其余 4xx 立即放弃）。它同时识别 `*retry.HTTPStatusError` 与其他携带 HTTP 状态码的错误（如 `util/errs.Error`）——后者若漏识别，BigModel 的确定性 4xx（1210/1214/1301）会被误判为「非 HTTP 错误」而重试 5 次，单次浪费约 5 分钟。带 `Retry-After` 头的瞬时限流按服务端建议延迟重试，而非盲目指数退避。
+
+## 节点自愈（heal）
+
+重试耗尽后不是直接判死，而是先问一句「为什么失败」。`trySelfHeal`（`heal.go`）对失败节点做 LLM 根因诊断（诊断 SubAgent 自带 5 分钟卡死上限，避免「诊断卡死节点又卡 30 分钟」；结论按 nodeID 缓存，不重复烧钱），仅对 **granularity / context_bloat 且置信度 ≥ 0.6** 的诊断触发 `RefineNode` 局部重分析，把失败节点动态替换为更细的子图（`ReplaceNodeWithSubgraph`）后续跑——只动那一个失败节点，不影响其它正常节点，并发出 `workflow.node.healed` 事件。最多细化 2 次（`maxHealRefinements`），超出则升级交人。
+
+刻意不自动化的部分，比自动化本身更重要：
+
+- **capability（工具档位不足）绝不自动扩权**：只把建议档位 `suggested_profile` 记进日志留痕，是否提档由人决定。自动放宽档位等于给最小权限防线开自动化后门——一次注入或一次误判就能让节点拿到它本不该有的 exec / 删除能力。
+- **endpoint / quota / other / 低置信**一律不改 DAG，走现有 failed 路径——自愈只修「拆分错了」，不修「环境坏了」。
+- 触发面收敛：配额耗尽交断路器；普通错误（非确定性失败）不值得诊断根因，直接 failed。自愈只在「确定性失败 + 根因可细化」这个窄口上动手。
 
 ## 配置
 
@@ -153,7 +179,7 @@ Review 阶段会区分两类错误，决定重试还是失败迭代：
 | `workflow.retry_max_ms` | `10000` | 重试最大退避间隔（毫秒） |
 | `workflow.schedule_interval_ms` | `200` | 调度器轮询间隔（毫秒） |
 | `workflow.analyzer_temperature` | `0.3` | 分析器 LLM temperature |
-| `workflow.analyzer_stuck_timeout` | `180` | 分析器（流式 LLM）卡死看门狗阈值（秒）。连续无 token 超过该时长判卡死并终止；硬上限 = 该值 × 3 |
+| `workflow.analyzer_stuck_timeout` | `180` | 分析器（流式 LLM）卡死看门狗阈值（秒）。连续无 token 超过该时长判卡死并终止；硬上限 = 该值 × 10（`subagent.delegateHardTimeoutFactor`，派生不写死） |
 | `workflow.analyzer_max_duration_ms` | `600000` | 分析阶段整轮总时长上限（毫秒，即 10 分钟）。兜底防止分析器无限重试把「分析中」拖成黑洞；超时则分析阶段整体失败并报错 |
 | `workflow.goal_max_iterations` | `5` | 目标模式（闭环循环）全局最大迭代轮数；达到上限仍不通过则工作流失败 |
 | `workflow.default_tool_profile` | `full` | 分析器未为节点声明工具档位时使用的默认档位（见「节点工具档位」）。可选 `readonly` / `analysis` / `edit` / `full`。**默认 full 是刻意的**：并行节点改代码是核心能力，一刀切降级会废掉它；配置化是为了日后能在不改码的前提下收紧默认值 |
@@ -197,6 +223,14 @@ Workflow 工具的 Scopes 为 `["private", "group"]`，在 SubAgent 上下文中
 > 递归防护的真实机制是 **workflow 工具与 spawn 工具的 Scopes 在 SubAgent 场景不可见**，而不是「SubAgent 没有工具」。
 >
 > 唯一的例外：`Setup` 未拿到 `ToolMgr` 时（如 `api/workflow_service.go` 在没有任何 bot 启动时自建实例），内部 SubAgent 才真的没有工具，代码/文件类节点只能产出计划。此时 `wire.go` 会打一条 Warn 日志。
+
+### 与 toolperm 的联动（内部 SubAgent 的授权边界）
+
+内部 SubAgent 的工具不是引擎自己裁剪的，而是**全部交给 toolperm 按平台规则评估**（`wire.go` 的 `ToolChannel`）：
+
+- 解析工具时带上平台上下文（默认 `web`），按该平台的 `toolperm` 规则放行工作空间工具。平台为空会落到「敏感工具默认禁止」分支，表现为节点自报「缺少文件系统工具」——这是历史上排查耗掉大半天的坑。
+- bot 若在 web 平台刻意收紧密感工具，其 workflow 子代理随之受限。**workflow 遵守 bot 的工具策略，而非绕过**。
+- 对外发言/外发文件工具对子智能体（`isSubagent`）**一律拒绝、与平台无关**（`toolperm` 的 `allow`）。子代理带上真实平台上下文后若不拦，会继承该平台的发帖权限、绕过主会话的禁发帖配置。外发文件类工具（如 `telegram_send_document` / `telegram_send_photo`）更进一步：即便平台**没有任何规则**也默认禁止，须管理员显式 allow 才放开（`toolperm` 的 exfil 风险级）——子代理在无人监督时把工作空间文件发到外部会话，没有这条路。
 
 ## 节点工具档位（ToolProfile）
 
@@ -290,7 +324,7 @@ token 类指标（gh-aw 的 `working-set-rebuild-factor`、`context-growth`）**
 >
 > 因此**发事件面板收不到**——事件（`agent/outbound` 的 `workflow.*`）服务于 SSE 订阅者与可观测性，与面板是两条独立链路。任何「让用户看到」的字段，必须同时进 `StatusResult` 或 `NodeFlat`。
 
-新增事件类型：`workflow.node.degraded`、`workflow.node.blocked`、`workflow.write_conflict`（面板看不到，供 SSE 订阅者消费）。
+新增事件类型：`workflow.node.degraded`、`workflow.node.blocked`、`workflow.write_conflict`、`workflow.node.healed`（面板看不到，供 SSE 订阅者消费）。
 
 ## 持久化
 

@@ -1,6 +1,6 @@
 # stats — LLM 用量统计
 
-记录和查询 Bot 的 LLM Token 使用量、缓存命中、工具调用等运行指标。通过异步批量写入 + 按日聚合，实现低开销的全链路用量追踪。
+记录和查询 Bot 的 LLM Token 使用量、缓存命中、工具调用等运行指标。通过异步批量写入 + 按日聚合，实现低开销的全链路用量追踪；另含两条**旁路明细**链路：工作流节点用量明细（`workflow_usage`）与 engagement 快判结果（`judge_records`）。
 
 ## 架构概览
 
@@ -18,7 +18,7 @@ Recorder.RecordUsage()               ← 非阻塞写入 channel（满则丢弃+
     │
     ▼
 flushBatch()                         ← 按 (bot_id, model, feature, channel, date) 聚合
-    │
+    │            └→ flushWorkflowUsage()（旁路：WorkflowID 非空时逐条写明细，失败不影响主链）
     ▼
 SQLite UPSERT → stats_usage_daily    ← ON CONFLICT 累加
 ```
@@ -37,8 +37,8 @@ app := fx.New(
 )
 
 // Module 自动完成：
-// 1. AutoMigrate stats_usage_daily 表
-// 2. 启动后台写入 goroutine
+// 1. AutoMigrate stats_usage_daily / workflow_usage / judge_records 三张表
+// 2. 启动 Recorder 与 JudgeRecorder 两个后台写入 goroutine
 // 3. 注册 Recorder 为 llm.UsageRecorder（供各 Stage 注入）
 // 4. 应用停止时 flush 剩余指标
 ```
@@ -78,7 +78,7 @@ recorder.RecordUsage(ctx, llm.UsageMetric{
 |------|------|
 | `NewRecorder(db, logger)` | 创建实例（channel 缓冲 1024，5s flush，batch 100） |
 | `Start()` | 启动后台写入 goroutine |
-| `Stop()` | 停止 goroutine，drain channel 中剩余指标后 flush |
+| `Stop()` | 关闭 stopCh 并等待 goroutine 退出（退出前 drain channel 剩余指标并 flush） |
 | `RecordUsage(ctx, metric)` | 非阻塞记录（channel 满时丢弃 + Warn 日志） |
 | `SyncFlush()` | 同步 drain 并 flush（测试用） |
 
@@ -117,7 +117,7 @@ ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
 |------|------|------|
 | `bot_id` | string | Bot 标识 |
 | `model` | string | 模型标识（如 `glm-5.2`） |
-| `feature` | string | 功能维度（如 `reply`/`chat`/`vision`/`memory_compress`/`cron`） |
+| `feature` | string | 功能维度。代码中实际出现的取值：`reply`、`vision`、`subagent`、`engagement`、`memory_formation`、`memory_compression`、`memory_consolidation`、`memory_dedup`、`dream_extract`、`dream_cluster`、`bot_profiler`、`user_profiler`、`heartbeat`、`dreaming`、`quota_blocked`、`budget_warning`、`cron`（cron 任务默认，可经 `job.Feature` 自定义） |
 | `channel` | string | 来源渠道（如 `telegram`/`web`/`misskey`），非 pipeline 路径为空串 |
 | `date` | date | 聚合日期（UTC 零点截断） |
 | `total_requests` | int | 总请求数 |
@@ -132,19 +132,52 @@ ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
 | `tool_calls` | int | 工具调用累计次数 |
 | `steps` | int | 编排步数累计 |
 
+### workflow_usage 表（旁路明细）
+
+工作流节点维度的**逐条**调用明细（`dao.WorkflowUsage`），由 `Recorder.flushWorkflowUsage` 在日聚合之后旁路写入：
+
+- 只落 `WorkflowID` 非空的指标，非工作流路径（reply / dream / memory 等）零开销
+- `workflow_id` / `node_id` **不进** UsageDaily 聚合维度——否则日聚合表会被撑成明细表、五列唯一索引语义被破坏
+- 失败仅记日志，不影响日聚合主链路
+- 两表经 `bot_id` + `created_at` 关联，Token 口径一致便于对账
+
+| 字段 | 说明 |
+|------|------|
+| `workflow_id` / `node_id` | 归因到哪条工作流的哪个节点 |
+| `bot_id` / `model` / `feature` | 同 UsageDaily 维度 |
+| `input_tokens` / `output_tokens` / `total_tokens` | Token 明细（口径与 UsageDaily 一致） |
+| `cache_read_tokens` / `cache_write_tokens` | 缓存 Token 明细 |
+| `tool_calls` / `steps` | 编排指标 |
+
+### judge_records 表（旁路明细）
+
+engagement LLM 快判（Tier 2 judge）的**逐条**结果明细（`dao.JudgeRecord`），使参与决策的质量可观测。与 UsageDaily 刻意分开：后者是日聚合记 token，本表记判定语义。
+
+| 字段 | 说明 |
+|------|------|
+| `bot_id` / `channel` / `model` | 维度；`feature` 固定 `engagement`（预留） |
+| `engage` | LLM 认为是否值得参与 |
+| `score` | 0-100 评分；0 表示未用评分模式（传统 YES/NO） |
+| `reason` | LLM 理由（落库前截断到 480 字符） |
+| `tier` | 决策层（`tier_rule` / `tier_llm`） |
+| `latency_ms` | 判定耗时 |
+
 ### UsageMetric（输入）
 
 由各 Stage 在 LLM 调用完成后构建，传递给 `Recorder.RecordUsage()`：
 
 ```go
 type llm.UsageMetric struct {
-    BotID     string         // 哪个 Bot
-    Model     string         // 哪个模型
-    Feature   string         // 哪个功能场景
-    Channel   string         // 来源渠道（可为空）
-    Usage     llm.Usage      // Token 用量（含缓存明细）
-    ToolCalls int            // 工具调用次数
-    Steps     int            // 编排步数
+    BotID      string    // 哪个 Bot
+    At         time.Time // 调用发生时刻（归日用；零值回退 flush 时刻）
+    Model      string    // 哪个模型
+    Feature    string    // 哪个功能场景
+    Channel    string    // 来源渠道（可为空）
+    Usage      llm.Usage // Token 用量（含缓存明细）
+    ToolCalls  int       // 工具调用次数
+    Steps      int       // 编排步数
+    WorkflowID string    // 工作流归因（非工作流路径为空；不进日聚合维度）
+    NodeID     string    // 工作流节点归因（同上）
 }
 ```
 
@@ -159,9 +192,9 @@ type llm.UsageMetric struct {
 | 函数 | 维度 | 用途 |
 |------|------|------|
 | `GetBotModelStats(db, botID, from, to)` | Bot × Model | 某 Bot 各模型的用量汇总（按 total_tokens 降序） |
-| `GetModelFeatureStats(db, botID, model, from, to)` | Model × Feature | 某 Bot + 模型在各功能中的分布 |
+| `GetModelFeatureStats(db, botID, model, from, to)` | Model × Feature | 某 Bot + 模型在各功能中的分布（按 total_requests 降序） |
 | `GetDailyStats(db, botID, from, to)` | Date | 某 Bot 按天的用量趋势（date 降序） |
-| `GetAllBotsModelStats(db, from, to)` | Bot × Model | 管理面板：全部 Bot 的用量 |
+| `GetAllBotsModelStats(db, from, to)` | Bot × Model | 管理面板：全部 Bot 的用量（bot_id 升序、组内 total_tokens 降序） |
 | `GetDailyStatsGlobal(db, botID, from, to)` | Date | 全局按天趋势（`botID` 为空则不限 Bot，date 升序） |
 | `GetDailyByBotStats(db, from, to)` | Date × Bot | 按日×Bot 的 token 量（堆叠图表用） |
 | `GetUsageRecords(db, botID, from, to, page, pageSize)` | 明细 | 分页查询用量流水，返回 `([]UsageRecord, total, error)` |
@@ -265,11 +298,11 @@ type UsageRecord struct {
 
 ### 日期范围过滤
 
-所有查询接受 `from *time.Time` / `to *time.Time` 可选参数：
+所有查询接受 `from *time.Time` / `to *time.Time` 可选参数（`applyDateRange`）：
 
 - `from` / `to` 为 nil 时不限制
-- 日期截断到 UTC 零点
-- `to` 包含当天（自动 +1 天再 `<=` 比较）
+- 两侧均截断到 UTC 零点（`truncateToDate`）后按 `date >= from` / `date <= to` 比较
+- `to` 与 `from` 同为闭区间边界（按日聚合行比较，无需 +1 天）
 
 ---
 
@@ -277,17 +310,35 @@ type UsageRecord struct {
 
 ```go
 var Module = fx.Module("stats",
-    fx.Provide(NewRecorderModule),  // 提供 *Recorder + llm.UsageRecorder
-    fx.Invoke(RegisterLifecycle),   // 注册生命周期钩子
+    fx.Provide(NewRecorderModule),      // 提供 *Recorder + llm.UsageRecorder
+    fx.Provide(NewJudgeRecorderModule), // 提供 *JudgeRecorder
+    fx.Invoke(RegisterLifecycle),       // 注册生命周期钩子
 )
 ```
 
 | 生命周期 | 行为 |
 |---------|------|
-| `OnStart` | `AutoMigrate(&dao.UsageDaily{})` + `Recorder.Start()` |
-| `OnStop` | `Recorder.Stop()`（drain + flush 剩余指标） |
+| `OnStart` | `AutoMigrate(UsageDaily, JudgeRecord, WorkflowUsage)` + `Recorder.Start()` + `JudgeRecorder.Start()` |
+| `OnStop` | `Recorder.Stop()` + `JudgeRecorder.Stop()`（各自 drain + flush 剩余数据） |
 
 `NewRecorderModule` 同时返回 `*Recorder` 和 `llm.UsageRecorder`，后者供各 Stage 通过 fx 可选注入。
+
+`JudgeSink` 不在 fx Module 内提供：由 `api/module.go` 的 `newBotService` 在组装时手动 `stats.NewJudgeSink(p.JudgeRecorder)` 包装（`JudgeRecorder` 为 nil 时不挂 sink，判定结果不落库）。另外 `dao.Migrate()` 的统一迁移列表也包含这三张表，AutoMigrate 幂等，两处注册无害。
+
+---
+
+## JudgeRecorder / JudgeSink — 判定结果旁路落库
+
+`JudgeRecorder` 复用 Recorder 的模式（channel 缓冲 1024 + 后台 goroutine，5s / 100 条批量，`CreateInBatches` 逐条插入，不做聚合），把 engagement 的 LLM 快判结果异步写入 `judge_records`。
+
+| 方法 | 说明 |
+|------|------|
+| `NewJudgeRecorder(db, logger)` | 创建实例（db 为 nil 时静默丢弃，纯内存/测试模式） |
+| `Start()` / `Stop()` | 启停后台 goroutine（Stop 时 drain + flush） |
+| `Record(ctx, rec)` | 非阻塞记录（channel 满时丢弃 + Warn） |
+| `SyncFlush()` | 同步 drain 并 flush（测试用） |
+
+`JudgeSink` 实现 `engagement.JudgeRecordSink` 接口（消费方定义接口），把 `engagement.JudgeRecord` 适配为 `dao.JudgeRecord` 落库——落库是旁路观测，绝不影响「是否参与」这个主决策。依赖方向为 stats → engagement 单向。
 
 ---
 
@@ -306,6 +357,8 @@ Token 节省 = (InputTokens - CacheReadTokens) 的比例变化
 
 | 文件 | 职责 |
 |------|------|
-| `recorder.go` | `Recorder` 类型、异步 channel 写入、批量聚合、SQLite UPSERT |
+| `recorder.go` | `Recorder` 类型、异步 channel 写入、批量聚合、SQLite UPSERT、工作流明细旁路写入（`flushWorkflowUsage`） |
 | `repository.go` | 查询函数（`GetBotModelStats` / `GetModelFeatureStats` / `GetDailyStats` / `GetAllBotsModelStats` / `GetDailyStatsGlobal` / `GetDailyByBotStats` / `GetUsageRecords`）、结果类型 |
-| `module.go` | fx Module 定义、`NewRecorderModule`、生命周期钩子 |
+| `judge_record.go` | `JudgeRecorder` — 判定结果异步批量落库（channel + 后台 goroutine） |
+| `judge_sink.go` | `JudgeSink` — 实现 `engagement.JudgeRecordSink`，reason 截断（480 字符） |
+| `module.go` | fx Module 定义、`NewRecorderModule` / `NewJudgeRecorderModule`、生命周期钩子 |

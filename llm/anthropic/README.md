@@ -54,6 +54,8 @@ result, err := prov.DoGenerate(ctx, llm.GenerateParams{
 - 顶层 `system` 字段支持缓存断点（`SystemCacheControl`）；工具与文本块同理。断点上限 `anthropicBreakpointCap = 4`，超出静默丢弃。
 - 多轮 Extended Thinking 的 `Signature` 会被保留并在回传 `thinking` 块时原样发送。
 - `llm.MessageRoleSystem` 的中间系统消息降级为 `<system-update>` 包裹的用户文本，避免静默丢失。
+- 工具结果回传：`ToolResultPart.Result` 为字符串时直接作为 `tool_result` content；其他类型 JSON 序列化后包为字符串，避免 content 出现裸 JSON 对象。
+- 延迟加载工具（`llm.Tool.Parameters == nil`）自动生成最小 schema `{"type":"object"}`（Anthropic 要求 `input_schema.type` 必须为 object）。
 - `Usage` 中 `input_tokens` 仅含未缓存 token，适配器会还原为 `非缓存 + cacheRead + cacheWrite` 的总量，并拆分 `InputTokenDetails`（含 5m/1h 写入拆分）。
 
 ## 直接 API 方法（底层 Messages API）

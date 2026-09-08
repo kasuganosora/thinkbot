@@ -4,6 +4,8 @@
 
 > 注意：shell 执行与文件读写类工具（`sandbox_exec` / `sandbox_read_file` 等）
 > 由 `sandbox` 包通过 `BotWorkspaceManager` 注册，不在本包内。
+> Telegram 文件外发工具（`telegram_send_document` / `telegram_send_photo`）同样不在本包，
+> 由 `channel/telegram` 注册且**默认拒绝**，详见[下文](#平台侧文件外发工具channeltelegram不在本包)。
 
 ## 注册的工具
 
@@ -117,6 +119,39 @@ web 路径发 progress 事件供前端渲染。telegram / misskey 走 `PollCreat
   "via": "web"
 }
 ```
+
+## 平台侧文件外发工具（`channel/telegram`，不在本包）
+
+以下两个工具不在 `tools` 包内，由 `channel/telegram` 注册，但语义上属于「通用能力」——
+把 bot 工作空间里的文件真正送达用户，弥补「工作空间能写、Channel 只能发文本」的断链。
+放在这里说明是为了避免在工具清单里找不到它们：
+
+| 工具 | 说明 |
+|------|------|
+| `telegram_send_document` | 把工作空间文件作为 Telegram 文档（附件）发送，任意类型，≤45MB |
+| `telegram_send_photo` | 把工作空间图片以「照片」形式发送（带预览渲染），PNG/JPEG/GIF/WEBP，≤9MB |
+
+### 共同行为
+
+- **参数**：`filePath`（必填，相对工作空间根，如 `demo/hello.txt`）、`chatId`（可省略，缺省发到当前会话；无当前会话上下文时拒绝执行）、`caption`（可省略，说明文字）。
+- **multipart 上传**：复用 `util/http` 的 `MultipartForm` 与 apiClient 既有 throttle（约 4 条/秒，规避 429）；文件名经 `AddFileWithMIME` 显式设置 Content-Type，双引号由标准库 `CreateFormFile` 的 `%q` 转义兜底（`TestMultipartAddFileEscapesQuotes` 锁真值）。
+- **文件名**：取路径最后一段（统一处理 `/` 与 `\` 分隔符及尾部斜杠），空时回退 `file` / `photo`。
+- **文件源解耦**：telegram 包不依赖 sandbox，文件读取经 `SetFileSource` 注入（`BotService` 装配 `WorkspaceManagerForBot → ws.ReadFile`，`validatePath` 防路径逃逸）；未注入时直接报错。
+- **路径与大小防护**：空文件、超限文件在上传前拒绝。
+
+### send_photo 特有加固
+
+- caption 按 **UTF-16 code unit** 截断到 1024（Telegram 的计量单位；emoji 占 2 unit，按 rune 截断会超限被 400），且绝不切断代理对。`telegram_send_document` 目前按 rune 截到 1024，够用但非严格等价。
+- 上传前按**文件头魔数**校验为 PNG/JPEG/GIF/WEBP，非图片在被 Telegram 400 之前就地拒绝。
+- 成功发送记录 `Infow` 日志（bot_id / chat_id / file / size / caption 长度 / message_id）。
+
+### 权限：默认拒绝（`toolperm` RiskExfil）
+
+两者在 `toolperm` 中均挂入 `exfilTools`，风险级别为 **exfil**：工作空间文件外发是不可逆的外泄通道，因此：
+
+- 平台**没有任何权限规则**时也默认 **deny**（不像 basic/broadcast 那样默认放行）；
+- 白名单模式（有规则但未命中）同样 deny；
+- 必须管理员**显式 allow** 规则才放开；且 exfil 同时计入 broadcast，系统/心跳/子代理会话一律禁止外发。
 
 ## 注册
 
