@@ -238,3 +238,136 @@ func TestSendDocumentTool_WorkspaceReadErrorPropagates(t *testing.T) {
 		t.Fatalf("expected read error to propagate, got %v", err)
 	}
 }
+
+// newSendPhotoTestServer 起一个假的 Telegram Bot API，只响应 sendPhoto。
+func newSendPhotoTestServer(t *testing.T) (*httptest.Server, *[]map[string]string) {
+	t.Helper()
+	got := make([]map[string]string, 0, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/sendPhoto") {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 404, "description": "not found"})
+			return
+		}
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Errorf("parse multipart: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		entry := map[string]string{}
+		for k, v := range r.MultipartForm.Value {
+			if len(v) > 0 {
+				entry[k] = v[0]
+			}
+		}
+		if fileHeaders := r.MultipartForm.File["photo"]; len(fileHeaders) > 0 {
+			fh := fileHeaders[0]
+			entry["__filename"] = fh.Filename
+			rc, err := fh.Open()
+			if err != nil {
+				t.Errorf("open uploaded photo: %v", err)
+			} else {
+				data, _ := io.ReadAll(rc)
+				_ = rc.Close()
+				entry["__content"] = string(data)
+			}
+		}
+		got = append(got, entry)
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":77}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+func findTool(defs []agenttools.ToolDef, name string) *llm.Tool {
+	for i := range defs {
+		if defs[i].Name == name {
+			return &defs[i].Tool
+		}
+	}
+	return nil
+}
+
+func TestSendPhotoTool_UploadsWorkspaceImage(t *testing.T) {
+	srv, got := newSendPhotoTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		if path != "demo/bird.png" {
+			return nil, errors.New("unexpected path " + path)
+		}
+		return []byte("png-bytes"), nil
+	})
+
+	defs, err := ch.ChannelTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered in ChannelTools")
+	}
+
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{
+		BotID:       "test-bot",
+		ChatID:      "888",
+		ChannelType: "telegram",
+	})
+	res, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": "demo/bird.png",
+		"caption":  "a bird photo",
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	m, _ := res.(map[string]any)
+	if m["success"] != true || m["messageId"] != int64(77) {
+		t.Fatalf("unexpected result: %#v", m)
+	}
+	if m["fileName"] != "bird.png" {
+		t.Errorf("fileName = %v, want bird.png (path base)", m["fileName"])
+	}
+
+	if len(*got) != 1 {
+		t.Fatalf("server received %d requests, want 1", len(*got))
+	}
+	req := (*got)[0]
+	if req["chat_id"] != "888" {
+		t.Errorf("chat_id = %q, want 888 (from MessageMeta)", req["chat_id"])
+	}
+	if req["caption"] != "a bird photo" {
+		t.Errorf("caption = %q", req["caption"])
+	}
+	if req["__filename"] != "bird.png" {
+		t.Errorf("uploaded filename = %q, want bird.png", req["__filename"])
+	}
+	if req["__content"] != "png-bytes" {
+		t.Errorf("uploaded content = %q", req["__content"])
+	}
+}
+
+func TestSendPhotoTool_RejectsOversizedImage(t *testing.T) {
+	srv, got := newSendPhotoTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		return make([]byte, 9<<20+1), nil
+	})
+
+	defs, _ := ch.ChannelTools(context.Background())
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered")
+	}
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{ChatID: "888"})
+	_, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": "demo/huge.png",
+	})
+	if err == nil {
+		t.Fatal("expected size-limit error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error should mention size limit, got: %v", err)
+	}
+	if len(*got) != 0 {
+		t.Errorf("server received %d requests, want 0 (must not upload oversized image)", len(*got))
+	}
+}

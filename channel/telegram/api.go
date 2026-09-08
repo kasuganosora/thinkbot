@@ -373,6 +373,39 @@ func (a *apiClient) sendPhoto(ctx context.Context, chatID int64, photoURL, capti
 	})
 }
 
+// sendPhotoUpload 通过 multipart 上传本地图片并发送（照片形式渲染，带预览）。
+// 与 sendPhoto(URL) 不同，这条路径不需要图片可公网访问。
+// caption 可空；返回发送成功的 message_id。
+// 文件大小上限由 Telegram 决定（sendPhoto 约 10MB），调用方负责事前校验。
+func (a *apiClient) sendPhotoUpload(ctx context.Context, chatID int64, filename, caption string, data []byte) (int64, error) {
+	if err := a.throttle(ctx); err != nil {
+		return 0, errs.Wrap(err, "telegram sendPhoto throttle")
+	}
+	form := http.NewMultipartForm().
+		AddField("chat_id", strconv.FormatInt(chatID, 10)).
+		AddField("caption", caption)
+	// 与 sendDocument 同理走 AddFileWithMIME：转义文件名中的双引号，
+	// mimeType 为空时回落到 application/octet-stream（Telegram 会自行嗅探图片格式）。
+	form = form.AddFileWithMIME("photo", filename, "", bytes.NewReader(data))
+
+	resp, err := a.client.Post("sendPhoto").
+		SetContext(ctx).
+		SetMultipart(form).
+		Do()
+	if err != nil {
+		return 0, errs.Wrap(err, "telegram sendPhoto")
+	}
+
+	var apiResp apiResponse[sendMessageResult]
+	if err := resp.JSON(&apiResp); err != nil {
+		return 0, errs.Wrap(err, "telegram sendPhoto parse")
+	}
+	if !apiResp.OK {
+		return 0, fmt.Errorf("telegram sendPhoto failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
+	}
+	return apiResp.Result.MessageID, nil
+}
+
 // sendDocument 发送文件（multipart 上传，支持任意二进制）。
 // caption 可空；返回发送成功的 message_id。
 // 文件大小上限由 Telegram 决定（bot 约 50MB），调用方负责事前校验。
