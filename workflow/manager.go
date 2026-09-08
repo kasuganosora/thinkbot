@@ -1486,6 +1486,39 @@ func (m *Manager) LatestWorkflowForSession(botID, sessionID string) *Workflow {
 	return nil
 }
 
+// ActiveGoalModeForSession 返回指定 bot + 会话当前正在运行（running）且开启目标模式
+// 的一条工作流（没有则返回 nil）。
+//
+// 用途：task 工具提交前的护栏。目标模式工作流是长时后台任务，用户在它运行期间发来的
+// 新消息（询问进度 / 追加要求）常被模型误当成新需求再次调用 task，开出一个重复任务
+// （2026-09-08 实证：tg 用户问「完成了吗」被误开第二个 readme 维护工作流）。本查询让
+// task 工具在已有 running+goalMode 工作流时拒绝重复提交，逼迫模型改为对话回复或调
+// task_detail 查进度，而不是又开一个活。
+//
+// 扫描最近 sessionWorkflowScanLimit 条，按 created_at 降序取第一个命中的运行中的目标模式工作流。
+func (m *Manager) ActiveGoalModeForSession(botID, sessionID string) *Workflow {
+	if botID == "" {
+		return nil
+	}
+	all, err := m.repo.List(sessionWorkflowScanLimit)
+	if err != nil {
+		m.logger.Errorw("failed to list workflows for active goal-mode lookup", "error", err)
+		return nil
+	}
+	for _, wf := range all {
+		if wf == nil || wf.BotID != botID {
+			continue
+		}
+		if sessionID != "" && wf.SessionID != sessionID {
+			continue
+		}
+		if wf.Status == WorkflowRunning && wf.GoalMode {
+			return wf
+		}
+	}
+	return nil
+}
+
 // DissociateSessionWorkflows 解除指定会话下所有工作流的会话关联（把 SessionID 置空）。
 //
 // 用途：配合 `/clear` 命令——清空会话聊天上下文时，工作流卡片也应一起消失，
