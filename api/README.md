@@ -22,6 +22,7 @@
 - **记忆管理**：查询/新增/更新/删除 Bot 记忆条目及统计
 - **容器与沙箱运维**：容器启停、快照、导入导出、终端执行、文件浏览与上传
 - **系统监控**：运行时健康检查、事件总线指标
+- **工具权限管理**：按 tool × platform × chatId × userIds 维度配置 allow/deny 规则与各渠道发言模式
 
 ## Pipeline 集成
 
@@ -37,6 +38,28 @@ BotService 在装配 Pipeline 时，用以下中间件包装 LLMStage（`pipelin
 | `TokenBudgetMiddlewareWithState` | 按 Channel 追踪累计 Token，阈值告警和硬限制 |
 
 **全链路 Token 记账**：BotService 在装配时创建共享 `pipeline.NewTokenQuotaState().WithStatsRecorder(statsRecorder)`，并用 `llm.NewQuotaRecordingProvider` 包裹 LLM Provider（`bundle.Main`、`bundle.Light`、`bundle.Vision`，外层再套 `llm.NewStatsRecordingProvider`）。配额中间件将 dimension 注入 context，所有经过 Provider 的 LLM 调用（包括 SubAgent、Workflow、Memory 等绕过 pipeline 的调用点）都自动记账，防止漏记。用量最终聚合到 `stats_usage_daily` 表。
+
+## Pipeline Stage 链
+
+BotService 用声明式 `pipeline.Builder` 按 Order 装配 Stage（`Build()` 按 Order 排序，与 `Add` 调用次序无关）：
+
+| Order | Stage | 职责 |
+|-------|-------|------|
+| 3 | `identity.BindStage` | 授权码绑定拦截：命中 `TB-XXXX-XXXX` 即消费绑定并中止 |
+| 4 | `command.CommandStage` | 命令拦截：仅注册 `/chatid`（返回当前会话/群 ID，供工具权限按群配置）；`RequireBound` 经 `identity.BindService` 校验发送者已绑定账号 |
+| 5 | 心跳频控预算重置 | 真实外部入站消息到达即恢复连续唤醒预算（heartbeat 组启用时） |
+| 40 | `inbound-chat-history` enricher | 为 Telegram 入站注入按会话隔离的对话历史（sessionID `tg:<chatID>`，群聊整群共享）；异步落库当前用户消息 |
+| 40 | `engagement.EngagementStage` | 参与时机判定（启用时；挂 `TimingGate` 与 `OutreachBreaker`——一次主动回复无人回应即停止追问） |
+| 45 | `lurk-detect` | 潜水资源富化 |
+| 46 | `passive-speak` | 被动发言抑制 |
+| 47 | `reaction-ack` | 反应（Misskey/Telegram reaction）通知仅供感知，硬抑制出站回复 |
+| 48 | `pure-renote` | 回复目标为纯 Renote 时硬抑制（Misskey 物理不可回复） |
+| 90 | 记忆召回 | 按 [bot, channel, user] 三 scope 检索长期记忆注入 system prompt |
+| 95 | 节奏门控 | 回复节奏控制 |
+| 100 | LLM（带上述中间件链） | 生成 ActionReply；引用回复的被引文渲染为引用块前缀 |
+| 850 | `outbound-chat-history` | 将本轮 Bot 回复落库到同一会话历史（仅 `__history_managed` 标记的会话） |
+
+Channel 装配后，若存在 Telegram Channel，会注入工作空间文件源（`SetFileSource`，经 `WorkspaceManagerForBot` 读取、防路径逃逸），供 `telegram_send_document` / `telegram_send_photo` 等 Channel 专属工具读取 bot 工作区文件。
 
 ## 关键类型
 
@@ -125,13 +148,15 @@ POST   /api/bots/:id/stop          — 停止 Bot（admin）
 
 ```
 GET    /api/bots/:id/platforms         — 列出 Bot 的平台配置
-POST   /api/bots/:id/platforms         — 创建平台配置
-PUT    /api/bots/:id/platforms/:pid    — 更新平台配置
+POST   /api/bots/:id/platforms         — 创建平台配置（默认 enabled=false，不构建 channel）
+PUT    /api/bots/:id/platforms/:pid    — 更新平台配置（部分更新，含 enabled 启停开关）
 DELETE /api/bots/:id/platforms/:pid    — 删除平台配置
 GET    /api/bots/platforms/tool-catalog — 平台工具目录（所有登录用户，驱动前端表单）
 ```
 
 > 旧的 `/api/bots/:id/channels` 与 `/api/channels/types` 已废弃并从路由中移除，统一由上述 Platform API 取代。
+>
+> 平台配置/启停/删除变更会触发运行中 Bot 的**热重载**（停→启，后台异步，无需重启服务）。
 
 ### 工具权限与发言模式（admin，嵌套在 Bot 下）
 
@@ -142,7 +167,11 @@ PUT    /api/bots/:id/tool-permissions/:rid          — 更新规则
 DELETE /api/bots/:id/tool-permissions/:rid          — 删除规则
 POST   /api/bots/:id/tool-permissions/reset-defaults — 恢复默认规则
 GET    /api/bots/:id/tools                          — Bot 已注册的工具列表
+```
 
+> 规则匹配维度：`tool` × `platform` × `chatId` × `userIds`。`chatId` 是会话/群标识（空或 `*` = 全部会话；填具体值如 Telegram 群 `-1001234567890` 仅对该群生效），与 `platform` 叠加实现「针对某个群单独配置」。用户可在 tg/misskey 中发 `/chatid` 获取当前会话 ID（要求发送者已绑定 thinkbot 账号）。
+
+```
 GET    /api/bots/:id/outbound                       — 各渠道发言模式（active/passive/mute）
 PUT    /api/bots/:id/outbound                       — 设置发言模式
 ```
@@ -231,7 +260,7 @@ GET    /api/bots/:id/compaction/history     — 压缩历史
 DELETE /api/bots/:id/compaction/history     — 清空压缩历史
 ```
 
-聊天节奏（rhythm）已合并进平台配置：作为 `rhythm` 字段随 `GET/PUT /api/bots/:id/platforms` 读写（支持 telegram / misskey，web 不参与）。
+聊天节奏（rhythm）已合并进平台配置：作为 `rhythm` 字段随 `GET /api/bots/:id/platforms` 列表与 `PUT /api/bots/:id/platforms/:pid` 读写（支持 telegram / misskey，web 不参与）。
 
 ### Bot 技能与 MCP（admin，嵌套在 Bot 下）
 
@@ -279,6 +308,8 @@ POST   /api/providers/:pid/models           — 添加模型
 PUT    /api/providers/:pid/models/:mid      — 更新模型
 DELETE /api/providers/:pid/models/:mid      — 删除模型
 POST   /api/providers/:pid/models/import    — 批量导入模型
+
+GET    /api/model-preset                   — 模型官方推荐预设查询（?model=<id>，驱动前端新增模型时自动填入推荐值）
 ```
 
 ### 搜索提供方（admin）
@@ -374,7 +405,7 @@ GET  /api/stats/bots/:id/daily     — Bot 每日统计
 ```
 GET  /api/system/health            — 详细健康检查（admin，`system.config`）
 GET  /api/system/events/metrics    — 事件总线指标（admin，`system.config`）
-GET  /health                       — 健康检查（公开，仅返回 ok）
+GET  /health                       — 存活探针（公开）：返回 status=ok，并附带 pid/uptime 与构建信息（version/gitRevision/buildTime/goVersion），便于确认实例版本
 ```
 
 ### Swagger API 文档
