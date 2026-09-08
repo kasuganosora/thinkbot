@@ -310,6 +310,39 @@ var internalOnlyRe = regexp.MustCompile(`(?is)<internal>.*?</internal>|<internal
 // 注意：起始符限定为 `<` 或 `/`，避免误伤正文里 "dog>" 这类正常英文（要求标签有明显起始符号）。
 var strayTagRe = regexp.MustCompile(`(?is)(?:</?|/)[a-zA-Z][a-zA-Z0-9_-]*[^>]*>`)
 
+// 裸思考泄漏检测：模型偶发不遵守 REPLY_CONTROL 协议（"NEVER write private thoughts as
+// bare text outside tags"），把内部推理/规划独白作为纯文本输出。这类文本若经 extractPublicReply
+// 路径 3（纯文本无标签）原样出站，会暴露内心活动、显得模型退化（实测 TG 私聊约 3% 回合命中）。
+// 以下为高置信度信号，刻意偏保守以避免误伤正常回复（如正常的 Options 列表不含第一人称内心动词、
+// 正常对话不会产出 "send true" 协议动词残片）。
+var (
+	// REPLY_CONTROL 协议标记残留：本应被 parseReplyControl 从正文剥离，若仍在即协议外泄。
+	replyControlLeakRe = regexp.MustCompile(`@@REPLY_CONTROL@@`)
+	// 协议动词残片：send 后紧跟 true/false（模型把出站协议指令写进正文而非用控制块）。
+	// 正常对话 "send me / send it" 不命中（send 后非 true/false）；技术语境 "send: true" 极罕见，
+	// fail-closed 仅少发一条回复，优于裸发思考。
+	protocolSendRe = regexp.MustCompile(`(?i)\bsend\s*[:=]?\s*(?:true|false)\b`)
+	// 第一人称内心独白 + 规划枚举：模型对自己列选项/自我批评（如 "But I failed... Options: (a)..."）。
+	// 要求第一人称内心动词（failed/should/think...）与 "Options:/My plan/Step N" 同段，避免误伤
+	// 正常给用户列选项的回复（那种不含第一人称内心动词）。
+	nakedPlanningRe = regexp.MustCompile(`(?is)(?:but|however|actually)[, ]+i\s|\bi\s+(?:failed|should|need\s+to|want\s+to|must|realiz(?:e|ed)|think|decided|meant|believe)\b.*(?:options?:|my\s+plan|step\s*\d)`)
+)
+
+// looksLikeInternalThinking 判断清洗后的纯文本是否疑似模型未打标签的内心思考泄漏。
+// 仅用于 extractPublicReply 路径 3 的 fail-closed 兜底；命中即不出站。
+func looksLikeInternalThinking(clean string) bool {
+	if replyControlLeakRe.MatchString(clean) {
+		return true
+	}
+	if protocolSendRe.MatchString(clean) {
+		return true
+	}
+	if nakedPlanningRe.MatchString(clean) {
+		return true
+	}
+	return false
+}
+
 // extractPublicReply 从清洗后的干净正文里提取「应公开发送」的内容（取巧三态）：
 //
 //  1. 有 <public> 标签 → 只拼接各 <public> 区块内文（模型明确"就发这些"，
@@ -343,7 +376,11 @@ func extractPublicReply(clean string) string {
 		return ""
 	}
 	// 路径 3：纯文本（无标签）→ 仍有概率含模型偶发的畸形标签（如 /public>）或 HTML，
-	// 出站前统一兜底剥离，避免任何标签文本裸发到帖子/消息。
+	// 以及未打标签的内心思考（裸思考）。裸思考若原样出站会暴露内部推理、显得模型退化，
+	// 故先做思考泄漏检测：命中高置信度信号则 fail-closed（返回空），与路径 2 一致。
+	if looksLikeInternalThinking(clean) {
+		return "" // 裸思考泄漏：fail-closed，绝不把内部推理发给用户
+	}
 	return strings.TrimSpace(strayTagRe.ReplaceAllString(clean, ""))
 }
 
