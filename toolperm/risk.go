@@ -38,6 +38,11 @@ const (
 	// RiskBroadcast 对外发言工具：会产生他人可见且不可撤回的痕迹，
 	// 受权限规则约束，且不被系统会话自动豁免。
 	RiskBroadcast = "broadcast"
+	// RiskExfil 对外发送数据/文件通道（工作空间外泄风险）。
+	// 与 broadcast 同享「系统/子代理会话禁止对外发言」硬约束，但默认比 broadcast 更严：
+	// 即便平台没有任何权限规则也**默认禁止**，必须管理员显式 allow 才放开——
+	// 防止 bot 工作空间内的任意文件被悄悄投递到外部会话。
+	RiskExfil = "exfil"
 )
 
 // basicTools 是明确判定为「无害基础能力」的工具白名单。
@@ -112,9 +117,31 @@ var broadcastTools = map[string]struct{}{
 	"telegram_delete_message": {}, // 删他人消息
 	"telegram_ban_member":     {}, // 封禁，可连带清空该用户历史消息
 	"telegram_unban_member":   {},
+}
 
-	// Telegram：向会话投递文件（对外可见，且是工作空间数据外泄通道）
+// exfilTools 是对外发送数据/文件的「工作空间外泄通道」。
+//
+// 与 broadcast（发帖/表态/关注等对外可见动作）不同，这类工具把 bot 工作空间内的
+// 任意文件投递到外部会话，危害面更大且不可逆（对方已收到文件，再无撤回余地）。
+// 因此它在权限模型里比 broadcast 更严：默认禁止，需管理员显式 allow 才放开——
+// 即便平台还没有任何权限规则（即走「保守默认」分支），也不应自动开放文件外发。
+//
+// 注意：外泄通道仍复用 broadcast 的「系统/子代理会话禁止对外发言」硬约束
+// （见 IsBroadcastTool：exfil 工具也视为 broadcast），防止 cron/心跳/子智能体
+// 在无人监督时把工作空间文件偷偷发出去。
+var exfilTools = map[string]struct{}{
+	// Telegram：把工作空间文件发到会话（外泄通道）
 	"telegram_send_document": {},
+}
+
+// IsExfilTool 判断工具是否为「对外发送数据/文件」的外泄通道。
+func IsExfilTool(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return false
+	}
+	_, ok := exfilTools[lower]
+	return ok
 }
 
 // broadcastPrefixes 兜住尚未逐个收录的 Channel 写操作工具。
@@ -155,9 +182,12 @@ var sensitivePrefixExceptions = map[string]struct{}{
 	"telegram_get_chat_administrators": {},
 }
 
-// ToolRisk 返回工具的风险级别（basic / sensitive / broadcast）。
+// ToolRisk 返回工具的风险级别（basic / sensitive / broadcast / exfil）。
 // 未收录的工具一律视为敏感（安全默认）。
 func ToolRisk(name string) string {
+	if IsExfilTool(name) {
+		return RiskExfil
+	}
 	if IsBroadcastTool(name) {
 		return RiskBroadcast
 	}
@@ -171,10 +201,15 @@ func ToolRisk(name string) string {
 //
 // 判定顺序：显式集合 → 前缀兜底（排除只读例外）。
 // 只读例外必须先排除，否则 misskey_search_user 这类纯查询会被误判为发言。
+// 外泄通道（exfil）也视为 broadcast —— 它同样产生对外痕迹，且必须复用
+// broadcast 的「系统/子代理会话禁止发言」硬约束。
 func IsBroadcastTool(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	if lower == "" {
 		return false
+	}
+	if IsExfilTool(lower) {
+		return true
 	}
 	if _, ok := broadcastTools[lower]; ok {
 		return true
