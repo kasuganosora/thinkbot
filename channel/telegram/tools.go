@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -595,12 +597,14 @@ func (c *TelegramChannel) sendPhotoTool() agenttools.ToolDef {
 					return nil, fmt.Errorf("telegram_send_photo: file %q is %d bytes, exceeds %d byte limit (Telegram photos are capped at 10MB; use telegram_send_document for larger images)",
 						path, len(data), maxPhotoBytes)
 				}
-				if len(caption) > 1024 {
-					// 按字节截断可能砍断多字节 UTF-8 字符，先按 rune 数
-					runes := []rune(caption)
-					if len(runes) > 1024 {
-						caption = string(runes[:1024])
-					}
+				if !isSupportedPhotoFormat(data) {
+					return nil, fmt.Errorf("telegram_send_photo: file %q is not a supported image format (Telegram sendPhoto accepts PNG/JPEG/GIF/WEBP); use telegram_send_document for other types", path)
+				}
+				// Telegram caption 上限按 UTF-16 code units 计（非 rune）。含代理对
+				// （emoji 等）的 1 个 rune 占 2 个 unit，按 rune 截断仍可能超限被 400，
+				// 因此按 UTF-16 units 截断，绝不切断代理对。
+				if utf16Len(caption) > telegramCaptionMaxUTF16 {
+					caption = truncateToUTF16(caption, telegramCaptionMaxUTF16)
 				}
 				filename := filepath.Base(strings.ReplaceAll(path, "\\", "/"))
 				if filename == "" || filename == "." {
@@ -610,6 +614,14 @@ func (c *TelegramChannel) sendPhotoTool() agenttools.ToolDef {
 				if err != nil {
 					return nil, fmt.Errorf("send photo failed: %w", err)
 				}
+				traceid.L(ctx).Infow("telegram send photo ok",
+					"bot_id", c.botID,
+					"chat_id", chatID,
+					"file_path", path,
+					"file_name", filename,
+					"file_size", len(data),
+					"caption_utf16_len", utf16Len(caption),
+					"message_id", msgID)
 				return map[string]any{
 					"success":   true,
 					"messageId": msgID,
@@ -622,6 +634,64 @@ func (c *TelegramChannel) sendPhotoTool() agenttools.ToolDef {
 		},
 		Category: "telegram",
 	}
+}
+
+// telegramCaptionMaxUTF16 是 Telegram caption 长度上限，按 UTF-16 code units 计。
+// Telegram 对 caption 限制为 1024 个 UTF-16 unit（非 rune）；含代理对的字符
+// （emoji 等）1 个 rune 占 2 个 unit，按 rune 截断仍可能超限被 400。
+const telegramCaptionMaxUTF16 = 1024
+
+// utf16Len 返回字符串的 UTF-16 code unit 数量。
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+// truncateToUTF16 按 UTF-16 code units 截断，绝不切断代理对（保证输出是合法 UTF-8）。
+func truncateToUTF16(s string, maxUnits int) string {
+	var b strings.Builder
+	units := 0
+	for _, r := range s {
+		u := 1
+		if r > 0xFFFF {
+			u = 2
+		}
+		if units+u > maxUnits {
+			break
+		}
+		b.WriteRune(r)
+		units += u
+	}
+	return b.String()
+}
+
+// isSupportedPhotoFormat 通过文件头魔数识别 Telegram sendPhoto 支持的主流图片格式
+// （PNG / JPEG / GIF / WEBP）。Telegram 对 sendPhoto 不接受 PDF / 纯文本等，
+// 发送前拦截可在被 TG 400 前暴露失败，也防止误把非图片当照片发出。
+func isSupportedPhotoFormat(data []byte) bool {
+	if len(data) < 12 {
+		return false
+	}
+	if bytes.HasPrefix(data, []byte{0x89, 0x50, 0x4E, 0x47}) { // PNG
+		return true
+	}
+	if data[0] == 0xFF && data[1] == 0xD8 { // JPEG
+		return true
+	}
+	if bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a")) { // GIF
+		return true
+	}
+	if bytes.HasPrefix(data, []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")) { // WEBP
+		return true
+	}
+	return false
 }
 
 // toInt64 将 interface{} 安全转换为 int64，支持 float64（JSON 默认数字类型）和 string。

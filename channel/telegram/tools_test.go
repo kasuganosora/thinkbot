@@ -295,7 +295,8 @@ func TestSendPhotoTool_UploadsWorkspaceImage(t *testing.T) {
 		if path != "demo/bird.png" {
 			return nil, errors.New("unexpected path " + path)
 		}
-		return []byte("png-bytes"), nil
+		// 真实 PNG 文件头（满足 sendPhoto 工具对图片格式的校验）+ 易识别的载荷
+		return append([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, []byte("png-bytes")...), nil
 	})
 
 	defs, err := ch.ChannelTools(context.Background())
@@ -340,8 +341,8 @@ func TestSendPhotoTool_UploadsWorkspaceImage(t *testing.T) {
 	if req["__filename"] != "bird.png" {
 		t.Errorf("uploaded filename = %q, want bird.png", req["__filename"])
 	}
-	if req["__content"] != "png-bytes" {
-		t.Errorf("uploaded content = %q", req["__content"])
+	if !strings.HasPrefix(req["__content"], "\x89PNG") {
+		t.Errorf("uploaded content should start with PNG magic, got %q", req["__content"])
 	}
 }
 
@@ -369,5 +370,149 @@ func TestSendPhotoTool_RejectsOversizedImage(t *testing.T) {
 	}
 	if len(*got) != 0 {
 		t.Errorf("server received %d requests, want 0 (must not upload oversized image)", len(*got))
+	}
+}
+
+func TestSendPhotoTool_RejectsNonImageFormat(t *testing.T) {
+	srv, got := newSendPhotoTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		return []byte("%PDF-1.4 not an image"), nil // PDF 头，非图片
+	})
+	defs, _ := ch.ChannelTools(context.Background())
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered")
+	}
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{ChatID: "888"})
+	_, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": "doc.pdf",
+	})
+	if err == nil {
+		t.Fatal("expected non-image-format error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a supported image format") {
+		t.Errorf("error should mention unsupported format, got: %v", err)
+	}
+	if len(*got) != 0 {
+		t.Errorf("server received %d requests, want 0 (must not upload non-image)", len(*got))
+	}
+}
+
+// TestSendPhotoTool_TruncatesCaptionUTF16 验证含 emoji（代理对，1 rune = 2 UTF-16
+// units）的 caption 按 UTF-16 units 截断，而非按 rune —— 否则截断后仍会超过
+// Telegram 的 1024 UTF-16 上限被 400。
+func TestSendPhotoTool_TruncatesCaptionUTF16(t *testing.T) {
+	srv, got := newSendPhotoTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4}, nil
+	})
+	defs, _ := ch.ChannelTools(context.Background())
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered")
+	}
+	// 600 个 emoji，每个占 2 个 UTF-16 unit → 共 1200 units，超过 1024 上限
+	caption := strings.Repeat("🙂", 600)
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{ChatID: "888"})
+	if _, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": "demo/bird.png",
+		"caption":  caption,
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("server received %d requests, want 1", len(*got))
+	}
+	gotCaption := (*got)[0]["caption"]
+	if utf16Len(gotCaption) > telegramCaptionMaxUTF16 {
+		t.Errorf("uploaded caption utf16 len = %d, want <= %d", utf16Len(gotCaption), telegramCaptionMaxUTF16)
+	}
+}
+
+// TestSendPhotoTool_ApiErrorPropagates 验证 Telegram 返回 !OK 时错误码与描述被
+// 透传到工具执行结果（便于排查图片发送失败原因）。
+func TestSendPhotoTool_ApiErrorPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"PHOTO_INVALID"}`))
+	}))
+	t.Cleanup(srv.Close)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4}, nil
+	})
+	defs, _ := ch.ChannelTools(context.Background())
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered")
+	}
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{ChatID: "888"})
+	_, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": "demo/bird.png",
+	})
+	if err == nil {
+		t.Fatal("expected API error to propagate, got nil")
+	}
+	if !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "PHOTO_INVALID") {
+		t.Errorf("error should surface Telegram code+desc, got: %v", err)
+	}
+}
+
+// TestSendPhotoTool_WindowsStylePathBase 验证 Windows 风格反斜杠路径被 filepath.Base 归一化为文件名。
+func TestSendPhotoTool_WindowsStylePathBase(t *testing.T) {
+	srv, got := newSendPhotoTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4}, nil
+	})
+	defs, _ := ch.ChannelTools(context.Background())
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered")
+	}
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{ChatID: "888"})
+	if _, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": `dir\sub\pic.png`,
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("server received %d requests, want 1", len(*got))
+	}
+	if (*got)[0]["__filename"] != "pic.png" {
+		t.Errorf("uploaded filename = %q, want pic.png (Windows path base)", (*got)[0]["__filename"])
+	}
+}
+
+// TestSendPhotoTool_ExplicitChatIDOverrides 验证显式 chatId 覆盖 MessageMeta 中的当前会话。
+func TestSendPhotoTool_ExplicitChatIDOverrides(t *testing.T) {
+	srv, got := newSendPhotoTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	ch.SetFileSource(func(ctx context.Context, botID, path string) ([]byte, error) {
+		return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4}, nil
+	})
+	defs, _ := ch.ChannelTools(context.Background())
+	photoTool := findTool(defs, "telegram_send_photo")
+	if photoTool == nil {
+		t.Fatal("telegram_send_photo not registered")
+	}
+	// MessageMeta.ChatID=888，显式传 chatId=999 → 应用显式值
+	ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{ChatID: "888"})
+	if _, err := photoTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"filePath": "demo/bird.png",
+		"chatId":   float64(999),
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("server received %d requests, want 1", len(*got))
+	}
+	if (*got)[0]["chat_id"] != "999" {
+		t.Errorf("chat_id = %q, want 999 (explicit override of MessageMeta)", (*got)[0]["chat_id"])
 	}
 }
