@@ -7,6 +7,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -186,6 +187,29 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 
 				// 提交来源由 LLMStage 在编排前注入 context（静态注册拿不到会话）。
 				origin := tools.CallOriginFromContext(ctx)
+
+				// 护栏：会话已有运行中的目标模式工作流时，禁止重复提交新任务。
+				// 避免长时工作流进行中，用户的新消息（问进度 / 追加要求）被模型误当成
+				// 新需求再次调 task，开出一个重复工作流（2026-09-08 实证：tg 用户问
+				// 「完成了吗」被误开第二个 readme 维护工作流）。模型应改为对话回复或
+				// 用 task_detail 查进度，而不是再开一个活。
+				if origin.SessionID != "" {
+					if active := mgr.ActiveGoalModeForSession(origin.BotID, origin.SessionID); active != nil {
+						done := 0
+						for _, n := range active.Nodes {
+							if n.Status == NodeCompleted {
+								done++
+							}
+						}
+						if l := traceid.L(ctx); l != nil {
+							l.Infow("task submit blocked: active goal-mode workflow exists",
+								"session_id", origin.SessionID, "active_wf", active.ID,
+								"done", done, "total", len(active.Nodes), "status", string(active.Status))
+						}
+						return nil, fmt.Errorf("当前会话已有运行中的目标模式工作流 %s（已完成 %d/%d 子任务，状态=%s）。请勿重复提交：用 task_detail 查询进度，或用 task_control 终止它后再开新任务。如需追加要求，请等待当前工作流完成。",
+							active.ID, done, len(active.Nodes), active.Status)
+					}
+				}
 
 				result, err := mgr.Submit(ctx, SubmitRequest{
 					Requirement: requirement,
