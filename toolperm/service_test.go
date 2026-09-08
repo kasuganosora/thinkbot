@@ -57,6 +57,45 @@ func TestEvaluate_NoRulePlatformAllows(t *testing.T) {
 	}
 }
 
+// TestEvaluator_ExfilToolDefaultDeny 验证「工作空间外发」类工具（telegram_send_document）
+// 即便平台没有任何权限规则，也默认禁止；必须管理员显式 allow 才放开。
+// 同时保留 broadcast 的「系统/子代理会话禁止发言」硬约束。
+func TestEvaluator_ExfilToolDefaultDeny(t *testing.T) {
+	svc := newTestService(t)
+
+	// 1) telegram 平台零规则 → 文件外发默认禁止（风险工具不可天然可用）
+	if svc.Evaluate("bot-exfil", "telegram_send_document", "telegram", "u1") {
+		t.Fatal("telegram_send_document must be DENIED by default when no rules exist")
+	}
+	// 普通对外发言工具（非外泄）在零规则下仍按设计放行（Bot 正常运作所需）
+	if !svc.Evaluate("bot-exfil", "misskey_react_to_note", "telegram", "u1") {
+		t.Fatal("normal broadcast tool should still be allowed by default")
+	}
+
+	// 2) 显式 allow 规则 → 放开
+	if _, err := svc.CreateRule("bot-exfil", RuleReq{
+		Tool: "telegram_send_document", Platform: "telegram", UserIDs: []string{"*"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.Evaluate("bot-exfil", "telegram_send_document", "telegram", "u1") {
+		t.Fatal("telegram_send_document must be allowed after explicit allow rule")
+	}
+
+	// 3) 系统会话（cron/心跳）即便有 allow 规则也禁止发言 → 沿用 broadcast 硬约束
+	ev := svc.NewEvaluator()
+	tools := []llm.Tool{{Name: "telegram_send_document"}}
+	sysCtx := &agenttools.ToolSessionContext{BotID: "bot-exfil", IsSystem: true, UserID: "system"}
+	sysOut, err := ev.FilterTools(context.Background(), tools, sysCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sysOut) != 0 {
+		t.Fatalf("system session must never be allowed to send files, got %d", len(sysOut))
+	}
+}
+
 func TestSeedWebDefault_WebAllowedAndEmptyPlatformsAllowed(t *testing.T) {
 	svc := newTestService(t)
 	// 触发惰性播种
