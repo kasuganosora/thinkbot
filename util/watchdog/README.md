@@ -102,9 +102,14 @@ case <-wdCtx.Done():
 ## Feed 行为细节
 
 - `Feed()` 仅在未 Stop 时生效
-- 如果 context 因**超时**已取消，`Feed()` 不会自动恢复（保持 `TimedOut() == true`）
-- 如果 context 因 **parent 取消**（非超时）失效，`Feed()` 会重建 context
-- `FeedWithTimeout()` 可以动态调整超时（如首次连接给更长超时，稳定后缩短）
+- 如果 context 因**超时**已取消，`Feed()` / `FeedWithTimeout()` 不会重设定时器，保持 `TimedOut() == true`（超时后继续 Feed 不会恢复，也不会重复触发超时回调）
+- 如果 context 因 **parent 取消**（非超时）失效，`Feed()` 会重建 context 并重置超时标志（视为"重新开始"）
+- `FeedWithTimeout()` 可以动态调整超时（如首次连接给更长超时，稳定后缩短）；已超时时仅更新超时值、不再重设定时器
+
+## 并发安全
+
+- 所有公开方法持锁访问内部状态；`TimedOut()` 基于 atomic.Bool，可在任意 goroutine 无锁读取
+- 内部用递增的"代际"（generation）标记每次（重）设定的定时器：`Feed()` 重设后，任何在重设前已触发的旧定时器回调都会被忽略，从根上消除 `time.Timer` 复用竞态导致的误杀与重复触发
 
 ## Parent Context 传播
 

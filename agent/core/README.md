@@ -18,7 +18,7 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 
 | 文件 | 内容 |
 |------|------|
-| `envelope.go` | `Message`、`Action`/`ActionType`、`Envelope`；`KVSuppressReply` / `IsHardSuppressReason` / `CopyEngagementOutboundMeta` |
+| `envelope.go` | `Message`、`Action`/`ActionType`、`Envelope`；`KVSuppressReply` / `IsHardSuppressReason` / `CopyEngagementOutboundMeta` / `IsReactionAck` |
 | `stage.go` | `Stage`、`StageFunc`、`StageInfo` |
 | `predicate.go` | `Predicate`、`PredicateFunc` |
 | `errors.go` | `PipelineError`、`AbortError`、`SkipError` 及判定函数 |
@@ -46,11 +46,26 @@ Pipeline 框架的零业务依赖核心包，定义消息处理流水线中的�
 `Set` / `Get` / `MustGet`（KV 存储）、`AddAction` / `Actions`（Action 累积，`Actions()` 返回深拷贝）、
 `Abort` / `Aborted`（中止控制）、`Err` / `SetErr`（错误状态）。
 
-`IsHardSuppressReason` 识别不可被模型 `send:true` 覆盖的抑制原因（被动模式、`unanswered_outreach` 等）。`CopyEngagementOutboundMeta` 把本轮是否为 engagement 主动出击拷进 `Action.Metadata`，供出站成功后按人记账。
+`IsHardSuppressReason` 识别不可被模型 `send:true` 覆盖的硬权限门：被动模式（`passive_mode_unmentioned`）、
+主动出击未被接住（`unanswered_outreach`，含已废弃但保留判定的 `unanswered_cooldown`）、反应通知
+（`reaction_notification`）、纯 Renote 物理不可回复（`target_is_pure_renote`）；非 string 值一律视为非硬门。
+`CopyEngagementOutboundMeta` 把本轮是否为 engagement 主动出击拷进 `Action.Metadata`（`engagement.proactive` /
+`engagement.channel`，后者取 `Message.Channel`，空则回退 `Source`），供出站成功后按人记账。
+`IsReactionAck` 判断入站是否为「别人对 bot 发言的表态」（`event_type=reaction` 或 `ack_only=true`）——
+积极接话但不得当普通聊天回复。
 
 ### ChatType 常量
 
-`ChatPrivate` / `ChatGroup` / `ChatSupergroup` / `ChatChannel`，空字符串表示未知类型。
+`ChatPrivate` / `ChatGroup` / `ChatSupergroup` / `ChatChannel`，空字符串表示未知类型；
+`NormalizeChatType` 把 Telegram 的 `supergroup` 归一为 `group`（避免按字面量匹配的工具/权限规则漏判）。
+
+### 回复抑制键（与 reply-control 的关系）
+
+`KVSuppressReply` 只是「本轮不发送」的标记，Bot 仍应听、想、记（记忆写入等下游 Stage 照常执行）。
+抑制原因分两级：**软原因**（节奏 / engagement 节流）可被模型 `REPLY_CONTROL send:true` 显式覆盖；
+**硬原因**（`IsHardSuppressReason` 为 true）绝不可被覆盖——**私聊亦然**（纯 Renote 物理不可回复、
+未 @ 不该自主发言、对方沉默熔断等）。fail-closed / 私聊 fail-open 的具体裁决在 `agent/stages` 的
+LLMStage 实现，core 只提供键名与判定，避免跨包硬编码字符串。
 
 ## 使用示例
 

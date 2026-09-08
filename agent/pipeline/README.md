@@ -29,6 +29,13 @@
 | `LazyResponseConfig` | 「不调工具直接下结论」的事后兜底检测 |
 | `VerificationGateConfig` | 环境类问题的事前强制工具调用门禁 |
 
+## Stage 装配方式
+
+| 场景 | 装配方式 |
+|------|----------|
+| 单 pipeline / fx 应用 | `pipeline.Module` 从 `pipeline_stages` 分组收集 |
+| 多 bot（`api.BotService.buildPipeline`，tg/misskey 入站） | `NewBuilder().WithMode(mode)` 显式拼接，Stage 须显式 `Add` / `AddIf`，漏加即失效 |
+
 ## Pipeline 执行语义
 
 | Stage 返回 | Pipeline 行为 |
@@ -68,6 +75,36 @@ fx.Options(
 ```
 
 `Module` 在上层未提供时会补充 OTel NoOp `TracerProvider` / `MeterProvider`。
+注意：多 bot 模式（`api.BotService.buildPipeline`）**不走** `pipeline_stages` 分组，见下节。
+
+### 多 Bot 装配（tg / misskey 入站）
+
+多 bot 模式下 pipeline 用 `NewBuilder().WithMode(mode)` 显式拼接，新 Stage 必须显式
+`Add` / `AddIf`，漏加即静默失效（代码注释中已作为坑位标注）。
+
+```go
+pb := pipeline.NewBuilder().WithMode(mode)
+if s.bindStage != nil { pb.Add(3, s.bindStage) }   // 授权码绑定（命中即消费并 Abort）
+if s.bindSvc != nil  { pb.Add(4, cmdStage) }       // 命令拦截（见下）
+pb.Add(40, inboundHistoryEnricher)                 // 会话历史富化；engagement 同为 40（AddIf + ModeGroups 门控）
+pb.Add(45, lurkEnricher)                           // 潜水资源
+pb.Add(46, passiveEnricher)                        // 被动资源
+pb.Add(47, reactionAckEnricher)                    // reaction 事件确认
+pb.Add(48, pureRenoteEnricher)                     // 纯 Renote 过滤
+pb.Add(90, recallStage)                            // 记忆召回
+pb.Add(95, rhythmStage)                            // 节奏门控
+pb.Add(100, wrappedLLM)                            // LLM
+pb.Add(850, outboundHistoryEnricher)               // 出站历史
+p, err := pipeline.New(pb.Build(), s.tp, s.mp, s.logger)
+```
+
+另有条件加入：`heartbeat-activity`（Order=5，真实入站消息重置心跳唤醒预算，lurk-only 关闭）。
+
+**命令拦截（Order=4，`agent/command.CommandStage`）**：置于 LLM 之前，拦截 `/` 开头的消息——
+命中已注册命令则执行、回复挂为 `ActionReply` 并 `env.Abort(nil)`（跳过 LLM 等 Stage，Dispatcher
+仍派发回复）；未知命令放行给 LLM。tg/misskey 链路仅注册 `/chatid`（其余内建命令依赖 web 会话），
+其 `RequireBound` 由 `BindingChecker`（`bindSvc.ResolveBySource`）校验绑定，binder 为 nil 时
+fail-closed。细节见 `agent/command/README.md`。
 
 ## 通用中间件
 

@@ -94,6 +94,13 @@ var httpErr *errs.Error
 errs.As(err, &httpErr)
 ```
 
+### GetCode 的跨包契约
+
+`GetCode` 是各包共享的 HTTP 状态码提取入口：任何把错误包成 `*errs.Error` 的包，
+其错误都能被 `util/retry.HTTPShouldRetry` 正确分类（按状态码判定 4xx 不重试）、
+`util/errs.Log` 正确分级。因此**请务必用 `HTTPErrorf` 携带状态码**，而不是 `Wrap`，
+否则下游只能当普通网络错误处理（`GetCode` 返回 0 → 被视为可重试）。
+
 ## 日志集成
 
 自动按 HTTP 状态码分级输出，并携带堆栈和上下文字段：

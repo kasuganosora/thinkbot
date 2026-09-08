@@ -5,7 +5,9 @@
 ## 功能
 
 - **平台无关**：统一的 `Workspace` 接口，上层无需关心底层是 Docker 还是本地进程
-- **Docker 隔离**：默认「一 bot 一长期容器」模式，文件落在 named volume，宿主机磁盘不落 bot 文件（真正隔离）
+- **Docker 隔离**：默认「一 bot 一长期容器」模式，named volume（`thinkbot-bot-<botID>`）挂载到容器内虚拟根 `/data`，宿主机磁盘不落 bot 文件（真正隔离）；固定 `--shm-size 512m`（浏览器场景 Chromium 需要）
+- **网络策略**：默认联网。每次使用前 `ensureNetwork` 复核容器网络（无网络则 attach `bridge`；历史遗留 `--network none` 容器不兼容直连，会复用原 volume 重建容器）；`NetworkDisabled=true` 时才 `--network none`
+- **出口代理**：`Config.Proxy` 注入容器 `HTTP_PROXY`/`HTTPS_PROXY`，容器内所有出站请求统一走部署侧代理（通常取自 `system.proxy`），空值直连
 - **本地降级**：无 Docker 时退化为本地进程执行（**无容器隔离**，命令直接跑在宿主上）
 - **工具注册**：通过 `BotWorkspaceToolProvider` 自动为每会话注册工作空间工具（`sandbox_exec` / `sandbox_read_file` 等）
 - **持久化**：per-bot 工作空间目录（`data/workspaces/{botID}/`）跨会话保留
@@ -23,7 +25,7 @@
 | `docker` | 强制 Docker，不可用直接报错 |
 | `local` | 强制本地进程执行 |
 
-- **PersistentContainer**（仅影响 `BotWorkspaceManager` 的 Docker 后端）：默认 `true`。为 true 时每个 bot 绑定一个长期运行的容器（`thinkbot-bot-<botID>`），挂载 named volume（`thinkbot-bot-<botID>`）到容器内 `/data`；false 时为旧行为（每条命令起临时容器 `docker run --rm`）。
+- **PersistentContainer**（仅影响 `BotWorkspaceManager` 的 Docker 后端）：默认 `true`，且 docker 后端强制启用——`NewBotWorkspaceManager` 会把 false 改写回 true，旧的「每条命令起临时容器 `docker run --rm`」路径实际不可达。每个 bot 绑定一个长期运行的容器（`thinkbot-bot-<botID>`），挂载 named volume（`thinkbot-bot-<botID>`）到容器内 `/data`。
 - **RequireDocker**：`auto` 模式下探测不到 Docker 直接报错，不降级（避免无隔离裸跑）。
 
 ## Docker 可用性探测与 PATH 自愈
@@ -33,6 +35,14 @@
 - 先调用 `ensureDockerPath()` 自愈 PATH：通过 launchd/systemd 启动的进程，其 PATH 常被裁剪（macOS 默认不含 `/opt/homebrew/bin`），而 docker CLI 多装在那里；`LookPath("docker")` 失败 → auto 静默降级 local → LLM 命令直接跑在宿主、且看不到容器 volume 里的文件。探测前主动在候选目录（Homebrew、Docker Desktop、Rancher Desktop、Colima、OrbStack 等，另可经环境变量 `THINKBOT_DOCKER_BIN_DIR` 显式指定）中查找 docker，找到即补进本进程 PATH（仅首次、幂等，正常 shell 启动零影响）。
 - 随后 `exec.LookPath("docker")` 探测可执行文件；再带 3s 超时执行 `docker version` 探测 daemon 是否在运行。
 - 任一步失败，返回 `(false, reason)`；调用方据此降级或报错，并在日志/`sandbox_health` 中暴露原因。
+
+## 长期容器生命周期（botContainer）
+
+- **惰性 ensure**：首次使用时 `docker run -d`（镜像经 `resolveBotImage` 解析：`builtin`/空 → 按需自构建内置镜像，其他值原样使用），已停止则 `docker start`；幂等。
+- **网络自愈**：ensure 每次复核并补齐网络配置（见上文「网络策略」）。
+- **停止语义**：用户显式 `stop()` 后置 `stopped` 标志，后续 `ensure()` 拒绝自动 `docker start`，避免「停止后又被 agent exec 重启」死循环；`unstop()` 恢复。
+- **destroy**：`docker rm -f`，可选连同 named volume 一起删除。
+- **内存**：`--memory` 取自 `cfg.MemoryLimit`，可被 per-bot `memoryOverride` 覆盖（`"0"`/`"-"` 表示不限制）；`ElevateMemory` 在**不销毁容器**的前提下 `docker update --memory` 就地提内存。
 
 ## 关键类型
 
@@ -75,7 +85,7 @@ type StreamWorkspace interface {
 
 | 工具 | 说明 | 备注 |
 |------|------|------|
-| `sandbox_exec` | 执行 shell 命令，返回 stdout/stderr/exitCode + 可信度信号 | 自动剥离命令末尾 `\| head`/`\| tail` 管道；验证型命令 OOM 时自动提内存重试一次 |
+| `sandbox_exec` | 执行 shell 命令，返回 stdout/stderr/exitCode + 可信度信号 | 自动剥离命令末尾 `\| head`/`\| tail` 管道；验证型命令 OOM 时自动提内存重试（多次 OOM 逐级放大，见下文） |
 | `sandbox_read_file` | 读文件（支持 offset/limit 分段、带行号） | — |
 | `sandbox_write_file` | 写文件（自动建父目录、覆盖） | — |
 | `sandbox_replace_in_file` | 精确替换字符串片段（支持 `replace_all`） | — |
@@ -97,7 +107,7 @@ type StreamWorkspace interface {
 - **卡死看门狗（StuckTimeout）**：命令连续无输出超过阈值（默认 5 分钟，可由 `sandbox.stuck_timeout` 配置）且已过启动宽限期、进程仍存活，才判卡死并终止。慢但持续输出的命令（如编译）不会被误杀。
 - **硬上限（Timeout）**：总时长兜底（默认 = 卡死阈值 × 3，可由 `sandbox.timeout` 配置），无论有无输出，超过即强制终止，防无限挂起。
 
-结果携带完整性/可信度信号（见 `ExecResult`）：`Reliable`/`Aborted`/`OOMKilled`/`Warnings`。检测分三层：退出码/超时/输出文本特征（`finalizeExecResult`）、cgroup `oom_kill` 前后对比、验证型命令 OOM 时经 `RetryOOMWithElevatedMemory` 在容器内就地 `docker update --memory` 提内存重试一次（封顶 `oomRetryMaxMB=16384`，不落库）。
+结果携带完整性/可信度信号（见 `ExecResult`）：`Reliable`/`Aborted`/`OOMKilled`/`Warnings`。检测分三层：退出码/超时/输出文本特征（`finalizeExecResult`）、cgroup `oom_kill` 前后对比、验证型命令 OOM 时经 `RetryOOMWithElevatedMemory` 就地 `docker update --memory` 提内存重试一次（首次 6144MB，仍 OOM 则按 2 倍逐级放大 6144 → 12288 → …，封顶 `oomRetryMaxMB=16384`，不落库；提升结果写回 `memoryOverride`，后续容器重建沿用）。
 
 ## 配置
 
@@ -111,9 +121,9 @@ type StreamWorkspace interface {
 | `sandbox.require_docker` | `false` | auto 模式下强制要求 Docker，否则报错 |
 | `sandbox.image` | `builtin` | Docker 镜像；`builtin`/空 = thinkbot 内置浏览器沙箱镜像（启动 bot 时按需自构建），其他值（如 `alpine:latest`）作为预构建镜像原样使用 |
 | `workspace.dir` | `data/workspaces` | per-bot 工作空间根目录 |
-| `system.timezone` | 服务器本地 | 容器/进程 TZ |
+| `system.timezone` | `UTC` | 容器/进程 TZ（IANA 格式） |
 
-`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
+`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`，可被 per-bot override 覆盖）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`（默认 false，即联网）、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB）、`Proxy`（全局出口代理，注入容器 `HTTP_PROXY`/`HTTPS_PROXY`，通常取自 `system.proxy`）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
 
 ## 安全隔离
 

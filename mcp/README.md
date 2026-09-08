@@ -16,7 +16,7 @@ mcp/
 └── config.go      从 config.Store 加载配置
 ```
 
-依赖方向：`mcp → agent/tools`（单向，无循环依赖）。
+依赖方向：`mcp → agent/tools`、`llm`、`config`、`util/*`（单向，无循环依赖）。
 
 ## 配置
 
@@ -39,7 +39,7 @@ mcp.experiment = {"transport":"stdio","command":"node","args":["server.js"],"ena
 说明：
 
 - 键名 `mcp.<name>` 中的 `<name>` 即服务器名；含额外 `.` 的键（如 `mcp.a.b`）会被 `LoadServers` 跳过。
-- stdio 额外支持 `env`（`["KEY=VALUE"]`）；未指定 `transport` 时默认按 `stdio` 处理。
+- stdio 额外支持 `env`（`["KEY=VALUE"]`，追加到现有环境而非替换）；未指定 `transport` 时默认按 `stdio` 处理。子进程 stderr 默认丢弃，程序化配置可经 `ServerConfig.Stderr`（`io.Writer`）转发到日志（JSON 配置不含该字段）。
 - HTTP 传输超时 120s，最大响应体 10MB，自动携带服务器返回的 `Mcp-Session-Id`，并可解析 `text/event-stream` 响应。
 
 ## 使用方式
@@ -90,13 +90,13 @@ mcp.RegisterTools(toolMgr, mgr)
 | `EnableServer(ctx, name)` / `DisableServer(name)` | 运行时开关单个服务器，幂等，触发缓存失效回调 |
 | `IsServerEnabled(name)` / `IsServerConnected(name)` | 状态查询 |
 | `ListServers() []ServerStatus` | 返回 `{Name, Transport, Enabled, Connected}` |
-| `CallTool(ctx, server, tool, args)` | 调用工具，连接失效时自动重连并重试一次 |
-| `ListAllTools(ctx)` | 按服务器分组列出工具（单个服务器失败时跳过） |
+| `CallTool(ctx, server, tool, args)` | 调用工具；仅当错误源于传输层（连接断开）时按服务器粒度加锁重连并重试一次，业务报错不重试 |
+| `ListAllTools(ctx)` | 按服务器分组列出工具；单个服务器失败时先重连一次再试，仍失败则返回 partial error（携带已成功部分） |
 | `GetClient(name)` / `ConnectedServers()` / `ServerCount()` | 客户端与统计信息 |
 | `SetOnServerChange(fn)` | 设置服务器状态变更回调 |
 | `Close()` | 关闭全部连接 |
 
-**Client**：`Initialize(ctx)`、`ListTools(ctx)`（自动翻页 cursor）、`CallTool(ctx, name, args)`、`IsHealthy()`、`Name()`、`Close()`。Client 由 Manager 创建，一般不需手动构造。
+**Client**：`Initialize(ctx)`（握手后发送 `notifications/initialized`）、`ListTools(ctx)`（自动翻页 cursor，上限 1000 页防死循环）、`CallTool(ctx, name, args)`、`IsHealthy()`、`Name()`、`Close()`。Client 由 Manager 创建，一般不需手动构造。
 
 **其他**：`LoadServers(store) []ServerConfig`、`SetupFromConfig(...)`、`NewProvider(mgr) *Provider`、`RegisterTools(toolMgr, mgr)`。
 
@@ -112,13 +112,16 @@ MCP 工具统一标记 `DeferredLoad = true`：初始只向模型暴露名称与
 
 ## 缓存与断线重连
 
-- `Provider` 缓存工具列表，避免每次 `Tools()` 都请求 MCP 服务器；`InvalidateCache()` 可手动失效。`RegisterTools` 会把它挂到 `Manager.SetOnServerChange`，服务器启用/禁用/重连后自动刷新。
+- `Provider` 缓存工具列表，避免每次 `Tools()` 都请求 MCP 服务器；`InvalidateCache()` 可手动失效。`RegisterTools` 会把它挂到 `Manager.SetOnServerChange`，服务器启用/禁用/重连后自动刷新。刷新出现部分失败时保留旧缓存，避免工具整体「消失」或被残缺结果覆盖。
 - `Client.IsHealthy()` 依托传输层探活：stdio 通过向子进程发送信号 0 判断存活；HTTP 恒为健康，由请求失败驱动重连。
 - `Manager.CallTool` 在连接失效时会按服务器粒度加锁重建连接并重试一次，使 MCP 服务器崩溃或重启后工具可自愈。
+- stdio 关闭时先向子进程发送 SIGTERM，3s 宽限后仍未退出才 SIGKILL；stdio 读取响应时会跳过服务器提前发来的通知行与噪声行（有 method 无 id）。
 
 ## 测试
 
-集成测试需要真实凭据，参见 `.env.test.example`：
+单元测试（mock 传输层，无外部依赖）：`go test ./mcp/`
+
+集成测试需要真实凭据，参见 `.env.test.example`（配置来源优先级：进程环境变量 > `mcp/.env.test` > 仓库根 `.env`）：
 
 ```bash
 cp mcp/.env.test.example mcp/.env.test   # 填入凭据

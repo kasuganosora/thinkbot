@@ -30,10 +30,10 @@ err := strutil.ExtractJSON(raw, &cfg)
 // → cfg = {Name: "test", Value: 42}
 
 // 直接 JSON 字符串
-err := strutil.ExtractJSON(`{"a": 1}`, &result)
+err = strutil.ExtractJSON(`{"a": 1}`, &result)
 
 // JSON 数组
-err := strutil.ExtractJSON("[1, 2, 3]", &list)
+err = strutil.ExtractJSON("[1, 2, 3]", &list)
 ```
 
 提取策略（按顺序尝试，任一成功即返回）：

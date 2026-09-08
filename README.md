@@ -5,15 +5,18 @@
 ## 核心特性
 
 - **多 LLM 供应商**：OpenAI / Anthropic / Google Gemini / xAI Grok，统一接口
-- **多渠道接入**：Misskey / Telegram / Web，统一消息归一化
+- **多渠道接入**：Misskey / Telegram / Web，统一消息归一化；Telegram 渠道工具覆盖发帖、置顶、群管理等，并支持发图 / 发文件（`telegram_send_photo` / `telegram_send_document`）
 - **分层记忆系统**：L0 工作记忆 → L1 长期记忆 → L2 场景记忆 → L3 用户画像，自动巩固
 - **工具调用**：Function Calling，支持沙箱工作空间（Docker/本地）
+- **工具授权**：`toolperm` 按 bot × 工具 × 平台 × 会话 × 用户 维度配置 allow/deny；无规则命中时按风险分级取默认（基础工具放行、敏感工具禁止，外发文件类任何情况下默认禁止），工具列表过滤 + 执行时复核双重防线
 - **Pipeline 架构**：可组合的 Stage 管道，中间件 + 谓词过滤
 - **Token 用量管理**：月度配额（Bot/Channel/Chat 三级限额 + 超额拦截）、单次预算控制、全链路记账（SubAgent/Workflow/Memory 均不漏记）
 - **主动参与**：三层漏斗决策引擎（规则 → LLM 快判 → 时序门控）
+- **自主心跳**：per-bot 周期唤醒并走完整编排链路，准入关卡 + 发言闸门 + 频控三级节制
 - **工作流引擎**：基于 DAG 的多步骤自动化工作流
 - **技能系统**：从文件系统动态加载可扩展技能
 - **MCP 集成**：支持 Model Context Protocol 工具服务器
+- **Web 控制台**：聊天界面 + 管理台（`web/`，Vue 3 + Vite + TDesign，构建产物输出到 `static/` 由后端托管）
 
 ## 快速开始
 
@@ -65,33 +68,54 @@ go build -ldflags="-s -w" -o thinkbot ./cmd && ./thinkbot
 thinkbot/
 ├── agent/          # 核心 Agent 框架（Engine + Pipeline + 记忆 + 工具）
 │   ├── bot/        #   Bot 实例与管理
+│   ├── command/    #   斜杠命令拦截 Stage（LLM 之前短路执行）
 │   ├── core/       #   核心类型（Message/Envelope/Stage）
 │   ├── engagement/ #   主动参与决策
+│   ├── heartbeat/  #   per-bot 自主心跳唤醒（准入 + 闸门 + 频控）
+│   ├── inbound/    #   统一消息入口网关（Ingress）
 │   ├── memory/     #   分层记忆系统
+│   ├── outbound/   #   Action 派发 + EventBus（Web SSE）
 │   ├── pipeline/   #   消息处理管道
 │   ├── prompt/     #   系统提示词构建
 │   ├── session/    #   会话串行化
 │   ├── stages/     #   内建 Stage
+│   ├── storage/    #   记忆持久化仓储（SQLite/GORM 适配器）
 │   └── tools/      #   工具管理
 ├── api/            # HTTP API 服务（Gin）
 ├── auth/           # 用户认证与权限
 ├── channel/        # 渠道适配器（Misskey/Telegram）
 ├── cmd/            # 程序入口
 ├── config/         # 配置管理
+├── cron/           # 定时任务调度
 ├── dao/            # 数据访问层（GORM）
 ├── db/             # 数据库初始化
+├── docker/         # entrypoint.sh 与内置浏览器沙箱镜像构建上下文（docker/sandbox 为 Go 包，go:embed 后按需构建）
+├── docs/           # Swagger 文档（swaggo 生成，供 /swagger 路由）
+├── filesystem/     # 空占位目录（仅 .gitkeep，暂无代码）
+├── identity/       # 平台账号 ↔ thinkbot 账号绑定
+├── internal/       # 内部支撑包（仅模块内可见，不构成对外 API）
+│   ├── buildinfo/  #   构建信息（ldflags 注入，/health 回报）
+│   ├── interaction/ #  跨平台「提问—等待应答」注册表（user_choice 核心）
+│   ├── searchproviders/ # 搜索提供方配置 + 12 家后端 + 回退熔断
+│   └── singleinst/ #   启动早期单实例版本协商
 ├── llm/            # LLM 供应商适配层
 │   ├── openai/     #   OpenAI（兼容 DeepSeek 等）
 │   ├── anthropic/  #   Anthropic Claude
 │   ├── google/     #   Google Gemini
 │   └── grok/       #   xAI Grok
 ├── mcp/            # MCP 协议客户端
+├── plugin/         # 空占位目录（仅 .gitkeep，暂无代码）
 ├── sandbox/        # Bot 沙箱工作空间
-├── skill/          # 技能系统
+├── scripts/        # 辅助脚本（redeploy.sh 重部署、run_thinkbot.py 守护启动、watch.sh 日志观察）
+├── skill/          # 技能系统（加载 / 注册 / 发现）
+├── skills/         # 技能内容目录（每个子目录一个技能，SKILL.md 为核心）
+├── static/         # 前端构建产物（npm run build 生成，勿手工编辑）
 ├── stats/          # 用量统计
 ├── subagent/       # 子代理管理
+├── toolperm/       # Bot 工具权限（风险分级默认策略 + 发言模式）
 ├── tools/          # 内建工具集
 ├── util/           # 通用工具库
+├── web/            # Web 前端源码（Vue 3 + Vite + TDesign）
 └── workflow/       # 工作流引擎
 ```
 
@@ -99,9 +123,10 @@ thinkbot/
 
 | 组件 | 技术 |
 |------|------|
-| 语言 | Go 1.27 |
+| 语言 | Go 1.27（`github.com/kasuganosora/thinkbot`，CGO 需开启，见上文 sqlite 说明） |
 | Web 框架 | Gin |
-| ORM | GORM + SQLite |
+| ORM | GORM + SQLite（`gorm.io/driver/sqlite` / `mattn/go-sqlite3`） |
+| API 文档 | swaggo（`/swagger`） |
 | 依赖注入 | go.uber.org/fx |
 | 日志 | Zap + Lumberjack |
 | 可观测性 | OpenTelemetry |
