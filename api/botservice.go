@@ -498,13 +498,6 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 			"workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID)
 		return
 	}
-	ch, ok := s.GetWebChannel(botID)
-	if !ok {
-		s.logger.Warnw("workflow completed but web channel unavailable, skip continuation",
-			"workflow_id", wf.ID, "bot_id", botID)
-		return
-	}
-
 	// 续跑以「系统通知」形式注入：traceID 用 sessionID，便于前端按会话 resume 收到流式回复。
 	traceID := sessionID
 	const userID = "system"
@@ -560,7 +553,9 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 		}
 	}
 
-	if err := ch.Inject(context.Background(), traceID, userID, text, extraMeta); err != nil {
+	// 按会话来源渠道路由续跑注入：TG 走真实渠道主动推回原会话，
+	// web/未知来源退回 WebChannel（落库 + 前端 resume）。
+	if err := s.injectWorkflowContinuation(botID, sessionID, traceID, userID, text, extraMeta); err != nil {
 		s.logger.Warnw("failed to inject workflow continuation", "err", err, "workflow_id", wf.ID)
 		return
 	}
@@ -574,6 +569,96 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 	}
 
 	s.logger.Infow("workflow continuation injected", "workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID)
+}
+
+// injectWorkflowContinuation 将工作流续跑指令注入到「发起会话的渠道」，
+// 使后台长任务（>18min，超过 task 工具 waitForTerminal 上限）跑完后，
+// agent 的续跑总结能主动推回用户原会话，而非只落库 web 历史。
+//
+// 路由规则：
+//   - tg（Telegram）：经该 bot 的 Telegram 渠道 Ingress 注入，续跑回复按
+//     msg.Source 路由回 Telegram Sender，主动推送到原 chat。
+//   - web / 未知来源：保持原有 WebChannel.Inject（前端 SSE resume + 落库）。
+//   - mk（Misskey）：sessionID 不含精确回复目标 noteID，错误路由风险高，
+//     暂退回 web 兜底（落库、不主动弹），与修复前行为一致，不引入退化。
+//
+// 返回 error 表示注入失败（渠道不可用等），调用方据此跳过后续标记。
+func (s *BotService) injectWorkflowContinuation(botID, sessionID, traceID, userID, text string, extraMeta map[string]any) error {
+	kind, target := splitSessionChannel(sessionID)
+
+	if kind == "tg" {
+		return s.injectContinuationToTelegram(botID, target, traceID, userID, text, extraMeta)
+	}
+	// mk / web / 未知：退回 WebChannel 注入（落库 + 前端 resume）。
+	webCh, ok := s.GetWebChannel(botID)
+	if !ok {
+		return fmt.Errorf("web channel unavailable for bot %q, cannot inject continuation", botID)
+	}
+	return webCh.Inject(context.Background(), traceID, userID, text, extraMeta)
+}
+
+// injectContinuationToTelegram 经 Telegram 渠道把续跑指令注入编排。
+// 关键：续跑消息的 Source 必须设为该 bot 已注册的 Telegram 渠道名
+// （replyHandler 路由键 = channel.Name()），Channel 设为原始 chatID（纯数字），
+// 这样 agent 续跑产出的回复才会经 Telegram Sender 投回原 chat。
+func (s *BotService) injectContinuationToTelegram(botID, chatID, traceID, userID, text string, extraMeta map[string]any) error {
+	if chatID == "" {
+		return fmt.Errorf("empty telegram chatID for bot %q", botID)
+	}
+	s.mu.RLock()
+	b, ok := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return fmt.Errorf("bot instance unavailable for %q", botID)
+	}
+	// 取已注册的 Telegram 渠道名（replyHandler 路由键 = channel.Name()）。
+	chName := ""
+	for _, c := range b.Channels() {
+		if c.Type() == "telegram" {
+			chName = c.Name()
+			break
+		}
+	}
+	if chName == "" {
+		return fmt.Errorf("no telegram channel registered for bot %q", botID)
+	}
+
+	metadata := map[string]any{
+		"channel_type":   "telegram",
+		"source_channel": chName,
+	}
+	for k, v := range extraMeta {
+		metadata[k] = v
+	}
+
+	msg := core.Message{
+		ID:        traceID,
+		TraceID:   traceID,
+		BotID:     botID,
+		Source:    chName,
+		Channel:   chatID,
+		ChatType:  core.ChatPrivate,
+		UserID:    userID,
+		Text:      text,
+		Mentioned: true,
+		CreatedAt: time.Now(),
+		Metadata:  metadata,
+	}
+	if err := b.Ingress().Receive(context.Background(), msg); err != nil {
+		return fmt.Errorf("telegram continuation inject failed: %w", err)
+	}
+	return nil
+}
+
+// splitSessionChannel 从 sessionID 解析渠道种类与真实会话标识。
+// 形如 "tg:76019910" → ("tg", "76019910")；"web:xxx" → ("web", "xxx")；
+// "mk:channel:user123" → ("mk", "channel:user123")；无前缀 → ("", sessionID)。
+func splitSessionChannel(sessionID string) (kind, target string) {
+	idx := strings.Index(sessionID, ":")
+	if idx < 0 {
+		return "", sessionID
+	}
+	return sessionID[:idx], sessionID[idx+1:]
 }
 
 // WorkflowEngine 返回一个已装配工作区工具的工作流引擎（无则返回 nil）。
