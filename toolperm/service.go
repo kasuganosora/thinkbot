@@ -269,8 +269,11 @@ func (s *Service) EvaluateUsers(botID, tool, platform, chatID string, candidateI
 	// 无匹配规则：该平台完全没有启用规则 → 保守默认（修复 5142 的 fail-open）。
 	// 基础工具与对外发言工具放行（Bot 正常运作所需），敏感工具（联网/命令/文件/
 	// 子智能体）默认禁止 —— 含危害面的能力必须显式放开，而非天然可用。
+	// 例外：外泄通道（exfil，如 telegram_send_document）即便在此分支也**默认禁止**，
+	// 工作空间文件不能随意发到外部会话，必须管理员显式 allow。
 	if !platformHasEnabledRule(rules, platform) {
-		return ToolRisk(tool) != RiskSensitive
+		r := ToolRisk(tool)
+		return r == RiskBasic || r == RiskBroadcast
 	}
 	// 该平台已进入白名单模式（已有规则但无命中）：仅基础工具放行，
 	// 对外发言与敏感工具均禁止 —— 管理员的配置意图是「收紧」，未显式放开即拒绝。

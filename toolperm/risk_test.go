@@ -18,15 +18,21 @@ func TestIsBroadcastTool_Classification(t *testing.T) {
 		"telegram_ban_member", "telegram_unban_member",
 		// 前缀兜底：未登记的新 Channel 写工具也应判为对外发言
 		"misskey_quote_note", "telegram_promote_member",
-		// 显式登记的文件投递工具
+		// 显式登记的对外发言工具
 		"telegram_send_document",
 	}
 	for _, name := range broadcast {
 		if !IsBroadcastTool(name) {
 			t.Errorf("expected %q to be broadcast", name)
 		}
-		if ToolRisk(name) != RiskBroadcast {
-			t.Errorf("expectedToolRisk(%q)=broadcast, got %s", name, ToolRisk(name))
+		// 注：telegram_send_document 是外泄通道（exfil），分级高于普通 broadcast，
+		// 但仍视为 broadcast 以复用「系统/子代理会话禁止发言」硬约束。
+		wantRisk := RiskBroadcast
+		if name == "telegram_send_document" {
+			wantRisk = RiskExfil
+		}
+		if ToolRisk(name) != wantRisk {
+			t.Errorf("expectedToolRisk(%q)=%s, got %s", name, wantRisk, ToolRisk(name))
 		}
 		// 对外发言工具绝不能同时被判为基础工具
 		if IsBasicTool(name) {
