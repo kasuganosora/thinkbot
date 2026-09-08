@@ -75,6 +75,7 @@ func (c *TelegramChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDe
 		c.getChatAdministratorsTool(),
 		c.pinMessageTool(),
 		c.sendDocumentTool(),
+		c.sendPhotoTool(),
 	}, nil
 }
 
@@ -510,6 +511,104 @@ func (c *TelegramChannel) sendDocumentTool() agenttools.ToolDef {
 				msgID, err := c.api.sendDocument(ctx, chatID, filename, caption, "", data)
 				if err != nil {
 					return nil, fmt.Errorf("send document failed: %w", err)
+				}
+				return map[string]any{
+					"success":   true,
+					"messageId": msgID,
+					"chatId":    chatID,
+					"filePath":  path,
+					"fileName":  filename,
+					"fileSize":  len(data),
+				}, nil
+			}),
+		},
+		Category: "telegram",
+	}
+}
+
+// sendPhotoTool 返回 telegram_send_photo 工具定义。
+//
+// 与 telegram_send_document 的区别：以「照片」形式渲染（预览/相册体验），
+// 而非文件附件。走 multipart 上传本地图片，不需要图片可公网访问——
+// 弥合 sendPhoto(URL) 预留实现无法发送工作空间图片的断链。
+// 文件源经 SetFileSource 注入（telegram 包不依赖 sandbox）。
+// 属外泄通道：toolperm 中挂入 exfilTools，默认拒绝、需显式 allow。
+func (c *TelegramChannel) sendPhotoTool() agenttools.ToolDef {
+	const maxPhotoBytes = 9 << 20 // 9MB，低于 Telegram sendPhoto 10MB 上限，留传输余量
+	return agenttools.ToolDef{
+		Tool: llm.Tool{
+			Name: "telegram_send_photo",
+			Description: "Send an image from the bot workspace as a Telegram photo (rendered with preview, not as a file attachment). " +
+				"filePath is relative to the workspace root (e.g. \"demo/bird.png\"). " +
+				"chatId is optional — it defaults to the current conversation; only pass it explicitly to send to a different chat. " +
+				"caption is optional (max 1024 chars). Use telegram_send_document for non-image files or when photo preview is not needed.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"filePath": map[string]any{
+						"type":        "string",
+						"description": "Image file path, relative to the bot workspace root",
+					},
+					"chatId": map[string]any{
+						"type":        "integer",
+						"description": "ID of the target chat. Omit to send to the current conversation",
+					},
+					"caption": map[string]any{
+						"type":        "string",
+						"description": "Optional caption shown with the photo",
+					},
+				},
+				"required": []string{"filePath"},
+			},
+			Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+				args, ok := input.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("telegram_send_photo: invalid input type")
+				}
+				path, _ := args["filePath"].(string)
+				if path == "" {
+					return nil, fmt.Errorf("telegram_send_photo: filePath is required")
+				}
+				chatID := toInt64(args["chatId"])
+				if chatID == 0 {
+					// 缺省发到当前会话（MessageMeta.ChatID 由 LLMStage 注入）。
+					// 无法确定目标时拒绝执行，避免把照片发给错误的对象。
+					meta := agenttools.MessageMetaFromContext(ctx)
+					chatID = toInt64(meta.ChatID)
+					if chatID == 0 {
+						return nil, fmt.Errorf("telegram_send_photo: chatId is required (no current conversation context)")
+					}
+				}
+				caption, _ := args["caption"].(string)
+
+				if c.fileSource == nil {
+					return nil, fmt.Errorf("telegram_send_photo: workspace file source not configured")
+				}
+				data, err := c.fileSource(ctx, c.botID, path)
+				if err != nil {
+					return nil, fmt.Errorf("read workspace file %q failed: %w", path, err)
+				}
+				if len(data) == 0 {
+					return nil, fmt.Errorf("telegram_send_photo: file %q is empty", path)
+				}
+				if len(data) > maxPhotoBytes {
+					return nil, fmt.Errorf("telegram_send_photo: file %q is %d bytes, exceeds %d byte limit (Telegram photos are capped at 10MB; use telegram_send_document for larger images)",
+						path, len(data), maxPhotoBytes)
+				}
+				if len(caption) > 1024 {
+					// 按字节截断可能砍断多字节 UTF-8 字符，先按 rune 数
+					runes := []rune(caption)
+					if len(runes) > 1024 {
+						caption = string(runes[:1024])
+					}
+				}
+				filename := filepath.Base(strings.ReplaceAll(path, "\\", "/"))
+				if filename == "" || filename == "." {
+					filename = "photo"
+				}
+				msgID, err := c.api.sendPhotoUpload(ctx, chatID, filename, caption, data)
+				if err != nil {
+					return nil, fmt.Errorf("send photo failed: %w", err)
 				}
 				return map[string]any{
 					"success":   true,
