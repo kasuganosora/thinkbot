@@ -20,6 +20,7 @@ func TestIsBroadcastTool_Classification(t *testing.T) {
 		"misskey_quote_note", "telegram_promote_member",
 		// 显式登记的对外发言工具
 		"telegram_send_document",
+		"telegram_send_photo", // 图片外发通道，exfil 级别（与 send_document 同族）
 	}
 	for _, name := range broadcast {
 		if !IsBroadcastTool(name) {
@@ -28,7 +29,7 @@ func TestIsBroadcastTool_Classification(t *testing.T) {
 		// 注：telegram_send_document 是外泄通道（exfil），分级高于普通 broadcast，
 		// 但仍视为 broadcast 以复用「系统/子代理会话禁止发言」硬约束。
 		wantRisk := RiskBroadcast
-		if name == "telegram_send_document" {
+		if name == "telegram_send_document" || name == "telegram_send_photo" {
 			wantRisk = RiskExfil
 		}
 		if ToolRisk(name) != wantRisk {

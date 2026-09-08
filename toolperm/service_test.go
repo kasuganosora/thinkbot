@@ -67,6 +67,9 @@ func TestEvaluator_ExfilToolDefaultDeny(t *testing.T) {
 	if svc.Evaluate("bot-exfil", "telegram_send_document", "telegram", "u1") {
 		t.Fatal("telegram_send_document must be DENIED by default when no rules exist")
 	}
+	if svc.Evaluate("bot-exfil", "telegram_send_photo", "telegram", "u1") {
+		t.Fatal("telegram_send_photo must be DENIED by default when no rules exist")
+	}
 	// 普通对外发言工具（非外泄）在零规则下仍按设计放行（Bot 正常运作所需）
 	if !svc.Evaluate("bot-exfil", "misskey_react_to_note", "telegram", "u1") {
 		t.Fatal("normal broadcast tool should still be allowed by default")
@@ -81,6 +84,16 @@ func TestEvaluator_ExfilToolDefaultDeny(t *testing.T) {
 	}
 	if !svc.Evaluate("bot-exfil", "telegram_send_document", "telegram", "u1") {
 		t.Fatal("telegram_send_document must be allowed after explicit allow rule")
+	}
+	// 图片外发通道需各自显式 allow 才放开（不应被 send_document 的 allow 顺带放开）
+	if _, err := svc.CreateRule("bot-exfil", RuleReq{
+		Tool: "telegram_send_photo", Platform: "telegram", UserIDs: []string{"*"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.Evaluate("bot-exfil", "telegram_send_photo", "telegram", "u1") {
+		t.Fatal("telegram_send_photo must be allowed after explicit allow rule")
 	}
 
 	// 3) 系统会话（cron/心跳）即便有 allow 规则也禁止发言 → 沿用 broadcast 硬约束
