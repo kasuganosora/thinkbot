@@ -712,7 +712,7 @@ const wildcardPresets = [
   { label: 'browser__*', value: 'browser__*', hint: '所有浏览器工具（开网页、点击、填表、截图）' },
   { label: 'sandbox_*', value: 'sandbox_*', hint: '所有沙箱与文件工具' },
   { label: 'web_*', value: 'web_*', hint: '所有联网工具（搜索、抓取）' },
-  { label: 'task_*', value: 'task_*', hint: '所有任务/工作流工具' },
+  { label: 'task*', value: 'task*', hint: '所有任务/工作流工具（task/task_control/task_detail/task_status）' },
   { label: 'text_*', value: 'text_*', hint: '所有文本处理工具' }
 ]
 
