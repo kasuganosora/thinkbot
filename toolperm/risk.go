@@ -132,6 +132,7 @@ var broadcastTools = map[string]struct{}{
 var exfilTools = map[string]struct{}{
 	// Telegram：把工作空间文件发到会话（外泄通道）
 	"telegram_send_document": {},
+	"telegram_send_photo":    {}, // 图片外发同属外泄通道：默认拒绝，需显式 allow
 }
 
 // IsExfilTool 判断工具是否为「对外发送数据/文件」的外泄通道。
