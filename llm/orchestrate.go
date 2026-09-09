@@ -453,6 +453,16 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		}
 		toolsExecuted = true
 
+		// 工具请求终止：user_choice 被同一会话的用户新消息打断等。此时旧回合仍持有
+		// 旧上下文，继续调 LLM 只会基于过时的上下文生成回复（LLM 看不到新消息），故
+		// 干净终止本轮编排，不再生成后续回复；用户插话由随后独立触发的回合处理。
+		for _, tr := range toolResults {
+			if tr.Halt {
+				logLoopStop(ctx, loop, len(allSteps))
+				return lastResult, nil
+			}
+		}
+
 		// Keep loaded deferred tools that were just executed "fresh" so they
 		// are not idle-evicted while still relevant.
 		if deferActive {
@@ -819,6 +829,19 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				break
 			}
 			toolsExecuted = true
+
+			// 工具请求终止：user_choice 被同一会话的用户新消息打断等。干净终止本轮
+			// 编排（不再基于旧上下文生成后续回复），由用户插话触发的独立回合处理新内容。
+			halt := false
+			for _, tr := range toolResults {
+				if tr.Halt {
+					halt = true
+					break
+				}
+			}
+			if halt {
+				break
+			}
 
 			// Keep loaded deferred tools that were just executed "fresh" so they
 			// are not idle-evicted while still relevant.
@@ -1379,6 +1402,7 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 			InvocationID: invocationID,
 			Result:       err.Error(),
 			IsError:      true,
+			Halt:         execCtx.halt,
 		}
 	}
 	sink.Emit(ctx, core.Event{
@@ -1425,5 +1449,6 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		ToolName:     tc.ToolName,
 		InvocationID: invocationID,
 		Result:       finalOutput,
+		Halt:         execCtx.halt,
 	}
 }
