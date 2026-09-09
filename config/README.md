@@ -80,6 +80,8 @@ policy := builder.GetToolPolicy("mybot")        // → ToolPolicyConfig
 
 各配置组均有对应的 `DefaultXxxConfig()` 与 `XxxMetaSpecs()`；
 `AllMetaSpecs()` 汇总全部元数据，`DefaultMap()` 返回默认值映射。
+`GlobalMetaSpecs()` 返回系统设置页展示的全局项：System / MemoryWindow / LLM 客户端 / Compaction，
+外加 Engagement 的 `unanswered_*` 两项全局社交节奏参数（改后需重启 Bot）。
 
 ### 常用配置键与默认值
 
@@ -92,13 +94,15 @@ policy := builder.GetToolPolicy("mybot")        // → ToolPolicyConfig
 | `bot.temperature` | `0.7` | 采样温度 |
 | `bot.max_tokens` | `4096` | 最大输出 token 数 |
 | `bot.workers` | `4` | Bot 并发 worker 数 |
-| `db.path` | `thinkbot.db` | SQLite 文件路径 |
+| `db.path` | `data/thinkbot.db` | SQLite 文件路径（落在 data 卷） |
 | `log.level` | `info` | 日志级别 |
 | `system.timezone` | 服务器本地时区 | IANA 时区标识符 |
 | `workspace.dir` | `data/workspaces` | Bot 工作空间根目录 |
 | `sandbox.backend` | `auto` | `auto`/`docker`/`local` |
 | `sandbox.stuck_timeout` | `300` | 卡死看门狗阈值（秒） |
 | `sandbox.timeout` | `0` | 单命令硬上限（秒），0=卡死阈值×3 |
+| `engagement.unanswered_silence` | `3m` | 主动回复后无人回应即视为拒绝的等待时长；超时只结算不补发 |
+| `engagement.unanswered_episode_boundary` | `5h` | 被拒后仍禁止点名此人，超期才允许房间级参与；完全恢复需对方 @ / 私聊 |
 | `soul.reload_interval` | `5s` | SOUL.md 热重载轮询间隔，0=禁用 |
 
 ### 配置键命名约定
@@ -111,6 +115,9 @@ policy := builder.GetToolPolicy("mybot")        // → ToolPolicyConfig
 | `bot.<id>.timezone` | `bot.mybot.timezone` | Bot 独立时区 |
 | `bot.<id>.token_quota` | `bot.mybot.token_quota` | Bot 级月 Token 额度（可细化到 channel/chat） |
 | `bot.<id>.engagement.adaptive.<sub>` | `bot.mybot.engagement.adaptive.enabled` | 自适应参与度（Bot/Channel/会话三级） |
+| `bot.<id>.reply_control` | `bot.mybot.reply_control` | 回复控制门控开关（fail-closed，默认关闭） |
+| `bot.<id>.memory.backfill.<sub>` | `bot.mybot.memory.backfill.event_watermark` | 记忆回灌开关与水位线 |
+| `bot.<id>.token_quota.channel.<type>[.<chat_id>]` | `bot.mybot.token_quota.channel.telegram` | Channel/chat 级月 Token 额度（最细粒度） |
 | `channel.<name>.<prop>` | `channel.mk.token` | Channel 配置 |
 | `tools.<id>.policy` | `tools.mybot.policy` | 工具权限策略（JSON） |
 

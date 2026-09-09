@@ -79,6 +79,10 @@ log.Output{
 | `Stdout()` | stdout | console（彩色） |
 | `Stderr()` | stderr | console（彩色） |
 | `File(dir, name)` | file | json（JSONL） |
+| `ConsoleFile(dir, name)` | file | console（纯文本，无 ANSI 颜色） |
+
+`ConsoleFile` 产出可读且自动轮换的纯文本日志（如 `./logs/thinkbot.console.log`），适合实时
+tail；与 `File`（JSONL）写不同文件、各自独立轮换，可同时挂载。
 
 快捷构造返回的是 `Output` 结构体值，需要覆盖字段时直接赋值：
 
@@ -92,8 +96,8 @@ outputs := []log.Output{
 }
 ```
 
-> 注意：`stdout` / `stderr` 输出源始终使用 console 编码器（彩色级别），
-> 对它们设置 `Format: FormatJSON` 不会生效。`Format` 仅对 `file` 输出源有实际区分。
+> 格式规则：`stdout` / `stderr` 输出源默认使用 console 编码器（彩色级别），但显式设置
+> `Format: FormatJSON` 会生效；写文件的 console 格式固定不带 ANSI 颜色，以保证纯文本可读。
 
 ---
 
@@ -177,9 +181,12 @@ log.Output{
 
 | 格式 | 说明 | 典型场景 |
 |------|------|----------|
-| `console` | 人类可读，彩色级别标记 | 终端 / 开发环境 |
+| `console` | 人类可读；终端输出带彩色级别，写文件时不带 ANSI 颜色 | 终端 / 开发环境 / tail 排查 |
 | `json` | JSONL（每行一个 JSON 对象） | 文件 / 生产环境 / 日志收集 |
-| `auto` | 自动：stdout/stderr → console，file → json | 默认 |
+| `auto` | 自动：stdout/stderr → console，file → json（默认） | — |
+
+同一文件路径的输出源共享同一个 Lumberjack 实例（按完整路径缓存），避免多个输出源指向同一
+文件时各自独立轮转、互相破坏。
 
 **Encoder 配置**（所有格式共用）：
 
