@@ -66,6 +66,10 @@ agent/
 │   ├── stage.go            #   MemoryStage(读,Order~100) + MemoryWriteStage(写,Order~900)
 │   ├── tier.go / tiered_bridge.go # 记忆层级 L0~L3 + TieredStore/TieredManager 桥接
 │   ├── dreaming.go / dreaming_phases.go # 梦境巩固管线（Light → REM → Deep）
+│   ├── compactor.go / compactor_precompress.go # 语义压缩 + LLM 摘要前确定性前置压缩
+│   ├── context_packer.go   #   ContextPacker（字符预算四阶段打包：贪心→压缩→重分配→重排序）
+│   ├── sync_executor.go    #   SyncExecutor（后台同步任务执行器）
+│   ├── think_filter.go     #   ThinkFilter（记忆写入前剥 <think>/<thinking> 推理内容）
 │   ├── compactor.go / consolidator.go  # 语义压缩 / 记忆巩固
 │   ├── formation.go        #   即时记忆提取管线
 │   ├── profiler.go / bot_profiler.go / profiler_validation.go # 画像提取
@@ -956,7 +960,7 @@ hb.Start(ctx)
 
 ### LLMStage（生产主力）
 
-对接 `llm` 模块做多步 tool-calling 编排，并承担**出站前的全部清洗与裁决**——这是全项目唯一产出 `ActionReply` 的地方：
+对接 `llm` 模块做多步 tool-calling 编排，并承担**出站前的全部清洗与裁决**——这是 LLM 自主生成回复路径中唯一产出 `ActionReply` 的地方（`ReplyStage` 与 `CommandStage` 也会按各自协议产出 `ActionReply`，但生产 pipeline 默认使用 LLMStage，见 `api/botservice.go` 的组装）：
 
 ```go
 stage := stages.NewLLMStage("llm", provider, stages.LLMConfig{

@@ -34,7 +34,7 @@ web/
     ├── stores/             # Pinia：user（登录态/角色）、bot（会话与消息）
     ├── api/                # http.js（请求封装）、services.js（接口入口）、mockDb.js（mock 数据）
     ├── views/              # 页面级视图（见下）
-    ├── components/         # 通用组件 + bot/（Bot 配置分页）+ common/（XtermConsole 等）
+    ├── components/         # 通用组件 + bot/（Bot 配置分页，16 个）+ common/（XtermConsole）
     ├── i18n/               # toolLabels：工具名 → 显示文案映射
     ├── styles/             # tokens.css（设计变量）、global.css
     └── utils/              # markdown、format、brand（主题色）、spring、userPreferences

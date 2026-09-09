@@ -6,9 +6,9 @@
 
 - **多 LLM 供应商**：OpenAI / Anthropic / Google Gemini / xAI Grok，统一接口
 - **多渠道接入**：Misskey / Telegram / Web，统一消息归一化；Telegram 渠道工具覆盖发帖、置顶、群管理等，并支持发图 / 发文件（`telegram_send_photo` / `telegram_send_document`）
-- **分层记忆系统**：L0 工作记忆 → L1 长期记忆 → L2 场景记忆 → L3 用户画像，自动巩固
+- **分层记忆系统**：L0 工作记忆 → L1 长期记忆 → L3 画像（用户画像 + Bot 自我画像），L0 自动巩固到 L1；L2 场景记忆为可选扩展点（`memory.Aggregator` 接口已定义，仓库未提供实现，生产管线不经过）
 - **工具调用**：Function Calling，支持沙箱工作空间（Docker/本地）
-- **工具授权**：`toolperm` 按 bot × 工具 × 平台 × 会话 × 用户 维度配置 allow/deny；无规则命中时按风险分级取默认（基础工具放行、敏感工具禁止，外发文件类任何情况下默认禁止），工具列表过滤 + 执行时复核双重防线
+- **工具授权**：`toolperm` 按 bot × 工具 × 平台 × 会话 × 用户 维度配置 allow/deny。判定顺序：首条匹配规则生效 > 平台无规则时按风险分级取默认（基础/对外发言工具放行，敏感工具禁止，exfil 外发通道即使在此分支也默认禁止）> 平台已有规则但未命中时白名单模式（仅基础工具放行）。工具列表过滤 + 执行时复核双重防线
 - **Pipeline 架构**：可组合的 Stage 管道，中间件 + 谓词过滤
 - **Token 用量管理**：月度配额（Bot/Channel/Chat 三级限额 + 超额拦截）、单次预算控制、全链路记账（SubAgent/Workflow/Memory 均不漏记）
 - **主动参与**：三层漏斗决策引擎（规则 → LLM 快判 → 时序门控）
@@ -90,7 +90,7 @@ thinkbot/
 ├── dao/            # 数据访问层（GORM）
 ├── db/             # 数据库初始化
 ├── docker/         # entrypoint.sh 与内置浏览器沙箱镜像构建上下文（docker/sandbox 为 Go 包，go:embed 后按需构建）
-├── docs/           # Swagger 文档（swaggo 生成，供 /swagger 路由）
+├── docs/           # Swagger 文档（swaggo 生成，供 /swagger 路由）+ 设计文档（heartbeat-redesign 等）
 ├── filesystem/     # 空占位目录（仅 .gitkeep，暂无代码）
 ├── identity/       # 平台账号 ↔ thinkbot 账号绑定
 ├── internal/       # 内部支撑包（仅模块内可见，不构成对外 API）
