@@ -37,6 +37,11 @@ const (
 	StatusTimeout Status = "timeout"
 	// StatusCancelled 被主动取消（会话中止等）。
 	StatusCancelled Status = "cancelled"
+	// StatusInterrupted 等待期间同一会话插入了新用户消息，阻塞被中断。
+	// 用于「用户阻塞等待选项时又发来新内容」：旧回合的编排拿旧上下文在跑，
+	// 继续等只会基于过时上下文生成回复（LLM 看不到新消息），故中断让旧回合
+	// 干净终止，新消息由随后独立触发的编排回合处理。
+	StatusInterrupted Status = "interrupted"
 )
 
 // Mode 选择模式。
@@ -94,6 +99,8 @@ var (
 	ErrTimeout = errors.New("interaction: 等待超时")
 	// ErrCancelled 问题已取消。
 	ErrCancelled = errors.New("interaction: 问题已取消")
+	// ErrInterrupted 等待被同一会话的用户新消息中断。
+	ErrInterrupted = errors.New("interaction: 等待被用户新消息中断")
 )
 
 const (
@@ -219,6 +226,9 @@ type entry struct {
 type Registry struct {
 	mu      sync.Mutex
 	entries map[string]*entry
+	// sessionQuestions 按会话（botID\x00chatID）索引其 pending 问题，
+	// 用于「用户插入新消息时中断该会话所有 pending choice」。
+	sessionQuestions map[string][]string
 }
 
 // PollCreator 是平台原生的投票创建函数。
@@ -266,7 +276,42 @@ func GetPollCreator(platform string) PollCreator {
 
 // NewRegistry 创建注册表。
 func NewRegistry() *Registry {
-	return &Registry{entries: make(map[string]*entry)}
+	return &Registry{
+		entries:          make(map[string]*entry),
+		sessionQuestions: make(map[string][]string),
+	}
+}
+
+// sessionKey 生成会话索引键（botID\x00chatID）。用不可见分隔符避免
+// botID/chatID 拼接歧义（如 "ab"+"c" 与 "a"+"bc" 碰撞）。
+func sessionKey(botID, chatID string) string {
+	return botID + "\x00" + chatID
+}
+
+// removeSessionQuestionLocked 在持锁状态下从会话索引中移除一个问题。
+// key 不存在或问题不在列表中则安全无操作。
+func (r *Registry) removeSessionQuestionLocked(key, qid string) {
+	ids := r.sessionQuestions[key]
+	if len(ids) == 0 {
+		return
+	}
+	out := ids[:0]
+	kept := false
+	for _, id := range ids {
+		if id == qid {
+			kept = true
+			continue
+		}
+		out = append(out, id)
+	}
+	if !kept {
+		return
+	}
+	if len(out) == 0 {
+		delete(r.sessionQuestions, key)
+	} else {
+		r.sessionQuestions[key] = out
+	}
 }
 
 // defaultRegistry 是进程内共享注册表。
@@ -311,6 +356,10 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 	}
 	q.Options = opts
 	r.entries[q.ID] = &entry{question: q, done: make(chan struct{})}
+	// 登记到会话索引：供 InterruptBySession 在用户插话时快速定位并中断本会话
+	// 所有 pending 问题。
+	key := sessionKey(q.BotID, q.ChatID)
+	r.sessionQuestions[key] = append(r.sessionQuestions[key], q.ID)
 	r.mu.Unlock()
 	return q, nil
 }
@@ -456,6 +505,8 @@ func (r *Registry) Wait(ctx context.Context, questionID string) (Question, Answe
 			return snap, ans, nil
 		case StatusCancelled:
 			return snap, Answer{}, ErrCancelled
+		case StatusInterrupted:
+			return snap, Answer{}, ErrInterrupted
 		default: // StatusTimeout
 			return snap, Answer{}, ErrTimeout
 		}
@@ -484,6 +535,9 @@ func (r *Registry) Wait(ctx context.Context, questionID string) (Question, Answe
 			if snap.Status == StatusAnswered {
 				return snap, ans, nil
 			}
+			if snap.Status == StatusInterrupted {
+				return snap, Answer{}, ErrInterrupted
+			}
 		}
 		if timedOut {
 			return Question{ID: questionID}, Answer{}, ErrTimeout
@@ -505,6 +559,9 @@ func (r *Registry) finalize(questionID string, status Status) error {
 		return fmt.Errorf("%w: 当前状态 %s", ErrAlreadyResolved, e.question.Status)
 	}
 	e.question.Status = status
+	if key := sessionKey(e.question.BotID, e.question.ChatID); key != "" {
+		r.removeSessionQuestionLocked(key, questionID)
+	}
 	close(e.done)
 	return nil
 }
@@ -523,6 +580,38 @@ func (r *Registry) cleanup(questionID string) {
 // 防止长跑进程的注册表无限增长。
 func (r *Registry) CleanupFinal(questionID string) {
 	r.cleanup(questionID)
+}
+
+// InterruptBySession 中断指定会话（botID+chatID）下所有 pending 的问题。
+//
+// 用于「用户阻塞等待选择期间，又在同一会话插入新消息」的场景：此时旧回合的
+// 编排仍持有旧上下文在跑，继续等待只会基于过时的上下文生成回复（LLM 根本没看到
+// 新消息）。中断阻塞让旧回合干净终止，新消息由随后独立触发的编排回合正常处理。
+//
+// 仅中断「本次调用时已处于 pending」的问题，不波及中断之后新注册的问题
+// （新问题的交互属于另一轮，不应被本次中断影响）。返回被中断的问题数，便于日志。
+func (r *Registry) InterruptBySession(botID, chatID string) int {
+	key := sessionKey(botID, chatID)
+	r.mu.Lock()
+	qids := r.sessionQuestions[key]
+	if len(qids) == 0 {
+		r.mu.Unlock()
+		return 0
+	}
+	// 清空该会话待中断列表：后续新问题会重新进入索引，属另一轮交互。
+	delete(r.sessionQuestions, key)
+	r.mu.Unlock()
+
+	n := 0
+	for _, qid := range qids {
+		// finalize 落到 interrupted 终态并关闭 done 唤醒等待者；已是终态（竞态）
+		// 则跳过。终态后立即从 entries 清理，避免长跑进程注册表泄漏。
+		if r.finalize(qid, StatusInterrupted) == nil {
+			n++
+		}
+		r.cleanup(qid)
+	}
+	return n
 }
 
 // AbortPending 取消仍处于 pending 的问题并立刻从注册表移除。

@@ -257,6 +257,104 @@ func TestOptionsIsolation(t *testing.T) {
 	}
 }
 
+func TestInterruptBySession(t *testing.T) {
+	r := NewRegistry()
+
+	// 同一会话（bot-1/chat-1）两个 pending 问题，另一会话一个。
+	qa := validQuestion("ia")
+	qb := validQuestion("ib")
+	qcOther := validQuestion("ic")
+	qcOther.ChatID = "chat-other"
+	if _, err := r.RegisterQuestion(qa); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterQuestion(qb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterQuestion(qcOther); err != nil {
+		t.Fatal(err)
+	}
+
+	// 在中断前先让等待者阻塞，模拟「user_choice 正在 Wait」。
+	type res struct {
+		id  string
+		err error
+	}
+	waitCh := make(chan res, 3)
+	waitOne := func(id string) {
+		go func() {
+			_, _, err := r.Wait(context.Background(), id)
+			waitCh <- res{id, err}
+		}()
+	}
+	waitOne("ia")
+	waitOne("ib")
+	waitOne("ic") // 另一会话，应不被中断
+	time.Sleep(20 * time.Millisecond)
+
+	// 中断本会话：应命中 2 个，且不应波及另一会话。
+	if n := r.InterruptBySession("bot-1", "chat-1"); n != 2 {
+		t.Fatalf("want interrupt 2, got %d", n)
+	}
+	// 重复中断同一会话应返回 0（索引已清空，无副作用）。
+	if n := r.InterruptBySession("bot-1", "chat-1"); n != 0 {
+		t.Fatalf("repeat interrupt want 0, got %d", n)
+	}
+
+	// 收集被中断的等待者结果。
+	got := map[string]error{}
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-waitCh:
+			got[r.id] = r.err
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for interrupted waiter")
+		}
+	}
+	for _, id := range []string{"ia", "ib"} {
+		if !errors.Is(got[id], ErrInterrupted) {
+			t.Fatalf("%s: want ErrInterrupted, got %v", id, got[id])
+		}
+		// 终态后应已从注册表清理（避免长跑泄漏）。
+		if _, lerr := r.Lookup(id); !errors.Is(lerr, ErrQuestionNotFound) {
+			t.Fatalf("%s: interrupted entry should be cleaned, got %v", id, lerr)
+		}
+	}
+
+	// 另一会话的等待者仍阻塞（未被中断）：Lookup 应仍是 pending。
+	otherSnap, lerr := r.Lookup("ic")
+	if lerr != nil {
+		t.Fatalf("ic lookup: %v", lerr)
+	}
+	if otherSnap.Status != StatusPending {
+		t.Fatalf("ic should stay pending, got %s", otherSnap.Status)
+	}
+}
+
+func TestInterruptDoesNotAffectLaterRegistration(t *testing.T) {
+	r := NewRegistry()
+	if _, err := r.RegisterQuestion(validQuestion("pre")); err != nil {
+		t.Fatal(err)
+	}
+	// 中断并清理旧问题后，新注册的问题仍可正常 Resolve。
+	if n := r.InterruptBySession("bot-1", "chat-1"); n != 1 {
+		t.Fatalf("want 1, got %d", n)
+	}
+	if _, err := r.RegisterQuestion(validQuestion("post")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Resolve("post", Answer{Selected: []int{0}, Via: ViaMisskey}); err != nil {
+		t.Fatalf("new question after interrupt should resolve: %v", err)
+	}
+	_, ans, err := r.Wait(context.Background(), "post")
+	if err != nil {
+		t.Fatalf("wait after resolve want nil, got %v", err)
+	}
+	if len(ans.Selected) != 1 || ans.Selected[0] != 0 {
+		t.Fatalf("unexpected answer: %v", ans.Selected)
+	}
+}
+
 func TestLookupCopiesUnderLock(t *testing.T) {
 	r := NewRegistry()
 	if _, err := r.RegisterQuestion(validQuestion("lk-copy")); err != nil {

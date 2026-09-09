@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/internal/interaction"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -172,6 +173,22 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 		return nil
 	}
 
+	// 用户在该会话阻塞等待选择期间插入了新消息：中断本会话所有 pending 的
+	// user_choice 问题。否则旧回合仍持有旧上下文在跑，等阻塞结束后只会基于过时的
+	// 上下文生成回复（LLM 看不到新消息）；中断后旧回合干净终止，这条新消息由随后
+	// 独立触发的编排回合正常处理。该调用只影响「本会话有 pending choice」的情况，
+	// 无 pending 时是空操作（返回 0），对普通消息路径零副作用。
+	if n := interaction.Default().InterruptBySession(msg.BotID, msg.Channel); n > 0 {
+		g.logger.Debugw("ingress: interrupted pending choice(s) by user insert",
+			"count", n,
+			"bot_id", msg.BotID,
+			"channel", msg.Channel,
+			"source", msg.Source,
+			"trace_id", msg.TraceID,
+			"entry", "Receive",
+		)
+	}
+
 	// 封装 Envelope
 	env := core.NewEnvelope(msg)
 
@@ -248,6 +265,9 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 	}
 
 	env := core.NewEnvelope(msg)
+
+	// 与 Receive 一致：用户插话中断本会话 pending 的 user_choice（详见 Receive 注释）。
+	interaction.Default().InterruptBySession(msg.BotID, msg.Channel)
 
 	sent := false
 	func() {
