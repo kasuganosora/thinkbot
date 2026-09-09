@@ -29,7 +29,7 @@
 | `BotManager` | 多 Bot 生命周期管理器（线程安全） |
 | `Channel` / `Sender` | 输入端 / 输出端接口 |
 | `LLMBundle` | LLM 实例集（Main/Light/Vision） |
-| `DreamingBundle` | 梦境巩固子系统封装（DreamManager + cron Scheduler） |
+| `DreamingBundle` | 梦境巩固子系统封装（Manager + DreamExecutor + Scheduler + CronStore + 分层存储，另含可选 `BotProfiler`） |
 | `DreamExecutor` | cron.Executor 实现，桥接 cron 触发和 DreamManager.Run() |
 | `BotMetrics` | Bot 运行指标快照（`Metrics()` 返回，含 Engine 指标 + 派发错误数） |
 | `MemoryChannel` | 内存双向 Channel（测试用） |
@@ -59,7 +59,7 @@ mgr.StopAll()
 
 ```go
 // 从 config 构建梦境配置
-dreamCfg := builder.GetDreamingConfig(botID)
+dreamCfg := builder.GetDreamingConfig(botID)  // 返回 config 侧 DreamingConfig
 dreamCfg.Enabled = true
 
 // 创建子系统（Enabled=false 时返回 nil）
@@ -74,12 +74,8 @@ bundle := bot.NewDreamingBundle(
     cronFilePath,     // cron Job 持久化路径
     db,               // *gorm.DB（SQLite 持久化，重启可恢复）
 )
-
-// Bot.Run 中启动调度器
-bundle.Scheduler.Start(ctx)
-
-// Bot 关闭时优雅停止
-defer bundle.Stop()
+// 注入 Bot：BotParams.DreamScheduler = bundle.Scheduler
+// Bot.Run 自动 Start，Bot.Close 自动 Stop（内部即 bundle.Stop()）
 ```
 
 | 组件 | 说明 |
@@ -88,4 +84,5 @@ defer bundle.Stop()
 | `DreamExecutor` | cron.Executor 实现，触发 DreamManager.Run() |
 | `Scheduler` | cron 调度器，按 `dreamCfg.Schedule` 定时触发 |
 | `CronStore` | cron Job 持久化（JSON 文件） |
-| `TieredMgr` / `TieredStore` | 独立的分层记忆管理器/存储（梦境管线专用，SQLite 持久化） |
+| `TieredMgr` / `TieredStore` | 独立的分层记忆管理器/存储（梦境管线专用，SQLite 持久化；TieredStore 亦供桥接层同步 NoteHandler 写入） |
+| `BotProfiler` | Bot 自我画像提取器（可选；注入后梦境管线每次运行时对 BotScope 提取画像） |

@@ -17,10 +17,12 @@
 
 通过 Bot API long polling 持续获取用户消息。
 
-- Long Polling（可配置超时和更新类型过滤）
+- Long Polling（可配置超时和更新类型过滤，默认含 `callback_query` / `message_reaction`）
 - 群聊/私聊识别（@提及 + 回复检测）
 - HTML / MarkdownV2 / 纯文本发送
 - 长消息自动分片（4096 字符限制）
+- 消息反应入站（awareness-only，不触发回复）
+- 工作空间文件/图片投递工具（`telegram_send_document` / `telegram_send_photo`，经 `SetFileSource` 注入文件源；toolperm 中属 exfil 级，默认拒绝、需显式 allow）
 
 ## Message 字段设计规范
 

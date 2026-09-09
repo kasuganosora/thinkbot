@@ -58,9 +58,20 @@ result, err := prov.DoGenerate(ctx, llm.GenerateParams{
 ## 两种 API 模式
 
 - **Responses API（默认）**：`DoGenerate` / `DoStream` 经 `paramsToOpenAIRequest` 转换后调用 `/v1/responses`，支持 `ReasoningConfig`、结构化输出（json_schema）、`PreviousResponseID` 多轮等能力。
-- **Chat Completions API**：当 `WithChatMode()` 生效时，`DoGenerate` / `DoStream` 改用 `/v1/chat/completions`，适用于仅实现 Chat Completions 的供应商（如智谱 BigModel、DeepSeek、Moonshot）。支持 `reasoning_content`、工具调用、JSON 模式。
+- **Chat Completions API**：当 `WithChatMode()` 生效时，`DoGenerate` / `DoStream` 改用 `/v1/chat/completions`，适用于仅实现 Chat Completions 的供应商（如智谱 BigModel、DeepSeek、Moonshot）。支持工具调用、JSON 模式；响应侧解析 `reasoning_content`（思考文本），请求侧历史中的思考块不回传。
 
 两种模式下都会自动处理隐式前缀缓存：若 `GenerateParams.CacheKey` 非空，会透传为 `prompt_cache_key` 并设 `store=false`。
+
+### Chat 模式消息规范化（GLM/BigModel 兼容）
+
+Chat 请求构造时自动规范化消息结构，规避 GLM 整请求拒收（1210「API 调用参数有误」/ 1214「messages 参数非法」）：
+
+- content 永不为空字符串：空/空白文本回退为占位符；工具结果为空时补「（工具无输出）」。
+- 工具结果（tool 消息）的 content 序列化为 JSON 字符串，单层转义不双重编码。
+- 消息严格交替：合并连续同 role 的纯文本消息；tool 消息与带 `tool_calls` 的 assistant 回合不合并，保持 `tool_call_id` 配对。
+- 首条消息 role 必须为 user/system：历史以 assistant/tool 开头且无 system 时，前置一条占位 user 消息。
+- 至少含一条 user 消息：system-only 对话在 system 之后补占位 user 消息。
+- 工具 schema 规范化：无参工具输出 `{"type":"object","properties":{}}`，并递归为每个 object 节点补空 `properties`。
 
 ## 直接 API 方法（底层，非 llm 接口）
 

@@ -20,6 +20,7 @@
 - [代理支持](#代理支持)
 - [Clone 共享连接池](#clone-共享连接池)
 - [Dump 调试](#dump-调试)
+- [URL 脱敏](#url-脱敏)
 - [Trace ID 集成](#trace-id-集成)
 - [文件结构](#文件结构)
 
@@ -165,6 +166,11 @@ client := httputil.New(
 
 **Retry-After 头支持**：收到 429 时自动解析 `Retry-After` 响应头（秒数或 HTTP-date），
 与退避计算出的间隔取较大值作为下次重试的等待时间。若自行提供了 `GetRetryDelay`，同样取二者较大值。
+
+**错误形态与跨包分类**：非 2xx 响应通过 `errs.HTTPErrorf` 返回携带状态码的 `*errs.Error`
+（消息中的 URL 经 `SanitizeURL` 脱敏，响应体截断至 500 字符）。`util/retry.HTTPShouldRetry` 会用
+`errs.GetCode` 识别这类错误并按状态码判定可重试性，确定性 4xx 不会再被误判为
+“非 HTTP 错误”而反复重试。
 
 **per-request 覆盖**：
 
@@ -377,6 +383,26 @@ resp, err := client.Post("/upload").
     Do()
 ```
 
+`SetMultipart` 会自动关闭表单写入器并设置带 boundary 的 `Content-Type`。
+
+### 安全行为：转义与注入防护
+
+`AddFile` 与 `AddFileWithMIME` 对 `name` / `filename` 做两层防护：
+
+- **换行/控制字符清洗**（`sanitizeMultipartToken`）：剔除 CR/LF 及其他不可见控制字符
+  （`r < 0x20`），防止通过这些字符注入额外的 HTTP 头。
+- **引号转义**：`AddFile` 委托标准库 `multipart.Writer.CreateFormFile`，后者用
+  `fmt.Sprintf("%q")` 拼 `Content-Disposition` 头，**本身就已转义双引号与反斜杠**；
+  `AddFileWithMIME` 走 `CreatePart` 手工拼头，因此显式调用 `escapeMultipartQuotes`
+  （`\` → `\\`、`"` → `\"`）做等价转义。
+
+两条路径行为一致：含引号/反斜杠的文件名（如 `re"port.txt`、`a\b.txt`）经真实 multipart
+服务端 round-trip 后可完整还原，不会损坏 `Content-Disposition` 头。
+
+> ⚠️ 历史上曾有「`AddFile` 不转义引号 → 会损坏 multipart 头」的误判，并据此想把
+> 调用点统一迁到 `AddFileWithMIME`。这是误报，无需迁移。
+> `multipart_test.go` 的 `TestMultipartAddFileEscapesQuotes` 已将该行为锁定为回归测试。
+
 ---
 
 ## 看门狗超时
@@ -514,6 +540,40 @@ resp, err := client.Post("/api").Dump().Do()
 
 ---
 
+## URL 脱敏
+
+`SanitizeURL`（`sanitize.go`）用于在日志/错误信息中抹除 URL 里的凭证，防止 token 经查询参数或路径段泄露。仅做展示层脱敏，实际请求仍使用原始 URL：
+
+| 场景 | 处理 |
+|------|------|
+| 敏感查询参数 | `i` / `token` / `access_token` / `secret` / `api_key` / `apikey` / `password` / `authorization`（不区分大小写）→ 值替换为 `***` |
+| Telegram 风格路径段 | `/bot<token>` → `/bot***` |
+| URL 解析失败 | 正则兜底，抹掉明显的 token 片段 |
+
+### 当前覆盖范围（截至本次同步）
+
+**已接入 `SanitizeURL` 的输出**：
+
+| 路径 | 位置 |
+|------|------|
+| 普通请求（`Do`）的请求失败/响应/截断告警日志、非 2xx 错误消息（`errs.HTTPErrorf`） | `client.go` |
+| Dump 输出的请求行 | `client.go` |
+| WS **拨号阶段**：`ws connected` / `ws dial *` 日志、`WatchdogTimeoutError.URL`、拨号 HTTP 错误消息 | `ws.go` |
+| `WatchdogTimeoutError.Error()` 输出（`URL` 字段存原始值，打印时脱敏） | `errors.go` |
+| 流式错误响应体读取失败的告警日志 | `stream_conn.go`（流式路径唯一一处） |
+
+**尚未接入（输出原始 URL）**：
+
+- SSE/Stream 的连接建立与生命周期日志（`connecting` / `connected` / `connection failed` / `unexpected status` / `ended` 等，`streamConnect` 与 `classifyStreamError` 直接使用原始 `reqURL`）
+- `StreamHTTPError.URL` 及其 `Error()`（刻意保留原始 URL 与完整 body，便于上层 SDK 解析 API 错误）
+- WS 建连成功后 `WSConn.url` 及相关生命周期日志（`closed` / `auto-ping failed` / 读错误等）
+
+即：**流式路径的脱敏覆盖是不完整的**，若上游把流式日志/`StreamHTTPError.URL` 落到持久化日志或对外输出，需自行调用 `httputil.SanitizeURL(raw)` 处理。
+
+> ⚠️ 不要依据本节推断「所有日志中的 URL 均已脱敏」——上述未覆盖清单以代码为准。
+
+---
+
 ## Trace ID 集成
 
 如果 context 中包含 Trace ID（通过 `util/traceid` 包），构建请求时会自动注入到请求头
@@ -533,12 +593,15 @@ resp, err := client.Get("/data").SetContext(ctx).Do()
 
 ```
 util/http/
-├── client.go       # Client + Option + Request 链式构造 + Response + 便捷方法 + Dump
-├── errors.go       # WatchdogTimeoutError / IsWatchdogTimeout + DefaultStreamShouldRetry
-│                   # + StreamShouldRetry + StreamGetRetryDelay + 配额耗尽识别（IsQuotaExhausted 等）
-├── sse.go          # SSE 事件流：DoSSE / DoSSEStream / DoSSEStreamWithErr
-├── stream.go       # 原始流式响应：DoStream / DoStreamChunks / DoStreamLines
-├── stream_conn.go  # 流式连接共用逻辑：streamConnect + StreamHTTPError + classifyStreamError
-├── ws.go           # WebSocket：DialWS / DoWS / DoWSMessages + WSConn + WSConfig
-└── multipart.go    # MultipartForm 表单构造器
+├── client.go         # Client + Option + Request 链式构造 + Response + 便捷方法 + Dump
+├── errors.go         # WatchdogTimeoutError / IsWatchdogTimeout + DefaultStreamShouldRetry
+│                     # + StreamShouldRetry + StreamGetRetryDelay + 配额耗尽识别（IsQuotaExhausted 等）
+├── sanitize.go       # SanitizeURL：日志/错误中的 URL 脱敏（token 查询参数 + /bot<token> 路径；
+│                     #   普通请求/Dump/WS 拨号已接入，流式日志与 StreamHTTPError.URL 未接入，详见「URL 脱敏」）
+├── sse.go            # SSE 事件流：DoSSE / DoSSEStream / DoSSEStreamWithErr
+├── stream.go         # 原始流式响应：DoStream / DoStreamChunks / DoStreamLines
+├── stream_conn.go    # 流式连接共用逻辑：streamConnect + StreamHTTPError + classifyStreamError
+├── ws.go             # WebSocket：DialWS / DoWS / DoWSMessages + WSConn + WSConfig
+├── multipart.go      # MultipartForm 表单构造器（name/filename 清洗 + 引号转义）
+└── multipart_test.go # 回归测试：锁定 AddFile 经 stdlib CreateFormFile 已转义引号
 ```

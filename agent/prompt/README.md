@@ -116,11 +116,15 @@ defer soul.Stop()
 **SoulStore**：默认 `osSoulStore` 直接操作宿主文件系统。docker 持久容器（DooD）场景下，
 调用方可注入基于 `sandbox.Workspace` 的实现，使读写和 mtime 轮询落到容器内真实文件。
 
-其他方法：`Path()`、`Content()`、`Loaded()`、`Variables()`、`ModTime()`。
+**原始内容读写**：`ReadRaw(ctx)` / `WriteRaw(ctx, data)` 读写含 front matter 的原始内容
+（`ReadRaw` 不截断），与 `Load()` 走同一 SoulStore 后端。供 `agent/bot` 的 soul 工具
+（bot 自改人格）使用；写入后调用方手动 `Load()` 或等待 watcher 在 `ReloadInterval` 内自动重载。
+
+其他方法：`Path()`、`Content()`、`Loaded()`、`Variables()`、`ModTime()`、`ScanMode()`。
 
 ## 安全扫描
 
-`prompt_scan.go` 对注入 system prompt 的上下文文件做威胁检测：
+`prompt_scan.go` 对注入 system prompt 的上下文文件（如 SOUL.md）做威胁检测：
 
 ```go
 findings := prompt.ScanForThreats(content)
@@ -130,11 +134,21 @@ if prompt.HasThreats(content) {
 ```
 
 检测类别：经典提示注入（`ignore previous instructions` 等）、系统提示覆盖、
-HTML 注释 / 隐藏 div 注入、C2 / promptware 模式、数据渗出（curl/wget + secrets、读取 `.env`）、
-不可见 Unicode 字符（零宽空格、RTL 覆盖等）。
+HTML 注释 / 隐藏 div 注入、C2 / promptware 模式（含已知框架名）、数据渗出
+（curl/wget + secrets、读取 `.env` / credentials）、
+不可见 Unicode 字符（零宽空格、RTL 覆盖、BOM、方向隔离符等）。
 
 `SoulLoaderConfig.ScanMode` 控制行为：`ScanModeOff` 不扫描、`ScanModeWarn` 告警但仍加载（默认）、
 `ScanModeBlock` 阻止加载并返回错误。
+
+### 其他扫描辅助
+
+- `StripInvisibleUnicode(content)` — 移除不可见 Unicode 字符，返回清洗后文本与被移除码位列表
+  （已去重）。与 `ScanForThreats` 复用同一字符集（检测能发现的就能移除），且幂等，
+  适合反复清洗的场景（如 workflow 闭环每轮回注审查意见）
+- `ScanFeedback(content)` — 审查意见场景的精简规则集：代码审查文本天然会提到 C2、渗出等词，
+  全量规则会大面积误报，故只保留注入类强信号；结果**只用于记录告警，不据此阻断**
+  （workflow 的审查意见清洗在使用）
 
 ## Pipeline 集成
 

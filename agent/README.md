@@ -99,25 +99,24 @@ agent/
 │   ├── bot_test.go
 │   └── manager_test.go
 ├── stages/                 # 内置 Stage 实现
-│   ├── llmroute.go         #   LLMStage（LLM 调用 + tool-calling 循环）
-│   ├── reply_stage.go      #   ReplyStage（LLM 决策 + 5 种输出模式）
+│   ├── llmroute.go         #   LLMStage（LLM 编排 + 回复门控/防泄漏清洗，见 stages/README.md）
+│   ├── reply_stage.go      #   ReplyStage（LLM + OutputDecision 输出决策）
 │   ├── logger.go           #   LoggerStage（结构化日志）
 │   ├── filter.go           #   FilterStage（谓词过滤）
 │   ├── enricher.go         #   EnricherStage（消息富化）
-│   ├── recall.go           #   RecallStage（长期记忆召回注入）
-│   ├── note_capture.go     #   NoteCaptureStage（入站消息摄取进 L0）
-│   ├── rhythm.go           #   节奏策略（发言间隔/活跃度）
-│   ├── multimodal.go       #   MultimodalStage（多模态转写）
-│   ├── hitl.go             #   HITL 工具审批 defer/续跑
-│   ├── lurk_contract.go    #   潜水观察者模式契约
-│   └── reply_stage_test.go
+│   ├── recall.go           #   RecallStage（长期记忆召回注入 KVMemoryRecall）
+│   ├── note_capture.go     #   NoteCaptureMiddleware（回复/用户消息捕获进 L0 + 事件流）
+│   ├── rhythm.go           #   RhythmStage 节奏策略（发言间隔/倾向/连续中断）
+│   ├── multimodal.go       #   MultimodalStage（多模态附件转写）
+│   ├── hitl.go             #   HITL 工具审批 defer/续跑（DeferredApprovalStore）
+│   └── lurk_contract.go    #   潜水观察者模式契约（结构化 JSON 记忆判定）
 ├── command/                # 命令子系统（/ 命令注册与分发）
-│   ├── parser.go           #   命令解析
-│   ├── registry.go         #   Registry 命令注册表
-│   ├── handlers.go         #   内建命令处理器
-│   ├── stage.go            #   CommandStage（Order=5）
-│   ├── module.go
-│   └── stage_test.go
+│   ├── parser.go           #   Parse（/cmd arg 解析）
+│   ├── registry.go         #   Registry / CommandHandler / Admin·Binding 检查
+│   ├── handlers.go         #   内建命令（help/clear/compact/status/chatid）
+│   ├── chatid.go           #   /chatid（供工具权限按群配置）
+│   ├── stage.go            #   CommandStage（命中即执行并中止 Pipeline）
+│   └── module.go           #   fx Module + AsStageInfo/ProvideStage（DefaultOrder=5）
 ├── engagement/             # 自适应参与度评估（是否/何时发言）
 │   ├── engagement.go       #   Tier 分层决策
 │   ├── rules.go            #   Tier 1 规则引擎
@@ -131,24 +130,23 @@ agent/
 │   ├── stage.go            #   EngagementStage
 │   ├── config.go
 │   └── stage_test.go
-├── heartbeat/              # 自主心跳（无 cron 表达式的自主唤醒）
-│   ├── heartbeat.go        #   Executor / 心跳决策管线
-│   ├── store.go            #   文件系统配置与日志存储
-│   └── heartbeat_test.go
+├── heartbeat/              # 自主心跳（cron.Scheduler 按 Config.Interval 周期唤醒）
+│   ├── heartbeat.go        #   Executor / Bundle / 决策契约 / 文件日志
+│   └── store.go            #   文件系统配置与日志存储（data/heartbeat/{botId}/）
 ├── session/                # 对话会话管理（见 session/README.md）
 ├── storage/                # 持久化层（SQLite/GORM，memory.Repository 适配器）
-│   ├── repository.go       #   SQLiteRepository
+│   ├── repository.go       #   SQLiteRepository / WindowStateStore
 │   ├── sqlite_compactor.go #   SQLiteCompactor（语义压缩）
-│   ├── doc.go
-│   └── storage_test.go
+│   ├── tiered_recall.go    #   TieredL1Retriever / MergedRetriever（复合召回）
+│   └── doc.go
 ├── tools/                  # 工具基础设施（见 tools/README.md）
 │   ├── registry.go         #   ToolRegistry（静态 + 动态工具）
-│   ├── manager.go          #   ToolManager（统一入口）
+│   ├── manager.go          #   ToolManager（统一入口 + 权限过滤）
 │   ├── policy.go / pattern_policy.go # 工具权限规则
 │   ├── prompt.go           #   ToolPromptManager（工具提示词注册）
-│   ├── stage.go            #   ToolsStage（诊断用）
-│   ├── types.go
-│   └── tools_test.go
+│   ├── messagemeta.go      #   MessageMeta（工具可见的本轮消息元信息）
+│   ├── stage.go            #   ToolsStage（诊断用，Order=150）
+│   └── types.go            #   ToolDef / ToolProvider / CallOrigin 等
 ├── engine.go               # Engine 轻量级内核（Inbound→Pipeline→Outbound + Hook）
 ├── engine_test.go
 ├── module.go               # 顶层 fx Module
@@ -165,25 +163,28 @@ agent/
                          │ ingress.Receive(ctx, msg)
                          ▼
     ┌─────────────────────────────────────────────────────────┐
-    │                  Inbound (Ingress)                      │
-    │   消息归一化 → 封装 Envelope → 投递到内部 channel         │
+    │                Inbound (Ingress)                        │
+    │  归一化 / 自消息过滤 / 去重 → Envelope → 内部 channel      │
     └────────────────────┬────────────────────────────────────┘
                          │ Ingress.C()  (N 个 worker 并发消费)
                          ▼
     ┌─────────────────────────────────────────────────────────┐
-    │                  Pipeline Engine                        │
-    │   Stage₁ → Stage₂ → ... → StageN                       │
-    │   (按 Order 排序，支持 Router 条件分支)                   │
+    │   Pipeline Engine                                       │
+    │   Stage₁ → Stage₂ → ... → StageN                        │
+    │   (按 Order 排序，支持 Router 条件分支)                    │
     │                                                         │
-    │   内置 Stage 编排（Order 参考值）：                        │
-    │     10  LoggerStage      — 入口日志                      │
-    │     20  FilterStage      — 谓词过滤                      │
-    │     30  EnricherStage    — 消息富化                      │
-    │     40  EngagementStage  — 主动参与 + OutreachBreaker    │
-    │    100  MemoryStage      — 记忆检索 → env.Set            │
-    │    200  PromptStage      — 组装 system prompt → env.Set  │
-    │    500  ReplyStage/LLM   — LLM 调用 + 输出决策           │
-    │    900  MemoryWriteStage — 写入新记忆                    │
+    │   内置 Stage 编排（Order 参考值，                          │
+    │   实际装配以调用方 Builder/Add 为准）：                      │
+    │     3-5  Bind / Command / 心跳预算重置（链首拦截）           │
+    │    20  LoggerStage      — 入口日志                       │
+    │    30  FilterStage      — 谓词过滤                        │
+    │    40  Enricher / Engagement — 消息富化 + 主动参与         │
+    │    90  RecallStage      — 记忆召回 → env.Set              │
+    │    95  RhythmStage      — 发言节奏门                      │
+    │   100  MemoryStage / LLMStage — 记忆检索 / LLM 编排 + 出站裁决│
+    │   200  PromptStage      — 组装 system prompt → env.Set   │
+    │   500  ReplyStage       — LLM + 输出决策                  │
+    │   900  MemoryWriteStage — 写入新记忆                       │
     └────────────────────┬────────────────────────────────────┘
                          │ Envelope.Actions()
                          ▼
@@ -251,7 +252,13 @@ env.AddAction(core.Action{
 env.Abort(err)       // 中止 Pipeline
 env.Aborted() bool   // 检查是否已中止
 env.SetErr(err)      // 记录错误（不中止）
+
+// 其它
+env.Actions()        // 返回累积动作的深拷贝（Metadata 一并复制）
+env.Err()            // 读取已记录的错误
 ```
+
+匿名函数 Stage 用 `core.StageFunc{StageName, Fn}` 适配，无需自定义类型。
 
 ### Stage
 
@@ -312,7 +319,8 @@ Inbound 层是一个**纯公共接口**，不管理输入端的生命周期。�
 ```go
 // 创建
 ingress := inbound.NewIngress(inbound.IngressConfig{
-    BufferSize: 256,  // 内部缓冲区大小
+    BufferSize: 256,  // 内部缓冲区大小（默认 256）
+    // SelfIDSet: 共享自消息 ID 集合（可选，供 Ingress 与 Engagement 两层防线共用）
 }, logger, tracerProvider)
 
 // 注入消息（阻塞式，缓冲区满时等待或 ctx 取消）
@@ -331,6 +339,8 @@ ch := ingress.C()
 // 关闭（已缓冲消息仍可被消费）
 ingress.Close()
 ```
+
+`Receive`/`TryReceive` 在入口统一做三件事：补默认字段（ID/CreatedAt）、自动分配 TraceID（优先复用 ctx 中的）、**自消息过滤**（`RegisterSelfUserID` 注册过的 ID 静默丢弃，防 Bot 回复自己形成循环）与**跨通道去重**（相同 msg.ID 窗口内只处理一次，防 WS 重连重放）。`Len()` 返回缓冲区待处理数。
 
 ### 在真实 Channel 中使用
 
@@ -357,9 +367,10 @@ func newWebhookHandler(ingress *inbound.Ingress) http.HandlerFunc {
 }
 ```
 
-### Channel 接口（可选）
+### Channel 接口（inbound 侧，可选）
 
 ```go
+// agent/inbound.Channel — 输入端可选元信息接口
 type Channel interface {
     Name() string  // "misskey-ws"、"telegram-webhook"
     Type() string  // "webhook"、"websocket"、"polling"
@@ -368,6 +379,8 @@ type Channel interface {
 
 这是可选的元信息接口，用于统一注册和日志。输入端不是必须实现它。
 
+输入端要接入 `bot.Bot` 则需实现功能更完整的 `bot.Channel`（`Name`/`Type`/`BotID`/`Start(ctx, ingress)`/`Stop(ctx)`，见 `agent/bot/channel.go`）；同时实现 `bot.Sender`（`Send(ctx, action)`）即可获得双向能力，`Send` 与 `outbound.ChannelSender` 方法签名一致。
+
 ## Pipeline — Stage 链处理引擎
 
 ### 执行模型
@@ -375,6 +388,7 @@ type Channel interface {
 Pipeline 按 `StageInfo.Order` 升序排列并依次执行所有已启用的 Stage。每个 Stage 处理一个 Envelope 并返回（可能修改过的）Envelope。
 
 ```go
+// 两种装配方式：直接给 StageInfo 切片……
 stages := []core.StageInfo{
     {Stage: loggerStage,      Order: 10,  Enabled: true},
     {Stage: filterStage,      Order: 20,  Enabled: true},
@@ -384,10 +398,21 @@ stages := []core.StageInfo{
     {Stage: replyStage,       Order: 500, Enabled: true},
     {Stage: memoryWriteStage, Order: 900, Enabled: true},
 }
-
 p, _ := pipeline.New(stages, tracerProvider, meterProvider, logger)
+
+// ……或声明式 Builder（Add/AddIf 顺序无关，Build() 统一按 Order 排序）
+pb := pipeline.NewBuilder().WithMode(pipeline.ModeStandard)
+pb.AddIf(cmdStage != nil, 4, cmdStage)
+pb.Add(100, llmStage)
+p2, _ := pipeline.New(pb.Build(), tp, mp, logger)
+
 result, err := p.Execute(ctx, envelope)
+
+// 可选：注入 append-only 事件轨迹（可观测 / HITL 锚点 / 记忆回灌）
+p.SetSink(core.NewMemorySink(2048))
 ```
+
+`WithMode` 设定装配模式（`ModeStandard` / `ModeLurkOnly` / `ModeCode`），`pipeline.ModeGroups(mode)` 返回各 Stage 组（engagement/heartbeat/lurk/code）的启用表，供调用方按模式门控 Stage 与工具注册。
 
 ### 错误处理
 
@@ -410,10 +435,10 @@ pipeline.MatchSource("webhook")
 pipeline.MatchChannel("general")
 
 &pipeline.TextHasPrefix{Prefix: "/cmd"}
-&pipeline.TextRegex{Pattern: regexp.MustCompile(`\d+`)}
+&pipeline.TextRegex{Pattern: regexp.MustCompile(`\d+`)}  // Pattern 是 RegexpCompat 接口（MatchString 即可）
 &pipeline.MetadataExists{Key: "priority"}
-&pipeline.MetadataEquals{Key: "type", Value: "text"}
-&pipeline.ValueExists{Key: "user.profile"}
+&pipeline.MetadataEquals{Key: "type", Value: "text"}     // Value 为 any
+&pipeline.ValueExists{Key: "user.profile"}               // 检查 Envelope KV
 
 // 组合谓词
 &pipeline.And{Predicates: []pipeline.Predicate{pred1, pred2}}
@@ -478,6 +503,12 @@ wrapped := pipeline.WithMiddleware(myStage,
 | `RecoveryMiddleware()` | panic 恢复 → `PipelineError`（含完整堆栈） |
 | `TimeoutMiddleware(d)` | Stage 超时控制（goroutine + channel） |
 | `LoggingMiddleware(logger)` | Stage 前后结构化日志 + duration |
+| `TokenBudgetMiddleware(WithState)` | 按会话追踪 token：软限注入「尽快总结」警告，硬限重置窗口 |
+| `TokenQuotaMiddleware(WithState)` | 按月 token 额度（chat → channel → bot → system 层级继承，可共享 state 嵌套记账） |
+| `LoopDetectionMiddleware(cfg)` | 检测重复工具调用循环（签名指纹） |
+| `LazyResponseMiddleware(cfg)` | 检测「不调工具直接编造结论」的偷懒回复 |
+| `VerificationGateMiddleware(cfg)` | 环境类问题强制 tool_choice=required（确定性防偷懒门禁） |
+| `stages.NoteCaptureMiddleware(cat, writer)` | LLM 产出回复后捕获用户消息/回复进 L0 + 事件流（见 stages 包） |
 
 ## Memory — 记忆与上下文管理
 
@@ -544,23 +575,28 @@ LLM Usage → Window.RecordUsage → 下轮 Available() 缩小
 | Stage | Order | 职责 |
 |-------|-------|------|
 | `MemoryStage` | ~100 | 读侧：检索相关记忆 → `env.Set("memory.context", ...)` |
-| `MemoryWriteStage` | ~900 | 写侧：将本轮交互写入记忆存储 |
+| `stages.RecallStage` | ~90 | 生产用读侧：bot/channel/user 三 scope 复合召回（可叠 `storage.MergedRetriever`）→ `KVMemoryRecall`，LLMStage 拼入 system prompt |
+| `MemoryWriteStage` | ~900 | 写侧：将 Envelope 中的 `ActionNote` 转存为记忆条目 |
+
+生产装配另有 `stages.NoteCaptureMiddleware`（在 LLMStage 外层把回复/用户消息补成 `ActionNote` 落 L0），二者配合保证「照样想、照样记」。
 
 ## Prompt — 系统提示词管理
 
 ### 设计理念
 
-将 system prompt 从硬编码字符串升级为模块化、可组装、条件激活的模板系统。
+system prompt 是模块化、可组装、条件激活的段落集合：身份 / 行为规则 / 记忆 / 工具说明 / 格式约束按 Order 拼接，SOUL.md 人格、技能触发提示、工具描述都作为 Section 注册进同一 Registry。
 
 ### 核心组件
 
 | 组件 | 职责 |
 |------|------|
-| `Section` | 提示词段落，带 Order 排序 + 条件激活 + 模板变量 |
-| `Variable` | 变量定义，支持 3 种来源（静态 / Envelope KV / 动态函数） |
-| `Registry` | Section 注册中心，线程安全，支持运行时动态增删 |
-| `Assembler` | 组装器：解析变量 → 渲染模板 → 按 Order 拼接 |
-| `PromptStage` | Pipeline 节点（Order=200） |
+| `Section` | 提示词段落（`Content` + Order 排序 + `Conditional` 条件激活 + `Enabled` 开关） |
+| `Variable` | 变量定义，支持 3 种来源（静态 / Envelope KV / 动态函数），可选 `Required`/`Default` |
+| `Registry` | Section 注册中心，线程安全，`Register`（同名覆盖）/ `Unregister` / `List` |
+| `Assembler` | 组装器：跳过禁用/条件不满足/渲染为空的段落 → 解析变量 → 按 Order 拼接 → 长度截断 |
+| `PromptStage` | Pipeline 节点（Order=200），组装结果写入 `system.prompt` 等 KV |
+| `FileLoader` | 从目录文件加载 Section（文件名前缀解析 Order + front matter） |
+| `SoulLoader` | 加载 SOUL.md 人格并注册为 `identity` Section（Order=0），支持文件监听热重载 |
 
 ### Section 排序约定
 
@@ -587,13 +623,15 @@ Variable{Name: "time", Source: SourceFunc, Func: func(ctx *AssemblyContext) stri
 }}
 ```
 
+占位符格式为 `{{.VarName}}`，由 `renderSection` 逐变量替换；`Required=true` 且无法解析时组装报错（`StrictMode`），否则回退 `Default`。
+
 ### 条件激活
 
 ```go
 Section{
-    Name:  "group_rules",
-    Order: 150,
-    Template: "在群聊中，请遵守以下规则：...",
+    Name:    "group_rules",
+    Order:   150,
+    Content: "在群聊中，请遵守以下规则：...",
     Conditional: func(ctx *AssemblyContext) bool {
         return ctx.ChatType == "group"  // 仅群聊时注入
     },
@@ -603,12 +641,11 @@ Section{
 ### Pipeline 集成
 
 PromptStage 工作流：
-1. 从 env KV 读取上游数据（`memory.context`、`bot.config` 等）
-2. 收集 Registry 中所有 Section + Variable 引用的 Envelope KV
-3. 调用 Assembler 组装完整 system prompt
-4. `env.Set("system.prompt", result)` 供下游 LLM Stage 消费
+1. 以 Envelope KV 快照构建 `AssemblyContext`（含 `memory.context` 注入的临时段落，`InjectMemoryContext` 默认开启）
+2. 调用 Assembler 组装完整 system prompt（Registry 为空且 `FallbackToConfig=true` 时回退 `BotConfig.SystemPrompt`）
+3. `env.Set("system.prompt" / "system.prompt.sections_used" / "system.prompt.length")`，并发射 `prompt.assembled` 事件
 
-LLMStage / ReplyStage 优先读 `env.Get("system.prompt")`，无则回退静态配置。
+LLMStage / ReplyStage 优先读 `env.Get("system.prompt")`，无则回退 `LLMConfig.SystemPrompt` 静态配置。
 
 ## Outbound — 消息派发
 
@@ -622,7 +659,7 @@ type Dispatcher interface {
 
 ### MultiDispatcher（生产用）
 
-按 ActionType 路由到不同处理器：
+按 ActionType 路由到不同处理器（未注册的类型走 fallback；无 fallback 时 WARN 并计数，不中断批派发）：
 
 ```go
 md := outbound.NewMultiDispatcher(logger, tracerProvider)
@@ -659,6 +696,8 @@ type ChannelSender interface {
 }
 ```
 
+路由依据 `Action.Metadata["source_channel"]`（缺失即报错），目标地址取 `Action.Channel`（语义随平台：Telegram chatID / Misskey noteID 等，由 Stage 从 `Message.Metadata["reply_target"]` 传递）。可挂载 `SetGuard(OutboundGuard)`（出站前渠道只读检查）与 `SetOnSent(...)`（发送成功回调，OutreachBreaker 记账用）。
+
 ### NoteHandler
 
 处理 ActionNote，将备注转换为 `NoteEntry` 经 `NoteWriter` 写入记忆仓储：
@@ -686,6 +725,9 @@ id := registry.Register("task-123", func(ctx context.Context, result outbound.Ca
     // 处理 sub-agent 返回的结果（result.Payload 为双方约定的结构）
     return nil
 })
+
+// CallbackRegistry 接口：Register / Invoke / Unregister / Has / Count / Close
+// 实现：MemoryCallbackRegistry（bot.New 在未注入时默认创建）
 ```
 
 ### EventBus（旁路事件总线）
@@ -697,21 +739,28 @@ bus := outbound.NewMemoryEventBus(outbound.MemoryEventBusConfig{
     SubscriptionBufferSize: 256,  // 0 时取默认 64
 }, logger)
 
-// 订阅（按 traceID 关联）
+// 订阅（按 traceID 关联；traceID 为空订阅全量）
 sub := bus.Subscribe(traceID)
 defer bus.Unsubscribe(sub)
 for event := range sub.C() {
     // event.Type: "message.received" / "llm.text_delta" / ...
     // event.Data: map[string]any{...}
+    // event.Seq:  全局单调递增序号（Publish 时自动赋值）
 }
 
-// 发布（非阻塞，满则丢弃 + 计数）
-bus.Publish(outbound.Event{
+// 发布（非阻塞，订阅者缓冲满则丢弃并计数）
+bus.Publish(ctx, outbound.Event{
     Type:    outbound.EventLLMTextDelta,
     TraceID: traceID,
     Data:    map[string]any{"text": "Hello"},
 })
+
+// SSE 断线重连：按 Seq 回放
+sub = bus.SubscribeWithReplay(traceID, lastSeq)
+// 其它订阅入口：SubscribeBot(botID)（订阅单个 Bot）、LatestSeq()
 ```
+
+便捷发布方法（`EventBus` 接口的一部分）：`PublishTextDelta` / `PublishToolCall` / `PublishToolProgress` / `PublishToolResult`；指标快照经 `Metrics()`（含 `EventsDropped`）。
 
 **内置事件类型：**
 
@@ -745,20 +794,34 @@ bot, err := bot.New(bot.BotParams{
         Temperature:  &temp,
         MaxTokens:    maxTokens,
     },
-    Pipeline:   myPipeline,
-    Dispatcher: multiDispatcher,
-    Channels:   []bot.Channel{misskeyChannel, telegramChannel},
-    EventBus:   eventBus,  // 可选
-    Logger:     logger,
-    TP:         tracerProvider,
+    AgentConfig: bot.AgentConfig{ /* per-bot 行为配置：MaxSteps、工具黑白名单等 */ },
+    Pipeline:    myPipeline,
+    Dispatcher:  multiDispatcher,   // *outbound.MultiDispatcher 时自动注册 6 类 Handler
+    Channels:    []bot.Channel{misskeyChannel, telegramChannel},
+    MemoryStore:      memStore,     // 可选，nil 时用内存仓储（NoteHandler 后端）
+    CallbackRegistry: cbRegistry,   // 可选，nil 时用 MemoryCallbackRegistry
+    EventBus:    eventBus,          // 可选，nil 时禁用 SSE 事件推送
+    OutboundGuard:    guard,        // 可选，出站前「渠道只读」检查（潜水 bot 用）
+    OutreachBreaker:  breaker,      // 可选，一次出价熔断（出站成功时记账）
+    SelfIDSet:        selfIDs,      // 可选，与 Engagement 共享自消息集合
+    WorkspaceDir:     "data/workspaces", // 可选，启用 SOUL.md / 工作空间工具
+    PromptRegistry:   promptReg,    // 可选，SoulLoader / 工具提示词注册目标
+    ToolManager:      toolMgr,      // 可选，工作空间工具注册入口
+    Mode:             pipeline.ModeStandard, // standard / lurk-only / code
+    Logger:      logger,
+    TP:          tracerProvider,
 })
 ```
+
+其余可选注入：`DreamScheduler`（梦境巩固 cron）、`AdaptiveSyncer`（画像→Engagement 参数）、`BrowserCookieLoader/Saver/StartupRecover`（浏览器 MCP cookie 双向同步）、`OnMessageStart/OnMessageDone`（traceID→cancel/interrupt 注册，供 `/chat/abort`、`/chat/append`）。
+
+Bot 生命周期：`Run(ctx)`（启动 Channel → Engine）阻塞直到 ctx 取消，`Stop()` 优雅关闭，`Close()` 释放工作空间等资源；访问器 `Ingress()` / `Engine()` / `Channels()` / `SoulLoader()` / `WorkspaceMgr()` / `Metrics()`。
 
 ### Bot 消息流转
 
 ```
-[Inbound] Channel.onMessage()
-  → msg.BotID = channel.BotID()
+[Inbound] Channel.Start(ctx, ingress)
+  → 收到消息：msg.BotID = channel.BotID()
   → bot.Ingress().Receive(ctx, msg)
   → Engine worker 从 ingress.C() 消费
   → pipeline.Execute(ctx, env)
@@ -766,10 +829,12 @@ bot, err := bot.New(bot.BotParams{
 
 [Outbound] Dispatcher 路由 Action 到对应 Handler：
   ActionReply/Forward/Broadcast → ChannelReplyHandler → Sender.Send()
-  ActionNote     → NoteHandler → memory.Store.Append()
+  ActionNote     → NoteHandler → NoteWriterAdapter → memory.Store.Append()
   ActionCallback → CallbackHandler → CallbackRegistry.Invoke()
   ActionSilent   → SilentHandler → trace/log only
 ```
+
+`Bot` 自身实现 `EngineHook`：`OnBeforeProcess` 注入 EventEmitter 到 context、写 `bot.id`/`bot.config`/`bot.soul.content` KV、发射 `message.received`，并按需建立可取消的 message context 与 interrupt 通道；`OnMessageDone` 发射 `message.done`。
 
 ### BotManager
 
@@ -851,11 +916,72 @@ type EngineHook interface {
 7. 派发失败 → `Hook.OnDispatchError`；成功 → `Hook.OnMessageDone`
 8. `ctx` 取消时：关闭 Ingress → 排空缓冲区 → 等待 worker 退出 → 超时兜底
 
+## Heartbeat — 自主心跳唤醒
+
+heartbeat 子包给每个 bot 一个周期性「被触发」的机会：让 bot 自己审视记忆、待办与关注项，有事就做（发帖 / 记笔记），没事就安静结束。它**不是**健康监视器——bot 是行动主体，心跳只是唤醒信号。
+
+核心组件：
+
+- **`Executor`**：实现 `cron.Executor` 接口的心跳执行器。唤醒消息经 `Engine.ProcessSync`（`TriggerRunner` 接口，由 `*agent.Engine` 实现，避免循环 import）进入与 `@bot` **完全相同的 pipeline**（工具 / 记忆 / SOUL 全在线），而非独立的「健康检查 LLM」
+- **`Bundle`**：封装完整子系统（Executor + cron.Scheduler + Store）。配置 disabled 时返回 nil；内部清理同名残留 cron job，防止跨重启重复触发；`Runner` 可为 nil，稍后 `SetRunner` 注入（Engine 在 `bot.New` 内部创建，构建顺序倒挂）
+- **`Store`**（store.go）：配置与日志的文件系统存储（`data/heartbeat/{botId}/config.json` / `logs.json` / `.cron.json`），per-bot 互斥锁串行化「读-改-写整文件」；配置在每次 `Execute` 重新加载，改动无需重启
+- **`NotifyUserActivity()`**：通知「有真实外部消息进来了」，立即重置连续唤醒预算；挂在每条入站消息路径上，必须廉价
+
+```go
+hb := heartbeat.NewBundle(heartbeat.BundleConfig{
+    BotID:         id,
+    Store:         heartbeatStore,      // 复用外部 Store，共享同一把 per-bot 锁
+    Location:      loc,
+    Logger:        logger,
+    AdmissionFn:   admissionFn,         // (ctx, since) → (是否有新信号, 描述)
+    ChannelLister: lister,              // 枚举可发帖的真实目标
+    ChannelPoster: poster,              // 直投真实渠道（绕过伪频道 dispatcher）
+    NoteSaver:     noteSaver,           // 决策笔记写入长期记忆（ActionNote 链路）
+})
+hb.SetRunner(b.Engine()) // 必须在 Start 之前注入
+hb.Start(ctx)
+```
+
+三级节制（**宁可多睡，不可误发**）：
+
+1. **准入关卡**（Admission Guard）：自上次唤醒以来无新信号（无新消息/新笔记）→ 0-step 直接结束，不消耗主 LLM 调用；连续拒绝达 `IdleWakeEvery` 次时强制放行一次（时间本身也是信号）
+2. **两级发言闸门**：平台策略（`AllowPost` / `AllowPostFn`，任一 false 即压制）优先于 bot 自主决策
+3. **连续唤醒硬频控**：连续「产生行动的唤醒」超过 `MaxConsecutiveWakes`（默认 3）或处于冷却窗内 → 降级为不发言；真实外部消息经 `NotifyUserActivity` 立即恢复预算
+
+唤醒消息契约：`Source = core.SourceHeartbeat`、`Channel = "heartbeat"`（独立会话空间）、**`Text` 留空**（避免被 note_capture 当用户原文摄入 L0 记忆），唤醒提示词走 `InjectContext` 通道并携带 `TraceID`。LLM 返回**结构化 JSON 决策**（`decision`: `post`/`note`/`silent` + 目标渠道/内容/理由），由 `KVHeartbeatMode` 驱动 LLMStage 强制 JSON 输出、`KVHeartbeatTargets` 携带可发帖目标；`KVSuppressReply` 恒为 true——真实发帖由 Executor 经 `ChannelPoster` 手动路由，绝不走伪频道 `"heartbeat"` 的通用 dispatcher。解析失败、目标不在可发列表、内容为空一律安全降级 silent。
+
+**每一次唤醒都落一条日志**（含被准入关卡拒绝的 0-step turn）：`Status` 五态（`acted`/`note`/`silent`/`suppressed`/`error`），`Reason` 仅 `suppressed` 时有值；`Store.AppendLog` 头部插入、滚动保留最新 200 条。详见 `heartbeat/README.md`。
+
 ## 内置 Stage
 
-### ReplyStage（推荐）
+### LLMStage（生产主力）
 
-对接 `llm` 模块并根据 `ReplyDecider` 决策输出模式。支持 5 种输出组合：
+对接 `llm` 模块做多步 tool-calling 编排，并承担**出站前的全部清洗与裁决**——这是全项目唯一产出 `ActionReply` 的地方：
+
+```go
+stage := stages.NewLLMStage("llm", provider, stages.LLMConfig{
+    SystemPrompt: "You are a helpful bot.",  // 优先级低于 env KV "system.prompt"
+    MaxSteps:     5,            // 软预算（0=单次，-1=无限）；HardMaxSteps 为硬上限
+    Tools:        myTools,      // 或 ToolResolver 动态解析
+    Model:        &myModel,
+    Temperature:  &temp,
+    RequireReplyControl: true,  // 回复控制门控（per-bot opt-in，默认 false）
+}, tracerProvider, logger)
+```
+
+出站管线（顺序固定，均为纵深防御）：
+
+1. **抑制裁决**：上游 `KVSuppressReply` 命中时默认不出站（结果仍写 `llm.result` 供记忆）。硬权限门（`passive_mode_unmentioned`、`unanswered_outreach`、`reaction_notification`、`target_is_pure_renote` 等，见 `core.IsHardSuppressReason`）不可被模型覆盖；软门（节奏/engagement）在 1:1 私聊一律放行，非私聊可被模型显式 `send:true` 覆盖
+2. **清洗**：`memory.StripThinking`（剥 `<think>/<thinking>` 内联思考）→ `StripInternalState`（剥记忆用量指标）→ `StripContextMarkers`（剥 `[Reply to ...]` 等注入标记）
+3. **REPLY_CONTROL 门控**（`RequireReplyControl=true` 时）：解析结尾 `@@REPLY_CONTROL@@{"send":bool}` 控制块。缺块/解析失败/`send:false` → 不出站（fail-closed）；例外：正文含显式 `<public>` 块时按其内文降级出站，1:1 私聊反转为 fail-open（提取不到可发内容才静默）。`extractPublicReply` 三态：有 `<public>` 只发内文；有 `<internal>` 无 `<public>` 整段不发；纯文本经裸思考检测后发全文
+4. **裸思考泄漏检测（fail-closed）**：模型偶发把未打标签的内心独白/规划枚举当纯文本输出，`looksLikeInternalThinking` 命中三类高置信信号（`@@REPLY_CONTROL@@` 协议标记残片、`send true/false` 协议动词残片、第一人称内心动词 + `Options:/My plan/Step N` 同段）即返回空、绝不外发；宁可少发一条回复，不把内部推理发给用户
+5. 清洗后为空 → 跳过发送（仅 trace）
+
+其余能力：流式输出（`StreamPublisher`）、潜水观察者模式（`KVLurkMode`，只写笔记不发帖且卸载工具）、心跳决策模式（`KVHeartbeatMode`，强制 JSON 输出）、HITL 审批 defer/续跑（`ResumeDeferredApproval`）、上下文压缩（`ReductionConfig`/`Compaction`）。
+
+### ReplyStage
+
+LLM 调用 + `ReplyDecider` 输出决策，产出 `ActionReply`/`ActionNote`/`ActionCallback`/`ActionSilent` 组合：
 
 ```go
 stage := stages.NewReplyStage("reply", provider, stages.ReplyStageConfig{
@@ -868,64 +994,14 @@ stage := stages.NewReplyStage("reply", provider, stages.ReplyStageConfig{
 }, tracerProvider, logger)
 ```
 
-**PrefixDecider 协议：** LLM 输出以特殊前缀开头决定行为：
+**PrefixDecider 协议：** LLM 输出以特殊前缀开头决定行为（`SystemPromptWithDecision` 可把协议说明追加到 prompt）：
 - `[REPLY]...` → 正常回复
 - `[NOTE]...` → 只记备注
 - `[REPLY+NOTE]reply[---]note` → 回复 + 备注
 - `[SKIP]` → 什么都不做（丢弃）
 - 无前缀 → 默认回复
 
-### LLMStage
-
-纯 LLM 调用 + tool-calling 循环（无决策逻辑）：
-
-```go
-stage := stages.NewLLMStage("gpt", grokProvider, stages.LLMConfig{
-    SystemPrompt: "You are a helpful bot.",
-    MaxSteps:     5,           // 最多 5 步 tool-calling
-    Tools:        myTools,
-    Model:        &myModel,
-    Temperature:  &temp,
-}, tracerProvider, logger)
-```
-
-### LoggerStage
-
-结构化日志记录，可选记录消息文本（截断 500 字符）：
-
-```go
-stage := stages.NewLoggerStage("audit-log", logger, true /* logPayload */)
-```
-
-### FilterStage
-
-基于 Predicate 的消息过滤：
-
-```go
-// 只放行包含 "bot" 的消息
-pass := stages.NewFilterStage("bot-filter",
-    pipeline.MatchTextContains("bot"),
-    stages.FilterPass, logger)
-
-// 丢弃来自 "spam" 源的消息
-drop := stages.NewFilterStage("spam-filter",
-    pipeline.MatchSource("spam"),
-    stages.FilterDrop, logger)
-```
-
-### EnricherStage
-
-自定义函数为消息附加额外信息：
-
-```go
-stage := stages.NewEnricherStage("user-enricher",
-    func(ctx context.Context, env *core.Envelope) error {
-        profile, err := userService.GetProfile(ctx, env.Message.UserID)
-        if err != nil { return err }
-        env.Set("user.profile", profile)
-        return nil
-    }, logger)
-```
+其余 Stage（详见 `stages/README.md`）：`RecallStage`（记忆召回注入 `KVMemoryRecall`）、`RhythmStage`（节奏门，命中设 `KVSuppressReply`）、`MultimodalStage`（附件转写）、`LoggerStage`（截断 500 字符的结构化日志）、`FilterStage`（谓词过滤）、`EnricherStage`（自定义函数富化）、`NoteCaptureMiddleware`（回复/用户消息捕获进 L0）。
 
 ## fx 依赖注入
 
@@ -974,16 +1050,15 @@ app.Run()
 ### Module 组合
 
 ```
-agent.Module
-├── pipeline.Module    (收集 group:"pipeline_stages" → 构建 Pipeline)
+agent.Module（单 Bot 模式，向后兼容；多 Bot 场景请用 bot.Module + BotManager）
+├── pipeline.Module    (收集 group:"pipeline_stages" → 构建 Pipeline；默认 OTel NoOp Tracer/MeterProvider)
 ├── inbound.Module     (提供 Ingress)
-├── outbound.Module    (提供默认 LogDispatcher)
+├── outbound.Module    (提供默认 LogDispatcher；默认 NoOp TracerProvider)
 ├── EngineConfig       (默认配置)
-├── Engine             (构建 + Lifecycle hooks)
-└── 默认 OTel NoOp providers (TracerProvider, MeterProvider)
+└── Engine             (newEngine 构建 + fx.Lifecycle：OnStart 起 goroutine Run、OnStop Stop)
 
 bot.Module
-├── BotManager         (多 Bot 管理，OnStart 启动全部 Bot、OnStop 停止)
+├── BotManager         (多 Bot 管理，OnStart RunAll、OnStop StopAll；默认 NoOp TracerProvider)
 └── ProvideBot         (fx 辅助注册，fx.Invoke 封装)
 
 注：NoteHandler 的 memory.Store 与 CallbackRegistry 由 bot.New 内部默认创建
@@ -996,34 +1071,44 @@ bot.Module
 
 ### Traces
 
-| Span | 位置 | 属性 |
+| Span | 位置 | 属性（节选） |
 |------|------|------|
-| `ingress.receive` | Ingress | message.id, source, channel |
-| `engine.process` | Engine | trace.id, worker.id, message.id, source, channel |
-| `pipeline.execute` | Pipeline | message.id, source, channel, actions count, duration |
-| `stage.<name>` | 每个 Stage | stage.name, message.id, duration |
-| `stage.llm.orchestrate` | LLMStage | llm.provider, tokens, steps, finish_reason |
-| `stage.prompt.assemble` | PromptStage | sections_count, variables_resolved, result_length |
-| `stage.session.process` | SessionStage | session.id, session.is_new |
-| `stage.memory.process` | MemoryStage | scope, entries_found |
-| `stage.memory_write.process` | MemoryWriteStage | scope, entries_written |
-| `outbound.dispatch` | Dispatcher | actions.count |
-| `note.handle` | NoteHandler | note.id, note.category |
-| `outbound.callback.handle` | CallbackHandler | callback.id |
+| `ingress.receive` | Ingress | trace.id, message.id, source, channel |
+| `engine.process` | Engine | trace.id, worker.id, message.id/source/channel, actions.count, message.dropped |
+| `pipeline.execute` | Pipeline | message.id, source, channel, pipeline.actions, pipeline.duration_seconds |
+| `stage.<name>` | 每个 Stage | stage.name, message.id, stage.duration_seconds |
+| `stage.llm.orchestrate` | LLMStage | llm.provider, llm.steps, llm.total/input/output_tokens, llm.finish_reason, reply.* 裁决属性 |
+| `stage.reply.process` | ReplyStage | llm.provider, message.id/source |
+| `stage.prompt.assemble` | PromptStage | prompt.length/sections_used/sections_skipped/vars_resolved/vars_failed/truncated |
+| `stage.session.process` / `stage.session_write.process` | SessionStage | session.id, session.is_new, session.message_count |
+| `stage.memory.process` | MemoryStage | memory.context_len, token_estimate, entries_used, compressed |
+| `stage.memory_write.process` | MemoryWriteStage | memory.written |
+| `stage.command.process` | CommandStage | command.name, command.args |
+| `stage.engagement.process` | EngagementStage | message.id/source |
+| `stage.multimodal.transcribe` / `stage.tools.resolve` | Multimodal / ToolsStage | message.id |
+| `outbound.dispatch` | LogDispatcher | actions.count |
+| `outbound.multi_dispatch` | MultiDispatcher | actions.count |
+| `channel_reply.handle` | ChannelReplyHandler | action.type/channel, source_channel |
+| `outbound.silent.handle` | SilentHandler | action.type/channel/user_id |
+| `note.handle` | NoteHandler | entry.id/scope_kind/scope_id/category/source |
+| `outbound.callback.handle` | CallbackHandler | action.type/channel, callback.id |
+| `memory.*`（compress/expand/consolidate/dreaming/profile 等） | memory 子系统 | 见 `memory/README.md` |
 
 ### Metrics
 
-| 指标 | 类型 | 说明 |
+OTel 指标只有 pipeline 一组真实计数器/直方图；其余为各组件的**结构化快照方法**（非 OTel 仪器），经 API 暴露：
+
+| 名称 | 类型 | 说明 |
 |------|------|------|
 | `pipeline.messages.processed` | Counter | 进入 Pipeline 的消息总数 |
-| `pipeline.messages.errors` | Counter | 处理错误总数 |
+| `pipeline.messages.errors` | Counter | 处理错误总数（含 panic 恢复，可带 stage 标签） |
 | `pipeline.messages.dropped` | Counter | 被 Stage 丢弃的消息总数 |
-| `pipeline.stage.duration_seconds` | Histogram | Stage 处理耗时 |
-| `eventbus.events.published` | Counter | EventBus 发布事件总数（`MemoryEventBus.Metrics()` 快照，含丢弃计数） |
-| `memory.entries.stored` | Counter | 记忆存储操作数（`Window.Metrics()` / `Registry.Metrics()` 等结构化快照） |
-| `memory.entries.retrieved` | Counter | 记忆检索操作数 |
-| `prompt.assemblies` | Counter | 提示词组装次数（`Registry.Metrics()` 快照） |
-| `prompt.assembly.duration_ms` | Histogram | 提示词组装耗时 |
+| `pipeline.stage.duration_seconds` | Histogram | Stage 处理耗时（`stage` 标签，含 `_pipeline_total`） |
+| `Engine.Metrics()` / `Bot.Metrics()` | 快照 | MessagesProcessed / MessagesErrors（Bot 另含 DispatchErrors） |
+| `MemoryEventBus.Metrics()` | 快照 | ActiveSubscriptions / EventsPublished / **EventsDropped** |
+| `MultiDispatcher.Metrics()` | 快照 | ActionsDispatched / ActionsErrors / ActionsNoHandler / RegisteredTypes |
+| `Registry.Metrics()` / `Assembler.Metrics()` | 快照 | 注册/组装计数（Registered/Unregistered/CurrentSize、Assemblies/Errors） |
+| `Window.Metrics()` | 快照 | token 窗口状态（见 memory/README.md） |
 
 ### 接入真实 Exporter
 
@@ -1124,13 +1209,11 @@ func (ws *WSChannel) Send(ctx context.Context, action core.Action) error {
 ### 注册 System Prompt Section
 
 ```go
-// 在 Bot 初始化时注册 prompt 段落
-registry := prompt.NewRegistry()
-
+// Section：段落内容字段是 Content（非 Template），变量占位符写在 Content 内
 registry.Register(prompt.Section{
-    Name:     "identity",
-    Order:    10,
-    Template: "你是{{.bot_name}}，{{.bot_role}}。",
+    Name:    "identity",
+    Order:   10,
+    Content: "你是{{.bot_name}}，{{.bot_role}}。",
     Variables: []prompt.Variable{
         {Name: "bot_name", Source: prompt.SourceStatic, StaticValue: "栞娜"},
         {Name: "bot_role", Source: prompt.SourceStatic, StaticValue: "一个智慧且温柔的 AI 助手"},
@@ -1138,18 +1221,18 @@ registry.Register(prompt.Section{
 })
 
 registry.Register(prompt.Section{
-    Name:     "memory_context",
-    Order:    200,
-    Template: "以下是你的记忆上下文：\n{{.memory}}",
+    Name:    "memory_context",
+    Order:   200,
+    Content: "以下是你的记忆上下文：\n{{.memory}}",
     Variables: []prompt.Variable{
         {Name: "memory", Source: prompt.SourceEnvelopeKV, EnvelopeKey: "memory.context"},
     },
 })
 
 registry.Register(prompt.Section{
-    Name:     "group_rules",
-    Order:    150,
-    Template: "当前为群聊环境，请注意：不要过度活跃，只在被 @ 或话题相关时回复。",
+    Name:    "group_rules",
+    Order:   150,
+    Content: "当前为群聊环境，请注意：不要过度活跃，只在被 @ 或话题相关时回复。",
     Conditional: func(ctx *prompt.AssemblyContext) bool {
         return ctx.ChatType == "group"
     },
@@ -1165,17 +1248,21 @@ Pipeline 中各 Stage 通过 Envelope KV 传递数据，以下是已使用的 ke
 | `memory.context` | MemoryStage | PromptStage | `string` | 格式化后的记忆上下文文本 |
 | `memory.entries_used` | MemoryStage | — | `int` | 使用的记忆条目数 |
 | `memory.compressed` | MemoryStage | — | `bool` | 是否触发了压缩 |
+| `memory.compressed_block` | MemoryStage | — | `string` | 压缩块文本 |
 | `memory.written` | MemoryWriteStage | — | `int` | 本轮写入的记忆条目数 |
-| `system.prompt` | PromptStage | LLMStage/ReplyStage | `string` | 组装好的完整 system prompt |
+| `memory.recall`（`core.KVMemoryRecall`） | RecallStage | LLMStage | `string` | 召回的长期记忆块，非潜水模式拼入 system prompt |
+| `system.prompt` | PromptStage | LLMStage/ReplyStage | `string` | 组装好的完整 system prompt（优先于 LLMConfig.SystemPrompt） |
 | `system.prompt.sections_used` | PromptStage | — | `[]string` | 实际生效的 Section 名称列表 |
 | `system.prompt.length` | PromptStage | — | `int` | 提示词字符长度 |
-| `bot.id` | Bot/Engine | PromptStage | `string` | 当前 Bot ID |
-| `bot.config` | Bot | PromptStage | `BotConfig` | Bot 配置 |
-| `llm.result` | LLMStage/ReplyStage | pipeline 中间件（token 预算/配额、循环检测、懒惰响应）与 heartbeat | `*llm.GenerateResult` | LLM 调用结果 |
+| `bot.id` / `bot.config` | Bot.OnBeforeProcess | PromptStage、LLMStage 用量记录 | `string`/`BotConfig` | Bot 标识与配置 |
+| `bot.soul.content`（`core.KVSoulContent`） | Bot.OnBeforeProcess | LLMStage（潜水观察者 prompt） | `string` | SOUL.md 人格文本（热重载后自动更新） |
+| `llm.result` | LLMStage/ReplyStage | pipeline 中间件（token 预算/配额、循环检测、懒惰响应）与 heartbeat | `*llm.GenerateResult` | LLM 调用结果（含被抑制轮次） |
 | `session.active` / `session.id` / `session.is_new` / `session.message_count` / `session.context` | SessionStage | 下游 Stage | `bool`/`string`/`string`/`int`/`string` | 会话解析结果与上下文（见 session/README.md） |
-| `reply.suppress` 等 core 约定键 | 各 Stage | LLMStage 等 | — | 见 core 包 `envelope.go` KV 约定（`KVSuppressReply`/`KVLurkMode`/`KVHeartbeatMode` 等） |
-| `engagement.proactive` | EngagementStage | LLMStage/ReplyStage → Action.Metadata | `bool` | 本轮为主动出击；出站成功后 OutreachBreaker 记账 |
-| `KVSuppressReplyReason=unanswered_outreach` | EngagementStage | LLMStage / RhythmStage | `string` | 一次出价硬门，不可被 `send:true` 覆盖 |
+| `engagement.evaluated` / `engagement.engage` / `engagement.action` / `engagement.reason` / `engagement.proactive` 等 | EngagementStage | LLMStage、RhythmStage、出站 enricher | `bool`/`string` | 参与度评估结果；`engagement.proactive=true` 经 `core.CopyEngagementOutboundMeta` 进 Action.Metadata，供 OutreachBreaker 记账 |
+| `reply.suppress`（`core.KVSuppressReply`） | Engagement/Rhythm/被动回复 enricher 等 | LLMStage | `bool` | 本轮不出站（仍思考/记忆） |
+| `reply.suppress_reason`（`core.KVSuppressReplyReason`） | 同上 | LLMStage（`core.IsHardSuppressReason`） | `string` | 硬门（passive_mode_unmentioned / unanswered_outreach / unanswered_cooldown / reaction_notification / target_is_pure_renote）不可被模型 `send:true` 覆盖 |
+| `memory.capture_suppressed_exchange`（`core.KVCaptureSuppressedExchange`） | LLMStage 抑制分支 | NoteCaptureMiddleware | `bool` | 回复被门禁拦下时仍要求捕获用户原文进 L0 |
+| `lurk.mode` / `heartbeat.mode` / `heartbeat.targets` | 潜水检测 enricher / 心跳 Executor | LLMStage | `bool`/`bool`/`[]ChannelTarget` | 模式开关与决策目标（详见 stages/heartbeat README） |
 
 ## 依赖
 
@@ -1199,7 +1286,7 @@ go test ./agent/session/ -v
 go test ./agent/ -v             # Engine 集成测试
 ```
 
-当前 agent 下共 **900+ 个测试函数**（14 个子包 + agent 根），覆盖：
+当前 agent 下共 **1000+ 个测试函数**（14 个子包 + agent 根）时点统计，覆盖：
 
 - **core**: Envelope、Stage、Error 类型、Action 全类型
 - **pipeline**: Stage 链执行、排序、中止、跳过、panic 恢复、可观测性
@@ -1209,12 +1296,12 @@ go test ./agent/ -v             # Engine 集成测试
 - **outbound**: MultiDispatcher + ChannelReplyHandler + NoteHandler + CallbackHandler + EventBus
 - **memory**: Repository CRUD + 容量淘汰 + Window + Compressor + Expander + Stage 集成
 - **prompt**: Section 排序 + 变量解析 + 条件激活 + Assembler + PromptStage 集成
-- **bot**: Bot 创建/校验 + 端到端消息流 + 多 Channel + 5 种输出模式 + BotManager 生命周期
-- **stages**: ReplyStage 决策模式 + LLMStage + FilterStage
+- **bot**: Bot 创建/校验 + 端到端消息流 + 多 Channel + 输出模式 + BotManager 生命周期
+- **stages**: LLMStage 回复控制门控与裸思考泄漏 fail-closed + ReplyStage 决策模式 + Recall/Rhythm/多模态/HITL/潜水契约
 - **engine**: 端到端集成、多 Source、优雅关闭、EngineHook
 - **session**: Session 实体/解析器/Manager/Stage/Runner 串行化
 - **command**: 命令解析、注册表、Stage 透传
 - **engagement**: 参与度分层决策、规则、限流、画像同步、OutreachBreaker 一次出价熔断
-- **heartbeat**: 心跳决策管线、平台闸门
-- **storage**: SQLite 仓储与压缩器
+- **heartbeat**: 消息契约、两级闸门与频控、准入关卡（含强制放行）、决策解析容错与安全降级、日志落库、`NotifyUserActivity` 预算恢复、Store 配置/日志往返
+- **storage**: SQLite 仓储、语义压缩器、TieredL1 复合召回
 - **tools**: 工具注册/解析/权限策略

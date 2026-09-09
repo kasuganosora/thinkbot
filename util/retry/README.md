@@ -94,7 +94,7 @@ type Result struct {
 
 携带 HTTP 状态码、响应头和 Body 的错误类型，供 `ShouldRetry` 和 `GetRetryDelay` 使用。
 
-配套的判定函数（均基于 `errors.As` 在错误链中查找 `*HTTPStatusError`）：
+配套的判定函数（均基于 `errors.As` 在错误链中查找 `*HTTPStatusError`，不识别 `*errs.Error`）：
 
 | 函数 | 判定条件 |
 |------|---------|
@@ -104,15 +104,24 @@ type Result struct {
 
 ### HTTPShouldRetry
 
+状态码识别顺序（任一命中即按状态码判定）：
+
+1. `errors.As` 查找本包 `*HTTPStatusError`（`DoHTTPRequest` 构造）
+2. `errs.GetCode(err)` 提取错误链中携带的 HTTP 状态码——兼容 `util/errs.Error`（`util/http` 经 `errs.HTTPErrorf` 返回该类型）
+
 | 状态码 | 重试 | 说明 |
 |--------|------|------|
 | 429 | ✓ | 限流 |
 | 500/502/503/504 | ✓ | 服务器错误 |
 | 529 | ✓ | 过载 |
 | 408 | ✓ | 请求超时 |
-| 4xx（其他） | ✗ | 客户端错误，不重试 |
-| 非 HTTP 错误 | ✓ | 网络超时等，重试 |
+| 4xx（其他） | ✗ | 客户端错误（确定性失败），立即放弃 |
+| 未识别出状态码 | ✓ | 网络超时等非 HTTP 错误，重试 |
 | context 取消 | ✗ | 立即停止 |
+
+> 第 2 步是关键兜底：若缺少该路径，`util/http` 返回的 `*errs.Error` 会被 `errors.As` 漏判、
+> 归入"非 HTTP 错误"而照常重试——典型后果是 BigModel 的确定性 4xx（1301 内容过滤 / 1210 /
+> 1214）被重试 5 次，单次浪费数分钟。
 
 ### HTTPGetRetryDelay
 
@@ -166,4 +175,4 @@ resp, err := retry.DoHTTPRequest(ctx, client, req, cfg)
 |------|------|
 | `retry.go` | `Config` / `Result` / `Do` / `DoSimple` / panic 恢复 / 执行循环 |
 | `backoff.go` | `Backoff` 类型 / 三种退避策略 / `Calc` 计算 |
-| `http_retry.go` | `HTTPStatusError` / `HTTPShouldRetry` / `HTTPGetRetryDelay` / 预设配置 / `DoHTTPRequest` |
+| `http_retry.go` | `HTTPStatusError` / `HTTPShouldRetry`（含 `errs.GetCode` 状态码分类）/ `HTTPGetRetryDelay` / 预设配置 / `DoHTTPRequest` |

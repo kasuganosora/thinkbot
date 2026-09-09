@@ -13,6 +13,8 @@
 - **并发控制**：限制同时执行的 Job 数量
 - **生命周期管理**：创建/暂停/恢复/手动触发/删除
 - **一次性任务**：执行后自动标记 Done，支持宽限窗口
+- **漏跑检测**：活跃循环任务超期未跑（≥2 个调度周期）时告警，带冷却去重
+- **跨进程文件锁**：写入 JSON 存储时 flock 防多实例写坏文件
 
 ## 调度格式
 
@@ -55,6 +57,7 @@ INFO  cron: scheduler starting    {tick_interval, max_concurrent, tz, bot_id}
 INFO  cron: job executing          {trace_id, job_id, job_name, schedule, run_count, tz}
 INFO  cron: job completed          {trace_id, job_id, duration, output_len}
 ERROR cron: job failed             {trace_id, job_id, duration, err}
+WARN  cron: job missed scheduled runs {job_id, job_name, schedule, expected_interval, last_run_at, last_run_age, threshold, bot_id}
 INFO  cron: job marked done        {job_id, reason}
 INFO  cron: scheduler stopped
 ```
@@ -111,6 +114,8 @@ GROUP BY feature;
 | `OnceGracePeriod` | 120s | 一次性 Job 的宽限窗口，超期则直接标记 Done |
 | `Location` | `time.Local` | cron/ISO 解析时区 |
 | `BotID` | `"unknown"` | token 统计归属 |
+| `Name` | 空 | 调度器用途标识（heartbeat/dreaming/user-cron），仅用于日志区分，空=`"unnamed"` |
+| `MissedRunGrace` | 0 | 漏跑检测额外宽限；判定 `now-LastRunAt > 2×ExpectedInterval + 该值` |
 
 `Scheduler` 还提供 `WithLogger()` 与 `Summary()`（返回 jobs/active/done/failed/paused 计数的可读摘要）。
 
@@ -209,7 +214,10 @@ cron.RegisterTools(toolMgr, mgr) // 注册单个 cron 工具
 | `cron_parser.go` | 标准 5 段 cron 表达式解析器 |
 | `job.go` | Job 模型 + 调度字符串解析（4 种格式） |
 | `store.go` | JSON 文件持久化（原子写入） |
-| `scheduler.go` | 调度循环 + 执行器 + Manager CRUD + 日志 + 统计 |
+| `store_flock_unix.go` | 写入时的跨进程 flock 咨询锁（linux/darwin） |
+| `store_flock_other.go` | 不支持 flock 平台的空实现 |
+| `scheduler.go` | 调度循环 + 执行器 + Manager CRUD + 漏跑告警 + 日志 + 统计 |
 | `tools.go` | Agent 工具定义（单一压缩工具 + prompt 安全扫描） |
 | `cron_test.go` | 调度器/解析器/存储单元测试（24 个） |
+| `scheduler_missed_test.go` | 漏跑检测与告警冷却测试（2 个） |
 | `tools_test.go` | Agent 工具单元测试（25 个） |
