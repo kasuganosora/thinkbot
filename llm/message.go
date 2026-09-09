@@ -96,6 +96,10 @@ type ToolResultPart struct {
 	InvocationID string `json:"invocationId,omitempty"`
 	Result       any    `json:"result"`
 	IsError      bool   `json:"isError,omitempty"`
+	// Halt 为 true 时，编排在收到本工具结果后立刻终止（不再调 LLM 生成后续回复）。
+	// 用于工具已请求中断（如 user_choice 被用户新消息打断）且后续回复无意义/错误的场景。
+	// 该字段仅供编排内部消费，不进入模型上下文，故不序列化。
+	Halt bool `json:"-"`
 }
 
 func (p ToolResultPart) PartType() MessagePartType { return PartTypeToolResult }

@@ -77,6 +77,17 @@ type ToolExecContext struct {
 	// UserRequest 触发本轮编排的用户请求文本（或子代理任务描述）。
 	// 供标记了 RequiresUserIntent 的写工具做「是否根植于用户显式意图」的护栏判定。
 	UserRequest string
+
+	// halt 由工具在需要让编排干净终止时置位（如 user_choice 被用户新消息中断），
+	// runTool 在工具返回后读取并标记 ToolResultPart.Halt，编排据此不再生成后续回复。
+	halt bool
+}
+
+// RequestHalt 请求编排在工具返回后立即终止（不再触发下一轮 LLM 生成）。
+// 用于「工具已无法/不应基于当前上下文继续」的场景（如等待被用户新消息打断，
+// 后续回复只会基于过时的上下文，无意义）。置位后工具应正常返回，由 runTool 接管。
+func (c *ToolExecContext) RequestHalt() {
+	c.halt = true
 }
 
 // ToolApprovalDecision controls how a tool call requiring approval is handled.

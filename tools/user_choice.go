@@ -258,6 +258,18 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 					"message":    "等待用户投票超时。请基于已有信息给出合理的默认处理，或稍后再问；不要反复重试本工具。",
 				}, nil
 			}
+			if err == interaction.ErrInterrupted {
+				// 等待期间用户在同一会话插入了新消息：旧回合上下文已过时，继续作答
+				// 只会基于旧内容生成（LLM 看不到新消息）。请求编排干净终止，由用户
+				// 新消息触发的独立回合处理新内容。
+				ctx.RequestHalt()
+				return map[string]any{
+					"status":     "interrupted",
+					"questionId": questionID,
+					"noteId":     noteID,
+					"message":    "等待用户选择期间，你发送了新消息，已中断本次选择。请基于你最新的消息继续，无需参考刚才的选项。",
+				}, nil
+			}
 			return nil, fmt.Errorf("user_choice: 等待中断: %w", err)
 		}
 		_ = snap
@@ -373,6 +385,17 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 				"status":     "timeout",
 				"questionId": questionID,
 				"message":    "等待用户应答超时。请基于已有信息给出合理的默认处理，或稍后再问；不要反复重试本工具。",
+			}, nil
+		}
+		if err == interaction.ErrInterrupted {
+			// 等待期间用户在同一会话插入了新消息：旧回合上下文已过时，继续作答
+			// 只会基于旧内容生成（LLM 看不到新消息）。请求编排干净终止，由用户
+			// 新消息触发的独立回合处理新内容。
+			ctx.RequestHalt()
+			return map[string]any{
+				"status":     "interrupted",
+				"questionId": questionID,
+				"message":    "等待用户选择期间，你发送了新消息，已中断本次选择。请基于你最新的消息继续，无需参考刚才的选项。",
 			}, nil
 		}
 		return nil, fmt.Errorf("user_choice: 等待中断: %w", err)
