@@ -117,7 +117,7 @@ ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
 |------|------|------|
 | `bot_id` | string | Bot 标识 |
 | `model` | string | 模型标识（如 `glm-5.2`） |
-| `feature` | string | 功能维度。代码中实际出现的取值：`reply`、`vision`、`subagent`、`engagement`、`memory_formation`、`memory_compression`、`memory_consolidation`、`memory_dedup`、`dream_extract`、`dream_cluster`、`bot_profiler`、`user_profiler`、`heartbeat`、`dreaming`、`quota_blocked`、`budget_warning`、`cron`（cron 任务默认，可经 `job.Feature` 自定义） |
+| `feature` | string | 功能维度。代码中实际出现的取值：主链路 LLM Stage 记为 `llm`（取 Stage 名）；各调用方经 `llm.WithStatsFeature` 显式标注的：`vision`、`subagent`、`engagement`、`memory_formation`、`memory_compression`、`memory_consolidation`、`memory_dedup`、`dream_extract`、`dream_cluster`、`bot_profiler`、`user_profiler`；另有 `heartbeat`、`dreaming`（cron 任务 Feature）、`cron`（cron 任务默认，可经 `job.Feature` 自定义）、`quota_blocked`、`budget_warning`，以及 `StatsRecordingProvider` 无标注时的兜底值 `unknown` |
 | `channel` | string | 来源渠道（如 `telegram`/`web`/`misskey`），非 pipeline 路径为空串 |
 | `date` | date | 聚合日期（UTC 零点截断） |
 | `total_requests` | int | 总请求数 |
@@ -159,7 +159,7 @@ engagement LLM 快判（Tier 2 judge）的**逐条**结果明细（`dao.JudgeRec
 | `engage` | LLM 认为是否值得参与 |
 | `score` | 0-100 评分；0 表示未用评分模式（传统 YES/NO） |
 | `reason` | LLM 理由（落库前截断到 480 字符） |
-| `tier` | 决策层（`tier_rule` / `tier_llm`） |
+| `tier` | 决策层（`rule` / `llm`，取自 `engagement.TierRule` / `TierLLM`） |
 | `latency_ms` | 判定耗时 |
 
 ### UsageMetric（输入）
@@ -321,7 +321,7 @@ var Module = fx.Module("stats",
 | `OnStart` | `AutoMigrate(UsageDaily, JudgeRecord, WorkflowUsage)` + `Recorder.Start()` + `JudgeRecorder.Start()` |
 | `OnStop` | `Recorder.Stop()` + `JudgeRecorder.Stop()`（各自 drain + flush 剩余数据） |
 
-`NewRecorderModule` 同时返回 `*Recorder` 和 `llm.UsageRecorder`，后者供各 Stage 通过 fx 可选注入。
+`NewRecorderModule` 同时返回 `*Recorder` 和 `llm.UsageRecorder`，后者供各 Stage 通过 fx 可选注入。`JudgeRecorder` 在 Module 内无条件提供（`NewJudgeRecorderModule`），由消费方决定是否包装为 sink；其 db 为 nil 时静默丢弃记录。
 
 `JudgeSink` 不在 fx Module 内提供：由 `api/module.go` 的 `newBotService` 在组装时手动 `stats.NewJudgeSink(p.JudgeRecorder)` 包装（`JudgeRecorder` 为 nil 时不挂 sink，判定结果不落库）。另外 `dao.Migrate()` 的统一迁移列表也包含这三张表，AutoMigrate 幂等，两处注册无害。
 
@@ -357,8 +357,10 @@ Token 节省 = (InputTokens - CacheReadTokens) 的比例变化
 
 | 文件 | 职责 |
 |------|------|
-| `recorder.go` | `Recorder` 类型、异步 channel 写入、批量聚合、SQLite UPSERT、工作流明细旁路写入（`flushWorkflowUsage`） |
+| `recorder.go` | `Recorder` 类型、异步 channel 写入、批量聚合、SQLite UPSERT、工作流明细旁路写入（`flushWorkflowUsage`）、`RecorderParams`（fx 注入参数） |
 | `repository.go` | 查询函数（`GetBotModelStats` / `GetModelFeatureStats` / `GetDailyStats` / `GetAllBotsModelStats` / `GetDailyStatsGlobal` / `GetDailyByBotStats` / `GetUsageRecords`）、结果类型 |
 | `judge_record.go` | `JudgeRecorder` — 判定结果异步批量落库（channel + 后台 goroutine） |
 | `judge_sink.go` | `JudgeSink` — 实现 `engagement.JudgeRecordSink`，reason 截断（480 字符） |
-| `module.go` | fx Module 定义、`NewRecorderModule` / `NewJudgeRecorderModule`、生命周期钩子 |
+| `module.go` | fx Module 定义、`StatsParams` / `LifecycleParams`、`NewRecorderModule` / `NewJudgeRecorderModule` / `RegisterLifecycle` |
+
+测试：`stats_test.go`（Recorder 记录与查询、Nil 安全、Start/Stop 异步）、`judge_record_test.go`（JudgeRecorder 逐条落库不聚合、Nil DB、channel 满不阻塞；JudgeSink 字段映射与 reason 截断）、`workflow_usage_test.go`（工作流明细不改变 UsageDaily 聚合、非工作流调用忽略、明细失败不破坏聚合）。均基于内存 SQLite，`go test ./stats/` 直接可跑。
