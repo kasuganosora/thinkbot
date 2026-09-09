@@ -26,7 +26,7 @@ Pipeline 产出 []core.Action
 | 文件 | 职责 |
 |------|------|
 | `dispatcher.go` | `Dispatcher` 接口、`LogDispatcher`（开发用）、`MultiDispatcher`（按 ActionType 路由） |
-| `channel_handler.go` | `ChannelReplyHandler`、`ChannelSender` / `OutboundGuard` 接口 — 将 Action 路由到对应 Channel 的 Sender（含只读渠道守卫） |
+| `channel_handler.go` | `ChannelReplyHandler`、`ChannelSender` / `OutboundGuard` 接口 — 将 Action 路由到对应 Channel 的 Sender（含只读渠道守卫、发送成功后的 `SetOnSent` 回调） |
 | `note_handler.go` | `NoteHandler` — 将 ActionNote 写入统一记忆仓储 |
 | `callback_handler.go` | `CallbackRegistry` + `CallbackHandler` — 回调注册与调用 |
 | `silent_handler.go` | `SilentHandler` — ActionSilent 处理（仅 trace，无外部 I/O） |
@@ -99,7 +99,9 @@ type ActionHandler interface {
 
 路由键：`Action.Metadata["source_channel"]` → 在 Sender 注册表中查找 → 若设置了 `OutboundGuard` 先做渠道只读检查 → 调用 `Send(ctx, action)` → **Send 成功后**调用 `SetOnSent` 回调（失败或被只读守卫丢弃不调用）。
 
-`SetOnSent` 由 `bot.New` 接上 `engagement.NotifyProactiveSent`：只对带 `engagement.proactive` 的 `ActionReply` 记账。这是 OutreachBreaker 的出站挂钩，不要只在测试里调 `RecordProactiveReply`。
+`SetOnSent` 由 `bot.New` 接上 `engagement.NotifyProactiveSent`：只对带 `engagement.proactive` 的 `ActionReply` 记账（会话 key 取 `engagement.channel`，缺省回退 `Action.Channel`）。这是 OutreachBreaker 的出站挂钩，不要只在测试里调 `RecordProactiveReply`。
+
+注意：`OutboundGuard` 只做「渠道只读」拦截。回复抑制（软门可被模型 `send:true` 覆盖、硬门不可、1:1 私聊不静音）的裁决在 `agent/stages` 的 LLMStage，发生在 Action 产出之前；被抑制的轮次根本不会产生 `ActionReply`，不会流到这里。
 
 ```go
 handler := outbound.NewChannelReplyHandler(logger, tp)

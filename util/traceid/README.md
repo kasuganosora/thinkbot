@@ -105,8 +105,8 @@ r.Use(func(c *gin.Context) {
 
 中间件行为：
 
-1. 检查请求头 `X-Trace-ID`，有则复用
-2. 否则检查 context 中已有值
+1. 读取请求头 `X-Trace-ID`，仅当其**合法**（32 字符 hex）时才复用；非法值（伪造 / CRLF / 日志注入）会被丢弃并重新生成
+2. 否则检查 context 中已有值，同样要求合法
 3. 都没有则生成新 ID
 4. 注入 context + 设置响应头
 5. 下游所有 `traceid.L(ctx)` 自动携带

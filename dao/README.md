@@ -19,7 +19,7 @@
 - **授权码**：`BindCode` — 一次性跨平台绑定授权码（5 分钟过期）
 - **身份映射**：`IdentityMapping` — 平台用户 ID 到内部用户的映射
 - **用户消息事件**：`UserMessageEvent` — 入站用户消息事件流（dreaming 回灌数据源，id 兼作水位线）
-- **Bot 工具权限**：`BotToolPermission` — bot 维度 tool/platform/user_ids 三维权限规则（首条匹配生效）
+- **Bot 工具权限**：`BotToolPermission` — bot 维度 tool/platform/chat_id/user_ids 四维权限规则（首条匹配生效）
 - **浏览器 Cookie**：`BotBrowserCookie` — bot 浏览器 Cookie 持久化（(bot_id, domain, name, path) 唯一；`BrowserCookieView` 提供掩码视图）
 - **自动迁移**：`Migrate(*gorm.DB) error` — 启动时自动建表，并幂等补齐存量表缺失列
 
@@ -57,4 +57,15 @@ dao.ChatRoleUser / dao.ChatRoleAssistant             // 消息角色
 `Migrate()` 先执行 GORM `AutoMigrate`，再调用内部 `ensureColumns`：
 SQLite 上 `AutoMigrate` 不会为存量表 ALTER 加列，因此新增列（如
 `bot_definitions.max_steps`、`hard_max_steps`、`memory_limit_mb`、
-`chat_messages.session_id`、`bot_tool_permissions.auto`）需手动幂等补齐，避免写入时报 “no such column”。
+`chat_messages.session_id`、`bot_tool_permissions.auto`、
+`bot_tool_permissions.chat_id`）需手动幂等补齐，避免写入时报 “no such column”。
+
+### `bot_tool_permissions.chat_id` 语义
+
+- 会话/群标识维度（可选），与其他维度叠加参与「首条匹配生效」的评估
+- 留空或 `"*"`：匹配该平台全部会话；存量规则（chat_id 为空）保持
+  「仅配 platform 即全群生效」的旧行为
+- 填具体值（如 Telegram 群 `"-1001234567890"`）：仅对该会话生效，
+  用于「针对某个群单独配置权限」
+- 入站取值：来自 `agent/core.Message.Channel`（Telegram 下即群/私聊 chat ID），
+  评估入口为 `toolperm.Service` 的 `matchChat`（精确相等，不支持通配）

@@ -9,6 +9,7 @@
 - **背压控制**：内部带缓冲通道（`BufferSize` 默认 256），满时 `Receive` 阻塞、`TryReceive` 立即返回 false
 - **链路追踪**：自动分配 TraceID（优先复用 `msg.TraceID` 或 context 中的值），并开启 `ingress.receive` span
 - **自消息过滤**：通过 `SelfIDSet` 丢弃 Bot 自己发出的消息，防止自我回复死循环
+- **消息去重**：按 `msg.ID` 做「检查并设置」去重（窗口 `ingressDedupTTL` = 2 分钟，后台每 30 秒清理过期项），防止 Misskey 多事件源（main + 多个 timeline 通道）或 WS 重连重放导致重复处理/重复回复；重复投递会打 Warn 日志（含 trace_id），空 ID 不去重、正常放行
 - **fx 集成**：`inbound.Module` 提供 `IngressConfig` 与 `*Ingress`
 
 Engine 的 worker goroutine 从 `Ingress.C()` 读取 Envelope 进行处理。
@@ -42,6 +43,14 @@ Channel 在 `Start()` 中发现自身身份后（Misskey 的 `getSelf`、Telegra
 调用 `RegisterSelfUserID` 注册。`SelfIDSet` 可通过 `IngressConfig.SelfIDSet` 由外部注入，
 或通过 `Ingress.SelfIDs()` 取出交给 Engagement 的 `SelfExclusionRule`，
 使两层防线引用同一份数据，无需时序协调。
+
+## 消息去重
+
+`Receive` / `TryReceive` 在自消息过滤之后、封装 Envelope 之前，对 `msg.ID` 做
+「检查并设置」原子去重（`seen`）：窗口内（2 分钟）重复出现的相同 ID 直接丢弃并打
+Warn 日志（`ingress: duplicate message dropped`，含 `entry` 标注入口）；`msg.ID` 为空
+不去重、正常放行。后台 `seenCleanup` 每 30 秒清理过期记录，`Close()` 时随 `done`
+channel 退出。测试见 `ingress_dedup_test.go`。
 
 ## 使用示例
 

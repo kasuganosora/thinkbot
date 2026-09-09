@@ -41,11 +41,12 @@
 `ReasoningEffort`(string，"minimal"/"low"/"medium"/"high")、`Tools`([]llm.Tool)、
 `ToolResolver`(ToolResolver，动态工具解析，覆盖 `Tools`)、`MessageBuilder`(func(core.Message) []llm.Message)、
 `UsageRecorder`(llm.UsageRecorder)、`StreamPublisher`(StreamPublisher，非 nil 走流式)、
-`ReductionConfig`(*llm.ReductionConfig，两阶段上下文压缩)、
+`ReductionConfig`(*llm.ReductionConfig，两阶段上下文压缩)、`Compaction`(*llm.CompactionConfig，主链路对话历史摘要压缩，按会话隔离)、
+`HardTimeout`(time.Duration，编排回路墙钟硬上限，0=不启用，仅当 ctx 无 deadline 时生效)、
 `ApprovalHandler`(func，HITL 工具审批门禁)、`ToolDeferral`(*llm.DeferralStore，延迟加载工具)、
 `ToolOutputSink`(llm.ToolOutputOffloadSink，工具输出落盘)、`ToolOutput`(llm.ToolOutputConfig，输出截断阈值)、
 `DeferredApprovalStore`(DeferredApprovalStore，HITL 审批锚点存储)、`ResumeDispatch`(func，HITL 续跑重跑入口)、
-`RequireReplyControl`(bool，回复控制门控，开启后要求模型输出 `@@REPLY_CONTROL@@` 控制 JSON，fail-closed)。
+`RequireReplyControl`(bool，回复控制门控，开启后要求模型输出 `@@REPLY_CONTROL@@` 控制 JSON；非私聊 fail-closed，1:1 私聊 fail-open——见下方 `Process` 行为)。
 
 ## 源文件
 
@@ -81,8 +82,9 @@ stage := stages.NewLLMStage("llm", provider, stages.LLMConfig{
 - 若 Envelope 带 `verify.required` 且有可用工具，首步强制 `tool_choice=required`（防偷懒门禁）。
 - `StreamPublisher` 非 nil 时走 `llm.OrchestrateStream`，否则 `llm.OrchestrateGenerate`。
 - 完成后写入 `ActionReply`（outbound 目标取 `Metadata["reply_target"]`，回退 `Message.Channel`），经 `CopyEngagementOutboundMeta` 拷贝 `engagement.proactive` / `engagement.channel` 供出站熔断记账，并把 `*llm.GenerateResult` 存入 KV `llm.result`。
-- `KVSuppressReply` 为真时默认不出站。软原因（节奏/engagement 节流）可被模型 `send:true` 覆盖；硬原因（`passive_mode_unmentioned`、`unanswered_outreach`、`reaction_notification`）不可覆盖。`RhythmStage` 遇到硬原因必须原样保留，不得改写成 `rhythm_*`。反应/点赞入站会卸掉工具列表，避免模型回赞或发帖。
-- 公开回复经 `extractPublicReply` 提取：仅当正文含显式且成对的 `<public>...</public>` 区块时取其内文（再剥一次 `<internal>` 残留）；随后 `deduplicatePublicContent` 做整段去重——检测「前半段 ≈ 后半段开头」的完全重复模式（LLM 偶发把回复写两遍，如 tool_choice 解封续生成场景），只保留第一份。最短匹配 40 字符，中点 ±10 字符宽松搜索，短句/签名等正常重复不会被误删。最后剥离任何残留标签（含畸形 public / 嵌套字面标签 / HTML 标签），避免标签文本外发。
+- `KVSuppressReply` 为真时默认不出站。软原因（节奏/engagement 节流）可被模型 `send:true` 覆盖；硬原因经 `core.IsHardSuppressReason` 判定（`passive_mode_unmentioned`、`unanswered_outreach`、`unanswered_cooldown`、`reaction_notification`、`target_is_pure_renote`），不可覆盖、私聊亦然。1:1 私聊（`ChatPrivate` 且非 heartbeat/cron 系统源，见 `isPrivateChat`）下软门一律放行。`RhythmStage` 遇到硬原因必须原样保留，不得改写成 `rhythm_*`。反应/点赞入站会卸掉工具列表，避免模型回赞或发帖。
+- 公开回复经 `extractPublicReply` 提取：正文含显式且成对的 `<public>...</public>` 区块时只取**第一个非空块**内文（协议只允许一个块，输出多个块属模型非法输出，丢弃其后所有块，避免同一段话发两遍；再剥一次 `<internal>` 残留）。纯文本路径（无标签）先做裸思考泄漏检测 `looksLikeInternalThinking`：命中 `@@REPLY_CONTROL@@` 协议标记残留、`send true/false` 协议动词残片、或第一人称内心独白+规划枚举（"I failed... Options:"）等高置信信号即 fail-closed 返回空，绝不把内部推理发给用户。最后统一剥离任何残留标签（含畸形 public / 嵌套字面标签 / HTML 标签）。
+- `RequireReplyControl` 开启时按 `@@REPLY_CONTROL@@` 控制 JSON 决策：非私聊下缺控制块或 `send:false` 一律 fail-closed 静默；1:1 私聊反转为 fail-open——缺控制块或 `send:false` 时用 `extractPublicReply` 兜底提取可发内容（`<public>` 优先，否则清洗后纯文本），提取不到任何内容才静默。
 
 ### ReplyStage
 
@@ -132,4 +134,5 @@ wrapped := stages.NoteCaptureMiddleware("exchange", umeWriter)(replyStage)
 - `system.prompt` (string)：PromptStage 注入的动态提示词，LLMStage/ReplyStage 优先使用。
 - `llm.result` (*llm.GenerateResult)：LLM 生成结果。
 - `verify.required` (bool)：VerificationGateMiddleware 标记的防偷懒强制门禁信号。
+- `memory.capture_suppressed_exchange` (bool)：`LLMStage` 抑制分支置位，告知 `NoteCaptureMiddleware`「不说出口但用户原文仍须落 L0 记忆」；私聊软门放行路径不置位（那是要说话，不是「想了不说」）。
 - `bot.id` (string)：`recordUsage` 提取的用量归属。

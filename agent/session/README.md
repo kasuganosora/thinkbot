@@ -103,6 +103,10 @@ API：`GetOrCreate(sessionID, botID, channel, createdBy)`、`Get`、`ActiveCount
 `SessionStage` 建议放在靠前位置（如 Order=50，在 MemoryStage 之前），
 `SessionWriteStage` 放在靠后（如 Order=850，ReplyStage 之后、MemoryWriteStage 之前）。
 
+注：模型回复可能被 LLMStage 的 reply-control 门控抑制（软门可被 `send:true` 覆盖、
+硬门不可、1:1 私聊不静音——见 `agent/stages`）。被抑制的轮次不产出 `ActionReply`，
+因此对应回合的 assistant 回复不会写回 session 工作记忆；用户侧的长期记忆捕获不受此影响。
+
 ```go
 readStage := session.NewSessionStage("session", mgr, session.DefaultStageConfig(), tp, logger)
 writeStage := session.NewSessionWriteStage("session_write", mgr, tp, logger)
@@ -113,8 +117,8 @@ writeStage := session.NewSessionWriteStage("session_write", mgr, tp, logger)
 `session.context`（由 `FormatContext` 生成，`ContextMaxMessages` 默认 10 条）。
 解析结果 `OK=false` 时仅设置 `session.active=false` 并放行。
 
-**SessionWriteStage**：从 Envelope 的 `ActionReply` 中提取 string payload，
-以 `assistant` 角色追加到对应 session；无 session 或无回复文本时跳过。
+**SessionWriteStage**：从 Envelope 的 `ActionReply` 中提取**第一个非空** string payload，
+以 `assistant` 角色追加到对应 session；无 session、session 非活跃（已归档）或无回复文本时跳过。
 
 **旁路事件**：`SessionStage` 通过 `outbound.EmitterFromContext(ctx)` 发射 `session.resolved`。
 
