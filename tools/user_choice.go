@@ -366,7 +366,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 				select {
 				case <-done:
 					return
-				case <-ctx.Context.Done():
+				case <-ctx.Done():
 					return
 				case <-tk.C:
 					ctx.SendProgress(ev)

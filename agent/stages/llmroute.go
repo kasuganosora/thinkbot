@@ -15,7 +15,6 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
-	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/session"
@@ -679,6 +678,8 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// （user_choice 等）据此判断应答平台与渲染路径。
 	ctx = agenttools.ContextWithMessageMeta(ctx, agenttools.MessageMeta{
 		BotID:       env.Message.BotID,
+		UserID:      env.Message.UserID,
+		Source:      env.Message.Source,
 		ChatID:      env.Message.Channel,
 		ChannelType: messageChannelType(&env.Message),
 		ReplyTarget: messageReplyTarget(&env.Message),
@@ -757,7 +758,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 而心跳的 InjectContext 已经要求「只输出一个 JSON 对象」，两套协议同时出现时
 	// 模型会把它们合并成 [{decision…}, {"send":false}] 数组
 	// （2026-08-29 实测：决策被静默降级丢弃）。故心跳路径不注入本协议。
-	if s.config.RequireReplyControl && env.Message.Source != core.SourceHeartbeat {
+	if s.config.RequireReplyControl && env.Message.Source != core.SourceHeartbeat && !env.IsOutreach() {
 		systemPrompt = systemPrompt + "\n\n" + replyControlInstruction
 	}
 
@@ -814,7 +815,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		HardMaxSteps: s.config.HardMaxSteps,
 		// 把本轮的「用户中途追加」通道透传给编排循环（Claude-CLI 风格），
 		// 让生成中的用户补充能注入同一轮对话。
-		InterruptCh: bot.InterruptChannelFromContext(ctx),
+		InterruptCh: core.InterruptChannelFromContext(ctx),
 		// 写操作意图护栏（Layer B）：把触发本轮的用户请求文本透传，供标记了
 		// RequiresUserIntent 的写工具（如 misskey follow/post/react）判定调用
 		// 是否根植于用户显式意图。子代理场景下 env.Message.Text 即其任务描述。
@@ -1209,7 +1210,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 回复控制门控（opt-in）：解析结尾控制 JSON，失败/缺失/send:false 一律不出站。
 	// 放在「清洗后空检查」之前——若模型 send:true 但正文为空，后续空检查会照常拦截；
 	// 若 send:false，这里已提前 return，独白绝不外发。
-	if s.config.RequireReplyControl {
+	if s.config.RequireReplyControl && !env.IsOutreach() {
 		send, clean, parsed := parseReplyControl(replyText)
 		switch {
 		case !parsed:
@@ -1244,6 +1245,17 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			replyText = pub
 
 		case !send:
+			if env.IsOutreach() {
+				// 规则已经决定必须发出：忽略模型的 send:false。
+				span.SetAttributes(attribute.Bool("reply.outreach_force_send", true))
+				logger.Infow("outreach force-send: ignoring model send=false",
+					"message_id", env.Message.ID)
+				replyText = extractPublicReply(clean)
+				if strings.TrimSpace(replyText) == "" {
+					replyText = strings.TrimSpace(clean)
+				}
+				break
+			}
 			if isPrivateChat(env) {
 				// 私聊（1:1）反转为 fail-open：私聊里 bot 一言不发会让用户以为 bot 坏了，
 				// 且私聊无「把内心独白发到公共时间线」的泄露风险。尽量提取可发内容（<public>
@@ -1295,19 +1307,27 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		return env, nil
 	}
 
+	actionMeta := map[string]any{
+		"source_channel": env.Message.Source,  // ChannelReplyHandler 路由必需
+		"trace_id":       env.Message.TraceID, // WebChannel 路由必需
+		"finish_reason":  string(result.FinishReason),
+		"usage":          result.Usage,
+		"tool_calls":     result.ToolCalls,
+		"steps":          len(result.Steps),
+	}
+	if sid := chatSessionIDFromEnvelope(env); sid != "" {
+		actionMeta["session_id"] = sid
+		actionMeta[agenttools.ExtraKeyChatSessionID] = sid
+	}
+	if env.Message.UserID != "" {
+		actionMeta["user_id"] = env.Message.UserID
+	}
 	env.AddAction(core.Action{
-		Type:    core.ActionReply,
-		Channel: replyTarget,
-		UserID:  env.Message.UserID,
-		Payload: replyText,
-		Metadata: core.CopyEngagementOutboundMeta(env, map[string]any{
-			"source_channel": env.Message.Source,  // ChannelReplyHandler 路由必需
-			"trace_id":       env.Message.TraceID, // WebChannel 路由必需
-			"finish_reason":  string(result.FinishReason),
-			"usage":          result.Usage,
-			"tool_calls":     result.ToolCalls,
-			"steps":          len(result.Steps),
-		}),
+		Type:     core.ActionReply,
+		Channel:  replyTarget,
+		UserID:   env.Message.UserID,
+		Payload:  replyText,
+		Metadata: core.CopyEngagementOutboundMeta(env, actionMeta),
 	})
 
 	// 在 Envelope KV 中存储完整结果

@@ -21,6 +21,10 @@ import (
 type MessageMeta struct {
 	// BotID 所属 bot。
 	BotID string
+	// UserID 本轮发送者 ID。
+	UserID string
+	// Source 渠道实例名（Channel.Name()，dispatcher 按此找 Sender）。
+	Source string
 	// ChatID 会话空间标识（telegram: chatID / misskey: channelID / web: sessionID）。
 	ChatID string
 	// ChannelType 来源平台类型（"web" / "telegram" / "misskey"）。

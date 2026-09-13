@@ -187,9 +187,9 @@ func TestDreamManager_LightSkipsEphemeral(t *testing.T) {
 
 	// 3 条时效性内容（多语言，均标 ephemeral=true）——应全部被跳过。
 	ephemeral := []string{
-		"TANK CHAIR というアニメが4月7日から放送開始。",                    // 日语
-		"@dev ने कहा कि नया मॉडल कल रिलीज़ होगा।",             // 印地语
-		"某模型今天开源发布，来源 IT 之家。",                              // 中文
+		"TANK CHAIR というアニメが4月7日から放送開始。",           // 日语
+		"@dev ने कहा कि नया मॉडल कल रिलीज़ होगा।", // 印地语
+		"某模型今天开源发布，来源 IT 之家。",                     // 中文
 	}
 	for _, c := range ephemeral {
 		if err := dm.manager.store.Append(ctx, TieredEntry{

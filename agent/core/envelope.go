@@ -107,6 +107,11 @@ const (
 	// 由 cron 调度器在 Job 到期时自动注入，bot 以「无人监督」模式跑一次 Job.Prompt。
 	// 与心跳类似走完整 pipeline，但目的是产出并投递结果到指定渠道（Channel 非空时）。
 	SourceCron string = "cron"
+
+	// SourceOutreach 对人主动开口（规则闸门打开后的合成轮）。
+	// 写入 Message.Metadata["origin"]，Message.Source 仍用真实渠道实例名
+	// （dispatcher 按 source_channel 找 Sender，不能再用伪频道名）。
+	SourceOutreach string = "outreach"
 )
 
 // ============================================================================
@@ -229,6 +234,13 @@ const (
 	// 等待人类确认后由 ResumeDeferredApproval 续跑。供下游 Stage / 可观测层识别此状态。
 	// 值类型 bool；仅 true 生效。
 	KVLLMDeferred = "llm.deferred"
+
+	// KVOutreachForceSend 标记「对人主动开口」合成轮：规则已经决定必须发出，
+	// 模型不许改判 silent / REPLY_CONTROL send:false。值类型 bool；仅 true 生效。
+	KVOutreachForceSend = "outreach.force_send"
+
+	// MetaOrigin 是 Message.Metadata 中标识合成触发源的键（取值如 SourceOutreach）。
+	MetaOrigin = "origin"
 
 	// KVHeartbeatMode 标记当前消息为「心跳自主唤醒」决策模式。
 	//
@@ -379,6 +391,28 @@ func (e *Envelope) Get(key string) (any, bool) {
 	defer e.mu.RUnlock()
 	v, ok := e.values[key]
 	return v, ok
+}
+
+// IsOutreach 判断本轮是否为人主动开口合成轮（规则已决定必须发出）。
+func (e *Envelope) IsOutreach() bool {
+	if e == nil {
+		return false
+	}
+	if v, ok := e.Get(KVOutreachForceSend); ok {
+		if b, ok := v.(bool); ok && b {
+			return true
+		}
+	}
+	return IsOutreachMessage(e.Message)
+}
+
+// IsOutreachMessage 根据 Metadata["origin"] 判断是否为人主动开口合成消息。
+func IsOutreachMessage(msg Message) bool {
+	if msg.Metadata == nil {
+		return false
+	}
+	v, ok := msg.Metadata[MetaOrigin].(string)
+	return ok && v == SourceOutreach
 }
 
 // MustGet 获取值，不存在时 panic。

@@ -147,6 +147,9 @@ func (s *RhythmStage) cleanupLocked(now time.Time) {
 
 // Process 实现 core.Stage。
 func (s *RhythmStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+	if env.IsOutreach() {
+		return env, nil
+	}
 	// 潜水模式不发言，节奏无关
 	if getBool(env, core.KVLurkMode) {
 		return env, nil

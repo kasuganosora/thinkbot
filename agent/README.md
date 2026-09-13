@@ -143,6 +143,7 @@ agent/
 │   ├── sqlite_compactor.go #   SQLiteCompactor（语义压缩）
 │   ├── tiered_recall.go    #   TieredL1Retriever / MergedRetriever（复合召回）
 │   └── doc.go
+├── outreach/               # 对人主动开口（规则闸门 + 配额，见 outreach/README.md）
 ├── tools/                  # 工具基础设施（见 tools/README.md）
 │   ├── registry.go         #   ToolRegistry（静态 + 动态工具）
 │   ├── manager.go          #   ToolManager（统一入口 + 权限过滤）

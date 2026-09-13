@@ -112,6 +112,7 @@ export default {
   // ── 记忆 / 定时 / 子代理 ──
   memory:                 '记忆',
   cron:                   '定时任务',
+  remind:                 '提醒',
   spawn:                  '子任务',
   use_skill:              '加载技能',
   dreaming:               '整理记忆',

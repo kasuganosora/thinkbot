@@ -711,23 +711,6 @@ type messageCancelCtxKey struct{}
 
 // interruptCtxKey 用于在 message context 中携带「用户中途追加」通道
 // （Claude-CLI 风格的「边思考/边输出边补充」）。
-type interruptCtxKey struct{}
-
-// WithInterruptChannel 将一条消息生命周期内的「用户中途追加」通道绑定到 ctx。
-func WithInterruptChannel(ctx context.Context, ch chan string) context.Context {
-	return context.WithValue(ctx, interruptCtxKey{}, ch)
-}
-
-// InterruptChannelFromContext 取回绑定到 ctx 的中途追加通道；无则返回 nil。
-func InterruptChannelFromContext(ctx context.Context) chan string {
-	if v := ctx.Value(interruptCtxKey{}); v != nil {
-		if ch, ok := v.(chan string); ok {
-			return ch
-		}
-	}
-	return nil
-}
-
 // finishMessageLifecycle 清理单条消息的取消函数注册与回调。
 func (b *Bot) finishMessageLifecycle(ctx context.Context, traceID string) {
 	if v := ctx.Value(messageCancelCtxKey{}); v != nil {
@@ -752,7 +735,7 @@ func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.C
 		interruptCh := make(chan string, 16)
 		b.onMessageStart(b.ID, traceID, cancel, interruptCh)
 		ctx = context.WithValue(msgCtx, messageCancelCtxKey{}, cancel)
-		ctx = WithInterruptChannel(ctx, interruptCh)
+		ctx = core.WithInterruptChannel(ctx, interruptCh)
 	}
 
 	// 注入 Bot 配置到 Envelope KV，供 Stage 读取

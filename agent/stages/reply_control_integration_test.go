@@ -200,13 +200,13 @@ func TestReplyControl_RealLLM(t *testing.T) {
 		// 对照：正常友好提问，协议不应误伤——模型应 send:true 并出站。
 		stage := newStage()
 		env := core.NewEnvelope(core.Message{
-			ID:      "test-reply-control-friendly",
-			TraceID: "trace-friendly",
-			BotID:   "bot-2d8f9b087270da0bcfe177a5",
-			Source:  "web",
-			Channel: "web:direct",
-			UserID:  "luna",
-			Text:    "栞娜，帮我看下 Go 里怎么用 context 控制超时？给个最小例子。",
+			ID:        "test-reply-control-friendly",
+			TraceID:   "trace-friendly",
+			BotID:     "bot-2d8f9b087270da0bcfe177a5",
+			Source:    "web",
+			Channel:   "web:direct",
+			UserID:    "luna",
+			Text:      "栞娜，帮我看下 Go 里怎么用 context 控制超时？给个最小例子。",
 			Mentioned: true,
 		})
 
@@ -293,12 +293,12 @@ func TestReplyControl_RealLLM(t *testing.T) {
 				t.Logf("parsed control block: parsed=%v send=%v", parsed, send)
 				t.Logf("REASONING (思考过程, len=%d chars, reasoning_tokens=%d):\n%s", len(res.Reasoning), res.Usage.ReasoningTokens, firstN(res.Reasoning, 1200))
 				// 诊断：清洗后是否仍残留 <internal> 裸标签（说明模型写了标签但门控没剥——不应发生）。
-			if strings.Contains(clean, "<internal>") {
-				t.Logf("WARN: <internal> tag survived cleaning in `clean` (model may have used unexpected casing/format)")
+				if strings.Contains(clean, "<internal>") {
+					t.Logf("WARN: <internal> tag survived cleaning in `clean` (model may have used unexpected casing/format)")
+				}
 			}
 		}
-	}
-})
+	})
 
 	t.Run("internal_without_public_stays_silent", func(t *testing.T) {
 		// 取巧逻辑的关键场景：模型既写了 <internal> 心里话，又想说点公开的，

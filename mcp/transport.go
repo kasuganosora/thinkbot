@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -163,7 +162,7 @@ func (t *stdioTransport) Send(ctx context.Context, data []byte) error {
 func (t *stdioTransport) Close() error {
 	if t.cmd != nil && t.cmd.Process != nil {
 		// 先优雅发送 SIGTERM，给子进程机会做退出清理（如发送 exit 通知）。
-		_ = t.cmd.Process.Signal(syscall.SIGTERM)
+		terminateProcess(t.cmd.Process)
 	}
 
 	done := make(chan struct{})
@@ -190,7 +189,7 @@ func (t *stdioTransport) Healthy() bool {
 	if t.cmd == nil || t.cmd.Process == nil {
 		return false
 	}
-	return t.cmd.Process.Signal(syscall.Signal(0)) == nil
+	return processAlive(t.cmd.Process)
 }
 
 // ============================================================================
