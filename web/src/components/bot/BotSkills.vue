@@ -13,6 +13,7 @@
         </t-button>
       </div>
     </div>
+    <p class="sk-lead">内置技能来自仓库 <code>skills/</code>，托管技能写在本 Bot 目录。启用后 Bot 可通过 <code>use_skill</code> 加载；运行中的 Bot 会立即热更新。</p>
 
     <!-- 空态 -->
     <t-loading :loading="loading" size="small">
@@ -28,17 +29,24 @@
           <div class="card-top">
             <span class="card-name">{{ s.name }}</span>
             <div class="card-ops">
-              <t-icon name="edit" @click="openEdit(s)" />
+              <t-icon v-if="s.editable !== false && s.source === 'managed'" name="edit" @click="openEdit(s)" />
               <t-icon name="browse" @click="openPreview(s)" />
-              <t-icon name="delete" class="op-del" @click="remove(s)" />
+              <t-icon v-if="s.editable !== false && s.source === 'managed'" name="delete" class="op-del" @click="remove(s)" />
             </div>
           </div>
           <div class="card-desc">{{ s.description || '（无描述）' }}</div>
           <div class="card-tags">
-            <span class="tag">{{ s.source === 'managed' ? '托管' : '本地' }}</span>
-            <span class="tag">{{ s.status === 'active' ? '生效中' : '未生效' }}</span>
+            <span class="tag">{{ sourceLabel(s.source) }}</span>
+            <span class="tag" :class="{ on: s.enabled }">{{ s.enabled ? '已启用' : '已禁用' }}</span>
+            <span v-if="s.hasScripts" class="tag">脚本</span>
+            <span v-if="s.hasReferences" class="tag">引用</span>
+            <span v-if="s.hasAssets" class="tag">资源</span>
           </div>
           <div class="card-path">{{ s.path }}</div>
+          <div class="card-enable">
+            <span>对当前 Bot 启用</span>
+            <t-switch :value="s.enabled" size="small" :loading="toggling === s.id" @change="val => toggle(s, val)" />
+          </div>
         </div>
       </div>
     </t-loading>
@@ -84,14 +92,14 @@
       <pre class="preview-pre">{{ preview?.content }}</pre>
       <div class="editor-foot">
         <t-button variant="outline" @click="previewVisible = false">关闭</t-button>
-        <t-button theme="primary" @click="editFromPreview">编辑</t-button>
+        <t-button v-if="preview?.source === 'managed'" theme="primary" @click="editFromPreview">编辑</t-button>
       </div>
     </t-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { botSkillApi } from '@/api/services'
 
@@ -99,17 +107,26 @@ const props = defineProps({ botId: { type: String, required: true } })
 
 const skills = ref([])
 const loading = ref(false)
+const toggling = ref('')
+const roots = ref({ bundled: 'skills', managed: '' })
 
 async function load() {
   loading.value = true
   try {
     const res = await botSkillApi.list(props.botId)
     skills.value = res.skills || []
+    if (res.roots) roots.value = res.roots
   } finally {
     loading.value = false
   }
 }
-load()
+watch(() => props.botId, load, { immediate: true })
+
+function sourceLabel(src) {
+  if (src === 'bundled') return '内置'
+  if (src === 'managed') return '托管'
+  return src || '本地'
+}
 
 /* ---------------- 编辑器 ---------------- */
 const editorVisible = ref(false)
@@ -183,8 +200,27 @@ function remove(s) {
   })
 }
 
+async function toggle(s, val) {
+  toggling.value = s.id
+  try {
+    if (val) await botSkillApi.enable(props.botId, s.id || s.name)
+    else await botSkillApi.disable(props.botId, s.id || s.name)
+    s.enabled = val
+    MessagePlugin.success(val ? `已启用「${s.name}」` : `已禁用「${s.name}」`)
+  } catch (e) {
+    MessagePlugin.error(e.message || '操作失败')
+  } finally {
+    toggling.value = ''
+  }
+}
+
 function showPath() {
-  MessagePlugin.info('技能根目录：/data/skills/')
+  const bundled = roots.value.bundled || 'skills'
+  const managed = roots.value.managed || `data/skills/${props.botId}`
+  DialogPlugin.alert({
+    header: '技能路径',
+    body: `内置：${bundled}\n本 Bot 托管：${managed}\n\n托管技能可新建/编辑；内置技能只能启用或禁用。运行中的 Bot 会立刻热加载变更。`
+  })
 }
 </script>
 
@@ -199,6 +235,8 @@ function showPath() {
   color: var(--bp-label-secondary); cursor: pointer;
 }
 .sk-path-link:hover { color: var(--bp-label); }
+.sk-lead { margin: -8px 0 16px; font-size: 13px; color: var(--bp-label-tertiary); line-height: 1.6; }
+.sk-lead code { font-size: 12px; }
 
 .sk-empty {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -226,7 +264,12 @@ function showPath() {
 }
 .card-tags { display: flex; gap: 8px; }
 .tag { font-size: 12px; padding: 3px 12px; border-radius: 20px; background: var(--bp-surface-fill); color: var(--bp-label-secondary); }
+.tag.on { background: var(--bp-accent-soft); color: var(--bp-accent); }
 .card-path { font-size: 12px; color: var(--bp-label-quaternary); word-break: break-all; }
+.card-enable {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--bp-label-secondary); padding-top: 4px;
+}
 
 /* 编辑器 */
 .editor-box {

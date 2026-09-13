@@ -24,6 +24,7 @@ import (
 	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/sandbox"
+	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -84,6 +85,7 @@ type Bot struct {
 	workspaceMgr *sandbox.BotWorkspaceManager // 工作空间管理器（nil=未启用）
 	workspaceDir string                       // 当前 Bot 的工作空间目录绝对路径
 	soulLoader   *prompt.SoulLoader           // SOUL.md 加载器（nil=未启用）
+	skillMgr     *skill.SkillManager          // 技能管理器（nil=未接线）
 
 	// 梦境巩固（nil=未启用，默认禁用）
 	dreamScheduler *cron.Scheduler // 梦境巩固的 cron 调度器
@@ -147,6 +149,9 @@ type BotParams struct {
 	// ToolManager 工具管理器（可选，用于注册工作空间文件操作工具）。
 	// 为 nil 时跳过工具注册（但工作空间目录仍会创建）。
 	ToolManager *tools.ToolManager
+
+	// SkillManager 已装配的技能管理器（可选）。由调用方 SetupSkills 后注入。
+	SkillManager *skill.SkillManager
 
 	// SandboxConfig 沙箱配置（Backend/Image/Limits 等，可选）。
 	// 为空时使用 sandbox.DefaultConfig()。
@@ -310,6 +315,7 @@ func New(params BotParams) (*Bot, error) {
 		ownRegistry:     ownRegistry,
 		onMessageStart:  params.OnMessageStart,
 		onMessageDone:   params.OnMessageDone,
+		skillMgr:        params.SkillManager,
 	}
 
 	// 创建持久化工作空间（文件在宿主文件系统，重启不丢失）
@@ -524,6 +530,9 @@ func (b *Bot) Close() {
 		if b.soulLoader != nil {
 			b.soulLoader.Stop()
 		}
+		if b.skillMgr != nil {
+			b.skillMgr.SaveEnabledStates(context.Background())
+		}
 		// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再关闭传输层、读回状态文件持久化到 DB。
 		// 必须在工作空间管理器关闭（容器销毁）之前完成。
 		// 注意：直接 Close() 会 SIGKILL 掉 docker exec 子进程，而 `docker exec -i` 默认不代理信号，
@@ -640,6 +649,11 @@ func (b *Bot) WorkspaceMgr() *sandbox.BotWorkspaceManager {
 // 如果未启用 SoulLoader，返回 nil。
 func (b *Bot) SoulLoader() *prompt.SoulLoader {
 	return b.soulLoader
+}
+
+// SkillManager 返回 Bot 的技能管理器。未接线时返回 nil。
+func (b *Bot) SkillManager() *skill.SkillManager {
+	return b.skillMgr
 }
 
 // CallbackRegistry 返回 Bot 的回调注册表。

@@ -35,9 +35,15 @@ import (
 
 // SkillWireConfig 是技能系统的装配参数。
 type SkillWireConfig struct {
-	// SkillsDir 技能文件系统根目录路径。
-	// 为空时跳过文件加载（仅管理运行时注册的技能）。
+	// SkillsDir 兼容旧调用：单一根目录，Source=fs。BundledDir/ManagedDir 优先。
 	SkillsDir string
+
+	// BundledDir 仓库内置技能目录（通常 "skills"），Source=bundled。
+	BundledDir string
+
+	// ManagedDir 该 Bot 托管技能目录（通常 data/skills/{botID}），Source=managed。
+	// 与 BundledDir 同名时托管覆盖内置。
+	ManagedDir string
 
 	// Tools ToolManager，用于注册 use_skill 工具提供者。
 	// 为 nil 时跳过工具注册（技能仍可通过 prompt 注入工作）。
@@ -114,15 +120,28 @@ func SetupSkills(cfg SkillWireConfig) (*skill.SkillManager, error) {
 	// 2. 创建 SkillManager（注入 Registry + Store 适配器）
 	mgr := skill.NewSkillManager(regAdapter, cfg.Store, botSkillLogger)
 
-	// 3. 从文件系统加载技能
-	if cfg.SkillsDir != "" {
-		loader := skill.NewLoader(cfg.SkillsDir, botSkillLogger)
+	// 3. 从文件系统加载技能（内置先、托管后；同名托管覆盖）
+	type loadSpec struct{ path, source string }
+	var specs []loadSpec
+	if cfg.BundledDir != "" {
+		specs = append(specs, loadSpec{cfg.BundledDir, "bundled"})
+	}
+	if cfg.ManagedDir != "" {
+		specs = append(specs, loadSpec{cfg.ManagedDir, "managed"})
+	}
+	if len(specs) == 0 && cfg.SkillsDir != "" {
+		specs = append(specs, loadSpec{cfg.SkillsDir, "fs"})
+	}
+	for _, spec := range specs {
+		loader := skill.NewLoader(spec.path, botSkillLogger)
+		loader.Source = spec.source
 		count, err := loader.LoadAndRegister(mgr)
 		if err != nil {
-			return nil, errs.Wrapf(err, "skill wire: load from %q", cfg.SkillsDir)
+			return nil, errs.Wrapf(err, "skill wire: load from %q", spec.path)
 		}
 		botSkillLogger.Debugw("skills loaded from filesystem",
-			"dir", cfg.SkillsDir,
+			"dir", spec.path,
+			"source", spec.source,
 			"count", count,
 		)
 	}
@@ -145,6 +164,8 @@ func SetupSkills(cfg SkillWireConfig) (*skill.SkillManager, error) {
 	}
 
 	botSkillLogger.Infow("skills system wired",
+		"bundled_dir", cfg.BundledDir,
+		"managed_dir", cfg.ManagedDir,
 		"dir", cfg.SkillsDir,
 		"total", len(mgr.List()),
 		"enabled", len(mgr.EnabledNames()),

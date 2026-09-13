@@ -46,6 +46,56 @@ func (a *ConfigStoreAdapter) GetBool(key string, def bool) bool {
 	return a.store.GetBool(key, def)
 }
 
+// BotSkillStoreAdapter 把 SkillManager 使用的键 skill.{name}.enabled
+// 映射为 per-bot 键 bot.{botID}.skill.{name}.enabled。
+// 读取时若无 per-bot 记录，回退全局 skill.{name}.enabled（管理台默认）。
+type BotSkillStoreAdapter struct {
+	store interface {
+		Get(key string) (string, bool)
+		Set(ctx context.Context, key, value string) error
+		GetBool(key string, def bool) bool
+	}
+	botID string
+}
+
+// NewBotSkillStoreAdapter 创建 per-bot 技能启用状态适配器。
+func NewBotSkillStoreAdapter(store interface {
+	Get(key string) (string, bool)
+	Set(ctx context.Context, key, value string) error
+	GetBool(key string, def bool) bool
+}, botID string) *BotSkillStoreAdapter {
+	return &BotSkillStoreAdapter{store: store, botID: botID}
+}
+
+func (a *BotSkillStoreAdapter) botKey(key string) string {
+	return "bot." + a.botID + "." + key
+}
+
+func (a *BotSkillStoreAdapter) Get(key string) (string, bool) {
+	if a.store == nil || a.botID == "" {
+		return "", false
+	}
+	if val, ok := a.store.Get(a.botKey(key)); ok {
+		return val, true
+	}
+	return a.store.Get(key)
+}
+
+func (a *BotSkillStoreAdapter) Set(ctx context.Context, key, value string) error {
+	if a.store == nil || a.botID == "" {
+		return nil
+	}
+	return a.store.Set(ctx, a.botKey(key), value)
+}
+
+func (a *BotSkillStoreAdapter) GetBool(key string, def bool) bool {
+	val, ok := a.Get(key)
+	if !ok {
+		return def
+	}
+	return val == "true"
+}
+
 // ============================================================================
 // 持久化辅助方法（SkillManager 扩展）
 // ============================================================================

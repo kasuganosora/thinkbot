@@ -203,6 +203,8 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/skills/:sid", s.handleGetBotSkill)
 				botsAdmin.POST("/:id/skills", s.handleCreateBotSkill)
 				botsAdmin.PUT("/:id/skills/:sid", s.handleUpdateBotSkill)
+				botsAdmin.PUT("/:id/skills/:sid/enable", s.handleEnableBotSkill)
+				botsAdmin.PUT("/:id/skills/:sid/disable", s.handleDisableBotSkill)
 				botsAdmin.DELETE("/:id/skills/:sid", s.handleRemoveBotSkill)
 
 				// Bot MCP 服务器管理

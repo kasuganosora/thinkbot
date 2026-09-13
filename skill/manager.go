@@ -122,6 +122,24 @@ func (m *SkillManager) Register(skill *Skill) {
 		"enabled", skill.Enabled,
 		"source", skill.Source,
 	)
+	m.refreshTriggerLocked()
+}
+
+// Unregister 移除指定 Skill，并从 prompt Registry 清掉其段落与触发清单。
+func (m *SkillManager) Unregister(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	old, ok := m.skills[name]
+	if !ok {
+		return
+	}
+	if old.Enabled && old.Content != "" {
+		m.unregisterPromptLocked(name)
+	}
+	delete(m.skills, name)
+	m.refreshTriggerLocked()
+	m.logger.Infow("skill unregistered", "name", name)
 }
 
 // resolveEnabledLocked 根据配置决定 Skill 的启用状态（必须持有 mu.Lock）。
@@ -168,6 +186,7 @@ func (m *SkillManager) Enable(name string) error {
 	}
 
 	m.persistEnabledLocked(name, true)
+	m.refreshTriggerLocked()
 	m.logger.Infow("skill enabled", "name", name)
 	return nil
 }
@@ -191,6 +210,7 @@ func (m *SkillManager) Disable(name string) error {
 	}
 
 	m.persistEnabledLocked(name, false)
+	m.refreshTriggerLocked()
 	m.logger.Infow("skill disabled", "name", name)
 	return nil
 }
@@ -222,6 +242,7 @@ func (m *SkillManager) Toggle(name string) error {
 		m.persistEnabledLocked(name, true)
 		m.logger.Infow("skill enabled", "name", name)
 	}
+	m.refreshTriggerLocked()
 	return nil
 }
 
@@ -344,7 +365,10 @@ func (m *SkillManager) skillSectionName(name string) string {
 func (m *SkillManager) BuildTriggerPrompt() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.buildTriggerPromptLocked()
+}
 
+func (m *SkillManager) buildTriggerPromptLocked() string {
 	var buf strings.Builder
 	buf.WriteString("## Available Skills\n\n")
 	buf.WriteString("A Skill is a package of specialized instructions for a specific domain, system or data format.\n")
@@ -374,6 +398,17 @@ func (m *SkillManager) BuildTriggerPrompt() string {
 	}
 
 	return buf.String()
+}
+
+const skillTriggerSection = "skill_trigger"
+const skillTriggerOrder = 150
+
+// refreshTriggerLocked 用当前已启用技能清单重写 skill_trigger 段落（必须持有 mu.Lock）。
+func (m *SkillManager) refreshTriggerLocked() {
+	if m.registry == nil {
+		return
+	}
+	m.registry.RegisterSection(skillTriggerSection, skillTriggerOrder, m.buildTriggerPromptLocked(), true)
 }
 
 // BuildTriggerSection 构建触发判断段落的 prompt Section（可直接注册到 Registry）。
