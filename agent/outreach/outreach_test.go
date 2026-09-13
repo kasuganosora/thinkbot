@@ -2,6 +2,7 @@ package outreach
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -311,6 +312,72 @@ func TestExecute_WebCapDoesNotAffectTelegram(t *testing.T) {
 	}
 	if runner.calls != 1 {
 		t.Fatalf("telegram should still send, calls=%d", runner.calls)
+	}
+}
+
+func TestExecute_SoftLLMErrorRetriesThenFailed(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	exec, repo, runner := testHarness(t, now)
+	runner.err = fmt.Errorf("llm down")
+	c := seedDue(t, repo, dao.OutreachKindWatch, now.Add(-time.Minute))
+	for i := 0; i < MaxAttempts; i++ {
+		if _, err := exec.Execute(context.Background(), &cron.Job{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runner.calls != MaxAttempts {
+		t.Fatalf("calls = %d want %d", runner.calls, MaxAttempts)
+	}
+	got, _ := repo.GetCommitment(context.Background(), "bot-1", c.ID)
+	if got.Status != dao.OutreachFailed {
+		t.Fatalf("status = %s want failed", got.Status)
+	}
+	if got.Attempts != MaxAttempts {
+		t.Fatalf("attempts = %d", got.Attempts)
+	}
+	before := runner.calls
+	if _, err := exec.Execute(context.Background(), &cron.Job{}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls != before {
+		t.Fatal("failed commitment must not call LLM again")
+	}
+}
+
+func TestExecute_TwoWatchesSameTick_SecondHitsQuota(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	exec, repo, runner := testHarness(t, now)
+	seedDue(t, repo, dao.OutreachKindWatch, now.Add(-2*time.Minute))
+	c2 := &dao.OutreachCommitment{
+		BotID: "bot-1", Kind: dao.OutreachKindWatch, IdentityKey: "user:1",
+		UserID: "1", Channel: "web-bot-1", ChannelType: "web", SessionID: "sess-1",
+		DueAt: now.Add(-time.Minute), Topic: "另一件事", Status: dao.OutreachPending,
+		CreatedAt: now.Add(-time.Hour),
+	}
+	if err := repo.CreateCommitment(context.Background(), c2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Execute(context.Background(), &cron.Job{}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("second watch must not call LLM, calls=%d", runner.calls)
+	}
+	rows, err := repo.ListRecords(context.Background(), "bot-1", "all", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent, quota int
+	for _, r := range rows {
+		switch r.Status {
+		case StatusSent:
+			sent++
+		case StatusSkippedQuota:
+			quota++
+		}
+	}
+	if sent != 1 || quota != 1 {
+		t.Fatalf("want 1 sent + 1 quota skip, got sent=%d quota=%d", sent, quota)
 	}
 }
 

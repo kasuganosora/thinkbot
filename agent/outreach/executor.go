@@ -118,12 +118,7 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 	}
 
 	if !cfg.Enabled {
-		e.mustWriteRecord(ctx, &dao.OutreachRecord{
-			BotID:   e.botID,
-			Status:  StatusSilent,
-			Reason:  "master switch off",
-			CostSec: time.Since(start).Seconds(),
-		})
+		// 总开关关闭不落 silent 对账，避免每 tick 一条噪声。
 		return &cron.ExecuteResult{Output: "[silent] outreach disabled"}, nil
 	}
 
@@ -142,26 +137,20 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 		return &cron.ExecuteResult{Output: "[silent] nothing due"}, nil
 	}
 
-	sentSoft := map[string]bool{} // identity|platform 本 tick 已发过软条件
+	// 软条件跨承诺去重不靠内存 map：handleOne 里 CheckGate 读已落库的 sent 记录，
+	// 同一 tick 顺序执行时第二条会 hit skipped_quota；跨进程靠日限 + singleinst。
 	var sent, skipped int
 	for i := range due {
 		c := due[i]
-		if !isHard(c.Kind) {
-			k := c.IdentityKey + "|" + c.ChannelType
-			if sentSoft[k] {
-				continue
-			}
-		}
 		st, err := e.handleOne(ctx, cfg, c, now)
 		if err != nil {
 			e.logger.Warnw("outreach: handle commitment failed", "err", err, "id", c.ID)
-			continue
+			if st == "" {
+				st = StatusError
+			}
 		}
 		if st == StatusSent {
 			sent++
-			if !isHard(c.Kind) {
-				sentSoft[c.IdentityKey+"|"+c.ChannelType] = true
-			}
 		} else {
 			skipped++
 		}
@@ -183,7 +172,7 @@ func (e *Executor) handleOne(ctx context.Context, cfg Config, c dao.OutreachComm
 	if already, err := e.repo.HasSentRecord(ctx, c.ID); err != nil {
 		return "", err
 	} else if already {
-		if merr := e.repo.MarkDelivered(ctx, c.ID, "", nowOr(e.nowFn).UTC()); merr != nil {
+		if merr := e.repo.MarkDelivered(ctx, e.botID, c.ID, "", nowOr(e.nowFn).UTC()); merr != nil {
 			e.logger.Warnw("outreach: mark already-sent commitment delivered", "err", merr, "id", c.ID)
 		}
 		return StatusSent, nil
@@ -210,8 +199,7 @@ func (e *Executor) handleOne(ctx context.Context, cfg Config, c dao.OutreachComm
 		rec := e.baseRecord(c, reason, start)
 		rec.Status = StatusError
 		rec.Reason = reason + " (runner not wired)"
-		e.mustWriteRecord(ctx, &rec)
-		return StatusError, fmt.Errorf("outreach: runner is nil")
+		return e.recordFailedAttempt(ctx, c, rec, fmt.Errorf("outreach: runner is nil"))
 	}
 
 	traceID := traceid.New()
@@ -232,16 +220,14 @@ func (e *Executor) handleOne(ctx context.Context, cfg Config, c dao.OutreachComm
 				rec.Status = StatusError
 				rec.TraceID = traceID
 				rec.Reason = reason + " (no fallback sender)"
-				e.mustWriteRecord(ctx, &rec)
-				return StatusError, fmt.Errorf("outreach: no fallback sender")
+				return e.recordFailedAttempt(ctx, c, rec, fmt.Errorf("outreach: no fallback sender"))
 			}
 			if ferr := e.fallback(ctx, c, content); ferr != nil {
 				rec := e.baseRecord(c, reason, start)
 				rec.Status = StatusError
 				rec.TraceID = traceID
 				rec.Reason = reason + " (fallback send failed: " + ferr.Error() + ")"
-				e.mustWriteRecord(ctx, &rec)
-				return StatusError, ferr
+				return e.recordFailedAttempt(ctx, c, rec, ferr)
 			}
 			return e.delivered(ctx, c, content, reason, traceID, start)
 		}
@@ -253,8 +239,7 @@ func (e *Executor) handleOne(ctx context.Context, cfg Config, c dao.OutreachComm
 		} else {
 			rec.Reason = reason + " (empty output, soft skip)"
 		}
-		e.mustWriteRecord(ctx, &rec)
-		return StatusError, err
+		return e.recordFailedAttempt(ctx, c, rec, err)
 	}
 
 	return e.delivered(ctx, c, content, reason, traceID, start)
@@ -280,7 +265,7 @@ func (e *Executor) delivered(ctx context.Context, c dao.OutreachCommitment, cont
 	if err := e.writeRecord(ctx, &rec); err != nil {
 		return StatusSent, err
 	}
-	if err := e.repo.MarkDelivered(ctx, c.ID, rec.ID, nowOr(e.nowFn).UTC()); err != nil {
+	if err := e.repo.MarkDelivered(ctx, e.botID, c.ID, rec.ID, nowOr(e.nowFn).UTC()); err != nil {
 		e.logger.Errorw("outreach: sent but failed to mark delivered; will skip re-send if sent record exists",
 			"err", err, "commitment_id", c.ID, "record_id", rec.ID)
 		return StatusSent, err
@@ -302,6 +287,23 @@ func (e *Executor) baseRecord(c dao.OutreachCommitment, reason string, start tim
 		ChannelType:  c.ChannelType,
 		CostSec:      time.Since(start).Seconds(),
 	}
+}
+
+func (e *Executor) recordFailedAttempt(ctx context.Context, c dao.OutreachCommitment, rec dao.OutreachRecord, cause error) (string, error) {
+	n, err := e.repo.BumpAttempts(ctx, e.botID, c.ID)
+	if err != nil {
+		e.logger.Warnw("outreach: bump attempts failed", "err", err, "id", c.ID)
+	}
+	if n > 0 {
+		rec.Reason = fmt.Sprintf("%s (attempt %d/%d)", rec.Reason, n, MaxAttempts)
+	}
+	e.mustWriteRecord(ctx, &rec)
+	if n >= MaxAttempts {
+		if ferr := e.repo.MarkFailed(ctx, e.botID, c.ID); ferr != nil {
+			e.logger.Warnw("outreach: mark failed", "err", ferr, "id", c.ID)
+		}
+	}
+	return StatusError, cause
 }
 
 func (e *Executor) writeRecord(ctx context.Context, rec *dao.OutreachRecord) error {
