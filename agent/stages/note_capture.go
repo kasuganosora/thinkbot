@@ -129,7 +129,7 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 				}
 				// 心跳自主唤醒的消息不写入 L0 记忆：其 InjectContext 不是用户原文，
 				// 且「心跳唤醒」本身不应成为长期记忆的一部分（避免污染 dreaming 学习）。
-				if out.Message.Source == core.SourceHeartbeat {
+				if out.Message.Source == core.SourceHeartbeat || out.IsOutreach() {
 					return out, nil
 				}
 				// 跨 Process 去重：同一条入站消息（按 message_id）只捕获一次。
@@ -166,9 +166,9 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 					//     想了，却什么都没记住（2026-09-01 生产排查：连续三天记忆零写入）。
 					// 潜水/心跳不置该键（潜水有模型 curated 笔记契约，心跳无用户原文），不受影响。
 					captureSuppressed := false
-				if v, ok := out.Get(core.KVCaptureSuppressedExchange); ok {
-					captureSuppressed, _ = v.(bool)
-				}
+					if v, ok := out.Get(core.KVCaptureSuppressedExchange); ok {
+						captureSuppressed, _ = v.(bool)
+					}
 					if !hasNote && (hasReply || captureSuppressed) {
 						out.AddAction(core.Action{
 							Type:    core.ActionNote,

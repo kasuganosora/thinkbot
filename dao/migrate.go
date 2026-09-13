@@ -28,6 +28,9 @@ func Migrate(database *gorm.DB) error {
 		&BotBrowserCookie{},
 		&JudgeRecord{},
 		&WorkflowUsage{},
+		&OutreachCommitment{},
+		&OutreachRecord{},
+		&OutreachLastSeen{},
 	); err != nil {
 		return err
 	}

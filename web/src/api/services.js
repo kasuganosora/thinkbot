@@ -2053,6 +2053,24 @@ function ensureHeartbeat(botId) {
   }
   return _botHb[botId]
 }
+export const outreachApi = {
+  getConfig(botId) {
+    return request('GET', `/api/bots/${botId}/outreach`)
+  },
+  updateConfig(botId, payload) {
+    return request('PUT', `/api/bots/${botId}/outreach`, payload)
+  },
+  listLogs(botId, status, platform) {
+    return request('GET', `/api/bots/${botId}/outreach/logs`, null, { status, platform })
+  },
+  listCommitments(botId, platform) {
+    return request('GET', `/api/bots/${botId}/outreach/commitments`, null, { platform })
+  },
+  cancelCommitment(botId, cid) {
+    return request('DELETE', `/api/bots/${botId}/outreach/commitments/${cid}`)
+  }
+}
+
 export const botHeartbeatApi = {
   getConfig(botId) {
     if (USE_MOCK) return mockResolve(() => ({ ...ensureHeartbeat(botId).config }))

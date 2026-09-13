@@ -253,7 +253,7 @@ type dagNodeSpec struct {
 	ReviewPrompt string   `json:"reviewPrompt"`
 	MaxRetries   int      `json:"maxRetries"`
 	// MaxIterations Review 迭代上限。
-	MaxIterations int `json:"maxIterations"`
+	MaxIterations int      `json:"maxIterations"`
 	Feedback      []string `json:"feedback"`
 	// ToolProfile 工具档位（readonly / analysis / edit / full）。
 	// 空值合法，表示 full（不过滤）——存量数据与未声明场景都依赖这个默认。

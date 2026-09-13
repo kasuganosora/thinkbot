@@ -27,6 +27,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/agent/outreach"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/stages"
@@ -77,6 +78,7 @@ type BotService struct {
 	toolManagers       map[string]*agenttools.ToolManager // botID → tool manager (for listing)
 	dreamingBundles    map[string]*bot.DreamingBundle     // botID → DreamingBundle
 	heartbeatBundles   map[string]*heartbeat.Bundle       // botID → HeartbeatBundle
+	outreachBundles    map[string]*outreach.Bundle        // botID → OutreachBundle
 	userCronSchedulers map[string]*cron.Scheduler         // botID → 用户级 cron 调度器
 	cancelFuncs        map[string]context.CancelFunc      // botID → bot context cancel
 	closeFuncs         map[string]func()                  // botID → sub-agent managers cleanup
@@ -104,6 +106,10 @@ type BotService struct {
 	// heartbeatStore 心跳配置/日志存储。由 BotService 持有并共享给 API Server，
 	// 保证「运行时执行器写日志」与「HTTP 读写配置」用的是同一把 per-bot 锁。
 	heartbeatStore *heartbeat.Store
+
+	// outreachStore / outreachRepo 对人主动开口的配置与承诺仓储，API 与运行时共享。
+	outreachStore *outreach.ConfigStore
+	outreachRepo  *outreach.Repo
 
 	// memRepos 保存每个已启动 bot 的 SQLite 记忆仓储（含 CompactScope），
 	// 供 /compact 等运维命令按需触发记忆压缩。
@@ -147,6 +153,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		botInstances:       make(map[string]*bot.Bot),
 		dreamingBundles:    make(map[string]*bot.DreamingBundle),
 		heartbeatBundles:   make(map[string]*heartbeat.Bundle),
+		outreachBundles:    make(map[string]*outreach.Bundle),
 		userCronSchedulers: make(map[string]*cron.Scheduler),
 		cancelFuncs:        make(map[string]context.CancelFunc),
 		closeFuncs:         make(map[string]func()),
@@ -164,6 +171,8 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		permSvc:        permSvc,
 		toolManagers:   make(map[string]*agenttools.ToolManager),
 		heartbeatStore: heartbeat.NewStore("data/heartbeat"),
+		outreachStore:  outreach.NewConfigStore("data/outreach"),
+		outreachRepo:   outreach.NewRepo(db),
 		bindStage:      bindStage,
 		bindSvc:        bindSvc,
 	}
@@ -175,6 +184,22 @@ func (s *BotService) HeartbeatStore() *heartbeat.Store {
 		return nil
 	}
 	return s.heartbeatStore
+}
+
+// OutreachStore 返回主动开口配置存储。
+func (s *BotService) OutreachStore() *outreach.ConfigStore {
+	if s == nil {
+		return nil
+	}
+	return s.outreachStore
+}
+
+// OutreachRepo 返回主动开口承诺/对账仓储。
+func (s *BotService) OutreachRepo() *outreach.Repo {
+	if s == nil {
+		return nil
+	}
+	return s.outreachRepo
 }
 
 // --- BotDefinition CRUD ---
@@ -972,6 +997,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Warnw("failed to register memory tools", "err", err)
 	}
 
+	if s.outreachRepo != nil {
+		if err := outreach.RegisterTools(toolMgr, outreach.ToolConfig{
+			Repo:     s.outreachRepo,
+			BotID:    id,
+			Location: builder.GetBotTimezoneLocation(id),
+		}); err != nil {
+			s.logger.Warnw("failed to register remind tool", "err", err)
+		}
+	}
+
 	// 注册工作流工具
 	wfMgr, wfSaMgr := workflow.Setup(workflow.WireConfig{
 		Provider:       bundle.Main,
@@ -1208,6 +1243,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 「观察者模式」——正常思考但只写内部学习笔记、绝不发帖。
 	// 必须在 LLMStage（Order=100）之前运行；engagement 在 40，本 enricher 放 45。
 	lurkEnricher := stages.NewEnricherStage("lurk-detect", func(ctx context.Context, env *core.Envelope) error {
+		if env.IsOutreach() {
+			return nil
+		}
 		platform := ""
 		if env.Message.Metadata != nil {
 			if ct, ok := env.Message.Metadata["channel_type"]; ok {
@@ -1234,6 +1272,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 顺序 46，紧接 lurk-detect(45) / engagement(40) 之后，此时 engagement.proactive 已就绪，
 	// 可正确识别「engagement 升级的伪提及」（Mentioned=true 但非真人 @）。
 	passiveEnricher := stages.NewEnricherStage("passive-speak", func(ctx context.Context, env *core.Envelope) error {
+		if env.IsOutreach() {
+			return nil
+		}
 		platform := ""
 		if env.Message.Metadata != nil {
 			if ct, ok := env.Message.Metadata["channel_type"]; ok {
@@ -1437,6 +1478,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		NoteSaver: s.heartbeatNoteSaver(id),
 	})
 
+	outBundle := outreach.NewBundle(outreach.BundleConfig{
+		BotID:    id,
+		Repo:     s.outreachRepo,
+		CfgStore: s.outreachStore,
+		Location: builder.GetBotTimezoneLocation(id),
+		Logger:   s.logger,
+		AllowPost: func(platform string) bool {
+			if s.permSvc == nil {
+				return true
+			}
+			return s.permSvc.AllowProactivePost(id, platform)
+		},
+		Fallback: s.outreachFallback(id),
+	})
+
 	// 创建 Pipeline：用声明式 Builder 累积各 Stage，取代此前手写字面量 +
 	// 条件 append/prepend 的易漂移写法。每个 Stage 的 Order 即其在链路中的相对位置，
 	// Builder.Build() 与 pipeline.New 都会按 Order 排序，顺序由 Order 唯一决定，
@@ -1489,16 +1545,31 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	pb.Add(95, rhythmStage)
 	pb.Add(100, wrappedLLM)
 	pb.Add(850, outboundHistoryEnricher)
-	if hbBundle != nil && groups[pipeline.GroupHeartbeat] {
-		// 心跳频控预算重置：任何真实外部入站消息（非心跳自身）都说明 bot 不在自激真空，
-		// 立即恢复连续唤醒预算。纯内存操作，置于链首（Order=5），不影响任何既有语义。
-		// lurk-only 下关闭（bot 不自主发帖，无需唤醒预算）。
+	if (hbBundle != nil && groups[pipeline.GroupHeartbeat]) || outBundle != nil {
+		// 心跳频控预算重置 + 主动开口 last-seen。纯内存/一次 upsert，置于链首（Order=5）。
 		hb := hbBundle
+		ob := outBundle
 		pb.Add(5, &core.StageFunc{
 			StageName: "heartbeat-activity",
-			Fn: func(_ context.Context, env *core.Envelope) (*core.Envelope, error) {
-				if env.Message.Source != core.SourceHeartbeat && env.Message.UserID != "" {
+			Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+				if env.Message.Source == core.SourceHeartbeat || env.Message.Source == core.SourceCron || env.IsOutreach() {
+					return env, nil
+				}
+				if env.Message.UserID == "" {
+					return env, nil
+				}
+				if hb != nil && groups[pipeline.GroupHeartbeat] {
 					hb.NotifyUserActivity()
+				}
+				if ob != nil {
+					chType := ""
+					if env.Message.Metadata != nil {
+						if v, ok := env.Message.Metadata["channel_type"].(string); ok {
+							chType = v
+						}
+					}
+					chType = outreach.NormalizeChannelType(chType, env.Message.Source)
+					ob.NotifyInbound(ctx, env.Message.UserID, chType)
 				}
 				return env, nil
 			},
@@ -1989,6 +2060,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		hbBundle.SetRunner(b.Engine())
 		s.logger.Infow("heartbeat wired to engine", "bot_id", id)
 	}
+	if outBundle != nil {
+		outBundle.SetRunner(b.Engine())
+		s.logger.Infow("outreach wired to engine", "bot_id", id)
+	}
 	// 用户级 cron 执行器接入真实编排入口（与 heartbeat 同构，须在 Scheduler 启动前完成）。
 	if userCronExecutor != nil {
 		userCronExecutor.SetRunner(b.Engine())
@@ -2081,6 +2156,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if hbBundle != nil {
 		hbBundle.Start(botCtx)
 	}
+	if outBundle != nil {
+		outBundle.Start(botCtx)
+	}
 	// 启动用户级 cron 调度器（若已创建）：与心跳同构，共享 botCtx，
 	// 消费 data/cron/<id>_cron.json，到点的 Job 经 Executor 注入编排执行（修复 5300）。
 	if userCronScheduler != nil {
@@ -2147,6 +2225,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if hbBundle != nil {
 		s.heartbeatBundles[id] = hbBundle
 	}
+	if outBundle != nil {
+		s.outreachBundles[id] = outBundle
+	}
 	if userCronScheduler != nil {
 		s.userCronSchedulers[id] = userCronScheduler
 	}
@@ -2182,6 +2263,10 @@ func (s *BotService) StopBot(id string) {
 	if hbBundle, ok := s.heartbeatBundles[id]; ok {
 		hbBundle.Stop()
 		delete(s.heartbeatBundles, id)
+	}
+	if ob, ok := s.outreachBundles[id]; ok {
+		ob.Stop()
+		delete(s.outreachBundles, id)
 	}
 	if userCronScheduler, ok := s.userCronSchedulers[id]; ok {
 		userCronScheduler.Stop()

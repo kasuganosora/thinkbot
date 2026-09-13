@@ -46,7 +46,7 @@ const (
 	// EventHitlDeferred / EventHitlResumed：HITL 工具审批被 defer（等待人类确认）
 	// 与续跑恢复（人类决策已注入、重新编排）。对应 harness 的「审批 pending / resolved」。
 	EventHitlDeferred EventKind = "hitl/deferred"
-	EventHitlResumed EventKind = "hitl/resumed"
+	EventHitlResumed  EventKind = "hitl/resumed"
 )
 
 // Event 是轨迹流中的一条记录。

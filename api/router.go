@@ -180,6 +180,12 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/heartbeat/logs", s.handleListHeartbeatLogs)
 				botsAdmin.DELETE("/:id/heartbeat/logs", s.handleClearHeartbeatLogs)
 
+				botsAdmin.GET("/:id/outreach", s.handleGetOutreachConfig)
+				botsAdmin.PUT("/:id/outreach", s.handleUpdateOutreachConfig)
+				botsAdmin.GET("/:id/outreach/logs", s.handleListOutreachLogs)
+				botsAdmin.GET("/:id/outreach/commitments", s.handleListOutreachCommitments)
+				botsAdmin.DELETE("/:id/outreach/commitments/:cid", s.handleCancelOutreachCommitment)
+
 				// 上下文压缩（agent memory compaction）
 				botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)
 				botsAdmin.PUT("/:id/compaction", s.handleUpdateBotCompaction)

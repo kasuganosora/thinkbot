@@ -18,8 +18,8 @@ type MultiStore struct {
 	stores []Store
 
 	// dupMu/dupSeen 是 (scopeKey, content) → 上次写入时间的去重表（见 Append）。
-	dupMu    sync.Mutex
-	dupSeen  map[string]time.Time
+	dupMu   sync.Mutex
+	dupSeen map[string]time.Time
 }
 
 // ============================================================================

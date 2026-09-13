@@ -89,7 +89,7 @@ func TestWebSearchNoEnabledProvider(t *testing.T) {
 		{ID: "br", Type: searchproviders.TypeBrave, Enabled: false, APIKey: "k"},
 	})
 	def := searchToolDef(SearchConfig{Store: store})
-	_, err := def.Tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"query": "golang"})
+	_, err := def.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"query": "golang"})
 	if err == nil || !strings.Contains(err.Error(), "no search provider is enabled") {
 		t.Fatalf("err=%v", err)
 	}
@@ -105,7 +105,7 @@ func TestWebSearchEmptyIsError(t *testing.T) {
 		{ID: "br", Type: searchproviders.TypeBrave, Enabled: true, APIKey: "k", BaseURL: srv.URL, Timeout: 5},
 	})
 	def := searchToolDef(SearchConfig{Store: store})
-	_, err := def.Tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"query": "zzzz-no-results"})
+	_, err := def.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"query": "zzzz-no-results"})
 	if err == nil || !strings.Contains(err.Error(), "no search results") {
 		t.Fatalf("err=%v", err)
 	}
@@ -122,7 +122,7 @@ func TestWebSearchAuthError(t *testing.T) {
 		{ID: "tv", Type: searchproviders.TypeTavily, Enabled: true, APIKey: "bad", BaseURL: srv.URL, Timeout: 5},
 	})
 	def := searchToolDef(SearchConfig{Store: store})
-	_, err := def.Tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"query": "golang"})
+	_, err := def.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"query": "golang"})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("err=%v", err)
 	}

@@ -37,10 +37,7 @@ func TestWebChannel_Send_FallbackPersistsWhenNoSubscriber(t *testing.T) {
 
 	// 兜底落库走异步 goroutine，轮询等待其完成（最多 2s）。
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if countAssistant(t, ch.chatHistory, traceID) == 1 {
-			break
-		}
+	for countAssistant(t, ch.chatHistory, traceID) != 1 {
 		if time.Now().After(deadline) {
 			t.Fatalf("fallback did not persist assistant reply within timeout")
 		}

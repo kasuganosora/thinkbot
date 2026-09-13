@@ -202,14 +202,21 @@ func (c *WebChannel) persistReplyFallback(ctx context.Context, action core.Actio
 	if action.Metadata != nil {
 		if sid, ok := action.Metadata["session_id"].(string); ok && sid != "" {
 			sessionID = sid
+		} else if sid, ok := action.Metadata["chat_session_id"].(string); ok && sid != "" {
+			sessionID = sid
 		}
 	}
 	if sessionID == "" {
 		sessionID = traceID
 	}
 
-	// 续跑无真实请求用户，沿用 continuation 命令的 "system" 归属，与 onWorkflowCompleted 保持对称。
-	const userID = "system"
+	// 默认沿用 continuation 的 "system" 归属；主动开口等合成轮把真实 user_id 写进 metadata。
+	userID := "system"
+	if action.Metadata != nil {
+		if u, ok := action.Metadata["user_id"].(string); ok && strings.TrimSpace(u) != "" {
+			userID = strings.TrimSpace(u)
+		}
+	}
 
 	c.chatHistory.logger.Infow("webchannel: reply persisted as fallback (no live subscriber)",
 		"channel", c.name, "trace_id", traceID, "session_id", sessionID, "len", len(content))

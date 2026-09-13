@@ -21,6 +21,9 @@
 - **用户消息事件**：`UserMessageEvent` — 入站用户消息事件流（dreaming 回灌数据源，id 兼作水位线）
 - **Bot 工具权限**：`BotToolPermission` — bot 维度 tool/platform/chat_id/user_ids 四维权限规则（首条匹配生效）
 - **浏览器 Cookie**：`BotBrowserCookie` — bot 浏览器 Cookie 持久化（(bot_id, domain, name, path) 唯一；`BrowserCookieView` 提供掩码视图）
+- **主动开口承诺**：`OutreachCommitment` — 到期提醒 / 盯梢（pending/delivered/cancelled/expired）
+- **主动开口对账**：`OutreachRecord` — 每次 tick 的发送/跳过/静默记录
+- **主动开口最近互动**：`OutreachLastSeen` — per (bot, identity, platform) 上次真实入站
 - **自动迁移**：`Migrate(*gorm.DB) error` — 启动时自动建表，并幂等补齐存量表缺失列
 
 ## 表结构
@@ -43,6 +46,9 @@
 | `user_message_events` | `UserMessageEvent` | 入站用户消息事件流 |
 | `bot_tool_permissions` | `BotToolPermission` | Bot 工具权限规则 |
 | `bot_browser_cookies` | `BotBrowserCookie` | Bot 浏览器 Cookie |
+| `outreach_commitments` | `OutreachCommitment` | 主动开口承诺 |
+| `outreach_records` | `OutreachRecord` | 主动开口对账 |
+| `outreach_last_seen` | `OutreachLastSeen` | 主动开口最近互动 |
 
 ## 状态常量
 

@@ -30,15 +30,6 @@ func clearCircuits() {
 	circuits = map[string]circuitEntry{}
 }
 
-func clearCircuit(id string) {
-	if id == "" {
-		return
-	}
-	circuitMu.Lock()
-	defer circuitMu.Unlock()
-	delete(circuits, id)
-}
-
 func tripAuthCircuit(id string) {
 	if id == "" {
 		return
