@@ -9,6 +9,8 @@
         <t-tag variant="light" theme="primary">L1: {{ stats.l1Count ?? 0 }}</t-tag>
         <t-tag variant="light">L2(估): {{ stats.l2Estimate ?? 0 }}</t-tag>
         <t-tag variant="light" theme="warning">L3: {{ stats.l3Count ?? 0 }}</t-tag>
+        <input ref="fileInput" type="file" accept=".tar,.gz,.tgz,application/gzip,application/x-tar" class="file-hidden" @change="onImportFile" />
+        <t-button size="small" variant="outline" :loading="importing" @click="pickImport" data-testid="memory-import">导入 Memoh 备份</t-button>
         <t-button size="small" variant="outline" @click="load" data-testid="memory-refresh">刷新</t-button>
       </t-space>
     </div>
@@ -47,6 +49,8 @@ import { formatTime } from '@/utils/format'
 const props = defineProps({ botId: { type: String, required: true } })
 
 const loading = ref(false)
+const importing = ref(false)
+const fileInput = ref(null)
 const entries = ref([])
 const stats = ref({})
 const tier = ref('')
@@ -83,6 +87,28 @@ async function load() {
   }
 }
 
+function pickImport() {
+  fileInput.value?.click()
+}
+
+async function onImportFile(ev) {
+  const file = ev.target.files && ev.target.files[0]
+  ev.target.value = ''
+  if (!file) return
+  importing.value = true
+  try {
+    const res = await memoryApi.importMemoh(props.botId, file)
+    const junk = res.skippedJunk ?? 0
+    const imported = res.imported ?? 0
+    MessagePlugin.success(`导入完成：写入 ${imported} 条，跳过废物 ${junk} 条`)
+    await load()
+  } catch (e) {
+    MessagePlugin.error('导入失败：' + (e.message || '请稍后重试'))
+  } finally {
+    importing.value = false
+  }
+}
+
 function remove(row) {
   const dlg = DialogPlugin.confirm({
     header: '删除记忆',
@@ -108,4 +134,5 @@ onMounted(load)
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
 .hint { color: var(--bp-label-tertiary); font-size: 13px; }
 .guide { margin-bottom: 16px; }
+.file-hidden { display: none; }
 </style>

@@ -410,6 +410,42 @@ func (s *TieredStore) LatestActivity(_ context.Context, scope Scope) time.Time {
 	return latest
 }
 
+// HasID 报告该 tier+scope 桶是否已有指定 ID（含过期条目）。
+func (s *TieredStore) HasID(_ context.Context, tier MemoryTier, scope Scope, id string) bool {
+	if s == nil || id == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, e := range s.buckets[tierScopeKey(tier, scope)] {
+		if e.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// HasIDInTier 报告该层级任意 scope 是否已有指定 ID。
+// 导入幂等按全局主键跳过：tiered_memories 以 ID 为主键，同 ID 换 scope 会覆盖行。
+func (s *TieredStore) HasIDInTier(_ context.Context, tier MemoryTier, id string) bool {
+	if s == nil || id == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for k, bucket := range s.buckets {
+		if tierOf(k) != tier {
+			continue
+		}
+		for _, e := range bucket {
+			if e.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Delete 按 ID 删除指定 tier+scope 下的一条记忆。
 func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, entryID string) error {
 	key := tierScopeKey(tier, scope)
