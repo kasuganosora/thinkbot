@@ -476,6 +476,12 @@ export const memoryApi = {
     if (USE_MOCK) return mockResolve(() => null)
     const q = new URLSearchParams({ id, tier, scope })
     return request('DELETE', `/api/bots/${botId}/memory/entry?${q}`)
+  },
+  importMemoh(botId, file) {
+    if (USE_MOCK) return mockResolve(() => ({ imported: 2, skipped: 0, skippedJunk: 8, profiles: 1, errors: [] }))
+    const fd = new FormData()
+    fd.append('file', file)
+    return uploadRequest('POST', `/api/bots/${botId}/memory/import`, fd)
   }
 }
 

@@ -24,7 +24,7 @@ import (
 //
 // 前端契约（均按 botId 归属）：
 //   botPlatformApi  — /api/bots/:id/platforms[/:pid], /api/bots/platforms/tool-catalog
-//   memoryApi       — GET /api/bots/:id/memory (分层记忆查询), GET /api/bots/:id/memory/stats, DELETE /api/bots/:id/memory/entry
+//   memoryApi       — GET /api/bots/:id/memory, GET .../memory/stats, POST .../memory/import, DELETE .../memory/entry
 //   botAccessApi    — /api/bots/:id/access
 //   botFileApi      — /api/bots/:id/files[/mkdir|upload]
 //   botRhythmApi    — /api/bots/:id/chat-rhythm
