@@ -377,6 +377,12 @@ func BotTimezoneKey(botID string) string {
 	return "bot." + botID + ".timezone"
 }
 
+// BotSkillEnabledKey 返回指定 Bot 某个技能的启用状态键。
+// 格式：bot.<bot_id>.skill.<name>.enabled
+func BotSkillEnabledKey(botID, name string) string {
+	return "bot." + botID + ".skill." + name + ".enabled"
+}
+
 // BotTokenQuotaKey 返回 Bot 级月 Token 额度配置键。
 // 格式：bot.<bot_id>.token_quota
 // 值为 int64（tokens/月），0 = 不限制。

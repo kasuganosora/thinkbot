@@ -47,6 +47,9 @@ type Server struct {
 	bindSvc        *identity.BindService
 	heartbeatStore *heartbeat.Store
 	permSvc        *toolperm.Service
+
+	// bundledSkillsDirOverride 测试用：覆盖内置技能目录（空则 "skills"）。
+	bundledSkillsDirOverride string
 }
 
 // NewServer 创建并配置 Gin Server。

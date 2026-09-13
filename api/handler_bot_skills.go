@@ -7,85 +7,167 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // ============================================================================
-// Bot 级技能管理 Handler — 每个 Bot 独立的 Skill CRUD
+// Bot 级技能管理 Handler
 //
-// Skill 以 SKILL.md 文件存储在 data/skills/{botId}/{skillName}/SKILL.md。
-// Content 即完整的 SKILL.md 文本（含 YAML front matter）。
-// 前端通过 content 字段创建/更新，后端从 front matter 解析 name、description。
+// 运行时加载两处来源（后者同名覆盖前者）：
+//   1. 内置 bundled：仓库 skills/（只读，可启用/禁用）
+//   2. 托管 managed：{data}/skills/{botId}/（CRUD）
 //
-// 路由：
-//   GET    /api/bots/:id/skills          → 列表
-//   GET    /api/bots/:id/skills/:sid     → 详情
-//   POST   /api/bots/:id/skills          → 新增
-//   PUT    /api/bots/:id/skills/:sid     → 更新
-//   DELETE /api/bots/:id/skills/:sid     → 删除
+// 启用状态键：bot.{botId}.skill.{name}.enabled，回退全局 skill.{name}.enabled。
+// Bot 在跑时 CRUD / 开关会热更新该实例的 SkillManager。
 // ============================================================================
 
 // botSkillEntry 是返回给前端的技能实体。
 type botSkillEntry struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Content     string `json:"content"`
-	Source      string `json:"source"`
-	Status      string `json:"status"`
-	Path        string `json:"path"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Content       string `json:"content"`
+	Source        string `json:"source"` // bundled | managed
+	Status        string `json:"status"` // enabled | disabled
+	Enabled       bool   `json:"enabled"`
+	Editable      bool   `json:"editable"`
+	Path          string `json:"path"`
+	HasScripts    bool   `json:"hasScripts"`
+	HasReferences bool   `json:"hasReferences"`
+	HasAssets     bool   `json:"hasAssets"`
+	CreatedAt     string `json:"createdAt"`
+	UpdatedAt     string `json:"updatedAt"`
 }
 
-// botSkillsDir 返回 Bot 的 skills 根目录。
-func botSkillsDir(botID string) string {
-	return filepath.Join("data", "skills", botID)
+func (s *Server) bundledSkillsDir() string {
+	if s != nil && s.bundledSkillsDirOverride != "" {
+		return s.bundledSkillsDirOverride
+	}
+	return "skills"
 }
 
-// handleListBotSkills 列出指定 Bot 的所有 Skill。
+func (s *Server) managedSkillsRoot() string {
+	if s != nil && s.botSvc != nil {
+		ws := s.botSvc.GetWorkspaceBaseDir()
+		parent := filepath.Dir(ws)
+		if parent != "" && parent != "." {
+			return filepath.Join(parent, "skills")
+		}
+	}
+	return filepath.Join("data", "skills")
+}
+
+func (s *Server) botSkillsDir(botID string) string {
+	return filepath.Join(s.managedSkillsRoot(), botID)
+}
+
+// handleListBotSkills 列出指定 Bot 将使用的技能（内置 ∪ 托管，托管同名覆盖）。
 func (s *Server) handleListBotSkills(c *gin.Context) {
 	botID := c.Param("id")
-	dir := botSkillsDir(botID)
+	skills := s.collectBotSkills(botID)
+	OK(c, gin.H{
+		"skills": skills,
+		"roots": gin.H{
+			"bundled": s.bundledSkillsDir(),
+			"managed": s.botSkillsDir(botID),
+		},
+	})
+}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			OK(c, gin.H{"skills": []botSkillEntry{}})
-			return
-		}
-		Fail(c, errs.Wrap(err, "read skills dir"))
-		return
+func (s *Server) collectBotSkills(botID string) []botSkillEntry {
+	byName := map[string]botSkillEntry{}
+	for _, sk := range s.scanSkillDir(s.bundledSkillsDir(), "bundled") {
+		byName[sk.Name] = sk
+	}
+	for _, sk := range s.scanSkillDir(s.botSkillsDir(botID), "managed") {
+		byName[sk.Name] = sk
 	}
 
+	if mgr, ok := s.runningSkillMgr(botID); ok {
+		for name, sk := range byName {
+			if info, found := mgr.GetInfo(name); found {
+				sk.Enabled = info.Enabled
+				sk.Status = skillStatus(info.Enabled)
+				sk.HasScripts = info.HasScripts
+				sk.HasReferences = info.HasReferences
+				sk.HasAssets = info.HasAssets
+				byName[name] = sk
+			}
+		}
+	} else {
+		for name, sk := range byName {
+			sk.Enabled = s.skillEnabledFromStore(botID, name, sk.Enabled)
+			sk.Status = skillStatus(sk.Enabled)
+			byName[name] = sk
+		}
+	}
+
+	out := make([]botSkillEntry, 0, len(byName))
+	for _, sk := range byName {
+		out = append(out, sk)
+	}
+	return out
+}
+
+func skillStatus(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func (s *Server) runningSkillMgr(botID string) (*skill.SkillManager, bool) {
+	if s.botSvc == nil {
+		return nil, false
+	}
+	return s.botSvc.RunningSkillManager(botID)
+}
+
+func (s *Server) skillEnabledFromStore(botID, name string, fallback bool) bool {
+	if s.store == nil {
+		return fallback
+	}
+	if val, ok := s.store.Get(config.BotSkillEnabledKey(botID, name)); ok {
+		return val == "true"
+	}
+	if val, ok := s.store.Get("skill." + name + ".enabled"); ok {
+		return val == "true"
+	}
+	return fallback
+}
+
+func (s *Server) scanSkillDir(root, source string) []botSkillEntry {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
 	var skills []botSkillEntry
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		skillDir := filepath.Join(dir, entry.Name())
-		sk, err := loadBotSkillEntry(skillDir)
+		skillDir := filepath.Join(root, entry.Name())
+		sk, err := loadBotSkillEntry(skillDir, source)
 		if err != nil {
 			continue
 		}
 		skills = append(skills, *sk)
 	}
-
-	OK(c, gin.H{"skills": skills})
+	return skills
 }
 
 // handleGetBotSkill 获取单个 Skill 详情。
 func (s *Server) handleGetBotSkill(c *gin.Context) {
 	botID := c.Param("id")
 	sid := c.Param("sid")
-	dir := botSkillsDir(botID)
-
-	// sid 可能是 skill name 也可能是 id，遍历查找
-	sk, err := findBotSkillByID(dir, sid)
+	sk, err := s.findBotSkill(botID, sid)
 	if err != nil {
 		Fail(c, errs.NotFound("skill not found"))
 		return
@@ -93,7 +175,7 @@ func (s *Server) handleGetBotSkill(c *gin.Context) {
 	OK(c, sk)
 }
 
-// handleCreateBotSkill 创建一个新 Skill。
+// handleCreateBotSkill 创建一个新 Skill（写入托管目录）。
 func (s *Server) handleCreateBotSkill(c *gin.Context) {
 	botID := c.Param("id")
 	var req struct {
@@ -109,32 +191,28 @@ func (s *Server) handleCreateBotSkill(c *gin.Context) {
 	}
 
 	name, description := parseSkillFrontMatter(req.Content)
+	name = sanitizeSkillName(name)
 	if name == "" {
 		name = fmt.Sprintf("skill-%d", time.Now().UnixMilli())
 	}
 
-	dir := botSkillsDir(botID)
+	dir := s.botSkillsDir(botID)
 	skillDir := filepath.Join(dir, name)
-
-	// 确保目录存在
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		Fail(c, errs.Wrap(err, "create skill dir"))
 		return
 	}
 
-	// 写入 SKILL.md
 	skillPath := filepath.Join(skillDir, "SKILL.md")
 	if err := os.WriteFile(skillPath, []byte(req.Content), 0o644); err != nil {
 		Fail(c, errs.Wrap(err, "write SKILL.md"))
 		return
 	}
 
-	// 写入元数据文件（存储 id、createdAt）
 	id := idgen.New("skill")
 	now := time.Now().UTC().Format(time.RFC3339)
 	metaContent := fmt.Sprintf("id=%s\ncreatedAt=%s\nupdatedAt=%s\n", id, now, now)
-	metaPath := filepath.Join(skillDir, ".meta")
-	_ = os.WriteFile(metaPath, []byte(metaContent), 0o644)
+	_ = os.WriteFile(filepath.Join(skillDir, ".meta"), []byte(metaContent), 0o644)
 
 	sk := botSkillEntry{
 		ID:          id,
@@ -142,17 +220,23 @@ func (s *Server) handleCreateBotSkill(c *gin.Context) {
 		Description: description,
 		Content:     req.Content,
 		Source:      "managed",
-		Status:      "active",
-		Path:        fmt.Sprintf("/data/skills/%s/%s/SKILL.md", botID, name),
+		Status:      "enabled",
+		Enabled:     true,
+		Editable:    true,
+		Path:        skillPath,
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}
+
+	if err := s.reloadManagedSkill(botID, skillDir); err != nil {
+		s.warnSkill("reload skill after create failed", botID, name, err)
 	}
 
 	auditLog(c, s.logger, "create_bot_skill", "bot_id", botID, "skill", name)
 	OK(c, sk)
 }
 
-// handleUpdateBotSkill 更新 Skill 内容。
+// handleUpdateBotSkill 更新托管 Skill 内容。内置技能不可改。
 func (s *Server) handleUpdateBotSkill(c *gin.Context) {
 	botID := c.Param("id")
 	sid := c.Param("sid")
@@ -168,20 +252,23 @@ func (s *Server) handleUpdateBotSkill(c *gin.Context) {
 		return
 	}
 
-	dir := botSkillsDir(botID)
-	sk, err := findBotSkillByID(dir, sid)
+	sk, err := s.findBotSkill(botID, sid)
 	if err != nil {
 		Fail(c, errs.NotFound("skill not found"))
 		return
 	}
+	if sk.Source != "managed" {
+		Fail(c, errs.BadRequest("bundled skills are read-only; clone into managed to edit"))
+		return
+	}
 
-	// 解析新内容的 name
 	newName, newDesc := parseSkillFrontMatter(req.Content)
+	newName = sanitizeSkillName(newName)
 	if newName == "" {
 		newName = sk.Name
 	}
 
-	// 如果 name 变了，需要重命名目录
+	dir := s.botSkillsDir(botID)
 	oldDir := filepath.Join(dir, sk.Name)
 	newDir := filepath.Join(dir, newName)
 	if sk.Name != newName {
@@ -189,16 +276,17 @@ func (s *Server) handleUpdateBotSkill(c *gin.Context) {
 			Fail(c, errs.Wrap(err, "rename skill dir"))
 			return
 		}
+		if mgr, ok := s.runningSkillMgr(botID); ok {
+			mgr.Unregister(sk.Name)
+		}
 	}
 
-	// 写入新内容
 	skillPath := filepath.Join(newDir, "SKILL.md")
 	if err := os.WriteFile(skillPath, []byte(req.Content), 0o644); err != nil {
 		Fail(c, errs.Wrap(err, "write SKILL.md"))
 		return
 	}
 
-	// 更新元数据
 	now := time.Now().UTC().Format(time.RFC3339)
 	metaPath := filepath.Join(newDir, ".meta")
 	metaContent := fmt.Sprintf("id=%s\ncreatedAt=%s\nupdatedAt=%s\n", sk.ID, sk.CreatedAt, now)
@@ -207,33 +295,125 @@ func (s *Server) handleUpdateBotSkill(c *gin.Context) {
 	sk.Name = newName
 	sk.Description = newDesc
 	sk.Content = req.Content
-	sk.Path = fmt.Sprintf("/data/skills/%s/%s/SKILL.md", botID, newName)
+	sk.Path = skillPath
 	sk.UpdatedAt = now
+
+	if err := s.reloadManagedSkill(botID, newDir); err != nil {
+		s.warnSkill("reload skill after update failed", botID, newName, err)
+	}
 
 	auditLog(c, s.logger, "update_bot_skill", "bot_id", botID, "skill", newName)
 	OK(c, sk)
 }
 
-// handleRemoveBotSkill 删除 Skill。
+// handleRemoveBotSkill 删除托管 Skill。内置技能不可删。
 func (s *Server) handleRemoveBotSkill(c *gin.Context) {
 	botID := c.Param("id")
 	sid := c.Param("sid")
-	dir := botSkillsDir(botID)
 
-	sk, err := findBotSkillByID(dir, sid)
+	sk, err := s.findBotSkill(botID, sid)
+	if err != nil {
+		Fail(c, errs.NotFound("skill not found"))
+		return
+	}
+	if sk.Source != "managed" {
+		Fail(c, errs.BadRequest("bundled skills cannot be deleted"))
+		return
+	}
+
+	skillDir := filepath.Join(s.botSkillsDir(botID), sk.Name)
+	if err := os.RemoveAll(skillDir); err != nil {
+		Fail(c, errs.Wrap(err, "remove skill dir"))
+		return
+	}
+	if mgr, ok := s.runningSkillMgr(botID); ok {
+		mgr.Unregister(sk.Name)
+	}
+
+	auditLog(c, s.logger, "remove_bot_skill", "bot_id", botID, "skill", sk.Name)
+	OK(c, nil)
+}
+
+// handleEnableBotSkill 启用技能（per-bot）。
+func (s *Server) handleEnableBotSkill(c *gin.Context) {
+	s.setBotSkillEnabled(c, true)
+}
+
+// handleDisableBotSkill 禁用技能（per-bot）。
+func (s *Server) handleDisableBotSkill(c *gin.Context) {
+	s.setBotSkillEnabled(c, false)
+}
+
+func (s *Server) setBotSkillEnabled(c *gin.Context, enabled bool) {
+	botID := c.Param("id")
+	sid := c.Param("sid")
+	sk, err := s.findBotSkill(botID, sid)
 	if err != nil {
 		Fail(c, errs.NotFound("skill not found"))
 		return
 	}
 
-	skillDir := filepath.Join(dir, sk.Name)
-	if err := os.RemoveAll(skillDir); err != nil {
-		Fail(c, errs.Wrap(err, "remove skill dir"))
-		return
+	if mgr, ok := s.runningSkillMgr(botID); ok {
+		var opErr error
+		if enabled {
+			opErr = mgr.Enable(sk.Name)
+		} else {
+			opErr = mgr.Disable(sk.Name)
+		}
+		if opErr != nil {
+			Fail(c, errs.Wrap(opErr, "set skill enabled"))
+			return
+		}
+	} else if s.store != nil {
+		val := "false"
+		if enabled {
+			val = "true"
+		}
+		if err := s.store.Set(c.Request.Context(), config.BotSkillEnabledKey(botID, sk.Name), val); err != nil {
+			Fail(c, errs.Wrap(err, "persist skill enabled"))
+			return
+		}
 	}
 
-	auditLog(c, s.logger, "remove_bot_skill", "bot_id", botID, "skill", sk.Name)
-	OK(c, nil)
+	sk.Enabled = enabled
+	sk.Status = skillStatus(enabled)
+	action := "disable_bot_skill"
+	if enabled {
+		action = "enable_bot_skill"
+	}
+	auditLog(c, s.logger, action, "bot_id", botID, "skill", sk.Name)
+	OK(c, sk)
+}
+
+func (s *Server) warnSkill(msg, botID, name string, err error) {
+	if s != nil && s.logger != nil {
+		s.logger.Warnw(msg, "bot", botID, "skill", name, "err", err)
+	}
+}
+
+func (s *Server) reloadManagedSkill(botID, skillDir string) error {
+	mgr, ok := s.runningSkillMgr(botID)
+	if !ok {
+		return nil
+	}
+	loader := skill.NewLoader(filepath.Dir(skillDir), s.logger)
+	loader.Source = "managed"
+	sk, err := loader.LoadSkill(skillDir)
+	if err != nil {
+		return err
+	}
+	mgr.Register(sk)
+	return nil
+}
+
+func (s *Server) findBotSkill(botID, sid string) (*botSkillEntry, error) {
+	for _, sk := range s.collectBotSkills(botID) {
+		if sk.ID == sid || sk.Name == sid {
+			cp := sk
+			return &cp, nil
+		}
+	}
+	return nil, fmt.Errorf("not found")
 }
 
 // ============================================================================
@@ -242,9 +422,7 @@ func (s *Server) handleRemoveBotSkill(c *gin.Context) {
 
 var reSkillFM = regexp.MustCompile(`(?m)^\s*(name|description)\s*:\s*(.*)$`)
 
-// parseSkillFrontMatter 简单解析 SKILL.md 的 front matter 中 name 和 description。
 func parseSkillFrontMatter(content string) (name, description string) {
-	// 找 front matter 区域
 	if !strings.HasPrefix(content, "---") {
 		return "", ""
 	}
@@ -252,7 +430,7 @@ func parseSkillFrontMatter(content string) (name, description string) {
 	if end < 0 {
 		return "", ""
 	}
-	fm := content[:end+6] // 包含开头和结尾的 ---
+	fm := content[:end+6]
 
 	matches := reSkillFM.FindAllStringSubmatch(fm, -1)
 	for _, m := range matches {
@@ -268,8 +446,25 @@ func parseSkillFrontMatter(content string) (name, description string) {
 	return
 }
 
-// loadBotSkillEntry 从目录加载一个 skill 条目。
-func loadBotSkillEntry(skillDir string) (*botSkillEntry, error) {
+func sanitizeSkillName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_':
+			b.WriteRune(r)
+		case r == ' ' || r == '.':
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	if len(out) > 80 {
+		out = out[:80]
+	}
+	return out
+}
+
+func loadBotSkillEntry(skillDir, source string) (*botSkillEntry, error) {
 	skillPath := filepath.Join(skillDir, "SKILL.md")
 	data, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -282,7 +477,6 @@ func loadBotSkillEntry(skillDir string) (*botSkillEntry, error) {
 		name = filepath.Base(skillDir)
 	}
 
-	// 读取元数据
 	id := ""
 	createdAt := ""
 	updatedAt := ""
@@ -299,10 +493,9 @@ func loadBotSkillEntry(skillDir string) (*botSkillEntry, error) {
 		}
 	}
 	if id == "" {
-		id = idgen.New("skill")
+		id = name
 	}
 
-	// 如果没有元数据文件，用文件修改时间
 	if createdAt == "" || updatedAt == "" {
 		info, _ := os.Stat(skillPath)
 		if info != nil {
@@ -316,38 +509,38 @@ func loadBotSkillEntry(skillDir string) (*botSkillEntry, error) {
 		}
 	}
 
+	loader := skill.NewLoader(filepath.Dir(skillDir), nil)
+	loader.Source = source
+	parsed, _ := loader.LoadSkill(skillDir)
+	enabled := true
+	hasScripts, hasRefs, hasAssets := false, false, false
+	if parsed != nil {
+		enabled = parsed.Enabled
+		hasScripts = len(parsed.Resources.Scripts) > 0
+		hasRefs = len(parsed.Resources.References) > 0
+		hasAssets = len(parsed.Resources.Assets) > 0
+		if parsed.Name != "" {
+			name = parsed.Name
+		}
+		if parsed.Description != "" {
+			description = parsed.Description
+		}
+	}
+
 	return &botSkillEntry{
-		ID:          id,
-		Name:        name,
-		Description: description,
-		Content:     content,
-		Source:      "managed",
-		Status:      "active",
-		Path:        skillPath,
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		ID:            id,
+		Name:          name,
+		Description:   description,
+		Content:       content,
+		Source:        source,
+		Status:        skillStatus(enabled),
+		Enabled:       enabled,
+		Editable:      source == "managed",
+		Path:          skillPath,
+		HasScripts:    hasScripts,
+		HasReferences: hasRefs,
+		HasAssets:     hasAssets,
+		CreatedAt:     createdAt,
+		UpdatedAt:     updatedAt,
 	}, nil
-}
-
-// findBotSkillByID 在目录中根据 ID 或名称查找 skill。
-func findBotSkillByID(dir, sid string) (*botSkillEntry, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		skillDir := filepath.Join(dir, entry.Name())
-		sk, err := loadBotSkillEntry(skillDir)
-		if err != nil {
-			continue
-		}
-		if sk.ID == sid || sk.Name == sid {
-			return sk, nil
-		}
-	}
-	return nil, fmt.Errorf("not found")
 }

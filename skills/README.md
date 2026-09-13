@@ -13,6 +13,6 @@
 
 - `skill/loader.go`：`Loader.LoadAll` / `LoadAndRegister` 扫描本目录的一级子目录，读取各自的 `SKILL.md` 并注册到 `SkillManager`；缺少 `SKILL.md` 或必填字段的子目录会被跳过并记录告警，目录不存在时静默返回 0 条。
 - `skill/discovery.go`：`Discover` 基于同一约定做自动发现，另支持多根目录、递归深度与可选热重载。
-- 调用入口：API 服务端启动时从工作目录下的 `skills/` 加载（`api/module.go` 的 `newSkillManager`）；Bot 侧按配置的技能目录加载（`agent/bot/skill.go` 的 `cfg.SkillsDir`）。
+- 调用入口：每个 Bot 启动时 `BotService` 调用 `SetupSkills`，加载本目录（内置）以及 `data/skills/{botID}/`（托管）。管理台 `/api/skills` 仍扫描本目录作为全局目录。
 
 注意：本目录与仓库中的 `skill/`（Go 源码包）同名但互不相关；两个技能的 `SKILL.md` 均由 git 跟踪，随仓库分发并在启动时加载。

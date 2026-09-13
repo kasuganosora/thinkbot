@@ -47,6 +47,9 @@ type Loader struct {
 	// Dir 是包含各 Skill 子目录的根目录（如 "skills/"）。
 	Dir string
 
+	// Source 写入 Skill.Source（bundled / managed / fs）。空则 "fs"。
+	Source string
+
 	// Logger 日志记录器（可选）。
 	Logger Logger
 }
@@ -114,13 +117,17 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 	content := string(data)
 	meta, body := parseFrontMatter(content)
 
+	src := l.Source
+	if src == "" {
+		src = "fs"
+	}
 	skill := &Skill{
 		Name:          meta.Name,
 		Description:   meta.Description,
 		Compatibility: meta.Compatibility,
 		Content:       strings.TrimSpace(body),
 		Enabled:       meta.Enabled == nil || *meta.Enabled, // nil 或 true → 默认启用
-		Source:        "fs",
+		Source:        src,
 		Dir:           skillDir,
 	}
 

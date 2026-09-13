@@ -1969,8 +1969,8 @@ function ensureSkills(botId) {
       id: genId('skill'), name, description,
       content: `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`,
       source: 'managed', status: 'active',
-      path: `/data/skills/${name}/SKILL.md`,
-      createdAt: nowISO(), updatedAt: nowISO()
+      path: `data/skills/${botId}/${name}/SKILL.md`,
+      enabled: true, editable: true, createdAt: nowISO(), updatedAt: nowISO()
     })
     _botSkills[botId] = [
       mk('bangumi', 'Manage Bangumi (番组计划) anime tracking. Use this skill whenever the user mentions anime tracking, Bangumi, 番组计划...'),
@@ -1998,7 +1998,8 @@ export const botSkillApi = {
       const s = {
         id: genId('skill'), name, description: meta.description || '',
         content: content || SKILL_TEMPLATE, source: 'managed', status: 'active',
-        path: `/data/skills/${name}/SKILL.md`, createdAt: nowISO(), updatedAt: nowISO()
+        path: `data/skills/${botId}/${name}/SKILL.md`, enabled: true, editable: true,
+        createdAt: nowISO(), updatedAt: nowISO()
       }
       ensureSkills(botId).push(s)
       return JSON.parse(JSON.stringify(s))
@@ -2011,7 +2012,7 @@ export const botSkillApi = {
       if (s) {
         const meta = parseSkillMeta(content)
         s.content = content
-        if (meta.name) { s.name = meta.name; s.path = `/data/skills/${meta.name}/SKILL.md` }
+        if (meta.name) { s.name = meta.name; s.path = `data/skills/${botId}/${meta.name}/SKILL.md` }
         if (meta.description) s.description = meta.description
         s.updatedAt = nowISO()
       }
@@ -2027,6 +2028,26 @@ export const botSkillApi = {
       return null
     })
     return request('DELETE', `/api/bots/${botId}/skills/${sid}`)
+  },
+  enable(botId, sid) {
+    if (USE_MOCK) {
+      return mockResolve(() => {
+        const s = ensureSkills(botId).find(x => x.id === sid || x.name === sid)
+        if (s) s.enabled = true
+        return s ? JSON.parse(JSON.stringify(s)) : null
+      })
+    }
+    return request('PUT', `/api/bots/${botId}/skills/${sid}/enable`)
+  },
+  disable(botId, sid) {
+    if (USE_MOCK) {
+      return mockResolve(() => {
+        const s = ensureSkills(botId).find(x => x.id === sid || x.name === sid)
+        if (s) s.enabled = false
+        return s ? JSON.parse(JSON.stringify(s)) : null
+      })
+    }
+    return request('PUT', `/api/bots/${botId}/skills/${sid}/disable`)
   },
   template() { return SKILL_TEMPLATE }
 }
