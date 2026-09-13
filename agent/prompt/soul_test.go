@@ -41,6 +41,29 @@ func TestSoulLoader_AutoCreateWithSubDir(t *testing.T) {
 	}
 }
 
+func TestSoulLoader_StatMissingAndPresent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SOUL.md")
+	reg := NewRegistry()
+	loader := NewSoulLoader(SoulLoaderConfig{Path: path}, reg)
+
+	st := loader.Stat()
+	if st.Err != nil {
+		t.Fatalf("stat missing: %v", st.Err)
+	}
+	if st.Exists {
+		t.Fatal("missing file should not exist")
+	}
+
+	if err := os.WriteFile(path, []byte("# hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st = loader.Stat()
+	if st.Err != nil || !st.Exists {
+		t.Fatalf("stat present: exists=%v err=%v", st.Exists, st.Err)
+	}
+}
+
 func TestSoulLoader_LoadBasic(t *testing.T) {
 	dir := t.TempDir()
 	path := writeSoul(t, dir, "You are ThinkBot, a helpful assistant.")

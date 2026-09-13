@@ -120,7 +120,7 @@ defer soul.Stop()
 （`ReadRaw` 不截断），与 `Load()` 走同一 SoulStore 后端。供 `agent/bot` 的 soul 工具
 （bot 自改人格）使用；写入后调用方手动 `Load()` 或等待 watcher 在 `ReloadInterval` 内自动重载。
 
-其他方法：`Path()`、`Content()`、`Loaded()`、`Variables()`、`ModTime()`、`ScanMode()`。
+其他方法：`Path()`、`Stat()`、`Content()`、`Loaded()`、`Variables()`、`ModTime()`、`ScanMode()`。
 
 ## 安全扫描
 

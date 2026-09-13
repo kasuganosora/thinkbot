@@ -270,6 +270,11 @@ func (l *SoulLoader) Path() string {
 	return l.config.Path
 }
 
+// Stat 探测 SOUL.md 是否存在（与 Load 同一 SoulStore 后端）。
+func (l *SoulLoader) Stat() SoulStat {
+	return l.config.Store.StatSoul(context.Background(), l.config.Path)
+}
+
 // ReadRaw 读取 SOUL.md 原始内容（含 front matter，未截断），供 soul 工具编辑使用。
 // 与 Load() 走同一 SoulStore 后端（local 落宿主文件，docker 落容器 named volume 真实文件）。
 func (l *SoulLoader) ReadRaw(ctx context.Context) ([]byte, error) {

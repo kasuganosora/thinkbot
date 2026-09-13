@@ -220,6 +220,51 @@ func (s *BotService) RunningBotWorkspaceMgr(botID string) (*sandbox.BotWorkspace
 	return mgr, true
 }
 
+// RunningSoulLoader 返回运行中 bot 的 SoulLoader（未启动或未接线时 ok=false）。
+func (s *BotService) RunningSoulLoader(botID string) (*prompt.SoulLoader, bool) {
+	s.mu.RLock()
+	b, ok := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return nil, false
+	}
+	loader := b.SoulLoader()
+	if loader == nil {
+		return nil, false
+	}
+	return loader, true
+}
+
+// openSoulLoader 返回该 bot 的 SoulLoader。
+// running=true 表示复用了运行中实例，写入后必须 Load() 才能热生效。
+// 未启动时按与 bot.go 相同的规则构造：docker 走 workspace volume，local 走宿主路径。
+func (s *BotService) openSoulLoader(botID string) (*prompt.SoulLoader, bool, error) {
+	if botID == "" {
+		return nil, false, errs.BadRequest("bot id is required")
+	}
+	if loader, ok := s.RunningSoulLoader(botID); ok {
+		return loader, true, nil
+	}
+
+	mgr, err := s.WorkspaceManagerForBot(botID)
+	if err != nil {
+		return nil, false, err
+	}
+	cfg := prompt.DefaultSoulLoaderConfig()
+	cfg.BotID = botID
+	if mgr.Backend() == "docker" {
+		ws, err := mgr.GetOrCreate(botID)
+		if err != nil {
+			return nil, false, errs.Wrap(err, "bot_service: soul workspace")
+		}
+		cfg.Store = bot.NewWorkspaceSoulStore(ws, "SOUL.md")
+		cfg.Path = "SOUL.md"
+	} else {
+		cfg.Path = filepath.Join(s.GetWorkspaceBaseDir(), botID, "SOUL.md")
+	}
+	return prompt.NewSoulLoader(cfg, prompt.NewRegistry()), false, nil
+}
+
 // ResolveWorkspace 返回指定 bot 的工作空间兼容层入口（docker/local 都返回）。
 //
 // 这是终端执行、agent shell/list_files 工具统一的执行出口：调用方只面向

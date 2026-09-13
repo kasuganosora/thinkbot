@@ -45,7 +45,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { dreamingApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
@@ -66,11 +66,11 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+watch(() => props.botId, load, { immediate: true })
 
 async function save() {
   await dreamingApi.updateConfig(props.botId, { enabled: config.value.enabled, schedule: config.value.schedule })
-  MessagePlugin.success('梦境配置已保存')
+  MessagePlugin.success('梦境配置已保存，需重启 Bot 才生效')
   status.value = await dreamingApi.status(props.botId)
 }
 

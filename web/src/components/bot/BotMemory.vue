@@ -16,7 +16,10 @@
     </div>
 
     <t-alert v-if="dreamingOff" theme="info" class="guide">
-      该 Bot 尚未启用「梦境巩固」，分层记忆存储不存在。启用后这里会展示并支持管理其分层记忆。
+      <div class="guide-row">
+        <span>该 Bot 尚未启用「梦境巩固」，分层记忆存储不存在。启用后这里会展示并支持管理其分层记忆。</span>
+        <t-button size="small" variant="outline" data-testid="memory-open-dreaming" @click="$emit('open-dreaming')">去启用</t-button>
+      </div>
     </t-alert>
 
     <t-table
@@ -47,6 +50,7 @@ import { memoryApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
 
 const props = defineProps({ botId: { type: String, required: true } })
+defineEmits(['open-dreaming'])
 
 const loading = ref(false)
 const importing = ref(false)
@@ -134,5 +138,6 @@ onMounted(load)
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
 .hint { color: var(--bp-label-tertiary); font-size: 13px; }
 .guide { margin-bottom: 16px; }
+.guide-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .file-hidden { display: none; }
 </style>
