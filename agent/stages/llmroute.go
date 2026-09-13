@@ -585,13 +585,19 @@ type LLMStage struct {
 	// 持久化摘要状态（previousSummary 增量更新），故以 sid 为 key 惰性创建；
 	// sync.Map 免锁，生命周期与 bot 进程同寿（并发会话数有界，无泄漏风险）。
 	compactors sync.Map
+
+	// 运行时配置源：非 nil 时每次编排现取，使系统配置页修改无需重启 Bot。
+	compactionSrc  func() *llm.CompactionConfig
+	toolOutputSrc  func() llm.ToolOutputConfig
+	hardTimeoutSrc func() time.Duration
 }
 
 // getCompactor 返回指定会话的 *llm.Compactor（惰性创建）。
 // 返回 (compactor, true)；当 s.config.Compaction 为 nil 时返回 (nil, false)。
 // 按 sid 隔离使压缩摘要状态在同一会话内跨轮持久、且不与并发会话串扰。
 func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
-	if s.config.Compaction == nil {
+	cfg := s.liveCompaction()
+	if cfg == nil {
 		return nil, false
 	}
 	if sid == "" {
@@ -600,7 +606,16 @@ func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
 	if v, ok := s.compactors.Load(sid); ok {
 		return v.(*llm.Compactor), true
 	}
-	c := llm.NewCompactor(*s.config.Compaction).SetLogger(s.logger)
+	c := llm.NewCompactor(*cfg).SetLogger(s.logger)
+	if s.compactionSrc != nil {
+		c.SetConfigSource(func() llm.CompactionConfig {
+			p := s.liveCompaction()
+			if p == nil {
+				return llm.DefaultCompactionConfig()
+			}
+			return *p
+		})
+	}
 	actual, _ := s.compactors.LoadOrStore(sid, c)
 	return actual.(*llm.Compactor), true
 }
@@ -634,6 +649,38 @@ func (s *LLMStage) SetToolOutputSink(sink llm.ToolOutputOffloadSink) { s.config.
 
 // SetToolOutputConfig 注入工具输出截断阈值（行/字节）。同上，避免改动 NewLLMStage 签名。
 func (s *LLMStage) SetToolOutputConfig(cfg llm.ToolOutputConfig) { s.config.ToolOutput = cfg }
+
+// SetCompactionSource / SetToolOutputSource / SetHardTimeoutSource 注入热加载配置源。
+func (s *LLMStage) SetCompactionSource(fn func() *llm.CompactionConfig) {
+	s.compactionSrc = fn
+}
+func (s *LLMStage) SetToolOutputSource(fn func() llm.ToolOutputConfig) {
+	s.toolOutputSrc = fn
+}
+func (s *LLMStage) SetHardTimeoutSource(fn func() time.Duration) {
+	s.hardTimeoutSrc = fn
+}
+
+func (s *LLMStage) liveCompaction() *llm.CompactionConfig {
+	if s.compactionSrc != nil {
+		return s.compactionSrc()
+	}
+	return s.config.Compaction
+}
+
+func (s *LLMStage) liveToolOutput() llm.ToolOutputConfig {
+	if s.toolOutputSrc != nil {
+		return s.toolOutputSrc()
+	}
+	return s.config.ToolOutput
+}
+
+func (s *LLMStage) liveHardTimeout() time.Duration {
+	if s.hardTimeoutSrc != nil {
+		return s.hardTimeoutSrc()
+	}
+	return s.config.HardTimeout
+}
 
 // SetDeferredApprovalStore 注入 HITL 续跑锚点存储（nil 表示不持久化，仅记日志）。
 func (s *LLMStage) SetDeferredApprovalStore(store DeferredApprovalStore) {
@@ -842,7 +889,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		cfg.BotID = env.Message.BotID
 	}
 	// 截断阈值：从 LLMConfig.ToolOutput 透传（零值字段在 runTool 内回退默认）。
-	cfg.ToolOutput = s.config.ToolOutput
+	cfg.ToolOutput = s.liveToolOutput()
 
 	// 防偷懒门禁：环境类问题确定性强制"先调工具再作答"。
 	// VerificationGateMiddleware 已在 LLMStage 之前对用户问题做确定性分类，
@@ -872,7 +919,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		cfg.OnToolResults = llm.NewOnToolResultsCallback(rc)
 		prepareStep = llm.NewReducePrepareStepCallback(rc)
 	}
-	if s.config.Compaction != nil {
+	if s.liveCompaction() != nil {
 		if compactor, ok := s.getCompactor(session.SessionIDFromEnvelope(env)); ok {
 			compactHook := llm.CompactionPrepareStepWithProvider(compactor, s.provider)(ctx)
 			base := prepareStep
@@ -906,9 +953,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	//（Misskey）的 ctx 无客户端可取消，若编排内某工具/LLM 流假活不返回，
 	// 会导致单条消息永久挂起 + goroutine/资源泄漏。此处用墙钟 deadline 收口。
 	workCtx, workCancel := ctx, func() {}
-	if s.config.HardTimeout > 0 {
+	hardTimeout := s.liveHardTimeout()
+	if hardTimeout > 0 {
 		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-			workCtx, workCancel = context.WithTimeout(ctx, s.config.HardTimeout)
+			workCtx, workCancel = context.WithTimeout(ctx, hardTimeout)
 		}
 	}
 	defer workCancel()
@@ -937,7 +985,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				// 避免后台渠道消息无限挂起。明确归因，区别于普通 provider 错误。
 				logger.Warnw("llm stage: stream orchestrate hard-timeout (wall-clock cap exceeded)",
 					"message_id", env.Message.ID,
-					"hard_timeout", s.config.HardTimeout.String(),
+					"hard_timeout", hardTimeout.String(),
 					"err", err)
 				return env, &core.PipelineError{
 					Stage:   s.name,
@@ -973,7 +1021,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				// 墙钟硬上限触发（HardTimeout）：编排总时长超限被强制终止。
 				logger.Warnw("llm stage: orchestrate hard-timeout (wall-clock cap exceeded)",
 					"message_id", env.Message.ID,
-					"hard_timeout", s.config.HardTimeout.String(),
+					"hard_timeout", hardTimeout.String(),
 					"err", err)
 				return env, &core.PipelineError{
 					Stage:   s.name,

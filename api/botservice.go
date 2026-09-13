@@ -1041,6 +1041,26 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		MaxMemoryTokens:   mw.MaxMemoryTokens,
 		CompressThreshold: mw.CompressThreshold,
 	})
+	mainCtxLen, mainMaxTok := bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens
+	memWindow.SetConfigSource(func() memory.WindowConfig {
+		live := config.NewBuilder(s.store, s.logger).GetMemoryWindowConfig()
+		ct := live.MaxContextTokens
+		if mainCtxLen > 0 {
+			ct = mainCtxLen
+		}
+		or := live.OutputReserve
+		if mainMaxTok > 0 {
+			or = mainMaxTok
+		}
+		return memory.WindowConfig{
+			MaxContextTokens:  ct,
+			ReservedTokens:    live.ReservedTokens,
+			OutputReserve:     or,
+			MemoryBudgetRatio: live.BudgetRatio,
+			MaxMemoryTokens:   live.MaxMemoryTokens,
+			CompressThreshold: live.CompressThreshold,
+		}
+	})
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
@@ -1104,8 +1124,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		subagent.WithFrequencyPenalty(freqPen),
 		subagent.WithPresencePenalty(presPen),
 		// 子 Agent 上下文压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
-		subagent.WithCompactor(llm.NewCompactor(
-			*compactionConfigFromConfig(builder.GetCompactionConfig()))),
+		subagent.WithCompactor(func() *llm.Compactor {
+			c := llm.NewCompactor(*compactionConfigFromConfig(builder.GetCompactionConfig()))
+			c.SetConfigSource(func() llm.CompactionConfig {
+				return *compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig())
+			})
+			return c
+		}()),
 	}
 	if bundle.MainDef.TopP != nil {
 		saOpts = append(saOpts, subagent.WithTopP(*bundle.MainDef.TopP))
@@ -1189,6 +1214,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.tp,
 		s.logger,
 	)
+	llmStage.SetCompactionSource(func() *llm.CompactionConfig {
+		return compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig())
+	})
+	llmStage.SetHardTimeoutSource(func() time.Duration {
+		return effectiveLLMHardTimeout(s.store)
+	})
 
 	// HITL 续跑锚点存储：默认接入主库（自动迁移 deferred_approvals 表）。
 	// 为 nil 时不持久化（仅记日志），不影响默认路径（默认无 ApprovalHandler）。
@@ -1284,6 +1315,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			engagement.BuildOutreachBreakerConfig(engCfg),
 			s.logger,
 		)
+		outreachBreaker.SetConfigSource(func() engagement.OutreachBreakerConfig {
+			return engagement.BuildOutreachBreakerConfig(config.NewBuilder(s.store, s.logger).GetEngagementConfig())
+		})
 		engagementStage = engagementStage.WithOutreachBreaker(outreachBreaker)
 		if engCfg.BurstIntervalSeconds > 0 {
 			burstBuf = engagement.NewBurstBuffer(
@@ -2160,6 +2194,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 主上下文仅留预览+指针+子 agent 委托提示，把深挖代码的代价隔离到独立子 agent 上下文。
 	if wm := b.WorkspaceMgr(); wm != nil {
 		toolOutCfg := builder.GetToolOutputConfig()
+		llmStage.SetToolOutputSource(func() llm.ToolOutputConfig {
+			t := config.NewBuilder(s.store, s.logger).GetToolOutputConfig()
+			return llm.ToolOutputConfig{MaxLines: t.MaxLines, MaxBytes: t.MaxBytes}
+		})
 		// 阈值透传到 LLMConfig.ToolOutput（runTool 内零值回退默认；这里传 0 即「用默认」）。
 		llmStage.SetToolOutputConfig(llm.ToolOutputConfig{
 			MaxLines: toolOutCfg.MaxLines,
