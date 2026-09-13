@@ -22,6 +22,7 @@ type OutreachCommitment struct {
 	Topic             string     `gorm:"size:256;not null" json:"topic"`
 	Context           string     `gorm:"type:text" json:"context"`
 	Status            string     `gorm:"size:16;not null;index:idx_outreach_due,priority:2" json:"status"`
+	Attempts          int        `gorm:"not null;default:0" json:"attempts"`
 	CreatedAt         time.Time  `gorm:"not null" json:"createdAt"`
 	DeliveredAt       *time.Time `json:"deliveredAt,omitempty"`
 	DeliveredRecordID string     `gorm:"size:64;default:''" json:"deliveredRecordId"`
@@ -63,6 +64,7 @@ const (
 	OutreachDelivered = "delivered"
 	OutreachCancelled = "cancelled"
 	OutreachExpired   = "expired"
+	OutreachFailed    = "failed"
 )
 
 // 承诺种类。

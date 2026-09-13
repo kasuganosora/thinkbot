@@ -130,10 +130,33 @@ func (r *Repo) HasSentRecord(ctx context.Context, commitmentID string) (bool, er
 	return n > 0, err
 }
 
-// MarkDelivered 把承诺标为已投递。
-func (r *Repo) MarkDelivered(ctx context.Context, id, recordID string, at time.Time) error {
+// BumpAttempts 把 pending 承诺的失败次数 +1，返回更新后的次数。
+func (r *Repo) BumpAttempts(ctx context.Context, botID, id string) (int, error) {
+	res := r.db.WithContext(ctx).Model(&dao.OutreachCommitment{}).
+		Where("id = ? AND bot_id = ? AND status = ?", id, botID, dao.OutreachPending).
+		UpdateColumn("attempts", gorm.Expr("attempts + 1"))
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	var c dao.OutreachCommitment
+	if err := r.db.WithContext(ctx).Select("attempts").
+		Where("id = ? AND bot_id = ?", id, botID).First(&c).Error; err != nil {
+		return 0, err
+	}
+	return c.Attempts, nil
+}
+
+// MarkFailed 把 pending 承诺标为 failed，不再重试。
+func (r *Repo) MarkFailed(ctx context.Context, botID, id string) error {
 	return r.db.WithContext(ctx).Model(&dao.OutreachCommitment{}).
-		Where("id = ?", id).
+		Where("id = ? AND bot_id = ? AND status = ?", id, botID, dao.OutreachPending).
+		Update("status", dao.OutreachFailed).Error
+}
+
+// MarkDelivered 把承诺标为已投递。
+func (r *Repo) MarkDelivered(ctx context.Context, botID, id, recordID string, at time.Time) error {
+	return r.db.WithContext(ctx).Model(&dao.OutreachCommitment{}).
+		Where("id = ? AND bot_id = ?", id, botID).
 		Updates(map[string]any{
 			"status":              dao.OutreachDelivered,
 			"delivered_at":        at,
