@@ -2,7 +2,7 @@
   <aside class="bot-sidebar" data-testid="bot-sidebar" aria-label="Bot 列表侧边栏">
     <div class="sidebar-top">
       <div class="logo-row">
-        <span class="logo-icon">🤖</span>
+        <img class="logo-icon" src="/icon-app.svg" width="28" height="28" alt="thinkbot" />
         <span class="logo-text">Bot 平台</span>
       </div>
     </div>
@@ -152,7 +152,10 @@ const userMenu = computed(() => {
   gap: 8px;
 }
 .logo-icon {
-  font-size: 22px;
+  width: 28px;
+  height: 28px;
+  display: block;
+  flex-shrink: 0;
 }
 .logo-text {
   font-size: 15px;
