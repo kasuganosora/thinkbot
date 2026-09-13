@@ -22,6 +22,7 @@ thinkbot 的 Web 前端，承担两块职责：
 ```
 web/
 ├── index.html              # SPA 入口
+├── public/                 # 品牌资源（favicon、app icon、og-image；构建时拷到 static/）
 ├── vite.config.js          # Vite 配置（输出目录、dev 端口与代理）
 ├── package.json
 ├── package-lock.json

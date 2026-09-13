@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/public/icon-app.svg" alt="thinkbot" width="128" height="128" />
+</p>
+
 # thinkbot
 
 基于 Go 的多渠道 AI 聊天机器人框架，支持多 LLM 供应商、多渠道接入、分层记忆系统、工具调用和沙箱工作空间。

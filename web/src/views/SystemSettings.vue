@@ -115,6 +115,13 @@
             </div>
           </div>
           <div class="panel-card">
+            <div class="about-brand">
+              <img src="/icon-app.svg" width="48" height="48" alt="thinkbot" />
+              <div>
+                <div class="about-name">thinkbot</div>
+                <p class="about-tag">智能对话 · 多 Bot 管理 · 一站式工作台</p>
+              </div>
+            </div>
             <div class="about-row"><span class="about-k">Git Commit</span><span class="about-v" data-testid="system-about-commit">{{ APP_COMMIT }}</span></div>
           </div>
         </div>
@@ -328,6 +335,30 @@ function save() {
   border: none; box-shadow: var(--bp-shadow-sm);
   border-radius: 12px;
   padding: 20px 24px;
+}
+.about-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px;
+  margin-bottom: 4px;
+  border-bottom: var(--bp-hairline);
+}
+.about-brand img {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+}
+.about-name {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: var(--bp-tracking-title);
+  color: var(--bp-label);
+}
+.about-tag {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--bp-label-tertiary);
 }
 .about-row {
   display: flex;

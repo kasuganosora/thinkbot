@@ -3,7 +3,7 @@
     <div class="login-bg"></div>
     <div class="login-card">
       <div class="brand">
-        <div class="brand-logo">🤖</div>
+        <img class="brand-logo" src="/icon-app.svg" width="64" height="64" alt="thinkbot" />
         <h1 class="brand-title">Bot 平台</h1>
         <p class="brand-sub">智能对话 · 多 Bot 管理 · 一站式工作台</p>
       </div>
@@ -138,8 +138,10 @@ function onSubmit({ validateResult }) {
   margin-bottom: 28px;
 }
 .brand-logo {
-  font-size: 44px;
-  line-height: 1;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+  display: block;
 }
 .brand-title {
   margin-top: 14px;
