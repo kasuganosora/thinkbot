@@ -2,12 +2,13 @@
   <div>
     <div class="toolbar">
       <t-space>
-        <span class="hint">该 Bot 的分层记忆（L0 工作 / L1 长期 / L2 场景 / L3 画像），实时存于数据库。</span>
+        <span class="hint">该 Bot 的分层记忆（L0 工作 / L1 长期 / L2 场景 / L3 画像）。L3 是梦境蒸馏的用户/Bot 画像，可按条删除。</span>
         <t-select v-model="tier" :options="tierOptions" style="width: 140px" @change="load" data-testid="memory-tier" />
       </t-space>
       <t-space>
         <t-tag variant="light" theme="primary">L1: {{ stats.l1Count ?? 0 }}</t-tag>
         <t-tag variant="light">L2(估): {{ stats.l2Estimate ?? 0 }}</t-tag>
+        <t-tag variant="light" theme="warning">L3: {{ stats.l3Count ?? 0 }}</t-tag>
         <t-button size="small" variant="outline" @click="load" data-testid="memory-refresh">刷新</t-button>
       </t-space>
     </div>

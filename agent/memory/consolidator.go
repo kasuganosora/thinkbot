@@ -825,7 +825,7 @@ func (m *TieredManager) ExtractProfile(ctx context.Context, scope Scope) (int, e
 		return 0, nil
 	}
 
-	existing, err := m.store.Retrieve(ctx, Tier3Profile, []Scope{scope}, 20)
+	existing, err := m.store.Retrieve(ctx, Tier3Profile, []Scope{scope}, 1000)
 	if err != nil {
 		m.logger.Warnw("extract profile: failed to get existing L3", "err", err)
 		existing = nil
@@ -836,7 +836,25 @@ func (m *TieredManager) ExtractProfile(ctx context.Context, scope Scope) (int, e
 		return 0, errs.Wrap(err, "extract profile: profiler failed")
 	}
 
+	kept := make([]ProfileItem, 0, len(items))
 	for _, item := range items {
+		if item.Confidence < MinProfileWriteConfidence {
+			continue
+		}
+		if strings.TrimSpace(item.Content) == "" {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == 0 {
+		return 0, nil
+	}
+
+	// 先写新再删旧：写入全失败时保留上一份画像，避免先清空再失败导致 L3 空洞。
+	oldIDs := profilerProfileIDs(existing)
+
+	written := 0
+	for _, item := range kept {
 		entry := Entry{
 			Scope:      scope,
 			Content:    item.Content,
@@ -848,13 +866,32 @@ func (m *TieredManager) ExtractProfile(ctx context.Context, scope Scope) (int, e
 			m.logger.Warnw("extract profile: failed to write L3 entry", "err", err)
 			continue
 		}
+		written++
+	}
+	if written == 0 {
+		return 0, nil
+	}
+	for _, id := range oldIDs {
+		if err := m.store.Delete(ctx, Tier3Profile, scope, id); err != nil {
+			m.logger.Warnw("extract profile: delete stale L3 failed", "id", id, "err", err)
+		}
 	}
 
 	m.logger.Infow("profile extraction complete",
 		"scope", scope.Key(),
-		"profile_items", len(items))
+		"profile_items", written)
 
-	return len(items), nil
+	return written, nil
+}
+
+func profilerProfileIDs(entries []TieredEntry) []string {
+	var ids []string
+	for _, e := range entries {
+		if e.Source == "profiler" && e.ID != "" {
+			ids = append(ids, e.ID)
+		}
+	}
+	return ids
 }
 
 // RunGC 执行 GC（清理过期 L0 条目）。

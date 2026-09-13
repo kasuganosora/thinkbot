@@ -7,7 +7,7 @@
 - **分层存储**：L0 工作记忆（近期对话窗口）→ L1 长期记忆（事实/偏好）→ L2 场景记忆（事件快照）→ L3 画像（用户性格特征 + Bot 自我认知）。默认容量 L0 200 / L1 500 / L2 50 / L3 20 条，L0 TTL 14 天（`DefaultTierConfigs`）。L2 为可选扩展点：仓库未提供 Aggregator 实现，生产中恒为空，实际管线为 L0→L1→L3
 - **自动巩固**：后台定期将 L0 记忆通过 LLM 巩固为 L1（去重/合并/更新）
 - **快照刷新**：可配置刷新策略（实时/冻结/定期），默认实时模式让 bot 始终看到最新记忆
-- **上下文展开**：从 L1/L2 检索相关记忆注入 LLM 上下文
+- **上下文展开**：召回顺序 L3 画像 → L1 长期 → memory_entries 原始笔记，注入 LLM 上下文
 - **上下文隔离**：系统标注包裹记忆上下文，防止记忆内容被误认为用户输入
 - **笔记过滤**：自动识别值得记住的信息（Think Filter）
 - **工具输出过滤**：记忆写入前剥离工具调用输出（搜索结果/文件内容/API JSON 等），避免冗长低价值内容挤占记忆预算（见 Strip 系列一节）
@@ -19,7 +19,8 @@
 - **批量原子操作**：单次 `batch` 调用执行 add+replace+remove，按最终字符预算验证
 - **跨平台记忆镜像**：`ToolConfig.BotID` 非空时，channel 作用域记忆在 add/replace/remove 时自动同步镜像到 BotScope（镜像 ID 带 `xch:` 前缀，正文带 `[<channel>]` 来源标注），使任意频道会话可召回其他平台的活动
 - **历史对话回灌**：`BackfillFromChatHistory` 从 `user_message_events` 事件流（append-only，权威数据源）一次性 bootstrap 补灌 L0，水位线 `bot.<id>.memory.backfill.event_watermark` 独立持久化，清空记忆表后重启也不会回潮
-- **Bot 自我画像**：`BotProfileProfiler` 从 BotScope 的 L1+L2 蒸馏 Bot 量化人格（energy_level / patience / preferred_topics / verbosity / personality）写入 L3，由 dreaming 结束时触发
+- **用户画像**：`LLMProfiler` 由 `NewDreamingBundle` 注入 `TieredManager` + `DreamManager.SetUserProfiler`。每次梦境（含无 Light 候选的早退）对活跃 `user:*` scope 蒸馏 L3；`Confidence < 0.4` 或空内容丢弃，整批替换 `source=profiler` 的旧 L3（其它来源保留）。单次最多 8 个 user scope
+- **Bot 自我画像**：`BotProfileProfiler` 从 BotScope 的 L1+L2 蒸馏 Bot 量化人格（energy_level / patience / preferred_topics / verbosity / personality）写入 L3，由 dreaming 结束时触发。`Confidence < 0.4` 不写 L3、不回调 `SetOnBotProfileUpdated`，以免覆盖 SOUL.md 种子（SOUL 热重载仍走 `ParseSoulProfile`，不受此门控）
 - **梦境巩固**：三相位后台记忆整理管线（Light → REM → Deep），证据驱动评分门控，从短期信号提取长期知识
 - **画像语义验证**：提取的用户画像通过 embedding cosine 相似度（或 Jaccard 降级）验证与源记忆的一致性
 - **可观测性**：后台任务 panic 恢复 + 日志记录，`traceid` 贯穿请求级到后台任务级
@@ -110,11 +111,10 @@
 
 ### Profiler 画像提取
 
-Dreaming 系统的 `discoverScopes()` 会自动发现所有活跃 scope（包括 `user:*`、`channel:*`、`bot:*`），但其中仅 `bot:*` scope 会进入画像提取（`extractBotProfiles` 注入的 `BotProfileProfiler`，蒸馏 Bot 的 L3 自我认知，并经 `SetOnBotProfileUpdated` 回调通知调用方）。用户画像由 `TieredManager.ExtractProfile`（配 `LLMProfiler`）按 scope 独立提取，与 dreaming 调度无关。因此：
+Dreaming 系统的 `discoverScopes()` 会自动发现所有活跃 scope（包括 `user:*`、`channel:*`、`bot:*`）。每次运行末尾（含无 Light 候选的早退）分别提取：
 
-- `user:A` scope 的记忆 → 提取用户 A 的专属画像
-- `user:B` scope 的记忆 → 提取用户 B 的专属画像
-- `channel:group1` scope 的记忆 → 提取群组上下文摘要（不是任何个人的画像）
+- `user:*` → `LLMProfiler` / `TieredManager.ExtractProfile` 写用户 L3（每人独立；`channel:*` 不进用户画像）
+- `bot:*` → `BotProfileProfiler` 写 Bot L3，并经 `SetOnBotProfileUpdated` 回调（低置信度不覆盖 SOUL）
 
 ## 核心接口
 
@@ -280,7 +280,7 @@ L0 工作记忆
 └────────┬─────────┘
          │
          ▼
-    L1 长期记忆 + 梦境日记
+    L1 长期记忆 + 用户/Bot L3 画像 + 梦境日记
 ```
 
 ### 6 信号加权评分
@@ -315,11 +315,16 @@ cfg.Schedule = "0 3 * * *" // 凌晨 3 点
 
 dm := memory.NewDreamManager(cfg, tieredManager, llmProvider, tp, logger)
 
+// 注入用户画像（生产路径由 NewDreamingBundle 接线 LLMProfiler）
+pcfg := memory.DefaultLLMProfilerConfig()
+pcfg.Provider = llmProvider
+dm.SetUserProfiler(memory.NewLLMProfiler(pcfg, tp, logger))
+
 // 注入 Bot 自我画像提取器（可选）
 dm.SetBotProfiler(memory.NewBotProfileProfiler(
     memory.BotProfileProfilerConfig{}, tp, logger))
 dm.SetOnBotProfileUpdated(func(botID string, r *memory.BotProfileResult) {
-    // 画像更新后的联动（如刷新 system prompt）
+    // 高置信度时联动 AdaptiveEngagementSyncer；低置信度保持 SOUL 种子
 })
 
 // 手动触发
@@ -385,7 +390,7 @@ bot.mybot.dreaming.schedule=0 4 * * *
 
 ### Bot 自我画像蒸馏
 
-dreaming 注入 `BotProfileProfiler` 后（`SetBotProfiler`），每次运行末尾对活跃的 `bot:*` scope 提取自我画像并写入 L3；`SetOnBotProfileUpdated` 回调可用于画像更新后的联动（如刷新 system prompt）。用户画像不走这条链路（见上文 Profiler 一节）。
+dreaming 注入 `BotProfileProfiler` 后（`SetBotProfiler`），每次运行末尾对活跃的 `bot:*` scope 提取自我画像并写入 L3；`SetOnBotProfileUpdated` 回调可用于画像更新后的联动（如刷新 engagement 参数）。`Confidence < MinProfileWriteConfidence`（0.4）时不写 L3、不回调，保留 SOUL.md 种子。用户画像走 `SetUserProfiler` / `ExtractProfile`（见上文 Profiler 一节）。
 
 ## 子包
 

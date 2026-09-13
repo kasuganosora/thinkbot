@@ -95,6 +95,12 @@ func DefaultLLMProfilerConfig() LLMProfilerConfig {
 	}
 }
 
+// MinProfileWriteConfidence 写入 L3 的最低置信度。低于此值的条目丢弃，避免单次观察写成性格。
+const MinProfileWriteConfidence = 0.4
+
+// MaxUserProfilesPerDream 单次梦境最多处理的 user scope 数，限制 LLM 费用。
+const MaxUserProfilesPerDream = 8
+
 // LLMProfiler 使用 LLM 从记忆中提取用户画像。
 type LLMProfiler struct {
 	config LLMProfilerConfig

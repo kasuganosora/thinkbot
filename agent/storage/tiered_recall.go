@@ -20,9 +20,9 @@ import (
 // 蒸馏知识从未进入对话 prompt（实测 110 条 L1 与 memory_entries 零重合）。
 // 整个 dreaming 子系统等于对对话不可见。
 //
-// 本 retriever 把 tiered_memories 的 L1 暴露为 memory.Retriever，与 memory_entries
-// 的 memRepo 经 MergedRetriever 合并后注入召回，形成「潜水学到的经验在真人交互里
-// 浮现」的完整闭环。
+// 本 retriever 把 tiered_memories 的指定层级暴露为 memory.Retriever。
+// NewTieredL1Retriever 读 L1；NewTieredProfileRetriever 读 L3 画像。
+// 与 memory_entries 的 memRepo 经 MergedRetriever 合并后注入召回。
 //
 // 注意：recall stage 在 lurk（只读）消息上会提前返回，故 L1 只在真人对话轮次被召回，
 // 不会在观察者自身产出笔记时回环。
@@ -32,39 +32,52 @@ import (
 var _ memory.Retriever = (*TieredL1Retriever)(nil)
 
 type TieredL1Retriever struct {
-	db *gorm.DB
+	db   *gorm.DB
+	tier int
 }
 
 // NewTieredL1Retriever 创建 L1 检索器。
 // db 必须是已迁移过的 GORM 实例（调用过 dao.Migrate，含 TieredMemoryModel）。
 func NewTieredL1Retriever(db *gorm.DB) *TieredL1Retriever {
-	return &TieredL1Retriever{db: db}
+	return &TieredL1Retriever{db: db, tier: 1}
 }
 
-// Recent 返回指定 scope 最近的 N 条 L1 记忆（按时间倒序）。
+// NewTieredProfileRetriever 创建 L3 画像检索器，供召回时把用户/Bot 画像注入 prompt。
+func NewTieredProfileRetriever(db *gorm.DB) *TieredL1Retriever {
+	return &TieredL1Retriever{db: db, tier: 3}
+}
+
+func (r *TieredL1Retriever) queryTier() int {
+	if r == nil || r.tier == 0 {
+		return 1
+	}
+	return r.tier
+}
+
+// Recent 返回指定 scope 最近的 N 条该层级记忆（按时间倒序）。
 func (r *TieredL1Retriever) Recent(_ context.Context, scope memory.Scope, limit int) ([]memory.Entry, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	var models []dao.TieredMemoryModel
 	err := r.db.
-		Where("tier = ? AND scope_kind = ? AND scope_id = ?", 1, string(scope.Kind), scope.ID).
+		Where("tier = ? AND scope_kind = ? AND scope_id = ?", r.queryTier(), string(scope.Kind), scope.ID).
 		Order("created_at DESC").
 		Limit(limit).
 		Find(&models).Error
 	if err != nil {
-		return nil, errs.Wrap(err, "tiered_l1_retriever: recent failed")
+		return nil, errs.Wrap(err, "tiered_retriever: recent failed")
 	}
 	return tieredModelsToEntries(models), nil
 }
 
-// Retrieve 按查询条件检索 L1 记忆（scope / category / 文本 过滤）。
+// Retrieve 按查询条件检索该层级记忆（scope / category / 文本 过滤）。
 func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]memory.Entry, error) {
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 200
 	}
-	tx := r.db.Model(&dao.TieredMemoryModel{}).Where("tier = ?", 1)
+	tx := r.db.Model(&dao.TieredMemoryModel{}).Where("tier = ?", r.queryTier())
 	if len(query.Scopes) > 0 {
 		scopeConditions := make([][]interface{}, 0, len(query.Scopes))
 		for _, scope := range query.Scopes {
@@ -80,19 +93,19 @@ func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]m
 	}
 	var models []dao.TieredMemoryModel
 	if err := tx.Order("created_at DESC").Limit(limit).Find(&models).Error; err != nil {
-		return nil, errs.Wrap(err, "tiered_l1_retriever: retrieve failed")
+		return nil, errs.Wrap(err, "tiered_retriever: retrieve failed")
 	}
 	return tieredModelsToEntries(models), nil
 }
 
-// Count 返回指定 scope 的 L1 记忆总数。
+// Count 返回指定 scope 在该层级的记忆总数。
 func (r *TieredL1Retriever) Count(_ context.Context, scope memory.Scope) (int, error) {
 	var count int64
 	err := r.db.Model(&dao.TieredMemoryModel{}).
-		Where("tier = ? AND scope_kind = ? AND scope_id = ?", 1, string(scope.Kind), scope.ID).
+		Where("tier = ? AND scope_kind = ? AND scope_id = ?", r.queryTier(), string(scope.Kind), scope.ID).
 		Count(&count).Error
 	if err != nil {
-		return 0, errs.Wrap(err, "tiered_l1_retriever: count failed")
+		return 0, errs.Wrap(err, "tiered_retriever: count failed")
 	}
 	return int(count), nil
 }
@@ -127,8 +140,8 @@ func tieredModelsToEntries(models []dao.TieredMemoryModel) []memory.Entry {
 //
 // 当前用于把 memory_entries（原始笔记，memRepo）与 tiered_memories L1（蒸馏知识）
 // 合并召回。合并策略：
-//   - 各源按传入顺序检索，先加入的源优先保留（故 L1 源应排在最前，确保其蒸馏知识
-//     在 Snapshot 字符预算截断时不被丢弃）；
+//   - 各源按传入顺序检索，先加入的源优先保留（故 L3 画像、L1 蒸馏应排在 memRepo 前，
+//     确保 Snapshot 字符预算截断时不被丢弃）；
 //   - 按内容去重，避免两源对同一事实重复计权。
 //
 // 单源检索失败属非致命，跳过该源不影响其他源（与 recall stage 的容错语义一致）。

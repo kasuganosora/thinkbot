@@ -159,3 +159,79 @@ func TestTieredL1Retriever_Integration(t *testing.T) {
 		}
 	}
 }
+
+func TestTieredProfileRetriever_ReadsL3NotL1(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	scope := memory.UserScope("u-l3")
+	now := time.Now()
+
+	if err := db.Create(&dao.TieredMemoryModel{
+		ID:        "l1-row",
+		Tier:      1,
+		ScopeKind: string(scope.Kind),
+		ScopeID:   scope.ID,
+		Content:   "L1 fact",
+		Category:  "fact",
+		Source:    "dreaming",
+		CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("insert L1: %v", err)
+	}
+	if err := db.Create(&dao.TieredMemoryModel{
+		ID:        "l3-row",
+		Tier:      3,
+		ScopeKind: string(scope.Kind),
+		ScopeID:   scope.ID,
+		Content:   "用户偏理性",
+		Category:  "trait",
+		Source:    "profiler",
+		CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("insert L3: %v", err)
+	}
+
+	l1 := NewTieredL1Retriever(db)
+	l3 := NewTieredProfileRetriever(db)
+
+	l1Got, err := l1.Recent(ctx, scope, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l1Got) != 1 || l1Got[0].Content != "L1 fact" {
+		t.Fatalf("L1 retriever should see only L1, got %+v", l1Got)
+	}
+
+	l3Got, err := l3.Recent(ctx, scope, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l3Got) != 1 || l3Got[0].Content != "用户偏理性" {
+		t.Fatalf("L3 retriever should see only L3, got %+v", l3Got)
+	}
+
+	retrieved, err := l3.Retrieve(ctx, memory.Query{Scopes: []memory.Scope{scope}, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retrieved) != 1 || retrieved[0].ID != "l3-row" {
+		t.Fatalf("L3 Retrieve should use tier=3, got %+v", retrieved)
+	}
+
+	n, err := l3.Count(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("L3 Count want 1, got %d", n)
+	}
+
+	merged := NewMergedRetriever(l3, l1)
+	all, err := merged.Recent(ctx, scope, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].Content != "用户偏理性" {
+		t.Fatalf("merged should put L3 first, got %+v", all)
+	}
+}

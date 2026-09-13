@@ -387,6 +387,29 @@ func (s *TieredStore) HasRecentActivity(_ context.Context, scope Scope, hours fl
 	return false
 }
 
+// LatestActivity 返回该 scope 任意层级中最新一条未过期记忆的 CreatedAt。
+// 零值表示该 scope 没有可用记忆。用于梦境用户画像 cap 按活跃度取前 N 个。
+func (s *TieredStore) LatestActivity(_ context.Context, scope Scope) time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var latest time.Time
+	now := time.Now()
+	tiers := []MemoryTier{Tier0Working, Tier1LongTerm, Tier2Episodic, Tier3Profile}
+	for _, tier := range tiers {
+		key := tierScopeKey(tier, scope)
+		for _, e := range s.buckets[key] {
+			if e.IsExpired(now) {
+				continue
+			}
+			if e.CreatedAt.After(latest) {
+				latest = e.CreatedAt
+			}
+		}
+	}
+	return latest
+}
+
 // Delete 按 ID 删除指定 tier+scope 下的一条记忆。
 func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, entryID string) error {
 	key := tierScopeKey(tier, scope)
