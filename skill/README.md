@@ -86,7 +86,7 @@ _ = mgr.Toggle("pdf")
 names := mgr.EnabledNames()
 ```
 
-`agent/bot.SetupSkills(SkillWireConfig)`（agent/bot/skill.go）已封装以上接线：Registry 适配器 + Loader + trigger Section（Order 150）+ 工具注册；`Prompt` 必传，`SkillsDir`/`Tools`/`Store` 为空（nil）时跳过对应环节。
+`agent/bot.SetupSkills(SkillWireConfig)`（agent/bot/skill.go）已封装以上接线：Registry 适配器 + Loader + trigger Section（Order 150）+ 工具注册。`Prompt` 必传。`BundledDir`（仓库 `skills/`）与 `ManagedDir`（`data/skills/{botID}`）按顺序加载，同名托管覆盖内置；旧字段 `SkillsDir` 仍可用。`Tools`/`Store` 为空时跳过对应环节。启用状态经 `BotSkillStoreAdapter` 写 `bot.{id}.skill.{name}.enabled`，回退全局 `skill.{name}.enabled`。
 
 ### 自动发现与热重载
 

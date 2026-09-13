@@ -49,6 +49,28 @@ func TestSkillManager_RegisterAndList(t *testing.T) {
 	}
 }
 
+func TestSkillManager_UnregisterAndTriggerRefresh(t *testing.T) {
+	var sections []string
+	reg := NewPromptRegistryAdapter(
+		func(name string, order int, content string, enabled bool) {
+			if name == "skill_trigger" {
+				sections = append(sections, content)
+			}
+		},
+		func(name string) {},
+	)
+	mgr := NewSkillManager(reg, nil, nil)
+	mgr.Register(&Skill{Name: "pdf", Description: "PDF", Content: "# pdf", Enabled: true})
+	if len(sections) == 0 || !contains(sections[len(sections)-1], "pdf") {
+		t.Fatalf("trigger should list pdf, got %#v", sections)
+	}
+	mgr.Unregister("pdf")
+	last := sections[len(sections)-1]
+	if contains(last, "- pdf") {
+		t.Fatalf("trigger after unregister still lists pdf: %s", last)
+	}
+}
+
 func TestSkillManager_EnableDisable(t *testing.T) {
 	mgr := NewSkillManager(nil, nil, nil)
 
@@ -502,11 +524,11 @@ func TestSkillManager_InjectAndRemovePrompt(t *testing.T) {
 		Source:      "fs",
 	})
 
-	if len(registered) != 1 {
-		t.Errorf("expected 1 registered section, got %d", len(registered))
+	if !containsSlice(registered, "skill_pdf") {
+		t.Errorf("expected skill_pdf in registered, got %v", registered)
 	}
-	if registered[0] != "skill_pdf" {
-		t.Errorf("expected 'skill_pdf', got %q", registered[0])
+	if !containsSlice(registered, "skill_trigger") {
+		t.Errorf("expected skill_trigger refresh on register, got %v", registered)
 	}
 
 	// 禁用后应触发 unregister
@@ -605,6 +627,15 @@ func TestDirectInjector_Clear(t *testing.T) {
 // ============================================================================
 // 辅助函数
 // ============================================================================
+
+func containsSlice(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstr(s, substr))

@@ -41,6 +41,7 @@ import (
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/sandbox"
+	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/tools"
@@ -233,6 +234,21 @@ func (s *BotService) RunningSoulLoader(botID string) (*prompt.SoulLoader, bool) 
 		return nil, false
 	}
 	return loader, true
+}
+
+// RunningSkillManager 返回运行中 bot 的技能管理器。
+func (s *BotService) RunningSkillManager(botID string) (*skill.SkillManager, bool) {
+	s.mu.RLock()
+	b, ok := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return nil, false
+	}
+	mgr := b.SkillManager()
+	if mgr == nil {
+		return nil, false
+	}
+	return mgr, true
 }
 
 // openSoulLoader 返回该 bot 的 SoulLoader。
@@ -2063,6 +2079,26 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return nil
 	}
 
+	// 技能系统：内置 skills/ + 该 Bot 托管 data/skills/{id}，启用状态 per-bot。
+	wsBase := s.GetWorkspaceBaseDir()
+	managedSkillsDir := filepath.Join(filepath.Dir(wsBase), "skills", id)
+	if filepath.Dir(wsBase) == "." || filepath.Dir(wsBase) == "" {
+		managedSkillsDir = filepath.Join("data", "skills", id)
+	}
+	skillMgr, skillErr := bot.SetupSkills(bot.SkillWireConfig{
+		BundledDir: "skills",
+		ManagedDir: managedSkillsDir,
+		Tools:      toolMgr,
+		Prompt:     promptReg,
+		Store:      skill.NewBotSkillStoreAdapter(s.store, id),
+		Logger:     s.logger,
+	})
+	if skillErr != nil {
+		s.logger.Warnw("bot_service: setup skills failed, continuing without skills",
+			"bot_id", id, "err", skillErr)
+		skillMgr = nil
+	}
+
 	b, err := bot.New(bot.BotParams{
 		ID:              id,
 		Name:            def.Name,
@@ -2080,6 +2116,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		SelfIDSet:       selfIDSet,
 		PromptRegistry:  promptReg,
 		ToolManager:     toolMgr,
+		SkillManager:    skillMgr,
 		AdaptiveSyncer:  adaptiveSyncer,
 		OutreachBreaker: outreachBreaker,
 		OnMessageStart: func(botID, traceID string, cancel context.CancelFunc, interruptCh chan string) {

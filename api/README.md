@@ -202,6 +202,20 @@ POST   /api/bots/:id/cron/:jobId/resume  — 恢复任务
 POST   /api/bots/:id/cron/:jobId/trigger — 手动触发任务
 ```
 
+### Bot 技能（admin，嵌套在 Bot 下）
+
+```
+GET    /api/bots/:id/skills              — 内置 ∪ 托管技能列表（托管同名覆盖）
+GET    /api/bots/:id/skills/:sid         — 详情
+POST   /api/bots/:id/skills              — 新建托管技能
+PUT    /api/bots/:id/skills/:sid         — 更新托管技能（内置只读）
+PUT    /api/bots/:id/skills/:sid/enable  — 对该 Bot 启用
+PUT    /api/bots/:id/skills/:sid/disable — 对该 Bot 禁用
+DELETE /api/bots/:id/skills/:sid         — 删除托管技能
+```
+
+运行时加载 `skills/`（内置）与 `data/skills/{botId}/`（托管）；启用状态键 `bot.{id}.skill.{name}.enabled`。
+
 ### 人格 SOUL.md（admin，嵌套在 Bot 下）
 
 ```
