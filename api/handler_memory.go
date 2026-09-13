@@ -145,7 +145,7 @@ func (s *Server) handleMemoryStats(c *gin.Context) {
 
 	bundle, ok := s.botSvc.GetDreamingBundle(botID)
 	if !ok {
-		OK(c, gin.H{"l1Count": 0, "l2Estimate": 0, "enabled": false})
+		OK(c, gin.H{"l1Count": 0, "l2Estimate": 0, "l3Count": 0, "enabled": false})
 		return
 	}
 
@@ -165,12 +165,14 @@ func (s *Server) handleMemoryStats(c *gin.Context) {
 		l1Count = len(l1Entries)
 	}
 
-	// 估算 L2 条目数
+	// 估算 L2 / L3 条目数
 	l2Entries, _ := mgr.RetrieveByTier(ctx, memory.Tier2Episodic, nil, 10000)
+	l3Entries, _ := mgr.RetrieveByTier(ctx, memory.Tier3Profile, nil, 10000)
 
 	OK(c, gin.H{
 		"l1Count":    l1Count,
 		"l2Estimate": len(l2Entries),
+		"l3Count":    len(l3Entries),
 		"enabled":    true,
 	})
 }
@@ -250,6 +252,8 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 		"deepPassed":      report.DeepPassed,
 		"deepPromoted":    report.DeepPromoted,
 		"skippedInactive": report.SkippedInactive,
+		"userProfiles":    report.UserProfiles,
+		"botProfiles":     report.BotProfiles,
 		"duration":        report.Duration().String(),
 		"phase":           report.Phase,
 		"error":           report.Error,

@@ -215,7 +215,7 @@ POST /api/bots/:id/dreaming/trigger — 手动触发一次梦境巩固
 
 ```
 GET    /api/bots/:id/memory         — 查询分层记忆（?tier=L0/L1/L2/L3&limit=）
-GET    /api/bots/:id/memory/stats   — 记忆统计（L1 计数 / L2 估算）
+GET    /api/bots/:id/memory/stats   — 记忆统计（L1 计数 / L2 估算 / L3 画像计数）
 DELETE /api/bots/:id/memory/entry   — 删除单条分层记忆（?id=&tier=&scope=）
 ```
 

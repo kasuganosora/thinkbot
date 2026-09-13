@@ -462,7 +462,11 @@ export const memoryApi = {
     if (USE_MOCK) {
       return mockResolve(() => {
         const list = db().memory[botId] || []
-        return { l1Count: list.filter(m => m.tier === 'L1').length, l2Estimate: list.filter(m => m.tier === 'L2').length }
+        return {
+          l1Count: list.filter(m => m.tier === 'L1').length,
+          l2Estimate: list.filter(m => m.tier === 'L2').length,
+          l3Count: list.filter(m => m.tier === 'L3').length
+        }
       })
     }
     return request('GET', `/api/bots/${botId}/memory/stats`)
