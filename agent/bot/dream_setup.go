@@ -43,8 +43,8 @@ func (e *DreamExecutor) Execute(ctx context.Context, _ *cron.Job) (*cron.Execute
 		return nil, err
 	}
 
-	output := fmt.Sprintf("dream complete: ingested=%d promoted=%d themes=%d",
-		report.LightIngested, report.DeepPromoted, report.REMThemes)
+	output := fmt.Sprintf("dream complete: ingested=%d promoted=%d themes=%d user_profiles=%d bot_profiles=%d",
+		report.LightIngested, report.DeepPromoted, report.REMThemes, report.UserProfiles, report.BotProfiles)
 
 	e.logger.Infow("dream execution completed",
 		"ingested", report.LightIngested,
@@ -108,9 +108,17 @@ func NewDreamingBundle(
 
 	// 1. 创建分层记忆管理器（带 SQLite 持久化，重启可恢复）
 	store := memory.NewTieredStoreWithDB(nil, db)
+	var userProfiler memory.Profiler
+	if provider != nil {
+		pcfg := memory.DefaultLLMProfilerConfig()
+		pcfg.Provider = provider
+		pcfg.Model = &llm.Model{ID: model}
+		userProfiler = memory.NewLLMProfiler(pcfg, tp, logger)
+	}
 	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{
 		Store:                 store,
 		EnableAutoConsolidate: true,
+		Profiler:              userProfiler,
 	}, tp, logger)
 
 	// 2. 创建 DreamManager（注入 bot 的 LLM 模型名 + 活跃度阈值）
@@ -119,6 +127,9 @@ func NewDreamingBundle(
 		dreamCfg.ActiveThresholdHours = 24 // 默认仅处理 24h 内有记忆写入的 scope
 	}
 	dreamMgr := memory.NewDreamManager(dreamCfg, tieredMgr, provider, tp, logger)
+	if userProfiler != nil {
+		dreamMgr.SetUserProfiler(userProfiler)
+	}
 
 	// 3. 创建 cron Store + Executor + Scheduler
 	cronStore := cron.NewStore(cronFilePath)

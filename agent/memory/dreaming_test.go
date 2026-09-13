@@ -7,6 +7,8 @@ import (
 
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 // testDreamLogger 创建测试用 logger。
@@ -627,5 +629,179 @@ func TestScoreBreakdown(t *testing.T) {
 	}
 	if sb.Frequency <= 0 {
 		t.Error("expected positive frequency score with LightHits=3")
+	}
+}
+
+func TestDreamManager_ExtractsUserProfileOnNoLightCandidates(t *testing.T) {
+	scope := UserScope("u-dream-l3")
+	dm, tm := newTestDreamManager(t, []Scope{scope})
+	ctx := context.Background()
+	stub := &stubUserProfiler{items: []ProfileItem{
+		{Type: ProfileTypeTrait, Content: "用户偏理性", Confidence: 0.8},
+	}}
+	dm.SetUserProfiler(stub)
+
+	if err := tm.WriteLongTerm(ctx, Entry{
+		Scope:    scope,
+		Content:  "用户常用 Go，偏好简洁回复",
+		Category: "fact",
+		Source:   "test",
+	}, Tier0Working); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if report.LightIngested != 0 {
+		t.Fatalf("expected no Light candidates, ingested=%d", report.LightIngested)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("expected profiler called once on no-Light path, got %d", stub.calls)
+	}
+	if report.UserProfiles != 1 {
+		t.Fatalf("expected UserProfiles=1, got %d", report.UserProfiles)
+	}
+	got, err := tm.Store().Retrieve(ctx, Tier3Profile, []Scope{scope}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Content != "用户偏理性" {
+		t.Fatalf("expected L3 written, got %+v", got)
+	}
+}
+
+type fixedTextProvider struct{ text string }
+
+func (p *fixedTextProvider) Name() string { return "fixed" }
+func (p *fixedTextProvider) DoGenerate(_ context.Context, _ llm.GenerateParams) (*llm.GenerateResult, error) {
+	return &llm.GenerateResult{Text: p.text}, nil
+}
+func (p *fixedTextProvider) DoStream(_ context.Context, _ llm.GenerateParams) (*llm.StreamResult, error) {
+	return nil, nil
+}
+
+func TestDreamManager_SkipsLowConfidenceBotProfile(t *testing.T) {
+	scope := BotScope("bot-soul")
+	dm, tm := newTestDreamManager(t, []Scope{scope})
+	ctx := context.Background()
+	if err := tm.WriteLongTerm(ctx, Entry{
+		Scope:    scope,
+		Content:  "Bot 经常简短回复技术问题",
+		Category: "fact",
+		Source:   "test",
+	}, Tier0Working); err != nil {
+		t.Fatal(err)
+	}
+
+	low := `{"energy_level":0.9,"patience":0.5,"preferred_topics":["go"],"verbosity":0.4,"personality":"噪声观察","confidence":0.2}`
+	dm.SetBotProfiler(NewBotProfileProfiler(BotProfileProfilerConfig{
+		Provider: &fixedTextProvider{text: low},
+		Model:    &llm.Model{ID: "stub"},
+	}, noop.NewTracerProvider(), testDreamLogger()))
+
+	var callbacks int
+	dm.SetOnBotProfileUpdated(func(string, *BotProfileResult) { callbacks++ })
+
+	report, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if report.BotProfiles != 0 {
+		t.Fatalf("low-confidence bot profile must not apply, BotProfiles=%d", report.BotProfiles)
+	}
+	if callbacks != 0 {
+		t.Fatalf("callback must not fire for low-confidence bot profile, got %d", callbacks)
+	}
+	got, err := tm.Store().Retrieve(ctx, Tier3Profile, []Scope{scope}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("low-confidence bot profile must not write L3, got %+v", got)
+	}
+
+	high := `{"energy_level":0.6,"patience":0.7,"preferred_topics":["go"],"verbosity":0.3,"personality":"稳重","confidence":0.8}`
+	dm.SetBotProfiler(NewBotProfileProfiler(BotProfileProfilerConfig{
+		Provider: &fixedTextProvider{text: high},
+		Model:    &llm.Model{ID: "stub"},
+	}, noop.NewTracerProvider(), testDreamLogger()))
+	report, err = dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("second Run failed: %v", err)
+	}
+	if report.BotProfiles != 1 {
+		t.Fatalf("high-confidence bot profile should apply, BotProfiles=%d", report.BotProfiles)
+	}
+	if callbacks != 1 {
+		t.Fatalf("expected 1 callback, got %d", callbacks)
+	}
+}
+
+func TestDreamManager_UserProfileCapPrefersRecent(t *testing.T) {
+	const n = MaxUserProfilesPerDream + 1
+	scopes := make([]Scope, n)
+	now := time.Now()
+	store := NewTieredStore(nil)
+	tm := NewTieredManager(TieredManagerConfig{Store: store},
+		noop.NewTracerProvider(), testDreamLogger())
+	cfg := DefaultDreamConfig()
+	cfg.Enabled = true
+	cfg.ActiveThresholdHours = 0
+	cfg.Scopes = scopes
+	dm := NewDreamManager(cfg, tm, nil, noop.NewTracerProvider(), testDreamLogger())
+	stub := &stubUserProfiler{items: []ProfileItem{
+		{Type: ProfileTypeTrait, Content: "画像", Confidence: 0.8},
+	}}
+	dm.SetUserProfiler(stub)
+	ctx := context.Background()
+
+	oldest := UserScope("u-oldest")
+	scopes[0] = oldest
+	if err := store.Append(ctx, TieredEntry{
+		Entry: Entry{
+			Scope:     oldest,
+			Content:   "最老用户",
+			Category:  "fact",
+			CreatedAt: now.Add(-48 * time.Hour),
+		},
+		Tier: Tier1LongTerm,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < n; i++ {
+		s := UserScope("u-recent-" + string(rune('a'+i-1)))
+		scopes[i] = s
+		if err := store.Append(ctx, TieredEntry{
+			Entry: Entry{
+				Scope:     s,
+				Content:   "较新用户",
+				Category:  "fact",
+				CreatedAt: now.Add(-time.Duration(i) * time.Minute),
+			},
+			Tier: Tier1LongTerm,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dm.config.Scopes = scopes
+
+	report, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if stub.calls != MaxUserProfilesPerDream {
+		t.Fatalf("expected cap %d profiler calls, got %d", MaxUserProfilesPerDream, stub.calls)
+	}
+	if report.UserProfiles != MaxUserProfilesPerDream {
+		t.Fatalf("expected UserProfiles=%d, got %d", MaxUserProfilesPerDream, report.UserProfiles)
+	}
+	got, err := store.Retrieve(ctx, Tier3Profile, []Scope{oldest}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("oldest user should be outside cap, got L3 %+v", got)
 	}
 }

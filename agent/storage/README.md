@@ -12,7 +12,7 @@ agent 模块的持久化层实现（SQLite / GORM），是 DDD 端口-适配器�
 storage/
 ├── repository.go        # SQLiteRepository / WindowStateStore / 自动压缩与淘汰
 ├── sqlite_compactor.go  # SQLiteCompactor：LLM 语义压缩器
-├── tiered_recall.go     # TieredL1Retriever / MergedRetriever：分层 L1 记忆召回
+├── tiered_recall.go     # TieredL1Retriever / NewTieredProfileRetriever / MergedRetriever：分层 L1/L3 召回
 └── doc.go               # 包文档
 ```
 
@@ -25,8 +25,8 @@ storage/
 - **手动压缩**：`CompactScope` 委派内部压缩器，供 `/compact` 命令按需触发（未配置 Compactor 时为空操作）
 - **访问时间回写**：`Retrieve` 后异步批量更新 `LastAccessedAt`
 - **窗口快照**：对话窗口状态的保存（upsert）与恢复
-- **分层召回**：`TieredL1Retriever` 读取 `tiered_memories` 表 tier=1 的蒸馏知识，
-  经 `MergedRetriever` 与原始笔记合并注入 recall stage
+- **分层召回**：`TieredL1Retriever` 读 L1，`NewTieredProfileRetriever` 读 L3 画像，
+  经 `MergedRetriever` 与原始笔记合并注入 recall stage（生产顺序：L3 → L1 → memRepo）
 - **指标统计**：`Metrics()` 返回 `memory.RepositoryMetrics`
 - **索引优化**：`dao.EntryModel` 对 scope、category、source、created_at、last_accessed_at 建有索引
 
@@ -61,12 +61,14 @@ storage/
 
 ## 分层召回（tiered_recall.go）
 
-`TieredL1Retriever` 把梦境子系统升华到 `tiered_memories`（tier=1）的长期知识暴露为
-`memory.Retriever`；`MergedRetriever` 将其与 `memory_entries` 的原始笔记合并注入召回：
+`TieredL1Retriever` 把梦境子系统升华到 `tiered_memories` 的长期知识暴露为
+`memory.Retriever`（`NewTieredProfileRetriever` 读 L3 画像）；`MergedRetriever`
+将其与 `memory_entries` 的原始笔记合并注入召回：
 
 ```go
+tieredL3 := storage.NewTieredProfileRetriever(db)
 tieredL1 := storage.NewTieredL1Retriever(db)
-recall := storage.NewMergedRetriever(tieredL1, memRepo) // L1 源排最前，预算截断时优先保留
+recall := storage.NewMergedRetriever(tieredL3, tieredL1, memRepo) // 画像/蒸馏排最前
 ```
 
 - 合并策略：各源按传入顺序检索、先加入者优先保留（**高价值源放最前**，确保蒸馏知识

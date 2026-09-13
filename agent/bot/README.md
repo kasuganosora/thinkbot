@@ -29,7 +29,7 @@
 | `BotManager` | 多 Bot 生命周期管理器（线程安全） |
 | `Channel` / `Sender` | 输入端 / 输出端接口 |
 | `LLMBundle` | LLM 实例集（Main/Light/Vision） |
-| `DreamingBundle` | 梦境巩固子系统封装（Manager + DreamExecutor + Scheduler + CronStore + 分层存储，另含可选 `BotProfiler`） |
+| `DreamingBundle` | 梦境巩固子系统封装（Manager + DreamExecutor + Scheduler + CronStore + 分层存储；构造时接线 `LLMProfiler`，另含可选 `BotProfiler`） |
 | `DreamExecutor` | cron.Executor 实现，桥接 cron 触发和 DreamManager.Run() |
 | `BotMetrics` | Bot 运行指标快照（`Metrics()` 返回，含 Engine 指标 + 派发错误数） |
 | `MemoryChannel` | 内存双向 Channel（测试用） |
@@ -76,7 +76,9 @@ bundle := bot.NewDreamingBundle(
 )
 // 注入 Bot：BotParams.DreamScheduler = bundle.Scheduler
 // Bot.Run 自动 Start，Bot.Close 自动 Stop（内部即 bundle.Stop()）
+// provider 非空时自动接线 LLMProfiler：梦境对活跃 user:* 写 L3 画像
 ```
+
 
 | 组件 | 说明 |
 |------|------|

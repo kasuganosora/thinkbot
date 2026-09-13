@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -110,6 +111,8 @@ type DreamReport struct {
 	DeepPassed      int        `json:"deep_passed"`
 	DeepPromoted    int        `json:"deep_promoted"`
 	SkippedInactive int        `json:"skipped_inactive"`
+	UserProfiles    int        `json:"user_profiles,omitempty"`
+	BotProfiles     int        `json:"bot_profiles,omitempty"`
 	Error           string     `json:"error,omitempty"`
 }
 
@@ -273,6 +276,15 @@ func (d *DreamManager) SetOnBotProfileUpdated(cb func(botID string, result *BotP
 	d.onBotProfileUpdated = cb
 }
 
+// SetUserProfiler 注入用户画像提取器（对 user:* scope 写 L3）。
+func (d *DreamManager) SetUserProfiler(p Profiler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.manager != nil {
+		d.manager.profiler = p
+	}
+}
+
 // State 返回当前状态。
 func (d *DreamManager) State() DreamState {
 	d.mu.Lock()
@@ -432,9 +444,11 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 		stagedCount := len(d.candidates)
 		d.mu.Unlock()
 		if stagedCount == 0 {
+			// 没有新候选仍可能有既有 L1，继续抽用户/Bot 画像。
+			d.extractProfiles(ctx, activeScopes, report)
 			report.FinishedAt = time.Now()
 			report.Phase = PhaseDeep
-			d.logger.Info("dreaming: no candidates, skipping")
+			d.logger.Info("dreaming: no candidates, skipping REM/Deep")
 			return report, nil
 		}
 		// 有已分期的候选，继续执行 REM + Deep
@@ -467,11 +481,7 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 	report.FinishedAt = time.Now()
 	report.Phase = PhaseDeep
 
-	// Phase 4 (Optional): Bot 自我画像提取
-	// 对 BotScope 的 L1+L2 记忆执行画像蒸馏，更新 Bot 的 L3 自我认知。
-	if d.botProfiler != nil {
-		d.extractBotProfiles(ctx, activeScopes)
-	}
+	d.extractProfiles(ctx, activeScopes, report)
 
 	span.SetAttributes(
 		attribute.Int("ingested", report.LightIngested),
@@ -528,8 +538,75 @@ func parseScopeFromKey(key string) Scope {
 	return Scope{Kind: ScopeKind(rest[:colon]), ID: rest[colon+1:]}
 }
 
+func (d *DreamManager) extractProfiles(ctx context.Context, activeScopes []Scope, report *DreamReport) {
+	if d.botProfiler != nil {
+		n := d.extractBotProfiles(ctx, activeScopes)
+		if report != nil {
+			report.BotProfiles = n
+		}
+	}
+	if d.manager != nil && d.manager.profiler != nil {
+		n := d.extractUserProfiles(ctx, activeScopes)
+		if report != nil {
+			report.UserProfiles = n
+		}
+	}
+}
+
+// extractUserProfiles 对活跃 user:* scope 蒸馏 L3 用户画像。
+func (d *DreamManager) extractUserProfiles(ctx context.Context, activeScopes []Scope) int {
+	ctx, span := d.tracer.Start(ctx, "memory.dreaming.user_profile")
+	defer span.End()
+	logger := traceid.WithLoggerFrom(ctx, d.logger)
+
+	type rankedUser struct {
+		scope Scope
+		at    time.Time
+	}
+	ranked := make([]rankedUser, 0, len(activeScopes))
+	for _, scope := range activeScopes {
+		if scope.Kind == ScopeUser && scope.ID != "" {
+			ranked = append(ranked, rankedUser{scope: scope, at: d.manager.store.LatestActivity(ctx, scope)})
+		}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].at.Equal(ranked[j].at) {
+			return ranked[i].scope.ID < ranked[j].scope.ID
+		}
+		return ranked[i].at.After(ranked[j].at)
+	})
+	users := make([]Scope, len(ranked))
+	for i := range ranked {
+		users[i] = ranked[i].scope
+	}
+	if len(users) > MaxUserProfilesPerDream {
+		logger.Infow("dreaming: user profile cap reached",
+			"cap", MaxUserProfilesPerDream, "candidates", len(users))
+		users = users[:MaxUserProfilesPerDream]
+	}
+
+	var attempted, writtenUsers int
+	for _, scope := range users {
+		attempted++
+		written, err := d.manager.ExtractProfile(ctx, scope)
+		if err != nil {
+			logger.Warnw("dreaming: user profile extraction failed", "user", scope.ID, "err", err)
+			continue
+		}
+		if written > 0 {
+			writtenUsers++
+			logger.Infow("dreaming: user profile written", "user", scope.ID, "items", written)
+		}
+	}
+	span.SetAttributes(
+		attribute.Int("user_profiles_attempted", attempted),
+		attribute.Int("user_profiles_extracted", writtenUsers),
+	)
+	return writtenUsers
+}
+
 // extractBotProfiles 对活跃 scope 中的 BotScope 执行自我画像提取。
-func (d *DreamManager) extractBotProfiles(ctx context.Context, activeScopes []Scope) {
+func (d *DreamManager) extractBotProfiles(ctx context.Context, activeScopes []Scope) int {
 	ctx, span := d.tracer.Start(ctx, "memory.dreaming.bot_profile",
 		trace.WithAttributes(
 			attribute.Int("active_scopes", len(activeScopes)),
@@ -590,6 +667,11 @@ func (d *DreamManager) extractBotProfiles(ctx context.Context, activeScopes []Sc
 		if profile == nil {
 			continue
 		}
+		if profile.Confidence < MinProfileWriteConfidence {
+			logger.Infow("dreaming: skip low-confidence bot profile (keep SOUL seed)",
+				"bot_id", botID, "confidence", profile.Confidence)
+			continue
+		}
 
 		// 将画像写入 L3（BotScope）
 		d.persistBotProfile(ctx, scope, profile)
@@ -604,6 +686,7 @@ func (d *DreamManager) extractBotProfiles(ctx context.Context, activeScopes []Sc
 			cb(botID, profile)
 		}
 	}
+	return extractedCount
 }
 
 // persistBotProfile 将 Bot 自我画像写入 L3。
@@ -652,6 +735,9 @@ func (d *DreamManager) appendDreamDiary(report *DreamReport) {
 		report.LightIngested, report.LightDeduped, report.LightDropped,
 		report.REMThemes, report.REMCandidates,
 		report.DeepScored, report.DeepPassed, report.DeepPromoted)
+	if report.UserProfiles > 0 || report.BotProfiles > 0 {
+		entry += fmt.Sprintf("- Profiles: user=%d, bot=%d\n", report.UserProfiles, report.BotProfiles)
+	}
 	if report.SkippedInactive > 0 {
 		entry += fmt.Sprintf("- Skipped (inactive): %d scopes\n", report.SkippedInactive)
 	}
