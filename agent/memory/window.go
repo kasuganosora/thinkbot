@@ -28,6 +28,7 @@ import (
 //  4. 超限时触发 Compressor 压缩
 type Window struct {
 	config WindowConfig
+	cfgFn  func() WindowConfig // 非 nil 时每次读取现取（热加载）
 
 	mu         sync.RWMutex
 	usedTokens int // 最新一轮 LLM 调用的完整 prompt input tokens（覆盖写，非累计）
@@ -117,6 +118,25 @@ func NewWindow(opts ...WindowConfig) *Window {
 	return &Window{config: cfg}
 }
 
+// SetConfigSource 设置运行时配置源。之后 Available/MemoryBudget 等每次调用都会现取，
+// 使系统配置页对 memorywindow.* 的修改无需重启 Bot。fn 为 nil 则回到构造时的快照。
+func (w *Window) SetConfigSource(fn func() WindowConfig) {
+	w.mu.Lock()
+	w.cfgFn = fn
+	w.mu.Unlock()
+}
+
+func (w *Window) liveConfig() WindowConfig {
+	w.mu.RLock()
+	fn := w.cfgFn
+	base := w.config
+	w.mu.RUnlock()
+	if fn == nil {
+		return base
+	}
+	return fn()
+}
+
 // RecordUsage 记录一次 LLM 调用的 token 用量。
 // usedTokens 取最新一轮的完整 prompt input（provider 报告值，覆盖写而非累计）。
 // Window 是 per-bot 共享的：跨会话调用会互相覆盖。主链路目前未接入 UpdateUsage，
@@ -143,16 +163,17 @@ func (w *Window) Available() int {
 	used := w.usedTokens
 	w.mu.RUnlock()
 
-	totalAvailable := w.config.MaxContextTokens - w.config.ReservedTokens - w.config.OutputReserve - used
+	cfg := w.liveConfig()
+	totalAvailable := cfg.MaxContextTokens - cfg.ReservedTokens - cfg.OutputReserve - used
 	if totalAvailable <= 0 {
 		return 0
 	}
 
-	memoryBudget := int(float64(totalAvailable) * w.config.MemoryBudgetRatio)
+	memoryBudget := int(float64(totalAvailable) * cfg.MemoryBudgetRatio)
 
 	// 硬上限：防止大窗口模型（如 200K Claude）注入过多记忆
-	if w.config.MaxMemoryTokens > 0 && memoryBudget > w.config.MaxMemoryTokens {
-		memoryBudget = w.config.MaxMemoryTokens
+	if cfg.MaxMemoryTokens > 0 && memoryBudget > cfg.MaxMemoryTokens {
+		memoryBudget = cfg.MaxMemoryTokens
 	}
 
 	return memoryBudget
@@ -161,13 +182,14 @@ func (w *Window) Available() int {
 // MemoryBudget 返回 memory 的 token 总预算（不考虑已消耗的 token）。
 // 用于初始状态下的规划。同样受 MaxMemoryTokens 硬上限约束。
 func (w *Window) MemoryBudget() int {
-	totalAvailable := w.config.MaxContextTokens - w.config.ReservedTokens - w.config.OutputReserve
+	cfg := w.liveConfig()
+	totalAvailable := cfg.MaxContextTokens - cfg.ReservedTokens - cfg.OutputReserve
 	if totalAvailable <= 0 {
 		return 0
 	}
-	budget := int(float64(totalAvailable) * w.config.MemoryBudgetRatio)
-	if w.config.MaxMemoryTokens > 0 && budget > w.config.MaxMemoryTokens {
-		budget = w.config.MaxMemoryTokens
+	budget := int(float64(totalAvailable) * cfg.MemoryBudgetRatio)
+	if cfg.MaxMemoryTokens > 0 && budget > cfg.MaxMemoryTokens {
+		budget = cfg.MaxMemoryTokens
 	}
 	return budget
 }
@@ -179,7 +201,8 @@ func (w *Window) ShouldCompress(memoryTokens int) bool {
 	if available <= 0 {
 		return memoryTokens > 0
 	}
-	threshold := int(float64(available) * w.config.CompressThreshold)
+	cfg := w.liveConfig()
+	threshold := int(float64(available) * cfg.CompressThreshold)
 	return memoryTokens > threshold
 }
 
@@ -228,7 +251,7 @@ func (w *Window) Metrics() WindowMetrics {
 	w.mu.RUnlock()
 
 	return WindowMetrics{
-		MaxContextTokens:   w.config.MaxContextTokens,
+		MaxContextTokens:   w.liveConfig().MaxContextTokens,
 		UsedTokens:         used,
 		AvailableForMemory: w.Available(),
 		RoundCount:         rounds,

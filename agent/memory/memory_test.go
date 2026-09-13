@@ -350,6 +350,22 @@ func TestScope_Key(t *testing.T) {
 // Window Tests
 // ============================================================================
 
+func TestWindow_ConfigSourceLive(t *testing.T) {
+	w := NewWindow(WindowConfig{MaxContextTokens: 10000, ReservedTokens: 1000, OutputReserve: 1000, MemoryBudgetRatio: 0.5, MaxMemoryTokens: 2000})
+	if got := w.MemoryBudget(); got != 2000 {
+		t.Fatalf("initial budget = %d", got)
+	}
+	cur := WindowConfig{MaxContextTokens: 10000, ReservedTokens: 1000, OutputReserve: 1000, MemoryBudgetRatio: 0.5, MaxMemoryTokens: 500}
+	w.SetConfigSource(func() WindowConfig { return cur })
+	if got := w.MemoryBudget(); got != 500 {
+		t.Fatalf("live budget = %d, want 500", got)
+	}
+	cur.MaxMemoryTokens = 100
+	if got := w.MemoryBudget(); got != 100 {
+		t.Fatalf("updated live budget = %d, want 100", got)
+	}
+}
+
 func TestWindow_Available(t *testing.T) {
 	w := NewWindow(WindowConfig{
 		MaxContextTokens:  10000,

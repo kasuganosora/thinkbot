@@ -80,17 +80,24 @@ func registerConfigLifecycle(lc fx.Lifecycle, store *Store, logger *zap.SugaredL
 			// 环境变量，使主机侧所有使用默认 Transport 的 HTTP 客户端（LLM、channel 等）
 			// 统一走部署侧代理。NO_PROXY 默认放行本地地址，避免自环请求被代理拦截。
 			// 须在配置加载完成后、发起任何出站请求前执行一次。
-			if proxy := GlobalProxy(store); proxy != "" {
-				_ = os.Setenv("HTTP_PROXY", proxy)
-				_ = os.Setenv("HTTPS_PROXY", proxy)
-				_ = os.Setenv("http_proxy", proxy)
-				_ = os.Setenv("https_proxy", proxy)
-				if os.Getenv("NO_PROXY") == "" {
-					_ = os.Setenv("NO_PROXY", "localhost,127.0.0.1")
-					_ = os.Setenv("no_proxy", "localhost,127.0.0.1")
+			applyGlobalProxy(store, logger, false)
+			if lvl := store.GetString(KeyLogLevel, ""); lvl != "" {
+				if err := applyLogLevel(lvl); err != nil {
+					logger.Warnw("config: apply log.level failed", "value", lvl, "err", err)
 				}
-				logger.Infow("global proxy enabled (host side)", "proxy", proxy)
 			}
+			store.OnChange(func(key, _, newVal string) {
+				switch key {
+				case KeySystemProxy:
+					applyGlobalProxy(store, logger, true)
+				case KeyLogLevel:
+					if err := applyLogLevel(newVal); err != nil {
+						logger.Warnw("config: apply log.level failed", "value", newVal, "err", err)
+					} else {
+						logger.Infow("config: log.level applied", "level", newVal)
+					}
+				}
+			})
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
@@ -108,6 +115,40 @@ func GlobalProxy(store *Store) string {
 		return p
 	}
 	return os.Getenv(ConfigKeyToEnvKey(KeySystemProxy))
+}
+
+func applyGlobalProxy(store *Store, logger *zap.SugaredLogger, allowClear bool) {
+	proxy := GlobalProxy(store)
+	if proxy == "" {
+		if allowClear {
+			_ = os.Unsetenv("HTTP_PROXY")
+			_ = os.Unsetenv("HTTPS_PROXY")
+			_ = os.Unsetenv("http_proxy")
+			_ = os.Unsetenv("https_proxy")
+			logger.Infow("global proxy disabled (host side)")
+		}
+		return
+	}
+	_ = os.Setenv("HTTP_PROXY", proxy)
+	_ = os.Setenv("HTTPS_PROXY", proxy)
+	_ = os.Setenv("http_proxy", proxy)
+	_ = os.Setenv("https_proxy", proxy)
+	if os.Getenv("NO_PROXY") == "" {
+		_ = os.Setenv("NO_PROXY", "localhost,127.0.0.1")
+		_ = os.Setenv("no_proxy", "localhost,127.0.0.1")
+	}
+	logger.Infow("global proxy enabled (host side)", "proxy", proxy)
+}
+
+// applyLogLevel 由 log 包注入，避免 config → util/log 循环依赖。
+// 未注入时 log.level 热更新被忽略（启动时仍从环境变量读取）。
+var applyLogLevel = func(string) error { return nil }
+
+// SetLogLevelApplier 注册 log.level 热更新回调（cmd 启动时注入）。
+func SetLogLevelApplier(fn func(string) error) {
+	if fn != nil {
+		applyLogLevel = fn
+	}
 }
 
 // ============================================================================
@@ -826,7 +867,7 @@ func EngagementMetaSpecs() []MetaSpec {
 		{Key: KeyEngagementThreshold, Category: "Engagement", Description: "LLM 快判评分阈值 0-100（默认 0=传统 YES/NO 模式，更高=更挑剔）"},
 		{Key: KeyEngagementAutoAdjustFreq, Category: "Engagement", Description: "是否自动根据群组活跃度调整参与频率（默认 false）"},
 		{Key: KeyEngagementUnansweredSilence, Category: "Engagement", Description: "主动回复后无人回应即视为拒绝的等待时长（默认 3m；超时只结算不补发）"},
-		{Key: KeyEngagementUnansweredEpisodeBoundary, Category: "Engagement", Description: "拒绝后仍禁止点名此人；超过此时长才允许房间级参与（如 5h，默认 5h）。未设置时用默认 5h。完全恢复需对方 @ / 私聊。修改后需重启 Bot"},
+		{Key: KeyEngagementUnansweredEpisodeBoundary, Category: "Engagement", Description: "拒绝后仍禁止点名此人；超过此时长才允许房间级参与（如 5h，默认 5h）。未设置时用默认 5h。完全恢复需对方 @ / 私聊。保存后下一次判定即生效。"},
 	}
 }
 
@@ -918,8 +959,9 @@ func (b *Builder) GetTimezoneLocation() *time.Location {
 // SystemMetaSpecs 返回系统配置项的元数据。
 func SystemMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeySystemTimezone, Category: "System", Description: "系统时区（IANA 标识符，如 Asia/Shanghai、UTC）。为空时使用服务器本地时区。影响 bot 时间感知和 Docker 沙箱容器时区。"},
-		{Key: KeySystemProxy, Category: "System", Description: "全局出口代理（URL，如 http://user:pass@host:port、socks5://host:port）。为空时直连（默认）。设置后主机侧所有出站请求（LLM、channel 等）与 bot Docker 容器内的请求统一走该代理，是「全站出口收敛 / SSRF 防护」的最简开关。"},
+		{Key: KeySystemTimezone, Category: "System", Description: "系统时区（IANA 标识符，如 Asia/Shanghai、UTC）。为空时使用服务器本地时区。影响 bot 时间感知和 Docker 沙箱容器时区。已运行的 Bot / 容器需重启后才换时区。"},
+		{Key: KeySystemProxy, Category: "System", Description: "全局出口代理（URL，如 http://user:pass@host:port、socks5://host:port）。为空时直连（默认）。设置后主机侧所有出站请求（LLM、channel 等）统一走该代理；保存后立即更新进程环境变量。已运行的 Bot 容器需重建后才换容器内代理。"},
+		{Key: KeyLogLevel, Category: "System", Description: "日志级别：debug / info / warn / error（默认 info）。保存后立即生效。"},
 	}
 }
 
@@ -930,8 +972,7 @@ func SystemMetaSpecs() []MetaSpec {
 // 现集中到配置模块，用户可在前端「系统配置」页编辑并持久化。
 // 未配置的字段自动使用 DefaultMemoryWindowConfig() 的值。
 //
-// 注意：记忆窗口在 bot 初始化时（NewWindow）读取一次并缓存于 bot 生命周期内，
-// 因此修改后需重启 bot 才生效（与多数需要重启的基础设施配置一致）。
+// 运行中的 Bot 通过 Window.SetConfigSource 每次召回现取，保存后下一轮即生效。
 type MemoryWindowConfig struct {
 	// MaxContextTokens 模型最大上下文窗口（token 数）。GLM-5.2/5.3=1M（1000000）。
 	MaxContextTokens int
@@ -977,12 +1018,12 @@ func (b *Builder) GetMemoryWindowConfig() MemoryWindowConfig {
 // MemoryWindowMetaSpecs 返回记忆窗口配置项的元数据，用于注册到前端设置界面。
 func MemoryWindowMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）的回退值。优先采用主模型自身配置（provider.<x>.models[].contextLength），仅当模型未配置时才回退到此全局值（默认 GLM-5.2/5.3 的 1M=1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 128000）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 4096，约 12288 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。原默认 7281 在 1M 上下文模型下会把'最近 50 条原始笔记'灌满整段预算（实测每轮 ~52K 字节），既浪费上下文又诱发重复退化；降到 4096 仍保留充足人味，同时压住体积。修改后需重启 bot 生效。"},
-		{Key: KeyMemoryWindowCompressThreshold, Category: "MemoryWindow", Description: "触发记忆压缩的阈值比例 0.0~1.0（默认 0.8）。修改后需重启 bot 生效。"},
+		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）的回退值。优先采用主模型自身配置（provider.<x>.models[].contextLength），仅当模型未配置时才回退到此全局值（默认 GLM-5.2/5.3 的 1M=1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。保存后下一轮记忆召回即生效。"},
+		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。保存后下一轮记忆召回即生效。"},
+		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 128000）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。保存后下一轮记忆召回即生效。"},
+		{Key: KeyMemoryWindowBudgetRatio, Category: "MemoryWindow", Description: "memory 可使用的窗口比例 0.0~1.0（默认 0.15）。保存后下一轮记忆召回即生效。"},
+		{Key: KeyMemoryWindowMaxMemoryTokens, Category: "MemoryWindow", Description: "记忆注入的硬上限 token 数（默认 4096，约 12288 字符）。无论可用空间多大，实际注入的 memory context 不超过此值。原默认 7281 在 1M 上下文模型下会把'最近 50 条原始笔记'灌满整段预算（实测每轮 ~52K 字节），既浪费上下文又诱发重复退化；降到 4096 仍保留充足人味，同时压住体积。保存后下一轮记忆召回即生效。"},
+		{Key: KeyMemoryWindowCompressThreshold, Category: "MemoryWindow", Description: "触发记忆压缩的阈值比例 0.0~1.0（默认 0.8）。保存后下一轮记忆召回即生效。"},
 	}
 }
 
@@ -1115,14 +1156,14 @@ func (b *Builder) GetCompactionConfig() CompactionConfig {
 // CompactionMetaSpecs 返回会话压缩配置项的元数据，用于注册到前端设置界面。
 func CompactionMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeyCompactionMaxTokens, Category: "Compaction", Description: "会话压缩假定的上下文窗口预算（token 数，默认 64000）。可用空间 = 此值 - reserved_tokens，超出即触发压缩。取比模型真实上限更小的保守值使压缩更早触发、预留安全余量。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionReservedTokens, Category: "Compaction", Description: "为系统消息和新回复预留的 token 数（默认 20000）。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionTailTokens, Category: "Compaction", Description: "压缩时保留的最近 token 数（不被摘要化，默认 8000）。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionMinMessagesToCompact, Category: "Compaction", Description: "触发压缩的最小消息数（默认 6，少于则不压缩）。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionSummaryMaxTokens, Category: "Compaction", Description: "LLM 生成摘要的最大 token 数（默认 4096）。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionToolOutputThreshold, Category: "Compaction", Description: "单个工具输出超过此 token 数（默认 500）在 pruning 阶段被裁剪为占位符。修改后需重启 bot 生效。"},
-		{Key: KeyCompactionAuto, Category: "Compaction", Description: "是否启用自动会话压缩（默认 true）。关闭后仅做工具输出裁剪、不再 LLM 摘要。修改后需重启 bot 生效。"},
+		{Key: KeyCompactionMaxTokens, Category: "Compaction", Description: "会话压缩假定的上下文窗口预算（token 数，默认 64000）。可用空间 = 此值 - reserved_tokens，超出即触发压缩。取比模型真实上限更小的保守值使压缩更早触发、预留安全余量。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionReservedTokens, Category: "Compaction", Description: "为系统消息和新回复预留的 token 数（默认 20000）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionTailTokens, Category: "Compaction", Description: "压缩时保留的最近 token 数（不被摘要化，默认 8000）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionMinMessagesToCompact, Category: "Compaction", Description: "触发压缩的最小消息数（默认 6，少于则不压缩）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionSummaryMaxTokens, Category: "Compaction", Description: "LLM 生成摘要的最大 token 数（默认 4096）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionToolOutputThreshold, Category: "Compaction", Description: "单个工具输出超过此 token 数（默认 500）在 pruning 阶段被裁剪为占位符。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionAuto, Category: "Compaction", Description: "是否启用自动会话压缩（默认 true）。关闭后仅做工具输出裁剪、不再 LLM 摘要。保存后下一轮对话即生效。"},
 	}
 }
 
@@ -1383,9 +1424,8 @@ func AllMetaSpecs() []MetaSpec {
 // GlobalMetaSpecs 仅返回适合在系统设置页面展示的全局配置项。
 // 排除 Bot / Soul / Dreaming / ToolPolicy 等 per-bot 配置，
 // 以及 Database / Workspace 等需要重启才生效的基础设施配置。
-// 记忆窗口（MemoryWindow）、LLM 客户端可靠性（LLM）、会话压缩（Compaction）
-// 是全局共享的模型相关参数，虽需重启 bot 生效，但属于用户应在前端可调的模型参数，故纳入。
-// 主动参与的未回应情节边界（Engagement unanswered_*）同样是全局社交节奏，纳入系统设置。
+// 记忆窗口（MemoryWindow）、会话压缩（Compaction）、未回应节奏（unanswered_*）
+// 在下一轮对话/召回/判定现取。LLM 客户端超时/重试仍在创建 Provider 时固化。
 // 注意：max_tokens 不在此列——它跟随「模型」而非全局/bot，由各 ModelDef.MaxTokens
 // （provider 模型配置页的每模型 maxTokens 字段）独立设置。
 func GlobalMetaSpecs() []MetaSpec {
@@ -1448,15 +1488,15 @@ func DefaultMap() map[string]string {
 		KeyWorkflowAnalyzerMaxDuration:  "600000",
 		KeyWorkflowGoalMaxIterations:    "5",
 		// Engagement
-		KeyEngagementEnabled:            "false",
-		KeyEngagementReplyProbability:   "0.15",
-		KeyEngagementRateLimitCapacity:  "3",
-		KeyEngagementRateLimitInterval:  "1h",
-		KeyEngagementBackoffBaseSeconds: "10",
-		KeyEngagementBackoffCapSeconds:  "300",
-		KeyEngagementBackoffStartCount:  "3",
-		KeyEngagementBurstInterval:      "5",
-		KeyEngagementWaitTimeout:        "30",
+		KeyEngagementEnabled:                   "false",
+		KeyEngagementReplyProbability:          "0.15",
+		KeyEngagementRateLimitCapacity:         "3",
+		KeyEngagementRateLimitInterval:         "1h",
+		KeyEngagementBackoffBaseSeconds:        "10",
+		KeyEngagementBackoffCapSeconds:         "300",
+		KeyEngagementBackoffStartCount:         "3",
+		KeyEngagementBurstInterval:             "5",
+		KeyEngagementWaitTimeout:               "30",
 		KeyEngagementBackoffBypass:             "0",
 		KeyEngagementThreshold:                 "0",
 		KeyEngagementUnansweredSilence:         "3m",

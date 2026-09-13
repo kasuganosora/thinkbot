@@ -75,6 +75,26 @@ func TestCountRunes(t *testing.T) {
 // Compaction 测试
 // ============================================================================
 
+func TestCompactor_ConfigSourceLive(t *testing.T) {
+	c := NewCompactor(CompactionConfig{
+		MaxTokens:      100000,
+		ReservedTokens: 10000,
+		TailTokens:     5000,
+	})
+	if c.UsableTokens() != 90000 {
+		t.Fatalf("initial usable = %d", c.UsableTokens())
+	}
+	cur := CompactionConfig{MaxTokens: 20000, ReservedTokens: 5000, TailTokens: 1000}
+	c.SetConfigSource(func() CompactionConfig { return cur })
+	if c.UsableTokens() != 15000 {
+		t.Fatalf("live usable = %d, want 15000", c.UsableTokens())
+	}
+	cur.MaxTokens = 8000
+	if c.UsableTokens() != 3000 {
+		t.Fatalf("updated usable = %d, want 3000", c.UsableTokens())
+	}
+}
+
 func TestCompactor_UsableTokens(t *testing.T) {
 	c := NewCompactor(CompactionConfig{
 		MaxTokens:      100000,

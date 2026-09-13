@@ -143,6 +143,23 @@ func TestOutreachBreaker_PrivateMessageCountsAsResponse(t *testing.T) {
 	}
 }
 
+func TestOutreachBreaker_ConfigSourceLive(t *testing.T) {
+	b := NewOutreachBreaker(OutreachBreakerConfig{
+		SilenceWindow:   3 * time.Minute,
+		EpisodeBoundary: 5 * time.Hour,
+	}, zap.NewNop().Sugar())
+	cur := OutreachBreakerConfig{SilenceWindow: 10 * time.Second, EpisodeBoundary: time.Minute}
+	b.SetConfigSource(func() OutreachBreakerConfig { return cur })
+	got := b.liveConfig()
+	if got.SilenceWindow != 10*time.Second || got.EpisodeBoundary != time.Minute {
+		t.Fatalf("live config = %+v", got)
+	}
+	cur.SilenceWindow = 2 * time.Second
+	if b.liveConfig().SilenceWindow != 2*time.Second {
+		t.Fatalf("updated silence = %v", b.liveConfig().SilenceWindow)
+	}
+}
+
 func TestOutreachBreaker_SilenceWindowLazySettle(t *testing.T) {
 	b, clk := newTestBreaker()
 	b.RecordProactiveReply("room-1", "u1")

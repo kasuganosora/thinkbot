@@ -177,6 +177,7 @@ Rules:
 // Compactor 执行上下文压缩。
 type Compactor struct {
 	config CompactionConfig
+	cfgFn  func() CompactionConfig // 非 nil 时每次读取现取（热加载）
 
 	mu              sync.Mutex
 	previousSummary string // 上次生成的摘要（用于增量更新）
@@ -216,14 +217,56 @@ func NewCompactor(config CompactionConfig) *Compactor {
 	return &Compactor{config: config}
 }
 
+// SetConfigSource 设置运行时配置源。之后 ShouldCompact 等每次调用都会现取，
+// 使系统配置页对 compaction.* 的修改无需重启 Bot。fn 为 nil 则回到构造时的快照。
+func (c *Compactor) SetConfigSource(fn func() CompactionConfig) {
+	c.mu.Lock()
+	c.cfgFn = fn
+	c.mu.Unlock()
+}
+
+func (c *Compactor) liveConfig() CompactionConfig {
+	c.mu.Lock()
+	fn := c.cfgFn
+	base := c.config
+	c.mu.Unlock()
+	if fn == nil {
+		return base
+	}
+	cfg := fn()
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = base.MaxTokens
+	}
+	if cfg.ReservedTokens <= 0 {
+		cfg.ReservedTokens = base.ReservedTokens
+	}
+	if cfg.TailTokens <= 0 {
+		cfg.TailTokens = base.TailTokens
+	}
+	if cfg.TailTurns <= 0 {
+		cfg.TailTurns = base.TailTurns
+	}
+	if cfg.MinMessagesToCompact <= 0 {
+		cfg.MinMessagesToCompact = base.MinMessagesToCompact
+	}
+	if cfg.SummaryMaxTokens <= 0 {
+		cfg.SummaryMaxTokens = base.SummaryMaxTokens
+	}
+	if cfg.ToolOutputThreshold <= 0 {
+		cfg.ToolOutputThreshold = base.ToolOutputThreshold
+	}
+	return cfg
+}
+
 // Config 返回压缩配置。
 func (c *Compactor) Config() CompactionConfig {
-	return c.config
+	return c.liveConfig()
 }
 
 // UsableTokens 返回可用 token 数（MaxTokens - ReservedTokens）。
 func (c *Compactor) UsableTokens() int {
-	return max(c.config.MaxTokens-c.config.ReservedTokens, c.config.TailTokens)
+	cfg := c.liveConfig()
+	return max(cfg.MaxTokens-cfg.ReservedTokens, cfg.TailTokens)
 }
 
 // IsOverflow 检查参数是否超过 token 上限。
@@ -247,13 +290,14 @@ func (c *Compactor) IsOverflowByUsage(usage *Usage) bool {
 
 // ShouldCompact 判断是否需要压缩。
 func (c *Compactor) ShouldCompact(params GenerateParams) bool {
-	if !c.config.Auto {
+	cfg := c.liveConfig()
+	if !cfg.Auto {
 		return false
 	}
 	if c.isDoomLoop() {
 		return false
 	}
-	if len(params.Messages) < c.config.MinMessagesToCompact {
+	if len(params.Messages) < cfg.MinMessagesToCompact {
 		return false
 	}
 	return c.IsOverflow(params)
@@ -349,7 +393,7 @@ func (c *Compactor) compactMessageToolOutputs(msg Message) Message {
 				continue
 			}
 			tokens := EstimatePartResultTokens(tr.Result)
-			if tokens > c.config.ToolOutputThreshold {
+			if tokens > c.liveConfig().ToolOutputThreshold {
 				originalLen := 0
 				if s, ok := tr.Result.(string); ok {
 					originalLen = len(s)
@@ -455,7 +499,7 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 		System:   CompactionSystemPrompt,
 		Messages: summaryMessages,
 	}
-	maxTokens := c.config.SummaryMaxTokens
+	maxTokens := c.liveConfig().SummaryMaxTokens
 	summaryParams.MaxTokens = &maxTokens
 
 	// 调用 LLM 生成摘要
@@ -504,7 +548,7 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 //
 // 保留最近 TailTurns 轮完整对话（用户消息开始的一轮）。
 func (c *Compactor) selectTailSplit(messages []Message) int {
-	limit := c.config.TailTurns
+	limit := c.liveConfig().TailTurns
 	if limit <= 0 {
 		return len(messages) // 全部保留
 	}
@@ -709,7 +753,7 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 		return "", fmt.Errorf("compactor: no provider for head summarization")
 	}
 	prompt := c.buildSummaryPrompt(head)
-	maxTokens := c.config.SummaryMaxTokens
+	maxTokens := c.liveConfig().SummaryMaxTokens
 	temp := 0.3
 	params := GenerateParams{
 		Model:       ChatModel(model),

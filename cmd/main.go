@@ -65,6 +65,8 @@ func main() {
 	}
 	defer func() { _ = log.Logger.Sync() }()
 
+	config.SetLogLevelApplier(log.SetLevel)
+
 	log.Logger.Infow("starting thinkbot")
 
 	app := fx.New(
