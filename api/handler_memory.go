@@ -1,14 +1,37 @@
 package api
 
 import (
+	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
+
+// memoryBundle 返回该 Bot 的梦境 bundle。Bot 在跑时用现成的；否则按需构建（导入/查询
+// 在 Bot 未启动时也能碰到 SQLite 里的分层记忆）。调用方必须 defer 返回的 stop。
+// bundle==nil 且 err==nil 表示未启用梦境。
+func (s *Server) memoryBundle(botID string) (*bot.DreamingBundle, func(), error) {
+	nop := func() {}
+	if s.botSvc == nil {
+		return nil, nop, errs.Internal("bot service not initialized")
+	}
+	if bundle, ok := s.botSvc.GetDreamingBundle(botID); ok && bundle != nil {
+		return bundle, nop, nil
+	}
+	bundle, err := s.botSvc.BuildDreamingBundleOnDemand(botID)
+	if err != nil {
+		return nil, nop, err
+	}
+	if bundle == nil {
+		return nil, nop, nil
+	}
+	return bundle, bundle.Stop, nil
+}
 
 // ============================================================================
 // 记忆查询 Handler — 只读访问 Bot 的分层记忆（admin）
@@ -41,12 +64,17 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 		}
 	}
 
-	bundle, ok := s.botSvc.GetDreamingBundle(botID)
-	if !ok {
+	bundle, stop, berr := s.memoryBundle(botID)
+	if berr != nil {
+		Fail(c, errs.Wrap(berr, "failed to open memory store"))
+		return
+	}
+	if bundle == nil {
 		// 未启用梦境巩固时分层存储不存在：返回空列表而非报错，由前端显示引导态。
 		OK(c, gin.H{"entries": []gin.H{}, "total": 0, "tier": tierStr, "enabled": false})
 		return
 	}
+	defer stop()
 
 	ctx := c.Request.Context()
 
@@ -143,11 +171,16 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 func (s *Server) handleMemoryStats(c *gin.Context) {
 	botID := c.Param("id")
 
-	bundle, ok := s.botSvc.GetDreamingBundle(botID)
-	if !ok {
+	bundle, stop, berr := s.memoryBundle(botID)
+	if berr != nil {
+		Fail(c, errs.Wrap(berr, "failed to open memory store"))
+		return
+	}
+	if bundle == nil {
 		OK(c, gin.H{"l1Count": 0, "l2Estimate": 0, "l3Count": 0, "enabled": false})
 		return
 	}
+	defer stop()
 
 	mgr := bundle.TieredMgr
 	if mgr == nil {
@@ -350,20 +383,19 @@ func (s *Server) handleDeleteTieredMemoryEntry(c *gin.Context) {
 		scope = memory.Scope{Kind: memory.ScopeKind(scopeStr)}
 	}
 
-	bundle, ok := s.botSvc.GetDreamingBundle(botID)
-	if !ok {
-		// bot 可能已停止但 dreaming 已配置：按需构建 bundle 以触达分层存储。
-		var berr error
-		bundle, berr = s.botSvc.BuildDreamingBundleOnDemand(botID)
-		if berr != nil {
-			Fail(c, errs.Wrap(berr, "failed to build dreaming bundle on demand"))
-			return
-		}
-		if bundle == nil {
-			Fail(c, errs.NotFound("dreaming not enabled for this bot"))
-			return
-		}
-		defer bundle.Stop()
+	bundle, stop, berr := s.memoryBundle(botID)
+	if berr != nil {
+		Fail(c, errs.Wrap(berr, "failed to open memory store"))
+		return
+	}
+	if bundle == nil {
+		Fail(c, errs.NotFound("dreaming not enabled for this bot"))
+		return
+	}
+	defer stop()
+	if bundle.TieredMgr == nil {
+		Fail(c, errs.Internal("memory manager not initialized"))
+		return
 	}
 
 	store := bundle.TieredMgr.Store()
@@ -379,4 +411,60 @@ func (s *Server) handleDeleteTieredMemoryEntry(c *gin.Context) {
 
 	auditLog(c, s.logger, "delete_memory_entry", "bot_id", botID, "tier", tierStr, "scope", scopeStr, "entry_id", id)
 	OK(c, gin.H{"deleted": id})
+}
+
+// handleImportMemohMemory 从 Memoh 工作空间备份（.tar / .tar.gz）导入分层记忆。
+// POST /api/bots/:id/memory/import  multipart field=file
+//
+// 只解析 memory/YYYY-MM-DD.md 与 PROFILES.md；心跳/空转/小时画像快照丢弃。
+func (s *Server) handleImportMemohMemory(c *gin.Context) {
+	botID := c.Param("id")
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 256<<20)
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		Fail(c, errs.BadRequest("file is required: "+err.Error()))
+		return
+	}
+	f, err := fileHeader.Open()
+	if err != nil {
+		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	bundle, stop, berr := s.memoryBundle(botID)
+	if berr != nil {
+		Fail(c, errs.Wrap(berr, "failed to open memory store"))
+		return
+	}
+	if bundle == nil {
+		Fail(c, errs.NotFound("dreaming not enabled for this bot"))
+		return
+	}
+	defer stop()
+	if bundle.TieredMgr == nil {
+		Fail(c, errs.Internal("memory manager not initialized"))
+		return
+	}
+	store := bundle.TieredMgr.Store()
+	if store == nil {
+		Fail(c, errs.Internal("memory store not initialized"))
+		return
+	}
+
+	report, err := memory.ImportMemohArchive(c.Request.Context(), store, botID, f)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "memoh import failed"))
+		return
+	}
+	auditLog(c, s.logger, "import_memoh_memory", "bot_id", botID,
+		"imported", report.Imported, "junk", report.SkippedJunk, "skipped", report.Skipped)
+	OK(c, gin.H{
+		"imported":    report.Imported,
+		"skipped":     report.Skipped,
+		"skippedJunk": report.SkippedJunk,
+		"profiles":    report.Profiles,
+		"errors":      report.Errors,
+	})
 }

@@ -19,6 +19,7 @@
 - **批量原子操作**：单次 `batch` 调用执行 add+replace+remove，按最终字符预算验证
 - **跨平台记忆镜像**：`ToolConfig.BotID` 非空时，channel 作用域记忆在 add/replace/remove 时自动同步镜像到 BotScope（镜像 ID 带 `xch:` 前缀，正文带 `[<channel>]` 来源标注），使任意频道会话可召回其他平台的活动
 - **历史对话回灌**：`BackfillFromChatHistory` 从 `user_message_events` 事件流（append-only，权威数据源）一次性 bootstrap 补灌 L0，水位线 `bot.<id>.memory.backfill.event_watermark` 独立持久化，清空记忆表后重启也不会回潮
+- **Memoh 备份导入**：`ImportMemohArchive` 流式读取工作空间 tar/tar.gz 的 `memory/YYYY-MM-DD.md` + `PROFILES.md` 写入 L1/L3（`source=memoh`）。心跳 / 「无事」空转 / 过短 / 小时 `user_profile` 快照丢弃；`MEMORY.md` 与媒体不读。幂等 id=`memoh_`+hash。管理页「导入 Memoh 备份」走 `POST /api/bots/:id/memory/import`
 - **用户画像**：`LLMProfiler` 由 `NewDreamingBundle` 注入 `TieredManager` + `DreamManager.SetUserProfiler`。每次梦境（含无 Light 候选的早退）对活跃 `user:*` scope 蒸馏 L3；`Confidence < 0.4` 或空内容丢弃，整批替换 `source=profiler` 的旧 L3（其它来源保留）。单次最多 8 个 user scope
 - **Bot 自我画像**：`BotProfileProfiler` 从 BotScope 的 L1+L2 蒸馏 Bot 量化人格（energy_level / patience / preferred_topics / verbosity / personality）写入 L3，由 dreaming 结束时触发。`Confidence < 0.4` 不写 L3、不回调 `SetOnBotProfileUpdated`，以免覆盖 SOUL.md 种子（SOUL 热重载仍走 `ParseSoulProfile`，不受此门控）
 - **梦境巩固**：三相位后台记忆整理管线（Light → REM → Deep），证据驱动评分门控，从短期信号提取长期知识
@@ -49,6 +50,7 @@
 | `SyncExecutor` / `BackgroundSyncManager` | 后台同步执行器（单 worker 串行，panic 恢复）/ 后台写入协调器（debounce 默认 5s） |
 | `PrefetchManager` | 预取缓存管理器 |
 | `DreamManager` / `DreamConfig` | 梦境巩固管线（Light → REM → Deep） |
+| `MemohImportReport` | Memoh 工作空间备份导入结果（`ImportMemohArchive` / `ImportMemohDir`） |
 | `DreamReport` / `DreamCandidate` / `DreamPhase` | 梦境运行报告 / 候选记忆 / 相位 |
 | `ScoreBreakdown` | 6 信号评分明细 |
 | `FormationPipeline` / `FormationConfig` / `FactItem` / `FactDecision` | 对话后即时记忆提取管线（Extract → Gather → Decide → Apply） |

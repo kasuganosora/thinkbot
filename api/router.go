@@ -120,9 +120,11 @@ func (s *Server) registerRoutes() {
 				// 分层记忆（嵌套在 Bot 下，真实存储为数据库 tiered_memories 表，按 L0~L3 分层）
 				// GET  /:id/memory        → handleQueryMemory：返回合并/分层的记忆条目（前端 memoryApi.query）
 				// GET  /:id/memory/stats  → handleMemoryStats：L1/L2/L3 计数
+				// POST /:id/memory/import → handleImportMemohMemory：从 Memoh tar.gz 导入 L1/L3
 				// DELETE /:id/memory/entry → handleDeleteTieredMemoryEntry：按 id+tier+scope 删除单条记忆
 				botsAdmin.GET("/:id/memory", s.handleQueryMemory)
 				botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
+				botsAdmin.POST("/:id/memory/import", s.handleImportMemohMemory)
 				botsAdmin.DELETE("/:id/memory/entry", s.handleDeleteTieredMemoryEntry)
 
 				// Channel 配置管理 — 已废弃，统一使用 Platform API（/api/bots/:id/platforms）
