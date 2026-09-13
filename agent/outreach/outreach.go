@@ -28,6 +28,9 @@ const (
 // 过期窗口：pending 且 due_at 早于 now-ExpireAfter 的承诺不再补发。
 const ExpireAfter = 7 * 24 * time.Hour
 
+// MaxAttempts 单条承诺连续失败上限。达到后标 failed，不再进 ListDue。
+const MaxAttempts = 3
+
 // PlatformConfig 单个平台的主动开口开关与配额。
 type PlatformConfig struct {
 	Enabled            bool    `json:"enabled"`

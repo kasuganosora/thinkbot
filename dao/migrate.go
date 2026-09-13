@@ -56,6 +56,7 @@ func ensureColumns(db *gorm.DB) error {
 		{"chat_messages", "session_id", "session_id TEXT NOT NULL DEFAULT ''"},
 		{"bot_tool_permissions", "auto", "auto INTEGER NOT NULL DEFAULT 0"},
 		{"bot_tool_permissions", "chat_id", "chat_id TEXT NOT NULL DEFAULT ''"},
+		{"outreach_commitments", "attempts", "attempts INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, s := range specs {
 		var cnt int64
