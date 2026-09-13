@@ -202,6 +202,13 @@ POST   /api/bots/:id/cron/:jobId/resume  — 恢复任务
 POST   /api/bots/:id/cron/:jobId/trigger — 手动触发任务
 ```
 
+### 人格 SOUL.md（admin，嵌套在 Bot 下）
+
+```
+GET  /api/bots/:id/soul — 读取人格文件；文件不存在时返回默认模板且不落盘
+PUT  /api/bots/:id/soul — 写入人格文件；Bot 在跑则立即热加载
+```
+
 ### 梦境巩固（admin，嵌套在 Bot 下）
 
 ```

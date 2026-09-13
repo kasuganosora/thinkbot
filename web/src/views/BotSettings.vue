@@ -46,7 +46,9 @@
           <!-- 容器 -->
           <div v-else-if="activeKey === 'container'" class="pad"><BotContainer :bot-id="bot.id" /></div>
           <!-- 记忆 -->
-          <BotMemory v-else-if="activeKey === 'memory'" :bot-id="bot.id" />
+          <BotMemory v-else-if="activeKey === 'memory'" :bot-id="bot.id" @open-dreaming="activeKey = 'dreaming'" />
+          <!-- 梦境巩固 -->
+          <div v-else-if="activeKey === 'dreaming'" class="pad"><BotDreaming :bot-id="bot.id" /></div>
           <!-- 平台 -->
           <BotPlatforms v-else-if="activeKey === 'platform'" :bot-id="bot.id" />
           <!-- 访问控制 -->
@@ -66,8 +68,8 @@
           <div v-else-if="activeKey === 'outreach'" class="pad"><BotOutreach :bot-id="bot.id" /></div>
           <!-- 上下文压缩 -->
           <div v-else-if="activeKey === 'compact'" class="pad"><BotCompaction :bot-id="bot.id" /></div>
-          <!-- 人格（占位） -->
-          <Placeholder v-else-if="activeKey === 'persona'" title="人格" desc="编辑 Bot 人格与系统提示（待完善）。" />
+          <!-- 人格 -->
+          <div v-else-if="activeKey === 'persona'" class="pad"><BotPersona :bot-id="bot.id" /></div>
           <!-- 定时任务 -->
           <div v-else-if="activeKey === 'cron'" class="pad"><BotCronJobs :bot-id="bot.id" /></div>
           <!-- 技能 -->
@@ -108,8 +110,10 @@ import BotHeartbeat from '@/components/bot/BotHeartbeat.vue'
 import BotOutreach from '@/components/bot/BotOutreach.vue'
 import BotTerminal from '@/components/bot/BotTerminal.vue'
 import BotBrowser from '@/components/bot/BotBrowser.vue'
+import BotDreaming from '@/components/bot/BotDreaming.vue'
+import BotPersona from '@/components/bot/BotPersona.vue'
 
-// 占位组件（11 项未实现面板的统一空态）
+// 占位组件（邮件仍未实现）
 const Placeholder = {
   props: { title: String, desc: String },
   setup(p) {
@@ -130,6 +134,7 @@ const navItems = [
   { key: 'general', label: '通用' },
   { key: 'container', label: '容器' },
   { key: 'memory', label: '记忆' },
+  { key: 'dreaming', label: '梦境' },
   { key: 'platform', label: '平台' },
   { key: 'access', label: '访问控制' },
   { key: 'toolperm', label: '工具权限' },

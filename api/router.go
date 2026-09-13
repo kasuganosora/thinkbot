@@ -101,6 +101,10 @@ func (s *Server) registerRoutes() {
 				botsAdmin.POST("/:id/start", s.handleStartBot)
 				botsAdmin.POST("/:id/stop", s.handleStopBot)
 
+				// 人格（SOUL.md）
+				botsAdmin.GET("/:id/soul", s.handleGetBotSoul)
+				botsAdmin.PUT("/:id/soul", s.handleUpdateBotSoul)
+
 				// 梦境巩固配置（嵌套在 Bot 下）
 				botsAdmin.GET("/:id/dreaming", s.handleGetDreamingConfig)
 				botsAdmin.PUT("/:id/dreaming", s.handleUpdateDreamingConfig)

@@ -408,7 +408,33 @@ function applyCronPatch(j, p) {
   j.updated_at = nowISO()
 }
 
-// ============================ 7. 梦境巩固 ============================
+// ============================ 7. 人格（SOUL.md） ============================
+
+export const soulApi = {
+  get(botId) {
+    if (USE_MOCK) {
+      return mockResolve(() => ({
+        content: db().soul?.[botId] || '',
+        exists: !!(db().soul && db().soul[botId]),
+        hotReloaded: false
+      }))
+    }
+    return request('GET', `/api/bots/${botId}/soul`)
+  },
+  update(botId, payload) {
+    if (USE_MOCK) {
+      return mockResolve(() => {
+        if (!db().soul) db().soul = {}
+        db().soul[botId] = payload.content
+        saveDB()
+        return { content: payload.content, exists: true, hotReloaded: false }
+      })
+    }
+    return request('PUT', `/api/bots/${botId}/soul`, payload)
+  }
+}
+
+// ============================ 7b. 梦境巩固 ============================
 
 export const dreamingApi = {
   getConfig(botId) {
