@@ -13,6 +13,9 @@ import (
 // Logger 全局 SugaredLogger 实例。
 var Logger *zap.SugaredLogger
 
+// levelEnabler 全局级别开关，供系统配置页热更新 log.level。
+var levelEnabler zap.AtomicLevel
+
 // ============================================================================
 // 输出源
 // ============================================================================
@@ -147,6 +150,16 @@ func Init() error {
 // 每个输出源可以有自己的级别过滤和格式：
 //   - stdout/stderr：默认 console 格式（彩色级别）
 //   - file：默认 JSONL 格式（便于程序解析）
+// SetLevel 热更新全局日志级别（debug/info/warn/error）。
+func SetLevel(name string) error {
+	l, err := zapcore.ParseLevel(name)
+	if err != nil {
+		return err
+	}
+	levelEnabler.SetLevel(l)
+	return nil
+}
+
 func InitWithConfig(cfg Config) error {
 	// --- 确定全局日志级别 ---
 	level := zapcore.InfoLevel
@@ -155,6 +168,7 @@ func InitWithConfig(cfg Config) error {
 			level = l
 		}
 	}
+	levelEnabler = zap.NewAtomicLevelAt(level)
 
 	// --- 确定 Outputs（向后兼容） ---
 	outputs := cfg.Outputs
@@ -185,7 +199,7 @@ func InitWithConfig(cfg Config) error {
 	fileCache := map[string]zapcore.WriteSyncer{}
 
 	for _, out := range outputs {
-		core, err := buildCore(out, baseEncCfg, level, fileCache)
+		core, err := buildCore(out, baseEncCfg, levelEnabler, fileCache)
 		if err != nil {
 			return err
 		}
@@ -196,7 +210,7 @@ func InitWithConfig(cfg Config) error {
 
 	if len(cores) == 0 {
 		// 兜底：至少输出到 stdout
-		cores = append(cores, makeConsoleCore(baseEncCfg, os.Stdout, level))
+		cores = append(cores, makeConsoleCore(baseEncCfg, os.Stdout, levelEnabler))
 	}
 
 	// --- 组装 ---
@@ -214,7 +228,7 @@ func InitWithConfig(cfg Config) error {
 
 // buildCore 为单个输出源构建 zapcore.Core。
 // fileCache 复用同一文件路径的 lumberjack 实例，避免重复轮转冲突。
-func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore.Level, fileCache map[string]zapcore.WriteSyncer) (zapcore.Core, error) {
+func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore.LevelEnabler, fileCache map[string]zapcore.WriteSyncer) (zapcore.Core, error) {
 	// --- 确定该输出源的级别 ---
 	outLevel := globalLevel
 	if out.Level != "" {
@@ -268,7 +282,7 @@ func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore
 }
 
 // makeConsoleCore 创建 console 格式的 Core。
-func makeConsoleCore(baseEncCfg zapcore.EncoderConfig, w zapcore.WriteSyncer, level zapcore.Level) zapcore.Core {
+func makeConsoleCore(baseEncCfg zapcore.EncoderConfig, w zapcore.WriteSyncer, level zapcore.LevelEnabler) zapcore.Core {
 	encCfg := baseEncCfg
 	encCfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	return zapcore.NewCore(
@@ -281,7 +295,7 @@ func makeConsoleCore(baseEncCfg zapcore.EncoderConfig, w zapcore.WriteSyncer, le
 // buildFileCore 创建文件输出 Core（JSONL，带滚动）。
 // fileCache 按完整文件路径复用 lumberjack 实例，避免多个输出源指向同一文件时
 // 各自独立轮转、互相破坏。
-func buildFileCore(out Output, encoder zapcore.Encoder, level zapcore.Level, fileCache map[string]zapcore.WriteSyncer) (zapcore.Core, error) {
+func buildFileCore(out Output, encoder zapcore.Encoder, level zapcore.LevelEnabler, fileCache map[string]zapcore.WriteSyncer) (zapcore.Core, error) {
 	dir := out.FileDir
 	if dir == "" {
 		dir = "."

@@ -14,8 +14,8 @@
 ### 读取优先级（从高到低）
 
 1. 运行时覆盖（`SetTemporary`）
-2. `.env` 文件
-3. 数据库缓存（`config_settings` 表，`Set`/`Reload` 后生效）
+2. 数据库缓存（`config_settings` 表，`Set`/`Reload` 后立即对后续 `Get` 生效）
+3. `.env` 文件（部署期种子）
 4. 操作系统环境变量（键名转换：`api.addr` → `API_ADDR`）
 5. 调用方提供的默认值
 
@@ -81,7 +81,9 @@ policy := builder.GetToolPolicy("mybot")        // → ToolPolicyConfig
 各配置组均有对应的 `DefaultXxxConfig()` 与 `XxxMetaSpecs()`；
 `AllMetaSpecs()` 汇总全部元数据，`DefaultMap()` 返回默认值映射。
 `GlobalMetaSpecs()` 返回系统设置页展示的全局项：System / MemoryWindow / LLM 客户端 / Compaction，
-外加 Engagement 的 `unanswered_*` 两项全局社交节奏参数（改后需重启 Bot）。
+外加 Engagement 的 `unanswered_*` 两项全局社交节奏参数（保存后下一次判定即生效）。
+MemoryWindow / Compaction 同样在下一轮对话/召回现取，无需重启 Bot。
+LLM 客户端超时/重试仍在创建 Provider 时固化，改后需重启 Bot。
 
 ### 常用配置键与默认值
 

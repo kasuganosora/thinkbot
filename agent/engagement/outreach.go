@@ -30,6 +30,8 @@ type OutreachBreaker struct {
 	mu       sync.Mutex
 	channels map[string]map[string]*userOutreachState // channelKey → userID → state
 	config   OutreachBreakerConfig
+	cfgMu    sync.RWMutex
+	cfgFn    func() OutreachBreakerConfig // 非 nil 时每次读取现取（热加载）
 	logger   *zap.SugaredLogger
 	nowFn    func() time.Time // 测试可注入；nil 则 time.Now
 }
@@ -82,6 +84,27 @@ func NewOutreachBreaker(cfg OutreachBreakerConfig, logger *zap.SugaredLogger) *O
 		config:   cfg,
 		logger:   logger.With("component", "outreach_breaker"),
 	}
+}
+
+// SetConfigSource 设置运行时配置源。沉默窗口 / 情节边界每次判定现取，
+// 使系统配置页对 engagement.unanswered_* 的修改无需重启 Bot。
+func (b *OutreachBreaker) SetConfigSource(fn func() OutreachBreakerConfig) {
+	b.cfgMu.Lock()
+	b.cfgFn = fn
+	b.cfgMu.Unlock()
+}
+
+func (b *OutreachBreaker) liveConfig() OutreachBreakerConfig {
+	b.cfgMu.RLock()
+	fn := b.cfgFn
+	base := b.config
+	b.cfgMu.RUnlock()
+	if fn == nil {
+		return base
+	}
+	cfg := fn()
+	cfg.normalize()
+	return cfg
 }
 
 func (b *OutreachBreaker) now() time.Time {
@@ -333,7 +356,7 @@ func (b *OutreachBreaker) settleExpiredLocked(channelKey string) {
 		if !st.pending {
 			continue
 		}
-		if now.Sub(st.repliedAt) < b.config.SilenceWindow {
+		if now.Sub(st.repliedAt) < b.liveConfig().SilenceWindow {
 			continue
 		}
 		b.declineLocked(channelKey, uid, st, "silence")
@@ -355,7 +378,7 @@ func (b *OutreachBreaker) pastEpisodeLocked(st *userOutreachState) bool {
 	if st.declinedAt.IsZero() {
 		return false
 	}
-	return b.now().Sub(st.declinedAt) >= b.config.EpisodeBoundary
+	return b.now().Sub(st.declinedAt) >= b.liveConfig().EpisodeBoundary
 }
 
 func (b *OutreachBreaker) gcLocked() {
