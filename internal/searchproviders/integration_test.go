@@ -180,4 +180,3 @@ func TestIntegration_Brave_AuthFailure(t *testing.T) {
 		t.Logf("auth failure message (informational): %v", err)
 	}
 }
-

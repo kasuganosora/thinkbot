@@ -84,14 +84,14 @@ type SnapshotConfig struct {
 // DefaultSnapshotConfig 返回默认快照配置。
 func DefaultSnapshotConfig() SnapshotConfig {
 	return SnapshotConfig{
-		Mode:            ModeLive,
-		MaxMemoryChars:  2200,
-		MaxUserChars:    1375,
-		MaxEntries:      20,
+		Mode:                 ModeLive,
+		MaxMemoryChars:       2200,
+		MaxUserChars:         1375,
+		MaxEntries:           20,
 		CompressTriggerRatio: 0.2,
-		Separator:       "\n§\n",
-		RefreshInterval: 5 * time.Minute,
-		RefreshTurns:    10,
+		Separator:            "\n§\n",
+		RefreshInterval:      5 * time.Minute,
+		RefreshTurns:         10,
 	}
 }
 

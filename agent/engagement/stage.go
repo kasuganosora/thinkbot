@@ -140,9 +140,9 @@ func (s *EngagementStage) Process(ctx context.Context, env *core.Envelope) (*cor
 	// 心跳自主唤醒：不经过 engagement 门控，直接进入下游 LLM 自主决策。
 	// 心跳消息并非被 @ 或时间线帖子，engagement 的「是否参与」语义对其无意义；
 	// 若在此走 policy 评估并被判定不 engage，会误设 KVSuppressReply 压制 bot 的自主发言。
-	if env.Message.Source == core.SourceHeartbeat {
+	if env.Message.Source == core.SourceHeartbeat || env.IsOutreach() {
 		env.Set("engagement.evaluated", false)
-		env.Set("engagement.heartbeat", true)
+		env.Set("engagement.heartbeat", env.Message.Source == core.SourceHeartbeat)
 		return env, nil
 	}
 

@@ -39,7 +39,7 @@ func TestSubAgentManager_ChatHardensWithChatTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn failed: %v", err)
 	}
-	defer mgr.Close(id)
+	defer func() { _ = mgr.Close(id) }()
 
 	start := time.Now()
 	// 无 deadline 的外部 ctx：Chat 必须自行套上 chatTimeout 并在 ~200ms 后返回错误，

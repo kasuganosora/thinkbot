@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm/openai"
 )
 
@@ -25,12 +26,16 @@ type integConfig struct {
 	BaseURL   string
 }
 
-var integCfg = integConfig{
-	Model:     envOr("INTEG_LLM_MODEL", "gpt-4o-mini"),
-	MaxTokens: 4096,
-	APIKey:    os.Getenv("INTEG_LLM_API_KEY"),
-	BaseURL:   os.Getenv("INTEG_LLM_BASE_URL"),
-}
+var integCfg = func() integConfig {
+	store := config.NewStore(nil)
+	_ = store.LoadEnvFile("../../.env")
+	return integConfig{
+		Model:     envOr("INTEG_LLM_MODEL", store.GetString("test.llm.model", "gpt-4o-mini")),
+		MaxTokens: store.GetInt("test.llm.max_tokens", 4096),
+		APIKey:    envOr("INTEG_LLM_API_KEY", store.GetString("test.llm.api_key", "")),
+		BaseURL:   envOr("INTEG_LLM_BASE_URL", store.GetString("test.llm.base_url", "")),
+	}
+}()
 
 var integBotID = envOr("INTEG_BOT_ID", "test-bot")
 

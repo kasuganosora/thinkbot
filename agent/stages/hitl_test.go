@@ -29,10 +29,10 @@ func newTestHITLStore(t *testing.T) DeferredApprovalStore {
 func TestDeferredApprovalStore_PersistLoadResolve(t *testing.T) {
 	store := newTestHITLStore(t)
 	rec := &DeferredApproval{
-		ApprovalID: "apv-1",
-		BotID:      "bot-1",
-		ToolName:   "shell_exec",
-		ToolCallID: "call-1",
+		ApprovalID:  "apv-1",
+		BotID:       "bot-1",
+		ToolName:    "shell_exec",
+		ToolCallID:  "call-1",
 		MessageJSON: `{"id":"m1","botId":"bot-1","text":"run it","metadata":{"reply_target":"ch-1"}}`,
 		Decision:    "deferred",
 		Status:      "pending",

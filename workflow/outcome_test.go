@@ -15,10 +15,10 @@ import (
 
 func TestParseNodeOutcome(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		want    NodeOutcome
-		wantOK  bool
+		name   string
+		input  string
+		want   NodeOutcome
+		wantOK bool
 	}{
 		{name: "空值等价ok", input: "", want: OutcomeOK, wantOK: true},
 		{name: "ok", input: "ok", want: OutcomeOK, wantOK: true},
@@ -149,7 +149,7 @@ func TestReviewLoop_BlockedOutcomeStopsIteration(t *testing.T) {
 			s := newMockScheduler(wf, exec)
 
 			node, _ := wf.GetNode("n1")
-			s.reviewLoop(context.Background(), node, "initial")
+			_, _ = s.reviewLoop(context.Background(), node, "initial")
 
 			// 只 review 一次——不迭代
 			if got := exec.revCalls.Load(); got != 1 {
@@ -299,9 +299,9 @@ func TestGrade_LoopDetection(t *testing.T) {
 	same := "需要补充错误处理逻辑，并且加上单元测试"
 
 	tests := []struct {
-		name       string
-		history    []ReviewRecord
-		wantLoops  int
+		name      string
+		history   []ReviewRecord
+		wantLoops int
 	}{
 		{
 			name: "完全相同算一轮打转",

@@ -48,8 +48,8 @@ type DeferredApproval struct {
 	// Status pending / resolved。
 	Status string `gorm:"size:32;index" json:"status"`
 	// ResolvedDecision / ResolvedReason 人类确认时的决策与理由。
-	ResolvedDecision string `gorm:"size:32" json:"resolvedDecision"`
-	ResolvedReason   string `gorm:"type:text" json:"resolvedReason"`
+	ResolvedDecision string    `gorm:"size:32" json:"resolvedDecision"`
+	ResolvedReason   string    `gorm:"type:text" json:"resolvedReason"`
 	CreatedAt        time.Time `json:"createdAt"`
 	UpdatedAt        time.Time `json:"updatedAt"`
 }

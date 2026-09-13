@@ -47,7 +47,7 @@ func TestIsNonRetryable(t *testing.T) {
 		},
 		{
 			name: "glm 1301 wrapped (multi-layer)",
-			err: fmt.Errorf("workflow_node_n1: %w", errors.New(`subagent stream failed: openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1301","message":"触发平台内容安全审核"}}`)),
+			err:  fmt.Errorf("workflow_node_n1: %w", errors.New(`subagent stream failed: openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1301","message":"触发平台内容安全审核"}}`)),
 			want: true,
 		},
 		{
@@ -75,7 +75,7 @@ func TestIsNonRetryable(t *testing.T) {
 		// —— 多层包装后仍应识别（errors.As 拿不到结构化类型，靠 loose 文本匹配）——
 		{
 			name: "wrapped 1214",
-			err: fmt.Errorf("workflow_node_n1: %w", errors.New(`subagent stream failed: openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1214","message":"messages 参数非法。请检查文档。"}}`)),
+			err:  fmt.Errorf("workflow_node_n1: %w", errors.New(`subagent stream failed: openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1214","message":"messages 参数非法。请检查文档。"}}`)),
 			want: true,
 		},
 		// —— 以下应为「可重试」（瞬时限流 / 网络抖动 / 普通错误）——

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -352,14 +351,10 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	// 关键：必须在 Start() 之前设置进程组，否则 SysProcAttr 不生效。
-	// 进程组看门狗依赖它：ctx 取消时 syscall.Kill(-pid) 才能连带杀掉
+	// 进程组看门狗依赖它：ctx 取消时 killProcessTree 才能连带杀掉
 	// sh -c "cmd | head" 的全部子孙进程，避免子进程持管道写端导致
 	// cmd.Wait() 永久阻塞（即「执行中」永不停的根因）。
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	} else {
-		cmd.SysProcAttr.Setpgid = true
-	}
+	setProcessGroup(cmd)
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -389,9 +384,7 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 		select {
 		case <-ctx.Done():
 			if cmd.Process != nil {
-				// 先杀进程组，再兜底杀直接子进程。
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				_ = cmd.Process.Kill()
+				killProcessTree(cmd.Process)
 			}
 		case <-watchDone:
 		}
@@ -436,12 +429,10 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 				// 卡死判定：已过启动宽限期，且连续 stuckTimeout 无输出、进程仍存活。
 				if elapsed > startupGrace &&
 					now.UnixNano()-lastActivity.Load() > int64(stuckTimeout) &&
-					cmd.Process != nil {
-					if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
-						stuckReason.Store("stuck")
-						cancel()
-						return
-					}
+					processAlive(cmd.Process) {
+					stuckReason.Store("stuck")
+					cancel()
+					return
 				}
 			}
 		}

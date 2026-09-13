@@ -8,7 +8,7 @@ import (
 
 // fakeStore 记录 Append 调用次数，用于验证 MultiStore 去重行为。
 type fakeStore struct {
-	mu     sync.Mutex
+	mu      sync.Mutex
 	appends int
 }
 

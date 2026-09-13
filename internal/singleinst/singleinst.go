@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -62,7 +61,7 @@ func Acquire(ctx context.Context, addr string, logger *zap.SugaredLogger, selfEx
 		// 连不上 = 无运行中实例，本实例正常接管。
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var hr healthResp
 	if err := json.NewDecoder(resp.Body).Decode(&hr); err != nil {
@@ -93,7 +92,7 @@ func Acquire(ctx context.Context, addr string, logger *zap.SugaredLogger, selfEx
 		// 对方更旧：请其优雅退出，等待端口释放后本实例接管。
 		logger.Infow("singleinst: terminating older instance",
 			"peer_pid", peerPID, "peer_build", peerBuild, "mine_build", me)
-		if e := syscall.Kill(peerPID, syscall.SIGTERM); e != nil {
+		if e := terminatePID(peerPID); e != nil {
 			logger.Warnw("singleinst: failed to signal older instance", "peer_pid", peerPID, "err", e)
 		}
 		if e := waitPortFree(ctx, listenAddr); e != nil {

@@ -291,10 +291,6 @@ func requireAPIKey(p Provider, name string) (string, error) {
 	return key, nil
 }
 
-func httpStatusError(status int, body []byte) error {
-	return newHTTPSearchError(status, body, 0)
-}
-
 func newHTTPSearchError(status int, body []byte, retryAfter time.Duration) error {
 	detail := extractJSONErrorMessage(body)
 	if detail == "" {

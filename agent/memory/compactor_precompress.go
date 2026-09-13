@@ -173,9 +173,7 @@ func dedupeRepeatedLines(s string) string {
 func extractMustKeep(s string) []string {
 	var found []string
 	for _, re := range mustKeepPatterns {
-		for _, m := range re.FindAllString(s, maxKeepPerPattern) {
-			found = append(found, m)
-		}
+		found = append(found, re.FindAllString(s, maxKeepPerPattern)...)
 	}
 	seen := make(map[string]bool, len(found))
 	uniq := found[:0]

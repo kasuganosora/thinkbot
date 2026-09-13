@@ -63,6 +63,7 @@
           <div v-else-if="activeKey === 'mcp'" class="pad"><BotMcp :bot-id="bot.id" /></div>
           <!-- 心跳 -->
           <div v-else-if="activeKey === 'heartbeat'" class="pad"><BotHeartbeat :bot-id="bot.id" /></div>
+          <div v-else-if="activeKey === 'outreach'" class="pad"><BotOutreach :bot-id="bot.id" /></div>
           <!-- 上下文压缩 -->
           <div v-else-if="activeKey === 'compact'" class="pad"><BotCompaction :bot-id="bot.id" /></div>
           <!-- 人格（占位） -->
@@ -104,6 +105,7 @@ import BotCompaction from '@/components/bot/BotCompaction.vue'
 import BotMcp from '@/components/bot/BotMcp.vue'
 import BotSkills from '@/components/bot/BotSkills.vue'
 import BotHeartbeat from '@/components/bot/BotHeartbeat.vue'
+import BotOutreach from '@/components/bot/BotOutreach.vue'
 import BotTerminal from '@/components/bot/BotTerminal.vue'
 import BotBrowser from '@/components/bot/BotBrowser.vue'
 
@@ -136,6 +138,7 @@ const navItems = [
   { key: 'files', label: '文件' },
   { key: 'mcp', label: 'MCP' },
   { key: 'heartbeat', label: '心跳' },
+  { key: 'outreach', label: '主动开口' },
   { key: 'compact', label: '上下文压缩' },
   { key: 'persona', label: '人格' },
   { key: 'cron', label: '定时任务' },

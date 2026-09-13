@@ -1495,6 +1495,35 @@ async function resumeContinuation(sessionId) {
       })
   }
 
+  // 会话打开且未在流式回复时，轮询历史增量，接住 bot 主动开口写入的 assistant 消息。
+  let _outreachTimer = null
+  async function pollOutreachMessages() {
+    const botId = activeBotId.value
+    const sessionId = activeSessionId.value
+    if (!botId || !sessionId || replying.value || messagesLoading.value) return
+    try {
+      const page = await chatApi.history(botId, null, PAGE_SIZE, sessionId)
+      if (botId !== activeBotId.value || sessionId !== activeSessionId.value) return
+      const incoming = (page.messages || []).reverse().map(buildPartsForMessage)
+      const have = new Set(messages.value.map(m => String(m.id || '')))
+      const extra = incoming.filter(m => m.id && !have.has(String(m.id)))
+      if (extra.length) {
+        messages.value = [...messages.value, ...extra]
+        scrollToBottomOnLoad.value = true
+      }
+    } catch {
+      // 空闲轮询失败不打扰用户
+    }
+  }
+  watch([activeSessionId, activeBotId], () => {
+    if (_outreachTimer) {
+      clearInterval(_outreachTimer)
+      _outreachTimer = null
+    }
+    if (!activeBotId.value || !activeSessionId.value) return
+    _outreachTimer = setInterval(pollOutreachMessages, 30000)
+  })
+
   return {
     bots, loading, error, replying, activeBotId,
     activeBot, messages, messagesLoading, loadingMore, hasMore,
