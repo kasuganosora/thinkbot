@@ -1792,6 +1792,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			s.logger,
 			id,
 			cronFile,
+			dreamRunRecordPath(id),
 			s.db,
 		)
 		if dBundle != nil {
@@ -2720,6 +2721,15 @@ func toInt(v any) int {
 
 // --- 子系统访问器 ---
 
+// dreamRunRecordPath 返回指定 Bot 的梦境「最近一次运行」记录文件路径。
+//
+// 必须使用稳定路径：按需构建 bundle（bot 未运行）时 cron 文件会走临时目录，
+// 但运行记录不能跟着走临时目录，否则 bot 未运行时运行状态页读不到历史。
+// 与 cron 文件同目录，命名上紧邻 <botID>_dream.json，便于对照排查。
+func dreamRunRecordPath(botID string) string {
+	return fmt.Sprintf("data/cron/%s_dream_lastrun.json", botID)
+}
+
 // GetDreamingBundle 返回指定 Bot 的梦境巩固子系统（如果已启用）。
 func (s *BotService) GetDreamingBundle(botID string) (*bot.DreamingBundle, bool) {
 	s.mu.RLock()
@@ -2764,6 +2774,7 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 		s.logger,
 		botID,
 		cronFile,
+		dreamRunRecordPath(botID),
 		s.db,
 	)
 	if dBundle == nil {

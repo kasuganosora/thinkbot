@@ -229,6 +229,11 @@ type DreamManager struct {
 	// onBotProfileUpdated 回调：Bot 画像更新后触发（可选）。
 	// 调用方可在此通知 AdaptiveEngagementSyncer 刷新参数。
 	onBotProfileUpdated func(botID string, result *BotProfileResult)
+
+	// onRunComplete 回调：每次 Run 结束（成功或失败）后触发（可选）。
+	// 用于把「最近一次运行」持久化，使运行状态页在刷新/重启后仍可展示。
+	// 手动触发与 cron 定时触发都走 Run()，因此两条路径都会被记录。
+	onRunComplete func(report *DreamReport)
 }
 
 // NewDreamManager 创建梦境管理器。
@@ -290,6 +295,13 @@ func (d *DreamManager) State() DreamState {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.state
+}
+
+// SetOnRunComplete 注入「运行完成」回调（每次 Run 结束调用一次，含失败路径）。
+func (d *DreamManager) SetOnRunComplete(cb func(report *DreamReport)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onRunComplete = cb
 }
 
 // LastReport 返回最近一次运行报告。
@@ -381,6 +393,17 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 
 	// 无论成功或失败都记录梦境日记
 	defer d.appendDreamDiary(report)
+
+	// 无论成功或失败都落库「最近一次运行」记录（运行状态页的唯一数据源）。
+	// 先把回调取出再释放锁，避免在持锁状态下做文件 IO。
+	defer func() {
+		d.mu.Lock()
+		cb := d.onRunComplete
+		d.mu.Unlock()
+		if cb != nil {
+			cb(report)
+		}
+	}()
 
 	ctx, span := d.tracer.Start(ctx, "memory.dreaming.run")
 	defer span.End()
