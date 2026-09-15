@@ -33,29 +33,30 @@
         <t-descriptions-item label="运行中">{{ status.running ? '是' : '否' }}</t-descriptions-item>
         <t-descriptions-item label="状态">{{ status.cronJob?.state || '-' }}</t-descriptions-item>
         <t-descriptions-item label="下次运行">{{ formatTime(status.cronJob?.nextRunAt) }}</t-descriptions-item>
-        <t-descriptions-item label="上次运行">{{ formatTime(status.cronJob?.lastRunAt) }}</t-descriptions-item>
-        <t-descriptions-item label="上次结果">{{ status.cronJob?.lastResult || '-' }}</t-descriptions-item>
-        <t-descriptions-item label="累计运行">{{ status.cronJob?.runCount ?? 0 }} 次</t-descriptions-item>
+        <t-descriptions-item label="上次运行">{{ formatTime(status.lastRun?.runAt || status.cronJob?.lastRunAt) }}</t-descriptions-item>
+        <t-descriptions-item label="上次结果">{{ status.lastRun?.summary || status.cronJob?.lastResult || '-' }}</t-descriptions-item>
+        <t-descriptions-item label="累计运行">{{ status.lastRun?.runCount ?? status.cronJob?.runCount ?? 0 }} 次</t-descriptions-item>
       </t-descriptions>
     </t-card>
 
-    <t-card v-if="lastTrigger" title="最近一次巩固结果" :bordered="false" class="card">
+    <t-card v-if="lastReport" title="最近一次巩固结果" :bordered="false" class="card">
       <t-descriptions :column="3" bordered size="small">
-        <t-descriptions-item label="浅层摄入">{{ lastTrigger.lightIngested }}</t-descriptions-item>
-        <t-descriptions-item label="去重">{{ lastTrigger.lightDeduped }}</t-descriptions-item>
-        <t-descriptions-item label="丢弃">{{ lastTrigger.lightDropped }}</t-descriptions-item>
-        <t-descriptions-item label="REM 主题">{{ lastTrigger.remThemes }}</t-descriptions-item>
-        <t-descriptions-item label="深层评分">{{ lastTrigger.deepScored }}</t-descriptions-item>
-        <t-descriptions-item label="深层晋升">{{ lastTrigger.deepPromoted }}</t-descriptions-item>
-        <t-descriptions-item label="耗时">{{ lastTrigger.duration }}</t-descriptions-item>
-        <t-descriptions-item label="阶段">{{ lastTrigger.phase }}</t-descriptions-item>
+        <t-descriptions-item label="浅层摄入">{{ lastReport.lightIngested }}</t-descriptions-item>
+        <t-descriptions-item label="去重">{{ lastReport.lightDeduped }}</t-descriptions-item>
+        <t-descriptions-item label="丢弃">{{ lastReport.lightDropped }}</t-descriptions-item>
+        <t-descriptions-item label="REM 主题">{{ lastReport.remThemes }}</t-descriptions-item>
+        <t-descriptions-item label="深层评分">{{ lastReport.deepScored }}</t-descriptions-item>
+        <t-descriptions-item label="深层晋升">{{ lastReport.deepPromoted }}</t-descriptions-item>
+        <t-descriptions-item label="耗时">{{ lastDuration }}</t-descriptions-item>
+        <t-descriptions-item label="阶段">{{ lastPhase }}</t-descriptions-item>
       </t-descriptions>
+      <div v-if="lastRunAt" class="run-at">运行于 {{ formatTime(lastRunAt) }}</div>
     </t-card>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { dreamingApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
@@ -67,6 +68,13 @@ const triggering = ref(false)
 const config = ref({ enabled: false, schedule: '0 3 * * *' })
 const status = ref(null)
 const lastTrigger = ref(null)
+
+// 「最近一次巩固结果」优先读服务端持久化记录（刷新页面、重启服务后依然在），
+// 仅在刚触发完、status 尚未刷到记录时回退到本次触发响应。
+const lastReport = computed(() => status.value?.lastRun?.report || lastTrigger.value || null)
+const lastDuration = computed(() => status.value?.lastRun?.duration || lastTrigger.value?.duration || '-')
+const lastPhase = computed(() => status.value?.lastRun?.phase || lastTrigger.value?.phase || '-')
+const lastRunAt = computed(() => status.value?.lastRun?.runAt || null)
 
 async function load() {
   loading.value = true
@@ -108,4 +116,5 @@ async function trigger() {
 <style scoped>
 .card { margin-bottom: 20px; }
 .tip { margin-left: 12px; color: var(--bp-label-tertiary); font-size: 13px; }
+.run-at { margin-top: 8px; color: var(--bp-label-tertiary); font-size: 12px; }
 </style>

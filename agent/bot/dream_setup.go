@@ -66,6 +66,10 @@ type DreamingBundle struct {
 	TieredMgr   *memory.TieredManager
 	TieredStore *memory.TieredStore // 供桥接层将 NoteHandler 写入同步到分层存储
 
+	// RunStore 持久化「最近一次运行」记录，作为运行状态页的数据源
+	// （cron Job 的统计会被手动触发绕过、且随重启重建归零，不能作为展示依据）。
+	RunStore *DreamRunStore
+
 	// BotProfiler Bot 自我画像提取器（可选）。
 	// 注入后，梦境管线会在每次运行时对 BotScope 执行画像提取。
 	BotProfiler *memory.BotProfileProfiler
@@ -82,6 +86,9 @@ type DreamingBundle struct {
 //   - logger: 日志
 //   - botID: Bot ID（用于日志和 cron Job 标识）
 //   - cronFilePath: cron Job 的 JSON 持久化文件路径
+//   - runRecordPath: 「最近一次运行」记录的 JSON 持久化文件路径。
+//     必须是稳定路径（不能是临时目录），否则 bot 未运行时运行状态页读不到记录。
+//   - db: 数据库句柄
 //
 // 返回的 bundle 中 Scheduler 已注册好 Job 但尚未 Start（由 Bot.Run 负责启动）。
 // 如果 dreamCfg.Enabled 为 false，返回 nil。
@@ -94,6 +101,7 @@ func NewDreamingBundle(
 	logger *zap.SugaredLogger,
 	botID string,
 	cronFilePath string,
+	runRecordPath string,
 	db *gorm.DB,
 ) *DreamingBundle {
 	if !dreamCfg.Enabled {
@@ -130,6 +138,11 @@ func NewDreamingBundle(
 	if userProfiler != nil {
 		dreamMgr.SetUserProfiler(userProfiler)
 	}
+
+	// 运行记录持久化：挂在 Run() 的完成回调上，手动触发与 cron 定时两条路径
+	// 都会经过 Run()，因此一处即可覆盖，且刷新页面/重启服务后仍可展示。
+	runStore := NewDreamRunStore(runRecordPath)
+	dreamMgr.SetOnRunComplete(func(report *memory.DreamReport) { runStore.Record(report) })
 
 	// 3. 创建 cron Store + Executor + Scheduler
 	cronStore := cron.NewStore(cronFilePath)
@@ -181,6 +194,7 @@ func NewDreamingBundle(
 		CronJob:     job,
 		TieredMgr:   tieredMgr,
 		TieredStore: store,
+		RunStore:    runStore,
 	}
 }
 
@@ -237,4 +251,13 @@ func (b *DreamingBundle) Stop() {
 	if b.Scheduler != nil {
 		b.Scheduler.Stop()
 	}
+}
+
+// LastRun 返回最近一次运行记录（跨页面刷新与服务重启保留）。
+// 从未运行过或记录文件损坏时返回 nil。
+func (b *DreamingBundle) LastRun() *DreamRunRecord {
+	if b == nil || b.RunStore == nil {
+		return nil
+	}
+	return b.RunStore.Load()
 }
