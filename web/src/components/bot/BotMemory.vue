@@ -114,21 +114,50 @@ async function onImportFile(ev) {
 }
 
 function remove(row) {
+  if (!row.scope) {
+    // 后端要求 id+tier+scope 三者齐全才定位到唯一一条；缺 scope 会 400。
+    // 提前拦住并给出可读原因，避免"弹框一闪而过、看起来没反应"。
+    MessagePlugin.error('这条记忆缺少作用域信息（scope），无法定位删除')
+    return
+  }
   const dlg = DialogPlugin.confirm({
     header: '删除记忆',
     body: `确认删除这条「${row.tier}」记忆？该操作不可恢复，且只删这一条。`,
     theme: 'warning',
+    // TDesign 1.20 的命令式 dialog：destroy() 内部只是 visible=false + 300ms 后移除 wrapper，
+    // 但 .t-dialog__ctx（含 .t-dialog__mask 遮罩）节点经常回收不掉，会在 DOM 里残留 0×0 的
+    // 遮罩/定位容器，累积后可能盖在表格上吞掉点击（踩过一次）。
+    // 因此三条关闭路径都先 destroy()，再显式清理已隐藏的游离对话框容器。
+    onCancel: () => { dlg.destroy(); removeOrphanDialogCtx() },
+    onClose: () => { dlg.destroy(); removeOrphanDialogCtx() },
     onConfirm: async () => {
       try {
         await memoryApi.remove(props.botId, row.id, row.tier, row.scope)
-        dlg.destroy()
         MessagePlugin.success('已删除')
         await load()
       } catch (e) {
         MessagePlugin.error('删除失败：' + (e.message || '请稍后重试'))
+      } finally {
+        dlg.destroy()
+        removeOrphanDialogCtx()
       }
     }
   })
+}
+
+// 关闭命令式 dialog 后，清理仍残留在 DOM 里的 .t-dialog__ctx（含 .t-dialog__mask 遮罩）节点。
+// TDesign 1.20 关闭时通过 v-if 把内部 .t-dialog 盒子移除（不会 display:none，遮罩节点因此残留），
+// 累积后会盖住表格吞掉点击。这里移除「不含可见 .t-dialog 盒子」的游离 ctx——
+// 正在显示的对话框盒子可见（offsetParent 非空）会被保留，关闭后盒子被移除的孤儿才会被清掉。
+// 350ms 晚于 TDesign 内部 300ms 的关闭过渡，确保盒子已真正卸载。
+function removeOrphanDialogCtx() {
+  setTimeout(() => {
+    document.querySelectorAll('.t-dialog__ctx').forEach((ctx) => {
+      const box = ctx.querySelector('.t-dialog')
+      const active = box && box.offsetParent !== null
+      if (!active) ctx.remove()
+    })
+  }, 350)
 }
 
 onMounted(load)
