@@ -9,6 +9,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -309,9 +310,24 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 func (s *Server) handleDreamingStatus(c *gin.Context) {
 	botID := c.Param("id")
 
-	bundle, ok := s.botSvc.GetDreamingBundle(botID)
+	// 运行记录与 bundle 是否在跑无关：先直接读持久化文件，
+	// 这样 bot 未启动时也能看到「上次运行/上次结果/累计次数」。
+	lastRun := bot.NewDreamRunStore(dreamRunRecordPath(botID)).Load()
+
+	var bundle *bot.DreamingBundle
+	ok := false
+	if s.botSvc != nil {
+		bundle, ok = s.botSvc.GetDreamingBundle(botID)
+	}
 	if !ok {
-		OK(c, gin.H{"enabled": false})
+		// bot 未运行：enabled 按持久化配置返回，避免前端把整块运行状态隐藏掉。
+		cfg := config.NewBuilder(s.store, s.logger).GetDreamingConfig(botID)
+		OK(c, gin.H{
+			"enabled": cfg.Enabled,
+			"running": false,
+			"cronJob": nil,
+			"lastRun": lastRun,
+		})
 		return
 	}
 
@@ -319,6 +335,7 @@ func (s *Server) handleDreamingStatus(c *gin.Context) {
 		"enabled": true,
 		"running": bundle.Manager != nil,
 		"cronJob": nil,
+		"lastRun": lastRun,
 	}
 
 	if bundle.CronJob != nil {
