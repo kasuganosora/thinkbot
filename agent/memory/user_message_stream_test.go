@@ -24,7 +24,7 @@ func TestSeedAndBackfillFromEventStream(t *testing.T) {
 	seed := []dao.ChatMessage{
 		{BotID: "bot-x", UserID: "u1", SessionID: "s1", Role: dao.ChatRoleUser, Content: "我喜欢用 Go 语言", CreatedAt: now.Add(-48 * time.Hour)},
 		{BotID: "bot-x", UserID: "u1", SessionID: "s1", Role: dao.ChatRoleAssistant, Content: "Go 很适合后端", CreatedAt: now.Add(-47 * time.Hour)},
-		{BotID: "bot-x", UserID: "u2", Role: dao.ChatRoleUser, Content: "用 Docker 部署", CreatedAt: now.Add(-10 * time.Hour)},
+		{BotID: "bot-x", UserID: "u2", Role: dao.ChatRoleUser, Content: "用户使用 Docker 部署服务", CreatedAt: now.Add(-10 * time.Hour)},
 		{BotID: "other", UserID: "z", Role: dao.ChatRoleUser, Content: "噪声", CreatedAt: now},
 		{BotID: "bot-x", UserID: "u3", Role: dao.ChatRoleUser, Content: "", CreatedAt: now}, // 空内容不进事件流
 	}

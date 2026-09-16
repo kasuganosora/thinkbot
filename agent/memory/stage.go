@@ -251,6 +251,12 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 			continue
 		}
 
+		// 过滤过短/过碎的噪声内容（少于 5 字符或 5 个词），不写入长期记忆。
+		cleaned := StripThinking(text)
+		if IsTrivialMemoryContent(cleaned) {
+			continue
+		}
+
 		// 确定存储 scope — 群聊场景下同时写入 Channel 和 User scope
 		// ChannelScope 记录会话/群组上下文（"这个群里发生了什么"）
 		// UserScope 用于跨会话的用户画像提取（"这个用户是谁、偏好什么"）
@@ -280,7 +286,7 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 		for _, scope := range scopes {
 			entry := Entry{
 				Scope:      scope,
-				Content:    StripThinking(text),
+				Content:    cleaned,
 				Category:   category,
 				Source:     "note",
 				Importance: 0.5, // 默认中等重要度
