@@ -10,6 +10,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -500,8 +501,14 @@ func (s *Server) handleImportMemohMemory(c *gin.Context) {
 //	dryRun : true（默认）仅统计并取样返回，不删除；false 才真正删除并持久化
 //
 // 背景：新写入已在捕获层（note_capture）/ActionNote（MemoryWriteStage）/回灌（backfill）
-// 被源头拦截，但规则生效前已落入 L0/L1 的短内容仍需一次性运维清理。删除逐条走
-// store.Delete（同时清理内存桶并 persistDelete 落库），真实生效。
+// 被源头拦截，但规则生效前已落入 L0/L1 的短内容仍需一次性运维清理。
+//
+// 扫描范围是 SQLite 全量行（而不是内存存储）：TieredStore 的内存桶每 scope 有
+// MaxEntries 上限（Tier0Working=200），内存里只是「最近的一部分」子集，
+// 只扫内存会漏掉绝大多数历史存量（实测 L0 库里 2898 行 / 内存仅 430）。
+// 删除：先清内存副本（store.Delete 同 scope 命中时会一并 persistDelete），
+// 再用 SQL 按 id 全量删除兜底——因为 store.Delete 对「不在内存桶」的条目会直接返回、
+// 不落库删除，历史存量只能靠 SQL 兜底。
 func (s *Server) handleCleanupTrivialMemory(c *gin.Context) {
 	botID := c.Param("id")
 
@@ -565,57 +572,121 @@ func (s *Server) handleCleanupTrivialMemory(c *gin.Context) {
 		Fail(c, errs.Internal("memory store not initialized"))
 		return
 	}
+	if s.db == nil {
+		Fail(c, errs.Internal("database not initialized"))
+		return
+	}
 
 	ctx := c.Request.Context()
+
+	// 以 SQLite 全量行为扫描基准（原因见函数头注释）：内存桶有 per-scope 上限，
+	// 只看内存会漏掉大部分历史存量。
+	tierInts := make([]int, 0, len(targets))
+	for _, t := range targets {
+		tierInts = append(tierInts, int(t))
+	}
+
+	var rows []struct {
+		ID        string
+		Tier      int
+		ScopeKind string
+		ScopeID   string
+		Content   string
+	}
+	if err := s.db.WithContext(ctx).Table("tiered_memories").
+		Select("id, tier, scope_kind, scope_id, content").
+		Where("tier IN ?", tierInts).
+		Find(&rows).Error; err != nil {
+		Fail(c, errs.Wrap(err, "failed to scan memory rows"))
+		return
+	}
 
 	type tierStat struct {
 		Scanned int `json:"scanned"`
 		Matched int `json:"matched"`
 	}
 	byTier := make(map[string]*tierStat, len(targets))
+	for _, t := range targets {
+		byTier[tierLabel[t]] = &tierStat{}
+	}
 	var sample []gin.H
 	const maxSample = 25
 
+	// hit 记录命中项，删除阶段需要 tier+scope 才能清对应的内存桶。
+	type hit struct {
+		ID    string
+		Tier  memory.MemoryTier
+		Scope memory.Scope
+	}
+	var hits []hit
+
 	totalScanned, totalMatched, totalDeleted := 0, 0, 0
 
-	for _, t := range targets {
-		stat := &tierStat{}
-		// 内存态遍历，传大 limit 取全量（RetrieveByTier 仅截断，无偏移分页）。
-		entries, err := mgr.RetrieveByTier(ctx, t, nil, 1_000_000)
-		if err != nil {
-			Fail(c, errs.Wrap(err, "failed to scan memory tier "+tierLabel[t]))
-			return
+	for _, r := range rows {
+		tier := memory.MemoryTier(r.Tier)
+		label, ok := tierLabel[tier]
+		if !ok {
+			continue
 		}
-		for _, e := range entries {
-			stat.Scanned++
-			if !memory.IsTrivialMemoryContent(e.Content) {
+		byTier[label].Scanned++
+		totalScanned++
+
+		if !memory.IsTrivialMemoryContent(r.Content) {
+			continue
+		}
+		byTier[label].Matched++
+		totalMatched++
+		hits = append(hits, hit{
+			ID:    r.ID,
+			Tier:  tier,
+			Scope: memory.Scope{Kind: memory.ScopeKind(r.ScopeKind), ID: r.ScopeID},
+		})
+
+		if len(sample) < maxSample {
+			content := r.Content
+			if rc := []rune(content); len(rc) > 200 {
+				content = string(rc[:200]) + "…"
+			}
+			sample = append(sample, gin.H{
+				"id":      r.ID,
+				"tier":    tier.String(),
+				"scope":   r.ScopeKind + ":" + r.ScopeID,
+				"content": content,
+			})
+		}
+	}
+
+	if !dryRun && len(hits) > 0 {
+		// 1) 先清内存副本：命中且仍在内存桶中的条目走 store.Delete（内存 + 落库一次做完），
+		//    避免内存残留被后续写路径复活；不在内存桶时该调用是 no-op。
+		for _, h := range hits {
+			if derr := store.Delete(ctx, h.Tier, h.Scope, h.ID); derr != nil {
+				s.logger.Warnw("cleanup-trivial: failed to delete in-memory entry",
+					"err", derr, "tier", h.Tier.String(), "id", h.ID)
+			}
+		}
+		// 2) 再按 id 用 SQL 全量删除兜底：store.Delete 对「不在内存桶」的条目直接返回、
+		//    不删库（见 TieredStore.Delete），只靠它清不掉历史存量。
+		const chunk = 500
+		ids := make([]string, 0, len(hits))
+		for _, h := range hits {
+			ids = append(ids, h.ID)
+		}
+		for start := 0; start < len(ids); start += chunk {
+			end := start + chunk
+			if end > len(ids) {
+				end = len(ids)
+			}
+			res := s.db.WithContext(ctx).Table("tiered_memories").
+				Where("id IN ?", ids[start:end]).
+				Delete(&dao.TieredMemoryModel{})
+			if res.Error != nil {
+				s.logger.Errorw("cleanup-trivial: failed to delete memory rows",
+					"err", res.Error, "bot_id", botID)
 				continue
 			}
-			stat.Matched++
-			if len(sample) < maxSample {
-				content := e.Content
-				if rc := []rune(content); len(rc) > 200 {
-					content = string(rc[:200]) + "…"
-				}
-				sample = append(sample, gin.H{
-					"id":      e.ID,
-					"tier":    e.Tier.String(),
-					"scope":   string(e.Scope.Kind) + ":" + e.Scope.ID,
-					"content": content,
-				})
-			}
-			if !dryRun {
-				if derr := store.Delete(ctx, e.Tier, e.Scope, e.ID); derr != nil {
-					s.logger.Warnw("cleanup-trivial: failed to delete entry",
-						"err", derr, "tier", e.Tier.String(), "id", e.ID)
-				} else {
-					totalDeleted++
-				}
-			}
+			totalDeleted += int(res.RowsAffected)
 		}
-		byTier[tierLabel[t]] = stat
-		totalScanned += stat.Scanned
-		totalMatched += stat.Matched
 	}
 
 	if !dryRun && totalDeleted > 0 {
