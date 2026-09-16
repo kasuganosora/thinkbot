@@ -194,18 +194,28 @@ const (
 	MinMemoryWords = 5
 )
 
-// IsTrivialMemoryContent 判断文本是否「过于简短、不值得作为长期记忆存储」。
+// IsTrivialMemoryContent 判断文本是否「过短或低信息、不值得作为长期记忆存储」。
 //
 // 判定（满足任一即琐碎）：
 //   - 去首尾空白后 rune 数 < MinMemoryChars
 //   - 词数 < MinMemoryWords
+//   - Misskey 投票 bot 刷屏（投票提问模板或其「无投票」回声）
+//   - Misskey 表情短码主导（>=2 个 :name: 且剥离后几乎无实义字符）
+//   - 短内容重复符号主导（总长 <= MaxRepetitionLen 且重复标点/filler 假名
+//     占去空白正文的过半）
 //
 // 词数统计对 CJK 字符「逐字成词」、非 CJK 片段按空白切分（见 countWords），
 // 因此纯中文只需满足字符数下限（不会被英文词数规则误杀），纯英文需满足词数下限
 // （防止 "yes" / "lol" / "ok" 这类随口短回复进入记忆，降低 dreaming / 记忆系统噪声）。
 //
+// 后三类为针对真实库内噪声（详见 thinkbot 记忆清理实践）补充的高精确率规则：
+// 投票 bot 帖、表情短码刷屏、以及 "ふえええええ！？" 这类纯情绪重复——它们无长期
+// 记忆价值。长内容（> MaxRepetitionLen）即使含重复符号也一律放过，避免误删真实记忆
+// （如 "SEKIRO 弦一郎直前まで進められたぞ！！！" 这类带情绪的合法内容）。
+//
 // 典型用例：note_capture 捕获用户发言、MemoryWriteStage 落库、backfill 事件流回灌，
-// 写入前调用本函数过滤，避免低质短内容污染长期记忆与梦境巩固输入。
+// 写入前调用本函数过滤，避免低质短内容污染长期记忆与梦境巩固输入；cleanup-trivial
+// 运维接口也复用它来识别存量垃圾。
 func IsTrivialMemoryContent(text string) bool {
 	s := strings.TrimSpace(text)
 	runes := []rune(s)
@@ -213,6 +223,90 @@ func IsTrivialMemoryContent(text string) bool {
 		return true
 	}
 	if countWords(runes) < MinMemoryWords {
+		return true
+	}
+
+	// 投票 bot 刷屏：Misskey 投票帖提问模板，或其无投票时的回声。
+	// 这类由 bot 自动发出，对用户长期记忆无价值。
+	if misskeyPollEchoRe.MatchString(s) || misskeyPollQRe.MatchString(s) {
+		return true
+	}
+
+	// 表情短码主导：>=2 个 :name: 短码且剥离短码/URL/空白后几乎无实义字符
+	// （如 ":panpan::panpan:…"）。属于历史库中出现的表情刷屏类噪声。
+	if sc := emojiShortcodeRe.FindAllString(s, -1); len(sc) >= 2 {
+		stripped := emojiShortcodeRe.ReplaceAllString(s, "")
+		stripped = urlRe.ReplaceAllString(stripped, "")
+		stripped = strings.Join(strings.Fields(stripped), "")
+		meaningful := 0
+		for _, r := range stripped {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) {
+				meaningful++
+			}
+		}
+		if meaningful <= 2 {
+			return true
+		}
+	}
+
+	// 短内容重复符号主导：总长受限且重复标点/filler 假名占去空白正文过半。
+	// 仅对短内容生效，保护带情绪的合法长文。
+	if len(runes) <= MaxRepetitionLen {
+		nonspace, noise := 0, 0
+		for _, r := range s {
+			if !unicode.IsSpace(r) {
+				nonspace++
+			}
+		}
+		// 手动扫描连续相同字符的 run（RE2 不支持反向引用，无法用正则表达 \1）。
+		rs := []rune(s)
+		for i := 0; i < len(rs); {
+			j := i + 1
+			for j < len(rs) && rs[j] == rs[i] {
+				j++
+			}
+			runLen := j - i
+			if runLen >= 4 && isFillerRunChar(rs[i]) {
+				noise += runLen
+			}
+			i = j
+		}
+		if noise >= 4 && noise >= nonspace/2 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// MaxRepetitionLen 是「重复符号主导」检测的生效长度上限（rune 数）。
+// 超过此长度的内容即使含重复符号也放过，避免误删带情绪的合法长文。
+const MaxRepetitionLen = 40
+
+// misskeyPollQRe 匹配 Misskey 投票 bot 的投票提问模板
+// 「みなさんは、<任意内容>と思いますか？」——bot 自动发出的投票帖，无长期记忆价值。
+var misskeyPollQRe = regexp.MustCompile(`みなさんは、.+と思いますか？$`)
+
+// misskeyPollEchoRe 匹配投票 bot 在无投票时的回声「投票はありませんでした」，
+// 常出现在 "[Renote from ...: <投票提问>]\n投票はありませんでした" 形态里。
+var misskeyPollEchoRe = regexp.MustCompile(`投票はありませんでした`)
+
+// emojiShortcodeRe 匹配 Misskey 表情短码 :name:。
+var emojiShortcodeRe = regexp.MustCompile(`:[A-Za-z0-9_]+:`)
+
+// urlRe 匹配 URL，避免把链接里的 "www" / 路径误判为 emoji 短码或重复噪声。
+var urlRe = regexp.MustCompile(`https?://\S+|www\.\S+`)
+
+// isFillerRunChar 判断重复字符是否属于「低信息噪声」集合：
+//   - 标点（。、！？… 等）的连续重复是刷屏式标点
+//   - 情绪 filler 假名/汉字（笑笑/哈哈/草草/ええ/っっ 等）的连续重复是纯情绪噪声
+//
+// 刻意排除长音 ー、波浪号 〜、字母、数字：它们常出现在合法日文长音 elongation、
+// URL、代码、base64 中，误判成本高。保护真实记忆优先于多抓几条噪声。
+func isFillerRunChar(r rune) bool {
+	switch r {
+	case '。', '、', '，', '！', '？', '!', '?', '…', '・', '♪',
+		'笑', '哈', '草', '哇', 'え', 'う', 'ん', 'ね', 'ふ', 'む', 'お', 'っ', 'ぃ':
 		return true
 	}
 	return false
