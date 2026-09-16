@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 )
 
 // exchangeSeen 按 message_id 对「同一条入站消息」做跨 Process 去重。
@@ -144,7 +145,9 @@ func NoteCaptureMiddleware(category string, writer UserMessageEventWriter) func(
 				// 见历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
 				// 一条用户消息只捕获一次。
 				userText := normalizeExchangeText(env.Message.Text)
-				if userText != "" {
+				// 过滤过短/过碎的噪声内容（少于 5 字符或 5 个词），不写入 L0 记忆与事件流，
+				// 避免"ok"/"好的"/"哈哈哈"这类随口短回复污染长期记忆与 dreaming 巩固输入。
+				if userText != "" && !memory.IsTrivialMemoryContent(userText) {
 					// 已经显式记过笔记（DecisionReplyWithNote / DecisionNoteOnly / 潜水笔记）
 					// 的，视为已捕获，不再重复写入用户发言。
 					hasNote := false

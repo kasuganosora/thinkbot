@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // ============================================================================
@@ -177,6 +178,81 @@ var contextMarkerRe = regexp.MustCompile(
 // 作为纵深防御的最后一道兜底。
 func StripContextMarkers(text string) string {
 	return strings.TrimSpace(contextMarkerRe.ReplaceAllString(text, ""))
+}
+
+// ============================================================================
+// 短内容过滤器 — 在记忆写入前剔除过短/过碎的噪声内容
+// ============================================================================
+
+// 短内容过滤阈值。
+//   - MinMemoryChars：去空白后 rune 数下限（任意语言下极短内容，如 "ok"、"好的"）。
+//   - MinMemoryWords：词数下限（空格分隔内容下的短句，如 "thanks a lot"）。
+//
+// 满足任一即视为琐碎噪声，不应作为长期记忆存储。
+const (
+	MinMemoryChars = 5
+	MinMemoryWords = 5
+)
+
+// IsTrivialMemoryContent 判断文本是否「过于简短、不值得作为长期记忆存储」。
+//
+// 判定（满足任一即琐碎）：
+//   - 去首尾空白后 rune 数 < MinMemoryChars
+//   - 词数 < MinMemoryWords
+//
+// 词数统计对 CJK 字符「逐字成词」、非 CJK 片段按空白切分（见 countWords），
+// 因此纯中文只需满足字符数下限（不会被英文词数规则误杀），纯英文需满足词数下限
+// （防止 "yes" / "lol" / "ok" 这类随口短回复进入记忆，降低 dreaming / 记忆系统噪声）。
+//
+// 典型用例：note_capture 捕获用户发言、MemoryWriteStage 落库、backfill 事件流回灌，
+// 写入前调用本函数过滤，避免低质短内容污染长期记忆与梦境巩固输入。
+func IsTrivialMemoryContent(text string) bool {
+	s := strings.TrimSpace(text)
+	runes := []rune(s)
+	if len(runes) < MinMemoryChars {
+		return true
+	}
+	if countWords(runes) < MinMemoryWords {
+		return true
+	}
+	return false
+}
+
+// isCJK 判断 rune 是否属于中日韩表意/假名/谚文文字（逐字成词计数）。
+func isCJK(r rune) bool {
+	return unicode.Is(unicode.Han, r) ||
+		unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Hangul, r)
+}
+
+// countWords 统计 CJK 感知词数：
+//   - 连续 CJK 字符：每个字独立计 1 词（"今天天气" → 4 词）
+//   - 非 CJK 连续段：按空白切分，每段计 1 词（"hello world" → 2 词）
+//
+// 中英混排内容（如 "今天 hello world"）会同时计入 CJK 字数与英文词数，
+// 既不会因中文无空格而词数过低误杀，也不会放过高噪声英文短语。
+func countWords(runes []rune) int {
+	words := 0
+	var latin []rune
+	flush := func() {
+		if len(latin) > 0 {
+			words++
+			latin = latin[:0]
+		}
+	}
+	for _, r := range runes {
+		if isCJK(r) {
+			flush()
+			words++
+		} else if unicode.IsSpace(r) {
+			flush()
+		} else {
+			latin = append(latin, r)
+		}
+	}
+	flush()
+	return words
 }
 
 // ============================================================================

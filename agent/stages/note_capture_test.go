@@ -52,7 +52,7 @@ func TestNoteCaptureMiddleware_Isolated(t *testing.T) {
 	next := core.Stage(fakeReplyStage{text: "hi there"})
 	stage := mw(next)
 
-	msg := core.Message{ID: "m1", BotID: "bot-x", Source: "web", Channel: "ch-x", UserID: "u1", Text: "hello"}
+	msg := core.Message{ID: "m1", BotID: "bot-x", Source: "web", Channel: "ch-x", UserID: "u1", Text: "hello there friend how are you"}
 	env := core.NewEnvelope(msg)
 
 	out, err := stage.Process(context.Background(), env)
@@ -73,8 +73,8 @@ func TestNoteCaptureMiddleware_Isolated(t *testing.T) {
 	// 这是刻意设计：捕获 bot 回复会让 dreaming 把 bot 的发言误记成用户的事实
 	// （说话人归属错误，历史 bug：把 bot 对《零之使魔》的安利错记成「用户熟悉该作」）。
 	// 见 note_capture.go 中 NoteCaptureMiddleware 的注释。
-	if note.Payload != "hello" {
-		t.Fatalf("note payload = %q, want %q（应捕获用户原文）", note.Payload, "hello")
+	if note.Payload != "hello there friend how are you" {
+		t.Fatalf("note payload = %q, want %q（应捕获用户原文）", note.Payload, "hello there friend how are you")
 	}
 	if strings.Contains(note.Payload.(string), "hi there") {
 		t.Fatalf("note payload 混入了 bot 回复：%q", note.Payload)
@@ -96,7 +96,7 @@ func TestNoteCaptureMiddleware_OnRealLLMStage(t *testing.T) {
 
 	stage := NoteCaptureMiddleware("exchange", nil)(llmStage)
 
-	msg := core.Message{ID: "m2", BotID: "bot-y", Source: "web", Channel: "ch-y", UserID: "u2", Text: "ping"}
+	msg := core.Message{ID: "m2", BotID: "bot-y", Source: "web", Channel: "ch-y", UserID: "u2", Text: "ping me when you are ready"}
 	env := core.NewEnvelope(msg)
 
 	out, err := stage.Process(context.Background(), env)
@@ -167,7 +167,7 @@ func TestNoteCaptureMiddleware_OneCapturePerMessage(t *testing.T) {
 	mw := NoteCaptureMiddleware("exchange", spy)
 	stage := mw(twoReplyStage{})
 
-	msg := core.Message{ID: "m9", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "hello"}
+	msg := core.Message{ID: "m9", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "hello from the other side"}
 	env := core.NewEnvelope(msg)
 
 	out, err := stage.Process(context.Background(), env)
@@ -186,7 +186,7 @@ func TestNoteCaptureMiddleware_OneCapturePerMessage(t *testing.T) {
 	if spy.count != 1 {
 		t.Fatalf("expected exactly 1 event-stream write per user message, got %d", spy.count)
 	}
-	if spy.last.MessageID != "m9" || spy.last.Content != "hello" {
+	if spy.last.MessageID != "m9" || spy.last.Content != "hello from the other side" {
 		t.Fatalf("event payload mismatch: %+v", spy.last)
 	}
 }
@@ -199,7 +199,7 @@ func TestNoteCaptureMiddleware_CrossProcessDedup(t *testing.T) {
 	mw := NoteCaptureMiddleware("exchange", spy)
 	stage := mw(twoReplyStage{})
 
-	msg := core.Message{ID: "m-dup", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "same message"}
+	msg := core.Message{ID: "m-dup", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "same message that was sent before"}
 	env := core.NewEnvelope(msg)
 
 	if _, err := stage.Process(context.Background(), env); err != nil {
@@ -218,7 +218,7 @@ func TestNoteCaptureMiddleware_CrossProcessDedup(t *testing.T) {
 	}
 
 	// 不同 message_id：应再捕获一条。
-	msg2 := core.Message{ID: "m-other", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "other message"}
+	msg2 := core.Message{ID: "m-other", BotID: "bot-z", Source: "web", Channel: "ch-z", UserID: "u9", Text: "other message sent on a different day"}
 	env2 := core.NewEnvelope(msg2)
 	if _, err := stage.Process(context.Background(), env2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
