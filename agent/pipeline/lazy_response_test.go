@@ -47,6 +47,7 @@ func TestHasLazyIndicators(t *testing.T) {
 		{"已安装声明", "系统已安装 Python 3.11。", true},
 		{"尝试结果编造", "尝试执行 which git 结果显示命令不存在。", true},
 		{"正常工具调用结果（无模式命中）", "文件内容如下...", false},
+		{"概念讨论含不存在无实体", "这个方案在架构上不存在根本缺陷，可以直接上线。", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -55,6 +56,42 @@ func TestHasLazyIndicators(t *testing.T) {
 				t.Errorf("hasLazyIndicators(%q) = %v, want %v", tc.text, got, tc.expected)
 			}
 		})
+	}
+}
+
+// TestHasLazyIndicators_ConceptDiscussionNoEntity 回归测试：纯概念讨论即使命中
+// "不存在"等断言词，只要不提及具体环境实体，就不应误判为偷懒。
+// 对应 2026-09-16 Telegram 重复回复事故——一条架构讨论回复含"膨胀在数学上就
+// 不存在了"被「不存在」误触发 loop-back，导致同消息重复回复。
+func TestHasLazyIndicators_ConceptDiscussionNoEntity(t *testing.T) {
+	cases := []string{
+		"agent 担心的膨胀在数学上就不存在了，它大概默认你要在每层复制快照才下的这个结论。",
+		"这个设计不存在根本缺陷，可以直接上线。",
+		"风险不存在，但我们要先确认存储和注入是两个独立的关注点。",
+		// 真实事故首轮回复的浓缩片段（含"事件"等会误命中裸"件"的词，验证不触发）
+		"它反对的是天真实现，不是这件事本身；膨胀在数学上就不存在了。",
+	}
+	for _, c := range cases {
+		if hasLazyIndicators(c) {
+			t.Errorf("concept discussion must NOT be lazy: %q", c)
+		}
+	}
+}
+
+// TestHasLazyIndicators_RealLazyStillDetected 回归测试：收紧后真偷懒（断言具体
+// 环境实体状态且无工具调用）仍必须被检测出来，不能因实体约束而漏判。
+func TestHasLazyIndicators_RealLazyStillDetected(t *testing.T) {
+	cases := []string{
+		"当前环境未安装 git，无法进行版本控制。",
+		"/usr/bin/git 不存在，需要手动安装。",
+		"系统已安装 Python 3.11。",
+		"磁盘空间已满，无法写入文件。",
+		"找不到 nginx 配置文件，服务起不来。",
+	}
+	for _, c := range cases {
+		if !hasLazyIndicators(c) {
+			t.Errorf("real lazy (env entity + assertion) must be detected: %q", c)
+		}
 	}
 }
 
@@ -333,5 +370,94 @@ func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
 	// 复位生效：call 4 重新触发 loop-back → calls==5
 	if calls != 5 {
 		t.Errorf("expected 5 LLM calls (lazy+rerun, toolcall, lazy+rerun), got %d", calls)
+	}
+}
+
+// TestLazyResponseMiddleware_LoopBackSingleAction 回归测试：验证 loop-back 重算
+// 不会把首轮与修正轮两条回复都派发出站（2026-09-16 Telegram 重复回复事故）。
+// dummy stage 模拟 LLMStage.Process 的行为——在收到的 envelope 上追加 ActionReply，
+// 因此同轮重算会复用同一 envelope，若不清空首轮 Action 就会出现 2 条。
+func TestLazyResponseMiddleware_LoopBackSingleAction(t *testing.T) {
+	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	calls := 0
+	dummy := &core.StageFunc{
+		StageName: "llm",
+		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+			calls++
+			var gr *llm.GenerateResult
+			var payload string
+			if calls == 1 {
+				// 首次：无工具调用的偷懒答案（命中懒模式）
+				payload = "当前环境未安装 git，无可用包管理器。"
+				gr = &llm.GenerateResult{Text: payload, Steps: []llm.StepResult{{Text: payload}}}
+			} else {
+				// loop-back 重算：修正后的答案（带工具调用，避免再触发懒模式）
+				payload = "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。"
+				gr = &llm.GenerateResult{
+					Text:  payload,
+					Steps: []llm.StepResult{{Text: payload, ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}},
+				}
+			}
+			// 复用传入的 envelope（与 LLMStage.Process 一致：env.AddAction 后返回 env），
+			// 使 loop-back 的二次调用在同一 envelope 上再追加一次 Action。
+			env.Set("llm.result", gr)
+			env.AddAction(core.Action{Type: core.ActionReply, Payload: payload})
+			return env, nil
+		},
+	}
+
+	wrapped := mw(dummy)
+	env := core.NewEnvelope(core.Message{Channel: "dup-ch", ID: "1"})
+	result, err := wrapped.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 LLM calls (1 original + 1 loop-back), got %d", calls)
+	}
+
+	// 核心断言：loop-back 必须「替换」而非「追加」——返回 envelope 只能有 1 条回复。
+	acts := result.Actions()
+	if len(acts) != 1 {
+		t.Fatalf("loop-back must REPLACE not append: expected exactly 1 dispatched action, got %d", len(acts))
+	}
+	if acts[0].Payload != "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。" {
+		t.Errorf("dispatched action should be the corrected one, got %q", acts[0].Payload)
+	}
+}
+
+// TestLazyResponseMiddleware_LoopBackFailureKeepsFirstAction 验证 loop-back 重算
+// 失败时不丢失首轮回复（至少有一条出站，而非零条）。
+func TestLazyResponseMiddleware_LoopBackFailureKeepsFirstAction(t *testing.T) {
+	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	calls := 0
+	dummy := &core.StageFunc{
+		StageName: "llm",
+		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+			calls++
+			if calls == 1 {
+				const text = "当前环境未安装 git，无可用包管理器。"
+				gr := &llm.GenerateResult{Text: text, Steps: []llm.StepResult{{Text: text}}}
+				env.Set("llm.result", gr)
+				env.AddAction(core.Action{Type: core.ActionReply, Payload: text})
+				return env, nil
+			}
+			// loop-back 重算失败
+			return env, context.DeadlineExceeded
+		},
+	}
+
+	wrapped := mw(dummy)
+	env := core.NewEnvelope(core.Message{Channel: "dup-fail-ch", ID: "1"})
+	result, err := wrapped.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("expected fallback to original result (nil err), got %v", err)
+	}
+	acts := result.Actions()
+	if len(acts) != 1 {
+		t.Fatalf("on loop-back failure the first reply must be preserved, got %d actions", len(acts))
+	}
+	if acts[0].Payload != "当前环境未安装 git，无可用包管理器。" {
+		t.Errorf("preserved action should be the first reply, got %q", acts[0].Payload)
 	}
 }
