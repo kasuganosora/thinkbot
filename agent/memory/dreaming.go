@@ -79,6 +79,80 @@ type ScoreBreakdown struct {
 	Richness      float64 `json:"richness"`
 }
 
+// DreamPromotionReason 记录一条记忆被提升为 L1 的理由与依据。
+//
+// 持久化在晋升后 L1 条目的 metadata["dream_reason"] 中（嵌套 JSON 对象），
+// 既供前端「最近晋升的记忆」面板逐条展示，也便于审计「为什么这条被记住了」。
+//
+// 设计要点（勿回退）：理由必须可解释。早期实现只存 dream_score 等标量，
+// 排查时无法判断「达标的究竟是哪些信号、引用了哪些原条目」，形成黑盒。
+// 这里把评分明细、通过的门控、REM 主题、引用的原 L0 条目 ID 一起固化，
+// 使每一次提升都自带证据链。
+type DreamPromotionReason struct {
+	// Summary 一句话中文理由（人读）。
+	Summary string `json:"summary"`
+	// Score 最终混合分（启发式与 LLM 重要性混合后的总分）。
+	Score float64 `json:"score"`
+	// MinScore 通过晋升所依据的阈值。
+	MinScore float64 `json:"min_score"`
+	// PassedGates 通过的全部门控名（如 "score"/"rem"/"recall"/"queries"）。
+	PassedGates []string `json:"passed_gates"`
+	// Breakdown 各评分信号子分数。
+	Breakdown ScoreBreakdown `json:"breakdown"`
+	// Heuristic 纯启发式总分（未与 LLM 重要性混合前）。
+	Heuristic float64 `json:"heuristic"`
+	// LLMImportance LLM 评估的重要性（未使用 LLM 时为 0，omitempty 省略）。
+	LLMImportance float64 `json:"llm_importance,omitempty"`
+	// LightHits / REMHits 关键信号快照。
+	LightHits int `json:"light_hits"`
+	REMHits   int `json:"rem_hits"`
+	// Theme 命中到的 REM 主题（空表示未聚类）。
+	Theme string `json:"theme,omitempty"`
+	// SourcePreview 引用的原 L0 条目原文预览（截断，最多 3 条）。
+	// 让晋升理由在「不展开面板」的主视图即自带证据原文，自我解释，
+	// 不必点开才能看到「凭什么原文提拔升」。与 source_entries 全量快照互补：
+	// 此处是供人速读的摘要，source_entries 是供审计展开的全文。
+	SourcePreview string `json:"source_preview,omitempty"`
+}
+
+// DreamSourceEntry 晋升时快照的「被引用的原始 L0 工作记忆条目」。
+//
+// 固化进 L1 条目 metadata["source_entries"]，使前端「最近晋升的记忆」面板可展开
+// 查看原内容，而不只是 ID。之所以要快照而非查询时反查：
+//   - L0 工作记忆 TTL=14 天，查询时原条目可能已过期删除，反查会得到空；
+//   - 晋升发生在 Deep 相位、当夜 L0 必然还在，此刻抓取最可靠。
+//
+// 注意：content 来自 L0 原文，可能含 bot 自身回复（speaker="assistant"），
+// 展示层应据 Speaker 标注来源，避免误读为用户事实。
+type DreamSourceEntry struct {
+	// ID 原 L0 条目 ID（"引用的原来的条目"）。
+	ID string `json:"id"`
+	// Content 原 L0 条目内容（快照，永久可读）。
+	Content string `json:"content"`
+	// Scope 原 L0 条目所属作用域（Scope.Key()）。
+	Scope string `json:"scope"`
+	// Speaker 说话人标签："user"=用户原话，"assistant"=bot 回复，"observer"=公开时间线观察，""=未知。
+	Speaker string `json:"speaker,omitempty"`
+}
+
+// DreamPromotionRecord 一次梦境运行中单条晋升的结构化记录。
+// 直接挂在 DreamReport.Promotions 上，使 trigger 响应可即时回显本轮晋升明细，
+// 无需再单独查询存储。
+type DreamPromotionRecord struct {
+	ID       string               `json:"id"`
+	Content  string               `json:"content"`
+	Category string               `json:"category"`
+	Scope    string               `json:"scope"`
+	Score    float64              `json:"score"`
+	Reason   DreamPromotionReason `json:"reason"`
+	// SourceIDs 引用的原始 L0 工作记忆条目 ID（"引用的原来的条目"）。
+	SourceIDs []string `json:"source_ids"`
+	// SourceEntries 引用的原始 L0 工作记忆条目快照（内容 + 说话人），供面板展开原内容。
+	SourceEntries []DreamSourceEntry `json:"source_entries,omitempty"`
+	// PromotedAt 晋升时间。
+	PromotedAt time.Time `json:"promoted_at"`
+}
+
 // Scoring weights (合计 = 1.0)
 // 评分权重（合计 = 1.0）。
 // 设计修正：Relevance/Diversity 依赖白天的召回信号（RecallCount/UniqueQueries），
@@ -99,21 +173,24 @@ const (
 
 // DreamReport 一次梦境运行的完整报告。
 type DreamReport struct {
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      time.Time  `json:"finished_at"`
-	Phase           DreamPhase `json:"phase"`
-	LightIngested   int        `json:"light_ingested"`
-	LightDeduped    int        `json:"light_deduped"`
-	LightDropped    int        `json:"light_dropped"`
-	REMThemes       int        `json:"rem_themes"`
-	REMCandidates   int        `json:"rem_candidates"`
-	DeepScored      int        `json:"deep_scored"`
-	DeepPassed      int        `json:"deep_passed"`
-	DeepPromoted    int        `json:"deep_promoted"`
-	SkippedInactive int        `json:"skipped_inactive"`
-	UserProfiles    int        `json:"user_profiles,omitempty"`
-	BotProfiles     int        `json:"bot_profiles,omitempty"`
-	Error           string     `json:"error,omitempty"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    time.Time  `json:"finished_at"`
+	Phase         DreamPhase `json:"phase"`
+	LightIngested int        `json:"light_ingested"`
+	LightDeduped  int        `json:"light_deduped"`
+	LightDropped  int        `json:"light_dropped"`
+	REMThemes     int        `json:"rem_themes"`
+	REMCandidates int        `json:"rem_candidates"`
+	DeepScored    int        `json:"deep_scored"`
+	DeepPassed    int        `json:"deep_passed"`
+	DeepPromoted  int        `json:"deep_promoted"`
+	// Promotions 本轮 Deep 相位实际晋升的明细（含理由与原条目引用）。
+	// 供 trigger 接口即时回显，也用于前端「最近晋升的记忆」面板。
+	Promotions      []DreamPromotionRecord `json:"promotions,omitempty"`
+	SkippedInactive int                    `json:"skipped_inactive"`
+	UserProfiles    int                    `json:"user_profiles,omitempty"`
+	BotProfiles     int                    `json:"bot_profiles,omitempty"`
+	Error           string                 `json:"error,omitempty"`
 }
 
 // Duration 返回本次梦境耗时。
@@ -515,6 +592,7 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 	report.DeepScored = deepRes.scored
 	report.DeepPassed = deepRes.passed
 	report.DeepPromoted = deepRes.promoted
+	report.Promotions = deepRes.promotions
 	report.FinishedAt = time.Now()
 	report.Phase = PhaseDeep
 

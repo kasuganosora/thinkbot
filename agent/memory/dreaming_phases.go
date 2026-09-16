@@ -502,9 +502,10 @@ func (d *DreamManager) clusterByCategory(candidates []*DreamCandidate) []themeCl
 // ============================================================================
 
 type deepResult struct {
-	scored   int
-	passed   int
-	promoted int
+	scored     int
+	passed     int
+	promoted   int
+	promotions []DreamPromotionRecord
 }
 
 // runDeep 执行深睡眠：6 信号评分 → 3 门控筛选 → 写入 L1。
@@ -533,6 +534,9 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 	type scoredItem struct {
 		candidate *DreamCandidate
 		score     float64
+		// breakdown 评分阶段算出的 6 信号明细，直接透传给 buildPromotionReason，
+		// 避免晋升循环里重复计算、且保证「展示的理由」与「实际达标的分」完全一致。
+		breakdown ScoreBreakdown
 	}
 
 	// LLM 批量重要性评估（主导分数来源，降噪）。
@@ -547,8 +551,10 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 	heuristicScores := make(map[string]float64, len(staged))
 
 	var scored []scoredItem
+	breakdownByKey := make(map[string]ScoreBreakdown, len(staged))
 	for _, c := range staged {
 		breakdown := d.scoreCandidate(c, now)
+		breakdownByKey[c.Key] = breakdown
 		heuristic := d.computeTotalScore(breakdown, c)
 		heuristicScores[c.Key] = heuristic
 		llm := -1.0
@@ -556,7 +562,7 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 			llm = v
 		}
 		c.Score = d.blendScore(heuristic, llm)
-		scored = append(scored, scoredItem{candidate: c, score: c.Score})
+		scored = append(scored, scoredItem{candidate: c, score: c.Score, breakdown: breakdown})
 	}
 
 	sort.Slice(scored, func(i, j int) bool {
@@ -589,7 +595,35 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 
 	// 写入 L1
 	promoted := 0
+	promotions := make([]DreamPromotionRecord, 0, len(passed))
+
+	// 晋级前快照引用的原始 L0 条目内容（best-effort）。
+	// Deep 相位当夜 L0 必然还在，此刻抓取最可靠；L0 TTL=14 天后查询时可能已过期，
+	// 故冻结进 L1 metadata，使前端面板可永久展开原内容，而不只是 ID。
+	sourceSnap := d.collectSourceEntries(ctx, passed)
+
 	for _, c := range passed {
+		breakdown := breakdownByKey[c.Key]
+		llm := -1.0
+		if v, ok := llmScores[c.Key]; ok {
+			llm = v
+		}
+
+		// 计算通过的全部门控，固化进理由（审计用）。
+		gates := []string{"score"}
+		if d.config.Deep.MinRecallCount > 0 && c.RecallCount >= d.config.Deep.MinRecallCount {
+			gates = append(gates, "recall")
+		}
+		if d.config.Deep.MinUniqueQueries > 0 && c.UniqueQueries >= d.config.Deep.MinUniqueQueries {
+			gates = append(gates, "queries")
+		}
+		if d.config.Deep.MinREMHits > 0 && c.REMHits >= d.config.Deep.MinREMHits {
+			gates = append(gates, "rem")
+		}
+
+		srcEntries := sourceSnap[c.Key]
+		reason := d.buildPromotionReason(c, now, breakdown, heuristicScores[c.Key], llm, d.config.Deep.MinScore, gates, srcEntries)
+
 		md := map[string]any{
 			"dream_score":       c.Score,
 			"dream_heuristic":   heuristicScores[c.Key],
@@ -597,9 +631,15 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 			"dream_light_hits":  c.LightHits,
 			"dream_rem_hits":    c.REMHits,
 			"dream_promoted_at": now,
+			// dream_reason：本条被提升的理由（结构化 + 中文摘要）。
+			"dream_reason": reason,
+			// source_entry_ids：引用的原来的条目（L0 工作记忆 ID，跨夜累加了全部来源）。
+			"source_entry_ids": c.SourceIDs,
+			// source_entries：引用的原 L0 条目内容快照（展开原内容用）。
+			"source_entries": srcEntries,
 		}
-		if v, ok := llmScores[c.Key]; ok {
-			md["dream_llm_importance"] = v
+		if llm >= 0 {
+			md["dream_llm_importance"] = llm
 		}
 		entry := Entry{
 			ID:         idgen.New("dream"),
@@ -619,15 +659,27 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 		c.Promoted = true
 		d.mu.Unlock()
 		promoted++
+		promotions = append(promotions, DreamPromotionRecord{
+			ID:            entry.ID,
+			Content:       c.Content,
+			Category:      c.Category,
+			Scope:         c.Scope.Key(),
+			Score:         c.Score,
+			Reason:        reason,
+			SourceIDs:     c.SourceIDs,
+			SourceEntries: srcEntries,
+			PromotedAt:    now,
+		})
 	}
 
 	d.logger.Debugw("dreaming: deep complete",
 		"scored", len(scored), "passed", len(passed), "promoted", promoted)
 
 	return &deepResult{
-		scored:   len(scored),
-		passed:   len(passed),
-		promoted: promoted,
+		scored:     len(scored),
+		passed:     len(passed),
+		promoted:   promoted,
+		promotions: promotions,
 	}, nil
 }
 
@@ -718,6 +770,182 @@ func (d *DreamManager) blendScore(heuristic, llm float64) float64 {
 		w = DefaultLLMImportanceWeight
 	}
 	return minF(1.0, llm*w+heuristic*(1-w))
+}
+
+// buildPromotionReason 构造一条晋升的结构化理由。
+//
+// 入参：候选 c、当前时刻 now、6 信号明细 breakdown、纯启发式分 heuristic、
+// LLM 重要性 llm（<0 表示未使用）、晋升阈值 minScore、通过的门控名 gates。
+// 返回的 DreamPromotionReason 既持久化进 L1 metadata，也挂到 DreamReport.Promotions。
+//
+// 注意 breakdown 由调用方传入而非内部重算，避免与 runDeep 评分阶段重复计算、
+// 且保证与最终 c.Score 所用的明细完全一致（杜绝「展示的理由」与「实际达标的分」不一致）。
+func (d *DreamManager) buildPromotionReason(
+	c *DreamCandidate,
+	now time.Time,
+	breakdown ScoreBreakdown,
+	heuristic, llm, minScore float64,
+	gates []string,
+	srcEntries []DreamSourceEntry,
+) DreamPromotionReason {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "得分 %.2f 达到晋升阈值 %.2f", c.Score, minScore)
+	if len(gates) > 1 {
+		sb.WriteString("（门控：")
+		sb.WriteString(strings.Join(gates, "/"))
+		sb.WriteString("）")
+	}
+	// 信号明细（仅列非零项，保持摘要简洁可读）
+	sb.WriteString("；信号 ")
+	sb.WriteString(fmt.Sprintf("频率%.2f·近期%.2f·巩固%.2f·丰富度%.2f",
+		breakdown.Frequency, breakdown.Recency, breakdown.Consolidation, breakdown.Richness))
+	if breakdown.Relevance > 0 {
+		sb.WriteString(fmt.Sprintf("·相关%.2f", breakdown.Relevance))
+	}
+	if breakdown.Diversity > 0 {
+		sb.WriteString(fmt.Sprintf("·多样%.2f", breakdown.Diversity))
+	}
+	if c.Theme != "" {
+		sb.WriteString(fmt.Sprintf("；REM主题「%s」", c.Theme))
+	}
+	if len(c.SourceIDs) > 0 {
+		sb.WriteString(fmt.Sprintf("；引用 L0 原条目 %d 条", len(c.SourceIDs)))
+	}
+	if llm >= 0 {
+		sb.WriteString(fmt.Sprintf("；LLM重要性 %.2f", llm))
+	}
+
+	return DreamPromotionReason{
+		Summary:       sb.String(),
+		Score:         c.Score,
+		MinScore:      minScore,
+		PassedGates:   gates,
+		Breakdown:     breakdown,
+		Heuristic:     heuristic,
+		LLMImportance: llmOrZero(llm),
+		LightHits:     c.LightHits,
+		REMHits:       c.REMHits,
+		Theme:         c.Theme,
+		// 原文预览：理由主视图即带证据原文，不必展开面板。
+		SourcePreview: buildSourcePreview(srcEntries),
+	}
+}
+
+// llmOrZero 把 buildPromotionReason 的 llm（<0 表示未使用）规整为 0，
+// 配合 json omitempty 省略「未用 LLM」时的字段。
+func llmOrZero(llm float64) float64 {
+	if llm < 0 {
+		return 0
+	}
+	return llm
+}
+
+// buildSourcePreview 把引用的原 L0 条目拼成可嵌入「理由」的原文预览。
+// 最多取前 3 条、每条截断到 140 字符（rune），按说话人标注来源，
+// 使理由在面板主视图即可见证据原文，不必展开；与 source_entries 全量快照互补：
+// 此处供人速读，source_entries 供审计展开全文。
+func buildSourcePreview(entries []DreamSourceEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	const maxSrc = 3
+	const maxRune = 140
+	var parts []string
+	for i, e := range entries {
+		if i >= maxSrc {
+			break
+		}
+		txt := e.Content
+		r := []rune(txt)
+		if len(r) > maxRune {
+			txt = string(r[:maxRune]) + "…"
+		}
+		parts = append(parts, fmt.Sprintf("[%s] %s", sourceSpeakerLabel(e.Speaker), txt))
+	}
+	preview := strings.Join(parts, " ｜ ")
+	if len(entries) > maxSrc {
+		preview += fmt.Sprintf("（另 %d 条略）", len(entries)-maxSrc)
+	}
+	return preview
+}
+
+// sourceSpeakerLabel 把说话人标签转成展示用中文。
+func sourceSpeakerLabel(spk string) string {
+	switch spk {
+	case "user":
+		return "用户"
+	case "assistant":
+		return "Bot"
+	case "observer":
+		return "观察"
+	default:
+		return "原文"
+	}
+}
+
+// collectSourceEntries 晋升前快照候选所引用的原始 L0 工作记忆条目内容。
+//
+// 入参 passed 是本轮通过门控、待写入 L1 的候选。返回 map[candidate.Key] -> 快照列表，
+// 快照顺序与候选 SourceIDs 一致、去重。
+//
+// 为什么在晋升时快照而非查询时反查：
+//   - Deep 相位当夜 L0 必然还在（Light 阶段刚摄取），此刻抓取 100% 命中；
+//   - L0 工作记忆 TTL=14 天，前端查询时原条目可能已过期删除，反查会得到空，
+//     导致面板只剩 ID、看不到原内容。
+//
+// 实现：按候选所属 scope 分组，每个 scope 一次拉取 L0 全量（limit=10000 模拟无限制），
+// 建 id->条目 映射；再按各候选 SourceIDs 取内容。某 ID 在 L0 中找不到（极端情况下已过期）
+// 则跳过该条，不影响其余引用。
+func (d *DreamManager) collectSourceEntries(ctx context.Context, passed []*DreamCandidate) map[string][]DreamSourceEntry {
+	out := make(map[string][]DreamSourceEntry, len(passed))
+
+	// 按 scope 去重，避免重复拉取同一 scope 的 L0。
+	scopes := make(map[Scope]struct{})
+	for _, c := range passed {
+		scopes[c.Scope] = struct{}{}
+	}
+	byScope := make(map[string]map[string]DreamSourceEntry, len(scopes))
+	for sc := range scopes {
+		l0, err := d.manager.store.Retrieve(ctx, Tier0Working, []Scope{sc}, 10000)
+		if err != nil {
+			d.logger.Warnw("dreaming deep: fetch L0 for source snapshot failed",
+				"scope", sc.Key(), "err", err)
+			continue
+		}
+		m := make(map[string]DreamSourceEntry, len(l0))
+		for _, te := range l0 {
+			spk := ""
+			if te.Metadata != nil {
+				if v, ok := te.Metadata["speaker"].(string); ok {
+					spk = v
+				}
+			}
+			m[te.ID] = DreamSourceEntry{
+				ID:      te.ID,
+				Content: te.Content,
+				Scope:   sc.Key(),
+				Speaker: spk,
+			}
+		}
+		byScope[sc.Key()] = m
+	}
+
+	for _, c := range passed {
+		index := byScope[c.Scope.Key()]
+		seen := make(map[string]bool, len(c.SourceIDs))
+		var list []DreamSourceEntry
+		for _, id := range c.SourceIDs {
+			if seen[id] {
+				continue
+			}
+			if e, ok := index[id]; ok {
+				seen[id] = true
+				list = append(list, e)
+			}
+		}
+		out[c.Key] = list
+	}
+	return out
 }
 
 // scoreImportanceBatch 批量调用 LLM 评估所有候选的「重要性」（0.0~1.0）。
