@@ -993,14 +993,22 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 					Cause:   err,
 				}
 			}
+		if isContentSafetyError(err) {
+			// 内容安全审核被拒（BigModel 1301 等）：用户内容触发平台策略，
+			// 属业务边界而非系统故障，降级为 WARN 避免监控噪音。
+			logger.Warnw("llm stage: stream orchestrate failed (content safety)",
+				"message_id", env.Message.ID,
+				"err", err)
+		} else {
 			logger.Errorw("llm stage: stream orchestrate failed",
 				"message_id", env.Message.ID,
 				"err", err)
-			return env, &core.PipelineError{
-				Stage:   s.name,
-				Message: "LLM stream orchestrate failed",
-				Cause:   err,
-			}
+		}
+		return env, &core.PipelineError{
+			Stage:   s.name,
+			Message: "LLM stream orchestrate failed",
+			Cause:   err,
+		}
 		}
 	} else {
 		var err error
@@ -1029,14 +1037,22 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 					Cause:   err,
 				}
 			}
+		if isContentSafetyError(err) {
+			// 内容安全审核被拒（BigModel 1301 等）：用户内容触发平台策略，
+			// 属业务边界而非系统故障，降级为 WARN 避免监控噪音。
+			logger.Warnw("llm stage: orchestrate failed (content safety)",
+				"message_id", env.Message.ID,
+				"err", err)
+		} else {
 			logger.Errorw("llm stage: orchestrate failed",
 				"message_id", env.Message.ID,
 				"err", err)
-			return env, &core.PipelineError{
-				Stage:   s.name,
-				Message: "LLM orchestrate failed",
-				Cause:   err,
-			}
+		}
+		return env, &core.PipelineError{
+			Stage:   s.name,
+			Message: "LLM orchestrate failed",
+			Cause:   err,
+		}
 		}
 	}
 
@@ -1597,4 +1613,26 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 		ToolCalls: toolCalls,
 		Steps:     steps,
 	})
+}
+
+// isContentSafetyError 判断错误是否为平台「内容安全审核」类拒绝（如 BigModel
+// 1301 / contentFilter）。这类错误由用户内容触发平台策略，属业务边界而非系统故障，
+// 不应记为 ERROR 告警。采用字符串宽松匹配（错误经多层包装后已退化为纯文本，
+// 与 workflow/retry_classify.go 的「Loose」哲学一致），仅匹配确定性特征。
+func isContentSafetyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	markers := []string{
+		`"code":"1301"`, `"code": "1301"`,
+		"内容安全审核", "触发平台内容",
+		"contentfilter", "content_filter",
+	}
+	for _, m := range markers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
 }
