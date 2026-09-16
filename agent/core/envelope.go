@@ -431,6 +431,15 @@ func (e *Envelope) AddAction(a Action) {
 	e.actions = append(e.actions, a)
 }
 
+// ClearActions 清空信封上累积的输出动作。
+// 用于 middleware 的同轮重算（loop-back）场景：首轮已追加的回复动作必须被清空，
+// 否则重算轮再次追加会导致 engine 把两条都派发出站（同一消息重复回复）。
+func (e *Envelope) ClearActions() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.actions = nil
+}
+
 // Actions 返回累积的所有输出动作的深拷贝。
 // Metadata map 也会被复制，防止调用方修改返回值影响 Envelope 内部状态。
 func (e *Envelope) Actions() []Action {

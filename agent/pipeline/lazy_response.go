@@ -50,6 +50,19 @@ var lazyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\|.*\|.*\|\n\|[-:]+\|`),
 }
 
+// envEntityPattern 匹配"具体可验证的环境实体"。防偷懒检测的初衷是捕获
+// "不调工具就编造环境状态"——被断言的对象必须是具体环境实体（软件/文件/命令/
+// 服务等）。纯概念讨论（"风险不存在""方案不存在""膨胀在数学上就不存在了"）
+// 不含这些实体词，不应误判为偷懒。
+//
+// 历史教训（2026-09-16 Telegram 重复回复事故）：一条架构讨论回复含"膨胀在数学上
+// 就不存在了"被「不存在」误判为偷懒，触发 loop-back 重算并重复回复。加此实体
+// 共现约束后，概念讨论不再触发。
+//
+// 注意：必须写"软件"而非"软?件"——后者会让裸"件"字（事件/组件/条件）也匹配，
+// 重新引入概念讨论误触发。
+var envEntityPattern = regexp.MustCompile(`(?i)(文件|目录|文件夹|包|依赖|模块|命令|指令|服务|进程|端口|路径|软件|程序|工具|插件|驱动|配置|版本|环境变量|git|docker|python|node|apt|yum|npm|pip|brew|pacman|cargo|数据库|磁盘|内存|cpu|内核|操作系统|系统版本)`)
+
 // lazyResponseState 按通道追踪是否已注入过警告。
 type lazyResponseState struct {
 	mu     sync.Mutex
@@ -81,9 +94,15 @@ func (c LazyResponseConfig) IsZero() bool {
 }
 
 // hasLazyIndicators 检测文本是否包含"可能偷懒"的指示模式。
+// 要求：文本同时提及具体环境实体（envEntityPattern）并命中偷懒断言模式。
+// 仅命中断言模式但无环境实体（纯概念讨论）不算偷懒。
 func hasLazyIndicators(text string) bool {
 	if len(strings.TrimSpace(text)) < 10 {
 		return false // 太短不算偷懒
+	}
+	// 必须提及具体环境实体，否则不可能是"编造环境状态"（概念讨论不触发）。
+	if !envEntityPattern.MatchString(text) {
+		return false
 	}
 	for _, pat := range lazyPatterns {
 		if pat.MatchString(text) {
@@ -175,10 +194,23 @@ Rules you MUST follow:
 						// 同轮 loop-back：把硬警告注入 prompt 后立即重算 LLM，
 						// 当轮即返回修正后的答案，而非等下一轮才教育模型。
 						// next 是更内层 stage（不含本 middleware），故只会重算一次、不会无限递归。
+						//
+						// 关键：首轮回复已被追加进 result.Actions。loop-back 复用同一
+						// envelope 再次重算，会再追加一条修正轮回复。若不清除首轮 Action，
+						// engine 会把两条都派发出站 → 同一条消息重复回复（见 2026-09-16
+						// Telegram 重复回复事故，trace 9fbd42e3…）。故重跑前清空首轮
+						// Action，使修正轮成为 envelope 里唯一的回复；重算失败则还原首轮，
+						// 保证至少有一条回复出站。
+						firstActions := result.Actions()
+						result.ClearActions()
 						if rerun, rerr := next.Process(ctx, result); rerr == nil {
 							// 把警告随修正结果一并带回，保持返回 Envelope 的警告一致性。
 							core.QueueWarning(rerun, warning)
 							return rerun, rerr
+						}
+						// 重算失败：还原首轮回复，避免无回复出站。
+						for _, a := range firstActions {
+							result.AddAction(a)
 						}
 						// 重算失败则退回原始（已带警告）结果。
 					}
