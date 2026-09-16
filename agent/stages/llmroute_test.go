@@ -111,3 +111,33 @@ func TestLLMStage_HardTimeout_ZeroDisablesCap(t *testing.T) {
 		t.Fatalf("expected returned envelope, got nil")
 	}
 }
+
+// TestIsContentSafetyError 覆盖「内容安全审核」错误判别：BigModel 1301 /
+// contentFilter / 内容安全审核 应判为内容安全（降级 WARN）；参数错误（1210/1214）
+// 与 5xx 仍属系统错误（保持 ERROR），不可误降级。
+func TestIsContentSafetyError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{"bigmodel 1301 content safety", `openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1301","message":"系统检测到输入或生成内容可能包含不安全或敏感内容"}}`, true},
+		{"bigmodel 1301 spaced", `{"error":{"code": "1301","message":"内容安全审核"}}`, true},
+		{"contentFilter level", `contentFilter: level=2 triggered`, true},
+		{"content safety audit", `触发平台内容安全审核`, true},
+		{"1210 param error", `{"error":{"code":"1210","message":"API 调用参数有误"}}`, false},
+		{"1214 messages", `{"error":{"code":"1214","message":"messages 参数非法"}}`, false},
+		{"500 server", `HTTP error 500 internal error`, false},
+		{"empty", ``, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isContentSafetyError(errors.New(c.err)); got != c.want {
+				t.Errorf("isContentSafetyError(%q) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+	if isContentSafetyError(nil) {
+		t.Error("nil error should not be content safety")
+	}
+}
