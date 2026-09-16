@@ -54,10 +54,10 @@
     </t-card>
 
     <t-card title="记忆清理（运维）" :bordered="false" class="card">
-      <p class="tip">清理历史存量里不符合标准的短噪声记忆（少于 5 字符或 5 个词）。新写入已被源头拦截，此处处理存量垃圾。删除为破坏性操作，建议先预览再清理。</p>
+      <p class="tip">清理历史存量里不符合标准的短噪声记忆（少于 5 字符或 5 个词）。新写入已被源头拦截，此处处理存量垃圾。扫描范围是库中该层级<b>全部</b>条目（不受内存容量上限影响）。删除为破坏性操作，建议先预览再清理。</p>
       <t-form label-align="top">
         <t-form-item label="目标层级">
-          <t-checkbox-group v-model="cleanTiers">
+          <t-checkbox-group v-model="cleanTiers" data-testid="clean-tier-group">
             <t-checkbox value="L0">L0 工作记忆</t-checkbox>
             <t-checkbox value="L1">L1 长期记忆</t-checkbox>
             <t-checkbox value="L2">L2 场景</t-checkbox>
@@ -66,8 +66,20 @@
         </t-form-item>
       </t-form>
       <t-space>
-        <t-button theme="default" :loading="cleaning" :disabled="cleanTiers.length === 0" @click="previewTrivial">预览垃圾</t-button>
-        <t-button theme="danger" :loading="cleaning" :disabled="cleanTiers.length === 0" @click="confirmClean">确认清理</t-button>
+        <t-button
+          theme="default"
+          :loading="cleaning"
+          :disabled="cleanTiers.length === 0"
+          data-testid="clean-preview-btn"
+          @click="previewTrivial"
+        >预览垃圾</t-button>
+        <t-button
+          theme="danger"
+          :loading="cleaning"
+          :disabled="cleanTiers.length === 0"
+          data-testid="clean-confirm-btn"
+          @click="confirmClean"
+        >确认清理</t-button>
       </t-space>
 
       <t-alert v-if="cleanResult" :theme="cleanResult.dryRun ? 'info' : 'success'" class="card">
@@ -143,6 +155,65 @@ async function trigger() {
     triggering.value = false
     tip && tip.close && tip.close()
   }
+}
+
+// ── 记忆清理（运维）：清理历史存量里的短噪声记忆 ──
+// 判定口径与后端 memory.IsTrivialMemoryContent 一致（<5 字符或 <5 词）。
+const cleanTiers = ref(['L0', 'L1'])
+const cleaning = ref(false)
+const cleanResult = ref(null)
+const cleanCols = [
+  { colKey: 'tier', title: '层级', width: 80 },
+  { colKey: 'scope', title: '范围', width: 160 },
+  { colKey: 'content', title: '内容', ellipsis: true },
+]
+
+async function runCleanup(dryRun) {
+  if (cleaning.value) return
+  if (cleanTiers.value.length === 0) {
+    MessagePlugin.warning('请至少选择一个目标层级')
+    return
+  }
+  cleaning.value = true
+  try {
+    const res = await memoryApi.cleanupTrivial(props.botId, { tiers: cleanTiers.value, dryRun })
+    // sample 后端无命中时可能为 null，统一兜成数组，模板才能安全取 length。
+    cleanResult.value = { ...res, dryRun, sample: res.sample || [] }
+    if (dryRun) {
+      MessagePlugin.info(`预览完成：扫描 ${res.scanned} 条，命中垃圾 ${res.matched} 条（未删除任何数据）`)
+    } else {
+      MessagePlugin.success(`清理完成：已删除 ${res.deleted} 条垃圾记忆`)
+      // 真删除后刷新状态，避免页面残留旧统计。
+      try {
+        status.value = await dreamingApi.status(props.botId)
+      } catch (e) {
+        // 状态刷新失败不影响清理结果展示，忽略即可。
+      }
+    }
+  } catch (e) {
+    MessagePlugin.error((dryRun ? '预览失败：' : '清理失败：') + (e.message || '请稍后重试'))
+  } finally {
+    cleaning.value = false
+  }
+}
+
+function previewTrivial() {
+  runCleanup(true)
+}
+
+function confirmClean() {
+  // 破坏性操作：必须二次确认，并提示先预览。
+  const dlg = DialogPlugin.confirm({
+    header: '确认清理垃圾记忆',
+    body: `将从 ${cleanTiers.value.join('、')} 中永久删除不符合标准的短噪声记忆（少于 5 字符或 5 个词），该操作不可撤销。建议先点「预览垃圾」确认清单。`,
+    confirmBtn: { content: '确认删除', theme: 'danger' },
+    cancelBtn: '取消',
+    onConfirm: () => {
+      runCleanup(false)
+      dlg.destroy()
+    },
+    onCancel: () => dlg.destroy(),
+  })
 }
 </script>
 
