@@ -167,7 +167,16 @@ type DeepPhaseConfig struct {
 	MaxPromotions       int
 	RecencyHalfLifeDays int
 	MaxAgeDays          int
+	// UseLLMImportance：用 LLM 评估「重要性」作为主导分数，替代纯启发式噪声
+	// （Recency 线性衰减 + Richness 字数阈值对单条记忆几乎恒定满分，导致分数全挤在 0.5~0.7）。
+	// 开启后：最终分 = LLM分*权重 + 启发式*(1-权重)。LLM 不可用时自动回退纯启发式。
+	UseLLMImportance bool
+	// LLMImportanceWeight：LLM 分占比（0~1）。0=未配置，runDeep 回退 0.55。
+	LLMImportanceWeight float64
 }
+
+// DefaultLLMImportanceWeight 是 LLM 重要性占比的回退默认值（当配置为 0 时）。
+const DefaultLLMImportanceWeight = 0.55
 
 // DefaultDreamConfig 返回默认配置。
 func DefaultDreamConfig() DreamConfig {
@@ -200,6 +209,11 @@ func DefaultDreamConfig() DreamConfig {
 			// RecencyHalfLifeDays=14：约两周半衰期，超过 ~4 周的内容评分趋近 0。
 			RecencyHalfLifeDays: 14,
 			MaxAgeDays:          30,
+			// UseLLMImportance=true：用 LLM 直接评估每条记忆的重要性，替代纯启发式
+			// 噪声（Recency 线性衰减/Richness 字数阈值对单条记忆几乎恒定满分）。
+			// LLM 分占 0.55，启发式占 0.45；LLM 模型未配置或调用失败时回退纯启发式。
+			UseLLMImportance:    true,
+			LLMImportanceWeight: DefaultLLMImportanceWeight,
 		},
 	}
 }
