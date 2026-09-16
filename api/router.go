@@ -130,6 +130,7 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/memory/stats", s.handleMemoryStats)
 				botsAdmin.POST("/:id/memory/import", s.handleImportMemohMemory)
 				botsAdmin.DELETE("/:id/memory/entry", s.handleDeleteTieredMemoryEntry)
+				botsAdmin.POST("/:id/memory/cleanup-trivial", s.handleCleanupTrivialMemory)
 
 				// Channel 配置管理 — 已废弃，统一使用 Platform API（/api/bots/:id/platforms）
 				// 旧 Channel API 路由已移除

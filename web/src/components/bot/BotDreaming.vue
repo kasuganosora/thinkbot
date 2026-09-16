@@ -52,13 +52,46 @@
       </t-descriptions>
       <div v-if="lastRunAt" class="run-at">运行于 {{ formatTime(lastRunAt) }}</div>
     </t-card>
+
+    <t-card title="记忆清理（运维）" :bordered="false" class="card">
+      <p class="tip">清理历史存量里不符合标准的短噪声记忆（少于 5 字符或 5 个词）。新写入已被源头拦截，此处处理存量垃圾。删除为破坏性操作，建议先预览再清理。</p>
+      <t-form label-align="top">
+        <t-form-item label="目标层级">
+          <t-checkbox-group v-model="cleanTiers">
+            <t-checkbox value="L0">L0 工作记忆</t-checkbox>
+            <t-checkbox value="L1">L1 长期记忆</t-checkbox>
+            <t-checkbox value="L2">L2 场景</t-checkbox>
+            <t-checkbox value="L3">L3 画像</t-checkbox>
+          </t-checkbox-group>
+        </t-form-item>
+      </t-form>
+      <t-space>
+        <t-button theme="default" :loading="cleaning" :disabled="cleanTiers.length === 0" @click="previewTrivial">预览垃圾</t-button>
+        <t-button theme="danger" :loading="cleaning" :disabled="cleanTiers.length === 0" @click="confirmClean">确认清理</t-button>
+      </t-space>
+
+      <t-alert v-if="cleanResult" :theme="cleanResult.dryRun ? 'info' : 'success'" class="card">
+        扫描 {{ cleanResult.scanned }} 条，命中垃圾 {{ cleanResult.matched }} 条
+        <template v-if="!cleanResult.dryRun">，已删除 {{ cleanResult.deleted }} 条</template>
+        <span v-for="(st, t) in cleanResult.byTier" :key="t"> ｜ {{ t }}: 扫描 {{ st.scanned }} / 命中 {{ st.matched }}</span>
+      </t-alert>
+
+      <t-table
+        v-if="cleanResult && cleanResult.sample.length"
+        :data="cleanResult.sample"
+        :columns="cleanCols"
+        size="small"
+        row-key="id"
+        class="card"
+      />
+    </t-card>
   </div>
 </template>
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { MessagePlugin } from 'tdesign-vue-next'
-import { dreamingApi } from '@/api/services'
+import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
+import { dreamingApi, memoryApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
 
 const props = defineProps({ botId: { type: String, required: true } })
