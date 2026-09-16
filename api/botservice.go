@@ -1237,6 +1237,19 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// userMessageEventWriter 把摄取到的入站用户消息并行写入持久化事件流
 	// （user_message_events 表），使 dreaming 回灌消费事件流而非扫描 chat_messages。
 	umeWriter := &userMessageEventWriter{db: s.db}
+	// 防偷懒两级级联：一级正则高召回召回，二级 LLM（优先 bundle.Light 便宜快模型）
+	// 做语义裁决，把裁判权从僵化词表交还模型。每次召回落库到
+	// data/lazy_judgments.jsonl 攒标注语料（旁路、非阻塞）。
+	lazyJudgeProvider := bundle.Main
+	lazyJudgeModel := bundle.MainDef.Model
+	if bundle.Light != nil {
+		lazyJudgeProvider = bundle.Light
+		lazyJudgeModel = bundle.LightDef.Model
+	}
+	lazyCfg := pipeline.NewLazyResponseConfig()
+	lazyCfg.Judge = NewLazyLLMJudge(lazyJudgeProvider, lazyJudgeModel)
+	lazyCfg.Sink = pipeline.NewFileLazyJudgeSink("data/lazy_judgments.jsonl")
+
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		// 捕获 LLM 回复为 L0 工作记忆笔记（category=exchange），供 dreaming 巩固。
 		// 必须放在最外层：在 LLMStage 产生 ActionReply 之后才补 ActionNote。
@@ -1248,7 +1261,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 因此**重复调用 task 属于真异常**（每次都会新建一个工作流），必须保留循环检测守卫。
 		// 历史上豁免的task_status 轮询工具已随阻塞化移除。
 		pipeline.LoopDetectionMiddleware(pipeline.NewLoopDetectionConfig()),
-		pipeline.LazyResponseMiddleware(pipeline.NewLazyResponseConfig()),
+		pipeline.LazyResponseMiddleware(lazyCfg),
 		pipeline.TokenBudgetMiddlewareWithState(pipeline.NewTokenBudgetConfig().WithStatsRecorder(s.statsRecorder), s.tokenBudget),
 	)
 
