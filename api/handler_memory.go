@@ -485,3 +485,152 @@ func (s *Server) handleImportMemohMemory(c *gin.Context) {
 		"errors":      report.Errors,
 	})
 }
+
+// ============================================================================
+// 琐碎内容清理（运维）— 清理历史存量里的垃圾短内容
+// ============================================================================
+
+// handleCleanupTrivialMemory 运维手段：扫描并清理不符合记忆标准的琐碎内容
+// （<5 字符或 <5 词的短噪声，判定见 memory.IsTrivialMemoryContent）。
+// POST /api/bots/:id/memory/cleanup-trivial
+//
+// body: { "tiers": ["L0","L1"], "dryRun": true }
+//
+//	tiers  : 目标层级，默认 ["L0","L1"]；可补 L2/L3，但默认不清（降低误删风险）
+//	dryRun : true（默认）仅统计并取样返回，不删除；false 才真正删除并持久化
+//
+// 背景：新写入已在捕获层（note_capture）/ActionNote（MemoryWriteStage）/回灌（backfill）
+// 被源头拦截，但规则生效前已落入 L0/L1 的短内容仍需一次性运维清理。删除逐条走
+// store.Delete（同时清理内存桶并 persistDelete 落库），真实生效。
+func (s *Server) handleCleanupTrivialMemory(c *gin.Context) {
+	botID := c.Param("id")
+
+	var req struct {
+		Tiers  []string `json:"tiers"`
+		DryRun *bool    `json:"dryRun"`
+	}
+	// body 允许为空：使用默认 tiers + dryRun=true。
+	_ = c.ShouldBindJSON(&req)
+
+	dryRun := true
+	if req.DryRun != nil {
+		dryRun = *req.DryRun
+	}
+	tierStrs := req.Tiers
+	if len(tierStrs) == 0 {
+		tierStrs = []string{"L0", "L1"}
+	}
+
+	targets := make([]memory.MemoryTier, 0, len(tierStrs))
+	tierLabel := make(map[memory.MemoryTier]string, len(tierStrs))
+	for _, ts := range tierStrs {
+		var t memory.MemoryTier
+		switch strings.ToUpper(ts) {
+		case "L0":
+			t = memory.Tier0Working
+		case "L1":
+			t = memory.Tier1LongTerm
+		case "L2":
+			t = memory.Tier2Episodic
+		case "L3":
+			t = memory.Tier3Profile
+		default:
+			continue
+		}
+		targets = append(targets, t)
+		tierLabel[t] = strings.ToUpper(ts)
+	}
+	if len(targets) == 0 {
+		Fail(c, errs.BadRequest("no valid tier specified (expected L0/L1/L2/L3)"))
+		return
+	}
+
+	bundle, stop, berr := s.memoryBundle(botID)
+	if berr != nil {
+		Fail(c, errs.Wrap(berr, "failed to open memory store"))
+		return
+	}
+	if bundle == nil {
+		Fail(c, errs.NotFound("dreaming not enabled for this bot"))
+		return
+	}
+	defer stop()
+	mgr := bundle.TieredMgr
+	if mgr == nil {
+		Fail(c, errs.Internal("memory manager not initialized"))
+		return
+	}
+	store := mgr.Store()
+	if store == nil {
+		Fail(c, errs.Internal("memory store not initialized"))
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	type tierStat struct {
+		Scanned int `json:"scanned"`
+		Matched int `json:"matched"`
+	}
+	byTier := make(map[string]*tierStat, len(targets))
+	var sample []gin.H
+	const maxSample = 25
+
+	totalScanned, totalMatched, totalDeleted := 0, 0, 0
+
+	for _, t := range targets {
+		stat := &tierStat{}
+		// 内存态遍历，传大 limit 取全量（RetrieveByTier 仅截断，无偏移分页）。
+		entries, err := mgr.RetrieveByTier(ctx, t, nil, 1_000_000)
+		if err != nil {
+			Fail(c, errs.Wrap(err, "failed to scan memory tier "+tierLabel[t]))
+			return
+		}
+		for _, e := range entries {
+			stat.Scanned++
+			if !memory.IsTrivialMemoryContent(e.Content) {
+				continue
+			}
+			stat.Matched++
+			if len(sample) < maxSample {
+				content := e.Content
+				if rc := []rune(content); len(rc) > 200 {
+					content = string(rc[:200]) + "…"
+				}
+				sample = append(sample, gin.H{
+					"id":      e.ID,
+					"tier":    e.Tier.String(),
+					"scope":   string(e.Scope.Kind) + ":" + e.Scope.ID,
+					"content": content,
+				})
+			}
+			if !dryRun {
+				if derr := store.Delete(ctx, e.Tier, e.Scope, e.ID); derr != nil {
+					s.logger.Warnw("cleanup-trivial: failed to delete entry",
+						"err", derr, "tier", e.Tier.String(), "id", e.ID)
+				} else {
+					totalDeleted++
+				}
+			}
+		}
+		byTier[tierLabel[t]] = stat
+		totalScanned += stat.Scanned
+		totalMatched += stat.Matched
+	}
+
+	if !dryRun && totalDeleted > 0 {
+		auditLog(c, s.logger, "cleanup_trivial_memory",
+			"bot_id", botID, "deleted", totalDeleted, "tiers", strings.Join(tierStrs, ","))
+		s.logger.Infow("cleanup-trivial: removed trivial memory entries",
+			"bot_id", botID, "deleted", totalDeleted, "scanned", totalScanned)
+	}
+
+	OK(c, gin.H{
+		"scanned": totalScanned,
+		"matched": totalMatched,
+		"deleted": totalDeleted,
+		"dryRun":  dryRun,
+		"byTier":  byTier,
+		"sample":  sample,
+	})
+}

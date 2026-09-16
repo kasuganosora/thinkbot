@@ -508,6 +508,18 @@ export const memoryApi = {
     const fd = new FormData()
     fd.append('file', file)
     return uploadRequest('POST', `/api/bots/${botId}/memory/import`, fd)
+  },
+  // 清理琐碎内容（运维）：扫描并删除不符合标准的短噪声记忆（<5 字符或 <5 词）。
+  // payload: { tiers?: ['L0','L1'], dryRun?: true }
+  cleanupTrivial(botId, payload = {}) {
+    if (USE_MOCK) {
+      return mockResolve(() => ({
+        scanned: 120, matched: 32, deleted: 0, dryRun: true,
+        byTier: { L0: { scanned: 100, matched: 25 }, L1: { scanned: 20, matched: 7 } },
+        sample: [{ id: 'm1', tier: 'L0', scope: 'channel:general', content: '好的' }]
+      }))
+    }
+    return request('POST', `/api/bots/${botId}/memory/cleanup-trivial`, payload)
   }
 }
 
