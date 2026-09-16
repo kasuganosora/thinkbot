@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -218,8 +219,18 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 	}
 	clusters, err := memory.ClusterMerge(batchCtx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs)
 	if err != nil {
-		c.logger.Warnw("sqlite_compactor: LLM cluster+merge failed, skipping batch",
-			"err", err, "batch_size", len(entries))
+		if isDeterministicLLMReject(err) {
+			// 内容安全审核 / 请求参数非法等「确定性失败」：相同内容重试必再次被拒。
+			// 标记这批条目跳过压缩，打破「每轮冷却后重新取出 → 再次被拒」的死循环，
+			// 避免持续浪费 BigModel 调用并刷 WARN 噪音。可恢复的瞬时限流 / 网络抖动
+			// 不标记，仍走冷却后重试路径。
+			skipped := c.repo.MarkCompactSkipped(batchCtx, scope, entries, err.Error())
+			c.logger.Warnw("sqlite_compactor: LLM cluster+merge rejected (deterministic), marking entries skipped",
+				"err", err, "batch_size", len(entries), "skipped", skipped)
+		} else {
+			c.logger.Warnw("sqlite_compactor: LLM cluster+merge failed, skipping batch",
+				"err", err, "batch_size", len(entries))
+		}
 		return 0, 0, 0
 	}
 	if len(clusters) == 0 {
@@ -262,4 +273,31 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 	}
 
 	return mergedCount, archivedCount, saved
+}
+
+// isDeterministicLLMReject 判断 LLM 调用是否返回「确定性失败」——即相同输入重试
+// 必然再次失败（内容安全审核 / 请求参数非法等），而非可恢复的瞬时限流或网络抖动。
+// 用于压缩死循环熔断：确定性失败时标记条目跳过，而非放入「冷却后重试」的死循环。
+//
+// 采用字符串宽松匹配而非结构化类型：压缩 LLM 调用经 provider 多层包装后错误已退化为
+// 纯文本，errors.As 拿不到结构化类型（与 workflow/retry_classify.go 的「Loose」哲学一致）。
+// 收录标准严格限定于确定性特征，任何可能表达「瞬时可恢复」的措辞都不得加入，否则会把
+// 可恢复故障误判为终态而放弃压缩。
+func isDeterministicLLMReject(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	deterministic := []string{
+		`"code":"1301"`, `"code": "1301"`, "内容安全审核", "触发平台内容",
+		`"code":"1210"`, `"code": "1210"`, "api 调用参数有误",
+		`"code":"1214"`, `"code": "1214"`, "messages 参数非法",
+		"contentfilter", "content_filter",
+	}
+	for _, p := range deterministic {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }

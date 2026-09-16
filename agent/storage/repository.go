@@ -527,8 +527,8 @@ func (r *SQLiteRepository) warnZeroBudget(ctx context.Context, scope memory.Scop
 func (r *SQLiteRepository) totalChars(ctx context.Context, scope memory.Scope) (int, error) {
 	var models []dao.EntryModel
 	if err := r.db.WithContext(ctx).
-		Where("scope_kind = ? AND scope_id = ? AND (metadata_json IS NULL OR metadata_json NOT LIKE ?)",
-			string(scope.Kind), scope.ID, "%\"archived\":true%").
+		Where("scope_kind = ? AND scope_id = ? AND (metadata_json IS NULL OR (metadata_json NOT LIKE ? AND metadata_json NOT LIKE ?))",
+			string(scope.Kind), scope.ID, "%\"archived\":true%", "%\"compact_skipped\":true%").
 		Find(&models).Error; err != nil {
 		return 0, errs.Wrap(err, "sqlite_repository: totalChars failed")
 	}
@@ -553,6 +553,11 @@ func (r *SQLiteRepository) GetAllActive(ctx context.Context, scope memory.Scope)
 	for _, m := range models {
 		e := modelToEntry(m)
 		if isEntryArchived(e.Metadata) {
+			continue
+		}
+		if isEntryCompactSkipped(e.Metadata) {
+			// 压缩时确定性失败（如内容安全审核被拒）已标记跳过：不再进入
+			// 压缩活跃集，避免 maybeCompact 每轮冷却后重新取出并反复触发 LLM 失败。
 			continue
 		}
 		out = append(out, e)
@@ -601,6 +606,58 @@ func isEntryArchived(meta map[string]any) bool {
 	}
 	archived, ok := meta["archived"].(bool)
 	return ok && archived
+}
+
+// isEntryCompactSkipped 检查元数据中是否有 compact_skipped=true 标记。
+// 该标记表示此条目在压缩时遭遇确定性失败（如内容安全审核被拒），
+// 相同内容重试必再次失败，故已退出压缩活跃集。
+func isEntryCompactSkipped(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	skipped, ok := meta["compact_skipped"].(bool)
+	return ok && skipped
+}
+
+// MarkCompactSkipped 将一批「压缩时确定性失败」的记忆标记，使其退出自动压缩的
+// 活跃集，避免反复取出重试形成死循环。失败是确定性的（相同内容重试必再次被拒），
+// 标记后 GetAllActive / totalChars 都会排除它们，maybeCompact 不再针对这些条目
+// 触发 LLM 调用。返回成功标记的条目数（已标记的按幂等跳过）。
+func (r *SQLiteRepository) MarkCompactSkipped(ctx context.Context, scope memory.Scope, entries []memory.Entry, reason string) int {
+	count := 0
+	for _, e := range entries {
+		var model dao.EntryModel
+		if err := r.db.WithContext(ctx).
+			Where("id = ? AND scope_kind = ? AND scope_id = ?", e.ID, string(scope.Kind), scope.ID).
+			First(&model).Error; err != nil {
+			continue
+		}
+		var meta map[string]any
+		if model.MetadataJSON != "" {
+			_ = json.Unmarshal([]byte(model.MetadataJSON), &meta)
+		}
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		if v, ok := meta["compact_skipped"].(bool); ok && v {
+			count++
+			continue
+		}
+		meta["compact_skipped"] = true
+		meta["compact_skipped_at"] = time.Now()
+		meta["compact_skip_reason"] = reason
+		b, err := json.Marshal(meta)
+		if err != nil {
+			continue
+		}
+		if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
+			Where("id = ?", e.ID).
+			Update("metadata_json", string(b)).Error; err != nil {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // ============================================================================
