@@ -97,6 +97,54 @@
         class="card"
       />
     </t-card>
+
+    <t-card title="重复刷屏清理（运维）" :bordered="false" class="card">
+      <p class="tip">清理同一 (层级+范围+内容) 精确重复 ≥ N 次的条目，每组保留 1 条、删除其余。典型如 bot 自动刷屏帖（"今日の迷路です！ #AiMaze" ×15）。默认 N=5，只命中纯刷屏，放过出现 3~4 次的真实记忆。扫描范围是库中该层级<b>全部</b>条目。删除为破坏性操作，建议先预览再清理。</p>
+      <t-form label-align="top">
+        <t-form-item label="目标层级">
+          <t-checkbox-group v-model="dupTiers" data-testid="dup-tier-group">
+            <t-checkbox value="L0">L0 工作记忆</t-checkbox>
+            <t-checkbox value="L1">L1 长期记忆</t-checkbox>
+            <t-checkbox value="L2">L2 场景</t-checkbox>
+            <t-checkbox value="L3">L3 画像</t-checkbox>
+          </t-checkbox-group>
+        </t-form-item>
+        <t-form-item label="重复阈值 N（同一内容出现次数 ≥ N 才清理）">
+          <t-input-number v-model="dupMinCount" :min="2" :max="100" style="width: 160px" data-testid="dup-mincount" />
+        </t-form-item>
+      </t-form>
+      <t-space>
+        <t-button
+          theme="default"
+          :loading="duping"
+          :disabled="dupTiers.length === 0"
+          data-testid="dup-preview-btn"
+          @click="previewDuplicates"
+        >预览重复</t-button>
+        <t-button
+          theme="danger"
+          :loading="duping"
+          :disabled="dupTiers.length === 0"
+          data-testid="dup-confirm-btn"
+          @click="confirmDupClean"
+        >确认清理</t-button>
+      </t-space>
+
+      <t-alert v-if="dupResult" :theme="dupResult.dryRun ? 'info' : 'success'" class="card">
+        扫描 {{ dupResult.scanned }} 条，命中 {{ dupResult.duplicateGroups }} 组重复（将删除 {{ dupResult.toDelete }} 条）
+        <template v-if="!dupResult.dryRun">，已删除 {{ dupResult.deleted }} 条</template>
+        <span v-for="(st, t) in dupResult.byTier" :key="t"> ｜ {{ t }}: 扫描 {{ st.scanned }} / 删 {{ st.matched }}</span>
+      </t-alert>
+
+      <t-table
+        v-if="dupResult && dupResult.groups.length"
+        :data="dupResult.groups"
+        :columns="dupCols"
+        size="small"
+        row-key="keepId"
+        class="card"
+      />
+    </t-card>
   </div>
 </template>
 
@@ -210,6 +258,70 @@ function confirmClean() {
     cancelBtn: '取消',
     onConfirm: () => {
       runCleanup(false)
+      dlg.destroy()
+    },
+    onCancel: () => dlg.destroy(),
+  })
+}
+
+// ── 重复刷屏清理（运维）：清理同一 (层级+范围+内容) 精确重复 ≥N 次的条目 ──
+// 判定口径与后端 handleCleanupDuplicateMemory 一致：按 (tier, scope, content) 分组计数，
+// 每组保留 1 条、删除其余（"去重"而非"全删"）。
+const dupTiers = ref(['L0', 'L1'])
+const dupMinCount = ref(5)
+const duping = ref(false)
+const dupResult = ref(null)
+const dupCols = [
+  { colKey: 'tier', title: '层级', width: 80 },
+  { colKey: 'scope', title: '范围', width: 160 },
+  { colKey: 'count', title: '重复次数', width: 100 },
+  { colKey: 'content', title: '内容（保留 1 条，其余删除）', ellipsis: true },
+]
+
+async function runDupCleanup(dryRun) {
+  if (duping.value) return
+  if (dupTiers.value.length === 0) {
+    MessagePlugin.warning('请至少选择一个目标层级')
+    return
+  }
+  duping.value = true
+  try {
+    const res = await memoryApi.cleanupDuplicates(props.botId, {
+      tiers: dupTiers.value,
+      minCount: dupMinCount.value,
+      dryRun,
+    })
+    // groups 后端无命中时可能为 null，统一兜成数组，模板才能安全取 length。
+    dupResult.value = { ...res, dryRun, groups: res.groups || [] }
+    if (dryRun) {
+      MessagePlugin.info(`预览完成：扫描 ${res.scanned} 条，命中 ${res.duplicateGroups} 组重复，将删除 ${res.toDelete} 条（未删除任何数据）`)
+    } else {
+      MessagePlugin.success(`清理完成：已删除 ${res.deleted} 条重复记忆`)
+      try {
+        status.value = await dreamingApi.status(props.botId)
+      } catch (e) {
+        // 状态刷新失败不影响清理结果展示，忽略即可。
+      }
+    }
+  } catch (e) {
+    MessagePlugin.error((dryRun ? '预览失败：' : '清理失败：') + (e.message || '请稍后重试'))
+  } finally {
+    duping.value = false
+  }
+}
+
+function previewDuplicates() {
+  runDupCleanup(true)
+}
+
+function confirmDupClean() {
+  const dlg = DialogPlugin.confirm({
+    header: '确认清理重复记忆',
+    body: `将删除 ${dupTiers.value.join('、')} 中同一内容出现 ≥ ${dupMinCount.value} 次的重复条目（每组保留 1 条），该操作不可撤销。建议先点「预览重复」确认清单。`,
+    confirmBtn: { content: '确认删除', theme: 'danger' },
+    cancelBtn: '取消',
+    onConfirm: () => {
+      runDupCleanup(false)
       dlg.destroy()
     },
     onCancel: () => dlg.destroy(),

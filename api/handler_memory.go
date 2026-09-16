@@ -705,3 +705,287 @@ func (s *Server) handleCleanupTrivialMemory(c *gin.Context) {
 		"sample":  sample,
 	})
 }
+
+// ============================================================================
+// 精确重复清理（运维）— 清理同一 (层级+范围+内容) 出现 ≥N 次的刷屏/重复条目
+// ============================================================================
+
+// handleCleanupDuplicateMemory 运维手段：清理「精确重复」的记忆条目。
+// 同一 (tier, scope, content) 出现 >= minCount 次视为重复刷屏/spam，保留 1 条、删除其余。
+// POST /api/bots/:id/memory/cleanup-duplicates
+//
+// body: { "tiers": ["L0","L1"], "minCount": 5, "dryRun": true }
+//
+//	tiers    : 目标层级，默认 ["L0","L1"]
+//	minCount : 同一 (tier,scope,content) 出现次数阈值，默认 5（>=2 才有意义）
+//	dryRun   : true（默认）仅统计并分组返回，不删除；false 才真正删除并持久化
+//
+// 背景：投票 bot / 心跳 bot 会把同一句话反复落库（如 "今日の迷路です！ #AiMaze" ×15、
+// 推广链接 ×7），它们内容完全一致、属纯刷屏噪声。按「精确内容 + 同范围」分组计数，
+// 既能命中刷屏，又不会误删不同用户在不同范围里各自说过的相同短句（如两人各说一次"谢谢"）。
+//
+// 去重语义：每组保留 1 条（最先写入的那条，按 id 升序取最小），其余删除——"去重"而非
+// "全删"，避免把可能仍有参考价值的唯一副本也清掉。若确认是无价值 bot 垃圾，可整体调高
+// 阈值后分多次清理，或直接用单条删除接口。
+//
+// 删除路径与 cleanup-trivial 一致：先 store.Delete 清内存副本（防复活），再 SQL 按 id
+// 全量删除兜底（store.Delete 对「不在内存桶」的条目只返回不落库）。
+func (s *Server) handleCleanupDuplicateMemory(c *gin.Context) {
+	botID := c.Param("id")
+
+	var req struct {
+		Tiers    []string `json:"tiers"`
+		MinCount int      `json:"minCount"`
+		DryRun   *bool    `json:"dryRun"`
+	}
+	// body 允许为空：使用默认 tiers + minCount=5 + dryRun=true。
+	_ = c.ShouldBindJSON(&req)
+
+	dryRun := true
+	if req.DryRun != nil {
+		dryRun = *req.DryRun
+	}
+	minCount := req.MinCount
+	if minCount < 2 {
+		// minCount<2 意味着"出现 1 次也算重复"，失去去重意义；强制下限 2。
+		minCount = 5
+	}
+
+	tierStrs := req.Tiers
+	if len(tierStrs) == 0 {
+		tierStrs = []string{"L0", "L1"}
+	}
+	targets := make([]memory.MemoryTier, 0, len(tierStrs))
+	tierLabel := make(map[memory.MemoryTier]string, len(tierStrs))
+	for _, ts := range tierStrs {
+		var t memory.MemoryTier
+		switch strings.ToUpper(ts) {
+		case "L0":
+			t = memory.Tier0Working
+		case "L1":
+			t = memory.Tier1LongTerm
+		case "L2":
+			t = memory.Tier2Episodic
+		case "L3":
+			t = memory.Tier3Profile
+		default:
+			continue
+		}
+		targets = append(targets, t)
+		tierLabel[t] = strings.ToUpper(ts)
+	}
+	if len(targets) == 0 {
+		Fail(c, errs.BadRequest("no valid tier specified (expected L0/L1/L2/L3)"))
+		return
+	}
+
+	bundle, stop, berr := s.memoryBundle(botID)
+	if berr != nil {
+		Fail(c, errs.Wrap(berr, "failed to open memory store"))
+		return
+	}
+	if bundle == nil {
+		Fail(c, errs.NotFound("dreaming not enabled for this bot"))
+		return
+	}
+	defer stop()
+	mgr := bundle.TieredMgr
+	if mgr == nil {
+		Fail(c, errs.Internal("memory manager not initialized"))
+		return
+	}
+	store := mgr.Store()
+	if store == nil {
+		Fail(c, errs.Internal("memory store not initialized"))
+		return
+	}
+	if s.db == nil {
+		Fail(c, errs.Internal("database not initialized"))
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// 以 SQLite 全量行为扫描基准（同 cleanup-trivial）：内存桶有 per-scope 上限，
+	// 只看内存会漏掉绝大多数历史存量。
+	tierInts := make([]int, 0, len(targets))
+	for _, t := range targets {
+		tierInts = append(tierInts, int(t))
+	}
+
+	var rows []struct {
+		ID        string
+		Tier      int
+		ScopeKind string
+		ScopeID   string
+		Content   string
+	}
+	if err := s.db.WithContext(ctx).Table("tiered_memories").
+		Select("id, tier, scope_kind, scope_id, content").
+		Where("tier IN ?", tierInts).
+		Order("id ASC").
+		Find(&rows).Error; err != nil {
+		Fail(c, errs.Wrap(err, "failed to scan memory rows"))
+		return
+	}
+
+	type tierStat struct {
+		Scanned int `json:"scanned"`
+		Matched int `json:"matched"` // 该层级将被删除的重复行数
+	}
+	byTier := make(map[string]*tierStat, len(targets))
+	for _, t := range targets {
+		byTier[tierLabel[t]] = &tierStat{}
+	}
+
+	// 按 (tier, scope_kind, scope_id, content) 精确分组。
+	type groupKey struct {
+		Tier      int
+		ScopeKind string
+		ScopeID   string
+		Content   string
+	}
+	type groupRow struct {
+		ID    string
+		Tier  int
+		Scope string
+	}
+	groups := make(map[groupKey][]groupRow)
+	for _, r := range rows {
+		label, ok := tierLabel[memory.MemoryTier(r.Tier)]
+		if !ok {
+			continue
+		}
+		byTier[label].Scanned++
+		k := groupKey{r.Tier, r.ScopeKind, r.ScopeID, r.Content}
+		groups[k] = append(groups[k], groupRow{
+			ID:    r.ID,
+			Tier:  r.Tier,
+			Scope: r.ScopeKind + ":" + r.ScopeID,
+		})
+	}
+
+	type dupGroup struct {
+		Content string
+		Tier    memory.MemoryTier
+		Scope   memory.Scope
+		Count   int
+		KeepID  string
+		DelIDs  []string
+	}
+	var dupGroups []dupGroup
+	totalScanned := len(rows)
+	totalMatched := 0  // 将被删除的重复行总数（每组保留 1，其余计入）
+	totalGroups := 0
+
+	for k, rs := range groups {
+		if len(rs) < minCount {
+			continue
+		}
+		totalGroups++
+		keep := rs[0] // Order("id ASC") → 最先写入（最小 id）的那条保留
+		del := make([]string, 0, len(rs)-1)
+		for i := 1; i < len(rs); i++ {
+			del = append(del, rs[i].ID)
+		}
+		label := tierLabel[memory.MemoryTier(k.Tier)]
+		byTier[label].Matched += len(del)
+		totalMatched += len(del)
+		dupGroups = append(dupGroups, dupGroup{
+			Content: k.Content,
+			Tier:    memory.MemoryTier(k.Tier),
+			Scope:   memory.Scope{Kind: memory.ScopeKind(k.ScopeKind), ID: k.ScopeID},
+			Count:   len(rs),
+			KeepID:  keep.ID,
+			DelIDs:  del,
+		})
+	}
+
+	// 预览分组采样（截断内容），上限 25 组。
+	const maxGroups = 25
+	type groupSample struct {
+		Content string `json:"content"`
+		Tier    string `json:"tier"`
+		Scope   string `json:"scope"`
+		Count   int    `json:"count"`
+		KeepID  string `json:"keepId"`
+	}
+	var groupSamples []groupSample
+	for _, g := range dupGroups {
+		if len(groupSamples) >= maxGroups {
+			break
+		}
+		content := g.Content
+		if rc := []rune(content); len(rc) > 200 {
+			content = string(rc[:200]) + "…"
+		}
+		groupSamples = append(groupSamples, groupSample{
+			Content: content,
+			Tier:    g.Tier.String(),
+			Scope:   string(g.Scope.Kind) + ":" + g.Scope.ID,
+			Count:   g.Count,
+			KeepID:  g.KeepID,
+		})
+	}
+
+	totalDeleted := 0
+	if !dryRun && totalMatched > 0 {
+		// 收集所有待删 id + 对应的 (tier, scope) 以便清内存桶。
+		type delHit struct {
+			ID    string
+			Tier  memory.MemoryTier
+			Scope memory.Scope
+		}
+		hits := make([]delHit, 0, totalMatched)
+		allIDs := make([]string, 0, totalMatched)
+		for _, g := range dupGroups {
+			for _, id := range g.DelIDs {
+				hits = append(hits, delHit{ID: id, Tier: g.Tier, Scope: g.Scope})
+				allIDs = append(allIDs, id)
+			}
+		}
+		// 1) 先清内存副本：命中且仍在内存桶的走 store.Delete（内存 + 落库一次做完），
+		//    否则该调用是 no-op。
+		for _, h := range hits {
+			if derr := store.Delete(ctx, h.Tier, h.Scope, h.ID); derr != nil {
+				s.logger.Warnw("cleanup-duplicate: failed to delete in-memory entry",
+					"err", derr, "tier", h.Tier.String(), "id", h.ID)
+			}
+		}
+		// 2) 再按 id 用 SQL 全量删除兜底。
+		const chunk = 500
+		for start := 0; start < len(allIDs); start += chunk {
+			end := start + chunk
+			if end > len(allIDs) {
+				end = len(allIDs)
+			}
+			res := s.db.WithContext(ctx).Table("tiered_memories").
+				Where("id IN ?", allIDs[start:end]).
+				Delete(&dao.TieredMemoryModel{})
+			if res.Error != nil {
+				s.logger.Errorw("cleanup-duplicate: failed to delete memory rows",
+					"err", res.Error, "bot_id", botID)
+				continue
+			}
+			totalDeleted += int(res.RowsAffected)
+		}
+		if totalDeleted > 0 {
+			auditLog(c, s.logger, "cleanup_duplicate_memory",
+				"bot_id", botID, "deleted", totalDeleted, "groups", totalGroups, "minCount", minCount, "tiers", strings.Join(tierStrs, ","))
+			s.logger.Infow("cleanup-duplicate: removed duplicate memory entries",
+				"bot_id", botID, "deleted", totalDeleted, "groups", totalGroups, "minCount", minCount)
+		}
+	}
+
+	OK(c, gin.H{
+		"scanned":        totalScanned,
+		"duplicateGroups": totalGroups,
+		"matched":        totalMatched,
+		"toDelete":       totalMatched,
+		"deleted":        totalDeleted,
+		"dryRun":         dryRun,
+		"minCount":       minCount,
+		"byTier":         byTier,
+		"groups":         groupSamples,
+	})
+}

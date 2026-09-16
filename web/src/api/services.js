@@ -520,6 +520,22 @@ export const memoryApi = {
       }))
     }
     return request('POST', `/api/bots/${botId}/memory/cleanup-trivial`, payload)
+  },
+  // 清理精确重复记忆（运维）：同一 (层级+范围+内容) 出现 >= minCount 次的条目，
+  // 保留 1 条、删除其余。payload: { tiers?: ['L0','L1'], minCount?: 5, dryRun?: true }
+  cleanupDuplicates(botId, payload = {}) {
+    if (USE_MOCK) {
+      return mockResolve(() => ({
+        scanned: 3000, duplicateGroups: 3, matched: 0, toDelete: 27, deleted: 0, dryRun: true, minCount: 5,
+        byTier: { L0: { scanned: 2800, matched: 25 }, L1: { scanned: 200, matched: 2 } },
+        groups: [
+          { content: '今日の迷路です！ #AiMaze', tier: 'L0', scope: 'channel:general', count: 15, keepId: 'k1' },
+          { content: '请用浏览器打开 http://127.0.0.1:8099/set…', tier: 'L0', scope: 'channel:general', count: 7, keepId: 'k2' },
+          { content: '投票はありませんでした', tier: 'L1', scope: 'channel:general', count: 6, keepId: 'k3' }
+        ]
+      }))
+    }
+    return request('POST', `/api/bots/${botId}/memory/cleanup-duplicates`, payload)
   }
 }
 
