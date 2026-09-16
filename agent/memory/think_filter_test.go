@@ -258,6 +258,39 @@ func TestIsTrivialMemoryContent_MixedAndWhitespace(t *testing.T) {
 	}
 }
 
+// TestIsTrivialMemoryContent_BotSpam 覆盖真实库内噪声检测器：
+// 投票 bot 刷屏、表情短码主导、短内容重复符号主导，以及长内容保护。
+func TestIsTrivialMemoryContent_BotSpam(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		// Misskey 投票 bot 提问模板 → 琐碎
+		{"みなさんは、どれが体に良さそうだと思いますか？", true},
+		// 投票 bot 无投票回声 → 琐碎
+		{"[Renote from 藍: みなさんは、どれが体に良さそうだと思いますか？]\n投票はありませんでした", true},
+		// 表情短码主导（实义字 <=2）→ 琐碎
+		{":panpan::panpan:…", true},
+		{":usuhoso::bia_doya:☝️☝️", true},
+		// 短内容重复符号主导（纯情绪）→ 琐碎
+		{"ふえええええ！？", true},
+		{"哈哈哈哈", true},
+		{"。。。。。", true},
+		// 长内容即使含重复符号也保留（保护带情绪合法长文）
+		{"うぉ〜〜！！！気まぐれにSEKIROやったら弦一郎直前まで進められたぞ！！！！\n居合の達人雑魚すぎぃ！！！", false},
+		// 正常中等长度记忆保留
+		{"@blogtalk 分享关于梁羽生武侠小说的详细阅读指南和历史背景", false},
+		{"这个用户玩刀剑乱舞，对高强度的肝活动感到非常疲惫", false},
+		// 表情短码但仍有实义正文 → 保留
+		{"@nukui 发布了新作 :art: 一幅很棒的风景画", false},
+	}
+	for _, c := range cases {
+		if got := IsTrivialMemoryContent(c.in); got != c.want {
+			t.Errorf("IsTrivialMemoryContent(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestThinkFilterStore_StripsReasoningArray(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewThinkFilterStore(repo)
