@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/check-template-bindings.mjs src",
     "build": "vite build",
+    "check:bindings": "node scripts/check-template-bindings.mjs src",
     "preview": "vite preview"
   },
   "dependencies": {
