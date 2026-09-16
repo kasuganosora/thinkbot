@@ -207,6 +207,57 @@ func TestThinkFilterStore_StripsOnAppend(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// IsTrivialMemoryContent
+// ============================================================================
+
+func TestIsTrivialMemoryContent_CJK(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"好的", true},       // 2 字符，过短
+		{"哈哈哈", true},      // 3 字符，过短
+		{"今天天气不错", false},  // 6 字符，CJK 逐字成词=6，保留
+		{"用户喜欢喝咖啡", false}, // 7 字符，保留
+		{" 嗯  ", true},     // 去空白后 1 字符，过短
+	}
+	for _, c := range cases {
+		if got := IsTrivialMemoryContent(c.in); got != c.want {
+			t.Errorf("IsTrivialMemoryContent(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestIsTrivialMemoryContent_English(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"ok", true},                      // 1 词，过短
+		{"thanks", true},                  // 单长单词仍按词数<5 丢弃
+		{"thanks a lot", true},            // 2 词，过短
+		{"this is a good idea", false},    // 5 词，保留
+		{"the cat sat on the mat", false}, // 6 词，保留
+	}
+	for _, c := range cases {
+		if got := IsTrivialMemoryContent(c.in); got != c.want {
+			t.Errorf("IsTrivialMemoryContent(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestIsTrivialMemoryContent_MixedAndWhitespace(t *testing.T) {
+	// 中英混排：CJK 逐字成词补足词数，"今天天气不错"(6 词)+"hello"(1 词)=7 词，应保留。
+	if IsTrivialMemoryContent("今天天气不错 hello") {
+		t.Errorf("mixed CJK+English with enough CJK should be kept")
+	}
+	// 纯空白应判定为琐碎。
+	if !IsTrivialMemoryContent("   ") {
+		t.Errorf("whitespace-only content should be trivial")
+	}
+}
+
 func TestThinkFilterStore_StripsReasoningArray(t *testing.T) {
 	repo := NewMemoryRepository()
 	store := NewThinkFilterStore(repo)

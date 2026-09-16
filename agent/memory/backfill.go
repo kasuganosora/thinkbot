@@ -82,6 +82,11 @@ func BackfillFromChatHistory(ctx context.Context, store Store, src UserMessageSo
 			continue
 		}
 
+		// 过滤过短/过碎的噪声内容（少于 5 字符或 5 个词），避免历史短回复经回灌污染 L0。
+		if IsTrivialMemoryContent(content) {
+			continue
+		}
+
 		var scope Scope
 		if m.Channel != "" {
 			scope = ChannelScope(m.Channel)
