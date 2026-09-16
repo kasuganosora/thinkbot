@@ -2,7 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -31,7 +38,62 @@ func hasLazyWarning(warnings []core.Warning) bool {
 	return false
 }
 
-// TestHasLazyIndicators 验证偷懒模式检测。
+// fakeLazyJudge 测试用二级裁决器：固定返回给定裁决。
+type fakeLazyJudge struct {
+	lazy   bool
+	reason string
+	conf   float64
+	entity bool
+}
+
+func (f *fakeLazyJudge) Adjudicate(ctx context.Context, req LazyJudgeRequest) (*LazyJudgeResult, error) {
+	return &LazyJudgeResult{Lazy: f.lazy, EntityAsserted: f.entity, Confidence: f.conf, Reason: f.reason}, nil
+}
+
+// verdictJudge 按回复原文精确返回裁决（用于多级 fixture 闭环测试）。
+type verdictJudge struct {
+	byReply map[string]bool
+}
+
+func (j *verdictJudge) Adjudicate(ctx context.Context, req LazyJudgeRequest) (*LazyJudgeResult, error) {
+	lazy, ok := j.byReply[req.Reply]
+	if !ok {
+		lazy = false
+	}
+	return &LazyJudgeResult{Lazy: lazy, Reason: "fixture-verdict"}, nil
+}
+
+// captureLazySink 测试用落库槽，捕获所有记录。
+type captureLazySink struct {
+	mu      sync.Mutex
+	records []LazyJudgeRecord
+}
+
+func (s *captureLazySink) RecordLazyJudge(_ context.Context, rec LazyJudgeRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, rec)
+}
+
+func (s *captureLazySink) last() LazyJudgeRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.records) == 0 {
+		return LazyJudgeRecord{}
+	}
+	return s.records[len(s.records)-1]
+}
+
+// lazyCfgWithJudge 构造带固定裁决器的配置（loop-back 测试用）。
+func lazyCfgWithJudge(lazy bool) LazyResponseConfig {
+	c := NewLazyResponseConfig()
+	c.Judge = &fakeLazyJudge{lazy: lazy, conf: 0.9, reason: "test"}
+	return c
+}
+
+// TestHasLazyIndicators 验证一级召回（高召回，允许误报）。
+// 注意：自两级级联后，一级不再要求"环境实体共现"——纯概念讨论只要命中断言词
+// （如"不存在"）就会被一级召回，真正的语义裁决交给二级 LLM。
 func TestHasLazyIndicators(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -47,7 +109,8 @@ func TestHasLazyIndicators(t *testing.T) {
 		{"已安装声明", "系统已安装 Python 3.11。", true},
 		{"尝试结果编造", "尝试执行 which git 结果显示命令不存在。", true},
 		{"正常工具调用结果（无模式命中）", "文件内容如下...", false},
-		{"概念讨论含不存在无实体", "这个方案在架构上不存在根本缺陷，可以直接上线。", false},
+		// 一级高召回：概念讨论含"不存在"现也会被召回（语义裁决交给二级）。
+		{"概念讨论含不存在被一级召回", "这个方案在架构上不存在根本缺陷，可以直接上线。", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,27 +122,8 @@ func TestHasLazyIndicators(t *testing.T) {
 	}
 }
 
-// TestHasLazyIndicators_ConceptDiscussionNoEntity 回归测试：纯概念讨论即使命中
-// "不存在"等断言词，只要不提及具体环境实体，就不应误判为偷懒。
-// 对应 2026-09-16 Telegram 重复回复事故——一条架构讨论回复含"膨胀在数学上就
-// 不存在了"被「不存在」误触发 loop-back，导致同消息重复回复。
-func TestHasLazyIndicators_ConceptDiscussionNoEntity(t *testing.T) {
-	cases := []string{
-		"agent 担心的膨胀在数学上就不存在了，它大概默认你要在每层复制快照才下的这个结论。",
-		"这个设计不存在根本缺陷，可以直接上线。",
-		"风险不存在，但我们要先确认存储和注入是两个独立的关注点。",
-		// 真实事故首轮回复的浓缩片段（含"事件"等会误命中裸"件"的词，验证不触发）
-		"它反对的是天真实现，不是这件事本身；膨胀在数学上就不存在了。",
-	}
-	for _, c := range cases {
-		if hasLazyIndicators(c) {
-			t.Errorf("concept discussion must NOT be lazy: %q", c)
-		}
-	}
-}
-
-// TestHasLazyIndicators_RealLazyStillDetected 回归测试：收紧后真偷懒（断言具体
-// 环境实体状态且无工具调用）仍必须被检测出来，不能因实体约束而漏判。
+// TestHasLazyIndicators_RealLazyStillDetected 回归测试：真偷懒（断言具体环境实体
+// 状态且无工具调用）必须被一级召回，不能因词表放宽而漏掉。
 func TestHasLazyIndicators_RealLazyStillDetected(t *testing.T) {
 	cases := []string{
 		"当前环境未安装 git，无法进行版本控制。",
@@ -134,20 +178,17 @@ func TestLazyResponseMiddleware_Disabled(t *testing.T) {
 	}
 }
 
-// TestLazyResponseMiddleware_DetectsLazy 验证检测到偷懒行为时注入警告。
+// TestLazyResponseMiddleware_DetectsLazy 验证检测到偷懒行为时注入警告（需二级确认）。
 func TestLazyResponseMiddleware_DetectsLazy(t *testing.T) {
-	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	mw := LazyResponseMiddleware(lazyCfgWithJudge(true))
 
 	dummy := &core.StageFunc{
 		StageName: "llm",
 		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
-			// 模拟一个"无工具调用但有环境状态断言"的结果
 			const text = "当前环境未安装 git，也没有 apt 包管理器可用。\n\n| 项目 | 状态 |\n| git | 未安装 |"
 			genResult := &llm.GenerateResult{
-				Text: text,
-				Steps: []llm.StepResult{
-					{Text: text, ToolCalls: nil}, // 无 tool calls
-				},
+				Text:  text,
+				Steps: []llm.StepResult{{Text: text, ToolCalls: nil}},
 			}
 			result := core.NewEnvelope(env.Message)
 			result.Set("llm.result", genResult)
@@ -161,21 +202,18 @@ func TestLazyResponseMiddleware_DetectsLazy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	// 应该注入了硬警告
 	if !hasLazyWarning(getWarnings(result)) {
 		t.Errorf("expected lazy_response hard warning, got warnings: %+v", getWarnings(result))
 	}
 }
 
-// TestLazyResponseMiddleware_SkipsNormalAnswer 验证正常回答不触发警告。
+// TestLazyResponseMiddleware_SkipsNormalAnswer 验证正常回答（一级未命中）不触发。
 func TestLazyResponseMiddleware_SkipsNormalAnswer(t *testing.T) {
 	mw := LazyResponseMiddleware(NewLazyResponseConfig())
 
 	dummy := &core.StageFunc{
 		StageName: "llm",
 		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
-			// 正常知识性回答，无工具调用但无偷懒模式
 			const text = "RAG 是检索增强生成技术，结合了信息检索和语言生成。"
 			genResult := &llm.GenerateResult{
 				Text:  text,
@@ -193,7 +231,6 @@ func TestLazyResponseMiddleware_SkipsNormalAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if hasLazyWarning(getWarnings(result)) {
 		t.Error("normal answer should not trigger lazy_response warning")
 	}
@@ -201,30 +238,22 @@ func TestLazyResponseMiddleware_SkipsNormalAnswer(t *testing.T) {
 
 // TestLazyResponseMiddleware_OncePerChannel 验证同一 channel 只警告一次。
 func TestLazyResponseMiddleware_OncePerChannel(t *testing.T) {
-	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	mw := LazyResponseMiddleware(lazyCfgWithJudge(true))
 	channel := "once-test"
-
-	buildLazyEnvelope := func(msgID string) *core.Envelope {
-		const text = "git 未安装在这个环境中。"
-		gr := &llm.GenerateResult{
-			Text:  text,
-			Steps: []llm.StepResult{{Text: text}},
-		}
-		env := core.NewEnvelope(core.Message{Channel: channel, ID: msgID})
-		env.Set("llm.result", gr)
-		return env
-	}
 
 	dummy := &core.StageFunc{
 		StageName: "llm",
 		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
-			return buildLazyEnvelope(env.Message.ID), nil
+			const text = "git 未安装在这个环境中。"
+			gr := &llm.GenerateResult{Text: text, Steps: []llm.StepResult{{Text: text}}}
+			result := core.NewEnvelope(env.Message)
+			result.Set("llm.result", gr)
+			return result, nil
 		},
 	}
 
 	wrapped := mw(dummy)
 
-	// 第一次 → 应该警告
 	r1, _ := wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: channel, ID: "1"}))
 	count1 := 0
 	for _, w := range getWarnings(r1) {
@@ -236,7 +265,6 @@ func TestLazyResponseMiddleware_OncePerChannel(t *testing.T) {
 		t.Errorf("first call expected 1 warning, got %d", count1)
 	}
 
-	// 第二次 → 不应再警告
 	r2, _ := wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: channel, ID: "2"}))
 	count2 := 0
 	for _, w := range getWarnings(r2) {
@@ -256,16 +284,10 @@ func TestLazyResponseMiddleware_SkipsWithToolCalls(t *testing.T) {
 	dummy := &core.StageFunc{
 		StageName: "llm",
 		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
-			// 有工具调用，即使文本包含"未安装"也不应触发
 			const text = "经过检查发现 git 未安装。"
 			genResult := &llm.GenerateResult{
-				Text: text,
-				Steps: []llm.StepResult{
-					{
-						Text:      text,
-						ToolCalls: []llm.ToolCall{{ToolName: "exec"}},
-					},
-				},
+				Text:  text,
+				Steps: []llm.StepResult{{Text: text, ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}},
 			}
 			result := core.NewEnvelope(env.Message)
 			result.Set("llm.result", genResult)
@@ -279,16 +301,15 @@ func TestLazyResponseMiddleware_SkipsWithToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if hasLazyWarning(getWarnings(result)) {
 		t.Error("should not warn when tool calls are present")
 	}
 }
 
 // TestLazyResponseMiddleware_LoopBackReturnsCorrected 验证同轮 loop-back：
-// 首次产出无依据的偷懒答案时，注入警告并重算 LLM，当轮即返回修正后的答案。
+// 二级确认偷懒后注入警告并重算 LLM，当轮即返回修正后的答案。
 func TestLazyResponseMiddleware_LoopBackReturnsCorrected(t *testing.T) {
-	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	mw := LazyResponseMiddleware(lazyCfgWithJudge(true))
 	calls := 0
 	dummy := &core.StageFunc{
 		StageName: "llm",
@@ -296,11 +317,9 @@ func TestLazyResponseMiddleware_LoopBackReturnsCorrected(t *testing.T) {
 			calls++
 			var gr *llm.GenerateResult
 			if calls == 1 {
-				// 首次：无工具调用的偷懒答案
 				const text = "当前环境未安装 git，无可用包管理器。"
 				gr = &llm.GenerateResult{Text: text, Steps: []llm.StepResult{{Text: text}}}
 			} else {
-				// loop-back 重算：模型这次调了工具，给出有依据的答案
 				const text = "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。"
 				gr = &llm.GenerateResult{
 					Text:  text,
@@ -334,9 +353,8 @@ func TestLazyResponseMiddleware_LoopBackReturnsCorrected(t *testing.T) {
 
 // TestLazyResponseMiddleware_ResetOnToolCall 验证：模型成功调工具后，
 // 同 channel 的警告标记被复位，后续再偷懒仍会被拦截（不会永久静默）。
-// 调用序列：lazy(1+重算2) → 工具调用(3,复位) → lazy 再次(4+重算5)。
 func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
-	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	mw := LazyResponseMiddleware(lazyCfgWithJudge(true))
 	calls := 0
 	dummy := &core.StageFunc{
 		StageName: "llm",
@@ -344,15 +362,15 @@ func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
 			calls++
 			var gr *llm.GenerateResult
 			switch calls {
-			case 1: // 首次：偷懒
+			case 1:
 				gr = &llm.GenerateResult{Text: "git 未安装。", Steps: []llm.StepResult{{Text: "git 未安装。"}}}
-			case 2: // 首次的重算：已纠正（带工具调用）
+			case 2:
 				gr = &llm.GenerateResult{Text: "经 which git 确认未安装。", Steps: []llm.StepResult{{Text: "x", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
-			case 3: // 工具调用结果 → 复位警告标记
+			case 3:
 				gr = &llm.GenerateResult{Text: "ok", Steps: []llm.StepResult{{Text: "ok", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
-			case 4: // 再次偷懒
+			case 4:
 				gr = &llm.GenerateResult{Text: "apt 未安装。", Steps: []llm.StepResult{{Text: "apt 未安装。"}}}
-			default: // calls==5：再次的重算
+			default:
 				gr = &llm.GenerateResult{Text: "经 which apt 确认。", Steps: []llm.StepResult{{Text: "x", ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}}}
 			}
 			result := core.NewEnvelope(env.Message)
@@ -366,8 +384,6 @@ func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
 	_, _ = wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "2"})) // 3 (复位)
 	_, _ = wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "reset-ch", ID: "3"})) // 4,5
 
-	// 若复位失效：call 3 不会改变 warned=true，call 4 会因已警告而跳过 loop-back → calls==4
-	// 复位生效：call 4 重新触发 loop-back → calls==5
 	if calls != 5 {
 		t.Errorf("expected 5 LLM calls (lazy+rerun, toolcall, lazy+rerun), got %d", calls)
 	}
@@ -375,10 +391,8 @@ func TestLazyResponseMiddleware_ResetOnToolCall(t *testing.T) {
 
 // TestLazyResponseMiddleware_LoopBackSingleAction 回归测试：验证 loop-back 重算
 // 不会把首轮与修正轮两条回复都派发出站（2026-09-16 Telegram 重复回复事故）。
-// dummy stage 模拟 LLMStage.Process 的行为——在收到的 envelope 上追加 ActionReply，
-// 因此同轮重算会复用同一 envelope，若不清空首轮 Action 就会出现 2 条。
 func TestLazyResponseMiddleware_LoopBackSingleAction(t *testing.T) {
-	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	mw := LazyResponseMiddleware(lazyCfgWithJudge(true))
 	calls := 0
 	dummy := &core.StageFunc{
 		StageName: "llm",
@@ -387,19 +401,15 @@ func TestLazyResponseMiddleware_LoopBackSingleAction(t *testing.T) {
 			var gr *llm.GenerateResult
 			var payload string
 			if calls == 1 {
-				// 首次：无工具调用的偷懒答案（命中懒模式）
 				payload = "当前环境未安装 git，无可用包管理器。"
 				gr = &llm.GenerateResult{Text: payload, Steps: []llm.StepResult{{Text: payload}}}
 			} else {
-				// loop-back 重算：修正后的答案（带工具调用，避免再触发懒模式）
 				payload = "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。"
 				gr = &llm.GenerateResult{
 					Text:  payload,
 					Steps: []llm.StepResult{{Text: payload, ToolCalls: []llm.ToolCall{{ToolName: "exec"}}}},
 				}
 			}
-			// 复用传入的 envelope（与 LLMStage.Process 一致：env.AddAction 后返回 env），
-			// 使 loop-back 的二次调用在同一 envelope 上再追加一次 Action。
 			env.Set("llm.result", gr)
 			env.AddAction(core.Action{Type: core.ActionReply, Payload: payload})
 			return env, nil
@@ -416,12 +426,11 @@ func TestLazyResponseMiddleware_LoopBackSingleAction(t *testing.T) {
 		t.Fatalf("expected 2 LLM calls (1 original + 1 loop-back), got %d", calls)
 	}
 
-	// 核心断言：loop-back 必须「替换」而非「追加」——返回 envelope 只能有 1 条回复。
 	acts := result.Actions()
 	if len(acts) != 1 {
 		t.Fatalf("loop-back must REPLACE not append: expected exactly 1 dispatched action, got %d", len(acts))
 	}
-	if acts[0].Payload != "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。" {
+	if fmt.Sprint(acts[0].Payload) != "我执行了 which git，输出为空，确认 git 未安装。建议用 apt 安装。" {
 		t.Errorf("dispatched action should be the corrected one, got %q", acts[0].Payload)
 	}
 }
@@ -429,7 +438,7 @@ func TestLazyResponseMiddleware_LoopBackSingleAction(t *testing.T) {
 // TestLazyResponseMiddleware_LoopBackFailureKeepsFirstAction 验证 loop-back 重算
 // 失败时不丢失首轮回复（至少有一条出站，而非零条）。
 func TestLazyResponseMiddleware_LoopBackFailureKeepsFirstAction(t *testing.T) {
-	mw := LazyResponseMiddleware(NewLazyResponseConfig())
+	mw := LazyResponseMiddleware(lazyCfgWithJudge(true))
 	calls := 0
 	dummy := &core.StageFunc{
 		StageName: "llm",
@@ -442,7 +451,6 @@ func TestLazyResponseMiddleware_LoopBackFailureKeepsFirstAction(t *testing.T) {
 				env.AddAction(core.Action{Type: core.ActionReply, Payload: text})
 				return env, nil
 			}
-			// loop-back 重算失败
 			return env, context.DeadlineExceeded
 		},
 	}
@@ -457,7 +465,129 @@ func TestLazyResponseMiddleware_LoopBackFailureKeepsFirstAction(t *testing.T) {
 	if len(acts) != 1 {
 		t.Fatalf("on loop-back failure the first reply must be preserved, got %d actions", len(acts))
 	}
-	if acts[0].Payload != "当前环境未安装 git，无可用包管理器。" {
+	if fmt.Sprint(acts[0].Payload) != "当前环境未安装 git，无可用包管理器。" {
 		t.Errorf("preserved action should be the first reply, got %q", acts[0].Payload)
+	}
+}
+
+// TestLazyResponseCascade_ConceptVetoedRealLazyConfirmed 两级级联闭环回归：
+// 用 5 个 fixture（含 2026-09-16 Telegram 重复回复事故首轮 2808 概念讨论），
+// 验证一级召回后二级裁决——概念讨论被否决（不 loop-back、不重复回复），
+// 真偷懒被确认（loop-back、ClearActions 后仅 1 条修正回复）。
+func TestLazyResponseCascade_ConceptVetoedRealLazyConfirmed(t *testing.T) {
+	fixtures := []struct {
+		name           string
+		reply          string
+		userQuery      string
+		expectLazy     bool
+		expectLoopback bool
+	}{
+		// 事故样本：纯架构讨论，"膨胀在数学上就不存在了"是概念陈述而非环境断言。
+		{"accident-2808-concept", "agent 担心的膨胀在数学上就不存在了，这是纯架构讨论。", "你们那个 agent 说的对吗", false, false},
+		{"git-not-installed", "git 未安装，需要先安装。", "帮我装个 git", true, true},
+		{"python-missing", "python 没有安装，脚本跑不了。", "跑下这个脚本", true, true},
+		{"nginx-config", "找不到 nginx 配置文件，服务起不来。", "修一下 nginx", true, true},
+		{"disk-full", "磁盘空间已满，无法写入文件。", "为什么写不进去了", true, true},
+	}
+
+	for _, fx := range fixtures {
+		fx := fx
+		t.Run(fx.name, func(t *testing.T) {
+			judge := &verdictJudge{byReply: map[string]bool{fx.reply: fx.expectLazy}}
+			sink := &captureLazySink{}
+			mw := LazyResponseMiddleware(func() LazyResponseConfig {
+				c := NewLazyResponseConfig()
+				c.Judge = judge
+				c.Sink = sink
+				return c
+			}())
+			calls := 0
+			dummy := &core.StageFunc{
+				StageName: "llm",
+				Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+					calls++
+					var text string
+					var tools []llm.ToolCall
+					if calls == 1 {
+						text = fx.reply
+					} else {
+						text = fx.reply + " (verified via tool)"
+						tools = []llm.ToolCall{{ToolName: "exec"}}
+					}
+					gr := &llm.GenerateResult{Text: text, Steps: []llm.StepResult{{Text: text, ToolCalls: tools}}}
+					env.Set("llm.result", gr)
+					env.AddAction(core.Action{Type: core.ActionReply, Payload: text})
+					return env, nil
+				},
+			}
+
+			wrapped := mw(dummy)
+			env := core.NewEnvelope(core.Message{Channel: "cascade-" + fx.name, ID: "1", BotID: "bot-x"})
+			result, err := wrapped.Process(context.Background(), env)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			acts := result.Actions()
+			if len(acts) != 1 {
+				t.Fatalf("expected exactly 1 dispatched action (no duplicate reply), got %d", len(acts))
+			}
+			if fx.expectLoopback {
+				if calls != 2 {
+					t.Errorf("real-lazy must loop-back: expected 2 calls, got %d", calls)
+				}
+				if !strings.Contains(fmt.Sprint(acts[0].Payload), "(verified via tool)") {
+					t.Errorf("loop-back must dispatch corrected reply, got %q", acts[0].Payload)
+				}
+				if sink.last().FinalAction != "loopback" {
+					t.Errorf("sink FinalAction=loopback, got %q", sink.last().FinalAction)
+				}
+			} else {
+				if calls != 1 {
+					t.Errorf("concept must be vetoed (no loop-back): expected 1 call, got %d", calls)
+				}
+				if fmt.Sprint(acts[0].Payload) != fx.reply {
+					t.Errorf("veto must keep original reply, got %q", acts[0].Payload)
+				}
+				if sink.last().FinalAction != "veto" {
+					t.Errorf("sink FinalAction=veto, got %q", sink.last().FinalAction)
+				}
+				if sink.last().Lazy {
+					t.Errorf("concept must be judged lazy=false")
+				}
+			}
+		})
+	}
+}
+
+// TestLazyJudgeSinkRecords 验证落库槽写 JSONL 且可解析回结构。
+func TestLazyJudgeSinkRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lazy_judgments.jsonl")
+	sink := NewFileLazyJudgeSink(path)
+	sink.RecordLazyJudge(context.Background(), LazyJudgeRecord{
+		TS:             time.Now(),
+		BotID:          "bot-x",
+		Channel:        "ch",
+		Stage1Matched:  true,
+		ReplyLen:       10,
+		HadToolCalls:   false,
+		Lazy:           true,
+		EntityAsserted: true,
+		Confidence:     0.9,
+		Reason:         "x",
+		FinalAction:    "loopback",
+	})
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var rec LazyJudgeRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !rec.Lazy || rec.FinalAction != "loopback" || rec.Confidence != 0.9 || rec.BotID != "bot-x" {
+		t.Errorf("bad record: %+v", rec)
 	}
 }
