@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -803,5 +804,64 @@ func TestDreamManager_UserProfileCapPrefersRecent(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("oldest user should be outside cap, got L3 %+v", got)
+	}
+}
+
+// TestBlendScore 验证 LLM 分主导的混合逻辑与回退语义。
+func TestBlendScore(t *testing.T) {
+	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("blend-test")})
+	// 默认 LLMImportanceWeight=0.55，启发式占 0.45。
+
+	// LLM 分有效：0.9*0.55 + 0.5*0.45 = 0.72
+	got := dm.blendScore(0.5, 0.9)
+	if math.Abs(got-0.72) > 1e-9 {
+		t.Errorf("expected 0.72, got %f", got)
+	}
+
+	// LLM 分缺失(<0) 回退纯启发式
+	got = dm.blendScore(0.5, -1)
+	if math.Abs(got-0.5) > 1e-9 {
+		t.Errorf("expected fallback 0.5, got %f", got)
+	}
+
+	// 结果必须被夹在 [0,1]
+	got = dm.blendScore(1.0, 1.0)
+	if got != 1.0 {
+		t.Errorf("expected 1.0, got %f", got)
+	}
+}
+
+// TestScoreCandidate_RecencyExponentialDecay 验证 Recency 改为指数半衰期曲线。
+func TestScoreCandidate_RecencyExponentialDecay(t *testing.T) {
+	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("recency-test")})
+	now := time.Now()
+	hlDays := dm.config.Deep.RecencyHalfLifeDays // 14
+
+	cases := []struct {
+		ageDays float64
+		want    float64
+	}{
+		{0, 1.0},            // age=0 → 1.0
+		{float64(hlDays), 0.5}, // age=halfLife → 0.5
+		{2 * float64(hlDays), 0.25}, // age=2*halfLife → 0.25
+	}
+	for _, tc := range cases {
+		c := &DreamCandidate{LastSeen: now.AddDate(0, 0, -int(tc.ageDays))}
+		sb := dm.scoreCandidate(c, now)
+		if math.Abs(sb.Recency-tc.want) > 1e-6 {
+			t.Errorf("age=%fdays: expected recency %f, got %f", tc.ageDays, tc.want, sb.Recency)
+		}
+	}
+}
+
+// TestScoreImportanceBatch_FallbackWhenNoModel 验证无模型配置时安全回退 nil。
+func TestScoreImportanceBatch_FallbackWhenNoModel(t *testing.T) {
+	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("llm-fb-test")})
+	// newTestDreamManager 的 model 为空 → 直接返回 nil，不触发任何 LLM 调用。
+	out := dm.scoreImportanceBatch(context.Background(), []*DreamCandidate{
+		{Key: "k1", Content: "x", LastSeen: time.Now()},
+	})
+	if out != nil {
+		t.Errorf("expected nil fallback when model unconfigured, got %v", out)
 	}
 }

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -534,12 +535,28 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 		score     float64
 	}
 
+	// LLM 批量重要性评估（主导分数来源，降噪）。
+	// model 未配置或 UseLLMImportance=false 时跳过，回退纯启发式。
+	var llmScores map[string]float64
+	if d.config.Deep.UseLLMImportance && d.model != "" && len(staged) > 0 {
+		llmScores = d.scoreImportanceBatch(ctx, staged)
+	}
+	if llmScores == nil {
+		llmScores = map[string]float64{}
+	}
+	heuristicScores := make(map[string]float64, len(staged))
+
 	var scored []scoredItem
 	for _, c := range staged {
 		breakdown := d.scoreCandidate(c, now)
-		total := d.computeTotalScore(breakdown, c)
-		c.Score = total
-		scored = append(scored, scoredItem{candidate: c, score: total})
+		heuristic := d.computeTotalScore(breakdown, c)
+		heuristicScores[c.Key] = heuristic
+		llm := -1.0
+		if v, ok := llmScores[c.Key]; ok {
+			llm = v
+		}
+		c.Score = d.blendScore(heuristic, llm)
+		scored = append(scored, scoredItem{candidate: c, score: c.Score})
 	}
 
 	sort.Slice(scored, func(i, j int) bool {
@@ -573,6 +590,17 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 	// 写入 L1
 	promoted := 0
 	for _, c := range passed {
+		md := map[string]any{
+			"dream_score":       c.Score,
+			"dream_heuristic":   heuristicScores[c.Key],
+			"dream_theme":       c.Theme,
+			"dream_light_hits":  c.LightHits,
+			"dream_rem_hits":    c.REMHits,
+			"dream_promoted_at": now,
+		}
+		if v, ok := llmScores[c.Key]; ok {
+			md["dream_llm_importance"] = v
+		}
 		entry := Entry{
 			ID:         idgen.New("dream"),
 			Scope:      c.Scope,
@@ -580,13 +608,7 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 			Category:   c.Category,
 			Source:     "dreaming",
 			Importance: c.Score,
-			Metadata: map[string]any{
-				"dream_score":       c.Score,
-				"dream_theme":       c.Theme,
-				"dream_light_hits":  c.LightHits,
-				"dream_rem_hits":    c.REMHits,
-				"dream_promoted_at": now,
-			},
+			Metadata:   md,
 		}
 		if err := d.manager.WriteLongTerm(ctx, entry, Tier0Working); err != nil {
 			d.logger.Warnw("dreaming deep: promote failed",
@@ -632,17 +654,19 @@ func (d *DreamManager) scoreCandidate(c *DreamCandidate, now time.Time) ScoreBre
 		sb.Diversity = minF(1.0, float64(c.UniqueQueries)/5.0)
 	}
 
-	// Recency: 时间衰减（半衰期模型）
+	// Recency: 指数半衰期衰减。
+	// age=0→1.0, age=halfLife→0.5, age=2*halfLife→0.25（平滑衰减，老记忆区分度更高）。
+	// 旧实现为线性 1.0 - age/halfLife（age<halfLife 时恒近 1.0，对近期记忆无区分度）。
 	if !c.LastSeen.IsZero() {
 		halfLife := float64(d.config.Deep.RecencyHalfLifeDays) * 24 // hours
 		if halfLife <= 0 {
 			halfLife = 14 * 24
 		}
 		ageHours := now.Sub(c.LastSeen).Hours()
-		sb.Recency = 1.0 - ageHours/halfLife
-		if sb.Recency < 0 {
-			sb.Recency = 0
+		if ageHours < 0 {
+			ageHours = 0
 		}
+		sb.Recency = math.Pow(0.5, ageHours/halfLife)
 	}
 
 	// Consolidation: 基于 REM 命中（跨多次梦境出现）
@@ -681,6 +705,86 @@ func (d *DreamManager) computeTotalScore(sb ScoreBreakdown, c *DreamCandidate) f
 	}
 
 	return minF(1.0, total)
+}
+
+// blendScore 将启发式分数与 LLM 重要性评估混合。
+// llm < 0 表示本次未获取 LLM 分（模型未配置 / 调用失败 / 解析失败），此时回退纯启发式。
+func (d *DreamManager) blendScore(heuristic, llm float64) float64 {
+	if llm < 0 {
+		return minF(1.0, heuristic)
+	}
+	w := d.config.Deep.LLMImportanceWeight
+	if w <= 0 {
+		w = DefaultLLMImportanceWeight
+	}
+	return minF(1.0, llm*w+heuristic*(1-w))
+}
+
+// scoreImportanceBatch 批量调用 LLM 评估所有候选的「重要性」（0.0~1.0）。
+// 一次请求覆盖全部候选（而非 N 次），控制 Deep 阶段 LLM 调用量与延迟。
+// 返回 key→importance 映射；任何失败（无模型 / 调用错误 / JSON 解析失败 / 空集）返回 nil，
+// 调用方据此回退为纯启发式评分，不影响晋升流程。
+func (d *DreamManager) scoreImportanceBatch(ctx context.Context, cands []*DreamCandidate) map[string]float64 {
+	if len(cands) == 0 || d.model == "" {
+		return nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("请评估以下每条记忆对用户长期价值的「重要性」，返回 JSON 数组。\n")
+	sb.WriteString("重要性取值 0.0~1.0：\n")
+	sb.WriteString("  1.0 = 核心事实 / 稳定偏好 / 长期有用（如技术栈、工作习惯、项目约定）\n")
+	sb.WriteString("  0.0 = 闲聊寒暄 / 临时调试 / 一次性上下文 / 易逝进度汇报\n")
+	sb.WriteString("判断依据：内容具体性、是否可被未来对话复用、出现/被引用频次。\n\n")
+	for _, c := range cands {
+		fmt.Fprintf(&sb, "[key:%s] 类别=%s 命中=%d 主题命中=%d 召回=%d\n%s\n\n",
+			c.Key, c.Category, c.LightHits, c.REMHits, c.RecallCount,
+			strutil.Truncate(c.Content, 80))
+	}
+	sb.WriteString("返回格式（只返回 JSON，不要解释）：\n")
+	sb.WriteString("[{\"key\":\"<key>\",\"importance\":0.0}]")
+
+	maxTokens := 2048
+	if d.config.MaxDreamTokens > 0 && d.config.MaxDreamTokens < maxTokens {
+		maxTokens = d.config.MaxDreamTokens
+	}
+	result, err := d.provider.DoGenerate(
+		llm.WithStatsFeature(ctx, "dream_score"),
+		llm.GenerateParams{
+			Model:     llm.ChatModel(d.model),
+			System:    "You are a memory importance evaluator. Return only a JSON array of objects {\"key\": string, \"importance\": number in 0.0~1.0}. No explanation.",
+			Messages:  []llm.Message{llm.UserMessage(sb.String())},
+			MaxTokens: &maxTokens,
+		},
+	)
+	if err != nil {
+		d.logger.Warnw("dreaming deep: LLM importance scoring failed, fallback to heuristic",
+			"err", err, "candidates", len(cands))
+		return nil
+	}
+
+	var scored []struct {
+		Key        string  `json:"key"`
+		Importance float64 `json:"importance"`
+	}
+	if err := strutil.ExtractJSON(result.Text, &scored); err != nil {
+		d.logger.Warnw("dreaming deep: LLM importance parse failed, fallback to heuristic",
+			"err", err)
+		return nil
+	}
+
+	out := make(map[string]float64, len(scored))
+	for _, s := range scored {
+		if s.Key == "" || s.Importance < 0 || s.Importance > 1 {
+			continue
+		}
+		out[s.Key] = s.Importance
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	d.logger.Infow("dreaming deep: LLM importance scored",
+		"scored", len(out), "of", len(cands))
+	return out
 }
 
 // ============================================================================
