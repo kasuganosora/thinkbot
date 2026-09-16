@@ -359,3 +359,35 @@ func TestSQLiteRepository_NilWindowNoWarn(t *testing.T) {
 		t.Error("window 未注入属设计上的不限制，不应置起告警标志")
 	}
 }
+
+// TestIsDeterministicLLMReject 覆盖压缩 LLM 调用「确定性失败」判别：
+// 内容安全审核（1301）/ 参数非法（1210/1214）/ content_filter 应判为确定性
+// （标记跳过以打破重试死循环）；超时 / 网络抖动 / 5xx 不应判为确定性（仍走冷却重试）。
+func TestIsDeterministicLLMReject(t *testing.T) {
+	cases := []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{"bigmodel 1301 content safety", `openai: chat stream failed: stream HTTP error 400 on https://open.bigmodel.cn/...: {"error":{"code":"1301","message":"触发平台内容安全审核"}}`, true},
+		{"bigmodel 1301 spaced", `{"error":{"code": "1301","message":"内容安全审核"}}`, true},
+		{"bigmodel 1210 param", `open.bigmodel.cn: {"error":{"code":"1210","message":"API 调用参数有误"}}`, true},
+		{"bigmodel 1214 messages", `open.bigmodel.cn: {"error":{"code":"1214","message":"messages 参数非法"}}`, true},
+		{"contentFilter level", `contentFilter: level=2 triggered`, true},
+		{"content_filter snake", `finish_reason content_filter`, true},
+		{"context deadline", `context deadline exceeded`, false},
+		{"connection reset", `connection reset by peer`, false},
+		{"500 server", `HTTP error 500 internal error`, false},
+		{"empty", ``, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isDeterministicLLMReject(fmt.Errorf("%s", c.err)); got != c.want {
+				t.Errorf("isDeterministicLLMReject(%q) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+	if isDeterministicLLMReject(nil) {
+		t.Error("nil error should not be deterministic")
+	}
+}
