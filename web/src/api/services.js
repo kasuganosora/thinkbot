@@ -466,6 +466,11 @@ export const dreamingApi = {
       return mockResolve(() => ({ lightIngested: 12, lightDeduped: 3, lightDropped: 1, remThemes: 4, remCandidates: 8, deepScored: 6, deepPassed: 4, deepPromoted: 2, duration: '1.2s', phase: 'done', error: '' }))
     }
     return request('POST', `/api/bots/${botId}/dreaming/trigger`)
+  },
+  // 列出最近被梦境巩固提升为 L1 的记忆（含提升理由与原 L0 条目引用）。
+  promotions(botId, limit = 20) {
+    if (USE_MOCK) return mockResolve(() => ({ promotions: [], total: 0, enabled: true }))
+    return request('GET', `/api/bots/${botId}/dreaming/promotions`, { limit })
   }
 }
 
