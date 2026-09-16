@@ -110,6 +110,7 @@ func (s *Server) registerRoutes() {
 				botsAdmin.PUT("/:id/dreaming", s.handleUpdateDreamingConfig)
 				botsAdmin.GET("/:id/dreaming/status", s.handleDreamingStatus)
 				botsAdmin.POST("/:id/dreaming/trigger", s.handleTriggerDreaming)
+				botsAdmin.GET("/:id/dreaming/promotions", s.handleListDreamPromotions)
 
 				// 定时任务管理（嵌套在 Bot 下）
 				botsAdmin.GET("/:id/cron", s.handleListCronJobs)

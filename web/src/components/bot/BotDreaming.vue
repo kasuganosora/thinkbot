@@ -53,6 +53,47 @@
       <div v-if="lastRunAt" class="run-at">运行于 {{ formatTime(lastRunAt) }}</div>
     </t-card>
 
+    <t-card v-if="status && status.enabled" title="最近晋升的记忆" :bordered="false" class="card">
+      <p class="tip">每次梦境巩固把一条记忆提升为长期记忆时，都会记录<strong>提升理由</strong>（达标分数 / 信号明细 / 通过的门控）、<strong>引用的原始 L0 条目原文预览</strong>与<strong>完整原内容</strong>，便于审计「为什么被记住、凭什么原文」。运行一次巩固后会自动刷新。</p>
+      <t-loading :loading="promotionsLoading">
+        <t-alert v-if="promotionRows.length === 0" theme="info" class="card">还没有被梦境巩固提升的长期记忆。运行一次巩固后，这里会逐条展示「为什么被记住、凭什么原文」。</t-alert>
+        <t-table
+          v-else
+          :data="promotionRows"
+          :columns="promotionCols"
+          size="small"
+          row-key="id"
+          class="card"
+          :expanded-row-keys="expandedRows"
+          @expand-change="onExpandChange"
+        >
+          <template #summary="{ row }">
+            <div class="summary-main">{{ row.summary }}</div>
+            <div v-if="row.sourcePreview" class="summary-preview">{{ row.sourcePreview }}</div>
+          </template>
+          <template #source_entries="{ row }">
+            <t-tag v-if="row.sourceCount === 0" variant="light" size="small">无</t-tag>
+            <t-tag v-else variant="light" size="small" theme="primary">引用 {{ row.sourceCount }} 条（点此行展开）</t-tag>
+          </template>
+          <template #expandedRow="{ row }">
+            <div class="source-list">
+              <div v-for="(s, i) in row.sourceEntries" :key="s.id" class="source-item">
+                <div class="source-meta">
+                  <span class="source-idx">#{{ i + 1 }}</span>
+                  <t-tag v-if="s.speaker" size="small" variant="light">{{ speakerLabel(s.speaker) }}</t-tag>
+                  <span class="source-id" :title="s.id">{{ s.id }}</span>
+                </div>
+                <div class="source-content">{{ s.content }}</div>
+              </div>
+              <div v-if="!row.sourceEntries || row.sourceEntries.length === 0" class="source-empty">
+                无引用的原始 L0 条目（可能已过期，或本轮无来源）
+              </div>
+            </div>
+          </template>
+        </t-table>
+      </t-loading>
+    </t-card>
+
     <t-card title="记忆清理（运维）" :bordered="false" class="card">
       <p class="tip">清理历史存量里不符合标准的短噪声记忆（少于 5 字符或 5 个词）。新写入已被源头拦截，此处处理存量垃圾。扫描范围是库中该层级<b>全部</b>条目（不受内存容量上限影响）。删除为破坏性操作，建议先预览再清理。</p>
       <t-form label-align="top">
@@ -169,11 +210,62 @@ const lastDuration = computed(() => status.value?.lastRun?.duration || lastTrigg
 const lastPhase = computed(() => status.value?.lastRun?.phase || lastTrigger.value?.phase || '-')
 const lastRunAt = computed(() => status.value?.lastRun?.runAt || null)
 
+// ── 最近晋升的记忆：每次提升都附「理由 + 引用的原 L0 条目」 ──
+const promotions = ref([])
+const promotionsLoading = ref(false)
+async function loadPromotions() {
+  promotionsLoading.value = true
+  try {
+    const res = await dreamingApi.promotions(props.botId, 30)
+    promotions.value = res.promotions || []
+  } catch (e) {
+    // 非致命：面板留空，不阻塞其余展示。
+    promotions.value = []
+  } finally {
+    promotionsLoading.value = false
+  }
+}
+
+// 把后端嵌套结构拍平成表格行：理由摘要 + 原文预览 + 引用的原 L0 条目快照 + 晋升时间。
+const promotionRows = computed(() => promotions.value.map((p) => ({
+  id: p.id,
+  content: p.content,
+  score: typeof p.score === 'number' ? p.score.toFixed(2) : p.score,
+  summary: p.reason?.summary || '—',
+  sourcePreview: p.reason?.source_preview || '',
+  sourceIDs: p.source_ids || [],
+  sourceEntries: p.source_entries || [],
+  sourceCount: (p.source_entries || []).length,
+  createdAt: p.createdAt,
+})))
+const promotionCols = [
+  { colKey: 'content', title: '记忆内容', ellipsis: true },
+  { colKey: 'score', title: '得分', width: 70 },
+  { colKey: 'summary', title: '提升理由', ellipsis: true },
+  { colKey: 'source_entries', title: '引用原条目', width: 150 },
+  { colKey: 'createdAt', title: '晋升时间', width: 170, cell: ({ row }) => formatTime(row.createdAt) },
+]
+
+// 展开行：展示每条被引用的原始 L0 工作记忆内容（快照，永久可读）。
+const expandedRows = ref([])
+function onExpandChange(keys) {
+  expandedRows.value = keys
+}
+function speakerLabel(spk) {
+  switch (spk) {
+    case 'user': return '用户原话'
+    case 'assistant': return 'Bot 回复'
+    case 'observer': return '公开观察'
+    default: return '未知来源'
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     config.value = await dreamingApi.getConfig(props.botId)
     status.value = await dreamingApi.status(props.botId)
+    await loadPromotions()
   } finally {
     loading.value = false
   }
@@ -333,4 +425,14 @@ function confirmDupClean() {
 .card { margin-bottom: 20px; }
 .tip { margin-left: 12px; color: var(--bp-label-tertiary); font-size: 13px; }
 .run-at { margin-top: 8px; color: var(--bp-label-tertiary); font-size: 12px; }
+.source-list { padding: 8px 4px; }
+.summary-main { line-height: 1.5; }
+.summary-preview { margin-top: 4px; padding: 4px 8px; background: var(--bp-bg-secondary, #f3f3f3); border-left: 3px solid var(--bp-border-brand, #0052d9); border-radius: 3px; font-size: 12px; color: var(--bp-label-secondary); white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+.source-item { padding: 8px 0; border-bottom: 1px solid var(--bp-border-secondary); }
+.source-item:last-child { border-bottom: none; }
+.source-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.source-idx { font-weight: 600; color: var(--bp-label-secondary); }
+.source-id { font-size: 12px; color: var(--bp-label-tertiary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.source-content { white-space: pre-wrap; word-break: break-word; line-height: 1.6; color: var(--bp-label-primary); }
+.source-empty { color: var(--bp-label-tertiary); font-size: 13px; }
 </style>

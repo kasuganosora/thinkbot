@@ -294,6 +294,8 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 		"error":           report.Error,
 		"message":         message,
 		"dreamDiary":      diaryTail,
+		// 本轮实际晋升的明细（含理由与原条目引用），供前端即时回显。
+		"promotions": report.Promotions,
 	})
 }
 
@@ -875,7 +877,7 @@ func (s *Server) handleCleanupDuplicateMemory(c *gin.Context) {
 	}
 	var dupGroups []dupGroup
 	totalScanned := len(rows)
-	totalMatched := 0  // 将被删除的重复行总数（每组保留 1，其余计入）
+	totalMatched := 0 // 将被删除的重复行总数（每组保留 1，其余计入）
 	totalGroups := 0
 
 	for k, rs := range groups {
@@ -978,14 +980,14 @@ func (s *Server) handleCleanupDuplicateMemory(c *gin.Context) {
 	}
 
 	OK(c, gin.H{
-		"scanned":        totalScanned,
+		"scanned":         totalScanned,
 		"duplicateGroups": totalGroups,
-		"matched":        totalMatched,
-		"toDelete":       totalMatched,
-		"deleted":        totalDeleted,
-		"dryRun":         dryRun,
-		"minCount":       minCount,
-		"byTier":         byTier,
-		"groups":         groupSamples,
+		"matched":         totalMatched,
+		"toDelete":        totalMatched,
+		"deleted":         totalDeleted,
+		"dryRun":          dryRun,
+		"minCount":        minCount,
+		"byTier":          byTier,
+		"groups":          groupSamples,
 	})
 }
