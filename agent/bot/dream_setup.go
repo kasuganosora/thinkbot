@@ -229,6 +229,16 @@ func applyDreamPhaseDefaults(dreamCfg *memory.DreamConfig) {
 	if dreamCfg.Deep.MaxPromotions == 0 {
 		dreamCfg.Deep.MaxPromotions = def.Deep.MaxPromotions
 	}
+	// UseLLMImportance / LLMImportanceWeight 也要从默认补齐：调用方（botservice）
+	// 只设 Enabled/Schedule 等少数字段，Deep 整段为零值传入，若这里不补，
+	// UseLLMImportance 会保持零值 false，导致 runDeep 跳过 LLM 重要性评分，
+	// 「主导分数来源=LLM 降噪」的意图被静默关闭（0/68 条 L1 带 dream_llm_importance）。
+	if !dreamCfg.Deep.UseLLMImportance {
+		dreamCfg.Deep.UseLLMImportance = def.Deep.UseLLMImportance
+	}
+	if dreamCfg.Deep.LLMImportanceWeight == 0 {
+		dreamCfg.Deep.LLMImportanceWeight = def.Deep.LLMImportanceWeight
+	}
 	if dreamCfg.Deep.RecencyHalfLifeDays == 0 {
 		dreamCfg.Deep.RecencyHalfLifeDays = def.Deep.RecencyHalfLifeDays
 	}
