@@ -841,8 +841,8 @@ func TestScoreCandidate_RecencyExponentialDecay(t *testing.T) {
 		ageDays float64
 		want    float64
 	}{
-		{0, 1.0},            // age=0 → 1.0
-		{float64(hlDays), 0.5}, // age=halfLife → 0.5
+		{0, 1.0},                    // age=0 → 1.0
+		{float64(hlDays), 0.5},      // age=halfLife → 0.5
 		{2 * float64(hlDays), 0.25}, // age=2*halfLife → 0.25
 	}
 	for _, tc := range cases {
@@ -863,5 +863,32 @@ func TestScoreImportanceBatch_FallbackWhenNoModel(t *testing.T) {
 	})
 	if out != nil {
 		t.Errorf("expected nil fallback when model unconfigured, got %v", out)
+	}
+}
+
+// TestScoreImportanceBatch_KeyNormalization 验证 LLM 返回 key 与 candidate.Key
+// 在大小写 / 前后空白不一致时仍能归一对齐，避免整条回退为 -1（纯启发式）。
+// 复现 09-18 review 发现的「9/10 条有 LLM 分、1 条缺失」偏差根因。
+func TestScoreImportanceBatch_KeyNormalization(t *testing.T) {
+	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("key-norm")})
+	dm.model = "test-model"
+	dm.config.Deep.UseLLMImportance = true
+	dm.provider = &fixedTextProvider{text: `[{"key":"foo:bar ","importance":0.8},{"key":"BAZ","importance":0.3}]`}
+
+	out := dm.scoreImportanceBatch(context.Background(), []*DreamCandidate{
+		{Key: "Foo:Bar", Content: "x", LastSeen: time.Now()},
+		{Key: "baz", Content: "y", LastSeen: time.Now()},
+	})
+	if out == nil {
+		t.Fatal("expected non-nil map when model configured")
+	}
+	if math.Abs(out["Foo:Bar"]-0.8) > 1e-9 {
+		t.Errorf("expected Foo:Bar matched to 0.8 via normalization, got %v", out["Foo:Bar"])
+	}
+	if math.Abs(out["baz"]-0.3) > 1e-9 {
+		t.Errorf("expected baz matched to 0.3 via normalization, got %v", out["baz"])
+	}
+	if len(out) != 2 {
+		t.Errorf("expected both candidates matched, got %d", len(out))
 	}
 }

@@ -672,6 +672,46 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 		})
 	}
 
+	// 降噪审计：记录落选候选的 LLM 评分，作为「噪声被 LLM 降权挡住」的实证。
+	// 仅当启用 LLM 重要性时具观测意义（llmScores 非空）。每天仅一次（cron 触发），单行可接受。
+	promotedSet := make(map[string]bool, len(passed))
+	for _, c := range passed {
+		promotedSet[c.Key] = true
+	}
+	type dropSample struct {
+		Key       string  `json:"key"`
+		Heuristic float64 `json:"heuristic"`
+		LLM       float64 `json:"llm"`
+		Score     float64 `json:"score"`
+	}
+	var drops []dropSample
+	for _, sc := range scored {
+		if promotedSet[sc.candidate.Key] {
+			continue
+		}
+		llm := -1.0
+		if v, ok := llmScores[sc.candidate.Key]; ok {
+			llm = v
+		}
+		drops = append(drops, dropSample{
+			Key:       sc.candidate.Key,
+			Heuristic: heuristicScores[sc.candidate.Key],
+			LLM:       llm,
+			Score:     sc.score,
+		})
+	}
+	sort.Slice(drops, func(i, j int) bool { return drops[i].LLM < drops[j].LLM })
+	samples := drops
+	if len(samples) > 5 {
+		samples = samples[:5]
+	}
+	d.logger.Infow("dreaming deep: de-noise audit",
+		"candidates", len(scored),
+		"llmScored", len(llmScores),
+		"promoted", promoted,
+		"dropped", len(drops),
+		"lowLLMSamples", samples)
+
 	d.logger.Debugw("dreaming: deep complete",
 		"scored", len(scored), "passed", len(passed), "promoted", promoted)
 
@@ -948,6 +988,13 @@ func (d *DreamManager) collectSourceEntries(ctx context.Context, passed []*Dream
 	return out
 }
 
+// normalizeScoreKey 归一化候选 / LLM 返回的 key，用于容错匹配。
+// LLM 可能把 [key:foo] 回写成 "Foo" 或 "foo "，统一转小写并去首尾空白后再比对，
+// 避免因大小写 / 空白差异导致 candidate.Key 与返回 key 不匹配、整条回退为 -1（纯启发式）。
+func normalizeScoreKey(k string) string {
+	return strings.ToLower(strings.TrimSpace(k))
+}
+
 // scoreImportanceBatch 批量调用 LLM 评估所有候选的「重要性」（0.0~1.0）。
 // 一次请求覆盖全部候选（而非 N 次），控制 Deep 阶段 LLM 调用量与延迟。
 // 返回 key→importance 映射；任何失败（无模型 / 调用错误 / JSON 解析失败 / 空集）返回 nil，
@@ -1000,12 +1047,25 @@ func (d *DreamManager) scoreImportanceBatch(ctx context.Context, cands []*DreamC
 		return nil
 	}
 
+	// 候选原始 key 的归一化索引：容忍 LLM 返回 key 的大小写 / 前后空白差异，
+	// 避免 candidate.Key 与返回 key 不完全一致时整条回退为 -1（纯启发式），
+	// 否则会出现「9/10 条有 LLM 分、1 条缺失」的偏差。
+	normIndex := make(map[string]string, len(cands))
+	for _, c := range cands {
+		if c.Key != "" {
+			normIndex[normalizeScoreKey(c.Key)] = c.Key
+		}
+	}
 	out := make(map[string]float64, len(scored))
 	for _, s := range scored {
-		if s.Key == "" || s.Importance < 0 || s.Importance > 1 {
+		if s.Importance < 0 || s.Importance > 1 {
 			continue
 		}
-		out[s.Key] = s.Importance
+		orig, ok := normIndex[normalizeScoreKey(s.Key)]
+		if !ok || orig == "" {
+			continue
+		}
+		out[orig] = s.Importance
 	}
 	if len(out) == 0 {
 		return nil
