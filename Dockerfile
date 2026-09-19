@@ -57,8 +57,17 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
       -X github.com/kasuganosora/thinkbot/internal/buildinfo.Version=${VERSION}" \
     -o /out/thinkbot ./cmd
 
-# ---- 运行阶段 ----
-FROM debian:bookworm-slim
+# 自举 loader 二进制（/thinkbot-loader）：默认不进 slim 最终镜像，仅自托管阶段使用。
+# 复用同一组 buildinfo 注入，使其 /loader/health 也能回报版本。
+RUN CGO_ENABLED=1 GOOS=linux go build \
+    -ldflags="-s -w \
+      -X github.com/kasuganosora/thinkbot/internal/buildinfo.BuildTime=${BUILD_TIME} \
+      -X github.com/kasuganosora/thinkbot/internal/buildinfo.GitRevision=${GIT_REVISION} \
+      -X github.com/kasuganosora/thinkbot/internal/buildinfo.Version=${VERSION}" \
+    -o /out/thinkbot-loader ./cmd/loader
+
+# ---- 运行阶段（默认，最小镜像，不含 loader/源码）----
+FROM debian:bookworm-slim AS thinkbot-slim
 
 # ca-certificates：HTTPS 出站调用（LLM API、web_fetch 等）
 # docker.io：docker CLI（DooD 关键，通过挂载的 docker.sock 连接宿主 daemon）
@@ -100,4 +109,66 @@ COPY .env.example /app/.env
 
 EXPOSE 8080
 # 以 root 启动 entrypoint 完成 docker.sock 组归属设置，再降权到 thinkbot 运行主程序。
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+# ============================================================================
+# 自托管运行阶段（target: selfhost）
+#
+# 启用方式：docker compose 的 build.target 设为 selfhost（见 docker-compose.yml）。
+# 该镜像在 slim 基础上额外包含「自举」所需的一切：
+#   - 开发工具：git / go 工具链（golang 基础镜像）/ node22（前端 build）/ gcc+libc6-dev（cgo）
+#   - 全量源码仓（含 .git，落在 /app/src），使容器内可执行 git pull 自部署
+#   - thinkbot-loader 二进制与入口（entrypoint 在 loader 存在时改 exec loader）
+# 配合宿主 .env 的 loader.enabled=true + loader.token，thinkbot 获得「监管 + 自部署 +
+# 健康门控回滚」能力。镜像体积显著大于 slim（含 go/node 工具链），仅自托管场景使用。
+#
+# 注意：本阶段基础镜像即 golang:1.27-bookworm（含 gcc/cgo），故无需再装构建链；
+# node 经 NodeSource 安装 v22（与 frontend 阶段一致），保证 vite 构建可用。
+# ============================================================================
+FROM golang:1.27-bookworm AS selfhost
+
+# 系统依赖：git（自部署拉代码）、docker.io（DooD 同宿主 daemon）、util-linux（setpriv 降权）、
+# wget（健康检查）、ca-certificates（HTTPS 出站）；gcc/libc6-dev 已随 golang 基础镜像具备，
+# 此处再显式确保 cgo 链路完整。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git ca-certificates docker.io util-linux wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22（前端构建）。经 NodeSource 仓库安装，与 frontend 阶段版本对齐。
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# 非 root 运行用户（uid/gid 1000），与 slim 阶段一致。
+RUN groupadd -r -g 1000 thinkbot && useradd -r -u 1000 -g thinkbot thinkbot
+
+WORKDIR /app
+# 全量源码仓（含 .git，由 .dockerignore 的 !.git 否定规则放行进上下文）。
+COPY . /app/src
+# 主程序与 loader 由 builder 阶段产出（带 buildinfo）。
+COPY --from=builder /out/thinkbot /app/thinkbot
+COPY --from=builder /out/thinkbot-loader /app/thinkbot-loader
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# 初始前端构建（产物落 /app/src/static）；运行时 /app/static 软链指向它，
+# 使后续自部署的 npm run build 直接落到同一路径，主程序 CWD=/app 即可读取。
+RUN cd /app/src/web && npm ci && npm run build
+RUN ln -s /app/src/static /app/static
+
+# HOME / DOCKER_CONFIG 指到运行用户可写目录（消除 docker CLI 的 config 权限 WARNING）。
+ENV HOME=/home/thinkbot \
+    DOCKER_CONFIG=/home/thinkbot/.docker
+RUN mkdir -p /home/thinkbot/.docker && chown -R thinkbot:thinkbot /home/thinkbot
+
+# 数据与日志目录预先建好并归属运行用户（非 root 运行时 MkdirAll 不会因 /app 属 root panic）。
+# 整棵 /app 归属 thinkbot：loader 需写 /app 做二进制 mv/回滚，git pull 需写 /app/src。
+RUN mkdir -p /app/data /app/logs && chown -R thinkbot:thinkbot /app
+
+# 默认配置（DooD 友好）。可用挂载的 .env 覆盖；自部署需在宿主 .env 设 loader.enabled=true。
+COPY .env.example /app/.env
+
+EXPOSE 8080
+# entrypoint 在 /app/thinkbot-loader 存在时改 exec loader（否则仍直接 exec thinkbot）。
 ENTRYPOINT ["/app/entrypoint.sh"]
