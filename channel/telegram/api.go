@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -31,12 +32,21 @@ const (
 	// 客户端层面的超时形同虚设，重试也无从生效（此前 reqCtx 用 +10s、
 	// 客户端用 +15s，context 反而先到期，属于明确的不一致）。
 	pollCtxExtra = 5 * time.Second
+
+	// maxTelegramDownloadBytes 入站附件下载的体积上限。
+	// Telegram bot 文档上限约 50MB、图片约 20MB；此处取 20MB 留余量，
+	// 超过则拒绝下载（改记占位文本 + 附件元信息），避免单条消息撑爆内存。
+	maxTelegramDownloadBytes = 20 * 1024 * 1024
 )
 
 // apiClient 封装了 Telegram Bot API 的 HTTP 调用。
 type apiClient struct {
 	client *http.Client
 	token  string
+
+	// fileClient 专用于下载 getFile 返回的本地文件字节，base 为 <APIBaseURL>/file/bot<token>，
+	// 与常规 API client（base 为 .../bot<token>）分离，且放宽 maxBodySize 以容纳较大附件。
+	fileClient *http.Client
 
 	// 出站限流（令牌桶式）：Telegram 对发送频率有严格限制（群聊约 1 条/秒、广播约 30 条/秒），
 	// 无限制会导致 429 并造成拆分消息部分丢失。sendMu 保护 lastSend，sendInterval 为最小发送间隔。
@@ -76,9 +86,28 @@ func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Op
 		}),
 	}
 	opts = append(defaultOpts, opts...)
+	// 文件下载走独立 client：base 为 <APIBaseURL>/file/bot<token>（与常规 API 的 .../bot<token> 不同），
+	// 并放宽 maxBodySize 到 maxTelegramDownloadBytes，避免大附件被默认 10MB 上限截断。
+	fileBase := fmt.Sprintf("%s/file/bot%s", baseURL, token)
+	fileClient := http.New(
+		http.WithBaseURL(fileBase),
+		http.WithTimeout(httpTimeout),
+		http.WithRetry(retry.Config{
+			MaxRetries: 5,
+			Backoff: &retry.Backoff{
+				Strategy: retry.StrategyExponential,
+				Initial:  500 * time.Millisecond,
+				Max:      8 * time.Second,
+				Factor:   2.0,
+				Jitter:   true,
+			},
+		}),
+		http.WithMaxBodySize(maxTelegramDownloadBytes),
+	)
 	return &apiClient{
 		client:       http.New(opts...),
 		token:        token,
+		fileClient:   fileClient,
 		sendInterval: 250 * time.Millisecond, // 约 4 条/秒，低于 Telegram 群聊限制且对私聊足够
 	}
 }
@@ -115,6 +144,33 @@ func (a *apiClient) getMe(ctx context.Context) (*User, error) {
 		return nil, fmt.Errorf("telegram getMe failed: [%d] %s", resp.ErrorCode, resp.Description)
 	}
 	return &resp.Result, nil
+}
+
+// getFile 通过 file_id 获取文件的本地路径信息，用于后续下载实际字节。
+func (a *apiClient) getFile(ctx context.Context, fileID string) (*File, error) {
+	var resp apiResponse[File]
+	if err := a.client.GetJSON(ctx, "getFile?file_id="+url.QueryEscape(fileID), &resp); err != nil {
+		return nil, errs.Wrap(err, "telegram getFile")
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("telegram getFile failed: [%d] %s", resp.ErrorCode, resp.Description)
+	}
+	return &resp.Result, nil
+}
+
+// downloadFile 下载 getFile 返回的本地文件字节（filePath 为相对路径，base 已含 .../file/bot<token>）。
+func (a *apiClient) downloadFile(ctx context.Context, filePath string) ([]byte, error) {
+	if a.fileClient == nil {
+		return nil, fmt.Errorf("telegram downloadFile: file client not initialized")
+	}
+	resp, err := a.fileClient.Get(filePath).SetContext(ctx).Do()
+	if err != nil {
+		return nil, errs.Wrap(err, "telegram downloadFile")
+	}
+	if !resp.IsSuccess() {
+		return nil, fmt.Errorf("telegram downloadFile failed: status %d", resp.StatusCode)
+	}
+	return resp.Body, nil
 }
 
 // getUpdates 使用 long polling 获取更新。timeout 为秒数。

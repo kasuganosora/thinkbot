@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +55,13 @@ const (
 	// mediaGroupMaxEntries mediaGroupSeen 的容量上限，超出后清理过期项、
 	// 仍超限则整体重置（聚合是尽力而为，不影响正确性）。
 	mediaGroupMaxEntries = 500
+
+	// maxInlineTextBytes 文本类附件内联进消息文本的上限；超过则只挂附件并记占位，
+	// 避免单条文件撑爆 LLM 上下文。
+	maxInlineTextBytes = 64 * 1024
+
+	// telegramDownloadTimeout 单次入站附件下载的整体超时（防止阻塞 long polling 循环）。
+	telegramDownloadTimeout = 60 * time.Second
 )
 
 // TelegramChannel 是 Telegram 平台的输入端实现。
@@ -263,21 +272,26 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 
 	// 提取文本：优先 Text，其次 Caption（图片/文件附带的文字），实体与文本按来源配对。
 	text, entities := c.mentionTextAndEntities(msg)
+	// 保留用户原文（caption）供附件内联时拼接指令；提及检测也基于它，
+	// 因此即便后续把文件内容内联进 text，也不会丢失 caption 里的 @提及。
+	captionText := text
 
-	// 如果没有文本但有附件，构造描述性文本（占位文本不带实体，无法被提及）
+	// 若无正文也无 caption，构造描述性占位文本（仅用于「确保消息非空」与下游提示；
+	// 占位文本不带实体，无法被提及）。真正的内容在下方 acquireInboundFile 下载后内联/挂载。
+	placeholder := ""
 	if text == "" {
 		entities = nil
 		if msg.Photo != nil {
-			text = "[图片]"
+			placeholder = "[图片]"
 		} else if msg.Document != nil {
-			text = fmt.Sprintf("[文件: %s]", msg.Document.FileName)
+			placeholder = fmt.Sprintf("[文件: %s]", msg.Document.FileName)
 		} else if msg.Sticker != nil {
-			text = fmt.Sprintf("[贴纸: %s]", msg.Sticker.Emoji)
+			placeholder = fmt.Sprintf("[贴纸: %s]", msg.Sticker.Emoji)
 		}
 	}
 
-	// 仍然无内容则跳过
-	if text == "" {
+	// 仍然无任何内容则跳过
+	if text == "" && placeholder == "" {
 		return
 	}
 
@@ -399,6 +413,12 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		metadata["media_group_id"] = msg.MediaGroupID
 	}
 
+	// 下载入站附件（文件/图片）并归一化为 core.Attachment；文本类内联内容到消息文本，
+	// 修复「bot 说收到文本但没文字」——让模型真正读到用户发来的文件内容。
+	// 放在媒体组/编辑去重之后（避免重复下载），构造 coreMsg 之前（以便写入最终文本与附件）。
+	finalText, attachments := c.acquireInboundFile(ctx, msg, captionText, placeholder)
+	text = finalText
+
 	coreMsg := core.Message{
 		ID:        fmt.Sprintf("%d", msg.MessageID),
 		BotID:     c.botID,
@@ -411,6 +431,11 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		MediaType: "text/plain",
 		Metadata:  metadata,
 		CreatedAt: time.Unix(msg.Date, 0),
+	}
+
+	// 附件写入 metadata（core.Attachment 结构），供下游 MultimodalStage 转写 / 主模型消费。
+	if len(attachments) > 0 {
+		core.SetAttachments(&coreMsg, attachments)
 	}
 
 	// 注入 Ingress
@@ -583,6 +608,158 @@ func (c *TelegramChannel) mentionTextAndEntities(msg *Message) (string, []Messag
 		return msg.Text, msg.Entities
 	}
 	return msg.Caption, msg.CaptionEntities
+}
+
+// acquireInboundFile 下载入站消息中的附件（Document / Photo）并归一化为 core.Attachment。
+//
+// 文本类附件（text/*、常见代码/文档扩展名）在体积 ≤ maxInlineTextBytes 时直接内联内容到
+// 返回文本，让 LLM 真正读到文件内容（修复「bot 说收到文本但没文字」）；非文本或超大附件则
+// 仅挂上附件并在占位文本里标注大小/类型，供下游工具或后续 wiring 使用。
+// 图片（Photo）作为 image 附件挂上，由 MultimodalStage 在「主模型不支持多模态且配置了 vision 模型」
+// 时转写为文本；下载失败则安全回退到占位文本、不挂附件，保证消息仍正常入站。
+func (c *TelegramChannel) acquireInboundFile(ctx context.Context, msg *Message, captionText, placeholder string) (string, []core.Attachment) {
+	dlCtx, cancel := context.WithTimeout(ctx, telegramDownloadTimeout)
+	defer cancel()
+
+	if msg.Document != nil {
+		doc := msg.Document
+		data, mime, err := c.downloadByFileID(dlCtx, doc.FileID, doc.MimeType)
+		if err != nil {
+			traceid.L(ctx).Warnw("telegram: download document failed",
+				"channel", c.name, "file_id", doc.FileID, "name", doc.FileName, "err", err)
+			// 下载失败：保留占位文本，不挂附件
+			if placeholder != "" {
+				return placeholder, nil
+			}
+			return captionText, nil
+		}
+		att := core.Attachment{Type: core.AttachmentTypeFile, MimeType: mime, Data: data, Filename: doc.FileName}
+		if isTextualContent(mime, doc.FileName) && int64(len(data)) <= maxInlineTextBytes {
+			traceid.L(ctx).Infow("telegram: document received and inlined",
+				"channel", c.name, "name", doc.FileName, "mime", mime, "bytes", len(data))
+			return formatFileText(captionText, doc.FileName, string(data)), []core.Attachment{att}
+		}
+		// 非文本或过大：记带大小/类型的占位，附件仍挂上
+		traceid.L(ctx).Infow("telegram: document received (binary/large)",
+			"channel", c.name, "name", doc.FileName, "mime", mime, "bytes", len(data))
+		return formatFileNote(captionText, doc.FileName, int64(len(data)), mime), []core.Attachment{att}
+	}
+
+	if msg.Photo != nil && len(msg.Photo) > 0 {
+		// Telegram 把相册各尺寸图都列出，取最后一项（最大尺寸）。
+		ph := msg.Photo[len(msg.Photo)-1]
+		data, mime, err := c.downloadByFileID(dlCtx, ph.FileID, "")
+		if err != nil {
+			traceid.L(ctx).Warnw("telegram: download photo failed",
+				"channel", c.name, "file_id", ph.FileID, "err", err)
+			if placeholder != "" {
+				return placeholder, nil
+			}
+			return captionText, nil
+		}
+		if mime == "" {
+			mime = "image/jpeg"
+		}
+		att := core.Attachment{Type: core.AttachmentTypeImage, MimeType: mime, Data: data, Filename: "photo.jpg"}
+		// 图片内容由下游 MultimodalStage 转写（主模型不支持多模态且配置了 vision 模型时）；
+		// 主模型本身支持多模态时的直接透传是独立 wiring（见 README 待办），此处仅挂附件 + 保留占位文本。
+		if placeholder != "" {
+			return placeholder, []core.Attachment{att}
+		}
+		return captionText, []core.Attachment{att}
+	}
+
+	// 无附件：原样返回（占位或 caption）
+	if placeholder != "" {
+		return placeholder, nil
+	}
+	return captionText, nil
+}
+
+// downloadByFileID 通过 Telegram getFile + 文件直链下载附件字节，并返回尽力推断的 MIME。
+func (c *TelegramChannel) downloadByFileID(ctx context.Context, fileID, fallbackMime string) ([]byte, string, error) {
+	f, err := c.api.getFile(ctx, fileID)
+	if err != nil {
+		return nil, "", err
+	}
+	if f.FilePath == "" {
+		return nil, "", fmt.Errorf("telegram getFile: empty file_path for file_id=%s", fileID)
+	}
+	data, err := c.api.downloadFile(ctx, f.FilePath)
+	if err != nil {
+		return nil, "", err
+	}
+	mime := fallbackMime
+	if mime == "" {
+		// net/http.DetectContentType 按前 512 字节嗅探，足够区分文本/图片/二进制。
+		mime = http.DetectContentType(data)
+	}
+	return data, mime, nil
+}
+
+// isTextualContent 判断附件是否应作为文本内联（让 LLM 直接阅读）。
+// 依据 MIME 前缀/已知类型，或文件名扩展名（覆盖常见代码与文档格式）。
+func isTextualContent(mime, filename string) bool {
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	switch mime {
+	case "application/json", "application/xml", "application/javascript",
+		"application/x-yaml", "application/yaml", "application/csv",
+		"application/toml", "application/x-sh", "application/sql", "application/x-httpd-php":
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".txt", ".md", ".go", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cc",
+		".cpp", ".h", ".hpp", ".rs", ".json", ".yaml", ".yml", ".toml", ".csv", ".log",
+		".sh", ".bash", ".sql", ".html", ".htm", ".css", ".xml", ".proto", ".rb", ".php",
+		".kt", ".kts", ".swift", ".scala", ".lua", ".pl", ".r", ".ipynb", ".cfg", ".ini",
+		".env", ".gitignore", ".dockerfile", ".go.mod", ".go.sum", ".lock", ".diff", ".patch",
+		".editorconfig", ".vue", ".svelte":
+		return true
+	}
+	return false
+}
+
+// formatFileText 把文本类文件内容内联进消息文本，保留用户 caption（若有）。
+func formatFileText(caption, name, content string) string {
+	if caption != "" {
+		return fmt.Sprintf("%s\n\n[文件: %s]\n%s", caption, name, content)
+	}
+	return fmt.Sprintf("[文件: %s]\n%s", name, content)
+}
+
+// formatFileNote 为不可内联的附件生成带大小/类型的占位文本，保留用户 caption（若有）。
+func formatFileNote(caption, name string, size int64, mime string) string {
+	sizeStr := humanSize(size)
+	var sb strings.Builder
+	if caption != "" {
+		sb.WriteString(caption)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString(fmt.Sprintf("[文件: %s (%s", name, sizeStr))
+	if mime != "" {
+		sb.WriteString(" " + mime)
+	}
+	sb.WriteString(")]")
+	return sb.String()
+}
+
+// humanSize 把字节数格式化为人类可读字符串（B / KB / MB）。
+func humanSize(n int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+	)
+	switch {
+	case n >= mb:
+		return fmt.Sprintf("%.1fMB", float64(n)/float64(mb))
+	case n >= kb:
+		return fmt.Sprintf("%.1fKB", float64(n)/float64(kb))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
 }
 
 // detectMention 通过解析消息 entities 判断是否 @提及了 Bot 或使用了 Bot 命令。
