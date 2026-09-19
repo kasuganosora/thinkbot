@@ -51,4 +51,12 @@ fi
 
 # 降权运行：setpriv 来自 util-linux（debian slim 自带），--init-groups 加载目标用户的附加组
 # （含上面加入的 docker.sock 组），从而获得 socket 访问权。
-exec setpriv --reuid=1000 --regid=1000 --init-groups /app/thinkbot "$@"
+#
+# 入口选择：若自举 loader 二进制存在（selfhost 镜像），改由 loader 接管——它按 .env 的
+# loader.enabled 决定「透明启动 thinkbot」还是「监管 + 自部署 + 运维接口」。slim 镜像无
+# loader，仍直接 exec thinkbot，行为不变。
+if [ -x /app/thinkbot-loader ]; then
+	exec setpriv --reuid=1000 --regid=1000 --init-groups /app/thinkbot-loader "$@"
+else
+	exec setpriv --reuid=1000 --regid=1000 --init-groups /app/thinkbot "$@"
+fi

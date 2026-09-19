@@ -22,3 +22,6 @@ web/node_modules
 static
 # 用户真实配置不进镜像（由 compose 挂载 ./.env）
 .env
+# 自托管镜像（target: selfhost）需要 .git 以支持容器内 git pull 自部署。
+# 否定规则重新包含 .git；slim 最终镜像不含源码，仅构建上下文变大。
+!.git
