@@ -62,6 +62,7 @@ ch.ChannelTools(ctx)                                 // 返回平台专属工具
 - 消息去重：基于 note ID 的 TTL 缓存（2min），每 30s 清理一次
 - timeline 事件会加上 `[Timeline]` 前缀，并过滤 DM 与空帖
 - main 流 `notification` 事件仅 `reaction` / `reaction:grouped` 入站为感知消息（见下），follow/renote 等其余通知忽略
+- **入站文件归一化**：帖子带 `note.Files` 时，除保留 `file_N_url` / `file_N_name` metadata 外，还会归一化为 `core.Attachment` 写入 `metadata["attachments"]`（按 MIME 推断 `image`/`audio`/`video`/`file` 类型，`URL` 填 DriveFile 公开直链）。下游 `messageBuilder` 在主模型支持多模态时把 `image/audio/video` 直送 `ImagePart`/`FilePart`，否则 `MultimodalStage` 经 vision 转写——使 Misskey 图片对主模型可见（与 Telegram 入站归一化对称）。`DataURI` 优先返回 `URL`，云端模型可直接 fetch。
 
 ## mention 锚点与断连 backfill（防重复回复）
 

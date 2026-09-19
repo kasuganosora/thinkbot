@@ -902,22 +902,28 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	isPureRenote := note.Renote != nil && strings.TrimSpace(note.Text) == ""
 
 	metadata := map[string]any{
-		"note_id":      note.ID,
-		"reply_target": note.ID, // outbound 回写时使用的精确目标（noteID）
-		"username":     note.User.Username,
-		"host":         note.User.Host,
-		"visibility":   note.Visibility,
-		"event_type":   eventType,
-		"reply_id":     note.ReplyID,
-		"renote_id":    note.RenoteID,
-		"display_name": displayName,
-		"acct":         username,
-		"note_type":    noteType,
-		"channel_type": "misskey", // Channel 类型，供 ToolSessionContext 使用
+		"note_id":             note.ID,
+		"reply_target":        note.ID, // outbound 回写时使用的精确目标（noteID）
+		"username":            note.User.Username,
+		"host":                note.User.Host,
+		"visibility":          note.Visibility,
+		"event_type":          eventType,
+		"reply_id":            note.ReplyID,
+		"renote_id":           note.RenoteID,
+		"display_name":        displayName,
+		"acct":                username,
+		"note_type":           noteType,
+		"channel_type":        "misskey", // Channel 类型，供 ToolSessionContext 使用
 		core.MetaIsPureRenote: isPureRenote,
 	}
+	// 入站附件归一化为 core.Attachment，供下游 messageBuilder（主模型支持多模态时
+	// 直送 ImagePart/FilePart）与 MultimodalStage（主模型不支持多模态时经 vision 转写）消费，
+	// 修复此前 Misskey 入站仅记 file_N_url、图片对主模型不可见的同源缺口（与 Telegram 对称）。
+	// URL 为 DriveFile 公开直链，core.Attachment.DataURI 优先返回 URL，云端模型可直接 fetch。
+	var attachments []core.Attachment
 	if len(note.Files) > 0 {
 		metadata["file_count"] = len(note.Files)
+		attachments = noteAttachments(note.Files)
 		for i, f := range note.Files {
 			metadata[fmt.Sprintf("file_%d_url", i)] = f.URL
 			metadata[fmt.Sprintf("file_%d_name", i)] = f.Name
@@ -979,6 +985,10 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		CreatedAt: createdAt,
 	}
 
+	if len(attachments) > 0 {
+		core.SetAttachments(&coreMsg, attachments)
+	}
+
 	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
 		traceid.L(ctx).Warnw("misskey ingress receive failed",
 			"channel", c.name, "note_id", note.ID, "err", err)
@@ -997,6 +1007,41 @@ func classifyNoteType(note Note) string {
 		return "reply"
 	}
 	return "note"
+}
+
+// attachmentTypeFromMIME 根据 MIME 类型推断 core.Attachment 的 Type 枚举，
+// 供入站文件归一化（图片/音频/视频走多模态直送或 vision 转写，其余归为普通文件）。
+func attachmentTypeFromMIME(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "image/"):
+		return core.AttachmentTypeImage
+	case strings.HasPrefix(mime, "audio/"):
+		return core.AttachmentTypeAudio
+	case strings.HasPrefix(mime, "video/"):
+		return core.AttachmentTypeVideo
+	default:
+		return core.AttachmentTypeFile
+	}
+}
+
+// noteAttachments 把 Misskey 帖子附带的文件归一化为 core.Attachment 列表，
+// 供下游 messageBuilder（主模型支持多模态时直送 ImagePart/FilePart）与
+// MultimodalStage（主模型不支持多模态时经 vision 转写）消费，使图片对主模型可见。
+// URL 为 DriveFile 公开直链，core.Attachment.DataURI 优先返回 URL。
+func noteAttachments(files []File) []core.Attachment {
+	if len(files) == 0 {
+		return nil
+	}
+	atts := make([]core.Attachment, 0, len(files))
+	for _, f := range files {
+		atts = append(atts, core.Attachment{
+			Type:     attachmentTypeFromMIME(f.Type),
+			MimeType: f.Type,
+			URL:      f.URL,
+			Filename: f.Name,
+		})
+	}
+	return atts
 }
 
 // noteContext 为帖子文本添加回复和转发上下文，让 Bot 能看到用户回复了什么或引用了什么。
