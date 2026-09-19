@@ -989,6 +989,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if q := buildQuoteBlock(msg.Metadata); q != "" {
 			content = q + "\n\n" + content
 		}
+		// 主模型支持多模态时，把入站附件（image/audio/video）作为多模态 part 直送主模型，
+		// 让模型真正「看到」用户发来的图片等（修复此前 MultimodalStage 未装配、图片静默丢弃的 P1）。
+		// 主模型不支持多模态时不附加 part —— 改由已装配的 MultimodalStage 转写为文本，避免 400。
+		if bundle.MainSupportsMultimodal() {
+			if parts := inboundAttachmentsToParts(&msg); len(parts) > 0 {
+				userParts := []llm.MessagePart{llm.TextPart{Text: content}}
+				userParts = append(userParts, parts...)
+				messages = append(messages, llm.Message{Role: llm.MessageRoleUser, Content: userParts})
+				return messages
+			}
+		}
 		messages = append(messages, llm.UserMessage(content))
 		return messages
 	}
@@ -1642,6 +1653,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			SetBinder(cmdBinder)
 		pb.Add(4, cmdStage)
 	}
+	// 多模态转写 Stage（Order=30）：主模型不支持多模态且配置了 vision 辅助模型时，
+	// 把入站图片/音频/视频转写为文本追加到消息（修复 MultimodalStage 此前未装配、图片静默丢弃的 P1）。
+	// MainMultimodal 与主模型能力对齐：主模型本身支持多模态时本 Stage 跳过（图片改由 messageBuilder 直送）。
+	if bundle.HasVision() {
+		mmCfg := stages.MultimodalConfig{
+			VisionProvider: bundle.Vision,
+			VisionModel:    llm.ChatModel(bundle.VisionDef.Model),
+			MainMultimodal: bundle.MainSupportsMultimodal(),
+		}
+		pb.Add(30, stages.NewMultimodalStage("multimodal", mmCfg, s.tp, s.logger))
+	}
 	// 始终开启的核心 stage：潜水资源富化 / 记忆召回 / 节奏门控 / LLM（lurk-only 下走潜水分支）。
 	pb.Add(40, inboundHistoryEnricher)
 	pb.Add(45, lurkEnricher)
@@ -1758,6 +1780,24 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				return nil, err
 			}
 			return ws.ReadFile(ctx, path)
+		})
+		// 入站文件写入器：把用户发来的大文件/二进制文件落到工作空间 inbound/ 子目录，
+		// 模型经 read_file 读取（见 channel/telegram acquireInboundFile）。未启用工作空间时
+		// fileSink 为 nil，channel 层回退占位文本。
+		tgc.SetFileSink(func(ctx context.Context, bid, filename string, data []byte) (string, error) {
+			mgr, err := s.WorkspaceManagerForBot(bid)
+			if err != nil {
+				return "", err
+			}
+			ws, err := mgr.GetOrCreate(bid)
+			if err != nil {
+				return "", err
+			}
+			rel := filepath.Join("inbound", sanitizeInboundFilename(filename))
+			if err := ws.WriteFile(ctx, rel, data); err != nil {
+				return "", err
+			}
+			return rel, nil
 		})
 	}
 
@@ -2984,4 +3024,55 @@ func buildQuoteBlock(meta map[string]any) string {
 		return fmt.Sprintf("[引用 %s 的消息]\n%s", from, rt)
 	}
 	return fmt.Sprintf("[引用消息]\n%s", rt)
+}
+
+// inboundAttachmentsToParts 把入站消息里的多模态附件转为 llm 多模态 part，
+// 供「支持多模态的主模型」直接消费：image → ImagePart，audio/video → FilePart。
+// 非多模态类型（file）不在此转换——文件类由 channel 层写工作空间并给路径，
+// 模型经 read_file 读取（见 channel/telegram acquireInboundFile）。
+func inboundAttachmentsToParts(msg *core.Message) []llm.MessagePart {
+	var parts []llm.MessagePart
+	for _, att := range core.GetAttachments(msg) {
+		if !core.IsMultimodalType(att.Type) {
+			continue
+		}
+		uri := att.DataURI()
+		if uri == "" {
+			continue
+		}
+		if core.IsImageType(att.Type) {
+			parts = append(parts, llm.ImagePart{Image: uri, MediaType: att.MimeType})
+		} else {
+			// audio / video 作为 FilePart 透传（部分 provider 支持内联媒体）
+			parts = append(parts, llm.FilePart{Data: uri, MediaType: att.MimeType, Filename: att.Filename})
+		}
+	}
+	return parts
+}
+
+// sanitizeInboundFilename 把入站文件名规整为安全的工作空间文件名：
+// 去掉路径分隔与父目录逃逸、过滤不可打印字符、限制长度。validatePath 会再做一次防逃逸校验。
+func sanitizeInboundFilename(name string) string {
+	base := filepath.Base(name)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "file"
+	}
+	// 去掉路径分隔（防 ../ 逃逸；validatePath 也会再校验）
+	base = strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(base)
+	var b strings.Builder
+	for _, r := range base {
+		if r > 0x1f && r != 0x7f {
+			b.WriteRune(r)
+		}
+	}
+	clean := b.String()
+	if clean == "" {
+		clean = "file"
+	}
+	const maxLen = 120
+	if len(clean) > maxLen {
+		ext := filepath.Ext(clean)
+		clean = clean[:maxLen-len(ext)] + ext
+	}
+	return clean
 }

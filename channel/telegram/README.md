@@ -40,6 +40,7 @@ ch.Send(ctx, action)                                          // 按 core.Action
 ch.RecentChats()                                          // 近期活跃会话列表（最多 20 个，实现 core.RecentChatLister）
 ch.Name() / ch.Type() / ch.BotID()                            // 元信息，Type() 返回 "telegram"
 ch.SetFileSource(fn)                                          // 注入工作空间文件源（须在 Start 前调用，见文件投递工具）
+ch.SetFileSink(fn)                                            // 注入入站文件写入器（存用户发来的文件到工作空间，见入站文件接收）
 ch.ChannelTools(ctx)                                          // 返回平台专属工具（见下）
 ```
 
@@ -51,7 +52,7 @@ ch.ChannelTools(ctx)                                          // 返回平台专
 - **user_choice**：Start 时注册 `PollCreator`，发送 inline keyboard；`getUpdates` 默认含 `callback_query`，点击经 `ResolveFrom` 回填（不注入 Ingress）
 - **引用回复可见**：入站消息携带 `reply_to_message_id` / `reply_to_text` / `reply_to_from`，上游 messageBuilder 据此渲染 `[引用 <作者> 的消息]` 块，模型能看到被引内容
 - **消息反应（awareness-only）**：`message_reaction` 更新（需 bot 为群管理员）归一化为 `[Telegram 反应]` 注入，只处理新增反应（new − old），带 `ack_only: true`、故意不设 `reply_target`，不触发回复
-- **入站文件接收**：收到 `Document` / `Photo` 时经 `getFile` + 文件直链下载字节，归一化为 `core.Attachment` 写入消息 `metadata["attachments"]`。文本类（MIME 以 `text/` 开头、或常见代码/文档扩展名，且 ≤64KB）直接内联内容到消息文本，修复「bot 说收到文本但没文字」——模型真正读到文件内容；非文本/超大附件则记带大小与 MIME 的占位并保留附件；图片作为 `image` 附件挂上，由 `MultimodalStage` 在主模型不支持多模态且配置 vision 模型时转写为文本。下载失败安全回退占位文本、不阻塞 polling（60s 超时）。
+- **入站文件接收**：收到 `Document` / `Photo` 时经 `getFile` + 文件直链下载字节，归一化为 `core.Attachment` 写入消息 `metadata["attachments"]`。文本类（MIME 以 `text/` 开头、或常见代码/文档扩展名，且 ≤64KB）直接内联内容到消息文本，修复「bot 说收到文本但没文字」——模型真正读到文件内容；图片作为 `image` 附件挂上，由下游分两条路消费：① 主模型支持多模态 → 上游 `messageBuilder` 经 `inboundAttachmentsToParts` 把 `ImagePart` 直送主模型，模型真正「看到」图；② 主模型不支持多模态但配置了 vision 模型 → `MultimodalStage` 转写为文本追加消息。非文本/超大文件优先经 `fileSink` 落到工作空间 `inbound/` 子目录，并在消息里给出 `read_file` 读取路径（模型可直接读内容）；未注入 `fileSink` 或写入失败时回退带大小/MIME 的占位并保留附件，保证消息正常入站。下载失败安全回退占位文本、不阻塞 polling（60s 超时）。
 - **私聊永不静音（telegram 侧表现）**：Telegram 私聊 `ChatType=private` 映射到 `core.ChatPrivate`，上游 reply-control 在 1:1 私聊反转为 fail-open——软门（节奏/engagement）不再抑制、模型 `send:false` 时仍尽量提取可发内容、缺控制块时回退清洗后纯文本（心跳/cron 源除外）；硬门（纯 Renote、被动未提及、反应通知、未回应熔断）仍 fail-closed
 
 ## 平台专属工具
@@ -97,7 +98,7 @@ Telegram getUpdates (long polling) → types.go (Update/Message/CallbackQuery/Me
 ```
 
 - **api.go** — Telegram Bot API HTTP 封装（含 `APIBaseURL` 自定义、限流 throttle、multipart 上传）
-- **channel.go** — Long polling 循环、消息归一化、提及检测、拆分发送、反应事件入站、`FileSourceFunc` 注入点
+- **channel.go** — Long polling 循环、消息归一化、提及检测、拆分发送、反应事件入站、`FileSourceFunc` / `FileSinkFunc` 注入点
 - **types.go** — Telegram API 数据结构（`Update`、`Message`、`CallbackQuery`、`ChatMemberUpdated`、`MessageReactionUpdated`）
 - **choice.go** — user_choice inline keyboard 与 callback_query 回填
 - **tools.go** — 平台专属工具定义（`ChannelTools`）、caption UTF-16 截断与图片魔数守卫

@@ -129,14 +129,28 @@ type TelegramChannel struct {
 	// nil 表示未注入（工作空间未启用），此时 send_document 工具会拒绝执行。
 	// 只在启动期写入、运行期只读，无需加锁。
 	fileSource FileSourceFunc
+
+	// fileSink 把入站文件写入 bot 工作空间（文件名 → 内容），返回工作空间相对路径，
+	// 供模型经 read_file 读取用户发来的大文件/二进制文件（直送主模型的附件不含 file 类）。
+	// nil 表示未注入（未启用工作空间），此时非文本附件仅挂占位文本、模型读不到内容。
+	// 只在启动期写入、运行期只读，无需加锁。
+	fileSink FileSinkFunc
 }
 
 // FileSourceFunc 是 bot 工作空间文件读取器：按 botID + 工作空间相对路径返回文件内容。
 type FileSourceFunc func(ctx context.Context, botID, path string) ([]byte, error)
 
+// FileSinkFunc 是 bot 工作空间文件写入器：按 botID + 文件名写入内容，返回工作空间相对路径。
+type FileSinkFunc func(ctx context.Context, botID, filename string, data []byte) (relPath string, err error)
+
 // SetFileSource 注入工作空间文件源。必须在 Start 前调用（启动期单线程注入）。
 func (c *TelegramChannel) SetFileSource(fn FileSourceFunc) {
 	c.fileSource = fn
+}
+
+// SetFileSink 注入工作空间文件写入器。必须在 Start 前调用（启动期单线程注入）。
+func (c *TelegramChannel) SetFileSink(fn FileSinkFunc) {
+	c.fileSink = fn
 }
 
 // NewChannel 创建一个 TelegramChannel。
@@ -639,6 +653,18 @@ func (c *TelegramChannel) acquireInboundFile(ctx context.Context, msg *Message, 
 				"channel", c.name, "name", doc.FileName, "mime", mime, "bytes", len(data))
 			return formatFileText(captionText, doc.FileName, string(data)), []core.Attachment{att}
 		}
+		// 非文本或过大：优先存工作空间并给 read_file 路径（模型可直接读取内容）；
+		// 未注入 fileSink 或写入失败时回退占位 + 挂附件，保证消息正常入站。
+		if c.fileSink != nil {
+			if rel, werr := c.fileSink(ctx, c.botID, doc.FileName, data); werr == nil {
+				traceid.L(ctx).Infow("telegram: document saved to workspace",
+					"channel", c.name, "name", doc.FileName, "mime", mime, "rel", rel)
+				return formatFileSinkText(captionText, doc.FileName, rel), nil
+			} else {
+				traceid.L(ctx).Warnw("telegram: save inbound file to workspace failed, fallback to placeholder",
+					"channel", c.name, "name", doc.FileName, "err", werr)
+			}
+		}
 		// 非文本或过大：记带大小/类型的占位，附件仍挂上
 		traceid.L(ctx).Infow("telegram: document received (binary/large)",
 			"channel", c.name, "name", doc.FileName, "mime", mime, "bytes", len(data))
@@ -661,8 +687,9 @@ func (c *TelegramChannel) acquireInboundFile(ctx context.Context, msg *Message, 
 			mime = "image/jpeg"
 		}
 		att := core.Attachment{Type: core.AttachmentTypeImage, MimeType: mime, Data: data, Filename: "photo.jpg"}
-		// 图片内容由下游 MultimodalStage 转写（主模型不支持多模态且配置了 vision 模型时）；
-		// 主模型本身支持多模态时的直接透传是独立 wiring（见 README 待办），此处仅挂附件 + 保留占位文本。
+		// 图片在此仅挂附件 + 保留占位文本，真正的「消费」在下游分两条路：
+		//  1) 主模型支持多模态 → messageBuilder 经 inboundAttachmentsToParts 把 ImagePart 直送主模型；
+		//  2) 主模型不支持多模态但配置了 vision 模型 → MultimodalStage 转写为文本追加到消息。
 		if placeholder != "" {
 			return placeholder, []core.Attachment{att}
 		}
@@ -728,6 +755,16 @@ func formatFileText(caption, name, content string) string {
 		return fmt.Sprintf("%s\n\n[文件: %s]\n%s", caption, name, content)
 	}
 	return fmt.Sprintf("[文件: %s]\n%s", name, content)
+}
+
+// formatFileSinkText 非文本/大文件存工作空间后，在消息文本里给出路径与读取方式，
+// 让模型知道文件已可经 read_file 工具读取。
+func formatFileSinkText(caption, name, relPath string) string {
+	head := fmt.Sprintf("[文件: %s]\n已保存到工作空间 %s，可用 read_file 工具读取其内容。", name, relPath)
+	if caption != "" {
+		return fmt.Sprintf("%s\n\n%s", caption, head)
+	}
+	return head
 }
 
 // formatFileNote 为不可内联的附件生成带大小/类型的占位文本，保留用户 caption（若有）。

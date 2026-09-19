@@ -7,7 +7,7 @@
 - **LLMStage**：调用 LLM Provider 编排生成（支持多步工具调用、流式输出、UsageRecorder、延迟警告合并、防偷懒门禁、上下文压缩、工具审批/ToolDeferral 注入、工具输出落盘、潜水观察与回复控制门控）。生成结果写入 `ActionReply` 并存入 Envelope KV `llm.result`。
 - **ReplyStage**：在 LLMStage 基础上增加「输出决策」机制（`OutputDecision`），按决策产出 `ActionReply` / `ActionNote` / `ActionCallback` / `ActionSilent` 组合，并自动把回复捕获为 L0 工作记忆笔记。
 - **EnricherStage**：消息预处理，通过 `EnrichFunc` 向 Envelope 注入用户画像、会话上下文或权限标记等元数据。
-- **MultimodalStage**：多模态附件转写。当主力模型不支持多模态且配置了辅助 Vision 模型时，将 image/audio/video 转写为文本并追加到 `Message.Text`。
+- **MultimodalStage**：多模态附件转写。当主力模型不支持多模态且配置了辅助 Vision 模型时，将 image/audio/video 转写为文本并追加到 `Message.Text`。已在 BotService 管线（Order=30，仅 `bundle.HasVision()` 时）装配，修复此前 `MultimodalStage` 全库零装配、图片静默丢弃的 P1；主模型本身支持多模态时该 Stage 跳过，改由上游 `messageBuilder` 经 `inboundAttachmentsToParts` 把 `ImagePart`/`FilePart` 直送主模型（`api/botservice.go`）。
 - **FilterStage**：基于 `core.Predicate` 的消息过滤（命中放行或命中丢弃）。
 - **LoggerStage**：结构化日志记录每条消息的关键信息（用于审计/调试）。
 - **NoteCaptureMiddleware**：中间件，在 LLM 产出回复后自动把**用户入站消息**捕获为 L0 笔记（`ActionNote`，speaker=user），并可选经 `UserMessageEventWriter` 写入用户消息事件流（供 dreaming 回灌），补齐记忆捕获路径。
@@ -109,6 +109,8 @@ stages.NewLoggerStage("logger", logger, true)
 ```
 
 `MultimodalStage.ShouldProcess(msg)` 判定是否需要转写（有附件 && 主模型不支持多模态 && 有辅助模型）。`FilterStage` 的 `FilterPass`=命中放行/未中丢弃，`FilterDrop`=命中丢弃/未中放行，丢弃时返回 `nil` Envelope。`LoggerStage.LogPayload` 控制是否记录消息文本（生产环境建议关闭以策安全）。
+
+> **主模型多模态直通（与 MultimodalStage 互补）**：当 `bundle.MainSupportsMultimodal()` 为真时，BotService 在构造发给主模型的消息（`messageBuilder`）里，把入站 `core.Attachment`（image/audio/video）经 `inboundAttachmentsToParts` 转为 `llm.ImagePart`/`llm.FilePart` 直接拼到 user message 的 `Content`，主模型即可原生消费图片等附件；此时 `MultimodalStage` 因 `MainMultimodal=true` 跳过、不做冗余转写。注意：多轮历史的 `dao.ChatMessage` 为纯文本，图片仅在**当前轮**直送，历史轮图片不可回溯（设计取舍）。
 
 ## 使用方式
 
