@@ -90,6 +90,13 @@ var basicTools = map[string]struct{}{
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},
+
+	// 自举（self-host）只读工具：查状态/查部署/读日志/读源码，无对外副作用、不改文件
+	"tb_loader_status":  {}, // 查 loader/子进程状态
+	"tb_deploy_status":  {}, // 查单次部署进度与日志（只读）
+	"tb_deploy_history": {}, // 列最近部署（只读）
+	"tb_logs":           {}, // 读运行/部署日志（只读）
+	"tb_read_source":    {}, // 读源码树文件（只读）
 }
 
 // broadcastTools 是「会产生他人可见痕迹」的工具集合。
