@@ -4,6 +4,10 @@
 //
 // 设计要点：
 //   - 仅当 .env 开启 loader.enabled 时才注册这些工具（自托管模式），普通部署零影响。
+//   - 工具全部按「敏感工具（RiskSensitive）」分级：**默认禁止**。即便已注册，
+//     也必须由管理员在「工具权限」页为对应 bot/平台显式写 allow 规则才开放
+//     （与 sandbox_exec / web_search 等高危害能力一致）；LLM 看不到未授权工具，
+//     调用前还有 call-time 二次复核兜底。
 //   - 所有变更类接口经 config 读取 loader.token 注入 X-Loader-Token 头，token 不进入 prompt，
 //     LLM 永远看不到凭据；只读工具同样走受控端点。
 //   - 工具经 127.0.0.1 环回访问 loader 的 ops 端口（默认 :8090），与 bot 同容器。

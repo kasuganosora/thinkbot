@@ -424,6 +424,55 @@ func TestEvaluate_ExplicitDenyBeatsBasicDefault(t *testing.T) {
 	}
 }
 
+// TestSelfHostTools_DefaultDenied 锁定本次需求「loader 工具默认关闭，需用户在权限系统开启」：
+// 全部 tb_* 自举工具必须按敏感工具分级（默认禁止），且只有显式 allow 规则才能放开。
+//
+// 这是「权限系统开启」语义的端到端保证 —— 即便 .env 已开 loader.enabled 注册了这些工具，
+// 没有对应 bot/平台的 allow 规则时，LLM 既看不到也调不到它们。
+func TestSelfHostTools_DefaultDenied(t *testing.T) {
+	selfHost := []string{
+		"tb_loader_status", "tb_deploy_status", "tb_deploy_history", "tb_logs", "tb_read_source",
+		"tb_deploy", "tb_rollback", "tb_restart", "tb_write_source",
+	}
+	// 1) 分级正确：全部敏感，绝不基础
+	for _, tool := range selfHost {
+		if got := ToolRisk(tool); got != RiskSensitive {
+			t.Errorf("ToolRisk(%q): got %s, want %s", tool, got, RiskSensitive)
+		}
+		if IsBasicTool(tool) {
+			t.Errorf("%q must not be classified as basic", tool)
+		}
+	}
+
+	svc := newTestService(t)
+	// 2) 渠道（misskey）无规则 → 默认禁止（保守默认，敏感工具不开自动放行）
+	for _, tool := range selfHost {
+		if svc.Evaluate("bot-sh", tool, "misskey", "u1") {
+			t.Errorf("self-host tool %q must be denied by default on unconfigured platform", tool)
+		}
+	}
+
+	// 3) 显式 allow 规则 → 放开（「在权限系统开启」）
+	if _, err := svc.CreateRule("bot-sh", RuleReq{
+		Tool: "tb_*", Platform: "misskey", UserIDs: []string{"*"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range selfHost {
+		if !svc.Evaluate("bot-sh", tool, "misskey", "u1") {
+			t.Errorf("self-host tool %q should be allowed after explicit tb_* allow rule", tool)
+		}
+	}
+
+	// 4) 其它平台仍未放开（规则按平台隔离）
+	for _, tool := range selfHost {
+		if svc.Evaluate("bot-sh", tool, "telegram", "u1") {
+			t.Errorf("self-host tool %q must stay denied on platform without allow rule", tool)
+		}
+	}
+}
+
 // TestEvaluate_NoRulePlatformDeniesSensitive 确认「平台完全无规则 → 保守默认」
 // （修复 5142）：未被管理员约束的渠道不再自动全开放，敏感工具默认禁止，
 // 仅基础工具默认放行。基础表达能力的 Bot 不会被锁死。

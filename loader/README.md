@@ -98,15 +98,21 @@ loader 的运维接口跑在 `127.0.0.1:8090`，与 thinkbot **同容器**，因
 
 | 工具 | 风险 | 说明 |
 |---|---|---|
-| `tb_loader_status` | basic | 查 loader/子进程状态、部署能力、最近部署 |
+| `tb_loader_status` | sensitive | 查 loader/子进程状态、部署能力、最近部署 |
 | `tb_deploy` | sensitive | 触发自部署，返回 id（异步，需轮询） |
-| `tb_deploy_status` | basic | 按 id 查部署进度 + 完整日志 |
-| `tb_deploy_history` | basic | 列最近部署，定位上次失败 |
-| `tb_logs` | basic | 读运行/部署日志 |
-| `tb_read_source` | basic | 读源码树文件（`loader.git_dir`，默认 `/app/src`） |
+| `tb_deploy_status` | sensitive | 按 id 查部署进度 + 完整日志 |
+| `tb_deploy_history` | sensitive | 列最近部署，定位上次失败 |
+| `tb_logs` | sensitive | 读运行/部署日志 |
+| `tb_read_source` | sensitive | 读源码树文件（`loader.git_dir`，默认 `/app/src`） |
 | `tb_write_source` | sensitive | 写源码树文件（路径穿越防护，禁止写 `.git`） |
 | `tb_rollback` | sensitive | 回退上一良版本并重启 |
 | `tb_restart` | sensitive | 仅重启子进程 |
+
+> ⚠️ **默认全部禁止**：9 个 `tb_*` 工具统一按「敏感工具（sensitive）」分级，**默认不开放**。
+> 即便 `.env` 已开 `loader.enabled` 注册了这些工具，也必须由管理员在「工具权限」页为对应
+> bot / 平台**显式写 allow 规则**才能启用（建议 `tool=tb_*` + 指定平台 + 指定可信用户）。
+> 没有 allow 规则时，LLM 既看不到也调不到它们——这是「loader 工具默认关闭，需在权限系统开启」的
+> 硬性保证，防止自托管高权限通道被对话中的 LLM 默认持有。
 
 工具经 `config` 读取 `loader.token` 注入 `X-Loader-Token` 头，**凭据不进入 prompt**（LLM 看不到）；
 只读工具同样走受控端点。典型闭环：用户报缺功能 → bot 用 `tb_read_source` 看代码 →
@@ -114,8 +120,8 @@ loader 的运维接口跑在 `127.0.0.1:8090`，与 thinkbot **同容器**，因
 `tb_logs?file=deploy&id=` 看错误 → 修复 → 再 `tb_deploy`。
 
 > ⚠️ 安全提示：这套工具让 bot 具备「改写自身源码并热部署」的能力，威力极大。
-> 仅在可信自托管环境开启 `loader.enabled`，务必配置强随机 `loader.token`，并依赖 toolperm
-> 按 bot 维度收紧 `tb_*` 写类工具的权限。
+> 仅在可信自托管环境开启 `loader.enabled`，务必配置强随机 `loader.token`，并在权限系统中
+> 仅对可信 bot / 用户放开 `tb_*` 工具（写类工具尤其要收口到具体用户）。
 
 ## 运行时崩溃自动回滚（兜底）
 
