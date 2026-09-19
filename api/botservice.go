@@ -33,6 +33,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/agent/storage"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/agent/tools/selfhost"
 	"github.com/kasuganosora/thinkbot/channel/misskey"
 	"github.com/kasuganosora/thinkbot/channel/telegram"
 	"github.com/kasuganosora/thinkbot/config"
@@ -1821,6 +1822,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				"channel_name", ch.Name(), "channel_type", ch.Type(), "count", len(defs))
 		}
 	}
+
+	// 注册自举（self-host）工具：仅当 .env 开启 loader.enabled 时，bot 才能调用
+	// loader 的运维接口与源码读写工具，形成「反馈→改码→部署→读日志再修」自举闭环。
+	// 工具按需经 config 读取 loader.token 注入鉴权头，凭据不进入 prompt。
+	toolMgr.AddProvider(selfhost.NewProvider(s.store, s.logger))
 
 	// 创建梦境巩固子系统（如果配置了）
 	var dreamScheduler *cron.Scheduler
