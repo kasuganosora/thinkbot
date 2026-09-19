@@ -98,6 +98,15 @@ type Document struct {
 	FileSize     int64  `json:"file_size,omitempty"`
 }
 
+// File 表示通过 getFile 获取的本地文件信息，用于下载实际字节。
+// FilePath 为相对路径，需拼到 <APIBaseURL>/file/bot<token>/ 后发起 GET 下载。
+type File struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileSize     int64  `json:"file_size,omitempty"`
+	FilePath     string `json:"file_path,omitempty"`
+}
+
 // Sticker 表示一个贴纸。
 type Sticker struct {
 	FileID       string `json:"file_id"`
