@@ -91,12 +91,36 @@ var basicTools = map[string]struct{}{
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},
 
-	// 自举（self-host）只读工具：查状态/查部署/读日志/读源码，无对外副作用、不改文件
+	// 注意：自举（self-host）全部 tb_* 工具**不**在此白名单内，统一按敏感工具处理
+	// （见下方说明），默认禁止，必须由管理员在权限系统显式 allow 才开放。
+}
+
+// selfHostTools 是 self-host 自举工具全集（tb_* 前缀），集中登记便于统一分级与文档。
+//
+// 设计意图（与本次需求「loader 工具默认关闭，需用户在权限系统开启」一致）：
+//   - 这些工具哪怕只读（查状态 / 查部署 / 读日志 / 读源码），也暴露在自托管容器内的
+//     高权限通道（127.0.0.1:8090 的 loader 运维接口，可触发重新编译部署、回滚、重启）；
+//   - 一旦被误开放，等于把「改源码 + 重新部署生产二进制」的能力交给了对话中的 LLM，
+//     危害面远超普通只读工具。因此**全部按敏感工具（RiskSensitive）处理**：
+//     无显式 allow 规则时默认禁止，管理员必须在「工具权限」页为对应 bot/平台写 allow 规则
+//     才能启用（与 sandbox_exec / web_search 等高危能力的管控方式一致）；
+//   - 即便 web 平台有 tool=* 的开放基线种子规则，管理员也需为这些工具单独配 allow，
+//     不会被「平台无规则→基础工具放行」或「白名单模式→仅基础放行」的默认分支自动放开。
+//
+// 它们不在 basicTools 白名单里，ToolRisk 会落到 RiskSensitive 兜底分支；
+// 这里单独列出只作可读性与审计用途，不参与运行时判定。
+var selfHostTools = map[string]struct{}{
+	// 只读：查状态/查部署/读日志/读源码
 	"tb_loader_status":  {}, // 查 loader/子进程状态
 	"tb_deploy_status":  {}, // 查单次部署进度与日志（只读）
 	"tb_deploy_history": {}, // 列最近部署（只读）
 	"tb_logs":           {}, // 读运行/部署日志（只读）
 	"tb_read_source":    {}, // 读源码树文件（只读）
+	// 写/变更：编译部署/回滚/重启/改源码
+	"tb_deploy":       {}, // 触发自部署（编译当前工作树并切换新二进制）
+	"tb_rollback":     {}, // 回退到上一良版本并重启
+	"tb_restart":      {}, // 仅重启子进程
+	"tb_write_source": {}, // 写源码树文件
 }
 
 // broadcastTools 是「会产生他人可见痕迹」的工具集合。
@@ -175,6 +199,7 @@ var sensitivePrefixes = []string{
 	"mcp_",     // 外部 MCP 工具，能力不可知
 	"misskey_", // Channel 写操作（只读项已在 basicTools 中显式例外）
 	"telegram_",
+	"tb_", // 自举（self-host）工具：暴露 loader 运维接口（部署/回滚/重启/读写源码），默认敏感
 }
 
 // sensitivePrefixExceptions 是「命中敏感前缀但实际无害」的显式例外。

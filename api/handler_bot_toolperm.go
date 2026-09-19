@@ -209,6 +209,17 @@ var userToolDesc = map[string]string{
 	"browser__evaluate":      "在页面中执行 JavaScript",
 	"browser__hover":         "鼠标悬停元素",
 	"browser__select_option": "选择下拉框选项",
+
+	// 自举（self-host）：暴露 loader 运维接口，默认敏感、需权限系统显式开启
+	"tb_loader_status":  "查看 loader 运行状态与部署能力",
+	"tb_deploy":         "触发自部署（改码后重新编译并切换）",
+	"tb_deploy_status":  "查询单次部署进度与完整日志",
+	"tb_deploy_history": "列出最近部署记录",
+	"tb_logs":           "读取运行或部署日志",
+	"tb_read_source":    "读取容器内源码文件",
+	"tb_write_source":   "写入容器内源码文件",
+	"tb_rollback":       "回退到上一良版本并重启",
+	"tb_restart":        "仅重启 thinkbot 子进程",
 }
 
 // toolCategoryLabel 把工具注册时使用的英文 category 映射为中文分组名，
@@ -220,6 +231,8 @@ var toolCategoryLabel = map[string]string{
 	"sandbox":  "沙箱与文件",
 	"subagent": "子智能体",
 	"workflow": "任务与工作流",
+	// 自举：loader 运维接口（部署/回滚/重启/读写源码），默认敏感、需权限系统显式开启
+	"selfhost": "自举与部署",
 	// 动态工具（MCP / 浏览器等）没有静态 category，由 ListAllTools 统一打标
 	agenttools.DynamicCategory: "浏览器与外部工具",
 }
@@ -284,5 +297,17 @@ func fallbackToolList() []agenttools.ToolInfo {
 		{Name: "sandbox_list_dir", Category: "sandbox"},
 		{Name: "sandbox_search_content", Category: "sandbox"},
 		{Name: "sandbox_health", Category: "sandbox"},
+
+		// 自举（self-host）：仅在 loader.enabled=true 的自托管 bot 实际注册，
+		// 这里列入兜底清单以便 bot 停止时也能在权限页预配置 allow 规则。
+		{Name: "tb_loader_status", Category: "selfhost"},
+		{Name: "tb_deploy", Category: "selfhost"},
+		{Name: "tb_deploy_status", Category: "selfhost"},
+		{Name: "tb_deploy_history", Category: "selfhost"},
+		{Name: "tb_logs", Category: "selfhost"},
+		{Name: "tb_read_source", Category: "selfhost"},
+		{Name: "tb_write_source", Category: "selfhost"},
+		{Name: "tb_rollback", Category: "selfhost"},
+		{Name: "tb_restart", Category: "selfhost"},
 	}
 }
