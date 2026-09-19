@@ -57,7 +57,7 @@ func (o *OpsServer) Start() error {
 	mux.HandleFunc("/loader/health", o.handleHealth)
 	mux.HandleFunc("/loader/status", o.auth(o.handleStatus))
 	mux.HandleFunc("/loader/deploy", o.auth(o.handleDeploy))
-	mux.HandleFunc("/loader/deploy/", o.auth(o.handleDeployStatus))
+	mux.HandleFunc("/loader/deploy/", o.auth(o.handleDeployDispatch))
 	mux.HandleFunc("/loader/rollback", o.auth(o.handleRollback))
 	mux.HandleFunc("/loader/restart", o.auth(o.handleRestart))
 	mux.HandleFunc("/loader/logs", o.auth(o.handleLogs))
@@ -123,11 +123,11 @@ func (o *OpsServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Ref   string `json:"ref"`
-		Force bool   `json:"force"`
+		Ref  string `json:"ref"`
+		Pull bool   `json:"pull"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	res, err := o.dep.Deploy(r.Context(), body.Ref)
+	res, err := o.dep.Deploy(r.Context(), body.Ref, body.Pull)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -135,8 +135,22 @@ func (o *OpsServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"id": res.ID, "status": res.Status})
 }
 
-func (o *OpsServer) handleDeployStatus(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/loader/deploy/")
+// handleDeployDispatch 处理 /loader/deploy/<id> 与 /loader/deploy/history 两条路由。
+func (o *OpsServer) handleDeployDispatch(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/loader/deploy/")
+	switch rest {
+	case "history":
+		limit := 10
+		if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+			limit = n
+		}
+		writeJSON(w, map[string]any{"history": o.dep.History(limit)})
+	default:
+		o.handleDeployStatus(w, r, rest)
+	}
+}
+
+func (o *OpsServer) handleDeployStatus(w http.ResponseWriter, r *http.Request, id string) {
 	if id == "" {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
@@ -170,8 +184,10 @@ func (o *OpsServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"status": "restarting"})
 }
 
-// handleLogs 读取/流式 tail 子进程日志。
-//   - file=console(默认)|json；lines=N(默认200)；follow=true(SSE 流式)
+// handleLogs 读取/流式 tail 子进程日志或某次部署的构建日志。
+//   - file=console(默认)|json|deploy
+//   - deploy 需配合 id=<deployID>，返回该次部署的完整构建/失败日志
+//   - lines=N(默认200)；follow=true(SSE 流式，仅对 console/json 有效)
 func (o *OpsServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	file := q.Get("file")
@@ -183,6 +199,31 @@ func (o *OpsServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		lines = n
 	}
 	follow := q.Get("follow") == "true" || q.Get("follow") == "1"
+
+	// 部署日志：从落盘的 deploy-<id>.json 读取（跨重启可用，是“失败时段日志”的来源）
+	if file == "deploy" {
+		id := q.Get("id")
+		if id == "" {
+			http.Error(w, "file=deploy 需提供 id 参数", http.StatusBadRequest)
+			return
+		}
+		res, ok := o.dep.Result(id)
+		if !ok {
+			http.Error(w, "deploy not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		var b strings.Builder
+		fmt.Fprintf(&b, "deploy %s status=%s\n", res.ID, res.Status)
+		if res.Error != "" {
+			fmt.Fprintf(&b, "error: %s\n", res.Error)
+		}
+		fmt.Fprintf(&b, "from=%s to=%s\n", res.FromRev, res.ToRev)
+		b.WriteString(strings.Join(res.Log, "\n"))
+		b.WriteString("\n")
+		w.Write([]byte(b.String()))
+		return
+	}
 
 	name := "thinkbot.console.log"
 	if file == "json" {

@@ -3,6 +3,7 @@ package loader
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,6 +32,7 @@ const (
 type DeployResult struct {
 	ID         string       `json:"id"`
 	Ref        string       `json:"ref"`
+	Pull       bool         `json:"pull"`
 	Status     DeployStatus `json:"status"`
 	StartedAt  time.Time    `json:"startedAt"`
 	FinishedAt time.Time    `json:"finishedAt"`
@@ -67,8 +69,13 @@ func (d *Deployer) Capability() map[string]bool {
 	}
 }
 
-// Deploy 触发一次自部署（异步）。ref 为空表示 pull 当前分支；否则 fetch+checkout 该 ref。
-func (d *Deployer) Deploy(ctx context.Context, ref string) (*DeployResult, error) {
+// Deploy 触发一次自部署（异步）。
+//   - ref 为空且 pull=false：直接编译当前工作树（保留容器内 bot 的本地改动），
+//     这是「bot 改代码→部署」自举闭环的默认路径。
+//   - pull=true：先 git pull --ff-only 合入上游（不丢弃本地未提交改动，冲突则中止），
+//     再编译工作树。
+//   - ref 非空：fetch + checkout 该 ref（会丢弃本地改动，用于部署指定干净版本）。
+func (d *Deployer) Deploy(ctx context.Context, ref string, pull bool) (*DeployResult, error) {
 	d.mu.Lock()
 	if d.running {
 		d.mu.Unlock()
@@ -78,7 +85,7 @@ func (d *Deployer) Deploy(ctx context.Context, ref string) (*DeployResult, error
 	d.mu.Unlock()
 
 	id := fmt.Sprintf("deploy-%d", time.Now().UnixNano())
-	res := &DeployResult{ID: id, Ref: ref, Status: DeployPending, StartedAt: time.Now()}
+	res := &DeployResult{ID: id, Ref: ref, Pull: pull, Status: DeployPending, StartedAt: time.Now()}
 	d.mu.Lock()
 	d.results[id] = res
 	d.mu.Unlock()
@@ -89,17 +96,9 @@ func (d *Deployer) Deploy(ctx context.Context, ref string) (*DeployResult, error
 			d.running = false
 			d.mu.Unlock()
 		}()
-		d.doDeploy(ctx, ref, res)
+		d.doDeploy(ctx, ref, pull, res)
 	}()
 	return res, nil
-}
-
-// Result 按 id 取部署结果。
-func (d *Deployer) Result(id string) (*DeployResult, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	r, ok := d.results[id]
-	return r, ok
 }
 
 // LastResult 返回最近一次部署结果（按开始时间）。
@@ -126,8 +125,103 @@ func (d *Deployer) RestorePrev() error {
 	return d.sup.ReplaceBin(d.cfg.PrevBin)
 }
 
+// ---------------------------------------------------------------------------
+// 部署日志持久化（供 bot 自举闭环“看上次失败日志”回溯）
+// ---------------------------------------------------------------------------
+
+// deployDataDir 返回部署审计目录（runtimeDir/data/loader）。
+func (d *Deployer) deployDataDir() string {
+	return filepath.Join(d.cfg.RuntimeDir, "data", "loader")
+}
+
+// persistResult 把一次部署结果原子写入 data/loader/deploy-<id>.json，
+// 并向 data/loader/deploy-history.jsonl 追加一行审计。失败仅记日志不阻断主流程。
+func (d *Deployer) persistResult(res *DeployResult) {
+	dir := d.deployDataDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		d.log.Warnw("创建部署审计目录失败", "err", err)
+		return
+	}
+	data, err := json.Marshal(res)
+	if err != nil {
+		d.log.Warnw("序列化部署结果失败", "err", err)
+		return
+	}
+	tmp := filepath.Join(dir, res.ID+".json.tmp")
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		d.log.Warnw("写入部署结果临时文件失败", "err", err)
+		return
+	}
+	if err := os.Rename(tmp, filepath.Join(dir, res.ID+".json")); err != nil {
+		d.log.Warnw("落盘部署结果失败", "err", err)
+		return
+	}
+	// 追加审计行（每行一个精简摘要，便于按时间回溯近期部署）
+	audit := map[string]any{
+		"id":         res.ID,
+		"ref":        res.Ref,
+		"pull":       res.Pull,
+		"status":     res.Status,
+		"startedAt":  res.StartedAt.Unix(),
+		"finishedAt": res.FinishedAt.Unix(),
+		"fromRev":    res.FromRev,
+		"toRev":      res.ToRev,
+		"error":      res.Error,
+	}
+	ab, _ := json.Marshal(audit)
+	af, err := os.OpenFile(filepath.Join(dir, "deploy-history.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err == nil {
+		_, _ = af.Write(append(ab, '\n'))
+		_ = af.Close()
+	}
+}
+
+// Result 按 id 取部署结果：优先内存，其次落盘文件（跨重启可读）。
+func (d *Deployer) Result(id string) (*DeployResult, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if r, ok := d.results[id]; ok {
+		return r, true
+	}
+	path := filepath.Join(d.deployDataDir(), id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var r DeployResult
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, false
+	}
+	return &r, true
+}
+
+// History 返回最近 limit 次部署的审计摘要（按开始时间倒序）。
+func (d *Deployer) History(limit int) []map[string]any {
+	if limit <= 0 {
+		limit = 10
+	}
+	path := filepath.Join(d.deployDataDir(), "deploy-history.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	out := make([]map[string]any, 0, limit)
+	// 文件尾部是最近，倒序取
+	for i := len(lines) - 1; i >= 0 && len(out) < limit; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &m); err == nil {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // doDeploy 执行完整部署流程。
-func (d *Deployer) doDeploy(ctx context.Context, ref string, res *DeployResult) {
+func (d *Deployer) doDeploy(ctx context.Context, ref string, pull bool, res *DeployResult) {
 	logf := func(format string, a ...any) {
 		d.mu.Lock()
 		res.Log = append(res.Log, fmt.Sprintf(format, a...))
@@ -140,6 +234,7 @@ func (d *Deployer) doDeploy(ctx context.Context, ref string, res *DeployResult) 
 		res.FinishedAt = time.Now()
 		d.mu.Unlock()
 		d.log.Errorw("部署失败", "id", res.ID, "error", err)
+		d.persistResult(res)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, d.cfg.BuildTimeout)
@@ -152,18 +247,17 @@ func (d *Deployer) doDeploy(ctx context.Context, ref string, res *DeployResult) 
 	}
 	logf("已快照当前二进制 → %s", d.cfg.PrevBin)
 
-	// 2) 拉取代码
+	// 2) 拉取代码（按调用意图分三档）
+	//    - ref 非空：fetch + checkout 指定版本（丢弃本地改动，部署干净版本）
+	//    - ref 空且 pull：git pull --ff-only 合入上游（保留本地改动，冲突则中止）
+	//    - 其余：直接编译当前工作树（保留 bot 的本地改动，自举闭环默认路径）
 	res.Status = DeployBuilding
 	fromRev := gitRev(d.cfg.GitDir)
 	res.FromRev = fromRev
 	logf("当前版本 %s", fromRev)
 
-	if ref == "" || ref == "HEAD" {
-		if err := runCmd(ctx, d.cfg.GitDir, logf, "git", "pull", "--ff-only"); err != nil {
-			fail(fmt.Errorf("git pull 失败: %w", err))
-			return
-		}
-	} else {
+	switch {
+	case ref != "" && ref != "HEAD":
 		if err := runCmd(ctx, d.cfg.GitDir, logf, "git", "fetch", "origin", ref); err != nil {
 			fail(fmt.Errorf("git fetch 失败: %w", err))
 			return
@@ -172,6 +266,13 @@ func (d *Deployer) doDeploy(ctx context.Context, ref string, res *DeployResult) 
 			fail(fmt.Errorf("git checkout 失败: %w", err))
 			return
 		}
+	case pull:
+		if err := runCmd(ctx, d.cfg.GitDir, logf, "git", "pull", "--ff-only"); err != nil {
+			fail(fmt.Errorf("git pull 失败（本地改动可能与上游冲突）: %w", err))
+			return
+		}
+	default:
+		logf("编译当前工作树（保留本地改动，不拉取/不 checkout）")
 	}
 
 	// 3) 前端构建（产物落入源码树 static，部署后由运行时 /app/static 软链指向）
@@ -253,6 +354,7 @@ func (d *Deployer) doDeploy(ctx context.Context, ref string, res *DeployResult) 
 	res.FinishedAt = time.Now()
 	d.mu.Unlock()
 	d.log.Infow("部署成功", "id", res.ID, "rev", rev)
+	d.persistResult(res)
 }
 
 // ---------------------------------------------------------------------------
