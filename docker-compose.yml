@@ -48,6 +48,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # 自托管变体开关（默认 thinkbot-slim，最小镜像、不含 loader/源码）：
+      #   THINKBOT_TARGET=selfhost docker compose up -d --build
+      # selfhost 镜像在 slim 基础上额外包含 git/go/node 工具链 + 全量源码仓（/app/src，
+      # 含 .git）+ thinkbot-loader 二进制，使容器具备「git pull 自部署 + 健康门控回滚」能力。
+      # 开启后还需在宿主 .env 配置 loader.enabled=true 与 loader.token，否则 loader 退化为
+      # 透明启动器（行为与 slim 完全一致）。运维接口默认监听 127.0.0.1:8090。
+      target: ${THINKBOT_TARGET:-thinkbot-slim}
       # 版本信息注入（可选，不填则回退到二进制 mtime，功能不受影响）。
       # 刻意不写成 ${BUILD_TIME} 之类的插值：compose 默认把项目根 .env 当作变量
       # 替换文件读取，而本项目的 .env 是【应用配置】，键名形如 api.addr（含点，
