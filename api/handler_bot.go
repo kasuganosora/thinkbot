@@ -158,6 +158,7 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		HardMaxSteps:    hardMaxSteps,
 		Workers:         workers,
 		ReasoningEffort: req.ReasoningEffort,
+		CostQuota:       req.CostQuota,
 		Status:          dao.BotStatusStopped,
 	}
 
@@ -241,6 +242,9 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	if req.ReasoningEffort != nil {
 		updates["reasoning_effort"] = *req.ReasoningEffort
 	}
+	if req.CostQuota != nil {
+		updates["cost_quota"] = *req.CostQuota
+	}
 
 	if len(updates) == 0 {
 		OKMsg(c, "no changes", nil)
@@ -250,6 +254,12 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	if err := s.botSvc.UpdateDefinition(id, updates); err != nil {
 		Fail(c, err)
 		return
+	}
+	// 成本额度：实时镜像到 config store，使运行中的 bot 立即生效（无需重启）。
+	if req.CostQuota != nil {
+		if err := s.botSvc.SyncBotCostQuota(c.Request.Context(), id, *req.CostQuota); err != nil {
+			s.logger.Warnw("update bot cost quota store sync failed", "bot_id", id, "err", err)
+		}
 	}
 	auditLog(c, s.logger, "update_bot", "bot_id", id, "fields", strutil.MapKeys(updates))
 	OKMsg(c, "bot updated", nil)

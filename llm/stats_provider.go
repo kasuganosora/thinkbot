@@ -53,6 +53,12 @@ func statsFeatureFromContext(ctx context.Context) string {
 	return v
 }
 
+// StatsFeatureFromContext 导出功能维度读取（供 CostRecordingProvider 等包外消费者使用）。
+// 未设置时返回空字符串（调用方应自行决定 fallback，如 "unknown" 或总预算墙）。
+func StatsFeatureFromContext(ctx context.Context) string {
+	return statsFeatureFromContext(ctx)
+}
+
 // ============================================================================
 // 工作流维度（workflow / node）
 //

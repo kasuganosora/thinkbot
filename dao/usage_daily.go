@@ -34,6 +34,12 @@ type UsageDaily struct {
 	// 编排步数累计
 	Steps int `gorm:"column:steps;default:0" json:"steps"`
 
+	// 金钱计费（按调用时模型单价快照，单位与 Currency 一致，默认 CNY）。
+	// 历史行用变更时单价快照，保证历史计费准确。
+	CostInput  float64 `gorm:"column:cost_input;default:0" json:"costInput"`
+	CostOutput float64 `gorm:"column:cost_output;default:0" json:"costOutput"`
+	CostTotal  float64 `gorm:"column:cost_total;default:0" json:"costTotal"`
+
 	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
 	UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updatedAt"`
 }

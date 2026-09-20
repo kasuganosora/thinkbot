@@ -71,6 +71,7 @@ type CreateBotReq struct {
 	HardMaxSteps    *int     `json:"hardMaxSteps"`
 	Workers         *int     `json:"workers"`
 	ReasoningEffort string   `json:"reasoningEffort"`
+	CostQuota       string   `json:"costQuota"` // 金钱额度配置 JSON（period 全局统一，不在此携带）
 }
 
 // UpdateBotReq 更新 Bot 请求（admin）。
@@ -89,6 +90,7 @@ type UpdateBotReq struct {
 	HardMaxSteps    *int     `json:"hardMaxSteps"`
 	Workers         *int     `json:"workers"`
 	ReasoningEffort *string  `json:"reasoningEffort"`
+	CostQuota       *string  `json:"costQuota"` // 金钱额度配置 JSON（period 全局统一，不在此携带）
 }
 
 // --- 聊天 ---

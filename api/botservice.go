@@ -418,6 +418,12 @@ func (s *BotService) UpdateDefinition(id string, updates map[string]any) error {
 	return nil
 }
 
+// SyncBotCostQuota 把 bot 成本额度实时镜像到 config store，使运行中的 bot 立即生效
+// （resolver 经 WithBotReader 读取），无需重启。与 system 成本额度走同一实时通道。
+func (s *BotService) SyncBotCostQuota(ctx context.Context, id, raw string) error {
+	return s.store.Set(ctx, config.BotCostQuotaKey(id), raw)
+}
+
 // DeleteDefinition 删除 Bot 定义（如果正在运行则先停止）。
 func (s *BotService) DeleteDefinition(id string) error {
 	// 先停止运行中的实例
@@ -914,19 +920,58 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Warnw("bot_service: failed to restore quota counters from stats", "bot_id", id, "err", err)
 	}
 	quotaRecorder := llm.QuotaUsageRecorder(quotaState.AddUsage)
+
+	// 创建共享金钱额度状态 + 包裹 Provider（token↔金钱换算 + 四堵墙拦截）
+	// - CostQuotaState 由 CostRecordingProvider 记账（与 token quota 同理，覆盖所有入口）
+	// - 拦截强制在 provider 层，故 cron / heartbeat / dreaming 等非用户路径也受约束
+	// - CostQuotaMiddleware 仅给用户路径把耗尽转为「友好提示回复」
+	costCfg, _ := pipeline.ParseCostQuotaConfig(def.CostQuota)
+	sysCostReader := func() (pipeline.SystemCostQuotaConfig, bool) {
+		return pipeline.SystemCostQuotaFromStore(s.store)
+	}
+	costPeriod := "monthly"
+	if sys, ok := sysCostReader(); ok && sys.Period != "" {
+		costPeriod = sys.Period
+	}
+	costState := pipeline.NewCostQuotaState(costPeriod)
+	// 从 stats_usage_daily 回算本周期已花费（按当前单价表），防止重启绕过限额
+	if err := costState.RestoreFromStats(syncCtx, s.db, builder.PriceResolver(), id); err != nil {
+		s.logger.Warnw("bot_service: failed to restore cost counters from stats", "bot_id", id, "err", err)
+	}
+	// 镜像 bot 成本额度到 config store，使运行时更新（经 UpdateDefinition + SyncBotCostQuota）
+	// 无需重启 bot 即生效：resolver 通过 WithBotReader 实时读取，与 system 成本额度同通道。
+	if err := s.store.Set(syncCtx, config.BotCostQuotaKey(id), def.CostQuota); err != nil {
+		s.logger.Warnw("bot_service: failed to mirror bot cost quota to store", "bot_id", id, "err", err)
+	}
+	costResolver := pipeline.NewCostQuotaResolver(costCfg, sysCostReader).WithBotReader(func() (pipeline.CostQuotaConfig, bool) {
+		raw, ok := s.store.Get(config.BotCostQuotaKey(id))
+		if !ok || raw == "" {
+			return pipeline.CostQuotaConfig{}, false
+		}
+		return pipeline.ParseCostQuotaConfig(raw)
+	})
+	costRecorder := func(botID, feature string, cost float64) { costState.RecordCost(botID, feature, cost) }
+	costPreCheck := func(botID, feature string) *llm.CostQuotaExceededError {
+		return costState.CheckWalls(costResolver, botID, feature)
+	}
+	costPriceFor := builder.PriceResolver()
+	wrapCost := func(p llm.Provider) llm.Provider {
+		return llm.NewCostRecordingProvider(p, id, costPriceFor, costPreCheck, costRecorder)
+	}
+
 	bundle.Main = llm.NewStatsRecordingProvider(
-		llm.NewQuotaRecordingProvider(bundle.Main, quotaRecorder),
+		llm.NewQuotaRecordingProvider(wrapCost(bundle.Main), quotaRecorder),
 		s.statsRecorder, id,
 	)
 	if bundle.Light != nil {
 		bundle.Light = llm.NewStatsRecordingProvider(
-			llm.NewQuotaRecordingProvider(bundle.Light, quotaRecorder),
+			llm.NewQuotaRecordingProvider(wrapCost(bundle.Light), quotaRecorder),
 			s.statsRecorder, id,
 		)
 	}
 	if bundle.Vision != nil {
 		bundle.Vision = llm.NewStatsRecordingProvider(
-			llm.NewQuotaRecordingProvider(bundle.Vision, quotaRecorder),
+			llm.NewQuotaRecordingProvider(wrapCost(bundle.Vision), quotaRecorder),
 			s.statsRecorder, id,
 		)
 	}
@@ -1269,6 +1314,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		stages.NoteCaptureMiddleware("exchange", umeWriter),
 		pipeline.VerificationGateMiddleware(pipeline.NewVerificationGateConfig()),
 		pipeline.TokenQuotaMiddlewareWithState(quotaResolver, quotaState, s.tp, s.logger),
+		// 金钱额度：拦截本身在 CostRecordingProvider（provider 层，覆盖所有入口）。
+		// 此处仅把用户路径的耗尽错误转为友好提示回复，不致命。
+		pipeline.CostQuotaMiddlewareWithState(costResolver, costState, s.tp, s.logger),
 		// 不豁免任何工具：workflow 的 task 已改为「提交即阻塞」，一次调用就等到终态，
 		// 因此**重复调用 task 属于真异常**（每次都会新建一个工作流），必须保留循环检测守卫。
 		// 历史上豁免的task_status 轮询工具已随阻塞化移除。

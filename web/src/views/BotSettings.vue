@@ -76,6 +76,8 @@
           <div v-else-if="activeKey === 'skills'" class="pad"><BotSkills :bot-id="bot.id" /></div>
           <!-- 浏览器 Cookie -->
           <div v-else-if="activeKey === 'browser'" class="pad"><BotBrowser :bot-id="bot.id" /></div>
+          <!-- 额度 -->
+          <div v-else-if="activeKey === 'quota'" class="pad"><BotCostQuota :bot-id="bot.id" /></div>
         </section>
       </div>
     </template>
@@ -112,6 +114,7 @@ import BotTerminal from '@/components/bot/BotTerminal.vue'
 import BotBrowser from '@/components/bot/BotBrowser.vue'
 import BotDreaming from '@/components/bot/BotDreaming.vue'
 import BotPersona from '@/components/bot/BotPersona.vue'
+import BotCostQuota from '@/components/bot/BotCostQuota.vue'
 
 // 占位组件（邮件仍未实现）
 const Placeholder = {
@@ -148,7 +151,8 @@ const navItems = [
   { key: 'persona', label: '人格' },
   { key: 'cron', label: '定时任务' },
   { key: 'skills', label: '技能' },
-  { key: 'browser', label: '浏览器' }
+  { key: 'browser', label: '浏览器' },
+  { key: 'quota', label: '额度' }
 ]
 const activeKey = ref('overview')
 

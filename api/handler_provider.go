@@ -58,6 +58,12 @@ type ProviderModel struct {
 	Temperature   float64  `json:"temperature"`
 	TopP          float64  `json:"topP"`
 	MaxTokens     int      `json:"maxTokens"`
+
+	// 计费单价（token↔金钱换算表，跟随「模型」）。缺省 0 = 该模型不参与金钱额度计算。
+	PriceInputPer1M     float64 `json:"priceInputPer1M"`
+	PriceOutputPer1M    float64 `json:"priceOutputPer1M"`
+	PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
+	Currency            string  `json:"currency"`
 }
 
 // --- 响应 DTO ---
@@ -104,6 +110,12 @@ type AddModelReq struct {
 	Temperature   *float64 `json:"temperature"` // 指针类型区分"未设置"和"显式设0"
 	TopP          *float64 `json:"topP"`
 	MaxTokens     int      `json:"maxTokens"`
+
+	// 计费单价
+	PriceInputPer1M     float64 `json:"priceInputPer1M"`
+	PriceOutputPer1M    float64 `json:"priceOutputPer1M"`
+	PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
+	Currency            string  `json:"currency"`
 }
 
 // UpdateModelReq 更新模型请求（字段可选）。
@@ -115,6 +127,12 @@ type UpdateModelReq struct {
 	Temperature   *float64 `json:"temperature"`
 	TopP          *float64 `json:"topP"`
 	MaxTokens     *int     `json:"maxTokens"`
+
+	// 计费单价（可选更新）
+	PriceInputPer1M     *float64 `json:"priceInputPer1M"`
+	PriceOutputPer1M    *float64 `json:"priceOutputPer1M"`
+	PriceCacheReadPer1M *float64 `json:"priceCacheReadPer1M"`
+	Currency            *string  `json:"currency"`
 }
 
 // --- 存储辅助 ---
@@ -382,6 +400,12 @@ func (s *Server) handleAddModel(c *gin.Context) {
 		Temperature:   temp,
 		TopP:          topP,
 		MaxTokens:     maxTokens,
+
+		// 计费单价（缺省 0 = 不计入金钱额度）
+		PriceInputPer1M:     req.PriceInputPer1M,
+		PriceOutputPer1M:    req.PriceOutputPer1M,
+		PriceCacheReadPer1M: req.PriceCacheReadPer1M,
+		Currency:            req.Currency,
 	}
 
 	def.Models = append(def.Models, model)
@@ -447,6 +471,18 @@ func (s *Server) handleUpdateModel(c *gin.Context) {
 	}
 	if req.MaxTokens != nil {
 		m.MaxTokens = *req.MaxTokens
+	}
+	if req.PriceInputPer1M != nil {
+		m.PriceInputPer1M = *req.PriceInputPer1M
+	}
+	if req.PriceOutputPer1M != nil {
+		m.PriceOutputPer1M = *req.PriceOutputPer1M
+	}
+	if req.PriceCacheReadPer1M != nil {
+		m.PriceCacheReadPer1M = *req.PriceCacheReadPer1M
+	}
+	if req.Currency != nil {
+		m.Currency = *req.Currency
 	}
 
 	if err := s.saveProvider(c, def); err != nil {
