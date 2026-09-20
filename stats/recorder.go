@@ -18,6 +18,9 @@ type Recorder struct {
 	db     *gorm.DB
 	logger *zap.SugaredLogger
 
+	// priceFor 按模型解析单价（token↔金钱换算表）。为 nil 时不计算 cost 列。
+	priceFor llm.ModelPriceResolver
+
 	// 异步写入
 	ch     chan llm.UsageMetric
 	stopCh chan struct{}
@@ -44,6 +47,12 @@ func NewRecorder(db *gorm.DB, logger *zap.SugaredLogger) *Recorder {
 		batchSize:     100,
 	}
 	return r
+}
+
+// SetPriceResolver 注入单价解析器（token↔金钱换算表）。
+// 未注入时不计算 cost_input/cost_output/cost_total 列（保持 0）。
+func (r *Recorder) SetPriceResolver(pr llm.ModelPriceResolver) {
+	r.priceFor = pr
 }
 
 // Start 启动后台写入 goroutine。
@@ -154,6 +163,11 @@ type aggRow struct {
 	TotalTokens       int
 	ToolCalls         int
 	Steps             int
+
+	// 金钱计费（调用时单价快照）
+	CostInput  float64
+	CostOutput float64
+	CostTotal  float64
 }
 
 // flushBatch 将一批指标按维度聚合后逐行 upsert 到数据库。
@@ -208,6 +222,16 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 		row.TotalTokens += m.Usage.TotalTokens
 		row.ToolCalls += m.ToolCalls
 		row.Steps += m.Steps
+
+		// 金钱计费：按调用时模型单价快照换算（线性可累加，故直接累加到聚合行）。
+		if r.priceFor != nil {
+			if price, ok := r.priceFor(row.Model); ok && price.HasPrice() {
+				ci, co, ct := llm.ComputeCost(m.Usage, price)
+				row.CostInput += ci
+				row.CostOutput += co
+				row.CostTotal += ct
+			}
+		}
 	}
 
 	// 逐行 upsert（SQLite UPSERT 语法）
@@ -273,8 +297,9 @@ func (r *Recorder) upsertRow(row *aggRow) error {
 		cache_read_tokens, cache_write_tokens, non_cache_tokens,
 		input_tokens, output_tokens, total_tokens,
 		tool_calls, steps,
+		cost_input, cost_output, cost_total,
 		created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(bot_id, model, feature, channel, date) DO UPDATE SET
 		total_requests = total_requests + excluded.total_requests,
 		cache_hit_requests = cache_hit_requests + excluded.cache_hit_requests,
@@ -287,6 +312,9 @@ func (r *Recorder) upsertRow(row *aggRow) error {
 		total_tokens = total_tokens + excluded.total_tokens,
 		tool_calls = tool_calls + excluded.tool_calls,
 		steps = steps + excluded.steps,
+		cost_input = cost_input + excluded.cost_input,
+		cost_output = cost_output + excluded.cost_output,
+		cost_total = cost_total + excluded.cost_total,
 		updated_at = excluded.updated_at`
 
 	return r.db.Exec(sql,
@@ -295,6 +323,7 @@ func (r *Recorder) upsertRow(row *aggRow) error {
 		row.CacheReadTokens, row.CacheWriteTokens, row.NonCacheTokens,
 		row.InputTokens, row.OutputTokens, row.TotalTokens,
 		row.ToolCalls, row.Steps,
+		row.CostInput, row.CostOutput, row.CostTotal,
 		now, now,
 	).Error
 }

@@ -142,6 +142,9 @@
         <div v-if="isAdmin && activeKey === 'admin-stats'" class="panel panel-wide" data-testid="system-panel-admin-stats">
           <StatsView embedded />
         </div>
+        <div v-if="isAdmin && activeKey === 'admin-billing'" class="panel panel-wide" data-testid="system-panel-admin-billing">
+          <BillingDashboard embedded />
+        </div>
         <div v-if="isAdmin && activeKey === 'admin-system'" class="panel panel-wide" data-testid="system-panel-admin-system">
           <SystemMonitorView embedded />
         </div>
@@ -163,6 +166,7 @@ import UsersView from '@/views/admin/UsersView.vue'
 import SkillsView from '@/views/admin/SkillsView.vue'
 import ConfigView from '@/views/admin/ConfigView.vue'
 import StatsView from '@/views/admin/StatsView.vue'
+import BillingDashboard from '@/views/admin/BillingDashboard.vue'
 import SystemMonitorView from '@/views/admin/SystemMonitorView.vue'
 import { applyPrimaryColor } from '@/utils/brand'
 
@@ -188,6 +192,7 @@ const navItems = [
   { key: 'admin-skills', label: '技能管理', icon: 'code', admin: true },
   { key: 'admin-config', label: '系统配置', icon: 'setting', admin: true },
   { key: 'admin-stats', label: '统计概览', icon: 'chart-bar', admin: true },
+  { key: 'admin-billing', label: '计费看板', icon: 'money', admin: true },
   { key: 'admin-system', label: '系统监控', icon: 'desktop', admin: true },
   { key: 'about', label: '关于', icon: 'info-circle' }
 ]

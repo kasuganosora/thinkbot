@@ -53,10 +53,14 @@ func ensureColumns(db *gorm.DB) error {
 		{"bot_definitions", "max_steps", "max_steps INTEGER NOT NULL DEFAULT 0"},
 		{"bot_definitions", "hard_max_steps", "hard_max_steps INTEGER NOT NULL DEFAULT 0"},
 		{"bot_definitions", "memory_limit_mb", "memory_limit_mb INTEGER NOT NULL DEFAULT 2048"},
+		{"bot_definitions", "cost_quota", "cost_quota TEXT NOT NULL DEFAULT ''"},
 		{"chat_messages", "session_id", "session_id TEXT NOT NULL DEFAULT ''"},
 		{"bot_tool_permissions", "auto", "auto INTEGER NOT NULL DEFAULT 0"},
 		{"bot_tool_permissions", "chat_id", "chat_id TEXT NOT NULL DEFAULT ''"},
 		{"outreach_commitments", "attempts", "attempts INTEGER NOT NULL DEFAULT 0"},
+		{"stats_usage_daily", "cost_input", "cost_input REAL NOT NULL DEFAULT 0"},
+		{"stats_usage_daily", "cost_output", "cost_output REAL NOT NULL DEFAULT 0"},
+		{"stats_usage_daily", "cost_total", "cost_total REAL NOT NULL DEFAULT 0"},
 	}
 	for _, s := range specs {
 		var cnt int64

@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 )
@@ -21,6 +22,7 @@ type StatsParams struct {
 
 	DB     *gorm.DB
 	Logger *zap.SugaredLogger
+	Config *config.Store
 }
 
 // Module 是 stats 的 fx 模块。
@@ -41,6 +43,10 @@ var Module = fx.Module("stats",
 // NewRecorderModule 创建 Recorder 并注册为 llm.UsageRecorder。
 func NewRecorderModule(p StatsParams) (*Recorder, llm.UsageRecorder) {
 	r := NewRecorder(p.DB, p.Logger)
+	// 注入单价解析器（token↔金钱换算表），用于计算 cost_input/cost_output/cost_total。
+	if p.Config != nil {
+		r.SetPriceResolver(config.NewBuilder(p.Config, p.Logger).PriceResolver())
+	}
 	return r, llm.UsageRecorder(r)
 }
 

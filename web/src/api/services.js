@@ -170,6 +170,29 @@ export const botApi = {
   }
 }
 
+// ============================ 5.5 计费 / 额度 ============================
+//
+//   GET /api/billing/models   → { models: ModelPriceEntry[] }（token↔金钱换算表）
+//   GET /api/billing/quotas   → { period, currency, bots: BotQuotaView[], system: SystemQuotaView }
+//   GET /api/billing/usage?bot=&period= → BillingUsageView（按功能/模型/bot 拆解）
+export const billingApi = {
+  models() {
+    return request('GET', '/api/billing/models')
+  },
+  quotas() {
+    if (USE_MOCK) return mockResolve(() => ({ period: 'monthly', currency: 'CNY', bots: [], system: { period: 'monthly', currency: 'CNY', total: 0, features: {}, usedTotal: 0, usedByFeature: {}, progress: 0 } }))
+    return request('GET', '/api/billing/quotas')
+  },
+  usage(params = {}) {
+    if (USE_MOCK) return mockResolve(() => ({ period: 'monthly', currency: 'CNY', totalCost: 0, byFeature: [], byModel: [], byBot: [] }))
+    const q = new URLSearchParams()
+    if (params.bot) q.set('bot', params.bot)
+    if (params.period) q.set('period', params.period)
+    const qs = q.toString()
+    return request('GET', '/api/billing/usage' + (qs ? '?' + qs : ''))
+  }
+}
+
 // 去掉前端本地扩展字段（avatar/sessions），仅保留后端 DTO 字段 + running
 function stripBot(b) {
   if (!b) return null

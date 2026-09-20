@@ -103,6 +103,7 @@
             <span v-if="m.contextLength" class="ctx-tag">{{ ctxLabel(m.contextLength) }}</span>
             <span v-if="m.temperature" class="cfg-tag" title="采样温度">T {{ m.temperature }}</span>
             <span v-if="m.topP" class="cfg-tag" title="核采样 TopP">P {{ m.topP }}</span>
+            <span v-if="m.priceInputPer1M || m.priceOutputPer1M" class="price-tag" title="计费单价">{{ m.currency || 'CNY' }} · 入 {{ fmtPrice(m.priceInputPer1M) }} / 出 {{ fmtPrice(m.priceOutputPer1M) }}</span>
             <div class="model-card-ops">
               <t-icon name="refresh" class="op" title="刷新" @click="$forceUpdate()" />
               <t-icon name="setting" class="op" :data-testid="`model-edit-${m.id}`" title="设置" @click="openEditModel(m)" />
@@ -152,6 +153,23 @@
             <t-input-number v-model="modelDialog.form.topP" :min="0" :max="1" :step="0.05" :decimal-places="2" style="width: 100%" data-testid="model-form-topp" />
           </t-form-item>
         </div>
+        <t-divider align="left" class="price-divider">计费单价（token↔金钱换算，缺省 0 表示不限额）</t-divider>
+        <div class="dlg-row2">
+          <t-form-item label="输入单价 / 1M">
+            <t-input-number v-model="modelDialog.form.priceInputPer1M" :min="0" :step="0.1" :decimal-places="4" style="width: 100%" data-testid="model-form-pricein" />
+          </t-form-item>
+          <t-form-item label="输出单价 / 1M">
+            <t-input-number v-model="modelDialog.form.priceOutputPer1M" :min="0" :step="0.1" :decimal-places="4" style="width: 100%" data-testid="model-form-priceout" />
+          </t-form-item>
+        </div>
+        <div class="dlg-row2">
+          <t-form-item label="缓存读单价 / 1M">
+            <t-input-number v-model="modelDialog.form.priceCacheReadPer1M" :min="0" :step="0.1" :decimal-places="4" style="width: 100%" data-testid="model-form-pricecache" />
+          </t-form-item>
+          <t-form-item label="货币">
+            <t-select v-model="modelDialog.form.currency" :options="currencyOptions" filterable creatable style="width: 100%" data-testid="model-form-currency" />
+          </t-form-item>
+        </div>
         <div v-if="modelPreset" class="preset-hint" data-testid="model-preset-hint">
           <t-icon name="bulb" />
           <span>官方推荐：Temp {{ modelPreset.temperature }} · TopP {{ modelPreset.topP }} · MaxTokens {{ modelPreset.maxTokens }} · 上下文 {{ ctxLabel(modelPreset.contextLength) }}</span>
@@ -194,6 +212,16 @@ function initial(s) { return (s || '?').charAt(0).toUpperCase() }
 function ctxLabel(n) {
   if (n >= 1000) return Math.round(n / 1000) + 'k'
   return String(n)
+}
+const currencyOptions = [
+  { label: 'CNY（人民币）', value: 'CNY' },
+  { label: 'USD（美元）', value: 'USD' },
+  { label: 'JPY（日元）', value: 'JPY' },
+  { label: 'EUR（欧元）', value: 'EUR' }
+]
+function fmtPrice(v) {
+  if (!v) return '0'
+  return Number(v).toFixed(2)
 }
 
 async function load() {
@@ -281,10 +309,10 @@ const CAP_OPTIONS = [
 
 const modelDialog = ref({ visible: false, isEdit: false, form: {} })
 function openAddModel() {
-  modelDialog.value = { visible: true, isEdit: false, form: { id: '', name: '', caps: ['chat'], contextLength: 0, maxTokens: 0, temperature: 0, topP: 0, multimodal: false } }
+  modelDialog.value = { visible: true, isEdit: false, form: { id: '', name: '', caps: ['chat'], contextLength: 0, maxTokens: 0, temperature: 0, topP: 0, multimodal: false, priceInputPer1M: 0, priceOutputPer1M: 0, priceCacheReadPer1M: 0, currency: 'CNY' } }
 }
 function openEditModel(m) {
-  modelDialog.value = { visible: true, isEdit: true, form: { ...m, caps: [...(m.capabilities || [])] } }
+  modelDialog.value = { visible: true, isEdit: true, form: { ...m, caps: [...(m.capabilities || [])], priceInputPer1M: m.priceInputPer1M || 0, priceOutputPer1M: m.priceOutputPer1M || 0, priceCacheReadPer1M: m.priceCacheReadPer1M || 0, currency: m.currency || 'CNY' } }
 }
 
 // --- 官方推荐预设：降低配置难度（自动填入 + 可自定义） ---
@@ -337,7 +365,11 @@ async function submitModel() {
     maxTokens: f.maxTokens,
     temperature: f.temperature || 0,
     topP: f.topP || 0,
-    multimodal: caps.includes('vision')
+    multimodal: caps.includes('vision'),
+    priceInputPer1M: f.priceInputPer1M || 0,
+    priceOutputPer1M: f.priceOutputPer1M || 0,
+    priceCacheReadPer1M: f.priceCacheReadPer1M || 0,
+    currency: f.currency || 'CNY'
   }
   try {
     if (modelDialog.value.isEdit) {
@@ -458,6 +490,8 @@ function removeModel(m) {
 
 /* 模型卡片上的采样参数标签 */
 .cfg-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: var(--bp-accent-soft); color: var(--bp-accent); font-weight: 600; }
+.price-tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: var(--bp-success-soft); color: var(--bp-success); font-weight: 600; }
+.price-divider { margin: 4px 0 8px; font-size: 12px; color: var(--bp-label-tertiary); }
 
 /* 官方推荐预设提示 */
 .preset-hint {
