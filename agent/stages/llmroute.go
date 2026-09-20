@@ -713,6 +713,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
 
+	// 标记主回复功能维度为 "reply"：使「按功能额度」与计费看板能区分用户回复与其他功能
+	// （dreaming / subagent / memory 等）。嵌套调用（subagent / workflow / memory）会在各自
+	// ctx 覆盖此值，故此处仅在不曾设置时才注入，避免覆盖外层已有标记。
+	if llm.StatsFeatureFromContext(ctx) == "" {
+		ctx = llm.WithStatsFeature(ctx, "reply")
+	}
+
 	// 注入工具调用来源（bot + 前端会话）。工具是**静态注册**的、自身拿不到会话，
 	// 需要按会话归属做事的工具从 context 读取它 —— 例如工作流提交要记录来源会话，
 	// 好让前端刷新页面后把工作流卡片恢复出来。

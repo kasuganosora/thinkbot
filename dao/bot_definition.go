@@ -64,6 +64,11 @@ type BotDefinition struct {
 	// 0 = 使用全局默认（当前 soft×3 = 90）。必须大于等于 MaxSteps。
 	HardMaxSteps int `gorm:"default:0" json:"hardMaxSteps,omitempty"`
 
+	// CostQuota 金钱额度配置（JSON，见 pipeline.CostQuotaConfig）。
+	// 存为字符串列，由 api 层在读写时与 pipeline.CostQuotaConfig 互转。
+	// 周期不在此处（全局强制一致，由 system.cost_quota.period 决定）。
+	CostQuota string `gorm:"column:cost_quota;type:text;default:''" json:"costQuota"`
+
 	// MemoryLimitMB 容器内存限制（MB）。
 	// 0 = 不限制（docker run 不加 --memory）；>0 = 限制该 MB 数；缺省/未配置 = 2G（2048MB）。
 	// 仅 Docker 后端生效，创建/重建容器时读取此值。

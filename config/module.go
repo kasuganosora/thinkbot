@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -213,6 +214,21 @@ type ModelDef struct {
 	// Multimodal 标记此模型是否支持多模态输入（图片/音频/视频）。
 	// 为 true 时，MultimodalStage 不会对此 bot 的消息做辅助转写。
 	Multimodal bool `json:"multimodal,omitempty"`
+
+	// ========================================================================
+	// 计费单价（token↔金钱换算表，跟随「模型」）。
+	// 缺省 0 = 该模型不参与金钱额度计算（不计费、不限额）。
+	// 货币统一跟随 Currency（默认 CNY）。
+	// ========================================================================
+
+	// PriceInputPer1M 每 1M 输入 token 单价。
+	PriceInputPer1M float64 `json:"price_input_per_1m,omitempty"`
+	// PriceOutputPer1M 每 1M 输出 token 单价。
+	PriceOutputPer1M float64 `json:"price_output_per_1m,omitempty"`
+	// PriceCacheReadPer1M 每 1M 缓存读 token 单价（命中提示缓存的 input）。
+	PriceCacheReadPer1M float64 `json:"price_cache_read_per_1m,omitempty"`
+	// Currency 货币代码（如 CNY、USD），默认 CNY。
+	Currency string `json:"currency,omitempty"`
 }
 
 // GetLLMModel 从 provider 系统查找 LLM 模型配置。
@@ -242,6 +258,11 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 				TopP          float64  `json:"topP"`
 				MaxTokens     int      `json:"maxTokens"`
 				Capabilities  []string `json:"capabilities"`
+				// 计费单价（token↔金钱换算表）
+				PriceInputPer1M     float64 `json:"priceInputPer1M"`
+				PriceOutputPer1M    float64 `json:"priceOutputPer1M"`
+				PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
+				Currency            string  `json:"currency"`
 			} `json:"models"`
 		}
 		if err := json.Unmarshal([]byte(raw), &prov); err != nil || !prov.Enabled {
@@ -293,11 +314,90 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 					MaxTokens:     mt,
 					ContextLength: ctx,
 					Multimodal:    m.Multimodal,
+					// 计费单价（换算表）：缺省 0 表示不计入金钱额度。
+					PriceInputPer1M:     m.PriceInputPer1M,
+					PriceOutputPer1M:    m.PriceOutputPer1M,
+					PriceCacheReadPer1M: m.PriceCacheReadPer1M,
+					Currency:            m.Currency,
 				}), true
 			}
 		}
 	}
 	return ModelDef{}, false
+}
+
+// PriceResolver 返回一个 llm.ModelPriceResolver，按模型 ID 解析单价
+// （token↔金钱换算表的一行）。查不到或单价全为 0 时返回 ok=false。
+// stats 记录器与 CostRecordingProvider 共用此解析器。
+func (b *Builder) PriceResolver() llm.ModelPriceResolver {
+	return func(modelID string) (llm.ModelPrice, bool) {
+		md, ok := b.resolveProviderModel(modelID)
+		if !ok {
+			return llm.ModelPrice{}, false
+		}
+		return llm.ModelPrice{
+			InputPer1M:      md.PriceInputPer1M,
+			OutputPer1M:     md.PriceOutputPer1M,
+			CacheReadPer1M:  md.PriceCacheReadPer1M,
+			Currency:        md.Currency,
+		}, md.PriceInputPer1M > 0 || md.PriceOutputPer1M > 0 || md.PriceCacheReadPer1M > 0
+	}
+}
+
+// ModelPriceEntry 是 token↔金钱换算表的一行（单个模型的单价）。
+type ModelPriceEntry struct {
+	ProviderID         string  `json:"providerId"`
+	ProviderName       string  `json:"providerName"`
+	ModelID            string  `json:"modelId"`
+	ModelName          string  `json:"modelName"`
+	PriceInputPer1M    float64 `json:"priceInputPer1M"`
+	PriceOutputPer1M   float64 `json:"priceOutputPer1M"`
+	PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
+	Currency           string  `json:"currency"`
+}
+
+// ModelPriceTable 返回所有已启用 provider 下全部模型的单价表（换算表）。
+// 用于计费看板与 /api/billing/models。
+func (b *Builder) ModelPriceTable() []ModelPriceEntry {
+	rawProviders := b.store.GetByPrefix("provider.")
+	out := make([]ModelPriceEntry, 0, len(rawProviders)*4)
+	for pid, raw := range rawProviders {
+		if raw == "" {
+			continue
+		}
+		var prov struct {
+			Name     string `json:"name"`
+			Enabled  bool   `json:"enabled"`
+			Models   []struct {
+				ID            string  `json:"id"`
+				Name          string  `json:"name"`
+				PriceInputPer1M    float64 `json:"priceInputPer1M"`
+				PriceOutputPer1M   float64 `json:"priceOutputPer1M"`
+				PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
+				Currency       string  `json:"currency"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal([]byte(raw), &prov); err != nil || !prov.Enabled {
+			continue
+		}
+		for _, m := range prov.Models {
+			cur := m.Currency
+			if cur == "" {
+				cur = "CNY"
+			}
+			out = append(out, ModelPriceEntry{
+				ProviderID:          pid,
+				ProviderName:        prov.Name,
+				ModelID:             m.ID,
+				ModelName:           m.Name,
+				PriceInputPer1M:     m.PriceInputPer1M,
+				PriceOutputPer1M:    m.PriceOutputPer1M,
+				PriceCacheReadPer1M: m.PriceCacheReadPer1M,
+				Currency:            cur,
+			})
+		}
+	}
+	return out
 }
 
 // mapClientType 将前端 Provider 的 clientType 映射为 llm.Provider 工厂所需的 provider 字符串。
@@ -357,6 +457,9 @@ func fillModelDefaults(def ModelDef) ModelDef {
 	}
 	if def.MaxTokens == 0 {
 		def.MaxTokens = 8192
+	}
+	if def.Currency == "" {
+		def.Currency = "CNY"
 	}
 	return def
 }

@@ -390,6 +390,13 @@ func BotTokenQuotaKey(botID string) string {
 	return "bot." + botID + ".token_quota"
 }
 
+// BotCostQuotaKey 返回 Bot 级金钱额度配置键（镜像自 bot_definitions.cost_quota）。
+// 格式：bot.<bot_id>.cost_quota
+// 值为 CostQuotaConfig 的 JSON 字符串；运行时实时读取，使额度更新无需重启 bot 即生效。
+func BotCostQuotaKey(botID string) string {
+	return "bot." + botID + ".cost_quota"
+}
+
 // BotTokenQuotaChannelKey 返回 channel 级 Token 额度配置键。
 // 格式：bot.<bot_id>.token_quota.channel.<channel_type>
 // 例如：bot.mybot.token_quota.channel.telegram → "500000"
@@ -409,6 +416,14 @@ func BotTokenQuotaChatKey(botID, channelType, chatID string) string {
 // 例如：system.token_quota → "2000000"
 func SystemTokenQuotaKey() string {
 	return "system.token_quota"
+}
+
+// SystemCostQuotaKey 返回系统级金钱额度配置键（换算表之外的全局预算 + 全局功能预算）。
+// 格式：system.cost_quota
+// 值为 JSON：{"period":"monthly","currency":"CNY","total":0,"features":{"dreaming":50}}
+// period 为全局唯一权威周期（daily|weekly|monthly），bot 额度不另设 period，强制一致。
+func SystemCostQuotaKey() string {
+	return "system.cost_quota"
 }
 
 // BotAdaptiveEngagementKey 返回 Bot 级自适应 engagement 配置键。
