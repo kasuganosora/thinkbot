@@ -74,6 +74,14 @@ type BotService struct {
 	// judgeSink LLM 快判结果落库目标。可选，nil 时判定结果用完即弃。
 	judgeSink engagement.JudgeRecordSink
 
+	// costState 是**进程级共享**的金钱额度计数器。
+	//
+	// 不能 per-bot 创建：四堵墙里有两堵是全局维度（"system" 与 "feature:F"），
+	// 若每 bot 各持一个 state，全局预算会退化成「每个 bot 各自一份全局预算」，
+	// 与计费看板（按 stats_usage_daily 全表聚合）的口径不符，全局限额形同虚设。
+	costState *pipeline.CostQuotaState
+	costMu    sync.Mutex // costState 惰性初始化的专用锁（避免与 mu 的 bot 实例锁互相死锁）
+
 	mu                 sync.RWMutex
 	channels           map[string]*WebChannel             // botID → WebChannel
 	botInstances       map[string]*bot.Bot                // botID → running Bot
@@ -422,6 +430,68 @@ func (s *BotService) UpdateDefinition(id string, updates map[string]any) error {
 // （resolver 经 WithBotReader 读取），无需重启。与 system 成本额度走同一实时通道。
 func (s *BotService) SyncBotCostQuota(ctx context.Context, id, raw string) error {
 	return s.store.Set(ctx, config.BotCostQuotaKey(id), raw)
+}
+
+// wrapCostForBot 给一个 provider 套上金钱额度拦截 + 记账。
+//
+// StartBot 之外新建 provider 的路径（目前是「手动触发梦境」的按需 bundle）必须调用它：
+// 那是真实的 LLM 花费，若用了裸 provider 就等于开了一个绕过全局/本 bot 预算的后门
+// ——钱照花、额度不记账、看板也看不到。
+func (s *BotService) wrapCostForBot(p llm.Provider, botID string, builder *config.Builder) llm.Provider {
+	if p == nil {
+		return p
+	}
+	sysReader := func() (pipeline.SystemCostQuotaConfig, bool) {
+		return pipeline.SystemCostQuotaFromStore(s.store)
+	}
+	botCfg := pipeline.CostQuotaConfig{}
+	var def dao.BotDefinition
+	if err := s.db.First(&def, "id = ?", botID).Error; err == nil {
+		botCfg, _ = pipeline.ParseCostQuotaConfig(def.CostQuota)
+	}
+	state := s.costQuotaState(sysReader)
+	resolver := pipeline.NewCostQuotaResolver(botCfg, sysReader).WithBotReader(func() (pipeline.CostQuotaConfig, bool) {
+		raw, ok := s.store.Get(config.BotCostQuotaKey(botID))
+		if !ok || raw == "" {
+			return pipeline.CostQuotaConfig{}, false
+		}
+		return pipeline.ParseCostQuotaConfig(raw)
+	})
+
+	// bot 未运行时其 bot 维度计数器为空，从 stats 恢复一次，避免「按需触发」绕过 bot 预算；
+	// bot 正在运行时内存已有实时数据，恢复反而会覆盖掉尚未落库的部分，故跳过。
+	s.mu.RLock()
+	_, running := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !running {
+		if err := state.RestoreBotFromStats(context.Background(), s.db, builder.PriceResolver(), botID); err != nil {
+			s.logger.Warnw("bot_service: restore bot cost counters for on-demand bundle failed",
+				"bot_id", botID, "err", err)
+		}
+	}
+
+	return llm.NewCostRecordingProvider(p, botID, builder.PriceResolver(),
+		func(b, f string) *llm.CostQuotaExceededError { return state.CheckWalls(resolver, b, f) },
+		func(b, f string, c float64) { state.RecordCost(b, f, c) })
+}
+
+// costQuotaState 返回进程级共享的金钱额度状态（惰性创建）。
+//
+// 共享是必需的：全局维度（"system" / "feature:F"）必须跨 bot 累加，若 per-bot 各建一个，
+// 全局预算会变成「每个 bot 各一份」，与计费看板按全表聚合的显示口径不符。
+// period 通过 sysReader 实时读取，改周期无需重启 bot。
+func (s *BotService) costQuotaState(sysReader func() (pipeline.SystemCostQuotaConfig, bool)) *pipeline.CostQuotaState {
+	s.costMu.Lock()
+	defer s.costMu.Unlock()
+	if s.costState == nil {
+		s.costState = pipeline.NewCostQuotaStateWithPeriodReader(func() string {
+			if sys, ok := sysReader(); ok && sys.Period != "" {
+				return sys.Period
+			}
+			return "monthly"
+		})
+	}
+	return s.costState
 }
 
 // DeleteDefinition 删除 Bot 定义（如果正在运行则先停止）。
@@ -929,14 +999,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	sysCostReader := func() (pipeline.SystemCostQuotaConfig, bool) {
 		return pipeline.SystemCostQuotaFromStore(s.store)
 	}
-	costPeriod := "monthly"
-	if sys, ok := sysCostReader(); ok && sys.Period != "" {
-		costPeriod = sys.Period
+	// 共享 state：全局维度跨 bot 累加；周期实时读 system.cost_quota.period，改完即时生效。
+	costState := s.costQuotaState(sysCostReader)
+	// 恢复本周期已花费，防止重启绕过限额。
+	// 全局维度（system / feature:F）仅首次启动恢复一次（内部 once 幂等）——
+	// 否则每个 bot 启动各恢复一次会把全局花费累加 N 遍。
+	if err := costState.RestoreGlobalFromStats(syncCtx, s.db, builder.PriceResolver()); err != nil {
+		s.logger.Warnw("bot_service: failed to restore global cost counters from stats", "bot_id", id, "err", err)
 	}
-	costState := pipeline.NewCostQuotaState(costPeriod)
-	// 从 stats_usage_daily 回算本周期已花费（按当前单价表），防止重启绕过限额
-	if err := costState.RestoreFromStats(syncCtx, s.db, builder.PriceResolver(), id); err != nil {
-		s.logger.Warnw("bot_service: failed to restore cost counters from stats", "bot_id", id, "err", err)
+	if err := costState.RestoreBotFromStats(syncCtx, s.db, builder.PriceResolver(), id); err != nil {
+		s.logger.Warnw("bot_service: failed to restore bot cost counters from stats", "bot_id", id, "err", err)
 	}
 	// 镜像 bot 成本额度到 config store，使运行时更新（经 UpdateDefinition + SyncBotCostQuota）
 	// 无需重启 bot 即生效：resolver 通过 WithBotReader 实时读取，与 system 成本额度同通道。
@@ -952,7 +1024,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	})
 	costRecorder := func(botID, feature string, cost float64) { costState.RecordCost(botID, feature, cost) }
 	costPreCheck := func(botID, feature string) *llm.CostQuotaExceededError {
-		return costState.CheckWalls(costResolver, botID, feature)
+		ce := costState.CheckWalls(costResolver, botID, feature)
+		if ce != nil {
+			// 可观测性：拦截发生在 provider 层，覆盖 cron / heartbeat / dreaming 等
+			// 非用户路径——这些路径没有 middleware 兜底打点，若不在此记录，
+			// 「功能突然不干活了」将完全无日志可查。
+			s.logger.Infow("cost quota blocked LLM call",
+				"bot_id", botID,
+				"feature", feature,
+				"dimension", ce.Dimension,
+				"wall_feature", ce.Feature,
+				"current", ce.Current,
+				"limit", ce.Limit,
+				"period", ce.Period)
+		}
+		return ce
 	}
 	costPriceFor := builder.PriceResolver()
 	wrapCost := func(p llm.Provider) llm.Provider {
@@ -2863,6 +2949,11 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 	if err != nil {
 		return nil, errs.Wrap(err, "build dreaming bundle: create llm bundle")
 	}
+
+	// 手动触发同样要过金钱额度：这里是真实的 LLM 花费，不能因为走「调试入口」
+	// 就绕过预算。与 StartBot 共用进程级共享 state（全局维度跨 bot 累加、口径一致）。
+	llmBundle.Main = s.wrapCostForBot(llmBundle.Main, botID, builder)
+
 	loc := builder.GetBotTimezoneLocation(botID)
 
 	// 临时 cron 文件路径：一次性触发不应污染 data/cron/<botID>_dream.json

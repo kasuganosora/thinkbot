@@ -274,6 +274,11 @@ func (e *Executor) NotifyUserActivity() {
 // Execute 实现 cron.Executor 接口。
 // 构造心跳唤醒消息 → 进入真实 pipeline（工具/记忆/SOUL 全在线）→ 收集 Actions 生成日志。
 func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResult, error) {
+	// 标记功能维度：心跳走完整 pipeline，LLM 调用会被 LLMStage 兜底标成 "reply"，
+	// 导致心跳开销混进用户回复、既无法按 heartbeat 限额也无法在看板下钻。
+	// 无条件覆盖：心跳比外层 cron 标签更具体，具体标签优先于泛化标签。
+	// 更内层的调用（subagent / memory / vision）会在各自 ctx 上再次覆盖，不受影响。
+	ctx = llm.WithStatsFeature(ctx, "heartbeat")
 	start := time.Now()
 	now := start.In(e.location)
 

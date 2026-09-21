@@ -222,21 +222,30 @@ func (s *Server) handleBillingUsage(c *gin.Context) {
 
 	view := BillingUsageView{Period: period, Currency: currency}
 
-	// feature 预算（用于进度线）：优先 bot 级，其次全局级
+	// feature 预算（用于进度线）：优先 bot 级，其次全局级。
+	//
+	// 仅当查询周期与全局周期一致时才给出预算：预算是「每全局周期」定义的，
+	// 拿日花费去除以月度预算会得到完全误导的进度（看板支持切换周期查看）。
 	featureLimit := map[string]float64{}
-	if bot != "" {
-		var bd dao.BotDefinition
-		if err := s.db.First(&bd, "id = ?", bot).Error; err == nil {
-			if cfg, ok := pipeline.ParseCostQuotaConfig(bd.CostQuota); ok {
-				for k, v := range cfg.Features {
-					featureLimit[k] = v
+	sysPeriod := sys.Period
+	if sysPeriod == "" {
+		sysPeriod = "monthly"
+	}
+	if period == sysPeriod {
+		if bot != "" {
+			var bd dao.BotDefinition
+			if err := s.db.First(&bd, "id = ?", bot).Error; err == nil {
+				if cfg, ok := pipeline.ParseCostQuotaConfig(bd.CostQuota); ok {
+					for k, v := range cfg.Features {
+						featureLimit[k] = v
+					}
 				}
 			}
 		}
-	}
-	for k, v := range sys.Features {
-		if _, ok := featureLimit[k]; !ok {
-			featureLimit[k] = v
+		for k, v := range sys.Features {
+			if _, ok := featureLimit[k]; !ok {
+				featureLimit[k] = v
+			}
 		}
 	}
 
