@@ -409,6 +409,10 @@ func (s *Scheduler) executeJob(ctx context.Context, job *Job) {
 	// 为每次执行生成独立 trace_id，注入 context，并标记这是一个
 	// cron 调度的无人监督会话（供 cron 工具做代码级反嵌套检查，报告 5373）
 	execCtx := WithCronSession(traceid.NewContext(ctx))
+	// 标记功能维度：定时任务自身不打标，其 LLM 开销会被 LLMStage 兜底标成 "reply"，
+	// 既无法按「定时任务」维度限额，也无法在计费看板下钻。
+	// 具体执行器（如 heartbeat）会在自己入口覆盖为更具体的标签，故此处只作兜底。
+	execCtx = llm.WithStatsFeature(execCtx, "cron")
 	logger := traceid.L(execCtx)
 
 	// 执行超时控制
