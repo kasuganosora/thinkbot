@@ -13,6 +13,10 @@
         <div class="metric-label">总工具调用</div>
         <div class="metric-value" data-testid="stats-total-toolcalls">{{ summary.toolCalls }}</div>
       </t-card>
+      <t-card :bordered="false" class="metric-card">
+        <div class="metric-label">总花费</div>
+        <div class="metric-value" data-testid="stats-total-cost">{{ fmtMoney(summary.costTotal) }}</div>
+      </t-card>
     </div>
 
     <t-card title="各 Bot 用量统计" :bordered="false" class="card">
@@ -25,6 +29,7 @@
         size="small"
         hover
       >
+        <template #costTotal="{ row }">{{ fmtMoney(row.costTotal) }}</template>
         <template #op="{ row }">
           <t-button
             variant="text"
@@ -35,7 +40,7 @@
           >查看趋势</t-button>
         </template>
       </t-table>
-    </t-card>
+      </t-card>
 
     <t-card v-if="selectedBot" :title="`每日趋势 · ${selectedBot}`" :bordered="false" class="card">
       <t-table
@@ -48,6 +53,7 @@
         hover
       >
         <template #date="{ row }">{{ formatTime(row.date) }}</template>
+        <template #costTotal="{ row }">{{ fmtMoney(row.costTotal) }}</template>
       </t-table>
     </t-card>
   </SettingsShell>
@@ -69,11 +75,15 @@
           <div class="metric-label">总 Token 数</div>
           <div class="metric-value" data-testid="stats-total-tokens">{{ summary.totalTokens }}</div>
         </t-card>
-        <t-card :bordered="false" class="metric-card">
-          <div class="metric-label">总工具调用</div>
-          <div class="metric-value" data-testid="stats-total-toolcalls">{{ summary.toolCalls }}</div>
-        </t-card>
-      </div>
+      <t-card :bordered="false" class="metric-card">
+        <div class="metric-label">总工具调用</div>
+        <div class="metric-value" data-testid="stats-total-toolcalls">{{ summary.toolCalls }}</div>
+      </t-card>
+      <t-card :bordered="false" class="metric-card">
+        <div class="metric-label">总花费</div>
+        <div class="metric-value" data-testid="stats-total-cost">{{ fmtMoney(summary.costTotal) }}</div>
+      </t-card>
+    </div>
 
       <t-card title="各 Bot 用量统计" :bordered="false" class="card">
         <t-table
@@ -94,6 +104,7 @@
               @click="loadDaily(row.botId)"
             >查看趋势</t-button>
           </template>
+          <template #costTotal="{ row }">{{ fmtMoney(row.costTotal) }}</template>
         </t-table>
       </t-card>
 
@@ -108,6 +119,7 @@
           hover
         >
           <template #date="{ row }">{{ formatTime(row.date) }}</template>
+          <template #costTotal="{ row }">{{ fmtMoney(row.costTotal) }}</template>
         </t-table>
       </t-card>
     </div>
@@ -138,6 +150,7 @@ const overviewColumns = [
   { colKey: 'outputTokens', title: '输出 Token', width: 110 },
   { colKey: 'totalTokens', title: '总 Token', width: 100 },
   { colKey: 'toolCalls', title: '工具调用', width: 90 },
+  { colKey: 'costTotal', title: '花费', width: 110 },
   { colKey: 'op', title: '操作', width: 100, fixed: 'right' }
 ]
 
@@ -146,7 +159,8 @@ const dailyColumns = [
   { colKey: 'totalRequests', title: '总请求' },
   { colKey: 'cacheHitRequests', title: '缓存命中' },
   { colKey: 'cacheMissRequests', title: '缓存未命中' },
-  { colKey: 'totalTokens', title: '总 Token' }
+  { colKey: 'totalTokens', title: '总 Token' },
+  { colKey: 'costTotal', title: '花费' }
 ]
 
 const summary = computed(() => {
@@ -155,11 +169,17 @@ const summary = computed(() => {
       acc.totalRequests += r.totalRequests || 0
       acc.totalTokens += r.totalTokens || 0
       acc.toolCalls += r.toolCalls || 0
+      acc.costTotal += r.costTotal || 0
       return acc
     },
-    { totalRequests: 0, totalTokens: 0, toolCalls: 0 }
+    { totalRequests: 0, totalTokens: 0, toolCalls: 0, costTotal: 0 }
   )
 })
+
+// 金额展示：统计侧统一按 CNY 呈现（模型单价未配置时恒为 0）
+function fmtMoney(v) {
+  return '¥' + (Number(v) || 0).toFixed(2)
+}
 
 function formatTime(iso) {
   if (!iso) return '-'

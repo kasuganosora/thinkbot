@@ -208,11 +208,17 @@ func (r *Recorder) flushBatch(metrics []llm.UsageMetric) error {
 			aggregated[key] = row
 		}
 
-		row.TotalRequests++
+		// 请求数：stage 层聚合记录一轮可能含多次 LLM 调用（见 UsageMetric.Requests），
+		// 未填时按 1 处理 —— 兼容所有单次调用场景。
+		reqs := m.Requests
+		if reqs <= 0 {
+			reqs = 1
+		}
+		row.TotalRequests += reqs
 		if m.Usage.CachedInputTokens > 0 || m.Usage.InputTokenDetails.CacheReadTokens > 0 {
-			row.CacheHitRequests++
+			row.CacheHitRequests += reqs
 		} else {
-			row.CacheMissRequests++
+			row.CacheMissRequests += reqs
 		}
 		row.CacheReadTokens += m.Usage.InputTokenDetails.CacheReadTokens
 		row.CacheWriteTokens += m.Usage.InputTokenDetails.CacheWriteTokens
@@ -332,3 +338,10 @@ func (r *Recorder) upsertRow(row *aggRow) error {
 func truncateToDate(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
+
+// TruncateToDate 归一化到「自然日」：取**本地日历日** + UTC 零点。
+//
+// 导出供计费 / 统计查询方使用。任何按 stats_usage_daily.date 过滤的代码
+// 都必须用与写入端完全相同的口径：date 列是字符串比较，写入用本地日历日，
+// 查询若用 UTC 日历日，东八区每天/每月的头 8 小时会串到上一个周期。
+func TruncateToDate(t time.Time) time.Time { return truncateToDate(t) }

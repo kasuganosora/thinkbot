@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/stats"
 )
 
 // sysReaderOf 构造一个返回固定全局配置的 sysReader 闭包。
@@ -406,5 +407,106 @@ func TestRowCostPrefersStoredCost(t *testing.T) {
 	// 既无 cost_total 也无单价 → 0（不计费、不限额）
 	if got := rowCost(costRestoreRow{Model: "unknown"}, priceFor); got != 0 {
 		t.Errorf("rowCost without price = %v, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 周期桶口径：必须与 stats_usage_daily.date 的写入口径（stats.TruncateToDate）一致
+//
+// 回归：曾把 periodStart/periodKey 改成 UTC 日历日，导致东八区每月/每周/每日
+// 的头 8 小时被算进上一个周期（本地 9/1 07:00 的调用落进 8 月桶）。
+// ---------------------------------------------------------------------------
+
+func TestPeriodStartMatchesStatsDateBucket(t *testing.T) {
+	// 用本地时区构造一个「早上 7 点」的时刻：UTC 日历日仍在前一天，
+	// 但本地日历日已经是当天 —— 正是曾经出错的窗口。
+	now := time.Date(2026, 9, 1, 7, 0, 0, 0, time.Local)
+
+	for _, p := range []string{"daily", "monthly"} {
+		got := periodStart(now, p)
+		if want := stats.TruncateToDate(now); p == "daily" && !got.Equal(want) {
+			t.Errorf("daily periodStart = %v, want %v (must equal stats date bucket)", got, want)
+		}
+		// 桶起点永不能超过「今天」这一行的 date 值，否则整天被漏掉
+		if got.After(stats.TruncateToDate(now)) {
+			t.Errorf("%s periodStart %v is after today's date row %v — the whole day would be filtered out",
+				p, got, stats.TruncateToDate(now))
+		}
+	}
+
+	// daily 桶起点必须正好等于当天的 date 值
+	if got, want := periodStart(now, "daily"), stats.TruncateToDate(now); !got.Equal(want) {
+		t.Errorf("daily bucket = %v, want %v", got, want)
+	}
+	// monthly 桶起点必须是本地当月 1 号的 UTC 零点（不是 UTC 月份）
+	if got, want := periodStart(now, "monthly"), time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("monthly bucket = %v, want %v", got, want)
+	}
+	// 周期键同样按本地日历日：本地 9/1 07:00 应归到 9 月桶
+	if got := periodKey(now, "monthly"); got != "2026-09" {
+		t.Errorf("monthly key = %q, want 2026-09 (local calendar day)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 功能组：配「dreaming」必须能限住 dream_extract / dream_cluster 等细分阶段
+//
+// 回归：统计表里的功能标签是阶段名，用户在预算里只会写功能名，
+// 精确匹配会让这类预算永远等不到数据（进度恒为 0、永不拦截）。
+// ---------------------------------------------------------------------------
+
+func TestCostFeatureGroupBudgetAppliesToSubPhases(t *testing.T) {
+	st := NewCostQuotaState("monthly")
+	sys := SystemCostQuotaConfig{
+		Period:   "monthly",
+		Features: map[string]float64{"dreaming": 50},
+	}
+	r := NewCostQuotaResolver(CostQuotaConfig{Enabled: true}, sysReaderOf(sys))
+
+	st.RecordCost("bot-1", "dream_extract", 30)
+
+	// 细分维度保留（看板仍可下钻到阶段）
+	if got := st.Usage(costDimFeature("dream_extract")); got != 30 {
+		t.Errorf("feature:dream_extract = %v, want 30", got)
+	}
+	// 组维度同步累加（配 "dreaming" 才能生效）
+	if got := st.Usage(costDimFeature("dreaming")); got != 30 {
+		t.Errorf("feature:dreaming = %v, want 30 (group must aggregate sub-phases)", got)
+	}
+	// bot 级组维度同样累加
+	if got := st.Usage(costDimBotFeature("bot-1", "dreaming")); got != 30 {
+		t.Errorf("bot feature group = %v, want 30", got)
+	}
+	// 未超预算不拦
+	if e := st.CheckWalls(r, "bot-1", "dream_extract"); e != nil {
+		t.Fatalf("should not block below budget, got %+v", e)
+	}
+
+	// 另一个阶段再花 25 → 组累计 55 > 50 → 所有梦境阶段都被拦
+	st.RecordCost("bot-1", "dream_cluster", 25)
+	e := st.CheckWalls(r, "bot-1", "dream_score")
+	if e == nil || e.Dimension != costDimFeature("dreaming") {
+		t.Fatalf("dreaming group wall should trigger at 55/50, got %+v", e)
+	}
+	// 无关的 reply 不受梦境预算影响
+	if e := st.CheckWalls(r, "bot-1", "reply"); e != nil {
+		t.Errorf("reply must not be blocked by dreaming budget, got %+v", e)
+	}
+}
+
+func TestCostFeatureGroupMapping(t *testing.T) {
+	cases := map[string]string{
+		"dream_extract": "dreaming",
+		"dream_cluster": "dreaming",
+		"dreaming":      "dreaming", // 已是组名 → 原样返回，不重复记
+		"memory_dedup":  "memory",
+		"subagent":      "subagent",
+		"reply":         "reply",
+		"":              "",
+	}
+	for in, want := range cases {
+		if got := costFeatureGroup(in); got != want {
+			t.Errorf("costFeatureGroup(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
