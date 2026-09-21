@@ -27,7 +27,7 @@
               <div class="feat-head fv">预算（{{ g.currency || 'CNY' }}）</div>
               <div class="feat-head fo"></div>
               <div v-for="(row, i) in gFeatureRows" :key="i" class="feat-line">
-                <t-input v-model="row.key" placeholder="如 dreaming / heartbeat" class="fk" data-testid="bg-feat-key" />
+                <t-select v-model="row.key" :options="featureOptions" filterable creatable placeholder="选择或输入功能名" class="fk" data-testid="bg-feat-key" />
                 <t-input-number v-model="row.value" :min="0" :step="10" :decimal-places="2" class="fv" data-testid="bg-feat-value" />
                 <t-icon name="close" class="fo op" title="删除" @click="removeGFeature(i)" />
               </div>
@@ -37,7 +37,7 @@
               <template #icon><t-icon name="add" /></template>
               添加全局功能预算
             </t-button>
-            <div class="tip">全局功能预算与 Bot 级功能预算独立评估，谁先撞最低墙谁生效（不显式取最小值）。</div>
+            <div class="tip">全局功能预算与 Bot 级功能预算独立评估，谁先撞最低墙谁生效（不显式取最小值）。<br />填 dreaming 即覆盖梦境全部阶段（dream_extract / dream_cluster / dream_score），填 memory 同理覆盖 memory_* —— 不必逐阶段配置。</div>
           </div>
         </t-form-item>
       </t-form>
@@ -212,6 +212,28 @@ function gRowsToMap() {
 function mapToRows(m) {
   return Object.entries(m || {}).map(([k, v]) => ({ key: k, value: v }))
 }
+// 功能名候选：预设 + 本周期实际出现过的标签。
+//
+// 后者是必需的 —— 统计表里梦境的标签是 dream_extract 这类**阶段名**，
+// 若只给预设，用户要么填错、要么以为预算没生效。把真实出现过的标签列出来，
+// 用户既能直接选阶段，也能选 dreaming 这个覆盖全部阶段的组名。
+const PRESET_FEATURES = [
+  { label: 'reply · 对话回复', value: 'reply' },
+  { label: 'dreaming · 梦境（含 dream_* 各阶段）', value: 'dreaming' },
+  { label: 'heartbeat · 心跳', value: 'heartbeat' },
+  { label: 'cron · 定时任务', value: 'cron' },
+  { label: 'memory · 记忆整理（含 memory_*）', value: 'memory' },
+  { label: 'subagent · 子代理/工作流', value: 'subagent' }
+]
+const featureOptions = computed(() => {
+  const seen = new Set(PRESET_FEATURES.map((o) => o.value))
+  const extra = usage.byFeature
+    .map((x) => x.key)
+    .filter((k) => k && !seen.has(k) && k !== '(未分类)')
+    .map((k) => ({ label: `${k} · 本周期实际出现`, value: k }))
+  return [...PRESET_FEATURES, ...extra]
+})
+
 function addGFeature() { gFeatureRows.value.push({ key: '', value: 0 }) }
 function removeGFeature(i) { gFeatureRows.value.splice(i, 1) }
 

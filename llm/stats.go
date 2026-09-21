@@ -35,6 +35,14 @@ type UsageMetric struct {
 	// Steps 编排步数。
 	Steps int
 
+	// Requests 本次记录代表多少次 LLM 调用（0 或负数按 1 处理）。
+	//
+	// 只记一次调用的场景（provider 层直记、dream / memory 等）留空即可。
+	// **stage 层聚合记录时必须填**：一轮编排会走多步工具循环，产生 N 次 LLM
+	// 调用，token 是 N 次之和 —— 若仍按 1 个请求入库，「总请求数」会被低估、
+	// 「平均每请求 token」虚高一个量级（线上曾出现 7.2 万 token/请求）。
+	Requests int
+
 	// WorkflowID / NodeID 标记调用来自哪条工作流的哪个节点。
 	//
 	// 非工作流路径（reply / dream / memory_compress 等）两者均为空。

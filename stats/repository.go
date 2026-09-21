@@ -20,17 +20,20 @@ type BotModelStat struct {
 	OutputTokens      int    `gorm:"column:output_tokens" json:"outputTokens"`
 	TotalTokens       int    `gorm:"column:total_tokens" json:"totalTokens"`
 	ToolCalls         int    `gorm:"column:tool_calls" json:"toolCalls"`
+	// CostTotal 花费（CNY 或模型配置货币）。未配置单价的模型恒为 0。
+	CostTotal float64 `gorm:"column:cost_total" json:"costTotal"`
 }
 
 // ModelFeatureStat 是按 (model, feature) 维度的汇总查询结果。
 type ModelFeatureStat struct {
-	Model             string `gorm:"column:model" json:"model"`
-	Feature           string `gorm:"column:feature" json:"feature"`
-	TotalRequests     int    `gorm:"column:total_requests" json:"totalRequests"`
-	CacheHitRequests  int    `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
-	CacheMissRequests int    `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
-	CacheReadTokens   int    `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
-	TotalTokens       int    `gorm:"column:total_tokens" json:"totalTokens"`
+	Model             string  `gorm:"column:model" json:"model"`
+	Feature           string  `gorm:"column:feature" json:"feature"`
+	TotalRequests     int     `gorm:"column:total_requests" json:"totalRequests"`
+	CacheHitRequests  int     `gorm:"column:cache_hit_requests" json:"cacheHitRequests"`
+	CacheMissRequests int     `gorm:"column:cache_miss_requests" json:"cacheMissRequests"`
+	CacheReadTokens   int     `gorm:"column:cache_read_tokens" json:"cacheReadTokens"`
+	TotalTokens       int     `gorm:"column:total_tokens" json:"totalTokens"`
+	CostTotal         float64 `gorm:"column:cost_total" json:"costTotal"`
 }
 
 // DailyStat 是按日期维度的汇总查询结果。
@@ -43,6 +46,7 @@ type DailyStat struct {
 	CacheWriteTokens  int       `gorm:"column:cache_write_tokens" json:"cacheWriteTokens"`
 	NonCacheTokens    int       `gorm:"column:non_cache_tokens" json:"nonCacheTokens"`
 	TotalTokens       int       `gorm:"column:total_tokens" json:"totalTokens"`
+	CostTotal         float64   `gorm:"column:cost_total" json:"costTotal"`
 }
 
 // GetBotModelStats 查询指定 Bot 使用的各模型统计（可限定日期范围）。
@@ -60,7 +64,8 @@ func GetBotModelStats(db *gorm.DB, botID string, from, to *time.Time) ([]BotMode
 			SUM(input_tokens) as input_tokens,
 			SUM(output_tokens) as output_tokens,
 			SUM(total_tokens) as total_tokens,
-			SUM(tool_calls) as tool_calls
+			SUM(tool_calls) as tool_calls,
+			SUM(cost_total) as cost_total
 		`).
 		Where("bot_id = ?", botID).
 		Group("bot_id, model").
@@ -82,7 +87,8 @@ func GetModelFeatureStats(db *gorm.DB, botID, model string, from, to *time.Time)
 			SUM(cache_hit_requests) as cache_hit_requests,
 			SUM(cache_miss_requests) as cache_miss_requests,
 			SUM(cache_read_tokens) as cache_read_tokens,
-			SUM(total_tokens) as total_tokens
+			SUM(total_tokens) as total_tokens,
+			SUM(cost_total) as cost_total
 		`).
 		Where("bot_id = ? AND model = ?", botID, model).
 		Group("model, feature").
@@ -106,7 +112,8 @@ func GetDailyStats(db *gorm.DB, botID string, from, to *time.Time) ([]DailyStat,
 			SUM(cache_read_tokens) as cache_read_tokens,
 			SUM(cache_write_tokens) as cache_write_tokens,
 			SUM(non_cache_tokens) as non_cache_tokens,
-			SUM(total_tokens) as total_tokens
+			SUM(total_tokens) as total_tokens,
+			SUM(cost_total) as cost_total
 		`).
 		Where("bot_id = ?", botID).
 		Group("date").
@@ -133,7 +140,8 @@ func GetAllBotsModelStats(db *gorm.DB, from, to *time.Time) ([]BotModelStat, err
 			SUM(input_tokens) as input_tokens,
 			SUM(output_tokens) as output_tokens,
 			SUM(total_tokens) as total_tokens,
-			SUM(tool_calls) as tool_calls
+			SUM(tool_calls) as tool_calls,
+			SUM(cost_total) as cost_total
 		`).
 		Group("bot_id, model").
 		Order("bot_id ASC, total_tokens DESC")
@@ -156,7 +164,8 @@ func GetDailyStatsGlobal(db *gorm.DB, botID string, from, to *time.Time) ([]Dail
 			SUM(cache_read_tokens) as cache_read_tokens,
 			SUM(cache_write_tokens) as cache_write_tokens,
 			SUM(non_cache_tokens) as non_cache_tokens,
-			SUM(total_tokens) as total_tokens
+			SUM(total_tokens) as total_tokens,
+			SUM(cost_total) as cost_total
 		`)
 
 	if botID != "" {
@@ -202,12 +211,13 @@ type UsageRecord struct {
 	InputTokens     int       `gorm:"column:input_tokens" json:"inputTokens"`
 	OutputTokens    int       `gorm:"column:output_tokens" json:"outputTokens"`
 	TotalRequests   int       `gorm:"column:total_requests" json:"totalRequests"`
+	CostTotal       float64   `gorm:"column:cost_total" json:"costTotal"`
 }
 
 // GetUsageRecords 分页查询用量流水记录。
 func GetUsageRecords(db *gorm.DB, botID string, from, to *time.Time, page, pageSize int) ([]UsageRecord, int64, error) {
 	q := db.Table("stats_usage_daily").
-		Select(`rowid as id, date, bot_id, model, feature, cache_read_tokens, input_tokens, output_tokens, total_requests`)
+		Select(`rowid as id, date, bot_id, model, feature, cache_read_tokens, input_tokens, output_tokens, total_requests, cost_total`)
 
 	if botID != "" {
 		q = q.Where("bot_id = ?", botID)

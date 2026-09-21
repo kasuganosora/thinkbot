@@ -35,7 +35,7 @@
                 :key="i"
                 class="feat-line"
               >
-                <t-input v-model="row.key" placeholder="如 dreaming / heartbeat / reply" class="fk" data-testid="cq-feat-key" />
+                <t-select v-model="row.key" :options="featureOptions" filterable creatable placeholder="选择或输入功能名" class="fk" data-testid="cq-feat-key" />
                 <t-input-number v-model="row.value" :min="0" :step="10" :decimal-places="2" class="fv" data-testid="cq-feat-value" />
                 <t-icon name="close" class="fo op" title="删除" @click="removeFeature(i)" />
               </div>
@@ -45,7 +45,7 @@
               <template #icon><t-icon name="add" /></template>
               添加功能预算
             </t-button>
-            <div class="tip">常见功能：reply（对话）、dreaming（梦境）、heartbeat（心跳）、cron（定时任务）。命中任意一堵墙即拦截，先碰最低预算墙者生效。</div>
+            <div class="tip">常见功能：reply（对话）、dreaming（梦境）、heartbeat（心跳）、cron（定时任务）。填 dreaming 即覆盖梦境全部阶段（dream_extract 等），不必逐阶段配置。<br />命中任意一堵墙即拦截，先碰最低预算墙者生效。</div>
           </div>
         </t-form-item>
       </t-form>
@@ -79,6 +79,27 @@ const form = reactive({ enabled: false, currency: 'CNY', total: 0 })
 const featureRows = ref([])
 const saving = ref(false)
 
+// 功能名候选：预设 + 本 Bot 本周期实际出现过的标签。
+//
+// 必需的原因：统计表里梦境的标签是 dream_extract 这类**阶段名**，
+// 只给预设的话用户要么填错、要么以为预算没生效。
+const PRESET_FEATURES = [
+  { label: 'reply · 对话回复', value: 'reply' },
+  { label: 'dreaming · 梦境（含 dream_* 各阶段）', value: 'dreaming' },
+  { label: 'heartbeat · 心跳', value: 'heartbeat' },
+  { label: 'cron · 定时任务', value: 'cron' },
+  { label: 'memory · 记忆整理（含 memory_*）', value: 'memory' },
+  { label: 'subagent · 子代理/工作流', value: 'subagent' }
+]
+const knownFeatures = ref([])
+const featureOptions = computed(() => {
+  const seen = new Set(PRESET_FEATURES.map((o) => o.value))
+  const extra = knownFeatures.value
+    .filter((k) => k && !seen.has(k) && k !== '(未分类)')
+    .map((k) => ({ label: `${k} · 本周期实际出现`, value: k }))
+  return [...PRESET_FEATURES, ...extra]
+})
+
 function rowsToMap() {
   const m = {}
   for (const r of featureRows.value) {
@@ -99,6 +120,12 @@ async function load() {
     const q = await billingApi.quotas().catch(() => null)
     if (q && q.period) period.value = q.period
   } catch (e) { /* 周期读取失败不影响表单 */ }
+
+  // 带出本 Bot 实际出现过的功能标签，供功能预算下拉候选
+  try {
+    const u = await billingApi.usage({ bot: props.botId })
+    knownFeatures.value = (u.byFeature || []).map((x) => x.key)
+  } catch (e) { /* 候选加载失败不影响表单 */ }
 
   try {
     const b = await botApi.get(props.botId)
