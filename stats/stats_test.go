@@ -300,3 +300,50 @@ func TestTruncateToDate(t *testing.T) {
 		t.Errorf("truncateToDate: got %v, want %v", got, want)
 	}
 }
+
+// TestRecorder_AggregatedRequests 锁住「一条 metric 可代表多次 LLM 调用」的语义。
+//
+// 回归：stage 层（reply / llmroute）把**整轮编排**聚合成一条 UsageMetric 上报，
+// Usage 是这一轮 N 次 LLM 调用的 token 之和。此前入库时一律按 1 个请求计，
+// 导致「总请求数」被低估、平均每请求 token 虚高一个量级（线上实测 7 万+/请求）。
+func TestRecorder_AggregatedRequests(t *testing.T) {
+	db := newTestDB(t)
+	r := NewRecorder(db, zap.NewNop().Sugar())
+	ctx := context.Background()
+
+	// 一轮编排：6 次 LLM 调用，token 为 6 次之和
+	r.RecordUsage(ctx, llm.UsageMetric{
+		BotID:    "bot1",
+		Model:    "m1",
+		Feature:  "reply",
+		Requests: 6,
+		Usage:    llm.Usage{InputTokens: 6000, OutputTokens: 600, TotalTokens: 6600},
+	})
+	// 单次调用（未填 Requests）仍按 1 计
+	r.RecordUsage(ctx, llm.UsageMetric{
+		BotID:   "bot1",
+		Model:   "m1",
+		Feature: "dream_extract",
+		Usage:   llm.Usage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150},
+	})
+	r.SyncFlush()
+
+	var rows []dao.UsageDaily
+	if err := db.Find(&rows).Error; err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	byFeature := map[string]dao.UsageDaily{}
+	for _, row := range rows {
+		byFeature[row.Feature] = row
+	}
+
+	if got := byFeature["reply"].TotalRequests; got != 6 {
+		t.Errorf("reply total_requests = %d, want 6 (one metric may cover N LLM calls)", got)
+	}
+	if got := byFeature["reply"].CacheMissRequests; got != 6 {
+		t.Errorf("reply cache_miss_requests = %d, want 6 (must scale with request count)", got)
+	}
+	if got := byFeature["dream_extract"].TotalRequests; got != 1 {
+		t.Errorf("dream_extract total_requests = %d, want 1 (default when Requests unset)", got)
+	}
+}

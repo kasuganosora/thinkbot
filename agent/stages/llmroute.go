@@ -1595,6 +1595,16 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 	if recorder == nil {
 		return
 	}
+	// 功能维度以 ctx 里显式注入的标签为准（reply / heartbeat / cron / dreaming ...）。
+	//
+	// 调用方传进来的 feature 是 **stage 名**（"llm" / "reply"），而额度墙
+	// （CostRecordingProvider）读的是 ctx 标签 —— 两套命名若各自落库，
+	// 计费看板按功能下钻就永远对不上用户配置的预算键（用户填 "reply"，
+	// 表里记的是 "llm"，预算进度恒为 0）。故 ctx 有标签时一律以 ctx 为准，
+	// stage 名仅作无标签时的兜底。
+	if f := llm.StatsFeatureFromContext(ctx); f != "" {
+		feature = f
+	}
 	botID := ""
 	if v, ok := env.Get("bot.id"); ok {
 		if s, ok := v.(string); ok {
@@ -1610,6 +1620,15 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 	for _, step := range result.Steps {
 		toolCalls += len(step.ToolCalls)
 	}
+	// 请求数 = 本轮编排实际发生的 LLM 调用次数。
+	//
+	// 一条 UsageMetric 在这里代表**整轮编排**（多步工具循环 = 多次 LLM 调用），
+	// 而 Usage 是这些调用的总和。若按 1 个请求入库，「总请求数」被低估、
+	// 「平均每请求 token」会虚高一个量级（线上实测 7 万+ token/请求）。
+	requests := steps
+	if requests <= 0 {
+		requests = 1
+	}
 	recorder.RecordUsage(ctx, llm.UsageMetric{
 		BotID:     botID,
 		At:        time.Now(),
@@ -1619,6 +1638,7 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 		Usage:     result.Usage,
 		ToolCalls: toolCalls,
 		Steps:     steps,
+		Requests:  requests,
 	})
 }
 

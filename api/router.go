@@ -312,9 +312,9 @@ func (s *Server) registerRoutes() {
 		billingGroup := authed.Group("/billing")
 		billingGroup.Use(requirePermission(auth.PermBotManage))
 		{
-			billingGroup.GET("/models", s.handleBillingModels)   // token↔金钱换算表
-			billingGroup.GET("/quotas", s.handleBillingQuotas)   // 各 bot 额度 + 进度 + 全局
-			billingGroup.GET("/usage", s.handleBillingUsage)     // 按功能/模型/bot 拆解（看板）
+			billingGroup.GET("/models", s.handleBillingModels) // token↔金钱换算表
+			billingGroup.GET("/quotas", s.handleBillingQuotas) // 各 bot 额度 + 进度 + 全局
+			billingGroup.GET("/usage", s.handleBillingUsage)   // 按功能/模型/bot 拆解（看板）
 		}
 
 		// --- 工作流监控（admin，只读 + 恢复 + 节点重试） ---

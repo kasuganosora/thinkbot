@@ -96,10 +96,12 @@ func SystemCostQuotaFromStore(store *config.Store) (SystemCostQuotaConfig, bool)
 // ----------------------------------------------------------------------------
 
 // periodKey 返回当前周期的桶标识（跨桶即重置计数）。
-// 统一使用 UTC，与 token quota（currentMonth 用 time.Now().UTC()）及
-// stats_usage_daily.date 列（truncateToDate 落 UTC 零点）保持一致，避免时区边界错位。
+//
+// 时区口径（勿改成 UTC）：取**本地日历日**，与 stats.truncateToDate 保持一致。
+// stats_usage_daily.date 由 truncateToDate 写入（本地年月日 + UTC 零点），若这里
+// 按 UTC 日期分桶，东八区每月/每周/每日的头 8 小时会被算进上一个周期 ——
+// 例如本地 9/1 07:00 的调用会落进 8 月桶，用户看到「本月额度」迟迟不重置。
 func periodKey(now time.Time, period string) string {
-	now = now.UTC()
 	switch period {
 	case "daily":
 		return now.Format("2006-01-02")
@@ -112,9 +114,11 @@ func periodKey(now time.Time, period string) string {
 }
 
 // periodStart 返回当前周期起点（用于 RestoreFromStats 过滤 stats_usage_daily）。
-// 使用 UTC，与 date 列（UTC 零点）对齐，保证 WHERE date >= start 边界正确。
+//
+// 取本地日历日，再归一化为 **UTC 零点**，以匹配 date 列的存储格式
+// （"2026-09-01 00:00:00+00:00"）。注意不能用本地零点：那会得到 "...+08:00"，
+// 字符串比较时反而大于当天的存储值，把整天漏掉。
 func periodStart(now time.Time, period string) time.Time {
-	now = now.UTC()
 	switch period {
 	case "daily":
 		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
@@ -206,6 +210,33 @@ func (r *CostQuotaResolver) currency() string {
 	return "CNY"
 }
 
+// costFeatureGroup 把细分的功能标签归并到「功能组」。
+//
+// 梦境由 dream_extract / dream_cluster / dream_score 等阶段组成，记忆有
+// memory_dedup 等，而用户配预算时只会写 "dreaming" / "memory"。若只按细分标签
+// 精确匹配，这类预算永远不会生效 —— 统计表里的标签是阶段名，不是功能名。
+//
+// 归并后**两个维度都记**：细分标签保留（看板仍可下钻到具体阶段），
+// 组标签同时累加（配 "dreaming" 就能限住全部梦境开销）。
+func costFeatureGroup(feature string) string {
+	switch {
+	case feature == "":
+		return ""
+	case strings.HasPrefix(feature, "dream"):
+		return "dreaming"
+	case strings.HasPrefix(feature, "memory"):
+		return "memory"
+	case strings.HasPrefix(feature, "subagent"), strings.HasPrefix(feature, "workflow"):
+		return "subagent"
+	default:
+		return feature
+	}
+}
+
+// CostFeatureGroup 导出功能组归并（供计费 API 展示与进度计算使用）。
+// 必须与内部 costFeatureGroup 同源，否则看板的预算进度会和实际拦截口径对不上。
+func CostFeatureGroup(feature string) string { return costFeatureGroup(feature) }
+
 // Walls 返回 (botID, feature) 这一次调用涉及的所有「有限额」的墙。
 // 未设限额的维度不出现（计数器也不必维护）。
 func (r *CostQuotaResolver) Walls(botID, feature string) []costWall {
@@ -214,22 +245,30 @@ func (r *CostQuotaResolver) Walls(botID, feature string) []costWall {
 		sys = s
 	}
 	cfg := r.botConfig()
-	walls := make([]costWall, 0, 4)
+	walls := make([]costWall, 0, 6)
 	if cfg.Enabled && cfg.Total > 0 {
 		walls = append(walls, costWall{dim: costDimBot(botID), limit: cfg.Total})
 	}
 	if sys.Total > 0 {
 		walls = append(walls, costWall{dim: costDimSystem(), limit: sys.Total})
 	}
-	if cfg.Enabled && len(cfg.Features) > 0 {
-		if lim, ok := cfg.Features[feature]; ok && lim > 0 {
-			walls = append(walls, costWall{dim: costDimBotFeature(botID, feature), limit: lim, feature: feature})
+	// 功能维度：细分标签 + 其所属功能组，两套墙都可能拦下本次调用。
+	addFeatureWall := func(key string) {
+		if key == "" {
+			return
+		}
+		if cfg.Enabled {
+			if lim, ok := cfg.Features[key]; ok && lim > 0 {
+				walls = append(walls, costWall{dim: costDimBotFeature(botID, key), limit: lim, feature: key})
+			}
+		}
+		if lim, ok := sys.Features[key]; ok && lim > 0 {
+			walls = append(walls, costWall{dim: costDimFeature(key), limit: lim, feature: key})
 		}
 	}
-	if len(sys.Features) > 0 {
-		if lim, ok := sys.Features[feature]; ok && lim > 0 {
-			walls = append(walls, costWall{dim: costDimFeature(feature), limit: lim, feature: feature})
-		}
+	addFeatureWall(feature)
+	if g := costFeatureGroup(feature); g != feature {
+		addFeatureWall(g)
 	}
 	return walls
 }
@@ -388,8 +427,11 @@ func (s *CostQuotaState) CheckWalls(resolver *CostQuotaResolver, botID, feature 
 	return nil
 }
 
-// RecordCost 把一次调用的花费计入四维度计数器。
+// RecordCost 把一次调用的花费计入各维度计数器。
 // feature 为空时只记两个总预算维度（避免污染 feature:"" 维度）。
+//
+// 功能维度同时记「细分标签」和「功能组」两个维度（见 costFeatureGroup）：
+// 只记细分会让用户配的 "dreaming" 预算永远等不到数据。
 func (s *CostQuotaState) RecordCost(botID, feature string, cost float64) {
 	if cost <= 0 {
 		return
@@ -399,6 +441,10 @@ func (s *CostQuotaState) RecordCost(botID, feature string, cost float64) {
 	if feature != "" {
 		s.AddCost(costDimBotFeature(botID, feature), cost)
 		s.AddCost(costDimFeature(feature), cost)
+		if g := costFeatureGroup(feature); g != feature {
+			s.AddCost(costDimBotFeature(botID, g), cost)
+			s.AddCost(costDimFeature(g), cost)
+		}
 	}
 }
 
@@ -576,6 +622,9 @@ func (s *CostQuotaState) RestoreBotFromStats(ctx context.Context, db *gorm.DB, p
 		dims := []string{costDimBot(botID)}
 		if r.Feature != "" && r.Feature != "unknown" {
 			dims = append(dims, costDimBotFeature(botID, r.Feature))
+			if g := costFeatureGroup(r.Feature); g != r.Feature {
+				dims = append(dims, costDimBotFeature(botID, g))
+			}
 		}
 		s.addToDims(dims, cost)
 	}
