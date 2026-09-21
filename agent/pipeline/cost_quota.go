@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,10 +45,10 @@ import (
 // CostQuotaConfig 是 per-bot 的金钱额度配置（挂在 BotDefinition.CostQuota JSON 列）。
 // 不含 Period：period 全局强制一致，由 SystemCostQuotaConfig.Period 决定。
 type CostQuotaConfig struct {
-	Enabled  bool               `json:"enabled"`           // 是否启用本 bot 额度
-	Currency string             `json:"currency"`          // 货币，默认 CNY
-	Total    float64            `json:"total"`             // 该周期总预算（金钱），0 = 不限制
-	Features map[string]float64 `json:"features"`          // 各功能预算（金钱），0/缺 = 不限制
+	Enabled  bool               `json:"enabled"`  // 是否启用本 bot 额度
+	Currency string             `json:"currency"` // 货币，默认 CNY
+	Total    float64            `json:"total"`    // 该周期总预算（金钱），0 = 不限制
+	Features map[string]float64 `json:"features"` // 各功能预算（金钱），0/缺 = 不限制
 }
 
 // SystemCostQuotaConfig 是全局金钱额度配置，存于 config 键 system.cost_quota（JSON）。
@@ -157,9 +158,9 @@ func PeriodStartNow(period string) time.Time {
 
 // costWall 一堵额度墙。
 type costWall struct {
-	dim    string  // 计数器维度
-	limit  float64 // 预算上限（0 = 不限制）
-	feature string // 触发的功能（空 = 总预算墙）
+	dim     string  // 计数器维度
+	limit   float64 // 预算上限（0 = 不限制）
+	feature string  // 触发的功能（空 = 总预算墙）
 }
 
 // CostQuotaResolver 解析一次调用涉及的额度墙。
@@ -192,6 +193,17 @@ func (r *CostQuotaResolver) botConfig() CostQuotaConfig {
 		}
 	}
 	return r.botCfg
+}
+
+// currency 返回当前生效货币：bot 级优先，其次全局，最后兜底 CNY。
+func (r *CostQuotaResolver) currency() string {
+	if c := r.botConfig().Currency; c != "" {
+		return c
+	}
+	if s, ok := r.sysReader(); ok && s.Currency != "" {
+		return s.Currency
+	}
+	return "CNY"
 }
 
 // Walls 返回 (botID, feature) 这一次调用涉及的所有「有限额」的墙。
@@ -228,7 +240,7 @@ func (r *CostQuotaResolver) Walls(botID, feature string) []costWall {
 
 type costPeriodCounter struct {
 	mu     sync.Mutex
-	bucket string  // 如 "2026-09"
+	bucket string // 如 "2026-09"
 	amount float64
 }
 
@@ -262,11 +274,21 @@ func (c *costPeriodCounter) get(bucket string) float64 {
 // ----------------------------------------------------------------------------
 
 // CostQuotaState 持有 per-dimension 的周期计数器。
-// 全局 period 由构造时确定（来自 system.cost_quota.period），所有维度共用一个桶边界。
+//
+// 关键：本状态必须是**进程级共享**的，而非 per-bot。四堵墙里有两堵是全局维度
+// （"system" 与 "feature:F"），若每个 bot 各持一个 state，全局预算会退化成
+// 「每个 bot 各自一份全局预算」，与 billing API（按 stats_usage_daily 全表聚合）
+// 的显示口径不符，全局限额形同虚设。
+//
+// period 支持构造时固定，也支持通过 periodReader 实时读取（system.cost_quota.period
+// 改完后无需重启 bot 即生效）。
 type CostQuotaState struct {
-	mu       sync.Mutex
-	period   string
-	counters map[string]*costPeriodCounter
+	mu           sync.Mutex
+	period       string
+	periodReader func() string
+	counters     map[string]*costPeriodCounter
+
+	globalRestored sync.Once
 }
 
 // NewCostQuotaState 创建计费状态。period 缺省 monthly。
@@ -280,8 +302,29 @@ func NewCostQuotaState(period string) *CostQuotaState {
 	}
 }
 
+// NewCostQuotaStateWithPeriodReader 创建计费状态，周期每次实时读取。
+// 用于 system.cost_quota.period 可在运行时修改的场景：改完周期立即按新桶边界重算，
+// 无需重启 bot。
+func NewCostQuotaStateWithPeriodReader(fn func() string) *CostQuotaState {
+	return &CostQuotaState{
+		period:       "monthly",
+		periodReader: fn,
+		counters:     make(map[string]*costPeriodCounter),
+	}
+}
+
+// Period 返回当前生效的周期（periodReader 优先）。
+func (s *CostQuotaState) Period() string {
+	if s.periodReader != nil {
+		if p := s.periodReader(); p != "" {
+			return p
+		}
+	}
+	return s.period
+}
+
 func (s *CostQuotaState) bucket() string {
-	return periodKey(time.Now(), s.period)
+	return periodKey(time.Now(), s.Period())
 }
 
 func (s *CostQuotaState) counter(dim string) *costPeriodCounter {
@@ -363,83 +406,178 @@ func (s *CostQuotaState) RecordCost(botID, feature string, cost float64) {
 // RestoreFromStats — 重启后从 stats_usage_daily 回算已花费用
 // ----------------------------------------------------------------------------
 
-// RestoreFromStats 用 stats_usage_daily（含 model/feature/tokens）× 当前单价表回算
-// 本周期已花费用，恢复四个维度计数器。无需新建表。
-func (s *CostQuotaState) RestoreFromStats(ctx context.Context, db *gorm.DB, priceFor llm.ModelPriceResolver, botIDs ...string) error {
-	if db == nil || priceFor == nil {
-		return nil
-	}
-	start := periodStart(time.Now(), s.period)
-	type row struct {
-		BotID  string
-		Model  string
-		Feature string
-		Input   int
-		Output  int
-		CacheRead int
-	}
-	var rows []row
-	q := db.WithContext(ctx).Raw(`
+// 恢复口径说明：
+// stats_usage_daily.cost_total 是调用发生时按当时单价落库的结果，是**权威口径**，
+// 与计费看板（/api/billing/*）同源。此处不再「按当前单价重算历史 token」——
+// 那会导致改一次单价、重启一次服务，历史花费就整体跳变，且与看板数字对不上。
+// 仅当 cost_total 缺失（存量行）时才用当前单价回算兜底。
+
+// costRestoreRow 恢复用聚合行。
+type costRestoreRow struct {
+	BotID     string
+	Model     string
+	Feature   string
+	Cost      float64 // SUM(cost_total)，可能为 0（存量行）
+	Input     int
+	Output    int
+	CacheRead int
+}
+
+// scanCostRows 按周期起点聚合 stats_usage_daily。botID 为空表示全表（全局维度）。
+func scanCostRows(ctx context.Context, db *gorm.DB, start time.Time, botID string) ([]costRestoreRow, error) {
+	const cols = `
 		SELECT bot_id, model, feature,
+		       SUM(cost_total)    AS cost,
 		       SUM(input_tokens)  AS input,
 		       SUM(output_tokens) AS output,
 		       SUM(cache_read_tokens) AS cache_read
 		FROM stats_usage_daily
-		WHERE date >= ?
-		GROUP BY bot_id, model, feature
-	`, start)
-	if len(botIDs) > 0 {
-		q = db.WithContext(ctx).Raw(`
-			SELECT bot_id, model, feature,
-			       SUM(input_tokens)  AS input,
-			       SUM(output_tokens) AS output,
-			       SUM(cache_read_tokens) AS cache_read
-			FROM stats_usage_daily
-			WHERE date >= ? AND bot_id IN ?
-			GROUP BY bot_id, model, feature
-		`, start, botIDs)
+		WHERE date >= ?`
+	const group = `
+		GROUP BY bot_id, model, feature`
+	var rows []costRestoreRow
+	var q *gorm.DB
+	if botID == "" {
+		q = db.WithContext(ctx).Raw(cols+group, start)
+	} else {
+		q = db.WithContext(ctx).Raw(cols+" AND bot_id = ?"+group, start, botID)
 	}
 	if err := q.Scan(&rows).Error; err != nil {
-		return err
+		return nil, err
 	}
+	return rows, nil
+}
 
+// rowCost 取一行在本周期的花费：优先 cost_total，缺失时按当前单价回算兜底。
+func rowCost(r costRestoreRow, priceFor llm.ModelPriceResolver) float64 {
+	if r.Cost > 0 {
+		return r.Cost
+	}
+	if priceFor == nil {
+		return 0
+	}
+	price, ok := priceFor(r.Model)
+	if !ok || !price.HasPrice() {
+		return 0
+	}
+	usage := llm.Usage{
+		InputTokens:       r.Input,
+		OutputTokens:      r.Output,
+		InputTokenDetails: llm.InputTokenDetail{CacheReadTokens: r.CacheRead},
+	}
+	_, _, total := llm.ComputeCost(usage, price)
+	return total
+}
+
+// addToDims 把花费累加到多个维度（内部加锁）。
+func (s *CostQuotaState) addToDims(dims []string, cost float64) {
+	if cost <= 0 {
+		return
+	}
 	bucket := s.bucket()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, dim := range dims {
+		c, ok := s.counters[dim]
+		if !ok {
+			c = &costPeriodCounter{bucket: bucket}
+			s.counters[dim] = c
+		}
+		c.mu.Lock()
+		if c.bucket != bucket {
+			c.bucket = bucket
+			c.amount = 0
+		}
+		c.amount += cost
+		c.mu.Unlock()
+	}
+}
+
+// RestoreGlobalFromStats 恢复**全局维度**（system + feature:F）。
+//
+// 必须在共享 state 上只生效一次（内部 sync.Once 幂等）：若每个 bot 启动都各调一次，
+// 全局花费会被重复累加 N 遍，导致全局预算提前耗尽。
+func (s *CostQuotaState) RestoreGlobalFromStats(ctx context.Context, db *gorm.DB, priceFor llm.ModelPriceResolver) error {
+	if db == nil {
+		return nil
+	}
+	var err error
+	s.globalRestored.Do(func() {
+		err = s.restoreGlobal(ctx, db, priceFor)
+	})
+	return err
+}
+
+func (s *CostQuotaState) restoreGlobal(ctx context.Context, db *gorm.DB, priceFor llm.ModelPriceResolver) error {
+	rows, err := scanCostRows(ctx, db, periodStart(time.Now(), s.Period()), "")
+	if err != nil {
+		return err
+	}
+	s.ResetGlobal()
 	for _, r := range rows {
-		price, ok := priceFor(r.Model)
-		if !ok || !price.HasPrice() {
+		cost := rowCost(r, priceFor)
+		if cost <= 0 {
 			continue
 		}
-		usage := llm.Usage{
-			InputTokens:       r.Input,
-			OutputTokens:      r.Output,
-			InputTokenDetails: llm.InputTokenDetail{CacheReadTokens: r.CacheRead},
-		}
-		_, _, total := llm.ComputeCost(usage, price)
-		if total <= 0 {
-			continue
-		}
-		addTo := func(dim string) {
-			c, ok := s.counters[dim]
-			if !ok {
-				c = newCostPeriodCounter()
-				s.counters[dim] = c
-			}
-			c.mu.Lock()
-			if c.bucket != bucket {
-				c.bucket = bucket
-				c.amount = 0
-			}
-			c.amount += total
-			c.mu.Unlock()
-		}
-		addTo(costDimBot(r.BotID))
-		addTo(costDimSystem())
+		dims := []string{costDimSystem()}
 		if r.Feature != "" && r.Feature != "unknown" {
-			addTo(costDimBotFeature(r.BotID, r.Feature))
-			addTo(costDimFeature(r.Feature))
+			dims = append(dims, costDimFeature(r.Feature))
 		}
+		s.addToDims(dims, cost)
+	}
+	return nil
+}
+
+// ResetBot 清空某 bot 的全部维度（bot:B + bot:B:feature:*）。
+//
+// 恢复是「用 DB 值覆盖内存值」而非叠加：共享 state 是进程级的，同一进程内
+// StopBot→StartBot 时该 bot 的内存计数器仍然存在，若直接累加会把历史再算一遍
+// （表现为重启一次 bot，已用额度就翻倍）。
+func (s *CostQuotaState) ResetBot(botID string) {
+	prefix := costDimBotFeature(botID, "")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.counters, costDimBot(botID))
+	for k := range s.counters {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.counters, k)
+		}
+	}
+}
+
+// ResetGlobal 清空全局维度（system + feature:*），语义同 ResetBot。
+func (s *CostQuotaState) ResetGlobal() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.counters, costDimSystem())
+	for k := range s.counters {
+		if strings.HasPrefix(k, "feature:") {
+			delete(s.counters, k)
+		}
+	}
+}
+
+// RestoreBotFromStats 恢复**单 bot 维度**（bot:B + bot:B:feature:F）。
+// 每个 bot 启动时各自调用，只影响自己的维度，不会污染全局计数器。
+func (s *CostQuotaState) RestoreBotFromStats(ctx context.Context, db *gorm.DB, priceFor llm.ModelPriceResolver, botID string) error {
+	if db == nil || botID == "" {
+		return nil
+	}
+	rows, err := scanCostRows(ctx, db, periodStart(time.Now(), s.Period()), botID)
+	if err != nil {
+		return err
+	}
+	s.ResetBot(botID)
+	for _, r := range rows {
+		cost := rowCost(r, priceFor)
+		if cost <= 0 {
+			continue
+		}
+		dims := []string{costDimBot(botID)}
+		if r.Feature != "" && r.Feature != "unknown" {
+			dims = append(dims, costDimBotFeature(botID, r.Feature))
+		}
+		s.addToDims(dims, cost)
 	}
 	return nil
 }
@@ -477,7 +615,7 @@ func CostQuotaMiddlewareWithState(resolver *CostQuotaResolver, state *CostQuotaS
 				ctx, span := tracer.Start(ctx, "pipeline.cost_quota.guard",
 					trace.WithAttributes(
 						attribute.String("cost_quota.bot_id", botID),
-						attribute.String("cost_quota.period", state.period),
+						attribute.String("cost_quota.period", state.Period()),
 					))
 				defer span.End()
 				logger := traceid.WithLoggerFrom(ctx, logger)
@@ -494,7 +632,7 @@ func CostQuotaMiddlewareWithState(resolver *CostQuotaResolver, state *CostQuotaS
 							"current", ce.Current,
 							"limit", ce.Limit,
 							"period", ce.Period)
-						return friendlyCostReply(env, ce, state.period), nil
+						return friendlyCostReply(env, ce, state.Period(), resolver.currency()), nil
 					}
 				}
 				return result, err
@@ -503,8 +641,26 @@ func CostQuotaMiddlewareWithState(resolver *CostQuotaResolver, state *CostQuotaS
 	}
 }
 
+// currencySymbol 把货币代码渲染成符号；未知代码原样输出（避免显示成"¥"却实为外币）。
+func currencySymbol(currency string) string {
+	switch currency {
+	case "CNY", "RMB":
+		return "¥"
+	case "USD":
+		return "$"
+	case "EUR":
+		return "€"
+	case "JPY":
+		return "¥"
+	case "GBP":
+		return "£"
+	default:
+		return currency + " "
+	}
+}
+
 // friendlyCostReply 构造一条「额度用尽」的友好回复，替换原信封的动作。
-func friendlyCostReply(env *core.Envelope, ce *llm.CostQuotaExceededError, period string) *core.Envelope {
+func friendlyCostReply(env *core.Envelope, ce *llm.CostQuotaExceededError, period, currency string) *core.Envelope {
 	env.ClearActions()
 	label := periodLabel(period)
 	wall := "预算"
@@ -514,8 +670,9 @@ func friendlyCostReply(env *core.Envelope, ce *llm.CostQuotaExceededError, perio
 	case ce.Dimension == costDimSystem():
 		wall = "全局总预算"
 	}
-	text := fmt.Sprintf("%s%s已用尽（当前 ¥%.2f / 上限 ¥%.2f），请于新的计费周期再试。",
-		label, wall, ce.Current, ce.Limit)
+	sym := currencySymbol(currency)
+	text := fmt.Sprintf("%s%s已用尽（当前 %s%.2f / 上限 %s%.2f），请于新的计费周期再试。",
+		label, wall, sym, ce.Current, sym, ce.Limit)
 	env.AddAction(core.Action{
 		Type:    core.ActionReply,
 		Channel: env.Message.Channel,
@@ -529,7 +686,7 @@ func friendlyCostReply(env *core.Envelope, ce *llm.CostQuotaExceededError, perio
 // Dimension 字符串
 // ----------------------------------------------------------------------------
 
-func costDimBot(botID string) string        { return "bot:" + botID }
-func costDimSystem() string                 { return "system" }
+func costDimBot(botID string) string                 { return "bot:" + botID }
+func costDimSystem() string                          { return "system" }
 func costDimBotFeature(botID, feature string) string { return "bot:" + botID + ":feature:" + feature }
-func costDimFeature(feature string) string  { return "feature:" + feature }
+func costDimFeature(feature string) string           { return "feature:" + feature }

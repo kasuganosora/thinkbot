@@ -280,3 +280,131 @@ func TestCostQuotaExceededErrorIs(t *testing.T) {
 		t.Fatal("unrelated error must not match ErrCostQuotaExceeded")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 全局维度共享（回归：曾因 per-bot state 使全局预算退化成「每 bot 一份」）
+// ---------------------------------------------------------------------------
+
+func TestCostQuotaStateGlobalSharedAcrossBots(t *testing.T) {
+	// 同一个 state 服务两个 bot —— 这正是生产环境的形态（进程级共享）。
+	st := NewCostQuotaState("monthly")
+
+	st.RecordCost("bot-a", "reply", 10)
+	st.RecordCost("bot-b", "reply", 20)
+
+	if got := st.Usage(costDimSystem()); got != 30 {
+		t.Errorf("system usage = %v, want 30 (global wall must aggregate across bots)", got)
+	}
+	if got := st.Usage(costDimFeature("reply")); got != 30 {
+		t.Errorf("feature:reply usage = %v, want 30", got)
+	}
+	if got := st.Usage(costDimBot("bot-a")); got != 10 {
+		t.Errorf("bot-a usage = %v, want 10", got)
+	}
+	if got := st.Usage(costDimBot("bot-b")); got != 20 {
+		t.Errorf("bot-b usage = %v, want 20", got)
+	}
+
+	// 全局墙被 bot-a + bot-b 的合计撞到（而非各自独立额度）
+	sys := SystemCostQuotaConfig{Period: "monthly", Total: 25}
+	rA := NewCostQuotaResolver(CostQuotaConfig{Enabled: true, Total: 1000}, sysReaderOf(sys))
+	rB := NewCostQuotaResolver(CostQuotaConfig{Enabled: true, Total: 1000}, sysReaderOf(sys))
+	if e := st.CheckWalls(rB, "bot-b", "reply"); e == nil || e.Dimension != costDimSystem() {
+		t.Fatalf("system wall should trigger on aggregate 30 > 25, got %+v", e)
+	}
+	// bot-a 虽然自己只花了 10（< 25），但全局已耗尽 → 同样被拦
+	if e := st.CheckWalls(rA, "bot-a", "reply"); e == nil || e.Dimension != costDimSystem() {
+		t.Fatalf("bot-a must also be blocked by exhausted global wall, got %+v", e)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// period 实时生效（改周期无需重启 bot）
+// ---------------------------------------------------------------------------
+
+func TestCostQuotaStatePeriodReaderLive(t *testing.T) {
+	period := "monthly"
+	st := NewCostQuotaStateWithPeriodReader(func() string { return period })
+
+	st.RecordCost("bot-1", "reply", 10)
+	if got := st.Usage(costDimBot("bot-1")); got != 10 {
+		t.Fatalf("usage = %v, want 10", got)
+	}
+	if st.Period() != "monthly" {
+		t.Fatalf("Period() = %q, want monthly", st.Period())
+	}
+
+	// 运行期把周期改成 daily → 桶标识变化 → 计数器自动归零（新周期从头计）
+	period = "daily"
+	if st.Period() != "daily" {
+		t.Fatalf("Period() after change = %q, want daily (period must be read live)", st.Period())
+	}
+	if got := st.Usage(costDimBot("bot-1")); got != 0 {
+		t.Errorf("usage after period switch = %v, want 0 (new bucket)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 恢复幂等：ResetBot / ResetGlobal 只清自己辖区，避免重启重复累加
+// ---------------------------------------------------------------------------
+
+func TestCostQuotaStateResetBotIsScoped(t *testing.T) {
+	st := NewCostQuotaState("monthly")
+	st.RecordCost("bot-a", "reply", 10)
+	st.RecordCost("bot-b", "reply", 20)
+
+	// 只清 bot-a（含其 feature 维度），bot-b 与全局维度不受影响
+	st.ResetBot("bot-a")
+	if got := st.Usage(costDimBot("bot-a")); got != 0 {
+		t.Errorf("bot-a after reset = %v, want 0", got)
+	}
+	if got := st.Usage(costDimBotFeature("bot-a", "reply")); got != 0 {
+		t.Errorf("bot-a feature after reset = %v, want 0", got)
+	}
+	if got := st.Usage(costDimBot("bot-b")); got != 20 {
+		t.Errorf("bot-b must survive bot-a reset, got %v want 20", got)
+	}
+	if got := st.Usage(costDimSystem()); got != 30 {
+		t.Errorf("system must survive bot-a reset, got %v want 30", got)
+	}
+
+	st.ResetGlobal()
+	if got := st.Usage(costDimSystem()); got != 0 {
+		t.Errorf("system after ResetGlobal = %v, want 0", got)
+	}
+	if got := st.Usage(costDimFeature("reply")); got != 0 {
+		t.Errorf("feature:reply after ResetGlobal = %v, want 0", got)
+	}
+	if got := st.Usage(costDimBot("bot-b")); got != 20 {
+		t.Errorf("bot-b must survive ResetGlobal, got %v want 20", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 恢复口径：优先用落库的 cost_total，而非按当前单价重算历史
+// ---------------------------------------------------------------------------
+
+func TestRowCostPrefersStoredCost(t *testing.T) {
+	// 有 cost_total → 原样采用，即使当前单价算出来不同（改单价不应篡改历史）
+	row := costRestoreRow{Model: "m1", Input: 1000, Output: 1000, Cost: 7.5}
+	if got := rowCost(row, nil); got != 7.5 {
+		t.Errorf("rowCost with stored = %v, want 7.5", got)
+	}
+
+	// 无 cost_total（存量行） → 按当前单价回算
+	row2 := costRestoreRow{Model: "m1", Input: 1_000_000, Output: 0}
+	priceFor := func(id string) (llm.ModelPrice, bool) {
+		if id != "m1" {
+			return llm.ModelPrice{}, false
+		}
+		return llm.ModelPrice{InputPer1M: 2, OutputPer1M: 8, Currency: "CNY"}, true
+	}
+	if got := rowCost(row2, priceFor); got != 2 {
+		t.Errorf("rowCost fallback = %v, want 2 (1M input × ¥2/1M)", got)
+	}
+
+	// 既无 cost_total 也无单价 → 0（不计费、不限额）
+	if got := rowCost(costRestoreRow{Model: "unknown"}, priceFor); got != 0 {
+		t.Errorf("rowCost without price = %v, want 0", got)
+	}
+}
