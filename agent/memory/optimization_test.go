@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -792,4 +793,48 @@ func testToolContext() *llm.ToolExecContext {
 
 func executeTool(tool llm.Tool, ctx *llm.ToolExecContext, input map[string]any) (any, error) {
 	return tool.Execute(ctx, input)
+}
+
+// TestSnapshot_HeaderReportsTimeSpan 锁住记忆块头部的规模/时间跨度元信息。
+//
+// 回归：注入上下文的只有按重要性截断的 ~20 条（且偏新）。用户问「你最早的记忆
+// 是什么时候」时，bot 只能从这批里猜 —— 实测把真实的 8 月答成 9 月。头部这一行
+// 让 bot 不调工具也能答出正确跨度，并提示它用 order="oldest" 去查那批内容。
+func TestSnapshot_HeaderReportsTimeSpan(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	jul := time.Date(2026, 7, 1, 10, 0, 0, 0, time.Local)
+	for i := 0; i < 3; i++ {
+		if err := repo.Append(ctx, Entry{
+			Scope:     ChannelScope("ch1"),
+			Content:   fmt.Sprintf("记忆 %d", i),
+			CreatedAt: jul.Add(time.Duration(i) * 30 * 24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	snap := NewSnapshot(DefaultSnapshotConfig())
+	if err := snap.Init(ctx, repo, []Scope{ChannelScope("ch1")}); err != nil {
+		t.Fatalf("init snapshot: %v", err)
+	}
+
+	block := snap.MemorySnapshot()
+	if block == "" {
+		t.Fatal("expected a memory block, got empty string")
+	}
+	for _, want := range []string{
+		"total 3 memories",
+		"oldest " + jul.Format("2006-01-02"),
+		"order=\"oldest\"",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("memory block header missing %q:\n%s", want, block)
+		}
+	}
+
+	// user 块不该带这行（条数少且不涉及时间跨度问题）。
+	if user := snap.UserSnapshot(); strings.Contains(user, "total ") {
+		t.Errorf("user block should not carry the stats line: %s", user)
+	}
 }

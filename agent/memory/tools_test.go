@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/tools"
@@ -526,4 +527,200 @@ func TestMemoryTool_EndToEnd(t *testing.T) {
 func newTestToolManager(t *testing.T) *tools.ToolManager {
 	t.Helper()
 	return tools.NewToolManager(prompt.NewRegistry(), nil, nil)
+}
+
+// ============================================================================
+// 时间轴问答（回归防线）
+//
+// 事故：用户问「你最早的记忆是什么时候」，bot 答「9 月」，真实最早是 8 月。
+// 根因不是模型笨，而是工具**没有取最早的能力**：search/recent 一律按时间倒序
+// 取前 N 条，模型只能在「最近这批」里找最早的一条。下面锁住四条能力：
+// order=oldest、since/until、count 的时间跨度、scope_kind=all。
+// ============================================================================
+
+// seedTimeSpanRepo 写入跨三个月、跨两个 scope 的时间轴样本。
+func seedTimeSpanRepo(t *testing.T, repo Repository) (jul, aug, sep time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	jul = time.Date(2026, 7, 1, 10, 0, 0, 0, time.Local)
+	aug = time.Date(2026, 8, 12, 19, 39, 0, 0, time.Local)
+	sep = time.Date(2026, 9, 19, 10, 49, 0, 0, time.Local)
+
+	entries := []Entry{
+		{Scope: BotScope("bot-1"), Content: "最早的记忆：第一次被点名", CreatedAt: jul},
+		{Scope: ChannelScope("ch1"), Content: "八月的记忆", CreatedAt: aug},
+		{Scope: ChannelScope("ch1"), Content: "九月的记忆", CreatedAt: sep},
+	}
+	for _, e := range entries {
+		if err := repo.Append(ctx, e); err != nil {
+			t.Fatalf("append %q: %v", e.Content, err)
+		}
+	}
+	return jul, aug, sep
+}
+
+func TestMemoryTool_SearchOrderOldest(t *testing.T) {
+	repo := NewMemoryRepository()
+	_, aug, sep := seedTimeSpanRepo(t, repo)
+	tool := Tools(ToolConfig{Repo: repo})[0].Tool
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+
+	// 默认 newest：最前面是九月（这正是 bot 当年答「9 月」的原因）。
+	got, err := tool.Execute(ctx, map[string]any{
+		"action": "search", "scope_kind": "channel", "scope_id": "ch1", "limit": 10,
+	})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	first := got.(map[string]any)["entries"].([]EntryResult)[0]
+	if first.Content != "九月的记忆" {
+		t.Fatalf("default order should be newest-first, got %q", first.Content)
+	}
+
+	// order=oldest：走到时间轴另一端，拿到八月。
+	got, err = tool.Execute(ctx, map[string]any{
+		"action": "search", "scope_kind": "channel", "scope_id": "ch1",
+		"limit": 10, "order": "oldest",
+	})
+	if err != nil {
+		t.Fatalf("search oldest: %v", err)
+	}
+	first = got.(map[string]any)["entries"].([]EntryResult)[0]
+	if first.Content != "八月的记忆" {
+		t.Fatalf("order=oldest should return the August entry first, got %q", first.Content)
+	}
+	if first.CreatedAt != aug.Format("2006-01-02 15:04") {
+		t.Errorf("created_at: got %q, want %q", first.CreatedAt, aug.Format("2006-01-02 15:04"))
+	}
+	_ = sep
+}
+
+func TestMemoryTool_SearchTimeRange(t *testing.T) {
+	repo := NewMemoryRepository()
+	seedTimeSpanRepo(t, repo)
+	tool := Tools(ToolConfig{Repo: repo})[0].Tool
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+
+	got, err := tool.Execute(ctx, map[string]any{
+		"action": "search", "scope_kind": "channel", "scope_id": "ch1",
+		"limit": 10, "order": "oldest",
+		"since": "2026-08-01", "until": "2026-08-31",
+	})
+	if err != nil {
+		t.Fatalf("search range: %v", err)
+	}
+	m := got.(map[string]any)
+	if m["count"].(int) != 1 {
+		t.Fatalf("expected only the August entry, got %d", m["count"].(int))
+	}
+	if m["entries"].([]EntryResult)[0].Content != "八月的记忆" {
+		t.Errorf("unexpected entry: %+v", m["entries"])
+	}
+
+	// 非法时间要显式报错，而不是被静默忽略（否则模型以为过滤生效了）。
+	if _, err := tool.Execute(ctx, map[string]any{
+		"action": "search", "scope_kind": "channel", "scope_id": "ch1", "since": "上个月",
+	}); err == nil {
+		t.Error("unparseable time should return an error")
+	}
+}
+
+func TestMemoryTool_ScopeAllCoversOtherScopes(t *testing.T) {
+	repo := NewMemoryRepository()
+	jul, _, _ := seedTimeSpanRepo(t, repo)
+	tool := Tools(ToolConfig{Repo: repo})[0].Tool
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+
+	// 当前 channel 里最早的是八月；跨 scope 才能看到 bot scope 里那条七月。
+	got, err := tool.Execute(ctx, map[string]any{
+		"action": "search", "scope_kind": "all", "limit": 10, "order": "oldest",
+	})
+	if err != nil {
+		t.Fatalf("search all: %v", err)
+	}
+	first := got.(map[string]any)["entries"].([]EntryResult)[0]
+	if first.Content != "最早的记忆：第一次被点名" {
+		t.Fatalf("scope_kind=all should surface the bot-scope July entry, got %q", first.Content)
+	}
+	if first.CreatedAt != jul.Format("2006-01-02 15:04") {
+		t.Errorf("created_at: got %q, want %q", first.CreatedAt, jul.Format("2006-01-02 15:04"))
+	}
+}
+
+func TestMemoryTool_CountReportsTimeSpan(t *testing.T) {
+	repo := NewMemoryRepository()
+	jul, _, sep := seedTimeSpanRepo(t, repo)
+	tool := Tools(ToolConfig{Repo: repo})[0].Tool
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+
+	// 单 scope
+	got, err := tool.Execute(ctx, map[string]any{
+		"action": "count", "scope_kind": "channel", "scope_id": "ch1",
+	})
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	m := got.(map[string]any)
+	if m["count"].(int) != 2 {
+		t.Fatalf("channel count: got %d, want 2", m["count"].(int))
+	}
+	if m["oldest_at"] == "" || m["newest_at"] == "" {
+		t.Fatalf("count must report oldest_at/newest_at, got %+v", m)
+	}
+
+	// 全 scope：这是「我一共有多少记忆 / 最早是哪天」的权威答案
+	got, err = tool.Execute(ctx, map[string]any{"action": "count", "scope_kind": "all"})
+	if err != nil {
+		t.Fatalf("count all: %v", err)
+	}
+	m = got.(map[string]any)
+	if m["count"].(int) != 3 {
+		t.Errorf("all-scope count: got %d, want 3", m["count"].(int))
+	}
+	if m["oldest_at"] != jul.Format("2006-01-02 15:04") {
+		t.Errorf("all-scope oldest_at: got %v, want %v", m["oldest_at"], jul.Format("2006-01-02 15:04"))
+	}
+	if m["newest_at"] != sep.Format("2006-01-02 15:04") {
+		t.Errorf("all-scope newest_at: got %v, want %v", m["newest_at"], sep.Format("2006-01-02 15:04"))
+	}
+}
+
+func TestMemoryTool_RecentHonorsOrder(t *testing.T) {
+	repo := NewMemoryRepository()
+	_, aug, _ := seedTimeSpanRepo(t, repo)
+	tool := Tools(ToolConfig{Repo: repo})[0].Tool
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+
+	got, err := tool.Execute(ctx, map[string]any{
+		"action": "recent", "scope_kind": "channel", "scope_id": "ch1",
+		"limit": 5, "order": "oldest",
+	})
+	if err != nil {
+		t.Fatalf("recent oldest: %v", err)
+	}
+	first := got.(map[string]any)["entries"].([]EntryResult)[0]
+	if first.Content != "八月的记忆" {
+		t.Fatalf("recent with order=oldest should return the August entry, got %q", first.Content)
+	}
+	_ = aug
+}
+
+// TestMemoryTool_ScopeAllIsReadOnly scope_kind="all" 只服务读取：
+// 若允许写入，会凭空造出 kind="all" 的孤儿 scope，里面的记忆以后谁也搜不到。
+func TestMemoryTool_ScopeAllIsReadOnly(t *testing.T) {
+	repo := NewMemoryRepository()
+	seedTimeSpanRepo(t, repo)
+	tool := Tools(ToolConfig{Repo: repo})[0].Tool
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+
+	for _, action := range []string{"add", "remove", "replace"} {
+		args := map[string]any{"action": action, "scope_kind": "all", "content": "x", "old_text": "y"}
+		if _, err := tool.Execute(ctx, args); err == nil {
+			t.Errorf("action %q with scope_kind=all must be rejected", action)
+		}
+	}
+	// 读取类操作不受影响
+	if _, err := tool.Execute(ctx, map[string]any{"action": "count", "scope_kind": "all"}); err != nil {
+		t.Errorf("count with scope_kind=all should work: %v", err)
+	}
 }

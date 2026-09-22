@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"sort"
 
 	"gorm.io/gorm"
 
@@ -179,6 +180,9 @@ func (m *MergedRetriever) Recent(ctx context.Context, scope memory.Scope, limit 
 }
 
 // Retrieve 合并各源的检索结果，按源顺序保留、内容去重。
+//
+// 各源已按 query.Order 各自排序并截断，跨源合并后顺序会被打乱，
+// 因此这里按同一方向再排一次：order=asc 时保证「最早的」确实排在最前。
 func (m *MergedRetriever) Retrieve(ctx context.Context, query memory.Query) ([]memory.Entry, error) {
 	seen := make(map[string]bool)
 	out := make([]memory.Entry, 0, 64)
@@ -195,6 +199,16 @@ func (m *MergedRetriever) Retrieve(ctx context.Context, query memory.Query) ([]m
 			out = append(out, e)
 		}
 	}
+
+	if query.Order == memory.OrderAsc {
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		})
+	} else {
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		})
+	}
 	return out, nil
 }
 
@@ -209,4 +223,28 @@ func (m *MergedRetriever) Count(ctx context.Context, scope memory.Scope) (int, e
 		total += c
 	}
 	return total, nil
+}
+
+// MemoryStats 聚合各源的条目总数与时间跨度（实现 memory.MemoryStatsProvider）。
+// 不支持统计的源跳过；总数求和，时间跨度取各源边界的并集。
+func (m *MergedRetriever) MemoryStats(ctx context.Context, scopes []memory.Scope) (memory.MemoryStatsInfo, error) {
+	var merged memory.MemoryStatsInfo
+	for _, src := range m.sources {
+		provider, ok := src.(memory.MemoryStatsProvider)
+		if !ok {
+			continue
+		}
+		info, err := provider.MemoryStats(ctx, scopes)
+		if err != nil {
+			continue
+		}
+		merged.Total += info.Total
+		if merged.Oldest.IsZero() || (!info.Oldest.IsZero() && info.Oldest.Before(merged.Oldest)) {
+			merged.Oldest = info.Oldest
+		}
+		if info.Newest.After(merged.Newest) {
+			merged.Newest = info.Newest
+		}
+	}
+	return merged, nil
 }

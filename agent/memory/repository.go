@@ -246,11 +246,23 @@ func (r *MemoryRepository) Retrieve(_ context.Context, query Query) ([]Entry, er
 			}
 		}
 
+		// 时间范围过滤（闭区间；零值表示不限，无需额外判断）
+		if !query.Since.IsZero() && entry.CreatedAt.Before(query.Since) {
+			continue
+		}
+		if !query.Until.IsZero() && entry.CreatedAt.After(query.Until) {
+			continue
+		}
+
 		results = append(results, *entry)
 	}
 
-	// 按时间倒序排列（最新的在前）
-	sortByTimeDesc(results)
+	// 排序：默认按时间倒序（最新的在前）；order=asc 时升序（最早的在前）。
+	if query.Order == OrderAsc {
+		sortByTimeAsc(results)
+	} else {
+		sortByTimeDesc(results)
+	}
 
 	// 截断到 limit
 	if len(results) > limit {
@@ -300,6 +312,44 @@ func (r *MemoryRepository) Count(_ context.Context, scope Scope) (int, error) {
 	return len(r.buckets[key]), nil
 }
 
+// MemoryStats 统计条目总数与时间跨度（实现 MemoryStatsProvider）。
+func (r *MemoryRepository) MemoryStats(_ context.Context, scopes []Scope) (MemoryStatsInfo, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var info MemoryStatsInfo
+	if len(scopes) == 0 {
+		for _, bucket := range r.buckets {
+			info.Total += len(bucket)
+			for i := range bucket {
+				observeSpan(&info, bucket[i].CreatedAt)
+			}
+		}
+		return info, nil
+	}
+	for _, scope := range scopes {
+		bucket := r.buckets[scope.Key()]
+		info.Total += len(bucket)
+		for i := range bucket {
+			observeSpan(&info, bucket[i].CreatedAt)
+		}
+	}
+	return info, nil
+}
+
+// observeSpan 把一个创建时间并入统计的最早/最新边界。
+func observeSpan(info *MemoryStatsInfo, t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	if info.Oldest.IsZero() || t.Before(info.Oldest) {
+		info.Oldest = t
+	}
+	if info.Newest.IsZero() || t.After(info.Newest) {
+		info.Newest = t
+	}
+}
+
 // ============================================================================
 // Metrics
 // ============================================================================
@@ -345,5 +395,12 @@ func containsIgnoreCase(s, substr string) bool {
 func sortByTimeDesc(entries []Entry) {
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].CreatedAt.After(entries[j].CreatedAt)
+	})
+}
+
+// sortByTimeAsc 按 CreatedAt 升序排列。
+func sortByTimeAsc(entries []Entry) {
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].CreatedAt.Before(entries[j].CreatedAt)
 	})
 }
