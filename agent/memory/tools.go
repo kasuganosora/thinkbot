@@ -50,6 +50,18 @@ You have persistent memory. Use the ` + "`memory`" + ` tool to save, search and 
 - **Delete stale entries**: whenever you find a memory that is outdated or wrong.
 - **Curate in bulk**: when you need to add and remove several entries, do it in a single ` + "`batch`" + ` operation.
 
+## Time-span questions (read this before answering "when" questions)
+
+Results are **always truncated by limit**, and the default order is newest-first. That means:
+
+- "What is your earliest memory?" / "When did we first talk?" → action "search" with order="oldest" and limit=5.
+  Do NOT answer from action "recent", and do NOT answer from the memories already in your system prompt —
+  both only show you the recent tail, so you would report September when the real answer is August.
+- "What happened in August?" → action "search" with since="2026-08-01", until="2026-08-31", order="oldest".
+- Questions about your memory as a whole (not this conversation) → add scope_kind="all".
+  The current channel is only one slice of your memory; a single-scope "earliest" is that channel's start, not yours.
+- action "count" reports oldest_at / newest_at when available — use it to state a span precisely instead of guessing.
+
 ## Best practices
 
 - A write takes effect in the system prompt of the **next** turn, not the current one.
@@ -151,6 +163,21 @@ func Tools(config ToolConfig) []tools.ToolDef {
 						"description": "Max results for 'search'/'recent'. Default: 10 (search), 5 (recent).",
 						"default":     10,
 					},
+					"order": map[string]any{
+						"type": "string",
+						"enum": []string{"newest", "oldest"},
+						"description": "Time order for 'search'/'recent'/'list'. Default 'newest'. " +
+							"Use 'oldest' for time-span questions (\"what is your earliest memory\", \"what happened in August\") — " +
+							"results are always truncated, so 'newest' can only ever see the recent tail.",
+					},
+					"since": map[string]any{
+						"type":        "string",
+						"description": "Only entries created at or after this time. Accepts 'YYYY-MM-DD' or RFC3339 (e.g. '2026-08-01').",
+					},
+					"until": map[string]any{
+						"type":        "string",
+						"description": "Only entries created at or before this time. Same formats as 'since'.",
+					},
 					"category": map[string]any{
 						"type":        "string",
 						"description": "Category for 'add'. Options: fact, preference, event, observation. Default: observation.",
@@ -180,9 +207,11 @@ func Tools(config ToolConfig) []tools.ToolDef {
 						},
 					},
 					"scope_kind": map[string]any{
-						"type":        "string",
-						"description": "Memory scope. Options: channel (default), user, bot, global.",
-						"default":     "channel",
+						"type": "string",
+						"description": "Memory scope. Options: channel (default), user, bot, global, all. " +
+							"'all' searches/counts across every scope — required for questions about your memory as a whole " +
+							"(\"your earliest memory\"), since the current channel is only one slice of it.",
+						"default": "channel",
 					},
 					"scope_id": map[string]any{
 						"type":        "string",
@@ -208,6 +237,15 @@ func Tools(config ToolConfig) []tools.ToolDef {
 
 				repo := config.Repo
 				scope := parseScope(m, defaultKind, defaultID)
+
+				// 护栏：scope_kind="all" 只是**读取**用的通配符（跨 scope 检索/统计），
+				// 不能当作写入目标 —— 否则会凭空造出一个 kind="all" 的孤儿 scope，
+				// 里面的记忆以后谁也搜不到（写入和查询的 scope 对不上）。
+				if scope.Kind == ScopeAll && action != "search" && action != "recent" && action != "count" {
+					return nil, fmt.Errorf(
+						"scope_kind 'all' is read-only (search/recent/count); "+
+							"'%s' needs a concrete scope: channel, user, bot or global", action)
+				}
 
 				switch action {
 				case "search":
@@ -238,7 +276,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					return handleRecent(ctx, repo, scope, m)
 
 				case "count":
-					return handleCount(ctx, repo, scope)
+					return handleCount(ctx, repo, scope, m)
 
 				case "batch":
 					result, err := handleBatch(ctx, repo, config, scope, m)
@@ -281,11 +319,23 @@ func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		limit = 50
 	}
 
+	since, err := parseTimeParam(m["since"])
+	if err != nil {
+		return nil, err
+	}
+	until, err := parseTimeParam(m["until"])
+	if err != nil {
+		return nil, err
+	}
+
 	entries, err := repo.Retrieve(ctx, Query{
-		Scopes:   []Scope{scope},
+		Scopes:   scopesFor(scope),
 		Text:     queryText,
 		Category: category,
 		Limit:    limit,
+		Order:    orderFor(m),
+		Since:    since,
+		Until:    until,
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "memory search failed")
@@ -514,7 +564,25 @@ func handleRecent(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		limit = 20
 	}
 
-	entries, err := repo.Recent(ctx, scope, limit)
+	// 走 Retrieve 而非 repo.Recent：Recent 语义上只能取最新的 N 条，无法表达
+	// order=oldest / 时间范围。带上 order + since/until 后 recent 才覆盖得住
+	// 「最早那几条」这类问法。
+	since, err := parseTimeParam(m["since"])
+	if err != nil {
+		return nil, err
+	}
+	until, err := parseTimeParam(m["until"])
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := repo.Retrieve(ctx, Query{
+		Scopes: scopesFor(scope),
+		Limit:  limit,
+		Order:  orderFor(m),
+		Since:  since,
+		Until:  until,
+	})
 	if err != nil {
 		return nil, errs.Wrap(err, "memory recent failed")
 	}
@@ -522,16 +590,39 @@ func handleRecent(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 	return formatEntries(entries, "recent"), nil
 }
 
-func handleCount(ctx *llm.ToolExecContext, repo Repository, scope Scope) (any, error) {
+func handleCount(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+	// scope_kind=all 时跨 scope 统计：单 scope 的 Count 无法回答
+	// 「我一共有多少记忆 / 最早是哪天」这类整体问题。
+	if provider, ok := repo.(MemoryStatsProvider); ok && scope.Kind == ScopeAll {
+		if info, err := provider.MemoryStats(ctx, nil); err == nil {
+			return map[string]any{
+				"scope":     scope.Key(),
+				"count":     info.Total,
+				"oldest_at": formatEntryTime(info.Oldest),
+				"newest_at": formatEntryTime(info.Newest),
+				"hint":      "Time span across all scopes. Use search with order:'oldest' to read the earliest entries.",
+			}, nil
+		}
+	}
+
 	count, err := repo.Count(ctx, scope)
 	if err != nil {
 		return nil, errs.Wrap(err, "memory count failed")
 	}
 
-	return map[string]any{
+	resp := map[string]any{
 		"scope": scope.Key(),
 		"count": count,
-	}, nil
+	}
+	// 时间跨度：让「最早的记忆是什么时候」这类问题有权威答案，而不必让模型
+	// 从截断后的列表里猜。后端不支持统计时静默省略（可选能力）。
+	if provider, ok := repo.(MemoryStatsProvider); ok {
+		if info, err := provider.MemoryStats(ctx, scopesFor(scope)); err == nil {
+			resp["oldest_at"] = formatEntryTime(info.Oldest)
+			resp["newest_at"] = formatEntryTime(info.Newest)
+		}
+	}
+	return resp, nil
 }
 
 func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
@@ -800,6 +891,57 @@ func parseScope(m map[string]any, defaultKind ScopeKind, defaultID string) Scope
 		id = defaultID
 	}
 	return Scope{Kind: ScopeKind(kindStr), ID: id}
+}
+
+// ============================================================================
+// 时间与排序参数解析
+// ============================================================================
+//
+// 这一组能力是为「时间轴类问题」补的：检索结果永远被 limit 截断，而默认排序是
+// 时间倒序 —— 于是模型无论问「最早的记忆」「8 月发生过什么」都只能看到最近的一批，
+// 然后把「最近 N 条里最早的」当成「全部最早」回答（实测真实最早 2026-08-12
+// 被答成「9 月」）。order=asc + since/until 让模型能真正走到时间轴的另一端。
+
+// scopesFor 把解析出的 scope 转成 Query.Scopes。
+// ScopeAll 返回空切片（检索/统计全部 scope）；其余按单 scope 精确限定。
+func scopesFor(scope Scope) []Scope {
+	if scope.Kind == ScopeAll {
+		return nil
+	}
+	return []Scope{scope}
+}
+
+// orderFor 解析 order 参数（"newest" / "oldest"），默认 newest。
+func orderFor(m map[string]any) string {
+	if o, _ := m["order"].(string); o == "oldest" {
+		return OrderAsc
+	}
+	return OrderDesc
+}
+
+// timeParamLayouts 接受的时间格式：完整 RFC3339 与常用日期/日期时间简写。
+// 简写按**本地时区**解释 —— bot 和用户说「8 月」指的是本地日历，用 UTC 会把
+// 月初/月末的几个小时算错月份。
+var timeParamLayouts = []string{
+	time.RFC3339,
+	"2006-01-02 15:04:05",
+	"2006-01-02 15:04",
+	"2006-01-02",
+}
+
+// parseTimeParam 解析 since/until 参数，无法识别时返回错误（提示模型换格式）。
+func parseTimeParam(v any) (time.Time, error) {
+	s, _ := v.(string)
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, nil
+	}
+	for _, layout := range timeParamLayouts {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse time %q; use RFC3339 (e.g. 2026-08-01T00:00:00+08:00) or 'YYYY-MM-DD'", s)
 }
 
 // ============================================================================

@@ -56,6 +56,15 @@ const (
 	// ScopeGlobal 全局记忆（跨 Bot 共享）。
 	// 典型场景：平台级配置、共享知识。
 	ScopeGlobal ScopeKind = "global"
+
+	// ScopeAll 查询用的通配符：跨所有 scope 检索/统计。
+	//
+	// 只用于**读**（search/recent/count），不可作为写入目标 —— 写入必须落在
+	// 确定的 scope 上，否则记忆会无处可寻。
+	// 存在理由：bot 的记忆分散在 channel / user / bot / global 多个 scope，
+	// 而会话默认只带当前 channel。问「你最早的记忆是什么时候」时，若只查当前
+	// channel，得到的「最早」只是这个频道的起点，不是 bot 的起点。
+	ScopeAll ScopeKind = "all"
 )
 
 // Key 返回 Scope 的唯一标识键（用于存储分桶）。
@@ -145,6 +154,19 @@ type Store interface {
 // Retriever — 记忆检索接口（查询侧）
 // ============================================================================
 
+// 排序方向常量（Query.Order 取值）。
+const (
+	// OrderDesc 按创建时间倒序（最新在前），默认行为。
+	OrderDesc = "desc"
+	// OrderAsc 按创建时间升序（最早在前）。
+	//
+	// 存在的理由：检索默认只能拿到「最近 N 条」，而用户常问
+	// 「你最早的记忆是什么」「8 月发生过什么」。没有升序能力时，模型只能
+	// 在最近的 N 条里找最早的一条，把「最近 N 条里最早的」当成「全部最早」，
+	// 系统性答错（实测：真实最早记忆 2026-08-12，模型答「9 月」）。
+	OrderAsc = "asc"
+)
+
 // Query 描述一次记忆检索请求。
 type Query struct {
 	// Scopes 检索范围（可同时检索多个 scope）。
@@ -159,6 +181,36 @@ type Query struct {
 	Limit int
 	// MinImportance 最小重要度过滤（0 表示不过滤）。
 	MinImportance float64
+	// Order 排序方向：OrderDesc（默认，最新在前）/ OrderAsc（最早在前）。
+	// 空值等价于 OrderDesc，保证既有调用方行为不变。
+	Order string
+	// Since 只返回创建时间 >= Since 的条目（零值表示不限，闭区间）。
+	Since time.Time
+	// Until 只返回创建时间 <= Until 的条目（零值表示不限，闭区间）。
+	Until time.Time
+}
+
+// MemoryStatsInfo 描述一组记忆的时间跨度与规模。
+//
+// 用途：让模型（和系统提示注入的记忆块）知道「全库有多少条、最早/最新是什么时候」，
+// 而不必把全部条目读一遍。缺了它，模型面对「最早的记忆是什么时候」只能凭注入的
+// 最近 N 条猜测。
+type MemoryStatsInfo struct {
+	// Total 条目总数（受 scopes 过滤影响）。
+	Total int
+	// Oldest 最早条目的创建时间（无条目时为零值）。
+	Oldest time.Time
+	// Newest 最新条目的创建时间（无条目时为零值）。
+	Newest time.Time
+}
+
+// MemoryStatsProvider 可选的统计能力。
+//
+// 定义为**可选接口**而非并入 Retriever，是为了不破坏既有实现与测试里的假仓储：
+// 不支持的后端由调用方（工具 / 快照）静默降级为不展示元信息，而不是编译失败。
+type MemoryStatsProvider interface {
+	// MemoryStats 统计给定 scopes（空表示全部）下的条目总数与时间跨度。
+	MemoryStats(ctx context.Context, scopes []Scope) (MemoryStatsInfo, error)
 }
 
 // Retriever 定义记忆的检索能力。
