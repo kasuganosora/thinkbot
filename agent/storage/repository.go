@@ -299,11 +299,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 
 	// Scope 过滤
 	if len(query.Scopes) > 0 {
-		scopeConditions := make([][]interface{}, 0, len(query.Scopes))
-		for _, scope := range query.Scopes {
-			scopeConditions = append(scopeConditions, []interface{}{string(scope.Kind), scope.ID})
-		}
-		tx = tx.Where("(scope_kind, scope_id) IN ?", scopeConditions)
+		tx = tx.Where("(scope_kind, scope_id) IN ?", scopeConditions(query.Scopes))
 	}
 
 	// Category 过滤
@@ -321,9 +317,24 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		tx = tx.Where("content LIKE ?", "%"+query.Text+"%")
 	}
 
-	// 按时间倒序 + limit
+	// 时间范围过滤（闭区间）
+	if !query.Since.IsZero() {
+		tx = tx.Where("created_at >= ?", query.Since)
+	}
+	if !query.Until.IsZero() {
+		tx = tx.Where("created_at <= ?", query.Until)
+	}
+
+	// 排序 + limit：默认倒序（最新在前），order=asc 时升序（最早在前）。
+	//
+	// 升序是「最早的记忆是什么」这类问题的唯一正确路径：先按时间倒序再截断，
+	// 无论 limit 多大都只能看到最近的一批，答案必然偏新。
 	var models []dao.EntryModel
-	if err := tx.Order("created_at DESC").Limit(limit).Find(&models).Error; err != nil {
+	order := "created_at DESC"
+	if query.Order == memory.OrderAsc {
+		order = "created_at ASC"
+	}
+	if err := tx.Order(order).Limit(limit).Find(&models).Error; err != nil {
 		return nil, errs.Wrap(err, "sqlite_repository: retrieve failed")
 	}
 
@@ -377,6 +388,72 @@ func (r *SQLiteRepository) Count(ctx context.Context, scope memory.Scope) (int, 
 		return 0, errs.Wrap(err, "sqlite_repository: count failed")
 	}
 	return int(count), nil
+}
+
+// MemoryStats 统计条目总数与时间跨度（实现 memory.MemoryStatsProvider）。
+//
+// 单次聚合查询（COUNT + MIN + MAX），避免把全表读进内存。
+// scopes 为空表示统计全库 —— 「我最早的记忆是什么时候」这类问题必须跨 scope 统计，
+// 否则在当前会话 scope 里算出的「最早」只是该频道的起点，不是 bot 的起点。
+func (r *SQLiteRepository) MemoryStats(ctx context.Context, scopes []memory.Scope) (memory.MemoryStatsInfo, error) {
+	tx := r.db.WithContext(ctx).Model(&dao.EntryModel{})
+	if len(scopes) > 0 {
+		tx = tx.Where("(scope_kind, scope_id) IN ?", scopeConditions(scopes))
+	}
+
+	// MIN/MAX 作用在 datetime(created_at) 上而非原始列：
+	// 原始列是带时区偏移的文本（如 "2026-08-12 19:39:29.93974+08:00"），
+	// 直接按文本比较在**混用不同时区偏移**的记录间会排错序；datetime() 先
+	// 归一化成 UTC 文本再比较，跨时区也正确。
+	//
+	// 另：GORM 把聚合结果扫到 *time.Time 会报 unsupported Scan（驱动返回
+	// string），因此先扫成 string 再自行解析。
+	var row struct {
+		Total  int64
+		Oldest *string
+		Newest *string
+	}
+	if err := tx.Select("COUNT(*) AS total, MIN(datetime(created_at)) AS oldest, MAX(datetime(created_at)) AS newest").
+		Scan(&row).Error; err != nil {
+		return memory.MemoryStatsInfo{}, errs.Wrap(err, "sqlite_repository: memory stats failed")
+	}
+
+	info := memory.MemoryStatsInfo{Total: int(row.Total)}
+	if row.Oldest != nil {
+		info.Oldest = parseSQLiteTime(*row.Oldest)
+	}
+	if row.Newest != nil {
+		info.Newest = parseSQLiteTime(*row.Newest)
+	}
+	return info, nil
+}
+
+// parseSQLiteTime 解析 SQLite datetime() 产出的 UTC 文本，并转换到本地时区。
+// 解析失败返回零值 —— 统计只是元信息，不该因为它让整次检索失败。
+func parseSQLiteTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999",
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+	} {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t.Local()
+		}
+	}
+	return time.Time{}
+}
+
+// scopeConditions 把 scope 列表转成 GORM 的多元组 IN 条件。
+func scopeConditions(scopes []memory.Scope) [][]interface{} {
+	cond := make([][]interface{}, 0, len(scopes))
+	for _, scope := range scopes {
+		cond = append(cond, []interface{}{string(scope.Kind), scope.ID})
+	}
+	return cond
 }
 
 // ============================================================================

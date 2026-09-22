@@ -109,6 +109,14 @@ type Snapshot struct {
 	cachedMemory string
 	cachedUser   string
 
+	// stats 记忆规模与时间跨度元信息（statsValid=false 表示后端不支持或统计失败）。
+	//
+	// 存在理由：注入上下文的只有重要性最高的 20 条（且偏新），模型据此回答
+	// 「你最早的记忆是什么时候」必然答成最近那批的时间。把「总数/最早/最新」
+	// 写进记忆块头部，模型不调工具也能给出正确的时间跨度。
+	stats      MemoryStatsInfo
+	statsValid bool
+
 	// 状态跟踪
 	captured    bool
 	capturedAt  time.Time
@@ -281,7 +289,12 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 		return fmt.Errorf("snapshot: all scope retrievals failed: %w", lastErr)
 	}
 
+	// 规模 / 时间跨度元信息（可选能力）：单次聚合查询，后端不支持则跳过。
+	stats, statsValid := memoryStats(ctx, retriever, scopes)
+
 	s.mu.Lock()
+	s.stats = stats
+	s.statsValid = statsValid
 	s.cachedMemory = s.renderBlock("memory", memoryEntries)
 	s.cachedUser = s.renderBlock("user", userEntries)
 	s.captured = true
@@ -422,7 +435,16 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	separator := "════════════════════════════════════════════════"
 
 	var sb strings.Builder
-	sb.WriteString(separator + "\n" + header + " [" + usage + "]\n" + separator + "\n")
+	sb.WriteString(separator + "\n" + header + " [" + usage + "]\n")
+
+	// 仅 memory 块带元信息：user 块条数少且不涉及「最早」类问题。
+	// 这一段是「你最早的记忆是什么时候」的唯一低成本正解 —— 下面的 N 条是按
+	// 重要性截断的，几乎全是近期的，模型若只看条目会把「最近」当成「最早」。
+	if target != "user" && s.statsValid && s.stats.Total > 0 {
+		sb.WriteString(s.renderStatsLine(len(sanitized)))
+	}
+
+	sb.WriteString(separator + "\n")
 	for i, entry := range sanitized {
 		if i > 0 {
 			sb.WriteString(s.config.Separator)
@@ -431,6 +453,41 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	}
 
 	return sb.String()
+}
+
+// renderStatsLine 渲染记忆块的规模/时间跨度元信息行。
+//
+// 关键在最后那句提示：光告诉模型「最早是 2026-08-12」不够，还得告诉它
+// 「要看那批内容得用 order=oldest 去查」，否则它知道了日期也编不出内容。
+func (s *Snapshot) renderStatsLine(shown int) string {
+	var sb strings.Builder
+	sb.WriteString("total " + strconv.Itoa(s.stats.Total) + " memories")
+	if !s.stats.Oldest.IsZero() {
+		sb.WriteString(", oldest " + s.stats.Oldest.Format("2006-01-02"))
+	}
+	if !s.stats.Newest.IsZero() {
+		sb.WriteString(", newest " + s.stats.Newest.Format("2006-01-02"))
+	}
+	sb.WriteString(" | showing " + strconv.Itoa(shown) +
+		" by importance — NOT the full timeline. For \"earliest memory\" / \"what happened in <month>\", " +
+		"use the memory tool: search with order=\"oldest\" (optionally since/until), scope_kind=\"all\".\n")
+	return sb.String()
+}
+
+// memoryStats 从检索器取规模/时间跨度统计；后端不支持时返回 false。
+func memoryStats(ctx context.Context, retriever Retriever, scopes []Scope) (MemoryStatsInfo, bool) {
+	provider, ok := retriever.(MemoryStatsProvider)
+	if !ok {
+		return MemoryStatsInfo{}, false
+	}
+	info, err := provider.MemoryStats(ctx, scopes)
+	if err != nil {
+		return MemoryStatsInfo{}, false
+	}
+	if info.Total == 0 {
+		return MemoryStatsInfo{}, false
+	}
+	return info, true
 }
 
 // formatUsage 格式化用量字符串。
