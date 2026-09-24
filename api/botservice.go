@@ -1671,7 +1671,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	tieredL1 := storage.NewTieredL1Retriever(s.db)
 	tieredL3 := storage.NewTieredProfileRetriever(s.db)
 	mergedRecall := storage.NewMergedRetriever(tieredL3, tieredL1, memRepo)
-	recallStage := stages.NewRecallStage("memory-recall", mergedRecall, memWindow, s.logger)
+	// 相关性召回默认关闭（灰度开关 THINKBOT_MEMORY_RELEVANCE_RECALL）：
+	// 主通道每 scope 只取最近 50 条，本机 misskey timeline scope 有 2472 条，
+	// 窗口外的历史记忆（含 importance 最高的一批）永远进不了候选集。
+	// 开启后由 Snapshot 的相关性通道从更宽窗口补足相关条目。
+	recallStage := stages.NewRecallStage("memory-recall", mergedRecall, memWindow, s.logger,
+		memory.SnapshotConfig{RelevanceRecall: stages.MemoryRelevanceEnabled()})
 
 	// 聊天节奏 stage：按「平台 + 会话类型」抑制过度发言。
 	// web 平台硬禁用；单聊(private)默认关闭节奏（即时回复）；群聊/频道默认受控。
