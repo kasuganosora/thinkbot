@@ -108,6 +108,11 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		snapCfg.RelevanceCandidates = s.recall.RelevanceCandidates
 		snapCfg.RelevanceTopK = s.recall.RelevanceTopK
 		snapCfg.Query = env.Message.Text
+		// 补充通道专用检索源（可选）：主链路不含 L0，而高价值老记忆常是 L0。
+		snapCfg.BeyondWindowRetriever = s.recall.BeyondWindowRetriever
+		// 单条长度约束：巨型档案条目会单条吃满记忆块预算，使补充召回的老记忆
+		// 永远看不见（实测 "showing 1 by importance"）。与相关性召回同开关灰度。
+		snapCfg.MaxRenderedEntryChars = memory.DefaultRenderedMaxChars
 	}
 	snap := memory.NewSnapshot(snapCfg)
 	if err := snap.Init(ctx, s.retriever, scopes); err != nil {

@@ -105,9 +105,31 @@ type SnapshotConfig struct {
 	ImportantTopK int
 	// ImportantMinImportance 高价值保底的 importance 阈值（默认 0.7）。
 	ImportantMinImportance float64
+	// ImportantRelevanceWeight 保底通道里相关性相对 importance 的权重（默认 0.6）。
+	//
+	// 保底通道的排序键是 relevance*weight + importance。设 0 即回到
+	// 「纯按 importance 取」的旧行为；加大则更偏向「与本轮话题相关」。
+	// 详见 relevance.go 里 DefaultImportantRelevanceWeight 的实测说明。
+	ImportantRelevanceWeight float64
+	// BeyondWindowRetriever 窗口外补充通道专用的检索源（可选，默认用主检索器）。
+	//
+	// 存在理由（2026-09-24 实测）：本机 importance 最高的一批记忆是 tier=0，
+	// 而主检索链路只含 L1/L3/memory_entries，这批条目不在候选集里，排序再怎么
+	// 改也捞不回来。L0 是未升华的原始事件流（2000+ 条），不能并入主通道
+	// （会把碎碎念灌进 prompt），因此单独装配给补充通道使用：该通道默认关闭，
+	// 且只取 importance 达标 + 与当前话题相关的少数几条。
+	BeyondWindowRetriever Retriever
 	// RecalledMaxChars 补充条目的单条字符上限（默认 240）。
 	// 补充条目普遍偏长，不封顶会吃满整个记忆块预算，挤掉主通道的近期记忆。
 	RecalledMaxChars int
+	// MaxRenderedEntryChars 注入块里单条记忆的字符上限（0 = 不限制，保持现状）。
+	//
+	// 默认关闭是因为它作用于主通道，属于行为变更：开启后超过上限
+	// renderedSkipFactor 倍的条目会被丢弃（本机是 14808/15314 字符的完整档案，
+	// 它们现在单条就吃满预算，导致注入块只剩 1 条残片）。
+	// 由灰度开关 THINKBOT_MEMORY_RELEVANCE_RECALL 一并带上，验证收益后再决定是否常开。
+	// 详见 relevance.go 里 DefaultRenderedMaxChars 的实测说明。
+	MaxRenderedEntryChars int
 	// Query 当前轮次的输入文本，用于相关性打分。由调用方（如 RecallStage）
 	// 在每轮构建快照时注入；为空时相关性通道自动跳过。
 	Query string
@@ -116,20 +138,21 @@ type SnapshotConfig struct {
 // DefaultSnapshotConfig 返回默认快照配置。
 func DefaultSnapshotConfig() SnapshotConfig {
 	return SnapshotConfig{
-		Mode:                   ModeLive,
-		MaxMemoryChars:         2200,
-		MaxUserChars:           1375,
-		MaxEntries:             20,
-		CompressTriggerRatio:   0.2,
-		Separator:              "\n§\n",
-		RefreshInterval:        5 * time.Minute,
-		RefreshTurns:           10,
-		RelevanceRecall:        false,
-		RelevanceCandidates:    DefaultRelevanceCandidates,
-		RelevanceTopK:          DefaultRelevanceTopK,
-		ImportantTopK:          DefaultImportantTopK,
-		ImportantMinImportance: DefaultImportantMinImportance,
-		RecalledMaxChars:       DefaultRecalledMaxChars,
+		Mode:                     ModeLive,
+		MaxMemoryChars:           2200,
+		MaxUserChars:             1375,
+		MaxEntries:               20,
+		CompressTriggerRatio:     0.2,
+		Separator:                "\n§\n",
+		RefreshInterval:          5 * time.Minute,
+		RefreshTurns:             10,
+		RelevanceRecall:          false,
+		RelevanceCandidates:      DefaultRelevanceCandidates,
+		RelevanceTopK:            DefaultRelevanceTopK,
+		ImportantTopK:            DefaultImportantTopK,
+		ImportantMinImportance:   DefaultImportantMinImportance,
+		ImportantRelevanceWeight: DefaultImportantRelevanceWeight,
+		RecalledMaxChars:         DefaultRecalledMaxChars,
 	}
 }
 
@@ -212,8 +235,20 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		if config[0].ImportantMinImportance > 0 {
 			cfg.ImportantMinImportance = config[0].ImportantMinImportance
 		}
+		// 与其他配额字段同一约定：0 表示「未设置」，回落默认值。
+		// 需要临时关闭保底通道的相关性排序时，把 Query 置空即可
+		// （无 query 时相关性恒为 0，等价于纯 importance 排序）。
+		if config[0].ImportantRelevanceWeight > 0 {
+			cfg.ImportantRelevanceWeight = config[0].ImportantRelevanceWeight
+		}
+		if config[0].BeyondWindowRetriever != nil {
+			cfg.BeyondWindowRetriever = config[0].BeyondWindowRetriever
+		}
 		if config[0].RecalledMaxChars > 0 {
 			cfg.RecalledMaxChars = config[0].RecalledMaxChars
+		}
+		if config[0].MaxRenderedEntryChars > 0 {
+			cfg.MaxRenderedEntryChars = config[0].MaxRenderedEntryChars
 		}
 		if config[0].Query != "" {
 			cfg.Query = config[0].Query
@@ -399,7 +434,10 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 		}
 	}
 
-	gate := relevanceGate(base, s.config.MaxEntries)
+	// 抬升基准取主通道**最高** importance：补充条目要严格压过主通道所有条目，
+	// 否则会被 doRefresh 的 MaxEntries 截断或 renderBlock 的字符预算挤掉。
+	// relevanceGate 只保证越过第 MaxEntries 名，实测不够（见 boostRelevance 注释）。
+	gate := topImportance(base)
 	var recalled []Entry
 
 	// 通道一：相关性（需要当前输入作为 query）
@@ -413,6 +451,10 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 			}
 			candidates = append(candidates, wider...)
 		}
+		// 先按长度过滤再打分：超过补充通道封顶门槛的条目最终会被 capRecalled
+		// 丢弃，为它们做分词纯属浪费。本机有 14808/15314 字符的档案条目，
+		// 不过滤时每轮快照要多花约 380ms（基线 16ms → 开启后 400ms）。
+		candidates = filterOversized(candidates, s.config.RecalledMaxChars)
 		candidateCount = len(candidates)
 
 		picked := SelectRelevant(s.config.Query, candidates, seen, s.config.RelevanceTopK)
@@ -431,9 +473,18 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 		}
 	}
 
-	// 通道二：高价值保底（不依赖 query，跨全时间按 importance 取）
+	// 通道二：高价值保底（跨全时间取 importance 达标者，按「相关性+重要性」排序）
+	//
+	// 用补充通道专用检索源（若装配了）：主检索链路不含 L0，而高价值老记忆
+	// 恰恰常是 L0，走主检索器会永远看不到它们（实测详情见配置字段注释）。
 	var importantCount int
-	if picked := SelectImportant(ctx, retriever, scopes, seen, s.config.ImportantMinImportance, s.config.ImportantTopK, s.logger); len(picked) > 0 {
+	importantRetriever := retriever
+	if s.config.BeyondWindowRetriever != nil {
+		importantRetriever = s.config.BeyondWindowRetriever
+	}
+	if picked := SelectImportant(ctx, importantRetriever, scopes, seen, s.config.Query,
+		s.config.ImportantMinImportance, s.config.ImportantRelevanceWeight,
+		s.config.ImportantTopK, s.config.RecalledMaxChars, s.logger); len(picked) > 0 {
 		boostRelevance(picked, gate)
 		var imp []Entry
 		for _, p := range picked {
@@ -513,6 +564,17 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].Importance > entries[j].Importance
 	})
+
+	// 单条长度约束（可选，默认关闭）：巨型条目会把整个字符预算吃光，
+	// 必须先于条数截断执行，否则它们仍会占掉名额。
+	if s.config.MaxRenderedEntryChars > 0 {
+		kept, dropped := capRendered(entries, s.config.MaxRenderedEntryChars)
+		if dropped > 0 && s.logger != nil {
+			s.logger.Infow("snapshot: dropped oversized entries from memory block",
+				"dropped", dropped, "maxChars", s.config.MaxRenderedEntryChars)
+		}
+		entries = kept
+	}
 
 	// 条数硬上限（双条件之一）：无论如何最多注入 MaxEntries 条。
 	// 人的注意力约 10 条上下文，给 20 条是富裕上限；超出部分按重要性降序截断。
