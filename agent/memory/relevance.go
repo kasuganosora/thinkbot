@@ -91,6 +91,18 @@ const (
 	// nearDupLengthRatio 允许改用包含度判定的 token 数之比上限。
 	// 超过这个比例说明一条显著长于另一条，此时只认 Jaccard（见 nearDupSimilarity）。
 	nearDupLengthRatio = 3
+	// DefaultMaxPinnedEntries 约束类记忆的置顶名额上限（默认 6）。
+	//
+	// 约束类（preference / bot_personality）是行为准则，不能因为与当前话题无关
+	// 就被相关性排序挤出注入块（实测会被挤掉，详见 hoistPinned 注释）。
+	// 本机这类条目共 89 条，必须限量：全部置顶会反过来压死主通道的近期记忆。
+	DefaultMaxPinnedEntries = 6
+	// DefaultRecalledBudgetChars 补充通道（相关性 + 高价值保底）的字符总配额。
+	//
+	// 取 1200 的依据：记忆块预算 2200，补充通道 8 条 × 240 字符 = 1920 会吃掉
+	// 87%，实测主通道从 18 条掉到 4 条。1200 约等于预算的 55%，给主通道留下
+	// 1000 字符（约 8 条近期记忆），同时够放 5 条完整的补充条目。
+	DefaultRecalledBudgetChars = 1200
 	// nearDupMinTokens 参与近重复比较的最小 token 数。
 	//
 	// 极短条目（如「好的」「嗯，收到」）只有 1~2 个 token，任意两条都可能
@@ -715,6 +727,68 @@ func boostRelevance(picked []ScoredEntry, gate float64) {
 			picked[i].Entry.Importance = eff
 		}
 	}
+}
+
+// hoistPinned 把「约束类」记忆提到候选最前面，返回重排后的条目与被提名的条数。
+//
+// 存在理由（2026-09-24 A/B 实测）：开启相关性召回后，补充通道的条目被抬升到
+// 主通道之上（见 boostRelevance），8 条 × 240 字符吃掉 2200 字符预算的 87%，
+// 主通道只剩 3~4 条名额。结果是「对 luna 的频率警告持续有效：不主动搭话」
+// 「若 luna 再现明确情绪求助信号，安全优先于频率限制」这类**行为约束**被挤出
+// 注入块——它们 importance 只有 0.687，与当前话题也不相关，靠排序永远救不回来。
+// 丢了它们的后果不是「少知道一件事」，而是 bot 可能重复此前造成过误会的过度发言。
+//
+// 判定只看 Category（约束类）：preference（用户偏好/行为约定）与
+// bot_personality（人设）。不用 importance 阈值是因为实测这些约束的分数并不高
+// （0.687 vs 长档案 0.7+），按分排序恰好是它们被挤掉的原因。
+//
+// maxPinned 限制提名条数：约束类条目本机有 89 条，全部置顶会反过来压死主通道。
+// 提名内部仍按 importance 降序（调用方已排好序，这里保序）。
+func hoistPinned(entries []Entry, categories map[string]struct{}, maxPinned int) ([]Entry, int) {
+	if len(categories) == 0 || maxPinned <= 0 || len(entries) < 2 {
+		return entries, 0
+	}
+	pinned := make([]Entry, 0, maxPinned)
+	rest := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if len(pinned) < maxPinned {
+			if _, ok := categories[strings.ToLower(strings.TrimSpace(e.Category))]; ok {
+				pinned = append(pinned, e)
+				continue
+			}
+		}
+		rest = append(rest, e)
+	}
+	if len(pinned) == 0 {
+		return entries, 0
+	}
+	out := make([]Entry, 0, len(entries))
+	out = append(out, pinned...)
+	out = append(out, rest...)
+	return out, len(pinned)
+}
+
+// capRecalledBudget 按累计字符裁剪补充通道的条目，返回保留的条目与被裁掉的条数。
+//
+// 存在理由（2026-09-24 A/B 实测）：补充通道最多 8 条 × 240 字符 = 1920，
+// 占满 2200 字符预算后主通道只剩 280 字符（18 条 → 4 条）。相关性召回应当是
+// 「在近期记忆之外多想起几条」，而不是「替换掉近期记忆」，所以补充通道必须
+// 有自己的预算天花板，不能靠单条封顶间接约束（TopK 一改天花板就跟着漂）。
+func capRecalledBudget(entries []Entry, budget int) ([]Entry, int) {
+	if budget <= 0 || len(entries) == 0 {
+		return entries, 0
+	}
+	used := 0
+	kept := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		n := len([]rune(e.Content))
+		if len(kept) > 0 && used+n > budget {
+			continue
+		}
+		kept = append(kept, e)
+		used += n
+	}
+	return kept, len(entries) - len(kept)
 }
 
 // topImportance 返回条目中最高的 importance（空切片返回 0）。
