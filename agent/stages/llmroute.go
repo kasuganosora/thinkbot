@@ -874,6 +874,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		// RequiresUserIntent 的写工具（如 misskey follow/post/react）判定调用
 		// 是否根植于用户显式意图。子代理场景下 env.Message.Text 即其任务描述。
 		UserRequest: env.Message.Text,
+		// 同一护栏的 LLM 快判客户端：关键词未命中时由 LLM 裁决口语化授权措辞
+		// （「发条 misskey」），沿用会话模型。参照 ApprovalHandler 的注入方式。
+		IntentJudge: llm.NewProviderIntentJudge(s.provider, s.config.Model),
 	}
 
 	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。

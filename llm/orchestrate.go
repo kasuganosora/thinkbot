@@ -105,6 +105,12 @@ type OrchestrateConfig struct {
 	// 供标记了 RequiresUserIntent 的写工具做「是否根植于用户显式意图」的护栏判定。
 	// 由调用方（llmroute）注入 env.Message.Text。
 	UserRequest string
+
+	// IntentJudge 写操作意图护栏（Layer B）的 LLM 快判客户端。当前轮用户请求
+	// 未命中高置信关键词时，由它裁决口语化授权措辞（「发条 misskey」「那你就
+	// 发呗」）。nil 时护栏退化为 fail-closed（未命中关键词即拦截，与 LLM 快判
+	// 判错同等保守）。由调用方（llmroute）用会话 Provider 构建注入。
+	IntentJudge IntentJudgeClient
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -1294,22 +1300,23 @@ func inputPreview(v any) string {
 	return s
 }
 
-// userIntentSocialKeywords 用于「写操作意图护栏」（Layer B）：当工具标记了
-// RequiresUserIntent（如 misskey 的 follow/unfollow/post/react 等写动作），仅当
-// 用户请求文本显式包含社交操作意图时才允许执行。覆盖社交动作动词（中英）。
-//
-// 注意：刻意不收录裸的平台名（如 "misskey"）——只读查询（"帮我查一下 misskey
-// 上的用户"）同样会命中平台名，收录会导致误放行。意图必须落在动作上。
+// userIntentSocialKeywords 是「写操作意图护栏」（Layer B）的零成本快速通道：
+// 当工具标记了 RequiresUserIntent（如 misskey 的 follow/unfollow/post/react
+// 等写动作），用户请求文本命中这些高置信关键词时直接放行，省一次 LLM 调用。
+// 未命中不直接判死——交由 IntentJudge（LLM 快判，见 intent_judge.go）裁决，
+// 覆盖口语化措辞（「发条 misskey」「那你就发呗」）。关键词表因此只收无歧义
+// 的高置信词，有歧义的（如裸平台名 misskey、react/提到/note）刻意不收：
+// 只读查询（「帮我查一下 misskey 上的用户」）同样会命中这些词。
 var userIntentSocialKeywords = []string{
 	"关注", "取关", "取消关注", "follow", "unfollow",
 	"发帖", "发动态", "发一条", "发条", "发个", "发一个", "发一下", "发布", "发一帖",
 	"来一条", "整一条", "发上去", "发出去", "发过去",
-	"renote", "react", "反应", "点赞", "点个赞",
-	"提及", "提到", "私信", "dm", "post", "note", "转推", "转发",
-	"发到", "推送到", "同步到", "赞",
+	"renote", "点赞", "点个赞",
+	"私信", "转推", "转发", "发到", "推送到",
 }
 
-// isUserIntentGrounded 判断用户请求文本是否显式包含社交操作意图。
+// isUserIntentGrounded 判断用户请求文本是否命中高置信社交意图关键词。
+// 仅作为 LLM 快判前的快速通道，不再承担兜底职责。
 func isUserIntentGrounded(userReq string) bool {
 	if userReq == "" {
 		return false
@@ -1323,28 +1330,28 @@ func isUserIntentGrounded(userReq string) bool {
 	return false
 }
 
-// intentLookbackMessages 回看窗口：从消息历史末尾最多回看多少条消息、其中
-// 最多采纳多少条用户消息。窗口刻意收窄：只救「上一两轮刚授权、本轮换个说法
-// 重试」的场景，不把久远的授权无限放大成永久通行证。
+// intentLookbackMessageWindow / intentLookbackMaxUserMsgs 是交给 LLM 快判器的
+// 回看窗口：从消息历史末尾最多回看多少条消息、其中最多采纳多少条用户消息。
+// 窗口刻意收窄：只覆盖「上一两轮刚授权、本轮换个说法重试」的场景，不把久远
+// 的授权无限放大成永久通行证。
 const (
 	intentLookbackMessageWindow = 12
 	intentLookbackMaxUserMsgs   = 3
 )
 
-// recentUserIntentGrounded 在消息历史的近端回看窗口内，判断是否存在包含社交
-// 操作意图的用户消息。用于当前轮 userReq 未命中、但用户在前几轮刚给出显式
-// 授权的场景（口语措辞多变，单条消息的子串匹配天然漏判）。只统计 user 角色
-// 消息的文本部分，assistant/system/tool 不参与，避免模型自我说服绕过护栏。
-func recentUserIntentGrounded(msgs []Message) bool {
+// collectRecentUserMsgs 收集回看窗口内的近期用户消息文本（时间正序），供
+// IntentJudge 参考「上一轮授权、本轮换说法」场景。只统计 user 角色消息，
+// assistant/system/tool 不参与——防止模型自我说服绕过护栏。
+func collectRecentUserMsgs(msgs []Message) []string {
 	if len(msgs) == 0 {
-		return false
+		return nil
 	}
 	start := len(msgs) - intentLookbackMessageWindow
 	if start < 0 {
 		start = 0
 	}
-	found := 0
-	for i := len(msgs) - 1; i >= start && found < intentLookbackMaxUserMsgs; i-- {
+	var out []string
+	for i := len(msgs) - 1; i >= start && len(out) < intentLookbackMaxUserMsgs; i-- {
 		if msgs[i].Role != MessageRoleUser {
 			continue
 		}
@@ -1354,12 +1361,43 @@ func recentUserIntentGrounded(msgs []Message) bool {
 				sb.WriteString(tp.Text)
 			}
 		}
-		found++
-		if isUserIntentGrounded(sb.String()) {
-			return true
-		}
+		out = append(out, sb.String())
 	}
-	return false
+	if len(out) == 0 {
+		return nil
+	}
+	// 反转成时间正序
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// intentCheckResult 意图护栏的综合判定结果。
+type intentCheckResult struct {
+	grounded bool
+	reason   string
+}
+
+// checkUserIntentGrounded 综合判定本次写工具调用是否根植于用户显式意图：
+//
+//  1. 当前轮用户请求命中高置信关键词 → 直接放行（零 LLM 成本的快速通道）；
+//  2. 注入了 IntentJudge（LLM 快判器）→ 由 LLM 结合当前轮 + 近期用户消息
+//     裁决，覆盖「发条 misskey」「那你就发呗」等口语措辞；
+//  3. 未注入快判器（旧装配/测试）→ fail-closed，保持拦截。
+//
+// 关键词表刻意不全（只收无歧义词，见 userIntentSocialKeywords 注释）——漏词
+// 由 LLM 快判兜住，这正是引入 Layer B LLM 裁决的原因。
+func checkUserIntentGrounded(ctx context.Context, toolName, userReq string, msgs []Message, cfg *OrchestrateConfig) intentCheckResult {
+	if isUserIntentGrounded(userReq) {
+		return intentCheckResult{grounded: true, reason: "keyword fast-path"}
+	}
+	if cfg == nil || cfg.IntentJudge == nil {
+		return intentCheckResult{grounded: false, reason: "no intent judge configured (fail-closed)"}
+	}
+	judge := NewIntentJudge(cfg.IntentJudge, intentJudgeTimeout)
+	verdict := judge.Grounded(ctx, toolName, userReq, collectRecentUserMsgs(msgs))
+	return intentCheckResult{grounded: verdict.grounded, reason: verdict.reason}
 }
 
 // groundedRefusal 生成未根植写操作的拦截消息，明确告知模型原因，促其停止循环。
@@ -1394,18 +1432,24 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 	}
 
 	// 写操作意图护栏（Layer B）：标记 RequiresUserIntent 的写工具（如 misskey
-	// follow/unfollow/post/react）仅在用户请求显式包含社交意图时才执行；否则视为
+	// follow/unfollow/post/react）仅在用户请求显式包含社交意图、或 LLM 快判器
+	// （IntentJudge，见 intent_judge.go）认定用户显式授权时才执行；否则视为
 	// 模型自发外发，在执行前拦截并明确告知原因。这样既保留 web 端用户明确要求的
 	// 社交调用，又根绝无关任务中途的脱轨写操作（2026-08 实测：cfblog 代码任务中模型
 	// 陷入脱轨循环，狂调 misskey 写工具，同时文本反复「停止、回到任务」却停不下来）。
-	if tool.RequiresUserIntent && !isUserIntentGrounded(execCtx.UserRequest) &&
-		!recentUserIntentGrounded(cfg.Params.Messages) {
-		return ToolResultPart{
-			ToolCallID:   tc.ToolCallID,
-			ToolName:     tc.ToolName,
-			InvocationID: invocationID,
-			Result:       groundedRefusal(tool.Name),
-			IsError:      true,
+	if tool.RequiresUserIntent {
+		check := checkUserIntentGrounded(ctx, tc.ToolName, execCtx.UserRequest, cfg.Params.Messages, cfg)
+		if lg := traceid.L(ctx); lg != nil {
+			lg.Infow("intent_gate", "tool", tc.ToolName, "grounded", check.grounded, "reason", check.reason)
+		}
+		if !check.grounded {
+			return ToolResultPart{
+				ToolCallID:   tc.ToolCallID,
+				ToolName:     tc.ToolName,
+				InvocationID: invocationID,
+				Result:       groundedRefusal(tool.Name),
+				IsError:      true,
+			}
 		}
 	}
 
