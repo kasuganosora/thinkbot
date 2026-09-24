@@ -17,6 +17,34 @@ import (
 // volatileMetricRe 匹配易失的项目指标/自指进度汇报，规则降级路径据此跳过。
 var volatileMetricRe = regexp.MustCompile(`\d+\s*(个|文件|测试|行|次|files?|tests?|builds?)|(created|passed|测试文件|编译通过|编译失败|build\s*(pass|fail)|CI)`)
 
+const (
+	// 梦境 LLM 调用的分批上限。
+	//
+	// 存在理由：Light 提取与 Deep 评分原本都是「全部候选一次调用」。日增量小时这
+	// 没问题，但补偿积压（backfill）时会把数千条 L0、数十万字符一次性塞进单个
+	// prompt —— 既撞上下文上限直接失败，也让单次费用不可控。分批后单批体积恒定，
+	// 费用可预估，且单批失败只影响该批。
+	//
+	// lightBatchChars 单次提取调用的片段字符上限（按截断后长度计，默认 6000）。
+	// 约 30 条 200 字的片段，加上固定 prompt 后单批输入仍在 1 万 token 量级。
+	lightBatchChars = 6000
+	// scoreBatchSize 单次重要性评分调用的候选条数（默认 60）。
+	// 候选在 prompt 里截断到 80 字符 + 元信息，60 条约 8000 字符。
+	scoreBatchSize = 60
+	// backfillMaxEntries 补偿模式单轮最多处理的 L0 条数。
+	//
+	// 必须 ≤ Light.MaxCandidates（默认 100）：候选在提取后会被截断到该上限，
+	// 而 dream_processed 标记是对本轮摄入的全部条目生效的。若单轮灌入远超该值的
+	// 条目，多出来的会被永久标记为已处理却从未产生候选 —— 补偿反而变成批量销毁。
+	// 分批后未处理的条目留在队列，下一轮按最老优先继续补。
+	backfillMaxEntries = 80
+	// backfillCharsPerToken 估算「字符 → token」的换算分母。
+	//
+	// 智谱文档给出 GLM 系列 Token 与汉字约 1:1.6（1 token ≈ 1.6 汉字）。
+	// 只用于**费用预估**（dry run），实际扣费以接口返回的 usage 为准。
+	backfillCharsPerToken = 1.6
+)
+
 // isEphemeralEntry 判断一条 L0 条目是否被标记为「时效性内容」，命中则不晋升长期记忆。
 //
 // 判定依据是**结构化标记** metadata["ephemeral"]，由捕获层（潜水观察者的契约 JSON）
@@ -27,6 +55,7 @@ var volatileMetricRe = regexp.MustCompile(`\d+\s*(个|文件|测试|行|次|file
 // 自然语言短语来拦截易失内容。那是打地鼠 —— 补掉中日英，印地语等仍会漏进 L1。
 // 现在「是否易失」由模型在捕获时以布尔字段声明，本函数只读该布尔。
 // 因此这里 **不得** 重新引入任何自然语言短语匹配。
+
 func isEphemeralEntry(metadata map[string]any) bool {
 	if metadata == nil {
 		return false
@@ -55,26 +84,31 @@ type rawSnippet struct {
 	content  string
 	sourceID string
 	scope    Scope
+	// created 是该 L0 条目的写入时间。补偿模式按它升序处理（最老优先）——
+	// 越老的条目越接近 L0 TTL 过期，先救它们才不会「补到一半就过期作废」。
+	created time.Time
 	// speaker 标记该片段的说话人："user"=用户原话，"assistant"=bot 自身回复，
 	// ""=未知。用于防止 dreaming 把 bot 自己的发言误归为用户事实。
 	speaker string
 }
 
 // runLight 执行浅睡眠：从 L0 摄取 → LLM 提取候选 → Jaccard 去重 → 暂存。
-func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResult, error) {
+func (d *DreamManager) runLight(ctx context.Context, scopes []Scope, opts DreamRunOptions) (*lightResult, error) {
 	ctx, span := d.tracer.Start(ctx, "memory.dreaming.light")
 	defer span.End()
 
 	d.logger.Debug("dreaming: light phase started")
 
+	// 回溯窗口：常规运行只看最近 LookbackDays（默认 2 天）内写入的 L0。
+	// 补偿模式（Backfill）把窗口放到零值 —— 不再按写入时间截断，
+	// 但 IsExpired 仍在下面按 L0 TTL 过滤，过期的条目不会被「救活」，
+	// dream_processed 标记也仍然生效，因此重跑是幂等的。
 	cutoff := time.Now().AddDate(0, 0, -d.config.Light.LookbackDays)
-	var snippets []rawSnippet
-	// 按 scope 追踪哪些 L0 条目被处理，用于标记
-	type scopeWithIDs struct {
-		scope Scope
-		ids   []string
+	if opts.Backfill {
+		cutoff = time.Time{}
 	}
-	var processedScopes []scopeWithIDs
+	var backfillScanned int
+	var snippets []rawSnippet
 
 	for _, scope := range scopes {
 		// 直接拉取该 scope 的全部 L0 条目（含已被实时 Consolidator 提升为 L1 的），
@@ -87,7 +121,6 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 				"scope", scope.Key(), "err", err)
 			continue
 		}
-		var ids []string
 		for _, e := range l0Entries {
 			if e.IsExpired(time.Now()) {
 				continue
@@ -122,16 +155,48 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 			}
 			snippets = append(snippets, rawSnippet{
 				content: content, sourceID: e.ID, scope: scope, speaker: spk,
+				created: e.CreatedAt,
 			})
-			ids = append(ids, e.ID)
-		}
-		if len(ids) > 0 {
-			processedScopes = append(processedScopes, scopeWithIDs{scope: scope, ids: ids})
+			backfillScanned++
 		}
 	}
 
 	if len(snippets) == 0 {
 		return &lightResult{}, nil
+	}
+
+	// 补偿模式分批：一次最多处理 backfillMaxEntries 条，最老优先。
+	//
+	// 为什么必须分批：Light 之后有 MaxCandidates（默认 100）截断，而「标记已处理」
+	// 是对本轮摄入的**全部** L0 生效的。若一次灌入 1100 条，只有前 100 条候选
+	// 能活下来，其余 1000 条会被打上 dream_processed 而永久失去巩固机会——
+	// 补偿反而变成了批量销毁。分批后未处理的条目留在队列里，下一轮继续补。
+	if opts.Backfill && backfillMaxEntries > 0 && len(snippets) > backfillMaxEntries {
+		sort.SliceStable(snippets, func(i, j int) bool {
+			return snippets[i].created.Before(snippets[j].created)
+		})
+		d.logger.Infow("dreaming light: backfill batch capped, oldest first",
+			"scanned", backfillScanned, "cap", backfillMaxEntries)
+		snippets = snippets[:backfillMaxEntries]
+	}
+
+	// 「本轮实际摄入」的条目才标记 dream_processed：在分批之后按 scope 归组，
+	// 保证标记集合与真正送进提取器的片段完全一致（不标记被截掉的条目）。
+	type scopeWithIDs struct {
+		scope Scope
+		ids   []string
+	}
+	scopeIdx := make(map[string]int)
+	var processedScopes []scopeWithIDs
+	for _, s := range snippets {
+		key := s.scope.Key()
+		i, ok := scopeIdx[key]
+		if !ok {
+			i = len(processedScopes)
+			scopeIdx[key] = i
+			processedScopes = append(processedScopes, scopeWithIDs{scope: s.scope})
+		}
+		processedScopes[i].ids = append(processedScopes[i].ids, s.sourceID)
 	}
 
 	// 按 scope 分组，避免跨 scope 混淆（channel vs user）
@@ -173,9 +238,18 @@ func (d *DreamManager) runLight(ctx context.Context, scopes []Scope) (*lightResu
 	}
 	d.mu.Unlock()
 
-	d.logger.Debugw("dreaming: light complete",
-		"ingested", len(snippets), "candidates", len(candidates),
-		"deduped", len(deduped), "dropped", dropped)
+	if opts.Backfill {
+		// 补偿跑必须留痕： scanned 是「TTL 内未处理的全量」，ingested 是本轮实际
+		// 摄入（受 backfillMaxEntries 限制）。两者差值就是还剩多少待补。
+		d.logger.Infow("dreaming light: backfill complete",
+			"scanned", backfillScanned, "ingested", len(snippets),
+			"remaining", backfillScanned-len(snippets),
+			"candidates", len(candidates), "deduped", len(deduped), "dropped", dropped)
+	} else {
+		d.logger.Debugw("dreaming: light complete",
+			"ingested", len(snippets), "candidates", len(candidates),
+			"deduped", len(deduped), "dropped", dropped)
+	}
 
 	return &lightResult{
 		ingested: len(snippets),
@@ -208,7 +282,57 @@ func (d *DreamManager) extractCandidatesGrouped(ctx context.Context, snippets []
 }
 
 // extractCandidates 用 LLM（或降级规则）从原始片段提取候选事实。
+//
+// 分批执行（见 lightBatchChars）：原实现把该 scope 的全部片段拼进**一个** prompt。
+// 日增量小时这没问题，但补偿积压（backfill）时会把 2900+ 条、58 万字符一次性
+// 塞进去——既会撞模型上下文上限直接失败，也会让单次调用的费用不可控。
 func (d *DreamManager) extractCandidates(ctx context.Context, snippets []rawSnippet) []DreamCandidate {
+	if d.provider == nil {
+		return d.extractCandidatesRuleBased(snippets)
+	}
+	if len(snippets) <= 1 || lightBatchChars <= 0 {
+		return d.extractCandidatesOnce(ctx, snippets)
+	}
+
+	var batches [][]rawSnippet
+	var cur []rawSnippet
+	curChars := 0
+	for i := range snippets {
+		// 单条截断到 500 字符（与 extractCandidatesOnce 的写入口径一致），
+		// 按此估算批次体积，否则超长片段会让估算失真。
+		n := len(snippets[i].content)
+		if n > 500 {
+			n = 500
+		}
+		if len(cur) > 0 && curChars+n > lightBatchChars {
+			batches = append(batches, cur)
+			cur = nil
+			curChars = 0
+		}
+		cur = append(cur, snippets[i])
+		curChars += n
+	}
+	if len(cur) > 0 {
+		batches = append(batches, cur)
+	}
+	if len(batches) <= 1 {
+		return d.extractCandidatesOnce(ctx, snippets)
+	}
+
+	var all []DreamCandidate
+	for i, b := range batches {
+		got := d.extractCandidatesOnce(ctx, b)
+		d.logger.Debugw("dreaming light: extract batch done",
+			"batch", i+1, "of", len(batches), "snippets", len(b), "candidates", len(got))
+		all = append(all, got...)
+	}
+	d.logger.Infow("dreaming light: extract batched",
+		"snippets", len(snippets), "batches", len(batches), "candidates", len(all))
+	return all
+}
+
+// extractCandidatesOnce 对**一批**片段执行一次 LLM 提取（原 extractCandidates 实现）。
+func (d *DreamManager) extractCandidatesOnce(ctx context.Context, snippets []rawSnippet) []DreamCandidate {
 	if d.provider == nil {
 		return d.extractCandidatesRuleBased(snippets)
 	}
@@ -995,11 +1119,42 @@ func normalizeScoreKey(k string) string {
 	return strings.ToLower(strings.TrimSpace(k))
 }
 
-// scoreImportanceBatch 批量调用 LLM 评估所有候选的「重要性」（0.0~1.0）。
-// 一次请求覆盖全部候选（而非 N 次），控制 Deep 阶段 LLM 调用量与延迟。
+// scoreImportanceBatch 批量调用 LLM 评估候选的长期重要性（0.0~1.0）。
+// 一次请求覆盖一批候选（而非 N 次），控制 Deep 阶段 LLM 调用量与延迟。
 // 返回 key→importance 映射；任何失败（无模型 / 调用错误 / JSON 解析失败 / 空集）返回 nil，
 // 调用方据此回退为纯启发式评分，不影响晋升流程。
+//
+// 分批执行（见 scoreBatchSize）：原实现把所有候选拼进**一个** prompt。日增量下
+// 候选只有几十条，但补偿积压时会有数百条，单次调用的输入会撞上下文上限；
+// 分成多批后单批失败只影响该批（其余照常拿到 LLM 分），不会整体回退启发式。
 func (d *DreamManager) scoreImportanceBatch(ctx context.Context, cands []*DreamCandidate) map[string]float64 {
+	if len(cands) == 0 || d.model == "" {
+		return nil
+	}
+	if len(cands) > scoreBatchSize {
+		out := make(map[string]float64, len(cands))
+		for start := 0; start < len(cands); start += scoreBatchSize {
+			end := start + scoreBatchSize
+			if end > len(cands) {
+				end = len(cands)
+			}
+			part := d.scoreImportanceOnce(ctx, cands[start:end])
+			for k, v := range part {
+				out[k] = v
+			}
+		}
+		d.logger.Infow("dreaming deep: LLM importance scored (batched)",
+			"candidates", len(cands), "batchSize", scoreBatchSize, "scored", len(out))
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return d.scoreImportanceOnce(ctx, cands)
+}
+
+// scoreImportanceOnce 对**一批**候选执行一次 LLM 评分（原 scoreImportanceBatch 实现）。
+func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCandidate) map[string]float64 {
 	if len(cands) == 0 || d.model == "" {
 		return nil
 	}

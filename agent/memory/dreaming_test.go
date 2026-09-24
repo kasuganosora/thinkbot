@@ -892,3 +892,73 @@ func TestScoreImportanceBatch_KeyNormalization(t *testing.T) {
 		t.Errorf("expected both candidates matched, got %d", len(out))
 	}
 }
+
+// TestDreamManager_BackfillIgnoresGates 锁定「补偿积压」模式放宽的两道门槛。
+//
+// 常规运行的门禁是：scope 必须 24h 内有写入（ActiveThresholdHours）+ L0 必须在
+// LookbackDays(2) 内写入。bot 停摆数天后两条同时不满足 → 整轮空转，而那些 L0
+// 还活着（TTL 14 天）却永远等不到巩固，直到过期作废。补偿模式正是为这段窗口兜底。
+func TestDreamManager_BackfillIgnoresGates(t *testing.T) {
+	ctx := context.Background()
+	store := NewTieredStore(nil)
+	tm := NewTieredManager(TieredManagerConfig{Store: store},
+		noop.NewTracerProvider(), testDreamLogger())
+	cfg := DefaultDreamConfig()
+	cfg.Enabled = true
+	cfg.ActiveThresholdHours = 24 // 门槛开启：该 scope 5 天无写入 → 判为不活跃
+	scope := UserScope("u-backfill")
+	cfg.Scopes = []Scope{scope}
+	// provider=nil：走规则降级提取，不依赖 LLM，测试稳定可重复。
+	dm := NewDreamManager(cfg, tm, nil, noop.NewTracerProvider(), testDreamLogger())
+
+	// 5 天前写入：超出 LookbackDays=2，但仍在 L0 TTL(14d) 内 → 属于「活着但错过窗口」
+	old := time.Now().Add(-5 * 24 * time.Hour)
+	if err := store.Append(ctx, TieredEntry{
+		Entry: Entry{
+			Scope:     scope,
+			Content:   "用户提到自己养了一只名叫小灰的鹦鹉，平时很喜欢讲它的趣事",
+			Category:  "fact",
+			CreatedAt: old,
+		},
+		Tier: Tier0Working,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 常规运行：活跃度门槛拦下该 scope，一条都进不来
+	r1, err := dm.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if r1.LightIngested != 0 {
+		t.Fatalf("normal run must be gated out, LightIngested=%d (skippedInactive=%d)",
+			r1.LightIngested, r1.SkippedInactive)
+	}
+	if r1.SkippedInactive != 1 {
+		t.Fatalf("expected 1 inactive scope skipped, got %d", r1.SkippedInactive)
+	}
+
+	// 2) 补偿模式：忽略活跃度门槛 + 忽略 Light 回溯窗口 → 摄入该条
+	r2, err := dm.RunWithOptions(ctx, DreamRunOptions{Backfill: true})
+	if err != nil {
+		t.Fatalf("backfill Run failed: %v", err)
+	}
+	if r2.LightIngested != 1 {
+		t.Fatalf("backfill must ingest the stale-but-alive L0, LightIngested=%d", r2.LightIngested)
+	}
+	if !r2.Backfill {
+		t.Fatal("report.Backfill must be true so runs can be told apart in logs/API")
+	}
+	if r2.BackfillScanned != 1 {
+		t.Fatalf("BackfillScanned = %d, want 1", r2.BackfillScanned)
+	}
+
+	// 3) 幂等：补偿跑过一次后条目被标记 dream_processed，再跑不再重复提取
+	r3, err := dm.RunWithOptions(ctx, DreamRunOptions{Backfill: true})
+	if err != nil {
+		t.Fatalf("second backfill Run failed: %v", err)
+	}
+	if r3.LightIngested != 0 {
+		t.Fatalf("backfill must be idempotent, second run ingested %d", r3.LightIngested)
+	}
+}
