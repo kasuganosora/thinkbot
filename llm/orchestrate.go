@@ -1294,12 +1294,17 @@ func inputPreview(v any) string {
 	return s
 }
 
-// userIntentSocialKeywords 用于「写操作意图护栏」：当工具标记了 RequiresUserIntent
-// （如 misskey 的 follow/unfollow/post/react 等写动作），仅当用户请求文本显式包含
-// 社交操作意图时才允许执行。覆盖频道名与社交动作动词（中英）。
+// userIntentSocialKeywords 用于「写操作意图护栏」（Layer B）：当工具标记了
+// RequiresUserIntent（如 misskey 的 follow/unfollow/post/react 等写动作），仅当
+// 用户请求文本显式包含社交操作意图时才允许执行。覆盖社交动作动词（中英）。
+//
+// 注意：刻意不收录裸的平台名（如 "misskey"）——只读查询（"帮我查一下 misskey
+// 上的用户"）同样会命中平台名，收录会导致误放行。意图必须落在动作上。
 var userIntentSocialKeywords = []string{
 	"关注", "取关", "取消关注", "follow", "unfollow",
-	"发帖", "发动态", "发一条", "发布", "renote", "react", "反应", "点赞",
+	"发帖", "发动态", "发一条", "发条", "发个", "发一个", "发一下", "发布", "发一帖",
+	"来一条", "整一条", "发上去", "发出去", "发过去",
+	"renote", "react", "反应", "点赞", "点个赞",
 	"提及", "提到", "私信", "dm", "post", "note", "转推", "转发",
 	"发到", "推送到", "同步到", "赞",
 }
@@ -1312,6 +1317,45 @@ func isUserIntentGrounded(userReq string) bool {
 	low := strings.ToLower(userReq)
 	for _, kw := range userIntentSocialKeywords {
 		if strings.Contains(low, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+// intentLookbackMessages 回看窗口：从消息历史末尾最多回看多少条消息、其中
+// 最多采纳多少条用户消息。窗口刻意收窄：只救「上一两轮刚授权、本轮换个说法
+// 重试」的场景，不把久远的授权无限放大成永久通行证。
+const (
+	intentLookbackMessageWindow = 12
+	intentLookbackMaxUserMsgs   = 3
+)
+
+// recentUserIntentGrounded 在消息历史的近端回看窗口内，判断是否存在包含社交
+// 操作意图的用户消息。用于当前轮 userReq 未命中、但用户在前几轮刚给出显式
+// 授权的场景（口语措辞多变，单条消息的子串匹配天然漏判）。只统计 user 角色
+// 消息的文本部分，assistant/system/tool 不参与，避免模型自我说服绕过护栏。
+func recentUserIntentGrounded(msgs []Message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	start := len(msgs) - intentLookbackMessageWindow
+	if start < 0 {
+		start = 0
+	}
+	found := 0
+	for i := len(msgs) - 1; i >= start && found < intentLookbackMaxUserMsgs; i-- {
+		if msgs[i].Role != MessageRoleUser {
+			continue
+		}
+		var sb strings.Builder
+		for _, part := range msgs[i].Content {
+			if tp, ok := part.(TextPart); ok {
+				sb.WriteString(tp.Text)
+			}
+		}
+		found++
+		if isUserIntentGrounded(sb.String()) {
 			return true
 		}
 	}
@@ -1354,7 +1398,8 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 	// 模型自发外发，在执行前拦截并明确告知原因。这样既保留 web 端用户明确要求的
 	// 社交调用，又根绝无关任务中途的脱轨写操作（2026-08 实测：cfblog 代码任务中模型
 	// 陷入脱轨循环，狂调 misskey 写工具，同时文本反复「停止、回到任务」却停不下来）。
-	if tool.RequiresUserIntent && !isUserIntentGrounded(execCtx.UserRequest) {
+	if tool.RequiresUserIntent && !isUserIntentGrounded(execCtx.UserRequest) &&
+		!recentUserIntentGrounded(cfg.Params.Messages) {
 		return ToolResultPart{
 			ToolCallID:   tc.ToolCallID,
 			ToolName:     tc.ToolName,
