@@ -737,17 +737,26 @@ func friendlyCostReply(env *core.Envelope, ce *llm.CostQuotaExceededError, perio
 		}
 	}
 
+	meta := map[string]any{
+		"source_channel": sourceChannel,       // ChannelReplyHandler 路由必需
+		"trace_id":       env.Message.TraceID, // WebChannel 按它找到 SSE 订阅，缺失=静默丢弃
+		"bot_id":         env.Message.BotID,
+		"message_id":     env.Message.ID,
+		"finish_reason":  "cost_quota_exceeded",
+	}
+	// 带上会话 ID，回复才能落到正确的聊天会话（与 LLMStage 同口径）
+	if env.Message.Metadata != nil {
+		if sid, ok := env.Message.Metadata["chat_session_id"].(string); ok && sid != "" {
+			meta["session_id"] = sid
+		}
+	}
+
 	env.AddAction(core.Action{
-		Type:    core.ActionReply,
-		Channel: replyTarget,
-		UserID:  env.Message.UserID,
-		Payload: text,
-		Metadata: core.CopyEngagementOutboundMeta(env, map[string]any{
-			"source_channel": sourceChannel,
-			"bot_id":         env.Message.BotID,
-			"message_id":     env.Message.ID,
-			"finish_reason":  "cost_quota_exceeded",
-		}),
+		Type:     core.ActionReply,
+		Channel:  replyTarget,
+		UserID:   env.Message.UserID,
+		Payload:  text,
+		Metadata: core.CopyEngagementOutboundMeta(env, meta),
 	})
 	return env
 }
