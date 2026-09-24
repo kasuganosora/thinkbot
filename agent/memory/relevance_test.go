@@ -21,6 +21,13 @@ func (f *fakeRetriever) Retrieve(_ context.Context, q Query) ([]Entry, error) {
 		}
 		out = append(out, e)
 	}
+	// 真实 SQL 的 OrderAsc 是「最早在前」。entries 按时间倒序存放（[0] 最新），
+	// 因此升序要反转。必须模拟这一点，否则测不出 OrderAsc+Limit 的截断退化。
+	if q.Order == OrderAsc {
+		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+			out[i], out[j] = out[j], out[i]
+		}
+	}
 	if q.Limit > 0 && len(out) > q.Limit {
 		out = out[:q.Limit]
 	}
@@ -233,6 +240,125 @@ func TestSnapshot_RelevanceRecallOffKeepsBaseline(t *testing.T) {
 
 	if counting.calls != 1 {
 		t.Fatalf("relevance off should only call Recent once per scope, got %d", counting.calls)
+	}
+}
+
+// TestSelectImportant_TopEntryNotLostToScanOrder 复现「OrderAsc + 小 Limit」的截断退化。
+//
+// 本机实测：importance>=0.7 共 641 条，其中 1.00 分条目按创建时间升序排在第
+// 516/573 位。用 OrderAsc + Limit(200) 扫描时只有最早的 200 条进入选择范围，
+// 这些最高分条目会被永久漏掉，抓到的反而是最早创建的人格设定条目。
+// 正确行为：排序在内存完成，与创建顺序无关。
+func TestSelectImportant_TopEntryNotLostToScanOrder(t *testing.T) {
+	scope := ChannelScope("misskey:timeline")
+
+	// 全部满足阈值，模拟本机 641 条的规模（> 旧的 importantScanLimit=200）。
+	total := 300
+	var entries []Entry
+	for i := 0; i < total; i++ {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("m%03d", i),
+			Scope:      scope,
+			Content:    fmt.Sprintf("候选记忆 %03d", i),
+			Importance: 0.70,
+		})
+	}
+	// 最高分条目放在「时间较新」一侧（entries[0] 最新）。
+	// 按时间升序排它落在第 total-5 位，旧的 Limit=200 扫不到。
+	entries[5] = Entry{
+		ID:         "top-value",
+		Scope:      scope,
+		Content:    "用户的核心偏好：讨厌反复回复的 bot",
+		Importance: 1.00,
+	}
+
+	got := SelectImportant(context.Background(), &fakeRetriever{entries: entries},
+		[]Scope{scope}, nil, 0.7, 3)
+
+	if len(got) == 0 {
+		t.Fatal("expected high-value entries to be selected")
+	}
+	if got[0].Entry.ID != "top-value" {
+		t.Fatalf("highest importance entry must win regardless of creation order, got %q", got[0].Entry.ID)
+	}
+	// 保底通道与当前输入无关，Score 应恒为 0（见 SelectImportant 注释）。
+	if got[0].Score != 0 {
+		t.Fatalf("important channel score must be 0, got %v", got[0].Score)
+	}
+}
+
+// TestCapRecalled_SkipsOverlongInsteadOfTruncating 保证超长条目被丢弃而非截成残句。
+//
+// 本机实测会命中「【栞娜人格设定】」(701/951 字符) 与「luna 完整档案」(2287 字符)，
+// 截断到 240 字符后注入 prompt 的是断头的人格定义，比不注入更糟。
+func TestCapRecalled_SkipsOverlongInsteadOfTruncating(t *testing.T) {
+	got := capRecalled([]Entry{
+		{ID: "persona", Content: strings.Repeat("栞", 1000)},
+		{ID: "normal", Content: "用户讨厌反复回复的 bot"},
+		{ID: "mid", Content: strings.Repeat("记", 300)},
+	}, 240)
+
+	for _, e := range got {
+		if e.ID == "persona" {
+			t.Fatal("overlong entries must be dropped, not truncated into fragments")
+		}
+	}
+
+	var normal, mid string
+	for _, e := range got {
+		switch e.ID {
+		case "normal":
+			normal = e.Content
+		case "mid":
+			mid = e.Content
+		}
+	}
+	if normal != "用户讨厌反复回复的 bot" {
+		t.Fatalf("short entries should pass through unchanged, got %q", normal)
+	}
+	if len([]rune(mid)) != 241 { // 240 + 省略号
+		t.Fatalf("mid entry should be capped at 240 chars + ellipsis, got %d", len([]rune(mid)))
+	}
+}
+
+// TestSnapshot_ImportantChannelSkipsPersonaSizedMemories 端到端：人格设定/档案量级的
+// 高 importance 记忆不该被补进注入块，而正常长度的高价值记忆仍要能救回。
+func TestSnapshot_ImportantChannelSkipsPersonaSizedMemories(t *testing.T) {
+	scope := ChannelScope("misskey:timeline")
+	persona := "【栞娜（Kanna）人格设定】" + strings.Repeat("身份：女仆Bot，服务于大小姐露娜。", 40)
+
+	// 先用 60 条低分填充占满主通道的 Recent(50) 窗口，
+	// 确保两条高价值记忆只能经由补充通道进入（否则测不到补充通道的行为）。
+	var entries []Entry
+	for i := 0; i < 60; i++ {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("fill%02d", i),
+			Scope:      scope,
+			Content:    fmt.Sprintf("今天天气不错 %02d", i),
+			Importance: 0.30,
+		})
+	}
+	entries = append(entries,
+		Entry{ID: "persona-1", Scope: scope, Content: persona, Importance: 0.95},
+		Entry{ID: "core-pref", Scope: scope, Content: "@luna 讨厌反复回复的 bot", Importance: 0.90},
+	)
+
+	cfg := DefaultSnapshotConfig()
+	cfg.Mode = ModeFrozen
+	cfg.RelevanceRecall = true
+	cfg.Query = "今天天气" // 与两条高价值记忆都无关，排除相关性通道干扰
+
+	snap := NewSnapshot(cfg)
+	if err := snap.Init(context.Background(), &fakeRetriever{entries: entries}, []Scope{scope}); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	text := snap.MemorySnapshot()
+	if strings.Contains(text, "人格设定") {
+		t.Fatal("persona-sized memory must not be injected as a truncated fragment")
+	}
+	if !strings.Contains(text, "讨厌反复回复的 bot") {
+		t.Fatal("normal-sized high-value memory should still be recalled")
 	}
 }
 
