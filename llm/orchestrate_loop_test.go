@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -225,11 +226,50 @@ func TestIsUserIntentGrounded(t *testing.T) {
 		{"Follow Alice on Misskey", true}, // 英文
 		{"给这篇帖子点个赞", true},                // react
 		{"帮我查一下 misskey 上的用户", false},     // 只读查询，不含写动作动词
+		{"那你尝试下发一个misskey 验证下", true},    // 口语动词「发一个」
+		{"发条 misskey，内容你定", true},          // 口语动词「发条」
+		{"你修完后我帮你部署", false},             // 部署，非社交动作
 	}
 	for _, c := range cases {
 		if got := isUserIntentGrounded(c.req); got != c.want {
 			t.Errorf("isUserIntentGrounded(%q) = %v, want %v", c.req, got, c.want)
 		}
+	}
+}
+
+func TestRecentUserIntentGrounded(t *testing.T) {
+	mk := func(text string) Message {
+		return UserMessage(text)
+	}
+	if recentUserIntentGrounded(nil) {
+		t.Error("nil msgs should not be grounded")
+	}
+	// 只有 assistant 消息 → 不算（防止模型自我说服绕过护栏）
+	onlyAssistant := []Message{{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "发帖发帖"}}}}
+	if recentUserIntentGrounded(onlyAssistant) {
+		t.Error("assistant messages must not ground intent")
+	}
+	// 上一轮授权过、本轮无关键词 → 回看命中
+	msgs := []Message{
+		mk("你好"),
+		{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "你好喵"}}},
+		mk("帮我修个 bug"), // 无意图
+		{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "修好了"}}},
+		mk("发条 misskey，内容你定"),
+		{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "正在处理"}}},
+		mk("内容你定就行"), // 当前轮无关键词
+	}
+	if !recentUserIntentGrounded(msgs) {
+		t.Error("recent user authorization should ground intent via lookback")
+	}
+	// 久远授权（超出回看窗口）→ 不放行
+	var far []Message
+	far = append(far, mk("发条 misskey")) // 授权在第 1 条
+	for i := 0; i < 20; i++ {
+		far = append(far, mk(fmt.Sprintf("后续闲聊 %d", i))) // 之后 20 条普通消息
+	}
+	if recentUserIntentGrounded(far) {
+		t.Error("authorization outside lookback window must not ground intent")
 	}
 }
 
