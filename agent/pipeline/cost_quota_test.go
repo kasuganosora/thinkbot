@@ -521,12 +521,14 @@ func TestCostFeatureGroupMapping(t *testing.T) {
 func TestFriendlyCostReplyRoutable(t *testing.T) {
 	msg := core.Message{
 		ID:      "msg-1",
+		TraceID: "trace-1",
 		BotID:   "bot-1",
 		Source:  "web:1",
 		Channel: "web:1",
 		UserID:  "u-1",
 		Metadata: map[string]any{
-			"reply_target": "web:session-9",
+			"reply_target":    "web:session-9",
+			"chat_session_id": "sess-1",
 		},
 	}
 	env := core.NewEnvelope(msg)
@@ -557,6 +559,14 @@ func TestFriendlyCostReplyRoutable(t *testing.T) {
 	}
 	if a.Metadata["bot_id"] != "bot-1" || a.Metadata["message_id"] != "msg-1" {
 		t.Errorf("metadata = %+v, want bot_id/message_id carried", a.Metadata)
+	}
+	// trace_id：WebChannel 靠它把回复投递到前端 SSE 订阅，缺失则整条消息被静默丢弃
+	// （channel_handler 会打出 "action sent via channel"，但用户端依然什么都收不到）。
+	if a.Metadata["trace_id"] != "trace-1" {
+		t.Fatalf("trace_id = %v, want trace-1", a.Metadata["trace_id"])
+	}
+	if a.Metadata["session_id"] != "sess-1" {
+		t.Errorf("session_id = %v, want sess-1", a.Metadata["session_id"])
 	}
 }
 
