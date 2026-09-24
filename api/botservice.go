@@ -1679,6 +1679,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// L0 未升华、噪音大，因此**不并入主通道**（否则碎碎念会灌进 prompt），
 	// 只给补充通道用：该通道默认关闭，且只取 importance 达标 + 与当前话题相关的
 	// 少数几条，并受单条长度封顶约束。
+	//
+	// 长期方案不在召回侧：L0 该由 dreaming 升华成 L1，升华后自然走主通道。
+	// 这里的 L0 检索器只是升华能力就位前的过渡手段，别在召回侧继续加码。
 	tieredL0 := storage.NewTieredL0Retriever(s.db)
 	mergedBeyond := storage.NewMergedRetriever(tieredL3, tieredL1, tieredL0, memRepo)
 	// 相关性召回默认关闭（灰度开关 THINKBOT_MEMORY_RELEVANCE_RECALL）：

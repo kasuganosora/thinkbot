@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -62,9 +63,7 @@ const (
 	// 否则会退化成「只看最早创建的 N 条」——本机 1.00 分条目按时间升序
 	// 排在第 516/573 位，用 200 时会永久漏掉。命中上限时会打 WARN。
 	importantScanLimit = 2000
-	// DefaultRenderedMaxChars 注入块里单条记忆的字符上限（默认 400）。
-	//
-	// 只在 SnapshotConfig.MaxRenderedEntryChars > 0 时生效（默认关闭，保持现状）。
+	// DefaultRenderedMaxChars 注入块里单条记忆的字符上限（默认 240，常开）。
 	//
 	// 存在理由（2026-09-24 实测）：bot scope 有两条 importance=1.00、
 	// 14808/15314 字符的「luna 完整档案+项目全记录」。它们 sort 后永远排第一，
@@ -72,10 +71,31 @@ const (
 	// ——bot 每轮看到的只是一份 15000 字档案的前 2200 字残片，其它记忆一条
 	// 都进不来。补充召回的老记忆因此永远不可见。
 	//
-	// 取 400 的依据：本机 memory_entries 里 <=240 占 1824 条、241-480 占 317 条，
-	// 短记忆是主体，设 400 不会动它们；>1600 的 395 条是档案/长笔记，
+	// 取 240 的依据：本机 memory_entries 里 <=240 占 1824 条、241-480 占 317 条，
+	// 短记忆是主体，设 240 不会动它们；>1600 的 395 条是档案/长笔记，
 	// 截断后只剩断头，直接丢弃比注入残片好（需要完整内容时走 memory 工具）。
+	// 与 RecalledMaxChars 同值：两个通道对「一条记忆该占多少预算」的口径应当一致。
 	DefaultRenderedMaxChars = 240
+	// DefaultNearDuplicateThreshold 近重复折叠的相似度阈值（默认 0.7，常开）。
+	//
+	// 存在理由（2026-09-24 实测）：注入块里出现过「变压器事件」×4、「@umeboshicc
+	// 档案」×3 —— 同一事件被反复记成措辞略不同的几条，importance 相近，
+	// 于是同时挤进 20 条名额，把其它记忆挤出去。折叠后本机注入从 10 条变 18 条。
+	//
+	// 相似度用 token 集合的 Jaccard（token 切分同 relevanceTokens，中文取 bigram）。
+	// 阈值配合 nearDupSimilarity 的「长度可比时用包含度」口径（见该函数注释）：
+	// 纯 Jaccard 在同源长记录上只有 0.5 上下，靠包含度才拉到 0.8+。本机真库
+	// 实测 0.7 能折掉事件档案的多版本记录，同时不误折主题不同、只共享通用词的
+	// 条目（这类一般低于 0.5）。
+	DefaultNearDuplicateThreshold = 0.7
+	// nearDupLengthRatio 允许改用包含度判定的 token 数之比上限。
+	// 超过这个比例说明一条显著长于另一条，此时只认 Jaccard（见 nearDupSimilarity）。
+	nearDupLengthRatio = 3
+	// nearDupMinTokens 参与近重复比较的最小 token 数。
+	//
+	// 极短条目（如「好的」「嗯，收到」）只有 1~2 个 token，任意两条都可能
+	// Jaccard=1.0，但它们携带的信息量本来就低、也不该被当成彼此的重复。
+	nearDupMinTokens = 5
 	// renderedSkipFactor 注入块里跳过超长条目的倍数门槛（= 上限 × 本值）。
 	renderedSkipFactor = 4
 	// recalledSkipChars 补充通道跳过超长条目的原始长度门槛（= 封顶值的倍数）。
@@ -451,10 +471,20 @@ func capRecalled(entries []Entry, maxChars int) []Entry {
 // 是为了避免给这些条目做分词——它们是本轮开销的主要来源：本机有
 // 14808/15314 字符的档案条目，不过滤时每轮快照 400ms，过滤后回到基线量级。
 func filterOversized(entries []Entry, maxChars int) []Entry {
-	if maxChars <= 0 {
+	return filterOversizedBy(entries, maxChars, recalledSkipFactor)
+}
+
+// filterOversizedBy 按指定倍数门槛剔除超长条目。
+//
+// factor 必须与该通道随后执行的截断函数一致（补充通道 recalledSkipFactor、
+// 注入块 renderedSkipFactor），否则会先按更严的门槛丢掉一批、截断函数
+// 本该保留的条目——实测复用补充通道的 2 倍门槛处理主通道时，丢弃线从 960
+// 掉到 480，20 条里丢了 19 条，注入块只剩 1 条。
+func filterOversizedBy(entries []Entry, maxChars int, factor int) []Entry {
+	if maxChars <= 0 || factor <= 0 {
 		return entries
 	}
-	skipAbove := maxChars * recalledSkipFactor
+	skipAbove := maxChars * factor
 	out := make([]Entry, 0, len(entries))
 	for _, e := range entries {
 		if len([]rune(e.Content)) > skipAbove {
@@ -494,6 +524,150 @@ func capRendered(entries []Entry, maxChars int) ([]Entry, int) {
 		out = append(out, e)
 	}
 	return out, dropped
+}
+
+// dedupeNearDuplicates 折叠内容高度重合的条目，返回保留的条目与折叠掉的条数。
+//
+// 为什么必须放在 MaxEntries 条数截断之前：折叠腾出的名额要能被后面的条目
+// 填上，否则「去重」只是少渲染几条，省下的预算一样浪费掉。同理它也必须在
+// capRendered **之前**执行——截断后所有长条目都变成同样长度的残片，
+// 既算不准相似度，也分不出哪条信息更全。
+//
+// 判定用 nearDupSimilarity（见 DefaultNearDuplicateThreshold 的定标说明）。
+// 只与**已保留**的条目比较（greedy）：候选最多百余条而保留上限 20 条，
+// 比较次数是 O(N*K)，不会像全量两两比较那样随条目数平方增长。
+//
+// 保留哪一条：同组内保留**内容更全（原始长度更大）**的一条，importance 取
+// 组内最高值以保住原排序位次。这不是洁癖——本机实测的近重复大多是两类：
+//   - 同一事件被反复记录（「变压器事件」×3），措辞略有不同的版本里长版信息更全；
+//   - Misskey 回复链（见 dedupeText），链上最新一条天然包含被引用的上文。
+//     实测折叠掉 [Reply] 链里的短条目后，保留下来的长条目仍含整链的原文。
+//
+// threshold <= 0 表示关闭，原样返回。
+func dedupeNearDuplicates(entries []Entry, threshold float64) ([]Entry, int) {
+	if threshold <= 0 || len(entries) < 2 {
+		return entries, 0
+	}
+
+	sets := make([]map[string]struct{}, 0, len(entries))
+	sizes := make([]int, 0, len(entries))
+	for _, e := range entries {
+		sets = append(sets, relevanceTokens(dedupeText(e.Content)))
+		sizes = append(sizes, len([]rune(e.Content)))
+	}
+
+	kept := make([]Entry, 0, len(entries))
+	keptSets := make([]map[string]struct{}, 0, len(entries))
+	keptSizes := make([]int, 0, len(entries))
+	folded := 0
+
+	for i, e := range entries {
+		set := sets[i]
+		if len(set) >= nearDupMinTokens {
+			dup := false
+			for ki := range keptSets {
+				if nearDupSimilarity(set, keptSets[ki]) < threshold {
+					continue
+				}
+				dup = true
+				// 组内 importance 取最高：折叠不该让一条记忆的排序位次下降，
+				// 否则「同组里最该被想起的那条」反而被排到后面、被字符预算切掉。
+				best := kept[ki].Importance
+				if e.Importance > best {
+					best = e.Importance
+				}
+				if sizes[i] > keptSizes[ki] {
+					// 用信息更全的一条替换，importance 仍取组内最高。
+					replacement := e
+					replacement.Importance = best
+					kept[ki] = replacement
+					keptSets[ki] = set
+					keptSizes[ki] = sizes[i]
+				} else {
+					kept[ki].Importance = best
+				}
+				break
+			}
+			if dup {
+				folded++
+				continue
+			}
+		}
+		kept = append(kept, e)
+		keptSets = append(keptSets, set)
+		keptSizes = append(keptSizes, sizes[i])
+	}
+	return kept, folded
+}
+
+// replyQuoteRe 匹配 Misskey 回复类记忆的引用前缀，形如
+// "[Reply to 茶泡梅干@我有颉压抑: 上文内容] 本条内容"。
+//
+// 贪婪匹配到最后一个 ']'：引用内容自身可能含 ']'（如引用里带表情短码或
+// 嵌套括号），非贪婪会在第一个 ']' 处截断，把引用正文残留下来。
+var replyQuoteRe = regexp.MustCompile(`^\[Reply\b.*\]\s*`)
+
+// dedupeText 返回参与近重复比较的文本。
+//
+// 剥离引用前缀的原因（2026-09-24 实测）：Misskey 回复链上相邻两条记忆的
+// 「上文引用」完全一致，只差最后一句新内容，Jaccard 实测 0.62~0.73，
+// 会被当成重复折叠掉——丢的恰恰是每条独有的那一句。剥掉引用的共同部分后，
+// 比较只剩各自的新内容，相似度回落到阈值以下。
+//
+// 剥离后若内容过短（不足 nearDupMinTokens），说明这条几乎只剩引用，
+// 此时回退到全文比较，避免漏折。
+func dedupeText(content string) string {
+	if !strings.HasPrefix(content, "[Reply") {
+		return content
+	}
+	stripped := replyQuoteRe.ReplaceAllString(content, "")
+	if len(relevanceTokens(stripped)) >= nearDupMinTokens {
+		return stripped
+	}
+	return content
+}
+
+// nearDupSimilarity 计算两条记忆的近重复相似度，0.0~1.0。
+//
+// 基础度量是 Jaccard（|A∩B| / |A∪B|）：用并集做分母，天然惩罚长度差，
+// 避免「短笔记被长档案包含」就被判成重复。
+//
+// 但纯 Jaccard 对长条目过于苛刻（2026-09-24 实测）：同一事件的两条几百字记录
+// 各自带一段独有细节，交集 400 token、各自 500/600 token，Jaccard 只有 ~0.55，
+// 折不掉——而它们截断成 240 字进注入块后几乎一模一样，占着三个名额讲同一件事。
+// 因此在**两条长度可比**时改用包含度 |A∩B| / min(|A|,|B|)：同源记录措辞不同但
+// 主体重合，包含度能到 0.8+，而独有细节只把 Jaccard 拉低。
+//
+// 长度可比 = token 数之比不超过 nearDupLengthRatio。这条限制是防误伤的关键：
+// 「用户会画画，几天画不了就心神不宁」的 token 集合几乎必然是某份长档案的子集
+// （包含度接近 1），但它是一条独立的短记忆，不该被档案吃掉。
+func nearDupSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	// 遍历较小集合，减少哈希查找次数。
+	small, large := a, b
+	if len(b) < len(a) {
+		small, large = b, a
+	}
+	inter := 0
+	for t := range small {
+		if _, ok := large[t]; ok {
+			inter++
+		}
+	}
+	if inter == 0 {
+		return 0
+	}
+	jaccard := float64(inter) / float64(len(a)+len(b)-inter)
+	if float64(len(large))/float64(len(small)) > nearDupLengthRatio {
+		return jaccard
+	}
+	containment := float64(inter) / float64(len(small))
+	if containment > jaccard {
+		return containment
+	}
+	return jaccard
 }
 
 // relevanceGate 返回主通道按 importance 降序取前 maxEntries 条时的入选门槛

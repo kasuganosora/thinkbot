@@ -37,6 +37,12 @@ import (
 // RefreshMode 控制快照何时刷新。
 type RefreshMode int
 
+// candidatePoolFactor 交给 renderBlock 的候选池相对 MaxEntries 的倍数。
+//
+// 见 Snapshot.doRefresh 里候选池粗筛的实测说明：候选池必须显著大于最终注入
+// 条数，否则「丢弃超长 + 折叠近重复」腾出的预算没有替补可填。
+const candidatePoolFactor = 10
+
 // recentPerScope 主通道每个 scope 取最近多少条作为候选。
 //
 // 这是「老记忆能不能浮现」的第一道闸门：某个 scope 的记忆量一旦远超这个值，
@@ -122,14 +128,24 @@ type SnapshotConfig struct {
 	// RecalledMaxChars 补充条目的单条字符上限（默认 240）。
 	// 补充条目普遍偏长，不封顶会吃满整个记忆块预算，挤掉主通道的近期记忆。
 	RecalledMaxChars int
-	// MaxRenderedEntryChars 注入块里单条记忆的字符上限（0 = 不限制，保持现状）。
+	// MaxRenderedEntryChars 注入块里单条记忆的字符上限（默认 240，常开）。
 	//
-	// 默认关闭是因为它作用于主通道，属于行为变更：开启后超过上限
-	// renderedSkipFactor 倍的条目会被丢弃（本机是 14808/15314 字符的完整档案，
-	// 它们现在单条就吃满预算，导致注入块只剩 1 条残片）。
-	// 由灰度开关 THINKBOT_MEMORY_RELEVANCE_RECALL 一并带上，验证收益后再决定是否常开。
+	// 作用于**主通道**（补充通道另有 RecalledMaxChars），属于行为变更：开启后
+	// 超过上限 renderedSkipFactor 倍的条目会被丢弃（本机是 14808/15314 字符的
+	// 完整档案，它们此前单条就吃满预算，导致注入块只剩 1 条残片）。
+	// 2026-09-24 由灰度开关转常开：本机实测注入从 1 条档案残片变成 10 条有效记忆
+	// （叠加下面的近重复折叠后是 18 条）。
+	// 传负数可显式关闭（仅测试/对照用）。
 	// 详见 relevance.go 里 DefaultRenderedMaxChars 的实测说明。
 	MaxRenderedEntryChars int
+	// NearDuplicateThreshold 近重复折叠的相似度阈值（默认 0.7，常开）。
+	//
+	// 同一事件常被记成措辞略不同的多条，importance 相近时会同时挤进注入块，
+	// 把其它记忆挤出去（实测「变压器事件」×4、「@umeboshicc 档案」×3）。
+	// 折叠后每组只留内容更全的一条（importance 取组内最高），腾出的名额留给别的记忆。
+	// 传负数可显式关闭（仅测试/对照用）。
+	// 详见 relevance.go 里 DefaultNearDuplicateThreshold 的实测说明。
+	NearDuplicateThreshold float64
 	// Query 当前轮次的输入文本，用于相关性打分。由调用方（如 RecallStage）
 	// 在每轮构建快照时注入；为空时相关性通道自动跳过。
 	Query string
@@ -153,6 +169,10 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		ImportantMinImportance:   DefaultImportantMinImportance,
 		ImportantRelevanceWeight: DefaultImportantRelevanceWeight,
 		RecalledMaxChars:         DefaultRecalledMaxChars,
+		// 单条长度封顶与近重复折叠均已从灰度转常开（2026-09-24 验证收益后）。
+		// 两者都只减少「重复/超长内容对记忆块预算的独占」，不新增召回来源。
+		MaxRenderedEntryChars:  DefaultRenderedMaxChars,
+		NearDuplicateThreshold: DefaultNearDuplicateThreshold,
 	}
 }
 
@@ -247,8 +267,12 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		if config[0].RecalledMaxChars > 0 {
 			cfg.RecalledMaxChars = config[0].RecalledMaxChars
 		}
-		if config[0].MaxRenderedEntryChars > 0 {
+		// 常开项：0 = 未设置 → 保持默认；负数 = 显式关闭（测试/对照用）。
+		if config[0].MaxRenderedEntryChars != 0 {
 			cfg.MaxRenderedEntryChars = config[0].MaxRenderedEntryChars
+		}
+		if config[0].NearDuplicateThreshold != 0 {
+			cfg.NearDuplicateThreshold = config[0].NearDuplicateThreshold
 		}
 		if config[0].Query != "" {
 			cfg.Query = config[0].Query
@@ -367,14 +391,23 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 		allEntries = append(allEntries, extra...)
 	}
 
-	// 双条件之一：条数硬上限——合并 memory + user 后按重要性降序取前 MaxEntries 条，
-	// 作为整个注入上下文的总条数上限（人的注意力约 10 条，给 20 条是富裕上限）。
-	// 合并后再切分，保证最宝贵的 20 条（含用户画像）优先进入上下文。
-	if s.config.MaxEntries > 0 && len(allEntries) > s.config.MaxEntries {
+	// 候选池粗筛：按重要性降序保留前 MaxEntries*candidatePoolFactor 条，
+	// 真正的「注入条数硬上限」由 renderBlock 的 MaxEntries 执行。
+	//
+	// 这里**不能**直接截到 MaxEntries（2026-09-24 实测修正）：renderBlock 会先
+	// 丢弃超长条目、再折叠近重复，候选池若只有 MaxEntries 条，那一批被丢掉的
+	// 名额就没有替补——本机 20 条候选里 14 条是 >960 字的档案，处理完只剩 6 条，
+	// 折叠后再减到 3 条，记忆块只用了 732/2200 字符，去重反而让注入更空。
+	// 放大候选池后，被丢弃/折叠腾出的预算才能被后面的条目填上。
+	poolLimit := s.config.MaxEntries * candidatePoolFactor
+	if poolLimit < recentPerScope {
+		poolLimit = recentPerScope
+	}
+	if s.config.MaxEntries > 0 && len(allEntries) > poolLimit {
 		sort.SliceStable(allEntries, func(i, j int) bool {
 			return allEntries[i].Importance > allEntries[j].Importance
 		})
-		allEntries = allEntries[:s.config.MaxEntries]
+		allEntries = allEntries[:poolLimit]
 	}
 	for _, e := range allEntries {
 		if e.Scope.Kind == ScopeUser {
@@ -565,15 +598,38 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 		return entries[i].Importance > entries[j].Importance
 	})
 
-	// 单条长度约束（可选，默认关闭）：巨型条目会把整个字符预算吃光，
+	// 单条长度约束（常开）：巨型条目会把整个字符预算吃光，
 	// 必须先于条数截断执行，否则它们仍会占掉名额。
+	//
+	// 分两步且中间夹着去重，是因为去重要在**截断前**才有意义（截断后所有长
+	// 条目都是等长残片，既算不准相似度也分不出哪条信息更全）；而先剔除注定
+	// 被丢弃的巨型条目，能避免为它们做分词——本机有 14808/15314 字符的档案，
+	// 不过滤时每轮快照要多花几百毫秒。
+	var oversizedDropped int
 	if s.config.MaxRenderedEntryChars > 0 {
-		kept, dropped := capRendered(entries, s.config.MaxRenderedEntryChars)
-		if dropped > 0 && s.logger != nil {
+		before := len(entries)
+		entries = filterOversizedBy(entries, s.config.MaxRenderedEntryChars, renderedSkipFactor)
+		oversizedDropped = before - len(entries)
+		if oversizedDropped > 0 && s.logger != nil {
 			s.logger.Infow("snapshot: dropped oversized entries from memory block",
-				"dropped", dropped, "maxChars", s.config.MaxRenderedEntryChars)
+				"dropped", oversizedDropped, "maxChars", s.config.MaxRenderedEntryChars)
+		}
+	}
+
+	// 近重复折叠（常开）：同一事件常被记成措辞略不同的多条，importance 相近时
+	// 会同时挤进注入块。必须在条数截断**之前**做，腾出的名额才能被后面的条目填上。
+	if s.config.NearDuplicateThreshold > 0 {
+		kept, folded := dedupeNearDuplicates(entries, s.config.NearDuplicateThreshold)
+		if folded > 0 && s.logger != nil {
+			s.logger.Infow("snapshot: folded near-duplicate entries from memory block",
+				"folded", folded, "threshold", s.config.NearDuplicateThreshold,
+				"kept", len(kept))
 		}
 		entries = kept
+	}
+
+	if s.config.MaxRenderedEntryChars > 0 {
+		entries, _ = capRendered(entries, s.config.MaxRenderedEntryChars)
 	}
 
 	// 条数硬上限（双条件之一）：无论如何最多注入 MaxEntries 条。
