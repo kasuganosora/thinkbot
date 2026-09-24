@@ -511,6 +511,202 @@ func TestSnapshot_RecalledSurvivesOversizedTopEntry(t *testing.T) {
 	}
 }
 
+// TestDedupeNearDuplicates_FoldsSameEventKeepsFuller 复现「同一事件被反复记录」。
+//
+// 本机实测：变压器事件在库里有 4 个措辞略不同的版本，importance 都在 0.9 上下，
+// 于是四条同时挤进 20 条名额。折叠后只留一条，且必须是**内容更全**的那条
+// （长版本还带"不必思考站多高才能让自己能飞"等独有细节），importance 取组内最高。
+func TestDedupeNearDuplicates_FoldsSameEventKeepsFuller(t *testing.T) {
+	short := "【变压器事件】luna晨间note称已购微波炉变压器、'回头给香油们试验一下效果''只要接通市电就能开搞'，bot误读为自杀信号"
+	full := short + "，并写'不必思考站多高才能让自己能飞'，bot破例回复关怀与心理援助热线12356，随后luna澄清实为DIY项目"
+
+	entries := []Entry{
+		{ID: "full", Content: full, Importance: 0.90},
+		{ID: "short", Content: short, Importance: 0.95},
+	}
+	kept, folded := dedupeNearDuplicates(entries, DefaultNearDuplicateThreshold)
+	if folded != 1 {
+		t.Fatalf("rephrased duplicate must be folded, folded=%d", folded)
+	}
+	if len(kept) != 1 || kept[0].ID != "full" {
+		t.Fatalf("the fuller entry must win, kept=%+v", kept)
+	}
+	if kept[0].Importance < 0.95 {
+		t.Fatalf("group importance must be preserved, got %.2f", kept[0].Importance)
+	}
+}
+
+// TestDedupeNearDuplicates_KeepsReplyChain 复现 Misskey 回复链被误折的坑。
+//
+// 回复链上相邻两条记忆共享整段「被引用的上文」，实测 Jaccard 0.62~0.73 会被
+// 判成重复——丢掉的恰恰是每条独有的那一句新内容。剥掉引用前缀后必须都保留。
+func TestDedupeNearDuplicates_KeepsReplyChain(t *testing.T) {
+	entries := []Entry{
+		{ID: "r1", Content: "[Reply to 茶泡梅干@我有颉压抑: 买了一瓶奇怪蜂蜜水，但是好像得倒出来喝，得嘞，到酒店再说吧] 眯了半个小时缓过来点"},
+		{ID: "r2", Content: "[Reply to 茶泡梅干@我有颉压抑: 进食补充血糖] 换乘去廊坊再睡，酒店办完入住再补觉"},
+	}
+	kept, folded := dedupeNearDuplicates(entries, DefaultNearDuplicateThreshold)
+	if folded != 0 || len(kept) != 2 {
+		t.Fatalf("reply chain entries carry distinct content and must both survive, folded=%d kept=%d",
+			folded, len(kept))
+	}
+}
+
+// TestDedupeNearDuplicates_ShortNoteNotSwallowedByArchive 短记忆不能被长档案吃掉。
+//
+// 短条目的 token 集合几乎必然是长档案的子集（包含度接近 1），若无条件用包含度
+// 判定，每条独立短记忆都会被某份档案吞掉。长度比超过 nearDupLengthRatio 时
+// 必须退回 Jaccard。
+func TestDedupeNearDuplicates_ShortNoteNotSwallowedByArchive(t *testing.T) {
+	// 档案必须是**内容多样**的长文本：relevanceTokens 返回的是集合，
+	// 用 Repeat 拼出来的长文本 token 种类极少，测不出长度差。
+	var sb strings.Builder
+	sb.WriteString("用户会画画，几天画不了就心神不宁；")
+	for i := 0; i < 60; i++ {
+		sb.WriteString(fmt.Sprintf("另有画像要点%02d：涉及项目进度、互动守则与设备环境等不同主题；", i))
+	}
+	archive := sb.String()
+	entries := []Entry{
+		{ID: "archive", Content: archive, Importance: 0.80},
+		{ID: "note", Content: "用户会画画，几天画不了就心神不宁", Importance: 0.70},
+	}
+	kept, folded := dedupeNearDuplicates(entries, DefaultNearDuplicateThreshold)
+	if folded != 0 || len(kept) != 2 {
+		t.Fatalf("independent short memory must not be swallowed by an archive, folded=%d kept=%d",
+			folded, len(kept))
+	}
+}
+
+// TestFilterOversizedBy_FactorMatters 门槛倍数必须与后续截断函数一致。
+//
+// 实测事故：主通道复用了补充通道的 filterOversized（2 倍门槛），丢弃线从
+// 240*4=960 掉到 240*2=480，20 条候选里丢了 19 条，注入块只剩 1 条残片。
+func TestFilterOversizedBy_FactorMatters(t *testing.T) {
+	entries := []Entry{
+		{ID: "a", Content: strings.Repeat("档", 600)},  // 480 < len <= 960
+		{ID: "b", Content: strings.Repeat("档", 1200)}, // > 960
+	}
+	byRendered := filterOversizedBy(entries, DefaultRenderedMaxChars, renderedSkipFactor)
+	if len(byRendered) != 1 || byRendered[0].ID != "a" {
+		t.Fatalf("rendered factor must keep the 600-char entry, got %+v", byRendered)
+	}
+	if kept, dropped := capRendered(entries, DefaultRenderedMaxChars); len(kept) != 1 || dropped != 1 {
+		t.Fatalf("capRendered must agree with the pre-filter, kept=%d dropped=%d", len(kept), dropped)
+	}
+}
+
+// TestSnapshot_DedupeFreesBudgetForOtherMemories 端到端：折叠腾出的预算必须被
+// 其它记忆填上，而不是让记忆块变空。
+//
+// 这条覆盖一个结构性缺陷（2026-09-24 实测）：候选池此前在 doRefresh 就被截到
+// MaxEntries 条，renderBlock 里丢弃超长 + 折叠近重复之后没有任何替补，
+// 实测注入从 10 条掉到 3 条、只用掉 732/2200 字符——去重反而让记忆块更空。
+func TestSnapshot_DedupeFreesBudgetForOtherMemories(t *testing.T) {
+	scope := ChannelScope("misskey:timeline")
+	var entries []Entry
+	// 4 个版本的同一事件（措辞不同）+ 1 条超长档案，占满旧的 20 条候选池前排
+	base := "【变压器事件】luna晨间note称已购微波炉变压器、'回头给香油们试验一下效果''只要接通市电就能开搞'，bot误读为自杀信号"
+	for i := 0; i < 4; i++ {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("dup%d", i),
+			Scope:      scope,
+			Content:    base + fmt.Sprintf("，补充细节版本%d，随附当天的心跳检查记录与后续澄清", i),
+			Importance: 0.90,
+		})
+	}
+	entries = append(entries, Entry{
+		ID: "archive", Scope: scope, Content: strings.Repeat("档", 15000), Importance: 1.0,
+	})
+	// 30 条普通记忆：只有候选池足够大时才可能在折叠后补进注入块。
+	// 内容必须两两不同（模板化措辞会被当成近重复折叠掉，那就测不到本用例想测的东西）。
+	// 句式各异，避免它们彼此被判成近重复（模板化措辞本就该被折叠，
+	// 但那会掩盖本用例真正要测的「腾出的预算有没有被填上」）。
+	others := []string{
+		"用户会画画，几天画不了就心神不宁",
+		"喜欢百合题材作品，曾主动求推荐百合本",
+		"玩过《极限脱出999》，接下来打算玩《善人シボウデス》",
+		"玩怪物猎人，希望官方推出雷狼龙",
+		"自认身体是脆皮又怕虫子，虽然喜欢户外工作",
+		"坐卧铺火车时永远优先选上铺，并带降噪耳机隔绝鼾声",
+		"认为《只狼》七成靠背板记招式、三成靠节奏感",
+		"用户玩打鼓类音游，水平在进步，难度高的谱面很耗体力",
+		"最近喝酒变少了，但很喜欢金酒",
+		"玩FGO很随缘：没有Grand从者、技能也基本没练就推进到了终章",
+		"资讯来源包括Telegram频道CE_Observe",
+		"常转发日本动画新番资讯，来源多为youranimes.tw",
+		"有原创兽人角色，名叫モカ",
+		"下将棋，诘将棋是查了攻略才完成的",
+		"觉得耳夹式耳机不堵塞耳道，使用体验非常好",
+		"判断AI项目质量的标准：标题能讲清功能的一般不错",
+	}
+	for i, content := range others {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("other%02d", i),
+			Scope:      scope,
+			Content:    content,
+			Importance: 0.60,
+		})
+	}
+
+	render := func(dedupe bool) string {
+		cfg := DefaultSnapshotConfig()
+		cfg.Mode = ModeFrozen
+		if !dedupe {
+			cfg.NearDuplicateThreshold = -1
+		}
+		snap := NewSnapshot(cfg)
+		if err := snap.Init(context.Background(), &fakeRetriever{entries: entries}, []Scope{scope}); err != nil {
+			t.Fatalf("init failed: %v", err)
+		}
+		return snap.MemorySnapshot()
+	}
+
+	without := render(false)
+	with := render(true)
+
+	countDup := func(s string) int {
+		n := 0
+		for i := 0; i < 4; i++ {
+			if strings.Contains(s, fmt.Sprintf("补充细节版本%d", i)) {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countDup(without); got != 4 {
+		t.Fatalf("without dedupe all 4 rephrased copies should be injected, got %d", got)
+	}
+	if got := countDup(with); got != 1 {
+		t.Fatalf("with dedupe only one copy should remain, got %d:\n%s", got, with)
+	}
+	// 关键：腾出的名额必须被其它记忆填上，而不是让记忆块变空。
+	for _, want := range []string{"用户会画画", "喜欢百合题材作品", "极限脱出999"} {
+		if !strings.Contains(with, want) {
+			t.Fatalf("budget freed by folding must be refilled by other memories, missing %q:\n%s", want, with)
+		}
+	}
+}
+
+// TestDefaultSnapshotConfig_LengthCapAndDedupeAlwaysOn 两个行为开关已转常开。
+//
+// 它们修的是「超长/重复内容独占记忆块预算」这个既有缺陷，与召回来源无关，
+// 不随相关性召回的灰度开关生效（此前挂在灰度里，导致默认路径一直带着缺陷）。
+func TestDefaultSnapshotConfig_LengthCapAndDedupeAlwaysOn(t *testing.T) {
+	cfg := DefaultSnapshotConfig()
+	if cfg.MaxRenderedEntryChars != DefaultRenderedMaxChars {
+		t.Errorf("MaxRenderedEntryChars should default on, got %d", cfg.MaxRenderedEntryChars)
+	}
+	if cfg.NearDuplicateThreshold != DefaultNearDuplicateThreshold {
+		t.Errorf("NearDuplicateThreshold should default on, got %v", cfg.NearDuplicateThreshold)
+	}
+	// 显式传负数仍可关闭，供对照与回归使用。
+	off := NewSnapshot(SnapshotConfig{MaxRenderedEntryChars: -1, NearDuplicateThreshold: -1})
+	if off.config.MaxRenderedEntryChars != -1 || off.config.NearDuplicateThreshold != -1 {
+		t.Errorf("negative values must disable both, got %d / %v",
+			off.config.MaxRenderedEntryChars, off.config.NearDuplicateThreshold)
+	}
+}
+
 type countingRetriever struct {
 	fakeRetriever
 	calls int
