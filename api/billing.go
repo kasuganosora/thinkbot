@@ -1,12 +1,38 @@
 package api
 
 import (
+	"sort"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/llm"
 )
+
+// effectiveRowCost 取一行的「生效花费」：优先落库的 cost_total，为 0 时按当前
+// 单价回算兜底——与额度恢复的 rowCost（agent/pipeline/cost_quota.go）同源同口径。
+//
+// 为什么必须在这里也兜底：cost_total 是调用当时算出来的，单价没配置时写进去的
+// 就是 0（本项目 9 个 GLM 模型的单价长期为空）。补上单价后，新调用会正常落库，
+// 但**存量行仍是 0** —— 若看板直接 SUM(cost_total)，就会出现「今天 5.8 万 token、
+// 花费 ¥0」而墙那边其实已经按 ¥0.55 在扣。显示与拦截口径不一致会直接误导排查。
+func effectiveRowCost(cost float64, model string, input, output, cacheRead int, priceFor llm.ModelPriceResolver) float64 {
+	if cost > 0 || priceFor == nil {
+		return cost
+	}
+	price, ok := priceFor(model)
+	if !ok || !price.HasPrice() {
+		return cost
+	}
+	_, _, total := llm.ComputeCost(llm.Usage{
+		InputTokens:       input,
+		OutputTokens:      output,
+		InputTokenDetails: llm.InputTokenDetail{CacheReadTokens: cacheRead},
+	}, price)
+	return total
+}
 
 // ============================================================================
 // 计费 / 额度 API
@@ -90,18 +116,29 @@ func (s *Server) handleBillingQuotas(c *gin.Context) {
 		return
 	}
 
-	// 本周期各 (bot, feature) 花费
+	// 本周期各 (bot, feature) 花费。
+	//
+	// 同样要带上 model / token 用量：cost_total 为 0 的存量行需按当前单价回算
+	// （见 effectiveRowCost），否则额度进度会显示 0 而墙那边其实已经在扣——
+	// 用户看到「今天花了 0 / 300」会以为拦截没生效。
+	priceFor := config.NewBuilder(s.store, s.logger).PriceResolver()
 	type usageRow struct {
-		BotID   string
-		Feature string
-		Cost    float64
+		BotID     string
+		Feature   string
+		Model     string
+		Cost      float64
+		Input     int
+		Output    int
+		CacheRead int
 	}
 	var rows []usageRow
 	if err := s.db.WithContext(c.Request.Context()).Raw(`
-		SELECT bot_id, feature, SUM(cost_total) AS cost
+		SELECT bot_id, feature, model, SUM(cost_total) AS cost,
+			SUM(input_tokens) AS input, SUM(output_tokens) AS output,
+			SUM(cache_read_tokens) AS cache_read
 		FROM stats_usage_daily
 		WHERE date >= ?
-		GROUP BY bot_id, feature
+		GROUP BY bot_id, feature, model
 	`, start).Scan(&rows).Error; err != nil {
 		Fail(c, err)
 		return
@@ -111,13 +148,14 @@ func (s *Server) handleBillingQuotas(c *gin.Context) {
 	botFeature := map[string]map[string]float64{}
 	globalFeature := map[string]float64{}
 	for _, r := range rows {
-		botTotal[r.BotID] += r.Cost
+		cost := effectiveRowCost(r.Cost, r.Model, r.Input, r.Output, r.CacheRead, priceFor)
+		botTotal[r.BotID] += cost
 		if r.Feature != "" {
 			if botFeature[r.BotID] == nil {
 				botFeature[r.BotID] = map[string]float64{}
 			}
-			botFeature[r.BotID][r.Feature] += r.Cost
-			globalFeature[r.Feature] += r.Cost
+			botFeature[r.BotID][r.Feature] += cost
+			globalFeature[r.Feature] += cost
 		}
 	}
 
@@ -238,31 +276,45 @@ func (s *Server) handleBillingUsage(c *gin.Context) {
 		args = append(args, bot)
 	}
 
-	// 按功能
+	// 单价解析器：用于把 cost_total=0 的存量行按当前单价回算（见 effectiveRowCost）。
+	priceFor := config.NewBuilder(s.store, s.logger).PriceResolver()
+
+	// 按功能（细分到 model，回算花费需要按模型取单价）
 	var featureRows []struct {
-		Feature  string
-		Cost     float64
-		Requests int
-		Input    int
-		Output   int
+		Feature   string
+		Model     string
+		Cost      float64
+		Requests  int
+		Input     int
+		Output    int
+		CacheRead int
 	}
-	db.Raw(`SELECT feature, SUM(cost_total) AS cost, SUM(total_requests) AS requests,
-		SUM(input_tokens) AS input, SUM(output_tokens) AS output
-		FROM stats_usage_daily WHERE `+where+` GROUP BY feature ORDER BY cost DESC`, args...).
+	db.Raw(`SELECT feature, model, SUM(cost_total) AS cost, SUM(total_requests) AS requests,
+		SUM(input_tokens) AS input, SUM(output_tokens) AS output,
+		SUM(cache_read_tokens) AS cache_read
+		FROM stats_usage_daily WHERE `+where+` GROUP BY feature, model`, args...).
 		Scan(&featureRows)
 
 	// 按模型
 	var modelRows []struct {
-		Model    string
-		Cost     float64
-		Requests int
-		Input    int
-		Output   int
+		Model     string
+		Cost      float64
+		Requests  int
+		Input     int
+		Output    int
+		CacheRead int
 	}
 	db.Raw(`SELECT model, SUM(cost_total) AS cost, SUM(total_requests) AS requests,
-		SUM(input_tokens) AS input, SUM(output_tokens) AS output
-		FROM stats_usage_daily WHERE `+where+` GROUP BY model ORDER BY cost DESC`, args...).
+		SUM(input_tokens) AS input, SUM(output_tokens) AS output,
+		SUM(cache_read_tokens) AS cache_read
+		FROM stats_usage_daily WHERE `+where+` GROUP BY model`, args...).
 		Scan(&modelRows)
+	for i := range modelRows {
+		modelRows[i].Cost = effectiveRowCost(modelRows[i].Cost, modelRows[i].Model,
+			modelRows[i].Input, modelRows[i].Output, modelRows[i].CacheRead, priceFor)
+	}
+	// 排序必须用回算后的 cost：存量行 cost_total=0，按原值排会把真正花钱的模型排到后面。
+	sort.Slice(modelRows, func(i, j int) bool { return modelRows[i].Cost > modelRows[j].Cost })
 
 	view := BillingUsageView{Period: period, Currency: currency}
 
@@ -293,27 +345,42 @@ func (s *Server) handleBillingUsage(c *gin.Context) {
 		}
 	}
 
-	// 细分花费索引：预算键可能是组名（dreaming），进度要按覆盖的全部阶段汇总，
-	// 不能只用当前这一行的花费做分子。
-	featureCost := make(map[string]float64, len(featureRows))
+	// 按 feature 归并（同一 feature 可能跨多个模型），并在此过程中回算存量行的花费。
+	byFeature := map[string]*CostBreakdownItem{}
+	var featureOrder []string
 	for _, r := range featureRows {
-		featureCost[r.Feature] += r.Cost
-	}
-
-	var totalCost float64
-	for _, r := range featureRows {
-		// 空 feature（早期数据 / 未打标的调用）不丢弃，归到「未分类」。
-		// 否则 ByFeature 之和会小于总花费，用户看到一笔对不上的差额却查不到去向。
 		key := r.Feature
 		if key == "" {
 			key = costUnlabeledLabel
 		}
+		it, ok := byFeature[key]
+		if !ok {
+			it = &CostBreakdownItem{Key: key, LimitKey: r.Feature}
+			byFeature[key] = it
+			featureOrder = append(featureOrder, key)
+		}
+		it.Cost += effectiveRowCost(r.Cost, r.Model, r.Input, r.Output, r.CacheRead, priceFor)
+		it.Requests += r.Requests
+		it.InputTokens += r.Input
+		it.OutputTokens += r.Output
+	}
+
+	// 细分花费索引：预算键可能是组名（dreaming），进度要按覆盖的全部阶段汇总，
+	// 不能只用当前这一行的花费做分子。
+	featureCost := make(map[string]float64, len(byFeature))
+	for k, it := range byFeature {
+		featureCost[k] = it.Cost
+	}
+
+	var totalCost float64
+	for _, key := range featureOrder {
+		it := byFeature[key]
 		// 预算键：优先精确匹配，其次落到所属功能组的预算（配 "dreaming" 时
 		// dream_extract 等阶段行都应显示该预算与整体进度）。
-		limKey := r.Feature
-		lim := featureLimit[r.Feature]
+		limKey := it.LimitKey
+		lim := featureLimit[limKey]
 		if lim <= 0 {
-			if g := pipeline.CostFeatureGroup(r.Feature); g != r.Feature {
+			if g := pipeline.CostFeatureGroup(limKey); g != limKey {
 				if gl, ok := featureLimit[g]; ok && gl > 0 {
 					lim = gl
 					limKey = g
@@ -324,12 +391,16 @@ func (s *Server) handleBillingUsage(c *gin.Context) {
 		if lim > 0 {
 			prog = featureCoveredCost(featureCost, limKey) / lim
 		}
-		view.ByFeature = append(view.ByFeature, CostBreakdownItem{
-			Key: key, Cost: r.Cost, Requests: r.Requests,
-			InputTokens: r.Input, OutputTokens: r.Output, Limit: lim, Progress: prog,
-			LimitKey: limKey,
-		})
+		it.Limit = lim
+		it.LimitKey = limKey
+		it.Progress = prog
+		view.ByFeature = append(view.ByFeature, *it)
 	}
+	// 按花费降序（SQL 原本 ORDER BY cost DESC，改在 Go 里归并后需自行排序，
+	// 且必须用回算后的 cost 排，否则存量行会让排序失真）。
+	sort.Slice(view.ByFeature, func(i, j int) bool {
+		return view.ByFeature[i].Cost > view.ByFeature[j].Cost
+	})
 	// 总花费取「按模型」聚合之和（覆盖全部调用，不受 feature 标签缺失影响），
 	// 比按 feature 求和更完整；feature 分解为下钻视图，不要求与总花费相等。
 	for _, r := range modelRows {
@@ -350,22 +421,36 @@ func (s *Server) handleBillingUsage(c *gin.Context) {
 	// 全局视图：按 bot 拆解
 	if bot == "" {
 		var botRows []struct {
-			BotID    string
-			Cost     float64
-			Requests int
-			Input    int
-			Output   int
+			BotID     string
+			Model     string
+			Cost      float64
+			Requests  int
+			Input     int
+			Output    int
+			CacheRead int
 		}
-		db.Raw(`SELECT bot_id, SUM(cost_total) AS cost, SUM(total_requests) AS requests,
-			SUM(input_tokens) AS input, SUM(output_tokens) AS output
-			FROM stats_usage_daily WHERE `+where+` GROUP BY bot_id ORDER BY cost DESC`, args...).
+		db.Raw(`SELECT bot_id, model, SUM(cost_total) AS cost, SUM(total_requests) AS requests,
+			SUM(input_tokens) AS input, SUM(output_tokens) AS output,
+			SUM(cache_read_tokens) AS cache_read
+			FROM stats_usage_daily WHERE `+where+` GROUP BY bot_id, model`, args...).
 			Scan(&botRows)
-		for _, r := range botRows {
-			view.ByBot = append(view.ByBot, CostBreakdownItem{
-				Key: r.BotID, Cost: r.Cost, Requests: r.Requests,
-				InputTokens: r.Input, OutputTokens: r.Output,
-			})
+		byBot := map[string]*CostBreakdownItem{}
+		for i := range botRows {
+			r := &botRows[i]
+			it, ok := byBot[r.BotID]
+			if !ok {
+				it = &CostBreakdownItem{Key: r.BotID}
+				byBot[r.BotID] = it
+			}
+			it.Cost += effectiveRowCost(r.Cost, r.Model, r.Input, r.Output, r.CacheRead, priceFor)
+			it.Requests += r.Requests
+			it.InputTokens += r.Input
+			it.OutputTokens += r.Output
 		}
+		for _, it := range byBot {
+			view.ByBot = append(view.ByBot, *it)
+		}
+		sort.Slice(view.ByBot, func(i, j int) bool { return view.ByBot[i].Cost > view.ByBot[j].Cost })
 	}
 
 	OK(c, view)
