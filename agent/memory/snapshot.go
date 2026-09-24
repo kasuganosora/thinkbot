@@ -146,6 +146,24 @@ type SnapshotConfig struct {
 	// 传负数可显式关闭（仅测试/对照用）。
 	// 详见 relevance.go 里 DefaultNearDuplicateThreshold 的实测说明。
 	NearDuplicateThreshold float64
+	// RecalledBudgetChars 补充通道的字符总配额（默认 1200）。
+	//
+	// 独立于单条封顶 RecalledMaxChars：单条封顶约束的是「一条占多少」，
+	// 总配额约束的是「补充通道一共能占多少」。实测补充通道 8 条 × 240 字符
+	// = 1920 会吃掉 87% 预算，主通道从 18 条掉到 4 条。相关性召回应当是
+	// 「在近期记忆之外多想起几条」，不是「替换掉近期记忆」。
+	// 传负数可显式关闭（仅测试/对照用）。
+	// 详见 relevance.go 里 DefaultRecalledBudgetChars 的实测说明。
+	RecalledBudgetChars int
+	// PinnedCategories 约束类记忆的 category 名单（默认 preference / bot_personality）。
+	//
+	// 这些是行为准则（用户偏好、行为约定、人设），不因「与当前话题不相关」
+	// 而被挤出注入块。详见 hoistPinned 的实测说明。
+	// 传空 slice 可显式关闭（仅测试/对照用）。
+	PinnedCategories []string
+	// MaxPinnedEntries 约束类记忆的置顶名额上限（默认 6）。
+	// 本机约束类条目有 89 条，必须限量，否则会反过来压死主通道。
+	MaxPinnedEntries int
 	// Query 当前轮次的输入文本，用于相关性打分。由调用方（如 RecallStage）
 	// 在每轮构建快照时注入；为空时相关性通道自动跳过。
 	Query string
@@ -173,7 +191,29 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		// 两者都只减少「重复/超长内容对记忆块预算的独占」，不新增召回来源。
 		MaxRenderedEntryChars:  DefaultRenderedMaxChars,
 		NearDuplicateThreshold: DefaultNearDuplicateThreshold,
+		RecalledBudgetChars:    DefaultRecalledBudgetChars,
+		PinnedCategories:       []string{CategoryPreference, CategoryBotPersonality},
+		MaxPinnedEntries:       DefaultMaxPinnedEntries,
 	}
+}
+
+// pinnedSet 把配置的约束类 category 名单转成小写集合，供 hoistPinned 查表。
+// 空名单返回 nil（hoistPinned 见 nil 直接跳过）。
+func (s *Snapshot) pinnedSet() map[string]struct{} {
+	if len(s.config.PinnedCategories) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(s.config.PinnedCategories))
+	for _, c := range s.config.PinnedCategories {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if c != "" {
+			set[c] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
 }
 
 // Snapshot 管理记忆快照，支持可配置的刷新策略。
@@ -279,6 +319,16 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		}
 		if config[0].NearDuplicateThreshold != 0 {
 			cfg.NearDuplicateThreshold = config[0].NearDuplicateThreshold
+		}
+		if config[0].RecalledBudgetChars != 0 {
+			cfg.RecalledBudgetChars = config[0].RecalledBudgetChars
+		}
+		// 空 slice = 显式关闭置顶；nil = 未设置，保持默认。
+		if config[0].PinnedCategories != nil {
+			cfg.PinnedCategories = config[0].PinnedCategories
+		}
+		if config[0].MaxPinnedEntries != 0 {
+			cfg.MaxPinnedEntries = config[0].MaxPinnedEntries
 		}
 		if config[0].Query != "" {
 			cfg.Query = config[0].Query
@@ -542,6 +592,11 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 		recalled = append(recalled, imp...)
 	}
 
+	// 总配额裁剪：补充通道不能吃满整个记忆块预算，否则「多想起几条老记忆」
+	// 会变成「替换掉近期记忆」（实测主通道 18 条 → 4 条）。
+	var budgetDropped int
+	recalled, budgetDropped = capRecalledBudget(recalled, s.config.RecalledBudgetChars)
+
 	if s.logger != nil {
 		// INFO 级：运维需能直接观测两条补充通道是否工作、各补进了几条。
 		s.logger.Infow("snapshot: recall beyond window",
@@ -551,6 +606,8 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 			"relevant", relevantCount,
 			"important", importantCount,
 			"recalled", len(recalled),
+			"budget_dropped", budgetDropped,
+			"budget_chars", s.config.RecalledBudgetChars,
 			"elapsed_ms", time.Since(started).Milliseconds())
 	}
 
@@ -641,6 +698,17 @@ func (s *Snapshot) renderBlock(target string, entries []Entry, stats MemoryStats
 
 	// 近重复折叠（常开）：同一事件常被记成措辞略不同的多条，importance 相近时
 	// 会同时挤进注入块。必须在条数截断**之前**做，腾出的名额才能被后面的条目填上。
+	// 约束类置顶：pinned 条目是行为准则，不能因为与当前话题不相关而被相关性
+	// 排序挤出预算。必须在条数截断之前做，否则置顶了也进不了块。
+	var pinnedCount int
+	if len(s.config.PinnedCategories) > 0 && s.config.MaxPinnedEntries > 0 {
+		entries, pinnedCount = hoistPinned(entries, s.pinnedSet(), s.config.MaxPinnedEntries)
+		if pinnedCount > 0 && s.logger != nil {
+			s.logger.Debugw("snapshot: hoisted constraint memories",
+				"pinned", pinnedCount, "of", len(entries))
+		}
+	}
+
 	if s.config.NearDuplicateThreshold > 0 {
 		kept, folded := dedupeNearDuplicates(entries, s.config.NearDuplicateThreshold)
 		if folded > 0 && s.logger != nil {

@@ -124,6 +124,18 @@ type Entry struct {
 	LastAccessedAt time.Time `json:"lastAccessedAt,omitempty"`
 }
 
+// 记忆分类常量（Entry.Category）。
+//
+// 分类在写入侧由提取器/画像器自由命名，这里只固化**读取侧要特殊对待**的两类：
+// 约束类（见 SnapshotConfig.PinnedCategories）。其余分类继续按自由字符串处理，
+// 不引入枚举，避免写入侧被迫改造。
+const (
+	// CategoryPreference 用户偏好与行为约定（如「不主动搭话」「不喜欢剧透」）。
+	CategoryPreference = "preference"
+	// CategoryBotPersonality Bot 人设（安静克制的守护型陪伴者等）。
+	CategoryBotPersonality = "bot_personality"
+)
+
 // ============================================================================
 // Store — 记忆写入接口（命令侧）
 // ============================================================================

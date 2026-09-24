@@ -46,16 +46,26 @@ func NewRecallStage(name string, retriever memory.Retriever, window *memory.Wind
 	return &RecallStage{retriever: retriever, window: window, logger: logger, recall: extra}
 }
 
-// MemoryRelevanceEnabled 报告是否启用记忆相关性召回（默认关闭）。
+// MemoryRelevanceEnabled 报告是否启用记忆相关性召回（默认开启）。
 //
 // 启用前提：目标 scope 的记忆量已远超主通道窗口（memory.recentPerScope）。
 // 若 scope 记忆量本身就在窗口内，相关性通道没有候选可补，纯属浪费 IO。
 //
-// 这是灰度开关（环境变量），不是长期配置入口：验证收益后应收敛到 bot 配置。
+// 环境变量只作为「紧急关闭」通道（设 0/false/off 关闭），不再是灰度开关：
+// 2026-09-24 真库 A/B 已验证收益并转常开——
+//   - query「你还记得我养的鹦鹉吗？」：关 = 18 条里 0 条与鹦鹉相关；
+//     开 = 前置 6 条全是鹦鹉记录（治疗疥癣 / 死亡经历 / 肝病）。
+//   - query「最近在折腾什么项目？」：关 = 0 条相关；开 = 前置 4 条命中
+//     thinkbot 项目备忘 / 自建 bot / 远程控制软件 / 科三出题规则。
+//
+// 开启后的两个副作用已同步修掉（否则不能放量）：
+//  1. 补充通道独占预算 → 新增 RecalledBudgetChars 总配额（默认 1200）；
+//  2. 约束类记忆（「对 luna 的频率警告持续有效」等）被相关性排序挤出 →
+//     新增约束类置顶（PinnedCategories / MaxPinnedEntries）。
 func MemoryRelevanceEnabled() bool {
 	raw := strings.TrimSpace(os.Getenv("THINKBOT_MEMORY_RELEVANCE_RECALL"))
 	if raw == "" {
-		return false
+		return true
 	}
 	if v, err := strconv.ParseBool(raw); err == nil {
 		return v
