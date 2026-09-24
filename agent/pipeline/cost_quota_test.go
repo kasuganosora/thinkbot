@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/stats"
 )
@@ -508,5 +509,68 @@ func TestCostFeatureGroupMapping(t *testing.T) {
 		if got := costFeatureGroup(in); got != want {
 			t.Errorf("costFeatureGroup(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestFriendlyCostReplyRoutable 锁定「被额度拦住时用户真的能看到提示」。
+//
+// 踩过的坑：友好回复只填了 Channel，没带 Action.Metadata["source_channel"]，
+// ChannelReplyHandler 找不到 Sender 直接报 "no source_channel in action metadata"
+// 派发失败 —— 日志里写着「已转友好回复」，用户端却一直转圈到超时。
+// 拦截生效但收不到任何反馈，排查时会误判成「额度没生效」。
+func TestFriendlyCostReplyRoutable(t *testing.T) {
+	msg := core.Message{
+		ID:      "msg-1",
+		BotID:   "bot-1",
+		Source:  "web:1",
+		Channel: "web:1",
+		UserID:  "u-1",
+		Metadata: map[string]any{
+			"reply_target": "web:session-9",
+		},
+	}
+	env := core.NewEnvelope(msg)
+	ce := &llm.CostQuotaExceededError{
+		Dimension: costDimSystem(),
+		Current:   0.79,
+		Limit:     0.05,
+		Period:    "2026-09-24",
+	}
+
+	out := friendlyCostReply(env, ce, "daily", "CNY")
+	acts := out.Actions()
+	if len(acts) != 1 {
+		t.Fatalf("actions = %d, want 1", len(acts))
+	}
+	a := acts[0]
+	if a.Type != core.ActionReply || a.Payload == "" {
+		t.Fatalf("want a non-empty ActionReply, got %+v", a)
+	}
+	// 回复目标：优先 reply_target，不是 msg.Channel
+	if a.Channel != "web:session-9" {
+		t.Errorf("channel = %q, want reply_target web:session-9", a.Channel)
+	}
+	// 路由元数据：缺了就派发失败
+	sc, ok := a.Metadata["source_channel"].(string)
+	if !ok || sc != "web:1" {
+		t.Fatalf("source_channel = %v (present=%v), want web:1", a.Metadata["source_channel"], ok)
+	}
+	if a.Metadata["bot_id"] != "bot-1" || a.Metadata["message_id"] != "msg-1" {
+		t.Errorf("metadata = %+v, want bot_id/message_id carried", a.Metadata)
+	}
+}
+
+// TestFriendlyCostReplyFallsBackToChannel 无 reply_target 时回退到 msg.Channel。
+func TestFriendlyCostReplyFallsBackToChannel(t *testing.T) {
+	env := core.NewEnvelope(core.Message{ID: "m", BotID: "b", Source: "tg", Channel: "tg-chat"})
+	out := friendlyCostReply(env, &llm.CostQuotaExceededError{
+		Dimension: costDimSystem(), Current: 1, Limit: 1, Period: "p",
+	}, "daily", "CNY")
+	a := out.Actions()[0]
+	if a.Channel != "tg-chat" {
+		t.Fatalf("channel = %q, want fallback to msg.Channel tg-chat", a.Channel)
+	}
+	if a.Metadata["source_channel"] != "tg" {
+		t.Fatalf("source_channel = %v, want tg", a.Metadata["source_channel"])
 	}
 }
