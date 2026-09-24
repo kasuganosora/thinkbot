@@ -37,6 +37,12 @@ import (
 // RefreshMode 控制快照何时刷新。
 type RefreshMode int
 
+// recentPerScope 主通道每个 scope 取最近多少条作为候选。
+//
+// 这是「老记忆能不能浮现」的第一道闸门：某个 scope 的记忆量一旦远超这个值，
+// 窗口外的条目就完全进不了候选集（详见 relevance.go 的实测说明）。
+const recentPerScope = 50
+
 const (
 	// ModeLive 实时刷新（默认）：每次构建系统提示时重新检索。
 	// bot 始终看到最新记忆状态，包括本轮通过工具写入的内容。
@@ -79,19 +85,51 @@ type SnapshotConfig struct {
 	RefreshInterval time.Duration
 	// RefreshTurns 定期刷新轮次间隔（仅 ModePeriodic 生效，默认 10）。
 	RefreshTurns int
+	// RelevanceRecall 是否启用相关性召回（默认 false，保持原有行为）。
+	//
+	// 背景：主通道是「每 scope 最近 N 条」，当某 scope 记忆量远大于 N 时，
+	// 窗口外的历史记忆（含 importance 最高的一批）永远进不了候选集。
+	// 开启后，除主通道外还会从更宽的候选窗口里按与 Query 的相关性补足若干条。
+	// 默认关闭：这是行为变更，需先在小范围验证收益再放量。
+	RelevanceRecall bool
+	// RelevanceCandidates 相关性召回的候选窗口大小（每个 scope，默认 300）。
+	RelevanceCandidates int
+	// RelevanceTopK 相关性通道最多补足的条数（跨 scope 合计，默认 5）。
+	// 设为总配额而非每 scope 配额，是为了避免相关性条目挤占主通道名额。
+	RelevanceTopK int
+	// ImportantTopK 高价值保底通道最多补足的条数（跨 scope 合计，默认 5）。
+	//
+	// 时间窗口再大也覆盖不到的跨月记忆（本机 misskey scope 里 importance 最高的
+	// 一批排在第 2400 位之后，09-19 的 50 条窗口完全看不到它们），
+	// 只能靠 importance 阈值直接捞。实测这类条目只有个位数，常驻成本可忽略。
+	ImportantTopK int
+	// ImportantMinImportance 高价值保底的 importance 阈值（默认 0.7）。
+	ImportantMinImportance float64
+	// RecalledMaxChars 补充条目的单条字符上限（默认 240）。
+	// 补充条目普遍偏长，不封顶会吃满整个记忆块预算，挤掉主通道的近期记忆。
+	RecalledMaxChars int
+	// Query 当前轮次的输入文本，用于相关性打分。由调用方（如 RecallStage）
+	// 在每轮构建快照时注入；为空时相关性通道自动跳过。
+	Query string
 }
 
 // DefaultSnapshotConfig 返回默认快照配置。
 func DefaultSnapshotConfig() SnapshotConfig {
 	return SnapshotConfig{
-		Mode:                 ModeLive,
-		MaxMemoryChars:       2200,
-		MaxUserChars:         1375,
-		MaxEntries:           20,
-		CompressTriggerRatio: 0.2,
-		Separator:            "\n§\n",
-		RefreshInterval:      5 * time.Minute,
-		RefreshTurns:         10,
+		Mode:                   ModeLive,
+		MaxMemoryChars:         2200,
+		MaxUserChars:           1375,
+		MaxEntries:             20,
+		CompressTriggerRatio:   0.2,
+		Separator:              "\n§\n",
+		RefreshInterval:        5 * time.Minute,
+		RefreshTurns:           10,
+		RelevanceRecall:        false,
+		RelevanceCandidates:    DefaultRelevanceCandidates,
+		RelevanceTopK:          DefaultRelevanceTopK,
+		ImportantTopK:          DefaultImportantTopK,
+		ImportantMinImportance: DefaultImportantMinImportance,
+		RecalledMaxChars:       DefaultRecalledMaxChars,
 	}
 }
 
@@ -158,6 +196,27 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		}
 		if config[0].CompressTriggerRatio > 0 {
 			cfg.CompressTriggerRatio = config[0].CompressTriggerRatio
+		}
+		// 相关性召回：开关是 bool，直接用传入值（false 也是有效值，
+		// 不能用 > 0 判断，否则调用方无法显式关闭）。
+		cfg.RelevanceRecall = config[0].RelevanceRecall
+		if config[0].RelevanceCandidates > 0 {
+			cfg.RelevanceCandidates = config[0].RelevanceCandidates
+		}
+		if config[0].RelevanceTopK > 0 {
+			cfg.RelevanceTopK = config[0].RelevanceTopK
+		}
+		if config[0].ImportantTopK > 0 {
+			cfg.ImportantTopK = config[0].ImportantTopK
+		}
+		if config[0].ImportantMinImportance > 0 {
+			cfg.ImportantMinImportance = config[0].ImportantMinImportance
+		}
+		if config[0].RecalledMaxChars > 0 {
+			cfg.RecalledMaxChars = config[0].RecalledMaxChars
+		}
+		if config[0].Query != "" {
+			cfg.Query = config[0].Query
 		}
 	}
 	return &Snapshot{config: cfg}
@@ -259,12 +318,18 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	var lastErr error
 	var allEntries []Entry
 	for _, scope := range scopes {
-		entries, err := retriever.Recent(ctx, scope, 50)
+		entries, err := retriever.Recent(ctx, scope, recentPerScope)
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		allEntries = append(allEntries, entries...)
+	}
+
+	// 窗口外补充通道：相关性召回 + 高价值保底。默认关闭（RelevanceRecall=false），
+	// 关闭时不产生任何额外检索，行为与改动前完全一致。
+	if extra := s.recallBeyondWindow(ctx, retriever, scopes, allEntries); len(extra) > 0 {
+		allEntries = append(allEntries, extra...)
 	}
 
 	// 双条件之一：条数硬上限——合并 memory + user 后按重要性降序取前 MaxEntries 条，
@@ -304,6 +369,90 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	s.mu.Unlock()
 
 	return nil
+}
+
+// recallBeyondWindow 在主通道（每 scope 最近 recentPerScope 条）之外，
+// 补充两类「本该被想起、但被时间窗口挡住」的条目：
+//
+//  1. 相关性：与当前输入话题相关、却落在时间窗口外的历史记忆；
+//  2. 高价值：importance 达阈值的长期事实/偏好，无论多老。
+//
+// 存在理由（实测 2026-09-24，本机 misskey timeline scope）：
+// 该 scope 共 2472 条，最近 50 条全部落在同一天；300 条覆盖 4 天、1000 条覆盖
+// 9 天。全表 importance 最高的 7 条（0.800，用户对 bot 行为的偏好、长期人设）
+// 全部在 08-13/08-14，排在第 2400 位之后——时间窗口再大也捞不到，
+// 这正是必须同时保留「高价值保底」通道的原因。
+//
+// 两类条目都会经 boostRelevance 抬升有效 importance 到主通道入选门槛之上，
+// 否则会在后续「按 importance 降序截断」与「字符预算逐条截断」里被二次挤掉。
+func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, scopes []Scope, base []Entry) []Entry {
+	if !s.config.RelevanceRecall || retriever == nil {
+		return nil
+	}
+	started := time.Now()
+
+	// 主通道已入选的条目：ID 为空者无法去重，视为不同条目（宁可重复也别丢）。
+	seen := make(map[string]struct{}, len(base))
+	for _, e := range base {
+		if e.ID != "" {
+			seen[e.ID] = struct{}{}
+		}
+	}
+
+	gate := relevanceGate(base, s.config.MaxEntries)
+	var recalled []Entry
+
+	// 通道一：相关性（需要当前输入作为 query）
+	var relevantCount, candidateCount int
+	if strings.TrimSpace(s.config.Query) != "" {
+		var candidates []Entry
+		for _, scope := range scopes {
+			wider, err := retriever.Recent(ctx, scope, s.config.RelevanceCandidates)
+			if err != nil {
+				continue
+			}
+			candidates = append(candidates, wider...)
+		}
+		candidateCount = len(candidates)
+
+		picked := SelectRelevant(s.config.Query, candidates, seen, s.config.RelevanceTopK)
+		if len(picked) > 0 {
+			boostRelevance(picked, gate)
+			for _, p := range picked {
+				recalled = append(recalled, p.Entry)
+				if p.Entry.ID != "" {
+					seen[p.Entry.ID] = struct{}{}
+				}
+			}
+			relevantCount = len(picked)
+		}
+	}
+
+	// 通道二：高价值保底（不依赖 query，跨全时间按 importance 取）
+	var importantCount int
+	if picked := SelectImportant(ctx, retriever, scopes, seen, s.config.ImportantMinImportance, s.config.ImportantTopK); len(picked) > 0 {
+		boostRelevance(picked, gate)
+		for _, p := range picked {
+			recalled = append(recalled, p.Entry)
+		}
+		importantCount = len(picked)
+	}
+
+	// 长度封顶：长摘要型的补充条目会吃满字符预算，把主通道的近期记忆挤光。
+	truncateRecalled(recalled, s.config.RecalledMaxChars)
+
+	if s.logger != nil {
+		// INFO 级：运维需能直接观测两条补充通道是否工作、各补进了几条。
+		s.logger.Infow("snapshot: recall beyond window",
+			"scopes", len(scopes),
+			"base", len(base),
+			"candidates", candidateCount,
+			"relevant", relevantCount,
+			"important", importantCount,
+			"elapsed_ms", time.Since(started).Milliseconds())
+	}
+
+	return recalled
 }
 
 // IsCaptured 返回快照是否已初始化。
