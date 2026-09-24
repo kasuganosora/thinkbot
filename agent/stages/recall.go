@@ -116,6 +116,10 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		snapCfg.BeyondWindowRetriever = s.recall.BeyondWindowRetriever
 	}
 	snap := memory.NewSnapshot(snapCfg)
+	// 必须显式注入 logger：Snapshot 内部的「丢弃超长 / 折叠近重复」计数只在
+	// logger 非 nil 时输出，缺了它运维无法判断记忆块到底被谁吃掉了预算
+	// （实测过：一条 1.5 万字的档案就能把 2200 字符预算吃满到只剩 1 条）。
+	snap.SetLogger(s.logger)
 	if err := snap.Init(ctx, s.retriever, scopes); err != nil {
 		if s.logger != nil {
 			s.logger.Warnw("recall: snapshot init failed, skip memory injection",
@@ -135,7 +139,8 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	if s.logger != nil {
 		// INFO 级：运维需能直接观测「人味读侧」是否工作（默认 INFO 下可见）。
 		s.logger.Infow("recall: injected long-term memory into prompt",
-			"bot_id", botID, "scopes", len(scopes), "chars", len(text))
+			"bot_id", botID, "scopes", len(scopes), "chars", len(text),
+			"entries", snap.RenderedMemoryCount())
 	}
 	return env, nil
 }

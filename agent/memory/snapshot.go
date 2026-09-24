@@ -190,6 +190,12 @@ type Snapshot struct {
 	cachedMemory string
 	cachedUser   string
 
+	// renderedMemory 上一次 memory 块实际注入的条目数（可观测性用）。
+	//
+	// 存在理由：字符数不是好指标——实测过 2200 字符预算被一条 1.5 万字档案
+	// 的残片吃满、showing 1 的情况，只看 chars 会误判成「记忆很充实」。
+	renderedMemory int
+
 	// stats 记忆规模与时间跨度元信息（statsValid=false 表示后端不支持或统计失败）。
 	//
 	// 存在理由：注入上下文的只有重要性最高的 20 条（且偏新），模型据此回答
@@ -425,11 +431,16 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	// 规模 / 时间跨度元信息（可选能力）：单次聚合查询，后端不支持则跳过。
 	stats, statsValid := memoryStats(ctx, retriever, scopes)
 
+	memoryBlock, memoryShown := s.renderBlock("memory", memoryEntries, stats, statsValid)
+	userBlock, _ := s.renderBlock("user", userEntries, stats, statsValid)
+
 	s.mu.Lock()
 	s.stats = stats
 	s.statsValid = statsValid
-	s.cachedMemory = s.renderBlock("memory", memoryEntries)
-	s.cachedUser = s.renderBlock("user", userEntries)
+	s.cachedMemory = memoryBlock
+	s.cachedUser = userBlock
+	// 实际注入条数（memory 块）：「记忆块有没有被单条超长档案吃满」的直接指标。
+	s.renderedMemory = memoryShown
 	s.captured = true
 	s.capturedAt = time.Now()
 	s.lastRefresh = time.Now()
@@ -560,6 +571,14 @@ func (s *Snapshot) MemorySnapshot() string {
 	return s.cachedMemory
 }
 
+// RenderedMemoryCount 返回上次 memory 块实际注入的条目数。
+// 供调用方（如 RecallStage）打日志观测「记忆块有没有被少数几条占满」。
+func (s *Snapshot) RenderedMemoryCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.renderedMemory
+}
+
 // UserSnapshot 返回当前的 user 快照文本。
 func (s *Snapshot) UserSnapshot() string {
 	s.mu.RLock()
@@ -585,11 +604,15 @@ func (s *Snapshot) FullSnapshot() string {
 	return result
 }
 
-// renderBlock 渲染一个记忆块。
+// renderBlock 渲染一个记忆块，返回文本与实际注入的条目数。
 // 对每条条目执行威胁扫描，匹配的条目被替换为 [BLOCKED: ...] 占位符。
-func (s *Snapshot) renderBlock(target string, entries []Entry) string {
+//
+// 返回条数是为了可观测性：注入条数（而不是字符数）才是「记忆块有没有被单条
+// 档案吃满」的直接指标——实测过字符数顶到 2200 但只 showing 1 的情况，
+// 光看 chars 会误判成「记忆很充实」。
+func (s *Snapshot) renderBlock(target string, entries []Entry, stats MemoryStatsInfo, statsValid bool) (string, int) {
 	if len(entries) == 0 {
-		return ""
+		return "", 0
 	}
 
 	// 按重要性降序稳定排序：固定的字符预算优先留给高价值记忆，而非最近的 N 条。
@@ -695,7 +718,7 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	}
 
 	if len(sanitized) == 0 {
-		return ""
+		return "", 0
 	}
 
 	var header string
@@ -714,8 +737,8 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 	// 仅 memory 块带元信息：user 块条数少且不涉及「最早」类问题。
 	// 这一段是「你最早的记忆是什么时候」的唯一低成本正解 —— 下面的 N 条是按
 	// 重要性截断的，几乎全是近期的，模型若只看条目会把「最近」当成「最早」。
-	if target != "user" && s.statsValid && s.stats.Total > 0 {
-		sb.WriteString(s.renderStatsLine(len(sanitized)))
+	if target != "user" && statsValid && stats.Total > 0 {
+		sb.WriteString(s.renderStatsLine(stats, len(sanitized)))
 	}
 
 	sb.WriteString(separator + "\n")
@@ -726,21 +749,21 @@ func (s *Snapshot) renderBlock(target string, entries []Entry) string {
 		sb.WriteString(entry)
 	}
 
-	return sb.String()
+	return sb.String(), len(sanitized)
 }
 
 // renderStatsLine 渲染记忆块的规模/时间跨度元信息行。
 //
 // 关键在最后那句提示：光告诉模型「最早是 2026-08-12」不够，还得告诉它
 // 「要看那批内容得用 order=oldest 去查」，否则它知道了日期也编不出内容。
-func (s *Snapshot) renderStatsLine(shown int) string {
+func (s *Snapshot) renderStatsLine(stats MemoryStatsInfo, shown int) string {
 	var sb strings.Builder
-	sb.WriteString("total " + strconv.Itoa(s.stats.Total) + " memories")
-	if !s.stats.Oldest.IsZero() {
-		sb.WriteString(", oldest " + s.stats.Oldest.Format("2006-01-02"))
+	sb.WriteString("total " + strconv.Itoa(stats.Total) + " memories")
+	if !stats.Oldest.IsZero() {
+		sb.WriteString(", oldest " + stats.Oldest.Format("2006-01-02"))
 	}
-	if !s.stats.Newest.IsZero() {
-		sb.WriteString(", newest " + s.stats.Newest.Format("2006-01-02"))
+	if !stats.Newest.IsZero() {
+		sb.WriteString(", newest " + stats.Newest.Format("2006-01-02"))
 	}
 	sb.WriteString(" | showing " + strconv.Itoa(shown) +
 		" by importance — NOT the full timeline. For \"earliest memory\" / \"what happened in <month>\", " +
