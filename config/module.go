@@ -359,6 +359,9 @@ type ModelPriceEntry struct {
 	PriceOutputPer1M    float64 `json:"priceOutputPer1M"`
 	PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
 	Currency            string  `json:"currency"`
+	// PriceSource 标明单价来源：config=provider 显式配置、preset=官方预设兜底、
+	// none=无任何单价（该模型不计入金钱额度）。
+	PriceSource string `json:"priceSource"`
 }
 
 // ModelsWithoutPrice 返回所有已启用 provider 下「拿不到有效单价」的模型 ID。
@@ -402,19 +405,27 @@ func (b *Builder) ModelPriceTable() []ModelPriceEntry {
 			continue
 		}
 		for _, m := range prov.Models {
-			cur := m.Currency
-			if cur == "" {
-				cur = "CNY"
+			// 必须展示**生效单价**（含官方预设兜底），而不是 provider 里的原始值。
+			// 否则看板会显示「单价 0 / 不计费」，而成本墙其实按预设在扣费——
+			// 显示与拦截口径不一致，排查时会被彻底误导。
+			in, outp, cache, cur := resolveModelPrice(m.ID, m.PriceInputPer1M, m.PriceOutputPer1M, m.PriceCacheReadPer1M, m.Currency)
+			// 标明单价来源，便于判断「为什么是这个价」以及是否需要人工校正。
+			src := "preset"
+			if m.PriceInputPer1M > 0 || m.PriceOutputPer1M > 0 || m.PriceCacheReadPer1M > 0 {
+				src = "config"
+			} else if in == 0 && outp == 0 && cache == 0 {
+				src = "none"
 			}
 			out = append(out, ModelPriceEntry{
 				ProviderID:          pid,
 				ProviderName:        prov.Name,
 				ModelID:             m.ID,
 				ModelName:           m.Name,
-				PriceInputPer1M:     m.PriceInputPer1M,
-				PriceOutputPer1M:    m.PriceOutputPer1M,
-				PriceCacheReadPer1M: m.PriceCacheReadPer1M,
+				PriceInputPer1M:     in,
+				PriceOutputPer1M:    outp,
+				PriceCacheReadPer1M: cache,
 				Currency:            cur,
+				PriceSource:         src,
 			})
 		}
 	}
