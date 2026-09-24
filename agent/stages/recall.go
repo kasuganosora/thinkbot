@@ -2,6 +2,9 @@ package stages
 
 import (
 	"context"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
@@ -26,14 +29,38 @@ type RecallStage struct {
 	retriever memory.Retriever
 	window    *memory.Window
 	logger    *zap.SugaredLogger
+	// recall 额外的快照配置（目前用于相关性召回开关与配额）。
+	recall memory.SnapshotConfig
 }
 
 // NewRecallStage 创建记忆召回 stage。retriever 为 nil 时 stage 为空操作。
 // window 可选：注入后记忆块字符上限由 Window.MemoryBudget()*3 派生，
 // 取代硬编码的 2200，与 context.go 使用 window 模块的口径一致。
-func NewRecallStage(name string, retriever memory.Retriever, window *memory.Window, logger *zap.SugaredLogger) *RecallStage {
+// recall 可选：传入记忆快照的额外配置（如相关性召回）；不传则全部走默认值。
+func NewRecallStage(name string, retriever memory.Retriever, window *memory.Window, logger *zap.SugaredLogger, recall ...memory.SnapshotConfig) *RecallStage {
 	_ = name // 名称保留给 future 多实例场景；Process 使用固定 Name()
-	return &RecallStage{retriever: retriever, window: window, logger: logger}
+	var extra memory.SnapshotConfig
+	if len(recall) > 0 {
+		extra = recall[0]
+	}
+	return &RecallStage{retriever: retriever, window: window, logger: logger, recall: extra}
+}
+
+// MemoryRelevanceEnabled 报告是否启用记忆相关性召回（默认关闭）。
+//
+// 启用前提：目标 scope 的记忆量已远超主通道窗口（memory.recentPerScope）。
+// 若 scope 记忆量本身就在窗口内，相关性通道没有候选可补，纯属浪费 IO。
+//
+// 这是灰度开关（环境变量），不是长期配置入口：验证收益后应收敛到 bot 配置。
+func MemoryRelevanceEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("THINKBOT_MEMORY_RELEVANCE_RECALL"))
+	if raw == "" {
+		return false
+	}
+	if v, err := strconv.ParseBool(raw); err == nil {
+		return v
+	}
+	return raw == "on" || raw == "yes"
 }
 
 // Name 返回 stage 名称。
@@ -72,6 +99,15 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	snapCfg := memory.SnapshotConfig{Mode: memory.ModeFrozen}
 	if s.window != nil {
 		snapCfg.Window = s.window
+	}
+	// 相关性召回：把当前轮次输入作为相关性打分的 query。
+	// 开关默认关闭（见 MemoryRelevanceEnabled），开启后窗口外的老记忆
+	// 才有机会补进候选集；配额字段为 0 时由 Snapshot 回落默认值。
+	if s.recall.RelevanceRecall {
+		snapCfg.RelevanceRecall = true
+		snapCfg.RelevanceCandidates = s.recall.RelevanceCandidates
+		snapCfg.RelevanceTopK = s.recall.RelevanceTopK
+		snapCfg.Query = env.Message.Text
 	}
 	snap := memory.NewSnapshot(snapCfg)
 	if err := snap.Init(ctx, s.retriever, scopes); err != nil {
