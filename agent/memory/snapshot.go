@@ -92,7 +92,7 @@ type SnapshotConfig struct {
 	// 开启后，除主通道外还会从更宽的候选窗口里按与 Query 的相关性补足若干条。
 	// 默认关闭：这是行为变更，需先在小范围验证收益再放量。
 	RelevanceRecall bool
-	// RelevanceCandidates 相关性召回的候选窗口大小（每个 scope，默认 300）。
+	// RelevanceCandidates 相关性召回的候选窗口大小（每个 scope，默认 1000）。
 	RelevanceCandidates int
 	// RelevanceTopK 相关性通道最多补足的条数（跨 scope 合计，默认 5）。
 	// 设为总配额而非每 scope 配额，是为了避免相关性条目挤占主通道名额。
@@ -418,28 +418,34 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 		picked := SelectRelevant(s.config.Query, candidates, seen, s.config.RelevanceTopK)
 		if len(picked) > 0 {
 			boostRelevance(picked, gate)
+			var rel []Entry
 			for _, p := range picked {
-				recalled = append(recalled, p.Entry)
+				rel = append(rel, p.Entry)
 				if p.Entry.ID != "" {
 					seen[p.Entry.ID] = struct{}{}
 				}
 			}
-			relevantCount = len(picked)
+			rel = capRecalled(rel, s.config.RecalledMaxChars)
+			relevantCount = len(rel)
+			recalled = append(recalled, rel...)
 		}
 	}
 
 	// 通道二：高价值保底（不依赖 query，跨全时间按 importance 取）
 	var importantCount int
-	if picked := SelectImportant(ctx, retriever, scopes, seen, s.config.ImportantMinImportance, s.config.ImportantTopK); len(picked) > 0 {
+	if picked := SelectImportant(ctx, retriever, scopes, seen, s.config.ImportantMinImportance, s.config.ImportantTopK, s.logger); len(picked) > 0 {
 		boostRelevance(picked, gate)
+		var imp []Entry
 		for _, p := range picked {
-			recalled = append(recalled, p.Entry)
+			imp = append(imp, p.Entry)
+			if p.Entry.ID != "" {
+				seen[p.Entry.ID] = struct{}{}
+			}
 		}
-		importantCount = len(picked)
+		imp = capRecalled(imp, s.config.RecalledMaxChars)
+		importantCount = len(imp)
+		recalled = append(recalled, imp...)
 	}
-
-	// 长度封顶：长摘要型的补充条目会吃满字符预算，把主通道的近期记忆挤光。
-	truncateRecalled(recalled, s.config.RecalledMaxChars)
 
 	if s.logger != nil {
 		// INFO 级：运维需能直接观测两条补充通道是否工作、各补进了几条。
@@ -449,6 +455,7 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 			"candidates", candidateCount,
 			"relevant", relevantCount,
 			"important", importantCount,
+			"recalled", len(recalled),
 			"elapsed_ms", time.Since(started).Milliseconds())
 	}
 
