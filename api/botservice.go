@@ -1976,6 +1976,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			s.logger.Infow("channel tools registered",
 				"channel_name", ch.Name(), "channel_type", ch.Type(), "count", len(defs))
 		}
+		// Dynamic channel tools (e.g. misskey_search_notes hidden while circuit open).
+		if tp, ok := ch.(agenttools.ToolProvider); ok {
+			toolMgr.AddProvider(tp)
+			s.logger.Infow("channel dynamic tool provider registered",
+				"channel_name", ch.Name(), "channel_type", ch.Type())
+		}
 	}
 
 	// 注册自举（self-host）工具：仅当 .env 开启 loader.enabled 时，bot 才能调用

@@ -42,6 +42,12 @@ func (j *lazyLLMJudge) Adjudicate(ctx context.Context, req pipeline.LazyJudgeReq
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(resp) == "" {
+		resp, err = j.client.Chat(ctx, lazyJudgeSystemPrompt, user+"\n\nReminder: respond with ONLY a JSON object.")
+		if err != nil {
+			return nil, err
+		}
+	}
 	return parseLazyJudgeJSON(resp)
 }
 

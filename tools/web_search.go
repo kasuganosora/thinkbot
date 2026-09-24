@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
@@ -100,9 +101,32 @@ func searchToolDef(cfg SearchConfig) agenttools.ToolDef {
 	}
 }
 
-// RegisterSearchTools 注册搜索相关工具。
+// searchToolProvider dynamically exposes web_search only when at least one
+// Settings -> Search Providers entry is enabled, so the model cannot thrash a
+// tool that is guaranteed to fail.
+type searchToolProvider struct {
+	cfg SearchConfig
+}
+
+func (p *searchToolProvider) Tools(ctx context.Context, sctx *agenttools.ToolSessionContext) ([]llm.Tool, error) {
+	_ = ctx
+	_ = sctx
+	store := p.cfg.Store
+	if store == nil {
+		store = searchproviders.DefaultStore()
+	}
+	list, err := store.EnabledList()
+	if err != nil || len(list) == 0 {
+		return nil, nil
+	}
+	def := searchToolDef(p.cfg)
+	return []llm.Tool{def.Tool}, nil
+}
+
+// RegisterSearchTools registers search tools (hidden when no provider enabled).
 func RegisterSearchTools(mgr *agenttools.ToolManager, cfg SearchConfig) error {
-	return mgr.Register(searchToolDef(cfg))
+	mgr.AddProvider(&searchToolProvider{cfg: cfg})
+	return nil
 }
 
 func toIntSearch(v any) (int, bool) {
