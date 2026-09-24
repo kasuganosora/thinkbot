@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"go.uber.org/zap"
 )
 
 // 相关性召回：在不引入 embedding / 向量库 / 外部依赖的前提下，用字面 token
@@ -46,10 +48,27 @@ const (
 	// 超出部分截断并加省略号，避免少数长记忆独占整个记忆块预算。
 	DefaultRecalledMaxChars = 240
 	// DefaultImportantMinImportance 高价值保底的 importance 阈值。
-	// 实测本机 importance>=0.7 的仅 11 条，规模极小，常驻成本可忽略。
+	//
+	// 注意两张表的规模差了一个量级（2026-09-24 实测，本机）：
+	//   - tiered_memories：importance>=0.7 仅 11 条
+	//   - memory_entries：importance>=0.7 有 641 条，平均 3264 字符、最长 20696
+	// 生产链路用 MergedRetriever，两个源都会命中，因此实际面对的是后者。
+	// 任何按「只有个位数短条目」做的定标都是错的。
 	DefaultImportantMinImportance = 0.7
-	// importantScanLimit 高价值保底通道的单次扫描上限（防止后端返回过多）。
-	importantScanLimit = 200
+	// importantScanLimit 高价值保底通道的单次扫描上限。
+	//
+	// 这是**防止后端返回过多的安全网**，不是筛选条件：真正的过滤由
+	// Query.MinImportance 完成。它必须大于「满足阈值的条目总数」，
+	// 否则会退化成「只看最早创建的 N 条」——本机 1.00 分条目按时间升序
+	// 排在第 516/573 位，用 200 时会永久漏掉。命中上限时会打 WARN。
+	importantScanLimit = 2000
+	// recalledSkipChars 补充通道跳过超长条目的原始长度门槛（= 封顶值的倍数）。
+	//
+	// 超过这个长度的条目被 truncateRecalled 截断后只剩下断头残句，
+	// 注入 prompt 比不注入更糟：本机实测会命中「【栞娜人格设定】」(701/951 字符)
+	// 与「luna 完整档案」(2287 字符)，截断后是残缺的人格定义。
+	// 这类内容属于 persona / profile 层的职责，不该由召回通道重复注入。
+	recalledSkipFactor = 2
 	// relevanceFloorStep 相关性条目相对主通道入选门槛的最小抬升量。
 	// 抬升的目的见 Snapshot.doRefresh：不抬的话补回来的老记忆会在后续
 	// importance 排序和字符预算截断里被再次挤掉，等于白补。
@@ -230,29 +249,39 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 // 按 importance 降序返回至多 topK 条。
 //
 // 这是「高价值保底」通道：时间窗口再大也覆盖不到的跨月记忆，只要 importance
-// 够高（长期事实/偏好/人设）就该被想起。实测本机这类条目只有个位数，
-// 常驻成本可忽略，但缺了它们 bot 会忘记用户的核心偏好。
+// 够高（长期事实/偏好）就该被想起。
+//
+// 排序在**内存**完成，不依赖 Query.Order + Limit 的组合。原因（2026-09-24 实测）：
+// Limit 一旦小于满足阈值的条目总数，就退化成「只扫最早/最新的 N 条」，
+// 而 Order 只能在两端二选一，救不了中间——本机 importance>=0.7 有 641 条，
+// 用 OrderAsc+Limit(200) 时排在第 516/573 位的 1.00 分条目永久漏掉，
+// 抓到的反而是最早的人格设定条目。真正的过滤交给 Query.MinImportance，
+// Limit 只作安全网；命中安全网时打 WARN 提示上调。
 //
 // 检索依赖 Query.MinImportance；后端若不支持该过滤，本通道退化为返回
 // 最新若干条（与已有条目重复会被 exclude 掉），属于无害的 fail-soft。
-// 返回的 Score 是相关性分（可能为 0），仅用于通道内部的排序参考。
-func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude map[string]struct{}, minImportance float64, topK int) []ScoredEntry {
+//
+// 返回的 Score 恒为 0：保底通道与当前输入无关，没有相关性分可言。
+// 抬升时只保证越过主通道门槛即可（见 boostRelevance）。
+func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude map[string]struct{}, minImportance float64, topK int, logger ...*zap.SugaredLogger) []ScoredEntry {
 	if topK <= 0 || minImportance <= 0 || r == nil {
 		return nil
 	}
 
-	// Order 必须用 OrderAsc（最早在前）：高价值条目同样受 Limit 截断，
-	// 若按默认的时间倒序取，得到的是「最近的高价值条目」，而我们要救的
-	// 恰恰是排在最末尾（最老）的那些——实测本机 importance>=0.7 有 641 条，
-	// 倒序取 200 条全是 09 月的，08-13 那批核心记忆一条都进不来。
 	got, err := r.Retrieve(ctx, Query{
 		Scopes:        scopes,
 		MinImportance: minImportance,
 		Limit:         importantScanLimit,
-		Order:         OrderAsc,
 	})
 	if err != nil || len(got) == 0 {
 		return nil
+	}
+
+	if len(got) >= importantScanLimit && len(logger) > 0 && logger[0] != nil {
+		// WARN：扫描上限被打满意味着 MinImportance 之上的条目没取全，
+		// 本通道会静默退化成「按时间截断」，需要上调 importantScanLimit。
+		logger[0].Warnw("memory: important scan limit reached, high-value recall truncated",
+			"limit", importantScanLimit, "minImportance", minImportance)
 	}
 
 	scored := make([]ScoredEntry, 0, len(got))
@@ -262,7 +291,7 @@ func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude m
 				continue
 			}
 		}
-		scored = append(scored, ScoredEntry{Entry: e, Score: e.Importance})
+		scored = append(scored, ScoredEntry{Entry: e, Score: 0})
 	}
 	if len(scored) == 0 {
 		return nil
@@ -277,21 +306,36 @@ func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude m
 	return scored
 }
 
-// truncateRecalled 就地限制补充条目的单条字符数。
+// capRecalled 限制补充条目的单条字符数，返回应实际补入的条目。
 //
-// 必要性：高 importance 的记忆常是长摘要（实测有 400+ 字的心理状态汇总），
-// 不封顶的话三五条就会吃满整个记忆块字符预算，把主通道的近期记忆全挤出去
-// ——实测开启后注入从 20 条掉到 "showing 5"，bot 反而不知道当下发生了什么。
-func truncateRecalled(entries []Entry, maxChars int) {
+// 两件事：
+//  1. 封顶：高 importance 的记忆常是长摘要（实测有 400+ 字的心理状态汇总），
+//     不封顶的话三五条就会吃满整个记忆块字符预算，把主通道的近期记忆全挤出去
+//     ——实测开启后注入从 20 条掉到 "showing 5"，bot 反而不知道当下发生了什么。
+//  2. 跳过超长条目：原始长度超过封顶值 recalledSkipFactor 倍的条目直接丢弃，
+//     不做截断。截断后的残句没有阅读价值，实测会命中「【栞娜人格设定】」
+//     (701/951 字符) 与「luna 完整档案」(2287 字符)，注入后是断头的人格定义。
+//     这类内容属于 persona / profile 层，不该由召回通道重复注入。
+//
+// maxChars <= 0 表示不限制，原样返回。
+func capRecalled(entries []Entry, maxChars int) []Entry {
 	if maxChars <= 0 {
-		return
+		return entries
 	}
-	for i := range entries {
-		runes := []rune(entries[i].Content)
-		if len(runes) > maxChars {
-			entries[i].Content = string(runes[:maxChars]) + "…"
+
+	skipAbove := maxChars * recalledSkipFactor
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		runes := []rune(e.Content)
+		if len(runes) > skipAbove {
+			continue
 		}
+		if len(runes) > maxChars {
+			e.Content = string(runes[:maxChars]) + "…"
+		}
+		out = append(out, e)
 	}
+	return out
 }
 
 // relevanceGate 返回主通道按 importance 降序取前 maxEntries 条时的入选门槛
