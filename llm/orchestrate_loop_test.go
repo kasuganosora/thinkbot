@@ -280,28 +280,38 @@ func TestCollectRecentUserMsgs(t *testing.T) {
 	}
 }
 
-// mockIntentJudgeClient 可编程的快判客户端桩。
+// mockIntentJudgeClient 可编程的快判客户端桩。resps 按次序出队，
+// 耗尽后重复最后一个；记录调用次数供重试断言。
 type mockIntentJudgeClient struct {
-	resp   string
-	err    error
-	gotSys string
-	gotUsr string
+	resps   []string
+	err     error
+	calls   int
+	gotSys  string
+	gotUsr  string
 }
 
 func (m *mockIntentJudgeClient) Chat(ctx context.Context, system, user string) (string, error) {
 	m.gotSys = system
 	m.gotUsr = user
+	m.calls++
 	if m.err != nil {
 		return "", m.err
 	}
-	return m.resp, nil
+	if len(m.resps) == 0 {
+		return `{"verdict":"NO","reason":"mock 无回复"}`, nil
+	}
+	resp := m.resps[0]
+	if len(m.resps) > 1 {
+		m.resps = m.resps[1:]
+	}
+	return resp, nil
 }
 
 func TestCheckUserIntentGrounded(t *testing.T) {
 	ctx := context.Background()
 
 	// 关键词快速通道：命中高置信词，不调 LLM
-	mock := &mockIntentJudgeClient{resp: "NO 不该到这一步"}
+	mock := &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"NO\",\"reason\":\"不该到这一步\"}"}}
 	res := checkUserIntentGrounded(ctx, "misskey_follow_user", "在 misskey 上关注 @foo", nil,
 		&OrchestrateConfig{IntentJudge: mock})
 	if !res.grounded {
@@ -319,7 +329,7 @@ func TestCheckUserIntentGrounded(t *testing.T) {
 
 	// 关键词未命中 + judge 判 YES（口语授权「那你就发呗」由 LLM 翻案——
 	// 注意这句不含任何关键词，专门覆盖快速通道漏词的场景）
-	mock = &mockIntentJudgeClient{resp: "YES 用户明确要求发帖"}
+	mock = &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"YES\",\"reason\":\"用户明确要求发帖\"}"}}
 	res = checkUserIntentGrounded(ctx, "misskey_create_note", "那你就发呗", nil,
 		&OrchestrateConfig{IntentJudge: mock})
 	if !res.grounded {
@@ -330,7 +340,7 @@ func TestCheckUserIntentGrounded(t *testing.T) {
 	}
 
 	// 关键词未命中 + judge 判 NO（只读查询不放行）
-	mock = &mockIntentJudgeClient{resp: "NO 用户只是查询"}
+	mock = &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"NO\",\"reason\":\"只是查询\"}"}}
 	res = checkUserIntentGrounded(ctx, "misskey_create_note", "帮我查下 misskey 上的用户", nil,
 		&OrchestrateConfig{IntentJudge: mock})
 	if res.grounded {
@@ -387,7 +397,7 @@ func TestRunTool_RequiresUserIntent(t *testing.T) {
 	called = false
 	cfg3 := &OrchestrateConfig{
 		UserRequest: "发条 misskey，内容你定",
-		IntentJudge: &mockIntentJudgeClient{resp: "YES 用户明确要求发帖"},
+		IntentJudge: &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"YES\",\"reason\":\"用户明确要求发帖\"}"}},
 	}
 	res3 := runTool(context.Background(), tc, tool, nil, cfg3)
 	if res3.IsError {

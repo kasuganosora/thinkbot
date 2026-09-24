@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -15,11 +16,15 @@ import (
 // 关键词子串匹配判定用户请求是否显式授权。口语措辞无穷（「发条 misskey」
 // 「整一个过去」「那你就发呗」），关键词表永远追不完，导致正常授权被误杀。
 //
-// 参照 agent/engagement.SimpleJudge 的成熟模式：极简 prompt、YES/NO 文本
-// 协议、无法解析时保守拒绝（fail-closed）。关键词匹配仅保留为零成本快速
-// 通道（命中即放行，省一次 LLM 调用）；未命中才走本判定器。
+// 参照 agent/engagement.SimpleJudge 的成熟模式：极简 prompt、严格输出协议、
+// 无法解析时保守拒绝（fail-closed）。与自由文本 YES/NO 不同，本判定器要求
+// LLM 输出严格 JSON（{"verdict":"YES|NO","reason":"..."}），解析后校验字段
+// 合法性；不合规的回复丢弃并重试，重试仍不合规才判 NO（fail-closed）。
 //
-// 判错/超时/无法解析一律视为「未授权」——护栏宁可误拦也不误放。
+// 关键词匹配仅保留为零成本快速通道（命中即放行，省一次 LLM 调用）；
+// 未命中才走本判定器。
+//
+// 判错/超时/重试耗尽一律视为「未授权」——护栏宁可误拦也不误放。
 
 // IntentJudgeClient 是意图快判的最小 LLM 客户端接口（与 engagement.
 // SimpleLLMClient 同构，但 llm 包不依赖 agent，故独立声明）。
@@ -29,8 +34,8 @@ type IntentJudgeClient interface {
 
 // providerIntentJudge 把 llm.Provider 适配为 IntentJudgeClient。
 type providerIntentJudge struct {
-	prov   Provider
-	model  *Model
+	prov  Provider
+	model *Model
 }
 
 // NewProviderIntentJudge 用现有 Provider（沿用会话模型）构建快判客户端。
@@ -41,7 +46,7 @@ func NewProviderIntentJudge(prov Provider, model *Model) IntentJudgeClient {
 
 func (a *providerIntentJudge) Chat(ctx context.Context, system, user string) (string, error) {
 	temp := 0.3
-	maxTok := 64
+	maxTok := 128
 	result, err := a.prov.DoGenerate(WithStatsFeature(ctx, "intent_judge"), GenerateParams{
 		Model:       a.model,
 		System:      system,
@@ -55,7 +60,7 @@ func (a *providerIntentJudge) Chat(ctx context.Context, system, user string) (st
 	return result.Text, nil
 }
 
-// intentJudgeSystemPrompt 快判 system prompt。只回答 YES/NO，判定标准是
+// intentJudgeSystemPrompt 快判 system prompt。要求严格 JSON 输出，判定标准是
 // 「用户是否在显式授权/要求执行社交写操作」，查询类不算。
 const intentJudgeSystemPrompt = `你是社交平台写操作的用户意图审核员。给定用户对 AI 助手说的话，判定用户是否显式地授权或要求执行社交写操作（发帖/发动态/关注/取关/点赞/转发/私信等）。
 
@@ -65,23 +70,29 @@ const intentJudgeSystemPrompt = `你是社交平台写操作的用户意图审�
 - 语气反问但实质是授权（「那你尝试下发一个验证下？」）算 YES。
 - 仅提到平台名、未落在写动作上的，一律 NO。
 
-只回答 YES 或 NO 开头，后跟一句理由。`
+只输出一个 JSON 对象，不要输出任何其他内容，格式如下：
+{"verdict":"YES 或 NO","reason":"一句话理由"}`
 
-// intentJudgeTimeout 快判超时。护栏在主链路关键路径上，必须快速失败；
-// 超时即视为未授权（fail-closed）。10s 覆盖慢 provider，又不至于挂死编排。
+// intentJudgeTimeout 快判整体超时（含重试）。护栏在主链路关键路径上，必须
+// 快速失败；超时即视为未授权（fail-closed）。10s 覆盖慢 provider 及一次
+// 重试，又不至于挂死编排。
 const intentJudgeTimeout = 10 * time.Second
 
+// intentJudgeMaxAttempts 单次判定的最大尝试次数。LLM 回复不合规时丢弃
+// 重试；达到上限仍不合规则 fail-closed 判 NO。
+const intentJudgeMaxAttempts = 2
+
 // IntentJudge 是写操作意图的 LLM 快判器。fail-closed：客户端错误、超时、
-// 回复无法解析时一律判定为未授权。
+// 重试耗尽仍无法解析时一律判定为未授权。
 type IntentJudge struct {
 	client  IntentJudgeClient
 	timeout time.Duration
 }
 
-// NewIntentJudge 创建意图快判器。timeout <=0 时默认 10s。
+// NewIntentJudge 创建意图快判器。timeout <= 0 时默认 10s。
 func NewIntentJudge(client IntentJudgeClient, timeout time.Duration) *IntentJudge {
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = intentJudgeTimeout
 	}
 	return &IntentJudge{client: client, timeout: timeout}
 }
@@ -110,28 +121,61 @@ func (j *IntentJudge) Grounded(ctx context.Context, toolName, userReq string, re
 		}
 	}
 	sb.WriteString("\nAI 助手即将执行的工具：" + toolName + "\n")
-	sb.WriteString("\n用户是否显式授权/要求此类写操作？回答 YES 或 NO。")
+	sb.WriteString("\n用户是否显式授权/要求此类写操作？只输出 JSON。")
 
 	cctx, cancel := context.WithTimeout(ctx, j.timeout)
 	defer cancel()
-	resp, err := j.client.Chat(cctx, intentJudgeSystemPrompt, sb.String())
-	if err != nil {
-		return intentJudgeVerdict{grounded: false, reason: "intent judge error: " + err.Error()}
+
+	var lastReason string
+	for attempt := 1; attempt <= intentJudgeMaxAttempts; attempt++ {
+		resp, err := j.client.Chat(cctx, intentJudgeSystemPrompt, sb.String())
+		if err != nil {
+			return intentJudgeVerdict{grounded: false, reason: "intent judge error: " + err.Error()}
+		}
+		verdict, ok := parseIntentJudgeResponse(resp)
+		if ok {
+			return verdict
+		}
+		// 回复不合规：丢弃，带错误提示重试一次。
+		lastReason = fmt.Sprintf("attempt %d: invalid judge response: %s", attempt, truncateForJudge(resp))
 	}
-	return parseIntentJudgeResponse(resp)
+	return intentJudgeVerdict{grounded: false, reason: lastReason}
 }
 
-// parseIntentJudgeResponse 解析 YES/NO 回复；无法解析时保守拒绝。
-func parseIntentJudgeResponse(text string) intentJudgeVerdict {
+// intentJudgeReply 是 LLM 应输出的 JSON 结构。
+type intentJudgeReply struct {
+	Verdict string `json:"verdict"`
+	Reason  string `json:"reason"`
+}
+
+// parseIntentJudgeResponse 解析并校验 LLM 的 JSON 回复。返回 ok=false 表示
+// 回复不合规（应丢弃重试 / fail-closed）。
+//
+// 校验规则：
+//   - 必须是合法 JSON 对象（允许首尾空白，允许被 ```json 围栏包裹）；
+//   - verdict 必须恰为 "YES" 或 "NO"（大小写不敏感），空串/其他值不合规；
+//   - reason 为自由文本，仅截断长度，不作硬性要求。
+func parseIntentJudgeResponse(text string) (intentJudgeVerdict, bool) {
 	text = strings.TrimSpace(text)
-	upper := strings.ToUpper(text)
-	switch {
-	case strings.HasPrefix(upper, "YES"):
-		return intentJudgeVerdict{grounded: true, reason: strings.TrimSpace(text[3:])}
-	case strings.HasPrefix(upper, "NO"):
-		return intentJudgeVerdict{grounded: false, reason: strings.TrimSpace(text[2:])}
+	// 剥离 markdown 代码围栏（部分模型习惯性加）。
+	if strings.HasPrefix(text, "```") {
+		if idx := strings.Index(text, "\n"); idx >= 0 {
+			text = strings.TrimSpace(text[idx+1:])
+		}
+		text = strings.TrimSuffix(strings.TrimSpace(text), "```")
+		text = strings.TrimSpace(text)
+	}
+	var reply intentJudgeReply
+	if err := json.Unmarshal([]byte(text), &reply); err != nil {
+		return intentJudgeVerdict{}, false
+	}
+	switch strings.ToUpper(strings.TrimSpace(reply.Verdict)) {
+	case "YES":
+		return intentJudgeVerdict{grounded: true, reason: reply.Reason}, true
+	case "NO":
+		return intentJudgeVerdict{grounded: false, reason: reply.Reason}, true
 	default:
-		return intentJudgeVerdict{grounded: false, reason: "unparseable judge response"}
+		return intentJudgeVerdict{}, false
 	}
 }
 
