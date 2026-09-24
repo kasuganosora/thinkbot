@@ -215,6 +215,10 @@ func (s *Server) handleMemoryStats(c *gin.Context) {
 // handleTriggerDreaming 手动触发梦境巩固。
 // POST /api/bots/:id/dreaming/trigger
 //
+// 可选参数 backfill=1（query 或 JSON body {"backfill":true}）：进入补偿积压模式，
+// 忽略活跃度门槛与 Light 的 2 天回溯窗口，处理 TTL 内全部未巩固的 L0（最老优先、
+// 单轮上限 80 条，可重复调用直至积压排空）。用于 bot 停摆数天后补回落下的记忆。
+//
 // @Summary      触发梦境巩固
 // @Description  手动触发指定 Bot 的梦境巩固流程
 // @Tags         梦境巩固
@@ -249,19 +253,37 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 		return
 	}
 
-	report, err := bundle.Manager.Run(c.Request.Context())
+	// 补偿积压模式：?backfill=1 或 body {"backfill":true}
+	backfill := c.Query("backfill") == "1" || c.Query("backfill") == "true"
+	if !backfill && c.Request.Body != nil {
+		var body struct {
+			Backfill bool `json:"backfill"`
+		}
+		if err := c.ShouldBindJSON(&body); err == nil && body.Backfill {
+			backfill = true
+		}
+	}
+
+	if backfill {
+		s.logger.Infow("dreaming trigger: backfill mode (ignore activity gate & light lookback)",
+			"bot_id", botID)
+	}
+
+	report, err := bundle.Manager.RunWithOptions(c.Request.Context(), memory.DreamRunOptions{Backfill: backfill})
 	if err != nil {
 		Fail(c, errs.Wrap(err, "dreaming trigger failed"))
 		return
 	}
 
-	auditLog(c, s.logger, "trigger_dreaming", "bot_id", botID, "phase", report.Phase)
+	auditLog(c, s.logger, "trigger_dreaming", "bot_id", botID, "phase", report.Phase, "backfill", backfill)
 
 	// 调试辅助：解释 ingested=0 的常见原因，便于快速定位问题。
 	message := ""
 	switch {
 	case report.Error != "":
 		message = report.Error
+	case report.Backfill && report.LightIngested == 0:
+		message = "补偿模式：TTL 内已无未巩固的 L0（积压排空，或历史条目已过 14 天 TTL 作废）"
 	case report.LightIngested == 0 && report.SkippedInactive > 0:
 		message = "所有 scope 因超过活跃阈值被跳过（需有近期 L0 写入才会处理）"
 	case report.LightIngested == 0 && report.LightDeduped > 0:
@@ -289,6 +311,8 @@ func (s *Server) handleTriggerDreaming(c *gin.Context) {
 		"skippedInactive": report.SkippedInactive,
 		"userProfiles":    report.UserProfiles,
 		"botProfiles":     report.BotProfiles,
+		"backfill":        report.Backfill,
+		"backfillScanned": report.BackfillScanned,
 		"duration":        report.Duration().String(),
 		"phase":           report.Phase,
 		"error":           report.Error,

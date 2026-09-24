@@ -190,7 +190,25 @@ type DreamReport struct {
 	SkippedInactive int                    `json:"skipped_inactive"`
 	UserProfiles    int                    `json:"user_profiles,omitempty"`
 	BotProfiles     int                    `json:"bot_profiles,omitempty"`
-	Error           string                 `json:"error,omitempty"`
+	// Backfill 标记本轮是「补偿积压」运行（忽略活跃度门槛与 Light 的回溯窗口）。
+	// 与常规运行共用同一条管线，仅放宽两道门槛，故必须能在报告里区分，
+	// 否则排查时无法判断某次晋升来自增量还是补偿。
+	Backfill bool `json:"backfill,omitempty"`
+	// BackfillScanned 补偿模式下扫描到的 TTL 内未处理 L0 条目数（常规运行为 0）。
+	BackfillScanned int    `json:"backfill_scanned,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+// DreamRunOptions 一次梦境运行的选项。
+type DreamRunOptions struct {
+	// Backfill 为 true 时进入「补偿积压」模式：
+	//   - 跳过 ActiveThresholdHours 活跃度门槛（停摆 N 天后所有 scope 都会被判为不活跃，
+	//     常规运行会整轮空转，积压的 L0 永远等不到处理）；
+	//   - Light 阶段不再按 LookbackDays（默认 2 天）截断，改为处理 TTL 内全部
+	//     未标记的 L0（IsExpired 仍然生效——过期的 L0 不该被救活）。
+	//
+	// 仍然生效的两道保险：L0 TTL（过期不处理）与 dream_processed 标记（幂等，不重复提取）。
+	Backfill bool
 }
 
 // Duration 返回本次梦境耗时。
@@ -457,8 +475,16 @@ func (d *DreamManager) RecordRecall(key, query string) {
 	}
 }
 
-// Run 执行完整梦境管线（Light → REM → Deep）。
+// Run 执行完整梦境管线（Light → REM → Deep），即常规增量运行。
 func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
+	return d.RunWithOptions(ctx, DreamRunOptions{})
+}
+
+// RunWithOptions 执行完整梦境管线，可指定运行选项（见 DreamRunOptions）。
+//
+// Backfill 模式用于补偿停摆期积压：放宽活跃度门槛与 Light 回溯窗口，
+// 让「还活着但已经错过窗口」的 L0 重新有机会被巩固。
+func (d *DreamManager) RunWithOptions(ctx context.Context, opts DreamRunOptions) (*DreamReport, error) {
 	d.mu.Lock()
 	if d.state == DreamDisabled {
 		d.mu.Unlock()
@@ -511,12 +537,15 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 		return report, nil
 	}
 
+	report.Backfill = opts.Backfill
+
 	// 活跃度过滤：跳过指定时间内无记忆写入的僵尸 scope
-	// ActiveThresholdHours=0 时跳过过滤
+	// ActiveThresholdHours=0 时跳过过滤；补偿模式（Backfill）也整体跳过——
+	// 停摆数天后所有 scope 必然不活跃，不跳过就一个 scope 都进不来。
 	threshold := d.config.ActiveThresholdHours
 	var activeScopes []Scope
 	skipped := 0
-	if threshold > 0 {
+	if threshold > 0 && !opts.Backfill {
 		activeScopes = make([]Scope, 0, len(scopes))
 		for _, s := range scopes {
 			if d.manager.store.HasRecentActivity(ctx, s, threshold) {
@@ -540,7 +569,7 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 	}
 
 	// Phase 1: Light
-	lightRes, err := d.runLight(ctx, activeScopes)
+	lightRes, err := d.runLight(ctx, activeScopes, opts)
 	if err != nil {
 		report.FinishedAt = time.Now()
 		report.Error = fmt.Sprintf("light: %v", err)
@@ -550,6 +579,11 @@ func (d *DreamManager) Run(ctx context.Context) (*DreamReport, error) {
 	report.LightIngested = lightRes.ingested
 	report.LightDeduped = lightRes.deduped
 	report.LightDropped = lightRes.dropped
+	if opts.Backfill {
+		// 补偿模式下 ingested 即「TTL 内、未处理过的 L0 条数」——
+		// 这是判断积压还剩多少的直接读数，常规运行下该口径无意义。
+		report.BackfillScanned = lightRes.ingested
+	}
 
 	if lightRes.deduped == 0 {
 		// 检查是否有已分期的候选（来自之前的 Run）
