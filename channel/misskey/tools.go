@@ -42,7 +42,8 @@ When someone @mentions or replies to you, simply reply with your normal text —
 
 ## Proactive reading (call tools on demand)
 - To see what someone recently posted: use misskey_get_user_notes (resolve userId first with misskey_search_user).
-- To search posts by keyword: use misskey_search_notes.
+- To search posts by keyword: use misskey_search_notes ONLY if it appears in your tool list. If it is missing, the instance search backend is down — do NOT invent a substitute call; use misskey_get_user_notes or just reply.
+- NEVER call misskey_unreact_to_note on a note you just reacted to in the same turn — that undoes your own reaction. Only unreact to deliberately take back a prior reaction.
 
 ## Proactively publishing a new note (only when NOT replying)
 Only call misskey_create_note when you want to start a brand-new note that is not a reply to anything. For replies, use the "reply with text" above.
@@ -68,6 +69,8 @@ Misskey does NOT render raw HTML, and the framework strips any tag it does not r
 // ChannelTools 返回 MisskeyChannel 提供的平台专属工具定义。
 // 工具通过闭包捕获 Channel 的 API 客户端，支持跨 Channel 调用。
 func (c *MisskeyChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDef, error) {
+	// misskey_search_notes is served via Tools() (ToolProvider) so it can be
+	// hidden while the search circuit is open.
 	return []agenttools.ToolDef{
 		c.followUserTool(),
 		c.unfollowUserTool(),
@@ -79,8 +82,18 @@ func (c *MisskeyChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDef
 		c.searchUserTool(),
 		c.listFollowingTool(),
 		c.getUserNotesTool(),
-		c.searchNotesTool(),
 	}, nil
+}
+
+// Tools implements agenttools.ToolProvider: expose misskey_search_notes only when the circuit is closed.
+func (c *MisskeyChannel) Tools(ctx context.Context, sctx *agenttools.ToolSessionContext) ([]llm.Tool, error) {
+	_ = ctx
+	_ = sctx
+	if c == nil || c.api == nil || c.api.isSearchCircuitOpen() {
+		return nil, nil
+	}
+	def := c.searchNotesTool()
+	return []llm.Tool{def.Tool}, nil
 }
 
 // formatNotes 把帖子列表渲染为易读文本（含作者、时间、正文、链接）。
@@ -237,7 +250,7 @@ func (c *MisskeyChannel) searchNotesTool() agenttools.ToolDef {
 					}
 					// 兜底也拿不到，返回干净文案，不把裸 HTTP 错误抛给 LLM，
 					// 避免模型把内部报错复述给用户。模型侧的红线见 channelToolAwarenessSection。
-					return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); try another approach or just reply directly")
+					return nil, fmt.Errorf("note search is temporarily unavailable (instance search backend is down); DO NOT call misskey_search_notes again this turn — use misskey_get_user_notes / misskey_search_user, or just reply directly")
 				}
 				return map[string]any{
 					"notes": formatNotes(notes, c.cfg.Host),
@@ -588,7 +601,9 @@ func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "misskey_unreact_to_note",
 			Description: "Remove the bot's own emoji reaction from a note on Misskey. " +
-				"Requires only the noteId — the bot's existing reaction on that note is removed automatically.",
+				"Requires only the noteId — the bot's existing reaction on that note is removed automatically. " +
+				"Do NOT call this on a note you just reacted to in the same turn (that would undo your own reaction). " +
+				"Only use it to deliberately take back a prior reaction.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

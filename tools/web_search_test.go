@@ -208,3 +208,37 @@ func TestWebSearchLastResortDDG(t *testing.T) {
 		t.Fatalf("provider=%v", m["provider"])
 	}
 }
+
+func TestWebSearchProviderHiddenWhenNoneEnabled(t *testing.T) {
+	store := searchproviders.NewStore(filepath.Join(t.TempDir(), "providers.json"))
+	if err := store.Save([]searchproviders.Provider{
+		{ID: "br", Type: searchproviders.TypeBrave, Enabled: false, APIKey: "k"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := &searchToolProvider{cfg: SearchConfig{Store: store, MaxResults: 5}}
+	tools, err := p.Tools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 0 {
+		t.Fatalf("expected no tools when no provider enabled, got %d", len(tools))
+	}
+}
+
+func TestWebSearchProviderVisibleWhenEnabled(t *testing.T) {
+	store := searchproviders.NewStore(filepath.Join(t.TempDir(), "providers.json"))
+	if err := store.Save([]searchproviders.Provider{
+		{ID: "br", Type: searchproviders.TypeBrave, Enabled: true, APIKey: "k", BaseURL: "http://127.0.0.1:9", Timeout: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := &searchToolProvider{cfg: SearchConfig{Store: store, MaxResults: 5}}
+	tools, err := p.Tools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 || tools[0].Name != "web_search" {
+		t.Fatalf("expected web_search, got %+v", tools)
+	}
+}
