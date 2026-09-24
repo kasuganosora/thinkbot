@@ -272,8 +272,9 @@ func TestSelectImportant_TopEntryNotLostToScanOrder(t *testing.T) {
 		Importance: 1.00,
 	}
 
+	// 无 query：相关性恒为 0，应退化为纯 importance 排序。
 	got := SelectImportant(context.Background(), &fakeRetriever{entries: entries},
-		[]Scope{scope}, nil, 0.7, 3)
+		[]Scope{scope}, nil, "", DefaultImportantMinImportance, DefaultImportantRelevanceWeight, 3, DefaultRecalledMaxChars)
 
 	if len(got) == 0 {
 		t.Fatal("expected high-value entries to be selected")
@@ -281,9 +282,60 @@ func TestSelectImportant_TopEntryNotLostToScanOrder(t *testing.T) {
 	if got[0].Entry.ID != "top-value" {
 		t.Fatalf("highest importance entry must win regardless of creation order, got %q", got[0].Entry.ID)
 	}
-	// 保底通道与当前输入无关，Score 应恒为 0（见 SelectImportant 注释）。
+	// 无 query 时没有相关性信号，Score 应恒为 0（见 SelectImportant 注释）。
 	if got[0].Score != 0 {
-		t.Fatalf("important channel score must be 0, got %v", got[0].Score)
+		t.Fatalf("important channel score must be 0 without a query, got %v", got[0].Score)
+	}
+}
+
+// TestSelectImportant_RelevanceBeatsRawImportance 复现「名额被无关的高分条目占满」。
+//
+// 本机实测：保底通道按纯 importance 取时，名额恒定被同一批 0.95 条目占满
+// （心理状态汇总等，与当轮话题无关），而 0.800 的长期事实（用户对 bot 行为的
+// 偏好）一条都进不来。加入相关性后，话题相关的老记忆应能反超。
+func TestSelectImportant_RelevanceBeatsRawImportance(t *testing.T) {
+	scope := ChannelScope("misskey:timeline")
+	entries := []Entry{
+		{ID: "unrelated-095", Scope: scope, Content: "用户的心理状态汇总：最近情绪起伏较大，需要注意休息", Importance: 0.95},
+		{ID: "unrelated-094", Scope: scope, Content: "今天讨论了一下晚饭吃什么，最后决定点外卖", Importance: 0.94},
+		{ID: "target-080", Scope: scope, Content: "@luna gets annoyed by bots that reply repeatedly", Importance: 0.80},
+	}
+
+	query := "luna 讨厌什么样的 bot，反复回复会怎样"
+	got := SelectImportant(context.Background(), &fakeRetriever{entries: entries},
+		[]Scope{scope}, nil, query, 0.7, DefaultImportantRelevanceWeight, 1, DefaultRecalledMaxChars)
+
+	if len(got) == 0 {
+		t.Fatal("expected one entry to be selected")
+	}
+	if got[0].Entry.ID != "target-080" {
+		t.Fatalf("query-relevant 0.80 memory must outrank irrelevant 0.95 entries, got %q", got[0].Entry.ID)
+	}
+	if got[0].Score <= 0 {
+		t.Fatalf("selected entry should carry a positive relevance score, got %v", got[0].Score)
+	}
+
+	// 权重为 0 时应退回纯 importance 排序，证明权重是可控旋钮而非硬编码行为。
+	plain := SelectImportant(context.Background(), &fakeRetriever{entries: entries},
+		[]Scope{scope}, nil, query, 0.7, 0, 1, DefaultRecalledMaxChars)
+	if len(plain) == 0 || plain[0].Entry.ID != "unrelated-095" {
+		t.Fatalf("with weight 0 the channel must fall back to pure importance, got %+v", plain)
+	}
+}
+
+// TestSelectImportant_FallsBackToImportanceWithoutQuery 无 query 时行为必须与
+// 改动前一致（纯 importance 降序），即相关性只做增量、不改变无输入时的结果。
+func TestSelectImportant_FallsBackToImportanceWithoutQuery(t *testing.T) {
+	scope := ChannelScope("misskey:timeline")
+	entries := []Entry{
+		{ID: "a", Scope: scope, Content: "关于鹦鹉的饲养经验分享", Importance: 0.75},
+		{ID: "b", Scope: scope, Content: "用户的核心偏好：讨厌反复回复的 bot", Importance: 0.90},
+	}
+
+	got := SelectImportant(context.Background(), &fakeRetriever{entries: entries},
+		[]Scope{scope}, nil, "", 0.7, DefaultImportantRelevanceWeight, 2, DefaultRecalledMaxChars)
+	if len(got) != 2 || got[0].Entry.ID != "b" {
+		t.Fatalf("without query, ordering must be by importance, got %+v", got)
 	}
 }
 
@@ -359,6 +411,103 @@ func TestSnapshot_ImportantChannelSkipsPersonaSizedMemories(t *testing.T) {
 	}
 	if !strings.Contains(text, "讨厌反复回复的 bot") {
 		t.Fatal("normal-sized high-value memory should still be recalled")
+	}
+}
+
+// TestCapRendered_DropsArchiveSizedEntries 复现「单条巨型记忆吃满整个预算」。
+//
+// 本机实测：bot scope 有两条 importance=1.00、14808/15314 字符的完整档案，
+// sort 后永远排第一，单条就把 2200 字符预算吃满，注入块是 "showing 1 by
+// importance" ——bot 每轮只看得到一份档案的前 2200 字残片。
+func TestCapRendered_DropsArchiveSizedEntries(t *testing.T) {
+	entries := []Entry{
+		{ID: "archive", Content: strings.Repeat("档", 15000), Importance: 1.0},
+		// 600 字：在跳过门槛（240*4=960）之内，应被截断而非丢弃
+		{ID: "mid", Content: strings.Repeat("记", 600), Importance: 0.9},
+		{ID: "short", Content: "用户讨厌反复回复的 bot", Importance: 0.8},
+	}
+
+	kept, dropped := capRendered(entries, DefaultRenderedMaxChars)
+	if dropped != 1 {
+		t.Fatalf("the 15000-char archive must be dropped, dropped=%d", dropped)
+	}
+	for _, e := range kept {
+		if e.ID == "archive" {
+			t.Fatal("archive-sized entry must never reach the prompt")
+		}
+	}
+
+	var short, mid string
+	for _, e := range kept {
+		switch e.ID {
+		case "short":
+			short = e.Content
+		case "mid":
+			mid = e.Content
+		}
+	}
+	if short != "用户讨厌反复回复的 bot" {
+		t.Fatalf("short entries should pass through unchanged, got %q", short)
+	}
+	if len([]rune(mid)) != DefaultRenderedMaxChars+1 {
+		t.Fatalf("mid entry should be capped at %d chars + ellipsis, got %d",
+			DefaultRenderedMaxChars, len([]rune(mid)))
+	}
+
+	// maxChars<=0 表示不启用，必须原样返回（保持现状）。
+	unchanged, dropped2 := capRendered(entries, 0)
+	if len(unchanged) != len(entries) || dropped2 != 0 {
+		t.Fatal("capRendered must be a no-op when disabled")
+	}
+}
+
+// TestSnapshot_RecalledSurvivesOversizedTopEntry 端到端：主通道存在巨型档案时，
+// 补充召回的相关老记忆仍必须出现在注入块里。
+//
+// 这条覆盖了两个必须同时成立的条件，缺一个都测不出问题：
+//  1. 巨型档案被丢弃（否则它单条吃满预算，后面一条都进不来）；
+//  2. 补充条目的抬升基准是主通道的**最高** importance 而不是第 MaxEntries 名
+//     （实测抬到第 20 名时，相关条目 rel=1.0 排第一却仍被字符预算切掉）。
+func TestSnapshot_RecalledSurvivesOversizedTopEntry(t *testing.T) {
+	scope := ChannelScope("misskey:timeline")
+
+	// 主通道窗口：一条 1.00 分的巨型档案 + 60 条低分近期记忆。
+	entries := []Entry{
+		{ID: "archive", Scope: scope, Content: "【luna 完整档案】" + strings.Repeat("项目全记录。", 1200), Importance: 1.0},
+	}
+	for i := 0; i < 60; i++ {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("fill%02d", i),
+			Scope:      scope,
+			Content:    fmt.Sprintf("今天天气不错 %02d", i),
+			Importance: 0.30,
+		})
+	}
+	// 目标老记忆：排在 Recent(50) 窗口之外，只能靠补充通道（importance 达标）。
+	entries = append(entries, Entry{
+		ID:         "target-old",
+		Scope:      scope,
+		Content:    "@luna gets annoyed by bots that reply repeatedly",
+		Importance: 0.80,
+	})
+
+	cfg := DefaultSnapshotConfig()
+	cfg.Mode = ModeFrozen
+	cfg.RelevanceRecall = true
+	cfg.MaxRenderedEntryChars = DefaultRenderedMaxChars
+	cfg.Query = "luna 讨厌反复回复的 bot 会怎样"
+
+	snap := NewSnapshot(cfg)
+	if err := snap.Init(context.Background(), &fakeRetriever{entries: entries}, []Scope{scope}); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	text := snap.MemorySnapshot()
+	if strings.Contains(text, "完整档案") {
+		t.Fatal("archive-sized entry must not occupy the memory block")
+	}
+	if !strings.Contains(text, "annoyed by bots") {
+		t.Fatalf("relevant old memory must survive both the entry cap and the char budget:\n%s", text)
 	}
 }
 

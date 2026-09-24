@@ -62,6 +62,22 @@ const (
 	// 否则会退化成「只看最早创建的 N 条」——本机 1.00 分条目按时间升序
 	// 排在第 516/573 位，用 200 时会永久漏掉。命中上限时会打 WARN。
 	importantScanLimit = 2000
+	// DefaultRenderedMaxChars 注入块里单条记忆的字符上限（默认 400）。
+	//
+	// 只在 SnapshotConfig.MaxRenderedEntryChars > 0 时生效（默认关闭，保持现状）。
+	//
+	// 存在理由（2026-09-24 实测）：bot scope 有两条 importance=1.00、
+	// 14808/15314 字符的「luna 完整档案+项目全记录」。它们 sort 后永远排第一，
+	// 单条就把 2200 字符预算吃满，实测注入块是 "showing 1 by importance"
+	// ——bot 每轮看到的只是一份 15000 字档案的前 2200 字残片，其它记忆一条
+	// 都进不来。补充召回的老记忆因此永远不可见。
+	//
+	// 取 400 的依据：本机 memory_entries 里 <=240 占 1824 条、241-480 占 317 条，
+	// 短记忆是主体，设 400 不会动它们；>1600 的 395 条是档案/长笔记，
+	// 截断后只剩断头，直接丢弃比注入残片好（需要完整内容时走 memory 工具）。
+	DefaultRenderedMaxChars = 240
+	// renderedSkipFactor 注入块里跳过超长条目的倍数门槛（= 上限 × 本值）。
+	renderedSkipFactor = 4
 	// recalledSkipChars 补充通道跳过超长条目的原始长度门槛（= 封顶值的倍数）。
 	//
 	// 超过这个长度的条目被 truncateRecalled 截断后只剩下断头残句，
@@ -69,6 +85,20 @@ const (
 	// 与「luna 完整档案」(2287 字符)，截断后是残缺的人格定义。
 	// 这类内容属于 persona / profile 层的职责，不该由召回通道重复注入。
 	recalledSkipFactor = 2
+	// DefaultImportantRelevanceWeight 保底通道里「本轮最相关」条目能拿到的
+	// importance 等效加成上限（默认 0.6）。
+	//
+	// 排序键 = importance + weight*归一化相关性，归一化取候选池内最高相关性为 1。
+	// weight=0 时退化为纯 importance 排序（改动前的行为）。
+	//
+	// 为什么用归一化而不是原始相关性分：原始分被 Ochiai 的长度归一压得很小
+	// （实测真库 100~300 字的记忆上只有 0.05~0.3），直接乘固定权重根本压不过
+	// 0.95 的无关条目；归一化后「本轮最相关的那条」稳定拿到满额加成，
+	// 0.80 + 0.6 > 0.95，而完全不相关的条目加成恒为 0。
+	//
+	// 取 0.6 而非 1.0：加成过大会让 importance 这一既有信号失去作用，
+	// 0.6 足够跨过一到两档 importance 差，同时在相关性接近时仍由 importance 定序。
+	DefaultImportantRelevanceWeight = 0.6
 	// relevanceFloorStep 相关性条目相对主通道入选门槛的最小抬升量。
 	// 抬升的目的见 Snapshot.doRefresh：不抬的话补回来的老记忆会在后续
 	// importance 排序和字符预算截断里被再次挤掉，等于白补。
@@ -96,8 +126,13 @@ func isTokenRune(r rune) bool {
 //
 // 切分规则：
 //   - 拉丁/数字：按非字母数字切分成词，长度 >= 2 才入集合（单字符噪音太大）；
-//   - CJK：连续 CJK 段内取单字 + 相邻二字（bigram），兼顾「鹦鹉」这类双字词
-//     与「养鹦鹉」这类局部搭配。
+//   - CJK：连续 CJK 段取相邻二字（bigram）；段长只有 1 时保留该单字。
+//
+// CJK 为什么不再取单字（2026-09-24 实测修正）：单字与 bigram 会重复计权——
+// 内容里出现一次「什么」，查询侧同时命中「什」「么」「什么」三个 token，
+// 一个通用词顶三次命中。结果是「今天讨论了一下晚饭吃什么」的相关性(0.125)
+// 反而高于真正的目标「@luna gets annoyed by bots...」(0.066)，
+// 通用字压过实体名。改为只用 bigram 后同一组样本变为 0.044 vs 0.066，序正确。
 func relevanceTokens(s string) map[string]struct{} {
 	tokens := make(map[string]struct{})
 	if s == "" {
@@ -120,9 +155,11 @@ func relevanceTokens(s string) map[string]struct{} {
 		if hasCJK {
 			for i, r := range runes {
 				if isCJK(r) {
-					tokens[string(r)] = struct{}{}
 					if i+1 < len(runes) && isCJK(runes[i+1]) {
 						tokens[string(r)+string(runes[i+1])] = struct{}{}
+					} else if len(runes) == 1 {
+						// 单独成段的单字（前后都是分隔符）：没有 bigram 可用，保留
+						tokens[string(r)] = struct{}{}
 					}
 				} else if len(runes) >= 2 {
 					// CJK 段内夹杂的拉丁词（如「MCP」「AI」）
@@ -183,28 +220,8 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 		return nil
 	}
 
-	// IDF 加权：先统计候选集内的文档频率。
-	//
-	// 不做这一步的话，中文停用词会主导打分——实测 query「养鹦鹉的事」的 top1
-	// 是「睡了一觉缓过来了，什么天气了还在冒汗」（只共享「的/了/什么」），
-	// 而真正的「养鹦鹉」记忆排在后面。原因是短条目的 |c| 小，
-	// Ochiai 分母小 → 靠几个通用字就能拿高分。用 IDF 给高频无区分度的
-	// token 降权后，「鹦鹉」这类稀有词的权重会比「的/了」高一个量级。
-	df := make(map[string]int, 256)
-	tokenSets := make([]map[string]struct{}, 0, len(candidates))
-	for _, e := range candidates {
-		ts := relevanceTokens(e.Content)
-		tokenSets = append(tokenSets, ts)
-		for t := range ts {
-			df[t]++
-		}
-	}
-
-	total := float64(len(candidates))
-	idf := make(map[string]float64, len(df))
-	for t, cnt := range df {
-		idf[t] = math.Log(1 + total/(1+float64(cnt)))
-	}
+	tokenSets := tokenizeAll(candidates)
+	idf := buildIDF(tokenSets)
 
 	scored := make([]ScoredEntry, 0, len(candidates))
 	for i, e := range candidates {
@@ -214,19 +231,9 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 			}
 		}
 
-		var weighted float64
-		for t := range q {
-			if _, ok := tokenSets[i][t]; ok {
-				weighted += idf[t]
-			}
-		}
-		if weighted <= 0 {
+		score := idfScore(q, tokenSets[i], idf)
+		if score <= 0 {
 			continue
-		}
-
-		score := weighted / math.Sqrt(float64(len(q))*float64(len(tokenSets[i])))
-		if score > 1 {
-			score = 1
 		}
 		scored = append(scored, ScoredEntry{Entry: e, Score: score})
 	}
@@ -245,11 +252,73 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 	return scored
 }
 
-// SelectImportant 取 importance 达到阈值、且不在 exclude 中的条目，
-// 按 importance 降序返回至多 topK 条。
+// tokenizeAll 批量切分候选条目，返回与 candidates 等长的 token 集合切片。
+func tokenizeAll(candidates []Entry) []map[string]struct{} {
+	out := make([]map[string]struct{}, 0, len(candidates))
+	for _, e := range candidates {
+		out = append(out, relevanceTokens(e.Content))
+	}
+	return out
+}
+
+// buildIDF 统计候选集内的文档频率并换算成 IDF 权重。
+//
+// 不做这一步的话，中文停用词会主导打分——实测 query「养鹦鹉的事」的 top1
+// 是「睡了一觉缓过来了，什么天气了还在冒汗」（只共享「的/了/什么」），
+// 而真正的「养鹦鹉」记忆排在后面。原因是短条目的 |c| 小，
+// Ochiai 分母小 → 靠几个通用字就能拿高分。用 IDF 给高频无区分度的
+// token 降权后，「鹦鹉」这类稀有词的权重会比「的/了」高一个量级。
+func buildIDF(tokenSets []map[string]struct{}) map[string]float64 {
+	df := make(map[string]int, 256)
+	for _, ts := range tokenSets {
+		for t := range ts {
+			df[t]++
+		}
+	}
+
+	total := float64(len(tokenSets))
+	idf := make(map[string]float64, len(df))
+	for t, cnt := range df {
+		idf[t] = math.Log(1 + total/(1+float64(cnt)))
+	}
+	return idf
+}
+
+// idfScore 用 IDF 加权的 Ochiai 系数计算 query 与单条候选的相关性（0.0~1.0）。
+func idfScore(q, c map[string]struct{}, idf map[string]float64) float64 {
+	if len(q) == 0 || len(c) == 0 {
+		return 0
+	}
+
+	var weighted float64
+	for t := range q {
+		if _, ok := c[t]; ok {
+			weighted += idf[t]
+		}
+	}
+	if weighted <= 0 {
+		return 0
+	}
+
+	score := weighted / math.Sqrt(float64(len(q))*float64(len(c)))
+	if score > 1 {
+		score = 1
+	}
+	return score
+}
+
+// SelectImportant 取 importance 达到阈值的条目，按
+// 「与 query 的相关性 * relevanceWeight + importance」降序返回至多 topK 条。
 //
 // 这是「高价值保底」通道：时间窗口再大也覆盖不到的跨月记忆，只要 importance
 // 够高（长期事实/偏好）就该被想起。
+//
+// 为什么必须带 query（2026-09-24 实测）：
+// 初版按纯 importance 排序，名额恒定被同一批 0.95 条目占满（心理状态汇总等，
+// 与当轮话题无关），导致每轮固定注入几条无关记忆，而诊断真正想救的 0.800
+// 长期事实（用户对 bot 行为的偏好等）一条都进不来。相关性参与排序后，
+// 话题相关的老记忆可以反超一到两档 importance 差（0.80+0.6*rel > 0.95）。
+// query 为空时相关性恒为 0，退化为纯 importance 排序，行为与初版一致。
 //
 // 排序在**内存**完成，不依赖 Query.Order + Limit 的组合。原因（2026-09-24 实测）：
 // Limit 一旦小于满足阈值的条目总数，就退化成「只扫最早/最新的 N 条」，
@@ -258,12 +327,16 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 // 抓到的反而是最早的人格设定条目。真正的过滤交给 Query.MinImportance，
 // Limit 只作安全网；命中安全网时打 WARN 提示上调。
 //
-// 检索依赖 Query.MinImportance；后端若不支持该过滤，本通道退化为返回
-// 最新若干条（与已有条目重复会被 exclude 掉），属于无害的 fail-soft。
+// 检索依赖 Query.MinImportance；后端若不支持该过滤，本通道会退化成返回
+// 该后端的最新若干条（与已有条目重复会被 exclude 掉），属于 fail-soft，
+// 但会让本通道失去「跨时间捞高价值」的意义——后端必须实现 MinImportance。
 //
-// 返回的 Score 恒为 0：保底通道与当前输入无关，没有相关性分可言。
-// 抬升时只保证越过主通道门槛即可（见 boostRelevance）。
-func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude map[string]struct{}, minImportance float64, topK int, logger ...*zap.SugaredLogger) []ScoredEntry {
+// maxChars 是补充通道的单条字符上限（= SnapshotConfig.RecalledMaxChars）：
+// 超过 recalledSkipFactor 倍的条目在打分前就被剔除，理由见 filterOversized
+// ——给它们做分词是每轮开销的主要来源，而它们最终一定会被丢弃。
+//
+// 返回的 Score 是归一化后的相关性分（无 query 时为 0），用于 boostRelevance 抬升排序。
+func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude map[string]struct{}, query string, minImportance float64, relevanceWeight float64, topK int, maxChars int, logger ...*zap.SugaredLogger) []ScoredEntry {
 	if topK <= 0 || minImportance <= 0 || r == nil {
 		return nil
 	}
@@ -284,21 +357,55 @@ func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude m
 			"limit", importantScanLimit, "minImportance", minImportance)
 	}
 
-	scored := make([]ScoredEntry, 0, len(got))
+	var kept []Entry
 	for _, e := range got {
 		if e.ID != "" {
 			if _, ok := exclude[e.ID]; ok {
 				continue
 			}
 		}
-		scored = append(scored, ScoredEntry{Entry: e, Score: 0})
+		kept = append(kept, e)
 	}
-	if len(scored) == 0 {
+	candidates := filterOversized(kept, maxChars)
+	if len(candidates) == 0 {
 		return nil
 	}
 
+	// 相关性只在有 query 时计算；无 query 时 rel 全为 0，等价于纯 importance。
+	//
+	// 归一化：以候选池内最高相关性为 1，其余按比例缩放。原始分受长度归一压制，
+	// 量级不稳定（见 DefaultImportantRelevanceWeight 的说明），不归一化则权重
+	// 无法给出可预测的效果。
+	rel := make([]float64, len(candidates))
+	if strings.TrimSpace(query) != "" {
+		q := relevanceTokens(query)
+		if len(q) > 0 {
+			tokenSets := tokenizeAll(candidates)
+			idf := buildIDF(tokenSets)
+			maxRel := 0.0
+			for i := range candidates {
+				rel[i] = idfScore(q, tokenSets[i], idf)
+				if rel[i] > maxRel {
+					maxRel = rel[i]
+				}
+			}
+			if maxRel > 0 {
+				for i := range rel {
+					rel[i] /= maxRel
+				}
+			}
+		}
+	}
+
+	scored := make([]ScoredEntry, 0, len(candidates))
+	for i, e := range candidates {
+		scored = append(scored, ScoredEntry{Entry: e, Score: rel[i]})
+	}
+
 	sort.SliceStable(scored, func(i, j int) bool {
-		return scored[i].Entry.Importance > scored[j].Entry.Importance
+		si := scored[i].Score*relevanceWeight + scored[i].Entry.Importance
+		sj := scored[j].Score*relevanceWeight + scored[j].Entry.Importance
+		return si > sj
 	})
 	if len(scored) > topK {
 		scored = scored[:topK]
@@ -338,6 +445,57 @@ func capRecalled(entries []Entry, maxChars int) []Entry {
 	return out
 }
 
+// filterOversized 剔除最终注定会被丢弃的超长条目（返回新切片）。
+//
+// 与 capRecalled 用同一门槛（maxChars*recalledSkipFactor）。放在打分之前，
+// 是为了避免给这些条目做分词——它们是本轮开销的主要来源：本机有
+// 14808/15314 字符的档案条目，不过滤时每轮快照 400ms，过滤后回到基线量级。
+func filterOversized(entries []Entry, maxChars int) []Entry {
+	if maxChars <= 0 {
+		return entries
+	}
+	skipAbove := maxChars * recalledSkipFactor
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if len([]rune(e.Content)) > skipAbove {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// capRendered 限制注入块里单条记忆的长度，返回保留的条目与丢弃条数。
+//
+// 与 capRecalled 同一套取舍，但作用在**主通道**上，因此默认不启用
+// （MaxRenderedEntryChars=0 时 Snapshot 不调用它）：
+//   - 超过上限 renderedSkipFactor 倍的条目直接丢弃：本机是 14808/15314 字符的
+//     完整档案，截断后是断头残片，注入比不注入更糟，完整内容应由 memory 工具按需取；
+//   - 其余超长条目截断到上限：否则单条就能吃满 2200 字符预算。
+//
+// 注意必须先于 MaxEntries 条数截断执行，否则被丢弃的巨型条目仍会占掉名额。
+func capRendered(entries []Entry, maxChars int) ([]Entry, int) {
+	if maxChars <= 0 {
+		return entries, 0
+	}
+
+	skipAbove := maxChars * renderedSkipFactor
+	out := make([]Entry, 0, len(entries))
+	dropped := 0
+	for _, e := range entries {
+		runes := []rune(e.Content)
+		if len(runes) > skipAbove {
+			dropped++
+			continue
+		}
+		if len(runes) > maxChars {
+			e.Content = string(runes[:maxChars]) + "…"
+		}
+		out = append(out, e)
+	}
+	return out, dropped
+}
+
 // relevanceGate 返回主通道按 importance 降序取前 maxEntries 条时的入选门槛
 // （即末位条目的 importance）。候选不足时返回最低 importance。
 //
@@ -361,22 +519,40 @@ func relevanceGate(entries []Entry, maxEntries int) float64 {
 	return sorted[idx].Importance
 }
 
-// boostRelevance 就地抬升相关性条目的有效 importance。
+// boostRelevance 就地抬升补充条目的有效 importance。
 //
-// 抬升幅度 = 门槛 + 固定步长 + 相关性分数映射，保证：
-//  1. 高于主通道入选门槛 → 不会被 importance 截断挤掉；
-//  2. 彼此仍按相关性排序 → 最相关的排最前，优先占字符预算。
+// 抬升幅度 = 主通道最高 importance + 固定步长 + 相关性分数映射，保证：
+//  1. 严格高于主通道所有条目 → 不会被 MaxEntries 截断挤掉，也不会被字符预算
+//     挤掉。早期版本抬到「第 MaxEntries 位门槛」之上，实测仍进不了注入块：
+//     门槛只是第 20 名的分数，而字符预算只装得下 6 条，补充条目排在 20 名
+//     附近等于必然被预算切掉（目标老记忆 rel=1.0 排第一却仍不出现在块里）。
+//  2. 彼此仍按相关性排序 → 最相关的排最前。
 //
 // 注意：importance 只参与排序，不渲染进 prompt（见 renderBlock），
-// 因此抬升不会向模型泄露失真的「重要度」信息。
+// 因此抬升不会向模型泄露失真的「重要度」信息；这里允许超过 1.0 也是这个原因
+// ——它是纯排序键，不是打分。
 func boostRelevance(picked []ScoredEntry, gate float64) {
 	for i := range picked {
 		eff := gate + relevanceFloorStep + picked[i].Score*relevanceScoreSpan
-		if eff > 1 {
-			eff = 1
+		if eff > 2 {
+			eff = 2
 		}
 		if picked[i].Entry.Importance < eff {
 			picked[i].Entry.Importance = eff
 		}
 	}
+}
+
+// topImportance 返回条目中最高的 importance（空切片返回 0）。
+//
+// 用作 boostRelevance 的抬升基准：补充条目必须严格高于主通道的**最高**分，
+// 而不是第 N 名的分数，否则会被后续的条数/字符双重截断挤掉。
+func topImportance(entries []Entry) float64 {
+	max := 0.0
+	for _, e := range entries {
+		if e.Importance > max {
+			max = e.Importance
+		}
+	}
+	return max
 }

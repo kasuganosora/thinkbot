@@ -48,8 +48,24 @@ func NewTieredProfileRetriever(db *gorm.DB) *TieredL1Retriever {
 	return &TieredL1Retriever{db: db, tier: 3}
 }
 
+// NewTieredL0Retriever 创建 L0 检索器（原始事件层）。
+//
+// 存在理由（2026-09-24 实测）：本机 tiered_memories 里 importance 最高的一批
+// （0.800，如「@luna 讨厌反复回复的 bot」、用户的长期偏好）全部是 tier=0，
+// 而召回链路此前只有 L1/L3/memory_entries 三个源，这些高价值条目**根本不在
+// 候选集里**——无论怎么排序都捞不回来（实测 MinImportance>=0.7 的 414 条与
+// Recent(1000) 的 1137 条里都没有它们）。
+//
+// L0 是未升华的原始事件流（本机 2000+ 条），不能直接并进主召回通道，否则会把
+// 碎碎念灌进 prompt。它只用于「窗口外补充召回」这一条受控路径：
+// 该路径默认关闭，且只取 importance 达标 + 与当前话题相关的少数几条。
+func NewTieredL0Retriever(db *gorm.DB) *TieredL1Retriever {
+	return &TieredL1Retriever{db: db, tier: 0}
+}
+
 func (r *TieredL1Retriever) queryTier() int {
-	if r == nil || r.tier == 0 {
+	// 注意：tier=0 是合法值（L0），只有 nil 时才回退到 L1。
+	if r == nil {
 		return 1
 	}
 	return r.tier
@@ -79,6 +95,13 @@ func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]m
 		limit = 200
 	}
 	tx := r.db.Model(&dao.TieredMemoryModel{}).Where("tier = ?", r.queryTier())
+	// MinImportance 必须在 SQL 层过滤：高价值召回通道靠它把候选集从「全量
+	// 该层记忆」压到「达标的少数几条」。此前这里漏了该条件，于是调用方拿到
+	// 的是按时间截断的该层全量数据——对 L0（2000+ 条）尤其致命：既拉不动，
+	// 又让「按 importance 捞高价值」退化成「按时间捞最新」。
+	if query.MinImportance > 0 {
+		tx = tx.Where("importance >= ?", query.MinImportance)
+	}
 	if len(query.Scopes) > 0 {
 		scopeConditions := make([][]interface{}, 0, len(query.Scopes))
 		for _, scope := range query.Scopes {
