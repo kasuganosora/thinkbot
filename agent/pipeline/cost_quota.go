@@ -722,11 +722,32 @@ func friendlyCostReply(env *core.Envelope, ce *llm.CostQuotaExceededError, perio
 	sym := currencySymbol(currency)
 	text := fmt.Sprintf("%s%s已用尽（当前 %s%.2f / 上限 %s%.2f），请于新的计费周期再试。",
 		label, wall, sym, ce.Current, sym, ce.Limit)
+
+	// 路由元数据不能省：ChannelReplyHandler 按 Action.Metadata["source_channel"]
+	// 选 Sender，缺失会直接报 "no source_channel in action metadata" 并派发失败
+	// ——实测结果是被拦的用户**什么都看不到**（前端一直转圈到超时），
+	// 而日志里明明已经打出「已转友好回复」。拦截了却不说人话等于没拦。
+	// 口径与 ReplyStage 保持一致：source_channel 取 msg.Source，
+	// 回复目标优先 Metadata["reply_target"]，回退 msg.Channel。
+	sourceChannel := env.Message.Source
+	replyTarget := env.Message.Channel
+	if env.Message.Metadata != nil {
+		if rt, ok := env.Message.Metadata["reply_target"].(string); ok && rt != "" {
+			replyTarget = rt
+		}
+	}
+
 	env.AddAction(core.Action{
 		Type:    core.ActionReply,
-		Channel: env.Message.Channel,
+		Channel: replyTarget,
 		UserID:  env.Message.UserID,
 		Payload: text,
+		Metadata: core.CopyEngagementOutboundMeta(env, map[string]any{
+			"source_channel": sourceChannel,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+			"finish_reason":  "cost_quota_exceeded",
+		}),
 	})
 	return env
 }
