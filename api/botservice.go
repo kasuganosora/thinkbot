@@ -971,6 +971,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建 LLM Bundle
 	builder := config.NewBuilder(s.store, s.logger)
+	// 可观测性：没有有效单价的模型既不计费也不限额（成本墙静默空转）。
+	// 单价是易漏配字段，这里在启动期一次性点名，避免「额度配了却拦不住」无日志可查。
+	if missing := builder.ModelsWithoutPrice(); len(missing) > 0 {
+		s.logger.Warnw("bot_service: models without price are NOT counted against the money budget",
+			"bot_id", id, "models", missing)
+	}
 	bundle, err := bot.CreateLLMBundle(builder, id)
 	if err != nil {
 		rollback()
@@ -2974,6 +2980,13 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 	// 手动触发同样要过金钱额度：这里是真实的 LLM 花费，不能因为走「调试入口」
 	// 就绕过预算。与 StartBot 共用进程级共享 state（全局维度跨 bot 累加、口径一致）。
 	llmBundle.Main = s.wrapCostForBot(llmBundle.Main, botID, builder)
+	// 还要进 token 统计（stats_usage_daily）：成本墙的「已用额度」是从 stats
+	// 恢复的（RestoreBotFromStats / RestoreGlobalFromStats），只包 cost 不包 stats
+	// 会让手动触发与定时任务的花费不进看板，也不参与下次恢复 —— 预算墙看到的
+	// 已用金额会偏小，等于花了一笔墙看不见的钱。
+	if s.statsRecorder != nil {
+		llmBundle.Main = llm.NewStatsRecordingProvider(llmBundle.Main, s.statsRecorder, botID)
+	}
 
 	loc := builder.GetBotTimezoneLocation(botID)
 
