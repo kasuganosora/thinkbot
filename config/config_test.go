@@ -894,3 +894,60 @@ func TestDefaultEngagementConfig_UnansweredEpisodeBoundary(t *testing.T) {
 		t.Fatal("GlobalMetaSpecs must include unanswered_episode_boundary for the settings UI")
 	}
 }
+
+// TestResolveModelPrice_PresetFallback 验证「provider 未填单价 → 回退官方单价预设」。
+//
+// 这是金钱额度能生效的前提：CostRecordingProvider 在拿不到有效单价时会「不计费、
+// 也不限额」，provider 里漏填单价 == 成本墙静默失效。本测试锁定兜底不被改坏。
+func TestResolveModelPrice_PresetFallback(t *testing.T) {
+	cases := []struct {
+		model     string
+		wantIn    float64
+		wantOut   float64
+		wantCache float64
+	}{
+		// 现网 provider 里实际配置的 9 个 GLM 型号，单价全部为空 → 必须全部兜住
+		{"glm-4.5", 3, 14, 0.6},
+		{"glm-4.5-air", 0.8, 6, 0.16},
+		{"glm-4.6", 3, 14, 0.6},
+		{"glm-4.7", 3, 14, 0.6},
+		{"glm-5", 4, 18, 1},
+		{"glm-5-turbo", 5, 22, 1.2},
+		{"glm-5.1", 6, 24, 1.3},
+		{"glm-5.2", 8, 28, 2},
+		{"glm-5.3", 8, 28, 2},
+	}
+	for _, c := range cases {
+		in, out, cache, cur := resolveModelPrice(c.model, 0, 0, 0, "")
+		if in != c.wantIn || out != c.wantOut || cache != c.wantCache {
+			t.Errorf("%s: got in=%v out=%v cache=%v, want %v/%v/%v",
+				c.model, in, out, cache, c.wantIn, c.wantOut, c.wantCache)
+		}
+		if cur != "CNY" {
+			t.Errorf("%s: currency = %q, want CNY", c.model, cur)
+		}
+	}
+
+	// 免费变体必须保持全 0（HasPrice=false），否则会把免费模型算进花费
+	if in, out, _, _ := resolveModelPrice("glm-4.7-flash", 0, 0, 0, ""); in != 0 || out != 0 {
+		t.Errorf("glm-4.7-flash is free, got in=%v out=%v, want 0/0", in, out)
+	}
+	// 廉价变体不能被旗舰价错误命中（Flash 只有旗舰的 1/10）
+	if in, _, _, _ := resolveModelPrice("glm-5.3-flash", 0, 0, 0, ""); in != 0.8 {
+		t.Errorf("glm-5.3-flash input = %v, want 0.8", in)
+	}
+
+	// 显式配置优先于预设，且逐维独立回退（只配了输入 → 只回退输出）
+	in, out, _, _ := resolveModelPrice("glm-5.3", 99, 0, 0, "")
+	if in != 99 {
+		t.Errorf("explicit input should win, got %v", in)
+	}
+	if out != 28 {
+		t.Errorf("unset output should fall back to preset, got %v", out)
+	}
+
+	// 未收录厂商 → 全 0（不计入金钱额度），不能凭空编造单价
+	if in, out, cache, _ := resolveModelPrice("some-unknown-model", 0, 0, 0, ""); in != 0 || out != 0 || cache != 0 {
+		t.Errorf("unknown model must stay unpriced, got %v/%v/%v", in, out, cache)
+	}
+}

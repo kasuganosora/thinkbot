@@ -303,6 +303,9 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 					ctx = preset.ContextLength
 				}
 
+				// 计费单价：provider 显式值 > 官方单价预设 > 0。
+				pin, pout, pcache, pcur := resolveModelPrice(m.ID, m.PriceInputPer1M, m.PriceOutputPer1M, m.PriceCacheReadPer1M, m.Currency)
+
 				return fillModelDefaults(ModelDef{
 					Provider:      mapClientType(prov.ClientType),
 					Model:         m.ID,
@@ -314,11 +317,13 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 					MaxTokens:     mt,
 					ContextLength: ctx,
 					Multimodal:    m.Multimodal,
-					// 计费单价（换算表）：缺省 0 表示不计入金钱额度。
-					PriceInputPer1M:     m.PriceInputPer1M,
-					PriceOutputPer1M:    m.PriceOutputPer1M,
-					PriceCacheReadPer1M: m.PriceCacheReadPer1M,
-					Currency:            m.Currency,
+					// 计费单价（换算表）：provider 显式值 > 官方单价预设 > 0（不计入金钱额度）。
+					// 官方预设兜底很关键：provider 里漏填单价时，成本墙会因拿不到价格而
+					// 直接放行（不计费也不限额），金钱额度形同虚设。
+					PriceInputPer1M:     pin,
+					PriceOutputPer1M:    pout,
+					PriceCacheReadPer1M: pcache,
+					Currency:            pcur,
 				}), true
 			}
 		}
@@ -336,24 +341,40 @@ func (b *Builder) PriceResolver() llm.ModelPriceResolver {
 			return llm.ModelPrice{}, false
 		}
 		return llm.ModelPrice{
-			InputPer1M:      md.PriceInputPer1M,
-			OutputPer1M:     md.PriceOutputPer1M,
-			CacheReadPer1M:  md.PriceCacheReadPer1M,
-			Currency:        md.Currency,
+			InputPer1M:     md.PriceInputPer1M,
+			OutputPer1M:    md.PriceOutputPer1M,
+			CacheReadPer1M: md.PriceCacheReadPer1M,
+			Currency:       md.Currency,
 		}, md.PriceInputPer1M > 0 || md.PriceOutputPer1M > 0 || md.PriceCacheReadPer1M > 0
 	}
 }
 
 // ModelPriceEntry 是 token↔金钱换算表的一行（单个模型的单价）。
 type ModelPriceEntry struct {
-	ProviderID         string  `json:"providerId"`
-	ProviderName       string  `json:"providerName"`
-	ModelID            string  `json:"modelId"`
-	ModelName          string  `json:"modelName"`
-	PriceInputPer1M    float64 `json:"priceInputPer1M"`
-	PriceOutputPer1M   float64 `json:"priceOutputPer1M"`
+	ProviderID          string  `json:"providerId"`
+	ProviderName        string  `json:"providerName"`
+	ModelID             string  `json:"modelId"`
+	ModelName           string  `json:"modelName"`
+	PriceInputPer1M     float64 `json:"priceInputPer1M"`
+	PriceOutputPer1M    float64 `json:"priceOutputPer1M"`
 	PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
-	Currency           string  `json:"currency"`
+	Currency            string  `json:"currency"`
+}
+
+// ModelsWithoutPrice 返回所有已启用 provider 下「拿不到有效单价」的模型 ID。
+//
+// 这些模型的花费既不计入 stats 的 cost_* 列，也不受金钱额度约束（HasPrice=false
+// → 不计费也不限额）。属于**静默失效**，启动时必须打点，否则「额度配了却拦不住」
+// 没有任何日志可查。
+func (b *Builder) ModelsWithoutPrice() []string {
+	resolve := b.PriceResolver()
+	var out []string
+	for _, e := range b.ModelPriceTable() {
+		if p, ok := resolve(e.ModelID); !ok || !p.HasPrice() {
+			out = append(out, e.ModelID)
+		}
+	}
+	return out
 }
 
 // ModelPriceTable 返回所有已启用 provider 下全部模型的单价表（换算表）。
@@ -366,15 +387,15 @@ func (b *Builder) ModelPriceTable() []ModelPriceEntry {
 			continue
 		}
 		var prov struct {
-			Name     string `json:"name"`
-			Enabled  bool   `json:"enabled"`
-			Models   []struct {
-				ID            string  `json:"id"`
-				Name          string  `json:"name"`
-				PriceInputPer1M    float64 `json:"priceInputPer1M"`
-				PriceOutputPer1M   float64 `json:"priceOutputPer1M"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+			Models  []struct {
+				ID                  string  `json:"id"`
+				Name                string  `json:"name"`
+				PriceInputPer1M     float64 `json:"priceInputPer1M"`
+				PriceOutputPer1M    float64 `json:"priceOutputPer1M"`
 				PriceCacheReadPer1M float64 `json:"priceCacheReadPer1M"`
-				Currency       string  `json:"currency"`
+				Currency            string  `json:"currency"`
 			} `json:"models"`
 		}
 		if err := json.Unmarshal([]byte(raw), &prov); err != nil || !prov.Enabled {
@@ -560,6 +581,106 @@ func lookupModelPreset(model string) *ModelPreset {
 // 未命中（未知模型）返回 nil。
 func GetModelPreset(model string) *ModelPreset {
 	return lookupModelPreset(model)
+}
+
+// ============================================================================
+// 模型官方单价预设（token↔金钱换算表兜底）
+// ============================================================================
+// ModelPricePreset 记录某类模型的官方单价（元 / 百万 tokens）。
+//
+// 为什么必须有这层兜底：CostRecordingProvider / stats 记录器在 priceFor 拿不到
+// 有效单价时是「不计费、也不限额」（见 llm/cost_provider.go 与 stats/recorder.go），
+// 也就是说 provider 配置里没填单价 == 金钱额度整条链路静默失效。单价属于易漏配的
+// 字段，因此把官方价目表里已公开的型号固化在这里兜底。
+//
+// 优先级：provider 显式单价 > 此处官方预设 > 0（不计入金钱额度）。
+//
+// 数据来源：docs.bigmodel.cn/cn/guide/start/pricing（2026-09-24 核对）。
+// 智谱按输入/输出长度分档计价，此处统一取【低档】——thinkbot 绝大多数调用的输入
+// 在 32K 以内、输出在 0.2K 以上；长上下文调用的实际花费会略高于本表估算，
+// 即估算偏保守（少算），如需绝对兜住上限请改用高档数值。
+type ModelPricePreset struct {
+	InputPer1M     float64 // 输入单价（元 / 百万 tokens）
+	OutputPer1M    float64 // 输出单价
+	CacheReadPer1M float64 // 缓存命中单价
+	Currency       string  // 币种，默认 CNY
+}
+
+// modelPriceRules 按「最具体在前」的顺序对模型名做前缀匹配，命中即返回。
+// 同族里存在免费 / 廉价变体（如 glm-5.3-flash、glm-4.7-flash），必须排在
+// 更宽泛的家族前缀之前，否则会被旗舰价错误命中（Flash 只有旗舰的 1/10）。
+var modelPriceRules = []struct {
+	prefixes []string
+	price    ModelPricePreset
+}{
+	// ---- 智谱 GLM 5 系 ----
+	{[]string{"glm-5.3-flashx"}, ModelPricePreset{InputPer1M: 2, OutputPer1M: 7, CacheReadPer1M: 0.57}},
+	{[]string{"glm-5.3-flash"}, ModelPricePreset{InputPer1M: 0.8, OutputPer1M: 2.8, CacheReadPer1M: 0.23}},
+	{[]string{"glm-5.3"}, ModelPricePreset{InputPer1M: 8, OutputPer1M: 28, CacheReadPer1M: 2}},
+	{[]string{"glm-5.2"}, ModelPricePreset{InputPer1M: 8, OutputPer1M: 28, CacheReadPer1M: 2}},
+	{[]string{"glm-5.1"}, ModelPricePreset{InputPer1M: 6, OutputPer1M: 24, CacheReadPer1M: 1.3}},
+	{[]string{"glm-5-turbo"}, ModelPricePreset{InputPer1M: 5, OutputPer1M: 22, CacheReadPer1M: 1.2}},
+	{[]string{"glm-5"}, ModelPricePreset{InputPer1M: 4, OutputPer1M: 18, CacheReadPer1M: 1}},
+
+	// ---- 智谱 GLM 4 系 ----
+	// 4.5 / 4.6 / 4.7 同档（输入 [0,32K) 且输出 ≥0.2K）：3 / 14 / 0.6
+	{[]string{"glm-4.7-flashx"}, ModelPricePreset{InputPer1M: 0.5, OutputPer1M: 3, CacheReadPer1M: 0.1}},
+	{[]string{"glm-4.7-flash"}, ModelPricePreset{}}, // 官方免费，保持全 0 → 不计入金钱额度
+	{[]string{"glm-4.7", "glm-4.6"}, ModelPricePreset{InputPer1M: 3, OutputPer1M: 14, CacheReadPer1M: 0.6}},
+	{[]string{"glm-4.5-air"}, ModelPricePreset{InputPer1M: 0.8, OutputPer1M: 6, CacheReadPer1M: 0.16}},
+	{[]string{"glm-4.5"}, ModelPricePreset{InputPer1M: 3, OutputPer1M: 14, CacheReadPer1M: 0.6}},
+	// glm-4-plus / glm-4-air / glm-4-flash 等存量型号价差极大（5/5 ~ 免费），
+	// 不做家族级兜底，避免给错价；未命中即不计入金钱额度。
+}
+
+// lookupModelPrice 根据模型名查找官方单价预设，未命中返回 nil。
+func lookupModelPrice(model string) *ModelPricePreset {
+	m := strings.ToLower(strings.TrimSpace(model))
+	for i := range modelPriceRules {
+		for _, p := range modelPriceRules[i].prefixes {
+			if strings.HasPrefix(m, strings.ToLower(p)) {
+				price := modelPriceRules[i].price
+				if price.Currency == "" {
+					price.Currency = "CNY"
+				}
+				return &price
+			}
+		}
+	}
+	return nil
+}
+
+// GetModelPricePreset 导出给 API 层使用的官方单价查询入口。
+// 未命中（未知模型 / 未收录厂商）返回 nil —— 该模型不计入金钱额度。
+func GetModelPricePreset(model string) *ModelPricePreset {
+	return lookupModelPrice(model)
+}
+
+// resolveModelPrice 解析模型的计费单价：provider 显式值 > 官方单价预设 > 0。
+// 逐维独立回退（输入配了、输出没配时只回退输出），避免覆盖用户已填的一半。
+// 全部为 0 时 llm.ModelPrice.HasPrice()==false → 该模型不计入金钱额度。
+func resolveModelPrice(modelID string, cfgIn, cfgOut, cfgCache float64, cfgCurrency string) (in, out, cache float64, currency string) {
+	in, out, cache, currency = cfgIn, cfgOut, cfgCache, cfgCurrency
+	preset := lookupModelPrice(modelID)
+	if preset != nil {
+		if in <= 0 {
+			in = preset.InputPer1M
+		}
+		if out <= 0 {
+			out = preset.OutputPer1M
+		}
+		if cache <= 0 {
+			cache = preset.CacheReadPer1M
+		}
+	}
+	if currency == "" {
+		if preset != nil && preset.Currency != "" {
+			currency = preset.Currency
+		} else {
+			currency = "CNY"
+		}
+	}
+	return in, out, cache, currency
 }
 
 // BotLLMAssignment 描述一个 Bot 的 LLM 角色分配。
