@@ -36,9 +36,11 @@ func (p *selfCompactSummaryProvider) DoStream(ctx context.Context, params llm.Ge
 }
 
 type memCheckpointStore struct {
-	mu    sync.Mutex
-	saved []ContextCheckpoint
-	prev  uint64
+	mu      sync.Mutex
+	saved   []ContextCheckpoint
+	prev    uint64
+	lastAt  map[string]time.Time // session → newest checkpoint created_at
+	lastErr error
 }
 
 func (m *memCheckpointStore) LatestContextCheckpointBoundary(botID, sessionID string) (uint64, error) {
@@ -50,10 +52,32 @@ func (m *memCheckpointStore) LatestContextCheckpointBoundary(botID, sessionID st
 	return m.prev, nil
 }
 
+func (m *memCheckpointStore) LastContextCheckpointAt(botID, sessionID string) (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastErr != nil {
+		return time.Time{}, m.lastErr
+	}
+	return m.lastAt[sessionID], nil
+}
+
+func (m *memCheckpointStore) setLastAt(sessionID string, t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastAt == nil {
+		m.lastAt = map[string]time.Time{}
+	}
+	m.lastAt[sessionID] = t
+}
+
 func (m *memCheckpointStore) SaveContextCheckpoint(cp ContextCheckpoint) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.saved = append(m.saved, cp)
+	if m.lastAt == nil {
+		m.lastAt = map[string]time.Time{}
+	}
+	m.lastAt[cp.SessionID] = time.Now()
 	return nil
 }
 
@@ -204,8 +228,9 @@ func TestCompactContext_SuccessPersistsCheckpoint(t *testing.T) {
 	if _, err := tool3.Execute(ctx3, map[string]any{}); err != nil {
 		t.Fatalf("other session should not be cooled down: %v", err)
 	}
-	// After the cooldown window it works again.
+	// After the cooldown window it works again (in-memory and persisted).
 	s.selfCompactCD.mark("chat:sess-1", time.Now().Add(-time.Hour))
+	store.setLastAt("sess-1", time.Now().Add(-time.Hour))
 	ctx4, _ := execCtxWith(base)
 	if _, err := s.newCompactContextTool(env, base).Execute(ctx4, map[string]any{}); err != nil {
 		t.Fatalf("after cooldown: %v", err)
