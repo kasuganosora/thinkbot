@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -53,7 +55,7 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 		t.Fatalf("raw load: %d %v", len(raw), err)
 	}
 	// No checkpoint → unchanged.
-	if got := s.ApplyContextCheckpoint("bot", "sess", raw); len(got) != 10 {
+	if got := s.ApplyContextCheckpoint("trace-1", "bot", "sess", raw); len(got) != 10 {
 		t.Fatalf("no checkpoint should keep history, got %d", len(got))
 	}
 
@@ -64,7 +66,7 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := s.ApplyContextCheckpoint("bot", "sess", raw)
+	got := s.ApplyContextCheckpoint("trace-1", "bot", "sess", raw)
 	if len(got) != 1+4 {
 		t.Fatalf("want summary + 4 recent, got %d", len(got))
 	}
@@ -101,7 +103,7 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 	}
 	// Other sessions unaffected.
 	other, _ := s.LoadContextBySession("bot", "other", 20)
-	if got := s.ApplyContextCheckpoint("bot", "other", other); len(got) != 4 || got[0].Role == dao.ChatRoleContextSummary {
+	if got := s.ApplyContextCheckpoint("trace-1", "bot", "other", other); len(got) != 4 || got[0].Role == dao.ChatRoleContextSummary {
 		t.Fatal("checkpoint leaked into another session")
 	}
 
@@ -120,14 +122,14 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 	if total != 2 || active != 1 {
 		t.Fatalf("checkpoints total=%d active=%d, want 2/1", total, active)
 	}
-	got = s.ApplyContextCheckpoint("bot", "sess", raw)
-	if len(got) != 3 || got[0].Content != "newer" {
+	got = s.ApplyContextCheckpoint("trace-1", "bot", "sess", raw)
+	if len(got) != 3 || !strings.HasSuffix(got[0].Content, "\n\nnewer") {
 		t.Fatalf("newer checkpoint not applied: %d %q", len(got), got[0].Content)
 	}
 
 	// Revert: deactivate → full history again.
 	s.db.Model(&dao.ContextCheckpoint{}).Where("session_id = ?", "sess").Update("active", false)
-	if got := s.ApplyContextCheckpoint("bot", "sess", raw); len(got) != 10 {
+	if got := s.ApplyContextCheckpoint("trace-1", "bot", "sess", raw); len(got) != 10 {
 		t.Fatalf("after revert want full history, got %d", len(got))
 	}
 }
@@ -135,18 +137,88 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 func TestContextCheckpoint_FailOpenAndGuards(t *testing.T) {
 	var nilSvc *ChatHistoryService
 	h := []dao.ChatMessage{{ID: 1, Role: dao.ChatRoleUser, Content: "x"}}
-	if got := nilSvc.ApplyContextCheckpoint("b", "s", h); len(got) != 1 {
+	if got := nilSvc.ApplyContextCheckpoint("t", "b", "s", h); len(got) != 1 {
 		t.Fatal("nil service must return history unchanged")
 	}
 	s := newTestChatHistory(t) // no context_checkpoints table → lookup error → fail open
-	if got := s.ApplyContextCheckpoint("b", "s", h); len(got) != 1 {
+	if got := s.ApplyContextCheckpoint("t", "b", "s", h); len(got) != 1 {
 		t.Fatal("lookup error must fail open")
 	}
-	if got := s.ApplyContextCheckpoint("b", "", h); len(got) != 1 {
+	if got := s.ApplyContextCheckpoint("t", "b", "", h); len(got) != 1 {
 		t.Fatal("empty session must be ignored")
 	}
 	if err := s.SaveContextCheckpoint(stages.ContextCheckpoint{BotID: "b"}); err == nil {
 		t.Fatal("checkpoint without session must be rejected")
+	}
+}
+
+func TestContextCheckpoint_ExpiryAndLogging(t *testing.T) {
+	s := newCheckpointTestHistory(t)
+	zc, logs := observer.New(zapcore.InfoLevel)
+	s.logger = zap.New(zc).Sugar()
+	seedSession(t, s, "bot", "sess", 10)
+	raw, _ := s.LoadContextBySession("bot", "sess", 20)
+	if err := s.SaveContextCheckpoint(stages.ContextCheckpoint{
+		BotID: "bot", SessionID: "sess", BoundaryMessageID: raw[5].ID, Summary: "## Topics\n- old topic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { checkpointNow = time.Now }()
+
+	// Fresh checkpoint: applied, header note added, decision logged with IDs.
+	got := s.ApplyContextCheckpoint("trace-a", "bot", "sess", raw)
+	if len(got) != 5 || !strings.HasPrefix(got[0].Content, "Note about earlier messages of this conversation (up to ") ||
+		!strings.Contains(got[0].Content, "newer messages take precedence") || !strings.HasSuffix(got[0].Content, "- old topic") {
+		t.Fatalf("applied content wrong: %d %q", len(got), got[0].Content)
+	}
+	applied := logs.FilterMessage("context checkpoint applied").All()
+	if len(applied) != 1 {
+		t.Fatalf("want an applied log line, got %d", len(applied))
+	}
+	f := applied[0].ContextMap()
+	if f["trace_id"] != "trace-a" || f["rows_dropped"] != int64(6) || f["rows_kept"] != int64(4) ||
+		f["checkpoint_id"] == nil || f["boundary_message_id"] != raw[5].ID || f["summary_tokens"] == nil {
+		t.Fatalf("applied log fields: %v", f)
+	}
+
+	// Older than the default 24h TTL → skipped (row untouched, still active).
+	checkpointNow = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	if got := s.ApplyContextCheckpoint("trace-b", "bot", "sess", raw); len(got) != 10 || got[0].Role == dao.ChatRoleContextSummary {
+		t.Fatalf("expired checkpoint must not be applied, got %d", len(got))
+	}
+	skipped := logs.FilterMessage("context checkpoint skipped").All()
+	if len(skipped) != 1 || !strings.Contains(skipped[0].ContextMap()["reason"].(string), "expired") {
+		t.Fatalf("skip not logged: %+v", skipped)
+	}
+	var active int64
+	s.db.Model(&dao.ContextCheckpoint{}).Where("active = ?", true).Count(&active)
+	if active != 1 {
+		t.Fatal("expiry is a load-time decision; the row must stay active")
+	}
+	// TTL disabled (<= 0) → applied again; custom TTL respected.
+	s.SetContextCheckpointTTLSource(func() time.Duration { return 0 })
+	if got := s.ApplyContextCheckpoint("t", "bot", "sess", raw); len(got) != 5 {
+		t.Fatalf("ttl disabled should apply, got %d", len(got))
+	}
+	s.SetContextCheckpointTTLSource(func() time.Duration { return 48 * time.Hour })
+	if got := s.ApplyContextCheckpoint("t", "bot", "sess", raw); len(got) != 5 {
+		t.Fatalf("within custom ttl should apply, got %d", len(got))
+	}
+	s.SetContextCheckpointTTLSource(nil)
+	checkpointNow = time.Now
+
+	// Covered rows scrolled out of the window → skipped.
+	window := raw[6:]
+	if got := s.ApplyContextCheckpoint("trace-c", "bot", "sess", window); len(got) != len(window) || got[0].Role == dao.ChatRoleContextSummary {
+		t.Fatalf("scrolled-out checkpoint must not be applied, got %d", len(got))
+	}
+	last := logs.FilterMessage("context checkpoint skipped").All()
+	if r := last[len(last)-1].ContextMap()["reason"].(string); !strings.Contains(r, "outside the history window") {
+		t.Fatalf("reason=%q", r)
+	}
+	// Empty history (load failure / brand-new window) → nothing to replace.
+	if got := s.ApplyContextCheckpoint("t", "bot", "sess", nil); len(got) != 0 {
+		t.Fatalf("empty history must stay empty, got %d", len(got))
 	}
 }
 
@@ -170,5 +242,14 @@ func TestContextCheckpoint_LastContextCheckpointAt(t *testing.T) {
 	}
 	if at3, _ := s.LastContextCheckpointAt("bot", "other"); !at3.IsZero() {
 		t.Fatal("other session must be independent")
+	}
+}
+
+func TestContextCheckpointTTL_Default(t *testing.T) {
+	var nilSvc *ChatHistoryService
+	nilSvc.SetContextCheckpointTTLSource(nil) // must not panic
+	s := newCheckpointTestHistory(t)
+	if s.contextCheckpointTTL() != defaultContextCheckpointTTL {
+		t.Fatal("default ttl")
 	}
 }

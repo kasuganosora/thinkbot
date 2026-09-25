@@ -149,6 +149,12 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 	if eventBus == nil {
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
+	if chatHistory != nil && store != nil {
+		// compact_context 检查点 TTL：每次加载历史时现读配置，改配置无需重启。
+		chatHistory.SetContextCheckpointTTLSource(func() time.Duration {
+			return contextCheckpointTTLFromStore(store)
+		})
+	}
 	return &BotService{
 		db:                 db,
 		store:              store,
@@ -672,7 +678,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 		s.logger.Warnw("failed to load context for workflow continuation", "err", err)
 		history = nil
 	}
-	history = s.chatHistory.ApplyContextCheckpoint(botID, sessionID, history)
+	history = s.chatHistory.ApplyContextCheckpoint(traceID, botID, sessionID, history)
 
 	done := 0
 	for _, n := range wf.Nodes {
@@ -915,6 +921,8 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 //   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 4096；摘要长度主要由提示词目标约束），被截断即作废；
 //   - agent.self_compact.summarizer：main（默认）| light，light 使用 bot 的低成本模型（未配置则回退 main）；
 //   - agent.self_compact.reasoning_effort：透传给摘要调用（默认空=服务商默认；GLM 等对参数严格，需实测后再开）。
+//
+// 检查点过期（agent.self_compact.checkpoint_ttl，秒）在加载时判定，见 context_checkpoint.go。
 func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle) *stages.SelfCompactConfig {
 	if !s.store.GetBool("agent.self_compact.enabled", true) {
 		return nil
@@ -940,6 +948,20 @@ func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle) *stages.SelfCompac
 		cfg.SummaryModel = llm.ChatModel(bundle.LightDef.Model)
 	}
 	return cfg
+}
+
+// contextCheckpointTTLFromStore 读取 agent.self_compact.checkpoint_ttl（秒）：
+// 未配置或 0 → 默认 24h；负数 → 不按时间过期（仍会在被覆盖的消息滑出历史窗口后失效）。
+func contextCheckpointTTLFromStore(store *config.Store) time.Duration {
+	secs := store.GetInt("agent.self_compact.checkpoint_ttl", 0)
+	switch {
+	case secs < 0:
+		return 0
+	case secs == 0:
+		return defaultContextCheckpointTTL
+	default:
+		return time.Duration(secs) * time.Second
+	}
 }
 
 // compactionConfigFromConfig 将配置模块的会话压缩配置转换为 llm 包的 CompactionConfig。
@@ -1640,7 +1662,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
 		} else {
 			// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
-			history = s.chatHistory.ApplyContextCheckpoint(env.Message.BotID, sid, history)
+			history = s.chatHistory.ApplyContextCheckpoint(env.Message.TraceID, env.Message.BotID, sid, history)
 			if len(history) > 0 {
 				env.Message.Metadata["chat_history"] = history
 			}
