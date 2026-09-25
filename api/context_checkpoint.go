@@ -22,7 +22,47 @@ import (
 // checkpoint restores the full history:
 //
 //	UPDATE context_checkpoints SET active = 0 WHERE bot_id = ? AND session_id = ?;
+//
+// Expiry (decided at load time; rows are never mutated): an active checkpoint
+// is ignored when
+//   - it is older than the TTL (agent.self_compact.checkpoint_ttl, seconds;
+//     default 24h, negative disables the TTL), or
+//   - none of the rows it covers is in the loaded history window any more —
+//     without the checkpoint those rows would have scrolled out of the
+//     normal chat_context_limit window as well, so the summary would only
+//     keep a stale topic alive. With the default window of 20 rows this
+//     ends injection after ~10 newer exchanges.
 // ============================================================================
+
+// defaultContextCheckpointTTL is used when no TTL source is configured.
+const defaultContextCheckpointTTL = 24 * time.Hour
+
+// checkpointTTLSource returns the checkpoint TTL (<= 0 → no TTL).
+type checkpointTTLSource func() time.Duration
+
+var checkpointNow = time.Now // test hook
+
+// SetContextCheckpointTTLSource installs a live TTL source (read on every
+// history load, so config changes apply without restart). fn returning <= 0
+// disables the TTL; nil restores the 24h default.
+func (s *ChatHistoryService) SetContextCheckpointTTLSource(fn func() time.Duration) {
+	if s == nil {
+		return
+	}
+	if fn == nil {
+		s.checkpointTTL.Store(nil)
+		return
+	}
+	src := checkpointTTLSource(fn)
+	s.checkpointTTL.Store(&src)
+}
+
+func (s *ChatHistoryService) contextCheckpointTTL() time.Duration {
+	if p := s.checkpointTTL.Load(); p != nil && *p != nil {
+		return (*p)()
+	}
+	return defaultContextCheckpointTTL
+}
 
 // ChatHistoryService implements stages.ContextCheckpointStore.
 var _ stages.ContextCheckpointStore = (*ChatHistoryService)(nil)
@@ -111,31 +151,76 @@ func (s *ChatHistoryService) SaveContextCheckpoint(in stages.ContextCheckpoint) 
 
 // ApplyContextCheckpoint rewrites a loaded LLM-context history window using
 // the session's active checkpoint: rows covered by the checkpoint are dropped
-// and a synthetic summary entry is prepended. On any error the history is
-// returned unchanged (fail-open to the previous behaviour).
-func (s *ChatHistoryService) ApplyContextCheckpoint(botID, sessionID string, history []dao.ChatMessage) []dao.ChatMessage {
+// and a synthetic summary entry is prepended, unless the checkpoint has
+// expired (see the package comment). Every decision is logged with the trace
+// ID, so it can be verified from logs which turn used which checkpoint. On
+// any error the history is returned unchanged (fail-open to the previous
+// behaviour).
+func (s *ChatHistoryService) ApplyContextCheckpoint(traceID, botID, sessionID string, history []dao.ChatMessage) []dao.ChatMessage {
 	if s == nil || sessionID == "" {
 		return history
 	}
 	cp, err := s.LatestContextCheckpoint(botID, sessionID)
 	if err != nil {
-		s.logger.Warnw("context checkpoint lookup failed, using raw history", "err", err, "session", sessionID)
+		s.logger.Warnw("context checkpoint lookup failed, using raw history", "err", err, "session", sessionID, "trace_id", traceID)
 		return history
 	}
-	return applyCheckpointToHistory(cp, history)
-}
-
-// applyCheckpointToHistory is the pure part of ApplyContextCheckpoint.
-func applyCheckpointToHistory(cp *dao.ContextCheckpoint, history []dao.ChatMessage) []dao.ChatMessage {
 	if cp == nil || cp.Summary == "" {
 		return history
 	}
-	out := make([]dao.ChatMessage, 0, len(history)+1)
+	now := checkpointNow()
+	out, d := applyCheckpointToHistory(cp, history, now, s.contextCheckpointTTL())
+	fields := []any{
+		"trace_id", traceID, "bot_id", botID, "session", sessionID,
+		"checkpoint_id", cp.ID, "boundary_message_id", cp.BoundaryMessageID,
+		"checkpoint_age", now.Sub(cp.CreatedAt).Round(time.Second).String(),
+		"history_rows", len(history),
+	}
+	if !d.applied {
+		s.logger.Infow("context checkpoint skipped", append(fields, "reason", d.reason)...)
+		return history
+	}
+	s.logger.Infow("context checkpoint applied", append(fields,
+		"rows_dropped", d.dropped, "rows_kept", len(out)-1,
+		"summary_tokens", llm.EstimateTokens(cp.Summary), "summary_len", len([]rune(cp.Summary)))...)
+	return out
+}
+
+// checkpointDecision explains what applyCheckpointToHistory did.
+type checkpointDecision struct {
+	applied bool
+	reason  string // why it was skipped
+	dropped int    // history rows replaced by the summary
+}
+
+// applyCheckpointToHistory is the pure part of ApplyContextCheckpoint.
+// ttl <= 0 disables the age check.
+func applyCheckpointToHistory(cp *dao.ContextCheckpoint, history []dao.ChatMessage, now time.Time, ttl time.Duration) ([]dao.ChatMessage, checkpointDecision) {
+	if cp == nil || cp.Summary == "" {
+		return history, checkpointDecision{reason: "no checkpoint"}
+	}
+	if ttl > 0 && !cp.CreatedAt.IsZero() && now.Sub(cp.CreatedAt) > ttl {
+		return history, checkpointDecision{reason: fmt.Sprintf("expired: older than ttl %s", ttl)}
+	}
+	dropped := 0
+	var lastCovered time.Time
+	for _, m := range history {
+		if m.ID != 0 && m.ID <= cp.BoundaryMessageID {
+			dropped++
+			if m.CreatedAt.After(lastCovered) {
+				lastCovered = m.CreatedAt
+			}
+		}
+	}
+	if dropped == 0 {
+		return history, checkpointDecision{reason: "covered messages are already outside the history window"}
+	}
+	out := make([]dao.ChatMessage, 0, len(history)-dropped+1)
 	out = append(out, dao.ChatMessage{
 		BotID:     cp.BotID,
 		SessionID: cp.SessionID,
 		Role:      dao.ChatRoleContextSummary,
-		Content:   cp.Summary,
+		Content:   checkpointSummaryContent(cp, lastCovered),
 		CreatedAt: cp.CreatedAt,
 	})
 	for _, m := range history {
@@ -144,7 +229,23 @@ func applyCheckpointToHistory(cp *dao.ContextCheckpoint, history []dao.ChatMessa
 		}
 		out = append(out, m)
 	}
-	return out
+	return out, checkpointDecision{applied: true, dropped: dropped}
+}
+
+// checkpointSummaryContent prefixes the stored summary with when it was
+// written and which period it covers, and reminds the model that it is a
+// lossy note: newer messages win, unverified items are not facts.
+func checkpointSummaryContent(cp *dao.ContextCheckpoint, lastCovered time.Time) string {
+	const layout = "2006-01-02 15:04 MST"
+	note := "Note about earlier messages of this conversation"
+	if !lastCovered.IsZero() {
+		note += " (up to " + lastCovered.Format(layout) + ")"
+	}
+	if !cp.CreatedAt.IsZero() {
+		note += ", written " + cp.CreatedAt.Format(layout)
+	}
+	note += ". It is a lossy summary and may be outdated: newer messages take precedence, and anything marked unverified is not confirmed."
+	return note + "\n\n" + cp.Summary
 }
 
 // chatHistoryToLLM converts a loaded history window into LLM messages and the
