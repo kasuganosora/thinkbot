@@ -459,24 +459,28 @@ func (s *CostQuotaState) RecordCost(botID, feature string, cost float64) {
 // 仅当 cost_total 缺失（存量行）时才用当前单价回算兜底。
 
 // costRestoreRow 恢复用聚合行。
+//
+// Input / Output / CacheRead 只统计 cost_total = 0 的存量行。已落库花费与未落库
+// 用量必须在 SQL 层分开：若先 SUM(cost_total) 再判断「>0 就整行跳过回算」，同一
+// 模型只要有一条新记录，所有存量 token 都会被漏掉，重启后墙比看板少算一截。
 type costRestoreRow struct {
 	BotID     string
 	Model     string
 	Feature   string
-	Cost      float64 // SUM(cost_total)，可能为 0（存量行）
-	Input     int
-	Output    int
-	CacheRead int
+	Cost      float64 // SUM(cost_total)，已落库部分
+	Input     int     // cost_total=0 行的 input_tokens
+	Output    int     // cost_total=0 行的 output_tokens
+	CacheRead int     // cost_total=0 行的 cache_read_tokens
 }
 
 // scanCostRows 按周期起点聚合 stats_usage_daily。botID 为空表示全表（全局维度）。
 func scanCostRows(ctx context.Context, db *gorm.DB, start time.Time, botID string) ([]costRestoreRow, error) {
 	const cols = `
 		SELECT bot_id, model, feature,
-		       SUM(cost_total)    AS cost,
-		       SUM(input_tokens)  AS input,
-		       SUM(output_tokens) AS output,
-		       SUM(cache_read_tokens) AS cache_read
+		       SUM(cost_total) AS cost,
+		       SUM(CASE WHEN cost_total = 0 THEN input_tokens ELSE 0 END) AS input,
+		       SUM(CASE WHEN cost_total = 0 THEN output_tokens ELSE 0 END) AS output,
+		       SUM(CASE WHEN cost_total = 0 THEN cache_read_tokens ELSE 0 END) AS cache_read
 		FROM stats_usage_daily
 		WHERE date >= ?`
 	const group = `
@@ -494,17 +498,16 @@ func scanCostRows(ctx context.Context, db *gorm.DB, start time.Time, botID strin
 	return rows, nil
 }
 
-// rowCost 取一行在本周期的花费：优先 cost_total，缺失时按当前单价回算兜底。
+// rowCost 取一行在本周期的花费：已落库 cost_total + 存量行按当前单价回算。
+// 与计费看板 usageCostRow.effectiveCost 同口径。
 func rowCost(r costRestoreRow, priceFor llm.ModelPriceResolver) float64 {
-	if r.Cost > 0 {
-		return r.Cost
-	}
-	if priceFor == nil {
-		return 0
+	cost := r.Cost
+	if priceFor == nil || (r.Input == 0 && r.Output == 0 && r.CacheRead == 0) {
+		return cost
 	}
 	price, ok := priceFor(r.Model)
 	if !ok || !price.HasPrice() {
-		return 0
+		return cost
 	}
 	usage := llm.Usage{
 		InputTokens:       r.Input,
@@ -512,7 +515,7 @@ func rowCost(r costRestoreRow, priceFor llm.ModelPriceResolver) float64 {
 		InputTokenDetails: llm.InputTokenDetail{CacheReadTokens: r.CacheRead},
 	}
 	_, _, total := llm.ComputeCost(usage, price)
-	return total
+	return cost + total
 }
 
 // addToDims 把花费累加到多个维度（内部加锁）。
@@ -568,6 +571,11 @@ func (s *CostQuotaState) restoreGlobal(ctx context.Context, db *gorm.DB, priceFo
 		dims := []string{costDimSystem()}
 		if r.Feature != "" && r.Feature != "unknown" {
 			dims = append(dims, costDimFeature(r.Feature))
+			// 与 RecordCost / RestoreBot 同口径：组预算（dreaming）必须吃到阶段花费，
+			// 否则重启后全局功能墙只剩字面 feature 名，dream_extract 等被漏计。
+			if g := costFeatureGroup(r.Feature); g != r.Feature {
+				dims = append(dims, costDimFeature(g))
+			}
 		}
 		s.addToDims(dims, cost)
 	}
