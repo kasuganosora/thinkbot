@@ -532,9 +532,7 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 	compactedMessages := make([]Message, 0, 1+len(tailMessages))
 
 	// 添加摘要作为系统上下文消息
-	compactedMessages = append(compactedMessages, SystemMessage(
-		fmt.Sprintf("[Conversation Summary]\n%s\n[End of Summary]", summary),
-	))
+	compactedMessages = append(compactedMessages, ConversationSummaryMessage(summary))
 
 	// 保留最近的完整消息
 	compactedMessages = append(compactedMessages, tailMessages...)
