@@ -908,7 +908,8 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 
 // selfCompactConfig 构造 compact_context（bot 自主上下文压缩）工具配置。均为 bot 启动时读取：
 //   - agent.self_compact.enabled=false 关闭；
-//   - agent.self_compact.cooldown（秒）覆盖默认 10 分钟冷却；
+//   - agent.self_compact.cooldown（秒）覆盖默认 10 分钟冷却（有持久化历史的会话另以最近检查点
+//     created_at 推导，重启不清零）；
 //   - agent.self_compact.min_tokens / min_messages / min_savings_tokens / min_savings_ratio：
 //     收益门槛（默认 8000 / 12 / 4000 / 0.3），不划算时直接 no-op，不调用摘要模型；
 //   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 4096；摘要长度主要由提示词目标约束），被截断即作废；

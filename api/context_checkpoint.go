@@ -53,6 +53,26 @@ func (s *ChatHistoryService) LatestContextCheckpointBoundary(botID, sessionID st
 	return cp.BoundaryMessageID, nil
 }
 
+// LastContextCheckpointAt implements stages.ContextCheckpointStore: creation
+// time of the newest checkpoint of the session, active or not (zero when
+// none). compact_context derives its cooldown from it so a restart does not
+// reset the cooldown.
+func (s *ChatHistoryService) LastContextCheckpointAt(botID, sessionID string) (time.Time, error) {
+	if s == nil || s.db == nil || sessionID == "" {
+		return time.Time{}, nil
+	}
+	var cp dao.ContextCheckpoint
+	err := s.db.Select("id", "created_at").Where("bot_id = ? AND session_id = ?", botID, sessionID).
+		Order("id DESC").Limit(1).Take(&cp).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("chat_history: load last context checkpoint: %w", err)
+	}
+	return cp.CreatedAt, nil
+}
+
 // SaveContextCheckpoint implements stages.ContextCheckpointStore: it stores a
 // new active checkpoint and deactivates older ones of the same session (kept
 // for audit).

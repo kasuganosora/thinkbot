@@ -149,3 +149,26 @@ func TestContextCheckpoint_FailOpenAndGuards(t *testing.T) {
 		t.Fatal("checkpoint without session must be rejected")
 	}
 }
+
+func TestContextCheckpoint_LastContextCheckpointAt(t *testing.T) {
+	s := newCheckpointTestHistory(t)
+	if at, err := s.LastContextCheckpointAt("bot", "sess"); err != nil || !at.IsZero() {
+		t.Fatalf("no checkpoint: %v %v", at, err)
+	}
+	before := time.Now().Add(-time.Second)
+	if err := s.SaveContextCheckpoint(stages.ContextCheckpoint{BotID: "bot", SessionID: "sess", BoundaryMessageID: 1, Summary: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	at, err := s.LastContextCheckpointAt("bot", "sess")
+	if err != nil || at.Before(before) {
+		t.Fatalf("last at: %v %v", at, err)
+	}
+	// Deactivated checkpoints still count for the cooldown.
+	s.db.Model(&dao.ContextCheckpoint{}).Update("active", false)
+	if at2, _ := s.LastContextCheckpointAt("bot", "sess"); !at2.Equal(at) {
+		t.Fatalf("deactivated checkpoint should still report its time: %v vs %v", at2, at)
+	}
+	if at3, _ := s.LastContextCheckpointAt("bot", "other"); !at3.IsZero() {
+		t.Fatal("other session must be independent")
+	}
+}

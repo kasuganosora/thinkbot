@@ -91,6 +91,10 @@ type ContextCheckpointStore interface {
 	// LatestContextCheckpointBoundary returns the boundary of the active
 	// checkpoint for the session (0 when none).
 	LatestContextCheckpointBoundary(botID, sessionID string) (uint64, error)
+	// LastContextCheckpointAt returns when the newest checkpoint of the
+	// session (active or not) was created; zero time when none. Used to make
+	// the cooldown survive restarts.
+	LastContextCheckpointAt(botID, sessionID string) (time.Time, error)
 	// SaveContextCheckpoint stores a new active checkpoint.
 	SaveContextCheckpoint(cp ContextCheckpoint) error
 }
@@ -104,7 +108,9 @@ type SelfCompactConfig struct {
 	// leading history messages produced by LLMConfig.MessageBuilder for msg
 	// (0 for synthetic entries such as an injected checkpoint summary).
 	HistoryMessageIDs func(msg core.Message) []uint64
-	// Cooldown between two compactions of the same session (0 → 10min).
+	// Cooldown between two compactions of the same session (0 → 10min). For
+	// sessions with a Store it is also derived from the newest checkpoint's
+	// created_at, so it survives restarts.
 	Cooldown time.Duration
 	// DefaultKeepRecent messages kept verbatim when the model omits keep_recent (0 → 6).
 	DefaultKeepRecent int
@@ -421,6 +427,26 @@ func (s *LLMStage) summaryCompactor(key string) *llm.Compactor {
 	return v.(*llm.Compactor)
 }
 
+// cooldownRemaining combines the in-memory cooldown (all channels) with the
+// newest persisted checkpoint (channels with chat history), so a restart does
+// not reset it. Store errors fail open to the in-memory value.
+func (s *LLMStage) cooldownRemaining(cfg *SelfCompactConfig, turn selfCompactTurn, now time.Time) (time.Duration, string) {
+	cd := cfg.cooldown()
+	remaining := s.selfCompactCD.remaining(turn.cooldownKey, cd, now)
+	source := "memory"
+	if cfg.Store != nil && turn.chatSessionID != "" {
+		last, err := cfg.Store.LastContextCheckpointAt(turn.botID, turn.chatSessionID)
+		if err != nil {
+			s.logger.Warnw("context_compact: load last checkpoint time failed", "err", err, "chat_session", turn.chatSessionID)
+		} else if !last.IsZero() {
+			if r := cd - now.Sub(last); r > remaining {
+				remaining, source = r, "checkpoint"
+			}
+		}
+	}
+	return remaining, source
+}
+
 func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactConfig, turn selfCompactTurn, compactorKey string, input any) (any, error) {
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
 	args, err := parseCompactContextArgs(input, cfg.keepDefault())
@@ -443,8 +469,8 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		return nil, errors.New("compact_context: context was already compacted in this turn; do not call it again this turn")
 	}
 	now := time.Now()
-	if r := s.selfCompactCD.remaining(turn.cooldownKey, cfg.cooldown(), now); r > 0 {
-		logger.Infow("context_compact", append(baseFields, "status", "cooldown", "remaining", r.Round(time.Second).String())...)
+	if r, src := s.cooldownRemaining(cfg, turn, now); r > 0 {
+		logger.Infow("context_compact", append(baseFields, "status", "cooldown", "remaining", r.Round(time.Second).String(), "cooldown_source", src)...)
 		return nil, fmt.Errorf("compact_context: cooling down — this conversation was compacted recently; try again in %s (only if really needed)", r.Round(time.Second))
 	}
 
