@@ -1706,8 +1706,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if replyText == "" {
 			return nil
 		}
+		// 同时落库本轮工具调用（与 Web 相同的 tool_calls 结构），使 Telegram 轮次可审计
+		// （此前只存回复文本，compact_context 等工具的完整参数无从追溯）。
+		toolCallsJSON := ""
+		if v, ok := env.Get("llm.result"); ok {
+			if r, ok := v.(*llm.GenerateResult); ok {
+				toolCallsJSON = toolCallsJSONFromResult(r)
+			}
+		}
 		if err := s.chatHistory.UpsertAssistantByTrace(
-			env.Message.BotID, sid, replyText, env.Message.TraceID, "", "", sid, false,
+			env.Message.BotID, sid, replyText, env.Message.TraceID, toolCallsJSON, "", sid, false,
 		); err != nil {
 			s.logger.Warnw("outbound chat history save assistant failed", "err", err, "session", sid)
 		}
