@@ -36,8 +36,9 @@ import (
 //     is stored; history loading then yields summary + rows after the boundary.
 //     Raw rows are never deleted, so this is reversible and auditable.
 //
-// The summary reuses the per-session llm.Compactor (same prompt/template and
-// incremental previous-summary anchor as automatic compaction).
+// The summary uses a dedicated faithfulness-first prompt/template
+// (llm.SelfCompactSystemPrompt); an applied checkpoint in the head is the
+// previous anchor.
 // ============================================================================
 
 // CompactContextToolName is the tool name exposed to the model.
@@ -379,7 +380,7 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	sumCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()
 	compactor := s.summaryCompactor(compactorKey)
-	summary, err := compactor.SummarizeForSelfCompact(sumCtx, s.provider, s.config.Model, head, args.Focus)
+	summary, err := compactor.SummarizeForSelfCompact(sumCtx, s.provider, s.config.Model, head, llm.SelfCompactOptions{Focus: args.Focus})
 	if err != nil {
 		logger.Warnw("context_compact",
 			"tool", CompactContextToolName, "status", "error", "stage", "summarize",
