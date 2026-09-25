@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -149,6 +150,69 @@ func TestCompactContext_TruncatedSummaryLeavesContext(t *testing.T) {
 	}
 	if lc.Compacted() || len(store.saved) != 0 {
 		t.Fatal("truncated summary must not be applied or persisted")
+	}
+}
+
+// --- cooldown ---------------------------------------------------------------
+
+func TestCompactContext_CooldownInMemory(t *testing.T) {
+	p := &selfCompactSummaryProvider{text: "S"}
+	s := newSelfCompactStage(p, &SelfCompactConfig{Cooldown: 5 * time.Minute})
+	env := webEnv("sess-1")
+	run := func() error {
+		ctx, _ := execCtxWith(longHistory(20))
+		_, err := s.newCompactContextTool(env, nil).Execute(ctx, map[string]any{})
+		return err
+	}
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	err := run()
+	if err == nil || !strings.Contains(err.Error(), "cooling down") {
+		t.Fatalf("second compaction within cooldown: %v", err)
+	}
+	if p.calls != 1 {
+		t.Fatalf("cooldown must refuse before summarizing, calls=%d", p.calls)
+	}
+	// Just inside the window → still cooling down; just past it → allowed.
+	s.selfCompactCD.mark("chat:sess-1", time.Now().Add(-4*time.Minute))
+	if err := run(); err == nil {
+		t.Fatal("4min < 5min cooldown should still refuse")
+	}
+	s.selfCompactCD.mark("chat:sess-1", time.Now().Add(-6*time.Minute))
+	if err := run(); err != nil {
+		t.Fatalf("after cooldown: %v", err)
+	}
+}
+
+func TestCompactContext_CooldownSurvivesRestart(t *testing.T) {
+	store := &memCheckpointStore{}
+	store.setLastAt("sess-1", time.Now().Add(-2*time.Minute)) // compacted before the restart
+	// Fresh stage = empty in-memory cooldown (process restarted).
+	p := &selfCompactSummaryProvider{text: "S"}
+	s := newSelfCompactStage(p, &SelfCompactConfig{Store: store})
+	ctx, lc := execCtxWith(longHistory(20))
+	_, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx, map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "cooling down") {
+		t.Fatalf("persisted checkpoint must keep the cooldown after restart: %v", err)
+	}
+	if p.calls != 0 || lc.Compacted() {
+		t.Fatal("must refuse before summarizing")
+	}
+	// Old checkpoint → no cooldown.
+	store.setLastAt("sess-1", time.Now().Add(-time.Hour))
+	ctx2, _ := execCtxWith(longHistory(20))
+	if _, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx2, map[string]any{}); err != nil {
+		t.Fatalf("old checkpoint should not cool down: %v", err)
+	}
+}
+
+func TestCompactContext_CooldownStoreErrorFailsOpen(t *testing.T) {
+	store := &memCheckpointStore{lastErr: errors.New("db down")}
+	s := newSelfCompactStage(&selfCompactSummaryProvider{text: "S"}, &SelfCompactConfig{Store: store})
+	ctx, _ := execCtxWith(longHistory(20))
+	if _, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx, map[string]any{}); err != nil {
+		t.Fatalf("store error must fall back to the in-memory cooldown: %v", err)
 	}
 }
 
