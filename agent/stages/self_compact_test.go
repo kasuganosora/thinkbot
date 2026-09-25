@@ -60,7 +60,7 @@ func (m *memCheckpointStore) SaveContextCheckpoint(cp ContextCheckpoint) error {
 // longHistory returns n alternating user/assistant messages with ~tokens each.
 func longHistory(n int) []llm.Message {
 	var out []llm.Message
-	body := strings.Repeat("some detailed discussion about the project ", 40)
+	body := strings.Repeat("some detailed discussion about the project ", 80)
 	for i := 0; i < n; i++ {
 		if i%2 == 0 {
 			out = append(out, llm.UserMessage(fmt.Sprintf("u%d %s", i, body)))

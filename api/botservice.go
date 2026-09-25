@@ -906,10 +906,15 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 	return defaultLLMHardTimeout
 }
 
-// selfCompactConfig 构造 compact_context（bot 自主上下文压缩）工具配置。
-// 可用 agent.self_compact.enabled=false 关闭；agent.self_compact.cooldown（秒）
-// 覆盖默认 10 分钟冷却。均为 bot 启动时读取。
-func (s *BotService) selfCompactConfig() *stages.SelfCompactConfig {
+// selfCompactConfig 构造 compact_context（bot 自主上下文压缩）工具配置。均为 bot 启动时读取：
+//   - agent.self_compact.enabled=false 关闭；
+//   - agent.self_compact.cooldown（秒）覆盖默认 10 分钟冷却；
+//   - agent.self_compact.min_tokens / min_messages / min_savings_tokens / min_savings_ratio：
+//     收益门槛（默认 8000 / 12 / 4000 / 0.3），不划算时直接 no-op，不调用摘要模型；
+//   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 4096；摘要长度主要由提示词目标约束），被截断即作废；
+//   - agent.self_compact.summarizer：main（默认）| light，light 使用 bot 的低成本模型（未配置则回退 main）；
+//   - agent.self_compact.reasoning_effort：透传给摘要调用（默认空=服务商默认；GLM 等对参数严格，需实测后再开）。
+func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle) *stages.SelfCompactConfig {
 	if !s.store.GetBool("agent.self_compact.enabled", true) {
 		return nil
 	}
@@ -921,6 +926,17 @@ func (s *BotService) selfCompactConfig() *stages.SelfCompactConfig {
 	}
 	if secs := s.store.GetInt("agent.self_compact.cooldown", 0); secs > 0 {
 		cfg.Cooldown = time.Duration(secs) * time.Second
+	}
+	cfg.MinTokens = s.store.GetInt("agent.self_compact.min_tokens", 0)
+	cfg.MinMessages = s.store.GetInt("agent.self_compact.min_messages", 0)
+	cfg.MinSavingsTokens = s.store.GetInt("agent.self_compact.min_savings_tokens", 0)
+	cfg.MinSavingsRatio = s.store.GetFloat64("agent.self_compact.min_savings_ratio", 0)
+	cfg.SummaryMaxTokens = s.store.GetInt("agent.self_compact.summary_max_tokens", 0)
+	cfg.SummaryReasoningEffort = strings.TrimSpace(s.store.GetString("agent.self_compact.reasoning_effort", ""))
+	if strings.EqualFold(strings.TrimSpace(s.store.GetString("agent.self_compact.summarizer", "main")), "light") &&
+		bundle != nil && bundle.Light != nil {
+		cfg.SummaryProvider = bundle.Light
+		cfg.SummaryModel = llm.ChatModel(bundle.LightDef.Model)
 	}
 	return cfg
 }
@@ -1366,7 +1382,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// 自主上下文压缩工具 compact_context：bot 可自行把旧上下文折叠为摘要。
 			// 有持久化历史的会话（web / telegram / 工作流续跑）写检查点，后续轮次
 			// 加载「摘要 + 边界后的消息」；原始 chat_messages 不删除（可回滚）。
-			SelfCompact: s.selfCompactConfig(),
+			SelfCompact: s.selfCompactConfig(bundle),
 		},
 		s.tp,
 		s.logger,
