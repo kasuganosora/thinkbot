@@ -572,6 +572,10 @@ type LLMConfig struct {
 	//   - 纯文本无标签 → send:true 发全文。
 	// 既防泄漏又不吞真实回复，仅对显式开启的 bot 生效。
 	RequireReplyControl bool
+
+	// SelfCompact 可选：向模型暴露 compact_context 工具，让 bot 自主压缩自身上下文
+	// （旧消息 → 结构化摘要，保留最近 N 条原文）。nil = 不暴露。见 self_compact.go。
+	SelfCompact *SelfCompactConfig
 }
 
 // ============================================================================
@@ -585,6 +589,11 @@ type LLMStage struct {
 	// 持久化摘要状态（previousSummary 增量更新），故以 sid 为 key 惰性创建；
 	// sync.Map 免锁，生命周期与 bot 进程同寿（并发会话数有界，无泄漏风险）。
 	compactors sync.Map
+
+	// selfCompactors 自动压缩关闭时 compact_context 使用的按会话摘要器（保留增量锚点）。
+	selfCompactors sync.Map
+	// selfCompactCD compact_context 的按会话冷却记录。
+	selfCompactCD selfCompactCooldowns
 
 	// 运行时配置源：非 nil 时每次编排现取，使系统配置页修改无需重启 Bot。
 	compactionSrc  func() *llm.CompactionConfig
@@ -823,6 +832,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 反应/点赞同样 awareness-only：软 prompt 挡不住 function calling，必须在这里卸工具。
 	if lurkMode || core.IsReactionAck(&env.Message) {
 		tools = nil
+	}
+	// 自主上下文压缩工具（compact_context）：按轮构造，闭包捕获本轮会话信息。
+	// 复制切片再追加，避免写入 ToolResolver/静态 Tools 的共享底层数组。
+	if s.shouldOfferSelfCompact(env, tools) {
+		withCompact := make([]llm.Tool, 0, len(tools)+1)
+		withCompact = append(withCompact, tools...)
+		tools = append(withCompact, s.newCompactContextTool(env, messages))
 	}
 
 	// 构建参数
