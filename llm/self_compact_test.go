@@ -186,11 +186,14 @@ func TestRenderMessagesForSummary_IncludesToolsAndClips(t *testing.T) {
 }
 
 type summaryFakeProvider struct {
-	mu     sync.Mutex
-	prompt string
-	system string
-	text   string
-	err    error
+	mu        sync.Mutex
+	prompt    string
+	system    string
+	maxTokens int
+	effort    string
+	text      string
+	finish    FinishReason
+	err       error
 }
 
 func (p *summaryFakeProvider) Name() string { return "fake" }
@@ -201,49 +204,117 @@ func (p *summaryFakeProvider) DoGenerate(ctx context.Context, params GeneratePar
 	if len(params.Messages) > 0 {
 		p.prompt = TextFromParts(params.Messages[0].Content)
 	}
+	p.maxTokens = 0
+	if params.MaxTokens != nil {
+		p.maxTokens = *params.MaxTokens
+	}
+	p.effort = ""
+	if params.ReasoningEffort != nil {
+		p.effort = *params.ReasoningEffort
+	}
 	if p.err != nil {
 		return nil, p.err
 	}
-	return &GenerateResult{Text: p.text}, nil
+	return &GenerateResult{Text: p.text, FinishReason: p.finish}, nil
 }
 func (p *summaryFakeProvider) DoStream(ctx context.Context, params GenerateParams) (*StreamResult, error) {
 	return nil, errors.New("not implemented")
 }
 
-func TestSummarizeForSelfCompact_FocusAndIncrementalAnchor(t *testing.T) {
+func TestSummarizeForSelfCompact_FaithfulPromptAndHints(t *testing.T) {
 	c := NewCompactor(DefaultCompactionConfig())
-	p := &summaryFakeProvider{text: "## Goal\n- first"}
+	p := &summaryFakeProvider{text: "## Topics\n- first"}
 	head := selfCompactConvo()[:4]
-	sum, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, "keep ticket #42")
+	sum, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, SelfCompactOptions{
+		Focus: "keep ticket #42", MaxOutputTokens: 1234, TargetWords: 300, ReasoningEffort: "low",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum != "## Goal\n- first" || c.PreviousSummary() != sum {
-		t.Fatalf("summary/anchor mismatch: %q / %q", sum, c.PreviousSummary())
+	if sum != "## Topics\n- first" {
+		t.Fatalf("summary=%q", sum)
 	}
-	if p.system != CompactionSystemPrompt {
-		t.Error("summarizer must reuse CompactionSystemPrompt")
+	if p.system != SelfCompactSystemPrompt {
+		t.Error("self compaction must use its own faithfulness-first system prompt")
 	}
-	for _, want := range []string{"keep ticket #42", "<must-preserve>", `<tool_result name="exec">`, "Create a new anchored summary"} {
+	for _, want := range []string{
+		"<assistant-hints>\nkeep ticket #42", "<transcript>", `<tool_call name="exec">`, `<tool_result name="exec">`,
+		"## Unverified / uncertain", "## Identifiers", "at most about 300 words", "Write the note for the transcript.",
+	} {
 		if !strings.Contains(p.prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	// Second call updates the anchor incrementally.
-	p.text = "## Goal\n- second"
-	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, ""); err != nil {
+	if strings.Contains(p.prompt, "<previous-note>") || strings.Contains(p.prompt, "## Relevant Files") {
+		t.Error("no previous note expected, and the coding template must not be used")
+	}
+	for _, rule := range []string{"never", "NOT evidence", "suggestion stays a suggestion", "Never complete, prefix"} {
+		if !strings.Contains(SelfCompactSystemPrompt, rule) {
+			t.Errorf("system prompt lost rule %q", rule)
+		}
+	}
+	if p.maxTokens != 1234 || p.effort != "low" {
+		t.Errorf("options not passed through: max=%d effort=%q", p.maxTokens, p.effort)
+	}
+	// The in-memory anchor of the automatic compactor is neither read nor written.
+	if c.PreviousSummary() != "" {
+		t.Error("self compaction must not write the automatic compactor anchor")
+	}
+	// Defaults: SummaryMaxTokens cap, no reasoning effort.
+	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, SelfCompactOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(p.prompt, "<previous-summary>") || !strings.Contains(p.prompt, "- first") {
-		t.Error("second summary should update the previous anchor")
+	if p.maxTokens != DefaultCompactionConfig().SummaryMaxTokens || p.effort != "" || strings.Contains(p.prompt, "<assistant-hints>") {
+		t.Errorf("defaults wrong: max=%d effort=%q", p.maxTokens, p.effort)
 	}
-	// Empty output is an error and keeps the anchor.
-	p.text = "   "
-	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, ""); err == nil {
-		t.Error("empty summary must be an error")
+}
+
+func TestSummarizeForSelfCompact_PreviousNoteFromAppliedCheckpoint(t *testing.T) {
+	c := NewCompactor(DefaultCompactionConfig())
+	p := &summaryFakeProvider{text: "note"}
+	head := append([]Message{ConversationSummaryMessage("## Topics\n- older topic")}, selfCompactConvo()[:4]...)
+	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, SelfCompactOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	if c.PreviousSummary() != "## Goal\n- second" {
-		t.Error("failed summary must not clobber the anchor")
+	if !strings.Contains(p.prompt, "<previous-note>\n## Topics\n- older topic\n</previous-note>") {
+		t.Errorf("leading checkpoint summary should become the previous note:\n%s", p.prompt)
+	}
+	if strings.Contains(p.prompt, ConversationSummaryHeader) {
+		t.Error("summary frame must not be rendered into the transcript")
+	}
+	if !strings.Contains(p.prompt, "merges the previous note") {
+		t.Error("merge instruction missing")
+	}
+}
+
+func TestSummarizeForSelfCompact_RejectsTruncatedAndEmpty(t *testing.T) {
+	c := NewCompactor(DefaultCompactionConfig())
+	head := selfCompactConvo()[:4]
+	p := &summaryFakeProvider{text: "## Topics\n- cut in the mid", finish: FinishReasonLength}
+	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, SelfCompactOptions{}); !errors.Is(err, ErrSelfCompactSummaryTruncated) {
+		t.Fatalf("truncated summary must be rejected, got %v", err)
+	}
+	p = &summaryFakeProvider{text: "   "}
+	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, SelfCompactOptions{}); err == nil {
+		t.Fatal("empty summary must be an error")
+	}
+}
+
+func TestRenderToolInput_KeepsEveryArgument(t *testing.T) {
+	// json.Marshal sorts keys: "content" comes before "path". Clipping the
+	// whole JSON used to drop the path; per-value clipping keeps it.
+	in := map[string]any{"content": strings.Repeat("x", 5000), "path": "llm/orchestrate.go"}
+	out := renderToolInput(in, 100)
+	if !strings.Contains(out, `"path": "llm/orchestrate.go"`) || !strings.Contains(out, "(truncated)") {
+		t.Fatalf("render lost the path or did not clip: %q", out)
+	}
+	// JSON-string input is parsed the same way.
+	out = renderToolInput(`{"content":"`+strings.Repeat("y", 3000)+`","path":"agent/stages/llmroute.go"}`, 100)
+	if !strings.Contains(out, "agent/stages/llmroute.go") {
+		t.Fatalf("string input lost the path: %q", out)
+	}
+	if got := renderToolInput("not json at all", 5); got != "not j…(truncated)" {
+		t.Fatalf("raw string clip: %q", got)
 	}
 }
 
