@@ -672,6 +672,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 		s.logger.Warnw("failed to load context for workflow continuation", "err", err)
 		history = nil
 	}
+	history = s.chatHistory.ApplyContextCheckpoint(botID, sessionID, history)
 
 	done := 0
 	for _, n := range wf.Nodes {
@@ -905,6 +906,25 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 	return defaultLLMHardTimeout
 }
 
+// selfCompactConfig 构造 compact_context（bot 自主上下文压缩）工具配置。
+// 可用 agent.self_compact.enabled=false 关闭；agent.self_compact.cooldown（秒）
+// 覆盖默认 10 分钟冷却。均为 bot 启动时读取。
+func (s *BotService) selfCompactConfig() *stages.SelfCompactConfig {
+	if !s.store.GetBool("agent.self_compact.enabled", true) {
+		return nil
+	}
+	cfg := &stages.SelfCompactConfig{
+		HistoryMessageIDs: chatHistoryMessageIDs,
+	}
+	if s.chatHistory != nil {
+		cfg.Store = s.chatHistory
+	}
+	if secs := s.store.GetInt("agent.self_compact.cooldown", 0); secs > 0 {
+		cfg.Cooldown = time.Duration(secs) * time.Second
+	}
+	return cfg
+}
+
 // compactionConfigFromConfig 将配置模块的会话压缩配置转换为 llm 包的 CompactionConfig。
 // 两包字段一一对齐；配置模块的 CompactionConfig 定义在 config 包内以避免 config↔llm
 // 循环依赖（与 ToolOutputConfig 同一手法）。
@@ -1097,19 +1117,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// MessageBuilder：从 Message.Metadata["chat_history"] 加载历史上下文
 	messageBuilder := func(msg core.Message) []llm.Message {
-		var messages []llm.Message
-		if history, ok := msg.Metadata["chat_history"]; ok {
-			if msgs, ok := history.([]dao.ChatMessage); ok {
-				for _, m := range msgs {
-					switch m.Role {
-					case dao.ChatRoleUser:
-						messages = append(messages, llm.UserMessage(m.Content))
-					case dao.ChatRoleAssistant:
-						messages = append(messages, llm.AssistantMessage(m.Content))
-					}
-				}
-			}
-		}
+		// 历史（含上下文检查点生成的摘要条目，见 context_checkpoint.go）。
+		// 与 compact_context 的边界映射共用 chatHistoryToLLM，保证逐条对齐。
+		messages, _ := chatHistoryToLLM(historyFromMetadata(msg))
 		// 心跳等触发源：Text 故意留空（防 L0 污染），真正内容在 InjectContext。
 		// 必须 fallback 到它，否则会拼出空 user message → GLM 400 拒收，心跳静默失败。
 		content := msg.Text
@@ -1353,6 +1363,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// 结构化摘要替代旧消息，按会话隔离、跨轮持久。
 			// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
 			Compaction: compactionConfigFromConfig(builder.GetCompactionConfig()),
+			// 自主上下文压缩工具 compact_context：bot 可自行把旧上下文折叠为摘要。
+			// 有持久化历史的会话（web / telegram / 工作流续跑）写检查点，后续轮次
+			// 加载「摘要 + 边界后的消息」；原始 chat_messages 不删除（可回滚）。
+			SelfCompact: s.selfCompactConfig(),
 		},
 		s.tp,
 		s.logger,
@@ -1607,8 +1621,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
 		if err != nil {
 			s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
-		} else if len(history) > 0 {
-			env.Message.Metadata["chat_history"] = history
+		} else {
+			// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
+			history = s.chatHistory.ApplyContextCheckpoint(env.Message.BotID, sid, history)
+			if len(history) > 0 {
+				env.Message.Metadata["chat_history"] = history
+			}
 		}
 
 		// 异步落库当前用户消息（顺序：先加载再保存，避免当前消息进入本轮历史造成重复）
