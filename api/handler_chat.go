@@ -411,7 +411,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		history = nil
 	} else {
 		// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
-		history = s.chatHistory.ApplyContextCheckpoint(req.BotID, req.SessionID, history)
+		history = s.chatHistory.ApplyContextCheckpoint(traceID, req.BotID, req.SessionID, history)
 	}
 
 	// 保存用户消息到 DB（异步，不阻塞响应）
