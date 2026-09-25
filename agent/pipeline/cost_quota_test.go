@@ -387,26 +387,34 @@ func TestCostQuotaStateResetBotIsScoped(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRowCostPrefersStoredCost(t *testing.T) {
-	// 有 cost_total → 原样采用，即使当前单价算出来不同（改单价不应篡改历史）
-	row := costRestoreRow{Model: "m1", Input: 1000, Output: 1000, Cost: 7.5}
-	if got := rowCost(row, nil); got != 7.5 {
-		t.Errorf("rowCost with stored = %v, want 7.5", got)
-	}
-
-	// 无 cost_total（存量行） → 按当前单价回算
-	row2 := costRestoreRow{Model: "m1", Input: 1_000_000, Output: 0}
 	priceFor := func(id string) (llm.ModelPrice, bool) {
 		if id != "m1" {
 			return llm.ModelPrice{}, false
 		}
 		return llm.ModelPrice{InputPer1M: 2, OutputPer1M: 8, Currency: "CNY"}, true
 	}
+
+	// 只有已落库花费：原样采用，不按当前单价重算（改单价不应篡改历史）
+	row := costRestoreRow{Model: "m1", Cost: 7.5}
+	if got := rowCost(row, priceFor); got != 7.5 {
+		t.Errorf("rowCost with stored = %v, want 7.5", got)
+	}
+
+	// 无 cost_total（存量行） → 按当前单价回算
+	row2 := costRestoreRow{Model: "m1", Input: 1_000_000, Output: 0}
 	if got := rowCost(row2, priceFor); got != 2 {
 		t.Errorf("rowCost fallback = %v, want 2 (1M input × ¥2/1M)", got)
 	}
 
+	// 混合行：已落库 0.2 + 未落库 1M 输入（¥2）= 2.2。
+	// 若「SUM>0 就跳过回算」，这里会得到 0.2，重启后墙比看板少算。
+	row3 := costRestoreRow{Model: "m1", Cost: 0.2, Input: 1_000_000}
+	if got := rowCost(row3, priceFor); got != 2.2 {
+		t.Errorf("rowCost mixed = %v, want 2.2 (stored 0.2 + recomputed 2)", got)
+	}
+
 	// 既无 cost_total 也无单价 → 0（不计费、不限额）
-	if got := rowCost(costRestoreRow{Model: "unknown"}, priceFor); got != 0 {
+	if got := rowCost(costRestoreRow{Model: "unknown", Input: 1_000_000}, priceFor); got != 0 {
 		t.Errorf("rowCost without price = %v, want 0", got)
 	}
 }
