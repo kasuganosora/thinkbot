@@ -305,6 +305,7 @@ func (r *Request) DialWS(cfg WSConfig) (*WSConn, error) {
 
 	conn, resp, err := dialer.DialContext(dialCtx, fullURL, header)
 	if err != nil {
+		err = SanitizeError(err)
 		if wdOwned && wd != nil {
 			wd.Stop(true)
 		}

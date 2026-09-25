@@ -98,10 +98,12 @@ func (r *Request) streamConnect(
 		if wdOwned {
 			wd.Stop(true)
 		}
-		return nil, errs.Wrapf(err, "failed to build %s request", kind)
+		return nil, errs.Wrapf(SanitizeError(err), "failed to build %s request", kind)
 	}
 
-	reqURL := req.URL.String()
+	// Only used for logs/errors: never expose credentials (query tokens,
+	// /bot<token> path segments).
+	reqURL := SanitizeURL(req.URL.String())
 
 	// --- 发送请求（使用零超时客户端）---
 	start := time.Now()
@@ -111,6 +113,7 @@ func (r *Request) streamConnect(
 
 	resp, err := streamClient.Do(req)
 	if err != nil {
+		err = SanitizeError(err)
 		r.ctx = origCtx
 		if wdOwned {
 			wd.Stop(true)
