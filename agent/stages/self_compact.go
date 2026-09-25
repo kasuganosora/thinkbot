@@ -38,24 +38,37 @@ import (
 //
 // The summary uses a dedicated faithfulness-first prompt/template
 // (llm.SelfCompactSystemPrompt); an applied checkpoint in the head is the
-// previous anchor.
+// previous anchor. Calls that would not pay for themselves are refused before
+// the summarizer runs (see selfCompactBenefit).
 // ============================================================================
 
 // CompactContextToolName is the tool name exposed to the model.
 const CompactContextToolName = "compact_context"
 
 // Self-compaction defaults (overridable via SelfCompactConfig).
+//
+// Thresholds were raised after the first production call (2026-09-26): a
+// 21-message / ~3k-token Telegram chat was compacted to save ~1.3k tokens,
+// while the summarizer call alone used 3.3k input + 3.3k output tokens (about
+// half the cost of the whole reply turn). Compaction must now remove a
+// substantial absolute and relative amount of context.
 const (
-	defaultSelfCompactKeepRecent = 6
-	minSelfCompactKeepRecent     = 2
-	maxSelfCompactKeepRecent     = 40
-	defaultSelfCompactCooldown   = 10 * time.Minute
-	defaultSelfCompactMinMsgs    = 8
-	defaultSelfCompactMinTokens  = 2000
-	minSelfCompactHeadMsgs       = 3
-	defaultSelfCompactTimeout    = 3 * time.Minute
-	maxSelfCompactFocusRunes     = 1000
-	selfCompactPreviewRunes      = 600
+	defaultSelfCompactKeepRecent       = 6
+	minSelfCompactKeepRecent           = 2
+	maxSelfCompactKeepRecent           = 40
+	defaultSelfCompactCooldown         = 10 * time.Minute
+	defaultSelfCompactMinMsgs          = 12
+	defaultSelfCompactMinTokens        = 8000
+	defaultSelfCompactMinSavings       = 4000
+	defaultSelfCompactMinSavingsRatio  = 0.3
+	defaultSelfCompactSummaryMaxTokens = 4096
+	minSelfCompactSummaryTokens        = 300
+	maxSelfCompactSummaryTokens        = 1000
+	selfCompactPromptOverheadTokens    = 1200 // system prompt + template + hints
+	minSelfCompactHeadMsgs             = 3
+	defaultSelfCompactTimeout          = 3 * time.Minute
+	maxSelfCompactFocusRunes           = 1000
+	selfCompactPreviewRunes            = 600
 )
 
 // ContextCheckpoint is a persisted compaction boundary for one chat session:
@@ -95,9 +108,25 @@ type SelfCompactConfig struct {
 	Cooldown time.Duration
 	// DefaultKeepRecent messages kept verbatim when the model omits keep_recent (0 → 6).
 	DefaultKeepRecent int
-	// MinMessages / MinTokens: below either threshold the call is a no-op.
+	// MinMessages / MinTokens: below either threshold the call is a no-op
+	// (0 → 12 messages / 8000 estimated tokens).
 	MinMessages int
 	MinTokens   int
+	// MinSavingsTokens / MinSavingsRatio: the estimated saving (compacted head
+	// minus expected summary) must reach both the absolute amount and the
+	// fraction of the current message list (0 → 4000 tokens / 0.3).
+	MinSavingsTokens int
+	MinSavingsRatio  float64
+	// SummaryMaxTokens caps the summarizer response incl. reasoning (0 → 4096;
+	// the summary length itself is steered by the prompt target, the cap only
+	// bounds runaway output — a cut-off summary is rejected).
+	SummaryMaxTokens int
+	// SummaryReasoningEffort is passed to the summarizer when set (e.g. "low").
+	SummaryReasoningEffort string
+	// SummaryProvider / SummaryModel override the summarizer (e.g. the bot's
+	// light model); nil → the stage's own provider/model.
+	SummaryProvider llm.Provider
+	SummaryModel    *llm.Model
 	// SummaryTimeout bounds the summarizer LLM call (0 → 3min).
 	SummaryTimeout time.Duration
 }
@@ -130,11 +159,70 @@ func (c *SelfCompactConfig) minTokens() int {
 	return defaultSelfCompactMinTokens
 }
 
+func (c *SelfCompactConfig) minSavings() int {
+	if c.MinSavingsTokens > 0 {
+		return c.MinSavingsTokens
+	}
+	return defaultSelfCompactMinSavings
+}
+
+func (c *SelfCompactConfig) minSavingsRatio() float64 {
+	if c.MinSavingsRatio > 0 {
+		return c.MinSavingsRatio
+	}
+	return defaultSelfCompactMinSavingsRatio
+}
+
+func (c *SelfCompactConfig) summaryMaxTokens() int {
+	if c.SummaryMaxTokens > 0 {
+		return c.SummaryMaxTokens
+	}
+	return defaultSelfCompactSummaryMaxTokens
+}
+
 func (c *SelfCompactConfig) timeout() time.Duration {
 	if c.SummaryTimeout > 0 {
 		return c.SummaryTimeout
 	}
 	return defaultSelfCompactTimeout
+}
+
+// selfCompactBenefit estimates whether summarizing head pays off.
+type selfCompactBenefit struct {
+	headTokens    int // estimated tokens of the compacted head
+	summaryTokens int // expected summary size
+	savings       int // headTokens - summaryTokens
+	costInput     int // expected summarizer input tokens
+	costOutputCap int // summarizer output cap (incl. reasoning)
+	targetWords   int // soft length target given to the summarizer
+}
+
+func estimateSelfCompactBenefit(headTokens int, cfg *SelfCompactConfig) selfCompactBenefit {
+	sum := headTokens / 5
+	if sum < minSelfCompactSummaryTokens {
+		sum = minSelfCompactSummaryTokens
+	}
+	if sum > maxSelfCompactSummaryTokens {
+		sum = maxSelfCompactSummaryTokens
+	}
+	return selfCompactBenefit{
+		headTokens:    headTokens,
+		summaryTokens: sum,
+		savings:       headTokens - sum,
+		costInput:     headTokens + selfCompactPromptOverheadTokens,
+		costOutputCap: cfg.summaryMaxTokens(),
+		targetWords:   sum * 3 / 4,
+	}
+}
+
+// refusal returns a no-op reason when the compaction is not worth its cost.
+func (b selfCompactBenefit) refusal(tokensBefore int, cfg *SelfCompactConfig) string {
+	minRatio := cfg.minSavingsRatio()
+	if b.savings >= cfg.minSavings() && float64(b.savings) >= minRatio*float64(tokensBefore) {
+		return ""
+	}
+	return fmt.Sprintf("not worth it: compacting ~%d tokens would save only ~%d tokens (need >= %d and >= %.0f%% of the current ~%d), while the summary call itself costs ~%d input + up to %d output tokens",
+		b.headTokens, b.savings, cfg.minSavings(), minRatio*100, tokensBefore, b.costInput, b.costOutputCap)
 }
 
 // selfCompactCooldowns tracks the last successful compaction per session key.
@@ -164,7 +252,7 @@ USE it when:
 - the topic clearly switches and the old back-and-forth is no longer relevant.
 
 DO NOT use it when:
-- the chat is short (it will simply no-op);
+- the chat is short or the saving would be small (it refuses with a no-op: compaction must remove several thousand tokens to pay for the summary call);
 - you are in the middle of a multi-step task whose exact intermediate outputs you still need (finish or reach a checkpoint first);
 - you already compacted recently (limited to once per turn with a cooldown) — never call it repeatedly.
 
@@ -339,6 +427,13 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	if err != nil {
 		return nil, err
 	}
+	// Full arguments go into every context_compact line (the generic
+	// tool_call/tool_result lines only carry a truncated input preview).
+	baseFields := []any{
+		"tool", CompactContextToolName,
+		"bot_id", turn.botID, "chat_session", turn.chatSessionID, "source", turn.source,
+		"keep_recent", args.KeepRecent, "focus", args.Focus,
+	}
 
 	live := llm.LiveContextFromContext(ctx)
 	if live == nil {
@@ -349,16 +444,16 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	}
 	now := time.Now()
 	if r := s.selfCompactCD.remaining(turn.cooldownKey, cfg.cooldown(), now); r > 0 {
+		logger.Infow("context_compact", append(baseFields, "status", "cooldown", "remaining", r.Round(time.Second).String())...)
 		return nil, fmt.Errorf("compact_context: cooling down — this conversation was compacted recently; try again in %s (only if really needed)", r.Round(time.Second))
 	}
 
 	snapshot := live.Snapshot()
 	tokensBefore := llm.EstimateMessagesTokens(snapshot)
-	noop := func(reason string) (any, error) {
-		logger.Infow("context_compact",
-			"tool", CompactContextToolName, "status", "noop", "reason", reason,
-			"bot_id", turn.botID, "chat_session", turn.chatSessionID, "source", turn.source,
+	noop := func(reason string, extra ...any) (any, error) {
+		fields := append(append([]any{}, baseFields...), "status", "noop", "reason", reason,
 			"messages", len(snapshot), "est_tokens", tokensBefore)
+		logger.Infow("context_compact", append(fields, extra...)...)
 		return map[string]any{
 			"status":     "noop",
 			"reason":     reason,
@@ -376,18 +471,44 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		return noop(fmt.Sprintf("not enough older messages to compact safely while keeping the most recent %d verbatim", args.KeepRecent))
 	}
 	head := snapshot[:boundary]
+	benefit := estimateSelfCompactBenefit(llm.EstimateMessagesTokens(head), cfg)
+	if reason := benefit.refusal(tokensBefore, cfg); reason != "" {
+		return noop(reason, "est_head_tokens", benefit.headTokens, "est_savings", benefit.savings)
+	}
+
+	provider, model := s.provider, s.config.Model
+	if cfg.SummaryProvider != nil {
+		provider = cfg.SummaryProvider
+		if cfg.SummaryModel != nil {
+			model = cfg.SummaryModel
+		}
+	}
+	modelID := ""
+	if model != nil {
+		modelID = model.ID
+	}
 
 	sumCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()
 	compactor := s.summaryCompactor(compactorKey)
-	summary, err := compactor.SummarizeForSelfCompact(sumCtx, s.provider, s.config.Model, head, llm.SelfCompactOptions{Focus: args.Focus})
+	summary, err := compactor.SummarizeForSelfCompact(sumCtx, provider, model, head, llm.SelfCompactOptions{
+		Focus:           args.Focus,
+		MaxOutputTokens: cfg.summaryMaxTokens(),
+		TargetWords:     benefit.targetWords,
+		ReasoningEffort: cfg.SummaryReasoningEffort,
+	})
 	if err != nil {
-		logger.Warnw("context_compact",
-			"tool", CompactContextToolName, "status", "error", "stage", "summarize",
-			"bot_id", turn.botID, "chat_session", turn.chatSessionID, "err", err)
+		logger.Warnw("context_compact", append(baseFields, "status", "error", "stage", "summarize", "summary_model", modelID, "err", err)...)
 		return nil, fmt.Errorf("compact_context: summarization failed, context left unchanged: %v", err)
 	}
 	summaryMsg := llm.ConversationSummaryMessage(summary)
+	summaryTokens := llm.EstimateMessageTokens(summaryMsg)
+	// The summary must actually be much smaller than what it replaces;
+	// otherwise keep the verbatim history (more faithful, same size).
+	if summaryTokens*5 > benefit.headTokens*4 {
+		return noop(fmt.Sprintf("summary (~%d tokens) is not meaningfully smaller than the %d messages it would replace (~%d tokens); kept them verbatim",
+			summaryTokens, boundary, benefit.headTokens), "summary_model", modelID, "summary_tokens", summaryTokens)
+	}
 	if err := live.ScheduleReplaceHead(boundary, summaryMsg); err != nil {
 		return nil, fmt.Errorf("compact_context: %v", err)
 	}
@@ -395,7 +516,7 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 
 	kept := snapshot[boundary:]
 	messagesAfter := 1 + len(kept)
-	tokensAfter := llm.EstimateMessageTokens(summaryMsg) + llm.EstimateMessagesTokens(kept)
+	tokensAfter := summaryTokens + llm.EstimateMessagesTokens(kept)
 
 	// Persist a checkpoint for later turns (sessions with chat history only).
 	persisted := false
@@ -431,18 +552,19 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 			persistNote = "checkpoint could not be saved; compaction applies to the rest of this turn only"
 		} else {
 			persisted = true
-			persistNote = "later turns will load this summary plus the messages after it"
+			persistNote = "later turns will load this summary plus the messages after it (until it expires or the covered messages scroll out of the history window)"
 		}
 	}
 
-	logger.Infow("context_compact",
-		"tool", CompactContextToolName, "status", "compacted",
-		"bot_id", turn.botID, "chat_session", turn.chatSessionID, "source", turn.source,
+	logger.Infow("context_compact", append(baseFields,
+		"status", "compacted",
 		"messages_before", len(snapshot), "messages_after", messagesAfter,
 		"compacted_messages", boundary, "kept_recent", len(kept),
 		"est_tokens_before", tokensBefore, "est_tokens_after", tokensAfter,
+		"est_head_tokens", benefit.headTokens, "summary_tokens", summaryTokens,
+		"summary_model", modelID,
 		"persisted", persisted, "boundary_message_id", boundaryID,
-		"focus_len", utf8.RuneCountInString(args.Focus), "summary_len", utf8.RuneCountInString(summary))
+		"focus_len", utf8.RuneCountInString(args.Focus), "summary_len", utf8.RuneCountInString(summary))...)
 
 	return map[string]any{
 		"status":             "compacted",
@@ -455,7 +577,7 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		"persisted":          persisted,
 		"persist_note":       persistNote,
 		"summary_preview":    previewRunes(summary, selfCompactPreviewRunes),
-		"note":               "Older context is replaced by the summary from your next step on (token counts are estimates for the message list only, excluding system prompt and tool schemas). Continue the conversation normally; do not call compact_context again this turn.",
+		"note":               "Older context is replaced by the summary from your next step on (token counts are estimates for the message list only, excluding system prompt and tool schemas). The summary may omit or simplify details; when exact wording matters, ask or re-check instead of guessing. Continue the conversation normally; do not call compact_context again this turn.",
 	}, nil
 }
 
