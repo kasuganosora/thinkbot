@@ -108,6 +108,7 @@ thinkbot/
 │   ├── google/     #   Google Gemini
 │   └── grok/       #   xAI Grok
 ├── mcp/            # MCP 协议客户端
+├── notify/         # 外部程序 → bot → 主人通知（POST /api/bots/{id}/notify，token/去重/限流/审计，见 docs/notify.md）
 ├── plugin/         # 空占位目录（仅 .gitkeep，暂无代码）
 ├── sandbox/        # Bot 沙箱工作空间
 ├── scripts/        # 辅助脚本（redeploy.sh 重部署、run_thinkbot.py 守护启动、watch.sh 日志观察）

@@ -1,0 +1,30 @@
+#!/bin/sh
+# smartd -> ThinkBot owner notification.
+#
+# Debian's smartd.conf already uses "-M exec /usr/share/smartmontools/smartd-runner",
+# which runs every script in /etc/smartmontools/run.d/ with the message file as $1.
+# Install: install -o root -g root -m 0755 60thinkbot-notify /etc/smartmontools/run.d/60thinkbot-notify
+#   (run-parts --lsbsysinit: the file name must not contain a dot)
+# Alternatively point smartd at this script directly: "-M exec /etc/smartmontools/run.d/60thinkbot-notify".
+# Test: add "-M test" to the DEVICESCAN line, restart smartd, then remove it again.
+MSGFILE="$1"
+HOST="$(hostname -s)"
+DEV="${SMARTD_DEVICESTRING:-${SMARTD_DEVICE:-unknown}}"
+TYPE="${SMARTD_FAILTYPE:-unknown}"
+
+case "$TYPE" in
+  EmailTest)         LEVEL=info ;;
+  Temperature|Usage) LEVEL=warn ;;
+  *)                 LEVEL=critical ;;  # Health, SelfTest, CurrentPendingSector, OfflineUncorrectableSector, ErrorCount, Failed*...
+esac
+
+TITLE="SMART $TYPE on $DEV"
+{
+  printf 'host: %s\ndevice: %s\ninfo: %s\nfirst seen: %s\n\n' "$HOST" "$DEV" "${SMARTD_DEVICEINFO:--}" "${SMARTD_TFIRST:--}"
+  if [ -n "$SMARTD_FULLMESSAGE" ]; then printf '%s\n' "$SMARTD_FULLMESSAGE"
+  elif [ -n "$MSGFILE" ] && [ -r "$MSGFILE" ]; then cat "$MSGFILE"
+  else printf '%s\n' "${SMARTD_MESSAGE:-}"; fi
+} | /usr/local/sbin/thinkbot-notify \
+  -s "$HOST/smartd" -l "$LEVEL" -t "$TITLE" -b - -k "smartd/$DEV/$TYPE" \
+  || logger -t thinkbot-smartd-hook "notify failed: $TITLE"
+exit 0

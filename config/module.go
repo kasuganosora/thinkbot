@@ -1654,7 +1654,32 @@ func AllMetaSpecs() []MetaSpec {
 	specs = append(specs, MemoryWindowMetaSpecs()...)
 	specs = append(specs, LLMClientMetaSpecs()...)
 	specs = append(specs, CompactionMetaSpecs()...)
+	specs = append(specs, NotifyMetaSpecs()...)
 	return specs
+}
+
+// NotifyMetaSpecs 返回 notify 接口（外部程序 → bot → 主人）配置项的元数据。
+func NotifyMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyNotifyEnabled, Category: "Notify", Description: "notify 接口总开关（默认 true；未创建 token 时所有请求 401）"},
+		{Key: KeyNotifyListenAddr, Category: "Notify", Description: "非空时 notify 路由只挂在该独立监听器上（如 127.0.0.1:8091），主 API 不再暴露；默认空。改后需重启"},
+		{Key: KeyNotifyAllowedCIDRs, Category: "Notify", Description: "允许调用 notify 的来源网段，逗号分隔（默认 loopback + 私网）"},
+		{Key: KeyNotifyTrustedProxies, Category: "Notify", Description: "可信反代网段：仅直连对端在此网段时才采信 X-Forwarded-For/X-Real-IP（默认 loopback + 私网）"},
+		{Key: KeyNotifyDefaultChannel, Category: "Notify", Description: "默认投递渠道（类型或实例名，默认 telegram）。per-bot：bot.<id>.notify.channel"},
+		{Key: KeyNotifyOwnerTarget, Category: "Notify", Description: "主人会话 ID（Telegram 私聊 chat id）；空＝自动取 admin 用户的身份绑定。per-bot：bot.<id>.notify.target"},
+		{Key: KeyNotifyDefaultMode, Category: "Notify", Description: "默认模式 raw | persona（默认 raw）。per-bot：bot.<id>.notify.mode"},
+		{Key: KeyNotifyAllowTargetOverride, Category: "Notify", Description: "是否允许请求体 target 指定任意会话（默认 false）"},
+		{Key: KeyNotifyMaxRequestBytes, Category: "Notify", Description: "请求体字节上限，超出 413（默认 16384）"},
+		{Key: KeyNotifyMaxTitleChars, Category: "Notify", Description: "标题字符上限，超出截断（默认 200）"},
+		{Key: KeyNotifyMaxBodyChars, Category: "Notify", Description: "正文字符上限，超出截断（默认 3000）"},
+		{Key: KeyNotifyRateLimit, Category: "Notify", Description: "info/warn 限流「次数/时长」，按 token+source 计（默认 20/1h）"},
+		{Key: KeyNotifyRateLimitCritical, Category: "Notify", Description: "critical 独立限流预算（默认 60/1h）"},
+		{Key: KeyNotifyDedupWindow, Category: "Notify", Description: "去重窗口（默认 30m，0 关闭）"},
+		{Key: KeyNotifyPersonaTimeout, Category: "Notify", Description: "persona 改写 LLM 超时（默认 45s，失败回落 raw）"},
+		{Key: KeyNotifyPersonaMaxChars, Category: "Notify", Description: "persona 改写输出字符上限（默认 1000）"},
+		{Key: KeyNotifyPersonaMaxTokens, Category: "Notify", Description: "persona 调用 max_tokens 封顶（默认 0＝跟随模型 maxTokens；>0 只能调低）"},
+		{Key: KeyNotifyRecordHistory, Category: "Notify", Description: "投递成功后写入主人会话历史（默认 true）"},
+	}
 }
 
 // GlobalMetaSpecs 仅返回适合在系统设置页面展示的全局配置项。
@@ -1772,5 +1797,27 @@ func DefaultMap() map[string]string {
 		KeyCompactionSummaryMaxTokens:     "0",
 		KeyCompactionToolOutputThreshold:  "500",
 		KeyCompactionAuto:                 "true",
+		// Notify
+		KeyNotifyEnabled:             "true",
+		KeyNotifyListenAddr:          "",
+		KeyNotifyAllowedCIDRs:        DefaultNotifyCIDRs,
+		KeyNotifyTrustedProxies:      DefaultNotifyCIDRs,
+		KeyNotifyDefaultChannel:      "telegram",
+		KeyNotifyOwnerTarget:         "",
+		KeyNotifyDefaultMode:         "raw",
+		KeyNotifyAllowTargetOverride: "false",
+		KeyNotifyMaxRequestBytes:     "16384",
+		KeyNotifyMaxTitleChars:       "200",
+		KeyNotifyMaxBodyChars:        "3000",
+		KeyNotifyRateLimit:           "20/1h",
+		KeyNotifyRateLimitCritical:   "60/1h",
+		KeyNotifyDedupWindow:         "30m",
+		KeyNotifyPersonaTimeout:      "45s",
+		KeyNotifyPersonaMaxChars:     "1000",
+		KeyNotifyPersonaMaxTokens:    "0",
+		KeyNotifyRecordHistory:       "true",
 	}
 }
+
+// DefaultNotifyCIDRs notify.allowed_cidrs / notify.trusted_proxies 的默认值：loopback + 私网。
+const DefaultNotifyCIDRs = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
