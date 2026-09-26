@@ -215,11 +215,12 @@ func New(provider llm.Provider, model string, opts ...Option) *SubAgent {
 		compactor := sa.compactor
 		provider := sa.provider
 		model := sa.model
+		modelMax := sa.maxTokens // subagent output limit = the model's configured maxTokens
 		sa.ctxMgr.summarizeHead = func(ctx context.Context, head []llm.Message) (llm.Message, bool) {
 			if len(head) < compactor.Config().MinMessagesToCompact {
 				return llm.Message{}, false
 			}
-			summary, err := compactor.SummarizeHead(ctx, provider, model, head)
+			summary, err := compactor.SummarizeHead(ctx, provider, model, head, modelMax)
 			if err != nil || summary == "" {
 				return llm.Message{}, false
 			}

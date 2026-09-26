@@ -395,8 +395,9 @@ func TestDefaultCompactionConfig(t *testing.T) {
 	if cfg.TailTurns != DefaultTailTurns {
 		t.Errorf("expected TailTurns=%d, got %d", DefaultTailTurns, cfg.TailTurns)
 	}
-	if cfg.SummaryMaxTokens != 4096 {
-		t.Errorf("expected SummaryMaxTokens=4096, got %d", cfg.SummaryMaxTokens)
+	// 0 = follow the model's configured maxTokens (no hardcoded 4096 anymore).
+	if cfg.SummaryMaxTokens != 0 {
+		t.Errorf("expected SummaryMaxTokens=0 (follow model), got %d", cfg.SummaryMaxTokens)
 	}
 }
 

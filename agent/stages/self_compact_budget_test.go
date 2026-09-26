@@ -13,19 +13,30 @@ import (
 
 func TestSummaryBudget(t *testing.T) {
 	cases := []struct {
-		configured, modelMax, first, retry int
+		name                           string
+		modelMax, opCap, ctxLen, input int
+		first, retry                   int
 	}{
-		{defaultSelfCompactSummaryMaxTokens, 128000, 16384, 32768}, // prod glm-5.3 bot
-		{defaultSelfCompactSummaryMaxTokens, 0, 16384, 32768},      // unknown model cap
-		{defaultSelfCompactSummaryMaxTokens, 8192, 8192, 8192},     // small model: capped, no retry
-		{defaultSelfCompactSummaryMaxTokens, 20000, 16384, 20000},  // retry capped by the model
-		{500, 0, minSelfCompactSummaryBudget, 2 * minSelfCompactSummaryBudget},
-		{500, 800, 800, 800},
+		// prod: glm-5.3 configured maxTokens 128000 / contextLength 1,000,000,
+		// no operator cap → the configured limit, no retry needed.
+		{"prod glm-5.3", 128000, 0, 1000000, 30000, 128000, 128000},
+		{"model limit unknown", 0, 0, 0, 30000, fallbackSelfCompactSummaryMaxTokens, fallbackSelfCompactSummaryMaxTokens},
+		{"small model", 8192, 0, 0, 30000, 8192, 8192},
+		// operator cap only lowers; retry doubles up to the model limit
+		{"operator cap", 128000, 16384, 1000000, 30000, 16384, 32768},
+		{"operator cap near model", 20000, 16384, 0, 30000, 16384, 20000},
+		{"operator cap above model", 8192, 50000, 0, 30000, 8192, 8192},
+		{"operator cap tiny", 128000, 500, 0, 30000, minSelfCompactSummaryBudget, 2 * minSelfCompactSummaryBudget},
+		{"cap w/o model limit", 0, 1500, 0, 30000, 1500, 3000},
+		// context fit: 200k window, ~150k prompt → 200000-150000-2048
+		{"context fit", 128000, 0, 200000, 150000, 47952, 47952},
+		{"context fit + cap", 128000, 16384, 200000, 150000, 16384, 32768},
 	}
 	for _, c := range cases {
-		b := summaryBudget(c.configured, c.modelMax)
+		b := summaryBudget(c.modelMax, c.opCap, c.ctxLen, c.input)
 		if b.first != c.first || b.retry != c.retry {
-			t.Errorf("summaryBudget(%d,%d)=%+v, want first=%d retry=%d", c.configured, c.modelMax, b, c.first, c.retry)
+			t.Errorf("%s: summaryBudget(%d,%d,%d,%d)=%+v, want first=%d retry=%d",
+				c.name, c.modelMax, c.opCap, c.ctxLen, c.input, b, c.first, c.retry)
 		}
 	}
 }
@@ -93,9 +104,41 @@ func newProdLikeCompactStage(p llm.Provider, cfg *SelfCompactConfig) *LLMStage {
 	}, nil, nil)
 }
 
-func TestCompactContext_DefaultBudgetAndLowReasoning(t *testing.T) {
+// Root cause of 2026-09-26: the summary call sent a hardcoded 4096 instead of
+// the model's configured maxTokens (glm-5.3: 128000). It must send exactly
+// the configured model limit (the value the chat path sends) when no operator
+// cap is set.
+func TestCompactContext_HonorsConfiguredModelMaxTokens(t *testing.T) {
+	p := &cutoffProvider{} // always cut off
+	ok := &recordingSummaryProvider{text: "## Topics\n- ok"}
+	s := newProdLikeCompactStage(ok, &SelfCompactConfig{})
+	ctx, lc := execCtxWith(longHistory(20))
+	out, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx, map[string]any{})
+	if err != nil || out.(map[string]any)["status"] != "compacted" || !lc.Compacted() {
+		t.Fatalf("%v %+v", err, out)
+	}
+	if ok.calls != 1 || ok.params.MaxTokens == nil || *ok.params.MaxTokens != 128000 {
+		t.Fatalf("summary must send the configured model maxTokens 128000, got calls=%d params=%v", ok.calls, ok.params.MaxTokens)
+	}
+	if ok.params.ReasoningEffort == nil || *ok.params.ReasoningEffort != "low" {
+		t.Fatalf("summary call must lower reasoning to low for a bot on medium: %v", ok.params.ReasoningEffort)
+	}
+	// Cut off even at the model limit → no pointless retry at the same cap.
+	s2 := newProdLikeCompactStage(p, &SelfCompactConfig{})
+	ctx2, lc2 := execCtxWith(longHistory(20))
+	if _, err := s2.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx2, map[string]any{}); err == nil || lc2.Compacted() {
+		t.Fatalf("truncated summary must fail and leave the context unchanged: %v", err)
+	}
+	if len(p.caps) != 1 || p.caps[0] != 128000 {
+		t.Fatalf("want one call at 128000, got %v", p.caps)
+	}
+}
+
+// An explicit operator cap (agent.self_compact.summary_max_tokens) lowers the
+// first attempt; on truncation it retries once at 2x, bounded by the model.
+func TestCompactContext_OperatorCapAndRetry(t *testing.T) {
 	p := &cutoffProvider{okAfter: 1} // first call cut off, retry succeeds
-	s := newProdLikeCompactStage(p, &SelfCompactConfig{})
+	s := newProdLikeCompactStage(p, &SelfCompactConfig{SummaryMaxTokens: 16384})
 	ctx, lc := execCtxWith(longHistory(20))
 	out, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx, map[string]any{})
 	if err != nil || out.(map[string]any)["status"] != "compacted" || !lc.Compacted() {
@@ -105,7 +148,29 @@ func TestCompactContext_DefaultBudgetAndLowReasoning(t *testing.T) {
 		t.Fatalf("want caps [16384 32768], got %v", p.caps)
 	}
 	if p.efforts[0] != "low" || p.efforts[1] != "low" {
-		t.Fatalf("summary call must lower reasoning to low for a bot on medium: %v", p.efforts)
+		t.Fatalf("efforts: %v", p.efforts)
+	}
+}
+
+// The context window of the model (ModelDef.ContextLength) bounds the output
+// budget: prompt + max_tokens must fit.
+func TestCompactContext_FitsOutputIntoContextWindow(t *testing.T) {
+	ok := &recordingSummaryProvider{text: "## Topics\n- ok"}
+	maxTok := 128000
+	s := NewLLMStage("llm", ok, LLMConfig{
+		Model:         llm.ChatModel("glm-5.3"),
+		MaxSteps:      10,
+		MaxTokens:     &maxTok,
+		ContextLength: 131072,
+		SelfCompact:   &SelfCompactConfig{},
+	}, nil, nil)
+	ctx, _ := execCtxWith(longHistory(20))
+	if _, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	got := *ok.params.MaxTokens
+	if got >= 128000 || got < 100000 {
+		t.Fatalf("budget should be fitted below the 131072 window minus the prompt, got %d", got)
 	}
 }
 
@@ -125,8 +190,8 @@ func TestCompactContext_FailureBacksOffAndCapsAttemptsPerTurn(t *testing.T) {
 		!strings.Contains(err.Error(), "Do NOT call compact_context again") || !strings.Contains(err.Error(), "5m0s") {
 		t.Fatalf("want a clear failure result, got %v", err)
 	}
-	if p.calls() != 2 {
-		t.Fatalf("one summarization = first call + one retry, got %d calls", p.calls())
+	if p.calls() != 1 {
+		t.Fatalf("one summarization at the model limit (no retry possible), got %d calls", p.calls())
 	}
 	if lc.Compacted() || len(store.saved) != 0 {
 		t.Fatal("failed summary must leave the context unchanged")
@@ -144,7 +209,7 @@ func TestCompactContext_FailureBacksOffAndCapsAttemptsPerTurn(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "paused after a recent failed attempt") {
 		t.Fatalf("next turn within the backoff must be refused: %v", err)
 	}
-	if p.calls() != 2 {
+	if p.calls() != 1 {
 		t.Fatalf("refusals must not call the summarizer, calls=%d", p.calls())
 	}
 	// Other conversations are not affected.
@@ -203,5 +268,21 @@ func TestCompactContext_LightSummarizerUsesItsOwnModelCap(t *testing.T) {
 	_, _ = s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx, map[string]any{})
 	if len(light.caps) != 1 || light.caps[0] != 8192 || light.efforts[0] != "low" {
 		t.Fatalf("light summarizer: caps=%v efforts=%v (want one call at its 8192 cap, no retry, effort low)", light.caps, light.efforts)
+	}
+
+	// prod: light glm-5.2 configured maxTokens 128000 → that limit, not the main one or 4096.
+	light2 := &recordingSummaryProvider{text: "## Topics\n- ok"}
+	s2 := newProdLikeCompactStage(&cutoffProvider{}, &SelfCompactConfig{
+		SummaryProvider:           light2,
+		SummaryModel:              llm.ChatModel("glm-5.2"),
+		SummaryModelMaxTokens:     128000,
+		SummaryModelContextLength: 1000000,
+	})
+	ctx2, _ := execCtxWith(longHistory(20))
+	if _, err := s2.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx2, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if light2.calls != 1 || *light2.params.MaxTokens != 128000 {
+		t.Fatalf("light summarizer must use its configured 128000, got %v", *light2.params.MaxTokens)
 	}
 }

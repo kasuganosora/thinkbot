@@ -502,8 +502,12 @@ type LLMConfig struct {
 	FrequencyPenalty *float64
 	// PresencePenalty 存在惩罚（GLM-5.x 推荐 0.05）：抑制已出现 token 再次出现。
 	PresencePenalty *float64
-	// MaxTokens 最大 token 数。
+	// MaxTokens 最大输出 token 数（主链路即 ModelDef.MaxTokens，provider 模型配置页每模型设置）。
+	// 内部调用（compact_context 摘要、自动压缩）同样以它为模型输出上限。
 	MaxTokens *int
+	// ContextLength 主模型上下文窗口（ModelDef.ContextLength；0=未知）。
+	// 内部调用据此把输出上限收进「输入 + 输出 ≤ 上下文」。
+	ContextLength int
 	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
 	ReasoningEffort string
 	// MessageBuilder 自定义消息构造函数。

@@ -918,9 +918,11 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 //     created_at 推导，重启不清零）；
 //   - agent.self_compact.min_tokens / min_messages / min_savings_tokens / min_savings_ratio：
 //     收益门槛（默认 8000 / 12 / 4000 / 0.3），不划算时直接 no-op，不调用摘要模型；
-//   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 16384，且不超过摘要模型的
-//     max_tokens；摘要长度主要由提示词目标约束）。被截断时自动以 2 倍上限（同样受模型上限约束）重试一次，
-//     仍被截断才作废。旧默认 4096 对思考模型（GLM-5.3 推理 token 计入上限）不够：2026-09-26 连续 3 次顶满 4096；
+//   - 摘要输出上限 = 摘要模型在 provider 模型配置页设置的 maxTokens（ModelDef.MaxTokens，与主链路一致；
+//     light 摘要用 LightDef），并收进该模型上下文窗口（ContextLength）。此前摘要调用不读模型配置，
+//     未设 summary_max_tokens 时一律发写死的 4096：2026-09-26 glm-5.3（配置 128000）连续 3 次顶满 4096；
+//   - agent.self_compact.summary_max_tokens：可选的运维封顶（含推理，默认 0=不封顶），只能压低模型上限；
+//     低于模型上限时，被截断会以 2 倍封顶（不超过模型上限）重试一次，仍被截断才作废；
 //   - agent.self_compact.summarizer：main（默认）| light，light 使用 bot 的低成本模型（未配置则回退 main）；
 //   - agent.self_compact.reasoning_effort：摘要调用的推理强度。空/auto（默认）= bot 本身配置了 reasoning_effort
 //     时用 low（bot 已是 none/minimal/low 则沿用），未配置则不发送；provider = 不发送（服务商默认，GLM-5.3 默认 max）；
@@ -956,6 +958,7 @@ func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle, botReasoningEffort
 		cfg.SummaryProvider = bundle.Light
 		cfg.SummaryModel = llm.ChatModel(bundle.LightDef.Model)
 		cfg.SummaryModelMaxTokens = bundle.LightDef.MaxTokens
+		cfg.SummaryModelContextLength = bundle.LightDef.ContextLength
 		cfg.SummaryReasoningFallback = botReasoningEffort
 	}
 	return cfg
@@ -1273,6 +1276,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
+		// 聚类合并输出上限跟随主模型配置（此前不发 max_tokens）。
+		MaxTokens: bundle.MainDef.MaxTokens,
 	}, s.logger)
 	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
 		Window:    memWindow,
@@ -1395,6 +1400,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			FrequencyPenalty: &freqPen,
 			PresencePenalty:  &presPen,
 			MaxTokens:        maxTok,
+			ContextLength:    bundle.MainDef.ContextLength,
 			ReasoningEffort:  def.ReasoningEffort,
 			MessageBuilder:   messageBuilder,
 			ToolResolver:     toolMgr,
@@ -1455,12 +1461,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// data/lazy_judgments.jsonl 攒标注语料（旁路、非阻塞）。
 	lazyJudgeProvider := bundle.Main
 	lazyJudgeModel := bundle.MainDef.Model
+	lazyJudgeMaxTokens := bundle.MainDef.MaxTokens
 	if bundle.Light != nil {
 		lazyJudgeProvider = bundle.Light
 		lazyJudgeModel = bundle.LightDef.Model
+		lazyJudgeMaxTokens = bundle.LightDef.MaxTokens
 	}
 	lazyCfg := pipeline.NewLazyResponseConfig()
-	lazyCfg.Judge = NewLazyLLMJudge(lazyJudgeProvider, lazyJudgeModel)
+	lazyCfg.Judge = NewLazyLLMJudge(lazyJudgeProvider, lazyJudgeModel, lazyJudgeMaxTokens)
 	lazyCfg.Sink = pipeline.NewFileLazyJudgeSink("data/lazy_judgments.jsonl")
 
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
@@ -1498,11 +1506,13 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// 优先使用 Light LLM 做快判（更便宜、更快）
 			judgeProvider := bundle.Main
 			modelID := bundle.MainDef.Model
+			judgeMaxTokens := bundle.MainDef.MaxTokens
 			if bundle.Light != nil {
 				judgeProvider = bundle.Light
 				modelID = bundle.LightDef.Model
+				judgeMaxTokens = bundle.LightDef.MaxTokens
 			}
-			adapter := newLLMJudgeAdapter(judgeProvider, modelID)
+			adapter := newLLMJudgeAdapter(judgeProvider, modelID, judgeMaxTokens)
 
 			promptCfg := engagement.PromptConfig{
 				BotName:    def.Name,
@@ -1899,6 +1909,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			VisionProvider: bundle.Vision,
 			VisionModel:    llm.ChatModel(bundle.VisionDef.Model),
 			MainMultimodal: bundle.MainSupportsMultimodal(),
+		}
+		// 视觉模型输出上限跟随其模型配置（ModelDef.MaxTokens）；未接线时 stage 兜底 1024。
+		if bundle.VisionDef.MaxTokens > 0 {
+			visionMax := bundle.VisionDef.MaxTokens
+			mmCfg.MaxTokens = &visionMax
 		}
 		pb.Add(30, stages.NewMultimodalStage("multimodal", mmCfg, s.tp, s.logger))
 	}
@@ -3079,7 +3094,8 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 			Enabled:          dreamCfg.Enabled,
 			Schedule:         dreamCfg.Schedule,
 			JaccardThreshold: 0.9,
-			MaxDreamTokens:   10000,
+			// 与定时路径（StartBot）一致：跟随主模型配置的 maxTokens，不再写死 10000。
+			MaxDreamTokens: llmBundle.MainDef.MaxTokens,
 		},
 		llmBundle.Main,
 		llmBundle.MainDef.Model,
@@ -3100,6 +3116,8 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 		memory.BotProfileProfilerConfig{
 			Provider: llmBundle.Main,
 			Model:    &llm.Model{ID: llmBundle.MainDef.Model},
+			// 与定时路径一致：跟随主模型 maxTokens（此前缺省退回 8192）。
+			MaxTokens: llmBundle.MainDef.MaxTokens,
 		},
 		s.tp,
 		s.logger,

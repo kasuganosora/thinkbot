@@ -76,23 +76,23 @@ func TestCompactContext_CostBenefitGate(t *testing.T) {
 
 func TestEstimateSelfCompactBenefit(t *testing.T) {
 	cfg := &SelfCompactConfig{}
-	b := estimateSelfCompactBenefit(1400, cfg)
+	b := estimateSelfCompactBenefit(1400, 128000)
 	if b.summaryTokens != minSelfCompactSummaryTokens || b.savings != 1100 {
 		t.Fatalf("small head: %+v", b)
 	}
 	if b.refusal(3066, cfg) == "" {
 		t.Fatal("the 2026-09-26 case (save ~1.1k of ~3k) must be refused")
 	}
-	b = estimateSelfCompactBenefit(20000, cfg)
+	b = estimateSelfCompactBenefit(20000, 128000)
 	if b.summaryTokens != maxSelfCompactSummaryTokens || b.refusal(26000, cfg) != "" {
 		t.Fatalf("large head should pass: %+v", b)
 	}
 	// Relative threshold: 5k saving on a 40k context is below 30%.
-	b = estimateSelfCompactBenefit(6000, cfg)
+	b = estimateSelfCompactBenefit(6000, 128000)
 	if b.refusal(40000, cfg) == "" {
 		t.Fatal("saving below the ratio must be refused")
 	}
-	if b.costOutputCap != defaultSelfCompactSummaryMaxTokens || b.targetWords <= 0 {
+	if b.costOutputCap != 128000 || b.targetWords <= 0 {
 		t.Fatalf("cost fields: %+v", b)
 	}
 }

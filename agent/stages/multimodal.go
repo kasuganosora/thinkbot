@@ -237,8 +237,9 @@ func (s *MultimodalStage) transcribeAttachment(ctx context.Context, att core.Att
 	if s.config.Temperature != nil {
 		temp = *s.config.Temperature
 	}
+	// 仅在未配置模型上限时兜底 1024（正常由 botservice 从 VisionDef.MaxTokens 注入）。
 	maxTokens := 1024
-	if s.config.MaxTokens != nil {
+	if s.config.MaxTokens != nil && *s.config.MaxTokens > 0 {
 		maxTokens = *s.config.MaxTokens
 	}
 

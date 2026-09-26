@@ -52,28 +52,33 @@ const CompactContextToolName = "compact_context"
 // half the cost of the whole reply turn). Compaction must now remove a
 // substantial absolute and relative amount of context.
 //
-// Summary output budget (2026-09-26 18:58-18:59): with the main model glm-5.3
-// (a thinking model; reasoning tokens count toward max_tokens) three calls in
-// one turn on ~14k input all stopped at exactly 4096 output tokens, so every
-// summary was discarded as cut off, and because failures did not record a
-// cooldown the model retried immediately. The default cap is now 16k (capped
-// by the summarizer model's max output), one automatic retry with a doubled
-// cap is made on truncation, reasoning is lowered for the summary call where
-// the bot already uses reasoning_effort, and a failure pauses the tool for the
-// conversation (and for the rest of the turn).
+// Summary output budget (2026-09-26 18:58-18:59): three calls in one turn on
+// ~14k input all stopped at exactly 4096 output tokens and were discarded as
+// cut off. Root cause: the summary call never used the summarizer model's
+// configured output limit (provider config → models[].maxTokens, 128000 for
+// glm-5.3 in production, the value the normal chat path sends); it sent this
+// file's hardcoded default of 4096 whenever agent.self_compact.summary_max_tokens
+// was unset. glm-5.3 is a thinking model, so reasoning tokens used up the 4096.
+// Now the budget is the model's configured limit (fitted into its context
+// window), summary_max_tokens is only an optional operator cap, and a fixed
+// fallback is used only when no model limit is known. Reasoning is lowered for
+// the summary call where the bot already uses reasoning_effort, and a failure
+// pauses the tool for the conversation (and for the rest of the turn).
 const (
-	defaultSelfCompactKeepRecent       = 6
-	minSelfCompactKeepRecent           = 2
-	maxSelfCompactKeepRecent           = 40
-	defaultSelfCompactCooldown         = 10 * time.Minute
-	defaultSelfCompactMinMsgs          = 12
-	defaultSelfCompactMinTokens        = 8000
-	defaultSelfCompactMinSavings       = 4000
-	defaultSelfCompactMinSavingsRatio  = 0.3
-	defaultSelfCompactSummaryMaxTokens = 16384
-	minSelfCompactSummaryBudget        = 1024 // never go below this even for tiny model caps
-	defaultSelfCompactFailureBackoff   = 5 * time.Minute
-	maxSelfCompactFailureBackoff       = time.Hour
+	defaultSelfCompactKeepRecent      = 6
+	minSelfCompactKeepRecent          = 2
+	maxSelfCompactKeepRecent          = 40
+	defaultSelfCompactCooldown        = 10 * time.Minute
+	defaultSelfCompactMinMsgs         = 12
+	defaultSelfCompactMinTokens       = 8000
+	defaultSelfCompactMinSavings      = 4000
+	defaultSelfCompactMinSavingsRatio = 0.3
+	// fallbackSelfCompactSummaryMaxTokens is used ONLY when the summarizer
+	// model's output limit is unknown (normally ModelDef.MaxTokens is set).
+	fallbackSelfCompactSummaryMaxTokens = 16384
+	minSelfCompactSummaryBudget         = 1024 // never go below this even for tiny model caps
+	defaultSelfCompactFailureBackoff    = 5 * time.Minute
+	maxSelfCompactFailureBackoff        = time.Hour
 	// maxSelfCompactFailuresPerTurn: after this many failed summarizer runs
 	// in one turn (each already includes one automatic retry on truncation),
 	// compact_context refuses for the rest of the turn.
@@ -143,16 +148,19 @@ type SelfCompactConfig struct {
 	// fraction of the current message list (0 → 4000 tokens / 0.3).
 	MinSavingsTokens int
 	MinSavingsRatio  float64
-	// SummaryMaxTokens caps the summarizer response incl. reasoning (0 → 16384;
-	// the summary length itself is steered by the prompt target, the cap only
-	// bounds runaway output — a cut-off summary is rejected). The effective cap
-	// never exceeds the summarizer model's max output (SummaryModelMaxTokens,
-	// or the stage's MaxTokens when the main model summarizes). On a cut-off
-	// response one retry runs with twice the cap (same model limit).
+	// SummaryMaxTokens is an optional operator cap on the summarizer output
+	// incl. reasoning (agent.self_compact.summary_max_tokens; 0 = no cap).
+	// The budget itself is the summarizer model's configured output limit
+	// (LLMConfig.MaxTokens = main ModelDef.MaxTokens, or SummaryModelMaxTokens
+	// for an override model), fitted into its context window; the cap can only
+	// lower it. When the cap is below the model limit, a cut-off response is
+	// retried once with twice the cap (never above the model limit).
 	SummaryMaxTokens int
-	// SummaryModelMaxTokens is the max output of SummaryModel (0 → unknown;
-	// when the main model summarizes, LLMConfig.MaxTokens is used instead).
-	SummaryModelMaxTokens int
+	// SummaryModelMaxTokens / SummaryModelContextLength are the configured
+	// output limit and context window of SummaryModel (0 = unknown). When the
+	// stage's own model summarizes, LLMConfig.MaxTokens / ContextLength apply.
+	SummaryModelMaxTokens     int
+	SummaryModelContextLength int
 	// SummaryReasoningEffort for the summarizer call:
 	//   "" / "auto" → "low" when the bot sends a reasoning_effort for normal
 	//                 turns (i.e. its provider accepts the parameter; a bot
@@ -219,13 +227,6 @@ func (c *SelfCompactConfig) minSavingsRatio() float64 {
 	return defaultSelfCompactMinSavingsRatio
 }
 
-func (c *SelfCompactConfig) summaryMaxTokens() int {
-	if c.SummaryMaxTokens > 0 {
-		return c.SummaryMaxTokens
-	}
-	return defaultSelfCompactSummaryMaxTokens
-}
-
 func (c *SelfCompactConfig) failureBackoff() time.Duration {
 	if c.FailureBackoff > 0 {
 		return c.FailureBackoff
@@ -239,22 +240,29 @@ type selfCompactBudget struct {
 	first, retry int
 }
 
-// summaryBudget derives the output caps from the configured/default cap and
-// the summarizer model's max output (modelMax <= 0 → unknown, no clamp).
-func summaryBudget(configured, modelMax int) selfCompactBudget {
-	first := configured
-	if modelMax > 0 && first > modelMax {
-		first = modelMax
-	}
-	if first < minSelfCompactSummaryBudget {
-		first = minSelfCompactSummaryBudget
-		if modelMax > 0 && first > modelMax {
-			first = modelMax
+// summaryBudget derives the summarizer output caps:
+//   - ceiling: the model's configured output limit (modelMax; unknown → the
+//     fallback), fitted into its context window next to the prompt;
+//   - first: the ceiling, or the operator cap when it is lower;
+//   - retry: one retry on a cut-off response with twice the first cap, never
+//     above the ceiling (retry <= first → no retry; with no operator cap the
+//     first call already uses the full model limit, so there is no retry).
+func summaryBudget(modelMax, operatorCap, contextLength, estInput int) selfCompactBudget {
+	ceiling := llm.ResolveMaxOutputTokens(modelMax, 0, fallbackSelfCompactSummaryMaxTokens)
+	ceiling = llm.FitOutputToContext(ceiling, contextLength, estInput, minSelfCompactSummaryBudget)
+	first := ceiling
+	if operatorCap > 0 && operatorCap < first {
+		first = operatorCap
+		if first < minSelfCompactSummaryBudget {
+			first = minSelfCompactSummaryBudget
+		}
+		if first > ceiling {
+			first = ceiling
 		}
 	}
 	retry := first * 2
-	if modelMax > 0 && retry > modelMax {
-		retry = modelMax
+	if retry > ceiling {
+		retry = ceiling
 	}
 	return selfCompactBudget{first: first, retry: retry}
 }
@@ -302,7 +310,7 @@ type selfCompactBenefit struct {
 	targetWords   int // soft length target given to the summarizer
 }
 
-func estimateSelfCompactBenefit(headTokens int, cfg *SelfCompactConfig) selfCompactBenefit {
+func estimateSelfCompactBenefit(headTokens, outputCap int) selfCompactBenefit {
 	sum := headTokens / 5
 	if sum < minSelfCompactSummaryTokens {
 		sum = minSelfCompactSummaryTokens
@@ -315,7 +323,7 @@ func estimateSelfCompactBenefit(headTokens int, cfg *SelfCompactConfig) selfComp
 		summaryTokens: sum,
 		savings:       headTokens - sum,
 		costInput:     headTokens + selfCompactPromptOverheadTokens,
-		costOutputCap: cfg.summaryMaxTokens(),
+		costOutputCap: outputCap,
 		targetWords:   sum * 3 / 4,
 	}
 }
@@ -326,7 +334,7 @@ func (b selfCompactBenefit) refusal(tokensBefore int, cfg *SelfCompactConfig) st
 	if b.savings >= cfg.minSavings() && float64(b.savings) >= minRatio*float64(tokensBefore) {
 		return ""
 	}
-	return fmt.Sprintf("not worth it: compacting ~%d tokens would save only ~%d tokens (need >= %d and >= %.0f%% of the current ~%d), while the summary call itself costs ~%d input + up to %d output tokens",
+	return fmt.Sprintf("not worth it: compacting ~%d tokens would save only ~%d tokens (need >= %d and >= %.0f%% of the current ~%d), while the summary call itself costs ~%d input tokens plus the summary output (limit %d incl. reasoning)",
 		b.headTokens, b.savings, cfg.minSavings(), minRatio*100, tokensBefore, b.costInput, b.costOutputCap)
 }
 
@@ -675,13 +683,12 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		return noop(fmt.Sprintf("not enough older messages to compact safely while keeping the most recent %d verbatim", args.KeepRecent))
 	}
 	head := snapshot[:boundary]
-	benefit := estimateSelfCompactBenefit(llm.EstimateMessagesTokens(head), cfg)
-	if reason := benefit.refusal(tokensBefore, cfg); reason != "" {
-		return noop(reason, "est_head_tokens", benefit.headTokens, "est_savings", benefit.savings)
-	}
 
+	// Summarizer = the stage's own model (the bot's main model) unless an
+	// override (e.g. the light model) is configured. Its output limit and
+	// context window come from the model definition in the provider config.
 	provider, model := s.provider, s.config.Model
-	modelMax := 0
+	modelMax, ctxLen := 0, s.config.ContextLength
 	if s.config.MaxTokens != nil {
 		modelMax = *s.config.MaxTokens
 	}
@@ -691,15 +698,21 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		if cfg.SummaryModel != nil {
 			model = cfg.SummaryModel
 		}
-		modelMax = cfg.SummaryModelMaxTokens
+		modelMax, ctxLen = cfg.SummaryModelMaxTokens, cfg.SummaryModelContextLength
 		botEffort = cfg.SummaryReasoningFallback
 	}
 	modelID := ""
 	if model != nil {
 		modelID = model.ID
 	}
-	budget := summaryBudget(cfg.summaryMaxTokens(), modelMax)
+	headTokens := llm.EstimateMessagesTokens(head)
+	budget := summaryBudget(modelMax, cfg.SummaryMaxTokens, ctxLen, headTokens+selfCompactPromptOverheadTokens)
 	effort := summaryReasoningEffort(cfg.SummaryReasoningEffort, botEffort)
+
+	benefit := estimateSelfCompactBenefit(headTokens, budget.first)
+	if reason := benefit.refusal(tokensBefore, cfg); reason != "" {
+		return noop(reason, "est_head_tokens", benefit.headTokens, "est_savings", benefit.savings)
+	}
 
 	sumCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()

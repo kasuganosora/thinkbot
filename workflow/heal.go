@@ -156,7 +156,8 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 
 	raw, err := a.saMgr.DelegateStream(ctx, healDiagnoseSystemPrompt, task,
 		subagent.WithTemperature(0),
-		subagent.WithMaxTokens(2000),
+		// 跟随模型配置（与 RefineNode/Analyze 同源）；此前写死 2000，思考模型推理即可耗尽。
+		subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
 		subagent.WithStuckTimeout(healDiagnoseStuckTimeout),
 	)
 	if err != nil {

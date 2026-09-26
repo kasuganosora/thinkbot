@@ -1192,7 +1192,7 @@ func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userI
 		// 未配置时回退 llm.DefaultCompactionConfig() 的内部兜底默认值。
 		compactor := llm.NewCompactor(*compactionConfigFromConfig(
 			config.NewBuilder(s.store, s.logger).GetCompactionConfig()))
-		if sum, serr := compactor.SummarizeHead(ctx, bundle.Main, bundle.MainDef.Model, head); serr == nil {
+		if sum, serr := compactor.SummarizeHead(ctx, bundle.Main, bundle.MainDef.Model, head, bundle.MainDef.MaxTokens); serr == nil {
 			summaryText = sum
 		} else {
 			s.logger.Warnw("compact: summarize failed, fall back to truncation", "err", serr)
