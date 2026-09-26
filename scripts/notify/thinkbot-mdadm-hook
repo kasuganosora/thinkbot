@@ -1,0 +1,23 @@
+#!/bin/sh
+# mdadm PROGRAM hook -> ThinkBot owner notification.
+# Install: install -o root -g root -m 0755 thinkbot-mdadm-hook /usr/local/sbin/thinkbot-mdadm-hook
+# mdadm.conf:  PROGRAM /usr/local/sbin/thinkbot-mdadm-hook
+# mdadm calls: PROGRAM <event> <md-device> [<component-device>]
+# Test:        mdadm --monitor --scan --oneshot --test
+EVENT="$1"; MD="$2"; COMP="$3"
+HOST="$(hostname -s)"
+
+case "$EVENT" in
+  Fail|FailSpare|DegradedArray|DeviceDisappeared) LEVEL=critical ;;
+  SparesMissing|RebuildStarted|MoveSpare)          LEVEL=warn ;;
+  *)                                               LEVEL=info ;;   # RebuildNN, RebuildFinished, SpareActive, NewArray, TestMessage
+esac
+
+TITLE="mdadm $EVENT on $MD${COMP:+ ($COMP)}"
+BODY="$(printf 'host: %s\nevent: %s\narray: %s\ncomponent: %s\n\n/proc/mdstat:\n%s\n' \
+  "$HOST" "$EVENT" "$MD" "${COMP:--}" "$(cat /proc/mdstat 2>/dev/null)")"
+
+printf '%s' "$BODY" | /usr/local/sbin/thinkbot-notify \
+  -s "$HOST/mdadm" -l "$LEVEL" -t "$TITLE" -b - -k "mdadm/$MD/$EVENT/${COMP:-}" \
+  || logger -t thinkbot-mdadm-hook "notify failed: $TITLE"
+exit 0
