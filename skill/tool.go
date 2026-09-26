@@ -78,7 +78,7 @@ func (m *SkillManager) BuildUseSkillTool() llm.Tool {
 Use this tool when the request involves a specific domain, system, or data format.
 
 Rules:
-- DISCOVERY: The full skill catalog is NOT injected into your context. When a task might benefit from a skill, first call use_skill with command "list" to discover what is available, then load the matching one.
+- DISCOVERY: The full skill catalog is NOT injected into your context. Prefer skill_search with a few keywords to discover matching skills cheaply; use use_skill with command "list" only when you truly need the full catalog, then load the matching one.
 - CRITICAL: Call this tool IMMEDIATELY as your first action when a relevant Skill exists. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded.
 - After loading, you MUST follow the Skill's instructions. They override your general defaults for that task.
 - The result may include `+"`baseDir`"+`, `+"`scripts`"+` and `+"`references`"+`. Prefer the Skill's own scripts over improvising an equivalent yourself.
@@ -136,15 +136,79 @@ func (m *SkillManager) availableNamesLocked() []string {
 }
 
 // ============================================================================
+// skill_search 工具 — 关键词粗检索（L1，两段式检索的第一步）
+//
+// 与 use_skill 分工：
+//   - skill_search：按关键词廉价检索技能元数据（name + 截断描述的命中列表），
+//     是发现技能的第一步；只读元数据，不加载正文
+//   - use_skill：加载命中的技能（传技能名），或传 "list" 取完整清单（较大）
+//
+// 设计参考 research/skill-search-two-stage.md：L1 粗搜必须便宜快，
+// 重阅读理解的 L2 精搜（subagent）不在本工具职责内。
+// ============================================================================
+
+// SkillSearchInput 是 skill_search 工具的输入参数。
+type SkillSearchInput struct {
+	// Query 检索关键词，多个词用空格分隔（全部命中才算候选，AND 语义）。
+	Query string `json:"query" jsonschema:"Space-separated keywords to search skill names and descriptions, e.g. \"pdf extract\", \"excel 表格\". All keywords must match"`
+
+	// Limit 最多返回的命中条数，默认 10，上限 20。
+	Limit int `json:"limit,omitempty" jsonschema:"Maximum number of hits to return. Default 10, max 20"`
+}
+
+// BuildSkillSearchTool 构造 skill_search 工具定义（llm.Tool）。
+//
+// 构造方式与 BuildUseSkillTool 完全对齐（llm.NewTool 泛型风格）。
+// Execute 返回：
+//
+//	map[string]any{
+//	  "status": "search",                         // 固定标记本次调用类型
+//	  "skills": []SearchHit,                      // 命中列表（name + 截断 description + score）
+//	  "hint":   "Call use_skill with the skill's name to load it."
+//	}
+//
+// 这里选择直接返回 SearchHit 列表（结构化，带 score，便于上层二次加工），
+// 而非逐行字符串——两者二选一，本实现取前者并在注释中说明。
+//
+// query 为空（或只有空格）时不返回错误，而是返回空结果 + 提示：
+// 让 LLM 拿到确定性反馈自行纠正（补关键词重试），错误应留给真正的失败场景。
+func (m *SkillManager) BuildSkillSearchTool() llm.Tool {
+	mgr := m
+	return llm.NewTool("skill_search",
+		`Cheaply search skills by keywords. This is the FIRST step of skill discovery: it returns a short list of hits (skill name + truncated description), without loading any skill content.
+
+Input: a few keywords separated by spaces (all keywords must match). Use the language of the task (Chinese keywords work).
+
+Workflow:
+- Call this tool first to find candidate skills for a specialized domain (a file format, a framework, a workflow, a known tool).
+- Then call use_skill with the chosen skill name to load it.
+- Call use_skill with command "list" ONLY when you need the full catalog of all available skills (larger) — prefer skill_search for keyword discovery.
+
+Rules:
+- This tool never loads skill content. It only returns metadata hits.
+- If nothing matches, broaden or change the keywords and retry; if still nothing, proceed without a Skill.`,
+		func(ctx *llm.ToolExecContext, input SkillSearchInput) (any, error) {
+			hits := mgr.SearchSkills(input.Query, input.Limit)
+			return map[string]any{
+				"status": "search",
+				// 复用 SearchHit 列表（name/description/score，description 已截断）
+				"skills": hits,
+				"hint":   "Call use_skill with the skill's name to load it.",
+			}, nil
+		})
+}
+
+// ============================================================================
 // SkillToolProvider — 将 SkillManager 适配为 tools.ToolProvider
 //
 // 实现 tools.ToolProvider 接口，在每次 Resolve 时根据当前技能状态
-// 动态决定是否提供 use_skill 工具。
+// 动态决定是否提供技能工具。
 //
 // 行为：
-//   - 存在已启用技能 → 返回 [use_skill] 工具
-//   - 无已启用技能   → 返回 nil（LLM 不会看到 use_skill）
-//   - 主 Agent 与子 Agent 共用：子 Agent 同样可加载技能（仅不能 spawn）
+//   - 存在已启用技能 → 返回 [use_skill, skill_search] 两个工具
+//     （skill_search 是便宜的发现第一步，use_skill 负责加载/取全量清单）
+//   - 无已启用技能   → 返回 nil（LLM 不会看到这两个工具）
+//   - 主 Agent 与子 Agent 共用：子 Agent 同样可检索/加载技能（仅不能 spawn）
 // ============================================================================
 
 // SkillToolProvider 将 SkillManager 适配为动态工具提供者。
@@ -158,7 +222,11 @@ func (p *SkillToolProvider) Tools(ctx context.Context, sctx *tools.ToolSessionCo
 	if !p.Manager.HasEnabledSkills() {
 		return nil, nil
 	}
-	return []llm.Tool{p.Manager.BuildUseSkillTool()}, nil
+	// use_skill（加载/全量清单）+ skill_search（关键词粗检索）成对提供
+	return []llm.Tool{
+		p.Manager.BuildUseSkillTool(),
+		p.Manager.BuildSkillSearchTool(),
+	}, nil
 }
 
 // HasEnabledSkills 返回是否存在已启用的技能。
@@ -177,10 +245,10 @@ func (m *SkillManager) HasEnabledSkills() bool {
 // RegisterTools — 便捷注册函数（对齐 mcp.RegisterTools 模式）
 // ============================================================================
 
-// RegisterTools 将 SkillManager 的 use_skill 工具注册到 ToolManager。
+// RegisterTools 将 SkillManager 的技能工具（use_skill + skill_search）注册到 ToolManager。
 //
 // 注册后，ToolManager 在每次解析工具列表时，
-// 会通过 SkillToolProvider 动态判断是否提供 use_skill 工具。
+// 会通过 SkillToolProvider 动态判断是否提供这两个技能工具。
 //
 // 如果 mgr 为 nil，直接返回（no-op）。
 func RegisterTools(toolMgr *tools.ToolManager, mgr *SkillManager) error {

@@ -74,3 +74,19 @@ type SkillInfo struct {
 	HasReferences bool     `json:"hasReferences"`
 	HasAssets     bool     `json:"hasAssets"`
 }
+
+// SearchHit 是 skill_search 粗检索（L1）的单条命中结果。
+// 仅携带元数据（name + 截断后的 description + 得分），不读技能正文，保证检索便宜快。
+// 风格对齐 SkillInfo：字段带 json tag，供工具返回 / API 序列化使用。
+type SearchHit struct {
+	// Name 技能唯一标识符，命中后用 use_skill "name" 加载。
+	Name string `json:"name"`
+
+	// Description 技能描述。超过 maxDescriptionRunes 个字符（rune 数）时
+	// 截断到该长度并追加省略号 "…"，控制回包体积。
+	Description string `json:"description"`
+
+	// Score 排序得分：name 命中权重（skillSearchNameWeight）远高于
+	// description 命中（skillSearchDescWeight），仅降序排序用。
+	Score int `json:"score"`
+}
