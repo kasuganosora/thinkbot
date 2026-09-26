@@ -122,6 +122,10 @@ const nodeStuckTimeout = 12 * time.Minute
 //     同一工作区且无文件锁，不记录就无从发现冲突。见 write_conflict.go。
 func (e *Executor) withNodeContext(ctx context.Context, node *DAGNode, rec *writeRecorder) context.Context {
 	ctx = llm.WithStatsWorkflow(ctx, workflowIDFromContext(ctx), node.ID)
+	// 功能标签兜底：节点内的 LLM 调用此前不带 feature，日聚合表里记成 "unknown"
+	// （2026-09 实测 ¥365 / 1.3 亿输入 token 全部挂在 unknown 下，看板无法归因，
+	// 配 "subagent" 功能预算也管不到工作流）。上游已有标签时保持不变。
+	ctx = llm.WithStatsFeatureIfUnset(ctx, "workflow")
 	return llm.WithPathRecorder(ctx, rec)
 }
 
