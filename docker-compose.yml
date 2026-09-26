@@ -113,7 +113,7 @@ services:
       # skill/loader.go 静默返回 0 条、不打错误日志，属正常行为，不是故障。
       # 若要在容器里启用文件系统技能，在项目根建 skills/<技能名>/SKILL.md 后
       # 取消下面一行注释（只读挂载即可，技能由主程序读取、无需写入）：
-      # - ./skills:/app/skills:ro
+      - ./skills:/app/skills:ro
 
     environment:
       # 影响 bot 的时间感知与日志时间戳，需与 .env 的 system.timezone 保持一致。
