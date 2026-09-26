@@ -566,6 +566,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 				partsJSON = string(b)
 			}
 		}
+		// 落库内容与 done 事件同口径：剥离 reply-control 控制块。增量源头
+		// （LLMStage.processStream）已跨 delta 过滤，这里兜底防其他发布路径漏出。
 		go func(content, tcJSON, pJSON string, streaming bool) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -575,7 +577,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			if err := s.chatHistory.UpsertAssistantByTrace(botID, userID, content, traceID, tcJSON, pJSON, req.SessionID, streaming); err != nil {
 				s.logger.Warnw("failed to save assistant message", "err", err)
 			}
-		}(fullText, toolCallsJSON, partsJSON, streaming)
+		}(stages.StripReplyControlBlock(fullText), toolCallsJSON, partsJSON, streaming)
 	}
 
 	// ---- 流式增量落库 ----
