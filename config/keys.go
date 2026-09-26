@@ -506,7 +506,7 @@ func IsSensitiveKey(key string) bool {
 	return false
 }
 
-// Notify 键：外部程序经 POST /api/bots/{id}/notify 让 bot 给主人发通知（见 docs/notify.md）。
+// Notify 键：外部程序经 POST /api/notify（或 /api/bots/{id}/notify）让 bot 给主人发通知（见 docs/notify.md）。
 // 除 notify.listen_addr（启动期固化，改后需重启）外均为请求时现取。
 // channel / target / mode 支持 per-bot 覆盖：bot.<botID>.notify.channel / .target / .mode。
 const (
@@ -525,7 +525,7 @@ const (
 	// KeyNotifyOwnerTarget 显式指定主人的会话 ID（Telegram 私聊 chat id）。
 	// 空＝自动发现：取活跃 admin 用户在该平台的身份绑定（identity_mappings）。
 	KeyNotifyOwnerTarget = "notify.owner_target"
-	// KeyNotifyDefaultMode 默认模式 raw | persona（默认 raw）。
+	// KeyNotifyDefaultMode 默认模式 bot | raw（默认 bot；persona 为 bot 的旧别名）。
 	KeyNotifyDefaultMode = "notify.default_mode"
 	// KeyNotifyAllowTargetOverride 是否允许请求体用 target 指定任意会话（默认 false）。
 	KeyNotifyAllowTargetOverride = "notify.allow_target_override"
@@ -541,11 +541,19 @@ const (
 	KeyNotifyRateLimitCritical = "notify.rate_limit_critical"
 	// KeyNotifyDedupWindow 去重窗口（默认 30m；0 关闭去重）。
 	KeyNotifyDedupWindow = "notify.dedup_window"
-	// KeyNotifyPersonaTimeout persona 改写的 LLM 调用超时（默认 45s，超时回落 raw）。
-	KeyNotifyPersonaTimeout = "notify.persona_timeout"
-	// KeyNotifyPersonaMaxChars persona 改写输出字符上限（默认 1000）。
-	KeyNotifyPersonaMaxChars = "notify.persona_max_chars"
-	// KeyNotifyPersonaMaxTokens persona 调用的 max_tokens 封顶（默认 0＝跟随模型 maxTokens；>0 只能调低）。
+	// KeyNotifyBotTimeout bot 模式 LLM 调用超时（默认 60s，超时回落 raw）。
+	KeyNotifyBotTimeout = "notify.bot_timeout"
+	// KeyNotifyBotMaxChars bot 模式输出字符上限（默认 1000）。
+	KeyNotifyBotMaxChars = "notify.bot_max_chars"
+	// KeyNotifyBotMaxTokens bot 模式 max_tokens 的额外封顶（默认 0＝不额外封顶；>0 只能调低）。
+	// 基础上限走内部调用策略：llm.internal_max_tokens.notify / .default，再无则模型 maxTokens。
+	KeyNotifyBotMaxTokens = "notify.bot_max_tokens"
+	// KeyNotifyBotHistoryMessages bot 模式带入的主人会话近期消息条数（默认 20；0＝不带历史）。
+	KeyNotifyBotHistoryMessages = "notify.bot_history_messages"
+	// KeyNotifyPersonaTimeout / KeyNotifyPersonaMaxChars / KeyNotifyPersonaMaxTokens 是
+	// bot_* 三个键的旧名（persona 模式时代），仅在新键未设置时作为别名读取。
+	KeyNotifyPersonaTimeout   = "notify.persona_timeout"
+	KeyNotifyPersonaMaxChars  = "notify.persona_max_chars"
 	KeyNotifyPersonaMaxTokens = "notify.persona_max_tokens"
 	// KeyNotifyRecordHistory 投递成功后是否写入主人会话历史（默认 true）。
 	KeyNotifyRecordHistory = "notify.record_history"

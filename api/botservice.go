@@ -129,6 +129,10 @@ type BotService struct {
 	// 供 /compact 等命令对聊天历史做 LLM 摘要。
 	llmBundles map[string]*bot.LLMBundle
 
+	// recallStages 保存每个已启动 bot 的长期记忆召回 stage（与对话 pipeline 同一实例），
+	// 供 notify 的 bot 模式在 pipeline 之外按相同规则召回记忆。
+	recallStages map[string]*stages.RecallStage
+
 	// bindStage 授权码绑定拦截 Stage（Order=3，置于链路最前）。
 	// 命中 TB-XXXX-XXXX 授权码时消费并完成跨平台身份绑定、直接回复、中止 Pipeline，
 	// 不再流入 LLM。必须在每个 bot 的 pipeline builder 中显式 Add——多 bot 模式下
@@ -178,8 +182,9 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
 
-		memRepos:   make(map[string]*storage.SQLiteRepository),
-		llmBundles: make(map[string]*bot.LLMBundle),
+		memRepos:     make(map[string]*storage.SQLiteRepository),
+		llmBundles:   make(map[string]*bot.LLMBundle),
+		recallStages: make(map[string]*stages.RecallStage),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -2658,6 +2663,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.botInstances[id] = b
 	s.memRepos[id] = memRepo
 	s.llmBundles[id] = bundle
+	if s.recallStages == nil {
+		s.recallStages = make(map[string]*stages.RecallStage)
+	}
+	s.recallStages[id] = recallStage
 	s.toolManagers[id] = toolMgr
 
 	// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。

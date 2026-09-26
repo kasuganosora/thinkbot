@@ -3,11 +3,20 @@
 
 Install:  install -o root -g root -m 0755 thinkbot-notify /usr/local/sbin/thinkbot-notify
 Config:   /etc/thinkbot/notify.token  (root:root 0600, one line: tbn_...)
-          /etc/thinkbot/notify.url    (optional, one line; or env THINKBOT_NOTIFY_URL)
+          /etc/thinkbot/notify.bot    (one line: id of the bot that should notify its owner,
+                                       e.g. bot-2d8f9b087270da0bcfe177a5; or env THINKBOT_NOTIFY_BOT,
+                                       or --bot; the token must have that bot in its scope)
+          /etc/thinkbot/notify.url    (optional, one line; or env THINKBOT_NOTIFY_URL;
+                                       default http://127.0.0.1:8091/api/notify, the isolated
+                                       notify listener, notify.listen_addr)
 
 Usage:
   thinkbot-notify -s maid/smartd -l critical -t "SMART failure on /dev/sda" [-b BODY | -b - (stdin)]
-                  [-k DEDUP_KEY] [-m raw|persona] [-c CHANNEL]
+                  [--bot BOT_ID] [-k DEDUP_KEY] [-m bot|raw] [-c CHANNEL]
+
+Precedence: --bot > THINKBOT_NOTIFY_BOT > /etc/thinkbot/notify.bot, and
+THINKBOT_NOTIFY_URL > /etc/thinkbot/notify.url > built-in default. With a legacy
+per-bot URL (.../api/bots/<id>/notify) the bot may be omitted.
 
 The token is read from a file and sent in the Authorization header, so it never
 appears in the process list. Exit status: 0 = delivered or deduplicated,
@@ -21,9 +30,10 @@ import syslog
 import urllib.error
 import urllib.request
 
-DEFAULT_URL = "http://127.0.0.1:8082/api/bots/bot-2d8f9b087270da0bcfe177a5/notify"
+DEFAULT_URL = "http://127.0.0.1:8091/api/notify"
 TOKEN_FILE = os.environ.get("THINKBOT_NOTIFY_TOKEN_FILE", "/etc/thinkbot/notify.token")
 URL_FILE = "/etc/thinkbot/notify.url"
+BOT_FILE = "/etc/thinkbot/notify.bot"
 
 
 def read_first_line(path):
@@ -44,9 +54,12 @@ def main():
     ap.add_argument("-t", "--title", required=True)
     ap.add_argument("-b", "--body", default="", help="body text, or - to read stdin")
     ap.add_argument("-k", "--dedup-key", default="")
-    ap.add_argument("-m", "--mode", default="", choices=["", "raw", "persona"])
+    ap.add_argument("-m", "--mode", default="", choices=["", "bot", "raw", "persona"],
+                    help="bot (default on the server): the bot relays it in its own words; raw: fixed format")
     ap.add_argument("-c", "--channel", default="")
-    ap.add_argument("--timeout", type=float, default=70.0)
+    ap.add_argument("--bot", default="", help="bot id (default: $THINKBOT_NOTIFY_BOT or " + BOT_FILE + ")")
+    # bot mode waits for one LLM call on the server (notify.bot_timeout, default 60s)
+    ap.add_argument("--timeout", type=float, default=90.0)
     a = ap.parse_args()
 
     body = sys.stdin.read() if a.body == "-" else a.body
@@ -56,6 +69,16 @@ def main():
     if not url and os.path.exists(URL_FILE):
         url = read_first_line(URL_FILE)
     url = url or DEFAULT_URL
+    bot = a.bot or os.environ.get("THINKBOT_NOTIFY_BOT", "")
+    if not bot and os.path.exists(BOT_FILE):
+        try:
+            bot = read_first_line(BOT_FILE)
+        except OSError as e:
+            log("cannot read bot file %s: %s" % (BOT_FILE, e))
+    if not bot and "/api/bots/" not in url:
+        log("no bot configured: pass --bot, set THINKBOT_NOTIFY_BOT or write the bot id to %s "
+            "(source=%s title=%r)" % (BOT_FILE, a.source, a.title))
+        return 1
     try:
         token = read_first_line(TOKEN_FILE)
     except OSError as e:
@@ -63,6 +86,8 @@ def main():
         return 1
 
     payload = {"source": a.source, "level": a.level, "title": a.title, "body": body}
+    if bot:
+        payload["bot"] = bot
     for k, v in (("dedup_key", a.dedup_key), ("mode", a.mode), ("channel", a.channel)):
         if v:
             payload[k] = v
