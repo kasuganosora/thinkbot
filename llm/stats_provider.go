@@ -48,6 +48,18 @@ func WithStatsFeature(ctx context.Context, feature string) context.Context {
 	return context.WithValue(ctx, statsFeatureKey{}, feature)
 }
 
+// WithStatsFeatureIfUnset 仅在 ctx 尚无功能标签时设置 feature，且**不改动** skip 标记。
+//
+// 与 WithStatsFeature 的区别：后者表示「这次调用明确要记账」，会清除 WithStatsSkip；
+// 本函数只给「本来就会被记录、却没有标签」的调用补一个兜底标签（否则落库为
+// "unknown"），不改变是否记录的语义，也不覆盖上游已设置的更具体标签。
+func WithStatsFeatureIfUnset(ctx context.Context, feature string) context.Context {
+	if feature == "" || statsFeatureFromContext(ctx) != "" {
+		return ctx
+	}
+	return context.WithValue(ctx, statsFeatureKey{}, feature)
+}
+
 func statsFeatureFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(statsFeatureKey{}).(string)
 	return v
