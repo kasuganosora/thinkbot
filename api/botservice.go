@@ -918,12 +918,18 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 //     created_at 推导，重启不清零）；
 //   - agent.self_compact.min_tokens / min_messages / min_savings_tokens / min_savings_ratio：
 //     收益门槛（默认 8000 / 12 / 4000 / 0.3），不划算时直接 no-op，不调用摘要模型；
-//   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 4096；摘要长度主要由提示词目标约束），被截断即作废；
+//   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 16384，且不超过摘要模型的
+//     max_tokens；摘要长度主要由提示词目标约束）。被截断时自动以 2 倍上限（同样受模型上限约束）重试一次，
+//     仍被截断才作废。旧默认 4096 对思考模型（GLM-5.3 推理 token 计入上限）不够：2026-09-26 连续 3 次顶满 4096；
 //   - agent.self_compact.summarizer：main（默认）| light，light 使用 bot 的低成本模型（未配置则回退 main）；
-//   - agent.self_compact.reasoning_effort：透传给摘要调用（默认空=服务商默认；GLM 等对参数严格，需实测后再开）。
+//   - agent.self_compact.reasoning_effort：摘要调用的推理强度。空/auto（默认）= bot 本身配置了 reasoning_effort
+//     时用 low（bot 已是 none/minimal/low 则沿用），未配置则不发送；provider = 不发送（服务商默认，GLM-5.3 默认 max）；
+//     其它值原样透传（如 GLM-5.2 的 none）；
+//   - agent.self_compact.failure_backoff（秒）：摘要失败后该会话暂停 compact_context 的时长（默认 300，
+//     连续失败翻倍，上限 1h）；同一轮内失败一次后本轮不再允许调用。
 //
 // 检查点过期（agent.self_compact.checkpoint_ttl，秒）在加载时判定，见 context_checkpoint.go。
-func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle) *stages.SelfCompactConfig {
+func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle, botReasoningEffort string) *stages.SelfCompactConfig {
 	if !s.store.GetBool("agent.self_compact.enabled", true) {
 		return nil
 	}
@@ -942,10 +948,15 @@ func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle) *stages.SelfCompac
 	cfg.MinSavingsRatio = s.store.GetFloat64("agent.self_compact.min_savings_ratio", 0)
 	cfg.SummaryMaxTokens = s.store.GetInt("agent.self_compact.summary_max_tokens", 0)
 	cfg.SummaryReasoningEffort = strings.TrimSpace(s.store.GetString("agent.self_compact.reasoning_effort", ""))
+	if secs := s.store.GetInt("agent.self_compact.failure_backoff", 0); secs > 0 {
+		cfg.FailureBackoff = time.Duration(secs) * time.Second
+	}
 	if strings.EqualFold(strings.TrimSpace(s.store.GetString("agent.self_compact.summarizer", "main")), "light") &&
 		bundle != nil && bundle.Light != nil {
 		cfg.SummaryProvider = bundle.Light
 		cfg.SummaryModel = llm.ChatModel(bundle.LightDef.Model)
+		cfg.SummaryModelMaxTokens = bundle.LightDef.MaxTokens
+		cfg.SummaryReasoningFallback = botReasoningEffort
 	}
 	return cfg
 }
@@ -1411,7 +1422,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// 自主上下文压缩工具 compact_context：bot 可自行把旧上下文折叠为摘要。
 			// 有持久化历史的会话（web / telegram / 工作流续跑）写检查点，后续轮次
 			// 加载「摘要 + 边界后的消息」；原始 chat_messages 不删除（可回滚）。
-			SelfCompact: s.selfCompactConfig(bundle),
+			SelfCompact: s.selfCompactConfig(bundle, def.ReasoningEffort),
 		},
 		s.tp,
 		s.logger,

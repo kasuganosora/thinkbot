@@ -51,6 +51,16 @@ const CompactContextToolName = "compact_context"
 // while the summarizer call alone used 3.3k input + 3.3k output tokens (about
 // half the cost of the whole reply turn). Compaction must now remove a
 // substantial absolute and relative amount of context.
+//
+// Summary output budget (2026-09-26 18:58-18:59): with the main model glm-5.3
+// (a thinking model; reasoning tokens count toward max_tokens) three calls in
+// one turn on ~14k input all stopped at exactly 4096 output tokens, so every
+// summary was discarded as cut off, and because failures did not record a
+// cooldown the model retried immediately. The default cap is now 16k (capped
+// by the summarizer model's max output), one automatic retry with a doubled
+// cap is made on truncation, reasoning is lowered for the summary call where
+// the bot already uses reasoning_effort, and a failure pauses the tool for the
+// conversation (and for the rest of the turn).
 const (
 	defaultSelfCompactKeepRecent       = 6
 	minSelfCompactKeepRecent           = 2
@@ -60,14 +70,25 @@ const (
 	defaultSelfCompactMinTokens        = 8000
 	defaultSelfCompactMinSavings       = 4000
 	defaultSelfCompactMinSavingsRatio  = 0.3
-	defaultSelfCompactSummaryMaxTokens = 4096
-	minSelfCompactSummaryTokens        = 300
-	maxSelfCompactSummaryTokens        = 1000
-	selfCompactPromptOverheadTokens    = 1200 // system prompt + template + hints
-	minSelfCompactHeadMsgs             = 3
-	defaultSelfCompactTimeout          = 3 * time.Minute
-	maxSelfCompactFocusRunes           = 1000
-	selfCompactPreviewRunes            = 600
+	defaultSelfCompactSummaryMaxTokens = 16384
+	minSelfCompactSummaryBudget        = 1024 // never go below this even for tiny model caps
+	defaultSelfCompactFailureBackoff   = 5 * time.Minute
+	maxSelfCompactFailureBackoff       = time.Hour
+	// maxSelfCompactFailuresPerTurn: after this many failed summarizer runs
+	// in one turn (each already includes one automatic retry on truncation),
+	// compact_context refuses for the rest of the turn.
+	maxSelfCompactFailuresPerTurn = 1
+	// selfCompactReasoningAuto / selfCompactReasoningProvider are the special
+	// values of SummaryReasoningEffort (see SelfCompactConfig).
+	selfCompactReasoningAuto        = "auto"
+	selfCompactReasoningProvider    = "provider"
+	minSelfCompactSummaryTokens     = 300
+	maxSelfCompactSummaryTokens     = 1000
+	selfCompactPromptOverheadTokens = 1200 // system prompt + template + hints
+	minSelfCompactHeadMsgs          = 3
+	defaultSelfCompactTimeout       = 3 * time.Minute
+	maxSelfCompactFocusRunes        = 1000
+	selfCompactPreviewRunes         = 600
 )
 
 // ContextCheckpoint is a persisted compaction boundary for one chat session:
@@ -122,12 +143,32 @@ type SelfCompactConfig struct {
 	// fraction of the current message list (0 → 4000 tokens / 0.3).
 	MinSavingsTokens int
 	MinSavingsRatio  float64
-	// SummaryMaxTokens caps the summarizer response incl. reasoning (0 → 4096;
+	// SummaryMaxTokens caps the summarizer response incl. reasoning (0 → 16384;
 	// the summary length itself is steered by the prompt target, the cap only
-	// bounds runaway output — a cut-off summary is rejected).
+	// bounds runaway output — a cut-off summary is rejected). The effective cap
+	// never exceeds the summarizer model's max output (SummaryModelMaxTokens,
+	// or the stage's MaxTokens when the main model summarizes). On a cut-off
+	// response one retry runs with twice the cap (same model limit).
 	SummaryMaxTokens int
-	// SummaryReasoningEffort is passed to the summarizer when set (e.g. "low").
+	// SummaryModelMaxTokens is the max output of SummaryModel (0 → unknown;
+	// when the main model summarizes, LLMConfig.MaxTokens is used instead).
+	SummaryModelMaxTokens int
+	// SummaryReasoningEffort for the summarizer call:
+	//   "" / "auto" → "low" when the bot sends a reasoning_effort for normal
+	//                 turns (i.e. its provider accepts the parameter; a bot
+	//                 already on none/minimal/low keeps its own value),
+	//                 otherwise not sent;
+	//   "provider"  → never sent (provider default);
+	//   anything else is sent verbatim (e.g. "none" for GLM-5.2).
 	SummaryReasoningEffort string
+	// SummaryReasoningFallback is the bot's normal-turn reasoning effort used
+	// by the "auto" policy when the summarizer is not the stage's own model
+	// (the stage's LLMConfig.ReasoningEffort is used otherwise).
+	SummaryReasoningFallback string
+	// FailureBackoff pauses compact_context for a conversation after a failed
+	// summarization (0 → 5min; doubles per consecutive failure, max 1h).
+	// Within the same turn a failure disables the tool for the rest of the turn.
+	FailureBackoff time.Duration
 	// SummaryProvider / SummaryModel override the summarizer (e.g. the bot's
 	// light model); nil → the stage's own provider/model.
 	SummaryProvider llm.Provider
@@ -183,6 +224,65 @@ func (c *SelfCompactConfig) summaryMaxTokens() int {
 		return c.SummaryMaxTokens
 	}
 	return defaultSelfCompactSummaryMaxTokens
+}
+
+func (c *SelfCompactConfig) failureBackoff() time.Duration {
+	if c.FailureBackoff > 0 {
+		return c.FailureBackoff
+	}
+	return defaultSelfCompactFailureBackoff
+}
+
+// selfCompactBudget is the summarizer output budget: the first cap and the
+// cap of the single retry on truncation (retry <= first → no retry).
+type selfCompactBudget struct {
+	first, retry int
+}
+
+// summaryBudget derives the output caps from the configured/default cap and
+// the summarizer model's max output (modelMax <= 0 → unknown, no clamp).
+func summaryBudget(configured, modelMax int) selfCompactBudget {
+	first := configured
+	if modelMax > 0 && first > modelMax {
+		first = modelMax
+	}
+	if first < minSelfCompactSummaryBudget {
+		first = minSelfCompactSummaryBudget
+		if modelMax > 0 && first > modelMax {
+			first = modelMax
+		}
+	}
+	retry := first * 2
+	if modelMax > 0 && retry > modelMax {
+		retry = modelMax
+	}
+	return selfCompactBudget{first: first, retry: retry}
+}
+
+// summaryReasoningEffort resolves the reasoning effort of the summary call.
+// botEffort is the effort the bot uses for normal turns ("" = not sent).
+func summaryReasoningEffort(configured, botEffort string) string {
+	c := strings.ToLower(strings.TrimSpace(configured))
+	switch c {
+	case "", selfCompactReasoningAuto:
+		b := strings.ToLower(strings.TrimSpace(botEffort))
+		switch b {
+		case "":
+			// The bot never sends reasoning_effort: its provider may reject
+			// the parameter (e.g. non-reasoning OpenAI models), so don't.
+			return ""
+		case "none", "minimal", "low":
+			return b
+		default:
+			// A summary needs little reasoning; thinking tokens count toward
+			// the output cap (GLM-5.3 defaults to "max" when unset).
+			return "low"
+		}
+	case selfCompactReasoningProvider, "default", "off":
+		return ""
+	default:
+		return strings.TrimSpace(configured)
+	}
 }
 
 func (c *SelfCompactConfig) timeout() time.Duration {
@@ -249,6 +349,74 @@ func (c *selfCompactCooldowns) remaining(key string, cd time.Duration, now time.
 
 func (c *selfCompactCooldowns) mark(key string, now time.Time) { c.m.Store(key, now) }
 
+// selfCompactFailures tracks failed summarizations per conversation key so a
+// failure pauses the tool (exponential backoff) instead of inviting retries.
+type selfCompactFailures struct {
+	mu sync.Mutex
+	m  map[string]selfCompactFailure
+}
+
+type selfCompactFailure struct {
+	count int
+	until time.Time
+}
+
+// record registers a failure and returns the pause it triggers.
+func (f *selfCompactFailures) record(key string, base time.Duration, now time.Time) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.m == nil {
+		f.m = make(map[string]selfCompactFailure)
+	}
+	st := f.m[key]
+	st.count++
+	d := base
+	for i := 1; i < st.count && d < maxSelfCompactFailureBackoff; i++ {
+		d *= 2
+	}
+	if d > maxSelfCompactFailureBackoff {
+		d = maxSelfCompactFailureBackoff
+	}
+	st.until = now.Add(d)
+	f.m[key] = st
+	return d
+}
+
+func (f *selfCompactFailures) remaining(key string, now time.Time) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.m[key]; ok {
+		if r := st.until.Sub(now); r > 0 {
+			return r
+		}
+	}
+	return 0
+}
+
+func (f *selfCompactFailures) clear(key string) {
+	f.mu.Lock()
+	delete(f.m, key)
+	f.mu.Unlock()
+}
+
+// selfCompactTurnState is shared by all calls of the tool within one turn.
+type selfCompactTurnState struct {
+	mu       sync.Mutex
+	failures int
+}
+
+func (t *selfCompactTurnState) failed() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.failures
+}
+
+func (t *selfCompactTurnState) addFailure() {
+	t.mu.Lock()
+	t.failures++
+	t.mu.Unlock()
+}
+
 const compactContextDescription = `Compress (compact) YOUR OWN conversation context: older messages of the current conversation are replaced by a concise structured summary, and the most recent messages are kept verbatim. Takes effect from your next step in this turn and (where the channel persists chat history) for later turns too. The system prompt/persona and memory are never touched; raw history is kept in storage (reversible).
 
 USE it when:
@@ -259,7 +427,8 @@ USE it when:
 DO NOT use it when:
 - the chat is short or the saving would be small (it refuses with a no-op: compaction must remove several thousand tokens to pay for the summary call);
 - you are in the middle of a multi-step task whose exact intermediate outputs you still need (finish or reach a checkpoint first);
-- you already compacted recently (limited to once per turn with a cooldown) — never call it repeatedly.
+- you already compacted recently (limited to once per turn with a cooldown) — never call it repeatedly;
+- a previous call failed: it is paused after a failure, so do not retry it in the same turn.
 
 Use "focus" to list what the summary MUST preserve (open tasks, promises, IDs, file paths, decisions). Returns before/after message and token estimates plus a summary preview.`
 
@@ -357,9 +526,10 @@ type selfCompactTurn struct {
 	source        string
 	baseMessages  []llm.Message // MessageBuilder output (history + current)
 	historyIDs    []uint64      // aligned with baseMessages prefix
+	state         *selfCompactTurnState
 }
 
-// selfCompactCooldownKey keys the cooldown by conversation.
+// selfCompactCooldownKey keys the cooldown/failure backoff by conversation.
 func selfCompactCooldownKey(env *core.Envelope) string {
 	if k := conversationKey(env); k != "" {
 		return k
@@ -395,6 +565,7 @@ func (s *LLMStage) newCompactContextTool(env *core.Envelope, baseMessages []llm.
 		cooldownKey:   selfCompactCooldownKey(env),
 		source:        env.Message.Source,
 		baseMessages:  baseMessages,
+		state:         &selfCompactTurnState{},
 	}
 	if cfg.HistoryMessageIDs != nil {
 		turn.historyIDs = cfg.HistoryMessageIDs(env.Message)
@@ -467,7 +638,15 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	if live.Compacted() {
 		return nil, errors.New("compact_context: context was already compacted in this turn; do not call it again this turn")
 	}
+	if turn.state != nil && turn.state.failed() >= maxSelfCompactFailuresPerTurn {
+		logger.Infow("context_compact", append(baseFields, "status", "refused", "reason", "failed_this_turn")...)
+		return nil, errors.New("compact_context: summarization already failed in this turn; do NOT call compact_context again this turn. Continue the task with the current context")
+	}
 	now := time.Now()
+	if r := s.selfCompactFail.remaining(turn.cooldownKey, now); r > 0 {
+		logger.Infow("context_compact", append(baseFields, "status", "backoff", "remaining", r.Round(time.Second).String())...)
+		return nil, fmt.Errorf("compact_context: paused after a recent failed attempt; do not retry now (try again in %s at the earliest, only if really needed). Continue the task with the current context", r.Round(time.Second))
+	}
 	if r, src := s.cooldownRemaining(cfg, turn, now); r > 0 {
 		logger.Infow("context_compact", append(baseFields, "status", "cooldown", "remaining", r.Round(time.Second).String(), "cooldown_source", src)...)
 		return nil, fmt.Errorf("compact_context: cooling down — this conversation was compacted recently; try again in %s (only if really needed)", r.Round(time.Second))
@@ -502,29 +681,45 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	}
 
 	provider, model := s.provider, s.config.Model
+	modelMax := 0
+	if s.config.MaxTokens != nil {
+		modelMax = *s.config.MaxTokens
+	}
+	botEffort := s.config.ReasoningEffort
 	if cfg.SummaryProvider != nil {
 		provider = cfg.SummaryProvider
 		if cfg.SummaryModel != nil {
 			model = cfg.SummaryModel
 		}
+		modelMax = cfg.SummaryModelMaxTokens
+		botEffort = cfg.SummaryReasoningFallback
 	}
 	modelID := ""
 	if model != nil {
 		modelID = model.ID
 	}
+	budget := summaryBudget(cfg.summaryMaxTokens(), modelMax)
+	effort := summaryReasoningEffort(cfg.SummaryReasoningEffort, botEffort)
 
 	sumCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()
 	compactor := s.summaryCompactor(compactorKey)
 	summary, err := compactor.SummarizeForSelfCompact(sumCtx, provider, model, head, llm.SelfCompactOptions{
-		Focus:           args.Focus,
-		MaxOutputTokens: cfg.summaryMaxTokens(),
-		TargetWords:     benefit.targetWords,
-		ReasoningEffort: cfg.SummaryReasoningEffort,
+		Focus:                args.Focus,
+		MaxOutputTokens:      budget.first,
+		RetryMaxOutputTokens: budget.retry,
+		TargetWords:          benefit.targetWords,
+		ReasoningEffort:      effort,
 	})
 	if err != nil {
-		logger.Warnw("context_compact", append(baseFields, "status", "error", "stage", "summarize", "summary_model", modelID, "err", err)...)
-		return nil, fmt.Errorf("compact_context: summarization failed, context left unchanged: %v", err)
+		if turn.state != nil {
+			turn.state.addFailure()
+		}
+		pause := s.selfCompactFail.record(turn.cooldownKey, cfg.failureBackoff(), now)
+		logger.Warnw("context_compact", append(baseFields, "status", "error", "stage", "summarize", "summary_model", modelID,
+			"max_tokens", budget.first, "retry_max_tokens", budget.retry, "reasoning_effort", effort,
+			"backoff", pause.String(), "err", err)...)
+		return nil, fmt.Errorf("compact_context: summarization failed, context left unchanged: %v. Do NOT call compact_context again in this turn (it is paused for this conversation for %s); continue the task with the current context", err, pause.Round(time.Second))
 	}
 	summaryMsg := llm.ConversationSummaryMessage(summary)
 	summaryTokens := llm.EstimateMessageTokens(summaryMsg)
@@ -538,6 +733,7 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		return nil, fmt.Errorf("compact_context: %v", err)
 	}
 	s.selfCompactCD.mark(turn.cooldownKey, now)
+	s.selfCompactFail.clear(turn.cooldownKey)
 
 	kept := snapshot[boundary:]
 	messagesAfter := 1 + len(kept)

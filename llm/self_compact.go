@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -321,6 +323,12 @@ type SelfCompactOptions struct {
 	TargetWords int
 	// ReasoningEffort is passed to the provider when non-empty (e.g. "low").
 	ReasoningEffort string
+	// RetryMaxOutputTokens enables ONE retry when the first response was cut
+	// off by the output limit (finish_reason=length): the retry runs with
+	// this larger cap. 0 or <= the first cap disables the retry. Thinking
+	// models spend part of the cap on reasoning, so a long transcript can
+	// exhaust a cap that is ample for the note itself.
+	RetryMaxOutputTokens int
 }
 
 // PreviousSummary returns the anchored summary kept for incremental updates
@@ -333,6 +341,7 @@ func (c *Compactor) PreviousSummary() string {
 
 // ErrSelfCompactSummaryTruncated is returned when the summarizer hit its
 // output limit: a cut-off note would silently lose context, so it is rejected.
+// Returned errors wrap it (errors.Is) with the caps that were tried.
 var ErrSelfCompactSummaryTruncated = errors.New("summary was cut off by the output token limit")
 
 // SummarizeForSelfCompact summarizes head for a model-initiated compaction.
@@ -357,22 +366,40 @@ func (c *Compactor) SummarizeForSelfCompact(ctx context.Context, provider Provid
 		maxTokens = c.liveConfig().SummaryMaxTokens
 	}
 	temp := 0.2
-	params := GenerateParams{
-		Model:       model,
-		System:      SelfCompactSystemPrompt,
-		Messages:    []Message{UserMessage(prompt)},
-		MaxTokens:   &maxTokens,
-		Temperature: &temp,
+	call := func(maxTokens int) (*GenerateResult, error) {
+		params := GenerateParams{
+			Model:       model,
+			System:      SelfCompactSystemPrompt,
+			Messages:    []Message{UserMessage(prompt)},
+			MaxTokens:   &maxTokens,
+			Temperature: &temp,
+		}
+		if e := strings.TrimSpace(opts.ReasoningEffort); e != "" {
+			params.ReasoningEffort = &e
+		}
+		return provider.DoGenerate(WithStatsFeature(ctx, "context_compact"), params)
 	}
-	if e := strings.TrimSpace(opts.ReasoningEffort); e != "" {
-		params.ReasoningEffort = &e
-	}
-	res, err := provider.DoGenerate(WithStatsFeature(ctx, "context_compact"), params)
+	res, err := call(maxTokens)
 	if err != nil {
 		return "", err
 	}
 	if res.FinishReason == FinishReasonLength {
-		return "", ErrSelfCompactSummaryTruncated
+		retryCap := opts.RetryMaxOutputTokens
+		if retryCap <= maxTokens {
+			return "", fmt.Errorf("%w (cap %d output tokens incl. reasoning)", ErrSelfCompactSummaryTruncated, maxTokens)
+		}
+		if logger := traceid.L(ctx); logger != nil {
+			logger.Infow("context_compact: summary hit the output limit, retrying once with a larger cap",
+				"max_tokens", maxTokens, "retry_max_tokens", retryCap,
+				"output_tokens", res.Usage.OutputTokens, "reasoning_effort", opts.ReasoningEffort)
+		}
+		res, err = call(retryCap)
+		if err != nil {
+			return "", err
+		}
+		if res.FinishReason == FinishReasonLength {
+			return "", fmt.Errorf("%w (tried caps %d and %d output tokens incl. reasoning)", ErrSelfCompactSummaryTruncated, maxTokens, retryCap)
+		}
 	}
 	summary := strings.TrimSpace(res.Text)
 	if summary == "" {
