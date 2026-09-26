@@ -121,6 +121,8 @@ func NewDreamingBundle(
 		pcfg := memory.DefaultLLMProfilerConfig()
 		pcfg.Provider = provider
 		pcfg.Model = &llm.Model{ID: model}
+		// 用户画像抽取与梦境同源：跟随主模型配置的 maxTokens（接线处传入 MaxDreamTokens）。
+		pcfg.MaxTokens = dreamCfg.MaxDreamTokens
 		userProfiler = memory.NewLLMProfiler(pcfg, tp, logger)
 	}
 	tieredMgr := memory.NewTieredManager(memory.TieredManagerConfig{

@@ -242,7 +242,7 @@ const (
 	// KeyCompactionMinMessagesToCompact 触发压缩的最小消息数。默认 6。
 	KeyCompactionMinMessagesToCompact = "compaction.min_messages_to_compact"
 
-	// KeyCompactionSummaryMaxTokens 摘要的最大 token 数。默认 4096。
+	// KeyCompactionSummaryMaxTokens 摘要输出上限封顶。默认 0 = 跟随模型配置的 maxTokens。
 	KeyCompactionSummaryMaxTokens = "compaction.summary_max_tokens"
 
 	// KeyCompactionToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。默认 500。

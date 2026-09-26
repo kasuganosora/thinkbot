@@ -316,8 +316,10 @@ const SelfCompactTemplate = `Output exactly the Markdown structure inside <templ
 type SelfCompactOptions struct {
 	// Focus: optional notes from the model on what to preserve (hints only).
 	Focus string
-	// MaxOutputTokens caps the summarizer response (0 → compactor SummaryMaxTokens).
-	// With reasoning models the cap also covers reasoning tokens.
+	// MaxOutputTokens caps the summarizer response incl. reasoning tokens.
+	// Callers pass the summarizer model's configured limit (see
+	// ResolveMaxOutputTokens); 0 → compactor SummaryMaxTokens, else
+	// DefaultMaxOutputTokens.
 	MaxOutputTokens int
 	// TargetWords is the soft length target stated in the prompt (0 → none).
 	TargetWords int
@@ -363,7 +365,7 @@ func (c *Compactor) SummarizeForSelfCompact(ctx context.Context, provider Provid
 	prompt := buildSelfCompactPrompt(head, opts)
 	maxTokens := opts.MaxOutputTokens
 	if maxTokens <= 0 {
-		maxTokens = c.liveConfig().SummaryMaxTokens
+		maxTokens = ResolveMaxOutputTokens(0, c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
 	}
 	temp := 0.2
 	call := func(maxTokens int) (*GenerateResult, error) {

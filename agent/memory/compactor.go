@@ -50,6 +50,9 @@ type CompactionConfig struct {
 	// 保护、回退校验），降低喂给 LLM 的 token 量。默认开启；回退校验保证
 	// 不会因压缩失灵而退化。对应 headroom 的传输层压缩前置思路。
 	Precompress bool
+	// MaxTokens 聚类合并调用的输出上限，应取模型配置的 maxTokens（ModelDef.MaxTokens）。
+	// 0 = 未配置，退回 DefaultGenerationMaxTokens（此前完全不发 max_tokens，交给服务端默认值）。
+	MaxTokens int
 }
 
 // DefaultCompactionConfig 返回默认配置。
@@ -288,7 +291,7 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 			Content:  e.Content,
 		})
 	}
-	raw, err := ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs)
+	raw, err := ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs, c.config.MaxTokens)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +323,10 @@ type ClusterInput struct {
 // 返回的 cluster 已通过基础合法性校验（至少 2 个来源、合并内容非空、
 // 来源数上限 50），调用方可按需再施加自身的大小约束（MinClusterSize/MaxClusterSize）。
 // LLM 返回无法解析的 JSON 时返回 (nil, nil)，表示「无可合并项」，不报错。
-func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput) ([]ClusterResult, error) {
+//
+// modelMaxTokens 为模型配置的输出上限（ModelDef.MaxTokens）；0 时退回
+// DefaultGenerationMaxTokens。
+func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput, modelMaxTokens int) ([]ClusterResult, error) {
 	var sb strings.Builder
 	sb.WriteString("## Long-term memory entries to compact\n\n")
 	for _, e := range entries {
@@ -350,10 +356,12 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	sb.WriteString("\n```")
 	sb.WriteString("\nIf nothing can be merged, output an empty array [] and nothing else.")
 
+	maxTokens := llm.ResolveMaxOutputTokens(modelMaxTokens, 0, DefaultGenerationMaxTokens)
 	resp, err := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), llm.GenerateParams{
-		Model:    model,
-		System:   systemPrompt,
-		Messages: []llm.Message{llm.UserMessage(sb.String())},
+		Model:     model,
+		System:    systemPrompt,
+		Messages:  []llm.Message{llm.UserMessage(sb.String())},
+		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "compactor: LLM call")

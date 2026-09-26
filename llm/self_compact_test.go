@@ -260,11 +260,11 @@ func TestSummarizeForSelfCompact_FaithfulPromptAndHints(t *testing.T) {
 	if c.PreviousSummary() != "" {
 		t.Error("self compaction must not write the automatic compactor anchor")
 	}
-	// Defaults: SummaryMaxTokens cap, no reasoning effort.
+	// Defaults: no model limit passed and no operator cap → DefaultMaxOutputTokens, no reasoning effort.
 	if _, err := c.SummarizeForSelfCompact(context.Background(), p, ChatModel("m"), head, SelfCompactOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if p.maxTokens != DefaultCompactionConfig().SummaryMaxTokens || p.effort != "" || strings.Contains(p.prompt, "<assistant-hints>") {
+	if p.maxTokens != DefaultMaxOutputTokens || p.effort != "" || strings.Contains(p.prompt, "<assistant-hints>") {
 		t.Errorf("defaults wrong: max=%d effort=%q", p.maxTokens, p.effort)
 	}
 }

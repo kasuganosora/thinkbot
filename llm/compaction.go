@@ -85,8 +85,11 @@ type CompactionConfig struct {
 	// 默认 6。
 	MinMessagesToCompact int
 
-	// SummaryMaxTokens 摘要的最大 token 数。
-	// 默认 4096。
+	// SummaryMaxTokens 摘要输出上限的「运维封顶」（compaction.summary_max_tokens）。
+	// 0（默认）= 跟随模型配置的 maxTokens（主链路 GenerateParams.MaxTokens，即
+	// provider 模型配置页的 ModelDef.MaxTokens）；>0 只能压低模型上限，不能抬高。
+	// 模型上限未知时回退 DefaultMaxOutputTokens。见 ResolveMaxOutputTokens。
+	// 此前默认写死 4096：思考模型（推理 token 计入上限）摘要会被截断。
 	SummaryMaxTokens int
 
 	// ToolOutputThreshold 单个工具输出的 token 阈值。
@@ -113,7 +116,7 @@ func DefaultCompactionConfig() CompactionConfig {
 		TailTokens:           8000,
 		TailTurns:            DefaultTailTurns,
 		MinMessagesToCompact: 6,
-		SummaryMaxTokens:     4096,
+		SummaryMaxTokens:     0, // follow the model's configured maxTokens
 		ToolOutputThreshold:  500,
 		Auto:                 true,
 	}
@@ -208,8 +211,8 @@ func NewCompactor(config CompactionConfig) *Compactor {
 	if config.MinMessagesToCompact <= 0 {
 		config.MinMessagesToCompact = 6
 	}
-	if config.SummaryMaxTokens <= 0 {
-		config.SummaryMaxTokens = 4096
+	if config.SummaryMaxTokens < 0 {
+		config.SummaryMaxTokens = 0
 	}
 	if config.ToolOutputThreshold <= 0 {
 		config.ToolOutputThreshold = 500
@@ -499,7 +502,10 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 		System:   CompactionSystemPrompt,
 		Messages: summaryMessages,
 	}
-	maxTokens := c.liveConfig().SummaryMaxTokens
+	// Same model as the main call → same configured output limit
+	// (params.MaxTokens = ModelDef.MaxTokens); compaction.summary_max_tokens
+	// may only lower it.
+	maxTokens := ResolveMaxOutputTokens(maxTokensOf(params.MaxTokens), c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
 	summaryParams.MaxTokens = &maxTokens
 
 	// 调用 LLM 生成摘要
@@ -509,6 +515,15 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 	result, err := provider.DoGenerate(ctx, summaryParams)
 	if err != nil {
 		return params, fmt.Errorf("summarize: %w", err)
+	}
+	// A cut-off summary would silently drop context and become the anchor for
+	// later incremental summaries: keep the uncompacted messages instead.
+	if result.FinishReason == FinishReasonLength {
+		if c.logger != nil {
+			c.logger.Warnw("compaction: summary cut off by the output limit, messages left unchanged",
+				"max_tokens", maxTokens, "output_tokens", result.Usage.OutputTokens)
+		}
+		return params, nil
 	}
 
 	summary := result.Text
@@ -743,7 +758,11 @@ func InsertMidConversationMessages(messages []Message, midMsgs ...MidConversatio
 //   - 不维护全局 previousSummary 增量状态（每次独立摘要传入的 head），因此可安全
 //     嵌入 ContextManager 的裁剪流程，而不会污染主 Agent 的增量锚定摘要；
 //   - model 指定摘要所用 LLM 模型（通常与 subagent 同模型）。
-func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model string, head []Message) (string, error) {
+//
+// modelMaxTokens is the configured output limit of model (ModelDef.MaxTokens;
+// 0 = unknown). A cut-off summary is returned as an error so callers fall back
+// to their non-summary path.
+func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model string, head []Message, modelMaxTokens int) (string, error) {
 	if len(head) == 0 {
 		return "", nil
 	}
@@ -751,7 +770,7 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 		return "", fmt.Errorf("compactor: no provider for head summarization")
 	}
 	prompt := c.buildSummaryPrompt(head)
-	maxTokens := c.liveConfig().SummaryMaxTokens
+	maxTokens := ResolveMaxOutputTokens(modelMaxTokens, c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
 	temp := 0.3
 	params := GenerateParams{
 		Model:       ChatModel(model),
@@ -763,6 +782,9 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 	result, err := provider.DoGenerate(ctx, params)
 	if err != nil {
 		return "", err
+	}
+	if result.FinishReason == FinishReasonLength {
+		return "", fmt.Errorf("compactor: head summary cut off by the output limit (max_tokens %d)", maxTokens)
 	}
 	return result.Text, nil
 }

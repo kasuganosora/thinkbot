@@ -1349,7 +1349,8 @@ type CompactionConfig struct {
 	TailTurns int
 	// MinMessagesToCompact 触发压缩的最小消息数。
 	MinMessagesToCompact int
-	// SummaryMaxTokens 摘要的最大 token 数。
+	// SummaryMaxTokens 自动压缩摘要输出上限的运维封顶（含推理 token）。
+	// 0 = 跟随模型配置的 maxTokens（ModelDef.MaxTokens）；>0 只能压低模型上限。
 	SummaryMaxTokens int
 	// ToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。
 	ToolOutputThreshold int
@@ -1367,7 +1368,7 @@ func DefaultCompactionConfig() CompactionConfig {
 		TailTokens:           8000,
 		TailTurns:            2,
 		MinMessagesToCompact: 6,
-		SummaryMaxTokens:     4096,
+		SummaryMaxTokens:     0, // 0 = follow the model's configured maxTokens
 		ToolOutputThreshold:  500,
 		Auto:                 true,
 	}
@@ -1396,7 +1397,7 @@ func CompactionMetaSpecs() []MetaSpec {
 		{Key: KeyCompactionTailTokens, Category: "Compaction", Description: "压缩时保留的最近 token 数（不被摘要化，默认 8000）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionMinMessagesToCompact, Category: "Compaction", Description: "触发压缩的最小消息数（默认 6，少于则不压缩）。保存后下一轮对话即生效。"},
-		{Key: KeyCompactionSummaryMaxTokens, Category: "Compaction", Description: "LLM 生成摘要的最大 token 数（默认 4096）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionSummaryMaxTokens, Category: "Compaction", Description: "自动压缩摘要的输出上限封顶（含推理 token）。0（默认）= 跟随模型配置的 maxTokens；大于 0 时只能压低模型上限。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionToolOutputThreshold, Category: "Compaction", Description: "单个工具输出超过此 token 数（默认 500）在 pruning 阶段被裁剪为占位符。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionAuto, Category: "Compaction", Description: "是否启用自动会话压缩（默认 true）。关闭后仅做工具输出裁剪、不再 LLM 摘要。保存后下一轮对话即生效。"},
 	}
@@ -1768,7 +1769,7 @@ func DefaultMap() map[string]string {
 		KeyCompactionTailTokens:           "8000",
 		KeyCompactionTailTurns:            "2",
 		KeyCompactionMinMessagesToCompact: "6",
-		KeyCompactionSummaryMaxTokens:     "4096",
+		KeyCompactionSummaryMaxTokens:     "0",
 		KeyCompactionToolOutputThreshold:  "500",
 		KeyCompactionAuto:                 "true",
 	}

@@ -23,9 +23,10 @@ type lazyLLMJudge struct {
 
 // NewLazyLLMJudge 用指定 provider + 模型创建 lazy 二级裁决器。
 // 调用方应优先传入 bundle.Light（便宜快模型）；无 Light 时退化为 Main。
-func NewLazyLLMJudge(provider llm.Provider, modelID string) pipeline.LazyJudge {
+// modelMaxTokens 为该模型在 provider 配置中的 maxTokens（0=未知，走默认兜底）。
+func NewLazyLLMJudge(provider llm.Provider, modelID string, modelMaxTokens int) pipeline.LazyJudge {
 	return &lazyLLMJudge{
-		client:  newLLMJudgeAdapter(provider, modelID),
+		client:  newLLMJudgeAdapter(provider, modelID, modelMaxTokens),
 		modelID: modelID,
 	}
 }
