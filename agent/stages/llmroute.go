@@ -613,6 +613,8 @@ type LLMStage struct {
 	selfCompactors sync.Map
 	// selfCompactCD compact_context 的按会话冷却记录。
 	selfCompactCD selfCompactCooldowns
+	// selfCompactFail compact_context 摘要失败后的按会话退避记录。
+	selfCompactFail selfCompactFailures
 
 	// 运行时配置源：非 nil 时每次编排现取，使系统配置页修改无需重启 Bot。
 	compactionSrc  func() *llm.CompactionConfig

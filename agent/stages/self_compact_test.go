@@ -250,12 +250,24 @@ func TestCompactContext_SummarizerErrorLeavesContext(t *testing.T) {
 	if lc.Compacted() || len(store.saved) != 0 {
 		t.Fatal("failed summarization must not change anything")
 	}
-	// Failure does not start the cooldown.
+	// Failure does not start the (10min) success cooldown, but a shorter
+	// failure backoff: an immediate retry is refused (2026-09-26: three
+	// failed summaries in one turn), once it expires a retry works.
 	p.err = nil
 	p.text = "S"
 	ctx2, _ := execCtxWith(longHistory(20))
-	if _, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx2, map[string]any{}); err != nil {
-		t.Fatalf("retry after failure: %v", err)
+	if _, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx2, map[string]any{}); err == nil ||
+		!strings.Contains(err.Error(), "paused after a recent failed attempt") {
+		t.Fatalf("immediate retry after failure must be refused: %v", err)
+	}
+	s.selfCompactFail.mu.Lock()
+	st := s.selfCompactFail.m["chat:sess-1"]
+	st.until = time.Now().Add(-time.Second)
+	s.selfCompactFail.m["chat:sess-1"] = st
+	s.selfCompactFail.mu.Unlock()
+	ctx3, _ := execCtxWith(longHistory(20))
+	if _, err := s.newCompactContextTool(webEnv("sess-1"), nil).Execute(ctx3, map[string]any{}); err != nil {
+		t.Fatalf("retry after the failure backoff: %v", err)
 	}
 }
 
