@@ -1513,6 +1513,18 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 	// 触发后立即停止消费 stream channel，截断已累积文本至最后正常位置。
 	repGuard := llm.NewRepetitionGuard()
 
+	// reply-control 控制块过滤：只作用于推给前端的增量，result.Text 仍保留原文，
+	// 由下游 parseReplyControl 解析 send 信号（控制语义不变）。控制块在流里几乎
+	// 总是被切成多段，必须跨 delta 过滤，见 ReplyControlStreamFilter。
+	var rcFilter ReplyControlStreamFilter
+	publishText := func(text string) {
+		if text != "" {
+			publisher.PublishTextDelta(ctx, traceID, botID, text)
+		}
+	}
+	// flushText 在非文本事件（工具调用等）之前与流结束时放行扣住的尾部，保证顺序。
+	flushText := func() { publishText(rcFilter.Flush()) }
+
 	// 单次消费 stream channel，同时转发 text delta 到 EventBus
 	for {
 		select {
@@ -1527,7 +1539,9 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 				result.Text += p.Text
 				// 重复退化检测：在发布到前端之前先检查增量是否导致 collapse
 				if p.Text != "" && !repGuard.Feed(p.Text) {
-					// 检测到重复退化：截断已累积文本，停止消费流
+					// 检测到重复退化：截断已累积文本，停止消费流。
+					// 扣住的尾部属于被截断的退化区，直接丢弃，不再放行。
+					rcFilter = ReplyControlStreamFilter{}
 					result.Text = repGuard.Text()
 					logger.Warnw("repetition collapse detected in stream, truncating",
 						"message_id", env.Message.ID,
@@ -1537,7 +1551,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					goto streamDone
 				}
 				if p.Text != "" {
-					publisher.PublishTextDelta(ctx, traceID, botID, p.Text)
+					publishText(rcFilter.Feed(p.Text))
 				}
 			case *llm.ReasoningDeltaPart:
 				result.Reasoning += p.Text
@@ -1547,8 +1561,10 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					ToolName:   p.ToolName,
 					Input:      p.Input,
 				})
+				flushText()
 				publisher.PublishToolCall(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.Input)
 			case *llm.ToolProgressPart:
+				flushText()
 				publisher.PublishToolProgress(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, p.Content)
 			case *llm.StreamToolResultPart:
 				result.ToolResults = append(result.ToolResults, llm.ToolResult{
@@ -1557,6 +1573,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					InvocationID: p.InvocationID,
 					Output:       p.Output,
 				})
+				flushText()
 				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, p.Output, "")
 			case *llm.StreamToolErrorPart:
 				// 工具执行失败：把错误作为结果事件下发，使前端卡片能正常收尾
@@ -1571,6 +1588,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					InvocationID: p.InvocationID,
 					Output:       errMsg,
 				})
+				flushText()
 				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, nil, errMsg)
 			case *llm.FinishStepPart:
 				result.Response = p.Response
@@ -1589,6 +1607,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 		}
 	}
 streamDone:
+	flushText()
 
 	result.Steps = streamResult.Steps
 	result.Messages = streamResult.Messages
