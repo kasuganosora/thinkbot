@@ -105,6 +105,10 @@ var (
 // 思考型模型即便 reasoning_effort=low 也可能要几十秒。
 const DefaultBotTimeout = 60 * time.Second
 
+// MaxBotTimeout 是 notify.bot_timeout 的上限：模型调用 + 宽限 + 投递要落在发送脚本的
+// HTTP 超时（thinkbot-notify 默认 120s）之内，脚本才能如实拿到送达结果。
+const MaxBotTimeout = 80 * time.Second
+
 // DefaultConfig 返回内置默认配置。
 func DefaultConfig() Config {
 	return Config{
@@ -169,6 +173,9 @@ func LoadConfig(store *config.Store, botID string) Config {
 	c.BotTimeout = store.GetDuration(alias(config.KeyNotifyBotTimeout, config.KeyNotifyPersonaTimeout), c.BotTimeout)
 	if c.BotTimeout <= 0 {
 		c.BotTimeout = DefaultBotTimeout
+	}
+	if c.BotTimeout > MaxBotTimeout {
+		c.BotTimeout = MaxBotTimeout
 	}
 	c.BotMaxChars = clampInt(store.GetInt(alias(config.KeyNotifyBotMaxChars, config.KeyNotifyPersonaMaxChars), c.BotMaxChars), 100, 3000)
 	c.BotMaxTokens = store.GetInt(alias(config.KeyNotifyBotMaxTokens, config.KeyNotifyPersonaMaxTokens), 0)
