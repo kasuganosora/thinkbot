@@ -84,6 +84,9 @@ type LLMProfilerConfig struct {
 	// MinValidationScore 最低验证分数（默认 0.15）。
 	// 低于此分数的画像会被丢弃。
 	MinValidationScore float64
+	// MaxTokens 画像抽取调用的输出上限，应取模型配置的 maxTokens（ModelDef.MaxTokens）。
+	// 0 = 未配置，退回 DefaultGenerationMaxTokens。
+	MaxTokens int
 }
 
 // DefaultLLMProfilerConfig 返回默认配置。
@@ -279,7 +282,7 @@ func (p *LLMProfiler) buildClusterPrompt(cluster profileCluster, l2, existing []
 
 // callLLM 调用 LLM 并解析结果。
 func (p *LLMProfiler) callLLM(ctx context.Context, prompt string) ([]ProfileItem, error) {
-	maxTokens := DefaultGenerationMaxTokens
+	maxTokens := llm.ResolveMaxOutputTokens(p.config.MaxTokens, 0, DefaultGenerationMaxTokens)
 	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "user_profiler"), llm.GenerateParams{
 		Model:     p.config.Model,
 		System:    p.config.SystemPrompt,
