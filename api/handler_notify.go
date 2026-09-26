@@ -502,12 +502,13 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 	// 与其它内部调用共用的策略（用途 llm.PurposeNotify）：reasoning_effort + 输出上限。
 	bc.Policy = newInternalPolicy(s.store, s.logger, botEffort, bundle)
 
-	if b := s.botSvc.runningBot(botID); b != nil && b.SoulLoader() != nil && b.SoulLoader().Loaded() {
-		bc.Identity = b.SoulLoader().Content()
+	// 身份与主链路 PromptStage 同一规则：SOUL.md + system_prompt（operator_instructions）。
+	// 不含工具指引 / 技能：本路径没有工具。
+	fallbackSP := ""
+	if def != nil {
+		fallbackSP = def.SystemPrompt
 	}
-	if strings.TrimSpace(bc.Identity) == "" && def != nil {
-		bc.Identity = def.SystemPrompt
-	}
+	bc.Identity = botIdentity(s.botSvc.runningBot(botID), fallbackSP)
 
 	// 刻意不做长期记忆召回：记忆里的旧事（如某次提交、某次维修）会被模型拿来「猜原因」，
 	// 把无关信息硬连到告警上（ops 实测）。bot 模式只需要人格 + 少量近期对话定语气。

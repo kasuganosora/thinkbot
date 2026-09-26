@@ -169,6 +169,39 @@ stage := prompt.NewPromptStage("prompt", asm, prompt.DefaultPromptStageConfig(),
 - `InjectMemoryContext`（默认 true）—— 自动把 `memory.context` 注入为临时段落
 - `MemorySectionOrder`（默认 200）
 - `FallbackToConfig`（默认 true）—— 组装失败时回退到 BotConfig 的 SystemPrompt
+- `OperatorSectionName` / `OperatorSectionOrder`（默认 `operator_instructions` / 10）——
+  Registry 已有身份段落（SOUL.md）时，`bot.config` 的 `SystemPrompt` 以
+  `# Operator Instructions` 段落紧跟身份之后注入；为空则不注入
+
+**SOUL.md 与 system_prompt 的组合**（`ComposeIdentity` 同一规则，notify bot 模式也用它）：
+SOUL.md 是身份（Order=0），bot 的 `system_prompt` 字段（`AgentConfig.EffectiveSystemPrompt`）
+是运营者指令（Order=10）；没有 SOUL.md 时 `system_prompt` 本身即身份（原回退语义）。
+
+**排序确定性**：段落按 `(Order, Name)` 排序。多个工具段落 / 全部技能共用同一 Order，
+只按 Order 排序时先后会随 map 迭代变化，逐轮 system prompt 不同、前缀缓存失效。
+
+### 主链路接线（api/botservice.go）
+
+主 bot pipeline 在 Order=97（节奏门控 95 之后、LLM 100 之前）挂 `PromptStage`
+（`api/prompt_wiring.go` 的 `newMainPromptStage`，`InjectMemoryContext=false`）。
+system prompt 自上而下：
+
+| 段落 | 来源 | 性质 |
+|---|---|---|
+| `identity` (0) | SOUL.md（SoulLoader，soul 工具改写后立即重载，外部编辑 5s 内按 mtime 重载） | 稳定 |
+| `operator_instructions` (10) | bot 的 `system_prompt` | 稳定 |
+| `skill_trigger` (150) | 技能使用说明（清单与正文经 `use_skill` 按需获取） | 稳定 |
+| `tool_*` (300-325) | `ToolDef.PromptSection` 使用指引（不渲染自动生成的工具描述，描述已在工具 schema 里） | 稳定 |
+| pipeline 警告 | LLMStage `core.MergeWarnings` | 逐轮 |
+| 记忆召回 | LLMStage 追加 `KVMemoryRecall` | 逐轮 |
+| 回复控制协议 | LLMStage（仅开启的 bot，非心跳） | 稳定但在逐轮内容之后 |
+
+技能正文段落 `skill_<name>`（500）虽在 Registry 中，但主链路经 `AssemblerConfig.Exclude`
+排除：全部已启用技能正文合计可达数十万字符，按需由 `use_skill` 以 tool_result 返回。
+
+前四项构成稳定前缀（可被模型服务端前缀缓存）；稳定前缀内不得出现时间戳等逐轮变化内容
+（SOUL.md 的 `{{.Var}}` 模板变量若取逐轮值会破坏缓存）。潜水模式下 LLMStage 用
+`KVSoulContent` + 观察者指令整体替换 system prompt，SOUL 只出现一次。
 
 **旁路事件**：通过 `outbound.EmitterFromContext(ctx)` 发射 `prompt.assembled`
 （含长度、段落列表、变量统计、是否截断）。
