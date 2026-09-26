@@ -38,7 +38,11 @@ func Migrate(database *gorm.DB) error {
 	// GORM AutoMigrate 在 SQLite 存量表上不会 ALTER 加列（仅新建表时建列），
 	// 因此存量表的新增列需手动补齐，否则写入会报 “no such column”。
 	// 此处幂等：列已存在则跳过。
-	return ensureColumns(database)
+	if err := ensureColumns(database); err != nil {
+		return err
+	}
+	// 一次性数据修复（依赖上面补齐的列），每项只执行一次，见 data_migration.go。
+	return runDataMigrations(database)
 }
 
 // columnSpec 描述一个需要补齐的存量表列。
