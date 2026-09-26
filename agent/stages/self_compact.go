@@ -11,7 +11,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
-	"github.com/kasuganosora/thinkbot/agent/session"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -360,12 +359,10 @@ type selfCompactTurn struct {
 	historyIDs    []uint64      // aligned with baseMessages prefix
 }
 
+// selfCompactCooldownKey keys the cooldown by conversation.
 func selfCompactCooldownKey(env *core.Envelope) string {
-	if sid := session.SessionIDFromEnvelope(env); sid != "" {
-		return "sess:" + sid
-	}
-	if cs := chatSessionIDFromEnvelope(env); cs != "" {
-		return "chat:" + cs
+	if k := conversationKey(env); k != "" {
+		return k
 	}
 	return "chan:" + env.Message.BotID + ":" + env.Message.Source + ":" + env.Message.Channel
 }
@@ -402,7 +399,8 @@ func (s *LLMStage) newCompactContextTool(env *core.Envelope, baseMessages []llm.
 	if cfg.HistoryMessageIDs != nil {
 		turn.historyIDs = cfg.HistoryMessageIDs(env.Message)
 	}
-	compactorKey := session.SessionIDFromEnvelope(env)
+	// Conversation-scoped (never a shared per-bot fallback; "" → ephemeral).
+	compactorKey := conversationKey(env)
 	return llm.Tool{
 		Name:        CompactContextToolName,
 		Description: compactContextDescription,
@@ -419,9 +417,10 @@ func (s *LLMStage) summaryCompactor(key string) *llm.Compactor {
 		return c
 	}
 	// Automatic compaction disabled: use a default-config compactor that is
-	// still kept per session so the incremental anchor survives across turns.
+	// still kept per conversation so the incremental anchor survives across
+	// turns. Without a conversation key it is ephemeral (never shared).
 	if key == "" {
-		key = "__default__"
+		return llm.NewCompactor(llm.DefaultCompactionConfig()).SetLogger(s.logger)
 	}
 	v, _ := s.selfCompactors.LoadOrStore(key, llm.NewCompactor(llm.DefaultCompactionConfig()).SetLogger(s.logger))
 	return v.(*llm.Compactor)

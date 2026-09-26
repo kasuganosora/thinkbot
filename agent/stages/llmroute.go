@@ -17,7 +17,6 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
-	"github.com/kasuganosora/thinkbot/agent/session"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -623,17 +622,18 @@ type LLMStage struct {
 
 // getCompactor 返回指定会话的 *llm.Compactor（惰性创建）。
 // 返回 (compactor, true)；当 s.config.Compaction 为 nil 时返回 (nil, false)。
-// 按 sid 隔离使压缩摘要状态在同一会话内跨轮持久、且不与并发会话串扰。
+// 按会话 key（conversationKey）隔离使压缩摘要状态在同一会话内跨轮持久、且不与并发会话串扰。
+// key 为空时返回一次性的临时 compactor（不入表）：绝不回落到按 bot 共享的
+// "__default__"，否则上一段会话的 previousSummary 会串进另一段会话。
 func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
 	cfg := s.liveCompaction()
 	if cfg == nil {
 		return nil, false
 	}
-	if sid == "" {
-		sid = "__default__"
-	}
-	if v, ok := s.compactors.Load(sid); ok {
-		return v.(*llm.Compactor), true
+	if sid != "" {
+		if v, ok := s.compactors.Load(sid); ok {
+			return v.(*llm.Compactor), true
+		}
 	}
 	c := llm.NewCompactor(*cfg).SetLogger(s.logger)
 	if s.compactionSrc != nil {
@@ -644,6 +644,9 @@ func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
 			}
 			return *p
 		})
+	}
+	if sid == "" {
+		return c, true
 	}
 	actual, _ := s.compactors.LoadOrStore(sid, c)
 	return actual.(*llm.Compactor), true
@@ -918,10 +921,12 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 
 	// 注入延迟加载工具管理器（defer_loading / tool search）。为 nil 时
-	// orchestrator 不做拦截。按当前会话解析各自的 ToolDeferral 实例，
-	// 保证延迟加载状态在同一会话内跨轮持久、且不与其它并发会话串扰。
+	// orchestrator 不做拦截。按当前会话（conversationKey：session / chat 会话 /
+	// bot+来源+channel）解析各自的 ToolDeferral 实例，保证延迟加载状态在同一会话内
+	// 跨轮持久、且不与其它并发会话串扰；编排循环另为每轮 Fork 独立快照
+	// （llm.ToolDeferral.Fork），并发轮次不会互相覆盖工具列表。
 	if s.config.ToolDeferral != nil {
-		cfg.ToolDeferral = s.config.ToolDeferral.ForSession(session.SessionIDFromEnvelope(env))
+		cfg.ToolDeferral = s.config.ToolDeferral.ForSession(conversationKey(env))
 	}
 
 	// 注入落盘指针接收器：被截断的工具输出把完整原文写入工作空间，主上下文
@@ -963,7 +968,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		prepareStep = llm.NewReducePrepareStepCallback(rc)
 	}
 	if s.liveCompaction() != nil {
-		if compactor, ok := s.getCompactor(session.SessionIDFromEnvelope(env)); ok {
+		if compactor, ok := s.getCompactor(conversationKey(env)); ok {
 			compactHook := llm.CompactionPrepareStepWithProvider(compactor, s.provider)(ctx)
 			base := prepareStep
 			prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {

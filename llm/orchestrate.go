@@ -237,18 +237,25 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	fullTools = stripSandboxPrefixes(fullTools)
 
 	deferActive := false
-	if cfg.ToolDeferral != nil {
-		cfg.ToolDeferral.SetTools(fullTools)
-		if cfg.ToolDeferral.HasDeferred() {
+	// Per-run fork: this run's tool list and step counter live in td only,
+	// so a concurrent run on the same (conversation or shared) deferral can
+	// never replace them mid-turn. Loaded state is written back at the end.
+	td, endDeferralRun := beginDeferralRun(cfg)
+	var viewGuard *toolViewGuard
+	if td != nil {
+		td.SetTools(fullTools)
+		if td.HasDeferred() {
 			deferActive = true
-			cfg.Params.Tools = cfg.ToolDeferral.View()
-			fullTools = append(fullTools, cfg.ToolDeferral.ExecTool())
+			cfg.Params.Tools = td.View()
+			viewGuard = newToolViewGuard(cfg.Params.Tools)
+			fullTools = append(fullTools, td.ExecTool())
 		} else {
 			cfg.Params.Tools = fullTools
 		}
 	} else {
 		cfg.Params.Tools = fullTools
 	}
+	defer endDeferralRun()
 
 	// Single-step fast path
 	if cfg.MaxSteps == 0 {
@@ -322,8 +329,9 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		// Refresh the model-facing tool view so tools loaded via tool_search
 		// (or auto-loaded on reference) become visible this step.
 		if deferActive {
-			cfg.ToolDeferral.SetStep(step)
-			params.Tools = cfg.ToolDeferral.View()
+			td.SetStep(step)
+			params.Tools = td.View()
+			viewGuard.check(ctx, step, params.Tools)
 		}
 		// Re-apply cache breakpoints for the current message set (the
 		// last messages may have changed since the initial placement).
@@ -344,12 +352,12 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		// schema isn't loaded yet, load it and re-prompt instead of executing
 		// with guessed arguments.
 		if deferActive {
-			if names := loadTriggeredDeferredTools(result.ToolCalls, toolMap, cfg.ToolDeferral); len(names) > 0 {
+			if names := loadTriggeredDeferredTools(result.ToolCalls, toolMap, td); len(names) > 0 {
 				if logger := traceid.L(ctx); logger != nil {
 					logger.Debugw("defer_loading: auto-load on reference", "tools", names)
 				}
 				for _, n := range names {
-					cfg.ToolDeferral.Load(n)
+					td.Load(n)
 				}
 				// Execute any sibling tool calls that are already ready
 				// (non-deferred or already-loaded deferred tools) so we don't
@@ -477,7 +485,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		if deferActive {
 			for _, tc := range result.ToolCalls {
 				if t, ok := toolMap[tc.ToolName]; ok && t != nil && t.DeferredLoad {
-					cfg.ToolDeferral.Touch(tc.ToolName)
+					td.Touch(tc.ToolName)
 				}
 			}
 		}
@@ -567,12 +575,18 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 	fullTools = stripSandboxPrefixes(fullTools)
 
 	deferActive := false
-	if cfg.ToolDeferral != nil {
-		cfg.ToolDeferral.SetTools(fullTools)
-		if cfg.ToolDeferral.HasDeferred() {
+	// Per-run fork: this run's tool list and step counter live in td only,
+	// so a concurrent run on the same (conversation or shared) deferral can
+	// never replace them mid-turn. Loaded state is written back at the end.
+	td, endDeferralRun := beginDeferralRun(cfg)
+	var viewGuard *toolViewGuard
+	if td != nil {
+		td.SetTools(fullTools)
+		if td.HasDeferred() {
 			deferActive = true
-			cfg.Params.Tools = cfg.ToolDeferral.View()
-			fullTools = append(fullTools, cfg.ToolDeferral.ExecTool())
+			cfg.Params.Tools = td.View()
+			viewGuard = newToolViewGuard(cfg.Params.Tools)
+			fullTools = append(fullTools, td.ExecTool())
 		} else {
 			cfg.Params.Tools = fullTools
 		}
@@ -589,6 +603,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			cfg.Params.Tools = fullTools
 		}
 		cfg.Params.Messages = PatchToolCalls(cfg.Params.Messages)
+		endDeferralRun()
 		return prov.DoStream(ctx, cfg.Params)
 	}
 
@@ -605,6 +620,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 	sr := &StreamResult{Stream: ch}
 
 	go func() {
+		defer endDeferralRun()
 		send := func(part StreamPart) bool {
 			select {
 			case ch <- part:
@@ -633,8 +649,9 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			// Refresh the model-facing tool view so tools loaded via tool_search
 			// (or auto-loaded on reference) become visible this step.
 			if deferActive {
-				cfg.ToolDeferral.SetStep(step)
-				params.Tools = cfg.ToolDeferral.View()
+				td.SetStep(step)
+				params.Tools = td.View()
+				viewGuard.check(ctx, step, params.Tools)
 			}
 			// Re-apply cache breakpoints for the current message set.
 			applyProviderCachePolicy(&params, prov.Name())
@@ -717,12 +734,12 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			// schema isn't loaded yet, load it and re-prompt instead of executing
 			// with guessed arguments.
 			if deferActive {
-				if names := loadTriggeredDeferredTools(stepToolCalls, toolMap, cfg.ToolDeferral); len(names) > 0 {
+				if names := loadTriggeredDeferredTools(stepToolCalls, toolMap, td); len(names) > 0 {
 					if logger := traceid.L(ctx); logger != nil {
 						logger.Debugw("defer_loading: auto-load on reference", "tools", names)
 					}
 					for _, n := range names {
-						cfg.ToolDeferral.Load(n)
+						td.Load(n)
 					}
 					// Execute any sibling tool calls that are already ready
 					// (non-deferred or already-loaded deferred tools) so we don't
@@ -865,7 +882,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			if deferActive {
 				for _, tc := range stepToolCalls {
 					if t, ok := toolMap[tc.ToolName]; ok && t != nil && t.DeferredLoad {
-						cfg.ToolDeferral.Touch(tc.ToolName)
+						td.Touch(tc.ToolName)
 					}
 				}
 			}
