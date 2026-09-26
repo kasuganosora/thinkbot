@@ -383,6 +383,26 @@ func extractPublicReply(clean string) string {
 	return strings.TrimSpace(strayTagRe.ReplaceAllString(clean, ""))
 }
 
+// CleanOutboundText 是所有渠道共用的出站正文清洗（门控 / <public> 提取之前的那一段），
+// 依次执行：
+//
+//  1. memory.StripThinking：部分模型（DeepSeek-R1 / GLM / QwQ 等）把推理过程以
+//     <think>...</think> 内联在正文里，而非放进结构化的 Reasoning 字段。这些内容属于
+//     「心里话」，绝不能发给用户（项目原先只在记忆写入侧清洗，出站链路必须补上）。
+//  2. memory.StripInternalState：纵深防御，剥离模型从系统提示里复述出来的内部状态
+//     （记忆用量指标等），例如把 "[2,206/2,200 chars]" 写成「当前记忆已接近容量上限
+//     （2,206/2,200 字符）」公开发到时间线。
+//  3. memory.StripContextMarkers：纵深防御，剥离入站阶段注入的上下文标记
+//     （[Reply to ...] / [Renote from ...] / [note_id: ...]）。模型偶发会原样回显到
+//     回复开头，导致对外帖子出现诡异方括号前缀。
+//
+// 回复控制门控开启时，LLMStage.Process 随后再做 parseReplyControl + extractPublicReply。
+func CleanOutboundText(text string) string {
+	text = memory.StripThinking(text)
+	text = memory.StripInternalState(text)
+	return memory.StripContextMarkers(text)
+}
+
 // explicitPublicReply 仅当正文含**显式且成对**的 <public>...</public> 区块时，返回其公开
 // 内文；否则返回空串。
 //
@@ -1277,22 +1297,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
-	// 清洗思考内容：部分模型（DeepSeek-R1/ GLM / QwQ 等）把推理过程以
-	// <think>...</think> 内联在正文里，而非放进结构化的 Reasoning 字段。
-	// 这些内容属于「心里话」，绝不能发给用户。
-	// 注意：项目原先只在记忆写入侧清洗，出站链路完全没清 —— 必须在此补上。
-	replyText := memory.StripThinking(result.Text)
-
-	// 纵深防御：剥离模型从系统提示里复述出来的内部状态（记忆用量指标等），
-	// 例如把 "[2,206/2,200 chars]" 写成「当前记忆已接近容量上限（2,206/2,200 字符）」
-	// 公开发到时间线。思考清洗后再次过滤内部指标，确保不泄漏。
-	replyText = memory.StripInternalState(replyText)
-
-	// 纵深防御：剥离入站阶段注入的上下文标记（[Reply to ...] / [Renote from ...] /
-	// [note_id: ...]）。这些标记仅供模型理解上下文，但模型偶发会原样回显到回复开头，
-	// 导致对外帖子出现诡异方括号前缀。在出站前兜底剥离（与 StripThinking / StripInternalState 同一思路）。
+	// 共享出站清洗（思考内容 / 内部状态 / 上下文标记），见 CleanOutboundText。
 	// 由于后续 clean / pub 均由 replyText 派生，此处一处调用即可覆盖所有出站路径。
-	replyText = memory.StripContextMarkers(replyText)
+	replyText := CleanOutboundText(result.Text)
 
 	// 回复控制门控（opt-in）：解析结尾控制 JSON，失败/缺失/send:false 一律不出站。
 	// 放在「清洗后空检查」之前——若模型 send:true 但正文为空，后续空检查会照常拦截；
@@ -1517,13 +1524,25 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 	// 由下游 parseReplyControl 解析 send 信号（控制语义不变）。控制块在流里几乎
 	// 总是被切成多段，必须跨 delta 过滤，见 ReplyControlStreamFilter。
 	var rcFilter ReplyControlStreamFilter
+	// 出站标签清洗（与 Process 里的共享出站清洗同口径）：丢弃 <think>/<internal> 块、
+	// 去掉 <public> 标签保留内文、去掉残留标签。串在 reply-control 过滤之后，
+	// 使 Web 渠道推送的 delta 与其他渠道最终发出的内容一致。门控条件与 Process 相同。
+	ocFilter := NewOutputCleanStreamFilter(s.config.RequireReplyControl && !env.IsOutreach())
 	publishText := func(text string) {
 		if text != "" {
 			publisher.PublishTextDelta(ctx, traceID, botID, text)
 		}
 	}
-	// flushText 在非文本事件（工具调用等）之前与流结束时放行扣住的尾部，保证顺序。
-	flushText := func() { publishText(rcFilter.Flush()) }
+	feedText := func(delta string) { publishText(ocFilter.Feed(rcFilter.Feed(delta))) }
+	// flushText 在非文本事件（工具调用等）之前放行 reply-control 过滤扣住的尾部，保证顺序。
+	// 标签过滤的状态（如尚未闭合的 <internal>）跨工具事件保留：result.Text 是各步文本的拼接，
+	// 门控也是在拼接后的全文上判定的。
+	flushText := func() { publishText(ocFilter.Feed(rcFilter.Flush())) }
+	// endText 在流结束时放行所有仍扣住的内容（未闭合的 think/internal 块直接丢弃）。
+	endText := func() {
+		flushText()
+		publishText(ocFilter.Flush())
+	}
 
 	// 单次消费 stream channel，同时转发 text delta 到 EventBus
 	for {
@@ -1542,6 +1561,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					// 检测到重复退化：截断已累积文本，停止消费流。
 					// 扣住的尾部属于被截断的退化区，直接丢弃，不再放行。
 					rcFilter = ReplyControlStreamFilter{}
+					ocFilter = NewOutputCleanStreamFilter(ocFilter.replyTags)
 					result.Text = repGuard.Text()
 					logger.Warnw("repetition collapse detected in stream, truncating",
 						"message_id", env.Message.ID,
@@ -1551,7 +1571,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					goto streamDone
 				}
 				if p.Text != "" {
-					publishText(rcFilter.Feed(p.Text))
+					feedText(p.Text)
 				}
 			case *llm.ReasoningDeltaPart:
 				result.Reasoning += p.Text
@@ -1607,7 +1627,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 		}
 	}
 streamDone:
-	flushText()
+	endText()
 
 	result.Steps = streamResult.Steps
 	result.Messages = streamResult.Messages
