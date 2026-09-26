@@ -1738,7 +1738,7 @@ func NotifyMetaSpecs() []MetaSpec {
 		{Key: KeyNotifyBotTimeout, Category: "Notify", Description: "bot 模式 LLM 超时（默认 60s，上限 80s；超时 / 失败回落 raw）。旧名 notify.persona_timeout 仍可用"},
 		{Key: KeyNotifyBotMaxChars, Category: "Notify", Description: "bot 模式输出字符上限（默认 1000）。旧名 notify.persona_max_chars 仍可用"},
 		{Key: KeyNotifyBotMaxTokens, Category: "Notify", Description: "bot 模式 max_tokens 的额外封顶：在内部调用策略（llm.internal_max_tokens.notify / .default，再无则模型 maxTokens）之上再压低；0（默认）= 不额外封顶，>0 只能调低。reasoning_effort 见 llm.internal_reasoning.notify。旧名 notify.persona_max_tokens 仍可用"},
-		{Key: KeyNotifyBotHistoryMessages, Category: "Notify", Description: "bot 模式带入的主人会话近期消息条数（默认 20；0＝不带历史）"},
+		{Key: KeyNotifyBotHistoryMessages, Category: "Notify", Description: "bot 模式带入的主人会话近期消息条数（默认 6，只用于语气；0＝不带历史）"},
 		{Key: KeyNotifyRecordHistory, Category: "Notify", Description: "投递成功后写入主人会话历史（默认 true）"},
 	}
 }
@@ -1876,7 +1876,7 @@ func DefaultMap() map[string]string {
 		KeyNotifyBotTimeout:          "60s",
 		KeyNotifyBotMaxChars:         "1000",
 		KeyNotifyBotMaxTokens:        "0",
-		KeyNotifyBotHistoryMessages:  "20",
+		KeyNotifyBotHistoryMessages:  "6",
 		KeyNotifyRecordHistory:       "true",
 
 		// 内部 LLM 调用策略（per-purpose 键留空 / 0 = 继承 default）

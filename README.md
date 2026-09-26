@@ -17,7 +17,7 @@
 - **Token 用量管理**：月度配额（Bot/Channel/Chat 三级限额 + 超额拦截）、单次预算控制、全链路记账（SubAgent/Workflow/Memory 均不漏记）
 - **主动参与**：三层漏斗决策引擎（规则 → LLM 快判 → 时序门控）
 - **自主心跳**：per-bot 周期唤醒并走完整编排链路，准入关卡 + 发言闸门 + 频控三级节制
-- **外部通知（notify）**：mdadm / smartd / cron 等本机程序经 `POST /api/notify`（请求体 `bot` 指定经哪个 bot；推荐只挂在独立本地监听器 `notify.listen_addr`，如宿主 `127.0.0.1:8091`）让 bot 把告警发到主人私聊。token 只存哈希、带 bot 作用域（bot 列表或全部）；默认 bot 模式由 bot 以自身人格 / 长期记忆 / 主人会话上下文提炼要点后用自己的话发送（无工具、通知作为不可信数据，critical 附原文要点，失败回落原文），也可 raw 原样转发；绕过 reply_control 等闸门，按 bot 去重与限流，写审计与主人会话历史。见 [docs/notify.md](docs/notify.md)
+- **外部通知（notify）**：mdadm / smartd / cron 等本机程序经 `POST /api/notify`（请求体 `bot` 指定经哪个 bot；推荐只挂在独立本地监听器 `notify.listen_addr`，如宿主 `127.0.0.1:8091`）让 bot 把告警发到主人私聊。token 只存哈希、带 bot 作用域（bot 列表或全部）；默认 bot 模式由 bot 以自身人格（SOUL.md + system_prompt，不召回长期记忆，少量近期对话只定语气）用自己的话转述，标识符须逐字照抄、不揣测原因（无工具、通知作为不可信数据；warn/critical 附原文块，info 若有标识符未逐字出现也附原文块；失败回落原文），也可 raw 原样转发；绕过 reply_control 等闸门，按 bot 去重与限流，写审计与主人会话历史。见 [docs/notify.md](docs/notify.md)
 - **工作流引擎**：基于 DAG 的多步骤自动化工作流
 - **技能系统**：从文件系统动态加载可扩展技能
 - **MCP 集成**：支持 Model Context Protocol 工具服务器

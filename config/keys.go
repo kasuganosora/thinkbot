@@ -548,7 +548,7 @@ const (
 	// KeyNotifyBotMaxTokens bot 模式 max_tokens 的额外封顶（默认 0＝不额外封顶；>0 只能调低）。
 	// 基础上限走内部调用策略：llm.internal_max_tokens.notify / .default，再无则模型 maxTokens。
 	KeyNotifyBotMaxTokens = "notify.bot_max_tokens"
-	// KeyNotifyBotHistoryMessages bot 模式带入的主人会话近期消息条数（默认 20；0＝不带历史）。
+	// KeyNotifyBotHistoryMessages bot 模式带入的主人会话近期消息条数（默认 6，只用于语气；0＝不带历史）。
 	KeyNotifyBotHistoryMessages = "notify.bot_history_messages"
 	// KeyNotifyPersonaTimeout / KeyNotifyPersonaMaxChars / KeyNotifyPersonaMaxTokens 是
 	// bot_* 三个键的旧名（persona 模式时代），仅在新键未设置时作为别名读取。

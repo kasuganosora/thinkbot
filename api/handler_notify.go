@@ -312,39 +312,6 @@ func (s *BotService) runningBot(botID string) *bot.Bot {
 	return s.botInstances[botID]
 }
 
-// notifyRecall 用该 bot 对话 pipeline 里的同一个 RecallStage 召回长期记忆：
-// 构造一条「主人私聊」形态的消息（bot / 会话 / 用户三 scope 与入站 Telegram 私聊一致，
-// 通知标题 + 正文作为相关性召回的 query），读取其注入的 KVMemoryRecall。失败返回空串。
-func (s *BotService) notifyRecall(ctx context.Context, botID string, t notify.Target, n notify.Notification) string {
-	if s == nil {
-		return ""
-	}
-	s.mu.RLock()
-	rs := s.recallStages[botID]
-	s.mu.RUnlock()
-	if rs == nil {
-		return ""
-	}
-	env := core.NewEnvelope(core.Message{
-		BotID:    botID,
-		Source:   t.ChannelName,
-		Channel:  t.ChatID,
-		UserID:   t.ChatID,
-		ChatType: core.ChatPrivate,
-		Text:     strings.TrimSpace(n.Title + "\n" + n.Body),
-	})
-	out, err := rs.Process(ctx, env)
-	if err != nil || out == nil {
-		return ""
-	}
-	if v, ok := out.Get(core.KVMemoryRecall); ok {
-		if text, ok := v.(string); ok {
-			return text
-		}
-	}
-	return ""
-}
-
 // notifyResolver 解析投递目标：渠道 = 请求覆盖 / 配置默认（类型或实例名）；
 // 会话 = 请求 target（需 notify.allow_target_override）/ 配置 owner_target /
 // 自动发现（活跃 admin 用户在该平台的 identity_mappings 绑定，Telegram 私聊 chat id = 用户 id）。
@@ -542,7 +509,8 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 		bc.Identity = def.SystemPrompt
 	}
 
-	bc.Memory = s.botSvc.notifyRecall(ctx, botID, t, n)
+	// 刻意不做长期记忆召回：记忆里的旧事（如某次提交、某次维修）会被模型拿来「猜原因」，
+	// 把无关信息硬连到告警上（ops 实测）。bot 模式只需要人格 + 少量近期对话定语气。
 
 	if historyLimit > 0 && s.chatHistory != nil {
 		sid := notifySessionID(t)

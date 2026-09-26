@@ -155,7 +155,6 @@ func newHarness(t *testing.T) *harness {
 		ModelMaxTokens: 4096,
 		BotName:        "栞娜",
 		Identity:       "You are Shiina, a maid. You call your owner Ojou-sama.",
-		Memory:         "[Long-term memory]\n- Ojou-sama's NAS is called maid, it has a RAID1 /dev/md0.",
 		History: []llm.Message{
 			llm.UserMessage("I'm replacing a disk in maid tonight."),
 			llm.AssistantMessage("Understood, Ojou-sama. Good luck!"),
@@ -653,7 +652,7 @@ func TestDefaultModeIsBot(t *testing.T) {
 	}
 }
 
-func TestBotModeUsesIdentityMemoryHistoryAndNoTools(t *testing.T) {
+func TestBotModeUsesIdentityHistoryAndNoTools(t *testing.T) {
 	h := newHarness(t)
 	h.cfg.DefaultMode = ModeBot
 	h.cfg.BotHistoryMessages = 7
@@ -678,8 +677,10 @@ func TestBotModeUsesIdentityMemoryHistoryAndNoTools(t *testing.T) {
 	if len(p.Tools) != 0 || p.ToolChoice != nil {
 		t.Fatalf("bot-mode call must have no tools: %+v %+v", p.Tools, p.ToolChoice)
 	}
-	// system：真实人格 + 记忆 + 转述任务
-	for _, want := range []string{"You are Shiina, a maid", "RAID1 /dev/md0", "UNTRUSTED DATA", "NO tools", "Notification relay"} {
+	// system：真实人格 + 转述任务（含逐字复制 / 不揣测原因的约束）；不带长期记忆
+	for _, want := range []string{"You are Shiina, a maid", "UNTRUSTED DATA", "NO tools", "Notification relay",
+		"Copy every identifier EXACTLY", "/dev/md/md-test stays /dev/md/md-test", "Do NOT speculate about causes",
+		"unless the notification itself says so", "ONLY so you keep your usual tone"} {
 		if !strings.Contains(p.System, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, p.System)
 		}
@@ -703,10 +704,10 @@ func TestBotModeUsesIdentityMemoryHistoryAndNoTools(t *testing.T) {
 	if p.ReasoningEffort != nil {
 		t.Fatalf("bot without reasoning_effort must not get one: %v", *p.ReasoningEffort)
 	}
-	// warn/info：只发 bot 的话（无原文块）
+	// warn：bot 的话 + 原文块
 	txt := h.del.sent[0].text
-	if txt != h.prov.text {
-		t.Fatalf("warn text must be the bot's text only: %q", txt)
+	if !strings.HasPrefix(txt, h.prov.text) || !strings.Contains(txt, "—— 原始告警 ——") || !strings.Contains(txt, req.Title) {
+		t.Fatalf("warn text must be the bot's text plus the raw block: %q", txt)
 	}
 	// 历史：系统备注（原文要点）在前 + bot 原话（assistant）
 	if len(h.hist.calls) != 1 || len(h.hist.calls[0]) != 2 {
@@ -1068,12 +1069,13 @@ func TestCriticalBotRawBlockKeepsHardwareFieldsAndFullMdstat(t *testing.T) {
 	if strings.Contains(txt, "[truncated]") {
 		t.Fatalf("mdstat must not be truncated:\n%s", txt)
 	}
-	// info/warn 仍只发 bot 文本
 	h2 := newHarness(t)
 	h2.cfg.DefaultMode = ModeBot
 	h2.prov.text = "Rebuild finished~"
 	req.Level, req.DedupKey = "info", "x"
-	if res := h2.svc.Notify(context.Background(), "bot-a", caller, req); !res.BotUsed || h2.del.sent[0].text != "Rebuild finished~" {
+	// info 但丢了标识符（mdstat 里的设备等）→ 仍附原文块
+	if res := h2.svc.Notify(context.Background(), "bot-a", caller, req); !res.BotUsed ||
+		!strings.Contains(h2.del.sent[0].text, "—— 原始通知 ——") || !strings.Contains(h2.del.sent[0].text, mdstat) {
 		t.Fatalf("%+v %q", res, h2.del.sent)
 	}
 }
@@ -1183,5 +1185,96 @@ func TestBotTimeoutClamped(t *testing.T) {
 	st.SetTemporary(config.KeyNotifyBotTimeout, "10m")
 	if c := LoadConfig(st, "bot-a"); c.BotTimeout != MaxBotTimeout {
 		t.Fatalf("got %s", c.BotTimeout)
+	}
+}
+
+func TestLevelRequired(t *testing.T) {
+	cfg := DefaultConfig()
+	for _, lvl := range []string{"", "  ", "loud"} {
+		if _, err := Validate(Request{Source: "maid/test", Level: lvl, Title: "t"}, cfg, time.Now()); err == nil {
+			t.Fatalf("level %q must be rejected", lvl)
+		}
+	}
+	if _, err := Validate(Request{Source: "maid/test", Title: "t"}, cfg, time.Now()); err == nil || !strings.Contains(err.Error(), "level is required") {
+		t.Fatalf("err = %v", err)
+	}
+	h := newHarness(t)
+	res := h.svc.Notify(context.Background(), "bot-a", caller, Request{Source: "maid/test", Title: "notify test", Body: "hello"})
+	if res.HTTPStatus != 400 || res.Status != StatusRejected || h.del.count() != 0 {
+		t.Fatalf("%+v", res)
+	}
+}
+
+// ops 实测：模型把 /dev/md/md-test 写成 /dev/md-md-test。
+func mdTestReq(level string) Request {
+	return Request{Source: "maid/mdadm", Level: level, Title: "mdadm TestMessage on /dev/md/md-test",
+		Body: "host: maid\nevent: TestMessage\narray: /dev/md/md-test\ncomponent: -\n\n/proc/mdstat:\nmd127 : active raid1 loop1[1] loop0[0]\n      102400 blocks super 1.2 [2/2] [UU]"}
+}
+
+func TestMangledIdentifierAppendsRawBlockAtAnyLevel(t *testing.T) {
+	for _, level := range []string{"info", "warn", "critical"} {
+		t.Run(level, func(t *testing.T) {
+			h := newHarness(t)
+			h.cfg.DefaultMode = ModeBot
+			h.prov.text = "Ojou-sama, mdadm sent a test message for /dev/md-md-test on maid. All fine~"
+			res := h.svc.Notify(context.Background(), "bot-a", caller, mdTestReq(level))
+			if !res.Delivered || !res.BotUsed {
+				t.Fatalf("%+v", res)
+			}
+			txt := h.del.sent[0].text
+			if !strings.HasPrefix(txt, h.prov.text) || !strings.Contains(txt, "array: /dev/md/md-test") || !strings.Contains(txt, "md127 : active raid1") {
+				t.Fatalf("raw block with the correct device must be appended:\n%s", txt)
+			}
+		})
+	}
+	n := Notification{Level: LevelInfo, Source: "maid/mdadm", Title: mdTestReq("info").Title, Body: mdTestReq("info").Body}
+	missing := MissingIdentifiers(n, "mdadm test for /dev/md-md-test on maid, md127 ok")
+	if len(missing) != 1 || missing[0] != "/dev/md/md-test" {
+		t.Fatalf("missing = %v", missing)
+	}
+}
+
+func TestInfoWithAllIdentifiersGetsFooterOnly(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.DefaultMode = ModeBot
+	h.prov.text = "Ojou-sama, a test message from mdadm: /dev/md/md-test on maid, md127 is [UU]. Nothing to do~"
+	req := mdTestReq("info")
+	if res := h.svc.Notify(context.Background(), "bot-a", caller, req); !res.BotUsed {
+		t.Fatalf("%+v", res)
+	}
+	txt := h.del.sent[0].text
+	if txt != h.prov.text+"\n\n— maid/mdadm · "+req.Title {
+		t.Fatalf("info with nothing missing must get a one-line footer only:\n%q", txt)
+	}
+	// ops 的 info 测试：没有标识符的普通通知 → 脚注
+	h2 := newHarness(t)
+	h2.cfg.DefaultMode = ModeBot
+	h2.prov.text = "Ojou-sama, maid says hello~"
+	h2.svc.Notify(context.Background(), "bot-a", caller, Request{Source: "maid/test", Level: "info", Title: "notify test", Body: "hello from maid"})
+	if got := h2.del.sent[0].text; got != "Ojou-sama, maid says hello~\n\n— maid/test · notify test" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestExtractIdentifiers(t *testing.T) {
+	n := Notification{Title: "SMART Health on sda (host nas01.example.com)",
+		Body: "host: maid\ndevice: /dev/sda [SAT]\nmodel/serial: WDC WD40EFRX-68N32N0, S/N:WD-WCC7K1234567\n" +
+			"peer 192.168.1.20 / fe80::1:2:3\ncommit 76646c6 broke it\nsectors 7813772288 md0"}
+	got := ExtractIdentifiers(n)
+	for _, want := range []string{"maid", "/dev/sda", "nas01.example.com", "192.168.1.20", "76646c6", "WD40EFRX-68N32N0", "WD-WCC7K1234567", "md0"} {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q in %v", want, got)
+		}
+	}
+	for _, g := range got {
+		if g == "7813772288" || g == "SMART" {
+			t.Fatalf("%q must not be treated as an identifier: %v", g, got)
+		}
 	}
 }
