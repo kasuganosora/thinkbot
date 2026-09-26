@@ -404,7 +404,7 @@ func (r *Request) Do() (*Response, error) {
 func (r *Request) doOnce() (*Response, error) {
 	req, err := r.buildHTTPRequest()
 	if err != nil {
-		return nil, errs.Wrap(err, "failed to build HTTP request")
+		return nil, errs.Wrap(SanitizeError(err), "failed to build HTTP request")
 	}
 
 	// dump 请求
@@ -419,6 +419,9 @@ func (r *Request) doOnce() (*Response, error) {
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
+		// *url.Error embeds the raw request URL (Telegram: /bot<TOKEN>/…);
+		// sanitize before it reaches logs or callers.
+		err = SanitizeError(err)
 		traceid.L(r.ctx).Warnw("http request failed",
 			"method", r.method, "url", SanitizeURL(req.URL.String()), "err", err, "elapsed", time.Since(start))
 		return nil, errs.Wrap(err, "http request failed")

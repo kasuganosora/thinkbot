@@ -176,3 +176,19 @@ func TestErrHasMisskeyCode(t *testing.T) {
 		t.Error("不应误匹配其他错误码")
 	}
 }
+
+func TestSearchBreakerIsOpen(t *testing.T) {
+	b := &searchBreaker{}
+	now := time.Now()
+	if b.isOpen(now) {
+		t.Fatal("fresh breaker should not be open")
+	}
+	b.recordFailure(now, "x")
+	b.recordFailure(now, "x")
+	if !b.isOpen(now.Add(time.Second)) {
+		t.Fatal("expected open after threshold failures")
+	}
+	if b.isOpen(now.Add(searchBreakerCooldown + time.Second)) {
+		t.Fatal("expected closed after cooldown")
+	}
+}

@@ -268,10 +268,10 @@ func buildCore(out Output, baseEncCfg zapcore.EncoderConfig, globalLevel zapcore
 	switch out.Type {
 	case OutputStdout:
 		// 尊重 out.Format（如显式 JSON），而非强制 console。
-		return zapcore.NewCore(encoder, zapcore.Lock(os.Stdout), outLevel), nil
+		return zapcore.NewCore(encoder, NewRedactingWriteSyncer(zapcore.Lock(os.Stdout)), outLevel), nil
 
 	case OutputStderr:
-		return zapcore.NewCore(encoder, zapcore.Lock(os.Stderr), outLevel), nil
+		return zapcore.NewCore(encoder, NewRedactingWriteSyncer(zapcore.Lock(os.Stderr)), outLevel), nil
 
 	case OutputFile:
 		return buildFileCore(out, encoder, outLevel, fileCache)
@@ -287,7 +287,7 @@ func makeConsoleCore(baseEncCfg zapcore.EncoderConfig, w zapcore.WriteSyncer, le
 	encCfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	return zapcore.NewCore(
 		zapcore.NewConsoleEncoder(encCfg),
-		zapcore.Lock(w),
+		NewRedactingWriteSyncer(zapcore.Lock(w)),
 		level,
 	)
 }
@@ -329,7 +329,8 @@ func buildFileCore(out Output, encoder zapcore.Encoder, level zapcore.LevelEnabl
 		Compress:   out.Compress,
 		LocalTime:  true,
 	}
-	ws := zapcore.AddSync(lj)
+	// Secrets are masked before they reach the file (see redact.go).
+	ws := NewRedactingWriteSyncer(zapcore.AddSync(lj))
 	fileCache[path] = ws
 
 	return zapcore.NewCore(encoder, ws, level), nil
