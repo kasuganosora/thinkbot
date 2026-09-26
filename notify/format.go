@@ -176,23 +176,40 @@ func FormatRaw(n Notification, loc *time.Location) string {
 	return b.String()
 }
 
-// compactBodyRunes 是 critical 原文块 / 历史备注里正文的截断长度。
+// compactBodyRunes 是历史备注里正文的截断长度（历史只需要要点）。
 const compactBodyRunes = 600
 
-// FormatCompactRaw 渲染紧凑原文块：来源、级别、标题、截断后的正文（逐字）、时间。
+// criticalRawBodyRunes 是 critical bot 消息所附原文块的正文上限。刻意宽松：正文本身已被
+// notify.max_body_chars（≤3500）截过，这里基本等于全文保留——硬件告警的关键字段
+// （md 设备、磁盘设备、序列号 / 型号、事件名、完整 /proc/mdstat）都在正文里，绝不能被截掉。
+// 超出 4096 字符的消息由 Telegram 渠道自动拆分发送。
+const criticalRawBodyRunes = 4000
+
+// FormatCompactRaw 渲染紧凑原文块（用于会话历史备注）：来源、级别、标题、截断后的正文（逐字）、时间。
 func FormatCompactRaw(n Notification, loc *time.Location) string {
+	return formatRawBlock(n, loc, compactBodyRunes)
+}
+
+// FormatCriticalRaw 渲染 critical bot 消息附带的原文块：与 FormatCompactRaw 同格式，
+// 但正文几乎不截断（criticalRawBodyRunes）。
+func FormatCriticalRaw(n Notification, loc *time.Location) string {
+	return formatRawBlock(n, loc, criticalRawBodyRunes)
+}
+
+func formatRawBlock(n Notification, loc *time.Location, bodyRunes int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s · %s\n%s", Badge(n.Level), n.Source, n.Title)
 	if n.Body != "" && n.Body != n.Title {
 		b.WriteString("\n")
-		b.WriteString(truncateRunes(n.Body, compactBodyRunes))
+		b.WriteString(truncateRunes(n.Body, bodyRunes))
 	}
 	fmt.Fprintf(&b, "\n🕒 %s", n.At.In(locOr(loc)).Format("2006-01-02 15:04:05 MST"))
 	return b.String()
 }
 
 // ComposeBot 把 bot 的文本与原始信息拼成最终发送文本。
-//   - critical：bot 文本 + 分隔线 + 紧凑原文块（来源 / 标题 / 截断正文逐字保留，关键信息永不丢失）。
+//   - critical：bot 文本 + 分隔线 + 原文块（来源 / 标题 / 正文逐字保留，基本不截断，
+//     硬件告警的设备、序列号、事件名、mdstat 等关键信息永不丢失，哪怕模型漏说或说错）。
 //   - info/warn：只发 bot 文本。
 //
 // bot 文本为空时回落 raw。
@@ -202,7 +219,7 @@ func ComposeBot(text string, n Notification, loc *time.Location) string {
 		return FormatRaw(n, loc)
 	}
 	if n.Level == LevelCritical {
-		return text + "\n\n—— 原始告警 ——\n" + FormatCompactRaw(n, loc)
+		return text + "\n\n—— 原始告警 ——\n" + FormatCriticalRaw(n, loc)
 	}
 	return text
 }

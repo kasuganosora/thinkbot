@@ -145,6 +145,9 @@ func DedupHash(botID string, n Notification) string {
 
 // Notify 处理一次已鉴权（含 bot 作用域校验）的通知请求。botID 由调用方从路径 / 请求体确定。
 func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req Request) Result {
+	// 请求一旦进到这里（已鉴权、已授权）就不再跟随调用方取消：脚本超时断开、请求被取消，
+	// 都不能让通知在审计、模型调用或投递途中丢掉。模型调用与投递各自有超时。
+	ctx = context.WithoutCancel(ctx)
 	cfg := s.cfg(botID)
 	now := s.now()
 	ev := &dao.NotifyEvent{
@@ -242,28 +245,42 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 	res.Channel = target.ChannelName
 
 	// ---- 渲染 ----
-	text := FormatRaw(n, cfg.Location)
+	rawText := FormatRaw(n, cfg.Location)
+	text := rawText
 	botUsed := false
 	if mode == ModeBot && s.Bot != nil {
-		out, berr := s.Bot.Compose(ctx, botID, target, n, cfg)
+		out, berr := s.composeBot(ctx, botID, target, n, cfg)
 		if berr != nil || strings.TrimSpace(out) == "" {
-			// 模型失败 / 空输出 / 超时：回落 raw，通知绝不因模型而丢失。
+			// 模型失败 / 空输出 / 超时 / panic：回落 raw，通知绝不因模型而丢失。
 			s.Logger.Warnw("notify: bot compose failed, falling back to raw", "bot_id", botID, "event_id", ev.ID, "err", berr)
 		} else {
 			text = ComposeBot(out, n, cfg.Location)
 			botUsed = true
 		}
 	}
-	ev.PersonaUsed, res.BotUsed = botUsed, botUsed
+	suffix := ""
 	if prev != nil && prev.RepeatCount > 1 {
-		text += fmt.Sprintf("\n↻ 上一条相同通知（%s）之后又重复了 %d 次（已去重）",
+		suffix = fmt.Sprintf("\n↻ 上一条相同通知（%s）之后又重复了 %d 次（已去重）",
 			prev.CreatedAt.In(locOr(cfg.Location)).Format("01-02 15:04"), prev.RepeatCount-1)
 	}
 
 	// ---- 投递 ----
-	if err := s.Deliverer.Deliver(ctx, botID, target, text); err != nil {
+	err = s.deliver(ctx, botID, target, text+suffix)
+	if err != nil && botUsed {
+		// bot 文本没发出去（例如模型输出触发了渠道侧错误）：再用 raw 原文试一次，
+		// 不让模型产物成为通知丢失的原因。
+		s.Logger.Warnw("notify: delivering bot text failed, retrying raw", "bot_id", botID, "event_id", ev.ID, "err", err)
+		if rerr := s.deliver(ctx, botID, target, rawText+suffix); rerr == nil {
+			err, text, botUsed = nil, rawText, false
+		} else {
+			err = rerr
+		}
+	}
+	ev.PersonaUsed, res.BotUsed = botUsed, botUsed
+	if err != nil {
 		return s.fail(ctx, ev, res, http.StatusBadGateway, err)
 	}
+	text += suffix
 	ev.Status = StatusDelivered
 	s.update(ctx, ev)
 	res.Status, res.Delivered, res.RepeatCount, res.HTTPStatus = StatusDelivered, true, 1, http.StatusOK
@@ -283,6 +300,50 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 	s.Logger.Infow("notify: delivered", "bot_id", botID, "event_id", ev.ID, "source", n.Source,
 		"level", n.Level, "mode", mode, "bot_used", botUsed, "channel", target.ChannelName, "token_id", caller.TokenID, "ip", caller.IP)
 	return res
+}
+
+// botComposeGrace 是在 notify.bot_timeout 之外再给 BotWriter 的宽限：BotWriter 自己按
+// bot_timeout 取消模型调用；即便某个实现无视 ctx 卡住，服务层也会在超时 + 宽限后放弃等待并回落 raw。
+var botComposeGrace = 5 * time.Second
+
+// deliverTimeout 是单次渠道投递的上限。
+const deliverTimeout = 30 * time.Second
+
+// composeBot 调 BotWriter，带服务层硬超时与 panic 保护：任何异常都只返回 error（→ 回落 raw）。
+func (s *Service) composeBot(ctx context.Context, botID string, t Target, n Notification, cfg Config) (string, error) {
+	limit := cfg.BotTimeout
+	if limit <= 0 {
+		limit = DefaultBotTimeout
+	}
+	limit += botComposeGrace
+	cctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	type result struct {
+		out string
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				ch <- result{err: fmt.Errorf("notify: bot compose panic: %v", p)}
+			}
+		}()
+		out, err := s.Bot.Compose(cctx, botID, t, n, cfg)
+		ch <- result{out, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.out, r.err
+	case <-cctx.Done():
+		return "", fmt.Errorf("notify: bot compose gave up after %s: %w", limit, cctx.Err())
+	}
+}
+
+func (s *Service) deliver(ctx context.Context, botID string, t Target, text string) error {
+	dctx, cancel := context.WithTimeout(ctx, deliverTimeout)
+	defer cancel()
+	return s.Deliverer.Deliver(dctx, botID, t, text)
 }
 
 func (s *Service) fail(ctx context.Context, ev *dao.NotifyEvent, res Result, code int, err error) Result {

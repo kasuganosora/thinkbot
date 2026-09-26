@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 )
@@ -62,13 +63,26 @@ type fakeDeliverer struct {
 	mu   sync.Mutex
 	sent []sent
 	err  error
+	// rejectIf：返回非 nil 时本次投递失败（模拟渠道拒收某些文本）。
+	rejectIf func(text string) error
+	attempts []string
 }
 
-func (f *fakeDeliverer) Deliver(_ context.Context, _ string, t Target, text string) error {
+func (f *fakeDeliverer) Deliver(ctx context.Context, _ string, t Target, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.attempts = append(f.attempts, text)
+	// 像真实渠道一样：已取消的 ctx 发不出去。
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.err != nil {
 		return f.err
+	}
+	if f.rejectIf != nil {
+		if err := f.rejectIf(text); err != nil {
+			return err
+		}
 	}
 	f.sent = append(f.sent, sent{t, text})
 	return nil
@@ -818,8 +832,8 @@ func TestCriticalBotModeAppendsCompactRawBlock(t *testing.T) {
 	if strings.Contains(txt, "REPLY_CONTROL") {
 		t.Fatalf("control marker must be stripped: %s", txt)
 	}
-	if len([]rune(txt)) > 1000+compactBodyRunes+300 {
-		t.Fatalf("raw block must be compact, len=%d", len([]rune(txt)))
+	if len([]rune(txt)) > 1000+criticalRawBodyRunes+300 {
+		t.Fatalf("raw block too long, len=%d", len([]rune(txt)))
 	}
 }
 
@@ -1006,5 +1020,168 @@ func TestDedupAndRateLimitArePerBot(t *testing.T) {
 	}
 	if DedupHash("bot-a", Notification{DedupKey: "k"}) == DedupHash("bot-b", Notification{DedupKey: "k"}) {
 		t.Fatal("dedup_key hash must include the bot")
+	}
+}
+
+// mdadmBody 模拟 thinkbot-mdadm-hook 的正文：关键字段 + 完整 /proc/mdstat（多阵列，>600 字符）。
+func mdadmBody() (string, string) {
+	mdstat := `Personalities : [raid1] [raid6] [raid5] [raid4] [linear] [multipath] [raid0] [raid10]
+md2 : active raid5 sdd1[3] sdc1[1] sdb1[0](F)
+      7813772288 blocks super 1.2 level 5, 512k chunk, algorithm 2 [3/2] [_UU]
+      bitmap: 4/30 pages [16KB], 65536KB chunk
+
+md1 : active raid1 sdf1[1] sde1[0]
+      1953382464 blocks super 1.2 [2/2] [UU]
+      bitmap: 0/15 pages [0KB], 65536KB chunk
+
+md0 : active raid1 sdb2[0](F) sda2[1]
+      976630464 blocks super 1.2 [2/1] [_U]
+      [=>...................]  recovery =  7.4% (72355840/976630464) finish=81.3min speed=185312K/sec
+      bitmap: 2/8 pages [8KB], 65536KB chunk
+
+unused devices: <none>`
+	body := "host: maid\nevent: Fail\narray: /dev/md0\ncomponent: /dev/sdb2\ndisk: sdb model=WDC WD40EFRX-68N32N0 serial=WD-WCC7K1234567\n\n/proc/mdstat:\n" + mdstat
+	return body, mdstat
+}
+
+func TestCriticalBotRawBlockKeepsHardwareFieldsAndFullMdstat(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.DefaultMode = ModeBot
+	h.prov.text = "Ojou-sama, a disk in maid's RAID just failed. Please take a look." // 模型漏掉了所有细节
+	body, mdstat := mdadmBody()
+	if len([]rune(body)) <= compactBodyRunes {
+		t.Fatalf("test body must exceed the compact limit, len=%d", len([]rune(body)))
+	}
+	req := Request{Source: "maid/mdadm", Level: "critical", Title: "mdadm Fail on /dev/md0 (/dev/sdb2)", Body: body,
+		DedupKey: "mdadm/md0/Fail/sdb2"}
+	res := h.svc.Notify(context.Background(), "bot-a", caller, req)
+	if !res.Delivered || !res.BotUsed {
+		t.Fatalf("%+v", res)
+	}
+	txt := h.del.sent[0].text
+	for _, want := range []string{h.prov.text, "—— 原始告警 ——", req.Title, "event: Fail", "array: /dev/md0",
+		"component: /dev/sdb2", "serial=WD-WCC7K1234567", "model=WDC WD40EFRX-68N32N0", mdstat} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("critical text missing %q:\n%s", want, txt)
+		}
+	}
+	if strings.Contains(txt, "[truncated]") {
+		t.Fatalf("mdstat must not be truncated:\n%s", txt)
+	}
+	// info/warn 仍只发 bot 文本
+	h2 := newHarness(t)
+	h2.cfg.DefaultMode = ModeBot
+	h2.prov.text = "Rebuild finished~"
+	req.Level, req.DedupKey = "info", "x"
+	if res := h2.svc.Notify(context.Background(), "bot-a", caller, req); !res.BotUsed || h2.del.sent[0].text != "Rebuild finished~" {
+		t.Fatalf("%+v %q", res, h2.del.sent)
+	}
+}
+
+type funcWriter func(ctx context.Context) (string, error)
+
+func (f funcWriter) Compose(ctx context.Context, _ string, _ Target, _ Notification, _ Config) (string, error) {
+	return f(ctx)
+}
+
+// critical 通知绝不因模型而丢：模型报错、超时、无视 ctx 卡死、panic、调用方断开、
+// bot 文本被渠道拒收，都必须以 raw 原文（含完整 mdstat）送达。
+func TestCriticalNeverLostBecauseOfLLM(t *testing.T) {
+	oldGrace := botComposeGrace
+	botComposeGrace = 20 * time.Millisecond
+	t.Cleanup(func() { botComposeGrace = oldGrace })
+	body, mdstat := mdadmBody()
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+
+	for name, tc := range map[string]struct {
+		writer   BotWriter
+		setup    func(h *harness)
+		ctx      func() context.Context
+		attempts int
+	}{
+		"provider error": {setup: func(h *harness) { h.prov.err = errors.New("502 from upstream") }},
+		"provider timeout": {writer: funcWriter(func(ctx context.Context) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		})},
+		"writer ignores ctx": {writer: funcWriter(func(context.Context) (string, error) {
+			<-block
+			return "too late", nil
+		})},
+		"writer panics": {writer: funcWriter(func(context.Context) (string, error) { panic("boom") })},
+		"caller disconnected": {
+			writer: funcWriter(func(ctx context.Context) (string, error) {
+				<-ctx.Done()
+				return "", ctx.Err()
+			}),
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+		},
+		"bot text rejected by channel": {
+			setup: func(h *harness) {
+				h.prov.text = "Ojou-sama, md0 lost a disk!"
+				h.del.rejectIf = func(text string) error {
+					if strings.Contains(text, "Ojou-sama") {
+						return errors.New("telegram: 400 Bad Request")
+					}
+					return nil
+				}
+			},
+			attempts: 2,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.cfg.DefaultMode = ModeBot
+			h.cfg.BotTimeout = 30 * time.Millisecond
+			if tc.writer != nil {
+				h.svc.Bot = tc.writer
+			}
+			if tc.setup != nil {
+				tc.setup(h)
+			}
+			ctx := context.Background()
+			if tc.ctx != nil {
+				ctx = tc.ctx()
+			}
+			req := Request{Source: "maid/mdadm", Level: "critical", Title: "mdadm Fail on /dev/md0 (/dev/sdb2)", Body: body}
+			start := time.Now()
+			res := h.svc.Notify(ctx, "bot-a", caller, req)
+			if el := time.Since(start); el > 5*time.Second {
+				t.Fatalf("took %s", el)
+			}
+			if !res.Delivered || res.BotUsed || res.Status != StatusDelivered {
+				t.Fatalf("%+v", res)
+			}
+			if h.del.count() != 1 {
+				t.Fatalf("sent %d", h.del.count())
+			}
+			if want := tc.attempts; want > 0 && len(h.del.attempts) != want {
+				t.Fatalf("attempts=%d want %d", len(h.del.attempts), want)
+			}
+			txt := h.del.sent[0].text
+			if !strings.HasPrefix(txt, "🔴 CRITICAL · maid/mdadm") || !strings.Contains(txt, mdstat) || !strings.Contains(txt, "serial=WD-WCC7K1234567") {
+				t.Fatalf("fallback must be the full raw text:\n%s", txt)
+			}
+			ev := h.events(t)
+			if len(ev) != 1 || ev[0].Status != StatusDelivered || ev[0].PersonaUsed {
+				t.Fatalf("%+v", ev)
+			}
+			if len(h.hist.calls) != 1 || len(h.hist.calls[0]) != 1 || h.hist.calls[0][0].Role != HistoryRoleNote {
+				t.Fatalf("history: %+v", h.hist.calls)
+			}
+		})
+	}
+}
+
+func TestBotTimeoutClamped(t *testing.T) {
+	st := config.NewStore(nil)
+	st.SetTemporary(config.KeyNotifyBotTimeout, "10m")
+	if c := LoadConfig(st, "bot-a"); c.BotTimeout != MaxBotTimeout {
+		t.Fatalf("got %s", c.BotTimeout)
 	}
 }

@@ -5,16 +5,55 @@
 # which runs every script in /etc/smartmontools/run.d/ with the message file as $1.
 # Needs /usr/local/sbin/thinkbot-notify plus /etc/thinkbot/notify.token and /etc/thinkbot/notify.bot
 # (the bot that should notify its owner; THINKBOT_NOTIFY_BOT works too, but mdadm/smartd run with a
-# minimal environment, so the file is the reliable choice). Default endpoint: the isolated notify
-# listener http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
+# minimal environment, so the file is the reliable choice; an existing per-bot notify.url
+# .../api/bots/<id>/notify also still works). Default endpoint: the isolated notify listener
+# http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
+# Mode: omitted = server default (bot: the bot relays it in its own words, falling back to the raw
+# text if the model fails; critical messages always carry the raw facts incl. model / serial).
+# To force raw for the hardware hooks only: echo raw > /etc/thinkbot/notify.hook-mode
+# (THINKBOT_NOTIFY_MODE / /etc/thinkbot/notify.mode are honoured by thinkbot-notify itself).
 # Install: install -o root -g root -m 0755 60thinkbot-notify /etc/smartmontools/run.d/60thinkbot-notify
 #   (run-parts --lsbsysinit: the file name must not contain a dot)
 # Alternatively point smartd at this script directly: "-M exec /etc/smartmontools/run.d/60thinkbot-notify".
 # Test: add "-M test" to the DEVICESCAN line, restart smartd, then remove it again.
 MSGFILE="$1"
 HOST="$(hostname -s)"
-DEV="${SMARTD_DEVICESTRING:-${SMARTD_DEVICE:-unknown}}"
+CONF="${THINKBOT_NOTIFY_CONF_DIR:-/etc/thinkbot}"
+NOTIFY="${THINKBOT_NOTIFY_BIN:-/usr/local/sbin/thinkbot-notify}"
+DEV="${SMARTD_DEVICESTRING:-${SMARTD_DEVICE:-unknown}}"   # e.g. "/dev/sda [SAT]"
 TYPE="${SMARTD_FAILTYPE:-unknown}"
+
+# devtoken "/dev/sda [SAT]" -> "sda", "/dev/disk/by-id/ata-X" -> "disk-by-id-ata-X": safe for
+# dedup keys, sources and titles.
+devtoken() {
+  t="$(printf '%s' "$1" | sed -e 's/\[[^]]*\]//g' -e 's|^[[:space:]]*/dev/||' -e 's/[^A-Za-z0-9._-][^A-Za-z0-9._-]*/-/g' \
+        -e 's/^[-.]*//' -e 's/-*$//' | cut -c1-40)"
+  printf '%s' "${t:-unknown}"
+}
+
+DEVTOK="$(devtoken "$DEV")"
+# Controller-addressed disks (-d megaraid,N / sat+megaraid,N / areca,N ...) share one device path:
+# keep the disk number so they don't collide.
+case "${SMARTD_DEVICETYPE:-}" in
+  *,*) DEVTOK="$DEVTOK-$(printf '%s' "${SMARTD_DEVICETYPE##*+}" | tr -c 'A-Za-z0-9' '\n' | tr -d '\n')" ;;
+esac
+TYPETOK="$(printf '%s' "$TYPE" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-40)"
+
+# Model / serial: smartd passes them in SMARTD_DEVICEINFO ("MODEL, S/N:..., WWN:..., FW:..., SIZE").
+INFO="${SMARTD_DEVICEINFO:-}"
+if [ -z "$INFO" ] && [ -n "${SMARTD_DEVICE:-}" ] && command -v smartctl >/dev/null 2>&1; then
+  DTYPE=""; [ -n "${SMARTD_DEVICETYPE:-}" ] && [ "$SMARTD_DEVICETYPE" != auto ] && DTYPE="$SMARTD_DEVICETYPE"
+  INFO="$(timeout 15 smartctl -i ${DTYPE:+-d "$DTYPE"} "$SMARTD_DEVICE" 2>/dev/null \
+    | sed -n 's/^\(Device Model\|Model Number\|Product\|Serial Number\|Serial number\):[[:space:]]*/\1: /p' \
+    | paste -sd ';' - | sed 's/;/; /g')"
+fi
+
+MODE="${THINKBOT_NOTIFY_HOOK_MODE:-}"
+[ -z "$MODE" ] && [ -r "$CONF/notify.hook-mode" ] && MODE="$(head -n1 "$CONF/notify.hook-mode" | tr -d '[:space:]')"
+case "$MODE" in
+  ""|bot|raw|persona) ;;
+  *) logger -t thinkbot-smartd-hook "ignoring invalid hook mode '$MODE'"; MODE="" ;;
+esac
 
 case "$TYPE" in
   EmailTest)         LEVEL=info ;;
@@ -22,13 +61,14 @@ case "$TYPE" in
   *)                 LEVEL=critical ;;  # Health, SelfTest, CurrentPendingSector, OfflineUncorrectableSector, ErrorCount, Failed*...
 esac
 
-TITLE="SMART $TYPE on $DEV"
+TITLE="SMART $TYPE on $DEVTOK"
 {
-  printf 'host: %s\ndevice: %s\ninfo: %s\nfirst seen: %s\n\n' "$HOST" "$DEV" "${SMARTD_DEVICEINFO:--}" "${SMARTD_TFIRST:--}"
+  printf 'host: %s\ndevice: %s\ntype: %s\nmodel/serial: %s\nevent: %s\nfirst seen: %s\n\n' \
+    "$HOST" "$DEV" "${SMARTD_DEVICETYPE:--}" "${INFO:--}" "$TYPE" "${SMARTD_TFIRST:--}"
   if [ -n "$SMARTD_FULLMESSAGE" ]; then printf '%s\n' "$SMARTD_FULLMESSAGE"
   elif [ -n "$MSGFILE" ] && [ -r "$MSGFILE" ]; then cat "$MSGFILE"
   else printf '%s\n' "${SMARTD_MESSAGE:-}"; fi
-} | /usr/local/sbin/thinkbot-notify \
-  -s "$HOST/smartd" -l "$LEVEL" -t "$TITLE" -b - -k "smartd/$DEV/$TYPE" \
+} | "$NOTIFY" ${MODE:+-m "$MODE"} \
+  -s "$HOST/smartd/$DEVTOK" -l "$LEVEL" -t "$TITLE" -b - -k "smartd/$DEVTOK/$TYPETOK" \
   || logger -t thinkbot-smartd-hook "notify failed: $TITLE"
 exit 0
