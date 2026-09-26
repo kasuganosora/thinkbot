@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -104,12 +105,91 @@ func (d *ToolDeferral) countDeferredLocked() int {
 // SetTools installs the full tool list (with Parameters + Execute) used both to
 // build the execution map and to search. Call once per orchestration request,
 // after schemas are resolved and names are finalized (e.g. sandbox prefixes
-// stripped).
+// stripped). The orchestrator calls it on a per-run Fork, never on a shared
+// conversation instance, so concurrent runs cannot replace each other's list.
 func (d *ToolDeferral) SetTools(full []Tool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.full = full
 }
+
+// Fork returns an independent copy of d for ONE orchestration run: same
+// enabled flag, logger, capacity, step and loaded-tool state, but its own
+// tool list and counters. Mutations on the fork (SetTools, SetStep, Load,
+// eviction) never touch d, so two runs that resolved the same conversation
+// deferral (or, historically, a shared per-bot one) cannot overwrite each
+// other's tool list mid-turn. Call Adopt(fork) when the run ends to keep the
+// discovered deferred tools for later turns.
+func (d *ToolDeferral) Fork() *ToolDeferral {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f := &ToolDeferral{
+		logger:    d.logger,
+		enabled:   d.enabled,
+		loaded:    make(map[string]bool, len(d.loaded)),
+		lastUsed:  make(map[string]int, len(d.lastUsed)),
+		recency:   append([]string(nil), d.recency...),
+		maxLoaded: d.maxLoaded,
+		idleEvict: d.idleEvict,
+		step:      d.step,
+		full:      d.full,
+	}
+	for k, v := range d.loaded {
+		f.loaded[k] = v
+	}
+	for k, v := range d.lastUsed {
+		f.lastUsed[k] = v
+	}
+	return f
+}
+
+// Adopt copies the loaded-tool state (and tool list / step) of a finished
+// run's Fork back into d, so tools discovered via tool_search stay loaded in
+// the next turn of the same conversation. When two runs of one conversation
+// overlap, the last one to finish wins; that only affects which deferred
+// tools start pre-loaded, never the tool list of a running turn.
+func (d *ToolDeferral) Adopt(run *ToolDeferral) {
+	if run == nil || run == d {
+		return
+	}
+	run.mu.Lock()
+	loaded := make(map[string]bool, len(run.loaded))
+	for k, v := range run.loaded {
+		loaded[k] = v
+	}
+	lastUsed := make(map[string]int, len(run.lastUsed))
+	for k, v := range run.lastUsed {
+		lastUsed[k] = v
+	}
+	recency := append([]string(nil), run.recency...)
+	step, full := run.step, run.full
+	run.mu.Unlock()
+
+	d.mu.Lock()
+	d.loaded, d.lastUsed, d.recency = loaded, lastUsed, recency
+	d.step, d.full = step, full
+	d.mu.Unlock()
+}
+
+// directToolNames returns the names of tools that are directly callable right
+// now (non-deferred, or deferred and loaded), sorted.
+func (d *ToolDeferral) directToolNames() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	names := make([]string, 0, len(d.full))
+	for i := range d.full {
+		t := d.full[i]
+		if t.DeferredLoad && !d.loaded[t.Name] {
+			continue
+		}
+		names = append(names, t.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// maxNoMatchToolNames caps the tool names listed in a tool_search no-match reply.
+const maxNoMatchToolNames = 80
 
 // HasDeferred reports whether the installed tool list contains any deferred tool.
 func (d *ToolDeferral) HasDeferred() bool {
@@ -415,12 +495,35 @@ func (d *ToolDeferral) searchTool() Tool {
 			if d.logger != nil {
 				d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", []string{})
 			}
-			// 真正的「无匹配」：绝不说「No matching tools found」这种会被模型
-			// 解读为「工具不存在」的话。明确提醒：exec/read_file/replace_in_file/
-			// list_dir 等常驻工具不经过延迟加载搜索、始终可直接按名调用。
-			return fmt.Sprintf("No lazily-loaded tool matches %q. Reminder: your always-available tools (exec, read_file, replace_in_file, list_dir, browser_*, memory, etc.) are NOT indexed by tool_search and are ready to call directly by name — if one of them does what you need, call it now. Otherwise rephrase the need or tell the user it is out of scope.", query), nil
+			// 真正的「无匹配」：列出本轮「实际」可直接调用的工具名，而不是写死
+			// 「exec/read_file 始终可用」——那句话在工具列表里确实没有 exec 时
+			// （2026-09-26：并发轮次覆盖了共享工具列表）会误导模型反复 tool_search。
+			return noMatchReply(query, d.directToolNames()), nil
 		},
 	}
+}
+
+// noMatchReply is the tool_search reply when nothing matched: it lists the
+// tools that are actually callable in this run instead of a hardcoded list,
+// and tells the model to report a missing capability plainly.
+func noMatchReply(query string, names []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "No tool matches %q. ", query)
+	if len(names) == 0 {
+		b.WriteString("Your current tool list has no directly callable tools. ")
+	} else {
+		shown := names
+		if len(shown) > maxNoMatchToolNames {
+			shown = shown[:maxNoMatchToolNames]
+		}
+		fmt.Fprintf(&b, "Tools you can call directly right now (%d): %s", len(names), strings.Join(shown, ", "))
+		if len(names) > len(shown) {
+			fmt.Fprintf(&b, ", … (+%d more)", len(names)-len(shown))
+		}
+		b.WriteString(". ")
+	}
+	b.WriteString("If one of them does what you need, call it by name now. Otherwise do not keep searching: tell the user plainly that no such tool is in your current tool list (do not attribute it to context or quota limits).")
+	return b.String()
 }
 
 // loadNote builds a user message telling the model that the named deferred
@@ -585,27 +688,42 @@ func (d *ToolDeferral) unloadLocked(name string) {
 // when several conversations run at once.
 //
 // Callers create one store per bot (enabled) and resolve it per request via
-// ForSession(sessionID). An empty session id falls back to a single shared
-// deferral, preserving the previous behavior rather than disabling deferral.
+// ForSession(conversationKey). An empty key yields a fresh, ephemeral
+// deferral: conversation-scoped state is never shared per bot (a shared
+// fallback let a concurrent Misskey turn replace a Telegram turn's tool list,
+// 2026-09-26). The orchestrator additionally forks the returned deferral per
+// run, so even two concurrent runs of one conversation stay isolated.
 type DeferralStore struct {
 	mu sync.Mutex
 	// enabled mirrors ToolDeferral.enabled; ForSession returns nil when false.
 	enabled bool
 	// logger, if set, is inherited by every ToolDeferral the store creates.
 	logger *zap.SugaredLogger
-	// sessions maps a session id to its ToolDeferral, created lazily.
-	sessions map[string]*ToolDeferral
-	// fallback is used when no session id is available (rare); it keeps the
-	// previous per-bot semantics instead of turning deferral off.
-	fallback *ToolDeferral
+	// sessions maps a conversation key to its ToolDeferral, created lazily.
+	sessions map[string]*deferralEntry
+	// now is the clock (tests override it).
+	now func() time.Time
 }
+
+type deferralEntry struct {
+	d        *ToolDeferral
+	lastSeen time.Time
+}
+
+// Idle conversation deferrals are pruned once the store grows beyond
+// deferralStorePruneAbove entries (only loaded-tool state is lost).
+const (
+	deferralStorePruneAbove = 512
+	deferralStoreIdleTTL    = 24 * time.Hour
+)
 
 // NewDeferralStore creates a per-session deferral store. When enabled is false,
 // ForSession returns nil and the orchestrator bypasses deferral.
 func NewDeferralStore(enabled bool) *DeferralStore {
 	return &DeferralStore{
 		enabled:  enabled,
-		sessions: make(map[string]*ToolDeferral),
+		sessions: make(map[string]*deferralEntry),
+		now:      time.Now,
 	}
 }
 
@@ -618,28 +736,46 @@ func (s *DeferralStore) SetLogger(l *zap.SugaredLogger) *DeferralStore {
 	return s
 }
 
-// ForSession returns the ToolDeferral for the given session id, creating it on
-// first use. An empty session id falls back to a single shared deferral.
-// Returns nil when the store is disabled.
-func (s *DeferralStore) ForSession(sid string) *ToolDeferral {
+// ForSession returns the ToolDeferral for the given conversation key, creating
+// it on first use. An empty key returns a new ephemeral deferral (not stored,
+// not shared). Returns nil when the store is disabled.
+func (s *DeferralStore) ForSession(key string) *ToolDeferral {
 	if !s.enabled {
 		return nil
 	}
-	if sid == "" {
-		s.mu.Lock()
-		if s.fallback == nil {
-			s.fallback = NewToolDeferral(true).SetLogger(s.logger)
-		}
-		fb := s.fallback
-		s.mu.Unlock()
-		return fb
-	}
 	s.mu.Lock()
-	d, ok := s.sessions[sid]
-	if !ok {
-		d = NewToolDeferral(true).SetLogger(s.logger)
-		s.sessions[sid] = d
+	logger := s.logger
+	if key == "" {
+		s.mu.Unlock()
+		return NewToolDeferral(true).SetLogger(logger)
 	}
+	now := s.now()
+	e, ok := s.sessions[key]
+	if !ok {
+		if len(s.sessions) >= deferralStorePruneAbove {
+			s.pruneLocked(now)
+		}
+		e = &deferralEntry{d: NewToolDeferral(true).SetLogger(logger)}
+		s.sessions[key] = e
+	}
+	e.lastSeen = now
+	d := e.d
 	s.mu.Unlock()
 	return d
+}
+
+// pruneLocked drops conversation deferrals idle for longer than the TTL.
+func (s *DeferralStore) pruneLocked(now time.Time) {
+	for k, e := range s.sessions {
+		if now.Sub(e.lastSeen) > deferralStoreIdleTTL {
+			delete(s.sessions, k)
+		}
+	}
+}
+
+// Len returns the number of conversation deferrals held (diagnostics/tests).
+func (s *DeferralStore) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sessions)
 }
