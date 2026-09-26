@@ -65,4 +65,8 @@ const (
 	// ChatRoleContextSummary 仅用于内存中的合成消息（不落库）：LLM 上下文加载时
 	// 由上下文检查点（ContextCheckpoint）生成，代表被压缩的更早历史。
 	ChatRoleContextSummary = "context_summary"
+	// ChatRoleNotify 是 notify 接口写入主人会话的系统备注（外部程序推送的通知原文要点，
+	// 外部数据）。落库；加载为 LLM 上下文时转成 system 消息（见 api.chatHistoryToLLM），
+	// 纯文本、不含 tool 调用。
+	ChatRoleNotify = "notify"
 )

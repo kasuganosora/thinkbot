@@ -58,7 +58,7 @@ func (s *Server) registerRoutes() {
 	// --- notify：外部程序经独立 token 让 bot 通知主人（不走会话鉴权，见 handler_notify.go）---
 	// 配置了 notify.listen_addr 时只挂在独立监听器上，主 API 不暴露。
 	if s.notifyListenAddr == "" {
-		apiGroup.POST("/bots/:id/notify", s.handleNotify)
+		registerNotifyCallRoutes(apiGroup, s.handleNotify)
 	}
 
 	// --- 需要登录的接口 ---
@@ -88,6 +88,15 @@ func (s *Server) registerRoutes() {
 			users.PUT("/:id/disable", s.handleDisableUser)
 			users.PUT("/:id/enable", s.handleEnableUser)
 			users.PUT("/:id/password", s.handleResetPassword)
+		}
+
+		// --- notify token（跨 bot 作用域，admin）---
+		notifyAdmin := authed.Group("/notify")
+		notifyAdmin.Use(requirePermission(auth.PermBotManage))
+		{
+			notifyAdmin.GET("/tokens", s.handleListNotifyTokens)
+			notifyAdmin.POST("/tokens", s.handleCreateNotifyToken)
+			notifyAdmin.DELETE("/tokens/:tid", s.handleRevokeNotifyToken)
 		}
 
 		// --- Bot 管理 ---

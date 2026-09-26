@@ -9,9 +9,14 @@ import "time"
 
 // NotifyToken 是 notify 接口的调用凭据。只存 SHA-256 哈希，明文仅在创建时展示一次。
 // 明文格式 "tbn_<ID>_<secret>"：ID 用于定位行，secret 为 32 字节随机数（base64url）。
+//
+// Scope 决定 token 能替哪些 bot 发通知：逗号分隔的 bot ID 列表，或 "*"（全部 bot）。
+// 旧版 token（Scope 为空）等价于只含 BotID 一个 bot；启动 / CLI 时会回填。
+// BotID 保留为「主归属 bot」（单 bot token 即该 bot；多 bot 为第一个；全部 bot 为 "*"）。
 type NotifyToken struct {
 	ID         string     `gorm:"primaryKey;size:32" json:"id"`
 	BotID      string     `gorm:"size:64;not null;index" json:"botId"`
+	Scope      string     `gorm:"type:text;not null;default:''" json:"-"`
 	Name       string     `gorm:"size:128;not null;default:''" json:"name"`
 	Hash       string     `gorm:"size:64;not null" json:"-"`
 	CreatedAt  time.Time  `gorm:"not null" json:"createdAt"`
@@ -42,8 +47,9 @@ type NotifyEvent struct {
 	Error       string `gorm:"type:text" json:"error,omitempty"`
 	DuplicateOf string `gorm:"size:64;not null;default:''" json:"duplicateOf,omitempty"`
 	RepeatCount int    `gorm:"not null;default:1" json:"repeatCount"`
-	// PersonaUsed 仅 persona 模式下模型改写成功并被采用时为 true。
-	PersonaUsed bool `gorm:"not null;default:false" json:"personaUsed"`
+	// PersonaUsed 仅 bot 模式（旧名 persona）下模型输出被采用时为 true；false＝raw / 回落 raw。
+	// 列名沿用首版（persona_used）以免迁移，JSON 同时给出 botUsed。
+	PersonaUsed bool `gorm:"not null;default:false" json:"botUsed"`
 }
 
 // TableName 指定 GORM 表名。

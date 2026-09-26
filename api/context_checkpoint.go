@@ -262,6 +262,10 @@ func chatHistoryToLLM(msgs []dao.ChatMessage) ([]llm.Message, []uint64) {
 			out = append(out, llm.AssistantMessage(m.Content))
 		case dao.ChatRoleContextSummary:
 			out = append(out, llm.ConversationSummaryMessage(m.Content))
+		case dao.ChatRoleNotify:
+			// notify 接口写入的系统备注（外部通知要点）：以 system 消息进入上下文，
+			// 与普通消息一样参与 ids 对齐（compact_context 边界映射依赖逐条对应）。
+			out = append(out, llm.SystemMessage(m.Content))
 		default:
 			continue
 		}

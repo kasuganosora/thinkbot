@@ -46,9 +46,23 @@ type Deliverer interface {
 	Deliver(ctx context.Context, botID string, t Target, text string) error
 }
 
+// 会话历史条目角色。
+const (
+	// HistoryRoleNote 是系统备注（外部通知原文要点，外部数据），在 LLM 上下文里以 system 消息出现。
+	HistoryRoleNote = "notify"
+	// HistoryRoleAssistant 是 bot 自己发给主人的话（bot 模式转述文本）。
+	HistoryRoleAssistant = "assistant"
+)
+
+// HistoryEntry 是写入主人会话历史的一条消息（按顺序写入）。
+type HistoryEntry struct {
+	Role    string
+	Content string
+}
+
 // HistoryRecorder 把已送达的通知写入主人会话历史，让 bot 知道自己发过。
 type HistoryRecorder interface {
-	Record(ctx context.Context, botID string, t Target, eventID, content string) error
+	Record(ctx context.Context, botID string, t Target, eventID string, entries []HistoryEntry) error
 }
 
 // Caller 是已鉴权的调用方信息。
@@ -66,22 +80,24 @@ type Result struct {
 	RateLimited  bool   `json:"rate_limited"`
 	RepeatCount  int    `json:"repeat_count,omitempty"`
 	DuplicateOf  string `json:"duplicate_of,omitempty"`
+	Bot          string `json:"bot,omitempty"`
 	Mode         string `json:"mode,omitempty"`
-	PersonaUsed  bool   `json:"persona_used,omitempty"`
-	Channel      string `json:"channel,omitempty"`
-	RetryAfter   int    `json:"retry_after,omitempty"`
-	Error        string `json:"error,omitempty"`
+	// BotUsed：bot 模式下模型输出被采用（false = 回落了 raw）。
+	BotUsed    bool   `json:"bot_used,omitempty"`
+	Channel    string `json:"channel,omitempty"`
+	RetryAfter int    `json:"retry_after,omitempty"`
+	Error      string `json:"error,omitempty"`
 
 	HTTPStatus int `json:"-"`
 }
 
-// Service 编排：校验 → 去重 → 限流 → 解析目标 → 渲染（raw/persona）→ 投递 → 审计 → 历史。
+// Service 编排：校验 → 去重 → 限流 → 解析目标 → 渲染（bot/raw）→ 投递 → 审计 → 历史。
 type Service struct {
 	DB        *gorm.DB
 	Config    func(botID string) Config
 	Resolver  Resolver
 	Deliverer Deliverer
-	Persona   PersonaWriter
+	Bot       BotWriter
 	History   HistoryRecorder
 	Logger    *zap.SugaredLogger
 	Now       func() time.Time
@@ -91,11 +107,11 @@ type Service struct {
 }
 
 // NewService 创建服务。
-func NewService(db *gorm.DB, cfg func(string) Config, r Resolver, d Deliverer, p PersonaWriter, h HistoryRecorder, logger *zap.SugaredLogger) *Service {
+func NewService(db *gorm.DB, cfg func(string) Config, r Resolver, d Deliverer, w BotWriter, h HistoryRecorder, logger *zap.SugaredLogger) *Service {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
-	return &Service{DB: db, Config: cfg, Resolver: r, Deliverer: d, Persona: p, History: h,
+	return &Service{DB: db, Config: cfg, Resolver: r, Deliverer: d, Bot: w, History: h,
 		Logger: logger.With("component", "notify"), Now: time.Now, limiter: NewLimiter()}
 }
 
@@ -114,7 +130,8 @@ func (s *Service) cfg(botID string) Config {
 }
 
 // DedupHash 计算去重键：显式 dedup_key 优先，否则 source+level+title+body。
-// 自动哈希包含 level，使 warn → critical 的升级不会被当成重复吞掉。
+// 两种都含 bot ID（同一告警发给不同 bot 互不去重）；自动哈希包含 level，
+// 使 warn → critical 的升级不会被当成重复吞掉。
 func DedupHash(botID string, n Notification) string {
 	var raw string
 	if n.DedupKey != "" {
@@ -126,7 +143,7 @@ func DedupHash(botID string, n Notification) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Notify 处理一次已鉴权的通知请求。
+// Notify 处理一次已鉴权（含 bot 作用域校验）的通知请求。botID 由调用方从路径 / 请求体确定。
 func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req Request) Result {
 	cfg := s.cfg(botID)
 	now := s.now()
@@ -141,7 +158,7 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 		TokenID:   caller.TokenID,
 		CallerIP:  caller.IP,
 	}
-	res := Result{ID: ev.ID}
+	res := Result{ID: ev.ID, Bot: botID}
 
 	n, err := Validate(req, cfg, now)
 	if err != nil {
@@ -186,7 +203,8 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 			return res
 		}
 	}
-	rate, bucketKey := cfg.RateLimit, caller.TokenID+"|"+n.Source
+	// 限流桶按 token + bot + source 计：同一 token 替多个 bot 发通知时各 bot 预算独立。
+	rate, bucketKey := cfg.RateLimit, caller.TokenID+"|"+botID+"|"+n.Source
 	if n.Level == LevelCritical {
 		// critical 走独立预算：普通告警刷满桶也挡不住 critical。
 		rate, bucketKey = cfg.RateLimitCritical, bucketKey+"|critical"
@@ -225,16 +243,18 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 
 	// ---- 渲染 ----
 	text := FormatRaw(n, cfg.Location)
-	if mode == ModePersona && s.Persona != nil {
-		p, perr := s.Persona.Rewrite(ctx, botID, n, cfg)
-		if perr != nil || strings.TrimSpace(p) == "" {
-			// 模型失败 / 空输出：回落 raw，通知绝不因模型而丢失。
-			s.Logger.Warnw("notify: persona rewrite failed, falling back to raw", "bot_id", botID, "event_id", ev.ID, "err", perr)
+	botUsed := false
+	if mode == ModeBot && s.Bot != nil {
+		out, berr := s.Bot.Compose(ctx, botID, target, n, cfg)
+		if berr != nil || strings.TrimSpace(out) == "" {
+			// 模型失败 / 空输出 / 超时：回落 raw，通知绝不因模型而丢失。
+			s.Logger.Warnw("notify: bot compose failed, falling back to raw", "bot_id", botID, "event_id", ev.ID, "err", berr)
 		} else {
-			text = ComposePersona(p, n, cfg.Location)
-			ev.PersonaUsed, res.PersonaUsed = true, true
+			text = ComposeBot(out, n, cfg.Location)
+			botUsed = true
 		}
 	}
+	ev.PersonaUsed, res.BotUsed = botUsed, botUsed
 	if prev != nil && prev.RepeatCount > 1 {
 		text += fmt.Sprintf("\n↻ 上一条相同通知（%s）之后又重复了 %d 次（已去重）",
 			prev.CreatedAt.In(locOr(cfg.Location)).Format("01-02 15:04"), prev.RepeatCount-1)
@@ -249,13 +269,19 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 	res.Status, res.Delivered, res.RepeatCount, res.HTTPStatus = StatusDelivered, true, 1, http.StatusOK
 
 	// ---- 会话历史 ----
+	// 系统备注（外部数据、原文要点）在前；bot 模式再追加 bot 的原话（assistant），
+	// 让之后的对话里 bot 知道自己说过什么、主人追问时能接上。
 	if cfg.RecordHistory && s.History != nil {
-		if herr := s.History.Record(ctx, botID, target, ev.ID, HistoryText(ev.ID, text)); herr != nil {
+		entries := []HistoryEntry{{Role: HistoryRoleNote, Content: HistoryNote(ev.ID, n, cfg.Location, botUsed)}}
+		if botUsed {
+			entries = append(entries, HistoryEntry{Role: HistoryRoleAssistant, Content: text})
+		}
+		if herr := s.History.Record(ctx, botID, target, ev.ID, entries); herr != nil {
 			s.Logger.Warnw("notify: record history failed", "bot_id", botID, "event_id", ev.ID, "err", herr)
 		}
 	}
 	s.Logger.Infow("notify: delivered", "bot_id", botID, "event_id", ev.ID, "source", n.Source,
-		"level", n.Level, "mode", mode, "persona_used", ev.PersonaUsed, "channel", target.ChannelName, "token_id", caller.TokenID, "ip", caller.IP)
+		"level", n.Level, "mode", mode, "bot_used", botUsed, "channel", target.ChannelName, "token_id", caller.TokenID, "ip", caller.IP)
 	return res
 }
 

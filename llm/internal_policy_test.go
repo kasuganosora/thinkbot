@@ -143,6 +143,7 @@ func TestInternalPurposes_Defaults(t *testing.T) {
 		PurposeLazyJudge: "none", PurposeEngagementJudge: "none", PurposeDreamScore: "none", PurposeDreamCluster: "none",
 		PurposeDreamExtract: "low", PurposeMemoryDedup: "low", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
 		PurposeUserProfiler: "low", PurposeBotProfiler: "low", PurposeWorkflowHeal: "low", PurposeVision: "low",
+		PurposeNotify: "low",
 	}
 	if len(InternalPurposes) != len(want) {
 		t.Fatalf("purposes: %d, want %d", len(InternalPurposes), len(want))
