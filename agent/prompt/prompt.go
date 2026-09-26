@@ -260,10 +260,20 @@ func (r *Registry) List() []Section {
 	for _, s := range r.sections {
 		result = append(result, *s)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Order < result[j].Order
-	})
+	sortSections(result)
 	return result
+}
+
+// sortSections 按 (Order, Name) 排序。Name 作为同 Order 的次序键：sections 存在 map 中，
+// 仅按 Order 排序时同 Order 段落（多个工具段落 / 全部技能都是同一 Order）的先后会随 map
+// 迭代随机变化，组装出的 system prompt 逐轮不同，破坏模型服务端的前缀缓存。
+func sortSections(s []Section) {
+	sort.SliceStable(s, func(i, j int) bool {
+		if s[i].Order != s[j].Order {
+			return s[i].Order < s[j].Order
+		}
+		return s[i].Name < s[j].Name
+	})
 }
 
 // Len 返回已注册的 Section 数量。
@@ -308,6 +318,10 @@ type AssemblerConfig struct {
 	// MaxPromptLength 最大 prompt 长度（字符数）。0 表示无限制。
 	// 超限时从低优先级段落开始截断。
 	MaxPromptLength int
+
+	// Exclude 返回 true 的段落名不参与组装（记入 SectionsSkipped）。nil 表示不排除。
+	// 用于同一 Registry 服务多个用途时按用途过滤，如主链路不渲染按需加载的技能正文。
+	Exclude func(name string) bool
 }
 
 // DefaultAssemblerConfig 返回合理的默认配置。
@@ -374,17 +388,15 @@ func (a *Assembler) Assemble(ctx *AssemblyContext, extraSections ...Section) (*A
 	sections := a.registry.List()
 	if len(extraSections) > 0 {
 		sections = append(sections, extraSections...)
-		sort.Slice(sections, func(i, j int) bool {
-			return sections[i].Order < sections[j].Order
-		})
+		sortSections(sections)
 	}
 
 	result := &AssemblyResult{}
 	var parts []string
 
 	for _, sec := range sections {
-		// 跳过禁用的段落
-		if !sec.Enabled {
+		// 跳过禁用 / 被排除的段落
+		if !sec.Enabled || (a.config.Exclude != nil && a.config.Exclude(sec.Name)) {
 			result.SectionsSkipped = append(result.SectionsSkipped, sec.Name)
 			continue
 		}
