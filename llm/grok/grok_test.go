@@ -888,3 +888,24 @@ func TestChatCompletionResponseParsing(t *testing.T) {
 		t.Errorf("unexpected content: %q", content)
 	}
 }
+
+// TestUsageToLLMUsage_CachedIncluded：xAI 与 OpenAI 协议一致，cached_tokens 包含在
+// prompt_tokens 内。InputTokens 保持含缓存口径，命中部分进 CacheReadTokens。
+func TestUsageToLLMUsage_CachedIncluded(t *testing.T) {
+	u := (&Usage{
+		PromptTokens: 1000, CompletionTokens: 200, TotalTokens: 1200,
+		PromptTokensDetails:     &PromptTokensDetails{CachedTokens: 700},
+		CompletionTokensDetails: &CompletionTokensDetails{ReasoningTokens: 50},
+	}).toLLMUsage()
+	if u.InputTokens != 1000 || u.InputTokenDetails.CacheReadTokens != 700 || u.InputTokenDetails.NoCacheTokens != 300 {
+		t.Fatalf("usage = %+v", u)
+	}
+	if u.ReasoningTokens != 50 || u.OutputTokenDetails.TextTokens != 150 {
+		t.Fatalf("reasoning split = %+v", u.OutputTokenDetails)
+	}
+	// 无明细时退化为旧行为
+	plain := (&Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}).toLLMUsage()
+	if plain.InputTokens != 10 || plain.InputTokenDetails.CacheReadTokens != 0 {
+		t.Fatalf("plain usage = %+v", plain)
+	}
+}
