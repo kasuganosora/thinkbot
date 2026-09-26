@@ -121,7 +121,7 @@ func NewServer(
 		ne.Use(zapRecovery(logger))
 		ne.Use(traceIDMiddleware())
 		ne.Use(requestLogger(logger))
-		ne.POST("/api/bots/:id/notify", s.handleNotify)
+		registerNotifyCallRoutes(ne.Group("/api"), s.handleNotify)
 		s.notifySrv = &http.Server{Addr: s.notifyListenAddr, Handler: ne, ReadHeaderTimeout: 10 * time.Second}
 	}
 

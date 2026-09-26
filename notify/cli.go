@@ -18,13 +18,27 @@ import (
 const CLIUsage = `usage: thinkbot notify-token <command> [flags]
 
 commands:
-  create --bot <botID> [--name <label>]   create a token (printed ONCE; only its hash is stored)
-  list   [--bot <botID>]                  list tokens (id, bot, name, created, last used, revoked)
-  revoke [--bot <botID>] <tokenID>        revoke a token
+  create (--bot <botID> [--bot <botID> ...] | --all-bots) [--name <label>]
+                                          create a token for the given bots (printed ONCE; only its hash is stored)
+  list   [--bot <botID>]                  list tokens (id, scope, name, created, last used, revoked);
+                                          --bot shows only tokens that can notify through that bot
+  revoke <tokenID>                        revoke a token
+
+A token can only notify through the bots in its scope (403 otherwise). Callers choose the bot per
+request: POST /api/notify with {"bot": "<botID>", ...}.
 
 The database is taken from $DB_PATH (default data/thinkbot.db). In the docker deployment run e.g.:
   docker exec -u thinkbot -w /app thinkbot /app/thinkbot notify-token create --bot <botID> --name maid-hooks
 `
+
+// multiFlag 是可重复的字符串 flag（--bot a --bot b，也接受逗号分隔）。
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
 
 // RunCLI 执行 notify-token 子命令，返回进程退出码。
 func RunCLI(ctx context.Context, db *gorm.DB, args []string, stdout, stderr io.Writer) int {
@@ -32,8 +46,8 @@ func RunCLI(ctx context.Context, db *gorm.DB, args []string, stdout, stderr io.W
 		fmt.Fprint(stderr, CLIUsage)
 		return 2
 	}
-	// 只迁移本功能的表，避免 CLI 对运行中的服务库做全量迁移。
-	if err := db.AutoMigrate(&dao.NotifyToken{}, &dao.NotifyEvent{}); err != nil {
+	// 只迁移本功能的表（并回填旧 token 的作用域），避免 CLI 对运行中的服务库做全量迁移。
+	if err := MigrateTokens(db); err != nil {
 		fmt.Fprintf(stderr, "migrate notify tables: %v\n", err)
 		return 1
 	}
@@ -41,28 +55,46 @@ func RunCLI(ctx context.Context, db *gorm.DB, args []string, stdout, stderr io.W
 	cmd, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("notify-token "+cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	bot := fs.String("bot", "", "bot id")
+	var bots multiFlag
+	fs.Var(&bots, "bot", "bot id (repeatable; comma-separated also accepted)")
+	allBots := fs.Bool("all-bots", false, "token may notify through every bot")
 	name := fs.String("name", "", "token label (e.g. maid-hooks)")
 	switch cmd {
 	case "create":
 		if err := fs.Parse(rest); err != nil {
 			return 2
 		}
-		if strings.TrimSpace(*bot) == "" {
-			fmt.Fprintln(stderr, "--bot is required")
+		if *allBots && len(bots) > 0 {
+			fmt.Fprintln(stderr, "use either --bot or --all-bots, not both")
 			return 2
 		}
-		var cnt int64
-		if err := db.Model(&dao.BotDefinition{}).Where("id = ?", *bot).Count(&cnt).Error; err == nil && cnt == 0 {
-			fmt.Fprintf(stderr, "bot %q not found in bot_definitions\n", *bot)
-			return 1
+		scope := []string(bots)
+		if *allBots {
+			scope = []string{ScopeAll}
 		}
-		plain, row, err := store.Create(ctx, *bot, *name)
+		norm, err := NormalizeScope(scope)
+		if err != nil {
+			fmt.Fprintln(stderr, "--bot <botID> (repeatable) or --all-bots is required")
+			if len(scope) > 0 {
+				fmt.Fprintln(stderr, err)
+			}
+			return 2
+		}
+		if norm[0] != ScopeAll {
+			for _, b := range norm {
+				var cnt int64
+				if err := db.Model(&dao.BotDefinition{}).Where("id = ?", b).Count(&cnt).Error; err == nil && cnt == 0 {
+					fmt.Fprintf(stderr, "bot %q not found in bot_definitions\n", b)
+					return 1
+				}
+			}
+		}
+		plain, row, err := store.Create(ctx, norm, *name)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		fmt.Fprintf(stderr, "created notify token id=%s bot=%s name=%q\n", row.ID, row.BotID, row.Name)
+		fmt.Fprintf(stderr, "created notify token id=%s scope=%s name=%q\n", row.ID, row.Scope, row.Name)
 		fmt.Fprintln(stderr, "store it now (e.g. in a root-only 0600 file); it cannot be shown again:")
 		fmt.Fprintln(stdout, plain)
 		return 0
@@ -70,15 +102,20 @@ func RunCLI(ctx context.Context, db *gorm.DB, args []string, stdout, stderr io.W
 		if err := fs.Parse(rest); err != nil {
 			return 2
 		}
-		rows, err := store.List(ctx, *bot)
+		filter := ""
+		if len(bots) > 0 {
+			filter = strings.TrimSpace(bots[0])
+		}
+		rows, err := store.List(ctx, filter)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tBOT\tNAME\tCREATED\tLAST_USED\tREVOKED")
-		for _, r := range rows {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.ID, r.BotID, r.Name, fmtTime(&r.CreatedAt), fmtTime(r.LastUsedAt), fmtTime(r.RevokedAt))
+		fmt.Fprintln(tw, "ID\tSCOPE\tNAME\tCREATED\tLAST_USED\tREVOKED")
+		for i := range rows {
+			r := &rows[i]
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.ID, strings.Join(TokenScope(r), ","), r.Name, fmtTime(&r.CreatedAt), fmtTime(r.LastUsedAt), fmtTime(r.RevokedAt))
 		}
 		_ = tw.Flush()
 		return 0
@@ -87,10 +124,14 @@ func RunCLI(ctx context.Context, db *gorm.DB, args []string, stdout, stderr io.W
 			return 2
 		}
 		if fs.NArg() != 1 {
-			fmt.Fprintln(stderr, "usage: thinkbot notify-token revoke [--bot <botID>] <tokenID>")
+			fmt.Fprintln(stderr, "usage: thinkbot notify-token revoke <tokenID>")
 			return 2
 		}
-		ok, err := store.Revoke(ctx, *bot, fs.Arg(0))
+		filter := ""
+		if len(bots) > 0 {
+			filter = strings.TrimSpace(bots[0])
+		}
+		ok, err := store.Revoke(ctx, filter, fs.Arg(0))
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1

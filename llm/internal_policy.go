@@ -52,6 +52,7 @@ const (
 	PurposeBotProfiler     = "bot_profiler"
 	PurposeWorkflowHeal    = "workflow_heal"
 	PurposeVision          = "vision"
+	PurposeNotify          = "notify"
 )
 
 // InternalPurposes lists every purpose with its built-in reasoning default.
@@ -72,6 +73,7 @@ var InternalPurposes = []struct {
 	{PurposeBotProfiler, "low", "bot self-profile extraction"},
 	{PurposeWorkflowHeal, "low", "workflow healing diagnosis"},
 	{PurposeVision, "low", "vision transcription of attachments"},
+	{PurposeNotify, "low", "notify bot mode: the bot relays an external notification to its owner"},
 }
 
 // Reasoning setting values.

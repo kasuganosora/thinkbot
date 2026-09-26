@@ -1,5 +1,9 @@
 #!/bin/sh
 # mdadm PROGRAM hook -> ThinkBot owner notification.
+# Needs /usr/local/sbin/thinkbot-notify plus /etc/thinkbot/notify.token and /etc/thinkbot/notify.bot
+# (the bot that should notify its owner; THINKBOT_NOTIFY_BOT works too, but mdadm/smartd run with a
+# minimal environment, so the file is the reliable choice). Default endpoint: the isolated notify
+# listener http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
 # Install: install -o root -g root -m 0755 thinkbot-mdadm-hook /usr/local/sbin/thinkbot-mdadm-hook
 # mdadm.conf:  PROGRAM /usr/local/sbin/thinkbot-mdadm-hook
 # mdadm calls: PROGRAM <event> <md-device> [<component-device>]
