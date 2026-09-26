@@ -61,6 +61,9 @@ func Validate(req Request, cfg Config, now time.Time) (Notification, error) {
 		return n, &ValidationError{"source must match [A-Za-z0-9._:/@+-], 1-64 chars (e.g. maid/smartd)"}
 	}
 
+	if strings.TrimSpace(req.Level) == "" {
+		return n, &ValidationError{"level is required: info|warn|critical"}
+	}
 	n.Level = NormalizeLevel(req.Level)
 	if n.Level == "" {
 		return n, &ValidationError{"level must be one of info|warn|critical"}
@@ -207,21 +210,98 @@ func formatRawBlock(n Notification, loc *time.Location, bodyRunes int) string {
 	return b.String()
 }
 
-// ComposeBot 把 bot 的文本与原始信息拼成最终发送文本。
-//   - critical：bot 文本 + 分隔线 + 原文块（来源 / 标题 / 正文逐字保留，基本不截断，
-//     硬件告警的设备、序列号、事件名、mdstat 等关键信息永不丢失，哪怕模型漏说或说错）。
-//   - info/warn：只发 bot 文本。
+// ComposeBot 把 bot 的文本与原始信息拼成最终发送文本，返回缺失的标识符（供日志）。
+//   - critical / warn：bot 文本 + 分隔线 + 原文块（来源 / 标题 / 正文逐字保留，基本不截断）。
+//   - info：若原文里的标识符（设备路径、序列号、IP、主机名、提交哈希……）有任何一个没有
+//     逐字出现在 bot 文本里（模型改写 / 拼错了），同样附原文块；否则只附一行「来源 · 标题」脚注。
 //
+// 这是确定性的事后校验：模型把 /dev/md/md-test 写成 /dev/md-md-test 这类失真，主人仍能在
+// 原文块里看到正确的值。模型凭空编造的原因无法检测，由 prompt 约束。
 // bot 文本为空时回落 raw。
-func ComposeBot(text string, n Notification, loc *time.Location) string {
+func ComposeBot(text string, n Notification, loc *time.Location) (string, []string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return FormatRaw(n, loc)
+		return FormatRaw(n, loc), nil
 	}
-	if n.Level == LevelCritical {
-		return text + "\n\n—— 原始告警 ——\n" + FormatCriticalRaw(n, loc)
+	missing := MissingIdentifiers(n, text)
+	switch {
+	case n.Level == LevelCritical || n.Level == LevelWarn:
+		return text + "\n\n—— 原始告警 ——\n" + FormatCriticalRaw(n, loc), missing
+	case len(missing) > 0:
+		return text + "\n\n—— 原始通知 ——\n" + FormatCriticalRaw(n, loc), missing
+	default:
+		return text + "\n\n— " + n.Source + " · " + n.Title, nil
 	}
-	return text
+}
+
+var (
+	// 路径：至少两级（/dev/sda、/dev/md/md-test、/var/log/x.log）。
+	identPathRE = regexp.MustCompile(`/[A-Za-z0-9._@:+-]+(?:/[A-Za-z0-9._@:+-]+)+`)
+	// md 设备名：md0、md127、md-test 形式由路径覆盖。
+	identMDRE = regexp.MustCompile(`\bmd[0-9]+\b`)
+	// IPv4 / IPv6（简化）。
+	identIPv4RE = regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
+	identIPv6RE = regexp.MustCompile(`\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4}\b`)
+	// 提交哈希等十六进制串：7-40 位，须同时含数字与 a-f 字母（排除纯数字）。
+	identHexRE = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
+	// 序列号 / 型号：大写字母与数字混合、≥6 位，可含 - _（WD-WCC7K1234567、WD40EFRX-68N32N0）。
+	identSerialRE = regexp.MustCompile(`\b[A-Z0-9][A-Z0-9_-]{5,}\b`)
+	// 主机名（FQDN）：至少一个点、末段为字母。
+	identFQDNRE = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)
+	// 钩子正文里的「host: xxx」行。
+	identHostLineRE = regexp.MustCompile(`(?mi)^\s*host(?:name)?\s*:\s*([A-Za-z0-9._-]+)\s*$`)
+)
+
+// maxIdentifiers 限制单条通知参与校验的标识符数量（超长正文如大段日志）。
+const maxIdentifiers = 40
+
+// ExtractIdentifiers 从通知标题与正文提取标识符类 token（按首次出现顺序、去重）。
+func ExtractIdentifiers(n Notification) []string {
+	src := n.Title + "\n" + n.Body
+	seen := map[string]bool{}
+	var out []string
+	add := func(tok string) {
+		tok = strings.Trim(tok, ".,;:()[]{}<>'\"")
+		if len(tok) < 3 || seen[tok] || len(out) >= maxIdentifiers {
+			return
+		}
+		seen[tok] = true
+		out = append(out, tok)
+	}
+	for _, m := range identHostLineRE.FindAllStringSubmatch(src, -1) {
+		add(m[1])
+	}
+	for _, re := range []*regexp.Regexp{identPathRE, identMDRE, identIPv4RE, identIPv6RE, identFQDNRE} {
+		for _, tok := range re.FindAllString(src, -1) {
+			// /proc、/sys 下的路径是数据来源标签（如钩子正文里的「/proc/mdstat:」），不是告警对象。
+			if strings.HasPrefix(tok, "/proc/") || strings.HasPrefix(tok, "/sys/") {
+				continue
+			}
+			add(tok)
+		}
+	}
+	for _, tok := range identHexRE.FindAllString(src, -1) {
+		if strings.ContainsAny(tok, "0123456789") && strings.ContainsAny(tok, "abcdef") {
+			add(tok)
+		}
+	}
+	for _, tok := range identSerialRE.FindAllString(src, -1) {
+		if strings.ContainsAny(tok, "0123456789") && strings.ContainsAny(tok, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+			add(tok)
+		}
+	}
+	return out
+}
+
+// MissingIdentifiers 返回没有逐字出现在 text 中的标识符。
+func MissingIdentifiers(n Notification, text string) []string {
+	var missing []string
+	for _, tok := range ExtractIdentifiers(n) {
+		if !strings.Contains(text, tok) {
+			missing = append(missing, tok)
+		}
+	}
+	return missing
 }
 
 // HistoryNote 是写入主人会话的「系统备注」：说明这是外部程序经 notify 接口推送的通知
