@@ -123,7 +123,7 @@ func DefaultConfig() Config {
 		DedupWindow:        30 * time.Minute,
 		BotTimeout:         DefaultBotTimeout,
 		BotMaxChars:        1000,
-		BotHistoryMessages: 20,
+		BotHistoryMessages: 6,
 		RecordHistory:      true,
 		Location:           time.Local,
 	}
@@ -191,10 +191,10 @@ func LoadConfig(store *config.Store, botID string) Config {
 	return c
 }
 
-// NormalizeLevel 归一级别；未知返回 ""。
+// NormalizeLevel 归一级别；空串或未知返回 ""（调用方返回 400，level 必填）。
 func NormalizeLevel(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "info", "notice", "":
+	case "info", "notice":
 		return LevelInfo
 	case "warn", "warning":
 		return LevelWarn

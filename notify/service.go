@@ -254,8 +254,13 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 			// 模型失败 / 空输出 / 超时 / panic：回落 raw，通知绝不因模型而丢失。
 			s.Logger.Warnw("notify: bot compose failed, falling back to raw", "bot_id", botID, "event_id", ev.ID, "err", berr)
 		} else {
-			text = ComposeBot(out, n, cfg.Location)
+			var missing []string
+			text, missing = ComposeBot(out, n, cfg.Location)
 			botUsed = true
+			if len(missing) > 0 {
+				s.Logger.Infow("notify: bot text dropped or altered identifiers, raw block appended",
+					"bot_id", botID, "event_id", ev.ID, "missing", missing)
+			}
 		}
 	}
 	suffix := ""

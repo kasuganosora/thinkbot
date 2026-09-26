@@ -63,7 +63,7 @@ Content-Type: application/json
 |---|---|---|
 | `bot` | yes on `/api/notify` | bot id; the token's scope must include it (403 otherwise) |
 | `source` | yes | `[A-Za-z0-9._:/@+-]{1,64}`, e.g. `maid/smartd` |
-| `level` | yes | `info` \| `warn` \| `critical` (aliases: `warning`, `crit`, `error`, `alert`, `emerg`) |
+| `level` | yes | `info` \| `warn` \| `critical` (aliases: `notice`, `warning`, `crit`, `error`, `err`, `alert`, `emerg`, `emergency`). Missing, empty or unknown → 400 |
 | `title` | title or body | single line, truncated to `notify.max_title_chars` |
 | `body` | title or body | multi-line, truncated to `notify.max_body_chars` |
 | `dedup_key` | no | explicit dedup key; default = hash(source+level+title+body) |
@@ -79,17 +79,20 @@ invalid UTF-8 are removed.
 - `bot` (default) — the bot relays the notification **as itself**: one LLM call on
   the bot's main model (its configured temperature and `maxTokens`) with the bot's
   real context:
-  - identity: the running bot's loaded SOUL.md (falls back to the bot's configured
-    system prompt);
-  - long-term memory: the bot's own `RecallStage` instance (same retrievers, same
-    bot / conversation / user scopes as a Telegram DM turn; title+body as the
-    relevance query);
-  - the recent owner conversation (`notify.bot_history_messages`, default 20; same
-    loader as inbound Telegram turns, context checkpoints applied; text only);
-  - a relay instruction: pull out the key facts (what, where: host/device/service,
-    numbers, error text, when) and tell the owner concisely in its own voice, copy
-    names/numbers verbatim, do not invent causes, may connect it to the recent
-    conversation.
+  - identity: the same identity as normal replies — the running bot's SOUL.md plus
+    its `system_prompt` as operator instructions (`prompt.ComposeIdentity`; without
+    SOUL.md the `system_prompt` alone). No tool guidance or skills (no tools here);
+  - **no long-term memory recall**: memories of past events (commits, repairs, other
+    machines) led the model to guess causes and link unrelated things to the alert;
+  - a little recent owner conversation, for tone only (`notify.bot_history_messages`,
+    default 6; at most 1000 chars per message / 6000 total; same loader as inbound
+    Telegram turns, context checkpoints applied; text only);
+  - a relay instruction: say what happened, where and when, concisely in its own
+    voice; copy every identifier character for character (device names and paths,
+    serials, model numbers, IPs, hostnames, commit ids, error strings, numbers and
+    units); do not speculate about causes or connect the alert to memory / earlier
+    conversations unless the notification says so; suggested checks only generic or
+    taken from the notification.
 
   The notification itself is the last user message, as JSON inside
   `<notification_data>` (JSON escaping makes it impossible for the content to close
@@ -114,13 +117,19 @@ invalid UTF-8 are removed.
   - timeout `notify.bot_timeout` (default 60s, max 80s) covers context assembly + the
     call; the service additionally stops waiting 5s after that even if the model
     client ignores cancellation.
-  - `critical`: the bot's text **plus** `—— 原始告警 ——` and a verbatim raw block
-    (badge, source, title, body, time). The body is kept practically whole (up to
-    4000 chars; it is already capped by `notify.max_body_chars`), so hardware key
+  - `critical` and `warn`: the bot's text **plus** `—— 原始告警 ——` and a verbatim raw
+    block (badge, source, title, body, time). The body is kept practically whole (up
+    to 4000 chars; it is already capped by `notify.max_body_chars`), so hardware key
     fields — md device, disk device, model/serial, event name and the full
     `/proc/mdstat` excerpt — are always present even if the model drops or garbles
     them. Longer messages are split by the Telegram channel.
-  - `info`/`warn`: the bot's text only.
+  - `info`: a deterministic post-check extracts identifier-like tokens from the raw
+    title and body (paths such as `/dev/md/md-test`, `mdN`, serial/model-looking
+    tokens, hex commit ids, IPv4/IPv6, FQDNs, `host:` lines; `/proc/…` and `/sys/…`
+    labels ignored). If any of them is not in the bot's text verbatim (e.g. the model
+    wrote `/dev/md-md-test`), the raw block is appended under `—— 原始通知 ——` and the
+    missing tokens are logged; otherwise a one-line footer `— <source> · <title>` is
+    appended. (An invented cause cannot be detected this way; the prompt forbids it.)
   - LLM error / timeout / panic / empty output (after cleaning) / bot without LLM →
     falls back to `raw`; the response then has `bot_used:false`.
 
@@ -239,7 +248,7 @@ Everything except `notify.listen_addr` is read per request.
 | `notify.bot_timeout` | `60s` | bot-mode timeout (then raw), capped at `80s` so the sender's 120s HTTP timeout still sees the result. Old name `notify.persona_timeout` is still read when the new key is unset |
 | `notify.bot_max_chars` | `1000` | bot-mode output cap. Old name `notify.persona_max_chars` |
 | `notify.bot_max_tokens` | `0` | extra lower cap for bot-mode `max_tokens` on top of `llm.internal_max_tokens.notify`; 0 = no extra cap (a value > 0 can only lower it). Old name `notify.persona_max_tokens` |
-| `notify.bot_history_messages` | `20` | recent owner-conversation messages given to the bot (0 = none) |
+| `notify.bot_history_messages` | `6` | recent owner-conversation messages given to the bot, for tone only (0 = none) |
 | `notify.record_history` | `true` | write the note (+ the bot's message) into the owner conversation |
 | `llm.internal_reasoning.notify` | *(empty = inherit default `auto` → `low`)* | bot-mode reasoning_effort (shared internal-call policy) |
 | `llm.internal_max_tokens.notify` | `0` | bot-mode output cap (0 = inherit `llm.internal_max_tokens.default`, then the model's `maxTokens`) |
