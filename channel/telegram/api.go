@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/log"
 	"github.com/kasuganosora/thinkbot/util/retry"
 )
 
@@ -104,6 +106,8 @@ func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Op
 		}),
 		http.WithMaxBodySize(maxTelegramDownloadBytes),
 	)
+	// Never let the token reach logs, whatever path an error takes.
+	log.RegisterSecret(token)
 	return &apiClient{
 		client:       http.New(opts...),
 		token:        token,
@@ -111,6 +115,41 @@ func newAPIClient(token string, pollTimeout int, baseURL string, opts ...http.Op
 		sendInterval: 250 * time.Millisecond, // 约 4 条/秒，低于 Telegram 群聊限制且对私聊足够
 	}
 }
+
+// wrapErr wraps an API error for callers/logs with the bot token removed.
+//
+// Every Bot API URL carries the token (<base>/bot<TOKEN>/method), and transport
+// errors (*url.Error) print the URL, so an unredacted error leaked the token
+// into thinkbot.log (seen on shutdown: "Post \"https://api.telegram.org/bot<redacted>/getUpdates\":
+// context canceled"). util/http already sanitizes *url.Error; this is the
+// Telegram-specific second layer: URL patterns plus the literal token value.
+func (a *apiClient) wrapErr(err error, msg string) error {
+	if err == nil {
+		return nil
+	}
+	return errs.Wrap(redactTokenErr(err, a.token), msg)
+}
+
+// redactTokenErr returns err with any occurrence of token (and generic
+// credential patterns) masked in Error(); errors.Is/As still see the cause.
+func redactTokenErr(err error, token string) error {
+	if err == nil {
+		return nil
+	}
+	err = http.SanitizeError(err)
+	if token == "" || !strings.Contains(err.Error(), token) {
+		return err
+	}
+	return &tokenRedactedError{msg: strings.ReplaceAll(err.Error(), token, log.RedactedPlaceholder), cause: err}
+}
+
+type tokenRedactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *tokenRedactedError) Error() string { return e.msg }
+func (e *tokenRedactedError) Unwrap() error { return e.cause }
 
 // throttle 在每次出站发送前做最小间隔限流，平滑发送速率以规避 429。
 // 返回 ctx 被取消时立即报错；否则等待到允许发送的下一个时间槽。
@@ -138,7 +177,7 @@ func (a *apiClient) getMe(ctx context.Context) (*User, error) {
 	var resp apiResponse[User]
 	err := a.client.GetJSON(ctx, "getMe", &resp)
 	if err != nil {
-		return nil, errs.Wrap(err, "telegram getMe")
+		return nil, a.wrapErr(err, "telegram getMe")
 	}
 	if !resp.OK {
 		return nil, fmt.Errorf("telegram getMe failed: [%d] %s", resp.ErrorCode, resp.Description)
@@ -150,7 +189,7 @@ func (a *apiClient) getMe(ctx context.Context) (*User, error) {
 func (a *apiClient) getFile(ctx context.Context, fileID string) (*File, error) {
 	var resp apiResponse[File]
 	if err := a.client.GetJSON(ctx, "getFile?file_id="+url.QueryEscape(fileID), &resp); err != nil {
-		return nil, errs.Wrap(err, "telegram getFile")
+		return nil, a.wrapErr(err, "telegram getFile")
 	}
 	if !resp.OK {
 		return nil, fmt.Errorf("telegram getFile failed: [%d] %s", resp.ErrorCode, resp.Description)
@@ -165,7 +204,7 @@ func (a *apiClient) downloadFile(ctx context.Context, filePath string) ([]byte, 
 	}
 	resp, err := a.fileClient.Get(filePath).SetContext(ctx).Do()
 	if err != nil {
-		return nil, errs.Wrap(err, "telegram downloadFile")
+		return nil, a.wrapErr(err, "telegram downloadFile")
 	}
 	if !resp.IsSuccess() {
 		return nil, fmt.Errorf("telegram downloadFile failed: status %d", resp.StatusCode)
@@ -187,12 +226,12 @@ func (a *apiClient) getUpdates(ctx context.Context, offset int64, timeout int, a
 
 	resp, err := req.Do()
 	if err != nil {
-		return nil, errs.Wrap(err, "telegram getUpdates")
+		return nil, a.wrapErr(err, "telegram getUpdates")
 	}
 
 	var apiResp apiResponse[[]Update]
 	if err := resp.JSON(&apiResp); err != nil {
-		return nil, errs.Wrap(err, "telegram getUpdates parse")
+		return nil, a.wrapErr(err, "telegram getUpdates parse")
 	}
 	if !apiResp.OK {
 		return nil, fmt.Errorf("telegram getUpdates failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -243,7 +282,7 @@ func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, par
 // sendMessageWithMarkup 发送带 inline keyboard 的文本消息。markup 为 nil 时与 sendMessageFull 等价。
 func (a *apiClient) sendMessageWithMarkup(ctx context.Context, chatID int64, text, parseMode string, replyTo int64, markup *InlineKeyboardMarkup) (int64, error) {
 	if err := a.throttle(ctx); err != nil {
-		return 0, errs.Wrap(err, "telegram sendMessage throttle")
+		return 0, a.wrapErr(err, "telegram sendMessage throttle")
 	}
 	req := a.client.Post("sendMessage").
 		SetContext(ctx).
@@ -257,12 +296,12 @@ func (a *apiClient) sendMessageWithMarkup(ctx context.Context, chatID int64, tex
 
 	resp, err := req.Do()
 	if err != nil {
-		return 0, errs.Wrap(err, "telegram sendMessage")
+		return 0, a.wrapErr(err, "telegram sendMessage")
 	}
 
 	var apiResp apiResponse[sendMessageResult]
 	if err := resp.JSON(&apiResp); err != nil {
-		return 0, errs.Wrap(err, "telegram sendMessage parse")
+		return 0, a.wrapErr(err, "telegram sendMessage parse")
 	}
 	if !apiResp.OK {
 		return 0, fmt.Errorf("telegram sendMessage failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -273,7 +312,7 @@ func (a *apiClient) sendMessageWithMarkup(ctx context.Context, chatID int64, tex
 // sendChatAction 发送聊天状态（如"正在输入..."）。
 func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action string) error {
 	if err := a.throttle(ctx); err != nil {
-		return errs.Wrap(err, "telegram sendChatAction throttle")
+		return a.wrapErr(err, "telegram sendChatAction throttle")
 	}
 	req := a.client.Post("sendChatAction").
 		SetContext(ctx).
@@ -284,12 +323,12 @@ func (a *apiClient) sendChatAction(ctx context.Context, chatID int64, action str
 
 	resp, err := req.Do()
 	if err != nil {
-		return errs.Wrap(err, "telegram sendChatAction")
+		return a.wrapErr(err, "telegram sendChatAction")
 	}
 
 	var apiResp apiResponse[any]
 	if err := resp.JSON(&apiResp); err != nil {
-		return errs.Wrap(err, "telegram sendChatAction parse")
+		return a.wrapErr(err, "telegram sendChatAction parse")
 	}
 	if !apiResp.OK {
 		return fmt.Errorf("telegram sendChatAction failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -304,7 +343,7 @@ func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64
 
 func (a *apiClient) editMessageTextWithMarkup(ctx context.Context, chatID, messageID int64, text, parseMode string, markup *InlineKeyboardMarkup) error {
 	if err := a.throttle(ctx); err != nil {
-		return errs.Wrap(err, "telegram editMessageText throttle")
+		return a.wrapErr(err, "telegram editMessageText throttle")
 	}
 	req := a.client.Post("editMessageText").
 		SetContext(ctx).
@@ -318,12 +357,12 @@ func (a *apiClient) editMessageTextWithMarkup(ctx context.Context, chatID, messa
 
 	resp, err := req.Do()
 	if err != nil {
-		return errs.Wrap(err, "telegram editMessageText")
+		return a.wrapErr(err, "telegram editMessageText")
 	}
 
 	var apiResp apiResponse[any]
 	if err := resp.JSON(&apiResp); err != nil {
-		return errs.Wrap(err, "telegram editMessageText parse")
+		return a.wrapErr(err, "telegram editMessageText parse")
 	}
 	if !apiResp.OK {
 		return fmt.Errorf("telegram editMessageText failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -367,7 +406,7 @@ func (a *apiClient) unbanChatMember(ctx context.Context, chatID, userID int64, o
 func (a *apiClient) getChat(ctx context.Context, chatID int64) (*getChatResponse, error) {
 	var resp apiResponse[getChatResponse]
 	if err := a.client.GetJSON(ctx, fmt.Sprintf("getChat?chat_id=%d", chatID), &resp); err != nil {
-		return nil, errs.Wrap(err, "telegram getChat")
+		return nil, a.wrapErr(err, "telegram getChat")
 	}
 	if !resp.OK {
 		return nil, fmt.Errorf("telegram getChat failed: [%d] %s", resp.ErrorCode, resp.Description)
@@ -397,7 +436,7 @@ func (a *apiClient) deleteMessage(ctx context.Context, chatID, messageID int64) 
 func (a *apiClient) getChatMemberCount(ctx context.Context, chatID int64) (int, error) {
 	var resp apiResponse[int]
 	if err := a.client.GetJSON(ctx, fmt.Sprintf("getChatMemberCount?chat_id=%d", chatID), &resp); err != nil {
-		return 0, errs.Wrap(err, "telegram getChatMemberCount")
+		return 0, a.wrapErr(err, "telegram getChatMemberCount")
 	}
 	if !resp.OK {
 		return 0, fmt.Errorf("telegram getChatMemberCount failed: [%d] %s", resp.ErrorCode, resp.Description)
@@ -409,7 +448,7 @@ func (a *apiClient) getChatMemberCount(ctx context.Context, chatID int64) (int, 
 func (a *apiClient) getChatAdministrators(ctx context.Context, chatID int64) ([]ChatMember, error) {
 	var resp apiResponse[[]ChatMember]
 	if err := a.client.GetJSON(ctx, fmt.Sprintf("getChatAdministrators?chat_id=%d", chatID), &resp); err != nil {
-		return nil, errs.Wrap(err, "telegram getChatAdministrators")
+		return nil, a.wrapErr(err, "telegram getChatAdministrators")
 	}
 	if !resp.OK {
 		return nil, fmt.Errorf("telegram getChatAdministrators failed: [%d] %s", resp.ErrorCode, resp.Description)
@@ -435,7 +474,7 @@ func (a *apiClient) sendPhoto(ctx context.Context, chatID int64, photoURL, capti
 // 文件大小上限由 Telegram 决定（sendPhoto 约 10MB），调用方负责事前校验。
 func (a *apiClient) sendPhotoUpload(ctx context.Context, chatID int64, filename, caption string, data []byte) (int64, error) {
 	if err := a.throttle(ctx); err != nil {
-		return 0, errs.Wrap(err, "telegram sendPhoto throttle")
+		return 0, a.wrapErr(err, "telegram sendPhoto throttle")
 	}
 	form := http.NewMultipartForm().
 		AddField("chat_id", strconv.FormatInt(chatID, 10)).
@@ -449,12 +488,12 @@ func (a *apiClient) sendPhotoUpload(ctx context.Context, chatID int64, filename,
 		SetMultipart(form).
 		Do()
 	if err != nil {
-		return 0, errs.Wrap(err, "telegram sendPhoto")
+		return 0, a.wrapErr(err, "telegram sendPhoto")
 	}
 
 	var apiResp apiResponse[sendMessageResult]
 	if err := resp.JSON(&apiResp); err != nil {
-		return 0, errs.Wrap(err, "telegram sendPhoto parse")
+		return 0, a.wrapErr(err, "telegram sendPhoto parse")
 	}
 	if !apiResp.OK {
 		return 0, fmt.Errorf("telegram sendPhoto failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)
@@ -467,7 +506,7 @@ func (a *apiClient) sendPhotoUpload(ctx context.Context, chatID int64, filename,
 // 文件大小上限由 Telegram 决定（bot 约 50MB），调用方负责事前校验。
 func (a *apiClient) sendDocument(ctx context.Context, chatID int64, filename, caption string, mimeType string, data []byte) (int64, error) {
 	if err := a.throttle(ctx); err != nil {
-		return 0, errs.Wrap(err, "telegram sendDocument throttle")
+		return 0, a.wrapErr(err, "telegram sendDocument throttle")
 	}
 	form := http.NewMultipartForm().
 		AddField("chat_id", strconv.FormatInt(chatID, 10)).
@@ -485,12 +524,12 @@ func (a *apiClient) sendDocument(ctx context.Context, chatID int64, filename, ca
 		SetMultipart(form).
 		Do()
 	if err != nil {
-		return 0, errs.Wrap(err, "telegram sendDocument")
+		return 0, a.wrapErr(err, "telegram sendDocument")
 	}
 
 	var apiResp apiResponse[sendMessageResult]
 	if err := resp.JSON(&apiResp); err != nil {
-		return 0, errs.Wrap(err, "telegram sendDocument parse")
+		return 0, a.wrapErr(err, "telegram sendDocument parse")
 	}
 	if !apiResp.OK {
 		return 0, fmt.Errorf("telegram sendDocument failed: [%d] %s", apiResp.ErrorCode, apiResp.Description)

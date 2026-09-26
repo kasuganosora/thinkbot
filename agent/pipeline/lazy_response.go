@@ -215,7 +215,14 @@ func LazyResponseMiddleware(cfg LazyResponseConfig) Middleware {
 
 				if judgeRes == nil || !judgeRes.Lazy {
 					// 无 judge 配置，或二级否决（含 judge 失败）→ 直接发送原回复。
-					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), false, judgeRes, cfg.Judge == nil, "veto")
+					finalAct := "veto"
+					if judgeRes != nil && strings.HasPrefix(judgeRes.Reason, "judge error:") {
+						finalAct = "judge_error_allow"
+					}
+					if cfg.Judge == nil {
+						finalAct = "no_judge"
+					}
+					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), false, judgeRes, cfg.Judge == nil, finalAct)
 					return result, err
 				}
 

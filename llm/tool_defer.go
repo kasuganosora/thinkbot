@@ -155,19 +155,28 @@ func (d *ToolDeferral) IsLoaded(name string) bool {
 // Search returns deferred (not-yet-loaded) tools whose name, description, or
 // keywords match query (case-insensitive substring), and marks them loaded so
 // they become directly callable. An empty query matches all deferred tools.
+// maxToolSearchHits caps how many deferred tools a single tool_search may load.
+const maxToolSearchHits = 8
+
 func (d *ToolDeferral) Search(query string) []Tool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
+	}
 	var hits []Tool
 	for i := range d.full {
 		t := d.full[i]
 		if !t.DeferredLoad || d.loaded[t.Name] {
 			continue
 		}
-		if q == "" || toolMatches(t, q) {
+		if toolMatches(t, q) {
 			hits = append(hits, t)
 			d.loadLocked(t.Name)
+			if len(hits) >= maxToolSearchHits {
+				break
+			}
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].Name < hits[j].Name })
@@ -337,9 +346,11 @@ func (d *ToolDeferral) searchTool() Tool {
 		Name: "tool_search",
 		Description: "Search for additional tools by keyword. Use this when you need a capability " +
 			"that is not in your current tool list — for example, tools that were lazily loaded and " +
-			"only expose their name and a short description until discovered. Returns the matching " +
+			"only expose their name and a short description until discovered. Returns up to 8 matching " +
 			"tool names and descriptions; once found, a tool becomes directly callable with its full " +
-			"parameters and input schema.",
+			"parameters and input schema. Call ONCE with a specific keyword, then use the returned tools — " +
+			"do NOT repeatedly tool_search or spray many unrelated tools in the same turn. " +
+			"query must be a non-empty keyword (empty query returns nothing).",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -356,6 +367,9 @@ func (d *ToolDeferral) searchTool() Tool {
 				if v, ok := m["query"].(string); ok {
 					query = v
 				}
+			}
+			if strings.TrimSpace(query) == "" {
+				return "tool_search requires a non-empty query keyword. Name the capability you need (e.g. browser, misskey, calendar); do not call tool_search with an empty query.", nil
 			}
 			hits := d.Search(query)
 			if len(hits) > 0 {

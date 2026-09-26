@@ -107,6 +107,22 @@ func (b *searchBreaker) recordSuccess() {
 	b.lastReason = ""
 }
 
+// isOpen reports whether the breaker is in cooldown. After cooldown (including
+// half-open probe) it returns false so misskey_search_notes can reappear.
+func (b *searchBreaker) isOpen(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return now.Before(b.openUntil)
+}
+
+// isSearchCircuitOpen lets the tool layer decide whether to expose misskey_search_notes.
+func (a *apiClient) isSearchCircuitOpen() bool {
+	if a == nil || a.searchBreaker == nil {
+		return false
+	}
+	return a.searchBreaker.isOpen(time.Now())
+}
+
 // ============================================================================
 // API — Misskey HTTP API 客户端
 // ============================================================================
