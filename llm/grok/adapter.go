@@ -94,9 +94,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			responseModel = chunk.Model
 
 			if chunk.Usage != nil {
-				usage.InputTokens = chunk.Usage.PromptTokens
-				usage.OutputTokens = chunk.Usage.CompletionTokens
-				usage.TotalTokens = chunk.Usage.TotalTokens
+				usage = chunk.Usage.toLLMUsage()
 			}
 
 			for _, choice := range chunk.Choices {
@@ -401,11 +399,7 @@ func grokResponseToResult(resp *ChatCompletionResponse) *llm.GenerateResult {
 	}
 
 	if resp.Usage != nil {
-		result.Usage = llm.Usage{
-			InputTokens:  resp.Usage.PromptTokens,
-			OutputTokens: resp.Usage.CompletionTokens,
-			TotalTokens:  resp.Usage.TotalTokens,
-		}
+		result.Usage = resp.Usage.toLLMUsage()
 	}
 
 	if len(resp.Choices) > 0 {
@@ -462,4 +456,31 @@ func toJSONRaw(v any) json.RawMessage {
 	}
 	data, _ := json.Marshal(v)
 	return data
+}
+
+// toLLMUsage 转换为统一用量。InputTokens 保持「含缓存」口径（与其余 adapter 一致），
+// 命中部分记入 CacheReadTokens，计费时按缓存价计一次（见 llm.ComputeCost）。
+func (u *Usage) toLLMUsage() llm.Usage {
+	out := llm.Usage{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+		TotalTokens:  u.TotalTokens,
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		cached := u.PromptTokensDetails.CachedTokens
+		out.CachedInputTokens = cached
+		out.InputTokenDetails = llm.InputTokenDetail{
+			CacheReadTokens: cached,
+			NoCacheTokens:   max(0, u.PromptTokens-cached),
+		}
+	}
+	if u.CompletionTokensDetails != nil && u.CompletionTokensDetails.ReasoningTokens > 0 {
+		r := u.CompletionTokensDetails.ReasoningTokens
+		out.ReasoningTokens = r
+		out.OutputTokenDetails = llm.OutputTokenDetail{
+			ReasoningTokens: r,
+			TextTokens:      max(0, u.CompletionTokens-r),
+		}
+	}
+	return out
 }

@@ -224,6 +224,22 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+
+	// PromptTokensDetails 输入明细。与 OpenAI 协议一致，cached_tokens 已包含在
+	// prompt_tokens 内（不是额外的量）。
+	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	// CompletionTokensDetails 输出明细（reasoning_tokens 已包含在 completion_tokens 内）。
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails 输入 token 明细。
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
+// CompletionTokensDetails 输出 token 明细。
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // ============================================================================
