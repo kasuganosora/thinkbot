@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // ============================================================================
@@ -319,6 +320,137 @@ func (m *SkillManager) EnabledNames() []string {
 }
 
 // ============================================================================
+// 关键词粗检索（L1 skill_search）
+// ============================================================================
+
+// skill_search 粗检索的计分 / 截断参数。
+// 设计参考 research/skill-search-two-stage.md 的 L1 层：
+// 只对 name/description 元数据做子串匹配，不读正文，保证主上下文调用便宜快。
+const (
+	// skillSearchNameWeight name 命中单个关键词的权重。
+	// 明显高于 description 命中（10:1），name 命中的技能优先返回。
+	skillSearchNameWeight = 10
+
+	// skillSearchDescWeight description 命中单个关键词的权重。
+	skillSearchDescWeight = 1
+
+	// skillSearchDefaultLimit limit 缺省/非法时使用的默认返回条数。
+	skillSearchDefaultLimit = 10
+
+	// skillSearchMaxLimit 单次检索允许的最大返回条数（limit > 20 时截断到 10）。
+	skillSearchMaxLimit = 20
+
+	// maxDescriptionRunes 单条 description 的最大 rune 数（含中文）。
+	// 超过则截断到该长度并追加 "…"。
+	maxDescriptionRunes = 200
+)
+
+// SearchSkills 对所有已启用技能做关键词粗检索（L1）。
+//
+// 匹配规则：
+//   - query 按空格分词（strings.Fields），忽略大小写（strings.ToLower）
+//   - 子串匹配 name 或 description；所有关键词都命中才算候选（AND 语义）
+//
+// 计分规则：name 每命中一个关键词 +10，description 每命中一个 +1（name 明显更高）。
+//
+// 排序规则：分数降序；同分按 name 字典序稳定排序。
+//
+// limit：<=0 或 >20 时取默认 10；返回前 limit 条（不足则全部）。
+// 每条 Description 超过 200 字符（rune 数）时截断并追加 "…"。
+//
+// 空 query 或无命中时返回空切片（非 nil，与 List 风格一致）。
+func (m *SkillManager) SearchSkills(query string, limit int) []SearchHit {
+	hits := make([]SearchHit, 0, skillSearchDefaultLimit)
+
+	keywords := searchKeywords(query)
+	if len(keywords) == 0 {
+		return hits // 空 query：返回空切片
+	}
+
+	// limit 归一化：非法值统一回落到默认 10
+	if limit <= 0 || limit > skillSearchMaxLimit {
+		limit = skillSearchDefaultLimit
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, s := range m.skills {
+		// 只检索已启用技能（与 BuildSkillListPrompt / use_skill 可加载范围一致）
+		if !s.Enabled {
+			continue
+		}
+		score, ok := scoreSkill(s, keywords)
+		if !ok {
+			continue // 任一关键词未命中 → 不是候选
+		}
+		hits = append(hits, SearchHit{
+			Name:        s.Name,
+			Description: truncateRunes(s.Description, maxDescriptionRunes),
+			Score:       score,
+		})
+	}
+
+	sortSearchHits(hits)
+
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits
+}
+
+// searchKeywords 将 query 切分为小写关键词（strings.Fields 按空格分词，忽略大小写）。
+// 返回空切片表示空 query（调用方应直接返回空结果）。
+func searchKeywords(query string) []string {
+	fields := strings.Fields(strings.ToLower(query))
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+// scoreSkill 计算单个技能对所有关键词的得分。
+// 返回 (总分, 是否全部命中)：任一关键词在 name 与 description 都未出现 → (0, false)。
+func scoreSkill(s *Skill, keywords []string) (int, bool) {
+	name := strings.ToLower(s.Name)
+	desc := strings.ToLower(s.Description)
+
+	score := 0
+	for _, kw := range keywords {
+		// name 命中权重远高于 description（10:1）
+		switch {
+		case strings.Contains(name, kw):
+			score += skillSearchNameWeight
+		case strings.Contains(desc, kw):
+			score += skillSearchDescWeight
+		default:
+			return 0, false // AND 语义：有未命中的关键词即淘汰
+		}
+	}
+	return score, true
+}
+
+// sortSearchHits 按分数降序排序；同分按 name 字典序升序（稳定排序）。
+func sortSearchHits(hits []SearchHit) {
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].Score != hits[j].Score {
+			return hits[i].Score > hits[j].Score
+		}
+		return hits[i].Name < hits[j].Name
+	})
+}
+
+// truncateRunes 按 rune 数截断字符串（正确处理中文等多字节字符）。
+// 超过 max 时截断到 max 个 rune 并追加省略号 "…"，否则原样返回。
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:max]) + "…"
+}
+
+// ============================================================================
 // 触发注入（prompt Registry 集成）
 // ============================================================================
 
@@ -370,16 +502,18 @@ func (m *SkillManager) BuildTriggerPrompt() string {
 
 func (m *SkillManager) buildTriggerPromptLocked() string {
 	// 自启发加载（lazy discovery）：不常驻技能清单，节省每次请求的 token。
-	// 技能数量增长时本段长度恒定；LLM 需要时通过 use_skill "list" 按需发现。
+	// 技能数量增长时本段长度恒定；LLM 需要时通过 skill_search / use_skill "list" 按需发现。
 	var buf strings.Builder
 	buf.WriteString("## Skills\n\n")
 	buf.WriteString("A Skill is a package of specialized instructions for a specific domain, system or data format. Skills exist in this system, but the list is intentionally NOT shown here to save context.\n\n")
 	buf.WriteString("When a request involves a specialized domain (a file format, a framework, a workflow, a known tool, a repeated task pattern), discover and load a Skill first:\n")
-	buf.WriteString("1. Call `use_skill` with command \"list\" to get all available skills (name — description).\n")
-	buf.WriteString("2. If a matching skill exists, call `use_skill` with that skill's name as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
-	buf.WriteString("3. After loading, follow the skill's instructions exactly. They override your general defaults for that task.\n")
-	buf.WriteString("4. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
-	buf.WriteString("5. NEVER mention a skill to the user without actually loading it.\n\n")
+	// 发现两步走：skill_search 按关键词粗检索（便宜的第一步）；use_skill "list" 返回全部清单（较大）。
+	buf.WriteString("1. Call `skill_search` with a few keywords to cheaply find matching skills (name + short description per hit).\n")
+	buf.WriteString("2. Call `use_skill` with command \"list\" only when you need the full catalog of all available skills (larger).\n")
+	buf.WriteString("3. If a matching skill exists, call `use_skill` with that skill's name as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
+	buf.WriteString("4. After loading, follow the skill's instructions exactly. They override your general defaults for that task.\n")
+	buf.WriteString("5. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
+	buf.WriteString("6. NEVER mention a skill to the user without actually loading it.\n\n")
 	buf.WriteString("These instructions are in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.\n")
 	return buf.String()
 }
@@ -411,7 +545,8 @@ func (m *SkillManager) buildSkillListLocked() string {
 		buf.WriteString("- ")
 		buf.WriteString(s.Name)
 		buf.WriteString(" — ")
-		buf.WriteString(s.Description)
+		// 单条描述超长时截断（rune 数，注意中文），清单仍返回全部条目
+		buf.WriteString(truncateRunes(s.Description, maxDescriptionRunes))
 		buf.WriteString("\n")
 	}
 	return buf.String()
