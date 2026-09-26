@@ -1735,7 +1735,7 @@ func NotifyMetaSpecs() []MetaSpec {
 		{Key: KeyNotifyRateLimit, Category: "Notify", Description: "info/warn 限流「次数/时长」，按 token+bot+source 计（默认 20/1h）"},
 		{Key: KeyNotifyRateLimitCritical, Category: "Notify", Description: "critical 独立限流预算（默认 60/1h）"},
 		{Key: KeyNotifyDedupWindow, Category: "Notify", Description: "去重窗口（默认 30m，0 关闭）"},
-		{Key: KeyNotifyBotTimeout, Category: "Notify", Description: "bot 模式 LLM 超时（默认 60s，失败回落 raw）。旧名 notify.persona_timeout 仍可用"},
+		{Key: KeyNotifyBotTimeout, Category: "Notify", Description: "bot 模式 LLM 超时（默认 60s，上限 80s；超时 / 失败回落 raw）。旧名 notify.persona_timeout 仍可用"},
 		{Key: KeyNotifyBotMaxChars, Category: "Notify", Description: "bot 模式输出字符上限（默认 1000）。旧名 notify.persona_max_chars 仍可用"},
 		{Key: KeyNotifyBotMaxTokens, Category: "Notify", Description: "bot 模式 max_tokens 的额外封顶：在内部调用策略（llm.internal_max_tokens.notify / .default，再无则模型 maxTokens）之上再压低；0（默认）= 不额外封顶，>0 只能调低。reasoning_effort 见 llm.internal_reasoning.notify。旧名 notify.persona_max_tokens 仍可用"},
 		{Key: KeyNotifyBotHistoryMessages, Category: "Notify", Description: "bot 模式带入的主人会话近期消息条数（默认 20；0＝不带历史）"},

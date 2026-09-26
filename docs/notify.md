@@ -111,13 +111,25 @@ invalid UTF-8 are removed.
       `llm.internal_max_tokens.notify` (or `.default`) when set, and additionally by
       `notify.bot_max_tokens` when > 0. Every step can only lower the limit
       (effective = min of the set values). Reasoning tokens count toward it.
-  - timeout `notify.bot_timeout` (default 60s) covers context assembly + the call.
-  - `critical`: the bot's text **plus** `—— 原始告警 ——` and a compact verbatim raw
-    block (badge, source, title, body truncated to 600 chars, time), so the key facts
-    are always present even if the model drops them.
+  - timeout `notify.bot_timeout` (default 60s, max 80s) covers context assembly + the
+    call; the service additionally stops waiting 5s after that even if the model
+    client ignores cancellation.
+  - `critical`: the bot's text **plus** `—— 原始告警 ——` and a verbatim raw block
+    (badge, source, title, body, time). The body is kept practically whole (up to
+    4000 chars; it is already capped by `notify.max_body_chars`), so hardware key
+    fields — md device, disk device, model/serial, event name and the full
+    `/proc/mdstat` excerpt — are always present even if the model drops or garbles
+    them. Longer messages are split by the Telegram channel.
   - `info`/`warn`: the bot's text only.
-  - LLM error / timeout / empty output (after cleaning) / bot without LLM → falls
-    back to `raw`; the response then has `bot_used:false`.
+  - LLM error / timeout / panic / empty output (after cleaning) / bot without LLM →
+    falls back to `raw`; the response then has `bot_used:false`.
+
+  **A notification is never lost because of the LLM.** Once a request is accepted
+  it no longer follows the caller's cancellation (a sender that times out or
+  disconnects does not abort the model call, the raw fallback or the delivery). If
+  the channel rejects the bot's text, the raw text is sent instead. Only a channel
+  that cannot deliver raw text either (bot not running, Telegram down) makes it
+  `failed` (502/503, not a dedup anchor, so a retry sends).
 - `raw` — `🔴 CRITICAL · maid/smartd`, title, body, `🕒 <timestamp in bot timezone>`.
   No LLM call.
 
@@ -224,7 +236,7 @@ Everything except `notify.listen_addr` is read per request.
 | `notify.rate_limit` | `20/1h` | info/warn budget per token+bot+source (`N/duration`, `0/…` disables) |
 | `notify.rate_limit_critical` | `60/1h` | separate critical budget |
 | `notify.dedup_window` | `30m` | `0` disables dedup |
-| `notify.bot_timeout` | `60s` | bot-mode timeout (then raw). Old name `notify.persona_timeout` is still read when the new key is unset |
+| `notify.bot_timeout` | `60s` | bot-mode timeout (then raw), capped at `80s` so the sender's 120s HTTP timeout still sees the result. Old name `notify.persona_timeout` is still read when the new key is unset |
 | `notify.bot_max_chars` | `1000` | bot-mode output cap. Old name `notify.persona_max_chars` |
 | `notify.bot_max_tokens` | `0` | extra lower cap for bot-mode `max_tokens` on top of `llm.internal_max_tokens.notify`; 0 = no extra cap (a value > 0 can only lower it). Old name `notify.persona_max_tokens` |
 | `notify.bot_history_messages` | `20` | recent owner-conversation messages given to the bot (0 = none) |
@@ -297,17 +309,49 @@ install -o root -g root -m 0755 scripts/notify/thinkbot-notify      /usr/local/s
 install -o root -g root -m 0755 scripts/notify/thinkbot-mdadm-hook  /usr/local/sbin/thinkbot-mdadm-hook
 install -o root -g root -m 0755 scripts/notify/60thinkbot-notify    /etc/smartmontools/run.d/60thinkbot-notify
 # token: /etc/thinkbot/notify.token (0600 root)
-# bot:   /etc/thinkbot/notify.bot (one line, e.g. bot-2d8f9b087270da0bcfe177a5), or env THINKBOT_NOTIFY_BOT, or --bot
+# bot:   /etc/thinkbot/notify.bot (one line, e.g. bot-2d8f9b087270da0bcfe177a5), or env THINKBOT_NOTIFY_BOT, or --bot;
+#        falls back to the id inside an old per-bot notify.url (.../api/bots/<id>/notify)
 # URL:   default http://127.0.0.1:8091/api/notify; override with /etc/thinkbot/notify.url or env THINKBOT_NOTIFY_URL
+# mode:  optional /etc/thinkbot/notify.mode (bot|raw), env THINKBOT_NOTIFY_MODE, or -m; default = server (bot)
 echo 'PROGRAM /usr/local/sbin/thinkbot-mdadm-hook' >> /etc/mdadm/mdadm.conf
 systemctl restart mdmonitor            # Debian: mdadm --monitor service
 mdadm --monitor --scan --oneshot --test # sends a TestMessage (level info) per array
 ```
 
-There is no built-in bot id: without `--bot` / `THINKBOT_NOTIFY_BOT` /
-`/etc/thinkbot/notify.bot` the sender refuses (logged to the journal), except when an
-old per-bot URL (`…/api/bots/<id>/notify`) is configured, which still works. mdadm and
-smartd run hooks with a minimal environment, so use the file for them.
+There is no built-in bot id. The sender takes the bot from `--bot` >
+`THINKBOT_NOTIFY_BOT` > `/etc/thinkbot/notify.bot` > the id embedded in an old
+per-bot URL (`…/api/bots/<id>/notify`, e.g. an existing `/etc/thinkbot/notify.url`),
+so hosts that only have the old URL file keep working unchanged. Only when no bot id
+is found anywhere does it refuse, with a clear error in the journal. mdadm and smartd
+run hooks with a minimal environment, so use the files for them.
+
+**Mode.** The hooks do not hardcode a mode: by default notifications — hardware
+alerts included — go through the bot (server default `bot`), which falls back to the
+raw text on any model failure and always appends the raw facts to critical messages.
+Precedence in `thinkbot-notify`: `-m/--mode` > `THINKBOT_NOTIFY_MODE` >
+`/etc/thinkbot/notify.mode` > omitted (server `notify.default_mode`). An invalid
+env/file value is logged and ignored, never a reason to drop a notification. The
+hooks pass a hook-specific mode through as `-m` when set:
+`THINKBOT_NOTIFY_HOOK_MODE` or `/etc/thinkbot/notify.hook-mode`.
+
+```sh
+# force raw for the mdadm / smartd hooks only (other senders keep the bot)
+echo raw > /etc/thinkbot/notify.hook-mode
+# force raw for everything this host sends through thinkbot-notify
+echo raw > /etc/thinkbot/notify.mode
+# back to the bot
+rm -f /etc/thinkbot/notify.hook-mode /etc/thinkbot/notify.mode
+```
+
+**Dedup keys, sources and titles** use a safe device token: bracketed suffixes such
+as smartd's ` [SAT]` are stripped, `/dev/` is dropped and other unsafe characters
+become `-` (`/dev/sda [SAT]` → `sda`, `/dev/md/0` → `md-0`; controller-addressed
+disks keep their number: `/dev/bus/0` with `-d sat+megaraid,1` → `bus-0-megaraid1`).
+smartd: source `<host>/smartd/sda`, title `SMART CurrentPendingSector on sda`, key
+`smartd/sda/CurrentPendingSector`; mdadm: key `mdadm/md0/Fail/sdb2`. The body keeps
+the original device strings plus the hardware details: mdadm adds the member disk's
+model/serial (`lsblk`, best effort) and the full `/proc/mdstat`; smartd adds
+`SMARTD_DEVICEINFO` (model, S/N, WWN, firmware, size; falls back to `smartctl -i`).
 
 smartd on Debian already runs `-M exec /usr/share/smartmontools/smartd-runner`, which
 executes every script in `/etc/smartmontools/run.d/` (the existing `10mail` fails
@@ -322,21 +366,27 @@ use `-M exec /etc/smartmontools/run.d/60thinkbot-notify` directly.
 """thinkbot-notify: push a notification to the owner through a ThinkBot bot.
 
 Install:  install -o root -g root -m 0755 thinkbot-notify /usr/local/sbin/thinkbot-notify
-Config:   /etc/thinkbot/notify.token  (root:root 0600, one line: tbn_...)
-          /etc/thinkbot/notify.bot    (one line: id of the bot that should notify its owner,
-                                       e.g. bot-2d8f9b087270da0bcfe177a5; or env THINKBOT_NOTIFY_BOT,
-                                       or --bot; the token must have that bot in its scope)
-          /etc/thinkbot/notify.url    (optional, one line; or env THINKBOT_NOTIFY_URL;
-                                       default http://127.0.0.1:8091/api/notify, the isolated
-                                       notify listener, notify.listen_addr)
+Config (all one line, in /etc/thinkbot; THINKBOT_NOTIFY_CONF_DIR overrides the directory):
+          notify.token  root:root 0600: tbn_...  (THINKBOT_NOTIFY_TOKEN_FILE overrides the path)
+          notify.bot    id of the bot that should notify its owner, e.g. bot-2d8f9b087270da0bcfe177a5
+                        (the token must have that bot in its scope)
+          notify.url    optional; default http://127.0.0.1:8091/api/notify, the isolated notify
+                        listener (notify.listen_addr)
+          notify.mode   optional: bot | raw; omitted = server default (notify.default_mode, "bot")
 
 Usage:
-  thinkbot-notify -s maid/smartd -l critical -t "SMART failure on /dev/sda" [-b BODY | -b - (stdin)]
+  thinkbot-notify -s maid/smartd -l critical -t "SMART failure on sda" [-b BODY | -b - (stdin)]
                   [--bot BOT_ID] [-k DEDUP_KEY] [-m bot|raw] [-c CHANNEL]
 
-Precedence: --bot > THINKBOT_NOTIFY_BOT > /etc/thinkbot/notify.bot, and
-THINKBOT_NOTIFY_URL > /etc/thinkbot/notify.url > built-in default. With a legacy
-per-bot URL (.../api/bots/<id>/notify) the bot may be omitted.
+Precedence:
+  bot:  --bot > $THINKBOT_NOTIFY_BOT > notify.bot > the id inside a legacy per-bot URL
+        (.../api/bots/<id>/notify, e.g. an existing notify.url)
+  url:  $THINKBOT_NOTIFY_URL > notify.url > built-in default
+  mode: -m/--mode > $THINKBOT_NOTIFY_MODE > notify.mode > omitted (server default). An invalid
+        env/file value is logged and ignored, never a reason to drop the notification.
+
+bot mode: the bot relays the notification in its own words; the server falls back to the raw
+text if the model fails or times out, and critical messages always carry the raw facts.
 
 The token is read from a file and sent in the Authorization header, so it never
 appears in the process list. Exit status: 0 = delivered or deduplicated,
@@ -345,15 +395,21 @@ appears in the process list. Exit status: 0 = delivered or deduplicated,
 import argparse
 import json
 import os
+import re
 import sys
 import syslog
 import urllib.error
 import urllib.request
 
 DEFAULT_URL = "http://127.0.0.1:8091/api/notify"
-TOKEN_FILE = os.environ.get("THINKBOT_NOTIFY_TOKEN_FILE", "/etc/thinkbot/notify.token")
-URL_FILE = "/etc/thinkbot/notify.url"
-BOT_FILE = "/etc/thinkbot/notify.bot"
+CONF_DIR = os.environ.get("THINKBOT_NOTIFY_CONF_DIR", "/etc/thinkbot")
+TOKEN_FILE = os.environ.get("THINKBOT_NOTIFY_TOKEN_FILE", os.path.join(CONF_DIR, "notify.token"))
+URL_FILE = os.path.join(CONF_DIR, "notify.url")
+BOT_FILE = os.path.join(CONF_DIR, "notify.bot")
+MODE_FILE = os.path.join(CONF_DIR, "notify.mode")
+MODES = ("bot", "raw", "persona")  # persona = old name of bot
+# bot id embedded in a legacy per-bot URL: .../api/bots/<id>/notify
+LEGACY_URL_RE = re.compile(r"/api/bots/([^/?#]+)/notify/?(?:[?#].*)?$")
 
 
 def read_first_line(path):
@@ -361,10 +417,62 @@ def read_first_line(path):
         return f.readline().strip()
 
 
+def read_optional(path):
+    """First line of path, or "" when missing; unreadable files are logged, not fatal."""
+    if not os.path.exists(path):
+        return ""
+    try:
+        return read_first_line(path)
+    except OSError as e:
+        log("cannot read %s: %s" % (path, e))
+        return ""
+
+
 def log(msg):
     syslog.openlog("thinkbot-notify", syslog.LOG_PID, syslog.LOG_DAEMON)
     syslog.syslog(syslog.LOG_WARNING, msg)
     print("thinkbot-notify: " + msg, file=sys.stderr)
+
+
+def resolve_url():
+    return os.environ.get("THINKBOT_NOTIFY_URL", "").strip() or read_optional(URL_FILE) or DEFAULT_URL
+
+
+def bot_from_url(url):
+    m = LEGACY_URL_RE.search(url)
+    return m.group(1) if m else ""
+
+
+def resolve_bot(flag, url):
+    """Returns (bot, where) following --bot > env > notify.bot > legacy URL."""
+    if flag:
+        return flag, "--bot"
+    env = os.environ.get("THINKBOT_NOTIFY_BOT", "").strip()
+    if env:
+        return env, "THINKBOT_NOTIFY_BOT"
+    f = read_optional(BOT_FILE)
+    if f:
+        return f, BOT_FILE
+    u = bot_from_url(url)
+    if u:
+        return u, "url"
+    return "", ""
+
+
+def resolve_mode(flag):
+    """--mode > THINKBOT_NOTIFY_MODE > notify.mode > "" (server default)."""
+    if flag:
+        return flag
+    for where, value in (("THINKBOT_NOTIFY_MODE", os.environ.get("THINKBOT_NOTIFY_MODE", "")),
+                         (MODE_FILE, read_optional(MODE_FILE))):
+        value = value.strip().lower()
+        if not value:
+            continue
+        if value in MODES:
+            return value
+        log("ignoring invalid mode %r from %s (want bot or raw); using the server default" % (value, where))
+        return ""
+    return ""
 
 
 def main():
@@ -375,40 +483,34 @@ def main():
     ap.add_argument("-b", "--body", default="", help="body text, or - to read stdin")
     ap.add_argument("-k", "--dedup-key", default="")
     ap.add_argument("-m", "--mode", default="", choices=["", "bot", "raw", "persona"],
-                    help="bot (default on the server): the bot relays it in its own words; raw: fixed format")
+                    help="bot: the bot relays it in its own words; raw: fixed format "
+                         "(default: $THINKBOT_NOTIFY_MODE, " + MODE_FILE + ", else the server default)")
     ap.add_argument("-c", "--channel", default="")
-    ap.add_argument("--bot", default="", help="bot id (default: $THINKBOT_NOTIFY_BOT or " + BOT_FILE + ")")
-    # bot mode waits for one LLM call on the server (notify.bot_timeout, default 60s)
-    ap.add_argument("--timeout", type=float, default=90.0)
+    ap.add_argument("--bot", default="", help="bot id (default: $THINKBOT_NOTIFY_BOT, " + BOT_FILE +
+                    ", else the id in a legacy per-bot URL)")
+    # bot mode waits for one LLM call on the server (notify.bot_timeout, default 60s, max 80s)
+    # plus delivery; the server keeps going (and falls back to raw) even if we give up.
+    ap.add_argument("--timeout", type=float, default=120.0)
     a = ap.parse_args()
 
     body = sys.stdin.read() if a.body == "-" else a.body
     body = body[:12000]  # server caps at notify.max_body_chars anyway; stay under max_request_bytes
 
-    url = os.environ.get("THINKBOT_NOTIFY_URL", "")
-    if not url and os.path.exists(URL_FILE):
-        url = read_first_line(URL_FILE)
-    url = url or DEFAULT_URL
-    bot = a.bot or os.environ.get("THINKBOT_NOTIFY_BOT", "")
-    if not bot and os.path.exists(BOT_FILE):
-        try:
-            bot = read_first_line(BOT_FILE)
-        except OSError as e:
-            log("cannot read bot file %s: %s" % (BOT_FILE, e))
-    if not bot and "/api/bots/" not in url:
-        log("no bot configured: pass --bot, set THINKBOT_NOTIFY_BOT or write the bot id to %s "
-            "(source=%s title=%r)" % (BOT_FILE, a.source, a.title))
+    url = resolve_url()
+    bot, _ = resolve_bot(a.bot.strip(), url)
+    if not bot:
+        log("no bot configured: pass --bot, set THINKBOT_NOTIFY_BOT, write the bot id to %s "
+            "or use a per-bot URL .../api/bots/<id>/notify (source=%s title=%r)" % (BOT_FILE, a.source, a.title))
         return 1
+    mode = resolve_mode(a.mode)
     try:
         token = read_first_line(TOKEN_FILE)
     except OSError as e:
         log("cannot read token file %s: %s" % (TOKEN_FILE, e))
         return 1
 
-    payload = {"source": a.source, "level": a.level, "title": a.title, "body": body}
-    if bot:
-        payload["bot"] = bot
-    for k, v in (("dedup_key", a.dedup_key), ("mode", a.mode), ("channel", a.channel)):
+    payload = {"source": a.source, "level": a.level, "title": a.title, "body": body, "bot": bot}
+    for k, v in (("dedup_key", a.dedup_key), ("mode", mode), ("channel", a.channel)):
         if v:
             payload[k] = v
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -449,14 +551,47 @@ if __name__ == "__main__":
 # mdadm PROGRAM hook -> ThinkBot owner notification.
 # Needs /usr/local/sbin/thinkbot-notify plus /etc/thinkbot/notify.token and /etc/thinkbot/notify.bot
 # (the bot that should notify its owner; THINKBOT_NOTIFY_BOT works too, but mdadm/smartd run with a
-# minimal environment, so the file is the reliable choice). Default endpoint: the isolated notify
-# listener http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
+# minimal environment, so the file is the reliable choice; an existing per-bot notify.url
+# .../api/bots/<id>/notify also still works). Default endpoint: the isolated notify listener
+# http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
+# Mode: omitted = server default (bot: the bot relays it in its own words, falling back to the raw
+# text if the model fails; critical messages always carry the raw facts incl. /proc/mdstat).
+# To force raw for the hardware hooks only: echo raw > /etc/thinkbot/notify.hook-mode
+# (THINKBOT_NOTIFY_MODE / /etc/thinkbot/notify.mode are honoured by thinkbot-notify itself).
 # Install: install -o root -g root -m 0755 thinkbot-mdadm-hook /usr/local/sbin/thinkbot-mdadm-hook
 # mdadm.conf:  PROGRAM /usr/local/sbin/thinkbot-mdadm-hook
 # mdadm calls: PROGRAM <event> <md-device> [<component-device>]
 # Test:        mdadm --monitor --scan --oneshot --test
 EVENT="$1"; MD="$2"; COMP="$3"
 HOST="$(hostname -s)"
+CONF="${THINKBOT_NOTIFY_CONF_DIR:-/etc/thinkbot}"
+NOTIFY="${THINKBOT_NOTIFY_BIN:-/usr/local/sbin/thinkbot-notify}"
+
+# devtoken "/dev/md/0" -> "md-0", "/dev/sdb2" -> "sdb2": safe for dedup keys / sources.
+devtoken() {
+  t="$(printf '%s' "$1" | sed -e 's/\[[^]]*\]//g' -e 's|^[[:space:]]*/dev/||' -e 's/[^A-Za-z0-9._-][^A-Za-z0-9._-]*/-/g' \
+        -e 's/^[-.]*//' -e 's/-*$//' | cut -c1-40)"
+  printf '%s' "${t:-unknown}"
+}
+
+# diskinfo /dev/sdb2 -> "sdb model=... serial=..." (best effort; the disk may already be gone).
+diskinfo() {
+  [ -n "$1" ] || return 0
+  command -v lsblk >/dev/null 2>&1 || return 0
+  disk="$(timeout 5 lsblk -dno PKNAME "$1" 2>/dev/null | head -n1)"
+  [ -n "$disk" ] || disk="$(basename "$1")"
+  model="$(timeout 5 lsblk -dno MODEL "/dev/$disk" 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//')"
+  serial="$(timeout 5 lsblk -dno SERIAL "/dev/$disk" 2>/dev/null | head -n1 | sed 's/[[:space:]]*$//')"
+  [ -n "$model$serial" ] || return 0
+  printf '%s model=%s serial=%s' "$disk" "${model:--}" "${serial:--}"
+}
+
+MODE="${THINKBOT_NOTIFY_HOOK_MODE:-}"
+[ -z "$MODE" ] && [ -r "$CONF/notify.hook-mode" ] && MODE="$(head -n1 "$CONF/notify.hook-mode" | tr -d '[:space:]')"
+case "$MODE" in
+  ""|bot|raw|persona) ;;
+  *) logger -t thinkbot-mdadm-hook "ignoring invalid hook mode '$MODE'"; MODE="" ;;
+esac
 
 case "$EVENT" in
   Fail|FailSpare|DegradedArray|DeviceDisappeared) LEVEL=critical ;;
@@ -464,12 +599,17 @@ case "$EVENT" in
   *)                                               LEVEL=info ;;   # RebuildNN, RebuildFinished, SpareActive, NewArray, TestMessage
 esac
 
-TITLE="mdadm $EVENT on $MD${COMP:+ ($COMP)}"
-BODY="$(printf 'host: %s\nevent: %s\narray: %s\ncomponent: %s\n\n/proc/mdstat:\n%s\n' \
-  "$HOST" "$EVENT" "$MD" "${COMP:--}" "$(cat /proc/mdstat 2>/dev/null)")"
+MDTOK="$(devtoken "$MD")"
+KEY="mdadm/$MDTOK/$EVENT"
+[ -n "$COMP" ] && KEY="$KEY/$(devtoken "$COMP")"
+DISK="$(diskinfo "$COMP")"
 
-printf '%s' "$BODY" | /usr/local/sbin/thinkbot-notify \
-  -s "$HOST/mdadm" -l "$LEVEL" -t "$TITLE" -b - -k "mdadm/$MD/$EVENT/${COMP:-}" \
+TITLE="mdadm $EVENT on $MD${COMP:+ ($COMP)}"
+BODY="$(printf 'host: %s\nevent: %s\narray: %s\ncomponent: %s\ndisk: %s\n\n/proc/mdstat:\n%s\n' \
+  "$HOST" "$EVENT" "$MD" "${COMP:--}" "${DISK:--}" "$(cat /proc/mdstat 2>/dev/null)")"
+
+printf '%s' "$BODY" | "$NOTIFY" ${MODE:+-m "$MODE"} \
+  -s "$HOST/mdadm" -l "$LEVEL" -t "$TITLE" -b - -k "$KEY" \
   || logger -t thinkbot-mdadm-hook "notify failed: $TITLE"
 exit 0
 ```
@@ -484,16 +624,55 @@ exit 0
 # which runs every script in /etc/smartmontools/run.d/ with the message file as $1.
 # Needs /usr/local/sbin/thinkbot-notify plus /etc/thinkbot/notify.token and /etc/thinkbot/notify.bot
 # (the bot that should notify its owner; THINKBOT_NOTIFY_BOT works too, but mdadm/smartd run with a
-# minimal environment, so the file is the reliable choice). Default endpoint: the isolated notify
-# listener http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
+# minimal environment, so the file is the reliable choice; an existing per-bot notify.url
+# .../api/bots/<id>/notify also still works). Default endpoint: the isolated notify listener
+# http://127.0.0.1:8091/api/notify (override with /etc/thinkbot/notify.url).
+# Mode: omitted = server default (bot: the bot relays it in its own words, falling back to the raw
+# text if the model fails; critical messages always carry the raw facts incl. model / serial).
+# To force raw for the hardware hooks only: echo raw > /etc/thinkbot/notify.hook-mode
+# (THINKBOT_NOTIFY_MODE / /etc/thinkbot/notify.mode are honoured by thinkbot-notify itself).
 # Install: install -o root -g root -m 0755 60thinkbot-notify /etc/smartmontools/run.d/60thinkbot-notify
 #   (run-parts --lsbsysinit: the file name must not contain a dot)
 # Alternatively point smartd at this script directly: "-M exec /etc/smartmontools/run.d/60thinkbot-notify".
 # Test: add "-M test" to the DEVICESCAN line, restart smartd, then remove it again.
 MSGFILE="$1"
 HOST="$(hostname -s)"
-DEV="${SMARTD_DEVICESTRING:-${SMARTD_DEVICE:-unknown}}"
+CONF="${THINKBOT_NOTIFY_CONF_DIR:-/etc/thinkbot}"
+NOTIFY="${THINKBOT_NOTIFY_BIN:-/usr/local/sbin/thinkbot-notify}"
+DEV="${SMARTD_DEVICESTRING:-${SMARTD_DEVICE:-unknown}}"   # e.g. "/dev/sda [SAT]"
 TYPE="${SMARTD_FAILTYPE:-unknown}"
+
+# devtoken "/dev/sda [SAT]" -> "sda", "/dev/disk/by-id/ata-X" -> "disk-by-id-ata-X": safe for
+# dedup keys, sources and titles.
+devtoken() {
+  t="$(printf '%s' "$1" | sed -e 's/\[[^]]*\]//g' -e 's|^[[:space:]]*/dev/||' -e 's/[^A-Za-z0-9._-][^A-Za-z0-9._-]*/-/g' \
+        -e 's/^[-.]*//' -e 's/-*$//' | cut -c1-40)"
+  printf '%s' "${t:-unknown}"
+}
+
+DEVTOK="$(devtoken "$DEV")"
+# Controller-addressed disks (-d megaraid,N / sat+megaraid,N / areca,N ...) share one device path:
+# keep the disk number so they don't collide.
+case "${SMARTD_DEVICETYPE:-}" in
+  *,*) DEVTOK="$DEVTOK-$(printf '%s' "${SMARTD_DEVICETYPE##*+}" | tr -c 'A-Za-z0-9' '\n' | tr -d '\n')" ;;
+esac
+TYPETOK="$(printf '%s' "$TYPE" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-40)"
+
+# Model / serial: smartd passes them in SMARTD_DEVICEINFO ("MODEL, S/N:..., WWN:..., FW:..., SIZE").
+INFO="${SMARTD_DEVICEINFO:-}"
+if [ -z "$INFO" ] && [ -n "${SMARTD_DEVICE:-}" ] && command -v smartctl >/dev/null 2>&1; then
+  DTYPE=""; [ -n "${SMARTD_DEVICETYPE:-}" ] && [ "$SMARTD_DEVICETYPE" != auto ] && DTYPE="$SMARTD_DEVICETYPE"
+  INFO="$(timeout 15 smartctl -i ${DTYPE:+-d "$DTYPE"} "$SMARTD_DEVICE" 2>/dev/null \
+    | sed -n 's/^\(Device Model\|Model Number\|Product\|Serial Number\|Serial number\):[[:space:]]*/\1: /p' \
+    | paste -sd ';' - | sed 's/;/; /g')"
+fi
+
+MODE="${THINKBOT_NOTIFY_HOOK_MODE:-}"
+[ -z "$MODE" ] && [ -r "$CONF/notify.hook-mode" ] && MODE="$(head -n1 "$CONF/notify.hook-mode" | tr -d '[:space:]')"
+case "$MODE" in
+  ""|bot|raw|persona) ;;
+  *) logger -t thinkbot-smartd-hook "ignoring invalid hook mode '$MODE'"; MODE="" ;;
+esac
 
 case "$TYPE" in
   EmailTest)         LEVEL=info ;;
@@ -501,14 +680,15 @@ case "$TYPE" in
   *)                 LEVEL=critical ;;  # Health, SelfTest, CurrentPendingSector, OfflineUncorrectableSector, ErrorCount, Failed*...
 esac
 
-TITLE="SMART $TYPE on $DEV"
+TITLE="SMART $TYPE on $DEVTOK"
 {
-  printf 'host: %s\ndevice: %s\ninfo: %s\nfirst seen: %s\n\n' "$HOST" "$DEV" "${SMARTD_DEVICEINFO:--}" "${SMARTD_TFIRST:--}"
+  printf 'host: %s\ndevice: %s\ntype: %s\nmodel/serial: %s\nevent: %s\nfirst seen: %s\n\n' \
+    "$HOST" "$DEV" "${SMARTD_DEVICETYPE:--}" "${INFO:--}" "$TYPE" "${SMARTD_TFIRST:--}"
   if [ -n "$SMARTD_FULLMESSAGE" ]; then printf '%s\n' "$SMARTD_FULLMESSAGE"
   elif [ -n "$MSGFILE" ] && [ -r "$MSGFILE" ]; then cat "$MSGFILE"
   else printf '%s\n' "${SMARTD_MESSAGE:-}"; fi
-} | /usr/local/sbin/thinkbot-notify \
-  -s "$HOST/smartd" -l "$LEVEL" -t "$TITLE" -b - -k "smartd/$DEV/$TYPE" \
+} | "$NOTIFY" ${MODE:+-m "$MODE"} \
+  -s "$HOST/smartd/$DEVTOK" -l "$LEVEL" -t "$TITLE" -b - -k "smartd/$DEVTOK/$TYPETOK" \
   || logger -t thinkbot-smartd-hook "notify failed: $TITLE"
 exit 0
 ```
