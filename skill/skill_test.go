@@ -61,8 +61,12 @@ func TestSkillManager_UnregisterAndTriggerRefresh(t *testing.T) {
 	)
 	mgr := NewSkillManager(reg, nil, nil)
 	mgr.Register(&Skill{Name: "pdf", Description: "PDF", Content: "# pdf", Enabled: true})
-	if len(sections) == 0 || !contains(sections[len(sections)-1], "pdf") {
-		t.Fatalf("trigger should list pdf, got %#v", sections)
+	if len(sections) == 0 || !contains(sections[len(sections)-1], "use_skill") {
+		t.Fatalf("trigger should instruct use_skill discovery, got %#v", sections)
+	}
+	// 自启发模式：触发段落不内联技能清单，清单由 BuildSkillListPrompt / use_skill "list" 提供
+	if contains(sections[len(sections)-1], "- pdf") {
+		t.Fatalf("trigger should not inline skill list: %s", sections[len(sections)-1])
 	}
 	mgr.Unregister("pdf")
 	last := sections[len(sections)-1]
@@ -186,20 +190,30 @@ func TestBuildTriggerPrompt(t *testing.T) {
 		t.Fatal("BuildTriggerPrompt should not return empty")
 	}
 
-	// 应该包含已启用的 skill
-	if !contains(prompt, "pdf") {
-		t.Error("trigger prompt should contain 'pdf'")
+	// 自启发模式：触发段落不内联清单，只留恒定长度的发现指引
+	if !contains(prompt, "use_skill") {
+		t.Error("trigger prompt should contain 'use_skill' instruction")
 	}
-	if !contains(prompt, "xlsx") {
-		t.Error("trigger prompt should contain 'xlsx'")
+	if !contains(prompt, "list") {
+		t.Error("trigger prompt should mention use_skill \"list\" discovery")
 	}
-	// 不应包含已禁用的 skill
+	if contains(prompt, "pdf") {
+		t.Error("trigger prompt should NOT inline skill names")
+	}
 	if contains(prompt, "disabled-skill") {
 		t.Error("trigger prompt should not contain disabled skill")
 	}
-	// 应该包含触发指令（use_skill 工具调用方式）
-	if !contains(prompt, "use_skill") {
-		t.Error("trigger prompt should contain 'use_skill' instruction")
+
+	// 清单职责移至 BuildSkillListPrompt
+	listPrompt := mgr.BuildSkillListPrompt()
+	if !contains(listPrompt, "pdf") {
+		t.Error("BuildSkillListPrompt should contain 'pdf'")
+	}
+	if !contains(listPrompt, "xlsx") {
+		t.Error("BuildSkillListPrompt should contain 'xlsx'")
+	}
+	if contains(listPrompt, "disabled-skill") {
+		t.Error("BuildSkillListPrompt should not contain disabled skill")
 	}
 }
 
