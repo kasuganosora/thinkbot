@@ -133,22 +133,52 @@ var internalCharsEnRe = regexp.MustCompile(`\d[\d,]*\s*\/\s*\d[\d,]*\s*chars?`)
 // 记忆容量指标 paraphrase 成中文写进公开回复）。
 var internalPhraseRe = regexp.MustCompile(`当前记忆已接近容量上限|记忆容量上限|记忆已接近容量上限|接近容量上限`)
 
-// multiSpaceRe 折叠剥离后残留的多余空白。
-var multiSpaceRe = regexp.MustCompile(`\s{2,}`)
-
 // StripInternalState 从最终回复文本中剥离内部系统状态（记忆用量指标等），
 // 防止「心里话 / 内部指标」泄漏到公开帖文。
 //
 // 典型泄漏案例：bot 把系统提示里的 "[2,206/2,200 chars]" 复述成
 // 「当前记忆已接近容量上限（2,206/2,200 字符）」公开发到时间线。
 // 本函数在 llmroute 出站清洗阶段（StripThinking 之后）调用，作为纵深防御。
+//
+// 空白处理只作用于「被剥离处」的接缝：原先对全文执行 \s{2,} → " "，会把没有任何
+// 内部指标的正常回复里的段落空行（\n\n）和代码缩进一并压扁，Telegram / Misskey /
+// Web 等所有渠道都会丢失排版。现在仅在删除点两侧折叠水平空白，其余原样保留。
 func StripInternalState(text string) string {
-	text = internalCharsRe.ReplaceAllString(text, "")
-	text = internalCharsEnRe.ReplaceAllString(text, "")
-	text = internalPhraseRe.ReplaceAllString(text, "")
-	// 清理剥离后可能残留的多余空白
-	text = multiSpaceRe.ReplaceAllString(text, " ")
+	text = removeAndJoin(internalCharsRe, text)
+	text = removeAndJoin(internalCharsEnRe, text)
+	text = removeAndJoin(internalPhraseRe, text)
 	return strings.TrimSpace(text)
+}
+
+// removeAndJoin 删除 re 的所有匹配，并只在删除点把两侧的水平空白（空格 / Tab）
+// 折叠为至多一个空格；换行两侧不补空格。未命中时原样返回。
+func removeAndJoin(re *regexp.Regexp, text string) string {
+	locs := re.FindAllStringIndex(text, -1)
+	if len(locs) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	prev := 0
+	for _, loc := range locs {
+		b.WriteString(text[prev:loc[0]])
+		prev = loc[1]
+		left := b.String()
+		lTrim := strings.TrimRight(left, " \t")
+		rest := text[prev:]
+		rTrim := strings.TrimLeft(rest, " \t")
+		if len(lTrim) == len(left) && len(rTrim) == len(rest) {
+			continue // 删除点两侧都没有空白：直接拼接
+		}
+		b.Reset()
+		b.WriteString(lTrim)
+		if lTrim != "" && rTrim != "" && !strings.HasSuffix(lTrim, "\n") && !strings.HasPrefix(rTrim, "\n") {
+			b.WriteByte(' ')
+		}
+		prev += len(rest) - len(rTrim)
+	}
+	b.WriteString(text[prev:])
+	return b.String()
 }
 
 // ============================================================================
