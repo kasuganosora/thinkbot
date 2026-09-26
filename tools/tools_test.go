@@ -405,11 +405,12 @@ func TestRegisterTools_StaticCount(t *testing.T) {
 	// But hidden meta has scope __never__ so it won't show in tool list
 	staticCount := mgr.StaticCount()
 	// web_fetch, calculate, random, uuid, datetime_calc,
-	// text_hash, text_encode, text_diff, text_stats, web_search,
-	// user_choice, __common_tools_meta = 12
-	// （shell / list_files 等 bot 工作空间工具由 sandbox 包注册，不在此列）
-	if staticCount != 12 {
-		t.Errorf("expected 12 static tools, got %d", staticCount)
+	// text_hash, text_encode, text_diff, text_stats,
+	// user_choice, __common_tools_meta = 11
+	// （web_search 是 ToolProvider，无启用提供方时不出现；shell / list_files 等
+	// bot 工作空间工具由 sandbox 包注册，均不在此列）
+	if staticCount != 11 {
+		t.Errorf("expected 11 static tools, got %d", staticCount)
 	}
 }
 
@@ -419,8 +420,9 @@ func TestRegisterTools_ProviderCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
-	if mgr.ProviderCount() != 1 {
-		t.Errorf("expected 1 provider (now), got %d", mgr.ProviderCount())
+	// now（per-bot 时区）+ web_search（按已启用的搜索提供方动态出现）
+	if mgr.ProviderCount() != 2 {
+		t.Errorf("expected 2 providers (now, web_search), got %d", mgr.ProviderCount())
 	}
 }
 
