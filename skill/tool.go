@@ -29,11 +29,13 @@ import (
 // UseSkillInput 是 use_skill 工具的输入参数。
 type UseSkillInput struct {
 	// Command 是技能名称（无参数）。如 "pdf"、"xlsx"、"agent-browser"。
-	Command string `json:"command" jsonschema:"The exact skill name as listed in Available Skills, with no arguments. E.g., \"pdf\", \"xlsx\""`
+	// 传 "list" 可列出全部可用技能（自启发发现，替代常驻清单注入）。
+	Command string `json:"command" jsonschema:"Skill name to load, or \"list\" to discover all available skills. E.g. \"pdf\", \"xlsx\", \"list\""`
 }
 
 // UseSkill 激活指定技能并返回其完整指令内容。
 // 调用后技能 Content 同时注入 prompt Registry（多轮持久化）和返回值（即时上下文）。
+// 传 "list" 时不加载任何技能，仅返回可用技能清单（自启发发现）。
 func (m *SkillManager) UseSkill(name string) (*Skill, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -73,12 +75,10 @@ func (m *SkillManager) BuildUseSkillTool() llm.Tool {
 	return llm.NewTool("use_skill",
 		`Load a Skill to obtain specialized domain knowledge, workflows, or tool instructions.
 
-Use this tool when ALL of the following are true:
-1. The request involves a specific domain, system, or data format.
-2. A matching Skill is listed in the "Available Skills" section.
-3. Loading the Skill would improve correctness, efficiency, or quality.
+Use this tool when the request involves a specific domain, system, or data format.
 
 Rules:
+- DISCOVERY: The full skill catalog is NOT injected into your context. When a task might benefit from a skill, first call use_skill with command "list" to discover what is available, then load the matching one.
 - CRITICAL: Call this tool IMMEDIATELY as your first action when a relevant Skill exists. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded.
 - After loading, you MUST follow the Skill's instructions. They override your general defaults for that task.
 - The result may include `+"`baseDir`"+`, `+"`scripts`"+` and `+"`references`"+`. Prefer the Skill's own scripts over improvising an equivalent yourself.
@@ -88,9 +88,18 @@ Rules:
 
 <example>
 user: 帮我把这个 PDF 里的表格提取出来
-assistant: [calls use_skill with command "pdf", then follows the loaded instructions]
+assistant: [calls use_skill with command "list" if unsure, then calls use_skill with command "pdf", then follows the loaded instructions]
 </example>`,
 		func(ctx *llm.ToolExecContext, input UseSkillInput) (any, error) {
+			// 自启发发现：list 不加载技能，仅返回完整清单
+			if input.Command == "list" {
+				return map[string]any{
+					"status": "list",
+					"skills": mgr.BuildSkillListPrompt(),
+					"hint":   "Call use_skill with a skill's name to load it.",
+				}, nil
+			}
+
 			s, err := mgr.UseSkill(input.Command)
 			if err != nil {
 				return nil, err
