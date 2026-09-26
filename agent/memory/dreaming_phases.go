@@ -368,24 +368,22 @@ func (d *DreamManager) extractCandidatesOnce(ctx context.Context, snippets []raw
 		fmt.Fprintf(&sb, "--- snippet %d (speaker: %s) ---\n%s\n\n", i+1, spk, strutil.Truncate(s.content, 500))
 	}
 
-	maxTokens := d.config.MaxDreamTokens
-	if maxTokens <= 0 {
-		maxTokens = DefaultGenerationMaxTokens
-	}
 	model := d.model
 	if model == "" {
 		return d.extractCandidatesRuleBased(snippets)
 	}
-	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_extract"), llm.GenerateParams{
-		Model:     llm.ChatModel(model),
-		System:    defaultLightExtractPrompt,
-		Messages:  []llm.Message{llm.UserMessage(sb.String())},
-		MaxTokens: &maxTokens,
-	})
+	params := llm.GenerateParams{
+		Model:    llm.ChatModel(model),
+		System:   defaultLightExtractPrompt,
+		Messages: []llm.Message{llm.UserMessage(sb.String())},
+	}
+	applyInternalCall(d.config.Policy, llm.PurposeDreamExtract, &params, d.config.MaxDreamTokens)
+	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_extract"), params)
 	if err != nil {
 		d.logger.Warnw("dreaming light: LLM failed, rule-based fallback", "err", err)
 		return d.extractCandidatesRuleBased(snippets)
 	}
+	warnIfTruncated(d.logger, llm.PurposeDreamExtract, result, params)
 
 	var extracted []struct {
 		Content  string `json:"content"`
@@ -557,21 +555,19 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 		fmt.Fprintf(&sb, "[key:%s] %s\n", c.Key, strutil.Truncate(c.Content, 100))
 	}
 
-	// 统一生成 max_tokens：与其他梦境相位一致，直接遵从 MaxDreamTokens（=全局 agent.max_tokens）。
-	// maxTokens 为输出天花板语义，分类调用不会真产出那么多 token，放宽到统一上限无害。
-	maxTokens := d.config.MaxDreamTokens
-	if maxTokens <= 0 {
-		maxTokens = DefaultGenerationMaxTokens
+	// 输出上限与其他梦境相位一致：跟随主模型配置的 maxTokens（MaxDreamTokens），
+	// 可由 llm.internal_max_tokens.dream_cluster 压低；reasoning_effort 走内部调用策略。
+	params := llm.GenerateParams{
+		Model:    llm.ChatModel(model),
+		System:   "You are a memory theme classifier. You assign concise topical tags to memory entries. Write tags in Chinese (中文).",
+		Messages: []llm.Message{llm.UserMessage(sb.String())},
 	}
-	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_cluster"), llm.GenerateParams{
-		Model:     llm.ChatModel(model),
-		System:    "You are a memory theme classifier. You assign concise topical tags to memory entries. Write tags in Chinese (中文).",
-		Messages:  []llm.Message{llm.UserMessage(sb.String())},
-		MaxTokens: &maxTokens,
-	})
+	applyInternalCall(d.config.Policy, llm.PurposeDreamCluster, &params, d.config.MaxDreamTokens)
+	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_cluster"), params)
 	if err != nil {
 		return d.clusterByCategory(candidates)
 	}
+	warnIfTruncated(d.logger, llm.PurposeDreamCluster, result, params)
 
 	var tagged []struct {
 		Key  string   `json:"key"`
@@ -1173,23 +1169,24 @@ func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCa
 	sb.WriteString("返回格式（只返回 JSON，不要解释）：\n")
 	sb.WriteString("[{\"key\":\"<key>\",\"importance\":0.0}]")
 
-	maxTokens := 2048
-	if d.config.MaxDreamTokens > 0 && d.config.MaxDreamTokens < maxTokens {
-		maxTokens = d.config.MaxDreamTokens
+	// 此前写死 maxTokens := 2048：GLM-5.3 缺省 max 推理，09-24 / 09-26 输出恰好 2048 即被截断，
+	// JSON 不完整 → 一直回退启发式评分。现跟随主模型配置的 maxTokens（可由
+	// llm.internal_max_tokens.dream_score 压低），reasoning_effort 按评分类策略（默认 none/low）。
+	params := llm.GenerateParams{
+		Model:    llm.ChatModel(d.model),
+		System:   "You are a memory importance evaluator. Return only a JSON array of objects {\"key\": string, \"importance\": number in 0.0~1.0}. No explanation.",
+		Messages: []llm.Message{llm.UserMessage(sb.String())},
 	}
-	result, err := d.provider.DoGenerate(
-		llm.WithStatsFeature(ctx, "dream_score"),
-		llm.GenerateParams{
-			Model:     llm.ChatModel(d.model),
-			System:    "You are a memory importance evaluator. Return only a JSON array of objects {\"key\": string, \"importance\": number in 0.0~1.0}. No explanation.",
-			Messages:  []llm.Message{llm.UserMessage(sb.String())},
-			MaxTokens: &maxTokens,
-		},
-	)
+	applyInternalCall(d.config.Policy, llm.PurposeDreamScore, &params, d.config.MaxDreamTokens)
+	result, err := d.provider.DoGenerate(llm.WithStatsFeature(ctx, "dream_score"), params)
 	if err != nil {
 		d.logger.Warnw("dreaming deep: LLM importance scoring failed, fallback to heuristic",
 			"err", err, "candidates", len(cands))
 		return nil
+	}
+	if warnIfTruncated(d.logger, llm.PurposeDreamScore, result, params) {
+		d.logger.Warnw("dreaming deep: importance scoring truncated, trying to parse what was returned",
+			"candidates", len(cands))
 	}
 
 	var scored []struct {

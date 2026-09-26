@@ -186,6 +186,15 @@ type Compactor struct {
 	previousSummary string // 上次生成的摘要（用于增量更新）
 	compactionCount int    // 连续压缩次数（doom loop 预防）
 	logger          *zap.SugaredLogger
+	policy          *InternalPolicy // reasoning_effort / output cap of the summary calls (nil = none)
+}
+
+// SetInternalPolicy sets the per-purpose policy (reasoning_effort, output cap)
+// used by the summary calls (PurposeAutoCompact, PurposeSummarizeHead).
+// Returns the receiver for chaining.
+func (c *Compactor) SetInternalPolicy(p *InternalPolicy) *Compactor {
+	c.policy = p
+	return c
 }
 
 // SetLogger 设置压缩器日志（可选，用于观测压缩触发）。返回 receiver 便于链式调用。
@@ -506,7 +515,11 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 	// (params.MaxTokens = ModelDef.MaxTokens); compaction.summary_max_tokens
 	// may only lower it.
 	maxTokens := ResolveMaxOutputTokens(maxTokensOf(params.MaxTokens), c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
+	maxTokens = c.policy.MaxTokens(PurposeAutoCompact, maxTokens, DefaultMaxOutputTokens)
 	summaryParams.MaxTokens = &maxTokens
+	// Without an explicit effort GLM-5.3 reasons at "max" (unbounded with a
+	// 128k limit); the policy picks a low effort where the provider accepts it.
+	c.policy.Apply(PurposeAutoCompact, &summaryParams)
 
 	// 调用 LLM 生成摘要
 	temp := 0.3
@@ -771,6 +784,7 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 	}
 	prompt := c.buildSummaryPrompt(head)
 	maxTokens := ResolveMaxOutputTokens(modelMaxTokens, c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
+	maxTokens = c.policy.MaxTokens(PurposeSummarizeHead, maxTokens, DefaultMaxOutputTokens)
 	temp := 0.3
 	params := GenerateParams{
 		Model:       ChatModel(model),
@@ -779,6 +793,7 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 		MaxTokens:   &maxTokens,
 		Temperature: &temp,
 	}
+	c.policy.Apply(PurposeSummarizeHead, &params)
 	result, err := provider.DoGenerate(ctx, params)
 	if err != nil {
 		return "", err

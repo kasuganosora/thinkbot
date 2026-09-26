@@ -216,6 +216,13 @@ const (
 
 	// KeyLLMRetryJitter 重试退避是否加入随机抖动（避免惊群）。默认 true。
 	KeyLLMRetryJitter = "llm.retry_jitter"
+
+	// KeyInternalReasoningPrefix 内部 LLM 调用 reasoning_effort 配置前缀：
+	// llm.internal_reasoning.default（默认 auto）与 llm.internal_reasoning.<purpose>（留空继承）。
+	KeyInternalReasoningPrefix = "llm.internal_reasoning."
+	// KeyInternalMaxTokensPrefix 内部 LLM 调用输出上限封顶前缀：
+	// llm.internal_max_tokens.default 与 llm.internal_max_tokens.<purpose>（0 = 跟随模型 maxTokens）。
+	KeyInternalMaxTokensPrefix = "llm.internal_max_tokens."
 )
 
 // Compaction（会话压缩）键：上下文压缩预算配置。

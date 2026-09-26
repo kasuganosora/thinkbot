@@ -236,6 +236,9 @@ type DreamConfig struct {
 	JaccardThreshold     float64
 	MaxDreamTokens       int
 	VerboseLogging       bool
+	// Policy 内部调用策略：各梦境相位（dream_extract / dream_cluster / dream_score）以及
+	// 同一 bundle 的用户画像抽取的 reasoning_effort 与可选输出封顶（nil = 不发 reasoning_effort）。
+	Policy *llm.InternalPolicy
 }
 
 // LightPhaseConfig 浅睡眠阶段配置。

@@ -34,10 +34,10 @@ func (m *maxTokRecorder) DoStream(context.Context, llm.GenerateParams) (*llm.Str
 func TestClusterMerge_SendsConfiguredModelMaxTokens(t *testing.T) {
 	p := &maxTokRecorder{response: `[]`}
 	in := []ClusterInput{{ID: "a", Content: "x"}, {ID: "b", Content: "y"}}
-	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("glm-5.3"), "", in, 128000); err != nil {
+	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("glm-5.3"), "", in, 128000, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("glm-5.3"), "", in, 0); err != nil {
+	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("glm-5.3"), "", in, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(p.got) != 2 || p.got[0] != 128000 || p.got[1] != DefaultGenerationMaxTokens {

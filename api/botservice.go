@@ -1273,11 +1273,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			CompressThreshold: live.CompressThreshold,
 		}
 	})
+	// 内部 LLM 调用（判定 / 压缩摘要 / 记忆去重 / 画像 / 梦境 / 自愈 / 视觉）的
+	// per-purpose reasoning_effort 与输出封顶策略：GLM-5.3 不传 reasoning_effort 时按 max 推理，
+	// 输出上限又跟随模型 128000，这些调用此前推理不受限（09-26 memory_dedup 32 次产出 242K token）。
+	internalPol := newInternalPolicy(s.store, s.logger, def.ReasoningEffort, bundle)
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
 		// 聚类合并输出上限跟随主模型配置（此前不发 max_tokens）。
 		MaxTokens: bundle.MainDef.MaxTokens,
+		Policy:    internalPol,
 	}, s.logger)
 	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
 		Window:    memWindow,
@@ -1311,6 +1316,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		TracerProvider: s.tp,
 		Store:          s.store,
 		ModelDef:       &bundle.MainDef,
+		InternalPolicy: internalPol,
 		EventBus:       s.eventBus,
 		// 让工作流内部 SubAgent（需求分析/节点执行/审查）继承本 bot 的工作空间工具
 		// （exec/读/写/列目录等），使其能像主 Agent 的 SubAgent 一样操作仓库——
@@ -1340,6 +1346,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 子 Agent 上下文压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
 		subagent.WithCompactor(func() *llm.Compactor {
 			c := llm.NewCompactor(*compactionConfigFromConfig(builder.GetCompactionConfig()))
+			c.SetInternalPolicy(internalPol)
 			c.SetConfigSource(func() llm.CompactionConfig {
 				return *compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig())
 			})
@@ -1402,6 +1409,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			MaxTokens:        maxTok,
 			ContextLength:    bundle.MainDef.ContextLength,
 			ReasoningEffort:  def.ReasoningEffort,
+			InternalPolicy:   internalPol,
 			MessageBuilder:   messageBuilder,
 			ToolResolver:     toolMgr,
 			// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效，
@@ -1468,7 +1476,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		lazyJudgeMaxTokens = bundle.LightDef.MaxTokens
 	}
 	lazyCfg := pipeline.NewLazyResponseConfig()
-	lazyCfg.Judge = NewLazyLLMJudge(lazyJudgeProvider, lazyJudgeModel, lazyJudgeMaxTokens)
+	lazyCfg.Judge = NewLazyLLMJudge(lazyJudgeProvider, lazyJudgeModel, lazyJudgeMaxTokens, internalPol)
 	lazyCfg.Sink = pipeline.NewFileLazyJudgeSink("data/lazy_judgments.jsonl")
 
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
@@ -1512,7 +1520,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				modelID = bundle.LightDef.Model
 				judgeMaxTokens = bundle.LightDef.MaxTokens
 			}
-			adapter := newLLMJudgeAdapter(judgeProvider, modelID, judgeMaxTokens)
+			adapter := newLLMJudgeAdapter(judgeProvider, modelID, judgeMaxTokens, internalPol, llm.PurposeEngagementJudge)
 
 			promptCfg := engagement.PromptConfig{
 				BotName:    def.Name,
@@ -1909,6 +1917,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			VisionProvider: bundle.Vision,
 			VisionModel:    llm.ChatModel(bundle.VisionDef.Model),
 			MainMultimodal: bundle.MainSupportsMultimodal(),
+			InternalPolicy: internalPol,
 		}
 		// 视觉模型输出上限跟随其模型配置（ModelDef.MaxTokens）；未接线时 stage 兜底 1024。
 		if bundle.VisionDef.MaxTokens > 0 {
@@ -2101,6 +2110,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				JaccardThreshold: 0.9,
 				// 梦境相位跟随主模型上限（ModelDef.MaxTokens），与全局 agent.max_tokens 解耦。
 				MaxDreamTokens: bundle.MainDef.MaxTokens,
+				Policy:         internalPol,
 			},
 			bundle.Main,          // 使用 bot 的主 LLM
 			bundle.MainDef.Model, // 模型名从 bot 主模型配置读取
@@ -2170,6 +2180,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				Model:    &llm.Model{ID: bundle.MainDef.Model},
 				// Bot 画像抽取上限跟随主模型（ModelDef.MaxTokens）。
 				MaxTokens: bundle.MainDef.MaxTokens,
+				Policy:    internalPol,
 			},
 			s.tp,
 			s.logger,
@@ -3087,6 +3098,13 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 
 	loc := builder.GetBotTimezoneLocation(botID)
 
+	// 与定时路径一致的内部调用策略（reasoning_effort / 输出封顶）。
+	botEffort := ""
+	if def, derr := s.GetDefinition(botID); derr == nil && def != nil {
+		botEffort = def.ReasoningEffort
+	}
+	internalPol := newInternalPolicy(s.store, s.logger, botEffort, llmBundle)
+
 	// 临时 cron 文件路径：一次性触发不应污染 data/cron/<botID>_dream.json
 	cronFile := filepath.Join(os.TempDir(), "dream_trigger_"+botID+".json")
 	dBundle := bot.NewDreamingBundle(
@@ -3096,6 +3114,7 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 			JaccardThreshold: 0.9,
 			// 与定时路径（StartBot）一致：跟随主模型配置的 maxTokens，不再写死 10000。
 			MaxDreamTokens: llmBundle.MainDef.MaxTokens,
+			Policy:         internalPol,
 		},
 		llmBundle.Main,
 		llmBundle.MainDef.Model,
@@ -3118,6 +3137,7 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 			Model:    &llm.Model{ID: llmBundle.MainDef.Model},
 			// 与定时路径一致：跟随主模型 maxTokens（此前缺省退回 8192）。
 			MaxTokens: llmBundle.MainDef.MaxTokens,
+			Policy:    internalPol,
 		},
 		s.tp,
 		s.logger,

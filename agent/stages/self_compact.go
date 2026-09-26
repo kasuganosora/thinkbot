@@ -707,7 +707,8 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	}
 	headTokens := llm.EstimateMessagesTokens(head)
 	budget := summaryBudget(modelMax, cfg.SummaryMaxTokens, ctxLen, headTokens+selfCompactPromptOverheadTokens)
-	effort := summaryReasoningEffort(cfg.SummaryReasoningEffort, botEffort)
+	// Map into the model's accepted vocabulary (e.g. GLM-5.3: only low/high/max).
+	effort := llm.NormalizeReasoningEffort(modelID, summaryReasoningEffort(cfg.SummaryReasoningEffort, botEffort))
 
 	benefit := estimateSelfCompactBenefit(headTokens, budget.first)
 	if reason := benefit.refusal(tokensBefore, cfg); reason != "" {

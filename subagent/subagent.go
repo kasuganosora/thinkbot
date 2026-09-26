@@ -68,6 +68,8 @@ type SubAgent struct {
 	frequencyPenalty float64
 	presencePenalty  float64
 	maxTokens        int
+	// reasoningEffort 非 nil 时随请求发送 reasoning_effort（内部轻任务按策略压低推理）。
+	reasoningEffort *string
 
 	// 上下文管理
 	ctxMgr     *ContextManager
@@ -552,6 +554,11 @@ func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
 	maxTokens := sa.maxTokens
 	freqPen := sa.frequencyPenalty
 	presPen := sa.presencePenalty
+	var effort *string
+	if sa.reasoningEffort != nil {
+		e := *sa.reasoningEffort
+		effort = &e
+	}
 
 	params := llm.GenerateParams{
 		Model:            llm.ChatModel(sa.model),
@@ -562,6 +569,7 @@ func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
 		FrequencyPenalty: &freqPen,
 		PresencePenalty:  &presPen,
 		MaxTokens:        &maxTokens,
+		ReasoningEffort:  effort,
 	}
 
 	if len(sa.extraTools) > 0 {

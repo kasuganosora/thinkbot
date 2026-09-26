@@ -215,6 +215,11 @@ type ModelDef struct {
 	// 为 true 时，MultimodalStage 不会对此 bot 的消息做辅助转写。
 	Multimodal bool `json:"multimodal,omitempty"`
 
+	// Reasoning 模型在 provider 配置里勾选了「推理 (reasoning)」能力
+	// （models[].capabilities 含 "reasoning"）。内部调用策略据此判断可以发送
+	// reasoning_effort（见 llm.InternalPolicy）。
+	Reasoning bool `json:"reasoning,omitempty"`
+
 	// ========================================================================
 	// 计费单价（token↔金钱换算表，跟随「模型」）。
 	// 缺省 0 = 该模型不参与金钱额度计算（不计费、不限额）。
@@ -317,6 +322,7 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 					MaxTokens:     mt,
 					ContextLength: ctx,
 					Multimodal:    m.Multimodal,
+					Reasoning:     hasCapability(m.Capabilities, "reasoning"),
 					// 计费单价（换算表）：provider 显式值 > 官方单价预设 > 0（不计入金钱额度）。
 					// 官方预设兜底很关键：provider 里漏填单价时，成本墙会因拿不到价格而
 					// 直接放行（不计费也不限额），金钱额度形同虚设。
@@ -329,6 +335,16 @@ func (b *Builder) resolveProviderModel(modelID string) (ModelDef, bool) {
 		}
 	}
 	return ModelDef{}, false
+}
+
+// hasCapability reports whether caps contains c (case-insensitive).
+func hasCapability(caps []string, c string) bool {
+	for _, x := range caps {
+		if strings.EqualFold(strings.TrimSpace(x), c) {
+			return true
+		}
+	}
+	return false
 }
 
 // PriceResolver 返回一个 llm.ModelPriceResolver，按模型 ID 解析单价
@@ -1328,6 +1344,49 @@ func LLMClientMetaSpecs() []MetaSpec {
 	}
 }
 
+// --- 内部 LLM 调用（判定 / 摘要 / 记忆 / 梦境 / 自愈 / 视觉）策略 ---
+
+// InternalReasoningKey 返回某个内部调用用途的 reasoning_effort 配置键
+// （purpose 为 llm.Purpose* 之一，或 "default"）。
+func InternalReasoningKey(purpose string) string { return KeyInternalReasoningPrefix + purpose }
+
+// InternalMaxTokensKey 返回某个内部调用用途的输出上限封顶配置键。
+func InternalMaxTokensKey(purpose string) string { return KeyInternalMaxTokensPrefix + purpose }
+
+// GetInternalLLMSettings 读取内部调用策略（每次调用现取，保存后下一次内部调用即生效）。
+func (b *Builder) GetInternalLLMSettings() llm.InternalSettings {
+	s := llm.InternalSettings{
+		DefaultReasoning: strings.TrimSpace(b.store.GetString(InternalReasoningKey("default"), llm.ReasoningAuto)),
+		DefaultMaxTokens: b.store.GetInt(InternalMaxTokensKey("default"), 0),
+		Reasoning:        make(map[string]string, len(llm.InternalPurposes)),
+		MaxTokens:        make(map[string]int, len(llm.InternalPurposes)),
+	}
+	for _, p := range llm.InternalPurposes {
+		if v := strings.TrimSpace(b.store.GetString(InternalReasoningKey(p.Name), "")); v != "" {
+			s.Reasoning[p.Name] = v
+		}
+		if v := b.store.GetInt(InternalMaxTokensKey(p.Name), 0); v > 0 {
+			s.MaxTokens[p.Name] = v
+		}
+	}
+	return s
+}
+
+// InternalLLMMetaSpecs 返回内部调用策略配置项元数据（系统设置页展示）。
+func InternalLLMMetaSpecs() []MetaSpec {
+	specs := []MetaSpec{
+		{Key: InternalReasoningKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用（判定、摘要、记忆去重、画像、梦境、工作流自愈、视觉）默认 reasoning_effort。auto（默认）= 按用途取内置默认值：判定/分类/评分类为 none（模型不支持 none 时用 low），合并/摘要/画像/自愈/视觉为 low；且只在确认 provider 接受该参数时发送（bot 本身配置了 reasoning_effort、模型勾选了 reasoning 能力，或模型为 GLM-5.2 及以上）。provider = 不发送（由 provider 缺省，GLM-5.3 缺省为 max）。其它值（none/minimal/low/medium/high/max）原样发送，并按已知模型词表映射（GLM-5.3 仅接受 low/high/max：none/minimal→low、medium→high）。保存后下一次调用即生效。"},
+		{Key: InternalMaxTokensKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用输出上限的默认封顶（含推理 token）。0（默认）= 跟随模型配置的 maxTokens；大于 0 时只会压低模型上限，用于控制成本。被截断的输出会记录 WARN 并按各调用点原有逻辑回退。保存后下一次调用即生效。"},
+	}
+	for _, p := range llm.InternalPurposes {
+		specs = append(specs,
+			MetaSpec{Key: InternalReasoningKey(p.Name), Category: "InternalLLM", Description: fmt.Sprintf("%s 的 reasoning_effort（留空 = 继承 %s；auto 时内置默认 %s；provider = 不发送）。", p.Description, InternalReasoningKey("default"), p.DefaultReasoning)},
+			MetaSpec{Key: InternalMaxTokensKey(p.Name), Category: "InternalLLM", Description: fmt.Sprintf("%s 的输出上限封顶（0 = 继承 %s，再为 0 则跟随模型 maxTokens；只会压低模型上限）。", p.Description, InternalMaxTokensKey("default"))},
+		)
+	}
+	return specs
+}
+
 // --- Compaction（会话压缩）配置 ---
 
 // CompactionConfig 描述会话级上下文压缩的全部可调参数（与 llm.CompactionConfig 字段对齐，
@@ -1655,6 +1714,7 @@ func AllMetaSpecs() []MetaSpec {
 	specs = append(specs, LLMClientMetaSpecs()...)
 	specs = append(specs, CompactionMetaSpecs()...)
 	specs = append(specs, NotifyMetaSpecs()...)
+	specs = append(specs, InternalLLMMetaSpecs()...)
 	return specs
 }
 
@@ -1690,9 +1750,9 @@ func NotifyMetaSpecs() []MetaSpec {
 // 注意：max_tokens 不在此列——它跟随「模型」而非全局/bot，由各 ModelDef.MaxTokens
 // （provider 模型配置页的每模型 maxTokens 字段）独立设置。
 func GlobalMetaSpecs() []MetaSpec {
-	return append(append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
+	return append(append(append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
 		LLMClientMetaSpecs()...), CompactionMetaSpecs()...),
-		engagementUnansweredMetaSpecs()...)
+		engagementUnansweredMetaSpecs()...), InternalLLMMetaSpecs()...)
 }
 
 // engagementUnansweredMetaSpecs 系统设置页展示的主动参与「未回应」节奏项。
@@ -1816,6 +1876,10 @@ func DefaultMap() map[string]string {
 		KeyNotifyPersonaMaxChars:     "1000",
 		KeyNotifyPersonaMaxTokens:    "0",
 		KeyNotifyRecordHistory:       "true",
+
+		// 内部 LLM 调用策略（per-purpose 键留空 / 0 = 继承 default）
+		KeyInternalReasoningPrefix + "default": "auto",
+		KeyInternalMaxTokensPrefix + "default": "0",
 	}
 }
 
