@@ -18,6 +18,7 @@ import (
 	"github.com/kasuganosora/thinkbot/auth"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
+	"github.com/kasuganosora/thinkbot/notify"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -47,6 +48,13 @@ type Server struct {
 	bindSvc        *identity.BindService
 	heartbeatStore *heartbeat.Store
 	permSvc        *toolperm.Service
+
+	// notify 接口（外部程序 → bot → 主人），见 handler_notify.go / docs/notify.md。
+	notifySvc    *notify.Service
+	notifyTokens *notify.TokenStore
+	// notifyListenAddr 非空时 notify 路由只挂在独立监听器 notifySrv 上。
+	notifyListenAddr string
+	notifySrv        *http.Server
 
 	// bundledSkillsDirOverride 测试用：覆盖内置技能目录（空则 "skills"）。
 	bundledSkillsDirOverride string
@@ -105,6 +113,18 @@ func NewServer(
 		permSvc:        permSvc,
 	}
 
+	// notify 接口：服务与（可选）独立本地监听器必须在注册路由前就绪。
+	s.initNotify()
+	s.notifyListenAddr = strings.TrimSpace(store.GetString(config.KeyNotifyListenAddr, ""))
+	if s.notifyListenAddr != "" {
+		ne := gin.New()
+		ne.Use(zapRecovery(logger))
+		ne.Use(traceIDMiddleware())
+		ne.Use(requestLogger(logger))
+		ne.POST("/api/bots/:id/notify", s.handleNotify)
+		s.notifySrv = &http.Server{Addr: s.notifyListenAddr, Handler: ne, ReadHeaderTimeout: 10 * time.Second}
+	}
+
 	// 注册所有路由
 	s.registerRoutes()
 
@@ -121,6 +141,21 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 		_ = s.httpSrv.Shutdown(shutdownCtx)
 	}()
+
+	if s.notifySrv != nil {
+		s.logger.Infow("notify listener starting", "addr", s.notifyListenAddr)
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = s.notifySrv.Shutdown(shutdownCtx)
+		}()
+		go func() {
+			if err := s.notifySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				s.logger.Errorw("notify listener error", "addr", s.notifyListenAddr, "err", err)
+			}
+		}()
+	}
 
 	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
@@ -161,7 +196,9 @@ func requestLogger(logger *zap.SugaredLogger) gin.HandlerFunc {
 
 		// 对写操作（POST/PUT/DELETE/PATCH），缓存请求体用于审计日志
 		var bodyPreview string
-		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+		// notify 调用跳过预读：其 handler 自带请求体上限（413），且正文是外部告警内容无需进访问日志。
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions &&
+			!isNotifyCallPath(c.Request.Method, c.Request.URL.Path) {
 			if c.Request.Body != nil {
 				raw, _ := io.ReadAll(c.Request.Body)
 				// 恢复 body 供后续 handler 读取

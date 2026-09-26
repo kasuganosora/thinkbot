@@ -36,6 +36,11 @@ func main() {
 	if dbPath == "" {
 		dbPath = "data/thinkbot.db"
 	}
+	// 管理子命令：thinkbot notify-token create|list|revoke（不启动服务）。
+	if len(os.Args) > 1 && os.Args[1] == "notify-token" {
+		os.Exit(runNotifyTokenCLI(dbPath, os.Args[2:]))
+	}
+
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
 		logLevel = "info"

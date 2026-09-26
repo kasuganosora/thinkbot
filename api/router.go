@@ -55,6 +55,12 @@ func (s *Server) registerRoutes() {
 		authGroup.POST("/logout", s.handleLogout)
 	}
 
+	// --- notify：外部程序经独立 token 让 bot 通知主人（不走会话鉴权，见 handler_notify.go）---
+	// 配置了 notify.listen_addr 时只挂在独立监听器上，主 API 不暴露。
+	if s.notifyListenAddr == "" {
+		apiGroup.POST("/bots/:id/notify", s.handleNotify)
+	}
+
 	// --- 需要登录的接口 ---
 	authed := apiGroup.Group("")
 	authed.Use(s.cookieAuth())
@@ -194,6 +200,12 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/outreach/logs", s.handleListOutreachLogs)
 				botsAdmin.GET("/:id/outreach/commitments", s.handleListOutreachCommitments)
 				botsAdmin.DELETE("/:id/outreach/commitments/:cid", s.handleCancelOutreachCommitment)
+
+				// notify token 与审计（token 明文只在创建时返回一次）
+				botsAdmin.GET("/:id/notify/tokens", s.handleListNotifyTokens)
+				botsAdmin.POST("/:id/notify/tokens", s.handleCreateNotifyToken)
+				botsAdmin.DELETE("/:id/notify/tokens/:tid", s.handleRevokeNotifyToken)
+				botsAdmin.GET("/:id/notify/events", s.handleListNotifyEvents)
 
 				// 上下文压缩（agent memory compaction）
 				botsAdmin.GET("/:id/compaction", s.handleGetBotCompaction)

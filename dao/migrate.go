@@ -32,6 +32,8 @@ func Migrate(database *gorm.DB) error {
 		&OutreachRecord{},
 		&OutreachLastSeen{},
 		&ContextCheckpoint{},
+		&NotifyToken{},
+		&NotifyEvent{},
 	); err != nil {
 		return err
 	}

@@ -498,3 +498,53 @@ func IsSensitiveKey(key string) bool {
 	}
 	return false
 }
+
+// Notify 键：外部程序经 POST /api/bots/{id}/notify 让 bot 给主人发通知（见 docs/notify.md）。
+// 除 notify.listen_addr（启动期固化，改后需重启）外均为请求时现取。
+// channel / target / mode 支持 per-bot 覆盖：bot.<botID>.notify.channel / .target / .mode。
+const (
+	// KeyNotifyEnabled notify 接口总开关（默认 true；无 token 时所有请求都会 401）。
+	KeyNotifyEnabled = "notify.enabled"
+	// KeyNotifyListenAddr 非空时 notify 路由只挂在这个独立监听器上（如 "127.0.0.1:8091"），
+	// 主 API 监听器不再暴露该路由。默认空＝挂在主 API 上。启动期读取。
+	KeyNotifyListenAddr = "notify.listen_addr"
+	// KeyNotifyAllowedCIDRs 允许调用的来源网段（逗号分隔）。默认 loopback + 私网。
+	KeyNotifyAllowedCIDRs = "notify.allowed_cidrs"
+	// KeyNotifyTrustedProxies 可信反代网段：仅当直连对端落在此网段时才采信
+	// X-Forwarded-For / X-Real-IP 来确定真实来源 IP。默认 loopback + 私网。
+	KeyNotifyTrustedProxies = "notify.trusted_proxies"
+	// KeyNotifyDefaultChannel 默认投递渠道（渠道类型或渠道实例名，默认 "telegram"）。
+	KeyNotifyDefaultChannel = "notify.default_channel"
+	// KeyNotifyOwnerTarget 显式指定主人的会话 ID（Telegram 私聊 chat id）。
+	// 空＝自动发现：取活跃 admin 用户在该平台的身份绑定（identity_mappings）。
+	KeyNotifyOwnerTarget = "notify.owner_target"
+	// KeyNotifyDefaultMode 默认模式 raw | persona（默认 raw）。
+	KeyNotifyDefaultMode = "notify.default_mode"
+	// KeyNotifyAllowTargetOverride 是否允许请求体用 target 指定任意会话（默认 false）。
+	KeyNotifyAllowTargetOverride = "notify.allow_target_override"
+	// KeyNotifyMaxRequestBytes 请求体字节上限，超出返回 413（默认 16384）。
+	KeyNotifyMaxRequestBytes = "notify.max_request_bytes"
+	// KeyNotifyMaxTitleChars 标题字符上限，超出截断（默认 200）。
+	KeyNotifyMaxTitleChars = "notify.max_title_chars"
+	// KeyNotifyMaxBodyChars 正文字符上限，超出截断（默认 3000）。
+	KeyNotifyMaxBodyChars = "notify.max_body_chars"
+	// KeyNotifyRateLimit 普通（info/warn）限流，格式 "次数/时长"，按 token+source 计（默认 "20/1h"）。
+	KeyNotifyRateLimit = "notify.rate_limit"
+	// KeyNotifyRateLimitCritical critical 独立限流预算，格式同上（默认 "60/1h"）。
+	KeyNotifyRateLimitCritical = "notify.rate_limit_critical"
+	// KeyNotifyDedupWindow 去重窗口（默认 30m；0 关闭去重）。
+	KeyNotifyDedupWindow = "notify.dedup_window"
+	// KeyNotifyPersonaTimeout persona 改写的 LLM 调用超时（默认 45s，超时回落 raw）。
+	KeyNotifyPersonaTimeout = "notify.persona_timeout"
+	// KeyNotifyPersonaMaxChars persona 改写输出字符上限（默认 1000）。
+	KeyNotifyPersonaMaxChars = "notify.persona_max_chars"
+	// KeyNotifyPersonaMaxTokens persona 调用的 max_tokens 封顶（默认 0＝跟随模型 maxTokens；>0 只能调低）。
+	KeyNotifyPersonaMaxTokens = "notify.persona_max_tokens"
+	// KeyNotifyRecordHistory 投递成功后是否写入主人会话历史（默认 true）。
+	KeyNotifyRecordHistory = "notify.record_history"
+)
+
+// NotifyBotKey 返回 per-bot notify 覆盖键：bot.<botID>.notify.<field>。
+func NotifyBotKey(botID, field string) string {
+	return fmt.Sprintf("bot.%s.notify.%s", botID, field)
+}

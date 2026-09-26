@@ -106,6 +106,7 @@ LLM 客户端超时/重试仍在创建 Provider 时固化，改后需重启 Bot�
 | `engagement.unanswered_silence` | `3m` | 主动回复后无人回应即视为拒绝的等待时长；超时只结算不补发 |
 | `engagement.unanswered_episode_boundary` | `5h` | 被拒后仍禁止点名此人，超期才允许房间级参与；完全恢复需对方 @ / 私聊 |
 | `soul.reload_interval` | `5s` | SOUL.md 热重载轮询间隔，0=禁用 |
+| `notify.*` | 见 docs/notify.md | 外部程序 → bot → 主人通知接口（token、CIDR、限流、去重、raw/persona）；per-bot 覆盖 `bot.<id>.notify.channel/target/mode` |
 
 ### 配置键命名约定
 
