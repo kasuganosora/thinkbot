@@ -505,6 +505,8 @@ type LLMConfig struct {
 	// MaxTokens 最大输出 token 数（主链路即 ModelDef.MaxTokens，provider 模型配置页每模型设置）。
 	// 内部调用（compact_context 摘要、自动压缩）同样以它为模型输出上限。
 	MaxTokens *int
+	// InternalPolicy 内部调用（自动压缩摘要等）的 reasoning_effort / 输出封顶策略（nil = 不发 reasoning_effort）。
+	InternalPolicy *llm.InternalPolicy
 	// ContextLength 主模型上下文窗口（ModelDef.ContextLength；0=未知）。
 	// 内部调用据此把输出上限收进「输入 + 输出 ≤ 上下文」。
 	ContextLength int
@@ -641,7 +643,7 @@ func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
 			return v.(*llm.Compactor), true
 		}
 	}
-	c := llm.NewCompactor(*cfg).SetLogger(s.logger)
+	c := llm.NewCompactor(*cfg).SetLogger(s.logger).SetInternalPolicy(s.config.InternalPolicy)
 	if s.compactionSrc != nil {
 		c.SetConfigSource(func() llm.CompactionConfig {
 			p := s.liveCompaction()

@@ -66,6 +66,8 @@ type SQLiteCompactorConfig struct {
 	MaxInputEntries int
 	// MaxTokens 聚类合并调用的输出上限（取模型配置的 maxTokens；0 = 默认兜底）。
 	MaxTokens int
+	// Policy 内部调用策略（memory_dedup 的 reasoning_effort / 输出封顶；nil = 不发 reasoning_effort）。
+	Policy *llm.InternalPolicy
 }
 
 // SQLiteCompactor 对 SQLiteRepository 中的记忆执行语义压缩。
@@ -88,6 +90,7 @@ func NewSQLiteCompactor(cfg SQLiteCompactorConfig, logger *zap.SugaredLogger) *S
 		Model:       cfg.Model,
 		Precompress: true, // LLM 摘要前先做确定性瘦身（JSON 紧凑化+must-keep+回退校验）
 		MaxTokens:   cfg.MaxTokens,
+		Policy:      cfg.Policy,
 	}
 	if cfg.SystemPrompt != "" {
 		mc.SystemPrompt = cfg.SystemPrompt
@@ -220,7 +223,7 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 			Content:  pc,
 		})
 	}
-	clusters, err := memory.ClusterMerge(batchCtx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs, c.config.MaxTokens)
+	clusters, err := memory.ClusterMerge(batchCtx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs, c.config.MaxTokens, c.config.Policy)
 	if err != nil {
 		if isDeterministicLLMReject(err) {
 			// 内容安全审核 / 请求参数非法等「确定性失败」：相同内容重试必再次被拒。

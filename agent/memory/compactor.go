@@ -12,6 +12,7 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/strutil"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -53,6 +54,8 @@ type CompactionConfig struct {
 	// MaxTokens 聚类合并调用的输出上限，应取模型配置的 maxTokens（ModelDef.MaxTokens）。
 	// 0 = 未配置，退回 DefaultGenerationMaxTokens（此前完全不发 max_tokens，交给服务端默认值）。
 	MaxTokens int
+	// Policy 内部调用策略（llm.PurposeMemoryDedup 的 reasoning_effort / 输出封顶；nil = 不发 reasoning_effort）。
+	Policy *llm.InternalPolicy
 }
 
 // DefaultCompactionConfig 返回默认配置。
@@ -291,7 +294,7 @@ func (c *SemanticCompactor) clusterAndMerge(ctx context.Context, entries []Tiere
 			Content:  e.Content,
 		})
 	}
-	raw, err := ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs, c.config.MaxTokens)
+	raw, err := ClusterMerge(ctx, c.config.Provider, c.config.Model, c.config.SystemPrompt, inputs, c.config.MaxTokens, c.config.Policy)
 	if err != nil {
 		return nil, err
 	}
@@ -325,8 +328,9 @@ type ClusterInput struct {
 // LLM 返回无法解析的 JSON 时返回 (nil, nil)，表示「无可合并项」，不报错。
 //
 // modelMaxTokens 为模型配置的输出上限（ModelDef.MaxTokens）；0 时退回
-// DefaultGenerationMaxTokens。
-func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput, modelMaxTokens int) ([]ClusterResult, error) {
+// DefaultGenerationMaxTokens。policy 决定 reasoning_effort（memory_dedup 默认 low；
+// GLM-5.3 缺省为 max 推理，此前 1 天 32 次调用产出 242K token）与可选输出封顶。
+func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput, modelMaxTokens int, policy *llm.InternalPolicy) ([]ClusterResult, error) {
 	var sb strings.Builder
 	sb.WriteString("## Long-term memory entries to compact\n\n")
 	for _, e := range entries {
@@ -356,16 +360,17 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	sb.WriteString("\n```")
 	sb.WriteString("\nIf nothing can be merged, output an empty array [] and nothing else.")
 
-	maxTokens := llm.ResolveMaxOutputTokens(modelMaxTokens, 0, DefaultGenerationMaxTokens)
-	resp, err := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), llm.GenerateParams{
-		Model:     model,
-		System:    systemPrompt,
-		Messages:  []llm.Message{llm.UserMessage(sb.String())},
-		MaxTokens: &maxTokens,
-	})
+	params := llm.GenerateParams{
+		Model:    model,
+		System:   systemPrompt,
+		Messages: []llm.Message{llm.UserMessage(sb.String())},
+	}
+	applyInternalCall(policy, llm.PurposeMemoryDedup, &params, modelMaxTokens)
+	resp, err := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), params)
 	if err != nil {
 		return nil, errs.Wrap(err, "compactor: LLM call")
 	}
+	warnIfTruncated(traceid.L(ctx), llm.PurposeMemoryDedup, resp, params)
 
 	var clusters []ClusterResult
 	if err := strutil.ExtractJSON(resp.Text, &clusters); err != nil {

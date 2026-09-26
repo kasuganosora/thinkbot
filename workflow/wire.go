@@ -56,6 +56,9 @@ type WireConfig struct {
 	// 可为空（nil ModelDef），此时走代码兜底 analyzerMaxTokensFallback。
 	ModelDef *config.ModelDef
 
+	// InternalPolicy 内部调用策略（可为 nil）：workflow 自愈诊断的 reasoning_effort / 输出封顶。
+	InternalPolicy *llm.InternalPolicy
+
 	// EventBus 旁路事件总线（可为 nil，则不发布事件）。
 	// Web SSE 订阅端通过 workflow_id 订阅实时进度事件。
 	EventBus outbound.EventBus
@@ -116,6 +119,10 @@ type EngineConfig struct {
 	// 默认 full 是刻意的：并行节点改代码是核心能力，一刀切降级会废掉它；
 	// 配置化是为了日后能在不改码的前提下收紧默认值。
 	DefaultToolProfile string
+	// InternalPolicy 内部调用策略（workflow_heal 诊断的 reasoning_effort / 输出封顶；nil = 不发）。
+	InternalPolicy *llm.InternalPolicy
+	// AnalyzerModel 分析器 / 自愈诊断所用模型 ID（用于 reasoning_effort 词表映射）。
+	AnalyzerModel string
 }
 
 // Setup 创建并装配工作流引擎的所有组件。
@@ -155,6 +162,8 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 
 	// 从 config.Store 读取引擎配置，Store 为 nil 时使用默认值
 	ec := resolveEngineConfig(cfg.Store, cfg.MaxParallel, cfg.ModelDef)
+	ec.InternalPolicy = cfg.InternalPolicy
+	ec.AnalyzerModel = cfg.Model
 
 	// 1. SubAgent 管理器
 	// 默认输出上限跟随当前模型配置（如 glm-5.2=128K）；analyzer 显式传的 cap 会覆盖此默认。

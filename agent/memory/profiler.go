@@ -87,6 +87,8 @@ type LLMProfilerConfig struct {
 	// MaxTokens 画像抽取调用的输出上限，应取模型配置的 maxTokens（ModelDef.MaxTokens）。
 	// 0 = 未配置，退回 DefaultGenerationMaxTokens。
 	MaxTokens int
+	// Policy 内部调用策略（llm.PurposeUserProfiler 的 reasoning_effort / 输出封顶；nil = 不发 reasoning_effort）。
+	Policy *llm.InternalPolicy
 }
 
 // DefaultLLMProfilerConfig 返回默认配置。
@@ -282,16 +284,17 @@ func (p *LLMProfiler) buildClusterPrompt(cluster profileCluster, l2, existing []
 
 // callLLM 调用 LLM 并解析结果。
 func (p *LLMProfiler) callLLM(ctx context.Context, prompt string) ([]ProfileItem, error) {
-	maxTokens := llm.ResolveMaxOutputTokens(p.config.MaxTokens, 0, DefaultGenerationMaxTokens)
-	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "user_profiler"), llm.GenerateParams{
-		Model:     p.config.Model,
-		System:    p.config.SystemPrompt,
-		Messages:  []llm.Message{llm.UserMessage(prompt)},
-		MaxTokens: &maxTokens,
-	})
+	params := llm.GenerateParams{
+		Model:    p.config.Model,
+		System:   p.config.SystemPrompt,
+		Messages: []llm.Message{llm.UserMessage(prompt)},
+	}
+	applyInternalCall(p.config.Policy, llm.PurposeUserProfiler, &params, p.config.MaxTokens)
+	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "user_profiler"), params)
 	if err != nil {
 		return nil, errs.Wrap(err, "profiler: LLM call failed")
 	}
+	warnIfTruncated(p.logger, llm.PurposeUserProfiler, result, params)
 	return p.parseResult(result.Text), nil
 }
 

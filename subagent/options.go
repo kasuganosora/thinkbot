@@ -51,6 +51,19 @@ func WithPresencePenalty(pen float64) Option {
 	}
 }
 
+// WithReasoningEffort 设置随请求发送的 reasoning_effort（"" = 不发送，由 provider 默认）。
+// 内部轻任务（如 workflow 自愈诊断）按 llm.InternalPolicy 压低推理，避免 GLM 缺省 max 推理。
+func WithReasoningEffort(effort string) Option {
+	return func(sa *SubAgent) {
+		if effort == "" {
+			sa.reasoningEffort = nil
+			return
+		}
+		e := effort
+		sa.reasoningEffort = &e
+	}
+}
+
 // WithMaxTokens 设置 LLM 最大输出 token 数。
 func WithMaxTokens(tokens int) Option {
 	return func(sa *SubAgent) {

@@ -72,6 +72,9 @@ type MultimodalConfig struct {
 	// Temperature 辅助模型温度。
 	// 为 nil 时使用 0.3。
 	Temperature *float64
+
+	// InternalPolicy 视觉调用（llm.PurposeVision）的 reasoning_effort / 输出封顶策略（nil = 不发）。
+	InternalPolicy *llm.InternalPolicy
 }
 
 // MultimodalStage 是多模态附件转写 Stage。
@@ -238,10 +241,11 @@ func (s *MultimodalStage) transcribeAttachment(ctx context.Context, att core.Att
 		temp = *s.config.Temperature
 	}
 	// 仅在未配置模型上限时兜底 1024（正常由 botservice 从 VisionDef.MaxTokens 注入）。
-	maxTokens := 1024
-	if s.config.MaxTokens != nil && *s.config.MaxTokens > 0 {
-		maxTokens = *s.config.MaxTokens
+	modelMax := 0
+	if s.config.MaxTokens != nil {
+		modelMax = *s.config.MaxTokens
 	}
+	maxTokens := s.config.InternalPolicy.MaxTokens(llm.PurposeVision, modelMax, 1024)
 
 	params := llm.GenerateParams{
 		Model:       s.config.VisionModel,
@@ -250,6 +254,7 @@ func (s *MultimodalStage) transcribeAttachment(ctx context.Context, att core.Att
 		Temperature: &temp,
 		MaxTokens:   &maxTokens,
 	}
+	s.config.InternalPolicy.Apply(llm.PurposeVision, &params)
 
 	result, err := s.config.VisionProvider.DoGenerate(llm.WithStatsFeature(ctx, "vision"), params)
 	if err != nil {

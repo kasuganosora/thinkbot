@@ -1192,6 +1192,12 @@ func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userI
 		// 未配置时回退 llm.DefaultCompactionConfig() 的内部兜底默认值。
 		compactor := llm.NewCompactor(*compactionConfigFromConfig(
 			config.NewBuilder(s.store, s.logger).GetCompactionConfig()))
+		// reasoning_effort / 输出封顶按内部调用策略（summarize_head，默认 low）。
+		botEffort := ""
+		if def, derr := s.botSvc.GetDefinition(botID); derr == nil && def != nil {
+			botEffort = def.ReasoningEffort
+		}
+		compactor.SetInternalPolicy(newInternalPolicy(s.store, s.logger, botEffort, bundle))
 		if sum, serr := compactor.SummarizeHead(ctx, bundle.Main, bundle.MainDef.Model, head, bundle.MainDef.MaxTokens); serr == nil {
 			summaryText = sum
 		} else {
