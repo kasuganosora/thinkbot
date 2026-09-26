@@ -419,6 +419,19 @@ func TestRowCostPrefersStoredCost(t *testing.T) {
 	}
 }
 
+// 存量行回算：input_tokens 含缓存，命中部分只按缓存价计，不能与全价叠加（双计）。
+func TestRowCostLegacyCacheNotDoubleCounted(t *testing.T) {
+	priceFor := func(id string) (llm.ModelPrice, bool) {
+		return llm.ModelPrice{InputPer1M: 8, OutputPer1M: 28, CacheReadPer1M: 2}, true
+	}
+	// 1M 输入其中 900K 命中：0.1M*8 + 0.9M*2 = 0.8 + 1.8 = 2.6（旧公式 8 + 1.8 = 9.8）
+	row := costRestoreRow{Model: "glm-5.3", Input: 1_000_000, CacheRead: 900_000}
+	got := rowCost(row, priceFor)
+	if d := got - 2.6; d > 1e-9 || d < -1e-9 {
+		t.Errorf("rowCost legacy cached = %v, want 2.6", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 周期桶口径：必须与 stats_usage_daily.date 的写入口径（stats.TruncateToDate）一致
 //

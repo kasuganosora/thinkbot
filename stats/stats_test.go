@@ -347,3 +347,32 @@ func TestRecorder_AggregatedRequests(t *testing.T) {
 		t.Errorf("dream_extract total_requests = %d, want 1 (default when Requests unset)", got)
 	}
 }
+
+// TestRecorder_CostDoesNotDoubleCountCache 锁定落库 cost_* 的口径：
+// InputTokens 含缓存，命中部分按缓存价计一次；cost_input + cost_output == cost_total。
+func TestRecorder_CostDoesNotDoubleCountCache(t *testing.T) {
+	db := newTestDB(t)
+	r := NewRecorder(db, zap.NewNop().Sugar())
+	r.SetPriceResolver(func(id string) (llm.ModelPrice, bool) {
+		return llm.ModelPrice{InputPer1M: 8, OutputPer1M: 28, CacheReadPer1M: 2}, true
+	})
+	r.RecordUsage(context.Background(), llm.UsageMetric{
+		BotID: "bot1", Model: "glm-5.3", Feature: "reply",
+		Usage: llm.Usage{
+			InputTokens: 1_000_000, OutputTokens: 100_000, TotalTokens: 1_100_000,
+			CachedInputTokens: 800_000,
+			InputTokenDetails: llm.InputTokenDetail{CacheReadTokens: 800_000, NoCacheTokens: 200_000},
+		},
+	})
+	r.SyncFlush()
+
+	var row dao.UsageDaily
+	if err := db.First(&row).Error; err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	near := func(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+	// input = 0.2M*8 + 0.8M*2 = 3.2；output = 0.1M*28 = 2.8；total = 6.0（旧公式 11.6）
+	if !near(row.CostInput, 3.2) || !near(row.CostOutput, 2.8) || !near(row.CostTotal, 6.0) {
+		t.Fatalf("cost (in,out,total) = (%v,%v,%v), want (3.2,2.8,6.0)", row.CostInput, row.CostOutput, row.CostTotal)
+	}
+}
