@@ -38,6 +38,8 @@ type BotProfileProfilerConfig struct {
 	SystemPrompt string
 	// MaxTokens 生成画像时的最大输出 token 数（0 时回退 DefaultGenerationMaxTokens）。
 	MaxTokens int
+	// Policy 内部调用策略（llm.PurposeBotProfiler 的 reasoning_effort / 输出封顶；nil = 不发 reasoning_effort）。
+	Policy *llm.InternalPolicy
 }
 
 // BotProfileProfiler 使用 LLM 提取 Bot 自我画像。
@@ -99,16 +101,16 @@ func (p *BotProfileProfiler) ExtractProfile(ctx context.Context, l1Entries, l2En
 		"l2_count", len(l2Entries),
 		"prompt_len", len(prompt))
 
-	maxTokens := p.config.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = DefaultGenerationMaxTokens
+	params := llm.GenerateParams{
+		Model:    p.config.Model,
+		System:   p.config.SystemPrompt,
+		Messages: []llm.Message{llm.UserMessage(prompt)},
 	}
-	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "bot_profiler"), llm.GenerateParams{
-		Model:     p.config.Model,
-		System:    p.config.SystemPrompt,
-		Messages:  []llm.Message{llm.UserMessage(prompt)},
-		MaxTokens: &maxTokens,
-	})
+	applyInternalCall(p.config.Policy, llm.PurposeBotProfiler, &params, p.config.MaxTokens)
+	result, err := p.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "bot_profiler"), params)
+	if err == nil {
+		warnIfTruncated(logger, llm.PurposeBotProfiler, result, params)
+	}
 	if err != nil {
 		span.RecordError(err)
 		logger.Errorw("bot_profile_profiler: LLM call failed", "err", err)

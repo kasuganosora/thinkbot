@@ -32,3 +32,33 @@ func TestMultimodal_TranscribeHonorsConfiguredMaxTokens(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// Vision runs with the vision reasoning policy (low) and an optional cap.
+func TestMultimodal_ReasoningPolicy(t *testing.T) {
+	att := core.Attachment{Type: core.AttachmentTypeImage, MimeType: "image/png", URL: "https://example.com/cat.png"}
+	set := llm.InternalSettings{MaxTokens: map[string]int{llm.PurposeVision: 4000}}
+	for _, c := range []struct {
+		pol        *llm.InternalPolicy
+		model      string
+		wantEffort string
+		wantMax    int
+	}{
+		{llm.NewInternalPolicy(nil, "medium"), "glm-5.3", "low", 32768},
+		{llm.NewInternalPolicy(func() llm.InternalSettings { return set }, "medium"), "glm-5.3", "low", 4000},
+		{llm.NewInternalPolicy(nil, ""), "gpt-4o", "", 32768},
+		{nil, "glm-5.3", "", 32768},
+	} {
+		p := &mockVisionProvider{name: "vision"}
+		s := newTestMultimodalStage(t, MultimodalConfig{VisionProvider: p, VisionModel: llm.ChatModel(c.model), MaxTokens: intPtr(32768), InternalPolicy: c.pol})
+		if _, err := s.transcribeAttachment(context.Background(), att, "?"); err != nil {
+			t.Fatal(err)
+		}
+		e := ""
+		if p.lastParam.ReasoningEffort != nil {
+			e = *p.lastParam.ReasoningEffort
+		}
+		if e != c.wantEffort || *p.lastParam.MaxTokens != c.wantMax {
+			t.Fatalf("%s: effort=%q max=%d, want %q/%d", c.model, e, *p.lastParam.MaxTokens, c.wantEffort, c.wantMax)
+		}
+	}
+}

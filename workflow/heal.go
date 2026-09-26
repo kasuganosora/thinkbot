@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -156,8 +157,10 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 
 	raw, err := a.saMgr.DelegateStream(ctx, healDiagnoseSystemPrompt, task,
 		subagent.WithTemperature(0),
-		// 跟随模型配置（与 RefineNode/Analyze 同源）；此前写死 2000，思考模型推理即可耗尽。
-		subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
+		// 跟随模型配置（与 RefineNode/Analyze 同源），可由 llm.internal_max_tokens.workflow_heal 压低；
+		// reasoning_effort 按内部调用策略（默认 low）。此前写死 2000，思考模型推理即可耗尽。
+		subagent.WithMaxTokens(a.ec.InternalPolicy.MaxTokens(llm.PurposeWorkflowHeal, a.ec.AnalyzerMaxTokens, analyzerMaxTokensFallback)),
+		subagent.WithReasoningEffort(a.ec.InternalPolicy.ReasoningEffort(llm.PurposeWorkflowHeal, a.ec.AnalyzerModel)),
 		subagent.WithStuckTimeout(healDiagnoseStuckTimeout),
 	)
 	if err != nil {
