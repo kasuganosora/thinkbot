@@ -369,18 +369,30 @@ func (m *SkillManager) BuildTriggerPrompt() string {
 }
 
 func (m *SkillManager) buildTriggerPromptLocked() string {
+	// 自启发加载（lazy discovery）：不常驻技能清单，节省每次请求的 token。
+	// 技能数量增长时本段长度恒定；LLM 需要时通过 use_skill "list" 按需发现。
 	var buf strings.Builder
-	buf.WriteString("## Available Skills\n\n")
-	buf.WriteString("A Skill is a package of specialized instructions for a specific domain, system or data format.\n")
-	buf.WriteString("When a user request falls into one of the domains listed below, call the `use_skill` tool with that skill's name to load its full instructions.\n\n")
-	buf.WriteString("Rules:\n")
-	buf.WriteString("- CRITICAL: Call `use_skill` as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
-	buf.WriteString("- After loading, you MUST follow the skill's instructions exactly. They override your general defaults for that task.\n")
-	buf.WriteString("- NEVER mention a skill to the user without actually loading it.\n")
-	buf.WriteString("- If no listed skill matches the request, proceed normally without calling `use_skill`.\n")
-	buf.WriteString("- These instructions are in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.\n\n")
-	buf.WriteString("Skills available now:\n")
+	buf.WriteString("## Skills\n\n")
+	buf.WriteString("A Skill is a package of specialized instructions for a specific domain, system or data format. Skills exist in this system, but the list is intentionally NOT shown here to save context.\n\n")
+	buf.WriteString("When a request involves a specialized domain (a file format, a framework, a workflow, a known tool, a repeated task pattern), discover and load a Skill first:\n")
+	buf.WriteString("1. Call `use_skill` with command \"list\" to get all available skills (name — description).\n")
+	buf.WriteString("2. If a matching skill exists, call `use_skill` with that skill's name as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
+	buf.WriteString("3. After loading, follow the skill's instructions exactly. They override your general defaults for that task.\n")
+	buf.WriteString("4. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
+	buf.WriteString("5. NEVER mention a skill to the user without actually loading it.\n\n")
+	buf.WriteString("These instructions are in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.\n")
+	return buf.String()
+}
 
+// BuildSkillListPrompt 返回完整的可用技能清单（name — description），供按需发现使用。
+// 触发段落（buildTriggerPromptLocked）不再内联此清单；LLM 通过 use_skill "list" 获取。
+func (m *SkillManager) BuildSkillListPrompt() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.buildSkillListLocked()
+}
+
+func (m *SkillManager) buildSkillListLocked() string {
 	enabled := make([]*Skill, 0, len(m.skills))
 	for _, s := range m.skills {
 		if s.Enabled {
@@ -389,6 +401,12 @@ func (m *SkillManager) buildTriggerPromptLocked() string {
 	}
 	sortSkills(enabled)
 
+	var buf strings.Builder
+	if len(enabled) == 0 {
+		buf.WriteString("No skills available.\n")
+		return buf.String()
+	}
+	buf.WriteString(fmt.Sprintf("%d skills available:\n", len(enabled)))
 	for _, s := range enabled {
 		buf.WriteString("- ")
 		buf.WriteString(s.Name)
@@ -396,7 +414,6 @@ func (m *SkillManager) buildTriggerPromptLocked() string {
 		buf.WriteString(s.Description)
 		buf.WriteString("\n")
 	}
-
 	return buf.String()
 }
 
