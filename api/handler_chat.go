@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 
@@ -995,15 +996,19 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			// ActionReply 表示 Bot 回复完成
 			// 文本已通过 EventBus 流式推送，这里只需发送 done
 			if action.Type == core.ActionReply {
-				// 如果 fullText 为空（EventBus 不可用），用 Action 的 payload
-				if fullText == "" {
-					text, _ := action.Payload.(string)
-					if text != "" {
-						text = stages.StripReplyControlBlock(text)
-						fullText = text
-						writeSSE(c.Writer, sseTextDelta, map[string]any{"text": text})
-						flusher.Flush()
-					}
+				// payload 是出站门控（与 Telegram / Misskey 等渠道共用的那条清洗链）的最终产物，
+				// 即其他渠道实际会发送的内容。done 文本与落库内容一律以它为准，
+				// 流式增量只是同口径的实时预览（见 stages.OutputCleanStreamFilter）。
+				canonical, _ := action.Payload.(string)
+				canonical = stages.StripReplyControlBlock(canonical)
+				// 如果 fullText 为空（EventBus 不可用），直接把 payload 作为一次增量补发
+				if fullText == "" && canonical != "" {
+					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": canonical})
+					flusher.Flush()
+				}
+				if canonical != "" {
+					fullText = canonical
+					parts = reconcileTextParts(parts, canonical)
 				}
 				// 收敛残留 phantom：避免最后一个空参数占位调用永久停在「执行中」
 				sweepPhantomToolCalls()
@@ -1282,4 +1287,48 @@ func (s *Server) replyCommandError(c *gin.Context, msg string) {
 
 	writeSSE(c.Writer, sseError, map[string]any{"message": msg})
 	flusher.Flush()
+}
+
+// reconcileTextParts 让有序 parts 里的文本片段与最终出站内容 canonical 对齐，
+// 保证刷新 / 回放（前端优先按 parts_json 渲染）看到的正文与其他渠道发送的一致。
+//
+//   - 各文本片段（去首尾空白后）能按顺序在 canonical 里依次对上、且覆盖全部内容：
+//     保留原有的文本 / 工具交错顺序，仅去掉空白片段；
+//   - 否则（流式预览与最终内容有出入，例如 <public> 之前的裸文本、被剥离的内部指标）：
+//     去掉所有文本片段，保留工具片段原顺序，在末尾追加一个 canonical 文本片段。
+func reconcileTextParts(parts []map[string]any, canonical string) []map[string]any {
+	if canonical == "" {
+		return parts
+	}
+	remaining := canonical
+	mapped := make([]map[string]any, 0, len(parts))
+	ok := true
+	for _, p := range parts {
+		if p["type"] != "text" {
+			mapped = append(mapped, p)
+			continue
+		}
+		content, _ := p["content"].(string)
+		seg := strings.TrimSpace(content)
+		if seg == "" {
+			continue
+		}
+		rest := strings.TrimLeftFunc(remaining, unicode.IsSpace)
+		if !strings.HasPrefix(rest, seg) {
+			ok = false
+			break
+		}
+		remaining = rest[len(seg):]
+		mapped = append(mapped, map[string]any{"type": "text", "content": seg})
+	}
+	if ok && strings.TrimSpace(remaining) == "" {
+		return mapped
+	}
+	out := make([]map[string]any, 0, len(parts)+1)
+	for _, p := range parts {
+		if p["type"] != "text" {
+			out = append(out, p)
+		}
+	}
+	return append(out, map[string]any{"type": "text", "content": canonical})
 }
