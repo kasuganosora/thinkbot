@@ -137,7 +137,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 			"Manage persistent memory that survives across sessions. "+
 				"Use action to add/replace/remove/search/recent/count/batch. "+
 				"Memory is injected into future sessions, keep entries compact and high-signal. "+
-				"When making multiple changes, use batch (all-or-nothing against final char budget).",
+				"When making multiple changes, use batch (all-or-nothing against final char budget). For replace: ALWAYS pass both old_text AND content.",
 			map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -148,7 +148,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					},
 					"content": map[string]any{
 						"type":        "string",
-						"description": "Entry content for 'add' or 'replace'. Required for add/replace.",
+						"description": "REQUIRED for action=add and action=replace — the full new entry text. For replace you MUST pass both old_text (locator) AND content (replacement). Omitting content on replace fails; use action=remove to delete.",
 					},
 					"old_text": map[string]any{
 						"type":        "string",
@@ -402,7 +402,11 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 		return nil, fmt.Errorf("old_text is required for 'replace' action")
 	}
 	if content == "" {
-		return nil, fmt.Errorf("content is required for 'replace' (use 'remove' to delete)")
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		return nil, fmt.Errorf("content is required for 'replace' (use 'remove' to delete); got keys %v — pass content=<new text> together with old_text", keys)
 	}
 	content = StripThinking(content)
 

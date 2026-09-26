@@ -149,6 +149,12 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 	if eventBus == nil {
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
+	if chatHistory != nil && store != nil {
+		// compact_context 检查点 TTL：每次加载历史时现读配置，改配置无需重启。
+		chatHistory.SetContextCheckpointTTLSource(func() time.Duration {
+			return contextCheckpointTTLFromStore(store)
+		})
+	}
 	return &BotService{
 		db:                 db,
 		store:              store,
@@ -672,6 +678,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 		s.logger.Warnw("failed to load context for workflow continuation", "err", err)
 		history = nil
 	}
+	history = s.chatHistory.ApplyContextCheckpoint(traceID, botID, sessionID, history)
 
 	done := 0
 	for _, n := range wf.Nodes {
@@ -905,6 +912,58 @@ func effectiveLLMHardTimeout(store *config.Store) time.Duration {
 	return defaultLLMHardTimeout
 }
 
+// selfCompactConfig 构造 compact_context（bot 自主上下文压缩）工具配置。均为 bot 启动时读取：
+//   - agent.self_compact.enabled=false 关闭；
+//   - agent.self_compact.cooldown（秒）覆盖默认 10 分钟冷却（有持久化历史的会话另以最近检查点
+//     created_at 推导，重启不清零）；
+//   - agent.self_compact.min_tokens / min_messages / min_savings_tokens / min_savings_ratio：
+//     收益门槛（默认 8000 / 12 / 4000 / 0.3），不划算时直接 no-op，不调用摘要模型；
+//   - agent.self_compact.summary_max_tokens：摘要调用输出上限（含推理，默认 4096；摘要长度主要由提示词目标约束），被截断即作废；
+//   - agent.self_compact.summarizer：main（默认）| light，light 使用 bot 的低成本模型（未配置则回退 main）；
+//   - agent.self_compact.reasoning_effort：透传给摘要调用（默认空=服务商默认；GLM 等对参数严格，需实测后再开）。
+//
+// 检查点过期（agent.self_compact.checkpoint_ttl，秒）在加载时判定，见 context_checkpoint.go。
+func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle) *stages.SelfCompactConfig {
+	if !s.store.GetBool("agent.self_compact.enabled", true) {
+		return nil
+	}
+	cfg := &stages.SelfCompactConfig{
+		HistoryMessageIDs: chatHistoryMessageIDs,
+	}
+	if s.chatHistory != nil {
+		cfg.Store = s.chatHistory
+	}
+	if secs := s.store.GetInt("agent.self_compact.cooldown", 0); secs > 0 {
+		cfg.Cooldown = time.Duration(secs) * time.Second
+	}
+	cfg.MinTokens = s.store.GetInt("agent.self_compact.min_tokens", 0)
+	cfg.MinMessages = s.store.GetInt("agent.self_compact.min_messages", 0)
+	cfg.MinSavingsTokens = s.store.GetInt("agent.self_compact.min_savings_tokens", 0)
+	cfg.MinSavingsRatio = s.store.GetFloat64("agent.self_compact.min_savings_ratio", 0)
+	cfg.SummaryMaxTokens = s.store.GetInt("agent.self_compact.summary_max_tokens", 0)
+	cfg.SummaryReasoningEffort = strings.TrimSpace(s.store.GetString("agent.self_compact.reasoning_effort", ""))
+	if strings.EqualFold(strings.TrimSpace(s.store.GetString("agent.self_compact.summarizer", "main")), "light") &&
+		bundle != nil && bundle.Light != nil {
+		cfg.SummaryProvider = bundle.Light
+		cfg.SummaryModel = llm.ChatModel(bundle.LightDef.Model)
+	}
+	return cfg
+}
+
+// contextCheckpointTTLFromStore 读取 agent.self_compact.checkpoint_ttl（秒）：
+// 未配置或 0 → 默认 24h；负数 → 不按时间过期（仍会在被覆盖的消息滑出历史窗口后失效）。
+func contextCheckpointTTLFromStore(store *config.Store) time.Duration {
+	secs := store.GetInt("agent.self_compact.checkpoint_ttl", 0)
+	switch {
+	case secs < 0:
+		return 0
+	case secs == 0:
+		return defaultContextCheckpointTTL
+	default:
+		return time.Duration(secs) * time.Second
+	}
+}
+
 // compactionConfigFromConfig 将配置模块的会话压缩配置转换为 llm 包的 CompactionConfig。
 // 两包字段一一对齐；配置模块的 CompactionConfig 定义在 config 包内以避免 config↔llm
 // 循环依赖（与 ToolOutputConfig 同一手法）。
@@ -1103,19 +1162,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// MessageBuilder：从 Message.Metadata["chat_history"] 加载历史上下文
 	messageBuilder := func(msg core.Message) []llm.Message {
-		var messages []llm.Message
-		if history, ok := msg.Metadata["chat_history"]; ok {
-			if msgs, ok := history.([]dao.ChatMessage); ok {
-				for _, m := range msgs {
-					switch m.Role {
-					case dao.ChatRoleUser:
-						messages = append(messages, llm.UserMessage(m.Content))
-					case dao.ChatRoleAssistant:
-						messages = append(messages, llm.AssistantMessage(m.Content))
-					}
-				}
-			}
-		}
+		// 历史（含上下文检查点生成的摘要条目，见 context_checkpoint.go）。
+		// 与 compact_context 的边界映射共用 chatHistoryToLLM，保证逐条对齐。
+		messages, _ := chatHistoryToLLM(historyFromMetadata(msg))
 		// 心跳等触发源：Text 故意留空（防 L0 污染），真正内容在 InjectContext。
 		// 必须 fallback 到它，否则会拼出空 user message → GLM 400 拒收，心跳静默失败。
 		content := msg.Text
@@ -1359,6 +1408,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// 结构化摘要替代旧消息，按会话隔离、跨轮持久。
 			// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
 			Compaction: compactionConfigFromConfig(builder.GetCompactionConfig()),
+			// 自主上下文压缩工具 compact_context：bot 可自行把旧上下文折叠为摘要。
+			// 有持久化历史的会话（web / telegram / 工作流续跑）写检查点，后续轮次
+			// 加载「摘要 + 边界后的消息」；原始 chat_messages 不删除（可回滚）。
+			SelfCompact: s.selfCompactConfig(bundle),
 		},
 		s.tp,
 		s.logger,
@@ -1613,8 +1666,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
 		if err != nil {
 			s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
-		} else if len(history) > 0 {
-			env.Message.Metadata["chat_history"] = history
+		} else {
+			// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
+			history = s.chatHistory.ApplyContextCheckpoint(env.Message.TraceID, env.Message.BotID, sid, history)
+			if len(history) > 0 {
+				env.Message.Metadata["chat_history"] = history
+			}
 		}
 
 		// 异步落库当前用户消息（顺序：先加载再保存，避免当前消息进入本轮历史造成重复）
@@ -1655,8 +1712,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if replyText == "" {
 			return nil
 		}
+		// 同时落库本轮工具调用（与 Web 相同的 tool_calls 结构），使 Telegram 轮次可审计
+		// （此前只存回复文本，compact_context 等工具的完整参数无从追溯）。
+		toolCallsJSON := ""
+		if v, ok := env.Get("llm.result"); ok {
+			if r, ok := v.(*llm.GenerateResult); ok {
+				toolCallsJSON = toolCallsJSONFromResult(r)
+			}
+		}
 		if err := s.chatHistory.UpsertAssistantByTrace(
-			env.Message.BotID, sid, replyText, env.Message.TraceID, "", "", sid, false,
+			env.Message.BotID, sid, replyText, env.Message.TraceID, toolCallsJSON, "", sid, false,
 		); err != nil {
 			s.logger.Warnw("outbound chat history save assistant failed", "err", err, "session", sid)
 		}
@@ -1981,6 +2046,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			}
 			s.logger.Infow("channel tools registered",
 				"channel_name", ch.Name(), "channel_type", ch.Type(), "count", len(defs))
+		}
+		// Dynamic channel tools (e.g. misskey_search_notes hidden while circuit open).
+		if tp, ok := ch.(agenttools.ToolProvider); ok {
+			toolMgr.AddProvider(tp)
+			s.logger.Infow("channel dynamic tool provider registered",
+				"channel_name", ch.Name(), "channel_type", ch.Type())
 		}
 	}
 

@@ -288,6 +288,12 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	copy(messages, cfg.Params.Messages)
 	messages = PatchToolCalls(messages)
 
+	// Per-run live context handle: lets a tool (compact_context) observe the
+	// current messages and schedule a head replacement. A fresh handle per run
+	// keeps nested orchestrations (subagents) isolated from the outer loop.
+	live := NewLiveContext()
+	ctx = WithLiveContext(ctx, live)
+
 	var (
 		totalUsage    Usage
 		lastResult    *GenerateResult
@@ -355,6 +361,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 				}
 				ready := filterToolCalls(result.ToolCalls, exclude)
 				if len(ready) > 0 {
+					live.SetSnapshot(messages)
 					readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, nil, cfg)
 					if rerr != nil {
 						var deferred *ToolApprovalDeferredError
@@ -401,6 +408,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 					allMessages = append(allMessages, stepMsgs...)
 					applyOnStep(cfg, &sr)
 					messages = append(messages, stepMsgs...)
+					messages = applyLiveCompaction(ctx, live, messages)
 				}
 				messages = append(messages, UserMessage(loadNote(names)))
 				continue
@@ -427,6 +435,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		}
 
 		// Execute tools
+		live.SetSnapshot(messages)
 		toolResults, err := executeTools(ctx, result.ToolCalls, toolMap, cfg.ApprovalHandler, nil, cfg)
 		if err != nil {
 			var deferred *ToolApprovalDeferredError
@@ -500,6 +509,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		applyOnStep(cfg, &sr)
 
 		messages = append(messages, stepMsgs...)
+		messages = applyLiveCompaction(ctx, live, messages)
 	}
 
 	logLoopStop(ctx, loop, len(allSteps))
@@ -586,6 +596,10 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 	messages := make([]Message, len(cfg.Params.Messages))
 	copy(messages, cfg.Params.Messages)
 	messages = PatchToolCalls(messages)
+
+	// Per-run live context handle (see OrchestrateGenerate).
+	live := NewLiveContext()
+	ctx = WithLiveContext(ctx, live)
 
 	ch := make(chan StreamPart, 64)
 	sr := &StreamResult{Stream: ch}
@@ -721,6 +735,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 					ready := filterToolCalls(stepToolCalls, exclude)
 					if len(ready) > 0 {
 						sendProgress := func(part StreamPart) { send(part) }
+						live.SetSnapshot(messages)
 						readyResults, rerr := executeTools(ctx, ready, toolMap, cfg.ApprovalHandler, sendProgress, cfg)
 						if rerr != nil {
 							var deferred *ToolApprovalDeferredError
@@ -766,6 +781,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 						allMessages = append(allMessages, stepMsgs...)
 						applyOnStep(cfg, &stepR)
 						messages = append(messages, stepMsgs...)
+						messages = applyLiveCompaction(ctx, live, messages)
 					}
 					messages = append(messages, UserMessage(loadNote(names)))
 					continue
@@ -804,6 +820,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			// Execute tools
 			sendProgress := func(part StreamPart) { send(part) }
+			live.SetSnapshot(messages)
 			toolResults, err := executeTools(ctx, stepToolCalls, toolMap, cfg.ApprovalHandler, sendProgress, cfg)
 			if err != nil {
 				var deferred *ToolApprovalDeferredError
@@ -879,6 +896,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			applyOnStep(cfg, &stepR)
 
 			messages = append(messages, stepMsgs...)
+			messages = applyLiveCompaction(ctx, live, messages)
 		}
 
 		logLoopStop(ctx, loop, len(allSteps))
@@ -1126,6 +1144,22 @@ func applyOnStep(cfg *OrchestrateConfig, stepResult *StepResult) {
 		}
 		cfg.Params = *override
 	}
+}
+
+// applyLiveCompaction applies a head replacement scheduled by a tool through
+// the run's LiveContext (compact_context). No-op when nothing is pending.
+func applyLiveCompaction(ctx context.Context, live *LiveContext, messages []Message) []Message {
+	out, ok := live.applyPending(messages)
+	if ok {
+		if logger := traceid.L(ctx); logger != nil {
+			logger.Infow("context_compact_applied",
+				"messages_before", len(messages),
+				"messages_after", len(out),
+				"est_tokens_before", EstimateMessagesTokens(messages),
+				"est_tokens_after", EstimateMessagesTokens(out))
+		}
+	}
+	return out
 }
 
 func applyPrepareStep(cfg *OrchestrateConfig, messages []Message) []Message {

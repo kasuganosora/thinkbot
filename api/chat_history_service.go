@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -41,6 +42,9 @@ type HistoryPage struct {
 type ChatHistoryService struct {
 	db     *gorm.DB
 	logger *zap.SugaredLogger
+	// checkpointTTL is the live context-checkpoint TTL source (see
+	// context_checkpoint.go); nil → default.
+	checkpointTTL atomic.Pointer[checkpointTTLSource]
 }
 
 // NewChatHistoryService 创建聊天历史服务。

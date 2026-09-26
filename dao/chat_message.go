@@ -61,4 +61,8 @@ func (ChatMessage) TableName() string { return "chat_messages" }
 const (
 	ChatRoleUser      = "user"
 	ChatRoleAssistant = "assistant"
+
+	// ChatRoleContextSummary 仅用于内存中的合成消息（不落库）：LLM 上下文加载时
+	// 由上下文检查点（ContextCheckpoint）生成，代表被压缩的更早历史。
+	ChatRoleContextSummary = "context_summary"
 )
