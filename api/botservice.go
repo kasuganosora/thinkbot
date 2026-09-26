@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -1208,6 +1209,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 创建 Prompt Registry + Tool Manager
 	promptReg := prompt.NewRegistry()
 	toolMgr := agenttools.NewToolManager(promptReg, s.store, s.logger)
+	// 不生成「工具描述」段落（tool_<name>_desc）：描述已随工具 schema 发给模型，
+	// 再渲染进 system prompt 只是逐字重复。system prompt 只放 ToolDef.PromptSection
+	// 中真正的使用指引（见 newMainPromptStage）。
+	toolMgr.EnableAutoDescribe(false)
+	// judge 人格在 bot 创建后才可用（SoulLoader 由 bot.New 装配），先占位，创建后回填。
+	var botRef atomic.Pointer[bot.Bot]
 
 	// 接入 bot 维度的工具权限控制（按 platform + userID 过滤）。
 	// 设置后取代 legacy ToolPolicyProvider，所有工具解析都走权限表裁决。
@@ -1400,7 +1407,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		"llm",
 		bundle.Main,
 		stages.LLMConfig{
-			SystemPrompt:     "", // 由 PromptStage 从 SOUL.md 注入
+			SystemPrompt:     "", // 由 PromptStage（Order=97）组装后经 Envelope KV "system.prompt" 注入
 			Model:            mainModel,
 			Temperature:      temp,
 			TopP:             bundle.MainDef.TopP,
@@ -1523,9 +1530,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			adapter := newLLMJudgeAdapter(judgeProvider, modelID, judgeMaxTokens, internalPol, llm.PurposeEngagementJudge)
 
 			promptCfg := engagement.PromptConfig{
-				BotName:    def.Name,
-				BotPersona: "", // 由 SOUL.md 提供
-				Interests:  engCfg.Keywords,
+				BotName: def.Name,
+				// 简短人格：SOUL.md（+ system_prompt）截断，每次判定时读取，跟随热重载。
+				PersonaFunc: func() string { return judgePersona(botRef.Load(), def.SystemPrompt) },
+				Interests:   engCfg.Keywords,
 			}
 
 			// 模型标识与落库目标一并注入：前者让判定结果可按模型归因
@@ -1934,6 +1942,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	pb.Add(48, pureRenoteEnricher)
 	pb.Add(90, recallStage)
 	pb.Add(95, rhythmStage)
+	// system prompt 组装（SOUL.md / system_prompt / 工具指引 / 技能），写入 "system.prompt" 供 LLMStage 使用。
+	pb.Add(promptStageOrder, newMainPromptStage(promptReg, s.tp, s.logger))
 	pb.Add(100, wrappedLLM)
 	pb.Add(850, outboundHistoryEnricher)
 	if (hbBundle != nil && groups[pipeline.GroupHeartbeat]) || outBundle != nil {
@@ -2218,8 +2228,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建 Bot
 	botCfg := bot.BotConfig{
-		Workers:      def.Workers,
-		SystemPrompt: "", // 由 PromptStage 从 SOUL.md 注入
+		Workers: def.Workers,
+		// bot 的 system_prompt 字段：PromptStage 从 Envelope "bot.config" 读取（有 SOUL.md 时
+		// 作为 operator_instructions 段落，无 SOUL 时作为身份）。AgentConfig 覆盖见下方。
+		SystemPrompt: def.SystemPrompt,
 		Model:        def.Model,
 	}
 	// Bot 温度跟随主模型（ModelDef.Temperature），不采用 bot 级 temperature。
@@ -2462,6 +2474,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		skillMgr = nil
 	}
 
+	botCfg.SystemPrompt = agentCfg.EffectiveSystemPrompt(botCfg)
 	b, err := bot.New(bot.BotParams{
 		ID:              id,
 		Name:            def.Name,
@@ -2502,6 +2515,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		rollback()
 		return errs.Wrap(err, "bot_service: create bot")
 	}
+	botRef.Store(b)
 
 	// 心跳后置接线：把真实编排入口（Engine：pipeline + dispatcher 全链路）交给心跳执行器。
 	// 必须在 bot.Run 启动 Scheduler 之前完成，否则首次唤醒会以 runner=nil 失败。

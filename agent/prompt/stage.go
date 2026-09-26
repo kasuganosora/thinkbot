@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -69,16 +70,84 @@ type PromptStageConfig struct {
 	// FallbackToConfig 当 Registry 为空时，是否回退到 BotConfig.SystemPrompt。
 	// 默认 true。
 	FallbackToConfig bool
+
+	// OperatorSectionName / OperatorSectionOrder：Registry 中已有身份段落（SOUL.md）时，
+	// BotConfig.SystemPrompt（bot 的 system_prompt 字段）不再作为身份，而是以
+	// 「运营者指令」段落紧跟身份之后注入（默认 "operator_instructions"，Order=10）。
+	// 名称为空时不注入（旧行为：有 SOUL 时忽略 system_prompt）。
+	OperatorSectionName  string
+	OperatorSectionOrder int
 }
 
 // DefaultPromptStageConfig 返回默认配置。
 func DefaultPromptStageConfig() PromptStageConfig {
 	return PromptStageConfig{
-		BaseSectionName:     "identity",
-		InjectMemoryContext: true,
-		MemorySectionOrder:  200,
-		FallbackToConfig:    true,
+		BaseSectionName:      "identity",
+		InjectMemoryContext:  true,
+		MemorySectionOrder:   200,
+		FallbackToConfig:     true,
+		OperatorSectionName:  OperatorSectionName,
+		OperatorSectionOrder: 10,
 	}
+}
+
+// OperatorSectionName 是 system_prompt 与 SOUL.md 并存时，system_prompt 所在段落的名称。
+const OperatorSectionName = "operator_instructions"
+
+// OperatorInstructions 渲染「运营者指令」段落：bot 的 system_prompt 字段在 SOUL.md
+// （身份）之后以独立标题出现。空输入返回空串。
+func OperatorInstructions(systemPrompt string) string {
+	sp := strings.TrimSpace(systemPrompt)
+	if sp == "" {
+		return ""
+	}
+	return "# Operator Instructions\n\n" + sp
+}
+
+// ComposeIdentity 按与 PromptStage 相同的规则组合身份：
+//   - 有 SOUL：SOUL + 空行 + OperatorInstructions(systemPrompt)；
+//   - 无 SOUL：systemPrompt 本身即身份（原有回退语义）。
+//
+// 供不走 pipeline、但需要同一人格的调用方（如 notify bot 模式）使用。
+func ComposeIdentity(soul, systemPrompt string) string {
+	soul = strings.TrimSpace(soul)
+	if soul == "" {
+		return strings.TrimSpace(systemPrompt)
+	}
+	if op := OperatorInstructions(systemPrompt); op != "" {
+		return soul + "\n\n" + op
+	}
+	return soul
+}
+
+// ShortPersona 返回用于轻量判定（engagement judge 等）的简短人格描述：
+// 去掉 Markdown 标题符号、压缩空行后按行截取，不超过 maxRunes 个字符。
+func ShortPersona(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		maxRunes = 600
+	}
+	var b strings.Builder
+	n := 0
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#"))
+		if line == "" {
+			continue
+		}
+		r := []rune(line)
+		if n+len(r)+1 > maxRunes {
+			if n == 0 {
+				b.WriteString(string(r[:maxRunes]))
+			}
+			break
+		}
+		if n > 0 {
+			b.WriteString("\n")
+			n++
+		}
+		b.WriteString(line)
+		n += len(r)
+	}
+	return b.String()
 }
 
 // NewPromptStage 创建系统提示词组装 Stage。
@@ -247,7 +316,8 @@ func (s *PromptStage) buildAssemblyContext(env *core.Envelope) *AssemblyContext 
 func (s *PromptStage) buildExtraSections(env *core.Envelope, ctx *AssemblyContext) []Section {
 	var extra []Section
 
-	// 自动注入 BotConfig.SystemPrompt 作为基础段落（如果 Registry 中没有）
+	// 自动注入 BotConfig.SystemPrompt 作为基础段落（如果 Registry 中没有）；
+	// Registry 已有身份段落（SOUL.md）时，SystemPrompt 作为「运营者指令」段落紧随其后。
 	if _, ok := s.assembler.registry.Get(s.config.BaseSectionName); !ok {
 		basePrompt := s.fallbackPrompt(env)
 		if basePrompt != "" {
@@ -255,6 +325,15 @@ func (s *PromptStage) buildExtraSections(env *core.Envelope, ctx *AssemblyContex
 				Name:    s.config.BaseSectionName,
 				Order:   0,
 				Content: basePrompt,
+				Enabled: true,
+			})
+		}
+	} else if s.config.OperatorSectionName != "" {
+		if op := OperatorInstructions(s.fallbackPrompt(env)); op != "" {
+			extra = append(extra, Section{
+				Name:    s.config.OperatorSectionName,
+				Order:   s.config.OperatorSectionOrder,
+				Content: op,
 				Enabled: true,
 			})
 		}

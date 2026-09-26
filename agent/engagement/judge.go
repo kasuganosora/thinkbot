@@ -87,8 +87,24 @@ type PromptConfig struct {
 	BotName string
 	// BotPersona Bot 人格描述（简短，1-2 句话）。
 	BotPersona string
+	// PersonaFunc 非 nil 时每次构建 prompt 调用，返回值非空则取代 BotPersona。
+	// 用于跟随 SOUL.md 热重载（人格在 judge 创建之后才加载 / 可能被改写）。
+	PersonaFunc func() string
 	// Interests Bot 关注的话题（用于引导 LLM 判断）。
 	Interests []string
+}
+
+// persona 返回当前人格描述：PersonaFunc > BotPersona > 默认。
+func (c PromptConfig) persona() string {
+	if c.PersonaFunc != nil {
+		if p := strings.TrimSpace(c.PersonaFunc()); p != "" {
+			return p
+		}
+	}
+	if p := strings.TrimSpace(c.BotPersona); p != "" {
+		return p
+	}
+	return DefaultPromptConfig().BotPersona
 }
 
 // DefaultPromptConfig 返回默认配置。
@@ -123,7 +139,7 @@ NO the post is small talk unrelated to anything I follow
 
 CRITICAL: NEVER output anything other than that single line.`,
 		config.BotName,
-		config.BotPersona,
+		config.persona(),
 		strings.Join(config.Interests, "、"))
 
 	user = buildUserPrompt(msg)
@@ -165,7 +181,7 @@ Output exactly one line: the score, then a one-sentence reason.
 
 CRITICAL: NEVER output anything other than that single line.`,
 		config.BotName,
-		config.BotPersona,
+		config.persona(),
 		strings.Join(config.Interests, "、"))
 
 	user = buildUserPrompt(msg)
