@@ -54,13 +54,47 @@ type ModelPrice struct {
 }
 
 // ComputeCost 按单价将一次调用的 token 用量换算为金钱。
-// 公式：cost = (in*Pin + out*Pout + cacheRead*Pcache) / 1e6。
+//
+// 用量口径（全项目统一，所有 adapter 在解析时已归一化）：
+//   - usage.InputTokens 是**含缓存**的输入总量。OpenAI 兼容协议（含智谱 GLM、xAI）
+//     的 prompt_tokens 本身就包含 prompt_tokens_details.cached_tokens；Gemini 的
+//     promptTokenCount 同样包含缓存；Anthropic 原生 input_tokens 不含缓存，
+//     llm/anthropic 在解析时已折算为 nonCached + cacheRead + cacheWrite。
+//   - usage.InputTokenDetails.CacheReadTokens 是其中命中缓存的部分。
+//
+// 因此公式为（与智谱官方「未命中缓存的输入费用 + 缓存命中费用 + 输出费用」一致）：
+//
+//	cost = (in - cacheRead)*Pin + cacheRead*Pcache + out*Pout   （/1e6）
+//
+// 旧实现按 in*Pin + cacheRead*Pcache 计算，缓存命中部分既按全价算了一遍、又按缓存价
+// 再加一遍（双计）。GLM 这类缓存命中率 80%+ 的负载会因此多算一倍以上。
+//
+// 细节：
+//   - 未配置缓存单价（Pcache=0）时，缓存命中部分按输入全价计，即「不知道折扣就不打折」，
+//     与旧版对这类模型的结果一致（旧版缓存部分已含在 in 里按全价算、缓存项为 0）。
+//   - cacheRead > in 属于异常数据（调用方只填了缓存数），非缓存部分截断为 0，
+//     缓存部分仍按缓存价计，不产生负数。
+//   - Anthropic 的 cache write 仍包含在 (in - cacheRead) 中按输入全价计（官方为
+//     1.25x/2x，此处略低估）；本项目当前没有单独的缓存写单价字段。
+//
+// 返回值：input 为输入侧花费（非缓存 + 缓存命中），output 为输出花费，total = input + output。
 // 缺单价（Price=0）的维度不参与计费（返回 0），调用方据此判断「该模型未配置单价」。
 func ComputeCost(usage Usage, p ModelPrice) (input, output, total float64) {
-	input = float64(usage.InputTokens) * p.InputPer1M / 1e6
+	cacheRead := usage.InputTokenDetails.CacheReadTokens
+	if cacheRead < 0 {
+		cacheRead = 0
+	}
+	nonCached := usage.InputTokens - cacheRead
+	if nonCached < 0 {
+		nonCached = 0
+	}
+	cacheRate := p.CacheReadPer1M
+	if cacheRate <= 0 {
+		cacheRate = p.InputPer1M
+	}
+	input = (float64(nonCached)*p.InputPer1M + float64(cacheRead)*cacheRate) / 1e6
 	output = float64(usage.OutputTokens) * p.OutputPer1M / 1e6
-	cache := float64(usage.InputTokenDetails.CacheReadTokens) * p.CacheReadPer1M / 1e6
-	total = input + output + cache
+	total = input + output
 	return input, output, total
 }
 
