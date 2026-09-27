@@ -189,6 +189,20 @@ const (
 	KeyToolOutputSubdir = "tool_output.subdir"
 )
 
+// ToolGuard 键：单轮编排内的工具调用护栏（llm/tool_guard.go），每轮开始时读取、热生效。
+const (
+	// KeyToolGuardEnabled 是否启用工具调用护栏（默认 true）。
+	KeyToolGuardEnabled = "tool_guard.enabled"
+	// KeyToolGuardMaxIdenticalCalls 同一工具、同一参数、同一结果连续调用的上限（默认 3），超出的调用不执行。
+	KeyToolGuardMaxIdenticalCalls = "tool_guard.max_identical_calls"
+	// KeyToolGuardMaxConsecutiveFailures 单个工具连续失败多少次后本轮禁用（默认 5）。
+	KeyToolGuardMaxConsecutiveFailures = "tool_guard.max_consecutive_failures"
+	// KeyToolGuardPerToolMaxFailures 按工具覆盖连续失败上限（JSON 对象，如 {"exec":8}；exec/sandbox_exec/run_code 默认 8）。
+	KeyToolGuardPerToolMaxFailures = "tool_guard.per_tool_max_failures"
+	// KeyToolGuardStreakAdvisory 同一工具连续调用多少次后附加「合并成脚本或停下汇报」提示（默认 8，-1 关闭）。
+	KeyToolGuardStreakAdvisory = "tool_guard.streak_advisory"
+)
+
 // LLM 客户端可靠性键：Provider 底层 HTTP 客户端超时、重试次数与指数退避参数。
 // 这些参数原硬编码在 agent/bot/llm_factory.go（const llmClientTimeout /
 // llmRetryMaxRetries），现集中到配置模块，用户可在前端「系统配置」页修改并持久化。

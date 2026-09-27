@@ -193,6 +193,14 @@ func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc
 	// 独立的 context，不依赖 FX OnStart 的短生命周期 context
 	srvCtx, srvCancel := context.WithCancel(context.Background())
 
+	// 单轮工具调用护栏（llm/tool_guard.go）：进程级热加载配置源，每轮编排开始时读取。
+	if p.Store != nil {
+		store, logger := p.Store, p.Logger
+		llm.SetToolGuardSource(func() llm.ToolGuardConfig {
+			return config.NewBuilder(store, logger).GetToolGuardConfig()
+		})
+	}
+
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			// 启动所有定义中 status=running 的 Bot

@@ -1168,6 +1168,38 @@ func (b *Builder) GetToolOutputConfig() ToolOutputConfig {
 	}
 }
 
+// --- ToolGuard 配置（单轮工具调用护栏）---
+
+// GetToolGuardConfig 读取工具调用护栏配置（零值字段由 llm 侧回退默认）。
+func (b *Builder) GetToolGuardConfig() llm.ToolGuardConfig {
+	c := llm.ToolGuardConfig{
+		Disabled:               !b.store.GetBool(KeyToolGuardEnabled, true),
+		MaxIdenticalCalls:      b.store.GetInt(KeyToolGuardMaxIdenticalCalls, 0),
+		MaxConsecutiveFailures: b.store.GetInt(KeyToolGuardMaxConsecutiveFailures, 0),
+		StreakAdvisory:         b.store.GetInt(KeyToolGuardStreakAdvisory, 0),
+	}
+	if raw := strings.TrimSpace(b.store.GetString(KeyToolGuardPerToolMaxFailures, "")); raw != "" {
+		var m map[string]int
+		if err := json.Unmarshal([]byte(raw), &m); err == nil {
+			c.PerToolMaxFailures = m
+		} else if b.logger != nil {
+			b.logger.Warnw("config: invalid tool_guard.per_tool_max_failures, ignored", "err", err)
+		}
+	}
+	return c
+}
+
+// ToolGuardMetaSpecs 返回工具调用护栏配置项的元数据。
+func ToolGuardMetaSpecs() []MetaSpec {
+	return []MetaSpec{
+		{Key: KeyToolGuardEnabled, Category: "ToolGuard", Description: "是否启用单轮工具调用护栏（默认 true）：拦截同参同结果的重复调用、连续失败的工具，并对长串同工具调用给出合并提示。"},
+		{Key: KeyToolGuardMaxIdenticalCalls, Category: "ToolGuard", Description: "同一工具以相同参数连续调用且结果相同的上限（默认 3），超出的调用不执行并提示模型换方法或询问用户。"},
+		{Key: KeyToolGuardMaxConsecutiveFailures, Category: "ToolGuard", Description: "单个工具在一轮内连续失败多少次后本轮禁用（默认 5；失败 = 报错或 exitCode 非 0）。"},
+		{Key: KeyToolGuardPerToolMaxFailures, Category: "ToolGuard", Description: `按工具覆盖连续失败上限，JSON 对象，如 {"browser__fill":3}；exec/sandbox_exec/run_code 默认 8。`},
+		{Key: KeyToolGuardStreakAdvisory, Category: "ToolGuard", Description: "同一工具连续调用多少次后附加「合并成一个脚本或停下汇报」提示（默认 8，-1 关闭）。"},
+	}
+}
+
 // ToolOutputMetaSpecs 返回工具输出配置项的元数据。
 func ToolOutputMetaSpecs() []MetaSpec {
 	return []MetaSpec{
@@ -1715,6 +1747,7 @@ func AllMetaSpecs() []MetaSpec {
 	specs = append(specs, CompactionMetaSpecs()...)
 	specs = append(specs, NotifyMetaSpecs()...)
 	specs = append(specs, InternalLLMMetaSpecs()...)
+	specs = append(specs, ToolGuardMetaSpecs()...)
 	return specs
 }
 
