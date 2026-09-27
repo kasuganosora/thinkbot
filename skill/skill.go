@@ -12,7 +12,7 @@
 //   - 与 prompt.Registry 集成：Skill 正文作为 Section 注册，自动组装进 system prompt
 //   - 与 config.Store 集成：启用状态持久化到数据库
 //   - 技能分级（light/heavy）：front matter 声明 delegation: preferred，或未声明时
-//     正文超过 3000 字节判为重型；重型技能在 use_skill / skill_search 返回中标注，
+//     正文超过 SkillHeavyContentBytes（12000）字节判为重型；重型技能在 use_skill / skill_search 返回中标注，
 //     并建议经 spawn 子代理委托执行（见 Skill.IsHeavy）
 //   - 卸载：use_skill 支持 "unload:<skill>" 子命令，任务完成后移除技能正文、
 //     保持上下文干净，之后可再次 use_skill 重新加载（见 SkillManager.UnloadSkill）
@@ -38,9 +38,11 @@ const (
 	SkillLevelHeavy = "heavy"
 
 	// SkillHeavyContentBytes 是体积自动分级阈值（字节，按 UTF-8 字节计）：
-	// 未显式声明 delegation 时，Content 超过该值（> 3000）视为重型技能，
-	// 恰好等于阈值仍为轻型。
-	SkillHeavyContentBytes = 3000
+	// 未显式声明 delegation 时，Content 超过该值视为重型技能，恰好等于阈值仍为轻型。
+	// 原为 3000（约 1K token）：50 个内置技能里 31 个被判重型，连一次性查询类技能
+	// 也被提示委托子代理。12000 字节约 3–4K token，只有真正的大说明书才算重型
+	// （2026-09-28：内置 7/50，bot 自装 2/12）。
+	SkillHeavyContentBytes = 12000
 )
 
 // ============================================================================
