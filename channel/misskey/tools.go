@@ -529,9 +529,8 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 			Name: "misskey_react_to_note",
 			Description: "Add an emoji reaction to a note on Misskey. " +
 				"Requires the noteId and a reaction (for example :heart:). " +
-				"NOTE: Misskey forbids reacting to a Renote (a pure re-post). " +
-				"If the target is a Renote the tool skips and returns reason=cannot_react_to_renote; " +
-				"react to the original note (renoteId) instead.",
+				"If noteId is a pure Renote (a re-post without its own text), Misskey does not allow reactions on it, " +
+				"so the reaction is added to the original note it re-posts; the result then carries renoteOf with the original id.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -556,41 +555,73 @@ func (c *MisskeyChannel) reactToNoteTool() agenttools.ToolDef {
 				if noteID == "" || reaction == "" {
 					return nil, fmt.Errorf("misskey_react_to_note: noteId and reaction are required")
 				}
-				// Misskey 不允许对 Renote（转贴）加反应，服务端会返回 400 CANNOT_REACT_TO_RENOTE。
-				// 加反应前先拉取帖子，若是 Renote 则直接友好跳过，避免无谓的 400 错误。
-				if note, gerr := c.api.getNote(ctx, noteID); gerr == nil && note != nil && note.RenoteID != "" {
-					return map[string]any{
-						"success": false,
-						"skipped": true,
-						"reason":  "cannot_react_to_renote",
-						"message": "目标帖子是 Renote（转贴），Misskey 不允许对其加反应，已跳过。如需表达态度，请对原帖（renoteId）操作。",
-					}, nil
+				// Misskey 不允许对纯转贴（pure renote）加反应（400 CANNOT_REACT_TO_RENOTE）。
+				// 纯转贴展示的就是原帖内容，模型想表态的对象是原帖：自动解析到原帖再加反应
+				// （2026-09-27：旧实现一律跳过，10 次全被跳过；且误把带文字的引用转贴也当成
+				// 转贴跳过——引用转贴本身可以加反应）。
+				requested := noteID
+				resolved, rerr := c.resolveReactionTarget(ctx, noteID)
+				if rerr != nil {
+					return nil, rerr
 				}
+				noteID = resolved
 				if err := c.api.createReaction(ctx, noteID, reaction); err != nil {
 					// 幂等语义：帖子已被本 bot 反应过（Misskey 400 ALREADY_REACTED）。
 					// 视为「目标已达成」，返回成功而非报错，避免编排层重复重试/误判失败。
 					if errors.Is(err, ErrAlreadyReacted) {
-						return map[string]any{
+						out := map[string]any{
 							"success":         true,
 							"already_reacted": true,
 							"noteId":          noteID,
 							"reaction":        reaction,
 							"message":         "已经对该帖子反应过了，跳过重复添加。",
-						}, nil
+						}
+						addRenoteResolution(out, requested, noteID)
+						return out, nil
 					}
 					return nil, fmt.Errorf("react failed: %w", err)
 				}
-				return map[string]any{
+				out := map[string]any{
 					"success":  true,
 					"noteId":   noteID,
 					"reaction": reaction,
-					"message":  fmt.Sprintf("Added reaction %s to note %s", noteID, reaction),
-				}, nil
+					"message":  fmt.Sprintf("Added reaction %s to note %s", reaction, noteID),
+				}
+				addRenoteResolution(out, requested, noteID)
+				return out, nil
 			}),
 			RequiresUserIntent: true,
 		},
 		Category: "misskey",
 	}
+}
+
+// maxRenoteHops bounds renote → original resolution.
+const maxRenoteHops = 3
+
+// resolveReactionTarget maps a pure renote to the note it re-posts (Misskey
+// rejects reactions on pure renotes). Other notes, and lookup failures, keep
+// the requested id so the API call reports the real error.
+func (c *MisskeyChannel) resolveReactionTarget(ctx context.Context, noteID string) (string, error) {
+	cur := noteID
+	for hop := 0; hop < maxRenoteHops; hop++ {
+		note, err := c.api.getNote(ctx, cur)
+		if err != nil || note == nil || !note.IsPureRenote() {
+			return cur, nil
+		}
+		cur = note.RenoteID
+	}
+	return "", fmt.Errorf("misskey_react_to_note: note %s is a chain of renotes deeper than %d; react to the original note directly", noteID, maxRenoteHops)
+}
+
+// addRenoteResolution records that the reaction went to the original note.
+func addRenoteResolution(out map[string]any, requested, target string) {
+	if requested == target {
+		return
+	}
+	out["requestedNoteId"] = requested
+	out["renoteOf"] = target
+	out["message"] = fmt.Sprintf("%v（%s 是纯转贴，Misskey 不允许对其加反应，已改为对原帖 %s 操作）", out["message"], requested, target)
 }
 
 // unreactToNoteTool 返回 misskey_unreact_to_note 工具定义。
@@ -620,6 +651,10 @@ func (c *MisskeyChannel) unreactToNoteTool() agenttools.ToolDef {
 				noteID, _ := args["noteId"].(string)
 				if noteID == "" {
 					return nil, fmt.Errorf("misskey_unreact_to_note: noteId is required")
+				}
+				// 与加反应对称：纯转贴上不可能有反应，撤销目标同样是原帖。
+				if resolved, rerr := c.resolveReactionTarget(ctx, noteID); rerr == nil {
+					noteID = resolved
 				}
 				if err := c.api.deleteReaction(ctx, noteID); err != nil {
 					// 幂等语义：本就没有反应可撤（Misskey 400 NOT_REACTED）。

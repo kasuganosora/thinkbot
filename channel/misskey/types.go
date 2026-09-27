@@ -1,5 +1,7 @@
 package misskey
 
+import "strings"
+
 import "encoding/json"
 
 // ============================================================================
@@ -50,11 +52,19 @@ type Note struct {
 	Reply             *Note    `json:"reply,omitempty"`
 	Renote            *Note    `json:"renote,omitempty"`
 	Files             []File   `json:"files,omitempty"`
+	Poll              any      `json:"poll,omitempty"`
 	Mentions          []string `json:"mentions,omitempty"`
 	URI               string   `json:"uri,omitempty"`
 	URL               string   `json:"url,omitempty"`
 	LocalOnly         bool     `json:"localOnly,omitempty"`
 	NoExtractMentions bool     `json:"noExtractMentions,omitempty"`
+}
+
+// IsPureRenote reports whether the note is a plain re-post (renote without
+// own text, CW, files or poll) — Misskey's isPureRenote, the only kind of
+// note that cannot receive reactions. A quote renote (renote with text) can.
+func (n *Note) IsPureRenote() bool {
+	return n != nil && n.RenoteID != "" && strings.TrimSpace(n.Text) == "" && n.CW == "" && len(n.Files) == 0 && n.Poll == nil
 }
 
 // File 表示 Misskey 帖子附带的文件。
