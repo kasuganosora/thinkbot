@@ -53,7 +53,8 @@ Every bot gets its own isolated workspace, and its files survive across sessions
 - **ALWAYS prefer replace_in_file for small edits.** Do not rewrite an entire file to change a few lines.
 - Page through large files with offset/limit instead of reading everything at once.
 - If you are unsure of a path, run list_dir first. NEVER guess file paths.
-- Paths are relative to the workspace root. NEVER use ".." to traverse outside it.
+- Paths are relative to the workspace root (/data), or absolute under /data. NEVER use ".." to traverse outside it.
+- File tools cannot reach paths outside /data (such as /tmp): for scratch files use /data/tmp/..., and use the same path in exec commands.
 - You can call several independent tools in parallel within a single reply.
 
 ### Command execution
@@ -221,6 +222,9 @@ func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			stripped := false
 			command, stripped = stripOutputLimitingPipe(command)
 			workdir, _ := m["workdir"].(string)
+			if err := checkWorkspacePath("workdir", workdir); err != nil {
+				return nil, err
+			}
 
 			req := ExecRequest{
 				Command: command,
@@ -370,6 +374,9 @@ func buildRunCodeTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 
 			req := ExecRequest{Command: interp + " " + fileName}
 			if wd, _ := m["workdir"].(string); wd != "" {
+				if err := checkWorkspacePath("workdir", wd); err != nil {
+					return nil, err
+				}
 				req.WorkDir = wd
 			}
 			if timeoutSec, ok := toInt(m["timeout"]); ok && timeoutSec > 0 {
@@ -467,6 +474,9 @@ func buildReadFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if path == "" {
 				return nil, fmt.Errorf("path is required")
 			}
+			if err := checkWorkspacePath("path", path); err != nil {
+				return nil, err
+			}
 
 			ws, err := mgr.GetOrCreate(botID)
 			if err != nil {
@@ -555,6 +565,9 @@ func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if path == "" {
 				return nil, fmt.Errorf("path is required")
 			}
+			if err := checkWorkspacePath("path", path); err != nil {
+				return nil, err
+			}
 			content, _ := m["content"].(string)
 
 			data := []byte(content)
@@ -627,11 +640,20 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if path == "" {
 				return nil, fmt.Errorf("path is required")
 			}
-			oldStr, _ := m["old_str"].(string)
-			if oldStr == "" {
-				return nil, fmt.Errorf("old_str is required")
+			if err := checkWorkspacePath("path", path); err != nil {
+				return nil, err
 			}
+			oldStr, _ := m["old_str"].(string)
 			newStr, _ := m["new_str"].(string)
+			if oldStr == "" {
+				if newStr == "" {
+					return nil, fmt.Errorf("replace_in_file got an empty old_str and an empty new_str, which would change nothing. " +
+						"old_str must be the exact text currently in the file that you want to change (read the file first); " +
+						"to create or completely rewrite a file use write_file")
+				}
+				return nil, fmt.Errorf("old_str is required: the exact text currently in the file to replace (read the file first). " +
+					"To insert text, include the neighbouring existing line in old_str and new_str; to create or rewrite a file use write_file")
+			}
 
 			// normalize line endings (CRLF → LF) for cross-platform compatibility
 			oldStr = strings.ReplaceAll(oldStr, "\r\n", "\n")
@@ -725,6 +747,9 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if path == "" {
 				return nil, fmt.Errorf("path is required")
 			}
+			if err := checkWorkspacePath("path", path); err != nil {
+				return nil, err
+			}
 
 			ws, err := mgr.GetOrCreate(botID)
 			if err != nil {
@@ -788,6 +813,12 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if dst == "" {
 				return nil, fmt.Errorf("dst is required")
 			}
+			if err := checkWorkspacePath("src", src); err != nil {
+				return nil, err
+			}
+			if err := checkWorkspacePath("dst", dst); err != nil {
+				return nil, err
+			}
 
 			ws, err := mgr.GetOrCreate(botID)
 			if err != nil {
@@ -842,6 +873,9 @@ func buildListDirTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				return nil, fmt.Errorf("invalid input: expected object")
 			}
 			path, _ := m["path"].(string)
+			if err := checkWorkspacePath("path", path); err != nil {
+				return nil, err
+			}
 
 			ws, err := mgr.GetOrCreate(botID)
 			if err != nil {
@@ -917,6 +951,9 @@ func buildSearchContentTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			searchPath, _ := m["path"].(string)
 			if searchPath == "" {
 				searchPath = "."
+			}
+			if err := checkWorkspacePath("path", searchPath); err != nil {
+				return nil, err
 			}
 
 			caseSensitive := false
