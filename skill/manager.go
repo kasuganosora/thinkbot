@@ -60,6 +60,11 @@ type SkillManager struct {
 	mu     sync.RWMutex
 	skills map[string]*Skill
 
+	// loaded 记录经 UseSkill 显式加载的技能（对话级使用状态，非持久化）。
+	// 与 Enabled（管理员级生命周期开关）正交：unload 只影响本集合与 prompt 注入，
+	// 不改变 skills 中的注册信息，也不写 Store。
+	loaded map[string]struct{}
+
 	registry RegistryAdapter // prompt Section 注入适配器（可为 nil）
 	store    StoreAdapter    // 配置持久化适配器（可为 nil）
 	logger   Logger
@@ -74,6 +79,7 @@ func NewSkillManager(registry RegistryAdapter, store StoreAdapter, logger Logger
 	}
 	return &SkillManager{
 		skills:   make(map[string]*Skill),
+		loaded:   make(map[string]struct{}),
 		registry: registry,
 		store:    store,
 		logger:   logger,
@@ -139,6 +145,7 @@ func (m *SkillManager) Unregister(name string) {
 		m.unregisterPromptLocked(name)
 	}
 	delete(m.skills, name)
+	delete(m.loaded, name) // 技能已不存在，加载状态一并失效
 	m.refreshTriggerLocked()
 	m.logger.Infow("skill unregistered", "name", name)
 }
@@ -209,6 +216,7 @@ func (m *SkillManager) Disable(name string) error {
 	if skill.Content != "" {
 		m.unregisterPromptLocked(name)
 	}
+	delete(m.loaded, name) // 禁用即不可用，加载状态一并失效
 
 	m.persistEnabledLocked(name, false)
 	m.refreshTriggerLocked()
@@ -232,6 +240,7 @@ func (m *SkillManager) Toggle(name string) error {
 		if skill.Content != "" {
 			m.unregisterPromptLocked(name)
 		}
+		delete(m.loaded, name) // 禁用即不可用，加载状态一并失效
 		m.persistEnabledLocked(name, false)
 		m.logger.Infow("skill disabled", "name", name)
 	} else {
@@ -320,6 +329,62 @@ func (m *SkillManager) EnabledNames() []string {
 }
 
 // ============================================================================
+// 已加载 / 卸载（use_skill 的对话级使用状态）
+//
+// 与 Enabled 的区别：Enabled 是管理员级生命周期开关（持久化到 Store），
+// loaded 只表示「当前经 use_skill 显式加载、说明书仍在上下文中」。
+// ============================================================================
+
+// IsLoaded 返回指定技能当前是否处于已加载状态（经 UseSkill 加载且未被卸载）。
+func (m *SkillManager) IsLoaded(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.loaded[name]
+	return ok
+}
+
+// LoadedNames 返回当前已加载技能的名称列表（按名称排序）。
+func (m *SkillManager) LoadedNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	names := make([]string, 0, len(m.loaded))
+	for name := range m.loaded {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// UnloadSkill 卸载已加载的技能：
+//   - 若技能未处于已加载状态，返回 ok=false（不算错误，调用方可据此给出友好提示）
+//   - 否则从 prompt Registry 移除其 Content Section、从 loaded 集合删除，并返回标记消息
+//
+// 返回的 note 是给模型的系统级标记（形如 "[skill unloaded: xxx] ..."），
+// 依据调研结论以 tool_result 形式进入本轮上下文并持久化，无需框架改动。
+// 卸载不改变技能的 Enabled 状态（管理员开关与加载状态正交）。
+func (m *SkillManager) UnloadSkill(name string) (note string, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, loaded := m.loaded[name]; !loaded {
+		// 未加载：非错误场景，由调用方返回友好提示（如 not currently loaded）
+		return "", false
+	}
+
+	// 从 prompt Registry 移除 Content Section（下一轮 system prompt 即不含该内容）
+	m.unregisterPromptLocked(name)
+	delete(m.loaded, name)
+	m.logger.Infow("skill unloaded via use_skill tool", "name", name)
+	return UnloadedNote(name), true
+}
+
+// UnloadedNote 构造卸载完成的标记消息（进入本轮 tool_result，提示模型该技能说明书已失效）。
+func UnloadedNote(name string) string {
+	return fmt.Sprintf("[skill unloaded: %s] 该技能说明书已失效，后续如需使用需重新 use_skill 加载。", name)
+}
+
+// ============================================================================
 // 关键词粗检索（L1 skill_search）
 // ============================================================================
 
@@ -388,6 +453,9 @@ func (m *SkillManager) SearchSkills(query string, limit int) []SearchHit {
 			Name:        s.Name,
 			Description: truncateRunes(s.Description, maxDescriptionRunes),
 			Score:       score,
+			// 分级标注（light/heavy）：让 LLM 在粗检索阶段即可识别重型技能，
+			// 把执行委托给 spawn 子代理，避免大说明书挤占主上下文。
+			Level: s.Level(),
 		})
 	}
 
@@ -513,7 +581,9 @@ func (m *SkillManager) buildTriggerPromptLocked() string {
 	buf.WriteString("3. If a matching skill exists, call `use_skill` with that skill's name as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
 	buf.WriteString("4. After loading, follow the skill's instructions exactly. They override your general defaults for that task.\n")
 	buf.WriteString("5. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
-	buf.WriteString("6. NEVER mention a skill to the user without actually loading it.\n\n")
+	buf.WriteString("6. When the task that needed a Skill is finished and you no longer need it, call `use_skill` with \"unload:<skill>\" to release it and keep the context clean; load it again with `use_skill` if needed later.\n")
+	buf.WriteString("7. DELEGATION: skills are graded `light` / `heavy` (see skill_search hits). A heavy Skill has a large instruction body; after loading it, prefer delegating the actual work to a subagent with the existing `spawn` tool and keep only the conclusions in your own context.\n")
+	buf.WriteString("8. NEVER mention a skill to the user without actually loading it.\n\n")
 	buf.WriteString("These instructions are in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.\n")
 	return buf.String()
 }
@@ -544,7 +614,11 @@ func (m *SkillManager) buildSkillListLocked() string {
 	for _, s := range enabled {
 		buf.WriteString("- ")
 		buf.WriteString(s.Name)
-		buf.WriteString(" — ")
+		// 分级标注：heavy 表示重型技能（体积超阈值或声明 delegation: preferred），
+		// 建议加载后经 spawn 子代理委托执行；light 为普通技能。
+		buf.WriteString(" [")
+		buf.WriteString(s.Level())
+		buf.WriteString("] — ")
 		// 单条描述超长时截断（rune 数，注意中文），清单仍返回全部条目
 		buf.WriteString(truncateRunes(s.Description, maxDescriptionRunes))
 		buf.WriteString("\n")

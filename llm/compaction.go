@@ -166,6 +166,7 @@ const SummaryTemplate = `Output exactly the Markdown structure shown inside <tem
 
 ## Critical Context
 - [important technical facts, errors, open questions, or "(none)"]
+- Skills & deferred tools state: [which skills/tools were loaded or unloaded (e.g. "skill pdf unloaded, needs reload before reuse"), including state changes made by use_skill load/unload and deferred-tool eviction, or "(none)"]
 
 ## Relevant Files
 - [file or directory path: why it matters, or "(none)"]
@@ -175,6 +176,7 @@ Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, commands, error strings, and identifiers when known.
+- Record the CURRENT skill load/unload state (latest state wins when a skill was loaded then unloaded), so the model knows which skills need reloading after compaction.
 - Do not mention the summary process or that context was compacted.`
 
 // Compactor 执行上下文压缩。
