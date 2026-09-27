@@ -422,15 +422,19 @@ func (d *ToolDeferral) ExecTool() Tool {
 }
 
 func (d *ToolDeferral) searchTool() Tool {
+	desc := "Search for additional tools by keyword. Use this when you need a capability " +
+		"that is not in your current tool list — for example, tools that were lazily loaded and " +
+		"only expose their name and a short description until discovered. Returns up to 8 matching " +
+		"tool names and descriptions; once found, a tool becomes directly callable with its full " +
+		"parameters and input schema. Call ONCE with a specific keyword, then use the returned tools — " +
+		"do NOT repeatedly tool_search or spray many unrelated tools in the same turn. " +
+		"query must be a non-empty keyword (empty query returns nothing)."
+	if d.hasSkillSearch() {
+		desc += toolSearchSkillNote
+	}
 	return Tool{
-		Name: "tool_search",
-		Description: "Search for additional tools by keyword. Use this when you need a capability " +
-			"that is not in your current tool list — for example, tools that were lazily loaded and " +
-			"only expose their name and a short description until discovered. Returns up to 8 matching " +
-			"tool names and descriptions; once found, a tool becomes directly callable with its full " +
-			"parameters and input schema. Call ONCE with a specific keyword, then use the returned tools — " +
-			"do NOT repeatedly tool_search or spray many unrelated tools in the same turn. " +
-			"query must be a non-empty keyword (empty query returns nothing).",
+		Name:        "tool_search",
+		Description: desc,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -450,6 +454,15 @@ func (d *ToolDeferral) searchTool() Tool {
 			}
 			if strings.TrimSpace(query) == "" {
 				return "tool_search requires a non-empty query keyword. Name the capability you need (e.g. browser, misskey, calendar); do not call tool_search with an empty query.", nil
+			}
+			// Skill lookups do not belong here: redirect to skill_search
+			// (only when it is callable) instead of reporting "no tool".
+			if isSkillQuery(query) && d.hasSkillSearch() {
+				probeHits := d.probe(stripSkillTerms(query))
+				if d.logger != nil {
+					d.logger.Debugw("defer_loading: tool_search redirected to skill_search", "query", query)
+				}
+				return skillRedirectReply(query, probeHits), nil
 			}
 			hits := d.Search(query)
 			if len(hits) > 0 {
@@ -494,6 +507,15 @@ func (d *ToolDeferral) searchTool() Tool {
 			}
 			if d.logger != nil {
 				d.logger.Debugw("defer_loading: tool_search", "query", query, "loaded", []string{})
+			}
+			// No tool matched, but the query names a Skill (asked through a
+			// tool's DiscoveryProbe): point at it instead of "no such
+			// capability". Only here, so tool hits are not diluted.
+			if probeHits := d.probe(query); len(probeHits) > 0 {
+				var b strings.Builder
+				fmt.Fprintf(&b, "No tool matches %q.", query)
+				writeProbeHits(&b, probeHits)
+				return b.String(), nil
 			}
 			// 真正的「无匹配」：列出本轮「实际」可直接调用的工具名，而不是写死
 			// 「exec/read_file 始终可用」——那句话在工具列表里确实没有 exec 时
