@@ -2,6 +2,7 @@ package skill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -46,14 +47,27 @@ type UseSkillInput struct {
 // 幂等可重入：已加载（含曾卸载后重新调用）时再次调用会重新返回全文，
 // 不会因「曾加载/曾卸载」而拒绝——重载语义即重新提供说明书。
 func (m *SkillManager) UseSkill(name string) (*Skill, error) {
+	skill, err := m.useSkill(name)
+	if err != nil {
+		var nf *SkillNotFoundError
+		if errors.As(err, &nf) {
+			// 不再倾倒全量清单（50+ 个名字，模型仍会猜错）：给出近似候选 + 明确的
+			// 「先 skill_search 再 use_skill」指引，帮助 LLM 自纠正而不是继续猜名字。
+			nf.Suggestions = m.SuggestSkills(name, 5)
+		}
+		return nil, err
+	}
+	return skill, nil
+}
+
+// useSkill 是 UseSkill 的加锁主体（近似候选在锁外计算）。
+func (m *SkillManager) useSkill(name string) (*Skill, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	skill, ok := m.skills[name]
 	if !ok {
-		// 列出可用技能帮助 LLM 自纠正
-		available := m.availableNamesLocked()
-		return nil, fmt.Errorf("skill %q not found. Available: %s", name, strings.Join(available, ", "))
+		return nil, &SkillNotFoundError{Name: name}
 	}
 	if !skill.Enabled {
 		return nil, fmt.Errorf("skill %q is disabled", name)
@@ -74,6 +88,29 @@ func (m *SkillManager) UseSkill(name string) (*Skill, error) {
 	)
 	return skill, nil
 }
+
+// SkillNotFoundError 是 use_skill 传入未知技能名时的错误。
+// Error() 面向模型：列出近似候选，并要求先 skill_search 拿到准确名字再加载。
+type SkillNotFoundError struct {
+	Name        string
+	Suggestions []string
+}
+
+func (e *SkillNotFoundError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "skill %q not found. ", e.Name)
+	if len(e.Suggestions) > 0 {
+		fmt.Fprintf(&b, "Closest existing skills: %s. ", strings.Join(e.Suggestions, ", "))
+		b.WriteString("If one of them fits, call use_skill with that exact name. ")
+	} else {
+		b.WriteString("No skill with a similar name exists. ")
+	}
+	b.WriteString("Do not guess skill names: call skill_search with keywords from the task (site, product, file format or domain; Chinese keywords work) and only pass use_skill a name it returned. If skill_search finds nothing, continue without a skill.")
+	return b.String()
+}
+
+// NotFound 标记为「未找到」类错误（与 errNotFound 一致）。
+func (e *SkillNotFoundError) NotFound() bool { return true }
 
 // unloadCommandPrefix 是 use_skill 卸载子命令的前缀（如 "unload:pdf"）。
 const unloadCommandPrefix = "unload:"
@@ -99,19 +136,19 @@ func (m *SkillManager) BuildUseSkillTool() llm.Tool {
 Use this tool when the request involves a specific domain, system, or data format.
 
 Rules:
-- DISCOVERY: The full skill catalog is NOT injected into your context. Prefer skill_search with a few keywords to discover matching skills cheaply; use use_skill with command "list" only when you truly need the full catalog, then load the matching one.
-- CRITICAL: Call this tool IMMEDIATELY as your first action when a relevant Skill exists. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded.
+- DISCOVERY FIRST: The full skill catalog is NOT injected into your context, so you do not know the exact skill names. Before loading a skill you have not loaded in this conversation, call skill_search with a few keywords to get its exact name; use use_skill with command "list" only when you truly need the full catalog. NEVER guess a name (e.g. "ctrip" when the skill is "ctrip-wendao") and NEVER use tool_search to look for skills — tool_search only finds tools.
+- CRITICAL: As soon as skill_search shows a relevant Skill, load it with this tool before attempting the task. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded.
 - After loading, you MUST follow the Skill's instructions. They override your general defaults for that task.
 - The result may include `+"`baseDir`"+`, `+"`scripts`"+` and `+"`references`"+`. Prefer the Skill's own scripts over improvising an equivalent yourself.
 - DELEGATION: Hits and results are tagged light / heavy. A heavy Skill has a large instruction body (or declares delegation). When a heavy Skill is loaded, the result carries a note: prefer delegating the actual work to a subagent with the existing spawn tool and keep only the conclusions in your context. Unload the Skill when done.
 - NEVER mention or describe a Skill without actually loading it.
 - Load each Skill at most once per task. Do NOT reload a Skill that is already active.
 - UNLOAD: When the task that needed a Skill is finished and you no longer need it, call use_skill with command "unload:<skill>" (e.g. "unload:pdf") to release it. The returned note means the Skill's instructions no longer apply; if you need it again later, simply load it again with use_skill. Unloading keeps the context clean when working across many different tasks.
-- If the call fails because the Skill does not exist, the error lists the available names. Pick the correct one, or continue without a Skill — do NOT invent skill names.
+- If the call fails because the Skill does not exist, the error lists the closest existing names. Pick one of those, or call skill_search, or continue without a Skill — do NOT invent skill names.
 
 <example>
 user: 帮我把这个 PDF 里的表格提取出来
-assistant: [calls use_skill with command "list" if unsure, then calls use_skill with command "pdf", then follows the loaded instructions]
+assistant: [calls skill_search with "pdf", sees the hit "pdf", calls use_skill with command "pdf", then follows the loaded instructions]
 
 user: 现在再帮我处理这个 Excel
 assistant: [calls use_skill with command "unload:pdf" since the PDF task is done, then calls use_skill with command "xlsx"]
@@ -182,15 +219,6 @@ assistant: [calls skill_search with "trip planner", sees the hit is tagged heavy
 		})
 }
 
-// availableNamesLocked 返回所有已注册技能的名称（必须持有 mu.RLock 或 mu.Lock）。
-func (m *SkillManager) availableNamesLocked() []string {
-	names := make([]string, 0, len(m.skills))
-	for name := range m.skills {
-		names = append(names, name)
-	}
-	return names
-}
-
 // parseUnloadCommand 解析 use_skill 的卸载子命令。
 // command 形如 "unload:pdf" 时返回 ("pdf", true)；其余（含纯 "unload"、空技能名）返回 ("", false)，
 // 由调用方按普通技能名处理（自然报 not found，帮助 LLM 自纠正）。
@@ -244,15 +272,16 @@ type SkillSearchInput struct {
 // 让 LLM 拿到确定性反馈自行纠正（补关键词重试），错误应留给真正的失败场景。
 func (m *SkillManager) BuildSkillSearchTool() llm.Tool {
 	mgr := m
-	return llm.NewTool("skill_search",
+	t := llm.NewTool("skill_search",
 		`Cheaply search skills by keywords. This is the FIRST step of skill discovery: it returns a short list of hits (skill name + truncated description), without loading any skill content.
 
 Input: a few keywords separated by spaces (all keywords must match). Use the language of the task (Chinese keywords work).
 
 Workflow:
-- Call this tool first to find candidate skills for a specialized domain (a file format, a framework, a workflow, a known tool).
-- Then call use_skill with the chosen skill name to load it.
+- Call this tool first to find candidate skills for a specialized domain (a file format, a framework, a website or service, a workflow, a known tool).
+- Then call use_skill with the chosen skill name, exactly as returned here, to load it.
 - Call use_skill with command "list" ONLY when you need the full catalog of all available skills (larger) — prefer skill_search for keyword discovery.
+- This is the ONLY way to find skills: tool_search finds tools, never skills. Do not use tool_search for skills and do not mix the two for the same need.
 
 Rules:
 - This tool never loads skill content. It only returns metadata hits.
@@ -260,15 +289,33 @@ Rules:
 - If nothing matches, broaden or change the keywords and retry; if still nothing, proceed without a Skill.`,
 		func(ctx *llm.ToolExecContext, input SkillSearchInput) (any, error) {
 			hits := mgr.SearchSkills(input.Query, input.Limit)
+			if len(hits) == 0 {
+				// 严格 AND 无命中：给出宽松近似候选（任一关键词 / 名字相近），
+				// 避免模型据空结果断定技能不存在、转而用 exec 手读 SKILL.md。
+				return map[string]any{
+					"status":      "search",
+					"skills":      hits,
+					"suggestions": mgr.SuggestSkills(input.Query, 5),
+					"hint":        "No skill matched ALL keywords. suggestions lists skills matching some of them; if one fits, load it with use_skill. Otherwise retry with fewer or different keywords (one keyword often works best), and if still nothing, proceed without a skill.",
+				}, nil
+			}
 			return map[string]any{
 				"status": "search",
 				// 复用 SearchHit 列表（name/description/score/level，description 已截断）；
 				// level 为 light/heavy 分级标注，提示 LLM 重型技能宜委托 spawn 子代理执行
 				"skills": hits,
-				"hint":   "Call use_skill with the skill's name to load it. Hits tagged heavy are large: prefer delegating the work to a subagent via the spawn tool.",
+				"hint":   "Call use_skill with the skill's name exactly as shown to load it. Hits tagged heavy are large: prefer delegating the work to a subagent via the spawn tool.",
 			}, nil
 		})
+	// tool_search 的发现探针：模型误用 tool_search 找技能时，据此把它引回 skill_search。
+	t.DiscoveryProbe = func(query string) []string {
+		return mgr.SuggestSkills(query, maxProbeSuggestions)
+	}
+	return t
 }
+
+// maxProbeSuggestions 是 tool_search 探针最多返回的技能名数量。
+const maxProbeSuggestions = 5
 
 // ============================================================================
 // SkillToolProvider — 将 SkillManager 适配为 tools.ToolProvider

@@ -150,6 +150,13 @@ type Tool struct {
 
 	// Keywords are extra terms used by tool_search to match this tool. Optional.
 	Keywords []string `json:"-"`
+
+	// DiscoveryProbe optionally lets tool_search find capabilities that are
+	// not tools but are reached THROUGH this tool (e.g. skill_search returns
+	// the names of Skills matching a query). tool_search calls it with the
+	// model's query and, when it reports matches, points the model at this
+	// tool instead of answering "no tool matches". Nil means no probe.
+	DiscoveryProbe func(query string) []string `json:"-"`
 }
 
 // ToolCall represents a tool invocation requested by the model.

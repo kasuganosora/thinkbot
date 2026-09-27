@@ -576,9 +576,9 @@ func (m *SkillManager) buildTriggerPromptLocked() string {
 	buf.WriteString("A Skill is a package of specialized instructions for a specific domain, system or data format. Skills exist in this system, but the list is intentionally NOT shown here to save context.\n\n")
 	buf.WriteString("When a request involves a specialized domain (a file format, a framework, a workflow, a known tool, a repeated task pattern), discover and load a Skill first:\n")
 	// 发现两步走：skill_search 按关键词粗检索（便宜的第一步）；use_skill "list" 返回全部清单（较大）。
-	buf.WriteString("1. Call `skill_search` with a few keywords to cheaply find matching skills (name + short description per hit).\n")
+	buf.WriteString("1. Call `skill_search` with a few keywords to cheaply find matching skills (name + short description per hit). This is the only way to find skills: `tool_search` finds tools, never skills.\n")
 	buf.WriteString("2. Call `use_skill` with command \"list\" only when you need the full catalog of all available skills (larger).\n")
-	buf.WriteString("3. If a matching skill exists, call `use_skill` with that skill's name as your FIRST action. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
+	buf.WriteString("3. If a matching skill exists, call `use_skill` with that skill's exact name (as returned by skill_search) before doing anything else. Never guess a skill name you have not seen in a skill_search / list result. Do NOT attempt the task, guess at a workflow, or call other tools before the skill is loaded.\n")
 	buf.WriteString("4. After loading, follow the skill's instructions exactly. They override your general defaults for that task.\n")
 	buf.WriteString("5. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
 	buf.WriteString("6. When the task that needed a Skill is finished and you no longer need it, call `use_skill` with \"unload:<skill>\" to release it and keep the context clean; load it again with `use_skill` if needed later.\n")
