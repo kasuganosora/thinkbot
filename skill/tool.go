@@ -157,6 +157,7 @@ user: 帮我按这份大型行程生成规范做一份完整的行程规划报�
 assistant: [calls skill_search with "trip planner", sees the hit is tagged heavy, calls use_skill with that skill, then delegates the heavy reading-and-drafting work to a subagent via the spawn tool and returns only the conclusion]
 </example>`,
 		func(ctx *llm.ToolExecContext, input UseSkillInput) (any, error) {
+			mgr.refreshWorkspace(execContext(ctx))
 			// 自启发发现：list 不加载技能，仅返回完整清单
 			if input.Command == "list" {
 				return map[string]any{
@@ -288,6 +289,8 @@ Rules:
 - Each hit carries a level tag: light (normal) or heavy (large instruction body or delegation declared). For heavy hits, plan to delegate the work to a subagent via the existing spawn tool after loading, instead of reading everything in your own context.
 - If nothing matches, broaden or change the keywords and retry; if still nothing, proceed without a Skill.`,
 		func(ctx *llm.ToolExecContext, input SkillSearchInput) (any, error) {
+			// 先（节流地）同步 bot 自装在工作空间里的技能，保证刚装好的技能可被检索到。
+			mgr.refreshWorkspace(execContext(ctx))
 			hits := mgr.SearchSkills(input.Query, input.Limit)
 			if len(hits) == 0 {
 				// 严格 AND 无命中：给出宽松近似候选（任一关键词 / 名字相近），
@@ -314,6 +317,14 @@ Rules:
 	return t
 }
 
+// execContext 返回工具执行上下文里的 context（测试里可能为 nil）。
+func execContext(ctx *llm.ToolExecContext) context.Context {
+	if ctx == nil || ctx.Context == nil {
+		return context.Background()
+	}
+	return ctx.Context
+}
+
 // maxProbeSuggestions 是 tool_search 探针最多返回的技能名数量。
 const maxProbeSuggestions = 5
 
@@ -338,6 +349,10 @@ type SkillToolProvider struct {
 // Tools 实现 tools.ToolProvider 接口。
 // 主 Agent 与子 Agent 共用同一套技能工具（子 Agent 仅不能 spawn，其余有权使用的工具皆可访问）。
 func (p *SkillToolProvider) Tools(ctx context.Context, sctx *tools.ToolSessionContext) ([]llm.Tool, error) {
+	if !p.Manager.HasEnabledSkills() {
+		// 仅有工作空间自装技能的 bot：启动时的异步扫描可能还没完成，这里补一次（节流）。
+		p.Manager.refreshWorkspace(ctx)
+	}
 	if !p.Manager.HasEnabledSkills() {
 		return nil, nil
 	}
