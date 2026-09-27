@@ -1024,6 +1024,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 	defer workCancel()
+	// 逐步累计已完成步骤的用量：硬超时时编排返回 error 而不带结果，
+	// 靠它把超时回合已经花掉的 token 记进 stats，并给用户回一句（见 hardTimeoutResult）。
+	partial := &partialSteps{}
+	cfg.OnStep = partial.wrap(cfg.OnStep)
 	// WithStatsSkip: StatsRecordingProvider 会跳过 Orchestrate 内部的每次调用，
 	// 由下方 recordUsage() 统一记录合并后的总用量到 journal + stats
 	statsCtx := llm.WithStatsSkip(workCtx)
@@ -1050,29 +1054,37 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				logger.Warnw("llm stage: stream orchestrate hard-timeout (wall-clock cap exceeded)",
 					"message_id", env.Message.ID,
 					"hard_timeout", hardTimeout.String(),
+					"steps_done", partial.len(),
 					"err", err)
-				return env, &core.PipelineError{
-					Stage:   s.name,
-					Message: "LLM stream orchestrate exceeded hard timeout",
-					Cause:   err,
+				timeoutRes, notify := s.hardTimeoutResult(env, partial, hardTimeout, lurkMode, heartbeatMode)
+				if !notify {
+					recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, timeoutRes)
+					return env, &core.PipelineError{
+						Stage:   s.name,
+						Message: "LLM stream orchestrate exceeded hard timeout",
+						Cause:   err,
+					}
 				}
+				result, err = timeoutRes, nil
 			}
-		if isContentSafetyError(err) {
+		}
+		if err != nil && isContentSafetyError(err) {
 			// 内容安全审核被拒（BigModel 1301 等）：用户内容触发平台策略，
 			// 属业务边界而非系统故障，降级为 WARN 避免监控噪音。
 			logger.Warnw("llm stage: stream orchestrate failed (content safety)",
 				"message_id", env.Message.ID,
 				"err", err)
-		} else {
+		} else if err != nil {
 			logger.Errorw("llm stage: stream orchestrate failed",
 				"message_id", env.Message.ID,
 				"err", err)
 		}
-		return env, &core.PipelineError{
-			Stage:   s.name,
-			Message: "LLM stream orchestrate failed",
-			Cause:   err,
-		}
+		if err != nil {
+			return env, &core.PipelineError{
+				Stage:   s.name,
+				Message: "LLM stream orchestrate failed",
+				Cause:   err,
+			}
 		}
 	} else {
 		var err error
@@ -1094,29 +1106,37 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				logger.Warnw("llm stage: orchestrate hard-timeout (wall-clock cap exceeded)",
 					"message_id", env.Message.ID,
 					"hard_timeout", hardTimeout.String(),
+					"steps_done", partial.len(),
 					"err", err)
-				return env, &core.PipelineError{
-					Stage:   s.name,
-					Message: "LLM orchestrate exceeded hard timeout",
-					Cause:   err,
+				timeoutRes, notify := s.hardTimeoutResult(env, partial, hardTimeout, lurkMode, heartbeatMode)
+				if !notify {
+					recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, timeoutRes)
+					return env, &core.PipelineError{
+						Stage:   s.name,
+						Message: "LLM orchestrate exceeded hard timeout",
+						Cause:   err,
+					}
 				}
+				result, err = timeoutRes, nil
 			}
-		if isContentSafetyError(err) {
+		}
+		if err != nil && isContentSafetyError(err) {
 			// 内容安全审核被拒（BigModel 1301 等）：用户内容触发平台策略，
 			// 属业务边界而非系统故障，降级为 WARN 避免监控噪音。
 			logger.Warnw("llm stage: orchestrate failed (content safety)",
 				"message_id", env.Message.ID,
 				"err", err)
-		} else {
+		} else if err != nil {
 			logger.Errorw("llm stage: orchestrate failed",
 				"message_id", env.Message.ID,
 				"err", err)
 		}
-		return env, &core.PipelineError{
-			Stage:   s.name,
-			Message: "LLM orchestrate failed",
-			Cause:   err,
-		}
+		if err != nil {
+			return env, &core.PipelineError{
+				Stage:   s.name,
+				Message: "LLM orchestrate failed",
+				Cause:   err,
+			}
 		}
 	}
 

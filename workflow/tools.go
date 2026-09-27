@@ -69,7 +69,7 @@ run command: sleep 120  → never sleep to wait for a task
 
 Key points:
 - A timeout is not a failure: if the returned ` + "`timedOut`" + ` is true, the task is still running in the background. Do NOT call ` + "`task`" + ` again (that would start a NEW task). Use ` + "`task_detail`" + ` to inspect progress, or simply tell the user the task is still in progress.
-- The ` + "`task`" + ` call may take minutes to tens of minutes; that is expected. The UI shows live progress while it runs.
+- The ` + "`task`" + ` call may take many minutes; that is expected. The UI shows live progress while it runs. It never blocks past this turn's time limit: if the turn is running out of time it returns early with ` + "`timedOut`" + ` true while the task keeps running, and the finished result is delivered back to this conversation automatically. Tell the user it is still running instead of waiting.
 
 ## Default to task for any work that changes files — only read-only lookups are exempt
 
@@ -139,7 +139,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
 			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
 			// 否则模型无从得知该参数的存在。
-			Description: "Submit complex, multi-step work. For tasks with several steps, multi-file changes, dependencies, or a need for quality review, you MUST prefer this tool over calling tools step by step yourself — it analyzes the requirement, decomposes it into a DAG of sub-tasks, and executes them asynchronously in parallel, with result review and retries. **When the requirement uses acceptance-style wording such as 「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」, you MUST submit with goalMode: true, and you MUST NOT handle it inline with subagent/delegate** — goal mode automatically rolls back and redoes the work when review fails, forming a 「工作→审查→修复→审查」 loop until the bar is met. It is designed exactly for tasks with an explicit acceptance bar, such as 「修复所有 X 直到全部通过」 or 「审查每个模块直到没有新问题」. **This call is BLOCKING**: the server runs the workflow to a terminal state (completed / failed / terminated) and returns the final status and progress, so you do NOT need — and there is no — a separate status-polling call. When goalMode is enabled, the returned status carries goalIteration / goalMaxIterations so you can see which closed-loop round is running. **NEVER poll and NEVER use sleep to wait; just submit and continue once it returns.**",
+			Description: "Submit complex, multi-step work. For tasks with several steps, multi-file changes, dependencies, or a need for quality review, you MUST prefer this tool over calling tools step by step yourself — it analyzes the requirement, decomposes it into a DAG of sub-tasks, and executes them asynchronously in parallel, with result review and retries. **When the requirement uses acceptance-style wording such as 「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」, you MUST submit with goalMode: true, and you MUST NOT handle it inline with subagent/delegate** — goal mode automatically rolls back and redoes the work when review fails, forming a 「工作→审查→修复→审查」 loop until the bar is met. It is designed exactly for tasks with an explicit acceptance bar, such as 「修复所有 X 直到全部通过」 or 「审查每个模块直到没有新问题」. **This call is BLOCKING**: the server runs the workflow to a terminal state (completed / failed / terminated) and returns the final status and progress (if this turn is about to hit its time limit it returns early with timedOut: true; the task keeps running and its result is delivered back to this conversation automatically), so you do NOT need — and there is no — a separate status-polling call. When goalMode is enabled, the returned status carries goalIteration / goalMaxIterations so you can see which closed-loop round is running. **NEVER poll and NEVER use sleep to wait; just submit and continue once it returns.**",
 			Keywords: []string{
 				"目标模式", "goal mode", "闭环", "迭代", "反复打磨", "直到通过",
 				"直到…为止", "验收", "达标", "审查到没有", "review 到没有", "收敛",
@@ -243,7 +243,21 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 								waited.Truncate(time.Second))))
 					}
 				}
-				return waitForTerminal(ctx, mgr, result.WorkflowID, taskBlockingMaxTimeout, onProgress)
+				// 等待不越过本回合的墙钟硬上限（见 taskWaitBudget）：提前返回 timedOut，
+				// 工作流在后台继续，结束后结果自动续跑回原会话。
+				budget := taskWaitBudget(ctx, taskBlockingMaxTimeout)
+				if budget <= 0 {
+					st, err := mgr.GetStatus(result.WorkflowID)
+					if err != nil {
+						return nil, err
+					}
+					return &waitStatusResult{StatusResult: st, Waited: "0s", TimedOut: true, Hint: taskBackgroundHint}, nil
+				}
+				res, err := waitForTerminal(ctx, mgr, result.WorkflowID, budget, onProgress)
+				if err == nil && res != nil && res.TimedOut && budget < taskBlockingMaxTimeout {
+					res.Hint = taskBackgroundHint
+				}
+				return res, err
 			}),
 		},
 		PromptSection: workflowToolPromptSection,
