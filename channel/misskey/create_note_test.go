@@ -2,6 +2,7 @@ package misskey
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/llm"
@@ -19,18 +20,41 @@ func TestCreateNoteTool_BlockedInDirectReplyContext(t *testing.T) {
 	out, err := tool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
 		"text": "收到！回复来啦～",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// 拦截必须以 error 返回（IsError），并明确「没有发出」，模型不能把它当成功汇报。
+	if err == nil || !strings.Contains(err.Error(), "NOT POSTED") {
+		t.Fatalf("expected a NOT POSTED error, got out=%v err=%v", out, err)
 	}
-	m, ok := out.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map result, got %T", out)
+}
+
+func reachesAPI(t *testing.T, c *MisskeyChannel, ctx context.Context) (reached bool, err error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			reached = true // nil api panic = 已越过拦截、走到发帖调用
+		}
+	}()
+	_, err = c.createNoteTool().Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{"text": "测试帖"})
+	return false, err
+}
+
+// 09-27 18:32：Telegram 私聊里用户让 bot 发 Misskey 帖，Mentioned=true（私聊）被当成
+// 「正在回复别人的 Misskey 帖」拦截。其它渠道驱动的回合不应受 Misskey 回复护栏影响。
+func TestCreateNoteTool_TelegramTurnIsNotAMisskeyReply(t *testing.T) {
+	c := &MisskeyChannel{name: "misskey"}
+	ctx := llm.WithDirectReply(context.Background(), true)
+	ctx = llm.WithInboundReply(ctx, llm.InboundReply{Source: "telegram", HasReplyTarget: true})
+	if reached, err := reachesAPI(t, c, ctx); !reached {
+		t.Fatalf("a Telegram-driven turn must be allowed to post on Misskey, got err=%v", err)
 	}
-	if m["blocked"] != true {
-		t.Fatalf("expected blocked=true, got %v", m["blocked"])
-	}
-	if m["success"] != false {
-		t.Fatalf("expected success=false, got %v", m["success"])
+}
+
+func TestCreateNoteTool_MisskeyDirectReplyStillBlocked(t *testing.T) {
+	c := &MisskeyChannel{name: "misskey"}
+	ctx := llm.WithDirectReply(context.Background(), true)
+	ctx = llm.WithInboundReply(ctx, llm.InboundReply{Source: "misskey", HasReplyTarget: true})
+	reached, err := reachesAPI(t, c, ctx)
+	if reached || err == nil || !strings.Contains(err.Error(), "NOT POSTED") {
+		t.Fatalf("a reply on this Misskey channel must stay blocked, reached=%v err=%v", reached, err)
 	}
 }
 
