@@ -133,7 +133,7 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 		"dir", skillDir,
 		"hasContent", skill.Content != "",
 		"hasScripts", len(skill.Resources.Scripts) > 0,
-		"level", skill.Level(), // 分级标注：light / heavy（delegation 声明 + 体积阈值）
+		"skill_level", skill.Level(), // 分级标注：light / heavy（delegation 声明 + 体积阈值）
 	)
 
 	return skill, nil

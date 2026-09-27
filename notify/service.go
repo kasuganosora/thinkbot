@@ -304,7 +304,7 @@ func (s *Service) Notify(ctx context.Context, botID string, caller Caller, req R
 		}
 	}
 	s.Logger.Infow("notify: delivered", "bot_id", botID, "event_id", ev.ID, "source", n.Source,
-		"level", n.Level, "mode", mode, "bot_used", botUsed, "channel", target.ChannelName, "token_id", caller.TokenID, "ip", caller.IP)
+		"notify_level", n.Level, "mode", mode, "bot_used", botUsed, "channel", target.ChannelName, "token_id", caller.TokenID, "ip", caller.IP)
 	return res
 }
 
