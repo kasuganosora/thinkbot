@@ -111,6 +111,11 @@ type OrchestrateConfig struct {
 	// 发呗」）。nil 时护栏退化为 fail-closed（未命中关键词即拦截，与 LLM 快判
 	// 判错同等保守）。由调用方（llmroute）用会话 Provider 构建注入。
 	IntentJudge IntentJudgeClient
+
+	// ToolGuard overrides the per-run tool call guard config (repeated identical
+	// calls / consecutive failures / streak advisory, see tool_guard.go). nil
+	// uses the process-wide source set by SetToolGuardSource, else defaults.
+	ToolGuard *ToolGuardConfig
 }
 
 // OrchestrateOption configures a multi-step generation request.
@@ -222,6 +227,8 @@ func PreApprovalFromContext(ctx context.Context) PreApprovalMap {
 // OrchestrateGenerate performs a multi-step generation with automatic tool execution.
 // If cfg.MaxSteps == 0, it delegates to a single provider call.
 func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateConfig) (*GenerateResult, error) {
+	// Per-run tool call guard (identical repeats / consecutive failures).
+	ctx = withToolGuard(ctx, cfg)
 	// Resolve tool schemas
 	for i := range cfg.Params.Tools {
 		schema, err := resolveSchema(cfg.Params.Tools[i].Parameters)
@@ -560,6 +567,8 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 // tool execution. All stream parts from all steps are forwarded through a single
 // channel. If cfg.MaxSteps == 0, it delegates directly to the provider.
 func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfig) (*StreamResult, error) {
+	// Per-run tool call guard (identical repeats / consecutive failures).
+	ctx = withToolGuard(ctx, cfg)
 	// Resolve tool schemas
 	for i := range cfg.Params.Tools {
 		schema, err := resolveSchema(cfg.Params.Tools[i].Parameters)
@@ -1232,6 +1241,9 @@ func executeTools(
 ) ([]ToolResultPart, error) {
 	results := make([]ToolResultPart, len(toolCalls))
 	pending := make([]pendingToolExec, 0, len(toolCalls))
+	guard := toolGuardFrom(ctx)
+	refused := make([]bool, len(toolCalls))
+	seenThisStep := make(map[string]int)
 
 	// Phase 1: resolve tools and check approvals (sequential, user-facing).
 	for i, tc := range toolCalls {
@@ -1243,6 +1255,13 @@ func executeTools(
 				Result:     ToolErrorText(fmt.Errorf("tool %q not found or has no execute handler", tc.ToolName)),
 				IsError:    true,
 			}
+			continue
+		}
+		// Tool call guard: blocked tools / identical repeats are refused
+		// before approval and execution.
+		if msg := guard.precheck(tc, seenThisStep); msg != "" {
+			results[i] = ToolResultPart{ToolCallID: tc.ToolCallID, ToolName: tc.ToolName, Result: msg, IsError: true}
+			refused[i] = true
 			continue
 		}
 
@@ -1332,6 +1351,9 @@ func executeTools(
 		wg.Wait()
 	}
 
+	for i, notice := range guard.record(toolCalls, results, refused) {
+		annotateToolResult(&results[i], notice)
+	}
 	return results, nil
 }
 
