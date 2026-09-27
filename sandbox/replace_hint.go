@@ -216,3 +216,21 @@ func runeEditDistance(a, b []rune) int {
 	}
 	return prev[len(b)]
 }
+
+// checkWorkspacePath rejects absolute paths outside the workspace root.
+//
+// File tools resolve every path inside the workspace: "/tmp/notes.md" used
+// to become /data/tmp/notes.md silently, while exec/run_code see the real
+// /tmp — so a workflow node wrote /tmp/tt-notes/odpt-api.md with write_file
+// and the next node's `cat /tmp/tt-notes/odpt-api.md` failed (3 times on
+// 2026-09-27). Refusing such paths makes every tool agree on one file.
+func checkWorkspacePath(param, p string) error {
+	q := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+	if !strings.HasPrefix(q, "/") || q == VirtualRoot || strings.HasPrefix(q, VirtualRoot+"/") {
+		return nil
+	}
+	return fmt.Errorf("%s %q is outside the workspace. File tools only access the workspace %s: this path would silently map to %s%s, "+
+		"while exec/run_code would use the real %s — two different files. Use a workspace path such as %q (or the relative %q) "+
+		"in file tools AND in exec commands, so every tool (and every workflow node) sees the same file",
+		param, p, VirtualRoot, VirtualRoot, q, q, VirtualRoot+q, strings.TrimPrefix(q, "/"))
+}

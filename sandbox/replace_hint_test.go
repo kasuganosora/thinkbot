@@ -1,9 +1,12 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 func TestOldStrNotFound_WhitespaceOnly(t *testing.T) {
@@ -37,5 +40,53 @@ func TestOldStrNotFound_NothingSimilar(t *testing.T) {
 	msg := oldStrNotFoundError("a.txt", "alpha\nbeta\n", "completely unrelated sentence here").Error()
 	if !strings.Contains(msg, "Read the file again") {
 		t.Fatalf("unexpected: %s", msg)
+	}
+}
+
+func TestCheckWorkspacePath(t *testing.T) {
+	for _, ok := range []string{"", "notes/a.md", "/data", "/data/tmp/x.md", "./x", "tmp/x"} {
+		if err := checkWorkspacePath("path", ok); err != nil {
+			t.Errorf("%q should be accepted: %v", ok, err)
+		}
+	}
+	err := checkWorkspacePath("path", "/tmp/tt-notes/odpt-api.md")
+	if err == nil || !strings.Contains(err.Error(), "/data/tmp/tt-notes/odpt-api.md") || !strings.Contains(err.Error(), "exec") {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestFileTools_RejectPathsOutsideWorkspace(t *testing.T) {
+	mgr, botID, cleanup := newTestBotMgr(t)
+	defer cleanup()
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+	w := buildWriteFileTool(mgr, botID)
+	if _, err := w.Execute(ctx, map[string]any{"path": "/tmp/tt-notes/odpt-api.md", "content": "x"}); err == nil || !strings.Contains(err.Error(), "outside the workspace") {
+		t.Fatalf("write_file /tmp must be refused: %v", err)
+	}
+	if _, err := w.Execute(ctx, map[string]any{"path": "/data/tmp/tt-notes/odpt-api.md", "content": "x"}); err != nil {
+		t.Fatalf("write_file /data/tmp must work: %v", err)
+	}
+	r := buildReadFileTool(mgr, botID)
+	if _, err := r.Execute(ctx, map[string]any{"path": "tmp/tt-notes/odpt-api.md"}); err != nil {
+		t.Fatalf("relative read of the same file must work: %v", err)
+	}
+}
+
+func TestReplaceInFile_ToolErrors(t *testing.T) {
+	mgr, botID, cleanup := newTestBotMgr(t)
+	defer cleanup()
+	ctx := &llm.ToolExecContext{Context: context.Background()}
+	ws := getBotWS(t, mgr, botID)
+	if err := ws.WriteFile(context.Background(), "main.go", []byte("package main\n\nfunc main() {\n\tprintln(1)\n}\n")); err != nil {
+		t.Fatal(err)
+	}
+	tool := buildReplaceInFileTool(mgr, botID)
+	_, err := tool.Execute(ctx, map[string]any{"path": "main.go", "old_str": "", "new_str": ""})
+	if err == nil || !strings.Contains(err.Error(), "would change nothing") {
+		t.Fatalf("empty old/new: %v", err)
+	}
+	_, err = tool.Execute(ctx, map[string]any{"path": "main.go", "old_str": "    println(1)", "new_str": "println(2)"})
+	if err == nil || !strings.Contains(err.Error(), "different whitespace") || !strings.Contains(err.Error(), "\tprintln(1)") {
+		t.Fatalf("mismatch hint: %v", err)
 	}
 }
