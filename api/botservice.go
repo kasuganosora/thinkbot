@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -677,6 +678,8 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 	if kind, _ := splitSessionChannel(sessionID); kind == "tg" {
 		traceID = msgID
 	}
+	// 续跑指令本身以 "system" 身份落库（它不是用户说的话）；续跑回合的工具权限则按提交
+	// 工作流那一轮的身份评估（见 continuationIdentity）。
 	const userID = "system"
 
 	// 按会话加载聊天历史作为上下文，让 agent 续跑时保有完整背景。
@@ -708,7 +711,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 
 	// 按会话来源渠道路由续跑注入：TG 走真实渠道主动推回原会话，
 	// web/未知来源退回 WebChannel（落库 + 前端 resume）。
-	if err := s.injectWorkflowContinuation(botID, sessionID, msgID, traceID, userID, text, extraMeta); err != nil {
+	if err := s.injectWorkflowContinuation(botID, sessionID, msgID, traceID, wf.Origin, text, extraMeta); err != nil {
 		s.logger.Warnw("failed to inject workflow continuation", "err", err, "workflow_id", wf.ID)
 		return
 	}
@@ -737,27 +740,54 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 //     暂退回 web 兜底（落库、不主动弹），与修复前行为一致，不引入退化。
 //
 // 返回 error 表示注入失败（渠道不可用等），调用方据此跳过后续标记。
-func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID, userID, text string, extraMeta map[string]any) error {
+func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID string, origin *workflow.Origin, text string, extraMeta map[string]any) error {
 	kind, target := splitSessionChannel(sessionID)
 
 	if kind == "tg" {
-		return s.injectContinuationToTelegram(botID, target, msgID, traceID, continuationUser{userID: userID}, text, extraMeta)
+		id := continuationIdentity(origin, "telegram", target)
+		return s.injectContinuationToTelegram(botID, target, msgID, traceID, id, text, extraMeta)
 	}
 	// mk / web / 未知：退回 WebChannel 注入（落库 + 前端 resume）。
 	webCh, ok := s.GetWebChannel(botID)
 	if !ok {
 		return fmt.Errorf("web channel unavailable for bot %q, cannot inject continuation", botID)
 	}
-	return webCh.InjectWithID(context.Background(), msgID, traceID, userID, text, extraMeta)
+	// 只有 web 来源的工作流才继承 web 身份；mk 会话退回 web 渠道注入时平台已不同，
+	// 继承原 misskey 用户到 web 平台的规则下可能越权，保持 "system"。
+	id := continuationIdentity(origin, "web", "")
+	meta := extraMeta
+	if id.username != "" {
+		meta = maps.Clone(extraMeta)
+		meta["username"] = id.username
+	}
+	return webCh.InjectWithID(context.Background(), msgID, traceID, id.userID, text, meta)
 }
 
 // metaKeyWorkflowContinuation 标记续跑回合对应的工作流 ID（消息 Metadata）。
 const metaKeyWorkflowContinuation = "workflow_continuation_id"
 
-// continuationUser 是续跑回合的发送者身份。
+// continuationUser 是续跑回合用于工具权限评估的身份。
 type continuationUser struct {
 	userID   string
 	username string
+}
+
+// continuationIdentity 决定续跑回合以谁的身份运行。
+//
+// 续跑回合是「提交工作流那一轮」的延续，应拿到与原回合相同的工具（exec / web / 浏览器 /
+// spawn……），而不是以 "system" 身份只拿到基础工具（2026-09-28 线上：续跑只有 15 个工具）。
+// 只有原回合身份存在、平台与注入渠道一致、且（有会话 ID 时）会话也一致才继承；否则回落
+// "system"（旧行为）。继承的只是原回合的用户身份，权限仍由 toolperm 按原平台 / 会话 /
+// 用户评估，因此不会超过原回合；续跑回合也从不以系统会话身份运行。
+func continuationIdentity(origin *workflow.Origin, platform, chatID string) continuationUser {
+	const fallback = "system"
+	if origin == nil || origin.UserID == "" || origin.ChannelType != platform {
+		return continuationUser{userID: fallback}
+	}
+	if chatID != "" && origin.ChatID != "" && origin.ChatID != chatID {
+		return continuationUser{userID: fallback}
+	}
+	return continuationUser{userID: origin.UserID, username: origin.Username}
 }
 
 // injectContinuationToTelegram 经 Telegram 渠道把续跑指令注入编排。

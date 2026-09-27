@@ -6,9 +6,15 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/prompt"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/workflow"
 )
@@ -53,10 +59,32 @@ func TestWorkflowContinuationText(t *testing.T) {
 	}
 }
 
+func TestContinuationIdentity(t *testing.T) {
+	tg := &workflow.Origin{ChannelType: "telegram", ChatID: "76017910", UserID: "76017910", Username: "sion"}
+	cases := []struct {
+		name     string
+		origin   *workflow.Origin
+		platform string
+		chatID   string
+		want     continuationUser
+	}{
+		{"tg origin, same chat", tg, "telegram", "76017910", continuationUser{"76017910", "sion"}},
+		{"tg origin, other chat", tg, "telegram", "999", continuationUser{userID: "system"}},
+		{"tg origin injected via web", tg, "web", "", continuationUser{userID: "system"}},
+		{"no origin (old workflow)", nil, "telegram", "76017910", continuationUser{userID: "system"}},
+		{"web origin", &workflow.Origin{ChannelType: "web", UserID: "alice"}, "web", "", continuationUser{userID: "alice"}},
+	}
+	for _, c := range cases {
+		if got := continuationIdentity(c.origin, c.platform, c.chatID); got != c.want {
+			t.Errorf("%s: got %+v, want %+v", c.name, got, c.want)
+		}
+	}
+}
+
 // 2026-09-28: the continuation message reused the session id as message id
 // (second one dropped by ingress dedup) and its reply was never stored.
 func TestTelegramContinuationMessage(t *testing.T) {
-	id := continuationUser{userID: "system"}
+	id := continuationUser{userID: "76017910", username: "sion"}
 	extra := map[string]any{agenttools.ExtraKeyChatSessionID: "tg:76017910", metaKeyWorkflowContinuation: "wf-1"}
 	a := buildTelegramContinuationMessage("bot", "Telegram", "76017910", idgen.New("wfc"), "t1", id, "x", extra)
 	b := buildTelegramContinuationMessage("bot", "Telegram", "76017910", idgen.New("wfc"), "t2", id, "y", extra)
@@ -66,9 +94,81 @@ func TestTelegramContinuationMessage(t *testing.T) {
 	if a.Metadata["__history_managed"] != true {
 		t.Fatal("continuation reply must be persisted by the outbound chat-history enricher")
 	}
-	if a.UserID != "system" || a.Metadata["channel_type"] != "telegram" ||
+	if a.UserID != "76017910" || a.Metadata["username"] != "sion" || a.Metadata["channel_type"] != "telegram" ||
 		a.Metadata[metaKeyWorkflowContinuation] != "wf-1" {
 		t.Fatalf("message = %+v", a)
+	}
+}
+
+// A continuation of a workflow started in a Telegram admin turn resolves the
+// same tools as that turn (exec/web/browser/spawn), a stranger's gets none of
+// them, and a workflow without a stored origin keeps the old "system" identity.
+func TestContinuationInheritsOriginalTurnTools(t *testing.T) {
+	const botID, admin, stranger = "bot-perm", "10001", "20002"
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=private"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dao.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	svc := toolperm.NewService(db, nil)
+	sensitive := []string{"sandbox_exec", "web_fetch", "browser__fetch", "spawn"}
+	enabled, sortv := true, 0
+	for _, name := range sensitive {
+		if _, err := svc.CreateRule(botID, toolperm.RuleReq{Tool: name, Platform: "telegram", UserIDs: []string{admin},
+			Decision: toolperm.DecisionAllow, Enabled: &enabled, Sort: &sortv}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr := agenttools.NewToolManager(prompt.NewRegistry(), nil, nil)
+	mgr.SetAccessEvaluator(svc.NewEvaluator())
+	noop := llm.ToolExecuteFunc(func(*llm.ToolExecContext, any) (any, error) { return "ok", nil })
+	for _, name := range append([]string{"memory"}, sensitive...) {
+		if err := mgr.Register(agenttools.ToolDef{Tool: llm.Tool{Name: name, Description: name, Execute: noop}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolve := func(msg core.Message) map[string]bool {
+		env := core.NewEnvelope(msg)
+		env.Set("bot.id", botID)
+		got, err := mgr.ResolveForEnvelope(context.Background(), env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for _, tl := range got {
+			m[tl.Name] = true
+		}
+		return m
+	}
+	turn := func(user string) core.Message {
+		return core.Message{ID: "m", BotID: botID, Source: "Telegram", Channel: user, ChatType: core.ChatPrivate,
+			UserID: user, Metadata: map[string]any{"channel_type": "telegram"}}
+	}
+	continuation := func(origin *workflow.Origin, chat string) core.Message {
+		id := continuationIdentity(origin, "telegram", chat)
+		return buildTelegramContinuationMessage(botID, "Telegram", chat, idgen.New("wfc"), "t", id, "x", nil)
+	}
+
+	adminTurn := resolve(turn(admin))
+	adminCont := resolve(continuation(&workflow.Origin{ChannelType: "telegram", ChatID: admin, UserID: admin}, admin))
+	for _, n := range sensitive {
+		if !adminTurn[n] || !adminCont[n] {
+			t.Fatalf("%s: admin turn %v, continuation %v", n, adminTurn[n], adminCont[n])
+		}
+	}
+	for n := range adminCont {
+		if !adminTurn[n] {
+			t.Fatalf("continuation got %s which the original turn did not have", n)
+		}
+	}
+	strangerCont := resolve(continuation(&workflow.Origin{ChannelType: "telegram", ChatID: stranger, UserID: stranger}, stranger))
+	legacyCont := resolve(continuation(nil, admin))
+	for _, n := range sensitive {
+		if strangerCont[n] || legacyCont[n] {
+			t.Fatalf("%s must stay denied: stranger %v, no-origin %v", n, strangerCont[n], legacyCont[n])
+		}
 	}
 }
 

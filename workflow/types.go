@@ -8,6 +8,7 @@
 package workflow
 
 import (
+	"github.com/kasuganosora/thinkbot/agent/tools"
 	"time"
 )
 
@@ -217,6 +218,11 @@ type Workflow struct {
 	// 保证同一工作流不会在每次部署后被反复注入（幂等）。
 	ContinuationRecoveries int `json:"continuationRecoveries,omitempty"`
 
+	// Origin 提交工作流的那一轮对话的身份（平台 / 会话 / 用户）。续跑等由工作流触发的注入回合
+	// 按它做工具权限评估，拿到与原回合相同（且不超过）的工具，而不是以 "system" 身份只拿到
+	// 基础工具。为空（历史数据 / 非对话提交）时续跑回合保持旧行为。
+	Origin *Origin `json:"origin,omitempty"`
+
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`
 
@@ -226,6 +232,37 @@ type Workflow struct {
 	reverseAdj map[string][]string `json:"-"` // nodeID → 依赖该节点的节点列表（下游）
 	inDegree   map[string]int      `json:"-"` // nodeID → 入度（依赖数）
 	roots      []string            `json:"-"` // 入度为 0 的根节点
+}
+
+// Origin 记录提交工作流的对话回合身份，字段与 tools.ToolSessionContext 的权限维度对应。
+// 刻意不含 IsSystem：续跑回合永远不以系统会话身份运行。
+type Origin struct {
+	ChannelType string `json:"channelType,omitempty"` // telegram / web / misskey
+	ChatID      string `json:"chatId,omitempty"`
+	ChatType    string `json:"chatType,omitempty"`
+	UserID      string `json:"userId,omitempty"`
+	Username    string `json:"username,omitempty"`
+}
+
+// OriginFromSessionContext 从工具会话上下文提取原回合身份；系统会话 / 子代理 / 无用户时返回 nil
+// （这些回合没有可继承的真人身份）。
+func OriginFromSessionContext(sctx tools.ToolSessionContext) *Origin {
+	if sctx.IsSystem || sctx.IsSubagent || sctx.UserID == "" || sctx.SourceChannelType == "" {
+		return nil
+	}
+	o := &Origin{
+		ChannelType: sctx.SourceChannelType,
+		ChatID:      sctx.ChatID,
+		ChatType:    sctx.ChatType,
+		UserID:      sctx.UserID,
+	}
+	for _, id := range sctx.UserIdentifiers {
+		if id != "" && id != sctx.UserID {
+			o.Username = id
+			break
+		}
+	}
+	return o
 }
 
 // Compiled returns true if Compile() has been called successfully.
