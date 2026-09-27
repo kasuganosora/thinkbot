@@ -766,9 +766,12 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 	// 快照会话维度：sctx 是指针，调用方后续可能复用/改写它，
 	// 而 call-time 复核发生在本函数返回之后，必须捕获值而非解引用指针。
 	botID, isSystem := sctx.BotID, sctx.IsSystem
+	// 继承真实父回合的子代理：浏览器工具按父回合身份走权限表（见 allow）。
+	isSubagent := sctx.IsSubagent
+	inherited := isSubagent && sctx.InheritedFromParent
 	out := make([]llm.Tool, 0, len(toolList))
 	for _, t := range toolList {
-		if !e.allow(botID, t.Name, platform, chatID, candidates, isSystem, sctx.IsSubagent) {
+		if !e.allow(botID, t.Name, platform, chatID, candidates, isSystem, isSubagent, inherited) {
 			continue
 		}
 		// 二次防御：调用时再用会话上下文复核权限，防止列表过滤被绕过
@@ -777,7 +780,7 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		orig := t.Execute
 		wt := t
 		wt.Execute = func(ctx *llm.ToolExecContext, input any) (any, error) {
-			if !e.allow(botID, toolName, platform, chatID, candidates, isSystem, sctx.IsSubagent) {
+			if !e.allow(botID, toolName, platform, chatID, candidates, isSystem, isSubagent, inherited) {
 				return nil, fmt.Errorf("tool %q is not permitted for bot %q on platform %q", toolName, botID, platform)
 			}
 			if orig == nil {
@@ -823,13 +826,22 @@ func (e *evaluator) resolveCandidates(sctx *tools.ToolSessionContext) []string {
 //     发言）作为兜底保留——子代理无论平台为空还是带了 web，都不许发言。
 //     非发言工具按平台规则评估（web 的 `*` 放开工作空间，使「审查并修复代码」
 //     类节点能真正 exec/读写），不再被空平台的「敏感工具默认禁止」误伤。
-func (e *evaluator) allow(botID, tool, platform, chatID string, candidates []string, isSystem, isSubagent bool) bool {
+//  3. 例外：子代理继承了真实父回合的会话上下文（inherited，spawn 场景）时，浏览器工具
+//     （browser__*，按前缀归入发言类）按父回合的平台 / 用户走权限表——父回合本身能用
+//     才放行，工具集还会与父回合取交集。平台原生发帖（misskey_/telegram_）与文件外发
+//     工具对子代理仍一律拒绝。
+func (e *evaluator) allow(botID, tool, platform, chatID string, candidates []string, isSystem, isSubagent, inherited bool) bool {
 	broadcast := IsBroadcastTool(tool)
-	if broadcast && (platform == "" || isSubagent) {
+	if broadcast && (platform == "" || (isSubagent && !(inherited && isBrowserTool(tool)))) {
 		return false
 	}
 	if isSystem && !broadcast {
 		return true
 	}
 	return e.svc.EvaluateUsers(botID, tool, platform, chatID, candidates)
+}
+
+// isBrowserTool 判断是否为浏览器 MCP 工具（browser__navigate 等）。
+func isBrowserTool(name string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "browser__")
 }

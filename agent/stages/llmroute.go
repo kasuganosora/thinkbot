@@ -779,6 +779,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		ReplyTarget: messageReplyTarget(&env.Message),
 	})
 
+	// 注入本轮工具会话上下文（平台 / 会话 / 用户身份）：spawn 等在执行期再解析工具的
+	// 工具据此让子代理按父回合的身份做权限评估（只带 BotID 会落进「敏感工具默认禁止」，
+	// 子代理拿不到 exec / 浏览器 / web / 文件工具）。
+	ctx = agenttools.ContextWithSessionContext(ctx, agenttools.SessionContextForEnvelope(env))
+
 	// 注入「直接回复语境」标记：对方 @ 了 Bot 或回复了 Bot（Mentioned=true）时，
 	// Channel 工具可据此禁用「手动发孤立帖」类能力（如 misskey_create_note），
 	// 强制走框架自动串接回复，避免重复发文。该值在 Orchestrate 全程透传到工具执行。
