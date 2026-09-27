@@ -326,11 +326,11 @@ func TestBuildSkillListPrompt_DescriptionTruncation(t *testing.T) {
 
 	got := mgr.BuildSkillListPrompt()
 
-	// 仍返回全部已启用条目（截断只作用于单条描述）
-	if !contains(got, "- long — ") {
+	// 仍返回全部已启用条目（截断只作用于单条描述；分级标注插入 name 与描述之间）
+	if !contains(got, "- long [") {
 		t.Error("skill list should contain 'long' entry")
 	}
-	if !contains(got, "- short — short one") {
+	if !contains(got, "- short [light] — short one") {
 		t.Error("skill list should contain 'short' entry with full description")
 	}
 	if contains(got, "- disabled") {

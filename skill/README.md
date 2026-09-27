@@ -11,8 +11,9 @@
 - **附加资源**：自动扫描 `scripts/`、`references/`、`assets/`
 - **自动发现 / 热重载**：`Discover` 支持多根目录与递归深度，`SkillHotReloader` 轮询 `SKILL.md` 修改时间触发重载
 - **prompt 集成**：启用的 Skill 正文注册为 prompt Section（名称 `skill_<name>`，Order 500，可在 Registry 适配器实现中覆盖）；技能清单作为 `skill_trigger` Section 注入（Order 由调用方传入，建议 150）
-- **工具集成**：通过 `use_skill` 工具（function calling）按需加载技能指令
+- **工具集成**：`use_skill` 工具（function calling）按需加载技能指令，支持 `"unload:<skill>"` 子命令在任务完成后卸载；`skill_search` 工具按关键词廉价检索技能元数据（发现第一步）
 - **状态持久化**：启用状态写入 `skill.<name>.enabled` 配置键
+- **技能分级与委托**：技能标注 `light` / `heavy`（front matter 声明 `delegation: preferred`，或未声明时正文超过 3000 字节判为重型）；重型技能在 `skill_search` 命中、`use_skill "list"` 清单与加载返回中标注，并建议经 `spawn` 子代理委托执行
 
 依赖方向：`skill → llm`、`skill → agent/tools`、`skill → util/errs`；不依赖 `agent/bot`、`agent/prompt`（通过 `RegistryAdapter`/`StoreAdapter` 解耦）。
 
@@ -59,7 +60,7 @@ enabled: true
 | `DirectInjector` | 直拼模式：把技能内容拼接到 system prompt 字符串 |
 | `PromptSection` | 传给外部 Registry 的 Section 描述（Name/Order/Content/Enabled） |
 
-`SkillManager` 完整公开方法：`NewSkillManager`、`SetRegistry`、`SetStore`、`Register`、`Enable`、`Disable`、`Toggle`、`IsEnabled`、`List`、`GetInfo`、`Get`、`EnabledNames`、`BuildTriggerPrompt`、`BuildTriggerSection`、`UseSkill`、`BuildUseSkillTool`、`HasEnabledSkills`、`LoadEnabledStates`、`SaveEnabledStates`、`RemoveSkillContent`；另有带 `Deprecated` 标记的 `TriggerIfNeeded` / `InjectSkillContent`（见下文）。
+`SkillManager` 完整公开方法：`NewSkillManager`、`SetRegistry`、`SetStore`、`Register`、`Unregister`、`Enable`、`Disable`、`Toggle`、`IsEnabled`、`List`、`GetInfo`、`Get`、`EnabledNames`、`IsLoaded`、`LoadedNames`、`UnloadSkill`、`SearchSkills`、`BuildTriggerPrompt`、`BuildSkillListPrompt`、`BuildTriggerSection`、`UseSkill`、`BuildUseSkillTool`、`BuildSkillSearchTool`、`HasEnabledSkills`、`LoadEnabledStates`、`SaveEnabledStates`、`RemoveSkillContent`；另有带 `Deprecated` 标记的 `TriggerIfNeeded` / `InjectSkillContent`（见下文）。
 
 ## 使用示例
 
@@ -106,13 +107,27 @@ defer r.Stop()
 
 ## use_skill 工具
 
-存在已启用技能时，`SkillToolProvider` 才向 LLM 暴露 `use_skill` 工具；主 Agent 与子 Agent 共用同一套技能工具。
+存在已启用技能时，`SkillToolProvider` 才向 LLM 暴露 `use_skill` 与 `skill_search` 两个工具；主 Agent 与子 Agent 共用同一套技能工具。
 
 调用 `use_skill(command: "<skill 名>")` 后：
 
 1. 校验技能存在且已启用、正文非空（否则返回错误，并在未找到时附带可用技能列表）
 2. 将技能正文注入 prompt Registry（多轮持久化）
-3. 返回 `{status, skill, content}`，并按需附带 `scripts`、`references`、`baseDir`
+3. 返回 `{status:"loaded", skill, content, level}`，并按需附带 `scripts`、`references`、`baseDir`；重型技能额外附带 `note`（建议经 `spawn` 委托执行的提示）
+
+`command` 另有两个特殊取值：
+
+- `"list"`：不加载技能，返回完整技能清单（每条标注 `[light|heavy]`）
+- `"unload:<skill>"`：卸载已加载技能，移除其 prompt Section 并返回 `{status:"unloaded", skill, note}`；未加载则返回 `{status:"not_loaded", ...}`（不算错误）。卸载不改变 `Enabled` 状态，之后可再次 `use_skill` 重新加载。任务完成后卸载可保持上下文干净。
+
+## 技能分级与委托执行
+
+技能分 `light` / `heavy` 两级，判定规则（`Skill.IsHeavy`，显式声明优先）：
+
+1. front matter `delegation: preferred` → 重型
+2. 未声明（空或其他取值）→ 正文超过 3000 字节（UTF-8，恰好 3000 仍为轻型）判为重型
+
+分级只影响提示词标注与 `use_skill` 的委托建议，不改变加载行为：`skill_search` 命中（`level` 字段）、`use_skill "list"` 清单（`[heavy]` 标注）与加载返回（重型附 `note`）三处统一标注，引导 LLM 把重型技能的实际执行委托给 `spawn` 子代理，只回传结论。
 
 ## 启用状态优先级
 

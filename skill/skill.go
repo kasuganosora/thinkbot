@@ -8,10 +8,40 @@
 //   - 每个 Skill 是一个目录，核心文件为 SKILL.md（YAML front matter + Markdown 正文）
 //   - 附加资源（scripts/、references/、assets/）按 Anthropic Skills 规范支持
 //   - 三级上下文加载（渐进式披露）：元数据 → SKILL.md 正文 → 附加资源
-//   - LLM 自主判断触发：所有已启用 Skill 的 name+description 常驻上下文
+//   - LLM 自主判断触发：技能清单不常驻上下文，经 skill_search / use_skill "list" 按需发现
 //   - 与 prompt.Registry 集成：Skill 正文作为 Section 注册，自动组装进 system prompt
 //   - 与 config.Store 集成：启用状态持久化到数据库
+//   - 技能分级（light/heavy）：front matter 声明 delegation: preferred，或未声明时
+//     正文超过 3000 字节判为重型；重型技能在 use_skill / skill_search 返回中标注，
+//     并建议经 spawn 子代理委托执行（见 Skill.IsHeavy）
+//   - 卸载：use_skill 支持 "unload:<skill>" 子命令，任务完成后移除技能正文、
+//     保持上下文干净，之后可再次 use_skill 重新加载（见 SkillManager.UnloadSkill）
 package skill
+
+// ============================================================================
+// 委托执行分级（delegation）
+//
+// 重型技能注入的上下文很大，直接在主 Agent 上下文里执行会挤占工作记忆；
+// 框架已有 spawn 工具（subagent 包）可把任务委托给子代理执行。
+// 分级只影响提示词标注与 use_skill 返回的委托建议，不改变加载行为。
+// ============================================================================
+
+const (
+	// DelegationPreferred 是 front matter 的 delegation 字段取值之一，
+	// 表示技能作者显式声明该技能适合委托给子代理执行（delegation: preferred）。
+	// 显式声明优先于体积阈值自动判定；其他显式取值（如 none）一律视为轻型。
+	DelegationPreferred = "preferred"
+
+	// SkillLevelLight / SkillLevelHeavy 是分级结果标签，
+	// 用于 skill_search 命中摘要与技能清单的 light/heavy 标注。
+	SkillLevelLight = "light"
+	SkillLevelHeavy = "heavy"
+
+	// SkillHeavyContentBytes 是体积自动分级阈值（字节，按 UTF-8 字节计）：
+	// 未显式声明 delegation 时，Content 超过该值（> 3000）视为重型技能，
+	// 恰好等于阈值仍为轻型。
+	SkillHeavyContentBytes = 3000
+)
 
 // ============================================================================
 // 核心数据结构
@@ -45,6 +75,31 @@ type Skill struct {
 
 	// Dir 文件系统路径（Source="fs" 时有值）。
 	Dir string
+
+	// Delegation 是 front matter delegation 字段的原始值（可选，向后兼容：缺省为空）。
+	// 目前取值 "preferred" 表示技能作者显式声明适合委托子代理执行；空或其他值表示未声明。
+	// 分级结果（重型/轻型）由 IsHeavy / Level 动态计算，不在此持久化。
+	Delegation string
+}
+
+// IsHeavy 判断技能是否为「重型」（建议委托 spawn 子代理执行）。
+// 判定规则（显式声明优先于体积阈值）：
+//  1. Delegation == "preferred" → 重型（作者显式声明委托）；
+//  2. 未显式声明（空或其他取值）→ Content 字节数 > SkillHeavyContentBytes 时视为重型。
+func (s *Skill) IsHeavy() bool {
+	if s.Delegation == DelegationPreferred {
+		return true
+	}
+	return len(s.Content) > SkillHeavyContentBytes
+}
+
+// Level 返回技能分级标签："heavy"（重型，建议委托）或 "light"（轻型）。
+// 供 skill_search 命中摘要、技能清单标注与 use_skill 委托提示统一取用。
+func (s *Skill) Level() string {
+	if s.IsHeavy() {
+		return SkillLevelHeavy
+	}
+	return SkillLevelLight
 }
 
 // SkillResources 描述 Skill 目录下的附加资源。
@@ -60,6 +115,10 @@ type SkillMeta struct {
 	Description   string   `yaml:"description"`
 	Compatibility []string `yaml:"compatibility"`
 	Enabled       *bool    `yaml:"enabled"`
+
+	// Delegation 委托执行声明（可选，向后兼容：不写即为空）。
+	// 目前取值 "preferred"：技能体积大/执行链长，建议委托 spawn 子代理执行。
+	Delegation string `yaml:"delegation"`
 }
 
 // SkillInfo 是 Skill 的只读详情快照，供列表展示、API 返回等场景使用。
@@ -89,4 +148,9 @@ type SearchHit struct {
 	// Score 排序得分：name 命中权重（skillSearchNameWeight）远高于
 	// description 命中（skillSearchDescWeight），仅降序排序用。
 	Score int `json:"score"`
+
+	// Level 分级标注："light"（轻型）或 "heavy"（重型，建议经 spawn 委托执行）。
+	// 由加载时的 delegation 声明与体积阈值共同决定（见 Skill.IsHeavy），
+	// 让 LLM 在粗检索阶段就能把重型技能的执行委托给子代理。
+	Level string `json:"level"`
 }

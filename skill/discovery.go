@@ -154,6 +154,8 @@ func loadSkillFromDir(dir string) (*Skill, error) {
 		Content:       body,
 		Enabled:       true,
 		Resources:     scanResources(dir),
+		// 委托执行声明透传（与 loader.go LoadSkill 一致；分级由 Skill.IsHeavy 动态判定）
+		Delegation: meta.Delegation,
 	}
 
 	if meta.Enabled != nil {
