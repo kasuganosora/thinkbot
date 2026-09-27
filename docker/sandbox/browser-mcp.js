@@ -115,8 +115,29 @@ const tools = [
   },
   {
     name: 'fill',
-    description: '在输入框内填写文本（先清空）。注意：禁止用于登录表单自动登录，账号导入走 Web 面板。',
+    description: '在文本输入框/textarea 内填写文本（先清空）。下拉框 <select> 用 select_option，复选框/单选框用 check；不确定选择器时先调 form_fields。注意：禁止用于登录表单自动登录，账号导入走 Web 面板。',
     inputSchema: { type: 'object', properties: { selector: { type: 'string' }, value: { type: 'string' }, timeout: { type: 'number', default: 15000 } }, required: ['selector', 'value'] },
+  },
+  {
+    name: 'select_option',
+    description: '在 <select> 下拉框中选择选项（按 value / label / index，三选一；多选框可传数组）。下拉框不要用 fill 或点击 <option>。',
+    inputSchema: { type: 'object', properties: {
+      selector: { type: 'string', description: '<select> 元素的 CSS 选择器' },
+      value: { description: '选项的 value 属性（字符串或字符串数组）' },
+      label: { description: '选项的可见文字（字符串或字符串数组）' },
+      index: { description: '选项序号，从 0 开始（数字或数字数组）' },
+      timeout: { type: 'number', default: 15000 },
+    }, required: ['selector'] },
+  },
+  {
+    name: 'check',
+    description: '勾选/取消勾选复选框（checkbox）或选中单选框（radio）。checked 默认 true。复选框/单选框不要用 fill。',
+    inputSchema: { type: 'object', properties: { selector: { type: 'string' }, checked: { type: 'boolean', default: true }, timeout: { type: 'number', default: 15000 } }, required: ['selector'] },
+  },
+  {
+    name: 'form_fields',
+    description: '列出当前页面的表单控件（input/select/textarea/button）：类型、name、id、可用选择器、当前值、下拉选项。填表前先调用一次，按返回的选择器操作，不要猜选择器。',
+    inputSchema: { type: 'object', properties: { maxFields: { type: 'number', default: 80 } }, required: [] },
   },
   {
     name: 'screenshot',
@@ -174,10 +195,39 @@ const tools = [
 
 function textResult(s) { return { content: [{ type: 'text', text: String(s) }] }; }
 
+// actionHint turns common Playwright failures into a next step, so the model
+// does not retry the same failing action (2026-09-27: fill on <select> /
+// checkboxes, clicks on <option>, guessed selectors timing out, 11 failures
+// in one turn).
+function actionHint(name, args, msg) {
+  const m = String(msg || '');
+  if (/is not an <input>|not an <input>, <textarea>|Element is not an <input>/i.test(m) && name === 'fill') {
+    return 'This element cannot be typed into. If it is a <select> dropdown use select_option; if it is a checkbox/radio use check. Call form_fields to see each control\'s type.';
+  }
+  if (/type "(checkbox|radio)" cannot be filled|cannot be filled/i.test(m)) {
+    return 'Checkboxes and radio buttons cannot be filled: use check (checked: true/false).';
+  }
+  if (/Timeout .*exceeded/i.test(m)) {
+    const sel = args && args.selector ? ` matching ${JSON.stringify(args.selector)}` : '';
+    let extra = '';
+    if (name === 'click' && /(^|[\s>])option\b/i.test(String(args && args.selector || ''))) {
+      extra = ' To choose an option of a <select>, use select_option instead of clicking the <option>.';
+    }
+    return `No actionable element${sel} was found in time (it may not exist, be hidden, or be inside an iframe). Do not retry the same selector: call form_fields or get_text to see the real page, then use a selector from there.${extra}`;
+  }
+  if (/did not find some options|Options? not found/i.test(m)) {
+    return 'The requested option does not exist in this <select>. Call form_fields to list its options (value and label) and pick one of those.';
+  }
+  return '';
+}
+
 async function callTool(name, args) {
   switch (name) {
     case 'navigate': {
       if (!page) throw new Error('page not ready');
+      if (/^\s*javascript:/i.test(String(args.url || ''))) {
+        throw new Error('javascript: URLs are not supported by navigate. Interact with the page through click / fill / select_option / check (call form_fields to find the right selectors).');
+      }
       const waitUntil = args.waitUntil || 'domcontentloaded';
       const resp = await page.goto(args.url, { waitUntil, timeout: 45000 });
       const status = resp ? resp.status() : 'n/a';
@@ -194,6 +244,47 @@ async function callTool(name, args) {
     case 'fill': {
       await page.fill(args.selector, args.value || '', { timeout: args.timeout || 15000 });
       return textResult(`filled: ${args.selector}`);
+    }
+    case 'select_option': {
+      let opt;
+      if (args.value !== undefined) opt = Array.isArray(args.value) ? args.value.map(v => ({ value: String(v) })) : { value: String(args.value) };
+      else if (args.label !== undefined) opt = Array.isArray(args.label) ? args.label.map(v => ({ label: String(v) })) : { label: String(args.label) };
+      else if (args.index !== undefined) opt = Array.isArray(args.index) ? args.index.map(v => ({ index: Number(v) })) : { index: Number(args.index) };
+      else throw new Error('select_option requires one of value, label or index');
+      const chosen = await page.selectOption(args.selector, opt, { timeout: args.timeout || 15000 });
+      return textResult(`selected in ${args.selector}: ${JSON.stringify(chosen)}`);
+    }
+    case 'check': {
+      const checked = args.checked === undefined ? true : !!args.checked;
+      await page.setChecked(args.selector, checked, { timeout: args.timeout || 15000 });
+      return textResult(`${checked ? 'checked' : 'unchecked'}: ${args.selector}`);
+    }
+    case 'form_fields': {
+      const max = args.maxFields || 80;
+      const fields = await page.evaluate((max) => {
+        const esc = (v) => (window.CSS && CSS.escape) ? CSS.escape(v) : v;
+        const out = [];
+        const els = document.querySelectorAll('input, select, textarea, button, [contenteditable="true"]');
+        for (const el of els) {
+          if (out.length >= max) break;
+          const type = el.tagName.toLowerCase() === 'input' ? (el.getAttribute('type') || 'text') : el.tagName.toLowerCase();
+          if (type === 'hidden') continue;
+          const r = el.getBoundingClientRect();
+          const visible = r.width > 0 && r.height > 0;
+          let selector = '';
+          if (el.id) selector = '#' + esc(el.id);
+          else if (el.name) selector = `${el.tagName.toLowerCase()}[name="${el.name}"]`;
+          const f = { tag: el.tagName.toLowerCase(), type, selector, name: el.name || undefined, id: el.id || undefined, visible };
+          const label = (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('aria-label') || el.getAttribute('placeholder') || (el.tagName === 'BUTTON' ? el.innerText : '');
+          if (label) f.label = String(label).trim().slice(0, 60);
+          if (type === 'checkbox' || type === 'radio') { f.checked = el.checked; f.value = el.value; }
+          else if (el.tagName === 'SELECT') { f.value = el.value; f.options = Array.from(el.options).slice(0, 30).map(o => ({ value: o.value, label: o.label })); }
+          else if ('value' in el && type !== 'password') f.value = String(el.value).slice(0, 80);
+          out.push(f);
+        }
+        return out;
+      }, max);
+      return textResult(JSON.stringify(fields, null, 1));
     }
     case 'screenshot': {
       ensureDir(SHOT_DIR);
@@ -307,7 +398,9 @@ function handleLine(line) {
         const result = await callTool(name, args || {});
         send({ jsonrpc: '2.0', id, result });
       } catch (e) {
-        send({ jsonrpc: '2.0', id, error: { code: -32000, message: e.message } });
+        const hint = actionHint(name, args || {}, e.message);
+        const message = hint ? `${e.message}\nHINT: ${hint}` : e.message;
+        send({ jsonrpc: '2.0', id, error: { code: -32000, message } });
       }
     })();
     return;

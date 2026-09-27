@@ -46,6 +46,16 @@ var buildFiles = []string{"Dockerfile", "browser-mcp.js", "browser-launch.sh"}
 // buildGroup 去重并发构建：多个 bot 同时启动只构建一个镜像。
 var buildGroup singleflight.Group
 
+// BrowserMCPScript 返回内置镜像里 /usr/local/bin/thinkbot-browser-mcp 的当前版本
+// （嵌入二进制的 browser-mcp.js）。已存在的 bot 容器不会因镜像 tag 变化而重建，
+// 启动浏览器前据此把新版脚本同步进容器（见 agent/bot/browser_sync.go）。
+func BrowserMCPScript() ([]byte, error) {
+	return buildContext.ReadFile("browser-mcp.js")
+}
+
+// BuiltinImagePrefix 是内置镜像 tag 的前缀（thinkbot-bot:<内容哈希>）。
+const BuiltinImagePrefix = "thinkbot-bot:"
+
 // builtinTag 由构建上下文内容计算确定性镜像 tag。
 // 哈希覆盖全部烤进镜像的文件（Dockerfile + 被 COPY 的 browser-mcp.js / browser-launch.sh），
 // 任一处变化都会改变 tag，确保「内容不变 → 不重复构建；内容变了 → 自动重建」。
@@ -62,7 +72,7 @@ func builtinTag() (string, error) {
 		}
 		_ = f.Close()
 	}
-	return "thinkbot-bot:" + hex.EncodeToString(h.Sum(nil)), nil
+	return BuiltinImagePrefix + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // EnsureImage 确保内置浏览器镜像已构建并返回其引用。
