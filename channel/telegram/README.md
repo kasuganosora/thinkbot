@@ -49,6 +49,7 @@ ch.ChannelTools(ctx)                                          // 返回平台专
 - **消息识别**：自动识别 @提及、`/`命令（offset=0）、回复 Bot、以及 `text_mention`（无 username 的用户提及）的消息
 - **长消息拆分**：超过 4096 字符（`telegramMaxMessageLength`）的消息按换行/rune 自动拆分多条发送
 - **Markdown 支持**：通过 `ParseMode` 指定 `MarkdownV2` 或 `HTML`
+- **格式容错**：`HTML` 模式下发送/编辑前自动转义不属于受支持标签/实体的 `<` `>` `&`；若 Telegram 仍以格式解析错误（400 can't parse entities）拒收，自动去掉格式按纯文本重发一次（见 `format.go`），避免整条回复丢失
 - **user_choice**：Start 时注册 `PollCreator`，发送 inline keyboard；`getUpdates` 默认含 `callback_query`，点击经 `ResolveFrom` 回填（不注入 Ingress）
 - **引用回复可见**：入站消息携带 `reply_to_message_id` / `reply_to_text` / `reply_to_from`，上游 messageBuilder 据此渲染 `[引用 <作者> 的消息]` 块，模型能看到被引内容
 - **消息反应（awareness-only）**：`message_reaction` 更新（需 bot 为群管理员）归一化为 `[Telegram 反应]` 注入，只处理新增反应（new − old），带 `ack_only: true`、故意不设 `reply_target`，不触发回复

@@ -280,7 +280,20 @@ func (a *apiClient) sendMessageFull(ctx context.Context, chatID int64, text, par
 }
 
 // sendMessageWithMarkup 发送带 inline keyboard 的文本消息。markup 为 nil 时与 sendMessageFull 等价。
+//
+// HTML 模式下先转义不属于受支持标签/实体的 < > &；若 Telegram 仍以格式解析错误 400 拒收，
+// 则去掉格式按纯文本重发一次，避免整条回复丢失（见 format.go）。
 func (a *apiClient) sendMessageWithMarkup(ctx context.Context, chatID int64, text, parseMode string, replyTo int64, markup *InlineKeyboardMarkup) (int64, error) {
+	prepared := prepareOutboundText(text, parseMode)
+	id, err := a.sendMessageOnce(ctx, chatID, prepared, parseMode, replyTo, markup)
+	if err != nil && parseMode != "" && isParseEntitiesError(err) {
+		logPlainFallback(ctx, "sendMessage", parseMode, err)
+		return a.sendMessageOnce(ctx, chatID, plainFallbackText(prepared, parseMode), "", replyTo, markup)
+	}
+	return id, err
+}
+
+func (a *apiClient) sendMessageOnce(ctx context.Context, chatID int64, text, parseMode string, replyTo int64, markup *InlineKeyboardMarkup) (int64, error) {
 	if err := a.throttle(ctx); err != nil {
 		return 0, a.wrapErr(err, "telegram sendMessage throttle")
 	}
@@ -341,7 +354,18 @@ func (a *apiClient) editMessageText(ctx context.Context, chatID, messageID int64
 	return a.editMessageTextWithMarkup(ctx, chatID, messageID, text, parseMode, nil)
 }
 
+// editMessageTextWithMarkup 编辑消息文本；格式处理与 sendMessageWithMarkup 相同（转义 + 纯文本兜底）。
 func (a *apiClient) editMessageTextWithMarkup(ctx context.Context, chatID, messageID int64, text, parseMode string, markup *InlineKeyboardMarkup) error {
+	prepared := prepareOutboundText(text, parseMode)
+	err := a.editMessageTextOnce(ctx, chatID, messageID, prepared, parseMode, markup)
+	if err != nil && parseMode != "" && isParseEntitiesError(err) {
+		logPlainFallback(ctx, "editMessageText", parseMode, err)
+		return a.editMessageTextOnce(ctx, chatID, messageID, plainFallbackText(prepared, parseMode), "", markup)
+	}
+	return err
+}
+
+func (a *apiClient) editMessageTextOnce(ctx context.Context, chatID, messageID int64, text, parseMode string, markup *InlineKeyboardMarkup) error {
 	if err := a.throttle(ctx); err != nil {
 		return a.wrapErr(err, "telegram editMessageText throttle")
 	}
