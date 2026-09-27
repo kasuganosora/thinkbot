@@ -49,6 +49,21 @@ func InboundReplyFrom(ctx context.Context) (InboundReply, bool) {
 	return v, ok
 }
 
+// IsDirectReplyFrom 判断本轮是否「source 渠道上」的直接回复语境（对方在该渠道 @ 了
+// Bot 或回复了 Bot）。IsDirectReply 只记「被 @/被回复」而不记渠道：Telegram 私聊里
+// Mentioned 同样为真，若 Misskey 工具据此拦截，TG 回合里就永远发不了 Misskey 帖
+// （09-27 18:32 线上实例）。未注入入站渠道信息时保守地沿用 IsDirectReply。
+func IsDirectReplyFrom(ctx context.Context, source string) bool {
+	if !IsDirectReply(ctx) {
+		return false
+	}
+	v, ok := InboundReplyFrom(ctx)
+	if !ok || v.Source == "" {
+		return true
+	}
+	return v.Source == source
+}
+
 // IsFrameworkReplyContext 判断本轮是否「由 source 渠道的入站消息驱动、且框架会串接回复」。
 // source 传入调用方渠道自身的实例名；不匹配（或未注入）时返回 false，
 // 保证跨渠道主动发帖能力不被误伤。

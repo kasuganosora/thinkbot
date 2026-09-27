@@ -143,7 +143,7 @@ func TestIntentJudge_TimeoutDefault(t *testing.T) {
 
 func TestProviderIntentJudgeAdapter(t *testing.T) {
 	// 适配器非 nil 即可满足接口；真实 provider 调用由集成环境覆盖。
-	var client IntentJudgeClient = NewProviderIntentJudge(nil, nil)
+	var client IntentJudgeClient = NewProviderIntentJudge(nil, nil, nil)
 	if client == nil {
 		t.Error("adapter must be non-nil")
 	}

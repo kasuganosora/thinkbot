@@ -377,24 +377,22 @@ func (c *MisskeyChannel) createNoteTool() agenttools.ToolDef {
 					return nil, fmt.Errorf("misskey_create_note: invalid input type")
 				}
 
-				// 回复语境拦截：禁止用本工具「回复」。覆盖两种场景：
-				//   1. IsDirectReply —— 对方 @ 了你或回复了你（Mentioned=true）。
+				// 回复语境拦截：禁止用本工具「回复」。只针对**本 Misskey 渠道**驱动的回合：
+				//   1. IsDirectReplyFrom —— 对方在本渠道 @ 了你或回复了你。
 				//   2. IsFrameworkReplyContext —— 本轮由本渠道入站帖驱动、框架会串接回复
 				//      （含未 @ Bot 的普通 timeline 帖）。手动发孤立帖会与框架自动回复重复。
-				// 直接让 Bot 用普通文本回复即可，框架会自动带 @ 前缀并以串接回复发出。
-				if llm.IsDirectReply(ctx) || llm.IsFrameworkReplyContext(ctx, c.name) {
+				// 其它渠道（Telegram / web）驱动的回合不受影响：那里用户要求发 Misskey 帖，
+				// 框架不会替你在 Misskey 上回复。
+				// 拦截以 error 返回（IsError），明确「没有发出」，避免模型把拦截当成功汇报。
+				directHere := llm.IsDirectReplyFrom(ctx, c.name)
+				if directHere || llm.IsFrameworkReplyContext(ctx, c.name) {
 					reason := "reply_context"
-					if llm.IsFrameworkReplyContext(ctx, c.name) && !llm.IsDirectReply(ctx) {
+					if !directHere {
 						reason = "inbound_reply_context"
 					}
-					return map[string]any{
-						"success": false,
-						"blocked": true,
-						"reason":  reason,
-						"message": "You are in a 'replying to an existing note' context (the other party @mentioned you, replied to you, or is threading a reply on a timeline note). " +
-							"Do NOT call misskey_create_note to reply — it would post an isolated new note that is not threaded to the original, and would duplicate the system's automatic reply. " +
-							"Just reply with your normal text: the system will automatically send your reply as a threaded reply with an @ prefix.",
-					}, nil
+					return nil, fmt.Errorf("NOT POSTED (%s): you are replying to an existing Misskey note (the other party @mentioned you, replied to you, "+
+						"or you are threading a reply on a timeline note). misskey_create_note would post an isolated new note that duplicates the system's "+
+						"automatic threaded reply, so it was blocked and nothing was published. Just reply with your normal text; the system sends it as a threaded reply", reason)
 				}
 
 				text, _ := args["text"].(string)

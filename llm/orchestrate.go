@@ -1240,7 +1240,7 @@ func executeTools(
 			results[i] = ToolResultPart{
 				ToolCallID: tc.ToolCallID,
 				ToolName:   tc.ToolName,
-				Result:     fmt.Sprintf("tool %q not found or has no execute handler", tc.ToolName),
+				Result:     ToolErrorText(fmt.Errorf("tool %q not found or has no execute handler", tc.ToolName)),
 				IsError:    true,
 			}
 			continue
@@ -1251,7 +1251,7 @@ func executeTools(
 				results[i] = ToolResultPart{
 					ToolCallID: tc.ToolCallID,
 					ToolName:   tc.ToolName,
-					Result:     "tool execution denied: no approval handler",
+					Result:     ToolErrorText(errors.New("tool execution denied: no approval handler")),
 					IsError:    true,
 				}
 				continue
@@ -1453,7 +1453,7 @@ func checkUserIntentGrounded(ctx context.Context, toolName, userReq string, msgs
 
 // groundedRefusal 生成未根植写操作的拦截消息，明确告知模型原因，促其停止循环。
 func groundedRefusal(toolName string) string {
-	return fmt.Sprintf("⚠️ 工具 %q 需要用户的显式授权：当前用户请求中未包含任何社交操作意图（关注/发帖/点赞/renote 等），该写操作已被拦截。若确需执行，请明确告知要进行的社交动作。", toolName)
+	return fmt.Sprintf("NOT EXECUTED — nothing was posted or changed. ⚠️ 工具 %q 需要用户的显式授权：未能确认用户明确要求了这个社交写操作（发帖/关注/点赞/renote 等），该写操作已被拦截、没有执行。不要告诉用户已经完成；如实说明没有发出，并请用户明确确认要执行的动作。", toolName)
 }
 
 func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart), cfg *OrchestrateConfig) ToolResultPart {
@@ -1540,7 +1540,7 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 			ToolCallID:   tc.ToolCallID,
 			ToolName:     tc.ToolName,
 			InvocationID: invocationID,
-			Result:       err.Error(),
+			Result:       ToolErrorText(err),
 			IsError:      true,
 			Halt:         execCtx.halt,
 		}
@@ -1591,4 +1591,17 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		Result:       finalOutput,
 		Halt:         execCtx.halt,
 	}
+}
+
+// ToolErrorPrefix 标在失败工具结果的最前面。OpenAI 兼容接口（GLM 等）的 tool 消息没有
+// is_error 字段，IsError 到不了模型，模型只看到一段文字，曾把失败/被拦截的发帖当成功
+// 汇报给用户（09-27 两次）。统一加前缀让失败在任何 provider 下都不含糊。
+const ToolErrorPrefix = "TOOL ERROR — the call failed and its action was NOT carried out; do not tell the user it succeeded. Details: "
+
+// ToolErrorText 把工具执行错误格式化为给模型看的结果文本（带 ToolErrorPrefix）。
+func ToolErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return ToolErrorPrefix + err.Error()
 }
