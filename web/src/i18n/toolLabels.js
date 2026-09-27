@@ -115,6 +115,7 @@ export default {
   remind:                 '提醒',
   spawn:                  '子任务',
   use_skill:              '加载技能',
+  skill_search:           '搜索技能',
   dreaming:               '整理记忆',
   heartbeat:              '心跳',
 
