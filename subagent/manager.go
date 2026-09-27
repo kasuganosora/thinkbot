@@ -120,7 +120,8 @@ func (m *SubAgentManager) SetMaxConcurrency(n int) {
 
 // SetToolResolver 让委托创建的子 Agent 继承主 Agent 的可用工具（经 scope 过滤，
 // 自动排除 spawn 防套娃），从而能操作工作空间（exec/读/写/列目录等）。
-// base 通常只填 BotID；解析时 IsSubagent 会被强制置 true。
+// base 通常只填 BotID；解析时 IsSubagent 会被强制置 true。执行期 ctx 带有父回合会话
+// 上下文时（spawn），改用父回合身份并与父回合工具取交集，见 resolveToolsWith。
 // 不调用本方法（或传 nil toolMgr）则子 Agent 不携带工具（纯 LLM，旧行为）。
 func (m *SubAgentManager) SetToolResolver(toolMgr *tools.ToolManager, base tools.ToolSessionContext) {
 	m.mu.Lock()
@@ -189,13 +190,47 @@ func (m *SubAgentManager) resolveToolsLocked(ctx context.Context) ([]llm.Tool, e
 }
 
 // resolveToolsWith 是解析逻辑的无状态实现，供加锁/已持锁两个入口复用。
+//
+// 若 ctx 带有父回合的工具会话上下文（LLMStage 经 tools.ContextWithSessionContext 注入，
+// spawn 工具执行时即是），子代理继承父回合的平台 / 会话 / 用户身份 / 系统会话标记做权限
+// 评估，再与父回合自身可用的工具取交集：子代理拿到父回合在子代理场景可用的工具，
+// 但绝不多于父回合。BotID 以装配期 base 为准（管理器按 bot 隔离）。
+// 没有父上下文（如工作流 / 持久 Spawn）时沿用 base（旧行为）。
 func resolveToolsWith(ctx context.Context, toolMgr *tools.ToolManager, base tools.ToolSessionContext) ([]llm.Tool, error) {
 	if toolMgr == nil {
 		return nil, nil
 	}
-	sctx := base
+	parent, inherited := tools.SessionContextFromContext(ctx)
+	if !inherited || parent.IsSubagent {
+		sctx := base
+		sctx.IsSubagent = true
+		return toolMgr.ResolveTools(ctx, &sctx)
+	}
+	if base.BotID != "" {
+		parent.BotID = base.BotID
+	}
+	parentTools, err := toolMgr.ResolveTools(ctx, &parent)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]bool, len(parentTools))
+	for _, t := range parentTools {
+		allowed[t.Name] = true
+	}
+	sctx := parent
 	sctx.IsSubagent = true
-	return toolMgr.ResolveTools(ctx, &sctx)
+	sctx.InheritedFromParent = true
+	subTools, err := toolMgr.ResolveTools(ctx, &sctx)
+	if err != nil {
+		return nil, err
+	}
+	out := subTools[:0:0]
+	for _, t := range subTools {
+		if allowed[t.Name] {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 // toolStepsSnapshot 在读锁下读取 defaultToolSteps，避免与 SetDefaultToolSteps 竞态。

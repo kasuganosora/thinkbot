@@ -147,6 +147,12 @@ type ToolSessionContext struct {
 	// SubAgent 场景通常不应返回联邦工具或记忆相关工具。
 	IsSubagent bool
 
+	// InheritedFromParent 子代理的会话上下文继承自真实父回合（spawn 时由 subagent 包置位，
+	// 平台 / 用户与父回合一致，且工具集已与父回合取交集）。toolperm 据此放开浏览器工具
+	// （浏览器按前缀归入对外发言类，但对子代理主要用于查资料 / 测网页）；平台原生发帖与
+	// 文件外发工具对子代理仍一律拒绝。
+	InheritedFromParent bool
+
 	// IsSystem 标记内部/系统会话（cron、心跳、梦境巩固等）。
 	// 置为 true 时，工具权限评估（toolperm）直接放行全部工具，
 	// 不受 bot_tool_permissions 约束。常规用户渠道（web/telegram/misskey）应为 false。
@@ -276,4 +282,29 @@ func (d *ToolDef) appliesTo(sctx *ToolSessionContext) bool {
 		}
 	}
 	return false
+}
+
+// sessionCtxKey 是本轮工具会话上下文在 context 中的 key。
+type sessionCtxKey struct{}
+
+// ContextWithSessionContext 把本轮的工具会话上下文（平台 / 会话 / 用户身份 / 是否系统会话）
+// 注入 context，供执行期需要「以调用方身份」再解析工具的工具使用——例如 spawn 让子代理
+// 继承父回合的权限上下文，而不是只带 BotID 落进「敏感工具默认禁止」分支。
+// 存的是值拷贝，调用方之后改写原结构体不影响已注入的上下文。
+func ContextWithSessionContext(ctx context.Context, sctx ToolSessionContext) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, sctx)
+}
+
+// SessionContextFromContext 取出 ContextWithSessionContext 注入的会话上下文。
+func SessionContextFromContext(ctx context.Context) (ToolSessionContext, bool) {
+	if ctx == nil {
+		return ToolSessionContext{}, false
+	}
+	v, ok := ctx.Value(sessionCtxKey{}).(ToolSessionContext)
+	return v, ok
+}
+
+// SessionContextForEnvelope 按与工具解析相同的规则从 Envelope 构建会话上下文（值拷贝）。
+func SessionContextForEnvelope(env *core.Envelope) ToolSessionContext {
+	return *envelopeToSessionContext(env)
 }

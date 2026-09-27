@@ -1366,6 +1366,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	saMgr := subagent.NewSubAgentManager(bundle.Main, bundle.MainDef.Model, saOpts...)
 	// 让子 Agent 继承主 Agent 在子 Agent 场景可用的工具（exec/读/写/列目录等），
 	// 使其能像主 Agent 一样操作工作空间。spawn 工具由 scope 排除防套娃。
+	// 这里只给 BotID：spawn 执行时 LLMStage 已把父回合的会话上下文（平台 / 用户 / 会话）
+	// 注入 ctx，子代理按父回合身份评估权限并与父回合工具取交集（subagent.resolveToolsWith）。
+	// 只带 BotID 会落进「空平台 → 敏感工具默认禁止」，子代理拿不到 exec/浏览器/web/文件。
 	saMgr.SetToolResolver(toolMgr, agenttools.ToolSessionContext{BotID: id})
 	// 子 Agent 重任务（读大量文件 + 多轮模型推理）常超过默认 120s：放宽到 10 分钟，
 	// 避免 context deadline exceeded（日志曾见单次 LLM 调用 ~108s 被 120s 上限杀掉）。
