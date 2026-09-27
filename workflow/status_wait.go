@@ -53,7 +53,39 @@ const (
 	//
 	// 改这个值前务必先确认 handler_chat 的 bgCtx 上限，两者必须保持这个偏序关系。
 	taskBlockingMaxTimeout = 18 * time.Minute
+
+	// taskReplyReserve 是 task 阻塞等待为本回合剩余工作预留的时间：调用方 ctx 带 deadline
+	// （主链路 LLM 墙钟硬上限 agent.hard_timeout，默认 15 分钟）时，等待最多到 deadline 前
+	// 这么久就返回 timedOut，让模型还来得及写回复。否则 task 一直阻塞到硬上限，整轮被杀、
+	// 用户收不到任何回复（09-27 线上 2 例：task 阻塞 14 分钟以上）。工作流照常在后台跑，
+	// 结束后经 onWorkflowCompleted 把结果续跑回原会话。
+	taskReplyReserve = 3 * time.Minute
+
+	// taskMinBlockingWait 剩余预算不足它时不再阻塞，提交后立即返回（后台继续跑）。
+	taskMinBlockingWait = 20 * time.Second
+
+	// taskBackgroundHint 是 task 等待提前返回（工作流仍在后台跑）时给模型的下一步建议。
+	taskBackgroundHint = "The task is still running in the background; this turn's time budget is nearly used up, so the wait returned early. " +
+		"Do NOT call task again (that would start a NEW task) and do not poll or sleep. Tell the user it is still running; " +
+		"when it finishes, its result is delivered back to this conversation automatically and you will continue from there."
 )
+
+// taskWaitBudget 返回 task 本次最多阻塞多久：不超过 max，且在 ctx 有 deadline 时
+// 给本回合留出 taskReplyReserve。返回 0 表示不要阻塞（提交后立即返回快照）。
+func taskWaitBudget(ctx context.Context, max time.Duration) time.Duration {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return max
+	}
+	left := time.Until(dl) - taskReplyReserve
+	if left >= max {
+		return max
+	}
+	if left < taskMinBlockingWait {
+		return 0
+	}
+	return left
+}
 
 // waitStatusResult 是 wait 模式的返回结构。
 //
