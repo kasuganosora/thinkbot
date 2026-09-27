@@ -78,6 +78,15 @@ var basicTools = map[string]struct{}{
 	"memory_snapshot": {},
 	"memory_tools":    {},
 
+	// 技能发现 / 加载：skill_search 只在本 bot 已安装的技能索引里做关键词检索，
+	// use_skill 只把技能说明书（SKILL.md）读进上下文或从上下文卸载 —— 均不联网、
+	// 不执行代码、不写文件。技能正文里若要求执行命令/联网，对应工具仍按各自级别
+	// 受权限约束。二者必须成对开放：只开 skill_search 时模型能找到技能却加载不了；
+	// 此前 TG/Misskey 进入白名单模式后二者被默认禁止，Bot 找不到任何技能，
+	// 转而用 tool_search 乱找或猜 use_skill 名字（2026-09-27 由管理员手动放开）。
+	"skill_search": {},
+	"use_skill":    {},
+
 	// 只读状态查询（不改变任何状态）
 	"task_detail":    {},
 	"sandbox_health": {},
