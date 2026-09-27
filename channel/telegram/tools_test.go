@@ -10,8 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"go.uber.org/zap"
+
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/sandbox"
 )
 
 // newSendDocTestServer 起一个假的 Telegram Bot API，只响应 sendDocument。
@@ -514,5 +517,83 @@ func TestSendPhotoTool_ExplicitChatIDOverrides(t *testing.T) {
 	}
 	if (*got)[0]["chat_id"] != "999" {
 		t.Errorf("chat_id = %q, want 999 (explicit override of MessageMeta)", (*got)[0]["chat_id"])
+	}
+}
+
+// TestSendDocumentTool_WorkspacePathForms: "demo/x", "/data/demo/x" and the
+// mistaken "data/demo/x" (absolute path minus its leading slash, which used to
+// resolve to /data/data/demo/x) all reach the same file through a real local
+// sandbox workspace; a genuine "data/" subdirectory still wins.
+func TestSendDocumentTool_WorkspacePathForms(t *testing.T) {
+	base := t.TempDir()
+	cfg := sandbox.DefaultConfig()
+	cfg.Backend = "local"
+	mgr, err := sandbox.NewBotWorkspaceManager(base, cfg, zap.NewNop().Sugar())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := mgr.GetOrCreate("test-bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxBg := context.Background()
+	if err := ws.WriteFile(ctxBg, "demo/qr.png", []byte("root file")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteFile(ctxBg, "data/nested.txt", []byte("nested data dir")); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, got := newSendDocTestServer(t)
+	ch := newSendDocTestChannel(srv)
+	var tried []string
+	ch.SetFileSource(func(ctx context.Context, botID, p string) ([]byte, error) {
+		tried = append(tried, p)
+		return ws.ReadFile(ctx, p)
+	})
+	defs, _ := ch.ChannelTools(ctxBg)
+	var docTool *llm.Tool
+	for i := range defs {
+		if defs[i].Name == "telegram_send_document" {
+			docTool = &defs[i].Tool
+		}
+	}
+	ctx := agenttools.ContextWithMessageMeta(ctxBg, agenttools.MessageMeta{BotID: "test-bot", ChatID: "777", ChannelType: "telegram"})
+	for _, p := range []string{"demo/qr.png", "/data/demo/qr.png", "data/demo/qr.png", "./data/demo/qr.png"} {
+		res, err := docTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{"filePath": p})
+		if err != nil {
+			t.Fatalf("%s: %v (tried %v)", p, err, tried)
+		}
+		if m := res.(map[string]any); m["fileSize"] != len("root file") {
+			t.Fatalf("%s: unexpected result %#v", p, m)
+		}
+	}
+	res, err := docTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{"filePath": "data/nested.txt"})
+	if err != nil || res.(map[string]any)["filePath"] != "data/nested.txt" {
+		t.Fatalf("real data/ subdir must be read as-is: %v %#v", err, res)
+	}
+	if (*got)[len(*got)-1]["__content"] != "nested data dir" {
+		t.Fatalf("wrong file uploaded: %q", (*got)[len(*got)-1]["__content"])
+	}
+	_, err = docTool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{"filePath": "data/missing.png"})
+	if err == nil || !strings.Contains(err.Error(), `not "data/reports/a.pdf"`) {
+		t.Fatalf("missing file error should explain path forms: %v", err)
+	}
+}
+
+func TestWorkspacePathCandidates(t *testing.T) {
+	cases := map[string][]string{
+		"a/b.txt":       {"a/b.txt"},
+		"/data/a.txt":   {"/data/a.txt"},
+		"data/a.txt":    {"data/a.txt", "a.txt"},
+		"./data/x/y":    {"./data/x/y", "x/y"},
+		"data":          {"data"},
+		"data\\win.txt": {"data/win.txt", "win.txt"},
+	}
+	for in, want := range cases {
+		got := workspacePathCandidates(in)
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%q: got %v want %v", in, got, want)
+		}
 	}
 }
