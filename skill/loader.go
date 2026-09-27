@@ -32,6 +32,7 @@ import (
 //	description: 处理 PDF 文件（提取文本、合并、拆分等）。当用户提到 PDF、需要提取 PDF 内容时使用。
 //	compatibility: [pdf_read_tool]
 //	enabled: true
+//	delegation: preferred
 //	---
 //
 //	# PDF 处理技能
@@ -39,6 +40,8 @@ import (
 //	## 指令
 //	当用户请求处理 PDF 时...
 //
+//	delegation 可选：取值 "preferred" 显式声明为重型技能（建议委托子代理执行）；
+//	未声明时正文超过 3000 字节自动判为重型，见 Skill.IsHeavy。
 // ============================================================================
 
 // Loader 从文件系统目录加载 Skill。
@@ -128,6 +131,8 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 		Enabled:       meta.Enabled == nil || *meta.Enabled, // nil 或 true → 默认启用
 		Source:        src,
 		Dir:           skillDir,
+		// 委托执行声明透传；分级（heavy/light）由 Skill.IsHeavy 按声明 + 体积动态判定
+		Delegation: meta.Delegation,
 	}
 
 	// 校验必填字段
@@ -146,6 +151,7 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 		"dir", skillDir,
 		"hasContent", skill.Content != "",
 		"hasScripts", len(skill.Resources.Scripts) > 0,
+		"level", skill.Level(), // 分级标注：light / heavy（delegation 声明 + 体积阈值）
 	)
 
 	return skill, nil
@@ -282,6 +288,11 @@ func applyFrontMatterField(key, val string, meta *SkillMeta) {
 			// 解析失败，保持 nil（默认启用）
 			meta.Enabled = nil
 		}
+	case "delegation":
+		// 委托执行声明（可选字段）：值原样 TrimSpace 后保存（如 "preferred"），
+		// 分级判定（Skill.IsHeavy）在读取侧完成，解析层不猜语义。
+		// 注意不要实现为 trim 后回写 quoted 字符串的变体，保持与 name/description 一致的单行语义。
+		meta.Delegation = strings.TrimSpace(strings.Trim(val, `"'`))
 	}
 }
 
