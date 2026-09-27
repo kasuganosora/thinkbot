@@ -95,7 +95,7 @@ func registerConfigLifecycle(lc fx.Lifecycle, store *Store, logger *zap.SugaredL
 					if err := applyLogLevel(newVal); err != nil {
 						logger.Warnw("config: apply log.level failed", "value", newVal, "err", err)
 					} else {
-						logger.Infow("config: log.level applied", "level", newVal)
+						logger.Infow("config: log.level applied", "log_level", newVal)
 					}
 				}
 			})
