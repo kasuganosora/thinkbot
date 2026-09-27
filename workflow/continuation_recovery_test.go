@@ -5,6 +5,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/agent/tools"
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 func finishedWorkflow(id string, status WorkflowStatus) *Workflow {
@@ -155,13 +158,35 @@ func TestConfirmContinuationPreventsReinjection(t *testing.T) {
 	}
 }
 
-// The continuation bookkeeping survives a DB round trip (a fresh repository
-// instance, as after a restart).
-func TestContinuationFieldsPersist(t *testing.T) {
+func TestOriginFromSessionContext(t *testing.T) {
+	o := OriginFromSessionContext(tools.ToolSessionContext{
+		SourceChannelType: "telegram", ChatID: "76017910", ChatType: "private",
+		UserID: "76017910", UserIdentifiers: []string{"76017910", "sion"},
+	})
+	if o == nil || o.ChannelType != "telegram" || o.ChatID != "76017910" || o.UserID != "76017910" || o.Username != "sion" {
+		t.Fatalf("origin = %+v", o)
+	}
+	for name, sctx := range map[string]tools.ToolSessionContext{
+		"system":   {SourceChannelType: "telegram", UserID: "1", IsSystem: true},
+		"subagent": {SourceChannelType: "telegram", UserID: "1", IsSubagent: true},
+		"no user":  {SourceChannelType: "telegram"},
+		"no plat":  {UserID: "1"},
+	} {
+		if OriginFromSessionContext(sctx) != nil {
+			t.Errorf("%s: expected nil origin", name)
+		}
+	}
+}
+
+// Origin and the continuation bookkeeping survive a DB round trip (a fresh
+// repository instance, as after a restart), and the task tool picks the
+// origin up from the turn's session context.
+func TestOriginAndContinuationFieldsPersist(t *testing.T) {
 	db := newSharedDB(t)
 	writer := NewRepository(db, noopLogger())
 	wf := finishedWorkflow("wf-o", WorkflowCompleted)
 	now := time.Now().Truncate(time.Second)
+	wf.Origin = &Origin{ChannelType: "telegram", ChatID: "76017910", ChatType: "private", UserID: "76017910", Username: "sion"}
 	wf.NeedsContinuation = true
 	wf.ContinuationInjectedAt = &now
 	wf.ContinuationRecoveries = 1
@@ -173,11 +198,21 @@ func TestContinuationFieldsPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ContinuationRecoveries != 1 || got.ContinuationInjectedAt == nil || !got.ContinuationInjectedAt.Equal(now) {
-		t.Fatalf("fields not persisted: %+v", got)
+	if got.Origin == nil || *got.Origin != *wf.Origin || got.ContinuationRecoveries != 1 ||
+		got.ContinuationInjectedAt == nil || !got.ContinuationInjectedAt.Equal(now) {
+		t.Fatalf("fields not persisted: %+v origin=%+v", got, got.Origin)
 	}
 	flagged, err := reader.FindNeedingContinuation()
 	if err != nil || len(flagged) != 1 {
 		t.Fatalf("FindNeedingContinuation = %v, %v", flagged, err)
+	}
+
+	sctx := tools.ToolSessionContext{SourceChannelType: "telegram", ChatID: "76017910", UserID: "76017910", UserIdentifiers: []string{"76017910"}}
+	ectx := &llm.ToolExecContext{Context: tools.ContextWithSessionContext(context.Background(), sctx)}
+	if o := submitOrigin(ectx); o == nil || o.UserID != "76017910" || o.ChannelType != "telegram" {
+		t.Fatalf("submitOrigin = %+v", o)
+	}
+	if o := submitOrigin(&llm.ToolExecContext{Context: context.Background()}); o != nil {
+		t.Fatalf("no session context must give nil origin, got %+v", o)
 	}
 }

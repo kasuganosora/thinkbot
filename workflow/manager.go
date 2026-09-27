@@ -197,6 +197,8 @@ type SubmitRequest struct {
 	// 可为空（非 web 渠道 / 历史调用），落库后供前端刷新页面时按会话恢复卡片。
 	BotID     string
 	SessionID string
+	// Origin 提交回合的身份（见 Workflow.Origin），可为空。
+	Origin *Origin
 }
 
 // SubmitResult 是提交工作流的立即返回结果。
@@ -226,6 +228,7 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	// 记录来源，供前端刷新后按会话恢复卡片、以及排查时定位工作空间。
 	wf.BotID = req.BotID
 	wf.SessionID = req.SessionID
+	wf.Origin = req.Origin
 
 	// 持久化初始状态
 	if err := m.repo.Save(wf); err != nil {

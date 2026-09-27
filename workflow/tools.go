@@ -218,6 +218,8 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 					// 记录来源，供前端刷新后按会话恢复卡片、排查时定位工作空间。
 					BotID:     origin.BotID,
 					SessionID: origin.SessionID,
+					// 提交回合的身份：续跑回合据此继承原回合的工具权限（不超过原回合）。
+					Origin: submitOrigin(ctx),
 				})
 				if err != nil {
 					return nil, err
@@ -441,4 +443,16 @@ func RegisterTools(mgr *tools.ToolManager, wfMgr *Manager) error {
 		nodesToolDef(wfMgr),
 		controlToolDef(wfMgr),
 	)
+}
+
+// submitOrigin 取提交 task 的对话回合身份（LLMStage 注入的会话上下文），没有则返回 nil。
+func submitOrigin(ctx *llm.ToolExecContext) *Origin {
+	if ctx == nil {
+		return nil
+	}
+	sctx, ok := tools.SessionContextFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	return OriginFromSessionContext(sctx)
 }
