@@ -390,6 +390,18 @@ func New(params BotParams) (*Bot, error) {
 			bot.soulLoader = soul
 		}
 
+		// bot 自装技能（<workspace>/skills/<name>/SKILL.md，docker 模式即容器内
+		// /data/skills）：接入 SkillManager，启动时异步扫描一次，之后在
+		// skill_search / use_skill 前节流刷新。bot 只能写自己的工作空间，
+		// 内置（/app/skills，只读）与托管（data/skills/<bot>）目录它都写不进去。
+		if params.SkillManager != nil {
+			if ws, gErr := wsMgr.GetOrCreate(params.ID); gErr == nil {
+				attachWorkspaceSkills(params.SkillManager, ws, botLogger.With("component", "skill_workspace"))
+			} else {
+				botLogger.Warnw("workspace skills: get workspace failed", "err", gErr)
+			}
+		}
+
 		// 注册工作空间工具（sandbox_exec/read_file/write_file/run_code 等）。
 		// lurk-only 模式下 bot 只学不说、不执行任何动作，跳过整组代码工具注册
 		// （GroupCode 关闭）；工作空间目录/SOUL.md/工具输出落盘不受影响。
