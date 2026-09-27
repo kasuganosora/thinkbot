@@ -68,6 +68,9 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 		return errs.Wrap(err, "bot: ensure browser container")
 	}
 
+	// 已存在的容器不会随内置镜像更新而重建：先把本二进制内嵌的新版 wrapper 同步进去。
+	syncBrowserMCPScript(ctx, containerName, b.logger)
+
 	browserMgr := mcp.NewManager(b.logger.With("component", "browser_mcp"))
 	// 代理透传：部署侧自有出口（IP 归部署侧），空值直连。
 	// 注意：docker exec 不继承 docker 客户端进程的 env，必须把代理以 `-e` 注入容器内。
