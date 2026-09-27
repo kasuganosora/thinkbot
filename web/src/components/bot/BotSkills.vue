@@ -125,6 +125,7 @@ watch(() => props.botId, load, { immediate: true })
 function sourceLabel(src) {
   if (src === 'bundled') return '内置'
   if (src === 'managed') return '托管'
+  if (src === 'workspace') return '自装'
   return src || '本地'
 }
 

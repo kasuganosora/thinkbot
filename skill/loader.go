@@ -116,31 +116,13 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 		return nil, errs.Wrap(err, "read SKILL.md")
 	}
 
-	content := string(data)
-	meta, body := parseFrontMatter(content)
-
 	src := l.Source
 	if src == "" {
 		src = "fs"
 	}
-	skill := &Skill{
-		Name:          meta.Name,
-		Description:   meta.Description,
-		Compatibility: meta.Compatibility,
-		Content:       strings.TrimSpace(body),
-		Enabled:       meta.Enabled == nil || *meta.Enabled, // nil 或 true → 默认启用
-		Source:        src,
-		Dir:           skillDir,
-		// 委托执行声明透传；分级（heavy/light）由 Skill.IsHeavy 按声明 + 体积动态判定
-		Delegation: meta.Delegation,
-	}
-
-	// 校验必填字段
-	if skill.Name == "" {
-		return nil, fmt.Errorf("SKILL.md: missing required field `name`")
-	}
-	if skill.Description == "" {
-		return nil, fmt.Errorf("SKILL.md: missing required field `description`")
+	skill, err := newSkillFromContent(string(data), src, skillDir)
+	if err != nil {
+		return nil, err
 	}
 
 	// 扫描附加资源
@@ -154,6 +136,30 @@ func (l *Loader) LoadSkill(skillDir string) (*Skill, error) {
 		"level", skill.Level(), // 分级标注：light / heavy（delegation 声明 + 体积阈值）
 	)
 
+	return skill, nil
+}
+
+// newSkillFromContent 由 SKILL.md 原文构建 Skill（不含资源扫描），校验必填字段。
+// 文件系统 Loader 与沙箱工作空间来源（WorkspaceSource）共用。
+func newSkillFromContent(content, source, dir string) (*Skill, error) {
+	meta, body := parseFrontMatter(content)
+	skill := &Skill{
+		Name:          meta.Name,
+		Description:   meta.Description,
+		Compatibility: meta.Compatibility,
+		Content:       strings.TrimSpace(body),
+		Enabled:       meta.Enabled == nil || *meta.Enabled, // nil 或 true → 默认启用
+		Source:        source,
+		Dir:           dir,
+		// 委托执行声明透传；分级（heavy/light）由 Skill.IsHeavy 按声明 + 体积动态判定
+		Delegation: meta.Delegation,
+	}
+	if skill.Name == "" {
+		return nil, fmt.Errorf("SKILL.md: missing required field `name`")
+	}
+	if skill.Description == "" {
+		return nil, fmt.Errorf("SKILL.md: missing required field `description`")
+	}
 	return skill, nil
 }
 

@@ -23,6 +23,7 @@ import (
 // 运行时加载两处来源（后者同名覆盖前者）：
 //   1. 内置 bundled：仓库 skills/（只读，可启用/禁用）
 //   2. 托管 managed：{data}/skills/{botId}/（CRUD）
+//   3. 工作空间 workspace：bot 自装在沙箱工作空间 skills/ 下（只读，可启用/禁用，仅 bot 在跑时可见）
 //
 // 启用状态键：bot.{botId}.skill.{name}.enabled，回退全局 skill.{name}.enabled。
 // Bot 在跑时 CRUD / 开关会热更新该实例的 SkillManager。
@@ -34,7 +35,7 @@ type botSkillEntry struct {
 	Name          string `json:"name"`
 	Description   string `json:"description"`
 	Content       string `json:"content"`
-	Source        string `json:"source"` // bundled | managed
+	Source        string `json:"source"` // bundled | managed | workspace
 	Status        string `json:"status"` // enabled | disabled
 	Enabled       bool   `json:"enabled"`
 	Editable      bool   `json:"editable"`
@@ -91,6 +92,23 @@ func (s *Server) collectBotSkills(botID string) []botSkillEntry {
 	}
 
 	if mgr, ok := s.runningSkillMgr(botID); ok {
+		// bot 自装在沙箱工作空间里的技能（<workspace>/skills，只读展示，可启用/禁用）。
+		for _, info := range mgr.List() {
+			if info.Source != skill.SourceWorkspace {
+				continue
+			}
+			if _, dup := byName[info.Name]; dup {
+				continue
+			}
+			entry := botSkillEntry{
+				ID: info.Name, Name: info.Name, Description: info.Description,
+				Source: skill.SourceWorkspace, Editable: false,
+			}
+			if sk, found := mgr.Get(info.Name); found {
+				entry.Path = sk.Dir
+			}
+			byName[info.Name] = entry
+		}
 		for name, sk := range byName {
 			if info, found := mgr.GetInfo(name); found {
 				sk.Enabled = info.Enabled

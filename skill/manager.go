@@ -65,6 +65,11 @@ type SkillManager struct {
 	// 不改变 skills 中的注册信息，也不写 Store。
 	loaded map[string]struct{}
 
+	// workspace 是 bot 沙箱工作空间里自装技能的来源（可为 nil，见 workspace_source.go）；
+	// installDir 是告诉模型的自装技能位置。
+	workspace  *WorkspaceSource
+	installDir string
+
 	registry RegistryAdapter // prompt Section 注入适配器（可为 nil）
 	store    StoreAdapter    // 配置持久化适配器（可为 nil）
 	logger   Logger
@@ -583,7 +588,11 @@ func (m *SkillManager) buildTriggerPromptLocked() string {
 	buf.WriteString("5. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
 	buf.WriteString("6. When the task that needed a Skill is finished and you no longer need it, call `use_skill` with \"unload:<skill>\" to release it and keep the context clean; load it again with `use_skill` if needed later.\n")
 	buf.WriteString("7. DELEGATION: skills are graded `light` / `heavy` (see skill_search hits). A heavy Skill has a large instruction body; after loading it, prefer delegating the actual work to a subagent with the existing `spawn` tool and keep only the conclusions in your own context.\n")
-	buf.WriteString("8. NEVER mention a skill to the user without actually loading it.\n\n")
+	buf.WriteString("8. NEVER mention a skill to the user without actually loading it.\n")
+	if hint := m.installHintLocked(); hint != "" {
+		buf.WriteString("9. " + hint + "\n")
+	}
+	buf.WriteString("\n")
 	buf.WriteString("These instructions are in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.\n")
 	return buf.String()
 }
