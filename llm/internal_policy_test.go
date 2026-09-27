@@ -33,7 +33,7 @@ func TestInternalPolicy_AutoReasoningEffort(t *testing.T) {
 		want                            string
 	}{
 		// prod: bot 栞娜 on reasoning_effort=medium, main glm-5.3, light glm-5.2
-		{"prod dedup", "medium", "glm-5.3", PurposeMemoryDedup, nil, "low"},
+		{"prod dedup", "medium", "glm-5.3", PurposeMemoryDedup, nil, "high"},
 		{"prod auto-compact", "medium", "glm-5.3", PurposeAutoCompact, nil, "low"},
 		{"prod dream_score (none unsupported on 5.3)", "medium", "glm-5.3", PurposeDreamScore, nil, "low"},
 		{"prod lazy judge on light glm-5.2", "medium", "glm-5.2", PurposeLazyJudge, nil, "none"},
@@ -44,10 +44,10 @@ func TestInternalPolicy_AutoReasoningEffort(t *testing.T) {
 		{"unknown model, bot off", "", "gpt-4o", PurposeMemoryDedup, nil, ""},
 		{"unknown model, bot off, judge", "", "gpt-4o", PurposeLazyJudge, nil, ""},
 		// model def marks the reasoning capability → send; none downgraded to low
-		{"reasoning capability", "", "o4-mini", PurposeMemoryDedup, []string{"o4-mini"}, "low"},
+		{"reasoning capability", "", "o4-mini", PurposeMemoryDedup, []string{"o4-mini"}, "high"},
 		{"reasoning capability judge", "", "o4-mini", PurposeLazyJudge, []string{"o4-mini"}, "low"},
 		// documented family (GLM-5.2+) → send even when the bot sends nothing
-		{"glm-5.3 bot off", "", "glm-5.3", PurposeMemoryDedup, nil, "low"},
+		{"glm-5.3 bot off", "", "glm-5.3", PurposeMemoryDedup, nil, "high"},
 		{"glm-5.2 bot off judge", "", "glm-5.2", PurposeDreamScore, nil, "none"},
 		// GLM below 5.2 does not support the parameter
 		{"glm-5.1", "medium", "glm-5.1", PurposeMemoryDedup, nil, ""},
@@ -133,7 +133,7 @@ func TestInternalPolicy_ApplyClearsWhenNotSent(t *testing.T) {
 		t.Fatalf("not sent → must be cleared, got %v", *params.ReasoningEffort)
 	}
 	params.Model = ChatModel("glm-5.3")
-	if e := NewInternalPolicy(nil, "medium").Apply(PurposeMemoryDedup, &params); e != "low" || *params.ReasoningEffort != "low" {
+	if e := NewInternalPolicy(nil, "medium").Apply(PurposeMemoryDedup, &params); e != "high" || *params.ReasoningEffort != "high" {
 		t.Fatalf("got %q", e)
 	}
 }
@@ -141,7 +141,7 @@ func TestInternalPolicy_ApplyClearsWhenNotSent(t *testing.T) {
 func TestInternalPurposes_Defaults(t *testing.T) {
 	want := map[string]string{
 		PurposeLazyJudge: "none", PurposeEngagementJudge: "none", PurposeDreamScore: "none", PurposeDreamCluster: "none",
-		PurposeDreamExtract: "low", PurposeMemoryDedup: "low", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
+		PurposeDreamExtract: "low", PurposeMemoryDedup: "high", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
 		PurposeUserProfiler: "low", PurposeBotProfiler: "low", PurposeWorkflowHeal: "low", PurposeVision: "low",
 		PurposeNotify: "low",
 	}
