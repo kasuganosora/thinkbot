@@ -365,6 +365,7 @@ result, err := wfMgr.Recover(context.Background())
 - `Recover()` 启动时扫描终态且 `NeedsContinuation==true` 的工作流（`Repository.FindNeedingContinuation`；GORM 无法查 JSON 内字段，取全量后内存过滤，纯内存模式扫缓存），按 `continuationRecoverySkipReason` 筛选：只有带 `ContinuationInjectedAt`（新语义）、`ContinuationRecoveries < 1`、注入不超过 12 小时的才重新注入；其余（`legacy_flag` 旧标记 / `already_recovered` / `too_old`）只清标记、不注入。注入前先落库 `ContinuationRecoveries++` 并清标记，保证同一工作流最多自动补注入一次
 - 续跑消息每次使用唯一消息 ID（`wfc_…`，不再复用 sessionID，否则同会话第二次续跑会被 ingress 当作重复消息丢弃）；Telegram 续跑的 traceID 也唯一，并标记 `__history_managed`，续跑回复经出站 enricher 落库到 `chat_messages`；web 续跑的 traceID 仍为 sessionID（前端按会话 resume）
 - 失败 / 终止的工作流续跑文本如实说明「已结束但没有成功」，不再写成「已执行完成」
+- 续跑回合的身份：`task` 提交时把原回合身份（平台 / 会话 / 用户 / 账号名，`Workflow.Origin`，取自 LLMStage 注入的会话上下文；系统会话 / 子代理回合不记录）存进工作流。续跑注入时，平台一致（且 Telegram 会话一致）才以原用户身份注入，工具权限由 toolperm 按原平台 / 会话 / 用户评估，与原回合相同、不会更多；无 Origin 的旧工作流或平台不一致时仍为 `system`
 - 恢复数量记入 `RecoveryResult.Continued`
 - `Manager.TriggerContinuation(wfID)` 支持手动重触发（前端 resume 按钮 / `POST /api/workflows/:wfId/continue`）：直接调用终态回调（绕过 `consumed` 去重），可多次调用；非终态工作流不可触发
 
