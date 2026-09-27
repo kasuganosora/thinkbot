@@ -80,6 +80,16 @@ func (c *WebChannel) Stop(_ context.Context) error {
 // Inject 向 Bot 注入一条 Web 消息。
 // traceID 用于关联回复。extraMetadata 中的键值会合并到 Message.Metadata 中。
 func (c *WebChannel) Inject(ctx context.Context, traceID, userID, text string, extraMetadata map[string]any) error {
+	return c.InjectWithID(ctx, traceID, traceID, userID, text, extraMetadata)
+}
+
+// InjectWithID 与 Inject 相同，但消息 ID 与 traceID 分开指定。
+// 用于同一 traceID 可能多次注入的场景（workflow 续跑按会话 traceID 注入）：ingress 按消息 ID
+// 去重，复用 traceID 作消息 ID 会把第二次注入当成重复消息丢弃。
+func (c *WebChannel) InjectWithID(ctx context.Context, msgID, traceID, userID, text string, extraMetadata map[string]any) error {
+	if msgID == "" {
+		msgID = traceID
+	}
 	c.mu.RLock()
 	ingress := c.ingress
 	c.mu.RUnlock()
@@ -96,7 +106,7 @@ func (c *WebChannel) Inject(ctx context.Context, traceID, userID, text string, e
 	metadata["channel_type"] = "web"
 
 	msg := core.Message{
-		ID:        traceID,
+		ID:        msgID,
 		TraceID:   traceID,
 		BotID:     c.botID,
 		Source:    c.name,

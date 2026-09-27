@@ -209,6 +209,13 @@ type Workflow struct {
 	// 的工作流并自动重新注入续跑消息（仅一次），避免「工作流跑完但 agent 没继续」。
 	// 由 Manager.SetNeedsContinuation 维护；仅当 onWorkflowCompleted 真正注入成功时置位。
 	NeedsContinuation bool `json:"needsContinuation,omitempty"`
+	// ContinuationInjectedAt 最近一次续跑消息注入成功的时刻（SetNeedsContinuation(true) 维护）。
+	// 启动续跑恢复只处理带此字段的工作流：旧数据的 NeedsContinuation 在续跑回合完成后从不清除，
+	// 无法区分「续跑被重启打断」和「早已续跑并回复」，一律不再自动注入。
+	ContinuationInjectedAt *time.Time `json:"continuationInjectedAt,omitempty"`
+	// ContinuationRecoveries 启动时自动重新注入续跑的次数。上限 maxContinuationRecoveries，
+	// 保证同一工作流不会在每次部署后被反复注入（幂等）。
+	ContinuationRecoveries int `json:"continuationRecoveries,omitempty"`
 
 	// 内部索引，不序列化
 	nodeIndex map[string]*DAGNode `json:"-"`

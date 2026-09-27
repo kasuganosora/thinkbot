@@ -360,8 +360,11 @@ result, err := wfMgr.Recover(context.Background())
 
 崩溃若发生在「工作流已完成、续跑 agent 回复尚未落库」之间，重启后 agent 上下文随引擎关闭而丢失，续跑回复永远不会产生。`Workflow.NeedsContinuation` 持久化标记 + `Manager.recoverContinuations` 解决这个悬浮态：
 
-- 引擎在终态回调真正注入续跑消息时置位 `NeedsContinuation`（仅值变化时写库，避免无谓双写）
-- `Recover()` 启动时扫描终态且 `NeedsContinuation==true` 的工作流（`Repository.FindNeedingContinuation`；GORM 无法查 JSON 内字段，取全量后内存过滤，纯内存模式扫缓存），重新注入续跑消息并**清除标记**——自动续跑只发生一次，避免每次重启重复注入污染会话
+- 引擎在终态回调真正注入续跑消息时置位 `NeedsContinuation`，并记录 `ContinuationInjectedAt`
+- 续跑回合**正常跑完**后，api 层的 `workflow-continuation-ack` stage（order 860）调用 `Manager.ConfirmContinuation` 清除持久化标记（只清持久化，不动前端轮询用的内存标记）；回合被停机打断（ctx 已取消）则不确认。旧实现从不清除标记，导致每次部署都把早已续跑并回复过的工作流（含失败的）重新注入会话（2026-09-28 线上）
+- `Recover()` 启动时扫描终态且 `NeedsContinuation==true` 的工作流（`Repository.FindNeedingContinuation`；GORM 无法查 JSON 内字段，取全量后内存过滤，纯内存模式扫缓存），按 `continuationRecoverySkipReason` 筛选：只有带 `ContinuationInjectedAt`（新语义）、`ContinuationRecoveries < 1`、注入不超过 12 小时的才重新注入；其余（`legacy_flag` 旧标记 / `already_recovered` / `too_old`）只清标记、不注入。注入前先落库 `ContinuationRecoveries++` 并清标记，保证同一工作流最多自动补注入一次
+- 续跑消息每次使用唯一消息 ID（`wfc_…`，不再复用 sessionID，否则同会话第二次续跑会被 ingress 当作重复消息丢弃）；Telegram 续跑的 traceID 也唯一，并标记 `__history_managed`，续跑回复经出站 enricher 落库到 `chat_messages`；web 续跑的 traceID 仍为 sessionID（前端按会话 resume）
+- 失败 / 终止的工作流续跑文本如实说明「已结束但没有成功」，不再写成「已执行完成」
 - 恢复数量记入 `RecoveryResult.Continued`
 - `Manager.TriggerContinuation(wfID)` 支持手动重触发（前端 resume 按钮 / `POST /api/workflows/:wfId/continue`）：直接调用终态回调（绕过 `consumed` 去重），可多次调用；非终态工作流不可触发
 
