@@ -441,7 +441,7 @@ func (c *TelegramChannel) sendDocumentTool() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "telegram_send_document",
 			Description: "Send a file from the bot workspace as a Telegram document. " +
-				"filePath is relative to the workspace root (e.g. \"demo/hello.txt\"). " +
+				"filePath is a workspace path: relative to the workspace root /data (e.g. \"demo/hello.txt\") or absolute under it (\"/data/demo/hello.txt\"). " +
 				"chatId is optional — it defaults to the current conversation; only pass it explicitly to send to a different chat. " +
 				"caption is optional (max 1024 chars). Use this to deliver files you generated in the workspace (reports, code, exports).",
 			Parameters: map[string]any{
@@ -449,7 +449,7 @@ func (c *TelegramChannel) sendDocumentTool() agenttools.ToolDef {
 				"properties": map[string]any{
 					"filePath": map[string]any{
 						"type":        "string",
-						"description": "File path, relative to the bot workspace root",
+						"description": "Workspace file path: \"demo/hello.txt\" or \"/data/demo/hello.txt\"",
 					},
 					"chatId": map[string]any{
 						"type":        "integer",
@@ -486,10 +486,11 @@ func (c *TelegramChannel) sendDocumentTool() agenttools.ToolDef {
 				if c.fileSource == nil {
 					return nil, fmt.Errorf("telegram_send_document: workspace file source not configured")
 				}
-				data, err := c.fileSource(ctx, c.botID, path)
+				data, resolved, err := c.readWorkspaceFile(ctx, path)
 				if err != nil {
-					return nil, fmt.Errorf("read workspace file %q failed: %w", path, err)
+					return nil, err
 				}
+				path = resolved
 				if len(data) == 0 {
 					return nil, fmt.Errorf("telegram_send_document: file %q is empty", path)
 				}
@@ -541,7 +542,7 @@ func (c *TelegramChannel) sendPhotoTool() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "telegram_send_photo",
 			Description: "Send an image from the bot workspace as a Telegram photo (rendered with preview, not as a file attachment). " +
-				"filePath is relative to the workspace root (e.g. \"demo/bird.png\"). " +
+				"filePath is a workspace path: relative to the workspace root /data (e.g. \"demo/bird.png\") or absolute under it (\"/data/demo/bird.png\"). " +
 				"chatId is optional — it defaults to the current conversation; only pass it explicitly to send to a different chat. " +
 				"caption is optional (max 1024 chars). Use telegram_send_document for non-image files or when photo preview is not needed.",
 			Parameters: map[string]any{
@@ -586,10 +587,11 @@ func (c *TelegramChannel) sendPhotoTool() agenttools.ToolDef {
 				if c.fileSource == nil {
 					return nil, fmt.Errorf("telegram_send_photo: workspace file source not configured")
 				}
-				data, err := c.fileSource(ctx, c.botID, path)
+				data, resolved, err := c.readWorkspaceFile(ctx, path)
 				if err != nil {
-					return nil, fmt.Errorf("read workspace file %q failed: %w", path, err)
+					return nil, err
 				}
+				path = resolved
 				if len(data) == 0 {
 					return nil, fmt.Errorf("telegram_send_photo: file %q is empty", path)
 				}
