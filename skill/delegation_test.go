@@ -239,10 +239,11 @@ func TestBuildSkillListPrompt_LevelAnnotation(t *testing.T) {
 // use_skill 重型技能的委托提示
 // ============================================================================
 
-// TestDelegationNote 委托提示文案引用现有 spawn 工具名（不新造能力）。
+// TestDelegationNote 委托提示文案引用现有 spawn 工具名（不新造能力），
+// 且只在长任务时建议委托、并让子代理自己用 use_skill 加载技能。
 func TestDelegationNote(t *testing.T) {
 	note := DelegationNote()
-	for _, want := range []string{"spawn", "子代理", "主上下文"} {
+	for _, want := range []string{"spawn", "use_skill", "long", "short task", "do not spawn"} {
 		if !contains(note, want) {
 			t.Errorf("delegation note should mention %q, got %q", want, note)
 		}

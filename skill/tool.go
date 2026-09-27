@@ -118,7 +118,9 @@ const unloadCommandPrefix = "unload:"
 // DelegationNote 构造重型技能的委托执行提示（随 use_skill 的 tool_result 进入本轮上下文）。
 // 直接引用框架现有的 spawn 工具名（subagent 包提供），只做提示引导，不新造能力。
 func DelegationNote() string {
-	return "此技能较大，建议通过 spawn 子代理（subagent）委托执行以保持主上下文干净：用 spawn 工具派生子代理，把遵循该技能说明书的任务交给它执行，只取回结论。"
+	return "This Skill has a large instruction body. If the task ahead is long (many tool calls, large outputs, or parallel parts), " +
+		"you may delegate it with the spawn tool: tell the subagent which Skill to load with use_skill (it has that tool) and what result to return, " +
+		"then unload this Skill here. For a short task (a lookup or a few commands), just follow the Skill yourself; do not spawn."
 }
 
 // BuildUseSkillTool 构造 use_skill 工具定义（llm.Tool）。
@@ -137,10 +139,10 @@ Use this tool when the request involves a specific domain, system, or data forma
 
 Rules:
 - DISCOVERY FIRST: The full skill catalog is NOT injected into your context, so you do not know the exact skill names. Before loading a skill you have not loaded in this conversation, call skill_search with a few keywords to get its exact name; use use_skill with command "list" only when you truly need the full catalog. NEVER guess a name (e.g. "ctrip" when the skill is "ctrip-wendao") and NEVER use tool_search to look for skills — tool_search only finds tools.
-- CRITICAL: As soon as skill_search shows a relevant Skill, load it with this tool before attempting the task. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded.
+- CRITICAL: As soon as skill_search shows a relevant Skill, load it with this tool before attempting the task. Do NOT attempt the task, and do NOT call other tools, before the Skill is loaded (the one exception is delegating a long task on a heavy Skill, see DELEGATION).
 - After loading, you MUST follow the Skill's instructions. They override your general defaults for that task.
 - The result may include `+"`baseDir`"+`, `+"`scripts`"+` and `+"`references`"+`. Prefer the Skill's own scripts over improvising an equivalent yourself.
-- DELEGATION: Hits and results are tagged light / heavy. A heavy Skill has a large instruction body (or declares delegation). When a heavy Skill is loaded, the result carries a note: prefer delegating the actual work to a subagent with the existing spawn tool and keep only the conclusions in your context. Unload the Skill when done.
+- DELEGATION: Hits and results are tagged light / heavy. A heavy Skill has a large instruction body (or declares delegation). Delegate only when the task itself is long (many tool calls, large outputs, or parallel parts): call spawn and tell the subagent to load the Skill with use_skill itself and return only the result; then you do not need to load it yourself. For short tasks, load and follow the Skill yourself, heavy or not. Size alone is never a reason to spawn. Unload the Skill when done.
 - NEVER mention or describe a Skill without actually loading it.
 - Load each Skill at most once per task. Do NOT reload a Skill that is already active.
 - UNLOAD: When the task that needed a Skill is finished and you no longer need it, call use_skill with command "unload:<skill>" (e.g. "unload:pdf") to release it. The returned note means the Skill's instructions no longer apply; if you need it again later, simply load it again with use_skill. Unloading keeps the context clean when working across many different tasks.
@@ -154,7 +156,10 @@ user: 现在再帮我处理这个 Excel
 assistant: [calls use_skill with command "unload:pdf" since the PDF task is done, then calls use_skill with command "xlsx"]
 
 user: 帮我按这份大型行程生成规范做一份完整的行程规划报告
-assistant: [calls skill_search with "trip planner", sees the hit is tagged heavy, calls use_skill with that skill, then delegates the heavy reading-and-drafting work to a subagent via the spawn tool and returns only the conclusion]
+assistant: [calls skill_search with "trip planner", sees the hit is tagged heavy and the job needs many searches and a long draft, so calls spawn with a task telling the subagent to load that skill with use_skill, do the research and drafting, and return the finished report]
+
+user: 查一下东京明天的天气
+assistant: [calls skill_search with "weather", calls use_skill with "weather", runs the one command it describes and answers; no spawn for a quick lookup]
 </example>`,
 		func(ctx *llm.ToolExecContext, input UseSkillInput) (any, error) {
 			mgr.refreshWorkspace(execContext(ctx))
@@ -286,7 +291,7 @@ Workflow:
 
 Rules:
 - This tool never loads skill content. It only returns metadata hits.
-- Each hit carries a level tag: light (normal) or heavy (large instruction body or delegation declared). For heavy hits, plan to delegate the work to a subagent via the existing spawn tool after loading, instead of reading everything in your own context.
+- Each hit carries a level tag: light (normal) or heavy (large instruction body or delegation declared). Heavy only means the instructions are long. If the task is also long, you may delegate it with spawn and tell the subagent to load the skill with use_skill; for short tasks load it yourself.
 - If nothing matches, broaden or change the keywords and retry; if still nothing, proceed without a Skill.`,
 		func(ctx *llm.ToolExecContext, input SkillSearchInput) (any, error) {
 			// 先（节流地）同步 bot 自装在工作空间里的技能，保证刚装好的技能可被检索到。
@@ -307,7 +312,7 @@ Rules:
 				// 复用 SearchHit 列表（name/description/score/level，description 已截断）；
 				// level 为 light/heavy 分级标注，提示 LLM 重型技能宜委托 spawn 子代理执行
 				"skills": hits,
-				"hint":   "Call use_skill with the skill's name exactly as shown to load it. Hits tagged heavy are large: prefer delegating the work to a subagent via the spawn tool.",
+				"hint":   "Call use_skill with the skill's name exactly as shown to load it. heavy = long instructions: for a long multi-step task you may instead spawn a subagent told to load that skill itself; for a short task load it yourself.",
 			}, nil
 		})
 	// tool_search 的发现探针：模型误用 tool_search 找技能时，据此把它引回 skill_search。

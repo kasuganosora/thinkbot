@@ -587,7 +587,7 @@ func (m *SkillManager) buildTriggerPromptLocked() string {
 	buf.WriteString("4. After loading, follow the skill's instructions exactly. They override your general defaults for that task.\n")
 	buf.WriteString("5. If no skill matches, proceed normally without loading. Load each skill at most once per task, and do NOT reload one already active.\n")
 	buf.WriteString("6. When the task that needed a Skill is finished and you no longer need it, call `use_skill` with \"unload:<skill>\" to release it and keep the context clean; load it again with `use_skill` if needed later.\n")
-	buf.WriteString("7. DELEGATION: skills are graded `light` / `heavy` (see skill_search hits). A heavy Skill has a large instruction body; after loading it, prefer delegating the actual work to a subagent with the existing `spawn` tool and keep only the conclusions in your own context.\n")
+	buf.WriteString("7. DELEGATION: skills are graded `light` / `heavy` (see skill_search hits); heavy only means the instruction body is long. Spawn a subagent only when the task itself is long (many tool calls, large outputs, parallel parts): tell it to load the skill with `use_skill` itself and return just the result. For short tasks load and follow the skill yourself; never spawn because of size alone.\n")
 	buf.WriteString("8. NEVER mention a skill to the user without actually loading it.\n")
 	if hint := m.installHintLocked(); hint != "" {
 		buf.WriteString("9. " + hint + "\n")
