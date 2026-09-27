@@ -668,8 +668,15 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 			"workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID)
 		return
 	}
-	// 续跑以「系统通知」形式注入：traceID 用 sessionID，便于前端按会话 resume 收到流式回复。
+	// 每次续跑都有自己唯一的消息 ID（绝不复用 sessionID）：ingress 按消息 ID 去重，
+	// 复用 sessionID 会让同一会话的第二次续跑被当成重复消息丢掉（2026-09-28 线上实证）。
+	// traceID：web 仍用 sessionID（前端按会话 resume 接收流式回复依赖它）；Telegram 用唯一 ID，
+	// 这样续跑回复按 trace 落库（UpsertAssistantByTrace）时不会覆盖上一次续跑的回复。
+	msgID := idgen.New("wfc")
 	traceID := sessionID
+	if kind, _ := splitSessionChannel(sessionID); kind == "tg" {
+		traceID = msgID
+	}
 	const userID = "system"
 
 	// 按会话加载聊天历史作为上下文，让 agent 续跑时保有完整背景。
@@ -681,37 +688,12 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 	}
 	history = s.chatHistory.ApplyContextCheckpoint(traceID, botID, sessionID, history)
 
-	done := 0
-	for _, n := range wf.Nodes {
-		if n.Status == workflow.NodeCompleted {
-			done++
-		}
-	}
-	text := fmt.Sprintf(
-		"系统通知：你此前通过 task 工具提交的工作流 %s 已执行完成（共 %d 个节点，%d 个已完成）。",
-		wf.ID, len(wf.Nodes), done,
-	)
-	if wf.GoalMode {
-		// GoalMode 工作流已自主把任务执行完，续跑只需汇报产出，切勿重跑任务——
-		// 否则 agent 会重新实现整个需求，撞上 LLM stage 15 分钟硬超时（墙钟上限），
-		// 导致回复永不落库（2026-09-02 线上实证：wf-d4778e9bf34a2004f3cea7e1 续跑
-		// 跑满 15 分钟被 orchestrate hard-timeout 掐死，session 9 始终无回复）。
-		text += fmt.Sprintf(
-			"该工作流以 GoalMode 自主完成了用户需求：%s。"+
-				"请直接基于各节点的实际产出，向用户做一份简明总结汇报"+
-				"（做了什么、关键产出落在哪些文件/路径、是否还有遗留项），不要再重新执行任务。",
-			wf.Requirement,
-		)
-	} else {
-		text += fmt.Sprintf(
-			"请基于工作流各节点的实际产出，继续完成用户最初的需求：%s。"+
-				"若需求已经被工作流结果满足，请向用户做简明总结；若还需要进一步操作，请直接继续执行。",
-			wf.Requirement,
-		)
-	}
+	text := workflowContinuationText(wf)
 
 	extraMeta := map[string]any{
 		agenttools.ExtraKeyChatSessionID: sessionID,
+		// 续跑回合跑完后由 workflow-continuation-ack stage 据此确认续跑（清持久化标记）。
+		metaKeyWorkflowContinuation: wf.ID,
 	}
 	if len(history) > 0 {
 		extraMeta["chat_history"] = history
@@ -726,7 +708,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 
 	// 按会话来源渠道路由续跑注入：TG 走真实渠道主动推回原会话，
 	// web/未知来源退回 WebChannel（落库 + 前端 resume）。
-	if err := s.injectWorkflowContinuation(botID, sessionID, traceID, userID, text, extraMeta); err != nil {
+	if err := s.injectWorkflowContinuation(botID, sessionID, msgID, traceID, userID, text, extraMeta); err != nil {
 		s.logger.Warnw("failed to inject workflow continuation", "err", err, "workflow_id", wf.ID)
 		return
 	}
@@ -739,7 +721,8 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 		mgr.SetNeedsContinuation(wf.ID, true)
 	}
 
-	s.logger.Infow("workflow continuation injected", "workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID)
+	s.logger.Infow("workflow continuation injected", "workflow_id", wf.ID, "bot_id", botID, "session_id", sessionID,
+		"message_id", msgID, "trace_id", traceID, "status", string(wf.Status))
 }
 
 // injectWorkflowContinuation 将工作流续跑指令注入到「发起会话的渠道」，
@@ -754,25 +737,34 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 //     暂退回 web 兜底（落库、不主动弹），与修复前行为一致，不引入退化。
 //
 // 返回 error 表示注入失败（渠道不可用等），调用方据此跳过后续标记。
-func (s *BotService) injectWorkflowContinuation(botID, sessionID, traceID, userID, text string, extraMeta map[string]any) error {
+func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID, userID, text string, extraMeta map[string]any) error {
 	kind, target := splitSessionChannel(sessionID)
 
 	if kind == "tg" {
-		return s.injectContinuationToTelegram(botID, target, traceID, userID, text, extraMeta)
+		return s.injectContinuationToTelegram(botID, target, msgID, traceID, continuationUser{userID: userID}, text, extraMeta)
 	}
 	// mk / web / 未知：退回 WebChannel 注入（落库 + 前端 resume）。
 	webCh, ok := s.GetWebChannel(botID)
 	if !ok {
 		return fmt.Errorf("web channel unavailable for bot %q, cannot inject continuation", botID)
 	}
-	return webCh.Inject(context.Background(), traceID, userID, text, extraMeta)
+	return webCh.InjectWithID(context.Background(), msgID, traceID, userID, text, extraMeta)
+}
+
+// metaKeyWorkflowContinuation 标记续跑回合对应的工作流 ID（消息 Metadata）。
+const metaKeyWorkflowContinuation = "workflow_continuation_id"
+
+// continuationUser 是续跑回合的发送者身份。
+type continuationUser struct {
+	userID   string
+	username string
 }
 
 // injectContinuationToTelegram 经 Telegram 渠道把续跑指令注入编排。
 // 关键：续跑消息的 Source 必须设为该 bot 已注册的 Telegram 渠道名
 // （replyHandler 路由键 = channel.Name()），Channel 设为原始 chatID（纯数字），
 // 这样 agent 续跑产出的回复才会经 Telegram Sender 投回原 chat。
-func (s *BotService) injectContinuationToTelegram(botID, chatID, traceID, userID, text string, extraMeta map[string]any) error {
+func (s *BotService) injectContinuationToTelegram(botID, chatID, msgID, traceID string, id continuationUser, text string, extraMeta map[string]any) error {
 	if chatID == "" {
 		return fmt.Errorf("empty telegram chatID for bot %q", botID)
 	}
@@ -794,6 +786,15 @@ func (s *BotService) injectContinuationToTelegram(botID, chatID, traceID, userID
 		return fmt.Errorf("no telegram channel registered for bot %q", botID)
 	}
 
+	msg := buildTelegramContinuationMessage(botID, chName, chatID, msgID, traceID, id, text, extraMeta)
+	if err := b.Ingress().Receive(context.Background(), msg); err != nil {
+		return fmt.Errorf("telegram continuation inject failed: %w", err)
+	}
+	return nil
+}
+
+// buildTelegramContinuationMessage 构造注入 Telegram 渠道的续跑消息。
+func buildTelegramContinuationMessage(botID, chName, chatID, msgID, traceID string, id continuationUser, text string, extraMeta map[string]any) core.Message {
 	metadata := map[string]any{
 		"channel_type":   "telegram",
 		"source_channel": chName,
@@ -801,24 +802,27 @@ func (s *BotService) injectContinuationToTelegram(botID, chatID, traceID, userID
 	for k, v := range extraMeta {
 		metadata[k] = v
 	}
+	if id.username != "" {
+		metadata["username"] = id.username
+	}
+	// 续跑消息自带 chat_history，inbound-chat-history enricher 会跳过它，于是出站 enricher
+	// 也不会保存续跑回复（2026-09-28 线上：续跑回复发到了 TG 却没进 chat_messages）。
+	// 显式标记由会话历史托管，让出站 enricher 把续跑回复落库。
+	metadata["__history_managed"] = true
 
-	msg := core.Message{
-		ID:        traceID,
+	return core.Message{
+		ID:        msgID,
 		TraceID:   traceID,
 		BotID:     botID,
 		Source:    chName,
 		Channel:   chatID,
 		ChatType:  core.ChatPrivate,
-		UserID:    userID,
+		UserID:    id.userID,
 		Text:      text,
 		Mentioned: true,
 		CreatedAt: time.Now(),
 		Metadata:  metadata,
 	}
-	if err := b.Ingress().Receive(context.Background(), msg); err != nil {
-		return fmt.Errorf("telegram continuation inject failed: %w", err)
-	}
-	return nil
 }
 
 // splitSessionChannel 从 sessionID 解析渠道种类与真实会话标识。
@@ -1949,6 +1953,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	pb.Add(promptStageOrder, newMainPromptStage(promptReg, s.tp, s.logger))
 	pb.Add(100, wrappedLLM)
 	pb.Add(850, outboundHistoryEnricher)
+	pb.Add(860, s.workflowContinuationAckStage())
 	if (hbBundle != nil && groups[pipeline.GroupHeartbeat]) || outBundle != nil {
 		// 心跳频控预算重置 + 主动开口 last-seen。纯内存/一次 upsert，置于链首（Order=5）。
 		hb := hbBundle
@@ -3391,4 +3396,83 @@ func sanitizeInboundFilename(name string) string {
 		clean = clean[:maxLen-len(ext)] + ext
 	}
 	return clean
+}
+
+// workflowContinuationAckStage 在续跑回合跑完后确认续跑：清除工作流持久化的 NeedsContinuation，
+// 使之后的重启不再把早已续跑过的工作流重新注入（见 workflow.Manager.recoverContinuations）。
+// ctx 已取消（停机打断）时不确认，重启后仍可补注入一次。
+func (s *BotService) workflowContinuationAckStage() core.Stage {
+	return &core.StageFunc{
+		StageName: "workflow-continuation-ack",
+		Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+			if env == nil || env.Message.Metadata == nil {
+				return env, nil
+			}
+			wfID, _ := env.Message.Metadata[metaKeyWorkflowContinuation].(string)
+			if wfID == "" || ctx.Err() != nil {
+				return env, nil
+			}
+			if mgr := s.WorkflowEngine(env.Message.BotID); mgr != nil {
+				mgr.ConfirmContinuation(wfID)
+			}
+			return env, nil
+		},
+	}
+}
+
+// truncateRunesStr 按 rune 截断并追加省略号。
+func truncateRunesStr(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
+// workflowContinuationText 生成注入会话的续跑指令文本。
+func workflowContinuationText(wf *workflow.Workflow) string {
+	done := 0
+	for _, n := range wf.Nodes {
+		if n.Status == workflow.NodeCompleted {
+			done++
+		}
+	}
+	text := fmt.Sprintf(
+		"系统通知：你此前通过 task 工具提交的工作流 %s 已执行完成（共 %d 个节点，%d 个已完成）。",
+		wf.ID, len(wf.Nodes), done,
+	)
+	if wf.Status != workflow.WorkflowCompleted {
+		// 失败 / 终止的工作流不能说成「已执行完成」，否则 agent 会向用户报喜。
+		text = fmt.Sprintf(
+			"系统通知：你此前通过 task 工具提交的工作流 %s 已结束，但没有成功（状态：%s，共 %d 个节点，%d 个已完成）。",
+			wf.ID, wf.Status, len(wf.Nodes), done,
+		)
+		if e := strings.TrimSpace(wf.Error); e != "" {
+			text += "错误：" + truncateRunesStr(e, 300) + "。"
+		}
+		text += fmt.Sprintf(
+			"用户最初的需求：%s。请用 task_detail 查看各节点的实际产出和失败原因，"+
+				"如实告诉用户哪些做成了、哪些没做成；不要声称任务已经完成。",
+			wf.Requirement,
+		)
+	} else if wf.GoalMode {
+		// GoalMode 工作流已自主把任务执行完，续跑只需汇报产出，切勿重跑任务——
+		// 否则 agent 会重新实现整个需求，撞上 LLM stage 15 分钟硬超时（墙钟上限），
+		// 导致回复永不落库（2026-09-02 线上实证：wf-d4778e9bf34a2004f3cea7e1 续跑
+		// 跑满 15 分钟被 orchestrate hard-timeout 掐死，session 9 始终无回复）。
+		text += fmt.Sprintf(
+			"该工作流以 GoalMode 自主完成了用户需求：%s。"+
+				"请直接基于各节点的实际产出，向用户做一份简明总结汇报"+
+				"（做了什么、关键产出落在哪些文件/路径、是否还有遗留项），不要再重新执行任务。",
+			wf.Requirement,
+		)
+	} else {
+		text += fmt.Sprintf(
+			"请基于工作流各节点的实际产出，继续完成用户最初的需求：%s。"+
+				"若需求已经被工作流结果满足，请向用户做简明总结；若还需要进一步操作，请直接继续执行。",
+			wf.Requirement,
+		)
+	}
+
+	return text
 }

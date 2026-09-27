@@ -325,14 +325,39 @@ func (m *Manager) SetNeedsContinuation(wfID string, v bool) {
 	}
 	m.consumeMu.Unlock()
 
-	// 持久化续跑标记（仅在值有变化时写库，避免无谓双写）。
-	if wf, err := m.repo.Get(wfID); err == nil && wf.NeedsContinuation != v {
+	// 持久化续跑标记。置位时同时记录注入时刻（启动续跑恢复据此判断是否是新语义下的标记）。
+	if wf, err := m.repo.Get(wfID); err == nil && (wf.NeedsContinuation != v || v) {
 		wf.NeedsContinuation = v
+		if v {
+			now := time.Now()
+			wf.ContinuationInjectedAt = &now
+		}
 		if err := m.repo.Save(wf); err != nil {
 			m.logger.Warnw("failed to persist needs_continuation flag",
 				"workflow_id", wfID, "value", v, "error", err)
 		}
 	}
+}
+
+// ConfirmContinuation 在续跑回合正常跑完后调用：清除持久化的 NeedsContinuation，
+// 使之后的重启不再把这个早已续跑过的工作流重新注入会话（2026-09-28 线上：每次部署都会
+// 把已完成 / 已失败且早已回复过的工作流再注入一遍）。
+// 只清持久化标记，不动前端轮询用的内存标记（前端可能尚未消费它）。
+func (m *Manager) ConfirmContinuation(wfID string) {
+	if wfID == "" {
+		return
+	}
+	wf, err := m.repo.Get(wfID)
+	if err != nil || !wf.NeedsContinuation {
+		return
+	}
+	wf.NeedsContinuation = false
+	if err := m.repo.Save(wf); err != nil {
+		m.logger.Warnw("failed to clear needs_continuation after continuation turn",
+			"workflow_id", wfID, "error", err)
+		return
+	}
+	m.logger.Infow("workflow continuation confirmed", "workflow_id", wfID)
 }
 
 // TriggerContinuation 手动/自动重触发工作流续跑：重新注入续跑消息唤醒 agent。
@@ -1003,8 +1028,37 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 	return result, nil
 }
 
-// recoverContinuations 续跑恢复：对终态且 NeedsContinuation==true 的工作流重新注入
-// 续跑消息，并清除持久化标记（保证自动续跑只发生一次，避免每次重启重复注入污染会话）。
+// 启动续跑恢复的约束（幂等）：
+//   - maxContinuationRecoveries：同一工作流最多自动重注入一次；
+//   - continuationRecoveryMaxAge：续跑注入超过这个时长仍未确认的，不再补注入
+//     （停机很久后再把旧结果推给用户只会是噪音，用户可随时用 task_detail 查）。
+const (
+	maxContinuationRecoveries  = 1
+	continuationRecoveryMaxAge = 12 * time.Hour
+)
+
+// continuationRecoverySkipReason 判断一个 NeedsContinuation==true 的终态工作流是否应在启动时
+// 重新注入续跑；返回非空原因表示跳过（并应清除标记）。
+//
+// 只有「续跑消息已注入、但续跑回合还没跑完服务就停了」才需要补：续跑回合正常结束时
+// ConfirmContinuation 会清掉标记。没有 ContinuationInjectedAt 的是旧语义下的标记
+// （旧代码从不清除，已续跑并回复过的工作流也带着它），一律跳过。
+func continuationRecoverySkipReason(wf *Workflow, now time.Time) string {
+	switch {
+	case !wf.Status.IsTerminal():
+		return "not_terminal"
+	case wf.ContinuationInjectedAt == nil:
+		return "legacy_flag"
+	case wf.ContinuationRecoveries >= maxContinuationRecoveries:
+		return "already_recovered"
+	case now.Sub(*wf.ContinuationInjectedAt) > continuationRecoveryMaxAge:
+		return "too_old"
+	}
+	return ""
+}
+
+// recoverContinuations 续跑恢复：对「续跑回合被重启打断」的终态工作流重新注入续跑消息（至多一次），
+// 其余带标记的工作流（旧语义标记、已恢复过、过旧）只清除标记、不注入。
 func (m *Manager) recoverContinuations(ctx context.Context, result *RecoveryResult) {
 	wfs, err := m.repo.FindNeedingContinuation()
 	if err != nil {
@@ -1014,26 +1068,36 @@ func (m *Manager) recoverContinuations(ctx context.Context, result *RecoveryResu
 	if len(wfs) == 0 {
 		return
 	}
-	m.logger.Infow("continuation recovery: found workflows needing continuation", "count", len(wfs))
+	m.logger.Infow("continuation recovery: found workflows flagged for continuation", "count", len(wfs))
+	now := time.Now()
 	for _, wf := range wfs {
+		if reason := continuationRecoverySkipReason(wf, now); reason != "" {
+			m.logger.Infow("continuation recovery: skipping, clearing flag",
+				"workflow_id", wf.ID, "status", wf.Status, "reason", reason, "session_id", wf.SessionID)
+			wf.NeedsContinuation = false
+			if err := m.repo.Save(wf); err != nil {
+				m.logger.Warnw("continuation recovery: failed to clear needs_continuation flag",
+					"workflow_id", wf.ID, "error", err)
+			}
+			continue
+		}
 		fn := m.onWorkflowCompleted
 		if fn == nil {
 			m.logger.Warnw("continuation recovery: no continuation callback (bot not started?), skipping",
 				"workflow_id", wf.ID)
 			continue
 		}
-		m.logger.Infow("continuation recovery: re-injecting continuation message",
+		// 先落库恢复计数再注入：即便注入过程中再次崩溃，也不会在下次启动时重复注入。
+		wf.ContinuationRecoveries++
+		wf.NeedsContinuation = false
+		if err := m.repo.Save(wf); err != nil {
+			m.logger.Warnw("continuation recovery: failed to persist recovery count, skipping",
+				"workflow_id", wf.ID, "error", err)
+			continue
+		}
+		m.logger.Infow("continuation recovery: re-injecting interrupted continuation",
 			"workflow_id", wf.ID, "status", wf.Status, "bot_id", wf.BotID, "session_id", wf.SessionID)
 		fn(wf)
-
-		// 自动续跑只触发一次：清持久化标记，避免后续重启再次注入重复消息。
-		if wf.NeedsContinuation {
-			wf.NeedsContinuation = false
-			if err := m.repo.Save(wf); err != nil {
-				m.logger.Warnw("continuation recovery: failed to clear needs_continuation flag",
-					"workflow_id", wf.ID, "error", err)
-			}
-		}
 		result.Continued++
 	}
 }
