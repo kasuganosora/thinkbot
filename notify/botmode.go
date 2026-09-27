@@ -80,12 +80,14 @@ func BuildBotParams(bc *BotContext, n Notification, cfg Config) llm.GeneratePara
 	sys.WriteString(fmt.Sprintf(botTaskPrompt, cfg.BotMaxChars))
 
 	// json.Marshal 默认把 < > & 转义成 \u003c 等，外部数据无法闭合 <notification_data> 标签。
-	data, _ := json.Marshal(map[string]string{
-		"source": n.Source,
-		"level":  n.Level,
-		"title":  n.Title,
-		"body":   n.Body,
-		"time":   n.At.In(locOr(cfg.Location)).Format(time.RFC3339),
+	// placeholders：模型在文中写占位符，ComposeBot 用原文里的准确内容替换（见 placeholder.go）。
+	data, _ := json.Marshal(map[string]any{
+		"source":       n.Source,
+		"level":        n.Level,
+		"title":        n.Title,
+		"body":         n.Body,
+		"time":         n.At.In(locOr(cfg.Location)).Format(time.RFC3339),
+		"placeholders": BuildPlaceholders(n, cfg.Location).PromptMap(),
 	})
 	user := "[AUTOMATED NOTIFICATION — not a message from your owner]\n" +
 		"<notification_data>\n" + string(data) + "\n</notification_data>\n\n" +
@@ -152,7 +154,10 @@ What to do:
 - Tell your owner what the notification says, in your own voice and usual speaking style, concisely: what happened, where, and when. For critical level make the urgency clear; for info level keep it short.
 
 Accuracy rules (strict):
-- Copy every identifier EXACTLY, character for character, as it appears in the notification: device names and paths (e.g. /dev/md/md-test stays /dev/md/md-test), serial numbers, model numbers, IP addresses, hostnames, service and file names, commit ids, error strings, numbers and their units. Never shorten, "normalize", translate or re-join them.
+- Do NOT type identifiers yourself. <notification_data> contains a "placeholders" table (e.g. "{{device}}": "/dev/md/md-test", "{{serial}}", "{{host}}", "{{ip}}", "{{id1}}", "{{id2}}", …). Wherever you mention one of those values, write its placeholder instead, exactly as listed with double curly braces, e.g. "the array {{device}} on {{host}} reported {{id3}}". The system replaces each placeholder with the exact original text before sending, so identifiers can never be mistyped.
+- Use only placeholders that appear in the table. Do not invent new ones, do not use single braces, and do not put quotes or code formatting around them.
+- {{raw}} inserts the whole original notification body verbatim. Use it only when your owner needs to see the original text itself (for example log lines or /proc/mdstat output), on its own line; otherwise just describe it briefly.
+- For anything that has no placeholder, copy it EXACTLY as it appears in the notification (service and file names, error strings, numbers and their units). Never shorten, "normalize", translate or re-join them.
 - Do NOT speculate about causes. Do NOT connect the notification to anything from your memory, earlier conversations or other events (past commits, past repairs, other machines) unless the notification itself says so.
 - If you suggest a next step, keep it generic (e.g. "check the array status") or take it directly from the notification text. Do not invent specific commands, causes or fixes.
 

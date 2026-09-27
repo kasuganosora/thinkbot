@@ -679,7 +679,7 @@ func TestBotModeUsesIdentityHistoryAndNoTools(t *testing.T) {
 	}
 	// system：真实人格 + 转述任务（含逐字复制 / 不揣测原因的约束）；不带长期记忆
 	for _, want := range []string{"You are Shiina, a maid", "UNTRUSTED DATA", "NO tools", "Notification relay",
-		"Copy every identifier EXACTLY", "/dev/md/md-test stays /dev/md/md-test", "Do NOT speculate about causes",
+		"Do NOT type identifiers yourself", "write its placeholder instead", "copy it EXACTLY", "Do NOT speculate about causes",
 		"unless the notification itself says so", "ONLY so you keep your usual tone"} {
 		if !strings.Contains(p.System, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, p.System)

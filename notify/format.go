@@ -210,27 +210,48 @@ func formatRawBlock(n Notification, loc *time.Location, bodyRunes int) string {
 	return b.String()
 }
 
-// ComposeBot 把 bot 的文本与原始信息拼成最终发送文本，返回缺失的标识符（供日志）。
-//   - critical / warn：bot 文本 + 分隔线 + 原文块（来源 / 标题 / 正文逐字保留，基本不截断）。
-//   - info：若原文里的标识符（设备路径、序列号、IP、主机名、提交哈希……）有任何一个没有
-//     逐字出现在 bot 文本里（模型改写 / 拼错了），同样附原文块；否则只附一行「来源 · 标题」脚注。
+// ComposeReport 描述 ComposeBot 的事后校验结果（供日志）。
+type ComposeReport struct {
+	Missing   []string // 替换后仍未逐字出现在消息里的标识符
+	Unknown   []string // 模型写了表里没有的占位符
+	Malformed bool     // 占位符写坏（括号不成对 / 单花括号）
+	Used      []string // 成功替换的占位符
+}
+
+// NeedsRaw 表示 bot 文本不可完全信任，需要附原文块。
+func (r ComposeReport) NeedsRaw() bool {
+	return len(r.Missing) > 0 || len(r.Unknown) > 0 || r.Malformed
+}
+
+// ComposeBot 把 bot 的文本与原始信息拼成最终发送文本。
 //
-// 这是确定性的事后校验：模型把 /dev/md/md-test 写成 /dev/md-md-test 这类失真，主人仍能在
-// 原文块里看到正确的值。模型凭空编造的原因无法检测，由 prompt 约束。
-// bot 文本为空时回落 raw。
-func ComposeBot(text string, n Notification, loc *time.Location) (string, []string) {
+// 先 FillPlaceholders：模型在文中写 {{device}} / {{id1}} / {{raw}} 等占位符，这里换成
+// 原文里的准确内容，模型不再自己重打标识符。然后做确定性的事后校验：
+//   - critical / warn：bot 文本 + 分隔线 + 原文块（来源 / 标题 / 正文逐字保留，基本不截断）。
+//     若模型用了 {{raw}}（正文已逐字在消息里）且占位符都正确，只附一行来源 / 标题 / 时间，避免正文重复两遍。
+//   - info：占位符写错（未知名字 / 括号不成对），或原文里的某个标识符替换后仍没有逐字出现
+//     （模型既没用占位符、又抄错或漏写），附原文块；否则只附一行「来源 · 标题」脚注。
+//
+// 模型凭空编造的原因无法检测，由 prompt 约束。bot 文本为空时回落 raw。
+func ComposeBot(text string, n Notification, loc *time.Location) (string, ComposeReport) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return FormatRaw(n, loc), nil
+		return FormatRaw(n, loc), ComposeReport{}
 	}
-	missing := MissingIdentifiers(n, text)
+	fill := FillPlaceholders(text, BuildPlaceholders(n, loc))
+	text = strings.TrimSpace(fill.Text)
+	rep := ComposeReport{Unknown: fill.Unknown, Malformed: fill.Malformed, Used: fill.Used}
+	rep.Missing = MissingIdentifiers(n, text)
 	switch {
+	case (n.Level == LevelCritical || n.Level == LevelWarn) && fill.RawUsed && !rep.NeedsRaw():
+		return text + "\n\n— " + Badge(n.Level) + " · " + n.Source + " · " + n.Title +
+			" · " + n.At.In(locOr(loc)).Format("2006-01-02 15:04:05 MST"), rep
 	case n.Level == LevelCritical || n.Level == LevelWarn:
-		return text + "\n\n—— 原始告警 ——\n" + FormatCriticalRaw(n, loc), missing
-	case len(missing) > 0:
-		return text + "\n\n—— 原始通知 ——\n" + FormatCriticalRaw(n, loc), missing
+		return text + "\n\n—— 原始告警 ——\n" + FormatCriticalRaw(n, loc), rep
+	case rep.NeedsRaw():
+		return text + "\n\n—— 原始通知 ——\n" + FormatCriticalRaw(n, loc), rep
 	default:
-		return text + "\n\n— " + n.Source + " · " + n.Title, nil
+		return text + "\n\n— " + n.Source + " · " + n.Title, rep
 	}
 }
 
@@ -250,6 +271,9 @@ var (
 	identFQDNRE = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b`)
 	// 钩子正文里的「host: xxx」行。
 	identHostLineRE = regexp.MustCompile(`(?mi)^\s*host(?:name)?\s*:\s*([A-Za-z0-9._-]+)\s*$`)
+	// 数字+单位（大写，序列号正则会命中的形式）：65536KB、4TB、512MIB、65536K、7200RPM、100MBPS、3GHZ、500MS。
+	// 刻意不收单字母的 S/H/D/V/A/C 等：「123456A」这类更可能是真序列号。
+	quantityRE = regexp.MustCompile(`^[0-9]+(?:[KMGTPE]I?B?|B|BPS|[KMG]BPS|[KMG]?HZ|RPM|IOPS|MS|US|NS|MIN)$`)
 )
 
 // maxIdentifiers 限制单条通知参与校验的标识符数量（超长正文如大段日志）。
@@ -286,6 +310,10 @@ func ExtractIdentifiers(n Notification) []string {
 		}
 	}
 	for _, tok := range identSerialRE.FindAllString(src, -1) {
+		if quantityRE.MatchString(tok) {
+			// 65536KB、512MB、7200RPM 是「数字+单位」的数量，不是序列号 / 型号。
+			continue
+		}
 		if strings.ContainsAny(tok, "0123456789") && strings.ContainsAny(tok, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
 			add(tok)
 		}

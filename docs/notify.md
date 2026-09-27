@@ -88,11 +88,24 @@ invalid UTF-8 are removed.
     default 6; at most 1000 chars per message / 6000 total; same loader as inbound
     Telegram turns, context checkpoints applied; text only);
   - a relay instruction: say what happened, where and when, concisely in its own
-    voice; copy every identifier character for character (device names and paths,
-    serials, model numbers, IPs, hostnames, commit ids, error strings, numbers and
-    units); do not speculate about causes or connect the alert to memory / earlier
-    conversations unless the notification says so; suggested checks only generic or
-    taken from the notification.
+    voice; **never type identifiers, write placeholders instead** (see below); copy
+    anything without a placeholder exactly; do not speculate about causes or connect
+    the alert to memory / earlier conversations unless the notification says so;
+    suggested checks only generic or taken from the notification.
+
+  **Placeholders.** The notification JSON carries a `placeholders` table built by
+  code from the title/body: `{{device}}` (first `/dev/…` path, else `mdN`),
+  `{{serial}}` (value after `S/N:` / `serial:` that contains a digit), `{{host}}`
+  (`host:` line, else first FQDN), `{{ip}}`, one `{{idN}}` per extracted identifier
+  (same extractor as the post-check below), plus `{{source}}`, `{{title}}`,
+  `{{time}}` and `{{raw}}` (the whole original body). Aliases only exist when found;
+  the model sees each placeholder's value. The model writes e.g.
+  `the array {{device}} on {{host}}` and the service substitutes the exact original
+  text (single pass, names case-insensitive, `{{ name }}` allowed), so identifiers
+  are never retyped. An unknown placeholder is replaced by `（见下方原文）`;
+  unbalanced braces or single-brace forms (`{device}`) count as malformed. Either
+  forces the raw block (below), whatever the level. The history keeps the filled
+  text.
 
   The notification itself is the last user message, as JSON inside
   `<notification_data>` (JSON escaping makes it impossible for the content to close
@@ -122,14 +135,20 @@ invalid UTF-8 are removed.
     to 4000 chars; it is already capped by `notify.max_body_chars`), so hardware key
     fields — md device, disk device, model/serial, event name and the full
     `/proc/mdstat` excerpt — are always present even if the model drops or garbles
-    them. Longer messages are split by the Telegram channel.
-  - `info`: a deterministic post-check extracts identifier-like tokens from the raw
-    title and body (paths such as `/dev/md/md-test`, `mdN`, serial/model-looking
-    tokens, hex commit ids, IPv4/IPv6, FQDNs, `host:` lines; `/proc/…` and `/sys/…`
-    labels ignored). If any of them is not in the bot's text verbatim (e.g. the model
-    wrote `/dev/md-md-test`), the raw block is appended under `—— 原始通知 ——` and the
-    missing tokens are logged; otherwise a one-line footer `— <source> · <title>` is
-    appended. (An invented cause cannot be detected this way; the prompt forbids it.)
+    them. Longer messages are split by the Telegram channel. Exception: when the
+    model inserted `{{raw}}` (the body is then already verbatim in the message) and
+    every placeholder was valid, only a one-line `— <badge> · <source> · <title> ·
+    <time>` footer is added, so the body is not sent twice.
+  - `info`: after substitution, a deterministic post-check extracts identifier-like
+    tokens from the raw title and body (paths such as `/dev/md/md-test`, `mdN`,
+    serial/model-looking tokens, hex commit ids, IPv4/IPv6, FQDNs, `host:` lines;
+    `/proc/…` and `/sys/…` labels ignored; number+unit quantities such as `65536KB`,
+    `512MIB`, `7200RPM` are not identifiers). If any of them is not in the final text
+    verbatim (the model neither used the placeholder nor copied it exactly, e.g.
+    wrote `/dev/md-md-test`), or a placeholder was unknown/malformed, the raw block is
+    appended under `—— 原始通知 ——` and the problems are logged; otherwise a one-line
+    footer `— <source> · <title>` is appended. (An invented cause cannot be detected
+    this way; the prompt forbids it.)
   - LLM error / timeout / panic / empty output (after cleaning) / bot without LLM →
     falls back to `raw`; the response then has `bot_used:false`.
 
