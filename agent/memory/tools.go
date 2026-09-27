@@ -152,7 +152,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					},
 					"old_text": map[string]any{
 						"type":        "string",
-						"description": "Short unique substring identifying the entry to replace or remove.",
+						"description": "Short unique substring copied exactly from the CURRENT text of the entry to replace or remove (not a paraphrase). Alternatively pass memory_id.",
 					},
 					"query": map[string]any{
 						"type":        "string",
@@ -219,7 +219,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					},
 					"memory_id": map[string]any{
 						"type":        "string",
-						"description": "Entry ID for remove by ID (alternative to old_text substring match).",
+						"description": "Entry ID for replace/remove by ID (alternative to old_text substring match; ids are shown by search/recent and in error candidates).",
 					},
 				},
 				"required": []string{"action"},
@@ -232,7 +232,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 
 				action, _ := m["action"].(string)
 				if action == "" {
-					return nil, fmt.Errorf("action is required")
+					return nil, missingActionError(m)
 				}
 
 				repo := config.Repo
@@ -286,7 +286,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					return result, err
 
 				default:
-					return nil, fmt.Errorf("unknown action '%s'. Use: add, replace, remove, search, recent, count, batch", action)
+					return nil, fmt.Errorf("unknown action '%s'. Use one of: %s", action, memoryActions)
 				}
 			},
 		),
@@ -397,9 +397,13 @@ func handleAdd(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope 
 func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
 	oldText, _ := m["old_text"].(string)
 	content, _ := m["content"].(string)
+	memoryID, _ := m["memory_id"].(string)
+	if memoryID == "" {
+		memoryID, _ = m["id"].(string)
+	}
 
-	if oldText == "" {
-		return nil, fmt.Errorf("old_text is required for 'replace' action")
+	if oldText == "" && memoryID == "" {
+		return nil, fmt.Errorf("old_text (exact substring of the entry) or memory_id is required for 'replace' action")
 	}
 	if content == "" {
 		keys := make([]string, 0, len(m))
@@ -427,17 +431,43 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 		return nil, errs.Wrap(err, "memory search failed")
 	}
 
-	matches := findSubstringMatches(entries, oldText)
+	var matches []Entry
+	if memoryID != "" {
+		// 按 ID 定位（可跨 scope：bot / global），与 remove 一致。
+		for _, e := range entries {
+			if e.ID == memoryID {
+				matches = append(matches, e)
+			}
+		}
+		if len(matches) == 0 {
+			homeScope, ok := resolveRemoveByID(ctx, repo, cfg, scope, memoryID)
+			if !ok {
+				return map[string]any{
+					"success": false,
+					"error":   fmt.Sprintf("No memory with id '%s' found in scope %s or other accessible scopes (bot/global).", memoryID, scope.Key()),
+				}, nil
+			}
+			if e, found := findEntryByIDInScope(ctx, repo, homeScope, memoryID); found {
+				scope = homeScope
+				matches = append(matches, e)
+			}
+		}
+	} else {
+		matches = findSubstringMatches(entries, oldText)
+	}
 	if len(matches) == 0 {
-		return map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("No entry matched '%s'.", oldText),
-		}, nil
+		if others := probeOtherScopesForSubstring(ctx, repo, cfg, scope, oldText); len(others) > 0 {
+			return map[string]any{
+				"success": false,
+				"error":   removeScopeHint(scope, oldText, others),
+			}, nil
+		}
+		return noMatchResponse(scope, oldText, closestEntries(entries, oldText)), nil
 	}
 	if len(matches) > 1 {
 		return map[string]any{
 			"success": false,
-			"error":   fmt.Sprintf("Multiple entries matched '%s'. Be more specific.", oldText),
+			"error":   fmt.Sprintf("Multiple entries matched '%s'. Be more specific, or pass memory_id.", oldText),
 			"matches": previewEntries(matches),
 		}, nil
 	}
@@ -534,15 +564,12 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sco
 				"error":   removeScopeHint(scope, oldText, others),
 			}, nil
 		}
-		return map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("No entry matched '%s'.", oldText),
-		}, nil
+		return noMatchResponse(scope, oldText, closestEntries(entries, oldText)), nil
 	}
 	if len(matches) > 1 {
 		return map[string]any{
 			"success": false,
-			"error":   fmt.Sprintf("Multiple entries matched '%s'. Be more specific.", oldText),
+			"error":   fmt.Sprintf("Multiple entries matched '%s'. Be more specific, or pass memory_id.", oldText),
 			"matches": previewEntries(matches),
 		}, nil
 	}
