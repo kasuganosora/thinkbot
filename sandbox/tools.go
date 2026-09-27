@@ -660,7 +660,7 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			// 检查 old_str 是否存在
 			count := strings.Count(content, oldStr)
 			if count == 0 {
-				return nil, fmt.Errorf("old_str not found in file %q", path)
+				return nil, oldStrNotFoundError(path, content, oldStr)
 			}
 			if count > 1 && !replaceAll {
 				return nil, fmt.Errorf("old_str appears %d times in file %q — must be unique. Set replace_all=true to replace all, or provide a longer string with more surrounding context", count, path)
