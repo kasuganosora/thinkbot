@@ -2,6 +2,8 @@ package llm
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -225,11 +227,132 @@ func TestIsUserIntentGrounded(t *testing.T) {
 		{"Follow Alice on Misskey", true}, // 英文
 		{"给这篇帖子点个赞", true},                // react
 		{"帮我查一下 misskey 上的用户", false},     // 只读查询，不含写动作动词
+		{"那你尝试下发一个misskey 验证下", true},    // 口语动词「发一个」
+		{"发条 misskey，内容你定", true},          // 口语动词「发条」
+		{"你修完后我帮你部署", false},             // 部署，非社交动作
 	}
 	for _, c := range cases {
 		if got := isUserIntentGrounded(c.req); got != c.want {
 			t.Errorf("isUserIntentGrounded(%q) = %v, want %v", c.req, got, c.want)
 		}
+	}
+}
+
+func TestCollectRecentUserMsgs(t *testing.T) {
+	mk := func(text string) Message {
+		return UserMessage(text)
+	}
+	if got := collectRecentUserMsgs(nil); got != nil {
+		t.Error("nil msgs should collect nothing")
+	}
+	// 只有 assistant 消息 → 不算（防止模型自我说服绕过护栏）
+	onlyAssistant := []Message{{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "发帖发帖"}}}}
+	if got := collectRecentUserMsgs(onlyAssistant); got != nil {
+		t.Error("assistant messages must not count as user intent context")
+	}
+	// 常规历史 → 收集到最近 3 条 user 消息（时间正序）
+	msgs := []Message{
+		mk("你好"),
+		{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "你好喵"}}},
+		mk("帮我修个 bug"),
+		{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "修好了"}}},
+		mk("发条 misskey，内容你定"),
+		{Role: MessageRoleAssistant, Content: []MessagePart{TextPart{Text: "正在处理"}}},
+		mk("内容你定就行"),
+	}
+	got := collectRecentUserMsgs(msgs)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 recent user msgs, got %d: %v", len(got), got)
+	}
+	if got[0] != "帮我修个 bug" || got[1] != "发条 misskey，内容你定" || got[2] != "内容你定就行" {
+		t.Errorf("expected chronological order, got %v", got)
+	}
+	// 窗口外授权：20 条之后的旧消息不该被收集到
+	var far []Message
+	far = append(far, mk("发条 misskey")) // 授权在第 1 条
+	for i := 0; i < 20; i++ {
+		far = append(far, mk(fmt.Sprintf("后续闲聊 %d", i)))
+	}
+	for _, m := range collectRecentUserMsgs(far) {
+		if m == "发条 misskey" {
+			t.Error("authorization outside lookback window must not be collected")
+		}
+	}
+}
+
+// mockIntentJudgeClient 可编程的快判客户端桩。resps 按次序出队，
+// 耗尽后重复最后一个；记录调用次数供重试断言。
+type mockIntentJudgeClient struct {
+	resps   []string
+	err     error
+	calls   int
+	gotSys  string
+	gotUsr  string
+}
+
+func (m *mockIntentJudgeClient) Chat(ctx context.Context, system, user string) (string, error) {
+	m.gotSys = system
+	m.gotUsr = user
+	m.calls++
+	if m.err != nil {
+		return "", m.err
+	}
+	if len(m.resps) == 0 {
+		return `{"verdict":"NO","reason":"mock 无回复"}`, nil
+	}
+	resp := m.resps[0]
+	if len(m.resps) > 1 {
+		m.resps = m.resps[1:]
+	}
+	return resp, nil
+}
+
+func TestCheckUserIntentGrounded(t *testing.T) {
+	ctx := context.Background()
+
+	// 关键词快速通道：命中高置信词，不调 LLM
+	mock := &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"NO\",\"reason\":\"不该到这一步\"}"}}
+	res := checkUserIntentGrounded(ctx, "misskey_follow_user", "在 misskey 上关注 @foo", nil,
+		&OrchestrateConfig{IntentJudge: mock})
+	if !res.grounded {
+		t.Error("keyword fast-path should ground intent without LLM call")
+	}
+	if mock.gotUsr != "" {
+		t.Error("keyword fast-path must not invoke the LLM judge")
+	}
+
+	// 未注入 judge → fail-closed
+	res = checkUserIntentGrounded(ctx, "misskey_follow_user", "给 cfblog 加无障碍树支持", nil, nil)
+	if res.grounded {
+		t.Error("no judge configured must fail closed")
+	}
+
+	// 关键词未命中 + judge 判 YES（口语授权「那你就发呗」由 LLM 翻案——
+	// 注意这句不含任何关键词，专门覆盖快速通道漏词的场景）
+	mock = &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"YES\",\"reason\":\"用户明确要求发帖\"}"}}
+	res = checkUserIntentGrounded(ctx, "misskey_create_note", "那你就发呗", nil,
+		&OrchestrateConfig{IntentJudge: mock})
+	if !res.grounded {
+		t.Errorf("judge YES should ground, reason=%q", res.reason)
+	}
+	if !strings.Contains(mock.gotUsr, "那你就发呗") {
+		t.Errorf("judge should receive the user request, got %q", mock.gotUsr)
+	}
+
+	// 关键词未命中 + judge 判 NO（只读查询不放行）
+	mock = &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"NO\",\"reason\":\"只是查询\"}"}}
+	res = checkUserIntentGrounded(ctx, "misskey_create_note", "帮我查下 misskey 上的用户", nil,
+		&OrchestrateConfig{IntentJudge: mock})
+	if res.grounded {
+		t.Error("judge NO must not ground")
+	}
+
+	// judge 报错 → fail-closed（同样用不含关键词的措辞，确保真的走了 judge）
+	mock = &mockIntentJudgeClient{err: errors.New("provider down")}
+	res = checkUserIntentGrounded(ctx, "misskey_create_note", "那你就发呗", nil,
+		&OrchestrateConfig{IntentJudge: mock})
+	if res.grounded {
+		t.Error("judge error must fail closed")
 	}
 }
 
@@ -245,7 +368,7 @@ func TestRunTool_RequiresUserIntent(t *testing.T) {
 	}
 	tc := ToolCall{ToolCallID: "c1", ToolName: "misskey_follow_user", Input: map[string]any{"userId": "x"}}
 
-	// 未根植：拦截，不执行
+	// 未根植（无 judge → fail-closed）：拦截，不执行
 	cfg := &OrchestrateConfig{UserRequest: "给 cfblog 加无障碍树支持"}
 	res := runTool(context.Background(), tc, tool, nil, cfg)
 	if !res.IsError {
@@ -259,7 +382,7 @@ func TestRunTool_RequiresUserIntent(t *testing.T) {
 		t.Errorf("refusal message missing, got %q", res.Result)
 	}
 
-	// 根植：执行
+	// 根植（关键词快速通道）：执行
 	called = false
 	cfg2 := &OrchestrateConfig{UserRequest: "在 misskey 上关注 @foo"}
 	res2 := runTool(context.Background(), tc, tool, nil, cfg2)
@@ -268,5 +391,19 @@ func TestRunTool_RequiresUserIntent(t *testing.T) {
 	}
 	if !called {
 		t.Error("tool should execute when grounded")
+	}
+
+	// 根植（LLM 快判 YES，口语授权措辞）：执行
+	called = false
+	cfg3 := &OrchestrateConfig{
+		UserRequest: "发条 misskey，内容你定",
+		IntentJudge: &mockIntentJudgeClient{resps: []string{"{\"verdict\":\"YES\",\"reason\":\"用户明确要求发帖\"}"}},
+	}
+	res3 := runTool(context.Background(), tc, tool, nil, cfg3)
+	if res3.IsError {
+		t.Fatalf("expected success when judge grounds, got %q", res3.Result)
+	}
+	if !called {
+		t.Error("tool should execute when judge grounds")
 	}
 }
