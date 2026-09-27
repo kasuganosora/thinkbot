@@ -87,7 +87,7 @@ func TestNewInternalPolicy_UsesReasoningCapability(t *testing.T) {
 	b.MainDef.Model, b.MainDef.Reasoning = "o4-mini", true
 	b.LightDef.Model = "gpt-4o-mini"
 	p := newInternalPolicy(nil, nil, "", b)
-	if got := p.ReasoningEffort(llm.PurposeMemoryDedup, "o4-mini"); got != "low" {
+	if got := p.ReasoningEffort(llm.PurposeAutoCompact, "o4-mini"); got != "low" {
 		t.Fatalf("reasoning-capable main: %q", got)
 	}
 	if got := p.ReasoningEffort(llm.PurposeLazyJudge, "gpt-4o-mini"); got != "" {

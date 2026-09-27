@@ -23,7 +23,8 @@ import (
 //
 // Values of the reasoning setting:
 //   - "" / "auto": the built-in default of the purpose (judges/classifiers/
-//     scorers → "none", everything else → "low"), sent ONLY when the provider
+//     scorers → "none", memory_dedup → "high", everything else → "low"),
+//     sent ONLY when the provider
 //     is known to accept the parameter: the bot already sends a
 //     reasoning_effort for normal turns, the model is marked with the
 //     "reasoning" capability in the provider config, or the model belongs to a
@@ -66,7 +67,7 @@ var InternalPurposes = []struct {
 	{PurposeDreamScore, "none", "dreaming importance scoring (scorer)"},
 	{PurposeDreamCluster, "none", "dreaming theme tagging (classifier)"},
 	{PurposeDreamExtract, "low", "dreaming light-phase memory extraction"},
-	{PurposeMemoryDedup, "low", "long-term memory cluster merge (memory_dedup)"},
+	{PurposeMemoryDedup, "high", "long-term memory cluster merge (memory_dedup); high because low-reasoning merges dropped details (09-27)"},
 	{PurposeAutoCompact, "low", "automatic conversation compaction summary"},
 	{PurposeSummarizeHead, "low", "sliding-window head summary (subagent, /compact)"},
 	{PurposeUserProfiler, "low", "user profile extraction"},
@@ -186,7 +187,7 @@ func (p *InternalPolicy) autoEffort(purpose, model string) string {
 	}
 	want := purposeDefault(purpose)
 	botCheap := p.botEffort == "none" || p.botEffort == "minimal"
-	if botCheap && want == "low" {
+	if botCheap && (want == "low" || want == "high") {
 		want = p.botEffort // the bot already runs cheaper than "low"
 	}
 	if want == "none" && !familyAcceptsNone(fam) {

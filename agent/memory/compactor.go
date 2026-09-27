@@ -351,6 +351,7 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	sb.WriteString("Cluster semantically similar entries and merge each cluster into one denser entry.\n")
 	sb.WriteString("- Merge near-duplicates into a single entry (several facts about the same topic become one sentence).\n")
 	sb.WriteString("- Merge complementary entries (e.g. '用户用Go' + '用户用Gin框架' → '用户使用Go+Gin做后端开发').\n")
+	sb.WriteString("- Keep every concrete detail (names, IDs, codes, numbers, dates, URLs, file/repo names) verbatim; only remove repetition.\n")
 	sb.WriteString("- Leave unrelated, standalone entries untouched.\n")
 	sb.WriteString("- A cluster MUST contain at least 2 source entries. NEVER emit a cluster of one.\n")
 	sb.WriteString("- Write merged_content in the same language as its source entries.\n\n")
@@ -377,9 +378,81 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 		return nil, nil // 解析失败返回空，不报错（与 clusterAndMerge 旧行为一致）
 	}
 
-	// 基础合法性校验
+	byID := make(map[string]string, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = StripThinking(e.Content)
+	}
+	valid := basicValidClusters(clusters, byID)
+
+	// Detail guard (cluster_guard.go): every merged entry must keep the
+	// identifiers of its sources. Clusters that lost some get one repair
+	// round; the ones still lossy are dropped so their sources stay active.
+	ok, bad := splitByDetail(valid, byID)
+	if len(bad) == 0 {
+		return ok, nil
+	}
+	logger := traceid.L(ctx)
+	logger.Infow("memory_dedup: merged entries dropped identifiers, asking for a repair",
+		"clusters", len(valid), "lossy", len(bad), "example_missing", truncList(bad[0].missing))
+
+	repairParams := params
+	repairParams.Messages = []llm.Message{
+		llm.UserMessage(sb.String()),
+		llm.AssistantMessage(resp.Text),
+		llm.UserMessage(repairPrompt(bad)),
+	}
+	used := map[string]bool{}
+	for _, cl := range ok {
+		for _, id := range cl.SourceIDs {
+			used[id] = true
+		}
+	}
+	dropped := len(bad)
+	if rresp, rerr := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), repairParams); rerr != nil {
+		logger.Warnw("memory_dedup: repair call failed, dropping lossy clusters", "err", rerr, "dropped", dropped)
+		return ok, nil
+	} else if !warnIfTruncated(logger, llm.PurposeMemoryDedup, rresp, repairParams) {
+		var repaired []ClusterResult
+		if strutil.ExtractJSON(rresp.Text, &repaired) == nil {
+			fixed, stillBad := splitByDetail(basicValidClusters(repaired, byID), byID)
+			for _, cl := range fixed {
+				if overlaps(cl.SourceIDs, used) {
+					continue
+				}
+				for _, id := range cl.SourceIDs {
+					used[id] = true
+				}
+				ok = append(ok, cl)
+				dropped--
+			}
+			if len(stillBad) > 0 {
+				logger.Infow("memory_dedup: repaired clusters still miss identifiers",
+					"count", len(stillBad), "example_missing", truncList(stillBad[0].missing))
+			}
+		}
+	}
+	if dropped < 0 {
+		dropped = 0
+	}
+	logger.Infow("memory_dedup: detail guard result", "kept", len(ok), "dropped_lossy", dropped)
+	return ok, nil
+}
+
+// basicValidClusters applies the structural checks: at least 2 known source
+// IDs (unknown IDs are removed), non-empty merged content, at most 50
+// sources.
+func basicValidClusters(clusters []ClusterResult, byID map[string]string) []ClusterResult {
 	var valid []ClusterResult
 	for _, cl := range clusters {
+		known := cl.SourceIDs[:0:0]
+		seen := map[string]bool{}
+		for _, id := range cl.SourceIDs {
+			if _, ok := byID[id]; ok && !seen[id] {
+				seen[id] = true
+				known = append(known, id)
+			}
+		}
+		cl.SourceIDs = known
 		if len(cl.SourceIDs) >= 2 && strings.TrimSpace(cl.MergedContent) != "" {
 			if len(cl.SourceIDs) > 50 {
 				cl.SourceIDs = cl.SourceIDs[:50]
@@ -387,8 +460,23 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 			valid = append(valid, cl)
 		}
 	}
+	return valid
+}
 
-	return valid, nil
+func overlaps(ids []string, used map[string]bool) bool {
+	for _, id := range ids {
+		if used[id] {
+			return true
+		}
+	}
+	return false
+}
+
+func truncList(s []string) []string {
+	if len(s) > 5 {
+		return s[:5]
+	}
+	return s
 }
 
 // isArchived 检查元数据中是否有 archived=true 标记。
@@ -447,7 +535,7 @@ const defaultCompactionPrompt = `You are a memory compactor, a deduplication com
 Rules:
 1. Merge ONLY entries that are genuinely similar. NEVER force unrelated entries together.
 2. Preserve every key detail when merging. Losing information is a failure.
-3. Each merged_content MUST be one concise, self-contained fact.
+3. Each merged_content MUST be one self-contained entry that keeps every concrete detail of its sources: names, IDs, codes, numbers, dates, URLs, file and repo names are copied verbatim. Density comes only from removing repetition, never from dropping facts. A merged entry may be long.
 4. source_ids MUST list the IDs of every entry folded into that cluster.
 5. Output a raw JSON array and nothing else — no prose, no code fences.
 6. If nothing can be merged, output an empty array [].
