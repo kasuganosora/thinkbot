@@ -209,6 +209,8 @@ func (l *Loader) LoadAndRegister(mgr *SkillManager) (int, error) {
 func parseFrontMatter(content string) (SkillMeta, string) {
 	var meta SkillMeta
 
+	content = strings.TrimPrefix(content, "\ufeff") // UTF-8 BOM
+
 	// 检查是否有 front matter
 	if !strings.HasPrefix(content, "---\n") && !strings.HasPrefix(content, "---\r\n") {
 		// 无 front matter，整个内容作为正文
@@ -237,9 +239,13 @@ func parseFrontMatter(content string) (SkillMeta, string) {
 	body = strings.TrimPrefix(body, "\n")
 	body = strings.TrimPrefix(body, "\r\n")
 
-	// 逐行解析（缩进感知）：支持单行 key: value，也支持块标量（>、|- 等续行写法）
-	// 详见下方 parseFrontMatterLines。
-	parseFrontMatterLines(frontMatter, &meta)
+	// YAML 语义解析（frontmatter.go）；不是合法 YAML 时退回逐行解析
+	// （缩进感知，支持单行 key: value 与块标量，单行值同样按 YAML 标量解码）。
+	frontMatter = strings.ReplaceAll(frontMatter, "\r\n", "\n")
+	// 末尾换行属于 "\n---" 分隔符、已被切掉；补回，使块标量的 chomping 与真实文档一致
+	if !decodeFrontMatterYAML(frontMatter+"\n", &meta) {
+		parseFrontMatterLines(frontMatter, &meta)
+	}
 
 	return meta, body
 }
@@ -258,6 +264,10 @@ func parseFrontMatterLines(fm string, meta *SkillMeta) {
 	sc := &blockScalarScanner{lines: lines}
 	for i := 0; i < len(lines)-1; i++ { // 最后一项是 EOF 哨兵，不参与
 		line := lines[i]
+		// 只读顶层键：缩进行（嵌套映射、多行纯量续行）与注释行不是本层字段
+		if line != "" && (line[0] == ' ' || line[0] == '\t' || line[0] == '#') {
+			continue
+		}
 		// 与旧的逐行解析一致：不含冒号的行（含空行）直接跳过
 		idx := strings.Index(line, ":")
 		if idx < 0 {
@@ -271,17 +281,30 @@ func parseFrontMatterLines(fm string, meta *SkillMeta) {
 			// 块结束行（下一个 key 或更浅的行）交回外层继续处理
 			val = sc.scanBlockScalar(i+1, literal, chomping, increment)
 			i = sc.idx - 1 // for 的 i++ 会再前进一行
+			// 块标量内容已是最终文本，不再做单行标量解码
+			assignFrontMatterField(key, val, meta)
+			continue
 		}
 		applyFrontMatterField(key, val, meta)
 	}
 }
 
-// applyFrontMatterField 把单个 key/value 赋给 SkillMeta。
-// （原 parseFrontMatterLine 的赋值逻辑，key/value 均已 TrimSpace。）
+// applyFrontMatterField 把单行 key: value 的原始值（冒号后的文本）按 YAML 标量
+// 语义解码（引号/转义、尾随注释、空白，见 yamlScalar）后赋给 SkillMeta。
+// compatibility 保留原始文本交给 parseYAMLList（支持 ["a", "b"] 与 a, b）。
 func applyFrontMatterField(key, val string, meta *SkillMeta) {
+	if key == "compatibility" {
+		meta.Compatibility = parseYAMLList(stripYAMLComment(strings.TrimSpace(val)))
+		return
+	}
+	assignFrontMatterField(key, yamlScalar(val), meta)
+}
+
+// assignFrontMatterField 把已解码的值赋给 SkillMeta。
+func assignFrontMatterField(key, val string, meta *SkillMeta) {
 	switch key {
 	case "name":
-		meta.Name = val
+		meta.Name = strings.TrimSpace(val)
 	case "description":
 		meta.Description = val
 	case "compatibility":
@@ -295,10 +318,9 @@ func applyFrontMatterField(key, val string, meta *SkillMeta) {
 			meta.Enabled = nil
 		}
 	case "delegation":
-		// 委托执行声明（可选字段）：值原样 TrimSpace 后保存（如 "preferred"），
+		// 委托执行声明（可选字段）：解码后的值原样保存（如 "preferred"），
 		// 分级判定（Skill.IsHeavy）在读取侧完成，解析层不猜语义。
-		// 注意不要实现为 trim 后回写 quoted 字符串的变体，保持与 name/description 一致的单行语义。
-		meta.Delegation = strings.TrimSpace(strings.Trim(val, `"'`))
+		meta.Delegation = strings.TrimSpace(val)
 	}
 }
 
