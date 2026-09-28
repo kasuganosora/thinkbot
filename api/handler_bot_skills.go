@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -438,30 +437,12 @@ func (s *Server) findBotSkill(botID, sid string) (*botSkillEntry, error) {
 // 辅助函数
 // ============================================================================
 
-var reSkillFM = regexp.MustCompile(`(?m)^\s*(name|description)\s*:\s*(.*)$`)
-
+// parseSkillFrontMatter returns name and description from SKILL.md front
+// matter, decoded exactly like the skill loader does (YAML semantics: quotes,
+// escapes, comments), so the admin page and the loader agree on the name.
 func parseSkillFrontMatter(content string) (name, description string) {
-	if !strings.HasPrefix(content, "---") {
-		return "", ""
-	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return "", ""
-	}
-	fm := content[:end+6]
-
-	matches := reSkillFM.FindAllStringSubmatch(fm, -1)
-	for _, m := range matches {
-		key := strings.TrimSpace(m[1])
-		val := strings.TrimSpace(m[2])
-		switch key {
-		case "name":
-			name = val
-		case "description":
-			description = val
-		}
-	}
-	return
+	meta, _ := skill.ParseFrontMatter(content)
+	return meta.Name, meta.Description
 }
 
 func sanitizeSkillName(name string) string {
