@@ -62,14 +62,10 @@ func TestInboundSessionID(t *testing.T) {
 			wantOK:   true,
 		},
 		{
-			// timeline 是旁听型：全局唯一且 archived，否则它会以最新 last_msg_at
-			// 永久占据列表首位（B17）。
-			name:       "misskey timeline broadcast -> single archived session",
-			msg:        core.Message{BotID: "bot-a", Channel: "misskey:timeline", Metadata: map[string]any{"channel_type": "misskey"}},
-			wantKey:    "misskey:timeline:global",
-			wantKind:   dao.KindTimeline,
-			wantStatus: dao.SessionStatusArchived,
-			wantOK:     true,
+			// timeline 旁听不建会话、不落库；只有被 @ / 回复 / 私信才进 session。
+			name:   "misskey timeline broadcast -> skip (no session)",
+			msg:    core.Message{BotID: "bot-a", Channel: "misskey:timeline", Metadata: map[string]any{"channel_type": "misskey"}},
+			wantOK: false,
 		},
 		{
 			name:   "telegram empty channel -> skip",

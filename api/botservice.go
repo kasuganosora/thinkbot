@@ -1772,7 +1772,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if strings.TrimSpace(env.Message.Text) == "" {
 			return nil
 		}
-		sid, kind, ok := s.inboundSessionID(&env.Message)
+		sid, _, ok := s.inboundSessionID(&env.Message)
 		if !ok {
 			return nil
 		}
@@ -1780,20 +1780,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 标记本消息的历史由本 enricher 托管，出站 enricher 据此只保存渠道回复
 		env.Message.Metadata["__history_managed"] = true
 
-		// ⚠️ timeline 旁听型会话**只落库、不注入历史**：把 20 条陌生人广播当成
-		// 多轮对话喂给 LLM 会造成跨用户串扰（详见 misskeySessionTarget 注释）。
-		// 落库照做 —— I7 要求 Bot 的出站 note 暂落 timeline，供 S2 的 fork reclaim。
-		if kind != dao.KindTimeline {
-			limit := s.store.GetInt(config.KeyChatContextLimit, 20)
-			history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
-			if err != nil {
-				s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
-			} else {
-				// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
-				history = s.chatHistory.ApplyContextCheckpoint(env.Message.TraceID, env.Message.BotID, sid, history)
-				if len(history) > 0 {
-					env.Message.Metadata["chat_history"] = history
-				}
+		limit := s.store.GetInt(config.KeyChatContextLimit, 20)
+		history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
+		if err != nil {
+			s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
+		} else {
+			// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
+			history = s.chatHistory.ApplyContextCheckpoint(env.Message.TraceID, env.Message.BotID, sid, history)
+			if len(history) > 0 {
+				env.Message.Metadata["chat_history"] = history
 			}
 		}
 
@@ -3395,8 +3390,8 @@ func pureRenoteEnrichFn(ctx context.Context, env *core.Envelope) error {
 
 // inboundSessionID 为一条入站消息派生其「会话历史」session ID 与会话类型。
 //
-// 返回 (数字会话 id, session_kind, ok)。kind 供调用方决定**是否注入 chat_history** ——
-// timeline 旁听型会话只落库、不注入（理由见 misskeySessionTarget）。
+// 返回 (数字会话 id, session_kind, ok)。Misskey 公开 timeline 旁听返回 ok=false
+// （不建会话、不落库）；只有被 @ / 被回复 / 私信才建 per-user 会话。
 //
 // 覆盖 Telegram 与 Misskey 两个外部渠道；其它来源（Web 已自行处理 / 心跳 / cron /
 // 反应）返回 ok=false 跳过。
@@ -3447,24 +3442,21 @@ func (s *BotService) inboundSessionID(msg *core.Message) (string, string, bool) 
 // misskeySessionTarget 判定 Misskey 入站消息的会话归属。
 //
 // `msg.Channel` 由 `misskeyIngressChannelID` 产出，只有两种取值：
-//   - `misskey:timeline`：未被 @ 的公开时间线广播（旁听）→ **全局唯一**会话（D2 拍板：
-//     timeline 不按天分片、不分 channel）
+//   - `misskey:timeline`：未被 @ 的公开时间线广播（旁听）→ **不建会话**
 //   - `<userID>`：被 @ / 被回复 / 私信 → 按对端用户聚合
 //
-// ⚠️ **timeline 只落库、不注入 chat_history**：它是 21 个互不相识的人的公开广播
-// （实测占入站 75%+），把最近 20 条当成「多轮对话历史」喂给 LLM 会造成跨用户串扰 ——
-// 模型会以为自己在跟一个自言自语的人对话。落库仍要做，因为 I7 要求 Bot 的出站 note
-// 暂落 timeline，等真有人回复时再由 S2 的 fork reclaim 成 thread。
-//
-// ⚠️ timeline 会话以 **archived** 建立：每条广播都在刷新它的 last_msg_at，若按活跃
-// 会话参与排序会永久占据列表首位，把真正的对话全挤下去（B17）。
+// ⚠️ timeline 旁听**跳过**（返回空 key）：它是互不相识的人的公开广播（实测占入站
+// 75%+），既不能当多轮对话喂给 LLM（跨用户串扰），也不值得为旁听流量建会话/落库。
+// Bot 仍可对 timeline 事件做 lurk/即时反应；只是没有 chat_sessions / chat_messages。
+// S2 若要做 fork reclaim，应在「有人回复 Bot 出站 note」时再建 thread，而不是先囤
+// 全部 timeline。
 //
 // ⚠️ 被 @ / 被回复目前也按 userID 聚合（`misskey:dm:<uid>`）而非 thread：thread 需要
 // `ResolveThreadRoot` + 入站 fork（I7 / D12），属 S2。S2 上线后这部分会再切成
 // `misskey:thread:<root>`，届时按 external_key 迁移即可（一次 UPDATE，无歧义）。
 func misskeySessionTarget(msg *core.Message) (key, kind, status string) {
 	if msg.Channel == "misskey:timeline" {
-		return dao.MisskeyTimelineKey(), dao.KindTimeline, dao.SessionStatusArchived
+		return "", "", ""
 	}
 	return dao.MisskeyDMKey(msg.Channel), dao.KindDirect, ""
 }
