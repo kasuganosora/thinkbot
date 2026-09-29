@@ -32,6 +32,9 @@ type dataMigration struct {
 var dataMigrations = []dataMigration{
 	{name: costCacheDoubleCountFixName, run: fixCostCacheDoubleCount},
 	{name: contextMarkersFixName, run: fixChannelContextMarkers},
+	// ⚠️ 必须在 S0 的 ensureColumns / ensureIndexes 之后（依赖 external_key 及其唯一索引），
+	// 见 migrate.go 中 runDataMigrations 的调用位置。
+	{name: orphanSessionBackfillName, run: backfillOrphanSessions},
 }
 
 // runDataMigrations 依次执行尚未登记的数据修复。

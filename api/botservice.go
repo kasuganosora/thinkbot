@@ -675,7 +675,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 	// 这样续跑回复按 trace 落库（UpsertAssistantByTrace）时不会覆盖上一次续跑的回复。
 	msgID := idgen.New("wfc")
 	traceID := sessionID
-	if kind, _ := splitSessionChannel(sessionID); kind == "tg" {
+	if kind, _ := s.resolveSessionRoute(sessionID); kind == "tg" {
 		traceID = msgID
 	}
 	// 续跑指令本身以 "system" 身份落库（它不是用户说的话）；续跑回合的工具权限则按提交
@@ -741,7 +741,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 //
 // 返回 error 表示注入失败（渠道不可用等），调用方据此跳过后续标记。
 func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID string, origin *workflow.Origin, text string, extraMeta map[string]any) error {
-	kind, target := splitSessionChannel(sessionID)
+	kind, target := s.resolveSessionRoute(sessionID)
 
 	if kind == "tg" {
 		id := continuationIdentity(origin, "telegram", target)
@@ -858,12 +858,49 @@ func buildTelegramContinuationMessage(botID, chName, chatID, msgID, traceID stri
 // splitSessionChannel 从 sessionID 解析渠道种类与真实会话标识。
 // 形如 "tg:76019910" → ("tg", "76019910")；"web:xxx" → ("web", "xxx")；
 // "mk:channel:user123" → ("mk", "channel:user123")；无前缀 → ("", sessionID)。
+//
+// ⚠️ 仅供**旧式字符串 sessionID** 兜底（迁移前的历史数据、测试）。D6 之后渠道会话的
+// sessionID 是数字，渠道信息在会话行的 external_key 里 —— 请用 resolveSessionRoute。
 func splitSessionChannel(sessionID string) (kind, target string) {
 	idx := strings.Index(sessionID, ":")
 	if idx < 0 {
 		return "", sessionID
 	}
 	return sessionID[:idx], sessionID[idx+1:]
+}
+
+// resolveSessionRoute 判定一个会话该走哪条出站路由，返回 (kind, target)。
+//
+// D6 之前 sessionID 自带渠道信息（"tg:76017910"），按首个 ":" 切分即可。D6 之后 sessionID
+// 是 chat_sessions 的**数字 ID**，渠道信息只存在于会话行的 external_key 里 —— 再按字符串
+// 切就永远切不出 "tg"，工作流续跑会**静默退回 web 兜底**（TG 续跑回复发不出去，表现为
+// 「工作流跑完了但 Telegram 里什么都没有」）。
+// 因此改为：数字 id → 查会话行 → 解析 external_key；查不到或非数字 → 沿用旧切分兜底。
+func (s *BotService) resolveSessionRoute(sessionID string) (kind, target string) {
+	if s.db != nil {
+		if sess, ok, err := dao.LookupSessionByID(s.db, sessionID); err == nil && ok {
+			if ch, _, id, parsed := dao.ParseExternalKey(sess.ExternalKey); parsed {
+				return normalizeChannelKind(ch), id
+			}
+			// 会话行存在但没有 external_key（历史 web 会话）：无渠道可路由。
+			return "", sessionID
+		}
+	}
+	return splitSessionChannel(sessionID)
+}
+
+// normalizeChannelKind 把 external_key 的首段映射回 splitSessionChannel 的旧三值。
+// 调用点判定的是 `kind == "tg"`（B25 记录的硬编码），而 external_key 首段是全名
+// "telegram" —— 差异收敛在这里，调用点语义不变。
+func normalizeChannelKind(channel string) string {
+	switch channel {
+	case dao.ChannelTelegram:
+		return "tg"
+	case dao.ChannelMisskey:
+		return "mk"
+	default:
+		return channel
+	}
 }
 
 // WorkflowEngine 返回一个已装配工作区工具的工作流引擎（无则返回 nil）。
@@ -1715,7 +1752,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 对话历史上下文（此前 chat_history 机制只为 Web 接线，导致 tg 单聊/群聊上下文串不起来）。
 	// 做法与 Web（handler_chat.go）对齐：入站时按会话加载最近 N 条写入 metadata["chat_history"]
 	// （messageBuilder 会渲染成多轮对话），并异步把当前用户消息落库，供后续轮次作为上下文。
-	// 群聊整群共享一条历史：sessionID 取 "tg:<chatID>"，群里所有人近期消息都进入同一历史，
+	// 群聊整群共享一条历史：sessionID 取该 chat 对应的会话行数字 ID（external_key =
+	// telegram:chat:<chatID>），群里所有人近期消息都进入同一历史，
 	// bot 被 @ 时才带着群聊语境回复（决策：整群共享一条历史）。
 	// 去重：Web 已在注入前自行写好 chat_history，这里直接跳过，避免重复加载/落库。
 	// Order 40，在 lurk(45)/recall(90)/LLM(100) 之前完成历史注入。
@@ -1728,7 +1766,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if strings.TrimSpace(env.Message.Text) == "" {
 			return nil
 		}
-		sid, ok := inboundSessionID(&env.Message)
+		sid, ok := s.inboundSessionID(&env.Message)
 		if !ok {
 			return nil
 		}
@@ -3349,14 +3387,36 @@ func pureRenoteEnrichFn(ctx context.Context, env *core.Envelope) error {
 // 其它来源（Web 已自行处理 / 心跳 / cron / 反应）返回 ok=false 跳过。
 // Telegram 一个 chat（私聊或群聊）即一个会话：私聊的 chatID 即对话双方，
 // 群聊的 chatID 对全群共享，从而「整群共享一条历史」。
-func inboundSessionID(msg *core.Message) (string, bool) {
-	if ct, _ := msg.Metadata["channel_type"].(string); ct == "telegram" {
-		if msg.Channel == "" {
-			return "", false
-		}
-		return "tg:" + msg.Channel, true
+//
+// ⚠️ D6 变更（2026-09-29）：返回值从字符串 `"tg:<chatID>"` 改为 **chat_sessions 的数字 ID**。
+//
+// 原因：字符串 id 下 `chat_sessions` 里根本没有对应行（实测 364 条全是孤儿），于是
+// Web 列表列不出、`touchSessionAfterSave` 因非数字直接 return（last_msg_at /
+// message_count / 自动标题永不更新）、`handleDeleteSession` 按数字 id 删消息删不干净。
+//
+// 会话行按 `external_key = telegram:chat:<chatID>` 查/建（dao.ResolveSession），
+// 与 backfill 迁移共用同一唯一键 —— 迁移已跑则命中同一行，迁移没跑也收敛到同一行。
+//
+// ⚠️ 解析失败时**必须**返回 ok=false，绝不回退成旧的 `"tg:<chatID>"` 字符串：
+// 存量已迁成数字 id，落回字符串会造出新的孤儿会话，且 Bot 从此读不到历史
+// （LoadContextBySession 按数字 id 查）——宁可本轮不注入历史，也不能污染会话身份。
+func (s *BotService) inboundSessionID(msg *core.Message) (string, bool) {
+	if ct, _ := msg.Metadata["channel_type"].(string); ct != "telegram" {
+		return "", false
 	}
-	return "", false
+	if msg.Channel == "" || msg.BotID == "" {
+		return "", false
+	}
+	sess, err := dao.ResolveSession(s.db, msg.BotID,
+		dao.TelegramChatKey(msg.Channel), dao.TelegramSessionKind(msg.Channel), "")
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Errorw("resolve inbound session failed, skip chat history",
+				"bot", msg.BotID, "channel", msg.Channel, "trace", msg.TraceID, "err", err)
+		}
+		return "", false
+	}
+	return strconv.FormatUint(sess.ID, 10), true
 }
 
 // buildQuoteBlock 把「引用回复」中被引用的上文渲染成引用块前缀。
