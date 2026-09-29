@@ -215,18 +215,24 @@ func (s *Server) handleChatAppend(c *gin.Context) {
 	OK(c, map[string]any{"accepted": accepted})
 }
 
-// handleChatActiveTasks 返回指定 bot 当前仍在后台执行的消息 traceID 列表。
-// GET /api/chat/active?botId=xxx
+// handleChatActiveTasks 返回指定 bot 当前仍在后台执行的消息任务。
+// GET /api/chat/active?botId=xxx&sessionId=yyy
 //
-// 用户断连后后台长任务继续跑，其 cancel 仍注册在 messageCancels 中（直到消息真正完成）。
-// 前端重连后据此知道自己可以 resume / abort 哪些任务。
+// sessionId 可选：传入时只返回该会话的任务，避免前端把 A 会话的 SSE 续到 B 会话。
+// 响应同时带 tasks（含 sessionId）与 traceIds（兼容旧前端）。
 func (s *Server) handleChatActiveTasks(c *gin.Context) {
 	botID := c.Query("botId")
 	if botID == "" {
 		Fail(c, errs.BadRequest("botId required"))
 		return
 	}
-	OK(c, map[string]any{"traceIds": s.botSvc.ActiveMessageTraceIDs(botID)})
+	sessionID := c.Query("sessionId")
+	tasks := s.botSvc.ActiveMessageTasks(botID, sessionID)
+	traceIDs := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		traceIDs = append(traceIDs, t.TraceID)
+	}
+	OK(c, map[string]any{"tasks": tasks, "traceIds": traceIDs})
 }
 
 // handleChatResume 按 traceID 重连续流（SSE）。
@@ -401,6 +407,8 @@ func (s *Server) handleChatSend(c *gin.Context) {
 
 	// 生成 traceID（使用 crypto/rand，格式 "web-{24 hex}"）
 	traceID := idgen.New("web")
+	// 在 Inject / OnMessageStart 之前记下会话，供 /active 按会话过滤 resume。
+	s.botSvc.RememberMessageSession(req.BotID, traceID, req.SessionID)
 
 	// 先加载历史（不含当前消息），再异步保存用户消息
 	// 顺序很重要：如果先保存再加载，当前消息会出现在历史中，
