@@ -3,8 +3,10 @@ package memory
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
@@ -548,6 +550,43 @@ func TestNormalizeKey(t *testing.T) {
 	}
 }
 
+// TestNormalizeKey_RuneSafe 验证按 rune 截断：中文串字节长度 >80 但码点数 ≤80 时
+// 不得按字节切开产生非法 UTF-8。
+func TestNormalizeKey_RuneSafe(t *testing.T) {
+	// 40 个汉字 = 120 字节，但仅 40 runes → 不应截断，且必须是合法 UTF-8。
+	zh40 := strings.Repeat("中", 40)
+	got := normalizeKey(zh40)
+	if got != zh40 {
+		t.Fatalf("40-rune Chinese must be unchanged, got lenBytes=%d lenRunes=%d", len(got), len([]rune(got)))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("normalizeKey produced invalid UTF-8 for 40-rune Chinese")
+	}
+
+	// 100 个汉字 → 截到 80 runes，不得在码点中间切断。
+	zh100 := strings.Repeat("文", 100)
+	got = normalizeKey(zh100)
+	if !utf8.ValidString(got) {
+		t.Fatal("normalizeKey produced invalid UTF-8 when truncating Chinese")
+	}
+	if n := len([]rune(got)); n != 80 {
+		t.Fatalf("expected 80 runes after truncate, got %d", n)
+	}
+	if got != strings.Repeat("文", 80) {
+		t.Fatalf("unexpected truncate result: %q", got)
+	}
+
+	// 混合 ASCII + CJK：字节切片旧实现会在多字节边界切断。
+	mixed := "abc" + strings.Repeat("漢", 90) // 3 + 90 = 93 runes → cap 80
+	got = normalizeKey(mixed)
+	if !utf8.ValidString(got) {
+		t.Fatal("normalizeKey produced invalid UTF-8 for mixed ASCII+CJK")
+	}
+	if n := len([]rune(got)); n != 80 {
+		t.Fatalf("expected 80 runes, got %d", n)
+	}
+}
+
 func TestTokenize(t *testing.T) {
 	tokens := tokenize("Hello, World! Hello/World")
 	if !tokens["hello"] {
@@ -680,6 +719,25 @@ func (p *fixedTextProvider) DoGenerate(_ context.Context, _ llm.GenerateParams) 
 	return &llm.GenerateResult{Text: p.text}, nil
 }
 func (p *fixedTextProvider) DoStream(_ context.Context, _ llm.GenerateParams) (*llm.StreamResult, error) {
+	return nil, nil
+}
+
+// sequencedTextProvider 按调用次序返回预设文本，用于测 miss-retry（第二次补齐）。
+type sequencedTextProvider struct {
+	texts []string
+	calls int
+}
+
+func (p *sequencedTextProvider) Name() string { return "sequenced" }
+func (p *sequencedTextProvider) DoGenerate(_ context.Context, _ llm.GenerateParams) (*llm.GenerateResult, error) {
+	i := p.calls
+	p.calls++
+	if i >= len(p.texts) {
+		return &llm.GenerateResult{Text: "[]"}, nil
+	}
+	return &llm.GenerateResult{Text: p.texts[i]}, nil
+}
+func (p *sequencedTextProvider) DoStream(_ context.Context, _ llm.GenerateParams) (*llm.StreamResult, error) {
 	return nil, nil
 }
 
@@ -866,30 +924,70 @@ func TestScoreImportanceBatch_FallbackWhenNoModel(t *testing.T) {
 	}
 }
 
-// TestScoreImportanceBatch_KeyNormalization 验证 LLM 返回 key 与 candidate.Key
-// 在大小写 / 前后空白不一致时仍能归一对齐，避免整条回退为 -1（纯启发式）。
-// 复现 09-18 review 发现的「9/10 条有 LLM 分、1 条缺失」偏差根因。
-func TestScoreImportanceBatch_KeyNormalization(t *testing.T) {
-	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("key-norm")})
+// TestScoreImportanceBatch_OpaqueIDs 验证评分 prompt 使用 opaque 短 id（c0/c1），
+// 模型回写 id 后本地映射到 candidate.Key；兼容旧字段名 "key"（值仍为 opaque id）。
+func TestScoreImportanceBatch_OpaqueIDs(t *testing.T) {
+	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("opaque-id")})
 	dm.model = "test-model"
 	dm.config.Deep.UseLLMImportance = true
-	dm.provider = &fixedTextProvider{text: `[{"key":"foo:bar ","importance":0.8},{"key":"BAZ","importance":0.3}]`}
+	// id 字段为主；顺带用 key 字段别名返回第二条，确认兼容。
+	dm.provider = &fixedTextProvider{text: `[{"id":"c0","importance":0.8},{"key":"c1","importance":0.3}]`}
 
 	out := dm.scoreImportanceBatch(context.Background(), []*DreamCandidate{
-		{Key: "Foo:Bar", Content: "x", LastSeen: time.Now()},
-		{Key: "baz", Content: "y", LastSeen: time.Now()},
+		{Key: "用户喜欢用 Go 写后端服务并且偏好简洁回复风格", Content: "用户喜欢用 Go 写后端服务并且偏好简洁回复风格", LastSeen: time.Now()},
+		{Key: "养了一只名叫小灰的鹦鹉", Content: "养了一只名叫小灰的鹦鹉", LastSeen: time.Now()},
 	})
 	if out == nil {
 		t.Fatal("expected non-nil map when model configured")
 	}
-	if math.Abs(out["Foo:Bar"]-0.8) > 1e-9 {
-		t.Errorf("expected Foo:Bar matched to 0.8 via normalization, got %v", out["Foo:Bar"])
+	k0 := "用户喜欢用 Go 写后端服务并且偏好简洁回复风格"
+	k1 := "养了一只名叫小灰的鹦鹉"
+	if math.Abs(out[k0]-0.8) > 1e-9 {
+		t.Errorf("expected %q matched to 0.8 via c0, got %v", k0, out[k0])
 	}
-	if math.Abs(out["baz"]-0.3) > 1e-9 {
-		t.Errorf("expected baz matched to 0.3 via normalization, got %v", out["baz"])
+	if math.Abs(out[k1]-0.3) > 1e-9 {
+		t.Errorf("expected %q matched to 0.3 via c1/key-alias, got %v", k1, out[k1])
 	}
 	if len(out) != 2 {
 		t.Errorf("expected both candidates matched, got %d", len(out))
+	}
+}
+
+// TestScoreImportanceBatch_MissRetry 验证首轮只返回部分 id 时，scoreImportanceBatch
+// 会对缺失子集再调一次 scoreImportanceOnce，合并后全部有分（仅一次重试）。
+func TestScoreImportanceBatch_MissRetry(t *testing.T) {
+	dm, _ := newTestDreamManager(t, []Scope{ChannelScope("miss-retry")})
+	dm.model = "test-model"
+	dm.config.Deep.UseLLMImportance = true
+	seq := &sequencedTextProvider{texts: []string{
+		`[{"id":"c0","importance":0.7},{"id":"c2","importance":0.4}]`, // 缺 c1
+		`[{"id":"c0","importance":0.9}]`,                              // retry 子集里原先的 c1 → 新批次 c0
+	}}
+	dm.provider = seq
+
+	cands := []*DreamCandidate{
+		{Key: "fact-a", Content: "事实甲", LastSeen: time.Now()},
+		{Key: "fact-b", Content: "事实乙", LastSeen: time.Now()},
+		{Key: "fact-c", Content: "事实丙", LastSeen: time.Now()},
+	}
+	out := dm.scoreImportanceBatch(context.Background(), cands)
+	if out == nil {
+		t.Fatal("expected non-nil scores after miss-retry")
+	}
+	if len(out) != 3 {
+		t.Fatalf("expected all 3 keys filled after miss-retry, got %d: %v", len(out), out)
+	}
+	if math.Abs(out["fact-a"]-0.7) > 1e-9 {
+		t.Errorf("fact-a: want 0.7, got %v", out["fact-a"])
+	}
+	if math.Abs(out["fact-b"]-0.9) > 1e-9 {
+		t.Errorf("fact-b: want 0.9 from retry, got %v", out["fact-b"])
+	}
+	if math.Abs(out["fact-c"]-0.4) > 1e-9 {
+		t.Errorf("fact-c: want 0.4, got %v", out["fact-c"])
+	}
+	if seq.calls != 2 {
+		t.Fatalf("expected exactly 2 LLM calls (initial + one miss-retry), got %d", seq.calls)
 	}
 }
 
