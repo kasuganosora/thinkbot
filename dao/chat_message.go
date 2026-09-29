@@ -50,6 +50,28 @@ type ChatMessage struct {
 	// 历史数据默认 false，语义与旧行为一致（旧逻辑只在收尾时写一次）。
 	Streaming bool `gorm:"not null;default:false" json:"streaming"`
 
+	// ---- 以下为会话划分（S0）新增列，S0 阶段**不参与任何逻辑**，仅建列/索引 ----
+	// 全部 `json:"-"`：S0 要求「零行为变化」，不对既有 API 响应暴露新字段。
+
+	// ExternalMsgID 渠道内消息/帖子的原生 ID（Misskey noteID / Telegram messageID）。
+	// 用途一：让 I1「一条 inbound 物理只落一行」成为**数据库不变量**——目前只靠
+	//         dedupSeen 的 2 分钟内存窗口撑着，超窗重放会双写（2026-09-01 事故同类）；
+	// 用途二：fork 的 reclaim 按它精确定位行。
+	// 空串 = 无外部 ID（Web 会话消息），不进 partial 唯一索引。
+	ExternalMsgID string `gorm:"size:128;not null;default:''" json:"-"`
+
+	// IsContext 该行是否是被引用进本会话的「外部上下文」（如 thread 视图里 root 的引用行）。
+	// S1/S2 的 X2 前端「话题起点」置顶卡会用到它，届时放开 json tag。
+	IsContext bool `gorm:"not null;default:false" json:"-"`
+
+	// OriginSessionID fork 迁移前的 session_id（留痕，I1 硬要求）。
+	// 缺它则 session_id 的单向迁移不可回滚、不可审计「这条来自时间线」。
+	OriginSessionID string `gorm:"size:64;not null;default:''" json:"-"`
+
+	// ForkedSessionID 仅 root 行使用：标记该 root 已分叉出的 thread 会话。
+	// 前端据此在 root 上显示「已分叉出对话 ↗」。
+	ForkedSessionID string `gorm:"size:64;not null;default:''" json:"-"`
+
 	// CreatedAt 创建时间（游标的主排序键）。
 	CreatedAt time.Time `gorm:"not null;index:idx_chat_session_time,priority:3,sort:desc" json:"createdAt"`
 }
