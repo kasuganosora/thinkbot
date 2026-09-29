@@ -20,6 +20,7 @@ func Migrate(database *gorm.DB) error {
 		&ChannelDefinition{},
 		&ChatSession{},
 		&ChatMessage{},
+		&SessionThreadIndex{},
 		&UserMessageEvent{},
 		&BindCode{},
 		&IdentityMapping{},
@@ -41,6 +42,11 @@ func Migrate(database *gorm.DB) error {
 	// 因此存量表的新增列需手动补齐，否则写入会报 “no such column”。
 	// 此处幂等：列已存在则跳过。
 	if err := ensureColumns(database); err != nil {
+		return err
+	}
+	// 索引必须最后建：partial index 的 WHERE 子句引用的是上面补齐的列，
+	// 列不存在时建索引会直接失败。
+	if err := ensureIndexes(database); err != nil {
 		return err
 	}
 	// 一次性数据修复（依赖上面补齐的列），每项只执行一次，见 data_migration.go。
@@ -68,6 +74,19 @@ func ensureColumns(db *gorm.DB) error {
 		{"stats_usage_daily", "cost_input", "cost_input REAL NOT NULL DEFAULT 0"},
 		{"stats_usage_daily", "cost_output", "cost_output REAL NOT NULL DEFAULT 0"},
 		{"stats_usage_daily", "cost_total", "cost_total REAL NOT NULL DEFAULT 0"},
+
+		// —— 会话划分（S0）——
+		// 全部带 DEFAULT 或可空：SQLite 的 ALTER TABLE ADD COLUMN 不允许
+		// 无默认值的 NOT NULL 列，存量表加列会直接失败。
+		{"chat_sessions", "external_key", "external_key TEXT NOT NULL DEFAULT ''"},
+		{"chat_sessions", "session_kind", "session_kind TEXT NOT NULL DEFAULT ''"},
+		{"chat_sessions", "thread_root", "thread_root TEXT NOT NULL DEFAULT ''"},
+		{"chat_sessions", "parent_session_id", "parent_session_id INTEGER"},
+		{"chat_sessions", "root_message_id", "root_message_id INTEGER"},
+		{"chat_messages", "external_msg_id", "external_msg_id TEXT NOT NULL DEFAULT ''"},
+		{"chat_messages", "is_context", "is_context INTEGER NOT NULL DEFAULT 0"},
+		{"chat_messages", "origin_session_id", "origin_session_id TEXT NOT NULL DEFAULT ''"},
+		{"chat_messages", "forked_session_id", "forked_session_id TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, s := range specs {
 		var cnt int64
@@ -87,6 +106,51 @@ func ensureColumns(db *gorm.DB) error {
 				continue
 			}
 			return err
+		}
+	}
+	return nil
+}
+
+// indexSpec 描述一个需要补齐的索引（含 partial index）。
+type indexSpec struct {
+	name string // 索引名，仅用于报错时定位
+	ddl  string // 完整 CREATE [UNIQUE] INDEX 语句，必须自带 IF NOT EXISTS（幂等）
+}
+
+// sessionIndexSpecs 会话划分（S0）需要的索引。
+//
+// ⚠️ 两张表都用 **partial index**（`WHERE col <> ”`）而不是普通唯一索引：
+// Web 会话消息没有渠道 ID（`external_msg_id` 恒为空串），普通唯一索引会让
+// 第 2 条 web 消息插入失败；partial index 直接把空值排除在索引之外（缺陷 B3）。
+//
+// ⚠️ chat_sessions 没有独立的 channel 列（原方案写的 `(bot_id, channel, external_key)`
+// 不成立），改用 `(bot_id, external_key)` —— 三段式 key 的**第一段就是 channel**，
+// 语义等价且不需要新增列。
+var sessionIndexSpecs = []indexSpec{
+	{
+		name: "idx_chat_sessions_external_key",
+		ddl:  `CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_external_key ON chat_sessions (bot_id, external_key) WHERE external_key <> ''`,
+	},
+	{
+		// I1「一条 inbound 只落一行」的数据库级保障（缺陷 B2）。
+		name: "idx_chat_messages_external_msg_id",
+		ddl:  `CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_external_msg_id ON chat_messages (bot_id, external_msg_id) WHERE external_msg_id <> ''`,
+	},
+	{
+		// reclaim / 入站归属都按根帖枚举子树，无此索引会全表扫（缺陷 B11）。
+		name: "idx_sti_root",
+		ddl:  `CREATE INDEX IF NOT EXISTS idx_sti_root ON session_thread_index (bot_id, channel, root_note_id)`,
+	},
+}
+
+// ensureIndexes 幂等地补齐索引。
+//
+// 与 ensureColumns 分离：DDL 依赖的列必须先由 ensureColumns 建好，
+// 且 GORM AutoMigrate 既不认识 partial index、也不会给存量表补索引。
+func ensureIndexes(db *gorm.DB) error {
+	for _, s := range sessionIndexSpecs {
+		if err := db.Exec(s.ddl).Error; err != nil {
+			return fmt.Errorf("create index %s: %w", s.name, err)
 		}
 	}
 	return nil
