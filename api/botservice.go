@@ -879,7 +879,13 @@ func splitSessionChannel(sessionID string) (kind, target string) {
 func (s *BotService) resolveSessionRoute(sessionID string) (kind, target string) {
 	if s.db != nil {
 		if sess, ok, err := dao.LookupSessionByID(s.db, sessionID); err == nil && ok {
-			if ch, _, id, parsed := dao.ParseExternalKey(sess.ExternalKey); parsed {
+			if ch, k, id, parsed := dao.ParseExternalKey(sess.ExternalKey); parsed {
+				// ⚠️ timeline 是「站点级旁听」会话，id 段是常量 "global"，不是可投递的
+				// 目标地址。放行会让工作流续跑把结果发给 "global" —— 表现为「工作流
+				// 跑完了但哪都没收到」，比不可路由更难查。
+				if k == dao.KindTimeline {
+					return "", sessionID
+				}
 				return normalizeChannelKind(ch), id
 			}
 			// 会话行存在但没有 external_key（历史 web 会话）：无渠道可路由。
@@ -1762,27 +1768,32 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		if _, ok := env.Message.Metadata["chat_history"]; ok {
 			return nil
 		}
-		// 仅处理有正文的 Telegram 消息（反应/心跳等非文本事件不进历史）
+		// 仅处理有正文的渠道消息（反应/心跳等非文本事件不进历史）
 		if strings.TrimSpace(env.Message.Text) == "" {
 			return nil
 		}
-		sid, ok := s.inboundSessionID(&env.Message)
+		sid, kind, ok := s.inboundSessionID(&env.Message)
 		if !ok {
 			return nil
 		}
 		env.Message.Metadata[agenttools.ExtraKeyChatSessionID] = sid
-		// 标记本消息的历史由本 enricher 托管，出站 enricher 据此只保存 Telegram 回复
+		// 标记本消息的历史由本 enricher 托管，出站 enricher 据此只保存渠道回复
 		env.Message.Metadata["__history_managed"] = true
 
-		limit := s.store.GetInt(config.KeyChatContextLimit, 20)
-		history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
-		if err != nil {
-			s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
-		} else {
-			// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
-			history = s.chatHistory.ApplyContextCheckpoint(env.Message.TraceID, env.Message.BotID, sid, history)
-			if len(history) > 0 {
-				env.Message.Metadata["chat_history"] = history
+		// ⚠️ timeline 旁听型会话**只落库、不注入历史**：把 20 条陌生人广播当成
+		// 多轮对话喂给 LLM 会造成跨用户串扰（详见 misskeySessionTarget 注释）。
+		// 落库照做 —— I7 要求 Bot 的出站 note 暂落 timeline，供 S2 的 fork reclaim。
+		if kind != dao.KindTimeline {
+			limit := s.store.GetInt(config.KeyChatContextLimit, 20)
+			history, err := s.chatHistory.LoadContextBySession(env.Message.BotID, sid, limit)
+			if err != nil {
+				s.logger.Warnw("inbound chat history load failed", "err", err, "session", sid)
+			} else {
+				// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
+				history = s.chatHistory.ApplyContextCheckpoint(env.Message.TraceID, env.Message.BotID, sid, history)
+				if len(history) > 0 {
+					env.Message.Metadata["chat_history"] = history
+				}
 			}
 		}
 
@@ -3382,11 +3393,13 @@ func pureRenoteEnrichFn(ctx context.Context, env *core.Envelope) error {
 	return nil
 }
 
-// inboundSessionID 为一条入站消息派生其「会话历史」session ID。
-// 仅 Telegram 入站拥有按会话隔离的历史上下文（与 Web 的 chat_history 机制对齐）；
-// 其它来源（Web 已自行处理 / 心跳 / cron / 反应）返回 ok=false 跳过。
-// Telegram 一个 chat（私聊或群聊）即一个会话：私聊的 chatID 即对话双方，
-// 群聊的 chatID 对全群共享，从而「整群共享一条历史」。
+// inboundSessionID 为一条入站消息派生其「会话历史」session ID 与会话类型。
+//
+// 返回 (数字会话 id, session_kind, ok)。kind 供调用方决定**是否注入 chat_history** ——
+// timeline 旁听型会话只落库、不注入（理由见 misskeySessionTarget）。
+//
+// 覆盖 Telegram 与 Misskey 两个外部渠道；其它来源（Web 已自行处理 / 心跳 / cron /
+// 反应）返回 ok=false 跳过。
 //
 // ⚠️ D6 变更（2026-09-29）：返回值从字符串 `"tg:<chatID>"` 改为 **chat_sessions 的数字 ID**。
 //
@@ -3394,29 +3407,66 @@ func pureRenoteEnrichFn(ctx context.Context, env *core.Envelope) error {
 // Web 列表列不出、`touchSessionAfterSave` 因非数字直接 return（last_msg_at /
 // message_count / 自动标题永不更新）、`handleDeleteSession` 按数字 id 删消息删不干净。
 //
-// 会话行按 `external_key = telegram:chat:<chatID>` 查/建（dao.ResolveSession），
-// 与 backfill 迁移共用同一唯一键 —— 迁移已跑则命中同一行，迁移没跑也收敛到同一行。
+// 会话行按 external_key 查/建（dao.ResolveSession），与 backfill 迁移共用同一唯一键
+// —— 迁移已跑则命中同一行，迁移没跑也收敛到同一行。
 //
-// ⚠️ 解析失败时**必须**返回 ok=false，绝不回退成旧的 `"tg:<chatID>"` 字符串：
+// ⚠️ 解析失败时**必须**返回 ok=false，绝不回退成旧的字符串 id：
 // 存量已迁成数字 id，落回字符串会造出新的孤儿会话，且 Bot 从此读不到历史
 // （LoadContextBySession 按数字 id 查）——宁可本轮不注入历史，也不能污染会话身份。
-func (s *BotService) inboundSessionID(msg *core.Message) (string, bool) {
-	if ct, _ := msg.Metadata["channel_type"].(string); ct != "telegram" {
-		return "", false
+func (s *BotService) inboundSessionID(msg *core.Message) (string, string, bool) {
+	if msg.BotID == "" || msg.Channel == "" {
+		return "", "", false
 	}
-	if msg.Channel == "" || msg.BotID == "" {
-		return "", false
+
+	var key, kind, status string
+	switch ct, _ := msg.Metadata["channel_type"].(string); ct {
+	case "telegram":
+		// 一个 chat（私聊或群聊）即一个会话：私聊的 chatID 即对话双方，
+		// 群聊的 chatID 对全群共享，从而「整群共享一条历史」。
+		key, kind = dao.TelegramChatKey(msg.Channel), dao.TelegramSessionKind(msg.Channel)
+	case "misskey":
+		key, kind, status = misskeySessionTarget(msg)
+	default:
+		return "", "", false
 	}
-	sess, err := dao.ResolveSession(s.db, msg.BotID,
-		dao.TelegramChatKey(msg.Channel), dao.TelegramSessionKind(msg.Channel), "")
+	if key == "" || kind == "" {
+		return "", "", false
+	}
+
+	sess, err := dao.ResolveSessionWithStatus(s.db, msg.BotID, key, kind, "", status)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Errorw("resolve inbound session failed, skip chat history",
 				"bot", msg.BotID, "channel", msg.Channel, "trace", msg.TraceID, "err", err)
 		}
-		return "", false
+		return "", "", false
 	}
-	return strconv.FormatUint(sess.ID, 10), true
+	return strconv.FormatUint(sess.ID, 10), kind, true
+}
+
+// misskeySessionTarget 判定 Misskey 入站消息的会话归属。
+//
+// `msg.Channel` 由 `misskeyIngressChannelID` 产出，只有两种取值：
+//   - `misskey:timeline`：未被 @ 的公开时间线广播（旁听）→ **全局唯一**会话（D2 拍板：
+//     timeline 不按天分片、不分 channel）
+//   - `<userID>`：被 @ / 被回复 / 私信 → 按对端用户聚合
+//
+// ⚠️ **timeline 只落库、不注入 chat_history**：它是 21 个互不相识的人的公开广播
+// （实测占入站 75%+），把最近 20 条当成「多轮对话历史」喂给 LLM 会造成跨用户串扰 ——
+// 模型会以为自己在跟一个自言自语的人对话。落库仍要做，因为 I7 要求 Bot 的出站 note
+// 暂落 timeline，等真有人回复时再由 S2 的 fork reclaim 成 thread。
+//
+// ⚠️ timeline 会话以 **archived** 建立：每条广播都在刷新它的 last_msg_at，若按活跃
+// 会话参与排序会永久占据列表首位，把真正的对话全挤下去（B17）。
+//
+// ⚠️ 被 @ / 被回复目前也按 userID 聚合（`misskey:dm:<uid>`）而非 thread：thread 需要
+// `ResolveThreadRoot` + 入站 fork（I7 / D12），属 S2。S2 上线后这部分会再切成
+// `misskey:thread:<root>`，届时按 external_key 迁移即可（一次 UPDATE，无歧义）。
+func misskeySessionTarget(msg *core.Message) (key, kind, status string) {
+	if msg.Channel == "misskey:timeline" {
+		return dao.MisskeyTimelineKey(), dao.KindTimeline, dao.SessionStatusArchived
+	}
+	return dao.MisskeyDMKey(msg.Channel), dao.KindDirect, ""
 }
 
 // buildQuoteBlock 把「引用回复」中被引用的上文渲染成引用块前缀。

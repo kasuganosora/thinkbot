@@ -35,6 +35,9 @@ var dataMigrations = []dataMigration{
 	// ⚠️ 必须在 S0 的 ensureColumns / ensureIndexes 之后（依赖 external_key 及其唯一索引），
 	// 见 migrate.go 中 runDataMigrations 的调用位置。
 	{name: orphanSessionBackfillName, run: backfillOrphanSessions},
+	// ⚠️ 必须排在 orphan backfill 之后：它按会话 id 对账，而 backfill 会新建会话行
+	// 并把存量消息改写为数字 id，顺序颠倒会把会话全部算成 0 条。
+	{name: sessionRecountFixName, run: recountSessionStats},
 }
 
 // runDataMigrations 依次执行尚未登记的数据修复。

@@ -70,9 +70,39 @@ func (s *ChatHistoryService) SaveMessageWithTools(botID, userID, role, content, 
 	return s.SaveMessageWithParts(botID, userID, role, content, traceID, toolCallsJSON, "", sessionID)
 }
 
+// resolveWritableSession 保证落库用的 session_id 非空且指向真实会话行（B32）。
+//
+// 此前 sessionID 完全依赖调用方（Web 前端）传参，为空就直接落一条 session_id 为空的
+// 消息 —— 这类行在 Web 上既列不出也查不到（孤儿），只能靠一次性迁移收编，而
+// 迁移只跑一次，**新产生的空 session 会持续堆积**。这里在写入侧兜底。
+//
+// 兜底键取 `web:default:<userID>` 而不是「找该 bot 最近一个会话」：前者可去重，
+// 同一用户反复触发只会收敛到同一行；后者在并发下会造出多个「默认会话」。
+//
+// 解析失败时返回空串（保持原行为）而不是报错：落库失败会连带丢掉 Bot 的上下文
+// 历史，比多一条孤儿严重。宁可孤儿，不可丢消息。
+func (s *ChatHistoryService) resolveWritableSession(botID, userID, sessionID string) string {
+	if sessionID != "" {
+		return sessionID
+	}
+	if s == nil || s.db == nil || botID == "" {
+		return ""
+	}
+	sess, err := dao.ResolveSession(s.db, botID, dao.WebDefaultKey(userID), dao.KindWeb, "默认会话")
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warnw("fallback session resolve failed, message will be orphan",
+				"bot", botID, "user", userID, "err", err)
+		}
+		return ""
+	}
+	return strconv.FormatUint(sess.ID, 10)
+}
+
 // SaveMessageWithParts 保存一条聊天消息，含工具调用 + 有序 parts。
 // partsJSON 为空时等价于 SaveMessageWithTools。parts 保留 LLM 输出的文本/工具交错顺序。
 func (s *ChatHistoryService) SaveMessageWithParts(botID, userID, role, content, traceID, toolCallsJSON, partsJSON, sessionID string) error {
+	sessionID = s.resolveWritableSession(botID, userID, sessionID)
 	msg := dao.ChatMessage{
 		BotID:     botID,
 		UserID:    userID,
@@ -131,6 +161,7 @@ func (s *ChatHistoryService) UpsertAssistantByTrace(botID, userID, content, trac
 	//
 	// 注意并发：同一 traceID 只由单个请求处理循环写入，不存在多写者竞争。
 	// 即便极端情况下重复插入，也仅表现为多一条历史，不会破坏数据一致性。
+	sessionID = s.resolveWritableSession(botID, userID, sessionID)
 	msg := dao.ChatMessage{
 		BotID:     botID,
 		UserID:    userID,
@@ -324,6 +355,7 @@ func (s *ChatHistoryService) DeleteMessages(botID, sessionID string, ids []uint6
 // SaveMessageAt 与 SaveMessage 类似，但允许指定 CreatedAt。用于 /compact 把历史摘要
 // 插入到「最近保留段」之前，保持时间顺序（摘要早于最近 N 条，而非追加到末尾）。
 func (s *ChatHistoryService) SaveMessageAt(botID, userID, role, content, traceID, sessionID string, createdAt time.Time) error {
+	sessionID = s.resolveWritableSession(botID, userID, sessionID)
 	msg := dao.ChatMessage{
 		BotID:     botID,
 		UserID:    userID,
