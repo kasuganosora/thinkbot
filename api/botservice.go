@@ -95,6 +95,7 @@ type BotService struct {
 	cancelFuncs        map[string]context.CancelFunc      // botID → bot context cancel
 	closeFuncs         map[string]func()                  // botID → sub-agent managers cleanup
 	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
+	messageSessions    map[string]string                  // "botID:traceID" → chat session id（供 active/resume 按会话过滤）
 	messageInterrupts  map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
@@ -176,6 +177,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		cancelFuncs:        make(map[string]context.CancelFunc),
 		closeFuncs:         make(map[string]func()),
 		messageCancels:     make(map[string]context.CancelFunc),
+		messageSessions:    make(map[string]string),
 		messageInterrupts:  make(map[string]chan string),
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
@@ -535,6 +537,19 @@ func (s *BotService) RegisterMessageCancel(botID, traceID string, cancel context
 	s.mu.Unlock()
 }
 
+// RememberMessageSession 记录某条执行中消息所属的会话 ID。
+// 供 /api/chat/active 与前端 resume 按会话过滤，避免把 A 会话的 SSE/工具卡画到 B 会话。
+// 在 Inject 之前调用即可（OnMessageStart 注册 cancel 时会话映射已就绪）。
+func (s *BotService) RememberMessageSession(botID, traceID, sessionID string) {
+	if botID == "" || traceID == "" || sessionID == "" {
+		return
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	s.messageSessions[key] = sessionID
+	s.mu.Unlock()
+}
+
 // UnregisterMessageCancel 注销一条消息取消函数。
 func (s *BotService) UnregisterMessageCancel(botID, traceID string) {
 	if botID == "" || traceID == "" {
@@ -543,6 +558,7 @@ func (s *BotService) UnregisterMessageCancel(botID, traceID string) {
 	key := messageCancelKey(botID, traceID)
 	s.mu.Lock()
 	delete(s.messageCancels, key)
+	delete(s.messageSessions, key)
 	s.mu.Unlock()
 }
 
@@ -620,14 +636,84 @@ func (s *BotService) AbortMessage(botID, traceID string) bool {
 // 用户关页面后后台长任务继续跑，其 cancel 仍注册在 messageCancels 中，直到消息真正完成
 // （OnMessageDone 注销）。前端据此知道哪些 traceID 仍可 resume / abort。
 func (s *BotService) ActiveMessageTraceIDs(botID string) []string {
+	tasks := s.ActiveMessageTasks(botID, "")
+	out := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		out = append(out, t.TraceID)
+	}
+	return out
+}
+
+// ActiveMessageTask 描述一条仍在执行的消息及其所属会话。
+type ActiveMessageTask struct {
+	TraceID   string `json:"traceId"`
+	SessionID string `json:"sessionId,omitempty"`
+}
+
+// ActiveMessageTasks 返回指定 bot 仍在执行的任务；sessionID 非空时只返回该会话的。
+// session 优先取 RememberMessageSession 的内存映射；缺失时回退查 chat_messages，
+// 再回退「traceID 本身就是数字会话 ID」（web 工作流续跑）。
+func (s *BotService) ActiveMessageTasks(botID, sessionID string) []ActiveMessageTask {
+	if botID == "" {
+		return nil
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	prefix := botID + ":"
-	out := make([]string, 0, len(s.messageCancels))
+	traceIDs := make([]string, 0, len(s.messageCancels))
+	sessByTrace := make(map[string]string, len(s.messageCancels))
 	for key := range s.messageCancels {
-		if strings.HasPrefix(key, prefix) {
-			out = append(out, strings.TrimPrefix(key, prefix))
+		if !strings.HasPrefix(key, prefix) {
+			continue
 		}
+		tid := strings.TrimPrefix(key, prefix)
+		traceIDs = append(traceIDs, tid)
+		if sid := s.messageSessions[key]; sid != "" {
+			sessByTrace[tid] = sid
+		}
+	}
+	s.mu.Unlock()
+	if len(traceIDs) == 0 {
+		return nil
+	}
+
+	missing := make([]string, 0)
+	for _, tid := range traceIDs {
+		if sessByTrace[tid] == "" {
+			missing = append(missing, tid)
+		}
+	}
+	if len(missing) > 0 && s.db != nil {
+		var rows []dao.ChatMessage
+		if err := s.db.Select("trace_id", "session_id").
+			Where("bot_id = ? AND trace_id IN ?", botID, missing).
+			Find(&rows).Error; err == nil {
+			for _, m := range rows {
+				if m.TraceID == "" || m.SessionID == "" {
+					continue
+				}
+				if sessByTrace[m.TraceID] == "" {
+					sessByTrace[m.TraceID] = m.SessionID
+				}
+			}
+		}
+	}
+	for _, tid := range missing {
+		if sessByTrace[tid] != "" {
+			continue
+		}
+		// web 工作流续跑：traceID == sessionID（数字）
+		if _, err := strconv.ParseUint(tid, 10, 64); err == nil {
+			sessByTrace[tid] = tid
+		}
+	}
+
+	out := make([]ActiveMessageTask, 0, len(traceIDs))
+	for _, tid := range traceIDs {
+		sid := sessByTrace[tid]
+		if sessionID != "" && sid != sessionID {
+			continue
+		}
+		out = append(out, ActiveMessageTask{TraceID: tid, SessionID: sid})
 	}
 	return out
 }
@@ -741,6 +827,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 //
 // 返回 error 表示注入失败（渠道不可用等），调用方据此跳过后续标记。
 func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID string, origin *workflow.Origin, text string, extraMeta map[string]any) error {
+	s.RememberMessageSession(botID, traceID, sessionID)
 	kind, target := s.resolveSessionRoute(sessionID)
 
 	if kind == "tg" {
@@ -1777,6 +1864,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			return nil
 		}
 		env.Message.Metadata[agenttools.ExtraKeyChatSessionID] = sid
+		// 供 web /active?sessionId= 过滤：渠道消息也要能按会话 resume，不能串到别的会话 UI
+		s.RememberMessageSession(env.Message.BotID, env.Message.TraceID, sid)
 		// 标记本消息的历史由本 enricher 托管，出站 enricher 据此只保存渠道回复
 		env.Message.Metadata["__history_managed"] = true
 
@@ -2830,6 +2919,7 @@ func (s *BotService) StopBot(id string) {
 		if strings.HasPrefix(key, prefix) {
 			pendingCancels = append(pendingCancels, cancel)
 			delete(s.messageCancels, key)
+			delete(s.messageSessions, key)
 		}
 	}
 	s.mu.Unlock()

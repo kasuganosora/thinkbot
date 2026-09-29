@@ -345,6 +345,7 @@ export const useBotStore = defineStore('bot', () => {
     try {
       const sess = await sessionApi.create(bid, title)
       sessions.value.unshift(sess)
+      _detachStreamingUI()
       activeSessionId.value = sess.id
       loadMessages()
       return sess
@@ -408,6 +409,10 @@ export const useBotStore = defineStore('bot', () => {
 
   function selectSession(sid) {
     if (String(activeSessionId.value) === String(sid)) return
+    // 只断开本页 SSE 订阅，不调用 /abort：后台任务继续跑，回到原会话时再 resume。
+    // 若这里走 _abortStreaming，会把还在生成的轮次杀掉，且旧实现会把别的会话的
+    // active trace 画进当前会话（工具卡/流式串台）。
+    _detachStreamingUI()
     activeSessionId.value = sid
     loadMessages()
   }
@@ -810,10 +815,14 @@ export const useBotStore = defineStore('bot', () => {
   // 同时设置 replying + _activeTraceId，使「停止生成」按钮可精确命中该任务予以终止。
   // 重连续流单个 traceID（后台仍在跑的任务 / 工作流终态后续跑）。
 // 渲染逻辑与 sendMessage 一致，抽出来供 resumeInFlightTasks 与 resumeContinuation 复用。
-async function _resumeTrace(traceId) {
+async function _resumeTrace(traceId, expectedSessionId) {
   if (!traceId || _resuming.has(traceId)) return
   const botId = activeBotId.value
   if (!botId) return
+  const reqSessionId = expectedSessionId != null ? expectedSessionId : activeSessionId.value
+  const stillHere = () =>
+    activeBotId.value === botId && String(activeSessionId.value) === String(reqSessionId)
+  if (!stillHere()) return
   _resuming.add(traceId)
   const assistantTmpId = uid()
   const assistantMsg = {
@@ -823,6 +832,10 @@ async function _resumeTrace(traceId) {
     toolCalls: [],
     parts: [],
     _temp: true,
+  }
+  if (!stillHere()) {
+    _resuming.delete(traceId)
+    return
   }
   messages.value = [...messages.value, assistantMsg]
 
@@ -838,8 +851,9 @@ async function _resumeTrace(traceId) {
   try {
     await chatApi.resume(botId, traceId, {
       signal: ctrl.signal,
-      onTextDelta: (delta) => appendTextPart(assistantTmpId, delta),
+      onTextDelta: (delta) => { if (stillHere()) appendTextPart(assistantTmpId, delta) },
       onToolCall: (call) => {
+        if (!stillHere()) return
         upsertToolCall(assistantTmpId, call)
         // user_choice 工具：重连续流时同样注册选择卡（断连期间下发的题目不能丢）
         const cp = choicePayloadFromTool(call)
@@ -851,6 +865,7 @@ async function _resumeTrace(traceId) {
         }
       },
       onToolProgress: (toolCallId, payload) => {
+        if (!stillHere()) return
         appendToolProgress(assistantTmpId, toolCallId, payload)
         // 同上：阻塞式 task 的 workflowId 只能从进度事件拿到（result 要等到终态）
         const pid = extractWorkflowId(payload)
@@ -867,6 +882,7 @@ async function _resumeTrace(traceId) {
         }
       },
       onToolResult: (toolCallId, payload) => {
+        if (!stillHere()) return
         finishToolCall(assistantTmpId, toolCallId, payload)
         const wid = extractWorkflowId(payload)
         if (wid) {
@@ -904,21 +920,28 @@ async function _resumeTrace(traceId) {
 
 async function resumeInFlightTasks() {
   const botId = activeBotId.value
-  if (!botId) return
-  let traceIds = []
+  const sessionId = activeSessionId.value
+  if (!botId || sessionId == null || sessionId === '') return
+  let tasks = []
   try {
-    traceIds = await chatApi.activeTasks(botId)
+    tasks = await chatApi.activeTasks(botId, sessionId)
   } catch {
     return
   }
-  traceIds = traceIds.filter(id => id && !_resuming.has(id))
+  // 二次过滤：旧后端无 session 过滤时，丢掉明确属于其他会话的；无 sessionId 的保守跳过
+  // （web 普通发送一定会 RememberMessageSession；未知归属宁可不画，也不要串台）
+  const traceIds = tasks
+    .filter(t => t && t.traceId && !_resuming.has(t.traceId))
+    .filter(t => !t.sessionId || String(t.sessionId) === String(sessionId))
+    .filter(t => t.sessionId) // 无归属的不 resume 到当前会话
+    .map(t => t.traceId)
   if (!traceIds.length) return
 
   // 不能串行 await：每个续流是 SSE 长连接，会一直挂到该任务结束（可能几十分钟），
   // 串行等待会把 loadMessages 后面的工作流恢复与首屏滚底整个卡死。
   // 这里只负责把续流拉起来，各自独立推进；错误已在 _resumeTrace 内部处理。
   for (const traceId of traceIds) {
-    _resumeTrace(traceId).catch(() => {})
+    _resumeTrace(traceId, sessionId).catch(() => {})
   }
 }
 
@@ -927,7 +950,9 @@ async function resumeInFlightTasks() {
 // 后端只在「阻塞等待方已超时/取消」时才注入，故正常情况下不会重复触发。
 async function resumeContinuation(sessionId) {
   if (!sessionId) return
-  await _resumeTrace(sessionId)
+  // 续跑 traceID == sessionID；若当前不在该会话，不要画到别的会话上
+  if (String(activeSessionId.value) !== String(sessionId)) return
+  await _resumeTrace(sessionId, sessionId)
 }
 
   // 切换 bot 时由 loadSessions 统一负责加载对应会话的消息（含首屏滚底）。
@@ -935,6 +960,19 @@ async function resumeContinuation(sessionId) {
   // 用空 session 发起一次查询并与正确查询竞态覆盖，已移除。
 
   // ---- 中止流式 ----
+  /** 只断开本页 SSE（send + resume），不向后端发 abort。切会话用这个。 */
+  function _detachStreamingUI() {
+    _activeTraceId = ''
+    if (_abortController) {
+      _abortController.abort()
+      _abortController = null
+    }
+    _abortResumes()
+    // resume 集合也清掉，否则回到原会话时 _resumeTrace 会因 _resuming 仍持有而跳过
+    _resuming.clear()
+    replying.value = false
+  }
+
   function _abortStreaming() {
     const traceId = _activeTraceId
     const botId = activeBotId.value
@@ -1330,6 +1368,9 @@ async function resumeContinuation(sessionId) {
     activeWorkflowId.value = ''
     activeWorkflowStatus.value = null
     const botId = activeBotId.value
+    const reqSessionId = activeSessionId.value
+    const stillHere = () =>
+      activeBotId.value === botId && String(activeSessionId.value) === String(reqSessionId)
 
     const userTmpId = uid()
     const userMsg = {
@@ -1359,14 +1400,17 @@ async function resumeContinuation(sessionId) {
     _activeTraceId = ''
 
     chatApi.send(botId, content, {
-      sessionId: activeSessionId.value,
+      sessionId: reqSessionId,
       onStart: (traceId) => {
+        if (!stillHere()) return
         _activeTraceId = traceId || ''
       },
       onTextDelta: (delta) => {
+        if (!stillHere()) return
         appendTextPart(assistantTmpId, delta)
       },
       onToolCall: (call) => {
+        if (!stillHere()) return
         upsertToolCall(assistantTmpId, call)
         // user_choice 工具：调用即下发选择卡（进度/结果要等用户作答，可能很久）
         const cp = choicePayloadFromTool(call)
@@ -1382,6 +1426,7 @@ async function resumeContinuation(sessionId) {
         }
       },
       onToolProgress: (toolCallId, payload) => {
+        if (!stillHere()) return
         appendToolProgress(assistantTmpId, toolCallId, payload)
         // task 工具「提交即阻塞」：tool_result 要等工作流跑完（可能数十分钟）才到达，
         // 因此必须从进度事件里就取到 workflowId，否则整个执行期间面板都不会出现。
@@ -1402,6 +1447,7 @@ async function resumeContinuation(sessionId) {
         }
       },
       onToolResult: (toolCallId, payload) => {
+        if (!stillHere()) return
         finishToolCall(assistantTmpId, toolCallId, payload)
         // task 工具返回里携带 workflowId（如 "wf-xxxx"），提取后驱动工作流面板展示
         const wid = extractWorkflowId(payload)
@@ -1422,6 +1468,7 @@ async function resumeContinuation(sessionId) {
       attachments: attachments || [],
     })
       .then((resp) => {
+        if (!stillHere()) return
         if (resp?.traceId) _activeTraceId = resp.traceId
 
         // 斜杠命令响应：/clear 等命令在 done 事件中携带 command:true
@@ -1475,6 +1522,7 @@ async function resumeContinuation(sessionId) {
       })
       .catch((err) => {
         if (err?.name === 'AbortError') return
+        if (!stillHere()) return
         const idx = messages.value.findIndex(m => m.id === assistantTmpId)
         if (idx >= 0 && !messages.value[idx].content) {
           const updated = [...messages.value]
@@ -1489,6 +1537,8 @@ async function resumeContinuation(sessionId) {
         }
       })
       .finally(() => {
+        // 已切走会话时不要清掉新会话上可能正在跑的 replying / trace
+        if (!stillHere()) return
         replying.value = false
         _abortController = null
         _activeTraceId = ''
