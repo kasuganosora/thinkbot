@@ -182,8 +182,22 @@ func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit
 	// 过滤掉，导致「刷新后看不到 bot 续跑结果」。单用户部署下 'system' 为保留哨兵，不与
 	// 真实数字 user_id 冲突。
 	const systemUserID = "system"
-	q := s.db.Model(&dao.ChatMessage{}).
-		Where("bot_id = ? AND session_id = ? AND (user_id = ? OR user_id = ?)", botID, sessionID, userID, systemUserID)
+
+	// ⚠️ B24-B：会话内查询**不再按 user_id 过滤**。
+	//
+	// 渠道消息的 user_id 写的就是渠道会话标识本身（botservice.go 的 `userID := sid`），
+	// 实测 tg:76017910 会话里 359 条 user_id 全是 'tg:76017910'，群聊更是全群共享一个值——
+	// 它恒不等于登录用户 id，于是整个会话一条都查不出来（「列表有、点进去空」）。
+	//
+	// 这不是开后门：chat_sessions 目前**没有 owner 字段**，handleListSessions 也只按
+	// bot_id 就列出全部会话，系统根本不存在会话级多用户隔离。去掉该条件不新增任何
+	// 暴露面，只是拆掉一个「看起来有隔离、实际没有」的假闸门。
+	// 附带收益：user_id='system' 哨兵不再跨会话可见，收敛到本会话内。
+	q := s.db.Model(&dao.ChatMessage{}).Where("bot_id = ? AND session_id = ?", botID, sessionID)
+	if sessionID == "" {
+		// 无会话维度的历史查询（session_id 为空的老数据）才回退到按归属用户过滤。
+		q = q.Where("user_id = ? OR user_id = ?", userID, systemUserID)
+	}
 
 	if cursor != "" {
 		ts, id, err := decodeCursor(cursor)
