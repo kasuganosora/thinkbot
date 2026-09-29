@@ -62,6 +62,23 @@ func MisskeyThreadKey(rootNoteID string) string { return ChannelMisskey + ":thre
 // MisskeyDMKey 构造 Misskey DM 会话的 external_key：`misskey:dm:<userID>`。
 func MisskeyDMKey(userID string) string { return ChannelMisskey + ":dm:" + userID }
 
+// MisskeyTimelineKey 是公开时间线会话的 external_key：**无 id 段之外的变量**，
+// 全局唯一（D2：timeline 不按天分片、不分 channel）。
+func MisskeyTimelineKey() string { return ChannelMisskey + ":timeline:global" }
+
+// WebDefaultKey 构造 Web 兜底会话的 external_key：`web:default:<userID>`。
+//
+// userID 为空时退化为 `web:default:anon` —— key 必须三段齐全，缺段会被
+// ParseExternalKey 拒绝，ResolveSession 也就无从去重（退化成每次新建一行）。
+//
+// 用途：B32 —— 写入侧在 sessionID 为空时用它兜底，杜绝新的孤儿消息行。
+func WebDefaultKey(userID string) string {
+	if strings.TrimSpace(userID) == "" {
+		userID = "anon"
+	}
+	return "web:default:" + userID
+}
+
 // ParseExternalKey 把 external_key 拆成 (channel, kind, id)。
 // 形如 "telegram:chat:76017910" → ("telegram", "chat", "76017910")。
 // 段数不足或含空段时 ok=false —— 调用方据此回退，不要猜。
@@ -92,6 +109,15 @@ func ParseExternalKey(key string) (channel, kind, id string, ok bool) {
 // 并发安全：两个 goroutine 同时首次解析同一 key 时，后一个 Create 会撞唯一索引；
 // 此时重新查一次而不是把错误抛给调用方——并发下这不是异常，是正常竞争。
 func ResolveSession(db *gorm.DB, botID, externalKey, kind, title string) (ChatSession, error) {
+	return ResolveSessionWithStatus(db, botID, externalKey, kind, title, SessionStatusActive)
+}
+
+// ResolveSessionWithStatus 同 ResolveSession，但可指定**新建**会话的初始 status。
+// 已存在的会话不会被改写 status（收编存量时不能把用户正在用的会话归档掉）。
+//
+// 用途：timeline 这类「旁听型」会话应以 archived 建立 —— 它每秒都在更新
+// last_msg_at，若按活跃会话排序会永久置顶，把真正的对话全挤下去（B17）。
+func ResolveSessionWithStatus(db *gorm.DB, botID, externalKey, kind, title, status string) (ChatSession, error) {
 	if db == nil {
 		return ChatSession{}, fmt.Errorf("dao: resolve session: nil db")
 	}
@@ -112,10 +138,13 @@ func ResolveSession(db *gorm.DB, botID, externalKey, kind, title string) (ChatSe
 	}
 
 	now := time.Now()
+	if status == "" {
+		status = SessionStatusActive
+	}
 	sess = ChatSession{
 		BotID:       botID,
 		Title:       title,
-		Status:      SessionStatusActive,
+		Status:      status,
 		ExternalKey: externalKey,
 		SessionKind: kind,
 		CreatedAt:   now,

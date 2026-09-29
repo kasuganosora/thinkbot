@@ -49,6 +49,7 @@
               @dblclick.stop="startRename(s)"
             >{{ s.title || '新会话' }}</div>
             <div class="sess-meta">
+              <span v-if="channelLabel(s)" class="sess-kind" :data-testid="`session-kind-${s.id}`">{{ channelLabel(s) }}</span>
               <span v-if="s.messageCount > 0" class="sess-count">{{ s.messageCount }} 条消息</span>
               <span class="sess-time">{{ formatTime(s.lastMsgAt || s.createdAt) }}</span>
             </div>
@@ -163,6 +164,19 @@ function onDelete(session) {
     },
     onCancel: () => { dialog.hide() },
   })
+}
+
+// 渠道会话类型标签。空串（历史 web 会话 / 未分类）不渲染，避免出现无意义的徽标。
+function channelLabel(s) {
+  switch (s.sessionKind) {
+    case 'direct': return '私聊'
+    case 'group': return '群组'
+    case 'topic': return '话题'
+    case 'thread': return '话题串'
+    case 'timeline': return '时间线'
+    case 'notify': return '通知'
+    default: return ''
+  }
 }
 
 function formatTime(iso) {
@@ -288,6 +302,13 @@ function formatTime(iso) {
 }
 .sess-count {
   color: var(--bp-label-tertiary);
+}
+.sess-kind {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: var(--bp-radius-xs);
+  background: var(--bp-accent-soft);
+  color: var(--bp-accent);
 }
 .sess-time {
   flex-shrink: 0;
