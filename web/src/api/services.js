@@ -910,12 +910,25 @@ export const chatApi = {
    * @param {string} botId
    * @returns {Promise<string[]>}
    */
-  async activeTasks(botId) {
+  /**
+   * 查询后台仍在执行的任务。sessionId 传入时只返回该会话的（避免跨会话 resume）。
+   * @returns {Promise<Array<{traceId: string, sessionId?: string}>>}
+   */
+  async activeTasks(botId, sessionId) {
     if (!botId) return []
     if (USE_MOCK) return []
     try {
-      const data = await request('GET', `/api/chat/active?botId=${encodeURIComponent(botId)}`)
-      return (data && data.traceIds) || []
+      const qs = new URLSearchParams({ botId })
+      if (sessionId) qs.set('sessionId', String(sessionId))
+      const data = await request('GET', `/api/chat/active?${qs.toString()}`)
+      if (Array.isArray(data?.tasks) && data.tasks.length) {
+        return data.tasks.filter(t => t && t.traceId).map(t => ({
+          traceId: String(t.traceId),
+          sessionId: t.sessionId != null ? String(t.sessionId) : '',
+        }))
+      }
+      // 兼容旧后端：只有 traceIds
+      return (data?.traceIds || []).filter(Boolean).map(id => ({ traceId: String(id), sessionId: '' }))
     } catch {
       return []
     }
