@@ -119,7 +119,7 @@ func newPolicyDreamManager(p llm.Provider, pol *llm.InternalPolicy) *DreamManage
 // dream_score hardcoded max_tokens 2048: on 09-24 and 09-26 the output was
 // exactly 2048 tokens (cut off), so scoring always fell back to the heuristic.
 func TestDreamScore_UsesModelLimitAndScorerReasoning(t *testing.T) {
-	p := &policyRecorder{response: `[{"key":"k1","importance":0.9}]`}
+	p := &policyRecorder{response: `[{"id":"c0","importance":0.9}]`}
 	d := newPolicyDreamManager(p, prodPolicy)
 	out := d.scoreImportanceOnce(context.Background(), []*DreamCandidate{{Key: "k1", Content: "用户使用 Go"}})
 	if out["k1"] != 0.9 {

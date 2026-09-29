@@ -28,9 +28,10 @@ const (
 	// lightBatchChars 单次提取调用的片段字符上限（按截断后长度计，默认 6000）。
 	// 约 30 条 200 字的片段，加上固定 prompt 后单批输入仍在 1 万 token 量级。
 	lightBatchChars = 6000
-	// scoreBatchSize 单次重要性评分调用的候选条数（默认 60）。
-	// 候选在 prompt 里截断到 80 字符 + 元信息，60 条约 8000 字符。
-	scoreBatchSize = 60
+	// scoreBatchSize 单次重要性评分调用的候选条数（默认 25）。
+	// 候选在 prompt 里用 opaque id + 截断到 80 字符的内容 + 元信息；
+	// 25 条约 3500 字符输入、~1k token 输出，比 60 更不易提前停写导致覆盖不全。
+	scoreBatchSize = 25
 	// backfillMaxEntries 补偿模式单轮最多处理的 L0 条数。
 	//
 	// 必须 ≤ Light.MaxCandidates（默认 100）：候选在提取后会被截断到该上限，
@@ -1108,13 +1109,6 @@ func (d *DreamManager) collectSourceEntries(ctx context.Context, passed []*Dream
 	return out
 }
 
-// normalizeScoreKey 归一化候选 / LLM 返回的 key，用于容错匹配。
-// LLM 可能把 [key:foo] 回写成 "Foo" 或 "foo "，统一转小写并去首尾空白后再比对，
-// 避免因大小写 / 空白差异导致 candidate.Key 与返回 key 不匹配、整条回退为 -1（纯启发式）。
-func normalizeScoreKey(k string) string {
-	return strings.ToLower(strings.TrimSpace(k))
-}
-
 // scoreImportanceBatch 批量调用 LLM 评估候选的长期重要性（0.0~1.0）。
 // 一次请求覆盖一批候选（而非 N 次），控制 Deep 阶段 LLM 调用量与延迟。
 // 返回 key→importance 映射；任何失败（无模型 / 调用错误 / JSON 解析失败 / 空集）返回 nil，
@@ -1123,12 +1117,15 @@ func normalizeScoreKey(k string) string {
 // 分批执行（见 scoreBatchSize）：原实现把所有候选拼进**一个** prompt。日增量下
 // 候选只有几十条，但补偿积压时会有数百条，单次调用的输入会撞上下文上限；
 // 分成多批后单批失败只影响该批（其余照常拿到 LLM 分），不会整体回退启发式。
+//
+// 覆盖补全：各批汇总后若仍有候选缺分，对缺失子集再调用一次 scoreImportanceOnce
+// （仅一次，无循环），合并进结果。缓解模型提前停写导致的部分覆盖（prod 09-30：45/60）。
 func (d *DreamManager) scoreImportanceBatch(ctx context.Context, cands []*DreamCandidate) map[string]float64 {
 	if len(cands) == 0 || d.model == "" {
 		return nil
 	}
+	out := make(map[string]float64, len(cands))
 	if len(cands) > scoreBatchSize {
-		out := make(map[string]float64, len(cands))
 		for start := 0; start < len(cands); start += scoreBatchSize {
 			end := start + scoreBatchSize
 			if end > len(cands) {
@@ -1141,40 +1138,72 @@ func (d *DreamManager) scoreImportanceBatch(ctx context.Context, cands []*DreamC
 		}
 		d.logger.Infow("dreaming deep: LLM importance scored (batched)",
 			"candidates", len(cands), "batchSize", scoreBatchSize, "scored", len(out))
-		if len(out) == 0 {
-			return nil
+	} else {
+		part := d.scoreImportanceOnce(ctx, cands)
+		for k, v := range part {
+			out[k] = v
 		}
-		return out
 	}
-	return d.scoreImportanceOnce(ctx, cands)
+
+	// 一次 miss-retry：仅对仍缺分的候选再评一轮，合并后结束（不循环）。
+	if len(out) < len(cands) {
+		missing := make([]*DreamCandidate, 0, len(cands)-len(out))
+		for _, c := range cands {
+			if _, ok := out[c.Key]; !ok {
+				missing = append(missing, c)
+			}
+		}
+		if len(missing) > 0 {
+			missed := len(missing)
+			retry := d.scoreImportanceOnce(ctx, missing)
+			for k, v := range retry {
+				out[k] = v
+			}
+			d.logger.Infow("dreaming deep: LLM importance miss-retry",
+				"missed", missed, "scored", len(retry), "totalScored", len(out), "of", len(cands))
+		}
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
-// scoreImportanceOnce 对**一批**候选执行一次 LLM 评分（原 scoreImportanceBatch 实现）。
+// scoreImportanceOnce 对**一批**候选执行一次 LLM 评分。
+//
+// 使用 opaque 短 id（c0, c1, …）作为模型回写标识，再本地映射回 candidate.Key。
+// 不再要求模型 echo 内容派生的 normalizeKey——长中文 key 易截断/改写，导致
+// 合法但仍不完整的 JSON 数组 → 缺 key 的条目 llm=-1（prod 09-30 覆盖缺口）。
 func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCandidate) map[string]float64 {
 	if len(cands) == 0 || d.model == "" {
 		return nil
 	}
 
+	idToKey := make(map[string]string, len(cands))
 	var sb strings.Builder
 	sb.WriteString("请评估以下每条记忆对用户长期价值的「重要性」，返回 JSON 数组。\n")
 	sb.WriteString("重要性取值 0.0~1.0：\n")
 	sb.WriteString("  1.0 = 核心事实 / 稳定偏好 / 长期有用（如技术栈、工作习惯、项目约定）\n")
 	sb.WriteString("  0.0 = 闲聊寒暄 / 临时调试 / 一次性上下文 / 易逝进度汇报\n")
-	sb.WriteString("判断依据：内容具体性、是否可被未来对话复用、出现/被引用频次。\n\n")
-	for _, c := range cands {
-		fmt.Fprintf(&sb, "[key:%s] 类别=%s 命中=%d 主题命中=%d 召回=%d\n%s\n\n",
-			c.Key, c.Category, c.LightHits, c.REMHits, c.RecallCount,
+	sb.WriteString("判断依据：内容具体性、是否可被未来对话复用、出现/被引用频次。\n")
+	sb.WriteString("每条候选带有短 id（如 c0）；返回时必须用该 id，不要回写内容原文。\n\n")
+	for i, c := range cands {
+		id := fmt.Sprintf("c%d", i)
+		idToKey[id] = c.Key
+		fmt.Fprintf(&sb, "[id:%s] 类别=%s 命中=%d 主题命中=%d 召回=%d\n%s\n\n",
+			id, c.Category, c.LightHits, c.REMHits, c.RecallCount,
 			strutil.Truncate(c.Content, 80))
 	}
 	sb.WriteString("返回格式（只返回 JSON，不要解释）：\n")
-	sb.WriteString("[{\"key\":\"<key>\",\"importance\":0.0}]")
+	sb.WriteString(`[{"id":"c0","importance":0.0}]`)
 
 	// 此前写死 maxTokens := 2048：GLM-5.3 缺省 max 推理，09-24 / 09-26 输出恰好 2048 即被截断，
 	// JSON 不完整 → 一直回退启发式评分。现跟随主模型配置的 maxTokens（可由
 	// llm.internal_max_tokens.dream_score 压低），reasoning_effort 按评分类策略（默认 none/low）。
 	params := llm.GenerateParams{
 		Model:    llm.ChatModel(d.model),
-		System:   "You are a memory importance evaluator. Return only a JSON array of objects {\"key\": string, \"importance\": number in 0.0~1.0}. No explanation.",
+		System:   `You are a memory importance evaluator. Return only a JSON array of objects {"id": string (e.g. "c0"), "importance": number in 0.0~1.0}. Use the given short ids; do not echo content. No explanation.`,
 		Messages: []llm.Message{llm.UserMessage(sb.String())},
 	}
 	applyInternalCall(d.config.Policy, llm.PurposeDreamScore, &params, d.config.MaxDreamTokens)
@@ -1190,7 +1219,8 @@ func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCa
 	}
 
 	var scored []struct {
-		Key        string  `json:"key"`
+		ID         string  `json:"id"`
+		Key        string  `json:"key"` // 兼容旧字段名：值仍应为 opaque id（c0…）
 		Importance float64 `json:"importance"`
 	}
 	if err := strutil.ExtractJSON(result.Text, &scored); err != nil {
@@ -1199,21 +1229,19 @@ func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCa
 		return nil
 	}
 
-	// 候选原始 key 的归一化索引：容忍 LLM 返回 key 的大小写 / 前后空白差异，
-	// 避免 candidate.Key 与返回 key 不完全一致时整条回退为 -1（纯启发式），
-	// 否则会出现「9/10 条有 LLM 分、1 条缺失」的偏差。
-	normIndex := make(map[string]string, len(cands))
-	for _, c := range cands {
-		if c.Key != "" {
-			normIndex[normalizeScoreKey(c.Key)] = c.Key
-		}
-	}
 	out := make(map[string]float64, len(scored))
 	for _, s := range scored {
 		if s.Importance < 0 || s.Importance > 1 {
 			continue
 		}
-		orig, ok := normIndex[normalizeScoreKey(s.Key)]
+		id := strings.TrimSpace(s.ID)
+		if id == "" {
+			id = strings.TrimSpace(s.Key)
+		}
+		if id == "" {
+			continue
+		}
+		orig, ok := idToKey[id]
 		if !ok || orig == "" {
 			continue
 		}
@@ -1222,8 +1250,14 @@ func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCa
 	if len(out) == 0 {
 		return nil
 	}
-	d.logger.Infow("dreaming deep: LLM importance scored",
-		"scored", len(out), "of", len(cands))
+	missing := len(cands) - len(out)
+	if missing > 0 {
+		d.logger.Infow("dreaming deep: LLM importance scored",
+			"scored", len(out), "of", len(cands), "missing", missing)
+	} else {
+		d.logger.Infow("dreaming deep: LLM importance scored",
+			"scored", len(out), "of", len(cands))
+	}
 	return out
 }
 
@@ -1299,11 +1333,13 @@ func tokenize(text string) map[string]bool {
 }
 
 // normalizeKey 生成候选的去重键。
+// 按 Unicode 码点（rune）截断到 80，避免按字节切片在 CJK 等多字节字符中间切断产生非法 UTF-8。
 func normalizeKey(content string) string {
 	content = strings.ToLower(strings.TrimSpace(content))
 	content = strings.Join(strings.Fields(content), " ")
-	if len(content) > 80 {
-		content = content[:80]
+	runess := []rune(content)
+	if len(runess) > 80 {
+		content = string(runess[:80])
 	}
 	return content
 }
