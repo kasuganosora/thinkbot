@@ -2,13 +2,12 @@ package stages
 
 import (
 	"context"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // exchangeSeen 按 message_id 对「同一条入站消息」做跨 Process 去重。
@@ -54,29 +53,17 @@ func (e *exchangeSeen) seen(id string) bool {
 
 const exchangeCaptureDedupTTL = 10 * time.Minute
 
-// 以下正则在捕获「用户说了什么」为 L0 对话记忆前，剥离渠道层为 LLM prompt 注入的
-// 装饰噪声（channel/misskey/channel.go:580-595）。这些前缀/后缀是给模型看的上下文，
-// 不应作为长期记忆原文存储——否则会污染 recall 召回 prompt 与 dreaming 巩固输入。
-//
-// 注意只剥离「已知的固定装饰格式」，不碰用户真实内容（如 Misskey 渲染的
-// "[Reply to 栞娜: ...]" 是帖子正文的一部分，必须保留）。
-var (
-	reTimelinePrefix = regexp.MustCompile(`^\[Timeline\]\s*@\S+:\s*`)
-	reDMPrefix       = regexp.MustCompile(`^\[DM\]\s*@\S+:\s*`)
-	reBotPrefix      = regexp.MustCompile(`^\[对方是 Bot 账号 [^\]]+\]\s*`)
-	reNoteIDSuffix   = regexp.MustCompile(`(?m)\s*\[note_id: [^\]]+\]\s*$`)
-)
-
 // normalizeExchangeText 去除捕获文本里的渠道装饰前缀/后缀，返回干净的用户原文。
+//
+// 实现委托给 strutil.StripChannelContextMarkers（唯一实现，会话标题也走同一处，
+// 避免两处正则漂移）。剥离项与原因见该文件注释。
+//
+// ⚠️ 旧注释曾称 "[Reply to 栞娜: ...]" 是 Misskey 渲染的帖子正文、必须保留——这是
+// 错误认知：该前缀由 channel/misskey/channel.go:noteContext 注入，其中嵌的是**被回复帖
+// 的正文**（多数情况下就是 Bot 自己的话）。据此保留，等于把 Bot 的发言当成用户的事实
+// 写进 L0，dreaming 再巩固成画像。2026-09-29 实测：47 天内有 90 条入站消息带此前缀。
 func normalizeExchangeText(raw string) string {
-	s := raw
-	// 注意顺序：Bot 账号标注包裹在 Timeline/DM 前缀之外（见 channel.go 注入顺序），
-	// 故先剥 Bot 前缀，再剥来源前缀。
-	s = reBotPrefix.ReplaceAllString(s, "")
-	s = reTimelinePrefix.ReplaceAllString(s, "")
-	s = reDMPrefix.ReplaceAllString(s, "")
-	s = reNoteIDSuffix.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
+	return strutil.StripChannelContextMarkers(raw)
 }
 
 // CapturedUserMessage 是一条已摄取的入站用户消息（写入事件流的最小单元）。
