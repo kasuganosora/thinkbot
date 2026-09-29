@@ -62,8 +62,8 @@ func MisskeyThreadKey(rootNoteID string) string { return ChannelMisskey + ":thre
 // MisskeyDMKey 构造 Misskey DM 会话的 external_key：`misskey:dm:<userID>`。
 func MisskeyDMKey(userID string) string { return ChannelMisskey + ":dm:" + userID }
 
-// MisskeyTimelineKey 是公开时间线会话的 external_key：**无 id 段之外的变量**，
-// 全局唯一（D2：timeline 不按天分片、不分 channel）。
+// MisskeyTimelineKey 是公开时间线会话的 external_key（全局唯一，不按天分片）。
+// 入站旁听已不再用它建会话；保留给 S2 fork/reclaim 或手动运维查询。
 func MisskeyTimelineKey() string { return ChannelMisskey + ":timeline:global" }
 
 // WebDefaultKey 构造 Web 兜底会话的 external_key：`web:default:<userID>`。
