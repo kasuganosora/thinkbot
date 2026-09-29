@@ -34,7 +34,10 @@ type ChatSession struct {
 	// SessionKind 会话类型：direct / group / topic / thread / timeline / web / notify。
 	// 空串 = 未分类（历史数据），由 S1 的 SessionResolver 回填。
 	// ⚠️ 不用 default 'direct'：历史 web 会话会被贴上错误标签，宁可留空。
-	SessionKind string `gorm:"size:16;not null;default:''" json:"-"`
+	//
+	// 已对 API 放开（S1）：Web 列表靠它区分 TG 私聊 / TG 群 / Misskey 时间线，
+	// 否则它们在列表里长得一模一样。
+	SessionKind string `gorm:"size:16;not null;default:''" json:"sessionKind,omitempty"`
 
 	// ThreadRoot thread 类会话的根帖/根消息 ID（渠道侧字符串 ID，非 chat_messages.id），
 	// 供反查与归并；非 thread 类会话为空串。

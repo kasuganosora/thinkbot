@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/kasuganosora/thinkbot/dao"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ============================================================================
@@ -47,7 +48,13 @@ func (s *Server) handleListSessions(c *gin.Context) {
 	}
 
 	var sessions []dao.ChatSession
+	// ⚠️ archived 会话（timeline 旁听会话即以此建立）必须沉底：它每条广播都在刷新
+	// last_msg_at，若与活跃会话同池排序会永久占据首位，把真正的对话全挤下去（B17）。
 	q := s.db.Where("bot_id = ?", botID).
+		Order(clause.Expr{
+			SQL:  "CASE WHEN status = ? THEN 1 ELSE 0 END",
+			Vars: []any{dao.SessionStatusArchived},
+		}).
 		Order("last_msg_at DESC, created_at DESC").
 		Find(&sessions)
 

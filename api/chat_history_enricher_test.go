@@ -33,22 +33,43 @@ func TestInboundSessionID(t *testing.T) {
 	s := &BotService{db: db}
 
 	cases := []struct {
-		name    string
-		msg     core.Message
-		wantKey string
-		wantOK  bool
+		name       string
+		msg        core.Message
+		wantKey    string
+		wantKind   string
+		wantStatus string
+		wantOK     bool
 	}{
 		{
-			name:    "telegram private chat",
-			msg:     core.Message{BotID: "bot-a", Channel: "12345", Metadata: map[string]any{"channel_type": "telegram"}},
-			wantKey: "telegram:chat:12345",
-			wantOK:  true,
+			name:     "telegram private chat",
+			msg:      core.Message{BotID: "bot-a", Channel: "12345", Metadata: map[string]any{"channel_type": "telegram"}},
+			wantKey:  "telegram:chat:12345",
+			wantKind: dao.KindDirect,
+			wantOK:   true,
 		},
 		{
-			name:    "telegram group chat (negative chatID) shares one session by chatID",
-			msg:     core.Message{BotID: "bot-a", Channel: "-98765", Metadata: map[string]any{"channel_type": "telegram"}},
-			wantKey: "telegram:chat:-98765",
-			wantOK:  true,
+			name:     "telegram group chat (negative chatID) shares one session by chatID",
+			msg:      core.Message{BotID: "bot-a", Channel: "-98765", Metadata: map[string]any{"channel_type": "telegram"}},
+			wantKey:  "telegram:chat:-98765",
+			wantKind: dao.KindGroup,
+			wantOK:   true,
+		},
+		{
+			name:     "misskey mention/reply -> per-user dm session",
+			msg:      core.Message{BotID: "bot-a", Channel: "9a1b2c", Metadata: map[string]any{"channel_type": "misskey"}},
+			wantKey:  "misskey:dm:9a1b2c",
+			wantKind: dao.KindDirect,
+			wantOK:   true,
+		},
+		{
+			// timeline 是旁听型：全局唯一且 archived，否则它会以最新 last_msg_at
+			// 永久占据列表首位（B17）。
+			name:       "misskey timeline broadcast -> single archived session",
+			msg:        core.Message{BotID: "bot-a", Channel: "misskey:timeline", Metadata: map[string]any{"channel_type": "misskey"}},
+			wantKey:    "misskey:timeline:global",
+			wantKind:   dao.KindTimeline,
+			wantStatus: dao.SessionStatusArchived,
+			wantOK:     true,
 		},
 		{
 			name:   "telegram empty channel -> skip",
@@ -74,7 +95,7 @@ func TestInboundSessionID(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			msg := c.msg
-			sid, ok := s.inboundSessionID(&msg)
+			sid, kind, ok := s.inboundSessionID(&msg)
 			if ok != c.wantOK {
 				t.Fatalf("ok=%v want %v (sid=%q)", ok, c.wantOK, sid)
 			}
@@ -95,8 +116,22 @@ func TestInboundSessionID(t *testing.T) {
 			if sess.ExternalKey != c.wantKey {
 				t.Errorf("external_key = %q, want %q", sess.ExternalKey, c.wantKey)
 			}
+			if c.wantKind != "" && sess.SessionKind != c.wantKind {
+				t.Errorf("session_kind = %q, want %q", sess.SessionKind, c.wantKind)
+			}
+			// kind 返回值供 enricher 决定是否注入 chat_history，必须与会话行一致
+			if c.wantKind != "" && kind != c.wantKind {
+				t.Errorf("returned kind = %q, want %q", kind, c.wantKind)
+			}
+			wantStatus := c.wantStatus
+			if wantStatus == "" {
+				wantStatus = dao.SessionStatusActive
+			}
+			if sess.Status != wantStatus {
+				t.Errorf("status = %q, want %q", sess.Status, wantStatus)
+			}
 			// 重复解析必须收敛到同一行
-			again, _ := s.inboundSessionID(&msg)
+			again, _, _ := s.inboundSessionID(&msg)
 			if again != sid {
 				t.Errorf("not idempotent: %q then %q", sid, again)
 			}
@@ -173,8 +208,8 @@ func TestBuildQuoteBlock(t *testing.T) {
 		{
 			name: "with author",
 			meta: map[string]any{
-				"reply_to_text":  "明天开会",
-				"reply_to_from":  "露娜 (@luna)",
+				"reply_to_text": "明天开会",
+				"reply_to_from": "露娜 (@luna)",
 			},
 			want: "[引用 露娜 (@luna) 的消息]\n明天开会",
 		},
