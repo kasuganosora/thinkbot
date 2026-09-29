@@ -10,13 +10,17 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// newMigrationTestDB 建一个用于数据迁移测试的内存库。
+//
+// ⚠️ 必须包含 dataMigrations 里所有修复会触及的表：runDataMigrations 是按列表
+// 全量跑的，只建单表会让后来新增的迁移报 "no such table"（2026-09-29 踩过）。
 func newMigrationTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=private"), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&UsageDaily{}); err != nil {
+	if err := db.AutoMigrate(&UsageDaily{}, &TieredMemoryModel{}, &UserMessageEvent{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -83,11 +87,16 @@ func TestFixCostCacheDoubleCount(t *testing.T) {
 		t.Fatalf("D (legacy) changed: %+v", d)
 	}
 
+	// 按名字断言而非数量：dataMigrations 是只追加的列表，新增修复不应让本测试变红。
 	var reg []DataMigration
 	if err := db.Find(&reg).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(reg) != 1 || reg[0].Name != costCacheDoubleCountFixName {
-		t.Fatalf("registry = %+v", reg)
+	applied := map[string]bool{}
+	for _, r := range reg {
+		applied[r.Name] = true
+	}
+	if !applied[costCacheDoubleCountFixName] {
+		t.Fatalf("cost fix not registered: %+v", reg)
 	}
 }

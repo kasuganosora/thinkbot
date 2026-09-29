@@ -31,6 +31,7 @@ type dataMigration struct {
 // dataMigrations 按顺序执行的数据修复列表（只追加，不要改名 / 删除已发布的项）。
 var dataMigrations = []dataMigration{
 	{name: costCacheDoubleCountFixName, run: fixCostCacheDoubleCount},
+	{name: contextMarkersFixName, run: fixChannelContextMarkers},
 }
 
 // runDataMigrations 依次执行尚未登记的数据修复。
