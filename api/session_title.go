@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 	"gorm.io/gorm"
 )
 
@@ -18,8 +19,12 @@ func isPlaceholderSessionTitle(t string) bool {
 	}
 }
 
+// titleFromFirstMessage 由首条用户消息生成会话标题（截断到 30 rune）。
+//
+// 必须先剥离渠道装饰再压缩空白：strings.Fields 会把 "[Reply to 栞娜: <bot 原文>]\n<用户正文>"
+// 的换行压成空格，剥离正则依赖该换行作为边界，顺序颠倒将直接失效（B18）。
 func titleFromFirstMessage(content string) string {
-	s := strings.Join(strings.Fields(content), " ")
+	s := strings.Join(strings.Fields(strutil.StripChannelContextMarkers(content)), " ")
 	if s == "" {
 		return ""
 	}
