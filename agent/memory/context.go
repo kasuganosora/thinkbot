@@ -409,6 +409,10 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 	if len(allEntries) > 1 {
 		sortEntriesByTimeDesc(allEntries)
 	}
+	// 最近记忆只保留和这句对得上的。聊别的主题时不把旧伤灌进提示。
+	if text != "" {
+		allEntries = FilterUnrelated(allEntries, text)
+	}
 
 	// 3. 如果有消息文本，做相关性检索（与 recent 去重）
 	if text != "" {
