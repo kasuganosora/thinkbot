@@ -69,6 +69,9 @@ func NewMemoryStage(
 ) *MemoryStage {
 	builder := NewContextBuilder(config.Builder)
 	mgr := NewContextManager(repo, builder, config.Window, config.Compressor, config.Context)
+	if v, ok := repo.(interface{ Vec() *VecIndex }); ok {
+		mgr.UseVec(v.Vec())
+	}
 
 	return &MemoryStage{
 		name:   name,

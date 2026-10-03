@@ -290,6 +290,7 @@ type ContextManager struct {
 	compressor Compressor
 	window     *Window
 	config     ContextManagerConfig
+	vec        *VecIndex
 }
 
 // ContextManagerConfig 配置上下文管理器。
@@ -361,6 +362,13 @@ func NewContextManager(
 	}
 }
 
+// UseVec 接上 sqlite-vec。没有扩展时仍用同一套向量相似度在内存里挡无关记忆。
+func (m *ContextManager) UseVec(v *VecIndex) {
+	if m != nil {
+		m.vec = v
+	}
+}
+
 // AssembleResult 是上下文组装的完整结果。
 type AssembleResult struct {
 	// ContextText 格式化后的上下文文本（供 LLM 消费）。
@@ -411,7 +419,7 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 	}
 	// 最近记忆只保留和这句对得上的。聊别的主题时不把旧伤灌进提示。
 	if text != "" {
-		allEntries = FilterUnrelated(allEntries, text)
+		allEntries = m.keepRelated(allEntries, scopes, text)
 	}
 
 	// 3. 如果有消息文本，做相关性检索（与 recent 去重）
@@ -512,6 +520,31 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 
 // UpdateUsage 更新 LLM 用量到 Window。
 // 每次 LLM 调用完成后调用此方法，让 Window 感知真实消耗。
+func (m *ContextManager) keepRelated(entries []Entry, scopes []Scope, text string) []Entry {
+	dist := map[string]float64{}
+	hasVec := m.vec.Enabled()
+	if hasVec {
+		for _, scope := range scopes {
+			for _, hit := range m.vec.Search(scope.Key(), text, 8) {
+				if prev, ok := dist[hit.EntryID]; !ok || hit.Distance < prev {
+					dist[hit.EntryID] = hit.Distance
+				}
+			}
+		}
+	}
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		d, ok := dist[e.ID]
+		if !ok {
+			d = -1
+		}
+		if KeepForTurn(e.Content, text, d, hasVec && ok) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func (m *ContextManager) suppressTopics(ctx context.Context, scopes []Scope) []string {
 	entries, err := m.retriever.Retrieve(ctx, Query{Scopes: scopes, Category: suppressCategory, Limit: 50})
 	if err != nil || len(entries) == 0 {
