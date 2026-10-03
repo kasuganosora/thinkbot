@@ -28,7 +28,7 @@ func TestMemoryStage_EmitsContextInjectEvent(t *testing.T) {
 		TraceID: "trace-1",
 		Channel: "chat-inject",
 		UserID:  "user-1",
-		Text:    "hi",
+		Text:    "what is Luna's name",
 	})
 
 	if _, err := stage.Process(ectx, env); err != nil {
