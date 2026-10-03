@@ -82,6 +82,51 @@ func topicHit(content string, topics []string) bool {
 	return false
 }
 
-const conductNote = `Conduct: recalled memories are background for how you act, never evidence in an argument and never something to quote back. If the user says not to mention a subject again, acknowledge in one short sentence and do not name that subject, including in apologies. Do not rank another project until you have actually read its code. After the user corrects you, answer in one or two sentences.`
+// FilterUnrelated 丢掉和当前这句话对不上的记忆，避免聊别的主题时把旧伤疤灌进提示。
+// 用户这句没提到的内容仍留在库里，搜索工具还能按原话找。
+func FilterUnrelated(entries []Entry, text string) []Entry {
+	text = strings.TrimSpace(text)
+	if text == "" || len(entries) == 0 {
+		return entries
+	}
+	grams := charGrams(text)
+	if len(grams) == 0 {
+		return entries
+	}
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if sharesGram(e.Content, grams) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func charGrams(text string) map[string]struct{} {
+	runes := []rune(strings.ToLower(text))
+	out := make(map[string]struct{})
+	for i := 0; i < len(runes); i++ {
+		if unicode.IsSpace(runes[i]) || unicode.IsPunct(runes[i]) {
+			continue
+		}
+		out[string(runes[i:i+1])] = struct{}{}
+		if i+1 < len(runes) {
+			out[string(runes[i:i+2])] = struct{}{}
+		}
+	}
+	return out
+}
+
+func sharesGram(content string, grams map[string]struct{}) bool {
+	runes := []rune(strings.ToLower(content))
+	for i := 0; i+1 < len(runes); i++ {
+		if _, ok := grams[string(runes[i:i+2])]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+const conductNote = `Conduct: recalled memories are background for how you act, never evidence in an argument and never something to quote back. Do not bring up the user's past failures, exams, relationship status, or other personal history unless they raised that subject in this message. If the user says not to mention a subject again, acknowledge in one short sentence and do not name that subject, including in apologies. Do not rank another project until you have actually read its code. After the user corrects you, answer in one or two sentences.`
 
 func ConductNote() string { return conductNote }
