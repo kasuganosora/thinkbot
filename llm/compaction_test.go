@@ -380,14 +380,14 @@ func TestCompactor_BuildSummaryPrompt_WithPrevious(t *testing.T) {
 
 func TestDefaultCompactionConfig(t *testing.T) {
 	cfg := DefaultCompactionConfig()
-	if cfg.MaxTokens != 64000 {
-		t.Errorf("expected MaxTokens=64000, got %d", cfg.MaxTokens)
+	if cfg.MaxTokens != 0 {
+		t.Errorf("expected MaxTokens=0 (derive from model window), got %d", cfg.MaxTokens)
 	}
-	if cfg.ReservedTokens <= 0 {
-		t.Error("expected positive ReservedTokens")
+	if cfg.TriggerRatio != DefaultTriggerRatio {
+		t.Errorf("expected TriggerRatio=%v, got %v", DefaultTriggerRatio, cfg.TriggerRatio)
 	}
-	if cfg.ReservedTokens != 20000 {
-		t.Errorf("expected ReservedTokens=20000, got %d", cfg.ReservedTokens)
+	if cfg.ReserveRatio != DefaultReserveRatio {
+		t.Errorf("expected ReserveRatio=%v, got %v", DefaultReserveRatio, cfg.ReserveRatio)
 	}
 	if !cfg.Auto {
 		t.Error("expected Auto=true")
@@ -395,9 +395,34 @@ func TestDefaultCompactionConfig(t *testing.T) {
 	if cfg.TailTurns != DefaultTailTurns {
 		t.Errorf("expected TailTurns=%d, got %d", DefaultTailTurns, cfg.TailTurns)
 	}
-	// 0 = follow the model's configured maxTokens (no hardcoded 4096 anymore).
 	if cfg.SummaryMaxTokens != 0 {
 		t.Errorf("expected SummaryMaxTokens=0 (follow model), got %d", cfg.SummaryMaxTokens)
+	}
+}
+
+func TestResolveCompactionBudget_UsesModelWindowRatio(t *testing.T) {
+	b := ResolveCompactionBudget(CompactionConfig{
+		ContextLength: 1_000_000,
+		OutputReserve: 128000,
+		TriggerRatio:  0.75,
+		ReserveRatio:  0.08,
+		TailTokens:    8000,
+	})
+	if b.Window != 1_000_000 {
+		t.Fatalf("window = %d", b.Window)
+	}
+	if b.Reserved != 128000 {
+		t.Fatalf("reserved = %d, want output reserve 128000", b.Reserved)
+	}
+	if b.Trigger != 750000 {
+		t.Fatalf("trigger = %d, want 750000", b.Trigger)
+	}
+}
+
+func TestResolveCompactionBudget_FallbackWhenWindowUnknown(t *testing.T) {
+	b := ResolveCompactionBudget(CompactionConfig{TailTokens: 8000})
+	if b.Window != fallbackCompactionWindow || b.Trigger != fallbackCompactionWindow-fallbackCompactionReserved {
+		t.Fatalf("fallback budget = %+v", b)
 	}
 }
 
