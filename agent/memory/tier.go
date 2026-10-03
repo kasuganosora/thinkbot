@@ -185,6 +185,7 @@ type TieredStore struct {
 	// logger 用于持久化层的可观测性（DB 失败、加载统计）。
 	// nil 时退化为 no-op，避免未初始化日志时 panic。
 	logger *zap.SugaredLogger
+	vec    *VecIndex
 }
 
 // NewTieredStore 创建分层存储（纯内存模式）。
@@ -204,6 +205,7 @@ func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *Tiere
 		configs: configs,
 		db:      db,
 		logger:  log.Logger,
+		vec:     OpenVecIndex(db),
 	}
 	if db != nil {
 		s.loadFromDB()
@@ -234,6 +236,9 @@ func (s *TieredStore) loadFromDB() {
 		key := tierScopeKey(te.Tier, te.Scope)
 		s.buckets[key] = append(s.buckets[key], te)
 		loaded++
+		if s.vec.Enabled() {
+			s.vec.Upsert(te.Scope.Key(), te.ID, te.Content)
+		}
 	}
 	if s.logger != nil {
 		s.logger.Infow("tiered_store: loaded persisted memories from db",
@@ -864,6 +869,10 @@ func (s *TieredStore) persistUpsert(ctx context.Context, e TieredEntry) {
 				"id", e.ID, "tier", int(e.Tier),
 				"scope_kind", string(e.Scope.Kind), "scope_id", e.Scope.ID, "err", err)
 		}
+		return
+	}
+	if s.vec.Enabled() {
+		s.vec.Upsert(e.Scope.Key(), e.ID, e.Content)
 	}
 }
 
@@ -881,9 +890,39 @@ func (s *TieredStore) persistDelete(tier MemoryTier, scope Scope, id string) {
 				"scope_kind", string(scope.Kind), "scope_id", scope.ID, "err", err)
 		}
 	}
+	if s.vec.Enabled() {
+		s.vec.Delete(id)
+	}
 }
 
-// persistClearTierScope 清空 SQLite 中指定 tier+scope 的所有记忆。
+func (s *TieredStore) Vec() *VecIndex {
+	if s == nil {
+		return nil
+	}
+	return s.vec
+}
+func (s *TieredStore) VecNeighbors(scope Scope, text string, k int) []TieredEntry {
+	if s == nil || !s.vec.Enabled() {
+		return nil
+	}
+	hits := s.vec.Search(scope.Key(), text, k)
+	if len(hits) == 0 {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byID := map[string]TieredEntry{}
+	for _, e := range s.buckets[tierScopeKey(Tier1LongTerm, scope)] {
+		byID[e.ID] = e
+	}
+	out := make([]TieredEntry, 0, len(hits))
+	for _, h := range hits {
+		if e, ok := byID[h.EntryID]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
 func (s *TieredStore) persistClearTierScope(tier MemoryTier, scope Scope) {
 	if s.db == nil {
 		return
