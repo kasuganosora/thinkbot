@@ -37,6 +37,10 @@ func BanTopic(text string) string {
 	}
 	topic := strings.TrimSpace(rest[:end])
 	topic = strings.Trim(topic, "「」\"'")
+	for _, suffix := range []string{"的事情", "这件事", "这事", "的事"} {
+		topic = strings.TrimSuffix(topic, suffix)
+	}
+	topic = strings.TrimSpace(topic)
 	if len([]rune(topic)) < 2 || len([]rune(topic)) > 24 {
 		return ""
 	}
