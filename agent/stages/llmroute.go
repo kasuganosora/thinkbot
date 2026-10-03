@@ -869,12 +869,20 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if lurkMode || core.IsReactionAck(&env.Message) {
 		tools = nil
 	}
+	if note := s.contextBudgetNote(env, messages); note != "" && env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
+		systemPrompt = systemPrompt + "\n\n" + note
+	}
+
 	// 自主上下文压缩工具（compact_context）：按轮构造，闭包捕获本轮会话信息。
 	// 复制切片再追加，避免写入 ToolResolver/静态 Tools 的共享底层数组。
 	if s.shouldOfferSelfCompact(env, tools) {
-		withCompact := make([]llm.Tool, 0, len(tools)+1)
+		withCompact := make([]llm.Tool, 0, len(tools)+3)
 		withCompact = append(withCompact, tools...)
-		tools = append(withCompact, s.newCompactContextTool(env, messages))
+		withCompact = append(withCompact, s.newCompactContextTool(env, messages), s.newContextRemainingTool(env, messages))
+		if s.config.SelfCompact != nil && s.config.SelfCompact.History != nil {
+			withCompact = append(withCompact, s.newSearchContextTool(env))
+		}
+		tools = withCompact
 	}
 
 	// 构建参数

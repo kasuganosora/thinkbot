@@ -1430,10 +1430,14 @@ func InternalLLMMetaSpecs() []MetaSpec {
 // 注意：这是「会话级」压缩预算，与 agent/memory/compactor.go 的「记忆聚类」压缩
 // （SimilarityThreshold 等）是两套不同配置，集成时分别处理、避免混淆。
 type CompactionConfig struct {
-	// MaxTokens 压缩模块假定的上下文窗口预算（token 数）。可用空间 = MaxTokens - ReservedTokens。
+	// MaxTokens 模型上下文长度未知时的回退窗口。0 = 内置 64000。已知 ContextLength 时不用。
 	MaxTokens int
-	// ReservedTokens 为系统消息和新回复预留的 token 数。
+	// ReservedTokens 模型上下文长度未知时的回退预留。0 = 内置 20000。
 	ReservedTokens int
+	// TriggerRatio 自动压缩触发比例（相对模型上下文窗口）。默认 0.75。
+	TriggerRatio float64
+	// ReserveRatio 预留比例（系统提示 / 工具定义 / 新回复）。默认 0.08。
+	ReserveRatio float64
 	// TailTokens 压缩时保留的最近 token 数（不摘要化）。
 	TailTokens int
 	// TailTurns 保留的最近完整对话轮数。
@@ -1454,8 +1458,10 @@ type CompactionConfig struct {
 // 二者应保持同步。
 func DefaultCompactionConfig() CompactionConfig {
 	return CompactionConfig{
-		MaxTokens:            64000,
-		ReservedTokens:       20000,
+		MaxTokens:            0,
+		ReservedTokens:       0,
+		TriggerRatio:         0.75,
+		ReserveRatio:         0.08,
 		TailTokens:           8000,
 		TailTurns:            2,
 		MinMessagesToCompact: 6,
@@ -1471,6 +1477,8 @@ func (b *Builder) GetCompactionConfig() CompactionConfig {
 	return CompactionConfig{
 		MaxTokens:            b.store.GetInt(KeyCompactionMaxTokens, d.MaxTokens),
 		ReservedTokens:       b.store.GetInt(KeyCompactionReservedTokens, d.ReservedTokens),
+		TriggerRatio:         b.store.GetFloat64(KeyCompactionTriggerRatio, d.TriggerRatio),
+		ReserveRatio:         b.store.GetFloat64(KeyCompactionReserveRatio, d.ReserveRatio),
 		TailTokens:           b.store.GetInt(KeyCompactionTailTokens, d.TailTokens),
 		TailTurns:            b.store.GetInt(KeyCompactionTailTurns, d.TailTurns),
 		MinMessagesToCompact: b.store.GetInt(KeyCompactionMinMessagesToCompact, d.MinMessagesToCompact),
@@ -1483,8 +1491,10 @@ func (b *Builder) GetCompactionConfig() CompactionConfig {
 // CompactionMetaSpecs 返回会话压缩配置项的元数据，用于注册到前端设置界面。
 func CompactionMetaSpecs() []MetaSpec {
 	return []MetaSpec{
-		{Key: KeyCompactionMaxTokens, Category: "Compaction", Description: "会话压缩假定的上下文窗口预算（token 数，默认 64000）。可用空间 = 此值 - reserved_tokens，超出即触发压缩。取比模型真实上限更小的保守值使压缩更早触发、预留安全余量。保存后下一轮对话即生效。"},
-		{Key: KeyCompactionReservedTokens, Category: "Compaction", Description: "为系统消息和新回复预留的 token 数（默认 20000）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionMaxTokens, Category: "Compaction", Description: "模型上下文长度未知时的回退窗口（token，0=内置 64000）。模型 ContextLength 已知时忽略本值，触发线改为窗口 × trigger_ratio。"},
+		{Key: KeyCompactionReservedTokens, Category: "Compaction", Description: "模型上下文长度未知时的回退预留（token，0=内置 20000）。已知窗口时预留为 max(模型输出上限, 窗口 × reserve_ratio)。"},
+		{Key: KeyCompactionTriggerRatio, Category: "Compaction", Description: "自动压缩触发比例，相对模型上下文窗口（默认 0.75）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionReserveRatio, Category: "Compaction", Description: "为系统提示、工具定义和新回复预留的比例（默认 0.08，须小于 trigger_ratio）。"},
 		{Key: KeyCompactionTailTokens, Category: "Compaction", Description: "压缩时保留的最近 token 数（不被摘要化，默认 8000）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionMinMessagesToCompact, Category: "Compaction", Description: "触发压缩的最小消息数（默认 6，少于则不压缩）。保存后下一轮对话即生效。"},
@@ -1883,8 +1893,10 @@ func DefaultMap() map[string]string {
 		KeyLLMRetryMaxMS:           "30000",
 		KeyLLMRetryJitter:          "true",
 		// Compaction 会话压缩
-		KeyCompactionMaxTokens:            "64000",
-		KeyCompactionReservedTokens:       "20000",
+		KeyCompactionMaxTokens:            "0",
+		KeyCompactionReservedTokens:       "0",
+		KeyCompactionTriggerRatio:         "0.75",
+		KeyCompactionReserveRatio:         "0.08",
 		KeyCompactionTailTokens:           "8000",
 		KeyCompactionTailTurns:            "2",
 		KeyCompactionMinMessagesToCompact: "6",

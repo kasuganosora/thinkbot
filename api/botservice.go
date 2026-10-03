@@ -1105,6 +1105,7 @@ func (s *BotService) selfCompactConfig(bundle *bot.LLMBundle, botReasoningEffort
 	}
 	if s.chatHistory != nil {
 		cfg.Store = s.chatHistory
+		cfg.History = s.chatHistory
 	}
 	if secs := s.store.GetInt("agent.self_compact.cooldown", 0); secs > 0 {
 		cfg.Cooldown = time.Duration(secs) * time.Second
@@ -1146,10 +1147,14 @@ func contextCheckpointTTLFromStore(store *config.Store) time.Duration {
 // compactionConfigFromConfig 将配置模块的会话压缩配置转换为 llm 包的 CompactionConfig。
 // 两包字段一一对齐；配置模块的 CompactionConfig 定义在 config 包内以避免 config↔llm
 // 循环依赖（与 ToolOutputConfig 同一手法）。
-func compactionConfigFromConfig(c config.CompactionConfig) *llm.CompactionConfig {
+func compactionConfigFromConfig(c config.CompactionConfig, contextLength, outputReserve int) *llm.CompactionConfig {
 	return &llm.CompactionConfig{
 		MaxTokens:            c.MaxTokens,
 		ReservedTokens:       c.ReservedTokens,
+		TriggerRatio:         c.TriggerRatio,
+		ReserveRatio:         c.ReserveRatio,
+		ContextLength:        contextLength,
+		OutputReserve:        outputReserve,
 		TailTokens:           c.TailTokens,
 		TailTurns:            c.TailTurns,
 		MinMessagesToCompact: c.MinMessagesToCompact,
@@ -1516,10 +1521,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		subagent.WithPresencePenalty(presPen),
 		// 子 Agent 上下文压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
 		subagent.WithCompactor(func() *llm.Compactor {
-			c := llm.NewCompactor(*compactionConfigFromConfig(builder.GetCompactionConfig()))
+			c := llm.NewCompactor(*compactionConfigFromConfig(builder.GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens))
 			c.SetInternalPolicy(internalPol)
 			c.SetConfigSource(func() llm.CompactionConfig {
-				return *compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig())
+				return *compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens)
 			})
 			return c
 		}()),
@@ -1606,7 +1611,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// （此前只有 subagent 接了压缩钩子，主 bot 漏接）。超阈值时 LLM 生成
 			// 结构化摘要替代旧消息，按会话隔离、跨轮持久。
 			// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
-			Compaction: compactionConfigFromConfig(builder.GetCompactionConfig()),
+			Compaction: compactionConfigFromConfig(builder.GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens),
 			// 自主上下文压缩工具 compact_context：bot 可自行把旧上下文折叠为摘要。
 			// 有持久化历史的会话（web / telegram / 工作流续跑）写检查点，后续轮次
 			// 加载「摘要 + 边界后的消息」；原始 chat_messages 不删除（可回滚）。
@@ -1616,7 +1621,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger,
 	)
 	llmStage.SetCompactionSource(func() *llm.CompactionConfig {
-		return compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig())
+		return compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens)
 	})
 	llmStage.SetHardTimeoutSource(func() time.Duration {
 		return effectiveLLMHardTimeout(s.store)

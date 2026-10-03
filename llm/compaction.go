@@ -62,14 +62,31 @@ var ProtectedTools = map[string]bool{
 
 // CompactionConfig 配置上下文压缩行为。
 type CompactionConfig struct {
-	// MaxTokens 上下文窗口的 token 上限。
-	// 当估算的总 token 超过此值时触发压缩。
+	// MaxTokens 是模型上下文长度未知时的回退窗口（token）。
+	// 0 = 用 fallbackCompactionWindow（64000）。模型 ContextLength 已知时不使用本字段，
+	// 触发线改为 ContextLength × TriggerRatio。
 	MaxTokens int
 
-	// ReservedTokens 为系统消息和新回复预留的 token 数量。
-	// 可用空间 = MaxTokens - ReservedTokens。
-	// 默认 20000。
+	// ReservedTokens 是模型上下文长度未知时的回退预留（token）。
+	// 0 = 用 fallbackCompactionReserved（20000）。ContextLength 已知时预留为
+	// max(OutputReserve, ContextLength × ReserveRatio)。
 	ReservedTokens int
+
+	// TriggerRatio 触发自动压缩的上下文占用比例（0–1）。
+	// 0 = 默认 0.75。仅在 ContextLength 已知时生效。
+	TriggerRatio float64
+
+	// ReserveRatio 为系统提示、工具定义和新回复预留的上下文比例（0–1）。
+	// 0 = 默认 0.08。必须小于 TriggerRatio。
+	ReserveRatio float64
+
+	// ContextLength 主模型上下文窗口（ModelDef.ContextLength）。运行时注入，不入库。
+	// 0 = 未知，回退到 MaxTokens / ReservedTokens。
+	ContextLength int
+
+	// OutputReserve 主模型配置的最大输出 token（ModelDef.MaxTokens）。运行时注入。
+	// 预留至少要盖住它，否则压缩后仍可能把输出挤爆。
+	OutputReserve int
 
 	// TailTokens 压缩时保留的最近 token 数量。
 	// 这些最近的消息不会被摘要化。
@@ -109,10 +126,21 @@ type CompactionConfig struct {
 // DefaultCompactionConfig 返回默认压缩配置。
 // MaxTokens 是压缩模块假定的上下文窗口预算（可用空间 = MaxTokens - ReservedTokens），
 // 取比模型真实上限更小的保守值，使压缩更早触发以预留安全余量，避免大输入挤爆输出窗口。
+// fallbackCompactionWindow / fallbackCompactionReserved 只在模型上下文长度未知时使用。
+const (
+	fallbackCompactionWindow   = 64000
+	fallbackCompactionReserved = 20000
+	DefaultTriggerRatio        = 0.75
+	DefaultReserveRatio        = 0.08
+	maxPreserveRecentTokensCap = 32000
+)
+
 func DefaultCompactionConfig() CompactionConfig {
 	return CompactionConfig{
-		MaxTokens:            64000,
-		ReservedTokens:       20000,
+		MaxTokens:            0, // derive from model context length; fallback window if unknown
+		ReservedTokens:       0,
+		TriggerRatio:         DefaultTriggerRatio,
+		ReserveRatio:         DefaultReserveRatio,
 		TailTokens:           8000,
 		TailTurns:            DefaultTailTurns,
 		MinMessagesToCompact: 6,
@@ -205,14 +233,9 @@ func (c *Compactor) SetLogger(l *zap.SugaredLogger) *Compactor {
 	return c
 }
 
-// NewCompactor 创建上下文压缩器。
+// NewCompactor 创建上下文压缩器。MaxTokens / ReservedTokens 为 0 表示按模型窗口百分比解析，
+// 不再把 0 当成「整份配置缺失」而套回 64000/20000。
 func NewCompactor(config CompactionConfig) *Compactor {
-	if config.MaxTokens <= 0 {
-		config = DefaultCompactionConfig()
-	}
-	if config.ReservedTokens <= 0 {
-		config.ReservedTokens = 20000
-	}
 	if config.TailTokens <= 0 {
 		config.TailTokens = 8000
 	}
@@ -227,6 +250,12 @@ func NewCompactor(config CompactionConfig) *Compactor {
 	}
 	if config.ToolOutputThreshold <= 0 {
 		config.ToolOutputThreshold = 500
+	}
+	if config.TriggerRatio <= 0 {
+		config.TriggerRatio = DefaultTriggerRatio
+	}
+	if config.ReserveRatio <= 0 {
+		config.ReserveRatio = DefaultReserveRatio
 	}
 	return &Compactor{config: config}
 }
@@ -248,12 +277,6 @@ func (c *Compactor) liveConfig() CompactionConfig {
 		return base
 	}
 	cfg := fn()
-	if cfg.MaxTokens <= 0 {
-		cfg.MaxTokens = base.MaxTokens
-	}
-	if cfg.ReservedTokens <= 0 {
-		cfg.ReservedTokens = base.ReservedTokens
-	}
 	if cfg.TailTokens <= 0 {
 		cfg.TailTokens = base.TailTokens
 	}
@@ -269,6 +292,24 @@ func (c *Compactor) liveConfig() CompactionConfig {
 	if cfg.ToolOutputThreshold <= 0 {
 		cfg.ToolOutputThreshold = base.ToolOutputThreshold
 	}
+	if cfg.TriggerRatio <= 0 {
+		cfg.TriggerRatio = base.TriggerRatio
+	}
+	if cfg.ReserveRatio <= 0 {
+		cfg.ReserveRatio = base.ReserveRatio
+	}
+	if cfg.ContextLength <= 0 {
+		cfg.ContextLength = base.ContextLength
+	}
+	if cfg.OutputReserve <= 0 {
+		cfg.OutputReserve = base.OutputReserve
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = base.MaxTokens
+	}
+	if cfg.ReservedTokens <= 0 {
+		cfg.ReservedTokens = base.ReservedTokens
+	}
 	return cfg
 }
 
@@ -277,13 +318,71 @@ func (c *Compactor) Config() CompactionConfig {
 	return c.liveConfig()
 }
 
-// UsableTokens 返回可用 token 数（MaxTokens - ReservedTokens）。
-func (c *Compactor) UsableTokens() int {
-	cfg := c.liveConfig()
-	return max(cfg.MaxTokens-cfg.ReservedTokens, cfg.TailTokens)
+// ResolvedBudget 是一次压缩判断用的窗口、预留和触发线。
+type ResolvedBudget struct {
+	Window   int
+	Reserved int
+	Trigger  int
+	Usable   int
+	Ratio    float64
 }
 
-// IsOverflow 检查参数是否超过 token 上限。
+// ResolveCompactionBudget 按模型上下文百分比计算触发线。
+// ContextLength 已知时忽略绝对 MaxTokens（那是未知窗口时的回退）。
+func ResolveCompactionBudget(cfg CompactionConfig) ResolvedBudget {
+	ratio := cfg.TriggerRatio
+	if ratio <= 0 || ratio > 0.95 {
+		ratio = DefaultTriggerRatio
+	}
+	reserveRatio := cfg.ReserveRatio
+	if reserveRatio <= 0 || reserveRatio >= ratio {
+		reserveRatio = DefaultReserveRatio
+	}
+	window := cfg.ContextLength
+	reserved := 0
+	if window > 0 {
+		reserved = int(float64(window) * reserveRatio)
+		if cfg.OutputReserve > reserved {
+			reserved = cfg.OutputReserve
+		}
+	} else {
+		window = cfg.MaxTokens
+		if window <= 0 {
+			window = fallbackCompactionWindow
+		}
+		reserved = cfg.ReservedTokens
+		if reserved <= 0 {
+			reserved = fallbackCompactionReserved
+		}
+	}
+	if reserved >= window {
+		reserved = window / 5
+	}
+	usable := window - reserved
+	trigger := usable
+	if cfg.ContextLength > 0 {
+		trigger = int(float64(window) * ratio)
+		if trigger > usable {
+			trigger = usable
+		}
+	}
+	if trigger < cfg.TailTokens {
+		trigger = cfg.TailTokens
+	}
+	return ResolvedBudget{Window: window, Reserved: reserved, Trigger: trigger, Usable: usable, Ratio: ratio}
+}
+
+// UsableTokens 返回触发压缩的 token 线（模型窗口已知时是窗口 × TriggerRatio）。
+func (c *Compactor) UsableTokens() int {
+	return ResolveCompactionBudget(c.liveConfig()).Trigger
+}
+
+// Budget 返回当前解析后的窗口预算。
+func (c *Compactor) Budget() ResolvedBudget {
+	return ResolveCompactionBudget(c.liveConfig())
+}
+
+// IsOverflow 检查参数是否超过触发线。
 func (c *Compactor) IsOverflow(params GenerateParams) bool {
 	total := EstimateParamsTokens(params)
 	return total >= c.UsableTokens()
@@ -615,10 +714,18 @@ func (c *Compactor) selectTailSplitByTokens(messages []Message, budget int) int 
 }
 
 // preserveRecentBudget 计算保留最近消息的 token 预算。
-// 默认为可用空间的 25%，限制在 [2000, 8000] 范围内。
+// 默认为可用空间的 25%，下限 2000；上限随窗口放大，但不超过 32000。
 func (c *Compactor) preserveRecentBudget() int {
-	budget := c.UsableTokens() / 4
-	return min(MaxPreserveRecentTokens, max(MinPreserveRecentTokens, budget))
+	b := c.Budget()
+	budget := b.Usable / 4
+	cap := MaxPreserveRecentTokens
+	if scaled := b.Window / 25; scaled > cap {
+		cap = scaled
+	}
+	if cap > maxPreserveRecentTokensCap {
+		cap = maxPreserveRecentTokensCap
+	}
+	return min(cap, max(MinPreserveRecentTokens, budget))
 }
 
 // buildSummaryPrompt 构建摘要请求的用户提示词。

@@ -1199,7 +1199,7 @@ func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userI
 		// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改；
 		// 未配置时回退 llm.DefaultCompactionConfig() 的内部兜底默认值。
 		compactor := llm.NewCompactor(*compactionConfigFromConfig(
-			config.NewBuilder(s.store, s.logger).GetCompactionConfig()))
+			config.NewBuilder(s.store, s.logger).GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens))
 		// reasoning_effort / 输出封顶按内部调用策略（summarize_head，默认 low）。
 		botEffort := ""
 		if def, derr := s.botSvc.GetDefinition(botID); derr == nil && def != nil {
