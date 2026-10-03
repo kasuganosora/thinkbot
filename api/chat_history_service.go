@@ -338,8 +338,9 @@ func (s *ChatHistoryService) SearchContextHistory(botID, sessionID, query string
 	if limit <= 0 || limit > 8 {
 		limit = 5
 	}
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 	q := s.db.Model(&dao.ChatMessage{}).
-		Where("bot_id = ? AND session_id = ? AND content LIKE ?", botID, sessionID, "%"+query+"%")
+		Where("bot_id = ? AND session_id = ? AND content LIKE ? ESCAPE '\\'", botID, sessionID, "%"+escaped+"%")
 	if beforeID > 0 {
 		q = q.Where("id <= ?", beforeID)
 	}
