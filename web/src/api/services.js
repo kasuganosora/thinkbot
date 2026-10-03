@@ -490,6 +490,10 @@ export const dreamingApi = {
     }
     return request('POST', `/api/bots/${botId}/dreaming/trigger`)
   },
+  rebuildVec(botId) {
+    if (USE_MOCK) return mockResolve(() => ({ indexed: 0 }))
+    return request('POST', `/api/bots/${botId}/dreaming/rebuild-vec`)
+  },
   // 列出最近被梦境巩固提升为 L1 的记忆（含提升理由与原 L0 条目引用）。
   promotions(botId, limit = 20) {
     if (USE_MOCK) return mockResolve(() => ({ promotions: [], total: 0, enabled: true }))
