@@ -239,7 +239,10 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 
 	// 提取 ActionNote 类型的 action
 	actions := env.Actions()
-	var written int
+	written := 0
+	if topic := BanTopic(env.Message.Text); topic != "" {
+		written += s.writeSuppress(ctx, env, topic, logger)
+	}
 
 	for _, action := range actions {
 		if action.Type != core.ActionNote {
@@ -326,4 +329,30 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 	}
 
 	return env, nil
+}
+
+func (s *MemoryWriteStage) writeSuppress(ctx context.Context, env *core.Envelope, topic string, logger *zap.SugaredLogger) int {
+	var scopes []Scope
+	if env.Message.Channel != "" {
+		scopes = append(scopes, ChannelScope(env.Message.Channel))
+	}
+	if env.Message.UserID != "" && env.Message.UserID != env.Message.Channel {
+		scopes = append(scopes, UserScope(env.Message.UserID))
+	}
+	n := 0
+	for _, scope := range scopes {
+		err := s.store.Append(ctx, Entry{
+			Scope:      scope,
+			Content:    topic,
+			Category:   suppressCategory,
+			Source:     "user_ban",
+			Importance: 1,
+		})
+		if err != nil {
+			logger.Warnw("suppress topic write failed", "topic", topic, "err", err)
+			continue
+		}
+		n++
+	}
+	return n
 }

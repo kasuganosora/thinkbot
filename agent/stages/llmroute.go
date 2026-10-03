@@ -829,6 +829,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 	systemPrompt = core.MergeWarnings(env, systemPrompt)
+	if env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
+		systemPrompt = systemPrompt + "\n\n" + memory.ConductNote()
+	}
 
 	// 潜水（只读）模式：切换为「观察者」prompt —— 结合 SOUL.md 人格，把思考
 	// 导向「从这条帖子里学到什么」，而非「如何回复」。仍可正常调用 LLM。
