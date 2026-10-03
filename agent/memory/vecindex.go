@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"database/sql/driver"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
@@ -160,13 +161,23 @@ func (v *VecIndex) Search(scopeKey, query string, k int) []Hit {
 	return out
 }
 
+// vecBlob 是一段向量字节。GORM 在占位符紧挨 '(' 时会把 []byte 按切片展开，
+// 1024 字节会变成 1024 个参数（再加上 scope、entry 就是 1026 values for 3 columns）。
+// driver.Valuer 会跳过这次展开，整段仍是一个绑定参数。
+type vecBlob []byte
+
+func (b vecBlob) Value() (driver.Value, error) {
+	return []byte(b), nil
+}
+
 // hashEmbed 是无外部模型时的本地向量：字符二元组哈希到 256 维后归一化。
 // 有 sqlite-vec 就能用；配了外部 embedding 服务后可替换这一层，表结构不变。
-func hashEmbed(text string) []byte {
+// 返回 vecBlob，避免 INSERT/MATCH 被 GORM 拆成逐字节参数。
+func hashEmbed(text string) vecBlob {
 	vec := make([]float32, vecDims)
 	runes := []rune(strings.ToLower(text))
 	if len(runes) == 0 {
-		return encodeVec(vec)
+		return vecBlob(encodeVec(vec))
 	}
 	add := func(s string) {
 		h := fnv.New32a()
@@ -189,7 +200,7 @@ func hashEmbed(text string) []byte {
 			vec[i] = float32(float64(vec[i]) / norm)
 		}
 	}
-	return encodeVec(vec)
+	return vecBlob(encodeVec(vec))
 }
 
 // EmbedSimilarity 是写入 sqlite-vec 的同一套向量的余弦相似度。没有扩展时也能用来挡无关记忆。
@@ -204,7 +215,7 @@ func EmbedSimilarity(a, b string) float64 {
 }
 
 func hashVec(text string) []float32 {
-	raw := hashEmbed(text)
+	raw := []byte(hashEmbed(text))
 	out := make([]float32, vecDims)
 	for i := 0; i < vecDims; i++ {
 		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))

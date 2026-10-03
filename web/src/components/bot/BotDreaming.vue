@@ -26,8 +26,18 @@
             :disabled="rebuilding"
             data-testid="dreaming-rebuild-vec-btn"
             @click="rebuildVec"
-          >重建向量库</t-button>
+          >{{ rebuilding ? '重建中…' : '重建向量库' }}</t-button>
         </t-space>
+        <p
+          v-if="rebuilding"
+          class="vec-progress"
+          data-testid="dreaming-rebuild-vec-progress"
+        >{{ vecProgressText }}</p>
+        <p
+          v-else-if="vecJob && vecJob.phase === 'error' && vecJob.error"
+          class="vec-progress vec-progress-error"
+          data-testid="dreaming-rebuild-vec-progress"
+        >重建失败：{{ vecJob.error }}</p>
       </t-loading>
     </t-card>
 
@@ -197,7 +207,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { dreamingApi, memoryApi } from '@/api/services'
 import { formatTime } from '@/utils/format'
@@ -207,6 +217,10 @@ const props = defineProps({ botId: { type: String, required: true } })
 const loading = ref(false)
 const triggering = ref(false)
 const rebuilding = ref(false)
+const vecJob = ref(null)
+let vecTimer = null
+let vecAwaitResult = false
+let vecAlive = true
 const config = ref({ enabled: false, schedule: '0 3 * * *' })
 const status = ref(null)
 const lastTrigger = ref(null)
@@ -268,17 +282,99 @@ function speakerLabel(spk) {
   }
 }
 
+const vecProgressText = computed(() => {
+  const job = vecJob.value
+  if (!job || !job.running) return '正在重建向量库…'
+  if (job.phase === 'select') return '正在重建向量库：正在选取记忆…'
+  if (job.phase === 'delete') return '正在重建向量库：正在清理旧向量…'
+  const indexed = typeof job.indexed === 'number' ? job.indexed : 0
+  const total = typeof job.total === 'number' ? job.total : 0
+  return `正在重建向量库：已写入 ${indexed} / ${total}`
+})
+
+function stopVecPoll() {
+  if (vecTimer != null) {
+    clearInterval(vecTimer)
+    vecTimer = null
+  }
+}
+
+function startVecPoll() {
+  if (vecTimer != null) return
+  vecTimer = setInterval(() => { void pollVecJob() }, 2000)
+}
+
+function applyVecJob(job) {
+  const next = job || { running: false, phase: 'idle', total: 0, indexed: 0 }
+  vecJob.value = next
+  if (next.running) {
+    rebuilding.value = true
+    startVecPoll()
+    return
+  }
+  rebuilding.value = false
+  const notify = vecAwaitResult
+  vecAwaitResult = false
+  stopVecPoll()
+  if (!notify) return
+  if (next.error || next.phase === 'error') {
+    MessagePlugin.error('重建失败：' + (next.error || '请稍后重试'))
+    return
+  }
+  if (next.phase === 'done') {
+    const n = typeof next.indexed === 'number' ? next.indexed : 0
+    MessagePlugin.success('向量库已重建，写入 ' + n + ' 条')
+  }
+}
+
+async function pollVecJob() {
+  const botId = props.botId
+  try {
+    const job = await dreamingApi.rebuildVecStatus(botId)
+    if (!vecAlive || botId !== props.botId) return
+    applyVecJob(job)
+  } catch (e) {
+    if (!vecAlive || botId !== props.botId) return
+    rebuilding.value = false
+    vecAwaitResult = false
+    stopVecPoll()
+    MessagePlugin.error('重建失败：' + (e.message || '请稍后重试'))
+  }
+}
+
+async function syncVecJob() {
+  try {
+    const job = await dreamingApi.rebuildVecStatus(props.botId)
+    if (!vecAlive) return
+    if (job && job.running) vecAwaitResult = true
+    applyVecJob(job)
+  } catch (e) {
+    // 进度查询失败不挡其余面板。
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     config.value = await dreamingApi.getConfig(props.botId)
     status.value = await dreamingApi.status(props.botId)
     await loadPromotions()
+    await syncVecJob()
   } finally {
     loading.value = false
   }
 }
-watch(() => props.botId, load, { immediate: true })
+watch(() => props.botId, () => {
+  stopVecPoll()
+  vecAwaitResult = false
+  rebuilding.value = false
+  vecJob.value = null
+  load()
+}, { immediate: true })
+onBeforeUnmount(() => {
+  vecAlive = false
+  stopVecPoll()
+})
 
 async function save() {
   await dreamingApi.updateConfig(props.botId, { enabled: config.value.enabled, schedule: config.value.schedule })
@@ -310,13 +406,14 @@ async function rebuildVec() {
   if (rebuilding.value) return
   rebuilding.value = true
   try {
-    const res = await dreamingApi.rebuildVec(props.botId)
-    const n = res && typeof res.indexed === 'number' ? res.indexed : 0
-    MessagePlugin.success('向量库已重建，写入 ' + n + ' 条')
+    const job = await dreamingApi.rebuildVec(props.botId)
+    vecAwaitResult = true
+    applyVecJob(job)
   } catch (e) {
-    MessagePlugin.error('重建失败：' + (e.message || '请稍后重试'))
-  } finally {
     rebuilding.value = false
+    vecAwaitResult = false
+    stopVecPoll()
+    MessagePlugin.error('重建失败：' + (e.message || '请稍后重试'))
   }
 }
 
@@ -446,6 +543,8 @@ function confirmDupClean() {
 
 <style scoped>
 .card { margin-bottom: 20px; }
+.vec-progress { margin: 12px 0 0; color: var(--bp-label-secondary); font-size: 13px; }
+.vec-progress-error { color: var(--td-error-color, #d54941); }
 .tip { margin-left: 12px; color: var(--bp-label-tertiary); font-size: 13px; }
 .run-at { margin-top: 8px; color: var(--bp-label-tertiary); font-size: 12px; }
 .source-list { padding: 8px 4px; }

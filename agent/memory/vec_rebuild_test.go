@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/dao"
@@ -50,5 +52,50 @@ func TestSelectVecRebuildRowsSharedDB(t *testing.T) {
 	}
 	if full["user:u"] || full["bot:b2"] || full["channel:shared"] {
 		t.Errorf("full keys wiped a shared scope: %#v", fullKeys)
+	}
+}
+
+func TestIndexVecRebuildRowsReportsProgress(t *testing.T) {
+	rows := make([]dao.TieredMemoryModel, 25)
+	for i := range rows {
+		rows[i] = dao.TieredMemoryModel{
+			ID:        fmt.Sprintf("e%d", i),
+			Content:   "memory",
+			ScopeKind: "bot",
+			ScopeID:   "b1",
+		}
+	}
+	var got []VecRebuildProgress
+	n, err := indexVecRebuildRows(context.Background(), nil, rows, func(p VecRebuildProgress) {
+		got = append(got, p)
+	})
+	if err != nil || n != 25 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("reports: %#v", got)
+	}
+	prev := 0
+	for i, p := range got {
+		if p.Phase != VecRebuildWrite || p.Total != 25 {
+			t.Fatalf("report %d: %#v", i, p)
+		}
+		if p.Indexed <= prev {
+			t.Fatalf("indexed did not increase: %#v", got)
+		}
+		prev = p.Indexed
+	}
+	if got[0].Indexed != 20 || got[len(got)-1].Indexed != 25 {
+		t.Fatalf("reports: %#v", got)
+	}
+}
+
+func TestIndexVecRebuildRowsStopsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rows := []dao.TieredMemoryModel{{ID: "e", Content: "x", ScopeKind: "bot", ScopeID: "b"}}
+	n, err := indexVecRebuildRows(ctx, nil, rows, nil)
+	if err == nil || n != 0 {
+		t.Fatalf("n=%d err=%v", n, err)
 	}
 }
