@@ -103,6 +103,7 @@ type SQLiteRepository struct {
 	entriesAppended atomic.Int64
 	entriesDeleted  atomic.Int64
 	retrievals      atomic.Int64
+	vec             *memory.VecIndex
 }
 
 // NewSQLiteRepository 创建 SQLite 记忆仓储。
@@ -132,6 +133,7 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 		config:    cfg,
 		window:    cfg.Window,
 		compactor: cfg.Compactor,
+		vec:       memory.OpenVecIndex(db),
 	}
 }
 
@@ -169,6 +171,9 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 	}
 
 	r.entriesAppended.Add(1)
+	if r.vec.Enabled() {
+		r.vec.Upsert(entry.Scope.Key(), entry.ID, entry.Content)
+	}
 
 	// 容量限制（按条数）：异步检查并淘汰最旧条目
 	go func() {
@@ -202,6 +207,9 @@ func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entry
 	}
 	if result.RowsAffected > 0 {
 		r.entriesDeleted.Add(result.RowsAffected)
+		if r.vec.Enabled() {
+			r.vec.Delete(entryID)
+		}
 	}
 	return nil
 }
@@ -248,6 +256,12 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 		r.entriesDeleted.Add(deleted)
 	}
 	r.entriesAppended.Add(1)
+	if r.vec.Enabled() {
+		if deleteID != "" && deleteID != newEntry.ID {
+			r.vec.Delete(deleteID)
+		}
+		r.vec.Upsert(scope.Key(), newEntry.ID, newEntry.Content)
+	}
 
 	// 与 Append 保持一致的收敛行为：替换后字符总量可能上涨（deleteID 不存在时
 	// 条目数也会 +1），仍需异步做容量淘汰与预算压缩。
@@ -312,7 +326,21 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		tx = tx.Where("importance >= ?", query.MinImportance)
 	}
 
-	// 文本关键词匹配
+	// 文本：sqlite-vec 可用时按 scope 近邻取回，失败或未启用则子串。
+	if query.Text != "" && r.vec.Enabled() && len(query.Scopes) > 0 {
+		ids := make([]string, 0, limit)
+		for _, scope := range query.Scopes {
+			for _, hit := range r.vec.Search(scope.Key(), query.Text, limit) {
+				ids = append(ids, hit.EntryID)
+			}
+		}
+		if len(ids) > 0 {
+			var models []dao.EntryModel
+			if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&models).Error; err == nil && len(models) > 0 {
+				return modelsToEntries(models), nil
+			}
+		}
+	}
 	if query.Text != "" {
 		tx = tx.Where("content LIKE ?", "%"+query.Text+"%")
 	}

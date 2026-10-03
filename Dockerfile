@@ -77,6 +77,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates docker.io util-linux wget \
     && rm -rf /var/lib/apt/lists/*
 
+# sqlite-vec：有扩展就走向量检索，加载失败时进程退回 scope 子串。默认镜像带上扩展。
+ARG SQLITE_VEC_VERSION=0.1.6
+ADD https://github.com/asg017/sqlite-vec/releases/download/v${SQLITE_VEC_VERSION}/sqlite-vec-${SQLITE_VEC_VERSION}-loadable-linux-x86_64.tar.gz /tmp/sqlite-vec.tar.gz
+RUN mkdir -p /usr/lib/sqlite-vec \
+    && tar -xzf /tmp/sqlite-vec.tar.gz -C /usr/lib/sqlite-vec \
+    && rm /tmp/sqlite-vec.tar.gz
+ENV THINKBOT_SQLITE_VEC=/usr/lib/sqlite-vec/vec0
+
 # 非 root 运行用户（uid/gid 1000）。DooD 仍需经 docker.sock 控制宿主 daemon，
 # 由 entrypoint 在启动时把该用户加入 docker.sock 所属组，再降权运行主程序。
 RUN groupadd -r -g 1000 thinkbot && useradd -r -u 1000 -g thinkbot thinkbot
@@ -133,7 +141,10 @@ FROM golang:1.27-bookworm AS selfhost
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git ca-certificates docker.io util-linux wget \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/lib/sqlite-vec
+COPY --from=thinkbot-slim /usr/lib/sqlite-vec/vec0.so /usr/lib/sqlite-vec/vec0.so
+ENV THINKBOT_SQLITE_VEC=/usr/lib/sqlite-vec/vec0
 
 # Node.js 22（前端构建）。经 NodeSource 仓库安装，与 frontend 阶段版本对齐。
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
