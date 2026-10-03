@@ -246,13 +246,18 @@ const (
 // 注意：本套是「会话级」压缩预算（llm.CompactionConfig），与 agent/memory/compactor.go
 // 的「记忆聚类」压缩（SimilarityThreshold 等）是两套不同配置，集成时分别处理、避免混淆。
 const (
-	// KeyCompactionMaxTokens 压缩模块假定的上下文窗口预算（token 数）。
-	// 可用空间 = MaxTokens - ReservedTokens。超过此值时触发压缩。
-	// 取比模型真实上限更小的保守值，使压缩更早触发以预留安全余量。默认 64000。
+	// KeyCompactionMaxTokens 模型上下文长度未知时的回退窗口（token）。
+	// 0 = 内置回退 64000。模型 ContextLength 已知时不使用本值，触发线为窗口 × trigger_ratio。
 	KeyCompactionMaxTokens = "compaction.max_tokens"
 
-	// KeyCompactionReservedTokens 为系统消息和新回复预留的 token 数。默认 20000。
+	// KeyCompactionReservedTokens 模型上下文长度未知时的回退预留（token）。0 = 内置回退 20000。
 	KeyCompactionReservedTokens = "compaction.reserved_tokens"
+
+	// KeyCompactionTriggerRatio 自动压缩触发比例（相对模型上下文窗口）。默认 0.75。
+	KeyCompactionTriggerRatio = "compaction.trigger_ratio"
+
+	// KeyCompactionReserveRatio 为系统提示、工具定义和新回复预留的比例。默认 0.08。
+	KeyCompactionReserveRatio = "compaction.reserve_ratio"
 
 	// KeyCompactionTailTokens 压缩时保留的最近 token 数（不摘要化）。默认 8000。
 	KeyCompactionTailTokens = "compaction.tail_tokens"

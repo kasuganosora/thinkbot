@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/dao"
 )
 
@@ -325,6 +326,41 @@ func (s *ChatHistoryService) LoadContextBySession(botID, sessionID string, limit
 		messages[i], messages[j] = messages[j], messages[i]
 	}
 	return messages, nil
+}
+
+// SearchContextHistory 在原始 chat_messages 里按子串搜索，供压缩后找回被摘要折叠的细节。
+// beforeID > 0 时只搜检查点边界及之前的行（已不在活窗口里的部分）。
+func (s *ChatHistoryService) SearchContextHistory(botID, sessionID, query string, beforeID uint64, limit int) ([]stages.ContextHistoryHit, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || botID == "" || sessionID == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 8 {
+		limit = 5
+	}
+	q := s.db.Model(&dao.ChatMessage{}).
+		Where("bot_id = ? AND session_id = ? AND content LIKE ?", botID, sessionID, "%"+query+"%")
+	if beforeID > 0 {
+		q = q.Where("id <= ?", beforeID)
+	}
+	var messages []dao.ChatMessage
+	if err := q.Order("id DESC").Limit(limit).Find(&messages).Error; err != nil {
+		return nil, fmt.Errorf("chat_history: search context: %w", err)
+	}
+	hits := make([]stages.ContextHistoryHit, 0, len(messages))
+	for _, m := range messages {
+		excerpt := m.Content
+		if r := []rune(excerpt); len(r) > 400 {
+			excerpt = string(r[:400]) + "…"
+		}
+		hits = append(hits, stages.ContextHistoryHit{
+			ID:        m.ID,
+			Role:      m.Role,
+			Excerpt:   excerpt,
+			CreatedAt: m.CreatedAt,
+		})
+	}
+	return hits, nil
 }
 
 // ClearSessionMessages 清空指定会话的所有聊天消息（保留会话记录本身）。

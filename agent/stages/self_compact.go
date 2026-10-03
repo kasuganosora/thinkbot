@@ -124,11 +124,27 @@ type ContextCheckpointStore interface {
 	SaveContextCheckpoint(cp ContextCheckpoint) error
 }
 
+// ContextHistoryHit is one raw chat row recovered after compaction.
+type ContextHistoryHit struct {
+	ID        uint64
+	Role      string
+	Excerpt   string
+	CreatedAt time.Time
+}
+
+// ContextHistorySearcher reads raw chat_messages that compaction folded out
+// of the live window. Implemented by the api chat history service.
+type ContextHistorySearcher interface {
+	SearchContextHistory(botID, sessionID, query string, beforeID uint64, limit int) ([]ContextHistoryHit, error)
+}
+
 // SelfCompactConfig enables the compact_context tool (nil = disabled).
 type SelfCompactConfig struct {
 	// Store persists checkpoints for sessions with chat history. nil → only
 	// the live turn is compacted.
 	Store ContextCheckpointStore
+	// History searches raw rows folded out of the window (nil → no search tool).
+	History ContextHistorySearcher
 	// HistoryMessageIDs returns the chat_messages IDs aligned 1:1 with the
 	// leading history messages produced by LLMConfig.MessageBuilder for msg
 	// (0 for synthetic entries such as an injected checkpoint summary).
