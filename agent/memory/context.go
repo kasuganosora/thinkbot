@@ -423,6 +423,12 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 		allEntries = dedup(allEntries, relevant)
 	}
 
+	topics := m.suppressTopics(ctx, scopes)
+	if topic := BanTopic(text); topic != "" {
+		topics = append(topics, topic)
+	}
+	allEntries = FilterSuppressed(allEntries, topics)
+
 	if len(allEntries) == 0 {
 		return &AssembleResult{}, nil
 	}
@@ -502,6 +508,21 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 
 // UpdateUsage 更新 LLM 用量到 Window。
 // 每次 LLM 调用完成后调用此方法，让 Window 感知真实消耗。
+func (m *ContextManager) suppressTopics(ctx context.Context, scopes []Scope) []string {
+	entries, err := m.retriever.Retrieve(ctx, Query{Scopes: scopes, Category: suppressCategory, Limit: 50})
+	if err != nil || len(entries) == 0 {
+		return nil
+	}
+	topics := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Content != "" {
+			topics = append(topics, e.Content)
+		}
+	}
+	return topics
+}
+
+// UpdateUsage 更新 LLM 用量到 Window。
 func (m *ContextManager) UpdateUsage(inputTokens, outputTokens int) {
 	if m.window != nil {
 		m.window.RecordUsage(inputTokens, outputTokens)
