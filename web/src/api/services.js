@@ -491,8 +491,13 @@ export const dreamingApi = {
     return request('POST', `/api/bots/${botId}/dreaming/trigger`)
   },
   rebuildVec(botId) {
-    if (USE_MOCK) return mockResolve(() => ({ indexed: 0 }))
+    // mock 只返回一次快照，不在这里挂定时器。
+    if (USE_MOCK) return mockResolve(() => ({ running: true, phase: 'write', total: 4, indexed: 0 }))
     return request('POST', `/api/bots/${botId}/dreaming/rebuild-vec`)
+  },
+  rebuildVecStatus(botId) {
+    if (USE_MOCK) return mockResolve(() => ({ running: false, phase: 'done', total: 4, indexed: 4 }))
+    return request('GET', `/api/bots/${botId}/dreaming/rebuild-vec`)
   },
   // 列出最近被梦境巩固提升为 L1 的记忆（含提升理由与原 L0 条目引用）。
   promotions(botId, limit = 20) {

@@ -262,13 +262,14 @@ func strOr(m map[string]any, key string) string {
 	return ""
 }
 
-// handleRebuildDreamingVec 重建该 Bot 的 sqlite-vec 索引。
+// handleRebuildDreamingVec 在后台重建该 Bot 的 sqlite-vec 索引。
 // POST /api/bots/:id/dreaming/rebuild-vec
 //
 // 库是进程共用的一份 SQLite，只替换这个 bot 的向量，不 DROP 整张 memory_vec。
+// 请求立刻返回进度；同一个 bot 已有任务在跑时不再开第二个。
 //
 // @Summary      重建向量库
-// @Description  按该 Bot 的分层记忆重建 sqlite-vec 索引
+// @Description  按该 Bot 的分层记忆在后台重建 sqlite-vec 索引，并返回当前进度
 // @Tags         梦境巩固
 // @Produce      json
 // @Param        id  path      string  true  "Bot ID"
@@ -281,23 +282,33 @@ func (s *Server) handleRebuildDreamingVec(c *gin.Context) {
 		Fail(c, errs.BadRequest("bot id is required"))
 		return
 	}
-	bundle, stop, berr := s.memoryBundle(botID)
-	if berr != nil && bundle == nil {
-		// 梦境未启用时 bundle 为 nil 且 err 为 nil；真正的打开失败才中断。
-		Fail(c, errs.Wrap(berr, "failed to open memory store"))
-		return
-	}
-	defer stop()
-
-	var store *memory.TieredStore
-	if bundle != nil {
-		store = bundle.TieredStore
-	}
-	n, err := memory.RebuildBotVectors(c.Request.Context(), s.db, botID, store)
+	view, started, err := s.startDreamingVecRebuild(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "rebuild vec failed"))
 		return
 	}
-	auditLog(c, s.logger, "rebuild_dreaming_vec", "bot_id", botID, "indexed", n)
-	OK(c, gin.H{"indexed": n})
+	if started {
+		auditLog(c, s.logger, "rebuild_dreaming_vec", "bot_id", botID, "started", true)
+	}
+	OK(c, view)
+}
+
+// handleDreamingVecRebuildStatus 返回该 Bot 最近一次向量重建进度。
+// GET /api/bots/:id/dreaming/rebuild-vec
+//
+// @Summary      向量重建进度
+// @Description  轮询后台向量重建任务。未开始过时 phase 为 idle
+// @Tags         梦境巩固
+// @Produce      json
+// @Param        id  path      string  true  "Bot ID"
+// @Success      200  {object}  Response
+// @Security     CookieAuth
+// @Router       /api/bots/{id}/dreaming/rebuild-vec [get]
+func (s *Server) handleDreamingVecRebuildStatus(c *gin.Context) {
+	botID := c.Param("id")
+	if botID == "" {
+		Fail(c, errs.BadRequest("bot id is required"))
+		return
+	}
+	OK(c, s.vecRebuildSnapshot(botID))
 }

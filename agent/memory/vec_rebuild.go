@@ -10,6 +10,32 @@ import (
 	"github.com/kasuganosora/thinkbot/dao"
 )
 
+// 向量重建进度阶段。页面按 phase 展示，不阻塞请求。
+const (
+	VecRebuildSelect = "select"
+	VecRebuildDelete = "delete"
+	VecRebuildWrite  = "write"
+	VecRebuildDone   = "done"
+	VecRebuildError  = "error"
+)
+
+// vecRebuildProgressEvery 是写入阶段上报间隔。最后一条总会再报一次。
+const vecRebuildProgressEvery = 20
+
+// VecRebuildProgress 是一次重建的进度快照。
+// Total 是选中的记忆条数，Indexed 是已经尝试写入向量的条数。
+type VecRebuildProgress struct {
+	Phase   string
+	Total   int
+	Indexed int
+}
+
+func reportVecRebuild(fn func(VecRebuildProgress), p VecRebuildProgress) {
+	if fn != nil {
+		fn(p)
+	}
+}
+
 // RebuildBotVectors 把该 bot 已持久化的分层记忆重新写入 sqlite-vec。
 //
 // 进程只有一份 SQLite（data/thinkbot.db），memory_vec 也是全进程一张表。
@@ -24,7 +50,8 @@ import (
 //
 // live 非空且当前没有可用索引时，会 TryEnableVec + OpenVecIndex 并挂回这个 store，
 // 这样部署后不必再重启一次才能写索引。
-func RebuildBotVectors(ctx context.Context, gdb *gorm.DB, botID string, live *TieredStore) (int, error) {
+// onProgress 可为 nil。删除结束后，以及写入每 20 条和最后一条时会回调。
+func RebuildBotVectors(ctx context.Context, gdb *gorm.DB, botID string, live *TieredStore, onProgress func(VecRebuildProgress)) (int, error) {
 	if botID == "" {
 		return 0, fmt.Errorf("bot id is required")
 	}
@@ -34,33 +61,73 @@ func RebuildBotVectors(ctx context.Context, gdb *gorm.DB, botID string, live *Ti
 	if gdb == nil {
 		return 0, fmt.Errorf("sqlite-vec is not available")
 	}
+	fail := func(total int, err error) (int, error) {
+		reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildError, Total: total})
+		return 0, err
+	}
+	reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildSelect})
 	idx, err := ensureVecIndex(gdb, live)
 	if err != nil {
-		return 0, err
+		return fail(0, err)
 	}
 
 	var rows []dao.TieredMemoryModel
 	if err := gdb.WithContext(ctx).Find(&rows).Error; err != nil {
-		return 0, err
+		return fail(0, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(0, err)
 	}
 	var events []dao.UserMessageEvent
 	if err := gdb.WithContext(ctx).Select("bot_id", "channel", "user_id").Find(&events).Error; err != nil {
-		return 0, err
+		return fail(0, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(0, err)
 	}
 	selected, fullKeys, partialIDs := selectVecRebuildRows(botID, rows, events)
+	total := len(selected)
+	reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildSelect, Total: total})
 	if err := idx.DeleteScopes(fullKeys); err != nil {
-		return 0, err
+		return fail(total, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(total, err)
 	}
 	if err := idx.DeleteEntryIDs(partialIDs); err != nil {
-		return 0, err
+		return fail(total, err)
 	}
+	reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildDelete, Total: total})
+	n, err := indexVecRebuildRows(ctx, idx, selected, onProgress)
+	if err != nil {
+		return n, err
+	}
+	reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildDone, Total: total, Indexed: n})
+	return n, nil
+}
+
+// indexVecRebuildRows 写入选中的记忆，并按间隔汇报进度。
+// idx 为空时仍计数（测试不必挂上 sqlite-vec）。ctx 取消会停在下一条之前。
+func indexVecRebuildRows(ctx context.Context, idx *VecIndex, selected []dao.TieredMemoryModel, onProgress func(VecRebuildProgress)) (int, error) {
+	total := len(selected)
 	n := 0
-	for _, row := range selected {
-		if row.ID == "" || row.Content == "" {
-			continue
+	since := 0
+	for i, row := range selected {
+		if err := ctx.Err(); err != nil {
+			reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildError, Total: total, Indexed: n})
+			return n, err
 		}
-		idx.Upsert(scopeKeyOf(row.ScopeKind, row.ScopeID), row.ID, row.Content)
-		n++
+		if row.ID != "" && row.Content != "" {
+			if idx != nil {
+				idx.Upsert(scopeKeyOf(row.ScopeKind, row.ScopeID), row.ID, row.Content)
+			}
+			n++
+			since++
+		}
+		if n > 0 && (since >= vecRebuildProgressEvery || i == len(selected)-1) {
+			reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildWrite, Total: total, Indexed: n})
+			since = 0
+		}
 	}
 	return n, nil
 }
@@ -70,7 +137,7 @@ func (s *TieredStore) RebuildVec(ctx context.Context, botID string) (int, error)
 	if s == nil {
 		return 0, fmt.Errorf("sqlite-vec is not available")
 	}
-	return RebuildBotVectors(ctx, s.db, botID, s)
+	return RebuildBotVectors(ctx, s.db, botID, s, nil)
 }
 
 func ensureVecIndex(gdb *gorm.DB, live *TieredStore) (*VecIndex, error) {
