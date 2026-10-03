@@ -124,6 +124,26 @@ func hashEmbed(text string) []byte {
 	return encodeVec(vec)
 }
 
+// EmbedSimilarity 是写入 sqlite-vec 的同一套向量的余弦相似度。没有扩展时也能用来挡无关记忆。
+func EmbedSimilarity(a, b string) float64 {
+	av := hashVec(a)
+	bv := hashVec(b)
+	var dot float64
+	for i := range av {
+		dot += float64(av[i]) * float64(bv[i])
+	}
+	return dot
+}
+
+func hashVec(text string) []float32 {
+	raw := hashEmbed(text)
+	out := make([]float32, vecDims)
+	for i := 0; i < vecDims; i++ {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))
+	}
+	return out
+}
+
 func encodeVec(vec []float32) []byte {
 	buf := make([]byte, len(vec)*4)
 	for i, x := range vec {

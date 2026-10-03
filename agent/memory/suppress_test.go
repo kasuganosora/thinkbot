@@ -1,9 +1,6 @@
 package memory
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestBanTopic(t *testing.T) {
 	if got := BanTopic("你再提科目二 我就删掉你的记忆"); got != "科目二" {
@@ -17,15 +14,15 @@ func TestBanTopic(t *testing.T) {
 	}
 }
 
-func TestFilterUnrelatedDropsScar(t *testing.T) {
-	entries := []Entry{{Content: "科目二挂了"}, {Content: "thinkbot 是多层记忆"}}
-	got := FilterUnrelated(entries, "我们继续看记忆系统怎么改")
-	if len(got) != 1 || !strings.Contains(got[0].Content, "记忆") {
-		t.Fatalf("got %#v", got)
+func TestKeepForTurnDropsScar(t *testing.T) {
+	if KeepForTurn("科目二挂了", "我们继续看记忆系统怎么改", -1, false) {
+		t.Fatal("unrelated scar should stay out")
 	}
-	kept := FilterUnrelated(entries, "科目二后来怎么样")
-	if len(kept) != 1 || kept[0].Content != "科目二挂了" {
-		t.Fatalf("asked topic should stay: %#v", kept)
+	if !KeepForTurn("科目二挂了", "科目二后来怎么样", -1, false) {
+		t.Fatal("asked topic should stay")
+	}
+	if !KeepForTurn("多层记忆", "记忆系统怎么改", 0.4, true) {
+		t.Fatal("near vec hit should stay")
 	}
 }
 
