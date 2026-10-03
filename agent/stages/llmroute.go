@@ -869,7 +869,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if lurkMode || core.IsReactionAck(&env.Message) {
 		tools = nil
 	}
-	if note := s.contextBudgetNote(env, messages); note != "" && env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
+	if note := s.contextBudgetNote(env, systemPrompt, messages); note != "" && env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
 		systemPrompt = systemPrompt + "\n\n" + note
 	}
 

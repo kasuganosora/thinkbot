@@ -16,7 +16,7 @@ const (
 
 // contextBudgetNote 把当前窗口余量写进系统提示，让模型在触发线之前主动收束。
 // 没有压缩器（自动压缩关闭）时不注入。
-func (s *LLMStage) contextBudgetNote(env *core.Envelope, messages []llm.Message) string {
+func (s *LLMStage) contextBudgetNote(env *core.Envelope, systemPrompt string, messages []llm.Message) string {
 	compactor, ok := s.getCompactor(conversationKey(env))
 	if !ok || compactor == nil {
 		return ""
@@ -25,7 +25,7 @@ func (s *LLMStage) contextBudgetNote(env *core.Envelope, messages []llm.Message)
 	if b.Window <= 0 || b.Trigger <= 0 {
 		return ""
 	}
-	used := llm.EstimateMessagesTokens(messages)
+	used := llm.EstimateMessagesTokens(messages) + llm.EstimateSystemTokens(systemPrompt)
 	remaining := b.Trigger - used
 	if remaining < 0 {
 		remaining = 0
@@ -34,7 +34,7 @@ func (s *LLMStage) contextBudgetNote(env *core.Envelope, messages []llm.Message)
 	if b.Trigger > 0 {
 		pct = used * 100 / b.Trigger
 	}
-	note := fmt.Sprintf(`Context budget: window %d tokens, compact trigger at %d (%.0f%% of the model window), about %d used, %d left before automatic compaction. Raw history is kept; compact_context folds older turns into a note and search_context_history can recover details afterwards.`,
+	note := fmt.Sprintf(`Context budget: window %d tokens, compact trigger at %d (%.0f%% of the model window), about %d used (messages plus system prompt), %d left before automatic compaction. Raw history is kept; compact_context folds older turns into a note and search_context_history can recover details afterwards.`,
 		b.Window, b.Trigger, b.Ratio*100, used, remaining)
 	if pct >= 75 {
 		note += " Budget is low: finish the current step, then call compact_context with a focus listing open tasks, decisions, paths and rejected approaches before starting more large tool calls."
