@@ -48,6 +48,7 @@ type MemoryRepository struct {
 	entriesAppended atomic.Int64
 	entriesDeleted  atomic.Int64
 	retrievals      atomic.Int64
+	vec             *VecIndex
 }
 
 // NewMemoryRepository 创建内存记忆仓储。
@@ -65,6 +66,16 @@ func NewMemoryRepository(opts ...MemoryRepositoryConfig) *MemoryRepository {
 		config:  cfg,
 		buckets: make(map[string][]Entry),
 	}
+}
+
+// UseVec 接上 sqlite-vec 索引。nil 时 search 保持 scope 子串。
+func (r *MemoryRepository) UseVec(v *VecIndex) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.vec = v
+	r.mu.Unlock()
 }
 
 // ============================================================================
@@ -240,10 +251,8 @@ func (r *MemoryRepository) Retrieve(_ context.Context, query Query) ([]Entry, er
 		}
 
 		// 文本关键词匹配（子串，不区分大小写）
-		if query.Text != "" {
-			if !containsIgnoreCase(entry.Content, query.Text) {
-				continue
-			}
+		if query.Text != "" && !containsIgnoreCase(entry.Content, query.Text) && !r.vec.Enabled() {
+			continue
 		}
 
 		// 时间范围过滤（闭区间；零值表示不限，无需额外判断）
@@ -257,7 +266,30 @@ func (r *MemoryRepository) Retrieve(_ context.Context, query Query) ([]Entry, er
 		results = append(results, *entry)
 	}
 
-	// 排序：默认按时间倒序（最新的在前）；order=asc 时升序（最早的在前）。
+	// 排序：向量近邻优先（sqlite-vec 可用时），其余仍按时间。
+	if query.Text != "" && r.vec.Enabled() && len(query.Scopes) > 0 {
+		rank := map[string]int{}
+		for _, scope := range query.Scopes {
+			for i, hit := range r.vec.Search(scope.Key(), query.Text, limit) {
+				if _, ok := rank[hit.EntryID]; !ok {
+					rank[hit.EntryID] = i
+				}
+			}
+		}
+		if len(rank) > 0 {
+			sort.SliceStable(results, func(i, j int) bool {
+				ri, okI := rank[results[i].ID]
+				rj, okJ := rank[results[j].ID]
+				if okI != okJ {
+					return okI
+				}
+				if okI && ri != rj {
+					return ri < rj
+				}
+				return results[i].CreatedAt.After(results[j].CreatedAt)
+			})
+		}
+	}
 	if query.Order == OrderAsc {
 		sortByTimeAsc(results)
 	} else {

@@ -541,6 +541,9 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 		m.logger.Warnw("failed to get existing L1 for consolidation", "err", err)
 		existing = nil
 	}
+	if neighbors := m.store.VecNeighbors(scope, joinL0(l0Entries), 8); len(neighbors) > 0 {
+		existing = neighbors
+	}
 
 	// 调用 Consolidator
 	decisions, err := m.consolidator.Consolidate(ctx, l0Entries, existing)
@@ -606,6 +609,15 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 		"l1_promoted", promoted)
 
 	return promoted, nil
+}
+
+func joinL0(entries []TieredEntry) string {
+	var b strings.Builder
+	for _, e := range entries {
+		b.WriteString(e.Content)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // updateL1Entry 更新或合并一条 L1 记忆。

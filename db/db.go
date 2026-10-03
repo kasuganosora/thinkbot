@@ -11,7 +11,7 @@ import (
 // sqlitePragmas 是 SQLite DSN 中附加的 PRAGMA 参数，用于启用 WAL 模式和锁等待。
 // _busy_timeout=5000: 遇到锁时最多等待 5 秒，而非立即返回 SQLITE_BUSY 错误
 // _journal_mode=WAL: 启用 Write-Ahead Logging，允许并发读写
-const sqlitePragmas = "?_busy_timeout=5000&_journal_mode=WAL"
+const sqlitePragmas = "?_busy_timeout=5000&_journal_mode=WAL&_load_extension=1"
 
 // openSQLite 打开 SQLite 数据库并统一应用连接池与 PRAGMA 配置。
 // 相对路径会解析为绝对路径（基于进程工作目录），避免工作目录变化导致
