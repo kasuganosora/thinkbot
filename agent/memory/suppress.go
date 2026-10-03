@@ -82,24 +82,15 @@ func topicHit(content string, topics []string) bool {
 	return false
 }
 
-// FilterUnrelated 丢掉和当前这句话对不上的记忆，避免聊别的主题时把旧伤疤灌进提示。
-// 用户这句没提到的内容仍留在库里，搜索工具还能按原话找。
-func FilterUnrelated(entries []Entry, text string) []Entry {
-	text = strings.TrimSpace(text)
-	if text == "" || len(entries) == 0 {
-		return entries
+// KeepForTurn 决定这条记忆能不能进本轮提示。向量分优先，字面重叠兜底。禁提主题由调用方另滤。
+func KeepForTurn(content, text string, vecDistance float64, hasVec bool) bool {
+	if hasVec && vecDistance >= 0 && vecDistance <= 1.15 {
+		return true
 	}
-	grams := charGrams(text)
-	if len(grams) == 0 {
-		return entries
+	if EmbedSimilarity(content, text) >= 0.18 {
+		return true
 	}
-	out := make([]Entry, 0, len(entries))
-	for _, e := range entries {
-		if sharesGram(e.Content, grams) {
-			out = append(out, e)
-		}
-	}
-	return out
+	return sharesGram(content, charGrams(text))
 }
 
 func charGrams(text string) map[string]struct{} {
