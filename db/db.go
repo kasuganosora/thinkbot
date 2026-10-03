@@ -11,7 +11,11 @@ import (
 // sqlitePragmas 是 SQLite DSN 中附加的 PRAGMA 参数，用于启用 WAL 模式和锁等待。
 // _busy_timeout=5000: 遇到锁时最多等待 5 秒，而非立即返回 SQLITE_BUSY 错误
 // _journal_mode=WAL: 启用 Write-Ahead Logging，允许并发读写
-const sqlitePragmas = "?_busy_timeout=5000&_journal_mode=WAL&_load_extension=1"
+//
+// 不放 _load_extension：mattn/go-sqlite3 不认这个 DSN 参数，SQL load_extension()
+// 在 sqlite3_enable_load_extension 之前永远 "not authorized"。扩展在
+// sqliteDriverName 的 ConnectHook 里用 C API 加载，见 vec.go。
+const sqlitePragmas = "?_busy_timeout=5000&_journal_mode=WAL"
 
 // openSQLite 打开 SQLite 数据库并统一应用连接池与 PRAGMA 配置。
 // 相对路径会解析为绝对路径（基于进程工作目录），避免工作目录变化导致
@@ -21,7 +25,10 @@ func openSQLite(path string, logger gormlogger.Interface) (*gorm.DB, error) {
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
-	db, err := gorm.Open(sqlite.Open(path+sqlitePragmas), &gorm.Config{
+	db, err := gorm.Open(sqlite.New(sqlite.Config{
+		DriverName: sqliteDriverName,
+		DSN:        path + sqlitePragmas,
+	}), &gorm.Config{
 		Logger: logger,
 	})
 	if err != nil {

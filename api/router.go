@@ -125,6 +125,7 @@ func (s *Server) registerRoutes() {
 				botsAdmin.PUT("/:id/dreaming", s.handleUpdateDreamingConfig)
 				botsAdmin.GET("/:id/dreaming/status", s.handleDreamingStatus)
 				botsAdmin.POST("/:id/dreaming/trigger", s.handleTriggerDreaming)
+				botsAdmin.POST("/:id/dreaming/rebuild-vec", s.handleRebuildDreamingVec)
 				botsAdmin.GET("/:id/dreaming/promotions", s.handleListDreamPromotions)
 
 				// 定时任务管理（嵌套在 Bot 下）

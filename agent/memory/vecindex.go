@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/binary"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"strings"
@@ -27,11 +28,7 @@ func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 		return nil
 	}
 	idx := &VecIndex{db: gdb}
-	err := gdb.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
-		embedding float[256],
-		+scope_key text,
-		+entry_id text
-	)`).Error
+	err := gdb.Exec(vecTableDDL).Error
 	if err != nil {
 		return nil
 	}
@@ -40,6 +37,77 @@ func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 }
 
 func (v *VecIndex) Enabled() bool { return v != nil && v.ready }
+
+const vecTableDDL = `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
+		embedding float[256],
+		+scope_key text,
+		+entry_id text
+	)`
+
+// Rebuild 丢掉并重建整张 memory_vec。只在这份 SQLite 只属于一个 bot 时安全。
+// 进程共用一个库时必须走按 scope/entry 删除（见 RebuildBotVectors），否则会清掉其他 bot 的向量。
+func (v *VecIndex) Rebuild() error {
+	if !v.Enabled() {
+		return fmt.Errorf("sqlite-vec is not available")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.db.Exec("DROP TABLE IF EXISTS memory_vec").Error; err != nil {
+		return err
+	}
+	if err := v.db.Exec(vecTableDDL).Error; err != nil {
+		v.ready = false
+		return err
+	}
+	v.ready = true
+	return nil
+}
+
+// DeleteScopes 只删这些 scope_key 的向量，不动其他 bot 的行。
+func (v *VecIndex) DeleteScopes(scopeKeys []string) error {
+	if !v.Enabled() || len(scopeKeys) == 0 {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for _, key := range scopeKeys {
+		if key == "" {
+			continue
+		}
+		if err := v.db.Exec("DELETE FROM memory_vec WHERE scope_key = ?", key).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteEntryIDs 按 entry_id 删除。共享 scope 里只换属于本 bot 的行时用这个。
+func (v *VecIndex) DeleteEntryIDs(ids []string) error {
+	if !v.Enabled() || len(ids) == 0 {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	const chunk = 200
+	for i := 0; i < len(ids); i += chunk {
+		end := i + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		part := ids[i:end]
+		args := make([]any, len(part))
+		holders := make([]string, len(part))
+		for j, id := range part {
+			args[j] = id
+			holders[j] = "?"
+		}
+		q := "DELETE FROM memory_vec WHERE entry_id IN (" + strings.Join(holders, ",") + ")"
+		if err := v.db.Exec(q, args...).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // Upsert 写入一条记忆的向量。失败只表示这条不进索引，不阻断记忆本身。
 func (v *VecIndex) Upsert(scopeKey, entryID, content string) {

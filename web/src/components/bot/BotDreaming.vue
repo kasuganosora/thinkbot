@@ -20,6 +20,13 @@
             @click="trigger"
             data-testid="dreaming-trigger-btn"
           >{{ triggering ? '巩固进行中…' : '立即触发一次' }}</t-button>
+          <t-button
+            variant="outline"
+            :loading="rebuilding"
+            :disabled="rebuilding"
+            data-testid="dreaming-rebuild-vec-btn"
+            @click="rebuildVec"
+          >重建向量库</t-button>
         </t-space>
       </t-loading>
     </t-card>
@@ -199,6 +206,7 @@ const props = defineProps({ botId: { type: String, required: true } })
 
 const loading = ref(false)
 const triggering = ref(false)
+const rebuilding = ref(false)
 const config = ref({ enabled: false, schedule: '0 3 * * *' })
 const status = ref(null)
 const lastTrigger = ref(null)
@@ -294,6 +302,21 @@ async function trigger() {
   } finally {
     triggering.value = false
     tip && tip.close && tip.close()
+  }
+}
+
+
+async function rebuildVec() {
+  if (rebuilding.value) return
+  rebuilding.value = true
+  try {
+    const res = await dreamingApi.rebuildVec(props.botId)
+    const n = res && typeof res.indexed === 'number' ? res.indexed : 0
+    MessagePlugin.success('向量库已重建，写入 ' + n + ' 条')
+  } catch (e) {
+    MessagePlugin.error('重建失败：' + (e.message || '请稍后重试'))
+  } finally {
+    rebuilding.value = false
   }
 }
 
