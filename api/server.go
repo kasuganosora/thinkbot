@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -58,6 +59,10 @@ type Server struct {
 
 	// bundledSkillsDirOverride 测试用：覆盖内置技能目录（空则 "skills"）。
 	bundledSkillsDirOverride string
+
+	// vecRebuildJobs 是按 bot 的向量重建进度。进程内一份，不落库。
+	vecRebuildMu   sync.Mutex
+	vecRebuildJobs map[string]*vecRebuildJob
 }
 
 // NewServer 创建并配置 Gin Server。
