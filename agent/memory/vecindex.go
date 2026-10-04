@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/binary"
@@ -285,14 +286,65 @@ func (v *VecIndex) DeleteEntryIDs(ids []string) error {
 
 // Upsert 写入一条记忆的向量。失败只表示这条不进索引，不阻断记忆本身。
 func (v *VecIndex) Upsert(scopeKey, entryID, content string) {
+	_, _ = v.upsert(scopeKey, entryID, content, false)
+}
+
+// upsert 写入一条向量。onlyIfAbsent 为 true 时，已有的 entry_id 保持不动。
+// 增量写入仍走 Upsert（先删后插）。启动补索引用 onlyIfAbsent，避免重写已有行。
+func (v *VecIndex) upsert(scopeKey, entryID, content string, onlyIfAbsent bool) (bool, error) {
 	if !v.Enabled() || entryID == "" || content == "" {
-		return
+		return false, nil
 	}
 	blob := hashEmbed(content)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	_ = v.db.Exec("DELETE FROM memory_vec WHERE entry_id = ?", entryID).Error
-	_ = v.db.Exec("INSERT INTO memory_vec(embedding, scope_key, entry_id) VALUES (?, ?, ?)", blob, scopeKey, entryID).Error
+	if onlyIfAbsent {
+		var n int
+		if err := v.db.Raw("SELECT COUNT(*) FROM memory_vec WHERE entry_id = ?", entryID).Scan(&n).Error; err != nil {
+			return false, err
+		}
+		if n > 0 {
+			return false, nil
+		}
+	}
+	if err := v.db.Exec("DELETE FROM memory_vec WHERE entry_id = ?", entryID).Error; err != nil {
+		return false, err
+	}
+	if err := v.db.Exec(
+		"INSERT INTO memory_vec(embedding, scope_key, entry_id) VALUES (?, ?, ?)",
+		blob, scopeKey, entryID,
+	).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// listEntryIDs 非 KNN 地列出已索引的 entry_id。启动补索引用它跳过已有行。
+func (v *VecIndex) listEntryIDs(ctx context.Context) (map[string]struct{}, error) {
+	if !v.Enabled() {
+		return map[string]struct{}{}, nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	rows, err := v.db.WithContext(ctx).Raw("SELECT entry_id FROM memory_vec").Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id != "" {
+			out[id] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (v *VecIndex) Delete(entryID string) {

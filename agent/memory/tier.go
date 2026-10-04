@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	stdlog "log"
 	"sort"
 	"sync"
 	"time"
@@ -186,7 +187,16 @@ type TieredStore struct {
 	// nil 时退化为 no-op，避免未初始化日志时 panic。
 	logger *zap.SugaredLogger
 	vec    *VecIndex
+
+	// vecBackfillOnce 保证一个 store 只起一次启动补索引。
+	vecBackfillOnce    sync.Once
+	vecBackfillStarted chan struct{}
+	vecBackfillDone    chan struct{}
 }
+
+// vecBackfillGate 在后台补索引读 memory_vec 之前运行。生产环境为 nil。
+// 测试用它卡住 goroutine，证明 NewTieredStoreWithDB 不会等 sqlite-vec 写完。
+var vecBackfillGate func()
 
 // NewTieredStore 创建分层存储（纯内存模式）。
 // configs 为 nil 时使用 DefaultTierConfigs()。
@@ -224,8 +234,8 @@ func (s *TieredStore) loadFromDB() {
 		return
 	}
 	now := time.Now()
+	var indexable []TieredEntry
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	loaded := 0
 	for _, m := range models {
 		// 跳过已过期条目（L0 TTL 已过）
@@ -236,14 +246,95 @@ func (s *TieredStore) loadFromDB() {
 		key := tierScopeKey(te.Tier, te.Scope)
 		s.buckets[key] = append(s.buckets[key], te)
 		loaded++
-		if s.vec.Enabled() {
-			s.vec.Upsert(te.Scope.Key(), te.ID, te.Content)
+		if te.ID != "" && te.Content != "" {
+			indexable = append(indexable, te)
 		}
 	}
+	s.mu.Unlock()
 	if s.logger != nil {
 		s.logger.Infow("tiered_store: loaded persisted memories from db",
 			"loaded", loaded, "total_rows", len(models))
 	}
+	// 向量写入不在构造函数里等。fx OnStart 只有 15 秒，几千条 upsert 会把进程打退出。
+	s.startVecBackfill(indexable)
+}
+
+// startVecBackfill 在锁释放后启动一次后台补索引。vec 不可用时什么都不做。
+func (s *TieredStore) startVecBackfill(entries []TieredEntry) {
+	if s == nil || s.vec == nil || !s.vec.Enabled() || len(entries) == 0 {
+		return
+	}
+	s.vecBackfillOnce.Do(func() {
+		started := make(chan struct{})
+		done := make(chan struct{})
+		s.vecBackfillStarted = started
+		s.vecBackfillDone = done
+		go func() {
+			defer close(done)
+			close(started)
+			if gate := vecBackfillGate; gate != nil {
+				gate()
+			}
+			s.backfillVec(context.Background(), entries)
+		}()
+	})
+}
+
+// backfillVec 只给 memory_vec 里还没有的 entry_id 做 Upsert。
+// 已有向量保持原样，重启不会重写几千行。
+func (s *TieredStore) backfillVec(ctx context.Context, entries []TieredEntry) {
+	present, err := s.vec.listEntryIDs(ctx)
+	if err != nil {
+		s.logBackfillError("tiered_store: vec backfill list entry ids failed", "", err)
+		return
+	}
+	already := 0
+	written := 0
+	for _, e := range entries {
+		if e.ID == "" || e.Content == "" {
+			continue
+		}
+		if _, ok := present[e.ID]; ok {
+			already++
+			continue
+		}
+		wrote, err := s.vec.upsert(e.Scope.Key(), e.ID, e.Content, true)
+		if err != nil {
+			s.logBackfillError("tiered_store: vec backfill upsert failed", e.ID, err)
+			continue
+		}
+		if wrote {
+			written++
+			present[e.ID] = struct{}{}
+			continue
+		}
+		already++
+	}
+	if s.logger != nil {
+		s.logger.Infow("tiered_store: vec backfill finished",
+			"already_present", already, "written", written)
+	} else {
+		stdlog.Printf("tiered_store: vec backfill finished already_present=%d written=%d", already, written)
+	}
+}
+
+func (s *TieredStore) logBackfillError(msg, entryID string, err error) {
+	if err == nil {
+		return
+	}
+	if s.logger != nil {
+		if entryID != "" {
+			s.logger.Errorw(msg, "entry_id", entryID, "err", err)
+			return
+		}
+		s.logger.Errorw(msg, "err", err)
+		return
+	}
+	if entryID != "" {
+		stdlog.Printf("%s entry_id=%s: %v", msg, entryID, err)
+		return
+	}
+	stdlog.Printf("%s: %v", msg, err)
 }
 
 // Append 追加一条 TieredEntry 到对应 tier+scope 桶。
