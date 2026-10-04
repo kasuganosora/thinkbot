@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 'use strict';
-// ThinkBot sandbox desktop. Speaks RFB 3.8 on stdin/stdout and reads the bot's
+// ThinkBot sandbox desktop. Speaks RFB 3.8 on stdin/stdout and reads this bot's
 // own X display (the same Xvfb Chromium uses). One process, one display.
 // Host mode never scans other processes' displays.
+//
+// The picture is the real X size. Updates are raw rectangles of 64px tiles that
+// changed, so a quiet screen is not a full 1280x800 frame.
+// Clipboard bytes are UTF-8 on this private stream (not Latin-1). CJK keysyms
+// are not on the Xvfb keymap, so typed CJK cannot be keycodes; paste uses the
+// CLIPBOARD selection instead.
 
 const net = require('net');
 const fs = require('fs');
@@ -10,16 +16,15 @@ const { spawn } = require('child_process');
 
 const SCREEN_W = 1280;
 const SCREEN_H = 800;
-const SCALE = 2;
-const RFB_W = SCREEN_W / SCALE;
-const RFB_H = SCREEN_H / SCALE;
+const TILE = 64;
 const MODE = process.env.THINKBOT_DESKTOP_MODE || 'container';
+const MARKER = process.env.THINKBOT_DESKTOP_MARKER === '1';
+const CLIP_ACK = process.env.THINKBOT_DESKTOP_CLIP_ACK === '1';
 
 let xvfb = null;
 function log(...a) {
   if (process.env.THINKBOT_DESKTOP_DEBUG) process.stderr.write(a.join(' ') + '\n');
 }
-
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function displayNum(disp) {
@@ -61,7 +66,7 @@ function readCookie(xauthority, display) {
   const want = displayNum(display);
   let o = 0;
   while (o + 4 <= buf.length) {
-    const family = buf.readUInt16BE(o); o += 2;
+    o += 2;
     const alen = buf.readUInt16BE(o); o += 2;
     if (o + alen + 2 > buf.length) break;
     o += alen;
@@ -75,7 +80,6 @@ function readCookie(xauthority, display) {
     if (o + dlen > buf.length) break;
     const data = buf.slice(o, o + dlen); o += dlen;
     if (number === want && data.length === 16) return data;
-    void family;
   }
   return null;
 }
@@ -107,6 +111,7 @@ class XConn {
     this.buf = Buffer.alloc(0);
     this.waiters = [];
     this.seq = 0;
+    this.pendingEvents = [];
     sock.on('data', d => { this.buf = Buffer.concat([this.buf, d]); this.pump(); });
     sock.on('error', e => this.fail(e));
     this.closed = new Promise((_, rej) => sock.on('close', () => rej(new Error('x closed'))));
@@ -122,6 +127,10 @@ class XConn {
   }
   need(n) {
     return new Promise((res, rej) => { this.waiters.push({ need: n, res, rej }); this.pump(); });
+  }
+  send(req) {
+    this.seq = (this.seq + 1) & 0xffff;
+    this.sock.write(req);
   }
   async handshake(cookie) {
     const name = cookie ? Buffer.from('MIT-MAGIC-COOKIE-1') : Buffer.alloc(0);
@@ -160,18 +169,55 @@ class XConn {
     this.nextRid = (this.nextRid + 1) & 0xffffffff;
     return id;
   }
+  takeEvent() {
+    if (this.buf.length < 32) return null;
+    const kind = this.buf[0];
+    if (kind === 1 || kind === 0) return null;
+    const ev = Buffer.from(this.buf.subarray(0, 32));
+    this.buf = this.buf.subarray(32);
+    return ev;
+  }
   async round(req, extraOf) {
-    this.seq = (this.seq + 1) & 0xffff;
-    this.sock.write(req);
+    this.send(req);
     for (;;) {
       const head = await this.need(32);
       const kind = head[0];
-      if (kind === 0) throw new Error('x error ' + head[1]);
-      if (kind !== 1) continue; // event
+      if (kind === 0) throw new Error('x error ' + head[1] + ' major ' + head[10]);
+      if (kind !== 1) {
+        const ev = Buffer.from(head);
+        if ((ev[0] & 0x7f) === 30) await this.onSelectionRequest(ev);
+        if ((ev[0] & 0x7f) === 29) this.clipOwned = false;
+        this.pendingEvents.push(ev);
+        continue;
+      }
       const extra = extraOf ? extraOf(head) : head.readUInt32LE(4) * 4;
       const rest = extra ? await this.need(extra) : Buffer.alloc(0);
       return { head, rest };
     }
+  }
+  async waitEvent(pred, ms) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      let ev;
+      while ((ev = this.pendingEvents.shift())) {
+        if (pred(ev)) return ev;
+      }
+      ev = this.takeEvent();
+      if (ev) {
+        if ((ev[0] & 0x7f) === 30) await this.onSelectionRequest(ev);
+        if ((ev[0] & 0x7f) === 29) this.clipOwned = false;
+        if (pred(ev)) return ev;
+        continue;
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      await new Promise(res => {
+        const on = () => { clearTimeout(t); res(); };
+        const t = setTimeout(() => { this.sock.removeListener('data', on); res(); }, Math.min(left, 40));
+        this.sock.on('data', on);
+      });
+    }
+    return null;
   }
   async queryExtension(name) {
     const nb = Buffer.from(name);
@@ -184,14 +230,170 @@ class XConn {
     const { head } = await this.round(req);
     return { present: head[8] === 1, major: head[9] };
   }
+  async intern(name) {
+    const nb = Buffer.from(name);
+    const len = 2 + Math.ceil(nb.length / 4);
+    const req = Buffer.alloc(len * 4);
+    req[0] = 16;
+    req.writeUInt16LE(len, 2);
+    req.writeUInt16LE(nb.length, 4);
+    nb.copy(req, 8);
+    const { head } = await this.round(req, () => 0);
+    const atom = head.readUInt32LE(8);
+    if (!atom) throw new Error('no atom ' + name);
+    return atom;
+  }
+  async setupClipboard() {
+    const names = ['CLIPBOARD', 'UTF8_STRING', 'STRING', 'TARGETS', 'ATOM', 'INCR', 'THINKBOT_CLIP'];
+    this.atom = {};
+    for (const n of names) this.atom[n] = await this.intern(n);
+    this.win = this.allocId();
+    const req = Buffer.alloc(36);
+    req[0] = 1;
+    req.writeUInt16LE(9, 2);
+    req.writeUInt32LE(this.win, 4);
+    req.writeUInt32LE(this.root, 8);
+    req.writeUInt16LE(1, 16);
+    req.writeUInt16LE(1, 18);
+    req.writeUInt16LE(1, 22);
+    req.writeUInt32LE(0x800, 28);
+    req.writeUInt32LE(0x400000, 32);
+    this.send(req);
+    this.clipText = '';
+    this.clipOwned = false;
+  }
+  changeProperty(win, prop, type, data, format) {
+    const nbytes = data.length;
+    const units = format === 32 ? nbytes / 4 : format === 16 ? nbytes / 2 : nbytes;
+    const pad = pad4(nbytes);
+    const len = 6 + pad / 4;
+    const req = Buffer.alloc(len * 4);
+    req[0] = 18;
+    req.writeUInt16LE(len, 2);
+    req.writeUInt32LE(win, 4);
+    req.writeUInt32LE(prop, 8);
+    req.writeUInt32LE(type, 12);
+    req[16] = format;
+    req.writeUInt32LE(units, 20);
+    data.copy(req, 24);
+    this.send(req);
+  }
+  deleteProperty(win, prop) {
+    const req = Buffer.alloc(12);
+    req[0] = 19;
+    req.writeUInt16LE(3, 2);
+    req.writeUInt32LE(win, 4);
+    req.writeUInt32LE(prop, 8);
+    this.send(req);
+  }
+  async getProperty(win, prop) {
+    const req = Buffer.alloc(24);
+    req[0] = 20;
+    req[1] = 1;
+    req.writeUInt16LE(6, 2);
+    req.writeUInt32LE(win, 4);
+    req.writeUInt32LE(prop, 8);
+    req.writeUInt32LE(65536, 20);
+    const { head, rest } = await this.round(req);
+    const format = head[1];
+    const type = head.readUInt32LE(8);
+    const valueLen = head.readUInt32LE(16);
+    if (!format || !valueLen) return { type, data: Buffer.alloc(0) };
+    const nbytes = format === 8 ? valueLen : format === 16 ? valueLen * 2 : valueLen * 4;
+    return { type, data: rest.subarray(0, Math.min(nbytes, rest.length)) };
+  }
+  async onSelectionRequest(ev) {
+    if (!this.atom) return;
+    const time = ev.readUInt32LE(4);
+    const requestor = ev.readUInt32LE(12);
+    const selection = ev.readUInt32LE(16);
+    const target = ev.readUInt32LE(20);
+    let property = ev.readUInt32LE(24);
+    if (!property) property = this.atom.THINKBOT_CLIP;
+    let propOut = 0;
+    const text = Buffer.from(this.clipText || '', 'utf8');
+    if (target === this.atom.TARGETS) {
+      const atoms = Buffer.alloc(12);
+      atoms.writeUInt32LE(this.atom.TARGETS, 0);
+      atoms.writeUInt32LE(this.atom.UTF8_STRING, 4);
+      atoms.writeUInt32LE(this.atom.STRING, 8);
+      this.changeProperty(requestor, property, this.atom.ATOM, atoms, 32);
+      propOut = property;
+    } else if (target === this.atom.UTF8_STRING || target === this.atom.STRING) {
+      this.changeProperty(requestor, property, target, text, 8);
+      propOut = property;
+    }
+    const notify = Buffer.alloc(32);
+    notify[0] = 31;
+    notify.writeUInt32LE(time, 4);
+    notify.writeUInt32LE(requestor, 8);
+    notify.writeUInt32LE(selection, 12);
+    notify.writeUInt32LE(target, 16);
+    notify.writeUInt32LE(propOut, 20);
+    const req = Buffer.alloc(44);
+    req[0] = 25;
+    req.writeUInt16LE(11, 2);
+    req.writeUInt32LE(requestor, 4);
+    notify.copy(req, 12);
+    this.send(req);
+  }
+  async setClipboard(text) {
+    if (!this.atom) return;
+    const buf = Buffer.from(String(text), 'utf8');
+    if (buf.length > 256 * 1024) return;
+    this.clipText = String(text);
+    this.changeProperty(this.win, this.atom.THINKBOT_CLIP, this.atom.UTF8_STRING, buf, 8);
+    const req = Buffer.alloc(16);
+    req[0] = 22;
+    req.writeUInt16LE(4, 2);
+    req.writeUInt32LE(this.win, 4);
+    req.writeUInt32LE(this.atom.CLIPBOARD, 8);
+    this.send(req);
+    this.clipOwned = true;
+  }
+  async convertSelection(target) {
+    const req = Buffer.alloc(24);
+    req[0] = 24;
+    req.writeUInt16LE(6, 2);
+    req.writeUInt32LE(this.win, 4);
+    req.writeUInt32LE(this.atom.CLIPBOARD, 8);
+    req.writeUInt32LE(target, 12);
+    req.writeUInt32LE(this.atom.THINKBOT_CLIP, 16);
+    this.send(req);
+    const ev = await this.waitEvent(e => (e[0] & 0x7f) === 31, 300);
+    if (!ev) return null;
+    const prop = ev.readUInt32LE(20);
+    if (!prop) return '';
+    let got = await this.getProperty(this.win, prop);
+    if (got.type === this.atom.INCR) {
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const pn = await this.waitEvent(e => (e[0] & 0x7f) === 28, 400);
+        if (!pn) break;
+        got = await this.getProperty(this.win, prop);
+        if (!got.data.length) break;
+        total += got.data.length;
+        if (total > 1024 * 1024) break;
+        chunks.push(Buffer.from(got.data));
+      }
+      return Buffer.concat(chunks).toString('utf8');
+    }
+    return got.data.toString('utf8');
+  }
+  async readClipboard() {
+    if (!this.atom) return null;
+    const utf = await this.convertSelection(this.atom.UTF8_STRING);
+    if (utf) return utf;
+    const latin = await this.convertSelection(this.atom.STRING);
+    return latin == null ? utf : latin;
+  }
   async getImage(w, h) {
     const req = Buffer.alloc(20);
     req[0] = 73;
     req[1] = 2;
     req.writeUInt16LE(5, 2);
     req.writeUInt32LE(this.root, 4);
-    req.writeUInt16LE(0, 8);
-    req.writeUInt16LE(0, 10);
     req.writeUInt16LE(w, 12);
     req.writeUInt16LE(h, 14);
     req.writeUInt32LE(0xffffffff, 16);
@@ -223,11 +425,12 @@ class XConn {
     req.writeUInt16LE(9, 2);
     req[4] = type;
     req[5] = detail;
+    req.writeUInt32LE(0, 8);
     req.writeUInt32LE(this.root, 12);
-    req.writeUInt16LE(x, 16);
-    req.writeUInt16LE(y, 18);
-    this.seq = (this.seq + 1) & 0xffff;
-    this.sock.write(req);
+    // XTest reads the payload as an xEvent: rootX/rootY sit at 24/26, not 16/18.
+    req.writeInt16LE(x | 0, 24);
+    req.writeInt16LE(y | 0, 26);
+    this.send(req);
   }
   async queryPointer() {
     const req = Buffer.alloc(8);
@@ -239,33 +442,117 @@ class XConn {
   }
 }
 
-function scaleFrame(raw, sw, sh) {
-  const out = Buffer.alloc(RFB_W * RFB_H * 4);
+function toFrame(raw, sw, sh) {
   const bpp = Math.max(4, Math.floor(raw.length / (sw * sh)) || 4);
-  for (let y = 0; y < RFB_H; y++) {
-    for (let x = 0; x < RFB_W; x++) {
-      const sx = Math.min(sw - 1, x * SCALE);
-      const sy = Math.min(sh - 1, y * SCALE);
-      const si = (sy * sw + sx) * bpp;
-      const di = (y * RFB_W + x) * 4;
-      // X ZPixmap little-endian is B,G,R,x. RFB shift 16/8/0 wants the same bytes.
-      out[di] = raw[si] || 0;
-      out[di + 1] = raw[si + 1] || 0;
-      out[di + 2] = raw[si + 2] || 0;
-      out[di + 3] = 0;
-    }
+  const out = Buffer.alloc(sw * sh * 4);
+  for (let i = 0; i < sw * sh; i++) {
+    const s = i * bpp;
+    const d = i * 4;
+    out[d] = raw[s] || 0;
+    out[d + 1] = raw[s + 1] || 0;
+    out[d + 2] = raw[s + 2] || 0;
   }
   return out;
 }
 
+let lastFrame = null;
 let pointer = { x: 0, y: 0 };
+let prevPointer = { x: -1, y: -1 };
 let buttons = 0;
+let lastSentClip = null;
+let lastPoll = 0;
+
+function tileDirty(frame, sw, t) {
+  if (!lastFrame) return true;
+  if (MARKER) {
+    const hit = (p) => p.x >= t.x && p.y >= t.y && p.x < t.x + t.tw && p.y < t.y + t.th;
+    if (hit(pointer) || hit(prevPointer)) return true;
+  }
+  for (let row = 0; row < t.th; row++) {
+    const o = ((t.y + row) * sw + t.x) * 4;
+    if (frame.compare(lastFrame, o, o + t.tw * 4, o, o + t.tw * 4) !== 0) return true;
+  }
+  return false;
+}
+
+function collectTiles(frame, sw, sh) {
+  const tiles = [];
+  for (let y = 0; y < sh; y += TILE) {
+    for (let x = 0; x < sw; x += TILE) {
+      const t = { x, y, tw: Math.min(TILE, sw - x), th: Math.min(TILE, sh - y) };
+      if (tileDirty(frame, sw, t)) tiles.push(t);
+    }
+  }
+  return tiles;
+}
+
+function rememberTiles(frame, sw, tiles) {
+  if (!lastFrame || lastFrame.length !== frame.length) lastFrame = Buffer.alloc(frame.length);
+  for (const t of tiles) {
+    for (let row = 0; row < t.th; row++) {
+      const o = ((t.y + row) * sw + t.x) * 4;
+      frame.copy(lastFrame, o, o, o + t.tw * 4);
+    }
+  }
+}
+
+function paintMarker(pix, t) {
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      const xx = pointer.x + dx;
+      const yy = pointer.y + dy;
+      if (xx < t.x || yy < t.y || xx >= t.x + t.tw || yy >= t.y + t.th) continue;
+      const i = ((yy - t.y) * t.tw + (xx - t.x)) * 4;
+      pix[i] = 255; pix[i + 1] = 255; pix[i + 2] = 255;
+    }
+  }
+}
+
+function encodeTiles(frame, sw, tiles) {
+  const parts = [Buffer.alloc(4)];
+  parts[0][0] = 0;
+  parts[0].writeUInt16BE(tiles.length, 2);
+  for (const t of tiles) {
+    const rh = Buffer.alloc(12);
+    rh.writeUInt16BE(t.x, 0);
+    rh.writeUInt16BE(t.y, 2);
+    rh.writeUInt16BE(t.tw, 4);
+    rh.writeUInt16BE(t.th, 6);
+    rh.writeInt32BE(0, 8);
+    const pix = Buffer.alloc(t.tw * t.th * 4);
+    for (let row = 0; row < t.th; row++) {
+      const o = ((t.y + row) * sw + t.x) * 4;
+      frame.copy(pix, row * t.tw * 4, o, o + t.tw * 4);
+    }
+    if (MARKER) paintMarker(pix, t);
+    parts.push(rh, pix);
+  }
+  return Buffer.concat(parts);
+}
+
+let outChain = Promise.resolve();
+function writeOut(buf) {
+  const run = outChain.then(() => new Promise(res => {
+    if (process.stdout.write(buf)) res();
+    else process.stdout.once('drain', res);
+  }));
+  outChain = run.then(() => {}, () => {});
+  return run;
+}
+
+async function emitCut(text) {
+  const b = Buffer.from(text, 'utf8');
+  const hdr = Buffer.alloc(8);
+  hdr[0] = 3;
+  hdr.writeUInt32BE(b.length, 4);
+  await writeOut(Buffer.concat([hdr, b]));
+}
 
 async function applyPointer(x11, mask, x, y) {
-  const px = Math.max(0, Math.min(SCREEN_W - 1, x * SCALE));
-  const py = Math.max(0, Math.min(SCREEN_H - 1, y * SCALE));
+  const px = Math.max(0, Math.min(x11.width - 1, x));
+  const py = Math.max(0, Math.min(x11.height - 1, y));
   await x11.fakeInput(6, 0, px, py);
-  for (let b = 0; b < 5; b++) {
+  for (let b = 0; b < 8; b++) {
     const bit = 1 << b;
     const was = buttons & bit;
     const now = mask & bit;
@@ -276,30 +563,142 @@ async function applyPointer(x11, mask, x, y) {
   try { pointer = await x11.queryPointer(); } catch (e) { pointer = { x: px, y: py }; }
 }
 
-function paintMarker(frame) {
-  if (!pointer) return;
-  const x = Math.max(0, Math.min(RFB_W - 1, Math.floor(pointer.x / SCALE)));
-  const y = Math.max(0, Math.min(RFB_H - 1, Math.floor(pointer.y / SCALE)));
-  for (let dy = -2; dy <= 2; dy++) {
-    for (let dx = -2; dx <= 2; dx++) {
-      const xx = x + dx, yy = y + dy;
-      if (xx < 0 || yy < 0 || xx >= RFB_W || yy >= RFB_H) continue;
-      const i = (yy * RFB_W + xx) * 4;
-      frame[i] = 255; frame[i + 1] = 255; frame[i + 2] = 255;
-    }
+async function sendFrame(x11) {
+  const sw = x11.width;
+  const sh = x11.height;
+  const raw = await x11.getImage(sw, sh);
+  const frame = toFrame(raw, sw, sh);
+  let tiles = collectTiles(frame, sw, sh).slice(0, 40);
+  if (Date.now() - lastPoll > 800) {
+    lastPoll = Date.now();
+    try {
+      const text = await x11.readClipboard();
+      if (text && text !== lastSentClip) {
+        lastSentClip = text;
+        await emitCut(text);
+      }
+    } catch (e) { log('clip', e.message); }
   }
+  if (!tiles.length) {
+    await sleep(40);
+    tiles = [];
+  }
+  await writeOut(encodeTiles(frame, sw, tiles));
+  rememberTiles(frame, sw, tiles);
+  prevPointer = { x: pointer.x, y: pointer.y };
 }
 
-function rfbRect(frame) {
-  const hdr = Buffer.alloc(16);
-  hdr[0] = 0;
-  hdr.writeUInt16BE(1, 2);
-  hdr.writeUInt16BE(0, 4);
-  hdr.writeUInt16BE(0, 6);
-  hdr.writeUInt16BE(RFB_W, 8);
-  hdr.writeUInt16BE(RFB_H, 10);
-  hdr.writeInt32BE(0, 12);
-  return Buffer.concat([hdr, frame]);
+let cin = Buffer.alloc(0);
+let stage = 'version';
+let x11ref = null;
+let driving = false;
+
+function onClient(chunk) {
+  if (chunk && chunk.length) cin = Buffer.concat([cin, chunk]);
+  if (driving) return;
+  driving = true;
+  drive().catch(e => { log(e.stack || e.message); shutdown(); }).finally(() => {
+    driving = false;
+    if (cin.length) onClient(Buffer.alloc(0));
+  });
+}
+
+async function drive() {
+  const x11 = x11ref;
+  while (true) {
+    if (stage === 'version') {
+      if (cin.length < 12) return;
+      cin = cin.subarray(12);
+      await writeOut(Buffer.from('RFB 003.008\n'));
+      await writeOut(Buffer.from([1, 1]));
+      stage = 'security';
+      continue;
+    }
+    if (stage === 'security') {
+      if (cin.length < 1) return;
+      cin = cin.subarray(1);
+      await writeOut(Buffer.alloc(4));
+      stage = 'init';
+      continue;
+    }
+    if (stage === 'init') {
+      if (cin.length < 1) return;
+      cin = cin.subarray(1);
+      const name = Buffer.from('thinkbot');
+      const init = Buffer.alloc(24 + name.length);
+      init.writeUInt16BE(x11.width, 0);
+      init.writeUInt16BE(x11.height, 2);
+      init[4] = 32; init[5] = 24; init[6] = 0; init[7] = 1;
+      init.writeUInt16BE(255, 8);
+      init.writeUInt16BE(255, 10);
+      init.writeUInt16BE(255, 12);
+      init[14] = 16; init[15] = 8; init[16] = 0;
+      init.writeUInt32BE(name.length, 20);
+      name.copy(init, 24);
+      await writeOut(init);
+      stage = 'msg';
+      continue;
+    }
+    if (!x11) return;
+    if (cin.length < 1) return;
+    const t = cin[0];
+    if (t === 0) {
+      if (cin.length < 20) return;
+      cin = cin.subarray(20);
+      continue;
+    }
+    if (t === 2) {
+      if (cin.length < 4) return;
+      const n = cin.readUInt16BE(2);
+      if (cin.length < 4 + n * 4) return;
+      cin = cin.subarray(4 + n * 4);
+      continue;
+    }
+    if (t === 3) {
+      if (cin.length < 10) return;
+      cin = cin.subarray(10);
+      await sendFrame(x11);
+      continue;
+    }
+    if (t === 4) {
+      if (cin.length < 8) return;
+      const down = cin[1];
+      const sym = cin.readUInt32BE(4);
+      cin = cin.subarray(8);
+      const code = x11.keysymToCode && x11.keysymToCode.get(sym);
+      if (code) await x11.fakeInput(down ? 2 : 3, code, pointer.x, pointer.y);
+      continue;
+    }
+    if (t === 5) {
+      if (cin.length < 6) return;
+      const mask = cin[1];
+      const x = cin.readUInt16BE(2);
+      const y = cin.readUInt16BE(4);
+      cin = cin.subarray(6);
+      await applyPointer(x11, mask, x, y);
+      continue;
+    }
+    if (t === 6) {
+      if (cin.length < 8) return;
+      const n = cin.readUInt32BE(4);
+      if (n > 256 * 1024) { shutdown(); return; }
+      if (cin.length < 8 + n) return;
+      const text = cin.subarray(8, 8 + n).toString('utf8');
+      cin = cin.subarray(8 + n);
+      try {
+        await x11.setClipboard(text);
+        lastSentClip = text;
+        if (CLIP_ACK) {
+          const back = await x11.readClipboard();
+          if (back === text) await emitCut(text);
+        }
+      } catch (e) { log('set clip', e.message); }
+      continue;
+    }
+    log('unknown client byte', t);
+    shutdown();
+    return;
+  }
 }
 
 async function main() {
@@ -312,118 +711,15 @@ async function main() {
   const ext = await x11.queryExtension('XTEST');
   if (ext.present) x11.xtest = ext.major;
   try { await x11.keymap(); } catch (e) { log('keymap', e.message); }
-
-  const sw = x11.width || SCREEN_W;
-  const sh = x11.height || SCREEN_H;
-
-  process.stdin.on('data', chunk => onClient(chunk, x11, sw, sh));
-  process.stdin.on('end', () => shutdown());
-  // server greeting is sent after the client version arrives
-}
-
-let cin = Buffer.alloc(0);
-let stage = 'version';
-let x11ref, swref, shref;
-let sending = false;
-let wantFrame = false;
-
-function onClient(chunk, x11, sw, sh) {
-  x11ref = x11; swref = sw; shref = sh;
-  cin = Buffer.concat([cin, chunk]);
-  drive().catch(e => { log(e.stack || e.message); shutdown(); });
-}
-
-async function drive() {
-  const x11 = x11ref;
-  while (true) {
-    if (stage === 'version') {
-      if (cin.length < 12) return;
-      cin = cin.subarray(12);
-      process.stdout.write(Buffer.from('RFB 003.008\n'));
-      process.stdout.write(Buffer.from([1, 1]));
-      stage = 'security';
-      continue;
-    }
-    if (stage === 'security') {
-      if (cin.length < 1) return;
-      cin = cin.subarray(1);
-      const ok = Buffer.alloc(4);
-      process.stdout.write(ok);
-      stage = 'init';
-      continue;
-    }
-    if (stage === 'init') {
-      if (cin.length < 1) return;
-      cin = cin.subarray(1);
-      const name = Buffer.from('thinkbot');
-      const init = Buffer.alloc(24 + name.length);
-      init.writeUInt16BE(RFB_W, 0);
-      init.writeUInt16BE(RFB_H, 2);
-      init[4] = 32; init[5] = 24; init[6] = 0; init[7] = 1;
-      init.writeUInt16BE(255, 8);
-      init.writeUInt16BE(255, 10);
-      init.writeUInt16BE(255, 12);
-      init[14] = 16; init[15] = 8; init[16] = 0;
-      init.writeUInt32BE(name.length, 20);
-      name.copy(init, 24);
-      process.stdout.write(init);
-      stage = 'msg';
-      continue;
-    }
-    if (cin.length < 1) return;
-    const t = cin[0];
-    if (t === 0 && cin.length >= 20) { cin = cin.subarray(20); continue; } // pixel format
-    if (t === 2) {
-      if (cin.length < 4) return;
-      const n = cin.readUInt16BE(2);
-      const need = 4 + n * 4;
-      if (cin.length < need) return;
-      cin = cin.subarray(need);
-      continue;
-    }
-    if (t === 3 && cin.length >= 10) {
-      cin = cin.subarray(10);
-      wantFrame = true;
-      if (!sending) { sending = true; sendFrame(x11).finally(() => { sending = false; }); }
-      continue;
-    }
-    if (t === 4 && cin.length >= 8) {
-      const down = cin[1];
-      const sym = cin.readUInt32BE(4);
-      cin = cin.subarray(8);
-      const code = x11.keysymToCode && x11.keysymToCode.get(sym);
-      if (code) await x11.fakeInput(down ? 2 : 3, code, pointer.x, pointer.y);
-      continue;
-    }
-    if (t === 5 && cin.length >= 6) {
-      const mask = cin[1];
-      const x = cin.readUInt16BE(2);
-      const y = cin.readUInt16BE(4);
-      cin = cin.subarray(6);
-      await applyPointer(x11, mask, x, y);
-      continue;
-    }
-    if (t === 6 && cin.length >= 8) {
-      const n = cin.readUInt32BE(4);
-      if (cin.length < 8 + n) return;
-      cin = cin.subarray(8 + n);
-      continue;
-    }
-    if (t !== 0 && t !== 2 && t !== 3 && t !== 4 && t !== 5 && t !== 6) {
-      log('unknown client byte', t);
-      shutdown();
-    }
-    return;
+  try { await x11.setupClipboard(); } catch (e) { log('clip setup', e.message); }
+  if (!x11.width || !x11.height) {
+    x11.width = SCREEN_W;
+    x11.height = SCREEN_H;
   }
-}
-
-async function sendFrame(x11) {
-  if (!wantFrame) return;
-  wantFrame = false;
-  const raw = await x11.getImage(swref, shref);
-  const frame = scaleFrame(raw, swref, shref);
-  paintMarker(frame);
-  process.stdout.write(rfbRect(frame));
+  x11ref = x11;
+  process.stdin.on('data', chunk => onClient(chunk));
+  process.stdin.on('end', () => shutdown());
+  process.stdin.resume();
 }
 
 function shutdown() {
