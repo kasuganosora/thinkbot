@@ -99,6 +99,7 @@ type Bot struct {
 
 	// 浏览器 MCP 管理器（per-bot，docker 后端 + BrowserEnabled 时创建；nil=未启用）。
 	browserMCP *mcp.Manager
+	alignMu    sync.Mutex // 打开桌面时把浏览器挪到共享屏幕，避免并发重启
 	// browserCookieSaver 会话结束后回收容器内 cookie 状态文件时调用。
 	browserCookieSaver func(ctx context.Context, stateJSON []byte) error
 	// browserCookieStartupRecover 启动期合并回收容器内残留 cookie 状态文件时调用。

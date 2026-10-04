@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -71,6 +72,11 @@ func (w *botWorkspace) StartDesktop(ctx context.Context) (*exec.Cmd, error) {
 		}
 		if err := SyncContainerBytes(ctx, w.container.container, desktopScriptPath, script); err != nil {
 			return nil, err
+		}
+		if launch, lerr := botsandbox.BrowserLaunchScript(); lerr == nil {
+			if err := SyncContainerBytes(ctx, w.container.container, "/usr/local/bin/thinkbot-browser-launch", launch); err != nil {
+				return nil, err
+			}
 		}
 		cmd := exec.CommandContext(ctx, "docker", "exec", "-i",
 			"-e", "THINKBOT_DESKTOP_MODE=container",
@@ -195,3 +201,46 @@ func RelayDesktop(ctx context.Context, conn *websocket.Conn, cmd *exec.Cmd) erro
 }
 
 func desktopScriptBytes() ([]byte, error) { return botsandbox.DesktopScript() }
+
+// browserDisplayScript prints the DISPLAY of this container's browser MCP, or NONE.
+// It only looks at thinkbot-browser-mcp, so a desktop on another bot is invisible.
+const browserDisplayScript = `
+for d in /proc/[0-9]*; do
+  cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+  case "$cmd" in
+    *thinkbot-browser-mcp*) ;;
+    *) continue ;;
+  esac
+  tr '\0' '\n' < "$d/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p' | head -1
+  exit 0
+done
+echo NONE
+`
+
+// ContainerBrowserDisplay is the X display the running browser MCP is attached
+// to. Empty means no browser process in that container.
+func ContainerBrowserDisplay(ctx context.Context, container string) (string, error) {
+	if container == "" {
+		return "", nil
+	}
+	out, err := exec.CommandContext(ctx, "docker", "exec", container, "sh", "-c", browserDisplayScript).Output()
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" || line == "NONE" {
+		return "", nil
+	}
+	return line, nil
+}
+
+// ContainerLaunchSharesDisplay reports whether this container's browser launcher
+// starts Chromium on the shared :99 screen. Custom images without that launcher
+// are left running where they are.
+func ContainerLaunchSharesDisplay(ctx context.Context, container string) bool {
+	if container == "" {
+		return false
+	}
+	err := exec.CommandContext(ctx, "docker", "exec", container, "grep", "-q", "DISPLAY_NUM=99", "/usr/local/bin/thinkbot-browser-launch").Run()
+	return err == nil
+}
