@@ -1,10 +1,13 @@
 package memory
 
 import (
+	"database/sql"
 	"database/sql/driver"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -24,13 +27,14 @@ type VecIndex struct {
 }
 
 // OpenVecIndex 在 sqlite-vec 可用时建表。不可用返回 nil。
+// 已有的 memory_vec 若仍把 scope_key 存成辅助列，会在这里就地迁到 metadata 列。
 func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 	if gdb == nil || !db.TryEnableVec(gdb) {
 		return nil
 	}
 	idx := &VecIndex{db: gdb}
-	err := gdb.Exec(vecTableDDL).Error
-	if err != nil {
+	if err := idx.ensureVecSchema(); err != nil {
+		log.Printf("memory vec schema: %v", err)
 		return nil
 	}
 	idx.ready = true
@@ -39,11 +43,180 @@ func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 
 func (v *VecIndex) Enabled() bool { return v != nil && v.ready }
 
-const vecTableDDL = `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(
-		embedding float[256],
+const (
+	vecTableName    = "memory_vec"
+	vecMigrateTable = "memory_vec_migrating"
+)
+
+// vecSchemaMu 串行化建表和迁移。进程里所有 bot 共用一张 memory_vec。
+var vecSchemaMu sync.Mutex
+
+// scope_key 不加 "+"，是 sqlite-vec 的 metadata 列，KNN 的 WHERE 可以等值过滤。
+// "+" 辅助列会报 "illegal WHERE constraint"。entry_id 只按 id 删除，保持辅助列。
+func vecCreateSQL(table string, ifNotExists bool) string {
+	opt := ""
+	if ifNotExists {
+		opt = "IF NOT EXISTS "
+	}
+	return fmt.Sprintf(`CREATE VIRTUAL TABLE %s%s USING vec0(
+		embedding float[%d],
+		scope_key text,
+		+entry_id text
+	)`, opt, table, vecDims)
+}
+
+// vecCreateSQLAux 是迁移前的旧表结构。复制失败时用它把 memory_vec 原样放回去。
+func vecCreateSQLAux(table string) string {
+	return fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(
+		embedding float[%d],
 		+scope_key text,
 		+entry_id text
-	)`
+	)`, table, vecDims)
+}
+
+func scopeKeyAuxiliary(createSQL string) bool {
+	return strings.Contains(createSQL, "+scope_key")
+}
+
+func lookupCreateSQL(gdb *gorm.DB, name string) (string, bool, error) {
+	var createSQL sql.NullString
+	err := gdb.Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", name).Row().Scan(&createSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !createSQL.Valid {
+		return "", true, nil
+	}
+	return createSQL.String, true, nil
+}
+
+func (v *VecIndex) ensureVecSchema() error {
+	vecSchemaMu.Lock()
+	defer vecSchemaMu.Unlock()
+
+	liveSQL, liveExists, err := lookupCreateSQL(v.db, vecTableName)
+	if err != nil {
+		return err
+	}
+	_, sideExists, err := lookupCreateSQL(v.db, vecMigrateTable)
+	if err != nil {
+		return err
+	}
+	if !liveExists && !sideExists {
+		return v.db.Exec(vecCreateSQL(vecTableName, true)).Error
+	}
+	if !liveExists && sideExists {
+		// 上次在删掉旧表之后中断。边表里是已经复制好的新结构，把它装回 memory_vec。
+		return v.finishVecSwap()
+	}
+	if !scopeKeyAuxiliary(liveSQL) {
+		if sideExists {
+			if err := v.db.Exec("DROP TABLE " + vecMigrateTable).Error; err != nil {
+				log.Printf("memory vec: drop leftover %s: %v", vecMigrateTable, err)
+			}
+		}
+		return nil
+	}
+	if sideExists {
+		if err := v.db.Exec("DROP TABLE " + vecMigrateTable).Error; err != nil {
+			return fmt.Errorf("drop leftover %s: %w", vecMigrateTable, err)
+		}
+	}
+	if err := v.db.Exec(vecCreateSQL(vecMigrateTable, false)).Error; err != nil {
+		return err
+	}
+	copied, err := v.copyVec(vecMigrateTable, vecTableName)
+	if err != nil {
+		if dropErr := v.db.Exec("DROP TABLE " + vecMigrateTable).Error; dropErr != nil {
+			return fmt.Errorf("copy memory_vec: %w (drop %s: %v)", err, vecMigrateTable, dropErr)
+		}
+		return fmt.Errorf("copy memory_vec: %w", err)
+	}
+	if err := v.db.Exec("DROP TABLE " + vecTableName).Error; err != nil {
+		_ = v.db.Exec("DROP TABLE " + vecMigrateTable).Error
+		return fmt.Errorf("drop old memory_vec: %w", err)
+	}
+	if err := v.finishVecSwap(); err != nil {
+		return err
+	}
+	log.Printf("memory vec: migrated scope_key to a metadata column (%d rows)", copied)
+	return nil
+}
+
+// copyVec 把 src 的向量行写入已经建好的 dst。行数不一致视为失败，调用方决定删哪张表。
+func (v *VecIndex) copyVec(dst, src string) (int, error) {
+	if err := v.db.Exec(fmt.Sprintf(
+		"INSERT INTO %s(embedding, scope_key, entry_id) SELECT embedding, scope_key, entry_id FROM %s",
+		dst, src)).Error; err != nil {
+		return 0, err
+	}
+	srcN, err := v.vecCount(src)
+	if err != nil {
+		return 0, err
+	}
+	dstN, err := v.vecCount(dst)
+	if err != nil {
+		return 0, err
+	}
+	if srcN != dstN {
+		return dstN, fmt.Errorf("copied %d of %d rows", dstN, srcN)
+	}
+	return dstN, nil
+}
+
+func (v *VecIndex) vecCount(table string) (int, error) {
+	var n int
+	err := v.db.Raw("SELECT count(*) FROM " + table).Scan(&n).Error
+	return n, err
+}
+
+// finishVecSwap 在 memory_vec 已经不在、边表持有全部行时，按新结构建回 memory_vec。
+// 建表或复制失败会从边表恢复旧的辅助列结构，避免最后一张表都没有。
+func (v *VecIndex) finishVecSwap() error {
+	if err := v.db.Exec(vecCreateSQL(vecTableName, false)).Error; err != nil {
+		return v.restoreAuxTable(err)
+	}
+	if _, err := v.copyVec(vecTableName, vecMigrateTable); err != nil {
+		if dropErr := v.db.Exec("DROP TABLE " + vecTableName).Error; dropErr != nil {
+			return fmt.Errorf("copy memory_vec back: %w (drop partial: %v)", err, dropErr)
+		}
+		return v.restoreAuxTable(fmt.Errorf("copy memory_vec back: %w", err))
+	}
+	if err := v.db.Exec("DROP TABLE " + vecMigrateTable).Error; err != nil {
+		log.Printf("memory vec: migrated but failed to drop %s: %v", vecMigrateTable, err)
+	}
+	return nil
+}
+
+func (v *VecIndex) restoreAuxTable(cause error) error {
+	liveSQL, liveExists, err := lookupCreateSQL(v.db, vecTableName)
+	if err != nil {
+		return fmt.Errorf("%w (schema lookup: %v)", cause, err)
+	}
+	if liveExists && !scopeKeyAuxiliary(liveSQL) {
+		if err := v.db.Exec("DROP TABLE " + vecTableName).Error; err != nil {
+			return fmt.Errorf("%w (drop partial memory_vec: %v)", cause, err)
+		}
+		liveExists = false
+	}
+	if liveExists {
+		_ = v.db.Exec("DROP TABLE " + vecMigrateTable).Error
+		return cause
+	}
+	if err := v.db.Exec(vecCreateSQLAux(vecTableName)).Error; err != nil {
+		return fmt.Errorf("%w (recreate auxiliary memory_vec: %v)", cause, err)
+	}
+	if _, err := v.copyVec(vecTableName, vecMigrateTable); err != nil {
+		return fmt.Errorf("%w (restore rows: %v)", cause, err)
+	}
+	if err := v.db.Exec("DROP TABLE " + vecMigrateTable).Error; err != nil {
+		return fmt.Errorf("%w (restored auxiliary table, drop %s: %v)", cause, vecMigrateTable, err)
+	}
+	return cause
+}
 
 // Rebuild 丢掉并重建整张 memory_vec。只在这份 SQLite 只属于一个 bot 时安全。
 // 进程共用一个库时必须走按 scope/entry 删除（见 RebuildBotVectors），否则会清掉其他 bot 的向量。
@@ -56,7 +229,7 @@ func (v *VecIndex) Rebuild() error {
 	if err := v.db.Exec("DROP TABLE IF EXISTS memory_vec").Error; err != nil {
 		return err
 	}
-	if err := v.db.Exec(vecTableDDL).Error; err != nil {
+	if err := v.db.Exec(vecCreateSQL(vecTableName, true)).Error; err != nil {
 		v.ready = false
 		return err
 	}
@@ -152,6 +325,7 @@ func (v *VecIndex) Search(scopeKey, query string, k int) []Hit {
 	err := v.db.Raw(`SELECT entry_id, distance FROM memory_vec
 		WHERE embedding MATCH ? AND k = ? AND scope_key = ?`, hashEmbed(query), k, scopeKey).Scan(&rows).Error
 	if err != nil {
+		log.Printf("memory vec search failed scope_key=%q: %v", scopeKey, err)
 		return nil
 	}
 	out := make([]Hit, 0, len(rows))
