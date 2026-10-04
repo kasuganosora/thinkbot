@@ -506,7 +506,7 @@ func (m *TieredManager) dedupeStaleProfiles(ctx context.Context, scope Scope, ca
 		if e.Category != category {
 			continue
 		}
-		if err := m.store.Delete(ctx, Tier3Profile, scope, e.ID); err != nil {
+		if err := m.store.Remove(ctx, Tier3Profile, scope, e.ID); err != nil {
 			m.logger.Warnw("WriteProfile: delete stale profile failed", "id", e.ID, "err", err)
 		}
 	}
@@ -561,7 +561,10 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 
 		switch d.Decision {
 		case DecisionAdd:
-			err := m.WriteLongTerm(ctx, Entry{
+			if m.store.BlocksNewFact(scope, d.Content) {
+				continue
+			}
+			add := Entry{
 				Scope:      scope,
 				Content:    d.Content,
 				Category:   d.Category,
@@ -571,7 +574,11 @@ func (m *TieredManager) Consolidate(ctx context.Context, scope Scope) (int, erro
 					"promoted_from_id": d.SourceID,
 					"consolidated_at":  time.Now(),
 				},
-			}, Tier0Working)
+			}
+			if d.Category == "observation" {
+				MarkInferred(&add)
+			}
+			err := m.WriteLongTerm(ctx, add, Tier0Working)
 			if err != nil {
 				m.logger.Warnw("failed to write L1 entry", "err", err)
 				continue
@@ -633,6 +640,27 @@ func (m *TieredManager) updateL1Entry(ctx context.Context, scope Scope, targetID
 	for _, e := range existing {
 		if e.ID != targetID {
 			continue
+		}
+
+		if decision == DecisionUpdate {
+			repl := TieredEntry{
+				Entry: Entry{
+					Scope:      scope,
+					Content:    newContent,
+					Category:   e.Category,
+					Source:     e.Source,
+					Importance: e.Importance,
+					Metadata:   map[string]any{"supersedes": targetID},
+				},
+				Tier:         Tier1LongTerm,
+				PromotedFrom: e.PromotedFrom,
+			}
+			if err := m.store.Supersede(ctx, scope, targetID, repl); err != nil {
+				m.logger.Warnw("updateL1Entry: supersede failed",
+					"scope", scope.Key(), "target_id", targetID, "err", err)
+				return false
+			}
+			return true
 		}
 
 		var content string

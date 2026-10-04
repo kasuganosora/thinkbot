@@ -640,8 +640,8 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 		return params, nil
 	}
 
-	summary := result.Text
-	if summary == "" {
+	summary := AttachSandboxPaths(result.Text, oldMessages)
+	if strings.TrimSpace(stripFileOps(summary)) == "" && strings.TrimSpace(result.Text) == "" {
 		return params, nil
 	}
 
@@ -696,7 +696,7 @@ func (c *Compactor) selectTailSplit(messages []Message) int {
 	if splitIdx == len(messages) {
 		return len(messages)
 	}
-	return splitIdx
+	return nearestSafeBoundary(messages, splitIdx)
 }
 
 // selectTailSplitByTokens 按 token 预算确定分割点。
@@ -706,7 +706,7 @@ func (c *Compactor) selectTailSplitByTokens(messages []Message, budget int) int 
 	for i := len(messages) - 1; i >= 0; i-- {
 		msgTokens := EstimateMessageTokens(messages[i])
 		if accumulated+msgTokens > budget {
-			return i + 1
+			return nearestSafeBoundary(messages, i+1)
 		}
 		accumulated += msgTokens
 	}
@@ -910,7 +910,7 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 	if result.FinishReason == FinishReasonLength {
 		return "", fmt.Errorf("compactor: head summary cut off by the output limit (max_tokens %d)", maxTokens)
 	}
-	return result.Text, nil
+	return AttachSandboxPaths(result.Text, head), nil
 }
 
 // ============================================================================
