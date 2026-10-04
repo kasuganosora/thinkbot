@@ -1,6 +1,5 @@
 <template>
   <div
-    ref="rootRef"
     class="tool-call"
     :class="[`tc-${state}`, { 'tc-quiet': isQuietChip }]"
     :data-testid="`chat-toolcall-${call.id}`"
@@ -18,7 +17,6 @@
       :tabindex="canExpand ? 0 : undefined"
       :aria-expanded="canExpand ? expanded : undefined"
       @click="onHeadClick"
-      @pointerdown="onHeadPointerDown"
       @keydown.enter.prevent="onHeadClick"
       @keydown.space.prevent="onHeadClick"
     >
@@ -171,13 +169,11 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import toolLabels from '@/i18n/toolLabels'
 import { useBotStore } from '@/stores/bot'
-import { animateSpring, prefersReducedMotion } from '@/utils/spring'
 
 const props = defineProps({
   call: { type: Object, required: true }
 })
 const store = useBotStore()
-const rootRef = ref(null)
 const hasInlineChoice = computed(() => !!store.choiceIdByToolCallId(props.call.id))
 
 function toolKey(name) {
@@ -680,47 +676,11 @@ function onHeadClick() {
   expanded.value = !expanded.value
 }
 
-const pressing = ref(false)
-let stopSpring = null
-function scaleTo(el, to, response) {
-  if (!el) return
-  if (stopSpring) stopSpring()
-  stopSpring = animateSpring({
-    el,
-    from: 1,
-    to,
-    damping: 1.0,
-    response,
-    disabled: prefersReducedMotion(),
-    onUpdate: (v) => { el.style.transform = 'scale(' + v + ')' },
-  })
-}
-function onHeadPointerDown(e) {
-  if (prefersReducedMotion()) return
-  if (!canExpand.value) return
-  if (e.button != null && e.button !== 0) return
-  const el = rootRef.value
-  if (!el) return
-  pressing.value = true
-  scaleTo(el, 0.97, 0.16)
-}
-function onGlobalPointerUp() {
-  if (!pressing.value) return
-  pressing.value = false
-  const el = rootRef.value
-  if (el) scaleTo(el, 1, 0.4)
-}
-
 onMounted(() => {
   armStuckTimer()
-  window.addEventListener('pointerup', onGlobalPointerUp, { passive: true })
-  window.addEventListener('pointercancel', onGlobalPointerUp, { passive: true })
 })
 onUnmounted(() => {
   clearStuckTimer()
-  if (stopSpring) stopSpring()
-  window.removeEventListener('pointerup', onGlobalPointerUp)
-  window.removeEventListener('pointercancel', onGlobalPointerUp)
 })
 watch(() => props.call, armStuckTimer)
 </script>
@@ -734,7 +694,6 @@ watch(() => props.call, armStuckTimer)
   overflow: visible;
   margin: 0;
   padding: 1px 0 1px 26px;
-  will-change: transform;
 }
 .tool-call::before {
   content: "";
@@ -766,15 +725,24 @@ watch(() => props.call, armStuckTimer)
   background: transparent;
   transition: color var(--bp-duration) var(--bp-ease-out);
 }
-.tc-head:hover { background: transparent; }
-.tc-head:hover .tc-title { color: var(--bp-label); }
+.tc-head:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tc-head:hover { background: transparent; }
+  .tc-head:hover .tc-title { color: var(--bp-label); }
+}
 .tc-head.is-static {
   cursor: default;
 }
 .tc-quiet .tc-head {
   padding: 3px 2px;
 }
-.tc-quiet .tc-head:hover { background: transparent; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-quiet .tc-head:hover { background: transparent; }
+}
 .tc-icon {
   position: absolute;
   left: 0;
@@ -808,10 +776,10 @@ watch(() => props.call, armStuckTimer)
 .file-spinner { width: 12px; height: 12px; flex-shrink: 0; }
 
 .tc-title {
-  font-weight: 450;
+  font-weight: 500;
   color: var(--bp-label-secondary);
   flex-shrink: 0;
-  letter-spacing: var(--bp-tracking-body);
+  letter-spacing: 0;
 }
 .tc-running-text {
   color: var(--bp-accent);
@@ -884,7 +852,9 @@ watch(() => props.call, armStuckTimer)
   border-radius: var(--bp-radius-sm);
   font-size: 13px;
 }
-.tc-file:hover { background: var(--bp-surface-fill-hover); }
+@media (hover: hover) and (pointer: fine) {
+  .tc-file:hover { background: var(--bp-surface-fill-hover); }
+}
 .tc-file.file-doing { opacity: 0.85; }
 .file-icon { color: var(--bp-label-tertiary); flex-shrink: 0; }
 .file-icon.pending { color: var(--bp-label-quaternary); }
@@ -967,7 +937,13 @@ watch(() => props.call, armStuckTimer)
   font-family: inherit;
   margin: 4px 8px 6px;
 }
-.tc-raw-toggle:hover { color: var(--bp-accent); }
+.tc-raw-toggle:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tc-raw-toggle:hover { color: var(--bp-accent); }
+}
 .tc-raw { display: flex; flex-direction: column; gap: 8px; padding: 0 8px 8px; }
 
 .tc-generic { padding: 4px 6px; display: flex; flex-direction: column; gap: 6px; }
@@ -1062,13 +1038,18 @@ watch(() => props.call, armStuckTimer)
 @media (prefers-reduced-motion: reduce) {
   .tc-body-wrap { transition: none; }
   .tc-head { transition: none; }
-  .tc-spinner, .file-spinner { animation: none; border-top-color: var(--bp-accent); opacity: 0.7; }
+  .tc-spinner, .file-spinner { animation: none !important; border-top-color: var(--bp-accent); opacity: 0.7; }
   .tc-running-text {
     animation: none;
     background: none;
     -webkit-text-fill-color: var(--bp-accent);
     color: var(--bp-accent);
   }
-  .dots i { animation: none; opacity: 1; }
+  .dots i { animation: none !important; opacity: 1; }
+  .tc-running-text { animation: none !important; }
+}
+@media (prefers-contrast: more) {
+  .tool-call::before { background: var(--bp-label-secondary); }
+  .tc-cmd, .tc-kv-val { border-color: var(--bp-label-secondary); }
 }
 </style>
