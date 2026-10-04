@@ -407,7 +407,7 @@ func (c *Compactor) SummarizeForSelfCompact(ctx context.Context, provider Provid
 	if summary == "" {
 		return "", errors.New("summarizer returned an empty summary")
 	}
-	return summary, nil
+	return AttachSandboxPaths(summary, head), nil
 }
 
 // splitLeadingSummary separates a leading anchored summary message (an

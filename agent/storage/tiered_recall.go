@@ -85,7 +85,7 @@ func (r *TieredL1Retriever) Recent(_ context.Context, scope memory.Scope, limit 
 	if err != nil {
 		return nil, errs.Wrap(err, "tiered_retriever: recent failed")
 	}
-	return tieredModelsToEntries(models), nil
+	return memory.FilterRecall(tieredModelsToEntries(models)), nil
 }
 
 // Retrieve 按查询条件检索该层级记忆（scope / category / 文本 过滤）。
@@ -119,7 +119,7 @@ func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]m
 	if err := tx.Order("created_at DESC").Limit(limit).Find(&models).Error; err != nil {
 		return nil, errs.Wrap(err, "tiered_retriever: retrieve failed")
 	}
-	return tieredModelsToEntries(models), nil
+	return memory.FilterRecall(tieredModelsToEntries(models)), nil
 }
 
 // Count 返回指定 scope 在该层级的记忆总数。

@@ -417,9 +417,10 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 	if len(allEntries) > 1 {
 		sortEntriesByTimeDesc(allEntries)
 	}
-	// 最近记忆只保留和这句对得上的。聊别的主题时不把旧伤灌进提示。
+	// 最近记忆先按字面相关性收一收。向量近邻在后面和这批结果融合，
+	// 不限于已经召回的窗口。
 	if text != "" {
-		allEntries = m.keepRelated(allEntries, scopes, text)
+		allEntries = m.keepLexical(allEntries, text)
 	}
 
 	// 3. 如果有消息文本，做相关性检索（与 recent 去重）
@@ -433,8 +434,10 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 			return nil, errs.Wrap(err, "memory context: relevant retrieval failed")
 		}
 		allEntries = dedup(allEntries, relevant)
+		allEntries = m.fuseWithVec(ctx, allEntries, scopes, text)
 	}
 
+	allEntries = FilterRecall(allEntries)
 	topics := m.suppressTopics(ctx, scopes)
 	if topic := BanTopic(text); topic != "" {
 		topics = append(topics, topic)
@@ -520,25 +523,133 @@ func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID,
 
 // UpdateUsage 更新 LLM 用量到 Window。
 // 每次 LLM 调用完成后调用此方法，让 Window 感知真实消耗。
-func (m *ContextManager) keepRelated(entries []Entry, scopes []Scope, text string) []Entry {
-	dist := map[string]float64{}
-	hasVec := m.vec.Enabled()
-	if hasVec {
-		for _, scope := range scopes {
-			for _, hit := range m.vec.Search(scope.Key(), text, 8) {
-				if prev, ok := dist[hit.EntryID]; !ok || hit.Distance < prev {
-					dist[hit.EntryID] = hit.Distance
+func (m *ContextManager) keepLexical(entries []Entry, text string) []Entry {
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if KeepForTurn(e.Content, text, -1, false) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// EntryFetcher loads memories by id so a vector hit outside the recent window
+// can still be fused in. Stores that cannot do this are skipped.
+type EntryFetcher interface {
+	FetchEntries(ctx context.Context, ids []string) ([]Entry, error)
+}
+
+const (
+	rrfK       = 60.0
+	minCosine  = 0.5
+	vecFusionK = 32
+)
+
+// cosineFromDistance converts a unit-vector L2 distance into cosine similarity.
+func cosineFromDistance(distance float64) float64 {
+	if distance < 0 {
+		return 0
+	}
+	c := 1 - (distance*distance)/2
+	if c < -1 {
+		return -1
+	}
+	if c > 1 {
+		return 1
+	}
+	return c
+}
+
+// fuseRankings combines two ranked id lists by reciprocal rank fusion.
+func fuseRankings(lexical, vector []string) []string {
+	scores := map[string]float64{}
+	var order []string
+	seen := map[string]struct{}{}
+	for _, list := range [][]string{lexical, vector} {
+		for rank, id := range list {
+			if id == "" {
+				continue
+			}
+			scores[id] += 1.0 / (rrfK + float64(rank))
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				order = append(order, id)
+			}
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		if scores[order[i]] == scores[order[j]] {
+			return i < j
+		}
+		return scores[order[i]] > scores[order[j]]
+	})
+	return order
+}
+
+// fuseWithVec searches the whole scope index and fuses those hits with the
+// lexical list. A disabled index or a failed search leaves the lexical list.
+func (m *ContextManager) fuseWithVec(ctx context.Context, lexical []Entry, scopes []Scope, text string) []Entry {
+	if m == nil || text == "" || !m.vec.Enabled() {
+		return lexical
+	}
+	byID := map[string]Entry{}
+	var lexIDs []string
+	for _, e := range lexical {
+		if e.ID == "" || !RecallVisible(e) {
+			continue
+		}
+		byID[e.ID] = e
+		lexIDs = append(lexIDs, e.ID)
+	}
+	var vecIDs []string
+	seenHit := map[string]bool{}
+	var missing []string
+	for _, scope := range scopes {
+		hits := m.vec.Search(scope.Key(), text, vecFusionK)
+		if hits == nil {
+			return lexical
+		}
+		for _, h := range hits {
+			if cosineFromDistance(h.Distance) < minCosine || h.EntryID == "" || seenHit[h.EntryID] {
+				continue
+			}
+			seenHit[h.EntryID] = true
+			vecIDs = append(vecIDs, h.EntryID)
+			if _, ok := byID[h.EntryID]; !ok {
+				missing = append(missing, h.EntryID)
+			}
+		}
+	}
+	if len(vecIDs) == 0 {
+		return lexical
+	}
+	if len(missing) > 0 {
+		fetcher, ok := m.retriever.(EntryFetcher)
+		if !ok {
+			missing = nil
+		} else if got, err := fetcher.FetchEntries(ctx, missing); err != nil {
+			return lexical
+		} else {
+			for _, e := range got {
+				if e.ID != "" && RecallVisible(e) {
+					byID[e.ID] = e
 				}
 			}
 		}
 	}
-	out := make([]Entry, 0, len(entries))
-	for _, e := range entries {
-		d, ok := dist[e.ID]
-		if !ok {
-			d = -1
+	var present []string
+	for _, id := range vecIDs {
+		if _, ok := byID[id]; ok {
+			present = append(present, id)
 		}
-		if KeepForTurn(e.Content, text, d, hasVec && ok) {
+	}
+	if len(present) == 0 {
+		return lexical
+	}
+	fused := fuseRankings(lexIDs, present)
+	out := make([]Entry, 0, len(fused))
+	for _, id := range fused {
+		if e, ok := byID[id]; ok {
 			out = append(out, e)
 		}
 	}
