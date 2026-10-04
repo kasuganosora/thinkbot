@@ -436,3 +436,27 @@ func sortByTimeAsc(entries []Entry) {
 		return entries[i].CreatedAt.Before(entries[j].CreatedAt)
 	})
 }
+
+// FetchEntries loads entries by id across scopes. Missing ids are omitted.
+func (r *MemoryRepository) FetchEntries(_ context.Context, ids []string) ([]Entry, error) {
+	if r == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			want[id] = struct{}{}
+		}
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Entry
+	for _, bucket := range r.buckets {
+		for _, e := range bucket {
+			if _, ok := want[e.ID]; ok {
+				out = append(out, e)
+			}
+		}
+	}
+	return out, nil
+}

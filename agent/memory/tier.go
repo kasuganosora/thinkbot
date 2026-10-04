@@ -187,6 +187,7 @@ type TieredStore struct {
 	// nil 时退化为 no-op，避免未初始化日志时 panic。
 	logger *zap.SugaredLogger
 	vec    *VecIndex
+	tomb   *tombstoneBook
 
 	// vecBackfillOnce 保证一个 store 只起一次启动补索引。
 	vecBackfillOnce    sync.Once
@@ -216,6 +217,7 @@ func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *Tiere
 		db:      db,
 		logger:  log.Logger,
 		vec:     OpenVecIndex(db),
+		tomb:    newTombstoneBook(db),
 	}
 	if db != nil {
 		s.loadFromDB()
@@ -338,7 +340,10 @@ func (s *TieredStore) logBackfillError(msg, entryID string, err error) {
 }
 
 // Append 追加一条 TieredEntry 到对应 tier+scope 桶。
-func (s *TieredStore) Append(_ context.Context, entry TieredEntry) error {
+func (s *TieredStore) Append(ctx context.Context, entry TieredEntry) error {
+	if entry.Tier == Tier1LongTerm && s.BlocksNewFact(entry.Scope, entry.Content) {
+		return nil
+	}
 	if entry.ID == "" {
 		entry.ID = idgen.New("mem")
 	}
@@ -377,7 +382,7 @@ func (s *TieredStore) Append(_ context.Context, entry TieredEntry) error {
 	s.mu.Unlock()
 
 	if s.db != nil {
-		s.persistUpsert(context.Background(), entry)
+		s.persistUpsert(ctx, entry)
 	}
 	return nil
 }
@@ -543,7 +548,11 @@ func (s *TieredStore) HasIDInTier(_ context.Context, tier MemoryTier, id string)
 }
 
 // Delete 按 ID 删除指定 tier+scope 下的一条记忆。
-func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, entryID string) error {
+func (s *TieredStore) Delete(ctx context.Context, tier MemoryTier, scope Scope, entryID string) error {
+	return s.remove(ctx, tier, scope, entryID, true)
+}
+
+func (s *TieredStore) remove(_ context.Context, tier MemoryTier, scope Scope, entryID string, tombstone bool) error {
 	key := tierScopeKey(tier, scope)
 
 	s.mu.Lock()
@@ -552,6 +561,9 @@ func (s *TieredStore) Delete(_ context.Context, tier MemoryTier, scope Scope, en
 		if e.ID == entryID {
 			s.buckets[key] = append(bucket[:i], bucket[i+1:]...)
 			s.mu.Unlock()
+			if tombstone && s.tomb != nil {
+				s.tomb.add(scope, e.Content, e.Source)
+			}
 			if s.db != nil {
 				s.persistDelete(tier, scope, entryID)
 			}

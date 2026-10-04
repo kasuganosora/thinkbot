@@ -188,17 +188,24 @@ func (f *FormationPipeline) ProcessTurn(
 	for _, d := range decisions {
 		switch d.Action {
 		case DecisionAdd:
+			if store.BlocksNewFact(scope, d.Fact.Content) {
+				result.Skipped++
+				continue
+			}
+			meta := map[string]any{"extracted_at": time.Now()}
+			add := Entry{
+				Scope:      scope,
+				Content:    d.Fact.Content,
+				Category:   d.Fact.Category,
+				Source:     "formation",
+				Importance: d.Fact.Importance,
+				Metadata:   meta,
+			}
+			if d.Fact.Category == "observation" {
+				MarkInferred(&add)
+			}
 			err := store.Append(ctx, TieredEntry{
-				Entry: Entry{
-					Scope:      scope,
-					Content:    d.Fact.Content,
-					Category:   d.Fact.Category,
-					Source:     "formation",
-					Importance: d.Fact.Importance,
-					Metadata: map[string]any{
-						"extracted_at": time.Now(),
-					},
-				},
+				Entry:        add,
 				Tier:         Tier1LongTerm,
 				PromotedFrom: Tier0Working,
 			})
@@ -390,31 +397,24 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 		if e.ID != d.TargetID {
 			continue
 		}
-		// 合并内容
-		newContent := e.Content
-		if !strings.Contains(e.Content, d.Fact.Content) {
-			newContent = e.Content + "; " + d.Fact.Content
-		}
-		// 更新重要度（取较高值）
 		importance := e.Importance
 		if d.Fact.Importance > importance {
 			importance = d.Fact.Importance
 		}
-		// 删除旧的，写入新的（原子性替换）
-		if err := store.Replace(ctx, Tier1LongTerm, scope, d.TargetID, TieredEntry{
+		repl := TieredEntry{
 			Entry: Entry{
-				ID:         d.TargetID,
 				Scope:      scope,
-				Content:    newContent,
-				Category:   e.Category,
-				Source:     e.Source,
+				Content:    d.Fact.Content,
+				Category:   firstNonEmpty(d.Fact.Category, e.Category),
+				Source:     "formation",
 				Importance: importance,
-				Metadata:   e.Metadata,
+				Metadata:   map[string]any{"supersedes": d.TargetID},
 			},
 			Tier:         Tier1LongTerm,
 			PromotedFrom: e.PromotedFrom,
-		}); err != nil {
-			f.logger.Warnw("formation: atomic replace failed", "err", err, "target_id", d.TargetID)
+		}
+		if err := store.Supersede(ctx, scope, d.TargetID, repl); err != nil {
+			f.logger.Warnw("formation: supersede failed", "err", err, "target_id", d.TargetID)
 			return false
 		}
 		return true
@@ -425,17 +425,22 @@ func (f *FormationPipeline) updateExisting(ctx context.Context, store *TieredSto
 
 // appendAsNew 将一条 fact 作为新 L1 记忆写入，成功时自增 result.Added。
 func (f *FormationPipeline) appendAsNew(ctx context.Context, store *TieredStore, scope Scope, fact FactItem, result *FormationResult) {
+	if store.BlocksNewFact(scope, fact.Content) {
+		return
+	}
+	add := Entry{
+		Scope:      scope,
+		Content:    fact.Content,
+		Category:   fact.Category,
+		Source:     "formation",
+		Importance: fact.Importance,
+		Metadata:   map[string]any{"extracted_at": time.Now()},
+	}
+	if fact.Category == "observation" {
+		MarkInferred(&add)
+	}
 	err := store.Append(ctx, TieredEntry{
-		Entry: Entry{
-			Scope:      scope,
-			Content:    fact.Content,
-			Category:   fact.Category,
-			Source:     "formation",
-			Importance: fact.Importance,
-			Metadata: map[string]any{
-				"extracted_at": time.Now(),
-			},
-		},
+		Entry:        add,
 		Tier:         Tier1LongTerm,
 		PromotedFrom: Tier0Working,
 	})
@@ -460,3 +465,10 @@ Categories:
 - preference: a preference ("用户偏好简洁的回复")
 - event: something that happened ("用户完成了部署")
 - observation: an inferred observation ("用户对 Rust 感兴趣")`
+
+func firstNonEmpty(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
+}

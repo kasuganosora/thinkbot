@@ -25,6 +25,7 @@ func Migrate(database *gorm.DB) error {
 		&BindCode{},
 		&IdentityMapping{},
 		&TieredMemoryModel{},
+		&MemoryTombstoneModel{},
 		&BotToolPermission{},
 		&BotBrowserCookie{},
 		&JudgeRecord{},

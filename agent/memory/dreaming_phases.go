@@ -771,6 +771,10 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 			Importance: c.Score,
 			Metadata:   md,
 		}
+		MarkInferred(&entry)
+		if d.manager != nil && d.manager.store != nil && d.manager.store.BlocksNewFact(c.Scope, c.Content) {
+			continue
+		}
 		if err := d.manager.WriteLongTerm(ctx, entry, Tier0Working); err != nil {
 			d.logger.Warnw("dreaming deep: promote failed",
 				"key", c.Key, "err", err)

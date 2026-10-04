@@ -208,6 +208,13 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 
 // Delete 按 ID 删除指定 scope 下的一条记忆。
 func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entryID string) error {
+	var existing dao.EntryModel
+	_ = r.db.WithContext(ctx).
+		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
+		First(&existing).Error
+	if existing.Content != "" {
+		memory.RecordExternalTombstone(r.db, scope, existing.Content, existing.Source)
+	}
 	result := r.db.WithContext(ctx).
 		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
 		Delete(&dao.EntryModel{})
@@ -908,4 +915,20 @@ func modelsToEntries(models []dao.EntryModel) []memory.Entry {
 		entries[i] = modelToEntry(m)
 	}
 	return entries
+}
+
+// FetchEntries loads memory_entries rows by id for vector fusion.
+func (r *SQLiteRepository) FetchEntries(ctx context.Context, ids []string) ([]memory.Entry, error) {
+	if r == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	var models []dao.EntryModel
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&models).Error; err != nil {
+		return nil, errs.Wrap(err, "sqlite_repository: fetch by id")
+	}
+	out := make([]memory.Entry, 0, len(models))
+	for _, m := range models {
+		out = append(out, modelToEntry(m))
+	}
+	return out, nil
 }

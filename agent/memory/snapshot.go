@@ -446,6 +446,7 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	if extra := s.recallBeyondWindow(ctx, retriever, scopes, allEntries); len(extra) > 0 {
 		allEntries = append(allEntries, extra...)
 	}
+	allEntries = FilterRecall(allEntries)
 
 	// 候选池粗筛：按重要性降序保留前 MaxEntries*candidatePoolFactor 条，
 	// 真正的「注入条数硬上限」由 renderBlock 的 MaxEntries 执行。
