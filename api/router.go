@@ -199,6 +199,7 @@ func (s *Server) registerRoutes() {
 				// 终端（容器 shell，接入真实 sandbox exec）
 				botsAdmin.GET("/:id/terminal", s.handleBotTerminal)
 				botsAdmin.POST("/:id/terminal/exec", s.handleBotTerminalExec)
+				botsAdmin.GET("/:id/desktop", s.handleBotDesktop)
 
 				// 心跳管理
 				botsAdmin.GET("/:id/heartbeat", s.handleGetHeartbeatConfig)
@@ -408,6 +409,7 @@ func (s *Server) registerRoutes() {
 		{
 			sessionGroup.GET("/:sid/terminal", s.handleSessionTerminal)
 			sessionGroup.POST("/:sid/terminal/exec", s.handleSessionTerminalExec)
+			sessionGroup.GET("/:sid/desktop", s.handleSessionDesktop)
 			sessionGroup.GET("/:sid/files", s.handleSessionFiles)
 			sessionGroup.GET("/:sid/files/download", s.handleSessionFileDownload)
 			sessionGroup.POST("/:sid/files/mkdir", s.handleSessionFileMkdir)

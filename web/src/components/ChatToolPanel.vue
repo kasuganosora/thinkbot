@@ -47,6 +47,10 @@
       </div>
 
       <!-- Terminal -->
+      <section v-show="tab === 'desktop'" class="tp-body" data-testid="tool-pane-desktop">
+        <SandboxDesktop v-if="sid" :key="sid" :bot-id="sid" scope="session" />
+      </section>
+
       <section v-show="tab === 'terminal'" class="tp-body terminal-body" data-testid="tool-pane-terminal">
         <div class="term-head">
           <span class="term-label">Terminal</span>
@@ -209,10 +213,12 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import { sessionToolApi } from '@/api/services'
 import { useBotStore } from '@/stores/bot'
 import XtermConsole from '@/components/common/XtermConsole.vue'
+import SandboxDesktop from '@/components/common/SandboxDesktop.vue'
 
 const store = useBotStore()
 const TABS = [
   { key: 'terminal', label: 'Terminal', icon: 'terminal' },
+  { key: 'desktop', label: '桌面', icon: 'desktop' },
   { key: 'files', label: '文件管理', icon: 'folder' },
   { key: 'status', label: 'Status', icon: 'chart-bar' }
 ]

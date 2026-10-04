@@ -133,6 +133,9 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 	// 选择工作目录
 	targetDir := w.root
 	if req.WorkDir != "" {
+		if err := w.guard.check(w.root, req.WorkDir, true); err != nil {
+			return nil, err
+		}
 		validated, err := validatePath(w.root, req.WorkDir)
 		if err != nil {
 			return nil, err
@@ -154,10 +157,8 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 	if w.cfg.Timezone != "" {
 		cmd.Env = append(os.Environ(), "TZ="+w.cfg.Timezone)
 	}
-	if w.guard.offline {
-		if err := applyOffline(cmd, req.Command); err != nil {
-			return nil, err
-		}
+	if err := applyLocalConfinement(cmd, req.Command, w.root, w.guard); err != nil {
+		return nil, err
 	}
 
 	// OOM 检测：命令前后对比宿主进程 cgroup 的 oom_kill 计数（local 后端命令直接在宿主 cgroup 内运行）。
@@ -227,6 +228,9 @@ func (w *localWorkspace) WriteFile(ctx context.Context, path string, data []byte
 }
 
 func (w *localWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, error) {
+	if err := w.guard.check(w.root, path, false); err != nil {
+		return nil, err
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return nil, err
@@ -239,6 +243,9 @@ func (w *localWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry,
 
 	result := make([]FileEntry, 0, len(entries))
 	for _, entry := range entries {
+		if _, secret := credentialNames[entry.Name()]; secret {
+			continue
+		}
 		info, err := entry.Info()
 		size := int64(0)
 		if err == nil {
