@@ -203,34 +203,32 @@
         <h2 class="greet-title">Hi，今天想聊点什么？</h2>
         <p class="greet-sub">当前 Bot：{{ store.activeBot?.name || '未选择' }}</p>
         <div class="greet-chips" data-testid="chat-quick-chips">
-          <div
+          <button
             v-for="(chip, i) in chips"
             :key="i"
+            type="button"
             class="greet-chip"
             :data-testid="`chat-quick-chip-${i}`"
-            role="button"
             :aria-label="`快捷提问：${chip}`"
             @click="quickSend(chip)"
           >
             {{ chip }}
-          </div>
+          </button>
         </div>
       </div>
 
       <!-- 回到底部按钮：流式期间用户上翻时显示 -->
       <Transition name="scroll-bottom-fade">
-        <div
+        <button
           v-if="store.replying && !isAtBottom"
+          type="button"
           class="scroll-to-bottom-btn"
           data-testid="chat-scroll-bottom"
-          role="button"
           aria-label="回到底部"
-          tabindex="0"
           @click="scrollToBottomManual"
-          @keydown.enter="scrollToBottomManual"
         >
           <t-icon name="chevron-down" />
-        </div>
+        </button>
       </Transition>
     </div>
 
@@ -255,7 +253,9 @@
             >
               <t-icon :name="fileIcon(f.type)" />
               {{ f.name }}
-              <t-icon name="close" class="attach-remove" @click.stop="removeAttach(i)" />
+              <button type="button" class="attach-remove" :aria-label="`移除附件 ${f.name}`" @click.stop="removeAttach(i)">
+                <t-icon name="close" />
+              </button>
             </span>
           </div>
           <t-textarea
@@ -272,7 +272,7 @@
             @keydown="onKeydown"
           />
           <div class="composer-bar">
-            <label class="attach-btn pressable" data-testid="chat-btn-attach" title="上传文件（图片、音频、视频）">
+            <label class="attach-btn" data-testid="chat-btn-attach" title="上传文件（图片、音频、视频）">
               <t-icon name="add" />
               <input
                 ref="fileInputRef"
@@ -288,41 +288,32 @@
               <button
                 v-if="!store.replying"
                 type="button"
-                class="composer-btn send pressable"
+                class="composer-btn send"
                 :disabled="!draft.trim() && !attachments.length"
                 data-testid="chat-btn-send"
                 aria-label="发送消息"
                 @click="send"
-                @pointerdown="onPressDown"
-                @pointerup="onPressUp"
-                @pointercancel="onPressUp"
               >
                 <t-icon name="send" />
               </button>
               <template v-else>
                 <button
                   type="button"
-                  class="composer-btn send pressable"
+                  class="composer-btn send"
                   :disabled="!draft.trim() || attachments.length > 0"
                   data-testid="chat-btn-append"
                   aria-label="补充内容（同一轮）"
                   title="把这段内容补充进当前回复，无需停止"
                   @click="send"
-                  @pointerdown="onPressDown"
-                  @pointerup="onPressUp"
-                  @pointercancel="onPressUp"
                 >
                   <t-icon name="arrow-up" />
                 </button>
                 <button
                   type="button"
-                  class="composer-btn stop pressable"
+                  class="composer-btn stop"
                   data-testid="chat-btn-stop"
                   aria-label="停止生成"
                   @click="store.stopReply()"
-                  @pointerdown="onPressDown"
-                  @pointerup="onPressUp"
-                  @pointercancel="onPressUp"
                 >
                   <t-icon name="stop" />
                 </button>
@@ -347,7 +338,6 @@ import ToolCallGroup from '@/components/ToolCallGroup.vue'
 import ChoiceCard from '@/components/ChoiceCard.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import { botSkillApi } from '@/api/services'
-import { animateSpring, prefersReducedMotion } from '@/utils/spring'
 
 // markdown 渲染统一走 utils/markdown：
 // 内置渲染缓存（模板每帧都会重新调用，历史消息不必反复 parse + sanitize）
@@ -461,38 +451,6 @@ function onDocPointerDown(e) {
 onMounted(() => {
   document.addEventListener('pointerdown', onDocPointerDown, true)
 })
-
-function scalePress(el, to, response) {
-  if (!el || prefersReducedMotion()) {
-    if (el) el.style.transform = to === 1 ? '' : 'scale(' + to + ')'
-    return
-  }
-  animateSpring({
-    el,
-    from: 1,
-    to,
-    damping: 1.0,
-    response,
-    onUpdate: (v) => { el.style.transform = 'scale(' + v + ')' },
-    onComplete: () => {
-      if (to === 1) el.style.transform = ''
-    },
-  })
-}
-function onPressDown(e) {
-  if (e.button != null && e.button !== 0) return
-  const el = e.currentTarget
-  if (!el || el.disabled) return
-  if (el.setPointerCapture && e.pointerId != null) {
-    try { el.setPointerCapture(e.pointerId) } catch (_) {}
-  }
-  scalePress(el, 0.97, 0.16)
-}
-function onPressUp(e) {
-  const el = e.currentTarget
-  if (!el) return
-  scalePress(el, 1, 0.4)
-}
 
 // ── 智能滚动：用户在底部才自动滚，上翻时不干扰 ──
 const isAtBottom = ref(true)
@@ -1008,7 +966,7 @@ function onKeydown(value, ctx) {
 .chat-topbar :deep(.t-tag) {
   background: transparent;
   border: none;
-  color: var(--bp-label-tertiary);
+  color: var(--bp-label-secondary);
   font-weight: 450;
   padding: 0;
 }
@@ -1024,7 +982,7 @@ function onKeydown(value, ctx) {
 .chat-body {
   flex: 1;
   overflow-y: auto;
-  padding: 28px 0 8px;
+  padding: 28px 32px 8px;
   position: relative;
 }
 .scroll-to-bottom-btn {
@@ -1043,18 +1001,25 @@ function onKeydown(value, ctx) {
   cursor: pointer;
   color: var(--bp-label-secondary);
   font-size: 18px;
-  transition: transform var(--bp-duration) var(--bp-ease-out),
-              opacity var(--bp-duration) var(--bp-ease-out),
-              color var(--bp-duration) var(--bp-ease-out),
-              background var(--bp-duration) var(--bp-ease-out);
+  padding: 0;
+  transition: transform 140ms var(--bp-ease-out),
+              opacity 140ms var(--bp-ease-out),
+              color 140ms ease,
+              background 140ms ease;
   z-index: 10;
 }
-.scroll-to-bottom-btn:hover {
-  background: var(--bp-accent);
-  color: var(--bp-label-on-accent);
+@media (hover: hover) and (pointer: fine) {
+  .scroll-to-bottom-btn:hover {
+    background: var(--bp-accent);
+    color: var(--bp-label-on-accent);
+  }
 }
 .scroll-to-bottom-btn:active {
-  transform: scale(var(--bp-press-scale));
+  transform: scale(0.97);
+}
+.scroll-to-bottom-btn:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
 }
 .scroll-bottom-fade-enter-active,
 .scroll-bottom-fade-leave-active {
@@ -1067,9 +1032,9 @@ function onKeydown(value, ctx) {
   transform: translateY(8px) scale(0.96);
 }
 .wf-inline {
-  max-width: 820px;
+  max-width: 860px;
   margin: 18px auto 0;
-  padding: 0 32px;
+  padding: 0;
 }
 /* 选择卡与工作流卡片同容器约定；多题连排时收紧间距，视觉上成组 */
 .cc-inline {
@@ -1089,10 +1054,10 @@ function onKeydown(value, ctx) {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 32px 14px;
+  padding: 10px 0 14px;
   font-size: 13px;
-  letter-spacing: var(--bp-tracking-caption);
-  color: var(--bp-label-tertiary);
+  letter-spacing: 0;
+  color: var(--bp-label-secondary);
 }
 .load-more-loading {
   display: inline-flex;
@@ -1107,23 +1072,29 @@ function onKeydown(value, ctx) {
   font-size: 13px;
   color: var(--bp-label-secondary);
   cursor: pointer;
-  transition: background var(--bp-duration) var(--bp-ease-out),
-              color var(--bp-duration) var(--bp-ease-out),
-              transform var(--bp-duration) var(--bp-ease-out);
+  transition: background 140ms ease,
+              color 140ms ease,
+              transform 140ms var(--bp-ease-out);
 }
-.load-more-btn:hover {
-  background: var(--bp-accent-soft);
-  color: var(--bp-accent);
+@media (hover: hover) and (pointer: fine) {
+  .load-more-btn:hover {
+    background: var(--bp-accent-soft);
+    color: var(--bp-accent);
+  }
 }
 .load-more-btn:active {
-  transform: scale(var(--bp-press-scale));
+  transform: scale(0.97);
+}
+.load-more-btn:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
 }
 .load-more-end {
-  color: var(--bp-label-quaternary);
+  color: var(--bp-label-secondary);
 }
 .msg-row {
   display: flex;
-  padding: 2px 40px;
+  padding: 2px 0;
   max-width: 860px;
   margin: 0 auto;
 }
@@ -1152,7 +1123,7 @@ function onKeydown(value, ctx) {
 .msg-header-name {
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: var(--bp-tracking-body);
+  letter-spacing: 0;
   color: var(--bp-label-secondary);
 }
 .msg-row.user {
@@ -1162,7 +1133,7 @@ function onKeydown(value, ctx) {
 .msg-bubble {
   font-size: 15px;
   line-height: 1.7;
-  letter-spacing: var(--bp-tracking-body);
+  letter-spacing: 0;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1200,7 +1171,7 @@ function onKeydown(value, ctx) {
   white-space: normal;
   font-size: 15px;
   line-height: 1.75;
-  letter-spacing: var(--bp-tracking-body);
+  letter-spacing: 0;
   word-break: break-word;
   padding: 4px 0 2px;
 }
@@ -1285,8 +1256,9 @@ function onKeydown(value, ctx) {
 .typing-indicator i:nth-child(2) { animation-delay: 0.2s; }
 .typing-indicator i:nth-child(3) { animation-delay: 0.4s; }
 .typing-text {
-  color: var(--bp-label-tertiary);
+  color: var(--bp-label-secondary);
   font-size: 13px;
+  letter-spacing: 0;
 }
 .append-unconfirmed {
   display: inline-block;
@@ -1309,8 +1281,8 @@ function onKeydown(value, ctx) {
   animation: chat-caret 1s steps(1) infinite;
 }
 @keyframes chat-blink {
-  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
-  40% { opacity: 1; transform: translateY(-2px); }
+  0%, 80%, 100% { opacity: 0.35; }
+  40% { opacity: 1; }
 }
 @keyframes chat-caret {
   0%, 50% { opacity: 1; }
@@ -1353,20 +1325,29 @@ function onKeydown(value, ctx) {
   padding: 10px 18px;
   background: var(--bp-surface);
   box-shadow: var(--bp-shadow-sm);
+  border: none;
   border-radius: var(--bp-radius-pill);
+  font: inherit;
   font-size: 13px;
+  letter-spacing: 0;
   color: var(--bp-label);
   cursor: pointer;
-  transition: transform var(--bp-duration) var(--bp-ease-out),
-              background var(--bp-duration) var(--bp-ease-out),
-              color var(--bp-duration) var(--bp-ease-out);
+  transition: transform 140ms var(--bp-ease-out),
+              background 140ms ease,
+              color 140ms ease;
 }
-.greet-chip:hover {
-  background: var(--bp-accent-soft);
-  color: var(--bp-accent);
+@media (hover: hover) and (pointer: fine) {
+  .greet-chip:hover {
+    background: var(--bp-accent-soft);
+    color: var(--bp-accent);
+  }
 }
 .greet-chip:active {
-  transform: scale(var(--bp-press-scale));
+  transform: scale(0.97);
+}
+.greet-chip:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
 }
 .chat-input-area {
   flex-shrink: 0;
@@ -1387,8 +1368,8 @@ function onKeydown(value, ctx) {
   transition: border-color var(--bp-duration) var(--bp-ease-out);
 }
 .input-box:focus-within {
-  border-color: rgba(60, 60, 67, 0.22);
-  box-shadow: none;
+  border-color: var(--bp-accent);
+  box-shadow: 0 0 0 3px var(--bp-accent-soft);
 }
 .composer-bar {
   display: flex;
@@ -1404,8 +1385,8 @@ function onKeydown(value, ctx) {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--bp-label-tertiary);
-  letter-spacing: var(--bp-tracking-caption);
+  color: var(--bp-label-secondary);
+  letter-spacing: 0;
 }
 .input-box :deep(.t-textarea) {
   width: 100%;
@@ -1413,7 +1394,7 @@ function onKeydown(value, ctx) {
 .input-box :deep(.t-textarea__inner) {
   font-size: 15px;
   line-height: 1.55;
-  letter-spacing: var(--bp-tracking-body);
+  letter-spacing: 0;
   padding: 2px 4px 6px;
   resize: none;
   background: transparent !important;
@@ -1447,12 +1428,23 @@ function onKeydown(value, ctx) {
   color: #ffffff;
   background: #1d1d1f;
   flex-shrink: 0;
-  transition: background var(--bp-duration) var(--bp-ease-out),
-              color var(--bp-duration) var(--bp-ease-out),
-              opacity var(--bp-duration) var(--bp-ease-out);
+  padding: 0;
+  transition: transform 120ms var(--bp-ease-out),
+              background 120ms ease,
+              color 120ms ease,
+              opacity 120ms ease;
 }
-.composer-btn.send:hover:not(:disabled) {
-  background: #3a3a3c;
+.composer-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.composer-btn:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .composer-btn.send:hover:not(:disabled) {
+    background: #3a3a3c;
+  }
 }
 .composer-btn.send:disabled {
   background: #eef0f2;
@@ -1464,8 +1456,10 @@ function onKeydown(value, ctx) {
   color: var(--bp-danger);
   box-shadow: inset 0 0 0 1px var(--bp-danger);
 }
-.composer-btn.stop:hover {
-  background: var(--bp-danger-soft);
+@media (hover: hover) and (pointer: fine) {
+  .composer-btn.stop:hover {
+    background: var(--bp-danger-soft);
+  }
 }
 .attach-btn {
   position: relative;
@@ -1480,16 +1474,22 @@ function onKeydown(value, ctx) {
   font-size: 16px;
   background: #f2f3f5;
   flex-shrink: 0;
-  transition: background var(--bp-duration) var(--bp-ease-out),
-              color var(--bp-duration) var(--bp-ease-out),
-              transform var(--bp-duration) var(--bp-ease-out);
+  transition: background 140ms ease,
+              color 140ms ease,
+              transform 120ms var(--bp-ease-out);
 }
-.attach-btn:hover {
-  background: var(--bp-surface-fill-hover);
-  color: var(--bp-label);
+@media (hover: hover) and (pointer: fine) {
+  .attach-btn:hover {
+    background: var(--bp-surface-fill-hover);
+    color: var(--bp-label);
+  }
 }
 .attach-btn:active {
-  transform: scale(var(--bp-press-scale));
+  transform: scale(0.97);
+}
+.attach-btn:focus-within {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
 }
 .attach-input {
   position: absolute;
@@ -1524,21 +1524,65 @@ function onKeydown(value, ctx) {
 }
 .attach-chip .attach-remove {
   font-size: 12px;
-  color: var(--bp-label-quaternary);
+  line-height: 1;
+  color: var(--bp-label-secondary);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--bp-duration-fast) var(--bp-ease-out);
+  opacity: 1;
+  border: none;
+  background: transparent;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  transition: opacity 120ms ease, color 120ms ease;
 }
-.attach-chip:hover .attach-remove { opacity: 1; }
-.attach-chip:hover .attach-remove:hover { color: var(--bp-danger); }
+.attach-chip .attach-remove:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .attach-chip .attach-remove { opacity: 0; }
+  .attach-chip:hover .attach-remove,
+  .attach-chip:focus-within .attach-remove { opacity: 1; }
+  .attach-chip .attach-remove:hover { color: var(--bp-danger); }
+}
 @media (prefers-reduced-motion: reduce) {
   .composer-btn,
-  .attach-btn {
+  .attach-btn,
+  .load-more-btn,
+  .greet-chip,
+  .scroll-to-bottom-btn {
     transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
   }
   .attach-btn:active,
-  .composer-btn:active {
+  .composer-btn:active,
+  .load-more-btn:active,
+  .greet-chip:active,
+  .scroll-to-bottom-btn:active {
     transform: none;
+  }
+  .typing-indicator i,
+  .stream-caret {
+    animation: none !important;
+  }
+  .typing-indicator i { opacity: 0.85; }
+  .stream-caret { opacity: 1; }
+  .scroll-bottom-fade-enter-from,
+  .scroll-bottom-fade-leave-to {
+    transform: none;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .chat-input-area { background: #f6f6f7; }
+}
+@media (prefers-contrast: more) {
+  .msg-row.user .msg-bubble,
+  .input-box,
+  .scroll-to-bottom-btn {
+    border: 1px solid var(--bp-label);
+  }
+  .input-box:focus-within {
+    border-color: var(--bp-accent);
   }
 }
 

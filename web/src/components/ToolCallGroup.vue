@@ -1,6 +1,5 @@
 <template>
   <div
-    ref="rootRef"
     class="tool-call-group"
     :class="`tcg-${aggState}`"
     :data-testid="`chat-toolgroup-${name}`"
@@ -14,7 +13,6 @@
       tabindex="0"
       :aria-expanded="expanded"
       @click="toggle"
-      @pointerdown="onHeadPointerDown"
       @keydown.enter.prevent="toggle"
       @keydown.space.prevent="toggle"
     >
@@ -48,17 +46,15 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
 import toolLabels from '@/i18n/toolLabels'
-import { animateSpring, prefersReducedMotion } from '@/utils/spring'
 
 const props = defineProps({
   name: { type: String, required: true },
   calls: { type: Array, required: true }
 })
 
-const rootRef = ref(null)
 const displayName = computed(() => {
   const name = props.name
   const key = String(name || "").replace(/^sandbox_/, "")
@@ -109,45 +105,6 @@ function toggle() {
   expanded.value = !expanded.value
 }
 
-const pressing = ref(false)
-let stopSpring = null
-function scaleTo(el, to, response) {
-  if (!el) return
-  if (stopSpring) stopSpring()
-  stopSpring = animateSpring({
-    el,
-    from: 1,
-    to,
-    damping: 1.0,
-    response,
-    disabled: prefersReducedMotion(),
-    onUpdate: (v) => { el.style.transform = 'scale(' + v + ')' },
-  })
-}
-function onHeadPointerDown(e) {
-  if (prefersReducedMotion()) return
-  if (e.button != null && e.button !== 0) return
-  const el = rootRef.value
-  if (!el) return
-  pressing.value = true
-  scaleTo(el, 0.97, 0.16)
-}
-function onGlobalPointerUp() {
-  if (!pressing.value) return
-  pressing.value = false
-  const el = rootRef.value
-  if (el) scaleTo(el, 1, 0.4)
-}
-
-onMounted(() => {
-  window.addEventListener('pointerup', onGlobalPointerUp, { passive: true })
-  window.addEventListener('pointercancel', onGlobalPointerUp, { passive: true })
-})
-onUnmounted(() => {
-  if (stopSpring) stopSpring()
-  window.removeEventListener('pointerup', onGlobalPointerUp)
-  window.removeEventListener('pointercancel', onGlobalPointerUp)
-})
 </script>
 
 <style scoped>
@@ -160,7 +117,6 @@ onUnmounted(() => {
   background: transparent;
   box-shadow: none;
   padding: 1px 0 1px 26px;
-  will-change: transform;
 }
 .tool-call-group::before {
   content: "";
@@ -181,8 +137,15 @@ onUnmounted(() => {
   background: transparent;
   transition: color var(--bp-duration) var(--bp-ease-out);
 }
-.tcg-head:hover { background: transparent; }
-.tcg-head:hover .tcg-title { color: var(--bp-label); }
+.tcg-head:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tcg-head:hover { background: transparent; }
+  .tcg-head:hover .tcg-title { color: var(--bp-label); }
+}
 .tcg-icon {
   position: absolute;
   left: 0;
@@ -199,9 +162,9 @@ onUnmounted(() => {
   color: var(--bp-label-tertiary);
 }
 .tcg-title {
-  font-weight: 450;
+  font-weight: 500;
   color: var(--bp-label-secondary);
-  letter-spacing: var(--bp-tracking-body);
+  letter-spacing: 0;
 }
 .tcg-count {
   color: var(--bp-label-tertiary);
@@ -271,6 +234,9 @@ onUnmounted(() => {
 @media (prefers-reduced-motion: reduce) {
   .tcg-body-wrap { transition: none; }
   .tcg-head { transition: none; }
-  .tc-spinner { animation: none; opacity: 0.7; }
+  .tc-spinner { animation: none !important; opacity: 0.7; }
+}
+@media (prefers-contrast: more) {
+  .tool-call-group::before { background: var(--bp-label-secondary); }
 }
 </style>
