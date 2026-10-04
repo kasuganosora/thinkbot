@@ -586,6 +586,17 @@ func fuseRankings(lexical, vector []string) []string {
 	return order
 }
 
+// scopeAllows reports whether an entry belongs to one of the scopes being recalled.
+// Vector fusion loads rows by id, which is not itself scoped, so a hit whose
+// row lives in another bot's scope is dropped.
+func scopeAllows(e Entry, allowed map[string]struct{}) bool {
+	if len(allowed) == 0 {
+		return false
+	}
+	_, ok := allowed[e.Scope.Key()]
+	return ok
+}
+
 // fuseWithVec searches the whole scope index and fuses those hits with the
 // lexical list. A disabled index or a failed search leaves the lexical list.
 func (m *ContextManager) fuseWithVec(ctx context.Context, lexical []Entry, scopes []Scope, text string) []Entry {
@@ -604,10 +615,17 @@ func (m *ContextManager) fuseWithVec(ctx context.Context, lexical []Entry, scope
 	var vecIDs []string
 	seenHit := map[string]bool{}
 	var missing []string
+	allowed := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		allowed[scope.Key()] = struct{}{}
+	}
 	for _, scope := range scopes {
 		hits := m.vec.Search(scope.Key(), text, vecFusionK)
+		// nil is a failed search for this scope, not "vec is off".
+		// Keep hits already collected from the other scopes; if every
+		// scope fails, vecIDs stays empty and the lexical list is kept.
 		if hits == nil {
-			return lexical
+			continue
 		}
 		for _, h := range hits {
 			if cosineFromDistance(h.Distance) < minCosine || h.EntryID == "" || seenHit[h.EntryID] {
@@ -631,7 +649,7 @@ func (m *ContextManager) fuseWithVec(ctx context.Context, lexical []Entry, scope
 			return lexical
 		} else {
 			for _, e := range got {
-				if e.ID != "" && RecallVisible(e) {
+				if e.ID != "" && RecallVisible(e) && scopeAllows(e, allowed) {
 					byID[e.ID] = e
 				}
 			}
