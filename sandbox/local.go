@@ -66,6 +66,7 @@ func (l *localSandbox) Create(id string) (Workspace, error) {
 		root:   dir,
 		cfg:    l.cfg,
 		logger: l.logger,
+		guard:  localGuard{project: l.cfg.LocalProject, offline: l.cfg.LocalOffline},
 	}, nil
 }
 
@@ -84,6 +85,7 @@ type localWorkspace struct {
 	root   string // 绝对路径
 	cfg    Config
 	logger *zap.SugaredLogger
+	guard  localGuard
 }
 
 func (w *localWorkspace) ID() string      { return w.id }
@@ -152,6 +154,11 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 	if w.cfg.Timezone != "" {
 		cmd.Env = append(os.Environ(), "TZ="+w.cfg.Timezone)
 	}
+	if w.guard.offline {
+		if err := applyOffline(cmd, req.Command); err != nil {
+			return nil, err
+		}
+	}
 
 	// OOM 检测：命令前后对比宿主进程 cgroup 的 oom_kill 计数（local 后端命令直接在宿主 cgroup 内运行）。
 	snap0, _ := readCgroupOOMKill()
@@ -177,6 +184,9 @@ func (w *localWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChun
 }
 
 func (w *localWorkspace) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	if err := w.guard.check(w.root, path, false); err != nil {
+		return nil, err
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return nil, err
@@ -195,6 +205,9 @@ func (w *localWorkspace) WriteFile(ctx context.Context, path string, data []byte
 			len(data), w.cfg.MaxFileWrite)
 	}
 
+	if err := w.guard.check(w.root, path, true); err != nil {
+		return err
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return err

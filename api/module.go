@@ -158,6 +158,7 @@ func newWorkflowService(db *gorm.DB, store *config.Store, tp trace.TracerProvide
 // newSkillManager 创建技能管理器（全局，从 skills/ 目录加载）。
 func newSkillManager(store *config.Store, logger *zap.SugaredLogger) *skill.SkillManager {
 	mgr := skill.NewSkillManager(nil, skill.NewConfigStoreAdapter(store), logger)
+	skill.RegisterBuiltins(mgr)
 
 	// 尝试从文件系统加载技能
 	skillsDir := filepath.Join("skills")
