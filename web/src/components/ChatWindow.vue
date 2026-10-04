@@ -258,7 +258,20 @@
               <t-icon name="close" class="attach-remove" @click.stop="removeAttach(i)" />
             </span>
           </div>
-          <div class="input-row">
+          <t-textarea
+            v-model="draft"
+            :autosize="{ minRows: 1, maxRows: 6 }"
+            :placeholder="inputPlaceholder"
+            :bordered="false"
+            data-testid="chat-input-textarea"
+            :aria-label="inputAriaLabel"
+            :aria-expanded="slashOpen"
+            aria-autocomplete="list"
+            :aria-controls="slashOpen ? 'chat-command-palette' : undefined"
+            :aria-activedescendant="slashActiveId"
+            @keydown="onKeydown"
+          />
+          <div class="composer-bar">
             <label class="attach-btn pressable" data-testid="chat-btn-attach" title="上传文件（图片、音频、视频）">
               <t-icon name="add" />
               <input
@@ -270,19 +283,7 @@
                 @change="onFileSelect"
               />
             </label>
-            <t-textarea
-              v-model="draft"
-              :autosize="{ minRows: 1, maxRows: 6 }"
-              :placeholder="inputPlaceholder"
-              :bordered="false"
-              data-testid="chat-input-textarea"
-              :aria-label="inputAriaLabel"
-              :aria-expanded="slashOpen"
-              aria-autocomplete="list"
-              :aria-controls="slashOpen ? 'chat-command-palette' : undefined"
-              :aria-activedescendant="slashActiveId"
-              @keydown="onKeydown"
-            />
+            <span v-if="store.activeBot?.model" class="composer-model" data-testid="chat-composer-model">{{ store.activeBot.model }}</span>
             <div class="input-actions">
               <button
                 v-if="!store.replying"
@@ -990,21 +991,26 @@ function onKeydown(value, ctx) {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--bp-chat-bg);
+  background: #f6f6f7;
   min-width: 0;
 }
 .chat-topbar {
-  height: 52px;
+  height: 48px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 20px;
-  background: var(--bp-surface-toolbar);
-  backdrop-filter: saturate(180%) blur(var(--bp-blur));
-  -webkit-backdrop-filter: saturate(180%) blur(var(--bp-blur));
-  border-bottom: var(--bp-hairline);
+  gap: 10px;
+  padding: 0 36px;
+  background: transparent;
+  border-bottom: none;
   z-index: 2;
+}
+.chat-topbar :deep(.t-tag) {
+  background: transparent;
+  border: none;
+  color: var(--bp-label-tertiary);
+  font-weight: 450;
+  padding: 0;
 }
 .topbar-title {
   font-size: 15px;
@@ -1018,7 +1024,7 @@ function onKeydown(value, ctx) {
 .chat-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 0;
+  padding: 28px 0 8px;
   position: relative;
 }
 .scroll-to-bottom-btn {
@@ -1117,44 +1123,45 @@ function onKeydown(value, ctx) {
 }
 .msg-row {
   display: flex;
-  padding: 4px 32px;
-  max-width: 820px;
+  padding: 2px 40px;
+  max-width: 860px;
   margin: 0 auto;
 }
 .msg-row.assistant {
   flex-direction: column;
   align-items: stretch;
-  margin-top: 18px;
+  margin-top: 28px;
 }
 .msg-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 8px;
+  margin-bottom: 6px;
 }
 .msg-header-avatar {
-  width: 30px;
-  height: 30px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: var(--bp-accent-soft);
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 17px;
+  font-size: 14px;
   flex-shrink: 0;
 }
 .msg-header-name {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: var(--bp-tracking-title);
-  color: var(--bp-label);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: var(--bp-tracking-body);
+  color: var(--bp-label-secondary);
 }
 .msg-row.user {
   justify-content: flex-end;
+  margin-top: 22px;
 }
 .msg-bubble {
   font-size: 15px;
-  line-height: var(--bp-leading-body);
+  line-height: 1.7;
   letter-spacing: var(--bp-tracking-body);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1169,34 +1176,33 @@ function onKeydown(value, ctx) {
   max-width: 100%;
 }
 .msg-row.user .msg-content-wrap {
-  max-width: 75%;
+  max-width: 78%;
   align-items: flex-end;
 }
-.msg-toolcalls {
-  width: 100%;
-}
+.msg-toolcalls,
 .msg-toolcall-item {
   width: 100%;
-  margin: 2px 0;
+  margin: 0;
 }
 .msg-row.user .msg-bubble {
-  background: var(--bp-surface-fill-active);
+  background: #ececee;
   color: var(--bp-label);
-  border-radius: 18px;
-  padding: 10px 16px;
+  border-radius: 16px;
+  padding: 12px 16px;
 }
 .msg-row.assistant .msg-bubble {
   background: transparent;
   color: var(--bp-label);
-  padding: 4px 0;
+  padding: 0;
   width: 100%;
 }
 .markdown-body {
   white-space: normal;
   font-size: 15px;
-  line-height: var(--bp-leading-body);
+  line-height: 1.75;
   letter-spacing: var(--bp-tracking-body);
   word-break: break-word;
+  padding: 4px 0 2px;
 }
 .markdown-body :deep(h1),
 .markdown-body :deep(h2),
@@ -1364,38 +1370,51 @@ function onKeydown(value, ctx) {
 }
 .chat-input-area {
   flex-shrink: 0;
-  padding: 0 24px 18px;
+  padding: 10px 32px 20px;
+  background: linear-gradient(180deg, rgba(246, 246, 247, 0) 0%, #f6f6f7 36%);
 }
 .composer {
   position: relative;
-  max-width: 820px;
+  max-width: 860px;
   margin: 0 auto;
 }
 .input-box {
-  border-radius: var(--bp-radius-2xl);
-  padding: 8px 8px 8px 8px;
-  background: var(--bp-surface);
-  box-shadow: var(--bp-shadow-composer);
-  border: var(--bp-hairline);
-  transition: box-shadow var(--bp-duration) var(--bp-ease-out);
+  border-radius: 20px;
+  padding: 12px 14px 8px;
+  background: #ffffff;
+  box-shadow: none;
+  border: 1px solid rgba(60, 60, 67, 0.12);
+  transition: border-color var(--bp-duration) var(--bp-ease-out);
 }
 .input-box:focus-within {
-  box-shadow: 0 0 0 3px var(--bp-accent-soft), var(--bp-shadow-composer);
+  border-color: rgba(60, 60, 67, 0.22);
+  box-shadow: none;
 }
-.input-row {
+.composer-bar {
   display: flex;
-  align-items: flex-end;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  min-height: 36px;
 }
-.input-row :deep(.t-textarea) {
-  flex: 1;
-  min-width: 0;
+.composer-model {
+  margin-left: auto;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--bp-label-tertiary);
+  letter-spacing: var(--bp-tracking-caption);
+}
+.input-box :deep(.t-textarea) {
+  width: 100%;
 }
 .input-box :deep(.t-textarea__inner) {
   font-size: 15px;
-  line-height: 1.45;
+  line-height: 1.55;
   letter-spacing: var(--bp-tracking-body);
-  padding: 7px 4px;
+  padding: 2px 4px 6px;
   resize: none;
   background: transparent !important;
   border: none !important;
@@ -1410,30 +1429,33 @@ function onKeydown(value, ctx) {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  padding-bottom: 1px;
+  margin-left: auto;
+}
+.composer-bar .composer-model + .input-actions {
+  margin-left: 8px;
 }
 .composer-btn {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 16px;
-  color: var(--bp-label-on-accent);
-  background: var(--bp-accent);
+  font-size: 15px;
+  color: #ffffff;
+  background: #1d1d1f;
   flex-shrink: 0;
   transition: background var(--bp-duration) var(--bp-ease-out),
               color var(--bp-duration) var(--bp-ease-out),
               opacity var(--bp-duration) var(--bp-ease-out);
 }
 .composer-btn.send:hover:not(:disabled) {
-  background: var(--bp-accent-hover);
+  background: #3a3a3c;
 }
 .composer-btn.send:disabled {
-  background: var(--bp-surface-fill);
+  background: #eef0f2;
   color: var(--bp-label-quaternary);
   cursor: default;
 }
@@ -1450,15 +1472,14 @@ function onKeydown(value, ctx) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
   cursor: pointer;
   color: var(--bp-label-secondary);
-  font-size: 18px;
-  background: var(--bp-surface-fill);
+  font-size: 16px;
+  background: #f2f3f5;
   flex-shrink: 0;
-  margin-bottom: 1px;
   transition: background var(--bp-duration) var(--bp-ease-out),
               color var(--bp-duration) var(--bp-ease-out),
               transform var(--bp-duration) var(--bp-ease-out);
@@ -1481,7 +1502,7 @@ function onKeydown(value, ctx) {
   display: flex;
   gap: 6px;
   overflow-x: auto;
-  padding: 4px 6px 8px 38px;
+  padding: 0 4px 8px;
   scrollbar-width: none;
 }
 .attach-strip::-webkit-scrollbar { display: none; }
