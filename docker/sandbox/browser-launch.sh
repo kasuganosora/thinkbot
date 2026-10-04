@@ -22,11 +22,25 @@ fi
 pkill -f thinkbot-browser-mcp 2>/dev/null || true
 sleep 1
 
+# One X display per container, shared with the desktop stream. xvfb-run -a
+# would pick a display that dies with this process and hide the browser.
+DISPLAY_NUM=99
+export DISPLAY=:$DISPLAY_NUM
+if [ ! -S /tmp/.X11-unix/X$DISPLAY_NUM ]; then
+  mkdir -p /tmp/.X11-unix
+  Xvfb :$DISPLAY_NUM -screen 0 1280x800x24 -ac -nolisten tcp >/tmp/xvfb-99.log 2>&1 &
+  i=0
+  while [ ! -S /tmp/.X11-unix/X$DISPLAY_NUM ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+fi
+chmod 777 /tmp/.X11-unix/X$DISPLAY_NUM 2>/dev/null || true
+
 if command -v runuser >/dev/null 2>&1; then
-  exec runuser -u bot -- env HOME=/home/bot xvfb-run -a -s "-screen 0 1920x1080x24" node /usr/local/bin/thinkbot-browser-mcp
+  exec runuser -u bot -- env HOME=/home/bot DISPLAY=$DISPLAY node /usr/local/bin/thinkbot-browser-mcp
 elif command -v su >/dev/null 2>&1; then
-  exec su -m bot -c 'HOME=/home/bot xvfb-run -a -s "-screen 0 1920x1080x24" node /usr/local/bin/thinkbot-browser-mcp'
+  exec su -m bot -c "HOME=/home/bot DISPLAY=$DISPLAY node /usr/local/bin/thinkbot-browser-mcp"
 else
-  # 无降权工具则退回 root（仅丢失加固，保持原行为不中断服务）
-  exec env HOME=/root xvfb-run -a -s "-screen 0 1920x1080x24" node /usr/local/bin/thinkbot-browser-mcp
+  exec env HOME=/root DISPLAY=$DISPLAY node /usr/local/bin/thinkbot-browser-mcp
 fi

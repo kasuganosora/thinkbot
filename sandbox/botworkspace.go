@@ -203,6 +203,7 @@ func (m *BotWorkspaceManager) GetOrCreate(botID string) (Workspace, error) {
 		cfg:     m.cfg,
 		backend: m.backend,
 		logger:  m.logger,
+		guard:   localGuard{project: m.cfg.LocalProject, offline: m.cfg.LocalOffline},
 	}
 	// docker 持久容器模式：为该 bot 绑定一个长期容器（惰性创建）。
 	if m.backend == "docker" && m.cfg.PersistentContainer {
@@ -576,6 +577,16 @@ type botWorkspace struct {
 	// container 非 nil 时（docker 持久容器模式），所有文件/命令操作走容器内，
 	// 宿主机磁盘不落 bot 文件（隔离）。为 nil 时走原有逻辑（宿主目录 + 临时容器/local）。
 	container *botContainer
+
+	// guard applies only to the local backend. Docker already has its own mount.
+	guard localGuard
+}
+
+func (w *botWorkspace) localGuardPath(path string, write bool) error {
+	if w.container != nil || w.backend != "local" {
+		return nil
+	}
+	return w.guard.check(w.root, path, write)
 }
 
 func (w *botWorkspace) ID() string { return w.botID }
@@ -663,6 +674,9 @@ func (w *botWorkspace) ReadFile(ctx context.Context, path string) ([]byte, error
 	if w.container != nil {
 		return w.container.ReadFile(ctx, path)
 	}
+	if err := w.localGuardPath(path, false); err != nil {
+		return nil, err
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return nil, err
@@ -681,6 +695,9 @@ func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) 
 	if w.cfg.MaxFileWrite > 0 && len(data) > w.cfg.MaxFileWrite {
 		return errs.Newf("bot_workspace: file size %d exceeds max write %d",
 			len(data), w.cfg.MaxFileWrite)
+	}
+	if err := w.localGuardPath(path, true); err != nil {
+		return err
 	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
@@ -701,6 +718,9 @@ func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) 
 func (w *botWorkspace) writeToolOutput(relPath string, data []byte) error {
 	if w.container != nil {
 		return w.container.writeFileUnbounded(context.Background(), relPath, data)
+	}
+	if err := w.localGuardPath(relPath, true); err != nil {
+		return err
 	}
 	validated, err := validatePath(w.root, relPath)
 	if err != nil {
@@ -727,6 +747,9 @@ func (w *botWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, e
 	if w.container != nil {
 		return w.container.ListDir(ctx, path)
 	}
+	if err := w.localGuardPath(path, false); err != nil {
+		return nil, err
+	}
 	validated, err := validatePath(w.root, path)
 	if err != nil {
 		return nil, err
@@ -741,6 +764,11 @@ func (w *botWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry, e
 		size := int64(0)
 		if err == nil {
 			size = info.Size()
+		}
+		if w.backend == "local" {
+			if _, secret := credentialNames[entry.Name()]; secret {
+				continue
+			}
 		}
 		result = append(result, FileEntry{
 			Name:  entry.Name(),
@@ -817,6 +845,9 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	} else {
 		targetDir := w.root
 		if req.WorkDir != "" {
+			if err := w.localGuardPath(req.WorkDir, true); err != nil {
+				return nil, err
+			}
 			validated, err := validatePath(w.root, req.WorkDir)
 			if err != nil {
 				return nil, err
@@ -836,6 +867,11 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 			env = append(env, "TZ="+w.cfg.Timezone)
 		}
 		cmd.Env = env
+		if w.backend == "local" {
+			if err := applyLocalConfinement(cmd, req.Command, w.root, w.guard); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	result, err := runCommandWithStreaming(execCtx, cancel, cmd, w.cfg.MaxOutput, nil, stuck, hard, func(stream, chunk string) {

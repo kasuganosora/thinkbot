@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -293,4 +296,57 @@ func (s *Server) handleBotTerminalExec(c *gin.Context) {
 		"sessionId": sess.ID,
 		"expired":   expired,
 	})
+}
+
+var desktopUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
+	},
+}
+
+// handleBotDesktop streams the bot's own X display. Same cookie session as
+// the terminal routes. The bot id in the URL picks the container; a session
+// id from another bot is not accepted.
+func (s *Server) handleBotDesktop(c *gin.Context) {
+	s.serveBotDesktop(c, c.Param("id"))
+}
+
+func (s *Server) handleSessionDesktop(c *gin.Context) {
+	s.serveBotDesktop(c, c.Param("sid"))
+}
+
+func (s *Server) serveBotDesktop(c *gin.Context, botID string) {
+	if botID == "" || s.botSvc == nil {
+		Fail(c, errs.BadRequest("bot is required"))
+		return
+	}
+	ws, err := s.botSvc.ResolveWorkspace(botID)
+	if err != nil {
+		Fail(c, fmt.Errorf("resolve workspace: %w", err))
+		return
+	}
+	runner, ok := ws.(sandbox.DesktopRunner)
+	if !ok {
+		Fail(c, errs.BadRequest("desktop is not available for this workspace"))
+		return
+	}
+	conn, err := desktopUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	cmd, err := runner.StartDesktop(c.Request.Context())
+	if err != nil {
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+		return
+	}
+	_ = sandbox.RelayDesktop(c.Request.Context(), conn, cmd)
 }
