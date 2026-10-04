@@ -1,10 +1,7 @@
 package sandbox
 
 import (
-	"fmt"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -53,18 +50,5 @@ func (g localGuard) check(root, path string, write bool) error {
 			return errs.Newf("sandbox/local: writes are limited to %q", g.project)
 		}
 	}
-	return nil
-}
-
-func applyOffline(cmd *exec.Cmd, command string) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("sandbox/local: offline mode is not available on windows")
-	}
-	unshare, err := exec.LookPath("unshare")
-	if err != nil {
-		return fmt.Errorf("sandbox/local: offline mode needs unshare: %w", err)
-	}
-	cmd.Path = unshare
-	cmd.Args = []string{"unshare", "-n", "-r", "--", "sh", "-c", command}
 	return nil
 }

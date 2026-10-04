@@ -91,21 +91,3 @@ func (h *TermHub) dropExpiredLocked() {
 		}
 	}
 }
-
-// DesktopStatus describes the graphical surface ThinkBot can actually offer.
-// The sandbox browser already runs on Xvfb. A full desktop the operator can
-// click in the browser would need a VNC websocket proxy, which is not a
-// dependency of this repo, so Available stays false.
-type DesktopStatus struct {
-	Available bool   `json:"available"`
-	Surface   string `json:"surface,omitempty"`
-	Reason    string `json:"reason"`
-}
-
-func DescribeDesktop() DesktopStatus {
-	return DesktopStatus{
-		Available: false,
-		Surface:   "browser-xvfb",
-		Reason:    "graphical desktop needs a VNC websocket proxy; the sandbox browser on Xvfb is the graphical surface that already exists",
-	}
-}

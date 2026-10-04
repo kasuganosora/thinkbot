@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	botsandbox "github.com/kasuganosora/thinkbot/docker/sandbox"
+	"github.com/kasuganosora/thinkbot/sandbox"
 )
 
 // browserMCPPath is where the builtin image installs the browser MCP wrapper.
@@ -45,6 +46,7 @@ func syncBrowserMCPScript(ctx context.Context, container string, logger *zap.Sug
 	wantHash := hex.EncodeToString(sum[:])
 	out, err := exec.CommandContext(ctx, "docker", "exec", container, "sha256sum", browserMCPPath).Output()
 	if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), wantHash) {
+		syncBrowserCompanions(ctx, container, logger)
 		return // up to date
 	}
 
@@ -59,4 +61,18 @@ func syncBrowserMCPScript(ctx context.Context, container string, logger *zap.Sug
 		return
 	}
 	logger.Infow("browser mcp script synced into container", "container", container, "sha256", wantHash[:12])
+	syncBrowserCompanions(ctx, container, logger)
+}
+
+func syncBrowserCompanions(ctx context.Context, container string, logger *zap.SugaredLogger) {
+	if launch, err := botsandbox.BrowserLaunchScript(); err == nil {
+		if err := sandbox.SyncContainerBytes(ctx, container, "/usr/local/bin/thinkbot-browser-launch", launch); err != nil {
+			logger.Debugw("browser launch sync failed", "err", err)
+		}
+	}
+	if desk, err := botsandbox.DesktopScript(); err == nil {
+		if err := sandbox.SyncContainerBytes(ctx, container, "/usr/local/bin/thinkbot-desktop", desk); err != nil {
+			logger.Debugw("desktop helper sync failed", "err", err)
+		}
+	}
 }

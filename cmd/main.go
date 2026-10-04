@@ -20,6 +20,7 @@ import (
 	"github.com/kasuganosora/thinkbot/db"
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/internal/singleinst"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"go.uber.org/fx"
@@ -28,6 +29,9 @@ import (
 )
 
 func main() {
+	if sandbox.ConfineIfRequested() {
+		return
+	}
 	// 配置键 db.path / log.level 经环境变量映射消费（EnvKeyToConfigKey:
 	// DB_PATH→db.path、LOG_LEVEL→log.level），避免这两个键成为「死键」。
 	// 数据库默认落在 data/ 卷（配合 docker 的 ./data:/app/data 持久化，重启不丢库）；

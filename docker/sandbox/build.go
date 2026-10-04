@@ -27,7 +27,7 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
-//go:embed Dockerfile browser-mcp.js browser-launch.sh
+//go:embed Dockerfile browser-mcp.js browser-launch.sh desktop-stdio.js
 var buildContext embed.FS
 
 const (
@@ -41,7 +41,7 @@ const (
 )
 
 // buildFiles 是构建上下文的全部文件（内容哈希决定镜像 tag）。
-var buildFiles = []string{"Dockerfile", "browser-mcp.js", "browser-launch.sh"}
+var buildFiles = []string{"Dockerfile", "browser-mcp.js", "browser-launch.sh", "desktop-stdio.js"}
 
 // buildGroup 去重并发构建：多个 bot 同时启动只构建一个镜像。
 var buildGroup singleflight.Group
@@ -51,6 +51,16 @@ var buildGroup singleflight.Group
 // 启动浏览器前据此把新版脚本同步进容器（见 agent/bot/browser_sync.go）。
 func BrowserMCPScript() ([]byte, error) {
 	return buildContext.ReadFile("browser-mcp.js")
+}
+
+// BrowserLaunchScript is the container entrypoint that starts the shared X display.
+func BrowserLaunchScript() ([]byte, error) {
+	return buildContext.ReadFile("browser-launch.sh")
+}
+
+// DesktopScript is the RFB helper that reads the bot's X display on stdio.
+func DesktopScript() ([]byte, error) {
+	return buildContext.ReadFile("desktop-stdio.js")
 }
 
 // BuiltinImagePrefix 是内置镜像 tag 的前缀（thinkbot-bot:<内容哈希>）。

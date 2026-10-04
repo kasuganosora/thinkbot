@@ -74,4 +74,5 @@ RUN mkdir -p /data/.browser-profile /data/browser-screenshots \
 
 # 浏览器 MCP 启动器：以非 root 用户运行 xvfb + node wrapper（保留环境，透传 BOT_BROWSER_PROXY 等）。
 COPY browser-launch.sh /usr/local/bin/thinkbot-browser-launch
-RUN chmod +x /usr/local/bin/thinkbot-browser-launch
+COPY desktop-stdio.js /usr/local/bin/thinkbot-desktop
+RUN chmod +x /usr/local/bin/thinkbot-browser-launch /usr/local/bin/thinkbot-desktop

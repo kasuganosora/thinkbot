@@ -59,6 +59,7 @@
           <Placeholder v-else-if="activeKey === 'email'" title="邮件" desc="配置邮件收发渠道（待完善）。" />
           <!-- 终端 -->
           <div v-else-if="activeKey === 'terminal'" class="pad"><BotTerminal :bot-id="bot.id" /></div>
+          <div v-else-if="activeKey === 'desktop'" class="pad"><SandboxDesktop :bot-id="bot.id" /></div>
           <!-- 文件 -->
           <BotFiles v-else-if="activeKey === 'files'" :bot-id="bot.id" />
           <!-- MCP -->
@@ -111,6 +112,7 @@ import BotSkills from '@/components/bot/BotSkills.vue'
 import BotHeartbeat from '@/components/bot/BotHeartbeat.vue'
 import BotOutreach from '@/components/bot/BotOutreach.vue'
 import BotTerminal from '@/components/bot/BotTerminal.vue'
+import SandboxDesktop from '@/components/common/SandboxDesktop.vue'
 import BotBrowser from '@/components/bot/BotBrowser.vue'
 import BotDreaming from '@/components/bot/BotDreaming.vue'
 import BotPersona from '@/components/bot/BotPersona.vue'
@@ -143,6 +145,7 @@ const navItems = [
   { key: 'toolperm', label: '工具权限' },
   { key: 'email', label: '邮件' },
   { key: 'terminal', label: '终端' },
+  { key: 'desktop', label: '桌面' },
   { key: 'files', label: '文件' },
   { key: 'mcp', label: 'MCP' },
   { key: 'heartbeat', label: '心跳' },
