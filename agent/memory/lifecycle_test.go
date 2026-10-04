@@ -134,3 +134,57 @@ func TestFingerprintIgnoresPunctuation(t *testing.T) {
 	}
 	_ = time.Second
 }
+
+func TestSupersedeSameStatementStaysCurrent(t *testing.T) {
+	s := NewTieredStore(nil)
+	ctx := context.Background()
+	scope := UserScope("u1")
+	if err := s.Append(ctx, TieredEntry{Entry: Entry{ID: "old", Scope: scope, Content: "住在上海", Source: "note"}, Tier: Tier1LongTerm}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Supersede(ctx, scope, "old", TieredEntry{Entry: Entry{Content: "住在上海。", Source: "note"}}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.GetAll(ctx, Tier1LongTerm, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := FilterRecall(tieredToEntries(all))
+	if len(visible) != 1 || visible[0].ID != "old" {
+		t.Fatalf("punctuation-only update hid the fact: %+v", all)
+	}
+}
+
+func TestSupersedeRefusesTombstonedReplacement(t *testing.T) {
+	s := NewTieredStore(nil)
+	ctx := context.Background()
+	scope := UserScope("u1")
+	if err := s.Append(ctx, TieredEntry{Entry: Entry{ID: "gone", Scope: scope, Content: "住在上海", Source: "note"}, Tier: Tier1LongTerm}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(ctx, TieredEntry{Entry: Entry{ID: "live", Scope: scope, Content: "住在杭州", Source: "note"}, Tier: Tier1LongTerm}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, Tier1LongTerm, scope, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	err := s.Supersede(ctx, scope, "live", TieredEntry{Entry: Entry{Content: "住在上海", Source: "note"}})
+	if err != ErrBlockedFact {
+		t.Fatalf("err = %v", err)
+	}
+	all, _ := s.GetAll(ctx, Tier1LongTerm, scope)
+	visible := FilterRecall(tieredToEntries(all))
+	if len(visible) != 1 || visible[0].Content != "住在杭州" {
+		t.Fatalf("current fact was dropped: %+v", visible)
+	}
+}
+
+func TestScopeAllowsRejectsOtherBot(t *testing.T) {
+	allowed := map[string]struct{}{BotScope("mine").Key(): {}}
+	if scopeAllows(Entry{ID: "x", Scope: BotScope("other"), Content: "secret"}, allowed) {
+		t.Fatal("fusion accepted another bot's row")
+	}
+	if !scopeAllows(Entry{ID: "y", Scope: BotScope("mine"), Content: "ok"}, allowed) {
+		t.Fatal("own bot row rejected")
+	}
+}
