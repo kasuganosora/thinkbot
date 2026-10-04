@@ -252,6 +252,9 @@ func (s *Server) handleBotTerminalExec(c *gin.Context) {
 		return
 	}
 
+	// Old browser processes keep xvfb-run's display until that process is
+	// replaced. Do it for this bot only, before the stream attaches to :99.
+	s.botSvc.AlignBrowserDisplay(c.Request.Context(), botID)
 	ws, err := s.botSvc.ResolveWorkspace(botID)
 	if err != nil {
 		Fail(c, fmt.Errorf("resolve workspace: %w", err))

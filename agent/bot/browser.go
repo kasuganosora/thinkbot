@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -33,7 +34,7 @@ var _ io.Writer = (*mcpStdioStderr)(nil)
 // 浏览器 MCP 接线 — per-bot，运行在 bot 持久容器内（见 docs/sandbox-browser-image-design.md）
 //
 // 链路：thinkbot 主进程 → `docker exec -i thinkbot-bot-<id>` → 容器内
-//       xvfb-run → node /usr/local/bin/thinkbot-browser-mcp（stdio JSON-RPC）→
+//       共享 Xvfb :99 → node /usr/local/bin/thinkbot-browser-mcp（stdio JSON-RPC）→
 //       容器内 headful chromium（patchright 驱动）。
 //
 // 工具命名遵循 MCP 框架约定 <server>__<tool>：本服务固定名为 "browser"，
@@ -144,4 +145,37 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 	}
 
 	return nil
+}
+
+// AlignBrowserDisplay restarts this bot's browser onto DISPLAY=:99 when it is
+// still on an older xvfb-run screen. The container is not recreated. A browser
+// that is already on :99, or not running, is left alone. Safe to call when the
+// desktop websocket opens.
+func (b *Bot) AlignBrowserDisplay(ctx context.Context) {
+	if b == nil || b.browserMCP == nil || b.workspaceMgr == nil {
+		return
+	}
+	b.alignMu.Lock()
+	defer b.alignMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	name := b.workspaceMgr.ContainerInfo(ctx, b.ID).ContainerName
+	if name == "" {
+		return
+	}
+	syncBrowserMCPScript(ctx, name, b.logger)
+	disp, err := sandbox.ContainerBrowserDisplay(ctx, name)
+	if err != nil || disp == "" || disp == ":99" || strings.HasPrefix(disp, ":99.") {
+		return
+	}
+	if !sandbox.ContainerLaunchSharesDisplay(ctx, name) {
+		return
+	}
+	b.logger.Infow("restarting browser onto the shared display", "from", disp, "bot_id", b.ID)
+	if err := b.browserMCP.DisableServer("browser"); err != nil {
+		b.logger.Warnw("browser disable before display align failed", "err", err)
+	}
+	if err := b.browserMCP.EnableServer(ctx, "browser"); err != nil {
+		b.logger.Warnw("browser restart onto shared display failed", "err", err)
+	}
 }

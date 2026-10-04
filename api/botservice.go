@@ -224,6 +224,21 @@ func (s *BotService) OutreachRepo() *outreach.Repo {
 
 // --- BotDefinition CRUD ---
 
+// AlignBrowserDisplay moves a running bot's browser onto the shared X display
+// before the desktop stream attaches. No-op when the bot is stopped.
+func (s *BotService) AlignBrowserDisplay(ctx context.Context, botID string) {
+	if s == nil || botID == "" {
+		return
+	}
+	s.mu.RLock()
+	b := s.botInstances[botID]
+	s.mu.RUnlock()
+	if b == nil {
+		return
+	}
+	b.AlignBrowserDisplay(ctx)
+}
+
 // RunningBotWorkspaceMgr 返回指定 bot 运行时的工作空间管理器（若 bot 正在运行且已启用）。
 // 文件管理 API 借此复用与运行时完全一致的后端（docker 持久容器 / local）。
 func (s *BotService) RunningBotWorkspaceMgr(botID string) (*sandbox.BotWorkspaceManager, bool) {
