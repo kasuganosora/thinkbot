@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
+
+var botTerminals = sandbox.NewTermHub(sandbox.TerminalIdle)
 
 // ============================================================================
 // Bot 运行时检查（概览页）— 接入真实 sandbox 状态
@@ -205,12 +208,20 @@ func (s *Server) handleBotTerminal(c *gin.Context) {
 	}
 
 	banner := fmt.Sprintf("Connected to container of bot %s (%s)", botID, ws.WorkDir())
-	OK(c, gin.H{
+	body := gin.H{
 		"host":      fmt.Sprintf("root@%s", botID),
 		"cwd":       ws.WorkDir(),
 		"connected": true,
 		"banner":    banner,
-	})
+		"desktop":   sandbox.DescribeDesktop(),
+		"idleSec":   int(sandbox.TerminalIdle / time.Second),
+	}
+	if cur, ok := botTerminals.Peek(botID, c.Query("session")); ok {
+		body["sessionId"] = cur.ID
+		body["cwd"] = cur.Cwd
+		body["reattached"] = true
+	}
+	OK(c, body)
 }
 
 // handleBotTerminalExec 在 bot 终端中执行命令。
@@ -224,8 +235,9 @@ func (s *Server) handleBotTerminal(c *gin.Context) {
 func (s *Server) handleBotTerminalExec(c *gin.Context) {
 	botID := c.Param("id")
 	var req struct {
-		Cmd string `json:"cmd" binding:"required"`
-		Cwd string `json:"cwd"`
+		Cmd       string `json:"cmd" binding:"required"`
+		Cwd       string `json:"cwd"`
+		SessionID string `json:"sessionId"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("cmd is required"))
@@ -243,9 +255,14 @@ func (s *Server) handleBotTerminalExec(c *gin.Context) {
 		return
 	}
 
+	sess, expired := botTerminals.Attach(botID, req.SessionID, req.Cwd)
+	workDir := req.Cwd
+	if workDir == "" {
+		workDir = sess.Cwd
+	}
 	res, err := ws.Exec(c.Request.Context(), sandbox.ExecRequest{
 		Command: req.Cmd,
-		WorkDir: req.Cwd,
+		WorkDir: workDir,
 	})
 	if err != nil {
 		Fail(c, fmt.Errorf("exec failed: %w", err))
@@ -265,8 +282,15 @@ func (s *Server) handleBotTerminalExec(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "bot_terminal_exec", "bot", botID, "cmd", req.Cmd)
+	cwd := ws.WorkDir()
+	if workDir != "" {
+		cwd = workDir
+	}
+	botTerminals.Touch(sess.ID, cwd)
 	OK(c, gin.H{
-		"output": output,
-		"cwd":    ws.WorkDir(),
+		"output":    output,
+		"cwd":       cwd,
+		"sessionId": sess.ID,
+		"expired":   expired,
 	})
 }

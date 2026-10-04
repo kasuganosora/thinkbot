@@ -204,6 +204,20 @@ type Config struct {
 	// 不降级到 local。适用于生产环境等不可接受无隔离的场景。
 	RequireDocker bool
 
+	// LocalProject limits local-backend writes to this workspace-relative directory.
+	// Empty means the whole workspace. Credential directories and .git writes are
+	// refused either way.
+	LocalProject string
+
+	// LocalOffline runs local-backend commands without network (unshare -n).
+	// Docker backends ignore it; they already have NetworkDisabled.
+	LocalOffline bool
+
+	// LocalAllowNet keeps network on when the workspace manager falls back to
+	// the local backend. Tests that construct a local sandbox directly are
+	// unchanged unless they set LocalOffline.
+	LocalAllowNet bool
+
 	// Timezone 时区标识符（IANA 格式，如 "Asia/Shanghai"）。
 	// 为空时使用 "UTC" 作为容器默认时区（不影响本地进程，本地进程继承宿主时区）。
 	// 影响：Docker 容器的 TZ 环境变量、本地执行进程的 TZ 环境变量。
