@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -279,9 +280,18 @@ func (s *TieredStore) BlocksNewFact(scope Scope, content string) bool {
 	return false
 }
 
+// ErrBlockedFact is returned when a replacement would revive a deleted statement.
+// The current row is left unchanged.
+var ErrBlockedFact = errors.New("memory: statement was deleted and cannot be written back")
+
 // Supersede keeps the old L1 row as history and stores the replacement as the
-// current fact. It does not tombstone the old text.
+// current fact. It does not tombstone the old text. A replacement that only
+// differs by punctuation updates the current row in place. A replacement that
+// was deleted is refused and the current row stays visible.
 func (s *TieredStore) Supersede(ctx context.Context, scope Scope, oldID string, replacement TieredEntry) error {
+	if s.Forgotten(scope, replacement.Content) {
+		return ErrBlockedFact
+	}
 	if replacement.ID == "" {
 		replacement.ID = idgen.New("mem")
 	}
@@ -301,15 +311,28 @@ func (s *TieredStore) Supersede(ctx context.Context, scope Scope, oldID string, 
 		s.mu.Unlock()
 		return errNotFound(oldID)
 	}
+	if sameStatement(bucket[found].Content, replacement.Content) {
+		bucket[found].Content = replacement.Content
+		if replacement.Category != "" {
+			bucket[found].Category = replacement.Category
+		}
+		if replacement.Importance > bucket[found].Importance {
+			bucket[found].Importance = replacement.Importance
+		}
+		updated := bucket[found]
+		s.buckets[key] = bucket
+		s.mu.Unlock()
+		if s.db != nil {
+			s.persistUpsert(ctx, updated)
+		}
+		return nil
+	}
 	MarkSuperseded(&bucket[found].Entry, replacement.ID, time.Now())
 	s.buckets[key] = bucket
 	old := bucket[found]
 	s.mu.Unlock()
 	if s.db != nil {
 		s.persistUpsert(ctx, old)
-	}
-	if s.Forgotten(scope, replacement.Content) || sameStatement(old.Content, replacement.Content) {
-		return nil
 	}
 	return s.Append(ctx, replacement)
 }
