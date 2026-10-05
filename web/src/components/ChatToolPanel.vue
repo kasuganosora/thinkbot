@@ -32,18 +32,27 @@
     <!-- 内容主体 -->
     <div class="tp-main">
       <!-- 顶部 tab 栏 -->
-      <div class="tp-tabs" data-testid="tool-panel-tabs">
+      <div ref="tabsEl" class="tp-tabs" data-testid="tool-panel-tabs">
         <button
           v-for="t in TABS"
           :key="t.key"
+          type="button"
           class="tp-tab"
           :class="{ active: tab === t.key }"
           :data-testid="`tool-tab-${t.key}`"
+          :aria-label="t.label"
+          :title="iconOnly ? t.label : undefined"
           @click="tab = t.key"
         >
           <t-icon :name="t.icon" />
-          <span>{{ t.label }}</span>
+          <span v-show="!iconOnly" class="tp-tab-label">{{ t.label }}</span>
         </button>
+      </div>
+      <div ref="tabsMeasure" class="tp-tabs tp-tabs-measure" aria-hidden="true">
+        <span v-for="t in TABS" :key="t.key" class="tp-tab">
+          <t-icon :name="t.icon" />
+          <span class="tp-tab-label">{{ t.label }}</span>
+        </span>
       </div>
 
       <!-- Terminal -->
@@ -138,13 +147,16 @@
             <span class="col-name">
               <t-icon :name="e.type === 'dir' ? 'folder' : 'file'" :class="e.type === 'dir' ? 'ic-dir' : 'ic-file'" />
               <span class="fname">{{ e.name }}</span>
-              <t-icon
+              <button
                 v-if="e.type !== 'dir'"
-                name="download"
+                type="button"
                 class="ic-download"
                 title="下载"
+                :aria-label="'下载 ' + e.name"
                 @click.stop="downloadFile(e.name)"
-              />
+              >
+                <t-icon name="download" />
+              </button>
             </span>
             <span class="col-size">{{ e.type === 'dir' ? '' : fmtSize(e.size) }}</span>
             <span class="col-time">{{ fmtTime(e.mtime) }}</span>
@@ -243,6 +255,28 @@ function getInitialWidth() {
 }
 const collapsed = ref(getInitialCollapsed())
 const width = ref(getInitialWidth())
+const tabsEl = ref(null)
+const tabsMeasure = ref(null)
+const iconOnly = ref(false)
+let tabsObserver = null
+
+function syncTabLabels() {
+  const bar = tabsEl.value
+  const measure = tabsMeasure.value
+  if (!bar || !measure) return
+  // Compare the live bar with a hidden full-label copy so hiding labels
+  // does not shrink the measurement and flicker back open.
+  iconOnly.value = bar.clientWidth < measure.scrollWidth
+}
+
+function bindTabObserver() {
+  tabsObserver?.disconnect()
+  tabsObserver = null
+  if (!tabsEl.value) return
+  tabsObserver = new ResizeObserver(() => syncTabLabels())
+  tabsObserver.observe(tabsEl.value)
+  syncTabLabels()
+}
 
 function collapse() { collapsed.value = true; localStorage.setItem('bp_tool_collapsed', '1') }
 function expand() { collapsed.value = false; localStorage.setItem('bp_tool_collapsed', '0') }
@@ -316,16 +350,30 @@ function enterDir(name) {
   files.value.path = `${files.value.path.replace(/\/$/, '')}/${name}`
   loadFiles()
 }
-function downloadFile(name) {
-  if (!sid.value) return
-  const full = `${files.value.path.replace(/\/$/, '')}/${name}`
-  const url = sessionToolApi.downloadUrl(sid.value, full)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+async function downloadFile(name) {
+  if (!sid.value || !name) return
+  const base = String(files.value.path || '/').replace(/\/$/, '')
+  const url = sessionToolApi.downloadUrl(sid.value, `${base}/${name}`)
+  try {
+    const resp = await fetch(url, { credentials: 'include' })
+    const type = resp.headers.get('content-type') || ''
+    if (!resp.ok || type.includes('application/json')) {
+      const json = await resp.json().catch(() => ({}))
+      MessagePlugin.error(json.message || '下载失败')
+      return
+    }
+    const blob = await resp.blob()
+    const obj = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = obj
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(obj), 1500)
+  } catch (_) {
+    MessagePlugin.error('下载失败')
+  }
 }
 function goUp() {
   if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
@@ -472,12 +520,18 @@ async function loadAll() {
   }
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  loadAll()
+  nextTick(bindTabObserver)
+  document.fonts?.ready?.then(() => syncTabLabels())
+})
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onResize)
   window.removeEventListener('mouseup', stopResize)
+  tabsObserver?.disconnect()
 })
 watch(sid, loadAll)
+watch(collapsed, () => nextTick(bindTabObserver))
 </script>
 
 <style scoped>
@@ -500,6 +554,7 @@ watch(sid, loadAll)
 }
 .tp-resizer:hover { background: var(--bp-accent-soft); }
 .tp-main {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -532,24 +587,53 @@ watch(sid, loadAll)
   padding: 10px 14px 0;
   border-bottom: var(--bp-hairline);
   flex-shrink: 0;
+  min-width: 0;
+}
+.tp-tabs-measure {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  border-bottom: 0;
 }
 .tp-tab {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
   border: none;
   background: none;
   padding: 8px 6px 12px;
   font-size: 14px;
+  font-family: inherit;
   color: var(--bp-label-tertiary);
   cursor: pointer;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  white-space: nowrap;
+  border-radius: 8px;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
+.tp-tab-label { line-height: 1.2; }
 .tp-tab.active {
   color: var(--bp-label);
   font-weight: 600;
   border-bottom-color: var(--bp-label);
+}
+.tp-tab:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+}
+.tp-tab:active { transform: translateY(1px); }
+@media (hover: hover) and (pointer: fine) {
+  .tp-tab:hover { color: var(--bp-label); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-tab, .tp-tab:active { transition: none; transform: none; }
 }
 
 .tp-body {
@@ -648,14 +732,34 @@ watch(sid, loadAll)
 .ic-file { flex: 0 0 auto; color: var(--bp-label-tertiary); font-size: 16px; }
 .ic-download {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
   color: var(--bp-label-quaternary);
   font-size: 15px;
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--bp-duration) var(--bp-ease-out), color var(--bp-duration) var(--bp-ease-out);
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease, transform 120ms ease;
 }
-.files-row:hover .ic-download { opacity: 1; }
-.ic-download:hover { color: var(--bp-accent); }
+.files-row:hover .ic-download,
+.ic-download:focus-visible { opacity: 1; }
+.ic-download:focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 2px;
+}
+.ic-download:active { transform: translateY(1px); }
+@media (hover: hover) and (pointer: fine) {
+  .ic-download:hover { color: var(--bp-accent); background: var(--bp-surface-fill); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ic-download, .ic-download:active { transition: none; transform: none; }
+}
 .files-empty { text-align: center; color: var(--bp-label-tertiary); padding: 28px 0; font-size: 13px; }
 .mkdir-row { background: var(--bp-accent-soft); }
 .mkdir-input {
