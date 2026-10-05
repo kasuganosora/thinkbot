@@ -82,6 +82,7 @@ func (w *botWorkspace) StartDesktop(ctx context.Context) (*exec.Cmd, error) {
 		}
 		cmd := exec.CommandContext(ctx, "docker", "exec", "-i",
 			"-e", "THINKBOT_DESKTOP_MODE=container",
+			"-e", "THINKBOT_DESKTOP_AUTOSTART=1",
 			w.container.container, "node", desktopScriptPath)
 		return cmd, nil
 	}
@@ -100,6 +101,7 @@ func (w *botWorkspace) StartDesktop(ctx context.Context) (*exec.Cmd, error) {
 	cmd.Env = append(os.Environ(),
 		"THINKBOT_DESKTOP_MODE=host",
 		"THINKBOT_DESKTOP_DISPLAY="+hostDisplay(w.botID),
+		"THINKBOT_DESKTOP_AUTOSTART=1",
 	)
 	return cmd, nil
 }
