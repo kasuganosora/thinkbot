@@ -77,4 +77,15 @@ func syncBrowserCompanions(ctx context.Context, container string, logger *zap.Su
 			logger.Debugw("desktop helper sync failed", "err", err)
 		}
 	}
+	_ = exec.CommandContext(ctx, "docker", "exec", container, "mkdir", "-p", "/etc/thinkbot").Run()
+	if session, err := botsandbox.DesktopSessionScript(); err == nil {
+		if err := sandbox.SyncContainerBytes(ctx, container, "/usr/local/bin/thinkbot-desktop-session", session); err != nil {
+			logger.Debugw("desktop session sync failed", "err", err)
+		}
+	}
+	if cfg, err := botsandbox.Tint2Config(); err == nil {
+		if err := sandbox.SyncContainerBytes(ctx, container, "/etc/thinkbot/tint2rc", cfg); err != nil {
+			logger.Debugw("tint2 config sync failed", "err", err)
+		}
+	}
 }

@@ -27,7 +27,7 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
-//go:embed Dockerfile browser-mcp.js browser-launch.sh desktop-stdio.js
+//go:embed Dockerfile browser-mcp.js browser-launch.sh desktop-stdio.js desktop-session.sh tint2rc
 var buildContext embed.FS
 
 const (
@@ -41,7 +41,7 @@ const (
 )
 
 // buildFiles 是构建上下文的全部文件（内容哈希决定镜像 tag）。
-var buildFiles = []string{"Dockerfile", "browser-mcp.js", "browser-launch.sh", "desktop-stdio.js"}
+var buildFiles = []string{"Dockerfile", "browser-mcp.js", "browser-launch.sh", "desktop-stdio.js", "desktop-session.sh", "tint2rc"}
 
 // buildGroup 去重并发构建：多个 bot 同时启动只构建一个镜像。
 var buildGroup singleflight.Group
@@ -61,6 +61,16 @@ func BrowserLaunchScript() ([]byte, error) {
 // DesktopScript is the RFB helper that reads the bot's X display on stdio.
 func DesktopScript() ([]byte, error) {
 	return buildContext.ReadFile("desktop-stdio.js")
+}
+
+// DesktopSessionScript starts the light window manager on the shared display.
+func DesktopSessionScript() ([]byte, error) {
+	return buildContext.ReadFile("desktop-session.sh")
+}
+
+// Tint2Config is the panel config baked into the builtin image.
+func Tint2Config() ([]byte, error) {
+	return buildContext.ReadFile("tint2rc")
 }
 
 // BuiltinImagePrefix 是内置镜像 tag 的前缀（thinkbot-bot:<内容哈希>）。

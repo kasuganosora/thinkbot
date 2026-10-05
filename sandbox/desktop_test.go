@@ -1,13 +1,18 @@
 package sandbox
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
+
+	botsandbox "github.com/kasuganosora/thinkbot/docker/sandbox"
 )
 
 func TestDesktopRFBShowsDisplayAndPointer(t *testing.T) {
@@ -191,4 +196,55 @@ func mustDesktopScript(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func TestDesktopSessionReportsMissingWindowManager(t *testing.T) {
+	script, err := botsandbox.DesktopSessionScript()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"sleep", "mkdir", "cat", "kill", "tr", "cut", "printf", "flock"} {
+		src, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		if err := os.Symlink(src, filepath.Join(bin, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll("/tmp/.X11-unix", 0o777); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := "/tmp/.X11-unix/X187"
+	_ = os.Remove(sockPath)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	defer os.Remove(sockPath)
+
+	cmd := exec.Command("sh", "-s")
+	cmd.Stdin = bytes.NewReader(script)
+	cmd.Env = []string{
+		"PATH=" + bin,
+		"HOME=" + dir,
+		"DISPLAY=:187",
+		"LANG=C.UTF-8",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("session script: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("openbox")) {
+		t.Fatalf("missing package hint: %s", out)
+	}
+	if bytes.Contains(out, []byte("chromium")) {
+		t.Fatalf("session tried to start chromium: %s", out)
+	}
 }

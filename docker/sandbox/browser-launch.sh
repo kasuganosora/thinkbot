@@ -37,6 +37,12 @@ if [ ! -S /tmp/.X11-unix/X$DISPLAY_NUM ]; then
 fi
 chmod 777 /tmp/.X11-unix/X$DISPLAY_NUM 2>/dev/null || true
 
+# Light desktop on the shared display (openbox + tint2). Chromium is a window
+# on this session, not the whole desktop. Script is idempotent.
+if [ -x /usr/local/bin/thinkbot-desktop-session ]; then
+  /usr/local/bin/thinkbot-desktop-session || true
+fi
+
 if command -v runuser >/dev/null 2>&1; then
   exec runuser -u bot -- env HOME=/home/bot DISPLAY=$DISPLAY node /usr/local/bin/thinkbot-browser-mcp
 elif command -v su >/dev/null 2>&1; then
