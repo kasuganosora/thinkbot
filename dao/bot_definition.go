@@ -74,7 +74,8 @@ type BotDefinition struct {
 	// 仅 Docker 后端生效，创建/重建容器时读取此值。
 	MemoryLimitMB int64 `gorm:"default:2048" json:"memoryLimitMB"`
 
-	// Status 运行状态：stopped | running。
+	// Status 运行状态：stopped | starting | running。
+	// starting = 用户要求启动（含重建容器）但 agent 尚未就绪；进程重启后应继续拉起。
 	Status string `gorm:"size:32;not null;default:'stopped'" json:"status"`
 
 	// CreatedAt 创建时间。
@@ -89,6 +90,7 @@ func (BotDefinition) TableName() string { return "bot_definitions" }
 
 // Bot 定义状态常量。
 const (
-	BotStatusStopped = "stopped"
-	BotStatusRunning = "running"
+	BotStatusStopped  = "stopped"
+	BotStatusStarting = "starting"
+	BotStatusRunning  = "running"
 )
