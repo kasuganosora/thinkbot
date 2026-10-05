@@ -11,9 +11,6 @@
       </button>
       <span class="desk-status" :class="phase">{{ status }}</span>
     </div>
-    <p class="desk-note">
-      这是这个 Bot 自己的屏幕。点击后键盘和滚轮会送到那一块画面。中文没有对应的按键码，输入法确认后会经剪贴板粘贴进去。
-    </p>
     <div class="desk-stage" :class="{ fit, actual: !fit }">
       <canvas
         v-show="width > 0"
