@@ -73,7 +73,9 @@ func (w *botWorkspace) StartDesktop(ctx context.Context) (*exec.Cmd, error) {
 		if err := SyncContainerBytes(ctx, w.container.container, desktopScriptPath, script); err != nil {
 			return nil, err
 		}
-		if launch, lerr := botsandbox.BrowserLaunchScript(); lerr == nil {
+		// Custom images keep their own browser launcher. Overwriting it would
+		// also make the :99 restart check think the image opted in.
+		if launch, lerr := botsandbox.BrowserLaunchScript(); lerr == nil && containerUsesBuiltinImage(ctx, w.container.container) {
 			if err := SyncContainerBytes(ctx, w.container.container, "/usr/local/bin/thinkbot-browser-launch", launch); err != nil {
 				return nil, err
 			}
@@ -232,6 +234,14 @@ func ContainerBrowserDisplay(ctx context.Context, container string) (string, err
 		return "", nil
 	}
 	return line, nil
+}
+
+func containerUsesBuiltinImage(ctx context.Context, container string) bool {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.Config.Image}}", container).Output()
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(out)), botsandbox.BuiltinImagePrefix)
 }
 
 // ContainerLaunchSharesDisplay reports whether this container's browser launcher

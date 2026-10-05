@@ -252,9 +252,6 @@ func (s *Server) handleBotTerminalExec(c *gin.Context) {
 		return
 	}
 
-	// Old browser processes keep xvfb-run's display until that process is
-	// replaced. Do it for this bot only, before the stream attaches to :99.
-	s.botSvc.AlignBrowserDisplay(c.Request.Context(), botID)
 	ws, err := s.botSvc.ResolveWorkspace(botID)
 	if err != nil {
 		Fail(c, fmt.Errorf("resolve workspace: %w", err))
@@ -331,6 +328,10 @@ func (s *Server) serveBotDesktop(c *gin.Context, botID string) {
 		Fail(c, errs.BadRequest("bot is required"))
 		return
 	}
+	// Old browser processes keep xvfb-run's display until that process is
+	// replaced. Do it for this bot only, before the stream attaches to :99.
+	// Terminal exec must not call this: it would restart Chromium on `ls`.
+	s.botSvc.AlignBrowserDisplay(c.Request.Context(), botID)
 	ws, err := s.botSvc.ResolveWorkspace(botID)
 	if err != nil {
 		Fail(c, fmt.Errorf("resolve workspace: %w", err))
