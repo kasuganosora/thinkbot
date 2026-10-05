@@ -739,38 +739,22 @@ async function drive() {
   }
 }
 
-function chromiumBin() {
-  for (const b of ['/usr/bin/chromium', '/usr/bin/chromium-browser']) {
-    if (fs.existsSync(b)) return b;
-  }
-  return null;
-}
-
-async function showWindow(x11, display) {
+async function startSession(display) {
   if (process.env.THINKBOT_DESKTOP_AUTOSTART !== '1') return;
-  let visible = false;
-  try { visible = await x11.hasVisibleWindow(); } catch (e) { log('tree', e.message); return; }
-  if (visible) return;
-  const bin = chromiumBin();
-  if (!bin) { log('no chromium to show'); return; }
-  const child = spawn(bin, [
-    '--no-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--ozone-platform=x11',
-    '--user-data-dir=/tmp/thinkbot-desktop-view',
-    '--window-size=' + SCREEN_W + ',' + SCREEN_H,
-    '--window-position=0,0',
-    '--no-first-run',
-    '--no-default-browser-check',
-    'about:blank',
-  ], {
-    env: Object.assign({}, process.env, { DISPLAY: display }),
-    detached: true,
-    stdio: 'ignore',
+  const script = process.env.THINKBOT_DESKTOP_SESSION || '/usr/local/bin/thinkbot-desktop-session';
+  if (!fs.existsSync(script)) {
+    log('no desktop session script', script);
+    return;
+  }
+  await new Promise(res => {
+    const child = spawn('sh', [script], {
+      env: Object.assign({}, process.env, { DISPLAY: display, HOME: process.env.HOME || '/root' }),
+      stdio: 'ignore',
+    });
+    const timer = setTimeout(() => { try { child.kill(); } catch (e) {} res(); }, 8000);
+    child.on('exit', () => { clearTimeout(timer); res(); });
+    child.on('error', () => { clearTimeout(timer); res(); });
   });
-  child.unref();
-  log('started chromium on', display);
 }
 
 async function main() {
@@ -789,7 +773,7 @@ async function main() {
     x11.height = SCREEN_H;
   }
   x11ref = x11;
-  try { await showWindow(x11, disp.display); } catch (e) { log('autostart', e.message); }
+  try { await startSession(disp.display); } catch (e) { log('session', e.message); }
   process.stdin.on('data', chunk => onClient(chunk));
   process.stdin.on('end', () => shutdown());
   process.stdin.resume();

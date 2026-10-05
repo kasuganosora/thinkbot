@@ -1,0 +1,57 @@
+# ThinkBot light panel. Bottom bar only; not a copy of any other product.
+rounded = 0
+border_width = 1
+background_color = #f4f4f6 100
+border_color = #c8c8cc 100
+
+rounded = 3
+border_width = 0
+background_color = #3b6cff 100
+border_color = #3b6cff 100
+
+rounded = 3
+border_width = 0
+background_color = #e4e5e9 100
+border_color = #e4e5e9 100
+
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 100% 30
+panel_margin = 0 0
+panel_padding = 4 2 4
+panel_background_id = 1
+panel_layer = top
+panel_dock = 0
+strut_policy = follow_size
+disable_transparency = 1
+panel_items = TSC
+
+taskbar_mode = single_desktop
+taskbar_padding = 0 0 2
+taskbar_background_id = 0
+taskbar_active_background_id = 0
+
+task_icon = 1
+task_text = 1
+task_centered = 0
+task_maximum_size = 160 26
+task_padding = 6 2 4
+task_font = sans 9
+task_font_color = #1c1d1f 100
+task_active_font_color = #ffffff 100
+task_background_id = 3
+task_active_background_id = 2
+urgent_nb_of_blink = 0
+mouse_left = toggle_iconify
+mouse_middle = none
+mouse_right = close
+
+systray_padding = 0 0 4
+systray_background_id = 0
+systray_icon_size = 16
+
+time1_format = %H:%M
+time1_font = sans 9
+clock_font_color = #1c1d1f 100
+clock_padding = 6 0
+clock_background_id = 0

@@ -63,8 +63,6 @@ async function initBrowser() {
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
       '--ozone-platform=x11',
-      '--window-position=0,0',
-      '--window-size=1280,800',
     ],
   };
   if (PROXY) {
@@ -106,11 +104,6 @@ process.on('beforeExit', () => { if (!shuttingDown) shutdown('beforeExit'); });
 
 // ---------------- JSON-RPC over stdio ----------------
 const tools = [
-  {
-    name: 'ensure_open',
-    description: '把本 Bot 的 Chromium 窗口显示在共享屏幕上。已经打开时不改变当前页面。',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-  },
   {
     name: 'navigate',
     description: '导航到指定 URL。返回最终 URL、标题、HTTP 状态、可访问性树摘要。',
@@ -231,11 +224,6 @@ function actionHint(name, args, msg) {
 
 async function callTool(name, args) {
   switch (name) {
-    case 'ensure_open': {
-      if (!browser) await initBrowser();
-      if (!page || page.isClosed()) page = await context.newPage();
-      return textResult(page.url() || 'about:blank');
-    }
     case 'navigate': {
       if (!page) throw new Error('page not ready');
       if (/^\s*javascript:/i.test(String(args.url || ''))) {

@@ -147,12 +147,10 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 	return nil
 }
 
-// AlignBrowserDisplay puts this bot's Chromium on DISPLAY=:99 and makes sure
-// a window is mapped before the desktop stream attaches. The container is not
-// recreated. A browser that is not running is started; one already on :99 is
-// left in place unless the wrapper script was just replaced. Custom images
-// whose launcher does not share :99 are left alone. Safe to call when the
-// desktop websocket opens.
+// AlignBrowserDisplay moves this bot's browser onto DISPLAY=:99 when it is
+// still on an older screen. The container is not recreated. The desktop
+// session (openbox) is started by the RFB helper, not by launching Chromium.
+// Custom images whose launcher does not share :99 are left alone.
 func (b *Bot) AlignBrowserDisplay(ctx context.Context) {
 	if b == nil || b.browserMCP == nil || b.workspaceMgr == nil {
 		return
@@ -185,24 +183,5 @@ func (b *Bot) AlignBrowserDisplay(ctx context.Context) {
 			b.logger.Warnw("browser restart onto shared display failed", "err", err)
 			return
 		}
-	}
-	b.ensureBrowserWindow(ctx)
-}
-
-// ensureBrowserWindow starts this bot's Chromium on the shared display without
-// navigating away from a page that is already open. The browser MCP is lazy
-// and otherwise leaves Xvfb's black root on the desktop.
-func (b *Bot) ensureBrowserWindow(ctx context.Context) {
-	if b == nil || b.browserMCP == nil {
-		return
-	}
-	if !b.browserMCP.IsServerConnected("browser") {
-		if err := b.browserMCP.EnableServer(ctx, "browser"); err != nil {
-			b.logger.Warnw("browser was not started for the desktop", "err", err, "bot_id", b.ID)
-			return
-		}
-	}
-	if _, err := b.browserMCP.CallTool(ctx, "browser", "ensure_open", map[string]any{}); err != nil {
-		b.logger.Warnw("browser window was not opened for the desktop", "err", err, "bot_id", b.ID)
 	}
 }

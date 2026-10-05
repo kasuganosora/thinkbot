@@ -10,10 +10,15 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ---------- 系统基础 + 浏览器 + 中文字体 + xvfb(伪装 headful) ----------
+# Desktop session packages (light): openbox WM + tint2 panel + xsetroot.
+# WeKnora uses full XFCE on Xvfb; we keep the same idea with a tiny stack.
+# Existing bot containers do not gain these until 重建工作容器 builds a new image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git unzip jq \
         chromium fonts-noto-cjk fonts-noto-color-emoji \
         xvfb xauth \
+        openbox tint2 xterm \
+        x11-xserver-utils \
         python3 python3-pip \
         locales \
     && sed -i '/zh_CN.UTF-8/s/^# *//' /etc/locale.gen \
@@ -75,4 +80,7 @@ RUN mkdir -p /data/.browser-profile /data/browser-screenshots \
 # 浏览器 MCP 启动器：以非 root 用户运行 xvfb + node wrapper（保留环境，透传 BOT_BROWSER_PROXY 等）。
 COPY browser-launch.sh /usr/local/bin/thinkbot-browser-launch
 COPY desktop-stdio.js /usr/local/bin/thinkbot-desktop
-RUN chmod +x /usr/local/bin/thinkbot-browser-launch /usr/local/bin/thinkbot-desktop
+COPY desktop-session.sh /usr/local/bin/thinkbot-desktop-session
+COPY tint2rc /etc/thinkbot/tint2rc
+RUN mkdir -p /etc/thinkbot \
+    && chmod +x /usr/local/bin/thinkbot-browser-launch /usr/local/bin/thinkbot-desktop /usr/local/bin/thinkbot-desktop-session

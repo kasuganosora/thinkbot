@@ -80,6 +80,9 @@ func (w *botWorkspace) StartDesktop(ctx context.Context) (*exec.Cmd, error) {
 				return nil, err
 			}
 		}
+		if err := syncDesktopSession(ctx, w.container.container); err != nil {
+			return nil, err
+		}
 		cmd := exec.CommandContext(ctx, "docker", "exec", "-i",
 			"-e", "THINKBOT_DESKTOP_MODE=container",
 			"-e", "THINKBOT_DESKTOP_AUTOSTART=1",
@@ -98,11 +101,17 @@ func (w *botWorkspace) StartDesktop(ctx context.Context) (*exec.Cmd, error) {
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, node, path)
-	cmd.Env = append(os.Environ(),
+	env := []string{
 		"THINKBOT_DESKTOP_MODE=host",
-		"THINKBOT_DESKTOP_DISPLAY="+hostDisplay(w.botID),
+		"THINKBOT_DESKTOP_DISPLAY=" + hostDisplay(w.botID),
 		"THINKBOT_DESKTOP_AUTOSTART=1",
-	)
+	}
+	if session, serr := botsandbox.DesktopSessionScript(); serr == nil {
+		if sp, merr := materializeDesktopScript(session); merr == nil {
+			env = append(env, "THINKBOT_DESKTOP_SESSION="+sp)
+		}
+	}
+	cmd.Env = append(os.Environ(), env...)
 	return cmd, nil
 }
 
@@ -255,4 +264,23 @@ func ContainerLaunchSharesDisplay(ctx context.Context, container string) bool {
 	}
 	err := exec.CommandContext(ctx, "docker", "exec", container, "grep", "-q", "DISPLAY_NUM=99", "/usr/local/bin/thinkbot-browser-launch").Run()
 	return err == nil
+}
+
+func syncDesktopSession(ctx context.Context, container string) error {
+	if container == "" {
+		return nil
+	}
+	_ = exec.CommandContext(ctx, "docker", "exec", container, "mkdir", "-p", "/etc/thinkbot", "/usr/local/bin").Run()
+	script, err := botsandbox.DesktopSessionScript()
+	if err != nil {
+		return err
+	}
+	if err := SyncContainerBytes(ctx, container, "/usr/local/bin/thinkbot-desktop-session", script); err != nil {
+		return err
+	}
+	cfg, err := botsandbox.Tint2Config()
+	if err != nil {
+		return err
+	}
+	return SyncContainerBytes(ctx, container, "/etc/thinkbot/tint2rc", cfg)
 }
