@@ -97,6 +97,9 @@ type BotService struct {
 	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
 	messageSessions    map[string]string                  // "botID:traceID" → chat session id（供 active/resume 按会话过滤）
 	messageInterrupts  map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
+	// containerStarts tracks in-flight container+agent starts detached from HTTP
+	// requests. Image builds can take minutes; the request context must not cancel them.
+	containerStarts map[string]context.CancelFunc // botID → cancel for async start
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
 	//
@@ -179,6 +182,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageCancels:     make(map[string]context.CancelFunc),
 		messageSessions:    make(map[string]string),
 		messageInterrupts:  make(map[string]chan string),
+		containerStarts:    make(map[string]context.CancelFunc),
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
 
@@ -2901,6 +2905,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 // StopBot 停止运行中的 Bot。
 func (s *BotService) StopBot(id string) {
+	s.CancelContainerStart(id)
 	s.mu.Lock()
 	b, exists := s.botInstances[id]
 	delete(s.botInstances, id)
@@ -3003,17 +3008,23 @@ func (s *BotService) RunningCount() int {
 	return count
 }
 
-// StartAll 从 DB 加载所有定义并启动状态为 running 的 Bot。
+// StartAll 从 DB 加载并启动状态为 running 或 starting 的 Bot。
+// starting 表示用户已要求启动（例如重建容器），但上次请求在镜像构建中超时，
+// 进程重启后必须继续拉起，否则频道永久静默。
 func (s *BotService) StartAll(ctx context.Context) error {
 	var defs []dao.BotDefinition
-	if err := s.db.Where("status = ?", dao.BotStatusRunning).Find(&defs).Error; err != nil {
+	if err := s.db.Where("status IN ?", []string{dao.BotStatusRunning, dao.BotStatusStarting}).Find(&defs).Error; err != nil {
 		return errs.Wrap(err, "bot_service: load running bots")
 	}
 
 	for _, def := range defs {
 		if err := s.StartBot(ctx, def.ID); err != nil {
 			s.logger.Errorw("failed to start bot on boot",
-				"bot_id", def.ID, "err", err)
+				"bot_id", def.ID, "status", def.Status, "err", err)
+			continue
+		}
+		if def.Status == dao.BotStatusStarting {
+			s.SetBotStatus(def.ID, dao.BotStatusRunning)
 		}
 	}
 
@@ -3021,6 +3032,85 @@ func (s *BotService) StartAll(ctx context.Context) error {
 		s.logger.Infow("started bots from DB", "count", len(defs))
 	}
 	return nil
+}
+
+// containerStartTimeout covers a cold builtin image build (chromium + openbox).
+const containerStartTimeout = 30 * time.Minute
+
+// BeginContainerStart marks the bot as starting and returns a detached context
+// for the long-running ensure+StartBot work. If a start is already in flight,
+// already is true and ctx is nil.
+func (s *BotService) BeginContainerStart(botID string) (ctx context.Context, already bool) {
+	if s == nil || botID == "" {
+		return nil, true
+	}
+	s.SetBotStatus(botID, dao.BotStatusStarting)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.containerStarts == nil {
+		s.containerStarts = make(map[string]context.CancelFunc)
+	}
+	if _, ok := s.containerStarts[botID]; ok {
+		return nil, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), containerStartTimeout)
+	s.containerStarts[botID] = cancel
+	return ctx, false
+}
+
+// FinishContainerStart clears the in-flight start entry and releases its timer.
+func (s *BotService) FinishContainerStart(botID string) {
+	if s == nil || botID == "" {
+		return
+	}
+	s.mu.Lock()
+	cancel, ok := s.containerStarts[botID]
+	if ok {
+		delete(s.containerStarts, botID)
+	}
+	s.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
+}
+
+// CancelContainerStart aborts an in-flight async start (intentional stop).
+func (s *BotService) CancelContainerStart(botID string) {
+	if s == nil || botID == "" {
+		return
+	}
+	s.mu.Lock()
+	cancel, ok := s.containerStarts[botID]
+	if ok {
+		delete(s.containerStarts, botID)
+	}
+	s.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
+}
+
+// HasContainerStart reports whether an async container start is in flight.
+func (s *BotService) HasContainerStart(botID string) bool {
+	if s == nil || botID == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.containerStarts[botID]
+	return ok
+}
+
+// BotIntentStatus returns the persisted bot status (stopped/starting/running).
+func (s *BotService) BotIntentStatus(botID string) string {
+	if s == nil || botID == "" {
+		return dao.BotStatusStopped
+	}
+	var def dao.BotDefinition
+	if err := s.db.Select("status").Where("id = ?", botID).First(&def).Error; err != nil {
+		return dao.BotStatusStopped
+	}
+	return def.Status
 }
 
 // GetBotInfo 返回 Bot 信息。

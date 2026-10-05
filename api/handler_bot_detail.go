@@ -526,43 +526,70 @@ func (s *Server) realBotContainerSnapshots(ctx context.Context, botID string) []
 // handleStartBotContainer 启动 Bot 容器（真实 docker start/create）+ 启动 agent 实例。
 // POST /api/bots/:id/container/start
 //
-// 必须同时启动 agent 实例：仅启动 docker 容器会让 chat 接口因 WebChannel 不存在而
-// 返回 404（bot is not running）。这与停止时「一并停 agent」对称——启动也必须一并
-// 启动，否则容器在跑但 bot 不在聊天可用状态。
+// Builtin image builds can take several minutes. The work runs in a detached
+// goroutine so a proxy/client timeout cannot cancel docker build or skip StartBot.
+// Status is set to "starting" immediately; intentional stop clears it to "stopped".
+// The HTTP response returns as soon as the start is accepted (poll GET for ready).
 func (s *Server) handleStartBotContainer(c *gin.Context) {
 	botID := c.Param("id")
-	ctx := c.Request.Context()
 	if s.botSvc == nil {
 		Fail(c, errs.New("bot service unavailable"))
 		return
 	}
-	// 1) 启动 docker 容器并清除 stopped 标记（否则后续 ensure() 拒绝拉起，工具执行失败）。
 	mgr, err := s.botSvc.WorkspaceManagerForBot(botID)
 	if err != nil {
 		Fail(c, err)
 		return
 	}
-	// 0) 读取 per-bot 内存限制并设置到 manager（必须是同一个 mgr 实例，
-	//    因为 WorkspaceManagerForBot 对未缓存的 bot 每次返回新实例；
-	//    覆盖值设在 StartBot 所用的实例上，容器创建时才会生效）。
 	if def, derr := s.botSvc.GetDefinition(botID); derr == nil {
 		mgr.SetBotMemoryOverride(botID, def.MemoryLimitMB)
 	}
-	if err := mgr.StartBot(ctx, botID); err != nil {
-		Fail(c, fmt.Errorf("启动容器失败: %w", err))
+
+	ctx, already := s.botSvc.BeginContainerStart(botID)
+	if already {
+		OK(c, s.realBotContainerInfo(c.Request.Context(), botID))
 		return
 	}
-	// 2) 启动 agent 实例（注册 WebChannel，使聊天可用）。
-	//    若 agent 已在运行则跳过，避免每次点启动都重启 agent。
+
+	go s.runContainerStart(botID, mgr, ctx)
+	OK(c, s.realBotContainerInfo(c.Request.Context(), botID))
+}
+
+// runContainerStart ensures the docker container, starts the agent, then marks
+// the bot running. It must not use the HTTP request context.
+func (s *Server) runContainerStart(botID string, mgr *sandbox.BotWorkspaceManager, ctx context.Context) {
+	defer s.botSvc.FinishContainerStart(botID)
+
+	if err := mgr.StartBot(ctx, botID); err != nil {
+		if ctx.Err() != nil {
+			s.logger.Infow("container start cancelled", "bot_id", botID, "err", err)
+			return
+		}
+		s.logger.Errorw("async container start failed", "bot_id", botID, "err", err)
+		// Leave status=starting so StartAll / a later start can retry.
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	if !s.botSvc.IsRunning(botID) {
 		if err := s.botSvc.StartBot(ctx, botID); err != nil {
-			Fail(c, fmt.Errorf("启动 Bot 实例失败: %w", err))
+			if ctx.Err() != nil {
+				s.logger.Infow("bot start cancelled after container ready", "bot_id", botID, "err", err)
+				return
+			}
+			s.logger.Errorw("async bot start failed after container ready", "bot_id", botID, "err", err)
 			return
 		}
 	}
-	// 3) DB 状态恢复为 running（与停止时置 stopped 对称）。
-	s.botSvc.SetBotStatus(botID, dao.BotStatusRunning)
-	OK(c, s.realBotContainerInfo(ctx, botID))
+	if ctx.Err() != nil {
+		return
+	}
+	// Only mark running if the user did not stop us mid-flight.
+	if s.botSvc.BotIntentStatus(botID) == dao.BotStatusStarting {
+		s.botSvc.SetBotStatus(botID, dao.BotStatusRunning)
+	}
+	s.logger.Infow("async container+bot start finished", "bot_id", botID)
 }
 
 // handleStopBotContainer 停止 Bot 容器（真实 docker stop，保留数据）。
@@ -1074,16 +1101,12 @@ func (s *Server) realBotContainerInfo(ctx context.Context, botID string) *BotCon
 		switch ci.State {
 		case "running":
 			info.ContainerStatus = "running"
-			info.TaskStatus = "running"
 		case "", "not-created":
 			info.ContainerStatus = "stopped"
-			info.TaskStatus = "not-created"
 		case "docker-unavailable":
 			info.ContainerStatus = "error"
-			info.TaskStatus = "docker-unavailable"
 		default: // exited / paused / created ...
 			info.ContainerStatus = "stopped"
-			info.TaskStatus = ci.State
 		}
 		if info.ContainerPath == "" && ci.Volume != "" {
 			info.ContainerPath = ci.Volume + ":/workspace"
@@ -1092,10 +1115,37 @@ func (s *Server) realBotContainerInfo(ctx context.Context, botID string) *BotCon
 		// 本地模式：无独立容器
 		info.ContainerID = ""
 		info.ContainerStatus = "local"
-		info.TaskStatus = "local"
 		info.Image = "(local process)"
 	}
+	// Task status is the agent intent, not the docker state. A running container
+	// with a stopped bot (failed rebuild) must not look "运行中".
+	info.TaskStatus = s.botTaskStatus(botID, info.ContainerStatus, info.ContainerID)
 	return info
+}
+
+func (s *Server) botTaskStatus(botID, containerStatus, containerID string) string {
+	if containerStatus == "local" {
+		return "local"
+	}
+	if containerStatus == "error" || containerStatus == "docker-unavailable" {
+		return "docker-unavailable"
+	}
+	if s.botSvc != nil && s.botSvc.IsRunning(botID) {
+		return "running"
+	}
+	if s.botSvc != nil {
+		switch s.botSvc.BotIntentStatus(botID) {
+		case dao.BotStatusStarting:
+			return "starting"
+		case dao.BotStatusRunning:
+			// DB says running but agent is not in memory (restart mid-flight).
+			return "starting"
+		}
+	}
+	if containerStatus == "stopped" && containerID == "" {
+		return "not-created"
+	}
+	return "stopped"
 }
 
 func (s *Server) getBotContainerInfo(botID string) *BotContainerInfo {
