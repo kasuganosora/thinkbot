@@ -29,13 +29,10 @@
         @paste="onPaste"
         @copy="onCopy"
         @compositionend="onCompose"
-        @focus="focused = true"
-        @blur="focused = false"
         @contextmenu.prevent
       />
       <div v-if="phase !== 'connected'" class="desk-overlay">{{ status }}</div>
     </div>
-    <p v-if="phase === 'connected' && !focused" class="desk-note">点击画面后键盘才生效。</p>
   </div>
 </template>
 
@@ -49,7 +46,6 @@ const props = defineProps({
 
 const canvasRef = ref(null)
 const connected = ref(false)
-const focused = ref(false)
 const fit = ref(true)
 const status = ref('未连接')
 const phase = ref('idle')
@@ -104,7 +100,6 @@ function connect() {
   }
   ws.onclose = () => {
     connected.value = false
-    focused.value = false
     if (phase.value === 'connecting' || phase.value === 'failed') {
       phase.value = 'failed'
       status.value = '桌面连接失败'
@@ -122,7 +117,6 @@ function disconnect(manual) {
     ws = null
   }
   connected.value = false
-  focused.value = false
   if (manual) {
     phase.value = 'idle'
     status.value = '未连接'
@@ -425,7 +419,6 @@ onBeforeUnmount(() => disconnect(false))
 .desk-status { font-size: 12px; color: var(--bp-label-secondary, #667); }
 .desk-status.connected { color: var(--bp-success, #1b7f4a); }
 .desk-status.failed, .desk-status.disconnected { color: var(--bp-danger, #b42318); }
-.desk-note { margin: 0; font-size: 13px; line-height: 1.45; color: var(--bp-label-secondary, #667); }
 .desk-stage {
   position: relative;
   flex: 1;
