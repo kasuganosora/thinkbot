@@ -432,6 +432,26 @@ class XConn {
     req.writeInt16LE(y | 0, 26);
     this.send(req);
   }
+  async hasVisibleWindow() {
+    const { head, rest } = await this.round(Buffer.from([
+      15, 0, 2, 0,
+      this.root & 255, (this.root >> 8) & 255, (this.root >> 16) & 255, (this.root >> 24) & 255,
+    ]));
+    const n = head.readUInt16LE(16);
+    for (let i = 0; i < n; i++) {
+      const id = rest.readUInt32LE(i * 4);
+      const geo = Buffer.alloc(8);
+      geo[0] = 14;
+      geo.writeUInt16LE(2, 2);
+      geo.writeUInt32LE(id, 4);
+      const { head: gh } = await this.round(geo, () => 0);
+      const w = gh.readUInt16LE(16);
+      const h = gh.readUInt16LE(18);
+      // The clipboard helper is a 1x1 window and does not count as a desktop.
+      if (w >= 200 && h >= 200) return true;
+    }
+    return false;
+  }
   async queryPointer() {
     const req = Buffer.alloc(8);
     req[0] = 38;
@@ -456,13 +476,29 @@ function toFrame(raw, sw, sh) {
 }
 
 let lastFrame = null;
+// 0 = this tile was sent. A fresh buffer is all unseen, so a black root is
+// not treated as "already delivered" just because lastFrame starts at zero.
+let covered = null;
 let pointer = { x: 0, y: 0 };
 let prevPointer = { x: -1, y: -1 };
 let buttons = 0;
 let lastSentClip = null;
 let lastPoll = 0;
 
+function tileIndex(sw, t) {
+  const nx = Math.ceil(sw / TILE);
+  return Math.floor(t.y / TILE) * nx + Math.floor(t.x / TILE);
+}
+
+function ensureCovered(frame, sw) {
+  const sh = frame.length / 4 / sw;
+  const n = Math.ceil(sw / TILE) * Math.ceil(sh / TILE);
+  if (!covered || covered.length !== n) covered = Buffer.alloc(n, 1);
+}
+
 function tileDirty(frame, sw, t) {
+  ensureCovered(frame, sw);
+  if (covered[tileIndex(sw, t)]) return true;
   if (!lastFrame) return true;
   if (MARKER) {
     const hit = (p) => p.x >= t.x && p.y >= t.y && p.x < t.x + t.tw && p.y < t.y + t.th;
@@ -487,8 +523,10 @@ function collectTiles(frame, sw, sh) {
 }
 
 function rememberTiles(frame, sw, tiles) {
+  ensureCovered(frame, sw);
   if (!lastFrame || lastFrame.length !== frame.length) lastFrame = Buffer.alloc(frame.length);
   for (const t of tiles) {
+    covered[tileIndex(sw, t)] = 0;
     for (let row = 0; row < t.th; row++) {
       const o = ((t.y + row) * sw + t.x) * 4;
       frame.copy(lastFrame, o, o, o + t.tw * 4);
@@ -701,6 +739,40 @@ async function drive() {
   }
 }
 
+function chromiumBin() {
+  for (const b of ['/usr/bin/chromium', '/usr/bin/chromium-browser']) {
+    if (fs.existsSync(b)) return b;
+  }
+  return null;
+}
+
+async function showWindow(x11, display) {
+  if (process.env.THINKBOT_DESKTOP_AUTOSTART !== '1') return;
+  let visible = false;
+  try { visible = await x11.hasVisibleWindow(); } catch (e) { log('tree', e.message); return; }
+  if (visible) return;
+  const bin = chromiumBin();
+  if (!bin) { log('no chromium to show'); return; }
+  const child = spawn(bin, [
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--ozone-platform=x11',
+    '--user-data-dir=/tmp/thinkbot-desktop-view',
+    '--window-size=' + SCREEN_W + ',' + SCREEN_H,
+    '--window-position=0,0',
+    '--no-first-run',
+    '--no-default-browser-check',
+    'about:blank',
+  ], {
+    env: Object.assign({}, process.env, { DISPLAY: display }),
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+  log('started chromium on', display);
+}
+
 async function main() {
   const disp = await ensureDisplay();
   const num = displayNum(disp.display);
@@ -717,6 +789,7 @@ async function main() {
     x11.height = SCREEN_H;
   }
   x11ref = x11;
+  try { await showWindow(x11, disp.display); } catch (e) { log('autostart', e.message); }
   process.stdin.on('data', chunk => onClient(chunk));
   process.stdin.on('end', () => shutdown());
   process.stdin.resume();
