@@ -9,15 +9,27 @@
       <div class="ch-actions">
         <t-button variant="outline" :loading="loading" @click="load">刷新</t-button>
         <t-button
-          v-if="info.containerStatus === 'running'"
+          v-if="info.containerStatus === 'running' || info.taskStatus === 'running' || info.taskStatus === 'starting'"
           variant="outline"
           :loading="acting"
           @click="onStop"
         >停止</t-button>
-        <t-button v-else variant="outline" :loading="acting" @click="onStart">启动</t-button>
+        <t-button
+          v-if="info.taskStatus !== 'running' && info.taskStatus !== 'starting'"
+          variant="outline"
+          :loading="acting"
+          @click="onStart"
+        >启动</t-button>
         <t-button variant="outline" :loading="acting" @click="onRecreate">重建工作容器</t-button>
       </div>
     </div>
+
+    <p v-if="agentGap" class="ctn-alert" data-testid="bot-container-agent-gap">
+      容器在运行，但 Bot 任务已停止：频道不会收消息。请点「启动」，或使用「重建工作容器」后等待完成。
+    </p>
+    <p v-else-if="info.taskStatus === 'starting'" class="ctn-hint" data-testid="bot-container-starting">
+      正在启动（首次或重建可能需要数分钟构建镜像），请勿重复操作。
+    </p>
 
     <!-- 容器信息卡 -->
     <div class="info-card">
@@ -154,7 +166,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, h } from 'vue'
+import { ref, reactive, computed, onMounted, h } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { botContainerApi } from '@/api/services'
 
@@ -185,7 +197,39 @@ const columns = [
 ]
 
 function statusText(s) {
-  return ({ running: '运行中', stopped: '已停止', exited: '已停止', removed: '已删除', 'not-created': '未创建' })[s] || s || '-'
+  return ({
+    running: '运行中',
+    starting: '启动中',
+    stopped: '已停止',
+    exited: '已停止',
+    removed: '已删除',
+    'not-created': '未创建',
+    'docker-unavailable': 'Docker 不可用'
+  })[s] || s || '-'
+}
+
+const agentGap = computed(() =>
+  info.value?.containerStatus === 'running' && info.value?.taskStatus === 'stopped'
+)
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms))
+}
+
+/** Wait until the async container start finishes (image build can take minutes). */
+async function waitUntilReady(timeoutMs = 15 * 60 * 1000) {
+  const started = Date.now()
+  let last = info.value
+  while (Date.now() - started < timeoutMs) {
+    last = await botContainerApi.get(props.botId)
+    info.value = last
+    if (last.taskStatus === 'running') return last
+    if (last.taskStatus === 'stopped' || last.taskStatus === 'not-created') {
+      throw new Error('启动未完成，Bot 当前已停止。请点「启动」重试（构建镜像可能需要数分钟）。')
+    }
+    await sleep(2000)
+  }
+  throw new Error('等待超时：镜像可能仍在构建。请稍后刷新；若任务状态仍是「启动中」，服务重启后会自动继续。')
 }
 function fmt(iso) {
   if (!iso) return '-'
@@ -250,15 +294,20 @@ async function doSaveMemory() {
 
 async function onStart() {
   acting.value = true
-  try { info.value = await botContainerApi.start(props.botId); MessagePlugin.success('容器已启动') }
-  catch (e) { MessagePlugin.error(e?.message || '启动失败') }
-  finally { acting.value = false }
+  try {
+    info.value = await botContainerApi.start(props.botId)
+    info.value = await waitUntilReady()
+    MessagePlugin.success('容器与 Bot 已启动')
+  } catch (e) {
+    MessagePlugin.error(e?.message || '启动失败')
+    await load()
+  } finally { acting.value = false }
 }
 function onRecreate() {
   const dlg = DialogPlugin.confirm({
     header: '重建工作容器',
     theme: 'warning',
-    body: '删除并重建这个 Bot 的容器，/data 会保留。',
+    body: '删除并重建这个 Bot 的容器，/data 会保留。首次或镜像变更时可能需要数分钟构建。',
     confirmBtn: '重建',
     onConfirm: async () => {
       dlg.destroy()
@@ -270,7 +319,8 @@ function onRecreate() {
         }
         await botContainerApi.remove(props.botId, true)
         info.value = await botContainerApi.start(props.botId)
-        MessagePlugin.success('工作容器已重建')
+        info.value = await waitUntilReady()
+        MessagePlugin.success('工作容器已重建，Bot 已启动')
         await load()
       } catch (e) {
         MessagePlugin.error(e?.message || '重建失败')
@@ -349,6 +399,27 @@ async function onCreateSnapshot() {
 </script>
 
 <style scoped>
+.ctn-alert {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff1f0;
+  color: #a61d24;
+  border: 1px solid #ffccc7;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ctn-hint {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f0f5ff;
+  color: #1d39c4;
+  border: 1px solid #adc6ff;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .ctn-wrap { width: 100%; display: flex; flex-direction: column; gap: 18px; }
 
 /* 头部 */
