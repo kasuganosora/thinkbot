@@ -15,6 +15,7 @@
           @click="onStop"
         >停止</t-button>
         <t-button v-else variant="outline" :loading="acting" @click="onStart">启动</t-button>
+        <t-button variant="outline" :loading="acting" @click="onRecreate">重建工作容器</t-button>
       </div>
     </div>
 
@@ -252,6 +253,33 @@ async function onStart() {
   try { info.value = await botContainerApi.start(props.botId); MessagePlugin.success('容器已启动') }
   catch (e) { MessagePlugin.error(e?.message || '启动失败') }
   finally { acting.value = false }
+}
+function onRecreate() {
+  const dlg = DialogPlugin.confirm({
+    header: '重建工作容器',
+    theme: 'warning',
+    body: '删除并重建这个 Bot 的容器，/data 会保留。',
+    confirmBtn: '重建',
+    onConfirm: async () => {
+      dlg.destroy()
+      acting.value = true
+      try {
+        const status = info.value.containerStatus
+        if (status === 'running' || status === 'stopped') {
+          await botContainerApi.stop(props.botId)
+        }
+        await botContainerApi.remove(props.botId, true)
+        info.value = await botContainerApi.start(props.botId)
+        MessagePlugin.success('工作容器已重建')
+        await load()
+      } catch (e) {
+        MessagePlugin.error(e?.message || '重建失败')
+        await load()
+      } finally {
+        acting.value = false
+      }
+    }
+  })
 }
 async function onStop() {
   acting.value = true
