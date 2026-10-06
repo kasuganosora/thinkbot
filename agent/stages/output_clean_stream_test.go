@@ -102,6 +102,9 @@ var parityCases = []struct {
 	{"internal only closed", "<internal>只有心里话</internal>"},
 	{"text after public dropped", "<public>hi</public> trailing <b>text</b>"},
 	{"empty public then real", "<public>  </public><public>real one</public><public>dup</public>"},
+	{"distinct blocks across steps", "<public>稍等，我查一下</public><public>查到了：答案是 42。</public>\n@@REPLY_CONTROL@@{\"send\": true}"},
+	{"near duplicate blocks", "<public>好的，收到！</public><public>好的,收到!</public>"},
+	{"internal between blocks", "<public>a</public><internal>x</internal> bare <public>b</public>"},
 	{"think then public", "<think>plan step 1\nstep 2</think>\n<public>答</public>"},
 	{"think inside public", "<public>a<think>x</public>y</think>b</public>"},
 	{"unclosed think", "ok<think>never closed"},
@@ -182,7 +185,7 @@ func TestOutputCleanStream_HoldBackOnlyPartialTag(t *testing.T) {
 		t.Fatalf("trailing whitespace held back, got %q", got)
 	}
 	if got := f.Feed("</public>之后"); got != "" {
-		t.Fatalf("content after first public block must be dropped, got %q", got)
+		t.Fatalf("bare text after a public block must be dropped, got %q", got)
 	}
 	if got := f.Flush(); got != "" {
 		t.Fatalf("flush got %q", got)
