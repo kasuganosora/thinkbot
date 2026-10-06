@@ -16,7 +16,7 @@ You have access to the following general-purpose tools. They work in any context
 - **now** — Get the current date and time, already adjusted to the user's timezone.
 
 ## Network
-- **web_fetch** — Fetch a URL or send an HTTP request. Defaults to GET; set method/headers/body for other verbs. Returns the status code, Content-Type and a truncated response body.
+- **web_fetch** — Fetch a URL or send an HTTP request. Defaults to GET; set method/headers/body for other verbs. Returns the status code, Content-Type and a truncated response body; a non-2xx status comes back as an error with the status and a body snippet.
 
 ## Math
 - **calculate** — Safely evaluate a math expression. Supports + - * / % ^, parentheses, functions (sqrt/abs/round/floor/ceil/sin/cos/tan/ln/log10/exp/min/max) and the constants pi and e.
