@@ -2,15 +2,15 @@ package stages
 
 import "testing"
 
-// TestExtractPublicReplyTakesFirstBlock 验证：多个 <public> 块（模型不合法输出）
-// 只保留第一个有效块，丢弃其后所有块——无论后续块是否为宽度变体重复。
-func TestExtractPublicReplyTakesFirstBlock(t *testing.T) {
+// TestExtractPublicReplyDedupesWidthVariant 验证 5fb36fa 针对的场景：两个 <public> 块
+// 只差全角/半角标点（近乎相同），只发第一个。不同内容的多个块见 public_blocks_test.go。
+func TestExtractPublicReplyDedupesWidthVariant(t *testing.T) {
 	in := "<public>喵~6/6全对!💯 这是给谁复习呀🤔</public>" +
 		"<public>喵~6/6全对！💯 这是给谁复习呀🤔</public>"
 	got := extractPublicReply(in)
 	want := "喵~6/6全对!💯 这是给谁复习呀🤔"
 	if got != want {
-		t.Fatalf("多块应只取第一个，得到 %q，期望 %q", got, want)
+		t.Fatalf("近重复块应只发一次，得到 %q，期望 %q", got, want)
 	}
 }
 

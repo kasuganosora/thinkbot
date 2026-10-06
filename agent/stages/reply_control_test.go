@@ -153,11 +153,11 @@ func TestExtractPublicReply(t *testing.T) {
 			want:  "这是一段纯公开回复，没有标签。",
 		},
 		{
-			// 协议只允许一个 <public> 块；多个块是模型不合法输出，只保留第一个，
-			// 其余（含块间夹带的 <internal>）一律丢弃，避免重复正文外发。
-			name:  "multiple public blocks -> only first kept",
+			// 多步骤回复会有多个 <public> 块：按顺序保留各个不同的块（空行分隔），
+			// 块间夹带的 <internal> 一律丢弃；只有近乎相同的重复块才去掉。
+			name:  "multiple distinct public blocks -> all kept in order",
 			input: "<public>第一段公开。</public><internal>私下吐槽</internal><public>第二段公开。</public>",
-			want:  "第一段公开。",
+			want:  "第一段公开。\n\n第二段公开。",
 		},
 		{
 			name:  "public with nested internal -> internal also stripped",

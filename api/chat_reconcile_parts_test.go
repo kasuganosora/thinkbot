@@ -49,3 +49,15 @@ func TestReconcileTextParts_ReplacesDivergingText(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+// TestReconcileTextParts_MultiPublicBlocks：多步骤回复的两个 <public> 区块（过场话 → 工具 →
+// 真正答复）流式时第二段带 "\n\n" 分隔推送，与 canonical（两段用空行连接）逐段对上，
+// 交错顺序保留，答复不会丢。
+func TestReconcileTextParts_MultiPublicBlocks(t *testing.T) {
+	parts := []map[string]any{textPart("容我查查资料"), toolPart("c1"), textPart("\n\n查到了：答案是 42。")}
+	got := reconcileTextParts(parts, "容我查查资料\n\n查到了：答案是 42。")
+	want := []map[string]any{textPart("容我查查资料"), toolPart("c1"), textPart("查到了：答案是 42。")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}

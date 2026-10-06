@@ -343,31 +343,31 @@ func looksLikeInternalThinking(clean string) bool {
 
 // extractPublicReply 从清洗后的干净正文里提取「应公开发送」的内容（取巧三态）：
 //
-//  1. 有 <public> 标签 → 只拼接各 <public> 区块内文（模型明确"就发这些"，
-//     其余包括任何 <internal> 心里话一律丢弃，最防泄漏）；
+//  1. 有 <public> 标签 → 只发 <public> 区块内文（模型明确"就发这些"，
+//     其余包括任何 <internal> 心里话一律丢弃，最防泄漏）。一轮回复跨多个工具步骤时
+//     会有多个区块（如第 1 步的过场话 + 最后一步的真正答复）：按顺序保留每个非空区块、
+//     用空行连接，只丢弃与已保留区块近乎相同的重复区块（见 public_blocks.go）；
 //  2. 含 <internal> 但无 <public> → 返回空（整段 fail-closed 不发——既然暴露了私密意图
 //     又没给公开出口，连 internal 之外的文本也不该带出）；
 //  3. 纯文本（无任何标签）→ 原样返回，由上层 control 块决定（send:true 发全文）。
 //
 // 无论哪条路径，私有标签（心里话）都不会进入出站 payload。
+// Web 流式（OutputCleanStreamFilter）按同一规则推送，渠道发送 / 落库 / 流式三处一致。
 func extractPublicReply(clean string) string {
 	// 路径 1：<public> 公开区优先，只发其内文（最防泄漏）。
-	if blocks := publicTagRe.FindAllStringSubmatch(clean, -1); len(blocks) > 0 {
-		// 协议约定只允许一个 <public> 块；多个块是模型不合法输出，
-		// 直接取第一个有效块（跳过空块），丢弃其后所有块，
-		// 避免把同一段话拼两遍发出去。
-		content := ""
-		for _, m := range blocks {
-			if c := strings.TrimSpace(m[1]); c != "" {
-				content = c
-				break
+	// 位于顶层 <internal> 内的 <public> 属于心里话，不取。
+	if blocks := publicBlockContents(clean); len(blocks) > 0 {
+		var kept publicBlockSet
+		for _, b := range blocks {
+			// 区块内也可能夹带 <internal> / 残留标签（畸形 public、嵌套字面标签、HTML），
+			// 逐块清洗后再判空与去重——清洗后为空的区块（只有心里话）直接跳过。
+			c := cleanPublicBlock(b)
+			if c == "" || kept.isDuplicate(c) {
+				continue
 			}
+			kept.add(c)
 		}
-		// 公开区内也可能夹带 <internal>，再剥一次确保心里话不外发。
-		out := memory.StripInternalTags(content)
-		// 再兜底剥离任何残留标签（含畸形 public / 嵌套字面标签 / HTML 标签），
-		// 避免标签文本外发到帖子或消息。
-		return strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
+		return kept.join()
 	}
 	// 路径 2：含 <internal> 私密标签却没给 <public> 公开出口 → 整段不发。
 	if internalOnlyRe.MatchString(clean) {
