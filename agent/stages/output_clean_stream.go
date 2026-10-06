@@ -14,8 +14,11 @@ import (
 //   - <internal>…</internal>：整块丢弃，闭合标签可以在任意后续 chunk 到达；未闭合则丢到流尾；
 //     位于 <public> 内时遇到 </public> 也视为结束（与 publicTagRe 非贪婪匹配后再
 //     StripInternalTags 的效果一致）；
-//   - <public>/</public>：去掉标签本身、保留内文；首个非空 <public> 区块闭合后，
-//     其余内容全部丢弃（extractPublicReply 只取第一个非空区块）；
+//   - <public>/</public>：去掉标签本身、保留内文；多个区块按 extractPublicReply 的规则
+//     合并（见 public_blocks.go）：第一个非空区块直接推送，之后的区块先扣住，一旦确定不是
+//     已推送区块的近重复（归一化前缀满 publicDupPrefixRunes 字且前缀不相似）就补上 "\n\n"
+//     分隔并继续实时推送；前缀相似的区块等闭合后按完整规则裁决，重复则整块丢弃；
+//     流结束时仍未闭合、尚未放行的区块丢弃（门控也不取未闭合区块）；
 //   - 一旦出现过 <internal> 或 <public>，区块之外的裸文本不再放行（最终出站只会取
 //     public 内文，或因「有 internal 无 public」整段 fail-closed）；
 //   - 其余 <tag …> / </tag> 与畸形的 /public> /internal>：去掉标签文本（对应 strayTagRe）。
@@ -36,6 +39,11 @@ type OutputCleanStreamFilter struct {
 	trimLead   bool   // 刚进入 <public>：跳过区块内首部空白
 	sawPrivate bool   // 出现过 <internal> / <public>：区块外裸文本不再放行
 	pubContent bool   // 当前 <public> 区块是否已有非空白内容
+
+	kept         publicBlockSet // 已推送（决定发送）的 <public> 区块
+	cur          string         // 当前 <public> 区块已清洗的内文（不含尾部空白）
+	hold         bool           // 当前区块尚未确定不是重复：内文只进 cur，暂不推送
+	dupCandidate bool           // 扣住的区块前缀已与某个已推送区块相似：等闭合后裁决
 }
 
 type ocMode int
@@ -45,7 +53,6 @@ const (
 	ocPublic                 // <public> 区块内
 	ocInternal               // <internal> 区块内（丢弃）
 	ocThink                  // <think> 区块内（丢弃）
-	ocDone                   // 首个非空 <public> 已闭合：其余全部丢弃
 )
 
 // maxStreamTagLen 是为判定「是否为标签」最多扣住的字节数；超过仍未见 '>' 则按普通文本放行
@@ -87,9 +94,6 @@ func (f *OutputCleanStreamFilter) Flush() string {
 func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, final bool) {
 	for buf != "" {
 		switch f.mode {
-		case ocDone:
-			return
-
 		case ocThink:
 			idx, n := indexFoldAny(buf, "</think>", "</thinking>")
 			if idx < 0 {
@@ -121,7 +125,7 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 			closing := asciiLower(buf[idx : idx+n])
 			buf = buf[idx+n:]
 			if closing == "</public>" {
-				f.closePublic()
+				f.closePublic(out)
 			} else {
 				f.mode = f.parent
 			}
@@ -145,7 +149,7 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 				continue
 			}
 			buf = buf[n:]
-			f.applyTag(kind)
+			f.applyTag(kind, out)
 		}
 	}
 }
@@ -236,7 +240,7 @@ func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) 
 	return tagStray, end + 1
 }
 
-func (f *OutputCleanStreamFilter) applyTag(kind tagKind) {
+func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 	switch kind {
 	case tagThinkOpen:
 		f.parent = f.mode
@@ -255,24 +259,35 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind) {
 			f.ws = ""
 			f.trimLead = true
 			f.pubContent = false
+			f.cur = ""
+			f.dupCandidate = false
+			// 已有推送过的区块：新区块可能是重复，先扣住等判定。
+			f.hold = f.kept.len() > 0
 		}
 		// 已在 <public> 内：嵌套的字面开标签按残留标签去掉。
 	case tagPublicClose:
 		if f.mode == ocPublic {
-			f.closePublic()
+			f.closePublic(out)
 		}
 		// 区块外的孤立 </public>：按残留标签去掉。
 	}
 }
 
-// closePublic 结束当前 <public> 区块：有内容则后续全部丢弃；空区块则回到区块外继续等下一个。
-func (f *OutputCleanStreamFilter) closePublic() {
+// closePublic 结束当前 <public> 区块并回到区块外（继续等下一个区块）。
+// 非空区块记入 kept；仍在扣住的区块此时按完整规则裁决：不重复则补发，重复则丢弃。
+func (f *OutputCleanStreamFilter) closePublic(out *strings.Builder) {
 	f.ws = ""
-	if f.pubContent {
-		f.mode = ocDone
-		return
-	}
 	f.mode = ocOutside
+	if f.pubContent {
+		if !f.hold {
+			f.kept.add(f.cur)
+		} else if !f.kept.isDuplicate(f.cur) {
+			out.WriteString("\n\n")
+			out.WriteString(f.cur)
+			f.kept.add(f.cur)
+		}
+	}
+	f.cur, f.hold, f.dupCandidate, f.pubContent = "", false, false, false
 }
 
 // emit 放行一段已确认不含标签的正文：处理首部/尾部空白，并按模式决定是否可见。
@@ -301,13 +316,28 @@ func (f *OutputCleanStreamFilter) emit(s string, out *strings.Builder) {
 		f.ws += s
 		return
 	}
-	out.WriteString(f.ws)
-	out.WriteString(body)
+	visible := f.ws + body
 	f.ws = s[len(body):]
 	f.emitted = true
 	if f.mode == ocPublic {
 		f.pubContent = true
+		f.cur += visible
+		if f.hold {
+			if f.dupCandidate {
+				return // 重复候选：扣到闭合再裁决
+			}
+			decided, distinct := f.kept.prefixVerdict(f.cur)
+			if !decided || !distinct {
+				f.dupCandidate = decided
+				return // 还不能确定 / 可能是重复：继续扣住
+			}
+			f.hold = false
+			out.WriteString("\n\n")
+			out.WriteString(f.cur)
+			return
+		}
 	}
+	out.WriteString(visible)
 }
 
 // indexFoldAny 在 s 中按 ASCII 大小写不敏感查找最早出现的任一 needle，返回位置与长度。
