@@ -100,7 +100,7 @@ var parityCases = []struct {
 	{"unclosed internal after public", "<public>hi</public><internal>never closed"},
 	{"internal only unclosed", "<internal>never closed and more text"},
 	{"internal only closed", "<internal>只有心里话</internal>"},
-	{"text after public dropped", "<public>hi</public> trailing <b>text</b>"},
+	{"text after public kept as trailing", "<public>hi</public> trailing <b>text</b>"},
 	{"empty public then real", "<public>  </public><public>real one</public><public>dup</public>"},
 	{"distinct blocks across steps", "<public>稍等，我查一下</public><public>查到了：答案是 42。</public>\n@@REPLY_CONTROL@@{\"send\": true}"},
 	{"near duplicate blocks", "<public>好的，收到！</public><public>好的,收到!</public>"},
@@ -185,10 +185,10 @@ func TestOutputCleanStream_HoldBackOnlyPartialTag(t *testing.T) {
 		t.Fatalf("trailing whitespace held back, got %q", got)
 	}
 	if got := f.Feed("</public>之后"); got != "" {
-		t.Fatalf("bare text after a public block must be dropped, got %q", got)
+		t.Fatalf("bare text after a public block is held until flush, got %q", got)
 	}
-	if got := f.Flush(); got != "" {
-		t.Fatalf("flush got %q", got)
+	if got := f.Flush(); got != "\n\n之后" {
+		t.Fatalf("flush should emit trailing bare answer, got %q", got)
 	}
 
 	// 非标签的 '<' 立即放行；半截 "<b" 在流尾原样放行（门控同样保留）。
