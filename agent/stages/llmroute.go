@@ -343,10 +343,11 @@ func looksLikeInternalThinking(clean string) bool {
 
 // extractPublicReply 从清洗后的干净正文里提取「应公开发送」的内容（取巧三态）：
 //
-//  1. 有 <public> 标签 → 只发 <public> 区块内文（模型明确"就发这些"，
-//     其余包括任何 <internal> 心里话一律丢弃，最防泄漏）。一轮回复跨多个工具步骤时
-//     会有多个区块（如第 1 步的过场话 + 最后一步的真正答复）：按顺序保留每个非空区块、
-//     用空行连接，只丢弃与已保留区块近乎相同的重复区块（见 public_blocks.go）；
+//  1. 有 <public> 标签 → 发 <public> 区块内文（模型明确"就发这些"），并在无近重复时
+//     附上最后一个 </public> 之后的「有实质内容」的裸文本（模型偶发只把过场话包进
+//     <public>、真正答复写在标签外——2026-10-06 Telegram 事故）。一轮回复跨多个工具
+//     步骤时会有多个区块（如第 1 步的过场话 + 最后一步的真正答复）：按顺序保留每个
+//     非空区块、用空行连接，只丢弃与已保留区块近乎相同的重复区块（见 public_blocks.go）；
 //  2. 含 <internal> 但无 <public> → 返回空（整段 fail-closed 不发——既然暴露了私密意图
 //     又没给公开出口，连 internal 之外的文本也不该带出）；
 //  3. 纯文本（无任何标签）→ 原样返回，由上层 control 块决定（send:true 发全文）。
@@ -354,9 +355,9 @@ func looksLikeInternalThinking(clean string) bool {
 // 无论哪条路径，私有标签（心里话）都不会进入出站 payload。
 // Web 流式（OutputCleanStreamFilter）按同一规则推送，渠道发送 / 落库 / 流式三处一致。
 func extractPublicReply(clean string) string {
-	// 路径 1：<public> 公开区优先，只发其内文（最防泄漏）。
-	// 位于顶层 <internal> 内的 <public> 属于心里话，不取。
-	if blocks := publicBlockContents(clean); len(blocks) > 0 {
+	// 路径 1：<public> 公开区优先；附带末个 </public> 后的实质裸文本（最防泄漏前提下
+	// 不丢标签外答复）。位于顶层 <internal> 内的 <public> 属于心里话，不取。
+	if blocks, trailing := publicBlockContentsAndTail(clean); len(blocks) > 0 {
 		var kept publicBlockSet
 		for _, b := range blocks {
 			// 区块内也可能夹带 <internal> / 残留标签（畸形 public、嵌套字面标签、HTML），
@@ -366,6 +367,9 @@ func extractPublicReply(clean string) string {
 				continue
 			}
 			kept.add(c)
+		}
+		if t := cleanPublicBlock(stripReplyControlSuffix(trailing)); significantTrailingPublic(t) && !kept.isDuplicate(t) {
+			kept.add(t)
 		}
 		return kept.join()
 	}
@@ -1551,6 +1555,22 @@ func (s *LLMStage) ResumeDeferredApproval(ctx context.Context, approvalID, decis
 	return nil
 }
 
+// appendStepText joins multi-step assistant text with a single newline when the
+// previous chunk does not already end with one and the next does not start with
+// one. Avoids gluing "等栞娜查查"+"查完啦" into "等栞娜查查查完啦" across tool steps.
+func appendStepText(dst, next string) string {
+	if next == "" {
+		return dst
+	}
+	if dst == "" {
+		return next
+	}
+	if strings.HasSuffix(dst, "\n") || strings.HasPrefix(next, "\n") {
+		return dst + next
+	}
+	return dst + "\n" + next
+}
+
 // processStream 使用 OrchestrateStream 执行流式生成，
 // 将文本增量通过 StreamPublisher 实时发布，最终返回完整的 GenerateResult。
 //
@@ -1596,6 +1616,10 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 		publishText(ocFilter.Flush())
 	}
 
+	// needStepSep：上一步生成已结束（FinishStep / 工具调用），下一段文本属于新步骤，
+	// 拼接时插入换行，避免跨步汉字粘连（「等栞娜查查」+「查完啦」→「等栞娜查查查完啦」）。
+	needStepSep := false
+
 	// 单次消费 stream channel，同时转发 text delta 到 EventBus
 	for {
 		select {
@@ -1607,9 +1631,20 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 			}
 			switch p := part.(type) {
 			case *llm.TextDeltaPart:
-				result.Text += p.Text
+				text := p.Text
+				if needStepSep && text != "" {
+					needStepSep = false
+					prev := result.Text
+					result.Text = appendStepText(result.Text, text)
+					if added := result.Text[len(prev):]; added != text {
+						// 插入了分隔符：先推分隔符再推正文（与 result.Text 一致）。
+						feedText(added[:len(added)-len(text)])
+					}
+				} else {
+					result.Text += text
+				}
 				// 重复退化检测：在发布到前端之前先检查增量是否导致 collapse
-				if p.Text != "" && !repGuard.Feed(p.Text) {
+				if text != "" && !repGuard.Feed(text) {
 					// 检测到重复退化：截断已累积文本，停止消费流。
 					// 扣住的尾部属于被截断的退化区，直接丢弃，不再放行。
 					rcFilter = ReplyControlStreamFilter{}
@@ -1618,16 +1653,17 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 					logger.Warnw("repetition collapse detected in stream, truncating",
 						"message_id", env.Message.ID,
 						"cut_index", repGuard.CutIndex(),
-						"original_len", len(result.Text)+len(p.Text),
+						"original_len", len(result.Text)+len(text),
 						"truncated_len", len(result.Text))
 					goto streamDone
 				}
-				if p.Text != "" {
-					feedText(p.Text)
+				if text != "" {
+					feedText(text)
 				}
 			case *llm.ReasoningDeltaPart:
 				result.Reasoning += p.Text
 			case *llm.StreamToolCallPart:
+				needStepSep = true
 				result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
 					ToolCallID: p.ToolCallID,
 					ToolName:   p.ToolName,
@@ -1663,6 +1699,7 @@ func (s *LLMStage) processStream(ctx context.Context, env *core.Envelope, cfg *l
 				flushText()
 				publisher.PublishToolResult(ctx, traceID, botID, p.ToolCallID, p.ToolName, p.InvocationID, nil, errMsg)
 			case *llm.FinishStepPart:
+				needStepSep = true
 				result.Response = p.Response
 				if result.Usage.TotalTokens == 0 {
 					result.Usage = p.Usage
