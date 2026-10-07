@@ -46,8 +46,17 @@ var (
 // <internal> 区块内的 <public>（那是心里话的一部分，与流式过滤器的处理一致）。
 // 未闭合的 <public> / <internal> 之后的内容一律不取。
 func publicBlockContents(clean string) []string {
-	var out []string
+	blocks, _ := publicBlockContentsAndTail(clean)
+	return blocks
+}
+
+// publicBlockContentsAndTail 与 publicBlockContents 相同，并额外返回最后一个成对
+// </public> 之后的原文（可含后续 <internal> 区块与裸文本）。未闭合的 <public> /
+// <internal> 会截断扫描：其后不取，但其前、位于末个 </public> 之后的文本仍作为
+// trailing 返回（供 extractPublicReply 把「标签外正文」并入公开回复）。
+func publicBlockContentsAndTail(clean string) (blocks []string, trailing string) {
 	pos := 0
+	lastPublicEnd := -1
 	for pos < len(clean) {
 		loc := blockOpenRe.FindStringIndex(clean[pos:])
 		if loc == nil {
@@ -57,19 +66,52 @@ func publicBlockContents(clean string) []string {
 		if strings.EqualFold(clean[start:pos+loc[1]], "<internal>") {
 			end := internalCloseRe.FindStringIndex(clean[pos+loc[1]:])
 			if end == nil {
-				break // 未闭合 internal：其后全是心里话
+				// 未闭合 internal：其后全是心里话；末个 </public> 到此处之前的文本可作 trailing。
+				if lastPublicEnd >= 0 {
+					trailing = clean[lastPublicEnd:start]
+				}
+				return blocks, trailing
 			}
 			pos = pos + loc[1] + end[1]
 			continue
 		}
 		m := publicTagRe.FindStringSubmatchIndex(clean[start:])
 		if m == nil || m[0] != 0 {
-			break // 未闭合的 <public>（流式截断的半句话）不取
+			// 未闭合的 <public>（流式截断的半句话）不取；此前 trailing 仍可保留。
+			if lastPublicEnd >= 0 {
+				trailing = clean[lastPublicEnd:start]
+			}
+			return blocks, trailing
 		}
-		out = append(out, clean[start+m[2]:start+m[3]])
+		blocks = append(blocks, clean[start+m[2]:start+m[3]])
 		pos = start + m[1]
+		lastPublicEnd = pos
 	}
-	return out
+	if lastPublicEnd >= 0 {
+		trailing = clean[lastPublicEnd:]
+	}
+	return blocks, trailing
+}
+
+// stripReplyControlSuffix 去掉正文末尾的 @@REPLY_CONTROL@@ 及其后 JSON（若有）。
+// trailing 提取时控制块可能仍粘在 </public> 之后（explicitPublicReply 在 parse 失败路径上
+// 会拿到未剥离的原文），必须先去掉再判「是否实质答复」，否则会被 looksLikeInternalThinking
+// 当成协议泄漏整段丢弃。
+func stripReplyControlSuffix(s string) string {
+	if idx := strings.Index(s, "@@REPLY_CONTROL@@"); idx >= 0 {
+		return strings.TrimRight(s[:idx], " \t\n\r")
+	}
+	return s
+}
+
+// significantTrailingPublic 判断 </public> 后的裸文本是否值得并入公开回复。
+// 纯空白、纯标点/符号碎片（如残留的「（」）、以及疑似裸思考泄漏的文本一律丢弃。
+func significantTrailingPublic(s string) bool {
+	s = strings.TrimSpace(stripReplyControlSuffix(s))
+	if s == "" || looksLikeInternalThinking(s) {
+		return false
+	}
+	return len(normalizeForDedup(s)) > 0
 }
 
 // cleanPublicBlock 对单个 <public> 区块内文做出站清洗：剥离夹带的 <internal> 与残留标签。

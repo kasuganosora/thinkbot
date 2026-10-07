@@ -19,8 +19,9 @@ import (
 //     已推送区块的近重复（归一化前缀满 publicDupPrefixRunes 字且前缀不相似）就补上 "\n\n"
 //     分隔并继续实时推送；前缀相似的区块等闭合后按完整规则裁决，重复则整块丢弃；
 //     流结束时仍未闭合、尚未放行的区块丢弃（门控也不取未闭合区块）；
-//   - 一旦出现过 <internal> 或 <public>，区块之外的裸文本不再放行（最终出站只会取
-//     public 内文，或因「有 internal 无 public」整段 fail-closed）；
+//   - 一旦出现过 <internal> 或 <public>，区块之间的裸文本先扣住；流结束时若
+//     最后一个 </public> 之后仍有「有实质内容」的裸文本，则按 extractPublicReply
+//     同样规则补发（用空行分隔），避免模型把答复写在标签外时丢掉；
 //   - 其余 <tag …> / </tag> 与畸形的 /public> /internal>：去掉标签文本（对应 strayTagRe）。
 //   - 首部空白与尾部空白不放行（出站内容均 TrimSpace），中间空白在后续有正文时补发。
 //
@@ -44,6 +45,7 @@ type OutputCleanStreamFilter struct {
 	cur          string         // 当前 <public> 区块已清洗的内文（不含尾部空白）
 	hold         bool           // 当前区块尚未确定不是重复：内文只进 cur，暂不推送
 	dupCandidate bool           // 扣住的区块前缀已与某个已推送区块相似：等闭合后裁决
+	trail        string         // </public> 之后、下一标签之前的裸文本（Flush 时若实质则补发）
 }
 
 type ocMode int
@@ -78,7 +80,8 @@ func (f *OutputCleanStreamFilter) Feed(delta string) string {
 }
 
 // Flush 在流结束时调用：放行仍扣住的普通文本（最终没凑成标签的半截 "<b" 等），
-// 丢弃未闭合的 think/internal 块与尾部空白。调用后过滤器回到初始状态。
+// 丢弃未闭合的 think/internal 块与尾部空白；若 </public> 后扣住的裸文本有实质内容，
+// 按 extractPublicReply 同样规则补发。调用后过滤器回到初始状态。
 func (f *OutputCleanStreamFilter) Flush() string {
 	var out strings.Builder
 	if f.pending != "" {
@@ -86,8 +89,26 @@ func (f *OutputCleanStreamFilter) Flush() string {
 		f.pending = ""
 		f.process(buf, &out, true)
 	}
+	f.flushTrailing(&out)
 	*f = OutputCleanStreamFilter{replyTags: f.replyTags}
 	return out.String()
+}
+
+// flushTrailing 在流结束时把最后一个 </public> 之后扣住的实质裸文本并入公开回复。
+// 仅在已推送过至少一个 <public> 区块时生效（与 extractPublicReply 路径 1 一致；
+// 有 internal 无 public 时仍 fail-closed，不把裸文本漏出去）。
+func (f *OutputCleanStreamFilter) flushTrailing(out *strings.Builder) {
+	c := cleanPublicBlock(f.trail)
+	f.trail = ""
+	if f.kept.len() == 0 {
+		return
+	}
+	if !significantTrailingPublic(c) || f.kept.isDuplicate(c) {
+		return
+	}
+	out.WriteString("\n\n")
+	out.WriteString(c)
+	f.kept.add(c)
 }
 
 // process 处理 buf；final=true 表示流已结束，半截标签不再等待。
@@ -249,6 +270,7 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 		if f.mode == ocOutside {
 			f.sawPrivate = true
 			f.ws = ""
+			// 不清空 trail：</public> 与后续 <internal> 之间的裸文本仍属 trailing。
 		}
 		f.parent = f.mode
 		f.mode = ocInternal
@@ -257,6 +279,7 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 			f.sawPrivate = true
 			f.mode = ocPublic
 			f.ws = ""
+			f.trail = "" // 区块之间的裸文本丢弃（只要后面还有 <public>）
 			f.trimLead = true
 			f.pubContent = false
 			f.cur = ""
@@ -296,6 +319,8 @@ func (f *OutputCleanStreamFilter) emit(s string, out *strings.Builder) {
 		return
 	}
 	if f.mode == ocOutside && f.replyTags && f.sawPrivate {
+		// 扣住：可能是末个 </public> 后的答复正文，Flush 时再裁决。
+		f.trail += s
 		return
 	}
 	if f.mode == ocPublic && f.trimLead {

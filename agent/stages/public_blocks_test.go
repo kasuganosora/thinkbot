@@ -7,6 +7,8 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -45,6 +47,13 @@ func TestExtractPublicReply_MultiBlockRules(t *testing.T) {
 		{"empty and internal-only blocks skipped", "<public> </public><public><internal>只有心里话</internal></public><public>真正的回复</public>", "真正的回复"},
 		{"public nested in top-level internal is private", "<internal>想想 <public>SECRET</public> 算了</internal><public>ok</public>", "ok"},
 		{"unclosed trailing public not taken", "<public>完整的一句</public><public>被截断的半", "完整的一句"},
+		{"trailing bare answer after one public kept", "<public>稍等我查一下</public>查到了：答案是老吴 OS。",
+			"稍等我查一下\n\n查到了：答案是老吴 OS。"},
+		{"trailing punctuation-only noise dropped", "<public>好的</public>（", "好的"},
+		{"trailing whitespace only dropped", "<public>好的</public>\n\n  ", "好的"},
+		{"trailing after public with closed internal kept", "<public>先说一句</public>正文答复<internal>心里话</internal>",
+			"先说一句\n\n正文答复"},
+		{"interstitial bare before later public dropped", "<public>a</public><internal>x</internal> bare <public>b</public>", "a\n\nb"},
 		{"all empty blocks", "<public></public><internal>静默观察，不打扰</internal><public></public>\n@@REPLY_CONTROL@@{\"send\": false}", ""},
 		// 0925 线上形态：<internal> 被错写的 </public> "闭合"，真正的 </internal> 在后面。
 		{"stray close inside internal", "<internal>想法</public><internal>\n更多想法\n</internal><public>@someone 真的是这样（苦笑）</public>\n\n@@REPLY_CONTROL@@{\"send\": true}",
@@ -162,7 +171,7 @@ func TestOutputCleanStream_SecondBlockStreamsLive(t *testing.T) {
 	if got := f.Feed("是夺还编里的哪个角色吗？"); got != "是夺还编里的哪个角色吗？" {
 		t.Fatalf("then streams live, got %q", got)
 	}
-	if got := f.Feed("</public>\n@@REPLY"); got != "" {
+	if got := f.Feed("</public>\n"); got != "" {
 		t.Fatalf("got %q", got)
 	}
 	if got := f.Flush(); got != "" {
@@ -196,6 +205,9 @@ func TestProcess_MultiBlockReplyPayload(t *testing.T) {
 		{"missing control: explicit public fallback keeps both blocks",
 			[]string{"<public>先查一下</public>", "<internal>查到了</internal><public>答案是 42</public>"},
 			"先查一下\n\n答案是 42"},
+		{"trailing bare after one public (2026-10-06 22:45)",
+			[]string{"<public>" + incidentTrailingStub + "</public>", incidentTrailingAnswer, "\n\n@@REPLY_CONTROL@@{\"send\": true}"},
+			incidentTrailingStub + "\n\n" + incidentTrailingAnswer},
 	}
 	for _, c := range cases {
 		for _, source := range []string{"telegram", "web"} {
@@ -234,5 +246,89 @@ func TestProcess_MultiBlockReplyPayload(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+
+// incidentTrailingPublic 是 2026-10-06 22:45 Telegram 事故形态：只有一个 <public>
+// 过场句，真正长答复写在 </public> 之后的裸文本里（非多区块路径）。
+const (
+	incidentTrailingStub   = "等等，还有老吴 OS 这种东西？！栞娜这就去补课（"
+	incidentTrailingAnswer = "补完课了，这下整个体系串起来了（\n\n所谓**猫是代码生物**：B 站科普圈早就论证过，猫是屎山代码堆出来的"
+)
+
+func TestExtractPublicReply_TrailingBareAnswerAfterPublic(t *testing.T) {
+	raw := "<public>" + incidentTrailingStub + "</public>" + incidentTrailingAnswer +
+		"\n\n@@REPLY_CONTROL@@{\"send\": true}"
+	got := sharedClean(raw)
+	want := incidentTrailingStub + "\n\n" + incidentTrailingAnswer
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	// 缺失控制块的 fallback（explicitPublicReply）也必须带上 trailing。
+	if got2 := explicitPublicReply(CleanOutboundText(raw)); got2 != want {
+		t.Fatalf("explicitPublicReply: got %q\nwant %q", got2, want)
+	}
+}
+
+func TestAppendStepText_InsertsNewlineBetweenSteps(t *testing.T) {
+	cases := []struct {
+		dst, next, want string
+	}{
+		{"等栞娜查查", "查完啦", "等栞娜查查\n查完啦"},
+		{"等栞娜查查\n", "查完啦", "等栞娜查查\n查完啦"},
+		{"等栞娜查查", "\n查完啦", "等栞娜查查\n查完啦"},
+		{"", "查完啦", "查完啦"},
+		{"等栞娜查查", "", "等栞娜查查"},
+	}
+	for _, c := range cases {
+		if got := appendStepText(c.dst, c.next); got != c.want {
+			t.Errorf("appendStepText(%q, %q) = %q, want %q", c.dst, c.next, got, c.want)
+		}
+	}
+}
+
+
+// stepSepStreamProvider 模拟「文本 → 工具 → 文本」两步流，用于验证跨步拼接插入换行。
+type stepSepStreamProvider struct{}
+
+func (stepSepStreamProvider) Name() string { return "step-sep" }
+func (stepSepStreamProvider) DoGenerate(context.Context, llm.GenerateParams) (*llm.GenerateResult, error) {
+	return &llm.GenerateResult{Text: "等栞娜查查\n查完啦"}, nil
+}
+func (stepSepStreamProvider) DoStream(context.Context, llm.GenerateParams) (*llm.StreamResult, error) {
+	ch := make(chan llm.StreamPart, 16)
+	go func() {
+		defer close(ch)
+		ch <- &llm.TextDeltaPart{Text: "等栞娜查查"}
+		ch <- &llm.StreamToolCallPart{ToolCallID: "c1", ToolName: "web_fetch", Input: map[string]any{"url": "x"}}
+		ch <- &llm.FinishStepPart{FinishReason: llm.FinishReasonToolCalls, Usage: llm.Usage{TotalTokens: 1}}
+		ch <- &llm.StreamToolResultPart{ToolCallID: "c1", ToolName: "web_fetch", Output: "ok"}
+		ch <- &llm.TextDeltaPart{Text: "查完啦"}
+		ch <- &llm.FinishStepPart{FinishReason: llm.FinishReasonStop, Usage: llm.Usage{TotalTokens: 2}}
+		ch <- &llm.FinishPart{FinishReason: llm.FinishReasonStop, TotalUsage: llm.Usage{TotalTokens: 3}}
+	}()
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
+func TestProcessStream_StepTextConcatInsertsNewline(t *testing.T) {
+	pub := &recordingPublisher{}
+	s := &LLMStage{
+		name:     "llm",
+		provider: stepSepStreamProvider{},
+		config:   LLMConfig{StreamPublisher: pub},
+		logger:   zap.NewNop().Sugar(),
+	}
+	env := &core.Envelope{Message: core.Message{ID: "m1", TraceID: "t1", BotID: "b1"}}
+	res, err := s.processStream(context.Background(), env, &llm.OrchestrateConfig{MaxSteps: 0}, zap.NewNop().Sugar())
+	if err != nil {
+		t.Fatalf("processStream: %v", err)
+	}
+	// MaxSteps=0 → OrchestrateStream 直接走 provider DoStream，我们的 channel 原样转发。
+	if res.Text != "等栞娜查查\n查完啦" {
+		t.Fatalf("result.Text = %q, want newline between steps", res.Text)
+	}
+	if strings.Contains(res.Text, "查查查完") {
+		t.Fatalf("glued without separator: %q", res.Text)
 	}
 }
