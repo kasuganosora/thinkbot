@@ -172,8 +172,17 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
-	aborted := s.botSvc.AbortMessage(req.BotID, req.TraceID)
-	OK(c, map[string]any{"aborted": aborted})
+	// traceId 与 sessionId 二选一：给会话维度一个「一次收口」的入口，
+	// 让前端不必先查 active 再逐条 abort（多一跳且会漏掉归属为空的任务）。
+	switch {
+	case req.TraceID != "":
+		OK(c, map[string]any{"aborted": s.botSvc.AbortMessage(req.BotID, req.TraceID)})
+	case req.SessionID != "":
+		n := s.botSvc.AbortSession(req.BotID, req.SessionID)
+		OK(c, map[string]any{"aborted": n > 0, "count": n})
+	default:
+		Fail(c, errs.BadRequest("traceId or sessionId required"))
+	}
 }
 
 // handleChatAppend 在一条正在执行的聊天（生成中）过程中，接收用户中途追加的内容，
