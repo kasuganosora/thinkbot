@@ -97,6 +97,7 @@ type BotService struct {
 	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
 	messageSessions    map[string]string                  // "botID:traceID" → chat session id（供 active/resume 按会话过滤）
 	messageInterrupts  map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
+	messageStarts      map[string]time.Time               // "botID:traceID" → 本轮开始时刻（供前端显示「已运行多久」，判断挂死）
 	// containerStarts tracks in-flight container+agent starts detached from HTTP
 	// requests. Image builds can take minutes; the request context must not cancel them.
 	containerStarts map[string]context.CancelFunc // botID → cancel for async start
@@ -182,6 +183,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageCancels:     make(map[string]context.CancelFunc),
 		messageSessions:    make(map[string]string),
 		messageInterrupts:  make(map[string]chan string),
+		messageStarts:      make(map[string]time.Time),
 		containerStarts:    make(map[string]context.CancelFunc),
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
@@ -553,6 +555,10 @@ func (s *BotService) RegisterMessageCancel(botID, traceID string, cancel context
 	key := messageCancelKey(botID, traceID)
 	s.mu.Lock()
 	s.messageCancels[key] = cancel
+	// 只有首次注册才记开始时刻：同一 traceID 重复注册（续跑等）不应把计时清零。
+	if _, ok := s.messageStarts[key]; !ok {
+		s.messageStarts[key] = time.Now()
+	}
 	s.mu.Unlock()
 }
 
@@ -578,6 +584,7 @@ func (s *BotService) UnregisterMessageCancel(botID, traceID string) {
 	s.mu.Lock()
 	delete(s.messageCancels, key)
 	delete(s.messageSessions, key)
+	delete(s.messageStarts, key)
 	s.mu.Unlock()
 }
 
@@ -664,9 +671,15 @@ func (s *BotService) ActiveMessageTraceIDs(botID string) []string {
 }
 
 // ActiveMessageTask 描述一条仍在执行的消息及其所属会话。
+//
+// StartedAt / ElapsedMs 供前端显示「已运行多久」——墙钟硬上限默认关闭后
+// （defaultLLMHardTimeout=0，编排尽力跑完），Web 是唯一的人工兜底通道：
+// 用户靠运行时长判断这一轮是不是挂死了，并就地中止。
 type ActiveMessageTask struct {
 	TraceID   string `json:"traceId"`
 	SessionID string `json:"sessionId,omitempty"`
+	StartedAt string `json:"startedAt,omitempty"` // RFC3339；缺失表示未记录到开始时刻
+	ElapsedMs int64  `json:"elapsedMs"`
 }
 
 // ActiveMessageTasks 返回指定 bot 仍在执行的任务；sessionID 非空时只返回该会话的。
@@ -680,6 +693,7 @@ func (s *BotService) ActiveMessageTasks(botID, sessionID string) []ActiveMessage
 	prefix := botID + ":"
 	traceIDs := make([]string, 0, len(s.messageCancels))
 	sessByTrace := make(map[string]string, len(s.messageCancels))
+	startByTrace := make(map[string]time.Time, len(s.messageCancels))
 	for key := range s.messageCancels {
 		if !strings.HasPrefix(key, prefix) {
 			continue
@@ -689,6 +703,7 @@ func (s *BotService) ActiveMessageTasks(botID, sessionID string) []ActiveMessage
 		if sid := s.messageSessions[key]; sid != "" {
 			sessByTrace[tid] = sid
 		}
+		startByTrace[tid] = s.messageStarts[key]
 	}
 	s.mu.Unlock()
 	if len(traceIDs) == 0 {
@@ -727,14 +742,42 @@ func (s *BotService) ActiveMessageTasks(botID, sessionID string) []ActiveMessage
 	}
 
 	out := make([]ActiveMessageTask, 0, len(traceIDs))
+	now := time.Now()
 	for _, tid := range traceIDs {
 		sid := sessByTrace[tid]
 		if sessionID != "" && sid != sessionID {
 			continue
 		}
-		out = append(out, ActiveMessageTask{TraceID: tid, SessionID: sid})
+		task := ActiveMessageTask{TraceID: tid, SessionID: sid}
+		if start := startByTrace[tid]; !start.IsZero() {
+			task.StartedAt = start.UTC().Format(time.RFC3339)
+			task.ElapsedMs = now.Sub(start).Milliseconds()
+		}
+		out = append(out, task)
 	}
 	return out
+}
+
+// AbortSession 中止指定会话下**所有**仍在执行的消息，返回实际中止的条数。
+//
+// 存在意义：墙钟硬上限默认关闭后，一轮编排可能长时间不返回；Web 是唯一的人工
+// 兜底通道。用户中止时关心的是「这个会话别再跑了」，而不是去认 traceID——
+// 按 traceID 逐个 abort 要求前端先查 active 再循环，多一跳且容易漏掉归属为
+// 空的续跑任务，故在会话维度一次性收口。
+func (s *BotService) AbortSession(botID, sessionID string) int {
+	if botID == "" || sessionID == "" {
+		return 0
+	}
+	// 复用 ActiveMessageTasks 的归属解析（内存映射 → DB 回退 → traceID 即数字
+	// sessionID），避免这里另写一套判定而与列表显示不一致。
+	tasks := s.ActiveMessageTasks(botID, sessionID)
+	n := 0
+	for _, t := range tasks {
+		if s.AbortMessage(botID, t.TraceID) {
+			n++
+		}
+	}
+	return n
 }
 
 // ResetTokenBudgets 重置所有 channel 的 token 预算追踪。
