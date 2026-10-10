@@ -2,9 +2,24 @@ package api
 
 import (
 	"testing"
+	"time"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 )
+
+// TestEffectiveLLMHardTimeoutDisabledByDefault 钉死「编排不再按墙钟腰斩」：
+// 未显式配置时硬上限必须是 0（尽力跑完），只有运维显式设 agent.hard_timeout 才启用。
+func TestEffectiveLLMHardTimeoutDisabledByDefault(t *testing.T) {
+	store := config.NewStore(nil)
+	if got := effectiveLLMHardTimeout(store); got != 0 {
+		t.Fatalf("default hard timeout must be 0 (disabled, best-effort), got %v", got)
+	}
+	store.SetTemporary("agent.hard_timeout", "600")
+	if got := effectiveLLMHardTimeout(store); got != 10*time.Minute {
+		t.Fatalf("explicit agent.hard_timeout=600s must be honored, got %v", got)
+	}
+}
 
 func TestEffectiveStepBudgets(t *testing.T) {
 	cases := []struct {

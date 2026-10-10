@@ -77,11 +77,12 @@ func (s *LLMStage) hardTimeoutResult(env *core.Envelope, partial *partialSteps, 
 	if !isPrivateChat(env) && !env.Message.Mentioned {
 		return res, false
 	}
-	text := fmt.Sprintf("⚠️ 这一轮处理超过了 %s 的时限，被系统中止了，没能给出完整回复。", humanDuration(limit))
+	// 只如实说明本轮没跑完，不要求用户回「继续」/「拆小任务」来续跑——
+	// 那是把中断成本转嫁给用户。该兜底默认已关闭（defaultLLMHardTimeout=0），
+	// 走到这里只可能是运维显式开了 agent.hard_timeout。
+	text := fmt.Sprintf("⚠️ 这一轮处理超过了 %s 的时限，没能给出完整回复。", humanDuration(limit))
 	if partial.calledTool("task") {
 		text += "已提交的后台任务仍在继续运行，完成后我会在这里告诉你结果。"
-	} else {
-		text += "你可以回复「继续」让我接着做，或者把任务拆小一点再发给我。"
 	}
 	if s.config.RequireReplyControl {
 		text += "\n" + replyControlDelimiter + `{"send": true}`

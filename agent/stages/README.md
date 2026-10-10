@@ -42,7 +42,7 @@
 `ToolResolver`(ToolResolver，动态工具解析，覆盖 `Tools`)、`MessageBuilder`(func(core.Message) []llm.Message)、
 `UsageRecorder`(llm.UsageRecorder)、`StreamPublisher`(StreamPublisher，非 nil 走流式)、
 `ReductionConfig`(*llm.ReductionConfig，两阶段上下文压缩)、`Compaction`(*llm.CompactionConfig，主链路对话历史摘要压缩，按会话隔离)、
-`HardTimeout`(time.Duration，编排回路墙钟硬上限，0=不启用，仅当 ctx 无 deadline 时生效)、
+`HardTimeout`(time.Duration，编排回路墙钟硬上限，**默认 0=不启用**，编排尽力跑完；仅当 ctx 无 deadline 时生效，由 `agent.hard_timeout`(秒) 运维显式开启作逃生口)、
 `ApprovalHandler`(func，HITL 工具审批门禁)、`ToolDeferral`(*llm.DeferralStore，延迟加载工具)、
 `ToolOutputSink`(llm.ToolOutputOffloadSink，工具输出落盘)、`ToolOutput`(llm.ToolOutputConfig，输出截断阈值)、
 `DeferredApprovalStore`(DeferredApprovalStore，HITL 审批锚点存储)、`ResumeDispatch`(func，HITL 续跑重跑入口)、
