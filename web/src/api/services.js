@@ -889,6 +889,18 @@ export const chatApi = {
     if (USE_MOCK) return mockResolve(() => db().bots.filter(b => b.running).map(b => ({ id: b.id, name: b.name, running: true })))
     return request('GET', '/api/chat/bots')
   },
+  /**
+   * 按会话中止该会话下**所有**仍在跑的回合（Web 侧人工兜底通道）。
+   * 与 abort 的区别：不需要先知道 traceID，也不必切到该会话。
+   * @param {string} botId
+   * @param {string|number} sessionId
+   * @returns {Promise<{aborted: boolean, count: number}>}
+   */
+  abortSession(botId, sessionId) {
+    if (!botId || sessionId == null || sessionId === '') return Promise.resolve({ aborted: false, count: 0 })
+    if (USE_MOCK) return mockResolve(() => ({ aborted: true, count: 1 }))
+    return request('POST', '/api/chat/abort', { botId, sessionId: String(sessionId) })
+  },
   abort(botId, traceId) {
     if (!botId || !traceId) return Promise.resolve({ aborted: false })
     if (USE_MOCK) return mockResolve(() => ({ aborted: true }))
@@ -920,8 +932,9 @@ export const chatApi = {
    * @returns {Promise<string[]>}
    */
   /**
-   * 查询后台仍在执行的任务。sessionId 传入时只返回该会话的（避免跨会话 resume）。
-   * @returns {Promise<Array<{traceId: string, sessionId?: string}>>}
+   * 查询后台仍在执行的任务。sessionId 传入时只返回该会话的（避免跨会话 resume）；
+   * 不传则返回该 bot 全部（供会话列表显示「哪些会话正在跑」）。
+   * @returns {Promise<Array<{traceId: string, sessionId?: string, startedAt?: string, elapsedMs: number}>>}
    */
   async activeTasks(botId, sessionId) {
     if (!botId) return []
@@ -934,10 +947,12 @@ export const chatApi = {
         return data.tasks.filter(t => t && t.traceId).map(t => ({
           traceId: String(t.traceId),
           sessionId: t.sessionId != null ? String(t.sessionId) : '',
+          startedAt: t.startedAt || '',
+          elapsedMs: Number(t.elapsedMs) || 0,
         }))
       }
       // 兼容旧后端：只有 traceIds
-      return (data?.traceIds || []).filter(Boolean).map(id => ({ traceId: String(id), sessionId: '' }))
+      return (data?.traceIds || []).filter(Boolean).map(id => ({ traceId: String(id), sessionId: '', startedAt: '', elapsedMs: 0 }))
     } catch {
       return []
     }

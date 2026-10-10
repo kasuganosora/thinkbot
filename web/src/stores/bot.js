@@ -43,6 +43,77 @@ export const useBotStore = defineStore('bot', () => {
   const activeSessionId = ref(null) // 当前选中的 session ID
   const pendingSessionId = ref(null) // URL / 外部指定的待选中 session（优先于自动选中）
 
+  // ---- 运行中的回合（Web 侧人工兜底通道）----
+  // 后端墙钟硬上限默认关闭后（defaultLLMHardTimeout=0，编排尽力跑完），一轮可能
+  // 长时间不返回，而后台渠道（Misskey）根本没有客户端可取消。这里维护 bot 维度的
+  // 「哪些会话正在跑 + 跑了多久」，供会话列表挂徽标并就地中止——用户中止时只认
+  // 「这个会话别再跑了」，不该被要求先去查 traceID。
+  const runningTasks = ref([]) // [{ traceId, sessionId, startedAt, elapsedMs }]
+  // 秒级心跳：只在有运行任务时跑，驱动徽标上的时长走动（15s 轮询不足以让人判断挂死）
+  const nowTick = ref(Date.now())
+  let _runningTimer = null
+  let _tickTimer = null
+
+  async function refreshRunningTasks() {
+    const botId = activeBotId.value
+    if (!botId) {
+      runningTasks.value = []
+      return
+    }
+    try {
+      runningTasks.value = await chatApi.activeTasks(botId)
+    } catch {
+      // 空闲轮询失败不打扰用户
+    }
+  }
+
+  // 按会话聚合运行中任务：{ [sessionId]: { count, startedAt } }
+  // 归属为空的任务（无法定位会话）不进这里——宁可不画，也不要画到错的会话上
+  // （与 resumeInFlightTasks 的保守策略一致）。
+  const runningBySession = computed(() => {
+    const m = {}
+    for (const t of runningTasks.value) {
+      const sid = t.sessionId ? String(t.sessionId) : ''
+      if (!sid) continue
+      const cur = m[sid]
+      if (!cur) {
+        m[sid] = { count: 1, startedAt: t.startedAt || '' }
+      } else {
+        cur.count += 1
+        if (t.startedAt && (!cur.startedAt || t.startedAt < cur.startedAt)) cur.startedAt = t.startedAt
+      }
+    }
+    return m
+  })
+
+  function isSessionRunning(sessionId) {
+    return Boolean(runningBySession.value[String(sessionId)])
+  }
+
+  /** 中止某个会话下所有在跑的回合（会话列表的兜底按钮）。 */
+  async function abortSession(sessionId) {
+    const botId = activeBotId.value
+    if (!botId || sessionId == null || sessionId === '') return false
+    // 停的是当前会话时，先断本页 SSE，否则本地 UI 还在往消息里写内容
+    if (String(activeSessionId.value) === String(sessionId)) _abortStreaming()
+    try {
+      await chatApi.abortSession(botId, sessionId)
+    } catch {
+      // 中止失败不弹错：多数情况是任务刚结束（已无 cancel 可找）
+    }
+    await refreshRunningTasks()
+    return true
+  }
+
+  watch(runningTasks, (v) => {
+    if (v.length && !_tickTimer) {
+      _tickTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
+    } else if (!v.length && _tickTimer) {
+      clearInterval(_tickTimer)
+      _tickTimer = null
+    }
+  })
+
   // 当前会话中由 bot 通过 task 工具创建的工作流 ID（驱动 SessionWorkflowPanel 展示）
   const activeWorkflowId = ref('')
   // SSE 推送的最新工作流快照（来自 task_status 工具结果）
@@ -336,6 +407,8 @@ export const useBotStore = defineStore('bot', () => {
     } finally {
       pendingSessionId.value = null
       sessionsLoading.value = false
+      // 首屏就能看到哪些会话正在跑（轮询最多 15s 后才到位，太慢）
+      refreshRunningTasks()
     }
   }
 
@@ -1398,6 +1471,8 @@ async function resumeContinuation(sessionId) {
     replying.value = true
     _abortController = new AbortController()
     _activeTraceId = ''
+    // 让会话列表的运行中徽标立刻出现，不等 15s 轮询
+    refreshRunningTasks()
 
     chatApi.send(botId, content, {
       sessionId: reqSessionId,
@@ -1542,6 +1617,7 @@ async function resumeContinuation(sessionId) {
         replying.value = false
         _abortController = null
         _activeTraceId = ''
+        refreshRunningTasks()
       })
   }
 
@@ -1574,6 +1650,19 @@ async function resumeContinuation(sessionId) {
     _outreachTimer = setInterval(pollOutreachMessages, 30000)
   })
 
+  // 运行中任务按 bot 轮询（不依赖当前会话）：挂死正是「没人操作」时最需要看见的，
+  // 只靠 loadSessions 触发会一直停在进入页面那一刻的快照。
+  watch(activeBotId, () => {
+    if (_runningTimer) {
+      clearInterval(_runningTimer)
+      _runningTimer = null
+    }
+    runningTasks.value = []
+    if (!activeBotId.value) return
+    refreshRunningTasks()
+    _runningTimer = setInterval(refreshRunningTasks, 15000)
+  })
+
   return {
     bots, loading, error, replying, activeBotId,
     activeBot, messages, messagesLoading, loadingMore, hasMore,
@@ -1589,6 +1678,9 @@ async function resumeContinuation(sessionId) {
     // 会话管理
     sessions, sessionsLoading, activeSessionId,
     loadSessions, createSession, deleteSession, renameSession, selectSession,
-    setPendingSession, openSessionById
+    setPendingSession, openSessionById,
+    // 运行中的回合（Web 侧人工兜底：看得见 + 停得掉）
+    runningTasks, runningBySession, nowTick,
+    isSessionRunning, abortSession, refreshRunningTasks
   }
 })
