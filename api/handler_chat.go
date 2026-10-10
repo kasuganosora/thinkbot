@@ -179,6 +179,14 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 		OK(c, map[string]any{"aborted": s.botSvc.AbortMessage(req.BotID, req.TraceID)})
 	case req.SessionID != "":
 		n := s.botSvc.AbortSession(req.BotID, req.SessionID)
+		// 可观测：人工兜底中止是判断「哪一会话经常挂住」的唯一来源，必须留痕
+		// （内容型日志用 Infow，且带上操作者，事后能回答「谁停的、停了几个」）。
+		who := "anonymous"
+		if u := currentUser(c); u != nil {
+			who = u.Username
+		}
+		s.logger.Infow("chat abort by session",
+			"bot_id", req.BotID, "session_id", req.SessionID, "aborted_count", n, "user", who)
 		OK(c, map[string]any{"aborted": n > 0, "count": n})
 	default:
 		Fail(c, errs.BadRequest("traceId or sessionId required"))
