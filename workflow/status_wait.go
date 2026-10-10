@@ -55,7 +55,8 @@ const (
 	taskBlockingMaxTimeout = 18 * time.Minute
 
 	// taskReplyReserve 是 task 阻塞等待为本回合剩余工作预留的时间：调用方 ctx 带 deadline
-	// （主链路 LLM 墙钟硬上限 agent.hard_timeout，默认 15 分钟）时，等待最多到 deadline 前
+	// （主链路 LLM 墙钟硬上限 agent.hard_timeout，默认 0=不启用，只有运维显式开启才会带
+	// deadline）时，等待最多到 deadline 前
 	// 这么久就返回 timedOut，让模型还来得及写回复。否则 task 一直阻塞到硬上限，整轮被杀、
 	// 用户收不到任何回复（09-27 线上 2 例：task 阻塞 14 分钟以上）。工作流照常在后台跑，
 	// 结束后经 onWorkflowCompleted 把结果续跑回原会话。
