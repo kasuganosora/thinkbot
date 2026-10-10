@@ -543,14 +543,17 @@ type LLMConfig struct {
 	// 隔离，使压缩摘要在同一会话内跨轮持久、且不串扰并发会话。
 	Compaction *llm.CompactionConfig
 
-	// HardTimeout 主 Agent 编排回路的墙钟硬上限（0=不启用）。
+	// HardTimeout 主 Agent 编排回路的墙钟硬上限（0=不启用，默认）。
+	//
+	// 默认不启用：编排跑到任务自然收尾为止（尽力完成），不按墙钟腰斩、也不让
+	// 用户回「继续」续跑。长任务的时间收口由各环节自身上限负责（task 工具的
+	// taskBlockingMaxTimeout、单步 LLM 客户端超时等）。
+	//
 	// 仅当传入的 ctx 本身没有 deadline 时才生效（若上游 worker/channel 已设
 	// 了 deadline，则尊重上游、不覆盖）——这与 subagent 的 chatWithHardTimeout
 	// 同源设计：兜底「无客户端的后台渠道（如 Misskey）ctx 永不取消」导致的
-	// 编排永久挂起（如某工具/LLM 流假活不返回）。启用后，编排总时长超过该值即
-	// 被强制终止（context.DeadlineExceeded），避免单条消息无限占用 goroutine
-	// 与下游资源。典型值 15min，远大于单步 LLM 客户端超时（~120s）与绝大多数
-	// 正常任务耗时；真要跑更久的任务应拆细而非依赖单次长编排。
+	// 编排永久挂起（如某工具/LLM 流假活不返回），避免单条消息无限占用 goroutine
+	// 与下游资源。仅作为运维显式开启的逃生口（agent.hard_timeout 秒）。
 	HardTimeout time.Duration
 
 	// ApprovalHandler 可选的工具审批处理器（HITL 门禁）。
@@ -1027,10 +1030,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		"streaming", s.config.StreamPublisher != nil)
 
 	var result *llm.GenerateResult
-	// 墙钟硬上限兜底：仅当传入 ctx 无 deadline 时才叠加（尊重上游已有的
+	// 墙钟硬上限兜底（默认不启用）：仅当传入 ctx 无 deadline 时才叠加（尊重上游已有的
 	// deadline，不覆盖）。这与 subagent.chatWithHardTimeout 同源——后台渠道
 	//（Misskey）的 ctx 无客户端可取消，若编排内某工具/LLM 流假活不返回，
 	// 会导致单条消息永久挂起 + goroutine/资源泄漏。此处用墙钟 deadline 收口。
+	// hardTimeout<=0（默认）时不设上限，编排尽力跑完。
 	workCtx, workCancel := ctx, func() {}
 	hardTimeout := s.liveHardTimeout()
 	if hardTimeout > 0 {
@@ -1240,6 +1244,8 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 若 LLM 因达到输出 token 上限被截断，追加提示，
 	// 避免用户误以为任务已完成（实际可能只生成了半成品回复）。
+	// 只陈述事实，不请用户回「继续」续跑——把中断成本转嫁给用户是本项目的
+	// 反模式（用户明确要求：尽力完成，不要老问用户同意）。
 	// 潜水模式不拼接：产出是给机器解析的 JSON，不是给人看的回复。
 	//
 	// 注意：部分 provider（如 GLM-5.2）在「思考+正文」共享预算耗尽时，
@@ -1252,17 +1258,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		hitCap = true
 	}
 	if hitCap && !lurkMode && !heartbeatMode {
-		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。" +
-			"请回复「继续」让我接着完成剩余工作。"
+		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。"
 	}
 
 	// 若编排循环因步数守卫（撞硬上限或陷入重复循环）而停止，追加提示，
-	// 避免用户把「步数预算耗尽、Bot 主动停下」误判为卡死。实际上任务
-	// 可能尚未跑完，回复「继续」即可让 Bot 接着处理剩余工作。
+	// 避免用户把「步数预算耗尽、Bot 主动停下」误判为卡死。只陈述事实与原因，
+	// 不请用户回「继续」续跑（同上：不把中断成本转嫁给用户）。
 	if result.LoopStoppedByGuard && !heartbeatMode {
 		result.Text += "\n\n⚠️ 提示：本次任务因达到工具调用步数上限（" +
-			result.LoopStopReason + "）被暂停，可能尚未全部完成。" +
-			"请回复「继续」让我接着完成剩余工作。"
+			result.LoopStopReason + "）被暂停，可能尚未全部完成。"
 		// 归一结束原因：模型仍在 tool-calls（想继续），但本轮回合已被守卫
 		// 强制结束。置为 stop 以免前端把 finish_reason=tool-calls 误判为
 		// 「Bot 仍在调用工具 / 卡住」。

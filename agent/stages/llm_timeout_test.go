@@ -91,6 +91,12 @@ func TestLLMStage_HardTimeoutRepliesAndRecordsUsage(t *testing.T) {
 			if strings.Contains(text, replyControlDelimiter) {
 				t.Fatalf("reply-control block leaked: %q", text)
 			}
+			// 超时回复只陈述事实，不得要求用户回「继续」/「拆小任务」续跑。
+			for _, banned := range []string{"回复「继续」", "拆小"} {
+				if strings.Contains(text, banned) {
+					t.Fatalf("timeout reply must not ask the user to continue, got %q", text)
+				}
+			}
 			if len(usage.metrics) != 1 || usage.metrics[0].Usage.InputTokens != 1200 || usage.metrics[0].Usage.OutputTokens != 80 {
 				t.Fatalf("usage of the completed step must be recorded once, got %+v", usage.metrics)
 			}
