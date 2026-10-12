@@ -126,7 +126,10 @@ func webFetchToolDef(cfg Config) agenttools.ToolDef {
 					"body":        resp.String(),
 					"bodySize":    len(resp.Body),
 					"truncated":   int64(len(resp.Body)) >= int64(cfg.MaxFetchSize),
-					"finalURL":    reqURL,
+					// 规范化后的**请求** URL（utilhttp.Response 不暴露重定向终点）。
+					// 底层 net/http.Client 默认跟随最多 10 次重定向，所以重定向后的
+					// 实际地址不可得；这里给模型的是它请求的那一个，不是终点。
+					"finalURL": reqURL,
 				}, nil
 			}),
 		},
@@ -159,6 +162,8 @@ func httpStatusText(code int) string {
 	case code >= 400:
 		return "client error"
 	case code >= 300:
+		// 底层 net/http.Client 默认跟随最多 10 次重定向，正常情况下拿不到 3xx；
+		// 走到这里说明重定向链断了（超过上限 / 缺 Location），按错误报给模型。
 		return "redirect not followed"
 	}
 	return "unexpected status"
