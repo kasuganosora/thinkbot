@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -559,6 +560,15 @@ func (s *Server) handleStartBotContainer(c *gin.Context) {
 // the bot running. It must not use the HTTP request context.
 func (s *Server) runContainerStart(botID string, mgr *sandbox.BotWorkspaceManager, ctx context.Context) {
 	defer s.botSvc.FinishContainerStart(botID)
+	// 这个 goroutine 脱离了 gin 的 recovery 中间件：docker / StartBot 里任何 panic 都会
+	// 直接把整个进程带崩（HTTP 请求里的 panic 由中间件兜住，这里的不会）。
+	// 必须自己兜住，并保留 status=starting，让 StartAll / 用户下次点启动还能重试。
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Errorw("async container start panicked",
+				"bot_id", botID, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		}
+	}()
 
 	if err := mgr.StartBot(ctx, botID); err != nil {
 		if ctx.Err() != nil {
