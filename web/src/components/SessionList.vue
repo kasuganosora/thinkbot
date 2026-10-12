@@ -16,6 +16,21 @@
       </div>
     </div>
 
+    <!-- 系统回合：解析不出会话归属（heartbeat / outreach / cron），画不进任何会话，
+         但不显示就永远停不掉——墙钟硬上限关掉后这是唯一能收口它们的入口 -->
+    <div v-if="store.unattributedRunning > 0" class="sess-system-running" data-testid="session-system-running">
+      <span class="sess-running">
+        <i class="running-dot" />系统任务运行中 ×{{ store.unattributedRunning }}
+      </span>
+      <t-button
+        class="sess-stop"
+        theme="danger" variant="text" size="small"
+        data-testid="session-system-stop"
+        title="停止该 Bot 下所有正在运行的回合（含这些系统任务）"
+        @click="onStopAll"
+      >停止</t-button>
+    </div>
+
     <div class="session-list" data-testid="session-list" role="listbox" aria-label="会话列表">
       <template v-if="store.sessions.length">
         <div
@@ -212,6 +227,17 @@ async function onStop(s) {
   }
 }
 
+// 停掉整个 bot 的在跑回合：只有这个入口能收口「没有会话归属」的系统任务
+//（heartbeat / outreach / cron 触发的回合画不进会话列表）。
+async function onStopAll() {
+  try {
+    await store.abortAllRunning()
+    MessagePlugin.success('已停止该 Bot 下所有正在运行的任务')
+  } catch (e) {
+    MessagePlugin.error(typeof e === 'string' ? e : e?.message || '停止失败')
+  }
+}
+
 // 渠道会话类型标签。空串（历史 web 会话 / 未分类）不渲染，避免出现无意义的徽标。
 function channelLabel(s) {
   switch (s.sessionKind) {
@@ -384,6 +410,17 @@ function formatTime(iso) {
 .sess-stop {
   flex-shrink: 0;
   color: var(--bp-danger) !important;
+}
+.sess-system-running {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 8px 6px;
+  padding: 6px 8px;
+  border-radius: var(--bp-radius-xs);
+  background: var(--bp-warning-soft);
+  font-size: 12px;
 }
 .sess-delete {
   opacity: 0;

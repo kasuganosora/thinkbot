@@ -172,25 +172,39 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
-	// traceId 与 sessionId 二选一：给会话维度一个「一次收口」的入口，
-	// 让前端不必先查 active 再逐条 abort（多一跳且会漏掉归属为空的任务）。
+	// 三个粒度：traceId（精确一条）> sessionId（该会话全部）> all（该 bot 全部，
+	// 含解析不出会话归属的系统回合）。墙钟硬上限默认关闭后人工中止是唯一的收口手段，
+	// 三种入口都要留痕（见 abortActor）。
+	who := abortActor(c)
 	switch {
 	case req.TraceID != "":
-		OK(c, map[string]any{"aborted": s.botSvc.AbortMessage(req.BotID, req.TraceID)})
+		aborted := s.botSvc.AbortMessage(req.BotID, req.TraceID)
+		s.logger.Infow("chat abort by trace",
+			"bot_id", req.BotID, "trace_id", req.TraceID, "aborted", aborted, "user", who)
+		OK(c, map[string]any{"aborted": aborted})
 	case req.SessionID != "":
 		n := s.botSvc.AbortSession(req.BotID, req.SessionID)
 		// 可观测：人工兜底中止是判断「哪一会话经常挂住」的唯一来源，必须留痕
 		// （内容型日志用 Infow，且带上操作者，事后能回答「谁停的、停了几个」）。
-		who := "anonymous"
-		if u := currentUser(c); u != nil {
-			who = u.Username
-		}
 		s.logger.Infow("chat abort by session",
 			"bot_id", req.BotID, "session_id", req.SessionID, "aborted_count", n, "user", who)
 		OK(c, map[string]any{"aborted": n > 0, "count": n})
+	case req.All:
+		n := s.botSvc.AbortBot(req.BotID)
+		s.logger.Infow("chat abort all turns of bot",
+			"bot_id", req.BotID, "aborted_count", n, "user", who)
+		OK(c, map[string]any{"aborted": n > 0, "count": n})
 	default:
-		Fail(c, errs.BadRequest("traceId or sessionId required"))
+		Fail(c, errs.BadRequest("traceId, sessionId or all required"))
 	}
+}
+
+// abortActor 取发起中止的操作者用户名（审计用）；未登录时记为 anonymous。
+func abortActor(c *gin.Context) string {
+	if u := currentUser(c); u != nil && u.Username != "" {
+		return u.Username
+	}
+	return "anonymous"
 }
 
 // handleChatAppend 在一条正在执行的聊天（生成中）过程中，接收用户中途追加的内容，
@@ -249,7 +263,14 @@ func (s *Server) handleChatActiveTasks(c *gin.Context) {
 	for _, t := range tasks {
 		traceIDs = append(traceIDs, t.TraceID)
 	}
-	OK(c, map[string]any{"tasks": tasks, "traceIds": traceIDs})
+	// unattributed：解析不出会话归属、画不进会话列表的系统回合（heartbeat / outreach /
+	// cron）。前端据此显示「系统任务运行中」并给出 bot 级中止入口，避免「看得见的都停了、
+	// 看不见的还在跑」。只在未指定 sessionId（bot 级查询）时有意义。
+	resp := map[string]any{"tasks": tasks, "traceIds": traceIDs}
+	if sessionID == "" {
+		resp["unattributed"] = s.botSvc.UnattributedRunning(botID)
+	}
+	OK(c, resp)
 }
 
 // handleChatResume 按 traceID 重连续流（SSE）。
