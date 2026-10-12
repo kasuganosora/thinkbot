@@ -271,6 +271,13 @@ func TestReplyControl_RealLLM(t *testing.T) {
 			}
 		}
 		if replied == nil {
+			// 真实 LLM 每次输出不同，失败时必须留下原始产出，否则无法区分
+			// 「门控回归」与「模型这次没按格式输出」（flaky）。
+			if v, ok := out.Get("llm.result"); ok {
+				if res, ok := v.(*llm.GenerateResult); ok {
+					t.Logf("no reply — model raw output:\n%s", res.Text)
+				}
+			}
 			t.Fatalf("REGRESSED: mixed scenario produced no reply — model should still post the public part")
 		}
 		payload := fmt.Sprintf("%v", replied.Payload)
