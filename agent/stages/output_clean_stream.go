@@ -45,7 +45,12 @@ type OutputCleanStreamFilter struct {
 	cur          string         // 当前 <public> 区块已清洗的内文（不含尾部空白）
 	hold         bool           // 当前区块尚未确定不是重复：内文只进 cur，暂不推送
 	dupCandidate bool           // 扣住的区块前缀已与某个已推送区块相似：等闭合后裁决
-	trail        string         // </public> 之后、下一标签之前的裸文本（Flush 时若实质则补发）
+	released     bool           // 当前区块已提前放行（内容已推给用户，收不回来）
+	// released 的区块要到 closePublic 才记入 kept，所以「新区块要不要先扣住判重」不能只
+	// 看 kept.len()——否则已推送但尚未闭合的区块不算数。当前代码路径里这段窗口不可达
+	//（未闭合时新的 <public> 开标签按残留标签忽略，闭合时 closePublic 已 add），
+	// 这是防御性加固：将来若允许 public 嵌套/重入，判重不会凭空失效。
+	trail string // </public> 之后、下一标签之前的裸文本（Flush 时若实质则补发）
 }
 
 type ocMode int
@@ -284,8 +289,9 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 			f.pubContent = false
 			f.cur = ""
 			f.dupCandidate = false
-			// 已有推送过的区块：新区块可能是重复，先扣住等判定。
-			f.hold = f.kept.len() > 0
+			// 已有推送过的区块（含「已提前放行但还没闭合」的）→ 新区块可能是重复，先扣住等判定。
+			f.hold = f.kept.len() > 0 || f.released
+			f.released = false
 		}
 		// 已在 <public> 内：嵌套的字面开标签按残留标签去掉。
 	case tagPublicClose:
@@ -298,6 +304,8 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 
 // closePublic 结束当前 <public> 区块并回到区块外（继续等下一个区块）。
 // 非空区块记入 kept；仍在扣住的区块此时按完整规则裁决：不重复则补发，重复则丢弃。
+// 已提前放行（released，hold=false）的区块一律记入 kept——内容已经推给用户，
+// 此时再判重复只会让「流式看到的」和「落库/渠道发出的」对不上。
 func (f *OutputCleanStreamFilter) closePublic(out *strings.Builder) {
 	f.ws = ""
 	f.mode = ocOutside
@@ -310,7 +318,7 @@ func (f *OutputCleanStreamFilter) closePublic(out *strings.Builder) {
 			f.kept.add(f.cur)
 		}
 	}
-	f.cur, f.hold, f.dupCandidate, f.pubContent = "", false, false, false
+	f.cur, f.hold, f.dupCandidate, f.pubContent, f.released = "", false, false, false, false
 }
 
 // emit 放行一段已确认不含标签的正文：处理首部/尾部空白，并按模式决定是否可见。
@@ -357,6 +365,7 @@ func (f *OutputCleanStreamFilter) emit(s string, out *strings.Builder) {
 				return // 还不能确定 / 可能是重复：继续扣住
 			}
 			f.hold = false
+			f.released = true // 已推出去：即便闭合时判为重复也收不回来，必须照发
 			out.WriteString("\n\n")
 			out.WriteString(f.cur)
 			return

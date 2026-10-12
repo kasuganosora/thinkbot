@@ -106,9 +106,13 @@ func stripReplyControlSuffix(s string) string {
 
 // significantTrailingPublic 判断 </public> 后的裸文本是否值得并入公开回复。
 // 纯空白、纯标点/符号碎片（如残留的「（」）、以及疑似裸思考泄漏的文本一律丢弃。
+//
+// 泄漏判定用 looksLikePrivateTrailing（比 looksLikeInternalThinking 多中文独白元话语、
+// 私有标签残片、通用协议标记）：3987099 把「标签外文本并入公开回复」这条路径从
+// fail-closed 放宽了，闸门必须比路径 3 更严，否则中文 bot 的心里话会原样发到频道。
 func significantTrailingPublic(s string) bool {
 	s = strings.TrimSpace(stripReplyControlSuffix(s))
-	if s == "" || looksLikeInternalThinking(s) {
+	if s == "" || looksLikePrivateTrailing(s) {
 		return false
 	}
 	return len(normalizeForDedup(s)) > 0

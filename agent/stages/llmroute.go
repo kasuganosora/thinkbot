@@ -326,6 +326,13 @@ var (
 	nakedPlanningRe = regexp.MustCompile(`(?is)(?:but|however|actually)[, ]+i\s|\bi\s+(?:failed|should|need\s+to|want\s+to|must|realiz(?:e|ed)|think|decided|meant|believe)\b.*(?:options?:|my\s+plan|step\s*\d)`)
 )
 
+// slowTurnLogThreshold 是单轮编排耗时超过此值就记一条 Infow 的阈值。
+//
+// 墙钟硬上限默认关闭后（3655d0f），编排不再被 15 分钟腰斩，长回合只会越来越多；
+// 取 5 分钟作为「该看一眼」的线：远大于正常回合（秒级~分钟级），又远小于用户能忍受的
+// 无反馈时长。命中即说明这一轮值得排查（工具假活 / 步数守卫兜底 / 模型空转）。
+const slowTurnLogThreshold = 5 * time.Minute
+
 // looksLikeInternalThinking 判断清洗后的纯文本是否疑似模型未打标签的内心思考泄漏。
 // 仅用于 extractPublicReply 路径 3 的 fail-closed 兜底；命中即不出站。
 func looksLikeInternalThinking(clean string) bool {
@@ -339,6 +346,47 @@ func looksLikeInternalThinking(clean string) bool {
 		return true
 	}
 	return false
+}
+
+// 私有标签残片 / 协议标记 / 中文内心独白元话语：供 looksLikePrivateTrailing 使用。
+//
+// 背景（2026-10-12 复查 3987099）：把 </public> 之后的裸文本并入公开回复，等于把路径 1
+// 从「只发 <public> 内文」放宽成「标签外的实质文本也发」。上面三条检测全是英文信号
+// （nakedPlanningRe 要求 "but/however + I"、"I should ... Options:/Step N"），
+// 中文 bot 的内心独白一句都命中不了 —— 漏发心里话的风险被这次放宽放大了。
+// 下面补的是「几乎不可能出现在给用户的回复里」的信号，刻意保守：
+// 宁可漏判（多发一段文字），也不要误判（把答复丢回 3987099 之前的事故状态）。
+var (
+	// privateTagFragmentRe：畸形/未闭合的私有标签残片（完整的 <internal> 已由
+	// cleanPublicBlock 的 StripInternalTags 剥掉，这里只兜残片）。
+	privateTagFragmentRe = regexp.MustCompile(`(?i)</?internal`)
+	// protocolMarkerRe：任意 @@XXX@@ 形式的协议标记（不止 REPLY_CONTROL）。
+	protocolMarkerRe = regexp.MustCompile(`@@[A-Z][A-Z0-9_]{2,}@@`)
+	// soliloquyRe：中文内心独白元话语。这些表述在正常回复里几乎不出现
+	//（除非用户要求 bot 自言自语），命中即几乎可以确定是「写给自己看的」。
+	//
+	// 刻意收紧「告诉类」表述：必须指向第三方（不能告诉他 / 不应该告诉用户），
+	// 「这个我不能告诉你」是 bot 对当前对话者说的正常拒绝，不能被误判成心里话。
+	soliloquyRe = regexp.MustCompile(`(?i)(内心独白|心里话|心里想|自言自语|我在内心|我暗自|暗想|对自己说|跟自己说|默念|私底下想想|不应该?告诉(?:他|她|用户|别人|对方)|不能告诉(?:他|她|用户|别人|对方)|别说出去|不要说出去|这是(?:我的?)?内心|internal\s*monologue)`)
+)
+
+// looksLikePrivateTrailing 判断 </public> 之后的裸文本是否疑似「不能外发」的内容。
+//
+// 与 looksLikeInternalThinking 的关系：覆盖它全部信号，并加上私有标签残片、通用协议标记、
+// 中文独白元话语。只用于 significantTrailingPublic（路径 1 的 trailing 闸门）——
+// 不动路径 3，因为路径 3 误判的代价是整条回复不出站（用户以为 bot 坏了），
+// 而 trailing 误判只是回到 3987099 之前的旧行为（不并这段文字）。
+func looksLikePrivateTrailing(s string) bool {
+	if privateTagFragmentRe.MatchString(s) {
+		return true
+	}
+	if protocolMarkerRe.MatchString(s) {
+		return true
+	}
+	if soliloquyRe.MatchString(s) {
+		return true
+	}
+	return looksLikeInternalThinking(s)
 }
 
 // extractPublicReply 从清洗后的干净正文里提取「应公开发送」的内容（取巧三态）：
@@ -355,6 +403,18 @@ func looksLikeInternalThinking(clean string) bool {
 // 无论哪条路径，私有标签（心里话）都不会进入出站 payload。
 // Web 流式（OutputCleanStreamFilter）按同一规则推送，渠道发送 / 落库 / 流式三处一致。
 func extractPublicReply(clean string) string {
+	text, _, _ := extractPublicReplyDetailed(clean)
+	return text
+}
+
+// extractPublicReplyDetailed 与 extractPublicReply 同逻辑，额外返回 </public> 之后那段
+// 裸文本的处置结果供调用点审计：
+//   - trailingLen：剥离 reply-control 与残留标签后，标签外裸文本的字符数（0 表示没有）；
+//   - adopted：这段裸文本是否被并入公开回复（false = 被闸门拦下或判为重复）。
+//
+// 存在理由（2026-10-12 复查 3987099）：「标签外文本也发」是从 fail-closed 放宽出来的，
+// 放宽就必须可观测——否则既不知道这条路径实际触发多频繁，也不知道闸门拦下了什么。
+func extractPublicReplyDetailed(clean string) (text string, trailingLen int, adopted bool) {
 	// 路径 1：<public> 公开区优先；附带末个 </public> 后的实质裸文本（最防泄漏前提下
 	// 不丢标签外答复）。位于顶层 <internal> 内的 <public> 属于心里话，不取。
 	if blocks, trailing := publicBlockContentsAndTail(clean); len(blocks) > 0 {
@@ -368,22 +428,53 @@ func extractPublicReply(clean string) string {
 			}
 			kept.add(c)
 		}
-		if t := cleanPublicBlock(stripReplyControlSuffix(trailing)); significantTrailingPublic(t) && !kept.isDuplicate(t) {
+		t := cleanPublicBlock(stripReplyControlSuffix(trailing))
+		trailingLen = len(strings.TrimSpace(t))
+		if trailingLen > 0 && significantTrailingPublic(t) && !kept.isDuplicate(t) {
 			kept.add(t)
+			adopted = true
 		}
-		return kept.join()
+		return kept.join(), trailingLen, adopted
 	}
 	// 路径 2：含 <internal> 私密标签却没给 <public> 公开出口 → 整段不发。
 	if internalOnlyRe.MatchString(clean) {
-		return ""
+		return "", 0, false
 	}
 	// 路径 3：纯文本（无标签）→ 仍有概率含模型偶发的畸形标签（如 /public>）或 HTML，
 	// 以及未打标签的内心思考（裸思考）。裸思考若原样出站会暴露内部推理、显得模型退化，
 	// 故先做思考泄漏检测：命中高置信度信号则 fail-closed（返回空），与路径 2 一致。
 	if looksLikeInternalThinking(clean) {
-		return "" // 裸思考泄漏：fail-closed，绝不把内部推理发给用户
+		return "", 0, false // 裸思考泄漏：fail-closed，绝不把内部推理发给用户
 	}
-	return strings.TrimSpace(strayTagRe.ReplaceAllString(clean, ""))
+	return strings.TrimSpace(strayTagRe.ReplaceAllString(clean, "")), 0, false
+}
+
+// publicReplyWithAudit 提取公开回复，并在「</public> 之后还有实质裸文本」时留一条日志。
+//
+// 3987099 起这段标签外文本会被并入公开回复（此前一律丢弃），因此每一次处置都要可追溯：
+// trailing_adopted=true 是「多发了一段」，false 是「闸门拦下了」。
+// 日志只带 16 字前缀定位，不写全文——万一那真是心里话，不该再往日志里抄一份。
+func (s *LLMStage) publicReplyWithAudit(ctx context.Context, env *core.Envelope, clean string) string {
+	text, trailingLen, adopted := extractPublicReplyDetailed(clean)
+	if trailingLen == 0 || env == nil {
+		return text
+	}
+	head := strings.TrimSpace(text)
+	if head == "" {
+		head = strings.TrimSpace(clean)
+	}
+	runes := []rune(head)
+	preview := string(runes)
+	if len(runes) > 16 {
+		preview = string(runes[:16])
+	}
+	traceid.WithLoggerFrom(ctx, s.logger).Infow("public reply: trailing text after </public>",
+		"message_id", env.Message.ID,
+		"trailing_len", trailingLen,
+		"trailing_adopted", adopted,
+		"public_len", len(text),
+		"public_head", preview)
+	return text
 }
 
 // CleanOutboundText 是所有渠道共用的出站正文清洗（门控 / <public> 提取之前的那一段），
@@ -759,6 +850,26 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	defer span.End()
 
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
+
+	// 单轮耗时观测：3655d0f 起墙钟硬上限默认关闭（defaultLLMHardTimeout=0，编排尽力跑完），
+	// 时间收口只剩步数守卫与单步 LLM 客户端超时。没有墙钟兜底就必须留痕——否则「这一轮
+	// 到底跑了多久、是不是挂住了」只能靠用户盯着前端徽标猜。超过阈值记一条 Infow，
+	// 正常回合只在 Debug 级留一句，不刷屏。
+	turnStarted := time.Now()
+	defer func() {
+		elapsed := time.Since(turnStarted)
+		if elapsed >= slowTurnLogThreshold {
+			logger.Infow("llm stage: slow turn",
+				"message_id", env.Message.ID,
+				"bot_id", env.Message.BotID,
+				"elapsed", elapsed.String(),
+				"elapsed_ms", elapsed.Milliseconds())
+			return
+		}
+		logger.Debugw("llm stage: turn finished",
+			"message_id", env.Message.ID,
+			"elapsed_ms", elapsed.Milliseconds())
+	}()
 
 	// 标记主回复功能维度为 "reply"：使「按功能额度」与计费看板能区分用户回复与其他功能
 	// （dreaming / subagent / memory 等）。嵌套调用（subagent / workflow / memory）会在各自
@@ -1377,7 +1488,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			if pub == "" && isPrivateChat(env) {
 				// 私聊兜底：缺失控制块也不该让 bot 一言不发（用户会以为 bot 坏了），
 				// 把清洗后的纯文本当作回复发出（剥离 thinking/内部标记/私密标签）。
-				pub = extractPublicReply(clean)
+				pub = s.publicReplyWithAudit(ctx, env, clean)
 			}
 			if pub == "" {
 				// 无显式公开区、且私聊兜底也无内容 → fail-closed，不出站（独白绝不外发）。
@@ -1404,7 +1515,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				span.SetAttributes(attribute.Bool("reply.outreach_force_send", true))
 				logger.Infow("outreach force-send: ignoring model send=false",
 					"message_id", env.Message.ID)
-				replyText = extractPublicReply(clean)
+				replyText = s.publicReplyWithAudit(ctx, env, clean)
 				if strings.TrimSpace(replyText) == "" {
 					replyText = strings.TrimSpace(clean)
 				}
@@ -1415,7 +1526,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				// 且私聊无「把内心独白发到公共时间线」的泄露风险。尽量提取可发内容（<public>
 				// 优先，否则清洗后的纯文本）；提取不到任何内容（如模型只写了 <internal> 私密
 				// 心话而无 <public>）时才仍不发出——那是「没话可说」，而非「拒绝回复」。
-				pub := extractPublicReply(clean)
+				pub := s.publicReplyWithAudit(ctx, env, clean)
 				if strings.TrimSpace(pub) == "" {
 					span.SetAttributes(attribute.Bool("reply.private_no_postable_content", true))
 					logger.Infow("reply suppressed: private chat but no postable content",
@@ -1437,7 +1548,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 		default:
 			// send:true —— 提取应公开发送的内容（见 extractPublicReply 的三态逻辑）。
-			replyText = extractPublicReply(clean)
+			replyText = s.publicReplyWithAudit(ctx, env, clean)
 			if strings.TrimSpace(replyText) == "" {
 				// send:true 但提取不到公开内容：模型只写了 <internal>（忘了 <public>），
 				// 或正文确实为空。两种情况都不应外发（fail-closed，绝不泄漏私密）。
