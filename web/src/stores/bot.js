@@ -49,6 +49,9 @@ export const useBotStore = defineStore('bot', () => {
   // 「哪些会话正在跑 + 跑了多久」，供会话列表挂徽标并就地中止——用户中止时只认
   // 「这个会话别再跑了」，不该被要求先去查 traceID。
   const runningTasks = ref([]) // [{ traceId, sessionId, startedAt, elapsedMs }]
+  // 解析不出会话归属的系统回合条数（heartbeat / outreach / cron）：画不进会话列表，
+  // 但同样会挂住 goroutine，只能经 bot 级入口收口，所以单独计数显示。
+  const unattributedRunning = ref(0)
   // 秒级心跳：只在有运行任务时跑，驱动徽标上的时长走动（15s 轮询不足以让人判断挂死）
   const nowTick = ref(Date.now())
   let _runningTimer = null
@@ -58,13 +61,30 @@ export const useBotStore = defineStore('bot', () => {
     const botId = activeBotId.value
     if (!botId) {
       runningTasks.value = []
+      unattributedRunning.value = 0
       return
     }
     try {
-      runningTasks.value = await chatApi.activeTasks(botId)
+      const { tasks, unattributed } = await chatApi.activeTasksWithMeta(botId)
+      runningTasks.value = tasks
+      unattributedRunning.value = unattributed
     } catch {
       // 空闲轮询失败不打扰用户
     }
+  }
+
+  /** 中止该 bot 下所有在跑的回合（含归属为空的系统回合）。 */
+  async function abortAllRunning() {
+    const botId = activeBotId.value
+    if (!botId) return false
+    _abortStreaming()
+    try {
+      await chatApi.abortAll(botId)
+    } catch {
+      // 中止失败不弹错：多数情况是任务刚结束（已无 cancel 可找）
+    }
+    await refreshRunningTasks()
+    return true
   }
 
   // 按会话聚合运行中任务：{ [sessionId]: { count, startedAt } }
@@ -1658,6 +1678,7 @@ async function resumeContinuation(sessionId) {
       _runningTimer = null
     }
     runningTasks.value = []
+    unattributedRunning.value = 0
     if (!activeBotId.value) return
     refreshRunningTasks()
     _runningTimer = setInterval(refreshRunningTasks, 15000)
@@ -1680,7 +1701,7 @@ async function resumeContinuation(sessionId) {
     loadSessions, createSession, deleteSession, renameSession, selectSession,
     setPendingSession, openSessionById,
     // 运行中的回合（Web 侧人工兜底：看得见 + 停得掉）
-    runningTasks, runningBySession, nowTick,
-    isSessionRunning, abortSession, refreshRunningTasks
+    runningTasks, runningBySession, nowTick, unattributedRunning,
+    isSessionRunning, abortSession, abortAllRunning, refreshRunningTasks
   }
 })

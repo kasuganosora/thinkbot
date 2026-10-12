@@ -762,8 +762,11 @@ func (s *BotService) ActiveMessageTasks(botID, sessionID string) []ActiveMessage
 //
 // 存在意义：墙钟硬上限默认关闭后，一轮编排可能长时间不返回；Web 是唯一的人工
 // 兜底通道。用户中止时关心的是「这个会话别再跑了」，而不是去认 traceID——
-// 按 traceID 逐个 abort 要求前端先查 active 再循环，多一跳且容易漏掉归属为
-// 空的续跑任务，故在会话维度一次性收口。
+// 按 traceID 逐个 abort 要求前端先查 active 再循环，多一跳。
+//
+// 边界：归属为空（解析不出会话 ID）的任务按会话过滤时被排除，它们归 AbortBot 管
+// （heartbeat / outreach / cron 触发的消息本就不属于任何前端会话，用户在会话列表里
+// 看不到它们，只有 bot 级入口能停）。
 func (s *BotService) AbortSession(botID, sessionID string) int {
 	if botID == "" || sessionID == "" {
 		return 0
@@ -771,6 +774,57 @@ func (s *BotService) AbortSession(botID, sessionID string) int {
 	// 复用 ActiveMessageTasks 的归属解析（内存映射 → DB 回退 → traceID 即数字
 	// sessionID），避免这里另写一套判定而与列表显示不一致。
 	tasks := s.ActiveMessageTasks(botID, sessionID)
+	n := 0
+	for _, t := range tasks {
+		if s.AbortMessage(botID, t.TraceID) {
+			n++
+		}
+	}
+	return n
+}
+
+// UnattributedRunning 返回该 bot 下「解析不出会话归属」的在跑任务条数。
+//
+// heartbeat / outreach / cron / 渠道入站早期注册的回合没有前端会话 ID，
+// 会话维度的徽标画不到它们头上，但它们同样会挂住 goroutine。前端据此显示一条
+// 「系统任务运行中」并可经 AbortBot 停掉，避免「看得见的都停了、看不见的还在跑」。
+func (s *BotService) UnattributedRunning(botID string) int {
+	if botID == "" {
+		return 0
+	}
+	// 内存里没记会话的，再按 ActiveMessageTasks 的回退规则（DB / traceID 即会话）确认一次，
+	// 能解析出来的不算「无归属」，避免出现两条互相矛盾的入口。
+	resolved := make(map[string]bool)
+	for _, t := range s.ActiveMessageTasks(botID, "") {
+		if t.SessionID != "" {
+			resolved[t.TraceID] = true
+		}
+	}
+	prefix := botID + ":"
+	cnt := 0
+	s.mu.RLock()
+	for key := range s.messageCancels {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if s.messageSessions[key] == "" && !resolved[strings.TrimPrefix(key, prefix)] {
+			cnt++
+		}
+	}
+	s.mu.RUnlock()
+	return cnt
+}
+
+// AbortBot 中止该 bot 下**所有**仍在执行的消息（含解析不出会话归属的），返回中止条数。
+//
+// 与 AbortSession 的分工：会话维度解决「用户在会话列表里看到的那一轮」，
+// bot 维度兜底「没有任何会话归属的系统回合」（heartbeat / outreach / cron），
+// 以及用户想一次性收口的场景。
+func (s *BotService) AbortBot(botID string) int {
+	if botID == "" {
+		return 0
+	}
+	tasks := s.ActiveMessageTasks(botID, "")
 	n := 0
 	for _, t := range tasks {
 		if s.AbortMessage(botID, t.TraceID) {
@@ -2993,6 +3047,9 @@ func (s *BotService) StopBot(id string) {
 			pendingCancels = append(pendingCancels, cancel)
 			delete(s.messageCancels, key)
 			delete(s.messageSessions, key)
+			// 一并清掉计时：否则 bot 反复启停会在 messageStarts 里留下永不回收的条目
+			// （遍历源是 messageCancels，不影响显示，但长跑进程会缓慢累积）。
+			delete(s.messageStarts, key)
 		}
 	}
 	s.mu.Unlock()

@@ -937,25 +937,54 @@ export const chatApi = {
    * @returns {Promise<Array<{traceId: string, sessionId?: string, startedAt?: string, elapsedMs: number}>>}
    */
   async activeTasks(botId, sessionId) {
-    if (!botId) return []
-    if (USE_MOCK) return []
+    return (await this.activeTasksWithMeta(botId, sessionId)).tasks
+  },
+  /**
+   * 同 activeTasks，额外返回 unattributed：解析不出会话归属、画不进会话列表的
+   * 系统回合条数（heartbeat / outreach / cron 触发）。它们同样会挂住 goroutine，
+   * 只有 bot 级入口能停，所以前端必须能看见它们。
+   * @param {string} botId
+   * @param {string|number} [sessionId]
+   * @returns {Promise<{tasks: Array, unattributed: number}>}
+   */
+  async activeTasksWithMeta(botId, sessionId) {
+    if (!botId) return { tasks: [], unattributed: 0 }
+    if (USE_MOCK) return { tasks: [], unattributed: 0 }
     try {
       const qs = new URLSearchParams({ botId })
       if (sessionId) qs.set('sessionId', String(sessionId))
       const data = await request('GET', `/api/chat/active?${qs.toString()}`)
+      const unattributed = Number(data?.unattributed) || 0
       if (Array.isArray(data?.tasks) && data.tasks.length) {
-        return data.tasks.filter(t => t && t.traceId).map(t => ({
-          traceId: String(t.traceId),
-          sessionId: t.sessionId != null ? String(t.sessionId) : '',
-          startedAt: t.startedAt || '',
-          elapsedMs: Number(t.elapsedMs) || 0,
-        }))
+        return {
+          unattributed,
+          tasks: data.tasks.filter(t => t && t.traceId).map(t => ({
+            traceId: String(t.traceId),
+            sessionId: t.sessionId != null ? String(t.sessionId) : '',
+            startedAt: t.startedAt || '',
+            elapsedMs: Number(t.elapsedMs) || 0,
+          })),
+        }
       }
       // 兼容旧后端：只有 traceIds
-      return (data?.traceIds || []).filter(Boolean).map(id => ({ traceId: String(id), sessionId: '', startedAt: '', elapsedMs: 0 }))
+      return {
+        unattributed,
+        tasks: (data?.traceIds || []).filter(Boolean).map(id => ({ traceId: String(id), sessionId: '', startedAt: '', elapsedMs: 0 })),
+      }
     } catch {
-      return []
+      return { tasks: [], unattributed: 0 }
     }
+  },
+  /**
+   * 中止该 bot 下**所有**在跑的回合（含解析不出会话归属的系统回合）。
+   * 与 abortSession 的区别：连「归属为空」的 heartbeat / cron 回合一起收口。
+   * @param {string} botId
+   * @returns {Promise<{aborted: boolean, count: number}>}
+   */
+  abortAll(botId) {
+    if (!botId) return Promise.resolve({ aborted: false, count: 0 })
+    if (USE_MOCK) return mockResolve(() => ({ aborted: true, count: 1 }))
+    return request('POST', '/api/chat/abort', { botId, all: true })
   },
   /**
    * 按 traceID 重连续流（断连后重连，恢复对后台仍在运行任务的进度展示与终止能力）。

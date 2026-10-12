@@ -105,15 +105,19 @@ type ChatReq struct {
 
 // ChatAbortReq 中止一条流式聊天请求。
 //
-// traceId 与 sessionId 二选一（都不传返回 400）：
+// traceId / sessionId / all 三选一（都不传返回 400），优先级同顺序：
 //   - traceId：中止精确一条在跑的回合（原有语义，前端「停止生成」用这个）；
 //   - sessionId：中止该会话下**所有**在跑的回合（会话列表的兜底通道，见
 //     BotService.AbortSession）。墙钟硬上限默认关闭后，一轮可能长时间不返回，
-//     用户中止时只认「这个会话别再跑了」，不该被要求先去查 traceID。
+//     用户中止时只认「这个会话别再跑了」，不该被要求先去查 traceID；
+//   - all：中止该 bot 下所有回合（见 BotService.AbortBot）。兜底「解析不出会话归属」
+//     的系统回合（heartbeat / outreach / cron）——它们画不进会话列表，却同样会挂住，
+//     只有 bot 级入口能收口。
 type ChatAbortReq struct {
 	BotID     string `json:"botId" binding:"required"`
 	TraceID   string `json:"traceId,omitempty"`
 	SessionID string `json:"sessionId,omitempty"`
+	All       bool   `json:"all,omitempty"`
 }
 
 // ChatAppendReq 在一条正在执行的聊天（生成中）过程中，用户中途追加的内容。
