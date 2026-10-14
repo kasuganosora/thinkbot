@@ -33,6 +33,7 @@
       </span>
 
       <span v-if="headHint" class="tc-summary" :title="headHintFull">{{ headHint }}</span>
+      <span v-if="stateLabel" class="tc-state-label" :class="`label-${state}`">{{ stateLabel }}</span>
       <span v-if="state !== 'running' && hasDiff" class="tc-diff">
         <span v-if="diffAdded" class="add">+{{ call.added }}</span>
         <span v-if="diffRemoved" class="del">-{{ call.removed }}</span>
@@ -52,12 +53,17 @@
       v-if="canExpand"
       class="tc-body-wrap"
       :class="{ 'is-open': expanded }"
+      :inert="!expanded"
+      :aria-hidden="!expanded"
       :data-testid="`chat-toolcall-body-${call.id}`"
     >
       <div class="tc-body-inner">
         <div class="tc-body">
           <div v-if="state === 'timeout'" class="tc-interrupt">
-            执行超时：连接可能已中断，结果未回传。请刷新对话或重新执行。
+            本次执行已超时，请查看详情确认结果。
+          </div>
+          <div v-else-if="stuck && state === 'running'" class="tc-interrupt">
+            等待结果较久，任务仍在运行。可在会话列表中停止任务。
           </div>
 
           <div
@@ -316,10 +322,9 @@ function armStuckTimer() {
   }
 }
 
-const state = computed(() => {
-  if (stuck.value && props.call.status === 'running') return 'timeout'
-  return props.call.status || 'success'
-})
+// 本地计时只能说明响应较慢，工具的执行终态仍以后端为准。
+const state = computed(() => props.call.status || 'success')
+const stateLabel = computed(() => ({ error: '失败', timeout: '超时', killed: '已停止', cancelled: '已取消', superseded: '已取代' })[state.value] || '')
 
 const isChoiceTool = computed(() => toolKey(props.call.name) === 'user_choice')
 const isQuietChip = computed(() => isChoiceTool.value && hasInlineChoice.value)
@@ -334,7 +339,8 @@ const displayTitle = computed(() => {
   if (isChoiceTool.value) {
     if (state.value === 'running') return '正在提问'
     if (state.value === 'timeout') return '提问超时'
-    if (state.value === 'error' || state.value === 'killed') return '提问失败'
+    if (state.value === 'cancelled' || state.value === 'killed') return '提问已取消'
+    if (state.value === 'error') return '提问失败'
     if (state.value === 'success' || state.value === 'superseded') return '已提问'
     return '向你提问'
   }
@@ -505,7 +511,7 @@ const genericView = computed(() => {
 
   const errStr = firstString(out, ['error', 'message', 'stderr'])
     || (typeof props.call.error === 'string' ? props.call.error : '')
-  if ((state.value === 'error' || state.value === 'killed') && errStr) {
+  if (['error', 'timeout', 'killed', 'cancelled'].includes(state.value) && errStr) {
     const cut = truncateText(errStr)
     return { kind: 'error', hits: [], lines: cut.text.split('\n'), text: '', truncated: cut.truncated, hitsTruncated: false }
   }
@@ -662,6 +668,7 @@ const headIcon = computed(() => {
     case 'success': return 'check-circle'
     case 'error': return 'error-circle'
     case 'killed':
+    case 'cancelled':
     case 'timeout':
       return 'stop-circle'
     case 'superseded':
@@ -761,8 +768,12 @@ watch(() => props.call, armStuckTimer)
 }
 .icon-success { color: var(--bp-label-tertiary); }
 .icon-error { color: var(--bp-danger); }
+.icon-timeout, .icon-killed, .icon-cancelled { color: var(--bp-warning); }
 .icon-superseded { color: var(--bp-label-quaternary); }
 .icon-running { color: var(--bp-accent); }
+.tc-state-label { flex-shrink: 0; font-size: 11px; color: var(--bp-label-secondary); }
+.label-error { color: var(--bp-danger); }
+.label-timeout, .label-killed, .label-cancelled { color: var(--bp-warning); }
 
 .tc-spinner, .file-spinner {
   width: 13px;

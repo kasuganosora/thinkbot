@@ -32,8 +32,8 @@ web/
     ├── App.vue
     ├── layouts/            # MainLayout：登录后的整体框架
     ├── router/             # 路由表 + 登录守卫与 admin 权限校验
-    ├── stores/             # Pinia：user（登录态/角色）、bot（会话与消息）
-    ├── api/                # http.js（请求封装）、services.js（接口入口）、mockDb.js（mock 数据）
+    ├── stores/             # Pinia：user（登录态）、bot（会话与消息）、layout（分栏与抽屉）
+    ├── api/                # http.js（请求封装）、chatStream.js（SSE 读取）、services.js（接口入口）
     ├── views/              # 页面级视图（见下）
     ├── components/         # 通用组件 + bot/（Bot 配置分页，16 个）+ common/（XtermConsole）
     ├── i18n/               # toolLabels：工具名 → 显示文案映射
@@ -68,6 +68,7 @@ npm install     # 安装依赖
 npm run dev     # 本地开发，监听 0.0.0.0:54727，/api 代理到 http://localhost:8080
 npm run build   # 生产构建
 npm run preview # 预览构建产物
+npm run test:regression # 图标、产物、工具交互、SSE 与会话状态回归
 ```
 
 开发要点（来自 `vite.config.js`）：
@@ -75,6 +76,21 @@ npm run preview # 预览构建产物
 - 路径别名 `@` → `./src`；
 - 构建时注入 `import.meta.env.APP_COMMIT`（git short commit，取不到则为 `unknown`）；
 - 后端接口未就绪时，API 层走 mock（见 `src/api/http.js` 的 `USE_MOCK` 与 `src/api/mockDb.js`；当前 `USE_MOCK` 为 `false`，走真实后端）。
+- 应用图标由 `components/common/appIcons.js` 静态导入，`AppIcon` 兼容原有 `<t-icon name="…">`。新增图标时同步注册，避免重新引入外部 CDN sprite 依赖。
+
+## 聊天与工作区回归
+
+`npm run test:regression` 使用现有 Node/Vue/Vite 依赖，在 HTTP 边界替换测试响应，不需要启动模型或安装浏览器。它覆盖流式回复断线、重复事件、历史合并、过期请求、草稿恢复和工具交互等状态行为。
+
+浏览器验收建议覆盖 1920、1440、1280、768、390px：
+
+- 切换 Bot、会话、浏览器返回与跨 Bot 深链接后，标题、消息、草稿归属一致；导航切换不停止后台任务。
+- 正在阅读旧消息时，流结束不抢滚动；切回会话恢复阅读位置；发送失败保留原会话草稿与附件。
+- 工作区按需加载，收起再开保留终端输出；切换 Bot 时文件、上传目的地与请求响应保持各自归属。
+- 上传部分失败可单项重试；文本预览限制为前 256 KB，图片为 5 MB，HTML/SVG 以转义文本展示。
+- 断开 SSE 后仅恢复订阅，不重新发送任务；完成回复以服务端完整快照为准；连接恢复失败有明确入口。
+
+右侧文件与终端属于 **Bot 共享工作区**。消息产物入口只来自该回复成功写入的文件，打开的是文件当前版本。Status 中累计 token 用量与当前上下文占用分开显示，后端未提供的实时占用保持「暂无数据」。草稿、阅读位置及各 Bot 的目录状态保留在当前页面内。
 
 ## 构建产物与 static/ 的关系
 

@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"sync"
@@ -121,7 +122,7 @@ type Event struct {
 //	// Pipeline/Bot 中：
 //	bus.Publish(ctx, Event{Type: EventStageEnter, TraceID: traceID, ...})
 type EventBus interface {
-	// Publish 发布事件。非阻塞——如果订阅者的 channel 已满则丢弃。
+	// Publish 发布事件。不会等待消费者；订阅溢出时关闭该订阅，消费者必须恢复快照。
 	Publish(ctx context.Context, event Event)
 
 	// PublishTextDelta 发布 LLM 文本增量事件（用于 SSE 流式输出）。
@@ -170,11 +171,17 @@ type Subscription struct {
 	TraceID string
 	// BotID 订阅的目标 Bot（空表示不限 Bot）。
 	BotID string
+	// ReplayAfterSeq is the requested trace's retention floor at subscription time.
+	// A persisted snapshot at or above this sequence can safely bridge replay.
+	ReplayAfterSeq uint64
+	// ReplayTruncated reports that the requested cursor predates retained history.
+	ReplayTruncated bool
 	// ch 事件接收通道。
 	ch chan Event
 	// closed 标记是否已关闭。
-	closed bool
-	mu     sync.Mutex
+	closed     bool
+	overflowed bool
+	mu         sync.Mutex
 }
 
 // C 返回事件接收通道。通道关闭表示订阅已结束。
@@ -182,7 +189,14 @@ func (s *Subscription) C() <-chan Event {
 	return s.ch
 }
 
-// send 非阻塞发送事件。channel 满时丢弃并返回 false。
+// Overflowed distinguishes a slow consumer from a normal subscription close.
+func (s *Subscription) Overflowed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.overflowed
+}
+
+// send 非阻塞发送事件。channel 满时关闭订阅并返回 false，要求消费者恢复快照。
 func (s *Subscription) send(event Event) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -193,7 +207,11 @@ func (s *Subscription) send(event Event) bool {
 	case s.ch <- event:
 		return true
 	default:
-		// channel 满，丢弃事件（旁路不应影响主流程）
+		// Never continue a stream after a missing delta or terminal event.
+		// Buffered events remain readable; closure then prompts snapshot recovery.
+		s.overflowed = true
+		s.closed = true
+		close(s.ch)
 		return false
 	}
 }
@@ -215,12 +233,86 @@ func (s *Subscription) close() {
 // eventStore 是一个固定容量的环形缓冲区，保存最近的事件用于回放。
 // 超过 TTL 的事件在回放时被跳过（惰性淘汰，无需后台 goroutine）。
 type eventStore struct {
-	mu       sync.RWMutex
-	buf      []Event // 环形缓冲
-	head     int     // 下一个写入位置
-	count    int     // 当前元素数（<= capacity）
-	capacity int
-	ttl      time.Duration
+	mu             sync.RWMutex
+	buf            []Event // 环形缓冲
+	head           int     // 下一个写入位置
+	count          int     // 当前元素数（<= capacity）
+	capacity       int
+	ttl            time.Duration
+	overwrittenSeq uint64
+	// Retain exact per-trace floors for recent traces and pin them while any
+	// trace-specific subscriber is alive. Forgotten metadata must never imply
+	// complete replay; its last known sequence contributes to the unknown floor.
+	traces       map[string]*traceReplayState
+	traceLRU     list.List
+	pinnedTraces int
+	unknownFloor uint64
+}
+
+type traceReplayState struct {
+	traceID        string
+	floor, lastSeq uint64
+	unknown        bool
+	pins           int
+	lru            *list.Element
+}
+
+func (s *eventStore) traceLocked(traceID string, fresh bool) *traceReplayState {
+	if state := s.traces[traceID]; state != nil {
+		return state
+	}
+	state := &traceReplayState{traceID: traceID, floor: s.unknownFloor, unknown: s.unknownFloor > 0}
+	if fresh {
+		state.floor, state.unknown = 0, false
+	}
+	state.lru = s.traceLRU.PushBack(state)
+	s.traces[traceID] = state
+	return state
+}
+
+func (s *eventStore) trimTracesLocked() {
+	// At most capacity unpinned traces plus the independently bounded active
+	// trace subscriptions. Quiet active tasks keep their exact floor indefinitely.
+	for next := s.traceLRU.Front(); len(s.traces) > s.capacity+s.pinnedTraces && next != nil; {
+		element := next
+		next = element.Next()
+		state := element.Value.(*traceReplayState)
+		if state.pins > 0 {
+			continue
+		}
+		s.unknownFloor = max(s.unknownFloor, state.floor, state.lastSeq)
+		delete(s.traces, state.traceID)
+		s.traceLRU.Remove(element)
+	}
+}
+
+func (s *eventStore) pinTrace(traceID string, fresh bool) {
+	if traceID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.traceLocked(traceID, fresh)
+	if state.pins == 0 {
+		s.pinnedTraces++
+	}
+	state.pins++
+	s.trimTracesLocked()
+}
+
+func (s *eventStore) unpinTrace(traceID string) {
+	if traceID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state := s.traces[traceID]; state != nil && state.pins > 0 {
+		state.pins--
+		if state.pins == 0 {
+			s.pinnedTraces--
+		}
+	}
+	s.trimTracesLocked()
 }
 
 func newEventStore(capacity int, ttl time.Duration) *eventStore {
@@ -234,6 +326,7 @@ func newEventStore(capacity int, ttl time.Duration) *eventStore {
 		buf:      make([]Event, capacity),
 		capacity: capacity,
 		ttl:      ttl,
+		traces:   make(map[string]*traceReplayState),
 	}
 }
 
@@ -241,21 +334,51 @@ func newEventStore(capacity int, ttl time.Duration) *eventStore {
 func (s *eventStore) append(event Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.count == s.capacity {
+		evicted := s.buf[s.head]
+		s.overwrittenSeq = max(s.overwrittenSeq, evicted.Seq)
+		if state := s.traces[evicted.TraceID]; state != nil {
+			state.floor = max(state.floor, evicted.Seq)
+		} else {
+			s.unknownFloor = max(s.unknownFloor, evicted.Seq)
+		}
+	}
+	state := s.traceLocked(event.TraceID, event.Type == EventMessageReceived)
+	if state.unknown && event.Type == EventMessageReceived {
+		// A retained trace beginning proves that replay does not need a prefix
+		// belonging to an older forgotten trace.
+		state.floor, state.unknown = 0, false
+	}
+	state.lastSeq = max(state.lastSeq, event.Seq)
+	s.traceLRU.MoveToBack(state.lru)
 	s.buf[s.head] = event
 	s.head = (s.head + 1) % s.capacity
 	if s.count < s.capacity {
 		s.count++
 	}
+	s.trimTracesLocked()
 }
 
 // replay 返回匹配 traceID 且 Seq > sinceSeq 且未过期的事件。
 // traceID 为空时匹配所有事件。按 Seq 升序返回。
 func (s *eventStore) replay(traceID string, sinceSeq uint64) []Event {
+	events, _ := s.replayWithFloor(traceID, sinceSeq)
+	return events
+}
+
+func (s *eventStore) replayWithFloor(traceID string, sinceSeq uint64) ([]Event, uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	cutoff := time.Now().Add(-s.ttl)
 	var result []Event
+	floor := s.overwrittenSeq
+	if traceID != "" {
+		floor = s.unknownFloor
+		if state := s.traces[traceID]; state != nil {
+			floor = state.floor
+		}
+	}
 
 	// 计算最旧元素的位置
 	start := 0
@@ -266,18 +389,19 @@ func (s *eventStore) replay(traceID string, sinceSeq uint64) []Event {
 	for i := 0; i < s.count; i++ {
 		idx := (start + i) % s.capacity
 		e := s.buf[idx]
-		if e.Seq <= sinceSeq {
+		if traceID != "" && e.TraceID != traceID {
 			continue
 		}
 		if e.Timestamp.Before(cutoff) {
+			floor = max(floor, e.Seq)
 			continue
 		}
-		if traceID != "" && e.TraceID != traceID {
+		if e.Seq <= sinceSeq {
 			continue
 		}
 		result = append(result, e)
 	}
-	return result
+	return result, floor
 }
 
 // ============================================================================
@@ -356,6 +480,13 @@ func NewMemoryEventBus(config MemoryEventBusConfig, logger *zap.SugaredLogger) *
 
 // Publish 发布事件到所有匹配的订阅者。
 func (b *MemoryEventBus) Publish(_ context.Context, event Event) {
+	// Sequence assignment, append, replay registration, and fanout share one
+	// order. Moving any of these outside this lock duplicates or reorders events.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
@@ -366,20 +497,17 @@ func (b *MemoryEventBus) Publish(_ context.Context, event Event) {
 		b.store.append(event)
 	}
 
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if b.closed {
-		return
-	}
-
 	for _, sub := range b.subscribers {
 		if b.matches(sub, event) {
 			if sub.send(event) {
 				b.eventsPublished.Add(1)
 			} else {
+				delete(b.subscribers, sub.ID)
+				if b.store != nil {
+					b.store.unpinTrace(sub.TraceID)
+				}
 				b.eventsDropped.Add(1)
-				b.logger.Debugw("eventbus: event dropped (channel full)",
+				b.logger.Debugw("eventbus: subscription closed after overflow",
 					"sub_id", sub.ID,
 					"trace_id", event.TraceID,
 					"event_type", string(event.Type))
@@ -390,18 +518,25 @@ func (b *MemoryEventBus) Publish(_ context.Context, event Event) {
 
 // Subscribe 订阅指定 trace_id 的事件（空字符串 = 全部事件）。
 func (b *MemoryEventBus) Subscribe(traceID string) *Subscription {
-	return b.subscribe(traceID, "", 0, false)
+	return b.subscribe(traceID, "", 0, false, false)
+}
+
+// SubscribeNewTrace starts a trace whose ID has never been used before. The
+// explicit declaration makes an empty fresh trace distinguishable from expired
+// replay metadata. Existing trace IDs must use Subscribe/SubscribeWithReplay.
+func (b *MemoryEventBus) SubscribeNewTrace(traceID string) *Subscription {
+	return b.subscribe(traceID, "", 0, false, true)
 }
 
 // SubscribeBot 订阅指定 Bot 的所有事件。
 func (b *MemoryEventBus) SubscribeBot(botID string) *Subscription {
-	return b.subscribe("", botID, 0, false)
+	return b.subscribe("", botID, 0, false, false)
 }
 
 // SubscribeWithReplay 订阅事件流，并先回放 sinceSeq 之后的历史事件。
 // 用于 SSE 断线重连场景。
 func (b *MemoryEventBus) SubscribeWithReplay(traceID string, sinceSeq uint64) *Subscription {
-	return b.subscribe(traceID, "", sinceSeq, true)
+	return b.subscribe(traceID, "", sinceSeq, true, false)
 }
 
 // LatestSeq 返回当前最新的 Seq 序列号。
@@ -411,7 +546,7 @@ func (b *MemoryEventBus) LatestSeq() uint64 {
 
 // subscribe 内部创建订阅。replay=true 时先回放历史事件到订阅 channel。
 // 关键：回放在写锁保护下执行，确保回放与实时推送之间无间隙、无重复。
-func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, replay bool) *Subscription {
+func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, replay, fresh bool) *Subscription {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -446,18 +581,31 @@ func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, repla
 
 	b.nextID++
 	id := fmt.Sprintf("sub-%d", b.nextID)
-
-	// 回放场景使用更大的 buffer 以容纳历史事件
-	bufSize := b.config.SubscriptionBufferSize
-	if replay && b.store != nil {
-		bufSize = min(b.config.StoreCapacity, 4096)
+	if b.store != nil {
+		b.store.pinTrace(traceID, fresh)
 	}
 
+	var events []Event
+	var replayAfterSeq uint64
+	if replay {
+		if b.store != nil {
+			events, replayAfterSeq = b.store.replayWithFloor(traceID, sinceSeq)
+		} else {
+			replayAfterSeq = b.seq.Load()
+		}
+	}
+	// Retain every available replay event and reserve normal capacity for live
+	// events published before the handler starts draining the subscription.
+	bufSize := b.config.SubscriptionBufferSize
+	bufSize += len(events)
+
 	sub := &Subscription{
-		ID:      id,
-		TraceID: traceID,
-		BotID:   botID,
-		ch:      make(chan Event, bufSize),
+		ID:              id,
+		TraceID:         traceID,
+		BotID:           botID,
+		ch:              make(chan Event, bufSize),
+		ReplayAfterSeq:  replayAfterSeq,
+		ReplayTruncated: sinceSeq < replayAfterSeq,
 	}
 
 	b.subscribers[id] = sub
@@ -465,12 +613,6 @@ func (b *MemoryEventBus) subscribe(traceID, botID string, sinceSeq uint64, repla
 	// 在写锁下回放历史事件——保证与后续实时事件无间隙、无重复。
 	// 权衡：回放期间 Publish 被阻塞。回放数量受 EventStore 容量限制。
 	if replay && b.store != nil {
-		events := b.store.replay(traceID, sinceSeq)
-		// 限制回放数量，避免长时间持锁
-		const maxReplay = 1000
-		if len(events) > maxReplay {
-			events = events[len(events)-maxReplay:]
-		}
 		replayed := 0
 		for _, e := range events {
 			// botID 过滤（store 只按 traceID 过滤）
@@ -564,7 +706,12 @@ func (b *MemoryEventBus) Unsubscribe(sub *Subscription) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	delete(b.subscribers, sub.ID)
+	if _, exists := b.subscribers[sub.ID]; exists {
+		delete(b.subscribers, sub.ID)
+		if b.store != nil {
+			b.store.unpinTrace(sub.TraceID)
+		}
+	}
 	sub.close()
 
 	b.logger.Debugw("eventbus: unsubscribed",
@@ -585,6 +732,9 @@ func (b *MemoryEventBus) Close() {
 	for id, sub := range b.subscribers {
 		sub.close()
 		delete(b.subscribers, id)
+		if b.store != nil {
+			b.store.unpinTrace(sub.TraceID)
+		}
 	}
 
 	b.logger.Infow("eventbus: closed")

@@ -1,838 +1,721 @@
 <template>
-  <!-- 折叠态：仅一条竖向图标栏 -->
-  <div v-if="collapsed" class="tool-collapsed" data-testid="tool-panel-collapsed">
-    <button class="rail-btn" title="展开工具栏" @click="expand">
-      <t-icon name="chevron-left" />
+  <aside v-show="!layout.toolsOpen && !layout.isNarrow" class="tool-collapsed" aria-label="工作区工具" data-testid="tool-panel-collapsed">
+    <button type="button" class="rail-btn" title="展开工作区" aria-label="展开工作区" @click="layout.openTools()"><t-icon name="chevron-left" /></button>
+    <button v-for="item in TABS" :key="item.key" type="button" class="rail-btn" :title="item.label" :aria-label="item.label" @click="layout.openTools(item.key)">
+      <t-icon :name="item.icon" />
     </button>
-    <button
-      v-for="t in TABS"
-      :key="t.key"
-      class="rail-btn"
-      :title="t.label"
-      @click="openTab(t.key)"
-    >
-      <t-icon :name="t.icon" />
-    </button>
-  </div>
+  </aside>
 
-  <!-- 展开态 -->
-  <div
-    v-else
+  <div v-if="layout.toolsOpen && layout.isNarrow" class="tool-backdrop" aria-hidden="true" @click="layout.closeTools()" />
+  <!-- Keep visited tools mounted while hidden. Switching Bot or leaving chat disposes them. -->
+  <aside
+    v-show="layout.toolsOpen"
+    ref="panelEl"
     class="tool-panel"
-    :style="{ width: width + 'px' }"
+    :class="{ 'tool-drawer': layout.isNarrow }"
+    :style="{ width: layout.isNarrow ? 'min(460px, 100vw)' : panelWidth + 'px' }"
+    :role="layout.isNarrow ? 'dialog' : 'complementary'"
+    :aria-modal="layout.isNarrow ? true : undefined"
+    aria-label="Bot 工作区"
+    tabindex="-1"
     data-testid="chat-tool-panel"
   >
-    <!-- 拖拽手柄 -->
     <div
+      v-if="!layout.isNarrow"
       class="tp-resizer"
+      role="separator"
+      tabindex="0"
+      aria-label="调整工作区宽度"
+      aria-orientation="vertical"
+      :aria-valuemin="MIN_W"
+      :aria-valuemax="layout.maxToolWidth"
+      :aria-valuenow="panelWidth"
+      :aria-valuetext="panelWidth + ' 像素'"
       data-testid="tool-panel-resizer"
-      @mousedown="startResize"
+      @pointerdown="startResize"
+      @keydown="onResizeKey"
     />
-
-    <!-- 内容主体 -->
     <div class="tp-main">
-      <!-- 顶部 tab 栏 -->
-      <div ref="tabsEl" class="tp-tabs" data-testid="tool-panel-tabs">
+      <header class="tp-header">
+        <div class="tp-heading"><span>工作区</span><span class="tp-bot-name" :title="store.activeBot?.name">{{ store.activeBot?.name || '当前 Bot' }}</span></div>
+        <button ref="closeButtonEl" type="button" class="rail-btn tp-close" title="收起工作区" aria-label="收起工作区" @click="layout.closeTools()"><t-icon :name="layout.isNarrow ? 'close' : 'chevron-right'" /></button>
+      </header>
+      <div class="tp-scope"><t-icon name="folder" /><span>当前 Bot 的所有会话共享此工作区</span></div>
+      <div class="tp-tabs" role="tablist" aria-label="工作区视图" data-testid="tool-panel-tabs" @keydown="onTabKey">
         <button
-          v-for="t in TABS"
-          :key="t.key"
+          v-for="item in TABS"
+          :id="'workspace-tab-' + item.key"
+          :key="item.key"
           type="button"
+          role="tab"
           class="tp-tab"
-          :class="{ active: tab === t.key }"
-          :data-testid="`tool-tab-${t.key}`"
-          :aria-label="t.label"
-          :title="iconOnly ? t.label : undefined"
-          @click="tab = t.key"
-        >
-          <t-icon :name="t.icon" />
-          <span v-show="!iconOnly" class="tp-tab-label">{{ t.label }}</span>
-        </button>
-      </div>
-      <div ref="tabsMeasure" class="tp-tabs tp-tabs-measure" aria-hidden="true">
-        <span v-for="t in TABS" :key="t.key" class="tp-tab">
-          <t-icon :name="t.icon" />
-          <span class="tp-tab-label">{{ t.label }}</span>
-        </span>
+          :class="{ active: layout.toolTab === item.key }"
+          :data-testid="`tool-tab-${item.key}`"
+          :aria-controls="'workspace-pane-' + item.key"
+          :aria-selected="layout.toolTab === item.key"
+          :tabindex="layout.toolTab === item.key ? 0 : -1"
+          @click="layout.toolTab = item.key"
+        ><t-icon :name="item.icon" /><span>{{ item.label }}</span></button>
       </div>
 
-      <!-- Terminal -->
-      <section v-show="tab === 'desktop'" class="tp-body" data-testid="tool-pane-desktop">
-        <SandboxDesktop v-if="sid" :key="sid" :bot-id="sid" scope="session" />
-      </section>
+      <div v-if="!botId" class="pane-state" role="status"><t-icon name="folder" /><strong>选择一个 Bot 后打开工作区</strong></div>
+      <template v-else>
+        <section id="workspace-pane-terminal" v-show="layout.toolTab === 'terminal'" role="tabpanel" aria-labelledby="workspace-tab-terminal" class="tp-body terminal-body" data-testid="tool-pane-terminal">
+          <XtermConsole
+            v-if="visited.terminal"
+            :key="botId"
+            :connect="terminalConnection.connect"
+            :exec="terminalConnection.exec"
+            :allow-interrupt="true"
+            title="终端"
+            body-height="100%"
+            class="term-console"
+          />
+        </section>
 
-      <section v-show="tab === 'terminal'" class="tp-body terminal-body" data-testid="tool-pane-terminal">
-        <div class="term-head">
-          <span class="term-label">Terminal</span>
-          <span class="term-conn" :class="{ ok: terminal.connected }">
-            {{ terminal.connected ? '已连接' : '未连接' }}
-          </span>
-        </div>
-        <XtermConsole
-          v-if="sid"
-          :key="sid"
-          :connect="onTermConnect"
-          :exec="onTermExec"
-          :show-header="false"
-          body-height="100%"
-          class="term-console"
-        />
-      </section>
+        <section id="workspace-pane-desktop" v-show="layout.toolTab === 'desktop'" role="tabpanel" aria-labelledby="workspace-tab-desktop" class="tp-body" data-testid="tool-pane-desktop">
+          <SandboxDesktop v-if="visited.desktop" :key="botId" :bot-id="botId" scope="session" />
+        </section>
 
-      <!-- 文件管理 -->
-      <section v-show="tab === 'files'" class="tp-body files-body" data-testid="tool-pane-files">
-        <div class="files-head">
-          <div class="crumb">
-            <t-icon name="folder" />
-            <template v-for="(seg, i) in crumbs" :key="i">
-              <t-icon v-if="i > 0" name="chevron-right" class="crumb-sep" />
-              <span
-                class="crumb-seg"
-                :class="{ last: i === crumbs.length - 1 }"
-                data-testid="crumb-seg"
-                @click="goCrumb(i)"
-              >{{ seg }}</span>
-            </template>
+        <section id="workspace-pane-files" v-show="layout.toolTab === 'files'" role="tabpanel" aria-labelledby="workspace-tab-files" class="tp-body files-body" data-testid="tool-pane-files" :aria-busy="filesLoading">
+          <div class="files-head">
+            <nav class="crumb" aria-label="当前文件路径">
+              <t-icon name="folder" />
+              <template v-for="(seg, i) in crumbs" :key="i">
+                <t-icon v-if="i > 0" name="chevron-right" class="crumb-sep" />
+                <button type="button" class="crumb-seg" :class="{ last: i === crumbs.length - 1 }" :aria-current="i === crumbs.length - 1 ? 'location' : undefined" data-testid="crumb-seg" @click="goCrumb(i)">{{ seg }}</button>
+              </template>
+            </nav>
+            <div class="files-ops">
+              <label class="upload-btn" data-testid="file-upload-btn">
+                <t-icon name="upload" /><span>上传</span>
+                <input type="file" multiple class="upload-input" aria-label="上传文件" @change="onUpload" />
+              </label>
+              <t-button size="small" variant="outline" :disabled="filesLoading || !!filesError" @click="startMkdir"><template #icon><t-icon name="folder-add" /></template>新建文件夹</t-button>
+              <t-button size="small" variant="text" shape="square" :loading="filesLoading" title="刷新文件" aria-label="刷新文件" @click="loadFiles()"><t-icon name="refresh" /></t-button>
+            </div>
+            <div class="files-filter">
+              <div class="file-search"><t-icon name="search" /><input v-model="fileQuery" aria-label="筛选当前目录" placeholder="筛选当前目录" /><button v-if="fileQuery" type="button" aria-label="清除文件筛选" @click="fileQuery = ''"><t-icon name="close" /></button></div>
+              <select v-model="fileSort" aria-label="文件排序"><option value="name">名称排序</option><option value="mtime">最近修改</option><option value="size">文件大小</option></select>
+            </div>
           </div>
-          <div class="files-ops">
-            <label class="upload-btn" data-testid="file-upload-btn">
-              <t-icon name="upload" /><span>上传</span>
-              <input ref="uploadInputRef" type="file" multiple class="upload-input" @change="onUpload" />
-            </label>
-            <t-button size="small" variant="outline" @click="startMkdir"><template #icon><t-icon name="folder-add" /></template>新建文件夹</t-button>
-            <t-button size="small" variant="outline" shape="square" @click="loadFiles"><t-icon name="refresh" /></t-button>
+          <div v-if="currentUploads.length" class="upload-queue" aria-label="上传队列" aria-live="polite">
+            <div class="queue-head"><span>上传记录 · {{ currentUploads.length }}</span><button v-if="currentUploads.some(item => item.status === 'success')" type="button" @click="clearCompletedUploads">清除已完成</button></div>
+            <div v-for="item in currentUploads" :key="item.id" class="queue-item" :class="{ 'queue-failed': item.status === 'error' }">
+              <t-icon :name="item.status === 'success' ? 'check-circle' : item.status === 'error' ? 'error-circle' : 'loading'" :class="{ spinning: item.status === 'uploading' }" />
+              <div class="queue-info"><span :title="item.path + '/' + item.name">{{ item.name }}</span><small>{{ item.status === 'error' ? item.error : item.status === 'success' ? '上传完成' : item.status === 'uploading' ? '正在上传…' : '等待上传' }}</small></div>
+              <button v-if="item.status === 'error'" type="button" :aria-label="'重试上传 ' + item.name" @click="retryUpload(item)">重试</button>
+              <button v-if="item.status !== 'uploading'" type="button" class="queue-remove" :aria-label="'移除上传记录 ' + item.name" @click="removeUpload(item)"><t-icon name="close" /></button>
+            </div>
           </div>
-        </div>
-        <div class="files-table">
-          <div class="files-row files-th">
-            <span class="col-name">名称</span>
-            <span class="col-size">大小</span>
-            <span class="col-time">修改时间</span>
+          <div v-if="preview" ref="previewEl" class="file-preview" role="region" :aria-label="'文件预览：' + preview.name" :aria-busy="preview.loading" tabindex="-1" data-testid="file-preview">
+            <div class="preview-head"><strong :title="preview.name">{{ preview.name }}</strong><button type="button" class="rail-btn" aria-label="关闭文件预览" @click="closePreview(true)"><t-icon name="close" /></button></div>
+            <div v-if="preview.loading" class="pane-state" role="status"><t-icon name="loading" class="spinning" /><span>正在读取预览…</span></div>
+            <div v-else-if="preview.error" class="pane-state error-state" role="alert"><span>{{ preview.error }}</span><t-button size="small" variant="outline" @click="previewFile(preview.entry)">重试</t-button></div>
+            <template v-else><img v-if="preview.kind === 'image'" :src="preview.url" :alt="preview.name" @error="preview.error = '图片无法预览，可下载后查看。'" /><pre v-else tabindex="0" aria-label="文件文本内容">{{ preview.text }}</pre><p v-if="preview.truncated" class="preview-note">仅预览前 256 KB，下载可查看完整内容。</p></template>
           </div>
-          <div
-            v-if="!isRoot"
-            class="files-row file-up"
-            data-testid="file-row-up"
-            @click="goUp"
-          >
-            <span class="col-name"><t-icon name="rollback" class="ic-dir" /> ..</span>
-            <span class="col-size"></span>
-            <span class="col-time"></span>
+          <div v-if="filesLoading" class="pane-state" role="status"><t-icon name="loading" class="spinning" /><span>正在加载文件…</span></div>
+          <div v-else-if="filesError" class="pane-state error-state" role="alert"><t-icon name="error-circle" /><strong>文件加载失败</strong><span>{{ filesError }}</span><t-button size="small" variant="outline" @click="loadFiles()">重试</t-button></div>
+          <div v-else class="files-table">
+            <div class="files-row files-th"><span class="col-name">名称</span><span class="col-size">大小</span><span class="col-time">修改时间</span></div>
+            <button v-if="!isRoot" type="button" class="files-row file-up" data-testid="file-row-up" @click="goUp"><span class="col-name"><t-icon name="rollback" class="ic-dir" />返回上一级</span></button>
+            <div v-if="mkdir.editing" class="files-row mkdir-row" data-testid="file-mkdir-row">
+              <span class="col-name"><t-icon name="folder" class="ic-dir" /><input ref="mkdirInputRef" v-model="mkdir.name" class="mkdir-input" data-testid="file-mkdir-input" aria-label="新文件夹名称" placeholder="新建文件夹" :disabled="mkdir.saving" @keydown.enter.prevent="confirmMkdir" @keydown.esc.prevent="cancelMkdir" @blur="confirmMkdir" /></span>
+            </div>
+            <div v-for="entry in visibleFiles" :key="entry.name" class="files-row" :class="{ 'is-highlighted': highlightedFile === entry.name }" :data-file-name="entry.name" data-testid="file-row">
+              <span class="col-name">
+                <t-icon :name="entry.type === 'dir' ? 'folder' : 'file'" :class="entry.type === 'dir' ? 'ic-dir' : 'ic-file'" />
+                <button v-if="entry.type === 'dir'" type="button" class="fname folder-link" :title="entry.name" @click="enterDir(entry.name)">{{ entry.name }}</button>
+                <button v-else-if="previewKind(entry.name)" type="button" class="fname folder-link" :title="'预览 ' + entry.name" @click="previewFile(entry)">{{ entry.name }}</button>
+                <span v-else class="fname" :title="entry.name">{{ entry.name }}</span>
+                <button v-if="entry.type !== 'dir'" type="button" class="ic-download" title="下载" :aria-label="'下载 ' + entry.name" @click="downloadFile(entry.name)"><t-icon name="download" /></button>
+              </span>
+              <span class="col-size">{{ entry.type === 'dir' ? '—' : fmtSize(entry.size) }}</span>
+              <span class="col-time" :title="entry.mtime">{{ fmtTime(entry.mtime) }}</span>
+            </div>
+            <div v-if="!visibleFiles.length && !mkdir.editing" class="pane-state"><t-icon :name="fileQuery ? 'search' : 'folder'" /><strong>{{ fileQuery ? '没有找到匹配的文件' : '这个目录还是空的' }}</strong><span>{{ fileQuery ? '试试其他名称，或清除筛选查看全部文件。' : '上传文件或新建文件夹，开始整理工作内容。' }}</span></div>
+            <p v-if="highlightedFile && !files.entries.some(entry => entry.name === highlightedFile)" class="location-notice" role="status">此目录中未找到“{{ highlightedFile }}”，文件可能已移动或删除。</p>
           </div>
-          <div v-if="mkdir.editing" class="files-row mkdir-row" data-testid="file-mkdir-row">
-            <span class="col-name">
-              <t-icon name="folder" class="ic-dir" />
-              <input
-                ref="mkdirInputRef"
-                v-model="mkdir.name"
-                class="mkdir-input"
-                data-testid="file-mkdir-input"
-                placeholder="新建文件夹"
-                :disabled="mkdir.saving"
-                @keydown.enter.prevent="confirmMkdir"
-                @keydown.esc.prevent="cancelMkdir"
-                @blur="confirmMkdir"
-              />
-            </span>
-            <span class="col-size"></span>
-            <span class="col-time"></span>
-          </div>
-          <div
-            v-for="e in files.entries"
-            :key="e.name"
-            class="files-row"
-            :class="{ clickable: e.type === 'dir' }"
-            data-testid="file-row"
-            @click="e.type === 'dir' && enterDir(e.name)"
-          >
-            <span class="col-name">
-              <t-icon :name="e.type === 'dir' ? 'folder' : 'file'" :class="e.type === 'dir' ? 'ic-dir' : 'ic-file'" />
-              <span class="fname">{{ e.name }}</span>
-              <button
-                v-if="e.type !== 'dir'"
-                type="button"
-                class="ic-download"
-                title="下载"
-                :aria-label="'下载 ' + e.name"
-                @click.stop="downloadFile(e.name)"
-              >
-                <t-icon name="download" />
-              </button>
-            </span>
-            <span class="col-size">{{ e.type === 'dir' ? '' : fmtSize(e.size) }}</span>
-            <span class="col-time">{{ fmtTime(e.mtime) }}</span>
-          </div>
-          <div v-if="!files.entries.length && !mkdir.editing" class="files-empty">此目录为空</div>
-        </div>
-      </section>
+        </section>
 
-      <!-- Status -->
-      <section v-show="tab === 'status'" class="tp-body status-body" data-testid="tool-pane-status">
-        <div class="stat-list">
-          <div class="stat-row">
-            <span class="stat-k">消息数</span>
-            <span class="stat-v">{{ status.messages }}</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-k">上下文使用率</span>
-            <span class="stat-v">{{ fmtK(status.contextUsed) }} / {{ status.contextLimit ? fmtK(status.contextLimit) : '--' }}</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-k">Cache 命中率</span>
-            <span class="stat-v">{{ (status.cacheHitRate * 100).toFixed(1) }}%</span>
-          </div>
-          <div class="stat-row">
-            <span class="stat-k">Cache 读取</span>
-            <span class="stat-v">{{ fmtBig(status.cacheRead) }}</span>
-          </div>
-          <div v-if="status.cacheWrite > 0" class="stat-row">
-            <span class="stat-k">Cache 写入</span>
-            <span class="stat-v">{{ fmtBig(status.cacheWrite) }}</span>
-          </div>
-        </div>
-        <button class="compact-btn" data-testid="status-compact" @click="doCompact">
-          <t-icon name="fullscreen-exit" />立即压缩
-        </button>
-        <div class="skills-block">
-          <div class="skills-title">SKILLS</div>
-          <div v-if="!status.skills || !status.skills.length" class="skills-empty">此会话未使用任何 Skill</div>
-          <div v-else class="skills-list">
-            <span v-for="s in status.skills" :key="s" class="skill-tag">{{ s }}</span>
-          </div>
-        </div>
-      </section>
+        <section id="workspace-pane-status" v-show="layout.toolTab === 'status'" role="tabpanel" aria-labelledby="workspace-tab-status" class="tp-body status-body" data-testid="tool-pane-status" :aria-busy="statusLoading">
+          <div class="status-head"><strong>Bot 累计用量</strong><t-button size="small" variant="text" shape="square" :loading="statusLoading" title="刷新用量" aria-label="刷新用量" @click="loadStatus"><t-icon name="refresh" /></t-button></div>
+          <div v-if="statusLoading" class="pane-state" role="status"><t-icon name="loading" class="spinning" /><span>正在加载用量…</span></div>
+          <div v-else-if="statusError" class="pane-state error-state" role="alert"><t-icon name="error-circle" /><strong>用量加载失败</strong><span>{{ statusError }}</span><t-button size="small" variant="outline" @click="loadStatus">重试</t-button></div>
+          <template v-else-if="status">
+            <div class="usage-summary"><span>累计 Token 消耗</span><strong>{{ fmtBig(status.totalTokens ?? status.contextUsed) }}</strong><p>当前 Bot 的历史累计用量</p></div>
+            <div class="stat-list">
+              <div class="stat-row"><span class="stat-k">累计消息</span><span class="stat-v">{{ fmtBig(status.messages) }}</span></div>
+              <div class="stat-row"><span class="stat-k">当前上下文占用</span><span class="stat-unknown">暂无数据</span></div>
+              <div class="stat-row"><span class="stat-k">缓存命中率</span><span class="stat-v">{{ Number.isFinite(status.cacheHitRate) ? (status.cacheHitRate * 100).toFixed(1) + '%' : '暂无数据' }}</span></div>
+              <div class="stat-row"><span class="stat-k">缓存读取 Token</span><span class="stat-v">{{ fmtBig(status.cacheRead) }}</span></div>
+              <div v-if="status.cacheWrite > 0" class="stat-row"><span class="stat-k">缓存写入 Token</span><span class="stat-v">{{ fmtBig(status.cacheWrite) }}</span></div>
+            </div>
+            <t-button block variant="outline" :loading="compacting" data-testid="status-compact" @click="doCompact"><template #icon><t-icon name="fullscreen-exit" /></template>压缩 Bot 记忆</t-button>
+            <div class="skills-block"><div class="skills-title">Skill 使用记录</div><p v-if="!status.skills?.length" class="skills-empty">当前 Bot 暂无 Skill 记录</p><div v-else class="skills-list"><span v-for="skill in status.skills" :key="skill" class="skill-tag">{{ skill }}</span></div></div>
+          </template>
+        </section>
+      </template>
     </div>
-
-    <!-- 右侧竖向图标栏 -->
-    <div class="tp-rail" data-testid="tool-panel-rail">
-      <button
-        v-for="t in TABS"
-        :key="t.key"
-        class="rail-btn"
-        :class="{ active: tab === t.key }"
-        :title="tab === t.key ? '收起工具栏' : t.label"
-        @click="openTab(t.key)"
-      >
-        <t-icon :name="t.icon" />
-      </button>
-      <button class="rail-btn rail-trash" title="清理"><t-icon name="delete" /></button>
-    </div>
-  </div>
+  </aside>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, computed, onBeforeUnmount, watch, nextTick } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sessionToolApi } from '@/api/services'
 import { useBotStore } from '@/stores/bot'
+import { useLayoutStore } from '@/stores/layout'
 import XtermConsole from '@/components/common/XtermConsole.vue'
 import SandboxDesktop from '@/components/common/SandboxDesktop.vue'
 
 const store = useBotStore()
+const layout = useLayoutStore()
+const botId = computed(() => store.activeBotId)
 const TABS = [
-  { key: 'terminal', label: 'Terminal', icon: 'terminal' },
+  { key: 'terminal', label: '终端', icon: 'terminal' },
   { key: 'desktop', label: '桌面', icon: 'desktop' },
-  { key: 'files', label: '文件管理', icon: 'folder' },
-  { key: 'status', label: 'Status', icon: 'chart-bar' }
+  { key: 'files', label: '文件', icon: 'folder' },
+  { key: 'status', label: '用量', icon: 'chart-bar' }
 ]
-const tab = ref('terminal')
-
-// 折叠 / 宽度（持久化）
-// 默认收起；用户手动操作后按 localStorage 中的偏好恢复
 const MIN_W = 340
-const MAX_W = 720
-function getInitialCollapsed() {
-  try {
-    const saved = localStorage.getItem('bp_tool_collapsed')
-    return saved === null ? true : saved === '1'
-  } catch (_) {
-    return true
+const panelWidth = computed(() => Math.min(layout.maxToolWidth, Math.max(MIN_W, layout.toolWidth)))
+const panelEl = ref(null)
+const closeButtonEl = ref(null)
+const visited = ref({})
+let alive = true
+let previousFocus = null
+
+function onTabKey(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const index = TABS.findIndex(item => item.key === layout.toolTab)
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? TABS.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + TABS.length) % TABS.length
+  layout.toolTab = TABS[next].key
+  nextTick(() => panelEl.value?.querySelector('[role="tab"][tabindex="0"]')?.focus())
+}
+
+function onDrawerKey(event) {
+  if (!layout.toolsOpen || !layout.isNarrow) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    layout.closeTools()
+  } else if (event.key === 'Tab') {
+    const focusable = Array.from(panelEl.value?.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), [tabindex="0"]') || []).filter(el => el.getClientRects().length > 0)
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (!first) { event.preventDefault(); panelEl.value?.focus(); return }
+    if (!panelEl.value?.contains(document.activeElement) || (!event.shiftKey && document.activeElement === last)) { event.preventDefault(); first.focus() }
+    else if (event.shiftKey && (document.activeElement === first || document.activeElement === panelEl.value)) { event.preventDefault(); last.focus() }
   }
 }
-function getInitialWidth() {
-  const saved = Number(localStorage.getItem('bp_tool_width'))
-  if (!Number.isFinite(saved) || saved < MIN_W) return 404
-  return Math.min(MAX_W, saved)
-}
-const collapsed = ref(getInitialCollapsed())
-const width = ref(getInitialWidth())
-const tabsEl = ref(null)
-const tabsMeasure = ref(null)
-const iconOnly = ref(false)
-let tabsObserver = null
 
-function syncTabLabels() {
-  const bar = tabsEl.value
-  const measure = tabsMeasure.value
-  if (!bar || !measure) return
-  // Compare the live bar with a hidden full-label copy so hiding labels
-  // does not shrink the measurement and flicker back open.
-  iconOnly.value = bar.clientWidth < measure.scrollWidth
-}
-
-function bindTabObserver() {
-  tabsObserver?.disconnect()
-  tabsObserver = null
-  if (!tabsEl.value) return
-  tabsObserver = new ResizeObserver(() => syncTabLabels())
-  tabsObserver.observe(tabsEl.value)
-  syncTabLabels()
-}
-
-function collapse() { collapsed.value = true; localStorage.setItem('bp_tool_collapsed', '1') }
-function expand() { collapsed.value = false; localStorage.setItem('bp_tool_collapsed', '0') }
-function openTab(k) {
-  // 已在展开态且就是当前 tab → 再点一次收起（符合直觉的切换行为）
-  if (!collapsed.value && tab.value === k) {
-    collapse()
+// Drawer focus is scoped to the overlay; the desktop panel does not trap focus.
+watch(() => layout.toolsOpen && layout.isNarrow, async (open) => {
+  if (open) {
+    previousFocus = document.activeElement
+    document.addEventListener('keydown', onDrawerKey)
+    await nextTick()
+    if (alive && layout.toolsOpen && layout.isNarrow) closeButtonEl.value?.focus()
   } else {
-    tab.value = k
-    expand()
+    document.removeEventListener('keydown', onDrawerKey)
+    const trigger = previousFocus
+    previousFocus = null
+    await nextTick()
+    if (alive && !layout.navigationOpen && trigger?.isConnected) trigger.focus()
   }
-}
+}, { immediate: true })
 
-// 拖拽调宽
-let resizing = false
-let startX = 0
-let startW = 0
-function startResize(e) {
-  resizing = true
-  startX = e.clientX
-  startW = width.value
+let resizeState = null
+function setWidth(value) { layout.toolWidth = Math.min(layout.maxToolWidth, Math.max(MIN_W, value)) }
+function startResize(event) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  stopResize()
+  resizeState = { x: event.clientX, width: panelWidth.value, cursor: document.body.style.cursor, userSelect: document.body.style.userSelect }
   document.body.style.cursor = 'col-resize'
   document.body.style.userSelect = 'none'
-  window.addEventListener('mousemove', onResize)
-  window.addEventListener('mouseup', stopResize)
+  window.addEventListener('pointermove', onResize)
+  window.addEventListener('pointerup', stopResize)
+  window.addEventListener('pointercancel', stopResize)
+  window.addEventListener('blur', stopResize)
 }
-function onResize(e) {
-  if (!resizing) return
-  // 面板在右侧，向左拖动变宽
-  const next = startW + (startX - e.clientX)
-  width.value = Math.min(MAX_W, Math.max(MIN_W, next))
-}
+function onResize(event) { if (resizeState) setWidth(resizeState.width + resizeState.x - event.clientX) }
 function stopResize() {
-  if (!resizing) return
-  resizing = false
-  document.body.style.cursor = ''
-  document.body.style.userSelect = ''
-  localStorage.setItem('bp_tool_width', String(width.value))
-  window.removeEventListener('mousemove', onResize)
-  window.removeEventListener('mouseup', stopResize)
+  if (!resizeState) return
+  document.body.style.cursor = resizeState.cursor
+  document.body.style.userSelect = resizeState.userSelect
+  resizeState = null
+  window.removeEventListener('pointermove', onResize)
+  window.removeEventListener('pointerup', stopResize)
+  window.removeEventListener('pointercancel', stopResize)
+  window.removeEventListener('blur', stopResize)
 }
-
-// ---------- 终端 ----------
-// terminal.ref 仍用于顶部标签头（tabs / 连接状态）展示
-const terminal = ref({ host: 'root@host', connected: false, tabs: [] })
-
-// 交给复用的 XtermConsole：建立连接 + 执行命令，均走会话级 API
-async function onTermConnect() {
-  const t = await sessionToolApi.terminal(sid.value)
-  terminal.value = t
-  return { host: t.host, cwd: t.cwd, connected: !!t.connected, banner: `Connected to ${t.host}` }
+function onResizeKey(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const step = event.shiftKey ? 80 : 24
+  setWidth(event.key === 'Home' ? MIN_W : event.key === 'End' ? layout.maxToolWidth : panelWidth.value + (event.key === 'ArrowLeft' ? step : -step))
 }
-function onTermExec(cmd) {
-  return sessionToolApi.exec(sid.value, cmd)
-}
+watch(() => layout.toolsOpen && !layout.isNarrow, (resizable) => { if (!resizable) stopResize() })
 
-// ---------- 文件 ----------
+// Bind each mounted terminal to its Bot, including commands already in flight.
+const terminalConnection = computed(() => {
+  const id = botId.value
+  return {
+    async connect() {
+      const info = await sessionToolApi.terminal(id)
+      return { ...info, banner: info.connected ? `Connected to ${info.host}` : '终端未连接，请重试' }
+    },
+    exec: (command, options) => sessionToolApi.exec(id, command, options)
+  }
+})
+
 const files = ref({ path: '/', entries: [] })
-const uploadInputRef = ref()
-const mkdir = ref({ editing: false, name: '', saving: false })
-const mkdirInputRef = ref()
-const crumbs = computed(() => ['/', ...String(files.value.path || '').split('/').filter(Boolean)])
-const isRoot = computed(() => files.value.path === '/')
-
-async function loadFiles() {
-  if (!sid.value) return
-  files.value = await sessionToolApi.files(sid.value, files.value.path)
-}
-function enterDir(name) {
-  if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
-  files.value.path = `${files.value.path.replace(/\/$/, '')}/${name}`
-  loadFiles()
-}
-async function downloadFile(name) {
-  if (!sid.value || !name) return
-  const base = String(files.value.path || '/').replace(/\/$/, '')
-  const url = sessionToolApi.downloadUrl(sid.value, `${base}/${name}`)
-  try {
-    const resp = await fetch(url, { credentials: 'include' })
-    const type = resp.headers.get('content-type') || ''
-    if (!resp.ok || type.includes('application/json')) {
-      const json = await resp.json().catch(() => ({}))
-      MessagePlugin.error(json.message || '下载失败')
-      return
+const filesLoading = ref(false)
+const filesError = ref('')
+const fileQuery = ref('')
+const fileSort = ref('name')
+const highlightedFile = ref('')
+const botWorkspaces = new Map()
+const visibleFiles = computed(() => {
+  const query = fileQuery.value.trim().toLocaleLowerCase()
+  return files.value.entries.filter(entry => !query || entry.name.toLocaleLowerCase().includes(query)).slice().sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1
+    if (fileSort.value === 'mtime') {
+      const difference = (Date.parse(b.mtime) || 0) - (Date.parse(a.mtime) || 0)
+      if (difference) return difference
     }
-    const blob = await resp.blob()
-    const obj = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = obj
-    a.download = name
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(obj), 1500)
-  } catch (_) {
-    MessagePlugin.error('下载失败')
+    if (fileSort.value === 'size') {
+      const difference = (b.size || 0) - (a.size || 0)
+      if (difference) return difference
+    }
+    return a.name.localeCompare(b.name, undefined, { numeric: true })
+  })
+})
+const mkdir = ref({ editing: false, name: '', saving: false })
+const mkdirInputRef = ref(null)
+const crumbs = computed(() => ['/', ...String(files.value.path || '/').split('/').filter(Boolean)])
+const isRoot = computed(() => files.value.path === '/')
+let filesRequest = 0
+
+async function loadFiles(path = files.value.path) {
+  const id = botId.value
+  if (!id) return
+  const request = ++filesRequest
+  if (files.value.path !== path) files.value = { path, entries: [] }
+  filesLoading.value = true
+  filesError.value = ''
+  try {
+    const result = await sessionToolApi.files(id, path)
+    if (alive && id === botId.value && request === filesRequest) {
+      files.value = { path: result.path || path, entries: result.entries || [] }
+      return true
+    }
+  } catch (error) {
+    if (alive && id === botId.value && request === filesRequest) filesError.value = error?.message || '暂时无法读取此目录，请重试。'
+  } finally {
+    if (alive && id === botId.value && request === filesRequest) filesLoading.value = false
   }
 }
-function goUp() {
-  if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
-  const parts = files.value.path.split('/').filter(Boolean)
-  parts.pop()
-  files.value.path = '/' + parts.join('/')
-  loadFiles()
+function navigateFiles(path) {
+  closePreview()
+  fileQuery.value = ''
+  highlightedFile.value = ''
+  mkdir.value = { editing: false, name: '', saving: false }
+  loadFiles(path)
 }
-function goCrumb(i) {
-  if (mkdir.value.editing) mkdir.value = { editing: false, name: '', saving: false }
-  if (i === 0) { files.value.path = '/'; }
-  else {
-    const parts = crumbs.value.slice(1, i + 1)
-    files.value.path = '/' + parts.join('/')
-  }
-  loadFiles()
-}
+function enterDir(name) { navigateFiles(`${files.value.path.replace(/\/$/, '')}/${name}`) }
+function goUp() { const parts = files.value.path.split('/').filter(Boolean); parts.pop(); navigateFiles('/' + parts.join('/')) }
+function goCrumb(index) { navigateFiles('/' + crumbs.value.slice(1, index + 1).join('/')) }
 function startMkdir() {
-  if (mkdir.value.editing) {
-    mkdirInputRef.value?.focus()
-    return
-  }
-  mkdir.value = { editing: true, name: '', saving: false }
+  if (!mkdir.value.editing) mkdir.value = { editing: true, name: '', saving: false }
   nextTick(() => mkdirInputRef.value?.focus())
 }
-function cancelMkdir() {
-  if (mkdir.value.saving) return
-  mkdir.value = { editing: false, name: '', saving: false }
-}
+function cancelMkdir() { if (!mkdir.value.saving) mkdir.value = { editing: false, name: '', saving: false } }
 async function confirmMkdir() {
   if (!mkdir.value.editing || mkdir.value.saving) return
   const name = mkdir.value.name.trim()
   if (!name) { cancelMkdir(); return }
-  mkdir.value.saving = true
+  const id = botId.value
+  const path = files.value.path
+  const editing = mkdir.value
+  editing.saving = true
   try {
-    await sessionToolApi.mkdir(sid.value, files.value.path, name)
+    await sessionToolApi.mkdir(id, path, name)
+    if (!alive || id !== botId.value || editing !== mkdir.value) return
     mkdir.value = { editing: false, name: '', saving: false }
-    MessagePlugin.success('已创建')
+    MessagePlugin.success('文件夹已创建')
     await loadFiles()
-  } catch (e) {
-    mkdir.value.saving = false
-    MessagePlugin.error(e.message || '创建失败')
+  } catch (error) {
+    if (!alive || id !== botId.value || editing !== mkdir.value) return
+    editing.saving = false
+    MessagePlugin.error(error?.message || '创建失败')
     nextTick(() => mkdirInputRef.value?.focus())
   }
 }
-function triggerUpload() { uploadInputRef.value?.click() }
+async function downloadFile(name) {
+  const id = botId.value
+  if (!id || !name) return
+  const path = `${files.value.path.replace(/\/$/, '')}/${name}`
+  try {
+    const response = await fetch(sessionToolApi.downloadUrl(id, path), { credentials: 'include' })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.message || '下载失败')
+    }
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1500)
+  } catch (error) { MessagePlugin.error(error?.message || '下载失败') }
+}
 
-// 上传限制：单文件 20MB、单次总量 60MB。
-// 没有限制时用户随手拖个几百 MB 的文件进来，前端整块读进内存 + 后端拒收，
-// 结果是浏览器先卡死，报错还落在最后。
 const MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
 const MAX_UPLOAD_TOTAL_BYTES = 60 * 1024 * 1024
-
-async function onUpload(e) {
-  const picked = Array.from(e.target.files || [])
-  const list = []
-  let total = 0
-  for (const f of picked) {
-    if (f.size > MAX_UPLOAD_FILE_BYTES) {
-      MessagePlugin.warning(`${f.name} 超过单文件 ${fmtSize(MAX_UPLOAD_FILE_BYTES)} 上限，已跳过`)
-      continue
-    }
-    if (total + f.size > MAX_UPLOAD_TOTAL_BYTES) {
-      MessagePlugin.warning(`单次上传总量超过 ${fmtSize(MAX_UPLOAD_TOTAL_BYTES)}，${f.name} 及后续文件已跳过`)
-      break
-    }
-    total += f.size
-    list.push(f)
+const uploads = ref([])
+const currentUploads = computed(() => uploads.value.filter(item => item.botId === botId.value))
+let processingUploads = false
+let nextUploadId = 0
+function onUpload(event) {
+  const id = botId.value
+  const path = files.value.path
+  const input = event.target
+  const picked = Array.from(input.files || [])
+  input.value = ''
+  if (!id) return
+  let total = uploads.value.reduce((sum, item) => sum + (item.file?.size || 0), 0)
+  for (const file of picked) {
+    if (file.size > MAX_UPLOAD_FILE_BYTES) { MessagePlugin.warning(`${file.name} 超过单文件 ${fmtSize(MAX_UPLOAD_FILE_BYTES)} 上限，已跳过`); continue }
+    if (total + file.size > MAX_UPLOAD_TOTAL_BYTES) { MessagePlugin.warning(`待上传文件总量上限为 ${fmtSize(MAX_UPLOAD_TOTAL_BYTES)}，其余文件已跳过`); break }
+    total += file.size
+    uploads.value.push({ id: ++nextUploadId, botId: id, path, name: file.name, file, status: 'queued', error: '' })
   }
-  if (!list.length) { e.target.value = ''; return }
-
-  const failed = []
-  for (const f of list) {
-    try {
-      await sessionToolApi.upload(sid.value, files.value.path, f)
-    } catch (err) {
-      failed.push({ name: f.name, message: err?.message || '上传失败' })
-    }
-  }
-  if (failed.length) {
-    for (const item of failed) {
-      MessagePlugin.error(`${item.name} 上传失败：${item.message}`)
-    }
-    const okCount = list.length - failed.length
-    if (okCount > 0) MessagePlugin.success(`已上传 ${okCount} 个文件`)
-  } else if (list.length) {
-    MessagePlugin.success(`已上传 ${list.length} 个文件`)
-  }
-  e.target.value = ''
-  loadFiles()
+  processUploadQueue()
 }
-
-// ---------- 状态 ----------
-const status = ref({ messages: 0, contextUsed: 0, contextLimit: null, cacheHitRate: 0, cacheRead: 0, cacheWrite: 0, skills: [] })
-async function doCompact() {
+async function processUploadQueue() {
+  if (processingUploads || !alive) return
+  processingUploads = true
+  const changedDirectories = new Set()
   try {
-    await sessionToolApi.compact(sid.value)
-    MessagePlugin.success('已触发上下文压缩')
-  } catch (e) {
-    MessagePlugin.error(`压缩失败：${e?.message || e || '未知错误'}`)
+    let item
+    while (alive && (item = uploads.value.find(entry => entry.status === 'queued'))) {
+      item.status = 'uploading'
+      try {
+        await sessionToolApi.upload(item.botId, item.path, item.file)
+        item.status = 'success'
+        item.file = null
+        changedDirectories.add(`${item.botId}\n${item.path}`)
+      } catch (error) {
+        item.status = 'error'
+        item.error = error?.message || '上传失败，请重试'
+      }
+    }
+  } finally {
+    processingUploads = false
+    if (alive && changedDirectories.has(`${botId.value}\n${files.value.path}`)) loadFiles()
+  }
+}
+function retryUpload(item) { if (item.status === 'error' && item.file) { item.status = 'queued'; item.error = ''; processUploadQueue() } }
+function removeUpload(item) { if (item.status !== 'uploading') uploads.value = uploads.value.filter(entry => entry.id !== item.id) }
+function clearCompletedUploads() { uploads.value = uploads.value.filter(item => item.botId !== botId.value || item.status !== 'success') }
+
+const preview = ref(null)
+const previewEl = ref(null)
+let previewController = null
+let previewTrigger = null
+const IMAGE_PREVIEW_LIMIT = 5 * 1024 * 1024
+const TEXT_PREVIEW_LIMIT = 256 * 1024
+function previewKind(name) {
+  if (/\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(name)) return 'image'
+  if (/\.(txt|md|csv|json|jsonl|ya?ml|toml|log|ini|conf|xml|html?|css|scss|js|jsx|ts|tsx|py|go|rs|java|sh|sql|svg)$/i.test(name) || /^(Dockerfile|Makefile|LICENSE|README)$/i.test(name)) return 'text'
+  return ''
+}
+function closePreview(restoreFocus = false) {
+  previewController?.abort()
+  previewController = null
+  if (preview.value?.url) URL.revokeObjectURL(preview.value.url)
+  preview.value = null
+  const trigger = previewTrigger
+  previewTrigger = null
+  if (restoreFocus === true) nextTick(() => { if (trigger?.isConnected) trigger.focus() })
+}
+async function previewFile(entry) {
+  const id = botId.value
+  const kind = previewKind(entry.name)
+  if (!id || !kind) return
+  closePreview()
+  previewTrigger = document.activeElement
+  const controller = new AbortController()
+  previewController = controller
+  const state = { name: entry.name, entry, kind, loading: true, error: '', text: '', url: '', truncated: false }
+  preview.value = state
+  nextTick(() => previewEl.value?.focus())
+  const limit = kind === 'image' ? IMAGE_PREVIEW_LIMIT : TEXT_PREVIEW_LIMIT
+  const path = `${files.value.path.replace(/\/$/, '')}/${entry.name}`
+  try {
+    if (kind === 'image' && entry.size > limit) throw new Error('图片超过 5 MB，请下载后查看。')
+    const response = await fetch(sessionToolApi.downloadUrl(id, path), { credentials: 'include', signal: controller.signal })
+    if (!response.ok) throw new Error('暂时无法读取这个文件，请重试。')
+    if (kind === 'image' && Number(response.headers.get('content-length')) > limit) { await response.body.cancel(); throw new Error('图片超过 5 MB，请下载后查看。') }
+    const reader = response.body.getReader()
+    const chunks = []
+    let length = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const remaining = limit - length
+      chunks.push(value.slice(0, remaining))
+      length += Math.min(value.length, remaining)
+      if (value.length > remaining) { state.truncated = true; await reader.cancel(); break }
+    }
+    if (controller.signal.aborted || !alive || botId.value !== id) return
+    if (kind === 'image') {
+      if (state.truncated) throw new Error('图片超过 5 MB，请下载后查看。')
+      // Only passive bitmap formats are previewed as images; SVG and HTML stay escaped text.
+      const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp' }[entry.name.split('.').pop().toLowerCase()]
+      state.url = URL.createObjectURL(new Blob(chunks, { type: mime }))
+    } else {
+      const bytes = new Uint8Array(length)
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+      state.text = new TextDecoder().decode(bytes)
+    }
+  } catch (error) {
+    if (!controller.signal.aborted) state.error = error?.message || '预览失败，请重试。'
+  } finally {
+    if (!controller.signal.aborted && alive && botId.value === id) {
+      state.loading = false
+      preview.value = { ...state }
+    }
   }
 }
 
-// ---------- 工具函数 ----------
-function fmtSize(b) {
-  if (b == null) return ''
-  if (b < 1024) return `${b} B`
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
-  return `${(b / 1024 / 1024).toFixed(1)} MB`
+const status = ref(null)
+const statusLoading = ref(false)
+const statusError = ref('')
+const compacting = ref(false)
+let statusRequest = 0
+async function loadStatus() {
+  const id = botId.value
+  if (!id) return
+  const request = ++statusRequest
+  statusLoading.value = true
+  statusError.value = ''
+  try {
+    const result = await sessionToolApi.status(id)
+    if (alive && id === botId.value && request === statusRequest) status.value = result
+  } catch (error) {
+    if (alive && id === botId.value && request === statusRequest) statusError.value = error?.message || '暂时无法读取用量，请重试。'
+  } finally {
+    if (alive && id === botId.value && request === statusRequest) statusLoading.value = false
+  }
+}
+async function doCompact() {
+  const id = botId.value
+  if (!id || compacting.value) return
+  compacting.value = true
+  try {
+    await sessionToolApi.compact(id)
+    if (alive && id === botId.value) MessagePlugin.success('已触发 Bot 记忆压缩，将在后台处理')
+  } catch (error) {
+    if (alive && id === botId.value) MessagePlugin.error(`压缩失败：${error?.message || '请重试'}`)
+  } finally { if (alive && id === botId.value) compacting.value = false }
+}
+
+function fmtSize(bytes) {
+  if (bytes == null) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 function fmtTime(iso) {
-  const d = new Date(iso)
-  if (isNaN(d)) return ''
-  const pad = (n) => String(n).padStart(2, '0')
-  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const date = new Date(iso)
+  if (isNaN(date)) return '—'
   const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-  const dayDiff = Math.floor((startOfToday - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / 86400000)
-  if (dayDiff === 0) return hm
-  if (dayDiff === 1) return `昨天 ${hm}`
-  if (dayDiff > 1 && dayDiff <= 6) return `${dayDiff}天前`
-  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (date.getFullYear() !== now.getFullYear()) return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+  return `${date.getMonth() + 1}/${date.getDate()}`
 }
-function fmtK(n) {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
-  return String(n)
-}
-function fmtBig(n) {
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
-  return String(n)
+function fmtBig(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '暂无数据'
+  const number = Number(value)
+  if (number >= 1e6) return `${(number / 1e6).toFixed(1)}M`
+  if (number >= 1e3) return `${(number / 1e3).toFixed(1)}K`
+  return String(number)
 }
 
-const sid = computed(() => store.activeBotId)
+watch(botId, (id, previousId) => {
+  if (previousId) botWorkspaces.set(previousId, { tab: layout.toolTab, path: files.value.path, query: fileQuery.value, sort: fileSort.value })
+  const saved = botWorkspaces.get(id)
+  closePreview()
+  filesRequest++
+  statusRequest++
+  visited.value = {}
+  files.value = { path: saved?.path || '/', entries: [] }
+  fileQuery.value = saved?.query || ''
+  fileSort.value = saved?.sort || 'name'
+  highlightedFile.value = ''
+  if (saved?.tab) layout.toolTab = saved.tab
+  filesLoading.value = false
+  filesError.value = ''
+  mkdir.value = { editing: false, name: '', saving: false }
+  status.value = null
+  statusLoading.value = false
+  statusError.value = ''
+  compacting.value = false
+}, { flush: 'sync' })
+watch([botId, () => layout.toolsOpen, () => layout.toolTab], ([id, open, tab]) => {
+  if (!id || !open || visited.value[tab]) return
+  visited.value[tab] = true
+  if (tab === 'files') loadFiles()
+  if (tab === 'status') loadStatus()
+}, { immediate: true })
 
-async function loadAll() {
-  if (!sid.value) return
-  try {
-    status.value = await sessionToolApi.status(sid.value)
-    files.value.path = '/'
-    await loadFiles()
-  } catch (e) {
-    // 静默：工具栏非核心
-  }
-}
+let handledFileRequest = null
+watch([() => layout.fileRequest, botId], async ([request, id]) => {
+  if (!request || request.nonce === handledFileRequest || request.botId !== String(id)) return
+  handledFileRequest = request.nonce
+  const parts = request.path.replace(/\\/g, '/').split('/').filter(part => part && part !== '.')
+  if (parts.some(part => part === '..')) { MessagePlugin.warning('文件路径无效，请从工作区目录打开。'); return }
+  const name = parts.pop() || ''
+  const directory = '/' + parts.join('/')
+  closePreview()
+  layout.toolTab = 'files'
+  visited.value.files = true
+  fileQuery.value = ''
+  highlightedFile.value = name
+  mkdir.value = { editing: false, name: '', saving: false }
+  const loaded = await loadFiles(directory)
+  if (!loaded || !alive || id !== botId.value || request.nonce !== layout.fileRequest?.nonce) return
+  await nextTick()
+  const row = Array.from(panelEl.value?.querySelectorAll('[data-file-name]') || []).find(el => el.dataset.fileName === name)
+  row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  row?.querySelector('button')?.focus()
+}, { immediate: true })
 
-onMounted(() => {
-  loadAll()
-  nextTick(bindTabObserver)
-  document.fonts?.ready?.then(() => syncTabLabels())
-})
 onBeforeUnmount(() => {
-  window.removeEventListener('mousemove', onResize)
-  window.removeEventListener('mouseup', stopResize)
-  tabsObserver?.disconnect()
+  alive = false
+  filesRequest++
+  statusRequest++
+  closePreview()
+  stopResize()
+  document.removeEventListener('keydown', onDrawerKey)
 })
-watch(sid, loadAll)
-watch(collapsed, () => nextTick(bindTabObserver))
 </script>
 
 <style scoped>
-.tool-panel {
-  position: relative;
-  display: flex;
-  height: 100%;
-  flex-shrink: 0;
-  border-left: var(--bp-hairline);
-  background: var(--bp-surface);
-}
-.tp-resizer {
-  position: absolute;
-  left: -3px;
-  top: 0;
-  width: 6px;
-  height: 100%;
-  cursor: col-resize;
-  z-index: 5;
-}
-.tp-resizer:hover { background: var(--bp-accent-soft); }
-.tp-main {
-  position: relative;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-/* 折叠态 */
-.tool-collapsed {
-  width: 52px;
-  min-width: 52px;
-  height: 100%;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  border-left: var(--bp-hairline);
-  background: var(--bp-bg-subtle);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 0;
-  box-shadow: none;
-  z-index: 2;
-}
-
-/* tabs */
-.tp-tabs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 14px 0;
-  border-bottom: var(--bp-hairline);
-  flex-shrink: 0;
-  min-width: 0;
-}
-.tp-tabs-measure {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: max-content;
-  height: 0;
-  overflow: hidden;
-  visibility: hidden;
-  pointer-events: none;
-  border-bottom: 0;
-}
-.tp-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  border: none;
-  background: none;
-  padding: 8px 6px 12px;
-  font-size: 14px;
-  font-family: inherit;
-  color: var(--bp-label-tertiary);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  white-space: nowrap;
-  border-radius: 8px;
-  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
-}
-.tp-tab-label { line-height: 1.2; }
-.tp-tab.active {
-  color: var(--bp-label);
-  font-weight: 600;
-  border-bottom-color: var(--bp-label);
-}
-.tp-tab:focus-visible {
-  outline: 2px solid var(--bp-accent);
-  outline-offset: 2px;
-}
-.tp-tab:active { transform: translateY(1px); }
-@media (hover: hover) and (pointer: fine) {
-  .tp-tab:hover { color: var(--bp-label); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .tp-tab, .tp-tab:active { transition: none; transform: none; }
-}
-
-.tp-body {
-  flex: 1;
-  overflow: auto;
-  padding: 14px;
-}
-
-/* terminal */
+.tool-panel { position: relative; display: flex; height: 100%; min-width: 0; flex-shrink: 0; border-left: var(--bp-hairline); background: var(--bp-surface); }
+.tp-main { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.tp-header { display: flex; align-items: center; justify-content: space-between; min-height: 60px; padding: 0 16px; gap: 8px; }
+.tp-heading { display: flex; align-items: baseline; gap: 10px; min-width: 0; font-size: 14px; font-weight: 650; color: var(--bp-label); }
+.tp-bot-name { font-size: 12px; font-weight: 400; color: var(--bp-label-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-scope { display: flex; align-items: center; gap: 6px; padding: 0 16px 12px; font-size: 11px; line-height: 1.6; color: var(--bp-label-tertiary); }
+.tp-resizer { position: absolute; left: -4px; top: 0; width: 8px; height: 100%; cursor: col-resize; z-index: 5; touch-action: none; }
+.tp-resizer:hover, .tp-resizer:focus-visible { background: var(--bp-accent-soft); outline-offset: -2px; }
+.tool-collapsed { width: 40px; min-width: 40px; height: 100%; flex-shrink: 0; box-sizing: border-box; border-left: var(--bp-hairline); background: var(--bp-surface); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 0; }
+.rail-btn { width: 32px; height: 32px; flex-shrink: 0; border: 0; background: transparent; border-radius: 8px; color: var(--bp-label-tertiary); cursor: pointer; font-size: 17px; display: inline-flex; align-items: center; justify-content: center; transition: background 140ms ease, color 140ms ease; }
+.rail-btn:hover { background: var(--bp-accent-soft); color: var(--bp-accent); }
+.tool-collapsed .rail-btn:first-child { margin-bottom: 4px; color: var(--bp-accent); }
+.tp-close { width: 30px; height: 30px; }
+.tp-tabs { display: flex; gap: 4px; margin: 0 12px; padding: 4px; border-radius: 10px; background: var(--bp-surface-fill); }
+.tp-tab { display: flex; align-items: center; justify-content: center; gap: 5px; flex: 1; min-width: 0; border: none; background: transparent; padding: 8px 3px; font-size: 12px; font-family: inherit; line-height: 1.3; color: var(--bp-label-secondary); cursor: pointer; white-space: nowrap; border-radius: 7px; transition: background 140ms ease, color 140ms ease; }
+.tp-tab.active { color: var(--bp-accent); background: var(--bp-surface); font-weight: 600; box-shadow: var(--bp-shadow-xs); }
+.tp-tab:hover { color: var(--bp-accent); }
+button:focus-visible, input:focus-visible, .upload-btn:focus-within, .tp-resizer:focus-visible { outline: 2px solid var(--bp-accent); outline-offset: 2px; }
+.tp-body { flex: 1; min-height: 0; overflow: auto; padding: 16px 12px 12px; }
 .terminal-body { display: flex; flex-direction: column; }
-.term-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-.term-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--bp-label-secondary);
-}
-.term-conn { font-size: 13px; color: var(--bp-label-quaternary); }
-.term-conn.ok { color: var(--bp-success); }
-.term-console { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.term-console { flex: 1; min-height: 0; }
 .term-console :deep(.xc-body) { flex: 1; min-height: 0; }
-
-/* files */
-.files-head { margin-bottom: 12px; }
-.crumb {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 14px; color: var(--bp-label-secondary); margin-bottom: 10px; flex-wrap: wrap;
-}
-.crumb-sep { color: var(--bp-label-quaternary); font-size: 13px; }
-.crumb-seg { cursor: pointer; }
+.term-console :deep(.xc-host) { display: none; }
+.term-console :deep(.xc-head) { gap: 8px; flex-wrap: wrap; }
+.term-console :deep(.xc-left) { gap: 7px; }
+.term-console :deep(.xc-title) { font-size: 12px; }
+.term-console :deep(.xc-actions) { gap: 4px; }
+.term-console :deep(.xc-actions .t-button) { height: 26px; font-size: 11px; padding: 0 8px; }
+.term-console :deep(.xc-status) { font-size: 11px; }
+.files-head { margin-bottom: 16px; }
+.crumb { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--bp-label-secondary); margin-bottom: 12px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.crumb-sep { flex-shrink: 0; color: var(--bp-label-quaternary); font-size: 12px; }
+.crumb-seg { border: 0; background: transparent; color: inherit; font: inherit; padding: 3px 2px; cursor: pointer; border-radius: 4px; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
 .crumb-seg:hover { color: var(--bp-accent); }
-.crumb-seg.last { font-weight: 600; color: var(--bp-label); cursor: default; }
-.crumb-seg.last:hover { color: var(--bp-label); }
-.files-ops { display: flex; gap: 8px; }
-.upload-btn {
-  position: relative;
-  overflow: hidden;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 12px;
-  font-size: 12px;
-  color: var(--bp-accent);
-  background: var(--bp-surface);
-  border: 1px solid var(--bp-accent);
-  border-radius: 3px;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  transition: background var(--bp-duration) var(--bp-ease-out), color var(--bp-duration) var(--bp-ease-out);
-}
-.upload-btn:hover { background: var(--bp-accent-soft); }
-.upload-btn:active { background: var(--bp-accent-soft-strong); }
-.hidden-file {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-}
-.upload-input {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
-  font-size: 0;
-}
-.files-table { font-size: 13px; }
-.files-row {
-  display: grid;
-  grid-template-columns: 1fr 80px 110px;
-  align-items: center;
-  padding: 9px 6px;
-  border-bottom: var(--bp-hairline);
-  border-radius: 6px;
-}
-.files-row.clickable { cursor: pointer; }
-.files-row.clickable:hover, .file-up:hover { background: var(--bp-surface-fill-hover); }
-.file-up { cursor: pointer; color: var(--bp-label-tertiary); }
-.files-th { color: var(--bp-label-tertiary); font-size: 12px; border-bottom: var(--bp-hairline); border-radius: 0; }
-.col-name { display: flex; align-items: center; gap: 10px; color: var(--bp-label); overflow: hidden; min-width: 0; }
-.col-name .fname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-size { text-align: right; color: var(--bp-label-tertiary); }
-.col-time { text-align: right; color: var(--bp-label-tertiary); }
-.ic-dir { flex: 0 0 auto; color: var(--bp-accent); font-size: 16px; }
-.ic-file { flex: 0 0 auto; color: var(--bp-label-tertiary); font-size: 16px; }
-.ic-download {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--bp-label-quaternary);
-  font-size: 15px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease, color 120ms ease, background 120ms ease, transform 120ms ease;
-}
-.files-row:hover .ic-download,
-.ic-download:focus-visible { opacity: 1; }
-.ic-download:focus-visible {
-  outline: 2px solid var(--bp-accent);
-  outline-offset: 2px;
-}
-.ic-download:active { transform: translateY(1px); }
-@media (hover: hover) and (pointer: fine) {
-  .ic-download:hover { color: var(--bp-accent); background: var(--bp-surface-fill); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .ic-download, .ic-download:active { transition: none; transform: none; }
-}
-.files-empty { text-align: center; color: var(--bp-label-tertiary); padding: 28px 0; font-size: 13px; }
-.mkdir-row { background: var(--bp-accent-soft); }
-.mkdir-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  border: 1px solid var(--bp-accent);
-  border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 13px;
-  color: var(--bp-label);
-  outline: none;
-  background: var(--bp-surface);
-}
-.mkdir-input:disabled { background: var(--bp-surface-fill); color: var(--bp-label-tertiary); }
-
-/* status */
-.status-body { padding: 18px; }
-.stat-list { margin-bottom: 14px; }
-.stat-row {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 2px;
-  border-bottom: var(--bp-hairline);
-  font-size: 14px;
-}
+.crumb-seg.last { font-weight: 600; color: var(--bp-label); }
+.files-ops { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.files-filter { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.file-search { display: flex; flex: 1; min-width: 0; gap: 6px; align-items: center; padding: 7px 8px; border: var(--bp-hairline); border-radius: 7px; color: var(--bp-label-tertiary); background: var(--bp-surface); }
+.file-search:focus-within { border-color: var(--bp-accent); }
+.file-search input { flex: 1; min-width: 0; width: 100%; outline: none; padding: 0; border: 0; background: transparent; font: inherit; font-size: 12px; color: var(--bp-label); }
+.file-search button { display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.files-filter select { max-width: 106px; padding: 6px; border: var(--bp-hairline); border-radius: 7px; color: var(--bp-label-secondary); background: var(--bp-surface); font-size: 11px; }
+.files-filter select:focus-visible { outline: 2px solid var(--bp-accent); outline-offset: 2px; }
+.upload-queue { padding: 10px; border: var(--bp-hairline); border-radius: 10px; background: var(--bp-bg-subtle); margin-bottom: 14px; }
+.queue-head { display: flex; justify-content: space-between; gap: 8px; color: var(--bp-label-tertiary); font-size: 11px; padding: 2px 0 8px; }
+.queue-head button, .queue-item > button { border: 0; padding: 2px 3px; border-radius: 4px; background: transparent; color: var(--bp-accent); font-size: 11px; cursor: pointer; }
+.queue-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; color: var(--bp-success); }
+.queue-item + .queue-item { border-top: var(--bp-hairline); }
+.queue-info { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.queue-info > span { font-size: 12px; color: var(--bp-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-info small { color: var(--bp-label-tertiary); font-size: 11px; overflow-wrap: anywhere; }
+.queue-failed, .queue-failed small { color: var(--bp-danger); }
+.queue-item > .queue-remove { color: var(--bp-label-tertiary); font-size: 14px; }
+.file-preview { border: var(--bp-hairline); border-radius: 10px; overflow: hidden; background: var(--bp-bg-subtle); margin-bottom: 14px; }
+.preview-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-bottom: var(--bp-hairline); }
+.preview-head strong { min-width: 0; font-size: 12px; font-weight: 500; color: var(--bp-label); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-preview pre { max-height: 340px; overflow: auto; margin: 0; padding: 14px; font-family: var(--bp-font-mono, monospace); font-size: 11px; line-height: 1.65; tab-size: 2; color: var(--bp-label-secondary); white-space: pre; }
+.file-preview img { display: block; max-width: 100%; max-height: 360px; margin: 0 auto; object-fit: contain; }
+.preview-note, .location-notice { margin: 0; padding: 10px; font-size: 11px; line-height: 1.6; color: var(--bp-label-tertiary); overflow-wrap: anywhere; }
+.files-row.is-highlighted { background: var(--bp-accent-soft); box-shadow: inset 3px 0 0 var(--bp-accent); }
+.upload-btn { position: relative; overflow: hidden; display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 10px; font-size: 12px; color: var(--bp-accent); background: var(--bp-accent-soft); border: 1px solid transparent; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.upload-btn:hover { background: var(--bp-accent-soft-strong); }
+.upload-btn.disabled { opacity: .55; cursor: wait; }
+.upload-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 0; }
+.files-table { font-size: 12px; }
+.files-row { display: grid; width: 100%; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) 58px 64px; gap: 8px; align-items: center; padding: 10px 4px; border: 0; border-bottom: var(--bp-hairline); background: transparent; font: inherit; }
+.files-row:hover { background: var(--bp-surface-fill-hover); }
+.files-th { color: var(--bp-label-tertiary); font-size: 11px; }
+.files-th:hover { background: transparent; }
+.file-up { cursor: pointer; text-align: left; }
+.file-up .col-name { grid-column: 1 / -1; color: var(--bp-label-tertiary); }
+.col-name { display: flex; align-items: center; gap: 7px; color: var(--bp-label); min-width: 0; }
+.fname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-link { border: 0; padding: 4px 0; border-radius: 3px; background: transparent; text-align: left; color: inherit; font: inherit; cursor: pointer; }
+.folder-link:hover { color: var(--bp-accent); }
+.col-size, .col-time { text-align: right; color: var(--bp-label-tertiary); font-variant-numeric: tabular-nums; }
+.ic-dir, .ic-file { flex: 0 0 auto; font-size: 16px; }
+.ic-dir { color: var(--bp-accent); }
+.ic-file { color: var(--bp-label-tertiary); }
+.ic-download { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 5px; background: transparent; color: var(--bp-label-tertiary); font-size: 14px; cursor: pointer; }
+.ic-download:hover { color: var(--bp-accent); background: var(--bp-accent-soft); }
+.mkdir-row { grid-template-columns: 1fr; background: var(--bp-accent-soft); }
+.mkdir-input { flex: 1; min-width: 0; border: 1px solid var(--bp-accent); border-radius: 4px; padding: 5px 8px; font: inherit; color: var(--bp-label); background: var(--bp-surface); }
+.mkdir-input:disabled { color: var(--bp-label-tertiary); }
+.pane-state { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 40px 16px; text-align: center; color: var(--bp-label-tertiary); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.pane-state > .t-icon { font-size: 26px; color: var(--bp-label-quaternary); }
+.pane-state strong { font-size: 13px; font-weight: 500; color: var(--bp-label-secondary); }
+.error-state > .t-icon { color: var(--bp-danger); }
+.status-head { display: flex; justify-content: space-between; align-items: center; color: var(--bp-label-secondary); font-size: 12px; margin-bottom: 12px; }
+.status-head strong { font-weight: 500; }
+.usage-summary { padding: 18px; background: var(--bp-accent-soft); border: 1px solid var(--bp-accent-soft-strong); border-radius: 12px; }
+.usage-summary > span { display: block; font-size: 12px; color: var(--bp-label-secondary); }
+.usage-summary > strong { display: block; padding: 8px 0 4px; font-size: 30px; line-height: 1.3; letter-spacing: -.8px; font-weight: 600; color: var(--bp-accent); font-variant-numeric: tabular-nums; }
+.usage-summary > p { margin: 0; font-size: 11px; color: var(--bp-label-tertiary); }
+.stat-list { margin: 10px 0 20px; }
+.stat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 2px; border-bottom: var(--bp-hairline); font-size: 12px; }
 .stat-k { color: var(--bp-label-secondary); }
-.stat-v { font-weight: 600; color: var(--bp-label); }
-.compact-btn {
-  width: 100%;
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  padding: 12px;
-  border: none; border-radius: 10px;
-  background: var(--bp-surface-fill); color: var(--bp-label);
-  font-size: 14px; font-weight: 600; cursor: pointer;
-  margin: 4px 0 20px;
-}
-.compact-btn:hover { background: var(--bp-surface-fill-hover); }
-.skills-title { font-size: 12px; font-weight: 700; color: var(--bp-label-tertiary); letter-spacing: 0.5px; margin-bottom: 8px; }
-.skills-empty { font-size: 14px; color: var(--bp-label-tertiary); }
+.stat-v { font-weight: 550; color: var(--bp-label); font-variant-numeric: tabular-nums; }
+.stat-unknown { color: var(--bp-label-tertiary); font-size: 11px; }
+.skills-block { margin-top: 24px; }
+.skills-title { font-size: 12px; font-weight: 600; color: var(--bp-label-secondary); margin-bottom: 10px; }
+.skills-empty { font-size: 12px; color: var(--bp-label-tertiary); }
 .skills-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.skill-tag { font-size: 12px; padding: 3px 10px; border-radius: 8px; background: var(--bp-surface-fill); color: var(--bp-label-secondary); }
-
-/* right rail */
-.tp-rail {
-  width: 52px;
-  min-width: 52px;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  border-left: var(--bp-hairline);
-  background: var(--bp-bg-subtle);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 0;
-}
-.rail-btn {
-  width: 36px;
-  height: 36px;
-  border: 1px solid transparent;
-  background: var(--bp-surface);
-  border-radius: 10px;
-  color: var(--bp-label-secondary);
-  cursor: pointer;
-  font-size: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: var(--bp-shadow-xs);
-  transition: background var(--bp-duration) var(--bp-ease-out), color var(--bp-duration) var(--bp-ease-out), transform var(--bp-duration) var(--bp-ease-out);
-}
-.rail-btn:hover { background: var(--bp-accent-soft); border-color: var(--bp-accent-soft-strong); color: var(--bp-accent); }
-.rail-btn.active { background: var(--bp-accent-soft-strong); border-color: var(--bp-accent); color: var(--bp-accent); box-shadow: none; }
-.tool-collapsed .rail-btn:first-child { color: var(--bp-accent); }
-.rail-trash { margin-top: auto; color: var(--bp-danger); }
-.rail-trash:hover { background: var(--bp-danger-soft); border-color: var(--bp-danger); color: var(--bp-danger); }
+.skill-tag { max-width: 100%; overflow-wrap: anywhere; font-size: 12px; padding: 4px 10px; border-radius: 6px; background: var(--bp-surface-fill); color: var(--bp-label-secondary); }
+.tool-backdrop { position: fixed; inset: 0; background: rgba(20, 27, 47, .3); backdrop-filter: blur(2px); z-index: 60; }
+.tool-drawer { position: fixed; inset: 0 0 0 auto; max-width: 100vw; height: 100dvh; z-index: 61; box-shadow: -12px 0 40px rgba(20, 27, 47, .12); padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box; }
+.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } .rail-btn, .tp-tab { transition: none; } }
 </style>

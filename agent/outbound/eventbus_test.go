@@ -222,7 +222,10 @@ func TestMemoryEventBus_NonBlockingPublish(t *testing.T) {
 	received := 0
 	for {
 		select {
-		case <-sub.C():
+		case _, ok := <-sub.C():
+			if !ok {
+				goto done
+			}
 			received++
 		case <-time.After(50 * time.Millisecond):
 			goto done

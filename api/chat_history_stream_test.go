@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -164,12 +165,165 @@ func TestMarkStreamingStale(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("affected rows = %d, want 1 (only the streaming row)", n)
 	}
-	if loadAssistant(t, s, "t-live").Streaming {
-		t.Error("stale streaming row should have been settled")
+	if stale := loadAssistant(t, s, "t-live"); stale.Streaming || stale.StreamStatus != "cancelled" || stale.StreamError == "" {
+		t.Errorf("stale streaming row should record interrupted outcome: %+v", stale)
 	}
 
 	// 幂等：再次调用无行可改。
 	if n2, err := s.MarkStreamingStale(); err != nil || n2 != 0 {
 		t.Fatalf("second call = (%d, %v), want (0, nil)", n2, err)
 	}
+}
+
+func TestUpsertAssistantSnapshot_SequencePreventsRegression(t *testing.T) {
+	s := newTestChatHistory(t)
+	write := func(content string, seq uint64, streaming bool) {
+		t.Helper()
+		if err := s.UpsertAssistantSnapshot("bot", "1", content, "trace", "", "", "session", streaming, seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("new partial", 20, true)
+	write("older partial", 10, true)
+	write("unversioned partial", 0, true)
+	if m := loadAssistant(t, s, "trace"); m.Content != "new partial" || m.StreamSeq != 20 {
+		t.Fatalf("outdated snapshot replaced newer one: %+v", m)
+	}
+	// A final canonical reply can reuse the cursor of its last text/tool event.
+	write("canonical final", 20, false)
+	write("late old final", 10, false)
+	write("late fallback", 0, false)
+	write("late partial", 21, true)
+	if m := loadAssistant(t, s, "trace"); m.Content != "canonical final" || m.Streaming || m.StreamSeq != 20 {
+		t.Fatalf("final snapshot regressed: %+v", m)
+	}
+}
+
+func TestUpsertAssistantSnapshot_IsScopedByBot(t *testing.T) {
+	s := newTestChatHistory(t)
+	for _, botID := range []string{"bot-a", "bot-b"} {
+		if err := s.UpsertAssistantSnapshot(botID, "1", botID, "shared-trace", "", "", "session", false, 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, botID := range []string{"bot-a", "bot-b"} {
+		m, err := s.LoadAssistantByTrace(botID, "shared-trace")
+		if err != nil || m == nil || m.Content != botID {
+			t.Fatalf("%s snapshot=%+v error=%v", botID, m, err)
+		}
+	}
+	if m, err := s.LoadAssistantByTrace("bot-c", "shared-trace"); err != nil || m != nil {
+		t.Fatalf("missing snapshot=%+v error=%v", m, err)
+	}
+}
+
+func TestLoadContext_MatchesSessionHistory(t *testing.T) {
+	s := newTestChatHistory(t)
+	for _, owner := range []string{"1", "system", "tg:123"} {
+		if err := s.SaveMessage("bot", owner, dao.ChatRoleUser, owner, owner, "session"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SaveMessage("bot", "1", dao.ChatRoleUser, "different session", "other", "other"); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.LoadContext("bot", "1", 20, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("context has %d messages; history shows all three owners", len(messages))
+	}
+	for i, owner := range []string{"1", "system", "tg:123"} {
+		if messages[i].Content != owner {
+			t.Fatalf("context[%d]=%q", i, messages[i].Content)
+		}
+	}
+}
+
+func TestLegacyAssistantSnapshots_ReadCanonicalHistoryWithoutDeletingRows(t *testing.T) {
+	s := newTestChatHistory(t)
+	const tools = `[{"id":"tool","status":"success"}]`
+	const parts = `[{"type":"tool","id":"tool"}]`
+	base := time.Now().Add(-time.Minute)
+	rows := []dao.ChatMessage{
+		{BotID: "bot", UserID: "1", SessionID: "session", Role: dao.ChatRoleUser, TraceID: "trace", Content: "question", CreatedAt: base},
+		{BotID: "bot", UserID: "1", SessionID: "session", Role: dao.ChatRoleAssistant, TraceID: "trace", Content: "partial", Streaming: true, StreamSeq: 10, ToolCalls: tools, PartsJSON: parts, CreatedAt: base.Add(time.Second)},
+		{BotID: "bot", UserID: "1", SessionID: "session", Role: dao.ChatRoleAssistant, TraceID: "trace", Content: "canonical final", StreamSeq: 20, CreatedAt: base.Add(2 * time.Second)},
+		{BotID: "bot", UserID: "1", SessionID: "session", Role: dao.ChatRoleAssistant, TraceID: "trace", Content: "late partial", Streaming: true, StreamSeq: 30, CreatedAt: base.Add(3 * time.Second)},
+		{BotID: "bot", UserID: "1", SessionID: "session", Role: dao.ChatRoleAssistant, TraceID: "next", Content: "next reply", CreatedAt: base.Add(4 * time.Second)},
+	}
+	if err := s.db.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := s.LoadAssistantByTrace("bot", "trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical.Content != "canonical final" || canonical.Streaming || canonical.ToolCalls != tools || !strings.Contains(canonical.PartsJSON, "canonical final") {
+		t.Fatalf("wrong canonical legacy snapshot: %+v", canonical)
+	}
+	cursor := ""
+	for i, want := range []string{"next reply", "canonical final", "question"} {
+		page, err := s.PaginateHistory("bot", "1", cursor, 1, "session")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Messages) != 1 || page.Messages[0].Content != want {
+			t.Fatalf("page %d: %+v", i, page)
+		}
+		if page.HasMore != (i < 2) {
+			t.Fatalf("page %d hasMore=%t", i, page.HasMore)
+		}
+		if i == 1 && page.Messages[0].ToolCalls != tools {
+			t.Fatal("history omitted tools held by duplicate snapshot")
+		}
+		cursor = page.NextCursor
+	}
+	for _, contextMessages := range []func() ([]dao.ChatMessage, error){
+		func() ([]dao.ChatMessage, error) { return s.LoadContext("bot", "1", 20, "session") },
+		func() ([]dao.ChatMessage, error) { return s.LoadContextBySession("bot", "session", 20) },
+	} {
+		messages, err := contextMessages()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(messages) != 3 || messages[1].Content != "canonical final" || messages[1].ToolCalls != tools {
+			t.Fatalf("context still contains stale snapshots: %+v", messages)
+		}
+	}
+	if err := s.UpsertAssistantSnapshot("bot", "1", "updated canonical", "trace", "", "", "session", false, 21); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err = s.LoadAssistantByTrace("bot", "trace")
+	if err != nil || canonical.Content != "updated canonical" || canonical.ToolCalls != tools {
+		t.Fatalf("upsert lost canonical tools: %+v, %v", canonical, err)
+	}
+	if count := countAssistant(t, s, "trace"); count != 3 {
+		t.Fatalf("legacy records were deleted, count=%d", count)
+	}
+}
+
+func TestLegacyAssistantHistoryUsesTraceSnapshotIndex(t *testing.T) {
+	s := newTestChatHistory(t)
+	if err := dao.Migrate(s.db); err != nil {
+		t.Fatal(err)
+	}
+	query := s.db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+		return canonicalAssistantRows(tx.Model(&dao.ChatMessage{})).
+			Where("bot_id = ? AND session_id = ?", "bot", "session").
+			Order("created_at DESC, id DESC").Limit(21).Find(&[]dao.ChatMessage{})
+	})
+	var plan []struct{ Detail string }
+	if err := s.db.Raw("EXPLAIN QUERY PLAN " + query).Scan(&plan).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range plan {
+		t.Log(step.Detail)
+		if strings.Contains(step.Detail, "canonical USING COVERING INDEX idx_chat_messages_trace_snapshot") &&
+			strings.Contains(step.Detail, "bot_id=? AND trace_id=? AND role=?") {
+			return
+		}
+	}
+	t.Fatalf("canonical snapshot lookup does not use its bot/trace/role index: %+v", plan)
 }

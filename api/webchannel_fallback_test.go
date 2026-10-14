@@ -35,7 +35,7 @@ func TestWebChannel_Send_FallbackPersistsWhenNoSubscriber(t *testing.T) {
 		t.Fatalf("Send returned error: %v", err)
 	}
 
-	// 兜底落库走异步 goroutine，轮询等待其完成（最多 2s）。
+	// Send returns only after fallback persistence is visible.
 	deadline := time.Now().Add(2 * time.Second)
 	for countAssistant(t, ch.chatHistory, traceID) != 1 {
 		if time.Now().After(deadline) {
@@ -57,6 +57,36 @@ func TestWebChannel_Send_FallbackPersistsWhenNoSubscriber(t *testing.T) {
 	}
 	if msg.Content == "" {
 		t.Errorf("persisted content is empty")
+	}
+}
+
+func TestWebChannel_FallbackPreservesToolsAndParts(t *testing.T) {
+	ch := NewWebChannel("web-bot", "bot")
+	ch.chatHistory = newTestChatHistory(t)
+	const tools = `[{"id":"tool-1","status":"success"}]`
+	const parts = `[{"type":"tool","id":"tool-1"}]`
+	if err := ch.chatHistory.UpsertAssistantSnapshot("bot", "1", "partial", "trace", tools, parts, "session", true, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Send(context.Background(), core.Action{Type: core.ActionReply, Payload: "canonical reply", Metadata: map[string]any{"trace_id": "trace", "session_id": "session"}}); err != nil {
+		t.Fatal(err)
+	}
+	m := loadAssistant(t, ch.chatHistory, "trace")
+	if m.Streaming || m.Content != "canonical reply" || m.ToolCalls != tools || m.PartsJSON != parts || m.StreamSeq != 10 {
+		t.Fatalf("fallback lost persisted snapshot fields: %+v", m)
+	}
+}
+
+func TestWebChannel_FullResponseReturnsDeliveryError(t *testing.T) {
+	ch := NewWebChannel("web-bot", "bot")
+	ch.RegisterResponse("trace", 1)
+	defer ch.UnregisterResponse("trace")
+	action := core.Action{Type: core.ActionReply, Payload: "reply", Metadata: map[string]any{"trace_id": "trace"}}
+	if err := ch.Send(context.Background(), action); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Send(context.Background(), action); err == nil {
+		t.Fatal("full response channel must not silently drop final reply")
 	}
 }
 

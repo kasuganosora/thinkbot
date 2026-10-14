@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -318,7 +320,11 @@ func (s *Server) handleListBotFiles(c *gin.Context) {
 	botID := c.Param("id")
 	path := c.DefaultQuery("path", "/")
 
-	entries := s.getBotFileEntries(botID, path)
+	entries, err := s.listBotFileEntries(c.Request.Context(), botID, path)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
 	OK(c, entries)
 }
 
@@ -894,6 +900,14 @@ func safeJoin(root string, elems ...string) (string, error) {
 // 优先复用运行中 bot 的工作空间管理器（与运行时状态完全一致）；
 // bot 未运行时按当前配置临时构造一个 manager（用于离线浏览容器文件）。
 func (s *Server) botFileWorkspace(botID string) (sandbox.Workspace, bool) {
+	ws, docker, err := s.botFileWorkspaceWithError(botID)
+	if err != nil {
+		return nil, false
+	}
+	return ws, docker
+}
+
+func (s *Server) botFileWorkspaceWithError(botID string) (sandbox.Workspace, bool, error) {
 	var mgr *sandbox.BotWorkspaceManager
 	if s.botSvc != nil {
 		if m, ok := s.botSvc.RunningBotWorkspaceMgr(botID); ok {
@@ -904,26 +918,56 @@ func (s *Server) botFileWorkspace(botID string) (sandbox.Workspace, bool) {
 		cfg := s.botSvc.SandboxConfigForBot()
 		m, err := sandbox.NewBotWorkspaceManager(s.botSvc.GetWorkspaceBaseDir(), cfg, s.logger)
 		if err != nil {
-			return nil, false
+			return nil, false, err
 		}
 		mgr = m
 	}
 	if mgr == nil || mgr.Backend() != "docker" {
-		return nil, false // local 模式：走宿主磁盘
+		return nil, false, nil // local 模式：走宿主磁盘
 	}
 	ws, err := mgr.GetOrCreate(botID)
 	if err != nil {
-		return nil, false
+		return nil, true, err
 	}
-	return ws, true
+	return ws, true, nil
 }
 
 func (s *Server) getBotFileEntries(botID, path string) []BotFileEntry {
+	entries, err := s.listBotFileEntries(context.Background(), botID, path)
+	if err != nil {
+		return []BotFileEntry{}
+	}
+	return entries
+}
+
+func fileListError(err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return errs.NotFound("目录不存在或已被移动")
+	case errors.Is(err, os.ErrPermission):
+		return errs.Forbidden("没有读取此目录的权限")
+	case errors.Is(err, os.ErrInvalid), errors.Is(err, syscall.ENOTDIR):
+		return errs.BadRequest("此路径不是目录")
+	default:
+		return errs.Wrap(err, "读取目录失败")
+	}
+}
+
+// listBotFileEntries distinguishes an empty directory from an unavailable
+// workspace. In particular a Docker error must not fall back to host files.
+func (s *Server) listBotFileEntries(ctx context.Context, botID, path string) ([]BotFileEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// docker 隔离模式：文件在容器内，通过容器列目录。
-	if ws, ok := s.botFileWorkspace(botID); ok {
-		entries, err := ws.ListDir(context.Background(), path)
+	ws, docker, err := s.botFileWorkspaceWithError(botID)
+	if err != nil {
+		return nil, fileListError(err)
+	}
+	if docker {
+		entries, err := ws.ListDir(ctx, path)
 		if err != nil {
-			return []BotFileEntry{}
+			return nil, fileListError(err)
 		}
 		result := make([]BotFileEntry, 0, len(entries))
 		for _, e := range entries {
@@ -941,23 +985,22 @@ func (s *Server) getBotFileEntries(botID, path string) []BotFileEntry {
 			}
 			result = append(result, be)
 		}
-		return result
+		return result, nil
 	}
 
 	root, err := s.botWorkspaceRoot(botID)
 	if err != nil {
-		return []BotFileEntry{}
+		return nil, fileListError(err)
 	}
 
 	fullPath, err := safeJoin(root, path)
 	if err != nil {
-		return []BotFileEntry{}
+		return nil, err
 	}
 
 	dirEntries, err := os.ReadDir(fullPath)
 	if err != nil {
-		// 目录不存在或无法读取，返回空切片而非报错。
-		return []BotFileEntry{}
+		return nil, fileListError(err)
 	}
 
 	entries := make([]BotFileEntry, 0, len(dirEntries))
@@ -979,7 +1022,7 @@ func (s *Server) getBotFileEntries(botID, path string) []BotFileEntry {
 		}
 		entries = append(entries, entry)
 	}
-	return entries
+	return entries, nil
 }
 
 func (s *Server) botFileMkdir(c *gin.Context, botID, path, name string) error {

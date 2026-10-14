@@ -33,7 +33,7 @@
       />
     </div>
 
-    <div class="tcg-body-wrap" :class="{ 'is-open': expanded }">
+    <div class="tcg-body-wrap" :class="{ 'is-open': expanded }" :inert="!expanded" :aria-hidden="!expanded">
       <div class="tcg-body-inner">
         <div class="tcg-body">
           <div v-for="c in calls" :key="c.id" class="tc-group-item">
@@ -61,41 +61,46 @@ const displayName = computed(() => {
   return toolLabels[name] || (key !== name ? toolLabels[key] : null) || name
 })
 
+const statusCounts = computed(() => {
+  const counts = { running: 0, success: 0, error: 0, timeout: 0, cancelled: 0, superseded: 0, unknown: 0 }
+  for (const call of props.calls || []) {
+    let status = call.status || 'success'
+    if (status === 'killed') status = 'cancelled'
+    if (status === 'answered' || status === 'resolved') status = 'success'
+    counts[Object.hasOwn(counts, status) ? status : 'unknown'] += 1
+  }
+  return counts
+})
 const aggState = computed(() => {
-  const calls = props.calls || []
-  if (calls.some(c => c.status === 'running')) return 'running'
-  if (calls.some(c => c.status === 'killed')) return 'killed'
-  if (calls.some(c => c.status === 'error')) return 'error'
-  return 'success'
+  const counts = statusCounts.value
+  return ['running', 'error', 'timeout', 'cancelled', 'unknown', 'superseded'].find(status => counts[status]) || 'success'
 })
 
 const aggIcon = computed(() => {
   switch (aggState.value) {
     case 'error': return 'close-circle'
-    case 'killed': return 'minus-circle'
+    case 'timeout': return 'time'
+    case 'cancelled':
+    case 'superseded': return 'minus-circle'
+    case 'unknown': return 'help-circle'
     case 'success': return 'check-circle'
     default: return 'check-circle'
   }
 })
 
 const aggMeta = computed(() => {
-  const calls = props.calls || []
-  const n = calls.length
-  if (aggState.value === 'running') return '执行中'
-  const errs = calls.filter(c => c.status === 'error').length
-  const superseded = calls.filter(c => c.status === 'superseded').length
-  if (errs > 0) return `${n} 次 · ${errs} 失败`
-  if (superseded > 0) return `已完成 ${n - superseded} 次 · ${superseded} 已取代`
-  return `已完成 ${n} 次`
+  const counts = statusCounts.value
+  const labels = { running: '执行中', success: '完成', error: '失败', timeout: '超时', cancelled: '已停止', superseded: '已取代', unknown: '状态待确认' }
+  return Object.entries(labels).filter(([status]) => counts[status]).map(([status, label]) => `${counts[status]} ${label}`).join(' · ')
 })
 
 const expanded = ref(true)
 const userToggled = ref(false)
 watch(
-  () => (props.calls || []).some(c => c.status === 'running'),
-  (running) => {
-    if (!running && !userToggled.value) expanded.value = false
-    if (running && !userToggled.value) expanded.value = true
+  () => aggState.value,
+  (state) => {
+    // 失败和超时留下详情，成功记录自动收起；用户手动选择始终优先。
+    if (!userToggled.value) expanded.value = ['running', 'error', 'timeout', 'unknown'].includes(state)
   },
   { immediate: true }
 )
@@ -131,6 +136,8 @@ function toggle() {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  min-height: 32px;
   padding: 3px 2px;
   cursor: pointer;
   user-select: none;
@@ -153,7 +160,7 @@ function toggle() {
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  background: #f6f6f7;
+  background: var(--bp-chat-bg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -176,6 +183,7 @@ function toggle() {
   text-align: right;
   color: var(--bp-label-secondary);
   font-size: 12px;
+  line-height: 1.5;
 }
 .tcg-chevron {
   color: var(--bp-label-tertiary);
@@ -185,7 +193,12 @@ function toggle() {
 .tcg-running .tcg-icon { color: var(--bp-accent); }
 .tcg-success .tcg-icon { color: var(--bp-label-tertiary); }
 .tcg-error .tcg-icon { color: var(--bp-danger); }
-.tcg-killed .tcg-icon { color: var(--bp-warning); }
+.tcg-timeout .tcg-icon,
+.tcg-cancelled .tcg-icon,
+.tcg-unknown .tcg-icon { color: var(--bp-warning); }
+.tcg-superseded .tcg-icon { color: var(--bp-label-tertiary); }
+.tcg-error .tcg-meta { color: var(--bp-danger); }
+.tcg-timeout .tcg-meta { color: var(--bp-warning); }
 
 .tcg-body-wrap {
   display: grid;

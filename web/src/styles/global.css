@@ -37,6 +37,16 @@ select {
   font-family: inherit;
 }
 
+/* Keep interactive state visible across native and library controls. */
+:where(button, a, input, textarea, select, [tabindex="0"]):focus-visible {
+  outline: 2px solid var(--bp-accent);
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
 /* Scrollbars — thin, unobtrusive */
 ::-webkit-scrollbar {
   width: 8px;

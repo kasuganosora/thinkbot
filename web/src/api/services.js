@@ -9,7 +9,7 @@
 
 import { USE_MOCK, mockResolve, request, uploadRequest } from './http'
 import { db, saveDB, nowISO } from './mockDb'
-import toolLabels from '@/i18n/toolLabels'
+import { readChatStream } from './chatStream'
 
 let _seq = 1000
 const genId = (p = 'id') => `${p}-${++_seq}`
@@ -882,7 +882,7 @@ export const bindApi = {
   }
 }
 
-// ============================ 聊天（SSE 简化为整段返回） ============================
+// ============================ 聊天（fetch SSE 与可恢复快照） ============================
 
 export const chatApi = {
   bots() {
@@ -914,7 +914,7 @@ export const chatApi = {
    * @param {string} traceId 当前正在执行的 traceID（来自 onStart）
    * @param {string} text 用户中途补充的内容
    * @param {string} [sessionId]
-   * @returns {Promise<{accepted: boolean}>} accepted=false 表示本轮已结束，应退化为普通 send
+   * @returns {Promise<{accepted: boolean}>} accepted=false 表示本轮已结束，由用户确认后另发新消息
    */
   append(botId, traceId, text, sessionId) {
     if (!botId || !traceId || !text || !text.trim()) return Promise.resolve({ accepted: false })
@@ -971,8 +971,8 @@ export const chatApi = {
         unattributed,
         tasks: (data?.traceIds || []).filter(Boolean).map(id => ({ traceId: String(id), sessionId: '', startedAt: '', elapsedMs: 0 })),
       }
-    } catch {
-      return { tasks: [], unattributed: 0 }
+    } catch (error) {
+      throw error
     }
   },
   /**
@@ -995,120 +995,17 @@ export const chatApi = {
    * @returns {Promise<{traceId, text, toolCalls}|null>}
    */
   async resume(botId, traceId, handlers = {}) {
-    if (!botId || !traceId) return null
-    if (USE_MOCK) return null
-    const {
-      onStart, onTextDelta, onToolCall, onToolProgress, onToolResult, onDone, signal,
-    } = handlers || {}
-    const url = `/api/chat/resume?botId=${encodeURIComponent(botId)}&traceId=${encodeURIComponent(traceId)}`
-    const fetchOpts = { method: 'GET', credentials: 'include', headers: { Accept: 'text/event-stream' } }
-    if (signal) fetchOpts.signal = signal
-    const response = await fetch(url, fetchOpts)
-    if (!response.ok) {
-      const err = new Error(`HTTP ${response.status}`)
-      try { const j = await response.json(); err.message = j.message || err.message } catch {}
-      throw err
-    }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let fullText = ''
-    const toolCalls = []
-    const toolCallMap = new Map()
-    let currentEvent = traceId
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const blocks = buffer.split('\n\n')
-        buffer = blocks.pop()
-        for (const block of blocks) {
-          if (!block.trim()) continue
-          const lines = block.split('\n')
-          let evtType = ''
-          const parts = {}
-          for (const line of lines) {
-            if (line.startsWith('event:')) evtType = line.slice(6).trim()
-            else if (line.startsWith('data:')) {
-              try { Object.assign(parts, JSON.parse(line.slice(5).trim())) } catch {}
-            }
-          }
-          switch (evtType) {
-            case 'text_delta': {
-              const chunk = parts.text || ''
-              fullText += chunk
-              if (onTextDelta) onTextDelta(chunk)
-              break
-            }
-            case 'start': {
-              currentEvent = parts.traceId || currentEvent
-              if (onStart) onStart(currentEvent)
-              break
-            }
-            case 'tool_call': {
-              const call = {
-                id: parts.toolCallId || genId('tool'),
-                name: parts.tool,
-                title: toolLabels[parts.tool] || parts.tool,
-                input: parts.input,
-                status: 'running',
-                output: { stdout: '', stderr: '', exitCode: null, truncated: false },
-              }
-              toolCalls.push(call)
-              toolCallMap.set(call.id, call)
-              if (onToolCall) onToolCall(call)
-              break
-            }
-            case 'tool_progress': {
-              const toolCallId = parts.toolCallId
-              const payload = {
-                ...(typeof parts.payload === 'object' && parts.payload ? parts.payload : {}),
-                stream: (parts.payload && parts.payload.stream) || parts.stream || 'stdout',
-                chunk: (parts.payload && parts.payload.chunk) || parts.chunk || '',
-              }
-              const t = toolCallMap.get(toolCallId)
-              if (t) {
-                const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout'
-                const chunk = payload.chunk || ''
-                const out = (typeof t.output === 'object' && t.output) ? t.output : { stdout: '', stderr: '', exitCode: null, truncated: false }
-                out[stream] = (out[stream] || '') + chunk
-                t.output = out
-              }
-              if (onToolProgress) onToolProgress(toolCallId, payload)
-              break
-            }
-            case 'tool_result': {
-              const toolCallId = parts.toolCallId
-              const t = toolCallMap.get(toolCallId)
-              const isErr = parts.error != null
-              const payload = { ...parts, status: parts.status || (isErr ? 'error' : 'success') }
-              if (t) {
-                Object.assign(t, { status: payload.status, summary: parts.summary })
-                if (parts.output !== undefined) t.output = parts.output
-                if (isErr && typeof t.output === 'object' && t.output) {
-                  t.output.stderr = (t.output.stderr || '') + String(parts.error)
-                }
-              }
-              if (onToolResult) onToolResult(toolCallId, payload)
-              break
-            }
-            case 'done': {
-              if (onDone) onDone({ traceId: currentEvent, text: fullText, toolCalls })
-              return { traceId: currentEvent, text: fullText, toolCalls }
-            }
-            case 'error':
-              throw new Error(parts.message || '请求失败')
-            default:
-              break
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock()
-    }
-    return { traceId: currentEvent, text: fullText, toolCalls }
+    if (!botId || !traceId || USE_MOCK) return null
+    const params = new URLSearchParams({ botId, traceId })
+    if (handlers.sessionId) params.set('sessionId', String(handlers.sessionId))
+    if (handlers.sinceSeq) params.set('sinceSeq', String(handlers.sinceSeq))
+    const response = await fetch(`/api/chat/resume?${params}`, {
+      method: 'GET', credentials: 'include',
+      headers: { Accept: 'text/event-stream' }, signal: handlers.signal,
+    })
+    return readChatStream(response, handlers, { traceId, sessionId: handlers.sessionId, sinceSeq: handlers.sinceSeq, message: handlers.initialMessage })
   },
+
   /**
    * 获取聊天历史（游标分页，倒序返回）。
    * @param {string} botId
@@ -1165,11 +1062,6 @@ export const chatApi = {
    */
   async send(botId, text, options = {}) {
     const {
-      onStart,
-      onTextDelta,
-      onToolCall,
-      onToolProgress,
-      onToolResult,
       signal,
       sessionId,
       attachments = [],
@@ -1190,141 +1082,7 @@ export const chatApi = {
       body: JSON.stringify({ botId, text, ...(sessionId ? { sessionId: String(sessionId) } : {}), ...(attachments.length ? { attachments } : {}) }),
       signal
     })
-    if (!response.ok) {
-      const err = new Error(`HTTP ${response.status}`)
-      try { const j = await response.json(); err.message = j.message || err.message } catch {}
-      throw err
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let fullText = ''
-    const toolCalls = []
-    const toolCallMap = new Map()
-    let currentEvent = null
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-
-        const blocks = buffer.split('\n\n')
-        buffer = blocks.pop()
-
-        for (const block of blocks) {
-          if (!block.trim()) continue
-          const lines = block.split('\n')
-          let evtType = ''
-          const parts = {}
-          for (const line of lines) {
-            if (line.startsWith('event:')) evtType = line.slice(6).trim()
-            else if (line.startsWith('data:')) {
-              try { Object.assign(parts, JSON.parse(line.slice(5).trim())) } catch {}
-            }
-          }
-
-          switch (evtType) {
-            case 'text_delta': {
-              const chunk = parts.text || ''
-              fullText += chunk
-              if (onTextDelta) onTextDelta(chunk)
-              break
-            }
-
-            case 'start':
-              currentEvent = parts.traceId
-              if (onStart && currentEvent) onStart(currentEvent)
-              break
-
-            case 'tool_call': {
-              const call = {
-                id: parts.toolCallId || genId('tool'),
-                name: parts.tool,
-                title: toolLabels[parts.tool] || parts.tool,
-                input: parts.input,
-                status: 'running',
-                output: { stdout: '', stderr: '', exitCode: null, truncated: false },
-              }
-              toolCalls.push(call)
-              toolCallMap.set(call.id, call)
-              if (onToolCall) onToolCall(call)
-              break
-            }
-
-            case 'tool_progress': {
-              const toolCallId = parts.toolCallId
-              const payload = {
-                ...(typeof parts.payload === 'object' && parts.payload ? parts.payload : {}),
-                stream: (parts.payload && parts.payload.stream) || parts.stream || 'stdout',
-                chunk: (parts.payload && parts.payload.chunk) || parts.chunk || '',
-              }
-              const t = toolCallMap.get(toolCallId)
-              if (t) {
-                const stream = payload.stream === 'stderr' ? 'stderr' : 'stdout'
-                const chunk = payload.chunk || ''
-                const out = (typeof t.output === 'object' && t.output) ? t.output : { stdout: '', stderr: '', exitCode: null, truncated: false }
-                out[stream] = (out[stream] || '') + chunk
-                t.output = out
-              }
-              if (onToolProgress) onToolProgress(toolCallId, payload)
-              break
-            }
-
-            case 'tool_result': {
-              const toolCallId = parts.toolCallId
-              const t = toolCallMap.get(toolCallId)
-              const isErr = parts.error != null
-              const payload = {
-                ...parts,
-                status: parts.status || (isErr ? 'error' : 'success')
-              }
-              if (t) {
-                Object.assign(t, {
-                  status: payload.status,
-                  summary: parts.summary,
-                })
-                if (parts.output !== undefined) t.output = parts.output
-                if (isErr && typeof t.output === 'object' && t.output) {
-                  t.output.stderr = (t.output.stderr || '') + String(parts.error)
-                }
-              }
-              if (onToolResult) onToolResult(toolCallId, payload)
-              break
-            }
-
-            case 'done':
-              if (parts.text) fullText = parts.text
-              if (parts.toolCalls && Array.isArray(parts.toolCalls)) {
-                for (const tc of parts.toolCalls) {
-                  if (!tc?.id) continue
-                  const existed = toolCallMap.get(tc.id)
-                  if (existed) Object.assign(existed, tc)
-                  else {
-                    toolCalls.push(tc)
-                    toolCallMap.set(tc.id, tc)
-                  }
-                }
-              }
-              // 透传命令响应元数据（/clear、/help 等斜杠命令在 done 中携带 command:true）
-              const resp = { traceId: currentEvent, text: fullText, toolCalls }
-              if (parts.command) resp.command = parts.command
-              if (parts.cleared != null) resp.cleared = parts.cleared
-              return resp
-
-            case 'error':
-              throw new Error(parts.message || '请求失败')
-
-            default:
-              break
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock()
-    }
-    return { traceId: currentEvent, text: fullText, toolCalls }
+    return readChatStream(response, options, { sessionId })
   }
 }
 
@@ -1416,9 +1174,9 @@ export const sessionToolApi = {
     }
     return request('GET', `/api/sessions/${sid}/terminal`)
   },
-  exec(sid, cmd) {
+  exec(sid, cmd, options = {}) {
     if (USE_MOCK) return mockResolve(() => ({ output: _mockExec(cmd), cwd: '~' }))
-    return request('POST', `/api/sessions/${sid}/terminal/exec`, { cmd })
+    return request('POST', `/api/sessions/${sid}/terminal/exec`, { cmd }, undefined, options)
   },
   // path 形如 '/data'；返回该目录下条目
   files(sid, path = '/data') {
