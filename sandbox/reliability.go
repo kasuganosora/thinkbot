@@ -44,6 +44,9 @@ func finalizeExecResult(result *ExecResult, killReason string) {
 	if result.ExitCode == -1 {
 		result.Aborted = true
 		switch killReason {
+		case "cancelled":
+			result.Warnings = append(result.Warnings,
+				"the command was cancelled before finishing; the result is incomplete")
 		case "stuck":
 			result.Warnings = append(result.Warnings,
 				"the command was killed by the stuck watchdog (no output/progress for a long time); the result is incomplete")

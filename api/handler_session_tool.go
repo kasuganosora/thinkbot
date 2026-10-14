@@ -121,6 +121,9 @@ func (s *Server) handleSessionTerminalExec(c *gin.Context) {
 		"output":    output,
 		"exitCode":  res.ExitCode,
 		"truncated": res.Truncated,
+		"aborted":   res.Aborted,
+		"reliable":  res.Reliable,
+		"warnings":  res.Warnings,
 		"cwd":       ws.WorkDir(),
 	})
 }
@@ -136,7 +139,11 @@ func (s *Server) handleSessionFiles(c *gin.Context) {
 	path := c.DefaultQuery("path", "/")
 
 	// session ID 即 bot ID（当前设计下 session 与 bot 1:1 映射）
-	entries := s.getBotFileEntries(sid, path)
+	entries, err := s.listBotFileEntries(c.Request.Context(), sid, path)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
 	OK(c, gin.H{
 		"path":    path,
 		"entries": entries,
@@ -206,13 +213,26 @@ func (s *Server) handleSessionFileDownload(c *gin.Context) {
 
 // SessionStatus 会话状态信息。
 type SessionToolStatus struct {
-	Messages     int      `json:"messages"`
-	ContextUsed  int      `json:"contextUsed"`
-	ContextLimit *int     `json:"contextLimit"` // nil = 无限制
-	CacheHitRate float64  `json:"cacheHitRate"`
-	CacheRead    int      `json:"cacheRead"`
-	CacheWrite   int      `json:"cacheWrite"`
-	Skills       []string `json:"skills"`
+	Scope        string               `json:"scope"`
+	BotID        string               `json:"botId"`
+	TotalTokens  int                  `json:"totalTokens"`
+	Context      SessionContextStatus `json:"context"`
+	Messages     int                  `json:"messages"`
+	ContextUsed  int                  `json:"contextUsed"`  // legacy alias of totalTokens, not a live window
+	ContextLimit *int                 `json:"contextLimit"` // legacy field: nil means unknown
+	CacheHitRate float64              `json:"cacheHitRate"`
+	CacheRead    int                  `json:"cacheRead"`
+	CacheWrite   int                  `json:"cacheWrite"`
+	Skills       []string             `json:"skills"`
+}
+
+// SessionContextStatus separates an unavailable live window from known zero
+// usage. Bot-wide accounting is not a measurement of a conversation's window.
+type SessionContextStatus struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+	Used   *int   `json:"used"`
+	Limit  *int   `json:"limit"`
 }
 
 // handleSessionStatus 获取会话状态。
@@ -348,7 +368,13 @@ func (s *Server) getSessionTerminalState(sid string) TerminalState {
 //
 // session ID 即 bot ID（1:1 映射）。
 func (s *Server) getSessionStatus(sid string) SessionToolStatus {
-	status := SessionToolStatus{Skills: []string{}}
+	status := SessionToolStatus{
+		Scope: "bot", BotID: sid, Skills: []string{},
+		Context: SessionContextStatus{
+			Status: "unavailable",
+			Reason: "当前会话尚无实时上下文快照",
+		},
+	}
 
 	// 消息数（真实，来自 chat_history）
 	if s.chatHistory != nil {
@@ -379,6 +405,7 @@ func (s *Server) getSessionStatus(sid string) SessionToolStatus {
 			status.CacheRead = cacheRead
 			status.CacheWrite = cacheWrite
 			status.ContextUsed = totalTokens
+			status.TotalTokens = totalTokens
 		}
 	}
 

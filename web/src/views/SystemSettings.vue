@@ -45,6 +45,7 @@
             <t-form label-align="left" :label-width="120">
               <t-form-item label="主题色">
                 <t-radio-group v-model="settings.primaryColor">
+                  <t-radio-button value="indigo">靛蓝</t-radio-button>
                   <t-radio-button value="green">绿色</t-radio-button>
                   <t-radio-button value="blue">蓝色</t-radio-button>
                   <t-radio-button value="purple">紫色</t-radio-button>
@@ -216,7 +217,7 @@ const langOptions = [
 
 const defaults = {
   theme: 'light',
-  primaryColor: 'blue',
+  primaryColor: 'indigo',
   language: 'zh-CN',
   apiBase: 'https://api.example.com/v1',
   apiKey: ''

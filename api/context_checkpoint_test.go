@@ -39,7 +39,8 @@ func seedSession(t *testing.T, s *ChatHistoryService, botID, sessionID string, n
 		if i%2 == 1 {
 			role = dao.ChatRoleAssistant
 		}
-		if err := s.SaveMessageAt(botID, "u1", role, fmt.Sprintf("msg-%d", i), "t", sessionID, base.Add(time.Duration(i)*time.Second)); err != nil {
+		traceID := fmt.Sprintf("%s-turn-%d", sessionID, i/2)
+		if err := s.SaveMessageAt(botID, "u1", role, fmt.Sprintf("msg-%d", i), traceID, sessionID, base.Add(time.Duration(i)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}

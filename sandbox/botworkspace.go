@@ -29,11 +29,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 )
 
 // BotWorkspaceManager 管理持久化的 per-bot 工作空间。
@@ -799,8 +802,22 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	stuck, hard := resolveExecTimeouts(req, w.cfg)
 
 	var cmd *exec.Cmd
+	var onCancel []func() error
 	if w.backend == "docker" {
-		args := []string{"run", "--rm"}
+		// Legacy one-command containers also outlive a killed docker CLI. Give
+		// each one a unique name so cancellation removes only this invocation.
+		name := idgen.New("thinkbot-exec")
+		args := []string{"create", "--name", name}
+		remove := func() error {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cleanupCancel()
+			out, err := exec.CommandContext(cleanupCtx, "docker", "rm", "-f", name).CombinedOutput()
+			if err != nil && !strings.Contains(string(out), "No such container") {
+				return fmt.Errorf("cancel command container: %w: %s", err, out)
+			}
+			return nil
+		}
+		onCancel = append(onCancel, remove)
 
 		mountPath, err := filepath.Abs(w.root)
 		if err != nil {
@@ -841,7 +858,14 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		}
 
 		args = append(args, w.cfg.Image, "sh", "-c", req.Command)
-		cmd = exec.CommandContext(execCtx, "docker", args...)
+		// Create before start closes the race where cancellation removes a name
+		// just before `docker run` creates it and continues in the background.
+		if out, err := exec.CommandContext(execCtx, "docker", args...).CombinedOutput(); err != nil {
+			_ = remove()
+			return nil, fmt.Errorf("create command container: %w: %s", err, out)
+		}
+		defer func() { _ = remove() }()
+		cmd = exec.CommandContext(execCtx, "docker", "start", "--attach", name)
 	} else {
 		targetDir := w.root
 		if req.WorkDir != "" {
@@ -878,7 +902,7 @@ func (w *botWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
-	})
+	}, onCancel...)
 	if err != nil {
 		return nil, errs.Wrap(err, "bot_workspace: exec command")
 	}

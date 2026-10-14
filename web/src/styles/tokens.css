@@ -3,16 +3,16 @@
 
 :root {
   /* Surfaces */
-  --bp-bg: #f5f5f7;
-  --bp-bg-subtle: #fbfbfd;
+  --bp-bg: #f5f6fa;
+  --bp-bg-subtle: #f8f9fc;
   --bp-surface: #ffffff;
   --bp-surface-elevated: #ffffff;
   --bp-surface-fill: rgba(120, 120, 128, 0.08);
   --bp-surface-fill-hover: rgba(120, 120, 128, 0.12);
-  --bp-surface-fill-active: rgba(120, 120, 128, 0.18);
-  --bp-surface-translucent: rgba(246, 246, 247, 0.72);
+  --bp-surface-fill-active: rgba(91, 95, 239, 0.09);
+  --bp-surface-translucent: rgba(243, 244, 249, 0.94);
   --bp-surface-toolbar: rgba(255, 255, 255, 0.72);
-  --bp-chat-bg: #fbfbfd;
+  --bp-chat-bg: #ffffff;
 
   /* Labels */
   --bp-label: #1d1d1f;
@@ -26,12 +26,12 @@
   --bp-separator-opaque: #e5e5ea;
   --bp-hairline: 0.5px solid var(--bp-separator);
 
-  /* Accent — calm system blue (overridden by appearance palette) */
-  --bp-accent: #0071e3;
-  --bp-accent-hover: #0077ed;
-  --bp-accent-active: #0060c2;
-  --bp-accent-soft: rgba(0, 113, 227, 0.1);
-  --bp-accent-soft-strong: rgba(0, 113, 227, 0.16);
+  /* Accent — the Thinkbot brand, reserved for actions and selection. */
+  --bp-accent: #5b5fef;
+  --bp-accent-hover: #4d50dc;
+  --bp-accent-active: #4245c7;
+  --bp-accent-soft: rgba(91, 95, 239, 0.08);
+  --bp-accent-soft-strong: rgba(91, 95, 239, 0.15);
 
   /* Semantic */
   --bp-success: #30a46c;
@@ -88,8 +88,8 @@
   --bp-leading-body: 1.47;
 
   /* Chrome widths */
-  --bp-sidebar-width: 232px;
-  --bp-session-width: 256px;
+  --bp-sidebar-width: 208px;
+  --bp-session-width: 232px;
 
   /* TDesign bridge — keep components in the same language */
   --td-font-family: var(--bp-font);

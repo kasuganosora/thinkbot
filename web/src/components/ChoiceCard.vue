@@ -133,6 +133,11 @@
       </button>
     </div>
 
+    <div v-if="submitError && phase === 'active'" class="cc-submit-error" role="alert" data-testid="choice-submit-error">
+      <span>{{ submitError }}</span>
+      <button type="button" :disabled="submitting || isPending" @click="submit">重新提交</button>
+    </div>
+
     <!-- pending：题目已展示但 questionId 仍是占位，禁止提交 -->
     <div v-if="isPending && phase === 'active'" class="cc-foot" data-testid="choice-pending-foot">
       <span class="cc-foot-text">题目准备中…</span>
@@ -150,6 +155,9 @@
       </template>
       <template v-else-if="phase === 'failed'">
         <span class="cc-foot-text">选择提交失败，本题已失效</span>
+      </template>
+      <template v-else-if="phase === 'ended'">
+        <span class="cc-foot-text">题目已结束，本次提交未生效</span>
       </template>
     </div>
     <!-- 激活态：超时倒计时（有截止时间才显示，避免无期限问题徒增压力） -->
@@ -238,15 +246,18 @@ const freeAriaLabel = computed(() => '补充输入：' + inputPlaceholder.value)
 // 二者取"先到者"，避免父级状态抖动把已锁定的 UI 回滚。
 const localPhase = ref('')
 const submitting = ref(false)
+const submitError = ref('')
+let disposed = false
 const phase = computed(() => {
-  if (localPhase.value) return localPhase.value
+  if (localPhase.value && localPhase.value !== 'submitting') return localPhase.value
   if (props.submitted) return 'answered'
   const s = props.status
   if (s === 'timeout') return 'timeout'
   if (s === 'cancelled' || s === 'killed') return 'cancelled'
   if (s === 'success' || s === 'answered' || s === 'resolved') return 'answered'
   if (s === 'error') return 'failed'
-  return 'active'
+  if (s === 'ended' || s === 'superseded') return 'ended'
+  return localPhase.value || 'active'
 })
 const isLocked = computed(() => phase.value !== 'active')
 // pending：tool_call 临时卡（questionId=call.id 占位）。选项可见但不可提交，
@@ -447,7 +458,7 @@ const effectiveQuestionId = computed(() => {
   if (!raw.startsWith('call_') && !raw.startsWith('_pending')) return raw
   // 占位符：尝试通过 toolCallId 解析真实 ID
   const resolved = store.choiceIdByToolCallId(raw)
-  if (!resolved || resolved === raw || resolved.startsWith('_pending')) return ''
+  if (!resolved || resolved === raw || resolved.startsWith('call_') || resolved.startsWith('_pending')) return ''
   return resolved
 })
 
@@ -463,6 +474,7 @@ async function waitForRealQuestionId() {
   // 短轮询：progress 事件通常在 tool_call 后几百毫秒内到达
   for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
+    if (disposed || phase.value !== 'submitting') return ''
     const qid = effectiveQuestionId.value
     if (qid) return qid
   }
@@ -472,64 +484,56 @@ async function waitForRealQuestionId() {
 async function doSubmit(qid) {
   const chosen = [...selectedIds.value]
   const extra = freeText.value.trim()
-  console.log('[ChoiceCard] doSubmit called with qid:', qid, 'selectedIds:', chosen)
   try {
     await userChoiceApi.answer(qid, { selectedIds: chosen, freeText: extra })
     localPhase.value = 'answered'
     store.markChoiceSubmitted(qid, { selectedIds: chosen, freeText: extra })
     MessagePlugin.success({ message: '选择已提交', placement: 'top', duration: 1600 })
   } catch (e) {
-    console.warn('[ChoiceCard] 提交失败', e)
     const code = Number(e && e.code)
     if (code === 404) {
-      // questionId 是占位符（call_xxx）或已过期的 uc-xxx
-      const isPlaceholder = qid.startsWith('call_') || qid.startsWith('_pending')
       localPhase.value = 'timeout'
       store.markChoiceTerminal(qid, 'timeout')
       MessagePlugin.warning({
-        message: isPlaceholder ? '连接同步中，请稍后刷新重试' : ((e && e.message) || '本题已过期'),
+        message: (e && e.message) || '本题已过期或不可访问',
         placement: 'top',
         duration: 4000,
       })
     } else if (code === 409) {
-      localPhase.value = 'answered'
-      store.markChoiceSubmitted(qid, { selectedIds: chosen, freeText: extra })
+      // 409 也可能是取消或超时，不能把本次未受理的选择记录成提交成功。
+      localPhase.value = 'ended'
+      store.markChoiceTerminal(qid, 'ended')
       MessagePlugin.warning({ message: (e && e.message) || '本题已结束', placement: 'top' })
     } else {
       localPhase.value = ''
-      MessagePlugin.error({ message: (e && e.message) || '提交失败，请重试', placement: 'top' })
+      submitError.value = (e && e.message) || '提交失败，已保留你的选择，请重试'
     }
   }
 }
 
 async function submit() {
-  if (submitting.value || interactionLocked.value) {
-    console.warn('[ChoiceCard] submit blocked: submitting=', submitting.value, 'locked=', interactionLocked.value)
-    return
-  }
+  if (submitting.value || interactionLocked.value || disposed) return
   if (!selectedIds.value.length && !freeText.value.trim()) return
 
   submitting.value = true
+  submitError.value = ''
   localPhase.value = 'submitting'
 
-  const qid = await waitForRealQuestionId()
-  if (!qid) {
-    // 轮询 5 秒仍无真实 ID：用原始 questionId 尝试提交（可能是 progress 事件丢失/延迟）。
-    // 之前会跳过 call_ 前缀导致用户完全无法提交；现在改为"尽力一试"，404 再提示。
-    const fallback = questionId.value
-    console.warn('[ChoiceCard] waitForRealQuestionId timed out, fallback to raw questionId:', fallback)
-    if (fallback) {
-      await doSubmit(fallback)
-    } else {
-      localPhase.value = ''
-      submitting.value = false
-      MessagePlugin.info({ message: '题目准备超时，请刷新页面重试', placement: 'top', duration: 3000 })
+  try {
+    const qid = await waitForRealQuestionId()
+    if (disposed || phase.value !== 'submitting') return
+    if (!qid) {
+      // 临时 ID 不能作为服务端问题 ID 提交。保留输入，等同步完成后允许原位重试。
+      submitError.value = '题目尚未同步完成，已保留你的选择，请稍后重试'
+      return
     }
-    return
+    await doSubmit(qid)
+  } catch (e) {
+    submitError.value = e?.message || '提交失败，已保留你的选择，请重试'
+  } finally {
+    submitting.value = false
+    if (localPhase.value === 'submitting') localPhase.value = ''
   }
-
-  await doSubmit(qid)
-  submitting.value = false
 }
 function onConfirm() {
   if (!submitting.value && selectedIds.value.length) submit()
@@ -574,6 +578,7 @@ onMounted(() => {
   window.addEventListener('pointercancel', onGlobalPointerUp, { passive: true })
 })
 onBeforeUnmount(() => {
+  disposed = true
   if (timerRaf) cancelAnimationFrame(timerRaf)
   timerRaf = 0
   window.removeEventListener('pointerup', onGlobalPointerUp)
@@ -599,12 +604,17 @@ onBeforeUnmount(() => {
 .cc-card:hover:not(.cc-inert) { box-shadow: var(--bp-shadow-md); }
 .cc-inert { box-shadow: var(--bp-shadow-sm); }
 .cc-inert:hover { box-shadow: var(--bp-shadow-sm); }
+.cc-submit-error { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 10px 14px 0; padding: 9px 10px; border-radius: var(--bp-radius-sm); background: var(--bp-danger-soft); color: var(--bp-danger); font-size: 12px; line-height: 1.6; }
+.cc-submit-error span { flex: 1; min-width: 160px; }
+.cc-submit-error button { border: 0; padding: 4px; border-radius: 4px; background: transparent; color: var(--bp-accent); font: inherit; cursor: pointer; }
+.cc-submit-error button:focus-visible { outline: 2px solid var(--bp-accent); outline-offset: 2px; }
 
 /* 状态色条：active=accent、answered=success、timeout/cancelled/failed=warning */
 .cc-rail { position: absolute; inset: 0 0 auto; height: 2px; background: var(--bp-accent); }
 .cc-answered .cc-rail { background: var(--bp-success); }
 .cc-timeout .cc-rail,
 .cc-cancelled .cc-rail,
+.cc-ended .cc-rail,
 .cc-failed .cc-rail { background: var(--bp-warning); }
 
 .cc-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 6px; }
