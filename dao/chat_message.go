@@ -50,6 +50,15 @@ type ChatMessage struct {
 	// 历史数据默认 false，语义与旧行为一致（旧逻辑只在收尾时写一次）。
 	Streaming bool `gorm:"not null;default:false" json:"streaming"`
 
+	// StreamSeq is the last EventBus sequence represented in this snapshot.
+	// Resume sends this snapshot before replaying only newer events.
+	StreamSeq uint64 `gorm:"not null;default:0" json:"streamSeq"`
+
+	// Persist terminal outcomes so reconnects after replay expiry still distinguish
+	// completion, cancellation, drops, and failures. Empty means legacy/unknown.
+	StreamStatus string `gorm:"size:32;not null;default:''" json:"streamStatus,omitempty"`
+	StreamError  string `gorm:"type:text;not null;default:''" json:"streamError,omitempty"`
+
 	// ---- 以下为会话划分（S0）新增列，S0 阶段**不参与任何逻辑**，仅建列/索引 ----
 	// 全部 `json:"-"`：S0 要求「零行为变化」，不对既有 API 响应暴露新字段。
 

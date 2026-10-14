@@ -94,12 +94,13 @@ function withQuery(url, query) {
  * @param {object} [body]  JSON 请求体
  * @param {object} [query] 可选的 query 参数对象，会拼接到 URL 的 querystring 上
  */
-export async function request(method, url, body, query) {
+export async function request(method, url, body, query, options = {}) {
   const finalUrl = withQuery(url, query)
   const resp = await fetch(finalUrl, {
     method,
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
+    signal: options.signal,
     body: body ? JSON.stringify(body) : undefined
   })
   if (resp.status === 401) {

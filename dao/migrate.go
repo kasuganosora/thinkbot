@@ -69,6 +69,9 @@ func ensureColumns(db *gorm.DB) error {
 		{"bot_definitions", "memory_limit_mb", "memory_limit_mb INTEGER NOT NULL DEFAULT 2048"},
 		{"bot_definitions", "cost_quota", "cost_quota TEXT NOT NULL DEFAULT ''"},
 		{"chat_messages", "session_id", "session_id TEXT NOT NULL DEFAULT ''"},
+		{"chat_messages", "stream_seq", "stream_seq INTEGER NOT NULL DEFAULT 0"},
+		{"chat_messages", "stream_status", "stream_status TEXT NOT NULL DEFAULT ''"},
+		{"chat_messages", "stream_error", "stream_error TEXT NOT NULL DEFAULT ''"},
 		{"bot_tool_permissions", "auto", "auto INTEGER NOT NULL DEFAULT 0"},
 		{"bot_tool_permissions", "chat_id", "chat_id TEXT NOT NULL DEFAULT ''"},
 		{"outreach_commitments", "attempts", "attempts INTEGER NOT NULL DEFAULT 0"},
@@ -128,6 +131,11 @@ type indexSpec struct {
 // 不成立），改用 `(bot_id, external_key)` —— 三段式 key 的**第一段就是 channel**，
 // 语义等价且不需要新增列。
 var sessionIndexSpecs = []indexSpec{
+	{
+		// Snapshot lookup and legacy deduplication must not scan every message.
+		name: "idx_chat_messages_trace_snapshot",
+		ddl:  `CREATE INDEX IF NOT EXISTS idx_chat_messages_trace_snapshot ON chat_messages (bot_id, trace_id, role, streaming, stream_seq DESC, id DESC, session_id)`,
+	},
 	{
 		name: "idx_chat_sessions_external_key",
 		ddl:  `CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_external_key ON chat_sessions (bot_id, external_key) WHERE external_key <> ''`,

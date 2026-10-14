@@ -861,8 +861,8 @@ func (s *BotService) publishWorkflowEngine(botID string, mgr *workflow.Manager) 
 // 超时后 agent 会被告知「别再等」，工作流在后台跑完后无人接手，表现为「跑完了但
 // agent 没继续」。
 //
-// 续跑以 sessionID 作为 traceID 注入，便于前端在 workflow 卡片终态时按会话 resume
-// 收到 agent 续跑的流式回复。
+// 每个续跑回合分配独立 traceID；前端通过按 sessionId 查询 active tasks
+// 找到真实 trace，避免第二次续跑覆盖第一条历史或重放第一轮的完成事件。
 func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 	botID := wf.BotID
 	sessionID := wf.SessionID
@@ -873,13 +873,9 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 	}
 	// 每次续跑都有自己唯一的消息 ID（绝不复用 sessionID）：ingress 按消息 ID 去重，
 	// 复用 sessionID 会让同一会话的第二次续跑被当成重复消息丢掉（2026-09-28 线上实证）。
-	// traceID：web 仍用 sessionID（前端按会话 resume 接收流式回复依赖它）；Telegram 用唯一 ID，
-	// 这样续跑回复按 trace 落库（UpsertAssistantByTrace）时不会覆盖上一次续跑的回复。
+	// traceID 同样必须每轮唯一，所有渠道都按 trace 幂等保存回复。
 	msgID := idgen.New("wfc")
-	traceID := sessionID
-	if kind, _ := s.resolveSessionRoute(sessionID); kind == "tg" {
-		traceID = msgID
-	}
+	traceID := msgID
 	// 续跑指令本身以 "system" 身份落库（它不是用户说的话）；续跑回合的工具权限则按提交
 	// 工作流那一轮的身份评估（见 continuationIdentity）。
 	const userID = "system"
@@ -963,7 +959,14 @@ func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID
 		meta = maps.Clone(extraMeta)
 		meta["username"] = id.username
 	}
-	return webCh.InjectWithID(context.Background(), msgID, traceID, id.userID, text, meta)
+	// Continuations need the same durable tool/text collector as a user send,
+	// even if nobody currently has an HTTP stream open for the session.
+	turn := s.prepareChatTurn(webCh, botID, "system", sessionID, traceID)
+	err := webCh.InjectWithID(context.Background(), msgID, traceID, id.userID, text, meta)
+	if err != nil && turn != nil {
+		turn.fail <- err
+	}
+	return err
 }
 
 // metaKeyWorkflowContinuation 标记续跑回合对应的工作流 ID（消息 Metadata）。
@@ -2799,6 +2802,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		OnMessageDone: func(botID, traceID string) {
 			s.UnregisterMessageCancel(botID, traceID)
 			s.UnregisterMessageInterrupt(botID, traceID)
+			s.notifyChatTurnDone(botID, traceID)
 		},
 		WorkspaceDir:  workspaceDir,
 		SandboxConfig: sbCfg,

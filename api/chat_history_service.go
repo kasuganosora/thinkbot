@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,6 +48,41 @@ type ChatHistoryService struct {
 	// checkpointTTL is the live context-checkpoint TTL source (see
 	// context_checkpoint.go); nil → default.
 	checkpointTTL atomic.Pointer[checkpointTTLSource]
+	// Locks are removed after the last writer leaves, so completed traces do not
+	// accumulate forever. The key includes BotID because trace IDs are bot scoped.
+	writersMu sync.Mutex
+	writers   map[assistantTraceKey]*assistantTraceWriter
+}
+
+type assistantTraceKey struct{ botID, traceID string }
+type assistantTraceWriter struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (s *ChatHistoryService) lockAssistantTrace(botID, traceID string) func() {
+	key := assistantTraceKey{botID, traceID}
+	s.writersMu.Lock()
+	if s.writers == nil {
+		s.writers = make(map[assistantTraceKey]*assistantTraceWriter)
+	}
+	w := s.writers[key]
+	if w == nil {
+		w = &assistantTraceWriter{}
+		s.writers[key] = w
+	}
+	w.refs++
+	s.writersMu.Unlock()
+	w.mu.Lock()
+	return func() {
+		w.mu.Unlock()
+		s.writersMu.Lock()
+		w.refs--
+		if w.refs == 0 {
+			delete(s.writers, key)
+		}
+		s.writersMu.Unlock()
+	}
 }
 
 // NewChatHistoryService 创建聊天历史服务。
@@ -138,47 +175,209 @@ func (s *ChatHistoryService) SaveMessageWithParts(botID, userID, role, content, 
 //
 // traceID 为空时退化为普通 Insert（无幂等键可用）。
 func (s *ChatHistoryService) UpsertAssistantByTrace(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID string, streaming bool) error {
-	if traceID == "" {
-		return s.SaveMessageWithParts(botID, userID, dao.ChatRoleAssistant, content, traceID, toolCallsJSON, partsJSON, sessionID)
-	}
+	return s.UpsertAssistantSnapshot(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID, streaming, 0)
+}
 
-	// 先尝试更新已有行：命中则结束，避免 Insert 冲突。
-	res := s.db.Model(&dao.ChatMessage{}).
-		Where("trace_id = ? AND role = ?", traceID, dao.ChatRoleAssistant).
-		Updates(map[string]any{
-			"content":    content,
-			"tool_calls": toolCallsJSON,
-			"parts_json": partsJSON,
-			"streaming":  streaming,
-		})
-	if res.Error != nil {
-		return fmt.Errorf("chat_history: upsert assistant (update): %w", res.Error)
+// UpsertAssistantSnapshot writes a snapshot together with the last event it
+// contains. Older snapshots cannot overwrite newer ones or reopen a final row.
+// Empty tools/parts mean "not supplied" (e.g. a WebChannel fallback), whereas
+// an explicit JSON array can replace those fields.
+func (s *ChatHistoryService) UpsertAssistantSnapshot(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID string, streaming bool, seq uint64) error {
+	return s.upsertAssistantSnapshot(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID, streaming, seq, "", "")
+}
+
+// FinalizeAssistantSnapshot commits the terminal outcome and its content in the
+// same row write. Readers can never see a final reply without its error/status.
+func (s *ChatHistoryService) FinalizeAssistantSnapshot(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID string, seq uint64, status, message string) error {
+	if status == "" {
+		status = "completed"
 	}
-	if res.RowsAffected > 0 {
+	return s.upsertAssistantSnapshot(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID, false, seq, status, message)
+}
+
+func (s *ChatHistoryService) upsertAssistantSnapshot(botID, userID, content, traceID, toolCallsJSON, partsJSON, sessionID string, streaming bool, seq uint64, status, message string) error {
+	var existing *dao.ChatMessage
+	if traceID != "" {
+		unlock := s.lockAssistantTrace(botID, traceID)
+		defer unlock()
+		var err error
+		existing, err = s.loadAssistantSnapshot(botID, traceID, sessionID)
+		if err != nil {
+			return err
+		}
+	}
+	if existing != nil {
+		if !existing.Streaming && streaming {
+			return nil
+		}
+		if seq > 0 && seq < existing.StreamSeq {
+			return nil
+		}
+		// A legacy fallback carries no cursor. It can finalize an active row but
+		// must not replace an already canonical snapshot or regress live content.
+		if seq == 0 && existing.StreamSeq > 0 && (!existing.Streaming || streaming) {
+			return nil
+		}
+		updates := map[string]any{"content": content, "streaming": streaming}
+		if status != "" {
+			updates["stream_status"] = status
+			updates["stream_error"] = message
+		}
+		if toolCallsJSON == "" {
+			toolCallsJSON = existing.ToolCalls
+		}
+		if partsJSON == "" {
+			partsJSON = existing.PartsJSON
+		}
+		if toolCallsJSON != "" {
+			updates["tool_calls"] = toolCallsJSON
+		}
+		if partsJSON != "" {
+			updates["parts_json"] = partsJSON
+		}
+		if seq > 0 {
+			updates["stream_seq"] = seq
+		}
+		if err := s.db.Model(&dao.ChatMessage{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
+			return fmt.Errorf("chat_history: upsert assistant (update): %w", err)
+		}
 		return nil
 	}
 
-	// 无既有行 → 插入。
-	//
-	// 注意并发：同一 traceID 只由单个请求处理循环写入，不存在多写者竞争。
-	// 即便极端情况下重复插入，也仅表现为多一条历史，不会破坏数据一致性。
+	// The per-trace lock covers both lookup and insert.
 	sessionID = s.resolveWritableSession(botID, userID, sessionID)
 	msg := dao.ChatMessage{
-		BotID:     botID,
-		UserID:    userID,
-		SessionID: sessionID,
-		Role:      dao.ChatRoleAssistant,
-		Content:   content,
-		ToolCalls: toolCallsJSON,
-		PartsJSON: partsJSON,
-		TraceID:   traceID,
-		Streaming: streaming,
-		CreatedAt: time.Now(),
+		BotID:        botID,
+		UserID:       userID,
+		SessionID:    sessionID,
+		Role:         dao.ChatRoleAssistant,
+		Content:      content,
+		ToolCalls:    toolCallsJSON,
+		PartsJSON:    partsJSON,
+		TraceID:      traceID,
+		Streaming:    streaming,
+		StreamSeq:    seq,
+		StreamStatus: status,
+		StreamError:  message,
+		CreatedAt:    time.Now(),
 	}
 	if err := s.db.Create(&msg).Error; err != nil {
 		return fmt.Errorf("chat_history: upsert assistant (insert): %w", err)
 	}
 	s.touchSessionAfterSave(sessionID, dao.ChatRoleAssistant, content)
+	return nil
+}
+
+// LoadAssistantByTrace returns the persisted snapshot, or nil when this turn
+// has not produced a snapshot yet. Bot scoping also protects resume lookups.
+func (s *ChatHistoryService) LoadAssistantByTrace(botID, traceID string) (*dao.ChatMessage, error) {
+	return s.loadAssistantSnapshot(botID, traceID, "")
+}
+
+func (s *ChatHistoryService) loadAssistantSnapshot(botID, traceID, sessionID string) (*dao.ChatMessage, error) {
+	var snapshots []dao.ChatMessage
+	q := s.db.Where("bot_id = ? AND trace_id = ? AND role = ?", botID, traceID, dao.ChatRoleAssistant)
+	if sessionID != "" {
+		q = q.Where("session_id = ?", sessionID)
+	}
+	err := q.
+		Order("streaming ASC, stream_seq DESC, id DESC").Find(&snapshots).Error
+	if err != nil {
+		return nil, fmt.Errorf("chat_history: load assistant snapshot: %w", err)
+	}
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	msg := snapshots[0]
+	for _, previous := range snapshots[1:] {
+		if previous.SessionID == msg.SessionID {
+			mergeMissingAssistantDetails(&msg, previous)
+		}
+	}
+	reconcileFinalSnapshotParts(&msg)
+	return &msg, nil
+}
+
+func mergeMissingAssistantDetails(msg *dao.ChatMessage, previous dao.ChatMessage) {
+	if msg.ToolCalls == "" {
+		msg.ToolCalls = previous.ToolCalls
+	}
+	if msg.PartsJSON == "" {
+		msg.PartsJSON = previous.PartsJSON
+	}
+}
+
+// The final reply is authoritative even when its ordered parts were recovered
+// from an older partial snapshot. Never render draft text instead of Content.
+func reconcileFinalSnapshotParts(msg *dao.ChatMessage) {
+	if msg.Role != dao.ChatRoleAssistant || msg.Streaming || msg.PartsJSON == "" {
+		return
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(msg.PartsJSON), &parts); err != nil || len(parts) == 0 {
+		return
+	}
+	if msg.Content == "" {
+		tools := make([]map[string]any, 0, len(parts))
+		for _, part := range parts {
+			if part["type"] != "text" {
+				tools = append(tools, part)
+			}
+		}
+		parts = tools
+	} else {
+		parts = reconcileTextParts(parts, msg.Content)
+	}
+	if encoded, err := json.Marshal(parts); err == nil {
+		msg.PartsJSON = string(encoded)
+	}
+}
+
+// Older releases could insert one assistant row per concurrent snapshot. Pick
+// a canonical row before cursor/limit filtering so duplicates cannot consume a
+// page or reappear on the next page. Keep the original rows for safe recovery.
+func canonicalAssistantRows(q *gorm.DB) *gorm.DB {
+	return q.Where(`(role <> 'assistant' OR trace_id IS NULL OR trace_id = '' OR id = (
+		SELECT canonical.id FROM chat_messages AS canonical
+		WHERE canonical.bot_id = chat_messages.bot_id
+		AND canonical.trace_id = chat_messages.trace_id AND canonical.role = 'assistant'
+		AND canonical.session_id = chat_messages.session_id
+		ORDER BY canonical.streaming ASC, canonical.stream_seq DESC, canonical.id DESC LIMIT 1
+	))`)
+}
+
+// A plain-text fallback may be the canonical final row while an older duplicate
+// still holds its tool details. Restore missing details in one batched lookup.
+func (s *ChatHistoryService) restoreLegacyAssistantDetails(botID string, messages []dao.ChatMessage) error {
+	type snapshotKey struct{ sessionID, traceID string }
+	bySnapshot := make(map[snapshotKey]*dao.ChatMessage)
+	traces := make([]string, 0, len(messages))
+	for i := range messages {
+		m := &messages[i]
+		if m.Role == dao.ChatRoleAssistant && m.TraceID != "" && (m.ToolCalls == "" || m.PartsJSON == "") {
+			bySnapshot[snapshotKey{m.SessionID, m.TraceID}] = m
+			traces = append(traces, m.TraceID)
+		}
+	}
+	if len(traces) == 0 {
+		for i := range messages {
+			reconcileFinalSnapshotParts(&messages[i])
+		}
+		return nil
+	}
+	var candidates []dao.ChatMessage
+	if err := s.db.Select("session_id", "trace_id", "tool_calls", "parts_json").Where("bot_id = ? AND role = ? AND trace_id IN ?", botID, dao.ChatRoleAssistant, traces).
+		Order("streaming ASC, stream_seq DESC, id DESC").Find(&candidates).Error; err != nil {
+		return fmt.Errorf("chat_history: restore legacy snapshots: %w", err)
+	}
+	for _, previous := range candidates {
+		if msg := bySnapshot[snapshotKey{previous.SessionID, previous.TraceID}]; msg != nil {
+			mergeMissingAssistantDetails(msg, previous)
+		}
+	}
+	for i := range messages {
+		reconcileFinalSnapshotParts(&messages[i])
+	}
 	return nil
 }
 
@@ -190,7 +389,7 @@ func (s *ChatHistoryService) UpsertAssistantByTrace(botID, userID, content, trac
 func (s *ChatHistoryService) MarkStreamingStale() (int64, error) {
 	res := s.db.Model(&dao.ChatMessage{}).
 		Where("streaming = ?", true).
-		Update("streaming", false)
+		Updates(map[string]any{"streaming": false, "stream_status": "cancelled", "stream_error": "服务重启，任务已中断"})
 	if res.Error != nil {
 		return 0, fmt.Errorf("chat_history: mark streaming stale: %w", res.Error)
 	}
@@ -225,7 +424,7 @@ func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit
 	// bot_id 就列出全部会话，系统根本不存在会话级多用户隔离。去掉该条件不新增任何
 	// 暴露面，只是拆掉一个「看起来有隔离、实际没有」的假闸门。
 	// 附带收益：user_id='system' 哨兵不再跨会话可见，收敛到本会话内。
-	q := s.db.Model(&dao.ChatMessage{}).Where("bot_id = ? AND session_id = ?", botID, sessionID)
+	q := canonicalAssistantRows(s.db.Model(&dao.ChatMessage{})).Where("bot_id = ? AND session_id = ?", botID, sessionID)
 	if sessionID == "" {
 		// 无会话维度的历史查询（session_id 为空的老数据）才回退到按归属用户过滤。
 		q = q.Where("user_id = ? OR user_id = ?", userID, systemUserID)
@@ -244,6 +443,9 @@ func (s *ChatHistoryService) PaginateHistory(botID, userID, cursor string, limit
 	var messages []dao.ChatMessage
 	if err := q.Order("created_at DESC, id DESC").Limit(limit + 1).Find(&messages).Error; err != nil {
 		return nil, fmt.Errorf("chat_history: query messages: %w", err)
+	}
+	if err := s.restoreLegacyAssistantDetails(botID, messages); err != nil {
+		return nil, err
 	}
 
 	page := &HistoryPage{
@@ -285,12 +487,20 @@ func (s *ChatHistoryService) LoadContext(botID, userID string, limit int, sessio
 
 	var messages []dao.ChatMessage
 	// 先按 DESC 取最近 limit 条，再反转为正序
-	if err := s.db.Model(&dao.ChatMessage{}).
-		Where("bot_id = ? AND user_id = ? AND session_id = ?", botID, userID, sessionID).
+	// Match the session view: channel/system continuation messages are part of
+	// the same conversation even when their UserID differs from the web login.
+	q := canonicalAssistantRows(s.db.Model(&dao.ChatMessage{})).Where("bot_id = ? AND session_id = ?", botID, sessionID)
+	if sessionID == "" {
+		q = q.Where("user_id = ? OR user_id = ?", userID, "system")
+	}
+	if err := q.
 		Order("created_at DESC, id DESC").
 		Limit(limit).
 		Find(&messages).Error; err != nil {
 		return nil, fmt.Errorf("chat_history: load context: %w", err)
+	}
+	if err := s.restoreLegacyAssistantDetails(botID, messages); err != nil {
+		return nil, err
 	}
 
 	// 反转为正序（旧→新）
@@ -313,12 +523,15 @@ func (s *ChatHistoryService) LoadContextBySession(botID, sessionID string, limit
 	}
 
 	var messages []dao.ChatMessage
-	if err := s.db.Model(&dao.ChatMessage{}).
+	if err := canonicalAssistantRows(s.db.Model(&dao.ChatMessage{})).
 		Where("bot_id = ? AND session_id = ?", botID, sessionID).
 		Order("created_at DESC, id DESC").
 		Limit(limit).
 		Find(&messages).Error; err != nil {
 		return nil, fmt.Errorf("chat_history: load context by session: %w", err)
+	}
+	if err := s.restoreLegacyAssistantDetails(botID, messages); err != nil {
+		return nil, err
 	}
 
 	// 反转为正序（旧→新）

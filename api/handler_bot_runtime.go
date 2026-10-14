@@ -295,6 +295,11 @@ func (s *Server) handleBotTerminalExec(c *gin.Context) {
 		"cwd":       cwd,
 		"sessionId": sess.ID,
 		"expired":   expired,
+		"exitCode":  res.ExitCode,
+		"truncated": res.Truncated,
+		"aborted":   res.Aborted,
+		"reliable":  res.Reliable,
+		"warnings":  res.Warnings,
 	})
 }
 

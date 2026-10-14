@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/agent/command"
-	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/stages"
@@ -232,16 +231,31 @@ func (s *Server) handleChatAppend(c *gin.Context) {
 		return
 	}
 	userID := fmt.Sprintf("%d", user.ID)
+	// The trace determines the target session. A stale browser tab must not
+	// inject into one task while recording its supplement in another session.
+	for _, task := range s.botSvc.ActiveMessageTasks(req.BotID, "") {
+		if task.TraceID != req.TraceID {
+			continue
+		}
+		if req.SessionID != "" && task.SessionID != "" && req.SessionID != task.SessionID {
+			Fail(c, errs.BadRequest("chat turn belongs to another session"))
+			return
+		}
+		if task.SessionID != "" {
+			req.SessionID = task.SessionID
+		}
+		break
+	}
 
 	accepted := s.botSvc.AppendToMessage(req.BotID, req.TraceID, req.Text)
 	if accepted {
-		// 持久化补充的用户消息，保证后续轮次上下文一致（与 /send 保存用户消息一致）。
-		go func() {
-			defer func() { _ = recover() }()
-			if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, req.TraceID, req.SessionID); err != nil {
-				s.logger.Warnw("failed to save appended user message", "err", err)
-			}
-		}()
+		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, req.TraceID, req.SessionID); err != nil {
+			s.logger.Warnw("failed to save appended user message", "err", err)
+			// The task already accepted this supplement; reporting rejection
+			// here would cause the client to execute it twice as a new request.
+			OK(c, map[string]any{"accepted": true, "persistenceError": "补充内容已投递，但未能保存到历史记录"})
+			return
+		}
 	}
 	OK(c, map[string]any{"accepted": accepted})
 }
@@ -279,64 +293,100 @@ func (s *Server) handleChatActiveTasks(c *gin.Context) {
 // 使用 EventBus.SubscribeWithReplay(traceID, 0) 回放历史事件并实时转发，
 // 使断连后重连的前端能继续看到「仍在后台运行」的任务的真实进度，并据此手动终止。
 func (s *Server) handleChatResume(c *gin.Context) {
-	botID := c.Query("botId")
-	traceID := c.Query("traceId")
+	botID, traceID := c.Query("botId"), c.Query("traceId")
 	if botID == "" || traceID == "" {
 		Fail(c, errs.BadRequest("botId and traceId required"))
 		return
 	}
-	bus := s.botSvc.EventBus()
-	memBus, ok := bus.(*outbound.MemoryEventBus)
-	if !ok || memBus == nil {
+	bus, ok := s.botSvc.EventBus().(*outbound.MemoryEventBus)
+	if !ok || bus == nil {
 		Fail(c, errs.Internal("event bus unavailable"))
 		return
 	}
-
-	sub := memBus.SubscribeWithReplay(traceID, 0)
-	defer memBus.Unsubscribe(sub)
-
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		Fail(c, errs.Internal("streaming not supported"))
-		return
+	var sinceSeq uint64
+	cursor := c.Query("sinceSeq")
+	if cursor == "" {
+		cursor = c.GetHeader("Last-Event-ID")
 	}
-
-	writeSSE(c.Writer, sseStart, map[string]any{"traceId": traceID})
-	flusher.Flush()
-
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
+	if cursor != "" {
+		var err error
+		sinceSeq, err = strconv.ParseUint(cursor, 10, 64)
+		if err != nil {
+			Fail(c, errs.BadRequest("invalid event cursor"))
 			return
-		case <-heartbeat.C:
-			writeSSE(c.Writer, ssePing, map[string]any{"ts": time.Now().Unix()})
-			flusher.Flush()
-		case event, ok := <-sub.C():
-			if !ok {
-				return
-			}
-			// 消息终态：转发 done 并结束重连续流。
-			if event.Type == outbound.EventMessageDone || event.Type == outbound.EventMessageError ||
-				event.Type == outbound.EventMessageDropped || event.Type == outbound.EventDispatchError {
-				writeSSE(c.Writer, sseDone, map[string]any{})
-				flusher.Flush()
-				return
-			}
-			evtType, data := translateEventToSSE(event)
-			if evtType == "" {
-				continue
-			}
-			writeSSE(c.Writer, evtType, data)
-			flusher.Flush()
 		}
 	}
+	// Subscribe before reading the DB: events committed while the snapshot
+	// query runs are buffered. Its persisted cursor removes any overlap.
+	sub := bus.SubscribeWithReplay(traceID, 0)
+	defer bus.Unsubscribe(sub)
+	snapshot, err := s.chatHistory.LoadAssistantByTrace(botID, traceID)
+	if err != nil {
+		Fail(c, errs.Wrap(err, "failed to load reply snapshot"))
+		return
+	}
+	var sessionID string
+	known := snapshot != nil
+	if snapshot != nil {
+		sessionID = snapshot.SessionID
+	} else {
+		var message dao.ChatMessage
+		result := s.chatHistory.db.Select("session_id").Where("bot_id = ? AND trace_id = ?", botID, traceID).Limit(1).Find(&message)
+		if result.Error != nil {
+			Fail(c, errs.Wrap(result.Error, "failed to locate chat turn"))
+			return
+		}
+		known = result.RowsAffected > 0
+		sessionID = message.SessionID
+		if !known {
+			for _, task := range s.botSvc.ActiveMessageTasks(botID, "") {
+				if task.TraceID == traceID {
+					known, sessionID = true, task.SessionID
+					break
+				}
+			}
+		}
+	}
+	if !known {
+		Fail(c, errs.NotFound("chat turn not found for this bot"))
+		return
+	}
+	if expected := c.Query("sessionId"); expected != "" && expected != sessionID {
+		Fail(c, errs.BadRequest("chat turn belongs to another session"))
+		return
+	}
+	if snapshot == nil || snapshot.Streaming {
+		_, managed := managedChatTurns.Load(messageCancelKey(botID, traceID))
+		s.botSvc.mu.RLock()
+		_, running := s.botSvc.messageStarts[messageCancelKey(botID, traceID)]
+		s.botSvc.mu.RUnlock()
+		if !managed && !running && len(sub.C()) == 0 {
+			// An old user-only turn or abandoned streaming snapshot cannot
+			// produce more events. Do not leave its browser waiting forever.
+			if snapshot == nil {
+				Fail(c, errs.NotFound("chat turn has ended without a saved reply"))
+				return
+			}
+			state := chatStreamState{text: snapshot.Content, seq: snapshot.StreamSeq}
+			_ = json.Unmarshal([]byte(snapshot.ToolCalls), &state.tools)
+			_ = json.Unmarshal([]byte(snapshot.PartsJSON), &state.parts)
+			state.finish("cancelled", "任务已中断，已恢复最后保存的内容")
+			tools, _ := json.Marshal(state.tools)
+			parts, _ := json.Marshal(state.parts)
+			if err := s.chatHistory.FinalizeAssistantSnapshot(botID, snapshot.UserID, state.text, traceID,
+				string(tools), string(parts), sessionID, snapshot.StreamSeq,
+				"cancelled", "任务已中断，已恢复最后保存的内容"); err != nil {
+				Fail(c, errs.Wrap(err, "failed to finalize interrupted reply"))
+				return
+			}
+			snapshot, err = s.chatHistory.LoadAssistantByTrace(botID, traceID)
+			if err != nil {
+				Fail(c, errs.Wrap(err, "failed to reload interrupted reply"))
+				return
+			}
+		}
+	}
+	s.serveChatEvents(c, bus, sub, botID, sessionID, traceID, snapshot, sinceSeq)
 }
 
 // translateEventToSSE 将 EventBus 内部事件翻译为前端 SSE 事件（type + data）。
@@ -347,10 +397,14 @@ func translateEventToSSE(event outbound.Event) (string, map[string]any) {
 	case outbound.EventLLMTextDelta:
 		return sseTextDelta, map[string]any{"text": event.Data["text"]}
 	case outbound.EventLLMToolCall:
+		id, _ := event.Data["toolCallId"].(string)
+		if id == "" {
+			id = fmt.Sprintf("tool-%d", event.Seq)
+		}
 		return sseToolCall, map[string]any{
-			"toolCallId": event.Data["toolCallId"],
-			"tool":       event.Data["tool"],
-			"input":      event.Data["input"],
+			"toolCallId": id,
+			"tool":       event.Data["tool"], "input": event.Data["input"],
+			"invocationId": event.Data["invocationId"],
 		}
 	case outbound.EventLLMToolProgress:
 		stream := "stdout"
@@ -380,6 +434,12 @@ func translateEventToSSE(event outbound.Event) (string, map[string]any) {
 		}
 		if errMsg, ok := event.Data["error"]; ok {
 			payload["error"] = errMsg
+		}
+		if status := extractToolStatus(event.Data["output"]); status != "" {
+			payload["status"] = status
+		}
+		if status, _ := event.Data["status"].(string); status != "" {
+			payload["status"] = status
 		}
 		return sseToolResult, payload
 	}
@@ -421,657 +481,83 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
-
-	// ---- 斜杠命令拦截（在 pipeline 之前处理，避免 /clear 等被当聊天文本送入 LLM）----
-	if cmd := command.Parse(req.Text); cmd != nil {
-		s.handleSlashCommand(c, cmd, &req)
-		return
-	}
-
-	// 获取 WebChannel
-	webCh, ok := s.botSvc.GetWebChannel(req.BotID)
-	if !ok {
-		Fail(c, errs.NotFound("bot is not running or not available for chat"))
-		return
-	}
-
 	user := currentUser(c)
 	if user == nil {
 		Fail(c, errs.Unauthorized("not logged in"))
 		return
 	}
-
-	userID := fmt.Sprintf("%d", user.ID)
-
-	// 生成 traceID（使用 crypto/rand，格式 "web-{24 hex}"）
+	webCh, ok := s.botSvc.GetWebChannel(req.BotID)
+	if !ok {
+		Fail(c, errs.NotFound("bot is not running or not available for chat"))
+		return
+	}
+	userID := strconv.FormatUint(uint64(user.ID), 10)
+	if req.SessionID == "" {
+		req.SessionID = s.chatHistory.resolveWritableSession(req.BotID, userID, "")
+		if req.SessionID == "" {
+			Fail(c, errs.Internal("failed to resolve chat session"))
+			return
+		}
+	} else {
+		var count int64
+		if err := s.chatHistory.db.Model(&dao.ChatSession{}).Where("id = ? AND bot_id = ?", req.SessionID, req.BotID).Count(&count).Error; err != nil {
+			Fail(c, errs.Wrap(err, "failed to resolve chat session"))
+			return
+		} else if count == 0 {
+			Fail(c, errs.NotFound("chat session not found for this bot"))
+			return
+		}
+	}
+	if cmd := command.Parse(req.Text); cmd != nil {
+		s.handleSlashCommand(c, cmd, &req)
+		return
+	}
+	bus, ok := s.botSvc.EventBus().(*outbound.MemoryEventBus)
+	if !ok || bus == nil {
+		Fail(c, errs.Internal("event bus unavailable"))
+		return
+	}
 	traceID := idgen.New("web")
-	// 在 Inject / OnMessageStart 之前记下会话，供 /active 按会话过滤 resume。
-	s.botSvc.RememberMessageSession(req.BotID, traceID, req.SessionID)
-
-	// 先加载历史（不含当前消息），再异步保存用户消息
-	// 顺序很重要：如果先保存再加载，当前消息会出现在历史中，
-	// 导致 MessageBuilder 重复追加，LLM 上下文中出现两次相同消息
 	contextLimit := s.store.GetInt(config.KeyChatContextLimit, 20)
 	history, err := s.chatHistory.LoadContext(req.BotID, userID, contextLimit, req.SessionID)
 	if err != nil {
-		s.logger.Warnw("failed to load chat history", "err", err)
-		history = nil
-	} else {
-		// 应用 compact_context 检查点：摘要 + 边界后的消息（无检查点时原样返回）。
-		history = s.chatHistory.ApplyContextCheckpoint(traceID, req.BotID, req.SessionID, history)
+		Fail(c, errs.Wrap(err, "failed to load chat history"))
+		return
 	}
-
-	// 保存用户消息到 DB（异步，不阻塞响应）
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.logger.Errorw("panic saving user message", "err", r)
-			}
-		}()
-		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, traceID, req.SessionID); err != nil {
-			s.logger.Warnw("failed to save user message", "err", err)
-		}
-	}()
-
-	// 注册回复 channel（用于接收最终完成信号）
-	respCh := webCh.RegisterResponse(traceID, 16)
-	defer webCh.UnregisterResponse(traceID)
-
-	// 订阅 EventBus 接收流式文本增量
-	var eventCh <-chan outbound.Event
-	var eventSub *outbound.Subscription
-	var memBus *outbound.MemoryEventBus
-	bus := s.botSvc.EventBus()
-	if bus != nil {
-		if mb, ok := bus.(*outbound.MemoryEventBus); ok {
-			memBus = mb
-			eventSub = mb.Subscribe(traceID)
-			eventCh = eventSub.C()
-		}
+	history = s.chatHistory.ApplyContextCheckpoint(traceID, req.BotID, req.SessionID, history)
+	// Commit the user row before work starts, preserving both chronological
+	// order and the next request's context even when the first reply is fast.
+	if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, traceID, req.SessionID); err != nil {
+		Fail(c, errs.Wrap(err, "failed to save chat message"))
+		return
 	}
-	// unsubscribeEventSub 释放 EventBus 订阅。仅在「连接已结束」或「后台 goroutine 接管」后
-	// 调用一次，避免与断连后的后台落库 goroutine 重复退订。
-	unsubscribeEventSub := func() {
-		if memBus != nil && eventSub != nil {
-			memBus.Unsubscribe(eventSub)
-		}
+	s.botSvc.RememberMessageSession(req.BotID, traceID, req.SessionID)
+	turn := s.botSvc.prepareChatTurn(webCh, req.BotID, userID, req.SessionID, traceID)
+	if turn == nil {
+		Fail(c, errs.Internal("chat persistence unavailable"))
+		return
 	}
-
-	// 注入消息到 Bot（携带聊天历史作为 LLM 上下文）
-	extraMeta := map[string]any{}
+	sub := bus.SubscribeWithReplay(traceID, 0)
+	defer bus.Unsubscribe(sub)
+	extraMeta := map[string]any{metaKeyChatSessionID: req.SessionID}
 	if len(history) > 0 {
 		extraMeta["chat_history"] = history
 	}
 	if len(req.Attachments) > 0 {
 		extraMeta["attachments"] = req.Attachments
 	}
-	// 前端会话 ID：让工作流提交时能记录「这条工作流属于哪个会话」，
-	// 前端刷新页面后据此把工作流卡片恢复出来（activeWorkflowId 只存在于内存，刷新即丢）。
-	if req.SessionID != "" {
-		extraMeta[metaKeyChatSessionID] = req.SessionID
-	}
-
-	// 目标模式自动路由：若用户需求表达「反复打磨 / 审查直到没有新问题」等收敛性验收意图，
-	// 注入一条强制指令，要求模型必须用 task(goalMode: true) 提交、禁止用 subagent/delegate
-	// 内联处理。原始文本仍按 req.Text 落库（见上方 goroutine），此处仅放大注入模型的文本。
 	injectText := req.Text
 	if workflow.DetectGoalModeIntent(req.Text) {
 		injectText = workflow.GoalModeDirective(req.Text)
 		extraMeta["goal_mode_intent"] = true
-		s.logger.Infow("goal-mode auto-route", "bot_id", req.BotID, "trace_id", traceID, "text", req.Text)
 	}
 	if err := webCh.Inject(c.Request.Context(), traceID, userID, injectText, extraMeta); err != nil {
+		turn.fail <- err
+		s.botSvc.UnregisterMessageCancel(req.BotID, traceID)
 		Fail(c, errs.Wrap(err, "failed to send message to bot"))
 		return
 	}
-
-	// 设置 SSE 响应头
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		Fail(c, errs.Internal("streaming not supported"))
-		return
-	}
-
-	// 发送 start 事件
-	writeSSE(c.Writer, sseStart, map[string]any{"traceId": traceID})
-	flusher.Flush()
-
-	// 设置空闲超时（收到任意流式事件会重置），避免总时长硬切长命令。
-	idleTimeout := 120 * time.Second
-	idleTimer := time.NewTimer(idleTimeout)
-	defer idleTimer.Stop()
-	resetIdle := func() {
-		if !idleTimer.Stop() {
-			select {
-			case <-idleTimer.C:
-			default:
-			}
-		}
-		idleTimer.Reset(idleTimeout)
-	}
-	// 心跳，防止中间代理在长静默期断开 SSE。
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
-
-	fullText := ""
-	botID := req.BotID
-	// 累积本轮工具调用，用于回复完成后随 assistant 消息一起持久化。
-	toolCalls := make([]map[string]any, 0)
-	toolCallIdx := make(map[string]int)
-	// ── 有序 parts：按 LLM 实际输出顺序记录文本片段和工具调用，
-	//    用于前端按时间线交错渲染（而非文本全在前、工具全在后）。
-	parts := make([]map[string]any, 0) // 有序: [{type:"text",content},{type:"tool",...}]
-
-	// syncPartTool 将 toolCalls[idx] 的最新状态同步到 parts 数组中对应的 tool part。
-	syncPartTool := func(toolCallID string) {
-		idx, ok := toolCallIdx[toolCallID]
-		if !ok || idx < 0 || idx >= len(toolCalls) {
-			return
-		}
-		src := toolCalls[idx]
-		for i := len(parts) - 1; i >= 0; i-- {
-			if parts[i]["type"] == "tool" && parts[i]["id"] == toolCallID {
-				// 合并 src 的字段到 part（不覆盖 type/id/name 等标识字段）
-				p := parts[i]
-				for k, v := range src {
-					if k != "type" && k != "id" && k != "name" {
-						p[k] = v
-					}
-				}
-				break
-			}
-		}
-	}
-
-	// saveAssistant 将本轮 assistant 回复（文本 + 工具调用 + 有序 parts）持久化到 DB。
-	// 供「正常完成」与「客户端断开」两条路径共用，确保工具调用终态（success/error/killed）
-	// 都能落库，避免重连后卡片停留在 running。
-	//
-	// 落库走 UpsertAssistantByTrace（以 traceID 为幂等键），因此本函数可被安全地重复调用：
-	// 流式过程中的增量落库与收尾落库写的是同一行。
-	//
-	// streaming=true 表示这是流式中间态；收尾时必须传 false，否则前端会把 running
-	// 工具卡片当成「仍在跑」而永久转圈。
-	saveAssistant := func(streaming bool) {
-		if fullText == "" && len(toolCalls) == 0 {
-			return
-		}
-		toolCallsJSON := ""
-		if len(toolCalls) > 0 {
-			if b, err := json.Marshal(toolCalls); err == nil {
-				toolCallsJSON = string(b)
-			}
-		}
-		partsJSON := ""
-		if len(parts) > 0 {
-			if b, err := json.Marshal(parts); err == nil {
-				partsJSON = string(b)
-			}
-		}
-		// 落库内容与 done 事件同口径：剥离 reply-control 控制块。增量源头
-		// （LLMStage.processStream）已跨 delta 过滤，这里兜底防其他发布路径漏出。
-		go func(content, tcJSON, pJSON string, streaming bool) {
-			defer func() {
-				if r := recover(); r != nil {
-					s.logger.Errorw("panic saving assistant message", "err", r)
-				}
-			}()
-			if err := s.chatHistory.UpsertAssistantByTrace(botID, userID, content, traceID, tcJSON, pJSON, req.SessionID, streaming); err != nil {
-				s.logger.Warnw("failed to save assistant message", "err", err)
-			}
-		}(stages.StripReplyControlBlock(fullText), toolCallsJSON, partsJSON, streaming)
-	}
-
-	// ---- 流式增量落库 ----
-	//
-	// 目的：用户在 bot 回复过程中刷新页面，也能看到已经产出的内容。
-	// 旧行为只在整轮结束时落库一次，中途刷新会丢掉全部流式内容（体验很差）。
-	//
-	// 为什么要节流：文本增量事件非常密集（每个 token 一次），逐条写库会把 SQLite 打满，
-	// 并与同连接的历史查询争锁。这里按最小间隔合并写入；工具调用等关键节点强制立即落库，
-	// 因为它们稀疏且信息量大，延迟落库最容易在刷新后丢状态。
-	var lastFlush time.Time
-	flushStream := func(force bool) {
-		if fullText == "" && len(toolCalls) == 0 {
-			return
-		}
-		if !force && time.Since(lastFlush) < streamPersistInterval {
-			return
-		}
-		lastFlush = time.Now()
-		saveAssistant(true)
-	}
-
-	// suppressPhantomToolCall 当同名工具的新调用到达时，若存在空参数的 phantom running call，
-	// 将其标记为 superseded（被后续真实调用取代），避免前端永久卡在「执行中」。
-	//
-	// 返回被取代的 toolCallID（无则为空串）：仅改服务端累积结构不足以让**当前正在看**
-	// 页面的用户看到状态变化 —— 前端卡片靠 SSE 驱动，不补发事件的话只有刷新页面
-	// （重新从 DB 读 parts）才会变。因此 SSE 路径必须据此补发一条 tool_result。
-	suppressPhantomToolCall := func(toolName string, newInput any) string {
-		idx := findPhantomToolCall(toolCalls, toolName, newInput)
-		if idx < 0 {
-			return ""
-		}
-		markToolCallSuperseded(toolCalls[idx])
-		id, _ := toolCalls[idx]["id"].(string)
-		syncPartTool(id)
-		return id
-	}
-
-	// sweepPhantomToolCalls 在本轮结束时收敛所有残留的空参数 phantom call。
-	//
-	// 为什么 suppressPhantomToolCall 不够：它依赖「后续有同名真实调用到达」来触发。
-	// 若 phantom 恰好是本轮最后一个工具调用（LLM 收尾时发的占位），就没有后继事件
-	// 来取代它，卡片会永久停在「执行中」。这里在 done 之前做一次兜底清扫。
-	//
-	// 只清空参数的 running 项：真实调用即使超时也应保留 running 语义交由前端超时提示，
-	// 不能误判成已取代而掩盖真正的卡死。
-	sweepPhantomToolCalls := func() {
-		for i, tc := range toolCalls {
-			if !isPhantomRunning(tc) {
-				continue
-			}
-			markToolCallSuperseded(toolCalls[i])
-			id, _ := tc["id"].(string)
-			syncPartTool(id)
-			if id != "" {
-				writeSSE(c.Writer, sseToolResult, map[string]any{
-					"toolCallId": id,
-					"tool":       tc["name"],
-					"status":     "superseded",
-					"output":     phantomSupersededMsg,
-				})
-			}
-		}
-	}
-
-	// accumulate 将一条 EventBus 事件合并进本轮 assistant 回复的累积结构
-	//（fullText / toolCalls / parts），供「断连后后台继续落库」与「正常完成落库」共用。
-	// 仅更新累积结构，不负责向客户端写 SSE。
-	accumulate := func(event outbound.Event) {
-		switch event.Type {
-		case outbound.EventLLMTextDelta:
-			delta, _ := event.Data["text"].(string)
-			if delta != "" {
-				fullText += delta
-				if len(parts) > 0 && parts[len(parts)-1]["type"] == "text" {
-					parts[len(parts)-1]["content"] = parts[len(parts)-1]["content"].(string) + delta
-				} else {
-					parts = append(parts, map[string]any{"type": "text", "content": delta})
-				}
-			}
-		case outbound.EventLLMToolCall:
-			toolCallID, _ := event.Data["toolCallId"].(string)
-			toolName, _ := event.Data["tool"].(string)
-			if toolCallID == "" {
-				toolCallID = idgen.New("tool")
-			}
-			// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代。
-			// accumulate 只负责累积（供断连后台落库），不发 SSE，故忽略返回值。
-			_ = suppressPhantomToolCall(toolName, event.Data["input"])
-			if _, ok := toolCallIdx[toolCallID]; !ok {
-				toolCalls = append(toolCalls, map[string]any{
-					"id":     toolCallID,
-					"name":   toolName,
-					"title":  toolName,
-					"status": "running",
-					"input":  event.Data["input"],
-					"output": map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false},
-				})
-				toolCallIdx[toolCallID] = len(toolCalls) - 1
-				part := map[string]any{
-					"type":   "tool",
-					"id":     toolCallID,
-					"name":   toolName,
-					"title":  toolName,
-					"status": "running",
-					"input":  event.Data["input"],
-				}
-				if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
-					part["invocationId"] = invID
-				}
-				parts = append(parts, part)
-			}
-		case outbound.EventLLMToolProgress:
-			toolCallID, _ := event.Data["toolCallId"].(string)
-			payload, _ := event.Data["payload"].(map[string]any)
-			stream := "stdout"
-			chunk := ""
-			if payload != nil {
-				if v, ok := payload["stream"].(string); ok && v != "" {
-					stream = v
-				}
-				if v, ok := payload["chunk"].(string); ok {
-					chunk = v
-				}
-			}
-			if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
-				out, _ := toolCalls[idx]["output"].(map[string]any)
-				if out == nil {
-					out = map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false}
-				}
-				if stream == "stderr" {
-					prev, _ := out["stderr"].(string)
-					out["stderr"] = prev + chunk
-				} else {
-					prev, _ := out["stdout"].(string)
-					out["stdout"] = prev + chunk
-				}
-				toolCalls[idx]["output"] = out
-				if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
-					toolCalls[idx]["invocationId"] = invID
-				}
-				syncPartTool(toolCallID)
-			}
-		case outbound.EventLLMToolResult:
-			toolCallID, _ := event.Data["toolCallId"].(string)
-			if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
-				if _, isErr := event.Data["error"]; isErr {
-					toolCalls[idx]["status"] = "error"
-				} else {
-					toolCalls[idx]["status"] = "success"
-				}
-				if event.Data["output"] != nil {
-					toolCalls[idx]["output"] = event.Data["output"]
-				}
-				if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
-					toolCalls[idx]["invocationId"] = invID
-				}
-				syncPartTool(toolCallID)
-			}
-		}
-	}
-
-	// drainAndSaveInBackground 在客户端断开后由后台 goroutine 继续消费 EventBus 事件，
-	// 直到消息终态（done/error/dropped/dispatch-error）再把最终 assistant 回复落库。
-	// 这样断连不会腰斩后台长任务，也不会丢失最终结果——重连后经前端回放即可看到真实进度。
-	drainAndSaveInBackground := func() {
-		if eventSub == nil {
-			return
-		}
-		bgCtx, bgCancel := context.WithTimeout(context.Background(), 20*time.Minute)
-		defer bgCancel()
-		for {
-			select {
-			case <-bgCtx.Done():
-				saveAssistant(false)
-				unsubscribeEventSub()
-				return
-			case event, ok := <-eventSub.C():
-				if !ok {
-					saveAssistant(false)
-					unsubscribeEventSub()
-					return
-				}
-				accumulate(event)
-				switch event.Type {
-				case outbound.EventMessageDone, outbound.EventMessageError,
-					outbound.EventMessageDropped, outbound.EventDispatchError:
-					saveAssistant(false)
-					unsubscribeEventSub()
-					return
-				}
-			}
-		}
-	}
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			// 客户端断开：不再取消后台执行链路（msgCtx 仅由 stop 按钮控制），
-			// 也不再写入「killed」残骸快照。改为把 EventBus 订阅移交给后台 goroutine，
-			// 由其继续消费事件直到消息终态，再把最终 assistant 回复落库。
-			// 这样断连既不会腰斩长任务，也不会丢失最终结果；用户重连后可由前端
-			// 经回放订阅看到真实进度并手动终止（见 resume 端点）。
-			if eventSub != nil {
-				go drainAndSaveInBackground()
-			}
-			return
-
-		case <-idleTimer.C:
-			// 空闲超时不应腰斩后台长任务：与「客户端断开」路径一致，
-			// 把 EventBus 订阅移交给后台 goroutine 续跑并落库（见 c.Request.Context().Done() 分支），
-			// 本 SSE 写端关闭即可，bot 生成跑在独立 msgCtx 上不依赖请求 context，不受影响。
-			// 真正卡死由 bot 自身工具/生成超时与 stop 按钮控制，不应由 SSE 空闲判定直接杀进程。
-			writeSSE(c.Writer, sseError, map[string]any{"message": "idle timeout"})
-			flusher.Flush()
-			if eventSub != nil {
-				go drainAndSaveInBackground()
-			}
-			return
-
-		case <-heartbeat.C:
-			writeSSE(c.Writer, ssePing, map[string]any{"ts": time.Now().Unix()})
-			flusher.Flush()
-
-		// 流式增量：从 EventBus 接收 LLM 文本/工具事件
-		case event, ok := <-eventCh:
-			if !ok {
-				continue
-			}
-			resetIdle()
-			switch event.Type {
-			case outbound.EventLLMTextDelta:
-				delta, _ := event.Data["text"].(string)
-				if delta != "" {
-					fullText += delta
-					// 剥离 reply-control 协议标记，避免前端渲染出 @@REPLY_CONTROL@@{...}
-					cleanDelta := stages.StripReplyControlBlock(delta)
-					if cleanDelta == "" {
-						// 整个 delta 都是控制标记（如最后一个 chunk），跳过不发
-						resetIdle()
-						break
-					}
-					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": cleanDelta})
-					flusher.Flush()
-					// 有序 parts：合并到最后一个 text part 或新建
-					if len(parts) > 0 && parts[len(parts)-1]["type"] == "text" {
-						parts[len(parts)-1]["content"] = parts[len(parts)-1]["content"].(string) + delta
-					} else {
-						parts = append(parts, map[string]any{"type": "text", "content": delta})
-					}
-					// 节流落库：让中途刷新页面的用户能看到已产出的文本。
-					flushStream(false)
-				}
-
-			case outbound.EventLLMToolCall:
-				toolCallID, _ := event.Data["toolCallId"].(string)
-				toolName, _ := event.Data["tool"].(string)
-				if toolCallID == "" {
-					toolCallID = idgen.New("tool")
-				}
-				// 抑制 phantom call：同名工具的空参数占位调用被真实参数调用取代。
-				// 必须补发 tool_result，否则前端那张「执行中」卡片收不到任何事件，
-				// 只有刷新页面才会变成已取代。
-				if phantomID := suppressPhantomToolCall(toolName, event.Data["input"]); phantomID != "" {
-					writeSSE(c.Writer, sseToolResult, map[string]any{
-						"toolCallId": phantomID,
-						"tool":       toolName,
-						"status":     "superseded",
-						"output":     phantomSupersededMsg,
-					})
-					flusher.Flush()
-				}
-				writeSSE(c.Writer, sseToolCall, map[string]any{
-					"toolCallId": toolCallID,
-					"tool":       toolName,
-					"input":      event.Data["input"],
-				})
-				flusher.Flush()
-				if _, ok := toolCallIdx[toolCallID]; !ok {
-					tc := map[string]any{
-						"id":     toolCallID,
-						"name":   toolName,
-						"title":  toolName,
-						"status": "running",
-						"input":  event.Data["input"],
-						"output": map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false},
-					}
-					toolCalls = append(toolCalls, tc)
-					toolCallIdx[toolCallID] = len(toolCalls) - 1
-					// 有序 parts：追加工具 part（保持调用顺序）
-					part := map[string]any{
-						"type":   "tool",
-						"id":     toolCallID,
-						"name":   toolName,
-						"title":  toolName,
-						"status": "running",
-						"input":  event.Data["input"],
-					}
-					if invID, ok := event.Data["invocationId"].(string); ok && invID != "" {
-						part["invocationId"] = invID
-					}
-					parts = append(parts, part)
-				}
-				// 工具调用是稀疏且高信息量的节点，强制立即落库：
-				// 若等节流窗口，刷新后最容易丢失「正在调用哪个工具」这类关键状态。
-				flushStream(true)
-
-			case outbound.EventLLMToolProgress:
-				toolCallID, _ := event.Data["toolCallId"].(string)
-				toolName, _ := event.Data["tool"].(string)
-				invocationID, _ := event.Data["invocationId"].(string)
-				// payload 是任意类型：user_choice 工具发 UserChoiceEventPayload 结构体，
-				// 代码/任务工具发 map[string]any（含 stream/chunk 文本增量）。原样透传
-				// （Go 的 json.Marshal 对结构体/map 均正确序列化）；切勿断言成
-				// map[string]any —— 结构体断言失败变 nil，前端拿到 null、永远注册不到
-				// 真实 questionId，提交全部 404（call_xxx 占位符）。
-				payload := event.Data["payload"]
-				stream := "stdout"
-				chunk := ""
-				if pm, ok := payload.(map[string]any); ok {
-					if v, ok := pm["stream"].(string); ok && v != "" {
-						stream = v
-					}
-					if v, ok := pm["chunk"].(string); ok {
-						chunk = v
-					}
-				}
-				writeSSE(c.Writer, sseToolProgress, map[string]any{
-					"toolCallId":   toolCallID,
-					"tool":         toolName,
-					"invocationId": invocationID,
-					"stream":       stream,
-					"chunk":        chunk,
-					"payload":      payload,
-				})
-				flusher.Flush()
-
-				if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
-					out, _ := toolCalls[idx]["output"].(map[string]any)
-					if out == nil {
-						out = map[string]any{"stdout": "", "stderr": "", "exitCode": nil, "truncated": false}
-					}
-					if stream == "stderr" {
-						prev, _ := out["stderr"].(string)
-						out["stderr"] = prev + chunk
-					} else {
-						prev, _ := out["stdout"].(string)
-						out["stdout"] = prev + chunk
-					}
-					toolCalls[idx]["output"] = out
-					if invocationID != "" {
-						toolCalls[idx]["invocationId"] = invocationID
-					}
-					syncPartTool(toolCallID)
-				}
-
-			case outbound.EventLLMToolResult:
-				toolCallID, _ := event.Data["toolCallId"].(string)
-				toolName, _ := event.Data["tool"].(string)
-				invocationID, _ := event.Data["invocationId"].(string)
-				output := event.Data["output"]
-				payload := map[string]any{
-					"toolCallId":   toolCallID,
-					"tool":         toolName,
-					"invocationId": invocationID,
-					"output":       output,
-				}
-				if errMsg, ok := event.Data["error"]; ok {
-					payload["error"] = errMsg
-				}
-				// 携带工具返回的真实 status（如 user_choice 的 timeout/answered），
-				// 让前端刷新后能正确恢复卡片终态。硬码 success/error 会导致
-				// 已超时的 choice 卡片被错误恢复为 active/answered。
-				if realStatus := extractToolStatus(output); realStatus != "" {
-					payload["status"] = realStatus
-				}
-				writeSSE(c.Writer, sseToolResult, payload)
-				flusher.Flush()
-
-				if idx, ok := toolCallIdx[toolCallID]; ok && idx >= 0 && idx < len(toolCalls) {
-					if _, isErr := event.Data["error"]; isErr {
-						toolCalls[idx]["status"] = "error"
-					} else if realStatus := extractToolStatus(output); realStatus != "" {
-						// user_choice 等工具在 output 里返回真实终态（timeout/answered/cancelled）
-						toolCalls[idx]["status"] = realStatus
-					} else {
-						toolCalls[idx]["status"] = "success"
-					}
-					if event.Data["output"] != nil {
-						toolCalls[idx]["output"] = event.Data["output"]
-					}
-					if invocationID != "" {
-						toolCalls[idx]["invocationId"] = invocationID
-					}
-					syncPartTool(toolCallID)
-				}
-				// 工具终态（success/error/killed）必须立即落库：
-				// 否则刷新后卡片会停留在 running，用户以为还在跑。
-				flushStream(true)
-			}
-
-		// 完成信号：从 WebChannel 收到最终 Action
-		case action, ok := <-respCh:
-			resetIdle()
-			if !ok {
-				// channel 关闭，结束
-				sweepPhantomToolCalls()
-				writeSSE(c.Writer, sseDone, map[string]any{"text": stages.StripReplyControlBlock(fullText)})
-				flusher.Flush()
-				unsubscribeEventSub()
-				return
-			}
-
-			// ActionReply 表示 Bot 回复完成
-			// 文本已通过 EventBus 流式推送，这里只需发送 done
-			if action.Type == core.ActionReply {
-				// payload 是出站门控（与 Telegram / Misskey 等渠道共用的那条清洗链）的最终产物，
-				// 即其他渠道实际会发送的内容。done 文本与落库内容一律以它为准，
-				// 流式增量只是同口径的实时预览（见 stages.OutputCleanStreamFilter）。
-				canonical, _ := action.Payload.(string)
-				canonical = stages.StripReplyControlBlock(canonical)
-				// 如果 fullText 为空（EventBus 不可用），直接把 payload 作为一次增量补发
-				if fullText == "" && canonical != "" {
-					writeSSE(c.Writer, sseTextDelta, map[string]any{"text": canonical})
-					flusher.Flush()
-				}
-				if canonical != "" {
-					fullText = canonical
-					parts = reconcileTextParts(parts, canonical)
-				}
-				// 收敛残留 phantom：避免最后一个空参数占位调用永久停在「执行中」
-				sweepPhantomToolCalls()
-				donePayload := map[string]any{"text": stages.StripReplyControlBlock(fullText)}
-				if len(toolCalls) > 0 {
-					donePayload["toolCalls"] = toolCalls
-				}
-				writeSSE(c.Writer, sseDone, donePayload)
-				flusher.Flush()
-
-				// 保存 Bot 回复到 DB（含工具调用信息 + 有序 parts）
-				saveAssistant(false)
-				unsubscribeEventSub()
-				return
-			}
-		}
-	}
+	s.serveChatEvents(c, bus, sub, req.BotID, req.SessionID, traceID, nil, 0)
 }
 
 // writeSSE 写入一个 SSE 事件。

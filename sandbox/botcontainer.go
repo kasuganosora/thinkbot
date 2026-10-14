@@ -16,6 +16,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -293,6 +294,18 @@ func (c *botContainer) create(ctx context.Context) error {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
+		// Offline API calls may own distinct managers for the same bot. Both can
+		// inspect an absent container before either creates it; the loser should
+		// attach to the winner, not fail an otherwise valid terminal/file request.
+		if ctx.Err() == nil && strings.Contains(out.String(), "already in use") {
+			if c.awaitConcurrentContainer(ctx, image) {
+				if networkErr := c.ensureNetwork(ctx); networkErr != nil {
+					return networkErr
+				}
+				c.ready = true
+				return nil
+			}
+		}
 		return errs.Wrapf(err, "bot_container: create container %q: %s",
 			c.container, strings.TrimSpace(out.String()))
 	}
@@ -315,6 +328,46 @@ func (c *botContainer) create(ctx context.Context) error {
 	c.logger.Infow("bot container created",
 		"container", c.container, "volume", c.volume, "image", image)
 	return nil
+}
+
+// awaitConcurrentContainer only reuses a concurrent creator's exact managed
+// bot/image/volume combination. A same-name foreign container is never started
+// or attached. Docker can reserve a name before inspect reports it as running.
+func (c *botContainer) awaitConcurrentContainer(ctx context.Context, image string) bool {
+	for attempt := 0; attempt < 20; attempt++ {
+		data, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{json .}}", c.container).Output()
+		if err == nil {
+			var detail struct {
+				Config struct {
+					Image  string
+					Labels map[string]string
+				}
+				State  struct{ Status string }
+				Mounts []struct{ Type, Name, Destination string }
+			}
+			if json.Unmarshal(data, &detail) != nil || detail.Config.Image != image || detail.Config.Labels["thinkbot.managed"] != "true" || detail.Config.Labels["thinkbot.bot"] != c.botID {
+				return false
+			}
+			ownVolume := false
+			for _, mount := range detail.Mounts {
+				if mount.Type == "volume" && mount.Name == c.volume && mount.Destination == containerWorkDir {
+					ownVolume = true
+				}
+			}
+			if !ownVolume {
+				return false
+			}
+			if detail.State.Status == "running" {
+				return true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return false
 }
 
 // destroy 销毁容器。removeVolume 为 true 时连同持久化 volume 一起删除。
@@ -494,18 +547,15 @@ func (c *botContainer) execInContainer(ctx context.Context, workDir, command str
 		wd = validated
 	}
 
-	args := []string{"exec", "-w", wd}
-	if stdin != nil {
-		args = append(args, "-i")
-	}
-	args = append(args, c.container, "sh", "-c", command)
-
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(execCtx, "docker", args...)
+	cmd, stop, err := dockerExecCommand(execCtx, c.container, wd, command, stdin != nil)
+	if err != nil {
+		return nil, err
+	}
 	// 复用统一的执行 + 完整性检测收尾（finalizeExecResult）。
 	stuck, hard := resolveExecTimeouts(ExecRequest{}, c.cfg)
-	result, err := runCommandWithStreaming(execCtx, cancel, cmd, c.cfg.MaxOutput, stdin, stuck, hard, nil)
+	result, err := runCommandWithStreaming(execCtx, cancel, cmd, c.cfg.MaxOutput, stdin, stuck, hard, nil, stop)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
 	}
@@ -539,7 +589,10 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		wd = validated
 	}
 
-	cmd := exec.CommandContext(execCtx, "docker", "exec", "-w", wd, c.container, "sh", "-c", req.Command)
+	cmd, stop, err := dockerExecCommand(execCtx, c.container, wd, req.Command, false)
+	if err != nil {
+		return nil, err
+	}
 
 	// OOM 检测：命令前后对比容器内 cgroup 的 oom_kill 计数。
 	// 这是最可靠的判定（不被管道掩盖退出码影响，如 `cmd | tee | head`）。
@@ -549,7 +602,7 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
-	})
+	}, stop)
 	if err != nil {
 		return nil, errs.Wrapf(err, "bot_container: exec in %q", c.container)
 	}
@@ -658,17 +711,17 @@ func (c *botContainer) ListDir(ctx context.Context, path string) ([]FileEntry, e
 	if err := c.ensure(ctx); err != nil {
 		return nil, err
 	}
-	formatCmd := fmt.Sprintf(
+	formatCmd := directoryCheckScript(validated) + fmt.Sprintf(
 		`for f in %s/*; do [ -e "$f" ] || continue; `+
 			`if [ -d "$f" ]; then printf "%%s\td\t0\t%%s\n" "$(basename "$f")" "$(stat -c%%Y "$f" 2>/dev/null || echo 0)"; `+
 			`else printf "%%s\tf\t%%s\t%%s\n" "$(basename "$f")" "$(stat -c%%s "$f" 2>/dev/null || echo 0)" "$(stat -c%%Y "$f" 2>/dev/null || echo 0)"; fi; done`,
-		validated)
+		shellQuote(validated))
 	cmd := exec.CommandContext(ctx, "docker", "exec", c.container, "sh", "-c", formatCmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, errs.Wrapf(err, "bot_container: list dir %q: %s",
+		return nil, errs.Wrapf(directoryExecError(err, path), "bot_container: list dir %q: %s",
 			path, strings.TrimSpace(stderr.String()))
 	}
 	return parseListOutputWithMtime(stdout.Bytes()), nil

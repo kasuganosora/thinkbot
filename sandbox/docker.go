@@ -205,14 +205,16 @@ func (w *dockerWorkspace) ExecStream(ctx context.Context, req ExecRequest, onChu
 		targetDir = validated
 	}
 
-	cmd := exec.CommandContext(execCtx, "docker",
-		"exec", "-w", targetDir, w.container, "sh", "-c", req.Command)
+	cmd, stop, err := dockerExecCommand(execCtx, w.container, targetDir, req.Command, false)
+	if err != nil {
+		return nil, err
+	}
 
 	result, err := runCommandWithStreaming(execCtx, cancel, cmd, w.cfg.MaxOutput, nil, stuck, hard, func(stream, chunk string) {
 		if onChunk != nil {
 			onChunk(ExecChunk{Stream: stream, Data: chunk})
 		}
-	})
+	}, stop)
 	if err != nil {
 		return nil, errs.Wrapf(err, "sandbox/docker: exec in container %q", w.container)
 	}
@@ -284,11 +286,11 @@ func (w *dockerWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry
 
 	// 使用 stat 格式输出 name/isDir/size
 	// 格式: {name}\t{type}\t{size}
-	formatCmd := fmt.Sprintf(
+	formatCmd := directoryCheckScript(validated) + fmt.Sprintf(
 		`for f in %s/*; do [ -e "$f" ] || continue; `+
 			`if [ -d "$f" ]; then printf "%%s\td\t0\n" "$(basename "$f")"; `+
 			`else printf "%%s\tf\t%%s\n" "$(basename "$f")" "$(stat -c%%s "$f" 2>/dev/null || echo 0)"; fi; done`,
-		validated)
+		shellQuote(validated))
 
 	cmd := exec.CommandContext(ctx, "docker", "exec", w.container, "sh", "-c", formatCmd)
 	var stdout bytes.Buffer
@@ -297,7 +299,7 @@ func (w *dockerWorkspace) ListDir(ctx context.Context, path string) ([]FileEntry
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, errs.Wrapf(err, "sandbox/docker: list dir %q: %s",
+		return nil, errs.Wrapf(directoryExecError(err, path), "sandbox/docker: list dir %q: %s",
 			path, strings.TrimSpace(stderr.String()))
 	}
 
@@ -346,7 +348,7 @@ func shellQuote(s string) string {
 // 超硬上限时调用它终止命令；进程组看门狗（见下）会随之清理整个管道子孙进程。
 // stuckTimeout / hardTimeout 分别为卡死看门狗阈值与硬上限兜底。
 // 收尾处调用 finalizeExecResult 填充完整性 / 可信度信号（退出码 / 卡死 / 输出文本特征）。
-func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, maxOut int, stdin []byte, stuckTimeout, hardTimeout time.Duration, onChunk func(stream, chunk string)) (*ExecResult, error) {
+func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, maxOut int, stdin []byte, stuckTimeout, hardTimeout time.Duration, onChunk func(stream, chunk string), onCancel ...func() error) (*ExecResult, error) {
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -355,6 +357,27 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 	// sh -c "cmd | head" 的全部子孙进程，避免子进程持管道写端导致
 	// cmd.Wait() 永久阻塞（即「执行中」永不停的根因）。
 	setProcessGroup(cmd)
+	var stopOnce sync.Once
+	var stopMu sync.Mutex
+	var stopErr error
+	stopCommand := func() error {
+		stopOnce.Do(func() {
+			stopMu.Lock()
+			defer stopMu.Unlock()
+			for _, cleanup := range onCancel {
+				if err := cleanup(); err != nil {
+					stopErr = err
+				}
+			}
+			killProcessTree(cmd.Process)
+		})
+		return stopErr
+	}
+	// CommandContext otherwise kills just the direct child before the process
+	// group watcher can perform container cleanup. Share one ordered stop path.
+	if cmd.Cancel != nil {
+		cmd.Cancel = stopCommand
+	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -383,9 +406,7 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 	go func() {
 		select {
 		case <-ctx.Done():
-			if cmd.Process != nil {
-				killProcessTree(cmd.Process)
-			}
+			_ = stopCommand()
 		case <-watchDone:
 		}
 	}()
@@ -538,6 +559,11 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 			label = fmt.Sprintf("命令超过硬上限 %s 被强制终止\n", hardTimeout)
 		}
 		result.Stderr = label + result.Stderr
+	} else if ctx.Err() != nil && waitErr != nil {
+		_ = stopCommand()
+		stuckReason.Store("cancelled")
+		result.ExitCode = -1
+		result.Stderr = "命令已取消\n" + result.Stderr
 	} else if waitErr != nil {
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
@@ -549,6 +575,13 @@ func runCommandWithStreaming(ctx context.Context, cancel context.CancelFunc, cmd
 	// 填充完整性 / 可信度信号（退出码 / 卡死 / 输出文本特征）。
 	// cgroup OOM 由调用方在 ExecStream 中前后对比后叠加到 OOMKilled。
 	finalizeExecResult(result, stuckReason.Load().(string))
+	stopMu.Lock()
+	defer stopMu.Unlock()
+	if stopErr != nil {
+		result.Aborted = true
+		result.Reliable = false
+		result.Warnings = append(result.Warnings, stopErr.Error())
+	}
 	return result, nil
 }
 

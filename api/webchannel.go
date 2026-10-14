@@ -70,6 +70,9 @@ func (c *WebChannel) Start(_ context.Context, ingress *inbound.Ingress) error {
 func (c *WebChannel) Stop(_ context.Context) error {
 	c.mu.Lock()
 	c.ingress = nil
+	for _, ch := range c.responses {
+		close(ch)
+	}
 	c.responses = make(map[string]chan core.Action)
 	c.mu.Unlock()
 	return nil
@@ -126,6 +129,9 @@ func (c *WebChannel) InjectWithID(ctx context.Context, msgID, traceID, userID, t
 func (c *WebChannel) RegisterResponse(traceID string, buf int) chan core.Action {
 	ch := make(chan core.Action, buf)
 	c.mu.Lock()
+	if previous, ok := c.responses[traceID]; ok {
+		close(previous)
+	}
 	c.responses[traceID] = ch
 	c.mu.Unlock()
 	return ch
@@ -164,22 +170,24 @@ func (c *WebChannel) Send(ctx context.Context, action core.Action) error {
 
 	c.mu.RLock()
 	ch, ok := c.responses[traceID]
-	c.mu.RUnlock()
 	if !ok {
+		c.mu.RUnlock()
 		// 无人实时订阅（如 workflow 续跑时 SSE 已断开 / 前端尚未 resume）：
 		// 兜底落库，用户刷新或 resume 时即可看到 bot 的回复，避免「bot 没继续干活」的体感。
 		// 注意：正常路径（前端持有 SSE）走上面的 ok 分支并实时投递，由 SSE handler
 		// 负责落库，二者互斥，不会重复写库。
-		c.persistReplyFallback(ctx, action, traceID)
-		return nil
+		return c.persistReplyFallback(ctx, action, traceID)
 	}
 
 	select {
 	case ch <- action:
 	default:
-		traceid.L(ctx).Warnw("webchannel: response channel full, action dropped",
-			"channel", c.name, "trace_id", traceID, "action_type", action.Type)
+		c.mu.RUnlock()
+		return fmt.Errorf("web channel %q: response channel full for trace %q", c.name, traceID)
 	}
+	// Unregister/Stop hold the write lock, so they cannot close the channel
+	// between our lookup and send. Delivery remains nonblocking.
+	c.mu.RUnlock()
 	return nil
 }
 
@@ -188,26 +196,25 @@ func (c *WebChannel) Send(ctx context.Context, action core.Action) error {
 //
 // 仅处理终态回复（ActionReply），忽略工具回调等其他 action 类型。
 // 幂等：以 traceID 作为 UpsertAssistantByTrace 的幂等键，重复调用只会刷新同一行。
-func (c *WebChannel) persistReplyFallback(ctx context.Context, action core.Action, traceID string) {
+func (c *WebChannel) persistReplyFallback(ctx context.Context, action core.Action, traceID string) error {
 	if c.chatHistory == nil {
-		return
+		return nil
 	}
 	if action.Type != core.ActionReply {
-		return
+		return nil
 	}
 	content, _ := action.Payload.(string)
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return
+		return nil
 	}
 	// 剥掉出站协议标记（@@REPLY_CONTROL@@{...}），与正常路径 saveAssistant 保持一致。
 	content = stages.StripReplyControlBlock(content)
 	if content == "" {
-		return
+		return nil
 	}
 
-	// 定位会话：优先从 metadata 取 session_id，否则退回 traceID
-	// （workflow 续跑以 sessionID 作 traceID 注入，二者相等）。
+	// 定位会话：优先从 metadata 取 session_id，否则兼容旧 traceID 会话。
 	sessionID := traceID
 	if action.Metadata != nil {
 		if sid, ok := action.Metadata["session_id"].(string); ok && sid != "" {
@@ -228,14 +235,14 @@ func (c *WebChannel) persistReplyFallback(ctx context.Context, action core.Actio
 		}
 	}
 
+	// Complete persistence before the pipeline emits message.done. Otherwise a
+	// resumed stream can report completion while history still has no reply.
+	if err := c.chatHistory.UpsertAssistantByTrace(c.botID, userID, content, traceID, "", "", sessionID, false); err != nil {
+		traceid.L(ctx).Warnw("webchannel: fallback persist assistant reply failed",
+			"channel", c.name, "trace_id", traceID, "session_id", sessionID, "err", err)
+		return err
+	}
 	c.chatHistory.logger.Infow("webchannel: reply persisted as fallback (no live subscriber)",
 		"channel", c.name, "trace_id", traceID, "session_id", sessionID, "len", len(content))
-
-	go func() {
-		// 用独立 context，避免上游 SSE context 取消导致落库失败。
-		if err := c.chatHistory.UpsertAssistantByTrace(c.botID, userID, content, traceID, "", "", sessionID, false); err != nil {
-			traceid.L(context.Background()).Warnw("webchannel: fallback persist assistant reply failed",
-				"channel", c.name, "trace_id", traceID, "session_id", sessionID, "err", err)
-		}
-	}()
+	return nil
 }

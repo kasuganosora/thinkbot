@@ -116,7 +116,7 @@ func TestMigrateSessionPartitionSchema(t *testing.T) {
 	// 1. 新列全部就位
 	want := map[string][]string{
 		"chat_sessions": {"external_key", "session_kind", "thread_root", "parent_session_id", "root_message_id"},
-		"chat_messages": {"external_msg_id", "is_context", "origin_session_id", "forked_session_id"},
+		"chat_messages": {"external_msg_id", "is_context", "origin_session_id", "forked_session_id", "stream_seq", "stream_status", "stream_error"},
 	}
 	for table, cols := range want {
 		got := tableColumns(t, db, table)
@@ -128,7 +128,7 @@ func TestMigrateSessionPartitionSchema(t *testing.T) {
 	}
 
 	// 2. 索引就位，且 chat_messages 那条确实是 partial index（空值不受约束）
-	for _, name := range []string{"idx_chat_sessions_external_key", "idx_chat_messages_external_msg_id", "idx_sti_root"} {
+	for _, name := range []string{"idx_chat_sessions_external_key", "idx_chat_messages_external_msg_id", "idx_sti_root", "idx_chat_messages_trace_snapshot"} {
 		if !hasIndex(t, db, name) {
 			t.Errorf("index %s not created", name)
 		}
@@ -157,7 +157,7 @@ func TestMigrateSessionPartitionSchema(t *testing.T) {
 	if err := db.Where("content = ?", "迁移前的老消息").First(&m).Error; err != nil {
 		t.Fatal(err)
 	}
-	if m.ExternalMsgID != "" || m.IsContext || m.OriginSessionID != "" || m.ForkedSessionID != "" {
+	if m.ExternalMsgID != "" || m.IsContext || m.OriginSessionID != "" || m.ForkedSessionID != "" || m.StreamSeq != 0 || m.StreamStatus != "" || m.StreamError != "" {
 		t.Errorf("legacy message got non-default values: %+v", m)
 	}
 
