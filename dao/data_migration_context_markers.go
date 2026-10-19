@@ -20,6 +20,9 @@ var contextMarkerLikePatterns = []string{
 	"[DM]%",
 	"[对方是 Bot 账号%",
 	"%[note_id:%",
+	// Mastodon（channel/mastodon）注入的同源标记，命名与 Misskey 不同。
+	"[Boost from %",
+	"%[status_id:%",
 }
 
 // fixChannelContextMarkers 剥离存量文本里渠道注入的装饰前缀/后缀。

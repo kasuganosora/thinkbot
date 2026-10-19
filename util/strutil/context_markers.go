@@ -27,6 +27,8 @@ import (
 //
 //	[对方是 Bot 账号 u] [Timeline] @u: [Renote from Y: r]\n[Reply to X: q]\n<用户正文>\n[note_id: n]
 //
+// Mastodon 渠道（channel/mastodon/channel.go 的 statusContext / handleStatus）格式相同
+// 但命名不同：转发上下文是 [Boost from Y: r]、帖子 ID 后缀是 [status_id: s]。
 // 剥离必须按此顺序由外向内进行。
 var (
 	reBotAccountPrefix = regexp.MustCompile(`^\[对方是 Bot 账号 [^\]]+\]\s*`)
@@ -39,6 +41,13 @@ var (
 	reRenoteContext = regexp.MustCompile(`(?s)^\[Renote from [^\]]+: .*?\]\s*?(\r?\n|$)`)
 	reReplyContext  = regexp.MustCompile(`(?s)^\[Reply to [^\]]+: .*?\]\s*?(\r?\n|$)`)
 	reNoteIDSuffix  = regexp.MustCompile(`(?m)\s*\[note_id: [^\]]+\]\s*$`)
+
+	// Mastodon 渠道（channel/mastodon）注入的同源标记，命名与 Misskey 不同：
+	// 转发上下文是 [Boost from ...]、帖子 ID 后缀是 [status_id: ...]。
+	// 不在这里剥掉的话，[status_id: xxx] 会被 note_capture 当成用户原话写进 L0
+	// 记忆，也会把 titleFromFirstMessage 的 30 rune 标题配额吃光。
+	reBoostContext   = regexp.MustCompile(`(?s)^\[Boost from [^\]]+: .*?\]\s*?(\r?\n|$)`)
+	reStatusIDSuffix = regexp.MustCompile(`(?m)\s*\[status_id: [^\]]+\]\s*$`)
 )
 
 // maxStripPasses 限制剥离轮数，避免病态输入下无谓循环。
@@ -52,7 +61,9 @@ func stripOnce(s string) string {
 	s = reDMPrefix.ReplaceAllString(s, "")
 	s = reRenoteContext.ReplaceAllString(s, "")
 	s = reReplyContext.ReplaceAllString(s, "")
+	s = reBoostContext.ReplaceAllString(s, "")
 	s = reNoteIDSuffix.ReplaceAllString(s, "")
+	s = reStatusIDSuffix.ReplaceAllString(s, "")
 	return s
 }
 

@@ -13,6 +13,16 @@
 - HTTP API 客户端（发帖/反应/关注/用户与帖子搜索/文件类型定义）
 - 消息去重（基于 note ID 的 TTL 缓存）
 
+### mastodon/
+
+通过 WebSocket streaming 连接 Mastodon 实例，监听通知（mention / reply / favourite）与可选的公共时间线。
+
+- WebSocket 长连接（自动重连 + 看门狗）
+- 事件归一化（status → `core.Message`，HTML 正文转纯文本）
+- HTTP API 客户端（发帖/回复/收藏/转发/关注/账号与帖子搜索/原生投票）
+- 消息去重（基于 status ID 的 TTL 缓存）+ 断连窗口 backfill（基于通知 ID 锚点）
+- 与 misskey/ 的差异（HTML 正文、acct 提及、poll 无事件需轮询等）见 `mastodon/README.md`
+
 ### telegram/
 
 通过 Bot API long polling 持续获取用户消息。
@@ -59,6 +69,8 @@
 | Telegram | 私聊 | `chatID`（= user ID） | 发言者 user ID |
 | Misskey | timeline | `misskey:timeline` | `note.User.ID` |
 | Misskey | mention / reply | `note.User.ID` | `note.User.ID` |
+| Mastodon | timeline | `mastodon:timeline` | `status.Account.ID` |
+| Mastodon | mention / reply / direct | `status.Account.ID` | `status.Account.ID` |
 
 > **新增 Channel 时请参照此规范。** 详见 `agent/memory/README.md` 的 "Scope 设计" 章节。
 

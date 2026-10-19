@@ -85,4 +85,4 @@ func extractPlatform(source string) string {
 }
 
 // knownPlatforms 已知平台前缀列表（按匹配优先级排序）。
-var knownPlatforms = []string{"telegram", "misskey", "discord", "slack", "web"}
+var knownPlatforms = []string{"telegram", "misskey", "mastodon", "discord", "slack", "web"}

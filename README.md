@@ -9,14 +9,14 @@
 
 ## thinkbot 是什么？
 
-thinkbot 是一个开源的多渠道 AI 机器人。你可以把它接进 Web、Telegram、Misskey，用自己习惯的模型来跑；它带着分层长期记忆、工具与技能、独立沙箱工作区，还能按工作流把多步事情串起来。
+thinkbot 是一个开源的多渠道 AI 机器人。你可以把它接进 Web、Telegram、Misskey、Mastodon，用自己习惯的模型来跑；它带着分层长期记忆、工具与技能、独立沙箱工作区，还能按工作流把多步事情串起来。
 
 跟它在不同地方聊，上下文还能接上。它会自己醒来看看有没有该做的事，夜里整理白天攒下的记忆，出了告警也能用自己的语气告诉你。一个人用、挂在群里用都行——设计目标就是挂着长期跑，而不是聊两句就散的临时窗口。
 
 ## 核心特性
 
 - **多 LLM 供应商**：OpenAI / Anthropic / Google Gemini / xAI Grok，统一接口
-- **多渠道接入**：Misskey / Telegram / Web，统一消息归一化；Telegram 渠道工具覆盖发帖、置顶、群管理等，并支持发图 / 发文件（`telegram_send_photo` / `telegram_send_document`）
+- **多渠道接入**：Misskey / Mastodon / Telegram / Web，统一消息归一化；Telegram 渠道工具覆盖发帖、置顶、群管理等，并支持发图 / 发文件（`telegram_send_photo` / `telegram_send_document`）
 - **分层记忆系统**：L0 工作记忆 → L1 长期记忆 → L3 画像（用户画像 + Bot 自我画像），L0 自动巩固到 L1；L2 场景记忆为可选扩展点（`memory.Aggregator` 接口已定义，仓库未提供实现，生产管线不经过）
 - **工具调用**：Function Calling，支持沙箱工作空间（Docker/本地）
 - **工具授权**：`toolperm` 按 bot × 工具 × 平台 × 会话 × 用户 维度配置 allow/deny。判定顺序：首条匹配规则生效 > 平台无规则时按风险分级取默认（基础/对外发言工具放行，敏感工具禁止，exfil 外发通道即使在此分支也默认禁止）> 平台已有规则但未命中时白名单模式（仅基础工具放行）。工具列表过滤 + 执行时复核双重防线
@@ -95,7 +95,7 @@ thinkbot/
 │   └── tools/      #   工具管理
 ├── api/            # HTTP API 服务（Gin）
 ├── auth/           # 用户认证与权限
-├── channel/        # 渠道适配器（Misskey/Telegram）
+├── channel/        # 渠道适配器（Misskey/Mastodon/Telegram）
 ├── cmd/            # 程序入口
 ├── config/         # 配置管理
 ├── cron/           # 定时任务调度

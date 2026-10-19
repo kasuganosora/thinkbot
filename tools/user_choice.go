@@ -182,16 +182,17 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 	case "", "web":
 		// web，或无 channel 上下文的内部调用（子代理 / 单测）：走完整交互流程。
 	default:
-		// Misskey 原生 poll 至少 2 项；1 项在 CreatePollNote 也会失败，这里提前降级
-		// 避免先 RegisterQuestion 再踩雷留下 pending。
-		if meta.ChannelType == "misskey" && len(in.Options) < 2 {
+		// 原生 poll 至少 2 项（Misskey / Mastodon 服务端都硬性要求）；
+		// 1 项在创建时也会失败，这里提前降级，避免先 RegisterQuestion 再踩雷留下 pending。
+		if (meta.ChannelType == "misskey" || meta.ChannelType == "mastodon") && len(in.Options) < 2 {
 			return map[string]any{
 				"status":   "unsupported",
 				"platform": meta.ChannelType,
-				"message":  "Misskey 投票至少需要 2 个选项。请增加选项，或改用普通文本把问题列出来让用户直接回复；不要重试本工具。",
+				"message":  "该平台投票至少需要 2 个选项。请增加选项，或改用普通文本把问题列出来让用户直接回复；不要重试本工具。",
 			}, nil
 		}
-		// 非 web 平台：尝试使用平台原生的投票创建器（Misskey poll / Telegram inline keyboard）。
+		// 非 web 平台：尝试使用平台原生的投票创建器
+		// （Misskey poll / Mastodon poll / Telegram inline keyboard）。
 		// 若该平台已注册 PollCreator，创建原生控件 + 注册问题 + 阻塞等待结果。
 		// 未注册的平台仍降级为 unsupported（让模型用纯文本提问）。
 		pollFn := interaction.GetPollCreator(meta.ChannelType)

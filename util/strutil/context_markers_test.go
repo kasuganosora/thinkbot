@@ -136,3 +136,50 @@ func TestStripChannelContextMarkers_Combinations(t *testing.T) {
 		})
 	}
 }
+
+// TestStripChannelContextMarkersMastodon 覆盖 Mastodon 渠道注入的标记。
+//
+// Mastodon 的转发上下文叫 [Boost from ...]、帖子 ID 后缀叫 [status_id: ...]，
+// 与 Misskey 的 [Renote from ...] / [note_id: ...] 命名不同。不覆盖的话
+// status_id 会被当成用户原话写进 L0 记忆（见 context_markers.go 头部说明）。
+func TestStripChannelContextMarkersMastodon(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "status_id 后缀被剥离",
+			in:   "用户正文\n[status_id: 10987654321]",
+			want: "用户正文",
+		},
+		{
+			name: "Boost 上下文被剥离",
+			in:   "[Boost from alice: 被转发的原文]\n用户正文",
+			want: "用户正文",
+		},
+		{
+			name: "完整 Mastodon 组合",
+			in:   "[Timeline] @alice: [Boost from bob: x]\n[Reply to carol: y]\n用户正文\n[status_id: 1]",
+			want: "用户正文",
+		},
+		{
+			name: "用户正文自带的方括号保留",
+			in:   "我觉得 [1] 是对的\n[status_id: 9]",
+			want: "我觉得 [1] 是对的",
+		},
+		{
+			name: "对方是 Bot 账号前缀 + status_id 后缀",
+			in:   "[对方是 Bot 账号 @alice] 用户正文\n[status_id: 5]",
+			want: "用户正文",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripChannelContextMarkers(tc.in); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
