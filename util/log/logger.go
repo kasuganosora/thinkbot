@@ -11,7 +11,16 @@ import (
 )
 
 // Logger 全局 SugaredLogger 实例。
-var Logger *zap.SugaredLogger
+//
+// 默认必须是**非 nil 的 nop logger**，不能是 nil。
+//
+// ⚠️ 原因（真实踩到）：util/http/ws.go 等模块直接用 `log.Logger.Debugw(...)`，
+// 而 Logger 只在 cmd/main.go 启动时才被真正赋值。任何不经过 main 的入口
+// （单元测试、库调用、未来的 embedd 场景）一旦走到 WebSocket / SSE 等路径，
+// 就是一次 nil 指针 panic，且爆在别人包的调用栈里，极难定位。
+// 用 nop 兜底后最坏情况只是「没有日志」，而不是进程崩溃；
+// main 里 InitWithConfig 依然会把它换成真 logger，行为不变。
+var Logger *zap.SugaredLogger = zap.NewNop().Sugar()
 
 // levelEnabler 全局级别开关，供系统配置页热更新 log.level。
 var levelEnabler zap.AtomicLevel

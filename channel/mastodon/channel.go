@@ -1553,6 +1553,11 @@ func pollVotes(p *Poll) []int {
 // 挂在 runCtx 上：轮询是长生命周期的，不能跟着某一轮 LLM 调用的 ctx 走。
 // 表里没有在途投票时本循环是纯空转（不发任何请求），成本可忽略。
 func (c *MastodonChannel) pollWatchLoop(ctx context.Context) {
+	// ⚠️ 本循环由 Start 以 wg.Add(1) 起，必须 defer Done。
+	// 少了这一行 Stop() 的 c.wg.Wait() 会**永久阻塞**（goroutine 其实已经退出，
+	// 但计数器没归零），表现为 bot 停止/重启卡死且没有任何报错——
+	// 只有真实实例跑一次才能发现，单元测试抓不到。
+	defer c.wg.Done()
 	ticker := time.NewTicker(pollWatchInterval)
 	defer ticker.Stop()
 	for {
