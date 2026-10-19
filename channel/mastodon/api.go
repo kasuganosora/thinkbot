@@ -2,6 +2,7 @@ package mastodon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -29,6 +30,49 @@ import (
 // maxPageLimit 是多数 Mastodon 列表端点（search / account statuses / following）
 // 的单页上限，超出会被服务端静默收敛或报错，故调用前统一 clamp。
 const maxPageLimit = 40
+
+// ============================================================================
+// 表态幂等哨兵错误
+// ============================================================================
+//
+// ⚠️ 真实实例实测推翻了「Mastodon 重复表态天然幂等」这个想当然的前提。
+// 2026-10-19 在 c.hime.at（4.3.0+community）实测矩阵：
+//
+//	端点            首次   重复/无效
+//	favourite       200    400 {"error":"already favourited"}
+//	unfavourite     200    400 {"error":"not favourited"}
+//	reblog          200    400 {"error":"already reblogged"}
+//	unreblog        200    400 {"error":"not reblogged"}
+//
+// 上游 Mastodon 对这些重复操作返回的确实是 200（幂等），但社区 fork 未必——
+// 所以**两种行为都要兼容**：返回 200 时本来就是成功；返回 400 且命中上面
+// 特定文案时，说明「目标状态已经达成」，同样应按成功处理。
+//
+// 与 Misskey 的 ErrAlreadyReacted / ErrNotReacted 完全对等：包装成哨兵错误，
+// 由 channel 层（出站 Action）吞掉、工具层（LLM 可见）转成 success + 标记，
+// 否则 LLM 会看到报错并反复重试 / 误判失败。
+var (
+	// ErrAlreadyFavourited 目标帖子已被本 bot 收藏过。
+	ErrAlreadyFavourited = errors.New("mastodon: already favourited")
+	// ErrNotFavourited 目标帖子本就没有本 bot 的收藏（常见于重复取消收藏）。
+	ErrNotFavourited = errors.New("mastodon: not favourited")
+	// ErrAlreadyReblogged 目标帖子已被本 bot 转发过。
+	ErrAlreadyReblogged = errors.New("mastodon: already reblogged")
+	// ErrNotReblogged 目标帖子本就没有本 bot 的转发。
+	ErrNotReblogged = errors.New("mastodon: not reblogged")
+)
+
+// errHasMastodonError 判断 err 文本里是否含指定的 Mastodon error message。
+//
+// 只能在 HTTP 客户端返回 err 的分支上用：Do() 把 4xx 直接当 error 返回，
+// 响应体只存在于 err.Error() 里（见文件头部的调用约定）。
+// 大小写不敏感，避免不同实例/版本文案大小写差异导致漏判。
+func errHasMastodonError(err error, msg string) bool {
+	if err == nil || msg == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), strings.ToLower(msg))
+}
 
 // apiClient 封装了 Mastodon HTTP API 调用。
 //
@@ -275,14 +319,23 @@ func (a *apiClient) deleteStatus(ctx context.Context, statusID string) error {
 // favourite 收藏（点赞）帖子（POST /api/v1/statuses/:id/favourite）。
 //
 // 对等 Misskey 的 notes/reactions/create，但 Mastodon **只有一个「收藏」动作**，
-// 没有自定义 emoji 反应。且服务端对重复收藏返回 200（而非 400），
-// 天然幂等，不需要 Misskey 那套 ALREADY_REACTED 哨兵错误。
+// 没有自定义 emoji 反应。
+//
+// ⚠️ 重复收藏**并不天然幂等**：上游 Mastodon 返回 200，但社区 fork 会返回
+// 400 {"error":"already favourited"}（2026-10-19 实测，见文件顶部矩阵）。
+// 因此这里同样要 Misskey 那套哨兵错误，由调用方按「目标已达成」处理。
 func (a *apiClient) favourite(ctx context.Context, statusID string) error {
 	_, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/favourite")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
+		// 幂等语义：目标状态已达成（如重复收藏 / 取消一个不存在的收藏）。
+		// 见文件头部「表态幂等哨兵错误」的实测矩阵——上游 Mastodon 返回 200，
+		// 社区 fork 返回 400 + "already favourited"，两者都要兼容。
+		if errHasMastodonError(err, "already favourited") {
+			return fmt.Errorf("mastodon favourite: %w", ErrAlreadyFavourited)
+		}
 		return errs.Wrap(err, "mastodon favourite")
 	}
 	return nil
@@ -295,19 +348,33 @@ func (a *apiClient) unfavourite(ctx context.Context, statusID string) error {
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
+		// 幂等语义：目标状态已达成（如重复收藏 / 取消一个不存在的收藏）。
+		// 见文件头部「表态幂等哨兵错误」的实测矩阵——上游 Mastodon 返回 200，
+		// 社区 fork 返回 400 + "not favourited"，两者都要兼容。
+		if errHasMastodonError(err, "not favourited") {
+			return fmt.Errorf("mastodon unfavourite: %w", ErrNotFavourited)
+		}
 		return errs.Wrap(err, "mastodon unfavourite")
 	}
 	return nil
 }
 
 // reblog 转发（boost）帖子（POST /api/v1/statuses/:id/reblog）。
-// 对等 Misskey 的 notes/create 带 renoteId。重复 boost 服务端返回 200，幂等。
+// 对等 Misskey 的 notes/create 带 renoteId。
+// ⚠️ 重复 boost 同样不天然幂等（fork 会 400 {"error":"already reblogged"}），
+// 由哨兵错误 ErrAlreadyReblogged 兜住。
 func (a *apiClient) reblog(ctx context.Context, statusID string) error {
 	_, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/reblog")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
+		// 幂等语义：目标状态已达成（如重复收藏 / 取消一个不存在的收藏）。
+		// 见文件头部「表态幂等哨兵错误」的实测矩阵——上游 Mastodon 返回 200，
+		// 社区 fork 返回 400 + "already reblogged"，两者都要兼容。
+		if errHasMastodonError(err, "already reblogged") {
+			return fmt.Errorf("mastodon reblog: %w", ErrAlreadyReblogged)
+		}
 		return errs.Wrap(err, "mastodon reblog")
 	}
 	return nil
@@ -320,6 +387,12 @@ func (a *apiClient) unreblog(ctx context.Context, statusID string) error {
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
+		// 幂等语义：目标状态已达成（如重复收藏 / 取消一个不存在的收藏）。
+		// 见文件头部「表态幂等哨兵错误」的实测矩阵——上游 Mastodon 返回 200，
+		// 社区 fork 返回 400 + "not reblogged"，两者都要兼容。
+		if errHasMastodonError(err, "not reblogged") {
+			return fmt.Errorf("mastodon unreblog: %w", ErrNotReblogged)
+		}
 		return errs.Wrap(err, "mastodon unreblog")
 	}
 	return nil

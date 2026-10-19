@@ -374,7 +374,7 @@ func (c *MastodonChannel) boostStatusTool() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "mastodon_boost_status",
 			Description: "Boost (reblog) a post to your own timeline. " +
-				"Equivalent to Misskey's renote. Boosting twice is harmless — the server treats it as idempotent.",
+				"Equivalent to Misskey's renote. Boosting an already-boosted post is a no-op, not an error.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -448,7 +448,7 @@ func (c *MastodonChannel) favouriteStatusTool() agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name: "mastodon_favourite_status",
 			Description: "Favourite (like) a post. This is the only reaction Mastodon has — there are no custom emoji reactions. " +
-				"Favouriting an already-favourited post succeeds silently (idempotent).",
+				"Favouriting an already-favourited post is a no-op, not an error.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
