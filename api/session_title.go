@@ -42,29 +42,34 @@ func titleFromFirstMessage(content string) string {
 	return s
 }
 
-// touchSessionAfterSave bumps last_msg_at / message_count and, for a user
+// touchSessionAfterSave refreshes last_msg_at / message_count and, for a user
 // message, fills a placeholder title from the first ~30 runes of content.
-func (s *ChatHistoryService) touchSessionAfterSave(sessionID, role, content string) {
-	if s == nil || s.db == nil || sessionID == "" {
-		return
+//
+// message_count is derived from the actual rows (COUNT(*)) instead of a blind
+// "+1": a "+1" drifts whenever some path deletes/moves rows or inserts without
+// touching. db is the transaction the insert ran in, so the count is
+// committed atomically with the row.
+func (s *ChatHistoryService) touchSessionAfterSave(db *gorm.DB, sessionID, role, content string) error {
+	if s == nil || db == nil || sessionID == "" {
+		return nil
 	}
 	id, err := strconv.ParseUint(sessionID, 10, 64)
 	if err != nil || id == 0 {
-		return
+		return nil
 	}
 	now := time.Now()
 	updates := map[string]any{
-		"message_count": gorm.Expr("message_count + 1"),
+		"message_count": gorm.Expr("(SELECT COUNT(*) FROM chat_messages WHERE session_id = ?)", sessionID),
 		"last_msg_at":   now,
 		"updated_at":    now,
 	}
 	if role == dao.ChatRoleUser {
 		var sess dao.ChatSession
-		if err := s.db.Select("id", "title").First(&sess, id).Error; err == nil && isPlaceholderSessionTitle(sess.Title) {
+		if err := db.Select("id", "title").First(&sess, id).Error; err == nil && isPlaceholderSessionTitle(sess.Title) {
 			if title := titleFromFirstMessage(content); title != "" {
 				updates["title"] = title
 			}
 		}
 	}
-	_ = s.db.Model(&dao.ChatSession{}).Where("id = ?", id).Updates(updates).Error
+	return db.Model(&dao.ChatSession{}).Where("id = ?", id).Updates(updates).Error
 }

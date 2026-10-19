@@ -41,6 +41,8 @@ var dataMigrations = []dataMigration{
 	// ⚠️ 必须排在 orphan backfill 之后：目标会话按 external_key 解析，backfill 已为
 	// 存量 tg: 会话建好会话行（同一唯一键），这里命中同一行而不是另建。
 	{name: NotifyLegacySessionMoveName, run: MoveLegacyNotifyRows},
+	// Must run after every migration that moves rows between sessions.
+	{name: messageCountRecount2Name, run: recountSessionStats},
 }
 
 // runDataMigrations 依次执行尚未登记的数据修复。

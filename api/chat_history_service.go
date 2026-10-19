@@ -152,10 +152,15 @@ func (s *ChatHistoryService) SaveMessageWithParts(botID, userID, role, content, 
 		TraceID:   traceID,
 		CreatedAt: time.Now(),
 	}
-	if err := s.db.Create(&msg).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
+		s.touchInTx(tx, sessionID, role, content)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("chat_history: save message: %w", err)
 	}
-	s.touchSessionAfterSave(sessionID, role, content)
 	return nil
 }
 
@@ -261,10 +266,15 @@ func (s *ChatHistoryService) upsertAssistantSnapshot(botID, userID, content, tra
 		StreamError:  message,
 		CreatedAt:    time.Now(),
 	}
-	if err := s.db.Create(&msg).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
+		s.touchInTx(tx, sessionID, dao.ChatRoleAssistant, content)
+		return nil
+	}); err != nil {
 		return fmt.Errorf("chat_history: upsert assistant (insert): %w", err)
 	}
-	s.touchSessionAfterSave(sessionID, dao.ChatRoleAssistant, content)
 	return nil
 }
 
@@ -580,11 +590,19 @@ func (s *ChatHistoryService) SearchContextHistory(botID, sessionID, query string
 // ClearSessionMessages 清空指定会话的所有聊天消息（保留会话记录本身）。
 // 返回被删除的消息数量。
 func (s *ChatHistoryService) ClearSessionMessages(sessionID string) (int64, error) {
-	res := s.db.Where("session_id = ?", sessionID).Delete(&dao.ChatMessage{})
-	if res.Error != nil {
-		return 0, fmt.Errorf("chat_history: clear session messages: %w", res.Error)
+	var n int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("session_id = ?", sessionID).Delete(&dao.ChatMessage{})
+		if res.Error != nil {
+			return res.Error
+		}
+		n = res.RowsAffected
+		return dao.RecountSession(tx, sessionID)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("chat_history: clear session messages: %w", err)
 	}
-	return res.RowsAffected, nil
+	return n, nil
 }
 
 // DeleteMessages 按 ID 删除指定会话的部分消息（用于 /compact 只压缩最旧的一段，
@@ -594,12 +612,20 @@ func (s *ChatHistoryService) DeleteMessages(botID, sessionID string, ids []uint6
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	res := s.db.Where("bot_id = ? AND session_id = ? AND id IN ?", botID, sessionID, ids).
-		Delete(&dao.ChatMessage{})
-	if res.Error != nil {
-		return 0, fmt.Errorf("chat_history: delete messages: %w", res.Error)
+	var n int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("bot_id = ? AND session_id = ? AND id IN ?", botID, sessionID, ids).
+			Delete(&dao.ChatMessage{})
+		if res.Error != nil {
+			return res.Error
+		}
+		n = res.RowsAffected
+		return dao.RecountSession(tx, sessionID)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("chat_history: delete messages: %w", err)
 	}
-	return res.RowsAffected, nil
+	return n, nil
 }
 
 // SaveMessageAt 与 SaveMessage 类似，但允许指定 CreatedAt。用于 /compact 把历史摘要
@@ -615,7 +641,15 @@ func (s *ChatHistoryService) SaveMessageAt(botID, userID, role, content, traceID
 		TraceID:   traceID,
 		CreatedAt: createdAt,
 	}
-	if err := s.db.Create(&msg).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
+		if err := dao.RecountSession(tx, sessionID); err != nil && s.logger != nil {
+			s.logger.Warnw("recount session after save failed", "session", sessionID, "err", err)
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("chat_history: save message at: %w", err)
 	}
 	return nil
@@ -648,4 +682,14 @@ func decodeCursor(cursor string) (time.Time, uint64, error) {
 		return time.Time{}, 0, fmt.Errorf("invalid id in cursor: %w", err)
 	}
 	return time.Unix(0, ns), id, nil
+}
+
+// touchInTx refreshes the session counters inside the insert's transaction. A
+// counter failure is logged, not returned: losing the message (and with it the
+// bot's context history) is worse than a stale counter, which the next write
+// re-derives from rows anyway.
+func (s *ChatHistoryService) touchInTx(tx *gorm.DB, sessionID, role, content string) {
+	if err := s.touchSessionAfterSave(tx, sessionID, role, content); err != nil && s.logger != nil {
+		s.logger.Warnw("touch session after save failed", "session", sessionID, "err", err)
+	}
 }
