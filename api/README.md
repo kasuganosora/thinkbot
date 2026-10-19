@@ -48,7 +48,7 @@ BotService 用声明式 `pipeline.Builder` 按 Order 装配 Stage（`Build()` �
 | 3 | `identity.BindStage` | 授权码绑定拦截：命中 `TB-XXXX-XXXX` 即消费绑定并中止 |
 | 4 | `command.CommandStage` | 命令拦截：仅注册 `/chatid`（返回当前会话/群 ID，供工具权限按群配置）；`RequireBound` 经 `identity.BindService` 校验发送者已绑定账号 |
 | 5 | 心跳频控预算重置 | 真实外部入站消息到达即恢复连续唤醒预算（heartbeat 组启用时） |
-| 40 | `inbound-chat-history` enricher | 为 Telegram 入站注入按会话隔离的对话历史（sessionID `tg:<chatID>`，群聊整群共享）；异步落库当前用户消息 |
+| 40 | `inbound-chat-history` enricher | 为 Telegram 入站注入按会话隔离的对话历史（数字 sessionID，按 external_key `telegram:chat:<chatID>` 解析，群聊整群共享；notify 写入同一会话）；异步落库当前用户消息 |
 | 40 | `engagement.EngagementStage` | 参与时机判定（启用时；挂 `TimingGate` 与 `OutreachBreaker`——一次主动回复无人回应即停止追问） |
 | 45 | `lurk-detect` | 潜水资源富化 |
 | 46 | `passive-speak` | 被动发言抑制 |
