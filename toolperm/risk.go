@@ -96,6 +96,10 @@ var basicTools = map[string]struct{}{
 	"misskey_list_following":           {},
 	"misskey_get_user_notes":           {}, // 拉取某人帖子，只读
 	"misskey_search_notes":             {}, // 按关键词搜帖子，只读
+	"mastodon_search_accounts":         {},
+	"mastodon_list_following":          {},
+	"mastodon_get_account_statuses":    {}, // 拉取某人帖子，只读
+	"mastodon_search_statuses":         {}, // 按关键词搜帖子，只读
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},
@@ -152,6 +156,17 @@ var broadcastTools = map[string]struct{}{
 	"misskey_follow_user":     {},
 	"misskey_unfollow_user":   {},
 
+	// Mastodon：发帖与转发（最直接的对外发言）
+	"mastodon_post_status":  {},
+	"mastodon_boost_status": {},
+	// Mastodon：删帖（不可逆地改变已公开内容）
+	"mastodon_delete_status": {},
+	// Mastodon：收藏与社交关系（会给对方推送通知）
+	"mastodon_favourite_status":   {},
+	"mastodon_unfavourite_status": {},
+	"mastodon_follow_account":     {},
+	"mastodon_unfollow_account":   {},
+
 	// Telegram：群内可见操作
 	"telegram_pin_message":    {}, // 默认通知全群
 	"telegram_delete_message": {}, // 删他人消息
@@ -192,6 +207,7 @@ func IsExfilTool(name string) bool {
 // 不会因为忘记登记而悄悄获得发言能力。
 var broadcastPrefixes = []string{
 	"misskey_",
+	"mastodon_",
 	"telegram_",
 	"browser__", // 浏览器工具（MCP server 名为 browser，工具名 browser__navigate 等）可对外发帖（x.com 发推/小红书评论），必须过 SpeakMode 门，否则绕过发言三态开第四条路径
 }
@@ -200,13 +216,14 @@ var broadcastPrefixes = []string{
 // 用于兜住尚未逐个收录的同族工具（如未来新增的 sandbox_xxx / web_xxx），
 // 确保新工具默认落到「敏感」而非被误判为基础工具。
 var sensitivePrefixes = []string{
-	"sandbox_", // 沙箱：执行命令、读写文件
-	"web_",     // 联网：搜索、抓取
-	"http_",    // 联网
-	"shell",    // 执行命令
-	"exec",     // 执行命令
-	"mcp_",     // 外部 MCP 工具，能力不可知
-	"misskey_", // Channel 写操作（只读项已在 basicTools 中显式例外）
+	"sandbox_",  // 沙箱：执行命令、读写文件
+	"web_",      // 联网：搜索、抓取
+	"http_",     // 联网
+	"shell",     // 执行命令
+	"exec",      // 执行命令
+	"mcp_",      // 外部 MCP 工具，能力不可知
+	"misskey_",  // Channel 写操作（只读项已在 basicTools 中显式例外）
+	"mastodon_", // 同上
 	"telegram_",
 	"tb_", // 自举（self-host）工具：暴露 loader 运维接口（部署/回滚/重启/读写源码），默认敏感
 }
@@ -219,6 +236,10 @@ var sensitivePrefixExceptions = map[string]struct{}{
 	"misskey_list_following":           {},
 	"misskey_get_user_notes":           {}, // 只读查询
 	"misskey_search_notes":             {}, // 只读查询
+	"mastodon_search_accounts":         {}, // 只读查询
+	"mastodon_list_following":          {},
+	"mastodon_get_account_statuses":    {}, // 只读查询
+	"mastodon_search_statuses":         {}, // 只读查询
 	"telegram_get_chat_info":           {},
 	"telegram_get_chat_member_count":   {},
 	"telegram_get_chat_administrators": {},

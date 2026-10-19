@@ -36,6 +36,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/storage"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/agent/tools/selfhost"
+	"github.com/kasuganosora/thinkbot/channel/mastodon"
 	"github.com/kasuganosora/thinkbot/channel/misskey"
 	"github.com/kasuganosora/thinkbot/channel/telegram"
 	"github.com/kasuganosora/thinkbot/config"
@@ -1110,6 +1111,8 @@ func normalizeChannelKind(channel string) string {
 		return "tg"
 	case dao.ChannelMisskey:
 		return "mk"
+	case dao.ChannelMastodon:
+		return "md"
 	default:
 		return channel
 	}
@@ -3347,6 +3350,8 @@ func (s *BotService) createChannel(def dao.ChannelDefinition) (bot.Channel, erro
 		return s.createTelegramChannel(def)
 	case "misskey":
 		return s.createMisskeyChannel(def)
+	case "mastodon":
+		return s.createMastodonChannel(def)
 	default:
 		return nil, fmt.Errorf("unsupported channel type: %s", def.Type)
 	}
@@ -3441,6 +3446,58 @@ func (s *BotService) createMisskeyChannel(def dao.ChannelDefinition) (bot.Channe
 	}
 
 	return misskey.NewChannel(def.Name, def.BotID, cfg), nil
+}
+
+// createMastodonChannel 从 ChannelDefinition 创建 Mastodon Channel。
+//
+// 配置字段与 api/channel_registry.go 的 Mastodon schema 对应：
+// server（实例 URL）/ token（OAuth access token）/ streams（订阅的公共时间线流）。
+func (s *BotService) createMastodonChannel(def dao.ChannelDefinition) (bot.Channel, error) {
+	var raw map[string]any
+	if def.Config != "" && def.Config != "{}" {
+		if err := json.Unmarshal([]byte(def.Config), &raw); err != nil {
+			return nil, fmt.Errorf("invalid mastodon config JSON: %w", err)
+		}
+	}
+
+	cfg := mastodon.Config{}
+	if v, ok := raw["server"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Server = s
+		}
+	}
+	if cfg.Server == "" {
+		return nil, fmt.Errorf("mastodon channel: server is required")
+	}
+	if v, ok := raw["token"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Token = s
+		}
+	}
+	if cfg.Token == "" {
+		return nil, fmt.Errorf("mastodon channel: token is required")
+	}
+	// 订阅的公共时间线流（user/public/public:local/public:remote/direct，可多选）。
+	// 通知流 user:notification 由 Channel 内部强制订阅，不接受配置——那是 @提及的唯一入口。
+	if v, ok := raw["streams"]; ok {
+		if arr, ok := v.([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok && s != "" {
+					cfg.Streams = append(cfg.Streams, s)
+				}
+			}
+		}
+	}
+	// 回复上下文解析默认开启：Mastodon 的 streaming 事件不内联父帖，
+	// 关掉会让 bot 看不到「别人在回复什么」。
+	cfg.ResolveReplyContext = true
+	if v, ok := raw["resolveReplyContext"]; ok {
+		if b, ok := v.(bool); ok {
+			cfg.ResolveReplyContext = b
+		}
+	}
+
+	return mastodon.NewChannel(def.Name, def.BotID, cfg), nil
 }
 
 // toInt 将 interface{} 安全转换为 int。
@@ -3736,6 +3793,8 @@ func (s *BotService) inboundSessionID(msg *core.Message) (string, string, bool) 
 		key, kind = dao.TelegramChatKey(msg.Channel), dao.TelegramSessionKind(msg.Channel)
 	case "misskey":
 		key, kind, status = misskeySessionTarget(msg)
+	case "mastodon":
+		key, kind, status = mastodonSessionTarget(msg)
 	default:
 		return "", "", false
 	}
@@ -3774,6 +3833,19 @@ func misskeySessionTarget(msg *core.Message) (key, kind, status string) {
 		return "", "", ""
 	}
 	return dao.MisskeyDMKey(msg.Channel), dao.KindDirect, ""
+}
+
+// mastodonSessionTarget 判定 Mastodon 入站消息的会话归属。
+//
+// 与 misskeySessionTarget 完全对等：`msg.Channel` 由 `mastodonIngressChannelID`
+// 产出，只有两种取值——
+//   - `mastodon:timeline`：未被 @ 的公开时间线广播（旁听）→ **不建会话**
+//   - `<accountID>`：被 @ / 被回复 / direct 私信 → 按对端账号聚合
+func mastodonSessionTarget(msg *core.Message) (key, kind, status string) {
+	if msg.Channel == "mastodon:timeline" {
+		return "", "", ""
+	}
+	return dao.MastodonDMKey(msg.Channel), dao.KindDirect, ""
 }
 
 // buildQuoteBlock 把「引用回复」中被引用的上文渲染成引用块前缀。

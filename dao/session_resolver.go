@@ -31,6 +31,7 @@ import (
 const (
 	ChannelTelegram = "telegram"
 	ChannelMisskey  = "misskey"
+	ChannelMastodon = "mastodon"
 )
 
 // session_kind 取值。空串表示未分类（历史 web 会话），由后续回填。
@@ -65,6 +66,20 @@ func MisskeyDMKey(userID string) string { return ChannelMisskey + ":dm:" + userI
 // MisskeyTimelineKey 是公开时间线会话的 external_key（全局唯一，不按天分片）。
 // 入站旁听已不再用它建会话；保留给 S2 fork/reclaim 或手动运维查询。
 func MisskeyTimelineKey() string { return ChannelMisskey + ":timeline:global" }
+
+// MastodonThreadKey 构造 Mastodon thread 会话的 external_key：`mastodon:thread:<rootStatusID>`。
+func MastodonThreadKey(rootStatusID string) string {
+	return ChannelMastodon + ":thread:" + rootStatusID
+}
+
+// MastodonDMKey 构造 Mastodon DM 会话的 external_key：`mastodon:dm:<accountID>`。
+//
+// 与 Misskey 对等：被 @ / 被回复 / direct 私信都按对端账号聚合。
+func MastodonDMKey(accountID string) string { return ChannelMastodon + ":dm:" + accountID }
+
+// MastodonTimelineKey 是公开时间线会话的 external_key（全局唯一，不按天分片）。
+// 与 Misskey 一致：入站旁听不建会话，保留给后续 fork/reclaim 或手动运维查询。
+func MastodonTimelineKey() string { return ChannelMastodon + ":timeline:global" }
 
 // WebDefaultKey 构造 Web 兜底会话的 external_key：`web:default:<userID>`。
 //

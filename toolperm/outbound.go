@@ -14,8 +14,8 @@
 // 配置载体：复用 bot_tool_permissions 表，不新表、不新接口。
 //   - mute   写一条 __outbound_reply deny 规则（auto 维护）；
 //   - passive 写一条 __speak_mode:passive 标记规则（auto，用于持久化状态）
-//             + 对该平台每个主动发布类工具模式写一条 deny 规则（auto，用于拦截 ①）。
-//   切换模式时先整体删除该平台下所有 auto 规则再重建，因此绝不误删用户在「规则列表」手动配的规则。
+//   - 对该平台每个主动发布类工具模式写一条 deny 规则（auto，用于拦截 ①）。
+//     切换模式时先整体删除该平台下所有 auto 规则再重建，因此绝不误删用户在「规则列表」手动配的规则。
 package toolperm
 
 import (
@@ -124,8 +124,13 @@ func hasAutoPassiveMarker(rules []RuleDTO, platform string) bool {
 // 平台无主动发布工具（telegram / web）返回 nil：其「不主动发帖」仅靠心跳过滤（见 SpeakMode/AllowProactivePost）。
 func ProactivePostToolPatterns(platform string) []string {
 	switch strings.ToLower(strings.TrimSpace(platform)) {
-	case "misskey", "*":
+	case "misskey":
 		return []string{"misskey_create_*"}
+	case "mastodon":
+		return []string{"mastodon_post_*"}
+	case "*":
+		// 全平台：把所有平台的主动发布工具一并列出。
+		return []string{"misskey_create_*", "mastodon_post_*"}
 	default:
 		return nil
 	}

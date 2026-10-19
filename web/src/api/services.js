@@ -1304,7 +1304,7 @@ const BOT_TOOL_CATALOG = [
 ]
 
 // mock 模式下的平台类型，需与后端 channel_registry.go 保持一致：
-// 仅包含后端 channel/ 目录已实现的平台（telegram、misskey）。
+// 仅包含后端 channel/ 目录已实现的平台（telegram、misskey、mastodon）。
 const PLATFORM_TYPES = [
   { type: 'telegram', name: 'Telegram', description: '通过 Telegram Bot API 接收用户消息，使用 long polling 方式。', icon: 'telegram', color: '#2aabee', fields: [
     { key: 'token', label: 'Bot Token', type: 'password', help: '从 @BotFather 获取' },
@@ -1321,6 +1321,17 @@ const PLATFORM_TYPES = [
       { value: 'localTimeline', label: '本地时间线' },
       { value: 'hybridTimeline', label: '社交时间线' },
       { value: 'globalTimeline', label: '全局时间线' }
+    ] }
+  ] },
+  { type: 'mastodon', name: 'Mastodon', description: '通过 Mastodon WebSocket streaming 接收提及、回复与收藏通知。', icon: 'mastodon', color: '#6364ff', fields: [
+    { key: 'server', label: '实例 URL', type: 'text', help: '如 https://mastodon.social', placeholder: 'https://mastodon.social' },
+    { key: 'token', label: 'Access Token', type: 'password', help: 'Mastodon OAuth access token（需 read/write 权限）' },
+    { key: 'streams', label: '订阅时间线', type: 'multiselect', optional: true, help: '选择要旁听的时间线（可多选，留空则仅接收 @提及/回复/私信）。', options: [
+      { value: 'user', label: '关注时间线' },
+      { value: 'public:local', label: '本站时间线' },
+      { value: 'public', label: '联邦时间线' },
+      { value: 'public:remote', label: '远端时间线' },
+      { value: 'direct', label: '私信' }
     ] }
   ] }
 ]
