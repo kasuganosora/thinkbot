@@ -1407,24 +1407,59 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 // Favourite 收藏（点赞）帖子。对等 Misskey 的 React。
 //
 // 平台差异：Mastodon 只有「收藏」这一种表态，没有自定义 emoji 反应，
-// 因此没有 emoji 参数。重复收藏服务端返回 200，天然幂等。
+// 因此没有 emoji 参数。
+//
+// 幂等：重复收藏属「目标已达成」，直接吞掉不向上层报错（与 Misskey React 一致）——
+// 上层是出站 Action 处理器，它没有立场区分「已经收藏过」和「失败」。
+// ⚠️ 别再写「重复收藏天然返回 200」：上游确实如此，但社区 fork 会返回
+// 400 {"error":"already favourited"}，实测见 api.go 顶部的矩阵。
 func (c *MastodonChannel) Favourite(ctx context.Context, statusID string) error {
-	return c.api.favourite(ctx, statusID)
+	if err := c.api.favourite(ctx, statusID); err != nil {
+		if errors.Is(err, ErrAlreadyFavourited) {
+			traceid.L(ctx).Debugw("mastodon: favourite skipped (already favourited)",
+				"channel", c.name, "status_id", statusID)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // Unfavourite 取消收藏。对等 Misskey 的 Unreact。
+// 本就没有收藏时同样视为目标已达成。
 func (c *MastodonChannel) Unfavourite(ctx context.Context, statusID string) error {
-	return c.api.unfavourite(ctx, statusID)
+	if err := c.api.unfavourite(ctx, statusID); err != nil {
+		if errors.Is(err, ErrNotFavourited) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // Boost 转发（boost）帖子。对等 Misskey 的 createRenote。
+// 重复转发视为目标已达成。
 func (c *MastodonChannel) Boost(ctx context.Context, statusID string) error {
-	return c.api.reblog(ctx, statusID)
+	if err := c.api.reblog(ctx, statusID); err != nil {
+		if errors.Is(err, ErrAlreadyReblogged) {
+			traceid.L(ctx).Debugw("mastodon: boost skipped (already reblogged)",
+				"channel", c.name, "status_id", statusID)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
-// Unboost 撤销转发。
+// Unboost 撤销转发。本就没有转发时视为目标已达成。
 func (c *MastodonChannel) Unboost(ctx context.Context, statusID string) error {
-	return c.api.unreblog(ctx, statusID)
+	if err := c.api.unreblog(ctx, statusID); err != nil {
+		if errors.Is(err, ErrNotReblogged) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // ============================================================================

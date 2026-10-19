@@ -88,7 +88,7 @@ ch.ChannelTools(ctx)                                         // 返回平台专�
 | 正文 | 纯文本 | **HTML**（`<p>…</p>`） | `htmlToText` 转纯文本（先补换行→删标签→反转义） |
 | 提及标识 | `username` + `host` 两字段 | 合并好的 `acct`（`alice@example.social`） | 出站提及直接用 acct，无需查host |
 | 表态 | 自定义 emoji 反应 | 只有「收藏」 | `mastodon_favourite_status`，无 emoji 参数 |
-| 重复表态 | 400 `ALREADY_REACTED` | 200，天然幂等 | 不需要哨兵错误 |
+| 重复表态 | 400 `ALREADY_REACTED` → `ErrAlreadyReacted` | 上游 200 幂等，但**社区 fork 400**（`already favourited` / `not favourited` / `already reblogged` / `not reblogged`） | 四个哨兵错误 `ErrAlreadyFavourited` / `ErrNotFavourited` / `ErrAlreadyReblogged` / `ErrNotReblogged`，channel 层吞掉、工具层报成功 |
 | 转发 | Renote（可带正文 = quote） | Boost（body 为空），quote 是 4.x 新特性 | `IsPureReblog` 仅作信息记录 |
 | 纯转发回复 | 400 `CANNOT_REPLY_TO_A_PURE_RENOTE`，需硬抑制 | **允许**回复 boost | 不写 `core.MetaIsPureRenote` |
 | 回复上下文 | streaming 内联 `reply` 对象 | **不内联**，只有 `in_reply_to_id` | 额外 `getStatus` + 缓存（`ResolveReplyContext` 可关） |
