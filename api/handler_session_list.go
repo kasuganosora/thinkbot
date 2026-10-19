@@ -83,8 +83,7 @@ func (s *Server) handleListSessions(c *gin.Context) {
 				s.logger.Warnw("migrate history to default session failed", "bot_id", botID, "err", res.Error)
 			} else if res.RowsAffected > 0 {
 				defaultSess.MessageCount = int(res.RowsAffected)
-				s.db.Model(&dao.ChatSession{}).Where("id = ?", defaultSess.ID).
-					Update("message_count", defaultSess.MessageCount)
+				_ = dao.RecountSession(s.db, strconv.FormatUint(defaultSess.ID, 10))
 			}
 			sessions = []dao.ChatSession{defaultSess}
 		}
