@@ -205,9 +205,9 @@ func (r *SelfExclusionRule) Allow(msg *core.Message) (bool, string) {
 	return true, ""
 }
 
-// --- RenoteExclusionRule: 排除纯转发 (Misskey 特有) ---
+// --- RenoteExclusionRule: 排除纯转发/Boost ---
 
-// RenoteExclusionRule 排除纯转发/Boost 消息（无文本内容，只有 renote_id）。
+// RenoteExclusionRule 排除纯转发/Boost 消息（无文本内容，只有转发目标 ID）。
 type RenoteExclusionRule struct{}
 
 // NewRenoteExclusionRule 创建转发排除规则。
@@ -216,13 +216,26 @@ func NewRenoteExclusionRule() *RenoteExclusionRule {
 }
 
 // Allow 实现 Rule。
+//
+// ⚠️ 转发目标 ID 的 metadata key 是**平台相关**的：Misskey 写 `renote_id`，
+// Mastodon 写 `reblog_id`（平台术语不同，不宜让 Mastodon 硬套 Misskey 的 key）。
+// 这里两个都读，否则 Mastodon 上这条规则会静默失效——纯 Boost 不再被排除，
+// 而调用方完全看不出来（既不报错也不记日志）。
 func (RenoteExclusionRule) Allow(msg *core.Message) (bool, string) {
-	// Misskey 纯转发：有 renote_id 但文本为空或极短
-	renoteID, _ := msg.Metadata["renote_id"].(string)
-	if renoteID != "" && strings.TrimSpace(msg.Text) == "" {
+	// 纯转发/Boost：有转发目标 ID 但文本为空或极短
+	if forwardID(msg) != "" && strings.TrimSpace(msg.Text) == "" {
 		return false, "pure renote/boost"
 	}
 	return true, ""
+}
+
+// forwardID 取出转发目标 ID，兼容 Misskey（renote_id）与 Mastodon（reblog_id）。
+func forwardID(msg *core.Message) string {
+	if id, _ := msg.Metadata["renote_id"].(string); id != "" {
+		return id
+	}
+	id, _ := msg.Metadata["reblog_id"].(string)
+	return id
 }
 
 // --- CooldownRule: 用户冷却 ---

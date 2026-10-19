@@ -1,8 +1,14 @@
 package mastodon
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -351,5 +357,275 @@ func TestAccountHandle(t *testing.T) {
 	// acct 缺失时退回 username
 	if got := (Account{Username: "alice"}).handle(); got != "@alice" {
 		t.Errorf("= %q", got)
+	}
+}
+
+// TestStatusURL 锁定 Mastodon 帖子链接形态。
+//
+// ⚠️ 曾经写成 `/@_/<id>`（照搬想象中的短链），实际是 404 死链：Mastodon 的
+// 路由是 `/@<username>/<id>`。LLM 会把工具返回的 url 当真链接发给用户，
+// 死链很难从日志里看出来，只能靠测试钉住。
+func TestStatusURL(t *testing.T) {
+	c := &MastodonChannel{cfg: Config{Server: "https://mastodon.social/"}}
+	c.botUsername = "kanna"
+
+	if got, want := c.statusURL("10987654321"), "https://mastodon.social/@kanna/10987654321"; got != want {
+		t.Errorf("statusURL = %q, want %q", got, want)
+	}
+	// 身份未解析时（Start 之前）不应拼出 /@_/ 这种死链以外的怪东西
+	c2 := &MastodonChannel{cfg: Config{Server: "https://mastodon.social"}}
+	if got, want := c2.statusURL("1"), "https://mastodon.social/@_/1"; got != want {
+		t.Errorf("statusURL (no identity) = %q, want %q", got, want)
+	}
+}
+
+func TestStatusLink(t *testing.T) {
+	c := &MastodonChannel{cfg: Config{Server: "https://mastodon.social"}}
+	c.botUsername = "kanna"
+
+	// 服务端返回的 url 是权威值，尤其远程帖会指向原站
+	remote := &Status{ID: "1", URL: "https://mastodon.xyz/@alice/1", Account: Account{Username: "alice"}}
+	if got, want := c.statusLink(remote), "https://mastodon.xyz/@alice/1"; got != want {
+		t.Errorf("statusLink(remote) = %q, want %q", got, want)
+	}
+	// 本地帖无 url 字段时按作者 username 拼
+	local := &Status{ID: "2", Account: Account{Username: "bob"}}
+	if got, want := c.statusLink(local), "https://mastodon.social/@bob/2"; got != want {
+		t.Errorf("statusLink(local) = %q, want %q", got, want)
+	}
+	// 兜底：连作者都没有时用 bot 自己的 username
+	bare := &Status{ID: "3"}
+	if got, want := c.statusLink(bare), "https://mastodon.social/@kanna/3"; got != want {
+		t.Errorf("statusLink(bare) = %q, want %q", got, want)
+	}
+	if got := c.statusLink(nil); got != "" {
+		t.Errorf("statusLink(nil) = %q, want empty", got)
+	}
+}
+
+// ============================================================================
+// 锚点推进 / 生命周期 / 并发安全
+// ============================================================================
+
+// newTestChannel 造一个不连网的 channel，供纯逻辑测试用。
+// 注意 dedup 与 polls 必须是非 nil map：dedupSeen 与 CreatePollStatus 会直接写。
+func newTestChannel() *MastodonChannel {
+	return &MastodonChannel{
+		name:         "test",
+		botAccountID: "self",
+		dedup:        map[string]time.Time{},
+		polls:        map[string]*pollState{},
+	}
+}
+
+// TestHandleNotificationMentionAdvancesAnchorOnSkipPaths 锁定 A4：
+// mention 的三条提前 return 路径（status 为 nil / 自己发的 / 去重命中）**都必须**推进锚点。
+//
+// 否则锚点停在旧值，重连时 backfill 用旧 since_id 把这条通知重新拉回，
+// 2 分钟的 dedup 窗口挡不住几十分钟后的重放 → 同一条 mention 被二次处理并二次外发
+// （Misskey 2026-09-01 重复外发事故的同款根因）。
+func TestHandleNotificationMentionAdvancesAnchorOnSkipPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("status 为 nil", func(t *testing.T) {
+		c := newTestChannel()
+		c.handleNotification(ctx, &Notification{ID: "10", Type: "mention"})
+		if got := c.getNotificationAnchor(); got != "10" {
+			t.Fatalf("anchor = %q, want %q（nil status 也必须推进锚点）", got, "10")
+		}
+	})
+
+	t.Run("自己发的", func(t *testing.T) {
+		c := newTestChannel()
+		c.handleNotification(ctx, &Notification{
+			ID: "20", Type: "mention",
+			Account: Account{ID: "self"},
+			Status:  &Status{ID: "s1", Content: "<p>hi</p>"},
+		})
+		if got := c.getNotificationAnchor(); got != "20" {
+			t.Fatalf("anchor = %q, want %q（自己发的也必须推进锚点）", got, "20")
+		}
+	})
+
+	t.Run("去重命中", func(t *testing.T) {
+		c := newTestChannel()
+		// 首次：正常处理，锚点推进到 30
+		c.handleNotification(ctx, &Notification{
+			ID: "30", Type: "mention",
+			Account: Account{ID: "other"},
+			Status:  &Status{ID: "s1", Content: "<p>hi</p>"},
+		})
+		if got := c.getNotificationAnchor(); got != "30" {
+			t.Fatalf("first anchor = %q, want %q", got, "30")
+		}
+		// 重放：dedup 命中会提前 return，锚点仍须推进到 31
+		c.handleNotification(ctx, &Notification{
+			ID: "31", Type: "mention",
+			Account: Account{ID: "other"},
+			Status:  &Status{ID: "s1", Content: "<p>hi</p>"},
+		})
+		if got := c.getNotificationAnchor(); got != "31" {
+			t.Fatalf("anchor after dup = %q, want %q（去重命中也必须推进锚点）", got, "31")
+		}
+	})
+
+	t.Run("favourite 不动锚点", func(t *testing.T) {
+		// backfill 的 types[] 只有 mention；被 favourite 顶高锚点会跳过更早的 mention。
+		c := newTestChannel()
+		c.handleNotification(ctx, &Notification{ID: "40", Type: "favourite", Account: Account{ID: "other"}})
+		if got := c.getNotificationAnchor(); got != "" {
+			t.Fatalf("anchor = %q, want empty（favourite 不应推进锚点）", got)
+		}
+	})
+}
+
+// TestStopCleansUpPollTimers 锁定 A7：Stop 必须停掉所有在途投票的定时器，
+// 否则 channel 停止后 expire 定时器仍会触发 expirePoll / resolvePollVote。
+func TestStopCleansUpPollTimers(t *testing.T) {
+	c := newTestChannel()
+	expired := make(chan struct{})
+	c.polls["s1"] = &pollState{
+		QuestionID: "q1",
+		PollID:     "p1",
+		OptionN:    2,
+		expire:     time.AfterFunc(50*time.Millisecond, func() { close(expired) }),
+		timer:      time.AfterFunc(50*time.Millisecond, func() {}),
+	}
+
+	if err := c.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if len(c.polls) != 0 {
+		t.Fatalf("polls 未清空，仍剩 %d 条", len(c.polls))
+	}
+	if !c.isStopped() {
+		t.Fatal("Stop 后 isStopped() 应为 true")
+	}
+	select {
+	case <-expired:
+		t.Fatal("expire 定时器在 Stop 之后仍然触发了")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestIdentityAccessorsConcurrent 覆盖 A6 的数据竞争：身份字段在 Start（持 c.mu）
+// 里写，但被工具执行 goroutine / 轮询 goroutine / streaming 读循环并发读。
+// 必须 `go test -race` 跑，裸读会被 race detector 直接报出来。
+func TestIdentityAccessorsConcurrent(t *testing.T) {
+	c := newTestChannel()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = c.selfAccountID()
+				_ = c.selfAcct()
+				_ = c.selfUsername()
+				_ = c.selfMentionRe()
+				_ = c.getIngress()
+				_ = c.isStopped()
+			}
+		}()
+	}
+
+	// 模拟 Start 里的写入（必须在锁内）
+	for i := 0; i < 200; i++ {
+		c.mu.Lock()
+		c.botAccountID = fmt.Sprintf("id-%d", i)
+		c.botUsername = fmt.Sprintf("bot%d", i)
+		c.botAcct = fmt.Sprintf("bot%d@example.social", i)
+		c.mentionRe = buildMentionRe(c.botUsername, c.botAcct)
+		c.mu.Unlock()
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestTruncateForStatusBudget 锁定 A2：截断预算必须扣掉 `...` 省略号。
+//
+// strutil.Truncate 超长时返回 `maxRunes + 3` 个字符。若直接把实例上限
+// （如 500）传进去，所有**需要被截断**的长文本都会变成 503 字符，
+// 被 Mastodon 判 422 `Text exceeds the maximum of 500 characters`。
+// 偏偏最长的回复最容易触发，短文本一切正常，自测时极容易漏掉。
+func TestTruncateForStatusBudget(t *testing.T) {
+	c := &MastodonChannel{api: &apiClient{}}
+	c.api.maxChars.Store(500)
+
+	long := strings.Repeat("あ", 600)
+	got := c.truncateForStatus(long)
+	if n := utf8.RuneCountInString(got); n != 500 {
+		t.Fatalf("截断后长度 = %d, want 500（上限本身）", n)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("截断结果应以 ... 结尾, got %q", got[len(got)-12:])
+	}
+	// 短文本原样返回，不被动手脚
+	short := strings.Repeat("あ", 100)
+	if got := c.truncateForStatus(short); got != short {
+		t.Fatalf("短文本被误改: len=%d", utf8.RuneCountInString(got))
+	}
+	// 上限极小（< 省略号长度）时不能崩、不能返回空串以外的怪东西
+	c.api.maxChars.Store(2)
+	if got := c.truncateForStatus(long); utf8.RuneCountInString(got) > 2 {
+		t.Fatalf("极小上限下超长: len=%d", utf8.RuneCountInString(got))
+	}
+}
+
+// TestClampPollExpiration 锁定投票存活时长的双向 clamp（Mastodon 默认 300~2629746 秒）。
+func TestClampPollExpiration(t *testing.T) {
+	a := &apiClient{}
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, defaultPollMinExpiration},  // 未指定 → 下限
+		{-5, defaultPollMinExpiration}, // 负值 → 下限
+		{60, defaultPollMinExpiration}, // 低于下限 → 下限
+		{300, 300},
+		{9999999, defaultPollMaxExpiration}, // 高于上限 → 上限
+	}
+	for _, tc := range cases {
+		if got := a.clampPollExpiration(tc.in); got != tc.want {
+			t.Errorf("clampPollExpiration(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestTruncateFor 锁定「截断后绝不超限」这一不变式（含省略号预算）。
+// 帖子正文与投票选项都走它，两边犯过同一个错。
+func TestTruncateFor(t *testing.T) {
+	cases := []struct {
+		name  string
+		s     string
+		limit int
+		want  int // 期望的最大 rune 数
+	}{
+		{"短于上限原样", "hello", 25, 5},
+		{"刚好等于上限", strings.Repeat("x", 25), 25, 25},
+		{"超长扣掉省略号", strings.Repeat("x", 100), 25, 25},
+		{"多字节字符", strings.Repeat("あ", 100), 25, 25},
+		{"上限小于省略号", strings.Repeat("x", 100), 2, 2},
+		{"上限为 0", "hello", 0, 0},
+		{"上限为负", "hello", -1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateFor(tc.s, tc.limit)
+			if n := utf8.RuneCountInString(got); n > tc.want {
+				t.Fatalf("truncateFor(limit=%d) 得到 %d rune，超过上限 %d", tc.limit, n, tc.want)
+			}
+		})
+	}
+	// 不需要截断时绝不改动原文
+	if got := truncateFor("hello", 25); got != "hello" {
+		t.Fatalf("短文本被改动: %q", got)
 	}
 }

@@ -376,3 +376,63 @@ func TestStripThinkTags_ChineseContent(t *testing.T) {
 		t.Errorf("got %q, want to contain %q", got, want)
 	}
 }
+
+// ============================================================================
+// StripContextMarkers — 入站上下文标记不得泄漏到对外回复
+// ============================================================================
+
+// TestStripContextMarkersPlatforms 覆盖两个平台注入的全部标记形态。
+//
+// ⚠️ Mastodon 侧标记是「Boost from」/「status_id」（Misskey 是「Renote from」/
+// 「note_id」）。新增平台时两套正则（这里 + util/strutil/context_markers.go）
+// 必须同步，否则标记会原样发到公开时间线上。
+func TestStripContextMarkersPlatforms(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "misskey reply marker",
+			in:   "[Reply to @luna: 嘿嘿]\n好的，我来处理",
+			want: "好的，我来处理",
+		},
+		{
+			name: "misskey renote marker",
+			in:   "[Renote from @luna: 今天天气不错]\n确实",
+			want: "确实",
+		},
+		{
+			name: "mastodon boost marker",
+			in:   "[Boost from luna: 今天天气不错]\n确实",
+			want: "确实",
+		},
+		{
+			name: "misskey note_id marker",
+			in:   "收到\n[note_id: 9abc123]",
+			want: "收到",
+		},
+		{
+			name: "mastodon status_id marker",
+			in:   "收到\n[status_id: 10987654321]",
+			want: "收到",
+		},
+		{
+			name: "marker only",
+			in:   "[status_id: 10987654321]",
+			want: "",
+		},
+		{
+			name: "inline bracket text preserved",
+			in:   "我看了下 [Boost from 是不存在的] 这个说法",
+			want: "我看了下 [Boost from 是不存在的] 这个说法",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripContextMarkers(tc.in); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
