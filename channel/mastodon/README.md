@@ -65,9 +65,13 @@ ch.Name() / ch.Type() / ch.BotID()                           // 元信息，Type
 ch.ChannelTools(ctx)                                         // 返回平台专属工具（见下）
 ```
 
-- WebSocket 地址：`wss://{host}/api/v1/streaming?access_token={token}&stream=user:notification&stream=...`
+- WebSocket 地址：`wss://{host}/api/v1/streaming?access_token={token}&stream=user:notification`；
+  流式域名可能与 API 域名不同，取自 `GET /api/v1/instance` 的 `urls.streaming_api`（如 `wss://streaming.mastodon.social`）
+- **多订阅靠 subscribe 帧**，不能靠重复 query 参数：服务端 `firstParam(query.stream)` 只取**第一个** `stream`，
+  重复写 `?stream=a&stream=b` 会被静默丢弃（连接正常、无 4xx，但第二个流一条都收不到）。
+  实现上只把第一个流（通知流）放进 query 作兼容兜底，其余在连接建立后发 `{"type":"subscribe","stream":"..."}` 帧
 - 单条帖子上限取自实例配置（`GET /api/v1/instance` 的 `configuration.statuses.max_characters`），
-  探测失败时回退 500；超出自动截断
+  探测失败时回退 500；超出自动截断（截断预算已扣掉 `...` 省略号，见 `truncateForStatus`）
 - 重连采用 5s → 5min 指数退避；重连后按通知锚点 backfill 断连窗口（见下）
 - 消息去重：基于 status ID 的 TTL 缓存（2min），每 30s 清理一次
 - timeline 事件会加上 `[Timeline]` 前缀，并过滤空帖与自身帖子
@@ -90,21 +94,35 @@ ch.ChannelTools(ctx)                                         // 返回平台专�
 | 回复上下文 | streaming 内联 `reply` 对象 | **不内联**，只有 `in_reply_to_id` | 额外 `getStatus` + 缓存（`ResolveReplyContext` 可关） |
 | mention 入口 | main 流 `mention` / `reply` 事件 | 通知流 `notification`（`type=mention`） | 强制订阅 `user:notification` |
 | backfill 端点 | `notes/mentions` | `notifications?types[]=mention` | 锚点是**通知 ID**，非 status ID |
-| 投票事件 | `pollVoted` 直推，含 choice + voter | **无事件**，结果只有票数、无投票人 | 轮询 `GET /api/v1/polls/:id` 按票数增量推断 |
-| 投票选项数 | 2~10 | **2~4**（服务端硬限） | 超出截断到 4 |
-| 投票最短时长 | 无限制 | **≥300 秒**，否则 422 | 自动 clamp |
+| 投票事件 | `pollVoted` 直推，含 choice + voter | **无事件**，结果只有票数、无投票人 | 共享 ticker 轮询 `GET /api/v1/polls/:id` 按票数增量推断（5s/跳，见下） |
+| 投票选项数 | 2~10 | **2~4**（实例级 `polls.max_options`，默认 4） | 按实例上限截断 |
+| 投票选项字数 | 无硬限 | 实例级 `polls.max_characters_per_option`（默认 25） | 按实例上限截断 |
+| 投票最短时长 | 无限制 | **≥300 秒**（实例级，上限 2629746），否则 422 | `clampPollExpiration` 双向 clamp |
 | 帖子长度 | 固定 3000 rune | 实例级配置（默认 500） | 启动时探测 |
+| 帖子链接 | `/notes/<id>` 短链 | `/@<username>/<id>`，**没有** `/@_/<id>` | 优先用服务端返回的 `url` 字段 |
 
 ## mention 锚点与断连 backfill（防重复回复）
 
 Mastodon streaming 同样不重放断连期间的消息，锚点机制与 Misskey 一致，但**锚点存的是通知 ID**：
 
 - **锚点含义**：最近一次成功处理的 mention 通知 ID。实时 mention 处理与 backfill 每处理一条都会推进；启动时拉最新一条 mention 通知作种子。
+- **提前 return 也推进**：实时 mention 的三条跳过路径（status 为 nil / 自己发的 / 去重命中）**同样**推进锚点，与 backfill 的推进条件严格一致。
+  否则锚点停留在旧值，重连时 backfill 会用旧 `since_id` 把这条重新拉回——正是下面的事故根因。
+- **只对 mention 推进**：backfill 的 `types[]` 只有 `mention`。若被一条 `favourite` 通知把锚点顶到更后面，
+  会跳过尚未处理的更早 mention，所以 favourite 路径**不**碰锚点。
 - **单调递增守卫**：Mastodon ID 与 Misskey aid 一样是定长雪花 ID、按时间字典序递增，锚点只允许向更新的 ID 推进（`newerID`）。空 ID 与乱序旧 ID 均不更新。
-- **backfill**：以锚点为 `since_id`（开区间）、用 `max_id` 翻页调 notifications，每页 100、封顶 300；复用 `handleStatus` 走与实时相同的路径，重叠由 `dedupSeen` 兜底。
+- **backfill**：以锚点为 `since_id`（开区间）、用 `max_id` 翻页调 notifications，每页 40（服务端单次上限）、封顶 100 条；
+  复用 `handleStatus` 走与实时相同的路径，重叠由 `dedupSeen` 兜底。
+  封顶是**配额保护**：每条 mention 还会额外触发一次 `getStatus` 取父帖，几百条积压会在瞬间打满 300 req/5min，
+  把 backfill 自己打挂；超出部分有意丢弃（仍在时间线流里可见）。
 
 > 事故背景：Misskey 曾因「锚点不推进 + 被旧值卡住」，两次断连把整晚 mention 重放两轮，重复外发。
 > 这里的守卫与联动是照搬那次修复——2 分钟的 dedup 窗口挡不住几十分钟后的重放。
+
+> ⚠️ **已知不对称**：锚点只覆盖「通知流里的 mention」。公共时间线流（`public` / `public:local` 等）
+> 走的是 `handleTimelineStatus`，拿不到通知 ID，**无法推进锚点**，因此时间线消息在断连窗口内
+> 不做 backfill（恢复后只收到新帖）。这与 Misskey 行为一致（Misskey 的 backfill 也只补 mentions），
+> 但不要把「时间线消息绝不丢」当成既有保证。
 
 ## 入站收藏通知（awareness-only）
 
@@ -118,8 +136,13 @@ Mastodon streaming 同样不重放断连期间的消息，锚点机制与 Misske
 
 - **发帖**：`POST /api/v1/statuses` 带 `poll{options, expires_in, multiple}`，拿到 status 与 poll ID。
 - **回填语义**：单选首票立即回填；多选累计、debounce ~3s 后一次性回填（与 Misskey 一致）。
-- **轮询**：Mastodon 不推送投票事件，故每条投票帖起一个 goroutine，每 3s 调 `GET /api/v1/polls/:id`，
-  把「各选项票数相对基线的增量」当作新票。轮询在结算 / 超时 / channel 停止时终止。
+- **轮询**：Mastodon 不推送投票事件，只能主动查 `GET /api/v1/polls/:id`，把「各选项票数相对基线的增量」当作新票。
+  轮询是 **channel 级共享的单个 ticker**（5s/跳，随 `Start` 起、随 `Stop` 停），按跳扫描 `c.polls` 全表。
+  > 为什么不是每条投票一个 goroutine + 一个 ticker：限流是 300 req/5min（≈1 req/s），
+  > 每条投票独立跳会让**跳数随并发投票数线性增长**，3 条并发就打满配额，发帖/点赞/取父帖连带 429。
+  > 共享 ticker 后跳数恒定，单跳成本才是 O(在途投票数)。表里没有在途投票时纯空转，不发请求。
+- **生命周期**：每条投票另有一个 `expire` 定时器在 `expires_in` 后强制回收（无人投票也不泄漏）；
+  `Stop` 会遍历 `c.polls` 停掉所有 debounce/expire 定时器。
 - **投票人不可知**：Mastodon 的 poll 结果只暴露 `votes_count` 与自己的 `own_votes`，**无法得知是谁投的**。
   因此回填直接用问题登记的 `ChatID`，跳过 Misskey 那套「投票人必须匹配会话」的校验。这是平台限制，不是实现偷懒。
 

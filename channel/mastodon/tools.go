@@ -84,9 +84,34 @@ func (c *MastodonChannel) ChannelTools(ctx context.Context) ([]agenttools.ToolDe
 	}, nil
 }
 
-// statusURL 拼出帖子在实例上的可点击链接。
+// statusURL 拼出**本 bot 自己**发的帖子在本实例上的可点击链接。
+//
+// ⚠️ Mastodon 的帖子路由是 `/@<username>/<id>`，既没有 Misskey 那种
+// `/notes/<id>` 短链，也**不存在** `/@_/<id>`。写成 `/@_/<id>` 得到的
+// 是一个 404 死链，而 LLM 会把它当成真链接直接发给用户且毫不自知。
 func (c *MastodonChannel) statusURL(id string) string {
-	return strings.TrimRight(c.cfg.Server, "/") + "/@_/" + id
+	user := c.selfUsername()
+	if user == "" {
+		user = "_"
+	}
+	return strings.TrimRight(c.cfg.Server, "/") + "/@" + user + "/" + id
+}
+
+// statusLink 给出一条帖子的可点击链接。
+//
+// 优先用服务端返回的 `url` 字段：它是权威值，且对**远程实例**的帖子会指向
+// 原站（本地拼接反而错）。拿不到时退回按作者 username 拼。
+func (c *MastodonChannel) statusLink(s *Status) string {
+	if s == nil {
+		return ""
+	}
+	if s.URL != "" {
+		return s.URL
+	}
+	if s.Account.Username != "" {
+		return strings.TrimRight(c.cfg.Server, "/") + "/@" + s.Account.Username + "/" + s.ID
+	}
+	return c.statusURL(s.ID)
 }
 
 // formatStatuses 把帖子列表渲染为易读文本（含作者、时间、正文、链接）。
@@ -107,7 +132,7 @@ func (c *MastodonChannel) formatStatuses(statuses []Status) string {
 		if s.SpoilerText != "" {
 			text = "[CW: " + s.SpoilerText + "] " + text
 		}
-		fmt.Fprintf(&b, "%d. %s · %s\n%s\n🔗 %s\n\n", i+1, handle, s.CreatedAt, text, c.statusURL(s.ID))
+		fmt.Fprintf(&b, "%d. %s · %s\n%s\n🔗 %s\n\n", i+1, handle, s.CreatedAt, text, c.statusLink(&s))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -589,7 +614,7 @@ func (c *MastodonChannel) listFollowingTool() agenttools.ToolDef {
 				args, _ := input.(map[string]any)
 				id, _ := args["accountId"].(string)
 				if id == "" {
-					id = c.botAccountID
+					id = c.selfAccountID() // 并发安全读：工具可能在 Start 之后任意 goroutine 上执行
 				}
 				limit := 10
 				if l, ok := args["limit"].(float64); ok {

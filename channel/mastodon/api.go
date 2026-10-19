@@ -10,12 +10,25 @@ import (
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/http"
+	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
 // API — Mastodon HTTP API 客户端
 // ============================================================================
+//
+// ⚠️ 调用约定（与 channel/misskey/api.go 同源的血泪教训）：
+// 本项目的 HTTP 客户端在 Do() 里对**任何非 2xx 都已经返回非 nil error**
+// （见 util/http/client.go 的 `if !result.IsSuccess()`），错误文本里带状态码与
+// 响应体。因此本文件**不要**再写 `if resp.StatusCode >= 400` —— 那个分支永远
+// 走不到，写在里面的修复会静默失效（Misskey 2026-08-30 的 ALREADY_REACTED
+// 幂等修复正因为写在 StatusCode 分支上而完全没生效）。
+// 需要按状态码分支时，改成判断 err 是否为 errs.HTTPError 并取其状态码。
+
+// maxPageLimit 是多数 Mastodon 列表端点（search / account statuses / following）
+// 的单页上限，超出会被服务端静默收敛或报错，故调用前统一 clamp。
+const maxPageLimit = 40
 
 // apiClient 封装了 Mastodon HTTP API 调用。
 //
@@ -31,7 +44,27 @@ type apiClient struct {
 	// Mastodon 该值是**实例级配置**（默认 500，不少实例放宽到 5000），
 	// 硬编码 500 会在放宽实例上白白截断长回复。
 	maxChars atomic.Int32
+
+	// streamingURL 是实例声明的 streaming 基址，可与 API 域名不同
+	// （mastodon.social 是 wss://streaming.mastodon.social）。
+	// 由 fetchInstanceLimits 在 Start 里同步填充，早于任何 goroutine 启动。
+	streamingURL string
+
+	// 投票相关的实例级限制，同样由 fetchInstanceLimits 填充。
+	// 未探测到时 pollLimits() 回退到官方默认值。
+	pollsMaxOptions     atomic.Int32
+	pollsMaxOptionChars atomic.Int32
+	pollsMinExpiration  atomic.Int32
+	pollsMaxExpiration  atomic.Int32
 }
+
+// 投票限制的官方默认兜底值（实例未声明 configuration.polls 时使用）。
+const (
+	defaultPollMaxOptions     = 4       // Mastodon 服务端硬上限
+	defaultPollMaxOptionChars = 25      // 保守取官方默认，宁可截断也不要 422
+	defaultPollMinExpiration  = 300     // 5 分钟，低于此值服务端 422
+	defaultPollMaxExpiration  = 2629746 // 约 30.4 天
+)
 
 // newAPIClient 创建一个 Mastodon API 客户端。
 // server 是实例基础 URL（如 "https://mastodon.social"），token 是 OAuth access token。
@@ -71,25 +104,88 @@ func (a *apiClient) fetchInstanceLimits(ctx context.Context) {
 	var info instanceInfo
 	resp, err := a.authRequest(a.client.Get("instance")).SetContext(ctx).Do()
 	if err != nil {
-		traceid.L(ctx).Debugw("mastodon: instance info fetch failed, using default status limit",
+		// 探测失败一律退回默认值：这只是少了一点余量，不影响可用性。
+		traceid.L(ctx).Debugw("mastodon: instance info fetch failed, using defaults",
 			"server", a.server, "err", err)
 		return
 	}
-	if resp.StatusCode >= 400 {
-		traceid.L(ctx).Debugw("mastodon: instance info returned error, using default status limit",
-			"server", a.server, "status", resp.StatusCode)
-		return
-	}
 	if err := resp.JSON(&info); err != nil {
-		traceid.L(ctx).Debugw("mastodon: instance info parse failed, using default status limit",
+		traceid.L(ctx).Debugw("mastodon: instance info parse failed, using defaults",
 			"server", a.server, "err", err)
 		return
 	}
 	if n := info.Configuration.Statuses.MaxCharacters; n > 0 {
 		a.maxChars.Store(int32(n))
-		traceid.L(ctx).Infow("mastodon: instance status limit resolved",
-			"server", a.server, "max_chars", n)
 	}
+	if u := strings.TrimSpace(info.URLs.StreamingAPI); u != "" {
+		a.streamingURL = u
+	}
+	if p := info.Configuration.Polls; p.MaxOptions > 0 {
+		a.pollsMaxOptions.Store(int32(p.MaxOptions))
+	}
+	if p := info.Configuration.Polls; p.MaxCharactersPerOption > 0 {
+		a.pollsMaxOptionChars.Store(int32(p.MaxCharactersPerOption))
+	}
+	if p := info.Configuration.Polls; p.MinExpiration > 0 {
+		a.pollsMinExpiration.Store(int32(p.MinExpiration))
+	}
+	if p := info.Configuration.Polls; p.MaxExpiration > 0 {
+		a.pollsMaxExpiration.Store(int32(p.MaxExpiration))
+	}
+	traceid.L(ctx).Infow("mastodon: instance limits resolved",
+		"server", a.server,
+		"max_chars", a.statusLimit(),
+		"streaming", a.streamingEndpoint(),
+		"poll_options", a.pollMaxOptions(),
+		"poll_option_chars", a.pollMaxOptionChars())
+}
+
+// streamingEndpoint 返回 WebSocket streaming 的完整 URL。
+// 优先用实例声明的独立 streaming 域名，否则回退到 API 域名下 /api/v1/streaming。
+func (a *apiClient) streamingEndpoint() string {
+	if a.streamingURL != "" {
+		return strings.TrimRight(a.streamingURL, "/") + "/api/v1/streaming"
+	}
+	return a.server + "/api/v1/streaming"
+}
+
+// pollMaxOptions 返回单个投票允许的选项数上限。
+func (a *apiClient) pollMaxOptions() int {
+	if n := a.pollsMaxOptions.Load(); n > 0 {
+		return int(n)
+	}
+	return defaultPollMaxOptions
+}
+
+// pollMaxOptionChars 返回单个投票选项的字符上限。
+func (a *apiClient) pollMaxOptionChars() int {
+	if n := a.pollsMaxOptionChars.Load(); n > 0 {
+		return int(n)
+	}
+	return defaultPollMaxOptionChars
+}
+
+// clampPollExpiration 把投票存活秒数收敛到实例允许的区间。
+// Mastodon 对该字段上下限都做校验（默认 300 ~ 2629746 秒），越界即 422。
+func (a *apiClient) clampPollExpiration(secs int) int {
+	minExp := defaultPollMinExpiration
+	if n := a.pollsMinExpiration.Load(); n > 0 {
+		minExp = int(n)
+	}
+	maxExp := defaultPollMaxExpiration
+	if n := a.pollsMaxExpiration.Load(); n > 0 {
+		maxExp = int(n)
+	}
+	if secs <= 0 {
+		return minExp
+	}
+	if secs < minExp {
+		return minExp
+	}
+	if secs > maxExp {
+		return maxExp
+	}
+	return secs
 }
 
 // verifyCredentials 获取当前 Token 对应的账号（GET /api/v1/accounts/verify_credentials）。
@@ -98,9 +194,6 @@ func (a *apiClient) verifyCredentials(ctx context.Context) (*Account, error) {
 	resp, err := a.authRequest(a.client.Get("accounts/verify_credentials")).SetContext(ctx).Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon verifyCredentials")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon verifyCredentials: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var acct Account
 	if err := resp.JSON(&acct); err != nil {
@@ -136,15 +229,18 @@ func (a *apiClient) createStatusFull(ctx context.Context, text, inReplyToID, vis
 		MediaIDs:    mediaIDs,
 		Poll:        poll,
 	}
+	// Idempotency-Key：POST /api/v1/statuses 是**非幂等**写操作，而本项目的 HTTP
+	// 客户端会对网络错误 / 5xx / 429 自动重试。一旦首次请求已被服务端处理但响应
+	// 丢失，重试就会再发一条一模一样的帖子——用户会看到重复内容，且这是最难排查
+	// 的一类重复外发。Mastodon 官方为此提供该头（去重窗口 1 小时）；重试复用同一个
+	// Request，因此同一个 key 会随每次重试一起重发，正好命中官方的去重语义。
 	resp, err := a.authRequest(a.client.Post("statuses")).
 		SetContext(ctx).
+		SetHeader("Idempotency-Key", idgen.New("mdst")).
 		SetJSONBody(body).
 		Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon createStatus")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon createStatus: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var out createStatusResponse
 	if err := resp.JSON(&out); err != nil {
@@ -160,9 +256,6 @@ func (a *apiClient) getStatus(ctx context.Context, statusID string) (*Status, er
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon getStatus")
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon getStatus: HTTP %d: %s", resp.StatusCode, resp.String())
-	}
 	var st Status
 	if err := resp.JSON(&st); err != nil {
 		return nil, errs.Wrap(err, "mastodon getStatus parse")
@@ -172,12 +265,9 @@ func (a *apiClient) getStatus(ctx context.Context, statusID string) (*Status, er
 
 // deleteStatus 删除自己发送的帖子（DELETE /api/v1/statuses/:id）。
 func (a *apiClient) deleteStatus(ctx context.Context, statusID string) error {
-	resp, err := a.authRequest(a.client.Delete("statuses/" + url.PathEscape(statusID))).SetContext(ctx).Do()
+	_, err := a.authRequest(a.client.Delete("statuses/" + url.PathEscape(statusID))).SetContext(ctx).Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon deleteStatus")
-	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon deleteStatus: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	return nil
 }
@@ -188,30 +278,24 @@ func (a *apiClient) deleteStatus(ctx context.Context, statusID string) error {
 // 没有自定义 emoji 反应。且服务端对重复收藏返回 200（而非 400），
 // 天然幂等，不需要 Misskey 那套 ALREADY_REACTED 哨兵错误。
 func (a *apiClient) favourite(ctx context.Context, statusID string) error {
-	resp, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/favourite")).
+	_, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/favourite")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon favourite")
 	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon favourite: HTTP %d: %s", resp.StatusCode, resp.String())
-	}
 	return nil
 }
 
 // unfavourite 取消收藏（POST /api/v1/statuses/:id/unfavourite）。
 func (a *apiClient) unfavourite(ctx context.Context, statusID string) error {
-	resp, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/unfavourite")).
+	_, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/unfavourite")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon unfavourite")
-	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon unfavourite: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	return nil
 }
@@ -219,30 +303,24 @@ func (a *apiClient) unfavourite(ctx context.Context, statusID string) error {
 // reblog 转发（boost）帖子（POST /api/v1/statuses/:id/reblog）。
 // 对等 Misskey 的 notes/create 带 renoteId。重复 boost 服务端返回 200，幂等。
 func (a *apiClient) reblog(ctx context.Context, statusID string) error {
-	resp, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/reblog")).
+	_, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/reblog")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon reblog")
 	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon reblog: HTTP %d: %s", resp.StatusCode, resp.String())
-	}
 	return nil
 }
 
 // unreblog 撤销转发（POST /api/v1/statuses/:id/unreblog）。
 func (a *apiClient) unreblog(ctx context.Context, statusID string) error {
-	resp, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/unreblog")).
+	_, err := a.authRequest(a.client.Post("statuses/" + url.PathEscape(statusID) + "/unreblog")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon unreblog")
-	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon unreblog: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	return nil
 }
@@ -250,30 +328,24 @@ func (a *apiClient) unreblog(ctx context.Context, statusID string) error {
 // followAccount 关注账号（POST /api/v1/accounts/:id/follow）。
 // locked 账号会进入「等待批准」状态（服务端返回 requested=true），不报错。
 func (a *apiClient) followAccount(ctx context.Context, accountID string) error {
-	resp, err := a.authRequest(a.client.Post("accounts/" + url.PathEscape(accountID) + "/follow")).
+	_, err := a.authRequest(a.client.Post("accounts/" + url.PathEscape(accountID) + "/follow")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon followAccount")
 	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon followAccount: HTTP %d: %s", resp.StatusCode, resp.String())
-	}
 	return nil
 }
 
 // unfollowAccount 取消关注（POST /api/v1/accounts/:id/unfollow）。
 func (a *apiClient) unfollowAccount(ctx context.Context, accountID string) error {
-	resp, err := a.authRequest(a.client.Post("accounts/" + url.PathEscape(accountID) + "/unfollow")).
+	_, err := a.authRequest(a.client.Post("accounts/" + url.PathEscape(accountID) + "/unfollow")).
 		SetContext(ctx).
 		SetJSONBody(map[string]string{}).
 		Do()
 	if err != nil {
 		return errs.Wrap(err, "mastodon unfollowAccount")
-	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("mastodon unfollowAccount: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	return nil
 }
@@ -283,6 +355,10 @@ func (a *apiClient) unfollowAccount(ctx context.Context, accountID string) error
 func (a *apiClient) searchAccounts(ctx context.Context, query string, limit int, resolve bool) ([]Account, error) {
 	if limit <= 0 {
 		limit = 10
+	}
+	// 多数列表端点单页上限 40，LLM 可能传更大的值
+	if limit > maxPageLimit {
+		limit = maxPageLimit
 	}
 	v := url.Values{}
 	v.Set("q", query)
@@ -294,9 +370,6 @@ func (a *apiClient) searchAccounts(ctx context.Context, query string, limit int,
 	resp, err := a.authRequest(a.searchRequest(v)).SetContext(ctx).Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon searchAccounts")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon searchAccounts: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var out searchResult
 	if err := resp.JSON(&out); err != nil {
@@ -314,6 +387,10 @@ func (a *apiClient) searchStatuses(ctx context.Context, query string, limit int)
 	if limit <= 0 {
 		limit = 10
 	}
+	// 多数列表端点单页上限 40，LLM 可能传更大的值
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
 	v := url.Values{}
 	v.Set("q", query)
 	v.Set("type", "statuses")
@@ -321,9 +398,6 @@ func (a *apiClient) searchStatuses(ctx context.Context, query string, limit int)
 	resp, err := a.authRequest(a.searchRequest(v)).SetContext(ctx).Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon searchStatuses")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon searchStatuses: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var out searchResult
 	if err := resp.JSON(&out); err != nil {
@@ -343,6 +417,10 @@ func (a *apiClient) getAccountStatuses(ctx context.Context, accountID string, li
 	if limit <= 0 {
 		limit = 10
 	}
+	// 多数列表端点单页上限 40，LLM 可能传更大的值
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
 	v := url.Values{}
 	v.Set("limit", fmt.Sprintf("%d", limit))
 	if excludeReplies {
@@ -354,9 +432,6 @@ func (a *apiClient) getAccountStatuses(ctx context.Context, accountID string, li
 		Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon getAccountStatuses")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon getAccountStatuses: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var out []Status
 	if err := resp.JSON(&out); err != nil {
@@ -370,6 +445,10 @@ func (a *apiClient) listFollowing(ctx context.Context, accountID string, limit i
 	if limit <= 0 {
 		limit = 10
 	}
+	// 多数列表端点单页上限 40，LLM 可能传更大的值
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
 	v := url.Values{}
 	v.Set("limit", fmt.Sprintf("%d", limit))
 	resp, err := a.authRequest(a.client.Get("accounts/" + url.PathEscape(accountID) + "/following")).
@@ -378,9 +457,6 @@ func (a *apiClient) listFollowing(ctx context.Context, accountID string, limit i
 		Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon listFollowing")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon listFollowing: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var out []Account
 	if err := resp.JSON(&out); err != nil {
@@ -441,9 +517,6 @@ func (a *apiClient) getNotifications(ctx context.Context, q notificationQuery) (
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon getNotifications")
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon getNotifications: HTTP %d: %s", resp.StatusCode, resp.String())
-	}
 	var out []Notification
 	if err := resp.JSON(&out); err != nil {
 		return nil, errs.Wrap(err, "mastodon getNotifications parse")
@@ -460,9 +533,6 @@ func (a *apiClient) getPoll(ctx context.Context, pollID string) (*Poll, error) {
 	resp, err := a.authRequest(a.client.Get("polls/" + url.PathEscape(pollID))).SetContext(ctx).Do()
 	if err != nil {
 		return nil, errs.Wrap(err, "mastodon getPoll")
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("mastodon getPoll: HTTP %d: %s", resp.StatusCode, resp.String())
 	}
 	var p Poll
 	if err := resp.JSON(&p); err != nil {

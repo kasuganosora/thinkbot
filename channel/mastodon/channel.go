@@ -43,10 +43,13 @@ const (
 	replyContextTTL = 10 * time.Minute
 	// pollWatchInterval 投票结果的轮询间隔。
 	// Mastodon 没有 pollVoted 推送事件，只能轮询票数变化来推断投票。
-	pollWatchInterval = 3 * time.Second
-	// pollMinExpiresSecs Mastodon 服务端要求 poll 最短存活 300 秒，
-	// user_choice 传更短的超时时必须 clamp，否则 422。
-	pollMinExpiresSecs = 300
+	//
+	// 5 秒是配额算出来的：Mastodon 标准限流 300 req/5min（≈1 req/s），
+	// 而一次 user_choice 最短也要存活 300 秒。轮询是**共享**的单 ticker，
+	// 单跳只花 O(在途投票数) 个请求，故稳态占用 = 0.2 req/s，
+	// 给发帖/点赞/取父帖留足余量。别再往下调——早期 3 秒 + 每条投票一个
+	// goroutine 的组合下，3 条并发投票就打满配额，其余 API 连带 429。
+	pollWatchInterval = 5 * time.Second
 	// pollMultiDebounce 多选投票的合并窗口（与 Misskey 一致）。
 	pollMultiDebounce = 3 * time.Second
 )
@@ -144,17 +147,20 @@ type MastodonChannel struct {
 	replyMu    sync.Mutex
 	replyCache map[string]*replyCacheEntry
 
-	mu      sync.Mutex
+	// mu 保护身份字段（botAccountID/botAcct/botUsername/mentionRe）、ingress 与 stopped。
+	//
+	// ⚠️ 这些字段在 Start（持 c.mu）里写，但被**工具执行 goroutine**、**投票轮询
+	// goroutine** 和 **streaming 读循环**并发读。裸读会构成数据竞争（-race 可复现），
+	// 且工具可能在 Start 完成前就被调用从而读到空身份。统一走下面这几个只读访问器。
+	mu      sync.RWMutex
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	stopped bool
 
-	// runCtx 是 Start 派生的运行 context。
-	//
-	// 投票结果轮询是长生命周期 goroutine，必须挂在它上面：直接用调用方传入的
-	// ctx（CreatePollStatus 常由某轮 LLM 调用触发）会导致那轮结束就取消轮询，
-	// 用户投的票再也回填不回去。Stop 时 c.cancel() 会级联取消这里派生的所有轮询。
-	runCtx context.Context
+	// 注：Start 派生的 runCtx 只以参数形式传给各个长生命周期 goroutine，
+	// 不存字段——存了就得加锁读，而目前没有任何路径需要外部再取它。
+	// 投票结果回填用的是共享轮询循环的 ctx（= runCtx），天然长生命周期，
+	// 不会跟着某一轮 LLM 调用的 ctx 一起被取消。
 
 	// streamConnects 累计成功建立的 streaming 连接次数。
 	streamConnects atomic.Int64
@@ -185,7 +191,6 @@ type pollState struct {
 	Selected []int
 	timer    *time.Timer // 多选 debounce
 	expire   *time.Timer // 无人投票时回收，避免泄漏
-	watch    context.CancelFunc
 }
 
 // NewChannel 创建一个 MastodonChannel。
@@ -279,13 +284,16 @@ func (c *MastodonChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
-	c.runCtx = runCtx
 
 	c.wg.Add(1)
 	go c.cleanupLoop(runCtx)
 
 	c.wg.Add(1)
 	go c.streamLoop(runCtx)
+
+	// 投票轮询是共享的单个 ticker，随 channel 生命周期走，不按投票数扩 goroutine。
+	c.wg.Add(1)
+	go c.pollWatchLoop(runCtx)
 
 	return nil
 }
@@ -443,8 +451,16 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 		traceid.L(ctx).Debugw("mastodon backfill: skipped (no anchor yet)", "channel", c.name)
 		return
 	}
-	const pageSize = 100
-	const maxTotal = 300
+	// pageSize 与服务端单次上限（maxPageLimit=40）对齐，避免请求被静默截断后
+	// 误以为已经翻完（len(notes) < pageSize 是终止条件之一）。
+	//
+	// maxTotal 是有意的封顶：每条 mention 还会额外触发一次 getStatus 取父帖上下文
+	// （ResolveReplyContext）。断连窗口若积压几百条，这里会在几十毫秒内打出
+	// 数百个请求，直接撞 300 req/5min 的限流，把 backfill 自己打挂，
+	// 连累同进程其它 API。超出部分**有意丢弃**——它们仍在时间线流里可见，
+	// 且锚点已推进到最新，不会重复处理。
+	const pageSize = 40
+	const maxTotal = 100
 	total := 0
 	maxID := ""
 	for total < maxTotal {
@@ -473,7 +489,7 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 				c.setNotificationAnchor(n.ID)
 				continue
 			}
-			if n.Account.ID == c.botAccountID {
+			if n.Account.ID == c.selfAccountID() {
 				c.setNotificationAnchor(n.ID)
 				continue
 			}
@@ -499,18 +515,34 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 // 阻塞直到连接断开或 ctx 被取消。
 func (c *MastodonChannel) connectAndServe(ctx context.Context) error {
 	// 订阅流：通知流（强制）+ 配置的公共时间线流。
-	// Mastodon 用一个 stream 参数重复多次来表达多订阅，故用 SetQueryValues（Add 语义）而非 SetQuery。
+	//
+	// ⚠️ 不能靠重复 `?stream=a&stream=b` 表达多订阅：Mastodon streaming 服务端
+	// 用 firstParam(query.stream) **只取第一个** stream 参数，其余被静默丢弃
+	// ——连接正常、心跳正常、无 4xx，但配置的时间线/私信一条都收不到。
+	// 官方的多流做法是在连接建立后发 `{"type":"subscribe","stream":"..."}` 帧。
+	//
+	// 因此：第一个流（通知流）仍走 query 参数作兼容性兜底——即使对端不支持
+	// subscribe 帧，@提及这条命脉也还在；其余流一律走 subscribe 帧。
 	streams := append([]string{notificationStream}, c.cfg.Streams...)
 	q := url.Values{}
 	q.Add("access_token", c.cfg.Token)
-	for _, s := range streams {
-		q.Add("stream", s)
-	}
+	q.Add("stream", streams[0])
 
 	cfg := http.WSConfig{
 		WatchdogTimeout: c.cfg.WatchdogTimeout,
 		PingInterval:    c.cfg.PingInterval,
 		OnConnect: func(conn *http.WSConn) {
+			// 订阅其余流（streams[0] 已由 query 参数订阅）。
+			for _, s := range streams[1:] {
+				msg := fmt.Sprintf(`{"type":"subscribe","stream":%q}`, s)
+				if err := conn.WriteText(msg); err != nil {
+					traceid.L(ctx).Warnw("mastodon stream: failed to subscribe",
+						"channel", c.name, "stream", s, "err", err)
+					continue
+				}
+				traceid.L(ctx).Debugw("mastodon stream: subscribed", "channel", c.name, "stream", s)
+			}
+
 			n := c.streamConnects.Add(1)
 			traceid.L(ctx).Infow("mastodon stream connected",
 				"channel", c.name, "connect_seq", n, "reconnect", n > 1, "streams", streams)
@@ -528,8 +560,10 @@ func (c *MastodonChannel) connectAndServe(ctx context.Context) error {
 		},
 	}
 
-	// DoWS 会阻塞直到连接关闭；baseURL 由 newAPIClient 拼好 https→wss。
-	return c.api.authRequest(c.hc.Get(c.api.server + "/api/v1/streaming")).
+	// DoWS 会阻塞直到连接关闭。实例可能把 streaming 部署在独立域名上
+	// （mastodon.social 就是 wss://streaming.mastodon.social），故用探测到的
+	// streaming endpoint，探测不到才回退到 API 域名下的 /api/v1/streaming。
+	return c.api.authRequest(c.hc.Get(c.api.streamingEndpoint())).
 		SetContext(ctx).
 		SetQueryValues(q).
 		DoWS(cfg)
@@ -614,7 +648,7 @@ func (c *MastodonChannel) handleTimelineStatus(ctx context.Context, st *Status, 
 		return
 	}
 	// 公共时间线上自己的帖子不入站（私信流理论上也不含自己，保险起见一并挡）。
-	if st.Account.ID == c.botAccountID {
+	if st.Account.ID == c.selfAccountID() {
 		return
 	}
 	// 空帖（纯媒体且无正文、也无被转发内容）不产生对话内容，跳过。
@@ -634,17 +668,17 @@ func (c *MastodonChannel) handleTimelineStatus(ctx context.Context, st *Status, 
 //     不需要像 Misskey 那样先拿到父帖对象再比对作者）；
 //  3. mentions 数组含 Bot 的账号 ID。
 func (c *MastodonChannel) timelineMentioned(st *Status) bool {
-	if c.mentionRe != nil && c.mentionRe.MatchString(htmlToText(st.Content)) {
+	if re := c.selfMentionRe(); re != nil && re.MatchString(htmlToText(st.Content)) {
 		return true
 	}
-	if c.botAccountID == "" {
+	if c.selfAccountID() == "" {
 		return false
 	}
-	if st.InReplyToAccountID == c.botAccountID {
+	if st.InReplyToAccountID == c.selfAccountID() {
 		return true
 	}
 	for _, m := range st.Mentions {
-		if m.ID == c.botAccountID {
+		if m.ID == c.selfAccountID() {
 			return true
 		}
 	}
@@ -666,10 +700,22 @@ func (c *MastodonChannel) handleNotification(ctx context.Context, n *Notificatio
 	}
 	switch n.Type {
 	case "mention":
+		// ⚠️ 锚点必须在**任何提前 return 之前**推进，且与 backfillMentions 的推进
+		// 条件完全一致（nil Status / 自己发的 / 去重命中 三条路径都推进）。
+		//
+		// 否则锚点停滞后，断线重连的 backfillMentions 会用旧 since_id 把这条通知
+		// 重新拉回来；dedupSeen 只有 2 分钟窗口，挡不住几十分钟后的重放 →
+		// 同一条 mention 被二次处理并**二次外发回复**。这正是 Misskey
+		// 2026-09-01 重复外发事故的同款根因。
+		//
+		// setNotificationAnchor 单调递增，末尾再调一次是冗余保护，无害。
+		// 注意：只对 mention 推进——backfill 的 Types 只有 mention，若被一条
+		// favourite 通知把锚点顶到更后面，会跳过尚未处理的更早 mention。
+		c.setNotificationAnchor(n.ID)
 		if n.Status == nil {
 			return
 		}
-		if n.Account.ID == c.botAccountID {
+		if n.Account.ID == c.selfAccountID() {
 			return
 		}
 		if c.dedupSeen(n.Status.ID) {
@@ -690,7 +736,7 @@ func (c *MastodonChannel) handleNotification(ctx context.Context, n *Notificatio
 // 提示模型「知道了就行，别回复、别回赞、别调工具」；metadata 带 ack_only=true
 // 且**故意不设 reply_target**，避免误串接到被收藏的帖子。
 func (c *MastodonChannel) handleFavouriteNotification(ctx context.Context, n *Notification) {
-	if n.Account.ID == c.botAccountID {
+	if n.Account.ID == c.selfAccountID() {
 		return // 忽略自赞
 	}
 	if c.dedupSeen(n.ID) {
@@ -742,10 +788,11 @@ func (c *MastodonChannel) handleFavouriteNotification(ctx context.Context, n *No
 		CreatedAt:     createdAt,
 	}
 
-	if c.ingress == nil {
+	ing := c.getIngress()
+	if ing == nil {
 		return
 	}
-	if err := c.ingress.Receive(ctx, msg); err != nil {
+	if err := ing.Receive(ctx, msg); err != nil {
 		traceid.L(ctx).Warnw("mastodon favourite notification ingress receive failed",
 			"channel", c.name, "notification_id", n.ID, "err", err)
 	}
@@ -772,8 +819,8 @@ func (c *MastodonChannel) handleStatus(ctx context.Context, st *Status, eventTyp
 	}
 
 	// 从文本中剥离 @bot 提及（Bot 不需要看到自己被 @）
-	if c.mentionRe != nil {
-		text = strings.TrimSpace(c.mentionRe.ReplaceAllString(text, ""))
+	if re := c.selfMentionRe(); re != nil {
+		text = strings.TrimSpace(re.ReplaceAllString(text, ""))
 	}
 	// 剥离后为空但原来是 boost，再次回退
 	if text == "" && st.Reblog != nil {
@@ -877,10 +924,11 @@ func (c *MastodonChannel) handleStatus(ctx context.Context, st *Status, eventTyp
 		core.SetAttachments(&msg, attachments)
 	}
 
-	if c.ingress == nil {
+	ing := c.getIngress()
+	if ing == nil {
 		return
 	}
-	if err := c.ingress.Receive(ctx, msg); err != nil {
+	if err := ing.Receive(ctx, msg); err != nil {
 		traceid.L(ctx).Warnw("mastodon ingress receive failed",
 			"channel", c.name, "status_id", st.ID, "err", err)
 	}
@@ -1016,6 +1064,48 @@ func (c *MastodonChannel) lookupReplyContext(ctx context.Context, statusID strin
 	return st
 }
 
+// isStopped 报告 channel 是否已停止。
+func (c *MastodonChannel) isStopped() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.stopped
+}
+
+// selfAccountID 返回 Bot 自身账号 ID（并发安全读）。
+func (c *MastodonChannel) selfAccountID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.botAccountID
+}
+
+// selfAcct 返回 Bot 的完整账号标识（并发安全读）。
+func (c *MastodonChannel) selfAcct() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.botAcct
+}
+
+// selfUsername 返回 Bot 的本地用户名（并发安全读）。
+func (c *MastodonChannel) selfUsername() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.botUsername
+}
+
+// selfMentionRe 返回 @bot 提及正则（并发安全读），未初始化返回 nil。
+func (c *MastodonChannel) selfMentionRe() *regexp.Regexp {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.mentionRe
+}
+
+// getIngress 返回入站管道（并发安全读），未 Start 返回 nil。
+func (c *MastodonChannel) getIngress() *inbound.Ingress {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ingress
+}
+
 // mastodonIngressChannelID 决定入站 Message.Channel。
 // 时间线上的普通帖共用 mastodon:timeline；被 @ / direct 私信仍按用户隔离，
 // 否则 user_choice 会把 ChatID 记成 mastodon:timeline，投票者对不上永远超时。
@@ -1035,6 +1125,24 @@ func (c *MastodonChannel) Stop(ctx context.Context) error {
 	}
 	c.stopped = true
 	c.mu.Unlock()
+
+	// 注：这里**故意不** UnregisterPollCreator。pollCreators 是按平台名做 key 的
+	// 全局表，本机可能同时挂着多个 mastodon bot，停掉其中一个就把整张表摘了会
+	// 连累别的 bot 的 user_choice。改为在 CreatePollStatus 入口判 stopped 拒绝。
+
+	// 停掉所有在途投票：轮询 goroutine 挂的是 runCtx，cancel 后会自己退出，
+	// 但 debounce / expire 定时器是 *time.Timer，必须显式 Stop 才不会在
+	// channel 停止后继续触发 resolvePollVote。
+	c.pollsMu.Lock()
+	for id, st := range c.polls {
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		c.stopPollWatchLocked(st)
+		delete(c.polls, id)
+	}
+	c.pollsMu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
@@ -1077,6 +1185,42 @@ func mapVisibility(v string) string {
 	}
 }
 
+// truncEllipsis 是 strutil.Truncate 超长时追加的省略号。
+const truncEllipsis = "..."
+
+// truncateFor 把 s 截到**不超过** limit 个 rune。
+//
+// ⚠️ 预算必须扣掉省略号：strutil.Truncate 在超长时返回 `maxRunes + 3` 个字符
+// （尾部追加 "..."）。若直接把上限传进去，所有**需要被截断**的长文本都会
+// 超限 3 个字符，被 Mastodon 的校验器判 422 `Validation failed /
+// Text exceeds the maximum of N characters` —— 偏偏最长的回复最容易触发，
+// 而短文本一切正常，自测时极容易漏掉。
+func truncateFor(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	budget := limit - len(truncEllipsis)
+	if budget <= 0 {
+		// 上限连省略号都塞不下（异常实例配置）：硬切到 limit，
+		// 宁可没有省略号也绝不能超限——超一点就是整个 422。
+		r := []rune(s)
+		if len(r) <= limit {
+			return s
+		}
+		return string(r[:limit])
+	}
+	return strutil.Truncate(s, budget)
+}
+
+// truncateForStatus 按实例帖子字符上限截断正文。
+func (c *MastodonChannel) truncateForStatus(s string) string {
+	limit := c.api.statusLimit()
+	if limit <= 0 {
+		limit = defaultMaxStatusLength
+	}
+	return truncateFor(s, limit)
+}
+
 // Reply 向指定帖子回复。便捷方法，供 Pipeline Action 处理器调用。
 // 文本超长时按实例上限自动截断。
 func (c *MastodonChannel) Reply(ctx context.Context, statusID, text string) error {
@@ -1088,15 +1232,14 @@ func (c *MastodonChannel) Reply(ctx context.Context, statusID, text string) erro
 // 与 Misskey 的差异：Mastodon 不需要「纯 Renote 降级」——回复 boost 是合法的，
 // 不存在 CANNOT_REPLY_TO_A_PURE_RENOTE 这类限制，故没有降级分支。
 func (c *MastodonChannel) ReplyWithVisibility(ctx context.Context, statusID, text, visibility string) error {
-	limit := c.api.statusLimit()
-	text = strutil.Truncate(strings.TrimSpace(text), limit)
+	text = c.truncateForStatus(strings.TrimSpace(text))
 
 	// 回复时自动 @ 被回复者及其他被 @ 的人（排除 Bot 自身）。
 	// Mastodon 用 acct（含域），远程用户只有带域才能被正确提及。
 	if statusID != "" {
 		if parent, err := c.lookupStatus(ctx, statusID); err == nil && parent != nil {
 			if prefix := c.buildReplyMentionPrefix(parent); prefix != "" {
-				text = strutil.Truncate(prefix+text, limit)
+				text = c.truncateForStatus(prefix + text)
 			}
 		} else if err != nil {
 			traceid.L(ctx).Debugw("mastodon: getStatus for reply mention prefix skipped",
@@ -1133,6 +1276,9 @@ func (c *MastodonChannel) buildReplyMentionPrefix(parent *Status) string {
 	if parent == nil {
 		return ""
 	}
+	// 一次取值，避免闭包里反复加锁；身份字段在 Start 之后不再变。
+	selfUser := c.selfUsername()
+	selfAcct := c.selfAcct()
 	seen := make(map[string]bool)
 	var handles []string
 	add := func(h string) {
@@ -1145,7 +1291,7 @@ func (c *MastodonChannel) buildReplyMentionPrefix(parent *Status) string {
 		if at := strings.Index(bare, "@"); at >= 0 {
 			bare = bare[:at]
 		}
-		if (c.botUsername != "" && bare == c.botUsername) || (c.botAcct != "" && strings.TrimPrefix(h, "@") == c.botAcct) {
+		if (selfUser != "" && bare == selfUser) || (selfAcct != "" && strings.TrimPrefix(h, "@") == selfAcct) {
 			return
 		}
 		if seen[h] {
@@ -1186,7 +1332,7 @@ func (c *MastodonChannel) PostTimeline(ctx context.Context, text, visibility, cw
 	if visibility == "" {
 		visibility = VisibilityUnlisted
 	}
-	text = strutil.Truncate(text, c.api.statusLimit())
+	text = c.truncateForStatus(text)
 	id, err := c.api.createStatus(ctx, text, "", mapVisibility(visibility), cw, nil)
 	if err != nil {
 		traceid.L(ctx).Warnw("mastodon: post to timeline failed", "channel", c.name, "err", err)
@@ -1230,7 +1376,7 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 		}
 	}
 
-	text = strutil.Truncate(strings.TrimSpace(text), c.api.statusLimit())
+	text = c.truncateForStatus(strings.TrimSpace(text))
 
 	// 回复时自动补全 @acct：联邦用户必须带域才能被正确提及并收到通知。
 	if parent, err := c.lookupStatus(ctx, statusID); err == nil && parent != nil {
@@ -1243,7 +1389,7 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 					t = strings.TrimSpace(strings.TrimPrefix(t, bare))
 				}
 			}
-			text = strutil.Truncate(prefix+t, c.api.statusLimit())
+			text = c.truncateForStatus(prefix + t)
 		}
 	} else if err != nil {
 		traceid.L(ctx).Debugw("mastodon: getStatus for send mention prefix skipped",
@@ -1306,17 +1452,32 @@ func (c *MastodonChannel) CreatePollStatus(ctx context.Context, question, replyI
 	if len(options) < 2 {
 		return "", fmt.Errorf("mastodon CreatePollStatus: at least 2 options required, got %d", len(options))
 	}
-	if len(options) > 4 {
-		// Mastodon 服务端硬性上限 4 个选项（Misskey 是 10）。
-		options = options[:4]
+	if c.isStopped() {
+		// 已停止的 channel 不再发投票：轮询 goroutine 与回收定时器都没人管了。
+		return "", errors.New("mastodon CreatePollStatus: channel already stopped")
 	}
-	expiresIn := timeoutSecs
-	if expiresIn <= 0 {
-		expiresIn = interaction.DefaultTimeoutSecs
+	// 选项数量/字数上限都是**实例级**配置（默认 4 个 / 25 字符，Misskey 是 10 个），
+	// 不截断的话服务端直接 422 `Validation failed`，LLM 侧的 user_choice 整条失败。
+	maxOpts := c.api.pollMaxOptions()
+	if maxOpts < 2 {
+		maxOpts = 2
 	}
-	if expiresIn < pollMinExpiresSecs {
-		expiresIn = pollMinExpiresSecs
+	if len(options) > maxOpts {
+		options = options[:maxOpts]
 	}
+	// 注意同样要扣掉省略号预算（truncateFor），否则截断后反而超限被 422。
+	maxOptChars := c.api.pollMaxOptionChars()
+	if maxOptChars > 0 {
+		for i, o := range options {
+			options[i] = truncateFor(strings.TrimSpace(o), maxOptChars)
+		}
+	}
+	// 题目即帖子正文，同样受实例字符上限约束。
+	question = c.truncateForStatus(strings.TrimSpace(question))
+
+	// clampPollExpiration 同时管上下限（Mastodon 默认 300 ~ 2629746 秒，越界即 422），
+	// 且对 <=0 直接兜到实例下限，故无需再单独判 DefaultTimeoutSecs。
+	expiresIn := c.api.clampPollExpiration(timeoutSecs)
 
 	// 回复场景：可见性必须跟随父帖（direct 帖只能 direct 回复，否则 422）。
 	visibility := VisibilityUnlisted
@@ -1348,30 +1509,24 @@ func (c *MastodonChannel) CreatePollStatus(ctx context.Context, question, replyI
 		PollID:     res.Poll.ID,
 		baseline:   pollVotes(res.Poll),
 	}
+
+	// ⚠️ expire 定时器必须在**持锁期间**写入 st：stopPollWatchLocked 会读 st.expire，
+	// 若在锁外赋值，与 Stop() 的并发清理构成数据竞争（-race 可复现），
+	// 且 Stop 可能漏停刚起好的定时器，导致 channel 停止后仍触发 resolvePollVote。
+	//
+	// 轮询本身不需要在这里起 goroutine：Start 已经拉起了一个共享的 pollWatchLoop，
+	// 它按 tick 扫 c.polls，这里只要把状态挂进表里即可。
 	c.pollsMu.Lock()
 	c.polls[res.ID] = st
+	st.expire = time.AfterFunc(time.Duration(expiresIn)*time.Second, func() {
+		c.expirePoll(res.ID, questionID)
+	})
 	c.pollsMu.Unlock()
 
 	traceid.L(ctx).Infow("mastodon: poll status created",
 		"channel", c.name, "status_id", res.ID, "poll_id", res.Poll.ID,
 		"question_id", questionID, "options", len(options), "multiple", multiple,
 		"expires_in", expiresIn)
-
-	// 启动轮询：Mastodon 不推送投票事件，只能主动查。
-	// 必须挂在 runCtx 上：调用方 ctx 常是某一轮 LLM 调用的生命周期，
-	// 用它会在那轮结束时就取消轮询，用户后面投的票再也回填不回去。
-	base := c.runCtx
-	if base == nil {
-		base = ctx
-	}
-	watchCtx, cancel := context.WithCancel(base)
-	st.watch = cancel
-	go c.pollWatchLoop(watchCtx, res.ID)
-
-	// 超时回收：与 Misskey 一致的 expire 定时器，避免无人投票时泄漏。
-	st.expire = time.AfterFunc(time.Duration(expiresIn)*time.Second, func() {
-		c.expirePoll(res.ID, questionID)
-	})
 
 	return res.ID, nil
 }
@@ -1388,8 +1543,16 @@ func pollVotes(p *Poll) []int {
 	return out
 }
 
-// pollWatchLoop 轮询投票结果直到结算、超时或 channel 停止。
-func (c *MastodonChannel) pollWatchLoop(ctx context.Context, statusID string) {
+// pollWatchLoop 是**全局共享**的投票轮询循环：一个 ticker 按跳扫描所有在途投票。
+//
+// 为什么不是「每条投票一个 goroutine + 一个 ticker」：Mastodon 限流
+// 300 req/5min（≈1 req/s）。每条投票独立跳时，跳数随并发投票数线性增长，
+// 3 条并发投票就打满整个配额，发帖/点赞/取父帖连带 429。共享一个 ticker 后
+// **跳数恒定**，单跳成本才是 O(在途投票数)，配额占用与并发投票数脱钩。
+//
+// 挂在 runCtx 上：轮询是长生命周期的，不能跟着某一轮 LLM 调用的 ctx 走。
+// 表里没有在途投票时本循环是纯空转（不发任何请求），成本可忽略。
+func (c *MastodonChannel) pollWatchLoop(ctx context.Context) {
 	ticker := time.NewTicker(pollWatchInterval)
 	defer ticker.Stop()
 	for {
@@ -1397,8 +1560,14 @@ func (c *MastodonChannel) pollWatchLoop(ctx context.Context, statusID string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !c.pollTick(ctx, statusID) {
-				return
+			c.pollsMu.Lock()
+			ids := make([]string, 0, len(c.polls))
+			for id := range c.polls {
+				ids = append(ids, id)
+			}
+			c.pollsMu.Unlock()
+			for _, id := range ids {
+				c.pollTick(ctx, id)
 			}
 		}
 	}
@@ -1539,7 +1708,8 @@ func applyPollVote(st *pollState, choice int) pollVoteAction {
 	return pollVoteDebounce
 }
 
-// stopPollWatchLocked 停掉轮询 goroutine 与过期定时器（需持有 pollsMu）。
+// stopPollWatchLocked 停掉这条投票的定时器（需持有 pollsMu）。
+// 轮询是共享 ticker，会自己发现表里没这条而跳过，无需在这里取消。
 func (c *MastodonChannel) stopPollWatchLocked(st *pollState) {
 	if st == nil {
 		return
@@ -1547,10 +1717,6 @@ func (c *MastodonChannel) stopPollWatchLocked(st *pollState) {
 	if st.expire != nil {
 		st.expire.Stop()
 		st.expire = nil
-	}
-	if st.watch != nil {
-		st.watch()
-		st.watch = nil
 	}
 }
 
