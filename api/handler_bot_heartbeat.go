@@ -103,6 +103,13 @@ func (s *BotService) heartbeatChannelLister(botID string) heartbeat.ChannelListe
 					Type:    "misskey",
 					Label:   "Misskey 时间线（发新帖）",
 				})
+			case "mastodon":
+				// Mastodon 时间线（顶层新帖）；与 Misskey 对等。
+				targets = append(targets, heartbeat.ChannelTarget{
+					Channel: ch.Name(),
+					Type:    "mastodon",
+					Label:   "Mastodon 时间线（发新帖）",
+				})
 			case "telegram":
 				// 近期聊过的 Telegram 会话：bot 才能在「憋了一天的群」里主动说点什么。
 				if rcl, ok := ch.(core.RecentChatLister); ok {
@@ -161,7 +168,9 @@ func (s *BotService) heartbeatChannelPoster(botID string) heartbeat.ChannelPoste
 			return fmt.Errorf("heartbeat poster: channel %q is not a sender", target.Channel)
 		}
 		switch target.Type {
-		case "misskey":
+		// Mastodon 与 Misskey 的发帖路径完全一致：顶层新帖走 TimelinePoster，
+		// 指定会话时走 Send 回复（"home" 由各 channel 自行映射到本平台取值）。
+		case "misskey", "mastodon":
 			if target.ConversationID == "" {
 				// 顶层新帖：走 TimelinePoster（createNoteFull(text, "", ...)）。
 				tp, ok := chosen.(core.TimelinePoster)

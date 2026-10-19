@@ -115,13 +115,14 @@ function emptyPlat() {
 const cfg = reactive({
   enabled: false,
   interval_min: 30,
-  platforms: { web: emptyPlat(), telegram: emptyPlat(), misskey: emptyPlat() }
+  platforms: { web: emptyPlat(), telegram: emptyPlat(), misskey: emptyPlat(), mastodon: emptyPlat() }
 })
 
 const platforms = [
   { key: 'web', label: 'Web', hint: '写入该用户的会话历史' },
   { key: 'telegram', label: 'Telegram', hint: '发到已有会话，不主动进陌生群' },
-  { key: 'misskey', label: 'Misskey', hint: '仅 specified 私信，不发时间线' }
+  { key: 'misskey', label: 'Misskey', hint: '仅 specified 私信，不发时间线' },
+  { key: 'mastodon', label: 'Mastodon', hint: '仅 direct 私信，不发时间线' }
 ]
 
 const saving = ref(false)
@@ -146,7 +147,8 @@ const platformFilter = [
   { label: '全部平台', value: '' },
   { label: 'Web', value: 'web' },
   { label: 'Telegram', value: 'telegram' },
-  { label: 'Misskey', value: 'misskey' }
+  { label: 'Misskey', value: 'misskey' },
+  { label: 'Mastodon', value: 'mastodon' }
 ]
 
 const STATUS_LABELS = {
@@ -204,6 +206,7 @@ async function loadConfig() {
     cfg.platforms.web = applyPlat('web', plats.web)
     cfg.platforms.telegram = applyPlat('telegram', plats.telegram)
     cfg.platforms.misskey = applyPlat('misskey', plats.misskey)
+    cfg.platforms.mastodon = applyPlat('mastodon', plats.mastodon)
   } catch (e) {
     MessagePlugin.error(`加载主动开口配置失败：${e.message || e}`)
   }
@@ -218,7 +221,8 @@ async function saveConfig() {
       platforms: {
         web: { ...cfg.platforms.web },
         telegram: { ...cfg.platforms.telegram },
-        misskey: { ...cfg.platforms.misskey }
+        misskey: { ...cfg.platforms.misskey },
+        mastodon: { ...cfg.platforms.mastodon }
       }
     })
     MessagePlugin.success('设置已保存')

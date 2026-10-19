@@ -95,6 +95,39 @@ var supportedChannelTypes = []ChannelTypeInfo{
 		},
 	},
 	{
+		Type:        "mastodon",
+		DisplayName: "Mastodon",
+		Description: "通过 Mastodon WebSocket streaming 接收提及、回复与收藏通知。",
+		Icon:        "mastodon",
+		Color:       "#6364ff",
+		Fields: []ChannelField{
+			{Key: "server", Label: "实例 URL", Type: "string", Required: true, HelpText: "如 https://mastodon.social"},
+			{Key: "token", Label: "Access Token", Type: "password", Required: true, HelpText: "Mastodon OAuth access token（需 read/write 权限）"},
+			{
+				Key:   "streams",
+				Label: "订阅时间线",
+				Type:  "multiselect",
+				HelpText: "选择要旁听的时间线（可多选，留空则仅接收 @提及/回复/私信）。" +
+					"通知流始终订阅，不受此配置影响。",
+				OptionItems: []ChannelOption{
+					{Value: "user", Label: "关注时间线"},
+					{Value: "public:local", Label: "本站时间线"},
+					{Value: "public", Label: "联邦时间线"},
+					{Value: "public:remote", Label: "远端时间线"},
+					{Value: "direct", Label: "私信"},
+				},
+			},
+			{
+				Key:     "resolveReplyContext",
+				Label:   "解析被回复内容",
+				Type:    "boolean",
+				Default: "true",
+				HelpText: "开启后入站回复会额外拉取父帖，让 Bot 看到对方在回复什么。" +
+					"关闭可节省 API 配额（Mastodon 限流 300 次/5 分钟）。",
+			},
+		},
+	},
+	{
 		Type:        "misskey",
 		DisplayName: "Misskey",
 		Description: "通过 Misskey WebSocket streaming 接收提及和回复消息。",
