@@ -1483,6 +1483,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 让模型看到被引用的上文（否则模型只能看到「这句话」，语境断层）。
 		if q := buildQuoteBlock(msg.Metadata); q != "" {
 			content = q + "\n\n" + content
+			if s.logger != nil {
+				s.logger.Infow("quoted reply text included in prompt",
+					"trace_id", msg.TraceID, "bot_id", msg.BotID, "channel", msg.Channel,
+					"reply_to_message_id", msg.Metadata["reply_to_message_id"],
+					"quote_len", len([]rune(q)))
+			}
 		}
 		// 主模型支持多模态时，把入站附件（image/audio/video）作为多模态 part 直送主模型，
 		// 让模型真正「看到」用户发来的图片等（修复此前 MultimodalStage 未装配、图片静默丢弃的 P1）。

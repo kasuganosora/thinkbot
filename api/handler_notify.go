@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -440,24 +441,47 @@ func sendNotifyToChannels(ctx context.Context, chs []bot.Channel, t notify.Targe
 	})
 }
 
-// notifySessionID 返回投递目标对应的会话键（Telegram: "tg:<chat>"，与入站历史同键）。
-func notifySessionID(t notify.Target) string {
-	if t.ChannelType == "telegram" {
-		return "tg:" + t.ChatID
+// notifySessionID 解析投递目标对应的会话历史 session ID —— 必须与入站消息同一会话。
+//
+// D6（0d71897，2026-09-29）起 Telegram 入站历史按 chat_sessions 的**数字 ID** 读写
+// （BotService.inboundSessionID：ResolveSession + TelegramChatKey）。此前这里仍返回旧的
+// 字符串键 "tg:<chat>"，于是通知写进了一个模型永远不会加载的孤儿会话：主人随后在同一
+// chat 里回话时，bot 看不到自己刚发的告警（2026-10-19 smartd 事故）。
+//
+// 解析失败时返回错误，**绝不回退旧字符串键**（与 inboundSessionID 同一纪律：落回字符串
+// 只会再造孤儿会话）。仅支持 Telegram（resolveNotifyTarget 只放行 telegram）；其它类型
+// 返回 ErrChannelUnsupported，而不是把 chat id 原样当 session id 写出孤儿行。
+func (s *Server) notifySessionID(botID string, t notify.Target) (string, error) {
+	if t.ChannelType != "telegram" {
+		return "", notify.ErrChannelUnsupported
 	}
-	return t.ChatID
+	if s.db == nil {
+		return "", errors.New("notify: session resolve: no database")
+	}
+	if strings.TrimSpace(t.ChatID) == "" {
+		return "", notify.ErrNoOwnerTarget
+	}
+	sess, err := dao.ResolveSession(s.db, botID, dao.TelegramChatKey(t.ChatID), dao.TelegramSessionKind(t.ChatID), "")
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatUint(sess.ID, 10), nil
 }
 
 // notifyHistory 把已送达通知写进主人会话：系统备注（role=notify，LLM 上下文中为 system 消息）
 // + bot 模式下 bot 的原话（role=assistant）。trace_id = 事件 ID，不与对话轮次的
 // UpsertAssistantByTrace 冲突；均为纯文本，不含 tool 调用，不影响工具配对 / 压缩边界。
+// 会话与入站消息同一数字会话（见 notifySessionID），模型下一轮加载历史时能看到通知。
 type notifyHistory struct{ s *Server }
 
 func (h *notifyHistory) Record(_ context.Context, botID string, t notify.Target, eventID string, entries []notify.HistoryEntry) error {
 	if h.s.chatHistory == nil {
 		return errors.New("chat history unavailable")
 	}
-	sid := notifySessionID(t)
+	sid, err := h.s.notifySessionID(botID, t)
+	if err != nil {
+		return fmt.Errorf("notify: resolve history session: %w", err)
+	}
 	for _, e := range entries {
 		role := dao.ChatRoleNotify
 		if e.Role == notify.HistoryRoleAssistant {
@@ -514,8 +538,9 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 	// 把无关信息硬连到告警上（ops 实测）。bot 模式只需要人格 + 少量近期对话定语气。
 
 	if historyLimit > 0 && s.chatHistory != nil {
-		sid := notifySessionID(t)
-		if rows, err := s.chatHistory.LoadContextBySession(botID, sid, historyLimit); err != nil {
+		if sid, err := s.notifySessionID(botID, t); err != nil {
+			s.logger.Warnw("notify: resolve owner session failed, no history", "bot_id", botID, "chat", t.ChatID, "err", err)
+		} else if rows, err := s.chatHistory.LoadContextBySession(botID, sid, historyLimit); err != nil {
 			s.logger.Warnw("notify: load owner history failed", "bot_id", botID, "session", sid, "err", err)
 		} else {
 			rows = s.chatHistory.ApplyContextCheckpoint("notify", botID, sid, rows)
