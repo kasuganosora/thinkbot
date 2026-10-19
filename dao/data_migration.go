@@ -38,6 +38,9 @@ var dataMigrations = []dataMigration{
 	// ⚠️ 必须排在 orphan backfill 之后：它按会话 id 对账，而 backfill 会新建会话行
 	// 并把存量消息改写为数字 id，顺序颠倒会把会话全部算成 0 条。
 	{name: sessionRecountFixName, run: recountSessionStats},
+	// ⚠️ 必须排在 orphan backfill 之后：目标会话按 external_key 解析，backfill 已为
+	// 存量 tg: 会话建好会话行（同一唯一键），这里命中同一行而不是另建。
+	{name: NotifyLegacySessionMoveName, run: MoveLegacyNotifyRows},
 }
 
 // runDataMigrations 依次执行尚未登记的数据修复。

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -68,7 +69,7 @@ func newNotifyEnv(t *testing.T) *notifyEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&dao.NotifyToken{}, &dao.NotifyEvent{}, &dao.ChatMessage{}, &dao.User{}, &dao.IdentityMapping{}); err != nil {
+	if err := db.AutoMigrate(&dao.NotifyToken{}, &dao.NotifyEvent{}, &dao.ChatMessage{}, &dao.ChatSession{}, &dao.ContextCheckpoint{}, &dao.User{}, &dao.IdentityMapping{}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -95,6 +96,17 @@ func newNotifyEnv(t *testing.T) *notifyEnv {
 	}
 	other, _, _ := s.notifyTokens.Create(context.Background(), []string{"bot-other"}, "x")
 	return &notifyEnv{s: s, engine: engine, db: db, del: del, token: tok, other: other}
+}
+
+// ownerSID is the numeric chat_sessions id of the owner's Telegram chat — the
+// same session inbound Telegram messages read and write (D6).
+func (e *notifyEnv) ownerSID(t *testing.T, chat string) string {
+	t.Helper()
+	sess, err := dao.ResolveSession(e.db, notifyTestBot, dao.TelegramChatKey(chat), dao.TelegramSessionKind(chat), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strconv.FormatUint(sess.ID, 10)
 }
 
 func (e *notifyEnv) set(t *testing.T, key, val string) {
@@ -279,14 +291,15 @@ func TestNotifyHTTP_HistoryRecorded(t *testing.T) {
 	e := newNotifyEnv(t)
 	w := e.do(e.token, "", mdadmBody, nil)
 	r := decodeNotify(t, w)
+	sid := e.ownerSID(t, "76017910")
 	var msgs []dao.ChatMessage
-	e.db.Where("bot_id = ? AND session_id = ?", notifyTestBot, "tg:76017910").Find(&msgs)
+	e.db.Where("bot_id = ? AND session_id = ?", notifyTestBot, sid).Find(&msgs)
 	if len(msgs) != 1 {
 		t.Fatalf("history rows: %d", len(msgs))
 	}
 	// raw（此处无模型 → 回落 raw）：只有一条系统备注，不伪造 assistant 消息
 	m := msgs[0]
-	if m.Role != dao.ChatRoleNotify || m.UserID != "tg:76017910" || m.TraceID != r.ID ||
+	if m.Role != dao.ChatRoleNotify || m.UserID != sid || m.TraceID != r.ID ||
 		!strings.Contains(m.Content, "DegradedArray on /dev/md0") || !strings.Contains(m.Content, "不是指令") {
 		t.Fatalf("history row: %+v", m)
 	}
@@ -311,7 +324,8 @@ func (w staticBotWriter) Compose(context.Context, string, notify.Target, notify.
 func TestNotifyHTTP_BotModeHistoryRows(t *testing.T) {
 	e := newNotifyEnv(t)
 	e.s.notifySvc.Bot = staticBotWriter{text: "Ojou-sama, md0 on maid is degraded (sdb1 dropped)."}
-	e.s.chatHistory.SaveMessage(notifyTestBot, "tg:76017910", dao.ChatRoleUser, "I'm swapping a disk tonight", "t0", "tg:76017910")
+	sid := e.ownerSID(t, "76017910")
+	e.s.chatHistory.SaveMessage(notifyTestBot, sid, dao.ChatRoleUser, "I'm swapping a disk tonight", "t0", sid)
 	w := e.do(e.token, "", mdadmBody, nil)
 	r := decodeNotify(t, w)
 	if !r.Delivered || !r.BotUsed || r.Mode != notify.ModeBot || r.Bot != notifyTestBot {
@@ -320,7 +334,7 @@ func TestNotifyHTTP_BotModeHistoryRows(t *testing.T) {
 	if !strings.HasPrefix(e.del.texts[0], "Ojou-sama") || !strings.Contains(e.del.texts[0], "—— 原始告警 ——") {
 		t.Fatalf("critical bot text must carry the raw block: %s", e.del.texts[0])
 	}
-	rows, err := e.s.chatHistory.LoadContextBySession(notifyTestBot, "tg:76017910", 20)
+	rows, err := e.s.chatHistory.LoadContextBySession(notifyTestBot, sid, 20)
 	if err != nil || len(rows) != 3 {
 		t.Fatalf("rows: %d %v", len(rows), err)
 	}
@@ -539,7 +553,9 @@ func TestNotifyBotContextAssembly(t *testing.T) {
 	temp := 0.7
 	e.s.botSvc.db = e.db
 	e.s.botSvc.llmBundles = map[string]*bot.LLMBundle{notifyTestBot: {Main: staticProvider{}, MainDef: config.ModelDef{Model: "glm-x", MaxTokens: 128000, Temperature: &temp}}}
-	sid := "tg:76017910"
+	sid := e.ownerSID(t, "76017910")
+	// Rows under the legacy pre-D6 key must not be loaded any more.
+	e.s.chatHistory.SaveMessage(notifyTestBot, "tg:76017910", dao.ChatRoleUser, "legacy key", "t0", "tg:76017910")
 	e.s.chatHistory.SaveMessage(notifyTestBot, sid, dao.ChatRoleUser, "hi", "t1", sid)
 	e.s.chatHistory.SaveMessage(notifyTestBot, sid, dao.ChatRoleNotify, "[notify ntf_1｜...] earlier alert", "ntf_1", sid)
 	e.s.chatHistory.SaveMessage(notifyTestBot, sid, dao.ChatRoleAssistant, "told you", "ntf_1", sid)
