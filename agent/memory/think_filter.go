@@ -185,10 +185,13 @@ func removeAndJoin(re *regexp.Regexp, text string) string {
 // 上下文标记过滤器 — 防止入站注入的上下文标记泄漏到对外回复
 // ============================================================================
 
-// contextMarkerRe 匹配入站阶段注入的「上下文标记」整行，形态有三种：
-//   - [Reply to <sender>: <quoted>]  —— noteContext 在用户回复某帖时前置，告知模型"用户在回复谁/回复了啥"
-//   - [Renote from <sender>: <quoted>] —— 同上，引用转发场景
-//   - [note_id: <id>] —— 当前帖 ID，供模型调引用/反应类工具
+// contextMarkerRe 匹配入站阶段注入的「上下文标记」整行，形态有五种：
+//   - [Reply to <sender>: <quoted>]    —— Misskey/Mastodon 共有：用户回复某帖时前置
+//   - [Renote from <sender>: <quoted>] —— Misskey：引用转发（Renote）场景
+//   - [Boost from <sender>: <quoted>]  —— Mastodon：纯转发（Reblog）场景，
+//     与 Renote from 完全对等，只是平台叫法不同；漏掉它等于 Mastodon 上这道兜底形同虚设
+//   - [note_id: <id>]                  —— Misskey：当前帖 ID，供模型调引用/反应类工具
+//   - [status_id: <id>]                —— Mastodon：同上，Mastodon 叫 status 不叫 note
 //
 // 这些标记仅供模型理解上下文，绝不应出现在对外发送的回复正文里。
 // 模型偶发会把入站文本里的 [Reply to ...] / [Renote from ...] 原样回显到自己的回复开头
@@ -197,12 +200,16 @@ func removeAndJoin(re *regexp.Regexp, text string) string {
 // 在出站清洗阶段兜底剥离，而非完全依赖模型遵守提示词。
 //
 // 匹配整行（允许行首尾空白），不误伤正文里普通出现的方括号内容。
+//
+// ⚠️ 新增平台注入标记时必须同步 `util/strutil/context_markers.go`（那是入站侧、
+// 管会话标题/L0 记忆的剥离），两套正则各管一段，漏一边都会漏标记。
 var contextMarkerRe = regexp.MustCompile(
-	`(?m)^\s*\[(?:(?:Reply to|Renote from) .*?: .*?|note_id: .*?)\]\s*$`,
+	`(?m)^\s*\[(?:(?:Reply to|Renote from|Boost from) .*?: .*?|(?:note_id|status_id): .*?)\]\s*$`,
 )
 
 // StripContextMarkers 从最终回复文本中剥离入站注入的上下文标记整行，
-// 防止 `[Reply to ...]` / `[Renote from ...]` / `[note_id: ...]` 泄漏到公开帖文。
+// 防止 `[Reply to ...]` / `[Renote from ...]` / `[Boost from ...]` /
+// `[note_id: ...]` / `[status_id: ...]` 泄漏到公开帖文。
 //
 // 在 llmroute 出站清洗阶段（StripThinking / StripInternalState 之后）调用，
 // 作为纵深防御的最后一道兜底。

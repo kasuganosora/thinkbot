@@ -279,9 +279,32 @@ type instanceStatusesConfig struct {
 	MaxCharacters int `json:"max_characters"`
 }
 
+// instancePollsConfig 是 GET /api/v1/instance 里 polls 配置段。
+//
+// 四项全是**实例级配置**：选项数量、单选项长度、投票最短/最长存活时间。
+// 任何一项超限 Mastodon 都返回 422，而 LLM 生成的选项/题目长度不可控，
+// 因此必须在建投票前探测并 clamp（否则 user_choice 直接失败、问题挂到超时）。
+type instancePollsConfig struct {
+	MaxOptions             int `json:"max_options"`
+	MaxCharactersPerOption int `json:"max_characters_per_option"`
+	MinExpiration          int `json:"min_expiration"`
+	MaxExpiration          int `json:"max_expiration"`
+}
+
 // instanceConfiguration 是 GET /api/v1/instance 的 configuration 段。
 type instanceConfiguration struct {
 	Statuses instanceStatusesConfig `json:"statuses"`
+	Polls    instancePollsConfig    `json:"polls"`
+}
+
+// instanceURLs 是 GET /api/v1/instance 的 urls 段。
+type instanceURLs struct {
+	// StreamingAPI 是流式端点基址（如 "wss://streaming.mastodon.social"）。
+	//
+	// 它可以与 API 域名**不同**：大实例普遍把 streaming 独立部署，而 gorilla
+	// 不跟随 3xx 重定向。若硬拼 <api域名>/api/v1/streaming 且该实例没配代理，
+	// 结果就是永久连不上、streamLoop 无限退避重连——没有任何报错提示。
+	StreamingAPI string `json:"streaming_api"`
 }
 
 // instanceInfo 是 GET /api/v1/instance 的响应子集。
@@ -291,6 +314,7 @@ type instanceInfo struct {
 	URI           string                `json:"uri,omitempty"`
 	Title         string                `json:"title,omitempty"`
 	Configuration instanceConfiguration `json:"configuration"`
+	URLs          instanceURLs          `json:"urls"`
 }
 
 // Relationship 是 GET /api/v1/accounts/relationships 的数组元素。
