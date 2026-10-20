@@ -5,12 +5,20 @@
 <h1 align="center">thinkbot</h1>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.27+" />
+  <img src="https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker compose" />
+  <img src="https://img.shields.io/github/license/kasuganosora/thinkbot?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/github/stars/kasuganosora/thinkbot?style=flat-square" alt="Stars" />
+  <img src="https://img.shields.io/github/last-commit/kasuganosora/thinkbot?style=flat-square" alt="Last commit" />
+</p>
+
+<p align="center">
   <b>服务器出了问题，它第一个找到你——而且你可以直接跟它聊这个问题。</b><br/>
   开源、自托管的长期在线 AI 伙伴：会聊天、会记事、会动手。
 </p>
 
 <p align="center">
-  简体中文 · <a href="README.en.md">English</a>
+  <b>简体中文</b> · <a href="README.en.md">English</a> · <a href="#快速开始">快速开始</a> · <a href="docs/configuration.md">配置</a> · <a href="docs/deploy.md">部署</a>
 </p>
 
 ---
@@ -27,12 +35,19 @@ thinkbot 适合想要一个**自己掌控的 AI 助手**的人：个人开发者
    以后真有 SMART 问题，会第一时间到你这儿。
 ```
 
-## 为什么用它
+## 它是谁
+
+thinkbot 不只是一个「有问必答」的助手。它有自己的人格（你来写），记得你们聊过的事，会在群里自然地插两句，也会在服务器出事时第一个来找你。它不追求每句话都回，而是想做一个**一直在线、有分寸、靠得住的伙伴**。
+
+## 亮点一览
+
+- **有性格，不是客服腔**：人格写在 SOUL.md 里，说话方式、口癖、兴趣都由你定；聊天、水群、报告告警都用同一种口吻。
+- **会水群，也懂得闭嘴**：群里不必每次都 @ 它。它按「聊天节奏」决定要不要接话：有发言倾向、连发防抖和连续发言上限，被 @ 或被回复则一定回应。
 
 - **会主动找你**：服务器告警、部署结果、你让它记着的提醒，它会主动发到你的 Telegram，而不是躺在日志里。
 - **记得住，也忘得掉**：分层长期记忆，几周前聊过的事还能接上；你说「忘掉这件事」，它就真的删掉，不会再学回来。
 - **真能动手**：每个 bot 有自己的沙箱容器，可以执行命令、读写文件、开浏览器、联网搜索和抓网页，还能加载技能和 MCP 工具。
-- **一个部署，多处聊**：Web、Telegram、Misskey 共用同一个 bot，跨平台上下文接得上；一个部署里可以养多个人格不同的 bot。
+- **一个部署，多处聊**：Web、Telegram、Misskey、Mastodon 共用同一个 bot，跨平台上下文接得上；一个部署里可以养多个人格不同的 bot。
 - **模型自己选**：OpenAI 兼容接口（如 DeepSeek）、OpenAI Responses、Anthropic、Gemini，在网页上点几下就能换。
 - **你说了算**：自托管、数据存本地 SQLite；工具权限、用量额度、用户管理都在 Web 管理台里。
 
@@ -43,7 +58,7 @@ thinkbot 适合想要一个**自己掌控的 AI 助手**的人：个人开发者
 | Web | ✅ 可用 | 内置聊天界面 + 管理台，可看工具调用过程、沙箱终端与桌面 |
 | Telegram | ✅ 可用 | 私聊、群聊（@它或回复它）；发图 / 发文件；群管理工具（置顶、删消息、封禁等，需在工具权限中开启）；**接收服务器告警** |
 | Misskey | ✅ 可用 | 回复提及、旁听时间线；发帖、反应、转发、关注、搜索、投票 |
-| Mastodon | 🚧 开发中 | 适配器在 [`feat/mastodon-channel`](https://github.com/kasuganosora/thinkbot/tree/feat/mastodon-channel) 分支，尚未合入 master |
+| Mastodon | 🧪 可用（beta） | 回复提及与回复、可选订阅时间线；发帖、收藏、转发等。实例地址和 Access Token 在 Web 管理台「Bot 设置 → 平台」里配置 |
 
 ## 用它来做什么
 
@@ -126,12 +141,34 @@ smartd、mdadm、cron、备份或部署脚本调用一下 `thinkbot-notify`，�
 - **有人格地闲聊**：在「Bot 设置 → 人格」写它的 SOUL.md（性格、说话方式），聊动画、聊游戏都按这个人设来。
 - **一起跑文字冒险**：它可以抛出选项让你选——Telegram 里是按钮，Misskey 里是原生投票，Web 里是卡片。
 - **发图给它看**：主模型支持图片，或配置了视觉模型时，它能看懂你发的截图和梗图。发贴纸时它看到的是贴纸对应的表情，可以顺着接梗。
-- **在群里当个帮手**：被 @ 或被回复时回应；开启主动参与后，它会自己判断什么时候插一句话，并有频率限制，不会刷屏。
+- **在群里当个帮手**：被 @ 或被回复时一定回应；平时怎么接话见下面的「在群里水群」。
 
-### 7. 更多玩法
+### 7. 在群里水群
+
+把它拉进 Telegram 群，不用每句都 @ 它：群里的普通消息也会经过它的「聊天节奏」判断，它会挑一部分自然地接上，其余的只听不说（听到的内容照样可以记下来）。
+
+```text
+🧑 阿杰：周末有人去漫展吗
+🧑 小林：去！就是还没想好 cos 谁
+🤖 小林可以考虑去年那部机甲番的女主，道具好做，人还少
+🧑 阿杰：哈哈它居然也懂
+🧑 小林：@thinkbot 那你说要不要带假发
+🤖 带吧，现场一出汗，自己的头发肯定先塌
+```
+
+在「Bot 设置 → 平台 → 聊天节奏」里按会话类型（单聊 / 群聊 / 频道）调节：
+
+- **发言倾向**（0.01–1.0，群聊默认 0.4）：对没有 @ 它的消息，按这个概率决定开不开口；1.0 等于每条都回。
+- **防抖静默等待**（群聊默认 3 秒）：有人连发几条时当作一段话，不会每条都插嘴。
+- **连续发言上限**（群聊默认 3）：连着说了几轮就先停一停，避免霸屏。
+- 被 **@ 或被回复** 时不受这些限制，一定回应；单聊默认关闭节奏，即时回复；Web 聊天不受节奏影响。
+
+另外，它自己也可以判断「这条不用回」，只记下不说话。Misskey / Mastodon 的时间线帖子还可以开启「主动参与」（`engagement.*` 配置，内置 observer / lurker / moderator / active 几档预设），按相关度评分和频率限制决定要不要参与，见 [docs/configuration.md](docs/configuration.md)。
+
+### 8. 更多玩法
 
 - **一个部署，多个 bot**：每个 bot 有自己的人格、模型、记忆、沙箱容器和平台账号，互不串台。
-- **一个 bot，多个平台**：同一个 bot 同时挂在 Telegram 和 Misskey 上，在一边聊过的事，另一边也接得上（Mastodon 即将支持）。
+- **一个 bot，多个平台**：同一个 bot 同时挂在 Telegram 和 Misskey 上，在一边聊过的事，另一边也接得上（Mastodon 同样支持，目前为 beta）。
 - **定时与提醒**：可以让它「明早 9 点提醒我」，或用定时任务让它按计划自己干活。
 
 ## 记忆是怎么工作的
@@ -147,7 +184,7 @@ smartd、mdadm、cron、备份或部署脚本调用一下 `thinkbot-notify`，�
 
 ## 快速开始
 
-需要：一台装了 Docker 的机器、一个模型 API Key、（可选）一个 Telegram Bot Token（找 [@BotFather](https://t.me/BotFather) 要）。
+需要：一台装了 Docker（含 `docker compose` 插件，v2.24 或更新）的机器、一个模型 API Key、（可选）一个 Telegram Bot Token（找 [@BotFather](https://t.me/BotFather) 要）。
 
 **1. 下载并准备配置**
 
@@ -168,8 +205,13 @@ services:
     environment:
       AUTH_BOOTSTRAP_ADMIN: admin
       AUTH_BOOTSTRAP_PASSWORD: change-me-please
+    # 默认端口映射是 "8080:8080"，会对局域网 / 公网开放。只想本机访问就保留下面两行：
+    ports: !override
+      - "127.0.0.1:8080:8080"
 YAML
 ```
+
+> `!override` 需要 Docker Compose v2.24+。不写它的话，override 里的 `ports` 会和默认的 `8080:8080` **合并**而不是替换，导致端口冲突。部署在服务器上又要远程访问时，删掉 `ports` 这两行，并自行用反向代理 / 防火墙保护。
 
 **3. 启动**
 
@@ -177,20 +219,20 @@ YAML
 docker compose up -d --build
 ```
 
-首次构建需要几分钟。`docker compose ps` 显示 `healthy` 就好了。
+首次构建需要几分钟（如果提示权限不足，用 `sudo` 或把当前用户加入 `docker` 组）。`docker compose ps` 显示 `healthy` 就好了。
 
 **4. 在网页上完成设置**
 
 打开 `http://localhost:8080`，用上面的账号登录，然后：
 
-1. **系统设置 → 模型服务**：添加服务商，填 API Key，添加模型；
+1. **系统设置 → 模型服务**：添加服务商，填 API Key，添加模型，并**打开服务商的「启用」开关**（新加的服务商默认是关闭的，不打开的话启动 bot 会报 `LLM "…" not found in config`）；
 2. **系统设置 → Bots → 新建 Bot**，选好主模型；
-3. **Bot 设置 → 平台**：添加 Telegram，填入 Bot Token 并启用；确认页面顶部 Bot 状态是「运行中」（不是的话点一下启用）；
+3. **Bot 设置 → 平台**：添加 Telegram，填入 Bot Token 并启用；确认页面顶部 Bot 状态是「运行中」（新建的 bot 默认是停止状态，点一下启用）。第一次启动 bot 时会构建它的沙箱镜像（约 1.4 GB），需要等一两分钟；
 4. **用户设置 → 生成授权码**，把 `TB-XXXX-XXXX` 发给你的 Telegram bot，完成账号绑定（接收告警通知需要这一步）。
 
 现在去 Telegram 跟它打个招呼吧 👋 也可以直接在网页里聊。
 
-> 登录后记得在「用户设置 → 安全设置」改密码。管理员已创建后，override 里的两行就不再起作用，可以删掉。
+> 登录后记得在「用户设置 → 安全设置」改密码。管理员已创建后，override 里的两行 `AUTH_BOOTSTRAP_*` 就不再起作用，可以删掉。
 
 ## 下一步
 
