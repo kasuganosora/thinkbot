@@ -39,7 +39,44 @@ func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 		return nil
 	}
 	idx.ready = true
+	if err := idx.ensureEmbedVersion(); err != nil {
+		log.Printf("memory vec embed version: %v", err)
+	}
 	return idx
+}
+
+const vecMetaTable = "memory_vec_meta"
+
+// ensureEmbedVersion drops memory_vec when its vectors were written by an
+// older hashEmbed. The startup backfill (TieredStore) only writes missing
+// entry_ids, so an empty table is fully re-filled with the current scheme for
+// every bot sharing the DB. Purely local: no model calls.
+func (v *VecIndex) ensureEmbedVersion() error {
+	vecSchemaMu.Lock()
+	defer vecSchemaMu.Unlock()
+	if err := v.db.Exec("CREATE TABLE IF NOT EXISTS " + vecMetaTable + " (key TEXT PRIMARY KEY, value TEXT NOT NULL)").Error; err != nil {
+		return err
+	}
+	var cur string
+	_ = v.db.Raw("SELECT value FROM " + vecMetaTable + " WHERE key = 'embed_version'").Scan(&cur).Error
+	if cur == embedVersion {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.db.Exec("DROP TABLE IF EXISTS " + vecTableName).Error; err != nil {
+		return err
+	}
+	if err := v.db.Exec(vecCreateSQL(vecTableName, true)).Error; err != nil {
+		v.ready = false
+		return err
+	}
+	log.Printf("memory vec: embed scheme %q -> %q, memory_vec cleared for re-index", cur, embedVersion)
+	return v.setEmbedVersion()
+}
+
+func (v *VecIndex) setEmbedVersion() error {
+	return v.db.Exec("INSERT INTO "+vecMetaTable+"(key, value) VALUES ('embed_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", embedVersion).Error
 }
 
 func (v *VecIndex) Enabled() bool { return v != nil && v.ready }
@@ -235,7 +272,8 @@ func (v *VecIndex) Rebuild() error {
 		return err
 	}
 	v.ready = true
-	return nil
+	_ = v.db.Exec("CREATE TABLE IF NOT EXISTS " + vecMetaTable + " (key TEXT PRIMARY KEY, value TEXT NOT NULL)").Error
+	return v.setEmbedVersion()
 }
 
 // DeleteScopes 只删这些 scope_key 的向量，不动其他 bot 的行。
@@ -400,6 +438,10 @@ func (b vecBlob) Value() (driver.Value, error) {
 // 有 sqlite-vec 就能用；配了外部 embedding 服务后可替换这一层，表结构不变。
 // 返回 vecBlob，避免 INSERT/MATCH 被 GORM 拆成逐字节参数。
 func hashEmbed(text string) vecBlob {
+	return hashEmbedRaw(normalizeForEmbed(text))
+}
+
+func hashEmbedRaw(text string) vecBlob {
 	vec := make([]float32, vecDims)
 	runes := []rune(strings.ToLower(text))
 	if len(runes) == 0 {
@@ -431,8 +473,10 @@ func hashEmbed(text string) vecBlob {
 
 // EmbedSimilarity 是写入 sqlite-vec 的同一套向量的余弦相似度。没有扩展时也能用来挡无关记忆。
 func EmbedSimilarity(a, b string) float64 {
-	av := hashVec(a)
-	bv := hashVec(b)
+	return dotVec(hashVec(a), hashVec(b))
+}
+
+func dotVec(av, bv []float32) float64 {
 	var dot float64
 	for i := range av {
 		dot += float64(av[i]) * float64(bv[i])
@@ -440,8 +484,11 @@ func EmbedSimilarity(a, b string) float64 {
 	return dot
 }
 
-func hashVec(text string) []float32 {
-	raw := []byte(hashEmbed(text))
+func hashVec(text string) []float32 { return decodeVec(hashEmbed(text)) }
+
+func rawHashVec(text string) []float32 { return decodeVec(hashEmbedRaw(text)) }
+
+func decodeVec(raw []byte) []float32 {
 	out := make([]float32, vecDims)
 	for i := 0; i < vecDims; i++ {
 		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))
