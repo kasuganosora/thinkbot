@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -149,6 +150,48 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 		compactor: cfg.Compactor,
 		vec:       memory.OpenVecIndex(db),
 	}
+}
+
+var vecBackfillDone sync.Map // *gorm.DB -> struct{}
+
+// StartVecBackfill indexes active memory_entries that have no vector yet, once
+// per DB per process, in the background. The TieredStore backfill only covers
+// tiered_memories; without this, memory_entries vectors cleared by an embed
+// scheme change (or never written) would stay missing until rewritten.
+func (r *SQLiteRepository) StartVecBackfill(logger *zap.SugaredLogger) {
+	if r == nil || r.db == nil || !r.vec.Enabled() {
+		return
+	}
+	if _, loaded := vecBackfillDone.LoadOrStore(r.db, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		n, w, err := r.BackfillVec(context.Background())
+		if logger == nil {
+			return
+		}
+		if err != nil {
+			logger.Warnw("memory_entries vec backfill failed", "err", err)
+			return
+		}
+		logger.Infow("memory_entries vec backfill finished", "already_present", n, "written", w)
+	}()
+}
+
+// BackfillVec synchronously indexes active memory_entries missing a vector.
+func (r *SQLiteRepository) BackfillVec(ctx context.Context) (int, int, error) {
+	if r == nil || !r.vec.Enabled() {
+		return 0, 0, nil
+	}
+	var models []dao.EntryModel
+	if err := r.db.WithContext(ctx).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
+		return 0, 0, err
+	}
+	items := make([]memory.VecItem, 0, len(models))
+	for _, e := range modelsToActiveEntries(models) {
+		items = append(items, memory.VecItem{ScopeKey: e.Scope.Key(), EntryID: e.ID, Content: e.Content})
+	}
+	return r.vec.BackfillMissing(ctx, items)
 }
 
 // CompactScope 对该 scope 执行语义压缩（委派给内部 MemoryCompactor，即带 pre-LLM
