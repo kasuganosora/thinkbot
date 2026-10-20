@@ -143,7 +143,7 @@ func TestInternalPolicy_ApplyClearsWhenNotSent(t *testing.T) {
 func TestInternalPurposes_Defaults(t *testing.T) {
 	want := map[string]string{
 		PurposeLazyJudge: "none", PurposeEngagementJudge: "none", PurposeDreamScore: "none", PurposeDreamCluster: "none",
-		PurposeDreamExtract: "low", PurposeMemoryDedup: "medium", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
+		PurposeDreamExtract: "low", PurposeMemoryDedup: "medium", PurposeDailyDigest: "medium", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
 		PurposeUserProfiler: "low", PurposeBotProfiler: "low", PurposeWorkflowHeal: "low", PurposeVision: "low",
 		PurposeNotify: "low",
 	}

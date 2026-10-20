@@ -48,6 +48,7 @@ const (
 	PurposeDreamCluster    = "dream_cluster"
 	PurposeDreamExtract    = "dream_extract"
 	PurposeMemoryDedup     = "memory_dedup"
+	PurposeDailyDigest     = "memory_daily_digest"
 	PurposeAutoCompact     = "auto_compact"
 	PurposeSummarizeHead   = "summarize_head"
 	PurposeUserProfiler    = "user_profiler"
@@ -72,6 +73,7 @@ var InternalPurposes = []struct {
 	{PurposeDreamCluster, "none", "dreaming theme tagging (classifier)", 0},
 	{PurposeDreamExtract, "low", "dreaming light-phase memory extraction", 0},
 	{PurposeMemoryDedup, "medium", "long-term memory cluster merge (memory_dedup); medium by default (low dropped details on 09-27, high cost ~12k output tokens/call); the cluster detail guard stays on", MemoryDedupDefaultMaxTokens},
+	{PurposeDailyDigest, "medium", "daily digest of a passive listen scope (e.g. misskey:timeline): one call per scope per day", 0},
 	{PurposeAutoCompact, "low", "automatic conversation compaction summary", 0},
 	{PurposeSummarizeHead, "low", "sliding-window head summary (subagent, /compact)", 0},
 	{PurposeUserProfiler, "low", "user profile extraction", 0},
