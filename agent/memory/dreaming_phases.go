@@ -452,7 +452,7 @@ Rules:
 2. Filter out small talk, greetings, throwaway debugging, and path/ID noise.
 3. Keep each item short and specific (≤100 characters).
 4. Output a raw JSON array and nothing else.
-5. Write each content value in Chinese (中文).`
+5. Write each content value in Chinese (中文).` + llm.SilenceRuleScope
 
 // ============================================================================
 // Phase 2: REM Sleep — 主题提取 + 模式识别

@@ -286,7 +286,7 @@ Faithfulness rules (they override everything else):
 6. The <assistant-hints> block (if any) was written by the assistant to say what it wants preserved. Hints tell you what matters; they are NOT evidence. Include a hint only as far as the transcript supports it, with the transcript's wording and status. If a hint contradicts the transcript, follow the transcript.
 7. A <previous-note> block (if any) is an earlier note about even older messages. It may contain mistakes: keep items that still matter, drop what is obsolete, never upgrade an item's certainty or status, and do not re-add items the transcript shows were resolved.
 
-Style: terse bullets, same language as the conversation, no preamble. Do not answer or continue the conversation, and do not mention that this is a summary or that context was compacted.`
+Style: terse bullets, same language as the conversation, no preamble. Do not answer or continue the conversation, and do not mention that this is a summary or that context was compacted.` + SilenceRuleScope
 
 // SelfCompactTemplate is the output structure requested from the summarizer.
 // It fits casual chat as well as task sessions: sections that do not apply

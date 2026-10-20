@@ -279,4 +279,4 @@ Rules:
 - 用户偏好Go语言开发，使用Gin框架 [ref:mem-abc123]
 - 项目使用Bazel构建系统，proto生成Go代码 [ref:mem-def456]
 - 已完成用户注册接口的软删除逻辑修复 [ref:mem-ghi789] [ref:mem-jkl012]
-</example>`
+</example>` + llm.SilenceRuleScope
