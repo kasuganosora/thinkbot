@@ -39,3 +39,34 @@ func TestEmbedSimilarityIgnoresSharedBoilerplate(t *testing.T) {
 func cosineRaw(a, b string) float64 {
 	return dotVec(rawHashVec(a), rawHashVec(b))
 }
+
+func TestNormalizeForEmbedQuoteAndAuthor(t *testing.T) {
+	cases := map[string]string{
+		"[Reply to Alice: @alice (quoted) text, with ) and https://example.org/x]\n今天的晚饭是咖喱": "今天的晚饭是咖喱",
+		"[Reply to Alice: @alice line one\n@bob line two]\nsecond line body":                 "second line body",
+		"@alice（Alice Example）：今天下雨了":                                                        "今天下雨了",
+		"@alice@example.social: 今天下雨了":                                                       "今天下雨了",
+		"@alice 今天下雨了":                                                                       "今天下雨了",
+		"觉得不错 回复@bob@example.net：同意":                                                         "觉得不错 同意",
+		"【回复 Bob：原文】好的":                                                                      "好的",
+	}
+	for in, want := range cases {
+		if got := normalizeForEmbed(in); got != want {
+			t.Errorf("normalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestEmbedSimilarityQuoteSegmentsIgnored(t *testing.T) {
+	quote := "[Reply to Alice: @alice 这是一段很长的被引用原文，讲的是周末去海边露营要带的装备清单和天气预报]\n"
+	a := quote + "我只带了帐篷"
+	b := quote + "Rust 1.99 编译器发布"
+	if s := EmbedSimilarity(a, b); s > 0.2 {
+		t.Fatalf("replies to the same quote must not look alike: %.3f (raw %.3f)", s, cosineRaw(a, b))
+	}
+	c := "@alice（Alice）：周末去海边露营要带帐篷和睡袋"
+	d := "@bob: 周末去海边露营要带帐篷和睡袋"
+	if s := EmbedSimilarity(c, d); s < 0.95 {
+		t.Fatalf("same text under different authors should match: %.3f", s)
+	}
+}
