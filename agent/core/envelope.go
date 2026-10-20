@@ -206,6 +206,13 @@ const (
 	// 由 pure-renote enricher 据此设硬权限抑制，避免生成注定失败的回复请求。
 	// 值类型 bool；仅 true 生效。
 	MetaIsPureRenote = "is_pure_renote"
+	// MetaExplicitMention marks an inbound message whose author explicitly
+	// addressed the bot (typed its @handle in the body they wrote, or replied
+	// directly to the bot's own post). Channels set it only when they can tell
+	// an explicit mention apart from mentions inherited through a reply chain.
+	// When true, the LLM stage must reply even if the model's reply-control
+	// block says send:false or is missing.
+	MetaExplicitMention = "explicit_mention"
 
 	// KVLurkMode 标记当前消息来自「潜水 / 只读」渠道。
 	//
