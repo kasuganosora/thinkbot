@@ -915,6 +915,9 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		"note_type":           noteType,
 		"channel_type":        "misskey", // Channel 类型，供 ToolSessionContext 使用
 		core.MetaIsPureRenote: isPureRenote,
+		// 作者亲手 @ 了 bot（非回复链自动继承的 mention）或直接回复 bot 的帖子：
+		// LLM 阶段据此强制回复（即使模型给出 send:false）。
+		core.MetaExplicitMention: c.explicitlyAddressed(note),
 	}
 	// 入站附件归一化为 core.Attachment，供下游 messageBuilder（主模型支持多模态时
 	// 直送 ImagePart/FilePart）与 MultimodalStage（主模型不支持多模态时经 vision 转写）消费，

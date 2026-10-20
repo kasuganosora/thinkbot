@@ -174,28 +174,126 @@ func isPrivateChat(env *core.Envelope) bool {
 	return core.NormalizeChatType(env.Message.ChatType) == core.ChatPrivate
 }
 
+// isExplicitlyAddressed reports whether a real person directly addressed the
+// bot in this message, so a reply is mandatory even when the model's
+// reply-control block says send:false or is missing.
+//
+// Generalised from the WeCom-only rule:
+//   - WeCom: group chats only deliver @-messages, so Mentioned is explicit.
+//   - Channels that can tell explicit mentions apart from inherited ones
+//     (Misskey: author typed @bot in the body, or replied to the bot's own
+//     note) set core.MetaExplicitMention.
+//   - Other channels (Telegram, Mastodon, ...) keep their existing behaviour:
+//     Mentioned alone is not enough.
+//
+// Anti-loop: messages from bot accounts and system triggers never force a reply.
+func isExplicitlyAddressed(env *core.Envelope) bool {
+	if env == nil || env.Message.FromIsBot {
+		return false
+	}
+	if env.Message.Source == core.SourceHeartbeat || env.Message.Source == core.SourceCron {
+		return false
+	}
+	if messageChannelType(&env.Message) == "wecom" {
+		return env.Message.Mentioned
+	}
+	if env.Message.Metadata != nil {
+		if b, ok := env.Message.Metadata[core.MetaExplicitMention].(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+// isMisskeyPublicMention reports a Misskey mention/reply on a non-DM note.
+// The channel frames such notes as ChatPrivate for the prompt, but they are
+// public thread replies, so the generic private-chat fail-open must not apply:
+// whether to override the model's send:false is decided solely by the
+// explicit-mention rule (forceDirectReply: author typed @bot or replied to the
+// bot's note, author is not a bot, per-thread cap). Inherited-only mentions
+// from a reply chain therefore keep the model's decision.
+func isMisskeyPublicMention(env *core.Envelope) bool {
+	if env == nil || !env.Message.Mentioned || messageChannelType(&env.Message) != "misskey" {
+		return false
+	}
+	vis, _ := env.Message.Metadata["visibility"].(string)
+	return vis != "specified"
+}
+
 // isFailOpenOnMissingControl 判断「回复控制块缺失」时是否降级为 fail-open。
 //
-// 只覆盖 `!parsed`（控制块缺失/解析失败）这一档 —— 那是格式噪音；
-// 模型**显式** send:false 的那一档不在这里，仍按模型意图 fail-closed。
-//
-// 为什么把「被真人 @ 提及」与私聊并列：
-//   - 用户 @ 了 bot 就是在跟它说话，bot 一言不发和私聊场景一样会被当成坏了
-//   - fail-closed 防的是「把内心独白当公开回复广播出去」（2026-08-17 故障）。
-//     被 @ 之后的**回复**不是广播：它落在同一段对话里，且发出前已经过
-//     publicReplyWithAudit（剥离 thinking / 内部状态 / 上下文标记 + 提取 <public>）
-//
-// ⚠️ 范围：「被 @ 即 fail-open」只对企业微信生效（企微群聊只推送 @ 消息，
-// 有界会话）。Telegram / Misskey / Mastodon 等其他渠道保持原行为：仅私聊 fail-open，
-// 避免改变既有渠道的群聊发言策略。
+// 只覆盖 `!parsed`（控制块缺失/解析失败）这一档 —— 那是格式噪音。
+// 私聊（排除 Misskey 仅回复链继承的 mention）与「被真人显式 @」（见 isExplicitlyAddressed）
+// 适用；被 @ 之后的回复不是广播，且发出前已经过 publicReplyWithAudit 清洗。
 func isFailOpenOnMissingControl(env *core.Envelope) bool {
 	if env == nil {
 		return false
 	}
-	if isPrivateChat(env) {
+	if isPrivateChat(env) && !isMisskeyPublicMention(env) {
 		return true
 	}
-	return env.Message.Mentioned && messageChannelType(&env.Message) == "wecom"
+	return isExplicitlyAddressed(env)
+}
+
+// chatContextLabel describes the conversation context for logs. Misskey marks
+// mentions/replies as ChatPrivate for prompt framing even when the note is a
+// public post, so the label is derived from the note visibility when present.
+func chatContextLabel(env *core.Envelope) string {
+	if env == nil {
+		return "unknown chat"
+	}
+	if vis, ok := env.Message.Metadata["visibility"].(string); ok && vis != "" {
+		switch vis {
+		case "public":
+			return "public post"
+		case "home":
+			return "home-timeline post"
+		case "followers":
+			return "followers-only post"
+		case "specified":
+			return "direct message"
+		}
+	}
+	if isPrivateChat(env) {
+		return "private chat"
+	}
+	return "group chat"
+}
+
+// directReplyNudge is appended to the system prompt when the bot was directly
+// addressed but the first generation produced nothing postable.
+const directReplyNudge = `
+
+[DIRECT MENTION — REPLY REQUIRED]
+The user directly @-mentioned you (or replied to your own post). You MUST answer them now.
+Write a short, natural reply inside <public>...</public> and end with @@REPLY_CONTROL@@{"send": true}.`
+
+// regenerateDirectReply re-asks the model once (no tools, single step) for a
+// short public reply when the bot was explicitly addressed but the first
+// output had nothing postable. Returns "" if it still yields nothing.
+func (s *LLMStage) regenerateDirectReply(ctx context.Context, cfg *llm.OrchestrateConfig, env *core.Envelope) string {
+	if cfg == nil || s.provider == nil {
+		return ""
+	}
+	retry := *cfg
+	retry.Params = cfg.Params
+	retry.Params.System = cfg.Params.System + directReplyNudge
+	retry.Params.Tools = nil
+	retry.Params.ToolChoice = nil
+	retry.MaxSteps = 0
+	retry.HardMaxSteps = 0
+	retry.OnFinish, retry.OnStep, retry.PrepareStep = nil, nil, nil
+	res, err := llm.OrchestrateGenerate(ctx, s.provider, &retry)
+	if err != nil || res == nil {
+		traceid.WithLoggerFrom(ctx, s.logger).Warnw("direct mention: regenerate failed",
+			"message_id", env.Message.ID, "err", err)
+		return ""
+	}
+	text := CleanOutboundText(res.Text)
+	if _, clean, ok := parseReplyControl(text); ok {
+		text = clean
+	}
+	return strings.TrimSpace(s.publicReplyWithAudit(ctx, env, text))
 }
 
 // buildLurkPrompt 构建潜水观察者 prompt：优先用 SOUL.md 人格内容，否则回退到已注入的
@@ -247,7 +345,8 @@ Rules:
 - When send:false, do NOT narrate "I won't reply" as a public message — just set send:false. Any text before the control line (inside or outside tags) is treated as a private note and will NOT be posted.
 - The control line itself is stripped before posting; users never see it.
 - Put the actual reply text BEFORE the control line. The control line must be the very last thing you output.
-- In a 1:1 private/direct chat (one person talking to you alone) you should almost always reply with send:true. A silent bot in a private chat looks broken to the user; only set send:false if the user explicitly asks you not to respond.`
+- In a 1:1 private/direct chat (one person talking to you alone) you should almost always reply with send:true. A silent bot in a private chat looks broken to the user; only set send:false if the user explicitly asks you not to respond.
+- If the user directly @-mentions you by name in what they wrote (or replies to your own post), they are talking to you: you MUST answer with send:true, even inside someone else's thread and even while you are otherwise just browsing. Being carried along in a thread's automatic mentions alone is not a direct mention.`
 
 // replyControlSignal 是回复控制块的结构化产出。
 type replyControlSignal struct {
@@ -596,6 +695,15 @@ func (s *LLMStage) emitLurkNote(env *core.Envelope, result *llm.GenerateResult) 
 
 // LLMConfig 配置 LLM Stage。
 type LLMConfig struct {
+	// ForcedReplyMaxPerThread caps how many replies an explicit @mention may
+	// force (overriding the model's send:false) per thread within
+	// ForcedReplyWindow. Beyond the cap the model's own decision stands.
+	// 0 = default (3); negative = disable forcing entirely.
+	ForcedReplyMaxPerThread int
+	// ForcedReplyWindow is the sliding window for ForcedReplyMaxPerThread.
+	// 0 = default (10m).
+	ForcedReplyWindow time.Duration
+
 	// SystemPrompt 系统提示词。
 	SystemPrompt string
 	// MaxSteps Orchestrate 软预算步数（0=单次, >0=多步, -1=无限）。
@@ -735,7 +843,9 @@ type LLMStage struct {
 	provider llm.Provider
 	config   LLMConfig
 	tracer   trace.Tracer
-	logger   *zap.SugaredLogger
+	// forcedReplies per-thread limiter for mention-forced replies.
+	forcedReplies forcedReplyLimiter
+	logger        *zap.SugaredLogger
 	// compactors 按会话(sid)隔离的 *llm.Compactor 实例。主链路压缩钩子需要跨轮
 	// 持久化摘要状态（previousSummary 增量更新），故以 sid 为 key 惰性创建；
 	// sync.Map 免锁，生命周期与 bot 进程同寿（并发会话数有界，无泄漏风险）。
@@ -1502,7 +1612,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			// 注意：不设置 KVCaptureSuppressedExchange——私聊是要说话的，不是「想了不说」。
 			span.SetAttributes(attribute.Bool("reply.private_bypass_soft_gate", true))
 			logger.Infow("private chat: bypassing soft suppress gate (will reply)",
-				"message_id", env.Message.ID, "original_reason", reason)
+				"message_id", env.Message.ID, "chat", chatContextLabel(env), "original_reason", reason)
 		} else {
 			// 非私聊软门：模型显式 send:true 可覆盖（确定性意图优先），否则 fail-closed 静默。
 			override := s.config.RequireReplyControl && modelExplicitlySends(result.Text)
@@ -1538,6 +1648,8 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 若 send:false，这里已提前 return，独白绝不外发。
 	if s.config.RequireReplyControl && !env.IsOutreach() {
 		send, clean, parsed := parseReplyControl(replyText)
+		// 被显式 @ 的强制回复：每条消息至多判定一次（判定即占用一次 per-thread 限额）。
+		forcedOnce := sync.OnceValue(func() bool { return s.forceDirectReply(env) })
 		switch {
 		case !parsed:
 			// 控制块缺失或解析失败。先做一次降级判定：模型偶发漏掉结尾控制行，但已用
@@ -1546,10 +1658,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			// 不做这个降级，就会因为一行格式噪音把「真人 @ 提及」的回复整条静默吞掉
 			// （实测 GLM 漏控制行 + 重复 <public> 开标签，导致被 @ 后完全没回复）。
 			pub := explicitPublicReply(replyText)
-			if pub == "" && isFailOpenOnMissingControl(env) {
+			if pub == "" && ((isPrivateChat(env) && !isMisskeyPublicMention(env)) || forcedOnce()) {
 				// 兜底：缺失控制块也不该让 bot 一言不发（用户会以为 bot 坏了），
 				// 把清洗后的纯文本当作回复发出（剥离 thinking/内部标记/私密标签）。
 				pub = s.publicReplyWithAudit(ctx, env, clean)
+			}
+			if strings.TrimSpace(pub) == "" && forcedOnce() {
+				// 被显式 @ 却无可发内容：再问一次，绝不发空。
+				pub = s.regenerateDirectReply(ctx, cfg, env)
+				span.SetAttributes(attribute.Bool("reply.direct_mention_regenerated", true))
 			}
 			if pub == "" {
 				// 无显式公开区、且私聊兜底也无内容 → fail-closed，不出站（独白绝不外发）。
@@ -1582,22 +1699,30 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				}
 				break
 			}
-			if isPrivateChat(env) {
+			forced := forcedOnce()
+			if forced || (isPrivateChat(env) && !isMisskeyPublicMention(env)) {
+				// 被显式 @（作者亲手 @bot / 回复 bot 帖子）：必须回复，忽略 send:false。
 				// 私聊（1:1）反转为 fail-open：私聊里 bot 一言不发会让用户以为 bot 坏了，
 				// 且私聊无「把内心独白发到公共时间线」的泄露风险。尽量提取可发内容（<public>
 				// 优先，否则清洗后的纯文本）；提取不到任何内容（如模型只写了 <internal> 私密
 				// 心话而无 <public>）时才仍不发出——那是「没话可说」，而非「拒绝回复」。
 				pub := s.publicReplyWithAudit(ctx, env, clean)
+				if strings.TrimSpace(pub) == "" && forced {
+					pub = s.regenerateDirectReply(ctx, cfg, env)
+					span.SetAttributes(attribute.Bool("reply.direct_mention_regenerated", true))
+				}
 				if strings.TrimSpace(pub) == "" {
 					span.SetAttributes(attribute.Bool("reply.private_no_postable_content", true))
-					logger.Infow("reply suppressed: private chat but no postable content",
-						"message_id", env.Message.ID)
+					logger.Infow("reply suppressed: no postable content after send:false override",
+						"message_id", env.Message.ID, "chat", chatContextLabel(env))
 					env.Set("llm.result", result)
 					return env, nil
 				}
 				span.SetAttributes(attribute.Bool("reply.private_fail_open", true))
-				logger.Infow("reply-control send:false overridden in private 1:1 chat (fail-open)",
-					"message_id", env.Message.ID)
+				span.SetAttributes(attribute.Bool("reply.direct_mention_forced", forced))
+				logger.Infow("reply-control send:false overridden (fail-open)",
+					"message_id", env.Message.ID, "chat", chatContextLabel(env),
+					"direct_mention", forced)
 				replyText = pub
 			} else {
 				span.SetAttributes(attribute.Bool("reply.model_declined", true))
@@ -1610,6 +1735,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		default:
 			// send:true —— 提取应公开发送的内容（见 extractPublicReply 的三态逻辑）。
 			replyText = s.publicReplyWithAudit(ctx, env, clean)
+			if strings.TrimSpace(replyText) == "" && forcedOnce() {
+				replyText = s.regenerateDirectReply(ctx, cfg, env)
+			}
 			if strings.TrimSpace(replyText) == "" {
 				// send:true 但提取不到公开内容：模型只写了 <internal>（忘了 <public>），
 				// 或正文确实为空。两种情况都不应外发（fail-closed，绝不泄漏私密）。
