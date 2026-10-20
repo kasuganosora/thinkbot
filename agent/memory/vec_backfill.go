@@ -65,6 +65,10 @@ func (v *VecIndex) BackfillMissing(ctx context.Context, table string, items []Ve
 	if !v.Enabled() {
 		return st, nil
 	}
+	// One backfill per DB at a time: the app-level run and a bot's TieredStore
+	// run wait for each other; the later one finds the rows present.
+	v.backfillMu.Lock()
+	defer v.backfillMu.Unlock()
 	started := time.Now()
 	present, err := v.listEntryIDs(ctx)
 	if err != nil {
