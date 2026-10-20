@@ -32,6 +32,7 @@ const (
 	ChannelTelegram = "telegram"
 	ChannelMisskey  = "misskey"
 	ChannelMastodon = "mastodon"
+	ChannelWecom    = "wecom"
 )
 
 // session_kind 取值。空串表示未分类（历史 web 会话），由后续回填。
@@ -80,6 +81,12 @@ func MastodonDMKey(accountID string) string { return ChannelMastodon + ":dm:" + 
 // MastodonTimelineKey 是公开时间线会话的 external_key（全局唯一，不按天分片）。
 // 与 Misskey 一致：入站旁听不建会话，保留给后续 fork/reclaim 或手动运维查询。
 func MastodonTimelineKey() string { return ChannelMastodon + ":timeline:global" }
+
+// ⚠️ 企业微信**没有** WecomChatKey / WecomDMKey：它的 external_key 就是
+// `msg.Channel`（`wecom:chat:<chatid>` / `wecom:dm:<userid>`），由 channel/wecom 在
+// 入站时一次成型 —— 同一个字符串还要承担出站寻址（含 chat_type）。
+// 前缀的真值在 `channel/wecom.PrefixChat` / `PrefixDM`（已导出），
+// api 层的 wecomSessionTarget 直接引用它，不再另建一份拼接函数，避免两处漂移。
 
 // WebDefaultKey 构造 Web 兜底会话的 external_key：`web:default:<userID>`。
 //

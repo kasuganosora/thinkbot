@@ -139,7 +139,7 @@ type outboundState struct {
 
 // outboundPlatforms 是出站开关覆盖的渠道类型。
 // 与前端平台下拉保持一致；"*" 表示一次性覆盖全部渠道。
-var outboundPlatforms = []string{"*", "web", "telegram", "misskey", "mastodon"}
+var outboundPlatforms = []string{"*", "web", "telegram", "misskey", "mastodon", "wecom"}
 
 // handleListBotTools 列出某Bot 已注册的全部工具（名称+描述+分类），
 // 用于工具权限页面的工具选择器。

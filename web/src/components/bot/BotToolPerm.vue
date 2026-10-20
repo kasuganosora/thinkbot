@@ -426,7 +426,7 @@ const saving = ref(false)
 const resetting = ref(false)
 
 // 已知平台（用于概览与下拉）；后端不限制取值，故下拉可自由输入
-const KNOWN_PLATFORMS = ['web', 'telegram', 'misskey', 'mastodon']
+const KNOWN_PLATFORMS = ['web', 'telegram', 'misskey', 'mastodon', 'wecom']
 
 // 后端用这个保留工具名把「渠道发言」建模成一条可授权能力（见 toolperm/outbound.go）。
 // 它不是真实工具，在规则列表里需要特殊渲染，也不应出现在工具选择器中。
@@ -436,7 +436,8 @@ const platformOptions = [
   { label: 'web', value: 'web' },
   { label: 'telegram', value: 'telegram' },
   { label: 'misskey', value: 'misskey' },
-  { label: 'mastodon', value: 'mastodon' }
+  { label: 'mastodon', value: 'mastodon' },
+  { label: '企业微信', value: 'wecom' }
 ]
 
 function platClass(p) {
@@ -996,6 +997,7 @@ async function confirmSave() {
 .pf-telegram { background: var(--bp-accent-soft); color: var(--bp-accent); }
 .pf-misskey  { background: var(--bp-success-soft); color: var(--bp-success); }
 .pf-mastodon { background: var(--bp-success-soft); color: var(--bp-success); }
+.pf-wecom    { background: var(--bp-accent-soft); color: var(--bp-accent); }
 .pf-all      { background: var(--bp-accent-soft); color: var(--bp-accent); }
 .pf-other    { background: var(--bp-surface-fill); color: var(--bp-label-tertiary); }
 
