@@ -604,6 +604,9 @@ func (r *SQLiteRepository) charBudget(scope memory.Scope) int {
 // 超预算的 scope 每 5 分钟就把全部条目重新送一遍 LLM）。冷却持久化在 memory_compact_states，重启不重置。
 // 非阻塞调用方；内部已做并发重入保护与冷却，压缩失败不影响正常写入。
 func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope) {
+	if isListenScope(scope) {
+		return // 被动收听 scope 按天摘要（DailyDigester），不做滚动去重
+	}
 	unchecked, err := r.CountUncheckedDedup(ctx, scope)
 	if err != nil || unchecked == 0 {
 		return

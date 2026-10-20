@@ -1112,10 +1112,16 @@ func (c *MastodonChannel) getIngress() *inbound.Ingress {
 // 否则 user_choice 会把 ChatID 记成 mastodon:timeline，投票者对不上永远超时。
 func mastodonIngressChannelID(eventType string, mentioned bool, visibility, userID string) string {
 	if eventType == "timeline" && !mentioned && visibility != VisibilityDirect {
-		return "mastodon:timeline"
+		return TimelineChannelID
 	}
 	return userID
 }
+
+// TimelineChannelID 是 timeline 普通帖共用的 Message.Channel（被动收听信息流，
+// 记忆按天生成摘要，见 core.RegisterListenChannel）。
+const TimelineChannelID = "mastodon:timeline"
+
+func init() { core.RegisterListenChannel(TimelineChannelID) }
 
 // Stop 优雅停止 streaming。
 func (c *MastodonChannel) Stop(ctx context.Context) error {
