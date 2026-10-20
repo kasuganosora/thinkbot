@@ -8,7 +8,7 @@ this change are not comparable, so the scheme is versioned.
 ## Upgrade (automatic)
 
 - `memory_vec_meta(key, value)` stores `embed_version` (currently
-  `bigram-norm-v2`).
+  `bigram-norm-v3`).
 - On startup `OpenVecIndex` compares it. On mismatch (or a missing table) it
   drops and recreates `memory_vec` (empty) and stamps the current version.
 - Two background backfills then refill it, writing only `entry_id`s that are
