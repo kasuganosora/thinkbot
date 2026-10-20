@@ -33,6 +33,18 @@ Plain stdlib line when the scheme check empties the table:
 INFO memory_vec_scheme_reset table=memory_vec old="bigram-norm-v2" new="bigram-norm-v3" cleared=5895
 ```
 
+Plain stdlib line when the first `OpenVecIndex` of a process finds several
+rows for one `entry_id` (left by the concurrent-backfill bug fixed after
+de18e9c); extras are deleted, the lowest rowid is kept:
+
+```
+INFO memory_vec_dedup_rows removed=1231 rows_before=3847 distinct_ids=2616
+```
+
+All `VecIndex` instances of one database share one write lock, and backfill
+runs on one database are serialized (a bot's TieredStore backfill waits for the
+app-level run and then finds the rows present).
+
 zap (JSON in production) for each table, `table` = `tiered_memories` or
 `memory_entries`:
 
