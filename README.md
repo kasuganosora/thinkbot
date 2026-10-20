@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [Русский](README.ru.md)
+
 <p align="center">
   <img src="web/public/icon-app.svg" alt="thinkbot" width="128" height="128" />
 </p>
@@ -13,180 +15,182 @@
 </p>
 
 <p align="center">
-  <b>服务器出了问题，它第一个找到你——而且你可以直接跟它聊这个问题。</b><br/>
-  开源、自托管的长期在线 AI 伙伴：会聊天、会记事、会动手。
+  <b>When your server has a problem, it reaches you first, and you can talk to it about the problem.</b><br/>
+  An open-source, self-hosted AI companion that stays online: it chats, remembers, and gets things done.
 </p>
 
 <p align="center">
-  <b>简体中文</b> · <a href="README.en.md">English</a> · <a href="#快速开始">快速开始</a> · <a href="docs/configuration.md">配置</a> · <a href="docs/deploy.md">部署</a>
+  <a href="README.zh-CN.md">简体中文</a> · <b>English</b> · <a href="#quick-start">Quick start</a> · <a href="docs/configuration.md">Configuration</a> · <a href="docs/deploy.md">Deployment</a>
 </p>
 
 ---
 
-你在 Telegram 里跟它聊天，它记得你说过的话；硬盘、RAID、部署脚本出了状况，它会主动发消息告诉你，你回一句「严重吗？」它就接着聊。它还能在自己的沙箱里跑命令、查网页、改代码，干完把结果告诉你。
+You chat with it in Telegram, and it remembers what you told it. When a disk, a RAID array, or a deploy script runs into trouble, it messages you first. Reply "is this serious?" and it picks up from there. It can also run commands in its own sandbox, look things up on the web, and edit code, then tell you how it went.
 
-thinkbot 适合想要一个**自己掌控的 AI 助手**的人：个人开发者、自己维护服务器的人、想在群里或 Fediverse 上养一个 bot 的人。一条 `docker compose` 就能跑起来，数据都在你自己的机器上。
+thinkbot is for people who want an **AI assistant they control**: indie developers, people who run their own servers, and anyone who wants a bot in a group chat or on the Fediverse. A single `docker compose` command starts it, and your data stays on your own machine.
 
 ```text
-🤖 [server-1/smartd · INFO] sda、sdb 各发来一条 SMART EmailTest。
-   这是 smartd 在测试通知通道，不是故障，两块盘都正常。
-🙋 嗯，在测试
-🤖 好。sda 和 sdb 都发了一条，说明两块盘的告警通道都是通的——
-   以后真有 SMART 问题，会第一时间到你这儿。
+🤖 [server-1/smartd · INFO] sda and sdb each sent a SMART EmailTest.
+   That's smartd testing the notification channel, not a fault. Both disks are fine.
+🙋 yes, they're testing
+🤖 Got it. sda and sdb each sent one, so the alert channel works for both disks.
+   If a real SMART problem shows up, you'll hear about it right away.
 ```
 
-## 它是谁
+## Meet thinkbot
 
-thinkbot 不只是一个「有问必答」的助手。它有自己的人格（你来写），记得你们聊过的事，会在群里自然地插两句，也会在服务器出事时第一个来找你。它不追求每句话都回，而是想做一个**一直在线、有分寸、靠得住的伙伴**。
+thinkbot isn't just an assistant that answers whatever you ask. It has a personality (you write it), remembers what you've talked about, chimes in naturally in group chats, and is the first to find you when a server goes wrong. It doesn't try to reply to everything; it aims to be an **always-on companion that knows when to speak and can be relied on**.
 
-## 亮点一览
+## Highlights
 
-- **有性格，不是客服腔**：人格写在 SOUL.md 里，说话方式、口癖、兴趣都由你定；聊天、水群、报告告警都用同一种口吻。
-- **会水群，也懂得闭嘴**：群里不必每次都 @ 它。它按「聊天节奏」决定要不要接话：有发言倾向、连发防抖和连续发言上限，被 @ 或被回复则一定回应。
+- **A personality, not a help-desk voice**: its persona lives in SOUL.md, so you decide how it talks, its quirks and its interests. It uses the same voice for small talk, group banter and alert reports.
+- **Hangs out in group chats, and knows when to stay quiet**: you don't have to @ it every time. Its chat rhythm settings decide whether it joins in: a speaking tendency, debouncing for bursts of messages, and a cap on consecutive replies. When someone mentions or replies to it, it always answers.
 
-- **会主动找你**：服务器告警、部署结果、你让它记着的提醒，它会主动发到你的 Telegram，而不是躺在日志里。
-- **记得住，也忘得掉**：分层长期记忆，几周前聊过的事还能接上；你说「忘掉这件事」，它就真的删掉，不会再学回来。
-- **真能动手**：每个 bot 有自己的沙箱容器，可以执行命令、读写文件、开浏览器、联网搜索和抓网页，还能加载技能和 MCP 工具。
-- **一个部署，多处聊**：Web、Telegram、Misskey、Mastodon 共用同一个 bot，跨平台上下文接得上；一个部署里可以养多个人格不同的 bot。
-- **模型自己选**：OpenAI 兼容接口（如 DeepSeek）、OpenAI Responses、Anthropic、Gemini，在网页上点几下就能换。
-- **你说了算**：自托管、数据存本地 SQLite；工具权限、用量额度、用户管理都在 Web 管理台里。
+- **It reaches out to you**: server alerts, deploy results, and reminders you ask for land in your Telegram chat instead of sitting in a log file.
+- **It remembers, and forgets on request**: layered long-term memory picks up conversations from weeks ago. Tell it to forget something and it deletes it, and it won't learn it back later. You control your privacy.
+- **It can actually do things**: each bot has its own sandbox container where it can run commands, read and write files, use a browser, and search and fetch web pages. You can add skills and MCP tools too.
+- **One deployment, many places to chat**: Web, Telegram, Misskey and Mastodon share the same bot, and context follows you across platforms. One deployment can host several bots, each with its own personality.
+- **Pick your model**: OpenAI-compatible APIs (such as DeepSeek), OpenAI Responses, Anthropic, or Gemini. Switching takes a few clicks in the web UI.
+- **You're in charge**: it's self-hosted and keeps its data in a local SQLite file. Tool permissions, usage quotas and user management all live in the web admin console.
 
-## 支持的平台
+## Supported platforms
 
-| 平台 | 状态 | 能做什么 |
+| Platform | Status | What it can do |
 |---|---|---|
-| Web | ✅ 可用 | 内置聊天界面 + 管理台，可看工具调用过程、沙箱终端与桌面 |
-| Telegram | ✅ 可用 | 私聊、群聊（@它或回复它）；发图 / 发文件；群管理工具（置顶、删消息、封禁等，需在工具权限中开启）；**接收服务器告警** |
-| Misskey | ✅ 可用 | 回复提及、旁听时间线；发帖、反应、转发、关注、搜索、投票 |
-| Mastodon | 🚧 开发中 | 代码已合并，尚未在生产环境测试。回复提及与回复、可选订阅时间线；发帖、收藏、转发等。实例地址和 Access Token 在 Web 管理台「Bot 设置 → 平台」里配置 |
+| Web | ✅ Available | Built-in chat UI and admin console. Shows tool calls, plus the sandbox terminal and desktop |
+| Telegram | ✅ Available | Private and group chats (mention it or reply to it); sends photos and files; group admin tools (pin, delete, ban…, enabled in tool permissions); **receives server alerts** |
+| Misskey | ✅ Available | Replies to mentions, can follow timelines; posts, reacts, renotes, follows, searches, runs polls |
+| Mastodon | 🚧 In development | Code merged, not yet tested in production. Replies to mentions and replies, optional timeline streams; posting, favourites, boosts and more. Set the instance URL and access token in the web UI under Bot Settings → Platforms |
 
-## 用它来做什么
+## What you can do with it
 
-### 1. 服务器出了问题，它第一个找到你
+### 1. When your server has a problem, it reaches you first
 
-smartd、mdadm、cron、备份或部署脚本调用一下 `thinkbot-notify`，告警就会以 bot 自己的口吻发到**你平时跟它聊天的那个 Telegram 对话**里。告警会记进对话历史，所以你可以直接追问，它知道你在说哪条。
+Have smartd, mdadm, cron, a backup job or a deploy script call `thinkbot-notify`. The alert arrives in the bot's own words, in **the same Telegram chat you already use with it**. Alerts are saved to the chat history, so you can ask follow-up questions and the bot knows which alert you mean.
 
 ```text
 🤖 [server-1/mdadm · INFO] RebuildFinished on /dev/md/md3 (mismatches found: 140672)
-   md3 的例行校验跑完了，发现 140672 处不一致；阵列仍是 [UU]，两块盘都在线。
-   不紧急，建议抽空看看。
-🙋 不用处理
-🤖 好的。
+   The routine check on md3 finished with 140672 mismatches. The array is still [UU]
+   and both disks are online. Nothing urgent, but worth a look when you have time.
+🙋 no action needed
+🤖 OK.
 
-        ……第二天……
+        …the next day…
 
 🤖 [server-1/mdadm · WARN] RebuildStarted on /dev/md/md3
-   md3 又开始校验了。不过进度停在 89.6%，速度 0K/sec，看起来像卡住了，
-   建议确认一下是不是挂起了。
+   md3 started another check, but progress is stuck at 89.6% at 0K/sec.
+   It looks hung. Worth checking.
 
-        ……之后……
+        …later…
 
 🤖 [server-1/mdadm · INFO] RebuildFinished on /dev/md/md3 (mismatches found: 32384)
-   这次跑完了，不一致降到 32384，阵列健康。
+   This one finished. Mismatches are down to 32384 and the array is healthy.
 ```
 
-部署脚本同理：最后一步把结果发给 bot，你回「有报错吗？」就能接着问（它依据通知里带的内容回答）。接入步骤见 [配置 › 告警通知快速接入](docs/configuration.md#告警通知notify快速接入)。
+Deploy scripts work the same way: send the result to the bot as the last step, then reply "any errors?" to keep going. It answers based on what the notification contained. Setup steps: [Configuration › notify quick setup](docs/configuration.md#告警通知notify快速接入).
 
-> 通知走独立通道：不会被 bot 的「这条不回复」逻辑吞掉；模型出错或超时会退回原文发送；warn / critical 一定附上原始告警文本；同一告警会去重和限流。目前只投递到 Telegram。
+> Notifications have their own delivery path. The bot's "don't reply to this" logic can't swallow them. If the model fails or times out, the raw text is sent instead. warn and critical alerts always include the original alert text. Repeated alerts are deduplicated and rate limited. Delivery is Telegram-only for now.
 
-### 2. 交给它一件多步骤的活
+### 2. Hand it a multi-step job
 
 ```text
-🙋 在 blog-app 里对本地那个提交跑一下 eslint 和 vitest，没问题就推上去
-🤖 缺依赖，先装上了。
-   ESLint 报了 2 个错，但基线提交上就有，我单独开了一个提交修掉。
-   vitest 有 1 个失败，在基线上同样失败，和这次改动无关。
-   第一次 push 失败了，查了下远端配置，修正后已推送。
-   小结：改动 8 个文件，ESLint 0 错误，已推送。
+🙋 Run eslint and vitest on my local commit in blog-app, and push if it's clean
+🤖 Some dependencies were missing, so I installed them.
+   ESLint found 2 errors, but they already exist on the base commit, so I fixed them
+   in a separate commit.
+   1 vitest test fails, and it fails on the base commit too, so it's unrelated.
+   The first push failed. I checked the remote config, fixed it, and pushed.
+   Summary: 8 files changed, 0 ESLint errors, pushed.
 ```
 
-命令都在这个 bot 自己的沙箱容器里执行，不碰宿主机。
+Every command runs inside that bot's own sandbox container, never on the host.
 
-### 3. 帮你查资料，并给出出处
+### 3. Look things up, with sources
 
 ```text
-🙋 这次别凭印象，真的去网上查一下 X 今天发布的更新说明
-🤖 查到了，以官方发布页为准：…… 主要变化有三点：……
-   来源：X 官方发布说明页面（链接）
+🙋 Don't go from memory this time. Actually search the web for today's release notes for X
+🤖 Found them. This is based on the official release page: … The three main changes are: …
+   Source: X's official release notes page (link)
 ```
 
-内置 `web_search` / `web_fetch`，搜索后端可在「系统设置 → 搜索」里配置，失败时自动换下一家。
+`web_search` and `web_fetch` are built in. You can configure search backends under System Settings → Search, and it falls back to the next one if a backend fails.
 
-### 4. 用技能做事
+### 4. Use skills
 
 ```text
-🙋 用 use_skill 加载一下代码评审的技能，告诉我它的第一原则是什么
-🤖 已加载。它的第一原则是：……
+🙋 Load the code-review skill with use_skill and tell me its first principle
+🤖 Loaded. Its first principle is: …
 ```
 
-技能就是一个带 `SKILL.md` 的目录，放进 `skills/` 或在管理台里添加即可。
+A skill is a folder with a `SKILL.md` file in it. Put it in `skills/` or add it from the admin console.
 
-### 5. 记得你，也尊重你的「忘掉」
+### 5. It remembers you, and forgets when you ask
 
 ```text
-        ……三周前……
-🙋 我的咖啡一般是燕麦拿铁，少糖
-🙋 最近在业余写一个记账小程序
+        …three weeks ago…
+🙋 My usual coffee is an oat latte, light on sugar
+🙋 I'm building a little budgeting app on the side
 
-        ……今天……
-🙋 早上好，帮我想想今天先做什么
-🤖 早！要不先来杯少糖燕麦拿铁 ☕ 然后把记账小程序上次卡住的导出功能收个尾？
+        …today…
+🙋 Morning! Help me figure out what to do first today
+🤖 Morning! Maybe start with a light-sugar oat latte ☕, then finish the export
+   feature you got stuck on in the budgeting app?
 
-🙋 之前那个周末旅行计划，相关的都忘掉吧
-🤖 好，旅行计划相关的记忆已经删掉了，以后不会再提。
+🙋 Forget everything about that weekend trip plan
+🤖 Done. I've deleted the memories about the trip plan and won't bring it up again.
 ```
 
-### 6. 陪你玩
+### 6. Have fun with it
 
-- **有人格地闲聊**：在「Bot 设置 → 人格」写它的 SOUL.md（性格、说话方式），聊动画、聊游戏都按这个人设来。
-- **一起跑文字冒险**：它可以抛出选项让你选——Telegram 里是按钮，Misskey 里是原生投票，Web 里是卡片。
-- **发图给它看**：主模型支持图片，或配置了视觉模型时，它能看懂你发的截图和梗图。发贴纸时它看到的是贴纸对应的表情，可以顺着接梗。
-- **在群里当个帮手**：被 @ 或被回复时一定回应；平时怎么接话见下面的「在群里水群」。
+- **Chat with a persona**: write its SOUL.md (personality, way of talking) under Bot Settings → Persona, and it stays in character whether you're talking anime or games.
+- **Play a text adventure**: it can give you choices to pick from. Telegram shows them as buttons, Misskey as a native poll, and the Web UI as a card.
+- **Show it pictures**: if the main model supports images, or you've set up a vision model, it can read your screenshots and memes. For stickers it sees the sticker's emoji, so it can play along with that.
+- **Help out in a group**: it always answers when someone mentions or replies to it. For how it joins in otherwise, see "Hang out in group chats" below.
 
-### 7. 在群里水群
+### 7. Hang out in group chats
 
-把它拉进 Telegram 群，不用每句都 @ 它：群里的普通消息也会经过它的「聊天节奏」判断，它会挑一部分自然地接上，其余的只听不说（听到的内容照样可以记下来）。
+Add it to a Telegram group and you don't need to @ it every time. Ordinary group messages also go through its chat rhythm: it picks some of them to answer naturally and just listens to the rest (it can still remember what it heard).
 
 ```text
-🧑 阿杰：周末有人去漫展吗
-🧑 小林：去！就是还没想好 cos 谁
-🤖 小林可以考虑去年那部机甲番的女主，道具好做，人还少
-🧑 阿杰：哈哈它居然也懂
-🧑 小林：@thinkbot 那你说要不要带假发
-🤖 带吧，现场一出汗，自己的头发肯定先塌
+🧑 Jay: anyone going to the comic con this weekend?
+🧑 Lin: me! still haven't decided who to cosplay though
+🤖 Lin, how about the lead from last year's mecha show? The props are easy and hardly anyone does her
+🧑 Jay: lol it actually knows this stuff
+🧑 Lin: @thinkbot should I bring a wig?
+🤖 Bring one. Once you start sweating, your own hair will be the first thing to collapse
 ```
 
-在「Bot 设置 → 平台 → 聊天节奏」里按会话类型（单聊 / 群聊 / 频道）调节：
+Tune it per chat type (private / group / channel) under Bot Settings → Platforms → Chat rhythm:
 
-- **发言倾向**（0.01–1.0，群聊默认 0.4）：对没有 @ 它的消息，按这个概率决定开不开口；1.0 等于每条都回。
-- **防抖静默等待**（群聊默认 3 秒）：有人连发几条时当作一段话，不会每条都插嘴。
-- **连续发言上限**（群聊默认 3）：连着说了几轮就先停一停，避免霸屏。
-- 被 **@ 或被回复** 时不受这些限制，一定回应；单聊默认关闭节奏，即时回复；Web 聊天不受节奏影响。
+- **Speaking tendency** (0.01–1.0, groups default to 0.4): for messages that don't mention it, the chance that it speaks up. 1.0 means it replies to everything.
+- **Debounce quiet wait** (groups default to 3 s): several messages in a row are treated as one, so it doesn't jump in after each line.
+- **Consecutive reply cap** (groups default to 3): after a few turns in a row it holds back so it doesn't take over the chat.
+- Mentions and replies to the bot skip these limits and always get an answer. Private chats have rhythm off by default (instant replies), and web chat is never throttled.
 
-另外，它自己也可以判断「这条不用回」，只记下不说话。Misskey / Mastodon 的时间线帖子还可以开启「主动参与」（`engagement.*` 配置，内置 observer / lurker / moderator / active 几档预设），按相关度评分和频率限制决定要不要参与，见 [docs/configuration.md](docs/configuration.md)。
+It can also decide on its own that a message needs no reply and just take note of it. For Misskey / Mastodon timeline posts you can additionally turn on proactive engagement (`engagement.*` settings, with observer / lurker / moderator / active presets), which scores relevance and applies rate limits before it joins in. See [docs/configuration.md](docs/configuration.md).
 
-### 8. 更多玩法
+### 8. More ways to use it
 
-- **一个部署，多个 bot**：每个 bot 有自己的人格、模型、记忆、沙箱容器和平台账号，互不串台。
-- **一个 bot，多个平台**：同一个 bot 同时挂在 Telegram 和 Misskey 上，在一边聊过的事，另一边也接得上（Mastodon 支持开发中：代码已合并，尚未在生产环境测试）。
-- **定时与提醒**：可以让它「明早 9 点提醒我」，或用定时任务让它按计划自己干活。
+- **Several bots in one deployment**: each bot has its own persona, model, memory, sandbox container and platform accounts, and they stay separate.
+- **One bot on several platforms**: the same bot can run on Telegram and Misskey at once, and what you talked about on one side carries over to the other (Mastodon support is in development: code merged, not yet tested in production).
+- **Reminders and schedules**: ask it to "remind me at 9 tomorrow morning", or set up scheduled jobs so it works on a timetable.
 
-## 记忆是怎么工作的
+## How memory works
 
-简单说，像人一样分「短期」和「长期」：
+In short, it has short-term and long-term memory, a bit like a person:
 
-1. **记下来**：聊天中值得记的内容先进入短期记忆（约两周后过期）。
-2. **整理**：后台定期把短期记忆提炼成长期记忆（事实、偏好），去重、合并、更新。还可以开启「梦境」：每天夜里给最近的记忆打分，重要的留下，琐碎的随时间淡出，顺便更新它对你的印象。
-3. **想起来**：回复前，它会找出和当前话题相关的记忆一起参考——按意思相近匹配，所以几周前提过的爱好，聊到相关话题时会自己冒出来。
-4. **忘掉**：让它忘掉某件事，相关记忆会被删除，并留下记号防止日后重新学回来。管理员也能在「Bot 设置 → 记忆」里逐条查看和删除。
+1. **Noting things down**: things worth remembering from a chat go into short-term memory first, which expires after about two weeks.
+2. **Tidying up**: a background job regularly turns short-term memories into long-term ones (facts, preferences), merging duplicates and updating old ones. You can also turn on "dreaming": every night it scores recent memories, keeps the important ones and lets trivial ones fade, and updates its picture of you along the way.
+3. **Recalling**: before it replies, it pulls up memories related to the current topic and matches them by meaning. So a hobby you mentioned weeks ago comes back on its own when a related topic comes up.
+4. **Forgetting**: ask it to forget something and the related memories are deleted, with a marker left so it doesn't learn them back later. Admins can also view and delete individual memories under Bot Settings → Memory.
 
-长对话可以自动压缩成摘要继续聊；管理员还能用 `/compact` 精简当前会话、`/clear` 从头开始。详见 [docs/memory.md](docs/memory.md)。
+Long conversations are condensed into a summary automatically so the chat can keep going. Admins can also trim the current conversation with `/compact` or start over with `/clear`. More in [docs/memory.md](docs/memory.md).
 
-## 快速开始
+## Quick start
 
-需要：一台装了 Docker（含 `docker compose` 插件，v2.24 或更新）的机器、一个模型 API Key、（可选）一个 Telegram Bot Token（找 [@BotFather](https://t.me/BotFather) 要）。
+You need a machine with Docker (including the `docker compose` plugin, v2.24 or newer), an API key for a model provider, and (optionally) a Telegram bot token from [@BotFather](https://t.me/BotFather).
 
-**1. 下载并准备配置**
+**1. Download and prepare the config**
 
 ```bash
 git clone https://github.com/kasuganosora/thinkbot.git && cd thinkbot
@@ -194,9 +198,9 @@ cp .env.example .env
 mkdir -p data/container logs/container
 ```
 
-`.env` 的默认值就能直接用，不用改。
+The defaults in `.env` work as-is, so you don't need to edit anything.
 
-**2. 设置首位管理员账号**（改成你自己的密码，至少 6 位）
+**2. Set up the first admin account** (use your own password, at least 6 characters)
 
 ```bash
 cat > docker-compose.override.yml <<'YAML'
@@ -205,45 +209,48 @@ services:
     environment:
       AUTH_BOOTSTRAP_ADMIN: admin
       AUTH_BOOTSTRAP_PASSWORD: change-me-please
-    # 默认端口映射是 "8080:8080"，会对局域网 / 公网开放。只想本机访问就保留下面两行：
+    # The default port mapping "8080:8080" is open to your LAN / the internet.
+    # Keep these two lines to allow access from this machine only:
     ports: !override
       - "127.0.0.1:8080:8080"
 YAML
 ```
 
-> `!override` 需要 Docker Compose v2.24+。不写它的话，override 里的 `ports` 会和默认的 `8080:8080` **合并**而不是替换，导致端口冲突。部署在服务器上又要远程访问时，删掉 `ports` 这两行，并自行用反向代理 / 防火墙保护。
+> `!override` needs Docker Compose v2.24+. Without it, `ports` in the override is **merged** with the default `8080:8080` instead of replacing it, and the ports clash. If it runs on a server you need to reach remotely, delete the two `ports` lines and protect it with a reverse proxy or firewall.
 
-**3. 启动**
+**3. Start it**
 
 ```bash
 docker compose up -d --build
 ```
 
-首次构建需要几分钟（如果提示权限不足，用 `sudo` 或把当前用户加入 `docker` 组）。`docker compose ps` 显示 `healthy` 就好了。
+The first build takes a few minutes (if you get a permission error, use `sudo` or add your user to the `docker` group). Once `docker compose ps` shows `healthy`, you're ready.
 
-**4. 在网页上完成设置**
+**4. Finish setup in the web UI**
 
-打开 `http://localhost:8080`，用上面的账号登录，然后：
+Open `http://localhost:8080`, log in with the account above, then:
 
-1. **系统设置 → 模型服务**：添加服务商，填 API Key，添加模型，并**打开服务商的「启用」开关**（新加的服务商默认是关闭的，不打开的话启动 bot 会报 `LLM "…" not found in config`）；
-2. **系统设置 → Bots → 新建 Bot**，选好主模型；
-3. **Bot 设置 → 平台**：添加 Telegram，填入 Bot Token 并启用；确认页面顶部 Bot 状态是「运行中」（新建的 bot 默认是停止状态，点一下启用）。第一次启动 bot 时会构建它的沙箱镜像（约 1.4 GB），需要等一两分钟；
-4. **用户设置 → 生成授权码**，把 `TB-XXXX-XXXX` 发给你的 Telegram bot，完成账号绑定（接收告警通知需要这一步）。
+1. **System Settings → Model Services** (系统设置 → 模型服务): add a provider, enter your API key, add a model, and **turn on the provider's Enabled (启用) switch**. New providers start disabled, and starting a bot on a disabled provider fails with `LLM "…" not found in config`.
+2. **System Settings → Bots → New Bot** (新建 Bot): create a bot and pick its main model.
+3. **Bot Settings → Platforms** (平台): add Telegram, paste your bot token, and enable it. Check that the status at the top of the page says running (运行中). New bots start stopped, so click to enable it. The first start builds the bot's sandbox image (about 1.4 GB), which takes a minute or two.
+4. **User Settings → Generate code** (用户设置 → 生成授权码): send the `TB-XXXX-XXXX` code to your Telegram bot to link your account. Alerts need this step.
 
-现在去 Telegram 跟它打个招呼吧 👋 也可以直接在网页里聊。
+Now say hi to it in Telegram 👋 or just chat in the web UI.
 
-> 登录后记得在「用户设置 → 安全设置」改密码。管理员已创建后，override 里的两行 `AUTH_BOOTSTRAP_*` 就不再起作用，可以删掉。
+> The web UI is in Simplified Chinese for now. The Chinese labels are in brackets above. After logging in, change your password under User Settings → Security (安全设置). Once the admin account exists, the two `AUTH_BOOTSTRAP_*` lines in the override do nothing and you can delete them.
 
-## 下一步
+## Next steps
 
-| 想了解 | 看这里 |
+Most detailed docs are in Chinese. [docs/notify.md](docs/notify.md) is in English.
+
+| Topic | Where |
 |---|---|
-| 所有配置项、首位管理员、工具权限、告警通知接入 | [docs/configuration.md](docs/configuration.md) |
-| 部署细节、更新、备份、回滚、迁移 | [docs/deploy.md](docs/deploy.md) |
-| 记忆系统 | [docs/memory.md](docs/memory.md) |
-| 外部通知接口（notify）完整规范 | [docs/notify.md](docs/notify.md) |
-| 功能详解、架构、项目结构、技术栈 | [docs/architecture.md](docs/architecture.md) |
-| 裸机运行、前端开发、Swagger、测试 | [docs/development.md](docs/development.md) |
+| All config options, first admin, tool permissions, alert setup | [docs/configuration.md](docs/configuration.md) |
+| Deployment details, updates, backup, rollback, migration | [docs/deploy.md](docs/deploy.md) |
+| Memory system | [docs/memory.md](docs/memory.md) |
+| Full notify API spec | [docs/notify.md](docs/notify.md) |
+| Features in depth, architecture, project layout, tech stack | [docs/architecture.md](docs/architecture.md) |
+| Running without Docker, frontend dev, Swagger, tests | [docs/development.md](docs/development.md) |
 
 ## License
 
