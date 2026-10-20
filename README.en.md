@@ -58,7 +58,7 @@ thinkbot isn't just an assistant that answers whatever you ask. It has a persona
 | Web | ✅ Available | Built-in chat UI and admin console. Shows tool calls, plus the sandbox terminal and desktop |
 | Telegram | ✅ Available | Private and group chats (mention it or reply to it); sends photos and files; group admin tools (pin, delete, ban…, enabled in tool permissions); **receives server alerts** |
 | Misskey | ✅ Available | Replies to mentions, can follow timelines; posts, reacts, renotes, follows, searches, runs polls |
-| Mastodon | 🧪 Supported (beta) | Replies to mentions and replies, optional timeline streams; posting, favourites, boosts and more. Set the instance URL and access token in the web UI under Bot Settings → Platforms |
+| Mastodon | 🚧 In development | Code merged, not yet tested in production. Replies to mentions and replies, optional timeline streams; posting, favourites, boosts and more. Set the instance URL and access token in the web UI under Bot Settings → Platforms |
 
 ## What you can do with it
 
@@ -170,7 +170,7 @@ It can also decide on its own that a message needs no reply and just take note o
 ### 8. More ways to use it
 
 - **Several bots in one deployment**: each bot has its own persona, model, memory, sandbox container and platform accounts, and they stay separate.
-- **One bot on several platforms**: the same bot can run on Telegram and Misskey at once, and what you talked about on one side carries over to the other (Mastodon works too, currently in beta).
+- **One bot on several platforms**: the same bot can run on Telegram and Misskey at once, and what you talked about on one side carries over to the other (Mastodon support is in development: code merged, not yet tested in production).
 - **Reminders and schedules**: ask it to "remind me at 9 tomorrow morning", or set up scheduled jobs so it works on a timetable.
 
 ## How memory works
