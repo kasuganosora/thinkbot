@@ -237,6 +237,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 
 				repo := config.Repo
 				scope := parseScope(m, defaultKind, defaultID)
+				scope = fillScopeIDFromSession(ctx, scope, config.BotID)
 
 				// 护栏：scope_kind="all" 只是**读取**用的通配符（跨 scope 检索/统计），
 				// 不能当作写入目标 —— 否则会凭空造出一个 kind="all" 的孤儿 scope，
@@ -1213,3 +1214,30 @@ func toInt(v any) int {
 // scope (see mirrorChannelMemoryToBot). Mirrors repeat a channel entry 1:1,
 // so memory dedup skips them: the original is deduplicated in its own scope.
 func IsMirrorID(id string) bool { return strings.HasPrefix(id, crossChannelMirrorPrefix) }
+
+// fillScopeIDFromSession fills an empty scope_id from the current message
+// (the model usually omits scope_id): channel → the session's chat id (the
+// same key MemoryWriteStage uses, env.Message.Channel), user → the sender,
+// bot → this bot. Before, tool writes without scope_id all landed in
+// channel:'' — one orphan scope shared by every channel and bot.
+func fillScopeIDFromSession(ctx context.Context, scope Scope, botID string) Scope {
+	if scope.ID != "" || ctx == nil {
+		return scope
+	}
+	if tc, ok := ctx.(*llm.ToolExecContext); ok && (tc == nil || tc.Context == nil) {
+		return scope
+	}
+	meta := tools.MessageMetaFromContext(ctx)
+	switch scope.Kind {
+	case ScopeChannel:
+		scope.ID = meta.ChatID
+	case ScopeUser:
+		scope.ID = meta.UserID
+	case ScopeBot:
+		scope.ID = botID
+		if scope.ID == "" {
+			scope.ID = meta.BotID
+		}
+	}
+	return scope
+}
