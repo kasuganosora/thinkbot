@@ -1308,7 +1308,7 @@ func MemoryWindowMetaSpecs() []MetaSpec {
 		{Key: KeyMemoryDedupTriggerNew, Category: "MemoryWindow", Description: "记忆去重（memory_dedup）增量触发：某 scope 未检查的新条目达到该数量即触发一次去重（默认 8）；超出字符预算时只要有未检查条目也会触发。全部已检查时不调用 LLM。重建 bot 后生效。"},
 		{Key: KeyMemoryDedupCooldownMin, Category: "MemoryWindow", Description: "同一 scope 两次自动去重的最小间隔分钟数（默认 5；持久化，重启不重置）。重建 bot 后生效。"},
 		{Key: KeyMemoryDedupNeighbourK, Category: "MemoryWindow", Description: "每个未检查条目从 memory_vec 取的近邻数（默认 5）；每组送 LLM 的条目为 2~10 条。重建 bot 后生效。"},
-		{Key: KeyMemoryDedupMinSimilarity, Category: "MemoryWindow", Description: "近邻入组的最低相似度 0~1（默认 0.45）；无近邻的条目直接标记已检查、不调用 LLM。重建 bot 后生效。"},
+		{Key: KeyMemoryDedupMinSimilarity, Category: "MemoryWindow", Description: "近邻入组的最低相似度 0~1（默认 0.50）；无近邻的条目直接标记已检查、不调用 LLM。重建 bot 后生效。"},
 		{Key: KeyMemoryDedupMaxSeeds, Category: "MemoryWindow", Description: "单次去重最多处理的未检查条目数（默认 30），存量分多轮消化。重建 bot 后生效。"},
 		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）的回退值。优先采用主模型自身配置（provider.<x>.models[].contextLength），仅当模型未配置时才回退到此全局值（默认 GLM-5.2/5.3 的 1M=1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。保存后下一轮记忆召回即生效。"},
 		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。保存后下一轮记忆召回即生效。"},

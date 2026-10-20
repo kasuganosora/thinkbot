@@ -59,12 +59,12 @@ L2 场景记忆是预留的扩展点（`memory.Aggregator` 接口已定义，仓
 - 输出上限 `llm.internal_max_tokens.memory_dedup` 默认 12288（含 reasoning；GLM-5.3 把 medium 当 high 跑）。
 - 每次去重 pass 结束打一行 `memory_dedup_stats`（`calls_total` / `truncated_total` / `truncated_ratio`，进程启动以来累计，含 cluster 与 repair 两阶段）；单次被输出上限截断时打 `memory_dedup_truncated`（warn）。
   `grep memory_dedup_truncated` 计数 ÷ 最后一行 `memory_dedup_stats` 的 `calls_total` 即截断率。
-- 离线 dry-run（不调用 LLM、不联网）：打印去重会形成的向量近邻分组，用来对照真实 sqlite-vec 校验 0.45 阈值。
+- 离线 dry-run（不调用 LLM、不联网）：打印去重会形成的向量近邻分组，用来对照真实 sqlite-vec 校验 0.50 阈值（默认值；归一化后旧的 0.45 会把无关条目拉进组）。
   默认先把库（含 -wal/-shm）复制到临时目录再打开，原库不被修改：
 
   ```sh
   THINKBOT_SQLITE_VEC=/usr/lib/sqlite-vec/vec0 \
-    go run ./cmd/dedup-dryrun -db /path/to/thinkbot.db -all -reindex -min-sim 0.45
+    go run ./cmd/dedup-dryrun -db /path/to/thinkbot.db -all -reindex -min-sim 0.50
   ```
 
   `-all` 忽略 dedup_checked_at（存量都已回填为已检查），`-reindex` 按当前哈希向量重建 memory_vec，
