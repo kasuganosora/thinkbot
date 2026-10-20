@@ -181,7 +181,7 @@ In short, it has short-term and long-term memory, a bit like a person:
 
 1. **Noting things down**: things worth remembering from a chat go into short-term memory first, which expires after about two weeks.
 2. **Tidying up**: a background job regularly turns short-term memories into long-term ones (facts, preferences), merging duplicates and updating old ones. You can also turn on "dreaming": every night it scores recent memories, keeps the important ones and lets trivial ones fade, and updates its picture of you along the way.
-3. **Recalling**: before it replies, it pulls up memories related to the current topic and matches them by meaning. So a hobby you mentioned weeks ago comes back on its own when a related topic comes up.
+3. **Recalling**: before it replies, it pulls up memories related to the current topic. Matching is lexical, not semantic: there is no embedding model; when the sqlite-vec extension is available, memories are indexed as local character-bigram hash vectors, otherwise keyword matching is used. So a hobby you mentioned weeks ago can come back when the conversation uses similar words.
 4. **Forgetting**: ask it to forget something and the related memories are deleted, with a marker left so it doesn't learn them back later. Admins can also view and delete individual memories under Bot Settings → Memory.
 
 Long conversations are condensed into a summary automatically so the chat can keep going. Admins can also trim the current conversation with `/compact` or start over with `/clear`. More in [docs/memory.md](docs/memory.md).

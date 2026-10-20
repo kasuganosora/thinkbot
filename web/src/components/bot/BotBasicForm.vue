@@ -33,7 +33,7 @@
           <t-form-item label="主模型（llmMain）">
             <t-select v-model="form.llmMain" :options="modelOptions" filterable creatable clearable placeholder="主 LLM 模型 ID" data-testid="bot-llm-main" />
           </t-form-item>
-          <t-form-item label="推理强度（reasoningEffort）">
+          <t-form-item label="主回复推理强度（reasoningEffort）">
             <t-select v-model="form.reasoningEffort" :options="effortOptions" data-testid="bot-effort" />
           </t-form-item>
         </div>
@@ -88,6 +88,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { REPLY_EFFORT_OPTIONS } from '@/utils/reasoning'
 
 const props = defineProps({
   form: { type: Object, required: true },
@@ -98,13 +99,7 @@ const props = defineProps({
 })
 defineEmits(['save', 'remove', 'toggle-status'])
 
-const effortOptions = [
-  { label: '默认（不指定）', value: '' },
-  { label: 'minimal', value: 'minimal' },
-  { label: 'low', value: 'low' },
-  { label: 'medium', value: 'medium' },
-  { label: 'high', value: 'high' }
-]
+const effortOptions = REPLY_EFFORT_OPTIONS
 
 const modelMaxTokens = computed(() => {
   const m = props.modelOptions.find(o => o.value === props.form.llmMain)

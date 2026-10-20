@@ -65,8 +65,9 @@ func TestClusterMerge_ReasoningPolicy(t *testing.T) {
 	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("glm-5.3"), "", in, 128000, prodPolicy); err != nil {
 		t.Fatal(err)
 	}
-	if c := p.last(t); c.effort != "high" || c.maxTokens != 128000 {
-		t.Fatalf("memory_dedup: %+v, want high/128000", c)
+	if c := p.last(t); c.effort != "high" || c.maxTokens != llm.MemoryDedupDefaultMaxTokens {
+		// default medium; GLM-5.3 serves medium as high. Output capped at 4096 by default.
+		t.Fatalf("memory_dedup: %+v, want high/%d", c, llm.MemoryDedupDefaultMaxTokens)
 	}
 	// Bot without reasoning_effort on a model with no known support → not sent.
 	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("gpt-4o"), "", in, 128000, llm.NewInternalPolicy(nil, "")); err != nil {

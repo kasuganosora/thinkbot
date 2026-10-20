@@ -35,7 +35,7 @@ L2 场景记忆是预留的扩展点（`memory.Aggregator` 接口已定义，仓
 
 回复前，系统按 **画像 → 长期记忆 → 原始笔记** 的顺序召回与当前话题相关的内容，用系统标注包起来放进上下文（避免被误当成用户输入），并受 token 预算控制（`memorywindow.*`）。
 
-如果 SQLite 的 sqlite-vec 扩展可用，会额外建一份向量索引（`memory_vec`），按「意思相近」召回——几周前随口提过的爱好，在聊到相关话题时也能被想起来；不可用时退回关键词匹配。
+如果 SQLite 的 sqlite-vec 扩展可用，会额外建一份向量索引（`memory_vec`）。这不是语义检索：没有 embedding 模型，向量是本地计算的字符二元组哈希（256 维），只反映字面相近——几周前随口提过的爱好，聊天里出现相近字词时能被召回；不可用时退回关键词匹配。哈希前会先去掉 @提及、帖子/状态 id、日期时间、「[Reply to …]」前缀和 URL，避免这些套话让无关记忆看起来相似；归一化方案变化时，启动会清空 `memory_vec`，再由后台补索引（`tiered_memories` 与 `memory_entries` 各一份，只补缺失的 entry_id）按新方案重建，纯本地计算。回滚步骤见 [memory-vec-rollback.md](memory-vec-rollback.md)。
 
 ## 忘掉
 
@@ -53,3 +53,20 @@ L2 场景记忆是预留的扩展点（`memory.Aggregator` 接口已定义，仓
 - `/compact [N]`：手动把当前会话压到只保留最近 N 条消息（默认 3），仅管理员可用。
 - `/clear`：清空当前会话上下文，从头开始，仅管理员可用。
 - `/help` 列出所有命令。
+
+## 去重（memory_dedup）运维
+
+- 输出上限 `llm.internal_max_tokens.memory_dedup` 默认 12288（含 reasoning；GLM-5.3 把 medium 当 high 跑）。
+- 每次去重 pass 结束打一行 `memory_dedup_stats`（`calls_total` / `truncated_total` / `truncated_ratio`，进程启动以来累计，含 cluster 与 repair 两阶段）；单次被输出上限截断时打 `memory_dedup_truncated`（warn）。
+  `grep memory_dedup_truncated` 计数 ÷ 最后一行 `memory_dedup_stats` 的 `calls_total` 即截断率。
+- 离线 dry-run（不调用 LLM、不联网）：打印去重会形成的向量近邻分组，用来对照真实 sqlite-vec 校验 0.50 阈值（默认值；归一化后旧的 0.45 会把无关条目拉进组）。
+  默认先把库（含 -wal/-shm）复制到临时目录再打开，原库不被修改：
+
+  ```sh
+  THINKBOT_SQLITE_VEC=/usr/lib/sqlite-vec/vec0 \
+    go run ./cmd/dedup-dryrun -db /path/to/thinkbot.db -all -reindex -min-sim 0.50
+  ```
+
+  `-all` 忽略 dedup_checked_at（存量都已回填为已检查），`-reindex` 按当前哈希向量重建 memory_vec，
+  `-scope channel:xxx` 只看指定 scope，`-k` / `-max-seeds`（-1 不限）/ `-max-chars` 同生产配置。
+  加载不到 sqlite-vec 时输出 `vec unavailable … fallback mode`，分组为生产环境的 recent 回退逻辑。

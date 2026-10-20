@@ -70,11 +70,19 @@ func TestClusterMerge_LossyClusterRepaired(t *testing.T) {
 	}
 	repair := p.calls[1].Messages
 	last := ""
-	if len(repair) == 3 {
-		last = repair[2].Content[0].(llm.TextPart).Text
+	if len(repair) == 1 {
+		last = repair[0].Content[0].(llm.TextPart).Text
 	}
 	if !strings.Contains(last, "TB-RW5Q-SKZN") || !strings.Contains(last, "m1, m2") {
 		t.Fatalf("repair request should list the missing identifiers: %+v", repair)
+	}
+	// Only the sources of the lossy cluster are resent (not m3/m4, not the
+	// first answer).
+	if strings.Contains(last, "[m3]") || strings.Contains(last, "[m4]") || strings.Contains(last, "喜欢猫并养了一只") {
+		t.Fatalf("repair request must carry only the failing clusters: %s", last)
+	}
+	if !strings.Contains(last, "[m1]") || !strings.Contains(last, "[m2]") {
+		t.Fatalf("repair request must carry the failing sources: %s", last)
 	}
 	if len(got) != 2 {
 		t.Fatalf("want 2 clusters, got %+v", got)

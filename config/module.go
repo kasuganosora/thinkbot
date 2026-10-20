@@ -1301,6 +1301,15 @@ func (b *Builder) GetMemoryWindowConfig() MemoryWindowConfig {
 // MemoryWindowMetaSpecs 返回记忆窗口配置项的元数据，用于注册到前端设置界面。
 func MemoryWindowMetaSpecs() []MetaSpec {
 	return []MetaSpec{
+		{Key: KeyMemoryListenScopes, Category: "MemoryWindow", Description: "被动收听（时间线类）记忆 scope 的 channel ID，逗号分隔（如 misskey:timeline）。留空 = 各渠道默认（misskey:timeline、mastodon:timeline）；none = 关闭。这些 scope 不做滚动去重，改为每天本地零点后生成一条日报并归档当天原始笔记。重建 bot 后生效。"},
+		{Key: KeyMemoryDigestMaxChars, Category: "MemoryWindow", Description: "每日摘要（memory_daily_digest）长度上限字符数（默认 1500）。"},
+		{Key: KeyMemoryDigestMaxInputChars, Category: "MemoryWindow", Description: "单次日报调用的笔记输入上限字符数（默认 24000）；超出时分块摘要再合并。"},
+		{Key: KeyMemoryDigestBacklogDays, Category: "MemoryWindow", Description: "首次运行时最多回补的天数（默认 7），更早的笔记保持原样。"},
+		{Key: KeyMemoryDedupTriggerNew, Category: "MemoryWindow", Description: "记忆去重（memory_dedup）增量触发：某 scope 未检查的新条目达到该数量即触发一次去重（默认 8）；超出字符预算时只要有未检查条目也会触发。全部已检查时不调用 LLM。重建 bot 后生效。"},
+		{Key: KeyMemoryDedupCooldownMin, Category: "MemoryWindow", Description: "同一 scope 两次自动去重的最小间隔分钟数（默认 5；持久化，重启不重置）。重建 bot 后生效。"},
+		{Key: KeyMemoryDedupNeighbourK, Category: "MemoryWindow", Description: "每个未检查条目从 memory_vec 取的近邻数（默认 5）；每组送 LLM 的条目为 2~10 条。重建 bot 后生效。"},
+		{Key: KeyMemoryDedupMinSimilarity, Category: "MemoryWindow", Description: "近邻入组的最低相似度 0~1（默认 0.50）；无近邻的条目直接标记已检查、不调用 LLM。重建 bot 后生效。"},
+		{Key: KeyMemoryDedupMaxSeeds, Category: "MemoryWindow", Description: "单次去重最多处理的未检查条目数（默认 30），存量分多轮消化。重建 bot 后生效。"},
 		{Key: KeyMemoryWindowMaxContextTokens, Category: "MemoryWindow", Description: "模型最大上下文窗口（token 数）的回退值。优先采用主模型自身配置（provider.<x>.models[].contextLength），仅当模型未配置时才回退到此全局值（默认 GLM-5.2/5.3 的 1M=1000000）。记忆预算 = (此值 - 预留 - 输出预留) × 预算比例，再受 max_memory_tokens 硬上限约束。保存后下一轮记忆召回即生效。"},
 		{Key: KeyMemoryWindowReservedTokens, Category: "MemoryWindow", Description: "为 system prompt / tool 定义等固定内容预留的 token 数（默认 2000）。保存后下一轮记忆召回即生效。"},
 		{Key: KeyMemoryWindowOutputReserve, Category: "MemoryWindow", Description: "为 LLM 输出预留的 token 数（默认 128000）的回退值。优先采用主模型的最大输出（ModelDef.MaxTokens），仅当模型未配置时才回退到此全局值。保存后下一轮记忆召回即生效。"},
@@ -1385,6 +1394,59 @@ func InternalReasoningKey(purpose string) string { return KeyInternalReasoningPr
 // InternalMaxTokensKey 返回某个内部调用用途的输出上限封顶配置键。
 func InternalMaxTokensKey(purpose string) string { return KeyInternalMaxTokensPrefix + purpose }
 
+// BotReasoningTasks 是 Web 设置页「推理强度（按任务）」可按 bot 覆盖的任务。
+// dream 一项同时作用于全部梦境阶段（dream_extract / dream_cluster / dream_score）；
+// heartbeat 作用于心跳决策轮（走主链路，不属于内部调用用途）。
+var BotReasoningTasks = []string{llm.PurposeMemoryDedup, "heartbeat", "dream", llm.PurposeWorkflowHeal}
+
+// BotReasoningPurposes 返回某个任务覆盖的内部调用用途。
+func BotReasoningPurposes(task string) []string {
+	if task == "dream" {
+		return []string{llm.PurposeDreamExtract, llm.PurposeDreamCluster, llm.PurposeDreamScore}
+	}
+	return []string{task}
+}
+
+// BotReasoningKey 返回 bot 级任务推理强度配置键：bot.<bot_id>.reasoning.<task>。
+// 值："" = 继承全局 llm.internal_reasoning.*（心跳为继承主回复设置）；
+// provider = 模型默认（不发送参数）；none / low / medium / high = 指定。
+func BotReasoningKey(botID, task string) string { return "bot." + botID + ".reasoning." + task }
+
+// ValidBotReasoning 判断 bot 级推理强度取值是否合法。
+func ValidBotReasoning(v string) bool {
+	switch v {
+	case "", llm.ReasoningProvider, "none", "low", "medium", "high":
+		return true
+	}
+	return false
+}
+
+// GetBotReasoning 读取 bot 级任务推理强度（未设置的任务为 ""）。
+func (b *Builder) GetBotReasoning(botID string) map[string]string {
+	out := make(map[string]string, len(BotReasoningTasks))
+	for _, t := range BotReasoningTasks {
+		out[t] = strings.ToLower(strings.TrimSpace(b.store.GetString(BotReasoningKey(botID, t), "")))
+	}
+	return out
+}
+
+// GetBotInternalLLMSettings 在全局内部调用策略上叠加 bot 级覆盖（优先于全局）。
+func (b *Builder) GetBotInternalLLMSettings(botID string) llm.InternalSettings {
+	s := b.GetInternalLLMSettings()
+	if botID == "" {
+		return s
+	}
+	for task, v := range b.GetBotReasoning(botID) {
+		if v == "" || task == "heartbeat" {
+			continue
+		}
+		for _, p := range BotReasoningPurposes(task) {
+			s.Reasoning[p] = v
+		}
+	}
+	return s
+}
+
 // GetInternalLLMSettings 读取内部调用策略（每次调用现取，保存后下一次内部调用即生效）。
 func (b *Builder) GetInternalLLMSettings() llm.InternalSettings {
 	s := llm.InternalSettings{
@@ -1407,13 +1469,13 @@ func (b *Builder) GetInternalLLMSettings() llm.InternalSettings {
 // InternalLLMMetaSpecs 返回内部调用策略配置项元数据（系统设置页展示）。
 func InternalLLMMetaSpecs() []MetaSpec {
 	specs := []MetaSpec{
-		{Key: InternalReasoningKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用（判定、摘要、记忆去重、画像、梦境、工作流自愈、视觉）默认 reasoning_effort。auto（默认）= 按用途取内置默认值：判定/分类/评分类为 none（模型不支持 none 时用 low），合并/摘要/画像/自愈/视觉为 low；且只在确认 provider 接受该参数时发送（bot 本身配置了 reasoning_effort、模型勾选了 reasoning 能力，或模型为 GLM-5.2 及以上）。provider = 不发送（由 provider 缺省，GLM-5.3 缺省为 max）。其它值（none/minimal/low/medium/high/max）原样发送，并按已知模型词表映射（GLM-5.3 仅接受 low/high/max：none/minimal→low、medium→high）。保存后下一次调用即生效。"},
+		{Key: InternalReasoningKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用（判定、摘要、记忆去重、画像、梦境、工作流自愈、视觉）默认 reasoning_effort。auto（默认）= 按用途取内置默认值：判定/分类/评分类为 none（模型不支持 none 时用 low），记忆去重 memory_dedup 为 medium（GLM-5.3 无 medium，按 high 发送），摘要/画像/自愈/视觉为 low；且只在确认 provider 接受该参数时发送（bot 本身配置了 reasoning_effort、模型勾选了 reasoning 能力，或模型为 GLM-5.2 及以上）。provider = 不发送（由 provider 缺省，GLM-5.3 缺省为 max）。其它值（none/minimal/low/medium/high/max）原样发送，并按已知模型词表映射（GLM-5.3 仅接受 low/high/max：none/minimal→low、medium→high）。保存后下一次调用即生效。"},
 		{Key: InternalMaxTokensKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用输出上限的默认封顶（含推理 token）。0（默认）= 跟随模型配置的 maxTokens；大于 0 时只会压低模型上限，用于控制成本。被截断的输出会记录 WARN 并按各调用点原有逻辑回退。保存后下一次调用即生效。"},
 	}
 	for _, p := range llm.InternalPurposes {
 		specs = append(specs,
 			MetaSpec{Key: InternalReasoningKey(p.Name), Category: "InternalLLM", Description: fmt.Sprintf("%s 的 reasoning_effort（留空 = 继承 %s；auto 时内置默认 %s；provider = 不发送）。", p.Description, InternalReasoningKey("default"), p.DefaultReasoning)},
-			MetaSpec{Key: InternalMaxTokensKey(p.Name), Category: "InternalLLM", Description: fmt.Sprintf("%s 的输出上限封顶（0 = 继承 %s，再为 0 则跟随模型 maxTokens；只会压低模型上限）。", p.Description, InternalMaxTokensKey("default"))},
+			MetaSpec{Key: InternalMaxTokensKey(p.Name), Category: "InternalLLM", Description: fmt.Sprintf("%s 的输出上限封顶（0 = 内置默认 %d（0 表示无），再与 %s 取较小者，均为 0 则跟随模型 maxTokens；只会压低模型上限）。", p.Description, p.DefaultMaxTokens, InternalMaxTokensKey("default"))},
 		)
 	}
 	return specs

@@ -333,6 +333,32 @@ func (e *Executor) Execute(ctx context.Context, _ *cron.Job) (*cron.ExecuteResul
 
 		hasSignal, signal := e.admissionFn(ctx, since)
 		forced := rejects+1 >= idleWakeEvery
+		// 发帖被压制（allow_post=false / 频控降级）且无新信号：即便到了空闲强制放行
+		// 周期也不调用 LLM——它最多只能 silent / 写内部 note，却要付一整轮主模型的钱。
+		suppressedIdle := !hasSignal && (!allowPost || degraded)
+		if suppressedIdle && !since.IsZero() {
+			e.wakeMu.Lock()
+			e.idleRejects++
+			rejects = e.idleRejects
+			e.wakeMu.Unlock()
+			cost := time.Since(start).Seconds()
+			why := "allow_post=false"
+			if degraded {
+				why = "frequency_cap"
+			}
+			e.appendLog(Log{
+				ID:       fmt.Sprintf("hb-%d", now.UnixMilli()),
+				Status:   StatusSilent,
+				Time:     now.Format("2006/1/2 15:04:05"),
+				Cost:     cost,
+				Actions:  []string{},
+				Admitted: false,
+				Result:   fmt.Sprintf("准入关卡拒绝（0-step，未调用 LLM）：发帖被压制（%s）且无新信号", why),
+			})
+			e.logger.Infow("heartbeat skipped: posting suppressed and no new signal",
+				"reason", why, "idle_rejects", rejects, "since", since.Format(time.RFC3339))
+			return &cron.ExecuteResult{Output: "[silent] 发帖被压制且无新信号（0-step）"}, nil
+		}
 		if !hasSignal && !forced && !since.IsZero() {
 			e.wakeMu.Lock()
 			e.idleRejects++
