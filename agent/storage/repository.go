@@ -154,6 +154,39 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 
 var vecBackfillDone sync.Map // *gorm.DB -> struct{}
 
+// StartAppVecBackfill runs both startup vector backfills (tiered_memories,
+// then memory_entries) in the background at app init, independent of whether
+// any bot is running: per-bot startup only happens for running bots, so with
+// stopped bots an emptied memory_vec would stay empty. Once per DB per
+// process; a later per-bot StartVecBackfill on the same DB is a no-op, and the
+// per-bot TieredStore backfill then only finds already-present rows.
+func StartAppVecBackfill(gdb *gorm.DB, logger *zap.SugaredLogger) {
+	if gdb == nil {
+		return
+	}
+	idx := memory.OpenVecIndex(gdb)
+	if !idx.Enabled() {
+		return
+	}
+	if _, loaded := vecBackfillDone.LoadOrStore(gdb, struct{}{}); loaded {
+		return
+	}
+	go func() { _, _ = runAppVecBackfill(context.Background(), gdb, idx, logger) }()
+}
+
+// runAppVecBackfill is the synchronous body of StartAppVecBackfill.
+func runAppVecBackfill(ctx context.Context, gdb *gorm.DB, idx *memory.VecIndex, logger *zap.SugaredLogger) ([2]memory.VecBackfillStats, error) {
+	var out [2]memory.VecBackfillStats
+	var err1, err2 error
+	out[0], err1 = memory.BackfillTieredVectors(ctx, gdb, idx, logger)
+	r := &SQLiteRepository{db: gdb, vec: idx}
+	out[1], err2 = r.backfillVec(ctx, logger)
+	if err1 != nil {
+		return out, err1
+	}
+	return out, err2
+}
+
 // StartVecBackfill indexes active memory_entries that have no vector yet, once
 // per DB per process, in the background. The TieredStore backfill only covers
 // tiered_memories; without this, memory_entries vectors cleared by an embed
@@ -166,32 +199,34 @@ func (r *SQLiteRepository) StartVecBackfill(logger *zap.SugaredLogger) {
 		return
 	}
 	go func() {
-		n, w, err := r.BackfillVec(context.Background())
-		if logger == nil {
-			return
-		}
-		if err != nil {
-			logger.Warnw("memory_entries vec backfill failed", "err", err)
-			return
-		}
-		logger.Infow("memory_entries vec backfill finished", "already_present", n, "written", w)
+		// start / done / error lines: memory_vec_backfill_* table=memory_entries
+		_, _ = r.backfillVec(context.Background(), logger)
 	}()
 }
 
 // BackfillVec synchronously indexes active memory_entries missing a vector.
+// Returns (already present, written).
 func (r *SQLiteRepository) BackfillVec(ctx context.Context) (int, int, error) {
+	st, err := r.backfillVec(ctx, nil)
+	return st.Present, st.Written, err
+}
+
+func (r *SQLiteRepository) backfillVec(ctx context.Context, logger *zap.SugaredLogger) (memory.VecBackfillStats, error) {
 	if r == nil || !r.vec.Enabled() {
-		return 0, 0, nil
+		return memory.VecBackfillStats{}, nil
 	}
 	var models []dao.EntryModel
 	if err := r.db.WithContext(ctx).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
-		return 0, 0, err
+		if logger != nil {
+			logger.Errorw(memory.VecBackfillErrorEvent, "table", "memory_entries", "stage", "load", "err", err)
+		}
+		return memory.VecBackfillStats{}, err
 	}
 	items := make([]memory.VecItem, 0, len(models))
 	for _, e := range modelsToActiveEntries(models) {
 		items = append(items, memory.VecItem{ScopeKey: e.Scope.Key(), EntryID: e.ID, Content: e.Content})
 	}
-	return r.vec.BackfillMissing(ctx, items)
+	return r.vec.BackfillMissing(ctx, "memory_entries", items, logger)
 }
 
 // CompactScope 对该 scope 执行语义压缩（委派给内部 MemoryCompactor，即带 pre-LLM

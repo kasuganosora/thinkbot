@@ -157,6 +157,9 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 	if eventBus == nil {
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
+	// memory_vec backfill at app init, not only when a bot starts (stopped bots
+	// would otherwise leave an emptied index empty). Once per DB.
+	storage.StartAppVecBackfill(db, logger)
 	if chatHistory != nil && store != nil {
 		// compact_context 检查点 TTL：每次加载历史时现读配置，改配置无需重启。
 		chatHistory.SetContextCheckpointTTLSource(func() time.Duration {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	gormlogger "gorm.io/gorm/logger"
 
@@ -54,5 +55,41 @@ func TestEmbedSchemeChangeRebuildsMemoryEntryVectors(t *testing.T) {
 	}
 	if a, w, _ := repo2.BackfillVec(ctx); a != 3 || w != 0 {
 		t.Fatalf("second backfill must be a no-op: already=%d written=%d", a, w)
+	}
+}
+
+// App-level backfill fills both tables with no bot running (stopped bots).
+func TestAppVecBackfillWithoutBots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vec.db")
+	gdb, err := db.OpenSQLiteWithLogger(path, gormlogger.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dao.Migrate(gdb); err != nil {
+		t.Fatal(err)
+	}
+	idx := memory.OpenVecIndex(gdb)
+	if !idx.Enabled() {
+		t.Skip("sqlite-vec not available")
+	}
+	now := time.Now()
+	gdb.Create(&dao.EntryModel{ID: "m1", ScopeKind: "channel", ScopeID: "c", Source: "note", Content: "fictional entry one", CreatedAt: now})
+	gdb.Create(&dao.TieredMemoryModel{ID: "t1", Tier: 1, ScopeKind: "channel", ScopeID: "c", Content: "fictional fact one", CreatedAt: now})
+	gdb.Create(&dao.TieredMemoryModel{ID: "t2", Tier: 0, ScopeKind: "channel", ScopeID: "c", Content: "expired note", CreatedAt: now, ExpiresAt: now.Add(-time.Hour)})
+	st, err := runAppVecBackfill(context.Background(), gdb, idx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st[0].Missing != 1 || st[0].Written != 1 || st[1].Missing != 1 || st[1].Written != 1 {
+		t.Fatalf("stats tiered=%+v entries=%+v", st[0], st[1])
+	}
+	var n int
+	gdb.Raw("SELECT count(*) FROM memory_vec").Scan(&n)
+	if n != 2 {
+		t.Fatalf("memory_vec rows = %d, want 2 (expired tiered row skipped)", n)
+	}
+	st, _ = runAppVecBackfill(context.Background(), gdb, idx, nil)
+	if st[0].Missing != 0 || st[1].Missing != 0 {
+		t.Fatalf("second run must find nothing missing: %+v", st)
 	}
 }
