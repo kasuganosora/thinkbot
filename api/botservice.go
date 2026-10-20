@@ -1603,6 +1603,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		DedupCooldown:   time.Duration(s.storeInt(config.KeyMemoryDedupCooldownMin, int(storage.DefaultDedupCooldown/time.Minute))) * time.Minute,
 	})
 	memCompactor.SetRepository(memRepo)
+	memRepo.StartVecBackfill(s.logger)
 	memCfg := memory.DefaultToolConfig(memRepo)
 	// 开启跨平台记忆镜像：channel 作用域的记忆会额外写入 bot 全局作用域，
 	// 使任意频道的会话都能在召回时看到其他平台的活动（如 web 频道上的「苦力活」）。
