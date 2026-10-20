@@ -1301,6 +1301,10 @@ func (b *Builder) GetMemoryWindowConfig() MemoryWindowConfig {
 // MemoryWindowMetaSpecs 返回记忆窗口配置项的元数据，用于注册到前端设置界面。
 func MemoryWindowMetaSpecs() []MetaSpec {
 	return []MetaSpec{
+		{Key: KeyMemoryListenScopes, Category: "MemoryWindow", Description: "被动收听（时间线类）记忆 scope 的 channel ID，逗号分隔（如 misskey:timeline）。留空 = 各渠道默认（misskey:timeline、mastodon:timeline）；none = 关闭。这些 scope 不做滚动去重，改为每天本地零点后生成一条日报并归档当天原始笔记。重建 bot 后生效。"},
+		{Key: KeyMemoryDigestMaxChars, Category: "MemoryWindow", Description: "每日摘要（memory_daily_digest）长度上限字符数（默认 1500）。"},
+		{Key: KeyMemoryDigestMaxInputChars, Category: "MemoryWindow", Description: "单次日报调用的笔记输入上限字符数（默认 24000）；超出时分块摘要再合并。"},
+		{Key: KeyMemoryDigestBacklogDays, Category: "MemoryWindow", Description: "首次运行时最多回补的天数（默认 7），更早的笔记保持原样。"},
 		{Key: KeyMemoryDedupTriggerNew, Category: "MemoryWindow", Description: "记忆去重（memory_dedup）增量触发：某 scope 未检查的新条目达到该数量即触发一次去重（默认 8）；超出字符预算时只要有未检查条目也会触发。全部已检查时不调用 LLM。重建 bot 后生效。"},
 		{Key: KeyMemoryDedupCooldownMin, Category: "MemoryWindow", Description: "同一 scope 两次自动去重的最小间隔分钟数（默认 5；持久化，重启不重置）。重建 bot 后生效。"},
 		{Key: KeyMemoryDedupNeighbourK, Category: "MemoryWindow", Description: "每个未检查条目从 memory_vec 取的近邻数（默认 5）；每组送 LLM 的条目为 2~10 条。重建 bot 后生效。"},

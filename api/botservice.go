@@ -2952,6 +2952,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if userCronScheduler != nil {
 		userCronScheduler.Start(botCtx)
 	}
+	// 被动收听 scope（如 misskey:timeline）的每日摘要：本地零点后每 scope 每天一次。
+	s.startDailyDigest(botCtx, id, memRepo, bundle, internalPol)
 
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
@@ -4021,4 +4023,46 @@ func (s *BotService) storeFloat(key string, def float64) float64 {
 		return def
 	}
 	return s.store.GetFloat64(key, def)
+}
+
+// startDailyDigest runs the daily digest of passive listen scopes for a bot.
+func (s *BotService) startDailyDigest(ctx context.Context, botID string, repo *storage.SQLiteRepository, bundle *bot.LLMBundle, pol *llm.InternalPolicy) {
+	if repo == nil || bundle == nil || bundle.Main == nil {
+		return
+	}
+	var loc *time.Location
+	if s.store != nil {
+		b := config.NewBuilder(s.store, s.logger)
+		loc = b.GetBotTimezoneLocation(botID)
+		switch v := strings.TrimSpace(s.store.GetString(config.KeyMemoryListenScopes, "")); v {
+		case "":
+			core.SetListenChannelsOverride(nil)
+		case "none":
+			core.SetListenChannelsOverride([]string{})
+		default:
+			core.SetListenChannelsOverride(strings.Split(v, ","))
+		}
+	}
+	if len(core.ListenChannels()) == 0 {
+		return
+	}
+	d := storage.NewDailyDigester(repo, storage.DailyDigestConfig{
+		Provider:      bundle.Main,
+		Model:         &llm.Model{ID: bundle.MainDef.Model},
+		BotID:         botID,
+		Location:      loc,
+		MaxChars:      s.storeInt(config.KeyMemoryDigestMaxChars, storage.DefaultDigestMaxChars),
+		MaxInputChars: s.storeInt(config.KeyMemoryDigestMaxInputChars, storage.DefaultDigestMaxInputChars),
+		BacklogDays:   s.storeInt(config.KeyMemoryDigestBacklogDays, storage.DefaultDigestBacklogDays),
+		MaxTokens:     bundle.MainDef.MaxTokens,
+		Policy:        pol,
+	}, s.logger)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Errorw("daily digest panic", "bot_id", botID, "err", r)
+			}
+		}()
+		d.Run(ctx, 15*time.Minute)
+	}()
 }

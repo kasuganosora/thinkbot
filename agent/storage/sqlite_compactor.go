@@ -217,6 +217,9 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 // memory_vec 不可用时退化为「未检查条目分块 + 少量最近已检查条目」。
 func (c *SQLiteCompactor) compactScope(ctx context.Context, scope memory.Scope) error {
 	start := time.Now()
+	if isListenScope(scope) {
+		return nil // digested once per day (DailyDigester), not deduplicated
+	}
 
 	all, err := c.repo.UncheckedDedup(ctx, scope, c.sel.maxSeeds)
 	if err != nil {

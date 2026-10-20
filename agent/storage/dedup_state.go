@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -40,7 +41,13 @@ var activeArgs = []any{"%\"archived\":true%", "%\"compact_skipped\":true%"}
 // compactor output (it is the result of a dedup pass) and cross-channel
 // mirror copies (deduplicated in their own channel scope).
 func precheckedForDedup(e memory.Entry) bool {
-	return e.Source == "compactor" || memory.IsMirrorID(e.ID)
+	return e.Source == "compactor" || e.Source == DailyDigestSource || memory.IsMirrorID(e.ID)
+}
+
+// isListenScope reports whether scope is a passive listen feed (see
+// core.RegisterListenChannel): digested daily, excluded from dedup.
+func isListenScope(scope memory.Scope) bool {
+	return scope.Kind == memory.ScopeChannel && core.IsListenChannel(scope.ID)
 }
 
 func (r *SQLiteRepository) scopeQuery(ctx context.Context, scope memory.Scope) *gorm.DB {

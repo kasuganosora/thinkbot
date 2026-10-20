@@ -27,6 +27,18 @@ type EntryModel struct {
 	DedupCheckedAt *time.Time
 }
 
+// MemoryDigestState 记录被动收听 scope（如 misskey:timeline）每日摘要的进度：
+// LastDate 为已完成摘要的最后一个本地日期（YYYY-MM-DD），保证重跑不重复。
+// ScopeKey 形如 "<bot_id>|channel:misskey:timeline"（同一 scope 可被多个 bot 收听）。
+type MemoryDigestState struct {
+	ScopeKey  string    `gorm:"primaryKey;size:250"`
+	LastDate  string    `gorm:"size:10;not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+// TableName 指定表名。
+func (MemoryDigestState) TableName() string { return "memory_digest_states" }
+
 // MemoryCompactState 记录每个记忆 scope 上次自动去重的时间。
 // 冷却持久化到 DB，进程重启不再重置（此前仅为内存 sync.Map）。
 type MemoryCompactState struct {

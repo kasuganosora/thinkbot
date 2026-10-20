@@ -37,6 +37,7 @@ func Migrate(database *gorm.DB) error {
 		&NotifyToken{},
 		&NotifyEvent{},
 		&MemoryCompactState{},
+		&MemoryDigestState{},
 	); err != nil {
 		return err
 	}

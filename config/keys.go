@@ -252,6 +252,17 @@ const (
 	KeyMemoryDedupMinSimilarity = "memory.dedup.min_similarity"
 	// KeyMemoryDedupMaxSeeds unchecked entries processed per pass (default 30).
 	KeyMemoryDedupMaxSeeds = "memory.dedup.max_seeds"
+
+	// KeyMemoryListenScopes overrides the passive listen channels (comma
+	// separated channel IDs, e.g. "misskey:timeline"); empty = channel defaults,
+	// "none" = disable daily digests.
+	KeyMemoryListenScopes = "memory.listen_scopes"
+	// KeyMemoryDigestMaxChars bounds one daily digest (default 1500).
+	KeyMemoryDigestMaxChars = "memory.digest.max_chars"
+	// KeyMemoryDigestMaxInputChars bounds the notes of one digest call (default 24000).
+	KeyMemoryDigestMaxInputChars = "memory.digest.max_input_chars"
+	// KeyMemoryDigestBacklogDays past days digested on the first run (default 7).
+	KeyMemoryDigestBacklogDays = "memory.digest.backlog_days"
 )
 
 // Compaction（会话压缩）键：上下文压缩预算配置。
