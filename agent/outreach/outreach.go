@@ -11,7 +11,10 @@ import (
 )
 
 // 已知平台，与「渠道发言」对齐。未出现在 Config.Platforms 的平台按关闭处理。
-var KnownPlatforms = []string{"web", "telegram", "misskey"}
+// ⚠️ mastodon 至今不在此列（历史欠账，见 docs/wecom-channel-design.md §8 第 10 项）。
+// 补进来会让既有 Mastodon bot 的「主动开口」从恒定关闭变成可按配置开启，
+// 属于行为变更，不随 wecom 一起改，单独决策。
+var KnownPlatforms = []string{"web", "telegram", "misskey", "wecom"}
 
 // 记录状态。
 const (

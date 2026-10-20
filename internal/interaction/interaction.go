@@ -62,6 +62,7 @@ const (
 	ViaTelegram Via = "telegram"
 	ViaMisskey  Via = "misskey"
 	ViaMastodon Via = "mastodon"
+	ViaWecom    Via = "wecom"
 )
 
 // IsValidMode 判断 Mode 是否合法。
@@ -72,7 +73,7 @@ func IsValidMode(m Mode) bool {
 // IsValidVia 判断 Via 是否合法。
 func IsValidVia(v Via) bool {
 	switch v {
-	case ViaWeb, ViaTelegram, ViaMisskey, ViaMastodon:
+	case ViaWeb, ViaTelegram, ViaMisskey, ViaMastodon, ViaWecom:
 		return true
 	}
 	return false

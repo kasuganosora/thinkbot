@@ -115,14 +115,15 @@ function emptyPlat() {
 const cfg = reactive({
   enabled: false,
   interval_min: 30,
-  platforms: { web: emptyPlat(), telegram: emptyPlat(), misskey: emptyPlat(), mastodon: emptyPlat() }
+  platforms: { web: emptyPlat(), telegram: emptyPlat(), misskey: emptyPlat(), mastodon: emptyPlat(), wecom: emptyPlat() }
 })
 
 const platforms = [
   { key: 'web', label: 'Web', hint: '写入该用户的会话历史' },
   { key: 'telegram', label: 'Telegram', hint: '发到已有会话，不主动进陌生群' },
   { key: 'misskey', label: 'Misskey', hint: '仅 specified 私信，不发时间线' },
-  { key: 'mastodon', label: 'Mastodon', hint: '仅 direct 私信，不发时间线' }
+  { key: 'mastodon', label: 'Mastodon', hint: '仅 direct 私信，不发时间线' },
+  { key: 'wecom', label: '企业微信', hint: '推到已有单聊/群聊，需用户先发过消息' }
 ]
 
 const saving = ref(false)
@@ -148,7 +149,8 @@ const platformFilter = [
   { label: 'Web', value: 'web' },
   { label: 'Telegram', value: 'telegram' },
   { label: 'Misskey', value: 'misskey' },
-  { label: 'Mastodon', value: 'mastodon' }
+  { label: 'Mastodon', value: 'mastodon' },
+  { label: '企业微信', value: 'wecom' }
 ]
 
 const STATUS_LABELS = {
@@ -207,6 +209,7 @@ async function loadConfig() {
     cfg.platforms.telegram = applyPlat('telegram', plats.telegram)
     cfg.platforms.misskey = applyPlat('misskey', plats.misskey)
     cfg.platforms.mastodon = applyPlat('mastodon', plats.mastodon)
+    cfg.platforms.wecom = applyPlat('wecom', plats.wecom)
   } catch (e) {
     MessagePlugin.error(`加载主动开口配置失败：${e.message || e}`)
   }
@@ -222,7 +225,8 @@ async function saveConfig() {
         web: { ...cfg.platforms.web },
         telegram: { ...cfg.platforms.telegram },
         misskey: { ...cfg.platforms.misskey },
-        mastodon: { ...cfg.platforms.mastodon }
+        mastodon: { ...cfg.platforms.mastodon },
+        wecom: { ...cfg.platforms.wecom }
       }
     })
     MessagePlugin.success('设置已保存')

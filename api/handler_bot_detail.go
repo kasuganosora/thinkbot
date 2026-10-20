@@ -1277,7 +1277,7 @@ func (s *Server) saveBotCompactionHistory(c *gin.Context, botID string, records 
 // ============================================================================
 
 // botRhythmPlatforms 支持节奏配置的平台（web 不在列，永不参与）。
-var botRhythmPlatforms = []string{"telegram", "misskey", "mastodon"}
+var botRhythmPlatforms = []string{"telegram", "misskey", "mastodon", "wecom"}
 
 // BotRhythmConfig 按平台配置的聊天节奏。每个平台一份。
 type BotRhythmConfig struct {

@@ -174,6 +174,30 @@ func isPrivateChat(env *core.Envelope) bool {
 	return core.NormalizeChatType(env.Message.ChatType) == core.ChatPrivate
 }
 
+// isFailOpenOnMissingControl 判断「回复控制块缺失」时是否降级为 fail-open。
+//
+// 只覆盖 `!parsed`（控制块缺失/解析失败）这一档 —— 那是格式噪音；
+// 模型**显式** send:false 的那一档不在这里，仍按模型意图 fail-closed。
+//
+// 为什么把「被真人 @ 提及」与私聊并列：
+//   - 用户 @ 了 bot 就是在跟它说话，bot 一言不发和私聊场景一样会被当成坏了
+//   - fail-closed 防的是「把内心独白当公开回复广播出去」（2026-08-17 故障）。
+//     被 @ 之后的**回复**不是广播：它落在同一段对话里，且发出前已经过
+//     publicReplyWithAudit（剥离 thinking / 内部状态 / 上下文标记 + 提取 <public>）
+//
+// ⚠️ 范围：「被 @ 即 fail-open」只对企业微信生效（企微群聊只推送 @ 消息，
+// 有界会话）。Telegram / Misskey / Mastodon 等其他渠道保持原行为：仅私聊 fail-open，
+// 避免改变既有渠道的群聊发言策略。
+func isFailOpenOnMissingControl(env *core.Envelope) bool {
+	if env == nil {
+		return false
+	}
+	if isPrivateChat(env) {
+		return true
+	}
+	return env.Message.Mentioned && messageChannelType(&env.Message) == "wecom"
+}
+
 // buildLurkPrompt 构建潜水观察者 prompt：优先用 SOUL.md 人格内容，否则回退到已注入的
 // base prompt，再拼接观察者指令。保证「结合 soul.md 模块分析」。
 func (s *LLMStage) buildLurkPrompt(env *core.Envelope, basePrompt string) string {
@@ -1522,8 +1546,8 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			// 不做这个降级，就会因为一行格式噪音把「真人 @ 提及」的回复整条静默吞掉
 			// （实测 GLM 漏控制行 + 重复 <public> 开标签，导致被 @ 后完全没回复）。
 			pub := explicitPublicReply(replyText)
-			if pub == "" && isPrivateChat(env) {
-				// 私聊兜底：缺失控制块也不该让 bot 一言不发（用户会以为 bot 坏了），
+			if pub == "" && isFailOpenOnMissingControl(env) {
+				// 兜底：缺失控制块也不该让 bot 一言不发（用户会以为 bot 坏了），
 				// 把清洗后的纯文本当作回复发出（剥离 thinking/内部标记/私密标签）。
 				pub = s.publicReplyWithAudit(ctx, env, clean)
 			}

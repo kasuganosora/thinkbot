@@ -757,8 +757,12 @@ func formatFileText(caption, name, content string) string {
 	return fmt.Sprintf("[文件: %s]\n%s", name, content)
 }
 
-// formatFileSinkText 非文本/大文件存工作空间后，在消息文本里给出路径与读取方式，
-// 让模型知道文件已可经 read_file 工具读取。
+// formatFileSinkText 非文本/大文件存工作空间后，在消息文本里给出路径与读取方式。
+//
+// ⚠️ 工具名写 **read_file**（不带 sandbox_ 前缀）：sandbox 包注册时叫
+// `sandbox_read_file`，但 `llm.stripSandboxPrefixes` 在把工具列表交给模型前会剥掉
+// `sandbox_` 前缀，模型看到的就是 `read_file`。
+// 注意与权限规则相反 —— 那里要用 `sandbox_*`（过滤发生在剥前缀之前）。
 func formatFileSinkText(caption, name, relPath string) string {
 	head := fmt.Sprintf("[文件: %s]\n已保存到工作空间 %s，可用 read_file 工具读取其内容。", name, relPath)
 	if caption != "" {
