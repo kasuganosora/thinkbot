@@ -39,6 +39,7 @@ import (
 	"github.com/kasuganosora/thinkbot/channel/mastodon"
 	"github.com/kasuganosora/thinkbot/channel/misskey"
 	"github.com/kasuganosora/thinkbot/channel/telegram"
+	"github.com/kasuganosora/thinkbot/channel/wecom"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/dao"
@@ -937,6 +938,7 @@ func (s *BotService) onWorkflowCompleted(wf *workflow.Workflow) {
 // 路由规则：
 //   - tg（Telegram）：经该 bot 的 Telegram 渠道 Ingress 注入，续跑回复按
 //     msg.Source 路由回 Telegram Sender，主动推送到原 chat。
+//   - wc（企业微信）：同 tg，走 `aibot_send_msg` 推回原单聊/群聊。
 //   - web / 未知来源：保持原有 WebChannel.Inject（前端 SSE resume + 落库）。
 //   - mk（Misskey）：sessionID 不含精确回复目标 noteID，错误路由风险高，
 //     暂退回 web 兜底（落库、不主动弹），与修复前行为一致，不引入退化。
@@ -949,6 +951,12 @@ func (s *BotService) injectWorkflowContinuation(botID, sessionID, msgID, traceID
 	if kind == "tg" {
 		id := continuationIdentity(origin, "telegram", target)
 		return s.injectContinuationToTelegram(botID, target, msgID, traceID, id, text, extraMeta)
+	}
+	// ⚠️ 企业微信必须显式接管：否则续跑总结会退回 web 兜底，
+	// 表现为「工作流跑完了但企业微信里什么都没有」（tg 那条路径当年就是为这个病写的）。
+	if kind == "wc" {
+		id := continuationIdentity(origin, "wecom", target)
+		return s.injectContinuationToWecom(botID, target, msgID, traceID, id, text, extraMeta)
 	}
 	// mk / web / 未知：退回 WebChannel 注入（落库 + 前端 resume）。
 	webCh, ok := s.GetWebChannel(botID)
@@ -1033,6 +1041,76 @@ func (s *BotService) injectContinuationToTelegram(botID, chatID, msgID, traceID 
 	return nil
 }
 
+// injectContinuationToWecom 把续跑总结注入企业微信渠道，经正常出站链路推回原会话。
+//
+// ⚠️ target 必须是**完整**的会话标识（`wecom:chat:<chatid>` / `wecom:dm:<userid>`）：
+// 前缀里编码了 chat_type，只给 id 段会被 `parseTarget` 判成 unrecognized target，
+// 消息照样发出去、对端一条都收不到。resolveSessionRoute 已按此返回。
+func (s *BotService) injectContinuationToWecom(botID, target, msgID, traceID string, id continuationUser, text string, extraMeta map[string]any) error {
+	if target == "" {
+		return fmt.Errorf("empty wecom target for bot %q", botID)
+	}
+	s.mu.RLock()
+	b, ok := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return fmt.Errorf("bot instance unavailable for %q", botID)
+	}
+	chName := ""
+	for _, c := range b.Channels() {
+		if c.Type() == "wecom" {
+			chName = c.Name()
+			break
+		}
+	}
+	if chName == "" {
+		return fmt.Errorf("no wecom channel registered for bot %q", botID)
+	}
+
+	msg := buildWecomContinuationMessage(botID, chName, target, msgID, traceID, id, text, extraMeta)
+	if err := b.Ingress().Receive(context.Background(), msg); err != nil {
+		return fmt.Errorf("wecom continuation inject failed: %w", err)
+	}
+	return nil
+}
+
+// buildWecomContinuationMessage 构造注入企业微信渠道的续跑消息。
+func buildWecomContinuationMessage(botID, chName, target, msgID, traceID string, id continuationUser, text string, extraMeta map[string]any) core.Message {
+	metadata := map[string]any{
+		"channel_type":   "wecom",
+		"source_channel": chName,
+		// 出站寻址：企微没有 thread，回复目标就是会话本身（与入站同构）。
+		"reply_target": target,
+	}
+	for k, v := range extraMeta {
+		metadata[k] = v
+	}
+	if id.username != "" {
+		metadata["username"] = id.username
+	}
+	// 同 tg：`__history_managed` 让出站 enricher 把续跑回复落库（否则只发出不进历史）。
+	metadata["__history_managed"] = true
+
+	chatType := core.ChatPrivate
+	if strings.HasPrefix(target, wecom.PrefixChat) {
+		chatType = core.ChatGroup
+	}
+
+	return core.Message{
+		ID:        msgID,
+		TraceID:   traceID,
+		BotID:     botID,
+		Source:    chName,
+		Channel:   target,
+		ChatType:  chatType,
+		UserID:    id.userID,
+		Text:      text,
+		Mentioned: true,
+		CreatedAt: time.Now(),
+		Metadata:  metadata,
+	}
+}
+
 // buildTelegramContinuationMessage 构造注入 Telegram 渠道的续跑消息。
 func buildTelegramContinuationMessage(botID, chName, chatID, msgID, traceID string, id continuationUser, text string, extraMeta map[string]any) core.Message {
 	metadata := map[string]any{
@@ -1096,6 +1174,12 @@ func (s *BotService) resolveSessionRoute(sessionID string) (kind, target string)
 				if k == dao.KindTimeline {
 					return "", sessionID
 				}
+				// ⚠️ 企业微信的路由目标是**整个 external_key**：前缀编码了 chat_type，
+				// 出站 parseTarget 需要完整串，只给 id 段会 unrecognized target。
+				// Telegram 相反 —— 它的 Sender 直接吃裸 chatID。
+				if ch == dao.ChannelWecom {
+					return normalizeChannelKind(ch), sess.ExternalKey
+				}
 				return normalizeChannelKind(ch), id
 			}
 			// 会话行存在但没有 external_key（历史 web 会话）：无渠道可路由。
@@ -1116,6 +1200,8 @@ func normalizeChannelKind(channel string) string {
 		return "mk"
 	case dao.ChannelMastodon:
 		return "md"
+	case dao.ChannelWecom:
+		return "wc"
 	default:
 		return channel
 	}
@@ -2397,6 +2483,27 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		})
 	}
 
+	// 企业微信：入站媒体（图片/文件）落到工作空间，模型经 read_file 读取。
+	// 不注入的话，大文件只能在正文里留一行占位，模型看不见内容。
+	// 只注入 fileSink（不注入 fileSource —— 那是 telegram_send_document 工具用的）。
+	if wc := findWecomChannel(allChannels); wc != nil {
+		wc.SetFileSink(func(ctx context.Context, bid, filename string, data []byte) (string, error) {
+			mgr, err := s.WorkspaceManagerForBot(bid)
+			if err != nil {
+				return "", err
+			}
+			ws, err := mgr.GetOrCreate(bid)
+			if err != nil {
+				return "", err
+			}
+			rel := filepath.Join("inbound", sanitizeInboundFilename(filename))
+			if err := ws.WriteFile(ctx, rel, data); err != nil {
+				return "", err
+			}
+			return rel, nil
+		})
+	}
+
 	// 注册 Channel 专属工具（每个 Channel 实现 ChannelToolProvider 接口）
 	// 通过闭包持有 Channel API 客户端，支持跨 Channel 工具调用
 	for _, ch := range allChannels {
@@ -3369,9 +3476,22 @@ func (s *BotService) createChannel(def dao.ChannelDefinition) (bot.Channel, erro
 		return s.createMisskeyChannel(def)
 	case "mastodon":
 		return s.createMastodonChannel(def)
+	case "wecom":
+		return s.createWecomChannel(def)
 	default:
 		return nil, fmt.Errorf("unsupported channel type: %s", def.Type)
 	}
+}
+
+// findWecomChannel 返回 channels 中的第一个企业微信 Channel（无则 nil）。
+// 用于向其注入入站文件写入器（大文件落到 bot 工作空间，供 read_file 读取）。
+func findWecomChannel(channels []bot.Channel) *wecom.WeComChannel {
+	for _, ch := range channels {
+		if wc, ok := ch.(*wecom.WeComChannel); ok {
+			return wc
+		}
+	}
+	return nil
 }
 
 // findTelegramChannel 返回 channels 中的第一个 Telegram Channel（无则 nil）。
@@ -3515,6 +3635,59 @@ func (s *BotService) createMastodonChannel(def dao.ChannelDefinition) (bot.Chann
 	}
 
 	return mastodon.NewChannel(def.Name, def.BotID, cfg), nil
+}
+
+// createWecomChannel 从 ChannelDefinition 创建企业微信 Channel。
+//
+// 配置字段与 api/channel_registry.go 的 wecom schema 对应：
+// robotId（BotID）/ secret（长连接密钥）/ botName（群内显示名）/ endpoint（可选覆盖）。
+func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel, error) {
+	var raw map[string]any
+	if def.Config != "" && def.Config != "{}" {
+		if err := json.Unmarshal([]byte(def.Config), &raw); err != nil {
+			return nil, fmt.Errorf("invalid wecom config JSON: %w", err)
+		}
+	}
+
+	cfg := wecom.Config{}
+	if v, ok := raw["robotId"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.RobotID = s
+		}
+	}
+	if cfg.RobotID == "" {
+		return nil, fmt.Errorf("wecom channel: robotId is required")
+	}
+	if v, ok := raw["secret"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Secret = s
+		}
+	}
+	if cfg.Secret == "" {
+		return nil, fmt.Errorf("wecom channel: secret is required")
+	}
+	if v, ok := raw["botName"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.BotName = s
+		}
+	}
+	if v, ok := raw["endpoint"]; ok {
+		if s, ok := v.(string); ok {
+			cfg.Endpoint = s
+		}
+	}
+	if v, ok := raw["allowCustomEndpoint"].(bool); ok {
+		cfg.AllowCustomEndpoint = v
+	}
+	// captionWindowMs：「文字 + 文件」合并窗口（毫秒）。
+	// 0 / 缺省 = 用 channel 默认（3s）；<0 = 关闭合并（接受双回复、零延迟）。
+	if v, ok := raw["captionWindowMs"]; ok {
+		if n := toInt(v); n != 0 {
+			cfg.CaptionWindow = time.Duration(n) * time.Millisecond
+		}
+	}
+
+	return wecom.NewChannel(def.Name, def.BotID, cfg), nil
 }
 
 // toInt 将 interface{} 安全转换为 int。
@@ -3812,6 +3985,8 @@ func (s *BotService) inboundSessionID(msg *core.Message) (string, string, bool) 
 		key, kind, status = misskeySessionTarget(msg)
 	case "mastodon":
 		key, kind, status = mastodonSessionTarget(msg)
+	case "wecom":
+		key, kind, status = wecomSessionTarget(msg)
 	default:
 		return "", "", false
 	}
@@ -3863,6 +4038,26 @@ func mastodonSessionTarget(msg *core.Message) (key, kind, status string) {
 		return "", "", ""
 	}
 	return dao.MastodonDMKey(msg.Channel), dao.KindDirect, ""
+}
+
+// wecomSessionTarget 判定企业微信入站消息的会话归属。
+//
+// msg.Channel 由 channel/wecom 产出，只有两种取值：
+//   - `wecom:chat:<chatid>`：群聊 → 整群共享一条历史（与 Telegram 群聊同构）
+//   - `wecom:dm:<userid>`：单聊 → 按对端用户聚合
+//
+// ⚠️ 群聊走 KindGroup 而不是 KindDirect：群里多个人在跟同一个机器人说话，
+// 按群聚合才是对的模型（Telegram 就是这么做的）；按人聚合会让 bot 看不见别人说过什么。
+// ⚠️ 没有「旁听/不建会话」的分支：企业微信没有公开时间线，收到的每条消息都是
+// 有人在对机器人说话，全部建会话。
+//
+// ⚠️ 前缀用 wecom.PrefixChat 而不是字面量：同一批前缀还承担着出站寻址，
+// 两处各写一份会在改动时静默分裂会话（external_key 变了 → 历史读不到）。
+func wecomSessionTarget(msg *core.Message) (key, kind, status string) {
+	if strings.HasPrefix(msg.Channel, wecom.PrefixChat) {
+		return msg.Channel, dao.KindGroup, ""
+	}
+	return msg.Channel, dao.KindDirect, ""
 }
 
 // buildQuoteBlock 把「引用回复」中被引用的上文渲染成引用块前缀。

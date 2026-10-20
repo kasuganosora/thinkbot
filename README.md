@@ -49,7 +49,7 @@ thinkbot isn't just an assistant that answers whatever you ask. It has a persona
 - **It reaches out to you**: server alerts, deploy results, and reminders you ask for land in your Telegram chat instead of sitting in a log file.
 - **It remembers, and forgets on request**: layered long-term memory picks up conversations from weeks ago. Tell it to forget something and it deletes it, and it won't learn it back later. You control your privacy.
 - **It can actually do things**: each bot has its own sandbox container where it can run commands, read and write files, use a browser, and search and fetch web pages. You can add skills and MCP tools too.
-- **One deployment, many places to chat**: Web, Telegram, Misskey and Mastodon share the same bot, and context follows you across platforms. One deployment can host several bots, each with its own personality.
+- **One deployment, many places to chat**: Web, Telegram, Misskey, Mastodon and WeCom share the same bot, and context follows you across platforms. One deployment can host several bots, each with its own personality.
 - **Pick your model**: OpenAI-compatible APIs (such as DeepSeek), OpenAI Responses, Anthropic, or Gemini. Switching takes a few clicks in the web UI.
 - **You're in charge**: it's self-hosted and keeps its data in a local SQLite file. Tool permissions, usage quotas and user management all live in the web admin console.
 
@@ -61,6 +61,7 @@ thinkbot isn't just an assistant that answers whatever you ask. It has a persona
 | Telegram | ✅ Available | Private and group chats (mention it or reply to it); sends photos and files; group admin tools (pin, delete, ban…, enabled in tool permissions); **receives server alerts** |
 | Misskey | ✅ Available | Replies to mentions, can follow timelines; posts, reacts, renotes, follows, searches, runs polls |
 | Mastodon | 🚧 In development | Code merged, not yet tested in production. Replies to mentions and replies, optional timeline streams; posting, favourites, boosts and more. Set the instance URL and access token in the web UI under Bot Settings → Platforms |
+| WeCom (企业微信) | ✅ Available | Smart-bot long connection (no public IP or callback URL needed); direct chats and group @-mentions; receives images and files |
 
 ## What you can do with it
 

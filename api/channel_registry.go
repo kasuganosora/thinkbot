@@ -128,6 +128,36 @@ var supportedChannelTypes = []ChannelTypeInfo{
 		},
 	},
 	{
+		Type:        "wecom",
+		DisplayName: "企业微信",
+		Description: "通过企业微信智能机器人长连接接收单聊与群聊消息，无需公网 IP 或回调地址。",
+		Icon:        "wecom",
+		Color:       "#0079f2",
+		Fields: []ChannelField{
+			{Key: "robotId", Label: "BotID", Type: "string", Required: true, HelpText: "企业微信后台「智能机器人」页的 BotID（aib_ 前缀）"},
+			{Key: "secret", Label: "Secret", Type: "password", Required: true, HelpText: "长连接专用 Secret（与 URL 回调模式的 Token/EncodingAESKey 不同）"},
+			{
+				Key:   "botName",
+				Label: "机器人在群里的显示名",
+				Type:  "string",
+				HelpText: "如 mybot。回调帧里只有 aibotid、**没有显示名**，不配置就只能靠通用规则剥离 @ 前缀，" +
+					"可能把 @别人 误判成 @本机器人。",
+			},
+			{Key: "endpoint", Label: "长连接地址", Type: "string", HelpText: "留空用官方默认地址；非官方地址需同时开启下方开关"},
+			{Key: "allowCustomEndpoint", Label: "允许非官方长连接地址", Type: "boolean", HelpText: "默认关闭。开启后 Secret 会发往自定义地址，仅私有部署使用"},
+			{
+				Key:   "captionWindowMs",
+				Label: "配文合并窗口（毫秒）",
+				Type:  "number",
+				// ⚠️ 默认 3000 不是随便取的：企微发文件时把配文拆成另一条回调，
+				// 两条间隔实测 0.3~2.5s。留空/0 走同一默认值；填 -1 关闭合并
+				// （回复零延迟，但「文字+文件」会变成两条回复）。
+				Default:  "3000",
+				HelpText: "发文件时配文会被拆成另一条回调，本窗口用来把它们合并成一条。默认 3000；填 -1 关闭合并（零延迟，但会双回复）",
+			},
+		},
+	},
+	{
 		Type:        "misskey",
 		DisplayName: "Misskey",
 		Description: "通过 Misskey WebSocket streaming 接收提及和回复消息。",
