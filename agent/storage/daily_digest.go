@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
+	_ "time/tzdata" // day buckets must not depend on the container's /etc/localtime or zoneinfo
 
 	"go.uber.org/zap"
 	"gorm.io/gorm/clause"
@@ -51,7 +53,8 @@ type DailyDigestConfig struct {
 	// BotID: only this bot's notes (metadata bot_id) are digested; the state key
 	// includes it, since several bots may listen to the same timeline.
 	BotID string
-	// Location: the day boundary (bot timezone; default Asia/Shanghai).
+	// Location: the day boundary (bot timezone; default Asia/Shanghai). It is
+	// also the zone of created_at values stored without an offset.
 	Location *time.Location
 	// MaxChars bounds the digest text (default 1500).
 	MaxChars int
@@ -75,11 +78,7 @@ type DailyDigester struct {
 // NewDailyDigester creates a digester.
 func NewDailyDigester(repo *SQLiteRepository, cfg DailyDigestConfig, logger *zap.SugaredLogger) *DailyDigester {
 	if cfg.Location == nil {
-		if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
-			cfg.Location = loc
-		} else {
-			cfg.Location = time.Local
-		}
+		cfg.Location = DigestLocation("")
 	}
 	if cfg.MaxChars <= 0 {
 		cfg.MaxChars = DefaultDigestMaxChars
@@ -161,19 +160,123 @@ func (d *DailyDigester) saveState(ctx context.Context, scope memory.Scope, date 
 	}).Create(&dao.MemoryDigestState{ScopeKey: d.stateKey(scope), LastDate: date, UpdatedAt: time.Now()}).Error
 }
 
-// DayNotes returns the active raw notes of scope written by this bot on day.
+// DefaultDigestTimezone is the digest day zone when none is configured.
+const DefaultDigestTimezone = "Asia/Shanghai"
+
+// DigestLocation loads name (default Asia/Shanghai). It never returns
+// time.Local: containers often run with /etc/localtime=UTC regardless of TZ.
+// If loading fails, Asia/Shanghai falls back to a fixed +08:00 zone and other
+// names to the default.
+func DigestLocation(name string) *time.Location {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.EqualFold(name, "local") {
+		name = DefaultDigestTimezone
+	}
+	if loc, err := time.LoadLocation(name); err == nil && loc != time.Local {
+		return loc
+	}
+	if name != DefaultDigestTimezone {
+		return DigestLocation(DefaultDigestTimezone)
+	}
+	return time.FixedZone("CST", 8*3600)
+}
+
+// createdAtLayouts are the created_at spellings found in memory_entries:
+// the driver's "2006-01-02 15:04:05.999999999-07:00", RFC3339 and zone-less.
+var createdAtLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02T15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+}
+
+var createdAtLocalLayouts = []string{
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04",
+	"2006-01-02",
+}
+
+// parseCreatedAt parses a stored created_at. Values without a zone are read
+// in loc (the bot timezone), not UTC and not the process local zone.
+func parseCreatedAt(raw string, loc *time.Location) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, l := range createdAtLayouts {
+		if t, err := time.Parse(l, raw); err == nil {
+			return t, true
+		}
+	}
+	for _, l := range createdAtLocalLayouts {
+		if t, err := time.ParseInLocation(l, raw, loc); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// DayNotes returns the active raw notes of scope written by this bot on day
+// (day boundaries in cfg.Location). created_at is stored as text in mixed
+// zones/formats, so SQL only pre-selects by date prefix (±1 day) and the exact
+// bucket is decided after parsing each value.
 func (d *DailyDigester) DayNotes(ctx context.Context, scope memory.Scope, day time.Time) ([]memory.Entry, error) {
-	var models []dao.EntryModel
-	q := d.repo.scopeQuery(ctx, scope).
+	loc := d.cfg.Location
+	start := dayStart(day.In(loc))
+	end := start.AddDate(0, 0, 1)
+	lo := start.AddDate(0, 0, -1).Format("2006-01-02")
+	hi := start.AddDate(0, 0, 2).Format("2006-01-02")
+	q := d.repo.scopeQuery(ctx, scope).Model(&dao.EntryModel{}).
 		Where("source = ?", "note").
-		Where("created_at >= ? AND created_at < ?", day, day.AddDate(0, 0, 1)).
-		Order("created_at ASC")
+		Where("substr(CAST(created_at AS TEXT), 1, 10) >= ? AND substr(CAST(created_at AS TEXT), 1, 10) < ?", lo, hi)
 	if d.cfg.BotID != "" {
 		q = q.Where("metadata_json LIKE ?", "%\"bot_id\":\""+d.cfg.BotID+"\"%")
 	}
-	if err := q.Find(&models).Error; err != nil {
+	var cands []struct {
+		ID        string `gorm:"column:id"`
+		CreatedAt string `gorm:"column:created_at_text"`
+	}
+	if err := q.Select("id, CAST(created_at AS TEXT) AS created_at_text").Scan(&cands).Error; err != nil {
 		return nil, err
 	}
+	at := make(map[string]time.Time, len(cands))
+	ids := make([]string, 0, len(cands))
+	for _, c := range cands {
+		t, ok := parseCreatedAt(c.CreatedAt, loc)
+		if !ok || t.Before(start) || !t.Before(end) {
+			continue
+		}
+		at[c.ID] = t
+		ids = append(ids, c.ID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var models []dao.EntryModel
+	for i := 0; i < len(ids); i += 500 {
+		j := i + 500
+		if j > len(ids) {
+			j = len(ids)
+		}
+		var part []dao.EntryModel
+		if err := d.repo.db.WithContext(ctx).Where("id IN ?", ids[i:j]).Find(&part).Error; err != nil {
+			return nil, err
+		}
+		models = append(models, part...)
+	}
+	for i := range models {
+		if t, ok := at[models[i].ID]; ok {
+			models[i].CreatedAt = t
+		}
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		if !models[i].CreatedAt.Equal(models[j].CreatedAt) {
+			return models[i].CreatedAt.Before(models[j].CreatedAt)
+		}
+		return models[i].ID < models[j].ID
+	})
 	return modelsToActiveEntries(models), nil
 }
 
