@@ -1,68 +1,107 @@
 # memory_vec: embed scheme change and rollback
 
-`hashEmbed` (local character-bigram hash, 256 dims, no embedding model) now
-normalizes text before hashing: @mentions, note/status ids, dates/times,
-`[Reply to …]` prefixes and URLs are stripped. Vectors written before and after
-this change are not comparable, so the scheme is versioned.
+`hashEmbed` (local character-bigram hash, 256 dims, no embedding model)
+normalizes text before hashing: @handles, note/status id references, dates and
+times, `[Reply to …]` quote segments, author prefixes, short `【…】` tags and
+URLs are stripped. Vectors written by different schemes are not comparable, so
+the scheme is versioned.
 
 ## Upgrade (automatic)
 
 - `memory_vec_meta(key, value)` stores `embed_version` (currently
   `bigram-norm-v3`).
 - On startup `OpenVecIndex` compares it. On mismatch (or a missing table) it
-  drops and recreates `memory_vec` (empty) and stamps the current version.
-- Two background backfills then refill it, writing only `entry_id`s that are
-  missing (no model calls, purely local):
-  - `TieredStore` backfill: non-expired rows of `tiered_memories`.
-  - `SQLiteRepository.StartVecBackfill`: active rows of `memory_entries`
-    (new; once per DB per process).
+  drops and recreates `memory_vec` (empty), stamps the current version and logs
+  `memory_vec_scheme_reset`.
+- At app init (`NewBotService` → `storage.StartAppVecBackfill`), **independent
+  of bot state** (also when every bot is stopped), one background job refills
+  it, writing only `entry_id`s that are missing (no model calls, purely local):
+  1. non-expired rows of `tiered_memories`;
+  2. active rows of `memory_entries`.
+
+  It runs once per DB per process. When a bot starts later, its own backfills
+  (TieredStore for dreaming bots, `SQLiteRepository.StartVecBackfill`) find
+  the rows already present.
 - `dedup-dryrun -reindex` (offline) rebuilds `memory_vec` from active
   `memory_entries` and stamps the version as well.
+
+### Logs to watch
+
+Plain stdlib line when the scheme check empties the table:
+
+```
+INFO memory_vec_scheme_reset table=memory_vec old="bigram-norm-v2" new="bigram-norm-v3" cleared=5895
+```
+
+zap (JSON in production) for each table, `table` = `tiered_memories` or
+`memory_entries`:
+
+```
+{"level":"info","msg":"memory_vec_backfill_start","table":"tiered_memories","total":2329,"present":0,"missing":2329}
+{"level":"info","msg":"memory_vec_backfill_done","table":"tiered_memories","written":2329,"failed":0,"missing":2329,"took":"9.736s"}
+{"level":"error","msg":"memory_vec_backfill_error","table":"memory_entries","stage":"upsert","entry_id":"…","err":"…"}
+```
+
+- `total`: indexable rows (id and content set; tiered: not expired).
+- `present` / `missing`: rows that already have / lack a vector.
+- `written`, `failed`, `took`: result of the run. `stage` is `load`, `list`
+  or `upsert`; at most 5 per-entry upsert errors are logged per run.
+
+After an upgrade or rollback, `memory_vec` is complete only once both
+`memory_vec_backfill_done` lines have appeared with `failed` 0. Rows whose
+entries no longer exist (deleted, archived, expired) are not re-created: the
+row count after a rebuild is lower than before, which is normal.
+
+`tiered_memories` and `memory_entries` can share an `entry_id` (memory_vec is
+keyed by `entry_id` only); such an id counts as `present` for the second table.
 
 ## What the old image does (57044ba / master 40b0b8e)
 
 Checked in the code of both revisions (`agent/memory/tier.go`
-`startVecBackfill` / `backfillVec`, `agent/storage/repository.go`):
+`startVecBackfill` / `backfillVec`, `agent/bot/dream_setup.go`,
+`agent/storage/repository.go`):
 
 - It does **not** know `memory_vec_meta` and never compares schemes. Vectors
   already present stay as they are, whatever scheme wrote them.
 - Startup backfill is **per entry, not "only when empty"**: `backfillVec` lists
   the `entry_id`s already in `memory_vec` and upserts every loaded
-  `tiered_memories` row whose id is missing. An empty table therefore gets all
-  tiered rows; a partially filled one gets only the missing ones.
+  `tiered_memories` row whose id is missing.
+- That backfill runs **only when a bot starts with dreaming enabled** (the
+  TieredStore is created in `NewDreamingBundle` from `StartBot`). With all bots
+  stopped nothing is backfilled.
 - It covers **only `tiered_memories`**. `memory_entries` vectors are written
-  only on Append/Replace (or by `dedup-dryrun -reindex`); missing
-  `memory_entries` vectors are never backfilled at startup. Retrieval then
-  simply does not see those entries via KNN (substring fallback is used only
+  only on Append/Replace (or by `dedup-dryrun -reindex`). Retrieval simply does
+  not see entries without a vector via KNN (substring fallback is used only
   when the KNN finds nothing at all).
 - The admin "rebuild vectors" job (`RebuildBotVectors`) also covers only
-  `tiered_memories`, per bot.
+  `tiered_memories`, per bot. The old image logs only
+  `tiered_store: vec backfill finished already_present=… written=…`.
 
 ## Rollback to the old image
 
 Without action the old image keeps the new-scheme vectors (no crash, but the
 old `hashEmbed` queries compare against normalized vectors). To restore
-old-scheme vectors everywhere, rebuild `memory_vec` with the **old** binary
-before the old image starts.
+old-scheme vectors, rebuild `memory_vec` with the **old** binary before the old
+image starts.
 
 Why one command is enough:
 
 - Old `dedup-dryrun -in-place -reindex` runs `VecIndex.Rebuild`, which does
   `DROP TABLE IF EXISTS memory_vec` and recreates it, then writes every active
-  `memory_entries` row with the old hash. No separate drop/delete is needed.
+  `memory_entries` row with the old hash.
 - The old image ignores `memory_vec_meta`. It is still dropped in the same
   command so that a later re-upgrade sees no `embed_version` and rebuilds;
   otherwise the new image would trust old-scheme vectors stamped as current.
-  It is a plain table, so `sqlite3` drops it without the extension.
-- On start, the old image's per-entry backfill then adds the missing
-  `tiered_memories` vectors.
+- `tiered_memories` vectors are left to the old image's startup backfill (see
+  above: only for bots that start with dreaming enabled).
 
 ### The helper image
 
-Images built from 57044ba / master 40b0b8e do **not** contain `dedup-dryrun`
-(only newer images ship `/app/dedup-dryrun`). Build a throwaway helper from the
-57044ba source. The source is cloned inside the build, so nothing is written
-on the host:
+The app images contain **no `sqlite3`**, and images built from 57044ba /
+master 40b0b8e do not contain `dedup-dryrun` either (newer images ship
+`/app/dedup-dryrun`). The rollback therefore must use a throwaway helper image
+built from the 57044ba source. The source is cloned inside the build, so
+nothing is written on the host:
 
 ```sh
 docker build -t thinkbot-rollback:57044ba - <<'EOF'
@@ -80,6 +119,10 @@ ENV THINKBOT_SQLITE_VEC=/usr/lib/sqlite-vec/vec0
 EOF
 ```
 
+When building the app image itself, use `docker build --target thinkbot-slim`
+for the slim image; a plain `docker build` ends at the last stage (`selfhost`,
+with Go toolchain and full source, about 2.1 GB).
+
 ### Steps
 
 1. Stop the bot and back up the DB (host path is an example; compose mounts
@@ -90,24 +133,45 @@ EOF
    cp data/container/thinkbot.db data/container/thinkbot.db.bak
    ```
 
-2. Drop the version table and rebuild `memory_vec` with the old hash in one
+2. Check the owner of the data dir. The command below runs as uid 1000 (the
+   `thinkbot` user of the app image) and must be able to write the DB and its
+   `-wal`/`-shm` files:
+
+   ```sh
+   stat -c %u data/container data/container/thinkbot.db   # expect 1000
+   ```
+
+   If it prints another uid, either pass that uid to `--user` (e.g.
+   `--user "$(stat -c %u data/container):$(stat -c %g data/container)"`) or
+   fix ownership with `sudo chown -R 1000:1000 data/container`.
+
+3. Drop the version table and rebuild `memory_vec` with the old hash in one
    throwaway container (`--rm`, data dir mounted, no LLM calls; the dry-run
-   report is discarded):
+   report is discarded). `test -s` guards against a wrong path: `sqlite3`
+   would otherwise create an empty DB file there.
 
    ```sh
    docker run --rm --user 1000:1000 -v "$PWD/data/container:/data" thinkbot-rollback:57044ba \
-     sh -c 'sqlite3 /data/thinkbot.db "DROP TABLE IF EXISTS memory_vec_meta;" &&
+     sh -c 'test -s /data/thinkbot.db &&
+            sqlite3 /data/thinkbot.db "DROP TABLE IF EXISTS memory_vec_meta;" &&
             dedup-dryrun -db /data/thinkbot.db -in-place -all -reindex >/dev/null'
    ```
 
-3. Start the old image. Its startup backfill adds the missing
-   `tiered_memories` vectors (old scheme), entry by entry.
+   A non-zero exit with no output means the DB path was wrong; nothing was
+   written.
 
-4. Remove the helper: `docker rmi thinkbot-rollback:57044ba`.
+4. Start the old image. Its startup backfill adds the missing
+   `tiered_memories` vectors (old scheme), entry by entry, for bots that start
+   with dreaming enabled; watch for
+   `tiered_store: vec backfill finished … written=…`.
 
-If step 2 is skipped, `tiered_memories` are restored only for entries without
+5. Remove the helper: `docker rmi thinkbot-rollback:57044ba`.
+
+If step 3 is skipped, `tiered_memories` are restored only for entries without
 a vector, and `memory_entries` keep new-scheme vectors until rewritten.
 
-Re-upgrading later needs nothing: the new image sees no `embed_version`,
-clears `memory_vec` and refills both tables. Newer images can also run
-`/app/dedup-dryrun` directly (copy mode by default; `-in-place` writes).
+Re-upgrading later needs nothing: the new image sees no `embed_version`, logs
+`memory_vec_scheme_reset`, clears `memory_vec` and the app-level backfill
+refills both tables (watch for the two `memory_vec_backfill_done` lines).
+Newer images can also run `/app/dedup-dryrun` directly (copy mode by default;
+`-in-place` writes).
