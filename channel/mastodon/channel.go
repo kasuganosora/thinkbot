@@ -524,8 +524,9 @@ func (c *MastodonChannel) connectAndServe(ctx context.Context) error {
 	// 因此：第一个流（通知流）仍走 query 参数作兼容性兜底——即使对端不支持
 	// subscribe 帧，@提及这条命脉也还在；其余流一律走 subscribe 帧。
 	streams := append([]string{notificationStream}, c.cfg.Streams...)
+	// Token is sent only via the Authorization header (authRequest). It must
+	// never go into the query string: util/http logs WebSocket URLs verbatim.
 	q := url.Values{}
-	q.Add("access_token", c.cfg.Token)
 	q.Add("stream", streams[0])
 
 	cfg := http.WSConfig{
@@ -1185,6 +1186,35 @@ func mapVisibility(v string) string {
 	}
 }
 
+// visibilityRank orders visibilities from widest (0) to narrowest (3).
+func visibilityRank(v string) int {
+	switch v {
+	case VisibilityPublic:
+		return 0
+	case VisibilityUnlisted:
+		return 1
+	case VisibilityPrivate:
+		return 2
+	case VisibilityDirect:
+		return 3
+	}
+	return 1
+}
+
+// clampVisibility returns the narrower of requested and the parent's
+// visibility, so a reply never exposes a conversation wider than its parent.
+// An empty parent visibility leaves requested unchanged.
+func clampVisibility(requested, parent string) string {
+	if strings.TrimSpace(parent) == "" {
+		return requested
+	}
+	p := mapVisibility(parent)
+	if visibilityRank(p) > visibilityRank(requested) {
+		return p
+	}
+	return requested
+}
+
 // truncEllipsis 是 strutil.Truncate 超长时追加的省略号。
 const truncEllipsis = "..."
 
@@ -1236,18 +1266,21 @@ func (c *MastodonChannel) ReplyWithVisibility(ctx context.Context, statusID, tex
 
 	// 回复时自动 @ 被回复者及其他被 @ 的人（排除 Bot 自身）。
 	// Mastodon 用 acct（含域），远程用户只有带域才能被正确提及。
+	vis := mapVisibility(visibility)
 	if statusID != "" {
-		if parent, err := c.lookupStatus(ctx, statusID); err == nil && parent != nil {
-			if prefix := c.buildReplyMentionPrefix(parent); prefix != "" {
-				text = c.truncateForStatus(prefix + text)
-			}
-		} else if err != nil {
-			traceid.L(ctx).Debugw("mastodon: getStatus for reply mention prefix skipped",
-				"channel", c.name, "status_id", statusID, "err", err)
+		parent, err := c.lookupStatus(ctx, statusID)
+		if err != nil || parent == nil {
+			// Fail closed: without the parent we cannot tell whether it was a
+			// DM, and replying with a wider visibility would leak it.
+			return fmt.Errorf("mastodon reply: cannot resolve parent %q visibility: %v", statusID, err)
+		}
+		vis = clampVisibility(vis, parent.Visibility)
+		if prefix := c.buildReplyMentionPrefix(parent); prefix != "" {
+			text = c.truncateForStatus(prefix + text)
 		}
 	}
 
-	_, err := c.api.createStatusFull(ctx, text, statusID, mapVisibility(visibility), "", nil, nil)
+	_, err := c.api.createStatusFull(ctx, text, statusID, vis, "", nil, nil)
 	if err != nil {
 		traceid.L(ctx).Warnw("mastodon: reply failed, target status may be deleted",
 			"channel", c.name, "status_id", statusID, "err", err)
@@ -1365,7 +1398,7 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 		return nil // 空消息不发送
 	}
 
-	visibility := VisibilityUnlisted
+	visibility := ""
 	cw := ""
 	if action.Metadata != nil {
 		if v, ok := action.Metadata["visibility"].(string); ok && v != "" {
@@ -1379,7 +1412,20 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 	text = c.truncateForStatus(strings.TrimSpace(text))
 
 	// 回复时自动补全 @acct：联邦用户必须带域才能被正确提及并收到通知。
-	if parent, err := c.lookupStatus(ctx, statusID); err == nil && parent != nil {
+	parent, perr := c.lookupStatus(ctx, statusID)
+	if perr != nil || parent == nil {
+		// Fail closed: an unknown parent might be a DM; never guess a wider visibility.
+		traceid.L(ctx).Warnw("mastodon send: parent status lookup failed",
+			"channel", c.name, "status_id", statusID, "err", perr)
+		return fmt.Errorf("mastodon send: cannot resolve parent %q visibility: %v", statusID, perr)
+	}
+	// Replies inherit the parent's visibility and may never widen it
+	// (a reply to a direct status stays direct).
+	if visibility == "" {
+		visibility = mapVisibility(parent.Visibility)
+	}
+	visibility = clampVisibility(visibility, parent.Visibility)
+	{
 		if prefix := c.buildReplyMentionPrefix(parent); prefix != "" {
 			// 去掉 LLM 文本开头可能重复写的裸 @被回复者，避免重复 mention
 			t := strings.TrimSpace(text)
@@ -1391,9 +1437,6 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 			}
 			text = c.truncateForStatus(prefix + t)
 		}
-	} else if err != nil {
-		traceid.L(ctx).Debugw("mastodon: getStatus for send mention prefix skipped",
-			"channel", c.name, "status_id", statusID, "err", err)
 	}
 
 	if _, err := c.api.createStatusFull(ctx, text, statusID, visibility, cw, nil, nil); err != nil {
