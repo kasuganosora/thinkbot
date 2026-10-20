@@ -357,6 +357,45 @@ func (v *VecIndex) upsert(scopeKey, entryID, content string, onlyIfAbsent bool) 
 	return true, nil
 }
 
+// VecItem is one entry to index.
+type VecItem struct{ ScopeKey, EntryID, Content string }
+
+// BackfillMissing writes vectors only for entry_ids not yet in memory_vec
+// (existing rows are left alone). Returns (already present, written).
+func (v *VecIndex) BackfillMissing(ctx context.Context, items []VecItem) (int, int, error) {
+	if !v.Enabled() {
+		return 0, 0, nil
+	}
+	present, err := v.listEntryIDs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	already, written := 0, 0
+	for _, it := range items {
+		if ctx.Err() != nil {
+			return already, written, ctx.Err()
+		}
+		if it.EntryID == "" || it.Content == "" {
+			continue
+		}
+		if _, ok := present[it.EntryID]; ok {
+			already++
+			continue
+		}
+		ok, err := v.upsert(it.ScopeKey, it.EntryID, it.Content, true)
+		if err != nil {
+			return already, written, err
+		}
+		if ok {
+			written++
+		} else {
+			already++
+		}
+		present[it.EntryID] = struct{}{}
+	}
+	return already, written, nil
+}
+
 // listEntryIDs 非 KNN 地列出已索引的 entry_id。启动补索引用它跳过已有行。
 func (v *VecIndex) listEntryIDs(ctx context.Context) (map[string]struct{}, error) {
 	if !v.Enabled() {
