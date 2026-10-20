@@ -1,13 +1,13 @@
 // Command dedup-dryrun prints the groups the memory_dedup pass would send to
 // the LLM for a thinkbot database, without any LLM or network call. Use it to
-// validate memory.dedup.neighbour_min_similarity (default 0.45) against real
+// validate memory.dedup.neighbour_min_similarity (default 0.50) against real
 // sqlite-vec data offline.
 //
 // By default the database (and its -wal/-shm files) is copied to a temp dir
 // first, because migrations, memory_vec and -reindex write to the DB:
 //
 //	THINKBOT_SQLITE_VEC=/usr/lib/sqlite-vec/vec0 \
-//	  go run ./cmd/dedup-dryrun -db thinkbot.db -all -reindex -min-sim 0.45
+//	  go run ./cmd/dedup-dryrun -db thinkbot.db -all -reindex -min-sim 0.50
 //
 // Without a loadable sqlite-vec it reports mode=recent (the fallback the
 // production pass would use).

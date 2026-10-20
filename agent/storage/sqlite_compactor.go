@@ -94,7 +94,7 @@ type SQLiteCompactorConfig struct {
 // Defaults of the incremental dedup selection.
 const (
 	DefaultDedupNeighbourTopK  = 5
-	DefaultDedupMinSimilarity  = 0.45
+	DefaultDedupMinSimilarity  = 0.50
 	DefaultDedupMaxSeeds       = 30
 	DefaultDedupFallbackRecent = 3
 	DefaultDedupMaxMergedChars = 800

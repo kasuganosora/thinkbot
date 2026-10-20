@@ -248,7 +248,7 @@ const (
 	KeyMemoryDedupCooldownMin = "memory.dedup.cooldown_min"
 	// KeyMemoryDedupNeighbourK neighbours taken from memory_vec per unchecked entry (default 5).
 	KeyMemoryDedupNeighbourK = "memory.dedup.neighbour_k"
-	// KeyMemoryDedupMinSimilarity minimum similarity of a neighbour (default 0.45).
+	// KeyMemoryDedupMinSimilarity minimum similarity of a neighbour (default 0.50).
 	KeyMemoryDedupMinSimilarity = "memory.dedup.min_similarity"
 	// KeyMemoryDedupMaxSeeds unchecked entries processed per pass (default 30).
 	KeyMemoryDedupMaxSeeds = "memory.dedup.max_seeds"
