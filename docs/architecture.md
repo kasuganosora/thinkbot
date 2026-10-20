@@ -33,7 +33,7 @@ thinkbot 是一个开源的多渠道 AI 机器人。你可以把它接进 Web、
 ### 补充说明（重写 README 时据代码核对）
 
 - Web 管理台中「模型服务」可选的客户端类型为 `OpenAI Compatible` / `OpenAI Responses` / `Anthropic` / `Gemini`（`web/src/components/ProvidersManager.vue`）；`llm/grok/` 下另有 xAI Grok 适配包。
-- 渠道注册表（`api/channel_registry.go`）目前登记 Telegram 与 Misskey；Web 聊天为内置渠道。Mastodon 适配器在 `feat/mastodon-channel` 分支开发中，尚未合入 master。
+- 渠道注册表（`api/channel_registry.go`）登记 Telegram、Misskey 与 Mastodon（beta，`channel/mastodon/`，实例地址与 Access Token 在 Web 管理台「Bot 设置 → 平台」配置）；Web 聊天为内置渠道。
 - 外部通知（notify）目前只支持投递到 Telegram 渠道。
 - 每个 bot 的沙箱是一个长期运行的兄弟容器 `thinkbot-bot-<botID>`，挂载同名 named volume；容器默认联网，`NetworkDisabled=true` 时才 `--network none`（见 `sandbox/README.md`）。
 - 所有 bot 共用一个 SQLite 数据库（默认 `data/thinkbot.db`），记忆按 bot / 会话 / 用户作用域隔离。

@@ -5,12 +5,20 @@
 <h1 align="center">thinkbot</h1>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.27+" />
+  <img src="https://img.shields.io/badge/Docker-compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker compose" />
+  <img src="https://img.shields.io/github/license/kasuganosora/thinkbot?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/github/stars/kasuganosora/thinkbot?style=flat-square" alt="Stars" />
+  <img src="https://img.shields.io/github/last-commit/kasuganosora/thinkbot?style=flat-square" alt="Last commit" />
+</p>
+
+<p align="center">
   <b>When your server has a problem, it reaches you first, and you can talk to it about the problem.</b><br/>
   An open-source, self-hosted AI companion that stays online: it chats, remembers, and gets things done.
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> · English
+  <a href="README.md">简体中文</a> · <b>English</b> · <a href="#quick-start">Quick start</a> · <a href="docs/configuration.md">Configuration</a> · <a href="docs/deploy.md">Deployment</a>
 </p>
 
 ---
@@ -27,12 +35,19 @@ thinkbot is for people who want an **AI assistant they control**: indie develope
    If a real SMART problem shows up, you'll hear about it right away.
 ```
 
-## Why use it
+## Meet thinkbot
+
+thinkbot isn't just an assistant that answers whatever you ask. It has a personality (you write it), remembers what you've talked about, chimes in naturally in group chats, and is the first to find you when a server goes wrong. It doesn't try to reply to everything; it aims to be an **always-on companion that knows when to speak and can be relied on**.
+
+## Highlights
+
+- **A personality, not a help-desk voice**: its persona lives in SOUL.md, so you decide how it talks, its quirks and its interests. It uses the same voice for small talk, group banter and alert reports.
+- **Hangs out in group chats, and knows when to stay quiet**: you don't have to @ it every time. Its chat rhythm settings decide whether it joins in: a speaking tendency, debouncing for bursts of messages, and a cap on consecutive replies. When someone mentions or replies to it, it always answers.
 
 - **It reaches out to you**: server alerts, deploy results, and reminders you ask for land in your Telegram chat instead of sitting in a log file.
 - **It remembers, and forgets on request**: layered long-term memory picks up conversations from weeks ago. Tell it to forget something and it deletes it, and it won't learn it back later. You control your privacy.
 - **It can actually do things**: each bot has its own sandbox container where it can run commands, read and write files, use a browser, and search and fetch web pages. You can add skills and MCP tools too.
-- **One deployment, many places to chat**: Web, Telegram and Misskey share the same bot, and context follows you across platforms. One deployment can host several bots, each with its own personality.
+- **One deployment, many places to chat**: Web, Telegram, Misskey and Mastodon share the same bot, and context follows you across platforms. One deployment can host several bots, each with its own personality.
 - **Pick your model**: OpenAI-compatible APIs (such as DeepSeek), OpenAI Responses, Anthropic, or Gemini. Switching takes a few clicks in the web UI.
 - **You're in charge**: it's self-hosted and keeps its data in a local SQLite file. Tool permissions, usage quotas and user management all live in the web admin console.
 
@@ -43,7 +58,7 @@ thinkbot is for people who want an **AI assistant they control**: indie develope
 | Web | ✅ Available | Built-in chat UI and admin console. Shows tool calls, plus the sandbox terminal and desktop |
 | Telegram | ✅ Available | Private and group chats (mention it or reply to it); sends photos and files; group admin tools (pin, delete, ban…, enabled in tool permissions); **receives server alerts** |
 | Misskey | ✅ Available | Replies to mentions, can follow timelines; posts, reacts, renotes, follows, searches, runs polls |
-| Mastodon | 🚧 Coming soon | Adapter in progress on the [`feat/mastodon-channel`](https://github.com/kasuganosora/thinkbot/tree/feat/mastodon-channel) branch, not merged into master yet |
+| Mastodon | 🧪 Supported (beta) | Replies to mentions and replies, optional timeline streams; posting, favourites, boosts and more. Set the instance URL and access token in the web UI under Bot Settings → Platforms |
 
 ## What you can do with it
 
@@ -128,12 +143,34 @@ A skill is a folder with a `SKILL.md` file in it. Put it in `skills/` or add it 
 - **Chat with a persona**: write its SOUL.md (personality, way of talking) under Bot Settings → Persona, and it stays in character whether you're talking anime or games.
 - **Play a text adventure**: it can give you choices to pick from. Telegram shows them as buttons, Misskey as a native poll, and the Web UI as a card.
 - **Show it pictures**: if the main model supports images, or you've set up a vision model, it can read your screenshots and memes. For stickers it sees the sticker's emoji, so it can play along with that.
-- **Help out in a group**: it answers when someone mentions or replies to it. With proactive engagement turned on, it decides for itself when to chime in, with rate limits so it doesn't spam.
+- **Help out in a group**: it always answers when someone mentions or replies to it. For how it joins in otherwise, see "Hang out in group chats" below.
 
-### 7. More ways to use it
+### 7. Hang out in group chats
+
+Add it to a Telegram group and you don't need to @ it every time. Ordinary group messages also go through its chat rhythm: it picks some of them to answer naturally and just listens to the rest (it can still remember what it heard).
+
+```text
+🧑 Jay: anyone going to the comic con this weekend?
+🧑 Lin: me! still haven't decided who to cosplay though
+🤖 Lin, how about the lead from last year's mecha show? The props are easy and hardly anyone does her
+🧑 Jay: lol it actually knows this stuff
+🧑 Lin: @thinkbot should I bring a wig?
+🤖 Bring one. Once you start sweating, your own hair will be the first thing to collapse
+```
+
+Tune it per chat type (private / group / channel) under Bot Settings → Platforms → Chat rhythm:
+
+- **Speaking tendency** (0.01–1.0, groups default to 0.4): for messages that don't mention it, the chance that it speaks up. 1.0 means it replies to everything.
+- **Debounce quiet wait** (groups default to 3 s): several messages in a row are treated as one, so it doesn't jump in after each line.
+- **Consecutive reply cap** (groups default to 3): after a few turns in a row it holds back so it doesn't take over the chat.
+- Mentions and replies to the bot skip these limits and always get an answer. Private chats have rhythm off by default (instant replies), and web chat is never throttled.
+
+It can also decide on its own that a message needs no reply and just take note of it. For Misskey / Mastodon timeline posts you can additionally turn on proactive engagement (`engagement.*` settings, with observer / lurker / moderator / active presets), which scores relevance and applies rate limits before it joins in. See [docs/configuration.md](docs/configuration.md).
+
+### 8. More ways to use it
 
 - **Several bots in one deployment**: each bot has its own persona, model, memory, sandbox container and platform accounts, and they stay separate.
-- **One bot on several platforms**: the same bot can run on Telegram and Misskey at once, and what you talked about on one side carries over to the other (Mastodon coming soon).
+- **One bot on several platforms**: the same bot can run on Telegram and Misskey at once, and what you talked about on one side carries over to the other (Mastodon works too, currently in beta).
 - **Reminders and schedules**: ask it to "remind me at 9 tomorrow morning", or set up scheduled jobs so it works on a timetable.
 
 ## How memory works
@@ -149,7 +186,7 @@ Long conversations are condensed into a summary automatically so the chat can ke
 
 ## Quick start
 
-You need a machine with Docker, an API key for a model provider, and (optionally) a Telegram bot token from [@BotFather](https://t.me/BotFather).
+You need a machine with Docker (including the `docker compose` plugin, v2.24 or newer), an API key for a model provider, and (optionally) a Telegram bot token from [@BotFather](https://t.me/BotFather).
 
 **1. Download and prepare the config**
 
@@ -170,8 +207,14 @@ services:
     environment:
       AUTH_BOOTSTRAP_ADMIN: admin
       AUTH_BOOTSTRAP_PASSWORD: change-me-please
+    # The default port mapping "8080:8080" is open to your LAN / the internet.
+    # Keep these two lines to allow access from this machine only:
+    ports: !override
+      - "127.0.0.1:8080:8080"
 YAML
 ```
+
+> `!override` needs Docker Compose v2.24+. Without it, `ports` in the override is **merged** with the default `8080:8080` instead of replacing it, and the ports clash. If it runs on a server you need to reach remotely, delete the two `ports` lines and protect it with a reverse proxy or firewall.
 
 **3. Start it**
 
@@ -179,20 +222,20 @@ YAML
 docker compose up -d --build
 ```
 
-The first build takes a few minutes. Once `docker compose ps` shows `healthy`, you're ready.
+The first build takes a few minutes (if you get a permission error, use `sudo` or add your user to the `docker` group). Once `docker compose ps` shows `healthy`, you're ready.
 
 **4. Finish setup in the web UI**
 
 Open `http://localhost:8080`, log in with the account above, then:
 
-1. **System Settings → Model Services** (系统设置 → 模型服务): add a provider, enter your API key, and add a model.
+1. **System Settings → Model Services** (系统设置 → 模型服务): add a provider, enter your API key, add a model, and **turn on the provider's Enabled (启用) switch**. New providers start disabled, and starting a bot on a disabled provider fails with `LLM "…" not found in config`.
 2. **System Settings → Bots → New Bot** (新建 Bot): create a bot and pick its main model.
-3. **Bot Settings → Platforms** (平台): add Telegram, paste your bot token, and enable it. Check that the status at the top of the page says running (运行中). If it doesn't, click to enable the bot.
+3. **Bot Settings → Platforms** (平台): add Telegram, paste your bot token, and enable it. Check that the status at the top of the page says running (运行中). New bots start stopped, so click to enable it. The first start builds the bot's sandbox image (about 1.4 GB), which takes a minute or two.
 4. **User Settings → Generate code** (用户设置 → 生成授权码): send the `TB-XXXX-XXXX` code to your Telegram bot to link your account. Alerts need this step.
 
 Now say hi to it in Telegram 👋 or just chat in the web UI.
 
-> The web UI is in Simplified Chinese for now. The Chinese labels are in brackets above. After logging in, change your password under User Settings → Security (安全设置). Once the admin account exists, the two override lines do nothing and you can delete them.
+> The web UI is in Simplified Chinese for now. The Chinese labels are in brackets above. After logging in, change your password under User Settings → Security (安全设置). Once the admin account exists, the two `AUTH_BOOTSTRAP_*` lines in the override do nothing and you can delete them.
 
 ## Next steps
 
