@@ -96,3 +96,27 @@ func (c *MisskeyChannel) inheritedFrom(parent *Note) bool {
 	}
 	return c.textMentionsSelf(parent.Text)
 }
+
+// explicitMentionMarker is appended to the model-facing text when the author
+// explicitly addressed the bot.
+const explicitMentionMarker = "[mentioned you directly — this message is addressed to you; reply]"
+
+// stripBotFromAutoPrefix removes the bot's own @handle only from the leading
+// run of mentions (the client's auto-prefix / the "@bot hello" call-out),
+// keeping every other @mention there and any @bot the author wrote later in
+// the body (e.g. a trailing "... @bot").
+func (c *MisskeyChannel) stripBotFromAutoPrefix(text string) string {
+	if c.mentionRe == nil {
+		return text
+	}
+	prefix := leadingMentionsRe.FindString(text)
+	if prefix == "" {
+		return text
+	}
+	rest := text[len(prefix):]
+	kept := strings.Fields(c.mentionRe.ReplaceAllString(prefix, ""))
+	if len(kept) == 0 {
+		return strings.TrimSpace(rest)
+	}
+	return strings.TrimSpace(strings.Join(kept, " ") + " " + rest)
+}

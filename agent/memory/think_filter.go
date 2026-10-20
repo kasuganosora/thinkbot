@@ -204,7 +204,7 @@ func removeAndJoin(re *regexp.Regexp, text string) string {
 // ⚠️ 新增平台注入标记时必须同步 `util/strutil/context_markers.go`（那是入站侧、
 // 管会话标题/L0 记忆的剥离），两套正则各管一段，漏一边都会漏标记。
 var contextMarkerRe = regexp.MustCompile(
-	`(?m)^\s*\[(?:(?:Reply to|Renote from|Boost from) .*?: .*?|(?:note_id|status_id): .*?)\]\s*$`,
+	`(?m)^\s*\[(?:(?:Reply to|Renote from|Boost from) .*?: .*?|(?:note_id|status_id): .*?|mentioned you directly\b.*?)\]\s*$`,
 )
 
 // StripContextMarkers 从最终回复文本中剥离入站注入的上下文标记整行，

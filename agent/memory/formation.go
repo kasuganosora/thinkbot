@@ -464,7 +464,7 @@ Categories:
 - fact: an objective fact ("用户使用 Go 语言")
 - preference: a preference ("用户偏好简洁的回复")
 - event: something that happened ("用户完成了部署")
-- observation: an inferred observation ("用户对 Rust 感兴趣")`
+- observation: an inferred observation ("用户对 Rust 感兴趣")` + llm.SilenceRuleScope
 
 func firstNonEmpty(a, b string) string {
 	if strings.TrimSpace(a) != "" {

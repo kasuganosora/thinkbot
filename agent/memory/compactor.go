@@ -661,7 +661,7 @@ Output:
 [{"merged_content":"用户使用Go语言和Gin框架进行开发","category":"fact","importance":0.8,"source_ids":["mem-1","mem-2"]}]
 
 mem-3 is unrelated, so it stays standalone and is not emitted.
-</example>`
+</example>` + llm.SilenceRuleScope
 
 // trackDedupCall logs usage and updates the dedup call counters.
 func trackDedupCall(logger *zap.SugaredLogger, phase string, resp *llm.GenerateResult, params llm.GenerateParams) {

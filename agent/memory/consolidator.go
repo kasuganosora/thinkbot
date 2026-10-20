@@ -233,7 +233,7 @@ Categories:
 - fact: an objective fact ("用户使用 Go 语言")
 - preference: a preference ("用户偏好简洁的回复风格")
 - event: something that happened ("用户完成了项目部署")
-- observation: an inferred observation ("用户似乎对 Rust 感兴趣")`
+- observation: an inferred observation ("用户似乎对 Rust 感兴趣")` + llm.SilenceRuleScope
 
 // ============================================================================
 // RuleConsolidator — 基于规则的巩固器（无 LLM 依赖，用于测试/降级）

@@ -48,3 +48,32 @@ func TestExplicitlyAddressed(t *testing.T) {
 		}
 	}
 }
+
+func TestTrailingBotMentionCountsAndIsKept(t *testing.T) {
+	c := newExplicitTestChannel()
+	parent := &Note{ID: "p1", User: User{ID: "alice-id", Username: "alice"}}
+	note := Note{ReplyID: "p1", Reply: parent, Text: "@alice what do you two think? @helperbot"}
+	if !c.explicitlyAddressed(note) {
+		t.Fatal("reply whose body ends with @bot must count as explicit")
+	}
+	got := c.stripBotFromAutoPrefix(note.Text)
+	if got != "@alice what do you two think? @helperbot" {
+		t.Fatalf("trailing @bot must be kept for the model, got %q", got)
+	}
+}
+
+func TestStripBotFromAutoPrefix(t *testing.T) {
+	c := newExplicitTestChannel()
+	cases := map[string]string{
+		"@helperbot hello":                        "hello",
+		"@alice @helperbot I agree":               "@alice I agree",
+		"@helperbot@social.example @bob hi there": "@bob hi there",
+		"no mentions here":                        "no mentions here",
+		"hello @helperbot":                        "hello @helperbot",
+	}
+	for in, want := range cases {
+		if got := c.stripBotFromAutoPrefix(in); got != want {
+			t.Errorf("%q: got %q want %q", in, got, want)
+		}
+	}
+}

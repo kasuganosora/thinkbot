@@ -837,6 +837,7 @@ func (c *MisskeyChannel) handleNotification(ctx context.Context, body json.RawMe
 // handleNote 将一条 Misskey Note 转换为 core.Message 并注入 Ingress。
 // mentioned 参数指示此 Note 是否明确 @提及了 Bot。
 func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType string, mentioned bool) {
+	explicit := c.explicitlyAddressed(note)
 	text := strings.TrimSpace(note.Text)
 
 	// 如果是纯 Renote（无自己的文字），回退到被 Renote 的帖子文本
@@ -855,9 +856,9 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 
 	// 从文本中剥离 @bot 提及（Bot 不需要看到自己被 @）
 	// 使用正则确保精确匹配 @username 或 @username@host，不误匹配更长的用户名
-	if c.mentionRe != nil {
-		text = strings.TrimSpace(c.mentionRe.ReplaceAllString(text, ""))
-	}
+	// 只剥离开头 auto-prefix 里的 @bot；正文中（含结尾）作者亲手写的 @bot 保留，
+	// 否则模型看不到自己被点名（曾因结尾 @bot 被剥离而误判「不是对我说的」）。
+	text = c.stripBotFromAutoPrefix(text)
 
 	// 剥离后如果为空但原来是 renote，再次回退
 	if text == "" && note.Renote != nil {
@@ -917,7 +918,7 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		core.MetaIsPureRenote: isPureRenote,
 		// 作者亲手 @ 了 bot（非回复链自动继承的 mention）或直接回复 bot 的帖子：
 		// LLM 阶段据此强制回复（即使模型给出 send:false）。
-		core.MetaExplicitMention: c.explicitlyAddressed(note),
+		core.MetaExplicitMention: explicit,
 	}
 	// 入站附件归一化为 core.Attachment，供下游 messageBuilder（主模型支持多模态时
 	// 直送 ImagePart/FilePart）与 MultimodalStage（主模型不支持多模态时经 vision 转写）消费，
@@ -953,6 +954,11 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 	// timeline 消息加上来源前缀（被明确提及的回复不标 [Timeline]，避免误导模型当作群聊广播）
 	if eventType == "timeline" && !mentioned {
 		text = fmt.Sprintf("[Timeline] @%s: %s", note.User.Username, text)
+	}
+
+	// 作者显式点名 bot（亲手 @ 或回复 bot 的帖子）：给模型一个明确标记。
+	if explicit {
+		text = text + "\n" + explicitMentionMarker
 	}
 
 	// 对方是 Bot 账号：在文本前标注，让 LLM 感知并自行决定是否/如何回复
