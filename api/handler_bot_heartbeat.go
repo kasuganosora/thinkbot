@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
@@ -37,9 +38,11 @@ import (
 //  2. memory_entries：新落库记忆条目——覆盖非 Web 渠道（如 Misskey）的入站，
 //     因为 note_capture 会把入站原文写成 L0 记忆。
 //
-// 注意：memory_entries 表无 bot_id 列（作用域为 scope_kind/scope_id），因此该计数
-// 在多 bot 共库部署下可能被其他 bot 的记忆写入触发。后果仅是「多醒一次」，
-// 方向上是安全的（宁可多醒，不可漏醒）；探测出错时同样保守放行。
+// memory_entries 表无 bot_id 列（作用域为 scope_kind/scope_id），因此只统计「本 bot」
+// 的作用域：bot:<botID>，以及本 bot 入站事件流（user_message_events，按 bot_id 归属）
+// 出现过的 channel / user 作用域。心跳自身、记忆压缩器、梦境、画像等内部写入不算
+// 外界信号（此前它们会让心跳自我唤醒：心跳写 note → 下一轮准入看到「新记忆」）。
+// 探测出错时保守放行。
 func (s *BotService) newHeartbeatAdmissionFn(botID string) heartbeat.AdmissionFn {
 	if s.db == nil {
 		return nil
@@ -61,10 +64,8 @@ func (s *BotService) newHeartbeatAdmissionFn(botID string) heartbeat.AdmissionFn
 			return true, fmt.Sprintf("新增聊天消息 %d 条", msgCount)
 		}
 
-		var memCount int64
-		if err := s.db.WithContext(ctx).Model(&dao.EntryModel{}).
-			Where("created_at > ?", since).
-			Count(&memCount).Error; err != nil {
+		memCount, err := countHeartbeatMemorySignals(ctx, s.db, botID, since)
+		if err != nil {
 			s.logger.Warnw("heartbeat admission: count memory_entries failed",
 				"bot_id", botID, "err", err)
 			return true, "信号探测失败，保守放行"
@@ -75,6 +76,32 @@ func (s *BotService) newHeartbeatAdmissionFn(botID string) heartbeat.AdmissionFn
 
 		return false, ""
 	}
+}
+
+// heartbeatInternalMemorySources are memory sources written by background
+// jobs, not by the outside world: they never count as a heartbeat signal.
+var heartbeatInternalMemorySources = []string{
+	"compactor", "consolidator", "dreaming", "profiler", "bot_profiler", "heartbeat",
+}
+
+// countHeartbeatMemorySignals counts memory entries created after since in
+// botID's own scopes, excluding entries written by the heartbeat itself
+// (channel "heartbeat", user "system:heartbeat", their bot-scope mirrors) and
+// by background jobs (compactor / dreaming / profilers).
+func countHeartbeatMemorySignals(ctx context.Context, db *gorm.DB, botID string, since time.Time) (int64, error) {
+	channels := db.Model(&dao.UserMessageEvent{}).Select("DISTINCT channel").Where("bot_id = ? AND channel <> ''", botID)
+	users := db.Model(&dao.UserMessageEvent{}).Select("DISTINCT user_id").Where("bot_id = ? AND user_id <> ''", botID)
+	var n int64
+	err := db.WithContext(ctx).Model(&dao.EntryModel{}).
+		Where("created_at > ?", since).
+		Where("(scope_kind = 'bot' AND scope_id = ?) OR (scope_kind = 'channel' AND scope_id IN (?)) OR (scope_kind = 'user' AND scope_id IN (?))",
+			botID, channels, users).
+		Where("source NOT IN ? AND source NOT LIKE ?", heartbeatInternalMemorySources, "heartbeat%").
+		Where("NOT (scope_kind = 'channel' AND scope_id = 'heartbeat')").
+		Where("NOT (scope_kind = 'user' AND scope_id = 'system:heartbeat')").
+		Where("NOT (id LIKE 'xch:%' AND content LIKE '[heartbeat]%')").
+		Count(&n).Error
+	return n, err
 }
 
 // heartbeatChannelLister 枚举本 bot 当前可主动发帖的真实渠道/会话，

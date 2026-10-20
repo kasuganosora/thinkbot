@@ -204,6 +204,9 @@ func (s *Server) registerRoutes() {
 				// 心跳管理
 				botsAdmin.GET("/:id/heartbeat", s.handleGetHeartbeatConfig)
 				botsAdmin.PUT("/:id/heartbeat", s.handleUpdateHeartbeatConfig)
+				// 推理强度（按任务：记忆去重 / 心跳 / 梦境 / 工作流自愈）
+				botsAdmin.GET("/:id/reasoning", s.handleGetBotReasoning)
+				botsAdmin.PUT("/:id/reasoning", s.handleUpdateBotReasoning)
 				botsAdmin.GET("/:id/heartbeat/logs", s.handleListHeartbeatLogs)
 				botsAdmin.DELETE("/:id/heartbeat/logs", s.handleClearHeartbeatLogs)
 

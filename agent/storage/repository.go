@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -67,6 +68,12 @@ type SQLiteRepositoryConfig struct {
 	Compactor MemoryCompactor
 	// CompressThreshold 触发压缩的预算占用比例（默认 0.85）。
 	CompressThreshold float64
+	// DedupTriggerNew 某 scope 未经去重检查的新条目达到该数量即触发增量去重
+	// （默认 DefaultDedupTriggerNew=8）；超出字符预算时只要有未检查条目也会触发。
+	DedupTriggerNew int
+	// DedupCooldown 同一 scope 两次自动去重的最小间隔（默认 5 分钟，持久化到
+	// memory_compact_states，重启不重置）。
+	DedupCooldown time.Duration
 }
 
 // DefaultSQLiteRepositoryConfig 返回默认配置。
@@ -75,6 +82,8 @@ func DefaultSQLiteRepositoryConfig() SQLiteRepositoryConfig {
 		MaxEntriesPerScope: 1000,
 		DefaultLimit:       10,
 		CompressThreshold:  0.85,
+		DedupTriggerNew:    DefaultDedupTriggerNew,
+		DedupCooldown:      DefaultDedupCooldown,
 	}
 }
 
@@ -127,6 +136,12 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 		if o.CompressThreshold > 0 && o.CompressThreshold <= 1.0 {
 			cfg.CompressThreshold = o.CompressThreshold
 		}
+		if o.DedupTriggerNew > 0 {
+			cfg.DedupTriggerNew = o.DedupTriggerNew
+		}
+		if o.DedupCooldown > 0 {
+			cfg.DedupCooldown = o.DedupCooldown
+		}
 	}
 	return &SQLiteRepository{
 		db:        db,
@@ -135,6 +150,83 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 		compactor: cfg.Compactor,
 		vec:       memory.OpenVecIndex(db),
 	}
+}
+
+var vecBackfillDone sync.Map // *gorm.DB -> struct{}
+
+// StartAppVecBackfill runs both startup vector backfills (tiered_memories,
+// then memory_entries) in the background at app init, independent of whether
+// any bot is running: per-bot startup only happens for running bots, so with
+// stopped bots an emptied memory_vec would stay empty. Once per DB per
+// process; a later per-bot StartVecBackfill on the same DB is a no-op, and the
+// per-bot TieredStore backfill then only finds already-present rows.
+func StartAppVecBackfill(gdb *gorm.DB, logger *zap.SugaredLogger) {
+	if gdb == nil {
+		return
+	}
+	idx := memory.OpenVecIndex(gdb)
+	if !idx.Enabled() {
+		return
+	}
+	if _, loaded := vecBackfillDone.LoadOrStore(gdb, struct{}{}); loaded {
+		return
+	}
+	go func() { _, _ = runAppVecBackfill(context.Background(), gdb, idx, logger) }()
+}
+
+// runAppVecBackfill is the synchronous body of StartAppVecBackfill.
+func runAppVecBackfill(ctx context.Context, gdb *gorm.DB, idx *memory.VecIndex, logger *zap.SugaredLogger) ([2]memory.VecBackfillStats, error) {
+	var out [2]memory.VecBackfillStats
+	var err1, err2 error
+	out[0], err1 = memory.BackfillTieredVectors(ctx, gdb, idx, logger)
+	r := &SQLiteRepository{db: gdb, vec: idx}
+	out[1], err2 = r.backfillVec(ctx, logger)
+	if err1 != nil {
+		return out, err1
+	}
+	return out, err2
+}
+
+// StartVecBackfill indexes active memory_entries that have no vector yet, once
+// per DB per process, in the background. The TieredStore backfill only covers
+// tiered_memories; without this, memory_entries vectors cleared by an embed
+// scheme change (or never written) would stay missing until rewritten.
+func (r *SQLiteRepository) StartVecBackfill(logger *zap.SugaredLogger) {
+	if r == nil || r.db == nil || !r.vec.Enabled() {
+		return
+	}
+	if _, loaded := vecBackfillDone.LoadOrStore(r.db, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		// start / done / error lines: memory_vec_backfill_* table=memory_entries
+		_, _ = r.backfillVec(context.Background(), logger)
+	}()
+}
+
+// BackfillVec synchronously indexes active memory_entries missing a vector.
+// Returns (already present, written).
+func (r *SQLiteRepository) BackfillVec(ctx context.Context) (int, int, error) {
+	st, err := r.backfillVec(ctx, nil)
+	return st.Present, st.Written, err
+}
+
+func (r *SQLiteRepository) backfillVec(ctx context.Context, logger *zap.SugaredLogger) (memory.VecBackfillStats, error) {
+	if r == nil || !r.vec.Enabled() {
+		return memory.VecBackfillStats{}, nil
+	}
+	var models []dao.EntryModel
+	if err := r.db.WithContext(ctx).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
+		if logger != nil {
+			logger.Errorw(memory.VecBackfillErrorEvent, "table", "memory_entries", "stage", "load", "err", err)
+		}
+		return memory.VecBackfillStats{}, err
+	}
+	items := make([]memory.VecItem, 0, len(models))
+	for _, e := range modelsToActiveEntries(models) {
+		items = append(items, memory.VecItem{ScopeKey: e.Scope.Key(), EntryID: e.ID, Content: e.Content})
+	}
+	return r.vec.BackfillMissing(ctx, "memory_entries", items, logger)
 }
 
 // CompactScope 对该 scope 执行语义压缩（委派给内部 MemoryCompactor，即带 pre-LLM
@@ -194,7 +286,7 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 
 	// 字符预算（按 window 派生）：超出阈值时异步触发语义压缩（压缩后入库），
 	// 取代简单的截断。渲染层仍保留截断作为兜底，但正常情况下存储已自行收敛。
-	if r.compactor != nil && r.window != nil {
+	if r.compactor != nil && !precheckedForDedup(entry) {
 		scope := entry.Scope
 		go func() {
 			cmpCtx, cancel := context.WithTimeout(context.Background(), compactionLLMTimeout)
@@ -287,7 +379,7 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 		defer cancel()
 		r.evictIfNeeded(evictCtx, scope)
 	}()
-	if r.compactor != nil && r.window != nil {
+	if r.compactor != nil && !precheckedForDedup(newEntry) {
 		go func() {
 			cmpCtx, cancel := context.WithTimeout(context.Background(), compactionLLMTimeout)
 			defer cancel()
@@ -583,34 +675,36 @@ func (r *SQLiteRepository) charBudget(scope memory.Scope) int {
 	return budgetChars
 }
 
-// maybeCompact 在 scope 字符数超过预算阈值时触发异步压缩。
+// maybeCompact 决定是否对 scope 发起一次（增量）记忆去重。
+//
+// 触发条件：未经去重检查的条目数（不含 compactor 输出）>= DedupTriggerNew。
+// 字符预算不再触发去重（见函数体注释）；全部条目都已检查过时不调用 LLM（此前
+// 超预算的 scope 每 5 分钟就把全部条目重新送一遍 LLM）。冷却持久化在 memory_compact_states，重启不重置。
 // 非阻塞调用方；内部已做并发重入保护与冷却，压缩失败不影响正常写入。
 func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope) {
-	budget := r.charBudget(scope)
-	if budget <= 0 {
-		// window 未注入 = 设计上的「不限制」，不是故障；
-		// 注入了却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
-		if r.window != nil {
-			r.warnZeroBudget(ctx, scope)
-		}
+	if isListenScope(scope) {
+		return // 被动收听 scope 按天摘要（DailyDigester），不做滚动去重
+	}
+	unchecked, err := r.CountUncheckedDedup(ctx, scope)
+	if err != nil || unchecked == 0 {
 		return
 	}
-	total, err := r.totalChars(ctx, scope)
-	if err != nil {
-		return
+	if r.window != nil && r.charBudget(scope) <= 0 {
+		// 注入了 window 却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
+		r.warnZeroBudget(ctx, scope)
 	}
-	threshold := int(float64(budget) * r.config.CompressThreshold)
-	if total <= threshold {
+	// 只按「新条目数」触发。超出字符预算不再触发：去重后仍超预算的 scope 此前每个
+	// 冷却周期都把同一批条目重新合并一遍（合并后长度几乎不变，after/before 中位数
+	// 0.994），超预算由渲染层截断 / 条数淘汰兜底。
+	if r.config.DedupTriggerNew <= 0 || unchecked < r.config.DedupTriggerNew {
 		return
 	}
 
 	key := scope.Key()
 
-	// 冷却：避免 LLM 无可合并项时每轮都打 LLM
-	if v, ok := r.lastCompact.Load(key); ok {
-		if t, ok := v.(time.Time); ok && time.Since(t) < compactCooldown {
-			return
-		}
+	// 冷却：避免每轮写入都打 LLM（持久化，重启不重置）
+	if t, ok := r.lastDedupRun(ctx, key); ok && time.Since(t) < r.config.DedupCooldown {
+		return
 	}
 
 	// 并发重入保护：同一 scope 压缩进行中则跳过
@@ -619,7 +713,7 @@ func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope)
 	}
 	defer r.compacting.Delete(key)
 
-	r.lastCompact.Store(key, time.Now())
+	r.storeDedupRun(ctx, key, time.Now())
 
 	// 非致命：压缩失败不影响正常写入；渲染层仍有截断兜底
 	_ = r.compactor.CompactScope(ctx, scope)
@@ -873,7 +967,13 @@ func entryToModel(entry memory.Entry) dao.EntryModel {
 		}
 	}
 
+	var checked *time.Time
+	if precheckedForDedup(entry) {
+		now := time.Now()
+		checked = &now
+	}
 	return dao.EntryModel{
+		DedupCheckedAt: checked,
 		ID:             entry.ID,
 		ScopeKind:      string(entry.Scope.Kind),
 		ScopeID:        entry.Scope.ID,

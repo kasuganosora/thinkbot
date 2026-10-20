@@ -19,11 +19,12 @@ import (
 //   - reasoning_effort: configurable per purpose (llm.internal_reasoning.<purpose>)
 //     with a global default (llm.internal_reasoning.default, default "auto");
 //   - max output tokens: the model's configured maxTokens, optionally lowered
-//     by llm.internal_max_tokens.<purpose> / .default (0 = model limit).
+//     by llm.internal_max_tokens.<purpose> / .default (0 = model limit) and by
+//     a built-in purpose cap (memory_dedup: 12288).
 //
 // Values of the reasoning setting:
 //   - "" / "auto": the built-in default of the purpose (judges/classifiers/
-//     scorers → "none", memory_dedup → "high", everything else → "low"),
+//     scorers → "none", memory_dedup → "medium", everything else → "low"),
 //     sent ONLY when the provider
 //     is known to accept the parameter: the bot already sends a
 //     reasoning_effort for normal turns, the model is marked with the
@@ -47,6 +48,7 @@ const (
 	PurposeDreamCluster    = "dream_cluster"
 	PurposeDreamExtract    = "dream_extract"
 	PurposeMemoryDedup     = "memory_dedup"
+	PurposeDailyDigest     = "memory_daily_digest"
 	PurposeAutoCompact     = "auto_compact"
 	PurposeSummarizeHead   = "summarize_head"
 	PurposeUserProfiler    = "user_profiler"
@@ -61,21 +63,33 @@ var InternalPurposes = []struct {
 	Name             string
 	DefaultReasoning string
 	Description      string
+	// DefaultMaxTokens is the built-in output cap of the purpose (0 = model
+	// limit). Operators override it with llm.internal_max_tokens.<purpose>.
+	DefaultMaxTokens int
 }{
-	{PurposeLazyJudge, "none", "anti-lazy reply judge (classifier)"},
-	{PurposeEngagementJudge, "none", "engagement Tier-2 judge (classifier)"},
-	{PurposeDreamScore, "none", "dreaming importance scoring (scorer)"},
-	{PurposeDreamCluster, "none", "dreaming theme tagging (classifier)"},
-	{PurposeDreamExtract, "low", "dreaming light-phase memory extraction"},
-	{PurposeMemoryDedup, "high", "long-term memory cluster merge (memory_dedup); high because low-reasoning merges dropped details (09-27)"},
-	{PurposeAutoCompact, "low", "automatic conversation compaction summary"},
-	{PurposeSummarizeHead, "low", "sliding-window head summary (subagent, /compact)"},
-	{PurposeUserProfiler, "low", "user profile extraction"},
-	{PurposeBotProfiler, "low", "bot self-profile extraction"},
-	{PurposeWorkflowHeal, "low", "workflow healing diagnosis"},
-	{PurposeVision, "low", "vision transcription of attachments"},
-	{PurposeNotify, "low", "notify bot mode: the bot relays an external notification to its owner"},
+	{PurposeLazyJudge, "none", "anti-lazy reply judge (classifier)", 0},
+	{PurposeEngagementJudge, "none", "engagement Tier-2 judge (classifier)", 0},
+	{PurposeDreamScore, "none", "dreaming importance scoring (scorer)", 0},
+	{PurposeDreamCluster, "none", "dreaming theme tagging (classifier)", 0},
+	{PurposeDreamExtract, "low", "dreaming light-phase memory extraction", 0},
+	{PurposeMemoryDedup, "medium", "long-term memory cluster merge (memory_dedup); medium by default (low dropped details on 09-27, high cost ~12k output tokens/call); the cluster detail guard stays on", MemoryDedupDefaultMaxTokens},
+	{PurposeDailyDigest, "medium", "daily digest of a passive listen scope (e.g. misskey:timeline): one call per scope per day", 0},
+	{PurposeAutoCompact, "low", "automatic conversation compaction summary", 0},
+	{PurposeSummarizeHead, "low", "sliding-window head summary (subagent, /compact)", 0},
+	{PurposeUserProfiler, "low", "user profile extraction", 0},
+	{PurposeBotProfiler, "low", "bot self-profile extraction", 0},
+	{PurposeWorkflowHeal, "low", "workflow healing diagnosis", 0},
+	{PurposeVision, "low", "vision transcription of attachments", 0},
+	{PurposeNotify, "low", "notify bot mode: the bot relays an external notification to its owner", 0},
 }
+
+// MemoryDedupDefaultMaxTokens is the built-in output cap (reasoning included)
+// of one memory_dedup call. Groups are 2-10 entries, so the JSON answer is
+// small; the cap bounds reasoning. 12288 rather than 4096: GLM-5.3 serves the
+// medium default as high and reasoning tokens count against the cap (observed
+// ~11.9k output tokens/call). A cut-off answer leaves the group unmerged and is
+// counted in the memory_dedup_stats log line.
+const MemoryDedupDefaultMaxTokens = 12288
 
 // Reasoning setting values.
 const (
@@ -126,6 +140,15 @@ func (p *InternalPolicy) current() InternalSettings {
 	return p.settings()
 }
 
+func purposeDefaultMaxTokens(purpose string) int {
+	for _, ip := range InternalPurposes {
+		if ip.Name == purpose {
+			return ip.DefaultMaxTokens
+		}
+	}
+	return 0
+}
+
 func purposeDefault(purpose string) string {
 	for _, ip := range InternalPurposes {
 		if ip.Name == purpose {
@@ -142,7 +165,12 @@ func (p *InternalPolicy) MaxTokens(purpose string, modelMax, fallback int) int {
 	s := p.current()
 	opCap := s.MaxTokens[purpose]
 	if opCap <= 0 {
-		opCap = s.DefaultMaxTokens
+		// No per-purpose setting: the built-in purpose cap, lowered further by
+		// the global default cap when that one is smaller.
+		opCap = purposeDefaultMaxTokens(purpose)
+		if g := s.DefaultMaxTokens; g > 0 && (opCap <= 0 || g < opCap) {
+			opCap = g
+		}
 	}
 	return ResolveMaxOutputTokens(modelMax, opCap, fallback)
 }
@@ -187,7 +215,7 @@ func (p *InternalPolicy) autoEffort(purpose, model string) string {
 	}
 	want := purposeDefault(purpose)
 	botCheap := p.botEffort == "none" || p.botEffort == "minimal"
-	if botCheap && (want == "low" || want == "high") {
+	if botCheap && (want == "low" || want == "medium" || want == "high") {
 		want = p.botEffort // the bot already runs cheaper than "low"
 	}
 	if want == "none" && !familyAcceptsNone(fam) {

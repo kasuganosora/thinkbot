@@ -239,6 +239,32 @@ const (
 	KeyInternalMaxTokensPrefix = "llm.internal_max_tokens."
 )
 
+// Memory dedup (memory_dedup) incremental selection keys. Read when a bot is
+// (re)built.
+const (
+	// KeyMemoryDedupTriggerNew unchecked entries in a scope that trigger a dedup pass (default 8).
+	KeyMemoryDedupTriggerNew = "memory.dedup.trigger_new"
+	// KeyMemoryDedupCooldownMin minimum minutes between two automatic passes of a scope (default 5, persisted).
+	KeyMemoryDedupCooldownMin = "memory.dedup.cooldown_min"
+	// KeyMemoryDedupNeighbourK neighbours taken from memory_vec per unchecked entry (default 5).
+	KeyMemoryDedupNeighbourK = "memory.dedup.neighbour_k"
+	// KeyMemoryDedupMinSimilarity minimum similarity of a neighbour (default 0.50).
+	KeyMemoryDedupMinSimilarity = "memory.dedup.min_similarity"
+	// KeyMemoryDedupMaxSeeds unchecked entries processed per pass (default 30).
+	KeyMemoryDedupMaxSeeds = "memory.dedup.max_seeds"
+
+	// KeyMemoryListenScopes overrides the passive listen channels (comma
+	// separated channel IDs, e.g. "misskey:timeline"); empty = channel defaults,
+	// "none" = disable daily digests.
+	KeyMemoryListenScopes = "memory.listen_scopes"
+	// KeyMemoryDigestMaxChars bounds one daily digest (default 1500).
+	KeyMemoryDigestMaxChars = "memory.digest.max_chars"
+	// KeyMemoryDigestMaxInputChars bounds the notes of one digest call (default 24000).
+	KeyMemoryDigestMaxInputChars = "memory.digest.max_input_chars"
+	// KeyMemoryDigestBacklogDays past days digested on the first run (default 7).
+	KeyMemoryDigestBacklogDays = "memory.digest.backlog_days"
+)
+
 // Compaction（会话压缩）键：上下文压缩预算配置。
 // 这些参数原硬编码在 llm/compaction.go 的 DefaultCompactionConfig()，
 // 现集中到配置模块，用户可在前端「系统配置」页修改并持久化（修改后需重启 bot 生效）。
