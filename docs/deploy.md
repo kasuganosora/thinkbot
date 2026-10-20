@@ -131,6 +131,6 @@ docker compose up -d
 
 ## 网络与安全提示
 
-- 只在本机访问时，可在 `.env` 设 `api.addr=127.0.0.1:8080`（容器内仍需监听容器端口，Docker 部署更常见的做法是把端口映射改成 `"127.0.0.1:8080:8080"`）。
+- 只在本机访问时，可在 `.env` 设 `api.addr=127.0.0.1:8080`（容器内仍需监听容器端口，Docker 部署更常见的做法是把端口映射改成 `"127.0.0.1:8080:8080"`）。用 `docker-compose.override.yml` 改端口时要写 `ports: !override`（Compose v2.24+），否则会与默认的 `8080:8080` 合并而不是替换。
 - 公网访问请放在反向代理后，并在 `.env` 设置 `api.cookie_secure=true`、`api.cors_origins`。
 - 告警通知接口建议只挂在独立的本机监听器上，见 [notify.md › Network restriction](notify.md#network-restriction)。
