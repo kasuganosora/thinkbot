@@ -175,7 +175,9 @@ func TestInternalPolicy_MemoryDedupBuiltinCap(t *testing.T) {
 	if got := per.MaxTokens(PurposeMemoryDedup, 128000, 8192); got != 12000 {
 		t.Fatalf("per-purpose setting must override: %d", got)
 	}
-	low := NewInternalPolicy(func() InternalSettings { return InternalSettings{Reasoning: map[string]string{PurposeMemoryDedup: "low"}} }, "")
+	low := NewInternalPolicy(func() InternalSettings {
+		return InternalSettings{Reasoning: map[string]string{PurposeMemoryDedup: "low"}}
+	}, "")
 	if got := low.ReasoningEffort(PurposeMemoryDedup, "glm-5.3"); got != "low" {
 		t.Fatalf("dedup reasoning must stay configurable: %q", got)
 	}
