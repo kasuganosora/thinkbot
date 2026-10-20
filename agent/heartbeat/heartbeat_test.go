@@ -666,3 +666,32 @@ func TestTruncateForLog(t *testing.T) {
 		t.Errorf("截断长度 = %d, want %d（%q）", len([]rune(got)), want, got)
 	}
 }
+
+// allow_post=false and no new signal: even the forced idle wake must not call
+// the LLM (it could only stay silent); a real signal still wakes it.
+func TestExecute_SuppressedPostingSkipsIdleWake(t *testing.T) {
+	runner := &fakeRunner{llmText: `{"decision":"silent"}`}
+	signal := false
+	admission := func(_ context.Context, _ time.Time) (bool, string) {
+		if signal {
+			return true, "新增聊天消息 1 条"
+		}
+		return false, ""
+	}
+	e, _ := newTestExecutor(t,
+		Config{Enabled: true, Interval: 30, AllowPost: false, IdleWakeEvery: 2},
+		runner, admission)
+
+	_, _ = e.Execute(context.Background(), nil) // first wake after start
+	for i := 0; i < 5; i++ {
+		_, _ = e.Execute(context.Background(), nil)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("suppressed idle wakes must not run the pipeline, calls=%d", runner.calls)
+	}
+	signal = true
+	_, _ = e.Execute(context.Background(), nil)
+	if runner.calls != 2 {
+		t.Fatalf("a real signal must still wake the bot, calls=%d", runner.calls)
+	}
+}
