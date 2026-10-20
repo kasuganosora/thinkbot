@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -348,6 +349,7 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 		return nil, errs.Wrap(err, "compactor: LLM call")
 	}
 	logDedupUsage(logger, "cluster", resp)
+	countDedupCall(logger, "cluster", resp, params)
 	if warnIfTruncated(logger, llm.PurposeMemoryDedup, resp, params) {
 		return nil, ErrDedupTruncated
 	}
@@ -392,7 +394,7 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	if rresp, rerr := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), repairParams); rerr != nil {
 		logger.Warnw("memory_dedup: repair call failed, dropping lossy clusters", "err", rerr, "dropped", dropped)
 		return ok, nil
-	} else if logDedupUsage(logger, "repair", rresp); !warnIfTruncated(logger, llm.PurposeMemoryDedup, rresp, repairParams) {
+	} else if trackDedupCall(logger, "repair", rresp, repairParams); !warnIfTruncated(logger, llm.PurposeMemoryDedup, rresp, repairParams) {
 		var repaired []ClusterResult
 		if strutil.ExtractJSON(rresp.Text, &repaired) == nil {
 			fixed, stillBad := splitByDetail(basicValidClusters(repaired, byID), byID)
@@ -417,6 +419,38 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	}
 	logger.Infow("memory_dedup: detail guard result", "kept", len(ok), "dropped_lossy", dropped)
 	return ok, nil
+}
+
+// dedup call counters (process-wide, since start). Logged as
+// "memory_dedup_stats" after every dedup pass; the cut-off ratio is
+// truncated/calls.
+var (
+	dedupCalls     atomic.Int64
+	dedupTruncated atomic.Int64
+)
+
+// DedupCallStats returns the number of memory_dedup LLM calls (cluster +
+// repair) and how many were cut off by the output limit, since start.
+func DedupCallStats() (calls, truncated int64) { return dedupCalls.Load(), dedupTruncated.Load() }
+
+// countDedupCall records one memory_dedup call; truncated = finish_reason length.
+func countDedupCall(logger *zap.SugaredLogger, phase string, resp *llm.GenerateResult, params llm.GenerateParams) {
+	dedupCalls.Add(1)
+	if resp == nil || resp.FinishReason != llm.FinishReasonLength {
+		return
+	}
+	n := dedupTruncated.Add(1)
+	if logger != nil {
+		maxTok := 0
+		if params.MaxTokens != nil {
+			maxTok = *params.MaxTokens
+		}
+		// grep keyword: memory_dedup_truncated
+		logger.Warnw("memory_dedup_truncated: answer cut off by the output limit",
+			"phase", phase, "max_tokens", maxTok, "output_tokens", resp.Usage.OutputTokens,
+			"reasoning_tokens", resp.Usage.ReasoningTokens,
+			"truncated_total", n, "calls_total", dedupCalls.Load())
+	}
 }
 
 // ErrDedupTruncated is returned by ClusterMerge when the answer hit the
@@ -628,3 +662,9 @@ Output:
 
 mem-3 is unrelated, so it stays standalone and is not emitted.
 </example>`
+
+// trackDedupCall logs usage and updates the dedup call counters.
+func trackDedupCall(logger *zap.SugaredLogger, phase string, resp *llm.GenerateResult, params llm.GenerateParams) {
+	logDedupUsage(logger, phase, resp)
+	countDedupCall(logger, phase, resp, params)
+}
