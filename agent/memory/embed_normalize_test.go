@@ -5,7 +5,7 @@ import "testing"
 func TestNormalizeForEmbedStripsBoilerplate(t *testing.T) {
 	in := "[Reply to @alice@example.social] 2026-03-01 12:30:05.123+08:00 note 9h6zahxdlu status 112233445566778899 see https://example.social/notes/9h6zahxdlu   ok"
 	got := normalizeForEmbed(in)
-	if got != "note status see ok" {
+	if got != "see ok" {
 		t.Fatalf("normalized = %q", got)
 	}
 	if normalizeForEmbed("@bob 2026-03-01") != "@bob 2026-03-01" {
@@ -68,5 +68,35 @@ func TestEmbedSimilarityQuoteSegmentsIgnored(t *testing.T) {
 	d := "@bob: 周末去海边露营要带帐篷和睡袋"
 	if s := EmbedSimilarity(c, d); s < 0.95 {
 		t.Fatalf("same text under different authors should match: %.3f", s)
+	}
+}
+
+func TestNormalizeForEmbedV3MidText(t *testing.T) {
+	cases := map[string]string{
+		"用户 @alice@example.social 在 note 9h6zahxdlu 里说喜欢猫": "用户 在 里说喜欢猫",
+		"见 note(9h6zahxdlu) 与 note：9h6zb1k2mq9abcde，内容相同":  "见 与 ，内容相同",
+		"2026年10月20日 记录：10月20日 去了公园，10/20 下午 3:15 回家":      "记录： 去了公园， 下午 回家",
+		"【日常记档】今天吃了拉面 [tag] 很好吃":                           "今天吃了拉面 很好吃",
+		"post office 在 2026-10-20T08:00:00+08:00 关门":       "post office 在 关门",
+		"@张三 不是 handle": "@张三 不是 handle",
+		"【这是一段超过二十个字符的长括号内容不应该被当作标签去掉的】正文": "【这是一段超过二十个字符的长括号内容不应该被当作标签去掉的】正文",
+	}
+	for in, want := range cases {
+		if got := normalizeForEmbed(in); got != want {
+			t.Errorf("normalize(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Extraction summaries share boilerplate mid-text; it must not make them alike.
+func TestEmbedSimilarityMidTextBoilerplate(t *testing.T) {
+	a := "【时间线记档】2026年10月20日，@alice@example.social 在 note 9h6zahxdlu 中提到周末去海边露营"
+	b := "【时间线记档】2026年10月20日，@alice@example.social note 9h6zb1k2mq：新买的机械键盘手感很好"
+	if s := EmbedSimilarity(a, b); s > 0.35 {
+		t.Fatalf("unrelated summaries: %.3f (raw %.3f)", s, cosineRaw(a, b))
+	}
+	c := "【时间线记档】10月19日 @bob 在 note(9h6zc3d4ef) 中提到周末去海边露营"
+	if s := EmbedSimilarity(a, c); s < 0.8 {
+		t.Fatalf("same event, different boilerplate: %.3f", s)
 	}
 }
