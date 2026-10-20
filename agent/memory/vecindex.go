@@ -22,9 +22,33 @@ const vecDims = 256
 
 // VecIndex 是可选的 sqlite-vec 索引。未启用时为 nil，检索退回 scope 子串。
 type VecIndex struct {
-	db    *gorm.DB
-	mu    sync.Mutex
-	ready bool
+	db *gorm.DB
+	// mu is shared by every VecIndex on the same database (see dbLocks):
+	// TieredStore, SQLiteRepository and the app-level backfill each open their
+	// own VecIndex, and per-instance mutexes let delete+insert of one entry_id
+	// interleave, leaving duplicate rows.
+	mu *sync.Mutex
+	// backfillMu serializes whole backfill runs on the database.
+	backfillMu *sync.Mutex
+	ready      bool
+}
+
+type vecDBLocks struct {
+	mu, backfill sync.Mutex
+	healed       sync.Once
+}
+
+// vecLocks maps the underlying *sql.DB (gorm sessions of one DB share it) to
+// its locks.
+var vecLocks sync.Map
+
+func locksFor(gdb *gorm.DB) *vecDBLocks {
+	var key any = gdb
+	if sqlDB, err := gdb.DB(); err == nil && sqlDB != nil {
+		key = sqlDB
+	}
+	l, _ := vecLocks.LoadOrStore(key, &vecDBLocks{})
+	return l.(*vecDBLocks)
 }
 
 // OpenVecIndex 在 sqlite-vec 可用时建表。不可用返回 nil。
@@ -33,7 +57,8 @@ func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 	if gdb == nil || !db.TryEnableVec(gdb) {
 		return nil
 	}
-	idx := &VecIndex{db: gdb}
+	locks := locksFor(gdb)
+	idx := &VecIndex{db: gdb, mu: &locks.mu, backfillMu: &locks.backfill}
 	if err := idx.ensureVecSchema(); err != nil {
 		log.Printf("memory vec schema: %v", err)
 		return nil
@@ -42,7 +67,57 @@ func OpenVecIndex(gdb *gorm.DB) *VecIndex {
 	if err := idx.ensureEmbedVersion(); err != nil {
 		log.Printf("memory vec embed version: %v", err)
 	}
+	locks.healed.Do(func() {
+		if _, err := idx.DedupRows(); err != nil {
+			log.Printf("ERROR memory_vec_dedup_rows failed: %v", err)
+		}
+	})
 	return idx
+}
+
+// DedupRows removes extra memory_vec rows of an entry_id (keeps the lowest
+// rowid; rows of one entry_id hold the same content's vector). Runs under the
+// shared per-DB lock, so it is safe while bots write. Returns rows removed.
+func (v *VecIndex) DedupRows() (int, error) {
+	if !v.Enabled() {
+		return 0, nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var rows []struct {
+		RowID   int64  `gorm:"column:rowid"`
+		EntryID string `gorm:"column:entry_id"`
+	}
+	if err := v.db.Raw("SELECT rowid, entry_id FROM " + vecTableName).Scan(&rows).Error; err != nil {
+		return 0, err
+	}
+	keep := make(map[string]int64, len(rows))
+	var extra []int64
+	for _, r := range rows {
+		if k, ok := keep[r.EntryID]; ok {
+			if r.RowID < k {
+				extra = append(extra, k)
+				keep[r.EntryID] = r.RowID
+			} else {
+				extra = append(extra, r.RowID)
+			}
+			continue
+		}
+		keep[r.EntryID] = r.RowID
+	}
+	if len(extra) == 0 {
+		return 0, nil
+	}
+	removed := 0
+	for _, rid := range extra {
+		if err := v.db.Exec("DELETE FROM "+vecTableName+" WHERE rowid = ?", rid).Error; err != nil {
+			log.Printf("INFO memory_vec_dedup_rows removed=%d (stopped: %v)", removed, err)
+			return removed, err
+		}
+		removed++
+	}
+	log.Printf("INFO memory_vec_dedup_rows removed=%d rows_before=%d distinct_ids=%d", removed, len(rows), len(keep))
+	return removed, nil
 }
 
 const vecMetaTable = "memory_vec_meta"
