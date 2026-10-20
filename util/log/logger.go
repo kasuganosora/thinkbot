@@ -159,6 +159,7 @@ func Init() error {
 // 每个输出源可以有自己的级别过滤和格式：
 //   - stdout/stderr：默认 console 格式（彩色级别）
 //   - file：默认 JSONL 格式（便于程序解析）
+//
 // SetLevel 热更新全局日志级别（debug/info/warn/error）。
 func SetLevel(name string) error {
 	l, err := zapcore.ParseLevel(name)
