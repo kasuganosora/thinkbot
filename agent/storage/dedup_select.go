@@ -13,6 +13,8 @@ type dedupSelectConfig struct {
 	maxSeeds       int
 	fallbackRecent int
 	maxGroup       int
+	maxMergedChars int
+	noopSim        float64
 }
 
 // buildDedupGroups groups each unchecked seed with its neighbours. An entry

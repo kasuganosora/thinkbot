@@ -111,8 +111,22 @@ func TestMigrate_AddsDedupColumnAndState(t *testing.T) {
 		t.Fatal("idx_memory_entries_dedup missing")
 	}
 	repo := NewSQLiteRepository(db)
+	// Backfill: existing entries are marked checked (no first-run storm)…
+	if n, _ := repo.CountUncheckedDedup(context.Background(), memory.ChannelScope("c")); n != 0 {
+		t.Fatalf("legacy entry must be backfilled as checked, got %d unchecked", n)
+	}
+	var content string
+	db.Raw("SELECT content FROM memory_entries WHERE id='old'").Scan(&content)
+	if content != "legacy" {
+		t.Fatalf("backfill must not rewrite content: %q", content)
+	}
+	// …and the backfill runs once: entries written later stay unchecked.
+	db.Exec(`INSERT INTO memory_entries (id, scope_kind, scope_id, content, created_at) VALUES ('new','channel','c','fresh',?)`, time.Now())
+	if err := dao.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
 	if n, _ := repo.CountUncheckedDedup(context.Background(), memory.ChannelScope("c")); n != 1 {
-		t.Fatalf("legacy entry must start unchecked, got %d", n)
+		t.Fatalf("entries written after the backfill must stay unchecked, got %d", n)
 	}
 	repo.storeDedupRun(context.Background(), "channel:c", time.Now())
 }
@@ -237,4 +251,84 @@ func TestDedupTokenMeasurement(t *testing.T) {
 	if newChars >= oldChars {
 		t.Fatalf("incremental dedup must send less: old=%d new=%d", oldChars, newChars)
 	}
+}
+
+// scriptedClusterProvider returns a fixed answer.
+type scriptedClusterProvider struct {
+	answer string
+	calls  int
+	prompt string
+}
+
+func (p *scriptedClusterProvider) Name() string { return "mock" }
+func (p *scriptedClusterProvider) DoGenerate(_ context.Context, gp llm.GenerateParams) (*llm.GenerateResult, error) {
+	p.calls++
+	p.prompt = extractPromptText(gp.Messages[0])
+	return &llm.GenerateResult{Text: p.answer, FinishReason: llm.FinishReasonStop}, nil
+}
+func (p *scriptedClusterProvider) DoStream(context.Context, llm.GenerateParams) (*llm.StreamResult, error) {
+	return nil, nil
+}
+
+func TestDedupOversizedAndRejectedMerges(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	scope := memory.ChannelScope("caps")
+	repo := NewSQLiteRepository(db)
+	long := ""
+	for i := 0; i < 120; i++ {
+		long += "很长的记忆内容"
+	}
+	mk := func(id, content, source string) {
+		if err := db.Create(&dao.EntryModel{ID: id, ScopeKind: "channel", ScopeID: "caps", Content: content, Source: source, CreatedAt: time.Now()}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("big", long, "note")
+	mk("a", "用户使用Go语言开发后端服务", "note")
+	mk("b", "用户使用Go语言开发后端", "note")
+	mk("cmp", "旧的合并结果", "compactor") // never a seed
+	if n, _ := repo.CountUncheckedDedup(ctx, scope); n != 3 {
+		t.Fatalf("compactor output must not count as unchecked seed: %d", n)
+	}
+	// merge result ≈ source a → no-op
+	prov := &scriptedClusterProvider{answer: `[{"merged_content":"用户使用Go语言开发后端服务","category":"fact","source_ids":["a","b"]}]`}
+	c := NewSQLiteCompactor(SQLiteCompactorConfig{Provider: prov, Model: &llm.Model{ID: "mock"}}, zap.NewNop().Sugar())
+	c.SetRepository(repo)
+	if err := c.CompactScope(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if prov.calls != 1 || containsID(prov.prompt, "big") {
+		t.Fatalf("oversized entry must not be sent: calls=%d prompt=%s", prov.calls, prov.prompt)
+	}
+	active, _ := repo.GetAllActive(ctx, scope)
+	if len(active) != 4 {
+		t.Fatalf("no-op merge must keep all sources, active=%d", len(active))
+	}
+	var bigContent string
+	db.Raw("SELECT content FROM memory_entries WHERE id='big'").Scan(&bigContent)
+	if bigContent != long {
+		t.Fatal("oversized entry must stay untouched")
+	}
+	if n, _ := repo.CountUncheckedDedup(ctx, scope); n != 0 {
+		t.Fatalf("everything must be marked checked, %d left", n)
+	}
+	// too long merge result → rejected
+	r := c.mergeRejectReason(memory.ClusterResult{MergedContent: long, SourceIDs: []string{"a"}}, map[string]memory.Entry{})
+	if r != "too_long" {
+		t.Fatalf("reason=%q", r)
+	}
+}
+
+func containsID(prompt, id string) bool {
+	return len(prompt) > 0 && (stringsContains(prompt, "["+id+"]"))
+}
+
+func stringsContains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

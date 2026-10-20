@@ -329,7 +329,7 @@ type ClusterInput struct {
 // LLM 返回无法解析的 JSON 时返回 (nil, nil)，表示「无可合并项」，不报错。
 //
 // modelMaxTokens 为模型配置的输出上限（ModelDef.MaxTokens）；0 时退回
-// DefaultGenerationMaxTokens。policy 决定 reasoning_effort（memory_dedup 默认 low；
+// DefaultGenerationMaxTokens。policy 决定 reasoning_effort（memory_dedup 默认 medium，可由 llm.internal_reasoning.memory_dedup 调整；
 // GLM-5.3 缺省为 max 推理，此前 1 天 32 次调用产出 242K token）与可选输出封顶。
 func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput, modelMaxTokens int, policy *llm.InternalPolicy) ([]ClusterResult, error) {
 	entriesSection := clusterEntriesSection(entries)
