@@ -524,7 +524,7 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 		}
 	}
 	// 与其它内部调用共用的策略（用途 llm.PurposeNotify）：reasoning_effort + 输出上限。
-	bc.Policy = newInternalPolicy(s.store, s.logger, botEffort, bundle)
+	bc.Policy = newBotInternalPolicy(s.store, s.logger, botID, botEffort, bundle)
 
 	// 身份与主链路 PromptStage 同一规则：SOUL.md + system_prompt（operator_instructions）。
 	// 不含工具指引 / 技能：本路径没有工具。

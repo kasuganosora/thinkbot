@@ -1585,7 +1585,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 内部 LLM 调用（判定 / 压缩摘要 / 记忆去重 / 画像 / 梦境 / 自愈 / 视觉）的
 	// per-purpose reasoning_effort 与输出封顶策略：GLM-5.3 不传 reasoning_effort 时按 max 推理，
 	// 输出上限又跟随模型 128000，这些调用此前推理不受限（09-26 memory_dedup 32 次产出 242K token）。
-	internalPol := newInternalPolicy(s.store, s.logger, def.ReasoningEffort, bundle)
+	internalPol := newBotInternalPolicy(s.store, s.logger, id, def.ReasoningEffort, bundle)
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
@@ -1726,9 +1726,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			MaxTokens:        maxTok,
 			ContextLength:    bundle.MainDef.ContextLength,
 			ReasoningEffort:  def.ReasoningEffort,
-			InternalPolicy:   internalPol,
-			MessageBuilder:   messageBuilder,
-			ToolResolver:     toolMgr,
+			HeartbeatReasoningEffort: func() string {
+				if s.store == nil {
+					return ""
+				}
+				return config.NewBuilder(s.store, s.logger).GetBotReasoning(id)["heartbeat"]
+			},
+			InternalPolicy: internalPol,
+			MessageBuilder: messageBuilder,
+			ToolResolver:   toolMgr,
 			// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效，
 			// 治理「模型决定不互动却把独白当回复发出」。默认关闭。
 			RequireReplyControl: requireReplyControl,
@@ -3576,7 +3582,7 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 	if def, derr := s.GetDefinition(botID); derr == nil && def != nil {
 		botEffort = def.ReasoningEffort
 	}
-	internalPol := newInternalPolicy(s.store, s.logger, botEffort, llmBundle)
+	internalPol := newBotInternalPolicy(s.store, s.logger, botID, botEffort, llmBundle)
 
 	// 临时 cron 文件路径：一次性触发不应污染 data/cron/<botID>_dream.json
 	cronFile := filepath.Join(os.TempDir(), "dream_trigger_"+botID+".json")

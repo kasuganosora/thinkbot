@@ -1390,6 +1390,59 @@ func InternalReasoningKey(purpose string) string { return KeyInternalReasoningPr
 // InternalMaxTokensKey 返回某个内部调用用途的输出上限封顶配置键。
 func InternalMaxTokensKey(purpose string) string { return KeyInternalMaxTokensPrefix + purpose }
 
+// BotReasoningTasks 是 Web 设置页「推理强度（按任务）」可按 bot 覆盖的任务。
+// dream 一项同时作用于全部梦境阶段（dream_extract / dream_cluster / dream_score）；
+// heartbeat 作用于心跳决策轮（走主链路，不属于内部调用用途）。
+var BotReasoningTasks = []string{llm.PurposeMemoryDedup, "heartbeat", "dream", llm.PurposeWorkflowHeal}
+
+// BotReasoningPurposes 返回某个任务覆盖的内部调用用途。
+func BotReasoningPurposes(task string) []string {
+	if task == "dream" {
+		return []string{llm.PurposeDreamExtract, llm.PurposeDreamCluster, llm.PurposeDreamScore}
+	}
+	return []string{task}
+}
+
+// BotReasoningKey 返回 bot 级任务推理强度配置键：bot.<bot_id>.reasoning.<task>。
+// 值："" = 继承全局 llm.internal_reasoning.*（心跳为继承主回复设置）；
+// provider = 模型默认（不发送参数）；none / low / medium / high = 指定。
+func BotReasoningKey(botID, task string) string { return "bot." + botID + ".reasoning." + task }
+
+// ValidBotReasoning 判断 bot 级推理强度取值是否合法。
+func ValidBotReasoning(v string) bool {
+	switch v {
+	case "", llm.ReasoningProvider, "none", "low", "medium", "high":
+		return true
+	}
+	return false
+}
+
+// GetBotReasoning 读取 bot 级任务推理强度（未设置的任务为 ""）。
+func (b *Builder) GetBotReasoning(botID string) map[string]string {
+	out := make(map[string]string, len(BotReasoningTasks))
+	for _, t := range BotReasoningTasks {
+		out[t] = strings.ToLower(strings.TrimSpace(b.store.GetString(BotReasoningKey(botID, t), "")))
+	}
+	return out
+}
+
+// GetBotInternalLLMSettings 在全局内部调用策略上叠加 bot 级覆盖（优先于全局）。
+func (b *Builder) GetBotInternalLLMSettings(botID string) llm.InternalSettings {
+	s := b.GetInternalLLMSettings()
+	if botID == "" {
+		return s
+	}
+	for task, v := range b.GetBotReasoning(botID) {
+		if v == "" || task == "heartbeat" {
+			continue
+		}
+		for _, p := range BotReasoningPurposes(task) {
+			s.Reasoning[p] = v
+		}
+	}
+	return s
+}
+
 // GetInternalLLMSettings 读取内部调用策略（每次调用现取，保存后下一次内部调用即生效）。
 func (b *Builder) GetInternalLLMSettings() llm.InternalSettings {
 	s := llm.InternalSettings{

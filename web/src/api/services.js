@@ -2019,6 +2019,25 @@ export const outreachApi = {
   }
 }
 
+// 推理强度（按任务）：GET/PUT /api/bots/:id/reasoning
+const mockReasoning = {}
+export const botReasoningApi = {
+  get(botId) {
+    if (USE_MOCK) return mockResolve(() => ({
+      tasks: { memory_dedup: '', heartbeat: '', dream: '', workflow_heal: '', ...(mockReasoning[botId] || {}) },
+      defaults: { memory_dedup: 'medium', heartbeat: 'inherit_reply', dream: 'low', workflow_heal: 'low' }
+    }))
+    return request('GET', `/api/bots/${botId}/reasoning`)
+  },
+  update(botId, payload) {
+    if (USE_MOCK) return mockResolve(() => {
+      mockReasoning[botId] = { ...(mockReasoning[botId] || {}), ...(payload.tasks || {}) }
+      return { tasks: { ...mockReasoning[botId] }, defaults: {} }
+    })
+    return request('PUT', `/api/bots/${botId}/reasoning`, payload)
+  }
+}
+
 export const botHeartbeatApi = {
   getConfig(botId) {
     if (USE_MOCK) return mockResolve(() => ({ ...ensureHeartbeat(botId).config }))
