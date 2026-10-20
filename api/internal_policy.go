@@ -18,6 +18,12 @@ import (
 // the parameter. Models whose provider config lists the "reasoning" capability
 // are allowed as well.
 func newInternalPolicy(store *config.Store, logger *zap.SugaredLogger, botEffort string, bundle *bot.LLMBundle) *llm.InternalPolicy {
+	return newBotInternalPolicy(store, logger, "", botEffort, bundle)
+}
+
+// newBotInternalPolicy is newInternalPolicy with the bot's own overrides
+// (bot.<id>.reasoning.*, Web bot settings) applied over the global settings.
+func newBotInternalPolicy(store *config.Store, logger *zap.SugaredLogger, botID, botEffort string, bundle *bot.LLMBundle) *llm.InternalPolicy {
 	var reasoningModels []string
 	if bundle != nil {
 		for _, d := range []config.ModelDef{bundle.MainDef, bundle.LightDef, bundle.VisionDef} {
@@ -29,7 +35,7 @@ func newInternalPolicy(store *config.Store, logger *zap.SugaredLogger, botEffort
 	var settings func() llm.InternalSettings
 	if store != nil {
 		settings = func() llm.InternalSettings {
-			return config.NewBuilder(store, logger).GetInternalLLMSettings()
+			return config.NewBuilder(store, logger).GetBotInternalLLMSettings(botID)
 		}
 	}
 	return llm.NewInternalPolicy(settings, botEffort, reasoningModels...)
