@@ -4033,7 +4033,8 @@ func (s *BotService) startDailyDigest(ctx context.Context, botID string, repo *s
 	var loc *time.Location
 	if s.store != nil {
 		b := config.NewBuilder(s.store, s.logger)
-		loc = b.GetBotTimezoneLocation(botID)
+		// not GetBotTimezoneLocation: its fallback is time.Local (UTC in the container)
+		loc = storage.DigestLocation(b.GetBotTimezone(botID))
 		switch v := strings.TrimSpace(s.store.GetString(config.KeyMemoryListenScopes, "")); v {
 		case "":
 			core.SetListenChannelsOverride(nil)
