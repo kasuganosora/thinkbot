@@ -240,4 +240,4 @@ Rules:
 5. verbosity: how detailed the bot's replies tend to be.
 6. personality: one or two sentences of stylized description.
 7. Output raw JSON and nothing else — no prose, no code fences.
-8. Write preferred_topics and personality in Chinese (中文).`
+8. Write preferred_topics and personality in Chinese (中文).` + llm.SilenceRuleScope

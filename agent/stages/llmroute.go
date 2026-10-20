@@ -346,7 +346,8 @@ Rules:
 - The control line itself is stripped before posting; users never see it.
 - Put the actual reply text BEFORE the control line. The control line must be the very last thing you output.
 - In a 1:1 private/direct chat (one person talking to you alone) you should almost always reply with send:true. A silent bot in a private chat looks broken to the user; only set send:false if the user explicitly asks you not to respond.
-- If the user directly @-mentions you by name in what they wrote (or replies to your own post), they are talking to you: you MUST answer with send:true, even inside someone else's thread and even while you are otherwise just browsing. Being carried along in a thread's automatic mentions alone is not a direct mention.`
+- If the user directly @-mentions you by name in what they wrote (or replies to your own post), they are talking to you: you MUST answer with send:true, even inside someone else's thread and even while you are otherwise just browsing. Being carried along in a thread's automatic mentions alone is not a direct mention. A message marked [mentioned you directly] is a direct mention.
+- A direct @mention (or a reply to your own post) overrides any remembered silence, lurking, "just observe" or reply-frequency convention from your memory or notes: those apply only when nobody is addressing you.`
 
 // replyControlSignal 是回复控制块的结构化产出。
 type replyControlSignal struct {
