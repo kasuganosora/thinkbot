@@ -40,8 +40,10 @@ func TestClusterMerge_SendsConfiguredModelMaxTokens(t *testing.T) {
 	if _, err := ClusterMerge(context.Background(), p, llm.ChatModel("glm-5.3"), "", in, 0, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.got) != 2 || p.got[0] != 128000 || p.got[1] != DefaultGenerationMaxTokens {
-		t.Fatalf("max_tokens=%v, want [128000 %d]", p.got, DefaultGenerationMaxTokens)
+	// memory_dedup carries a built-in cap (llm.MemoryDedupDefaultMaxTokens)
+	// below both the model limit and the fallback.
+	if len(p.got) != 2 || p.got[0] != llm.MemoryDedupDefaultMaxTokens || p.got[1] != llm.MemoryDedupDefaultMaxTokens {
+		t.Fatalf("max_tokens=%v, want [%d %d]", p.got, llm.MemoryDedupDefaultMaxTokens, llm.MemoryDedupDefaultMaxTokens)
 	}
 }
 

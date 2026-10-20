@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -331,47 +332,25 @@ type ClusterInput struct {
 // DefaultGenerationMaxTokens。policy 决定 reasoning_effort（memory_dedup 默认 low；
 // GLM-5.3 缺省为 max 推理，此前 1 天 32 次调用产出 242K token）与可选输出封顶。
 func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, systemPrompt string, entries []ClusterInput, modelMaxTokens int, policy *llm.InternalPolicy) ([]ClusterResult, error) {
-	var sb strings.Builder
-	sb.WriteString("## Long-term memory entries to compact\n\n")
-	for _, e := range entries {
-		sb.WriteString("[")
-		sb.WriteString(e.ID)
-		sb.WriteString("] (")
-		if e.Category != "" {
-			sb.WriteString(e.Category)
-		} else {
-			sb.WriteString("uncategorized")
-		}
-		sb.WriteString(") ")
-		sb.WriteString(StripThinking(e.Content))
-		sb.WriteByte('\n')
-	}
-
-	sb.WriteString("\n## Task\n")
-	sb.WriteString("Cluster semantically similar entries and merge each cluster into one denser entry.\n")
-	sb.WriteString("- Merge near-duplicates into a single entry (several facts about the same topic become one sentence).\n")
-	sb.WriteString("- Merge complementary entries (e.g. '用户用Go' + '用户用Gin框架' → '用户使用Go+Gin做后端开发').\n")
-	sb.WriteString("- Keep every concrete detail (names, IDs, codes, numbers, dates, URLs, file/repo names) verbatim; only remove repetition.\n")
-	sb.WriteString("- Leave unrelated, standalone entries untouched.\n")
-	sb.WriteString("- A cluster MUST contain at least 2 source entries. NEVER emit a cluster of one.\n")
-	sb.WriteString("- Write merged_content in the same language as its source entries.\n\n")
-	sb.WriteString("Output a JSON array:\n")
-	sb.WriteString("```json\n")
-	sb.WriteString(`[{"merged_content":"用户使用Go+Gin框架做后端开发","category":"fact","importance":0.8,"source_ids":["mem-1","mem-2"]}]`)
-	sb.WriteString("\n```")
-	sb.WriteString("\nIf nothing can be merged, output an empty array [] and nothing else.")
+	entriesSection := clusterEntriesSection(entries)
+	userPrompt := entriesSection + clusterTaskRules
 
 	params := llm.GenerateParams{
 		Model:    model,
 		System:   systemPrompt,
-		Messages: []llm.Message{llm.UserMessage(sb.String())},
+		Messages: []llm.Message{llm.UserMessage(userPrompt)},
 	}
 	applyInternalCall(policy, llm.PurposeMemoryDedup, &params, modelMaxTokens)
+	logger := traceid.L(ctx)
+	logDedupPrompt(logger, "cluster", len(entries), systemPrompt, clusterTaskRules, entriesSection, params)
 	resp, err := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), params)
 	if err != nil {
 		return nil, errs.Wrap(err, "compactor: LLM call")
 	}
-	warnIfTruncated(traceid.L(ctx), llm.PurposeMemoryDedup, resp, params)
+	logDedupUsage(logger, "cluster", resp)
+	if warnIfTruncated(logger, llm.PurposeMemoryDedup, resp, params) {
+		return nil, ErrDedupTruncated
+	}
 
 	var clusters []ClusterResult
 	if err := strutil.ExtractJSON(resp.Text, &clusters); err != nil {
@@ -391,16 +370,18 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	if len(bad) == 0 {
 		return ok, nil
 	}
-	logger := traceid.L(ctx)
 	logger.Infow("memory_dedup: merged entries dropped identifiers, asking for a repair",
 		"clusters", len(valid), "lossy", len(bad), "example_missing", truncList(bad[0].missing))
 
+	// The repair call carries only the sources of the failing clusters (not
+	// the whole batch and not the previous answer): its input scales with the
+	// lossy clusters instead of re-billing every entry of the batch.
+	repairEntries := entriesOfClusters(entries, bad)
+	repairSection := clusterEntriesSection(repairEntries)
+	repairRules := "\n" + repairPrompt(bad) + "\n" + clusterOutputSchema
 	repairParams := params
-	repairParams.Messages = []llm.Message{
-		llm.UserMessage(sb.String()),
-		llm.AssistantMessage(resp.Text),
-		llm.UserMessage(repairPrompt(bad)),
-	}
+	repairParams.Messages = []llm.Message{llm.UserMessage(repairSection + repairRules)}
+	logDedupPrompt(logger, "repair", len(repairEntries), systemPrompt, repairRules, repairSection, repairParams)
 	used := map[string]bool{}
 	for _, cl := range ok {
 		for _, id := range cl.SourceIDs {
@@ -411,7 +392,7 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	if rresp, rerr := provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_dedup"), repairParams); rerr != nil {
 		logger.Warnw("memory_dedup: repair call failed, dropping lossy clusters", "err", rerr, "dropped", dropped)
 		return ok, nil
-	} else if !warnIfTruncated(logger, llm.PurposeMemoryDedup, rresp, repairParams) {
+	} else if logDedupUsage(logger, "repair", rresp); !warnIfTruncated(logger, llm.PurposeMemoryDedup, rresp, repairParams) {
 		var repaired []ClusterResult
 		if strutil.ExtractJSON(rresp.Text, &repaired) == nil {
 			fixed, stillBad := splitByDetail(basicValidClusters(repaired, byID), byID)
@@ -436,6 +417,101 @@ func ClusterMerge(ctx context.Context, provider llm.Provider, model *llm.Model, 
 	}
 	logger.Infow("memory_dedup: detail guard result", "kept", len(ok), "dropped_lossy", dropped)
 	return ok, nil
+}
+
+// ErrDedupTruncated is returned by ClusterMerge when the answer hit the
+// output limit (llm.internal_max_tokens.memory_dedup): the JSON is incomplete,
+// nothing is merged.
+var ErrDedupTruncated = errors.New("memory_dedup: output cut off by the output limit")
+
+const clusterOutputSchema = "Output a JSON array:\n```json\n" +
+	`[{"merged_content":"用户使用Go+Gin框架做后端开发","category":"fact","importance":0.8,"source_ids":["mem-1","mem-2"]}]` +
+	"\n```\nIf nothing can be merged, output an empty array [] and nothing else."
+
+const clusterTaskRules = "\n## Task\n" +
+	"Cluster semantically similar entries and merge each cluster into one denser entry.\n" +
+	"- Merge near-duplicates into a single entry (several facts about the same topic become one sentence).\n" +
+	"- Merge complementary entries (e.g. '用户用Go' + '用户用Gin框架' → '用户使用Go+Gin做后端开发').\n" +
+	"- Keep every concrete detail (names, IDs, codes, numbers, dates, URLs, file/repo names) verbatim; only remove repetition.\n" +
+	"- Leave unrelated, standalone entries untouched.\n" +
+	"- A cluster MUST contain at least 2 source entries. NEVER emit a cluster of one.\n" +
+	"- Write merged_content in the same language as its source entries.\n\n" +
+	clusterOutputSchema
+
+func clusterEntriesSection(entries []ClusterInput) string {
+	var sb strings.Builder
+	sb.WriteString("## Long-term memory entries to compact\n\n")
+	for _, e := range entries {
+		sb.WriteString("[")
+		sb.WriteString(e.ID)
+		sb.WriteString("] (")
+		if e.Category != "" {
+			sb.WriteString(e.Category)
+		} else {
+			sb.WriteString("uncategorized")
+		}
+		sb.WriteString(") ")
+		sb.WriteString(StripThinking(e.Content))
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// entriesOfClusters returns the inputs referenced by the given clusters, in
+// input order.
+func entriesOfClusters(entries []ClusterInput, bad []clusterCheck) []ClusterInput {
+	want := map[string]bool{}
+	for _, b := range bad {
+		for _, id := range b.cluster.SourceIDs {
+			want[id] = true
+		}
+	}
+	var out []ClusterInput
+	for _, e := range entries {
+		if want[e.ID] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// logDedupPrompt logs the size of one memory_dedup request, split into the
+// system prompt, the task/repair rules and the entries, so the billed input
+// can be explained (EstimateTokens is an estimate, not the provider count).
+func logDedupPrompt(logger *zap.SugaredLogger, phase string, n int, system, rules, entries string, params llm.GenerateParams) {
+	if logger == nil {
+		return
+	}
+	effort, maxTok := "", 0
+	if params.ReasoningEffort != nil {
+		effort = *params.ReasoningEffort
+	}
+	if params.MaxTokens != nil {
+		maxTok = *params.MaxTokens
+	}
+	logger.Infow("memory_dedup: request",
+		"phase", phase,
+		"entries", n,
+		"system_chars", len([]rune(system)), "system_tokens_est", llm.EstimateTokens(system),
+		"rules_chars", len([]rune(rules)), "rules_tokens_est", llm.EstimateTokens(rules),
+		"entries_chars", len([]rune(entries)), "entries_tokens_est", llm.EstimateTokens(entries),
+		"total_tokens_est", llm.EstimateTokens(system)+llm.EstimateTokens(rules)+llm.EstimateTokens(entries),
+		"tools", len(params.Tools),
+		"reasoning_effort", effort, "max_tokens", maxTok)
+}
+
+// logDedupUsage logs the provider-reported usage of one memory_dedup call.
+func logDedupUsage(logger *zap.SugaredLogger, phase string, resp *llm.GenerateResult) {
+	if logger == nil || resp == nil {
+		return
+	}
+	logger.Infow("memory_dedup: usage",
+		"phase", phase,
+		"input_tokens", resp.Usage.InputTokens,
+		"cached_input_tokens", resp.Usage.CachedInputTokens,
+		"output_tokens", resp.Usage.OutputTokens,
+		"reasoning_tokens", resp.Usage.ReasoningTokens,
+		"finish_reason", string(resp.FinishReason))
 }
 
 // basicValidClusters applies the structural checks: at least 2 known source
