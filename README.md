@@ -2,148 +2,206 @@
   <img src="web/public/icon-app.svg" alt="thinkbot" width="128" height="128" />
 </p>
 
-# thinkbot
+<h1 align="center">thinkbot</h1>
 
-给每个渠道背后一个能长期在线的 AI 伙伴。开源。  
-会聊天、会记事、会动手，合上电脑它也不歇着。
+<p align="center">
+  <b>服务器出了问题，它第一个找到你——而且你可以直接跟它聊这个问题。</b><br/>
+  开源、自托管的长期在线 AI 伙伴：会聊天、会记事、会动手。
+</p>
 
-## thinkbot 是什么？
+<p align="center">
+  简体中文 · <a href="README.en.md">English</a>
+</p>
 
-thinkbot 是一个开源的多渠道 AI 机器人。你可以把它接进 Web、Telegram、Misskey、Mastodon，用自己习惯的模型来跑；它带着分层长期记忆、工具与技能、独立沙箱工作区，还能按工作流把多步事情串起来。
+---
 
-跟它在不同地方聊，上下文还能接上。它会自己醒来看看有没有该做的事，夜里整理白天攒下的记忆，出了告警也能用自己的语气告诉你。一个人用、挂在群里用都行——设计目标就是挂着长期跑，而不是聊两句就散的临时窗口。
+你在 Telegram 里跟它聊天，它记得你说过的话；硬盘、RAID、部署脚本出了状况，它会主动发消息告诉你，你回一句「严重吗？」它就接着聊。它还能在自己的沙箱里跑命令、查网页、改代码，干完把结果告诉你。
 
-## 核心特性
+thinkbot 适合想要一个**自己掌控的 AI 助手**的人：个人开发者、自己维护服务器的人、想在群里或 Fediverse 上养一个 bot 的人。一条 `docker compose` 就能跑起来，数据都在你自己的机器上。
 
-- **多 LLM 供应商**：OpenAI / Anthropic / Google Gemini / xAI Grok，统一接口
-- **多渠道接入**：Misskey / Mastodon / Telegram / Web，统一消息归一化；Telegram 渠道工具覆盖发帖、置顶、群管理等，并支持发图 / 发文件（`telegram_send_photo` / `telegram_send_document`）
-- **分层记忆系统**：L0 工作记忆 → L1 长期记忆 → L3 画像（用户画像 + Bot 自我画像），L0 自动巩固到 L1；L2 场景记忆为可选扩展点（`memory.Aggregator` 接口已定义，仓库未提供实现，生产管线不经过）
-- **工具调用**：Function Calling，支持沙箱工作空间（Docker/本地）
-- **工具授权**：`toolperm` 按 bot × 工具 × 平台 × 会话 × 用户 维度配置 allow/deny。判定顺序：首条匹配规则生效 > 平台无规则时按风险分级取默认（基础/对外发言工具放行，敏感工具禁止，exfil 外发通道即使在此分支也默认禁止）> 平台已有规则但未命中时白名单模式（仅基础工具放行）。工具列表过滤 + 执行时复核双重防线
-- **Pipeline 架构**：可组合的 Stage 管道，中间件 + 谓词过滤
-- **Token 用量管理**：月度配额（Bot/Channel/Chat 三级限额 + 超额拦截）、单次预算控制、全链路记账（SubAgent/Workflow/Memory 均不漏记）
-- **主动参与**：三层漏斗决策引擎（规则 → LLM 快判 → 时序门控）
-- **自主心跳**：per-bot 周期唤醒并走完整编排链路，准入关卡 + 发言闸门 + 频控三级节制
-- **外部通知（notify）**：mdadm / smartd / cron 等本机程序经 `POST /api/notify`（请求体 `bot` 指定经哪个 bot；推荐只挂在独立本地监听器 `notify.listen_addr`，如宿主 `127.0.0.1:8091`）让 bot 把告警发到主人私聊。token 只存哈希、带 bot 作用域（bot 列表或全部）；默认 bot 模式由 bot 以自身人格（SOUL.md + system_prompt，不召回长期记忆，少量近期对话只定语气）用自己的话转述，标识符须逐字照抄、不揣测原因（无工具、通知作为不可信数据；warn/critical 附原文块，info 若有标识符未逐字出现也附原文块；失败回落原文），也可 raw 原样转发；绕过 reply_control 等闸门，按 bot 去重与限流，写审计与主人会话历史。见 [docs/notify.md](docs/notify.md)
-- **工作流引擎**：基于 DAG 的多步骤自动化工作流
-- **技能系统**：从文件系统动态加载可扩展技能
-- **MCP 集成**：支持 Model Context Protocol 工具服务器
-- **Web 控制台**：聊天界面 + 管理台（`web/`，Vue 3 + Vite + TDesign，构建产物输出到 `static/` 由后端托管）
+```text
+🤖 [server-1/smartd · INFO] sda、sdb 各发来一条 SMART EmailTest。
+   这是 smartd 在测试通知通道，不是故障，两块盘都正常。
+🙋 嗯，在测试
+🤖 好。sda 和 sdb 都发了一条，说明两块盘的告警通道都是通的——
+   以后真有 SMART 问题，会第一时间到你这儿。
+```
+
+## 为什么用它
+
+- **会主动找你**：服务器告警、部署结果、你让它记着的提醒，它会主动发到你的 Telegram，而不是躺在日志里。
+- **记得住，也忘得掉**：分层长期记忆，几周前聊过的事还能接上；你说「忘掉这件事」，它就真的删掉，不会再学回来。
+- **真能动手**：每个 bot 有自己的沙箱容器，可以执行命令、读写文件、开浏览器、联网搜索和抓网页，还能加载技能和 MCP 工具。
+- **一个部署，多处聊**：Web、Telegram、Misskey 共用同一个 bot，跨平台上下文接得上；一个部署里可以养多个人格不同的 bot。
+- **模型自己选**：OpenAI 兼容接口（如 DeepSeek）、OpenAI Responses、Anthropic、Gemini，在网页上点几下就能换。
+- **你说了算**：自托管、数据存本地 SQLite；工具权限、用量额度、用户管理都在 Web 管理台里。
+
+## 支持的平台
+
+| 平台 | 状态 | 能做什么 |
+|---|---|---|
+| Web | ✅ 可用 | 内置聊天界面 + 管理台，可看工具调用过程、沙箱终端与桌面 |
+| Telegram | ✅ 可用 | 私聊、群聊（@它或回复它）；发图 / 发文件；群管理工具（置顶、删消息、封禁等，需在工具权限中开启）；**接收服务器告警** |
+| Misskey | ✅ 可用 | 回复提及、旁听时间线；发帖、反应、转发、关注、搜索、投票 |
+| Mastodon | 🚧 开发中 | 适配器在 [`feat/mastodon-channel`](https://github.com/kasuganosora/thinkbot/tree/feat/mastodon-channel) 分支，尚未合入 master |
+
+## 用它来做什么
+
+### 1. 服务器出了问题，它第一个找到你
+
+smartd、mdadm、cron、备份或部署脚本调用一下 `thinkbot-notify`，告警就会以 bot 自己的口吻发到**你平时跟它聊天的那个 Telegram 对话**里。告警会记进对话历史，所以你可以直接追问，它知道你在说哪条。
+
+```text
+🤖 [server-1/mdadm · INFO] RebuildFinished on /dev/md/md3 (mismatches found: 140672)
+   md3 的例行校验跑完了，发现 140672 处不一致；阵列仍是 [UU]，两块盘都在线。
+   不紧急，建议抽空看看。
+🙋 不用处理
+🤖 好的。
+
+        ……第二天……
+
+🤖 [server-1/mdadm · WARN] RebuildStarted on /dev/md/md3
+   md3 又开始校验了。不过进度停在 89.6%，速度 0K/sec，看起来像卡住了，
+   建议确认一下是不是挂起了。
+
+        ……之后……
+
+🤖 [server-1/mdadm · INFO] RebuildFinished on /dev/md/md3 (mismatches found: 32384)
+   这次跑完了，不一致降到 32384，阵列健康。
+```
+
+部署脚本同理：最后一步把结果发给 bot，你回「有报错吗？」就能接着问（它依据通知里带的内容回答）。接入步骤见 [配置 › 告警通知快速接入](docs/configuration.md#告警通知notify快速接入)。
+
+> 通知走独立通道：不会被 bot 的「这条不回复」逻辑吞掉；模型出错或超时会退回原文发送；warn / critical 一定附上原始告警文本；同一告警会去重和限流。目前只投递到 Telegram。
+
+### 2. 交给它一件多步骤的活
+
+```text
+🙋 在 blog-app 里对本地那个提交跑一下 eslint 和 vitest，没问题就推上去
+🤖 缺依赖，先装上了。
+   ESLint 报了 2 个错，但基线提交上就有，我单独开了一个提交修掉。
+   vitest 有 1 个失败，在基线上同样失败，和这次改动无关。
+   第一次 push 失败了，查了下远端配置，修正后已推送。
+   小结：改动 8 个文件，ESLint 0 错误，已推送。
+```
+
+命令都在这个 bot 自己的沙箱容器里执行，不碰宿主机。
+
+### 3. 帮你查资料，并给出出处
+
+```text
+🙋 这次别凭印象，真的去网上查一下 X 今天发布的更新说明
+🤖 查到了，以官方发布页为准：…… 主要变化有三点：……
+   来源：X 官方发布说明页面（链接）
+```
+
+内置 `web_search` / `web_fetch`，搜索后端可在「系统设置 → 搜索」里配置，失败时自动换下一家。
+
+### 4. 用技能做事
+
+```text
+🙋 用 use_skill 加载一下代码评审的技能，告诉我它的第一原则是什么
+🤖 已加载。它的第一原则是：……
+```
+
+技能就是一个带 `SKILL.md` 的目录，放进 `skills/` 或在管理台里添加即可。
+
+### 5. 记得你，也尊重你的「忘掉」
+
+```text
+        ……三周前……
+🙋 我的咖啡一般是燕麦拿铁，少糖
+🙋 最近在业余写一个记账小程序
+
+        ……今天……
+🙋 早上好，帮我想想今天先做什么
+🤖 早！要不先来杯少糖燕麦拿铁 ☕ 然后把记账小程序上次卡住的导出功能收个尾？
+
+🙋 之前那个周末旅行计划，相关的都忘掉吧
+🤖 好，旅行计划相关的记忆已经删掉了，以后不会再提。
+```
+
+### 6. 陪你玩
+
+- **有人格地闲聊**：在「Bot 设置 → 人格」写它的 SOUL.md（性格、说话方式），聊动画、聊游戏都按这个人设来。
+- **一起跑文字冒险**：它可以抛出选项让你选——Telegram 里是按钮，Misskey 里是原生投票，Web 里是卡片。
+- **发图给它看**：主模型支持图片，或配置了视觉模型时，它能看懂你发的截图和梗图。发贴纸时它看到的是贴纸对应的表情，可以顺着接梗。
+- **在群里当个帮手**：被 @ 或被回复时回应；开启主动参与后，它会自己判断什么时候插一句话，并有频率限制，不会刷屏。
+
+### 7. 更多玩法
+
+- **一个部署，多个 bot**：每个 bot 有自己的人格、模型、记忆、沙箱容器和平台账号，互不串台。
+- **一个 bot，多个平台**：同一个 bot 同时挂在 Telegram 和 Misskey 上，在一边聊过的事，另一边也接得上（Mastodon 即将支持）。
+- **定时与提醒**：可以让它「明早 9 点提醒我」，或用定时任务让它按计划自己干活。
+
+## 记忆是怎么工作的
+
+简单说，像人一样分「短期」和「长期」：
+
+1. **记下来**：聊天中值得记的内容先进入短期记忆（约两周后过期）。
+2. **整理**：后台定期把短期记忆提炼成长期记忆（事实、偏好），去重、合并、更新。还可以开启「梦境」：每天夜里给最近的记忆打分，重要的留下，琐碎的随时间淡出，顺便更新它对你的印象。
+3. **想起来**：回复前，它会找出和当前话题相关的记忆一起参考——按意思相近匹配，所以几周前提过的爱好，聊到相关话题时会自己冒出来。
+4. **忘掉**：让它忘掉某件事，相关记忆会被删除，并留下记号防止日后重新学回来。管理员也能在「Bot 设置 → 记忆」里逐条查看和删除。
+
+长对话可以自动压缩成摘要继续聊；管理员还能用 `/compact` 精简当前会话、`/clear` 从头开始。详见 [docs/memory.md](docs/memory.md)。
 
 ## 快速开始
 
-thinkbot 推荐以 **DooD（Docker-out-of-Docker）** 方式部署：主容器经挂载的 `docker.sock` 指挥宿主 Docker 为各 Bot 创建兄弟容器（沙箱），因此 `sandbox.backend` 必须为 `docker`。
+需要：一台装了 Docker 的机器、一个模型 API Key、（可选）一个 Telegram Bot Token（找 [@BotFather](https://t.me/BotFather) 要）。
+
+**1. 下载并准备配置**
 
 ```bash
-# 克隆仓库
-git clone https://github.com/kasuganosora/thinkbot.git
-cd thinkbot
-
-# 准备配置（必做）
+git clone https://github.com/kasuganosora/thinkbot.git && cd thinkbot
 cp .env.example .env
-# 编辑 .env：填入 LLM 供应商 API Key，确认 sandbox.backend=docker（已默认）
+mkdir -p data/container logs/container
+```
 
-# 启动（后台运行，含健康检查；镜像内自动完成 Go 与前端构建）
+`.env` 的默认值就能直接用，不用改。
+
+**2. 设置首位管理员账号**（改成你自己的密码，至少 6 位）
+
+```bash
+cat > docker-compose.override.yml <<'YAML'
+services:
+  thinkbot:
+    environment:
+      AUTH_BOOTSTRAP_ADMIN: admin
+      AUTH_BOOTSTRAP_PASSWORD: change-me-please
+YAML
+```
+
+**3. 启动**
+
+```bash
 docker compose up -d --build
 ```
 
-> ⚠️ `cp .env.example .env` 不可跳过。bind mount 不会自动创建缺失的文件——宿主没有 `.env` 时 Docker 会挂进来一个空目录，容器会在启动时直接报错退出（`entrypoint.sh` 已内置该检查）。
+首次构建需要几分钟。`docker compose ps` 显示 `healthy` 就好了。
 
-数据落在 `./data/container`（SQLite 库与 bot 工作空间）、日志落在 `./logs/container`，均持久化到宿主目录。刻意使用 `container/` 子目录，避免容器启动时的 `chown -R` 影响宿主上裸机运行实例的数据属主。
+**4. 在网页上完成设置**
 
-访问 `http://localhost:8080` 打开 Web 管理界面。`.env` 中的 `sandbox.backend` 已默认 `docker`、`sandbox.image` 默认 `builtin`，与 `docker-compose.yml` 的 DooD 挂载联动；如需改用已存在的预构建镜像，改 `sandbox.image` 即可。
+打开 `http://localhost:8080`，用上面的账号登录，然后：
 
-若需在镜像里带上精确版本号（供单实例协商与 `/health` 展示），构建时显式传入：
+1. **系统设置 → 模型服务**：添加服务商，填 API Key，添加模型；
+2. **系统设置 → Bots → 新建 Bot**，选好主模型；
+3. **Bot 设置 → 平台**：添加 Telegram，填入 Bot Token 并启用；确认页面顶部 Bot 状态是「运行中」（不是的话点一下启用）；
+4. **用户设置 → 生成授权码**，把 `TB-XXXX-XXXX` 发给你的 Telegram bot，完成账号绑定（接收告警通知需要这一步）。
 
-```bash
-docker compose build \
-  --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-  --build-arg GIT_REVISION=$(git rev-parse HEAD) \
-  --build-arg VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
-docker compose up -d
-```
+现在去 Telegram 跟它打个招呼吧 👋 也可以直接在网页里聊。
 
-### 不使用 Docker（裸机运行）
+> 登录后记得在「用户设置 → 安全设置」改密码。管理员已创建后，override 里的两行就不再起作用，可以删掉。
 
-```bash
-# 重新生成 swagger 文档（如需）后编译
-go build -ldflags="-s -w" -o thinkbot ./cmd && ./thinkbot
-```
+## 下一步
 
-> 提示：默认 `go build` 产物约 50MB；加上 `-ldflags="-s -w"` 可剥离调试符号与 DWARF 信息，体积显著减小（与 Docker 构建路径一致）。二进制需能访问宿主 `docker` 才能使用 `sandbox.backend=docker`，否则请将 `sandbox.backend` 改为 `local`。
-
-> ⚠️ **不要设置 `CGO_ENABLED=0`**。数据库驱动 `gorm.io/driver/sqlite` 底层为 `mattn/go-sqlite3`（C 实现），`CGO_ENABLED=0` 下仍能编译通过，但驱动会被替换成 stub，运行期打开数据库时报 `go-sqlite3 requires cgo to work. This is a stub` 而无法启动。交叉编译时需配置对应平台的 C 工具链。
-
-## 项目结构
-
-```
-thinkbot/
-├── agent/          # 核心 Agent 框架（Engine + Pipeline + 记忆 + 工具）
-│   ├── bot/        #   Bot 实例与管理
-│   ├── command/    #   斜杠命令拦截 Stage（LLM 之前短路执行）
-│   ├── core/       #   核心类型（Message/Envelope/Stage）
-│   ├── engagement/ #   主动参与决策
-│   ├── heartbeat/  #   per-bot 自主心跳唤醒（准入 + 闸门 + 频控）
-│   ├── inbound/    #   统一消息入口网关（Ingress）
-│   ├── memory/     #   分层记忆系统
-│   ├── outbound/   #   Action 派发 + EventBus（Web SSE）
-│   ├── pipeline/   #   消息处理管道
-│   ├── prompt/     #   系统提示词构建
-│   ├── session/    #   会话串行化
-│   ├── stages/     #   内建 Stage
-│   ├── storage/    #   记忆持久化仓储（SQLite/GORM 适配器）
-│   └── tools/      #   工具管理
-├── api/            # HTTP API 服务（Gin）
-├── auth/           # 用户认证与权限
-├── channel/        # 渠道适配器（Misskey/Mastodon/Telegram）
-├── cmd/            # 程序入口
-├── config/         # 配置管理
-├── cron/           # 定时任务调度
-├── dao/            # 数据访问层（GORM）
-├── db/             # 数据库初始化
-├── docker/         # entrypoint.sh 与内置浏览器沙箱镜像构建上下文（docker/sandbox 为 Go 包，go:embed 后按需构建）
-├── docs/           # Swagger 文档（swaggo 生成，供 /swagger 路由）+ 设计文档（heartbeat-redesign 等）
-├── filesystem/     # 空占位目录（仅 .gitkeep，暂无代码）
-├── identity/       # 平台账号 ↔ thinkbot 账号绑定
-├── internal/       # 内部支撑包（仅模块内可见，不构成对外 API）
-│   ├── buildinfo/  #   构建信息（ldflags 注入，/health 回报）
-│   ├── interaction/ #  跨平台「提问—等待应答」注册表（user_choice 核心）
-│   ├── searchproviders/ # 搜索提供方配置 + 12 家后端 + 回退熔断
-│   └── singleinst/ #   启动早期单实例版本协商
-├── llm/            # LLM 供应商适配层
-│   ├── openai/     #   OpenAI（兼容 DeepSeek 等）
-│   ├── anthropic/  #   Anthropic Claude
-│   ├── google/     #   Google Gemini
-│   └── grok/       #   xAI Grok
-├── mcp/            # MCP 协议客户端
-├── notify/         # 外部程序 → bot → 主人通知（POST /api/notify，bot 作用域 token / bot 模式 / 去重 / 限流 / 审计，见 docs/notify.md）
-├── plugin/         # 空占位目录（仅 .gitkeep，暂无代码）
-├── sandbox/        # Bot 沙箱工作空间
-├── scripts/        # 辅助脚本（redeploy.sh 重部署、run_thinkbot.py 守护启动、watch.sh 日志观察）
-├── skill/          # 技能系统（加载 / 注册 / 发现）
-├── skills/         # 技能内容目录（每个子目录一个技能，SKILL.md 为核心）
-├── static/         # 前端构建产物（npm run build 生成，勿手工编辑）
-├── stats/          # 用量统计
-├── subagent/       # 子代理管理
-├── toolperm/       # Bot 工具权限（风险分级默认策略 + 发言模式）
-├── tools/          # 内建工具集
-├── util/           # 通用工具库
-├── web/            # Web 前端源码（Vue 3 + Vite + TDesign）
-└── workflow/       # 工作流引擎
-```
-
-## 技术栈
-
-| 组件 | 技术 |
-|------|------|
-| 语言 | Go 1.27（`github.com/kasuganosora/thinkbot`，CGO 需开启，见上文 sqlite 说明） |
-| Web 框架 | Gin |
-| ORM | GORM + SQLite（`gorm.io/driver/sqlite` / `mattn/go-sqlite3`） |
-| API 文档 | swaggo（`/swagger`） |
-| 依赖注入 | go.uber.org/fx |
-| 日志 | Zap + Lumberjack |
-| 可观测性 | OpenTelemetry |
-| 实时通信 | WebSocket / SSE |
+| 想了解 | 看这里 |
+|---|---|
+| 所有配置项、首位管理员、工具权限、告警通知接入 | [docs/configuration.md](docs/configuration.md) |
+| 部署细节、更新、备份、回滚、迁移 | [docs/deploy.md](docs/deploy.md) |
+| 记忆系统 | [docs/memory.md](docs/memory.md) |
+| 外部通知接口（notify）完整规范 | [docs/notify.md](docs/notify.md) |
+| 功能详解、架构、项目结构、技术栈 | [docs/architecture.md](docs/architecture.md) |
+| 裸机运行、前端开发、Swagger、测试 | [docs/development.md](docs/development.md) |
 
 ## License
 
