@@ -20,7 +20,22 @@ type EntryModel struct {
 
 	CreatedAt      time.Time `gorm:"not null;index:idx_created"`
 	LastAccessedAt time.Time `gorm:"index:idx_accessed"`
+
+	// DedupCheckedAt 记忆去重（memory_dedup）最近一次确认该条目「无可合并项」的时间。
+	// NULL = 尚未检查：去重只处理未检查条目（及其近邻），已检查条目不会被反复送进 LLM。
+	// 存量表由 ensureColumns 补列（migration: memory_entries.dedup_checked_at）。
+	DedupCheckedAt *time.Time
 }
+
+// MemoryCompactState 记录每个记忆 scope 上次自动去重的时间。
+// 冷却持久化到 DB，进程重启不再重置（此前仅为内存 sync.Map）。
+type MemoryCompactState struct {
+	ScopeKey  string    `gorm:"primaryKey;size:200"`
+	LastRunAt time.Time `gorm:"not null"`
+}
+
+// TableName 指定表名。
+func (MemoryCompactState) TableName() string { return "memory_compact_states" }
 
 // TableName 指定表名。
 func (EntryModel) TableName() string {
