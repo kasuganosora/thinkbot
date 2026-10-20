@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -80,6 +81,14 @@ type SQLiteCompactorConfig struct {
 	MaxSeedsPerRun int
 	// FallbackRecent memory_vec 不可用时每组附带的最近已检查条目数（默认 3）。
 	FallbackRecent int
+	// MaxMergedChars 合并结果的长度上限（字符，默认 DefaultDedupMaxMergedChars=800）。
+	// 只作用于「正常大小」条目的合并：长于该值的来源条目不参与合并（原样保留，
+	// 仅在注入 prompt 时截断），绝不把存量超长条目压到 800；合并结果超过上限则放弃
+	// 该次合并（来源保留），而不是截断——09-27 的细节丢失正是过度压缩造成的。
+	MaxMergedChars int
+	// NoopSimilarity 合并结果与任一来源的相似度 >= 该值时视为无效合并（不写入，
+	// 来源标记已检查；默认 0.9）。
+	NoopSimilarity float64
 }
 
 // Defaults of the incremental dedup selection.
@@ -88,6 +97,8 @@ const (
 	DefaultDedupMinSimilarity  = 0.45
 	DefaultDedupMaxSeeds       = 30
 	DefaultDedupFallbackRecent = 3
+	DefaultDedupMaxMergedChars = 800
+	DefaultDedupNoopSimilarity = 0.9
 )
 
 // SQLiteCompactor 对 SQLiteRepository 中的记忆执行语义压缩。
@@ -159,6 +170,17 @@ func NewSQLiteCompactor(cfg SQLiteCompactorConfig, logger *zap.SugaredLogger) *S
 	if sel.maxGroup < 2 {
 		sel.maxGroup = 10
 	}
+	sel.maxMergedChars = cfg.MaxMergedChars
+	if sel.maxMergedChars <= 0 {
+		sel.maxMergedChars = DefaultDedupMaxMergedChars
+	}
+	sel.noopSim = cfg.NoopSimilarity
+	if sel.noopSim <= 0 {
+		sel.noopSim = DefaultDedupNoopSimilarity
+	}
+	mc.SystemPrompt += fmt.Sprintf("\n\nLength: keep each merged_content concise, at most %d characters. "+
+		"Concise means removing repetition, never dropping details. "+
+		"If a cluster cannot fit in %d characters with every detail kept, do not merge it.", sel.maxMergedChars, sel.maxMergedChars)
 	return &SQLiteCompactor{
 		sel:    sel,
 		config: mc,
@@ -196,12 +218,23 @@ func (c *SQLiteCompactor) CompactScope(ctx context.Context, scope memory.Scope) 
 func (c *SQLiteCompactor) compactScope(ctx context.Context, scope memory.Scope) error {
 	start := time.Now()
 
-	seeds, err := c.repo.UncheckedDedup(ctx, scope, c.sel.maxSeeds)
+	all, err := c.repo.UncheckedDedup(ctx, scope, c.sel.maxSeeds)
 	if err != nil {
 		return errs.Wrap(err, "sqlite_compactor: get unchecked entries")
 	}
-	if len(seeds) == 0 {
+	if len(all) == 0 {
 		return nil
+	}
+	// Oversized entries (> MaxMergedChars) never take part in a merge: they
+	// stay as they are and are marked checked.
+	var seeds []memory.Entry
+	var oversized []string
+	for _, e := range all {
+		if c.oversized(e) {
+			oversized = append(oversized, e.ID)
+			continue
+		}
+		seeds = append(seeds, e)
 	}
 
 	var groups [][]memory.Entry
@@ -214,10 +247,16 @@ func (c *SQLiteCompactor) compactScope(ctx context.Context, scope memory.Scope) 
 		}, c.sel.maxGroup)
 	} else {
 		mode = "recent"
-		recent, _ := c.repo.RecentCheckedDedup(ctx, scope, c.sel.fallbackRecent)
-		groups, lonely = buildFallbackGroups(seeds, recent, c.sel.maxGroup)
+		recent, _ := c.repo.RecentCheckedDedup(ctx, scope, c.sel.fallbackRecent*3)
+		var small []memory.Entry
+		for _, e := range recent {
+			if !c.oversized(e) && len(small) < c.sel.fallbackRecent {
+				small = append(small, e)
+			}
+		}
+		groups, lonely = buildFallbackGroups(seeds, small, c.sel.maxGroup)
 	}
-	marked := c.repo.MarkDedupChecked(ctx, scope, lonely)
+	marked := c.repo.MarkDedupChecked(ctx, scope, append(lonely, oversized...))
 
 	mergedTotal, archivedTotal, savedTotal, calls := 0, 0, 0, 0
 	for _, g := range groups {
@@ -238,6 +277,7 @@ func (c *SQLiteCompactor) compactScope(ctx context.Context, scope memory.Scope) 
 		"groups", len(groups),
 		"llm_groups", calls,
 		"no_neighbour", len(lonely),
+		"oversized_skipped", len(oversized),
 		"marked_checked", marked,
 		"merged", mergedTotal,
 		"archived", archivedTotal,
@@ -262,7 +302,33 @@ func (c *SQLiteCompactor) vecNeighbours(ctx context.Context, scope memory.Scope,
 	if err != nil {
 		return nil
 	}
-	return filterNeighbours(seed, cands, c.sel.minSim, c.sel.topK)
+	small := cands[:0]
+	for _, e := range cands {
+		if !c.oversized(e) {
+			small = append(small, e)
+		}
+	}
+	return filterNeighbours(seed, small, c.sel.minSim, c.sel.topK)
+}
+
+// oversized reports whether an entry is too long to take part in a merge.
+func (c *SQLiteCompactor) oversized(e memory.Entry) bool {
+	return len([]rune(e.Content)) > c.sel.maxMergedChars
+}
+
+// mergeRejectReason returns why a merge result must not be written ("" = ok):
+// longer than MaxMergedChars, or nearly identical to one of its sources (the
+// merge would only replace a source by a copy of itself).
+func (c *SQLiteCompactor) mergeRejectReason(cl memory.ClusterResult, byID map[string]memory.Entry) string {
+	if len([]rune(cl.MergedContent)) > c.sel.maxMergedChars {
+		return "too_long"
+	}
+	for _, id := range cl.SourceIDs {
+		if src, ok := byID[id]; ok && memory.EmbedSimilarity(cl.MergedContent, src.Content) >= c.sel.noopSim {
+			return "noop_similar_to_source"
+		}
+	}
+	return ""
 }
 
 // compactBatch 对一批活跃记忆执行 LLM 聚类合并 + 归档来源。
@@ -326,7 +392,17 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 
 	mergedIDs := make(map[string]bool)
 	mergedCount, archivedCount := 0, 0
+	byID := make(map[string]memory.Entry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
 	for _, cl := range clusters {
+		if why := c.mergeRejectReason(cl, byID); why != "" {
+			c.logger.Infow("memory_dedup: merge rejected, sources kept",
+				"scope", scope.Key(), "source_ids", cl.SourceIDs, "reason", why,
+				"merged_chars", len([]rune(cl.MergedContent)))
+			continue
+		}
 		meta := map[string]any{
 			"compacted_at": time.Now(),
 			"source_ids":   cl.SourceIDs,

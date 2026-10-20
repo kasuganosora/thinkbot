@@ -52,7 +52,7 @@ func (r *SQLiteRepository) scopeQuery(ctx context.Context, scope memory.Scope) *
 // CountUncheckedDedup counts active entries of scope not yet seen by dedup.
 func (r *SQLiteRepository) CountUncheckedDedup(ctx context.Context, scope memory.Scope) (int, error) {
 	var n int64
-	if err := r.scopeQuery(ctx, scope).Where("dedup_checked_at IS NULL").Count(&n).Error; err != nil {
+	if err := r.scopeQuery(ctx, scope).Where("dedup_checked_at IS NULL AND (source IS NULL OR source <> ?)", "compactor").Count(&n).Error; err != nil {
 		return 0, errs.Wrap(err, "sqlite_repository: count unchecked failed")
 	}
 	return int(n), nil
@@ -61,7 +61,10 @@ func (r *SQLiteRepository) CountUncheckedDedup(ctx context.Context, scope memory
 // UncheckedDedup returns up to limit active unchecked entries, oldest first.
 func (r *SQLiteRepository) UncheckedDedup(ctx context.Context, scope memory.Scope, limit int) ([]memory.Entry, error) {
 	var models []dao.EntryModel
-	q := r.scopeQuery(ctx, scope).Where("dedup_checked_at IS NULL").Order("created_at ASC")
+	// Compactor output is never a seed (only a neighbour): re-seeding merged
+	// entries made them absorb each other in chains (misskey:timeline 10/15
+	// active entries were compactor output, chains up to 84 deep).
+	q := r.scopeQuery(ctx, scope).Where("dedup_checked_at IS NULL AND (source IS NULL OR source <> ?)", "compactor").Order("created_at ASC")
 	if limit > 0 {
 		q = q.Limit(limit)
 	}
