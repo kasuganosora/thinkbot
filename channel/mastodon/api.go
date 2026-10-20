@@ -162,7 +162,12 @@ func (a *apiClient) fetchInstanceLimits(ctx context.Context) {
 		a.maxChars.Store(int32(n))
 	}
 	if u := strings.TrimSpace(info.URLs.StreamingAPI); u != "" {
-		a.streamingURL = u
+		if safeStreamingURL(a.server, u) {
+			a.streamingURL = u
+		} else {
+			traceid.L(ctx).Warnw("mastodon: ignoring untrusted streaming_api URL",
+				"server", a.server, "streaming_api", u)
+		}
 	}
 	if p := info.Configuration.Polls; p.MaxOptions > 0 {
 		a.pollsMaxOptions.Store(int32(p.MaxOptions))
@@ -182,6 +187,33 @@ func (a *apiClient) fetchInstanceLimits(ctx context.Context) {
 		"streaming", a.streamingEndpoint(),
 		"poll_options", a.pollMaxOptions(),
 		"poll_option_chars", a.pollMaxOptionChars())
+}
+
+// safeStreamingURL reports whether the instance-advertised streaming URL may
+// receive our bearer token: it must use a secure scheme (unless the server
+// itself is plain http) and its host must be the server host or a subdomain
+// of it. Anything else would let a hostile instance response redirect the
+// token or our connection to an arbitrary (possibly internal) host.
+func safeStreamingURL(server, streaming string) bool {
+	su, err := url.Parse(server)
+	if err != nil || su.Hostname() == "" {
+		return false
+	}
+	u, err := url.Parse(streaming)
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss", "https":
+	case "ws", "http":
+		if strings.ToLower(su.Scheme) != "http" {
+			return false
+		}
+	default:
+		return false
+	}
+	sh, h := strings.ToLower(su.Hostname()), strings.ToLower(u.Hostname())
+	return h == sh || strings.HasSuffix(h, "."+sh)
 }
 
 // streamingEndpoint 返回 WebSocket streaming 的完整 URL。

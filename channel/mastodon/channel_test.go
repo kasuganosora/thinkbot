@@ -629,3 +629,38 @@ func TestTruncateFor(t *testing.T) {
 		t.Fatalf("短文本被改动: %q", got)
 	}
 }
+
+func TestClampVisibilityKeepsDMsDirect(t *testing.T) {
+	cases := []struct{ req, parent, want string }{
+		{VisibilityUnlisted, VisibilityDirect, VisibilityDirect},
+		{VisibilityPublic, VisibilityPrivate, VisibilityPrivate},
+		{VisibilityDirect, VisibilityPublic, VisibilityDirect},
+		{VisibilityUnlisted, VisibilityPublic, VisibilityUnlisted},
+		{VisibilityPublic, "", VisibilityPublic},
+	}
+	for _, tc := range cases {
+		if got := clampVisibility(tc.req, tc.parent); got != tc.want {
+			t.Errorf("clampVisibility(%q,%q)=%q want %q", tc.req, tc.parent, got, tc.want)
+		}
+	}
+}
+
+func TestSafeStreamingURL(t *testing.T) {
+	cases := []struct {
+		server, stream string
+		ok             bool
+	}{
+		{"https://mastodon.social", "wss://streaming.mastodon.social", true},
+		{"https://mastodon.example.com", "wss://mastodon.example.com", true},
+		{"https://mastodon.example.com", "wss://evil.example", false},
+		{"https://mastodon.example.com", "ws://mastodon.example.com", false},
+		{"https://mastodon.example.com", "wss://169.254.169.254", false},
+		{"https://mastodon.example.com", "wss://evilmastodon.example.com", false},
+		{"https://mastodon.example.com", "file:///etc/passwd", false},
+	}
+	for _, tc := range cases {
+		if got := safeStreamingURL(tc.server, tc.stream); got != tc.ok {
+			t.Errorf("safeStreamingURL(%q,%q)=%v want %v", tc.server, tc.stream, got, tc.ok)
+		}
+	}
+}
