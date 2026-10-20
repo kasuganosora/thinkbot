@@ -1219,7 +1219,7 @@ func IsMirrorID(id string) bool { return strings.HasPrefix(id, crossChannelMirro
 // (the model usually omits scope_id): channel → the session's chat id (the
 // same key MemoryWriteStage uses, env.Message.Channel), user → the sender,
 // bot → this bot. Before, tool writes without scope_id all landed in
-// channel:'' — one orphan scope shared by every channel and bot.
+// channel:” — one orphan scope shared by every channel and bot.
 func fillScopeIDFromSession(ctx context.Context, scope Scope, botID string) Scope {
 	if scope.ID != "" || ctx == nil {
 		return scope
