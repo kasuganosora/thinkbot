@@ -66,6 +66,10 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
       -X github.com/kasuganosora/thinkbot/internal/buildinfo.Version=${VERSION}" \
     -o /out/thinkbot-loader ./cmd/loader
 
+# Offline memory dedup dry-run / memory_vec reindex tool (no LLM calls).
+# Shipped in both final images as /app/dedup-dryrun (see docs/memory-vec-rollback.md).
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /out/dedup-dryrun ./cmd/dedup-dryrun
+
 # ---- 运行阶段（默认，最小镜像，不含 loader/源码）----
 FROM debian:bookworm-slim AS thinkbot-slim
 
@@ -101,6 +105,7 @@ RUN mkdir -p /home/thinkbot/.docker && chown -R thinkbot:thinkbot /home/thinkbot
 
 WORKDIR /app
 COPY --from=builder /out/thinkbot /app/thinkbot
+COPY --from=builder /out/dedup-dryrun /app/dedup-dryrun
 COPY docker/entrypoint.sh /app/entrypoint.sh
 # Windows checkout 可能把 .sh 检成 CRLF；去 \r 避免 shebang 变成 #!/bin/sh\r。
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
@@ -159,6 +164,7 @@ WORKDIR /app
 COPY . /app/src
 # 主程序与 loader 由 builder 阶段产出（带 buildinfo）。
 COPY --from=builder /out/thinkbot /app/thinkbot
+COPY --from=builder /out/dedup-dryrun /app/dedup-dryrun
 COPY --from=builder /out/thinkbot-loader /app/thinkbot-loader
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh

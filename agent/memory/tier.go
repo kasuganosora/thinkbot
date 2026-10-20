@@ -282,42 +282,14 @@ func (s *TieredStore) startVecBackfill(entries []TieredEntry) {
 	})
 }
 
-// backfillVec 只给 memory_vec 里还没有的 entry_id 做 Upsert。
-// 已有向量保持原样，重启不会重写几千行。
+// backfillVec 只给 memory_vec 里还没有的 entry_id 做 Upsert（未过期的 tiered_memories）。
+// 已有向量保持原样，重启不会重写几千行。日志见 VecBackfillStartEvent / VecBackfillDoneEvent。
 func (s *TieredStore) backfillVec(ctx context.Context, entries []TieredEntry) {
-	present, err := s.vec.listEntryIDs(ctx)
-	if err != nil {
-		s.logBackfillError("tiered_store: vec backfill list entry ids failed", "", err)
-		return
-	}
-	already := 0
-	written := 0
+	items := make([]VecItem, 0, len(entries))
 	for _, e := range entries {
-		if e.ID == "" || e.Content == "" {
-			continue
-		}
-		if _, ok := present[e.ID]; ok {
-			already++
-			continue
-		}
-		wrote, err := s.vec.upsert(e.Scope.Key(), e.ID, e.Content, true)
-		if err != nil {
-			s.logBackfillError("tiered_store: vec backfill upsert failed", e.ID, err)
-			continue
-		}
-		if wrote {
-			written++
-			present[e.ID] = struct{}{}
-			continue
-		}
-		already++
+		items = append(items, VecItem{ScopeKey: e.Scope.Key(), EntryID: e.ID, Content: e.Content})
 	}
-	if s.logger != nil {
-		s.logger.Infow("tiered_store: vec backfill finished",
-			"already_present", already, "written", written)
-	} else {
-		stdlog.Printf("tiered_store: vec backfill finished already_present=%d written=%d", already, written)
-	}
+	_, _ = s.vec.BackfillMissing(ctx, "tiered_memories", items, s.logger)
 }
 
 func (s *TieredStore) logBackfillError(msg, entryID string, err error) {

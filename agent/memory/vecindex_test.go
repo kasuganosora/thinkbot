@@ -150,6 +150,13 @@ func TestVecMigratesAuxiliaryScopeKey(t *testing.T) {
 	).Error; err != nil {
 		t.Fatal(err)
 	}
+	// Rows above use the current hashEmbed; stamp it so only the schema migrates.
+	if err := gdb.Exec("CREATE TABLE " + vecMetaTable + " (key TEXT PRIMARY KEY, value TEXT NOT NULL)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := gdb.Exec("INSERT INTO "+vecMetaTable+" VALUES ('embed_version', ?)", embedVersion).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	idx := OpenVecIndex(gdb)
 	if !idx.Enabled() {
@@ -227,5 +234,30 @@ func TestVecSearchLogsScopeOnError(t *testing.T) {
 	got := buf.String()
 	if !strings.Contains(got, `memory vec search failed scope_key="channel:alpha-long"`) {
 		t.Fatalf("search error was not logged: %q", got)
+	}
+}
+
+func TestVecEmbedVersionMismatchClearsIndex(t *testing.T) {
+	gdb := openVecDB(t)
+	idx := OpenVecIndex(gdb)
+	if !idx.Enabled() {
+		t.Skip("sqlite-vec not available")
+	}
+	idx.Upsert("channel:a", "e1", "fictional kettle note")
+	if err := gdb.Exec("UPDATE " + vecMetaTable + " SET value = 'old' WHERE key = 'embed_version'").Error; err != nil {
+		t.Fatal(err)
+	}
+	idx2 := OpenVecIndex(gdb)
+	if n, _ := idx2.vecCount(vecTableName); n != 0 {
+		t.Fatalf("stale vectors kept: %d", n)
+	}
+	var v string
+	gdb.Raw("SELECT value FROM " + vecMetaTable + " WHERE key = 'embed_version'").Scan(&v)
+	if v != embedVersion {
+		t.Fatalf("version = %q", v)
+	}
+	idx2.Upsert("channel:a", "e1", "fictional kettle note")
+	if n, _ := OpenVecIndex(gdb).vecCount(vecTableName); n != 1 {
+		t.Fatalf("matching version must keep rows, got %d", n)
 	}
 }

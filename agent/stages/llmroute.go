@@ -607,6 +607,10 @@ type LLMConfig struct {
 	ContextLength int
 	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
 	ReasoningEffort string
+	// HeartbeatReasoningEffort 可选：心跳决策轮的推理强度（每次现取，Web bot 设置
+	// bot.<id>.reasoning.heartbeat）。"" = 沿用 ReasoningEffort；"provider" = 不发送；
+	// 其余值按模型词表映射（不支持该参数的模型不发送）。
+	HeartbeatReasoningEffort func() string
 	// MessageBuilder 自定义消息构造函数。
 	// 如果为 nil，默认将 Message.Text 作为 user message。
 	MessageBuilder func(msg core.Message) []llm.Message
@@ -832,6 +836,36 @@ func (s *LLMStage) SetResumeDispatch(fn func(ctx context.Context, msg core.Messa
 }
 
 // reasoningEffortPtr 将非空字符串转为 *string，空字符串返回 nil。
+// replyEffort is the reply turn's reasoning effort. Values are sent as
+// configured (unchanged behaviour), except "none" (Web: 关闭) which is mapped
+// to the model vocabulary: GLM-5.3 has no none (→ low), models without
+// reasoning_effort support get nothing.
+func replyEffort(effort string, model *llm.Model) *string {
+	if strings.EqualFold(strings.TrimSpace(effort), "none") {
+		id := ""
+		if model != nil {
+			id = model.ID
+		}
+		return reasoningEffortPtr(llm.NormalizeReasoningEffort(id, "none"))
+	}
+	return reasoningEffortPtr(effort)
+}
+
+// heartbeatEffort resolves the reasoning effort of a heartbeat decision turn.
+func heartbeatEffort(setting string, model *llm.Model, current *string) *string {
+	switch setting = strings.ToLower(strings.TrimSpace(setting)); setting {
+	case "":
+		return current
+	case llm.ReasoningProvider, "off", "default":
+		return nil
+	}
+	id := ""
+	if model != nil {
+		id = model.ID
+	}
+	return reasoningEffortPtr(llm.NormalizeReasoningEffort(id, setting))
+}
+
 func reasoningEffortPtr(s string) *string {
 	if s == "" {
 		return nil
@@ -1017,7 +1051,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		FrequencyPenalty: s.config.FrequencyPenalty,
 		PresencePenalty:  s.config.PresencePenalty,
 		MaxTokens:        s.config.MaxTokens,
-		ReasoningEffort:  reasoningEffortPtr(s.config.ReasoningEffort),
+		ReasoningEffort:  replyEffort(s.config.ReasoningEffort, s.config.Model),
 	}
 
 	// 潜水模式：强制结构化 JSON 输出，使「是否值得记忆」成为一个与语言无关的布尔，
@@ -1041,6 +1075,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		if b, ok := v.(bool); ok && b {
 			params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
 			params.Temperature = lurkTemperature()
+			if s.config.HeartbeatReasoningEffort != nil {
+				params.ReasoningEffort = heartbeatEffort(s.config.HeartbeatReasoningEffort(), params.Model, params.ReasoningEffort)
+			}
 		}
 	}
 

@@ -42,6 +42,7 @@
           <!-- 通用（基础与模型） -->
           <div v-else-if="activeKey === 'general'" class="pad">
             <BotBasicForm :form="form" :emojis="emojis" :model-options="modelOptions" :running="!!bot.running" :toggling="toggling" @save="saveBasic" @remove="removeBot" @toggle-status="toggleStatus" />
+            <BotReasoning :bot-id="bot.id" />
           </div>
           <!-- 容器 -->
           <div v-else-if="activeKey === 'container'" class="pad"><BotContainer :bot-id="bot.id" /></div>
@@ -98,6 +99,7 @@ import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
 import { botApi, providerApi } from '@/api/services'
 import BotBasicForm from '@/components/bot/BotBasicForm.vue'
+import BotReasoning from '@/components/bot/BotReasoning.vue'
 import BotCronJobs from '@/components/bot/BotCronJobs.vue'
 import BotPlatforms from '@/components/bot/BotPlatforms.vue'
 import BotMemory from '@/components/bot/BotMemory.vue'
@@ -201,7 +203,7 @@ function loadBot() {
       id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
       llmMain: b.llmMain || '', llmLight: b.llmLight || '',
       temperature: b.temperature ?? 0.7, maxTokens: b.maxTokens ?? 4096,
-      workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort || 'medium',
+      workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort ?? '',
       hardMaxSteps: b.hardMaxSteps ?? 0
     }
   }

@@ -157,6 +157,9 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 	if eventBus == nil {
 		eventBus = outbound.NewMemoryEventBus(outbound.DefaultMemoryEventBusConfig(), logger)
 	}
+	// memory_vec backfill at app init, not only when a bot starts (stopped bots
+	// would otherwise leave an emptied index empty). Once per DB.
+	storage.StartAppVecBackfill(db, logger)
 	if chatHistory != nil && store != nil {
 		// compact_context 检查点 TTL：每次加载历史时现读配置，改配置无需重启。
 		chatHistory.SetContextCheckpointTTLSource(func() time.Duration {
@@ -1585,19 +1588,25 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 内部 LLM 调用（判定 / 压缩摘要 / 记忆去重 / 画像 / 梦境 / 自愈 / 视觉）的
 	// per-purpose reasoning_effort 与输出封顶策略：GLM-5.3 不传 reasoning_effort 时按 max 推理，
 	// 输出上限又跟随模型 128000，这些调用此前推理不受限（09-26 memory_dedup 32 次产出 242K token）。
-	internalPol := newInternalPolicy(s.store, s.logger, def.ReasoningEffort, bundle)
+	internalPol := newBotInternalPolicy(s.store, s.logger, id, def.ReasoningEffort, bundle)
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
 		// 聚类合并输出上限跟随主模型配置（此前不发 max_tokens）。
-		MaxTokens: bundle.MainDef.MaxTokens,
-		Policy:    internalPol,
+		MaxTokens:              bundle.MainDef.MaxTokens,
+		Policy:                 internalPol,
+		NeighbourTopK:          s.storeInt(config.KeyMemoryDedupNeighbourK, storage.DefaultDedupNeighbourTopK),
+		NeighbourMinSimilarity: s.storeFloat(config.KeyMemoryDedupMinSimilarity, storage.DefaultDedupMinSimilarity),
+		MaxSeedsPerRun:         s.storeInt(config.KeyMemoryDedupMaxSeeds, storage.DefaultDedupMaxSeeds),
 	}, s.logger)
 	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
-		Window:    memWindow,
-		Compactor: memCompactor,
+		Window:          memWindow,
+		Compactor:       memCompactor,
+		DedupTriggerNew: s.storeInt(config.KeyMemoryDedupTriggerNew, storage.DefaultDedupTriggerNew),
+		DedupCooldown:   time.Duration(s.storeInt(config.KeyMemoryDedupCooldownMin, int(storage.DefaultDedupCooldown/time.Minute))) * time.Minute,
 	})
 	memCompactor.SetRepository(memRepo)
+	memRepo.StartVecBackfill(s.logger)
 	memCfg := memory.DefaultToolConfig(memRepo)
 	// 开启跨平台记忆镜像：channel 作用域的记忆会额外写入 bot 全局作用域，
 	// 使任意频道的会话都能在召回时看到其他平台的活动（如 web 频道上的「苦力活」）。
@@ -1721,9 +1730,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			MaxTokens:        maxTok,
 			ContextLength:    bundle.MainDef.ContextLength,
 			ReasoningEffort:  def.ReasoningEffort,
-			InternalPolicy:   internalPol,
-			MessageBuilder:   messageBuilder,
-			ToolResolver:     toolMgr,
+			HeartbeatReasoningEffort: func() string {
+				if s.store == nil {
+					return ""
+				}
+				return config.NewBuilder(s.store, s.logger).GetBotReasoning(id)["heartbeat"]
+			},
+			InternalPolicy: internalPol,
+			MessageBuilder: messageBuilder,
+			ToolResolver:   toolMgr,
 			// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效，
 			// 治理「模型决定不互动却把独白当回复发出」。默认关闭。
 			RequireReplyControl: requireReplyControl,
@@ -2941,6 +2956,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if userCronScheduler != nil {
 		userCronScheduler.Start(botCtx)
 	}
+	// 被动收听 scope（如 misskey:timeline）的每日摘要：本地零点后每 scope 每天一次。
+	s.startDailyDigest(botCtx, id, memRepo, bundle, internalPol)
 
 	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
 	go func() {
@@ -3571,7 +3588,7 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 	if def, derr := s.GetDefinition(botID); derr == nil && def != nil {
 		botEffort = def.ReasoningEffort
 	}
-	internalPol := newInternalPolicy(s.store, s.logger, botEffort, llmBundle)
+	internalPol := newBotInternalPolicy(s.store, s.logger, botID, botEffort, llmBundle)
 
 	// 临时 cron 文件路径：一次性触发不应污染 data/cron/<botID>_dream.json
 	cronFile := filepath.Join(os.TempDir(), "dream_trigger_"+botID+".json")
@@ -3994,4 +4011,63 @@ func workflowContinuationText(wf *workflow.Workflow) string {
 	}
 
 	return text
+}
+
+// storeInt reads an int setting (def when the store is absent or unset).
+func (s *BotService) storeInt(key string, def int) int {
+	if s.store == nil {
+		return def
+	}
+	return s.store.GetInt(key, def)
+}
+
+// storeFloat reads a float setting (def when the store is absent or unset).
+func (s *BotService) storeFloat(key string, def float64) float64 {
+	if s.store == nil {
+		return def
+	}
+	return s.store.GetFloat64(key, def)
+}
+
+// startDailyDigest runs the daily digest of passive listen scopes for a bot.
+func (s *BotService) startDailyDigest(ctx context.Context, botID string, repo *storage.SQLiteRepository, bundle *bot.LLMBundle, pol *llm.InternalPolicy) {
+	if repo == nil || bundle == nil || bundle.Main == nil {
+		return
+	}
+	var loc *time.Location
+	if s.store != nil {
+		b := config.NewBuilder(s.store, s.logger)
+		// not GetBotTimezoneLocation: its fallback is time.Local (UTC in the container)
+		loc = storage.DigestLocation(b.GetBotTimezone(botID))
+		switch v := strings.TrimSpace(s.store.GetString(config.KeyMemoryListenScopes, "")); v {
+		case "":
+			core.SetListenChannelsOverride(nil)
+		case "none":
+			core.SetListenChannelsOverride([]string{})
+		default:
+			core.SetListenChannelsOverride(strings.Split(v, ","))
+		}
+	}
+	if len(core.ListenChannels()) == 0 {
+		return
+	}
+	d := storage.NewDailyDigester(repo, storage.DailyDigestConfig{
+		Provider:      bundle.Main,
+		Model:         &llm.Model{ID: bundle.MainDef.Model},
+		BotID:         botID,
+		Location:      loc,
+		MaxChars:      s.storeInt(config.KeyMemoryDigestMaxChars, storage.DefaultDigestMaxChars),
+		MaxInputChars: s.storeInt(config.KeyMemoryDigestMaxInputChars, storage.DefaultDigestMaxInputChars),
+		BacklogDays:   s.storeInt(config.KeyMemoryDigestBacklogDays, storage.DefaultDigestBacklogDays),
+		MaxTokens:     bundle.MainDef.MaxTokens,
+		Policy:        pol,
+	}, s.logger)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Errorw("daily digest panic", "bot_id", botID, "err", r)
+			}
+		}()
+		d.Run(ctx, 15*time.Minute)
+	}()
 }

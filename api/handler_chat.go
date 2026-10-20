@@ -729,7 +729,7 @@ func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userI
 		if def, derr := s.botSvc.GetDefinition(botID); derr == nil && def != nil {
 			botEffort = def.ReasoningEffort
 		}
-		compactor.SetInternalPolicy(newInternalPolicy(s.store, s.logger, botEffort, bundle))
+		compactor.SetInternalPolicy(newBotInternalPolicy(s.store, s.logger, botID, botEffort, bundle))
 		if sum, serr := compactor.SummarizeHead(ctx, bundle.Main, bundle.MainDef.Model, head, bundle.MainDef.MaxTokens); serr == nil {
 			summaryText = sum
 		} else {

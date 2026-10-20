@@ -1411,12 +1411,18 @@ func isUnicodeEmoji(s string) bool {
 	return false
 }
 
+// TimelineChannelID 是 timeline 普通帖共用的 Message.Channel：被动收听的信息流
+// （core.RegisterListenChannel），其记忆按天生成摘要而非滚动去重。
+const TimelineChannelID = "misskey:timeline"
+
+func init() { core.RegisterListenChannel(TimelineChannelID) }
+
 // misskeyIngressChannelID 决定入站 Message.Channel。
 // timeline 上的普通帖共用 misskey:timeline；被 @ / specified 私信仍按用户隔离，
 // 否则 user_choice 会把 ChatID 记成 misskey:timeline，投票者 userId 对不上永远超时。
 func misskeyIngressChannelID(eventType string, mentioned bool, visibility, userID string) string {
 	if eventType == "timeline" && !mentioned && visibility != VisibilitySpecified {
-		return "misskey:timeline"
+		return TimelineChannelID
 	}
 	return userID
 }

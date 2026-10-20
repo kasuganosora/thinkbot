@@ -44,10 +44,12 @@ func TestInternalPolicy_AutoReasoningEffort(t *testing.T) {
 		{"unknown model, bot off", "", "gpt-4o", PurposeMemoryDedup, nil, ""},
 		{"unknown model, bot off, judge", "", "gpt-4o", PurposeLazyJudge, nil, ""},
 		// model def marks the reasoning capability → send; none downgraded to low
-		{"reasoning capability", "", "o4-mini", PurposeMemoryDedup, []string{"o4-mini"}, "high"},
+		{"reasoning capability", "", "o4-mini", PurposeMemoryDedup, []string{"o4-mini"}, "medium"},
 		{"reasoning capability judge", "", "o4-mini", PurposeLazyJudge, []string{"o4-mini"}, "low"},
 		// documented family (GLM-5.2+) → send even when the bot sends nothing
+		// memory_dedup defaults to medium; GLM-5.3 has no medium and serves it as high
 		{"glm-5.3 bot off", "", "glm-5.3", PurposeMemoryDedup, nil, "high"},
+		{"glm-5.2 dedup medium", "", "glm-5.2", PurposeMemoryDedup, nil, "medium"},
 		{"glm-5.2 bot off judge", "", "glm-5.2", PurposeDreamScore, nil, "none"},
 		// GLM below 5.2 does not support the parameter
 		{"glm-5.1", "medium", "glm-5.1", PurposeMemoryDedup, nil, ""},
@@ -141,7 +143,7 @@ func TestInternalPolicy_ApplyClearsWhenNotSent(t *testing.T) {
 func TestInternalPurposes_Defaults(t *testing.T) {
 	want := map[string]string{
 		PurposeLazyJudge: "none", PurposeEngagementJudge: "none", PurposeDreamScore: "none", PurposeDreamCluster: "none",
-		PurposeDreamExtract: "low", PurposeMemoryDedup: "high", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
+		PurposeDreamExtract: "low", PurposeMemoryDedup: "medium", PurposeDailyDigest: "medium", PurposeAutoCompact: "low", PurposeSummarizeHead: "low",
 		PurposeUserProfiler: "low", PurposeBotProfiler: "low", PurposeWorkflowHeal: "low", PurposeVision: "low",
 		PurposeNotify: "low",
 	}
@@ -152,5 +154,31 @@ func TestInternalPurposes_Defaults(t *testing.T) {
 		if want[p.Name] != p.DefaultReasoning {
 			t.Errorf("%s default %q, want %q", p.Name, p.DefaultReasoning, want[p.Name])
 		}
+	}
+}
+
+func TestInternalPolicy_MemoryDedupBuiltinCap(t *testing.T) {
+	var nilPol *InternalPolicy
+	if got := nilPol.MaxTokens(PurposeMemoryDedup, 128000, 8192); got != MemoryDedupDefaultMaxTokens {
+		t.Fatalf("builtin dedup cap: got %d, want %d", got, MemoryDedupDefaultMaxTokens)
+	}
+	if got := nilPol.MaxTokens(PurposeUserProfiler, 128000, 8192); got != 128000 {
+		t.Fatalf("purpose without builtin cap must follow the model: %d", got)
+	}
+	glob := NewInternalPolicy(func() InternalSettings { return InternalSettings{DefaultMaxTokens: 2000} }, "")
+	if got := glob.MaxTokens(PurposeMemoryDedup, 128000, 8192); got != 2000 {
+		t.Fatalf("smaller global cap must win: %d", got)
+	}
+	per := NewInternalPolicy(func() InternalSettings {
+		return InternalSettings{DefaultMaxTokens: 2000, MaxTokens: map[string]int{PurposeMemoryDedup: 12000}}
+	}, "")
+	if got := per.MaxTokens(PurposeMemoryDedup, 128000, 8192); got != 12000 {
+		t.Fatalf("per-purpose setting must override: %d", got)
+	}
+	low := NewInternalPolicy(func() InternalSettings {
+		return InternalSettings{Reasoning: map[string]string{PurposeMemoryDedup: "low"}}
+	}, "")
+	if got := low.ReasoningEffort(PurposeMemoryDedup, "glm-5.3"); got != "low" {
+		t.Fatalf("dedup reasoning must stay configurable: %q", got)
 	}
 }

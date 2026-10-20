@@ -43,6 +43,25 @@ var dataMigrations = []dataMigration{
 	{name: NotifyLegacySessionMoveName, run: MoveLegacyNotifyRows},
 	// Must run after every migration that moves rows between sessions.
 	{name: messageCountRecount2Name, run: recountSessionStats},
+	// Must run after ensureColumns (needs memory_entries.dedup_checked_at).
+	{name: MemoryDedupBackfillName, run: backfillMemoryDedupChecked},
+}
+
+// MemoryDedupBackfillName marks every existing memory entry as already
+// dedup-checked when incremental dedup is introduced, so the first passes after
+// the deploy only see entries written afterwards (no first-run LLM storm).
+// Only dedup_checked_at is set; no entry content is rewritten.
+const MemoryDedupBackfillName = "2026-10-20-memory-dedup-checked-backfill"
+
+func backfillMemoryDedupChecked(tx *gorm.DB) (string, error) {
+	if !tx.Migrator().HasTable("memory_entries") {
+		return "memory_entries absent, nothing to backfill", nil
+	}
+	res := tx.Exec("UPDATE memory_entries SET dedup_checked_at = ? WHERE dedup_checked_at IS NULL", time.Now().UTC())
+	if res.Error != nil {
+		return "", res.Error
+	}
+	return fmt.Sprintf("marked %d existing entries dedup-checked", res.RowsAffected), nil
 }
 
 // runDataMigrations 依次执行尚未登记的数据修复。

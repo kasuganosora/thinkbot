@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
@@ -115,11 +116,22 @@ func TestSQLiteCompactor_CompactScope(t *testing.T) {
 	if len(merged) != 1 {
 		t.Fatalf("expected 1 merged entry, got %d", len(merged))
 	}
+	// Without memory_vec (tests) the 3 unchecked entries form one fallback group.
 	if merged[0].Content != "MERGED-3" {
 		t.Errorf("unexpected merged content: %q", merged[0].Content)
 	}
 	if len(active) != 1 {
 		t.Errorf("expected only 1 active entry after archival, got %d", len(active))
+	}
+	if n, _ := repo.CountUncheckedDedup(ctx, scope); n != 0 {
+		t.Errorf("all entries must be checked after the pass, %d unchecked", n)
+	}
+	// A second pass has nothing new: no LLM call.
+	if err := compactor.CompactScope(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 1 {
+		t.Errorf("second pass must not call the LLM, calls=%d", provider.calls)
 	}
 
 	after, err := repo.totalChars(ctx, scope)
@@ -210,9 +222,11 @@ func TestSQLiteRepository_AppendTriggersCompaction(t *testing.T) {
 		MaxMemoryTokens:   1, // 上限 1 token → 3 字符
 	})
 	spy := &spyCompactor{}
+	// Trigger is the number of unchecked entries (char budget no longer triggers).
 	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{
-		Window:    win,
-		Compactor: spy,
+		Window:          win,
+		Compactor:       spy,
+		DedupTriggerNew: 1,
 	})
 
 	// 写入一条明显超过 3 字符预算的记忆
@@ -242,17 +256,15 @@ func TestSQLiteRepository_AppendTriggersCompaction(t *testing.T) {
 	}
 }
 
-// TestSQLiteCompactor_CompactScopeBatchesWhenExceedsMaxInput 是「记忆压缩积压」bug 的回归测试。
-// 根因：活跃条目超过 MaxInputEntries 时，旧代码 entries[:MaxInputEntries] 截断丢弃超额部分，
-// 而 GetAllActive 按 created_at ASC 排序，导致较新记忆永远轮不到压缩、活跃数只增不减
-// （生产日志见 "sqlite_compactor exceeds MaxInputEntries"，大 scope 从 343 涨到 367 且持续）。
-// 修复：按 MaxInputEntries 切块循环处理全部活跃条目。本测试验证这一点。
-func TestSQLiteCompactor_CompactScopeBatchesWhenExceedsMaxInput(t *testing.T) {
+// TestSQLiteCompactor_IncrementalLargeScope: a large unchecked scope is
+// processed in bounded passes (MaxSeedsPerRun), every LLM call carries at most
+// MaxClusterSize entries, and once everything is checked no call is made.
+// (Replaces the old "process ALL active entries in batches of 50" test: that
+// behaviour re-sent the whole scope to the LLM on every pass.)
+func TestSQLiteCompactor_IncrementalLargeScope(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	scope := memory.ChannelScope("batch-compact")
-
-	// spy 防 Append 的 maybeCompact 干扰，且 nil-safe
 	spy := &spyCompactor{}
 	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{Compactor: spy})
 
@@ -267,52 +279,64 @@ func TestSQLiteCompactor_CompactScopeBatchesWhenExceedsMaxInput(t *testing.T) {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
-	before, err := repo.GetAllActive(ctx, scope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(before) != n {
-		t.Fatalf("expected %d active before compaction, got %d", n, len(before))
-	}
 
-	provider := &mockClusterProvider{}
-	const maxInput = 50
+	provider := &sizeRecordingProvider{}
 	compactor := NewSQLiteCompactor(SQLiteCompactorConfig{
-		Provider:        provider,
-		Model:           &llm.Model{ID: "mock"},
-		MaxInputEntries: maxInput,
-		MinClusterSize:  2,
+		Provider:       provider,
+		Model:          &llm.Model{ID: "mock"},
+		MaxSeedsPerRun: 30,
 	}, zap.NewNop().Sugar())
 	compactor.SetRepository(repo)
 
-	if err := compactor.CompactScope(ctx, scope); err != nil {
-		t.Fatalf("CompactScope: %v", err)
-	}
-
-	// 回归核心：超过 MaxInputEntries(50) 应分批处理全部 120 条，
-	// 分批次数 = ceil(120/50) = 3。旧逻辑只调 1 次 LLM（处理前 50 条）。
-	if provider.calls != 3 {
-		t.Errorf("expected 3 batch LLM calls (ceil(120/50)), got %d", provider.calls)
-	}
-
-	active, err := repo.GetAllActive(ctx, scope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 旧逻辑(entries[:50])：只处理前 50 -> 1 条 merged + 后 70 活跃残留 ≈71。
-	// 新逻辑：120 条源全归档 + 3 条 merged，活跃应≈3。
-	if len(active) >= 50 {
-		t.Errorf("regression: %d active remain (expected ~3); old truncation bug would leave ~71", len(active))
-	}
-	var merged int
-	for _, e := range active {
-		if e.Source == "compactor" {
-			merged++
+	for pass := 0; pass < 20; pass++ {
+		if err := compactor.CompactScope(ctx, scope); err != nil {
+			t.Fatal(err)
+		}
+		if u, _ := repo.CountUncheckedDedup(ctx, scope); u == 0 {
+			break
 		}
 	}
-	if merged != 3 {
-		t.Errorf("expected 3 merged entries (one per batch), got %d", merged)
+	if u, _ := repo.CountUncheckedDedup(ctx, scope); u != 0 {
+		t.Fatalf("%d entries still unchecked", u)
 	}
+	for _, sz := range provider.sizes {
+		if sz < 2 || sz > 10 {
+			t.Fatalf("group size %d outside 2..10", sz)
+		}
+	}
+	calls := len(provider.sizes)
+	if err := compactor.CompactScope(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.sizes) != calls {
+		t.Fatalf("fully checked scope must not call the LLM")
+	}
+}
+
+// sizeRecordingProvider answers "nothing to merge" and records group sizes.
+type sizeRecordingProvider struct {
+	mu     sync.Mutex
+	sizes  []int
+	chars  []int
+	tokens []int
+}
+
+func (p *sizeRecordingProvider) Name() string { return "mock" }
+func (p *sizeRecordingProvider) DoGenerate(_ context.Context, gp llm.GenerateParams) (*llm.GenerateResult, error) {
+	text := extractPromptText(gp.Messages[0])
+	ids := regexp.MustCompile(`(?m)^\[([a-z0-9:-]+)\]`).FindAllString(text, -1)
+	if debugPrompts {
+		fmt.Println("PROMPT:", text)
+	}
+	p.mu.Lock()
+	p.sizes = append(p.sizes, len(ids))
+	p.chars = append(p.chars, len([]rune(text))+len([]rune(gp.System)))
+	p.tokens = append(p.tokens, llm.EstimateTokens(text)+llm.EstimateTokens(gp.System))
+	p.mu.Unlock()
+	return &llm.GenerateResult{Text: "[]", FinishReason: llm.FinishReasonStop}, nil
+}
+func (p *sizeRecordingProvider) DoStream(context.Context, llm.GenerateParams) (*llm.StreamResult, error) {
+	return nil, nil
 }
 
 // TestSQLiteRepository_ZeroBudgetWarns 覆盖「预算算出 0」的告警路径。
@@ -333,6 +357,11 @@ func TestSQLiteRepository_ZeroBudgetWarns(t *testing.T) {
 
 	spy := &spyCompactor{}
 	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{Window: win, Compactor: spy})
+	// maybeCompact only looks at the budget when the scope has unchecked entries.
+	if err := repo.db.Create(&dao.EntryModel{ID: "zb-1", ScopeKind: string(scope.Kind), ScopeID: scope.ID,
+		Content: "x", CreatedAt: time.Now()}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	repo.maybeCompact(context.Background(), scope)
 
@@ -391,3 +420,5 @@ func TestIsDeterministicLLMReject(t *testing.T) {
 		t.Error("nil error should not be deterministic")
 	}
 }
+
+var debugPrompts = false

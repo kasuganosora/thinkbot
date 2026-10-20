@@ -36,6 +36,8 @@ func Migrate(database *gorm.DB) error {
 		&ContextCheckpoint{},
 		&NotifyToken{},
 		&NotifyEvent{},
+		&MemoryCompactState{},
+		&MemoryDigestState{},
 	); err != nil {
 		return err
 	}
@@ -91,6 +93,10 @@ func ensureColumns(db *gorm.DB) error {
 		{"chat_messages", "is_context", "is_context INTEGER NOT NULL DEFAULT 0"},
 		{"chat_messages", "origin_session_id", "origin_session_id TEXT NOT NULL DEFAULT ''"},
 		{"chat_messages", "forked_session_id", "forked_session_id TEXT NOT NULL DEFAULT ''"},
+
+		// —— 记忆去重增量化 ——
+		// 可空：NULL = 尚未做过去重检查（存量条目全部视为未检查，首轮按批次增量处理）。
+		{"memory_entries", "dedup_checked_at", "dedup_checked_at DATETIME"},
 	}
 	for _, s := range specs {
 		var cnt int64
@@ -152,12 +158,20 @@ var sessionIndexSpecs = []indexSpec{
 	},
 }
 
+// memoryIndexSpecs 记忆去重增量化需要的索引：按 scope 取未检查条目。
+var memoryIndexSpecs = []indexSpec{
+	{
+		name: "idx_memory_entries_dedup",
+		ddl:  `CREATE INDEX IF NOT EXISTS idx_memory_entries_dedup ON memory_entries (scope_kind, scope_id, dedup_checked_at)`,
+	},
+}
+
 // ensureIndexes 幂等地补齐索引。
 //
 // 与 ensureColumns 分离：DDL 依赖的列必须先由 ensureColumns 建好，
 // 且 GORM AutoMigrate 既不认识 partial index、也不会给存量表补索引。
 func ensureIndexes(db *gorm.DB) error {
-	for _, s := range sessionIndexSpecs {
+	for _, s := range append(append([]indexSpec(nil), sessionIndexSpecs...), memoryIndexSpecs...) {
 		if err := db.Exec(s.ddl).Error; err != nil {
 			return fmt.Errorf("create index %s: %w", s.name, err)
 		}
