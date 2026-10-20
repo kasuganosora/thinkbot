@@ -222,9 +222,11 @@ func TestSQLiteRepository_AppendTriggersCompaction(t *testing.T) {
 		MaxMemoryTokens:   1, // 上限 1 token → 3 字符
 	})
 	spy := &spyCompactor{}
+	// Trigger is the number of unchecked entries (char budget no longer triggers).
 	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{
-		Window:    win,
-		Compactor: spy,
+		Window:          win,
+		Compactor:       spy,
+		DedupTriggerNew: 1,
 	})
 
 	// 写入一条明显超过 3 字符预算的记忆

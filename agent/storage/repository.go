@@ -599,29 +599,23 @@ func (r *SQLiteRepository) charBudget(scope memory.Scope) int {
 
 // maybeCompact 决定是否对 scope 发起一次（增量）记忆去重。
 //
-// 触发条件（任一满足，且 scope 内存在未检查条目）：
-//   - 未经去重检查的条目数 >= DedupTriggerNew；
-//   - 活跃字符数超过 window 派生预算 * CompressThreshold。
-//
-// 全部条目都已检查过时不再调用 LLM（此前超预算的 scope 每 5 分钟就把全部条目
-// 重新送一遍 LLM）。冷却持久化在 memory_compact_states，重启不重置。
+// 触发条件：未经去重检查的条目数（不含 compactor 输出）>= DedupTriggerNew。
+// 字符预算不再触发去重（见函数体注释）；全部条目都已检查过时不调用 LLM（此前
+// 超预算的 scope 每 5 分钟就把全部条目重新送一遍 LLM）。冷却持久化在 memory_compact_states，重启不重置。
 // 非阻塞调用方；内部已做并发重入保护与冷却，压缩失败不影响正常写入。
 func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope) {
 	unchecked, err := r.CountUncheckedDedup(ctx, scope)
 	if err != nil || unchecked == 0 {
 		return
 	}
-	trigger := r.config.DedupTriggerNew > 0 && unchecked >= r.config.DedupTriggerNew
-	if !trigger && r.window != nil {
-		budget := r.charBudget(scope)
-		if budget <= 0 {
-			// 注入了 window 却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
-			r.warnZeroBudget(ctx, scope)
-		} else if total, err := r.totalChars(ctx, scope); err == nil {
-			trigger = total > int(float64(budget)*r.config.CompressThreshold)
-		}
+	if r.window != nil && r.charBudget(scope) <= 0 {
+		// 注入了 window 却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
+		r.warnZeroBudget(ctx, scope)
 	}
-	if !trigger {
+	// 只按「新条目数」触发。超出字符预算不再触发：去重后仍超预算的 scope 此前每个
+	// 冷却周期都把同一批条目重新合并一遍（合并后长度几乎不变，after/before 中位数
+	// 0.994），超预算由渲染层截断 / 条数淘汰兜底。
+	if r.config.DedupTriggerNew <= 0 || unchecked < r.config.DedupTriggerNew {
 		return
 	}
 

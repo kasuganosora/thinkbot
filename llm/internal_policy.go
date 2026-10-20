@@ -19,7 +19,8 @@ import (
 //   - reasoning_effort: configurable per purpose (llm.internal_reasoning.<purpose>)
 //     with a global default (llm.internal_reasoning.default, default "auto");
 //   - max output tokens: the model's configured maxTokens, optionally lowered
-//     by llm.internal_max_tokens.<purpose> / .default (0 = model limit).
+//     by llm.internal_max_tokens.<purpose> / .default (0 = model limit) and by
+//     a built-in purpose cap (memory_dedup: 4096).
 //
 // Values of the reasoning setting:
 //   - "" / "auto": the built-in default of the purpose (judges/classifiers/

@@ -1412,7 +1412,7 @@ func (b *Builder) GetInternalLLMSettings() llm.InternalSettings {
 // InternalLLMMetaSpecs 返回内部调用策略配置项元数据（系统设置页展示）。
 func InternalLLMMetaSpecs() []MetaSpec {
 	specs := []MetaSpec{
-		{Key: InternalReasoningKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用（判定、摘要、记忆去重、画像、梦境、工作流自愈、视觉）默认 reasoning_effort。auto（默认）= 按用途取内置默认值：判定/分类/评分类为 none（模型不支持 none 时用 low），合并/摘要/画像/自愈/视觉为 low；且只在确认 provider 接受该参数时发送（bot 本身配置了 reasoning_effort、模型勾选了 reasoning 能力，或模型为 GLM-5.2 及以上）。provider = 不发送（由 provider 缺省，GLM-5.3 缺省为 max）。其它值（none/minimal/low/medium/high/max）原样发送，并按已知模型词表映射（GLM-5.3 仅接受 low/high/max：none/minimal→low、medium→high）。保存后下一次调用即生效。"},
+		{Key: InternalReasoningKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用（判定、摘要、记忆去重、画像、梦境、工作流自愈、视觉）默认 reasoning_effort。auto（默认）= 按用途取内置默认值：判定/分类/评分类为 none（模型不支持 none 时用 low），记忆去重 memory_dedup 为 medium（GLM-5.3 无 medium，按 high 发送），摘要/画像/自愈/视觉为 low；且只在确认 provider 接受该参数时发送（bot 本身配置了 reasoning_effort、模型勾选了 reasoning 能力，或模型为 GLM-5.2 及以上）。provider = 不发送（由 provider 缺省，GLM-5.3 缺省为 max）。其它值（none/minimal/low/medium/high/max）原样发送，并按已知模型词表映射（GLM-5.3 仅接受 low/high/max：none/minimal→low、medium→high）。保存后下一次调用即生效。"},
 		{Key: InternalMaxTokensKey("default"), Category: "InternalLLM", Description: "内部 LLM 调用输出上限的默认封顶（含推理 token）。0（默认）= 跟随模型配置的 maxTokens；大于 0 时只会压低模型上限，用于控制成本。被截断的输出会记录 WARN 并按各调用点原有逻辑回退。保存后下一次调用即生效。"},
 	}
 	for _, p := range llm.InternalPurposes {
