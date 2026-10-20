@@ -67,6 +67,12 @@ type SQLiteRepositoryConfig struct {
 	Compactor MemoryCompactor
 	// CompressThreshold 触发压缩的预算占用比例（默认 0.85）。
 	CompressThreshold float64
+	// DedupTriggerNew 某 scope 未经去重检查的新条目达到该数量即触发增量去重
+	// （默认 DefaultDedupTriggerNew=8）；超出字符预算时只要有未检查条目也会触发。
+	DedupTriggerNew int
+	// DedupCooldown 同一 scope 两次自动去重的最小间隔（默认 5 分钟，持久化到
+	// memory_compact_states，重启不重置）。
+	DedupCooldown time.Duration
 }
 
 // DefaultSQLiteRepositoryConfig 返回默认配置。
@@ -75,6 +81,8 @@ func DefaultSQLiteRepositoryConfig() SQLiteRepositoryConfig {
 		MaxEntriesPerScope: 1000,
 		DefaultLimit:       10,
 		CompressThreshold:  0.85,
+		DedupTriggerNew:    DefaultDedupTriggerNew,
+		DedupCooldown:      DefaultDedupCooldown,
 	}
 }
 
@@ -126,6 +134,12 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 		}
 		if o.CompressThreshold > 0 && o.CompressThreshold <= 1.0 {
 			cfg.CompressThreshold = o.CompressThreshold
+		}
+		if o.DedupTriggerNew > 0 {
+			cfg.DedupTriggerNew = o.DedupTriggerNew
+		}
+		if o.DedupCooldown > 0 {
+			cfg.DedupCooldown = o.DedupCooldown
 		}
 	}
 	return &SQLiteRepository{
@@ -194,7 +208,7 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 
 	// 字符预算（按 window 派生）：超出阈值时异步触发语义压缩（压缩后入库），
 	// 取代简单的截断。渲染层仍保留截断作为兜底，但正常情况下存储已自行收敛。
-	if r.compactor != nil && r.window != nil {
+	if r.compactor != nil && !precheckedForDedup(entry) {
 		scope := entry.Scope
 		go func() {
 			cmpCtx, cancel := context.WithTimeout(context.Background(), compactionLLMTimeout)
@@ -287,7 +301,7 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 		defer cancel()
 		r.evictIfNeeded(evictCtx, scope)
 	}()
-	if r.compactor != nil && r.window != nil {
+	if r.compactor != nil && !precheckedForDedup(newEntry) {
 		go func() {
 			cmpCtx, cancel := context.WithTimeout(context.Background(), compactionLLMTimeout)
 			defer cancel()
@@ -583,34 +597,39 @@ func (r *SQLiteRepository) charBudget(scope memory.Scope) int {
 	return budgetChars
 }
 
-// maybeCompact 在 scope 字符数超过预算阈值时触发异步压缩。
+// maybeCompact 决定是否对 scope 发起一次（增量）记忆去重。
+//
+// 触发条件（任一满足，且 scope 内存在未检查条目）：
+//   - 未经去重检查的条目数 >= DedupTriggerNew；
+//   - 活跃字符数超过 window 派生预算 * CompressThreshold。
+//
+// 全部条目都已检查过时不再调用 LLM（此前超预算的 scope 每 5 分钟就把全部条目
+// 重新送一遍 LLM）。冷却持久化在 memory_compact_states，重启不重置。
 // 非阻塞调用方；内部已做并发重入保护与冷却，压缩失败不影响正常写入。
 func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope) {
-	budget := r.charBudget(scope)
-	if budget <= 0 {
-		// window 未注入 = 设计上的「不限制」，不是故障；
-		// 注入了却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
-		if r.window != nil {
+	unchecked, err := r.CountUncheckedDedup(ctx, scope)
+	if err != nil || unchecked == 0 {
+		return
+	}
+	trigger := r.config.DedupTriggerNew > 0 && unchecked >= r.config.DedupTriggerNew
+	if !trigger && r.window != nil {
+		budget := r.charBudget(scope)
+		if budget <= 0 {
+			// 注入了 window 却算出 0 预算 = 配置错误，必须告警（见 warnZeroBudget）。
 			r.warnZeroBudget(ctx, scope)
+		} else if total, err := r.totalChars(ctx, scope); err == nil {
+			trigger = total > int(float64(budget)*r.config.CompressThreshold)
 		}
-		return
 	}
-	total, err := r.totalChars(ctx, scope)
-	if err != nil {
-		return
-	}
-	threshold := int(float64(budget) * r.config.CompressThreshold)
-	if total <= threshold {
+	if !trigger {
 		return
 	}
 
 	key := scope.Key()
 
-	// 冷却：避免 LLM 无可合并项时每轮都打 LLM
-	if v, ok := r.lastCompact.Load(key); ok {
-		if t, ok := v.(time.Time); ok && time.Since(t) < compactCooldown {
-			return
-		}
+	// 冷却：避免每轮写入都打 LLM（持久化，重启不重置）
+	if t, ok := r.lastDedupRun(ctx, key); ok && time.Since(t) < r.config.DedupCooldown {
+		return
 	}
 
 	// 并发重入保护：同一 scope 压缩进行中则跳过
@@ -619,7 +638,7 @@ func (r *SQLiteRepository) maybeCompact(ctx context.Context, scope memory.Scope)
 	}
 	defer r.compacting.Delete(key)
 
-	r.lastCompact.Store(key, time.Now())
+	r.storeDedupRun(ctx, key, time.Now())
 
 	// 非致命：压缩失败不影响正常写入；渲染层仍有截断兜底
 	_ = r.compactor.CompactScope(ctx, scope)
@@ -873,7 +892,13 @@ func entryToModel(entry memory.Entry) dao.EntryModel {
 		}
 	}
 
+	var checked *time.Time
+	if precheckedForDedup(entry) {
+		now := time.Now()
+		checked = &now
+	}
 	return dao.EntryModel{
+		DedupCheckedAt: checked,
 		ID:             entry.ID,
 		ScopeKind:      string(entry.Scope.Kind),
 		ScopeID:        entry.Scope.ID,

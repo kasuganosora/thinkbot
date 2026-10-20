@@ -1208,3 +1208,8 @@ func toInt(v any) int {
 		return 0
 	}
 }
+
+// IsMirrorID reports whether id is a cross-channel mirror copy in the bot
+// scope (see mirrorChannelMemoryToBot). Mirrors repeat a channel entry 1:1,
+// so memory dedup skips them: the original is deduplicated in its own scope.
+func IsMirrorID(id string) bool { return strings.HasPrefix(id, crossChannelMirrorPrefix) }

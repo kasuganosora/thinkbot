@@ -1590,12 +1590,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
 		// 聚类合并输出上限跟随主模型配置（此前不发 max_tokens）。
-		MaxTokens: bundle.MainDef.MaxTokens,
-		Policy:    internalPol,
+		MaxTokens:              bundle.MainDef.MaxTokens,
+		Policy:                 internalPol,
+		NeighbourTopK:          s.storeInt(config.KeyMemoryDedupNeighbourK, storage.DefaultDedupNeighbourTopK),
+		NeighbourMinSimilarity: s.storeFloat(config.KeyMemoryDedupMinSimilarity, storage.DefaultDedupMinSimilarity),
+		MaxSeedsPerRun:         s.storeInt(config.KeyMemoryDedupMaxSeeds, storage.DefaultDedupMaxSeeds),
 	}, s.logger)
 	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
-		Window:    memWindow,
-		Compactor: memCompactor,
+		Window:          memWindow,
+		Compactor:       memCompactor,
+		DedupTriggerNew: s.storeInt(config.KeyMemoryDedupTriggerNew, storage.DefaultDedupTriggerNew),
+		DedupCooldown:   time.Duration(s.storeInt(config.KeyMemoryDedupCooldownMin, int(storage.DefaultDedupCooldown/time.Minute))) * time.Minute,
 	})
 	memCompactor.SetRepository(memRepo)
 	memCfg := memory.DefaultToolConfig(memRepo)
@@ -3994,4 +3999,20 @@ func workflowContinuationText(wf *workflow.Workflow) string {
 	}
 
 	return text
+}
+
+// storeInt reads an int setting (def when the store is absent or unset).
+func (s *BotService) storeInt(key string, def int) int {
+	if s.store == nil {
+		return def
+	}
+	return s.store.GetInt(key, def)
+}
+
+// storeFloat reads a float setting (def when the store is absent or unset).
+func (s *BotService) storeFloat(key string, def float64) float64 {
+	if s.store == nil {
+		return def
+	}
+	return s.store.GetFloat64(key, def)
 }
