@@ -20,7 +20,7 @@ import (
 //     with a global default (llm.internal_reasoning.default, default "auto");
 //   - max output tokens: the model's configured maxTokens, optionally lowered
 //     by llm.internal_max_tokens.<purpose> / .default (0 = model limit) and by
-//     a built-in purpose cap (memory_dedup: 4096).
+//     a built-in purpose cap (memory_dedup: 12288).
 //
 // Values of the reasoning setting:
 //   - "" / "auto": the built-in default of the purpose (judges/classifiers/
@@ -85,8 +85,11 @@ var InternalPurposes = []struct {
 
 // MemoryDedupDefaultMaxTokens is the built-in output cap (reasoning included)
 // of one memory_dedup call. Groups are 2-10 entries, so the JSON answer is
-// small; the cap bounds reasoning. A cut-off answer leaves the group unmerged.
-const MemoryDedupDefaultMaxTokens = 4096
+// small; the cap bounds reasoning. 12288 rather than 4096: GLM-5.3 serves the
+// medium default as high and reasoning tokens count against the cap (observed
+// ~11.9k output tokens/call). A cut-off answer leaves the group unmerged and is
+// counted in the memory_dedup_stats log line.
+const MemoryDedupDefaultMaxTokens = 12288
 
 // Reasoning setting values.
 const (

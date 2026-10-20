@@ -286,8 +286,20 @@ func (c *SQLiteCompactor) compactScope(ctx context.Context, scope memory.Scope) 
 		"archived", archivedTotal,
 		"precompressed_saved", savedTotal,
 		"duration", time.Since(start))
+	logDedupStats(c.logger)
 
 	return nil
+}
+
+// logDedupStats logs the cumulative dedup call counters (grep keyword
+// memory_dedup_stats; cut-off ratio = truncated_total / calls_total).
+func logDedupStats(logger *zap.SugaredLogger) {
+	calls, trunc := memory.DedupCallStats()
+	ratio := 0.0
+	if calls > 0 {
+		ratio = float64(trunc) / float64(calls)
+	}
+	logger.Infow("memory_dedup_stats", "calls_total", calls, "truncated_total", trunc, "truncated_ratio", ratio)
 }
 
 // vecNeighbours returns the active entries most similar to seed (memory_vec
