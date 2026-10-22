@@ -18,9 +18,11 @@ package wecom
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -43,8 +45,32 @@ const (
 	// defaultPlaceholderRefresh 占位的刷新间隔（见 Config.PlaceholderRefresh）。
 	defaultPlaceholderRefresh = 5 * time.Second
 
+	// defaultDeltaInterval 生成过程中增量内容的最小推送间隔
+	// （见 Config.StreamDeltaInterval）。
+	defaultDeltaInterval = 2 * time.Second
+
 	// streamPlaceholder 占位文案。
 	streamPlaceholder = "正在思考…"
+
+	// streamDraftSuffix 增量正文的尾标。
+	//
+	// 企微的流是**原位替换**，用户在气泡里看到文字一段段长出来，
+	// 没有尾标根本分不清「还在写」还是「已经写完了，就这么短」。
+	streamDraftSuffix = "\n\n（还在写…）"
+)
+
+// 看门狗参数。用 var 而不是 const：单测要把它们压到毫秒级，
+// 否则验证一次「轮次结束后确实退订」要等 6 秒。
+var (
+	// deltaLivenessInterval 检查「本轮还在不在跑」的间隔（见 feedStream 的看门狗）。
+	deltaLivenessInterval = 1 * time.Second
+
+	// deltaStartGrace 容忍「编排侧还没登记本轮」的时间。
+	//
+	// feedStream 起在 Ingress.Receive **之前**，那一瞬间 IsMessageActive 必然是
+	// false（还没登记）。没有这段宽限期的话，看门狗第一轮就把自己判成
+	// 「轮次已结束」退出了 —— 增量推送永远一条都推不出去。
+	deltaStartGrace = 5 * time.Second
 )
 
 // wecomStream 是一条进行中的流式消息。
@@ -63,10 +89,45 @@ type wecomStream struct {
 	content string
 	closed  bool
 
+	// fed 是否已推过**真实增量内容**（B 档）。
+	//
+	// ⚠️ 置位后占位刷新与占位推送都必须停手：那条「正在思考… 12s」
+	// 会把已经推上去的正文覆盖回占位文案，用户会看到内容倒退。
+	fed bool
+
 	// refreshed 已刷新占位的次数。只用于可观测性：成功刷新的日志
 	// 每流只留第一条，否则长任务会刷出一整屏。
 	refreshed int
+
+	// fakePush 单测用的推送出口替换。wsSession 依赖真实 WS 连接，
+	// 单测里构造不出来 —— 让流式逻辑（占位 / 增量 / 收尾）仍可被真实覆盖。
+	fakePush func(content string, finish bool) error
 }
+
+// push 推送一帧流式内容。**流式层唯一的出口**，替换 fakePush 即可单测。
+func (st *wecomStream) push(ctx context.Context, content string, finish bool) error {
+	if st.fakePush != nil {
+		return st.fakePush(content, finish)
+	}
+	if st.sess == nil {
+		return errors.New("wecom: stream has no session")
+	}
+	return st.sess.sendStream(ctx, st.reqID, st.streamID, content, finish)
+}
+
+// DeltaSourceFunc 订阅一条 trace 的**已清洗**文本增量（B 档：边生成边推）。
+//
+// 增量在 agent/stages/llmroute.go 里已串过 reply-control 过滤与出站清洗
+// （<think>/<internal> 块丢弃、<public> 标签剥离），**可以直接推给外部渠道**，
+// 无需在 channel 侧再洗一遍 —— 与 Web SSE 推给前端的是同一份。
+//
+// 由 api 层注入（与 fileSink 同构）：channel 包不该反向依赖 agent/outbound。
+//
+// 返回：增量通道（关闭 = 本轮生成结束）与退订函数；通道为 nil 表示不可用。
+type DeltaSourceFunc func(traceID string) (<-chan string, func())
+
+// SetDeltaSource 注入增量源（由 api 层在构建 channel 后调用）。
+func (c *WeComChannel) SetDeltaSource(fn DeltaSourceFunc) { c.deltaSrc = fn }
 
 // streamEnabled 是否启用流式回复。
 func (c *WeComChannel) streamEnabled() bool { return c.cfg.StreamReply }
@@ -90,6 +151,25 @@ func (c *WeComChannel) placeholderRefresh() time.Duration {
 		return c.cfg.PlaceholderRefresh
 	}
 	return defaultPlaceholderRefresh
+}
+
+// deltaInterval 增量内容的最小推送间隔；<0 表示关闭增量推送。
+func (c *WeComChannel) deltaInterval() time.Duration {
+	if c.cfg.StreamDeltaInterval != 0 {
+		return c.cfg.StreamDeltaInterval
+	}
+	return defaultDeltaInterval
+}
+
+// currentStream 取会话当前登记的流（不存在则 nil）。
+func (c *WeComChannel) currentStream(key string) *wecomStream {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	st, ok := c.streams[key]
+	if !ok || st == nil {
+		return nil
+	}
+	return st
 }
 
 // openStream 为一次入站回调登记一条潜在流。
@@ -124,7 +204,7 @@ func (c *WeComChannel) openStream(ctx context.Context, key, reqID, supersedeText
 		// 否则原样 finish —— 只把「正在思考…」定格，不留半截答案。
 		delete(c.streams, key)
 		c.streamMu.Unlock()
-		c.closeStream(ctx, old, supersedeText)
+		c.closeStream(ctx, old, supersedeTextFor(old, supersedeText))
 		c.streamMu.Lock()
 	}
 	c.streams[key] = st
@@ -133,17 +213,32 @@ func (c *WeComChannel) openStream(ctx context.Context, key, reqID, supersedeText
 	st.timer = time.AfterFunc(c.placeholderDelay(), func() { c.pushPlaceholder(key, st) })
 }
 
+// supersedeTextFor 旧流被新消息顶掉时，用什么内容收尾。
+//
+// ⚠️ 已经推过正文（fed）时**不能**只留打断提示：B 档之前气泡里只有「正在思考…」，
+// 换成提示无所谓；现在用户正在读那半截正文，抹掉它比留着更难接受 ——
+// 他正是因为看到内容才决定插话的。所以正文保留、提示**追加**在后面。
+// 没推过正文时照旧：只有一句占位的话，「（这条已被新消息打断）」信息量更大。
+func supersedeTextFor(old *wecomStream, supersedeText string) string {
+	if old == nil || !old.fed || old.content == "" || supersedeText == "" {
+		return supersedeText
+	}
+	return old.content + "\n\n" + supersedeText
+}
+
 // pushPlaceholder 延迟到点，推一条占位（finish=false）。
 func (c *WeComChannel) pushPlaceholder(key string, st *wecomStream) {
 	c.streamMu.Lock()
-	if cur, ok := c.streams[key]; !ok || cur != st || st.closed {
+	// ⚠️ fed 置位说明已经在推真实正文了 —— 这时再推占位会把正文覆盖回
+	// 「正在思考…」，用户看到内容倒退，比不推还糟。
+	if cur, ok := c.streams[key]; !ok || cur != st || st.closed || st.fed {
 		c.streamMu.Unlock()
-		return // 已被 finish / 已被更新的流顶掉 / 已停机
+		return // 已被 finish / 已被更新的流顶掉 / 已停机 / 已在推正文
 	}
 	c.streamMu.Unlock()
 
 	ctx := c.deliveryCtx(nil)
-	if err := st.sess.sendStream(ctx, st.reqID, st.streamID, streamPlaceholder, false); err != nil {
+	if err := st.push(ctx, streamPlaceholder, false); err != nil {
 		// 占位推失败不硬撑：摘掉这条流，最终回复会走整段 aibot_send_msg。
 		traceid.L(ctx).Warnw("wecom: stream placeholder failed, falling back to plain send",
 			"channel", c.name, "stream_id", st.streamID, "err", err)
@@ -201,7 +296,7 @@ func (c *WeComChannel) closeStream(ctx context.Context, st *wecomStream, text st
 	// 把内容推上去，再 finish=true 收尾，两步都落在实测过的路径上。
 	// 代价只有「快回复多一帧」，可忽略；换来的是这个分支零不确定性。
 	if firstPushOnFinish {
-		if err := st.sess.sendStream(ctx, st.reqID, st.streamID, text, false); err != nil {
+		if err := st.push(ctx, text, false); err != nil {
 			traceid.L(ctx).Warnw("wecom: stream first push failed, falling back to plain send",
 				"channel", c.name, "stream_id", st.streamID, "err", err)
 			return false
@@ -212,7 +307,7 @@ func (c *WeComChannel) closeStream(ctx context.Context, st *wecomStream, text st
 		c.streamMu.Unlock()
 	}
 
-	if err := st.sess.sendStream(ctx, st.reqID, st.streamID, text, true); err != nil {
+	if err := st.push(ctx, text, true); err != nil {
 		traceid.L(ctx).Warnw("wecom: stream finish failed, falling back to plain send",
 			"channel", c.name, "stream_id", st.streamID, "err", err)
 		return false
@@ -222,6 +317,195 @@ func (c *WeComChannel) closeStream(ctx context.Context, st *wecomStream, text st
 		// false = 回复太快，占位还没推就出结果了（已补一帧，见上）。
 		"placeholder_shown", !firstPushOnFinish)
 	return true
+}
+
+// pushStreamContent 往一条已登记的流推一次内容（finish=false，原位替换）。
+//
+// ⚠️ 只在 st 仍是**当前**流时推：本轮若已被新消息打断/顶替，再推就会
+// 把新轮次的占位覆盖成上一轮的残稿。
+//
+// ⚠️ draft 决定**推**出去的文本带不带「还在写…」尾标，但存档的 st.content
+// 永远是干净正文：兜底收尾（reapStreams / abortStreams）用的就是 st.content，
+// 把「还在写…」当最终内容定格，用户会看到一条**已经结束**的消息写着还在写。
+func (c *WeComChannel) pushStreamContent(ctx context.Context, key string, st *wecomStream, text string, draft bool) bool {
+	c.streamMu.Lock()
+	if cur, ok := c.streams[key]; !ok || cur != st || st.closed {
+		c.streamMu.Unlock()
+		return false
+	}
+	c.streamMu.Unlock()
+
+	display := text
+	if draft {
+		display += streamDraftSuffix
+	}
+	if err := st.push(ctx, display, false); err != nil {
+		traceid.L(ctx).Warnw("wecom: stream push failed",
+			"channel", c.name, "stream_id", st.streamID, "err", err)
+		return false
+	}
+	c.streamMu.Lock()
+	st.pushed = true
+	st.fed = true
+	st.content = text
+	c.streamMu.Unlock()
+	return true
+}
+
+// feedStream 订阅本轮的文本增量，边生成边往企微推（B 档）。
+//
+// 只有「正在思考…」是不够的：几十秒里用户根本不知道 bot 在往哪个方向写，
+// 等结果出来才发现跑偏 —— 那时再纠正已经白等一整轮。推增量让他能当场判断、
+// 当场发「停止」或补一句引导。
+//
+// ⚠️ 与占位刷新互斥：推过真实内容后（st.fed）占位就不再刷，否则内容会倒退。
+func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
+	if c.deltaSrc == nil || traceID == "" || !c.streamEnabled() {
+		return
+	}
+	gap := c.deltaInterval()
+	if gap < 0 {
+		return // 显式关闭增量推送
+	}
+
+	ch, stop := c.deltaSrc(traceID)
+	if ch == nil {
+		return
+	}
+	// ⚠️ 这个 defer 是**必须的**，不是洁癖：EventBus 的订阅只在 Unsubscribe /
+	// bus.Close 时才关，轮次结束**不会**关。而 stop() 是唯一会关 ch 的东西，
+	// 若只在「ch 被关」时返回，两者就互相等待 —— goroutine 与订阅双双永久泄漏。
+	// 订阅上限 1000（MaxSubscriptions），按每条入站消息漏一个的速度，
+	// 一千条消息后 Subscribe 会开始返回已关闭订阅 → **Web SSE 全线失效**。
+	defer stop()
+
+	start := time.Now()
+
+	var buf strings.Builder
+	last := time.Time{}
+	announced := false
+	deltas := 0 // 收到的增量条数
+	pushes := 0 // 实际推出去的帧数
+
+	// ⚠️ 收尾必须打一条总账：单次推送只在**首次成功**时留痕（否则长任务刷屏），
+	// 光看日志根本数不出推了几帧 —— 「增量到底推没推、推得够不够密」就全靠猜。
+	// 2026-10-22 真机就栽在这：日志只有一条 bytes=3，一度以为只推了一次。
+	defer func() {
+		traceid.L(ctx).Infow("wecom: stream delta feed ended",
+			"channel", c.name, "chat", key, "trace_id", traceID,
+			"deltas", deltas, "pushes", pushes, "bytes", buf.Len(),
+			"elapsed", time.Since(start).String())
+	}()
+
+	// mine 本轮**自己那条流**，首次 flush 时锁定，之后只往它推。
+	//
+	// ⚠️ 不能每次 flush 都去取「当前」流：旧轮被 abort 后它的 feedStream 还活着
+	// （IsMessageActive 要等 OnMessageDone 才转 false，实测可达数秒），
+	// 而新轮的流这时候已经开了 —— 每次取当前流的话，旧轮会把**上轮残稿**
+	// 推进新轮的流，把新轮刚推的「正在思考…」直接盖掉。
+	var mine *wecomStream
+	// detached 本轮的流已被顶掉/推不动了，再循环下去只会污染别人的流。
+	detached := false
+
+	flush := func(final bool) {
+		if buf.Len() == 0 {
+			return
+		}
+		if mine == nil {
+			mine = c.currentStream(key)
+			if mine == nil {
+				return // 本轮的流还没登记（极少见），攒着等下一批增量
+			}
+		}
+		text := buf.String()
+		if !c.pushStreamContent(ctx, key, mine, text, !final) {
+			// 推不动 = 流已被新轮顶掉，或推送失败。两种都不必再试：
+			// 继续循环只会把本轮残稿往**新**流上怼（见 mine 的注释）。
+			detached = true
+			return
+		}
+		// ⚠️ 首次成功的日志必须在**置位之前**取快照再判：
+		// 写成「flush 完再判 !announced」永远为假，这条日志一次也打不出来。
+		first := !announced
+		announced = true
+		last = time.Now()
+		pushes++
+		if final {
+			traceid.L(ctx).Infow("wecom: stream delta flushed at turn end",
+				"channel", c.name, "stream_id", mine.streamID, "bytes", len(text))
+		} else if first {
+			traceid.L(ctx).Infow("wecom: streaming partial content to user",
+				"channel", c.name, "chat", key, "stream_id", mine.streamID,
+				"trace_id", traceID, "bytes", len(text))
+		} else {
+			traceid.L(ctx).Debugw("wecom: stream delta pushed",
+				"channel", c.name, "stream_id", mine.streamID, "bytes", len(text))
+		}
+	}
+
+	// 存活看门狗：轮次一结束就退订（这是唯一可靠的结束信号）。
+	// 只靠 ctx 是不够的 —— 投递用的是 runCtx，它活到服务停机为止。
+	watch := time.NewTicker(deltaLivenessInterval)
+	defer watch.Stop()
+	deadline := start.Add(c.streamMaxAge())
+	sawActive := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-watch.C:
+			// 硬兜底：turnCtl 未注入（单测/裁剪部署）时看门狗永远判不出结束，
+			// 只剩 deadline 这一个出口。
+			if time.Now().After(deadline) {
+				flush(true)
+				return
+			}
+			if c.turnAlive(traceID) {
+				sawActive = true
+				continue
+			}
+			// 还没见过「在跑」就别急着退：本轮可能只是还没登记（见 deltaStartGrace）。
+			if !sawActive && time.Since(start) < deltaStartGrace {
+				continue
+			}
+			flush(true)
+			return
+		case d, ok := <-ch:
+			if !ok {
+				// 增量通道关闭 = 本轮生成结束：把尾巴推一次。最终回复随后还会
+				// finish 一次覆盖成完整版 —— 两次都在实测过的路径上。
+				flush(true)
+				return
+			}
+			buf.WriteString(d)
+			deltas++
+			if !sawActive {
+				sawActive = c.turnAlive(traceID)
+			}
+			// 节流：太频繁会把「原位替换」变成闪烁，也白耗推送额度。
+			// 2s 一次，53s 的一轮约 26 次 —— 远低于实测的 300 次/分钟。
+			if time.Since(last) < gap {
+				continue
+			}
+			flush(false)
+			if detached {
+				return
+			}
+		}
+	}
+}
+
+// turnAlive 编排侧是否仍在执行这一轮。
+//
+// 判不出来时（没注入控制器 / botID 为空）返回 true = 不干预，交给 deadline 兜底 ——
+// 宁可多等一会儿，也不能把还在生成的轮次提前判死、让增量推送半途断掉。
+func (c *WeComChannel) turnAlive(traceID string) bool {
+	ctl := c.turnCtl
+	if ctl == nil || c.botID == "" || traceID == "" {
+		return true
+	}
+	return ctl.IsMessageActive(c.botID, traceID)
 }
 
 // streamTickLoop 周期刷新占位（共享 ticker，随 Start/Stop 走）。
@@ -260,8 +544,9 @@ func (c *WeComChannel) refreshPlaceholders(ctx context.Context) {
 	c.streamMu.Lock()
 	due := make([]*wecomStream, 0, len(c.streams))
 	for _, st := range c.streams {
-		// 只刷「已经推过占位」的：还没推说明回复很快，刷它反而多余。
-		if st == nil || st.closed || !st.pushed {
+		// 只刷「已经推过占位、且还没开始推正文」的：
+		// 还没推占位说明回复很快，刷它多余；已在推正文的刷了会让内容倒退。
+		if st == nil || st.closed || !st.pushed || st.fed {
 			continue
 		}
 		due = append(due, st)
@@ -270,7 +555,7 @@ func (c *WeComChannel) refreshPlaceholders(ctx context.Context) {
 
 	for _, st := range due {
 		text := fmt.Sprintf("%s %ds", streamPlaceholder, int(now.Sub(st.started).Seconds()))
-		if err := st.sess.sendStream(ctx, st.reqID, st.streamID, text, false); err != nil {
+		if err := st.push(ctx, text, false); err != nil {
 			// 刷新失败不摘流：占位已经在那儿了，最终回复照样能 finish，
 			// 摘掉反而会让最终答案退化成整段发送（多一个气泡）。
 			traceid.L(ctx).Warnw("wecom: stream placeholder refresh failed",

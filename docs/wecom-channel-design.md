@@ -554,6 +554,9 @@ Ingress 缓冲打满，让 `deliver` 真的阻塞，把窗口放大成必现。
 1.5s 后才推「正在思考…」占位（`pushPlaceholder`）—— 快回复不推，避免「思考中」闪一下就被替换；
 pipeline 出结果后 `Send` 用 `finish=true` **原位替换**。任何一步失败都回退整段发送，**不会丢消息**。
 
+**B 档（边生成边推正文）见 §9.2.11** —— 只有占位是不够的：用户全程不知道 bot 在往哪个方向写，
+等最终结果出来才发现跑偏，那时白等一整轮。
+
 几个不显然的点：
 
 - **占位延迟是必要的**：实测 bot 单轮 17~20s，绝大多数场景都会落在占位之后；
@@ -619,6 +622,52 @@ pipeline 出结果后 `Send` 用 `finish=true` **原位替换**。任何一步�
 终止指令**整句完全匹配**才生效：「停一下再说」「请停止输出」都不是终止指令，
 否则用户一开口带「停」字就被掐断，体验灾难。内置词表见 `defaultStopCommands`，
 可用 `stopCommands` 追加。
+
+### 9.2.11 边生成边推正文（B 档，2026-10-22）
+
+**为什么必须做**：只有「正在思考…」时用户是**盲等**的。实测一轮 17~55s，
+期间完全不知道 bot 在往哪个方向写；等最终结果出来才发现方向错了，
+那时整轮已经白跑 —— 这正是「正在思考的时候我并不知道他想要说啥，
+只有看到输出的时候我才知道方向错了、想重新引导」这条反馈的根因。
+
+做法：订阅 EventBus 的 `llm.text_delta`（`agent/stages/llmroute.go` 发布），
+按 2s 节流把累积正文推给同一条流（`feedStream` → `pushStreamContent`）。
+
+| 项目 | 取值 / 结论 |
+| --- | --- |
+| 数据源 | `agent/outbound.MemoryEventBus` 的 `EventLLMTextDelta`，由 api 层注入（`SetDeltaSource`） |
+| 内容 | **已清洗**：串过 reply-control 过滤与出站清洗（`<think>`/`<internal>` 丢弃、`<public>` 剥标签），与 Web SSE 推给前端的是同一份，**channel 侧不用再洗** |
+| 节流 | `streamDeltaIntervalMs`，默认 2000；`<0` 关闭（退回纯占位） |
+| 尾标 | 增量一律带「（还在写…）」—— 原位替换下没有尾标分不清「还在写」还是「就写这么短」 |
+| 互斥 | 推过正文后（`st.fed`）占位刷新**必须停**，否则「正在思考… Ns」会把正文覆盖回去、内容倒退 |
+
+⚠️⚠️ **订阅泄漏（实现时踩到，必须留着看）**：`MemoryEventBus` 的订阅**只在
+`Unsubscribe` / `bus.Close` 时关闭**，轮次结束**不会**关。而 `feedStream` 阻塞在 `<-ch`
+上、`stop()` 又是 `defer` 的 —— 只靠「通道关闭」退出的话两者互相等待，
+**goroutine 与订阅双双永久泄漏**。订阅上限 `MaxSubscriptions=1000`，
+按每条入站消息漏一个的速度，一千条消息后 `Subscribe` 开始返回已关闭订阅
+→ **Web SSE 全线失效**。
+
+治理：`feedStream` 自带存活看门狗（1s 轮询 `IsMessageActive`），轮次一结束就退订；
+再加 `streamMaxAge` 硬兜底（`turnCtl` 未注入时的唯一出口）。
+回归测试 `TestFeedStream_UnsubscribesWhenTurnEnds` 用**永不关闭**的通道验证：
+去掉看门狗它会 2s 超时失败（已实测确认）。
+
+⚠️ **宽限期 `deltaStartGrace`（5s）不能省**：`feedStream` 起在 `Ingress.Receive`
+**之前**，那一瞬间 `IsMessageActive` 必然是 false（编排侧还没登记）。
+没有宽限期的话看门狗第一轮就把自己判成「轮次已结束」退出 —— 增量一条都推不出去。
+
+⚠️⚠️ **feedStream 必须锁定「自己那条流」（`mine`），不能每次 flush 都取当前流**：
+restart 策略下旧轮被 abort 后它自己的 feedStream 还活着（`IsMessageActive` 要等
+`OnMessageDone` 才转 false，可达数秒），而新轮的流这时已经开了 ——
+每次取当前流的话，旧轮会把**上轮残稿**推进新轮的流，把新轮刚推的「正在思考…」直接盖掉。
+修法：首次 flush 时锁定，之后只往它推；发现推不动（流被顶掉）就立即退出。
+回归测试 `TestFeedStream_DoesNotClobberNewerStream`。
+
+⚠️ **「（还在写…）」只是推送尾标，不能存进 `st.content`**：
+兜底收尾（`reapStreams` / `abortStreams`）用的正是 `st.content`，
+把它定格成最终内容的话，用户会看到一条**已经结束**的消息写着「还在写…」。
+所以 `pushStreamContent` 分开存（干净正文）与显（正文 + 尾标）。
 
 ### 9.3 真实回调样本
 

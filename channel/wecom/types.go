@@ -67,6 +67,16 @@ type Config struct {
 	// 快回复不推，避免「思考中」闪一下就被替换的劣质观感）。
 	PlaceholderDelay time.Duration
 
+	// StreamDeltaInterval 生成过程中**增量内容**的推送间隔，0 = 2s；<0 关闭增量推送。
+	//
+	// 为什么必须有：只有「正在思考…」的话，用户在长达几十秒的生成里
+	// **根本不知道 bot 在往哪个方向写**，等结果出来才发现跑偏 ——
+	// 那时再纠正已经白等一整轮。把增量推上去，用户能当场判断、当场引导。
+	//
+	// ⚠️ 推的是**已清洗**的增量（见 DeltaSourceFunc 的注释），不含思考块。
+	// ⚠️ 实测 respond 连推 13 次零失败、不占 30 条/分钟配额，2s 一次很安全。
+	StreamDeltaInterval time.Duration
+
 	// PlaceholderRefresh 占位的刷新间隔，0 = 5s；<0 关闭刷新。
 	//
 	// 必须刷新：一轮生成实测 17~55s，占位推出来后就一动不动，
