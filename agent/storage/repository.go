@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,7 +56,8 @@ var (
 // SQLiteRepositoryConfig 配置 SQLite 记忆仓储。
 type SQLiteRepositoryConfig struct {
 	// MaxEntriesPerScope 每个 scope 的最大记忆条目数（默认 1000）。
-	// 超过时按最旧淘汰。
+	// 超过时先删已归档条目，再压缩/淘汰最旧活跃条目；每日摘要不计数、不淘汰。
+	// 对应配置键 memory.max_entries_per_scope。
 	MaxEntriesPerScope int
 	// DefaultLimit 检索时的默认返回条数（默认 10）。
 	DefaultLimit int
@@ -74,12 +76,14 @@ type SQLiteRepositoryConfig struct {
 	// DedupCooldown 同一 scope 两次自动去重的最小间隔（默认 5 分钟，持久化到
 	// memory_compact_states，重启不重置）。
 	DedupCooldown time.Duration
+	// Logger 可选日志器（淘汰日志等）；nil 时静默。
+	Logger *zap.SugaredLogger
 }
 
 // DefaultSQLiteRepositoryConfig 返回默认配置。
 func DefaultSQLiteRepositoryConfig() SQLiteRepositoryConfig {
 	return SQLiteRepositoryConfig{
-		MaxEntriesPerScope: 1000,
+		MaxEntriesPerScope: DefaultMaxEntriesPerScope,
 		DefaultLimit:       10,
 		CompressThreshold:  0.85,
 		DedupTriggerNew:    DefaultDedupTriggerNew,
@@ -103,6 +107,7 @@ type SQLiteRepository struct {
 	// 压缩并发/冷却控制（零值即可用）
 	compacting  sync.Map // scope.Key() -> true（压缩进行中）
 	lastCompact sync.Map // scope.Key() -> time.Time（上次压缩时间，用于冷却）
+	evicting    sync.Map // scope.Key() -> true（淘汰进行中）
 
 	// budgetWarned 字符预算为 0 的告警只打一次。
 	// 预算是 window 级配置，每个 scope 都告警会刷屏。
@@ -141,6 +146,9 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 		}
 		if o.DedupCooldown > 0 {
 			cfg.DedupCooldown = o.DedupCooldown
+		}
+		if o.Logger != nil {
+			cfg.Logger = o.Logger
 		}
 	}
 	return &SQLiteRepository{
@@ -618,38 +626,125 @@ func (r *SQLiteRepository) Metrics() memory.RepositoryMetrics {
 // eviction
 // ============================================================================
 
-// evictIfNeeded 检查 scope 是否超出容量，超出时淘汰最旧条目。
+// evictWhereScope / evictArchived / evictDigest 是淘汰路径使用的 SQL 片段。
+// 每日摘要（source=daily_digest）永不淘汰、也不计入上限；
+// 已归档条目（已摘要/已压缩）优先淘汰；bot scope 中的 xch: 镜像优先于自有条目淘汰。
+const (
+	evictWhereScope   = "scope_kind = ? AND scope_id = ? AND (source IS NULL OR source <> ?)"
+	evictArchivedCond = "metadata_json IS NOT NULL AND metadata_json LIKE ?"
+	evictActiveCond   = "(metadata_json IS NULL OR metadata_json NOT LIKE ?)"
+	evictOrder        = "CASE WHEN id LIKE 'xch:%' THEN 0 ELSE 1 END, created_at ASC"
+	archivedLike      = "%\"archived\":true%"
+)
+
+// evictIfNeeded 检查 scope 是否超出容量，超出时按以下顺序淘汰：
+//  1. 每日摘要条目永不淘汰、不计数；
+//  2. 先删除已归档条目（已被摘要/压缩，内容已保留在摘要里）；
+//  3. 活跃条目仍超过上限时，先交给 Compactor 压缩（压缩后入库），
+//     压缩失败则保留并告警；未配置 Compactor 时退化为按最旧删除（带日志）。
+//
+// 上限按「非摘要条目总数」计算；活跃条目单独与上限比较，因此归档条目
+// 只在总数超限时被清理，不会挤占活跃条目的配额。
 func (r *SQLiteRepository) evictIfNeeded(ctx context.Context, scope memory.Scope) {
-	var count int64
-	if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
-		Count(&count).Error; err != nil {
+	key := scope.Key()
+	if _, busy := r.evicting.LoadOrStore(key, true); busy {
+		return // 同 scope 已有淘汰在进行，下一次写入会再次检查
+	}
+	defer r.evicting.Delete(key)
+
+	limit := r.config.MaxEntriesPerScope
+	if limit <= 0 {
+		return
+	}
+	base := func() *gorm.DB {
+		return r.db.WithContext(ctx).Model(&dao.EntryModel{}).
+			Where(evictWhereScope, string(scope.Kind), scope.ID, DailyDigestSource)
+	}
+
+	var total int64
+	if err := base().Count(&total).Error; err != nil {
 		return // DB 错误，跳过淘汰
 	}
-
-	if int(count) <= r.config.MaxEntriesPerScope {
+	if int(total) <= limit {
 		return
 	}
 
-	// 计算需要淘汰的数量
-	excess := int(count) - r.config.MaxEntriesPerScope
-
-	// 找出最旧的 N 条 ID
-	var oldIDs []string
-	if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
-		Order("created_at ASC").
-		Limit(excess).
-		Pluck("id", &oldIDs).Error; err != nil {
+	// 1) 已归档条目优先淘汰
+	excess := int(total) - limit
+	var archivedIDs []string
+	if err := base().Where(evictArchivedCond, archivedLike).
+		Order(evictOrder).Limit(excess).Pluck("id", &archivedIDs).Error; err != nil {
 		return
 	}
+	r.deleteEvicted(ctx, scope, archivedIDs, "archived")
 
-	if len(oldIDs) > 0 {
-		result := r.db.WithContext(ctx).Where("id IN ?", oldIDs).Delete(&dao.EntryModel{})
-		if result.RowsAffected > 0 {
-			r.entriesDeleted.Add(result.RowsAffected)
+	// 2) 活跃条目超限：先摘要（压缩），再淘汰
+	activeCount := func() (int, error) {
+		var n int64
+		err := base().Where(evictActiveCond, archivedLike).Count(&n).Error
+		return int(n), err
+	}
+	active, err := activeCount()
+	if err != nil || active <= limit {
+		return
+	}
+	if r.compactor != nil {
+		if cerr := r.compactor.CompactScope(ctx, scope); cerr != nil {
+			r.log().Warnw("memory eviction: compaction failed, keeping unarchived entries over cap",
+				"scope", key, "active", active, "cap", limit, "error", cerr)
+			return
+		}
+		// 压缩会归档来源条目；先清理新产生的归档条目
+		var n int64
+		if err := base().Count(&n).Error; err == nil && int(n) > limit {
+			var ids []string
+			if base().Where(evictArchivedCond, archivedLike).
+				Order(evictOrder).Limit(int(n)-limit).Pluck("id", &ids).Error == nil {
+				r.deleteEvicted(ctx, scope, ids, "archived")
+			}
+		}
+		if active, err = activeCount(); err != nil || active <= limit {
+			return
 		}
 	}
+	// 压缩后仍超限（或未配置 Compactor）：按最旧删除活跃条目（xch: 镜像优先）
+	var oldIDs []string
+	if err := base().Where(evictActiveCond, archivedLike).
+		Order(evictOrder).Limit(active-limit).Pluck("id", &oldIDs).Error; err != nil {
+		return
+	}
+	r.deleteEvicted(ctx, scope, oldIDs, "active")
+}
+
+// deleteEvicted 删除给定 id 并记录 Info 日志（scope、数量、类型、xch 镜像数）。
+func (r *SQLiteRepository) deleteEvicted(ctx context.Context, scope memory.Scope, ids []string, kind string) {
+	if len(ids) == 0 {
+		return
+	}
+	result := r.db.WithContext(ctx).Where("id IN ?", ids).Delete(&dao.EntryModel{})
+	if result.Error != nil {
+		r.log().Warnw("memory eviction: delete failed", "scope", scope.Key(), "kind", kind, "error", result.Error)
+		return
+	}
+	if result.RowsAffected > 0 {
+		r.entriesDeleted.Add(result.RowsAffected)
+	}
+	mirrors := 0
+	for _, id := range ids {
+		if strings.HasPrefix(id, "xch:") {
+			mirrors++
+		}
+	}
+	r.log().Infow("memory eviction",
+		"scope", scope.Key(), "kind", kind, "count", result.RowsAffected,
+		"xch_mirrors", mirrors, "own", len(ids)-mirrors, "cap", r.config.MaxEntriesPerScope)
+}
+
+func (r *SQLiteRepository) log() *zap.SugaredLogger {
+	if r.config.Logger != nil {
+		return r.config.Logger
+	}
+	return zap.NewNop().Sugar()
 }
 
 // ============================================================================
@@ -1032,3 +1127,6 @@ func (r *SQLiteRepository) FetchEntries(ctx context.Context, ids []string) ([]me
 	}
 	return out, nil
 }
+
+// DefaultMaxEntriesPerScope 每个 scope 默认的记忆条目上限（memory.max_entries_per_scope）。
+const DefaultMaxEntriesPerScope = 1000
