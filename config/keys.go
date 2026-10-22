@@ -257,6 +257,9 @@ const (
 	// separated channel IDs, e.g. "misskey:timeline"); empty = channel defaults,
 	// "none" = disable daily digests.
 	KeyMemoryListenScopes = "memory.listen_scopes"
+	// KeyMemoryMaxEntriesPerScope caps non-digest memory entries per scope (default 1000).
+	// Archived entries are evicted first; daily digests are never evicted.
+	KeyMemoryMaxEntriesPerScope = "memory.max_entries_per_scope"
 	// KeyMemoryDigestMaxChars bounds one daily digest (default 1500).
 	KeyMemoryDigestMaxChars = "memory.digest.max_chars"
 	// KeyMemoryDigestMaxInputChars bounds the notes of one digest call (default 24000).
