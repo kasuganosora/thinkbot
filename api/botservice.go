@@ -662,6 +662,22 @@ func (s *BotService) AbortMessage(botID, traceID string) bool {
 	return true
 }
 
+// IsMessageActive 这条 trace 是否仍在执行（未结束）。
+//
+// 供 Channel 层判定「本轮还在不在跑」（如企微的打断/补充/终止，见 channel/wecom/turn.go）。
+// ⚠️ 不能反过来用「出站是否发过消息」判断：pipeline 完全可能决定不回复（静默），
+// 那时根本不会有出站回调，轮次却早就结束了。
+func (s *BotService) IsMessageActive(botID, traceID string) bool {
+	if botID == "" || traceID == "" {
+		return false
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	_, ok := s.messageCancels[key]
+	s.mu.Unlock()
+	return ok
+}
+
 // ActiveMessageTraceIDs 返回指定 bot 当前仍在执行（未结束）的消息 traceID 列表。
 // 用于前端重连后恢复对「断连但后台仍运行」的任务的订阅与终止能力：
 // 用户关页面后后台长任务继续跑，其 cancel 仍注册在 messageCancels 中，直到消息真正完成
@@ -2502,6 +2518,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			}
 			return rel, nil
 		})
+
+		// 轮次控制：bot 正在输出时用户又发话，可以「打断旧轮 / 注入补充 / 文本终止」。
+		// 与 web 端同源（POST /api/chat/append、/api/chat/abort 就是这两个方法），
+		// 这里只是把同一个出口接给企微 —— 企微没有引用关系也没有中止按钮，
+		// 语义只能靠「本轮是否还在跑」来判（见 channel/wecom/turn.go）。
+		wc.SetTurnController(s)
 	}
 
 	// 注册 Channel 专属工具（每个 Channel 实现 ChannelToolProvider 接口）
@@ -3684,6 +3706,48 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 	if v, ok := raw["captionWindowMs"]; ok {
 		if n := toInt(v); n != 0 {
 			cfg.CaptionWindow = time.Duration(n) * time.Millisecond
+		}
+	}
+	// 流式回复：先推「正在思考…」，出结果后原位替换（docs §9.2.9）。
+	// 关掉则回到整段 aibot_send_msg。任何一步失败都会自动回退，不会丢消息。
+	if v, ok := raw["streamReply"]; ok {
+		if b, isBool := v.(bool); isBool {
+			cfg.StreamReply = b
+		}
+	}
+	if v, ok := raw["placeholderDelayMs"]; ok {
+		if n := toInt(v); n > 0 {
+			cfg.PlaceholderDelay = time.Duration(n) * time.Millisecond
+		}
+	}
+	// 轮次策略：bot 忙时新消息「打断旧轮」还是「注入当前轮」。
+	// 非法值一律回退到默认（restart），不报错 —— 这只是体验开关，不是功能开关。
+	if v, ok := raw["interruptPolicy"]; ok {
+		if s, isStr := v.(string); isStr {
+			switch strings.ToLower(strings.TrimSpace(s)) {
+			case wecom.InterruptRestart, wecom.InterruptAppend:
+				cfg.InterruptPolicy = strings.ToLower(strings.TrimSpace(s))
+			}
+		}
+	}
+	// 额外终止指令（在默认值之外追加，整句完全匹配才生效）。
+	if v, ok := raw["stopCommands"]; ok {
+		switch arr := v.(type) {
+		case []any:
+			for _, item := range arr {
+				if s, isStr := item.(string); isStr && strings.TrimSpace(s) != "" {
+					cfg.StopCommands = append(cfg.StopCommands, s)
+				}
+			}
+		case []string:
+			cfg.StopCommands = append(cfg.StopCommands, arr...)
+		case string:
+			// 表单里是逗号分隔的单行文本（registry 没有 list 类型）。
+			for _, s := range strings.Split(arr, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					cfg.StopCommands = append(cfg.StopCommands, s)
+				}
+			}
 		}
 	}
 

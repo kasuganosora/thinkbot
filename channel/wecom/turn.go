@@ -1,0 +1,273 @@
+package wecom
+
+// 轮次控制：bot 正在输出时，用户又发来消息，这条消息归谁？
+//
+// 企微没有「回复/引用某条消息」的引用关系，也没有现成的中止按钮，
+// 所以只能靠「本轮是否还在执行」这个状态来判定语义。三种动作：
+//
+//   - turnNew：开新一轮（若旧的还在跑，先打断它）。**默认策略** —— 聊天场景里
+//     用户连发两句通常是想另起话题，把两轮内容混在一起比丢掉补充更难受。
+//   - turnAppend：注入当前轮继续跑（Claude-CLI 风格）。由 `interruptPolicy=append` 开启。
+//   - turnStopped：文本终止指令，只打断、不开新轮。
+//
+// 能力与 web 端同源：`POST /api/chat/append` 与 `POST /api/chat/abort` 用的就是
+// BotService.AppendToMessage / AbortMessage，这里只是给企微接上同一个出口。
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/kasuganosora/thinkbot/util/traceid"
+)
+
+// TurnController 由 api 层注入的轮次控制能力（照 fileSink 的注入方式）。
+//
+// 抽成接口而不是直接依赖 *api.BotService：channel 包不该反向依赖 api 包，
+// 单测里也能塞一个假的。
+type TurnController interface {
+	// AbortMessage 取消一条正在执行的消息。false = 未命中（已结束或不存在）。
+	AbortMessage(botID, traceID string) bool
+	// AppendToMessage 把用户补充注入正在执行的那一轮。false = 本轮已结束。
+	AppendToMessage(botID, traceID, text string) bool
+	// IsMessageActive 这条 trace 是否仍在执行。
+	//
+	// ⚠️ 轮次**不能**靠「出站 Send 来过」就摘掉：core.Action 不带 TraceID，
+	// 出站侧认不出自己在服务哪一輪；更要命的是 pipeline 完全可能决定不回复
+	// （静默 / 被抑制 / 出错），那时根本不会有 Send 回调。
+	// 所以「本轮还在不在跑」必须以**编排侧**为准。
+	IsMessageActive(botID, traceID string) bool
+}
+
+// SetTurnController 注入轮次控制器（由 api 层在建好 channel 后调用）。
+func (c *WeComChannel) SetTurnController(tc TurnController) { c.turnCtl = tc }
+
+// 轮次策略取值（Config.InterruptPolicy）。
+const (
+	// InterruptRestart bot 忙时新消息 = 打断旧轮 + 开新一轮（默认）。
+	InterruptRestart = "restart"
+	// InterruptAppend bot 忙时新消息 = 注入当前轮继续跑。
+	InterruptAppend = "append"
+)
+
+// defaultStopCommands 终止指令词表。
+//
+// ⚠️ 必须**整句完全匹配**才生效：「停止一下再说」不是终止指令，
+// 否则用户一开口说「停」字就被掐断，体验灾难。
+var defaultStopCommands = []string{
+	"停止", "停下", "停", "别说了", "别讲了", "打住", "取消", "终止", "闭嘴",
+	"stop", "cancel", "abort", "halt",
+}
+
+// activeTurn 一个正在执行的轮次。
+type activeTurn struct {
+	traceID string
+	started time.Time
+}
+
+// turnAction 一条新入站消息的归属判定结果。
+type turnAction int
+
+const (
+	// turnNew 开新一轮（必要时先打断旧的）。
+	turnNew turnAction = iota
+	// turnAppend 已注入当前轮，调用方**不要**再投递入站。
+	turnAppend
+	// turnStopped 已终止当前轮，调用方**不要**再投递入站。
+	turnStopped
+)
+
+// normalizeCommand 归一化：去空白、去尾部标点、小写。
+// 「停止。」「Stop!」「 停止 」应等价。
+func normalizeCommand(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimRight(s, "。.!！?？~～ \t")
+	return strings.TrimSpace(s)
+}
+
+// isStopCommand 判断一条文本是不是终止指令。
+func isStopCommand(text string, extra []string) bool {
+	cmd := normalizeCommand(text)
+	if cmd == "" {
+		return false
+	}
+	for _, w := range defaultStopCommands {
+		if cmd == w {
+			return true
+		}
+	}
+	for _, w := range extra {
+		if cmd == normalizeCommand(w) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveTurn 判定这条消息的归属，并返回一个应绑定给它的 traceID。
+//
+// 返回的 traceID 必须写进 msg.TraceID：channel 自己生成它，
+// 后续才能拿它去 Abort / Append（Ingress.Receive 会保留已设值，不会覆盖）。
+//
+// ⚠️ 打断/终止都会顺带收尾旧流：pipeline 被 ctx cancel 后不会再有 Send 回调，
+// 那条「正在思考…」若没人 finish 会一直挂到服务端 10 分钟兜底。
+func (c *WeComChannel) resolveTurn(ctx context.Context, key, text string) (turnAction, string) {
+	ctl := c.turnCtl
+	c.turnMu.Lock()
+	cur := c.active[key]
+	c.turnMu.Unlock()
+
+	// 没有在跑的轮次：一切都从简（「停止」也只是句普通话，交给 LLM 理解）。
+	// 仍要返回 traceID：调用方会把它写进 msg.TraceID 并登记新轮次。
+	if cur == nil || ctl == nil {
+		return turnNew, traceid.New()
+	}
+
+	// ⚠️ 僵尸轮次：编排侧早已结束（静默 / 出错 / 压根没起），只是活跃表还没摘。
+	// 不判这一条的话，「停止」会打一行日志然后什么也没停，
+	// 普通消息也会被误当成打断、白白推一条「（这条已被新消息打断）」。
+	if !ctl.IsMessageActive(c.botID, cur.traceID) {
+		c.clearTurn(key, cur.traceID)
+		return turnNew, traceid.New()
+	}
+
+	// 1) 文本终止指令：只打断，不开新轮。
+	if isStopCommand(text, c.cfg.StopCommands) {
+		if ctl.AbortMessage(c.botID, cur.traceID) {
+			traceid.L(ctx).Infow("wecom: turn aborted by stop command",
+				"channel", c.name, "chat", key, "trace_id", cur.traceID)
+			c.clearTurn(key, cur.traceID)
+			c.finishStream(ctx, key, "已停止。")
+		} else {
+			// 本轮其实已经结束了，只是活跃表还没摘 —— 清掉即可，别误报。
+			c.clearTurn(key, cur.traceID)
+		}
+		return turnStopped, ""
+	}
+
+	// 2) append 策略：注入当前轮。
+	if strings.EqualFold(c.cfg.InterruptPolicy, InterruptAppend) {
+		if ctl.AppendToMessage(c.botID, cur.traceID, text) {
+			traceid.L(ctx).Infow("wecom: user supplement injected into running turn",
+				"channel", c.name, "chat", key, "trace_id", cur.traceID,
+				"text_len", len(text))
+			return turnAppend, ""
+		}
+		// 本轮已结束 → 退化成新一轮（下面照常走）。
+		c.clearTurn(key, cur.traceID)
+		return turnNew, traceid.New()
+	}
+
+	// 3) 默认 restart：打断旧轮，开新一轮。
+	//
+	// ⚠️ **不要**在这里 finishStream：旧流已由 openStream 用 turnInterruptText
+	// 收尾（见 handleMsgCallback）。此时表里的流是**新消息自己那条**，
+	// 在这里 finish 会把新轮次的流也吃掉，最终答案只能退化成整段发送。
+	if ctl.AbortMessage(c.botID, cur.traceID) {
+		traceid.L(ctx).Infow("wecom: previous turn interrupted by new message",
+			"channel", c.name, "chat", key, "trace_id", cur.traceID)
+	}
+	c.clearTurn(key, cur.traceID)
+	return turnNew, traceid.New()
+}
+
+// beginTurn 登记一个新轮次。
+//
+// ⚠️ turnCtl 为 nil 时不登记：没人能 abort/append 它，登记了只会让后来的消息
+// 被判成「打断一个其实打不断的轮次」，白白多走一次 Abort 调用。
+func (c *WeComChannel) beginTurn(key, traceID string) {
+	if key == "" || traceID == "" || c.turnCtl == nil {
+		return
+	}
+	c.turnMu.Lock()
+	if c.active == nil {
+		c.active = make(map[string]*activeTurn)
+	}
+	c.active[key] = &activeTurn{traceID: traceID, started: time.Now()}
+	c.turnMu.Unlock()
+}
+
+// turnInterruptText 旧轮被新消息打断时，旧流收尾用的文案。
+const turnInterruptText = "（这条已被新消息打断）"
+
+// startsNewTurn 这条消息会不会起一个新轮次（**无副作用**的预判）。
+//
+// 供入站路径决定要不要为它开流：终止指令要复用旧流（finish 时原位替换成
+// 「已停止。」），append 补充压根不该有新气泡，只有 restart 才真的需要新流。
+func (c *WeComChannel) startsNewTurn(key, text string) bool {
+	if !c.turnRunning(key) {
+		return true
+	}
+	if isStopCommand(text, c.cfg.StopCommands) {
+		return false
+	}
+	return !strings.EqualFold(c.cfg.InterruptPolicy, InterruptAppend)
+}
+
+// holdWorthy 这条裸文本值不值得进配文合并窗口。
+//
+// ⚠️ bot 正忙着时**不要**暂存：用户的打断/补充必须立刻生效，
+// 再等 3s 合并窗口，用户早就把「停止」发了三遍了。
+// ⚠️ 终止指令同理，它应该是即时的。
+func (c *WeComChannel) holdWorthy(key, text string) bool {
+	if isStopCommand(text, c.cfg.StopCommands) {
+		return false
+	}
+	return !c.turnRunning(key)
+}
+
+// turnRunning 该会话是否真有一个**正在执行**的轮次。
+//
+// ⚠️ 不能只查活跃表：轮次结束没有统一回调点（pipeline 静默时连 Send 都没有），
+// 表里留下的僵尸项会让后续消息一律被判成「打断一个已经结束的轮次」。
+// 所以最终以编排侧为准（见 TurnController.IsMessageActive 的注释）。
+func (c *WeComChannel) turnRunning(key string) bool {
+	ctl := c.turnCtl
+	if ctl == nil {
+		return false
+	}
+	c.turnMu.Lock()
+	cur := c.active[key]
+	c.turnMu.Unlock()
+	if cur == nil {
+		return false
+	}
+	return ctl.IsMessageActive(c.botID, cur.traceID)
+}
+
+// hasActiveTurn 活跃表里是否有该会话的登记项（**不**判断是否还在跑）。
+// 只供单测与 reapTurns 之类的内部维护用；业务判定一律走 turnRunning。
+func (c *WeComChannel) hasActiveTurn(key string) bool {
+	c.turnMu.Lock()
+	_, ok := c.active[key]
+	c.turnMu.Unlock()
+	return ok
+}
+
+// clearTurn 摘除轮次（只在 traceID 对得上时摘，避免误摘新轮）。
+func (c *WeComChannel) clearTurn(key, traceID string) {
+	c.turnMu.Lock()
+	if cur, ok := c.active[key]; ok && (traceID == "" || cur.traceID == traceID) {
+		delete(c.active, key)
+	}
+	c.turnMu.Unlock()
+}
+
+// reapTurns 收尾长时间未摘除的轮次（cleanupLoop 调用）。
+//
+// 轮次主要靠 Send 成功/失败回调摘除，但 pipeline 静默（决定不回复）时没人摘，
+// 留着会让后来的消息一律被判成「打断」。
+func (c *WeComChannel) reapTurns(ctx context.Context) {
+	maxAge := c.streamMaxAge()
+	now := time.Now()
+	c.turnMu.Lock()
+	for k, t := range c.active {
+		if t == nil || now.Sub(t.started) < maxAge {
+			continue
+		}
+		delete(c.active, k)
+		traceid.L(ctx).Warnw("wecom: stale turn reaped",
+			"channel", c.name, "chat", k, "trace_id", t.traceID, "age", now.Sub(t.started).String())
+	}
+	c.turnMu.Unlock()
+}
