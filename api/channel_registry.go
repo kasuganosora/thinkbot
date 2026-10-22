@@ -177,11 +177,12 @@ var supportedChannelTypes = []ChannelTypeInfo{
 				Key:   "interruptPolicy",
 				Label: "忙时新消息的处理",
 				Type:  "string",
-				// 默认 restart：聊天里连发两句通常是想另起话题，
-				// 把两轮内容混在一条回复里比丢掉补充更难受。
-				// 无论哪种，「停止」这类终止指令都只打断、不开新轮。
-				Default:  "restart",
-				HelpText: "restart（默认）= 打断旧回复、就新消息另起一轮；append = 把新消息塞进正在跑的那一轮继续跑",
+				// 默认 append：把新消息塞进正在跑的那一轮继续跑。
+				// ⚠️ 代价：当前这轮会**照旧跑完**再带着补充重跑一次
+				// （补充只在一步生成结束后才被注入），长任务耗时接近翻倍。
+				// 想立刻掐断就填 restart；无论哪种，「停止」都只打断、不开新轮。
+				Default:  "append",
+				HelpText: "append（默认）= 塞进正在跑的那一轮继续跑（当前这轮会跑完再重跑，长任务耗时接近翻倍）；restart = 立刻打断旧回复、就新消息另起一轮",
 			},
 			{
 				Key:   "stopCommands",

@@ -576,12 +576,28 @@ pipeline 出结果后 `Send` 用 `finish=true` **原位替换**。任何一步�
 | 动作 | 触发条件 | 行为 |
 | --- | --- | --- |
 | `turnNew` | 无在跑轮次 / 僵尸轮次 | 起新一轮 |
-| `turnNew`（restart） | 有在跑轮次，默认策略 | 打断旧轮 + 起新一轮 |
-| `turnAppend` | 有在跑轮次 + `interruptPolicy=append` | 注入当前轮继续跑 |
+| `turnAppend` | 有在跑轮次，**默认策略** | 注入当前轮继续跑 |
+| `turnNew`（restart） | 有在跑轮次 + `interruptPolicy=restart` | 打断旧轮 + 起新一轮 |
 | `turnStopped` | 有在跑轮次 + 文本终止指令 | 只打断，不起新轮 |
 
-默认取 **restart**：聊天场景里连发两句通常是想另起话题，
-把两轮内容混在一条回复里比丢掉补充更难受。终止指令无论哪种策略都只打断。
+默认取 **append**（塞进正在跑的那一轮）。终止指令无论哪种策略都只打断。
+
+⚠️⚠️ **append 的两个代价，选它之前必须知道**：
+
+1. **耗时接近翻倍**。补充只在「一步生成结束后」才被编排层取走
+   （`llm.drainInterruptMessages`，只在 step 边界调用），
+   当前这轮会**照旧跑完**、再带着补充重跑一次。
+   实测一轮 53s 的场景下，append 总耗时约 100s，restart 约 70s
+   （restart 立即掐断，只浪费已跑掉的那一段）。
+2. **存在「注入成功但没人消费」的窗口**。同上，最后一次取用之后
+   本轮才真正结束的话，补充就静静躺在通道里被丢弃。
+   实测该窗口约 0.7s（生成完成 → 出站 → 笔记落库 → `OnMessageDone`）。
+   治理：`BotService.UnregisterMessageInterrupt` 注销前把**没被取走**的
+   补充留进 `messageAppends`，`TakeUnconsumedAppends` 取回；
+   Channel 侧 `watchAppend` 等本轮**确实结束**后再判定 ——
+   取回有内容就退化成新一轮，取回为空说明已被消费、什么都不做。
+   ⚠️ 本轮**仍在跑**时绝不能取（那些内容马上会被消费，
+   取走再开一轮就是重复处理，用户会收到两条回复）。
 
 ⚠️⚠️ **「本轮还在不在跑」必须以编排侧为准**（`TurnController.IsMessageActive`），
 不能靠「出站 Send 来过就摘掉」：

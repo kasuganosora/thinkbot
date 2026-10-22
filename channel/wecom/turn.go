@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -38,6 +39,12 @@ type TurnController interface {
 	// （静默 / 被抑制 / 出错），那时根本不会有 Send 回调。
 	// 所以「本轮还在不在跑」必须以**编排侧**为准。
 	IsMessageActive(botID, traceID string) bool
+	// TakeUnconsumedAppends 取回注入成功但**没被编排层消费**的补充。
+	//
+	// 「AppendToMessage 返回 true」只说明投递进了通道，不说明被取走
+	// （编排层只在一步生成结束后取一次）。本轮随即结束时这些补充没人管，
+	// 调用方必须兜底成一次新的入站消息。
+	TakeUnconsumedAppends(botID, traceID string) []string
 }
 
 // SetTurnController 注入轮次控制器（由 api 层在建好 channel 后调用）。
@@ -152,20 +159,23 @@ func (c *WeComChannel) resolveTurn(ctx context.Context, key, text string) (turnA
 		return turnStopped, ""
 	}
 
-	// 2) append 策略：注入当前轮。
-	if strings.EqualFold(c.cfg.InterruptPolicy, InterruptAppend) {
+	// 2) 默认 append：注入当前轮，让它带着补充继续跑。
+	//
+	// ⚠️ 返回的是**当前轮**的 traceID，不是新的 —— 调用方要用它去兜底
+	// 「注入成功但没被消费」（见 watchAppend）。
+	if !strings.EqualFold(c.cfg.InterruptPolicy, InterruptRestart) {
 		if ctl.AppendToMessage(c.botID, cur.traceID, text) {
 			traceid.L(ctx).Infow("wecom: user supplement injected into running turn",
 				"channel", c.name, "chat", key, "trace_id", cur.traceID,
 				"text_len", len(text))
-			return turnAppend, ""
+			return turnAppend, cur.traceID
 		}
 		// 本轮已结束 → 退化成新一轮（下面照常走）。
 		c.clearTurn(key, cur.traceID)
 		return turnNew, traceid.New()
 	}
 
-	// 3) 默认 restart：打断旧轮，开新一轮。
+	// 3) restart：打断旧轮，开新一轮。
 	//
 	// ⚠️ **不要**在这里 finishStream：旧流已由 openStream 用 turnInterruptText
 	// 收尾（见 handleMsgCallback）。此时表里的流是**新消息自己那条**，
@@ -198,6 +208,9 @@ func (c *WeComChannel) beginTurn(key, traceID string) {
 // turnInterruptText 旧轮被新消息打断时，旧流收尾用的文案。
 const turnInterruptText = "（这条已被新消息打断）"
 
+// appendWatchInterval 兜底 watcher 的轮询间隔（见 watchAppend）。
+const appendWatchInterval = 250 * time.Millisecond
+
 // startsNewTurn 这条消息会不会起一个新轮次（**无副作用**的预判）。
 //
 // 供入站路径决定要不要为它开流：终止指令要复用旧流（finish 时原位替换成
@@ -209,7 +222,7 @@ func (c *WeComChannel) startsNewTurn(key, text string) bool {
 	if isStopCommand(text, c.cfg.StopCommands) {
 		return false
 	}
-	return !strings.EqualFold(c.cfg.InterruptPolicy, InterruptAppend)
+	return strings.EqualFold(c.cfg.InterruptPolicy, InterruptRestart)
 }
 
 // holdWorthy 这条裸文本值不值得进配文合并窗口。
@@ -259,6 +272,61 @@ func (c *WeComChannel) clearTurn(key, traceID string) {
 		delete(c.active, key)
 	}
 	c.turnMu.Unlock()
+}
+
+// watchAppend 兜底「注入成功但没被消费」的补充（append 策略专用）。
+//
+// ⚠️ AppendToMessage 返回 true 只说明进了通道，编排层**只在一部生成结束后**
+// 取一次（drainInterruptMessages）。若那一轮的取用已经跑过、本轮随即结束，
+// 这条补充就没人管了 —— 实测窗口约 0.7s（生成完成 → 出站 → 笔记落库 →
+// OnMessageDone）。丢了是静默的，用户只会觉得「bot 没理我」。
+//
+// 判定方式不做猜测：等到本轮**确实结束**后去 TakeUnconsumedAppends，
+// 取回来有内容 = 没被消费（通道已被编排层取空则返回空）。
+func (c *WeComChannel) watchAppend(ctx context.Context, msg core.Message, traceID string) {
+	ctl := c.turnCtl
+	if ctl == nil || traceID == "" {
+		return
+	}
+	deadline := time.Now().Add(c.streamMaxAge())
+	ended := false
+	for time.Now().Before(deadline) {
+		if c.isStopped() {
+			return // 停机中：不做兜底，避免往正在关闭的 pipeline 里塞消息
+		}
+		if !ctl.IsMessageActive(c.botID, traceID) {
+			ended = true
+			break
+		}
+		time.Sleep(appendWatchInterval)
+	}
+	// ⚠️ 超时且本轮仍在跑：**绝对不能**取 —— 那些补充马上会被消费，
+	// 取走再开一轮就是重复处理（用户会收到两条回复）。
+	if !ended {
+		return
+	}
+
+	left := ctl.TakeUnconsumedAppends(c.botID, traceID)
+	if len(left) == 0 {
+		return // 已被编排层取走，正常路径
+	}
+	supplement := strings.Join(left, "\n")
+	traceid.L(ctx).Warnw("wecom: supplement was never consumed, falling back to a new turn",
+		"channel", c.name, "chat", msg.Channel, "trace_id", traceID,
+		"text", strutil.Truncate(supplement, 60))
+
+	msg.Text = supplement
+	msg.TraceID = traceid.New()
+	ing := c.getIngress()
+	if ing == nil {
+		return
+	}
+	c.beginTurn(msg.Channel, msg.TraceID)
+	if err := ing.Receive(c.deliveryCtx(ctx), msg); err != nil {
+		traceid.L(ctx).Warnw("wecom: append fallback delivery failed",
+			"channel", c.name, "trace_id", msg.TraceID, "err", err)
+		c.clearTurn(msg.Channel, msg.TraceID)
+	}
 }
 
 // reapTurns 收尾长时间未摘除的轮次（cleanupLoop 调用）。

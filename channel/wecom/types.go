@@ -80,11 +80,12 @@ type Config struct {
 	StreamMaxAge time.Duration
 
 	// InterruptPolicy bot 正在输出时，用户又发来一条，这条归谁？
-	//   - "" / "restart"（默认）：打断旧轮 + 开新一轮。
-	//   - "append"：注入正在跑的那一轮，让它带着补充继续跑。
+	//   - "" / "append"（默认）：注入正在跑的那一轮，让它带着补充继续跑。
+	//   - "restart"：打断旧轮 + 开新一轮。
 	//
-	// 默认取 restart：聊天场景里连发两句通常是想另起话题，
-	// 把两轮内容混在一条回复里，比丢掉补充更难受。
+	// ⚠️ 默认 append 的**代价**：补充只在「一步生成结束后」才被编排层取走
+	// （drainInterruptMessages），当前这轮会照旧跑完、再带着补充重跑一次 ——
+	// 长任务总耗时接近翻倍。想立刻掐断就填 restart。
 	// 无论哪种策略，「停止」这类终止指令都只打断、不开新轮（见 turn.go）。
 	InterruptPolicy string
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -19,10 +20,12 @@ type fakeTurnCtl struct {
 	appendOK bool
 	// live 当前仍被视为「在执行中」的 trace 集合。
 	live map[string]bool
+	// unconsumed 本轮结束时仍未被编排层取走的补充。
+	unconsumed map[string][]string
 }
 
 func newFakeTurnCtl() *fakeTurnCtl {
-	return &fakeTurnCtl{abortOK: true, appendOK: true, live: map[string]bool{}}
+	return &fakeTurnCtl{abortOK: true, appendOK: true, live: map[string]bool{}, unconsumed: map[string][]string{}}
 }
 
 func (f *fakeTurnCtl) AbortMessage(_, traceID string) bool {
@@ -43,6 +46,21 @@ func (f *fakeTurnCtl) IsMessageActive(_, traceID string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.live[traceID]
+}
+
+// leftover 模拟「本轮结束时还没被取走」的补充。
+func (f *fakeTurnCtl) leftover(traceID string, texts ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unconsumed[traceID] = append(f.unconsumed[traceID], texts...)
+}
+
+func (f *fakeTurnCtl) TakeUnconsumedAppends(_, traceID string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.unconsumed[traceID]
+	delete(f.unconsumed, traceID)
+	return out
 }
 
 // markLive 标记一条 trace 正在执行。
@@ -164,8 +182,9 @@ func TestResolveTurn_AppendPolicyInjects(t *testing.T) {
 	if action != turnAppend {
 		t.Fatalf("action = %v, want turnAppend", action)
 	}
-	if tid != "" {
-		t.Errorf("traceID = %q, want empty", tid)
+	// ⚠️ 必须回传**当前轮**的 traceID：调用方要拿它去兜底「注入成功但没被消费」。
+	if tid != "T-old" {
+		t.Errorf("traceID = %q, want the running turn's T-old", tid)
 	}
 	if ctl.abortCount() != 0 {
 		t.Errorf("abort called %d times, want 0", ctl.abortCount())
@@ -199,26 +218,49 @@ func TestResolveTurn_AppendFallsBackToNewTurn(t *testing.T) {
 	}
 }
 
-func TestResolveTurn_RestartIsDefault(t *testing.T) {
-	for _, policy := range []string{"", "restart", "unknown-policy"} {
+// TestResolveTurn_AppendIsDefault 默认策略是 append：
+// bot 忙时的新消息注入当前轮继续跑，不打断。
+func TestResolveTurn_AppendIsDefault(t *testing.T) {
+	for _, policy := range []string{"", "append", "unknown-policy"} {
 		ctl := newFakeTurnCtl()
 		c := newTurnTestChannel(ctl, policy)
 		beginLiveTurn(c, ctl, "wecom:dm:u1", "T-old")
 
-		action, tid := c.resolveTurn(context.Background(), "wecom:dm:u1", "换个话题")
-		if action != turnNew {
-			t.Fatalf("policy %q: action = %v, want turnNew", policy, action)
+		action, tid := c.resolveTurn(context.Background(), "wecom:dm:u1", "再查下天气")
+		if action != turnAppend {
+			t.Fatalf("policy %q: action = %v, want turnAppend", policy, action)
 		}
-		if !traceid.IsValid(tid) {
-			t.Fatalf("policy %q: traceID = %q", policy, tid)
+		// ⚠️ 必须回传**当前轮**的 traceID，调用方要拿它去兜底「没被消费」。
+		if tid != "T-old" {
+			t.Errorf("policy %q: traceID = %q, want the running turn's T-old", policy, tid)
 		}
-		if ctl.abortCount() != 1 {
-			t.Errorf("policy %q: abort called %d times, want 1", policy, ctl.abortCount())
+		if ctl.abortCount() != 0 {
+			t.Errorf("policy %q: append must not abort, got %d", policy, ctl.abortCount())
 		}
-		// ⚠️ 打断后必须摘掉旧轮：留着会让再下一条消息又去 abort 同一个 traceID。
-		if c.hasActiveTurn("wecom:dm:u1") {
-			t.Errorf("policy %q: old turn must be cleared", policy)
+		if !c.hasActiveTurn("wecom:dm:u1") {
+			t.Errorf("policy %q: the running turn must stay registered", policy)
 		}
+	}
+}
+
+func TestResolveTurn_RestartRequiresExplicitPolicy(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, InterruptRestart)
+	beginLiveTurn(c, ctl, "wecom:dm:u1", "T-old")
+
+	action, tid := c.resolveTurn(context.Background(), "wecom:dm:u1", "换个话题")
+	if action != turnNew {
+		t.Fatalf("action = %v, want turnNew", action)
+	}
+	if !traceid.IsValid(tid) {
+		t.Fatalf("traceID = %q, want a valid one", tid)
+	}
+	if ctl.abortCount() != 1 {
+		t.Errorf("abort called %d times, want 1", ctl.abortCount())
+	}
+	// ⚠️ 打断后必须摘掉旧轮：留着会让再下一条消息又去 abort 同一个 traceID。
+	if c.hasActiveTurn("wecom:dm:u1") {
+		t.Error("old turn must be cleared")
 	}
 }
 
@@ -234,15 +276,15 @@ func TestStartsNewTurn_GuardsStreamOpening(t *testing.T) {
 	if c.startsNewTurn("k", "停止") {
 		t.Error("stop command with active turn: must NOT open a new stream")
 	}
-	// 有活跃轮次 + restart → 开新流
-	if !c.startsNewTurn("k", "换个话题") {
-		t.Error("restart: should open stream")
+	// 有活跃轮次 + 默认（append）→ 不开新流，最终答案原位替换
+	if c.startsNewTurn("k", "补充一句") {
+		t.Error("default(append): must NOT open a new stream")
 	}
 
-	c2 := newTurnTestChannel(ctl, InterruptAppend)
+	c2 := newTurnTestChannel(ctl, InterruptRestart)
 	beginLiveTurn(c2, ctl, "k", "T1")
-	if c2.startsNewTurn("k", "补充一句") {
-		t.Error("append policy: must NOT open a new stream")
+	if !c2.startsNewTurn("k", "换个话题") {
+		t.Error("restart: should open stream")
 	}
 }
 
@@ -272,6 +314,86 @@ func TestReapTurns(t *testing.T) {
 	c.reapTurns(context.Background())
 	if c.hasActiveTurn("k") {
 		t.Error("stale turn should have been reaped")
+	}
+}
+
+// TestWatchAppend_UnconsumedFallsBackToNewTurn 注入成功但本轮随即结束、
+// 补充没被取走 → 必须退化成新一轮，绝不能静默丢掉。
+func TestWatchAppend_UnconsumedFallsBackToNewTurn(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, "")
+	var mu sync.Mutex
+	var got []core.Message
+	ing := newRecordingIngress(t, &mu, &got)
+	c.ingress = ing
+
+	// 本轮已结束 + 补充没被消费
+	ctl.live["T1"] = false
+	ctl.leftover("T1", "顺便查下天气")
+
+	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "顺便查下天气"}
+	c.watchAppend(context.Background(), msg, "T1")
+
+	waitDelivered(t, &mu, &got, 1)
+	mu.Lock()
+	delivered := got
+	mu.Unlock()
+	if delivered[0].TraceID == "" {
+		t.Error("fallback turn must carry a fresh traceID")
+	}
+	if !c.hasActiveTurn("k") {
+		t.Error("fallback turn must be registered")
+	}
+}
+
+// TestWatchAppend_ConsumedStaysQuiet 已被编排层取走 → 什么都不做，
+// 绝不能重复开一轮（否则用户会收到两条回复）。
+func TestWatchAppend_ConsumedStaysQuiet(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, "")
+	var mu sync.Mutex
+	var got []core.Message
+	ing := newRecordingIngress(t, &mu, &got)
+	c.ingress = ing
+
+	ctl.live["T1"] = false // 本轮已结束
+	// 不塞 leftover：通道已被编排层取空
+
+	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "顺便查下天气"}
+	c.watchAppend(context.Background(), msg, "T1")
+
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	n := len(got)
+	mu.Unlock()
+	if n != 0 {
+		t.Errorf("consumed supplement must not spawn a new turn, got %d delivery(s)", n)
+	}
+}
+
+// TestWatchAppend_StillRunningDoesNotSteal 本轮仍在跑时**不能**取走补充：
+// 那些内容马上会被消费，取走再开一轮就是重复处理。
+func TestWatchAppend_StillRunningDoesNotSteal(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, "")
+	var mu sync.Mutex
+	var got []core.Message
+	ing := newRecordingIngress(t, &mu, &got)
+	c.ingress = ing
+
+	ctl.live["T1"] = true // 一直在跑
+	ctl.leftover("T1", "顺便查下天气")
+	// 用极短的 maxAge 让轮询超时退出
+	c.cfg.StreamMaxAge = 300 * time.Millisecond
+
+	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "顺便查下天气"}
+	c.watchAppend(context.Background(), msg, "T1")
+
+	mu.Lock()
+	n := len(got)
+	mu.Unlock()
+	if n != 0 {
+		t.Errorf("must not steal appends from a still-running turn, got %d delivery(s)", n)
 	}
 }
 
