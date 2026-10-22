@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/util/strutil"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -126,7 +127,13 @@ func (c *WeComChannel) resolveTurn(ctx context.Context, key, text string) (turnA
 	// ⚠️ 僵尸轮次：编排侧早已结束（静默 / 出错 / 压根没起），只是活跃表还没摘。
 	// 不判这一条的话，「停止」会打一行日志然后什么也没停，
 	// 普通消息也会被误当成打断、白白推一条「（这条已被新消息打断）」。
+	//
+	// ⚠️ 必须留日志：「为什么我发的话没打断上一轮」全靠这一行定位 ——
+	// 上一轮其实早就生成完了，只是这条消息到得晚。
 	if !ctl.IsMessageActive(c.botID, cur.traceID) {
+		traceid.L(ctx).Infow("wecom: stale turn detected, starting a new one",
+			"channel", c.name, "chat", key, "trace_id", cur.traceID,
+			"age", time.Since(cur.started).String(), "text", strutil.Truncate(text, 40))
 		c.clearTurn(key, cur.traceID)
 		return turnNew, traceid.New()
 	}
@@ -165,7 +172,8 @@ func (c *WeComChannel) resolveTurn(ctx context.Context, key, text string) (turnA
 	// 在这里 finish 会把新轮次的流也吃掉，最终答案只能退化成整段发送。
 	if ctl.AbortMessage(c.botID, cur.traceID) {
 		traceid.L(ctx).Infow("wecom: previous turn interrupted by new message",
-			"channel", c.name, "chat", key, "trace_id", cur.traceID)
+			"channel", c.name, "chat", key, "trace_id", cur.traceID,
+			"age", time.Since(cur.started).String(), "text", strutil.Truncate(text, 40))
 	}
 	c.clearTurn(key, cur.traceID)
 	return turnNew, traceid.New()
