@@ -40,6 +40,9 @@ const (
 	// 到点强制 finish，避免 pipeline 静默（决定不回复）时消息永远卡在「正在思考…」。
 	defaultStreamMaxAge = 5 * time.Minute
 
+	// defaultPlaceholderRefresh 占位的刷新间隔（见 Config.PlaceholderRefresh）。
+	defaultPlaceholderRefresh = 5 * time.Second
+
 	// streamPlaceholder 占位文案。
 	streamPlaceholder = "正在思考…"
 )
@@ -76,6 +79,13 @@ func (c *WeComChannel) streamMaxAge() time.Duration {
 		return c.cfg.StreamMaxAge
 	}
 	return defaultStreamMaxAge
+}
+
+func (c *WeComChannel) placeholderRefresh() time.Duration {
+	if c.cfg.PlaceholderRefresh != 0 {
+		return c.cfg.PlaceholderRefresh
+	}
+	return defaultPlaceholderRefresh
 }
 
 // openStream 为一次入站回调登记一条潜在流。
@@ -208,6 +218,65 @@ func (c *WeComChannel) closeStream(ctx context.Context, st *wecomStream, text st
 		// false = 回复太快，占位还没推就出结果了（已补一帧，见上）。
 		"placeholder_shown", !firstPushOnFinish)
 	return true
+}
+
+// streamTickLoop 周期刷新占位（共享 ticker，随 Start/Stop 走）。
+//
+// ⚠️ 别按每条流各起一个 ticker：并发流一多，推送数会随流数线性增长，
+// 直接打满平台限流（Misskey 上吃过这个亏）。
+func (c *WeComChannel) streamTickLoop(ctx context.Context) {
+	defer c.wg.Done()
+	d := c.placeholderRefresh()
+	if d <= 0 {
+		return
+	}
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.refreshPlaceholders(ctx)
+		}
+	}
+}
+
+// refreshPlaceholders 把「已推过占位、还没收尾」的流刷新一次，末尾带上已用秒数。
+//
+// 为什么必须刷新：一轮生成实测 17~55s（本次「再来一篇超级长的」跑了 53s），
+// 占位推出来后就一动不动，用户根本分不清「还在跑」还是「卡死了」——
+// 反馈里那句「之前的思考还是停不下来」就是这个观感。带秒数至少证明它活着。
+func (c *WeComChannel) refreshPlaceholders(ctx context.Context) {
+	if !c.streamEnabled() {
+		return
+	}
+	now := time.Now()
+
+	c.streamMu.Lock()
+	due := make([]*wecomStream, 0, len(c.streams))
+	for _, st := range c.streams {
+		// 只刷「已经推过占位」的：还没推说明回复很快，刷它反而多余。
+		if st == nil || st.closed || !st.pushed {
+			continue
+		}
+		due = append(due, st)
+	}
+	c.streamMu.Unlock()
+
+	for _, st := range due {
+		text := fmt.Sprintf("%s %ds", streamPlaceholder, int(now.Sub(st.started).Seconds()))
+		if err := st.sess.sendStream(ctx, st.reqID, st.streamID, text, false); err != nil {
+			// 刷新失败不摘流：占位已经在那儿了，最终回复照样能 finish，
+			// 摘掉反而会让最终答案退化成整段发送（多一个气泡）。
+			traceid.L(ctx).Warnw("wecom: stream placeholder refresh failed",
+				"channel", c.name, "stream_id", st.streamID, "err", err)
+			continue
+		}
+		c.streamMu.Lock()
+		st.content = text
+		c.streamMu.Unlock()
+	}
 }
 
 // dropStream 摘除一条流（占位推送失败时）。
