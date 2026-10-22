@@ -155,6 +155,32 @@ var supportedChannelTypes = []ChannelTypeInfo{
 				Default:  "3000",
 				HelpText: "发文件时配文会被拆成另一条回调，本窗口用来把它们合并成一条。默认 3000；填 -1 关闭合并（零延迟，但会双回复）",
 			},
+			{
+				Key:   "streamReply",
+				Label: "流式回复",
+				Type:  "boolean",
+				// 默认开：这是长连接模式的核心能力，实测 15/15 步全成功，
+				// 且任何一步失败都会自动回退成整段发送，不会丢消息。
+				Default:  "true",
+				HelpText: "收到消息先显示「正在思考…」，出结果后原位替换成最终答案。关闭则等结果出来后直接发一条整段消息",
+			},
+			{
+				Key:   "interruptPolicy",
+				Label: "忙时新消息的处理",
+				Type:  "string",
+				// 默认 restart：聊天里连发两句通常是想另起话题，
+				// 把两轮内容混在一条回复里比丢掉补充更难受。
+				// 无论哪种，「停止」这类终止指令都只打断、不开新轮。
+				Default:  "restart",
+				HelpText: "restart（默认）= 打断旧回复、就新消息另起一轮；append = 把新消息塞进正在跑的那一轮继续跑",
+			},
+			{
+				Key:   "stopCommands",
+				Label: "额外终止指令",
+				Type:  "string",
+				// ⚠️ 整句完全匹配才生效，避免用户一开口带「停」字就被掐断。
+				HelpText: "在内置词表（停止/停下/取消/终止/打住/stop/cancel 等）之外追加。多条用逗号分隔，必须整句完全相同才生效",
+			},
 		},
 	},
 	{

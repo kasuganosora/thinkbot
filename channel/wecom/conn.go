@@ -213,6 +213,9 @@ func (s *wsSession) dispatch(ctx context.Context, data []byte) string {
 			traceid.L(ctx).Debugw("wecom: failed to parse msg callback", "err", err)
 			return ""
 		}
+		// ⚠️ req_id 在**帧头**不在 body 里，而它是被动回复（aibot_respond_msg / 流式）
+		// 的唯一钥匙 —— 必须在这里带下去，丢了就再也拿不回来。
+		body.ReqID = f.Headers.ReqID
 		if s.onMsg != nil {
 			s.onMsg(ctx, &body)
 		}
@@ -326,6 +329,70 @@ func (s *wsSession) call(ctx context.Context, cmd string, body any) (ackResult, 
 	case <-ctx.Done():
 		return ackResult{}, ctx.Err()
 	}
+}
+
+// respond 发送 aibot_respond_msg —— 对**某一次回调**的被动回复。
+//
+// ⚠️ 不能走 call()：call 会自己 new 一个 req_id，而这里必须用回调帧带下来的那个
+// （服务端靠它把回复关联回那次回调；同一次回调的所有流式刷新复用同一个）。
+//
+// ⚠️ 并发保护：同一个 req_id 同时只能有一个在途请求。流式刷新是串行的
+// （下一条要等上一条 ACK，否则顺序无法保证），真撞上说明调用方写错了，直接报错。
+func (s *wsSession) respond(ctx context.Context, reqID string, body any) (ackResult, error) {
+	if reqID == "" {
+		return ackResult{}, errors.New("wecom: respond requires the callback req_id")
+	}
+
+	p := &pendingReq{ch: make(chan ackResult, 1)}
+	s.mu.Lock()
+	if _, dup := s.pending[reqID]; dup {
+		s.mu.Unlock()
+		return ackResult{}, errs.Newf("wecom: respond req_id %s already in flight", reqID)
+	}
+	s.seq++
+	p.seq = s.seq
+	s.pending[reqID] = p
+	s.mu.Unlock()
+	defer s.removePending(reqID)
+
+	if err := s.writeFrame(cmdRespond, reqID, body); err != nil {
+		return ackResult{}, errs.Wrapf(err, "wecom: send %s", cmdRespond)
+	}
+
+	timer := time.NewTimer(callTimeout)
+	defer timer.Stop()
+
+	select {
+	case res := <-p.ch:
+		if res.ErrCode == -1 {
+			return res, errors.New(res.ErrMsg) // failAll 投出来的，代表连接已断
+		}
+		return res, nil
+	case <-s.closed:
+		return ackResult{}, errors.New("wecom: connection closed while awaiting respond ack")
+	case <-timer.C:
+		return ackResult{}, errs.Newf("wecom: %s timeout after %s (no ack)", cmdRespond, callTimeout)
+	case <-ctx.Done():
+		return ackResult{}, ctx.Err()
+	}
+}
+
+// sendStream 推送或刷新一条流式消息（长连接模式的「类 SSE」能力）。
+//
+// content 是**全量内容**：同 streamID 再推一次即客户端原位替换。
+// finish=true 结束该流（之后不再可更新）。
+func (s *wsSession) sendStream(ctx context.Context, reqID, streamID, content string, finish bool) error {
+	res, err := s.respond(ctx, reqID, respondBody{
+		MsgType: MsgTypeStream,
+		Stream:  &streamBody{ID: streamID, Finish: finish, Content: content},
+	})
+	if err != nil {
+		return err
+	}
+	if !res.OK() {
+		return errs.Newf("wecom: respond stream failed: errcode=%d errmsg=%s", res.ErrCode, res.ErrMsg)
+	}
+	return nil
 }
 
 // sendMarkdown 向指定会话发送一条 markdown 消息。
