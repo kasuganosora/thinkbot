@@ -1686,10 +1686,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		MaxSeedsPerRun:         s.storeInt(config.KeyMemoryDedupMaxSeeds, storage.DefaultDedupMaxSeeds),
 	}, s.logger)
 	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
-		Window:          memWindow,
-		Compactor:       memCompactor,
-		DedupTriggerNew: s.storeInt(config.KeyMemoryDedupTriggerNew, storage.DefaultDedupTriggerNew),
-		DedupCooldown:   time.Duration(s.storeInt(config.KeyMemoryDedupCooldownMin, int(storage.DefaultDedupCooldown/time.Minute))) * time.Minute,
+		Window:             memWindow,
+		Compactor:          memCompactor,
+		DedupTriggerNew:    s.storeInt(config.KeyMemoryDedupTriggerNew, storage.DefaultDedupTriggerNew),
+		DedupCooldown:      time.Duration(s.storeInt(config.KeyMemoryDedupCooldownMin, int(storage.DefaultDedupCooldown/time.Minute))) * time.Minute,
+		MaxEntriesPerScope: s.storeInt(config.KeyMemoryMaxEntriesPerScope, storage.DefaultMaxEntriesPerScope),
+		Logger:             s.logger,
 	})
 	memCompactor.SetRepository(memRepo)
 	memRepo.StartVecBackfill(s.logger)
