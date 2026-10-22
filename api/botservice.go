@@ -2570,17 +2570,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 语义只能靠「本轮是否还在跑」来判（见 channel/wecom/turn.go）。
 		wc.SetTurnController(s)
 
-		// 文本增量源（B 档：边生成边把内容推给用户）。
+		// 增量源（B 档：边生成边把内容推给用户）。
 		// 订阅 EventBus 的 llm.text_delta —— 与 Web SSE 推给前端的是同一份，
 		// 已过 reply-control 与出站清洗（think/internal/public 块已处理），
 		// 可以直接对外发。
-		wc.SetDeltaSource(func(traceID string) (<-chan string, func()) {
+		//
+		// 另外把 llm.tool_call / llm.tool_result 也转出来（只带工具名）：
+		// 工具调用恰好落在「模型在想、还没写出正文」的空窗里，
+		// 那是整个一轮里唯一还能给用户看点什么的时间段。
+		wc.SetDeltaSource(func(traceID string) (<-chan wecom.Delta, func()) {
 			bus, ok := s.eventBus.(*outbound.MemoryEventBus)
 			if !ok || bus == nil || traceID == "" {
 				return nil, func() {}
 			}
 			sub := bus.Subscribe(traceID)
-			out := make(chan string, 256)
+			out := make(chan wecom.Delta, 256)
 			done := make(chan struct{})
 			var closeOnce sync.Once
 			stop := func() {
@@ -2597,15 +2601,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 						if !ok {
 							return
 						}
-						if ev.Type != outbound.EventLLMTextDelta {
-							continue
-						}
-						t, _ := ev.Data["text"].(string)
-						if t == "" {
+						d, wanted := toWecomDelta(ev)
+						if !wanted {
 							continue
 						}
 						select {
-						case out <- t:
+						case out <- d:
 						case <-done:
 							return
 						default:
@@ -3826,6 +3827,14 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 			cfg.StreamDeltaInterval = time.Duration(n) * time.Millisecond
 		}
 	}
+	// 工具活动行（只显示工具名）。缺省 = 开：它填补的正是「在想但还没写正文」的空窗。
+	if v, ok := raw["streamToolActivity"]; ok {
+		if b, isBool := v.(bool); isBool {
+			cfg.StreamToolActivity = b
+		}
+	} else {
+		cfg.StreamToolActivity = true
+	}
 	// 轮次策略：bot 忙时新消息「打断旧轮」还是「注入当前轮」。
 	// 非法值一律回退到默认（restart），不报错 —— 这只是体验开关，不是功能开关。
 	if v, ok := raw["interruptPolicy"]; ok {
@@ -3858,6 +3867,37 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 	}
 
 	return wecom.NewChannel(def.Name, def.BotID, cfg), nil
+}
+
+// toWecomDelta 把一条 EventBus 事件翻译成企微增量。
+//
+// ⚠️ 工具只取**名字**：input / output 里可能有绝对路径、命令行、URL，
+// 企微是外部渠道，带上就等于把内部信息写进聊天记录。
+func toWecomDelta(ev outbound.Event) (wecom.Delta, bool) {
+	switch ev.Type {
+	case outbound.EventLLMTextDelta:
+		t, _ := ev.Data["text"].(string)
+		if t == "" {
+			return wecom.Delta{}, false
+		}
+		return wecom.Delta{Kind: wecom.DeltaText, Text: t}, true
+	case outbound.EventLLMToolCall:
+		name, _ := ev.Data["tool"].(string)
+		if name == "" {
+			return wecom.Delta{}, false
+		}
+		id, _ := ev.Data["toolCallId"].(string)
+		return wecom.Delta{Kind: wecom.DeltaToolStart, ID: id, Text: name}, true
+	case outbound.EventLLMToolResult:
+		name, _ := ev.Data["tool"].(string)
+		if name == "" {
+			return wecom.Delta{}, false
+		}
+		id, _ := ev.Data["toolCallId"].(string)
+		msg, _ := ev.Data["error"].(string)
+		return wecom.Delta{Kind: wecom.DeltaToolDone, ID: id, Text: name, Failed: msg != ""}, true
+	}
+	return wecom.Delta{}, false
 }
 
 // toInt 将 interface{} 安全转换为 int。

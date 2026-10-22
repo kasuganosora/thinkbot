@@ -185,6 +185,17 @@ var supportedChannelTypes = []ChannelTypeInfo{
 				HelpText: "生成过程中每隔多久把已写出的正文推给你一次（原地刷新，不是刷屏）。默认 2000；填 -1 关闭（只显示「正在思考…」，出结果再一次性替换）",
 			},
 			{
+				Key:   "streamToolActivity",
+				Label: "显示工具调用",
+				Type:  "boolean",
+				// 默认开：模型「在想但还没写出正文」的那段空窗里，
+				// 「🔧 正在调用 X」是唯一能让用户知道 bot 在干什么的状态信号。
+				// ⚠️ 只推工具**名**，不推参数与返回值 —— 那些里头可能有
+				// 绝对路径、命令行、URL，写进企微聊天记录等于外泄内部信息。
+				Default:  "true",
+				HelpText: "生成过程中显示「🔧 正在调用 xxx / ✅ xxx 完成」。只显示工具名，不含参数与返回值",
+			},
+			{
 				Key:   "interruptPolicy",
 				Label: "忙时新消息的处理",
 				Type:  "string",
