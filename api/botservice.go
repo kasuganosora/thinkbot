@@ -2569,6 +2569,54 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 这里只是把同一个出口接给企微 —— 企微没有引用关系也没有中止按钮，
 		// 语义只能靠「本轮是否还在跑」来判（见 channel/wecom/turn.go）。
 		wc.SetTurnController(s)
+
+		// 文本增量源（B 档：边生成边把内容推给用户）。
+		// 订阅 EventBus 的 llm.text_delta —— 与 Web SSE 推给前端的是同一份，
+		// 已过 reply-control 与出站清洗（think/internal/public 块已处理），
+		// 可以直接对外发。
+		wc.SetDeltaSource(func(traceID string) (<-chan string, func()) {
+			bus, ok := s.eventBus.(*outbound.MemoryEventBus)
+			if !ok || bus == nil || traceID == "" {
+				return nil, func() {}
+			}
+			sub := bus.Subscribe(traceID)
+			out := make(chan string, 256)
+			done := make(chan struct{})
+			var closeOnce sync.Once
+			stop := func() {
+				closeOnce.Do(func() { close(done) })
+				bus.Unsubscribe(sub)
+			}
+			go func() {
+				defer close(out)
+				for {
+					select {
+					case <-done:
+						return
+					case ev, ok := <-sub.C():
+						if !ok {
+							return
+						}
+						if ev.Type != outbound.EventLLMTextDelta {
+							continue
+						}
+						t, _ := ev.Data["text"].(string)
+						if t == "" {
+							continue
+						}
+						select {
+						case out <- t:
+						case <-done:
+							return
+						default:
+							// 下游消费不过来就丢增量，绝不能反压到 EventBus
+							// （那是全链路共享的，堵住会拖慢整个 bot）。
+						}
+					}
+				}
+			}()
+			return out, stop
+		})
 	}
 
 	// 注册 Channel 专属工具（每个 Channel 实现 ChannelToolProvider 接口）
@@ -3769,6 +3817,13 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 	if v, ok := raw["placeholderRefreshMs"]; ok {
 		if n := toInt(v); n != 0 {
 			cfg.PlaceholderRefresh = time.Duration(n) * time.Millisecond
+		}
+	}
+	// 边生成边推送的间隔（毫秒）。0/缺省 = 2s；<0 关闭增量推送
+	// （只剩「正在思考…」+ 最终替换 —— 用户全程盲等，出结果才知道方向对不对）。
+	if v, ok := raw["streamDeltaIntervalMs"]; ok {
+		if n := toInt(v); n != 0 {
+			cfg.StreamDeltaInterval = time.Duration(n) * time.Millisecond
 		}
 	}
 	// 轮次策略：bot 忙时新消息「打断旧轮」还是「注入当前轮」。
