@@ -23,6 +23,7 @@ import (
 	"hash/fnv"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -57,6 +58,18 @@ const (
 	// 企微的流是**原位替换**，用户在气泡里看到文字一段段长出来，
 	// 没有尾标根本分不清「还在写」还是「已经写完了，就这么短」。
 	streamDraftSuffix = "\n\n（还在写…）"
+
+	// streamToolSuffix 有工具正在跑时的尾标。
+	//
+	// 与正文尾标分开：这一刻 bot 并没有在「写」，它在等工具返回 ——
+	// 统一写「还在写…」是句假话，而且恰好掩盖了「正在调工具」这个最该让用户知道的状态。
+	streamToolSuffix = "\n\n（工具执行中…）"
+
+	// maxToolLines 气泡里最多保留多少行工具活动。
+	//
+	// ⚠️ 工具行不随正文增长而丢弃，一个跑偏的 agent 调上百次工具会把气泡撑爆，
+	// 而且每次推送都要把这一整坨重发一遍。到顶后不再追加（结束事件也就无从改写，忽略即可）。
+	maxToolLines = 20
 )
 
 // 看门狗参数。用 var 而不是 const：单测要把它们压到毫秒级，
@@ -102,10 +115,44 @@ type wecomStream struct {
 	// fakePush 单测用的推送出口替换。wsSession 依赖真实 WS 连接，
 	// 单测里构造不出来 —— 让流式逻辑（占位 / 增量 / 收尾）仍可被真实覆盖。
 	fakePush func(content string, finish bool) error
+
+	// pushMu 串行化同一条流的推送。
+	//
+	// ⚠️ 必须：conn.respond 对同一 req_id 只允许一个在途请求，撞上就报
+	// 「already in flight」**直接丢帧**。而推送方不止一个 goroutine ——
+	// 占位刷新的 ticker、推增量的 feedStream、Send 的收尾，三者会并发。
+	// 实测企微 ACK 偶尔要 5s（2026-10-22 14:55:08 真机丢帧），这 5s 里谁撞上谁丢。
+	// 丢一条占位刷新只是少跳一次秒；丢掉**收尾帧**会让 Send 回退成整段发送，
+	// 用户就多收到一个气泡。
+	pushMu sync.Mutex
 }
 
+// errPushBusy 上一条推送还在等 ACK，这一条主动放弃（见 tryPush）。
+var errPushBusy = errors.New("wecom: previous push still awaiting ack")
+
 // push 推送一帧流式内容。**流式层唯一的出口**，替换 fakePush 即可单测。
+//
+// ⚠️ 会阻塞到上一条推送收到 ACK（见 pushMu）。正文与收尾必须走这里 ——
+// 它们丢了就是少内容 / 多气泡，宁可等。
 func (st *wecomStream) push(ctx context.Context, content string, finish bool) error {
+	st.pushMu.Lock()
+	defer st.pushMu.Unlock()
+	return st.pushLocked(ctx, content, finish)
+}
+
+// tryPush 非阻塞版本：拿不到锁立刻放弃，返回 errPushBusy。
+//
+// 只给**占位刷新**用：它是纯装饰性的，少刷一次秒无所谓；
+// 为它去阻塞共享 ticker（甚至拖慢真正的正文推送）完全不划算。
+func (st *wecomStream) tryPush(ctx context.Context, content string, finish bool) error {
+	if !st.pushMu.TryLock() {
+		return errPushBusy
+	}
+	defer st.pushMu.Unlock()
+	return st.pushLocked(ctx, content, finish)
+}
+
+func (st *wecomStream) pushLocked(ctx context.Context, content string, finish bool) error {
 	if st.fakePush != nil {
 		return st.fakePush(content, finish)
 	}
@@ -115,16 +162,39 @@ func (st *wecomStream) push(ctx context.Context, content string, finish bool) er
 	return st.sess.sendStream(ctx, st.reqID, st.streamID, content, finish)
 }
 
-// DeltaSourceFunc 订阅一条 trace 的**已清洗**文本增量（B 档：边生成边推）。
+// DeltaKind 增量种类。
+type DeltaKind int
+
+const (
+	// DeltaText 正文增量。
+	DeltaText DeltaKind = iota
+	// DeltaToolStart 开始调用一个工具（Text 是工具名）。
+	DeltaToolStart
+	// DeltaToolDone 一个工具执行结束（Text 是工具名，Failed 表示失败）。
+	DeltaToolDone
+)
+
+// Delta 一条推给渠道的增量。
 //
-// 增量在 agent/stages/llmroute.go 里已串过 reply-control 过滤与出站清洗
+// ⚠️ 工具只带**名字**，不带参数与返回值：企微是外部渠道，参数里可能有
+// 绝对路径、命令行、URL，带上就等于把内部信息写进聊天记录。
+type Delta struct {
+	Kind   DeltaKind
+	ID     string // 工具调用 ID，用于把「正在调用」改写成「完成」
+	Text   string // 正文增量 或 工具名
+	Failed bool   // DeltaToolDone 专用
+}
+
+// DeltaSourceFunc 订阅一条 trace 的**已清洗**增量（B 档：边生成边推）。
+//
+// 正文增量在 agent/stages/llmroute.go 里已串过 reply-control 过滤与出站清洗
 // （<think>/<internal> 块丢弃、<public> 标签剥离），**可以直接推给外部渠道**，
 // 无需在 channel 侧再洗一遍 —— 与 Web SSE 推给前端的是同一份。
 //
 // 由 api 层注入（与 fileSink 同构）：channel 包不该反向依赖 agent/outbound。
 //
 // 返回：增量通道（关闭 = 本轮生成结束）与退订函数；通道为 nil 表示不可用。
-type DeltaSourceFunc func(traceID string) (<-chan string, func())
+type DeltaSourceFunc func(traceID string) (<-chan Delta, func())
 
 // SetDeltaSource 注入增量源（由 api 层在构建 channel 后调用）。
 func (c *WeComChannel) SetDeltaSource(fn DeltaSourceFunc) { c.deltaSrc = fn }
@@ -160,6 +230,13 @@ func (c *WeComChannel) deltaInterval() time.Duration {
 	}
 	return defaultDeltaInterval
 }
+
+// toolActivityEnabled 是否在气泡里显示工具活动行。
+//
+// ⚠️ 只显示工具**名**（见 toolActivityLine），不显示参数与返回值。
+// 默认开：工具调用恰好落在「模型在想、还没写正文」的空窗里，
+// 关掉它那段空窗就又变成纯盲等。
+func (c *WeComChannel) toolActivityEnabled() bool { return c.cfg.StreamToolActivity }
 
 // currentStream 取会话当前登记的流（不存在则 nil）。
 func (c *WeComChannel) currentStream(key string) *wecomStream {
@@ -324,10 +401,11 @@ func (c *WeComChannel) closeStream(ctx context.Context, st *wecomStream, text st
 // ⚠️ 只在 st 仍是**当前**流时推：本轮若已被新消息打断/顶替，再推就会
 // 把新轮次的占位覆盖成上一轮的残稿。
 //
-// ⚠️ draft 决定**推**出去的文本带不带「还在写…」尾标，但存档的 st.content
-// 永远是干净正文：兜底收尾（reapStreams / abortStreams）用的就是 st.content，
-// 把「还在写…」当最终内容定格，用户会看到一条**已经结束**的消息写着还在写。
-func (c *WeComChannel) pushStreamContent(ctx context.Context, key string, st *wecomStream, text string, draft bool) bool {
+// ⚠️ store 与 display 分开：display 是推给用户看的（带「还在写…」之类的尾标），
+// store 是存档（干净正文 + 工具活动行）。兜底收尾（reapStreams / abortStreams）
+// 用的是 store —— 把「还在写…」当最终内容定格，用户会看到一条**已经结束**的消息
+// 写着还在写。
+func (c *WeComChannel) pushStreamContent(ctx context.Context, key string, st *wecomStream, store, display string) bool {
 	c.streamMu.Lock()
 	if cur, ok := c.streams[key]; !ok || cur != st || st.closed {
 		c.streamMu.Unlock()
@@ -335,10 +413,6 @@ func (c *WeComChannel) pushStreamContent(ctx context.Context, key string, st *we
 	}
 	c.streamMu.Unlock()
 
-	display := text
-	if draft {
-		display += streamDraftSuffix
-	}
 	if err := st.push(ctx, display, false); err != nil {
 		traceid.L(ctx).Warnw("wecom: stream push failed",
 			"channel", c.name, "stream_id", st.streamID, "err", err)
@@ -347,7 +421,7 @@ func (c *WeComChannel) pushStreamContent(ctx context.Context, key string, st *we
 	c.streamMu.Lock()
 	st.pushed = true
 	st.fed = true
-	st.content = text
+	st.content = store
 	c.streamMu.Unlock()
 	return true
 }
@@ -387,6 +461,12 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 	deltas := 0 // 收到的增量条数
 	pushes := 0 // 实际推出去的帧数
 
+	// activity 工具活动行，按发生顺序；正文在下、活动在上（见 compose）。
+	//
+	// 为什么要单列一块：工具调用恰好落在「模型在想、还没写出正文」的那段空窗里，
+	// 那段时间原本一个字都看不到 —— 「🔧 正在调用 X」是这段空窗里唯一的状态信号。
+	var activity []string
+
 	// ⚠️ 收尾必须打一条总账：单次推送只在**首次成功**时留痕（否则长任务刷屏），
 	// 光看日志根本数不出推了几帧 —— 「增量到底推没推、推得够不够密」就全靠猜。
 	// 2026-10-22 真机就栽在这：日志只有一条 bytes=3，一度以为只推了一次。
@@ -394,7 +474,7 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 		traceid.L(ctx).Infow("wecom: stream delta feed ended",
 			"channel", c.name, "chat", key, "trace_id", traceID,
 			"deltas", deltas, "pushes", pushes, "bytes", buf.Len(),
-			"elapsed", time.Since(start).String())
+			"tools", len(activity), "elapsed", time.Since(start).String())
 	}()
 
 	// mine 本轮**自己那条流**，首次 flush 时锁定，之后只往它推。
@@ -407,8 +487,34 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 	// detached 本轮的流已被顶掉/推不动了，再循环下去只会污染别人的流。
 	detached := false
 
+	// toolLine toolCallID → activity 下标：工具结束时把「正在调用」就地改写成「完成」，
+	// 而不是再追加一行（否则气泡里会同时挂着「正在调用」和「完成」，像卡住了）。
+	toolLine := map[string]int{}
+	running := 0 // 仍在执行的工具数（决定尾标是「还在写」还是「工具执行中」）
+
+	// compose 拼出气泡内容：工具活动在上（引用块），正文在下。
+	compose := func(text string) string {
+		if len(activity) == 0 {
+			return text
+		}
+		var b strings.Builder
+		for i, line := range activity {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("> ")
+			b.WriteString(line)
+		}
+		if text != "" {
+			b.WriteString("\n\n")
+			b.WriteString(text)
+		}
+		return b.String()
+	}
+
 	flush := func(final bool) {
-		if buf.Len() == 0 {
+		text := buf.String()
+		if text == "" && len(activity) == 0 {
 			return
 		}
 		if mine == nil {
@@ -417,8 +523,16 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 				return // 本轮的流还没登记（极少见），攒着等下一批增量
 			}
 		}
-		text := buf.String()
-		if !c.pushStreamContent(ctx, key, mine, text, !final) {
+		store := compose(text)
+		display := store
+		if !final {
+			if running > 0 {
+				display += streamToolSuffix
+			} else {
+				display += streamDraftSuffix
+			}
+		}
+		if !c.pushStreamContent(ctx, key, mine, store, display) {
 			// 推不动 = 流已被新轮顶掉，或推送失败。两种都不必再试：
 			// 继续循环只会把本轮残稿往**新**流上怼（见 mine 的注释）。
 			detached = true
@@ -436,10 +550,10 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 		} else if first {
 			traceid.L(ctx).Infow("wecom: streaming partial content to user",
 				"channel", c.name, "chat", key, "stream_id", mine.streamID,
-				"trace_id", traceID, "bytes", len(text))
+				"trace_id", traceID, "bytes", len(store), "tools", len(activity))
 		} else {
 			traceid.L(ctx).Debugw("wecom: stream delta pushed",
-				"channel", c.name, "stream_id", mine.streamID, "bytes", len(text))
+				"channel", c.name, "stream_id", mine.streamID, "bytes", len(store))
 		}
 	}
 
@@ -478,14 +592,44 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 				flush(true)
 				return
 			}
-			buf.WriteString(d)
 			deltas++
 			if !sawActive {
 				sawActive = c.turnAlive(traceID)
 			}
-			// 节流：太频繁会把「原位替换」变成闪烁，也白耗推送额度。
-			// 2s 一次，53s 的一轮约 26 次 —— 远低于实测的 300 次/分钟。
-			if time.Since(last) < gap {
+			switch d.Kind {
+			case DeltaText:
+				buf.WriteString(d.Text)
+				// 节流：太频繁会把「原位替换」变成闪烁，也白耗推送额度。
+				// 2s 一次，53s 的一轮约 26 次 —— 远低于实测的 300 次/分钟。
+				if time.Since(last) < gap {
+					continue
+				}
+			case DeltaToolStart:
+				if d.Text == "" || !c.toolActivityEnabled() {
+					continue
+				}
+				running++
+				if len(activity) >= maxToolLines {
+					continue // 到顶不再追加（结束事件找不到下标，忽略即可）
+				}
+				toolLine[d.ID] = len(activity)
+				activity = append(activity, toolActivityLine(d.Text, false, false))
+				// 状态变化**立刻**推，不走节流：工具一进一出往往就几百毫秒，
+				// 等 2s 节流的话用户根本看不到它被调用过。
+			case DeltaToolDone:
+				if d.Text == "" || !c.toolActivityEnabled() {
+					continue
+				}
+				if running > 0 {
+					running--
+				}
+				if idx, ok := toolLine[d.ID]; ok {
+					activity[idx] = toolActivityLine(d.Text, true, d.Failed)
+					delete(toolLine, d.ID)
+				} else if len(activity) < maxToolLines {
+					activity = append(activity, toolActivityLine(d.Text, true, d.Failed))
+				}
+			default:
 				continue
 			}
 			flush(false)
@@ -493,6 +637,21 @@ func (c *WeComChannel) feedStream(ctx context.Context, key, traceID string) {
 				return
 			}
 		}
+	}
+}
+
+// toolActivityLine 生成一行工具活动文案。
+//
+// ⚠️ 只放工具**名**：参数与返回值里可能有绝对路径、命令行、URL，
+// 企微是外部渠道，带上就等于把内部信息写进聊天记录。
+func toolActivityLine(name string, done, failed bool) string {
+	switch {
+	case !done:
+		return "🔧 正在调用 " + name
+	case failed:
+		return "❌ " + name + " 失败"
+	default:
+		return "✅ " + name + " 完成"
 	}
 }
 
@@ -555,11 +714,19 @@ func (c *WeComChannel) refreshPlaceholders(ctx context.Context) {
 
 	for _, st := range due {
 		text := fmt.Sprintf("%s %ds", streamPlaceholder, int(now.Sub(st.started).Seconds()))
-		if err := st.push(ctx, text, false); err != nil {
+		// ⚠️ 用 tryPush：刷新是装饰性的，上一条还在等 ACK 就直接跳过，
+		// 绝不能阻塞共享 ticker（会把真正的正文推送也一起拖慢）。
+		if err := st.tryPush(ctx, text, false); err != nil {
 			// 刷新失败不摘流：占位已经在那儿了，最终回复照样能 finish，
 			// 摘掉反而会让最终答案退化成整段发送（多一个气泡）。
-			traceid.L(ctx).Warnw("wecom: stream placeholder refresh failed",
-				"channel", c.name, "stream_id", st.streamID, "err", err)
+			if errors.Is(err, errPushBusy) {
+				// 不是故障，是并发让路 —— 打成 WARN 会把「真出错」淹掉。
+				traceid.L(ctx).Debugw("wecom: stream placeholder refresh skipped, push busy",
+					"channel", c.name, "stream_id", st.streamID)
+			} else {
+				traceid.L(ctx).Warnw("wecom: stream placeholder refresh failed",
+					"channel", c.name, "stream_id", st.streamID, "err", err)
+			}
 			continue
 		}
 		c.streamMu.Lock()

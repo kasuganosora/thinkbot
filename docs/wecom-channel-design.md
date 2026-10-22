@@ -664,6 +664,29 @@ restart 策略下旧轮被 abort 后它自己的 feedStream 还活着（`IsMessa
 修法：首次 flush 时锁定，之后只往它推；发现推不动（流被顶掉）就立即退出。
 回归测试 `TestFeedStream_DoesNotClobberNewerStream`。
 
+**工具活动行**（`streamToolActivity`，默认开）：`llm.tool_call` / `llm.tool_result`
+也转成增量，气泡里以引用块显示「🔧 正在调用 X」→「✅ X 完成 / ❌ X 失败」（**就地改写**，
+不是追加新行 —— 两行并存看起来像卡住了）。
+
+⚠️ 为什么值得做：实测一轮里前 15s 是 thinking（被丢弃）、正文要到最后才流出来，
+**那段空窗原本一个字都看不到**，而工具调用恰好落在里面 —— 它是空窗期唯一的状态信号。
+工具执行中尾标是「（工具执行中…）」而不是「（还在写…）」：那一刻 bot 并没有在写。
+
+⚠️⚠️ **只推工具名，绝不推参数与返回值**：`input` / `output` 里可能有绝对路径、命令行、
+URL，企微是外部渠道，带上就等于把内部信息写进聊天记录。由 `toWecomDelta` 单点把关，
+`TestToWecomDelta_ToolsOnlyCarryName` 盯着这条红线。企微平台是白名单模式（已有规则），
+可用的是 `basicTools`（`now`/`calculate`/`memory`/`text_*` 等）与显式放行的 `sandbox_*`。
+
+⚠️⚠️ **同一条流的推送必须串行**（`wecomStream.pushMu`）：`conn.respond` 对同一 req_id
+只允许一个在途请求，撞上就报「already in flight」**直接丢帧**。而推送方不止一个 goroutine
+—— 占位刷新的 ticker、推增量的 feedStream、Send 的收尾，三者会并发。
+实测企微 ACK 偶尔要 5s（2026-10-22 14:55:08 真机丢过一帧刷新），这 5s 里谁撞上谁丢。
+
+- 正文 / 收尾走 `push()`（阻塞等锁）：**收尾帧丢了会让 `Send` 回退成整段发送，用户多收到一个气泡**
+- 占位刷新走 `tryPush()`（拿不到锁就放弃）：它是装饰性的，为它去阻塞共享 ticker 会连正文一起拖慢；
+  跳过只记 Debug，不打 WARN —— 那是并发让路，不是故障，打 WARN 会淹掉真错误
+- 回归测试 `TestPush_SerializesSameStream` 模拟了 conn 的在途检测：去掉锁它会丢 4/5 帧（已实测确认）
+
 ⚠️ **「（还在写…）」只是推送尾标，不能存进 `st.content`**：
 兜底收尾（`reapStreams` / `abortStreams`）用的正是 `st.content`，
 把它定格成最终内容的话，用户会看到一条**已经结束**的消息写着「还在写…」。
