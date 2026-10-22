@@ -713,6 +713,13 @@ func (c *WeComChannel) deliver(ctx context.Context, msg core.Message) {
 	if ing == nil {
 		return
 	}
+	// ⚠️ 必须先归一化 ctx：配文窗口到点时定时器回调传进来的是 **nil**
+	// （见 holdPending 的 time.AfterFunc），而下面的 resolveTurn 要用
+	// traceid.L(ctx) 打日志 —— nil ctx 会直接 SIGSEGV 把整个进程拖死
+	// （2026-10-22 11:43 真机事故：收到一条普通消息即 panic）。
+	// deliveryCtx(nil) 会退到 runCtx / Background。
+	ctx = c.deliveryCtx(ctx)
+
 	// 停机回灌（flushPending）不做轮次判定：服务要关了，别再触发 abort。
 	if !c.isStopped() {
 		switch action, tid := c.resolveTurn(ctx, msg.Channel, msg.Text); action {
