@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/channel/wecom"
@@ -76,5 +77,23 @@ func TestToWecomDelta_IgnoresOtherEvents(t *testing.T) {
 		if _, ok := toWecomDelta(outbound.Event{Type: typ, Data: map[string]any{}}); ok {
 			t.Errorf("event %s must not be forwarded", typ)
 		}
+	}
+}
+
+func TestUnconsumedAppendsPrunedAfterTTL(t *testing.T) {
+	s := &BotService{messageInterrupts: map[string]chan string{}, messageAppends: map[string]pendingAppends{}}
+	ch := make(chan string, 2)
+	s.RegisterMessageInterrupt("b", "t1", ch)
+	ch <- "hello"
+	s.UnregisterMessageInterrupt("b", "t1")
+	if got := s.TakeUnconsumedAppends("b", "t1"); len(got) != 1 || got[0] != "hello" {
+		t.Fatalf("take = %v", got)
+	}
+	// stale entry is pruned on next unregister
+	s.messageAppends["b:old"] = pendingAppends{texts: []string{"x"}, at: time.Now().Add(-2 * unconsumedAppendTTL)}
+	s.RegisterMessageInterrupt("b", "t2", make(chan string, 1))
+	s.UnregisterMessageInterrupt("b", "t2")
+	if _, ok := s.messageAppends["b:old"]; ok {
+		t.Fatal("stale appends not pruned")
 	}
 }

@@ -99,7 +99,7 @@ type BotService struct {
 	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
 	messageSessions    map[string]string                  // "botID:traceID" → chat session id（供 active/resume 按会话过滤）
 	messageInterrupts  map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
-	messageAppends     map[string][]string                // "botID:traceID" → 本轮结束仍未被消费的补充（供 Channel 兜底，见 TakeUnconsumedAppends）
+	messageAppends     map[string]pendingAppends          // "botID:traceID" → 本轮结束仍未被消费的补充（供 Channel 兜底，见 TakeUnconsumedAppends）
 	messageStarts      map[string]time.Time               // "botID:traceID" → 本轮开始时刻（供前端显示「已运行多久」，判断挂死）
 	// containerStarts tracks in-flight container+agent starts detached from HTTP
 	// requests. Image builds can take minutes; the request context must not cancel them.
@@ -189,7 +189,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageCancels:     make(map[string]context.CancelFunc),
 		messageSessions:    make(map[string]string),
 		messageInterrupts:  make(map[string]chan string),
-		messageAppends:     make(map[string][]string),
+		messageAppends:     make(map[string]pendingAppends),
 		messageStarts:      make(map[string]time.Time),
 		containerStarts:    make(map[string]context.CancelFunc),
 		wfEngines:          make(map[string]*workflow.Manager),
@@ -632,11 +632,20 @@ func (s *BotService) UnregisterMessageInterrupt(botID, traceID string) {
 			}
 			break
 		}
+		now := time.Now()
+		// Prune leftovers nobody claimed (e.g. web chat has no taker); without
+		// this the map grows forever on channels that never call Take.
+		for k, v := range s.messageAppends {
+			if now.Sub(v.at) > unconsumedAppendTTL {
+				delete(s.messageAppends, k)
+			}
+		}
 		if len(left) > 0 {
 			if s.messageAppends == nil {
-				s.messageAppends = make(map[string][]string)
+				s.messageAppends = make(map[string]pendingAppends)
 			}
-			s.messageAppends[key] = append(s.messageAppends[key], left...)
+			cur := s.messageAppends[key]
+			s.messageAppends[key] = pendingAppends{texts: append(cur.texts, left...), at: now}
 		}
 	}
 	s.mu.Unlock()
@@ -652,13 +661,26 @@ func (s *BotService) TakeUnconsumedAppends(botID, traceID string) []string {
 	}
 	key := messageCancelKey(botID, traceID)
 	s.mu.Lock()
-	out := s.messageAppends[key]
-	if len(out) > 0 {
+	v, ok := s.messageAppends[key]
+	if ok {
 		delete(s.messageAppends, key)
 	}
 	s.mu.Unlock()
-	return out
+	if ok && time.Since(v.at) > unconsumedAppendTTL {
+		return nil
+	}
+	return v.texts
 }
+
+// pendingAppends holds supplements left unconsumed when a turn ended.
+type pendingAppends struct {
+	texts []string
+	at    time.Time
+}
+
+// unconsumedAppendTTL bounds how long unclaimed supplements are retained.
+// The WeCom watcher polls every few hundred ms, so this is generous.
+const unconsumedAppendTTL = 2 * time.Minute
 
 // AppendToMessage 在一条正在执行的消息（botID+traID）生成过程中，把用户
 // 中途补充的内容追加进同一轮对话（Claude-CLI 风格的「边思考/边输出边补充」）。
