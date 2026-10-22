@@ -110,6 +110,10 @@ type WeComChannel struct {
 	// 与 fileSink 同构：为 nil 时退化为「每条消息都开新一轮」，功能不受损。
 	turnCtl TurnController
 
+	// deltaSrc 由 api 层注入的文本增量源（B 档：边生成边推内容），见 stream.go。
+	// 为 nil 时退化为「只推占位 + 最终整体替换」。
+	deltaSrc DeltaSourceFunc
+
 	// active 按会话标识索引的**正在执行**轮次（见 turn.go）。
 	//
 	// ⚠️ 判定「本轮是否还在跑」全靠这张表：企微没有引用/回复关系，
@@ -739,6 +743,16 @@ func (c *WeComChannel) deliver(ctx context.Context, msg core.Message) {
 	// ⚠️ 必须在 Receive **之前**登记：Ingress 是异步派发的，
 	// 晚一步登记会出现「pipeline 已在跑但活跃表里查不到」的空窗。
 	c.beginTurn(msg.Channel, msg.TraceID)
+
+	// 边生成边推（B 档）：订阅本轮的文本增量，让用户能当场看到方向对不对。
+	// 必须在 Receive **之前**订阅，否则可能错过开头几个增量。
+	//
+	// 前置判断放在这里而不是只放在 feedStream 里：B 档关掉时（没注入增量源 /
+	// 关了流式）每条入站消息就省掉一个多余的 goroutine。
+	if c.deltaSrc != nil && c.streamEnabled() {
+		go c.feedStream(c.deliveryCtx(ctx), msg.Channel, msg.TraceID)
+	}
+
 	if err := ing.Receive(c.deliveryCtx(ctx), msg); err != nil {
 		traceid.L(ctx).Warnw("wecom: ingress receive failed",
 			"channel", c.name, "msgid", msg.ID, "err", err)
