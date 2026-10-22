@@ -80,6 +80,13 @@ func WithTraceID(ctx context.Context, traceID string) context.Context {
 //  2. OTel span 中的 trace ID（如果 span 正在记录）
 //  3. 返回空字符串
 func FromContext(ctx context.Context) string {
+	// ⚠️ 必须容忍 nil：定时器/回调路径经常拿不到 ctx（如 wecom 配文窗口到点时
+	// 传的就是 nil），而 L(ctx) 是打日志的常规用法 —— 在这里崩掉等于
+	// **一个日志调用把整个服务拖死**（2026-10-22 真机事故：企微收到消息即 panic）。
+	// 日志链路绝不能成为单点故障。
+	if ctx == nil {
+		return ""
+	}
 	// 优先取本包注入的值
 	if id, ok := ctx.Value(ctxKey{}).(string); ok && id != "" {
 		return id

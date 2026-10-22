@@ -450,3 +450,25 @@ func TestBeginTurn_RequiresController(t *testing.T) {
 		t.Error("must not register a turn without a controller")
 	}
 }
+
+// TestDeliver_NilContextMustNotPanic 配文窗口到点时定时器回调传的是 **nil ctx**
+// （holdPending 的 time.AfterFunc）。轮次判定里有日志调用，若吃不下 nil ctx
+// 就 SIGSEGV 把整个进程拖死 —— 2026-10-22 11:43 真机事故：用户发一句普通
+// 补充，服务当场 panic 下线。
+func TestDeliver_NilContextMustNotPanic(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, "")
+	var mu sync.Mutex
+	var got []core.Message
+	c.ingress = newRecordingIngress(t, &mu, &got)
+
+	// 登记一个**已经结束**的轮次，逼 resolveTurn 走进「僵尸分支」——
+	// 那正是当时打日志打崩的地方。
+	c.beginTurn("k", "T1")
+	ctl.markLive("T1", false)
+
+	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "补上第二天他的猪被偷了的剧情"}
+	c.deliver(nil, msg) // ← 未归一化 ctx 时这里会 panic
+
+	waitDelivered(t, &mu, &got, 1)
+}

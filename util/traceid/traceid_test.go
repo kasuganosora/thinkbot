@@ -342,3 +342,21 @@ func TestHeaderKey(t *testing.T) {
 		t.Fatalf("HeaderKey should start with X-, got %q", HeaderKey)
 	}
 }
+
+// TestFromContext_Nil 定时器/回调路径拿不到 ctx 时会传 nil。
+//
+// ⚠️ 这条必须守住：L(ctx) 是最常见的打日志写法，若它吃不下 nil ctx，
+// 就等于「一行日志把整个服务拖死」—— 2026-10-22 真机事故正是如此
+// （企微配文窗口到点 → deliver(nil) → 轮次判定里 L(nil) → SIGSEGV）。
+// 日志链路绝不能成为单点故障。
+func TestFromContext_Nil(t *testing.T) {
+	if got := FromContext(nil); got != "" {
+		t.Errorf("FromContext(nil) = %q, want empty", got)
+	}
+	if got := FromContext(context.Background()); got != "" {
+		t.Errorf("FromContext(background) = %q, want empty", got)
+	}
+	// 打日志不能 panic
+	L(nil).Infow("nil ctx must not panic", "k", "v")
+	WithLoggerFrom(nil, nil).Infow("nil logger too", "k", "v")
+}
