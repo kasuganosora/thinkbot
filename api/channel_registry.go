@@ -165,6 +165,15 @@ var supportedChannelTypes = []ChannelTypeInfo{
 				HelpText: "收到消息先显示「正在思考…」，出结果后原位替换成最终答案。关闭则等结果出来后直接发一条整段消息",
 			},
 			{
+				Key:   "placeholderRefreshMs",
+				Label: "占位刷新间隔（毫秒）",
+				Type:  "number",
+				// 一轮生成实测 17~55s，占位推出来后一动不动会被当成卡死。
+				// 每 5s 刷一次并带上已用秒数（实测连推 13 次零失败，不占 30 条/分钟配额）。
+				Default:  "5000",
+				HelpText: "「正在思考…」的刷新间隔，每次会带上已用秒数，用来证明还在跑。默认 5000；填 -1 关闭刷新",
+			},
+			{
 				Key:   "interruptPolicy",
 				Label: "忙时新消息的处理",
 				Type:  "string",

@@ -3720,6 +3720,12 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 			cfg.PlaceholderDelay = time.Duration(n) * time.Millisecond
 		}
 	}
+	// 占位刷新间隔（毫秒）。0/缺省 = 5s；<0 关闭刷新。
+	if v, ok := raw["placeholderRefreshMs"]; ok {
+		if n := toInt(v); n != 0 {
+			cfg.PlaceholderRefresh = time.Duration(n) * time.Millisecond
+		}
+	}
 	// 轮次策略：bot 忙时新消息「打断旧轮」还是「注入当前轮」。
 	// 非法值一律回退到默认（restart），不报错 —— 这只是体验开关，不是功能开关。
 	if v, ok := raw["interruptPolicy"]; ok {

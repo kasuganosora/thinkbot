@@ -221,11 +221,12 @@ func (c *WeComChannel) Start(ctx context.Context, ingress *inbound.Ingress) erro
 	// 但注册是零成本的第二道防线，且 aibotid 就是它的身份。
 	ingress.RegisterSelfUserID(c.cfg.RobotID)
 
-	c.wg.Add(4)
+	c.wg.Add(5)
 	go c.streamLoop(runCtx)
 	go c.pingLoop(runCtx)
 	go c.cleanupLoop(runCtx)
 	go c.inboxLoop(runCtx)
+	go c.streamTickLoop(runCtx)
 
 	traceid.L(ctx).Infow("wecom channel started",
 		"channel", c.name, "robot_id", c.cfg.RobotID, "endpoint", c.cfg.endpoint())

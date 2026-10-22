@@ -67,6 +67,13 @@ type Config struct {
 	// 快回复不推，避免「思考中」闪一下就被替换的劣质观感）。
 	PlaceholderDelay time.Duration
 
+	// PlaceholderRefresh 占位的刷新间隔，0 = 5s；<0 关闭刷新。
+	//
+	// 必须刷新：一轮生成实测 17~55s，占位推出来后就一动不动，
+	// 用户分不清「还在跑」还是「卡死了」—— 观感上就是「停不下来」。
+	// 带上已用秒数至少证明它活着（实测连推 13 次零失败，不占配额）。
+	PlaceholderRefresh time.Duration
+
 	// StreamMaxAge 一条流的最长存活，0 = 5min。到点强制收尾，
 	// 避免 pipeline 静默时消息永远停在「正在思考…」。
 	// 服务端硬上限是 10min，取一半留余量。
