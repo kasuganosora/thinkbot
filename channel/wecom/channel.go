@@ -717,7 +717,10 @@ func (c *WeComChannel) deliver(ctx context.Context, msg core.Message) {
 	if !c.isStopped() {
 		switch action, tid := c.resolveTurn(ctx, msg.Channel, msg.Text); action {
 		case turnAppend:
-			return // 已注入正在跑的那一轮
+			// 已注入正在跑的那一轮。tid 是**那一轮**的 traceID：
+			// 起一个兜底 watcher，万一补充没被消费就退化成新一轮（见 watchAppend）。
+			go c.watchAppend(c.deliveryCtx(ctx), msg, tid)
+			return
 		case turnStopped:
 			return // 已终止当前轮
 		case turnNew:

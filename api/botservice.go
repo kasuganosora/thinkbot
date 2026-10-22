@@ -99,6 +99,7 @@ type BotService struct {
 	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
 	messageSessions    map[string]string                  // "botID:traceID" → chat session id（供 active/resume 按会话过滤）
 	messageInterrupts  map[string]chan string             // "botID:traceID" → 用户中途追加通道（生成中补充）
+	messageAppends     map[string][]string                // "botID:traceID" → 本轮结束仍未被消费的补充（供 Channel 兜底，见 TakeUnconsumedAppends）
 	messageStarts      map[string]time.Time               // "botID:traceID" → 本轮开始时刻（供前端显示「已运行多久」，判断挂死）
 	// containerStarts tracks in-flight container+agent starts detached from HTTP
 	// requests. Image builds can take minutes; the request context must not cancel them.
@@ -188,6 +189,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageCancels:     make(map[string]context.CancelFunc),
 		messageSessions:    make(map[string]string),
 		messageInterrupts:  make(map[string]chan string),
+		messageAppends:     make(map[string][]string),
 		messageStarts:      make(map[string]time.Time),
 		containerStarts:    make(map[string]context.CancelFunc),
 		wfEngines:          make(map[string]*workflow.Manager),
@@ -605,14 +607,57 @@ func (s *BotService) RegisterMessageInterrupt(botID, traceID string, ch chan str
 }
 
 // UnregisterMessageInterrupt 注销一条消息的「用户中途追加」通道。
+//
+// ⚠️ 注销前必须把**没被取走**的补充留下来（见 TakeUnconsumedAppends）：
+// 「注入成功」不等于「被消费」—— 编排层只在「一步生成结束后」取一次
+// （drainInterruptMessages），而那一轮完全可能在这最后一次取用之后才真正结束。
+// 实测这个窗口约 0.7s（生成完成 → 出站 → 笔记落库 → OnMessageDone），
+// 落进去的补充会被静默丢弃。
 func (s *BotService) UnregisterMessageInterrupt(botID, traceID string) {
 	if botID == "" || traceID == "" {
 		return
 	}
 	key := messageCancelKey(botID, traceID)
 	s.mu.Lock()
+	ch := s.messageInterrupts[key]
 	delete(s.messageInterrupts, key)
+	if ch != nil {
+		var left []string
+		for {
+			select {
+			case t := <-ch:
+				left = append(left, t)
+				continue
+			default:
+			}
+			break
+		}
+		if len(left) > 0 {
+			if s.messageAppends == nil {
+				s.messageAppends = make(map[string][]string)
+			}
+			s.messageAppends[key] = append(s.messageAppends[key], left...)
+		}
+	}
 	s.mu.Unlock()
+}
+
+// TakeUnconsumedAppends 取回一条消息上**没被编排层消费**的用户补充。
+//
+// 供 Channel 层兜底：注入成功后若本轮随即结束，这些补充就没人管了 ——
+// 调用方应把它们退化成一次普通的新的入站消息，**绝不能就这么丢掉**。
+func (s *BotService) TakeUnconsumedAppends(botID, traceID string) []string {
+	if botID == "" || traceID == "" {
+		return nil
+	}
+	key := messageCancelKey(botID, traceID)
+	s.mu.Lock()
+	out := s.messageAppends[key]
+	if len(out) > 0 {
+		delete(s.messageAppends, key)
+	}
+	s.mu.Unlock()
+	return out
 }
 
 // AppendToMessage 在一条正在执行的消息（botID+traID）生成过程中，把用户
