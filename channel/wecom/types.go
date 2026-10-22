@@ -77,6 +77,15 @@ type Config struct {
 	// ⚠️ 实测 respond 连推 13 次零失败、不占 30 条/分钟配额，2s 一次很安全。
 	StreamDeltaInterval time.Duration
 
+	// StreamToolActivity 是否在流式气泡里显示工具活动行（只显示工具**名**）。
+	//
+	// 默认开：模型「在想但还没写出正文」的那段空窗里，工具调用是唯一的状态信号；
+	// 关掉它，那十几秒就只剩下「正在思考…」在跳秒。
+	//
+	// ⚠️ 只有**工具名**会被推出去：参数与返回值里可能有绝对路径、命令行、URL，
+	// 企微是外部渠道，带上就等于把内部信息写进聊天记录（见 toolActivityLine）。
+	StreamToolActivity bool
+
 	// PlaceholderRefresh 占位的刷新间隔，0 = 5s；<0 关闭刷新。
 	//
 	// 必须刷新：一轮生成实测 17~55s，占位推出来后就一动不动，

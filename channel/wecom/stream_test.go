@@ -2,6 +2,7 @@ package wecom
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,7 +46,8 @@ func (p *pushRec) last() streamPush {
 
 // newStreamTestChannel 造一个只测流式逻辑的 channel（不碰 WS 连接）。
 func newStreamTestChannel() *WeComChannel {
-	c := &WeComChannel{cfg: Config{StreamReply: true}}
+	// StreamToolActivity 取生产默认（开），与 createWecomChannel 的缺省一致。
+	c := &WeComChannel{cfg: Config{StreamReply: true, StreamToolActivity: true}}
 	c.streams = make(map[string]*wecomStream)
 	return c
 }
@@ -68,12 +70,12 @@ func TestFeedStream_PushesPartialContent(t *testing.T) {
 	st := newFakeStream(rec)
 	c.streams["k"] = st
 
-	ch := make(chan string, 8)
-	c.deltaSrc = func(string) (<-chan string, func()) { return ch, func() {} }
+	ch := make(chan Delta, 8)
+	c.deltaSrc = func(string) (<-chan Delta, func()) { return ch, func() {} }
 	c.cfg.StreamDeltaInterval = 1 // 1ns：每个增量都推，去掉节流抖动
 
-	ch <- "从前有"
-	ch <- "一座山"
+	ch <- Delta{Kind: DeltaText, Text: "从前有"}
+	ch <- Delta{Kind: DeltaText, Text: "一座山"}
 	close(ch)
 
 	c.feedStream(context.Background(), "k", "T1")
@@ -102,10 +104,10 @@ func TestFeedStream_DisabledWhenIntervalNegative(t *testing.T) {
 	rec := &pushRec{}
 	c.streams["k"] = newFakeStream(rec)
 	c.cfg.StreamDeltaInterval = -1
-	ch := make(chan string, 4)
-	ch <- "x"
+	ch := make(chan Delta, 4)
+	ch <- Delta{Kind: DeltaText, Text: "x"}
 	close(ch)
-	c.deltaSrc = func(string) (<-chan string, func()) { return ch, func() {} }
+	c.deltaSrc = func(string) (<-chan Delta, func()) { return ch, func() {} }
 
 	c.feedStream(context.Background(), "k", "T1")
 	if n := len(rec.all()); n != 0 {
@@ -198,7 +200,7 @@ func TestPlaceholderRefreshStopsAfterRealContent(t *testing.T) {
 
 	// 先刷一次占位，再推一段真实增量。
 	c.refreshPlaceholders(context.Background())
-	if !c.pushStreamContent(context.Background(), "k", st, "半截正文", true) {
+	if !c.pushStreamContent(context.Background(), "k", st, "半截正文", "半截正文"+streamDraftSuffix) {
 		t.Fatal("pushStreamContent should succeed")
 	}
 	// 「还在写…」只是推给用户的尾标，存档必须是干净正文 ——
@@ -273,9 +275,9 @@ func TestFeedStream_UnsubscribesWhenTurnEnds(t *testing.T) {
 	c.SetTurnController(ctl)
 
 	// 通道**永不关闭** —— 正是真实 EventBus 的行为。
-	ch := make(chan string, 1)
+	ch := make(chan Delta, 1)
 	var stopped atomic.Bool
-	c.deltaSrc = func(string) (<-chan string, func()) {
+	c.deltaSrc = func(string) (<-chan Delta, func()) {
 		return ch, func() { stopped.Store(true) }
 	}
 
@@ -311,8 +313,8 @@ func TestFeedStream_KeepsGoingWhileTurnAlive(t *testing.T) {
 	ctl.markLive("T1", true)
 	c.SetTurnController(ctl)
 
-	ch := make(chan string, 4)
-	c.deltaSrc = func(string) (<-chan string, func()) { return ch, func() {} }
+	ch := make(chan Delta, 4)
+	c.deltaSrc = func(string) (<-chan Delta, func()) { return ch, func() {} }
 	c.cfg.StreamDeltaInterval = 1
 
 	done := make(chan struct{})
@@ -330,7 +332,7 @@ func TestFeedStream_KeepsGoingWhileTurnAlive(t *testing.T) {
 	}
 
 	// 增量照旧要能推出来。
-	ch <- "半截正文"
+	ch <- Delta{Kind: DeltaText, Text: "半截正文"}
 	time.Sleep(100 * time.Millisecond)
 	st := c.currentStream("k")
 	if st == nil || !st.fed {
@@ -357,8 +359,8 @@ func TestFeedStream_DoesNotClobberNewerStream(t *testing.T) {
 	oldRec := &pushRec{}
 	c.streams["k"] = newFakeStream(oldRec)
 
-	ch := make(chan string, 8)
-	c.deltaSrc = func(string) (<-chan string, func()) { return ch, func() {} }
+	ch := make(chan Delta, 8)
+	c.deltaSrc = func(string) (<-chan Delta, func()) { return ch, func() {} }
 	c.cfg.StreamDeltaInterval = 1
 
 	done := make(chan struct{})
@@ -367,7 +369,7 @@ func TestFeedStream_DoesNotClobberNewerStream(t *testing.T) {
 		c.feedStream(context.Background(), "k", "T1")
 	}()
 
-	ch <- "上一轮的残稿"
+	ch <- Delta{Kind: DeltaText, Text: "上一轮的残稿"}
 	waitFor(t, func() bool { return len(oldRec.all()) >= 1 }, "first delta push")
 
 	// 新消息到达：旧流被收尾，新轮开了一条自己的流。
@@ -376,7 +378,7 @@ func TestFeedStream_DoesNotClobberNewerStream(t *testing.T) {
 	c.streams["k"] = newFakeStream(newRec)
 	c.streamMu.Unlock()
 
-	ch <- "再来一段"
+	ch <- Delta{Kind: DeltaText, Text: "再来一段"}
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -407,6 +409,191 @@ func TestSupersedeTextFor_KeepsDraftContent(t *testing.T) {
 	// 无提示文案（普通顶替）：交给 closeStream 用 st.content 原样定格。
 	if got := supersedeTextFor(draft, ""); got != "" {
 		t.Errorf("supersede text = %q, want empty (let closeStream freeze content)", got)
+	}
+}
+
+// TestFeedStream_ToolActivityShown 工具调用必须显示出来，且「正在调用」要被
+// 「完成」**就地改写**，不能两行并存（并存看起来像卡住了）。
+//
+// 为什么值得做：模型「在想、还没写出正文」的那段空窗里，工具调用是唯一的状态信号。
+func TestFeedStream_ToolActivityShown(t *testing.T) {
+	c := newStreamTestChannel()
+	rec := &pushRec{}
+	st := newFakeStream(rec)
+	c.streams["k"] = st
+
+	ch := make(chan Delta, 8)
+	c.deltaSrc = func(string) (<-chan Delta, func()) { return ch, func() {} }
+	c.cfg.StreamDeltaInterval = time.Hour // 正文走节流，只有工具事件会触发推送
+
+	ch <- Delta{Kind: DeltaToolStart, ID: "c1", Text: "sandbox_read_file"}
+	ch <- Delta{Kind: DeltaToolDone, ID: "c1", Text: "sandbox_read_file"}
+	ch <- Delta{Kind: DeltaText, Text: "正文"}
+	close(ch)
+
+	c.feedStream(context.Background(), "k", "T1")
+
+	pushes := rec.all()
+	if len(pushes) == 0 {
+		t.Fatal("tool activity must be pushed")
+	}
+	// 「正在调用」那一帧：工具还没结束，尾标应该是「工具执行中」而不是「还在写」。
+	if !strings.Contains(pushes[0].content, "🔧 正在调用 sandbox_read_file") {
+		t.Errorf("first push = %q, want running tool line", pushes[0].content)
+	}
+	if !strings.Contains(pushes[0].content, streamToolSuffix) {
+		t.Errorf("running tool must use the tool suffix, got %q", pushes[0].content)
+	}
+	last := pushes[len(pushes)-1].content
+	if !strings.Contains(last, "✅ sandbox_read_file 完成") {
+		t.Errorf("last push = %q, want completed tool line", last)
+	}
+	if strings.Contains(last, "🔧 正在调用") {
+		t.Errorf("the running line must be rewritten in place, got %q", last)
+	}
+	if !strings.Contains(last, "正文") {
+		t.Errorf("text must be composed under the activity block, got %q", last)
+	}
+}
+
+// TestFeedStream_ToolActivityDisabled 关掉开关后一条工具活动都不该出现。
+func TestFeedStream_ToolActivityDisabled(t *testing.T) {
+	c := newStreamTestChannel()
+	c.cfg.StreamToolActivity = false
+	rec := &pushRec{}
+	c.streams["k"] = newFakeStream(rec)
+
+	ch := make(chan Delta, 4)
+	c.deltaSrc = func(string) (<-chan Delta, func()) { return ch, func() {} }
+	c.cfg.StreamDeltaInterval = 1
+
+	ch <- Delta{Kind: DeltaToolStart, ID: "c1", Text: "sandbox_read_file"}
+	ch <- Delta{Kind: DeltaToolDone, ID: "c1", Text: "sandbox_read_file"}
+	close(ch)
+
+	c.feedStream(context.Background(), "k", "T1")
+	for _, p := range rec.all() {
+		if strings.Contains(p.content, "sandbox_read_file") {
+			t.Errorf("tool activity must be hidden when disabled, got %q", p.content)
+		}
+	}
+}
+
+// TestToolActivityLine 工具名之外的东西一律不出现在气泡里。
+func TestToolActivityLine(t *testing.T) {
+	cases := []struct {
+		name    string
+		done    bool
+		failed  bool
+		want    string
+		notWant []string
+	}{
+		{"sandbox_read_file", false, false, "🔧 正在调用 sandbox_read_file", nil},
+		{"sandbox_read_file", true, false, "✅ sandbox_read_file 完成", nil},
+		{"sandbox_exec", true, true, "❌ sandbox_exec 失败", nil},
+	}
+	for _, tc := range cases {
+		got := toolActivityLine(tc.name, tc.done, tc.failed)
+		if got != tc.want {
+			t.Errorf("toolActivityLine(%q,%v,%v) = %q, want %q", tc.name, tc.done, tc.failed, got, tc.want)
+		}
+	}
+}
+
+// TestPush_SerializesSameStream 同一条流的推送必须串行。
+//
+// ⚠️ conn.respond 对同一 req_id 只允许一个在途请求，撞上就报
+// 「already in flight」直接丢帧（2026-10-22 14:55:08 真机丢过一次）。
+// 丢掉收尾帧会让 Send 回退成整段发送 —— 用户多收到一个气泡。
+func TestPush_SerializesSameStream(t *testing.T) {
+	rec := &pushRec{}
+	st := newFakeStream(rec)
+
+	// ⚠️ 必须模拟 conn.respond 的真实行为：同一 req_id 只允许一个在途，
+	// 并发进来就报「already in flight」丢帧。
+	// 少了这段模拟，去掉 pushMu 这个测试也照样全绿 —— 测试就成了摆设。
+	var inflight atomic.Int32
+	st.fakePush = func(content string, finish bool) error {
+		if inflight.Add(1) != 1 {
+			inflight.Add(-1)
+			return errors.New("wecom: respond req_id X already in flight")
+		}
+		time.Sleep(80 * time.Millisecond) // 模拟等 ACK
+		inflight.Add(-1)
+		rec.add(content, finish)
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	var lost atomic.Int32
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := st.push(context.Background(), "帧", false); err != nil {
+				lost.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := rec.all(); len(got) != 5 {
+		t.Errorf("all 5 pushes must go through, got %d (lost=%d)", len(got), lost.Load())
+	}
+	if lost.Load() != 0 {
+		t.Errorf("%d pushes were dropped as 'already in flight'", lost.Load())
+	}
+}
+
+// TestTryPush_YieldsWhenBusy 占位刷新用 tryPush：上一条还在等 ACK 就**放弃**，
+// 而不是阻塞 —— 否则会拖住共享 ticker，连正文推送一起慢下来。
+func TestTryPush_YieldsWhenBusy(t *testing.T) {
+	rec := &pushRec{}
+	st := newFakeStream(rec)
+	release := make(chan struct{})
+	st.fakePush = func(content string, finish bool) error {
+		<-release // 卡住，模拟 ACK 迟迟不来
+		rec.add(content, finish)
+		return nil
+	}
+
+	go func() { _ = st.push(context.Background(), "正文", false) }()
+	time.Sleep(30 * time.Millisecond) // 等它拿到锁
+
+	if err := st.tryPush(context.Background(), "正在思考… 9s", false); !errors.Is(err, errPushBusy) {
+		t.Fatalf("tryPush must yield while busy, got %v", err)
+	}
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+	if got := len(rec.all()); got != 1 {
+		t.Errorf("only the content frame must be pushed, got %d", got)
+	}
+}
+
+// TestRefreshPlaceholders_SkipsWhenBusy 刷新撞上在途推送时要静默跳过，
+// 不能打成 WARN —— 那是并发让路，不是故障，打 WARN 会把真正的错误淹掉。
+func TestRefreshPlaceholders_SkipsWhenBusy(t *testing.T) {
+	c := newStreamTestChannel()
+	rec := &pushRec{}
+	st := newFakeStream(rec)
+	st.pushed = true
+	st.started = time.Now().Add(-12 * time.Second)
+	c.streams["k"] = st
+
+	release := make(chan struct{})
+	st.fakePush = func(content string, finish bool) error {
+		<-release
+		rec.add(content, finish)
+		return nil
+	}
+
+	go func() { _ = st.push(context.Background(), "正文", false) }()
+	time.Sleep(30 * time.Millisecond)
+
+	c.refreshPlaceholders(context.Background()) // 必须立刻返回，不能卡在锁上
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+	if got := len(rec.all()); got != 1 {
+		t.Errorf("busy refresh must be skipped, got %d pushes", got)
 	}
 }
 
