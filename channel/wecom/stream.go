@@ -62,6 +62,10 @@ type wecomStream struct {
 	// content 最近一次推送的全量内容（超时兜底时用它收尾）。
 	content string
 	closed  bool
+
+	// refreshed 已刷新占位的次数。只用于可观测性：成功刷新的日志
+	// 每流只留第一条，否则长任务会刷出一整屏。
+	refreshed int
 }
 
 // streamEnabled 是否启用流式回复。
@@ -275,7 +279,21 @@ func (c *WeComChannel) refreshPlaceholders(ctx context.Context) {
 		}
 		c.streamMu.Lock()
 		st.content = text
+		first := st.refreshed == 0
+		st.refreshed++
 		c.streamMu.Unlock()
+
+		// ⚠️ 刷新成功也得留痕（每流只留第一条）：否则「占位到底刷没刷」
+		// 只能靠肉眼盯着客户端看，事后无从核对。
+		if first {
+			traceid.L(ctx).Infow("wecom: stream placeholder refreshing (turn still alive)",
+				"channel", c.name, "stream_id", st.streamID,
+				"elapsed", now.Sub(st.started).String())
+		} else {
+			traceid.L(ctx).Debugw("wecom: stream placeholder refreshed",
+				"channel", c.name, "stream_id", st.streamID,
+				"elapsed", now.Sub(st.started).String())
+		}
 	}
 }
 
