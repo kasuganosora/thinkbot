@@ -55,6 +55,37 @@ type Config struct {
 	// 代价：没有媒体跟随的纯文本消息，回复会被推迟整个窗口时长。
 	// 实测两条回调间隔 0.3~2.5s，故默认 3s。
 	CaptionWindow time.Duration
+
+	// StreamReply 启用流式回复：收到消息先推一条「正在思考…」，
+	// pipeline 出结果后用 finish=true **原位替换**成最终答案（docs §9.2.9）。
+	//
+	// 零值 = 关闭（走原来的整段 aibot_send_msg）。**任何一步失败都会自动回退**
+	// 到整段发送，不会因此丢消息。
+	StreamReply bool
+
+	// PlaceholderDelay 推占位的延迟，0 = 1.5s（见 stream.go 的注释：
+	// 快回复不推，避免「思考中」闪一下就被替换的劣质观感）。
+	PlaceholderDelay time.Duration
+
+	// StreamMaxAge 一条流的最长存活，0 = 5min。到点强制收尾，
+	// 避免 pipeline 静默时消息永远停在「正在思考…」。
+	// 服务端硬上限是 10min，取一半留余量。
+	StreamMaxAge time.Duration
+
+	// InterruptPolicy bot 正在输出时，用户又发来一条，这条归谁？
+	//   - "" / "restart"（默认）：打断旧轮 + 开新一轮。
+	//   - "append"：注入正在跑的那一轮，让它带着补充继续跑。
+	//
+	// 默认取 restart：聊天场景里连发两句通常是想另起话题，
+	// 把两轮内容混在一条回复里，比丢掉补充更难受。
+	// 无论哪种策略，「停止」这类终止指令都只打断、不开新轮（见 turn.go）。
+	InterruptPolicy string
+
+	// StopCommands 额外终止指令（在默认值之外追加）。
+	//
+	// ⚠️ 整句完全匹配才生效：「停一下再说」不是终止指令。
+	// 否则用户一开口带「停」字就被掐断，体验灾难。
+	StopCommands []string
 }
 
 // frame 是长连接上所有帧的统一外层结构。
@@ -100,6 +131,25 @@ type markdownBody struct {
 	Content string `json:"content"`
 }
 
+// respondBody 是 aibot_respond_msg 的请求体（被动回复，含流式）。
+//
+// ⚠️ 与 aibot_send_msg 的根本区别：它不是「主动推一条新消息」，而是「对某一次
+// 回调的回复」，req_id 必须透传那次回调的（见 callbackBody.ReqID）。
+type respondBody struct {
+	MsgType string      `json:"msgtype"`
+	Stream  *streamBody `json:"stream,omitempty"`
+}
+
+// streamBody 是流式消息的内容。
+//
+// ⚠️ content 是**全量内容**不是增量：同 id 再推一次 = 客户端原位替换上一条。
+// ⚠️ 首次推送起 10 分钟内必须 finish=true，否则服务端自动结束该流。
+type streamBody struct {
+	ID      string `json:"id"`
+	Finish  bool   `json:"finish"`
+	Content string `json:"content"`
+}
+
 // callbackBody 是 aibot_msg_callback 的消息体。
 type callbackBody struct {
 	MsgID    string `json:"msgid"`
@@ -110,6 +160,14 @@ type callbackBody struct {
 		UserID string `json:"userid"`
 	} `json:"from"`
 	MsgType string `json:"msgtype"`
+
+	// ReqID 是本次回调**帧**的 headers.req_id（不在 body 里，由 dispatch 填进来）。
+	//
+	// ⚠️ 这是被动回复（aibot_respond_msg，含流式）的钥匙：
+	// 服务端靠它把回复关联回某一次回调，且**同一次回调的所有流式刷新都用同一个**。
+	// 早期版本在 dispatch 里只把 body 往下传，req_id 丢了 —— 流式根本无从下手。
+	// 一次性凭据（内含语义），不进 metadata / 不落会话历史，用完即弃。
+	ReqID string `json:"-"`
 
 	Text  *textContent  `json:"text,omitempty"`
 	Image *mediaContent `json:"image,omitempty"`
@@ -220,4 +278,7 @@ const (
 	MsgTypeFile     = "file"
 	MsgTypeVideo    = "video"
 	MsgTypeMarkdown = "markdown"
+	// MsgTypeStream 流式消息。**只有 aibot_respond_msg 支持**（长连接模式），
+	// aibot_send_msg 与 response_url 都不认它（后者实测返回 40008，见 docs §9.2.3）。
+	MsgTypeStream = "stream"
 )

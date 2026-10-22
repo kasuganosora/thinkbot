@@ -526,6 +526,84 @@ Ingress 缓冲打满，让 `deliver` 真的阻塞，把窗口放大成必现。
    `reply_target` = 完整会话标识、`channel_type=wecom`、`__history_managed=true`
    （否则续跑回复只发出、不进历史）。群聊按前缀设 `ChatType=group`。
 
+### 9.2.9 流式回复（类 SSE）：`aibot_respond_msg` + `msgtype=stream`（2026-10-22 实测）
+
+协议要点（官方长连接文档 + 真机探针 15/15 步全 ok）：
+
+| 项目 | 实测结论 |
+| --- | --- |
+| 帧 | `aibot_respond_msg`，body `{msgtype:"stream", stream:{id, finish, content}}` |
+| `req_id` | **必须透传消息回调帧的 req_id**（`headers.req_id`，不在 body 里）。同一回调的多次刷新用同一个 req_id |
+| `content` | **全量内容**，不是增量。同 `stream.id` 再推一次 = 客户端原位替换 |
+| `finish` | `true` 收尾。服务端从**首次推送起 10 分钟**硬上限 |
+| 响应窗口 | 收到回调起 24 小时内可 respond |
+| `response_url` | **不支持** stream（errcode 40008），只有长连接模式能做 |
+
+⚠️ `req_id` 在**帧头**不在 body —— 早先 `dispatch` 只解 body、把 header 里的 req_id 丢了，
+流式压根没法做。修在 `conn.go` 的 `dispatch`：`body.ReqID = f.Headers.ReqID`。
+
+实测数据（探针连推）：
+
+- 首推 / 反复刷新 / finish 全部 `errcode=0`
+- **连推 13 次（≈5 次/秒，折合 300 次/分钟）零失败**
+  → respond **不**落在「30 条/分钟/会话」那条限流上（那是 `aibot_send_msg` 的口径）
+- 单次 content **27049 字节**也成功 → 流式通道**不**受 markdown 的 20480 字节上限
+- 与 `aibot_send_msg` 并存不冲突（刷流的同时 bot 照常整段回复）
+
+实现（A 档，`channel/wecom/stream.go`）：入站先登记流（`openStream`），
+1.5s 后才推「正在思考…」占位（`pushPlaceholder`）—— 快回复不推，避免「思考中」闪一下就被替换；
+pipeline 出结果后 `Send` 用 `finish=true` **原位替换**。任何一步失败都回退整段发送，**不会丢消息**。
+
+几个不显然的点：
+
+- **占位延迟是必要的**：实测 bot 单轮 17~20s，绝大多数场景都会落在占位之后；
+  但短回复若也推占位，观感比干等还差。
+- **「首推就是 finish=true」未实测**（15 步探针没覆盖：正常回复都要十几秒，占位早推过了）。
+  代码不赌这条：检测到还没推过就先补一帧 `finish=false`，两步都落在实测过的路径上。
+- **超时必须兜底**：pipeline 完全可能决定不回复（静默 / 被抑制 / 出错），
+  那时没人会来 finish，消息会永远停在「正在思考…」直到服务端 10 分钟兜底。
+  `reapStreams`（5min）+ `abortStreams`（停机时）负责收尾。
+
+### 9.2.10 轮次控制：输出过程中的「补充 / 打断 / 终止」（2026-10-22）
+
+企微**没有**「回复/引用某条消息」的引用关系，也**没有**中止按钮，
+所以「bot 正在输出时用户又发来一句，这句话归谁」只能靠状态判定。
+
+能力与 web 端同源 —— `POST /api/chat/append` 与 `/api/chat/abort` 用的就是
+`BotService.AppendToMessage` / `AbortMessage`，这里只是给企微接上同一个出口
+（`channel/wecom/turn.go`）。三种动作：
+
+| 动作 | 触发条件 | 行为 |
+| --- | --- | --- |
+| `turnNew` | 无在跑轮次 / 僵尸轮次 | 起新一轮 |
+| `turnNew`（restart） | 有在跑轮次，默认策略 | 打断旧轮 + 起新一轮 |
+| `turnAppend` | 有在跑轮次 + `interruptPolicy=append` | 注入当前轮继续跑 |
+| `turnStopped` | 有在跑轮次 + 文本终止指令 | 只打断，不起新轮 |
+
+默认取 **restart**：聊天场景里连发两句通常是想另起话题，
+把两轮内容混在一条回复里比丢掉补充更难受。终止指令无论哪种策略都只打断。
+
+⚠️⚠️ **「本轮还在不在跑」必须以编排侧为准**（`TurnController.IsMessageActive`），
+不能靠「出站 Send 来过就摘掉」：
+
+1. `core.Action` **不带 TraceID**，出站侧认不出自己在服务哪一輪；
+   在 `Send` 里无差别摘除，会把「下一轮刚登记、本轮才刚出结果」的竞态窗口变成误摘。
+2. pipeline 完全可能**决定不回复**（静默），那时根本不会有 Send 回调，
+   活跃表里会留下一堆僵尸项 —— 后续消息一律被判成「打断一个已经结束的轮次」，
+   白推一条「（这条已被新消息打断）」，用户的「停止」也会被吃掉。
+
+配套的两个细节：
+
+- **轮次在 `deliver` 里登记**，不在 `handleMsgCallback` 里：配文暂存的那 3s 里
+  pipeline 还没起，那时就登记，会让随后的消息去打断一个**根本没在跑**的轮次。
+- **bot 忙时不走配文合并窗口**（`holdWorthy`）：打断与「停止」必须即时生效，
+  再等 3s 用户早把「停止」发了三遍了。`startsNewTurn` 同理决定要不要开流 ——
+  终止指令要复用旧流（finish 时原位替换成「已停止。」），给它开新流会多冒一个气泡。
+
+终止指令**整句完全匹配**才生效：「停一下再说」「请停止输出」都不是终止指令，
+否则用户一开口带「停」字就被掐断，体验灾难。内置词表见 `defaultStopCommands`，
+可用 `stopCommands` 追加。
+
 ### 9.3 真实回调样本
 
 ```json

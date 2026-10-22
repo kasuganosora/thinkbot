@@ -99,6 +99,24 @@ type WeComChannel struct {
 	pendMu sync.Mutex
 	pend   map[string]*pendingCaption
 
+	// streams 按会话标识索引的进行中流式消息（见 stream.go）。
+	//
+	// ⚠️ key 只能是会话标识：core.Action 没有 TraceID 字段，出站侧（Send）
+	// 拿不到 trace，唯一能对上号的就是 action.Channel。
+	streamMu sync.Mutex
+	streams  map[string]*wecomStream
+
+	// turnCtl 由 api 层注入的轮次控制能力（abort / append），见 turn.go。
+	// 与 fileSink 同构：为 nil 时退化为「每条消息都开新一轮」，功能不受损。
+	turnCtl TurnController
+
+	// active 按会话标识索引的**正在执行**轮次（见 turn.go）。
+	//
+	// ⚠️ 判定「本轮是否还在跑」全靠这张表：企微没有引用/回复关系，
+	// 用户连发两条消息时无法从协议上区分「补充」还是「另起话题」。
+	turnMu sync.Mutex
+	active map[string]*activeTurn
+
 	// inbox 入站消息队列，由 inboxLoop 串行消费（见 enqueueMsg 的注释）。
 	//
 	// ⚠️ 不要在 WS 分发循环里直接处理消息回调：媒体下载最长 30s×4 项，
@@ -145,6 +163,8 @@ func NewChannel(name, botID string, cfg Config) *WeComChannel {
 		dedup:   make(map[string]time.Time),
 		pend:    make(map[string]*pendingCaption),
 		inbox:   make(chan *callbackBody, wecomInboxSize),
+		streams: make(map[string]*wecomStream),
+		active:  make(map[string]*activeTurn),
 	}
 }
 
@@ -222,6 +242,11 @@ func (c *WeComChannel) Stop(ctx context.Context) error {
 	c.stopped = true
 	c.mu.Unlock()
 	c.flushPending()
+
+	// ⚠️ 收尾全部进行中的流：进程一走就再没人能 finish，
+	// 客户端那条「正在思考…」会一直挂到服务端 10 分钟兜底。
+	// 必须在取消 runCtx **之前**做 —— 取消后连接就断了，推不出去。
+	c.abortStreams(c.deliveryCtx(nil))
 
 	c.mu.Lock()
 	if c.cancel != nil {
@@ -419,6 +444,10 @@ func (c *WeComChannel) cleanupLoop(ctx context.Context) {
 			round++
 			if round%wecomPruneLimiterDiv == 0 {
 				c.limiter.prune()
+				// 顺带收尾超时未完成的流（pipeline 静默时没人会来 finish）。
+				c.reapStreams(ctx)
+				// 顺带摘掉僵死的轮次（pipeline 决定不回复时没人来摘）。
+				c.reapTurns(ctx)
 			}
 		}
 	}
@@ -584,6 +613,21 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 		CreatedAt: time.Now(),
 	}
 
+	// 开流（A 档）：登记这条回调的 req_id，占位由延迟定时器推，最终回复会原位替换。
+	//
+	// ⚠️ 必须在 caption 分支**之前**：走 holdPending 的消息要等 3s 才投递，
+	// 那时再开流就已经晚了（占位要等 3s 后才出现）。放在这里两条路径都覆盖。
+	//
+	// ⚠️ req_id 是本次回调帧的；合并后的消息带的是**媒体那条**回调的 req_id，
+	// 配文那条回调的 req_id 用不上（一次回复只能关联一次回调）。
+	//
+	// ⚠️ 只有「这条消息会起一个新轮次」时才开流（见 startsNewTurn）：
+	// 终止指令要复用旧流、finish 时原位替换成「已停止。」；
+	// append 补充不产生新气泡。给它开流会多冒一条「（这条已被新消息打断）」。
+	if c.startsNewTurn(channelID, text) {
+		c.openStream(ctx, channelID, body.ReqID, turnInterruptText)
+	}
+
 	// ⚠️ caption 合并（docs §9.2.4）：企微发文件时把配文拆成另一条**独立回调**
 	// （两个 msgid、无任何关联字段），直接投递会让 bot 对「文字」和「文件」各回一次。
 	// 裸文本先暂存一个窗口，期间同人同会话来了媒体消息就并进去、只发一条。
@@ -601,7 +645,9 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 	var pendingMentioned bool
 	if w := c.cfg.CaptionWindow; w > 0 {
 		key := channelID + "|" + userID
-		if len(items) == 0 && text != "" {
+		// ⚠️ bot 忙 / 终止指令时不暂存：打断与「停止」必须即时生效，
+		// 再等 3s 合并窗口就太迟了（见 holdWorthy）。
+		if len(items) == 0 && text != "" && c.holdWorthy(channelID, text) {
 			c.holdPending(ctx, key, w, msg)
 			return
 		}
@@ -656,14 +702,36 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 }
 
 // deliver 把归一化后的消息投给 Ingress。
+//
+// ⚠️ 这里也是**轮次控制的唯一入口**：立即投递 / 配文暂存后投递 / Stop 时 flush
+// 三条路径都汇聚过来，而「本轮是否还在跑」必须等到**真要把消息交给 pipeline 的
+// 这一刻**才判定 —— 配文暂存的那 3s 里 pipeline 还没起，那时就登记轮次，
+// 会让随后的消息去打断一个根本没在跑的轮次（Abort 落空，还把人家的 traceID 摘了）。
 func (c *WeComChannel) deliver(ctx context.Context, msg core.Message) {
 	ing := c.getIngress()
 	if ing == nil {
 		return
 	}
+	// 停机回灌（flushPending）不做轮次判定：服务要关了，别再触发 abort。
+	if !c.isStopped() {
+		switch action, tid := c.resolveTurn(ctx, msg.Channel, msg.Text); action {
+		case turnAppend:
+			return // 已注入正在跑的那一轮
+		case turnStopped:
+			return // 已终止当前轮
+		case turnNew:
+			// Ingress.Receive 会保留已设的 TraceID（为空才自己生成），
+			// 所以我们在这里钉死它，后面才能拿同一个 ID 去 abort/append。
+			msg.TraceID = tid
+		}
+	}
+	// ⚠️ 必须在 Receive **之前**登记：Ingress 是异步派发的，
+	// 晚一步登记会出现「pipeline 已在跑但活跃表里查不到」的空窗。
+	c.beginTurn(msg.Channel, msg.TraceID)
 	if err := ing.Receive(c.deliveryCtx(ctx), msg); err != nil {
 		traceid.L(ctx).Warnw("wecom: ingress receive failed",
 			"channel", c.name, "msgid", msg.ID, "err", err)
+		c.clearTurn(msg.Channel, msg.TraceID)
 	}
 }
 
@@ -1006,6 +1074,11 @@ func (c *WeComChannel) Send(ctx context.Context, action core.Action) error {
 		return nil // 空消息不发送
 	}
 
+	// ⚠️ 刻意**不**在这里摘活跃轮次：core.Action 不带 TraceID，出站侧认不出
+	// 自己在服务哪一輪，无差别摘除会把「下一轮刚登记、本轮才刚出结果」的
+	// 竞态窗口变成误摘。轮次是否还在跑一律以编排侧的 IsActive 为准
+	// （见 turn.go 的 turnRunning）。
+
 	chatID, chatType, err := parseTarget(target)
 	if err != nil {
 		return err
@@ -1016,6 +1089,19 @@ func (c *WeComChannel) Send(ctx context.Context, action core.Action) error {
 	sess := c.currentSession()
 	if sess == nil {
 		return errors.New("wecom send: no active connection (reconnecting)")
+	}
+
+	// 流式优先：本轮若开着一条流，用 finish=true 原位替换掉「正在思考…」。
+	//
+	// ⚠️ 必须放在整段发送**之前**，且失败要能落回去 —— 流式只是「更好看的同一条回复」，
+	// 它失败绝不能变成「消息发不出去」。
+	// ⚠️ 走流式时**不截断**：实测流式通道不受 markdown 的 20480 字节上限
+	// （27049 字节照样成功），截掉反而会丢内容。
+	// ⚠️ 也**不走** limiter：那是 aibot_send_msg 的 30 条/分钟口径，
+	// 实测 respond 连推 13 次（≈5 次/秒）零失败，不属于该配额。
+	if c.finishStream(ctx, target, text) {
+		traceid.L(ctx).Debugw("wecom send: ok via stream", "channel", c.name, "target", target)
+		return nil
 	}
 
 	// 30 条/分钟/会话。宁可晚两秒发出去，也不要触发限流后整条丢掉。
