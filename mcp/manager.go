@@ -40,6 +40,9 @@ type ServerConfig struct {
 	// Headers HTTP 模式下的自定义请求头。
 	Headers map[string]string
 
+	// Cwd stdio 模式下子进程的工作目录；空则继承当前进程。
+	Cwd string
+
 	// Enabled 是否启用。false 时跳过此服务器。
 	Enabled bool
 }
@@ -82,15 +85,59 @@ func (m *Manager) AddServer(cfg ServerConfig) {
 	m.configs[cfg.Name] = cfg
 }
 
-// RemoveServer 移除并关闭一个服务器。
+// RemoveServer 移除并关闭一个服务器，并触发 onServerChange 以失效工具缓存。
 func (m *Manager) RemoveServer(name string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if client, ok := m.clients[name]; ok {
-		_ = client.Close()
+	client, ok := m.clients[name]
+	if ok {
 		delete(m.clients, name)
 	}
+	_, hadCfg := m.configs[name]
 	delete(m.configs, name)
+	m.mu.Unlock()
+
+	if ok {
+		_ = client.Close()
+	}
+	if ok || hadCfg {
+		m.notifyServerChange()
+	}
+}
+
+// UpsertServer 写入（或覆盖）服务器配置，并按 Enabled 热连接/断开。
+//
+// 与 AddServer+EnableServer 的区别：若同名服务器已连接，会先断开再按新配置重连，
+// 使 Admin UI / 工具侧的「改 command/url 后保存」无需重启即可生效；连接变化会触发
+// onServerChange，使 Provider 缓存失效、下次 Tools() 重新 list_tools。
+func (m *Manager) UpsertServer(ctx context.Context, cfg ServerConfig) error {
+	if cfg.Name == "" {
+		return fmt.Errorf("mcp: server name is required")
+	}
+
+	m.mu.Lock()
+	oldClient, wasConnected := m.clients[cfg.Name]
+	if wasConnected {
+		delete(m.clients, cfg.Name)
+	}
+	m.configs[cfg.Name] = cfg
+	m.mu.Unlock()
+
+	if wasConnected {
+		_ = oldClient.Close()
+	}
+
+	if !cfg.Enabled {
+		m.notifyServerChange()
+		return nil
+	}
+
+	if err := m.connectOne(ctx, cfg); err != nil {
+		m.notifyServerChange()
+		return err
+	}
+	m.logger.Infow("mcp server upserted and connected", "server", cfg.Name, "transport", cfg.Transport)
+	m.notifyServerChange()
+	return nil
 }
 
 // EnableServer 启用并连接指定的 MCP 服务器。
@@ -297,7 +344,7 @@ func (m *Manager) createClient(ctx context.Context, cfg ServerConfig) (*Client, 
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("mcp: server %q: stdio transport requires command", cfg.Name)
 		}
-		tp, err = newStdioTransport(ctx, cfg.Command, cfg.Args, cfg.Env, cfg.Stderr)
+		tp, err = newStdioTransport(ctx, cfg.Command, cfg.Args, cfg.Env, cfg.Cwd, cfg.Stderr)
 	case "http":
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("mcp: server %q: http transport requires url", cfg.Name)

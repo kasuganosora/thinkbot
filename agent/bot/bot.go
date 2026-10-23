@@ -97,6 +97,10 @@ type Bot struct {
 	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
 	closerOnce  sync.Once // 确保 Close 只执行一次
 
+	// 用户配置的 MCP 管理器（Admin UI / mcp_server 工具 → data/mcp/{botId}/servers.json）。
+	// 与 browserMCP 分离：浏览器是内置能力，用户 MCP 是可热挂载的外部服务器。
+	userMCP *mcp.Manager
+
 	// 浏览器 MCP 管理器（per-bot，docker 后端 + BrowserEnabled 时创建；nil=未启用）。
 	browserMCP *mcp.Manager
 	alignMu    sync.Mutex // 打开桌面时把浏览器挪到共享屏幕，避免并发重启
@@ -429,6 +433,13 @@ func New(params BotParams) (*Bot, error) {
 		}
 	}
 
+	// 接入用户配置的 MCP 服务器（data/mcp/{botId}/servers.json）。
+	// 不依赖 docker 工作空间：stdio 在宿主侧拉起，http/sse 直连远端。
+	// 空配置也会创建 Manager，便于运行中热挂载而无需重启。
+	if params.ToolManager != nil && params.Mode != pipeline.ModeLurkOnly {
+		setupUserMCP(bot, params)
+	}
+
 	// 创建 Engine，注入 Bot 的 hook
 	bot.engine = agent.NewEngine(
 		ingress,
@@ -545,6 +556,13 @@ func (b *Bot) Close() {
 		}
 		if b.skillMgr != nil {
 			b.skillMgr.SaveEnabledStates(context.Background())
+		}
+		// 关闭用户 MCP 连接（stdio 子进程 / HTTP 会话）。
+		if b.userMCP != nil {
+			if err := b.userMCP.Close(); err != nil {
+				b.logger.Warnw("user mcp close failed", "err", err)
+			}
+			b.userMCP = nil
 		}
 		// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再关闭传输层、读回状态文件持久化到 DB。
 		// 必须在工作空间管理器关闭（容器销毁）之前完成。

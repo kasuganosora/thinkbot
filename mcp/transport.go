@@ -47,9 +47,12 @@ type stdioTransport struct {
 	wg     sync.WaitGroup
 }
 
-func newStdioTransport(ctx context.Context, command string, args, env []string, stderr io.Writer) (*stdioTransport, error) {
+func newStdioTransport(ctx context.Context, command string, args, env []string, cwd string, stderr io.Writer) (*stdioTransport, error) {
 	cmdCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cmdCtx, command, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	if len(env) > 0 {
 		// 追加而非替换，避免丢掉 PATH 等基础环境导致命令（如 docker）找不到。
 		cmd.Env = append(os.Environ(), env...)

@@ -20,6 +20,17 @@ mcp/
 
 ## 配置
 
+### Per-bot（Admin UI / `mcp_server` 工具）
+
+每个 Bot 的 MCP 服务器保存在 `data/mcp/{botId}/servers.json`。
+
+- Bot 启动时 `setupUserMCP` 加载并 `UpsertServer`；空配置也会创建 Manager，便于热挂载。
+- Admin API（`POST/PUT/DELETE /api/bots/:id/mcp`）写文件后对运行中 bot 调用 `UpsertServer` / `RemoveServer`，`Provider` 经 `onServerChange` 失效缓存，**无需重启**。
+- Bot 可调用工具 `mcp_server`（action=`list|add|remove|enable|disable`）同样写文件并热挂载。`mcp_` 前缀为敏感工具，需在工具权限中显式 allow；系统会话与子代理硬拒绝。
+
+### 全局（config.Store）
+
+
 在 `.env` 或数据库中配置：
 
 ```bash
@@ -85,7 +96,8 @@ mcp.RegisterTools(toolMgr, mgr)
 | 方法 | 说明 |
 | --- | --- |
 | `NewManager(logger)` | 创建管理器 |
-| `AddServer(ServerConfig)` / `RemoveServer(name)` | 注册（不立即连接）/ 移除并关闭 |
+| `AddServer(ServerConfig)` / `RemoveServer(name)` | 注册（不立即连接）/ 移除并关闭（触发缓存失效） |
+| `UpsertServer(ctx, ServerConfig)` | 覆盖配置并按 Enabled 热连接/断开（改配置后重连） |
 | `Connect(ctx)` | 连接所有 `Enabled` 的服务器，部分失败会汇总为 error |
 | `EnableServer(ctx, name)` / `DisableServer(name)` | 运行时开关单个服务器，幂等，触发缓存失效回调 |
 | `IsServerEnabled(name)` / `IsServerConnected(name)` | 状态查询 |
