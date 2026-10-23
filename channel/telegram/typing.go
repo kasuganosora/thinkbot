@@ -16,7 +16,7 @@ import (
 // error / max age.
 //
 // Groups and private chats both get typing refresh. Placeholder + editMessageText
-// streaming (if added later) is private-only — see isPrivateChat.
+// streaming is private-only — see stream.go and isPrivateChat.
 // ============================================================================
 
 const (
@@ -175,7 +175,7 @@ func (c *TelegramChannel) sendTypingOnce(ctx context.Context, chatID int64) erro
 
 // isPrivateChat reports whether chatType is a 1:1 DM.
 //
-// Placeholder + editMessageText streaming (when enabled) must stay private-only:
+// Placeholder + editMessageText streaming (stream.go) must stay private-only:
 // group/supergroup placeholders would spam the room. Typing keepalive still
 // runs in every chat type.
 func isPrivateChat(chatType string) bool {
