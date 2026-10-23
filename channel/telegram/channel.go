@@ -352,11 +352,6 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		return
 	}
 
-	// Typing keepalive: Telegram typing expires ~5s; refresh every ~4s while
-	// the agent run is in flight so long replies don't look stuck. Stopped in
-	// Send / on Receive failure / Stop / max age (see typing.go).
-	c.startTypingKeepalive(msg.Chat.ID)
-
 	// 转换 chat ID 为字符串 channel
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)
 	// 记录近期会话，供心跳等自主发帖场景枚举目标（无副作用，失败不影响消息处理）。
@@ -475,13 +470,20 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		core.SetAttachments(&coreMsg, attachments)
 	}
 
-	// Private-chat edit stream: pre-assign TraceID so feedStream can subscribe
-	// before Ingress.Receive (same ordering as WeCom). Groups skip this —
-	// typing keepalive only, one final message on Send.
+	// Pre-assign TraceID before typing / stream / Receive so keepalive and
+	// feedStream can watch IsMessageActive for cancel / silent / drop /
+	// hard-timeout without waiting for max age. Ingress keeps a non-empty value.
+	if coreMsg.TraceID == "" {
+		coreMsg.TraceID = traceid.New()
+	}
+
+	// Typing keepalive: Telegram typing expires ~5s; refresh every ~4s while
+	// the agent run is in flight. Stopped on Send / Receive failure / Stop /
+	// turn inactive / max age (~3 min). See typing.go.
+	c.startTypingKeepalive(msg.Chat.ID, coreMsg.TraceID)
+
+	// Private-chat edit stream (groups: typing only, one final message on Send).
 	if c.streamEnabled() && isPrivateChat(chatType) {
-		if coreMsg.TraceID == "" {
-			coreMsg.TraceID = traceid.New()
-		}
 		c.openStream(ctx, msg.Chat.ID, chatType, coreMsg.TraceID, msg.MessageID)
 	}
 

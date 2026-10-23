@@ -49,8 +49,9 @@ const (
 	defaultEditInterval = 1 * time.Second
 
 	// defaultStreamMaxAge hard-stops a stream that never got a final Send
-	// (silent / suppressed / error). Must not leave 「正在思考…」 forever.
-	defaultStreamMaxAge = 10 * time.Minute
+	// (silent / suppressed / error / mid-generation hang). Aligned with
+	// typingMaxAge (~3 min) so placeholder and typing release together.
+	defaultStreamMaxAge = 3 * time.Minute
 
 	// streamEditTimeout bounds a single send/edit call.
 	streamEditTimeout = 10 * time.Second
@@ -167,10 +168,11 @@ func (c *TelegramChannel) openStream(ctx context.Context, chatID int64, chatType
 
 	st.timer = time.AfterFunc(streamPlaceholderDelay, func() { c.pushPlaceholder(chatID, st) })
 
-	if c.deltaSrc != nil {
-		c.wg.Add(1)
-		go c.feedStream(stCtx, chatID, st, traceID)
-	}
+	// Always start feedStream: even without a delta source it runs the
+	// liveness / max-age watchdog so cancel / silent / hang never leave
+	// 「正在思考…」 (and stop typing via releaseTurnUI).
+	c.wg.Add(1)
+	go c.feedStream(stCtx, chatID, st, traceID)
 }
 
 // supersedeTGText chooses finish text when a newer private inbound replaces an
@@ -342,16 +344,21 @@ func (c *TelegramChannel) abortAllStreams(ctx context.Context) {
 //
 // Must be started before Ingress.Receive so early deltas are not missed.
 // Exits cleanly on cancel / channel close / orchestrator idle / max age.
+// Always releases typing + finishes the placeholder when the turn ends
+// without Send (silent / abort / hard-timeout / hang max age).
 func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tgStream, traceID string) {
 	defer c.wg.Done()
-	if c.deltaSrc == nil || mine == nil || traceID == "" {
+	if mine == nil || traceID == "" {
 		return
 	}
-	ch, stop := c.deltaSrc(traceID)
-	if ch == nil {
-		return
+	var ch <-chan Delta
+	if c.deltaSrc != nil {
+		var stop func()
+		ch, stop = c.deltaSrc(traceID)
+		if stop != nil {
+			defer stop()
+		}
 	}
-	defer stop()
 
 	start := time.Now()
 	var buf strings.Builder
@@ -416,29 +423,32 @@ func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tg
 	sawActive := false
 	gap := streamEditInterval
 
+	finalText := func() string {
+		final := buf.String()
+		if final == "" && len(activity) == 0 {
+			return streamErrorNote
+		}
+		if final == "" {
+			return compose("")
+		}
+		return compose(final)
+	}
+
 	for {
+		var deltaC <-chan Delta
+		if ch != nil {
+			deltaC = ch
+		}
 		select {
 		case <-ctx.Done():
+			// Channel Stop / supersede cancel: release typing; stream close is
+			// owned by abortAllStreams / openStream supersede when applicable.
+			c.stopTypingKeepalive(chatID)
 			return
 		case <-watch.C:
 			if time.Now().After(deadline) {
 				flush(true)
-				// Max age with no Send: finish the bubble so it is not stuck.
-				c.streamMu.Lock()
-				stillMine := c.streams[chatID] == mine
-				if stillMine {
-					delete(c.streams, chatID)
-				}
-				c.streamMu.Unlock()
-				if stillMine {
-					final := buf.String()
-					if final == "" {
-						final = streamErrorNote
-					} else {
-						final = compose(final)
-					}
-					_ = c.closeStream(ctx, mine, final)
-				}
+				c.releaseTurnUI(ctx, chatID, mine, finalText())
 				return
 			}
 			if c.turnAlive(traceID) {
@@ -448,12 +458,17 @@ func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tg
 			if !sawActive && time.Since(start) < streamStartGrace {
 				continue
 			}
+			// Turn ended without Send (silent / cancel / drop / hard-timeout).
 			flush(true)
+			c.releaseTurnUI(ctx, chatID, mine, finalText())
 			return
-		case d, ok := <-ch:
+		case d, ok := <-deltaC:
 			if !ok {
+				// Delta subscription closed: keep watching liveness / max age
+				// so a silent turn still releases typing + placeholder.
+				ch = nil
 				flush(true)
-				return
+				continue
 			}
 			deltas++
 			if !sawActive {
@@ -493,10 +508,34 @@ func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tg
 			}
 			flush(false)
 			if detached {
+				c.stopTypingKeepalive(chatID)
 				return
 			}
 		}
 	}
+}
+
+// releaseTurnUI stops typing and finishes the private stream when the
+// orchestrator turn ended without a final Send (or hit stream max age).
+// Idempotent with Send: if Send already finishStream'd, stillMine is false.
+func (c *TelegramChannel) releaseTurnUI(ctx context.Context, chatID int64, mine *tgStream, text string) {
+	c.stopTypingKeepalive(chatID)
+	if mine == nil {
+		return
+	}
+	c.streamMu.Lock()
+	stillMine := c.streams[chatID] == mine
+	if stillMine {
+		delete(c.streams, chatID)
+	}
+	c.streamMu.Unlock()
+	if !stillMine {
+		return
+	}
+	if text == "" {
+		text = streamErrorNote
+	}
+	_ = c.closeStream(ctx, mine, text)
 }
 
 func tgToolLine(name string, done, failed bool) string {

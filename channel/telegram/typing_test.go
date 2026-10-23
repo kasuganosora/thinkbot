@@ -61,7 +61,7 @@ func TestTypingKeepalive_RefreshesUntilStop(t *testing.T) {
 	rec := &countingTypingAction{}
 	ch := newTypingTestChannel(rec)
 
-	ch.startTypingKeepalive(42)
+	ch.startTypingKeepalive(42, "")
 	rec.waitAtLeast(t, 1, time.Second) // immediate
 
 	rec.waitAtLeast(t, 3, time.Second) // at least two refreshes
@@ -87,7 +87,7 @@ func TestTypingKeepalive_ShortReplySingleAction(t *testing.T) {
 	rec := &countingTypingAction{}
 	ch := newTypingTestChannel(rec)
 
-	ch.startTypingKeepalive(7)
+	ch.startTypingKeepalive(7, "")
 	rec.waitAtLeast(t, 1, time.Second)
 	ch.stopTypingKeepalive(7)
 
@@ -104,9 +104,9 @@ func TestTypingKeepalive_RestartCancelsPrevious(t *testing.T) {
 	rec := &countingTypingAction{}
 	ch := newTypingTestChannel(rec)
 
-	ch.startTypingKeepalive(99)
+	ch.startTypingKeepalive(99, "")
 	rec.waitAtLeast(t, 1, time.Second)
-	ch.startTypingKeepalive(99) // supersede
+	ch.startTypingKeepalive(99, "") // supersede
 	rec.waitAtLeast(t, 2, time.Second)
 
 	ch.stopTypingKeepalive(99)
@@ -137,8 +137,8 @@ func TestTypingKeepalive_StopAllAndMaxAge(t *testing.T) {
 	rec := &countingTypingAction{}
 	ch := newTypingTestChannel(rec)
 
-	ch.startTypingKeepalive(1)
-	ch.startTypingKeepalive(2)
+	ch.startTypingKeepalive(1, "")
+	ch.startTypingKeepalive(2, "")
 	rec.waitAtLeast(t, 2, time.Second)
 
 	ch.stopAllTyping()
@@ -154,7 +154,7 @@ func TestTypingKeepalive_StopAllAndMaxAge(t *testing.T) {
 	}
 
 	// Max age: start one and let it expire without stop.
-	ch.startTypingKeepalive(3)
+	ch.startTypingKeepalive(3, "")
 	rec.waitAtLeast(t, rec.count(), time.Second) // ensure running
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -170,7 +170,7 @@ func TestTypingKeepalive_StopAllAndMaxAge(t *testing.T) {
 func TestTypingKeepalive_ZeroChatIDIgnored(t *testing.T) {
 	rec := &countingTypingAction{}
 	ch := newTypingTestChannel(rec)
-	ch.startTypingKeepalive(0)
+	ch.startTypingKeepalive(0, "")
 	time.Sleep(30 * time.Millisecond)
 	if rec.count() != 0 {
 		t.Fatalf("zero chatID should not send typing, got %d", rec.count())
@@ -207,7 +207,7 @@ func TestTypingKeepalive_RunCtxCancel(t *testing.T) {
 	ch.runCtx = ctx
 	ch.mu.Unlock()
 
-	ch.startTypingKeepalive(55)
+	ch.startTypingKeepalive(55, "")
 	rec.waitAtLeast(t, 1, time.Second)
 	cancel()
 
@@ -224,4 +224,93 @@ func TestTypingKeepalive_RunCtxCancel(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("typing keepalive did not exit after runCtx cancel")
+}
+
+
+// TestTypingMaxAgeIsThreeMinutes pins the ops-requested hard cap (~2–3 min).
+func TestTypingMaxAgeIsThreeMinutes(t *testing.T) {
+	if typingMaxAge != 3*time.Minute {
+		t.Fatalf("typingMaxAge = %s, want 3m (ops hang release)", typingMaxAge)
+	}
+	if defaultStreamMaxAge != 3*time.Minute {
+		t.Fatalf("defaultStreamMaxAge = %s, want 3m (aligned with typing)", defaultStreamMaxAge)
+	}
+}
+
+// fakeTypingLiveness toggles orchestrator turn activity for keepalive tests.
+type fakeTypingLiveness struct {
+	active atomic.Bool
+}
+
+func (f *fakeTypingLiveness) IsMessageActive(_, _ string) bool {
+	return f.active.Load()
+}
+
+// TestTypingKeepalive_TurnInactiveStops: cancel / silent / drop / hard-timeout
+// clear IsMessageActive without Send — typing must stop (not wait for max age).
+func TestTypingKeepalive_TurnInactiveStops(t *testing.T) {
+	withFastTyping(t, 20*time.Millisecond, time.Minute) // max age far away
+	rec := &countingTypingAction{}
+	ch := newTypingTestChannel(rec)
+	live := &fakeTypingLiveness{}
+	live.active.Store(true)
+	ch.botID = "bot-1"
+	ch.SetMessageLiveness(live)
+
+	// Shrink grace so the watchdog can observe inactive quickly.
+	oldGrace := streamStartGrace
+	streamStartGrace = 5 * time.Millisecond
+	t.Cleanup(func() { streamStartGrace = oldGrace })
+	oldLive := streamLivenessInterval
+	streamLivenessInterval = 10 * time.Millisecond
+	t.Cleanup(func() { streamLivenessInterval = oldLive })
+
+	ch.startTypingKeepalive(77, "trace-cancel")
+	rec.waitAtLeast(t, 1, time.Second)
+	if !ch.typingActive(77) {
+		t.Fatal("keepalive should be active while turn is alive")
+	}
+
+	live.active.Store(false) // simulates OnMessageDone after AbortMessage / silent
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !ch.typingActive(77) {
+			n := rec.count()
+			time.Sleep(60 * time.Millisecond)
+			if got := rec.count(); got != n {
+				t.Fatalf("typing continued after turn inactive: before=%d after=%d", n, got)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("typing keepalive did not stop after turn became inactive")
+}
+
+// TestTypingKeepalive_InterruptRestarts: new inbound same chat cancels old loop
+// (pipeline interrupt path) — covered by RestartCancelsPrevious; assert stop
+// still works when a traceID is bound.
+func TestTypingKeepalive_InterruptWithTraceStops(t *testing.T) {
+	withFastTyping(t, 20*time.Millisecond, time.Minute)
+	rec := &countingTypingAction{}
+	ch := newTypingTestChannel(rec)
+	live := &fakeTypingLiveness{}
+	live.active.Store(true)
+	ch.botID = "bot-1"
+	ch.SetMessageLiveness(live)
+
+	ch.startTypingKeepalive(88, "trace-old")
+	rec.waitAtLeast(t, 1, time.Second)
+	ch.startTypingKeepalive(88, "trace-new") // interrupt / supersede
+	rec.waitAtLeast(t, 2, time.Second)
+	ch.stopTypingKeepalive(88)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !ch.typingActive(88) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("typing still active after interrupt + stop")
 }

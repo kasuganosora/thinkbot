@@ -24,8 +24,9 @@ const (
 	typingRefreshInterval = 4 * time.Second
 
 	// typingMaxAge is the hard stop when pipeline never replies (silent /
-	// suppressed / error without Send). Prevents leaked refresh goroutines.
-	typingMaxAge = 10 * time.Minute
+	// suppressed / error without Send) and liveness cannot observe end
+	// (mid-generation hang). Ops: 2–3 min; was 10 min and felt stuck.
+	typingMaxAge = 3 * time.Minute
 
 	// typingActionTimeout bounds a single sendChatAction call so a hung API
 	// cannot pin the keepalive loop.
@@ -40,18 +41,24 @@ var (
 
 // typingSession is one in-flight typing keepalive for a chat.
 type typingSession struct {
-	cancel context.CancelFunc
-	chatID int64
-	gen    uint64 // bumped on each restart so a stale loop can exit cleanly
+	cancel  context.CancelFunc
+	chatID  int64
+	traceID string // orchestrator trace; empty → max-age only (no liveness)
+	gen     uint64 // bumped on each restart so a stale loop can exit cleanly
 }
 
 // startTypingKeepalive begins (or restarts) typing refresh for chatID.
 //
 // Safe to call from handleUpdate before Ingress.Receive: the first action is
 // sent immediately, then every typingRefresh until stopTypingKeepalive /
-// stopAllTyping / max age. A new inbound for the same chat cancels the old
-// session — no leaked goroutines across superseding turns.
-func (c *TelegramChannel) startTypingKeepalive(chatID int64) {
+// stopAllTyping / turn inactive (cancel / timeout / silent) / max age.
+// A new inbound for the same chat cancels the old session — no leaked
+// goroutines across superseding turns.
+//
+// traceID binds the keepalive to the orchestrator turn so cancel / silent /
+// drop / hard-timeout (OnMessageDone → IsMessageActive false) release typing
+// without waiting for max age. Empty traceID → max-age only.
+func (c *TelegramChannel) startTypingKeepalive(chatID int64, traceID string) {
 	if chatID == 0 {
 		return
 	}
@@ -70,11 +77,11 @@ func (c *TelegramChannel) startTypingKeepalive(chatID int64) {
 	ctx, cancel := context.WithCancel(parent)
 	c.typingGen++
 	gen := c.typingGen
-	c.typing[chatID] = &typingSession{cancel: cancel, chatID: chatID, gen: gen}
+	c.typing[chatID] = &typingSession{cancel: cancel, chatID: chatID, traceID: traceID, gen: gen}
 	c.typingMu.Unlock()
 
 	c.wg.Add(1)
-	go c.typingLoop(ctx, chatID, gen)
+	go c.typingLoop(ctx, chatID, gen, traceID)
 }
 
 // stopTypingKeepalive cancels the keepalive for chatID (idempotent).
@@ -113,10 +120,10 @@ func (c *TelegramChannel) typingParent() context.Context {
 	return context.Background()
 }
 
-// typingLoop sends typing immediately, then every typingRefresh until cancel
-// or typingMaxAgeD. Short replies that stop before the first tick produce
-// exactly one sendChatAction — no API spam.
-func (c *TelegramChannel) typingLoop(ctx context.Context, chatID int64, gen uint64) {
+// typingLoop sends typing immediately, then every typingRefresh until cancel,
+// orchestrator turn end, or typingMaxAgeD. Short replies that stop before the
+// first tick produce exactly one sendChatAction — no API spam.
+func (c *TelegramChannel) typingLoop(ctx context.Context, chatID int64, gen uint64, traceID string) {
 	defer c.wg.Done()
 	defer c.clearTypingIfGen(chatID, gen)
 
@@ -127,13 +134,40 @@ func (c *TelegramChannel) typingLoop(ctx context.Context, chatID int64, gen uint
 	deadline := time.NewTimer(typingMaxAgeD)
 	defer deadline.Stop()
 
+	// Liveness watchdog: pipeline cancel / silent / drop / hard-timeout end the
+	// turn without Send. Without this, typing would refresh until max age.
+	// Grace matches streamStartGrace — startTyping runs before OnMessageStart.
+	var liveWatch *time.Ticker
+	if traceID != "" && c.liveness != nil {
+		liveWatch = time.NewTicker(streamLivenessInterval)
+		defer liveWatch.Stop()
+	}
+	start := time.Now()
+	sawActive := false
+
 	for {
+		var liveC <-chan time.Time
+		if liveWatch != nil {
+			liveC = liveWatch.C
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-deadline.C:
 			traceid.L(ctx).Debugw("telegram: typing keepalive reached max age",
-				"channel", c.name, "chat_id", chatID)
+				"channel", c.name, "chat_id", chatID, "trace_id", traceID)
+			return
+		case <-liveC:
+			if c.turnAlive(traceID) {
+				sawActive = true
+				continue
+			}
+			if !sawActive && time.Since(start) < streamStartGrace {
+				continue
+			}
+			traceid.L(ctx).Debugw("telegram: typing keepalive released (turn inactive)",
+				"channel", c.name, "chat_id", chatID, "trace_id", traceID,
+				"saw_active", sawActive, "elapsed", time.Since(start).String())
 			return
 		case <-ticker.C:
 			if err := c.sendTypingOnce(ctx, chatID); err != nil {
