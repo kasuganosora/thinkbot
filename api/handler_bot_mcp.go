@@ -1,15 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
@@ -18,6 +18,8 @@ import (
 // Bot MCP 服务器管理 Handler
 //
 // 每个 Bot 独立管理 MCP 服务器配置，存储在 data/mcp/{botId}/servers.json。
+// 写入后若 Bot 正在运行，立即 UpsertServer / RemoveServer，使工具列表热刷新
+//（不再需要重启）。
 //
 // 路由：
 //   GET    /api/bots/:id/mcp              → 列表
@@ -27,69 +29,24 @@ import (
 //   POST   /api/bots/:id/mcp/import       → 批量导入（JSON 配置）
 // ============================================================================
 
-// mcpServerEntry 是返回给前端的 MCP 服务器实体。
-type mcpServerEntry struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Type      string            `json:"type"`    // "stdio" | "http" | "sse"
-	Command   string            `json:"command"` // stdio
-	Args      []string          `json:"args"`
-	Env       map[string]string `json:"env"`
-	Cwd       string            `json:"cwd"`
-	URL       string            `json:"url"`     // http/sse
-	Headers   map[string]string `json:"headers"` // http/sse
-	Enabled   bool              `json:"enabled"`
-	Status    string            `json:"status"` // "draft" | "running" | "disabled" | "error"
-	CreatedAt string            `json:"createdAt"`
-	UpdatedAt string            `json:"updatedAt"`
-}
-
-// mcpStoreFile 返回 Bot 的 MCP 服务器配置文件路径。
-func mcpStoreFile(botID string) string {
-	return filepath.Join("data", "mcp", botID, "servers.json")
-}
-
-// loadMcpServers 从文件加载 MCP 服务器列表。
-func loadMcpServers(botID string) ([]mcpServerEntry, error) {
-	path := mcpStoreFile(botID)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var servers []mcpServerEntry
-	if err := json.Unmarshal(data, &servers); err != nil {
-		return nil, err
-	}
-	return servers, nil
-}
-
-// saveMcpServers 将 MCP 服务器列表保存到文件。
-func saveMcpServers(botID string, servers []mcpServerEntry) error {
-	path := mcpStoreFile(botID)
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(servers, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
 // handleListBotMcp 列出指定 Bot 的 MCP 服务器。
 func (s *Server) handleListBotMcp(c *gin.Context) {
 	botID := c.Param("id")
-	servers, err := loadMcpServers(botID)
+	servers, err := mcp.LoadBotServers(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "load mcp servers"))
 		return
 	}
 	if servers == nil {
-		servers = []mcpServerEntry{}
+		servers = []mcp.BotServerEntry{}
+	}
+	// 若 bot 在跑，用运行时连接态刷新 status，避免 UI 与真实状态脱节。
+	if mgr, ok := s.runningUserMCP(botID); ok {
+		for i := range servers {
+			e := &servers[i]
+			connected := mgr.IsServerConnected(e.Name)
+			e.Status = mcp.DeriveStatus(e.Enabled, e.ReadyToConnect(), connected, nil)
+		}
 	}
 	OK(c, gin.H{"servers": servers})
 }
@@ -113,9 +70,9 @@ func (s *Server) handleCreateBotMcp(c *gin.Context) {
 		return
 	}
 
-	servers, _ := loadMcpServers(botID)
+	servers, _ := mcp.LoadBotServers(botID)
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := mcp.NowRFC3339()
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -137,7 +94,7 @@ func (s *Server) handleCreateBotMcp(c *gin.Context) {
 		req.Headers = map[string]string{}
 	}
 
-	entry := mcpServerEntry{
+	entry := mcp.BotServerEntry{
 		ID:        idgen.New("mcp"),
 		Name:      req.Name,
 		Type:      req.Type,
@@ -155,12 +112,19 @@ func (s *Server) handleCreateBotMcp(c *gin.Context) {
 	if entry.Name == "" {
 		entry.Name = "未命名"
 	}
+	if err := mcp.ValidateServerName(entry.Name); err != nil && entry.Name != "未命名" {
+		Fail(c, errs.BadRequest(err.Error()))
+		return
+	}
 
 	servers = append(servers, entry)
-	if err := saveMcpServers(botID, servers); err != nil {
+	if err := mcp.SaveBotServers(botID, servers); err != nil {
 		Fail(c, errs.Wrap(err, "save mcp servers"))
 		return
 	}
+
+	// 热挂载：配置已够连接条件时立即 Upsert；否则仅登记，等保存补全。
+	entry = s.syncMCPRuntime(botID, "", entry)
 
 	auditLog(c, s.logger, "create_bot_mcp", "bot_id", botID, "mcp", entry.Name)
 	OK(c, entry)
@@ -177,7 +141,7 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 		return
 	}
 
-	servers, err := loadMcpServers(botID)
+	servers, err := mcp.LoadBotServers(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "load mcp servers"))
 		return
@@ -195,7 +159,7 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 		return
 	}
 
-	// 应用更新
+	oldName := servers[idx].Name
 	sv := &servers[idx]
 	if v, ok := req["name"].(string); ok {
 		sv.Name = v
@@ -246,22 +210,30 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 		sv.Enabled = v
 	}
 
-	// 根据 enabled 和配置变更更新 status
-	if sv.Enabled {
-		sv.Status = "running"
-	} else {
-		sv.Status = "disabled"
+	if err := mcp.ValidateServerName(sv.Name); err != nil && sv.Name != "未命名" {
+		Fail(c, errs.BadRequest(err.Error()))
+		return
 	}
 
-	sv.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	sv.UpdatedAt = mcp.NowRFC3339()
 
-	if err := saveMcpServers(botID, servers); err != nil {
+	if err := mcp.SaveBotServers(botID, servers); err != nil {
 		Fail(c, errs.Wrap(err, "save mcp servers"))
 		return
 	}
 
+	updated := s.syncMCPRuntime(botID, oldName, *sv)
+	// 写回 status（sync 可能改写）
+	for i := range servers {
+		if servers[i].ID == updated.ID {
+			servers[i] = updated
+			break
+		}
+	}
+	_ = mcp.SaveBotServers(botID, servers)
+
 	auditLog(c, s.logger, "update_bot_mcp", "bot_id", botID, "mcp_id", mid)
-	OK(c, *sv)
+	OK(c, updated)
 }
 
 // handleRemoveBotMcp 删除 MCP 服务器。
@@ -269,15 +241,17 @@ func (s *Server) handleRemoveBotMcp(c *gin.Context) {
 	botID := c.Param("id")
 	mid := c.Param("mid")
 
-	servers, err := loadMcpServers(botID)
+	servers, err := mcp.LoadBotServers(botID)
 	if err != nil {
 		Fail(c, errs.Wrap(err, "load mcp servers"))
 		return
 	}
 
+	var removedName string
 	found := false
 	for i, sv := range servers {
 		if sv.ID == mid {
+			removedName = sv.Name
 			servers = append(servers[:i], servers[i+1:]...)
 			found = true
 			break
@@ -288,9 +262,13 @@ func (s *Server) handleRemoveBotMcp(c *gin.Context) {
 		return
 	}
 
-	if err := saveMcpServers(botID, servers); err != nil {
+	if err := mcp.SaveBotServers(botID, servers); err != nil {
 		Fail(c, errs.Wrap(err, "save mcp servers"))
 		return
+	}
+
+	if mgr, ok := s.runningUserMCP(botID); ok && removedName != "" {
+		mgr.RemoveServer(removedName)
 	}
 
 	auditLog(c, s.logger, "remove_bot_mcp", "bot_id", botID, "mcp_id", mid)
@@ -309,10 +287,10 @@ func (s *Server) handleImportBotMcp(c *gin.Context) {
 		return
 	}
 
-	servers, _ := loadMcpServers(botID)
-	now := time.Now().UTC().Format(time.RFC3339)
+	servers, _ := mcp.LoadBotServers(botID)
+	now := mcp.NowRFC3339()
 
-	var created []mcpServerEntry
+	var created []mcp.BotServerEntry
 	for name, raw := range req.McpServers {
 		var cfg struct {
 			Type    string            `json:"type"`
@@ -350,7 +328,7 @@ func (s *Server) handleImportBotMcp(c *gin.Context) {
 			cfg.Headers = map[string]string{}
 		}
 
-		entry := mcpServerEntry{
+		entry := mcp.BotServerEntry{
 			ID:        idgen.New("mcp"),
 			Name:      name,
 			Type:      tp,
@@ -365,15 +343,55 @@ func (s *Server) handleImportBotMcp(c *gin.Context) {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		entry = s.syncMCPRuntime(botID, "", entry)
 		servers = append(servers, entry)
 		created = append(created, entry)
 	}
 
-	if err := saveMcpServers(botID, servers); err != nil {
+	if err := mcp.SaveBotServers(botID, servers); err != nil {
 		Fail(c, errs.Wrap(err, "save mcp servers"))
 		return
 	}
 
 	auditLog(c, s.logger, "import_bot_mcp", "bot_id", botID, "count", fmt.Sprintf("%d", len(created)))
 	OK(c, gin.H{"servers": created})
+}
+
+// runningUserMCP 返回运行中 bot 的用户 MCP Manager。
+func (s *Server) runningUserMCP(botID string) (*mcp.Manager, bool) {
+	if s.botSvc == nil {
+		return nil, false
+	}
+	return s.botSvc.RunningUserMCP(botID)
+}
+
+// syncMCPRuntime 将一条配置同步到运行中 bot 的 MCP Manager。
+// oldName 非空且与 entry.Name 不同时，先移除旧名（支持重命名）。
+// bot 未运行时仅更新 entry.Status 推导值并返回。
+func (s *Server) syncMCPRuntime(botID, oldName string, entry mcp.BotServerEntry) mcp.BotServerEntry {
+	mgr, ok := s.runningUserMCP(botID)
+	if !ok || mgr == nil {
+		entry.Status = mcp.DeriveStatus(entry.Enabled, entry.ReadyToConnect(), false, nil)
+		return entry
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if oldName != "" && oldName != entry.Name {
+		mgr.RemoveServer(oldName)
+	}
+
+	cfg := entry.ToServerConfig()
+	var connectErr error
+	if err := mgr.UpsertServer(ctx, cfg); err != nil {
+		connectErr = err
+		if s.logger != nil {
+			s.logger.Warnw("mcp hot-mount failed",
+				"bot_id", botID, "server", entry.Name, "err", err)
+		}
+	}
+	connected := mgr.IsServerConnected(entry.Name)
+	entry.Status = mcp.DeriveStatus(entry.Enabled, entry.ReadyToConnect(), connected, connectErr)
+	return entry
 }

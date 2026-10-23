@@ -607,7 +607,7 @@ func TestStdioTransportHealthy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires subprocess")
 	}
-	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil, nil)
+	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil, "", nil)
 	if err != nil {
 		t.Fatalf("newStdioTransport: %v", err)
 	}
@@ -637,5 +637,71 @@ func TestClientIsHealthy(t *testing.T) {
 	_ = c.Close()
 	if c.IsHealthy() {
 		t.Fatal("closed client should be unhealthy")
+	}
+}
+
+func TestManager_UpsertServer_HotConnectAndCache(t *testing.T) {
+	mgr := NewManager(zap.NewNop().Sugar())
+	called := 0
+	mgr.SetOnServerChange(func() { called++ })
+
+	// Inject via Upsert with Enabled=false (no connect)
+	if err := mgr.UpsertServer(context.Background(), ServerConfig{
+		Name: "srv", Transport: "stdio", Command: "true", Enabled: false,
+	}); err != nil {
+		t.Fatalf("Upsert disabled: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("disabled upsert should notify once, got %d", called)
+	}
+	if mgr.IsServerConnected("srv") {
+		t.Fatal("should not be connected when disabled")
+	}
+
+	// Simulate connected client then Upsert with new config disabled → disconnect + notify
+	tp := setupMockTransport(nil, "")
+	client := newClient("srv", tp, zap.NewNop().Sugar())
+	mgr.mu.Lock()
+	mgr.clients["srv"] = client
+	mgr.configs["srv"] = ServerConfig{Name: "srv", Enabled: true}
+	mgr.mu.Unlock()
+
+	if err := mgr.UpsertServer(context.Background(), ServerConfig{
+		Name: "srv", Enabled: false,
+	}); err != nil {
+		t.Fatalf("Upsert to disable: %v", err)
+	}
+	if !tp.closed {
+		t.Fatal("old transport should be closed on upsert")
+	}
+	if mgr.IsServerConnected("srv") {
+		t.Fatal("should be disconnected")
+	}
+	if called < 2 {
+		t.Fatalf("expected more notify calls, got %d", called)
+	}
+}
+
+func TestManager_RemoveServer_Notifies(t *testing.T) {
+	mgr := NewManager(zap.NewNop().Sugar())
+	called := 0
+	mgr.SetOnServerChange(func() { called++ })
+
+	mgr.AddServer(ServerConfig{Name: "srv", Enabled: true})
+	tp := setupMockTransport(nil, "")
+	client := newClient("srv", tp, zap.NewNop().Sugar())
+	mgr.mu.Lock()
+	mgr.clients["srv"] = client
+	mgr.mu.Unlock()
+
+	mgr.RemoveServer("srv")
+	if called != 1 {
+		t.Fatalf("RemoveServer should notify once, got %d", called)
+	}
+	if !tp.closed {
+		t.Fatal("transport should be closed")
+	}
+	if _, ok := mgr.GetClient("srv"); ok {
+		t.Fatal("client should be gone")
 	}
 }
