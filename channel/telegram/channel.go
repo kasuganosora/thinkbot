@@ -135,6 +135,17 @@ type TelegramChannel struct {
 	// nil 表示未注入（未启用工作空间），此时非文本附件仅挂占位文本、模型读不到内容。
 	// 只在启动期写入、运行期只读，无需加锁。
 	fileSink FileSinkFunc
+
+	// runCtx is the cancellable context for pollLoop / typing keepalives.
+	// Written under mu in Start/Stop; readers take mu (see typingParent).
+	runCtx context.Context
+
+	// typing tracks in-flight typing keepalives (chatID → session). See typing.go.
+	typingMu  sync.Mutex
+	typing    map[int64]*typingSession
+	typingGen uint64 // monotonic; stale loops ignore clear of newer sessions
+	// typingAction overrides sendChatAction for unit tests; nil = real API.
+	typingAction func(ctx context.Context, chatID int64) error
 }
 
 // FileSourceFunc 是 bot 工作空间文件读取器：按 botID + 工作空间相对路径返回文件内容。
@@ -208,9 +219,10 @@ func (c *TelegramChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 	// 注册时机：在 pollLoop 启动前，确保零竞态。
 	ingress.RegisterSelfUserID(fmt.Sprintf("%d", me.ID))
 
-	// 派生可取消的 context
+	// 派生可取消的 context（typing keepalive 也挂在这上面，Stop 时一并取消）
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
+	c.runCtx = runCtx
 
 	// 启动 polling goroutine
 	c.wg.Add(1)
@@ -324,15 +336,10 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		return
 	}
 
-	// 发送"正在输入..."状态（fire-and-forget，使用独立超时避免被主 ctx 取消影响）
-	go func() {
-		actionCtx, actionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer actionCancel()
-		if err := c.api.sendChatAction(actionCtx, msg.Chat.ID, "typing"); err != nil {
-			traceid.L(ctx).Debugw("telegram: sendChatAction failed",
-				"channel", c.name, "err", err)
-		}
-	}()
+	// Typing keepalive: Telegram typing expires ~5s; refresh every ~4s while
+	// the agent run is in flight so long replies don't look stuck. Stopped in
+	// Send / on Receive failure / Stop / max age (see typing.go).
+	c.startTypingKeepalive(msg.Chat.ID)
 
 	// 转换 chat ID 为字符串 channel
 	chatID := fmt.Sprintf("%d", msg.Chat.ID)
@@ -456,6 +463,7 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
 		traceid.L(ctx).Warnw("telegram ingress receive failed",
 			"channel", c.name, "message_id", msg.MessageID, "err", err)
+		c.stopTypingKeepalive(msg.Chat.ID)
 	}
 }
 
@@ -874,8 +882,12 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 		c.cancel()
 		c.cancel = nil
 	}
+	c.runCtx = nil
 	c.stopped = true
 	c.mu.Unlock()
+
+	// Cancel typing keepalives before wg.Wait so they don't pin shutdown.
+	c.stopAllTyping()
 
 	// 等待 goroutine 退出
 	done := make(chan struct{})
@@ -901,6 +913,7 @@ func (c *TelegramChannel) Reply(ctx context.Context, chatID int64, text string, 
 
 // ReplyWithMode 向指定聊天回复消息，指定 parseMode。
 func (c *TelegramChannel) ReplyWithMode(ctx context.Context, chatID int64, text, parseMode string, replyToMessageID int64) error {
+	c.stopTypingKeepalive(chatID)
 	chunks := splitMessage(text, telegramMaxMessageLength)
 	for i, chunk := range chunks {
 		// 只有第一条消息引用 replyToMessageID
@@ -944,6 +957,9 @@ func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
 	if err != nil {
 		return errs.Wrapf(err, "telegram send: invalid chatID %q", action.Channel)
 	}
+
+	// Final outbound ends the typing indicator even if payload is empty/skipped.
+	c.stopTypingKeepalive(chatID)
 
 	// 提取文本
 	text, ok := action.Payload.(string)
