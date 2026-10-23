@@ -45,6 +45,7 @@ import (
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/subagent"
@@ -292,6 +293,21 @@ func (s *BotService) RunningSkillManager(botID string) (*skill.SkillManager, boo
 		return nil, false
 	}
 	mgr := b.SkillManager()
+	if mgr == nil {
+		return nil, false
+	}
+	return mgr, true
+}
+
+// RunningUserMCP 返回运行中 bot 的用户 MCP Manager（Admin UI / mcp_server 热挂载共用）。
+func (s *BotService) RunningUserMCP(botID string) (*mcp.Manager, bool) {
+	s.mu.RLock()
+	b, ok := s.botInstances[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return nil, false
+	}
+	mgr := b.UserMCP()
 	if mgr == nil {
 		return nil, false
 	}
