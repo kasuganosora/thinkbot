@@ -2566,6 +2566,49 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			}
 			return rel, nil
 		})
+
+		// Private-chat edit streaming: orchestrator liveness + cleaned text/tool
+		// deltas (same EventBus feed as WeCom / Web SSE). Groups stay typing-only.
+		tgc.SetMessageLiveness(s)
+		tgc.SetDeltaSource(func(traceID string) (<-chan telegram.Delta, func()) {
+			bus, ok := s.eventBus.(*outbound.MemoryEventBus)
+			if !ok || bus == nil || traceID == "" {
+				return nil, func() {}
+			}
+			sub := bus.Subscribe(traceID)
+			out := make(chan telegram.Delta, 256)
+			done := make(chan struct{})
+			var closeOnce sync.Once
+			stop := func() {
+				closeOnce.Do(func() { close(done) })
+				bus.Unsubscribe(sub)
+			}
+			go func() {
+				defer close(out)
+				for {
+					select {
+					case <-done:
+						return
+					case ev, ok := <-sub.C():
+						if !ok {
+							return
+						}
+						d, wanted := toTelegramDelta(ev)
+						if !wanted {
+							continue
+						}
+						select {
+						case out <- d:
+						case <-done:
+							return
+						default:
+							// Drop rather than back-pressure the shared EventBus.
+						}
+					}
+				}
+			}()
+			return out, stop
+		})
 	}
 
 	// 企业微信：入站媒体（图片/文件）落到工作空间，模型经 read_file 读取。
@@ -3681,6 +3724,14 @@ func (s *BotService) createTelegramChannel(def dao.ChannelDefinition) (bot.Chann
 			cfg.AllowedUpdates = strings.Split(s, ",")
 		}
 	}
+	// Private-chat placeholder + editMessageText streaming (default on).
+	// Groups/supergroups ignore this and stay typing-only.
+	cfg.StreamReply = true
+	if v, ok := raw["streamReply"]; ok {
+		if b, isBool := v.(bool); isBool {
+			cfg.StreamReply = b
+		}
+	}
 
 	return telegram.NewChannel(def.Name, def.BotID, cfg), nil
 }
@@ -3891,6 +3942,36 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 	}
 
 	return wecom.NewChannel(def.Name, def.BotID, cfg), nil
+}
+
+// toTelegramDelta 把一条 EventBus 事件翻译成 Telegram 私聊增量。
+//
+// 与 toWecomDelta 同构：工具只取名字，不带参数/返回值（外部渠道）。
+func toTelegramDelta(ev outbound.Event) (telegram.Delta, bool) {
+	switch ev.Type {
+	case outbound.EventLLMTextDelta:
+		t, _ := ev.Data["text"].(string)
+		if t == "" {
+			return telegram.Delta{}, false
+		}
+		return telegram.Delta{Kind: telegram.DeltaText, Text: t}, true
+	case outbound.EventLLMToolCall:
+		name, _ := ev.Data["tool"].(string)
+		if name == "" {
+			return telegram.Delta{}, false
+		}
+		id, _ := ev.Data["toolCallId"].(string)
+		return telegram.Delta{Kind: telegram.DeltaToolStart, ID: id, Text: name}, true
+	case outbound.EventLLMToolResult:
+		name, _ := ev.Data["tool"].(string)
+		if name == "" {
+			return telegram.Delta{}, false
+		}
+		id, _ := ev.Data["toolCallId"].(string)
+		msg, _ := ev.Data["error"].(string)
+		return telegram.Delta{Kind: telegram.DeltaToolDone, ID: id, Text: name, Failed: msg != ""}, true
+	}
+	return telegram.Delta{}, false
 }
 
 // toWecomDelta 把一条 EventBus 事件翻译成企微增量。

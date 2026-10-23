@@ -42,6 +42,11 @@ type Config struct {
 	// ParseMode 发送消息时使用的格式化模式："HTML" / "MarkdownV2" / ""（纯文本）。
 	// 默认 ""。
 	ParseMode string
+
+	// StreamReply enables private-chat placeholder + editMessageText streaming.
+	// Groups/supergroups stay typing-only regardless. Default true (set in
+	// createTelegramChannel); set false to force classic single-message replies.
+	StreamReply bool
 }
 
 // telegramMaxMessageLength Telegram 单条消息最大长度。
@@ -146,6 +151,17 @@ type TelegramChannel struct {
 	typingGen uint64 // monotonic; stale loops ignore clear of newer sessions
 	// typingAction overrides sendChatAction for unit tests; nil = real API.
 	typingAction func(ctx context.Context, chatID int64) error
+
+	// Private-chat edit streaming (see stream.go). Groups never open a stream.
+	streamMu  sync.Mutex
+	streams   map[int64]*tgStream
+	streamGen uint64
+	deltaSrc  DeltaSourceFunc
+	liveness  MessageLiveness
+	// Test hooks (nil = real API).
+	streamSend   func(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error)
+	streamEdit   func(ctx context.Context, chatID, messageID int64, text string) error
+	streamDelete func(ctx context.Context, chatID, messageID int64) error
 }
 
 // FileSourceFunc 是 bot 工作空间文件读取器：按 botID + 工作空间相对路径返回文件内容。
@@ -459,11 +475,23 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 		core.SetAttachments(&coreMsg, attachments)
 	}
 
+	// Private-chat edit stream: pre-assign TraceID so feedStream can subscribe
+	// before Ingress.Receive (same ordering as WeCom). Groups skip this —
+	// typing keepalive only, one final message on Send.
+	if c.streamEnabled() && isPrivateChat(chatType) {
+		if coreMsg.TraceID == "" {
+			coreMsg.TraceID = traceid.New()
+		}
+		c.openStream(ctx, msg.Chat.ID, chatType, coreMsg.TraceID, msg.MessageID)
+	}
+
 	// 注入 Ingress
 	if err := c.ingress.Receive(ctx, coreMsg); err != nil {
 		traceid.L(ctx).Warnw("telegram ingress receive failed",
 			"channel", c.name, "message_id", msg.MessageID, "err", err)
 		c.stopTypingKeepalive(msg.Chat.ID)
+		// Replace placeholder with an error note, or drop an unpushed stream.
+		_ = c.finishStream(ctx, msg.Chat.ID, streamErrorNote)
 	}
 }
 
@@ -886,8 +914,11 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 	c.stopped = true
 	c.mu.Unlock()
 
-	// Cancel typing keepalives before wg.Wait so they don't pin shutdown.
+	// Cancel typing keepalives and finish any private streams before wg.Wait
+	// so feedStream / placeholder timers don't pin shutdown or leave
+	// stuck 「正在思考…」 bubbles.
 	c.stopAllTyping()
+	c.abortAllStreams(ctx)
 
 	// 等待 goroutine 退出
 	done := make(chan struct{})
@@ -995,7 +1026,13 @@ func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
 		}
 	}
 
-	// 执行发送
+	// Private edit stream: replace placeholder / partial with the final reply.
+	// Groups never opened a stream, so this is a no-op there.
+	if c.finishStream(ctx, chatID, text) {
+		return nil
+	}
+
+	// 执行发送（无流 / 流未推占位 / 编辑失败已删占位后的回退）
 	return c.ReplyWithMode(ctx, chatID, text, parseMode, replyToMessageID)
 }
 
