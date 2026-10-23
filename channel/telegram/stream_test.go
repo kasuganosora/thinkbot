@@ -378,3 +378,56 @@ func TestTruncateRunes(t *testing.T) {
 		t.Fatalf("expected ellipsis suffix, got %q", got)
 	}
 }
+
+
+// TestStream_TurnInactiveReleasesTypingAndPlaceholder: pipeline cancel / silent
+// / drop ends IsMessageActive without Send — must stop typing and replace
+// 「正在思考…」 (not wait for max age).
+func TestStream_TurnInactiveReleasesTypingAndPlaceholder(t *testing.T) {
+	withFastStream(t, 10*time.Millisecond, time.Second, time.Minute)
+	api := newRecordingStreamAPI()
+	ch := newStreamTestChannel(api)
+	live := &fakeTypingLiveness{}
+	live.active.Store(true)
+	ch.SetMessageLiveness(live)
+
+	rec := &countingTypingAction{}
+	ch.typingAction = rec.fn
+	withFastTyping(t, 30*time.Millisecond, time.Minute)
+
+	ch.startTypingKeepalive(21, "Tsilent")
+	ch.openStream(context.Background(), 21, "private", "Tsilent", 1)
+	waitUntil(t, time.Second, func() bool { return api.sendCount() >= 1 })
+	if !ch.typingActive(21) {
+		t.Fatal("typing should be active during generation")
+	}
+
+	live.active.Store(false) // OnMessageDone after silent / AbortMessage
+	waitUntil(t, 2*time.Second, func() bool {
+		return !ch.streamActive(21) && !ch.typingActive(21)
+	})
+	if got := api.lastEditText(); got != streamErrorNote {
+		t.Fatalf("inactive release edit = %q, want %q", got, streamErrorNote)
+	}
+	n := rec.count()
+	time.Sleep(80 * time.Millisecond)
+	if got := rec.count(); got != n {
+		t.Fatalf("typing continued after inactive release: before=%d after=%d", n, got)
+	}
+}
+
+// TestStream_MaxAgeReleasesStuckPlaceholder: hard cap cleans 「正在思考…」
+// when the turn stays "active" (true mid-generation hang).
+func TestStream_MaxAgeReleasesStuckPlaceholder(t *testing.T) {
+	withFastStream(t, 5*time.Millisecond, time.Second, 80*time.Millisecond)
+	api := newRecordingStreamAPI()
+	ch := newStreamTestChannel(api)
+	ch.SetMessageLiveness(alwaysAlive{})
+
+	ch.openStream(context.Background(), 22, "private", "Thang", 1)
+	waitUntil(t, time.Second, func() bool { return api.sendCount() >= 1 })
+	waitUntil(t, 2*time.Second, func() bool { return !ch.streamActive(22) })
+	if got := api.lastEditText(); got != streamErrorNote {
+		t.Fatalf("max-age edit = %q, want %q", got, streamErrorNote)
+	}
+}
