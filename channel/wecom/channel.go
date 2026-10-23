@@ -543,14 +543,20 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 		return
 	}
 
+	// ⚠️ 下面几个 drop **一律不能用 Debug**：线上默认 INFO，Debug 等于没有。
+	// 实测踩过（2026-10-23）：群里有人说 "@bot 之后 bot 没回应"，排查时
+	// 只能证明「没进 pipeline」，却无法区分「企微压根没推」和「推了被我们丢了」——
+	// 因为丢消息的那几行全是 Debug，日志里一条都没有。
+	// 这些是**低频异常**（不是每帧都走），提到 INFO/WARN 代价极低、收益是能定位。
 	userID := body.From.UserID
 	if userID == "" {
-		traceid.L(ctx).Debugw("wecom: drop message without from.userid",
+		traceid.L(ctx).Warnw("wecom: drop message without from.userid",
 			"channel", c.name, "msgid", body.MsgID)
 		return
 	}
 	if userID == c.cfg.RobotID {
-		traceid.L(ctx).Debugw("wecom: drop message from bot itself", "channel", c.name)
+		traceid.L(ctx).Infow("wecom: drop message from bot itself",
+			"channel", c.name, "msgid", body.MsgID, "user", userID)
 		return
 	}
 
@@ -571,8 +577,8 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 	}
 
 	if body.MsgID == "" || !c.markSeen(body.MsgID) {
-		traceid.L(ctx).Debugw("wecom: drop duplicate or unidentified message",
-			"channel", c.name, "msgid", body.MsgID)
+		traceid.L(ctx).Infow("wecom: drop duplicate or unidentified message",
+			"channel", c.name, "msgid", body.MsgID, "user", userID)
 		return
 	}
 
@@ -581,8 +587,8 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 	if text == "" && len(items) == 0 {
 		// 实测真实存在：用户只发一个 "@mybot "。剥完前缀就是空串，
 		// 不挡掉会让 LLM 收到一条空消息（进而回一句莫名其妙的话）。
-		traceid.L(ctx).Debugw("wecom: drop empty message after stripping @mention",
-			"channel", c.name, "msgid", body.MsgID, "raw_type", body.MsgType)
+		traceid.L(ctx).Infow("wecom: drop empty message after stripping @mention",
+			"channel", c.name, "msgid", body.MsgID, "user", userID, "raw_type", body.MsgType)
 		return
 	}
 
@@ -788,8 +794,11 @@ func (c *WeComChannel) holdPending(ctx context.Context, key string, w time.Durat
 
 	// 可观测性：暂存时刻必须落日志，否则「配文为什么没合并上」只能靠猜
 	// （2026-10-20 16:12 的 6.5MB 案例就是靠这条的时间差定位到下载吃掉窗口的）。
+	// ⚠️ 必须带 `user`：这是绝大多数群消息的**唯一**入站日志（只有 bot 忙时
+	// 才改走下面的 "inbound message"）。没有 user 就无法回答「这条是谁发的」——
+	// 2026-10-23 排查「别人 @ 了 bot 没回应」时正是缺了它，只能去翻 DB 反查。
 	traceid.L(ctx).Infow("wecom: caption held, waiting for possible media",
-		"channel", c.name, "msgid", msg.ID, "chat", msg.Channel,
+		"channel", c.name, "msgid", msg.ID, "chat", msg.Channel, "user", msg.UserID,
 		"window", w.String(), "text", strutil.Truncate(msg.Text, 60))
 
 	// ⚠️ 摘旧桶 + 插新桶必须在**同一临界区**内完成。
