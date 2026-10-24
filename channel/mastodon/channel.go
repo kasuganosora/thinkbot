@@ -37,7 +37,15 @@ const (
 	mastodonReconnectDelayMin = 5 * time.Second
 	mastodonReconnectDelayMax = 5 * time.Minute
 	// 去重缓存 TTL 和清理间隔。
-	mastodonDedupTTL          = 2 * time.Minute
+	//
+	// 不能只用 2 分钟。同一条 status 会从 user / public:local / direct /
+	// user:notification 各来一次，断线重连后 backfill 还会再拉一次 mention。
+	// 2026-10-24 status 18391 在 16:38 进了 LLM，又在 17:22 / 17:41 / 18:23
+	// 三次重连补发时再进。2 分钟窗口挡不住这几十分钟的间隔，ingress 的
+	// msg.ID 窗口同样是 2 分钟，所以补发会漏过去。
+	// 24 小时覆盖「连接活了一整天才断」的重连；第一次命中去重的补发仍会
+	// 推进通知锚点，之后的重连就不会再把这条拉回来。
+	mastodonDedupTTL          = 24 * time.Hour
 	mastodonDedupCleanupEvery = 30 * time.Second
 	// replyContextTTL 被回复帖缓存的有效期（避免同一父帖被反复拉取）。
 	replyContextTTL = 10 * time.Minute
@@ -130,8 +138,13 @@ type MastodonChannel struct {
 
 	ingress *inbound.Ingress
 
-	// 去重缓存：statusID -> 入时间。防止 notification 与 timeline 双路径投递同一帖。
-	// 注意锚点用的是 notification ID（见 lastNotificationID），两者不可混用。
+	// 去重缓存：ingestDedupKey -> 入时间。
+	// 键是「事件类型 + id」，不是裸 id，也不是流名字：
+	//   - user / public:local / direct / mention / backfill 投递同一条帖子
+	//     都用 status:<statusID>，重连补发才能认出已经见过的帖；
+	//   - favourite 用 favourite:<notificationID>，避免小实例上短整数
+	//     status id 和 notification id 撞车，把收藏通知吞掉或反过来。
+	// 锚点用的是 notification ID（见 lastNotificationID），两者不可混用。
 	dedupMu sync.Mutex
 	dedup   map[string]time.Time
 
@@ -385,17 +398,40 @@ func (c *MastodonChannel) cleanupLoop(ctx context.Context) {
 	}
 }
 
-// dedupSeen 检查 statusID 是否在去重窗口内已处理过，未处理则标记为已处理。
-func (c *MastodonChannel) dedupSeen(statusID string) bool {
-	if statusID == "" {
+// statusDedupKey 是一条帖子进入 LLM 的去重键。
+// 流名字（user / public:local / direct）和入站标签（timeline / mention）
+// 都不进键：它们只是同一条 status 的不同投递路径，包括重连 backfill。
+func statusDedupKey(statusID string) string {
+	return ingestDedupKey("status", statusID)
+}
+
+// favouriteDedupKey 是收藏通知的去重键。事件类型必须和 status 分开，
+// 否则 notification id 与 status id 取到同一个短整数时会互相吞掉。
+func favouriteDedupKey(notificationID string) string {
+	return ingestDedupKey("favourite", notificationID)
+}
+
+// ingestDedupKey 把事件类型和 id 拼成稳定键。空 id 返回空串，
+// 调用方（dedupSeen）对空键不去重。
+func ingestDedupKey(event, id string) string {
+	if id == "" {
+		return ""
+	}
+	return event + ":" + id
+}
+
+// dedupSeen 检查 key 是否在去重窗口内已处理过，未处理则标记为已处理。
+// key 必须来自 statusDedupKey / favouriteDedupKey，不要直接传裸 id。
+func (c *MastodonChannel) dedupSeen(key string) bool {
+	if key == "" {
 		return false
 	}
 	c.dedupMu.Lock()
 	defer c.dedupMu.Unlock()
-	if ts, seen := c.dedup[statusID]; seen && time.Since(ts) < mastodonDedupTTL {
+	if ts, seen := c.dedup[key]; seen && time.Since(ts) < mastodonDedupTTL {
 		return true
 	}
-	c.dedup[statusID] = time.Now()
+	c.dedup[key] = time.Now()
 	return false
 }
 
@@ -485,7 +521,7 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 				c.setNotificationAnchor(n.ID)
 				continue
 			}
-			if c.dedupSeen(n.Status.ID) {
+			if c.dedupSeen(statusDedupKey(n.Status.ID)) {
 				c.setNotificationAnchor(n.ID)
 				continue
 			}
@@ -645,7 +681,7 @@ func (c *MastodonChannel) handleTimelineStatus(ctx context.Context, st *Status, 
 	if st == nil {
 		return
 	}
-	if c.dedupSeen(st.ID) {
+	if c.dedupSeen(statusDedupKey(st.ID)) {
 		return
 	}
 	// 公共时间线上自己的帖子不入站（私信流理论上也不含自己，保险起见一并挡）。
@@ -705,9 +741,10 @@ func (c *MastodonChannel) handleNotification(ctx context.Context, n *Notificatio
 		// 条件完全一致（nil Status / 自己发的 / 去重命中 三条路径都推进）。
 		//
 		// 否则锚点停滞后，断线重连的 backfillMentions 会用旧 since_id 把这条通知
-		// 重新拉回来；dedupSeen 只有 2 分钟窗口，挡不住几十分钟后的重放 →
-		// 同一条 mention 被二次处理并**二次外发回复**。这正是 Misskey
-		// 2026-09-01 重复外发事故的同款根因。
+		// 重新拉回来。时间线路径没有 notification id，推进不了锚点；去重键必须和
+		// backfill 一样是 status:<statusID>，并且窗口要盖住重连间隔。2 分钟挡不住
+		// 几十分钟后的补发，同一条帖会再进一次 LLM。这正是 Misskey 2026-09-01
+		// 重复外发事故的同款根因。
 		//
 		// setNotificationAnchor 单调递增，末尾再调一次是冗余保护，无害。
 		// 注意：只对 mention 推进——backfill 的 Types 只有 mention，若被一条
@@ -719,7 +756,7 @@ func (c *MastodonChannel) handleNotification(ctx context.Context, n *Notificatio
 		if n.Account.ID == c.selfAccountID() {
 			return
 		}
-		if c.dedupSeen(n.Status.ID) {
+		if c.dedupSeen(statusDedupKey(n.Status.ID)) {
 			return
 		}
 		c.handleStatus(ctx, n.Status, "mention", true, n.ID)
@@ -740,7 +777,7 @@ func (c *MastodonChannel) handleFavouriteNotification(ctx context.Context, n *No
 	if n.Account.ID == c.selfAccountID() {
 		return // 忽略自赞
 	}
-	if c.dedupSeen(n.ID) {
+	if c.dedupSeen(favouriteDedupKey(n.ID)) {
 		return
 	}
 
@@ -774,7 +811,10 @@ func (c *MastodonChannel) handleFavouriteNotification(ctx context.Context, n *No
 	}
 
 	msg := core.Message{
-		ID:            n.ID,
+		// ingress 只按 msg.ID 去重。收藏通知的 ID 必须带事件类型，
+		// 否则和一条 status id 相同的短整数会在 2 分钟窗口里被当成同一条消息丢掉。
+		// 原始通知 ID 仍在 metadata["notification_id"]。
+		ID:            favouriteDedupKey(n.ID),
 		BotID:         c.botID,
 		Source:        c.name,
 		Channel:       n.Account.ID, // 1:1 会话
@@ -802,7 +842,8 @@ func (c *MastodonChannel) handleFavouriteNotification(ctx context.Context, n *No
 // handleStatus 将一条 Mastodon Status 转换为 core.Message 并注入 Ingress。
 //
 // notifyID 是来源通知 ID（mention 场景），用于推进 backfill 锚点；
-// 时间线场景传空。消息本身始终以 status.ID 作为 ID 与去重键。
+// 时间线场景传空。消息 ID 仍是 status.ID（给 ingress / 回复目标用）。
+// 跨流、跨重连的去重不在这里做，调用方用 statusDedupKey 在进入本函数前完成。
 func (c *MastodonChannel) handleStatus(ctx context.Context, st *Status, eventType string, mentioned bool, notifyID string) {
 	text := htmlToText(st.Content)
 
