@@ -19,6 +19,10 @@ import (
 // with one final edit. Parse/HTML errors fall back to plain text via the
 // existing editMessageText path in api.go.
 //
+// Private sends never set reply_to_message_id. The quote bar (user name +
+// snippet) is wrong in a 1:1 chat. editMessageText updates that same bubble
+// and does not re-attach a reply.
+//
 // WeCom StreamReply is a different protocol (aibot_respond_msg stream frames);
 // Telegram must use sendMessage + editMessageText.
 // ============================================================================
@@ -116,7 +120,7 @@ type tgStream struct {
 	chatID    int64
 	messageID int64 // 0 until placeholder / first content is posted
 	traceID   string
-	replyTo   int64
+	replyTo   int64 // always 0: private streams must not quote the user message
 	started   time.Time
 	gen       uint64
 	cancel    context.CancelFunc
@@ -134,10 +138,17 @@ type tgStream struct {
 //
 // Does NOT send yet: the placeholder is delayed so fast replies never flash
 // 「正在思考…」. Groups/supergroups are a no-op (typing keepalive only).
+//
+// replyTo is ignored. A 1:1 bubble must not set reply_to_message_id: Telegram
+// draws a quote header (sender name + snippet) on every message that replies,
+// which is the wrong look for a private chat. Groups never enter this
+// function; an explicit reply_to_message_id on a group Send is kept so a
+// threaded mention can still attach to the message being answered.
 func (c *TelegramChannel) openStream(ctx context.Context, chatID int64, chatType, traceID string, replyTo int64) {
 	if !c.streamEnabled() || !isPrivateChat(chatType) || chatID == 0 || traceID == "" {
 		return
 	}
+	replyTo = 0
 
 	parent := c.typingParent() // runCtx; must not hold streamMu (Stop: mu then streamMu)
 
@@ -294,7 +305,7 @@ func (c *TelegramChannel) closeStream(ctx context.Context, st *tgStream, text st
 			break
 		}
 	}
-	_ = replyTo // reserved: placeholder already replied when sent
+	_ = replyTo // always 0; private sends do not set reply_to_message_id
 	traceid.L(ctx).Infow("telegram: stream finished",
 		"channel", c.name, "chat_id", chatID, "message_id", msgID, "bytes", len(text))
 	return true

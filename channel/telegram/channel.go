@@ -483,8 +483,10 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 	c.startTypingKeepalive(msg.Chat.ID, coreMsg.TraceID)
 
 	// Private-chat edit stream (groups: typing only, one final message on Send).
+	// Pass 0: openStream also forces replyTo to 0 so the placeholder / first
+	// bubble is a standalone message, not a quote of the user's message.
 	if c.streamEnabled() && isPrivateChat(chatType) {
-		c.openStream(ctx, msg.Chat.ID, chatType, coreMsg.TraceID, msg.MessageID)
+		c.openStream(ctx, msg.Chat.ID, chatType, coreMsg.TraceID, 0)
 	}
 
 	// 注入 Ingress
@@ -982,7 +984,8 @@ func (c *TelegramChannel) SendTyping(ctx context.Context, chatID int64) error {
 //   - Action.Metadata["parse_mode"]：格式化模式（"HTML"/"MarkdownV2"，可选，默认用 Config 中的值）
 //
 // 行为：
-//   - ActionReply：回复消息（支持 reply_to_message_id 引用、自动拆分长文本）
+//   - ActionReply：回复消息（群聊可带 reply_to_message_id 引用、自动拆分长文本）
+//   - 私聊（正 chat id）忽略 reply_to_message_id，不画引用条
 //   - 其他 ActionType：当前也按回复处理（后续扩展 Forward/Broadcast）
 func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
 	// 解析 chatID
@@ -1026,6 +1029,17 @@ func (c *TelegramChannel) Send(ctx context.Context, action core.Action) error {
 				parseMode = pm
 			}
 		}
+	}
+
+	// Private chats use a positive chat id; groups, supergroups, and channels
+	// are negative. 1:1 DMs must not pass reply_to_message_id — the client
+	// draws a quote bar (user name + snippet) on the bot bubble. Groups keep
+	// an explicit reply_to so a threaded answer still attaches to the message
+	// being answered. Outbound actions do not carry chat type, so the id sign
+	// is the discriminator. editMessageText only updates our own bubble and
+	// does not set reply_to.
+	if isPrivateChatID(chatID) {
+		replyToMessageID = 0
 	}
 
 	// Private edit stream: replace placeholder / partial with the final reply.
