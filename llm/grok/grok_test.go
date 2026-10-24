@@ -734,6 +734,12 @@ func TestReasoningEffortConstants(t *testing.T) {
 }
 
 func TestModelConstants(t *testing.T) {
+	if ModelGrok47 != "grok-4.7" {
+		t.Error("unexpected grok-4.7 model constant")
+	}
+	if ModelGrok46 != "grok-4.6" || ModelGrok45 != "grok-4.5" {
+		t.Error("unexpected grok-4.6 / grok-4.5 model constant")
+	}
 	if ModelGrok43 != "grok-4.3" {
 		t.Error("unexpected model constant")
 	}
