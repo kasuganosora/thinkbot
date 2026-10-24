@@ -713,8 +713,38 @@ func TestLookupModelPreset(t *testing.T) {
 	if p := lookupModelPreset("ernie-4.5-turbo"); p == nil || p.Temperature != 0.8 {
 		t.Errorf("ernie-4.5-turbo: want temp 0.8, got %v", p)
 	}
-	if p := lookupModelPreset("deepseek-chat"); p == nil || p.TopP != 1.0 {
-		t.Errorf("deepseek-chat: want top_p 1.0, got %v", p)
+	if p := lookupModelPreset("deepseek-chat"); p == nil || p.TopP != 1.0 || p.MaxTokens != 8192 || p.ContextLength != 1_000_000 {
+		t.Errorf("deepseek-chat: want generic deepseek preset, got %v", p)
+	}
+	// V4 具体前缀必须先于通用 deepseek（后者 MaxTokens 仍是 8192）。
+	if p := lookupModelPreset("deepseek-flash"); p == nil || p.MaxTokens != 65536 || p.ContextLength != 1_000_000 || p.Temperature != 1.0 || p.TopP != 1.0 {
+		t.Errorf("deepseek-flash: want V4 flash preset, got %v", p)
+	}
+	if p := lookupModelPreset("deepseek-v4-flash"); p == nil || p.MaxTokens != 65536 || p.ContextLength != 1_000_000 {
+		t.Errorf("deepseek-v4-flash: want V4 flash preset, got %v", p)
+	}
+	if p := lookupModelPreset("deepseek-v4-pro"); p == nil || p.MaxTokens != 65536 || p.ContextLength != 1_000_000 || p.TopP != 1.0 {
+		t.Errorf("deepseek-v4-pro: want V4 pro preset, got %v", p)
+	}
+	// kimi-k3.1 必须先于 kimi-k3（32K）和更宽的 kimi 兜底（256k）。
+	if p := lookupModelPreset("kimi-k3.1-pro"); p == nil || p.Temperature != 1.0 || p.TopP != 0.95 || p.MaxTokens != 131072 || p.ContextLength != 1_000_000 {
+		t.Errorf("kimi-k3.1-pro: want K3.1 preset, got %v", p)
+	}
+	if p := lookupModelPreset("kimi-k3.1-pro-highspeed"); p == nil || p.MaxTokens != 131072 || p.ContextLength != 1_000_000 {
+		t.Errorf("kimi-k3.1-pro-highspeed: want K3.1 preset, got %v", p)
+	}
+	if p := lookupModelPreset("kimi-k3"); p == nil || p.MaxTokens != 32768 || p.ContextLength != 1_000_000 {
+		t.Errorf("kimi-k3: want existing K3 preset, got %v", p)
+	}
+	// grok-4.7：500k 上下文，采样取官方 0.7 / 0.95，默认输出 128000。
+	if p := lookupModelPreset("grok-4.7"); p == nil || p.Temperature != 0.7 || p.TopP != 0.95 || p.MaxTokens != 128000 || p.ContextLength != 500_000 {
+		t.Errorf("grok-4.7: want Grok 4.7 preset, got %v", p)
+	}
+	if p := lookupModelPreset("grok-4.20-0309-reasoning"); p == nil || p.ContextLength != 1_000_000 || p.Temperature != 0.7 {
+		t.Errorf("grok-4.20: want 1M context preset, got %v", p)
+	}
+	if p := lookupModelPreset("grok-build-0.1"); p == nil || p.ContextLength != 256_000 {
+		t.Errorf("grok-build-0.1: want 256k context, got %v", p)
 	}
 	if p := lookupModelPreset("some-unknown-model"); p != nil {
 		t.Errorf("unknown model: want nil, got %v", p)
@@ -933,8 +963,35 @@ func TestResolveModelPrice_PresetFallback(t *testing.T) {
 		t.Errorf("glm-4.7-flash is free, got in=%v out=%v, want 0/0", in, out)
 	}
 	// 廉价变体不能被旗舰价错误命中（Flash 只有旗舰的 1/10）
-	if in, _, _, _ := resolveModelPrice("glm-5.3-flash", 0, 0, 0, ""); in != 0.8 {
-		t.Errorf("glm-5.3-flash input = %v, want 0.8", in)
+	if in, _, _, cur := resolveModelPrice("glm-5.3-flash", 0, 0, 0, ""); in != 0.8 || cur != "CNY" {
+		t.Errorf("glm-5.3-flash = in %v %s, want 0.8 CNY", in, cur)
+	}
+
+	usd := []struct {
+		model     string
+		wantIn    float64
+		wantOut   float64
+		wantCache float64
+	}{
+		{"grok-4.7", 2, 6, 0.5},
+		{"grok-4.6", 2, 6, 0.5},
+		{"grok-4.5", 2, 6, 0.3},
+		{"grok-4.3", 1.25, 2.5, 0.2},
+		{"grok-4.20-multi-agent-0309", 1.25, 2.5, 0.2},
+		{"grok-build-0.1", 1, 2, 0.2},
+		{"deepseek-flash", 0.3, 1.2, 0.006},
+		{"deepseek-v4-flash", 0.3, 1.2, 0.006},
+		{"deepseek-v4-pro", 1.32, 3.96, 0.044},
+		{"kimi-k3.1-pro-highspeed", 4, 20, 0.2},
+		{"kimi-k3.1-pro", 2, 10, 0.2},
+		{"kimi-k3", 3, 15, 0.3},
+	}
+	for _, c := range usd {
+		in, out, cache, cur := resolveModelPrice(c.model, 0, 0, 0, "")
+		if in != c.wantIn || out != c.wantOut || cache != c.wantCache || cur != "USD" {
+			t.Errorf("%s: got in=%v out=%v cache=%v %s, want %v/%v/%v USD",
+				c.model, in, out, cache, cur, c.wantIn, c.wantOut, c.wantCache)
+		}
 	}
 
 	// 显式配置优先于预设，且逐维独立回退（只配了输入 → 只回退输出）
