@@ -203,6 +203,14 @@ type callbackBody struct {
 	Video *mediaContent `json:"video,omitempty"`
 	Mixed *mixedContent `json:"mixed,omitempty"`
 
+	// Quote 被**引用**的那条消息。用户在企微里引用某条历史消息再提问时才有。
+	//
+	// ⚠️ 官方定义：body.quote 引用内容，若用户引用了其他消息则有该字段。
+	// 早期版本 callbackBody 根本没这个字段 —— 整块被 JSON 解码**静默丢弃**，
+	// 用户问「这个怎么改」时 bot 只看得到这一句、看不到被引用的原文，
+	// 只能瞎猜或反过来问用户要内容。
+	Quote *quoteContent `json:"quote,omitempty"`
+
 	// ResponseURL 是一次性的 HTTP 被动回复通道（见 docs §9.2.3）。
 	// 一期未使用，先记录下来备用。
 	ResponseURL string `json:"response_url,omitempty"`
@@ -234,6 +242,25 @@ type mixedItem struct {
 	MsgType string        `json:"msgtype"`
 	Text    *textContent  `json:"text,omitempty"`
 	Image   *mediaContent `json:"image,omitempty"`
+}
+
+// quoteContent 是「引用消息」的载荷（body.quote）。
+//
+// 结构与普通消息体一致：msgtype + 对应类型的载荷。官方示例：
+//
+//	"quote": {"msgtype": "text", "text": {"content": "这是今日的测试情况"}}
+//
+// ⚠️ 引用里**只有文本能拿到内容**：图片/语音/文件/视频的引用即使带 url 也通常
+// 不带 aeskey，解密下载无从下手。所以这些类型只渲染成类型占位（见 renderQuote），
+// 至少让模型知道「用户引用了一条图片」而不是完全不知情。
+type quoteContent struct {
+	MsgType string        `json:"msgtype"`
+	Text    *textContent  `json:"text,omitempty"`
+	Image   *mediaContent `json:"image,omitempty"`
+	Voice   *mediaContent `json:"voice,omitempty"`
+	File    *mediaContent `json:"file,omitempty"`
+	Video   *mediaContent `json:"video,omitempty"`
+	Mixed   *mixedContent `json:"mixed,omitempty"`
 }
 
 // eventBody 是 aibot_event_callback 的消息体。
