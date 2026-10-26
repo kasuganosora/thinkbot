@@ -774,23 +774,40 @@ func (c *WeComChannel) reapStreams(ctx context.Context) {
 	now := time.Now()
 
 	c.streamMu.Lock()
-	var stale []*wecomStream
+	type staleEntry struct {
+		key string
+		st  *wecomStream
+	}
+	var stale []staleEntry
 	for k, st := range c.streams {
 		if st == nil || now.Sub(st.started) < maxAge {
 			continue
 		}
 		delete(c.streams, k)
-		stale = append(stale, st)
+		stale = append(stale, staleEntry{key: k, st: st})
 	}
 	c.streamMu.Unlock()
 
-	for _, st := range stale {
-		if st.closed {
+	for _, e := range stale {
+		if e.st.closed {
 			continue
 		}
-		traceid.L(ctx).Warnw("wecom: stream reaped after max age (no reply came)",
-			"channel", c.name, "stream_id", st.streamID, "age", now.Sub(st.started).String())
-		c.closeStream(ctx, st, st.content)
+		// ⚠️ 两种「超时」必须分开记，否则会持续制造假警报：
+		// 编排层还在跑 = 长任务撞上了流上限，回复**之后真会来**（实测 11:57
+		// 收尾、12:05 才 action sent，中间隔 8 分钟）；编排层已停 = 本轮确实
+		// 不会回复了。混成一句 "no reply came" 会让「bot 没理我」的排查
+		// 每次都先撞上一条假阳性。
+		if c.turnRunning(e.key) {
+			traceid.L(ctx).Warnw("wecom: stream closed at max age while turn still running",
+				"channel", c.name, "chat", e.key, "stream_id", e.st.streamID,
+				"age", now.Sub(e.st.started).String(),
+				"hint", "long task exceeded stream lifetime; final reply will arrive as a separate message")
+		} else {
+			traceid.L(ctx).Warnw("wecom: stream reaped after max age (no reply came)",
+				"channel", c.name, "chat", e.key, "stream_id", e.st.streamID,
+				"age", now.Sub(e.st.started).String())
+		}
+		c.closeStream(ctx, e.st, e.st.content)
 	}
 }
 
