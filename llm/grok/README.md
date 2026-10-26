@@ -26,7 +26,7 @@ prov := grok.New(
 )
 
 result, err := prov.DoGenerate(ctx, llm.GenerateParams{
-    Model:    llm.ChatModel("grok-4.3"), // 或常量 grok.ModelGrok43
+    Model:    llm.ChatModel("grok-4.7"), // 或常量 grok.ModelGrok47 / grok.ModelGrok43
     Messages: []llm.Message{llm.UserMessage("你好")},
 })
 ```
@@ -134,7 +134,7 @@ result, err := prov.DoGenerate(ctx, llm.GenerateParams{
 
 - 常量：`DefaultBaseURL="https://api.x.ai"`、`RoleSystem`/`RoleUser`/`RoleAssistant`/`RoleTool`、`ContentTypeText`/`ContentTypeImageURL`、`ResponseFormatText`/`ResponseFormatJSONObject`/`ResponseFormatJSONSchema`、`ImageFormatURL`/`ImageFormatBase64`、`VideoStatus*`、`VideoResolution480p`/`VideoResolution720p`、`FinishReason*`(`stop`/`length`/`tool_calls`/`content_filter`)。
 - 模型常量：
-  - 文本：`ModelGrok43`、`ModelGrok420NonReasoning`、`ModelGrok420Reasoning`、`ModelGrok420MultiAgent`、`ModelGrokBuild`。
+  - 文本：`ModelGrok47`、`ModelGrok46`、`ModelGrok45`、`ModelGrok43`、`ModelGrok420NonReasoning`、`ModelGrok420Reasoning`、`ModelGrok420MultiAgent`、`ModelGrokBuild`。
   - 图片：`ModelGrokImage`、`ModelGrokImageQuality`。
   - 视频：`ModelGrokVideo`、`ModelGrokVideo15Preview`。
 - 推理：`ReasoningEffort` 类型及常量 `ReasoningNone`/`ReasoningLow`/`ReasoningMedium`/`ReasoningHigh`（`low` 的"默认"仅是注释标注，适配器不设置缺省值）。
