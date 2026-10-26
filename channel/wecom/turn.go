@@ -336,14 +336,40 @@ func (c *WeComChannel) watchAppend(ctx context.Context, msg core.Message, traceI
 func (c *WeComChannel) reapTurns(ctx context.Context) {
 	maxAge := c.streamMaxAge()
 	now := time.Now()
+
+	// ⚠️ 先只收集候选、出了锁再判活：turnRunning 自己要拿 turnMu，
+	// 持锁调用会死锁（sync.Mutex 不可重入）。
+	type staleTurn struct {
+		key     string
+		traceID string
+		age     time.Duration
+	}
 	c.turnMu.Lock()
+	var stale []staleTurn
 	for k, t := range c.active {
 		if t == nil || now.Sub(t.started) < maxAge {
 			continue
 		}
-		delete(c.active, k)
-		traceid.L(ctx).Warnw("wecom: stale turn reaped",
-			"channel", c.name, "chat", k, "trace_id", t.traceID, "age", now.Sub(t.started).String())
+		stale = append(stale, staleTurn{key: k, traceID: t.traceID, age: now.Sub(t.started)})
 	}
 	c.turnMu.Unlock()
+
+	for _, s := range stale {
+		// ⚠️⚠️ **仍在跑的轮次绝不能摘**。摘掉之后同会话的下一条消息查不到
+		// 活跃登记，会被判成 turnNew → 起第二个 turn，两个 turn 并发跑在
+		// 同一个 workspace 上互相破坏（2026-10-26 15:16 实测：后起的 turn
+		// 一句 `rm -rf wecom-doc-mcp && git clone` 就把前一个 turn 刚装好的
+		// 目录删了，两边重复劳动、双双变慢）。
+		//
+		// 光看 age 是不够的：长任务天然会超过 streamMaxAge，但它**没结束**。
+		// 是否僵死要以编排侧为准（turnRunning → ctl.IsMessageActive）——
+		// 只有编排层确认已经不活跃的登记才是真僵尸。
+		if c.turnRunning(s.key) {
+			continue
+		}
+		// traceID 对得上才删，避免摘掉期间刚起的新轮。
+		c.clearTurn(s.key, s.traceID)
+		traceid.L(ctx).Warnw("wecom: stale turn reaped",
+			"channel", c.name, "chat", s.key, "trace_id", s.traceID, "age", s.age.String())
+	}
 }
