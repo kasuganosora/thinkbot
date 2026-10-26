@@ -73,6 +73,34 @@ func TestMCPServerTool_AddListRemove_PersistsAndHotMounts(t *testing.T) {
 	}
 }
 
+// TestMCPServerTool_Scopes 固化 mcp_server 的适用场景：私聊与群聊都要暴露，
+// 但子代理绝不暴露。
+//
+// 回归背景（2026-10-26）：Scopes 曾只写 "private"，管理员在群里让 bot 加 MCP
+// 时工具列表里根本没有 mcp_server，tool_search 一律 no match，而工具本身注册
+// 正常 —— 静默失效，只能靠翻规则表反推。可用性门槛必须被测试钉住。
+func TestMCPServerTool_Scopes(t *testing.T) {
+	tool := NewMCPServerTool("bot-x", mcp.NewManager(zap.NewNop().Sugar()), zap.NewNop().Sugar())
+
+	has := func(scope string) bool {
+		for _, s := range tool.Scopes {
+			if s == scope {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("private") {
+		t.Error("mcp_server must be available in private chats")
+	}
+	if !has("group") {
+		t.Error("mcp_server must be available in group chats")
+	}
+	if has("subagent") {
+		t.Error("mcp_server must NOT be exposed to subagents")
+	}
+}
+
 func TestMCPServerTool_RejectsSystemAndSubagent(t *testing.T) {
 	mgr := mcp.NewManager(zap.NewNop().Sugar())
 	tool := NewMCPServerTool("bot-x", mgr, zap.NewNop().Sugar())
