@@ -449,11 +449,15 @@ func (c *WeComChannel) cleanupLoop(ctx context.Context) {
 			round++
 			if round%wecomPruneLimiterDiv == 0 {
 				c.limiter.prune()
-				// 顺带收尾超时未完成的流（pipeline 静默时没人会来 finish）。
-				c.reapStreams(ctx)
-				// 顺带摘掉僵死的轮次（pipeline 决定不回复时没人来摘）。
-				c.reapTurns(ctx)
 			}
+			// ⚠️ 收尾必须**每轮**跑，不能挂在 wecomPruneLimiterDiv 上：
+			// 它守护的阈值是 streamMaxAge（默认 5 分钟），而 div=10 会把扫描
+			// 间隔拉到 10 分钟 —— 兜底比它要兜的阈值还晚，占位符会一直卡在
+			// 「正在思考…」，甚至越过企微服务端「首次推送起 10 分钟」的硬上限
+			// （实测 reaped 的 age 一路到 13m03s）。prune 只是限流桶瘦身，
+			// 才配得上 10 分钟一次；收尾不是。
+			c.reapStreams(ctx) // 超时未完成的流（pipeline 静默时没人会来 finish）
+			c.reapTurns(ctx)   // 僵死轮次（pipeline 决定不回复时没人来摘）
 		}
 	}
 }
