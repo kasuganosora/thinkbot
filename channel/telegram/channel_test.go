@@ -2,12 +2,17 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/internal/interaction"
 )
@@ -629,5 +634,63 @@ func TestDropChoicePendingStopsTimer(t *testing.T) {
 	case <-fired:
 		t.Fatal("timer should have been stopped so expire does not fire")
 	default:
+	}
+}
+
+// TestSend_PrivateOmitsReplyToGroupKeepsIt locks the quote-bar rule:
+// private chat ids are positive and must not send reply_to_message_id even
+// when the action carries one; group/supergroup ids are negative and keep an
+// explicit reply_to so a threaded mention still attaches to the answered message.
+func TestSend_PrivateOmitsReplyToGroupKeepsIt(t *testing.T) {
+	var mu sync.Mutex
+	var got []int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req sendMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode sendMessage: %v", err)
+		}
+		mu.Lock()
+		got = append(got, req.ReplyToMessageID)
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":9}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	api := newAPIClient("TEST", 0, srv.URL)
+	api.sendInterval = 0
+	ch := &TelegramChannel{api: api, cfg: Config{}}
+
+	private := core.Action{
+		Channel: "424242",
+		Payload: "plain dm",
+		Metadata: map[string]any{
+			"reply_to_message_id": int64(77),
+		},
+	}
+	if err := ch.Send(context.Background(), private); err != nil {
+		t.Fatalf("private Send: %v", err)
+	}
+
+	group := core.Action{
+		Channel: "-100123",
+		Payload: "threaded",
+		Metadata: map[string]any{
+			"reply_to_message_id": int64(77),
+		},
+	}
+	if err := ch.Send(context.Background(), group); err != nil {
+		t.Fatalf("group Send: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("sends = %d, want 2: %v", len(got), got)
+	}
+	if got[0] != 0 {
+		t.Fatalf("private reply_to_message_id = %d, want 0", got[0])
+	}
+	if got[1] != 77 {
+		t.Fatalf("group reply_to_message_id = %d, want 77", got[1])
 	}
 }

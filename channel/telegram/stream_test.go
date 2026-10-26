@@ -91,6 +91,16 @@ func (r *recordingStreamAPI) sendTexts() []string {
 	return out
 }
 
+func (r *recordingStreamAPI) replyTos() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]int64, len(r.sends))
+	for i, s := range r.sends {
+		out[i] = s.ReplyTo
+	}
+	return out
+}
+
 func newStreamTestChannel(api *recordingStreamAPI) *TelegramChannel {
 	ch := &TelegramChannel{
 		name:  "tg-stream-test",
@@ -162,6 +172,50 @@ func TestStream_DisabledConfig(t *testing.T) {
 	if ch.streamActive(7) {
 		t.Fatal("StreamReply=false must not open streams")
 	}
+}
+
+// TestStream_PrivateSendDoesNotQuoteUser: 1:1 bubbles must not set
+// reply_to_message_id. Passing the inbound user message id (historical
+// threading) still sends a standalone message — Telegram otherwise draws a
+// quote header with the user's name and snippet on every bot bubble.
+func TestStream_PrivateSendDoesNotQuoteUser(t *testing.T) {
+	t.Run("placeholder", func(t *testing.T) {
+		withFastStream(t, 15*time.Millisecond, time.Second, time.Minute)
+		api := newRecordingStreamAPI()
+		ch := newStreamTestChannel(api)
+
+		ch.openStream(context.Background(), 42, "private", "Tquote", 77)
+		waitUntil(t, time.Second, func() bool { return api.sendCount() >= 1 })
+
+		for i, replyTo := range api.replyTos() {
+			if replyTo != 0 {
+				t.Fatalf("send[%d] ReplyTo = %d, want 0 (no private quote bar)", i, replyTo)
+			}
+		}
+		_ = ch.finishStream(context.Background(), 42, "done")
+	})
+
+	t.Run("first content before placeholder", func(t *testing.T) {
+		withFastStream(t, time.Hour, time.Second, time.Minute)
+		api := newRecordingStreamAPI()
+		ch := newStreamTestChannel(api)
+		deltas := make(chan Delta, 4)
+		ch.deltaSrc = func(string) (<-chan Delta, func()) { return deltas, func() {} }
+		ch.liveness = alwaysAlive{}
+
+		ch.openStream(context.Background(), 42, "private", "Tquote2", 88)
+		deltas <- Delta{Kind: DeltaText, Text: "hello"}
+		close(deltas)
+
+		waitUntil(t, time.Second, func() bool { return api.sendCount() >= 1 })
+		for i, replyTo := range api.replyTos() {
+			if replyTo != 0 {
+				t.Fatalf("send[%d] ReplyTo = %d, want 0 (no private quote bar)", i, replyTo)
+			}
+		}
+		_ = ch.finishStream(context.Background(), 42, "hello")
+		waitUntil(t, time.Second, func() bool { return !ch.streamActive(42) })
+	})
 }
 
 // TestStream_PlaceholderThenFinishEdit: A-档 lifecycle — placeholder, then final edit.

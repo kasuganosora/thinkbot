@@ -193,6 +193,17 @@ func TestIsPrivateChat(t *testing.T) {
 			t.Errorf("isPrivateChat(%q) = %v, want %v", ct, got, want)
 		}
 	}
+	idCases := map[int64]bool{
+		424242:  true,  // private user id
+		-1001:   false, // basic group
+		-100123: false, // supergroup / channel
+		0:       false,
+	}
+	for id, want := range idCases {
+		if got := isPrivateChatID(id); got != want {
+			t.Errorf("isPrivateChatID(%d) = %v, want %v", id, got, want)
+		}
+	}
 }
 
 // TestTypingKeepalive_RunCtxCancel: cancelling channel runCtx ends keepalives

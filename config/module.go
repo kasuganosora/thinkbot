@@ -524,13 +524,14 @@ func float64Ptr(v float64) *float64 {
 // 当 provider.* 模型配置未显式给出对应字段时，回退到此处的推荐值，
 // 实现「用户/Provider 未设置时读取模型预设」的需求。
 //
-// 数据来源（截至 2026-08）：
+// 数据来源（截至 2026-10）：
 //   - 智谱 GLM：docs.z.ai / docs.bigmodel.cn
 //   - 百度文心 ERNIE：cloud.baidu.com 文心千帆模型文档
 //   - 腾讯混元 Hunyuan：cloud.tencent.com 混元文档
-//   - Moonshot / Kimi：platform.kimi.com/docs/api/models-overview
+//   - Moonshot / Kimi：platform.kimi.ai（models-overview / K3.1 Pro quickstart）
 //   - 阿里通义千问 Qwen：help.aliyun.com 百炼模型文档
 //   - DeepSeek：api-docs.deepseek.com
+//   - xAI Grok：docs.x.ai（grok-4.7 / pricing / text best practices）
 //   - 字节豆包 Doubao：volcengine.com / BytePlus 文档
 type ModelPreset struct {
 	Temperature   float64 // 采样温度官方推荐值
@@ -546,7 +547,9 @@ var modelPresetRules = []struct {
 	preset   ModelPreset
 }{
 	// ---- 智谱 GLM ----
-	// GLM-5 全系：temp 1.0 / top_p 0.95 / 输出 128K(默认 64K) / 上下文 1M
+	// GLM-5 全系：temp 1.0 / top_p 0.95 / 输出 128K(默认 64K) / 上下文 1M。
+	// GLM-5.3-Flash / FlashX 共用本采样预设（官方推荐与 GLM-5.3 一致：
+	// 默认 max_tokens 65536，架构上限 131072）。不要把默认值抬到上限。
 	{[]string{"glm-5", "glm-z1"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 65536, ContextLength: 1_000_000}},
 	// GLM-4.7 / 4.6：与 5 系同推荐（temp 1.0 / top_p 0.95 / 输出 128K）
 	{[]string{"glm-4.7", "glm-4.6"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 65536, ContextLength: 200_000}},
@@ -567,6 +570,10 @@ var modelPresetRules = []struct {
 	{[]string{"hunyuan"}, ModelPreset{Temperature: 1.0, TopP: 1.0, MaxTokens: 4096, ContextLength: 128_000}},
 
 	// ---- Moonshot / Kimi ----
+	// K3.1（kimi-k3.1-pro / -highspeed）必须排在 kimi-k3 之前，否则前缀 kimi-k3 会先命中。
+	// 采样与 K3 相同且被 API 固定为 temp 1.0 / top_p 0.95；上下文 1M。
+	// max_completion_tokens 官方默认 131072（可设至 1048576），不用 K3 行里更旧的 32K。
+	{[]string{"kimi-k3.1"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 131072, ContextLength: 1_000_000}},
 	{[]string{"kimi-k3"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 32768, ContextLength: 1_000_000}},
 	{[]string{"kimi-k2.7"}, ModelPreset{Temperature: 1.0, TopP: 0.95, MaxTokens: 32768, ContextLength: 256_000}},
 	{[]string{"kimi-k2.6"}, ModelPreset{Temperature: 0.6, TopP: 0.95, MaxTokens: 32768, ContextLength: 256_000}},
@@ -582,7 +589,22 @@ var modelPresetRules = []struct {
 	{[]string{"qwen"}, ModelPreset{Temperature: 0.7, TopP: 0.8, MaxTokens: 4096, ContextLength: 128_000}},
 
 	// ---- DeepSeek ----
+	// V4 官方 id：deepseek-flash（V4.1-Flash）与 deepseek-v4-pro。上下文 1M，最大输出 384K。
+	// 未显式设置时默认 64K。deepseek-v4-flash 是已退役别名，仍由 Flash 承接，须单独前缀，
+	// 且两条都要排在通用 deepseek 之前。
+	{[]string{"deepseek-v4-flash", "deepseek-flash"}, ModelPreset{Temperature: 1.0, TopP: 1.0, MaxTokens: 65536, ContextLength: 1_000_000}},
+	{[]string{"deepseek-v4-pro"}, ModelPreset{Temperature: 1.0, TopP: 1.0, MaxTokens: 65536, ContextLength: 1_000_000}},
 	{[]string{"deepseek"}, ModelPreset{Temperature: 1.0, TopP: 1.0, MaxTokens: 8192, ContextLength: 1_000_000}},
+
+	// ---- xAI Grok ----
+	// 采样取 docs.x.ai text best practices：temperature 0.7 / top_p 0.95
+	// （偏离后质量下降；服务端还会把 temperature 钳到 ≤1、top_p 钳到模型默认 0.95）。
+	// max_output_tokens 未设置时官方默认 128000。上下文：4.5/4.6/4.7 为 500k，4.3/4.20 为 1M，
+	// grok-build-0.1 为 256k。更具体的前缀必须排在兜底 grok 之前。
+	{[]string{"grok-4.3", "grok-4.20"}, ModelPreset{Temperature: 0.7, TopP: 0.95, MaxTokens: 128000, ContextLength: 1_000_000}},
+	{[]string{"grok-4.7", "grok-4.6", "grok-4.5"}, ModelPreset{Temperature: 0.7, TopP: 0.95, MaxTokens: 128000, ContextLength: 500_000}},
+	{[]string{"grok-build"}, ModelPreset{Temperature: 0.7, TopP: 0.95, MaxTokens: 128000, ContextLength: 256_000}},
+	{[]string{"grok"}, ModelPreset{Temperature: 0.7, TopP: 0.95, MaxTokens: 128000, ContextLength: 500_000}},
 
 	// ---- 字节豆包 Doubao（官方默认值在不同文档间有分歧，此处取 OpenAI 兼容层常见默认） ----
 	{[]string{"doubao-seed-2.0"}, ModelPreset{Temperature: 1.0, TopP: 0.5, MaxTokens: 4096, ContextLength: 256_000}},
@@ -622,12 +644,20 @@ func GetModelPreset(model string) *ModelPreset {
 //
 // 优先级：provider 显式单价 > 此处官方预设 > 0（不计入金钱额度）。
 //
-// 数据来源：docs.bigmodel.cn/cn/guide/start/pricing（2026-09-24 核对）。
-// 智谱按输入/输出长度分档计价，此处统一取【低档】——thinkbot 绝大多数调用的输入
-// 在 32K 以内、输出在 0.2K 以上；长上下文调用的实际花费会略高于本表估算，
-// 即估算偏保守（少算），如需绝对兜住上限请改用高档数值。
+// 数据来源：
+//   - 智谱：docs.bigmodel.cn/cn/guide/start/pricing（2026-09-24，CNY）。
+//     按输入/输出长度分档，此处统一取【低档】——thinkbot 绝大多数调用的输入
+//     在 32K 以内、输出在 0.2K 以上；长上下文调用的实际花费会略高于本表估算，
+//     即估算偏保守（少算），如需绝对兜住上限请改用高档数值。
+//   - xAI：docs.x.ai/developers/pricing（2026-10-10，USD）。长上下文（≥200k）另有高档，
+//     此处取 <200k 低档，与智谱「优先低档 / 偏保守」一致。
+//   - DeepSeek：api-docs.deepseek.com/quick_start/pricing（2026-10，USD）。
+//     高峰价约为空闲价的 2 倍，此处取高峰价（偏保守）。
+//   - Kimi：platform.kimi.ai 公开标价（2026-10-24，USD，按上下文不分档）。
+//     CacheRead 取缓存命中价；cache write 不在本表字段内，不计入。
+// Currency 为空时 lookupModelPrice 回退 CNY，因此非人民币价目必须显式写币种。
 type ModelPricePreset struct {
-	InputPer1M     float64 // 输入单价（元 / 百万 tokens）
+	InputPer1M     float64 // 输入单价（每百万 tokens）
 	OutputPer1M    float64 // 输出单价
 	CacheReadPer1M float64 // 缓存命中单价
 	Currency       string  // 币种，默认 CNY
@@ -658,6 +688,25 @@ var modelPriceRules = []struct {
 	{[]string{"glm-4.5"}, ModelPricePreset{InputPer1M: 3, OutputPer1M: 14, CacheReadPer1M: 0.6}},
 	// glm-4-plus / glm-4-air / glm-4-flash 等存量型号价差极大（5/5 ~ 免费），
 	// 不做家族级兜底，避免给错价；未命中即不计入金钱额度。
+
+	// ---- xAI Grok（USD / 1M tokens，<200k 低档）----
+	// grok-4.20 覆盖 multi-agent / reasoning / non-reasoning 等同价变体。
+	{[]string{"grok-4.7", "grok-4.6"}, ModelPricePreset{InputPer1M: 2, OutputPer1M: 6, CacheReadPer1M: 0.5, Currency: "USD"}},
+	{[]string{"grok-4.5"}, ModelPricePreset{InputPer1M: 2, OutputPer1M: 6, CacheReadPer1M: 0.3, Currency: "USD"}},
+	{[]string{"grok-4.3", "grok-4.20"}, ModelPricePreset{InputPer1M: 1.25, OutputPer1M: 2.5, CacheReadPer1M: 0.2, Currency: "USD"}},
+	{[]string{"grok-build"}, ModelPricePreset{InputPer1M: 1, OutputPer1M: 2, CacheReadPer1M: 0.2, Currency: "USD"}},
+
+	// ---- DeepSeek（USD / 1M tokens，高峰价）----
+	// deepseek-v4-flash 须在 deepseek-v4-pro 与通用前缀之外单独列出；
+	// 它不是 deepseek-flash 的前缀匹配（中间有 -v4-）。
+	{[]string{"deepseek-v4-flash", "deepseek-flash"}, ModelPricePreset{InputPer1M: 0.3, OutputPer1M: 1.2, CacheReadPer1M: 0.006, Currency: "USD"}},
+	{[]string{"deepseek-v4-pro"}, ModelPricePreset{InputPer1M: 1.32, OutputPer1M: 3.96, CacheReadPer1M: 0.044, Currency: "USD"}},
+
+	// ---- Moonshot / Kimi（USD / 1M tokens，缓存命中价）----
+	// highspeed 必须排在 kimi-k3.1-pro 之前，kimi-k3.1-pro 必须排在 kimi-k3 之前。
+	{[]string{"kimi-k3.1-pro-highspeed"}, ModelPricePreset{InputPer1M: 4, OutputPer1M: 20, CacheReadPer1M: 0.2, Currency: "USD"}},
+	{[]string{"kimi-k3.1-pro"}, ModelPricePreset{InputPer1M: 2, OutputPer1M: 10, CacheReadPer1M: 0.2, Currency: "USD"}},
+	{[]string{"kimi-k3"}, ModelPricePreset{InputPer1M: 3, OutputPer1M: 15, CacheReadPer1M: 0.3, Currency: "USD"}},
 }
 
 // lookupModelPrice 根据模型名查找官方单价预设，未命中返回 nil。

@@ -112,12 +112,17 @@ Mastodon streaming 同样不重放断连期间的消息，锚点机制与 Misske
   会跳过尚未处理的更早 mention，所以 favourite 路径**不**碰锚点。
 - **单调递增守卫**：Mastodon ID 与 Misskey aid 一样是定长雪花 ID、按时间字典序递增，锚点只允许向更新的 ID 推进（`newerID`）。空 ID 与乱序旧 ID 均不更新。
 - **backfill**：以锚点为 `since_id`（开区间）、用 `max_id` 翻页调 notifications，每页 40（服务端单次上限）、封顶 100 条；
-  复用 `handleStatus` 走与实时相同的路径，重叠由 `dedupSeen` 兜底。
+  复用 `handleStatus` 走与实时相同的路径。重叠由 `dedupSeen` 兜底，键是 `status:<statusID>`
+  （`user` / `public:local` / `direct` / mention / backfill 共用，不含流名字），TTL 24 小时。
+  收藏通知单独用 `favourite:<notificationID>`，避免和帖子 id 撞车。
+  已见过的 status 在补发里被丢掉时仍推进锚点。
   封顶是**配额保护**：每条 mention 还会额外触发一次 `getStatus` 取父帖，几百条积压会在瞬间打满 300 req/5min，
   把 backfill 自己打挂；超出部分有意丢弃（仍在时间线流里可见）。
 
 > 事故背景：Misskey 曾因「锚点不推进 + 被旧值卡住」，两次断连把整晚 mention 重放两轮，重复外发。
-> 这里的守卫与联动是照搬那次修复——2 分钟的 dedup 窗口挡不住几十分钟后的重放。
+> Mastodon 若只用裸 status id + 2 分钟窗口，同一条帖会从多条流和重连补发各进一次 LLM
+> （2026-10-24 status 18391 进了四次）。键改成「事件类型 + id」并且把窗口拉到 24 小时之后，
+> 补发才能认出几十分钟前已经见过的帖。
 
 > ⚠️ **已知不对称**：锚点只覆盖「通知流里的 mention」。公共时间线流（`public` / `public:local` 等）
 > 走的是 `handleTimelineStatus`，拿不到通知 ID，**无法推进锚点**，因此时间线消息在断连窗口内
