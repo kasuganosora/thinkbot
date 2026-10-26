@@ -150,8 +150,14 @@ func NewMCPServerTool(botID string, mgr *mcp.Manager, logger *zap.SugaredLogger)
 			}),
 		},
 		Category: "mcp",
-		// 仅主会话私聊可用；群聊/子代理不暴露，降低误挂载面。
-		Scopes: []string{"private"},
+		// 主会话私聊/群聊可用，子代理不暴露。
+		//
+		// 2026-10-26 放开群聊：管理员在群里让 bot 挂 MCP 是最自然的用法，
+		// 群聊场景此前被 private 一刀切掉，导致「在群里让 bot 加 MCP」永远
+		// 搜不到这个工具（只能改回单聊或走 Web）。风险由 toolperm 规则收敛：
+		// mcp_server 命中 mcp_ 敏感前缀，企微已进入白名单模式，必须显式 allow
+		// 才放行；子代理仍被 executeMCPServerTool 硬拒。
+		Scopes: []string{"private", "group"},
 	}
 }
 

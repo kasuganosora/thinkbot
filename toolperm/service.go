@@ -790,7 +790,42 @@ func (e *evaluator) FilterTools(_ context.Context, toolList []llm.Tool, sctx *to
 		}
 		out = append(out, wt)
 	}
+	if len(out) != len(toolList) {
+		e.logFiltered(botID, platform, chatID, toolList, out)
+	}
 	return out, nil
+}
+
+// maxLoggedFilteredTools 限制单条日志里列出的被过滤工具名数量，避免
+// 工具集很大时（MCP 挂载几十个工具）把日志行撑爆。数量本身始终完整记录。
+const maxLoggedFilteredTools = 20
+
+// logFiltered 记录本轮被权限过滤掉的工具。
+//
+// 这段可观测性是补一个真实踩过的坑：工具被静默从列表里摘掉时，日志里
+// **一行痕迹都没有**，模型侧只表现为 tool_search 找不到、或干脆不调用，
+// 排查只能靠反推规则表（2026-10-26 企微 bot 的 mcp_server 即如此）。
+// 只在确实过滤掉工具时打一条 INFO 汇总，不逐工具刷屏。
+func (e *evaluator) logFiltered(botID, platform, chatID string, toolList, out []llm.Tool) {
+	kept := make(map[string]bool, len(out))
+	for _, t := range out {
+		kept[t.Name] = true
+	}
+	names := make([]string, 0, len(toolList)-len(out))
+	for _, t := range toolList {
+		if !kept[t.Name] {
+			names = append(names, t.Name)
+		}
+	}
+	sort.Strings(names)
+	shown := names
+	if len(shown) > maxLoggedFilteredTools {
+		shown = shown[:maxLoggedFilteredTools]
+	}
+	e.svc.logger.Infow("toolperm: tools hidden by permission",
+		"bot", botID, "platform", platform, "chat", chatID,
+		"total", len(toolList), "allowed", len(out), "filtered", len(names),
+		"tools", strings.Join(shown, ","))
 }
 
 // resolveCandidates 收集当前用户在工具权限评估中的所有可识别身份（OR 匹配候选集）：
