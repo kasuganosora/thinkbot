@@ -584,6 +584,15 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 
 	text, mentioned, items := extractInbound(body, c.cfg.BotName, isGroup)
 	text = strings.TrimSpace(text)
+	// 引用：用户引用了某条历史消息再提问时，把被引用的原文并进正文。
+	// ⚠️ 必须在剥 @ 之后、判空之前：引用内容本身不参与 @ 剥离（它是历史内容），
+	// 而「只引用、一个字没打」这种输入靠引用才能不变成空消息被丢掉。
+	if q := renderQuote(body.Quote); q != "" {
+		text = mergeQuote(q, text)
+		traceid.L(ctx).Infow("wecom: quoted message attached to inbound text",
+			"channel", c.name, "msgid", body.MsgID, "chat", channelID,
+			"quote_type", body.Quote.MsgType, "quote_len", len(q), "text_len", len(text))
+	}
 	if text == "" && len(items) == 0 {
 		// 实测真实存在：用户只发一个 "@mybot "。剥完前缀就是空串，
 		// 不挡掉会让 LLM 收到一条空消息（进而回一句莫名其妙的话）。
@@ -888,6 +897,76 @@ func mergeCaption(caption, body string) string {
 		return caption
 	default:
 		return caption + "\n" + body
+	}
+}
+
+// quoteRenderLimit 引用内容拼进正文的字符上限。
+// 引用是**上下文**不是用户输入，一条超长引用不该吃掉整个上下文窗口。
+const quoteRenderLimit = 2000
+
+// renderQuote 把被引用消息渲染成一段可拼进正文的文本。
+// 没有引用、或引用里抽不出任何可呈现的内容时返回 ""（调用方据此跳过）。
+func renderQuote(q *quoteContent) string {
+	if q == nil {
+		return ""
+	}
+	var b strings.Builder
+	switch q.MsgType {
+	case MsgTypeText:
+		if q.Text != nil {
+			b.WriteString(q.Text.Content)
+		}
+	case MsgTypeMixed:
+		// 与 extractInbound 同口径：mixed 顶层没有 text，必须遍历 msg_item。
+		if q.Mixed != nil {
+			for _, it := range q.Mixed.Items {
+				if it.MsgType == MsgTypeText && it.Text != nil {
+					b.WriteString(it.Text.Content)
+				}
+			}
+		}
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return strutil.Truncate(s, quoteRenderLimit)
+	}
+	// 引用了媒体：拿不到内容，至少告诉模型引用的是什么类型。
+	switch q.MsgType {
+	case MsgTypeImage, MsgTypeVoice, MsgTypeFile, MsgTypeVideo:
+		return "[" + mediaLabel(q.MsgType) + "]"
+	}
+	return ""
+}
+
+// quoteBlock 把引用原文渲染成带标题的引用块。
+//
+// 为什么要显式分块：模型必须能区分「被引用的历史内容」和「用户这次说的话」。
+// 直接把两段拼一起，「这个怎么改」里的"这个"指代还算好猜，但引用里那些陈述句
+// 很容易被当成用户此刻的诉求（"帮我把它上线" 被引用于 "把它下线" 的后果可想而知）。
+func quoteBlock(s string) string {
+	var b strings.Builder
+	b.WriteString("【引用消息】\n")
+	for _, line := range strings.Split(s, "\n") {
+		b.WriteString("> " + line + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// mergeQuote 把引用内容并进正文。
+//
+// 引用放**前面**：企微 UI 里被引用的那条就显示在输入框上方，顺序与用户看到的一致。
+//
+// ⚠️ 已知代价：引用在最前面时，正文里的斜杠命令（/chatid 等）不再位于串首，
+// 命令解析会失效。实际不会有人"引用一条消息再发命令"，不为此加特例。
+func mergeQuote(quote, body string) string {
+	quote = strings.TrimSpace(quote)
+	body = strings.TrimSpace(body)
+	switch {
+	case quote == "":
+		return body
+	case body == "":
+		return quoteBlock(quote)
+	default:
+		return quoteBlock(quote) + "\n\n" + body
 	}
 }
 
