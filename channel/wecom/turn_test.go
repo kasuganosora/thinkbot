@@ -388,6 +388,37 @@ func TestWatchAppend_UnconsumedFallsBackToNewTurn(t *testing.T) {
 	}
 }
 
+// TestWatchAppend_LongTurnStillFallsBack 回归用例（2026-10-26 实测）：
+// 本轮跑得比流式气泡寿命（streamMaxAge，默认 5 分钟）还久时，兜底 watcher
+// **不能**提前放弃 —— 旧实现把等待上限错绑在 streamMaxAge 上，长任务里
+// TakeUnconsumedAppends 永远没机会执行，补充被静默丢弃。
+func TestWatchAppend_LongTurnStillFallsBack(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, "")
+	var mu sync.Mutex
+	var got []core.Message
+	ing := newRecordingIngress(t, &mu, &got)
+	c.ingress = ing
+
+	// 旧实现的等待上限：远小于本轮实际结束时刻。
+	c.cfg.StreamMaxAge = 300 * time.Millisecond
+	// 新实现的等待上限：够长，能等到本轮结束。
+	c.watchAppendMaxWaitOverride = 3 * time.Second
+
+	ctl.markLive("T1", true)
+	ctl.leftover("T1", "正式环境的主体是 yak_log_json")
+	// 本轮在「旧上限」之后才结束（模拟 17 分钟的长任务）。
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		ctl.markLive("T1", false)
+	}()
+
+	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "正式环境的主体是 yak_log_json"}
+	c.watchAppend(context.Background(), msg, "T1")
+
+	waitDelivered(t, &mu, &got, 1)
+}
+
 // TestWatchAppend_ConsumedStaysQuiet 已被编排层取走 → 什么都不做，
 // 绝不能重复开一轮（否则用户会收到两条回复）。
 func TestWatchAppend_ConsumedStaysQuiet(t *testing.T) {
@@ -425,8 +456,8 @@ func TestWatchAppend_StillRunningDoesNotSteal(t *testing.T) {
 
 	ctl.live["T1"] = true // 一直在跑
 	ctl.leftover("T1", "顺便查下天气")
-	// 用极短的 maxAge 让轮询超时退出
-	c.cfg.StreamMaxAge = 300 * time.Millisecond
+	// 用极短的等待上限让轮询超时退出（旧实现这里改的是 StreamMaxAge）。
+	c.watchAppendMaxWaitOverride = 300 * time.Millisecond
 
 	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "顺便查下天气"}
 	c.watchAppend(context.Background(), msg, "T1")

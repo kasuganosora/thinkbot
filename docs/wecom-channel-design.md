@@ -636,6 +636,27 @@ pipeline 出结果后 `Send` 用 `finish=true` **原位替换**。任何一步�
    ⚠️ 本轮**仍在跑**时绝不能取（那些内容马上会被消费，
    取走再开一轮就是重复处理，用户会收到两条回复）。
 
+⚠️⚠️ **2026-10-26 修正：step 边界的取用曾在流式编排里整个缺失。**
+`OrchestrateGenerate`（非流式）在循环开头每步都 drain，但流式编排
+`OrchestrateStream` 只在「本步没有工具调用、即将收尾」的分支里 drain 一次。
+后果：**长工具链轮次里补充永远取不到** —— 实测 16:32:57 群里补充
+「正式环境的主体是 yak_log_json」，`AppendToMessage` 返回 true、日志也打了
+「注入成功」，但那一轮连续 30+ 步都在调工具（`SearchLog` / `exec` / `read_file`），
+收尾分支一次都没命中，补充在通道里躺了 13 分钟直到本轮结束被丢弃，
+期间 bot 一直搜错的索引（`yak_base_go_prod`）。
+
+> 「投递成功」≠「被消费」，两者之间可以隔十几分钟、也可能永远不到。
+> 排查时**不要**只看 Channel 侧的注入日志，要看编排侧消费日志
+> （`interrupt: user supplement consumed into context`）。
+
+两处修复：
+
+- `OrchestrateStream` 对齐 `OrchestrateGenerate`，**每一步边界**都 drain，
+  且固定在 `applyPrepareStep` 之后（刚注入的消息不该被本步 reducer/compactor 压掉）。
+- `watchAppend` 的等待上限不再用 `streamMaxAge`（5 分钟，那是**企微流式气泡**
+  的寿命，与本轮编排无关）：上例那轮跑了 17 分钟，watcher 第 9 分钟就放弃了。
+  改为 `appendWatchMaxWait`（1 小时），超时给 WARN 而不是静默 return。
+
 ⚠️⚠️ **「本轮还在不在跑」必须以编排侧为准**（`TurnController.IsMessageActive`），
 不能靠「出站 Send 来过就摘掉」：
 

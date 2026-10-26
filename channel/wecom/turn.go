@@ -211,6 +211,23 @@ const turnInterruptText = "（这条已被新消息打断）"
 // appendWatchInterval 兜底 watcher 的轮询间隔（见 watchAppend）。
 const appendWatchInterval = 250 * time.Millisecond
 
+// watchAppendMaxWait 返回兜底 watcher 的等待上限；单测可覆盖缩短。
+func (c *WeComChannel) watchAppendMaxWait() time.Duration {
+	if c.watchAppendMaxWaitOverride > 0 {
+		return c.watchAppendMaxWaitOverride
+	}
+	return appendWatchMaxWait
+}
+
+// appendWatchMaxWait 兜底 watcher 的最长等待时间（见 watchAppend）。
+//
+// ⚠️ 绝不能用 streamMaxAge（默认 5 分钟）：那是**企微流式气泡**的寿命，与
+// 「本轮编排跑多久」毫无关系。实测 2026-10-26：用户在第 4 分钟补充，那一轮
+// 跑到第 17 分钟才结束 —— watcher 在第 9 分钟就放弃了，TakeUnconsumedAppends
+// 压根没机会执行，补充被静默丢弃。长任务是常态（没有墙钟硬上限），这里给一个
+// 远大于任何合理轮次的上限，代价只是一次每 250ms 的 map 查表。
+const appendWatchMaxWait = time.Hour
+
 // startsNewTurn 这条消息会不会起一个新轮次（**无副作用**的预判）。
 //
 // 供入站路径决定要不要为它开流：终止指令要复用旧流（finish 时原位替换成
@@ -288,7 +305,7 @@ func (c *WeComChannel) watchAppend(ctx context.Context, msg core.Message, traceI
 	if ctl == nil || traceID == "" {
 		return
 	}
-	deadline := time.Now().Add(c.streamMaxAge())
+	deadline := time.Now().Add(c.watchAppendMaxWait())
 	ended := false
 	for time.Now().Before(deadline) {
 		if c.isStopped() {
@@ -302,7 +319,13 @@ func (c *WeComChannel) watchAppend(ctx context.Context, msg core.Message, traceI
 	}
 	// ⚠️ 超时且本轮仍在跑：**绝对不能**取 —— 那些补充马上会被消费，
 	// 取走再开一轮就是重复处理（用户会收到两条回复）。
+	//
+	// 走到这里说明本轮跑了超过 appendWatchMaxWait 还没结束，属于异常长任务：
+	// 留一条 WARN，否则「我补充了但 bot 完全没反应」又是一次零线索排查。
 	if !ended {
+		traceid.L(ctx).Warnw("wecom: append watcher gave up before the turn ended",
+			"channel", c.name, "chat", msg.Channel, "trace_id", traceID,
+			"waited", appendWatchMaxWait.String())
 		return
 	}
 

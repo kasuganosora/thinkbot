@@ -132,6 +132,10 @@ type WeComChannel struct {
 	// runCtx 是 channel 生命周期上下文（Start 建立，Stop 取消）。
 	// 延迟投递必须挂它：回调带进来的 ctx 随本次回调返回就结束了。
 	runCtx context.Context
+
+	// watchAppendMaxWaitOverride 仅供单测缩短 watchAppend 的等待上限
+	// （见 appendWatchMaxWait）；零值表示用默认值。
+	watchAppendMaxWaitOverride time.Duration
 }
 
 // pendingCaption 一条等待合并的裸文本消息。
