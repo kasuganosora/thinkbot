@@ -216,6 +216,15 @@ func isPrivateChat(chatType string) bool {
 	return chatType == "private"
 }
 
+// isPrivateChatID reports a 1:1 DM from Telegram's chat id sign.
+//
+// Private chats are positive user ids. Basic groups, supergroups, and
+// channels are negative. Send uses this because outbound actions carry the
+// chat id but not chat type: DMs drop reply_to, groups keep an explicit one.
+func isPrivateChatID(chatID int64) bool {
+	return chatID > 0
+}
+
 // typingActive reports whether a keepalive is registered for chatID (tests).
 func (c *TelegramChannel) typingActive(chatID int64) bool {
 	c.typingMu.Lock()

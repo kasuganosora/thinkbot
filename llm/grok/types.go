@@ -23,6 +23,9 @@ const (
 // 模型名称。
 const (
 	// 文本模型
+	ModelGrok47              = "grok-4.7"
+	ModelGrok46              = "grok-4.6"
+	ModelGrok45              = "grok-4.5"
 	ModelGrok43              = "grok-4.3"
 	ModelGrok420NonReasoning = "grok-4.20-0309-non-reasoning"
 	ModelGrok420Reasoning    = "grok-4.20-0309-reasoning"

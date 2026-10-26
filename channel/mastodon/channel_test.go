@@ -422,7 +422,7 @@ func newTestChannel() *MastodonChannel {
 // mention 的三条提前 return 路径（status 为 nil / 自己发的 / 去重命中）**都必须**推进锚点。
 //
 // 否则锚点停在旧值，重连时 backfill 用旧 since_id 把这条通知重新拉回，
-// 2 分钟的 dedup 窗口挡不住几十分钟后的重放 → 同一条 mention 被二次处理并二次外发
+// 去重窗口挡不住之后的重放 → 同一条 mention 被二次处理并二次外发
 // （Misskey 2026-09-01 重复外发事故的同款根因）。
 func TestHandleNotificationMentionAdvancesAnchorOnSkipPaths(t *testing.T) {
 	ctx := context.Background()
