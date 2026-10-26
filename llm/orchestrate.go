@@ -326,7 +326,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 	for step := 0; ; step++ {
 		// 中途追加：把用户在生成中补充的内容注入当前轮（Claude-CLI 风格）。
 		// 在下一步边界消费；若已触及硬上限则不再为追加多跑一步，本轮结束。
-		if drainInterruptMessages(cfg.InterruptCh, &messages) > 0 && loop.atHardLimit(step) {
+		if drainInterruptMessages(ctx, cfg.InterruptCh, &messages) > 0 && loop.atHardLimit(step) {
 			break
 		}
 		if !loop.shouldContinue(step) {
@@ -653,9 +653,27 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 		toolsExecuted := false
 
 		loop := newLoopController(cfg.MaxSteps, cfg.HardMaxSteps)
-		for step := 0; loop.shouldContinue(step); step++ {
+		for step := 0; ; step++ {
+			if !loop.shouldContinue(step) {
+				break
+			}
 			if step > 0 {
 				messages = applyPrepareStep(cfg, messages)
+			}
+			// 中途追加：把用户在流式生成中补充的内容注入当前轮（Claude-CLI 风格）。
+			//
+			// ⚠️⚠️ 必须**每一步边界**都取，不能只靠下面「本步没有工具调用」那处
+			// 收尾分支。实测 2026-10-26 16:32：群里补充「正式环境的主体是
+			// yak_log_json」，那一轮连续 30+ 步都在调工具（SearchLog / exec /
+			// read_file），收尾分支一次都没命中 —— 补充在带缓冲的通道里躺了 13 分钟，
+			// 直到本轮结束被静默丢弃。AppendToMessage 返回 true 只代表「投递进通道」，
+			// 不代表「被消费」，两者之间可以隔很久、也可以永远不到。
+			// 非流式编排 OrchestrateGenerate 在循环开头取，这里必须对齐。
+			//
+			// 取用位置固定在 applyPrepareStep 之后：刚注入的用户消息不应被本步的
+			// reducer / compactor 当场压缩掉。
+			if drainInterruptMessages(ctx, cfg.InterruptCh, &messages) > 0 && loop.atHardLimit(step) {
+				break
 			}
 			messages = PatchToolCalls(messages)
 
@@ -830,7 +848,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 				// 收尾前再给一次「中途追加」机会：若用户在本步流式输出期间补充了
 				// 内容，则作为用户消息加入上下文并继续循环，让模型结合新内容重新
 				// 生成（无需先终止当前生成再补充）。
-				if drainInterruptMessages(cfg.InterruptCh, &messages) > 0 {
+				if drainInterruptMessages(ctx, cfg.InterruptCh, &messages) > 0 {
 					continue
 				}
 				stepMsgs := buildStepMessages(stepText, stepReasoning, stepReasoningMeta, stepToolCalls, nil, &stepUsage)
@@ -977,7 +995,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 //
 // 用于 Claude-CLI 风格的「边思考/边输出边补充」：无需终止当前生成即可把新
 // 上下文注入同一轮对话。调用方应保证通道带缓冲，因此本函数永不阻塞。
-func drainInterruptMessages(ch chan string, messages *[]Message) int {
+func drainInterruptMessages(ctx context.Context, ch chan string, messages *[]Message) int {
 	if ch == nil {
 		return 0
 	}
@@ -989,10 +1007,23 @@ func drainInterruptMessages(ch chan string, messages *[]Message) int {
 				*messages = append(*messages, UserMessage(extra))
 				n++
 			}
+			continue
 		default:
-			return n
+		}
+		break
+	}
+	// 可观测性：这是补充**真正进入上下文**的唯一时刻。
+	//
+	// 「投递成功」（AppendToMessage 返回 true）与「被编排层取用」是两件事，
+	// 中间可以隔十几分钟，也可能永远不到。此前全程没有一行日志，只能靠
+	// 「bot 的行为有没有变」反推，排查成本极高 —— 2026-10-26 那次补充
+	// 就是在通道里躺了 13 分钟后被静默丢弃，日志却显示「注入成功」。
+	if n > 0 {
+		if lg := traceid.L(ctx); lg != nil {
+			lg.Infow("interrupt: user supplement consumed into context", "count", n)
 		}
 	}
+	return n
 }
 
 // ============================================================================
