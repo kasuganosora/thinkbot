@@ -303,7 +303,13 @@ func TestHoldWorthy_BusyAndStopSkipCaptionWindow(t *testing.T) {
 	}
 }
 
-// TestReapTurns 长时间没摘的轮次必须被回收，否则后续消息一律被判成「打断」。
+// TestReapTurns 回收必须**只看编排侧是否还活着**，不能只看 age：
+//
+//   - 仍在跑的长任务即便 age 超限也绝不能摘 —— 摘了之后同会话的下一条消息查不到
+//     活跃登记，会被判成 turnNew 起第二个 turn，两个 turn 并发跑在同一个 workspace
+//     上互相破坏（2026-10-26 15:16 实测：后起的 turn 一句 `rm -rf` 就删掉了前一个
+//     turn 刚装好的目录）。
+//   - 编排层确认已结束的登记才是真僵尸，那种必须摘，否则后续消息一律被判成「打断」。
 func TestReapTurns(t *testing.T) {
 	ctl := newFakeTurnCtl()
 	c := newTurnTestChannel(ctl, "")
@@ -311,9 +317,45 @@ func TestReapTurns(t *testing.T) {
 	c.turnMu.Lock()
 	c.active["k"].started = c.active["k"].started.Add(-2 * defaultStreamMaxAge)
 	c.turnMu.Unlock()
+
+	// 1) 编排层仍在跑：不摘。
+	c.reapTurns(context.Background())
+	if !c.hasActiveTurn("k") {
+		t.Error("turn still running must NOT be reaped: reaping it spawns a second concurrent turn")
+	}
+
+	// 2) 编排层已结束（真僵尸）：必须摘。
+	ctl.markLive("T1", false)
 	c.reapTurns(context.Background())
 	if c.hasActiveTurn("k") {
-		t.Error("stale turn should have been reaped")
+		t.Error("stale turn should have been reaped once the orchestrator reports it inactive")
+	}
+}
+
+// TestReapTurns_NoCrossTurnTraceMismatch 摘除只认收集时的 traceID：
+// 判活期间刚好起了新轮的话，绝不能把新轮摘掉。
+func TestReapTurns_NoCrossTurnTraceMismatch(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, "")
+	beginLiveTurn(c, ctl, "k", "T1")
+	c.turnMu.Lock()
+	c.active["k"].started = c.active["k"].started.Add(-2 * defaultStreamMaxAge)
+	c.turnMu.Unlock()
+
+	// 模拟：收集之后、判活之前，同会话起了新一轮（traceID 变了）。
+	ctl.markLive("T1", false)
+	c.beginTurn("k", "T2")
+	ctl.markLive("T2", true)
+
+	c.reapTurns(context.Background())
+	if !c.hasActiveTurn("k") {
+		t.Fatal("new turn T2 must survive: only the collected traceID may be cleared")
+	}
+	c.turnMu.Lock()
+	got := c.active["k"].traceID
+	c.turnMu.Unlock()
+	if got != "T2" {
+		t.Errorf("remaining turn traceID = %q, want T2", got)
 	}
 }
 
