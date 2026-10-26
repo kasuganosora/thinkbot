@@ -591,11 +591,20 @@ pipeline 出结果后 `Send` 用 `finish=true` **原位替换**。任何一步�
 >    （这句不在本仓库、也不在我们的出站日志里，是平台兜底 ——
 >    说明该类型压根没推给机器人，代码侧无解，只能让用户直接粘贴内容）。
 >
-> 所以上面这套解析是**按官方契约实现、尚未被真实数据验证**的。保留它是对的
-> （字段确实写在文档里，群聊或后续版本可能才带），但别向用户承诺"支持引用"。
-> 以后要是群里出现了带 quote 的回调，`channel.go` 会打
-> `wecom: quoted message attached to inbound text`（带 quote_type / quote_len），
-> 看到那条日志才算真的生效。
+> ⚠️⚠️ **再修订（2026-10-26 下午，推翻上面那段"至今没收到过"）：群聊是带的。**
+> 当天 11:29:18 群聊回调**确实带 `quote`**，日志为证：
+>
+> ```
+> wecom: quoted message attached to inbound text
+>   chat=wecom:chat:wrkSFfCgAAPJJy0JsG8ZJ0iqqbREszOg
+>   quote_type=text quote_len=68 text_len=247
+> ```
+>
+> 对应入库正文以「【引用消息】 > @打工仔 帮我查下…」开头，功能确认生效。
+>
+> → **结论：群聊带、单聊不带。** 上午那条"企微根本不推 quote"只取了单聊样本
+> （两条）就下了平台级结论，是样本偏差。企微单聊与群聊是两条不同的推送路径，
+> 行为可以完全不一样 —— 凡是平台级结论，两种会话都要取样。
 
 能力与 web 端同源 —— `POST /api/chat/append` 与 `/api/chat/abort` 用的就是
 `BotService.AppendToMessage` / `AbortMessage`，这里只是给企微接上同一个出口
