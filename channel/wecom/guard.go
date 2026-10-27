@@ -21,6 +21,31 @@ import (
 // allowedMediaSuffixes 是允许的媒体主机后缀（含自身与任意子域，精确后缀匹配）。
 var allowedMediaSuffixes = []string{"qq.com", "weixin.qq.com"}
 
+// 企业微信智能机器人的媒体文件**不在** qq.com / weixin.qq.com 域上：回调里的下载
+// URL 指向腾讯云 COS 的官方桶（现网实测：
+// ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com，签名 5 分钟有效）。
+//
+// ⚠️ 2026-10-27 线上事故：只按域名后缀放行时这个 host 被拒，当天 image 与 file
+// 全部下载失败，用户侧只看到「[图片：下载或解密失败]」。
+//
+// 但不能直接放行 "myqcloud.com"——那是**所有**腾讯云租户的公有桶，等于允许
+// 伪造的回调 URL 让 bot 去拉任意公开对象并喂给 LLM。故用「官方桶名前缀 +
+// 域名后缀」双重限定，既能覆盖未来的 region/appid 变体，又不放开整个 COS。
+const (
+	officialMediaHostPrefix = "ww-aibot-"
+	officialMediaHostSuffix = ".myqcloud.com"
+)
+
+// isOfficialMediaHost 判断是否企业微信智能机器人媒体的官方 COS 桶域名。
+func isOfficialMediaHost(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if !strings.HasPrefix(h, officialMediaHostPrefix) || !strings.HasSuffix(h, officialMediaHostSuffix) {
+		return false
+	}
+	// 前缀与后缀之间必须还有内容："ww-aibot-.myqcloud.com" 不放行。
+	return len(h) > len(officialMediaHostPrefix)+len(officialMediaHostSuffix)
+}
+
 // officialEndpointHosts 是官方长连接主机。
 var officialEndpointHosts = []string{"openws.work.weixin.qq.com"}
 
@@ -31,15 +56,28 @@ func hostMatchesSuffix(host, suffix string) bool {
 	return host == suffix || strings.HasSuffix(host, "."+suffix)
 }
 
-func isAllowedMediaHost(host string) bool {
+// isAllowedMediaHost 判断媒体主机是否放行。
+//
+// extra 是运维额外放行的主机后缀（Config.MediaAllowedHosts）：企微若哪天换了桶名，
+// 线上不必等发版就能自救。缺省为空，官方桶与后缀白名单照旧生效。
+func isAllowedMediaHost(host string, extra []string) bool {
 	if host == "" {
 		return false
 	}
 	if _, err := netip.ParseAddr(host); err == nil {
 		return false // 字面量 IP 一律拒绝
 	}
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
 	for _, s := range allowedMediaSuffixes {
-		if hostMatchesSuffix(host, s) {
+		if hostMatchesSuffix(h, s) {
+			return true
+		}
+	}
+	if isOfficialMediaHost(h) {
+		return true
+	}
+	for _, s := range extra {
+		if s != "" && hostMatchesSuffix(h, s) {
 			return true
 		}
 	}
@@ -47,7 +85,7 @@ func isAllowedMediaHost(host string) bool {
 }
 
 // validateMediaURL 校验入站媒体 URL：必须 https 且主机在白名单内。
-func validateMediaURL(raw string) error {
+func validateMediaURL(raw string, extra []string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("wecom: invalid media url: %w", err)
@@ -58,7 +96,7 @@ func validateMediaURL(raw string) error {
 	if u.User != nil {
 		return errors.New("wecom: media url must not carry userinfo")
 	}
-	if !isAllowedMediaHost(u.Hostname()) {
+	if !isAllowedMediaHost(u.Hostname(), extra) {
 		return fmt.Errorf("wecom: media host %q not in allowlist", u.Hostname())
 	}
 	return nil
@@ -91,7 +129,7 @@ func dialControl(network, address string, _ syscall.RawConn) error {
 }
 
 // newMediaTransportClient 构造媒体下载用的 *http.Client：拨号层 IP 校验 + 重定向白名单。
-func newMediaTransportClient() *nethttp.Client {
+func newMediaTransportClient(extra []string) *nethttp.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: dialControl}
 	tr := &nethttp.Transport{
 		Proxy:                 nil, // 不走环境代理：代理会绕过拨号层的 IP 校验
@@ -108,7 +146,7 @@ func newMediaTransportClient() *nethttp.Client {
 			if len(via) >= 5 {
 				return errors.New("wecom: too many redirects")
 			}
-			return validateMediaURL(req.URL.String())
+			return validateMediaURL(req.URL.String(), extra)
 		},
 	}
 }

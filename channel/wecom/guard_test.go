@@ -16,7 +16,10 @@ import (
 func TestValidateMediaURL(t *testing.T) {
 	ok := []string{
 		"https://qq.com/a",
-		"https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.qq.com/x?sign=1",
+		// ⚠️ 真实线上 host（2026-10-27 企微回调实测）：媒体文件在腾讯云 COS 上，
+		// 不在 qq.com 域。这里必须用真域名，早先写成
+		// "...myqcloud.qq.com" 是个**不存在的域名**，测试绿了但线上照样拒。
+		"https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/x?sign=1",
 		"https://media.weixin.qq.com/x",
 		"https://QYAPI.WEIXIN.QQ.COM./x",
 	}
@@ -30,16 +33,43 @@ func TestValidateMediaURL(t *testing.T) {
 		"file:///etc/passwd",
 		"",
 		"https://169.254.169.254/latest",
+		// 任意租户的 COS 公有桶不得放行：只认官方 ww-aibot- 前缀。
+		"https://someone-elses-bucket-1234567890.cos.ap-shanghai.myqcloud.com/x",
+		// 前缀紧贴后缀也不算（中间必须有桶名）。
+		"https://ww-aibot-.myqcloud.com/x",
+		// 前缀出现在别的位置不算。
+		"https://ww-aibot-img.evil.com/x",
+		"https://evil-ww-aibot-img.cos.ap-guangzhou.myqcloud.com/x",
 	}
 	for _, u := range ok {
-		if err := validateMediaURL(u); err != nil {
+		if err := validateMediaURL(u, nil); err != nil {
 			t.Errorf("want ok %q: %v", u, err)
 		}
 	}
 	for _, u := range bad {
-		if err := validateMediaURL(u); err == nil {
+		if err := validateMediaURL(u, nil); err == nil {
 			t.Errorf("want reject %q", u)
 		}
+	}
+}
+
+// 官方换桶名时的逃生口：配置追加的域名必须生效，且重定向一起生效。
+func TestValidateMediaURL_ExtraHosts(t *testing.T) {
+	extra := []string{"new-bucket.cos.ap-beijing.myqcloud.com"}
+	if err := validateMediaURL("https://new-bucket.cos.ap-beijing.myqcloud.com/x", extra); err != nil {
+		t.Fatalf("extra host must be allowed: %v", err)
+	}
+	if err := validateMediaURL("https://other.cos.ap-beijing.myqcloud.com/x", extra); err == nil {
+		t.Fatal("extra must not match unrelated hosts")
+	}
+	hc := newMediaTransportClient(extra)
+	req, _ := newReq("https://new-bucket.cos.ap-beijing.myqcloud.com/x")
+	if err := hc.CheckRedirect(req, nil); err != nil {
+		t.Fatalf("allowlisted redirect (extra) rejected: %v", err)
+	}
+	req, _ = newReq("https://other.cos.ap-beijing.myqcloud.com/x")
+	if err := hc.CheckRedirect(req, nil); err == nil {
+		t.Fatal("redirect to non-configured host must be rejected")
 	}
 }
 
@@ -63,7 +93,7 @@ func TestIsBlockedIP(t *testing.T) {
 }
 
 func TestMediaClientRejectsBadRedirect(t *testing.T) {
-	hc := newMediaTransportClient()
+	hc := newMediaTransportClient(nil)
 	req, _ := newReq("https://evil.example.com/x")
 	if err := hc.CheckRedirect(req, nil); err == nil {
 		t.Fatal("redirect to non-allowlisted host must be rejected")

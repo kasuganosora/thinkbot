@@ -213,6 +213,15 @@ var supportedChannelTypes = []ChannelTypeInfo{
 				// ⚠️ 整句完全匹配才生效，避免用户一开口带「停」字就被掐断。
 				HelpText: "在内置词表（停止/停下/取消/终止/打住/stop/cancel 等）之外追加。多条用逗号分隔，必须整句完全相同才生效",
 			},
+			{
+				Key:   "mediaAllowedHosts",
+				Label: "额外放行的媒体域名",
+				Type:  "string",
+				// 逃生口：企微媒体文件的官方 COS 桶（ww-aibot-*.myqcloud.com）已内置放行，
+				// 这里只在官方换域名导致图片/文件下载失败时临时追加。
+				// ⚠️ 按后缀匹配，填 example.com 会连带放行所有子域。
+				HelpText: "仅在企微更换媒体文件域名、导致图片/文件下载失败时才填。多个用逗号分隔，按域名后缀匹配（填 example.com 会放行其所有子域）",
+			},
 		},
 	},
 	{
