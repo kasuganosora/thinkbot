@@ -147,6 +147,89 @@ func TestReconnectBackfillDropsAlreadySeenStatus(t *testing.T) {
 	}
 }
 
+// mentionNoteJSON 是一条 mention 通知。community 的 since_id 是闭区间，
+// 回填必须自己丢掉 id 不严格新于锚点的行。
+func mentionNoteJSON(notifID, statusID string) string {
+	return `{
+		"id":"` + notifID + `",
+		"type":"mention",
+		"created_at":"2026-10-26T14:07:00Z",
+		"account":{"id":"acct-other","username":"sion","acct":"sion"},
+		"status":{
+			"id":"` + statusID + `",
+			"created_at":"2026-10-26T14:07:00Z",
+			"content":"<p>ping</p>",
+			"visibility":"public",
+			"account":{"id":"acct-other","username":"sion","acct":"sion"}
+		}
+	}`
+}
+
+// TestBackfillIgnoresInclusiveSinceIDEcho 锁定线上症状：
+// user:notification 重连 20 次，每次 backfill 都是 count=1 anchor="119"。
+// community（c.hime.at）的 since_id 是 id >= since_id，会把锚点那条再吐出来。
+// 锚点已经覆盖它，不能再入队，也不能把它算成「补回的提及」。
+func TestBackfillIgnoresInclusiveSinceIDEcho(t *testing.T) {
+	c := newTestChannel()
+	c.ingress = testMastodonIngress(t)
+	c.setNotificationAnchor("119")
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/notifications" {
+			http.NotFound(w, r)
+			return
+		}
+		hits++
+		if got := r.URL.Query().Get("since_id"); got != "119" {
+			t.Errorf("since_id=%q want 119", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[" + mentionNoteJSON("119", "9001") + "]"))
+	}))
+	t.Cleanup(srv.Close)
+	c.api = newAPIClient(srv.URL, "token")
+
+	c.backfillMentions(context.Background())
+	if got := c.ingress.Len(); got != 0 {
+		t.Fatalf("inclusive since_id echo of anchor 119 was ingested, ingress=%d want 0", got)
+	}
+	if got := c.getNotificationAnchor(); got != "119" {
+		t.Fatalf("anchor=%q want 119 (echo must not move the cursor)", got)
+	}
+	if hits != 1 {
+		t.Fatalf("notifications requests=%d want 1 (must not paginate the anchor row)", hits)
+	}
+}
+
+// TestBackfillAdvancesPastInclusiveEchoWhenNewerExists：同一页里既有更新的
+// 通知，也有闭区间回吐的锚点行。只处理严格更新的那条，锚点推进到它。
+func TestBackfillAdvancesPastInclusiveEchoWhenNewerExists(t *testing.T) {
+	c := newTestChannel()
+	c.ingress = testMastodonIngress(t)
+	c.setNotificationAnchor("119")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/notifications" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// 服务端按 id DESC：120 在前，锚点 119 在后。
+		_, _ = w.Write([]byte("[" + mentionNoteJSON("120", "9002") + "," + mentionNoteJSON("119", "9001") + "]"))
+	}))
+	t.Cleanup(srv.Close)
+	c.api = newAPIClient(srv.URL, "token")
+
+	c.backfillMentions(context.Background())
+	if got := c.ingress.Len(); got != 1 {
+		t.Fatalf("ingress=%d want 1 (only notification 120)", got)
+	}
+	if got := c.getNotificationAnchor(); got != "120" {
+		t.Fatalf("anchor=%q want 120", got)
+	}
+}
+
 // TestFavouriteNotCollapsedWithStatusOfSameID：去重键必须带事件类型。
 // 小实例的 status id 和 notification id 都是短整数，裸 ID 会把收藏通知吞掉。
 func TestFavouriteNotCollapsedWithStatusOfSameID(t *testing.T) {

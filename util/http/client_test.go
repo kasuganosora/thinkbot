@@ -1040,6 +1040,29 @@ func TestSSERetryOnWatchdogTimeout(t *testing.T) {
 	}
 }
 
+func TestClassifyStreamErrorPreservesCallerContext(t *testing.T) {
+	t.Run("deadline stays deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		defer cancel()
+		time.Sleep(2 * time.Millisecond)
+		err := classifyStreamError(ctx.Err(), ctx, nil, "https://example.test/sse", time.Now(), 3, 12, "sse")
+		if err == context.Canceled {
+			t.Fatal("deadline was rewritten to context.Canceled; adapters treat that as a clean user stop")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v want context.DeadlineExceeded", err)
+		}
+	})
+	t.Run("cancel stays cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := classifyStreamError(ctx.Err(), ctx, nil, "https://example.test/sse", time.Now(), 0, 0, "sse")
+		if err != context.Canceled {
+			t.Fatalf("err=%v want context.Canceled", err)
+		}
+	})
+}
+
 func TestSSERetryNotTriggeredForUserCancel(t *testing.T) {
 	var connections int32
 

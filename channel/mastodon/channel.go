@@ -479,8 +479,16 @@ func newerID(a, b string) bool {
 // backfillMentions 重连后补发断连窗口内错过的 @提及/回复。
 //
 // Mastodon streaming 与 Misskey 一样不重放历史消息。本方法以锚点为 since_id
-// （开区间）翻页拉 notifications?types[]=mention 补齐。
+// 翻页拉 notifications?types[]=mention 补齐。
 // 翻页：结果按时间倒序（最新在前），用 max_id 取更旧的一页，封顶 maxTotal。
+//
+// Mastodon 文档里 since_id 是开区间（id > since_id）。community（c.hime.at，
+// 4.3.0+community）实际是闭区间（id >= since_id），于是每次重连都会把锚点
+// 那一条再吐出来。setNotificationAnchor 对相等 id 是空操作，锚点永远停在
+// 原地，日志就一直是 count=1 anchor="119"。去重窗口过期后，同一条 mention
+// 还会被重新入队。这里只处理严格新于锚点的通知，闭区间回声直接丢掉。
+// 不能改用 min_id：上游 Mastodon 看到 min_id 会改成升序翻页，和这里的
+// 「最新在前 + max_id」循环不兼容。
 func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 	anchor := c.getNotificationAnchor()
 	if anchor == "" {
@@ -501,7 +509,7 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 	maxID := ""
 	for total < maxTotal {
 		notes, err := c.api.getNotifications(ctx, notificationQuery{
-			SinceID: anchor, // 只取断连窗口内（比锚点更新）的通知
+			SinceID: anchor, // 断连窗口。上游可能把锚点自己也算进来，下面会滤掉。
 			MaxID:   maxID,  // 逐页往更旧处翻
 			Limit:   pageSize,
 			Types:   backfillNotificationTypes,
@@ -515,8 +523,15 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 			break
 		}
 		// 倒序返回，按时间正序（最旧→最新）处理，锚点自然推进到最新。
+		pageNew := 0
 		for i := len(notes) - 1; i >= 0; i-- {
 			n := notes[i]
+			// 闭区间回声，或服务端没遵守 since_id 时带回来的旧行。
+			// 相等不算更新：再推进一次也是空操作，但会计入 count、过期后会重放。
+			if !newerID(n.ID, anchor) {
+				continue
+			}
+			pageNew++
 			if n.Status == nil {
 				c.setNotificationAnchor(n.ID)
 				continue
@@ -532,11 +547,14 @@ func (c *MastodonChannel) backfillMentions(ctx context.Context) {
 			c.handleStatus(ctx, n.Status, "mention", true, n.ID)
 			c.setNotificationAnchor(n.ID)
 		}
-		total += len(notes)
-		if len(notes) < pageSize {
+		total += pageNew
+		// 本页最旧的一条不比锚点新：再往下翻只会拿到更旧的（或再把锚点吐一次）。
+		// pageNew == 0 还挡住「整页都是旧行且满页」时用同一 max_id 空转。
+		oldest := notes[len(notes)-1].ID
+		if pageNew == 0 || len(notes) < pageSize || !newerID(oldest, anchor) {
 			break
 		}
-		maxID = notes[len(notes)-1].ID
+		maxID = oldest
 	}
 	if total > 0 {
 		traceid.L(ctx).Infow("mastodon backfill: recovered missed mentions after reconnect",
