@@ -56,8 +56,8 @@ You have persistent memory. Use the ` + "`memory`" + ` tool to save, search and 
 ## How to search (keywords, not an exact phrase)
 
 ` + "`query`" + ` is scored by relevance, not matched as one exact substring: several keywords separated by
-spaces work, and word order does not matter. ` + "`query`" + ` = "正式环境 日志主题" finds the stored fact
-"正式环境日志主题为 yak_log_json…" even though the stored text has no space there.
+spaces work, and word order does not matter. ` + "`query`" + ` = "测试环境 数据库 地址" finds a stored fact
+written as "测试环境数据库地址是 10.0.0.7:3306" even though the stored text has no space there.
 If you get 0 results, retry with fewer and more distinctive keywords — one concept at a time,
 dropping filler words. Re-issuing the identical query cannot produce a different answer;
 fall back to ` + "`recent`" + ` or ` + "`count`" + ` to see what is actually stored in this scope.
@@ -417,12 +417,27 @@ func formatSearchEntries(entries []Entry, query string, scanned int) any {
 			"entries": []any{},
 		}
 	}
+	return map[string]any{
+		"count":   len(entries),
+		"type":    "search",
+		"entries": entryResults(entries, searchEntryMaxChars),
+	}
+}
+
+// entryResults 把条目转成工具输出结构。maxChars > 0 时单条封顶并标注总长，
+// 为 0 时原样输出（其它 action 不需要封顶）。
+//
+// 只有一份实现：search 需要封顶、recent/count 等不需要，但输出结构必须一致，
+// 否则模型按一种形状解析、另一种 action 返回另一种形状就会解析失败。
+func entryResults(entries []Entry, maxChars int) []EntryResult {
 	results := make([]EntryResult, 0, len(entries))
 	for _, e := range entries {
 		content := e.Content
-		if r := []rune(content); len(r) > searchEntryMaxChars {
-			content = string(r[:searchEntryMaxChars]) +
-				fmt.Sprintf("…[truncated, %d chars total; narrow the query or use action \"recent\"]", len(r))
+		if maxChars > 0 {
+			if r := []rune(content); len(r) > maxChars {
+				content = string(r[:maxChars]) +
+					fmt.Sprintf("…[truncated, %d chars total; narrow the query or use action \"recent\"]", len(r))
+			}
 		}
 		results = append(results, EntryResult{
 			ID:         e.ID,
@@ -432,11 +447,7 @@ func formatSearchEntries(entries []Entry, query string, scanned int) any {
 			CreatedAt:  formatEntryTime(e.CreatedAt),
 		})
 	}
-	return map[string]any{
-		"count":   len(entries),
-		"type":    "search",
-		"entries": results,
-	}
+	return results
 }
 
 func handleAdd(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
@@ -1268,21 +1279,10 @@ func formatEntries(entries []Entry, queryType string) any {
 		}
 	}
 
-	results := make([]EntryResult, 0, len(entries))
-	for _, e := range entries {
-		results = append(results, EntryResult{
-			ID:         e.ID,
-			Content:    e.Content,
-			Category:   e.Category,
-			Importance: e.Importance,
-			CreatedAt:  formatEntryTime(e.CreatedAt),
-		})
-	}
-
 	return map[string]any{
 		"count":   len(entries),
 		"type":    queryType,
-		"entries": results,
+		"entries": entryResults(entries, 0),
 	}
 }
 

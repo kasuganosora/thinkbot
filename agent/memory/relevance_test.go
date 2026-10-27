@@ -778,30 +778,79 @@ func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
 	}
 }
 
-// TestNormalizedRelevanceScores 归一化到「池内最高分 = 1」，且无关条目恒为 0。
-//
-// 不能直接用原始分：Ochiai 的长度归一把真库 100~300 字的记忆压到 0.05~0.3，
-// 乘固定权重根本压不过 0.9 的无关条目（详见 DefaultImportantRelevanceWeight）。
-func TestNormalizedRelevanceScores(t *testing.T) {
+// TestRelevanceScores 打分口径：强匹配 > 部分重合 > 无重合（0）。
+func TestRelevanceScores(t *testing.T) {
 	entries := []Entry{
 		{ID: "a", Content: "正式环境日志主题为 yak_log_json"},
 		{ID: "b", Content: "用户偏好深色主题"},
 		{ID: "c", Content: "周会结论：本周无阻塞事项"},
 	}
-	got := NormalizedRelevanceScores("正式环境 日志主题", entries)
+	got := RelevanceScores("正式环境 日志主题", entries)
 	if len(got) != 3 {
 		t.Fatalf("want 3 scores, got %d", len(got))
 	}
-	if got[0] != 1 {
-		t.Errorf("top hit must normalize to 1, got %v", got[0])
+	if got[0] <= got[1] {
+		t.Errorf("full match must outrank partial overlap: %v vs %v", got[0], got[1])
 	}
-	if got[1] <= 0 || got[1] >= 1 {
-		t.Errorf("partial overlap should be in (0,1), got %v", got[1])
+	if got[1] <= 0 {
+		t.Errorf("partial overlap should be > 0, got %v", got[1])
 	}
 	if got[2] != 0 {
 		t.Errorf("irrelevant entry must stay 0, got %v", got[2])
 	}
-	if empty := NormalizedRelevanceScores("", entries); empty[0] != 0 || empty[1] != 0 {
+	for _, s := range got {
+		if s > 1 {
+			t.Errorf("score must be capped at 1, got %v", s)
+		}
+	}
+	if empty := RelevanceScores("", entries); empty[0] != 0 || empty[1] != 0 {
 		t.Errorf("empty query must produce all-zero scores, got %v", empty)
+	}
+}
+
+// TestRelevanceScores_NoiseStaysBelowRealMatch 加固「不要归一化」这条决定。
+//
+// 真实库 22 条 query 实测：相关的最低池内最高分 0.415，无关的最高 0.395 ——
+// 两类重叠，归一化会把噪声拉成 1.0 拿到满额加成。这里用同样的形态构造样本：
+// 一个「只靠通用词勉强沾边」的噪声条目，其加成必须明显低于真匹配，
+// 否则噪声会顶掉真正重要的记忆。
+func TestRelevanceScores_NoiseStaysBelowRealMatch(t *testing.T) {
+	entries := []Entry{
+		{ID: "real", Content: "正式环境日志主题为 yak_log_json，可用日志通道查正式环境问题"},
+		{ID: "noise", Content: "今天的例行巡检记录，各项指标正常，已归档备查，无需处理"},
+	}
+	real := RelevanceScores("正式环境 日志主题 在哪查", entries)
+	if real[0] <= real[1] {
+		t.Fatalf("real match must score above noise: %v vs %v", real[0], real[1])
+	}
+	// 噪声即便有分，加成也必须是「小幅」而不是满额（归一化会让这里变成 1.0）
+	if real[1] > 0.5 {
+		t.Errorf("weak noise match must not be amplified to near-full weight, got %v", real[1])
+	}
+}
+
+// TestSelectRelevant_And_RelevanceScoresShareScale 两条路径必须同一口径：
+// 「窗口外捞回来」和「窗口内加权」用两套分数排序会互相打架。
+func TestSelectRelevant_And_RelevanceScoresShareScale(t *testing.T) {
+	entries := []Entry{
+		{ID: "a", Content: "正式环境日志主题为 yak_log_json"},
+		{ID: "b", Content: "用户偏好深色主题"},
+		{ID: "c", Content: "周会结论：本周无阻塞事项"},
+	}
+	query := "正式环境 日志主题"
+	all := RelevanceScores(query, entries)
+	picked := SelectRelevant(query, entries, nil, 10)
+	if len(picked) == 0 {
+		t.Fatal("expected at least one hit")
+	}
+	want := picked[0].Score
+	gotIdx := -1
+	for i, e := range entries {
+		if e.ID == picked[0].Entry.ID {
+			gotIdx = i
+		}
+	}
+	if gotIdx < 0 || all[gotIdx] != want {
+		t.Errorf("SelectRelevant score %v must equal RelevanceScores[%d]=%v", want, gotIdx, all[gotIdx])
 	}
 }

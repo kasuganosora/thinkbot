@@ -179,7 +179,8 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 			closing := asciiLower(buf[idx : idx+n])
 			buf = buf[idx+n:]
 			if closing == "</public>" {
-				f.mode = ocPublic
+				// closePublic 自己会把 mode 置回 ocOutside，不要再设 ocPublic
+				// （与 ocInternal 同口径）。
 				f.closePublic(out)
 			} else {
 				f.mode = f.parent
