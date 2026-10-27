@@ -725,24 +725,15 @@ func TestMemoryTool_ScopeAllIsReadOnly(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// search 相关性检索（2026-10-27）
-//
-// 背景：search 走的是 SQL `content LIKE '%q%'`，整串子串匹配。线上真实库 189 条
-// 实测「正式环境 日志主题」命中 0 条（库里躺着「正式环境日志主题为 yak_log_json」，
-// 只是中间没空格），「数据库 mysql」也是 0 条。LLM 连搜三词一无所获，最后只能
-// 让用户重说一遍。这里用真实事故里的那组句子做回归，防止再退回子串匹配。
-// ============================================================================
-
 // TestMemoryTool_Search_MultiKeywordSpansWhitespace 多词 query 要跨空格命中。
-// 旧实现（LIKE '%正式环境 日志主题%'）在同样的数据上返回 0 条。
+// 整串 LIKE 在「演示环境 日志主题」对「演示环境日志主题为 demo_events」上是 0 条。
 func TestMemoryTool_Search_MultiKeywordSpansWhitespace(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
-	target := "正式环境日志主题为 yak_log_json，可用日志通道查正式环境问题"
+	target := "演示环境日志主题为 demo_events，可用日志通道查演示环境问题"
 	for _, c := range []string{
 		target,
-		"测试数据库MySQL：9.134.38.148:3306，账号 aidata",
+		"测试数据库MySQL：192.0.2.10:3306，账号 appuser",
 		"用户偏好深色主题",
 	} {
 		if err := repo.Append(ctx, Entry{Scope: ChannelScope("ch1"), Content: c}); err != nil {
@@ -752,7 +743,7 @@ func TestMemoryTool_Search_MultiKeywordSpansWhitespace(t *testing.T) {
 
 	tool := Tools(ToolConfig{Repo: repo})[0].Tool
 	got, err := tool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
-		"action": "search", "query": "正式环境 日志主题", "scope_kind": "channel", "scope_id": "ch1",
+		"action": "search", "query": "演示环境 日志主题", "scope_kind": "channel", "scope_id": "ch1",
 	})
 	if err != nil {
 		t.Fatalf("search: %v", err)
@@ -764,6 +755,9 @@ func TestMemoryTool_Search_MultiKeywordSpansWhitespace(t *testing.T) {
 	entries := m["entries"].([]EntryResult)
 	if entries[0].Content != target {
 		t.Errorf("top hit should be the log-topic fact, got %q", entries[0].Content)
+	}
+	if entries[0].Relevance <= 0 {
+		t.Errorf("search results must include the raw relevance score, got %v", entries[0].Relevance)
 	}
 	// 「测试数据库MySQL…」与 query 零交集，不该出现；
 	// 「用户偏好深色主题」共享「主题」bigram，属合理弱相关，允许跟在后面。
@@ -795,6 +789,9 @@ func TestMemoryTool_Search_NoQueryKeepsTimeOrder(t *testing.T) {
 	if entries[0].Content != "九月的记忆" || entries[1].Content != "八月的记忆" {
 		t.Errorf("newest-first order broken: %+v", entries)
 	}
+	if entries[0].Relevance != 0 || entries[1].Relevance != 0 {
+		t.Errorf("time-ordered search must not attach relevance scores, got %+v", entries)
+	}
 	if entries[0].CreatedAt != sep.Format("2006-01-02 15:04") {
 		t.Errorf("created_at: got %q want %q", entries[0].CreatedAt, sep.Format("2006-01-02 15:04"))
 	}
@@ -802,11 +799,10 @@ func TestMemoryTool_Search_NoQueryKeepsTimeOrder(t *testing.T) {
 }
 
 // TestMemoryTool_Search_LongEntryIsTruncated 长条目要封顶并标注总长。
-// 反例（2026-10-26 17:46）：query="db" 原样吐回一篇 3000+ 字符的巡检报告，
-// 真正要找的连接串被埋在后面，模型读不完就当没有。
+// 短查询可能命中一篇很长的笔记，真正要找的句子被埋在后面，模型读不完就当没有。
 func TestMemoryTool_Search_LongEntryIsTruncated(t *testing.T) {
 	repo := NewMemoryRepository()
-	long := strings.Repeat("巡检细节占位 ", 300) + "关键连接串 host=9.134.38.148 port=3306"
+	long := strings.Repeat("巡检细节占位 ", 300) + "关键连接串 host=192.0.2.10 port=3306"
 	if err := repo.Append(context.Background(), Entry{Scope: ChannelScope("ch1"), Content: long}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
@@ -831,7 +827,7 @@ func TestMemoryTool_Search_LongEntryIsTruncated(t *testing.T) {
 }
 
 // TestMemoryTool_Search_MissSuggestsRetry 未命中时要给可行动的下一步，
-// 否则模型只会把同一个词再搜一遍（线上「db」就是这么被搜了三次）。
+// 否则模型只会把同一个词再搜一遍。
 func TestMemoryTool_Search_MissSuggestsRetry(t *testing.T) {
 	repo := NewMemoryRepository()
 	if err := repo.Append(context.Background(), Entry{Scope: ChannelScope("ch1"), Content: "用户偏好深色主题"}); err != nil {
@@ -858,17 +854,11 @@ func TestMemoryTool_Search_MissSuggestsRetry(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// 跨平台镜像幂等（2026-10-27）
-//
-// 线上 memory_entries 106 条里有 7 条双前缀镜像（"[wecom:dm:T…] [wecom:dm:T…] …"）：
-// LLM 从召回块里读到带来源标签的镜像原文，连同标签一起存回 channel scope，
-// 再镜像一次就多叠一层。镜像必须收敛到至多一个前缀，否则每轮都加一层。
-// ============================================================================
+// 镜像必须收敛到至多一个前缀：模型会把已经带标签的正文再存一次。
 
 func TestMirrorContent_IsIdempotent(t *testing.T) {
-	const ch = "wecom:dm:T72340005A"
-	plain := "aidata 测试库连接：host=9.134.38.148 port=3306"
+	const ch = "wecom:dm:demo-user"
+	plain := "appuser 测试库连接：host=192.0.2.10 port=3306"
 	once := MirrorContent(ch, plain)
 	if once != "["+ch+"] "+plain {
 		t.Fatalf("first mirror = %q", once)
@@ -893,8 +883,8 @@ func TestMirrorContent_KeepsForeignChannelTag(t *testing.T) {
 
 func TestMirrorDedupeKey_StripsSourceTag(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"[wecom:dm:T1] aidata 测试库连接", "aidata 测试库连接"},
-		{"aidata 测试库连接", "aidata 测试库连接"},
+		{"[wecom:dm:T1] appuser 测试库连接", "appuser 测试库连接"},
+		{"appuser 测试库连接", "appuser 测试库连接"},
 		{"[重要] 不是来源标签，不该剥", "[重要] 不是来源标签，不该剥"},
 	}
 	for _, c := range cases {
@@ -911,7 +901,7 @@ func TestMirrorChannelMemoryToBot_DoesNotStack(t *testing.T) {
 	cfg := ToolConfig{Repo: repo, BotID: "bot-1"}
 	ctx := &llm.ToolExecContext{Context: context.Background()}
 	ch := ChannelScope("wecom:dm:T1")
-	entry := Entry{ID: "mem-1", Scope: ch, Content: "aidata 测试库连接：host=9.134.38.148"}
+	entry := Entry{ID: "mem-1", Scope: ch, Content: "appuser 测试库连接：host=192.0.2.10"}
 
 	mirrorChannelMemoryToBot(ctx, repo, cfg, entry.ID, entry)
 	// 模拟「LLM 把带标签的镜像原文存回 channel scope」后再镜像一次
@@ -926,7 +916,7 @@ func TestMirrorChannelMemoryToBot_DoesNotStack(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("mirror must reuse one row, got %d: %+v", len(got), got)
 	}
-	if got[0].Content != "[wecom:dm:T1] aidata 测试库连接：host=9.134.38.148" {
+	if got[0].Content != "[wecom:dm:T1] appuser 测试库连接：host=192.0.2.10" {
 		t.Errorf("mirror content = %q", got[0].Content)
 	}
 }

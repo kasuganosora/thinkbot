@@ -15,7 +15,7 @@ import (
 
 // leadingMentionPrefixRE 匹配模型偶发在记忆正文前加的空 mention 前缀
 // （如 "[] " 或 "[] [] "）。这类前缀无语义，却会让同一观察因格式不一致产生
-// 近重复记忆（memory_entries 实测 ~80 条带 "[]" 前缀的噪音，甚至累积成 "[] []"）。
+// 近重复记忆（正文前多出来的 "[]" 前缀会让同一观察被存成两条，甚至叠成 "[] []"）。
 // 写入前统一剥离，保证内容规范。
 var leadingMentionPrefixRE = regexp.MustCompile(`^(\[\]\s*)+`)
 
@@ -333,8 +333,7 @@ const searchCandidateLimit = 2000
 
 // searchEntryMaxChars 单条检索结果回显的字符上限。
 //
-// 反例（2026-10-26 17:46 线上）：query="db" 命中并原样返回一篇 3000+ 字符的
-// 日志巡检报告，真正要的「aidata 测试库连接 host=…」被埋在后面。短记忆是主体，
+// 短查询可能命中一篇很长的笔记，真正要的句子被埋在后面。短记忆是主体，
 // 封顶只砍档案类长条目，并在末尾标注总长，模型知道被截断了可以换词再搜。
 const searchEntryMaxChars = 1200
 
@@ -373,19 +372,15 @@ func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		if err != nil {
 			return nil, errs.Wrap(err, "memory search failed")
 		}
-		return formatSearchEntries(entries, "", len(entries)), nil
+		return formatSearchEntries(entries, nil, "", len(entries)), nil
 	}
 
 	// 有 query：先拉候选，再按相关性打分排序。
 	//
-	// 为什么不能继续用 Query.Text（SQL content LIKE '%q%'）：整串子串匹配，
-	// query 里多一个空格就 0 命中。2026-10-27 真实库（189 条）实测：
-	//   - 「正式环境 日志主题」LIKE=0，而库里躺着「正式环境日志主题为
-	//     yak_log_json，可用日志通道查正式环境问题」—— 中间没空格就永远搜不到；
-	//   - 「数据库 mysql」LIKE=0，库里有「测试数据库MySQL：9.134.38.148:3306」；
-	//   - 「db」LIKE=10 条，全是含 "db" 子串的噪音。
-	// 换成 SelectRelevant（Ochiai + CJK bigram + IDF）后前两条都是 top 命中。
-	// 这正是线上 LLM 连搜「数据库 mysql」「db」「SQL 查询」却一无所获的根因。
+	// 不用 Query.Text（SQL content LIKE '%q%'）：那是整串子串匹配，query 里
+	// 多一个空格就 0 命中。例如「演示环境 日志主题」匹配不到存成
+	// 「演示环境日志主题为 demo_events」的句子。SelectRelevant（Ochiai +
+	// CJK bigram + IDF）按词重合打分，词序无关。
 	base.Limit = searchCandidateLimit
 	candidates, err := repo.Retrieve(ctx, base)
 	if err != nil {
@@ -393,15 +388,17 @@ func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 	}
 	picked := SelectRelevant(queryText, FilterRecall(candidates), nil, limit)
 	entries := make([]Entry, 0, len(picked))
+	scores := make([]float64, 0, len(picked))
 	for _, p := range picked {
 		entries = append(entries, p.Entry)
+		scores = append(scores, p.Score)
 	}
-	return formatSearchEntries(entries, queryText, len(candidates)), nil
+	return formatSearchEntries(entries, scores, queryText, len(candidates)), nil
 }
 
 // formatSearchEntries 输出检索结果：单条封顶；未命中时给可行动的提示而不是
 // 一句干巴巴的 "No matching memory found."（否则模型只会把同一个词再搜一遍）。
-func formatSearchEntries(entries []Entry, query string, scanned int) any {
+func formatSearchEntries(entries []Entry, scores []float64, query string, scanned int) any {
 	if len(entries) == 0 {
 		msg := "No matching memory found."
 		if strings.TrimSpace(query) != "" {
@@ -417,10 +414,16 @@ func formatSearchEntries(entries []Entry, query string, scanned int) any {
 			"entries": []any{},
 		}
 	}
+	results := entryResults(entries, searchEntryMaxChars)
+	for i := range results {
+		if i < len(scores) {
+			results[i].Relevance = scores[i]
+		}
+	}
 	return map[string]any{
 		"count":   len(entries),
 		"type":    "search",
-		"entries": entryResults(entries, searchEntryMaxChars),
+		"entries": results,
 	}
 }
 
@@ -1036,8 +1039,8 @@ func parseScope(m map[string]any, defaultKind ScopeKind, defaultID string) Scope
 //
 // 这一组能力是为「时间轴类问题」补的：检索结果永远被 limit 截断，而默认排序是
 // 时间倒序 —— 于是模型无论问「最早的记忆」「8 月发生过什么」都只能看到最近的一批，
-// 然后把「最近 N 条里最早的」当成「全部最早」回答（实测真实最早 2026-08-12
-// 被答成「9 月」）。order=asc + since/until 让模型能真正走到时间轴的另一端。
+// 然后把「最近 N 条里最早的」当成「全部最早」回答（真实起点在八月，
+// 却被答成「9 月」）。order=asc + since/until 让模型能真正走到时间轴的另一端。
 
 // scopesFor 把解析出的 scope 转成 Query.Scopes。
 // ScopeAll 返回空切片（检索/统计全部 scope）；其余按单 scope 精确限定。
@@ -1091,10 +1094,8 @@ const crossChannelMirrorPrefix = "xch:"
 
 // MirrorContent 生成镜像正文：以 [<channelID>] 标注来源频道，且至多标注一次。
 //
-// 幂等是必须的：线上实测（2026-10-27，memory_entries 106 条）有 7 条 channel
-// 记忆的正文里已经带着自己的来源标签（"[wecom:dm:T72340005A] aidata 测试库连接…"），
-// 再拼一次就变成 "[id] [id] …"。成因是 LLM 从注入的召回块里读到带标签的镜像原文，
-// 连同标签一起又存回了 channel scope——若不在这里收敛，每轮都会多叠一层。
+// 幂等是必须的：模型会把召回块里已经带上来源标签的正文再存回 channel scope。
+// 若这里再拼一次前缀，就会变成 "[id] [id] …"，并且每轮多叠一层。
 func MirrorContent(channelID, content string) string {
 	if channelID == "" {
 		return content
@@ -1262,12 +1263,15 @@ func removeScopeHint(requested Scope, substr string, others []Entry) string {
 }
 
 // EntryResult 是单条记忆的序列化结构。
+// Relevance 只在 search 的打分结果里填写，供调试。recent / count 以及注入进
+// prompt 的记忆块都不带这个字段（omitempty，且注入块只渲染正文）。
 type EntryResult struct {
 	ID         string  `json:"id"`
 	Content    string  `json:"content"`
 	Category   string  `json:"category,omitempty"`
 	Importance float64 `json:"importance,omitempty"`
 	CreatedAt  string  `json:"created_at,omitempty"`
+	Relevance  float64 `json:"relevance,omitempty"`
 }
 
 func formatEntries(entries []Entry, queryType string) any {

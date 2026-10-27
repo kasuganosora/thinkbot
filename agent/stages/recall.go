@@ -52,16 +52,12 @@ func NewRecallStage(name string, retriever memory.Retriever, window *memory.Wind
 // 启用前提：目标 scope 的记忆量已远超主通道窗口（memory.recentPerScope）。
 // 若 scope 记忆量本身就在窗口内，相关性通道没有候选可补，纯属浪费 IO。
 //
-// 环境变量只作为「紧急关闭」通道（设 0/false/off 关闭），不再是灰度开关：
-// 2026-09-24 真库 A/B 已验证收益并转常开——
-//   - query「你还记得我养的鹦鹉吗？」：关 = 18 条里 0 条与鹦鹉相关；
-//     开 = 前置 6 条全是鹦鹉记录（治疗疥癣 / 死亡经历 / 肝病）。
-//   - query「最近在折腾什么项目？」：关 = 0 条相关；开 = 前置 4 条命中
-//     thinkbot 项目备忘 / 自建 bot / 远程控制软件 / 科三出题规则。
+// 环境变量只作为「紧急关闭」通道（设 0/false/off 关闭），不再是灰度开关。
+// 关掉时，窗口外的旧事实不会被补回；打开时，与当前问句相关的旧事实可以排到前面。
 //
 // 开启后的两个副作用已同步修掉（否则不能放量）：
 //  1. 补充通道独占预算 → 新增 RecalledBudgetChars 总配额（默认 1200）；
-//  2. 约束类记忆（「对 luna 的频率警告持续有效」等）被相关性排序挤出 →
+//  2. 约束类记忆（发言频率、回复边界这类行为约定）被相关性排序挤出 →
 //     新增约束类置顶（PinnedCategories / MaxPinnedEntries）。
 func MemoryRelevanceEnabled() bool {
 	raw := strings.TrimSpace(os.Getenv("THINKBOT_MEMORY_RELEVANCE_RECALL"))
@@ -157,25 +153,25 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 	if s.window != nil {
 		snapCfg.Window = s.window
 	}
-	// 相关性召回：把当前轮次输入作为相关性打分的 query。
-	// 开关默认关闭（见 MemoryRelevanceEnabled），开启后窗口外的老记忆
-	// 才有机会补进候选集；配额字段为 0 时由 Snapshot 回落默认值。
-	//
-	// 单条长度封顶与近重复折叠**不随本开关灰度**：它们作用于主通道，修的是
-	// 「超长/重复内容独占记忆块预算」这个与召回来源无关的既有缺陷，
-	// 已在 SnapshotConfig 默认值里常开，无需在此重复设置。
+	// 当前输入始终作为相关性 query。窗口内加权不看 RelevanceRecall；
+	// 若只在开关打开时赋值，关掉窗口外召回会把窗口内加权一起关掉。
+	if q := strings.TrimSpace(env.Message.Text); q != "" {
+		snapCfg.Query = q
+	}
+	// 窗口外召回另受开关控制。配额为 0 时由 Snapshot 回落默认值。
+	// 单条长度封顶与近重复折叠不随本开关变化，它们修的是主通道预算，
+	// 已在 SnapshotConfig 默认值里常开。
 	if s.recall.RelevanceRecall {
 		snapCfg.RelevanceRecall = true
 		snapCfg.RelevanceCandidates = s.recall.RelevanceCandidates
 		snapCfg.RelevanceTopK = s.recall.RelevanceTopK
-		snapCfg.Query = env.Message.Text
 		// 补充通道专用检索源（可选）：主链路不含 L0，而高价值老记忆常是 L0。
 		snapCfg.BeyondWindowRetriever = s.recall.BeyondWindowRetriever
 	}
 	snap := memory.NewSnapshot(snapCfg)
 	// 必须显式注入 logger：Snapshot 内部的「丢弃超长 / 折叠近重复」计数只在
 	// logger 非 nil 时输出，缺了它运维无法判断记忆块到底被谁吃掉了预算
-	// （实测过：一条 1.5 万字的档案就能把 2200 字符预算吃满到只剩 1 条）。
+	// （一条上万字的档案就能把 2200 字符预算吃满到只剩 1 条）。
 	snap.SetLogger(s.logger)
 	if err := snap.Init(ctx, s.retriever, scopes); err != nil {
 		if s.logger != nil {

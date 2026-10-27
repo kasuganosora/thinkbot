@@ -14,12 +14,11 @@ import (
 // 相关性召回：在不引入 embedding / 向量库 / 外部依赖的前提下，用字面 token
 // 重合度估计「当前消息」与「历史记忆」的主题相关程度。
 //
-// 存在理由（实测证据，2026-09-24）：
-// 自动召回的候选集是「每 scope 最近 N 条」(见 Snapshot.doRefresh 的 Recent 调用)。
-// 当某个 scope 的记忆量远大于 N 时——本机 misskey timeline scope 有 2472 条而 N=50，
-// 最近 50 条全部落在同一天——窗口外的历史记忆永远不会进入候选集，
+// 存在理由：自动召回的候选集是「每 scope 最近 N 条」(见 Snapshot.doRefresh 的 Recent 调用)。
+// 当某个 scope 的记忆量远大于 N 时——例如一个时间线 scope 有两千多条而 N=50，
+// 最近 50 条可能全部落在同一天——窗口外的历史记忆永远不会进入候选集，
 // 后续的 importance 排序再怎么排也救不回来：全表 importance 最高的一批
-// （0.800，如用户对 bot 行为的偏好、长期人设事实）全部在窗口外。
+// （长期偏好、人设事实）可能全部在窗口外。
 //
 // 相关性召回负责给这些「老但相关」的条目第二次机会：从更宽的候选窗口里
 // 按与当前消息的相关性补足若干条，送回原有排序链路。
@@ -30,9 +29,9 @@ import (
 
 // 召回增强的默认值。
 //
-// 候选窗口大小由实测定标（2026-09-24，本机 misskey timeline scope 2472 条）：
-// 最近 50 条只覆盖 1 天、300 条覆盖 4 天、1000 条覆盖 9 天、全量覆盖 38 天。
-// 因此单靠时间窗口无法捞到跨月的高价值记忆（它们排在第 2400 位之后），
+// 候选窗口按「时间窗口覆盖不了跨月高价值记忆」来定：
+// 最近 50 条可能只覆盖一天，放大到数百或一千条仍可能盖不住全表。
+// 因此单靠时间窗口无法捞到排在很后面的高价值记忆，
 // 这才需要第二条「高价值保底」通道按 importance 直接取。
 const (
 	// DefaultRelevanceCandidates 默认候选窗口大小（每个 scope）。
@@ -50,9 +49,8 @@ const (
 	DefaultRecalledMaxChars = 240
 	// DefaultImportantMinImportance 高价值保底的 importance 阈值。
 	//
-	// 注意两张表的规模差了一个量级（2026-09-24 实测，本机）：
-	//   - tiered_memories：importance>=0.7 仅 11 条
-	//   - memory_entries：importance>=0.7 有 641 条，平均 3264 字符、最长 20696
+	// 注意两张表的规模可以差一个量级：tiered_memories 里高分条目可能只有十几条，
+	// memory_entries 里同样阈值可以有数百条，而且单条往往很长。
 	// 生产链路用 MergedRetriever，两个源都会命中，因此实际面对的是后者。
 	// 任何按「只有个位数短条目」做的定标都是错的。
 	DefaultImportantMinImportance = 0.7
@@ -60,32 +58,29 @@ const (
 	//
 	// 这是**防止后端返回过多的安全网**，不是筛选条件：真正的过滤由
 	// Query.MinImportance 完成。它必须大于「满足阈值的条目总数」，
-	// 否则会退化成「只看最早创建的 N 条」——本机 1.00 分条目按时间升序
-	// 排在第 516/573 位，用 200 时会永久漏掉。命中上限时会打 WARN。
+	// 否则会退化成「只看最早创建的 N 条」——高分条目若排在扫描窗口之外会永久漏掉。
+	// 命中上限时会打 WARN。
 	importantScanLimit = 2000
 	// DefaultRenderedMaxChars 注入块里单条记忆的字符上限（默认 240，常开）。
 	//
-	// 存在理由（2026-09-24 实测）：bot scope 有两条 importance=1.00、
-	// 14808/15314 字符的「luna 完整档案+项目全记录」。它们 sort 后永远排第一，
-	// 单条就把 2200 字符预算吃满，实测注入块是 "showing 1 by importance"
-	// ——bot 每轮看到的只是一份 15000 字档案的前 2200 字残片，其它记忆一条
-	// 都进不来。补充召回的老记忆因此永远不可见。
+	// 存在理由：importance=1 的档案可以有上万字。它们 sort 后永远排第一，
+	// 单条就把 2200 字符预算吃满，注入块变成 "showing 1 by importance"
+	// ——每轮看到的只是长档案的前 2200 字残片，其它记忆一条都进不来。
+	// 补充召回的老记忆因此永远不可见。
 	//
-	// 取 240 的依据：本机 memory_entries 里 <=240 占 1824 条、241-480 占 317 条，
-	// 短记忆是主体，设 240 不会动它们；>1600 的 395 条是档案/长笔记，
+	// 取 240 的依据：短记忆是主体，设 240 不会动它们；上千字的档案和长笔记
 	// 截断后只剩断头，直接丢弃比注入残片好（需要完整内容时走 memory 工具）。
 	// 与 RecalledMaxChars 同值：两个通道对「一条记忆该占多少预算」的口径应当一致。
 	DefaultRenderedMaxChars = 240
 	// DefaultNearDuplicateThreshold 近重复折叠的相似度阈值（默认 0.7，常开）。
 	//
-	// 存在理由（2026-09-24 实测）：注入块里出现过「变压器事件」×4、「@umeboshicc
-	// 档案」×3 —— 同一事件被反复记成措辞略不同的几条，importance 相近，
-	// 于是同时挤进 20 条名额，把其它记忆挤出去。折叠后本机注入从 10 条变 18 条。
+	// 存在理由：同一件事会被记成措辞略不同的几条，importance 相近，
+	// 于是同时挤进有限名额，把其它记忆挤出去。
 	//
 	// 相似度用 token 集合的 Jaccard（token 切分同 relevanceTokens，中文取 bigram）。
 	// 阈值配合 nearDupSimilarity 的「长度可比时用包含度」口径（见该函数注释）：
-	// 纯 Jaccard 在同源长记录上只有 0.5 上下，靠包含度才拉到 0.8+。本机真库
-	// 实测 0.7 能折掉事件档案的多版本记录，同时不误折主题不同、只共享通用词的
+	// 纯 Jaccard 在同源长记录上只有 0.5 上下，靠包含度才拉到 0.8+。
+	// 0.7 能折掉同一事件的多版本记录，同时不误折主题不同、只共享通用词的
 	// 条目（这类一般低于 0.5）。
 	DefaultNearDuplicateThreshold = 0.7
 	// nearDupLengthRatio 允许改用包含度判定的 token 数之比上限。
@@ -95,7 +90,7 @@ const (
 	//
 	// 约束类（preference / bot_personality）是行为准则，不能因为与当前话题无关
 	// 就被相关性排序挤出注入块（实测会被挤掉，详见 hoistPinned 注释）。
-	// 本机这类条目共 89 条，必须限量：全部置顶会反过来压死主通道的近期记忆。
+	// 这类条目可以有几十条，必须限量：全部置顶会反过来压死主通道的近期记忆。
 	DefaultMaxPinnedEntries = 6
 	// DefaultRecalledBudgetChars 补充通道（相关性 + 高价值保底）的字符总配额。
 	//
@@ -113,26 +108,17 @@ const (
 	// recalledSkipChars 补充通道跳过超长条目的原始长度门槛（= 封顶值的倍数）。
 	//
 	// 超过这个长度的条目被 truncateRecalled 截断后只剩下断头残句，
-	// 注入 prompt 比不注入更糟：本机实测会命中「【栞娜人格设定】」(701/951 字符)
-	// 与「luna 完整档案」(2287 字符)，截断后是残缺的人格定义。
+	// 注入 prompt 比不注入更糟：人格设定和上万字档案截断后是残缺定义。
 	// 这类内容属于 persona / profile 层的职责，不该由召回通道重复注入。
 	recalledSkipFactor = 2
 	// DefaultRelevanceInWindowWeight 主通道（时间窗口内）条目能拿到的
 	// importance 等效加成上限（默认 0.6）。
 	//
-	// 存在理由（2026-10-27 真实库复测）：此前只有 recallBeyondWindow 捞回来的
-	// 补充条目会被 boostRelevance 抬升，主通道条目完全不参与相关性打分，
-	// 只按 importance 降序排序。于是「就在窗口里、与当前话题高度相关、但
-	// importance 排名靠后」的记忆永远拿不到加权，被一批只是 importance 高
-	// 却与话题无关的条目挤出预算。复现：93 条候选里「正式环境日志主题为
-	// yak_log_json…」相关性最高，importance 0.658 排在第 9~14 名，而 2457
-	// 字符预算只装得下约 10 条 × 240 字符——它恰好卡在边界外，注入块里没有它。
-	//
-	// 取 0.6（与 DefaultImportantRelevanceWeight 同值）：强匹配
-	// （相关性 0.8+）能拿到 ≈0.5 的加成，稳定跨过一到两档 importance 差
-	// （0.658+0.5 > 0.8），同时相关性接近时仍由 importance 定序，
-	// 不推翻 2026-09-24 调好的那套阈值。加成用的是**原始**相关性分
-	// （见 RelevanceScores 的实测说明：归一化会把噪声也拉满）。
+	// 主通道原先只按 importance 排序，与当前输入高度相关但分数靠后的条目
+	// 会被无关高分条目挤出字符预算。0.6 与 DefaultImportantRelevanceWeight
+	// 同值：强匹配（原始相关性 0.8+）大约拿到 0.5，能跨过一档 importance，
+	// 分数接近时仍由 importance 定序。加成用原始分，不把池内最高分拉成 1
+	// （见 RelevanceScores：那样会把噪声也抬满）。
 	DefaultRelevanceInWindowWeight = 0.6
 	// maxSortImportance 参与排序的 importance 上限。
 	//
@@ -143,16 +129,16 @@ const (
 	// DefaultImportantRelevanceWeight 保底通道里「本轮最相关」条目能拿到的
 	// importance 等效加成上限（默认 0.6）。
 	//
-	// 排序键 = importance + weight*归一化相关性，归一化取候选池内最高相关性为 1。
-	// weight=0 时退化为纯 importance 排序（改动前的行为）。
+	// 排序键 = importance + weight*门控后的原始相关性。weight=0 时退化为纯
+	// importance 排序。
 	//
-	// 为什么用归一化而不是原始相关性分：原始分被 Ochiai 的长度归一压得很小
-	// （实测真库 100~300 字的记忆上只有 0.05~0.3），直接乘固定权重根本压不过
-	// 0.95 的无关条目；归一化后「本轮最相关的那条」稳定拿到满额加成，
-	// 0.80 + 0.6 > 0.95，而完全不相关的条目加成恒为 0。
+	// 与窗口内加权同一口径：不把池内最高分拉成 1。单独一条强匹配保留原始分，
+	// 0.8×0.6 仍能跨过一档 importance；平坦噪声簇只贡献超出均值的那一点，
+	// 抬不动真正高分的无关条目。弱语料原始分只有 0.05~0.3 时加成很小，
+	// 这是安全退化，不是再归一化。
 	//
-	// 取 0.6 而非 1.0：加成过大会让 importance 这一既有信号失去作用，
-	// 0.6 足够跨过一到两档 importance 差，同时在相关性接近时仍由 importance 定序。
+	// 取 0.6 而非 1.0：加成过大会让 importance 失去作用。分数接近时仍由
+	// importance 定序。
 	DefaultImportantRelevanceWeight = 0.6
 	// relevanceFloorStep 相关性条目相对主通道入选门槛的最小抬升量。
 	// 抬升的目的见 Snapshot.doRefresh：不抬的话补回来的老记忆会在后续
@@ -183,11 +169,10 @@ func isTokenRune(r rune) bool {
 //   - 拉丁/数字：按非字母数字切分成词，长度 >= 2 才入集合（单字符噪音太大）；
 //   - CJK：连续 CJK 段取相邻二字（bigram）；段长只有 1 时保留该单字。
 //
-// CJK 为什么不再取单字（2026-09-24 实测修正）：单字与 bigram 会重复计权——
+// CJK 为什么不再取单字：单字与 bigram 会重复计权——
 // 内容里出现一次「什么」，查询侧同时命中「什」「么」「什么」三个 token，
-// 一个通用词顶三次命中。结果是「今天讨论了一下晚饭吃什么」的相关性(0.125)
-// 反而高于真正的目标「@luna gets annoyed by bots...」(0.066)，
-// 通用字压过实体名。改为只用 bigram 后同一组样本变为 0.044 vs 0.066，序正确。
+// 一个通用词顶三次命中。结果是泛句「今天讨论了一下晚饭吃什么」的分数
+// 可以高于真正的目标句，通用字压过实体。改为只用 bigram 后序才正确。
 func relevanceTokens(s string) map[string]struct{} {
 	tokens := make(map[string]struct{})
 	if s == "" {
@@ -311,19 +296,16 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 // 「从窗口外再捞几条」；这里保留**全部**条目（含 0 分）的分数，用于
 // 「给已经在候选池里的条目重新排序」——主通道条目此前完全没有这一路信号。
 //
-// ⚠️ 用**原始分**，不要归一化到「池内最高分 = 1」（2026-10-27 真实库 22 条
-// query 实测，这个坑踩过一次）：归一化会把「根本没有相关记忆」的噪声也拉满。
-// 实测池内最高分的分布——
+// 用原始分，不要除以池内最高分。除以最高分会把「本池里最好的一条噪声」
+// 拉成 1，满额加成，把真正高 importance 的条目顶掉。原始分与信号强度成正比：
+// 弱重合大约 0.6×0.4≈0.24，强匹配大约 0.6×0.9≈0.54。话题相关与不相关的
+// 池内最高分会在 0.4 附近重叠，固定阈值分不开它们；弱语料（原始分只有
+// 0.05~0.3）只拿到很小的加成，属于安全退化。
 //
-//	相关 query：1.000 1.000 1.000 1.000 0.979 0.942 0.830 0.614 0.561 0.415
-//	无关 query：0.395 0.345 0.323 0.280 0.257 0.199 0 0 0 0 0 0
-//
-// 两类在 0.4 附近重叠（相关最低 0.415 vs 无关最高 0.395），任何固定阈值都
-// 分不开。归一化后无关 query 的噪声条目照样拿到满额加成，把真正重要的记忆
-// 顶下去——比不加还糟。用原始分则加成与信号强度成正比：噪声最多拿到
-// 0.6×0.395≈0.24，真匹配拿到 0.6×0.9≈0.54，序由信号本身决定，不需要碰运气的
-// 阈值；信号本来就弱的语料（相关性分只有 0.05~0.3）自然只拿到很小的加成，
-// 属于「没帮上也没帮倒忙」的安全退化。
+// 加成不要直接乘这份原始分。平坦噪声簇的最高分也会落在 0.4 附近，乘 0.6
+// 仍有大约 0.24，足够打乱相邻的 importance。boost 用
+// gateRelevanceByPoolMean：不超过正分均值的记 0，超过的只保留超出均值的
+// 部分，并且不除以池内最高分。
 func RelevanceScores(query string, candidates []Entry) []float64 {
 	scores := make([]float64, len(candidates))
 	if len(candidates) == 0 || strings.TrimSpace(query) == "" {
@@ -334,6 +316,46 @@ func RelevanceScores(query string, candidates []Entry) []float64 {
 		return scores
 	}
 	return rawRelevanceScores(q, candidates)
+}
+
+// gatedRelevanceScores 是窗口内加权和保底通道排序用的加成权重。
+// 检索排序和 search 调试输出仍用 RelevanceScores 的原始分。
+func gatedRelevanceScores(query string, candidates []Entry) []float64 {
+	return gateRelevanceByPoolMean(RelevanceScores(query, candidates))
+}
+
+// gateRelevanceByPoolMean 把原始分收成加成权重。
+//
+// 均值只统计正分。零分是「没有 token 重合」，不是弱匹配；算进均值会把
+// 门槛拉到接近 0，门控等于没设。不超过均值的记 0。高于均值的保留
+// raw-mean，不除以（最高分-均值）——那是另一种归一化，会把最好的噪声重新拉满。
+//
+// 只有一条正分时没有可对照的分布，原样返回。丢掉它会把唯一的信号清掉，
+// 而「单条命中被归一化成 1」并不是要防的失败模式。
+func gateRelevanceByPoolMean(scores []float64) []float64 {
+	out := make([]float64, len(scores))
+	var sum float64
+	var n int
+	for _, s := range scores {
+		if s > 0 {
+			sum += s
+			n++
+		}
+	}
+	if n == 0 {
+		return out
+	}
+	if n == 1 {
+		copy(out, scores)
+		return out
+	}
+	mean := sum / float64(n)
+	for i, s := range scores {
+		if s > mean {
+			out[i] = s - mean
+		}
+	}
+	return out
 }
 
 // rawRelevanceScores 是 RelevanceScores / SelectRelevant 共用的打分内核：
@@ -360,9 +382,9 @@ func tokenizeAll(candidates []Entry) []map[string]struct{} {
 
 // buildIDF 统计候选集内的文档频率并换算成 IDF 权重。
 //
-// 不做这一步的话，中文停用词会主导打分——实测 query「养鹦鹉的事」的 top1
-// 是「睡了一觉缓过来了，什么天气了还在冒汗」（只共享「的/了/什么」），
-// 而真正的「养鹦鹉」记忆排在后面。原因是短条目的 |c| 小，
+// 不做这一步的话，中文停用词会主导打分——短 query 的 top1
+// 可能只是共享了「的/了/什么」的无关短句，真正的主题记忆排在后面。
+// 原因是短条目的 |c| 小，
 // Ochiai 分母小 → 靠几个通用字就能拿高分。用 IDF 给高频无区分度的
 // token 降权后，「鹦鹉」这类稀有词的权重会比「的/了」高一个量级。
 func buildIDF(tokenSets []map[string]struct{}) map[string]float64 {
@@ -410,18 +432,15 @@ func idfScore(q, c map[string]struct{}, idf map[string]float64) float64 {
 // 这是「高价值保底」通道：时间窗口再大也覆盖不到的跨月记忆，只要 importance
 // 够高（长期事实/偏好）就该被想起。
 //
-// 为什么必须带 query（2026-09-24 实测）：
-// 初版按纯 importance 排序，名额恒定被同一批 0.95 条目占满（心理状态汇总等，
-// 与当轮话题无关），导致每轮固定注入几条无关记忆，而诊断真正想救的 0.800
-// 长期事实（用户对 bot 行为的偏好等）一条都进不来。相关性参与排序后，
+// 为什么必须带 query：初版按纯 importance 排序，名额恒定被同一批高分、
+// 但与当轮话题无关的长摘要占满，真正想救的长期事实进不来。相关性参与排序后，
 // 话题相关的老记忆可以反超一到两档 importance 差（0.80+0.6*rel > 0.95）。
 // query 为空时相关性恒为 0，退化为纯 importance 排序，行为与初版一致。
 //
-// 排序在**内存**完成，不依赖 Query.Order + Limit 的组合。原因（2026-09-24 实测）：
+// 排序在**内存**完成，不依赖 Query.Order + Limit 的组合。原因：
 // Limit 一旦小于满足阈值的条目总数，就退化成「只扫最早/最新的 N 条」，
-// 而 Order 只能在两端二选一，救不了中间——本机 importance>=0.7 有 641 条，
-// 用 OrderAsc+Limit(200) 时排在第 516/573 位的 1.00 分条目永久漏掉，
-// 抓到的反而是最早的人格设定条目。真正的过滤交给 Query.MinImportance，
+// 而 Order 只能在两端二选一，救不了中间——高分条目若落在扫描窗口之外会永久漏掉，
+// 抓到的反而是时间两端的档案。真正的过滤交给 Query.MinImportance，
 // Limit 只作安全网；命中安全网时打 WARN 提示上调。
 //
 // 检索依赖 Query.MinImportance；后端若不支持该过滤，本通道会退化成返回
@@ -432,7 +451,8 @@ func idfScore(q, c map[string]struct{}, idf map[string]float64) float64 {
 // 超过 recalledSkipFactor 倍的条目在打分前就被剔除，理由见 filterOversized
 // ——给它们做分词是每轮开销的主要来源，而它们最终一定会被丢弃。
 //
-// 返回的 Score 是归一化后的相关性分（无 query 时为 0），用于 boostRelevance 抬升排序。
+// 返回的 Score 是门控后的原始相关性（无 query 时为 0），不是「池内最高分 = 1」。
+// boostRelevance 只用它做很小的次序拉开；谁进 topK 由下面的排序键决定。
 func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude map[string]struct{}, query string, minImportance float64, relevanceWeight float64, topK int, maxChars int, logger ...*zap.SugaredLogger) []ScoredEntry {
 	if topK <= 0 || minImportance <= 0 || r == nil {
 		return nil
@@ -468,31 +488,8 @@ func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude m
 		return nil
 	}
 
-	// 相关性只在有 query 时计算；无 query 时 rel 全为 0，等价于纯 importance。
-	//
-	// 归一化：以候选池内最高相关性为 1，其余按比例缩放。原始分受长度归一压制，
-	// 量级不稳定（见 DefaultImportantRelevanceWeight 的说明），不归一化则权重
-	// 无法给出可预测的效果。
-	rel := make([]float64, len(candidates))
-	if strings.TrimSpace(query) != "" {
-		q := relevanceTokens(query)
-		if len(q) > 0 {
-			tokenSets := tokenizeAll(candidates)
-			idf := buildIDF(tokenSets)
-			maxRel := 0.0
-			for i := range candidates {
-				rel[i] = idfScore(q, tokenSets[i], idf)
-				if rel[i] > maxRel {
-					maxRel = rel[i]
-				}
-			}
-			if maxRel > 0 {
-				for i := range rel {
-					rel[i] /= maxRel
-				}
-			}
-		}
-	}
+	// 与窗口内加权同一份门控原始分。无 query 时全 0，等价于纯 importance。
+	rel := gatedRelevanceScores(query, candidates)
 
 	scored := make([]ScoredEntry, 0, len(candidates))
 	for i, e := range candidates {
@@ -513,13 +510,12 @@ func SelectImportant(ctx context.Context, r Retriever, scopes []Scope, exclude m
 // capRecalled 限制补充条目的单条字符数，返回应实际补入的条目。
 //
 // 两件事：
-//  1. 封顶：高 importance 的记忆常是长摘要（实测有 400+ 字的心理状态汇总），
+//  1. 封顶：高 importance 的记忆常是数百字的长摘要，
 //     不封顶的话三五条就会吃满整个记忆块字符预算，把主通道的近期记忆全挤出去
-//     ——实测开启后注入从 20 条掉到 "showing 5"，bot 反而不知道当下发生了什么。
+//     ——注入可以从 20 条掉到 "showing 5"，模型反而不知道当下发生了什么。
 //  2. 跳过超长条目：原始长度超过封顶值 recalledSkipFactor 倍的条目直接丢弃，
-//     不做截断。截断后的残句没有阅读价值，实测会命中「【栞娜人格设定】」
-//     (701/951 字符) 与「luna 完整档案」(2287 字符)，注入后是断头的人格定义。
-//     这类内容属于 persona / profile 层，不该由召回通道重复注入。
+//     不做截断。截断后的残句没有阅读价值（人格设定、上万字档案都会中招），
+//     注入后是断头定义。这类内容属于 persona / profile 层，不该由召回通道重复注入。
 //
 // maxChars <= 0 表示不限制，原样返回。
 func capRecalled(entries []Entry, maxChars int) []Entry {
@@ -545,8 +541,8 @@ func capRecalled(entries []Entry, maxChars int) []Entry {
 // filterOversized 剔除最终注定会被丢弃的超长条目（返回新切片）。
 //
 // 与 capRecalled 用同一门槛（maxChars*recalledSkipFactor）。放在打分之前，
-// 是为了避免给这些条目做分词——它们是本轮开销的主要来源：本机有
-// 14808/15314 字符的档案条目，不过滤时每轮快照 400ms，过滤后回到基线量级。
+// 是为了避免给这些条目做分词——上万字档案是本轮开销的主要来源，
+// 不过滤时每轮快照会从十几毫秒涨到数百毫秒。
 func filterOversized(entries []Entry, maxChars int) []Entry {
 	return filterOversizedBy(entries, maxChars, recalledSkipFactor)
 }
@@ -576,8 +572,8 @@ func filterOversizedBy(entries []Entry, maxChars int, factor int) []Entry {
 //
 // 与 capRecalled 同一套取舍，但作用在**主通道**上，因此默认不启用
 // （MaxRenderedEntryChars=0 时 Snapshot 不调用它）：
-//   - 超过上限 renderedSkipFactor 倍的条目直接丢弃：本机是 14808/15314 字符的
-//     完整档案，截断后是断头残片，注入比不注入更糟，完整内容应由 memory 工具按需取；
+//   - 超过上限 renderedSkipFactor 倍的条目直接丢弃：上万字档案截断后是断头残片，
+//     注入比不注入更糟，完整内容应由 memory 工具按需取；
 //   - 其余超长条目截断到上限：否则单条就能吃满 2200 字符预算。
 //
 // 注意必须先于 MaxEntries 条数截断执行，否则被丢弃的巨型条目仍会占掉名额。
@@ -615,10 +611,10 @@ func capRendered(entries []Entry, maxChars int) ([]Entry, int) {
 // 比较次数是 O(N*K)，不会像全量两两比较那样随条目数平方增长。
 //
 // 保留哪一条：同组内保留**内容更全（原始长度更大）**的一条，importance 取
-// 组内最高值以保住原排序位次。这不是洁癖——本机实测的近重复大多是两类：
-//   - 同一事件被反复记录（「变压器事件」×3），措辞略有不同的版本里长版信息更全；
-//   - Misskey 回复链（见 dedupeText），链上最新一条天然包含被引用的上文。
-//     实测折叠掉 [Reply] 链里的短条目后，保留下来的长条目仍含整链的原文。
+// 组内最高值以保住原排序位次。近重复大多是两类：
+//   - 同一事件被反复记录，措辞略有不同的版本里长版信息更全；
+//   - 回复链（见 dedupeText），链上最新一条天然包含被引用的上文。
+//     折叠掉 [Reply] 链里的短条目后，保留下来的长条目仍含整链的原文。
 //
 // threshold <= 0 表示关闭，原样返回。
 func dedupeNearDuplicates(entries []Entry, threshold float64) ([]Entry, int) {
@@ -677,8 +673,8 @@ func dedupeNearDuplicates(entries []Entry, threshold float64) ([]Entry, int) {
 	return kept, folded
 }
 
-// replyQuoteRe 匹配 Misskey 回复类记忆的引用前缀，形如
-// "[Reply to 茶泡梅干@我有颉压抑: 上文内容] 本条内容"。
+// replyQuoteRe 匹配回复类记忆的引用前缀，形如
+// "[Reply to demo-user: 上文内容] 本条内容"。
 //
 // 贪婪匹配到最后一个 ']'：引用内容自身可能含 ']'（如引用里带表情短码或
 // 嵌套括号），非贪婪会在第一个 ']' 处截断，把引用正文残留下来。
@@ -686,8 +682,8 @@ var replyQuoteRe = regexp.MustCompile(`^\[Reply\b.*\]\s*`)
 
 // dedupeText 返回参与近重复比较的文本。
 //
-// 剥离引用前缀的原因（2026-09-24 实测）：Misskey 回复链上相邻两条记忆的
-// 「上文引用」完全一致，只差最后一句新内容，Jaccard 实测 0.62~0.73，
+// 剥离引用前缀的原因：回复链上相邻两条记忆的
+// 「上文引用」完全一致，只差最后一句新内容，Jaccard 可以到 0.62~0.73，
 // 会被当成重复折叠掉——丢的恰恰是每条独有的那一句。剥掉引用的共同部分后，
 // 比较只剩各自的新内容，相似度回落到阈值以下。
 //
@@ -716,7 +712,7 @@ func dedupeText(content string) string {
 // 主体重合，包含度能到 0.8+，而独有细节只把 Jaccard 拉低。
 //
 // 长度可比 = token 数之比不超过 nearDupLengthRatio。这条限制是防误伤的关键：
-// 「用户会画画，几天画不了就心神不宁」的 token 集合几乎必然是某份长档案的子集
+// 「演示账号只读，写操作要换维护账号」的 token 集合几乎必然是某份长档案的子集
 // （包含度接近 1），但它是一条独立的短记忆，不该被档案吃掉。
 func nearDupSimilarity(a, b map[string]struct{}) float64 {
 	if len(a) == 0 || len(b) == 0 {
@@ -796,18 +792,18 @@ func boostRelevance(picked []ScoredEntry, gate float64) {
 
 // hoistPinned 把「约束类」记忆提到候选最前面，返回重排后的条目与被提名的条数。
 //
-// 存在理由（2026-09-24 A/B 实测）：开启相关性召回后，补充通道的条目被抬升到
+// 存在理由：开启相关性召回后，补充通道的条目被抬升到
 // 主通道之上（见 boostRelevance），8 条 × 240 字符吃掉 2200 字符预算的 87%，
-// 主通道只剩 3~4 条名额。结果是「对 luna 的频率警告持续有效：不主动搭话」
-// 「若 luna 再现明确情绪求助信号，安全优先于频率限制」这类**行为约束**被挤出
-// 注入块——它们 importance 只有 0.687，与当前话题也不相关，靠排序永远救不回来。
-// 丢了它们的后果不是「少知道一件事」，而是 bot 可能重复此前造成过误会的过度发言。
+// 主通道只剩 3~4 条名额。结果是「发言频率约束：不主动搭话」
+// 「安全信号优先于频率限制」这类**行为约束**被挤出
+// 注入块——它们 importance 可以只有 0.7 以下，与当前话题也不相关，靠排序永远救不回来。
+// 丢了它们的后果不是「少知道一件事」，而是可能重复此前约定不要做的发言。
 //
 // 判定只看 Category（约束类）：preference（用户偏好/行为约定）与
-// bot_personality（人设）。不用 importance 阈值是因为实测这些约束的分数并不高
-// （0.687 vs 长档案 0.7+），按分排序恰好是它们被挤掉的原因。
+// bot_personality（人设）。不用 importance 阈值是因为这些约束的分数并不高
+// （可以低于长档案的 0.7），按分排序恰好是它们被挤掉的原因。
 //
-// maxPinned 限制提名条数：约束类条目本机有 89 条，全部置顶会反过来压死主通道。
+// maxPinned 限制提名条数：约束类条目可以有几十条，全部置顶会反过来压死主通道。
 // 提名内部仍按 importance 降序（调用方已排好序，这里保序）。
 func hoistPinned(entries []Entry, categories map[string]struct{}, maxPinned int) ([]Entry, int) {
 	if len(categories) == 0 || maxPinned <= 0 || len(entries) < 2 {
@@ -835,7 +831,7 @@ func hoistPinned(entries []Entry, categories map[string]struct{}, maxPinned int)
 
 // capRecalledBudget 按累计字符裁剪补充通道的条目，返回保留的条目与被裁掉的条数。
 //
-// 存在理由（2026-09-24 A/B 实测）：补充通道最多 8 条 × 240 字符 = 1920，
+// 存在理由：补充通道最多 8 条 × 240 字符 = 1920，
 // 占满 2200 字符预算后主通道只剩 280 字符（18 条 → 4 条）。相关性召回应当是
 // 「在近期记忆之外多想起几条」，而不是「替换掉近期记忆」，所以补充通道必须
 // 有自己的预算天花板，不能靠单条封顶间接约束（TopK 一改天花板就跟着漂）。
