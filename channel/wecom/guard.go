@@ -21,16 +21,13 @@ import (
 // allowedMediaSuffixes 是允许的媒体主机后缀（含自身与任意子域，精确后缀匹配）。
 var allowedMediaSuffixes = []string{"qq.com", "weixin.qq.com"}
 
-// 企业微信智能机器人的媒体文件**不在** qq.com / weixin.qq.com 域上：回调里的下载
-// URL 指向腾讯云 COS 的官方桶（现网实测：
-// ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com，签名 5 分钟有效）。
+// 企业微信智能机器人的媒体文件不在 qq.com / weixin.qq.com 上，回调里的下载
+// URL 指向腾讯云 COS 官方桶，形如
+// ww-aibot-img-<appid>.cos.<region>.myqcloud.com。
 //
-// ⚠️ 2026-10-27 线上事故：只按域名后缀放行时这个 host 被拒，当天 image 与 file
-// 全部下载失败，用户侧只看到「[图片：下载或解密失败]」。
-//
-// 但不能直接放行 "myqcloud.com"——那是**所有**腾讯云租户的公有桶，等于允许
-// 伪造的回调 URL 让 bot 去拉任意公开对象并喂给 LLM。故用「官方桶名前缀 +
-// 域名后缀」双重限定，既能覆盖未来的 region/appid 变体，又不放开整个 COS。
+// 不能直接放行 "myqcloud.com"：那是所有腾讯云租户的公有桶，等于允许伪造的
+// 回调 URL 让 bot 去拉任意公开对象并喂给 LLM。用「官方桶名前缀 + 域名后缀」
+// 双重限定，覆盖 region / appid 变化，同时不放开整个 COS。
 const (
 	officialMediaHostPrefix = "ww-aibot-"
 	officialMediaHostSuffix = ".myqcloud.com"

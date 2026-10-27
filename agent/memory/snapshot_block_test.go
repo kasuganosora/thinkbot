@@ -14,7 +14,7 @@ func TestRenderBlockWrapsInPairedTags(t *testing.T) {
 	repo := NewMemoryRepository()
 	if err := repo.Append(ctx, Entry{
 		Scope:      ChannelScope("c1"),
-		Content:    "正式环境日志主题为 yak_log_json",
+		Content:    "演示环境日志主题为 demo_events",
 		Category:   "fact",
 		Importance: 0.8,
 	}); err != nil {
@@ -39,7 +39,7 @@ func TestRenderBlockWrapsInPairedTags(t *testing.T) {
 	}
 
 	// 摘除后必须什么都不剩：整块连内容一起消失
-	if left := StripRecallBlocks(text); strings.Contains(left, "yak_log_json") ||
+	if left := StripRecallBlocks(text); strings.Contains(left, "demo_events") ||
 		strings.Contains(left, RecallBlockTagOpen) || strings.Contains(left, RecallBlockTagClose) {
 		t.Fatalf("strip left residue: %q", left)
 	}

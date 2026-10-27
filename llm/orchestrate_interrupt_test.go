@@ -135,7 +135,7 @@ func TestOrchestrateInterruptAppendsMidRun(t *testing.T) {
 	}
 }
 
-// toolChainInterruptProvider 模拟真实的长工具链轮次（2026-10-26 事故的形状）：
+// toolChainInterruptProvider 模拟长工具链轮次：
 //   - step 0：发一个工具调用，工具执行期间测试注入用户补充；
 //   - step >= 1：只输出文本，不再调工具。
 //
@@ -184,9 +184,8 @@ func (p *toolChainInterruptProvider) DoStream(ctx context.Context, params Genera
 // TestOrchestrateStreamInterruptDuringToolChain 验证：用户在**工具链执行期间**
 // 补充的内容，必须在**下一个步边界**就进入上下文。
 //
-// 回归用例（2026-10-26 16:32 实测）：群里补充「正式环境的主体是 yak_log_json」，
-// 那一轮连续 30+ 步都在调工具，旧实现只在「本步没有工具调用」时取一次补充，
-// 于是补充在通道里躺到本轮结束被丢弃 —— 期间 bot 一直搜错的索引。
+// 长工具链期间的补充必须在下一步边界进入上下文。旧实现只在「本步没有工具
+// 调用」时取一次，补充会留在通道里直到本轮结束被丢弃。
 func TestOrchestrateStreamInterruptDuringToolChain(t *testing.T) {
 	prov := &toolChainInterruptProvider{
 		toolStarted: make(chan struct{}, 1),
@@ -228,7 +227,7 @@ func TestOrchestrateStreamInterruptDuringToolChain(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("tool never started")
 	}
-	interruptCh <- "正式环境的主体是 yak_log_json"
+	interruptCh <- "补充：日志主题是 demo_events"
 	close(prov.toolGate)
 
 	var res *StreamResult
@@ -258,7 +257,7 @@ func TestOrchestrateStreamInterruptDuringToolChain(t *testing.T) {
 	}
 	found := false
 	for _, m := range msgs[1] {
-		if m.Role == MessageRoleUser && strings.Contains(TextFromParts(m.Content), "yak_log_json") {
+		if m.Role == MessageRoleUser && strings.Contains(TextFromParts(m.Content), "demo_events") {
 			found = true
 		}
 	}

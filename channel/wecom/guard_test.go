@@ -16,10 +16,9 @@ import (
 func TestValidateMediaURL(t *testing.T) {
 	ok := []string{
 		"https://qq.com/a",
-		// ⚠️ 真实线上 host（2026-10-27 企微回调实测）：媒体文件在腾讯云 COS 上，
-		// 不在 qq.com 域。这里必须用真域名，早先写成
-		// "...myqcloud.qq.com" 是个**不存在的域名**，测试绿了但线上照样拒。
-		"https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/x?sign=1",
+		// 官方媒体桶在 COS 上，不在 qq.com。必须用 ww-aibot- 前缀 + .myqcloud.com
+		// 后缀这种形态；写成 "...myqcloud.qq.com" 会靠 qq.com 后缀误通过。
+		"https://ww-aibot-img-1000000001.cos.ap-guangzhou.myqcloud.com/x?sign=1",
 		"https://media.weixin.qq.com/x",
 		"https://QYAPI.WEIXIN.QQ.COM./x",
 	}

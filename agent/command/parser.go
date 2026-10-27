@@ -57,14 +57,14 @@ func Parse(text string) *ParsedCommand {
 	}
 }
 
-// skipLeadingMention 跳过文本开头连续的 @提及（如企微群里的 "@打工仔 "）。
+// skipLeadingMention 跳过文本开头连续的 @提及（如群里的 "@helper "）。
 //
 // 为什么命令解析要自己剥一遍：剥 @ 前缀本来是各 channel 的职责
 // （如 channel/wecom 的 stripMention），但它依赖配置里的机器人显示名与实际
 // 群昵称完全一致。一旦机器人在平台侧改名（或客户端渲染成全角 ＠），
-// 就会漏剥，文本变成 "@打工仔 /chatid" —— 命令识别全线失效，
+// 就会漏剥，文本变成 "@helper /chatid" —— 命令识别全线失效，
 // 且失败是静默的（消息被当成普通聊天喂给 LLM，bot 回一句"我不认识"）。
-// 实测 2026-10-23 线上就是这么坏的。
+// 群昵称和配置里的名字不一致时就会这样。
 //
 // 只处理**开头**的 @token，正文中间的 @ 原样保留，避免误伤。
 func skipLeadingMention(text string) string {

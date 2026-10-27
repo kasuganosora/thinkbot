@@ -14,7 +14,7 @@ func TestQuoteFieldIsDecoded(t *testing.T) {
 	raw := `{
 		"msgid": "m1",
 		"aibotid": "aib1",
-		"chatid": "wrkSFfCgAA",
+		"chatid": "demoChat",
 		"chattype": "group",
 		"from": {"userid": "U1"},
 		"msgtype": "text",

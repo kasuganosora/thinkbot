@@ -248,12 +248,12 @@ func TestMergedRetriever_DedupesChannelMirror(t *testing.T) {
 
 	botSrc := &fakeRetriever{byScope: map[memory.Scope][]memory.Entry{
 		bot: {
-			{ID: "xch:mem-1", Scope: bot, Content: "[wecom:dm:T1] aidata 测试库连接 host=9.134.38.148"},
+			{ID: "xch:mem-1", Scope: bot, Content: "[wecom:dm:T1] appuser 测试库连接 host=192.0.2.10"},
 		},
 	}}
 	chSrc := &fakeRetriever{byScope: map[memory.Scope][]memory.Entry{
 		ch: {
-			{ID: "mem-1", Scope: ch, Content: "aidata 测试库连接 host=9.134.38.148"},
+			{ID: "mem-1", Scope: ch, Content: "appuser 测试库连接 host=192.0.2.10"},
 		},
 	}}
 

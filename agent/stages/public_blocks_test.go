@@ -12,12 +12,12 @@ import (
 )
 
 const (
-	incidentFiller = "容栞娜翻翻资料，这个梗栞娜不敢乱答"
-	incidentAnswer = "这个栞娜真不敢乱答……\n\n486、蕾姆老婆、青色断章这些栞娜都知道，但“老吴”栞娜没查到确切的出处，不敢瞎编一个糊弄大小姐（\n\n是夺还编里的哪个角色吗？大小姐揭晓一下，栞娜记进小本本（"
+	incidentFiller = "我先核对一下资料，这个先不猜"
+	incidentAnswer = "核对过了：手册第 3 节写的是蓝色主题，不是绿色。需要的话我可以把小节号记下来。"
 )
 
-// TestExtractPublicReply_IncidentSecondBlockDelivered 回归 2026-10-06 21:49 TG 私聊：
-// 第 1 步的过场话 + 最后一步的真正答复是两个不同的 <public> 区块，真正答复不能丢。
+// TestExtractPublicReply_IncidentSecondBlockDelivered：过场话和最终答复是两个
+// 不同的 <public> 区块，最终答复不能丢。
 func TestExtractPublicReply_IncidentSecondBlockDelivered(t *testing.T) {
 	got := sharedClean(histMultiBlockReplies["incident1006"])
 	want := incidentFiller + "\n\n" + incidentAnswer
@@ -32,10 +32,10 @@ func TestExtractPublicReply_MultiBlockRules(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{"0926 near-identical (one-char typo) sent once", histMultiBlockReplies["dup0926Typo"],
-			"ランプ集めの積み重ねが一瞬で消えるのは本当にしんどいですよね……あれはもう青春のログみたいなものだから、引き継ぎミスのダメージがデカい。ランプ消えたのいつ頃でした？"},
-		{"0927 status + correction both kept", histMultiBlockReplies["distinct0927Correction"],
-			"抱歉喵，刚才光顾着说没真发出去……这次真的发了！\n\n呜……又没发出去，这次是权限被拦了。大小姐在 Misskey 那边直接 @栞娜 说一句「把 tokyo-transit 发条帖」之类的，栞娜收到就能发了喵"},
+		{"near-identical (one-char typo) sent once", histMultiBlockReplies["dup0926Typo"],
+			"蓝色主题的配置写在设置页第三节，改完要重启服务才会生效，请不要把旧缓存当成当前值。灯灭了再看一次状态页。"},
+		{"status + correction both kept", histMultiBlockReplies["distinct0927Correction"],
+			"抱歉，刚才只说了没真发出去……这次真的发了！\n\n又没发出去，这次是权限被拦了。请在那边直接说一句「发一条演示帖」，我收到就能发。"},
 		{"5fb36fa half/full-width duplicate sent once",
 			"<public>喵~6/6全对!💯 这是给谁复习呀🤔</public><public>喵~6/6全对！💯 这是给谁复习呀🤔</public>",
 			"喵~6/6全对!💯 这是给谁复习呀🤔"},
@@ -47,8 +47,8 @@ func TestExtractPublicReply_MultiBlockRules(t *testing.T) {
 		{"empty and internal-only blocks skipped", "<public> </public><public><internal>只有心里话</internal></public><public>真正的回复</public>", "真正的回复"},
 		{"public nested in top-level internal is private", "<internal>想想 <public>SECRET</public> 算了</internal><public>ok</public>", "ok"},
 		{"unclosed trailing public not taken", "<public>完整的一句</public><public>被截断的半", "完整的一句"},
-		{"trailing bare answer after one public kept", "<public>稍等我查一下</public>查到了：答案是老吴 OS。",
-			"稍等我查一下\n\n查到了：答案是老吴 OS。"},
+		{"trailing bare answer after one public kept", "<public>稍等我查一下</public>查到了：答案是蓝色主题。",
+			"稍等我查一下\n\n查到了：答案是蓝色主题。"},
 		{"trailing punctuation-only noise dropped", "<public>好的</public>（", "好的"},
 		{"trailing whitespace only dropped", "<public>好的</public>\n\n  ", "好的"},
 		{"trailing after public with closed internal kept", "<public>先说一句</public>正文答复<internal>心里话</internal>",
@@ -75,11 +75,11 @@ func TestExtractPublicReply_RewriteDeduped(t *testing.T) {
 	}
 }
 
-// TestExtractPublicReply_GarbledTurnKeepsFinalAnswer：0927 B 站登录那轮前面几个区块是崩坏输出，
-// 最后一步才是真正的坦白与说明；只取第一块时这段会丢。
+// TestExtractPublicReply_GarbledTurnKeepsFinalAnswer：前面几个区块是崩坏输出，
+// 最后一步才是真正的说明；只取第一块时这段会丢。
 func TestExtractPublicReply_GarbledTurnKeepsFinalAnswer(t *testing.T) {
 	got := sharedClean(histMultiBlockReplies["garbled0927"])
-	if !strings.HasSuffix(got, "扫完说一声，栞娜马上验证真实状态（这次只报验证过的事实，不再抢跑喵）。") {
+	if !strings.HasSuffix(got, "扫完说一声，我马上验证真实状态（这次只报验证过的事实，不再抢跑喵）。") {
 		t.Fatalf("final step's public block must be delivered, got %q", got)
 	}
 	if strings.Contains(got, "上一个回复完全崩溃了") {
@@ -93,7 +93,7 @@ func TestPublicBlockSimilarityThresholds(t *testing.T) {
 	if set.isDuplicate(incidentAnswer) {
 		t.Fatal("filler and real answer must not be duplicates")
 	}
-	if !set.isDuplicate("容栞娜翻翻资料,这个梗栞娜不敢乱答!") {
+	if !set.isDuplicate("我先核对一下资料,这个先不猜!") {
 		t.Fatal("punctuation/width variant must be a duplicate")
 	}
 	// prefixVerdict 不能与 isDuplicate 矛盾：提前判定 distinct 的必须确实不是重复。
@@ -161,14 +161,14 @@ func TestOutputCleanStream_SecondBlockStreamsLive(t *testing.T) {
 	if got := f.Feed("<public>这个"); got != "" {
 		t.Fatalf("second block must be held until it is known not to be a duplicate, got %q", got)
 	}
-	if got := f.Feed("栞娜真不敢乱答……486、蕾姆老婆、青色断章"); got != "" {
+	if got := f.Feed("手册第三节写的是蓝色主题不是绿色"); got != "" {
 		t.Fatalf("still too short to decide, got %q", got)
 	}
-	rest := "这些栞娜都知道，但老吴栞娜没查到确切的出处，不敢瞎编一个糊弄大小姐（"
-	if got := f.Feed(rest); got != "\n\n这个栞娜真不敢乱答……486、蕾姆老婆、青色断章"+rest {
+	rest := "需要的话可以把小节号记下来，避免下次再把缓存当成当前值，演示环境每月重置（"
+	if got := f.Feed(rest); got != "\n\n这个手册第三节写的是蓝色主题不是绿色"+rest {
 		t.Fatalf("distinct block should be released once decided, got %q", got)
 	}
-	if got := f.Feed("是夺还编里的哪个角色吗？"); got != "是夺还编里的哪个角色吗？" {
+	if got := f.Feed("演示数据每月重置。"); got != "演示数据每月重置。" {
 		t.Fatalf("then streams live, got %q", got)
 	}
 	if got := f.Feed("</public>\n"); got != "" {
@@ -179,13 +179,12 @@ func TestOutputCleanStream_SecondBlockStreamsLive(t *testing.T) {
 	}
 }
 
-// incidentChunks 是 21:49 事故回复按增量切开的样子（过场话 → 工具 → 最终答复，result.Text 跨步骤拼接）。
+// incidentChunks 把「过场话 → 最终答复」按增量切开，result.Text 跨步骤拼接。
 func incidentChunks() []string {
 	return []string{
-		"<public>容栞娜翻翻资料，", "这个梗栞娜不敢乱答</public>",
-		"<public>这个栞娜真不敢乱答……\n\n486、蕾姆老婆、青色断章这些栞娜都知道，",
-		"但“老吴”栞娜没查到确切的出处，不敢瞎编一个糊弄大小姐（\n\n",
-		"是夺还编里的哪个角色吗？大小姐揭晓一下，栞娜记进小本本（</public>",
+		"<public>我先核对一下资料，", "这个先不猜</public>",
+		"<public>核对过了：手册第 3 节写的是蓝色主题，不是绿色。",
+		"需要的话我可以把小节号记下来。</public>",
 		"\n\n@@REPLY_CONTROL@@{\"send\": true}",
 	}
 }
@@ -224,8 +223,8 @@ func TestProcess_MultiBlockReplyPayload(t *testing.T) {
 				}
 				stage := NewLLMStage("llm", &chunkStreamProvider{chunks: c.chunks}, cfg, nil, nil)
 				env := core.NewEnvelope(core.Message{
-					ID: "m-1", TraceID: "t-1", BotID: "b1", Text: "老吴是什么梗", Source: source,
-					Channel: source, UserID: "76017910", ChatType: core.ChatPrivate,
+					ID: "m-1", TraceID: "t-1", BotID: "b1", Text: "蓝色主题写在哪一节", Source: source,
+					Channel: source, UserID: "demo-user", ChatType: core.ChatPrivate,
 				})
 				out, err := stage.Process(context.Background(), env)
 				if err != nil {
@@ -249,11 +248,10 @@ func TestProcess_MultiBlockReplyPayload(t *testing.T) {
 	}
 }
 
-// incidentTrailingPublic 是 2026-10-06 22:45 Telegram 事故形态：只有一个 <public>
-// 过场句，真正长答复写在 </public> 之后的裸文本里（非多区块路径）。
+// incidentTrailingPublic：只有一个 <public> 过场句，真正答复写在 </public> 之后的裸文本里。
 const (
-	incidentTrailingStub   = "等等，还有老吴 OS 这种东西？！栞娜这就去补课（"
-	incidentTrailingAnswer = "补完课了，这下整个体系串起来了（\n\n所谓**猫是代码生物**：B 站科普圈早就论证过，猫是屎山代码堆出来的"
+	incidentTrailingStub   = "等等，我先把手册翻开（"
+	incidentTrailingAnswer = "翻完了。手册第 3 节写的是蓝色主题，不是绿色。"
 )
 
 func TestExtractPublicReply_TrailingBareAnswerAfterPublic(t *testing.T) {
@@ -335,9 +333,9 @@ func TestProcessStream_StepTextConcatInsertsNewline(t *testing.T) {
 // 模型把 system prompt 里的记忆块整段复述进回复时，必须连内容一起剥掉——
 // 私聊记忆被带到群里后，只去标签（strayTagRe）会把正文原样留在回复里发出去。
 func TestCleanPublicBlock_StripsRecalledMemory(t *testing.T) {
-	in := "先说结论\n<recalled_memory>\nMEMORY (your personal notes)\n测试数据库 9.134.38.148:3306 用户 aidata\n</recalled_memory>\n再说细节"
+	in := "先说结论\n<recalled_memory>\nMEMORY (your personal notes)\n测试数据库 192.0.2.10:3306 用户 appuser\n</recalled_memory>\n再说细节"
 	got := cleanPublicBlock(in)
-	if strings.Contains(got, "9.134.38.148") || strings.Contains(got, "aidata") {
+	if strings.Contains(got, "192.0.2.10") || strings.Contains(got, "appuser") {
 		t.Fatalf("recalled memory leaked into outbound text: %q", got)
 	}
 	if strings.Contains(got, "recalled_memory") {
@@ -356,7 +354,7 @@ func TestOutputCleanStreamFilter_DropsRecalledMemory(t *testing.T) {
 	chunks := []string{
 		"<public>可见开头 ",
 		"<recalled_memory>",
-		"私聊里说的秘密 9.134.38.148",
+		"私聊里说的秘密 192.0.2.10",
 		"</recalled_memory>",
 		"可见结尾</public>",
 	}
@@ -365,7 +363,7 @@ func TestOutputCleanStreamFilter_DropsRecalledMemory(t *testing.T) {
 		got += f.Feed(c)
 	}
 	got += f.Flush()
-	if strings.Contains(got, "9.134.38.148") || strings.Contains(got, "recalled_memory") {
+	if strings.Contains(got, "192.0.2.10") || strings.Contains(got, "recalled_memory") {
 		t.Fatalf("stream leaked recalled memory: %q", got)
 	}
 	if !strings.Contains(got, "可见开头") || !strings.Contains(got, "可见结尾") {
