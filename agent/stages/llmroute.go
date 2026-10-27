@@ -441,25 +441,22 @@ func StripReplyControlBlock(text string) string {
 // 模型用它明确「只发这段」，门控据此丢弃其余所有内容（含 <internal> 心里话），彻底防泄漏。
 var publicTagRe = regexp.MustCompile(`(?is)<public>\s*(.*?)\s*</public>`)
 
-// internalOnlyRe 匹配「含 <internal> 私密标签但未用 <public> 标出公开区」的情形：
-// 完整对 <internal>...</internal>，或裸开标签 <internal>（未闭合/流式截断）。
-// 命中即视为模型泄露了私密意图却没给出公开出口 —— 整段 fail-closed 不发，
-// 避免把 internal 之外的文本也带出去（取巧逻辑：<internal> 是强私密信号，无 <public> 则整段沉）。
-var internalOnlyRe = regexp.MustCompile(`(?is)<internal>.*?</internal>|<internal>`)
-
 // strayTagRe 兜底剥离所有残留的结构化 / HTML 标签（含模型偶发的畸形形态）。
 //
-// 覆盖三类：
+// 覆盖四类：
 //  1. 正常标签：<public> </public> <internal> <long> <p> <ul> <li> <b> ...
 //  2. 畸形开标签（缺 <）：模型偶发把 <public> 写成 /public>，首条内存回复就裸发了 "/public>"。
 //  3. 嵌套/重复开标签：<public>\n<public>正文</public> 内层字面 <public> 被 publicTagRe 当正文捕获。
+//  4. 缺 '>' 的残缺闭标签：/internal、/public（后面不是标签名字符）。`>` 可有可无。
+//     `/internally`、`/publication` 不算。
 //
 // 必须兜底剥离的原因：Misskey / Telegram 不渲染裸 HTML，<p>/<ul>/<li> 会原样显示成奇怪标签；
-// 畸形 public 标签（/public>）同样会原样发出的帖子。与「不做自然语言兜底」原则不冲突——
+// 畸形 public 标签（/public> 或 /public）同样会原样出现在发出的帖子里。与「不做自然语言兜底」原则不冲突——
 // 这里清洗的是结构化标签文本，不是做语义解析。
 //
 // 注意：起始符限定为 `<` 或 `/`，避免误伤正文里 "dog>" 这类正常英文（要求标签有明显起始符号）。
-var strayTagRe = regexp.MustCompile(`(?is)(?:</?|/)[a-zA-Z][a-zA-Z0-9_-]*[^>]*>`)
+// 私有区域本身（从 `<internal` 一直到闭合或末尾）由 StripInternalTags / 路径 2 处理，不靠这里。
+var strayTagRe = regexp.MustCompile(`(?is)(?:</?|/)[a-zA-Z][a-zA-Z0-9_-]*[^>]*>|/(?:internal|public)\b`)
 
 // 裸思考泄漏检测：模型偶发不遵守 REPLY_CONTROL 协议（"NEVER write private thoughts as
 // bare text outside tags"），把内部推理/规划独白作为纯文本输出。这类文本若经 extractPublicReply
@@ -581,7 +578,14 @@ func extractPublicReplyDetailed(clean string) (text string, trailingLen int, ado
 			}
 			kept.add(c)
 		}
-		t := cleanPublicBlock(stripReplyControlSuffix(trailing))
+		rawTrail := stripReplyControlSuffix(trailing)
+		// 缺 '>' 且没有闭合的 `<internal` 是私有残片。清洗会把残片连同其后文一起拿掉，
+		// 若只看清洗结果，残片前面的半句会变成「正常 trailing」被并入公开回复。
+		// 这里按清洗前的原文拒收整段 trailing，与旧闸门看到残片就整段丢弃的行为一致。
+		if memory.HasUnclosedMalformedInternal(rawTrail) {
+			return kept.join(), len(strings.TrimSpace(rawTrail)), false
+		}
+		t := cleanPublicBlock(rawTrail)
 		trailingLen = len(strings.TrimSpace(t))
 		if trailingLen > 0 && significantTrailingPublic(t) && !kept.isDuplicate(t) {
 			kept.add(t)
@@ -589,8 +593,9 @@ func extractPublicReplyDetailed(clean string) (text string, trailingLen int, ado
 		}
 		return kept.join(), trailingLen, adopted
 	}
-	// 路径 2：含 <internal> 私密标签却没给 <public> 公开出口 → 整段不发。
-	if internalOnlyRe.MatchString(clean) {
+	// 路径 2：含 `<internal` 私密标签（`>` 可缺）却没给 <public> 公开出口 → 整段不发。
+	// 宽松开标签与 StripInternalTags 同一判定，避免缺 '>' 时掉进路径 3 把心里话原文发出去。
+	if memory.IndexLooseInternalOpen(clean) >= 0 {
 		return "", 0, false
 	}
 	// 路径 3：纯文本（无标签）→ 仍有概率含模型偶发的畸形标签（如 /public>）或 HTML，
