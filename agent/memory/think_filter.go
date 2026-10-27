@@ -42,23 +42,211 @@ func StripThinkTags(text string) string {
 	return strings.TrimSpace(cleaned)
 }
 
-// internalTagRe 匹配 <internal>...</internal> 块（回复控制协议要求的私有心里话标签）。
-// 标志与 thinkTagRe 一致：i 不区分大小写，s 使 . 匹配换行（心里话通常多行）。
-var internalTagRe = regexp.MustCompile(`(?is)<internal>\s*.*?\s*</internal>`)
-
-// unclosedInternalRe 匹配只有开标签没有闭标签的 <internal>（流式截断场景）。
-// 注意：调用方只会把「控制块之前的内容」传入，故 .*$ 不会吞掉 @@REPLY_CONTROL@@ 控制行。
-var unclosedInternalRe = regexp.MustCompile(`(?is)<internal>.*$`)
-
-// StripInternalTags 从文本中移除 <internal>...</internal> 私有心里话标签及其内容。
+// StripInternalTags 从文本中移除私有心里话及其标签。
 //
-// 出站链路用它确保模型写在 <internal> 里的判断、吐槽、内部备注永不外发——
-// 这是「同时输出心里话和想说的话」场景下防止心里话泄漏的关键一道。
-// 与 StripThinkTags 同范式：先去完整标签对，再去未闭合开标签，最后清理空白。
+// 出站链路用它确保模型写在 internal 里的判断、吐槽、内部备注永不外发。
+// 开标签认 `<internal`：紧跟着的 `>` 可有可无，但后面若还是标签名字符
+// （`<internalize`）则不是这个标签。区域一直延伸到下列三者中最先出现的一个：
+//   - `</internal>`（`>` 可有可无）
+//   - `/internal`（前面可以没有 `<`，后面的 `>` 也可有可无；后面若还是标签名
+//     字符则不算闭合，避免把 `/internally` 当成闭标签）
+//   - 文本末尾（流式截断 / 模型没写完）
 func StripInternalTags(text string) string {
-	cleaned := internalTagRe.ReplaceAllString(text, "")
-	cleaned = unclosedInternalRe.ReplaceAllString(cleaned, "")
-	return strings.TrimSpace(cleaned)
+	var b strings.Builder
+	b.Grow(len(text))
+	i := 0
+	for i < len(text) {
+		rel := IndexLooseInternalOpen(text[i:])
+		if rel < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		b.WriteString(text[i : i+rel])
+		end, _, ok := ConsumeLooseInternal(text[i+rel:])
+		if !ok {
+			b.WriteString(text[i:])
+			break
+		}
+		i += rel + end
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// IndexLooseInternalOpen 返回下一个宽松 `<internal` 开标签的字节下标；没有则 -1。
+// `>` 可缺。`<internalize` 这类更长的标签名不算。
+func IndexLooseInternalOpen(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '<' {
+			continue
+		}
+		if _, match, _ := LooseInternalOpenAt(s[i:]); match {
+			return i
+		}
+	}
+	return -1
+}
+
+// LooseInternalOpenAt 判断 s 是否以宽松 `<internal` 开标签开头。
+//
+//   - match：是开标签。n 是应消费的字节数（`<internal`，若紧跟 `>` 则一并算上）。
+//   - incomplete：s 只是 `<internal` 的真前缀，或者正好是 `<internal` 而下一个字节
+//     还未知（调用方在非流尾时应继续等待，下一个字节可能把名字接成 `<internalize`）。
+func LooseInternalOpenAt(s string) (n int, match bool, incomplete bool) {
+	const token = "<internal"
+	if !hasASCIIPrefixFold(s, token) {
+		if len(s) < len(token) && hasASCIIPrefixFold(token, s) {
+			return 0, false, true
+		}
+		return 0, false, false
+	}
+	if len(s) == len(token) {
+		return len(token), true, true
+	}
+	c := s[len(token)]
+	if c == '>' {
+		return len(token) + 1, true, false
+	}
+	if isTagNameByte(c) {
+		return 0, false, false
+	}
+	return len(token), true, false
+}
+
+// ConsumeLooseInternal 吃掉从 s 开头起的一整段宽松 internal 区域。
+// ok 为 false 表示 s 不是开标签。closed 为 false 表示没有闭合标记、区域一直到末尾
+// （此时 end == len(s)）。
+func ConsumeLooseInternal(s string) (end int, closed, ok bool) {
+	n, match, _ := LooseInternalOpenAt(s)
+	if !match {
+		return 0, false, false
+	}
+	if n > len(s) {
+		n = len(s)
+	}
+	idx, cn, found := nextLooseInternalClose(s[n:])
+	if !found {
+		return len(s), false, true
+	}
+	return n + idx + cn, true, true
+}
+
+// NextLooseInternalClose 在 s 中查找下一个 internal 闭合标记。
+// 命中时 idx:n 覆盖可选的前导 `<` 与可选的尾随 `>`。
+// 非流尾且缓冲区正好停在 `/internal` 或 `</internal`（下一个字节未知）时，
+// hold 是需要扣住的后缀长度，idx 为 -1。
+func NextLooseInternalClose(s string, atEOF bool) (idx, n, hold int) {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '/' || !hasASCIIPrefixFold(s[i:], "/internal") {
+			continue
+		}
+		end := i + len("/internal")
+		if end < len(s) && isTagNameByte(s[end]) {
+			continue
+		}
+		start := i
+		if start > 0 && s[start-1] == '<' {
+			start = i - 1
+		}
+		if end == len(s) && !atEOF {
+			return -1, 0, len(s) - start
+		}
+		length := end - start
+		if end < len(s) && s[end] == '>' {
+			length++
+		}
+		return start, length, 0
+	}
+	if !atEOF {
+		return -1, 0, looseClosePrefixHold(s)
+	}
+	return -1, 0, 0
+}
+
+func nextLooseInternalClose(s string) (idx, n int, ok bool) {
+	idx, n, hold := NextLooseInternalClose(s, true)
+	if hold != 0 || idx < 0 {
+		return 0, 0, false
+	}
+	return idx, n, true
+}
+
+// looseClosePrefixHold 返回 s 的最长后缀长度，该后缀是 `</internal` 或 `/internal` 的真前缀。
+func looseClosePrefixHold(s string) int {
+	best := 0
+	for _, nd := range []string{"</internal", "/internal"} {
+		maxK := len(nd) - 1
+		if maxK > len(s) {
+			maxK = len(s)
+		}
+		for k := maxK; k > best; k-- {
+			if hasASCIIPrefixFold(nd, s[len(s)-k:]) {
+				best = k
+				break
+			}
+		}
+	}
+	return best
+}
+
+func hasASCIIPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		c := s[i]
+		p := prefix[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if p >= 'A' && p <= 'Z' {
+			p += 'a' - 'A'
+		}
+		if c != p {
+			return false
+		}
+	}
+	return true
+}
+
+func isTagNameByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+}
+
+// MalformedInternalOpen 报告 s 是否以缺 '>' 的 `<internal` 开头。
+// `<internal>`（有 '>'）与 `<internalize` 都不是。
+func MalformedInternalOpen(s string) bool {
+	n, match, _ := LooseInternalOpenAt(s)
+	if !match || n == 0 || n > len(s) {
+		return false
+	}
+	return s[n-1] != '>'
+}
+
+// HasUnclosedMalformedInternal 报告 s 里是否有「缺 '>' 且直到末尾都没闭合」的 internal 区。
+// 成对的 `<internal>…</internal>`、以及已经用 `/internal` 闭合的宽松区域，都不算。
+// 供 </public> 之后的 trailing 闸门使用：这种残片以前会整段留下并被判定为私有，
+// 不能在剥掉残片后把残片前面的半句当成正常答复放出去。
+func HasUnclosedMalformedInternal(s string) bool {
+	rest := s
+	for len(rest) > 0 {
+		rel := IndexLooseInternalOpen(rest)
+		if rel < 0 {
+			return false
+		}
+		seg := rest[rel:]
+		end, closed, ok := ConsumeLooseInternal(seg)
+		if !ok {
+			return false
+		}
+		if MalformedInternalOpen(seg) && !closed {
+			return true
+		}
+		if !closed || end <= 0 || end > len(seg) {
+			return false
+		}
+		rest = seg[end:]
+	}
+	return false
 }
 
 // 召回块成对标签：注入 system prompt 时包裹整块记忆（见 snapshot.renderBlock）。
