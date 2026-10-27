@@ -522,7 +522,7 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 }
 
 // weightInWindowRelevance 就地抬升「与当前话题相关」的主通道条目的有效
-// importance：eff = importance + weight * 归一化相关性。
+// importance：eff = importance + weight * 相关性（原始分，见 RelevanceScores）。
 //
 // 只抬不压：相关性为 0 的条目保持原 importance，配置权重为 0 或 Query 为空
 // 时整个函数直接返回，排序退化为旧行为。
@@ -537,7 +537,7 @@ func (s *Snapshot) weightInWindowRelevance(entries []Entry) {
 		return
 	}
 
-	scores := NormalizedRelevanceScores(s.config.Query, entries)
+	scores := RelevanceScores(s.config.Query, entries)
 	boosted := 0
 	for i := range entries {
 		if scores[i] <= 0 {

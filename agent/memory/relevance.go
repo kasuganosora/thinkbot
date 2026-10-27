@@ -128,9 +128,11 @@ const (
 	// yak_log_json…」相关性最高，importance 0.658 排在第 9~14 名，而 2457
 	// 字符预算只装得下约 10 条 × 240 字符——它恰好卡在边界外，注入块里没有它。
 	//
-	// 取 0.6（与 DefaultImportantRelevanceWeight 同值）+ 归一化：让「本轮最相关」
-	// 稳定跨过一到两档 importance 差（0.658+0.6 > 0.8），同时相关性接近时
-	// 仍由 importance 定序，不推翻 2026-09-24 调好的那套阈值。
+	// 取 0.6（与 DefaultImportantRelevanceWeight 同值）：强匹配
+	// （相关性 0.8+）能拿到 ≈0.5 的加成，稳定跨过一到两档 importance 差
+	// （0.658+0.5 > 0.8），同时相关性接近时仍由 importance 定序，
+	// 不推翻 2026-09-24 调好的那套阈值。加成用的是**原始**相关性分
+	// （见 RelevanceScores 的实测说明：归一化会把噪声也拉满）。
 	DefaultRelevanceInWindowWeight = 0.6
 	// maxSortImportance 参与排序的 importance 上限。
 	//
@@ -273,9 +275,7 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 		return nil
 	}
 
-	tokenSets := tokenizeAll(candidates)
-	idf := buildIDF(tokenSets)
-
+	scores := rawRelevanceScores(q, candidates)
 	scored := make([]ScoredEntry, 0, len(candidates))
 	for i, e := range candidates {
 		if e.ID != "" {
@@ -284,11 +284,10 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 			}
 		}
 
-		score := idfScore(q, tokenSets[i], idf)
-		if score <= 0 {
+		if scores[i] <= 0 {
 			continue
 		}
-		scored = append(scored, ScoredEntry{Entry: e, Score: score})
+		scored = append(scored, ScoredEntry{Entry: e, Score: scores[i]})
 	}
 
 	if len(scored) == 0 {
@@ -305,43 +304,47 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 	return scored
 }
 
-// NormalizedRelevanceScores 给每条候选算出与 query 的相关性，归一化到
-// 「池内最高分 = 1.0」后按原顺序返回等长切片；无 token 重合者为 0。
+// RelevanceScores 给每条候选算出与 query 的相关性（IDF 加权的 Ochiai，
+// 0.0~1.0），按原顺序返回等长切片；无 token 重合者为 0。
 //
 // 与 SelectRelevant 的区别：SelectRelevant 只返回分数 > 0 的 topK 条，用于
-// 「从窗口外再捞几条」；这里要保留**全部**条目（含 0 分）的分数，用于
+// 「从窗口外再捞几条」；这里保留**全部**条目（含 0 分）的分数，用于
 // 「给已经在候选池里的条目重新排序」——主通道条目此前完全没有这一路信号。
 //
-// 为什么必须归一化（与 DefaultImportantRelevanceWeight 同口径，2026-09-24 实测）：
-// 原始相关性分被 Ochiai 的长度归一压得很小，真库 100~300 字的记忆上只有
-// 0.05~0.3；直接乘固定权重根本压不过 0.95 的无关条目。归一化后「本轮最相关的
-// 那条」稳定拿到满额加成，完全不相关的条目加成恒为 0。
-func NormalizedRelevanceScores(query string, candidates []Entry) []float64 {
+// ⚠️ 用**原始分**，不要归一化到「池内最高分 = 1」（2026-10-27 真实库 22 条
+// query 实测，这个坑踩过一次）：归一化会把「根本没有相关记忆」的噪声也拉满。
+// 实测池内最高分的分布——
+//
+//	相关 query：1.000 1.000 1.000 1.000 0.979 0.942 0.830 0.614 0.561 0.415
+//	无关 query：0.395 0.345 0.323 0.280 0.257 0.199 0 0 0 0 0 0
+//
+// 两类在 0.4 附近重叠（相关最低 0.415 vs 无关最高 0.395），任何固定阈值都
+// 分不开。归一化后无关 query 的噪声条目照样拿到满额加成，把真正重要的记忆
+// 顶下去——比不加还糟。用原始分则加成与信号强度成正比：噪声最多拿到
+// 0.6×0.395≈0.24，真匹配拿到 0.6×0.9≈0.54，序由信号本身决定，不需要碰运气的
+// 阈值；信号本来就弱的语料（相关性分只有 0.05~0.3）自然只拿到很小的加成，
+// 属于「没帮上也没帮倒忙」的安全退化。
+func RelevanceScores(query string, candidates []Entry) []float64 {
 	scores := make([]float64, len(candidates))
 	if len(candidates) == 0 || strings.TrimSpace(query) == "" {
 		return scores
 	}
-
 	q := relevanceTokens(query)
 	if len(q) == 0 {
 		return scores
 	}
+	return rawRelevanceScores(q, candidates)
+}
 
+// rawRelevanceScores 是 RelevanceScores / SelectRelevant 共用的打分内核：
+// 批量分词 → 建 IDF → 逐条 idfScore。两条调用路径必须同一口径，否则
+// 「窗口外捞回来」和「窗口内加权」会用两套分数排序，互相打架。
+func rawRelevanceScores(q map[string]struct{}, candidates []Entry) []float64 {
 	tokenSets := tokenizeAll(candidates)
 	idf := buildIDF(tokenSets)
-
-	max := 0.0
+	scores := make([]float64, len(candidates))
 	for i := range candidates {
 		scores[i] = idfScore(q, tokenSets[i], idf)
-		if scores[i] > max {
-			max = scores[i]
-		}
-	}
-	if max <= 0 {
-		return scores
-	}
-	for i := range scores {
-		scores[i] /= max
 	}
 	return scores
 }
