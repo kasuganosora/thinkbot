@@ -86,10 +86,10 @@ func TestRecallStage_UnionsLinkedChannels(t *testing.T) {
 	repo := memory.NewMemoryRepository()
 	botID := "bot-link"
 
-	// 私聊沉淀的事实：正式环境日志主题。群里提问要能调到它。
+	// 私聊里存过的环境事实。群里提问时，声明了关联会话就要能召回。
 	if err := repo.Append(ctx, memory.Entry{
-		Scope:      memory.ChannelScope("wecom:dm:T72340005A"),
-		Content:    "正式环境日志主题为 yak_log_json",
+		Scope:      memory.ChannelScope("wecom:dm:demo-user"),
+		Content:    "演示环境日志主题为 demo_events",
 		Category:   "fact",
 		Importance: 0.8,
 	}); err != nil {
@@ -109,23 +109,23 @@ func TestRecallStage_UnionsLinkedChannels(t *testing.T) {
 
 	// 未声明关联会话：调不到私聊内容（改动前的行为）
 	plain := core.NewEnvelope(core.Message{
-		ID: "r3", BotID: botID, Channel: "wecom:chat:g1", UserID: "T72340005A",
-		Text: "查一下正式环境的日志",
+		ID: "r3", BotID: botID, Channel: "wecom:chat:g1", UserID: "demo-user",
+		Text: "查一下演示环境的日志",
 	})
 	if _, err := stage.Process(ctx, plain); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := plain.Get(core.KVMemoryRecall)
-	if s, _ := before.(string); strings.Contains(s, "yak_log_json") {
+	if s, _ := before.(string); strings.Contains(s, "demo_events") {
 		t.Fatalf("without linked channels the DM fact must not appear, got %q", s)
 	}
 
 	// 声明关联会话后：私聊事实进入召回
 	linked := core.NewEnvelope(core.Message{
-		ID: "r4", BotID: botID, Channel: "wecom:chat:g1", UserID: "T72340005A",
-		Text: "查一下正式环境的日志",
+		ID: "r4", BotID: botID, Channel: "wecom:chat:g1", UserID: "demo-user",
+		Text: "查一下演示环境的日志",
 		Metadata: map[string]any{
-			core.MetaMemoryLinkedChannels: []string{"wecom:dm:T72340005A"},
+			core.MetaMemoryLinkedChannels: []string{"wecom:dm:demo-user"},
 		},
 	})
 	if _, err := stage.Process(ctx, linked); err != nil {
@@ -136,8 +136,52 @@ func TestRecallStage_UnionsLinkedChannels(t *testing.T) {
 		t.Fatal("KVMemoryRecall not set")
 	}
 	text, _ := after.(string)
-	if !strings.Contains(text, "yak_log_json") {
+	if !strings.Contains(text, "demo_events") {
 		t.Fatalf("linked channel memory must be recalled, got %q", text)
+	}
+}
+
+// TestRecallStage_InWindowBoostWithoutBeyondWindowRecall 关掉窗口外召回时，
+// 当前输入仍要作为 query，否则窗口内加权一起失效。
+func TestRecallStage_InWindowBoostWithoutBeyondWindowRecall(t *testing.T) {
+	ctx := context.Background()
+	repo := memory.NewMemoryRepository()
+	ch := "web-demo"
+	topics := []string{"周会结论", "磁盘巡检", "发布窗口", "告警统计", "依赖升级", "容量评估", "值班安排",
+		"代码评审", "压测结果", "灰度比例", "回滚预案", "监控覆盖", "权限梳理", "工单流转",
+		"文档归档", "培训计划", "招聘进度", "预算核算", "合规检查", "资产盘点"}
+	for i, topic := range topics {
+		if err := repo.Append(ctx, memory.Entry{
+			Scope:      memory.ChannelScope(ch),
+			Content:    topic + "：" + strings.Repeat("无关细节", 40),
+			Importance: 0.90,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = i
+	}
+	if err := repo.Append(ctx, memory.Entry{
+		Scope:      memory.ChannelScope(ch),
+		Content:    "演示环境日志主题为 demo_events，可用日志通道查询",
+		Importance: 0.658,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stage := NewRecallStage("memory-recall", repo, nil, zap.NewNop().Sugar())
+	env := core.NewEnvelope(core.Message{
+		ID: "r-inwindow", Channel: ch, Text: "演示环境 日志主题 在哪查",
+	})
+	if _, err := stage.Process(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := env.Get(core.KVMemoryRecall)
+	s, _ := text.(string)
+	if !strings.Contains(s, "demo_events") {
+		t.Fatalf("in-window fact must survive without beyond-window recall, got %q", s)
+	}
+	if strings.Contains(s, "relevance") {
+		t.Fatalf("injected block must not include relevance scores, got %q", s)
 	}
 }
 

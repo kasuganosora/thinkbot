@@ -105,9 +105,9 @@ type SnapshotConfig struct {
 	RelevanceTopK int
 	// ImportantTopK 高价值保底通道最多补足的条数（跨 scope 合计，默认 5）。
 	//
-	// 时间窗口再大也覆盖不到的跨月记忆（本机 misskey scope 里 importance 最高的
-	// 一批排在第 2400 位之后，09-19 的 50 条窗口完全看不到它们），
-	// 只能靠 importance 阈值直接捞。实测这类条目只有个位数，常驻成本可忽略。
+	// 时间窗口再大也覆盖不到的跨月记忆（高分条目可能排在两千位之后，
+	// 最近几十条的窗口完全看不到它们），
+	// 只能靠 importance 阈值直接捞。这类条目通常很少，常驻成本可忽略。
 	ImportantTopK int
 	// ImportantMinImportance 高价值保底的 importance 阈值（默认 0.7）。
 	ImportantMinImportance float64
@@ -116,7 +116,7 @@ type SnapshotConfig struct {
 	//
 	// 主通道此前只按 importance 降序排序，完全不参与相关性打分，导致「就在
 	// 窗口里、与当前话题高度相关、但 importance 排名靠后」的记忆被无关的高分
-	// 条目挤出字符预算（2026-10-27 真实库复测详见该常量的注释）。
+	// 条目挤出字符预算（见 DefaultRelevanceInWindowWeight）。
 	// 设 0 即回到「纯按 importance 排」的旧行为。
 	RelevanceInWindowWeight float64
 	// ImportantRelevanceWeight 保底通道里相关性相对 importance 的权重（默认 0.6）。
@@ -127,9 +127,9 @@ type SnapshotConfig struct {
 	ImportantRelevanceWeight float64
 	// BeyondWindowRetriever 窗口外补充通道专用的检索源（可选，默认用主检索器）。
 	//
-	// 存在理由（2026-09-24 实测）：本机 importance 最高的一批记忆是 tier=0，
+	// 存在理由：importance 最高的一批记忆可能是 tier=0，
 	// 而主检索链路只含 L1/L3/memory_entries，这批条目不在候选集里，排序再怎么
-	// 改也捞不回来。L0 是未升华的原始事件流（2000+ 条），不能并入主通道
+	// 改也捞不回来。L0 是未升华的原始事件流，不能并入主通道
 	// （会把碎碎念灌进 prompt），因此单独装配给补充通道使用：该通道默认关闭，
 	// 且只取 importance 达标 + 与当前话题相关的少数几条。
 	BeyondWindowRetriever Retriever
@@ -139,17 +139,16 @@ type SnapshotConfig struct {
 	// MaxRenderedEntryChars 注入块里单条记忆的字符上限（默认 240，常开）。
 	//
 	// 作用于**主通道**（补充通道另有 RecalledMaxChars），属于行为变更：开启后
-	// 超过上限 renderedSkipFactor 倍的条目会被丢弃（本机是 14808/15314 字符的
-	// 完整档案，它们此前单条就吃满预算，导致注入块只剩 1 条残片）。
-	// 2026-09-24 由灰度开关转常开：本机实测注入从 1 条档案残片变成 10 条有效记忆
-	// （叠加下面的近重复折叠后是 18 条）。
+	// 超过上限 renderedSkipFactor 倍的条目会被丢弃（上万字档案此前单条就吃满预算，
+	// 导致注入块只剩 1 条残片）。常开后，档案残片让出名额，有效记忆才能进来
+	// （再叠加近重复折叠，名额还会再多几条）。
 	// 传负数可显式关闭（仅测试/对照用）。
 	// 详见 relevance.go 里 DefaultRenderedMaxChars 的实测说明。
 	MaxRenderedEntryChars int
 	// NearDuplicateThreshold 近重复折叠的相似度阈值（默认 0.7，常开）。
 	//
 	// 同一事件常被记成措辞略不同的多条，importance 相近时会同时挤进注入块，
-	// 把其它记忆挤出去（实测「变压器事件」×4、「@umeboshicc 档案」×3）。
+	// 把其它记忆挤出去（同一事件可以有好几个措辞略不同的版本）。
 	// 折叠后每组只留内容更全的一条（importance 取组内最高），腾出的名额留给别的记忆。
 	// 传负数可显式关闭（仅测试/对照用）。
 	// 详见 relevance.go 里 DefaultNearDuplicateThreshold 的实测说明。
@@ -170,10 +169,11 @@ type SnapshotConfig struct {
 	// 传空 slice 可显式关闭（仅测试/对照用）。
 	PinnedCategories []string
 	// MaxPinnedEntries 约束类记忆的置顶名额上限（默认 6）。
-	// 本机约束类条目有 89 条，必须限量，否则会反过来压死主通道。
+	// 约束类条目可以有几十条，必须限量，否则会反过来压死主通道。
 	MaxPinnedEntries int
 	// Query 当前轮次的输入文本，用于相关性打分。由调用方（如 RecallStage）
-	// 在每轮构建快照时注入；为空时相关性通道自动跳过。
+	// 在每轮构建快照时注入。窗口外召回关闭时也要注入，否则窗口内加权不会跑。
+	// 为空时两条相关性路径都跳过。
 	Query string
 }
 
@@ -455,26 +455,23 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	}
 
 	// 窗口外补充通道：相关性召回 + 高价值保底。默认关闭（RelevanceRecall=false），
-	// 关闭时不产生任何额外检索，行为与改动前完全一致。
+	// 关闭时不产生任何额外检索。gate 必须在窗口内加权之前算，否则补充条目
+	// 会被抬到「已经加过相关性的主通道最高分」之上，反过来压掉主通道。
+	var recalled []Entry
 	if extra := s.recallBeyondWindow(ctx, retriever, scopes, allEntries); len(extra) > 0 {
-		allEntries = append(allEntries, extra...)
+		recalled = extra
 	}
-	allEntries = FilterRecall(allEntries)
-
-	// 主通道相关性加权：给时间窗口内的条目也叠加相关性信号。
-	//
-	// 必须放在 recallBeyondWindow **之后**：补充通道的抬升基准 gate 取的是
-	// 主通道最高 importance，若先加权再算 gate，补充条目会被抬得更高，
-	// 反过来压掉主通道（与 capRecalledBudget 的意图相反）。
-	s.weightInWindowRelevance(allEntries)
+	// 窗口内加权不能看到 recalled：那些条目已经过 boostRelevance。
+	// 再乘一次相关性就是同一信号加两遍。
+	allEntries = assembleSnapshotEntries(allEntries, recalled, s.weightInWindowRelevance)
 
 	// 候选池粗筛：按重要性降序保留前 MaxEntries*candidatePoolFactor 条，
 	// 真正的「注入条数硬上限」由 renderBlock 的 MaxEntries 执行。
 	//
 	// 这里**不能**直接截到 MaxEntries（2026-09-24 实测修正）：renderBlock 会先
 	// 丢弃超长条目、再折叠近重复，候选池若只有 MaxEntries 条，那一批被丢掉的
-	// 名额就没有替补——本机 20 条候选里 14 条是 >960 字的档案，处理完只剩 6 条，
-	// 折叠后再减到 3 条，记忆块只用了 732/2200 字符，去重反而让注入更空。
+	// 名额就没有替补——若 20 条候选里大半是超长档案，处理完可能只剩几条，
+	// 折叠后再减，记忆块用不满预算，去重反而让注入更空。
 	// 放大候选池后，被丢弃/折叠腾出的预算才能被后面的条目填上。
 	poolLimit := s.config.MaxEntries * candidatePoolFactor
 	if poolLimit < recentPerScope {
@@ -522,7 +519,8 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 }
 
 // weightInWindowRelevance 就地抬升「与当前话题相关」的主通道条目的有效
-// importance：eff = importance + weight * 相关性（原始分，见 RelevanceScores）。
+// importance：eff = importance + weight * 门控后的原始相关性。
+// 调用方只能传入窗口内条目。窗口外补充条目已经由 boostRelevance 抬过一次。
 //
 // 只抬不压：相关性为 0 的条目保持原 importance，配置权重为 0 或 Query 为空
 // 时整个函数直接返回，排序退化为旧行为。
@@ -537,7 +535,7 @@ func (s *Snapshot) weightInWindowRelevance(entries []Entry) {
 		return
 	}
 
-	scores := RelevanceScores(s.config.Query, entries)
+	scores := gatedRelevanceScores(s.config.Query, entries)
 	boosted := 0
 	for i := range entries {
 		if scores[i] <= 0 {
@@ -564,11 +562,9 @@ func (s *Snapshot) weightInWindowRelevance(entries []Entry) {
 //  1. 相关性：与当前输入话题相关、却落在时间窗口外的历史记忆；
 //  2. 高价值：importance 达阈值的长期事实/偏好，无论多老。
 //
-// 存在理由（实测 2026-09-24，本机 misskey timeline scope）：
-// 该 scope 共 2472 条，最近 50 条全部落在同一天；300 条覆盖 4 天、1000 条覆盖
-// 9 天。全表 importance 最高的 7 条（0.800，用户对 bot 行为的偏好、长期人设）
-// 全部在 08-13/08-14，排在第 2400 位之后——时间窗口再大也捞不到，
-// 这正是必须同时保留「高价值保底」通道的原因。
+// 存在理由：一个繁忙 scope 可以有两千多条记忆，最近 50 条可能全部落在同一天，
+// 放大到数百或一千条仍盖不住全表。importance 最高的长期偏好可能排在两千位之后
+// ——时间窗口再大也捞不到，这正是必须同时保留「高价值保底」通道的原因。
 //
 // 两类条目都会经 boostRelevance 抬升有效 importance 到主通道入选门槛之上，
 // 否则会在后续「按 importance 降序截断」与「字符预算逐条截断」里被二次挤掉。
@@ -604,8 +600,8 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 			candidates = append(candidates, wider...)
 		}
 		// 先按长度过滤再打分：超过补充通道封顶门槛的条目最终会被 capRecalled
-		// 丢弃，为它们做分词纯属浪费。本机有 14808/15314 字符的档案条目，
-		// 不过滤时每轮快照要多花约 380ms（基线 16ms → 开启后 400ms）。
+		// 丢弃，为它们做分词纯属浪费。上万字档案不过滤时，
+		// 每轮快照会从十几毫秒涨到数百毫秒。
 		candidates = filterOversized(candidates, s.config.RecalledMaxChars)
 		candidateCount = len(candidates)
 
@@ -672,6 +668,20 @@ func (s *Snapshot) recallBeyondWindow(ctx context.Context, retriever Retriever, 
 	return recalled
 }
 
+// assembleSnapshotEntries 先对窗口内条目做相关性加权，再接上窗口外补充。
+// boost 看不到 recalled，避免 boostRelevance 之后再加一次相关性。
+func assembleSnapshotEntries(inWindow, recalled []Entry, boost func([]Entry)) []Entry {
+	inWindow = FilterRecall(inWindow)
+	if boost != nil && len(inWindow) > 0 {
+		boost(inWindow)
+	}
+	if len(recalled) == 0 {
+		return inWindow
+	}
+	recalled = FilterRecall(recalled)
+	return append(inWindow, recalled...)
+}
+
 // IsCaptured 返回快照是否已初始化。
 func (s *Snapshot) IsCaptured() bool {
 	s.mu.RLock()
@@ -732,6 +742,7 @@ func (s *Snapshot) renderBlock(target string, entries []Entry, stats MemoryStats
 
 	// 按重要性降序稳定排序：固定的字符预算优先留给高价值记忆，而非最近的 N 条。
 	// 同等重要性保持原有顺序（约=时间倒序），不破坏召回的时效性直觉。
+	// importance 和相关性分都只是排序键，不要写进注入块。
 	sort.SliceStable(entries, func(i, j int) bool {
 		return entries[i].Importance > entries[j].Importance
 	})
@@ -741,8 +752,8 @@ func (s *Snapshot) renderBlock(target string, entries []Entry, stats MemoryStats
 	//
 	// 分两步且中间夹着去重，是因为去重要在**截断前**才有意义（截断后所有长
 	// 条目都是等长残片，既算不准相似度也分不出哪条信息更全）；而先剔除注定
-	// 被丢弃的巨型条目，能避免为它们做分词——本机有 14808/15314 字符的档案，
-	// 不过滤时每轮快照要多花几百毫秒。
+	// 被丢弃的巨型条目，能避免为它们做分词——上万字档案不过滤时，
+	// 每轮快照要多花几百毫秒。
 	var oversizedDropped int
 	if s.config.MaxRenderedEntryChars > 0 {
 		before := len(entries)

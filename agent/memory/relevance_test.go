@@ -129,11 +129,10 @@ func TestRelevanceGateAndBoost(t *testing.T) {
 
 // TestSnapshot_RelevanceRecallBringsBackOldMemory 是本次修改的核心回归：
 //
-// 复现 2026-09-24 的真实诊断——主 scope 记忆量远超 Recent 窗口（实测 2472 条 vs 50），
-// importance 最高的老记忆全部落在窗口外，导致永不浮现。
+// 主 scope 记忆量远超 Recent 窗口时，高价值老记忆全部落在窗口外，导致永不浮现。
 // 关闭相关性通道时老记忆不出现；开启后必须被补回。
 func TestSnapshot_RelevanceRecallBringsBackOldMemory(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 
 	var entries []Entry
 	for i := 0; i < 100; i++ {
@@ -184,10 +183,9 @@ func TestSnapshot_RelevanceRecallBringsBackOldMemory(t *testing.T) {
 
 // TestSnapshot_ImportantMemoryBeyondAnyWindow 复现「时间窗口再大也捞不到」的场景：
 //
-// 本机 misskey scope 里 importance 最高的 7 条排在 2400 位之后，1000 条窗口同样
-// 覆盖不到——只有按 importance 直接取的保底通道能救回它们。
+// 高价值记忆排在第 2900 位，时间窗口覆盖不到——只有按 importance 直接取的保底通道能救回它们。
 func TestSnapshot_ImportantMemoryBeyondAnyWindow(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 
 	// 3000 条：索引越大越老。高价值记忆放在索引 2900（远超任何合理时间窗口）。
 	var entries []Entry
@@ -202,7 +200,7 @@ func TestSnapshot_ImportantMemoryBeyondAnyWindow(t *testing.T) {
 	entries[2900] = Entry{
 		ID:         "core-preference",
 		Scope:      scope,
-		Content:    "@luna 讨厌反复回复的 bot",
+		Content:    "用户讨厌反复回复的 bot",
 		Importance: 0.80,
 	}
 
@@ -245,14 +243,12 @@ func TestSnapshot_RelevanceRecallOffKeepsBaseline(t *testing.T) {
 
 // TestSelectImportant_TopEntryNotLostToScanOrder 复现「OrderAsc + 小 Limit」的截断退化。
 //
-// 本机实测：importance>=0.7 共 641 条，其中 1.00 分条目按创建时间升序排在第
-// 516/573 位。用 OrderAsc + Limit(200) 扫描时只有最早的 200 条进入选择范围，
-// 这些最高分条目会被永久漏掉，抓到的反而是最早创建的人格设定条目。
-// 正确行为：排序在内存完成，与创建顺序无关。
+// 高分条目若按创建时间排在扫描窗口之外，OrderAsc + 小 Limit 会永久漏掉它们，
+// 抓到的反而是最早创建的档案。正确行为：排序在内存完成，与创建顺序无关。
 func TestSelectImportant_TopEntryNotLostToScanOrder(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 
-	// 全部满足阈值，模拟本机 641 条的规模（> 旧的 importantScanLimit=200）。
+	// 全部满足阈值，规模大于旧的 importantScanLimit=200。
 	total := 300
 	var entries []Entry
 	for i := 0; i < total; i++ {
@@ -290,18 +286,17 @@ func TestSelectImportant_TopEntryNotLostToScanOrder(t *testing.T) {
 
 // TestSelectImportant_RelevanceBeatsRawImportance 复现「名额被无关的高分条目占满」。
 //
-// 本机实测：保底通道按纯 importance 取时，名额恒定被同一批 0.95 条目占满
-// （心理状态汇总等，与当轮话题无关），而 0.800 的长期事实（用户对 bot 行为的
-// 偏好）一条都进不来。加入相关性后，话题相关的老记忆应能反超。
+// 保底通道按纯 importance 取时，名额会被无关的高分条目占满，
+// 分数更低但与当轮话题相关的长期事实进不来。加入相关性后应能反超。
 func TestSelectImportant_RelevanceBeatsRawImportance(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 	entries := []Entry{
-		{ID: "unrelated-095", Scope: scope, Content: "用户的心理状态汇总：最近情绪起伏较大，需要注意休息", Importance: 0.95},
-		{ID: "unrelated-094", Scope: scope, Content: "今天讨论了一下晚饭吃什么，最后决定点外卖", Importance: 0.94},
-		{ID: "target-080", Scope: scope, Content: "@luna gets annoyed by bots that reply repeatedly", Importance: 0.80},
+		{ID: "unrelated-095", Scope: scope, Content: "库存盘点：上周耗材还够用，无需补货", Importance: 0.95},
+		{ID: "unrelated-094", Scope: scope, Content: "仓库周报已经归档，下周一再看构建耗时", Importance: 0.94},
+		{ID: "target-080", Scope: scope, Content: "用户讨厌什么样的机器人：反复回复同一件事会让人厌烦", Importance: 0.80},
 	}
 
-	query := "luna 讨厌什么样的 bot，反复回复会怎样"
+	query := "用户讨厌什么样的机器人，反复回复会怎样"
 	got := SelectImportant(context.Background(), &fakeRetriever{entries: entries},
 		[]Scope{scope}, nil, query, 0.7, DefaultImportantRelevanceWeight, 1, DefaultRecalledMaxChars)
 
@@ -326,9 +321,9 @@ func TestSelectImportant_RelevanceBeatsRawImportance(t *testing.T) {
 // TestSelectImportant_FallsBackToImportanceWithoutQuery 无 query 时行为必须与
 // 改动前一致（纯 importance 降序），即相关性只做增量、不改变无输入时的结果。
 func TestSelectImportant_FallsBackToImportanceWithoutQuery(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 	entries := []Entry{
-		{ID: "a", Scope: scope, Content: "关于鹦鹉的饲养经验分享", Importance: 0.75},
+		{ID: "a", Scope: scope, Content: "关于演示环境的巡检记录", Importance: 0.75},
 		{ID: "b", Scope: scope, Content: "用户的核心偏好：讨厌反复回复的 bot", Importance: 0.90},
 	}
 
@@ -341,8 +336,7 @@ func TestSelectImportant_FallsBackToImportanceWithoutQuery(t *testing.T) {
 
 // TestCapRecalled_SkipsOverlongInsteadOfTruncating 保证超长条目被丢弃而非截成残句。
 //
-// 本机实测会命中「【栞娜人格设定】」(701/951 字符) 与「luna 完整档案」(2287 字符)，
-// 截断到 240 字符后注入 prompt 的是断头的人格定义，比不注入更糟。
+// 人格设定和上万字档案截断到 240 字符后是断头定义，比不注入更糟。
 func TestCapRecalled_SkipsOverlongInsteadOfTruncating(t *testing.T) {
 	got := capRecalled([]Entry{
 		{ID: "persona", Content: strings.Repeat("栞", 1000)},
@@ -376,8 +370,8 @@ func TestCapRecalled_SkipsOverlongInsteadOfTruncating(t *testing.T) {
 // TestSnapshot_ImportantChannelSkipsPersonaSizedMemories 端到端：人格设定/档案量级的
 // 高 importance 记忆不该被补进注入块，而正常长度的高价值记忆仍要能救回。
 func TestSnapshot_ImportantChannelSkipsPersonaSizedMemories(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
-	persona := "【栞娜（Kanna）人格设定】" + strings.Repeat("身份：女仆Bot，服务于大小姐露娜。", 40)
+	scope := ChannelScope("demo:timeline")
+	persona := "【演示人格设定】" + strings.Repeat("身份说明占位，不注入残片。", 40)
 
 	// 先用 60 条低分填充占满主通道的 Recent(50) 窗口，
 	// 确保两条高价值记忆只能经由补充通道进入（否则测不到补充通道的行为）。
@@ -392,7 +386,7 @@ func TestSnapshot_ImportantChannelSkipsPersonaSizedMemories(t *testing.T) {
 	}
 	entries = append(entries,
 		Entry{ID: "persona-1", Scope: scope, Content: persona, Importance: 0.95},
-		Entry{ID: "core-pref", Scope: scope, Content: "@luna 讨厌反复回复的 bot", Importance: 0.90},
+		Entry{ID: "core-pref", Scope: scope, Content: "用户讨厌反复回复的 bot", Importance: 0.90},
 	)
 
 	cfg := DefaultSnapshotConfig()
@@ -416,9 +410,8 @@ func TestSnapshot_ImportantChannelSkipsPersonaSizedMemories(t *testing.T) {
 
 // TestCapRendered_DropsArchiveSizedEntries 复现「单条巨型记忆吃满整个预算」。
 //
-// 本机实测：bot scope 有两条 importance=1.00、14808/15314 字符的完整档案，
-// sort 后永远排第一，单条就把 2200 字符预算吃满，注入块是 "showing 1 by
-// importance" ——bot 每轮只看得到一份档案的前 2200 字残片。
+// importance=1 的上万字档案 sort 后永远排第一，单条就把 2200 字符预算吃满，
+// 注入块是 "showing 1 by importance" ——每轮只看得到档案的前 2200 字残片。
 func TestCapRendered_DropsArchiveSizedEntries(t *testing.T) {
 	entries := []Entry{
 		{ID: "archive", Content: strings.Repeat("档", 15000), Importance: 1.0},
@@ -469,11 +462,11 @@ func TestCapRendered_DropsArchiveSizedEntries(t *testing.T) {
 //  2. 补充条目的抬升基准是主通道的**最高** importance 而不是第 MaxEntries 名
 //     （实测抬到第 20 名时，相关条目 rel=1.0 排第一却仍被字符预算切掉）。
 func TestSnapshot_RecalledSurvivesOversizedTopEntry(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 
 	// 主通道窗口：一条 1.00 分的巨型档案 + 60 条低分近期记忆。
 	entries := []Entry{
-		{ID: "archive", Scope: scope, Content: "【luna 完整档案】" + strings.Repeat("项目全记录。", 1200), Importance: 1.0},
+		{ID: "archive", Scope: scope, Content: "【演示完整档案】" + strings.Repeat("项目全记录。", 1200), Importance: 1.0},
 	}
 	for i := 0; i < 60; i++ {
 		entries = append(entries, Entry{
@@ -487,7 +480,7 @@ func TestSnapshot_RecalledSurvivesOversizedTopEntry(t *testing.T) {
 	entries = append(entries, Entry{
 		ID:         "target-old",
 		Scope:      scope,
-		Content:    "@luna gets annoyed by bots that reply repeatedly",
+		Content:    "用户讨厌机器人反复回复同一件事，重复刷屏会让人厌烦",
 		Importance: 0.80,
 	})
 
@@ -495,7 +488,7 @@ func TestSnapshot_RecalledSurvivesOversizedTopEntry(t *testing.T) {
 	cfg.Mode = ModeFrozen
 	cfg.RelevanceRecall = true
 	cfg.MaxRenderedEntryChars = DefaultRenderedMaxChars
-	cfg.Query = "luna 讨厌反复回复的 bot 会怎样"
+	cfg.Query = "用户讨厌反复回复的 bot 会怎样"
 
 	snap := NewSnapshot(cfg)
 	if err := snap.Init(context.Background(), &fakeRetriever{entries: entries}, []Scope{scope}); err != nil {
@@ -506,19 +499,18 @@ func TestSnapshot_RecalledSurvivesOversizedTopEntry(t *testing.T) {
 	if strings.Contains(text, "完整档案") {
 		t.Fatal("archive-sized entry must not occupy the memory block")
 	}
-	if !strings.Contains(text, "annoyed by bots") {
+	if !strings.Contains(text, "反复回复") {
 		t.Fatalf("relevant old memory must survive both the entry cap and the char budget:\n%s", text)
 	}
 }
 
 // TestDedupeNearDuplicates_FoldsSameEventKeepsFuller 复现「同一事件被反复记录」。
 //
-// 本机实测：变压器事件在库里有 4 个措辞略不同的版本，importance 都在 0.9 上下，
-// 于是四条同时挤进 20 条名额。折叠后只留一条，且必须是**内容更全**的那条
-// （长版本还带"不必思考站多高才能让自己能飞"等独有细节），importance 取组内最高。
+// 同一事件有两个措辞略不同的版本，importance 都在 0.9 上下，
+// 会同时挤进有限名额。折叠后只留一条，且必须是内容更全的那条，importance 取组内最高。
 func TestDedupeNearDuplicates_FoldsSameEventKeepsFuller(t *testing.T) {
-	short := "【变压器事件】luna晨间note称已购微波炉变压器、'回头给香油们试验一下效果''只要接通市电就能开搞'，bot误读为自杀信号"
-	full := short + "，并写'不必思考站多高才能让自己能飞'，bot破例回复关怀与心理援助热线12356，随后luna澄清实为DIY项目"
+	short := "【演示事件】用户晨间备忘称已购演示用变压器，打算接通演示电源做小实验，助手误读成设备故障告警"
+	full := short + "，并补了一句演示用的接线步骤，助手随后确认这只是课堂 DIY 项目"
 
 	entries := []Entry{
 		{ID: "full", Content: full, Importance: 0.90},
@@ -542,8 +534,8 @@ func TestDedupeNearDuplicates_FoldsSameEventKeepsFuller(t *testing.T) {
 // 判成重复——丢掉的恰恰是每条独有的那一句新内容。剥掉引用前缀后必须都保留。
 func TestDedupeNearDuplicates_KeepsReplyChain(t *testing.T) {
 	entries := []Entry{
-		{ID: "r1", Content: "[Reply to 茶泡梅干@我有颉压抑: 买了一瓶奇怪蜂蜜水，但是好像得倒出来喝，得嘞，到酒店再说吧] 眯了半个小时缓过来点"},
-		{ID: "r2", Content: "[Reply to 茶泡梅干@我有颉压抑: 进食补充血糖] 换乘去廊坊再睡，酒店办完入住再补觉"},
+		{ID: "r1", Content: "[Reply to demo-user: 买了一瓶演示用饮料，到站点再说] 休息了半小时再继续"},
+		{ID: "r2", Content: "[Reply to demo-user: 先补充一点糖] 换乘去下一站，办完入住再休息"},
 	}
 	kept, folded := dedupeNearDuplicates(entries, DefaultNearDuplicateThreshold)
 	if folded != 0 || len(kept) != 2 {
@@ -561,14 +553,14 @@ func TestDedupeNearDuplicates_ShortNoteNotSwallowedByArchive(t *testing.T) {
 	// 档案必须是**内容多样**的长文本：relevanceTokens 返回的是集合，
 	// 用 Repeat 拼出来的长文本 token 种类极少，测不出长度差。
 	var sb strings.Builder
-	sb.WriteString("用户会画画，几天画不了就心神不宁；")
+	sb.WriteString("演示账号只读，写操作要换维护账号；")
 	for i := 0; i < 60; i++ {
-		sb.WriteString(fmt.Sprintf("另有画像要点%02d：涉及项目进度、互动守则与设备环境等不同主题；", i))
+		sb.WriteString(fmt.Sprintf("另有配置要点%02d：涉及构建脚本、日志分片与发布窗口等不同主题；", i))
 	}
 	archive := sb.String()
 	entries := []Entry{
 		{ID: "archive", Content: archive, Importance: 0.80},
-		{ID: "note", Content: "用户会画画，几天画不了就心神不宁", Importance: 0.70},
+		{ID: "note", Content: "演示账号只读，写操作要换维护账号", Importance: 0.70},
 	}
 	kept, folded := dedupeNearDuplicates(entries, DefaultNearDuplicateThreshold)
 	if folded != 0 || len(kept) != 2 {
@@ -602,10 +594,10 @@ func TestFilterOversizedBy_FactorMatters(t *testing.T) {
 // MaxEntries 条，renderBlock 里丢弃超长 + 折叠近重复之后没有任何替补，
 // 实测注入从 10 条掉到 3 条、只用掉 732/2200 字符——去重反而让记忆块更空。
 func TestSnapshot_DedupeFreesBudgetForOtherMemories(t *testing.T) {
-	scope := ChannelScope("misskey:timeline")
+	scope := ChannelScope("demo:timeline")
 	var entries []Entry
 	// 4 个版本的同一事件（措辞不同）+ 1 条超长档案，占满旧的 20 条候选池前排
-	base := "【变压器事件】luna晨间note称已购微波炉变压器、'回头给香油们试验一下效果''只要接通市电就能开搞'，bot误读为自杀信号"
+	base := "【演示事件】用户晨间备忘称已购演示用变压器，打算接通演示电源做小实验，助手误读成设备故障告警"
 	for i := 0; i < 4; i++ {
 		entries = append(entries, Entry{
 			ID:         fmt.Sprintf("dup%d", i),
@@ -622,22 +614,22 @@ func TestSnapshot_DedupeFreesBudgetForOtherMemories(t *testing.T) {
 	// 句式各异，避免它们彼此被判成近重复（模板化措辞本就该被折叠，
 	// 但那会掩盖本用例真正要测的「腾出的预算有没有被填上」）。
 	others := []string{
-		"用户会画画，几天画不了就心神不宁",
-		"喜欢百合题材作品，曾主动求推荐百合本",
-		"玩过《极限脱出999》，接下来打算玩《善人シボウデス》",
-		"玩怪物猎人，希望官方推出雷狼龙",
-		"自认身体是脆皮又怕虫子，虽然喜欢户外工作",
-		"坐卧铺火车时永远优先选上铺，并带降噪耳机隔绝鼾声",
-		"认为《只狼》七成靠背板记招式、三成靠节奏感",
-		"用户玩打鼓类音游，水平在进步，难度高的谱面很耗体力",
-		"最近喝酒变少了，但很喜欢金酒",
-		"玩FGO很随缘：没有Grand从者、技能也基本没练就推进到了终章",
-		"资讯来源包括Telegram频道CE_Observe",
-		"常转发日本动画新番资讯，来源多为youranimes.tw",
-		"有原创兽人角色，名叫モカ",
-		"下将棋，诘将棋是查了攻略才完成的",
-		"觉得耳夹式耳机不堵塞耳道，使用体验非常好",
-		"判断AI项目质量的标准：标题能讲清功能的一般不错",
+		"演示项目的构建脚本写在仓库根目录的 Makefile 里",
+		"演示环境的日志主题名叫 demo_events，按日期分片",
+		"蓝色主题的开关在设置页第三节，不是绿色",
+		"演示账号 appuser 只读，写操作要换维护账号",
+		"每周一上午有一次例行巡检，结果记在周报里",
+		"缓存默认五分钟过期，改配置后要手动刷新",
+		"演示机器人回复超长时会截断并标注总长度",
+		"队列积压超过一百条就告警，阈值写在配置里",
+		"演示文档的目录按功能分章，不按日期排列",
+		"夜间批处理从两点开始，失败会重试三次",
+		"演示用的样例数据每月一号重置一遍",
+		"搜索框支持关键词，不支持整句精确匹配",
+		"演示频道的欢迎语可以在后台修改",
+		"附件只接受图片和纯文本，不接受可执行文件",
+		"演示环境的时区固定为东八区",
+		"回滚要带上变更单号，不能只说回到上一版",
 	}
 	for i, content := range others {
 		entries = append(entries, Entry{
@@ -680,7 +672,7 @@ func TestSnapshot_DedupeFreesBudgetForOtherMemories(t *testing.T) {
 		t.Fatalf("with dedupe only one copy should remain, got %d:\n%s", got, with)
 	}
 	// 关键：腾出的名额必须被其它记忆填上，而不是让记忆块变空。
-	for _, want := range []string{"用户会画画", "喜欢百合题材作品", "极限脱出999"} {
+	for _, want := range []string{"构建脚本", "demo_events", "蓝色主题"} {
 		if !strings.Contains(with, want) {
 			t.Fatalf("budget freed by folding must be refilled by other memories, missing %q:\n%s", want, with)
 		}
@@ -717,17 +709,9 @@ func (c *countingRetriever) Recent(ctx context.Context, scope Scope, limit int) 
 	return c.fakeRetriever.Recent(ctx, scope, limit)
 }
 
-// TestSnapshot_InWindowRelevantMemorySurvivesBudget 复现「就在时间窗口里、
-// 与当前话题高度相关、但 importance 排名靠后 → 被无关的高分条目挤出预算」。
-//
-// 真实事故（2026-10-27，生产库 189 条候选复测）：用户问「帮我查一下昨天那个
-// bug，正式环境的日志在哪查」。库里躺着「正式环境日志主题为 yak_log_json…」，
-// 相关性最高，但 importance 只有 0.658，排在第 9~14 名；2457 字符预算只装得下
-// 约 10 条 × 240 字符，它恰好卡在边界外——注入块里没有它，bot 只能让用户把
-// 环境信息再说一遍。
-//
-// 改动前只有 recallBeyondWindow 捞回来的补充条目会被 boostRelevance 抬升，
-// 主通道条目完全不参与相关性打分，于是这条永远进不来。
+// TestSnapshot_InWindowRelevantMemorySurvivesBudget：窗口内、与当前话题高度相关、
+// 但 importance 靠后的条目，不能被无关高分条目挤出字符预算。
+// 关掉窗口内加权时它进不了块；打开后必须出现。
 func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
 	scope := ChannelScope("wecom:dm:T1")
 	// 20 条无关但 importance 更高的近期记忆，每条 ~250 字符：
@@ -735,7 +719,7 @@ func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
 	topics := []string{"周会结论", "磁盘巡检", "发布窗口", "告警统计", "依赖升级", "容量评估", "值班安排",
 		"代码评审", "压测结果", "灰度比例", "回滚预案", "监控覆盖", "权限梳理", "工单流转",
 		"文档归档", "培训计划", "招聘进度", "预算核算", "合规检查", "资产盘点"}
-	target := "正式环境日志主题为 yak_log_json，可用日志通道查正式环境问题"
+	target := "演示环境日志主题为 demo_events，可用日志通道查演示环境问题"
 
 	entries := make([]Entry, 0, len(topics)+1)
 	for i, topic := range topics {
@@ -750,9 +734,9 @@ func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
 		ID:         "log-topic-fact",
 		Scope:      scope,
 		Content:    target,
-		Importance: 0.658, // 与线上那条实测值一致
+		Importance: 0.658,
 	})
-	query := "正式环境 日志主题 在哪查"
+	query := "演示环境 日志主题 在哪查"
 	retriever := &fakeRetriever{entries: entries}
 
 	build := func(weight float64) *Snapshot {
@@ -769,11 +753,11 @@ func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
 	}
 
 	// 对照：显式关掉主通道加权（负数 = 关闭），即改动前的行为
-	if got := build(-1).MemorySnapshot(); strings.Contains(got, "yak_log_json") {
+	if got := build(-1).MemorySnapshot(); strings.Contains(got, "demo_events") {
 		t.Fatal("baseline must NOT surface the fact — this is the bug being fixed")
 	}
 	// 开启后必须进块
-	if got := build(DefaultRelevanceInWindowWeight).MemorySnapshot(); !strings.Contains(got, "yak_log_json") {
+	if got := build(DefaultRelevanceInWindowWeight).MemorySnapshot(); !strings.Contains(got, "demo_events") {
 		t.Fatalf("relevant in-window memory must survive the char budget; block =\n%s", got)
 	}
 }
@@ -781,11 +765,11 @@ func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
 // TestRelevanceScores 打分口径：强匹配 > 部分重合 > 无重合（0）。
 func TestRelevanceScores(t *testing.T) {
 	entries := []Entry{
-		{ID: "a", Content: "正式环境日志主题为 yak_log_json"},
+		{ID: "a", Content: "演示环境日志主题为 demo_events"},
 		{ID: "b", Content: "用户偏好深色主题"},
 		{ID: "c", Content: "周会结论：本周无阻塞事项"},
 	}
-	got := RelevanceScores("正式环境 日志主题", entries)
+	got := RelevanceScores("演示环境 日志主题", entries)
 	if len(got) != 3 {
 		t.Fatalf("want 3 scores, got %d", len(got))
 	}
@@ -810,16 +794,15 @@ func TestRelevanceScores(t *testing.T) {
 
 // TestRelevanceScores_NoiseStaysBelowRealMatch 加固「不要归一化」这条决定。
 //
-// 真实库 22 条 query 实测：相关的最低池内最高分 0.415，无关的最高 0.395 ——
-// 两类重叠，归一化会把噪声拉成 1.0 拿到满额加成。这里用同样的形态构造样本：
+// 归一化会把噪声拉成 1.0 拿到满额加成。这里构造：
 // 一个「只靠通用词勉强沾边」的噪声条目，其加成必须明显低于真匹配，
 // 否则噪声会顶掉真正重要的记忆。
 func TestRelevanceScores_NoiseStaysBelowRealMatch(t *testing.T) {
 	entries := []Entry{
-		{ID: "real", Content: "正式环境日志主题为 yak_log_json，可用日志通道查正式环境问题"},
+		{ID: "real", Content: "演示环境日志主题为 demo_events，可用日志通道查演示环境问题"},
 		{ID: "noise", Content: "今天的例行巡检记录，各项指标正常，已归档备查，无需处理"},
 	}
-	real := RelevanceScores("正式环境 日志主题 在哪查", entries)
+	real := RelevanceScores("演示环境 日志主题 在哪查", entries)
 	if real[0] <= real[1] {
 		t.Fatalf("real match must score above noise: %v vs %v", real[0], real[1])
 	}
@@ -833,11 +816,11 @@ func TestRelevanceScores_NoiseStaysBelowRealMatch(t *testing.T) {
 // 「窗口外捞回来」和「窗口内加权」用两套分数排序会互相打架。
 func TestSelectRelevant_And_RelevanceScoresShareScale(t *testing.T) {
 	entries := []Entry{
-		{ID: "a", Content: "正式环境日志主题为 yak_log_json"},
+		{ID: "a", Content: "演示环境日志主题为 demo_events"},
 		{ID: "b", Content: "用户偏好深色主题"},
 		{ID: "c", Content: "周会结论：本周无阻塞事项"},
 	}
-	query := "正式环境 日志主题"
+	query := "演示环境 日志主题"
 	all := RelevanceScores(query, entries)
 	picked := SelectRelevant(query, entries, nil, 10)
 	if len(picked) == 0 {
@@ -852,5 +835,103 @@ func TestSelectRelevant_And_RelevanceScoresShareScale(t *testing.T) {
 	}
 	if gotIdx < 0 || all[gotIdx] != want {
 		t.Errorf("SelectRelevant score %v must equal RelevanceScores[%d]=%v", want, gotIdx, all[gotIdx])
+	}
+}
+
+func TestGateRelevanceByPoolMean(t *testing.T) {
+	lone := gateRelevanceByPoolMean([]float64{0.42, 0, 0})
+	if lone[0] != 0.42 || lone[1] != 0 || lone[2] != 0 {
+		t.Fatalf("a single positive score must keep its raw value, got %v", lone)
+	}
+
+	// 平坦噪声簇：最高分只比均值高出一点点，加成不得跨过一档 importance。
+	noise := gateRelevanceByPoolMean([]float64{0.395, 0.345, 0.323, 0.280, 0.257, 0.199})
+	maxSurplus := 0.0
+	for _, s := range noise {
+		if s > maxSurplus {
+			maxSurplus = s
+		}
+	}
+	if maxSurplus*DefaultRelevanceInWindowWeight >= 0.15 {
+		t.Fatalf("flat noise must not get a meaningful boost, surplus=%v", maxSurplus)
+	}
+	for _, s := range noise {
+		if s >= 0.395 {
+			t.Fatalf("gate must not pass the raw score through or renormalize it, got %v", s)
+		}
+	}
+
+	out := gateRelevanceByPoolMean([]float64{0.90, 0.20, 0.10, 0})
+	if out[0] <= 0.4 || out[0] >= 0.90 {
+		t.Fatalf("outlier must keep raw-mean, not 1 and not the full raw score, got %v", out[0])
+	}
+	if out[1] != 0 || out[2] != 0 || out[3] != 0 {
+		t.Fatalf("scores at or below the mean must be gated off, got %v", out)
+	}
+}
+
+func TestAssembleSnapshotEntries_DoesNotBoostRecalled(t *testing.T) {
+	inWindow := []Entry{{ID: "in", Importance: 0.5, Content: "window"}}
+	recalled := []Entry{{ID: "old", Importance: 1.2, Content: "recalled"}}
+	out := assembleSnapshotEntries(inWindow, recalled, func(entries []Entry) {
+		for i := range entries {
+			entries[i].Importance += 0.6
+		}
+	})
+	var inImp, oldImp float64
+	var sawIn, sawOld bool
+	for _, e := range out {
+		switch e.ID {
+		case "in":
+			sawIn = true
+			inImp = e.Importance
+		case "old":
+			sawOld = true
+			oldImp = e.Importance
+		}
+	}
+	if !sawIn || !sawOld {
+		t.Fatalf("both sides must be kept, got %+v", out)
+	}
+	if inImp != 1.1 {
+		t.Fatalf("in-window entry must be boosted once, got %v", inImp)
+	}
+	if oldImp != 1.2 {
+		t.Fatalf("beyond-window entry must not be boosted again, got %v", oldImp)
+	}
+}
+
+func TestSnapshot_InWindowBoostWhenBeyondWindowRecallOff(t *testing.T) {
+	scope := ChannelScope("wecom:dm:T1")
+	topics := []string{"周会结论", "磁盘巡检", "发布窗口", "告警统计", "依赖升级", "容量评估", "值班安排",
+		"代码评审", "压测结果", "灰度比例", "回滚预案", "监控覆盖", "权限梳理", "工单流转",
+		"文档归档", "培训计划", "招聘进度", "预算核算", "合规检查", "资产盘点"}
+	target := "演示环境日志主题为 demo_events，可用日志通道查询"
+	entries := make([]Entry, 0, len(topics)+1)
+	for i, topic := range topics {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("filler%02d", i),
+			Scope:      scope,
+			Content:    fmt.Sprintf("%s：编号%02d。%s", topic, i, strings.Repeat(fmt.Sprintf("条目%03d细节", i), 30)),
+			Importance: 0.90,
+		})
+	}
+	entries = append(entries, Entry{
+		ID: "log-topic-fact", Scope: scope, Content: target, Importance: 0.658,
+	})
+	cfg := DefaultSnapshotConfig()
+	cfg.Mode = ModeFrozen
+	cfg.RelevanceRecall = false
+	cfg.Query = "演示环境 日志主题 在哪查"
+	snap := NewSnapshot(cfg)
+	if err := snap.Init(context.Background(), &fakeRetriever{entries: entries}, []Scope{scope}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	got := snap.MemorySnapshot()
+	if !strings.Contains(got, "demo_events") {
+		t.Fatalf("in-window boost must run when beyond-window recall is off:\n%s", got)
+	}
+	if strings.Contains(got, "relevance") {
+		t.Fatalf("injected block must not carry relevance scores:\n%s", got)
 	}
 }
