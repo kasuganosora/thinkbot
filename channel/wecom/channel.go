@@ -623,6 +623,12 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 		"chat_native":  strings.ToLower(body.ChatType),
 		"aibot_id":     body.AIBotID,
 	}
+	// 记忆同源会话：群里发言的人，和 bot 还有个一对一私聊（channel = wecom:dm:<userid>）。
+	// 私聊里沉淀的长期记忆若不声明，群里的提问就永远调不到（记忆按 channel 分作用域）。
+	// 只声明**发言者本人**的私聊：不把别人的私聊记忆拉进群。
+	if isGroup {
+		meta[core.MetaMemoryLinkedChannels] = []string{PrefixDM + userID}
+	}
 	// ⚠️ 刻意**不**把 response_url 塞进 metadata：它是一次性凭据（内含
 	// response_code），会被一路带进会话历史与日志里，而我们一期根本用不到它。
 	// 将来要做流式/分片回复时再从回调帧里取，用完即弃。

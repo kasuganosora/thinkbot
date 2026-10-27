@@ -436,3 +436,53 @@ func TestStripContextMarkersPlatforms(t *testing.T) {
 		})
 	}
 }
+
+// TestStripRecallBlocks 覆盖出站硬闸：召回记忆块被模型整段复述时必须连内容一起剥掉，
+// 不能只去标签（strayTagRe 只去标签，正文会留在回复里 —— 那等于把私聊记忆发进群）。
+func TestStripRecallBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "memory block removed with content",
+			in:   "前面正常回复\n<recalled_memory>\nMEMORY (your personal notes)\n正式环境日志主题为 yak_log_json\n</recalled_memory>\n后面正常回复",
+			want: "前面正常回复\n\n后面正常回复",
+		},
+		{
+			name: "profile block removed with content",
+			in:   "回答<user_profile>\nUSER PROFILE\n用户是 Go 后端\n</user_profile>结束",
+			want: "回答结束",
+		},
+		{
+			name: "unclosed block drops the tail",
+			in:   "可见内容<recalled_memory>\n泄露内容泄露内容",
+			want: "可见内容",
+		},
+		{
+			name: "no block is untouched",
+			in:   "正常回复，没有记忆块",
+			want: "正常回复，没有记忆块",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripRecallBlocks(tc.in); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStripRecallBlocks_Idempotent 连续剥离不应破坏已干净的文本。
+func TestStripRecallBlocks_Idempotent(t *testing.T) {
+	in := "正文一\n<recalled_memory>记忆</recalled_memory>\n正文二"
+	once := StripRecallBlocks(in)
+	if twice := StripRecallBlocks(once); twice != once {
+		t.Fatalf("second strip changed text: %q -> %q", once, twice)
+	}
+	if strings.Contains(once, "记忆") || strings.Contains(once, "recalled_memory") {
+		t.Fatalf("leak: %q", once)
+	}
+}

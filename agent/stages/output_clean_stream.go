@@ -60,6 +60,7 @@ const (
 	ocPublic                 // <public> 区块内
 	ocInternal               // <internal> 区块内（丢弃）
 	ocThink                  // <think> 区块内（丢弃）
+	ocRecall                 // 召回记忆块内（丢弃，见 tagRecallOpen）
 )
 
 // maxStreamTagLen 是为判定「是否为标签」最多扣住的字节数；超过仍未见 '>' 则按普通文本放行
@@ -156,6 +157,34 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 				f.mode = f.parent
 			}
 
+		case ocRecall:
+			// 闭合标签可在任意后续 chunk 到达；位于 <public> 内时遇 </public> 也视为结束
+			// （与 ocInternal 同口径）。未闭合则丢到流尾。
+			var idx, n int
+			if f.parent == ocPublic {
+				idx, n = indexFoldAny(buf, "</recalled_memory>", "</user_profile>", "</public>")
+			} else {
+				idx, n = indexFoldAny(buf, "</recalled_memory>", "</user_profile>")
+			}
+			if idx < 0 {
+				if !final {
+					if f.parent == ocPublic {
+						f.pending = buf[len(buf)-closingPrefixLen(buf, "</recalled_memory>", "</user_profile>", "</public>"):]
+					} else {
+						f.pending = buf[len(buf)-closingPrefixLen(buf, "</recalled_memory>", "</user_profile>"):]
+					}
+				}
+				return
+			}
+			closing := asciiLower(buf[idx : idx+n])
+			buf = buf[idx+n:]
+			if closing == "</public>" {
+				f.mode = ocPublic
+				f.closePublic(out)
+			} else {
+				f.mode = f.parent
+			}
+
 		default: // ocOutside / ocPublic
 			i := f.nextTagStart(buf)
 			if i < 0 {
@@ -189,7 +218,8 @@ const (
 	tagInternalOpen
 	tagPublicOpen
 	tagPublicClose
-	tagStray // 其余标签 / 畸形 /public> /internal>：去掉标签文本
+	tagRecallOpen // <recalled_memory> / <user_profile>：连内容整块丢弃
+	tagStray      // 其余标签 / 畸形 /public> /internal>：去掉标签文本
 )
 
 // nextTagStart 返回下一个可能的标签起点（'<'，门控剥离标签时还包括畸形标签的 '/'）。
@@ -262,6 +292,11 @@ func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) 
 		return tagPublicOpen, end + 1
 	case "</public>":
 		return tagPublicClose, end + 1
+	// 召回记忆块被整段复述：连内容一起丢（与 cleanPublicBlock 同口径）。
+	// 跨会话召回把私聊记忆带进群聊后，这里拦住「流式先吐出去、门控再删」
+	// 的时间差——Web 流是实时可见的，晚删等于已经泄露。
+	case "<recalled_memory>", "<user_profile>":
+		return tagRecallOpen, end + 1
 	}
 	return tagStray, end + 1
 }
@@ -299,6 +334,9 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 			f.closePublic(out)
 		}
 		// 区块外的孤立 </public>：按残留标签去掉。
+	case tagRecallOpen:
+		f.parent = f.mode
+		f.mode = ocRecall
 	}
 }
 

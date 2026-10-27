@@ -61,6 +61,42 @@ func StripInternalTags(text string) string {
 	return strings.TrimSpace(cleaned)
 }
 
+// 召回块成对标签：注入 system prompt 时包裹整块记忆（见 snapshot.renderBlock）。
+// 三个用途，改动必须与 StripRecallBlocks 同步：
+//  1. 边界明确，记忆正文不与系统指令混在一起；
+//  2. 上下文预算吃紧时可整块摘除，把额度让给对话历史（agent/stages/context_budget.go）；
+//  3. 出站清洗按标签剥掉「模型整段复述记忆」，这是跨会话召回（私聊记忆在群里
+//     可用）上线后「记忆内容绝不吐到输出端」的硬闸。
+const (
+	RecallBlockTagOpen   = "<recalled_memory>"
+	RecallBlockTagClose  = "</recalled_memory>"
+	ProfileBlockTagOpen  = "<user_profile>"
+	ProfileBlockTagClose = "</user_profile>"
+)
+
+var (
+	// recallBlockRe 匹配成对的召回块（记忆块或用户画像块）及其全部内容。
+	recallBlockRe = regexp.MustCompile(`(?is)<recalled_memory>.*?</recalled_memory>|<user_profile>.*?</user_profile>`)
+	// recallBlockUnclosedRe 匹配只有开标签的召回块（流式截断场景）。
+	recallBlockUnclosedRe = regexp.MustCompile(`(?is)<(?:recalled_memory|user_profile)>.*$`)
+)
+
+// StripRecallBlocks 从文本中移除召回记忆块（含块内全部内容）。
+//
+// 两处调用方：
+//   - 出站清洗（agent/stages/public_blocks.go cleanPublicBlock）：模型偶尔会把
+//     system prompt 里的记忆整段复述进回复。私聊记忆在群里被召回后，一旦复述
+//     就等于把私聊内容发进群，故必须按标签连内容一起剥掉（不是只去标签——
+//     strayTagRe 只去标签，正文会留下）。
+//   - 上下文预算吃紧时从 system prompt 摘除记忆块，把 token 让给对话历史。
+//
+// 与 StripInternalTags 同范式：先去完整标签对，再去未闭合开标签，最后清理空白。
+func StripRecallBlocks(text string) string {
+	cleaned := recallBlockRe.ReplaceAllString(text, "")
+	cleaned = recallBlockUnclosedRe.ReplaceAllString(cleaned, "")
+	return strings.TrimSpace(cleaned)
+}
+
 // reasoningPart 对应某些 API（如智谱 GLM）在 content 字段中发出的 JSON 推理数组。
 type reasoningPart struct {
 	Text string `json:"text"`

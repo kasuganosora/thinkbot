@@ -124,6 +124,18 @@ type DreamPromotionReason struct {
 //
 // 注意：content 来自 L0 原文，可能含 bot 自身回复（speaker="assistant"），
 // 展示层应据 Speaker 标注来源，避免误读为用户事实。
+
+// 说话人标签取值（DreamSourceEntry.Speaker / L0 条目标注）。
+const (
+	// SpeakerUser 用户原话。含此类来源的蒸馏事实属「用户已陈述」，
+	// 不能被 MarkInferred 降级为 pending（见 HasUserSource）。
+	SpeakerUser = "user"
+	// SpeakerAssistant bot 自己的回复。
+	SpeakerAssistant = "assistant"
+	// SpeakerObserver 公开时间线观察，非本会话用户所说。
+	SpeakerObserver = "observer"
+)
+
 type DreamSourceEntry struct {
 	// ID 原 L0 条目 ID（"引用的原来的条目"）。
 	ID string `json:"id"`

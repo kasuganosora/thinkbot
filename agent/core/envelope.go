@@ -249,6 +249,21 @@ const (
 	// MetaOrigin 是 Message.Metadata 中标识合成触发源的键（取值如 SourceOutreach）。
 	MetaOrigin = "origin"
 
+	// MetaMemoryLinkedChannels 是 Message.Metadata 中的键：与本会话「记忆同源」的
+	// 其它会话 Channel 列表（[]string），由渠道层在入站时声明。
+	//
+	// 用途：用户在私聊里说过的事实，之后在群里提问时也要能召回。
+	// 记忆按 Channel 作用域存储，群 scope 里没有私聊说过的内容，召回天然看不到；
+	// 渠道层最清楚「这个群成员和我还有哪个会话」，所以由它声明，RecallStage 只读取、
+	// 不构造（读侧零写入：不复制记忆、不污染记忆页、不需要额外的清理或标签）。
+	//
+	// 例：企微群里用户 U 发言 → ["wecom:dm:<U>"]，于是私聊沉淀的 L1 事实在群里可见。
+	//
+	// ⚠️ 副作用：这些会话的记忆会进入当前会话的 prompt。出站侧必须保证记忆内容
+	// 不被复述出去（见 memory.StripRecallBlocks / stages.cleanPublicBlock），
+	// 否则等同于把私聊内容发进群。
+	MetaMemoryLinkedChannels = "memory_linked_channels"
+
 	// KVHeartbeatMode 标记当前消息为「心跳自主唤醒」决策模式。
 	//
 	// 由心跳 Executor 在构造唤醒消息时设置。LLMStage 读取后强制 JSON 结构化输出

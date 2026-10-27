@@ -118,9 +118,15 @@ func significantTrailingPublic(s string) bool {
 	return len(normalizeForDedup(s)) > 0
 }
 
-// cleanPublicBlock 对单个 <public> 区块内文做出站清洗：剥离夹带的 <internal> 与残留标签。
+// cleanPublicBlock 对单个 <public> 区块内文做出站清洗：剥离夹带的 <internal>、
+// 被整段复述的召回记忆块，以及残留标签。
+//
+// 顺序不能反：召回块必须**先**整块剥掉（连内容一起），否则下一步的 strayTagRe
+// 只把 <recalled_memory> 标签本身去掉、正文原样留下——那正好是跨会话召回
+// 最怕的结果（私聊记忆被复述进群聊）。
 func cleanPublicBlock(content string) string {
-	out := memory.StripInternalTags(strings.TrimSpace(content))
+	out := memory.StripRecallBlocks(strings.TrimSpace(content))
+	out = memory.StripInternalTags(out)
 	return strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
 }
 

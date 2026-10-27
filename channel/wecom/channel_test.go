@@ -500,3 +500,67 @@ func pendText(m *core.Message) string {
 	}
 	return strings.TrimSpace(m.Text)
 }
+
+// TestHandleMsgCallback_DeclaresLinkedMemoryChannel 覆盖跨会话召回的写入侧声明：
+// 群里发言的人，其私聊（wecom:dm:<userid>）要被声明为记忆同源会话，
+// 否则私聊沉淀的长期记忆在群里永远调不出来。私聊本身不需要声明（它自己就在 scopes 里）。
+func TestHandleMsgCallback_DeclaresLinkedMemoryChannel(t *testing.T) {
+	ctx := context.Background()
+
+	// 群聊：应声明发言者本人的私聊
+	c := newTestChannel(t, 10*time.Millisecond)
+	var mu sync.Mutex
+	var got []core.Message
+	c.ingress = newRecordingIngress(t, &mu, &got)
+	c.handleMsgCallback(ctx, &callbackBody{
+		MsgID:    "m-group",
+		ChatType: "group",
+		ChatID:   "g1",
+		MsgType:  MsgTypeText,
+		From: struct {
+			UserID string `json:"userid"`
+		}{UserID: "U1"},
+		Text: &textContent{Content: "群里问个问题"},
+	})
+	waitDelivered(t, &mu, &got, 1)
+	mu.Lock()
+	msg := got[0]
+	mu.Unlock()
+
+	if msg.Channel != PrefixChat+"g1" {
+		t.Fatalf("channel = %q", msg.Channel)
+	}
+	raw, ok := msg.Metadata[core.MetaMemoryLinkedChannels]
+	if !ok {
+		t.Fatalf("group message must declare %s, metadata=%+v", core.MetaMemoryLinkedChannels, msg.Metadata)
+	}
+	ids, ok := raw.([]string)
+	if !ok || len(ids) != 1 || ids[0] != PrefixDM+"U1" {
+		t.Fatalf("linked channels = %#v, want [%s]", raw, PrefixDM+"U1")
+	}
+
+	// 私聊：不需要声明（当前会话本身就在召回作用域里）
+	var mu2 sync.Mutex
+	var got2 []core.Message
+	c2 := newTestChannel(t, 10*time.Millisecond)
+	c2.ingress = newRecordingIngress(t, &mu2, &got2)
+	c2.handleMsgCallback(ctx, &callbackBody{
+		MsgID:    "m-dm",
+		ChatType: "single",
+		MsgType:  MsgTypeText,
+		From: struct {
+			UserID string `json:"userid"`
+		}{UserID: "U1"},
+		Text: &textContent{Content: "私聊问个问题"},
+	})
+	waitDelivered(t, &mu2, &got2, 1)
+	mu2.Lock()
+	msg2 := got2[0]
+	mu2.Unlock()
+	if msg2.Channel != PrefixDM+"U1" {
+		t.Fatalf("dm channel = %q", msg2.Channel)
+	}
+	if _, ok := msg2.Metadata[core.MetaMemoryLinkedChannels]; ok {
+		t.Fatalf("dm must not declare linked channels, metadata=%+v", msg2.Metadata)
+	}
+}
