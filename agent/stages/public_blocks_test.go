@@ -372,3 +372,63 @@ func TestOutputCleanStreamFilter_DropsRecalledMemory(t *testing.T) {
 		t.Fatalf("normal content lost: %q", got)
 	}
 }
+
+// TestAppendReplyControlReminder_Idempotent 覆盖逐步提醒的幂等性。
+//
+// 这个不变量一旦破了，第 N 步就会堆 N 条提醒：applyPrepareStep 把返回的
+// messages 赋回持久历史，30 步的复杂任务会白白吃掉上万字符上下文，
+// 反而把协议本身稀释掉（正是要修的问题）。
+func TestAppendReplyControlReminder_Idempotent(t *testing.T) {
+	msgs := []llm.Message{
+		llm.SystemMessage("base system"),
+		llm.UserMessage("查一下这个 bug"),
+		llm.AssistantMessage("先看日志"),
+	}
+
+	once := appendReplyControlReminder(msgs)
+	if len(once) != len(msgs)+1 {
+		t.Fatalf("want %d messages, got %d", len(msgs)+1, len(once))
+	}
+	last := once[len(once)-1]
+	if last.Role != llm.MessageRoleSystem {
+		t.Errorf("reminder must be a system message, got %q", last.Role)
+	}
+	if llm.TextFromParts(last.Content) != replyControlReminder {
+		t.Errorf("reminder must sit at the very end, got %q", llm.TextFromParts(last.Content))
+	}
+
+	// 模拟 30 步连续调用：条数不能增长
+	cur := msgs
+	for i := 0; i < 30; i++ {
+		cur = appendReplyControlReminder(cur)
+		// 每步之间模型/工具还会产生新消息
+		cur = append(cur, llm.ToolMessage(llm.ToolResultPart{
+			ToolCallID: "c1", ToolName: "exec", Result: "ok",
+		}))
+	}
+	n := 0
+	for _, m := range cur {
+		if m.Role == llm.MessageRoleSystem && llm.TextFromParts(m.Content) == replyControlReminder {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("after 30 steps there must be exactly one reminder, got %d", n)
+	}
+	if got := llm.TextFromParts(cur[len(cur)-1].Content); got == replyControlReminder {
+		t.Error("reminder should be re-appended after new messages, but must not duplicate")
+	}
+	// 重新顶到末尾后仍是唯一一条
+	final := appendReplyControlReminder(cur)
+	cnt := 0
+	idx := -1
+	for i, m := range final {
+		if m.Role == llm.MessageRoleSystem && llm.TextFromParts(m.Content) == replyControlReminder {
+			cnt++
+			idx = i
+		}
+	}
+	if cnt != 1 || idx != len(final)-1 {
+		t.Errorf("want exactly one reminder at the end, got count=%d idx=%d len=%d", cnt, idx, len(final))
+	}
+}
