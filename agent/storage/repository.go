@@ -118,6 +118,65 @@ type SQLiteRepository struct {
 	entriesDeleted  atomic.Int64
 	retrievals      atomic.Int64
 	vec             *memory.VecIndex
+
+	// touches 把 last_accessed_at 的刷新合并到固定间隔，避免每次 Retrieve
+	// 都抢 SQLite 的写锁。
+	touches accessToucher
+}
+
+// accessTouchInterval 是同一条记忆刷新 last_accessed_at 的最小间隔。
+//
+// 这一列只被存下来、没有查询按它排序或淘汰。每次 Retrieve 都 UPDATE
+// 会占住 SQLite 唯一的写锁，memory_vec 的 MATCH、stats_usage_daily 和
+// chat_messages 的写入一起变慢。十分钟的粒度对「最近访问」够用。
+const accessTouchInterval = 10 * time.Minute
+
+// accessToucher 记录每个 id 上次认领刷新的时间。claim 在启动写 goroutine
+// 之前就把时间记上，并发的 Retrieve 会合成一次 UPDATE。
+type accessToucher struct {
+	mu       sync.Mutex
+	last     map[string]time.Time
+	interval time.Duration
+}
+
+// claim 返回这次应该写入的 id。interval 为零时用 accessTouchInterval。
+func (t *accessToucher) claim(ids []string, now time.Time) []string {
+	if t == nil || len(ids) == 0 {
+		return nil
+	}
+	interval := t.interval
+	if interval == 0 {
+		interval = accessTouchInterval
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.last == nil {
+		t.last = make(map[string]time.Time, len(ids))
+	}
+	if len(t.last) > 8192 {
+		for id, ts := range t.last {
+			if now.Sub(ts) >= interval {
+				delete(t.last, id)
+			}
+		}
+	}
+	due := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if prev, ok := t.last[id]; ok && now.Sub(prev) < interval {
+			continue
+		}
+		t.last[id] = now
+		due = append(due, id)
+	}
+	return due
 }
 
 // NewSQLiteRepository 创建 SQLite 记忆仓储。
@@ -483,18 +542,22 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		return nil, errs.Wrap(err, "sqlite_repository: retrieve failed")
 	}
 
-	// 更新 LastAccessedAt（批量）
+	// 更新 LastAccessedAt（批量）。同一 id 在 accessTouchInterval 内只写一次，
+	// 认领发生在 goroutine 之外，重叠的 Retrieve 不会各打一笔 UPDATE。
 	if len(models) > 0 {
 		ids := make([]string, len(models))
 		for i, m := range models {
 			ids[i] = m.ID
 		}
-		go func() {
-			updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			r.db.WithContext(updateCtx).Model(&dao.EntryModel{}).Where("id IN ?", ids).
-				Update("last_accessed_at", time.Now())
-		}()
+		due := r.touches.claim(ids, time.Now())
+		if len(due) > 0 {
+			go func() {
+				updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				r.db.WithContext(updateCtx).Model(&dao.EntryModel{}).Where("id IN ?", due).
+					Update("last_accessed_at", time.Now())
+			}()
+		}
 	}
 
 	return modelsToEntries(models), nil

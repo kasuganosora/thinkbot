@@ -119,7 +119,8 @@ const nodeStuckTimeout = 12 * time.Minute
 //
 //  2. 写操作记录器（供并发写冲突检测）
 //     sandbox 的写类工具会从 ctx 取出它并上报路径。默认并行 3 个节点共享
-//     同一工作区且无文件锁，不记录就无从发现冲突。见 write_conflict.go。
+//     同一工作区；写/替换/删除/移动按路径加锁，记录仍用于发现跨工具的冲突。
+//     见 write_conflict.go。
 func (e *Executor) withNodeContext(ctx context.Context, node *DAGNode, rec *writeRecorder) context.Context {
 	ctx = llm.WithStatsWorkflow(ctx, workflowIDFromContext(ctx), node.ID)
 	// 功能标签兜底：节点内的 LLM 调用此前不带 feature，日聚合表里记成 "unknown"
@@ -320,6 +321,13 @@ func (e *Executor) Review(ctx context.Context, node *DAGNode, product string) (*
 	if err != nil {
 		span.RecordError(err)
 		return nil, errs.Wrapf(err, "node %q review failed", node.ID)
+	}
+	// 流式层若仍把截止后的半截文本当成功返回，这里拒绝解析。
+	// 半截分析里的「全部通过」会让 heuristic 放行。完整、非 JSON 的回复
+	// 仍然走下面的收尾调用和 heuristic，那条契约不变。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		span.RecordError(ctxErr)
+		return nil, errs.Wrapf(ctxErr, "node %q review aborted", node.ID)
 	}
 
 	// 解析 Review 结果（期望 LLM 在最后一行返回 JSON）
