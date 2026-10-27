@@ -349,6 +349,35 @@ Rules:
 - If the user directly @-mentions you by name in what they wrote (or replies to your own post), they are talking to you: you MUST answer with send:true, even inside someone else's thread and even while you are otherwise just browsing. Being carried along in a thread's automatic mentions alone is not a direct mention. A message marked [mentioned you directly] is a direct mention.
 - A direct @mention (or a reply to your own post) overrides any remembered silence, lurking, "just observe" or reply-frequency convention from your memory or notes: those apply only when nobody is addressing you.`
 
+// replyControlReminder 是每步 LLM 调用前顶到消息末尾的精简协议提醒。
+//
+// 与 replyControlInstruction 的区别：那个是完整说明（只在 system prompt 里
+// 出现一次），这个是可重复注入的要点清单——必须短，因为它会随每一步重复出现。
+// 内容改动要同步幂等剔除逻辑（PrepareStep 里按本常量全文匹配）。
+// appendReplyControlReminder 把协议提醒放到消息末尾，并保证恒有一条。
+//
+// 幂等是硬要求：applyPrepareStep 把返回的 messages 赋回持久历史，每步无脑
+// append 会让第 N 步堆 N 条提醒（一条就有几百字符，30 步就是上万字符白白
+// 吃掉上下文，还会反过来稀释协议本身）。故先剔除已有的、再追加。
+func appendReplyControlReminder(msgs []llm.Message) []llm.Message {
+	out := make([]llm.Message, 0, len(msgs)+1)
+	for _, m := range msgs {
+		if m.Role == llm.MessageRoleSystem &&
+			llm.TextFromParts(m.Content) == replyControlReminder {
+			continue
+		}
+		out = append(out, m)
+	}
+	return append(out, llm.SystemMessage(replyControlReminder))
+}
+
+const replyControlReminder = `[REPLY CONTROL REMINDER] Your final answer this turn MUST satisfy all three:
+1. Put whatever the user should see inside <public>...</public>.
+2. Put private reasoning (judgments, complaints, "what I really think", plans like "let me check X") inside <internal>...</internal> — never as bare text.
+3. End the reply with exactly one control line, as the very last thing you output:
+   @@REPLY_CONTROL@@{"send": true}   or   @@REPLY_CONTROL@@{"send": false}
+Without the control line NOTHING is posted (fail-closed).`
+
 // replyControlSignal 是回复控制块的结构化产出。
 type replyControlSignal struct {
 	Send bool `json:"send"`
@@ -1147,7 +1176,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 而心跳的 InjectContext 已经要求「只输出一个 JSON 对象」，两套协议同时出现时
 	// 模型会把它们合并成 [{decision…}, {"send":false}] 数组
 	// （2026-08-29 实测：决策被静默降级丢弃）。故心跳路径不注入本协议。
-	if s.config.RequireReplyControl && env.Message.Source != core.SourceHeartbeat && !env.IsOutreach() {
+	// 同一条件后续还要用来挂「逐步提醒」，抽出来避免两处判定漂移。
+	replyControlActive := s.config.RequireReplyControl &&
+		env.Message.Source != core.SourceHeartbeat && !env.IsOutreach()
+	if replyControlActive {
 		systemPrompt = systemPrompt + "\n\n" + replyControlInstruction
 	}
 
@@ -1311,6 +1343,34 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				}
 				return p
 			}
+		}
+	}
+	// 回复控制协议的「逐步提醒」：每一步 LLM 调用前把精简协议顶到消息末尾。
+	//
+	// 存在理由（2026-10-27 全天 43 轮实测）：协议只写在 system prompt 里，
+	// 模型在几十次工具调用往返后会遗忘，缺失率随步数单调上升——
+	//     1 步（纯对话）0/13 = 0%    2-10 步 4/6 = 67%    >10 步 18/24 = 75%
+	// 与输出截断无关（缺失轮次的 finish_reason 全是 stop，不是 length）。
+	// 漏掉协议后私聊走 fail-open 兜底，会把「我对下代码里…的鉴权逻辑：」这类
+	// 内心独白连同正文一起发给用户——功能没坏，但回复质量明显下降。
+	//
+	// 包在压缩钩子**外面**：prepareStep 会裁剪历史，提醒必须在裁剪之后追加，
+	// 否则可能被当成旧消息裁掉，或落在被压缩段落中间。
+	//
+	// ⚠️ 必须幂等：applyPrepareStep 会把返回的 messages 赋回持久历史，
+	// 每步无脑 append 会让第 30 步堆 30 条提醒。这里先剔除上一步注入的那条
+	// 再追加，保证恒有一条、且始终在最末（注意力最强处）。
+	if replyControlActive {
+		base := prepareStep
+		prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {
+			if base != nil {
+				if bp := base(p); bp != nil {
+					p = bp
+				}
+			}
+			np := *p
+			np.Messages = appendReplyControlReminder(p.Messages)
+			return &np
 		}
 	}
 	if prepareStep != nil {
