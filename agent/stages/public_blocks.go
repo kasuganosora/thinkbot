@@ -1,7 +1,6 @@
 package stages
 
 import (
-	"regexp"
 	"strings"
 	"unicode"
 
@@ -36,11 +35,8 @@ const (
 	publicDupMaxRunes = 2000
 )
 
-// blockOpenRe / internalCloseRe 用于定位区块起点、跳过顶层 <internal> 区块（大小写不敏感）。
-var (
-	blockOpenRe     = regexp.MustCompile(`(?i)<public>|<internal>`)
-	internalCloseRe = regexp.MustCompile(`(?i)</internal>`)
-)
+// publicOpenLiteral 是大小写不敏感扫描用的 <public> 开标签（比较前先做 ASCII 小写）。
+const publicOpenLiteral = "<public>"
 
 // publicBlockContents 按顺序返回 clean 中所有成对 <public> 区块的原始内文，跳过位于顶层
 // <internal> 区块内的 <public>（那是心里话的一部分，与流式过滤器的处理一致）。
@@ -58,23 +54,33 @@ func publicBlockContentsAndTail(clean string) (blocks []string, trailing string)
 	pos := 0
 	lastPublicEnd := -1
 	for pos < len(clean) {
-		loc := blockOpenRe.FindStringIndex(clean[pos:])
-		if loc == nil {
+		pubRel := strings.Index(asciiLower(clean[pos:]), publicOpenLiteral)
+		intRel := memory.IndexLooseInternalOpen(clean[pos:])
+		if pubRel < 0 && intRel < 0 {
 			break
 		}
-		start := pos + loc[0]
-		if strings.EqualFold(clean[start:pos+loc[1]], "<internal>") {
-			end := internalCloseRe.FindStringIndex(clean[pos+loc[1]:])
-			if end == nil {
-				// 未闭合 internal：其后全是心里话；末个 </public> 到此处之前的文本可作 trailing。
+		// 宽松 `<internal`（`>` 可缺）优先于里面的 <public>：那段是心里话，不能被当成公开区挖出来。
+		// 闭合认 `</internal>` / `/internal`（`>` 都可缺）；没有闭合则截断，与旧的未闭合 internal 一样。
+		if intRel >= 0 && (pubRel < 0 || intRel < pubRel) {
+			start := pos + intRel
+			end, closed, ok := memory.ConsumeLooseInternal(clean[start:])
+			if !ok || !closed {
 				if lastPublicEnd >= 0 {
-					trailing = clean[lastPublicEnd:start]
+					// 缺 '>' 的未闭合开标签要留在 trailing 里，让闸门整段拒收
+					// （残片本身不能外发，残片前面的半句也不能借清洗后的空档漏出去）。
+					// 带 '>' 的未闭合 <internal> 仍按旧规则截断：心里话不进 trailing。
+					if memory.MalformedInternalOpen(clean[start:]) {
+						trailing = clean[lastPublicEnd:]
+					} else {
+						trailing = clean[lastPublicEnd:start]
+					}
 				}
 				return blocks, trailing
 			}
-			pos = pos + loc[1] + end[1]
+			pos = start + end
 			continue
 		}
+		start := pos + pubRel
 		m := publicTagRe.FindStringSubmatchIndex(clean[start:])
 		if m == nil || m[0] != 0 {
 			// 未闭合的 <public>（流式截断的半句话）不取；此前 trailing 仍可保留。
