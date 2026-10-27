@@ -771,7 +771,16 @@ func (d *DreamManager) runDeep(ctx context.Context) (*deepResult, error) {
 			Importance: c.Score,
 			Metadata:   md,
 		}
-		MarkInferred(&entry)
+		// 只有「来源里没有任何用户原话」的蒸馏结果才是系统猜测，才需要待确认。
+		// 用户亲口说过的事实属已陈述事实：一旦标 pending，RecallVisible 会把整条
+		// 挡在召回之外。2026-10-26 实测：此前无条件 MarkInferred，20 条 L1 蒸馏事实
+		// 全部 status=pending，真实查询里 L1 召回返回 0 条 —— 整层对用户不可见。
+		// 与 consolidator.go / formation.go 的 Category=="observation" 口径不同：
+		// 梦境候选的 category 是 fact/preference（实测 14+6），不是 observation，
+		// 那两个口径在此会漏判，故按来源说话人判定。
+		if !HasUserSource(md["source_entries"]) {
+			MarkInferred(&entry)
+		}
 		if d.manager != nil && d.manager.store != nil && d.manager.store.BlocksNewFact(c.Scope, c.Content) {
 			continue
 		}

@@ -1159,8 +1159,20 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if lurkMode || core.IsReactionAck(&env.Message) {
 		tools = nil
 	}
-	if note := s.contextBudgetNote(env, systemPrompt, messages); note != "" && env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
-		systemPrompt = systemPrompt + "\n\n" + note
+	if env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
+		// 预算吃紧时先摘记忆块：召回块是成对标签包住的（memory.StripRecallBlocks），
+		// 整块摘掉即可把额度让给对话历史——对话历史丢了就补不回来，记忆下一轮还能再召回。
+		// 必须先于 contextBudgetNote：提示里的占用数字要反映摘除之后的真实用量。
+		if pct, ok := s.contextBudgetPercent(env, systemPrompt, messages); ok && pct >= contextBudgetRecallDropPct {
+			if trimmed := memory.StripRecallBlocks(systemPrompt); trimmed != systemPrompt {
+				logger.Infow("context budget: dropped recalled memory block to free window",
+					"used_pct", pct, "chars_freed", len(systemPrompt)-len(trimmed))
+				systemPrompt = trimmed
+			}
+		}
+		if note := s.contextBudgetNote(env, systemPrompt, messages); note != "" {
+			systemPrompt = systemPrompt + "\n\n" + note
+		}
 	}
 
 	// 自主上下文压缩工具（compact_context）：按轮构造，闭包捕获本轮会话信息。

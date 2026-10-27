@@ -63,6 +63,36 @@ func ConfirmEntry(e *Entry) {
 	setMeta(e, metaStatus, StatusActive)
 }
 
+// HasUserSource reports whether an entry's source snapshot contains a user
+// utterance. It is the gate for MarkInferred: a fact distilled from what the
+// user actually said is a stated fact, not a system guess, and must never be
+// parked as pending — pending entries are dropped by FilterRecall, so marking
+// them makes the whole layer invisible to recall.
+//
+// v accepts both shapes the snapshot takes: []DreamSourceEntry in memory right
+// after promotion, and []any (of map[string]any) when read back from SQLite.
+func HasUserSource(v any) bool {
+	switch src := v.(type) {
+	case []DreamSourceEntry:
+		for _, e := range src {
+			if e.Speaker == SpeakerUser {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range src {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if s, _ := m["speaker"].(string); s == SpeakerUser {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // MarkSuperseded keeps the old statement but stops injecting it as current.
 func MarkSuperseded(e *Entry, byID string, at time.Time) {
 	setMeta(e, metaStatus, StatusSuperseded)

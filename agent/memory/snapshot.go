@@ -801,6 +801,11 @@ func (s *Snapshot) renderBlock(target string, entries []Entry, stats MemoryStats
 	separator := "════════════════════════════════════════════════"
 
 	var sb strings.Builder
+	// 成对标签包住整块：① 边界明确，记忆正文不会和系统指令混在一起；
+	// ② 上下文预算吃紧时可整块摘除（stages/context_budget.go）；
+	// ③ 出站清洗可按标签剥掉「模型整段复述记忆」的情况——跨会话召回把私聊
+	//    记忆带进群聊后，这条是「记忆内容不吐到输出端」的硬闸。
+	sb.WriteString(blockOpenTag(target) + "\n")
 	sb.WriteString(separator + "\n" + header + " [" + usage + "]\n")
 
 	// 仅 memory 块带元信息：user 块条数少且不涉及「最早」类问题。
@@ -818,7 +823,25 @@ func (s *Snapshot) renderBlock(target string, entries []Entry, stats MemoryStats
 		sb.WriteString(entry)
 	}
 
+	sb.WriteString("\n" + blockCloseTag(target))
+
 	return sb.String(), len(sanitized)
+}
+
+// blockOpenTag / blockCloseTag 返回该记忆块的成对包裹标签。
+// 与 StripRecallBlocks 必须一一对应，改动任一侧都要同步另一侧。
+func blockOpenTag(target string) string {
+	if target == "user" {
+		return ProfileBlockTagOpen
+	}
+	return RecallBlockTagOpen
+}
+
+func blockCloseTag(target string) string {
+	if target == "user" {
+		return ProfileBlockTagClose
+	}
+	return RecallBlockTagClose
 }
 
 // renderStatsLine 渲染记忆块的规模/时间跨度元信息行。

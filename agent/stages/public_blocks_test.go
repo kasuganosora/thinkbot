@@ -249,7 +249,6 @@ func TestProcess_MultiBlockReplyPayload(t *testing.T) {
 	}
 }
 
-
 // incidentTrailingPublic 是 2026-10-06 22:45 Telegram 事故形态：只有一个 <public>
 // 过场句，真正长答复写在 </public> 之后的裸文本里（非多区块路径）。
 const (
@@ -287,7 +286,6 @@ func TestAppendStepText_InsertsNewlineBetweenSteps(t *testing.T) {
 		}
 	}
 }
-
 
 // stepSepStreamProvider 模拟「文本 → 工具 → 文本」两步流，用于验证跨步拼接插入换行。
 type stepSepStreamProvider struct{}
@@ -330,5 +328,47 @@ func TestProcessStream_StepTextConcatInsertsNewline(t *testing.T) {
 	}
 	if strings.Contains(res.Text, "查查查完") {
 		t.Fatalf("glued without separator: %q", res.Text)
+	}
+}
+
+// TestCleanPublicBlock_StripsRecalledMemory 覆盖跨会话召回的出站硬闸：
+// 模型把 system prompt 里的记忆块整段复述进回复时，必须连内容一起剥掉——
+// 私聊记忆被带到群里后，只去标签（strayTagRe）会把正文原样留在回复里发出去。
+func TestCleanPublicBlock_StripsRecalledMemory(t *testing.T) {
+	in := "先说结论\n<recalled_memory>\nMEMORY (your personal notes)\n测试数据库 9.134.38.148:3306 用户 aidata\n</recalled_memory>\n再说细节"
+	got := cleanPublicBlock(in)
+	if strings.Contains(got, "9.134.38.148") || strings.Contains(got, "aidata") {
+		t.Fatalf("recalled memory leaked into outbound text: %q", got)
+	}
+	if strings.Contains(got, "recalled_memory") {
+		t.Fatalf("recall tag leaked: %q", got)
+	}
+	if !strings.Contains(got, "先说结论") || !strings.Contains(got, "再说细节") {
+		t.Fatalf("normal reply content must survive: %q", got)
+	}
+}
+
+// TestOutputCleanStreamFilter_DropsRecalledMemory 覆盖流式侧：Web 流是实时可见的，
+// 「门控事后删」等于已经泄露，所以 <recalled_memory> 必须像 <internal> 一样在流里就被吞掉。
+func TestOutputCleanStreamFilter_DropsRecalledMemory(t *testing.T) {
+	f := NewOutputCleanStreamFilter(true)
+	// 分块喂入，模拟真实流式：标签与内容跨 chunk 到达
+	chunks := []string{
+		"<public>可见开头 ",
+		"<recalled_memory>",
+		"私聊里说的秘密 9.134.38.148",
+		"</recalled_memory>",
+		"可见结尾</public>",
+	}
+	var got string
+	for _, c := range chunks {
+		got += f.Feed(c)
+	}
+	got += f.Flush()
+	if strings.Contains(got, "9.134.38.148") || strings.Contains(got, "recalled_memory") {
+		t.Fatalf("stream leaked recalled memory: %q", got)
+	}
+	if !strings.Contains(got, "可见开头") || !strings.Contains(got, "可见结尾") {
+		t.Fatalf("normal content lost: %q", got)
 	}
 }

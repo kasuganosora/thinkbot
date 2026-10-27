@@ -118,6 +118,8 @@ func sharesGram(content string, grams map[string]struct{}) bool {
 	return false
 }
 
-const conductNote = `Conduct: recalled memories are background for how you act, never evidence in an argument and never something to quote back. Do not bring up the user's past failures, exams, relationship status, or other personal history unless they raised that subject in this message. If the user says not to mention a subject again, acknowledge in one short sentence and do not name that subject, including in apologies. Do not rank another project until you have actually read its code. After the user corrects you, answer in one or two sentences.`
+const conductNote = `Conduct: recalled memories are background for how you act, never evidence in an argument and never something to quote back. Do not bring up the user's past failures, exams, relationship status, or other personal history unless they raised that subject in this message. If the user says not to mention a subject again, acknowledge in one short sentence and do not name that subject, including in apologies. Do not rank another project until you have actually read its code. After the user corrects you, answer in one or two sentences.
+
+Recalled memories are internal context, not material to publish: never paste, quote or restate the memory block, and never say that you keep notes, remember things, or were told something elsewhere. Use what you know silently and answer in your own words. Some notes came from private conversations and are shown to you even in shared channels: keep them to yourself. Never write out connection strings, hosts, ports, accounts, tokens or credentials that only exist in your notes — use them to act (for example to query the right database) but do not reproduce them in a reply.`
 
 func ConductNote() string { return conductNote }

@@ -193,6 +193,11 @@ type TieredStore struct {
 	vecBackfillOnce    sync.Once
 	vecBackfillStarted chan struct{}
 	vecBackfillDone    chan struct{}
+
+	// pendingRepairOnce 保证一个 store 只跑一次存量 pending 改判。
+	// pendingRepairDone 供测试/调用方等待改判结束（生产不等它）。
+	pendingRepairOnce sync.Once
+	pendingRepairDone chan struct{}
 }
 
 // vecBackfillGate 在后台补索引读 memory_vec 之前运行。生产环境为 nil。
@@ -259,6 +264,75 @@ func (s *TieredStore) loadFromDB() {
 	}
 	// 向量写入不在构造函数里等。fx OnStart 只有 15 秒，几千条 upsert 会把进程打退出。
 	s.startVecBackfill(indexable)
+	// 存量 pending 改判同理不在构造函数里同步跑。
+	s.startPendingRepair()
+}
+
+// startPendingRepair 启动一次存量修复：把「来源含用户原话却被标成 pending」的
+// 条目改判为 active。
+//
+// 背景（2026-10-26 实测）：dreaming 深睡相位曾无条件调用 MarkInferred，
+// 20 条 L1 蒸馏事实全部 status=pending，而 RecallVisible 对 pending 返回 false，
+// 于是整层 L1 在真实召回里返回 0 条 —— 用户说过的事实在库里躺着却调不出来。
+// 生产者已修（仅在来源无用户发言时才标 inferred），这里只负责修存量。
+//
+// 幂等：只翻转 pending→active，重复运行无副作用；且被 pendingRepairOnce 挡住。
+func (s *TieredStore) startPendingRepair() {
+	if s == nil || s.db == nil {
+		return
+	}
+	s.pendingRepairOnce.Do(func() {
+		done := make(chan struct{})
+		s.pendingRepairDone = done
+		go func() {
+			defer close(done)
+			s.repairUserStatedPending(context.Background())
+		}()
+	})
+}
+
+// repairUserStatedPending 是 startPendingRepair 的同步主体。
+func (s *TieredStore) repairUserStatedPending(ctx context.Context) {
+	type target struct {
+		tier  MemoryTier
+		scope Scope
+		id    string
+	}
+	var targets []target
+	scanned := 0
+	s.mu.Lock()
+	for _, entries := range s.buckets {
+		for _, te := range entries {
+			scanned++
+			if StatusOf(te.Entry) != StatusPending {
+				continue
+			}
+			if !HasUserSource(te.Entry.Metadata["source_entries"]) {
+				continue
+			}
+			targets = append(targets, target{tier: te.Tier, scope: te.Scope, id: te.ID})
+		}
+	}
+	s.mu.Unlock()
+
+	fixed := 0
+	for _, tgt := range targets {
+		ok, err := s.Confirm(ctx, tgt.tier, tgt.scope, tgt.id)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warnw("tiered_store: pending repair confirm failed",
+					"entry_id", tgt.id, "err", err)
+			}
+			continue
+		}
+		if ok {
+			fixed++
+		}
+	}
+	if s.logger != nil && (fixed > 0 || len(targets) > 0) {
+		s.logger.Infow("tiered_store: repaired user-stated memories wrongly parked as pending",
+			"scanned", scanned, "candidates", len(targets), "fixed", fixed)
+	}
 }
 
 // startVecBackfill 在锁释放后启动一次后台补索引。vec 不可用时什么都不做。

@@ -12,7 +12,27 @@ import (
 const (
 	contextRemainingToolName = "get_context_remaining"
 	searchContextToolName    = "search_context_history"
+
+	// contextBudgetRecallDropPct 上下文占用达到这个百分比时，先摘掉注入的召回记忆块。
+	// 记忆是「锦上添花」，对话历史是「不可替代」——额度紧张时让给后者。
+	// 与下面 note 里「Budget is low」的 75% 同一条线，避免两条线互相打架。
+	contextBudgetRecallDropPct = 75
 )
+
+// contextBudgetPercent 返回当前已用 token 占压缩触发线的百分比。
+// 没有压缩器（自动压缩关闭）或触发线无效时返回 (0, false)。
+func (s *LLMStage) contextBudgetPercent(env *core.Envelope, systemPrompt string, messages []llm.Message) (int, bool) {
+	compactor, ok := s.getCompactor(conversationKey(env))
+	if !ok || compactor == nil {
+		return 0, false
+	}
+	b := compactor.Budget()
+	if b.Window <= 0 || b.Trigger <= 0 {
+		return 0, false
+	}
+	used := llm.EstimateMessagesTokens(messages) + llm.EstimateSystemTokens(systemPrompt)
+	return used * 100 / b.Trigger, true
+}
 
 // contextBudgetNote 把当前窗口余量写进系统提示，让模型在触发线之前主动收束。
 // 没有压缩器（自动压缩关闭）时不注入。
@@ -36,7 +56,7 @@ func (s *LLMStage) contextBudgetNote(env *core.Envelope, systemPrompt string, me
 	}
 	note := fmt.Sprintf(`Context budget: window %d tokens, compact trigger at %d (%.0f%% of the model window), about %d used (messages plus system prompt), %d left before automatic compaction. Raw history is kept; compact_context folds older turns into a note and search_context_history can recover details afterwards.`,
 		b.Window, b.Trigger, b.Ratio*100, used, remaining)
-	if pct >= 75 {
+	if pct >= contextBudgetRecallDropPct {
 		note += " Budget is low: finish the current step, then call compact_context with a focus listing open tasks, decisions, paths and rejected approaches before starting more large tool calls."
 	}
 	return note
@@ -44,9 +64,9 @@ func (s *LLMStage) contextBudgetNote(env *core.Envelope, systemPrompt string, me
 
 func (s *LLMStage) newContextRemainingTool(env *core.Envelope, messages []llm.Message) llm.Tool {
 	return llm.Tool{
-		Name: contextRemainingToolName,
+		Name:        contextRemainingToolName,
 		Description: "Read the context-window oil gauge: model window, compact trigger, estimated tokens used, and tokens left before automatic compaction. Call this before a long tool run if you are unsure whether to compact first.",
-		Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
 		Execute: func(ctx *llm.ToolExecContext, input any) (any, error) {
 			compactor, ok := s.getCompactor(conversationKey(env))
 			if !ok || compactor == nil {
@@ -62,13 +82,13 @@ func (s *LLMStage) newContextRemainingTool(env *core.Envelope, messages []llm.Me
 				remaining = 0
 			}
 			return map[string]any{
-				"window_tokens":  b.Window,
-				"trigger_tokens": b.Trigger,
-				"trigger_ratio":  b.Ratio,
-				"reserved_tokens": b.Reserved,
-				"used_tokens":    used,
+				"window_tokens":    b.Window,
+				"trigger_tokens":   b.Trigger,
+				"trigger_ratio":    b.Ratio,
+				"reserved_tokens":  b.Reserved,
+				"used_tokens":      used,
 				"remaining_tokens": remaining,
-				"low":            used*100 >= b.Trigger*75,
+				"low":              used*100 >= b.Trigger*75,
 			}, nil
 		},
 	}
@@ -77,7 +97,7 @@ func (s *LLMStage) newContextRemainingTool(env *core.Envelope, messages []llm.Me
 func (s *LLMStage) newSearchContextTool(env *core.Envelope) llm.Tool {
 	cfg := s.config.SelfCompact
 	return llm.Tool{
-		Name: searchContextToolName,
+		Name:        searchContextToolName,
 		Description: "Search raw chat history that compaction folded out of the live window. Use this when a summary is missing a path, error, decision or rejected approach. Returns short excerpts, not the whole row.",
 		Parameters: map[string]any{
 			"type": "object",
