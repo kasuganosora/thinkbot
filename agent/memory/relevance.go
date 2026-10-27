@@ -117,6 +117,27 @@ const (
 	// 与「luna 完整档案」(2287 字符)，截断后是残缺的人格定义。
 	// 这类内容属于 persona / profile 层的职责，不该由召回通道重复注入。
 	recalledSkipFactor = 2
+	// DefaultRelevanceInWindowWeight 主通道（时间窗口内）条目能拿到的
+	// importance 等效加成上限（默认 0.6）。
+	//
+	// 存在理由（2026-10-27 真实库复测）：此前只有 recallBeyondWindow 捞回来的
+	// 补充条目会被 boostRelevance 抬升，主通道条目完全不参与相关性打分，
+	// 只按 importance 降序排序。于是「就在窗口里、与当前话题高度相关、但
+	// importance 排名靠后」的记忆永远拿不到加权，被一批只是 importance 高
+	// 却与话题无关的条目挤出预算。复现：93 条候选里「正式环境日志主题为
+	// yak_log_json…」相关性最高，importance 0.658 排在第 9~14 名，而 2457
+	// 字符预算只装得下约 10 条 × 240 字符——它恰好卡在边界外，注入块里没有它。
+	//
+	// 取 0.6（与 DefaultImportantRelevanceWeight 同值）+ 归一化：让「本轮最相关」
+	// 稳定跨过一到两档 importance 差（0.658+0.6 > 0.8），同时相关性接近时
+	// 仍由 importance 定序，不推翻 2026-09-24 调好的那套阈值。
+	DefaultRelevanceInWindowWeight = 0.6
+	// maxSortImportance 参与排序的 importance 上限。
+	//
+	// 被相关性抬升后的 importance 是**纯排序键**：它不渲染进 prompt
+	// （见 renderBlock），也不回写存储，因此允许超过 1.0。封顶只为避免
+	// 多个通道叠加加成后数值越跑越远、让排序键失去可读性。
+	maxSortImportance = 2.0
 	// DefaultImportantRelevanceWeight 保底通道里「本轮最相关」条目能拿到的
 	// importance 等效加成上限（默认 0.6）。
 	//
@@ -282,6 +303,47 @@ func SelectRelevant(query string, candidates []Entry, exclude map[string]struct{
 		scored = scored[:topK]
 	}
 	return scored
+}
+
+// NormalizedRelevanceScores 给每条候选算出与 query 的相关性，归一化到
+// 「池内最高分 = 1.0」后按原顺序返回等长切片；无 token 重合者为 0。
+//
+// 与 SelectRelevant 的区别：SelectRelevant 只返回分数 > 0 的 topK 条，用于
+// 「从窗口外再捞几条」；这里要保留**全部**条目（含 0 分）的分数，用于
+// 「给已经在候选池里的条目重新排序」——主通道条目此前完全没有这一路信号。
+//
+// 为什么必须归一化（与 DefaultImportantRelevanceWeight 同口径，2026-09-24 实测）：
+// 原始相关性分被 Ochiai 的长度归一压得很小，真库 100~300 字的记忆上只有
+// 0.05~0.3；直接乘固定权重根本压不过 0.95 的无关条目。归一化后「本轮最相关的
+// 那条」稳定拿到满额加成，完全不相关的条目加成恒为 0。
+func NormalizedRelevanceScores(query string, candidates []Entry) []float64 {
+	scores := make([]float64, len(candidates))
+	if len(candidates) == 0 || strings.TrimSpace(query) == "" {
+		return scores
+	}
+
+	q := relevanceTokens(query)
+	if len(q) == 0 {
+		return scores
+	}
+
+	tokenSets := tokenizeAll(candidates)
+	idf := buildIDF(tokenSets)
+
+	max := 0.0
+	for i := range candidates {
+		scores[i] = idfScore(q, tokenSets[i], idf)
+		if scores[i] > max {
+			max = scores[i]
+		}
+	}
+	if max <= 0 {
+		return scores
+	}
+	for i := range scores {
+		scores[i] /= max
+	}
+	return scores
 }
 
 // tokenizeAll 批量切分候选条目，返回与 candidates 等长的 token 集合切片。
@@ -720,8 +782,8 @@ func relevanceGate(entries []Entry, maxEntries int) float64 {
 func boostRelevance(picked []ScoredEntry, gate float64) {
 	for i := range picked {
 		eff := gate + relevanceFloorStep + picked[i].Score*relevanceScoreSpan
-		if eff > 2 {
-			eff = 2
+		if eff > maxSortImportance {
+			eff = maxSortImportance
 		}
 		if picked[i].Entry.Importance < eff {
 			picked[i].Entry.Importance = eff

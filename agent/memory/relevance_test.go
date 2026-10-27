@@ -716,3 +716,92 @@ func (c *countingRetriever) Recent(ctx context.Context, scope Scope, limit int) 
 	c.calls++
 	return c.fakeRetriever.Recent(ctx, scope, limit)
 }
+
+// TestSnapshot_InWindowRelevantMemorySurvivesBudget 复现「就在时间窗口里、
+// 与当前话题高度相关、但 importance 排名靠后 → 被无关的高分条目挤出预算」。
+//
+// 真实事故（2026-10-27，生产库 189 条候选复测）：用户问「帮我查一下昨天那个
+// bug，正式环境的日志在哪查」。库里躺着「正式环境日志主题为 yak_log_json…」，
+// 相关性最高，但 importance 只有 0.658，排在第 9~14 名；2457 字符预算只装得下
+// 约 10 条 × 240 字符，它恰好卡在边界外——注入块里没有它，bot 只能让用户把
+// 环境信息再说一遍。
+//
+// 改动前只有 recallBeyondWindow 捞回来的补充条目会被 boostRelevance 抬升，
+// 主通道条目完全不参与相关性打分，于是这条永远进不来。
+func TestSnapshot_InWindowRelevantMemorySurvivesBudget(t *testing.T) {
+	scope := ChannelScope("wecom:dm:T1")
+	// 20 条无关但 importance 更高的近期记忆，每条 ~250 字符：
+	// 条数上限（20）与字符预算（2200/240≈9 条）同时把目标条目挡在外面。
+	topics := []string{"周会结论", "磁盘巡检", "发布窗口", "告警统计", "依赖升级", "容量评估", "值班安排",
+		"代码评审", "压测结果", "灰度比例", "回滚预案", "监控覆盖", "权限梳理", "工单流转",
+		"文档归档", "培训计划", "招聘进度", "预算核算", "合规检查", "资产盘点"}
+	target := "正式环境日志主题为 yak_log_json，可用日志通道查正式环境问题"
+
+	entries := make([]Entry, 0, len(topics)+1)
+	for i, topic := range topics {
+		entries = append(entries, Entry{
+			ID:         fmt.Sprintf("filler%02d", i),
+			Scope:      scope,
+			Content:    fmt.Sprintf("%s：编号%02d。%s", topic, i, strings.Repeat(fmt.Sprintf("条目%03d细节", i), 30)),
+			Importance: 0.90,
+		})
+	}
+	entries = append(entries, Entry{
+		ID:         "log-topic-fact",
+		Scope:      scope,
+		Content:    target,
+		Importance: 0.658, // 与线上那条实测值一致
+	})
+	query := "正式环境 日志主题 在哪查"
+	retriever := &fakeRetriever{entries: entries}
+
+	build := func(weight float64) *Snapshot {
+		cfg := DefaultSnapshotConfig()
+		cfg.Mode = ModeFrozen
+		cfg.RelevanceRecall = true
+		cfg.Query = query
+		cfg.RelevanceInWindowWeight = weight
+		snap := NewSnapshot(cfg)
+		if err := snap.Init(context.Background(), retriever, []Scope{scope}); err != nil {
+			t.Fatalf("init failed: %v", err)
+		}
+		return snap
+	}
+
+	// 对照：显式关掉主通道加权（负数 = 关闭），即改动前的行为
+	if got := build(-1).MemorySnapshot(); strings.Contains(got, "yak_log_json") {
+		t.Fatal("baseline must NOT surface the fact — this is the bug being fixed")
+	}
+	// 开启后必须进块
+	if got := build(DefaultRelevanceInWindowWeight).MemorySnapshot(); !strings.Contains(got, "yak_log_json") {
+		t.Fatalf("relevant in-window memory must survive the char budget; block =\n%s", got)
+	}
+}
+
+// TestNormalizedRelevanceScores 归一化到「池内最高分 = 1」，且无关条目恒为 0。
+//
+// 不能直接用原始分：Ochiai 的长度归一把真库 100~300 字的记忆压到 0.05~0.3，
+// 乘固定权重根本压不过 0.9 的无关条目（详见 DefaultImportantRelevanceWeight）。
+func TestNormalizedRelevanceScores(t *testing.T) {
+	entries := []Entry{
+		{ID: "a", Content: "正式环境日志主题为 yak_log_json"},
+		{ID: "b", Content: "用户偏好深色主题"},
+		{ID: "c", Content: "周会结论：本周无阻塞事项"},
+	}
+	got := NormalizedRelevanceScores("正式环境 日志主题", entries)
+	if len(got) != 3 {
+		t.Fatalf("want 3 scores, got %d", len(got))
+	}
+	if got[0] != 1 {
+		t.Errorf("top hit must normalize to 1, got %v", got[0])
+	}
+	if got[1] <= 0 || got[1] >= 1 {
+		t.Errorf("partial overlap should be in (0,1), got %v", got[1])
+	}
+	if got[2] != 0 {
+		t.Errorf("irrelevant entry must stay 0, got %v", got[2])
+	}
+	if empty := NormalizedRelevanceScores("", entries); empty[0] != 0 || empty[1] != 0 {
+		t.Errorf("empty query must produce all-zero scores, got %v", empty)
+	}
+}

@@ -235,3 +235,42 @@ func TestTieredProfileRetriever_ReadsL3NotL1(t *testing.T) {
 		t.Fatalf("merged should put L3 first, got %+v", all)
 	}
 }
+
+// TestMergedRetriever_DedupesChannelMirror 镜像副本必须被去重。
+//
+// 线上同一条事实会在候选池里出现两次：channel scope 的原文，和 bot scope 里
+// 正文为 "[<channel-id>] <原文>" 的镜像（xch: 前缀）。逐字精确去重认不出它们
+// 是同一件事，于是召回预算被副本吃掉一半（36 条候选里就有一批是这种副本）。
+func TestMergedRetriever_DedupesChannelMirror(t *testing.T) {
+	ctx := context.Background()
+	bot := memory.BotScope("bot-x")
+	ch := memory.ChannelScope("wecom:dm:T1")
+
+	botSrc := &fakeRetriever{byScope: map[memory.Scope][]memory.Entry{
+		bot: {
+			{ID: "xch:mem-1", Scope: bot, Content: "[wecom:dm:T1] aidata 测试库连接 host=9.134.38.148"},
+		},
+	}}
+	chSrc := &fakeRetriever{byScope: map[memory.Scope][]memory.Entry{
+		ch: {
+			{ID: "mem-1", Scope: ch, Content: "aidata 测试库连接 host=9.134.38.148"},
+		},
+	}}
+
+	merged := NewMergedRetriever(botSrc, chSrc)
+	got, err := merged.Recent(ctx, bot, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("mirror copy should be deduped, got %d: %+v", len(got), got)
+	}
+
+	all, err := merged.Retrieve(ctx, memory.Query{Scopes: []memory.Scope{bot}, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("Retrieve should dedupe the mirror copy too, got %d: %+v", len(all), all)
+	}
+}

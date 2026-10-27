@@ -46,9 +46,21 @@ You have persistent memory. Use the ` + "`memory`" + ` tool to save, search and 
 ## When to use it
 
 - **Save proactively**: whenever the user states a preference, corrects you, or shares personal information, save it without being asked.
-- **Search**: whenever you need to recall something from an earlier conversation.
+- **Search before you guess**: whenever the task depends on something the user told you earlier —
+  a host, port, log topic, project name, account, or a convention — call ` + "`search`" + ` first,
+  instead of guessing, and instead of asking the user to repeat it. "Look up the bug we found
+  yesterday" means search first; the log topic and the DB host are already in your memory.
 - **Delete stale entries**: whenever you find a memory that is outdated or wrong.
 - **Curate in bulk**: when you need to add and remove several entries, do it in a single ` + "`batch`" + ` operation.
+
+## How to search (keywords, not an exact phrase)
+
+` + "`query`" + ` is scored by relevance, not matched as one exact substring: several keywords separated by
+spaces work, and word order does not matter. ` + "`query`" + ` = "正式环境 日志主题" finds the stored fact
+"正式环境日志主题为 yak_log_json…" even though the stored text has no space there.
+If you get 0 results, retry with fewer and more distinctive keywords — one concept at a time,
+dropping filler words. Re-issuing the identical query cannot produce a different answer;
+fall back to ` + "`recent`" + ` or ` + "`count`" + ` to see what is actually stored in this scope.
 
 ## Time-span questions (read this before answering "when" questions)
 
@@ -69,7 +81,10 @@ Results are **always truncated by limit**, and the default order is newest-first
 - **Delete by ID is preferred**: ` + "`remove`" + ` accepts ` + "`id`" + ` (or ` + "`memory_id`" + `) for an unambiguous delete; this works even if the entry lives in a different scope (e.g. a bot-scope heartbeat note seen from a channel session). Use ` + "`search`" + ` first to get the exact ` + "`id`" + `.
 - **Substring remove**: if ` + "`old_text`" + ` matches nothing in the current scope but DOES match in another scope, the tool tells you the ` + "`id`" + ` and ` + "`scope`" + ` to retry with — do not give up.
 - When the store is full, use ` + "`batch`" + `: remove or replace old entries to free space first, then add the new ones.
-- NEVER store information that is trivially rediscoverable, raw data dumps, or short-lived TODOs.`,
+- NEVER store information that is trivially rediscoverable, raw data dumps, or short-lived TODOs.
+- **Memory is internal context**: use a recalled fact to act, but never read it back to the user
+  verbatim, and never mention that you keep notes. Secrets found in memory (hosts, tokens,
+  passwords) are for you to use, not to paste into a reply.`,
 	Enabled: true,
 }
 
@@ -156,7 +171,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					},
 					"query": map[string]any{
 						"type":        "string",
-						"description": "Search keyword for 'search' action.",
+						"description": "Keywords for action=search, scored by relevance (not an exact substring). Several space-separated keywords are fine and word order does not matter. If 0 results, retry with fewer, more distinctive keywords or use action=recent.",
 					},
 					"limit": map[string]any{
 						"type":        "integer",
@@ -309,6 +324,20 @@ func RegisterTools(mgr *tools.ToolManager, config ToolConfig) error {
 // Action handlers
 // ============================================================================
 
+// searchCandidateLimit 主动检索的候选扫描上限。
+//
+// 必须先拉够候选再打分：相关性打分是内存计算，候选太少等于把「整串子串匹配」
+// 的窄口径换成「只看最近 N 条」的另一种窄口径，一样会漏。上限只用于保护
+// 大库的打分开销（与 importantScanLimit 同量级）。
+const searchCandidateLimit = 2000
+
+// searchEntryMaxChars 单条检索结果回显的字符上限。
+//
+// 反例（2026-10-26 17:46 线上）：query="db" 命中并原样返回一篇 3000+ 字符的
+// 日志巡检报告，真正要的「aidata 测试库连接 host=…」被埋在后面。短记忆是主体，
+// 封顶只砍档案类长条目，并在末尾标注总长，模型知道被截断了可以换词再搜。
+const searchEntryMaxChars = 1200
+
 func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
 	queryText, _ := m["query"].(string)
 	category, _ := m["category"].(string)
@@ -329,20 +358,85 @@ func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		return nil, err
 	}
 
-	entries, err := repo.Retrieve(ctx, Query{
+	base := Query{
 		Scopes:   scopesFor(scope),
-		Text:     queryText,
 		Category: category,
-		Limit:    limit,
-		Order:    orderFor(m),
 		Since:    since,
 		Until:    until,
-	})
+	}
+
+	// 无 query：保持原语义（按 order 取最新/最旧的 N 条），不引入相关性。
+	if strings.TrimSpace(queryText) == "" {
+		base.Limit = limit
+		base.Order = orderFor(m)
+		entries, err := repo.Retrieve(ctx, base)
+		if err != nil {
+			return nil, errs.Wrap(err, "memory search failed")
+		}
+		return formatSearchEntries(entries, "", len(entries)), nil
+	}
+
+	// 有 query：先拉候选，再按相关性打分排序。
+	//
+	// 为什么不能继续用 Query.Text（SQL content LIKE '%q%'）：整串子串匹配，
+	// query 里多一个空格就 0 命中。2026-10-27 真实库（189 条）实测：
+	//   - 「正式环境 日志主题」LIKE=0，而库里躺着「正式环境日志主题为
+	//     yak_log_json，可用日志通道查正式环境问题」—— 中间没空格就永远搜不到；
+	//   - 「数据库 mysql」LIKE=0，库里有「测试数据库MySQL：9.134.38.148:3306」；
+	//   - 「db」LIKE=10 条，全是含 "db" 子串的噪音。
+	// 换成 SelectRelevant（Ochiai + CJK bigram + IDF）后前两条都是 top 命中。
+	// 这正是线上 LLM 连搜「数据库 mysql」「db」「SQL 查询」却一无所获的根因。
+	base.Limit = searchCandidateLimit
+	candidates, err := repo.Retrieve(ctx, base)
 	if err != nil {
 		return nil, errs.Wrap(err, "memory search failed")
 	}
+	picked := SelectRelevant(queryText, FilterRecall(candidates), nil, limit)
+	entries := make([]Entry, 0, len(picked))
+	for _, p := range picked {
+		entries = append(entries, p.Entry)
+	}
+	return formatSearchEntries(entries, queryText, len(candidates)), nil
+}
 
-	return formatEntries(entries, "search"), nil
+// formatSearchEntries 输出检索结果：单条封顶；未命中时给可行动的提示而不是
+// 一句干巴巴的 "No matching memory found."（否则模型只会把同一个词再搜一遍）。
+func formatSearchEntries(entries []Entry, query string, scanned int) any {
+	if len(entries) == 0 {
+		msg := "No matching memory found."
+		if strings.TrimSpace(query) != "" {
+			msg = fmt.Sprintf(
+				"Nothing scored above zero against %q (scanned %d entries in this scope). "+
+					"Retry with fewer, more distinctive keywords - one concept at a time, "+
+					"and drop filler words; or use action %q to see what is actually stored here.",
+				query, scanned, "recent")
+		}
+		return map[string]any{
+			"count":   0,
+			"message": msg,
+			"entries": []any{},
+		}
+	}
+	results := make([]EntryResult, 0, len(entries))
+	for _, e := range entries {
+		content := e.Content
+		if r := []rune(content); len(r) > searchEntryMaxChars {
+			content = string(r[:searchEntryMaxChars]) +
+				fmt.Sprintf("…[truncated, %d chars total; narrow the query or use action \"recent\"]", len(r))
+		}
+		results = append(results, EntryResult{
+			ID:         e.ID,
+			Content:    content,
+			Category:   e.Category,
+			Importance: e.Importance,
+			CreatedAt:  formatEntryTime(e.CreatedAt),
+		})
+	}
+	return map[string]any{
+		"count":   len(entries),
+		"type":    "search",
+		"entries": results,
+	}
 }
 
 func handleAdd(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
@@ -984,6 +1078,35 @@ func parseTimeParam(v any) (time.Time, error) {
 // channel 条目 ID 组成，因此增/改/删都能稳定定位到同一条镜像，避免重复累积。
 const crossChannelMirrorPrefix = "xch:"
 
+// MirrorContent 生成镜像正文：以 [<channelID>] 标注来源频道，且至多标注一次。
+//
+// 幂等是必须的：线上实测（2026-10-27，memory_entries 106 条）有 7 条 channel
+// 记忆的正文里已经带着自己的来源标签（"[wecom:dm:T72340005A] aidata 测试库连接…"），
+// 再拼一次就变成 "[id] [id] …"。成因是 LLM 从注入的召回块里读到带标签的镜像原文，
+// 连同标签一起又存回了 channel scope——若不在这里收敛，每轮都会多叠一层。
+func MirrorContent(channelID, content string) string {
+	if channelID == "" {
+		return content
+	}
+	prefix := "[" + channelID + "] "
+	for strings.HasPrefix(content, prefix) {
+		content = strings.TrimPrefix(content, prefix)
+	}
+	return prefix + content
+}
+
+// MirrorDedupeKey 内容去重键：剥掉开头的来源标签后再比较。
+//
+// 镜像条目（bot scope，ID 前缀 "xch:"）正文是 "[<channel-id>] <原文>"，与 channel
+// scope 里的原文逐字不同，按原文精确去重会放过它——同一件事在候选池里出现两次，
+// 白占召回预算。只有形如 "[a:b] " 的标签会被剥（所有 channel id 都带 ':')，
+// 两条无关记忆恰好同标签同正文的概率可忽略。
+var mirrorTagRe = regexp.MustCompile(`^\[[^\s\]]*:[^\s\]]*\]\s*`)
+
+func MirrorDedupeKey(content string) string {
+	return strings.TrimSpace(mirrorTagRe.ReplaceAllString(content, ""))
+}
+
 // mirrorChannelMemoryToBot 将一条 channel 作用域的记忆镜像到 bot 全局作用域，
 // 使任意频道的会话在召回（已加载 BotScope）时都能看到其他平台的活动。
 //
@@ -998,7 +1121,7 @@ func mirrorChannelMemoryToBot(ctx *llm.ToolExecContext, repo Repository, cfg Too
 	mirror := Entry{
 		ID:             crossChannelMirrorPrefix + originalID,
 		Scope:          botScope,
-		Content:        fmt.Sprintf("[%s] %s", entry.Scope.ID, entry.Content),
+		Content:        MirrorContent(entry.Scope.ID, entry.Content),
 		Category:       entry.Category,
 		Source:         entry.Source,
 		Importance:     entry.Importance,

@@ -111,6 +111,14 @@ type SnapshotConfig struct {
 	ImportantTopK int
 	// ImportantMinImportance 高价值保底的 importance 阈值（默认 0.7）。
 	ImportantMinImportance float64
+	// RelevanceInWindowWeight 主通道（时间窗口内）条目能拿到的 importance
+	// 等效加成上限（默认 0.6，见 DefaultRelevanceInWindowWeight）。
+	//
+	// 主通道此前只按 importance 降序排序，完全不参与相关性打分，导致「就在
+	// 窗口里、与当前话题高度相关、但 importance 排名靠后」的记忆被无关的高分
+	// 条目挤出字符预算（2026-10-27 真实库复测详见该常量的注释）。
+	// 设 0 即回到「纯按 importance 排」的旧行为。
+	RelevanceInWindowWeight float64
 	// ImportantRelevanceWeight 保底通道里相关性相对 importance 的权重（默认 0.6）。
 	//
 	// 保底通道的排序键是 relevance*weight + importance。设 0 即回到
@@ -186,6 +194,7 @@ func DefaultSnapshotConfig() SnapshotConfig {
 		ImportantTopK:            DefaultImportantTopK,
 		ImportantMinImportance:   DefaultImportantMinImportance,
 		ImportantRelevanceWeight: DefaultImportantRelevanceWeight,
+		RelevanceInWindowWeight:  DefaultRelevanceInWindowWeight,
 		RecalledMaxChars:         DefaultRecalledMaxChars,
 		// 单条长度封顶与近重复折叠均已从灰度转常开（2026-09-24 验证收益后）。
 		// 两者都只减少「重复/超长内容对记忆块预算的独占」，不新增召回来源。
@@ -306,6 +315,10 @@ func NewSnapshot(config ...SnapshotConfig) *Snapshot {
 		// （无 query 时相关性恒为 0，等价于纯 importance 排序）。
 		if config[0].ImportantRelevanceWeight > 0 {
 			cfg.ImportantRelevanceWeight = config[0].ImportantRelevanceWeight
+		}
+		// 与常开项同一约定：0 = 未设置 → 回落默认；负数 = 显式关闭（对照/回退用）。
+		if config[0].RelevanceInWindowWeight != 0 {
+			cfg.RelevanceInWindowWeight = config[0].RelevanceInWindowWeight
 		}
 		if config[0].BeyondWindowRetriever != nil {
 			cfg.BeyondWindowRetriever = config[0].BeyondWindowRetriever
@@ -448,6 +461,13 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	}
 	allEntries = FilterRecall(allEntries)
 
+	// 主通道相关性加权：给时间窗口内的条目也叠加相关性信号。
+	//
+	// 必须放在 recallBeyondWindow **之后**：补充通道的抬升基准 gate 取的是
+	// 主通道最高 importance，若先加权再算 gate，补充条目会被抬得更高，
+	// 反过来压掉主通道（与 capRecalledBudget 的意图相反）。
+	s.weightInWindowRelevance(allEntries)
+
 	// 候选池粗筛：按重要性降序保留前 MaxEntries*candidatePoolFactor 条，
 	// 真正的「注入条数硬上限」由 renderBlock 的 MaxEntries 执行。
 	//
@@ -499,6 +519,43 @@ func (s *Snapshot) doRefresh(ctx context.Context) error {
 	s.mu.Unlock()
 
 	return nil
+}
+
+// weightInWindowRelevance 就地抬升「与当前话题相关」的主通道条目的有效
+// importance：eff = importance + weight * 归一化相关性。
+//
+// 只抬不压：相关性为 0 的条目保持原 importance，配置权重为 0 或 Query 为空
+// 时整个函数直接返回，排序退化为旧行为。
+//
+// 抬的是**纯排序键**（importance 不渲染进 prompt、也不回写存储，见
+// renderBlock），因此可以超过 1.0，与 boostRelevance 的口径一致。
+func (s *Snapshot) weightInWindowRelevance(entries []Entry) {
+	if len(entries) == 0 || s.config.RelevanceInWindowWeight <= 0 {
+		return
+	}
+	if strings.TrimSpace(s.config.Query) == "" {
+		return
+	}
+
+	scores := NormalizedRelevanceScores(s.config.Query, entries)
+	boosted := 0
+	for i := range entries {
+		if scores[i] <= 0 {
+			continue
+		}
+		eff := entries[i].Importance + scores[i]*s.config.RelevanceInWindowWeight
+		if eff > maxSortImportance {
+			eff = maxSortImportance
+		}
+		if eff > entries[i].Importance {
+			entries[i].Importance = eff
+			boosted++
+		}
+	}
+	if boosted > 0 && s.logger != nil {
+		s.logger.Debugw("snapshot: boosted in-window entries by relevance",
+			"boosted", boosted, "of", len(entries), "weight", s.config.RelevanceInWindowWeight)
+	}
 }
 
 // recallBeyondWindow 在主通道（每 scope 最近 recentPerScope 条）之外，
