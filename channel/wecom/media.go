@@ -196,7 +196,7 @@ func (c *WeComChannel) downloadAndDecrypt(ctx context.Context, msgID string, it 
 
 // downloadMedia 拉一次密文，同时返回响应声明的 Content-Type（排查「返回的不是密文」时要用）。
 func (c *WeComChannel) downloadMedia(ctx context.Context, it mediaItem) ([]byte, string, error) {
-	if err := validateMediaURL(it.URL); err != nil {
+	if err := validateMediaURL(it.URL, c.cfg.MediaAllowedHosts); err != nil {
 		return nil, "", err
 	}
 	dlCtx, cancel := context.WithTimeout(ctx, wecomMediaTimeout)

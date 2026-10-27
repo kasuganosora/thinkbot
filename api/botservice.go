@@ -3956,6 +3956,30 @@ func (s *BotService) createWecomChannel(def dao.ChannelDefinition) (bot.Channel,
 			}
 		}
 	}
+	// 额外放行的媒体下载域名（逃生口：企微换桶名时不用等发版）。
+	if v, ok := raw["mediaAllowedHosts"]; ok {
+		switch arr := v.(type) {
+		case []any:
+			for _, item := range arr {
+				if s, isStr := item.(string); isStr && strings.TrimSpace(s) != "" {
+					cfg.MediaAllowedHosts = append(cfg.MediaAllowedHosts, strings.TrimSpace(s))
+				}
+			}
+		case []string:
+			for _, s := range arr {
+				if s = strings.TrimSpace(s); s != "" {
+					cfg.MediaAllowedHosts = append(cfg.MediaAllowedHosts, s)
+				}
+			}
+		case string:
+			// 表单里是逗号分隔的单行文本（registry 没有 list 类型）。
+			for _, s := range strings.Split(arr, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					cfg.MediaAllowedHosts = append(cfg.MediaAllowedHosts, s)
+				}
+			}
+		}
+	}
 
 	return wecom.NewChannel(def.Name, def.BotID, cfg), nil
 }

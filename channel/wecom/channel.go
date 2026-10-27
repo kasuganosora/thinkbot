@@ -166,7 +166,7 @@ func NewChannel(name, botID string, cfg Config) *WeComChannel {
 		botID:   botID,
 		cfg:     cfg,
 		hc:      http.New(),
-		mediaHC: http.New(http.WithHTTPClient(newMediaTransportClient()), http.WithMaxBodySize(wecomMediaMaxBytes+1024)),
+		mediaHC: http.New(http.WithHTTPClient(newMediaTransportClient(cfg.MediaAllowedHosts)), http.WithMaxBodySize(wecomMediaMaxBytes+1024)),
 		limiter: newSendLimiter(),
 		dedup:   make(map[string]time.Time),
 		pend:    make(map[string]*pendingCaption),
