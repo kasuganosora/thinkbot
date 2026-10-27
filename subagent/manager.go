@@ -563,6 +563,15 @@ loop:
 	case streamErr != nil:
 		return "", errs.Wrapf(streamErr, "subagent stream failed")
 	}
+	// 父 ctx 已截止或取消时，丢掉已经拼出来的半截文本。
+	//
+	// 流可以在没有任何 ErrorPart 的情况下关掉：适配器把截止误当成
+	// context.Canceled 时不发错误；即便发了，ctx 已经结束的 send() 也会丢掉。
+	// 编排循环遇到 ctx.Err() 只是 break，然后正常收尾。审查若把这段文本
+	// 交给 heuristic，「全部通过」会被当成审查通过。
+	if err := ctx.Err(); err != nil {
+		return "", errs.Wrapf(err, "subagent stream aborted")
+	}
 	return textBuf.String(), nil
 }
 

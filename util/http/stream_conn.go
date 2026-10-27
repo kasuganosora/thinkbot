@@ -208,7 +208,7 @@ func readErrorBody(resp *http.Response) []byte {
 //
 // 返回值：
 //   - nil: 正常结束（EOF）
-//   - context.Canceled: 用户主动取消
+//   - origCtx.Err(): 调用方 context 已结束（Canceled 与 DeadlineExceeded 必须分开）
 //   - *WatchdogTimeoutError: 看门狗超时
 //   - 其他 error: 读取错误
 func classifyStreamError(
@@ -228,11 +228,16 @@ func classifyStreamError(
 		return nil
 	}
 
-	// 原始 context 被取消 → 用户主动取消
-	if origCtx.Err() != nil {
-		log.Logger.Debugw(kind+" stream ended (user context canceled)",
-			"url", reqURL, "items", itemsReceived, "bytes", bytesReceived)
-		return context.Canceled
+	// 调用方 context 已结束。交还原错误，不要一律折成 context.Canceled。
+	//
+	// 审查超时是 DeadlineExceeded。各 LLM 适配器用
+	// `streamErr != context.Canceled` 决定要不要发 ErrorPart：折成 Canceled
+	// 会被当成用户主动停止，半截输出再配一个 FinishReasonStop 送出去。
+	// 审查文本里若含「全部通过」，heuristic 会把这次截止判成通过。
+	if err := origCtx.Err(); err != nil {
+		log.Logger.Debugw(kind+" stream ended (caller context done)",
+			"url", reqURL, "items", itemsReceived, "bytes", bytesReceived, "err", err)
+		return err
 	}
 
 	// 看门狗超时
