@@ -532,6 +532,10 @@ func buildReadFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	}
 }
 
+// testAfterWorkspaceRead 在 replace 读完、写回之前调用。生产环境保持 nil。
+// 并发测试用它把两次读改写对齐到同一份旧内容上，否则丢失更新只是偶发。
+var testAfterWorkspaceRead func(path string)
+
 // ============================================================================
 // sandbox_write_file — 写入文件（纯文本）
 // ============================================================================
@@ -570,29 +574,31 @@ func buildWriteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			}
 			content, _ := m["content"].(string)
 
-			data := []byte(content)
+			return withWorkspacePathLock(botID, path, func() (any, error) {
+				data := []byte(content)
 
-			ws, err := mgr.GetOrCreate(botID)
-			if err != nil {
-				return nil, err
-			}
+				ws, err := mgr.GetOrCreate(botID)
+				if err != nil {
+					return nil, err
+				}
 
-			if err := ws.WriteFile(ctx, path, data); err != nil {
-				return nil, err
-			}
-			recordWrite(ctx, path, "write")
+				if err := ws.WriteFile(ctx, path, data); err != nil {
+					return nil, err
+				}
+				recordWrite(ctx, path, "write")
 
-			lineCount := strings.Count(content, "\n") + 1
-			if content == "" {
-				lineCount = 0
-			}
+				lineCount := strings.Count(content, "\n") + 1
+				if content == "" {
+					lineCount = 0
+				}
 
-			return map[string]any{
-				"success": true,
-				"path":    path,
-				"size":    len(data),
-				"lines":   lineCount,
-			}, nil
+				return map[string]any{
+					"success": true,
+					"path":    path,
+					"size":    len(data),
+					"lines":   lineCount,
+				}, nil
+			})
 		}),
 	}
 }
@@ -664,54 +670,60 @@ func buildReplaceInFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				replaceAll = v
 			}
 
-			ws, err := mgr.GetOrCreate(botID)
-			if err != nil {
-				return nil, err
-			}
+			return withWorkspacePathLock(botID, path, func() (any, error) {
+				ws, err := mgr.GetOrCreate(botID)
+				if err != nil {
+					return nil, err
+				}
 
-			// 读取当前内容
-			data, err := ws.ReadFile(ctx, path)
-			if err != nil {
-				return nil, err
-			}
+				// 读取当前内容。锁覆盖读和写，避免并行节点互相覆盖。
+				data, err := ws.ReadFile(ctx, path)
+				if err != nil {
+					return nil, err
+				}
+				// 测试把读和写拉开。生产环境为 nil。
+				if testAfterWorkspaceRead != nil {
+					testAfterWorkspaceRead(path)
+				}
 
-			content := string(data)
-			// normalize file line endings too
-			content = strings.ReplaceAll(content, "\r\n", "\n")
+				content := string(data)
+				// normalize file line endings too
+				content = strings.ReplaceAll(content, "\r\n", "\n")
 
-			// 检查 old_str 是否存在
-			count := strings.Count(content, oldStr)
-			if count == 0 {
-				return nil, oldStrNotFoundError(path, content, oldStr)
-			}
-			if count > 1 && !replaceAll {
-				return nil, fmt.Errorf("old_str appears %d times in file %q — must be unique. Set replace_all=true to replace all, or provide a longer string with more surrounding context", count, path)
-			}
+				// 检查 old_str 是否存在
+				count := strings.Count(content, oldStr)
+				if count == 0 {
+					return nil, oldStrNotFoundError(path, content, oldStr)
+				}
+				if count > 1 && !replaceAll {
+					return nil, fmt.Errorf("old_str appears %d times in file %q — must be unique. Set replace_all=true to replace all, or provide a longer string with more surrounding context", count, path)
+				}
 
-			// 执行替换
-			var newContent string
-			replacedCount := 0
-			if replaceAll {
-				newContent = strings.ReplaceAll(content, oldStr, newStr)
-				replacedCount = count
-			} else {
-				newContent = strings.Replace(content, oldStr, newStr, 1)
-				replacedCount = 1
-			}
+				// 执行替换
+				var newContent string
+				replacedCount := 0
+				if replaceAll {
+					newContent = strings.ReplaceAll(content, oldStr, newStr)
+					replacedCount = count
+				} else {
+					newContent = strings.Replace(content, oldStr, newStr, 1)
+					replacedCount = 1
+				}
 
-			// 写回
-			if err := ws.WriteFile(ctx, path, []byte(newContent)); err != nil {
-				return nil, err
-			}
-			recordWrite(ctx, path, "replace")
+				// 写回
+				if err := ws.WriteFile(ctx, path, []byte(newContent)); err != nil {
+					return nil, err
+				}
+				recordWrite(ctx, path, "replace")
 
-			return map[string]any{
-				"success":  true,
-				"path":     path,
-				"oldSize":  len(data),
-				"newSize":  len(newContent),
-				"replaced": replacedCount,
-			}, nil
+				return map[string]any{
+					"success":  true,
+					"path":     path,
+					"oldSize":  len(data),
+					"newSize":  len(newContent),
+					"replaced": replacedCount,
+				}, nil
+			})
 		}),
 	}
 }
@@ -751,27 +763,29 @@ func buildDeleteFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				return nil, err
 			}
 
-			ws, err := mgr.GetOrCreate(botID)
-			if err != nil {
-				return nil, err
-			}
+			return withWorkspacePathLock(botID, path, func() (any, error) {
+				ws, err := mgr.GetOrCreate(botID)
+				if err != nil {
+					return nil, err
+				}
 
-			// 用 rm -rf 删除（路径已通过 validatePath 校验）
-			result, err := ws.Exec(ctx, ExecRequest{
-				Command: fmt.Sprintf("rm -rf -- %s", shellQuote(path)),
+				// 用 rm -rf 删除（路径已通过 validatePath 校验）
+				result, err := ws.Exec(ctx, ExecRequest{
+					Command: fmt.Sprintf("rm -rf -- %s", shellQuote(path)),
+				})
+				if err != nil {
+					return nil, err
+				}
+				if result.ExitCode != 0 {
+					return nil, fmt.Errorf("delete failed: %s", result.Stderr)
+				}
+				recordWrite(ctx, path, "delete")
+
+				return map[string]any{
+					"success": true,
+					"path":    path,
+				}, nil
 			})
-			if err != nil {
-				return nil, err
-			}
-			if result.ExitCode != 0 {
-				return nil, fmt.Errorf("delete failed: %s", result.Stderr)
-			}
-			recordWrite(ctx, path, "delete")
-
-			return map[string]any{
-				"success": true,
-				"path":    path,
-			}, nil
 		}),
 	}
 }
@@ -820,30 +834,32 @@ func buildMoveFileTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				return nil, err
 			}
 
-			ws, err := mgr.GetOrCreate(botID)
-			if err != nil {
-				return nil, err
-			}
+			return withWorkspacePathLocks(botID, []string{src, dst}, func() (any, error) {
+				ws, err := mgr.GetOrCreate(botID)
+				if err != nil {
+					return nil, err
+				}
 
-			result, err := ws.Exec(ctx, ExecRequest{
-				Command: fmt.Sprintf("mv -- %s %s", shellQuote(src), shellQuote(dst)),
+				result, err := ws.Exec(ctx, ExecRequest{
+					Command: fmt.Sprintf("mv -- %s %s", shellQuote(src), shellQuote(dst)),
+				})
+				if err != nil {
+					return nil, err
+				}
+				if result.ExitCode != 0 {
+					return nil, fmt.Errorf("move failed: %s", result.Stderr)
+				}
+				// 移动同时影响两个路径：源被移走、目标被覆盖。
+				// 两个都要记录，否则「A 移走 B 正在读的文件」这类冲突检测不到。
+				recordWrite(ctx, src, "move")
+				recordWrite(ctx, dst, "move")
+
+				return map[string]any{
+					"success": true,
+					"src":     src,
+					"dst":     dst,
+				}, nil
 			})
-			if err != nil {
-				return nil, err
-			}
-			if result.ExitCode != 0 {
-				return nil, fmt.Errorf("move failed: %s", result.Stderr)
-			}
-			// 移动同时影响两个路径：源被移走、目标被覆盖。
-			// 两个都要记录，否则「A 移走 B 正在读的文件」这类冲突检测不到。
-			recordWrite(ctx, src, "move")
-			recordWrite(ctx, dst, "move")
-
-			return map[string]any{
-				"success": true,
-				"src":     src,
-				"dst":     dst,
-			}, nil
 		}),
 	}
 }

@@ -576,10 +576,14 @@ var backfillNotificationTypes = []string{"mention"}
 
 // notificationQuery 是 GET /api/v1/notifications 的查询条件。
 //
-// Mastodon 的分页是半开区间：
+// 上游 Mastodon 的分页是半开区间：
 //   - SinceID：只返回比它更新的（> since_id）
 //   - MaxID：只返回比它更旧的（< max_id）
-//   - MinID：只返回比它更新的（> min_id，用于向前翻页）
+//   - MinID：只返回比它更新的（> min_id）。带上它会把排序改成升序，
+//     backfill 的「最新在前 + max_id」循环不能用。
+//
+// community（c.hime.at）把 since_id 做成了闭区间（id >= since_id）。
+// 调用方必须自己丢掉不严格新于锚点的行，不能假设开区间。
 //
 // backfill 需要 since_id + max_id 组合翻页：since_id 锚定断连窗口下界，
 // max_id 逐页往更旧处取，直到取完或触及封顶。
@@ -594,7 +598,8 @@ type notificationQuery struct {
 // getNotifications 拉取通知（GET /api/v1/notifications），按时间倒序（最新在前）。
 //
 // 用于断连 backfill：Mastodon streaming 同样不重放断连窗口内的事件，
-// 以锚点为 since_id（开区间）把错过的 mention 补回来。
+// 以锚点为 since_id 把错过的 mention 补回来。since_id 在 community 上是闭区间，
+// 过滤放在 backfillMentions。
 // Types 为空时返回全部类型；调用方按需传 ["mention"]。
 func (a *apiClient) getNotifications(ctx context.Context, q notificationQuery) ([]Notification, error) {
 	limit := q.Limit

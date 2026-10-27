@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,47 @@ func TestStreamWithWatchdog_DrainCompletesPromptly(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("drain did not complete promptly: took %v", elapsed)
+	}
+}
+
+// deadlinePartialProvider 先吐一段像「审查通过」的文本，然后等调用方 ctx 结束
+// 再关掉流，且不发 ErrorPart。这是 SSE 截止后 send() 把 ErrorPart 丢掉、
+// 编排循环只 break 的形状：消费者若把半截文本当成功返回，审查会启发式放行。
+type deadlinePartialProvider struct{}
+
+func (p *deadlinePartialProvider) Name() string { return "deadline-partial" }
+func (p *deadlinePartialProvider) DoGenerate(ctx context.Context, _ llm.GenerateParams) (*llm.GenerateResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (p *deadlinePartialProvider) DoStream(ctx context.Context, _ llm.GenerateParams) (*llm.StreamResult, error) {
+	ch := make(chan llm.StreamPart, 1)
+	ch <- &llm.TextDeltaPart{Text: "构建和测试全部通过"}
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
+func TestStreamWithWatchdog_ParentDeadlineDiscardsPartialText(t *testing.T) {
+	provider := &deadlinePartialProvider{}
+	sa := New(provider, "m")
+	defer sa.Close()
+	mgr := NewSubAgentManager(provider, "m")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	text, err := mgr.streamWithWatchdog(ctx, sa, "task", 5*time.Second, 10*time.Second)
+	if err == nil {
+		t.Fatalf("parent deadline returned partial text %q with a nil error", text)
+	}
+	if text != "" {
+		t.Fatalf("partial text must be discarded on abort, got %q", text)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v want context.DeadlineExceeded", err)
 	}
 }
 
