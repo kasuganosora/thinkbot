@@ -192,10 +192,11 @@ func (m *MergedRetriever) Recent(ctx context.Context, scope memory.Scope, limit 
 			continue
 		}
 		for _, e := range entries {
-			if seen[e.Content] {
+			key := memory.MirrorDedupeKey(e.Content)
+			if seen[key] {
 				continue
 			}
-			seen[e.Content] = true
+			seen[key] = true
 			out = append(out, e)
 		}
 	}
@@ -215,10 +216,11 @@ func (m *MergedRetriever) Retrieve(ctx context.Context, query memory.Query) ([]m
 			continue
 		}
 		for _, e := range entries {
-			if seen[e.Content] {
+			key := memory.MirrorDedupeKey(e.Content)
+			if seen[key] {
 				continue
 			}
-			seen[e.Content] = true
+			seen[key] = true
 			out = append(out, e)
 		}
 	}
