@@ -229,6 +229,9 @@ func PreApprovalFromContext(ctx context.Context) PreApprovalMap {
 func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateConfig) (*GenerateResult, error) {
 	// Per-run tool call guard (identical repeats / consecutive failures).
 	ctx = withToolGuard(ctx, cfg)
+	// Shared per-turn counter for opt-in heavy tools (memory deep recall).
+	// Installing the counter does not run recall.
+	ctx = WithToolTurnBudget(ctx)
 	// Resolve tool schemas
 	for i := range cfg.Params.Tools {
 		schema, err := resolveSchema(cfg.Params.Tools[i].Parameters)
@@ -569,6 +572,8 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfig) (*StreamResult, error) {
 	// Per-run tool call guard (identical repeats / consecutive failures).
 	ctx = withToolGuard(ctx, cfg)
+	// Shared per-turn counter for opt-in heavy tools (memory deep recall).
+	ctx = WithToolTurnBudget(ctx)
 	// Resolve tool schemas
 	for i := range cfg.Params.Tools {
 		schema, err := resolveSchema(cfg.Params.Tools[i].Parameters)

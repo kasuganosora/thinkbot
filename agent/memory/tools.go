@@ -62,9 +62,21 @@ If you get 0 results, retry with fewer and more distinctive keywords — one con
 dropping filler words. Re-issuing the identical query cannot produce a different answer;
 fall back to ` + "`recent`" + ` or ` + "`count`" + ` to see what is actually stored in this scope.
 
+## Related recall (omit query)
+
+Omit ` + "`query`" + `, and do not pass ` + "`order`" + ` / ` + "`since`" + ` / ` + "`until`" + `, when you need related memories
+that are not already in the visible conversation. That call runs a heavier recall loop: it reads
+about the last four turns, expands keywords, searches, and returns a short refined set for this turn.
+It is capped (once per turn, a timeout, and a small result). If it returns a short error, pass an
+explicit ` + "`query`" + ` instead. Do not call this form on every turn.
+
+Passing ` + "`query`" + ` stays a fast lexical search. Set ` + "`deep`" + ` true only when that query should still
+go through the heavier loop.
+
 ## Time-span questions (read this before answering "when" questions)
 
-Results are **always truncated by limit**, and the default order is newest-first. That means:
+An empty query without order/since/until is related recall, not a time listing. Time-span results
+are **always truncated by limit**, and an explicit order defaults to newest-first. That means:
 
 - "What is your earliest memory?" / "When did we first talk?" → action "search" with order="oldest" and limit=5.
   Do NOT answer from action "recent", and do NOT answer from the memories already in your system prompt —
@@ -110,6 +122,9 @@ type ToolConfig struct {
 	MaxUserChars int
 	// EntrySeparator 条目分隔符（默认 "\n§\n"）。
 	EntrySeparator string
+	// Recall 配置 action=search 的按需深度召回。Provider 为空时该路径直接
+	// 返回短错误；显式 query 不使用它。
+	Recall DeepRecallConfig
 }
 
 // DefaultToolConfig 返回默认配置。
@@ -152,7 +167,8 @@ func Tools(config ToolConfig) []tools.ToolDef {
 			"Manage persistent memory that survives across sessions. "+
 				"Use action to add/replace/remove/search/recent/count/batch. "+
 				"Memory is injected into future sessions, keep entries compact and high-signal. "+
-				"When making multiple changes, use batch (all-or-nothing against final char budget). For replace: ALWAYS pass both old_text AND content.",
+				"When making multiple changes, use batch (all-or-nothing against final char budget). For replace: ALWAYS pass both old_text AND content. "+
+				"For action=search: omit query (and do not pass order/since/until) to run related-memory recall; pass query for a fast lexical search.",
 			map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -171,7 +187,11 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					},
 					"query": map[string]any{
 						"type":        "string",
-						"description": "Keywords for action=search, scored by relevance (not an exact substring). Several space-separated keywords are fine and word order does not matter. If 0 results, retry with fewer, more distinctive keywords or use action=recent.",
+						"description": "Keywords for action=search, scored by relevance (not an exact substring). Several space-separated keywords are fine and word order does not matter. Omit query, and do not pass order/since/until, to run related-memory recall against the recent conversation instead (heavier, budgeted). If a lexical search returns 0 results, retry with fewer, more distinctive keywords or use action=recent.",
+					},
+					"deep": map[string]any{
+						"type":        "boolean",
+						"description": "For action=search. true forces the heavier related-memory loop even when query is set. false forces the fast path. Omit it to use the default: empty query (and no order/since/until) is the heavier loop; an explicit query is the fast lexical search.",
 					},
 					"limit": map[string]any{
 						"type":        "integer",
@@ -265,7 +285,7 @@ func Tools(config ToolConfig) []tools.ToolDef {
 
 				switch action {
 				case "search":
-					return handleSearch(ctx, repo, scope, m)
+					return handleSearch(ctx, repo, config, scope, m)
 
 				case "add":
 					result, err := handleAdd(ctx, repo, config, scope, m)
@@ -308,6 +328,9 @@ func Tools(config ToolConfig) []tools.ToolDef {
 		),
 	}
 
+	// Resident on purpose: related recall is opt-in, so the model must be able
+	// to call search without a tool_search mount.
+	memoryTool.DeferredLoad = false
 	return []tools.ToolDef{memoryTool}
 }
 
@@ -337,7 +360,7 @@ const searchCandidateLimit = 2000
 // 封顶只砍档案类长条目，并在末尾标注总长，模型知道被截断了可以换词再搜。
 const searchEntryMaxChars = 1200
 
-func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[string]any) (any, error) {
+func handleSearch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scope Scope, m map[string]any) (any, error) {
 	queryText, _ := m["query"].(string)
 	category, _ := m["category"].(string)
 	limit := 10
@@ -364,7 +387,13 @@ func handleSearch(ctx *llm.ToolExecContext, repo Repository, scope Scope, m map[
 		Until:    until,
 	}
 
-	// 无 query：保持原语义（按 order 取最新/最旧的 N 条），不引入相关性。
+	// 无 query、且没有 order/since/until：按需深度召回。显式 query 仍走下面的
+	// 轻量词法检索；带时间参数的空 query 保持按时间翻页，不进深度循环。
+	if deepRecallRequested(m) {
+		return runDeepSearch(ctx, repo, cfg, scope, m, queryText, since, until)
+	}
+
+	// 无 query（时间浏览）：按 order 取最新/最旧的 N 条，不引入相关性。
 	if strings.TrimSpace(queryText) == "" {
 		base.Limit = limit
 		base.Order = orderFor(m)
