@@ -1219,6 +1219,16 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		tools = withCompact
 	}
 
+	// ⚠️ 第 0 步也要带协议提醒：applyPrepareStep 只在 step > 0 触发（首轮没有
+	// 「上一步的历史」可压缩，这是对的），所以只靠 PrepareStep 的话**单步轮次
+	// 一条提醒都拿不到** —— 而纯对话轮次（1 步）占到实测 43 轮里的 13 轮。
+	// 2026-10-27 20:41 实测：web 单步轮次照样漏协议，走了 fail-open 兜底。
+	// 这里把提醒顶到初始消息末尾（用户消息之后、生成之前），后续每步由
+	// PrepareStep 幂等重顶，全程恒有一条。
+	if replyControlActive {
+		messages = appendReplyControlReminder(messages)
+	}
+
 	// 构建参数
 	params := llm.GenerateParams{
 		Model:            s.config.Model,
