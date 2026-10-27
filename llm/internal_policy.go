@@ -56,6 +56,7 @@ const (
 	PurposeWorkflowHeal    = "workflow_heal"
 	PurposeVision          = "vision"
 	PurposeNotify          = "notify"
+	PurposeMemoryRecall    = "memory_recall"
 )
 
 // InternalPurposes lists every purpose with its built-in reasoning default.
@@ -81,6 +82,7 @@ var InternalPurposes = []struct {
 	{PurposeWorkflowHeal, "low", "workflow healing diagnosis", 0},
 	{PurposeVision, "low", "vision transcription of attachments", 0},
 	{PurposeNotify, "low", "notify bot mode: the bot relays an external notification to its owner", 0},
+	{PurposeMemoryRecall, "low", "on-demand related-memory recall inside memory search (keyword expansion and candidate refine); runs only when the model calls search without a query or with deep set", 1024},
 }
 
 // MemoryDedupDefaultMaxTokens is the built-in output cap (reasoning included)
