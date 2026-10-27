@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -53,6 +54,43 @@ func (p *scriptedProvider) DoStream(ctx context.Context, params llm.GeneratePara
 }
 
 func (p *scriptedProvider) callCount() int { return int(atomic.LoadInt32(&p.calls)) }
+
+// abortingReviewProvider 先吐出含「全部通过」的半截审查，再挂到 ctx 结束。
+// 不发 ErrorPart：截止时刻 send() 会把错误片段丢掉，流看起来像正常收尾。
+type abortingReviewProvider struct{}
+
+func (p *abortingReviewProvider) Name() string { return "aborting-review" }
+func (p *abortingReviewProvider) DoGenerate(ctx context.Context, _ llm.GenerateParams) (*llm.GenerateResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (p *abortingReviewProvider) DoStream(ctx context.Context, _ llm.GenerateParams) (*llm.StreamResult, error) {
+	ch := make(chan llm.StreamPart, 1)
+	ch <- &llm.TextDeltaPart{Text: midAnalysisNoVerdict}
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
+// TestReview_DeadlineDoesNotHeuristicPass：SSE 截止截断的审查文本里若含
+// 「全部通过」，不能走 heuristic 放行。必须把截止当作审查失败上抛。
+func TestReview_DeadlineDoesNotHeuristicPass(t *testing.T) {
+	e, saMgr := newTestExecutor(&abortingReviewProvider{})
+	defer saMgr.CloseAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	res, err := e.Review(ctx, &DAGNode{ID: "n-deadline", Name: "审查"}, "产物")
+	if err == nil {
+		t.Fatalf("deadline must fail the review, got passed=%v source=%s", res.Passed, res.Source)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v want context.DeadlineExceeded", err)
+	}
+}
 
 // midAnalysisNoVerdict 复刻线上真实形态：审查跑了多步工具、通篇是中途叙述，
 // 结尾没有约定的判定 JSON，也没有显式判定行。
