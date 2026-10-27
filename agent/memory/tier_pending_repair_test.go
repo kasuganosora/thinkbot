@@ -132,8 +132,8 @@ func TestStartPendingRepairFlipsUserStatedFacts(t *testing.T) {
 	}
 	rows := []dao.TieredMemoryModel{
 		// 用户原话支撑的 pending：应被改判为 active
-		mk("e-user", "正式环境日志主题为 yak_log_json",
-			`{"status":"pending","inferred":true,"source_entries":[{"speaker":"user","content":"正式环境日志主题是 yak_log_json"}]}`),
+		mk("e-user", "演示环境日志主题为 demo_events",
+			`{"status":"pending","inferred":true,"source_entries":[{"speaker":"user","content":"演示环境日志主题是 demo_events"}]}`),
 		// 只有 bot 回复支撑的 pending：保持 pending（确实是系统猜测）
 		mk("e-assistant", "bot 自己猜的事实",
 			`{"status":"pending","inferred":true,"source_entries":[{"speaker":"assistant","content":"猜的"}]}`),

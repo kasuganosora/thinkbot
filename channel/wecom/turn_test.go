@@ -307,8 +307,7 @@ func TestHoldWorthy_BusyAndStopSkipCaptionWindow(t *testing.T) {
 //
 //   - 仍在跑的长任务即便 age 超限也绝不能摘 —— 摘了之后同会话的下一条消息查不到
 //     活跃登记，会被判成 turnNew 起第二个 turn，两个 turn 并发跑在同一个 workspace
-//     上互相破坏（2026-10-26 15:16 实测：后起的 turn 一句 `rm -rf` 就删掉了前一个
-//     turn 刚装好的目录）。
+//     上互相破坏（后起的 turn 会改到前一个 turn 还在用的工作目录）。
 //   - 编排层确认已结束的登记才是真僵尸，那种必须摘，否则后续消息一律被判成「打断」。
 func TestReapTurns(t *testing.T) {
 	ctl := newFakeTurnCtl()
@@ -388,7 +387,7 @@ func TestWatchAppend_UnconsumedFallsBackToNewTurn(t *testing.T) {
 	}
 }
 
-// TestWatchAppend_LongTurnStillFallsBack 回归用例（2026-10-26 实测）：
+// TestWatchAppend_LongTurnStillFallsBack：
 // 本轮跑得比流式气泡寿命（streamMaxAge，默认 5 分钟）还久时，兜底 watcher
 // **不能**提前放弃 —— 旧实现把等待上限错绑在 streamMaxAge 上，长任务里
 // TakeUnconsumedAppends 永远没机会执行，补充被静默丢弃。
@@ -406,14 +405,14 @@ func TestWatchAppend_LongTurnStillFallsBack(t *testing.T) {
 	c.watchAppendMaxWaitOverride = 3 * time.Second
 
 	ctl.markLive("T1", true)
-	ctl.leftover("T1", "正式环境的主体是 yak_log_json")
+	ctl.leftover("T1", "补充：日志主题是 demo_events")
 	// 本轮在「旧上限」之后才结束（模拟 17 分钟的长任务）。
 	go func() {
 		time.Sleep(800 * time.Millisecond)
 		ctl.markLive("T1", false)
 	}()
 
-	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "正式环境的主体是 yak_log_json"}
+	msg := core.Message{ID: "m1", BotID: "b", Channel: "k", Text: "补充：日志主题是 demo_events"}
 	c.watchAppend(context.Background(), msg, "T1")
 
 	waitDelivered(t, &mu, &got, 1)

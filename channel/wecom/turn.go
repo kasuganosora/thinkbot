@@ -221,11 +221,10 @@ func (c *WeComChannel) watchAppendMaxWait() time.Duration {
 
 // appendWatchMaxWait 兜底 watcher 的最长等待时间（见 watchAppend）。
 //
-// ⚠️ 绝不能用 streamMaxAge（默认 5 分钟）：那是**企微流式气泡**的寿命，与
-// 「本轮编排跑多久」毫无关系。实测 2026-10-26：用户在第 4 分钟补充，那一轮
-// 跑到第 17 分钟才结束 —— watcher 在第 9 分钟就放弃了，TakeUnconsumedAppends
-// 压根没机会执行，补充被静默丢弃。长任务是常态（没有墙钟硬上限），这里给一个
-// 远大于任何合理轮次的上限，代价只是一次每 250ms 的 map 查表。
+// 不能用 streamMaxAge（默认 5 分钟）：那是企微流式气泡的寿命，不是本轮编排
+// 要跑多久。长工具链经常超过气泡寿命；若 watcher 提前放弃，TakeUnconsumedAppends
+// 不会执行，补充被静默丢弃。这里给一个远大于合理轮次的上限，代价只是一次
+// 每 250ms 的 map 查表。
 const appendWatchMaxWait = time.Hour
 
 // startsNewTurn 这条消息会不会起一个新轮次（**无副作用**的预判）。
@@ -378,11 +377,10 @@ func (c *WeComChannel) reapTurns(ctx context.Context) {
 	c.turnMu.Unlock()
 
 	for _, s := range stale {
-		// ⚠️⚠️ **仍在跑的轮次绝不能摘**。摘掉之后同会话的下一条消息查不到
+		// 仍在跑的轮次绝不能摘。摘掉之后同会话的下一条消息查不到
 		// 活跃登记，会被判成 turnNew → 起第二个 turn，两个 turn 并发跑在
-		// 同一个 workspace 上互相破坏（2026-10-26 15:16 实测：后起的 turn
-		// 一句 `rm -rf wecom-doc-mcp && git clone` 就把前一个 turn 刚装好的
-		// 目录删了，两边重复劳动、双双变慢）。
+		// 同一个 workspace 上互相破坏（后起的 turn 可能删掉前一个 turn
+		// 刚准备好的目录，两边重复劳动、双双变慢）。
 		//
 		// 光看 age 是不够的：长任务天然会超过 streamMaxAge，但它**没结束**。
 		// 是否僵死要以编排侧为准（turnRunning → ctl.IsMessageActive）——

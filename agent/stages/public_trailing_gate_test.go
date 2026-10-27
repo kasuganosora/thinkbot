@@ -18,12 +18,12 @@ import (
 
 func TestTrailingGate_KeepsRealAnswer(t *testing.T) {
 	// 事故样本：过场话在 <public> 里，真正答复写在标签外 —— 必须照发。
-	raw := "<public>容栞娜翻翻资料</public>查完啦，这个是 Re0 里老吴的梗，出处是 2018 年的一段直播。"
+	raw := "<public>我先核对一下资料</public>查完啦，手册第 3 节写的是蓝色主题，不是绿色。"
 	text, trailingLen, adopted := extractPublicReplyDetailed(CleanOutboundText(raw))
 	if !adopted {
 		t.Fatalf("real answer after </public> must be adopted, got text=%q trailingLen=%d", text, trailingLen)
 	}
-	if !strings.Contains(text, "查完啦") || !strings.Contains(text, "容栞娜翻翻资料") {
+	if !strings.Contains(text, "查完啦") || !strings.Contains(text, "我先核对一下资料") {
 		t.Fatalf("both blocks must survive: %q", text)
 	}
 }
@@ -80,10 +80,10 @@ func TestLooksLikePrivateTrailing_CoversEnglishSignals(t *testing.T) {
 func TestLooksLikePrivateTrailing_DoesNotEatNormalReplies(t *testing.T) {
 	// 闸门误判的代价是「答复被丢回 3987099 之前的事故状态」，必须确认正常中文回复放行。
 	normal := []string{
-		"我先查一下再告诉大小姐。",
+		"我先查一下再告诉你。",
 		"这个我需要分三步说明：第一步装依赖，第二步跑测试，第三步看日志。",
 		"其实我觉得可以这样：先确认授权，再选低谷时段。",
-		"好的呀，栞娜记进小本本了（",
+		"好的呀，我记在备忘里了（",
 	}
 	for _, s := range normal {
 		if looksLikePrivateTrailing(s) {

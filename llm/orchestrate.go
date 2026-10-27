@@ -662,13 +662,11 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 			}
 			// 中途追加：把用户在流式生成中补充的内容注入当前轮（Claude-CLI 风格）。
 			//
-			// ⚠️⚠️ 必须**每一步边界**都取，不能只靠下面「本步没有工具调用」那处
-			// 收尾分支。实测 2026-10-26 16:32：群里补充「正式环境的主体是
-			// yak_log_json」，那一轮连续 30+ 步都在调工具（SearchLog / exec /
-			// read_file），收尾分支一次都没命中 —— 补充在带缓冲的通道里躺了 13 分钟，
-			// 直到本轮结束被静默丢弃。AppendToMessage 返回 true 只代表「投递进通道」，
-			// 不代表「被消费」，两者之间可以隔很久、也可以永远不到。
-			// 非流式编排 OrchestrateGenerate 在循环开头取，这里必须对齐。
+			// 必须在每一步边界取用，不能只靠下面「本步没有工具调用」的收尾分支。
+			// 长工具链一轮里收尾分支可能一次都不命中，补充会一直留在通道里直到
+			// 本轮结束被丢弃。AppendToMessage 返回 true 只代表「投递进通道」，
+			// 不代表「被消费」。非流式编排 OrchestrateGenerate 在循环开头取，
+			// 这里必须对齐。
 			//
 			// 取用位置固定在 applyPrepareStep 之后：刚注入的用户消息不应被本步的
 			// reducer / compactor 当场压缩掉。
@@ -1015,9 +1013,7 @@ func drainInterruptMessages(ctx context.Context, ch chan string, messages *[]Mes
 	// 可观测性：这是补充**真正进入上下文**的唯一时刻。
 	//
 	// 「投递成功」（AppendToMessage 返回 true）与「被编排层取用」是两件事，
-	// 中间可以隔十几分钟，也可能永远不到。此前全程没有一行日志，只能靠
-	// 「bot 的行为有没有变」反推，排查成本极高 —— 2026-10-26 那次补充
-	// 就是在通道里躺了 13 分钟后被静默丢弃，日志却显示「注入成功」。
+	// 中间可以隔很久，也可能永远不到。没有这行日志时，只能靠回复变没变来反推。
 	if n > 0 {
 		if lg := traceid.L(ctx); lg != nil {
 			lg.Infow("interrupt: user supplement consumed into context", "count", n)

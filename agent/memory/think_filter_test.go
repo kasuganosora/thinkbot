@@ -447,7 +447,7 @@ func TestStripRecallBlocks(t *testing.T) {
 	}{
 		{
 			name: "memory block removed with content",
-			in:   "前面正常回复\n<recalled_memory>\nMEMORY (your personal notes)\n正式环境日志主题为 yak_log_json\n</recalled_memory>\n后面正常回复",
+			in:   "前面正常回复\n<recalled_memory>\nMEMORY (your personal notes)\n演示环境日志主题为 demo_events\n</recalled_memory>\n后面正常回复",
 			want: "前面正常回复\n\n后面正常回复",
 		},
 		{

@@ -23,10 +23,8 @@ import (
 // 凭据来源（按序，都不满足则 t.Skip）：
 //   1. 环境变量 THINKBOT_TEST_LLM_API_KEY / _BASE_URL / _MODEL / _CHAT_MODE
 //      （与 skill/integration_test.go 同范式）
-//   2. 本机项目根 thinkbot.db 的 provider.provider-djtzhmuij940（真实 GLM 凭据）
-//      + bot.bot-2d8f9b087270da0bcfe177a5.main（模型名）
-//
-// 这样无需把 secret 硬编码进代码，露娜直接 `go test` 即可用真实 GLM 跑。
+//   2. 本机项目根 thinkbot.db，键名由 THINKBOT_TEST_DB_PROVIDER_KEY /
+//      THINKBOT_TEST_DB_MODEL_KEY 指定（不要把线上键写进仓库）
 //
 // 运行（强联网 + 真实 GLM）：
 //   go test -v -run TestReplyControl_RealLLM -timeout 180s ./agent/stages/
@@ -104,8 +102,12 @@ func loadGLMFromDB(t *testing.T) (apiKey, baseURL, model string) {
 
 	// provider JSON 含 apiKey / baseUrl
 	var provJSON string
+	providerKey := os.Getenv("THINKBOT_TEST_DB_PROVIDER_KEY")
+	if providerKey == "" {
+		return "", "", ""
+	}
 	if err := conn.QueryRow(
-		"SELECT value FROM config_settings WHERE key='provider.provider-djtzhmuij940'",
+		"SELECT value FROM config_settings WHERE key=?", providerKey,
 	).Scan(&provJSON); err != nil {
 		return "", "", ""
 	}
@@ -118,10 +120,12 @@ func loadGLMFromDB(t *testing.T) (apiKey, baseURL, model string) {
 	}
 	// bot 主模型名
 	var m string
-	if err := conn.QueryRow(
-		"SELECT value FROM config_settings WHERE key='bot.bot-2d8f9b087270da0bcfe177a5.main'",
-	).Scan(&m); err == nil && m != "" {
-		model = m
+	if modelKey := os.Getenv("THINKBOT_TEST_DB_MODEL_KEY"); modelKey != "" {
+		if err := conn.QueryRow(
+			"SELECT value FROM config_settings WHERE key=?", modelKey,
+		).Scan(&m); err == nil && m != "" {
+			model = m
+		}
 	}
 	return prov.APIKey, prov.BaseURL, model
 }
@@ -148,22 +152,18 @@ func TestReplyControl_RealLLM(t *testing.T) {
 	}
 
 	t.Run("sensitive_timeline_post_stays_silent", func(t *testing.T) {
-		// 复现 2026-08-17 故障帖：可写 Misskey 时间线上 @blogtalk 分享 Cloak 技术文章，
-		// 该账号专注规避广告审核的欺骗性用途，bot 此前已标注谨慎互动。
-		// 这正是「模型知道不该回、却把独白当回复发出」的原始场景。
+		// 模型知道不该公开回复、却把独白当回复发出。用一条虚构的时间线帖子覆盖这条路径。
 		stage := newStage()
 		env := core.NewEnvelope(core.Message{
 			ID:      "test-reply-control-sensitive",
 			TraceID: "trace-sensitive",
-			BotID:   "bot-2d8f9b087270da0bcfe177a5",
+			BotID:   "bot-test",
 			Source:  "misskey",
 			Channel: "misskey:timeline",
-			UserID:  "blogtalk",
-			Text: "你正在 Misskey 上作为 @栞娜 旁听 @blogtalk 的时间线。" +
-				"@blogtalk 刚分享了一篇关于 Cloak 技术（回源风暴与缓存穿透定位）的故障排查文章。" +
-				"背景：该账号长期专注 cloaking / AB 页跳转技术，涉及规避广告平台审核的欺骗性用途，" +
-				"你此前已标注对其内容互动需谨慎。这条新帖没有新增需要记录的信息，" +
-				"也不适合协助扩散或深入参与讨论。请基于以上判断，决定是否要公开回复这条帖子。",
+			UserID:  "demo-poster",
+			Text: "你正在一条公共时间线上旁听。demo-poster 刚发了一条广告帖，" +
+				"内容是引导别人绕过平台审核。你此前已经记下：不要协助扩散，也不要公开接话。" +
+				"这条新帖没有新增需要记录的信息。请决定是否公开回复。",
 			Mentioned: false,
 		})
 
@@ -202,7 +202,7 @@ func TestReplyControl_RealLLM(t *testing.T) {
 		env := core.NewEnvelope(core.Message{
 			ID:        "test-reply-control-friendly",
 			TraceID:   "trace-friendly",
-			BotID:     "bot-2d8f9b087270da0bcfe177a5",
+			BotID:     "bot-test",
 			Source:    "web",
 			Channel:   "web:direct",
 			UserID:    "luna",
@@ -245,7 +245,7 @@ func TestReplyControl_RealLLM(t *testing.T) {
 		env := core.NewEnvelope(core.Message{
 			ID:      "test-reply-control-mixed",
 			TraceID: "trace-mixed",
-			BotID:   "bot-2d8f9b087270da0bcfe177a5",
+			BotID:   "bot-test",
 			Source:  "misskey",
 			Channel: "misskey:timeline",
 			UserID:  "someone",
@@ -315,7 +315,7 @@ func TestReplyControl_RealLLM(t *testing.T) {
 		env := core.NewEnvelope(core.Message{
 			ID:      "test-reply-control-internal-no-public",
 			TraceID: "trace-internal-no-public",
-			BotID:   "bot-2d8f9b087270da0bcfe177a5",
+			BotID:   "bot-test",
 			Source:  "misskey",
 			Channel: "misskey:timeline",
 			UserID:  "someone",
