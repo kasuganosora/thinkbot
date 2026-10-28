@@ -84,6 +84,10 @@ services:
       # 实际 gid 建组 + usermod + setpriv 降权完成。
       - /var/run/docker.sock:/var/run/docker.sock
 
+      # Volume B：每个 bot 一个子目录 thinkbot-channel-<id>，里面是 channel unix socket。
+      # 路径在宿主和本容器里必须相同，因为 docker.sock 创建兄弟容器时按宿主路径挂载。
+      - /var/run/thinkbot-bots:/var/run/thinkbot-bots
+
       # 应用数据持久化：数据库（data/thinkbot.db 及 -wal/-shm）与 bot 工作空间
       # （data/workspaces）。删掉这个挂载等于删库，请纳入备份。
       #

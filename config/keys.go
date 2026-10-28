@@ -169,6 +169,10 @@ const (
 	// 使浏览器流量经部署侧自有代理出口（IP 归部署侧，符合「指纹归 thinkbot、IP 归部署侧」的责任边界）。
 	// 空值表示直连（默认）。
 	KeySandboxBrowserProxy = "sandbox.browser.proxy"
+
+	// KeySandboxChannelSecret 派生 per-bot channel token 的服务器密钥。
+	// 空则回退到 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先，可不落库。
+	KeySandboxChannelSecret = "sandbox.channel.secret"
 )
 
 // ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。
@@ -530,9 +534,10 @@ func ValidateKey(key string) error {
 // 含：JWT 签名密钥、各渠道 token/secret、数据库/代理凭据等。匹配前缀即可，
 // 因此 bot.<id>.xxx 这类按 bot 隔离的密钥也会被覆盖（如 channel token）。
 var SensitiveConfigKeys = map[string]bool{
-	"auth.jwt_secret": true,
-	"db.password":     true,
-	"db.path":         false, // 非敏感（已在死键修复中处理），仅占位说明
+	"auth.jwt_secret":        true,
+	"sandbox.channel.secret": true,
+	"db.password":            true,
+	"db.path":                false, // 非敏感（已在死键修复中处理），仅占位说明
 }
 
 // IsSensitiveKey 判断配置键是否敏感（含精确匹配与前缀匹配）。

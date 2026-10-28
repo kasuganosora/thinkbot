@@ -47,6 +47,7 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/sandbox"
+	"github.com/kasuganosora/thinkbot/sandbox/channelclient"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/toolperm"
@@ -425,7 +426,21 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 		cfg.MemoryLimit = "" // 0 = 不限制
 	default: // mb < 0：保留 DefaultConfig 的 2G 默认
 	}
+	s.applyChannelConfig(&cfg)
 	return cfg
+}
+
+// applyChannelConfig 填入 channel 服务器密钥与 socket 根目录。
+// 密钥优先读 THINKBOT_CHANNEL_SECRET（可不落库），其次 sandbox.channel.secret，最后 auth.jwt_secret。
+func (s *BotService) applyChannelConfig(cfg *sandbox.Config) {
+	cfg.ChannelSecret = channelclient.SelectSecret(
+		os.Getenv(channelclient.EnvSecret),
+		s.store.GetString(config.KeySandboxChannelSecret, ""),
+		s.store.GetString("auth.jwt_secret", ""),
+	)
+	if root := os.Getenv(channelclient.EnvSockRoot); root != "" {
+		cfg.ChannelSockRoot = root
+	}
 }
 
 // GetWorkspaceBaseDir 返回 bot 工作空间根目录。
@@ -2975,6 +2990,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		browserProxy = config.GlobalProxy(s.store)
 	}
 	sbCfg.BrowserProxy = browserProxy
+	s.applyChannelConfig(&sbCfg)
 
 	// 出站只读守卫：Pipeline 自动回复（ActionReply → Channel.Send）不经过工具权限，
 	// 因此「只看不发」的潜水bot 必须在出站链路拦。

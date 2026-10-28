@@ -50,7 +50,11 @@ ARG VERSION=dev
 # cgo to work. This is a stub"，主程序无法启动（已实测复现）。
 # 代价：二进制动态链接 glibc，故运行阶段必须同为 bookworm（下方即是），
 # 不能换成 alpine（musl）或 scratch。
-RUN CGO_ENABLED=1 GOOS=linux go build \
+# 沙箱镜像的 PID 1。静态链接，体积独立于主程序的 cgo/sqlite。
+# 随后用 -tags embedchannel 嵌进 thinkbot，slim 镜像里没有源码时 EnsureImage 仍能烤进 bot 镜像。
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o docker/sandbox/thinkbot-channel ./cmd/thinkbot-channel
+RUN CGO_ENABLED=1 GOOS=linux go build -tags embedchannel \
     -ldflags="-s -w \
       -X github.com/kasuganosora/thinkbot/internal/buildinfo.BuildTime=${BUILD_TIME} \
       -X github.com/kasuganosora/thinkbot/internal/buildinfo.GitRevision=${GIT_REVISION} \

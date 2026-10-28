@@ -4,8 +4,9 @@ package sandbox
 // botContainer — per-bot 长期持久化 Docker 容器
 //
 // 隔离目标：一个 bot 对应一个长期运行的容器（thinkbot-bot-<botID>）+ 一个 named
-// volume（thinkbot-bot-<botID>）挂载到容器内 /workspace。bot 的所有文件读写与命令
+// volume（thinkbot-bot-<botID>）挂载到容器内 /data。bot 的所有文件读写与命令
 // 执行都通过 docker exec 在容器内完成，宿主机磁盘不落任何 bot 文件，真正隔离。
+// 内置镜像的 PID 1 是 thinkbot-channel（镜像 ENTRYPOINT），不再用 sleep infinity。
 //
 // 生命周期：
 //   - ensure()：惰性创建/启动容器（若不存在则 docker run -d，已停止则 docker start）
@@ -20,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +31,9 @@ import (
 
 	"go.uber.org/zap"
 
+	botsandbox "github.com/kasuganosora/thinkbot/docker/sandbox"
+	"github.com/kasuganosora/thinkbot/sandbox/channel"
+	"github.com/kasuganosora/thinkbot/sandbox/channelclient"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -203,10 +209,22 @@ func (c *botContainer) recreateForNetwork(ctx context.Context, mode string, netw
 }
 
 // ensure 保证容器已创建并处于 running 状态（惰性、幂等）。
+// 内置 channel 镜像还会探针 unix socket；失败则删容器重建一次（保留数据 volume）。
 func (c *botContainer) ensure(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.ensureRunningLocked(ctx); err != nil {
+		return err
+	}
+	if err := c.ensureChannelLocked(ctx); err != nil {
+		c.ready = false
+		return err
+	}
+	return nil
+}
 
+// ensureRunningLocked 拉起容器。调用方必须已持有 c.mu。
+func (c *botContainer) ensureRunningLocked(ctx context.Context) error {
 	// 用户已显式停止：不再自动拉起，避免“停止后又被 agent exec 重启”的死循环。
 	if c.stopped {
 		return errs.New("bot_container: container is stopped by user; refusing to auto-start")
@@ -248,14 +266,103 @@ func (c *botContainer) ensure(ctx context.Context) error {
 	}
 }
 
-// create 创建并启动长期容器。
-func (c *botContainer) create(ctx context.Context) error {
-	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
-	image, err := resolveBotImage(ctx, c.cfg.Image, c.logger)
-	if err != nil {
-		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
-	}
+// usesChannel 为真时，这个 bot 的镜像入口是 thinkbot-channel，ensure 必须探针成功。
+// 自定义镜像仍走 sleep，不在这里失败（它们没有 channel 可探针）。
+func (c *botContainer) usesChannel() bool {
+	return isBuiltinImage(c.cfg.Image) || imageUsesChannelPID1(c.cfg.Image)
+}
 
+func (c *botContainer) channelHostDir() string {
+	root := c.cfg.ChannelSockRoot
+	if root == "" {
+		root = channelclient.DefaultSockRoot
+	}
+	return root + "/thinkbot-channel-" + sanitizeName(c.botID)
+}
+
+func (c *botContainer) channelSockFile() string {
+	return c.channelHostDir() + "/channel.sock"
+}
+
+// writeChannelToken puts the derived token on Volume B as a 0600 file and
+// does not pass it through the container environment. The daemon reads it
+// once at startup and deletes the file.
+func (c *botContainer) writeChannelToken(token string) error {
+	if err := os.MkdirAll(c.channelHostDir(), 0o750); err != nil {
+		return errs.Wrapf(err, "bot_container: channel socket dir %q", c.channelHostDir())
+	}
+	path := c.channelHostDir() + "/" + channel.TokenFileName
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token), 0o600); err != nil {
+		return errs.Wrap(err, "bot_container: write channel token")
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return errs.Wrap(err, "bot_container: commit channel token")
+	}
+	return nil
+}
+
+// ensureChannelLocked 探针 Health + Hello。失败则删除容器并重建一次，数据 volume 保留。
+// 调用方必须已持有 c.mu。没有第二种执行路径。
+func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
+	if !c.usesChannel() {
+		return nil
+	}
+	token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
+	if err != nil {
+		return errs.Wrap(err, "bot_container: channel token")
+	}
+	sock := c.channelSockFile()
+	probe := func(ctx context.Context) error {
+		return channelclient.Probe(ctx, sock, token, c.botID)
+	}
+	recreate := func(ctx context.Context) error {
+		c.logger.Warnw("channel probe failed; recreating bot container",
+			"container", c.container, "data_volume", c.volume)
+		if err := c.removeContainerKeepData(); err != nil {
+			return err
+		}
+		c.ready = false
+		return c.create(ctx)
+	}
+	if err := channelclient.Recover(ctx, probe, recreate); err != nil {
+		return errs.Wrapf(err, "bot_container: %s", c.container)
+	}
+	return nil
+}
+
+func (c *botContainer) removeContainerKeepData() error {
+	out, err := exec.Command("docker", "rm", "-f", c.container).CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "No such container") {
+		return errs.Wrapf(err, "bot_container: remove %q for channel recreate: %s",
+			c.container, strings.TrimSpace(string(out)))
+	}
+	c.logger.Infow("bot container removed for channel recreate",
+		"container", c.container, "data_volume", c.volume)
+	return nil
+}
+
+// DialChannel ensures the container and returns an authenticated session.
+// Later call sites can switch file and exec traffic onto this client.
+func (c *botContainer) DialChannel(ctx context.Context) (*channelclient.Client, error) {
+	if !c.usesChannel() {
+		return nil, errs.New("bot_container: image has no thinkbot-channel entrypoint")
+	}
+	if err := c.ensure(ctx); err != nil {
+		return nil, err
+	}
+	token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
+	if err != nil {
+		return nil, errs.Wrap(err, "bot_container: channel token")
+	}
+	return channelclient.Dial(ctx, c.channelSockFile(), token, c.botID)
+}
+
+// dockerRunArgs 是 `docker run -d` 的参数（不含 docker 本身）。
+// 内置镜像的 ENTRYPOINT 已是 thinkbot-channel，不能再追加 sleep，否则那两个词会变成
+// 守护进程的 argv。自定义镜像没有这个入口，仍用 sleep infinity 保持容器不退出。
+func (c *botContainer) dockerRunArgs(image string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", c.container,
@@ -289,7 +396,50 @@ func (c *botContainer) create(ctx context.Context) error {
 		args = append(args, "--network", "none")
 	}
 
+	if imageUsesChannelPID1(image) {
+		args = append(args, "-v", c.channelHostDir()+":"+channelclient.ContainerSockDir)
+		args = append(args, "-e", channel.EnvBotID+"="+c.botID)
+		// The token is a 0600 file on Volume B, not a container environment variable.
+		if uid := os.Getuid(); uid > 0 {
+			args = append(args,
+				"-e", channel.EnvSockUID+"="+strconv.Itoa(uid),
+				"-e", channel.EnvSockGID+"="+strconv.Itoa(os.Getgid()),
+			)
+		}
+		args = append(args,
+			"--label", "thinkbot.channel.version="+channel.Version,
+			"--label", "thinkbot.channel.protocol="+channel.Protocol,
+			image,
+		)
+		return args
+	}
 	args = append(args, image, "sleep", "infinity")
+	return args
+}
+
+// imageUsesChannelPID1 为真时，镜像 ENTRYPOINT 是 thinkbot-channel，容器命令必须留空。
+func imageUsesChannelPID1(image string) bool {
+	return strings.HasPrefix(image, botsandbox.BuiltinImagePrefix)
+}
+
+// create 创建并启动长期容器。
+func (c *botContainer) create(ctx context.Context) error {
+	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
+	image, err := resolveBotImage(ctx, c.cfg.Image, c.logger)
+	if err != nil {
+		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
+	}
+	if imageUsesChannelPID1(image) {
+		token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
+		if err != nil {
+			return errs.Wrap(err, "bot_container: channel token")
+		}
+		if err := c.writeChannelToken(token); err != nil {
+			return err
+		}
+	}
+
+	args := c.dockerRunArgs(image)
 
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -574,6 +724,9 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	if req.Command == "" {
 		return nil, errs.New("bot_container: command is empty")
 	}
+	if c.usesChannel() {
+		return c.execStreamChannel(ctx, req, onChunk)
+	}
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stuck, hard := resolveExecTimeouts(req, c.cfg)
@@ -625,6 +778,9 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 
 // ReadFile 读取容器内文件。
 func (c *botContainer) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	if c.usesChannel() {
+		return c.readFileChannel(ctx, path)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return nil, err
@@ -645,6 +801,16 @@ func (c *botContainer) ReadFile(ctx context.Context, path string) ([]byte, error
 
 // WriteFile 写入容器内文件（自动创建父目录）。
 func (c *botContainer) WriteFile(ctx context.Context, path string, data []byte) error {
+	if c.usesChannel() {
+		if c.cfg.MaxFileWrite > 0 && len(data) > c.cfg.MaxFileWrite {
+			return errs.Newf("bot_container: file size %d exceeds max write %d", len(data), c.cfg.MaxFileWrite)
+		}
+		var limit int64
+		if c.cfg.MaxFileWrite > 0 {
+			limit = int64(c.cfg.MaxFileWrite)
+		}
+		return c.writeFileChannel(ctx, path, data, limit)
+	}
 	if c.cfg.MaxFileWrite > 0 && len(data) > c.cfg.MaxFileWrite {
 		return errs.Newf("bot_container: file size %d exceeds max write %d",
 			len(data), c.cfg.MaxFileWrite)
@@ -680,6 +846,9 @@ func (c *botContainer) WriteFile(ctx context.Context, path string, data []byte) 
 // 用户 HTTP 上传不走这里，而是 writeUserStream 流式写入。
 // 普通工具写文件仍走 WriteFile，继续受 MaxFileWrite 约束。
 func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data []byte) error {
+	if c.usesChannel() {
+		return c.writeFileChannel(ctx, path, data, 0)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return err
@@ -709,6 +878,9 @@ func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data
 // 不读进内存，也不经过宿主磁盘（持久容器的 named volume 在主进程里不可见）。
 // limit > 0 时超限返回 ErrUserUploadTooLarge，并在容器内删除半截文件。
 func (c *botContainer) writeUserStream(ctx context.Context, path string, r io.Reader, limit int64) (int64, error) {
+	if c.usesChannel() {
+		return c.writeStreamChannel(ctx, path, r, limit)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return 0, err
@@ -764,6 +936,9 @@ func (c *botContainer) removeStreamedFile(validated string) {
 
 // ListDir 列出容器内目录。
 func (c *botContainer) ListDir(ctx context.Context, path string) ([]FileEntry, error) {
+	if c.usesChannel() {
+		return c.listDirChannel(ctx, path)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return nil, err
@@ -789,6 +964,9 @@ func (c *botContainer) ListDir(ctx context.Context, path string) ([]FileEntry, e
 
 // Mkdir 在容器内创建目录。
 func (c *botContainer) Mkdir(ctx context.Context, path string) error {
+	if c.usesChannel() {
+		return c.mkdirChannel(ctx, path)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return err
@@ -805,6 +983,9 @@ func (c *botContainer) Mkdir(ctx context.Context, path string) error {
 
 // Stat 返回容器内单个路径的信息（用于下载前校验）。返回 exists, isDir, size。
 func (c *botContainer) Stat(ctx context.Context, path string) (exists bool, isDir bool, size int64, err error) {
+	if c.usesChannel() {
+		return c.statChannel(ctx, path)
+	}
 	validated, verr := validatePath(containerWorkDir, path)
 	if verr != nil {
 		return false, false, 0, verr

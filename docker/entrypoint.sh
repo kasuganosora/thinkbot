@@ -49,6 +49,12 @@ if [ -S /var/run/docker.sock ]; then
 	fi
 fi
 
+# Volume B 父目录。bot 容器把 thinkbot-channel-<id> 挂到 /run/thinkbot，
+# 主进程从同一路径拨 unix socket。先建好并交给运行用户，否则降权后无法创建子目录。
+mkdir -p /var/run/thinkbot-bots
+chown thinkbot:thinkbot /var/run/thinkbot-bots
+chmod 0750 /var/run/thinkbot-bots
+
 # 降权运行：setpriv 来自 util-linux（debian slim 自带），--init-groups 加载目标用户的附加组
 # （含上面加入的 docker.sock 组），从而获得 socket 访问权。
 #
