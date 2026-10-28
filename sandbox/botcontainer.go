@@ -4,8 +4,9 @@ package sandbox
 // botContainer — per-bot 长期持久化 Docker 容器
 //
 // 隔离目标：一个 bot 对应一个长期运行的容器（thinkbot-bot-<botID>）+ 一个 named
-// volume（thinkbot-bot-<botID>）挂载到容器内 /workspace。bot 的所有文件读写与命令
+// volume（thinkbot-bot-<botID>）挂载到容器内 /data。bot 的所有文件读写与命令
 // 执行都通过 docker exec 在容器内完成，宿主机磁盘不落任何 bot 文件，真正隔离。
+// 内置镜像的 PID 1 是 thinkbot-channel（镜像 ENTRYPOINT），不再用 sleep infinity。
 //
 // 生命周期：
 //   - ensure()：惰性创建/启动容器（若不存在则 docker run -d，已停止则 docker start）
@@ -28,6 +29,8 @@ import (
 
 	"go.uber.org/zap"
 
+	botsandbox "github.com/kasuganosora/thinkbot/docker/sandbox"
+	"github.com/kasuganosora/thinkbot/sandbox/channel"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -248,14 +251,10 @@ func (c *botContainer) ensure(ctx context.Context) error {
 	}
 }
 
-// create 创建并启动长期容器。
-func (c *botContainer) create(ctx context.Context) error {
-	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
-	image, err := resolveBotImage(ctx, c.cfg.Image, c.logger)
-	if err != nil {
-		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
-	}
-
+// dockerRunArgs 是 `docker run -d` 的参数（不含 docker 本身）。
+// 内置镜像的 ENTRYPOINT 已是 thinkbot-channel，不能再追加 sleep，否则那两个词会变成
+// 守护进程的 argv。自定义镜像没有这个入口，仍用 sleep infinity 保持容器不退出。
+func (c *botContainer) dockerRunArgs(image string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", c.container,
@@ -289,7 +288,32 @@ func (c *botContainer) create(ctx context.Context) error {
 		args = append(args, "--network", "none")
 	}
 
+	if imageUsesChannelPID1(image) {
+		args = append(args,
+			"--label", "thinkbot.channel.version="+channel.Version,
+			"--label", "thinkbot.channel.protocol="+channel.Protocol,
+			image,
+		)
+		return args
+	}
 	args = append(args, image, "sleep", "infinity")
+	return args
+}
+
+// imageUsesChannelPID1 为真时，镜像 ENTRYPOINT 是 thinkbot-channel，容器命令必须留空。
+func imageUsesChannelPID1(image string) bool {
+	return strings.HasPrefix(image, botsandbox.BuiltinImagePrefix)
+}
+
+// create 创建并启动长期容器。
+func (c *botContainer) create(ctx context.Context) error {
+	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
+	image, err := resolveBotImage(ctx, c.cfg.Image, c.logger)
+	if err != nil {
+		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
+	}
+
+	args := c.dockerRunArgs(image)
 
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)

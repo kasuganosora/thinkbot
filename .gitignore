@@ -59,6 +59,8 @@ static/
 *.db.bak-*
 # Compiled server binary
 /thinkbot
+# Static channel daemon written into the sandbox build context (embedded with -tags embedchannel).
+/docker/sandbox/thinkbot-channel
 # thinkbot binary backups (e.g. thinkbot.bak-prev)
 /thinkbot.bak*
 
