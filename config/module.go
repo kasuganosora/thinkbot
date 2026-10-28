@@ -1190,6 +1190,7 @@ func WorkspaceMetaSpecs() []MetaSpec {
 		{Key: KeySandboxTimeout, Category: "Workspace", Description: "bot 在沙箱里执行单条命令的「硬上限」秒数。默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟），不写死固定时长；设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：哪怕命令一直在输出，超过它也会被强制终止。正常慢命令靠卡死看门狗放行，不会误杀。"},
 		{Key: KeySandboxStuckTimeout, Category: "Workspace", Description: "卡死看门狗阈值（秒，默认 300，即 5 分钟）。命令连续无输出超过该时长即判定卡死并终止。这是区分「编译慢」与「死锁卡死」的关键：只要命令持续有输出（哪怕慢）就不杀。"},
 		{Key: KeySandboxChannelSecret, Category: "Workspace", Description: "派生 per-bot channel token 的服务器密钥（HKDF，不按 bot 落库）。空则使用 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先于本键。"},
+		{Key: KeySandboxChannelTransport, Category: "Workspace", Description: "thinkbot-channel 传输：auto（默认；Linux 用 unix socket，Windows 用 TCP）| unix | tcp | http。http 与 tcp 相同，仍是帧协议，token 只放在 Hello 帧，不放 URL。宿主只连接 127.0.0.1。环境变量 THINKBOT_CHANNEL_TRANSPORT 优先。"},
 	}
 }
 

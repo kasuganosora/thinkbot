@@ -106,6 +106,47 @@ func TestProbeHealthThenHello(t *testing.T) {
 	}
 }
 
+func TestDialEndpointTCPHello(t *testing.T) {
+	token, err := DeriveToken("server-secret", "bot-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	srv, err := channel.Listen(channel.Config{
+		Root:        dir + "/data",
+		Token:       token,
+		BotID:       "bot-a",
+		SocketPath:  dir + "/s",
+		ListenAddr:  "127.0.0.1:0",
+		MaxPutBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	ep := Endpoint{Network: channel.TransportTCP, Addr: srv.Addr()}
+	pctx, cancelProbe := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelProbe()
+	if err := ProbeEndpoint(pctx, ep, token, "bot-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProbeEndpoint(pctx, Endpoint{Network: channel.TransportTCP, Addr: srv.Addr() + "?token=" + token}, token, "bot-a"); err == nil {
+		t.Fatal("query token was accepted")
+	}
+	cli, err := DialEndpoint(pctx, ep, token, "bot-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	if cli.Sock != srv.Addr() {
+		t.Fatalf("sock %q", cli.Sock)
+	}
+}
+
 func TestRecoverRecreatesOnce(t *testing.T) {
 	var probes, recreates int
 	err := Recover(context.Background(), func(context.Context) error {

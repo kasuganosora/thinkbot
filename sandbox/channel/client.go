@@ -19,10 +19,10 @@ type DialOptions struct {
 	ClientVersion string
 }
 
-// Client is one unix connection. RPCs on a single client run one at a time.
+// Client is one connection. RPCs on a single client run one at a time.
 // Command.Exec may send Command.Signal on the same connection when its context
 // is cancelled. A second connection is required to list or signal processes
-// while an exec is streaming.
+// while an exec is streaming. Unix and TCP clients share this type.
 type Client struct {
 	conn net.Conn
 	br   *bufio.Reader
@@ -32,16 +32,44 @@ type Client struct {
 	next atomic.Uint32
 }
 
-// Dial connects to sock and, when Token is set, completes Hello.
+// Dial connects to a unix socket and, when Token is set, completes Hello.
 func Dial(ctx context.Context, sock string, opt DialOptions) (*Client, error) {
 	if sock == "" {
 		sock = DefaultSock
+	}
+	if err := RejectTokenTarget(sock); err != nil {
+		return nil, err
 	}
 	var d net.Dialer
 	nc, err := d.DialContext(ctx, "unix", sock)
 	if err != nil {
 		return nil, err
 	}
+	return DialConn(ctx, nc, opt)
+}
+
+// DialTCP connects to a loopback TCP address and, when Token is set, completes
+// Hello. This is the http/tcp transport: the bytes are the framed protocol,
+// not an HTTP request. The token stays in the Hello body.
+func DialTCP(ctx context.Context, addr string, opt DialOptions) (*Client, error) {
+	if err := RejectTokenTarget(addr); err != nil {
+		return nil, err
+	}
+	if err := requireLoopbackDial(addr); err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	nc, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return DialConn(ctx, nc, opt)
+}
+
+// DialConn completes Hello on an existing connection. The caller chooses the
+// transport by dialing a unix socket or a TCP loopback listener. On Hello
+// failure the connection is closed.
+func DialConn(ctx context.Context, nc net.Conn, opt DialOptions) (*Client, error) {
 	c := &Client{conn: nc, br: bufio.NewReader(nc), bw: bufio.NewWriter(nc)}
 	if opt.Token == "" && opt.BotID == "" {
 		return c, nil

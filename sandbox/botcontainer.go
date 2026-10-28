@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,10 @@ type botContainer struct {
 	// 用于在反复 OOM 时按 2 倍逐级放大（6144 → 12288 → …）直到封顶，
 	// 避免每次 OOM 都只回到固定的 6144m 而陷入「OOM→重建→再 OOM」死循环。
 	oomElevatedMB atomic.Int64
+
+	// channelAddr 是 TCP 传输下宿主 127.0.0.1 的拨号地址（Docker 动态分配的端口）。
+	// 只放在进程内运行时状态，不是密钥，也不写入容器环境变量。unix 传输时为空。
+	channelAddr string
 }
 
 func newBotContainer(botID string, cfg Config, logger *zap.SugaredLogger) *botContainer {
@@ -209,7 +214,9 @@ func (c *botContainer) recreateForNetwork(ctx context.Context, mode string, netw
 }
 
 // ensure 保证容器已创建并处于 running 状态（惰性、幂等）。
-// 内置 channel 镜像还会探针 unix socket；失败则删容器重建一次（保留数据 volume）。
+// 内置 channel 镜像还会探针 channel（Linux 默认 unix socket，Windows 或
+// sandbox.channel.transport=http 时为宿主 127.0.0.1 上的 TCP）；失败则删容器
+// 重建一次（保留数据 volume）。
 func (c *botContainer) ensure(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -309,13 +316,20 @@ func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
 	if !c.usesChannel() {
 		return nil
 	}
+	transport, err := c.channelTransport()
+	if err != nil {
+		return err
+	}
 	token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
 	if err != nil {
 		return errs.Wrap(err, "bot_container: channel token")
 	}
-	sock := c.channelSockFile()
 	probe := func(ctx context.Context) error {
-		return channelclient.Probe(ctx, sock, token, c.botID)
+		ep, err := c.channelEndpointLocked(ctx, transport)
+		if err != nil {
+			return err
+		}
+		return channelclient.ProbeEndpoint(ctx, ep, token, c.botID)
 	}
 	recreate := func(ctx context.Context) error {
 		c.logger.Warnw("channel probe failed; recreating bot container",
@@ -338,6 +352,7 @@ func (c *botContainer) removeContainerKeepData() error {
 		return errs.Wrapf(err, "bot_container: remove %q for channel recreate: %s",
 			c.container, strings.TrimSpace(string(out)))
 	}
+	c.channelAddr = ""
 	c.logger.Infow("bot container removed for channel recreate",
 		"container", c.container, "data_volume", c.volume)
 	return nil
@@ -356,13 +371,27 @@ func (c *botContainer) DialChannel(ctx context.Context) (*channelclient.Client, 
 	if err != nil {
 		return nil, errs.Wrap(err, "bot_container: channel token")
 	}
-	return channelclient.Dial(ctx, c.channelSockFile(), token, c.botID)
+	c.mu.Lock()
+	transport, err := c.channelTransport()
+	if err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	ep, err := c.channelEndpointLocked(ctx, transport)
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return channelclient.DialEndpoint(ctx, ep, token, c.botID)
 }
 
 // dockerRunArgs 是 `docker run -d` 的参数（不含 docker 本身）。
 // 内置镜像的 ENTRYPOINT 已是 thinkbot-channel，不能再追加 sleep，否则那两个词会变成
 // 守护进程的 argv。自定义镜像没有这个入口，仍用 sleep infinity 保持容器不退出。
-func (c *botContainer) dockerRunArgs(image string) []string {
+//
+// Linux 默认只挂 Volume B 上的 unix socket。TCP（Windows，或 sandbox.channel.transport=http）
+// 额外把容器端口发布到宿主 127.0.0.1 的动态端口；Hello token 仍只来自 Volume B 上的一次性文件。
+func (c *botContainer) dockerRunArgs(image string) ([]string, error) {
 	args := []string{
 		"run", "-d",
 		"--name", c.container,
@@ -397,10 +426,24 @@ func (c *botContainer) dockerRunArgs(image string) []string {
 	}
 
 	if imageUsesChannelPID1(image) {
+		transport, err := channel.SelectTransport(c.cfg.ChannelTransport, runtime.GOOS)
+		if err != nil {
+			return nil, errs.Wrap(err, "bot_container: channel transport")
+		}
+		if transport == channel.TransportTCP && c.cfg.NetworkDisabled {
+			return nil, errs.New("bot_container: tcp channel transport publishes on 127.0.0.1 and cannot use --network none")
+		}
 		args = append(args, "-v", c.channelHostDir()+":"+channelclient.ContainerSockDir)
 		args = append(args, "-e", channel.EnvBotID+"="+c.botID)
 		// The token is a 0600 file on Volume B, not a container environment variable.
-		if uid := os.Getuid(); uid > 0 {
+		// THINKBOT_CHANNEL_HTTP is only the listen address. Docker forwards it to
+		// a host port bound on 127.0.0.1; the client dials that loopback port.
+		if transport == channel.TransportTCP {
+			args = append(args,
+				"-p", channel.PublishSpec(),
+				"-e", channel.EnvHTTP+"="+channel.ContainerListenAddr(),
+			)
+		} else if uid := os.Getuid(); uid > 0 {
 			args = append(args,
 				"-e", channel.EnvSockUID+"="+strconv.Itoa(uid),
 				"-e", channel.EnvSockGID+"="+strconv.Itoa(os.Getgid()),
@@ -409,12 +452,13 @@ func (c *botContainer) dockerRunArgs(image string) []string {
 		args = append(args,
 			"--label", "thinkbot.channel.version="+channel.Version,
 			"--label", "thinkbot.channel.protocol="+channel.Protocol,
+			"--label", "thinkbot.channel.transport="+transport,
 			image,
 		)
-		return args
+		return args, nil
 	}
 	args = append(args, image, "sleep", "infinity")
-	return args
+	return args, nil
 }
 
 // imageUsesChannelPID1 为真时，镜像 ENTRYPOINT 是 thinkbot-channel，容器命令必须留空。
@@ -430,6 +474,10 @@ func (c *botContainer) create(ctx context.Context) error {
 		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
 	}
 	if imageUsesChannelPID1(image) {
+		c.channelAddr = ""
+		if _, err := c.channelTransport(); err != nil {
+			return err
+		}
 		token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
 		if err != nil {
 			return errs.Wrap(err, "bot_container: channel token")
@@ -439,7 +487,10 @@ func (c *botContainer) create(ctx context.Context) error {
 		}
 	}
 
-	args := c.dockerRunArgs(image)
+	args, err := c.dockerRunArgs(image)
+	if err != nil {
+		return err
+	}
 
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -527,6 +578,7 @@ func (c *botContainer) destroy(removeVolume bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ready = false
+	c.channelAddr = ""
 
 	_ = exec.Command("docker", "rm", "-f", c.container).Run()
 	c.logger.Infow("bot container destroyed", "container", c.container)

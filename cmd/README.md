@@ -56,4 +56,4 @@ go build -o thinkbot ./cmd && ./thinkbot
 
 ## thinkbot-channel
 
-`cmd/thinkbot-channel` 是沙箱容器的 PID 1（镜像 `ENTRYPOINT`，exec 形式），不是主进程的子命令。它在容器内监听 unix socket（默认 `/run/thinkbot/channel.sock`），用 `THINKBOT_CHANNEL_TOKEN` 校验 Hello，并把文件操作限制在 `/data`。`thinkbot-channel health` 供镜像 HEALTHCHECK 使用，不需要 token。协议实现在 `sandbox/channel`。不包含 PTY 或截图。
+`cmd/thinkbot-channel` 是沙箱容器的 PID 1（镜像 `ENTRYPOINT`，exec 形式），不是主进程的子命令。Linux 默认在容器内监听 unix socket（`/run/thinkbot/channel.sock`）。Hello 的 token 来自该目录一次性的 `token` 文件（0600，读完即删）；`THINKBOT_CHANNEL_TOKEN` 只是兼容回退，启动后会从环境变量清掉，不会留在 `/proc/1/environ`。设置 `THINKBOT_CHANNEL_HTTP`（或 `--http`）后改为 TCP，帧协议不变，token 仍然只在 Hello 帧里，不进 URL。文件操作限制在 `/data`。`thinkbot-channel health` 供镜像 HEALTHCHECK 使用，不需要 token。协议实现在 `sandbox/channel`。不包含 PTY 或截图。

@@ -441,6 +441,11 @@ func (s *BotService) applyChannelConfig(cfg *sandbox.Config) {
 	if root := os.Getenv(channelclient.EnvSockRoot); root != "" {
 		cfg.ChannelSockRoot = root
 	}
+	if transport := os.Getenv(channelclient.EnvTransport); transport != "" {
+		cfg.ChannelTransport = transport
+	} else if transport := s.store.GetString(config.KeySandboxChannelTransport, ""); transport != "" {
+		cfg.ChannelTransport = transport
+	}
 }
 
 // GetWorkspaceBaseDir 返回 bot 工作空间根目录。

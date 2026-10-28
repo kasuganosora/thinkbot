@@ -173,6 +173,12 @@ const (
 	// KeySandboxChannelSecret 派生 per-bot channel token 的服务器密钥。
 	// 空则回退到 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先，可不落库。
 	KeySandboxChannelSecret = "sandbox.channel.secret"
+
+	// KeySandboxChannelTransport 选择 thinkbot-channel 的传输。
+	// 空或 auto：Linux 用 unix socket（Volume B + 一次性 token 文件），Windows 用 TCP。
+	// http 与 tcp 相同：帧协议不变，token 只在 Hello 帧，宿主只拨 127.0.0.1。
+	// 环境变量 THINKBOT_CHANNEL_TRANSPORT 优先于本键。本键不是密钥。
+	KeySandboxChannelTransport = "sandbox.channel.transport"
 )
 
 // ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。

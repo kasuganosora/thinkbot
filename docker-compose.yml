@@ -84,7 +84,9 @@ services:
       # 实际 gid 建组 + usermod + setpriv 降权完成。
       - /var/run/docker.sock:/var/run/docker.sock
 
-      # Volume B：每个 bot 一个子目录 thinkbot-channel-<id>，里面是 channel unix socket。
+      # Volume B：每个 bot 一个子目录 thinkbot-channel-<id>。
+      # Linux 默认在这里放 channel unix socket 和一次性 token 文件。
+      # Windows / sandbox.channel.transport=http 仍用这个目录放 token，数据面改走宿主 127.0.0.1 上的 TCP。
       # 路径在宿主和本容器里必须相同，因为 docker.sock 创建兄弟容器时按宿主路径挂载。
       - /var/run/thinkbot-bots:/var/run/thinkbot-bots
 

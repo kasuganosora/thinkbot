@@ -18,4 +18,6 @@ func listenUnix(path string) (net.Listener, error) {
 
 func claimSockPeer(dir, sock, ready string) error { return nil }
 
+func claimStateFiles(dir string, paths ...string) error { return nil }
+
 func diskUsage(root string) DiskUsage { return DiskUsage{} }

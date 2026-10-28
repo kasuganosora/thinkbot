@@ -38,6 +38,11 @@ const (
 	EnvBotID = "THINKBOT_BOT_ID"
 	EnvSock  = "THINKBOT_CHANNEL_SOCK"
 	EnvRoot  = "THINKBOT_CHANNEL_ROOT"
+	// EnvHTTP is the daemon TCP listen address, for example "127.0.0.1:0" or
+	// the in-container "0.0.0.0:17931" used so Docker can publish the port.
+	// It is not a secret. Unset keeps the unix socket. The Hello token is
+	// never read from this variable, a URL, or a query string.
+	EnvHTTP = "THINKBOT_CHANNEL_HTTP"
 	// EnvSockUID and EnvSockGID name the peer that may dial the socket.
 	// The socket stays mode 0600. Root inside the container can still connect.
 	EnvSockUID = "THINKBOT_CHANNEL_SOCK_UID"
@@ -46,6 +51,16 @@ const (
 	// TokenFileName is a one-shot file on the socket volume. The daemon reads
 	// it at startup and deletes it so the token is not left in PID 1's environment.
 	TokenFileName = "token"
+
+	// ListenFileName is a non-secret file written next to the socket directory
+	// after a loopback TCP bind. It holds the dial address inside the daemon's
+	// network namespace, not the Docker-published host port, and not the token.
+	ListenFileName = "listen"
+
+	// PublishPort is the fixed in-container TCP port. The host publishes it
+	// on 127.0.0.1 with an ephemeral host port. Bot containers have separate
+	// network namespaces, so they can share this port.
+	PublishPort = 17931
 
 	chunkSize = 256 << 10
 )
@@ -128,7 +143,7 @@ var Capabilities = []string{
 	"control.shutdown",
 }
 
-// Frame is one length-prefixed message on the unix connection.
+// Frame is one length-prefixed message. Unix and TCP use the same framing.
 type Frame struct {
 	Type    MsgType
 	ReqID   uint32
