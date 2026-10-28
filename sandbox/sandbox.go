@@ -197,7 +197,9 @@ type Config struct {
 	// MaxOutput stdout/stderr 各自的最大字节数。
 	MaxOutput int
 
-	// MaxFileWrite 单次文件写入的最大字节数。
+	// MaxFileWrite 单次工具/代理文件写入的最大字节数。
+	// 用户经 Web API 上传走流式 WriteUserUploadStream，上限是 api.MaxUserUploadBytes，
+	// 不抬高这里，避免模型写文件和交互上传绑在同一个阈值上。
 	MaxFileWrite int
 
 	// RequireDocker 为 true 时，auto 模式下 Docker 不可用直接返回错误，

@@ -20,6 +20,7 @@ import (
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/notify"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -59,6 +60,10 @@ type Server struct {
 
 	// bundledSkillsDirOverride 测试用：覆盖内置技能目录（空则 "skills"）。
 	bundledSkillsDirOverride string
+
+	// uploadWorkspaceHook 仅测试使用。非 nil 时用户上传写入该工作空间，
+	// 以便在没有 Docker 的情况下覆盖「跳过 MaxFileWrite」的路径。
+	uploadWorkspaceHook func(botID string) (sandbox.Workspace, bool)
 
 	// vecRebuildJobs 是按 bot 的向量重建进度。进程内一份，不落库。
 	vecRebuildMu   sync.Mutex
@@ -203,7 +208,8 @@ func requestLogger(logger *zap.SugaredLogger) gin.HandlerFunc {
 		var bodyPreview string
 		// notify 调用跳过预读：其 handler 自带请求体上限（413），且正文是外部告警内容无需进访问日志。
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions &&
-			!isNotifyCallPath(c.Request.Method, c.Request.URL.Path) {
+			!isNotifyCallPath(c.Request.Method, c.Request.URL.Path) &&
+			!isWorkspaceFileUpload(c.Request.Method, c.Request.URL.Path) {
 			if c.Request.Body != nil {
 				raw, _ := io.ReadAll(c.Request.Body)
 				// 恢复 body 供后续 handler 读取
@@ -243,6 +249,13 @@ func requestLogger(logger *zap.SugaredLogger) gin.HandlerFunc {
 			logger.Infow("request", fields...)
 		}
 	}
+}
+
+// isWorkspaceFileUpload 报告会话/Bot 工作区文件上传。
+// 这些请求体按流式上传处理，上限是 MaxUserUploadBytes。
+// 访问日志若先把正文整包读入，就会抵消流式写入。
+func isWorkspaceFileUpload(method, path string) bool {
+	return method == http.MethodPost && strings.HasSuffix(path, "/files/upload")
 }
 
 // sanitizeBody 清理请求体中的敏感字段，返回截断后的预览。

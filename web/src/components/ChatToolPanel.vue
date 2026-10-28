@@ -103,7 +103,13 @@
             <div class="queue-head"><span>上传记录 · {{ currentUploads.length }}</span><button v-if="currentUploads.some(item => item.status === 'success')" type="button" @click="clearCompletedUploads">清除已完成</button></div>
             <div v-for="item in currentUploads" :key="item.id" class="queue-item" :class="{ 'queue-failed': item.status === 'error' }">
               <t-icon :name="item.status === 'success' ? 'check-circle' : item.status === 'error' ? 'error-circle' : 'loading'" :class="{ spinning: item.status === 'uploading' }" />
-              <div class="queue-info"><span :title="item.path + '/' + item.name">{{ item.name }}</span><small>{{ item.status === 'error' ? item.error : item.status === 'success' ? '上传完成' : item.status === 'uploading' ? '正在上传…' : '等待上传' }}</small></div>
+              <div class="queue-info">
+                <span :title="item.path + '/' + item.name">{{ item.name }}</span>
+                <small>{{ uploadStatusText(item) }}</small>
+                <div v-if="item.status === 'uploading'" class="queue-bar" role="progressbar" :aria-valuenow="uploadPercent(item)" aria-valuemin="0" aria-valuemax="100" :aria-valuetext="uploadStatusText(item)">
+                  <span :style="{ width: uploadPercent(item) + '%' }"></span>
+                </div>
+              </div>
               <button v-if="item.status === 'error'" type="button" :aria-label="'重试上传 ' + item.name" @click="retryUpload(item)">重试</button>
               <button v-if="item.status !== 'uploading'" type="button" class="queue-remove" :aria-label="'移除上传记录 ' + item.name" @click="removeUpload(item)"><t-icon name="close" /></button>
             </div>
@@ -164,6 +170,7 @@
 import { ref, computed, onBeforeUnmount, watch, nextTick } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { sessionToolApi } from '@/api/services'
+import { MAX_WORKSPACE_UPLOAD_BYTES, MAX_WORKSPACE_UPLOAD_TOTAL_BYTES, formatUploadPercent, formatUploadSpeed } from '@/constants/uploadLimits'
 import { useBotStore } from '@/stores/bot'
 import { useLayoutStore } from '@/stores/layout'
 import XtermConsole from '@/components/common/XtermConsole.vue'
@@ -375,8 +382,8 @@ async function downloadFile(name) {
   } catch (error) { MessagePlugin.error(error?.message || '下载失败') }
 }
 
-const MAX_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
-const MAX_UPLOAD_TOTAL_BYTES = 60 * 1024 * 1024
+const MAX_UPLOAD_FILE_BYTES = MAX_WORKSPACE_UPLOAD_BYTES
+const MAX_UPLOAD_TOTAL_BYTES = MAX_WORKSPACE_UPLOAD_TOTAL_BYTES
 const uploads = ref([])
 const currentUploads = computed(() => uploads.value.filter(item => item.botId === botId.value))
 let processingUploads = false
@@ -393,7 +400,7 @@ function onUpload(event) {
     if (file.size > MAX_UPLOAD_FILE_BYTES) { MessagePlugin.warning(`${file.name} 超过单文件 ${fmtSize(MAX_UPLOAD_FILE_BYTES)} 上限，已跳过`); continue }
     if (total + file.size > MAX_UPLOAD_TOTAL_BYTES) { MessagePlugin.warning(`待上传文件总量上限为 ${fmtSize(MAX_UPLOAD_TOTAL_BYTES)}，其余文件已跳过`); break }
     total += file.size
-    uploads.value.push({ id: ++nextUploadId, botId: id, path, name: file.name, file, status: 'queued', error: '' })
+    uploads.value.push({ id: ++nextUploadId, botId: id, path, name: file.name, file, status: 'queued', error: '', loaded: 0, total: file.size || 0, speed: 0 })
   }
   processUploadQueue()
 }
@@ -405,8 +412,15 @@ async function processUploadQueue() {
     let item
     while (alive && (item = uploads.value.find(entry => entry.status === 'queued'))) {
       item.status = 'uploading'
+      item.loaded = 0
+      item.speed = 0
+      item.total = item.file?.size || 0
       try {
-        await sessionToolApi.upload(item.botId, item.path, item.file)
+        await sessionToolApi.upload(item.botId, item.path, item.file, (progress) => {
+          item.loaded = progress.loaded
+          if (progress.total) item.total = progress.total
+          item.speed = progress.speed
+        })
         item.status = 'success'
         item.file = null
         changedDirectories.add(`${item.botId}\n${item.path}`)
@@ -419,6 +433,17 @@ async function processUploadQueue() {
     processingUploads = false
     if (alive && changedDirectories.has(`${botId.value}\n${files.value.path}`)) loadFiles()
   }
+}
+function uploadPercent(item) { return formatUploadPercent(item.loaded, item.total) }
+function uploadStatusText(item) {
+  if (item.status === 'error') return item.error
+  if (item.status === 'success') return '上传完成'
+  if (item.status === 'uploading') {
+    const speed = formatUploadSpeed(item.speed)
+    if (!item.total) return speed
+    return `${uploadPercent(item)}% · ${speed}`
+  }
+  return '等待上传'
 }
 function retryUpload(item) { if (item.status === 'error' && item.file) { item.status = 'queued'; item.error = ''; processUploadQueue() } }
 function removeUpload(item) { if (item.status !== 'uploading') uploads.value = uploads.value.filter(entry => entry.id !== item.id) }
@@ -660,6 +685,8 @@ button:focus-visible, input:focus-visible, .upload-btn:focus-within, .tp-resizer
 .queue-info { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
 .queue-info > span { font-size: 12px; color: var(--bp-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-info small { color: var(--bp-label-tertiary); font-size: 11px; overflow-wrap: anywhere; }
+.queue-bar { height: 3px; border-radius: 2px; background: var(--bp-surface-fill); overflow: hidden; }
+.queue-bar > span { display: block; height: 100%; background: var(--bp-accent); }
 .queue-failed, .queue-failed small { color: var(--bp-danger); }
 .queue-item > .queue-remove { color: var(--bp-label-tertiary); font-size: 14px; }
 .file-preview { border: var(--bp-hairline); border-radius: 10px; overflow: hidden; background: var(--bp-bg-subtle); margin-bottom: 14px; }

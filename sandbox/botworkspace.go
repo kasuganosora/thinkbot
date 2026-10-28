@@ -24,7 +24,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -699,6 +701,48 @@ func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) 
 		return errs.Newf("bot_workspace: file size %d exceeds max write %d",
 			len(data), w.cfg.MaxFileWrite)
 	}
+	return w.writeLocalFile(path, data)
+}
+
+// WriteUserUploadStream 流式写入用户上传，跳过 MaxFileWrite，不把正文读进 []byte。
+// limit 由 API 传入（api.MaxUserUploadBytes）。工具写入仍走 WriteFile。
+// docker 持久容器把 r 直接送进 `docker exec -i … cat > path` 的 stdin，
+// 不在宿主落盘（named volume 对主进程不可见）。local 模式 io.Copy 到宿主工作区文件。
+// 超限或中途失败会删除半截文件。
+func (w *botWorkspace) WriteUserUploadStream(ctx context.Context, path string, r io.Reader, limit int64) (int64, error) {
+	if w.container != nil {
+		return w.container.writeUserStream(ctx, path, r, limit)
+	}
+	if err := w.localGuardPath(path, true); err != nil {
+		return 0, err
+	}
+	validated, err := validatePath(w.root, path)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(validated), 0o755); err != nil {
+		return 0, errs.Wrapf(err, "bot_workspace: mkdir parent dir for %q", path)
+	}
+	f, err := os.OpenFile(validated, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, errs.Wrapf(err, "bot_workspace: create %q", path)
+	}
+	n, copyErr := CopyUserUpload(f, r, limit)
+	closeErr := f.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(validated)
+		if errors.Is(copyErr, ErrUserUploadTooLarge) {
+			return n, ErrUserUploadTooLarge
+		}
+		if copyErr != nil {
+			return n, errs.Wrapf(copyErr, "bot_workspace: stream file %q", path)
+		}
+		return n, errs.Wrapf(closeErr, "bot_workspace: stream file %q", path)
+	}
+	return n, nil
+}
+
+func (w *botWorkspace) writeLocalFile(path string, data []byte) error {
 	if err := w.localGuardPath(path, true); err != nil {
 		return err
 	}

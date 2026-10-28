@@ -481,6 +481,12 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
+	// 聊天附件是 base64 JSON，不经过工作区 WriteFile，因此不受 MaxFileWrite（10MB）约束。
+	// 上限与前端 ChatWindow 一致，见 MaxChatAttachmentBytes。
+	if err := validateChatAttachments(req.Attachments); err != nil {
+		Fail(c, err)
+		return
+	}
 	user := currentUser(c)
 	if user == nil {
 		Fail(c, errs.Unauthorized("not logged in"))

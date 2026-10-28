@@ -133,4 +133,5 @@ docker compose up -d
 
 - 只在本机访问时，可在 `.env` 设 `api.addr=127.0.0.1:8080`（容器内仍需监听容器端口，Docker 部署更常见的做法是把端口映射改成 `"127.0.0.1:8080:8080"`）。用 `docker-compose.override.yml` 改端口时要写 `ports: !override`（Compose v2.24+），否则会与默认的 `8080:8080` 合并而不是替换。
 - 公网访问请放在反向代理后，并在 `.env` 设置 `api.cookie_secure=true`、`api.cors_origins`。
+- 工作区文件上传（`POST /api/sessions/:sid/files/upload` 与 `POST /api/bots/:id/files/upload`）是流式写入，单文件上限 1000MB，与当前网关的 `client_max_body_size 1000m` 一致，这次不用改 nginx。超过上限时接口返回 400，并删掉已经写出的半截文件。聊天输入框附件仍是另一条路径（base64 JSON，单文件 20MB、合计 60MB），不走这条流。工具写文件（`sandbox_write_file`）仍是 10MB。
 - 告警通知接口建议只挂在独立的本机监听器上，见 [notify.md › Network restriction](notify.md#network-restriction)。

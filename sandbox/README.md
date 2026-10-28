@@ -123,7 +123,9 @@ type StreamWorkspace interface {
 | `workspace.dir` | `data/workspaces` | per-bot 工作空间根目录 |
 | `system.timezone` | `UTC` | 容器/进程 TZ（IANA 格式） |
 
-`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`，可被 per-bot override 覆盖）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`（默认 false，即联网）、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB）、`Proxy`（全局出口代理，注入容器 `HTTP_PROXY`/`HTTPS_PROXY`，通常取自 `system.proxy`）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
+`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`，可被 per-bot override 覆盖）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`（默认 false，即联网）、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB，只约束工具/代理写文件，例如 `sandbox_write_file`）、`Proxy`（全局出口代理，注入容器 `HTTP_PROXY`/`HTTPS_PROXY`，通常取自 `system.proxy`）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
+
+用户从 Web 上传到会话或 Bot 工作区不走 `MaxFileWrite`，也不把文件读进内存：`WriteUserUploadStream` 用 `io.Copy` 写到宿主文件，或经 `docker exec -i` 的 stdin 流进容器。单文件上限是 `api.MaxUserUploadBytes`（1000MB），与已部署网关的 `client_max_body_size 1000m` 对齐。超限会删掉半截文件并返回明确错误。
 
 ## 安全隔离
 

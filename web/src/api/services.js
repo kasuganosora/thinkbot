@@ -1115,7 +1115,7 @@ export const userChoiceApi = {
 //   POST /api/sessions/:sid/terminal/exec       { cmd } → { output, cwd }
 //   GET  /api/sessions/:sid/files?path=/data   → { path, entries:[{name,type:'dir'|'file',size,mtime}] }
 //   POST /api/sessions/:sid/files/mkdir         { path, name } → { ok:true }
-//   POST /api/sessions/:sid/files/upload        { path, name, size } → { ok:true }
+//   POST /api/sessions/:sid/files/upload        multipart path + file → { ok:true }（流式，单文件 1000MB）
 //   GET  /api/sessions/:sid/status             → { messages, contextUsed, contextLimit, cacheHitRate, cacheRead, cacheWrite, skills:[] }
 //   POST /api/sessions/:sid/compact            → { ok:true }
 
@@ -1197,7 +1197,7 @@ export const sessionToolApi = {
     }
     return request('POST', `/api/sessions/${sid}/files/mkdir`, { path, name })
   },
-  upload(sid, path, file) {
+  upload(sid, path, file, onProgress) {
     if (USE_MOCK) {
       return mockResolve(() => {
         if (!_mockFS[path]) _mockFS[path] = []
@@ -1211,9 +1211,10 @@ export const sessionToolApi = {
       })
     }
     const fd = new FormData()
-    fd.append('file', file)
+    // path 放在 file 之前，服务端可以边收边写入目标，而不必先落临时文件。
     fd.append('path', path)
-    return uploadRequest('POST', `/api/sessions/${sid}/files/upload`, fd)
+    fd.append('file', file)
+    return uploadRequest('POST', `/api/sessions/${sid}/files/upload`, fd, undefined, onProgress)
   },
   downloadUrl(sid, path) {
     return `/api/sessions/${sid}/files/download?path=${encodeURIComponent(path)}`
@@ -1573,18 +1574,23 @@ export const botFileApi = {
     }
     return request('POST', `/api/bots/${botId}/files/mkdir`, { path, name })
   },
-  upload(botId, path, name, size) {
+  upload(botId, path, file, onProgress) {
     if (USE_MOCK) {
       return mockResolve(() => {
         const fs = ensureFS(botId)
         if (!fs[path]) fs[path] = []
+        const name = file?.name
+        const size = file?.size
         const idx = fs[path].findIndex(e => e.name === name)
         const entry = { name, type: 'file', size: size || 0, mtime: nowISO() }
         if (idx > -1) fs[path][idx] = entry; else fs[path].push(entry)
         return { ok: true }
       })
     }
-    return request('POST', `/api/bots/${botId}/files/upload`, { path, name, size })
+    const fd = new FormData()
+    fd.append('path', path)
+    fd.append('file', file)
+    return uploadRequest('POST', `/api/bots/${botId}/files/upload`, fd, undefined, onProgress)
   }
 }
 
