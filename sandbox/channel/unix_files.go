@@ -23,20 +23,9 @@ func listenUnix(path string) (net.Listener, error) {
 }
 
 func claimSockPeer(dir, sock, ready string) error {
-	uidStr := os.Getenv(EnvSockUID)
-	if uidStr == "" || uidStr == "0" {
-		return nil
-	}
-	uid, err := strconv.Atoi(uidStr)
-	if err != nil || uid < 0 {
-		return fmt.Errorf("channel: bad %s", EnvSockUID)
-	}
-	gid := uid
-	if g := os.Getenv(EnvSockGID); g != "" {
-		gid, err = strconv.Atoi(g)
-		if err != nil || gid < 0 {
-			return fmt.Errorf("channel: bad %s", EnvSockGID)
-		}
+	uid, gid, ok, err := sockPeerIDs()
+	if err != nil || !ok {
+		return err
 	}
 	if err := os.Chmod(dir, 0o750); err != nil {
 		return err
@@ -51,6 +40,49 @@ func claimSockPeer(dir, sock, ready string) error {
 		_ = os.Chown(ready, uid, gid)
 	}
 	return nil
+}
+
+// claimStateFiles chowns the state directory and any files that exist. Used
+// by the TCP listener, which has no socket inode. A missing peer env is fine.
+func claimStateFiles(dir string, paths ...string) error {
+	uid, gid, ok, err := sockPeerIDs()
+	if err != nil || !ok {
+		return err
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return err
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		return err
+	}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if err := os.Chown(p, uid, gid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sockPeerIDs() (uid, gid int, ok bool, err error) {
+	uidStr := os.Getenv(EnvSockUID)
+	if uidStr == "" || uidStr == "0" {
+		return 0, 0, false, nil
+	}
+	uid, err = strconv.Atoi(uidStr)
+	if err != nil || uid < 0 {
+		return 0, 0, false, fmt.Errorf("channel: bad %s", EnvSockUID)
+	}
+	gid = uid
+	if g := os.Getenv(EnvSockGID); g != "" {
+		gid, err = strconv.Atoi(g)
+		if err != nil || gid < 0 {
+			return 0, 0, false, fmt.Errorf("channel: bad %s", EnvSockGID)
+		}
+	}
+	return uid, gid, true, nil
 }
 
 func diskUsage(root string) DiskUsage {

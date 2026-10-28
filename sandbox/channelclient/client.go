@@ -1,8 +1,10 @@
 // Package channelclient is the main-process side of the in-sandbox channel.
 //
 // It derives a per-bot token from a server secret (HKDF, not stored per bot),
-// dials the unix socket on the shared Volume B directory, and decides when a
-// failed probe should recreate the bot container while keeping the data volume.
+// dials the daemon, and decides when a failed probe should recreate the bot
+// container while keeping the data volume. Linux dials the unix socket on the
+// shared Volume B directory. Windows, and sandbox.channel.transport=http, dial
+// 127.0.0.1 with the same Hello token. The token is not a URL or query value.
 // File, exec, and process RPCs are available for later call-site migration.
 // There is no PTY and no screenshot support.
 package channelclient
@@ -28,6 +30,10 @@ const (
 
 	// EnvSockRoot overrides the directory this process uses to reach per-bot sockets.
 	EnvSockRoot = "THINKBOT_CHANNEL_SOCK_ROOT"
+
+	// EnvTransport overrides sandbox.channel.transport (auto, unix, tcp, or http).
+	// It selects the dial path. It is not a secret and is not the Hello token.
+	EnvTransport = "THINKBOT_CHANNEL_TRANSPORT"
 
 	// DefaultSockRoot is the shared Volume B parent. In DooD it must be the same
 	// path on the Docker host and inside the main container.
@@ -81,40 +87,89 @@ func DeriveToken(secret, botID string) (string, error) {
 type Client struct {
 	*channel.Client
 	BotID string
-	Sock  string
+	// Sock is the dial address: a unix path, or 127.0.0.1:port for TCP.
+	Sock string
 }
 
-// Dial health-checks the socket, then completes Hello with the token and bot id.
+// Endpoint is one daemon address. Network is channel.TransportUnix or
+// channel.TransportTCP. An empty Network means unix.
+type Endpoint struct {
+	Network string
+	Addr    string
+}
+
+// Dial health-checks the unix socket, then completes Hello with the token and bot id.
 func Dial(ctx context.Context, sock, token, botID string) (*Client, error) {
-	if err := probeHealth(ctx, sock); err != nil {
+	return DialEndpoint(ctx, Endpoint{Network: channel.TransportUnix, Addr: sock}, token, botID)
+}
+
+// DialEndpoint health-checks the endpoint, then completes Hello. The token is
+// sent only in the Hello frame.
+func DialEndpoint(ctx context.Context, ep Endpoint, token, botID string) (*Client, error) {
+	if ep.Network == "" {
+		ep.Network = channel.TransportUnix
+	}
+	if ep.Addr == "" && ep.Network == channel.TransportUnix {
+		ep.Addr = channel.DefaultSock
+	}
+	if err := channel.RejectTokenTarget(ep.Addr); err != nil {
 		return nil, err
 	}
-	inner, err := channel.Dial(ctx, sock, channel.DialOptions{
+	if err := probeHealthEndpoint(ctx, ep); err != nil {
+		return nil, err
+	}
+	opt := channel.DialOptions{
 		Token:         token,
 		BotID:         botID,
 		ClientVersion: channel.Version,
-	})
+	}
+	var (
+		inner *channel.Client
+		err   error
+	)
+	switch ep.Network {
+	case channel.TransportUnix:
+		inner, err = channel.Dial(ctx, ep.Addr, opt)
+	case channel.TransportTCP:
+		inner, err = channel.DialTCP(ctx, ep.Addr, opt)
+	default:
+		err = fmt.Errorf("channel: unknown transport %q", ep.Network)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("channel hello: %w", err)
 	}
-	return &Client{Client: inner, BotID: botID, Sock: sock}, nil
+	return &Client{Client: inner, BotID: botID, Sock: ep.Addr}, nil
 }
 
-// Probe checks Health.Ping and then Hello. It does not keep the connection.
+// Probe checks Health.Ping and then Hello on the unix socket. It does not keep the connection.
 func Probe(ctx context.Context, sock, token, botID string) error {
+	return ProbeEndpoint(ctx, Endpoint{Network: channel.TransportUnix, Addr: sock}, token, botID)
+}
+
+// ProbeEndpoint checks Health.Ping and then Hello. It does not keep the connection.
+func ProbeEndpoint(ctx context.Context, ep Endpoint, token, botID string) error {
 	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	cli, err := Dial(pctx, sock, token, botID)
+	cli, err := DialEndpoint(pctx, ep, token, botID)
 	if err != nil {
 		return err
 	}
 	return cli.Close()
 }
 
-func probeHealth(ctx context.Context, sock string) error {
+func probeHealthEndpoint(ctx context.Context, ep Endpoint) error {
 	hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := channel.Ping(hctx, sock); err != nil {
+	var err error
+	switch ep.Network {
+	case "", channel.TransportUnix:
+		err = channel.Ping(hctx, ep.Addr)
+	case channel.TransportTCP:
+		err = channel.PingTCP(hctx, ep.Addr)
+	default:
+		err = fmt.Errorf("channel: unknown transport %q", ep.Network)
+	}
+	if err != nil {
 		return fmt.Errorf("channel health: %w", err)
 	}
 	return nil
