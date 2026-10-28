@@ -13,26 +13,36 @@ import (
 	"time"
 )
 
-// Config is the daemon configuration. Token comes from the environment; the
-// main process derives it later and injects it. An empty token rejects every
-// Hello. Health.Ping stays available so a local HEALTHCHECK can succeed
-// before that injection exists.
+// Config is the daemon configuration. Token comes from the one-shot token
+// file (or, only as a fallback, the environment). The main process derives
+// it and does not leave it in the container environment. An empty token
+// rejects every Hello. Health.Ping stays available so a local HEALTHCHECK
+// can succeed before that injection exists.
+//
+// ListenAddr selects TCP. Empty keeps the unix socket, which is the Linux
+// production default. Windows and sandbox.channel.transport=http set a
+// loopback (or in-container wildcard) address instead.
 type Config struct {
 	Root        string
 	Token       string
 	BotID       string
 	SocketPath  string
+	ListenAddr  string
 	MaxPutBytes int64
 	OnShutdown  func()
 }
 
-// Server is the unix-socket RPC server.
+// Server is the channel RPC server. The accept loop is the same for a unix
+// socket and a TCP listener.
 type Server struct {
-	cfg     Config
-	ln      net.Listener
-	reaper  *Reaper
-	started time.Time
-	ready   string
+	cfg        Config
+	ln         net.Listener
+	reaper     *Reaper
+	started    time.Time
+	ready      string
+	listenFile string
+	// boundDial is the loopback address clients should dial. Set only for TCP.
+	boundDial string
 
 	mu     sync.Mutex
 	closed bool
@@ -40,15 +50,19 @@ type Server struct {
 }
 
 // Listen creates the socket (mode 0600) and the ready file next to it.
+// A non-empty ListenAddr binds TCP instead and does not create a socket.
 func Listen(cfg Config) (*Server, error) {
 	if cfg.Root == "" {
 		cfg.Root = DefaultRoot
 	}
-	if cfg.SocketPath == "" {
-		cfg.SocketPath = DefaultSock
-	}
 	if cfg.MaxPutBytes == 0 {
 		cfg.MaxPutBytes = DefaultMaxPut
+	}
+	if cfg.ListenAddr != "" {
+		return listenTCP(cfg)
+	}
+	if cfg.SocketPath == "" {
+		cfg.SocketPath = DefaultSock
 	}
 	if err := os.MkdirAll(cfg.Root, 0o755); err != nil {
 		return nil, err
@@ -87,19 +101,36 @@ func Listen(cfg Config) (*Server, error) {
 	}, nil
 }
 
-// Serve accepts until ctx is cancelled or Close is called.
+// Serve accepts on the listener from Listen until ctx is cancelled or Close
+// is called.
 func (s *Server) Serve(ctx context.Context) error {
+	return s.ServeListener(ctx, s.ln)
+}
+
+// ServeListener is the shared accept loop. ln may be a unix socket or a TCP
+// listener; framing and Hello authentication do not depend on which one.
+func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
+	if ln == nil {
+		return errors.New("channel: nil listener")
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return net.ErrClosed
+	}
+	s.ln = ln
+	s.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = s.ln.Close()
+			_ = ln.Close()
 		case <-done:
 		}
 	}()
 	defer close(done)
 	for {
-		nc, err := s.ln.Accept()
+		nc, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil || s.isClosed() {
 				return nil
@@ -140,7 +171,10 @@ func (s *Server) Close() error {
 	if s.ready != "" {
 		_ = os.Remove(s.ready)
 	}
-	if s.cfg.SocketPath != "" {
+	if s.listenFile != "" {
+		_ = os.Remove(s.listenFile)
+	}
+	if s.cfg.ListenAddr == "" && s.cfg.SocketPath != "" {
 		if fi, statErr := os.Lstat(s.cfg.SocketPath); statErr == nil && fi.Mode()&os.ModeSocket != 0 {
 			_ = os.Remove(s.cfg.SocketPath)
 		}
@@ -170,8 +204,24 @@ func (s *Server) untrack(nc net.Conn) {
 	delete(s.conns, nc)
 }
 
-// Addr returns the socket path.
-func (s *Server) Addr() string { return s.cfg.SocketPath }
+// Addr returns the unix socket path, or the loopback TCP dial address.
+func (s *Server) Addr() string {
+	if s.boundDial != "" {
+		return s.boundDial
+	}
+	return s.cfg.SocketPath
+}
+
+// ListenerAddr returns the address the listener actually bound, which can be
+// a wildcard when Docker publishes the port. Callers that dial must use Addr.
+func (s *Server) ListenerAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ln == nil {
+		return ""
+	}
+	return s.ln.Addr().String()
+}
 
 type conn struct {
 	s    *Server
@@ -527,11 +577,36 @@ func Ping(ctx context.Context, sock string) error {
 	if sock == "" {
 		sock = DefaultSock
 	}
+	if err := RejectTokenTarget(sock); err != nil {
+		return err
+	}
 	var d net.Dialer
 	nc, err := d.DialContext(ctx, "unix", sock)
 	if err != nil {
 		return err
 	}
+	return PingConn(ctx, nc)
+}
+
+// PingTCP dials a loopback TCP address. Wildcard addresses are not dialed;
+// map them with LocalDialAddr first.
+func PingTCP(ctx context.Context, addr string) error {
+	if err := RejectTokenTarget(addr); err != nil {
+		return err
+	}
+	if err := requireLoopbackDial(addr); err != nil {
+		return err
+	}
+	var d net.Dialer
+	nc, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	return PingConn(ctx, nc)
+}
+
+// PingConn sends Health.Ping on an existing connection and closes it.
+func PingConn(ctx context.Context, nc net.Conn) error {
 	defer nc.Close()
 	deadline, ok := ctx.Deadline()
 	if !ok {

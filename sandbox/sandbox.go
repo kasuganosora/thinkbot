@@ -253,6 +253,11 @@ type Config struct {
 	// DooD 下该路径必须和 Docker 宿主上的路径是同一目录。
 	ChannelSockRoot string
 
+	// ChannelTransport 选择 channel 传输。空或 auto：Windows 用 TCP，其他系统用 unix socket。
+	// http 与 tcp 相同，都是既有帧协议打在 TCP 上，不是 HTTP 请求。宿主只拨 127.0.0.1。
+	// Token 仍只出现在 Hello 帧里。环境变量 THINKBOT_CHANNEL_TRANSPORT 优先于本字段。
+	ChannelTransport string
+
 	// Proxy 全局出口代理 URL（如 "http://user:pass@host:port"、"socks5://host:port"）。
 	// 注入到 bot Docker 容器的 HTTP_PROXY/HTTPS_PROXY 环境变量，使容器内所有出站请求
 	// （curl、python requests、node fetch、容器内 thinkbot 等）统一走部署侧代理。
