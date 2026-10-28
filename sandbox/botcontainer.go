@@ -17,7 +17,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -673,9 +675,10 @@ func (c *botContainer) WriteFile(ctx context.Context, path string, data []byte) 
 }
 
 // writeFileUnbounded 同 WriteFile，但跳过 MaxFileWrite 限制。
-// 仅供框架内部转储（工具输出 offload）使用：offload 承载的是超截断阈值的
-// 完整输出，体积可能较大，受调用方截断上限与 PruneToolOutput 清理约束，
-// 不应被普通工具的写文件大小限制阻断。
+// 仅供框架内部转储（工具输出 offload）：offload 承载的是已经在内存中的输出，
+// 受调用方截断上限与 PruneToolOutput 约束。
+// 用户 HTTP 上传不走这里，而是 writeUserStream 流式写入。
+// 普通工具写文件仍走 WriteFile，继续受 MaxFileWrite 约束。
 func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data []byte) error {
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
@@ -700,6 +703,63 @@ func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data
 		return errs.Newf("bot_container: write tool output %q failed: %s", path, res.Stderr)
 	}
 	return nil
+}
+
+// writeUserStream 把 r 直接送进 `docker exec -i … cat > path` 的 stdin。
+// 不读进内存，也不经过宿主磁盘（持久容器的 named volume 在主进程里不可见）。
+// limit > 0 时超限返回 ErrUserUploadTooLarge，并在容器内删除半截文件。
+func (c *botContainer) writeUserStream(ctx context.Context, path string, r io.Reader, limit int64) (int64, error) {
+	validated, err := validatePath(containerWorkDir, path)
+	if err != nil {
+		return 0, err
+	}
+	if err := c.ensure(ctx); err != nil {
+		return 0, err
+	}
+	dir := pathDir(validated)
+	quoted := shellQuote(validated)
+	var command string
+	if dir != "" && dir != containerWorkDir {
+		command = fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(dir), quoted)
+	} else {
+		command = fmt.Sprintf("cat > %s", quoted)
+	}
+	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", c.container, "sh", "-c", command)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return 0, errs.Wrapf(err, "bot_container: stdin pipe for %q", path)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return 0, errs.Wrapf(err, "bot_container: stream file %q", path)
+	}
+	n, copyErr := CopyUserUpload(stdin, r, limit)
+	closeErr := stdin.Close()
+	waitErr := cmd.Wait()
+	if errors.Is(copyErr, ErrUserUploadTooLarge) {
+		c.removeStreamedFile(validated)
+		return n, ErrUserUploadTooLarge
+	}
+	if copyErr != nil || closeErr != nil || waitErr != nil {
+		c.removeStreamedFile(validated)
+		switch {
+		case copyErr != nil:
+			return n, errs.Wrapf(copyErr, "bot_container: stream file %q", path)
+		case waitErr != nil:
+			return n, errs.Wrapf(waitErr, "bot_container: stream file %q: %s", path, strings.TrimSpace(stderr.String()))
+		default:
+			return n, errs.Wrapf(closeErr, "bot_container: stream file %q", path)
+		}
+	}
+	return n, nil
+}
+
+func (c *botContainer) removeStreamedFile(validated string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "exec", c.container, "rm", "-f", "--", validated)
+	_ = cmd.Run()
 }
 
 // ListDir 列出容器内目录。
