@@ -13,6 +13,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,12 +54,15 @@ Usage:
   thinkbot-channel health [--sock PATH]
   thinkbot-channel version
 
+The token is read once from <socket-dir>/%s (mode 0600) and the file is removed.
+%s is only a fallback and is cleared from the environment after startup.
+Health ping does not need a token.
+
 Environment:
-  %s   required for authenticated RPC (health ping does not use it)
   %s        optional; Hello.botId must match when set
   %s   socket path (default %s)
   %s   file jail (default %s)
-`, channel.EnvToken, channel.EnvBotID, channel.EnvSock, channel.DefaultSock, channel.EnvRoot, channel.DefaultRoot)
+`, channel.TokenFileName, channel.EnvToken, channel.EnvBotID, channel.EnvSock, channel.DefaultSock, channel.EnvRoot, channel.DefaultRoot)
 }
 
 func daemonConfig(args []string) (channel.Config, []string) {
@@ -69,7 +74,6 @@ func daemonConfig(args []string) (channel.Config, []string) {
 	cfg := channel.Config{
 		SocketPath: *sock,
 		Root:       *root,
-		Token:      os.Getenv(channel.EnvToken),
 		BotID:      os.Getenv(channel.EnvBotID),
 	}
 	if cfg.SocketPath == "" {
@@ -81,8 +85,34 @@ func daemonConfig(args []string) (channel.Config, []string) {
 	return cfg, fs.Args()
 }
 
+// consumeChannelToken loads the one-shot token file next to the socket, or the
+// process environment if the file is absent. Either source is then removed from
+// the environment so /proc/1/environ does not keep the secret.
+func consumeChannelToken(sock string) string {
+	if sock == "" {
+		sock = channel.DefaultSock
+	}
+	path := filepath.Join(filepath.Dir(sock), channel.TokenFileName)
+	var fromFile string
+	if b, err := os.ReadFile(path); err == nil {
+		fromFile = strings.TrimSpace(string(b))
+		_ = os.Remove(path)
+	}
+	fromEnv := os.Getenv(channel.EnvToken)
+	_ = os.Unsetenv(channel.EnvToken)
+	if fromFile != "" {
+		return fromFile
+	}
+	return fromEnv
+}
+
 func runDaemon(args []string) error {
 	cfg, extra := daemonConfig(args)
+	sock := cfg.SocketPath
+	if sock == "" {
+		sock = os.Getenv(channel.EnvSock)
+	}
+	cfg.Token = consumeChannelToken(sock)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cfg.OnShutdown = cancel
@@ -98,7 +128,7 @@ func runDaemon(args []string) error {
 	defer srv.Close()
 
 	if cfg.Token == "" {
-		log.Printf("thinkbot-channel: %s is empty; authenticated RPC is rejected until it is set (health ping still answers)", channel.EnvToken)
+		log.Printf("thinkbot-channel: no token file; authenticated RPC is rejected until one is provided (health ping still answers)")
 	}
 	if len(extra) > 0 {
 		// A previous image contract appended `sleep infinity` as the container

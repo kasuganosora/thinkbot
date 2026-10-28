@@ -284,6 +284,25 @@ func (c *botContainer) channelSockFile() string {
 	return c.channelHostDir() + "/channel.sock"
 }
 
+// writeChannelToken puts the derived token on Volume B as a 0600 file and
+// does not pass it through the container environment. The daemon reads it
+// once at startup and deletes the file.
+func (c *botContainer) writeChannelToken(token string) error {
+	if err := os.MkdirAll(c.channelHostDir(), 0o750); err != nil {
+		return errs.Wrapf(err, "bot_container: channel socket dir %q", c.channelHostDir())
+	}
+	path := c.channelHostDir() + "/" + channel.TokenFileName
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token), 0o600); err != nil {
+		return errs.Wrap(err, "bot_container: write channel token")
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return errs.Wrap(err, "bot_container: commit channel token")
+	}
+	return nil
+}
+
 // ensureChannelLocked 探针 Health + Hello。失败则删除容器并重建一次，数据 volume 保留。
 // 调用方必须已持有 c.mu。没有第二种执行路径。
 func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
@@ -380,11 +399,7 @@ func (c *botContainer) dockerRunArgs(image string) []string {
 	if imageUsesChannelPID1(image) {
 		args = append(args, "-v", c.channelHostDir()+":"+channelclient.ContainerSockDir)
 		args = append(args, "-e", channel.EnvBotID+"="+c.botID)
-		if c.cfg.ChannelSecret != "" {
-			if token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID); err == nil {
-				args = append(args, "-e", channel.EnvToken+"="+token)
-			}
-		}
+		// The token is a 0600 file on Volume B, not a container environment variable.
 		if uid := os.Getuid(); uid > 0 {
 			args = append(args,
 				"-e", channel.EnvSockUID+"="+strconv.Itoa(uid),
@@ -415,11 +430,12 @@ func (c *botContainer) create(ctx context.Context) error {
 		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
 	}
 	if imageUsesChannelPID1(image) {
-		if _, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID); err != nil {
+		token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
+		if err != nil {
 			return errs.Wrap(err, "bot_container: channel token")
 		}
-		if err := os.MkdirAll(c.channelHostDir(), 0o750); err != nil {
-			return errs.Wrapf(err, "bot_container: channel socket dir %q", c.channelHostDir())
+		if err := c.writeChannelToken(token); err != nil {
+			return err
 		}
 	}
 
@@ -708,6 +724,9 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 	if req.Command == "" {
 		return nil, errs.New("bot_container: command is empty")
 	}
+	if c.usesChannel() {
+		return c.execStreamChannel(ctx, req, onChunk)
+	}
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stuck, hard := resolveExecTimeouts(req, c.cfg)
@@ -759,6 +778,9 @@ func (c *botContainer) ExecStream(ctx context.Context, req ExecRequest, onChunk 
 
 // ReadFile 读取容器内文件。
 func (c *botContainer) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	if c.usesChannel() {
+		return c.readFileChannel(ctx, path)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return nil, err
@@ -779,6 +801,16 @@ func (c *botContainer) ReadFile(ctx context.Context, path string) ([]byte, error
 
 // WriteFile 写入容器内文件（自动创建父目录）。
 func (c *botContainer) WriteFile(ctx context.Context, path string, data []byte) error {
+	if c.usesChannel() {
+		if c.cfg.MaxFileWrite > 0 && len(data) > c.cfg.MaxFileWrite {
+			return errs.Newf("bot_container: file size %d exceeds max write %d", len(data), c.cfg.MaxFileWrite)
+		}
+		var limit int64
+		if c.cfg.MaxFileWrite > 0 {
+			limit = int64(c.cfg.MaxFileWrite)
+		}
+		return c.writeFileChannel(ctx, path, data, limit)
+	}
 	if c.cfg.MaxFileWrite > 0 && len(data) > c.cfg.MaxFileWrite {
 		return errs.Newf("bot_container: file size %d exceeds max write %d",
 			len(data), c.cfg.MaxFileWrite)
@@ -814,6 +846,9 @@ func (c *botContainer) WriteFile(ctx context.Context, path string, data []byte) 
 // 用户 HTTP 上传不走这里，而是 writeUserStream 流式写入。
 // 普通工具写文件仍走 WriteFile，继续受 MaxFileWrite 约束。
 func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data []byte) error {
+	if c.usesChannel() {
+		return c.writeFileChannel(ctx, path, data, 0)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return err
@@ -843,6 +878,9 @@ func (c *botContainer) writeFileUnbounded(ctx context.Context, path string, data
 // 不读进内存，也不经过宿主磁盘（持久容器的 named volume 在主进程里不可见）。
 // limit > 0 时超限返回 ErrUserUploadTooLarge，并在容器内删除半截文件。
 func (c *botContainer) writeUserStream(ctx context.Context, path string, r io.Reader, limit int64) (int64, error) {
+	if c.usesChannel() {
+		return c.writeStreamChannel(ctx, path, r, limit)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return 0, err
@@ -898,6 +936,9 @@ func (c *botContainer) removeStreamedFile(validated string) {
 
 // ListDir 列出容器内目录。
 func (c *botContainer) ListDir(ctx context.Context, path string) ([]FileEntry, error) {
+	if c.usesChannel() {
+		return c.listDirChannel(ctx, path)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return nil, err
@@ -923,6 +964,9 @@ func (c *botContainer) ListDir(ctx context.Context, path string) ([]FileEntry, e
 
 // Mkdir 在容器内创建目录。
 func (c *botContainer) Mkdir(ctx context.Context, path string) error {
+	if c.usesChannel() {
+		return c.mkdirChannel(ctx, path)
+	}
 	validated, err := validatePath(containerWorkDir, path)
 	if err != nil {
 		return err
@@ -939,6 +983,9 @@ func (c *botContainer) Mkdir(ctx context.Context, path string) error {
 
 // Stat 返回容器内单个路径的信息（用于下载前校验）。返回 exists, isDir, size。
 func (c *botContainer) Stat(ctx context.Context, path string) (exists bool, isDir bool, size int64, err error) {
+	if c.usesChannel() {
+		return c.statChannel(ctx, path)
+	}
 	validated, verr := validatePath(containerWorkDir, path)
 	if verr != nil {
 		return false, false, 0, verr

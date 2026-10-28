@@ -154,7 +154,7 @@ func (c *conn) runGet(f Frame) {
 		c.sendResult(MsgFileGetEnd, f.ReqID, GetEnd{Code: CodeJail, Error: err.Error()})
 		return
 	}
-	file, err := os.Open(full)
+	file, err := openFileNoFollow(c.s.cfg.Root, full)
 	if err != nil {
 		c.sendResult(MsgFileGetEnd, f.ReqID, GetEnd{Code: errorCode(err), Error: err.Error()})
 		return
@@ -214,7 +214,17 @@ func (c *conn) runList(f Frame) {
 		c.sendError(f.ReqID, CodeJail, err.Error())
 		return
 	}
-	entries, err := os.ReadDir(full)
+	dir, err := openDirNoFollow(c.s.cfg.Root, full)
+	if err != nil {
+		code := errorCode(err)
+		if errors.Is(err, errNotDir) {
+			code = CodeBadRequest
+		}
+		c.sendError(f.ReqID, code, err.Error())
+		return
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
 	if err != nil {
 		c.sendError(f.ReqID, errorCode(err), err.Error())
 		return
@@ -251,11 +261,7 @@ func (c *conn) runDelete(f Frame) {
 		c.sendError(f.ReqID, CodeBadRequest, "refusing to delete the virtual root")
 		return
 	}
-	if req.Recursive {
-		err = os.RemoveAll(full)
-	} else {
-		err = os.Remove(full)
-	}
+	err = removeNoFollow(c.s.cfg.Root, full, req.Recursive)
 	if err != nil {
 		c.sendError(f.ReqID, errorCode(err), err.Error())
 		return
@@ -274,7 +280,13 @@ func (c *conn) runStat(f Frame) {
 		c.sendError(f.ReqID, CodeJail, err.Error())
 		return
 	}
-	info, err := os.Stat(full)
+	file, err := openFileNoFollow(c.s.cfg.Root, full)
+	if err != nil {
+		c.sendError(f.ReqID, errorCode(err), err.Error())
+		return
+	}
+	info, err := file.Stat()
+	_ = file.Close()
 	if err != nil {
 		c.sendError(f.ReqID, errorCode(err), err.Error())
 		return
@@ -297,6 +309,8 @@ func errorCode(err error) string {
 		return CodeTooLarge
 	case errors.Is(err, os.ErrNotExist):
 		return CodeNotFound
+	case errors.Is(err, errNotDir):
+		return CodeBadRequest
 	default:
 		return CodeIO
 	}

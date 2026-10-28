@@ -20,7 +20,7 @@ func TestDaemonConfigIgnoresSleepInfinity(t *testing.T) {
 	if cfg.SocketPath != "" || cfg.Root != "" {
 		t.Fatalf("flags should stay empty so Listen applies defaults, got %+v", cfg)
 	}
-	if cfg.Token != "tok" || cfg.BotID != "bot-1" {
+	if cfg.Token != "" || cfg.BotID != "bot-1" {
 		t.Fatalf("env not applied: %+v", cfg)
 	}
 	cfg, extra = daemonConfig([]string{"--sock", filepath.Join(os.TempDir(), "c.sock"), "--root", "/data", "sleep"})
@@ -29,6 +29,38 @@ func TestDaemonConfigIgnoresSleepInfinity(t *testing.T) {
 	}
 	if len(extra) != 1 || extra[0] != "sleep" {
 		t.Fatalf("extra %#v", extra)
+	}
+}
+
+func TestConsumeChannelTokenFileOnce(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "channel.sock")
+	tokenPath := filepath.Join(dir, channel.TokenFileName)
+	if err := os.WriteFile(tokenPath, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(channel.EnvToken, "from-env")
+	got := consumeChannelToken(sock)
+	if got != "from-file" {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatal("token file was not removed")
+	}
+	if os.Getenv(channel.EnvToken) != "" {
+		t.Fatal("token still in the environment")
+	}
+}
+
+func TestConsumeChannelTokenUnsetsEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(channel.EnvToken, "from-env")
+	got := consumeChannelToken(filepath.Join(dir, "channel.sock"))
+	if got != "from-env" {
+		t.Fatalf("got %q", got)
+	}
+	if os.Getenv(channel.EnvToken) != "" {
+		t.Fatal("token still in the environment")
 	}
 }
 

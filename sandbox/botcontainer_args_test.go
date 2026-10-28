@@ -49,11 +49,23 @@ func TestDockerRunArgsChannelPID1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(joined, channel.EnvToken+"="+token) {
-		t.Fatal("derived token was not injected")
+	if strings.Contains(joined, channel.EnvToken+"=") || strings.Contains(joined, token) || strings.Contains(joined, "server-secret") {
+		t.Fatal("token or server secret leaked into docker args")
 	}
-	if strings.Contains(joined, "server-secret") {
-		t.Fatal("server secret leaked into docker args")
+	if err := c.writeChannelToken(token); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := hostDir + "/" + channel.TokenFileName
+	fi, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("token mode %o", fi.Mode().Perm())
+	}
+	body, err := os.ReadFile(tokenPath)
+	if err != nil || string(body) != token {
+		t.Fatalf("token file %q", body)
 	}
 	if !strings.Contains(joined, channel.EnvBotID+"=bot 1") {
 		t.Fatalf("missing bot id env: %s", joined)

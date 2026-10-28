@@ -43,6 +43,10 @@ const (
 	EnvSockUID = "THINKBOT_CHANNEL_SOCK_UID"
 	EnvSockGID = "THINKBOT_CHANNEL_SOCK_GID"
 
+	// TokenFileName is a one-shot file on the socket volume. The daemon reads
+	// it at startup and deletes it so the token is not left in PID 1's environment.
+	TokenFileName = "token"
+
 	chunkSize = 256 << 10
 )
 
