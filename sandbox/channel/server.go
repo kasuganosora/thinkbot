@@ -73,6 +73,10 @@ func Listen(cfg Config) (*Server, error) {
 		_ = ln.Close()
 		return nil, err
 	}
+	if err := claimSockPeer(dir, cfg.SocketPath, ready); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
 	return &Server{
 		cfg:     cfg,
 		ln:      ln,

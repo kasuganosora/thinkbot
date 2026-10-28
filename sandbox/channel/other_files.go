@@ -16,4 +16,6 @@ func listenUnix(path string) (net.Listener, error) {
 	return nil, errors.New("channel: unix sockets are required")
 }
 
+func claimSockPeer(dir, sock, ready string) error { return nil }
+
 func diskUsage(root string) DiskUsage { return DiskUsage{} }

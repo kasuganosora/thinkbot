@@ -245,6 +245,14 @@ type Config struct {
 	// 使浏览器流量走部署侧自有代理（IP 归部署侧）。空值表示直连。
 	BrowserProxy string
 
+	// ChannelSecret 是派生 per-bot channel token 的服务器密钥（HKDF，不按 bot 落库）。
+	// 空则内置 channel 镜像无法创建容器。优先来自环境变量 THINKBOT_CHANNEL_SECRET。
+	ChannelSecret string
+
+	// ChannelSockRoot 是主进程能看到的 Volume B 根目录（默认 /var/run/thinkbot-bots）。
+	// DooD 下该路径必须和 Docker 宿主上的路径是同一目录。
+	ChannelSockRoot string
+
 	// Proxy 全局出口代理 URL（如 "http://user:pass@host:port"、"socks5://host:port"）。
 	// 注入到 bot Docker 容器的 HTTP_PROXY/HTTPS_PROXY 环境变量，使容器内所有出站请求
 	// （curl、python requests、node fetch、容器内 thinkbot 等）统一走部署侧代理。

@@ -38,6 +38,10 @@ const (
 	EnvBotID = "THINKBOT_BOT_ID"
 	EnvSock  = "THINKBOT_CHANNEL_SOCK"
 	EnvRoot  = "THINKBOT_CHANNEL_ROOT"
+	// EnvSockUID and EnvSockGID name the peer that may dial the socket.
+	// The socket stays mode 0600. Root inside the container can still connect.
+	EnvSockUID = "THINKBOT_CHANNEL_SOCK_UID"
+	EnvSockGID = "THINKBOT_CHANNEL_SOCK_GID"
 
 	chunkSize = 256 << 10
 )
