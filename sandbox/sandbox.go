@@ -226,9 +226,10 @@ type Config struct {
 	Timezone string
 
 	// PersistentContainer 为 true 时，per-bot Docker 后端使用「一个 bot 一个长期容器」
-	// 模式：容器在首次使用时创建（docker run -d ... sleep infinity），挂载一个 named
-	// volume 到容器内 /workspace，bot 的所有文件读写与命令执行都通过 docker exec 在
-	// 容器内完成，宿主机磁盘不落任何 bot 文件（真正隔离）。
+	// 模式：容器在首次使用时创建（docker run -d），挂载一个 named volume 到容器内
+	// /data。内置镜像的 PID 1 是 thinkbot-channel；自定义镜像仍用 sleep infinity
+	// 占住进程。内置镜像上的文件读写、上传、命令和进程操作走 channel；自定义镜像
+	// 仍用 docker exec。宿主机磁盘不落任何 bot 文件。
 	// 为 false 时（旧行为）：每条命令起一个临时容器（docker run --rm），文件走宿主机 bind mount。
 	// 仅影响 BotWorkspaceManager 的 Docker 后端；local 后端不受影响。
 	PersistentContainer bool
@@ -243,6 +244,14 @@ type Config struct {
 	// 仅 BrowserEnabled=true 时生效，透传给容器内 wrapper（BOT_BROWSER_PROXY 环境变量），
 	// 使浏览器流量走部署侧自有代理（IP 归部署侧）。空值表示直连。
 	BrowserProxy string
+
+	// ChannelSecret 是派生 per-bot channel token 的服务器密钥（HKDF，不按 bot 落库）。
+	// 空则内置 channel 镜像无法创建容器。优先来自环境变量 THINKBOT_CHANNEL_SECRET。
+	ChannelSecret string
+
+	// ChannelSockRoot 是主进程能看到的 Volume B 根目录（默认 /var/run/thinkbot-bots）。
+	// DooD 下该路径必须和 Docker 宿主上的路径是同一目录。
+	ChannelSockRoot string
 
 	// Proxy 全局出口代理 URL（如 "http://user:pass@host:port"、"socks5://host:port"）。
 	// 注入到 bot Docker 容器的 HTTP_PROXY/HTTPS_PROXY 环境变量，使容器内所有出站请求

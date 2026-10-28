@@ -53,3 +53,7 @@ go build -o thinkbot ./cmd && ./thinkbot
 
 程序不接受命令行参数。配置通过 `.env` 文件或环境变量提供；
 `.env` 路径默认为当前目录下 `.env`，可用环境变量 `CONFIG_FILE` 覆盖。
+
+## thinkbot-channel
+
+`cmd/thinkbot-channel` 是沙箱容器的 PID 1（镜像 `ENTRYPOINT`，exec 形式），不是主进程的子命令。它在容器内监听 unix socket（默认 `/run/thinkbot/channel.sock`），用 `THINKBOT_CHANNEL_TOKEN` 校验 Hello，并把文件操作限制在 `/data`。`thinkbot-channel health` 供镜像 HEALTHCHECK 使用，不需要 token。协议实现在 `sandbox/channel`。不包含 PTY 或截图。

@@ -38,7 +38,8 @@
 
 ## 长期容器生命周期（botContainer）
 
-- **惰性 ensure**：首次使用时 `docker run -d`（镜像经 `resolveBotImage` 解析：`builtin`/空 → 按需自构建内置镜像，其他值原样使用），已停止则 `docker start`；幂等。
+- **惰性 ensure**：首次使用时 `docker run -d`（镜像经 `resolveBotImage` 解析：`builtin`/空 → 按需自构建内置镜像，其他值原样使用），已停止则 `docker start`；幂等。内置镜像的 ENTRYPOINT / PID 1 是 `thinkbot-channel`（unix socket，默认 `/run/thinkbot/channel.sock`），不再把 `sleep infinity` 当作入口；自定义镜像仍用 `sleep infinity` 保持运行。
+- **Channel**：内置镜像另挂 Volume B（`/var/run/thinkbot-bots/thinkbot-channel-<botID>` → 容器内 `/run/thinkbot`）。Token 由服务器密钥和 botID 经 HKDF 派生，写成该目录里一次性的 `0600` 文件，守护进程读完即删，不放进 PID 1 的环境变量，也不写入 `/data`。ensure 先 Health 再 Hello；失败则 `docker rm` 后重建一次容器，数据 volume 保留。没有 exec 回退开关。内置镜像上的上传、读写、列目录、命令和进程操作走 channel；自定义镜像仍用 docker exec。桌面 RFB 仍走 docker exec。
 - **网络自愈**：ensure 每次复核并补齐网络配置（见上文「网络策略」）。
 - **停止语义**：用户显式 `stop()` 后置 `stopped` 标志，后续 `ensure()` 拒绝自动 `docker start`，避免「停止后又被 agent exec 重启」死循环；`unstop()` 恢复。
 - **destroy**：`docker rm -f`，可选连同 named volume 一起删除。

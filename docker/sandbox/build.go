@@ -6,7 +6,9 @@
 // 因此二进制更新即自动携带最新上下文，镜像始终与当前 thinkbot 版本一致。
 //
 // 镜像以构建上下文的内容哈希作为 tag（thinkbot-bot:<md5>），仅当本地不存在时才
-// 构建；thinkbot 更新导致任一上下文文件变化 → 哈希变化 → 新 tag → 自动重建。
+// 构建；thinkbot 更新导致任一上下文文件或 thinkbot-channel 变化 → 哈希变化 →
+// 新 tag → 自动重建。生产 slim 镜像用 -tags embedchannel 把 channel 二进制嵌进来；
+// 开发树没有嵌入时，用源码摘要（cmd/thinkbot-channel 与 sandbox/channel）代替。
 package botsandbox
 
 import (
@@ -77,7 +79,7 @@ func Tint2Config() ([]byte, error) {
 const BuiltinImagePrefix = "thinkbot-bot:"
 
 // builtinTag 由构建上下文内容计算确定性镜像 tag。
-// 哈希覆盖全部烤进镜像的文件（Dockerfile + 被 COPY 的 browser-mcp.js / browser-launch.sh），
+// 哈希覆盖 Dockerfile、被 COPY 的脚本，以及 thinkbot-channel（嵌入字节或源码摘要）。
 // 任一处变化都会改变 tag，确保「内容不变 → 不重复构建；内容变了 → 自动重建」。
 func builtinTag() (string, error) {
 	h := md5.New()
@@ -92,7 +94,27 @@ func builtinTag() (string, error) {
 		}
 		_ = f.Close()
 	}
+	if err := hashChannel(h); err != nil {
+		return "", err
+	}
 	return BuiltinImagePrefix + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashChannel mixes the channel daemon into the image tag. Embedded bytes win
+// so a slim binary (no source tree) still changes tag when the daemon changes.
+func hashChannel(h io.Writer) error {
+	if b := embeddedChannelBinary(); len(b) > 0 {
+		_, _ = io.WriteString(h, "embedded-channel")
+		_, _ = h.Write(b)
+		return nil
+	}
+	sum, err := channelSourceDigest()
+	if err != nil {
+		return err
+	}
+	_, _ = io.WriteString(h, "channel-src")
+	_, _ = h.Write(sum)
+	return nil
 }
 
 // EnsureImage 确保内置浏览器镜像已构建并返回其引用。
@@ -145,6 +167,9 @@ func ensureImageOnce(ctx context.Context, logger *zap.SugaredLogger, tag string)
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 			return "", errs.Wrapf(err, "botsandbox: write build context %q", name)
 		}
+	}
+	if err := writeChannelBinary(dir); err != nil {
+		return "", err
 	}
 
 	buildCtx, cancel := context.WithTimeout(ctx, imageBuildTimeout)
