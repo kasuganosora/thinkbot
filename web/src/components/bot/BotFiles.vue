@@ -16,6 +16,7 @@
         <input ref="fileInput" type="file" hidden @change="onUpload" />
       </div>
     </div>
+    <p v-if="uploading" class="bf-progress" role="progressbar" :aria-valuenow="uploadPercent" aria-valuemin="0" aria-valuemax="100">{{ uploadLabel }}</p>
 
     <!-- 文件表 -->
     <div class="bf-table">
@@ -57,12 +58,16 @@
 import { ref, computed, onMounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { botFileApi } from '@/api/services'
+import { MAX_WORKSPACE_UPLOAD_BYTES, formatUploadPercent, formatUploadSpeed } from '@/constants/uploadLimits'
 
 const props = defineProps({ botId: { type: String, required: true } })
 
 const path = ref('/data')
 const entries = ref([])
 const fileInput = ref()
+const uploading = ref(false)
+const uploadLabel = ref('')
+const uploadPercent = ref(0)
 
 const crumbs = computed(() => {
   const segs = path.value.split('/').filter(Boolean)
@@ -93,10 +98,28 @@ function fmtTime(v) {
 
 function triggerUpload() { fileInput.value?.click() }
 async function onUpload(e) {
-  const f = e.target.files?.[0]; if (!f) return
-  await botFileApi.upload(props.botId, path.value, f.name, f.size)
+  const f = e.target.files?.[0]
   e.target.value = ''
-  await load(); MessagePlugin.success('上传成功')
+  if (!f) return
+  if (f.size > MAX_WORKSPACE_UPLOAD_BYTES) {
+    MessagePlugin.warning(`${f.name} 超过单文件 ${fmtSize(MAX_WORKSPACE_UPLOAD_BYTES)} 上限`)
+    return
+  }
+  uploading.value = true
+  uploadPercent.value = 0
+  uploadLabel.value = `${f.name} 0% · …`
+  try {
+    await botFileApi.upload(props.botId, path.value, f, (progress) => {
+      uploadPercent.value = formatUploadPercent(progress.loaded, progress.total || f.size)
+      uploadLabel.value = `${f.name} ${uploadPercent.value}% · ${formatUploadSpeed(progress.speed)}`
+    })
+    await load()
+    MessagePlugin.success('上传成功')
+  } catch (err) {
+    MessagePlugin.error(err.message || '上传失败')
+  } finally {
+    uploading.value = false
+  }
 }
 
 const mkdirVisible = ref(false)
@@ -119,6 +142,7 @@ async function confirmMkdir() {
 .crumb-link { cursor: pointer; }
 .crumb-link:hover { color: var(--bp-label); text-decoration: underline; }
 .bf-ops { display: flex; gap: 8px; }
+.bf-progress { margin: 0 0 10px; font-size: 12px; color: var(--bp-label-secondary); }
 .bf-table { flex: 1; border: none; box-shadow: var(--bp-shadow-sm); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; background: var(--bp-surface); }
 .bf-thead { display: flex; padding: 12px 18px; border-bottom: var(--bp-hairline); font-size: 13px; color: var(--bp-label-tertiary); }
 .bf-tbody { flex: 1; overflow-y: auto; }

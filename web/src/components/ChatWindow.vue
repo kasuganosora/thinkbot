@@ -379,6 +379,7 @@ import ChoiceCard from '@/components/ChoiceCard.vue'
 import MessageArtifacts from '@/components/MessageArtifacts.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import { botSkillApi } from '@/api/services'
+import { MAX_CHAT_ATTACHMENT_BYTES, MAX_CHAT_ATTACHMENT_COUNT, MAX_CHAT_ATTACHMENT_TOTAL_BYTES } from '@/constants/uploadLimits'
 
 // markdown 渲染统一走 utils/markdown：
 // 内置渲染缓存（模板每帧都会重新调用，历史消息不必反复 parse + sanitize）
@@ -704,11 +705,12 @@ function scrollToBottomManual() {
 }
 const attachments = computed({ get: () => store.composerDraft.attachments, set: value => { store.composerDraft.attachments = value } })  // { name, type, size, dataUrl (base64) }[]
 
-// 附件上限：单文件 20MB、单次总大小 60MB、最多 10 个。
+// 附件上限与后端 validateChatAttachments 一致：单文件 20MB、单次总大小 60MB、最多 10 个。
+// 这是 base64 JSON，不是工作区文件上传（后者见 uploadLimits.js 的 100MB）。
 // 仅单文件限制时，用户批量塞入大文件会让 base64 全量驻留内存直至发送。
-const MAX_ATTACH_FILE_BYTES = 20 * 1024 * 1024
-const MAX_ATTACH_TOTAL_BYTES = 60 * 1024 * 1024
-const MAX_ATTACH_COUNT = 10
+const MAX_ATTACH_FILE_BYTES = MAX_CHAT_ATTACHMENT_BYTES
+const MAX_ATTACH_TOTAL_BYTES = MAX_CHAT_ATTACHMENT_TOTAL_BYTES
+const MAX_ATTACH_COUNT = MAX_CHAT_ATTACHMENT_COUNT
 
 /** 根据 MIME type 返回图标名 */
 function fileIcon(mimeType) {
@@ -765,9 +767,9 @@ async function addAttachments(files) {
   // share the same size/count limits, even while FileReader is still running.
   for (const file of files) {
     if (target.attachments.length >= MAX_ATTACH_COUNT) { target.notice = `最多只能添加 ${MAX_ATTACH_COUNT} 个附件`; break }
-    if (file.size > MAX_ATTACH_FILE_BYTES) { target.notice = `文件「${file.name}」超过 20MB 上限，已跳过`; continue }
+    if (file.size > MAX_ATTACH_FILE_BYTES) { target.notice = `文件「${file.name}」超过 ${formatFileSize(MAX_ATTACH_FILE_BYTES)} 上限，已跳过`; continue }
     const total = target.attachments.reduce((sum, attachment) => sum + (attachment.size || 0), 0)
-    if (total + file.size > MAX_ATTACH_TOTAL_BYTES) { target.notice = '附件总大小不能超过 60MB'; break }
+    if (total + file.size > MAX_ATTACH_TOTAL_BYTES) { target.notice = `附件总大小不能超过 ${formatFileSize(MAX_ATTACH_TOTAL_BYTES)}`; break }
     const attachment = { id: `${Date.now()}-${Math.random()}`, name: file.name, type: file.type || guessType(file.name), size: file.size, dataUrl: '', status: 'reading' }
     target.attachments.push(attachment)
     pending.push({ file, attachment })
