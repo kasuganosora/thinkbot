@@ -102,3 +102,60 @@ func TestChannelExecAndStuckWatchdog(t *testing.T) {
 		t.Fatalf("stuck result %+v", res)
 	}
 }
+
+// TestChannelRecreateBackoffLevels 验证退避档位指数增长并封顶，
+// 且失败次数极大时不会因重复倍增而溢出。
+func TestChannelRecreateBackoffLevels(t *testing.T) {
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, 0},
+		{1, 30 * time.Second},
+		{2, 60 * time.Second},
+		{3, 2 * time.Minute},
+		{4, 4 * time.Minute},
+		{5, 8 * time.Minute},
+		{6, channelRecreateMaxBackoff},
+		{50, channelRecreateMaxBackoff},
+	}
+	for _, tc := range cases {
+		if got := channelRecreateBackoff(tc.failures); got != tc.want {
+			t.Fatalf("channelRecreateBackoff(%d) = %s, want %s", tc.failures, got, tc.want)
+		}
+	}
+}
+
+// TestEnsureChannelLockedCooldownSuppressesRecreate 验证冷却窗口内探针失败时
+// 不执行破坏性的「删容器 + 重建」。缺少这道闸时，重建修不好的环境级故障
+// 会随调用方频率无限销毁重建容器。
+func TestEnsureChannelLockedCooldownSuppressesRecreate(t *testing.T) {
+	c := newBotContainer("bot-cooldown", Config{
+		ChannelSecret: "server-secret",
+		Image:         "thinkbot-bot:test",
+	}, zap.NewNop().Sugar())
+	c.channelRecreateUntil = time.Now().Add(time.Hour)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	err := c.ensureChannelLocked(ctx)
+	if err == nil {
+		t.Fatal("expected channel probe failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "cooling down") {
+		t.Fatalf("expected recreate suppressed by cooldown, got %v", err)
+	}
+	if c.channelRecreateFails != 1 {
+		t.Fatalf("consecutive failures = %d, want 1", c.channelRecreateFails)
+	}
+	// 冷却窗口只延长不缩短：短档位重算不能覆盖掉现存的长窗口。
+	if d := time.Until(c.channelRecreateUntil); d < 59*time.Minute {
+		t.Fatalf("cooldown window shrank, remaining %s", d)
+	}
+
+	c.clearChannelRecreateBackoff()
+	if c.channelRecreateFails != 0 || !c.channelRecreateUntil.IsZero() || c.channelRecreateErr != "" {
+		t.Fatalf("cooldown not cleared: fails=%d until=%v err=%q",
+			c.channelRecreateFails, c.channelRecreateUntil, c.channelRecreateErr)
+	}
+}
