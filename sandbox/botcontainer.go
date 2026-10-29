@@ -362,6 +362,10 @@ func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
 		}
 		return channelclient.ProbeEndpoint(ctx, ep, token, c.botID)
 	}
+	// attempted 表示已经越过冷却闸、开始破坏性重建。窗口内被跳过的失败
+	// 不能记入 noteChannelRecreateFailure：否则每次 ensure 都会 fails+1，
+	// 并把 channelRecreateUntil 刷新到 now+backoff，连续探测下窗口永远到不了期。
+	attempted := false
 	recreate := func(ctx context.Context) error {
 		// 冷却窗口内不再销毁重建。重建修不好的故障在窗口内每轮都会重演，
 		// 无冷却时调用方每几秒就会销毁并重建一次容器（日志刷屏、拖垮启动）。
@@ -373,6 +377,7 @@ func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
 			return errs.Newf("bot_container: channel recreate cooling down (retry in %s, %d consecutive failures): %s",
 				d.Round(time.Second), c.channelRecreateFails, c.channelRecreateErr)
 		}
+		attempted = true
 		c.logger.Warnw("channel probe failed; recreating bot container",
 			"container", c.container, "data_volume", c.volume)
 		if err := c.removeContainerKeepData(); err != nil {
@@ -382,19 +387,21 @@ func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
 		return c.create(ctx)
 	}
 	if err := channelclient.Recover(ctx, probe, recreate); err != nil {
-		c.noteChannelRecreateFailure(err)
+		if attempted {
+			c.noteChannelRecreateFailure(err)
+		}
 		return errs.Wrapf(err, "bot_container: %s", c.container)
 	}
 	c.clearChannelRecreateBackoff()
 	return nil
 }
 
-// noteChannelRecreateFailure 记录一次失败并抬升冷却档位。调用方必须已持有 c.mu。
+// noteChannelRecreateFailure 记录一次「破坏性重建已经尝试且仍然失败」，并抬升冷却档位。
+// 调用方必须已持有 c.mu。冷却窗口内被跳过的重建不得调用本函数。
 func (c *botContainer) noteChannelRecreateFailure(err error) {
 	c.channelRecreateFails++
 	backoff := channelRecreateBackoff(c.channelRecreateFails)
-	// 只延长、不缩短：冷却期内被拦的失败同样计入，若重算出的窗口比现存窗口短
-	// （退避档位回退或外部已设更长窗口），保留原来那个，否则会越拦越频繁。
+	// 只延长、不缩短。现存窗口更长时（例如外部已设更长窗口）保留原来那个。
 	if next := time.Now().Add(backoff); next.After(c.channelRecreateUntil) {
 		c.channelRecreateUntil = next
 	}
