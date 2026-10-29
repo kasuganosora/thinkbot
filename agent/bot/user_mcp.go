@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -12,6 +13,13 @@ import (
 	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
+
+// mcpStartupBudget 是启动时连接所有 per-bot MCP 服务器的总时限。
+//
+// 这条路径跑在 fx 的启动阶段，而 fx 启动有全局超时：一旦超过，fx 会中止启动并
+// 让进程以 exit 1 退出（不是某个 MCP 失败，而是整个服务起不来）。健康的 MCP
+// 握手通常在 1s 内完成，这个预算只用于兜住「某个端点不可达且连接挂住」的情况。
+const mcpStartupBudget = 10 * time.Second
 
 // setupUserMCP 为本 bot 接入 Admin UI / 工具配置的 per-bot MCP 服务器
 // （data/mcp/{botId}/servers.json）。
@@ -30,9 +38,18 @@ func setupUserMCP(b *Bot, params BotParams) {
 		logger.Warnw("load bot mcp servers failed", "err", err)
 	}
 
-	ctx := context.Background()
+	// 启动阶段给 MCP 连接一个总预算。MCP 是第三方外部依赖，任何一个连不上
+	// 都不该拖垮 bot 启动：fx 的启动超时一到，整个进程会以 exit 1 中止。
+	// 预算到期后剩余的服务器直接跳过并记 WARN（连接失败本身不致命）。
+	ctx, cancel := context.WithTimeout(context.Background(), mcpStartupBudget)
+	defer cancel()
 	connected := 0
 	for _, e := range entries {
+		if ctx.Err() != nil {
+			logger.Warnw("mcp startup budget exhausted; skipping remaining servers",
+				"configured", len(entries), "connected", connected, "budget", mcpStartupBudget)
+			break
+		}
 		cfg := e.ToServerConfig()
 		if cfg.Name == "" {
 			continue
