@@ -41,6 +41,31 @@ import (
 // 容器内固定工作目录（agent 面向的虚拟根 /data）。
 const containerWorkDir = VirtualRoot
 
+// channel 重建退避。探针失败后的重建是破坏性动作（docker rm -f + docker run），
+// 当故障是环境级的（宿主不支持容器 unix socket、镜像与守护进程协议不匹配等）时
+// 重建永远修不好，若无冷却就会随调用方频率无限销毁重建容器。
+const (
+	channelRecreateBaseBackoff = 30 * time.Second
+	channelRecreateMaxBackoff  = 10 * time.Minute
+	// channelRecreateErrRunes 是缓存的最近失败原因字符数上限，避免长错误串常驻内存。
+	channelRecreateErrRunes = 200
+)
+
+// channelRecreateBackoff 返回第 n 次连续失败后的冷却时长（指数退避，封顶）。
+func channelRecreateBackoff(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	d := channelRecreateBaseBackoff
+	for i := 1; i < failures; i++ {
+		if d >= channelRecreateMaxBackoff/2 {
+			return channelRecreateMaxBackoff
+		}
+		d *= 2
+	}
+	return d
+}
+
 // botContainer 管理单个 bot 的长期容器。
 type botContainer struct {
 	botID     string
@@ -65,6 +90,12 @@ type botContainer struct {
 	// channelAddr 是 TCP 传输下宿主 127.0.0.1 的拨号地址（Docker 动态分配的端口）。
 	// 只放在进程内运行时状态，不是密钥，也不写入容器环境变量。unix 传输时为空。
 	channelAddr string
+
+	// channelRecreate* 是「重建后探针仍失败」的冷却状态，受 mu 保护。
+	// 冷却只抑制破坏性的「删容器 + 重建」，不影响只读探针：容器仍可能自行恢复。
+	channelRecreateFails int       // 连续失败次数，决定退避档位
+	channelRecreateUntil time.Time // 冷却截止时刻
+	channelRecreateErr   string    // 最近一次失败原因（截断），仅用于日志
 }
 
 func newBotContainer(botID string, cfg Config, logger *zap.SugaredLogger) *botContainer {
@@ -332,6 +363,16 @@ func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
 		return channelclient.ProbeEndpoint(ctx, ep, token, c.botID)
 	}
 	recreate := func(ctx context.Context) error {
+		// 冷却窗口内不再销毁重建。重建修不好的故障在窗口内每轮都会重演，
+		// 无冷却时调用方每几秒就会销毁并重建一次容器（日志刷屏、拖垮启动）。
+		if d := time.Until(c.channelRecreateUntil); d > 0 {
+			c.logger.Warnw("channel recreate skipped: cooling down",
+				"container", c.container, "retry_in", d.Round(time.Second),
+				"consecutive_failures", c.channelRecreateFails,
+				"last_error", c.channelRecreateErr)
+			return errs.Newf("bot_container: channel recreate cooling down (retry in %s, %d consecutive failures): %s",
+				d.Round(time.Second), c.channelRecreateFails, c.channelRecreateErr)
+		}
 		c.logger.Warnw("channel probe failed; recreating bot container",
 			"container", c.container, "data_volume", c.volume)
 		if err := c.removeContainerKeepData(); err != nil {
@@ -341,9 +382,45 @@ func (c *botContainer) ensureChannelLocked(ctx context.Context) error {
 		return c.create(ctx)
 	}
 	if err := channelclient.Recover(ctx, probe, recreate); err != nil {
+		c.noteChannelRecreateFailure(err)
 		return errs.Wrapf(err, "bot_container: %s", c.container)
 	}
+	c.clearChannelRecreateBackoff()
 	return nil
+}
+
+// noteChannelRecreateFailure 记录一次失败并抬升冷却档位。调用方必须已持有 c.mu。
+func (c *botContainer) noteChannelRecreateFailure(err error) {
+	c.channelRecreateFails++
+	backoff := channelRecreateBackoff(c.channelRecreateFails)
+	// 只延长、不缩短：冷却期内被拦的失败同样计入，若重算出的窗口比现存窗口短
+	// （退避档位回退或外部已设更长窗口），保留原来那个，否则会越拦越频繁。
+	if next := time.Now().Add(backoff); next.After(c.channelRecreateUntil) {
+		c.channelRecreateUntil = next
+	}
+	if err != nil {
+		// 按 rune 截断，避免把多字节字符切一半留下半个乱码。
+		runes := []rune(err.Error())
+		if len(runes) > channelRecreateErrRunes {
+			runes = runes[:channelRecreateErrRunes]
+		}
+		c.channelRecreateErr = string(runes)
+	}
+	c.logger.Warnw("channel recreate backoff armed",
+		"container", c.container, "consecutive_failures", c.channelRecreateFails,
+		"backoff", backoff.String())
+}
+
+// clearChannelRecreateBackoff 在探针通过后复位冷却状态。调用方必须已持有 c.mu。
+func (c *botContainer) clearChannelRecreateBackoff() {
+	if c.channelRecreateFails == 0 && c.channelRecreateUntil.IsZero() {
+		return
+	}
+	c.logger.Infow("channel recovered; recreate cooldown cleared",
+		"container", c.container, "previous_failures", c.channelRecreateFails)
+	c.channelRecreateFails = 0
+	c.channelRecreateUntil = time.Time{}
+	c.channelRecreateErr = ""
 }
 
 func (c *botContainer) removeContainerKeepData() error {
