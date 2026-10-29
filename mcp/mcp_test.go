@@ -602,6 +602,41 @@ func TestExtractText(t *testing.T) {
 	}
 }
 
+// TestStdioTransportSurvivesCallerCancel 验证连接用的 ctx 被取消后，stdio
+// 子进程仍然活着。进程寿命只到 Close()；若 CommandContext 绑在调用方 ctx 上，
+// 启动预算结束时的 cancel 会把已经连上的 MCP 子进程 SIGKILL 掉。
+func TestStdioTransportSurvivesCallerCancel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires subprocess")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tp, err := newStdioTransport(ctx, "sleep", []string{"30"}, nil, "", nil)
+	if err != nil {
+		t.Fatalf("newStdioTransport: %v", err)
+	}
+
+	cancel()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !tp.Healthy() {
+			_ = tp.Close()
+			t.Fatal("stdio child died after caller context cancel; lifetime must end at Close")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !tp.Healthy() {
+		_ = tp.Close()
+		t.Fatal("stdio child died after caller context cancel; lifetime must end at Close")
+	}
+
+	if err := tp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if tp.Healthy() {
+		t.Fatal("Close should stop the stdio child")
+	}
+}
+
 // TestStdioTransportHealthy 验证 stdio 传输层的健康探测：进程存活时为 true，
 // 被杀后为 false（断线自动重连依赖此信号）。
 func TestStdioTransportHealthy(t *testing.T) {
