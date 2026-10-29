@@ -555,6 +555,11 @@ func (c *botContainer) create(ctx context.Context) error {
 	// 解析实际镜像：builtin/空 → thinkbot 按需自构建；否则原样使用（兼容预构建镜像）。
 	image, err := resolveBotImage(ctx, c.cfg.Image, c.logger)
 	if err != nil {
+		// 镜像还在后台构建（首次部署要装 chromium）：这不是容器故障，
+		// 建容器这件事等镜像就绪后自然成功，不要按失败去重建或冷却。
+		if errors.Is(err, botsandbox.ErrImageBuilding) {
+			return errs.Wrapf(err, "bot_container: sandbox image not ready for %q", c.container)
+		}
 		return errs.Wrapf(err, "bot_container: resolve image for %q", c.container)
 	}
 	if imageUsesChannelPID1(image) {
