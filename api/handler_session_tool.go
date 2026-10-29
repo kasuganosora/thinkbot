@@ -28,7 +28,8 @@ const compactLLMTimeout = 5 * time.Minute
 //   POST /api/sessions/:sid/terminal/exec  — 执行命令
 //   GET  /api/sessions/:sid/files          — 文件列表
 //   POST /api/sessions/:sid/files/mkdir    — 创建目录
-//   POST /api/sessions/:sid/files/upload   — 上传文件（单文件见 MaxUserUploadBytes）
+//   POST /api/sessions/:sid/files/upload   — 上传小文件（单次 multipart，见 MaxUserUploadBytes）
+//   POST /api/sessions/:sid/files/uploads  — 分片上传：建会话 / 传段 / 合并（见 chunk_upload.go）
 //   GET  /api/sessions/:sid/status         — 会话状态
 //   POST /api/sessions/:sid/compact        — 压缩上下文
 // ============================================================================

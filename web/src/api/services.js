@@ -7,7 +7,9 @@
 // 返回值均为「解包后的 data」（Promise）。失败时 reject Error。
 // ============================================================================
 
-import { USE_MOCK, mockResolve, request, uploadRequest } from './http'
+import { USE_MOCK, mockResolve, putBytes, request, uploadRequest } from './http'
+import { shouldChunkWorkspaceUpload } from '../constants/uploadLimits'
+import { uploadInChunks } from '../utils/chunkedUpload'
 import { db, saveDB, nowISO } from './mockDb'
 import { readChatStream } from './chatStream'
 
@@ -1115,7 +1117,8 @@ export const userChoiceApi = {
 //   POST /api/sessions/:sid/terminal/exec       { cmd } → { output, cwd }
 //   GET  /api/sessions/:sid/files?path=/data   → { path, entries:[{name,type:'dir'|'file',size,mtime}] }
 //   POST /api/sessions/:sid/files/mkdir         { path, name } → { ok:true }
-//   POST /api/sessions/:sid/files/upload        multipart path + file → { ok:true }（流式，单文件 1000MB）
+//   POST /api/sessions/:sid/files/upload        multipart path + file → { ok:true }（不超过 16MiB 的单次流式上传）
+//   POST /api/sessions/:sid/files/uploads       分片：建会话 → PUT chunks → complete（大于 16MiB）
 //   GET  /api/sessions/:sid/status             → { messages, contextUsed, contextLimit, cacheHitRate, cacheRead, cacheWrite, skills:[] }
 //   POST /api/sessions/:sid/compact            → { ok:true }
 
@@ -1210,11 +1213,13 @@ export const sessionToolApi = {
         return { ok: true }
       })
     }
-    const fd = new FormData()
-    // path 放在 file 之前，服务端可以边收边写入目标，而不必先落临时文件。
-    fd.append('path', path)
-    fd.append('file', file)
-    return uploadRequest('POST', `/api/sessions/${sid}/files/upload`, fd, undefined, onProgress)
+    return uploadWorkspaceFile(
+      `/api/sessions/${sid}/files/upload`,
+      `/api/sessions/${sid}/files/uploads`,
+      path,
+      file,
+      onProgress,
+    )
   },
   downloadUrl(sid, path) {
     return `/api/sessions/${sid}/files/download?path=${encodeURIComponent(path)}`
@@ -1291,6 +1296,7 @@ export const sessionApi = {
 //   记忆      GET        /api/bots/:id/memory                 POST/PUT/DELETE /api/bots/:id/memory[/:mid]
 //   访问控制  GET/PUT    /api/bots/:id/access                 （default + rules[]）
 //   文件      GET        /api/bots/:id/files?path=            POST /files/mkdir  POST /files/upload
+//            大于 16MiB 时走 POST /files/uploads + PUT chunks + complete
 //   聊天节奏  GET/PUT /api/bots/:id/platforms[/:pid] 的 rhythm 字段（已合并进平台设置）
 // ============================================================================
 
@@ -1587,11 +1593,34 @@ export const botFileApi = {
         return { ok: true }
       })
     }
-    const fd = new FormData()
-    fd.append('path', path)
-    fd.append('file', file)
-    return uploadRequest('POST', `/api/bots/${botId}/files/upload`, fd, undefined, onProgress)
+    return uploadWorkspaceFile(
+      `/api/bots/${botId}/files/upload`,
+      `/api/bots/${botId}/files/uploads`,
+      path,
+      file,
+      onProgress,
+    )
   }
+}
+
+// 不超过一段的文件仍走单次 multipart。更大的文件拆成多段，进度按整个文件累计。
+function uploadWorkspaceFile(singleURL, chunkURL, path, file, onProgress) {
+  if (shouldChunkWorkspaceUpload(file?.size || 0)) {
+    return uploadInChunks({
+      path,
+      file,
+      onProgress,
+      init: (body) => request('POST', chunkURL, body),
+      put: (uploadId, index, blob, onChunk) => putBytes(`${chunkURL}/${encodeURIComponent(uploadId)}/chunks/${index}`, blob, onChunk),
+      complete: (uploadId) => request('POST', `${chunkURL}/${encodeURIComponent(uploadId)}/complete`),
+      abort: (uploadId) => request('DELETE', `${chunkURL}/${encodeURIComponent(uploadId)}`).catch(() => {}),
+    })
+  }
+  const fd = new FormData()
+  // path 放在 file 之前，服务端可以边收边写入目标，而不必先落临时文件。
+  fd.append('path', path)
+  fd.append('file', file)
+  return uploadRequest('POST', singleURL, fd, undefined, onProgress)
 }
 
 // ============================ 容器管理 ============================

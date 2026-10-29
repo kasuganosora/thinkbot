@@ -247,7 +247,8 @@ DELETE /api/bots/:id/memory/entry   — 删除单条分层记忆（?id=&tier=&sc
 GET    /api/bots/:id/files                 — 列出工作空间文件
 GET    /api/bots/:id/files/download        — 下载文件
 POST   /api/bots/:id/files/mkdir           — 新建目录
-POST   /api/bots/:id/files/upload          — 流式上传文件（multipart，单文件 1000MB）
+POST   /api/bots/:id/files/upload          — 流式上传小文件（multipart，单文件 1000MB；Web 对超过 16MiB 的文件改走分片）
+POST   /api/bots/:id/files/uploads         — 分片上传：建会话 → PUT .../chunks/:index → POST .../complete
 
 GET    /api/bots/:id/container             — 容器信息
 PUT    /api/bots/:id/container/config      — 更新容器配置
@@ -315,7 +316,8 @@ POST   /api/sessions/:sid/terminal/exec      — 会话内执行命令
 GET    /api/sessions/:sid/files              — 会话工作目录文件列表
 GET    /api/sessions/:sid/files/download     — 下载文件
 POST   /api/sessions/:sid/files/mkdir        — 新建目录
-POST   /api/sessions/:sid/files/upload       — 流式上传文件（multipart，单文件 1000MB）
+POST   /api/sessions/:sid/files/upload       — 流式上传小文件（multipart，单文件 1000MB；Web 对超过 16MiB 的文件改走分片）
+POST   /api/sessions/:sid/files/uploads       — 分片上传：建会话 → PUT .../chunks/:index → POST .../complete
 ```
 
 ### Provider 与模型管理（admin）
