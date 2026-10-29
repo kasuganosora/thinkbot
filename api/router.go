@@ -165,6 +165,11 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/files/download", s.handleBotFileDownload)
 				botsAdmin.POST("/:id/files/mkdir", s.handleBotFileMkdir)
 				botsAdmin.POST("/:id/files/upload", s.handleBotFileUpload)
+				// 大文件分片：每段 DefaultChunkUploadBytes，避开边缘代理的单请求体上限。
+				botsAdmin.POST("/:id/files/uploads", s.handleBotChunkUploadInit)
+				botsAdmin.PUT("/:id/files/uploads/:uploadId/chunks/:index", s.handleBotChunkUploadPut)
+				botsAdmin.POST("/:id/files/uploads/:uploadId/complete", s.handleBotChunkUploadComplete)
+				botsAdmin.DELETE("/:id/files/uploads/:uploadId", s.handleBotChunkUploadAbort)
 
 				// 容器管理
 				botsAdmin.PUT("/:id/container/config", s.handleUpdateBotContainerConfig)
@@ -417,6 +422,10 @@ func (s *Server) registerRoutes() {
 			sessionGroup.GET("/:sid/files/download", s.handleSessionFileDownload)
 			sessionGroup.POST("/:sid/files/mkdir", s.handleSessionFileMkdir)
 			sessionGroup.POST("/:sid/files/upload", s.handleSessionFileUpload)
+			sessionGroup.POST("/:sid/files/uploads", s.handleSessionChunkUploadInit)
+			sessionGroup.PUT("/:sid/files/uploads/:uploadId/chunks/:index", s.handleSessionChunkUploadPut)
+			sessionGroup.POST("/:sid/files/uploads/:uploadId/complete", s.handleSessionChunkUploadComplete)
+			sessionGroup.DELETE("/:sid/files/uploads/:uploadId", s.handleSessionChunkUploadAbort)
 			sessionGroup.GET("/:sid/status", s.handleSessionStatus)
 			sessionGroup.POST("/:sid/compact", s.handleSessionCompact)
 		}

@@ -353,6 +353,7 @@ func (s *Server) handleBotFileMkdir(c *gin.Context) {
 // POST /api/bots/:id/files/upload
 // 接收 multipart/form-data：字段 file（文件）、path（目标路径）。
 // 正文流式写入工作区，单文件上限为 MaxUserUploadBytes，高于工具写文件的 MaxFileWrite。
+// 超过边缘单请求体上限的文件改走 /files/uploads 分片，见 chunk_upload.go。
 func (s *Server) handleBotFileUpload(c *gin.Context) {
 	botID := c.Param("id")
 	if _, _, _, err := s.consumeWorkspaceUpload(c, botID); err != nil {

@@ -19,13 +19,23 @@ import (
 // 用户上传与工具写入分开限流。
 //
 // sandbox.Config.MaxFileWrite（默认 10MB）继续约束模型/工具写文件。
-// 用户上传走流式拷贝，上限与已部署的网关 client_max_body_size（1000m）对齐，
-// 应用不再把正文读进内存，也不再套用 10MB 的工具写入上限。
+// 小文件仍可一次 POST /files/upload 流式写入，上限 MaxUserUploadBytes（1000 MiB），
+// 与已部署网关的 client_max_body_size（1000m）对齐，应用不再把正文读进内存。
+// 边缘代理常见的单请求体上限大约 100MB，流式写盘绕不过去：更大的文件由 Web
+// 拆成 DefaultChunkUploadBytes 一段段上传，服务端拼好后放进同一工作区路径。
 const (
 	// MaxUserUploadBytes 是会话工作区与 Bot 文件面板的单文件上限（1000 MiB）。
 	// 与网关 client_max_body_size 1000m 一致；反向代理不用为这次改动再调大。
 	// multipart 的 boundary 与 path 字段由 maxUploadBodyBytes 另留 1MB。
 	MaxUserUploadBytes int64 = 1000 << 20
+
+	// DefaultChunkUploadBytes 是分片上传的段大小（16 MiB）。
+	// 必须与 web/src/constants/uploadLimits.js 的 WORKSPACE_UPLOAD_CHUNK_BYTES 一致。
+	// 每一段都远小于常见边缘代理的单请求体上限，因此不必调大 CDN。
+	DefaultChunkUploadBytes int64 = 16 << 20
+
+	// MaxChunkUploadBytes 是单段请求体的硬上限（32 MiB）。
+	MaxChunkUploadBytes int64 = 32 << 20
 
 	// MaxChatAttachmentBytes 是聊天输入框单个附件的原始字节上限。
 	// 附件以 base64 data URL 放进 POST /api/chat/send 的 JSON，不经过工作区流式上传，
@@ -166,11 +176,21 @@ func mapUploadWriteError(err error) error {
 	return errs.Internal("failed to write file: " + err.Error())
 }
 
+// validateUploadFileName 拒绝路径片段。分片上传与单次上传共用同一规则。
+func validateUploadFileName(name string) error {
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') ||
+		strings.ContainsRune(name, filepath.Separator) ||
+		strings.ContainsRune(name, 0) || len(name) > 255 {
+		return errs.BadRequest("invalid file name")
+	}
+	return nil
+}
+
 // streamWorkspaceFile 将 r 流式写入工作区。limit 是文件字节上限。
 func (s *Server) streamWorkspaceFile(c *gin.Context, botID, path, name string, content io.Reader, limit int64) (int64, error) {
-	if name == "" || name == "." || name == ".." ||
-		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
-		return 0, errs.BadRequest("invalid file name")
+	if err := validateUploadFileName(name); err != nil {
+		return 0, err
 	}
 
 	if ws, ok := s.workspaceForUpload(botID); ok {
