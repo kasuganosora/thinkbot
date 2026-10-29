@@ -48,7 +48,14 @@ type stdioTransport struct {
 }
 
 func newStdioTransport(ctx context.Context, command string, args, env []string, cwd string, stderr io.Writer) (*stdioTransport, error) {
-	cmdCtx, cancel := context.WithCancel(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, errs.Wrap(err, "mcp: stdio transport context")
+	}
+	// 子进程寿命不跟随调用方 ctx。启动预算和请求截止时间只限制握手；
+	// 若 CommandContext 派生自那个可取消的父 ctx，父 ctx 结束时会 SIGKILL
+	// 已经连上的 stdio 服务器，Manager 却仍认为它处于连接状态。
+	// 结束子进程的唯一路径是 Close() 持有的 cancel。
+	cmdCtx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(cmdCtx, command, args...)
 	if cwd != "" {
 		cmd.Dir = cwd

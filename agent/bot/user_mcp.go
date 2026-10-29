@@ -19,7 +19,9 @@ import (
 // 这条路径跑在 fx 的启动阶段，而 fx 启动有全局超时：一旦超过，fx 会中止启动并
 // 让进程以 exit 1 退出（不是某个 MCP 失败，而是整个服务起不来）。健康的 MCP
 // 握手通常在 1s 内完成，这个预算只用于兜住「某个端点不可达且连接挂住」的情况。
-const mcpStartupBudget = 10 * time.Second
+// 它只限制连接尝试，不绑定已拉起的 stdio 子进程寿命（见 newStdioTransport）。
+// 测试可以临时改短这个变量。
+var mcpStartupBudget = 10 * time.Second
 
 // setupUserMCP 为本 bot 接入 Admin UI / 工具配置的 per-bot MCP 服务器
 // （data/mcp/{botId}/servers.json）。
@@ -44,10 +46,17 @@ func setupUserMCP(b *Bot, params BotParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), mcpStartupBudget)
 	defer cancel()
 	connected := 0
-	for _, e := range entries {
+	for i, e := range entries {
 		if ctx.Err() != nil {
+			skipped, changed := markStartupSkipped(entries[i:])
+			if changed {
+				if saveErr := mcp.SaveBotServers(params.ID, entries); saveErr != nil {
+					logger.Warnw("persist mcp status after startup budget skip failed", "err", saveErr)
+				}
+			}
 			logger.Warnw("mcp startup budget exhausted; skipping remaining servers",
-				"configured", len(entries), "connected", connected, "budget", mcpStartupBudget)
+				"configured", len(entries), "connected", connected, "budget", mcpStartupBudget,
+				"skipped", skipped)
 			break
 		}
 		cfg := e.ToServerConfig()
@@ -80,6 +89,24 @@ func setupUserMCP(b *Bot, params BotParams) {
 		"bot_id", params.ID,
 		"configured", len(entries),
 		"connected", connected)
+}
+
+// markStartupSkipped 把预算耗尽后没来得及连接、但状态仍写着 running 的条目改成 error，
+// 避免列表继续显示过期的「运行中」。names 是被跳过的服务器名。
+// entries 与原切片共享底层数组，调用方保存原切片即可。
+func markStartupSkipped(entries []mcp.BotServerEntry) (names []string, changed bool) {
+	for i := range entries {
+		name := strings.TrimSpace(entries[i].Name)
+		if name != "" {
+			names = append(names, name)
+		}
+		if entries[i].Status == "running" {
+			entries[i].Status = "error"
+			entries[i].UpdatedAt = mcp.NowRFC3339()
+			changed = true
+		}
+	}
+	return names, changed
 }
 
 // UserMCP 返回本 bot 的用户 MCP Manager（Admin UI / mcp_server 工具共用）。
