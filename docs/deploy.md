@@ -133,5 +133,5 @@ docker compose up -d
 
 - 只在本机访问时，可在 `.env` 设 `api.addr=127.0.0.1:8080`（容器内仍需监听容器端口，Docker 部署更常见的做法是把端口映射改成 `"127.0.0.1:8080:8080"`）。用 `docker-compose.override.yml` 改端口时要写 `ports: !override`（Compose v2.24+），否则会与默认的 `8080:8080` 合并而不是替换。
 - 公网访问请放在反向代理后，并在 `.env` 设置 `api.cookie_secure=true`、`api.cors_origins`。
-- 工作区文件上传（`POST /api/sessions/:sid/files/upload` 与 `POST /api/bots/:id/files/upload`）是流式写入，单文件上限 1000MB，与当前网关的 `client_max_body_size 1000m` 一致，这次不用改 nginx。超过上限时接口返回 400，并删掉已经写出的半截文件。聊天输入框附件仍是另一条路径（base64 JSON，单文件 20MB、合计 60MB），不走这条流。工具写文件（`sandbox_write_file`）仍是 10MB。
+- 工作区文件上传单文件上限仍是 1000MB。不超过 16MiB 的文件可以一次 `POST /api/sessions/:sid/files/upload` 或 `POST /api/bots/:id/files/upload`（流式写入，超限返回 400 并删掉半截文件）。更大的文件由 Web 拆成 16MiB 一段：`POST .../files/uploads` 建会话，`PUT .../files/uploads/:uploadId/chunks/:index` 传一段，`POST .../complete` 在服务端拼好后原子放入同一工作区路径。这是为了绕开边缘代理常见的大约 100MB 单请求体上限；合并后重新构建并部署即可，不必改 nginx 的 `client_max_body_size`，也不必调大 CDN 上传限制。未完成的分片在 `{workspace}/.chunk-uploads/`，空闲超过 6 小时会被清掉。聊天输入框附件仍是另一条路径（base64 JSON，单文件 20MB、合计 60MB），不走这条流。工具写文件（`sandbox_write_file`）仍是 10MB。
 - 告警通知接口建议只挂在独立的本机监听器上，见 [notify.md › Network restriction](notify.md#network-restriction)。
