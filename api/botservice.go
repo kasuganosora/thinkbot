@@ -1907,6 +1907,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 开启跨平台记忆镜像：channel 作用域的记忆会额外写入 bot 全局作用域，
 	// 使任意频道的会话都能在召回时看到其他平台的活动（如 web 频道上的「苦力活」）。
 	memCfg.BotID = id
+	// 按需深度召回只在模型调用 memory search（空 query 或 deep）时跑，
+	// 不接入回复前的自动注入。
+	memCfg.Recall = memory.DeepRecallConfig{
+		Provider:       bundle.Main,
+		Model:          &llm.Model{ID: bundle.MainDef.Model},
+		Policy:         internalPol,
+		ModelMaxTokens: bundle.MainDef.MaxTokens,
+	}
+	if idx := memRepo.Vec(); idx != nil {
+		memCfg.Recall.Vec = idx
+	}
 	if err := memory.RegisterTools(toolMgr, memCfg); err != nil {
 		s.logger.Warnw("failed to register memory tools", "err", err)
 	}
