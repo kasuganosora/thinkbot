@@ -1187,7 +1187,7 @@ func WorkspaceMetaSpecs() []MetaSpec {
 		{Key: KeySandboxBackend, Category: "Workspace", Description: "沙箱后端：auto（默认，有 Docker 用容器隔离否则 local）| docker（强制容器隔离，不可用则报错）| local（强制本地进程，无隔离）。DooD 部署建议设为 docker。"},
 		{Key: KeySandboxImage, Category: "Workspace", Description: "沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用，默认 alpine:latest）。"},
 		{Key: KeySandboxRequireDocker, Category: "Workspace", Description: "auto 模式下是否强制要求 Docker 可用：true 则探测不到 Docker 直接报错而非降级 local（避免无隔离裸跑）；false（默认）则降级 local。"},
-		{Key: KeySandboxCPULimit, Category: "Workspace", Description: "bot 沙箱容器的 CPU 上限（docker --cpus 的值，如 \"1.0\"、\"16\"）。未配置时沿用内置的 \"1.0\"；设为 0 / - / unlimited 表示不限制（不加 --cpus，可用满宿主核数）。编译类任务在 1 核上会慢到像卡死，整机独占部署时建议放开。"},
+		{Key: KeySandboxCPULimit, Category: "Workspace", Description: "Bot 沙箱容器的 CPU 上限（docker --cpus，如 1.0 / 16）。留空 = 内置 1.0；0、-、unlimited = 不限制（用满宿主核数）。编译类任务在 1 核上会慢到像卡死。"},
 		{Key: KeySandboxTimeout, Category: "Workspace", Description: "bot 在沙箱里执行单条命令的「硬上限」秒数。默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟），不写死固定时长；设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：哪怕命令一直在输出，超过它也会被强制终止。正常慢命令靠卡死看门狗放行，不会误杀。"},
 		{Key: KeySandboxStuckTimeout, Category: "Workspace", Description: "卡死看门狗阈值（秒，默认 300，即 5 分钟）。命令连续无输出超过该时长即判定卡死并终止。这是区分「编译慢」与「死锁卡死」的关键：只要命令持续有输出（哪怕慢）就不杀。"},
 		{Key: KeySandboxChannelSecret, Category: "Workspace", Description: "派生 per-bot channel token 的服务器密钥（HKDF，不按 bot 落库）。空则使用 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先于本键。"},
@@ -1910,9 +1910,26 @@ func NotifyMetaSpecs() []MetaSpec {
 // 注意：max_tokens 不在此列——它跟随「模型」而非全局/bot，由各 ModelDef.MaxTokens
 // （provider 模型配置页的每模型 maxTokens 字段）独立设置。
 func GlobalMetaSpecs() []MetaSpec {
-	return append(append(append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
+	return append(append(append(append(append(append(SystemMetaSpecs(), MemoryWindowMetaSpecs()...),
 		LLMClientMetaSpecs()...), CompactionMetaSpecs()...),
-		engagementUnansweredMetaSpecs()...), InternalLLMMetaSpecs()...)
+		engagementUnansweredMetaSpecs()...), InternalLLMMetaSpecs()...),
+		sandboxResourceMetaSpecs()...)
+}
+
+// sandboxResourceMetaSpecs 系统设置页展示的沙箱资源上限项。
+//
+// 刻意只放资源配额，不整包引入 WorkspaceMetaSpecs()：后者还包含镜像名、后端选择
+// 与 channel 密钥，改错会直接让 bot 容器起不来或动到凭据入口，不适合出现在这张
+// 通用配置页上。沙箱侧的 CPU 上限属于「这台机器愿意分多少给 bot」的宿主级决策，
+// 与内存（per-bot，在 bot 详情页改）并列，放这里最直观。
+func sandboxResourceMetaSpecs() []MetaSpec {
+	out := make([]MetaSpec, 0, 1)
+	for _, spec := range WorkspaceMetaSpecs() {
+		if spec.Key == KeySandboxCPULimit {
+			out = append(out, spec)
+		}
+	}
+	return out
 }
 
 // engagementUnansweredMetaSpecs 系统设置页展示的主动参与「未回应」节奏项。

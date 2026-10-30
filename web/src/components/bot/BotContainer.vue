@@ -114,6 +114,7 @@
         <span v-if="memSaved" class="mem-hint ok">✓ 已保存</span>
         <span v-else-if="memDirty" class="mem-hint dirty">有未保存的更改</span>
         <span v-else class="mem-hint tip">内存限制等容器配置修改后，点击此处统一保存</span>
+        <span class="mem-hint tip">CPU 上限是全局配置，在「系统配置 → 沙箱工作空间」中修改</span>
       </div>
     </div>
 
