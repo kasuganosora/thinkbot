@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -1170,24 +1171,33 @@ func hasExecutableTools(toolCalls []ToolCall, toolMap map[string]*Tool) bool {
 // buildStepMessages creates the messages produced by a step: an assistant
 // message (text/reasoning/tool-calls) and optionally a tool message.
 func buildStepMessages(text, reasoning string, reasoningMeta map[string]any, toolCalls []ToolCall, toolResults []ToolResultPart, usage *Usage) []Message {
+	vault := secret.Default()
 	var assistantParts []MessagePart
 	if reasoning != "" {
+		// reasoning 不脱敏：部分 provider（扩展思考）要求 thinking block 原样回传，
+		// 改动内容会破坏 API 契约。票据主要经工具参数/结果进入，那里已硬闸遮蔽。
 		assistantParts = append(assistantParts, ReasoningPart{Text: reasoning, ProviderMetadata: reasoningMeta})
 	}
 	if text != "" {
-		assistantParts = append(assistantParts, TextPart{Text: text})
+		assistantParts = append(assistantParts, TextPart{Text: vault.Redact(text)})
 	}
 	for _, tc := range toolCalls {
+		// LLM 可能把从记忆/工具结果里读到的明文直接写进参数，回灌前统一遮蔽。
 		assistantParts = append(assistantParts, ToolCallPart{
 			ToolCallID: tc.ToolCallID,
 			ToolName:   tc.ToolName,
-			Input:      tc.Input,
+			Input:      vault.RedactValue(tc.Input),
 		})
 	}
 
 	msgs := []Message{{Role: MessageRoleAssistant, Content: assistantParts, Usage: usage}}
 	if len(toolResults) > 0 {
-		msgs = append(msgs, ToolMessage(toolResults...))
+		redacted := make([]ToolResultPart, len(toolResults))
+		for i, r := range toolResults {
+			r.Result = vault.RedactValue(r.Result)
+			redacted[i] = r
+		}
+		msgs = append(msgs, ToolMessage(redacted...))
 	}
 	return msgs
 }
@@ -1564,32 +1574,41 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 		Payload: map[string]any{"invocation_id": invocationID, "input_preview": inputPreview(tc.Input)},
 	})
 
-	output, err := tool.Execute(execCtx, tc.Input)
+	// 唯一咽喉点：入参里的占位符在此还原为真实值，仅供工具执行使用。
+	// tc.Input 本身保持占位符形态，供下游日志 / 事件 / 前端回显使用——
+	// 真实值绝不写回 tc.Input，否则 input_preview 与 StreamToolResultPart 会泄露。
+	execInput := secret.Default().Resolve(tc.Input)
+	output, err := tool.Execute(execCtx, execInput)
+	// 工具返回后立即遮蔽：output 会流向日志预览、StreamToolResultPart、
+	// ToolResultPart.Result 三处，必须在源头改掉。
+	output = secret.Default().RedactValue(output)
 	if err != nil {
+		// 错误信息常含完整 URL（token 可能在 query/path 里），同样要遮蔽。
+		safeErr := fmt.Errorf("%s", secret.Default().Redact(err.Error()))
 		sink.Emit(ctx, core.Event{
 			Kind:    core.EventToolResult,
 			Source:  "tool:" + tc.ToolName,
 			Surface: true,
-			Payload: map[string]any{"invocation_id": invocationID, "is_error": true, "error": err.Error()},
+			Payload: map[string]any{"invocation_id": invocationID, "is_error": true, "error": safeErr.Error()},
 		})
 		// 可观测性：每次工具返回都带 trace_id 落日志（server 端可实时按 trace 追踪，
 		// 不再只能等 turn 末聚合 summary）。
 		if lg := traceid.L(ctx); lg != nil {
-			lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", true, "error", err.Error(), "input_preview", inputPreview(tc.Input))
+			lg.Infow("tool_result", "tool", tc.ToolName, "invocation_id", invocationID, "is_error", true, "error", safeErr.Error(), "input_preview", inputPreview(tc.Input))
 		}
 		if sendProgress != nil {
 			sendProgress(&StreamToolErrorPart{
 				ToolCallID:   tc.ToolCallID,
 				ToolName:     tc.ToolName,
 				InvocationID: invocationID,
-				Error:        err,
+				Error:        safeErr,
 			})
 		}
 		return ToolResultPart{
 			ToolCallID:   tc.ToolCallID,
 			ToolName:     tc.ToolName,
 			InvocationID: invocationID,
-			Result:       ToolErrorText(err),
+			Result:       ToolErrorText(safeErr),
 			IsError:      true,
 			Halt:         execCtx.halt,
 		}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/internal/interaction"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -173,6 +174,14 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 		return nil
 	}
 
+	// 密钥回复前置拦截：命中则把明文存入保险库，并把消息正文改写为脱敏的
+	// 「密钥已就绪」提示后再投递。明文绝不进入 pipeline（LLM / 历史 enricher / 记忆）。
+	if name, ok := consumeSecretReply(&msg); ok {
+		g.logger.Infow("ingress: redacted user-provided secret before pipeline",
+			"bot_id", msg.BotID, "channel", msg.Channel, "secret_name", name, "trace_id", msg.TraceID)
+		// 改写后的消息继续走下方的正常投递流程。
+	}
+
 	// 用户在该会话阻塞等待选择期间插入了新消息：中断本会话所有 pending 的
 	// user_choice 问题。否则旧回合仍持有旧上下文在跑，等阻塞结束后只会基于过时的
 	// 上下文生成回复（LLM 看不到新消息）；中断后旧回合干净终止，这条新消息由随后
@@ -264,6 +273,12 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 		return true
 	}
 
+	// 与 Receive 一致：密钥回复前置拦截，明文改写为脱敏提示后再投递。
+	if name, ok := consumeSecretReply(&msg); ok {
+		g.logger.Infow("ingress: redacted user-provided secret before pipeline",
+			"entry", "TryReceive", "bot_id", msg.BotID, "channel", msg.Channel, "secret_name", name, "trace_id", msg.TraceID)
+	}
+
 	env := core.NewEnvelope(msg)
 
 	// 与 Receive 一致：用户插话中断本会话 pending 的 user_choice（详见 Receive 注释）。
@@ -285,6 +300,22 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 // Engine 的 worker goroutine 从此通道读取消息进行处理。
 func (g *Ingress) C() <-chan *core.Envelope {
 	return g.ch
+}
+
+// consumeSecretReply 若本条消息是对某个 pending 密钥请求的回复，则把明文写入
+// 保险库，并把 msg.Text 改写为脱敏的「密钥已就绪」提示，返回登记的密钥名。
+// 调用方据此把改写后的消息继续正常投递——明文绝不进入 pipeline。
+func consumeSecretReply(msg *core.Message) (string, bool) {
+	name, ok := interaction.Default().ConsumeSecret(msg.BotID, msg.Channel, msg.Text)
+	if !ok {
+		return "", false
+	}
+	if err := secret.Default().Register(name, msg.Text, "由用户在会话中直接提供"); err != nil {
+		msg.Text = fmt.Sprintf("[密钥 %s 登记失败：%v；请让用户重新提供，暂不要使用该占位符。]", name, err)
+	} else {
+		msg.Text = fmt.Sprintf("[用户已提供密钥 %s。此后在工具参数中写占位符 %s 即可引用，系统会在执行前自动还原为真实值，你看不到也不应索要明文。请继续此前因缺少该密钥而暂停的任务。]", name, secret.Placeholder(name))
+	}
+	return name, true
 }
 
 // seen 以「检查并设置」的原子方式记录某消息 ID 已处理。

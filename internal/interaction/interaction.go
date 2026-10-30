@@ -44,6 +44,15 @@ const (
 	StatusInterrupted Status = "interrupted"
 )
 
+// Kind 区分问题的用途：普通选择 vs 密钥请求。
+// 空值等价于 KindChoice，保证已有 user_choice 调用零改动兼容。
+type Kind string
+
+const (
+	KindChoice Kind = "choice"
+	KindSecret Kind = "secret"
+)
+
 // Mode 选择模式。
 type Mode string
 
@@ -155,12 +164,24 @@ type Question struct {
 	TimeoutSecs int
 	// Status 状态机快照（由 Registry 维护，注册时读回）。
 	Status Status
+	// Kind 问题用途。空值按 KindChoice 处理（向后兼容）。
+	Kind Kind
+	// SecretName KindSecret 时要登记的密钥名（占位符 {{secret:name}} 中的 name）。
+	SecretName string
+	// RegisteredAt 注册时刻（unix 秒），供 ConsumeSecret 惰性判定超时。
+	RegisteredAt int64
 }
 
 // validate 校验问题字段（不含 ID 唯一性，那由 Registry 检查）。
 func (q *Question) validate() error {
 	if q.ID == "" || q.Question == "" {
 		return fmt.Errorf("%w: ID 与问题正文均不能为空", ErrInvalidQuestion)
+	}
+	if q.Kind == KindSecret {
+		if q.SecretName == "" {
+			return fmt.Errorf("%w: 密钥请求缺少 SecretName", ErrInvalidQuestion)
+		}
+		return nil
 	}
 	if len(q.Options) < MinOptions || len(q.Options) > MaxOptions {
 		return fmt.Errorf("%w: 须为 %d~%d 个，实际 %d 个",
@@ -341,6 +362,7 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 		q.TimeoutSecs = DefaultTimeoutSecs
 	}
 	q.Status = StatusPending
+	q.RegisteredAt = time.Now().Unix()
 
 	r.mu.Lock()
 	if _, exists := r.entries[q.ID]; exists {
@@ -364,6 +386,42 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 	r.sessionQuestions[key] = append(r.sessionQuestions[key], q.ID)
 	r.mu.Unlock()
 	return q, nil
+}
+
+// ConsumeSecret 尝试把 text 作为该会话某个 pending 密钥请求的应答消费掉。
+// 命中时原子置 answered 并唤醒等待者，返回登记的密钥名；未命中返回 ("", false)。
+//
+// 由入站网关在 InterruptBySession 之前调用：命中后调用方不应再把消息投递进
+// pipeline（明文绝不能进 LLM 上下文）。内部消费不走 Answer.validate（密钥请求
+// 没有选项语义），但仍在同一把锁内完成，避免与 InterruptBySession 竞态。
+func (r *Registry) ConsumeSecret(botID, chatID, text string) (string, bool) {
+	key := sessionKey(botID, chatID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := append([]string(nil), r.sessionQuestions[key]...)
+	for _, qid := range ids {
+		e, ok := r.entries[qid]
+		if !ok || e.question.Kind != KindSecret || e.question.Status != StatusPending {
+			continue
+		}
+		// 惰性超时：超过等待预算则清理并跳过，避免把无关的后续消息误当成密钥回复。
+		if e.question.TimeoutSecs > 0 && time.Since(time.Unix(e.question.RegisteredAt, 0)) > time.Duration(e.question.TimeoutSecs)*time.Second {
+			r.removeSessionQuestionLocked(key, qid)
+			delete(r.entries, qid)
+			continue
+		}
+		name := e.question.SecretName
+		e.answer = Answer{CustomInput: text}
+		e.question.Status = StatusAnswered
+		close(e.done)
+		r.removeSessionQuestionLocked(key, qid)
+		// secret 请求是一次性入口：非阻塞工具不会调 CleanupFinal，此处直接移除
+		// 条目防止终态常驻。若恰有阻塞等待者，其持有的 entry 指针副本仍有效
+		// （done 已关闭），可正常取到 answer。
+		delete(r.entries, qid)
+		return name, true
+	}
+	return "", false
 }
 
 // Lookup 返回问题的只读快照（不存在返回 ErrQuestionNotFound）。
