@@ -94,6 +94,7 @@ func RegisterTools(mgr *agenttools.ToolManager, cfg Config) error {
 		textDiffToolDef(),
 		textStatsToolDef(),
 		userChoiceToolDef(),
+		secretInputToolDef(),
 	}
 
 	if err := mgr.RegisterMany(staticDefs...); err != nil {
