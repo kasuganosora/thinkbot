@@ -19,6 +19,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -554,7 +555,10 @@ func looksLikePrivateTrailing(s string) bool {
 // Web 流式（OutputCleanStreamFilter）按同一规则推送，渠道发送 / 落库 / 流式三处一致。
 func extractPublicReply(clean string) string {
 	text, _, _ := extractPublicReplyDetailed(clean)
-	return text
+	// 路径 3（纯文本无标签）此前不经 cleanPublicBlock，票据明文可能原样出站；
+	// 模型也可能把记忆/工具结果里的明文写进正文。判重基于原文完成后统一遮蔽，
+	// 保证「流式拼接 == 出站 payload」parity 不被 Redact 改变判重口径。
+	return secret.Default().Redact(text)
 }
 
 // extractPublicReplyDetailed 与 extractPublicReply 同逻辑，额外返回 </public> 之后那段
@@ -614,6 +618,8 @@ func extractPublicReplyDetailed(clean string) (text string, trailingLen int, ado
 // 日志只带 16 字前缀定位，不写全文——万一那真是心里话，不该再往日志里抄一份。
 func (s *LLMStage) publicReplyWithAudit(ctx context.Context, env *core.Envelope, clean string) string {
 	text, trailingLen, adopted := extractPublicReplyDetailed(clean)
+	// 与 extractPublicReply 同口径：判重完成后对最终出站文本统一遮蔽票据。
+	text = secret.Default().Redact(text)
 	if trailingLen == 0 || env == nil {
 		return text
 	}
@@ -1832,6 +1838,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			}
 		}
 	}
+
+	// 纵深防御 + parity 统一：无论是否走 reply-control 门控，最终出站正文都在此
+	// 遮蔽已登记密钥。门控路径已在 publicReplyWithAudit 内遮蔽过（此处 no-op）；
+	// 非门控路径（RequireReplyControl=false / outreach）此前只到 CleanOutboundText，
+	// 在这里补上，保证「流式拼接 == 出站 payload」对所有配置都成立。
+	// 放在门控判重之后、空检查之前：不改判重口径（判重基于原文，Redact 只动最终文本）。
+	replyText = secret.Default().Redact(replyText)
 
 	if strings.TrimSpace(replyText) == "" {
 		// 清洗后为空说明模型这轮只输出了思考内容，没有真正要说的话。
