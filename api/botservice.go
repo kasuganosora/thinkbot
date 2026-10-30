@@ -387,6 +387,32 @@ func (s *BotService) SandboxConfigForBot() sandbox.Config {
 	return s.sandboxConfigWithMemoryLimit(-1)
 }
 
+// sandboxCPULimitOverride 读取 sandbox.cpu_limit 并解析为 docker --cpus 的值。
+//
+// 返回 (value, configured)：
+//   - ("", false)：未配置，沿用 sandbox.DefaultConfig() 的 "1.0"；
+//   - ("", true)：显式配置为不限制（0 / - / unlimited），docker run 不加 --cpus；
+//   - (v, true)：限制为 v（直接作为 --cpus 参数）。
+//
+// 注意「不限制」必须能表达成空串，而空串同时又是"未配置"的返回值，
+// 故用第二个返回值区分，不能只看 value 是否为空。
+func (s *BotService) sandboxCPULimitOverride() (string, bool) {
+	return parseSandboxCPULimit(s.store.GetString(config.KeySandboxCPULimit, ""))
+}
+
+// parseSandboxCPULimit 把 sandbox.cpu_limit 的原始值解析为 (--cpus 值, 是否已显式配置)。
+// 抽成纯函数便于表驱动测试：空串同时是"未配置"与"不限制"的中间形态，靠第二返回值区分。
+func parseSandboxCPULimit(raw string) (string, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", false
+	}
+	if v == "0" || v == "-" || strings.EqualFold(v, "unlimited") {
+		return "", true
+	}
+	return v, true
+}
+
 // sandboxConfigWithMemoryLimit 构造基础 sandbox 配置并按 mb 决定内存限制。
 //   - mb > 0：限制为该 MB 数（如 "2048m"）。
 //   - mb == 0：不限制（docker run 不加 --memory）。
@@ -402,6 +428,9 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	}
 	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
 		cfg.Backend = backend
+	}
+	if cpu, configured := s.sandboxCPULimitOverride(); configured {
+		cfg.CPULimit = cpu
 	}
 	// auto 模式下是否强制要求 Docker 可用：避免 DooD 部署探测失败时静默降级 local 裸跑。
 	if s.store.GetString(config.KeySandboxRequireDocker, "") == "true" {
@@ -2985,6 +3014,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
 		sbCfg.Backend = backend
+	}
+	// CPU 上限必须从这个 sbCfg 读取：bot.New 用它自建 BotWorkspaceManager 并据此
+	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的 "1.0"。
+	if cpu, configured := s.sandboxCPULimitOverride(); configured {
+		sbCfg.CPULimit = cpu
 	}
 	// 浏览器 MCP 服务开关（per-bot，docker 持久容器模式 + 浏览器镜像时启用）。
 	sbCfg.BrowserEnabled = s.store.GetBool(config.KeySandboxBrowserEnabled, false)
