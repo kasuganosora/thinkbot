@@ -448,15 +448,29 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	if sec := s.store.GetInt(config.KeySandboxStuckTimeout, 300); sec > 0 {
 		cfg.StuckTimeout = time.Duration(sec) * time.Second
 	}
-	switch {
-	case mb > 0:
-		cfg.MemoryLimit = fmt.Sprintf("%dm", mb)
-	case mb == 0:
-		cfg.MemoryLimit = "" // 0 = 不限制
-	default: // mb < 0：保留 DefaultConfig 的 2G 默认
+	if mem, ok := sandboxMemoryLimit(mb); ok {
+		cfg.MemoryLimit = mem
 	}
 	s.applyChannelConfig(&cfg)
 	return cfg
+}
+
+// sandboxMemoryLimit 把 per-bot 的 memory_limit_mb 转成 docker --memory 的值。
+//
+//   - mb > 0：限制为 mb MB，返回 (值, true)；
+//   - mb == 0：不限制，返回 ("", true)（docker run 不加 --memory）；
+//   - mb < 0：未指定，返回 ("", false)，调用方保留 DefaultConfig 的 2G 默认。
+//
+// 「不限制」与「未指定」的返回值都是空串，靠第二个返回值区分。
+func sandboxMemoryLimit(mb int64) (string, bool) {
+	switch {
+	case mb > 0:
+		return fmt.Sprintf("%dm", mb), true
+	case mb == 0:
+		return "", true
+	default:
+		return "", false
+	}
 }
 
 // applyChannelConfig 填入 channel 服务器密钥与 socket 根目录。
@@ -3019,6 +3033,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的 "1.0"。
 	if cpu, configured := s.sandboxCPULimitOverride(); configured {
 		sbCfg.CPULimit = cpu
+	}
+	// per-bot 内存限制同理必须在这里读：服务重启后 bot 由 StartBot 自动拉起，
+	// 不会再经过 handleStartBotContainer 那条 SetBotMemoryOverride 路径，
+	// 否则容器一旦重建就回落到 DefaultConfig 的 2G（编译类任务直接 OOM）。
+	if def, derr := s.GetDefinition(id); derr == nil {
+		if mem, configured := sandboxMemoryLimit(def.MemoryLimitMB); configured {
+			sbCfg.MemoryLimit = mem
+		}
 	}
 	// 浏览器 MCP 服务开关（per-bot，docker 持久容器模式 + 浏览器镜像时启用）。
 	sbCfg.BrowserEnabled = s.store.GetBool(config.KeySandboxBrowserEnabled, false)
