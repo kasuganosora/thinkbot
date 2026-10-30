@@ -559,7 +559,10 @@ func IsSensitiveKey(key string) bool {
 		return true
 	}
 	// 前缀匹配：任何以这些前缀开头的键都视为敏感（如各渠道 token/secret）。
-	for _, prefix := range []string{"auth.", "channel.", "db."} {
+	// provider.* 以单行 JSON 存放整包配置（含 apiKey 字段），同样禁止原文回显 ——
+	// provider 的常规读写走专用 /api/providers（其 GET 已 maskAPIKey），这里只堵
+	// 住通用的 /api/config/:key 单键读取接口，避免整包明文 JSON 从这里泄露。
+	for _, prefix := range []string{"auth.", "channel.", "db.", "provider."} {
 		if strings.HasPrefix(key, prefix) {
 			// db.path 等明确非敏感的已在上表标 false，这里需排除。
 			if key == "db.path" {

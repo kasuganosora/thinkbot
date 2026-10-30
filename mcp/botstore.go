@@ -166,3 +166,44 @@ func ValidateServerName(name string) error {
 	}
 	return nil
 }
+
+// sensitiveConfigKeySegments 是凭据类键名的判定词表。命中即认为该键的值
+// 属于票据，不应原文落盘或经读取接口回显，应改用 {{secret:name}} 占位符引用。
+//
+// 采用「按非字母数字切词后精确匹配」而非裸 substring：避免把 monkey / author /
+// TOKENIZERS_PARALLELISM 之类普通键误判为敏感（"key"/"auth"/"token" 作子串会误伤）。
+var sensitiveConfigKeySegments = map[string]bool{
+	"authorization": true, "auth": true, "token": true, "secret": true,
+	"password": true, "passwd": true, "pwd": true,
+	"credential": true, "credentials": true, "bearer": true,
+	"cookie": true, "private": true, "key": true,
+}
+
+// sensitiveConfigKeyJoinWords 兜底驼峰/连写键名（切词后不独立成段的情况），
+// 例如 myApiKey、accessToken。这些词足够独特，作子串不会误伤常见普通键。
+var sensitiveConfigKeyJoinWords = []string{
+	"apikey", "accesskey", "secretkey", "authtoken", "accesstoken",
+}
+
+// IsSensitiveConfigKey 判定一个 MCP env / header 键名是否承载凭据，大小写不敏感。
+// 供工具路径硬闸（addMCPServerForTool）与 bot MCP 管理接口读取掩码共用，
+// 保证「哪些字段算敏感」两处口径一致。
+func IsSensitiveConfigKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	lower := strings.ToLower(key)
+	for _, w := range sensitiveConfigKeyJoinWords {
+		if strings.Contains(lower, w) {
+			return true
+		}
+	}
+	for _, seg := range strings.FieldsFunc(lower, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	}) {
+		if sensitiveConfigKeySegments[seg] {
+			return true
+		}
+	}
+	return false
+}
