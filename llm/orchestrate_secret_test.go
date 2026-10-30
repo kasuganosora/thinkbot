@@ -45,7 +45,7 @@ func TestOrchestrate_ResolveInput_RedactOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Register("svc.token", "REAL_TOKEN_VALUE_abcdefgh", "测试令牌"); err != nil {
+	if err := v.Register("", "svc.token", "REAL_TOKEN_VALUE_abcdefgh", "测试令牌"); err != nil {
 		t.Fatal(err)
 	}
 	prev := secret.Default()
@@ -122,4 +122,48 @@ func flattenMessageText(msg Message) string {
 		}
 	}
 	return b.String()
+}
+
+// TestOrchestrate_ResolveIsBotScoped 执行咽喉点按 ctx 里的 bot 归属还原：
+// 别的 bot 名下的占位符原样交给工具，真实值不会被跨 bot 取用。
+func TestOrchestrate_ResolveIsBotScoped(t *testing.T) {
+	v, err := secret.New("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const realValue = "REAL_TOKEN_VALUE_abcdefgh"
+	if err := v.Register("bot-a", "svc.token", realValue, ""); err != nil {
+		t.Fatal(err)
+	}
+	prev := secret.Default()
+	secret.SetDefault(v)
+	t.Cleanup(func() { secret.SetDefault(prev) })
+
+	run := func(ctx context.Context) string {
+		var gotInput any
+		execTool := Tool{
+			Name: "exec",
+			Execute: func(_ *ToolExecContext, input any) (any, error) {
+				gotInput = input
+				return "ok", nil
+			},
+		}
+		cfg := &OrchestrateConfig{
+			Params:   GenerateParams{Model: &Model{ID: "mock"}, Tools: []Tool{execTool}, MaxTokens: intPtr(200)},
+			MaxSteps: 5,
+		}
+		if _, err := OrchestrateGenerate(ctx, &secretFlowProvider{}, cfg); err != nil {
+			t.Fatalf("OrchestrateGenerate: %v", err)
+		}
+		m, _ := gotInput.(map[string]any)
+		cmd, _ := m["cmd"].(string)
+		return cmd
+	}
+
+	if cmd := run(secret.WithBot(context.Background(), "bot-a")); !strings.Contains(cmd, realValue) {
+		t.Errorf("owner bot: placeholder not resolved: %q", cmd)
+	}
+	if cmd := run(secret.WithBot(context.Background(), "bot-b")); strings.Contains(cmd, realValue) {
+		t.Errorf("other bot resolved bot-a's secret: %q", cmd)
+	}
 }

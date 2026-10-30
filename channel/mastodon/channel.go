@@ -893,6 +893,13 @@ func (c *MastodonChannel) handleStatus(ctx context.Context, st *Status, eventTyp
 		return
 	}
 
+	// 装饰前的用户原文：密钥回复拦截要登记的是它，而不是加了引用/前缀的整段文本。
+	// boost 回退时正文是别人的帖子，不是用户输入，不记。
+	secretCandidate := ""
+	if !reblogFallback {
+		secretCandidate = text
+	}
+
 	// 构建回复/转发上下文，让 Bot 能看到用户回复了什么或转发了什么
 	text = c.statusContext(ctx, st, text, reblogFallback)
 
@@ -933,6 +940,9 @@ func (c *MastodonChannel) handleStatus(ctx context.Context, st *Status, eventTyp
 		// 纯 boost 只作信息记录：Mastodon 允许回复 boost，
 		// 不写 core.MetaIsPureRenote（那是 Misskey 的硬抑制标记）。
 		"is_pure_reblog": isPureReblog,
+	}
+	if secretCandidate != "" {
+		metadata[core.MetaSecretCandidate] = secretCandidate
 	}
 	if notifyID != "" {
 		metadata["notification_id"] = notifyID
