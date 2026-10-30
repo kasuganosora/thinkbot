@@ -148,6 +148,44 @@ func (m *BotWorkspaceManager) SetBotMemoryOverride(botID string, mb int64) {
 	m.memoryOverrides[botID] = mb
 }
 
+// containerFor 返回该 bot 的容器句柄，拿不到时返回 nil（local 后端或 botID 为空）。
+//
+// 优先复用已建好的那个，以继承它的内存状态（如 OOM 抬升过的上限）；没有就按
+// 确定性命名临时构造一个——docker update 只用得到容器名，不依赖这里的内存状态。
+func (m *BotWorkspaceManager) containerFor(botID string) *botContainer {
+	if botID == "" || m.backend != "docker" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ws, ok := m.workspaces[botID]; ok && ws != nil && ws.container != nil {
+		return ws.container
+	}
+	return newBotContainer(botID, m.cfg, m.logger)
+}
+
+// ApplyCPULimit 把 CPU 上限就地应用到该 bot 的运行中容器（不重建）。
+// 传空串表示「不限制」，此时返回 ErrLimitNotClearable：docker update 无法取消
+// 已有的 --cpus，只有重建容器才能真正不限。
+// 容器不存在时返回 nil——下次创建容器时自然会用新上限。
+func (m *BotWorkspaceManager) ApplyCPULimit(ctx context.Context, botID, limit string) error {
+	c := m.containerFor(botID)
+	if c == nil {
+		return nil
+	}
+	return c.UpdateCPULimit(ctx, limit)
+}
+
+// ApplyMemoryLimit 把内存上限就地应用到该 bot 的运行中容器（不重建）。
+// mb <= 0 表示「不限制」，此时返回 ErrLimitNotClearable。语义同 ApplyCPULimit。
+func (m *BotWorkspaceManager) ApplyMemoryLimit(ctx context.Context, botID string, mb int64) error {
+	c := m.containerFor(botID)
+	if c == nil {
+		return nil
+	}
+	return c.UpdateMemoryLimit(ctx, mb)
+}
+
 // getBotMemoryLimitLocked 返回指定 bot 的内存限制字符串（用于 docker --memory）。
 // 调用方必须已持有 m.mu（读锁或写锁均可）。拆出此无锁版本是为了避免在持写锁的路径
 // （如 GetOrCreate 慢路径）中再次请求读锁，否则会与自身持有的写锁构成 RWMutex 自死锁。

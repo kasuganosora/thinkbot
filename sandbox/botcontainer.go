@@ -791,7 +791,10 @@ func (c *botContainer) ElevateMemory(ctx context.Context, suggestMB int) (int, e
 	}
 
 	limit := fmt.Sprintf("%dm", target)
-	cmd := exec.CommandContext(ctx, "docker", "update", "--memory", limit, c.container)
+	// 必须同时抬 --memory-swap：创建容器时 swap 默认是 memory 的 2 倍，
+	// 单独放大 --memory 到超过它会被 docker 拒绝（"Memory limit should be smaller
+	// than already set memoryswap limit"）。默认 2G 起步 + 抬到 6144m 必然踩中。
+	cmd := exec.CommandContext(ctx, "docker", "update", "--memory", limit, "--memory-swap", limit, c.container)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -808,6 +811,73 @@ func (c *botContainer) ElevateMemory(ctx context.Context, suggestMB int) (int, e
 	c.logger.Infow("bot container memory elevated in-place (no recreate)",
 		"container", c.container, "to", limit)
 	return target, nil
+}
+
+// ErrLimitNotClearable 表示要把上限在线改成「不限制」。
+//
+// docker update 做不到：0 被当作"不改这个字段"，-1 不是合法值，
+// 唯一取消已有 --memory / --cpus 的办法是重建容器。调用方据此提示用户，
+// 而不是假装成功（实测：--memory 0 / --cpus 0 都不会改变现有上限）。
+var ErrLimitNotClearable = errs.New("bot_container: docker update cannot clear an existing limit; recreate the container to remove it")
+
+// containerExists 判断容器是否存在（不论运行与否）。
+// 只用于"有就改、没有就不必改"的场景，故意不调 ensure()——那会在容器缺失时新建，
+// 而配置变更不应该顺手把容器拉起来。
+func (c *botContainer) containerExists(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.Name}}", c.container)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run() == nil
+}
+
+// UpdateCPULimit 就地修改运行中容器的 CPU 上限（不重建容器）。
+// limit 为空表示「不限制」，此时返回 ErrLimitNotClearable。
+// 容器不存在时返回 nil：下次创建容器时自然会用新上限。
+func (c *botContainer) UpdateCPULimit(ctx context.Context, limit string) error {
+	if limit == "" {
+		return ErrLimitNotClearable
+	}
+	if !c.containerExists(ctx) {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "update", "--cpus", limit, c.container)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return errs.Wrapf(err, "bot_container: docker update --cpus %s %q: %s",
+			limit, c.container, strings.TrimSpace(out.String()))
+	}
+	c.logger.Infow("bot container cpu limit updated in-place (no recreate)",
+		"container", c.container, "cpus", limit)
+	return nil
+}
+
+// UpdateMemoryLimit 就地修改运行中容器的内存上限（不重建容器）。
+// mb <= 0 表示「不限制」，此时返回 ErrLimitNotClearable。
+//
+// 必须同时给 --memory-swap：容器创建时 swap 默认是 memory 的 2 倍，单独放大
+// --memory 会被 docker 以 "Memory limit should be smaller than already set
+// memoryswap limit" 拒绝。取 swap = memory 表示不再额外给 swap。
+func (c *botContainer) UpdateMemoryLimit(ctx context.Context, mb int64) error {
+	if mb <= 0 {
+		return ErrLimitNotClearable
+	}
+	if !c.containerExists(ctx) {
+		return nil
+	}
+	limit := fmt.Sprintf("%dm", mb)
+	cmd := exec.CommandContext(ctx, "docker", "update", "--memory", limit, "--memory-swap", limit, c.container)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return errs.Wrapf(err, "bot_container: docker update --memory %s %q: %s",
+			limit, c.container, strings.TrimSpace(out.String()))
+	}
+	c.logger.Infow("bot container memory limit updated in-place (no recreate)",
+		"container", c.container, "memory", limit)
+	return nil
 }
 
 // currentMemoryBytes 读取容器当前 --memory 限制（字节）；0 表示不限制（unlimited）。

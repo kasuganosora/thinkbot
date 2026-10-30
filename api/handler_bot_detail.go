@@ -471,7 +471,22 @@ func (s *Server) handleUpdateBotContainerConfig(c *gin.Context) {
 		return
 	}
 
-	OK(c, gin.H{"ok": true})
+	// 落库后再就地应用到运行中的容器，免得用户还得重建一次才生效。
+	// docker update 无法取消已有上限（0 会被当成"不改"），所以「不限制」只能
+	// 等容器重建；这里把结果如实回给前端，不要假装成功。
+	applied := false
+	needsRecreate := false
+	if mgr, err := s.botSvc.WorkspaceManagerForBot(botID); err == nil {
+		if err := mgr.ApplyMemoryLimit(c.Request.Context(), botID, req.MemoryLimitMB); err == nil {
+			applied = true
+		} else if errors.Is(err, sandbox.ErrLimitNotClearable) {
+			needsRecreate = true
+		} else {
+			s.logger.Warnw("apply container memory limit failed", "bot", botID, "err", err)
+		}
+	}
+
+	OK(c, gin.H{"ok": true, "applied": applied, "needsRecreate": needsRecreate})
 }
 
 // handleGetBotContainerSnapshots 获取 Bot 容器快照列表（真实 docker 镜像）。
