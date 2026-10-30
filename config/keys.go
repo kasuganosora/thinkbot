@@ -145,6 +145,12 @@ const (
 	// 注意：Backend 显式设为 "docker" 时本就强制要求 Docker，与本键无关。
 	KeySandboxRequireDocker = "sandbox.require_docker"
 
+	// KeySandboxCPULimit bot 沙箱容器的 CPU 上限（docker --cpus 的值，如 "1.0"、"16"）。
+	// 未配置时沿用 sandbox.DefaultConfig() 的 "1.0"。
+	// 显式设为 "0" / "-" / "unlimited" 表示不限制（docker run 不加 --cpus，容器可用满宿主核数）。
+	// 编译类任务（如 gdb / 大型 C++ 项目）在 1 核上会慢到像卡死，整机独占部署时应放开。
+	KeySandboxCPULimit = "sandbox.cpu_limit"
+
 	// KeySandboxTimeout bot 在沙箱里执行单条命令的「硬上限」秒数。
 	// 默认 0 表示自动 = 卡死阈值 × 3（见 hardTimeoutFactor），不写死固定时长；
 	// 设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：即便命令一直在输出，
