@@ -873,6 +873,13 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		return
 	}
 
+	// 装饰前的用户原文：密钥回复拦截要登记的是它，而不是加了引用/前缀的整段文本。
+	// renote 回退时正文是别人的帖子，不是用户输入，不记。
+	secretCandidate := ""
+	if !renoteFallback {
+		secretCandidate = text
+	}
+
 	// 构建回复/转发上下文，让 Bot 能看到用户回复了什么或转发了什么
 	text = noteContext(note, text, renoteFallback)
 
@@ -919,6 +926,9 @@ func (c *MisskeyChannel) handleNote(ctx context.Context, note Note, eventType st
 		// 作者亲手 @ 了 bot（非回复链自动继承的 mention）或直接回复 bot 的帖子：
 		// LLM 阶段据此强制回复（即使模型给出 send:false）。
 		core.MetaExplicitMention: explicit,
+	}
+	if secretCandidate != "" {
+		metadata[core.MetaSecretCandidate] = secretCandidate
 	}
 	// 入站附件归一化为 core.Attachment，供下游 messageBuilder（主模型支持多模态时
 	// 直送 ImagePart/FilePart）与 MultimodalStage（主模型不支持多模态时经 vision 转写）消费，

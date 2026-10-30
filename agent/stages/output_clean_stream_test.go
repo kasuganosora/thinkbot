@@ -316,7 +316,7 @@ func withStreamSecretVault(t *testing.T, name, value string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Register(name, value, "流式遮蔽测试"); err != nil {
+	if err := v.Register("", name, value, "流式遮蔽测试"); err != nil {
 		t.Fatal(err)
 	}
 	prev := secret.Default()

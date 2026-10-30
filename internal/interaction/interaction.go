@@ -424,6 +424,25 @@ func (r *Registry) ConsumeSecret(botID, chatID, text string) (string, bool) {
 	return "", false
 }
 
+// HasPendingSecret 报告该会话是否有尚未过期的 pending 密钥请求（只读，不消费）。
+// 供渠道在打日志 / 合并引用之前判断要不要先走密钥拦截。
+func (r *Registry) HasPendingSecret(botID, chatID string) bool {
+	key := sessionKey(botID, chatID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, qid := range r.sessionQuestions[key] {
+		e, ok := r.entries[qid]
+		if !ok || e.question.Kind != KindSecret || e.question.Status != StatusPending {
+			continue
+		}
+		if e.question.TimeoutSecs > 0 && time.Since(time.Unix(e.question.RegisteredAt, 0)) > time.Duration(e.question.TimeoutSecs)*time.Second {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // Lookup 返回问题的只读快照（不存在返回 ErrQuestionNotFound）。
 func (r *Registry) Lookup(questionID string) (Question, error) {
 	r.mu.Lock()
@@ -653,13 +672,28 @@ func (r *Registry) CleanupFinal(questionID string) {
 func (r *Registry) InterruptBySession(botID, chatID string) int {
 	key := sessionKey(botID, chatID)
 	r.mu.Lock()
-	qids := r.sessionQuestions[key]
-	if len(qids) == 0 {
+	all := r.sessionQuestions[key]
+	if len(all) == 0 {
 		r.mu.Unlock()
 		return 0
 	}
+	// 密钥请求是非阻塞的（没有等待者需要唤醒），用户插话不应让它失效：
+	// 典型场景是用户先追问「token 在哪拿？」再发 token —— 若这里把请求中断掉，
+	// 随后那条 token 就会以明文进入 LLM。故只中断非 secret 的问题，secret 留在索引里。
+	var qids, keep []string
+	for _, qid := range all {
+		if e, ok := r.entries[qid]; ok && e.question.Kind == KindSecret && e.question.Status == StatusPending {
+			keep = append(keep, qid)
+			continue
+		}
+		qids = append(qids, qid)
+	}
 	// 清空该会话待中断列表：后续新问题会重新进入索引，属另一轮交互。
-	delete(r.sessionQuestions, key)
+	if len(keep) > 0 {
+		r.sessionQuestions[key] = keep
+	} else {
+		delete(r.sessionQuestions, key)
+	}
 	r.mu.Unlock()
 
 	n := 0

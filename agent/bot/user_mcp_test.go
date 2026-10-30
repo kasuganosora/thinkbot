@@ -340,7 +340,7 @@ func withMCPSecretVault(t *testing.T, name, value string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Register(name, value, "mcp 敏感字段测试"); err != nil {
+	if err := v.Register("", name, value, "mcp 敏感字段测试"); err != nil {
 		t.Fatal(err)
 	}
 	prev := secret.Default()

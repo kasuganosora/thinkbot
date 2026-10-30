@@ -264,6 +264,16 @@ const (
 	// 否则等同于把私聊内容发进群。
 	MetaMemoryLinkedChannels = "memory_linked_channels"
 
+	// MetaSecretCandidate 渠道在给正文加装饰（回复引用、[Timeline] 前缀、
+	// note_id 后缀等）之前，记下用户**亲手输入**的那段原文。
+	//
+	// 用途：密钥回复拦截（inbound.InterceptSecretReply）要登记的是用户发来的
+	// 原始值，而不是渠道包装后的整段文本——否则 Misskey 回复 bot 的帖子会把
+	// 「[Reply to …]」连同 token 一起存进保险库，工具执行时还原出来的就不是 token。
+	// 只有正文会被装饰的渠道需要写；缺省时拦截按 msg.Text 处理。
+	// 无论是否命中，拦截时都会删除该键，原文副本不会随 Metadata 流进 pipeline。
+	MetaSecretCandidate = "secret_candidate"
+
 	// KVHeartbeatMode 标记当前消息为「心跳自主唤醒」决策模式。
 	//
 	// 由心跳 Executor 在构造唤醒消息时设置。LLMStage 读取后强制 JSON 结构化输出

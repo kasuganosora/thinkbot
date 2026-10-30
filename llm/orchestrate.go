@@ -1577,7 +1577,13 @@ func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(Str
 	// 唯一咽喉点：入参里的占位符在此还原为真实值，仅供工具执行使用。
 	// tc.Input 本身保持占位符形态，供下游日志 / 事件 / 前端回显使用——
 	// 真实值绝不写回 tc.Input，否则 input_preview 与 StreamToolResultPart 会泄露。
-	execInput := secret.Default().Resolve(tc.Input)
+	// 按 bot 还原：只认本 bot 名下与全局条目，别的 bot 的占位符原样保留。
+	// 归属优先取 ctx（编排入口注入），回落 cfg.BotID（仅落盘指针场景会设）。
+	vaultBot := secret.BotFromContext(ctx)
+	if vaultBot == "" && cfg != nil {
+		vaultBot = cfg.BotID
+	}
+	execInput := secret.Default().Resolve(vaultBot, tc.Input)
 	output, err := tool.Execute(execCtx, execInput)
 	// 工具返回后立即遮蔽：output 会流向日志预览、StreamToolResultPart、
 	// ToolResultPart.Result 三处，必须在源头改掉。

@@ -106,10 +106,12 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		action = "request"
 	}
 
+	meta := agenttools.MessageMetaFromContext(ctx.Context)
 	if action == "list" {
+		// 只列本 bot 可见的条目（本 bot + 全局），别的 bot 的目录不外露。
 		return map[string]any{
 			"status":  "ok",
-			"secrets": secret.Default().Catalog(),
+			"secrets": secret.Default().Catalog(meta.BotID),
 		}, nil
 	}
 	if action != "request" {
@@ -129,7 +131,6 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		return nil, fmt.Errorf("secret_input: 非法 name %q", name)
 	}
 
-	meta := agenttools.MessageMetaFromContext(ctx.Context)
 	timeout := in.TimeoutSecs
 	if timeout <= 0 {
 		timeout = interaction.DefaultTimeoutSecs

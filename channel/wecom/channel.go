@@ -592,6 +592,8 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 
 	text, mentioned, items := extractInbound(body, c.cfg.BotName, isGroup)
 	text = strings.TrimSpace(text)
+	// 引用合并前的用户原文：密钥回复拦截登记的是它（见下方 InterceptSecretReply）。
+	secretCandidate := text
 	// 引用：用户引用了某条历史消息再提问时，把被引用的原文并进正文。
 	// ⚠️ 必须在剥 @ 之后、判空之前：引用内容本身不参与 @ 剥离（它是历史内容），
 	// 而「只引用、一个字没打」这种输入靠引用才能不变成空消息被丢掉。
@@ -645,6 +647,20 @@ func (c *WeComChannel) handleMsgCallback(ctx context.Context, body *callbackBody
 		MediaType: mediaMIME(items),
 		Metadata:  meta,
 		CreatedAt: time.Now(),
+	}
+
+	// ⚠️ 密钥回复拦截必须在这里，早于下面所有会「看到」正文的环节：
+	// 入站日志 / 配文暂存日志会把正文写进日志；bot 正忙时 deliver 走
+	// AppendToMessage 直接注入编排，**不经过 Ingress**——若只靠 Ingress 拦截，
+	// 用户在上一轮还没结束时回复的密钥会以明文进 LLM。
+	// 命中后 msg.Text 已是脱敏提示，同步回 text：下面媒体合并会 `msg.Text = text`。
+	if secretCandidate != "" {
+		meta[core.MetaSecretCandidate] = secretCandidate
+	}
+	if name, ok := inbound.InterceptSecretReply(&msg); ok {
+		text = msg.Text
+		traceid.L(ctx).Infow("wecom: user-provided secret redacted at channel entry",
+			"channel", c.name, "msgid", body.MsgID, "chat", channelID, "secret_name", name)
 	}
 
 	// 开流（A 档）：登记这条回调的 req_id，占位由延迟定时器推，最终回复会原位替换。

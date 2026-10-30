@@ -1094,6 +1094,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		BotID:     env.Message.BotID,
 		SessionID: chatSessionIDFromEnvelope(env),
 	})
+	// 密钥保险库按 bot 隔离：执行咽喉点据此只还原本 bot 名下的占位符。
+	// 子代理 / spawn 都派生自这个 ctx，自动继承同一归属。
+	ctx = secret.WithBot(ctx, env.Message.BotID)
 
 	// 注入本轮消息元信息（平台类型 / 会话空间 / 回写目标）：交互类工具
 	// （user_choice 等）据此判断应答平台与渲染路径。
