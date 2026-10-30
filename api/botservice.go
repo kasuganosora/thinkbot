@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -411,6 +412,51 @@ func parseSandboxCPULimit(raw string) (string, bool) {
 		return "", true
 	}
 	return v, true
+}
+
+// ApplySandboxCPULimit 把当前的 sandbox.cpu_limit 就地应用到该 bot 的运行中容器
+// （不重建）。用于「系统配置里改完立刻生效」。
+//
+// 返回 (needsRecreate, err)：
+//   - needsRecreate=true：配置成了「不限制」，docker update 取消不掉已有的
+//     --cpus，只能等容器重建；
+//   - 未配置该键、或容器不存在（下次创建自然会带上）时返回 (false, nil)。
+func (s *BotService) ApplySandboxCPULimit(ctx context.Context, botID string) (bool, error) {
+	limit, configured := s.sandboxCPULimitOverride()
+	if !configured {
+		return false, nil
+	}
+	mgr, err := s.WorkspaceManagerForBot(botID)
+	if err != nil {
+		return false, err
+	}
+	if err := mgr.ApplyCPULimit(ctx, botID, limit); err != nil {
+		if errors.Is(err, sandbox.ErrLimitNotClearable) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+// ApplySandboxCPULimitAll 把 sandbox.cpu_limit 应用到所有已定义的 bot。
+// 单个 bot 失败不影响其它：配置已落库，重建容器时一样会生效。
+func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) bool {
+	defs, err := s.ListDefinitions()
+	if err != nil {
+		s.logger.Warnw("apply sandbox cpu limit: list bots failed", "err", err)
+		return false
+	}
+	needsRecreate := false
+	for _, def := range defs {
+		nr, err := s.ApplySandboxCPULimit(ctx, def.ID)
+		if err != nil {
+			s.logger.Warnw("apply sandbox cpu limit failed", "bot", def.ID, "err", err)
+			continue
+		}
+		needsRecreate = needsRecreate || nr
+	}
+	return needsRecreate
 }
 
 // sandboxConfigWithMemoryLimit 构造基础 sandbox 配置并按 mb 决定内存限制。
