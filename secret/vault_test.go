@@ -144,3 +144,39 @@ func TestCatalogHasNoValues(t *testing.T) {
 		t.Fatal("empty placeholder")
 	}
 }
+
+func TestStreamHoldLen(t *testing.T) {
+	v := newTestVault(t)
+	// 空库：普通文本零扣留。
+	if n := v.StreamHoldLen("hello world"); n != 0 {
+		t.Fatalf("empty vault should not hold, got %d", n)
+	}
+	if err := v.Register("tok", "abcdefghijklmnop", ""); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"hello world", 0},        // 无前缀
+		{"prefix abc", 3},         // 短真前缀
+		{"prefix abcdef", 6},      // 更长真前缀
+		{"x abcdefghijklmno", 15}, // 值长 16，最长真前缀 15
+		{"abcdefghijklmnop", 0},   // 完整值结尾：交给 Redact，不扣
+		{"tail abcdefghijklmnop", 0},
+		{"abc and more", 0}, // 前缀不在尾部
+		{"", 0},
+	}
+	for _, c := range cases {
+		if got := v.StreamHoldLen(c.in); got != c.want {
+			t.Errorf("StreamHoldLen(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+	// 多值取最长真前缀。
+	if err := v.Register("long", "abcdefghijklmnopqrst", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.StreamHoldLen("x abcdefghijklmnopqr"); got != 18 {
+		t.Fatalf("longest prefix across values: got %d, want 18", got)
+	}
+}

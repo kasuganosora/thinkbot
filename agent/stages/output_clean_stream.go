@@ -3,8 +3,10 @@ package stages
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/secret"
 )
 
 // OutputCleanStreamFilter 在流式增量里做与出站门控（LLMStage.Process 中
@@ -59,6 +61,11 @@ type OutputCleanStreamFilter struct {
 	// looseInternalOpen 为真表示当前 internal 区是缺 '>' 的开标签。
 	// 流结束时若仍未闭合，trail 里残片前面的半句也不能补发（与 extract 的 trailing 闸门一致）。
 	looseInternalOpen bool
+
+	// secHold 是跨 chunk 密钥遮蔽的尾部缓冲：保留「可能是某条已登记密钥真前缀」的
+	// 尾部字节到下一次 Feed，确保跨界值在被推送前完整落进某次拼接被 Redact。
+	// 空库时恒为空，不改变既有流式行为。
+	secHold string
 }
 
 type ocMode int
@@ -91,7 +98,8 @@ func (f *OutputCleanStreamFilter) Feed(delta string) string {
 	buf := f.pending + delta
 	f.pending = ""
 	f.process(buf, &out, false)
-	return out.String()
+	// 推送前做跨 chunk 安全的密钥遮蔽：尾部疑似未闭合值的前缀扣到下一次增量。
+	return f.redactStream(out.String(), false)
 }
 
 // Flush 在流结束时调用：放行仍扣住的普通文本（最终没凑成标签的半截 "<b" 等），
@@ -108,8 +116,10 @@ func (f *OutputCleanStreamFilter) Flush() string {
 		f.trail = ""
 	}
 	f.flushTrailing(&out)
+	// 流结束：把跨 chunk 缓冲拼回，一并 Redact 后全部放行。
+	text := f.redactStream(out.String(), true)
 	*f = OutputCleanStreamFilter{replyTags: f.replyTags}
-	return out.String()
+	return text
 }
 
 // flushTrailing 在流结束时把最后一个 </public> 之后扣住的实质裸文本并入公开回复。
@@ -464,6 +474,48 @@ func (f *OutputCleanStreamFilter) emit(s string, out *strings.Builder) {
 		}
 	}
 	out.WriteString(visible)
+}
+
+// redactStream 对一段「即将推送」的清洗后文本做跨 chunk 安全的密钥遮蔽。
+//
+// 顺序很关键：先 Redact 把当前 buf 里完整出现的真实值全部替换成占位符，再按
+// StreamHoldLen 把尾部「疑似未闭合值前缀」扣住到下一次增量。若只扣不 Redact，
+// 完整的短值会被留到下一 chunk 才遮蔽（多延迟一步）；若只 Redact 不扣，跨界值
+// 的前半段会被当作普通文本提前推送出去（泄露）。final=true 表示流已结束，把
+// secHold 拼回一并 Redact 后全部放行。
+func (f *OutputCleanStreamFilter) redactStream(text string, final bool) string {
+	vault := secret.Default()
+	buf := f.secHold + text
+	if final {
+		f.secHold = ""
+		return vault.Redact(buf)
+	}
+	redacted := vault.Redact(buf)
+	hold := vault.StreamHoldLen(redacted)
+	if hold <= 0 {
+		f.secHold = ""
+		return redacted
+	}
+	if len(redacted) <= hold {
+		f.secHold = redacted
+		return ""
+	}
+	cut := backToRuneStart(redacted, len(redacted)-hold)
+	if cut <= 0 {
+		f.secHold = redacted
+		return ""
+	}
+	f.secHold = redacted[cut:]
+	return redacted[:cut]
+}
+
+// backToRuneStart 把字节下标 i 往回退到最近的 UTF-8 rune 起始处，避免把一个多字节
+// 字符从中间切开推送给前端（往回退只会多扣一点，对遮蔽只会更安全）。
+func backToRuneStart(s string, i int) int {
+	for i > 0 && i < len(s) && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
 }
 
 // indexFoldAny 在 s 中按 ASCII 大小写不敏感查找最早出现的任一 needle，返回位置与长度。

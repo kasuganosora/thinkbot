@@ -242,6 +242,52 @@ func (v *Vault) Redact(text string) string {
 	return text
 }
 
+// StreamHoldLen 返回 s 尾部需要扣住、暂不推送的字节数，用于流式跨 chunk 遮蔽。
+//
+// 背景：流式增量可能在某条已登记密钥的中间被切开，单独对一个 chunk 做 Redact
+// 匹配不到跨界的完整值——前半段会被当成普通文本推送出去。调用方应在推送前保留
+// 尾部 StreamHoldLen 字节到下一次增量，拼接后再 Redact：这样任何完整值在被推送前
+// 必然完整地落在某次拼接里被遮蔽。
+//
+// 返回值是「s 的某个后缀恰好是某条已登记真实值的真前缀」时的最大长度；否则 0。
+// 只扣住真正可能成值的前缀，普通文本零延迟放行——不做固定长度窗口，避免长密钥
+// 把整条流扣到 Flush 才吐出、破坏实时性。
+//
+// 复杂度上界 O(值数量 × 最长值²)（自大到小命中即停）；典型 token 级密钥下远低于此。
+// 若将来需要登记文件级超长密钥且流式吞吐很高，可改为前缀索引，这里保持最简正确解。
+func (v *Vault) StreamHoldLen(s string) int {
+	if s == "" {
+		return 0
+	}
+	v.mu.RLock()
+	vals := make([]string, 0, len(v.entries))
+	for _, e := range v.entries {
+		if e.Value != "" {
+			vals = append(vals, e.Value)
+		}
+	}
+	v.mu.RUnlock()
+
+	best := 0
+	for _, val := range vals {
+		n := len(val)
+		if n <= best+1 { // 该值不可能产生比 best 更长的真前缀，跳过
+			continue
+		}
+		limit := n - 1 // 真前缀：不含完整值本身（完整值交给 Redact 处理）
+		if limit > len(s) {
+			limit = len(s)
+		}
+		for k := limit; k > best; k-- {
+			if val[:k] == s[len(s)-k:] {
+				best = k
+				break
+			}
+		}
+	}
+	return best
+}
+
 // RedactValue 是 Redact 的递归版本，保持入参类型结构（string/map/slice）。
 func (v *Vault) RedactValue(x any) any {
 	switch t := x.(type) {
