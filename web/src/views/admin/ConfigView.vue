@@ -1,47 +1,23 @@
 <template>
-  <SettingsShell v-if="!embedded" title="系统配置">
-    <t-card :bordered="false" class="card">
-      <div class="toolbar">
-        <span class="hint">这些配置由后端 /api/config 持久化，按分类分组。修改后点击「保存全部修改」。</span>
-        <t-button theme="primary" :disabled="!dirty" @click="saveAll" data-testid="config-save-btn">保存全部修改</t-button>
-      </div>
-
-      <t-loading :loading="loading">
-        <div v-for="(items, cat) in grouped" :key="cat" class="group">
-          <div class="group-title">{{ catLabel(cat) }}</div>
-          <t-form label-align="left" :label-width="200">
-            <t-form-item v-for="item in items" :key="item.key" :label="item.description || item.key">
-              <div class="field">
-                <t-switch
-                  v-if="isBool(item.value)"
-                  :value="item.value === 'true'"
-                  @change="v => updateValue(item.key, v ? 'true' : 'false')"
-                  :data-testid="`config-${item.key}`"
-                />
-                <t-input
-                  v-else
-                  :value="draft[item.key]"
-                  @change="v => updateValue(item.key, v)"
-                  :data-testid="`config-${item.key}`"
-                  style="width: 320px"
-                />
-                <span class="key-name">{{ item.key }}</span>
-              </div>
-            </t-form-item>
-          </t-form>
-        </div>
-      </t-loading>
-    </t-card>
-  </SettingsShell>
-
-  <div v-else class="embed-panel">
-    <div class="panel-head">
+  <!--
+    One form body for both shells (SettingsShell + embedded) so layout/CSS cannot drift.
+    Descriptions are top-aligned and wrap; technical keys sit beside/under controls.
+  -->
+  <component
+    :is="embedded ? 'div' : SettingsShell"
+    v-bind="embedded ? { class: 'embed-panel' } : { title: '系统配置' }"
+  >
+    <div v-if="embedded" class="panel-head">
       <div>
         <h3 class="panel-title">系统配置</h3>
         <p class="panel-desc">全局系统配置项，按分类分组，修改后点击「保存全部修改」。</p>
       </div>
     </div>
-    <div class="panel-card">
+
+    <component
+      :is="embedded ? 'div' : 't-card'"
+      v-bind="embedded ? { class: 'panel-card' } : { bordered: false, class: 'card' }"
+    >
       <div class="toolbar">
         <span class="hint">这些配置由后端 /api/config 持久化，按分类分组。修改后点击「保存全部修改」。</span>
         <t-button theme="primary" :disabled="!dirty" @click="saveAll" data-testid="config-save-btn">保存全部修改</t-button>
@@ -50,8 +26,11 @@
       <t-loading :loading="loading">
         <div v-for="(items, cat) in grouped" :key="cat" class="group">
           <div class="group-title">{{ catLabel(cat) }}</div>
-          <t-form label-align="left" :label-width="200">
-            <t-form-item v-for="item in items" :key="item.key" :label="item.description || item.key">
+          <t-form label-align="top" class="config-form">
+            <t-form-item v-for="item in items" :key="item.key">
+              <template #label>
+                <span class="item-label">{{ item.description || item.key }}</span>
+              </template>
               <div class="field">
                 <t-switch
                   v-if="isBool(item.value)"
@@ -64,7 +43,7 @@
                   :value="draft[item.key]"
                   @change="v => updateValue(item.key, v)"
                   :data-testid="`config-${item.key}`"
-                  style="width: 320px"
+                  class="config-input"
                 />
                 <span class="key-name">{{ item.key }}</span>
               </div>
@@ -72,8 +51,8 @@
           </t-form>
         </div>
       </t-loading>
-    </div>
-  </div>
+    </component>
+  </component>
 </template>
 
 <script setup>
@@ -82,7 +61,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { configApi } from '@/api/services'
 
-const props = defineProps({ embedded: { type: Boolean, default: false } })
+defineProps({ embedded: { type: Boolean, default: false } })
 
 const loading = ref(false)
 const list = ref([])
@@ -142,6 +121,7 @@ async function saveAll() {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 20px;
 }
 .hint { color: var(--bp-label-tertiary); font-size: 13px; max-width: 70%; }
@@ -153,6 +133,33 @@ async function saveAll() {
   padding-left: 8px;
   border-left: 3px solid var(--bp-accent);
 }
-.field { display: flex; align-items: center; gap: 12px; }
-.key-name { color: var(--bp-label-quaternary); font-size: 12px; font-family: monospace; }
+.field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+}
+.key-name {
+  color: var(--bp-label-quaternary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  word-break: break-all;
+}
+/* Long Chinese descriptions must wrap; TDesign left labels default to nowrap. */
+.config-form :deep(.t-form__label),
+.config-form :deep(.t-form-item__label),
+.item-label {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.45;
+}
+/* Prefer class max-width over inline width so the field can flex. */
+.config-input,
+.field :deep(.t-input) {
+  flex: 1 1 220px;
+  max-width: 480px;
+  min-width: 0;
+  width: 100%;
+}
 </style>
