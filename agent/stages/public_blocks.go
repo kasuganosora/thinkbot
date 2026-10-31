@@ -5,6 +5,7 @@ import (
 	"unicode"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/secret"
 )
 
 // 多段 <public> 的合并与近重复去重。
@@ -133,7 +134,11 @@ func significantTrailingPublic(s string) bool {
 func cleanPublicBlock(content string) string {
 	out := memory.StripRecallBlocks(strings.TrimSpace(content))
 	out = memory.StripInternalTags(out)
-	return strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
+	out = strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
+	// 纵深防御：万一票据明文经记忆/幻觉混入出站正文，最后一道遮蔽成占位符。
+	// 保险库为空时 Redact 是 no-op，不改变既有行为；流式实时推送（emit 路径）
+	// 不走这里，其跨 chunk 遮蔽属后续加固项。
+	return secret.Default().Redact(out)
 }
 
 // publicBlockSet 记录已决定发送的区块（及其归一化形式）。

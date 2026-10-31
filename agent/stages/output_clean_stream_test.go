@@ -9,6 +9,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 )
 
 // streamClean 按 processStream 的组合方式（reply-control 过滤 → 标签清洗）处理切片。
@@ -305,5 +306,143 @@ func TestProcess_WebStreamMatchesReplyPayload(t *testing.T) {
 				t.Fatalf("streamed %q != payload %q (deltas=%q)", streamed, payload, pub.deltas)
 			}
 		})
+	}
+}
+
+// withStreamSecretVault 把全局保险库换成内存库并登记一条真实值，供流式遮蔽测试用。
+func withStreamSecretVault(t *testing.T, name, value string) {
+	t.Helper()
+	v, err := secret.New("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Register("", name, value, "流式遮蔽测试"); err != nil {
+		t.Fatal(err)
+	}
+	prev := secret.Default()
+	secret.SetDefault(v)
+	t.Cleanup(func() { secret.SetDefault(prev) })
+}
+
+// TestOutputCleanStream_SecretRedactedAcrossChunks：无论增量怎么切（逐字符/二分/随机），
+// 任何一段推送出去的 delta 都不含真实值甚至其前缀；拼接结果 == 出站 payload（parity），
+// 且值被遮蔽成占位符。覆盖出站路径 1（<public>）与路径 3（纯文本，本次补齐 Redact）。
+func TestOutputCleanStream_SecretRedactedAcrossChunks(t *testing.T) {
+	const realValue = "REAL_SECRET_VALUE_abcdefgh"
+	withStreamSecretVault(t, "svc.token", realValue)
+	ph := secret.Placeholder("svc.token")
+
+	raws := []string{
+		"<public>调用内部接口完成，令牌 " + realValue + " 已使用。</public>\n@@REPLY_CONTROL@@{\"send\": true}",
+		"部署完成，票据 " + realValue + " 已归档。\n@@REPLY_CONTROL@@{\"send\": true}",
+	}
+	for _, raw := range raws {
+		want := sharedClean(raw)
+		if strings.Contains(want, realValue) {
+			t.Fatalf("outbound payload still contains raw secret: %q", want)
+		}
+		for _, chunks := range allChunkings(raw) {
+			got, outs := streamClean(chunks, true)
+			// 逐段 delta：既不能泄露完整值，也不能泄露其前缀（前缀靠 secHold 扣住）。
+			for _, o := range outs {
+				if strings.Contains(o, realValue) || strings.Contains(o, realValue[:8]) {
+					t.Fatalf("secret leaked in a delta %q (chunks=%q)", o, chunks)
+				}
+			}
+			if strings.Contains(got, realValue) {
+				t.Fatalf("raw secret leaked in stream result %q (chunks=%q)", got, chunks)
+			}
+			if !strings.Contains(got, ph) {
+				t.Fatalf("placeholder missing in stream %q (chunks=%q)", got, chunks)
+			}
+			if got != want {
+				t.Fatalf("stream %q != outbound %q (chunks=%q)", got, want, chunks)
+			}
+		}
+	}
+}
+
+// TestOutputCleanStream_SecretHoldThenRelease：精确验证跨 chunk 的值被扣住、拼完整后
+// 才 Redact 放行；完整值在单 chunk 内直接遮蔽；流尾残缺前缀在 Flush 放行且不丢正文。
+func TestOutputCleanStream_SecretHoldThenRelease(t *testing.T) {
+	const val = "abcdefghijklmnop"
+	withStreamSecretVault(t, "tok", val)
+	ph := secret.Placeholder("tok")
+
+	// 值被切成两段：前半扣住，一点前缀都不吐。
+	f := NewOutputCleanStreamFilter(false)
+	if got := f.Feed("token=" + val[:8]); !strings.HasPrefix(got, "token=") || strings.Contains(got, val[:4]) {
+		t.Fatalf("partial value prefix should be held, got %q", got)
+	}
+	// 后半到达，与扣住的前半拼成完整值 → 遮蔽成占位符。
+	if got := f.Feed(val[8:] + " ok"); got != ph+" ok" {
+		t.Fatalf("joined value should be redacted, got %q", got)
+	}
+
+	// 完整值落在单个 chunk 内：直接遮蔽。
+	g := NewOutputCleanStreamFilter(false)
+	if got := g.Feed("x " + val + " y"); got != "x "+ph+" y" {
+		t.Fatalf("complete value in one chunk should be redacted, got %q", got)
+	}
+
+	// 流尾只有残缺前缀（值从未完整出现）：Feed 扣住，Flush 放行该前缀（非完整票据，安全）。
+	h := NewOutputCleanStreamFilter(false)
+	if got := h.Feed("tail " + val[:5]); strings.Contains(got, val[:3]) {
+		t.Fatalf("trailing prefix should stay held until flush, got %q", got)
+	}
+	if got := h.Flush(); got != val[:5] {
+		t.Fatalf("flush should release only the held trailing prefix, got %q", got)
+	}
+}
+
+// TestProcess_NoReplyControl_RedactsSecret：门控未开启（RequireReplyControl=false，
+// 即 replyTags=false）时，出站不经过 publicReplyWithAudit，原本会绕过 Redact。
+// 端到端验证最终 ActionReply payload 与 Web 流式拼接都已跨 chunk 遮蔽票据。
+func TestProcess_NoReplyControl_RedactsSecret(t *testing.T) {
+	const realValue = "RAW_CREDENTIAL_VALUE_abcdefgh"
+	withStreamSecretVault(t, "svc.token", realValue)
+	ph := secret.Placeholder("svc.token")
+
+	pub := &recordingPublisher{}
+	stage := NewLLMStage("llm", &chunkStreamProvider{
+		chunks: []string{
+			"部署完成，票据 " + realValue[:18],
+			realValue[18:] + " 已归档。",
+		},
+	}, LLMConfig{
+		RequireReplyControl: false,
+		StreamPublisher:     pub,
+		MessageBuilder: func(msg core.Message) []llm.Message {
+			return []llm.Message{llm.UserMessage(msg.Text)}
+		},
+	}, nil, nil)
+	env := core.NewEnvelope(core.Message{
+		ID: "web-3", TraceID: "t-web-3", BotID: "b1", Text: "hi", Source: "web",
+		Channel: "web", UserID: "1", ChatType: core.ChatPrivate,
+	})
+	out, err := stage.Process(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	replies := replyActions(out)
+	if len(replies) != 1 {
+		t.Fatalf("want 1 reply, got %d", len(replies))
+	}
+	payload, _ := replies[0].Payload.(string)
+	if strings.Contains(payload, realValue) {
+		t.Fatalf("raw secret leaked into outbound payload: %q", payload)
+	}
+	if !strings.Contains(payload, ph) {
+		t.Fatalf("placeholder missing in payload: %q", payload)
+	}
+	streamed := strings.Join(pub.deltas, "")
+	if strings.Contains(streamed, realValue) {
+		t.Fatalf("raw secret leaked into stream: %q", streamed)
+	}
+	if !strings.Contains(streamed, ph) {
+		t.Fatalf("placeholder missing in stream: %q", streamed)
+	}
+	if streamed != payload {
+		t.Fatalf("streamed %q != payload %q (deltas=%q)", streamed, payload, pub.deltas)
 	}
 }

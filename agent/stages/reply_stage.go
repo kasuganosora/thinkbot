@@ -11,6 +11,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -177,6 +178,8 @@ func (s *ReplyStage) Process(ctx context.Context, env *core.Envelope) (*core.Env
 		"message_id", env.Message.ID,
 		"provider", s.provider.Name())
 
+	// 密钥保险库按 bot 隔离：与 LLMStage 相同，执行咽喉点只还原本 bot 的占位符。
+	ctx = secret.WithBot(ctx, env.Message.BotID)
 	// WithStatsSkip: 让 StatsRecordingProvider 跳过 Orchestrate 内部的逐次调用，
 	// 由下方 recordUsage() 统一记录合并后的总用量到 journal + stats
 	result, err := llm.OrchestrateGenerate(llm.WithStatsSkip(ctx), s.provider, cfg)

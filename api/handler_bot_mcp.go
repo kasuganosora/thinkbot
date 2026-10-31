@@ -29,6 +29,85 @@ import (
 //   POST   /api/bots/:id/mcp/import       → 批量导入（JSON 配置）
 // ============================================================================
 
+// mcpSecretMask 是敏感 env/header 值经读取接口返回前端时的掩码占位串。
+//
+// 契约（与前端一致）：前端把整份配置回传做更新时，若某敏感字段仍是该串，
+// 后端判定为「用户未改动」，沿用已存的真实值，不覆盖。
+// 采用固定串而非「按原值长度打码」，是因为本 handler 的更新是 map 整体覆盖，
+// 无法像指针字段那样区分「字段未传」与「传了」——只有固定哨兵能被无歧义识别。
+// 真实凭据几乎不可能是连续 8 个星号，碰撞风险可忽略。
+const mcpSecretMask = "********"
+
+// maskMCPSecretMap 返回一份敏感值已打码的新 map；空值与非敏感键原样保留。
+// 绝不改动入参 map。
+func maskMCPSecretMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if v != "" && mcp.IsSensitiveConfigKey(k) {
+			out[k] = mcpSecretMask
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// maskMCPEntrySecrets 返回可安全回显给前端的条目拷贝：敏感 env/header 打码。
+//
+// 采用值拷贝 + 新 map，绝不改动入参——入参可能已写入 servers.json，或正被
+// syncMCPRuntime 拿来连接真实 MCP server；就地改会破坏运行时连接或落盘值。
+func maskMCPEntrySecrets(e mcp.BotServerEntry) mcp.BotServerEntry {
+	out := e
+	out.Env = maskMCPSecretMap(e.Env)
+	out.Headers = maskMCPSecretMap(e.Headers)
+	return out
+}
+
+// maskMCPEntries 批量掩码，返回新切片，不改原切片。
+func maskMCPEntries(entries []mcp.BotServerEntry) []mcp.BotServerEntry {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]mcp.BotServerEntry, len(entries))
+	for i := range entries {
+		out[i] = maskMCPEntrySecrets(entries[i])
+	}
+	return out
+}
+
+// ErrMCPMaskUnresolvable 表示前端回传了掩码串，但本地没有对应的原值可以还原。
+//
+// 典型场景是用户把敏感键改名（旧键消失、新键带着掩码回来）：掩码无法反推出真实
+// 凭据，静默跳过会让凭据在保存时被丢掉，而界面上还显示着已保存。这种情况必须
+// 让请求失败并提示用户重新填写真实值。
+var ErrMCPMaskUnresolvable = errs.New("masked secret cannot be resolved: no stored value for this key; re-enter the real value")
+
+// mergeMCPSecretMap 把前端回传的 env/headers 应用到条目：敏感键且值为
+// mcpSecretMask 时沿用旧值（用户未改动），避免掩码串把真实凭据写回覆盖；
+// 空字符串仍表示显式清空；旧值不存在的掩码键无法还原，返回 ErrMCPMaskUnresolvable。
+func mergeMCPSecretMap(old map[string]string, req map[string]any) (map[string]string, error) {
+	out := make(map[string]string, len(req))
+	for k, val := range req {
+		s, ok := val.(string)
+		if !ok {
+			continue
+		}
+		if mcp.IsSensitiveConfigKey(k) && s == mcpSecretMask {
+			oldVal, exists := old[k]
+			if !exists {
+				return nil, errs.Wrapf(ErrMCPMaskUnresolvable, "mcp: key %q", k)
+			}
+			out[k] = oldVal
+			continue
+		}
+		out[k] = s
+	}
+	return out, nil
+}
+
 // handleListBotMcp 列出指定 Bot 的 MCP 服务器。
 func (s *Server) handleListBotMcp(c *gin.Context) {
 	botID := c.Param("id")
@@ -48,7 +127,7 @@ func (s *Server) handleListBotMcp(c *gin.Context) {
 			e.Status = mcp.DeriveStatus(e.Enabled, e.ReadyToConnect(), connected, nil)
 		}
 	}
-	OK(c, gin.H{"servers": servers})
+	OK(c, gin.H{"servers": maskMCPEntries(servers)})
 }
 
 // handleCreateBotMcp 创建一个 MCP 服务器配置。
@@ -127,7 +206,7 @@ func (s *Server) handleCreateBotMcp(c *gin.Context) {
 	entry = s.syncMCPRuntime(botID, "", entry)
 
 	auditLog(c, s.logger, "create_bot_mcp", "bot_id", botID, "mcp", entry.Name)
-	OK(c, entry)
+	OK(c, maskMCPEntrySecrets(entry))
 }
 
 // handleUpdateBotMcp 更新 MCP 服务器配置。
@@ -182,12 +261,13 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 	}
 	if v, ok := req["env"]; ok {
 		if env, ok := v.(map[string]any); ok {
-			sv.Env = make(map[string]string, len(env))
-			for k, val := range env {
-				if s, ok := val.(string); ok {
-					sv.Env[k] = s
-				}
+			// 敏感键值为掩码串表示「用户未改动」，沿用旧值，避免回传覆盖真实凭据。
+			merged, err := mergeMCPSecretMap(sv.Env, env)
+			if err != nil {
+				Fail(c, errs.BadRequest(err.Error()))
+				return
 			}
+			sv.Env = merged
 		}
 	}
 	if v, ok := req["cwd"].(string); ok {
@@ -198,12 +278,12 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 	}
 	if v, ok := req["headers"]; ok {
 		if headers, ok := v.(map[string]any); ok {
-			sv.Headers = make(map[string]string, len(headers))
-			for k, val := range headers {
-				if s, ok := val.(string); ok {
-					sv.Headers[k] = s
-				}
+			merged, err := mergeMCPSecretMap(sv.Headers, headers)
+			if err != nil {
+				Fail(c, errs.BadRequest(err.Error()))
+				return
 			}
+			sv.Headers = merged
 		}
 	}
 	if v, ok := req["enabled"].(bool); ok {
@@ -233,7 +313,7 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 	_ = mcp.SaveBotServers(botID, servers)
 
 	auditLog(c, s.logger, "update_bot_mcp", "bot_id", botID, "mcp_id", mid)
-	OK(c, updated)
+	OK(c, maskMCPEntrySecrets(updated))
 }
 
 // handleRemoveBotMcp 删除 MCP 服务器。
@@ -354,7 +434,7 @@ func (s *Server) handleImportBotMcp(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "import_bot_mcp", "bot_id", botID, "count", fmt.Sprintf("%d", len(created)))
-	OK(c, gin.H{"servers": created})
+	OK(c, gin.H{"servers": maskMCPEntries(created)})
 }
 
 // runningUserMCP 返回运行中 bot 的用户 MCP Manager。

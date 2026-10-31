@@ -173,6 +173,14 @@ func (g *Ingress) Receive(ctx context.Context, msg core.Message) error {
 		return nil
 	}
 
+	// 密钥回复前置拦截：命中则把明文存入保险库，并把消息正文改写为脱敏的
+	// 「密钥已就绪」提示后再投递。明文绝不进入 pipeline（LLM / 历史 enricher / 记忆）。
+	if name, ok := InterceptSecretReply(&msg); ok {
+		g.logger.Infow("ingress: redacted user-provided secret before pipeline",
+			"bot_id", msg.BotID, "channel", msg.Channel, "secret_name", name, "trace_id", msg.TraceID)
+		// 改写后的消息继续走下方的正常投递流程。
+	}
+
 	// 用户在该会话阻塞等待选择期间插入了新消息：中断本会话所有 pending 的
 	// user_choice 问题。否则旧回合仍持有旧上下文在跑，等阻塞结束后只会基于过时的
 	// 上下文生成回复（LLM 看不到新消息）；中断后旧回合干净终止，这条新消息由随后
@@ -262,6 +270,12 @@ func (g *Ingress) TryReceive(msg core.Message) bool {
 			"entry", "TryReceive",
 		)
 		return true
+	}
+
+	// 与 Receive 一致：密钥回复前置拦截，明文改写为脱敏提示后再投递。
+	if name, ok := InterceptSecretReply(&msg); ok {
+		g.logger.Infow("ingress: redacted user-provided secret before pipeline",
+			"entry", "TryReceive", "bot_id", msg.BotID, "channel", msg.Channel, "secret_name", name, "trace_id", msg.TraceID)
 	}
 
 	env := core.NewEnvelope(msg)
