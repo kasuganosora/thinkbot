@@ -31,6 +31,7 @@ import (
 // TieredL1Retriever 从 tiered_memories 表读取 tier=1 的记忆。
 // 编译期契约：实现 memory.Retriever，可直接作为 recall stage 的检索源。
 var _ memory.Retriever = (*TieredL1Retriever)(nil)
+var _ memory.EntryFetcher = (*TieredL1Retriever)(nil)
 
 type TieredL1Retriever struct {
 	db    *gorm.DB
@@ -142,6 +143,21 @@ func (r *TieredL1Retriever) Count(ctx context.Context, scope memory.Scope) (int,
 	return int(count), nil
 }
 
+// FetchEntries hydrates vector hits within this source's tier and trusted bot.
+// Keeping both predicates here prevents a merged recall source from importing
+// an L0 hit or a different bot's row merely because its ID is in memory_vec.
+func (r *TieredL1Retriever) FetchEntries(ctx context.Context, ids []string) ([]memory.Entry, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var models []dao.TieredMemoryModel
+	if err := ownedByBot(r.db.WithContext(ctx), r.botID).
+		Where("tier = ? AND id IN ?", r.queryTier(), ids).Find(&models).Error; err != nil {
+		return nil, errs.Wrap(err, "tiered_retriever: fetch by id failed")
+	}
+	return memory.FilterRecall(tieredModelsToEntries(models)), nil
+}
+
 // tieredModelsToEntries 将持久化模型映射为领域 Entry（含 scope 与 metadata）。
 func tieredModelsToEntries(models []dao.TieredMemoryModel) []memory.Entry {
 	out := make([]memory.Entry, 0, len(models))
@@ -179,6 +195,7 @@ func tieredModelsToEntries(models []dao.TieredMemoryModel) []memory.Entry {
 // 单源检索失败属非致命，跳过该源不影响其他源（与 recall stage 的容错语义一致）。
 
 var _ memory.Retriever = (*MergedRetriever)(nil)
+var _ memory.EntryFetcher = (*MergedRetriever)(nil)
 
 type MergedRetriever struct {
 	sources []memory.Retriever
@@ -188,6 +205,68 @@ type MergedRetriever struct {
 // 排在前面的源在内容去重时优先保留（推荐把高价值 / 蒸馏知识的源放在最前）。
 func NewMergedRetriever(sources ...memory.Retriever) *MergedRetriever {
 	return &MergedRetriever{sources: sources}
+}
+
+// BoundBotID exposes an owner only when every source has the same nonempty
+// trusted binding. A mixed/unbound collection cannot authorize bot-wide fusion.
+func (m *MergedRetriever) BoundBotID() string {
+	botID := ""
+	for _, src := range m.sources {
+		bound, ok := src.(interface{ BoundBotID() string })
+		if !ok || bound.BoundBotID() == "" {
+			return ""
+		}
+		if botID != "" && bound.BoundBotID() != botID {
+			return ""
+		}
+		botID = bound.BoundBotID()
+	}
+	return botID
+}
+
+// FetchEntries preserves source priority while hydrating the combined vector
+// index. Each source checks its own table/tier; the merger also checks owner
+// and requested IDs before handing content to the context manager.
+func (m *MergedRetriever) FetchEntries(ctx context.Context, ids []string) ([]memory.Entry, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	botID := m.BoundBotID()
+	if botID == "" {
+		return nil, errs.New("merged_retriever: vector hydration requires consistent bot ownership")
+	}
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	seen := make(map[string]bool, len(ids))
+	var out []memory.Entry
+	for _, src := range m.sources {
+		fetcher, ok := src.(memory.EntryFetcher)
+		if !ok {
+			continue
+		}
+		entries, err := fetcher.FetchEntries(ctx, ids)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !wanted[e.ID] || seen[e.ID] {
+				continue
+			}
+			owner := e.Metadata["bot_id"]
+			if e.Scope.Kind == memory.ScopeBot {
+				if e.Scope.ID != botID || (owner != nil && owner != botID) {
+					continue
+				}
+			} else if owner != botID {
+				continue
+			}
+			seen[e.ID] = true
+			out = append(out, e)
+		}
+	}
+	return memory.FilterRecall(out), nil
 }
 
 // Recent 合并各源的最近 N 条记忆，按源顺序保留、内容去重。
