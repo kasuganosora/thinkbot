@@ -93,7 +93,8 @@ var (
 	// ErrQuestionNotFound 问题不存在（未注册或已清理）。
 	ErrQuestionNotFound = errors.New("interaction: 问题不存在")
 	// ErrDuplicateID 问题 ID 已注册。
-	ErrDuplicateID = errors.New("interaction: 问题 ID 已注册")
+	ErrDuplicateID   = errors.New("interaction: 问题 ID 已注册")
+	ErrPendingSecret = errors.New("interaction: 本会话已有待回复的密钥请求；请先完成或发送 /cancel-secret 取消")
 	// ErrInvalidQuestion 问题字段非法（ID/正文为空等）。
 	ErrInvalidQuestion = errors.New("interaction: 问题字段非法")
 	// ErrInvalidOptions 选项数量非法（须 1~8 个）。
@@ -369,6 +370,24 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 		r.mu.Unlock()
 		return Question{}, fmt.Errorf("%w: %s", ErrDuplicateID, q.ID)
 	}
+	// A reply has no request ID, so only one pending secret can be unambiguous.
+	if q.Kind == KindSecret {
+		key := sessionKey(q.BotID, q.ChatID)
+		for _, id := range append([]string(nil), r.sessionQuestions[key]...) {
+			e := r.entries[id]
+			if e == nil || e.question.Kind != KindSecret || e.question.Status != StatusPending {
+				continue
+			}
+			if time.Since(time.Unix(e.question.RegisteredAt, 0)) <= time.Duration(e.question.TimeoutSecs)*time.Second {
+				r.mu.Unlock()
+				return Question{}, ErrPendingSecret
+			}
+			e.question.Status = StatusTimeout
+			close(e.done)
+			r.removeSessionQuestionLocked(key, id)
+			delete(r.entries, id)
+		}
+	}
 	// 拷贝 Options 切片，隔离调用方后续修改。
 	opts := make([]Option, len(q.Options))
 	copy(opts, q.Options)
@@ -395,31 +414,55 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 // pipeline（明文绝不能进 LLM 上下文）。内部消费不走 Answer.validate（密钥请求
 // 没有选项语义），但仍在同一把锁内完成，避免与 InterruptBySession 竞态。
 func (r *Registry) ConsumeSecret(botID, chatID, text string) (string, bool) {
+	name, expired, ok := r.TakeSecretReply(botID, chatID, text)
+	if !ok || expired {
+		return "", false
+	}
+	return name, true
+}
+
+// TakeSecretReply claims the next reply atomically. Even an expired request
+// claims one reply for safe disposal: a late credential must not become chat.
+func (r *Registry) TakeSecretReply(botID, chatID, text string) (name string, expired, ok bool) {
 	key := sessionKey(botID, chatID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	ids := append([]string(nil), r.sessionQuestions[key]...)
-	for _, qid := range ids {
-		e, ok := r.entries[qid]
-		if !ok || e.question.Kind != KindSecret || e.question.Status != StatusPending {
+	for _, qid := range append([]string(nil), r.sessionQuestions[key]...) {
+		e := r.entries[qid]
+		if e == nil || e.question.Kind != KindSecret || e.question.Status != StatusPending {
 			continue
 		}
-		// 惰性超时：超过等待预算则清理并跳过，避免把无关的后续消息误当成密钥回复。
-		if e.question.TimeoutSecs > 0 && time.Since(time.Unix(e.question.RegisteredAt, 0)) > time.Duration(e.question.TimeoutSecs)*time.Second {
-			r.removeSessionQuestionLocked(key, qid)
-			delete(r.entries, qid)
-			continue
+		expired = e.question.TimeoutSecs > 0 && time.Since(time.Unix(e.question.RegisteredAt, 0)) > time.Duration(e.question.TimeoutSecs)*time.Second
+		if expired {
+			e.question.Status = StatusTimeout
+		} else {
+			e.answer = Answer{CustomInput: text}
+			e.question.Status = StatusAnswered
 		}
-		name := e.question.SecretName
-		e.answer = Answer{CustomInput: text}
-		e.question.Status = StatusAnswered
 		close(e.done)
 		r.removeSessionQuestionLocked(key, qid)
-		// secret 请求是一次性入口：非阻塞工具不会调 CleanupFinal，此处直接移除
-		// 条目防止终态常驻。若恰有阻塞等待者，其持有的 entry 指针副本仍有效
-		// （done 已关闭），可正常取到 answer。
 		delete(r.entries, qid)
-		return name, true
+		return e.question.SecretName, expired, true
+	}
+	return "", false, false
+}
+
+// CancelSecret cancels only the current session's pending secret request.
+// It also cleans an expired request so users can explicitly leave secret mode.
+func (r *Registry) CancelSecret(botID, chatID string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := sessionKey(botID, chatID)
+	for _, id := range append([]string(nil), r.sessionQuestions[key]...) {
+		e := r.entries[id]
+		if e == nil || e.question.Kind != KindSecret || e.question.Status != StatusPending {
+			continue
+		}
+		e.question.Status = StatusCancelled
+		close(e.done)
+		r.removeSessionQuestionLocked(key, id)
+		delete(r.entries, id)
+		return e.question.SecretName, true
 	}
 	return "", false
 }

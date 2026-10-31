@@ -42,15 +42,22 @@ func InterceptSecretReply(msg *core.Message) (string, bool) {
 		return "", false
 	}
 	reg := interaction.Default()
-	if !reg.HasPendingSecret(msg.BotID, msg.Channel) {
-		return "", false
+	if candidate == "/cancel-secret" {
+		if name, ok := reg.CancelSecret(msg.BotID, msg.Channel); ok {
+			msg.Text = "[用户已取消密钥提供请求，未登记任何值。请继续普通对话；未经用户重新要求，不要再次索要该密钥。]"
+			return name, true
+		}
 	}
 	if candidate == "" {
 		return "", false
 	}
-	name, ok := reg.ConsumeSecret(msg.BotID, msg.Channel, candidate)
+	name, expired, ok := reg.TakeSecretReply(msg.BotID, msg.Channel, candidate)
 	if !ok {
 		return "", false
+	}
+	if expired {
+		msg.Text = "[密钥请求已过期，迟到的回复已按密钥处理并隐藏，未登记。请告知用户本次未保存；如仍需提供，请重新发起密钥请求。]"
+		return name, true
 	}
 	err := secret.Default().Register(msg.BotID, name, candidate, "由用户在会话中直接提供")
 	switch {

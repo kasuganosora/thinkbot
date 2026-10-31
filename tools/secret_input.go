@@ -40,7 +40,7 @@ func secretInputToolDef() agenttools.ToolDef {
 			Description: "Request a secret credential (API token, password, key) from the user WITHOUT you ever seeing its value. " +
 				"Two-step, non-blocking: (1) call this with action='request' and a 'purpose' describing where/why the secret is needed, plus optional 'name'; " +
 				"the tool returns immediately with a placeholder like {{secret:name}} instead of blocking. " +
-				"(2) Then send the user a short message stating the purpose and asking them to reply with the secret. Warn that their next non-empty reply is treated as the secret, including questions. " +
+				"(2) Then send the user a short message stating the purpose and asking them to reply with the secret. Warn that their next non-empty reply is treated as the secret, including questions. They can send /cancel-secret to cancel before providing a value. " +
 				"When the user replies, the system stores it securely and you get a REDACTED notice that the placeholder is ready — you never receive the raw value. " +
 				"Then continue the task by putting the placeholder in tool arguments (e.g. an Authorization header); it is resolved to the real value only at execution time. " +
 				"action='list' returns the names/purposes of already-stored secrets (never their values). " +
@@ -84,7 +84,7 @@ var secretInputPromptSection = &agenttools.ToolPromptSection{
 	Content: `## Secrets and credentials
 
 - When a task needs a credential the user must provide (API token, password, key), call **secret_input** with action=request and a clear **purpose** describing where/why it will be used.
-- The tool returns a placeholder such as {{secret:name}}. It does NOT block. After calling it, send the user a short message stating the purpose and asking them to reply with the secret. Explain that the next non-empty reply, including a question, will be treated as the secret.
+- The tool returns a placeholder such as {{secret:name}}. It does NOT block. After calling it, send the user a short message stating the purpose and asking them to reply with the secret. Explain that the next non-empty reply, including a question, will be treated as the secret. They can send /cancel-secret to cancel. Only one pending request is allowed per conversation.
 - The user's reply is handled securely by the system: the raw value is stored in a vault and NEVER enters your context. You will get a REDACTED notice when the placeholder is ready.
 - To use a stored secret, write its placeholder {{secret:name}} in a tool argument (URL, header, body, command, etc.). It is resolved to the real value only at execution time — you never see the real value.
 - Use action=list to see which secret names/purposes are already stored (values are never shown).
@@ -106,7 +106,13 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		action = "request"
 	}
 
+	if ctx == nil || ctx.Context == nil {
+		return nil, fmt.Errorf("secret_input: missing conversation context")
+	}
 	meta := agenttools.MessageMetaFromContext(ctx.Context)
+	if meta.BotID == "" || meta.ChatID == "" {
+		return nil, fmt.Errorf("secret_input: missing bot or conversation identity")
+	}
 	if action == "list" {
 		// 只列本 bot 可见的条目（本 bot + 全局），别的 bot 的目录不外露。
 		return map[string]any{
@@ -155,6 +161,6 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		"placeholder": secret.Placeholder(name),
 		"purpose":     purpose,
 		"expires_in":  timeout,
-		"hint":        "已登记密钥请求。请现在向用户发一条消息，说明用途并请其直接回复该密钥；用户回复后系统安全存储，你会收到一条脱敏的「密钥已就绪」提示，届时再用占位符继续任务。不要在本回合索要或猜测明文。",
+		"hint":        "已登记密钥请求。请现在向用户发一条消息，说明用途并请其直接回复该密钥（不想提供时可发送 /cancel-secret 取消）；用户回复后系统安全存储，你会收到一条脱敏的「密钥已就绪」提示，届时再用占位符继续任务。不要在本回合索要或猜测明文。",
 	}, nil
 }
