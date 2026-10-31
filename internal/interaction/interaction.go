@@ -170,6 +170,8 @@ type Question struct {
 	Kind Kind
 	// SecretName KindSecret 时要登记的密钥名（占位符 {{secret:name}} 中的 name）。
 	SecretName string
+	// SecretForm requires an explicit request-ID submission, never a chat reply.
+	SecretForm bool
 	// RegisteredAt 注册时刻（unix 秒），供 ConsumeSecret 惰性判定超时。
 	RegisteredAt int64
 }
@@ -443,7 +445,7 @@ func (r *Registry) TakeSecretReply(botID, chatID, text string) (name string, exp
 	defer r.mu.Unlock()
 	for _, qid := range append([]string(nil), r.sessionQuestions[key]...) {
 		e := r.entries[qid]
-		if e == nil || e.question.Kind != KindSecret || e.question.Status != StatusPending {
+		if e == nil || e.question.Kind != KindSecret || e.question.Status != StatusPending || e.question.SecretForm {
 			continue
 		}
 		expired = e.question.TimeoutSecs > 0 && time.Since(time.Unix(e.question.RegisteredAt, 0)) > time.Duration(e.question.TimeoutSecs)*time.Second
@@ -459,6 +461,37 @@ func (r *Registry) TakeSecretReply(botID, chatID, text string) (name string, exp
 		return e.question.SecretName, expired, true
 	}
 	return "", false, false
+}
+
+// ClaimSecretForm atomically authenticates and completes one browser request.
+// Unknown IDs (including after a restart), other owners, IM requests and expired
+// requests cannot turn submitted text into ordinary chat. The value is not stored here.
+func (r *Registry) ClaimSecretForm(id, botID, chatID string, cancel bool) (Question, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.entries[id]
+	if e == nil || e.question.Kind != KindSecret || !e.question.SecretForm || e.question.BotID != botID || e.question.ChatID != chatID || chatID == "" {
+		return Question{}, ErrQuestionNotFound
+	}
+	if e.question.Status != StatusPending {
+		return Question{}, ErrAlreadyResolved
+	}
+	expired := e.question.TimeoutSecs > 0 && time.Since(time.Unix(e.question.RegisteredAt, 0)) > time.Duration(e.question.TimeoutSecs)*time.Second
+	switch {
+	case cancel:
+		e.question.Status = StatusCancelled
+	case expired:
+		e.question.Status = StatusTimeout
+	default:
+		e.question.Status = StatusAnswered
+	}
+	close(e.done)
+	r.removeSessionQuestionLocked(sessionKey(botID, chatID), id)
+	delete(r.entries, id)
+	if expired && !cancel {
+		return Question{}, ErrTimeout
+	}
+	return e.question, nil
 }
 
 // CancelSecret cancels only the current session's pending secret request.
