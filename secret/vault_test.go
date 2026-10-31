@@ -1,8 +1,10 @@
 package secret
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -295,5 +297,38 @@ func TestRegisterRefusedWhenLoadFailed(t *testing.T) {
 	v := &Vault{entries: map[entryKey]Entry{}, loadErr: os.ErrPermission}
 	if err := v.Register("bot-a", "svc.token", "some-long-secret-value", ""); err != ErrUnavailable {
 		t.Fatalf("Register on failed vault = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestConcurrentRegisterPersistsEverySuccessfulEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault.json")
+	v, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := v.Register("bot", fmt.Sprintf("key%d", i), fmt.Sprintf("fictional-password-%d", i), "test"); err != nil {
+				t.Errorf("register: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 32; i++ {
+		name := fmt.Sprintf("key%d", i)
+		want := fmt.Sprintf("fictional-password-%d", i)
+		if got, ok := reloaded.Get("bot", name); !ok || got != want {
+			t.Errorf("persisted entry %s missing", name)
+		}
+		if got, ok := v.Get("bot", name); !ok || got != want {
+			t.Errorf("memory entry %s missing", name)
+		}
 	}
 }
