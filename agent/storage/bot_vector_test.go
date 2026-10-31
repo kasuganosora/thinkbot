@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,89 @@ import (
 	"github.com/kasuganosora/thinkbot/db"
 	gormlogger "gorm.io/gorm/logger"
 )
+
+func TestProductionMergedContextBotVectorHydration(t *testing.T) {
+	gdb, err := db.OpenSQLiteWithLogger(filepath.Join(t.TempDir(), "vec.db"), gormlogger.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dao.Migrate(gdb); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now()
+	repo := NewSQLiteRepository(gdb, SQLiteRepositoryConfig{BotID: "a"})
+	if !repo.Vec().Enabled() {
+		t.Skip("sqlite-vec unavailable")
+	}
+	// Exact production source composition and priority.
+	l3 := NewTieredProfileRetriever(gdb, "a")
+	l1 := NewTieredL1Retriever(gdb, "a")
+	merged := NewMergedRetriever(l3, l1, repo)
+	rows := []dao.TieredMemoryModel{
+		{ID: "l3-owned", Tier: 3, ScopeKind: "user", ScopeID: "u", Content: "fictional amber orchard profile", MetadataJSON: `{"bot_id":"a"}`, CreatedAt: now.Add(-time.Hour)},
+		{ID: "l1-owned", Tier: 1, ScopeKind: "channel", ScopeID: "c", Content: "fictional amber orchard project", MetadataJSON: `{"bot_id":"a"}`, CreatedAt: now.Add(-time.Hour)},
+		{ID: "l3-recent", Tier: 3, ScopeKind: "user", ScopeID: "u", Content: "unrelated newest profile", MetadataJSON: `{"bot_id":"a"}`, CreatedAt: now},
+		{ID: "l1-recent", Tier: 1, ScopeKind: "channel", ScopeID: "c", Content: "unrelated newest event", MetadataJSON: `{"bot_id":"a"}`, CreatedAt: now},
+		{ID: "l0-excluded", Tier: 0, ScopeKind: "user", ScopeID: "u", Content: "fictional amber orchard L0", MetadataJSON: `{"bot_id":"a"}`, CreatedAt: now},
+		{ID: "foreign", Tier: 3, ScopeKind: "user", ScopeID: "u", Content: "fictional amber orchard foreign", MetadataJSON: `{"bot_id":"b"}`, CreatedAt: now},
+		{ID: "unknown", Tier: 1, ScopeKind: "channel", ScopeID: "c", Content: "fictional amber orchard unknown", CreatedAt: now},
+	}
+	if err := gdb.Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Append(ctx, memory.Entry{ID: "raw-owned", Scope: memory.ChannelScope("c"), Content: "fictional amber orchard note"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runAppVecBackfill(ctx, gdb, repo.Vec(), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Even incorrect index ownership cannot import foreign/unattributed hits.
+	for _, row := range rows {
+		repo.Vec().Upsert("bot:a", row.ID, row.Content)
+	}
+	ids := []string{"l3-owned", "l1-owned", "raw-owned", "l0-excluded", "foreign", "unknown"}
+	got, err := merged.FetchEntries(ctx, ids)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("merged hydration: %+v %v", got, err)
+	}
+	if got, err := l3.FetchEntries(ctx, ids); err != nil || len(got) != 1 || got[0].ID != "l3-owned" {
+		t.Fatalf("tier hydration: %+v %v", got, err)
+	}
+	for _, tc := range []struct {
+		scope memory.Scope
+		want  []string
+	}{
+		{memory.BotScope("a"), []string{"l3-owned", "l1-owned", "raw-owned"}},
+		{memory.UserScope("u"), []string{"l3-owned"}},
+	} {
+		mgr := memory.NewContextManager(merged, memory.NewContextBuilder(), nil, nil, memory.ContextManagerConfig{RecentLimit: 1, RelevantLimit: 1})
+		mgr.UseVec(repo.Vec())
+		// Reversed words defeat tiered SQL LIKE; old tiered rows are outside
+		// Recent(1), so they can only arrive through merged vector hydration.
+		result, err := mgr.AssembleContextScopes(ctx, []memory.Scope{tc.scope}, "orchard amber")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, e := range result.RecentEntries {
+			seen[e.ID] = true
+		}
+		for _, id := range tc.want {
+			if !seen[id] {
+				t.Fatalf("scope=%s missing %s, got %+v text=%s", tc.scope.Key(), id, result.RecentEntries, result.ContextText)
+			}
+		}
+		for _, id := range []string{"l0-excluded", "foreign", "unknown"} {
+			if seen[id] || strings.Contains(result.ContextText, id) {
+				t.Fatalf("excluded hit injected: %s", id)
+			}
+		}
+		if tc.scope.Kind == memory.ScopeUser && (seen["l1-owned"] || seen["raw-owned"]) {
+			t.Fatal("exact user classification widened")
+		}
+	}
+}
 
 func TestSQLiteRepositoryBotVectorsPreserveSharingAndFilters(t *testing.T) {
 	gdb, err := db.OpenSQLiteWithLogger(filepath.Join(t.TempDir(), "vec.db"), gormlogger.Discard)

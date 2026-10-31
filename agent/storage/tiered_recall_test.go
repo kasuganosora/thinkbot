@@ -75,6 +75,28 @@ func TestTieredRetrievers_BotOwnershipAndOriginalScopes(t *testing.T) {
 	}
 }
 
+func TestMergedRetrieverRequiresConsistentTrustedOwner(t *testing.T) {
+	db := testDB(t)
+	a := NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "a"})
+	for _, sources := range [][]memory.Retriever{
+		nil,
+		{a, NewTieredL1Retriever(db)},
+		{a, NewTieredL1Retriever(db, "b")},
+		{a, &fakeRetriever{}},
+	} {
+		merged := NewMergedRetriever(sources...)
+		if merged.BoundBotID() != "" {
+			t.Fatal("mixed/unbound sources granted a bot identity")
+		}
+		if got, err := merged.FetchEntries(context.Background(), []string{"id"}); err == nil || len(got) != 0 {
+			t.Fatalf("unbound hydration: %+v %v", got, err)
+		}
+	}
+	if got := NewMergedRetriever(NewTieredProfileRetriever(db, "a"), NewTieredL1Retriever(db, "a"), a).BoundBotID(); got != "a" {
+		t.Fatalf("consistent binding = %q", got)
+	}
+}
+
 // fakeRetriever 是 memory.Retriever 的内存桩，按构造时给定的条目响应，
 // 用于无 DB 验证 MergedRetriever 的合并 / 优先级 / 去重逻辑。
 type fakeRetriever struct {
