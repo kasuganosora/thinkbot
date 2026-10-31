@@ -66,8 +66,8 @@ storage/
 将其与 `memory_entries` 的原始笔记合并注入召回：
 
 ```go
-tieredL3 := storage.NewTieredProfileRetriever(db)
-tieredL1 := storage.NewTieredL1Retriever(db)
+tieredL3 := storage.NewTieredProfileRetriever(db, botID)
+tieredL1 := storage.NewTieredL1Retriever(db, botID)
 recall := storage.NewMergedRetriever(tieredL3, tieredL1, memRepo) // 画像/蒸馏排最前
 ```
 
@@ -75,6 +75,12 @@ recall := storage.NewMergedRetriever(tieredL3, tieredL1, memRepo) // 画像/蒸�
   在 Snapshot 字符预算截断时不被丢弃），按内容去重
 - 单源检索失败属非致命，跳过该源（与 recall stage 容错语义一致）
 - L1 只在真人对话轮次被召回（recall stage 在 lurk 只读消息上提前返回），不会回环
+
+## 机器人边界
+
+同一机器人的原始笔记和分层记忆可跨用户、群私聊与平台共享。`BotID` 为空的仓储仅用于测试或离线维护，生产调用必须绑定；不能把用户提交的机器人 ID 直接当作可信归属。`metadata.bot_id` 与原始 scope 分类分别承担归属和画像语义，旧数据不靠渠道关联猜测归属。
+
+`BotScope(botID)` 在绑定仓储中检索该机器人拥有的所有来源分类。向量索引使用机器人 key，但最终命中仍按归属和查询条件校验；迁移只修正明确归属条目的索引，不重建或清空其他机器人的数据。
 
 ## 自动压缩行为
 
@@ -89,6 +95,7 @@ recall := storage.NewMergedRetriever(tieredL3, tieredL1, memRepo) // 画像/蒸�
 ```go
 // db 需先经过 dao.Migrate
 repo := storage.NewSQLiteRepository(db, storage.SQLiteRepositoryConfig{
+    BotID: botID, // 服务器选定的机器人；生产装配必须绑定
     MaxEntriesPerScope: 2000,
 })
 
