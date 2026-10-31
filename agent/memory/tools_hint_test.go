@@ -17,8 +17,8 @@ func memExec(t *testing.T, repo Repository, args map[string]any) (any, error) {
 func TestMemoryReplace_NoMatchListsClosestAndReplaceByID(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
-	_ = repo.Append(ctx, Entry{ID: "m1", Scope: ChannelScope("ch1"), Content: "tokyo-transit技能(/data/skills/tokyo-transit,SKILL.md+odpt_query.js+odpt_station.js,零依赖)"})
-	_ = repo.Append(ctx, Entry{ID: "m2", Scope: ChannelScope("ch1"), Content: "用户喜欢猫"})
+	_ = repo.Append(ctx, Entry{ID: "m1", Scope: ChannelScope("ch1"), Content: "tokyo-transit技能(/data/skills/tokyo-transit,SKILL.md+odpt_query.js+odpt_station.js,零依赖)", Metadata: map[string]any{"bot_id": "botX"}})
+	_ = repo.Append(ctx, Entry{ID: "m2", Scope: ChannelScope("ch1"), Content: "用户喜欢猫", Metadata: map[string]any{"bot_id": "botX"}})
 
 	// old_text is an older/paraphrased version of m1 → no substring match.
 	res, err := memExec(t, repo, map[string]any{

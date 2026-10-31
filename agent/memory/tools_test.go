@@ -270,9 +270,8 @@ func TestMemoryTool_Remove_CrossScopeByID(t *testing.T) {
 	}
 }
 
-// TestMemoryTool_Remove_SubstringHintsOtherScope 验证：子串在请求 scope 内无匹配、
-// 但在 bot scope 命中时，工具返回带 id+scope 的可执行指引，而不是死路 "no entry matched"。
-func TestMemoryTool_Remove_SubstringHintsOtherScope(t *testing.T) {
+// Every conversation of a bot can remove its shared memory by substring.
+func TestMemoryTool_Remove_SubstringUsesSharedBotMemory(t *testing.T) {
 	repo := NewMemoryRepository()
 	botScope := BotScope("botX")
 	_ = repo.Append(context.Background(), Entry{
@@ -291,12 +290,11 @@ func TestMemoryTool_Remove_SubstringHintsOtherScope(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	m := result.(map[string]any)
-	if m["success"].(bool) {
-		t.Fatal("expected success=false (substring not in channel scope)")
+	if m["success"] != true {
+		t.Fatalf("same-bot memory was not shared: %#v", m)
 	}
-	errMsg := m["error"].(string)
-	if !strings.Contains(errMsg, "Found") || !strings.Contains(errMsg, "scope=") {
-		t.Errorf("expected cross-scope hint with id+scope, got: %s", errMsg)
+	if n, _ := repo.Count(context.Background(), botScope); n != 0 {
+		t.Fatal("shared memory was not removed")
 	}
 }
 

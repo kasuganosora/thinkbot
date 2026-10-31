@@ -67,7 +67,7 @@ fall back to ` + "`recent`" + ` or ` + "`count`" + ` to see what is actually sto
 Omit ` + "`query`" + `, and do not pass ` + "`order`" + ` / ` + "`since`" + ` / ` + "`until`" + `, when you need related memories
 that are not already in the visible conversation. That call runs a heavier recall loop: it reads
 about the last four turns, expands keywords, searches, and returns a short refined set for this turn.
-In group chats, deep recall only searches the current group, regardless of the requested scope.
+All chats and platforms of this bot share the same memory. Other bots are isolated.
 It is capped (once per turn, a timeout, and a small result). If it returns a short error, pass an
 explicit ` + "`query`" + ` instead. Do not call this form on every turn.
 
@@ -83,8 +83,8 @@ are **always truncated by limit**, and an explicit order defaults to newest-firs
   Do NOT answer from action "recent", and do NOT answer from the memories already in your system prompt —
   both only show you the recent tail, so you would report September when the real answer is August.
 - "What happened in August?" → action "search" with since="2026-08-01", until="2026-08-31", order="oldest".
-- Questions about your memory as a whole (not this conversation) → add scope_kind="all".
-  The current channel is only one slice of your memory; a single-scope "earliest" is that channel's start, not yours.
+- Questions about your memory as a whole → use scope_kind="all" for all memory owned by this bot, never the whole database.
+  Memories are shared across this bot's users, platforms and conversations; source scopes retain their classification.
 - action "count" reports oldest_at / newest_at when available — use it to state a span precisely instead of guessing.
 
 ## Best practices
@@ -245,13 +245,13 @@ func Tools(config ToolConfig) []tools.ToolDef {
 					"scope_kind": map[string]any{
 						"type": "string",
 						"description": "Memory scope. Options: channel (default), user, bot, global, all. " +
-							"'all' searches/counts across every scope — required for questions about your memory as a whole " +
-							"(\"your earliest memory\"), since the current channel is only one slice of it.",
+							"All values operate within the current bot. 'all' searches/counts its shared memory — useful for questions about your memory as a whole " +
+							"(\"your earliest memory\"). It never searches another bot or the entire database.",
 						"default": "channel",
 					},
 					"scope_id": map[string]any{
 						"type":        "string",
-						"description": "Scope identifier (channel ID, user ID). Empty for global.",
+						"description": "Legacy scope identifier. The server restricts every action to the current bot; this cannot select another bot.",
 					},
 					"memory_id": map[string]any{
 						"type":        "string",
@@ -274,6 +274,18 @@ func Tools(config ToolConfig) []tools.ToolDef {
 				repo := config.Repo
 				scope := parseScope(m, defaultKind, defaultID)
 				scope = fillScopeIDFromSession(ctx, scope, config.BotID)
+
+				// BotID is fixed by server-side registration, never by the model.
+				// All users, platforms and chat types share this bot's memory.
+				if config.BotID != "" {
+					repo = ForBotRepository(repo, config.BotID)
+					if scope.Kind == ScopeBot && scope.ID != config.BotID {
+						return nil, fmt.Errorf("memory: scope outside this bot")
+					}
+					if scope.Kind == ScopeAll && (action == "search" || action == "recent" || action == "count") {
+						scope = BotScope(config.BotID)
+					}
+				}
 
 				// 护栏：scope_kind="all" 只是**读取**用的通配符（跨 scope 检索/统计），
 				// 不能当作写入目标 —— 否则会凭空造出一个 kind="all" 的孤儿 scope，
@@ -613,6 +625,7 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 
 	// 替换：优先使用原子性 Replace（如果实现支持），否则降级为 Append-before-Delete
 	old := matches[0]
+	scope = old.Scope
 	newEntry := Entry{
 		ID:             old.ID,
 		Scope:          scope,
@@ -713,6 +726,7 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sco
 		}, nil
 	}
 
+	scope = matches[0].Scope
 	if err := repo.Delete(ctx, scope, matches[0].ID); err != nil {
 		return nil, errs.Wrap(err, "delete failed")
 	}
@@ -906,7 +920,7 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 				target:    targetID,
 				origEntry: &orig,
 				entry: &Entry{
-					Scope:    scope,
+					Scope:    orig.Scope,
 					Content:  opContent,
 					Category: orig.Category,
 					Source:   orig.Source,
@@ -957,7 +971,7 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 				return batchError(scope, pos+": '"+opOldText+"' matched multiple entries"), nil
 			}
 			targetID := matches[0].ID
-			changes = append(changes, batchChange{op: "delete", target: targetID})
+			changes = append(changes, batchChange{op: "delete", target: targetID, targetScope: matches[0].Scope})
 			// 更新 working 副本以支持后续操作匹配
 			newWorking := make([]Entry, 0, len(working))
 			for _, e := range working {
@@ -1189,13 +1203,24 @@ func unmirrorChannelMemoryFromBot(ctx *llm.ToolExecContext, repo Repository, cfg
 
 func findSubstringMatches(entries []Entry, substr string) []Entry {
 	var matches []Entry
+	matchedIDs := make(map[string]bool)
 	lower := strings.ToLower(substr)
 	for _, e := range entries {
 		if strings.Contains(strings.ToLower(e.Content), lower) {
 			matches = append(matches, e)
+			matchedIDs[e.ID] = true
 		}
 	}
-	return matches
+	// Shared bot reads contain both a channel entry and its historical mirror.
+	// They are one logical edit target; preserve genuinely ambiguous matches.
+	out := matches[:0]
+	for _, e := range matches {
+		if IsMirrorID(e.ID) && matchedIDs[strings.TrimPrefix(e.ID, crossChannelMirrorPrefix)] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func previewEntries(entries []Entry) []string {
@@ -1224,21 +1249,21 @@ func previewEntries(entries []Entry) []string {
 // first, then the bot and global scopes. Returning the entry's home scope lets the
 // caller delete an entry that lives outside the current session scope.
 func resolveRemoveByID(ctx context.Context, repo Repository, cfg ToolConfig, requested Scope, id string) (Scope, bool) {
-	if _, ok := findEntryByIDInScope(ctx, repo, requested, id); ok {
-		return requested, true
+	if e, ok := findEntryByIDInScope(ctx, repo, requested, id); ok {
+		return e.Scope, true
 	}
 	if cfg.BotID != "" {
 		botScope := BotScope(cfg.BotID)
 		if botScope.Key() != requested.Key() {
-			if _, ok := findEntryByIDInScope(ctx, repo, botScope, id); ok {
-				return botScope, true
+			if e, ok := findEntryByIDInScope(ctx, repo, botScope, id); ok {
+				return e.Scope, true
 			}
 		}
 	}
 	globalScope := Scope{Kind: ScopeGlobal, ID: ""}
 	if globalScope.Key() != requested.Key() {
-		if _, ok := findEntryByIDInScope(ctx, repo, globalScope, id); ok {
-			return globalScope, true
+		if e, ok := findEntryByIDInScope(ctx, repo, globalScope, id); ok {
+			return e.Scope, true
 		}
 	}
 	return Scope{}, false
