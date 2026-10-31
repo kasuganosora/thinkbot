@@ -115,7 +115,7 @@ func NewDreamingBundle(
 	applyDreamPhaseDefaults(&dreamCfg)
 
 	// 1. 创建分层记忆管理器（带 SQLite 持久化，重启可恢复）
-	store := memory.NewTieredStoreWithDB(nil, db)
+	store := memory.NewTieredStoreForBot(nil, db, botID)
 	var userProfiler memory.Profiler
 	if provider != nil {
 		pcfg := memory.DefaultLLMProfilerConfig()
