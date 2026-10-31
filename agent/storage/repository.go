@@ -306,7 +306,7 @@ func (r *SQLiteRepository) backfillVec(ctx context.Context, logger *zap.SugaredL
 	}
 	items := make([]memory.VecItem, 0, len(models))
 	for _, e := range modelsToActiveEntries(models) {
-		items = append(items, memory.VecItem{ScopeKey: e.Scope.Key(), EntryID: e.ID, Content: e.Content})
+		items = append(items, memory.VecItem{ScopeKey: memory.VectorScopeKey(e.Scope, e.Metadata), EntryID: e.ID, Content: e.Content})
 	}
 	return r.vec.BackfillMissing(ctx, "memory_entries", items, logger)
 }
@@ -361,7 +361,7 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 
 	r.entriesAppended.Add(1)
 	if r.vec.Enabled() {
-		r.vec.Upsert(entry.Scope.Key(), entry.ID, entry.Content)
+		r.vec.Upsert(memory.VectorScopeKey(entry.Scope, entry.Metadata), entry.ID, entry.Content)
 	}
 
 	// 容量限制（按条数）：异步检查并淘汰最旧条目
@@ -464,7 +464,7 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 		if deleted > 0 && deleteID != "" && deleteID != newEntry.ID {
 			r.vec.Delete(deleteID)
 		}
-		r.vec.Upsert(scope.Key(), newEntry.ID, newEntry.Content)
+		r.vec.Upsert(memory.VectorScopeKey(newEntry.Scope, newEntry.Metadata), newEntry.ID, newEntry.Content)
 	}
 
 	// 与 Append 保持一致的收敛行为：替换后字符总量可能上涨（deleteID 不存在时
@@ -538,9 +538,15 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 	}
 
 	// 文本：sqlite-vec 可用时按 scope 近邻取回，失败或未启用则子串。
-	if query.Text != "" && r.vec.Enabled() && len(query.Scopes) > 0 {
+	if query.Text != "" && r.vec.Enabled() && (len(query.Scopes) > 0 || r.config.BotID != "") {
 		ids := make([]string, 0, limit)
-		for _, scope := range query.Scopes {
+		vectorScopes := query.Scopes
+		if r.config.BotID != "" {
+			// The vector copy is bot-wide; SQL above still enforces the requested
+			// original scopes, owner, category, importance and time bounds.
+			vectorScopes = []memory.Scope{memory.BotScope(r.config.BotID)}
+		}
+		for _, scope := range vectorScopes {
 			for _, hit := range r.vec.Search(scope.Key(), query.Text, limit) {
 				ids = append(ids, hit.EntryID)
 			}

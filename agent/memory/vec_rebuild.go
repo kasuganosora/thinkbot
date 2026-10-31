@@ -39,14 +39,12 @@ func reportVecRebuild(fn func(VecRebuildProgress), p VecRebuildProgress) {
 // RebuildBotVectors 把该 bot 已持久化的分层记忆重新写入 sqlite-vec。
 //
 // 进程只有一份 SQLite（data/thinkbot.db），memory_vec 也是全进程一张表。
-// 因此这里不会 DROP 整表，只删除本 bot 的 scope_key / entry_id 再插入。
+// 因此这里不会 DROP 整表，只按已确认归属的 tiered entry_id 删除再插入。
 //
 // 纳入规则：
-//   - scope bot:<botID> 整桶（bot 专属）
-//   - metadata.bot_id 等于该 bot 的行
-//   - 某个 channel/user scope 只出现在该 bot 的 user_message_events 里，
-//     且桶内没有其他 bot 的 metadata.bot_id：整桶重建（覆盖没打 bot_id 的梦境产物）
-//   - 同一 scope 里混有其他 bot 的标记：只替换 metadata.bot_id 属于本 bot 的行
+//   - scope bot:<botID> 且 metadata.bot_id 不冲突
+//   - 非 bot scope 且 metadata.bot_id 明确等于该 bot
+//   - 无归属或冲突的旧条目不猜测、不删除，历史会话不能代替归属证据
 //
 // live 非空且当前没有可用索引时，会 TryEnableVec + OpenVecIndex 并挂回这个 store，
 // 这样部署后不必再重启一次才能写索引。
@@ -78,23 +76,19 @@ func RebuildBotVectors(ctx context.Context, gdb *gorm.DB, botID string, live *Ti
 	if err := ctx.Err(); err != nil {
 		return fail(0, err)
 	}
-	var events []dao.UserMessageEvent
-	if err := gdb.WithContext(ctx).Select("bot_id", "channel", "user_id").Find(&events).Error; err != nil {
-		return fail(0, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return fail(0, err)
-	}
-	selected, fullKeys, partialIDs := selectVecRebuildRows(botID, rows, events)
+	selected := selectVecRebuildRows(botID, rows)
 	total := len(selected)
 	reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildSelect, Total: total})
-	if err := idx.DeleteScopes(fullKeys); err != nil {
-		return fail(total, err)
+	// Both memory tables share the bot vector bucket. Rebuilding tiered rows
+	// must not erase memory_entries vectors from that same bucket.
+	ids := make([]string, 0, len(selected))
+	for _, row := range selected {
+		ids = append(ids, row.ID)
 	}
 	if err := ctx.Err(); err != nil {
 		return fail(total, err)
 	}
-	if err := idx.DeleteEntryIDs(partialIDs); err != nil {
+	if err := idx.DeleteEntryIDs(ids); err != nil {
 		return fail(total, err)
 	}
 	reportVecRebuild(onProgress, VecRebuildProgress{Phase: VecRebuildDelete, Total: total})
@@ -119,7 +113,8 @@ func indexVecRebuildRows(ctx context.Context, idx *VecIndex, selected []dao.Tier
 		}
 		if row.ID != "" && row.Content != "" {
 			if idx != nil {
-				idx.Upsert(scopeKeyOf(row.ScopeKind, row.ScopeID), row.ID, row.Content)
+				entry := modelToTiedEntry(row)
+				idx.Upsert(VectorScopeKey(entry.Scope, entry.Metadata), row.ID, row.Content)
 			}
 			n++
 			since++
@@ -156,113 +151,25 @@ func ensureVecIndex(gdb *gorm.DB, live *TieredStore) (*VecIndex, error) {
 	return idx, nil
 }
 
-func scopeKeyOf(kind, id string) string {
-	if id == "" {
-		return kind
+// selectVecRebuildRows uses the same explicit ownership rule as bot-bound
+// repositories. A historical channel/user association never assigns old data.
+func selectVecRebuildRows(botID string, rows []dao.TieredMemoryModel) []dao.TieredMemoryModel {
+	var selected []dao.TieredMemoryModel
+	if botID == "" {
+		return selected
 	}
-	return kind + ":" + id
-}
-
-func metadataBotID(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return ""
-	}
-	s, _ := m["bot_id"].(string)
-	return s
-}
-
-type vecRebuildGroup struct {
-	rows []dao.TieredMemoryModel
-}
-
-// selectVecRebuildRows 决定哪些记忆行属于这个 bot，以及删除时用整桶还是按 entry。
-func selectVecRebuildRows(botID string, rows []dao.TieredMemoryModel, events []dao.UserMessageEvent) (selected []dao.TieredMemoryModel, fullKeys []string, partialIDs []string) {
-	thisCh := map[string]struct{}{}
-	otherCh := map[string]struct{}{}
-	thisUser := map[string]struct{}{}
-	otherUser := map[string]struct{}{}
-	for _, e := range events {
-		ch, user := thisCh, thisUser
-		if e.BotID != botID {
-			ch, user = otherCh, otherUser
-		}
-		if e.Channel != "" {
-			ch[e.Channel] = struct{}{}
-		}
-		if e.UserID != "" {
-			user[e.UserID] = struct{}{}
-		}
-	}
-	groups := map[string]*vecRebuildGroup{}
-	order := make([]string, 0)
 	for _, row := range rows {
-		key := scopeKeyOf(row.ScopeKind, row.ScopeID)
-		g := groups[key]
-		if g == nil {
-			g = &vecRebuildGroup{}
-			groups[key] = g
-			order = append(order, key)
-		}
-		g.rows = append(g.rows, row)
-	}
-	botKey := scopeKeyOf(string(ScopeBot), botID)
-	for _, key := range order {
-		g := groups[key]
-		if key == botKey {
-			fullKeys = append(fullKeys, key)
-			selected = append(selected, g.rows...)
+		var metadata map[string]any
+		_ = json.Unmarshal([]byte(row.MetadataJSON), &metadata)
+		owner := metadata["bot_id"]
+		if row.ScopeKind == string(ScopeBot) {
+			if row.ScopeID != botID || (owner != nil && owner != botID) {
+				continue
+			}
+		} else if owner != botID {
 			continue
 		}
-		taggedThis := 0
-		taggedOther := 0
-		for _, row := range g.rows {
-			bid := metadataBotID(row.MetadataJSON)
-			switch {
-			case bid == "":
-			case bid == botID:
-				taggedThis++
-			default:
-				taggedOther++
-			}
-		}
-		if taggedOther > 0 {
-			for _, row := range g.rows {
-				if metadataBotID(row.MetadataJSON) == botID {
-					selected = append(selected, row)
-					if row.ID != "" {
-						partialIDs = append(partialIDs, row.ID)
-					}
-				}
-			}
-			continue
-		}
-		exclusive := scopeExclusive(key, thisCh, otherCh, thisUser, otherUser)
-		if exclusive || taggedThis > 0 {
-			fullKeys = append(fullKeys, key)
-			selected = append(selected, g.rows...)
-		}
+		selected = append(selected, row)
 	}
-	return selected, fullKeys, partialIDs
-}
-
-func scopeExclusive(key string, thisCh, otherCh, thisUser, otherUser map[string]struct{}) bool {
-	const chP, userP = "channel:", "user:"
-	switch {
-	case len(key) > len(chP) && key[:len(chP)] == chP:
-		id := key[len(chP):]
-		_, mine := thisCh[id]
-		_, other := otherCh[id]
-		return mine && !other
-	case len(key) > len(userP) && key[:len(userP)] == userP:
-		id := key[len(userP):]
-		_, mine := thisUser[id]
-		_, other := otherUser[id]
-		return mine && !other
-	default:
-		return false
-	}
+	return selected
 }

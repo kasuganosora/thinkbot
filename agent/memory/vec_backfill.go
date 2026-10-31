@@ -58,8 +58,9 @@ func vecLog(logger *zap.SugaredLogger, level, event string, kv ...any) {
 	stdlog.Printf(format, args...)
 }
 
-// BackfillMissing writes vectors only for entry_ids not yet in memory_vec
-// (existing rows are left alone) and logs start / done / errors for table.
+// BackfillMissing writes missing vectors and moves stale scope keys to their
+// explicitly owned bot bucket. Existing embeddings are never overwritten by
+// the startup snapshot, which may be older than a concurrent live write.
 func (v *VecIndex) BackfillMissing(ctx context.Context, table string, items []VecItem, logger *zap.SugaredLogger) (VecBackfillStats, error) {
 	var st VecBackfillStats
 	if !v.Enabled() {
@@ -70,7 +71,7 @@ func (v *VecIndex) BackfillMissing(ctx context.Context, table string, items []Ve
 	v.backfillMu.Lock()
 	defer v.backfillMu.Unlock()
 	started := time.Now()
-	present, err := v.listEntryIDs(ctx)
+	present, err := v.listEntryScopes(ctx)
 	if err != nil {
 		vecLog(logger, "error", VecBackfillErrorEvent, "table", table, "stage", "list", "err", err)
 		return st, err
@@ -86,7 +87,7 @@ func (v *VecIndex) BackfillMissing(ctx context.Context, table string, items []Ve
 		}
 		seen[it.EntryID] = struct{}{}
 		st.Total++
-		if _, ok := present[it.EntryID]; ok {
+		if scope, ok := present[it.EntryID]; ok && scope == it.ScopeKey {
 			st.Present++
 			continue
 		}
@@ -139,7 +140,7 @@ func BackfillTieredVectors(ctx context.Context, gdb *gorm.DB, idx *VecIndex, log
 			continue
 		}
 		te := modelToTiedEntry(m)
-		items = append(items, VecItem{ScopeKey: te.Scope.Key(), EntryID: te.ID, Content: te.Content})
+		items = append(items, VecItem{ScopeKey: VectorScopeKey(te.Scope, te.Metadata), EntryID: te.ID, Content: te.Content})
 	}
 	return idx.BackfillMissing(ctx, "tiered_memories", items, logger)
 }
