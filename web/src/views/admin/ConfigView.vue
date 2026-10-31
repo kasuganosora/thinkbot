@@ -34,7 +34,7 @@
               <div class="field">
                 <t-switch
                   v-if="isBool(item.value)"
-                  :value="item.value === 'true'"
+                  :value="draft[item.key] === 'true'"
                   @change="v => updateValue(item.key, v ? 'true' : 'false')"
                   :data-testid="`config-${item.key}`"
                 />
