@@ -479,7 +479,7 @@ func writeSSEWithID(w io.Writer, kind string, data any, seq uint64) error {
 // serveChatEvents has no responsibility for task lifetime or persistence.
 // Closing its HTTP request only releases this particular subscriber.
 func (s *Server) serveChatEvents(c *gin.Context, bus *outbound.MemoryEventBus, sub *outbound.Subscription,
-	botID, sessionID, traceID string, snapshot *dao.ChatMessage, sinceSeq uint64) {
+	botID, sessionID, traceID string, snapshot *dao.ChatMessage, sinceSeq uint64, userText ...string) {
 	defer bus.Unsubscribe(sub)
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -496,7 +496,11 @@ func (s *Server) serveChatEvents(c *gin.Context, bus *outbound.MemoryEventBus, s
 		flusher.Flush()
 		return true
 	}
-	if !write(sseStart, map[string]any{"traceId": traceID, "sessionId": sessionID}, 0) {
+	start := map[string]any{"traceId": traceID, "sessionId": sessionID}
+	if len(userText) > 0 {
+		start["userText"] = userText[0]
+	}
+	if !write(sseStart, start, 0) {
 		return
 	}
 	if snapshot != nil {

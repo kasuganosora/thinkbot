@@ -16,6 +16,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/dao"
 )
 
 func TestChatFinalPersistenceFailure_PreservesCanonicalReplyForSlowSubscriber(t *testing.T) {
@@ -232,5 +233,19 @@ func TestChatCollectorRetentionLoss_LifecycleFallbackPreservesRealOutcome(t *tes
 				t.Fatalf("missing incomplete-history warning: %+v", saved)
 			}
 		})
+	}
+}
+
+func TestChatStartReturnsCanonicalUserText(t *testing.T) {
+	env := newChatStreamTestEnv(t)
+	const trace = "normalized-user-text"
+	sub := env.bus.SubscribeWithReplay(trace, 0)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	snapshot := &dao.ChatMessage{Role: "assistant", Content: "done", TraceID: trace, SessionID: env.session}
+	(&Server{chatHistory: env.history}).serveChatEvents(ctx, env.bus, sub, "bot", env.session, trace, snapshot, 0, "{{secret:service}}")
+	if !strings.Contains(recorder.Body.String(), `"userText":"{{secret:service}}"`) {
+		t.Fatalf("missing canonical text: %s", recorder.Body.String())
 	}
 }

@@ -1323,7 +1323,7 @@ async function resumeContinuation(sessionId) {
    * @param {string} content
    */
   function appendToCurrentReply(content) {
-    const text = (content || '').trim()
+    let text = (content || '').trim()
     if (!text) return { accepted: false, reason: '请输入补充内容' }
     if (!replying.value) return sendMessage(text)
     const traceId = _activeTraceId
@@ -1339,6 +1339,10 @@ async function resumeContinuation(sessionId) {
     target.notice = ''
     const completion = chatApi.append(botId, traceId, text, sessionId)
       .then((resp) => {
+        if (typeof resp?.userText === 'string') {
+          text = resp.userText
+          if (stillHere()) messages.value = messages.value.map(m => m.id === userMsg.id ? { ...m, content: text } : m)
+        }
         if (resp?.accepted === true) {
           if (resp.persistenceError) target.notice = '补充已接收，但历史记录保存失败。请复制留存，不必重复发送。'
           return { status: 'accepted', persistenceError: resp.persistenceError }
@@ -1635,6 +1639,7 @@ async function resumeContinuation(sessionId) {
   function sendMessage(content, attachments) {
     if (!activeBot.value || replying.value || messagesLoading.value || sessionsLoading.value || getDraft().pending) return { accepted: false, reason: '当前暂时无法发送，请稍后重试' }
     if (!String(content || '').trim() && !attachments?.length) return { accepted: false, reason: '请输入消息内容' }
+    let recoveryText = content
     const key = draftKey.value
     getDraft(key).notice = ''
     // 新对话开始：清空上一轮工作流面板（task 触发时再重新显示）
@@ -1656,7 +1661,6 @@ async function resumeContinuation(sessionId) {
       _temp: true
     }
     messages.value = [...messages.value, userMsg]
-    maybeAutoTitleActiveSession(content)
 
     const assistantTmpId = uid()
     const acceptsEvents = () => stillHere() && messages.value.find(message => message.id === assistantTmpId)?.streaming !== false
@@ -1681,8 +1685,14 @@ async function resumeContinuation(sessionId) {
     const completion = chatApi.send(botId, content, {
       sessionId: reqSessionId,
       currentSnapshot: () => stillHere() ? messages.value.find(message => message.id === assistantTmpId) : null,
-      onStart: (traceId) => {
+      onStart: (traceId, data = {}) => {
+        if (typeof data.userText === 'string') recoveryText = data.userText
         if (!stillHere()) return
+        if (typeof data.userText === 'string') {
+          messages.value = messages.value.map(message => message.id === userTmpId ? { ...message, content: recoveryText } : message)
+          // Only server-normalized input may become a persisted session title.
+          maybeAutoTitleActiveSession(recoveryText)
+        }
         _activeTraceId = traceId || ''
         messages.value = messages.value.map(message => [userTmpId, assistantTmpId].includes(message.id) ? { ...message, traceId, sessionId: reqSessionId } : message)
       },
@@ -1770,7 +1780,11 @@ async function resumeContinuation(sessionId) {
       })
       .catch((err) => {
         if (err?.name === 'AbortError') return { status: 'interrupted' }
-        recoverFailedSend(key, content, attachments, err.recoverable === false ? '任务未完成，发送内容已保留。请检查错误后再决定是否重发。' : '连接异常，发送内容已保留。任务可能仍在运行，请先重新连接，避免重复发送。')
+        if (typeof err?.userText === 'string') {
+          recoveryText = err.userText
+          if (stillHere()) messages.value = messages.value.map(message => message.id === userTmpId ? { ...message, content: recoveryText } : message)
+        }
+        recoverFailedSend(key, recoveryText, attachments, err.recoverable === false ? '任务未完成，发送内容已保留。请检查错误后再决定是否重发。' : '连接异常，发送内容已保留。任务可能仍在运行，请先重新连接，避免重复发送。')
         if (!stillHere()) return { status: 'unknown' }
         streamError.value = err.message || '回复连接中断，可重新连接获取最新进度'
         if (err.recoverable === false) finalizeStreamMessage(assistantTmpId, err)

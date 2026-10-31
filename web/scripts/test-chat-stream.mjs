@@ -88,3 +88,8 @@ test('concurrent history cursor prevents replaying buffered text and tool events
   assert.equal(current.content, 'ABC')
   assert.equal(result.text, 'ABC')
 })
+
+test('HTTP errors retain only the server-normalized user text for recovery', async () => {
+  const resp = new Response(JSON.stringify({message:'history unavailable', data:{userText:'[密钥已隐藏]'}}), {status:500})
+  await assert.rejects(readChatStream(resp), err => err.userText === '[密钥已隐藏]' && err.httpStatus === 500)
+})
