@@ -28,6 +28,13 @@ func (r *SQLiteRepository) forScope(tx *gorm.DB, scope memory.Scope) *gorm.DB {
 	return r.forScopes(tx, []memory.Scope{scope})
 }
 
+// exactScope preserves the stored classification for maintenance and writes.
+// BotScope expands to all owned scopes only for shared reads via forScope;
+// eviction, compaction and mutation must target the original scope and owner.
+func (r *SQLiteRepository) exactScope(tx *gorm.DB, scope memory.Scope) *gorm.DB {
+	return r.owned(tx).Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID)
+}
+
 func (r *SQLiteRepository) forScopes(tx *gorm.DB, scopes []memory.Scope) *gorm.DB {
 	return scopesForBot(tx, r.config.BotID, scopes)
 }

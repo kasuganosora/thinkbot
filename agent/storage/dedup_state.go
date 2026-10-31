@@ -51,7 +51,7 @@ func isListenScope(scope memory.Scope) bool {
 }
 
 func (r *SQLiteRepository) scopeQuery(ctx context.Context, scope memory.Scope) *gorm.DB {
-	return r.forScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
+	return r.exactScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
 		Where(activeWhere, activeArgs...)
 }
 
@@ -112,7 +112,7 @@ func (r *SQLiteRepository) MarkDedupChecked(ctx context.Context, scope memory.Sc
 	if len(ids) == 0 {
 		return 0
 	}
-	res := r.forScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
+	res := r.exactScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
 		Where("id IN ?", ids).
 		Update("dedup_checked_at", time.Now())
 	if res.Error != nil {
