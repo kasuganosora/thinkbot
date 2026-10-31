@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -71,5 +73,45 @@ func TestCPUApplyReportsDefinitionLoadFailure(t *testing.T) {
 	result = s.ApplySandboxCPULimitAll(context.Background())
 	if result.Failed || result.NeedsRecreate || !result.Applied {
 		t.Fatalf("empty fleet: %+v", result)
+	}
+}
+
+func TestCPUApplyReportsPartialFleet(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=private"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, _ := db.DB()
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.AutoMigrate(&dao.BotDefinition{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"limited", "broken"} {
+		if err := db.Create(&dao.BotDefinition{ID: id, Name: id}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+ version) echo test ;;
+ inspect) case "$*" in *broken*) echo 'daemon unavailable' >&2; exit 1 ;; *) echo '1000000000 2147483648' ;; esac ;;
+ *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	store := config.NewStore(nil)
+	for key, value := range map[string]string{config.KeySandboxCPULimit: "unlimited", config.KeySandboxBackend: "docker", config.KeyWorkspaceDir: t.TempDir()} {
+		if err := store.Set(context.Background(), key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &BotService{db: db, store: store, logger: zap.NewNop().Sugar()}
+	got := s.ApplySandboxCPULimitAll(context.Background())
+	if got.Applied || !got.Failed || !got.NeedsRecreate || len(got.FailedBots) != 1 || got.FailedBots[0] != "broken" {
+		t.Fatalf("partial application lost: %+v", got)
 	}
 }
