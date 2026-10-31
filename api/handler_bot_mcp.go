@@ -85,9 +85,9 @@ func maskMCPEntries(entries []mcp.BotServerEntry) []mcp.BotServerEntry {
 // 让请求失败并提示用户重新填写真实值。
 var ErrMCPMaskUnresolvable = errs.New("masked secret cannot be resolved: no stored value for this key; re-enter the real value")
 
-// mergeMCPSecretMap 把前端回传的 env/headers 应用到条目：敏感键且值为
-// mcpSecretMask 时沿用旧值（用户未改动），避免掩码串把真实凭据写回覆盖；
-// 空字符串仍表示显式清空；旧值不存在的掩码键无法还原，返回 ErrMCPMaskUnresolvable。
+// mergeMCPSecretMap 把前端回传的 env/headers 应用到条目。掩码是保留字，
+// 仅当同一敏感键已有真实值时表示「未改动」；改名到非敏感键也不能把掩码
+// 当成新值保存。空字符串仍表示显式清空。
 func mergeMCPSecretMap(old map[string]string, req map[string]any) (map[string]string, error) {
 	out := make(map[string]string, len(req))
 	for k, val := range req {
@@ -95,9 +95,9 @@ func mergeMCPSecretMap(old map[string]string, req map[string]any) (map[string]st
 		if !ok {
 			continue
 		}
-		if mcp.IsSensitiveConfigKey(k) && s == mcpSecretMask {
+		if s == mcpSecretMask {
 			oldVal, exists := old[k]
-			if !exists {
+			if !mcp.IsSensitiveConfigKey(k) || !exists || oldVal == "" || oldVal == mcpSecretMask {
 				return nil, errs.Wrapf(ErrMCPMaskUnresolvable, "mcp: key %q", k)
 			}
 			out[k] = oldVal
@@ -106,6 +106,19 @@ func mergeMCPSecretMap(old map[string]string, req map[string]any) (map[string]st
 		out[k] = s
 	}
 	return out, nil
+}
+
+// rejectNewMCPMasks rejects copied masked configs: create/import have no original
+// value to preserve. Check every key, including credentials renamed to ordinary keys.
+func rejectNewMCPMasks(maps ...map[string]string) error {
+	for _, values := range maps {
+		for key, value := range values {
+			if value == mcpSecretMask {
+				return errs.Wrapf(ErrMCPMaskUnresolvable, "mcp: key %q", key)
+			}
+		}
+	}
+	return nil
 }
 
 // handleListBotMcp 列出指定 Bot 的 MCP 服务器。
@@ -146,6 +159,11 @@ func (s *Server) handleCreateBotMcp(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body"))
+		return
+	}
+
+	if err := rejectNewMCPMasks(req.Env, req.Headers); err != nil {
+		Fail(c, errs.BadRequest(err.Error()))
 		return
 	}
 
@@ -385,6 +403,11 @@ func (s *Server) handleImportBotMcp(c *gin.Context) {
 			continue
 		}
 
+		if err := rejectNewMCPMasks(cfg.Env, cfg.Headers); err != nil {
+			Fail(c, errs.BadRequest(err.Error()))
+			return
+		}
+
 		tp := cfg.Type
 		if tp == "" {
 			if cfg.URL != "" {
@@ -423,9 +446,14 @@ func (s *Server) handleImportBotMcp(c *gin.Context) {
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		entry = s.syncMCPRuntime(botID, "", entry)
-		servers = append(servers, entry)
 		created = append(created, entry)
+	}
+
+	// Validate the entire import before hot-mounting any server. A bad mask in
+	// a later entry must not leave a partially applied runtime configuration.
+	for i := range created {
+		created[i] = s.syncMCPRuntime(botID, "", created[i])
+		servers = append(servers, created[i])
 	}
 
 	if err := mcp.SaveBotServers(botID, servers); err != nil {
