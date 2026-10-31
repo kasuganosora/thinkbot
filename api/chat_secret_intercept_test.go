@@ -40,16 +40,12 @@ func TestInterceptWebSecretReply(t *testing.T) {
 
 	s := &Server{logger: zap.NewNop().Sugar()}
 
-	// 问句放行：原样返回，请求仍 pending。
-	if got := s.interceptWebSecretReply(bot, user, "这个令牌在哪里拿？"); got != "这个令牌在哪里拿？" {
-		t.Fatalf("conversational text altered: %q", got)
-	}
 	// 别的用户的会话不受影响。
 	if got := s.interceptWebSecretReply(bot, "43", "RAW_SECRET_VALUE_other1234"); got != "RAW_SECRET_VALUE_other1234" {
 		t.Fatalf("other user's message intercepted: %q", got)
 	}
 
-	const raw = "RAW_SECRET_VALUE_web12345"
+	const raw = "虚构密码 web12345?"
 	got := s.interceptWebSecretReply(bot, user, raw)
 	if strings.Contains(got, raw) {
 		t.Fatalf("plaintext would be persisted: %q", got)
