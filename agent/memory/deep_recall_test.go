@@ -2,12 +2,15 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 )
 
 // recallLLM is a stand-in for the on-demand recall model. It never touches a
@@ -20,11 +23,19 @@ type recallLLM struct {
 	blockOnCtx   bool
 	failIfCalled bool
 	tb           testing.TB
+	err          error
+	inspect      func(llm.GenerateParams)
 }
 
 func (p *recallLLM) Name() string { return "recall-test" }
 
 func (p *recallLLM) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	if p.inspect != nil {
+		p.inspect(params)
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
 	if p.failIfCalled && p.tb != nil {
 		p.tb.Errorf("deep recall model was called")
 	}
@@ -497,4 +508,76 @@ func (f *fakeVec) Search(_, query string, _ int) []Hit {
 		return nil
 	}
 	return f.hits[query]
+}
+
+func TestDeepCompleteRedactsBeforeProvider(t *testing.T) {
+	v, _ := secret.New("")
+	prev := secret.Default()
+	secret.SetDefault(v)
+	t.Cleanup(func() { secret.SetDefault(prev) })
+	const raw = "fictional-secret-for-recall"
+	if err := v.Register("bot", "recall", raw, "test"); err != nil {
+		t.Fatal(err)
+	}
+	p := &recallLLM{inspect: func(params llm.GenerateParams) {
+		if strings.Contains(params.System, raw) || strings.Contains(llm.TextFromParts(params.Messages[0].Content), raw) {
+			t.Error("plaintext reached provider")
+		}
+	}}
+	if _, err := deepComplete(context.Background(), DeepRecallConfig{Provider: p}, raw, "memory: "+raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemorySearch_ProviderFailureClosesWithoutRawError(t *testing.T) {
+	tool := deepTool(NewMemoryRepository(), &recallLLM{err: errors.New("private provider diagnostic")}, DeepRecallConfig{})
+	got, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()}, map[string]any{"action": "search"})
+	if err != nil {
+		t.Fatalf("raw error escaped: %v", err)
+	}
+	m := got.(map[string]any)
+	if m["count"] != 0 || m["message"] != deepMsgFailed {
+		t.Fatalf("unexpected closed result: %#v", m)
+	}
+}
+
+func TestCapDeepResultsHonorsSmallBudget(t *testing.T) {
+	for _, cap := range []int{1, 10, 280} {
+		results := capDeepResults([]Entry{{Content: strings.Repeat("字", 2000)}}, 5, cap)
+		if len(results) != 1 || len([]rune(results[0].Content)) > cap {
+			t.Fatalf("result exceeds %d runes", cap)
+		}
+	}
+}
+
+func TestMemorySearch_GroupDeepRecallCannotExpandIntoPrivateScopes(t *testing.T) {
+	repo := NewMemoryRepository()
+	for _, e := range []Entry{
+		{ID: "private", Scope: ChannelScope("dm"), Content: "lighthouse private appointment"},
+		{ID: "mirror", Scope: BotScope("bot"), Content: "lighthouse private mirror"},
+		{ID: "group", Scope: ChannelScope("group"), Content: "lighthouse public release"},
+	} {
+		if err := repo.Append(context.Background(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, kind := range []string{"all", "bot", "channel"} {
+		t.Run(kind, func(t *testing.T) {
+			p := &recallLLM{keywords: `{"keywords":["lighthouse"]}`, refine: `{"keep":["private","mirror","group"]}`, inspect: func(params llm.GenerateParams) {
+				if strings.Contains(llm.TextFromParts(params.Messages[0].Content), "private") {
+					t.Error("private memory sent to group recall model")
+				}
+			}}
+			ctx := agenttools.ContextWithSessionContext(context.Background(), agenttools.ToolSessionContext{ChatType: "supergroup"})
+			ctx = agenttools.ContextWithMessageMeta(ctx, agenttools.MessageMeta{BotID: "bot", ChatID: "group"})
+			got, err := deepTool(repo, p, DeepRecallConfig{}).Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{"action": "search", "scope_kind": kind, "scope_id": "dm"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries := got.(map[string]any)["entries"].([]EntryResult)
+			if len(entries) != 1 || entries[0].ID != "group" {
+				t.Fatalf("wrong group results: %+v", entries)
+			}
+		})
+	}
 }
