@@ -11,6 +11,7 @@ await test('chat conversation and delivery regressions', async (t) => {
   const originalInterval = globalThis.setInterval
   globalThis.setInterval = (...args) => { const timer = originalInterval(...args); timer.unref(); intervals.add(timer); return timer }
   const { useBotStore } = await server.ssrLoadModule('/src/stores/bot.js')
+  const { secretRequestsForMessage } = await server.ssrLoadModule('/src/utils/secretInput.js')
   const { chatApi, sessionApi, workflowApi } = await server.ssrLoadModule('/src/api/services.js')
   const originals = new Map([chatApi, sessionApi, workflowApi].map(api => [api, { ...api }]))
   const stores = []
@@ -33,6 +34,21 @@ await test('chat conversation and delivery regressions', async (t) => {
     return store
   }
   try {
+    await t.test('live secret tool result retains form metadata through normalization and snapshot completion', async () => {
+      const store = await makeStore()
+      const payload = { status: 'requested', input_mode: 'web_form', question_id: 'form-1', name: 'demo', purpose: 'Fictional test', placeholder: '{{secret:demo}}', expires_at: Math.floor(Date.now() / 1000) + 600 }
+      chatApi.send = async (_bot, _text, handlers) => {
+        handlers.onStart('secret-form-trace')
+        handlers.onToolCall({ id: 'secret-call', name: 'secret_input' })
+        handlers.onToolResult('secret-call', { output: { ...payload, unexpectedField: 'must-not-persist' }, status: 'success' })
+        const assistant = store.messages.find(m => m.role === 'assistant' && m.traceId === 'secret-form-trace')
+        assert.deepEqual(secretRequestsForMessage(assistant), [payload])
+        assert(!JSON.stringify(assistant).includes('must-not-persist'))
+        return { traceId: 'secret-form-trace', text: 'Please use the password card.' }
+      }
+      await store.sendMessage('request credential').completion
+      assert.deepEqual(secretRequestsForMessage(store.messages.find(m => m.role === 'assistant' && m.traceId === 'secret-form-trace')), [payload])
+    })
     await t.test('draft text and attachments stay scoped to Bot and session', async () => {
       const store = await makeStore()
       const attachment = { name: 'note.txt', dataUrl: 'data:text/plain;base64,YQ==' }
