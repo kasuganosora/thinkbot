@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"github.com/kasuganosora/thinkbot/config"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"testing"
 )
 
@@ -58,5 +61,18 @@ func TestSandboxMemoryLimit(t *testing.T) {
 					c.mb, got, configured, c.wantValue, c.wantConfig)
 			}
 		})
+	}
+}
+
+func TestEffectiveSandboxCPULimitRestoresDefault(t *testing.T) {
+	store := config.NewStore(nil)
+	svc := &BotService{store: store}
+	for _, tc := range []struct{ raw, want string }{{"16", "16"}, {"", sandbox.DefaultConfig().CPULimit}, {"unlimited", ""}} {
+		if err := store.Set(context.Background(), config.KeySandboxCPULimit, tc.raw); err != nil {
+			t.Fatal(err)
+		}
+		if got := svc.effectiveSandboxCPULimit(); got != tc.want {
+			t.Fatalf("setting %q: got %q, want %q", tc.raw, got, tc.want)
+		}
 	}
 }

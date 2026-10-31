@@ -85,31 +85,34 @@ func TestInterceptSecretReply_NoPendingPassthrough(t *testing.T) {
 	}
 }
 
-// TestInterceptSecretReply_ConversationPassesThrough 明显在说话的回复（中文、问句）
-// 放行给 LLM，请求保持 pending，用户下一条才被当成密钥。
-func TestInterceptSecretReply_ConversationPassesThrough(t *testing.T) {
-	v := withTestVault(t)
-	registerSecretRequest(t, "si-test-2", "bot-test", "chat-conv", "svc.token")
-
-	for _, text := range []string{"token 在哪里拿？", "这个是干什么用的", "where do I find it?"} {
-		msg := &core.Message{BotID: "bot-test", Channel: "chat-conv", Text: text}
-		if _, ok := InterceptSecretReply(msg); ok {
-			t.Fatalf("conversational reply %q was swallowed as a secret", text)
-		}
-		if msg.Text != text {
-			t.Fatalf("passthrough altered text: %q", msg.Text)
-		}
+func TestInterceptSecretReply_UnicodeAndPassphrases(t *testing.T) {
+	for _, raw := range []string{"虚构密码测试-123456", "仮のパスワード123456", "가상암호123456", "is this a fictional password?", "短？"} {
+		t.Run(raw, func(t *testing.T) {
+			v := withTestVault(t)
+			registerSecretRequest(t, "si-unicode", "bot-test", "chat-unicode", "svc.token")
+			msg := &core.Message{BotID: "bot-test", Channel: "chat-unicode", Text: raw}
+			if _, ok := InterceptSecretReply(msg); !ok || strings.Contains(msg.Text, raw) {
+				t.Fatalf("pending reply was not protected: %q", msg.Text)
+			}
+			if len(raw) >= secret.MinValueLen {
+				if got, _ := v.Get("bot-test", "svc.token"); got != raw {
+					t.Fatal("secret not registered")
+				}
+			}
+		})
 	}
-	// 插话中断（Ingress 里紧随其后）不能把非阻塞的密钥请求一并清掉。
-	interaction.Default().InterruptBySession("bot-test", "chat-conv")
+}
 
-	const raw = "ghp_ExampleTokenValue123456"
-	msg := &core.Message{BotID: "bot-test", Channel: "chat-conv", Text: raw}
-	if _, ok := InterceptSecretReply(msg); !ok {
-		t.Fatal("real secret after a question was not intercepted")
+func TestInterceptSecretReply_EmptyReplyKeepsRequest(t *testing.T) {
+	withTestVault(t)
+	registerSecretRequest(t, "si-empty", "bot-test", "chat-empty", "svc.token")
+	msg := &core.Message{BotID: "bot-test", Channel: "chat-empty", Text: "  "}
+	if _, ok := InterceptSecretReply(msg); ok {
+		t.Fatal("empty reply consumed request")
 	}
-	if got, _ := v.Get("bot-test", "svc.token"); got != raw {
-		t.Fatalf("vault value = %q, want %q", got, raw)
+	interaction.Default().InterruptBySession("bot-test", "chat-empty")
+	if !interaction.Default().HasPendingSecret("bot-test", "chat-empty") {
+		t.Fatal("request lost")
 	}
 }
 
@@ -156,23 +159,5 @@ func TestInterceptSecretReply_UsesRawCandidate(t *testing.T) {
 	}
 	if strings.Contains(msg.Text, raw) {
 		t.Fatalf("plaintext leaked: %q", msg.Text)
-	}
-}
-
-func TestLooksLikeConversation(t *testing.T) {
-	cases := map[string]bool{
-		"":                            true,
-		"在哪里拿":                        true,
-		"トークン":                        true,
-		"how do I get this?":          true,
-		"ghp_ExampleTokenValue123456": false,
-		"sk-abc?def":                  false, // 无空格：像 token
-		"pa ss wo rd with spaces":     false, // 有空格但不是问句、无 CJK：按密钥处理
-		"Bearer abc.def.ghi":          false,
-	}
-	for in, want := range cases {
-		if got := looksLikeConversation(in); got != want {
-			t.Errorf("looksLikeConversation(%q) = %v, want %v", in, got, want)
-		}
 	}
 }
