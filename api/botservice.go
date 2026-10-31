@@ -2473,8 +2473,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 取代此前硬编码的 2200，与 context.go 使用 window 模块的口径一致。
 	// 复合召回：L3 画像 → L1 蒸馏 → memory_entries 原始笔记。高价值源排最前，
 	// 确保 Snapshot 字符预算截断时画像/项目事实不被丢弃；按内容去重避免重复计权。
-	tieredL1 := storage.NewTieredL1Retriever(s.db)
-	tieredL3 := storage.NewTieredProfileRetriever(s.db)
+	tieredL1 := storage.NewTieredL1Retriever(s.db, id)
+	tieredL3 := storage.NewTieredProfileRetriever(s.db, id)
 	mergedRecall := storage.NewMergedRetriever(tieredL3, tieredL1, memRepo)
 	// 窗口外补充通道专用检索源：额外包含 L0（原始事件层）。
 	//
@@ -2487,7 +2487,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	//
 	// 长期方案不在召回侧：L0 该由 dreaming 升华成 L1，升华后自然走主通道。
 	// 这里的 L0 检索器只是升华能力就位前的过渡手段，别在召回侧继续加码。
-	tieredL0 := storage.NewTieredL0Retriever(s.db)
+	tieredL0 := storage.NewTieredL0Retriever(s.db, id)
 	mergedBeyond := storage.NewMergedRetriever(tieredL3, tieredL1, tieredL0, memRepo)
 	// 相关性召回默认关闭（灰度开关 THINKBOT_MEMORY_RELEVANCE_RECALL）：
 	// 主通道每 scope 只取最近 50 条，本机 misskey timeline scope 有 2472 条，

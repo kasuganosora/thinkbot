@@ -2,12 +2,78 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/dao"
 )
+
+func TestTieredRetrievers_BotOwnershipAndOriginalScopes(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	for _, tier := range []int{0, 1, 3} {
+		rows := []dao.TieredMemoryModel{
+			{ScopeKind: "user", ScopeID: "shared-user", MetadataJSON: `{"bot_id":"a"}`},
+			{ScopeKind: "channel", ScopeID: "shared-channel", MetadataJSON: `{"bot_id":"a"}`},
+			{ScopeKind: "bot", ScopeID: "a"}, // explicitly owned legacy row
+			{ScopeKind: "user", ScopeID: "shared-user", MetadataJSON: `{"bot_id":"b"}`},
+			{ScopeKind: "channel", ScopeID: "shared-channel", MetadataJSON: `{"bot_id":"b"}`},
+			{ScopeKind: "user", ScopeID: "shared-user"}, // unattributed legacy
+			{ScopeKind: "bot", ScopeID: "b", MetadataJSON: `{"bot_id":"a"}`},
+			{ScopeKind: "bot", ScopeID: "a", MetadataJSON: `{"bot_id":"b"}`},
+			{ScopeKind: "user", ScopeID: "shared-user", MetadataJSON: `{"nested":{"bot_id":"a"}}`},
+		}
+		for i := range rows {
+			rows[i].ID = fmt.Sprintf("tier-%d-row-%d", tier, i)
+			rows[i].Content = rows[i].ID
+			rows[i].Tier = tier
+			rows[i].CreatedAt = time.Now().Add(time.Duration(i) * time.Second)
+		}
+		if err := db.Create(&rows).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, r := range []*TieredL1Retriever{NewTieredL0Retriever(db, "a"), NewTieredL1Retriever(db, "a"), NewTieredProfileRetriever(db, "a")} {
+		t.Run(fmt.Sprintf("tier-%d", r.tier), func(t *testing.T) {
+			if r.BoundBotID() != "a" {
+				t.Fatal("missing trusted owner")
+			}
+			for _, query := range []memory.Query{{}, {Scopes: []memory.Scope{memory.BotScope("a")}}, {Scopes: []memory.Scope{{Kind: memory.ScopeAll}}}} {
+				got, err := r.Retrieve(ctx, query)
+				if err != nil || len(got) != 3 {
+					t.Fatalf("bot-wide retrieve: got %+v, err %v", got, err)
+				}
+				for _, e := range got {
+					if e.ID != fmt.Sprintf("tier-%d-row-0", r.tier) && e.ID != fmt.Sprintf("tier-%d-row-1", r.tier) && e.ID != fmt.Sprintf("tier-%d-row-2", r.tier) {
+						t.Fatalf("foreign, unattributed or wrong-tier entry: %+v", e)
+					}
+				}
+			}
+			got, err := r.Recent(ctx, memory.BotScope("a"), 1)
+			if err != nil || len(got) != 1 || got[0].ID != fmt.Sprintf("tier-%d-row-2", r.tier) {
+				t.Fatalf("ownership must precede limit: %+v, %v", got, err)
+			}
+			for _, scope := range []memory.Scope{memory.UserScope("shared-user"), memory.ChannelScope("shared-channel")} {
+				got, err := r.Recent(ctx, scope, 100)
+				if err != nil || len(got) != 1 || got[0].Scope != scope {
+					t.Fatalf("original profile category must remain exact: %+v, %v", got, err)
+				}
+				if count, err := r.Count(ctx, scope); err != nil || count != 1 {
+					t.Fatalf("scoped count = %d, %v", count, err)
+				}
+			}
+			if count, err := r.Count(ctx, memory.BotScope("a")); err != nil || count != 3 {
+				t.Fatalf("bot count = %d, %v", count, err)
+			}
+			got, err = r.Retrieve(ctx, memory.Query{Scopes: []memory.Scope{memory.BotScope("b")}})
+			if err != nil || len(got) != 0 {
+				t.Fatalf("foreign bot scope: %+v, %v", got, err)
+			}
+		})
+	}
+}
 
 // fakeRetriever 是 memory.Retriever 的内存桩，按构造时给定的条目响应，
 // 用于无 DB 验证 MergedRetriever 的合并 / 优先级 / 去重逻辑。

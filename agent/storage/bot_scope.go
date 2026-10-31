@@ -14,7 +14,10 @@ const metadataBotID = "(CASE WHEN json_valid(metadata_json) THEN json_extract(me
 func (r *SQLiteRepository) BoundBotID() string { return r.config.BotID }
 
 func (r *SQLiteRepository) owned(tx *gorm.DB) *gorm.DB {
-	bot := r.config.BotID
+	return ownedByBot(tx, r.config.BotID)
+}
+
+func ownedByBot(tx *gorm.DB, bot string) *gorm.DB {
 	if bot == "" {
 		return tx
 	}
@@ -26,16 +29,20 @@ func (r *SQLiteRepository) forScope(tx *gorm.DB, scope memory.Scope) *gorm.DB {
 }
 
 func (r *SQLiteRepository) forScopes(tx *gorm.DB, scopes []memory.Scope) *gorm.DB {
-	tx = r.owned(tx)
+	return scopesForBot(tx, r.config.BotID, scopes)
+}
+
+func scopesForBot(tx *gorm.DB, bot string, scopes []memory.Scope) *gorm.DB {
+	tx = ownedByBot(tx, bot)
 	if len(scopes) == 0 {
 		return tx
 	}
-	if r.config.BotID == "" {
+	if bot == "" {
 		return tx.Where("(scope_kind, scope_id) IN ?", scopeConditions(scopes))
 	}
 	var allowed []memory.Scope
 	for _, scope := range scopes {
-		if scope.Kind == memory.ScopeAll || (scope.Kind == memory.ScopeBot && scope.ID == r.config.BotID) {
+		if scope.Kind == memory.ScopeAll || (scope.Kind == memory.ScopeBot && scope.ID == bot) {
 			return tx
 		}
 		if scope.Kind != memory.ScopeBot {
