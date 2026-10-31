@@ -67,6 +67,7 @@ fall back to ` + "`recent`" + ` or ` + "`count`" + ` to see what is actually sto
 Omit ` + "`query`" + `, and do not pass ` + "`order`" + ` / ` + "`since`" + ` / ` + "`until`" + `, when you need related memories
 that are not already in the visible conversation. That call runs a heavier recall loop: it reads
 about the last four turns, expands keywords, searches, and returns a short refined set for this turn.
+In group chats, deep recall only searches the current group, regardless of the requested scope.
 It is capped (once per turn, a timeout, and a small result). If it returns a short error, pass an
 explicit ` + "`query`" + ` instead. Do not call this form on every turn.
 
