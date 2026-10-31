@@ -55,6 +55,8 @@ var (
 
 // SQLiteRepositoryConfig 配置 SQLite 记忆仓储。
 type SQLiteRepositoryConfig struct {
+	// BotID binds this repository to one bot. Empty is reserved for offline/app maintenance.
+	BotID string
 	// MaxEntriesPerScope 每个 scope 的最大记忆条目数（默认 1000）。
 	// 超过时先删已归档条目，再压缩/淘汰最旧活跃条目；每日摘要不计数、不淘汰。
 	// 对应配置键 memory.max_entries_per_scope。
@@ -185,6 +187,7 @@ func NewSQLiteRepository(db *gorm.DB, opts ...SQLiteRepositoryConfig) *SQLiteRep
 	cfg := DefaultSQLiteRepositoryConfig()
 	if len(opts) > 0 {
 		o := opts[0]
+		cfg.BotID = o.BotID
 		if o.MaxEntriesPerScope > 0 {
 			cfg.MaxEntriesPerScope = o.MaxEntriesPerScope
 		}
@@ -262,7 +265,19 @@ func (r *SQLiteRepository) StartVecBackfill(logger *zap.SugaredLogger) {
 	if r == nil || r.db == nil || !r.vec.Enabled() {
 		return
 	}
-	if _, loaded := vecBackfillDone.LoadOrStore(r.db, struct{}{}); loaded {
+	var key any = r.db
+	if r.config.BotID != "" {
+		// App-wide backfill already covers every owner; otherwise each bot must
+		// backfill its own rows rather than the first bot suppressing all others.
+		if _, done := vecBackfillDone.Load(r.db); done {
+			return
+		}
+		key = struct {
+			db    *gorm.DB
+			botID string
+		}{r.db, r.config.BotID}
+	}
+	if _, loaded := vecBackfillDone.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
 	go func() {
@@ -283,7 +298,7 @@ func (r *SQLiteRepository) backfillVec(ctx context.Context, logger *zap.SugaredL
 		return memory.VecBackfillStats{}, nil
 	}
 	var models []dao.EntryModel
-	if err := r.db.WithContext(ctx).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
+	if err := r.owned(r.db.WithContext(ctx)).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
 		if logger != nil {
 			logger.Errorw(memory.VecBackfillErrorEvent, "table", "memory_entries", "stage", "load", "err", err)
 		}
@@ -322,6 +337,11 @@ func (r *SQLiteRepository) CompactScope(ctx context.Context, scope memory.Scope)
 
 // Append 追加一条记忆到指定 scope。
 func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error {
+	var err error
+	entry, err = r.ownedEntry(entry)
+	if err != nil {
+		return err
+	}
 	// 自动填充默认值
 	if entry.ID == "" {
 		entry.ID = idgen.New("mem")
@@ -368,14 +388,16 @@ func (r *SQLiteRepository) Append(ctx context.Context, entry memory.Entry) error
 // Delete 按 ID 删除指定 scope 下的一条记忆。
 func (r *SQLiteRepository) Delete(ctx context.Context, scope memory.Scope, entryID string) error {
 	var existing dao.EntryModel
-	_ = r.db.WithContext(ctx).
-		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
+	_ = r.forScope(r.db.WithContext(ctx), scope).Where("id = ?", entryID).
 		First(&existing).Error
 	if existing.Content != "" {
-		memory.RecordExternalTombstone(r.db, scope, existing.Content, existing.Source)
+		tombstoneScope := scope
+		if r.config.BotID != "" {
+			tombstoneScope = memory.BotScope(r.config.BotID)
+		}
+		memory.RecordExternalTombstone(r.db, tombstoneScope, existing.Content, existing.Source)
 	}
-	result := r.db.WithContext(ctx).
-		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
+	result := r.forScope(r.db.WithContext(ctx), scope).Where("id = ?", entryID).
 		Delete(&dao.EntryModel{})
 
 	if result.Error != nil {
@@ -409,19 +431,25 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 		newEntry.LastAccessedAt = newEntry.CreatedAt
 	}
 	newEntry.Scope = scope
+	var err error
+	newEntry, err = r.ownedEntry(newEntry)
+	if err != nil {
+		return err
+	}
 
 	model := entryToModel(newEntry)
 
 	var deleted int64
 	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if deleteID != "" {
-			res := tx.Where("id = ? AND scope_kind = ? AND scope_id = ?",
-				deleteID, string(scope.Kind), scope.ID).
-				Delete(&dao.EntryModel{})
+			res := r.forScope(tx, scope).Where("id = ?", deleteID).Delete(&dao.EntryModel{})
 			if res.Error != nil {
 				return res.Error
 			}
 			deleted = res.RowsAffected
+			if r.config.BotID != "" && deleted == 0 {
+				return errs.New("sqlite_repository: replacement source not found in this bot")
+			}
 		}
 		return tx.Create(&model).Error
 	}); err != nil {
@@ -433,7 +461,7 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 	}
 	r.entriesAppended.Add(1)
 	if r.vec.Enabled() {
-		if deleteID != "" && deleteID != newEntry.ID {
+		if deleted > 0 && deleteID != "" && deleteID != newEntry.ID {
 			r.vec.Delete(deleteID)
 		}
 		r.vec.Upsert(scope.Key(), newEntry.ID, newEntry.Content)
@@ -459,8 +487,7 @@ func (r *SQLiteRepository) Replace(ctx context.Context, scope memory.Scope, dele
 
 // Clear 清空指定 scope 的所有记忆。
 func (r *SQLiteRepository) Clear(ctx context.Context, scope memory.Scope) error {
-	result := r.db.WithContext(ctx).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
+	result := r.forScope(r.db.WithContext(ctx), scope).
 		Delete(&dao.EntryModel{})
 
 	if result.Error != nil {
@@ -485,11 +512,11 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		limit = r.config.DefaultLimit
 	}
 
-	tx := r.db.WithContext(ctx).Model(&dao.EntryModel{})
+	tx := r.owned(r.db.WithContext(ctx)).Model(&dao.EntryModel{})
 
 	// Scope 过滤
 	if len(query.Scopes) > 0 {
-		tx = tx.Where("(scope_kind, scope_id) IN ?", scopeConditions(query.Scopes))
+		tx = r.forScopes(tx, query.Scopes)
 	}
 
 	// Category 过滤
@@ -502,6 +529,14 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		tx = tx.Where("importance >= ?", query.MinImportance)
 	}
 
+	// 时间范围过滤（闭区间）
+	if !query.Since.IsZero() {
+		tx = tx.Where("created_at >= ?", query.Since)
+	}
+	if !query.Until.IsZero() {
+		tx = tx.Where("created_at <= ?", query.Until)
+	}
+
 	// 文本：sqlite-vec 可用时按 scope 近邻取回，失败或未启用则子串。
 	if query.Text != "" && r.vec.Enabled() && len(query.Scopes) > 0 {
 		ids := make([]string, 0, limit)
@@ -512,21 +547,13 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		}
 		if len(ids) > 0 {
 			var models []dao.EntryModel
-			if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&models).Error; err == nil && len(models) > 0 {
+			if err := tx.Session(&gorm.Session{}).Where("id IN ?", ids).Limit(limit).Find(&models).Error; err == nil && len(models) > 0 {
 				return modelsToEntries(models), nil
 			}
 		}
 	}
 	if query.Text != "" {
 		tx = tx.Where("content LIKE ?", "%"+query.Text+"%")
-	}
-
-	// 时间范围过滤（闭区间）
-	if !query.Since.IsZero() {
-		tx = tx.Where("created_at >= ?", query.Since)
-	}
-	if !query.Until.IsZero() {
-		tx = tx.Where("created_at <= ?", query.Until)
 	}
 
 	// 排序 + limit：默认倒序（最新在前），order=asc 时升序（最早在前）。
@@ -554,7 +581,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 			go func() {
 				updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				r.db.WithContext(updateCtx).Model(&dao.EntryModel{}).Where("id IN ?", due).
+				r.owned(r.db.WithContext(updateCtx)).Model(&dao.EntryModel{}).Where("id IN ?", due).
 					Update("last_accessed_at", time.Now())
 			}()
 		}
@@ -572,8 +599,7 @@ func (r *SQLiteRepository) Recent(ctx context.Context, scope memory.Scope, limit
 	}
 
 	var models []dao.EntryModel
-	err := r.db.WithContext(ctx).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
+	err := r.forScope(r.db.WithContext(ctx), scope).
 		Order("created_at DESC").
 		Limit(limit).
 		Find(&models).Error
@@ -588,8 +614,7 @@ func (r *SQLiteRepository) Recent(ctx context.Context, scope memory.Scope, limit
 // Count 返回指定 scope 的记忆总数。
 func (r *SQLiteRepository) Count(ctx context.Context, scope memory.Scope) (int, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
+	err := r.forScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
 		Count(&count).Error
 
 	if err != nil {
@@ -604,9 +629,9 @@ func (r *SQLiteRepository) Count(ctx context.Context, scope memory.Scope) (int, 
 // scopes 为空表示统计全库 —— 「我最早的记忆是什么时候」这类问题必须跨 scope 统计，
 // 否则在当前会话 scope 里算出的「最早」只是该频道的起点，不是 bot 的起点。
 func (r *SQLiteRepository) MemoryStats(ctx context.Context, scopes []memory.Scope) (memory.MemoryStatsInfo, error) {
-	tx := r.db.WithContext(ctx).Model(&dao.EntryModel{})
+	tx := r.owned(r.db.WithContext(ctx)).Model(&dao.EntryModel{})
 	if len(scopes) > 0 {
-		tx = tx.Where("(scope_kind, scope_id) IN ?", scopeConditions(scopes))
+		tx = r.forScopes(tx, scopes)
 	}
 
 	// MIN/MAX 作用在 datetime(created_at) 上而非原始列：
@@ -671,10 +696,10 @@ func scopeConditions(scopes []memory.Scope) [][]interface{} {
 // Metrics 返回当前指标快照。
 func (r *SQLiteRepository) Metrics() memory.RepositoryMetrics {
 	var totalEntries int64
-	r.db.Model(&dao.EntryModel{}).Count(&totalEntries)
+	r.owned(r.db).Model(&dao.EntryModel{}).Count(&totalEntries)
 
 	var totalScopes int64
-	r.db.Model(&dao.EntryModel{}).Distinct("scope_kind", "scope_id").Count(&totalScopes)
+	r.owned(r.db).Model(&dao.EntryModel{}).Distinct("scope_kind", "scope_id").Count(&totalScopes)
 
 	return memory.RepositoryMetrics{
 		TotalScopes:     int(totalScopes),
@@ -720,8 +745,7 @@ func (r *SQLiteRepository) evictIfNeeded(ctx context.Context, scope memory.Scope
 		return
 	}
 	base := func() *gorm.DB {
-		return r.db.WithContext(ctx).Model(&dao.EntryModel{}).
-			Where(evictWhereScope, string(scope.Kind), scope.ID, DailyDigestSource)
+		return r.forScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).Where("(source IS NULL OR source <> ?)", DailyDigestSource)
 	}
 
 	var total int64
@@ -784,7 +808,7 @@ func (r *SQLiteRepository) deleteEvicted(ctx context.Context, scope memory.Scope
 	if len(ids) == 0 {
 		return
 	}
-	result := r.db.WithContext(ctx).Where("id IN ?", ids).Delete(&dao.EntryModel{})
+	result := r.owned(r.db.WithContext(ctx)).Where("id IN ?", ids).Delete(&dao.EntryModel{})
 	if result.Error != nil {
 		r.log().Warnw("memory eviction: delete failed", "scope", scope.Key(), "kind", kind, "error", result.Error)
 		return
@@ -900,9 +924,7 @@ func (r *SQLiteRepository) warnZeroBudget(ctx context.Context, scope memory.Scop
 // 用于判断是否需要触发压缩。归档条目（archived=true）不计入。
 func (r *SQLiteRepository) totalChars(ctx context.Context, scope memory.Scope) (int, error) {
 	var models []dao.EntryModel
-	if err := r.db.WithContext(ctx).
-		Where("scope_kind = ? AND scope_id = ? AND (metadata_json IS NULL OR (metadata_json NOT LIKE ? AND metadata_json NOT LIKE ?))",
-			string(scope.Kind), scope.ID, "%\"archived\":true%", "%\"compact_skipped\":true%").
+	if err := r.forScope(r.db.WithContext(ctx), scope).Where(activeWhere, activeArgs...).
 		Find(&models).Error; err != nil {
 		return 0, errs.Wrap(err, "sqlite_repository: totalChars failed")
 	}
@@ -917,8 +939,7 @@ func (r *SQLiteRepository) totalChars(ctx context.Context, scope memory.Scope) (
 // 供压缩器读取待合并的来源。
 func (r *SQLiteRepository) GetAllActive(ctx context.Context, scope memory.Scope) ([]memory.Entry, error) {
 	var models []dao.EntryModel
-	if err := r.db.WithContext(ctx).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
+	if err := r.forScope(r.db.WithContext(ctx), scope).
 		Order("created_at ASC").
 		Find(&models).Error; err != nil {
 		return nil, errs.Wrap(err, "sqlite_repository: get all active failed")
@@ -943,8 +964,7 @@ func (r *SQLiteRepository) GetAllActive(ctx context.Context, scope memory.Scope)
 // 压缩后的来源条目通过此方法归档，避免重复记忆持续累积。
 func (r *SQLiteRepository) ArchiveByID(ctx context.Context, scope memory.Scope, entryID string) bool {
 	var model dao.EntryModel
-	if err := r.db.WithContext(ctx).
-		Where("id = ? AND scope_kind = ? AND scope_id = ?", entryID, string(scope.Kind), scope.ID).
+	if err := r.forScope(r.db.WithContext(ctx), scope).Where("id = ?", entryID).
 		First(&model).Error; err != nil {
 		return false
 	}
@@ -965,7 +985,7 @@ func (r *SQLiteRepository) ArchiveByID(ctx context.Context, scope memory.Scope, 
 	if err != nil {
 		return false
 	}
-	if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
+	if err := r.owned(r.db.WithContext(ctx)).Model(&dao.EntryModel{}).
 		Where("id = ?", entryID).
 		Update("metadata_json", string(b)).Error; err != nil {
 		return false
@@ -1001,8 +1021,7 @@ func (r *SQLiteRepository) MarkCompactSkipped(ctx context.Context, scope memory.
 	count := 0
 	for _, e := range entries {
 		var model dao.EntryModel
-		if err := r.db.WithContext(ctx).
-			Where("id = ? AND scope_kind = ? AND scope_id = ?", e.ID, string(scope.Kind), scope.ID).
+		if err := r.forScope(r.db.WithContext(ctx), scope).Where("id = ?", e.ID).
 			First(&model).Error; err != nil {
 			continue
 		}
@@ -1024,7 +1043,7 @@ func (r *SQLiteRepository) MarkCompactSkipped(ctx context.Context, scope memory.
 		if err != nil {
 			continue
 		}
-		if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
+		if err := r.owned(r.db.WithContext(ctx)).Model(&dao.EntryModel{}).
 			Where("id = ?", e.ID).
 			Update("metadata_json", string(b)).Error; err != nil {
 			continue
@@ -1181,7 +1200,7 @@ func (r *SQLiteRepository) FetchEntries(ctx context.Context, ids []string) ([]me
 		return nil, nil
 	}
 	var models []dao.EntryModel
-	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&models).Error; err != nil {
+	if err := r.owned(r.db.WithContext(ctx)).Where("id IN ?", ids).Find(&models).Error; err != nil {
 		return nil, errs.Wrap(err, "sqlite_repository: fetch by id")
 	}
 	out := make([]memory.Entry, 0, len(models))

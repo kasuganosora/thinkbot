@@ -1960,6 +1960,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		MaxSeedsPerRun:         s.storeInt(config.KeyMemoryDedupMaxSeeds, storage.DefaultDedupMaxSeeds),
 	}, s.logger)
 	memRepo := storage.NewSQLiteRepository(s.db, storage.SQLiteRepositoryConfig{
+		BotID:              id,
 		Window:             memWindow,
 		Compactor:          memCompactor,
 		DedupTriggerNew:    s.storeInt(config.KeyMemoryDedupTriggerNew, storage.DefaultDedupTriggerNew),

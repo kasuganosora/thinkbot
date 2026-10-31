@@ -232,7 +232,7 @@ func (d *DailyDigester) DayNotes(ctx context.Context, scope memory.Scope, day ti
 		Where("source = ?", "note").
 		Where("substr(CAST(created_at AS TEXT), 1, 10) >= ? AND substr(CAST(created_at AS TEXT), 1, 10) < ?", lo, hi)
 	if d.cfg.BotID != "" {
-		q = q.Where("metadata_json LIKE ?", "%\"bot_id\":\""+d.cfg.BotID+"\"%")
+		q = q.Where(metadataBotID+" = ?", d.cfg.BotID)
 	}
 	var cands []struct {
 		ID        string `gorm:"column:id"`
@@ -261,7 +261,7 @@ func (d *DailyDigester) DayNotes(ctx context.Context, scope memory.Scope, day ti
 			j = len(ids)
 		}
 		var part []dao.EntryModel
-		if err := d.repo.db.WithContext(ctx).Where("id IN ?", ids[i:j]).Find(&part).Error; err != nil {
+		if err := d.repo.owned(d.repo.db.WithContext(ctx)).Where("id IN ?", ids[i:j]).Find(&part).Error; err != nil {
 			return nil, err
 		}
 		models = append(models, part...)
@@ -288,7 +288,7 @@ func (d *DailyDigester) digestDay(ctx context.Context, scope memory.Scope, day t
 	date := day.Format("2006-01-02")
 	id := digestID(d.cfg.BotID, scope, date)
 	var exists int64
-	d.repo.db.WithContext(ctx).Model(&dao.EntryModel{}).Where("id = ?", id).Count(&exists)
+	d.repo.owned(d.repo.db.WithContext(ctx)).Model(&dao.EntryModel{}).Where("id = ?", id).Count(&exists)
 	if exists > 0 {
 		return nil // already digested (idempotent)
 	}

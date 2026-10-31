@@ -51,8 +51,7 @@ func isListenScope(scope memory.Scope) bool {
 }
 
 func (r *SQLiteRepository) scopeQuery(ctx context.Context, scope memory.Scope) *gorm.DB {
-	return r.db.WithContext(ctx).Model(&dao.EntryModel{}).
-		Where("scope_kind = ? AND scope_id = ?", string(scope.Kind), scope.ID).
+	return r.forScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
 		Where(activeWhere, activeArgs...)
 }
 
@@ -113,8 +112,8 @@ func (r *SQLiteRepository) MarkDedupChecked(ctx context.Context, scope memory.Sc
 	if len(ids) == 0 {
 		return 0
 	}
-	res := r.db.WithContext(ctx).Model(&dao.EntryModel{}).
-		Where("scope_kind = ? AND scope_id = ? AND id IN ?", string(scope.Kind), scope.ID, ids).
+	res := r.forScope(r.db.WithContext(ctx).Model(&dao.EntryModel{}), scope).
+		Where("id IN ?", ids).
 		Update("dedup_checked_at", time.Now())
 	if res.Error != nil {
 		return 0
@@ -124,6 +123,7 @@ func (r *SQLiteRepository) MarkDedupChecked(ctx context.Context, scope memory.Sc
 
 // lastDedupRun returns the persisted time of the last automatic dedup pass.
 func (r *SQLiteRepository) lastDedupRun(ctx context.Context, key string) (time.Time, bool) {
+	key = r.dedupStateKey(key)
 	if v, ok := r.lastCompact.Load(key); ok {
 		if t, ok := v.(time.Time); ok {
 			return t, true
@@ -139,6 +139,7 @@ func (r *SQLiteRepository) lastDedupRun(ctx context.Context, key string) (time.T
 
 // storeDedupRun persists the time of an automatic dedup pass.
 func (r *SQLiteRepository) storeDedupRun(ctx context.Context, key string, t time.Time) {
+	key = r.dedupStateKey(key)
 	r.lastCompact.Store(key, t)
 	_ = r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "scope_key"}},
