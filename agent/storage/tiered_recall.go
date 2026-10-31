@@ -33,19 +33,20 @@ import (
 var _ memory.Retriever = (*TieredL1Retriever)(nil)
 
 type TieredL1Retriever struct {
-	db   *gorm.DB
-	tier int
+	db    *gorm.DB
+	tier  int
+	botID string
 }
 
 // NewTieredL1Retriever 创建 L1 检索器。
 // db 必须是已迁移过的 GORM 实例（调用过 dao.Migrate，含 TieredMemoryModel）。
-func NewTieredL1Retriever(db *gorm.DB) *TieredL1Retriever {
-	return &TieredL1Retriever{db: db, tier: 1}
+func NewTieredL1Retriever(db *gorm.DB, botID ...string) *TieredL1Retriever {
+	return newTieredRetriever(db, 1, botID)
 }
 
 // NewTieredProfileRetriever 创建 L3 画像检索器，供召回时把用户/Bot 画像注入 prompt。
-func NewTieredProfileRetriever(db *gorm.DB) *TieredL1Retriever {
-	return &TieredL1Retriever{db: db, tier: 3}
+func NewTieredProfileRetriever(db *gorm.DB, botID ...string) *TieredL1Retriever {
+	return newTieredRetriever(db, 3, botID)
 }
 
 // NewTieredL0Retriever 创建 L0 检索器（原始事件层）。
@@ -59,9 +60,21 @@ func NewTieredProfileRetriever(db *gorm.DB) *TieredL1Retriever {
 // L0 是未升华的原始事件流（本机 2000+ 条），不能直接并进主召回通道，否则会把
 // 碎碎念灌进 prompt。它只用于「窗口外补充召回」这一条受控路径：
 // 该路径默认关闭，且只取 importance 达标 + 与当前话题相关的少数几条。
-func NewTieredL0Retriever(db *gorm.DB) *TieredL1Retriever {
-	return &TieredL1Retriever{db: db, tier: 0}
+func NewTieredL0Retriever(db *gorm.DB, botID ...string) *TieredL1Retriever {
+	return newTieredRetriever(db, 0, botID)
 }
+
+// Production callers must supply the trusted bot ID. Omission is reserved for
+// offline maintenance and legacy tests, matching SQLiteRepository's contract.
+func newTieredRetriever(db *gorm.DB, tier int, botIDs []string) *TieredL1Retriever {
+	r := &TieredL1Retriever{db: db, tier: tier}
+	if len(botIDs) > 0 {
+		r.botID = botIDs[0]
+	}
+	return r
+}
+
+func (r *TieredL1Retriever) BoundBotID() string { return r.botID }
 
 func (r *TieredL1Retriever) queryTier() int {
 	// 注意：tier=0 是合法值（L0），只有 nil 时才回退到 L1。
@@ -72,13 +85,12 @@ func (r *TieredL1Retriever) queryTier() int {
 }
 
 // Recent 返回指定 scope 最近的 N 条该层级记忆（按时间倒序）。
-func (r *TieredL1Retriever) Recent(_ context.Context, scope memory.Scope, limit int) ([]memory.Entry, error) {
+func (r *TieredL1Retriever) Recent(ctx context.Context, scope memory.Scope, limit int) ([]memory.Entry, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	var models []dao.TieredMemoryModel
-	err := r.db.
-		Where("tier = ? AND scope_kind = ? AND scope_id = ?", r.queryTier(), string(scope.Kind), scope.ID).
+	err := scopesForBot(r.db.WithContext(ctx), r.botID, []memory.Scope{scope}).Where("tier = ?", r.queryTier()).
 		Order("created_at DESC").
 		Limit(limit).
 		Find(&models).Error
@@ -89,12 +101,12 @@ func (r *TieredL1Retriever) Recent(_ context.Context, scope memory.Scope, limit 
 }
 
 // Retrieve 按查询条件检索该层级记忆（scope / category / 文本 过滤）。
-func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]memory.Entry, error) {
+func (r *TieredL1Retriever) Retrieve(ctx context.Context, query memory.Query) ([]memory.Entry, error) {
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 200
 	}
-	tx := r.db.Model(&dao.TieredMemoryModel{}).Where("tier = ?", r.queryTier())
+	tx := ownedByBot(r.db.WithContext(ctx), r.botID).Model(&dao.TieredMemoryModel{}).Where("tier = ?", r.queryTier())
 	// MinImportance 必须在 SQL 层过滤：高价值召回通道靠它把候选集从「全量
 	// 该层记忆」压到「达标的少数几条」。此前这里漏了该条件，于是调用方拿到
 	// 的是按时间截断的该层全量数据——对 L0（2000+ 条）尤其致命：既拉不动，
@@ -103,12 +115,9 @@ func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]m
 		tx = tx.Where("importance >= ?", query.MinImportance)
 	}
 	if len(query.Scopes) > 0 {
-		scopeConditions := make([][]interface{}, 0, len(query.Scopes))
-		for _, scope := range query.Scopes {
-			scopeConditions = append(scopeConditions, []interface{}{string(scope.Kind), scope.ID})
-		}
-		tx = tx.Where("(scope_kind, scope_id) IN ?", scopeConditions)
+		tx = scopesForBot(tx, r.botID, query.Scopes)
 	}
+
 	if query.Category != "" {
 		tx = tx.Where("category = ?", query.Category)
 	}
@@ -123,10 +132,9 @@ func (r *TieredL1Retriever) Retrieve(_ context.Context, query memory.Query) ([]m
 }
 
 // Count 返回指定 scope 在该层级的记忆总数。
-func (r *TieredL1Retriever) Count(_ context.Context, scope memory.Scope) (int, error) {
+func (r *TieredL1Retriever) Count(ctx context.Context, scope memory.Scope) (int, error) {
 	var count int64
-	err := r.db.Model(&dao.TieredMemoryModel{}).
-		Where("tier = ? AND scope_kind = ? AND scope_id = ?", r.queryTier(), string(scope.Kind), scope.ID).
+	err := scopesForBot(r.db.WithContext(ctx).Model(&dao.TieredMemoryModel{}), r.botID, []memory.Scope{scope}).Where("tier = ?", r.queryTier()).
 		Count(&count).Error
 	if err != nil {
 		return 0, errs.Wrap(err, "tiered_retriever: count failed")
