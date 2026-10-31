@@ -820,30 +820,35 @@ func (c *botContainer) ElevateMemory(ctx context.Context, suggestMB int) (int, e
 // 而不是假装成功（实测：--memory 0 / --cpus 0 都不会改变现有上限）。
 var ErrLimitNotClearable = errs.New("bot_container: docker update cannot clear an existing limit; recreate the container to remove it")
 
-// hostConfigLimits 读取容器当前生效的 CPU / 内存上限：
-//   - cpuNano：docker 内部以 NanoCpus 计量，0 表示未设上限；
-//   - memBytes：0 表示未设上限；
-//   - ok=false：容器不存在（或 inspect 失败）。
-//
-// 故意不调 ensure()——那会在容器缺失时新建，而配置变更不应该顺手把容器拉起来。
-func (c *botContainer) hostConfigLimits(ctx context.Context) (cpuNano int64, memBytes int64, ok bool) {
-	cmd := exec.CommandContext(ctx, "docker", "inspect",
-		"-f", "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}", c.container)
-	var outBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		return 0, 0, false
+// hostConfigLimits distinguishes a missing container from an unavailable daemon.
+// A failed inspection must never be reported as a successful live limit update.
+func (c *botContainer) hostConfigLimits(ctx context.Context) (cpuNano int64, memBytes int64, exists bool, err error) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}", c.container)
+	var out, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		if ctx.Err() != nil {
+			return 0, 0, false, ctx.Err()
+		}
+		message := strings.ToLower(stderr.String())
+		if strings.Contains(message, "no such object:") || strings.Contains(message, "no such container:") {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, errs.Wrapf(runErr, "bot_container: inspect limits %q: %s", c.container, strings.TrimSpace(stderr.String()))
 	}
-	fields := strings.Fields(strings.TrimSpace(outBuf.String()))
-	if len(fields) < 2 {
-		return 0, 0, true
+	fields := strings.Fields(out.String())
+	if len(fields) != 2 {
+		return 0, 0, true, errs.New("bot_container: invalid limit inspection response")
 	}
-	// 解析失败按"未设上限"处理：宁可多报一次「无需改动」，也不要因为格式差异
-	// 把本来就没限制的容器判成需要重建。
-	cpuNano, _ = strconv.ParseInt(fields[0], 10, 64)
-	memBytes, _ = strconv.ParseInt(fields[1], 10, 64)
-	return cpuNano, memBytes, true
+	cpuNano, err = strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || cpuNano < 0 {
+		return 0, 0, true, errs.New("bot_container: invalid CPU limit inspection response")
+	}
+	memBytes, err = strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || memBytes < 0 {
+		return 0, 0, true, errs.New("bot_container: invalid memory limit inspection response")
+	}
+	return cpuNano, memBytes, true, nil
 }
 
 // setCPULimit 回写容器配置里的 CPU 上限，使后续重建沿用在线改过的值。
@@ -860,7 +865,10 @@ func (c *botContainer) setCPULimit(limit string) {
 //     已有上限则返回 ErrLimitNotClearable（docker update 取消不掉，只能重建）；
 //   - 其余：docker update 就地生效，并回写配置以免重建时被旧值盖回去。
 func (c *botContainer) UpdateCPULimit(ctx context.Context, limit string) error {
-	cpuNano, _, ok := c.hostConfigLimits(ctx)
+	cpuNano, _, ok, err := c.hostConfigLimits(ctx)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
 	}
@@ -895,7 +903,10 @@ func (c *botContainer) UpdateCPULimit(ctx context.Context, limit string) error {
 // --memory 会被 docker 以 "Memory limit should be smaller than already set
 // memoryswap limit" 拒绝。取 swap = memory 表示不再额外给 swap。
 func (c *botContainer) UpdateMemoryLimit(ctx context.Context, mb int64) error {
-	_, memBytes, ok := c.hostConfigLimits(ctx)
+	_, memBytes, ok, err := c.hostConfigLimits(ctx)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
 	}

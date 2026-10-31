@@ -80,3 +80,32 @@ func TestApplyUnlimitedRetainsDesiredLimitsForRecreate(t *testing.T) {
 		t.Fatal("manager lost unlimited setting")
 	}
 }
+
+func TestUpdateLimitsDistinguishesMissingFromInspectionFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		wantErr      bool
+	}{
+		{"missing", "echo 'Error: No such object: bot' >&2; exit 1", false},
+		{"daemon unavailable", "echo 'Cannot connect to the Docker daemon' >&2; exit 1", true},
+		{"permission denied", "echo 'permission denied' >&2; exit 1", true},
+		{"malformed", "echo 'not limits'", true},
+		{"partial", "echo '0'", true},
+		{"unlimited", "echo '0 0'", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			c := newBotContainer("bot", DefaultConfig(), zap.NewNop().Sugar())
+			if err := c.UpdateCPULimit(context.Background(), ""); (err != nil) != tc.wantErr {
+				t.Fatalf("cpu err=%v", err)
+			}
+			if err := c.UpdateMemoryLimit(context.Background(), 0); (err != nil) != tc.wantErr {
+				t.Fatalf("memory err=%v", err)
+			}
+		})
+	}
+}

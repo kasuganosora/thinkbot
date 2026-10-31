@@ -69,6 +69,13 @@ import (
 //   - 管理每个 Bot 的 WebChannel（供 SSE 聊天使用）
 // ============================================================================
 
+// containerStartAttempt identifies an accepted start so stale workers cannot
+// cancel or change the status of a newer attempt for the same bot.
+type containerStartAttempt struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
 // BotService 管理 Bot 定义和运行时实例。
 type BotService struct {
 	db            *gorm.DB
@@ -107,7 +114,7 @@ type BotService struct {
 	messageStarts      map[string]time.Time               // "botID:traceID" → 本轮开始时刻（供前端显示「已运行多久」，判断挂死）
 	// containerStarts tracks in-flight container+agent starts detached from HTTP
 	// requests. Image builds can take minutes; the request context must not cancel them.
-	containerStarts map[string]context.CancelFunc // botID → cancel for async start
+	containerStarts map[string]containerStartAttempt // botID → accepted async start
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
 	//
@@ -195,7 +202,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		messageInterrupts:  make(map[string]chan string),
 		messageAppends:     make(map[string]pendingAppends),
 		messageStarts:      make(map[string]time.Time),
-		containerStarts:    make(map[string]context.CancelFunc),
+		containerStarts:    make(map[string]containerStartAttempt),
 		wfEngines:          make(map[string]*workflow.Manager),
 		chatHistory:        chatHistory,
 
@@ -3678,34 +3685,41 @@ func (s *BotService) BeginContainerStart(botID string) (ctx context.Context, alr
 	if s == nil || botID == "" {
 		return nil, true
 	}
-	s.SetBotStatus(botID, dao.BotStatusStarting)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.containerStarts == nil {
-		s.containerStarts = make(map[string]context.CancelFunc)
+		s.containerStarts = make(map[string]containerStartAttempt)
 	}
 	if _, ok := s.containerStarts[botID]; ok {
 		return nil, true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), containerStartTimeout)
-	s.containerStarts[botID] = cancel
+	s.SetBotStatus(botID, dao.BotStatusStarting)
+	s.containerStarts[botID] = containerStartAttempt{ctx: ctx, cancel: cancel}
 	return ctx, false
 }
 
-// FinishContainerStart clears the in-flight start entry and releases its timer.
-func (s *BotService) FinishContainerStart(botID string) {
+// FinishContainerStart only finalizes the matching accepted start. Failures,
+// timeout and panic become retryable; a cancelled old worker cannot touch a restart.
+func (s *BotService) FinishContainerStart(botID string, ctx context.Context, running bool) {
 	if s == nil || botID == "" {
 		return
 	}
 	s.mu.Lock()
-	cancel, ok := s.containerStarts[botID]
-	if ok {
-		delete(s.containerStarts, botID)
+	defer s.mu.Unlock()
+	attempt, ok := s.containerStarts[botID]
+	if !ok || attempt.ctx != ctx {
+		return
 	}
-	s.mu.Unlock()
-	if ok && cancel != nil {
-		cancel()
+	delete(s.containerStarts, botID)
+	status := dao.BotStatusStopped
+	if running {
+		status = dao.BotStatusRunning
 	}
+	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ? AND status = ?", botID, dao.BotStatusStarting).Update("status", status).Error; err != nil {
+		s.logger.Warnw("failed to finalize container start", "bot_id", botID, "err", err)
+	}
+	attempt.cancel()
 }
 
 // CancelContainerStart aborts an in-flight async start (intentional stop).
@@ -3714,13 +3728,13 @@ func (s *BotService) CancelContainerStart(botID string) {
 		return
 	}
 	s.mu.Lock()
-	cancel, ok := s.containerStarts[botID]
+	attempt, ok := s.containerStarts[botID]
 	if ok {
 		delete(s.containerStarts, botID)
 	}
 	s.mu.Unlock()
-	if ok && cancel != nil {
-		cancel()
+	if ok && attempt.cancel != nil {
+		attempt.cancel()
 	}
 }
 
