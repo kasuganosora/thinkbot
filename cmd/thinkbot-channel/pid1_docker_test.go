@@ -88,16 +88,32 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=3 CMD ["/usr/local/bin/thinkbot
 		t.Fatalf("health: %v\n%s\nlogs:\n%s", healthErr, healthOut, logs)
 	}
 
+	// docker top reports host PIDs. Compare with the container init's host PID,
+	// and inspect the executable field; "sleep infinity" remains in os.Args even
+	// when the channel binary correctly ignores those trailing arguments.
+	initPID, err := exec.Command("docker", "inspect", "--format", "{{.State.Pid}}", name).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect init PID: %v\n%s", err, initPID)
+	}
 	top, err := exec.Command("docker", "top", name, "-o", "pid,args").CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker top: %v\n%s", err, top)
 	}
-	text := string(top)
-	if strings.Contains(text, "sleep") {
-		t.Fatalf("sleep is running; channel is not PID 1:\n%s", text)
+	foundInit := false
+	for _, line := range strings.Split(string(top), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if filepath.Base(fields[1]) == "sleep" {
+			t.Fatalf("sleep process is running:\n%s", top)
+		}
+		if fields[0] == strings.TrimSpace(string(initPID)) {
+			foundInit = filepath.Base(fields[1]) == "thinkbot-channel"
+		}
 	}
-	if !strings.Contains(text, "thinkbot-channel") {
-		t.Fatalf("pid 1 args:\n%s", text)
+	if !foundInit {
+		t.Fatalf("container init is not thinkbot-channel (host PID %s):\n%s", strings.TrimSpace(string(initPID)), top)
 	}
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
