@@ -41,9 +41,14 @@ func InterceptSecretReply(msg *core.Message) (string, bool) {
 	if msg.BotID == "" {
 		return "", false
 	}
+	sessionID, _ := msg.Metadata["chat_session_id"].(string)
+	chatID := interaction.SecretReplyChatID(msg.Channel, sessionID)
+	if chatID == "" {
+		return "", false
+	}
 	reg := interaction.Default()
 	if candidate == "/cancel-secret" {
-		if name, ok := reg.CancelSecret(msg.BotID, msg.Channel); ok {
+		if name, ok := reg.CancelSecret(msg.BotID, chatID); ok {
 			msg.Text = "[用户已取消密钥提供请求，未登记任何值。请继续普通对话；未经用户重新要求，不要再次索要该密钥。]"
 			return name, true
 		}
@@ -51,7 +56,7 @@ func InterceptSecretReply(msg *core.Message) (string, bool) {
 	if candidate == "" {
 		return "", false
 	}
-	name, expired, ok := reg.TakeSecretReply(msg.BotID, msg.Channel, candidate)
+	name, expired, ok := reg.TakeSecretReply(msg.BotID, chatID, candidate)
 	if !ok {
 		return "", false
 	}
