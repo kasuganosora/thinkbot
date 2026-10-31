@@ -565,16 +565,17 @@ func TestMemoryTool_SearchOrderOldest(t *testing.T) {
 	tool := Tools(ToolConfig{Repo: repo})[0].Tool
 	ctx := &llm.ToolExecContext{Context: context.Background()}
 
-	// 默认 newest：最前面是九月（这正是 bot 当年答「9 月」的原因）。
+	// 显式 order=newest：最前面是九月（省略 query 且不给 order 会走深度召回，
+	// 不再把「最近 N 条」当成默认）。
 	got, err := tool.Execute(ctx, map[string]any{
-		"action": "search", "scope_kind": "channel", "scope_id": "ch1", "limit": 10,
+		"action": "search", "scope_kind": "channel", "scope_id": "ch1", "limit": 10, "order": "newest",
 	})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
 	first := got.(map[string]any)["entries"].([]EntryResult)[0]
 	if first.Content != "九月的记忆" {
-		t.Fatalf("default order should be newest-first, got %q", first.Content)
+		t.Fatalf("order=newest should be newest-first, got %q", first.Content)
 	}
 
 	// order=oldest：走到时间轴另一端，拿到八月。
@@ -768,8 +769,8 @@ func TestMemoryTool_Search_MultiKeywordSpansWhitespace(t *testing.T) {
 	}
 }
 
-// TestMemoryTool_Search_NoQueryKeepsTimeOrder 无 query 时不得引入相关性排序。
-// 这条路径是「按时间翻记忆」，一旦按分数重排，order=oldest 就会失效。
+// TestMemoryTool_Search_NoQueryKeepsTimeOrder 显式 order、无 query 时不得引入相关性排序。
+// 这条路径是「按时间翻记忆」。省略 order 的空 query 是深度召回，不在这里。
 func TestMemoryTool_Search_NoQueryKeepsTimeOrder(t *testing.T) {
 	repo := NewMemoryRepository()
 	_, aug, sep := seedTimeSpanRepo(t, repo)
@@ -777,7 +778,7 @@ func TestMemoryTool_Search_NoQueryKeepsTimeOrder(t *testing.T) {
 	ctx := &llm.ToolExecContext{Context: context.Background()}
 
 	got, err := tool.Execute(ctx, map[string]any{
-		"action": "search", "scope_kind": "channel", "scope_id": "ch1", "limit": 2,
+		"action": "search", "scope_kind": "channel", "scope_id": "ch1", "limit": 2, "order": "newest",
 	})
 	if err != nil {
 		t.Fatalf("search: %v", err)
