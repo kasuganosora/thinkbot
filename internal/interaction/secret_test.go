@@ -93,3 +93,41 @@ func TestRegisterQuestion_SecretNeedsName(t *testing.T) {
 		t.Fatalf("secret question without name: got %v, want ErrInvalidQuestion", err)
 	}
 }
+
+func TestSecretRequestsAreUnambiguousAndCancellable(t *testing.T) {
+	r := NewRegistry()
+	if _, err := r.RegisterQuestion(secretQuestion("first", "one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterQuestion(secretQuestion("second", "two")); !errors.Is(err, ErrPendingSecret) {
+		t.Fatalf("second request accepted: %v", err)
+	}
+	if _, ok := r.CancelSecret("bot-1", "other-chat"); ok {
+		t.Fatal("cross-chat cancel")
+	}
+	if name, ok := r.CancelSecret("bot-1", "chat-1"); !ok || name != "one" {
+		t.Fatal("cancel failed")
+	}
+	if _, err := r.RegisterQuestion(secretQuestion("second", "two")); err != nil {
+		t.Fatal(err)
+	}
+	if name, _, ok := r.TakeSecretReply("bot-1", "chat-1", "fictional-credential"); !ok || name != "two" {
+		t.Fatal("reply matched wrong request")
+	}
+}
+
+func TestLateSecretReplyIsClaimedForDisposal(t *testing.T) {
+	r := NewRegistry()
+	q := secretQuestion("expired", "one")
+	q.TimeoutSecs = 1
+	if _, err := r.RegisterQuestion(q); err != nil {
+		t.Fatal(err)
+	}
+	r.entries[q.ID].question.RegisteredAt = time.Now().Add(-time.Minute).Unix()
+	if name, expired, ok := r.TakeSecretReply("bot-1", "chat-1", "fictional-late-credential"); !ok || !expired || name != "one" {
+		t.Fatal("late reply would pass through as chat")
+	}
+	if _, _, ok := r.TakeSecretReply("bot-1", "chat-1", "normal chat"); ok {
+		t.Fatal("expired request consumed twice")
+	}
+}

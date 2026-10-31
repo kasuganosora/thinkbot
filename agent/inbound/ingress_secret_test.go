@@ -161,3 +161,19 @@ func TestInterceptSecretReply_UsesRawCandidate(t *testing.T) {
 		t.Fatalf("plaintext leaked: %q", msg.Text)
 	}
 }
+
+func TestInterceptSecretReply_CancelDoesNotRegisterValue(t *testing.T) {
+	v := withTestVault(t)
+	registerSecretRequest(t, "cancel-test", "bot-test", "chat-cancel", "svc.token")
+	msg := &core.Message{BotID: "bot-test", Channel: "chat-cancel", Text: "/cancel-secret"}
+	if _, ok := InterceptSecretReply(msg); !ok || !strings.Contains(msg.Text, "取消") {
+		t.Fatal("cancellation not intercepted")
+	}
+	if _, found := v.Get("bot-test", "svc.token"); found {
+		t.Fatal("cancel command registered as credential")
+	}
+	next := &core.Message{BotID: "bot-test", Channel: "chat-cancel", Text: "ordinary conversation"}
+	if _, ok := InterceptSecretReply(next); ok {
+		t.Fatal("cancelled request still captures messages")
+	}
+}
