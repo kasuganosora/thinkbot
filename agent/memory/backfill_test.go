@@ -63,6 +63,15 @@ func TestBackfillFromChatHistory(t *testing.T) {
 		t.Fatalf("expected 2 L0 entries, got %d", len(l0))
 	}
 	for _, e := range l0 {
+		if e.Metadata["bot_id"] != "bot-x" || e.Metadata["speaker"] != "user" {
+			t.Fatalf("backfill must preserve the event source's bot ownership: %+v", e)
+		}
+		if e.Metadata["message_id"] == "m1" && e.Scope != ChannelScope("s1") {
+			t.Fatalf("channel classification lost: %+v", e)
+		}
+		if e.Metadata["message_id"] == "m3" && e.Scope != UserScope("u2") {
+			t.Fatalf("user classification lost: %+v", e)
+		}
 		if e.Source != "chat_history" {
 			t.Fatalf("expected source chat_history, got %s", e.Source)
 		}
@@ -87,5 +96,23 @@ func TestBackfillFromChatHistory(t *testing.T) {
 		t.Fatalf("incremental backfill above watermark should write 0, got n=%d wm=%d err=%v", n, wm, err)
 	} else if wm != maxID {
 		t.Fatalf("incremental backfill should preserve watermark, got %d want %d", wm, maxID)
+	}
+}
+
+func TestBackfillFromChatHistory_MissingBotDoesNotWrite(t *testing.T) {
+	src := &memUserMessageSource{msgs: []struct {
+		botID string
+		msg   BackfillMessage
+	}{
+		{msg: BackfillMessage{ID: 4, Channel: "shared-channel", Content: "unowned historical message must not be imported"}},
+	}}
+	repo := NewMemoryRepository()
+	written, watermark, err := BackfillFromChatHistory(context.Background(), repo, src, "", 3, nil)
+	if err != nil || written != 0 || watermark != 3 {
+		t.Fatalf("missing bot should skip backfill: written=%d watermark=%d err=%v", written, watermark, err)
+	}
+	entries, err := repo.Retrieve(context.Background(), Query{})
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("unexpected writes: %v, %v", entries, err)
 	}
 }

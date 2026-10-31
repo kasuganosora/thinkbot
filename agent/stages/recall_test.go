@@ -7,11 +7,12 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"go.uber.org/zap"
 )
 
 // TestRecallStage_InjectsBotScopeMemory 验证「潜水学到的经验在真人交互里浮现」读侧：
-// 召回 [bot, channel, user] 三 scope 的记忆时，bot 全局 scope 的潜水笔记应被召回
+// 召回当前 bot scope 的记忆时，bot 全局 scope 的潜水笔记应被召回
 // （从 misskey 学到的在 web 对话也能用），且其他 bot 的笔记不串入。
 func TestRecallStage_InjectsBotScopeMemory(t *testing.T) {
 	repo := memory.NewMemoryRepository()
@@ -78,66 +79,58 @@ func TestRecallStage_SkipsWhenNoScopes(t *testing.T) {
 	}
 }
 
-// TestRecallStage_UnionsLinkedChannels 覆盖跨会话召回：私聊里说过的环境事实，
-// 在群里提问时也要能被召回（记忆按 channel 分作用域，群 scope 里本来没有）。
-// 关联会话由渠道层声明（core.MetaMemoryLinkedChannels），读侧只读不写。
-func TestRecallStage_UnionsLinkedChannels(t *testing.T) {
+// 实时写入与自动注入使用同一 bot 空间：跨平台、用户和群私聊共享，跨 bot 隔离。
+func TestRecallStage_BotSharingBoundary(t *testing.T) {
 	ctx := context.Background()
 	repo := memory.NewMemoryRepository()
-	botID := "bot-link"
-
-	// 私聊里存过的环境事实。群里提问时，声明了关联会话就要能召回。
-	if err := repo.Append(ctx, memory.Entry{
-		Scope:      memory.ChannelScope("wecom:dm:demo-user"),
-		Content:    "演示环境日志主题为 demo_events",
-		Category:   "fact",
-		Importance: 0.8,
+	writer := memory.NewNoteWriterAdapter(repo, "bot-a")
+	if err := writer.WriteNote(ctx, outbound.NoteEntry{
+		ScopeKind: "bot", ScopeID: "forged-bot",
+		Content: "演示环境日志主题为 demo_events", Category: "fact",
+		Metadata: map[string]any{"bot_id": "forged-bot", "user_id": "user-a"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// 群自己的记忆
-	if err := repo.Append(ctx, memory.Entry{
-		Scope:      memory.ChannelScope("wecom:chat:g1"),
-		Content:    "群里讨论过的群内事项",
-		Category:   "fact",
-		Importance: 0.4,
-	}); err != nil {
-		t.Fatal(err)
+	for _, entry := range []memory.Entry{
+		{Scope: memory.BotScope("bot-b"), Content: "foreign bot sentinel"},
+		{Scope: memory.ChannelScope("wecom:dm:user-a"), Content: "legacy channel sentinel"},
+		{Scope: memory.UserScope("user-a"), Content: "legacy user sentinel"},
+	} {
+		if err := repo.Append(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
 	}
-
 	stage := NewRecallStage("memory-recall", repo, nil, zap.NewNop().Sugar())
-
-	// 未声明关联会话：调不到私聊内容（改动前的行为）
-	plain := core.NewEnvelope(core.Message{
-		ID: "r3", BotID: botID, Channel: "wecom:chat:g1", UserID: "demo-user",
-		Text: "查一下演示环境的日志",
-	})
-	if _, err := stage.Process(ctx, plain); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := plain.Get(core.KVMemoryRecall)
-	if s, _ := before.(string); strings.Contains(s, "demo_events") {
-		t.Fatalf("without linked channels the DM fact must not appear, got %q", s)
-	}
-
-	// 声明关联会话后：私聊事实进入召回
-	linked := core.NewEnvelope(core.Message{
-		ID: "r4", BotID: botID, Channel: "wecom:chat:g1", UserID: "demo-user",
-		Text: "查一下演示环境的日志",
-		Metadata: map[string]any{
-			core.MetaMemoryLinkedChannels: []string{"wecom:dm:demo-user"},
-		},
-	})
-	if _, err := stage.Process(ctx, linked); err != nil {
-		t.Fatal(err)
-	}
-	after, ok := linked.Get(core.KVMemoryRecall)
-	if !ok {
-		t.Fatal("KVMemoryRecall not set")
-	}
-	text, _ := after.(string)
-	if !strings.Contains(text, "demo_events") {
-		t.Fatalf("linked channel memory must be recalled, got %q", text)
+	for _, tc := range []struct {
+		name, bot, channel, user string
+		wantShared               bool
+	}{
+		{"original private chat", "bot-a", "wecom:dm:user-a", "user-a", true},
+		{"different platform and user", "bot-a", "web:session", "user-b", true},
+		{"group chat", "bot-a", "wecom:chat:group", "user-c", true},
+		{"other bot same identifiers", "bot-b", "wecom:dm:user-a", "user-a", false},
+		{"missing bot same identifiers", "", "wecom:dm:user-a", "user-a", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := core.NewEnvelope(core.Message{
+				BotID: tc.bot, Channel: tc.channel, UserID: tc.user,
+				Metadata: map[string]any{core.MetaMemoryLinkedChannels: []string{"wecom:dm:user-a"}},
+			})
+			if _, err := stage.Process(ctx, env); err != nil {
+				t.Fatal(err)
+			}
+			value, _ := env.Get(core.KVMemoryRecall)
+			text, _ := value.(string)
+			if strings.Contains(text, "demo_events") != tc.wantShared {
+				t.Fatalf("shared memory presence = %v, want %v: %s", strings.Contains(text, "demo_events"), tc.wantShared, text)
+			}
+			if strings.Contains(text, "legacy") {
+				t.Fatalf("unowned legacy memory leaked: %s", text)
+			}
+			if tc.bot != "bot-b" && strings.Contains(text, "foreign bot sentinel") {
+				t.Fatalf("other bot memory leaked: %s", text)
+			}
+		})
 	}
 }
 
@@ -152,7 +145,7 @@ func TestRecallStage_InWindowBoostWithoutBeyondWindowRecall(t *testing.T) {
 		"文档归档", "培训计划", "招聘进度", "预算核算", "合规检查", "资产盘点"}
 	for i, topic := range topics {
 		if err := repo.Append(ctx, memory.Entry{
-			Scope:      memory.ChannelScope(ch),
+			Scope:      memory.BotScope("bot-inwindow"),
 			Content:    topic + "：" + strings.Repeat("无关细节", 40),
 			Importance: 0.90,
 		}); err != nil {
@@ -161,7 +154,7 @@ func TestRecallStage_InWindowBoostWithoutBeyondWindowRecall(t *testing.T) {
 		_ = i
 	}
 	if err := repo.Append(ctx, memory.Entry{
-		Scope:      memory.ChannelScope(ch),
+		Scope:      memory.BotScope("bot-inwindow"),
 		Content:    "演示环境日志主题为 demo_events，可用日志通道查询",
 		Importance: 0.658,
 	}); err != nil {
@@ -170,7 +163,7 @@ func TestRecallStage_InWindowBoostWithoutBeyondWindowRecall(t *testing.T) {
 
 	stage := NewRecallStage("memory-recall", repo, nil, zap.NewNop().Sugar())
 	env := core.NewEnvelope(core.Message{
-		ID: "r-inwindow", Channel: ch, Text: "演示环境 日志主题 在哪查",
+		ID: "r-inwindow", BotID: "bot-inwindow", Channel: ch, Text: "演示环境 日志主题 在哪查",
 	})
 	if _, err := stage.Process(ctx, env); err != nil {
 		t.Fatal(err)
@@ -182,36 +175,5 @@ func TestRecallStage_InWindowBoostWithoutBeyondWindowRecall(t *testing.T) {
 	}
 	if strings.Contains(s, "relevance") {
 		t.Fatalf("injected block must not include relevance scores, got %q", s)
-	}
-}
-
-// TestAppendLinkedScopes_DedupesAndIgnoresBadType 覆盖去重与类型防御。
-func TestAppendLinkedScopes_DedupesAndIgnoresBadType(t *testing.T) {
-	stage := NewRecallStage("memory-recall", nil, nil, zap.NewNop().Sugar())
-	base := []memory.Scope{
-		memory.BotScope("b"),
-		memory.ChannelScope("wecom:chat:g1"),
-	}
-
-	// 重复声明当前会话：不应出现两次
-	env := core.NewEnvelope(core.Message{
-		Channel:  "wecom:chat:g1",
-		Metadata: map[string]any{core.MetaMemoryLinkedChannels: []string{"wecom:chat:g1", "wecom:dm:U1"}},
-	})
-	got := stage.appendLinkedScopes(base, env)
-	if len(got) != 3 {
-		t.Fatalf("want 3 scopes after dedupe, got %d: %+v", len(got), got)
-	}
-	if got[2].Key() != "channel:wecom:dm:U1" {
-		t.Fatalf("linked scope = %q", got[2].Key())
-	}
-
-	// 类型不对：不应 panic，也不应新增
-	bad := core.NewEnvelope(core.Message{
-		Channel:  "wecom:chat:g1",
-		Metadata: map[string]any{core.MetaMemoryLinkedChannels: "wecom:dm:U1"},
-	})
-	if n := len(stage.appendLinkedScopes(base, bad)); n != len(base) {
-		t.Fatalf("non-[]string metadata must be ignored, got %d scopes", n)
 	}
 }

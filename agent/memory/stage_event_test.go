@@ -13,7 +13,7 @@ import (
 func TestMemoryStage_EmitsContextInjectEvent(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := context.Background()
-	scope := ChannelScope("chat-inject")
+	scope := BotScope("bot-inject")
 	if err := repo.Append(ctx, Entry{Scope: scope, Content: "User name is Luna, a Go developer"}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
@@ -25,6 +25,7 @@ func TestMemoryStage_EmitsContextInjectEvent(t *testing.T) {
 
 	env := core.NewEnvelope(core.Message{
 		ID:      "m-1",
+		BotID:   "bot-inject",
 		TraceID: "trace-1",
 		Channel: "chat-inject",
 		UserID:  "user-1",
@@ -70,6 +71,7 @@ func TestMemoryStage_NoContextNoInjectEvent(t *testing.T) {
 
 	env := core.NewEnvelope(core.Message{
 		ID:      "m-2",
+		BotID:   "bot-inject",
 		TraceID: "trace-2",
 		Channel: "empty-ch",
 		UserID:  "user-2",

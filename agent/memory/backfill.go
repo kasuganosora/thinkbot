@@ -12,9 +12,9 @@ type BackfillMessage struct {
 	ID        uint64
 	Content   string
 	CreatedAt time.Time
-	// Channel 会话空间标识（记忆关联）。非空时作为 ChannelScope，否则退回 UserScope。
+	// Channel 原始会话空间标识（追溯用，不作为记忆授权 scope）。
 	Channel string
-	// UserID 用户标识（Channel 为空时的 scope 兜底）。
+	// UserID 原始用户标识（追溯用）。
 	UserID string
 	// MessageID 原始消息 ID（追溯用）。
 	MessageID string
@@ -51,7 +51,7 @@ type UserMessageSource interface {
 // 写入细节：
 //   - 每条消息作为一个 L0 条目写入 store（生产为 memStore：
 //     MultiStore → TieredStoreAdapter → TieredStore L0 层，write-through 到 tiered_memories）。
-//   - scope：优先按 Channel（ChannelScope），无则按 UserID（UserScope）。
+//   - scope：保留 Channel/User 分类，同时以事件源查询的 botID 标记可信归属。
 //   - CreatedAt 设为当前时间——必须如此，否则以原始时间（可能数天前）写入会被
 //     dreaming 的 LookbackDays / ActiveThresholdHours 门槛判为过期而跳过。
 //   - Source="chat_history"，并在 Metadata 记录原始事件 id / message_id，便于追溯。
@@ -59,7 +59,7 @@ type UserMessageSource interface {
 // 返回 (写入条目数, 已处理消息的最大 id, error)。maxID 始终 >= sinceID，便于调用方
 // 直接持久化为下一轮水位线。
 func BackfillFromChatHistory(ctx context.Context, store Store, src UserMessageSource, botID string, sinceID uint64, logger *zap.SugaredLogger) (written int, maxID uint64, err error) {
-	if store == nil || src == nil {
+	if store == nil || src == nil || botID == "" {
 		return 0, sinceID, nil
 	}
 	msgs, err := src.LoadSince(ctx, botID, sinceID)
@@ -90,10 +90,11 @@ func BackfillFromChatHistory(ctx context.Context, store Store, src UserMessageSo
 		var scope Scope
 		if m.Channel != "" {
 			scope = ChannelScope(m.Channel)
-		} else {
+		} else if m.UserID != "" {
 			scope = UserScope(m.UserID)
+		} else {
+			scope = BotScope(botID)
 		}
-
 		entry := Entry{
 			Scope:    scope,
 			Content:  content,
@@ -102,6 +103,10 @@ func BackfillFromChatHistory(ctx context.Context, store Store, src UserMessageSo
 			Metadata: map[string]any{
 				"event_id":   m.ID,
 				"message_id": m.MessageID,
+				"bot_id":     botID,
+				"channel":    m.Channel,
+				"user_id":    m.UserID,
+				"speaker":    "user",
 			},
 			CreatedAt:      now,
 			LastAccessedAt: now,

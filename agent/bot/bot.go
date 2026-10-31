@@ -278,7 +278,7 @@ func New(params BotParams) (*Bot, error) {
 	if memStore == nil {
 		memStore = memory.NewMemoryRepository()
 	}
-	noteWriter := memory.NewNoteWriterAdapter(memStore)
+	noteWriter := memory.NewNoteWriterAdapter(memStore, params.ID)
 	noteHandler := outbound.NewNoteHandler(noteWriter, botLogger, params.TP)
 
 	// 创建 CallbackHandler
