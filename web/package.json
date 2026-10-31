@@ -9,6 +9,7 @@
     "prebuild": "node scripts/check-template-bindings.mjs src",
     "build": "vite build",
     "check:bindings": "node scripts/check-template-bindings.mjs src",
+    "test:settings": "node scripts/test-settings-feedback.mjs",
     "test:regression": "node scripts/test-app-icons.mjs && node scripts/test-message-artifacts.mjs && node scripts/test-tool-interactions.mjs && node scripts/test-chat-stream.mjs && node scripts/test-chat-store.mjs && node scripts/test-bot-reasoning.mjs && node scripts/test-chunk-upload.mjs",
     "preview": "vite preview"
   },

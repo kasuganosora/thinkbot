@@ -20,9 +20,10 @@
     >
       <div class="toolbar">
         <span class="hint">这些配置由后端 /api/config 持久化，按分类分组。修改后点击「保存全部修改」。</span>
-        <t-button theme="primary" :disabled="!dirty" @click="saveAll" data-testid="config-save-btn">保存全部修改</t-button>
+        <t-button theme="primary" :disabled="!dirty || loading" :loading="saving" @click="saveAll" data-testid="config-save-btn">保存全部修改</t-button>
       </div>
 
+      <t-alert v-if="feedback" :theme="feedback.theme" :message="feedback.message" class="save-feedback" data-testid="config-feedback" />
       <t-loading :loading="loading">
         <div v-for="(items, cat) in grouped" :key="cat" class="group">
           <div class="group-title">{{ catLabel(cat) }}</div>
@@ -34,12 +35,14 @@
               <div class="field">
                 <t-switch
                   v-if="isBool(item.value)"
+                  :disabled="saving"
                   :value="draft[item.key] === 'true'"
                   @change="v => updateValue(item.key, v ? 'true' : 'false')"
                   :data-testid="`config-${item.key}`"
                 />
                 <t-input
                   v-else
+                  :disabled="saving"
                   :value="draft[item.key]"
                   @change="v => updateValue(item.key, v)"
                   :data-testid="`config-${item.key}`"
@@ -60,10 +63,13 @@ import { ref, computed, onMounted } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import SettingsShell from '@/components/SettingsShell.vue'
 import { configApi } from '@/api/services'
+import { configApplyFeedback } from '@/utils/configApplyFeedback'
 
 defineProps({ embedded: { type: Boolean, default: false } })
 
 const loading = ref(false)
+const saving = ref(false)
+const feedback = ref(null)
 const list = ref([])
 const draft = ref({})
 const changed = ref({})
@@ -97,25 +103,37 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => load().catch(e => { feedback.value = { theme: 'error', message: e.message || '加载配置失败，请刷新重试' } }))
 
 function updateValue(key, val) {
+  feedback.value = null
   draft.value[key] = val
   changed.value[key] = val
 }
 
 async function saveAll() {
+  if (saving.value || !dirty.value) return
+  saving.value = true
   try {
-    await configApi.batchSet({ ...changed.value })
-    MessagePlugin.success('配置已保存')
-    load()
+    const result = await configApi.batchSet({ ...changed.value })
+    feedback.value = configApplyFeedback(result)
+    MessagePlugin[feedback.value.theme](feedback.value.message)
+    // The write succeeded even if the subsequent refresh fails.
+    changed.value = {}
+    try { await load() } catch (e) {
+      feedback.value = { theme: 'warning', message: `${feedback.value.message}；刷新失败，请刷新页面确认最新值` }
+    }
   } catch (e) {
-    MessagePlugin.error(e.message || '保存失败')
+    feedback.value = { theme: 'error', message: e.message || '保存失败' }
+    MessagePlugin.error(feedback.value.message)
+  } finally {
+    saving.value = false
   }
 }
 </script>
 
 <style scoped>
+.save-feedback { margin-bottom: 16px; }
 .card { margin-bottom: 20px; }
 .toolbar {
   display: flex;

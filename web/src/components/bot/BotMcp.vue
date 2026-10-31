@@ -58,6 +58,7 @@
           <t-button theme="danger" size="small" @click="remove">删除</t-button>
         </div>
 
+        <p class="sub" data-testid="mcp-secret-help">已隐藏的凭据显示为 ********，保持不变会沿用原值；改名时需重新填写真实值，清空会删除该值。</p>
         <div class="grid2">
           <div class="field">
             <label class="lbl">名称</label>
@@ -85,7 +86,7 @@
               <div v-for="(row, i) in envRows" :key="i" class="env-row">
                 <t-input v-model="row.key" placeholder="KEY" style="flex:1" />
                 <span class="env-eq">=</span>
-                <t-input v-model="row.value" placeholder="VALUE" style="flex:1" />
+                <t-input :type="row.originalValue === MCP_SECRET_MASK ? 'password' : 'text'" v-model="row.value" placeholder="VALUE" style="flex:1" />
                 <t-button variant="text" theme="danger" shape="square" @click="removeEnv(i)">
                   <t-icon name="delete" />
                 </t-button>
@@ -114,7 +115,7 @@
               <div v-for="(row, i) in headerRows" :key="i" class="env-row">
                 <t-input v-model="row.key" placeholder="Header 名" style="flex:1" />
                 <span class="env-eq">:</span>
-                <t-input v-model="row.value" placeholder="Header 值" style="flex:1" />
+                <t-input :type="row.originalValue === MCP_SECRET_MASK ? 'password' : 'text'" v-model="row.value" placeholder="Header 值" style="flex:1" />
                 <t-button variant="text" theme="danger" shape="square" @click="removeHeader(i)">
                   <t-icon name="delete" />
                 </t-button>
@@ -163,14 +164,14 @@
       v-model:visible="importVisible"
       header="导入 MCP 配置"
       :width="560"
-      confirm-btn="导入"
+      :confirm-btn="{ content: '导入', loading: importing }"
       :on-confirm="confirmImport"
       dialogClassName="mcp-add-dialog"
     >
       <div class="field">
         <label class="lbl">粘贴 JSON 配置</label>
         <div class="sub">形如 <code>{ "mcpServers": { "name": { "command": "...", "args": [] } } }</code></div>
-        <t-textarea v-model="importText" :autosize="{ minRows: 8, maxRows: 16 }" placeholder='{ "mcpServers": { } }' />
+        <t-textarea :disabled="importing" v-model="importText" :autosize="{ minRows: 8, maxRows: 16 }" placeholder='{ "mcpServers": { } }' />
       </div>
     </t-dialog>
   </div>
@@ -180,6 +181,7 @@
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { botMcpApi } from '@/api/services'
+import { MCP_SECRET_MASK, mcpRows, mcpRowsToObject, validateMcpImport } from '@/utils/mcpConfigForm'
 
 const props = defineProps({ botId: { type: String, required: true } })
 
@@ -212,20 +214,16 @@ function select(s) { cur.value = s }
 const envRows = ref([])
 const headerRows = ref([])
 watch(cur, (s) => {
-  envRows.value = s ? Object.entries(s.env || {}).map(([key, value]) => ({ key, value })) : []
-  headerRows.value = s ? Object.entries(s.headers || {}).map(([key, value]) => ({ key, value })) : []
+  envRows.value = s ? mcpRows(s.env || {}) : []
+  headerRows.value = s ? mcpRows(s.headers || {}) : []
 }, { immediate: true })
 function addEnv() { envRows.value.push({ key: '', value: '' }) }
 function removeEnv(i) { envRows.value.splice(i, 1) }
 function addHeader() { headerRows.value.push({ key: '', value: '' }) }
 function removeHeader(i) { headerRows.value.splice(i, 1) }
-function rowsToObj(rows) {
-  const o = {}
-  for (const r of rows) { if (r.key.trim()) o[r.key.trim()] = r.value }
-  return o
-}
 
 async function save() {
+  if (saving.value) return
   if (!cur.value.name.trim()) return MessagePlugin.warning('请填写名称')
   saving.value = true
   try {
@@ -234,10 +232,10 @@ async function save() {
       type: cur.value.type,
       command: cur.value.command,
       args: cur.value.args || [],
-      env: rowsToObj(envRows.value),
+      env: mcpRowsToObject(envRows.value),
       cwd: cur.value.cwd,
       url: cur.value.url,
-      headers: rowsToObj(headerRows.value),
+      headers: mcpRowsToObject(headerRows.value),
       enabled: cur.value.enabled
     }
     await botMcpApi.update(props.botId, cur.value.id, payload)
@@ -279,8 +277,10 @@ async function confirmAdd() {
 /* 导入 */
 const importVisible = ref(false)
 const importText = ref('')
+const importing = ref(false)
 function openImport() { importText.value = ''; importVisible.value = true }
 async function confirmImport() {
+  if (importing.value) return false
   let cfg
   try {
     cfg = JSON.parse(importText.value)
@@ -288,14 +288,20 @@ async function confirmImport() {
     MessagePlugin.error('JSON 格式有误，请检查')
     return false
   }
-  if (!cfg.mcpServers || typeof cfg.mcpServers !== 'object') {
-    MessagePlugin.error('缺少 mcpServers 字段')
+  try {
+    validateMcpImport(cfg)
+    importing.value = true
+    const res = await botMcpApi.import(props.botId, cfg)
+    importText.value = ''
+    importVisible.value = false
+    await load(res.servers?.[0]?.id)
+    MessagePlugin.success(`已导入 ${res.servers?.length || 0} 个服务器`)
+  } catch (e) {
+    MessagePlugin.error(e.message || '导入失败，请重试')
     return false
+  } finally {
+    importing.value = false
   }
-  const res = await botMcpApi.import(props.botId, cfg)
-  importVisible.value = false
-  await load(res.servers?.[0]?.id)
-  MessagePlugin.success(`已导入 ${res.servers?.length || 0} 个服务器`)
 }
 
 onMounted(load)

@@ -11,7 +11,7 @@
         <t-button
           v-if="info.containerStatus === 'running' || info.taskStatus === 'running' || info.taskStatus === 'starting'"
           variant="outline"
-          :loading="acting"
+          :loading="stopping"
           @click="onStop"
         >停止</t-button>
         <t-button
@@ -60,6 +60,7 @@
           <div class="ic-label">内存限制</div>
           <div class="ic-value mem-cell">
             <t-input-number
+              :disabled="memSaving || loading"
               :value="memValue"
               :min="0"
               :step="512"
@@ -70,8 +71,8 @@
               @change="onMemChange"
             />
             <span class="mem-unit">MB</span>
-            <span v-if="memSaved" class="mem-hint ok">✓ 已生效</span>
-            <span v-else-if="memDirty" class="mem-hint dirty">未保存 · 重建容器后生效</span>
+            <span v-if="memFeedback" class="mem-hint" :class="memFeedback.theme === 'success' ? 'ok' : 'dirty'" data-testid="memory-apply-state">{{ memFeedback.message }}</span>
+            <span v-else-if="memDirty" class="mem-hint dirty">未保存</span>
             <span class="mem-hint tip">0 = 不限制（需重建容器生效）</span>
           </div>
         </div>
@@ -111,7 +112,7 @@
           :loading="memSaving"
           @click="onMemSave"
         >保存容器设置</t-button>
-        <span v-if="memSaved" class="mem-hint ok">✓ 已保存</span>
+        <span v-if="memFeedback" class="mem-hint" :class="memFeedback.theme === 'success' ? 'ok' : 'dirty'">{{ memFeedback.message }}</span>
         <span v-else-if="memDirty" class="mem-hint dirty">有未保存的更改</span>
         <span v-else class="mem-hint tip">内存限制等容器配置修改后，点击此处统一保存</span>
         <span class="mem-hint tip">CPU 上限是全局配置，在「系统配置 → 沙箱工作空间」中修改</span>
@@ -119,7 +120,7 @@
     </div>
 
     <!-- 提示条 -->
-    <div class="ctn-tip">内存限制变更需要<strong>重建容器</strong>后才会生效（删除容器后重新启动）。GPU 配置变更同样需要重建容器。</div>
+    <div class="ctn-tip">具体内存上限会尝试立即应用；取消已有上限需重建容器。请以保存后的结果提示为准。GPU 配置变更需要重建容器。</div>
 
     <!-- 数据操作 -->
     <div class="block">
@@ -167,23 +168,27 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, h } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, h } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { botContainerApi } from '@/api/services'
+import { configApplyFeedback } from '@/utils/configApplyFeedback'
 
 const props = defineProps({ botId: { type: String, required: true } })
 
 const loading = ref(false)
 const acting = ref(false)
+const stopping = ref(false)
 const busy = reactive({ export: false, restore: false, snap: false })
 const info = ref({})
 const snapshots = ref([])
 const snapName = ref('')
 const memValue = ref(0)        // 当前编辑值
 const memSaving = ref(false)
-const memSaved = ref(false)
+const memFeedback = ref(null)
 const memDirty = ref(false)     // 值是否被修改但未保存
-let memTimer = null           // 防抖定时器
+let observationVersion = 0
+let disposed = false
+onBeforeUnmount(() => { disposed = true })
 
 const columns = [
   { colKey: 'name', title: '名称', width: 380, ellipsis: true,
@@ -220,17 +225,23 @@ function sleep(ms) {
 /** Wait until the async container start finishes (image build can take minutes). */
 async function waitUntilReady(timeoutMs = 15 * 60 * 1000) {
   const started = Date.now()
+  const observation = ++observationVersion
   let last = info.value
-  while (Date.now() - started < timeoutMs) {
+  while (!disposed && observation === observationVersion && Date.now() - started < timeoutMs) {
     last = await botContainerApi.get(props.botId)
+    if (disposed || observation !== observationVersion) return null
     info.value = last
     if (last.taskStatus === 'running') return last
-    if (last.taskStatus === 'stopped' || last.taskStatus === 'not-created') {
+    if (['error', 'docker-unavailable'].includes(last.taskStatus)) {
+      throw new Error('容器服务不可用，请检查 Docker 状态后重试。')
+    }
+    if (['stopped', 'not-created'].includes(last.taskStatus)) {
       throw new Error('启动未完成，Bot 当前已停止。请点「启动」重试（构建镜像可能需要数分钟）。')
     }
     await sleep(2000)
   }
-  throw new Error('等待超时：镜像可能仍在构建。请稍后刷新；若任务状态仍是「启动中」，服务重启后会自动继续。')
+  if (disposed || observation !== observationVersion) return null
+  throw new Error('等待超时：镜像可能仍在构建。请稍后刷新；若任务状态仍是「启动中」，请检查服务日志或停止后重试。')
 }
 function fmt(iso) {
   if (!iso) return '-'
@@ -251,28 +262,39 @@ async function load() {
     snapshots.value = s
     memValue.value = i.memoryLimitMB || 0
     memDirty.value = false
-    memSaved.value = false
+    memFeedback.value = null
   } finally {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(async () => {
+  try {
+    await load()
+    // Reloading this page must keep observing an accepted background start.
+    if (info.value.taskStatus === 'starting') {
+      acting.value = true
+      const ready = await waitUntilReady()
+      if (ready) info.value = ready
+    }
+  } catch (e) {
+    if (!disposed) MessagePlugin.error(e?.message || '加载容器状态失败')
+  } finally { acting.value = false }
+})
 
-// 内存限制变更（标记脏 + 防抖自动保存）
+// 内存限制变更只标记脏，点击按钮后保存
 function onMemChange(val) {
   memValue.value = val ?? 0
   memDirty.value = (memValue.value !== (info.value.memoryLimitMB || 0))
-  memSaved.value = false
-  clearTimeout(memTimer)
+  memFeedback.value = null
 }
 
 // 手动点击保存按钮（始终可点；未变更时给出轻提示）
 async function onMemSave() {
+  if (memSaving.value) return
   if (!memDirty.value) {
     MessagePlugin.info('容器设置未变更')
     return
   }
-  clearTimeout(memTimer)
   await doSaveMemory()
 }
 
@@ -284,16 +306,8 @@ async function doSaveMemory() {
     const res = await botContainerApi.updateConfig(props.botId, { memoryLimitMB: mb })
     info.value.memoryLimitMB = mb
     memDirty.value = false
-    memSaved.value = true
-    // 后端会就地 docker update：具体数值立刻生效，「不限制」docker update 取消不掉，
-    // 只能等重建。如实把这两种结果告诉用户，别都显示成"已生效"。
-    const d = res?.data ?? res
-    if (d?.needsRecreate) {
-      MessagePlugin.warning('已保存；「不限制」需重建工作容器后才生效')
-    } else if (d?.applied) {
-      MessagePlugin.success('已保存并立即生效（无需重建）')
-    }
-    setTimeout(() => { memSaved.value = false }, 3000)
+    memFeedback.value = configApplyFeedback(res, '内存限制')
+    MessagePlugin[memFeedback.value.theme](memFeedback.value.message)
   } catch (e) {
     MessagePlugin.error(e?.message || '保存失败')
   } finally {
@@ -305,9 +319,12 @@ async function onStart() {
   acting.value = true
   try {
     info.value = await botContainerApi.start(props.botId)
-    info.value = await waitUntilReady()
+    const ready = await waitUntilReady()
+    if (!ready) return
+    info.value = ready
     MessagePlugin.success('容器与 Bot 已启动')
   } catch (e) {
+    if (disposed) return
     MessagePlugin.error(e?.message || '启动失败')
     await load()
   } finally { acting.value = false }
@@ -328,10 +345,13 @@ function onRecreate() {
         }
         await botContainerApi.remove(props.botId, true)
         info.value = await botContainerApi.start(props.botId)
-        info.value = await waitUntilReady()
+        const ready = await waitUntilReady()
+        if (!ready) return
+        info.value = ready
         MessagePlugin.success('工作容器已重建，Bot 已启动')
         await load()
       } catch (e) {
+        if (disposed) return
         MessagePlugin.error(e?.message || '重建失败')
         await load()
       } finally {
@@ -341,10 +361,17 @@ function onRecreate() {
   })
 }
 async function onStop() {
-  acting.value = true
-  try { info.value = await botContainerApi.stop(props.botId); MessagePlugin.success('容器已停止') }
-  catch (e) { MessagePlugin.error(e?.message || '停止失败') }
-  finally { acting.value = false }
+  if (stopping.value) return
+  stopping.value = true
+  try {
+    const stopped = await botContainerApi.stop(props.botId)
+    observationVersion++ // Ignore an older in-flight GET after the stop succeeds.
+    info.value = stopped
+    acting.value = false
+    MessagePlugin.success('容器已停止')
+  } catch (e) {
+    MessagePlugin.error(e?.message || '停止失败')
+  } finally { stopping.value = false }
 }
 
 async function onExport() {
@@ -447,7 +474,7 @@ async function onCreateSnapshot() {
 /* 内存限制单元格 */
 .mem-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .mem-unit { font-size: 13px; color: var(--bp-label-tertiary); }
-.mem-hint { font-size: 11px; white-space: nowrap; }
+.mem-hint { font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
 .mem-hint.saving { color: var(--bp-warning); }
 .mem-hint.ok { color: var(--bp-success); }
 .mem-hint.dirty { color: var(--bp-warning); }
