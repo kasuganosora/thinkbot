@@ -175,7 +175,9 @@ func DefaultTierConfigs() map[MemoryTier]TierConfig {
 // 同时每个写操作 write-through 到 SQLite（表 tiered_memories），并在初始化时
 // 从库加载未过期的条目。这样进程重启后分层记忆可恢复，避免“重启即失”。
 type TieredStore struct {
-	mu sync.RWMutex
+	botID string
+	bound bool
+	mu    sync.RWMutex
 	// key = tier:scope.Key() -> []TieredEntry
 	buckets map[string][]TieredEntry
 	configs map[MemoryTier]TierConfig
@@ -213,10 +215,21 @@ func NewTieredStore(configs map[MemoryTier]TierConfig) *TieredStore {
 // NewTieredStoreWithDB 创建带 SQLite 持久化的分层存储。
 // db 非 nil 时，初始化会从库加载未过期的条目，之后所有写操作 write-through。
 func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *TieredStore {
+	return newTieredStore(configs, db, "", false)
+}
+
+// NewTieredStoreForBot binds all loading, processing and persistence to one bot.
+// Empty bot IDs fail closed; the unbound constructor is for explicit maintenance.
+func NewTieredStoreForBot(configs map[MemoryTier]TierConfig, db *gorm.DB, botID string) *TieredStore {
+	return newTieredStore(configs, db, botID, true)
+}
+
+func newTieredStore(configs map[MemoryTier]TierConfig, db *gorm.DB, botID string, bound bool) *TieredStore {
 	if configs == nil {
 		configs = DefaultTierConfigs()
 	}
 	s := &TieredStore{
+		botID: botID, bound: bound,
 		buckets: make(map[string][]TieredEntry),
 		configs: configs,
 		db:      db,
@@ -234,7 +247,7 @@ func NewTieredStoreWithDB(configs map[MemoryTier]TierConfig, db *gorm.DB) *Tiere
 // 仅在 NewTieredStoreWithDB 且 db 非 nil 时调用一次。
 func (s *TieredStore) loadFromDB() {
 	var models []dao.TieredMemoryModel
-	if err := s.db.Order("created_at ASC").Find(&models).Error; err != nil {
+	if err := s.ownedDB(s.db).Order("created_at ASC").Find(&models).Error; err != nil {
 		if s.logger != nil {
 			s.logger.Errorw("tiered_store: failed to load persisted memories from db", "err", err)
 		}
@@ -387,6 +400,11 @@ func (s *TieredStore) logBackfillError(msg, entryID string, err error) {
 
 // Append 追加一条 TieredEntry 到对应 tier+scope 桶。
 func (s *TieredStore) Append(ctx context.Context, entry TieredEntry) error {
+	var err error
+	entry, err = s.ownedEntry(ctx, entry)
+	if err != nil {
+		return err
+	}
 	if entry.Tier == Tier1LongTerm && s.BlocksNewFact(entry.Scope, entry.Content) {
 		return nil
 	}
@@ -608,7 +626,7 @@ func (s *TieredStore) remove(_ context.Context, tier MemoryTier, scope Scope, en
 			s.buckets[key] = append(bucket[:i], bucket[i+1:]...)
 			s.mu.Unlock()
 			if tombstone && s.tomb != nil {
-				s.tomb.add(scope, e.Content, e.Source)
+				s.tomb.add(s.tombstoneScope(scope), e.Content, e.Source)
 			}
 			if s.db != nil {
 				s.persistDelete(tier, scope, entryID)
@@ -624,7 +642,13 @@ func (s *TieredStore) remove(_ context.Context, tier MemoryTier, scope Scope, en
 // 操作在单个写锁内完成，避免 Delete+Append 分离时的中间状态
 // （如 Append 失败但旧条目已被删除导致数据丢失）。
 // 如果 deleteID 为空或不存在，则仅追加新条目。
-func (s *TieredStore) Replace(_ context.Context, tier MemoryTier, scope Scope, deleteID string, newEntry TieredEntry) error {
+func (s *TieredStore) Replace(ctx context.Context, tier MemoryTier, scope Scope, deleteID string, newEntry TieredEntry) error {
+	newEntry.Scope = scope
+	var err error
+	newEntry, err = s.ownedEntry(ctx, newEntry)
+	if err != nil {
+		return err
+	}
 	newEntry.Tier = tier
 
 	if newEntry.ID == "" {
@@ -1010,7 +1034,7 @@ func (s *TieredStore) persistUpsert(ctx context.Context, e TieredEntry) {
 		return
 	}
 	model := tieredEntryToModel(e)
-	if err := s.db.WithContext(ctx).Save(&model).Error; err != nil {
+	if err := s.persistOwnedEntry(ctx, &model); err != nil {
 		// 非致命：内存副本已更新，仅持久化同步失败。
 		// 避免阻塞记忆写入主流程，但必须上报，否则数据静默丢失不可观测。
 		if s.logger != nil {
@@ -1030,16 +1054,17 @@ func (s *TieredStore) persistDelete(tier MemoryTier, scope Scope, id string) {
 	if s.db == nil {
 		return
 	}
-	if err := s.db.Where("id = ? AND tier = ? AND scope_kind = ? AND scope_id = ?",
+	result := s.ownedDB(s.db).Where("id = ? AND tier = ? AND scope_kind = ? AND scope_id = ?",
 		id, int(tier), string(scope.Kind), scope.ID).
-		Delete(&dao.TieredMemoryModel{}).Error; err != nil {
+		Delete(&dao.TieredMemoryModel{})
+	if err := result.Error; err != nil {
 		if s.logger != nil {
 			s.logger.Errorw("tiered_store: persist delete failed",
 				"id", id, "tier", int(tier),
 				"scope_kind", string(scope.Kind), "scope_id", scope.ID, "err", err)
 		}
 	}
-	if s.vec.Enabled() {
+	if result.Error == nil && result.RowsAffected > 0 && s.vec.Enabled() {
 		s.vec.Delete(id)
 	}
 }
@@ -1078,7 +1103,7 @@ func (s *TieredStore) persistClearTierScope(tier MemoryTier, scope Scope) {
 	if s.db == nil {
 		return
 	}
-	if err := s.db.Where("tier = ? AND scope_kind = ? AND scope_id = ?",
+	if err := s.ownedDB(s.db).Where("tier = ? AND scope_kind = ? AND scope_id = ?",
 		int(tier), string(scope.Kind), scope.ID).
 		Delete(&dao.TieredMemoryModel{}).Error; err != nil {
 		if s.logger != nil {
@@ -1093,7 +1118,7 @@ func (s *TieredStore) persistClearTier(tier MemoryTier) {
 	if s.db == nil {
 		return
 	}
-	if err := s.db.Where("tier = ?", int(tier)).Delete(&dao.TieredMemoryModel{}).Error; err != nil {
+	if err := s.ownedDB(s.db).Where("tier = ?", int(tier)).Delete(&dao.TieredMemoryModel{}).Error; err != nil {
 		if s.logger != nil {
 			s.logger.Errorw("tiered_store: persist clear-tier failed",
 				"tier", int(tier), "err", err)

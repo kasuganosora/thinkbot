@@ -286,7 +286,7 @@ func (s *TieredStore) Forgotten(scope Scope, content string) bool {
 	if s == nil || s.tomb == nil {
 		return false
 	}
-	return s.tomb.has(scope.Key(), MemoryFingerprint(content))
+	return s.tomb.has(s.tombstoneScope(scope).Key(), MemoryFingerprint(content))
 }
 
 // BlocksNewFact is true when writing the statement as a current L1 fact would
@@ -319,6 +319,12 @@ var ErrBlockedFact = errors.New("memory: statement was deleted and cannot be wri
 // differs by punctuation updates the current row in place. A replacement that
 // was deleted is refused and the current row stays visible.
 func (s *TieredStore) Supersede(ctx context.Context, scope Scope, oldID string, replacement TieredEntry) error {
+	replacement.Scope = scope
+	var err error
+	replacement, err = s.ownedEntry(ctx, replacement)
+	if err != nil {
+		return err
+	}
 	if s.Forgotten(scope, replacement.Content) {
 		return ErrBlockedFact
 	}

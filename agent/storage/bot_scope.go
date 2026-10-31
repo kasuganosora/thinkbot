@@ -21,7 +21,7 @@ func ownedByBot(tx *gorm.DB, bot string) *gorm.DB {
 	if bot == "" {
 		return tx
 	}
-	return tx.Where("((scope_kind = ? AND scope_id = ? AND ("+metadataBotID+" IS NULL OR "+metadataBotID+" = ?)) OR (scope_kind <> ? AND "+metadataBotID+" = ?))", string(memory.ScopeBot), bot, bot, string(memory.ScopeBot), bot)
+	return memory.OwnedMemoryRows(tx, bot)
 }
 
 func (r *SQLiteRepository) forScope(tx *gorm.DB, scope memory.Scope) *gorm.DB {
