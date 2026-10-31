@@ -432,6 +432,14 @@ func validateSandboxCPULimit(raw string) error {
 	return nil
 }
 
+// effectiveSandboxCPULimit also restores the builtin default when the setting is cleared.
+func (s *BotService) effectiveSandboxCPULimit() string {
+	if limit, configured := s.sandboxCPULimitOverride(); configured {
+		return limit
+	}
+	return sandbox.DefaultConfig().CPULimit
+}
+
 // ApplySandboxCPULimit 把当前的 sandbox.cpu_limit 就地应用到该 bot 的运行中容器
 // （不重建）。用于「系统配置里改完立刻生效」。
 //
@@ -440,10 +448,7 @@ func validateSandboxCPULimit(raw string) error {
 //     --cpus，只能等容器重建；
 //   - 未配置该键、或容器不存在（下次创建自然会带上）时返回 (false, nil)。
 func (s *BotService) ApplySandboxCPULimit(ctx context.Context, botID string) (bool, error) {
-	limit, configured := s.sandboxCPULimitOverride()
-	if !configured {
-		return false, nil
-	}
+	limit := s.effectiveSandboxCPULimit()
 	mgr, err := s.WorkspaceManagerForBot(botID)
 	if err != nil {
 		return false, err
@@ -465,10 +470,7 @@ func (s *BotService) ApplySandboxCPULimit(ctx context.Context, botID string) (bo
 // BotWorkspaceManager，其构造函数顺带触发镜像预热，N 个 bot 各建一个就是 N 次
 // 预热。docker update 只按容器名操作，不依赖 manager 的 per-bot 状态。
 func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) bool {
-	limit, configured := s.sandboxCPULimitOverride()
-	if !configured {
-		return false
-	}
+	limit := s.effectiveSandboxCPULimit()
 	defs, err := s.ListDefinitions()
 	if err != nil {
 		s.logger.Warnw("apply sandbox cpu limit: list bots failed", "err", err)

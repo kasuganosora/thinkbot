@@ -61,10 +61,11 @@ type imageBuild struct {
 	tag  string
 	done chan struct{}
 
-	mu     sync.Mutex
-	err    error
-	tail   []string // 构建输出尾部，失败时拼进错误
-	sawTag bool     // stdout 里出现过成功标记
+	mu         sync.Mutex
+	finishedAt time.Time
+	err        error
+	tail       []string // 构建输出尾部，失败时拼进错误
+	sawTag     bool     // stdout 里出现过成功标记
 }
 
 // builds 记录进行中/已结束的后台构建，按 tag 去重。
@@ -164,6 +165,20 @@ func ensureImageTag(tag string, logger *zap.SugaredLogger) (string, error) {
 
 	buildsMu.Lock()
 	b := builds[tag]
+	if b != nil {
+		select {
+		case <-b.done:
+			// A successful build is no longer authoritative after image removal.
+			// Retry transient failures after a cooldown, without a restart or a build storm.
+			b.mu.Lock()
+			retry := b.err == nil || time.Since(b.finishedAt) >= 30*time.Second
+			b.mu.Unlock()
+			if retry {
+				b = nil
+			}
+		default:
+		}
+	}
 	if b == nil {
 		b = &imageBuild{tag: tag, done: make(chan struct{})}
 		builds[tag] = b
@@ -201,6 +216,7 @@ func (b *imageBuild) run(logger *zap.SugaredLogger) {
 	err := b.doBuild(logger)
 	b.mu.Lock()
 	b.err = err
+	b.finishedAt = time.Now()
 	b.mu.Unlock()
 	if err != nil {
 		logger.Errorw("builtin bot image build failed", "image", b.tag, "err", err)

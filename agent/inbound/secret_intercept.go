@@ -3,7 +3,6 @@ package inbound
 import (
 	"fmt"
 	"strings"
-	"unicode"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/internal/interaction"
@@ -27,8 +26,9 @@ import (
 //
 // 返回 (secretName, intercepted)。intercepted=false 时 msg 原样不动：
 //   - 本会话没有 pending 密钥请求；
-//   - 文本看起来明显不是密钥（looksLikeConversation），按普通消息放行，
-//     请求继续保持 pending，用户下一条才是密钥。
+//   - 回复为空，请求继续保持 pending。
+//
+// 非空回复一律按密钥处理：自然语言、Unicode 和问号也可能是密码。
 func InterceptSecretReply(msg *core.Message) (string, bool) {
 	if msg == nil {
 		return "", false
@@ -45,7 +45,7 @@ func InterceptSecretReply(msg *core.Message) (string, bool) {
 	if !reg.HasPendingSecret(msg.BotID, msg.Channel) {
 		return "", false
 	}
-	if looksLikeConversation(candidate) {
+	if candidate == "" {
 		return "", false
 	}
 	name, ok := reg.ConsumeSecret(msg.BotID, msg.Channel, candidate)
@@ -75,27 +75,4 @@ func secretCandidate(msg *core.Message) string {
 		}
 	}
 	return strings.TrimSpace(msg.Text)
-}
-
-// looksLikeConversation 判断一条回复是不是「明显在说话，而不是在贴密钥」。
-//
-// 只放行**结构上**不可能是凭据的文本：令牌 / 口令 / API key 不会含中日韩文字，
-// 也不会以问号结尾。宁可把边界情况当密钥吞掉（模型只会看到一句「已登记」），
-// 也不让真实值以明文进 LLM——所以这里刻意只认两类强信号，不做打分。
-func looksLikeConversation(s string) bool {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return true
-	}
-	for _, r := range s {
-		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
-			return true
-		}
-	}
-	// 以问号结尾的整句（「how do I get it?」）。凭据末尾带 '?' 极少见，
-	// 且要求中间有空格（是句子而不是一个 token）。
-	if strings.HasSuffix(s, "?") || strings.HasSuffix(s, "？") {
-		return strings.ContainsAny(s, " \t")
-	}
-	return false
 }
