@@ -202,10 +202,10 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 }
 
 // interceptWebSecretReply 对 Web 聊天文本做密钥回复拦截，返回应继续使用的文本
-// （命中时为脱敏提示，否则原样）。会话键必须与 WebChannel.InjectWithID 构造的
-// msg.Channel 一致——secret_input 正是按它登记 pending 请求的。
-func (s *Server) interceptWebSecretReply(botID, userID, text string) string {
-	msg := core.Message{BotID: botID, Channel: "web:" + userID, Text: text}
+// （命中时为脱敏提示，重发已登记的值也会再次脱敏）。与工具侧一致，
+// 通过用户渠道和前端 sessionID 共同限定密钥请求，防止同用户不同标签页串话。
+func (s *Server) interceptWebSecretReply(botID, userID, sessionID, text string) string {
+	msg := core.Message{BotID: botID, Channel: "web:" + userID, Text: text, Metadata: map[string]any{agenttools.ExtraKeyChatSessionID: sessionID}}
 	if name, ok := inbound.InterceptSecretReply(&msg); ok {
 		s.logger.Infow("chat: user-provided secret redacted before persistence",
 			"bot_id", botID, "secret_name", name)
@@ -264,7 +264,7 @@ func (s *Server) handleChatAppend(c *gin.Context) {
 
 	// append 直接注入进行中的编排，不经过 Ingress：密钥回复必须在这里拦截，
 	// 否则上一轮还没结束时用户回复的密钥会以明文进 LLM 并落库。
-	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.Text)
+	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.SessionID, req.Text)
 	accepted := s.botSvc.AppendToMessage(req.BotID, req.TraceID, req.Text)
 	if accepted {
 		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, req.TraceID, req.SessionID); err != nil {
@@ -534,7 +534,7 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	}
 	// 密钥回复拦截必须早于 SaveMessage：本函数先落库再 Inject，若只靠 Ingress
 	// 拦截，明文已经进了 chat_messages，下一轮又会作为 chat_history 喂给 LLM。
-	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.Text)
+	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.SessionID, req.Text)
 	if cmd := command.Parse(req.Text); cmd != nil {
 		s.handleSlashCommand(c, cmd, &req)
 		return

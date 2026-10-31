@@ -10,8 +10,7 @@ import (
 )
 
 // TestInterceptWebSecretReply Web 聊天先落库再投递：拦截必须在 handler 里、
-// 早于 SaveMessage 完成，且用的会话键要与 WebChannel.Inject 的 Channel 一致
-// （否则 secret_input 登记的请求永远匹配不上，明文照样落库）。
+// 早于 SaveMessage 完成，并与工具注册时使用相同的用户+前端会话键。
 func TestInterceptWebSecretReply(t *testing.T) {
 	v, err := secret.New("")
 	if err != nil {
@@ -25,7 +24,7 @@ func TestInterceptWebSecretReply(t *testing.T) {
 	if _, err := interaction.Default().RegisterQuestion(interaction.Question{
 		ID:          reqID,
 		BotID:       bot,
-		ChatID:      "web:" + user, // 与 WebChannel.InjectWithID 构造的 Channel 相同
+		ChatID:      interaction.SecretReplyChatID("web:"+user, "session-one"),
 		Question:    "示例用途",
 		Kind:        interaction.KindSecret,
 		SecretName:  "svc.token",
@@ -41,12 +40,19 @@ func TestInterceptWebSecretReply(t *testing.T) {
 	s := &Server{logger: zap.NewNop().Sugar()}
 
 	// 别的用户的会话不受影响。
-	if got := s.interceptWebSecretReply(bot, "43", "RAW_SECRET_VALUE_other1234"); got != "RAW_SECRET_VALUE_other1234" {
+	if got := s.interceptWebSecretReply(bot, "43", "session-one", "RAW_SECRET_VALUE_other1234"); got != "RAW_SECRET_VALUE_other1234" {
 		t.Fatalf("other user's message intercepted: %q", got)
 	}
 
+	// Another tab owned by the same user must not consume this session's request.
+	if got := s.interceptWebSecretReply(bot, user, "session-two", "normal message from another tab"); got != "normal message from another tab" {
+		t.Fatalf("cross-session interception: %q", got)
+	}
+	if got := s.interceptWebSecretReply(bot, user, "session-two", "/cancel-secret"); got != "/cancel-secret" {
+		t.Fatalf("cross-session cancel: %q", got)
+	}
 	const raw = "虚构密码 web12345?"
-	got := s.interceptWebSecretReply(bot, user, raw)
+	got := s.interceptWebSecretReply(bot, user, "session-one", raw)
 	if strings.Contains(got, raw) {
 		t.Fatalf("plaintext would be persisted: %q", got)
 	}
@@ -68,7 +74,7 @@ func TestInterceptWebSecretReplyRedactsRegisteredRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Server{logger: zap.NewNop().Sugar()}
-	if got := s.interceptWebSecretReply("bot", "user", raw); strings.Contains(got, raw) {
+	if got := s.interceptWebSecretReply("bot", "user", "session-one", raw); strings.Contains(got, raw) {
 		t.Fatal("retry after consumed request would persist plaintext")
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -405,6 +406,19 @@ func (r *Registry) RegisterQuestion(q Question) (Question, error) {
 	r.sessionQuestions[key] = append(r.sessionQuestions[key], q.ID)
 	r.mu.Unlock()
 	return q, nil
+}
+
+// SecretReplyChatID scopes browser requests to a conversation as well as a user.
+// Non-web platforms already identify the conversation in chatID. An empty result
+// means a web caller lacks the required session and must not register/consume.
+func SecretReplyChatID(chatID, sessionID string) string {
+	if !strings.HasPrefix(chatID, "web:") {
+		return chatID
+	}
+	if sessionID == "" {
+		return ""
+	}
+	return chatID + "\x00" + sessionID
 }
 
 // ConsumeSecret 尝试把 text 作为该会话某个 pending 密钥请求的应答消费掉。

@@ -124,6 +124,10 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		return nil, fmt.Errorf("secret_input: 未知 action %q", action)
 	}
 
+	chatID := interaction.SecretReplyChatID(meta.ChatID, agenttools.CallOriginFromContext(ctx.Context).SessionID)
+	if chatID == "" {
+		return nil, fmt.Errorf("secret_input: missing web conversation identity")
+	}
 	purpose := strings.TrimSpace(in.Purpose)
 	if purpose == "" {
 		return nil, fmt.Errorf("secret_input: purpose 不能为空（需向用户说明用途）")
@@ -145,7 +149,7 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 	q := interaction.Question{
 		ID:          questionID,
 		BotID:       meta.BotID,
-		ChatID:      meta.ChatID,
+		ChatID:      chatID,
 		Question:    purpose,
 		Kind:        interaction.KindSecret,
 		SecretName:  name,
