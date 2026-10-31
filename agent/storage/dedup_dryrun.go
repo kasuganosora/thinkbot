@@ -71,7 +71,7 @@ func (r *SQLiteRepository) DryRunDedupGroups(ctx context.Context, opt DedupDryRu
 	scopes := opt.Scopes
 	if len(scopes) == 0 {
 		var rows []struct{ ScopeKind, ScopeID string }
-		if err := r.db.WithContext(ctx).Model(&dao.EntryModel{}).Where(activeWhere, activeArgs...).
+		if err := r.owned(r.db.WithContext(ctx)).Model(&dao.EntryModel{}).Where(activeWhere, activeArgs...).
 			Distinct("scope_kind", "scope_id").Order("scope_kind, scope_id").Find(&rows).Error; err != nil {
 			return nil, errs.Wrap(err, "dedup dry-run: list scopes")
 		}
@@ -80,12 +80,15 @@ func (r *SQLiteRepository) DryRunDedupGroups(ctx context.Context, opt DedupDryRu
 		}
 	}
 	vec := r.Vec()
+	if opt.Reindex && r.config.BotID != "" {
+		return nil, errs.New("dedup dry-run: shared vector rebuild requires an unscoped maintenance repository")
+	}
 	if opt.Reindex && vec.Enabled() {
 		if err := vec.Rebuild(); err != nil {
 			return nil, errs.Wrap(err, "dedup dry-run: rebuild memory_vec")
 		}
 		var models []dao.EntryModel
-		if err := r.db.WithContext(ctx).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
+		if err := r.owned(r.db.WithContext(ctx)).Where(activeWhere, activeArgs...).Find(&models).Error; err != nil {
 			return nil, errs.Wrap(err, "dedup dry-run: load entries")
 		}
 		for _, e := range modelsToActiveEntries(models) {
