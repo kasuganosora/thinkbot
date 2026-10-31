@@ -1357,7 +1357,11 @@ async function resumeContinuation(sessionId) {
         recoverFailedSend(key, text, [], '补充投递结果未确认。内容已保留，请先检查回复，避免重复发送。')
         return { status: 'unknown' }
       })
-      .catch(() => {
+      .catch((err) => {
+        if (typeof err?.userText === 'string') {
+          text = err.userText
+          if (stillHere()) messages.value = messages.value.map(m => m.id === userMsg.id ? { ...m, content: text } : m)
+        }
         if (stillHere()) markAppendUnconfirmed(userMsg.id)
         recoverFailedSend(key, text, [], '补充投递结果未确认。内容已保留，请先检查回复，避免重复发送。')
         return { status: 'unknown' }

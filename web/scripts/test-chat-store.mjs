@@ -163,6 +163,19 @@ await test('chat conversation and delivery regressions', async (t) => {
       assert.equal(store.composerDraft.text, '[密钥登记失败，原文已隐藏]')
       assert(!JSON.stringify(store.messages).includes('fictional-secret'))
     })
+    await t.test('append HTTP failure restores canonical text after server redaction', async () => {
+      const store = await makeStore()
+      const run = deferred()
+      chatApi.send = (_bot, _text, handlers) => { handlers.onStart('secret-append-error'); return run.promise }
+      chatApi.append = async () => { throw Object.assign(new Error('persistence unavailable'), { userText: '[密钥已隐藏]' }) }
+      const turn = store.sendMessage('initial')
+      const append = store.appendToCurrentReply('fictional-secret-123456')
+      assert.equal((await append.completion).status, 'unknown')
+      assert.equal(store.composerDraft.text, '[密钥已隐藏]')
+      assert(!JSON.stringify(store.messages).includes('fictional-secret'))
+      run.resolve({ text: 'done' })
+      await turn.completion
+    })
     await t.test('rejected secret append restores only server-normalized text', async () => {
       const store = await makeStore()
       const run = deferred()

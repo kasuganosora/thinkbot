@@ -114,6 +114,9 @@ export async function request(method, url, body, query, options = {}) {
   if (json.code !== 0) {
     const err = new Error(json.message || '请求失败')
     err.code = json.code
+    // Chat may have consumed/redacted a secret before a later operation failed.
+    // Preserve only its canonical safe text, never the original request body.
+    if (typeof json.data?.userText === 'string') err.userText = json.data.userText
     throw err
   }
   return json.data
