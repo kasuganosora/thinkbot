@@ -128,6 +128,7 @@ export const APP_ICONS = Object.freeze({
   'lock-off': LockOffIcon,
   'lock-on': LockOnIcon,
   'minus-circle': MinusCircleIcon,
+  'mastodon': ChatBubble1Icon,
   'misskey': ChatBubbleSmileIcon,
   'money': MoneyIcon,
   'more': MoreIcon,

@@ -2,7 +2,7 @@
   <div>
     <div class="toolbar">
       <t-space>
-        <span class="hint">该 Bot 的分层记忆（L0 工作 / L1 长期 / L2 场景 / L3 画像）。L3 是梦境蒸馏的用户/Bot 画像，可按条删除。</span>
+        <span class="hint">记忆在同一 Bot 的会话间共享。分层记忆（L0 工作 / L1 长期 / L2 场景 / L3 画像）。L3 是梦境蒸馏的用户/Bot 画像，可按条删除。此页仅管理分层记忆，记忆工具保存的笔记不在此列表。</span>
         <t-select v-model="tier" :options="tierOptions" style="width: 140px" @change="load" data-testid="memory-tier" />
       </t-space>
       <t-space>
