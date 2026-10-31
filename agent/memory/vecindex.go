@@ -403,8 +403,8 @@ func (v *VecIndex) Upsert(scopeKey, entryID, content string) {
 	_, _ = v.upsert(scopeKey, entryID, content, false)
 }
 
-// upsert 写入一条向量。onlyIfAbsent 为 true 时，已有的 entry_id 保持不动。
-// 增量写入仍走 Upsert（先删后插）。启动补索引用 onlyIfAbsent，避免重写已有行。
+// upsert 写入一条向量。onlyIfAbsent 为 true 时只修正已有行的 scope_key，
+// 不覆盖 embedding，防止启动快照覆盖并发写入的新内容。
 func (v *VecIndex) upsert(scopeKey, entryID, content string, onlyIfAbsent bool) (bool, error) {
 	if !v.Enabled() || entryID == "" || content == "" {
 		return false, nil
@@ -418,7 +418,8 @@ func (v *VecIndex) upsert(scopeKey, entryID, content string, onlyIfAbsent bool) 
 			return false, err
 		}
 		if n > 0 {
-			return false, nil
+			res := v.db.Exec("UPDATE memory_vec SET scope_key = ? WHERE entry_id = ? AND scope_key <> ?", scopeKey, entryID, scopeKey)
+			return res.RowsAffected > 0, res.Error
 		}
 	}
 	if err := v.db.Exec("DELETE FROM memory_vec WHERE entry_id = ?", entryID).Error; err != nil {
@@ -435,24 +436,33 @@ func (v *VecIndex) upsert(scopeKey, entryID, content string, onlyIfAbsent bool) 
 
 // listEntryIDs 非 KNN 地列出已索引的 entry_id。启动补索引用它跳过已有行。
 func (v *VecIndex) listEntryIDs(ctx context.Context) (map[string]struct{}, error) {
+	scopes, err := v.listEntryScopes(ctx)
+	out := make(map[string]struct{}, len(scopes))
+	for id := range scopes {
+		out[id] = struct{}{}
+	}
+	return out, err
+}
+
+func (v *VecIndex) listEntryScopes(ctx context.Context) (map[string]string, error) {
 	if !v.Enabled() {
-		return map[string]struct{}{}, nil
+		return map[string]string{}, nil
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	rows, err := v.db.WithContext(ctx).Raw("SELECT entry_id FROM memory_vec").Rows()
+	rows, err := v.db.WithContext(ctx).Raw("SELECT entry_id, scope_key FROM memory_vec").Rows()
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string]struct{})
+	out := make(map[string]string)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, scope string
+		if err := rows.Scan(&id, &scope); err != nil {
 			return nil, err
 		}
 		if id != "" {
-			out[id] = struct{}{}
+			out[id] = scope
 		}
 	}
 	if err := rows.Err(); err != nil {

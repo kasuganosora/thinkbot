@@ -361,7 +361,7 @@ func (s *TieredStore) startVecBackfill(entries []TieredEntry) {
 func (s *TieredStore) backfillVec(ctx context.Context, entries []TieredEntry) {
 	items := make([]VecItem, 0, len(entries))
 	for _, e := range entries {
-		items = append(items, VecItem{ScopeKey: e.Scope.Key(), EntryID: e.ID, Content: e.Content})
+		items = append(items, VecItem{ScopeKey: VectorScopeKey(e.Scope, e.Metadata), EntryID: e.ID, Content: e.Content})
 	}
 	_, _ = s.vec.BackfillMissing(ctx, "tiered_memories", items, s.logger)
 }
@@ -1021,7 +1021,7 @@ func (s *TieredStore) persistUpsert(ctx context.Context, e TieredEntry) {
 		return
 	}
 	if s.vec.Enabled() {
-		s.vec.Upsert(e.Scope.Key(), e.ID, e.Content)
+		s.vec.Upsert(VectorScopeKey(e.Scope, e.Metadata), e.ID, e.Content)
 	}
 }
 
@@ -1054,15 +1054,17 @@ func (s *TieredStore) VecNeighbors(scope Scope, text string, k int) []TieredEntr
 	if s == nil || !s.vec.Enabled() {
 		return nil
 	}
-	hits := s.vec.Search(scope.Key(), text, k)
-	if len(hits) == 0 {
-		return nil
-	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	byID := map[string]TieredEntry{}
+	keys := map[string]bool{}
 	for _, e := range s.buckets[tierScopeKey(Tier1LongTerm, scope)] {
 		byID[e.ID] = e
+		keys[VectorScopeKey(e.Scope, e.Metadata)] = true
+	}
+	s.mu.RUnlock()
+	var hits []Hit
+	for key := range keys {
+		hits = append(hits, s.vec.Search(key, text, k)...)
 	}
 	out := make([]TieredEntry, 0, len(hits))
 	for _, h := range hits {
