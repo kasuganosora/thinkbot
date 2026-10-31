@@ -78,6 +78,16 @@ func (r *MemoryRepository) UseVec(v *VecIndex) {
 	r.mu.Unlock()
 }
 
+// Vec 返回已接上的索引。未启用时为 nil。
+func (r *MemoryRepository) Vec() *VecIndex {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.vec
+}
+
 // ============================================================================
 // Store 实现（写入侧）
 // ============================================================================
