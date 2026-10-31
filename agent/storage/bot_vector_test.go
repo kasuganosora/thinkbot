@@ -88,3 +88,49 @@ func TestSQLiteRepositoryBotVectorsPreserveSharingAndFilters(t *testing.T) {
 		t.Fatalf("other bot vector not preserved: %+v", hits)
 	}
 }
+
+func TestSQLiteRepositoryBotVectorsCompactorAndReindex(t *testing.T) {
+	gdb, err := db.OpenSQLiteWithLogger(filepath.Join(t.TempDir(), "vec.db"), gormlogger.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dao.Migrate(gdb); err != nil {
+		t.Fatal(err)
+	}
+	a := NewSQLiteRepository(gdb, SQLiteRepositoryConfig{BotID: "a"})
+	b := NewSQLiteRepository(gdb, SQLiteRepositoryConfig{BotID: "b"})
+	if !a.Vec().Enabled() {
+		t.Skip("sqlite-vec unavailable")
+	}
+	ctx := context.Background()
+	scope := memory.ChannelScope("shared")
+	for _, item := range []struct {
+		repo  *SQLiteRepository
+		id    string
+		scope memory.Scope
+	}{
+		{a, "seed", scope}, {a, "neighbor", scope}, {a, "another-scope", memory.UserScope("u")}, {b, "other-bot", scope},
+	} {
+		if err := item.repo.Append(ctx, memory.Entry{ID: item.id, Scope: item.scope, Content: "fictional orchard amber"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed, err := a.FetchEntries(ctx, []string{"seed"})
+	if err != nil || len(seed) != 1 {
+		t.Fatalf("seed=%+v err=%v", seed, err)
+	}
+	c := &SQLiteCompactor{repo: a, sel: dedupSelectConfig{topK: 10, minSim: 0.1, maxMergedChars: 1000}}
+	check := func() {
+		t.Helper()
+		got := c.vecNeighbours(ctx, scope, a.Vec(), seed[0])
+		if len(got) != 1 || got[0].ID != "neighbor" {
+			t.Fatalf("neighbors=%+v", got)
+		}
+	}
+	check()
+	maintenance := NewSQLiteRepository(gdb)
+	if _, err := maintenance.DryRunDedupGroups(ctx, DedupDryRunOptions{Reindex: true}); err != nil {
+		t.Fatal(err)
+	}
+	check()
+}

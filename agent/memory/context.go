@@ -596,9 +596,26 @@ func fuseRankings(lexical, vector []string) []string {
 // scopeAllows reports whether an entry belongs to one of the scopes being recalled.
 // Vector fusion loads rows by id, which is not itself scoped, so a hit whose
 // row lives in another bot's scope is dropped.
-func scopeAllows(e Entry, allowed map[string]struct{}) bool {
+func scopeAllows(e Entry, allowed map[string]struct{}, trustedBot ...string) bool {
 	if len(allowed) == 0 {
 		return false
+	}
+	if len(trustedBot) > 0 && trustedBot[0] != "" {
+		botID := trustedBot[0]
+		owner := e.Metadata["bot_id"]
+		if e.Scope.Kind == ScopeBot {
+			if e.Scope.ID != botID || (owner != nil && owner != botID) {
+				return false
+			}
+		} else if owner != botID {
+			return false
+		}
+		if _, ok := allowed[BotScope(botID).Key()]; ok {
+			return true
+		}
+		if _, ok := allowed[(Scope{Kind: ScopeAll}).Key()]; ok {
+			return true
+		}
 	}
 	_, ok := allowed[e.Scope.Key()]
 	return ok
@@ -610,23 +627,34 @@ func (m *ContextManager) fuseWithVec(ctx context.Context, lexical []Entry, scope
 	if m == nil || text == "" || !m.vec.Enabled() {
 		return lexical
 	}
-	byID := map[string]Entry{}
-	var lexIDs []string
-	for _, e := range lexical {
-		if e.ID == "" || !RecallVisible(e) {
-			continue
-		}
-		byID[e.ID] = e
-		lexIDs = append(lexIDs, e.ID)
+	botID := ""
+	if bound, ok := m.retriever.(interface{ BoundBotID() string }); ok {
+		botID = bound.BoundBotID()
 	}
-	var vecIDs []string
-	seenHit := map[string]bool{}
-	var missing []string
 	allowed := make(map[string]struct{}, len(scopes))
 	for _, scope := range scopes {
 		allowed[scope.Key()] = struct{}{}
 	}
-	for _, scope := range scopes {
+	byID := map[string]Entry{}
+	var lexIDs []string
+	filtered := make([]Entry, 0, len(lexical))
+	for _, e := range lexical {
+		if e.ID == "" || !RecallVisible(e) || !scopeAllows(e, allowed, botID) {
+			continue
+		}
+		filtered = append(filtered, e)
+		byID[e.ID] = e
+		lexIDs = append(lexIDs, e.ID)
+	}
+	lexical = filtered
+	var vecIDs []string
+	seenHit := map[string]bool{}
+	var missing []string
+	vectorScopes := scopes
+	if botID != "" {
+		vectorScopes = []Scope{BotScope(botID)}
+	}
+	for _, scope := range vectorScopes {
 		hits := m.vec.Search(scope.Key(), text, vecFusionK)
 		// nil is a failed search for this scope, not "vec is off".
 		// Keep hits already collected from the other scopes; if every
@@ -656,7 +684,7 @@ func (m *ContextManager) fuseWithVec(ctx context.Context, lexical []Entry, scope
 			return lexical
 		} else {
 			for _, e := range got {
-				if e.ID != "" && RecallVisible(e) && scopeAllows(e, allowed) {
+				if e.ID != "" && RecallVisible(e) && scopeAllows(e, allowed, botID) {
 					byID[e.ID] = e
 				}
 			}
