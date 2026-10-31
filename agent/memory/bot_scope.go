@@ -16,6 +16,8 @@ type botRepository struct {
 	botID string
 }
 
+func (r *botRepository) BoundBotID() string { return r.botID }
+
 func (r *botRepository) owns(e Entry) bool {
 	if r.botID == "" {
 		return false
