@@ -820,25 +820,55 @@ func (c *botContainer) ElevateMemory(ctx context.Context, suggestMB int) (int, e
 // 而不是假装成功（实测：--memory 0 / --cpus 0 都不会改变现有上限）。
 var ErrLimitNotClearable = errs.New("bot_container: docker update cannot clear an existing limit; recreate the container to remove it")
 
-// containerExists 判断容器是否存在（不论运行与否）。
-// 只用于"有就改、没有就不必改"的场景，故意不调 ensure()——那会在容器缺失时新建，
-// 而配置变更不应该顺手把容器拉起来。
-func (c *botContainer) containerExists(ctx context.Context) bool {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.Name}}", c.container)
-	cmd.Stdout = io.Discard
+// hostConfigLimits 读取容器当前生效的 CPU / 内存上限：
+//   - cpuNano：docker 内部以 NanoCpus 计量，0 表示未设上限；
+//   - memBytes：0 表示未设上限；
+//   - ok=false：容器不存在（或 inspect 失败）。
+//
+// 故意不调 ensure()——那会在容器缺失时新建，而配置变更不应该顺手把容器拉起来。
+func (c *botContainer) hostConfigLimits(ctx context.Context) (cpuNano int64, memBytes int64, ok bool) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect",
+		"-f", "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}", c.container)
+	var outBuf bytes.Buffer
+	cmd.Stdout = &outBuf
 	cmd.Stderr = io.Discard
-	return cmd.Run() == nil
+	if err := cmd.Run(); err != nil {
+		return 0, 0, false
+	}
+	fields := strings.Fields(strings.TrimSpace(outBuf.String()))
+	if len(fields) < 2 {
+		return 0, 0, true
+	}
+	// 解析失败按"未设上限"处理：宁可多报一次「无需改动」，也不要因为格式差异
+	// 把本来就没限制的容器判成需要重建。
+	cpuNano, _ = strconv.ParseInt(fields[0], 10, 64)
+	memBytes, _ = strconv.ParseInt(fields[1], 10, 64)
+	return cpuNano, memBytes, true
+}
+
+// setCPULimit 回写容器配置里的 CPU 上限，使后续重建沿用在线改过的值。
+func (c *botContainer) setCPULimit(limit string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg.CPULimit = limit
 }
 
 // UpdateCPULimit 就地修改运行中容器的 CPU 上限（不重建容器）。
-// limit 为空表示「不限制」，此时返回 ErrLimitNotClearable。
-// 容器不存在时返回 nil：下次创建容器时自然会用新上限。
+//
+//   - 容器不存在：返回 nil，下次创建容器时自然会用新上限；
+//   - limit 为空（「不限制」）：容器本来就没设过 --cpus 时返回 nil；
+//     已有上限则返回 ErrLimitNotClearable（docker update 取消不掉，只能重建）；
+//   - 其余：docker update 就地生效，并回写配置以免重建时被旧值盖回去。
 func (c *botContainer) UpdateCPULimit(ctx context.Context, limit string) error {
-	if limit == "" {
-		return ErrLimitNotClearable
-	}
-	if !c.containerExists(ctx) {
+	cpuNano, _, ok := c.hostConfigLimits(ctx)
+	if !ok {
 		return nil
+	}
+	if limit == "" {
+		if cpuNano == 0 {
+			return nil // 本就不限制，无需改动
+		}
+		return ErrLimitNotClearable
 	}
 	cmd := exec.CommandContext(ctx, "docker", "update", "--cpus", limit, c.container)
 	var out bytes.Buffer
@@ -848,23 +878,32 @@ func (c *botContainer) UpdateCPULimit(ctx context.Context, limit string) error {
 		return errs.Wrapf(err, "bot_container: docker update --cpus %s %q: %s",
 			limit, c.container, strings.TrimSpace(out.String()))
 	}
+	c.setCPULimit(limit)
 	c.logger.Infow("bot container cpu limit updated in-place (no recreate)",
 		"container", c.container, "cpus", limit)
 	return nil
 }
 
 // UpdateMemoryLimit 就地修改运行中容器的内存上限（不重建容器）。
-// mb <= 0 表示「不限制」，此时返回 ErrLimitNotClearable。
+//
+//   - 容器不存在：返回 nil，下次创建容器时自然会用新上限；
+//   - mb <= 0（「不限制」）：容器本来就没设过 --memory 时返回 nil；
+//     已有上限则返回 ErrLimitNotClearable（docker update 取消不掉，只能重建）；
+//   - 其余：docker update 就地生效，并回写覆盖值以免重建时被旧值盖回去。
 //
 // 必须同时给 --memory-swap：容器创建时 swap 默认是 memory 的 2 倍，单独放大
 // --memory 会被 docker 以 "Memory limit should be smaller than already set
 // memoryswap limit" 拒绝。取 swap = memory 表示不再额外给 swap。
 func (c *botContainer) UpdateMemoryLimit(ctx context.Context, mb int64) error {
-	if mb <= 0 {
-		return ErrLimitNotClearable
-	}
-	if !c.containerExists(ctx) {
+	_, memBytes, ok := c.hostConfigLimits(ctx)
+	if !ok {
 		return nil
+	}
+	if mb <= 0 {
+		if memBytes == 0 {
+			return nil // 本就不限制，无需改动
+		}
+		return ErrLimitNotClearable
 	}
 	limit := fmt.Sprintf("%dm", mb)
 	cmd := exec.CommandContext(ctx, "docker", "update", "--memory", limit, "--memory-swap", limit, c.container)
@@ -875,6 +914,7 @@ func (c *botContainer) UpdateMemoryLimit(ctx context.Context, mb int64) error {
 		return errs.Wrapf(err, "bot_container: docker update --memory %s %q: %s",
 			limit, c.container, strings.TrimSpace(out.String()))
 	}
+	c.SetMemoryOverride(limit)
 	c.logger.Infow("bot container memory limit updated in-place (no recreate)",
 		"container", c.container, "memory", limit)
 	return nil

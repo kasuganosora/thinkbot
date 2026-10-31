@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/mcp"
@@ -66,7 +67,7 @@ func TestMaskMCPEntrySecrets(t *testing.T) {
 }
 
 // TestMergeMCPSecretMap 验证 update 解析：敏感键掩码串沿用旧值、新真实值覆盖、
-// 空串清空、非敏感键掩码串按字面、凭空新增掩码键跳过、非字符串忽略。
+// 空串清空、非敏感键掩码串按字面、凭空新增掩码键报错（不能静默丢凭据）、非字符串忽略。
 func TestMergeMCPSecretMap(t *testing.T) {
 	old := map[string]string{
 		"Authorization": "Bearer real-old-token-123456",
@@ -75,10 +76,13 @@ func TestMergeMCPSecretMap(t *testing.T) {
 	}
 
 	t.Run("masked sensitive key keeps old value", func(t *testing.T) {
-		got := mergeMCPSecretMap(old, map[string]any{
+		got, err := mergeMCPSecretMap(old, map[string]any{
 			"Authorization": mcpSecretMask,
 			"NODE_ENV":      "staging",
 		})
+		if err != nil {
+			t.Fatalf("merge must succeed, got %v", err)
+		}
 		if got["Authorization"] != "Bearer real-old-token-123456" {
 			t.Fatalf("masked sensitive value must be preserved, got %q", got["Authorization"])
 		}
@@ -88,14 +92,20 @@ func TestMergeMCPSecretMap(t *testing.T) {
 	})
 
 	t.Run("new real value overwrites", func(t *testing.T) {
-		got := mergeMCPSecretMap(old, map[string]any{"Authorization": "Bearer fresh-new-token-999"})
+		got, err := mergeMCPSecretMap(old, map[string]any{"Authorization": "Bearer fresh-new-token-999"})
+		if err != nil {
+			t.Fatalf("merge must succeed, got %v", err)
+		}
 		if got["Authorization"] != "Bearer fresh-new-token-999" {
 			t.Fatalf("explicit new value must overwrite, got %q", got["Authorization"])
 		}
 	})
 
 	t.Run("empty string clears sensitive key", func(t *testing.T) {
-		got := mergeMCPSecretMap(old, map[string]any{"API_KEY": ""})
+		got, err := mergeMCPSecretMap(old, map[string]any{"API_KEY": ""})
+		if err != nil {
+			t.Fatalf("merge must succeed, got %v", err)
+		}
 		v, ok := got["API_KEY"]
 		if !ok || v != "" {
 			t.Fatalf("empty string should explicitly clear the key, got %q exists=%v", v, ok)
@@ -103,21 +113,33 @@ func TestMergeMCPSecretMap(t *testing.T) {
 	})
 
 	t.Run("mask on non-sensitive key treated literally", func(t *testing.T) {
-		got := mergeMCPSecretMap(old, map[string]any{"NODE_ENV": mcpSecretMask})
+		got, err := mergeMCPSecretMap(old, map[string]any{"NODE_ENV": mcpSecretMask})
+		if err != nil {
+			t.Fatalf("merge must succeed, got %v", err)
+		}
 		if got["NODE_ENV"] != mcpSecretMask {
 			t.Fatalf("non-sensitive key should accept the literal mask string, got %q", got["NODE_ENV"])
 		}
 	})
 
-	t.Run("masked key with no old value is skipped", func(t *testing.T) {
-		got := mergeMCPSecretMap(old, map[string]any{"NEW_TOKEN": mcpSecretMask})
-		if _, exists := got["NEW_TOKEN"]; exists {
-			t.Fatal("a brand-new masked key cannot be resolved to a real value; it must be skipped")
+	t.Run("masked key with no old value fails instead of dropping the secret", func(t *testing.T) {
+		got, err := mergeMCPSecretMap(old, map[string]any{"NEW_TOKEN": mcpSecretMask})
+		if err == nil {
+			t.Fatal("a masked key with no stored value cannot be resolved; merging must fail")
+		}
+		if !errors.Is(err, ErrMCPMaskUnresolvable) {
+			t.Fatalf("expected ErrMCPMaskUnresolvable, got %v", err)
+		}
+		if got != nil {
+			t.Fatalf("no partial result must be returned on failure, got %v", got)
 		}
 	})
 
 	t.Run("non-string value ignored", func(t *testing.T) {
-		got := mergeMCPSecretMap(old, map[string]any{"PORT": 8080})
+		got, err := mergeMCPSecretMap(old, map[string]any{"PORT": 8080})
+		if err != nil {
+			t.Fatalf("merge must succeed, got %v", err)
+		}
 		if _, exists := got["PORT"]; exists {
 			t.Fatal("non-string value must be ignored")
 		}
@@ -183,8 +205,14 @@ func TestMCPSecretMaskRoundTrip_PreservesRealValue(t *testing.T) {
 	reqEnv["NODE_ENV"] = "staging"
 
 	// 后端 update 解析后：敏感值必须仍是最初的真实值，普通字段改动生效
-	gotEnv := mergeMCPSecretMap(orig.Env, reqEnv)
-	gotHeaders := mergeMCPSecretMap(orig.Headers, reqHeaders)
+	gotEnv, err := mergeMCPSecretMap(orig.Env, reqEnv)
+	if err != nil {
+		t.Fatalf("round-trip env merge must succeed, got %v", err)
+	}
+	gotHeaders, err := mergeMCPSecretMap(orig.Headers, reqHeaders)
+	if err != nil {
+		t.Fatalf("round-trip headers merge must succeed, got %v", err)
+	}
 
 	if gotEnv["Authorization"] != "Bearer real-roundtrip-token-123" {
 		t.Fatalf("round-trip must preserve env secret, got %q", gotEnv["Authorization"])

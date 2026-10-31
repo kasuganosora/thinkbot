@@ -78,10 +78,17 @@ func maskMCPEntries(entries []mcp.BotServerEntry) []mcp.BotServerEntry {
 	return out
 }
 
+// ErrMCPMaskUnresolvable 表示前端回传了掩码串，但本地没有对应的原值可以还原。
+//
+// 典型场景是用户把敏感键改名（旧键消失、新键带着掩码回来）：掩码无法反推出真实
+// 凭据，静默跳过会让凭据在保存时被丢掉，而界面上还显示着已保存。这种情况必须
+// 让请求失败并提示用户重新填写真实值。
+var ErrMCPMaskUnresolvable = errs.New("masked secret cannot be resolved: no stored value for this key; re-enter the real value")
+
 // mergeMCPSecretMap 把前端回传的 env/headers 应用到条目：敏感键且值为
 // mcpSecretMask 时沿用旧值（用户未改动），避免掩码串把真实凭据写回覆盖；
-// 空字符串仍表示显式清空；旧值不存在的新增掩码键无法还原，直接跳过。
-func mergeMCPSecretMap(old map[string]string, req map[string]any) map[string]string {
+// 空字符串仍表示显式清空；旧值不存在的掩码键无法还原，返回 ErrMCPMaskUnresolvable。
+func mergeMCPSecretMap(old map[string]string, req map[string]any) (map[string]string, error) {
 	out := make(map[string]string, len(req))
 	for k, val := range req {
 		s, ok := val.(string)
@@ -89,14 +96,16 @@ func mergeMCPSecretMap(old map[string]string, req map[string]any) map[string]str
 			continue
 		}
 		if mcp.IsSensitiveConfigKey(k) && s == mcpSecretMask {
-			if oldVal, exists := old[k]; exists {
-				out[k] = oldVal
+			oldVal, exists := old[k]
+			if !exists {
+				return nil, errs.Wrapf(ErrMCPMaskUnresolvable, "mcp: key %q", k)
 			}
+			out[k] = oldVal
 			continue
 		}
 		out[k] = s
 	}
-	return out
+	return out, nil
 }
 
 // handleListBotMcp 列出指定 Bot 的 MCP 服务器。
@@ -253,7 +262,12 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 	if v, ok := req["env"]; ok {
 		if env, ok := v.(map[string]any); ok {
 			// 敏感键值为掩码串表示「用户未改动」，沿用旧值，避免回传覆盖真实凭据。
-			sv.Env = mergeMCPSecretMap(sv.Env, env)
+			merged, err := mergeMCPSecretMap(sv.Env, env)
+			if err != nil {
+				Fail(c, errs.BadRequest(err.Error()))
+				return
+			}
+			sv.Env = merged
 		}
 	}
 	if v, ok := req["cwd"].(string); ok {
@@ -264,7 +278,12 @@ func (s *Server) handleUpdateBotMcp(c *gin.Context) {
 	}
 	if v, ok := req["headers"]; ok {
 		if headers, ok := v.(map[string]any); ok {
-			sv.Headers = mergeMCPSecretMap(sv.Headers, headers)
+			merged, err := mergeMCPSecretMap(sv.Headers, headers)
+			if err != nil {
+				Fail(c, errs.BadRequest(err.Error()))
+				return
+			}
+			sv.Headers = merged
 		}
 	}
 	if v, ok := req["enabled"].(bool); ok {
