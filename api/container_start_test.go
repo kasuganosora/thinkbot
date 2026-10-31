@@ -29,7 +29,7 @@ func testBotServiceDB(t *testing.T) (*BotService, *gorm.DB) {
 		logger:          zap.NewNop().Sugar(),
 		mgr:             bot.NewBotManager(zap.NewNop().Sugar(), noop_trace.NewTracerProvider()),
 		botInstances:    make(map[string]*bot.Bot),
-		containerStarts: make(map[string]context.CancelFunc),
+		containerStarts: make(map[string]containerStartAttempt),
 		cancelFuncs:     make(map[string]context.CancelFunc),
 		closeFuncs:      make(map[string]func()),
 		channels:        make(map[string]*WebChannel),

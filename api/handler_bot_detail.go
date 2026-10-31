@@ -18,6 +18,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
+	botsandbox "github.com/kasuganosora/thinkbot/docker/sandbox"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -561,13 +562,35 @@ func (s *Server) handleStartBotContainer(c *gin.Context) {
 	OK(c, s.realBotContainerInfo(c.Request.Context(), botID))
 }
 
+// waitForContainerImage resumes the accepted start after a cold image build.
+// Ordinary errors are terminal; only the explicit in-progress sentinel is retried.
+func waitForContainerImage(ctx context.Context, interval time.Duration, start func(context.Context) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := start(ctx)
+		if !errors.Is(err, botsandbox.ErrImageBuilding) {
+			return err
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // runContainerStart ensures the docker container, starts the agent, then marks
 // the bot running. It must not use the HTTP request context.
 func (s *Server) runContainerStart(botID string, mgr *sandbox.BotWorkspaceManager, ctx context.Context) {
-	defer s.botSvc.FinishContainerStart(botID)
+	completed := false
+	defer func() { s.botSvc.FinishContainerStart(botID, ctx, completed) }()
 	// 这个 goroutine 脱离了 gin 的 recovery 中间件：docker / StartBot 里任何 panic 都会
 	// 直接把整个进程带崩（HTTP 请求里的 panic 由中间件兜住，这里的不会）。
-	// 必须自己兜住，并保留 status=starting，让 StartAll / 用户下次点启动还能重试。
+	// 必须自己兜住；退出时恢复可重试状态。
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Errorw("async container start panicked",
@@ -575,13 +598,13 @@ func (s *Server) runContainerStart(botID string, mgr *sandbox.BotWorkspaceManage
 		}
 	}()
 
-	if err := mgr.StartBot(ctx, botID); err != nil {
+	if err := waitForContainerImage(ctx, time.Second, func(ctx context.Context) error { return mgr.StartBot(ctx, botID) }); err != nil {
 		if ctx.Err() != nil {
 			s.logger.Infow("container start cancelled", "bot_id", botID, "err", err)
 			return
 		}
 		s.logger.Errorw("async container start failed", "bot_id", botID, "err", err)
-		// Leave status=starting so StartAll / a later start can retry.
+		// Deferred cleanup clears starting so the UI can offer a retry.
 		return
 	}
 	if ctx.Err() != nil {
@@ -600,10 +623,8 @@ func (s *Server) runContainerStart(botID string, mgr *sandbox.BotWorkspaceManage
 	if ctx.Err() != nil {
 		return
 	}
-	// Only mark running if the user did not stop us mid-flight.
-	if s.botSvc.BotIntentStatus(botID) == dao.BotStatusStarting {
-		s.botSvc.SetBotStatus(botID, dao.BotStatusRunning)
-	}
+	// Completion is applied by the matching-attempt finalizer only.
+	completed = true
 	s.logger.Infow("async container+bot start finished", "bot_id", botID)
 }
 
