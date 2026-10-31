@@ -694,12 +694,25 @@ func (c *botContainer) stop() error {
 	return nil
 }
 
-// unstop 解除用户停止标记（容器启动前调用），允许 ensure() 再次自动拉起。
-func (c *botContainer) unstop() {
+// start explicitly clears the stop marker and ensures the container under one
+// lock. A cancelled startup waiting behind stop must not clear its marker; a
+// concurrent stop that follows this lock always leaves the container stopped.
+func (c *botContainer) start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.stopped = false
 	c.ready = false
+	if err := c.ensureRunningLocked(ctx); err != nil {
+		return err
+	}
+	if err := c.ensureChannelLocked(ctx); err != nil {
+		c.ready = false
+		return err
+	}
+	return nil
 }
 
 // SetMemoryOverride 设置内存限制覆盖值。

@@ -125,6 +125,7 @@ type BotService struct {
 	// containerStarts tracks in-flight container+agent starts detached from HTTP
 	// requests. Image builds can take minutes; the request context must not cancel them.
 	containerStarts map[string]containerStartAttempt // botID → accepted async start
+	botStarts       map[string]*botStartAttempt      // publication ownership for agent startup
 
 	// wfEngines 保存每个已启动 bot 的**已装配工作区工具**的工作流引擎。
 	//
@@ -1683,18 +1684,19 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.mu.Unlock()
 		return errs.Conflict("bot is already starting, please wait")
 	}
-	s.botInstances[id] = nil // 占位，防止并发启动
+	attempt := s.reserveBotStartLocked(ctx, id)
+	ctx = attempt.ctx
+	defer attempt.cancel()
+	published := false
 	s.mu.Unlock()
 
-	// 创建失败时回滚占位
-	rollback := func() {
-		s.mu.Lock()
-		// 只有 nil 占位才删除，避免删除已赋值的实例
-		if s.botInstances[id] == nil {
-			delete(s.botInstances, id)
+	// A stale startup must never remove a newer attempt's placeholder.
+	rollback := func() { s.rollbackBotStart(id, attempt) }
+	defer func() {
+		if !published {
+			rollback()
 		}
-		s.mu.Unlock()
-	}
+	}()
 
 	// 将 Bot 定义的 LLM 分配同步到 config store
 	// （CreateLLMBundle 从 config store 读 bot.<id>.main/light，而定义存在 DB 表中）
@@ -2031,9 +2033,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Warnw("failed to register workflow tools", "err", err)
 	}
 
-	// 发布这个**已装配工具**的引擎，供 WorkflowService（Recover / Sweeper / UI 重试）复用。
-	// 不发布的话它会自建 ToolMgr=nil 的残废引擎，重启后接管的工作流只能产出计划而非结果。
-	s.publishWorkflowEngine(id, wfMgr)
+	// Wire the callback now, but publish with the ready bot under the startup
+	// token. A stopped startup must not replace a newer workflow engine.
+	wfMgr.SetOnWorkflowCompleted(s.onWorkflowCompleted)
 
 	// 注册 SubAgent 工具
 	// 将当前模型的 MaxTokens 作为默认输出上限注入，避免 SubAgent 写死 4096：
@@ -2084,6 +2086,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		wfSaMgr.CloseAll()
 		saMgr.CloseAll()
 	}
+	defer func() {
+		if !published {
+			wfCleanup()
+		}
+	}()
 
 	// 计算 per-bot 工具调用步数预算（soft/hard）。DB 中为 0 时回退全局默认。
 	// 该值后续同时用于 LLMStage 装配与 AgentConfig.MaxSteps，保证两处一致。
@@ -3449,13 +3456,6 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger.Infow("adaptive engagement: SoulLoader hot-reload wired", "bot_id", id)
 	}
 
-	// 注册到 BotManager
-	if err := s.mgr.Register(b); err != nil {
-		b.Close()
-		rollback()
-		return errs.Wrap(err, "bot_service: register bot")
-	}
-
 	// 用独立 context 启动 Bot，避免 HTTP 请求结束后 ctx 被取消导致 Bot 立即关闭
 	botCtx, botCancel := context.WithCancel(context.Background())
 
@@ -3488,74 +3488,96 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}()
 
 	// 等待 Bot 就绪（带 30s 超时，防止永久挂起）
-	// 注意：仍然监听 HTTP 请求的 ctx.Done()，但仅用于中断等待，不取消 Bot
+	// 取消或 StopBot 都会中止本次启动；Ready 后仍须在发布锁内再次校验。
 	readyTimeout := time.NewTimer(30 * time.Second)
 	defer readyTimeout.Stop()
 	select {
 	case <-b.Ready():
-		s.logger.Infow("bot started", "bot_id", id, "channels", len(allChannels))
 	case <-readyTimeout.C:
 		botCancel()
 		b.Stop()
 		b.Close()
-		s.mgr.Unregister(id)
 		rollback()
 		return errs.Internal("bot_service: bot startup timeout (30s)")
 	case <-ctx.Done():
 		botCancel()
 		b.Stop()
 		b.Close()
-		s.mgr.Unregister(id)
 		rollback()
 		return errs.Wrap(ctx.Err(), "bot_service: context cancelled")
 	}
 
-	s.mu.Lock()
-	s.channels[id] = webCh
-	s.botInstances[id] = b
-	s.memRepos[id] = memRepo
-	s.llmBundles[id] = bundle
-	s.toolManagers[id] = toolMgr
+	err = s.publishBotStart(id, attempt, func() error {
+		if err := s.mgr.Register(b); err != nil {
+			return errs.Wrap(err, "bot_service: register bot")
+		}
+		s.channels[id] = webCh
+		s.botInstances[id] = b
+		s.memRepos[id] = memRepo
+		s.llmBundles[id] = bundle
+		s.toolManagers[id] = toolMgr
+		s.wfEngines[id] = wfMgr
 
-	// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
-	// 走完整 Engine 管线（Recall → LLM → 工具），并在 ctx 中携带预批准，使被 defer
-	// 的工具直接采用人类决策而非再次挂起。默认路径无 ApprovalHandler，此闭包不会被调用。
-	llmStage.SetResumeDispatch(func(ctx context.Context, msg core.Message) (*core.Envelope, error) {
-		env := &core.Envelope{Message: msg}
-		res, _, err := b.Engine().ProcessSync(ctx, env)
-		return res, err
+		// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
+		// 走完整 Engine 管线（Recall → LLM → 工具），并在 ctx 中携带预批准，使被 defer
+		// 的工具直接采用人类决策而非再次挂起。默认路径无 ApprovalHandler，此闭包不会被调用。
+		llmStage.SetResumeDispatch(func(ctx context.Context, msg core.Message) (*core.Envelope, error) {
+			env := &core.Envelope{Message: msg}
+			res, _, err := b.Engine().ProcessSync(ctx, env)
+			return res, err
+		})
+		s.cancelFuncs[id] = botCancel
+		s.closeFuncs[id] = func() {
+			wfCleanup()
+		}
+		if dreamBundle != nil {
+			s.dreamingBundles[id] = dreamBundle
+		}
+		if hbBundle != nil {
+			s.heartbeatBundles[id] = hbBundle
+		}
+		if outBundle != nil {
+			s.outreachBundles[id] = outBundle
+		}
+		if userCronScheduler != nil {
+			s.userCronSchedulers[id] = userCronScheduler
+		}
+
+		// 更新定义状态
+		if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusRunning).Error; err != nil {
+			s.logger.Warnw("failed to update bot status to running", "bot_id", id, "err", err)
+		}
+
+		return nil
 	})
-	s.cancelFuncs[id] = botCancel
-	s.closeFuncs[id] = func() {
-		wfCleanup()
+	if err != nil {
+		botCancel()
+		b.Stop()
+		b.Close()
+		rollback()
+		return errs.Wrap(err, "bot_service: startup publication cancelled")
 	}
-	if dreamBundle != nil {
-		s.dreamingBundles[id] = dreamBundle
-	}
-	if hbBundle != nil {
-		s.heartbeatBundles[id] = hbBundle
-	}
-	if outBundle != nil {
-		s.outreachBundles[id] = outBundle
-	}
-	if userCronScheduler != nil {
-		s.userCronSchedulers[id] = userCronScheduler
-	}
-	s.mu.Unlock()
-
-	// 更新定义状态
-	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusRunning).Error; err != nil {
-		s.logger.Warnw("failed to update bot status to running", "bot_id", id, "err", err)
-	}
+	published = true
+	s.logger.Infow("bot started", "bot_id", id, "channels", len(allChannels))
 
 	return nil
 }
 
 // StopBot 停止运行中的 Bot。
 func (s *BotService) StopBot(id string) {
-	s.CancelContainerStart(id)
 	s.mu.Lock()
+	if attempt, ok := s.containerStarts[id]; ok {
+		delete(s.containerStarts, id)
+		attempt.cancel()
+	}
+	if attempt, ok := s.botStarts[id]; ok {
+		delete(s.botStarts, id)
+		attempt.cancel()
+	}
 	b, exists := s.botInstances[id]
+	if b != nil {
+		s.mgr.Detach(b)
+	}
 	delete(s.botInstances, id)
 	delete(s.toolManagers, id)
 	delete(s.channels, id)
@@ -3598,17 +3620,17 @@ func (s *BotService) StopBot(id string) {
 			delete(s.messageStarts, key)
 		}
 	}
+	// 无论内存中是否存在 agent 实例，都确保 DB 状态置为 stopped。
+	// （容器停止按钮也会调用本方法，需保证「任务状态」与容器状态一致。）
+	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusStopped).Error; err != nil {
+		s.logger.Warnw("failed to update bot status to stopped", "bot_id", id, "err", err)
+	}
+
 	s.mu.Unlock()
 	for _, cancel := range pendingCancels {
 		if cancel != nil {
 			cancel()
 		}
-	}
-
-	// 无论内存中是否存在 agent 实例，都确保 DB 状态置为 stopped。
-	// （容器停止按钮也会调用本方法，需保证「任务状态」与容器状态一致。）
-	if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusStopped).Error; err != nil {
-		s.logger.Warnw("failed to update bot status to stopped", "bot_id", id, "err", err)
 	}
 
 	if !exists || b == nil {
@@ -3617,7 +3639,6 @@ func (s *BotService) StopBot(id string) {
 
 	b.Stop()
 	b.Close()
-	s.mgr.Unregister(id)
 
 	s.logger.Infow("bot stopped", "bot_id", id)
 }
@@ -3673,9 +3694,6 @@ func (s *BotService) StartAll(ctx context.Context) error {
 			s.logger.Errorw("failed to start bot on boot",
 				"bot_id", def.ID, "status", def.Status, "err", err)
 			continue
-		}
-		if def.Status == dao.BotStatusStarting {
-			s.SetBotStatus(def.ID, dao.BotStatusRunning)
 		}
 	}
 
