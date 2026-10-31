@@ -394,13 +394,20 @@ type AssembleResult struct {
 // 返回完整的组装结果。
 // 无记忆时返回空 result（ContextText 为空字符串）。
 func (m *ContextManager) AssembleContext(ctx context.Context, channelID, userID, text string) (*AssembleResult, error) {
+	return m.AssembleContextScopes(ctx, m.resolveScopes(channelID, userID), text)
+}
+
+// AssembleContextScopes 仅从调用方已确认归属的 scope 组装记忆上下文。
+// 空 scope 不表示全库检索；缺少归属时不注入任何记忆。
+func (m *ContextManager) AssembleContextScopes(ctx context.Context, scopes []Scope, text string) (*AssembleResult, error) {
+	if len(scopes) == 0 {
+		return &AssembleResult{}, nil
+	}
+
 	// 窗口已耗尽时不要回退到静态 MaxTokenEstimate：那会在已无预算时仍灌记忆。
 	if m.window != nil && m.window.Available() <= 0 {
 		return &AssembleResult{}, nil
 	}
-
-	// 1. 确定检索 scope
-	scopes := m.resolveScopes(channelID, userID)
 
 	// 2. 获取最近对话记忆
 	var allEntries []Entry

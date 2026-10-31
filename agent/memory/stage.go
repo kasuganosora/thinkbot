@@ -101,13 +101,11 @@ func (s *MemoryStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 
 	start := time.Now()
 
-	// 组装记忆上下文
-	result, err := s.mgr.AssembleContext(
-		ctx,
-		env.Message.Channel,
-		env.Message.UserID,
-		env.Message.Text,
-	)
+	// 自动注入与实时写入统一使用当前机器人的记忆空间。
+	if env.Message.BotID == "" {
+		return env, nil
+	}
+	result, err := s.mgr.AssembleContextScopes(ctx, []Scope{BotScope(env.Message.BotID)}, env.Message.Text)
 	if err != nil {
 		// 记忆检索失败不应阻塞消息处理，降级为无记忆继续
 		logger.Warnw("memory retrieval failed, proceeding without context",
@@ -263,6 +261,10 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 			continue
 		}
 
+		// 归属由入站机器人确定；原始 scope 保留会话/用户画像分类。
+		if env.Message.BotID == "" {
+			continue
+		}
 		// 确定存储 scope — 群聊场景下同时写入 Channel 和 User scope
 		// ChannelScope 记录会话/群组上下文（"这个群里发生了什么"）
 		// UserScope 用于跨会话的用户画像提取（"这个用户是谁、偏好什么"）
@@ -288,6 +290,16 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 			}
 		}
 
+		// 保留说话人等溯源标签，归属字段由入站消息覆盖。
+		metadata := make(map[string]any, len(action.Metadata)+4)
+		for key, value := range action.Metadata {
+			metadata[key] = value
+		}
+		metadata["message_id"] = env.Message.ID
+		metadata["user_id"] = env.Message.UserID
+		metadata["bot_id"] = env.Message.BotID
+		metadata["channel"] = env.Message.Channel
+
 		// 写入每个 scope
 		for _, scope := range scopes {
 			entry := Entry{
@@ -296,11 +308,7 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 				Category:   category,
 				Source:     "note",
 				Importance: 0.5, // 默认中等重要度
-				Metadata: map[string]any{
-					"message_id": env.Message.ID,
-					"user_id":    env.Message.UserID,
-					"bot_id":     env.Message.BotID,
-				},
+				Metadata:   metadata,
 			}
 
 			if err := s.store.Append(ctx, entry); err != nil {
@@ -335,6 +343,9 @@ func (s *MemoryWriteStage) Process(ctx context.Context, env *core.Envelope) (*co
 }
 
 func (s *MemoryWriteStage) writeSuppress(ctx context.Context, env *core.Envelope, topic string, logger *zap.SugaredLogger) int {
+	if env.Message.BotID == "" {
+		return 0
+	}
 	var scopes []Scope
 	if env.Message.Channel != "" {
 		scopes = append(scopes, ChannelScope(env.Message.Channel))
@@ -350,6 +361,10 @@ func (s *MemoryWriteStage) writeSuppress(ctx context.Context, env *core.Envelope
 			Category:   suppressCategory,
 			Source:     "user_ban",
 			Importance: 1,
+			Metadata: map[string]any{
+				"bot_id":  env.Message.BotID,
+				"user_id": env.Message.UserID,
+			},
 		})
 		if err != nil {
 			logger.Warnw("suppress topic write failed", "topic", topic, "err", err)

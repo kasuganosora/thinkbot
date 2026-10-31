@@ -2,7 +2,6 @@ package stages
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -20,10 +19,8 @@ import (
 // 观察者分支产出 ActionNote（bot 全局 scope），经 MultiStore 沉淀进 memory_entries
 // 与 tiered_memories（L0→L1）；本 stage 在每个真人对话轮次前把相关记忆召回。
 //
-// 检索范围 [bot, channel, user] 三 scope：
-//   - bot scope：潜水学到的跨渠道通用经验（关键，从 misskey 学到的在 web 对话也能用）；
-//   - channel scope：当前渠道的对话流上下文；
-//   - user scope：该用户的跨渠道长期偏好。
+// 检索当前 bot 的统一 scope：同一机器人跨渠道、用户和群私聊共享记忆。
+// 不读取未记录机器人归属的旧 channel/user scope，避免不同机器人串用同名会话。
 //
 // retriever 为 nil 或非致命错误时静默跳过（不阻断对话）。
 type RecallStage struct {
@@ -73,48 +70,6 @@ func MemoryRelevanceEnabled() bool {
 // Name 返回 stage 名称。
 func (s *RecallStage) Name() string { return "memory-recall" }
 
-// appendLinkedScopes 把渠道层声明的「记忆同源会话」并入检索作用域，按 Scope.Key() 去重。
-//
-// 为什么需要它：记忆按 Channel 分作用域存储，私聊沉淀的 L1 事实在群 scope 里不存在，
-// 于是「昨天在私聊告诉过 bot 的日志主题/库地址」在群里提问时永远调不出来。
-// 由渠道层声明关联会话（core.MetaMemoryLinkedChannels），读侧只读不写：
-// 不复制记忆、不产生需要清理的镜像条目。
-//
-// ⚠️ 这些会话的记忆会进入当前会话的 prompt，出站侧靠 memory.StripRecallBlocks
-// 保证内容不被复述出去（见 public_blocks.cleanPublicBlock）。
-func (s *RecallStage) appendLinkedScopes(scopes []memory.Scope, env *core.Envelope) []memory.Scope {
-	raw, ok := env.Message.Metadata[core.MetaMemoryLinkedChannels]
-	if !ok {
-		return scopes
-	}
-	ids, ok := raw.([]string)
-	if !ok && s.logger != nil {
-		// 渠道层传了非 []string：静默丢掉会表现为「召回莫名其妙少一块」，
-		// 必须能在默认日志里看见是谁传错的。
-		s.logger.Warnw("recall: linked channels metadata has unexpected type, ignored",
-			"channel", env.Message.Channel, "type", fmt.Sprintf("%T", raw))
-	}
-	if !ok {
-		return scopes
-	}
-	seen := make(map[string]struct{}, len(scopes))
-	for _, sc := range scopes {
-		seen[sc.Key()] = struct{}{}
-	}
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		sc := memory.ChannelScope(id)
-		if _, dup := seen[sc.Key()]; dup {
-			continue
-		}
-		seen[sc.Key()] = struct{}{}
-		scopes = append(scopes, sc)
-	}
-	return scopes
-}
-
 // Process 检索并注入记忆。返回原 env（可能被注入 KVMemoryRecall）。
 func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
 	if s.retriever == nil {
@@ -126,26 +81,10 @@ func (s *RecallStage) Process(ctx context.Context, env *core.Envelope) (*core.En
 		return env, nil
 	}
 	botID := env.Message.BotID
-	channel := env.Message.Channel
-	userID := env.Message.UserID
-
-	scopes := make([]memory.Scope, 0, 3)
-	if botID != "" {
-		scopes = append(scopes, memory.BotScope(botID))
-	}
-	if channel != "" {
-		scopes = append(scopes, memory.ChannelScope(channel))
-	}
-	if userID != "" {
-		scopes = append(scopes, memory.UserScope(userID))
-	}
-	// 渠道层声明的「记忆同源会话」：典型场景是用户在私聊里说过的环境/配置事实，
-	// 之后在群里提问时也要能召回（记忆按 channel 分作用域，群 scope 里没有那些内容）。
-	// 这里只读取、不构造——渠道层才知道「这个会话还关联着哪些会话」。
-	scopes = s.appendLinkedScopes(scopes, env)
-	if len(scopes) == 0 {
+	if botID == "" {
 		return env, nil
 	}
+	scopes := []memory.Scope{memory.BotScope(botID)}
 
 	// ModeFrozen：每次对话新建快照并立即检索，不跨轮缓存（对话频次低，开销可控）。
 	// 注入 Window 使记忆块字符上限随模型上下文窗口自适应（window 模块）。
