@@ -86,20 +86,33 @@ func TestSQLiteRepositoryBotIsolationAcrossSharedDatabase(t *testing.T) {
 	assertIDs(got, err, "b-new")
 	got, err = a.FetchEntries(ctx, []string{"injected"})
 	assertIDs(got, err)
-	if err := a.Replace(ctx, memory.BotScope("a"), "a-legacy", memory.Entry{ID: "a-legacy", Content: "updated legacy"}); err != nil {
+	if err := a.Replace(ctx, memory.BotScope("a"), "a-legacy", memory.Entry{ID: "a-legacy", Content: "wrong scope"}); err == nil {
+		t.Fatal("shared read alias must not reclassify a user memory")
+	}
+	if err := a.Replace(ctx, memory.UserScope("same-user"), "a-legacy", memory.Entry{ID: "a-legacy", Content: "updated legacy"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err = a.FetchEntries(ctx, []string{"a-legacy"})
 	assertIDs(got, err, "a-legacy")
-	if got[0].Scope != memory.BotScope("a") || got[0].Metadata["bot_id"] != "a" {
-		t.Fatal("replacement did not preserve trusted owner")
+	if got[0].Scope != memory.UserScope("same-user") || got[0].Metadata["bot_id"] != "a" {
+		t.Fatal("replacement did not preserve scope and trusted owner")
 	}
 	if err := a.Delete(ctx, memory.BotScope("a"), "a-new"); err != nil {
 		t.Fatal(err)
 	}
 	got, err = a.FetchEntries(ctx, []string{"a-new"})
+	assertIDs(got, err, "a-new")
+	if err := a.Delete(ctx, raw, "a-new"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = a.FetchEntries(ctx, []string{"a-new"})
 	assertIDs(got, err)
 	if err := a.Clear(ctx, memory.BotScope("a")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = a.Retrieve(ctx, memory.Query{Limit: 100})
+	assertIDs(got, err, "a-legacy")
+	if err := a.Clear(ctx, memory.UserScope("same-user")); err != nil {
 		t.Fatal(err)
 	}
 	got, err = a.Retrieve(ctx, memory.Query{Limit: 100})
@@ -184,6 +197,7 @@ func TestSQLiteRepositoryCompactionReadsOnlyOwnedScope(t *testing.T) {
 	for _, row := range []dao.EntryModel{
 		{ID: "owned", ScopeKind: "user", ScopeID: "same-user", Content: "one", MetadataJSON: `{"bot_id":"a"}`},
 		{ID: "foreign", ScopeKind: "user", ScopeID: "same-user", Content: "other", MetadataJSON: `{"bot_id":"b"}`},
+		{ID: "owned-bot", ScopeKind: "bot", ScopeID: "a", Content: "bot", MetadataJSON: `{"bot_id":"a"}`},
 	} {
 		if err := db.Create(&row).Error; err != nil {
 			t.Fatal(err)
@@ -192,23 +206,28 @@ func TestSQLiteRepositoryCompactionReadsOnlyOwnedScope(t *testing.T) {
 	if err := repo.CompactScope(ctx, memory.BotScope("a")); err != nil {
 		t.Fatal(err)
 	}
-	if len(probe.entries) != 1 || probe.entries[0].ID != "owned" {
-		t.Fatalf("compactor read foreign entries: %+v", probe.entries)
+	if len(probe.entries) != 1 || probe.entries[0].ID != "owned-bot" {
+		t.Fatalf("compactor escaped exact bot scope: %+v", probe.entries)
 	}
-	got, err := repo.ActiveByIDs(ctx, memory.BotScope("a"), []string{"owned", "foreign"})
-	if err != nil || len(got) != 1 || got[0].ID != "owned" {
+	got, err := repo.ActiveByIDs(ctx, memory.BotScope("a"), []string{"owned", "foreign", "owned-bot"})
+	if err != nil || len(got) != 1 || got[0].ID != "owned-bot" {
 		t.Fatalf("dedup IDs escaped owner: %+v %v", got, err)
 	}
 	got, err = repo.UncheckedDedup(ctx, memory.BotScope("a"), 100)
-	if err != nil || len(got) != 1 || got[0].ID != "owned" {
+	if err != nil || len(got) != 1 || got[0].ID != "owned-bot" {
 		t.Fatalf("unchecked escaped owner: %+v %v", got, err)
 	}
 	if chars, err := repo.totalChars(ctx, memory.BotScope("a")); err != nil || chars != 3 {
 		t.Fatalf("totalChars=%d %v", chars, err)
 	}
-	repo.MarkDedupChecked(ctx, memory.BotScope("a"), []string{"owned", "foreign"})
+	if marked := repo.MarkDedupChecked(ctx, memory.BotScope("a"), []string{"owned", "foreign", "owned-bot"}); marked != 1 {
+		t.Fatalf("marked %d entries outside exact scope", marked)
+	}
 	got, err = repo.RecentCheckedDedup(ctx, memory.BotScope("a"), 100)
-	if err != nil || len(got) != 1 || got[0].ID != "owned" {
+	if err != nil || len(got) != 1 || got[0].ID != "owned-bot" {
 		t.Fatalf("recent checked escaped owner: %+v %v", got, err)
+	}
+	if n, err := repo.CountUncheckedDedup(ctx, memory.UserScope("same-user")); err != nil || n != 1 {
+		t.Fatalf("bot maintenance touched user scope: %d %v", n, err)
 	}
 }
