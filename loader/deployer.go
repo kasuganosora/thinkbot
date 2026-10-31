@@ -297,9 +297,20 @@ func (d *Deployer) doDeploy(ctx context.Context, ref string, pull bool, res *Dep
 			"-X github.com/kasuganosora/thinkbot/internal/buildinfo.Version=%s",
 		rev, now, ver,
 	)
+	// 先编出静态 thinkbot-channel，再用 -tags embedchannel 嵌进主二进制。
+	// slim 运行镜像没有源码和 go，EnsureImage 只能靠这份嵌入的字节烤进沙箱镜像。
+	channelOut := filepath.Join(d.cfg.GitDir, "docker", "sandbox", "thinkbot-channel")
+	channelEnv := append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
+	if err := runCmdEnv(ctx, d.cfg.GitDir, channelEnv, logf, "go", "build",
+		"-trimpath", "-ldflags", "-s -w", "-o", channelOut, "./cmd/thinkbot-channel"); err != nil {
+		fail(fmt.Errorf("thinkbot-channel 编译失败: %w", err))
+		return
+	}
+	defer os.Remove(channelOut)
+
 	buildEnv := append(os.Environ(), "CGO_ENABLED=1", "GOOS=linux")
 	if err := runCmdEnv(ctx, d.cfg.GitDir, buildEnv, logf, "go", "build",
-		"-ldflags", ldflags, "-o", d.cfg.NewBin, "./cmd"); err != nil {
+		"-tags", "embedchannel", "-ldflags", ldflags, "-o", d.cfg.NewBin, "./cmd"); err != nil {
 		fail(fmt.Errorf("go build 失败: %w", err))
 		return
 	}

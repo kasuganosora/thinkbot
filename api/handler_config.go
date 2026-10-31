@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/config"
@@ -103,12 +105,38 @@ func (s *Server) handleSetConfigKey(c *gin.Context) {
 		return
 	}
 
+	// 沙箱 CPU 上限先校验再落库：非法值会被原样拼进 docker --cpus，真正的报错
+	// 要等到创建/更新容器时才出现，且埋在 docker 输出里难以归因到配置项。
+	if key == config.KeySandboxCPULimit {
+		if err := validateSandboxCPULimit(req.Value); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
+
 	if err := s.store.Set(c.Request.Context(), key, req.Value); err != nil {
 		Fail(c, errs.Wrap(err, "failed to set config"))
 		return
 	}
 	auditLog(c, s.logger, "set_config", "key", key)
+	// 沙箱 CPU 上限改完就地应用到运行中的 bot 容器，不必等重建。
+	if key == config.KeySandboxCPULimit {
+		if needsRecreate := s.applySandboxCPULimit(c.Request.Context()); needsRecreate {
+			OKMsg(c, "config updated（已保存；「不限制」需重建 bot 容器后才生效）", nil)
+			return
+		}
+	}
 	OKMsg(c, "config updated", nil)
+}
+
+// applySandboxCPULimit 把新写入的 sandbox.cpu_limit 就地应用到所有 bot 容器。
+// 失败只记日志：配置已经落库，容器重建时一样会生效。
+// 返回 true 表示设成了「不限制」，docker update 取消不掉，需要重建容器。
+func (s *Server) applySandboxCPULimit(ctx context.Context) bool {
+	if s.botSvc == nil {
+		return false
+	}
+	return s.botSvc.ApplySandboxCPULimitAll(ctx)
 }
 
 // handleBatchSetConfig 批量设置配置项。
@@ -131,10 +159,24 @@ func (s *Server) handleBatchSetConfig(c *gin.Context) {
 		return
 	}
 
+	// 与单条设置一致：批量写入前先校验沙箱 CPU 上限，避免整批落库后才发现非法值。
+	if v, ok := req.Items[config.KeySandboxCPULimit]; ok {
+		if err := validateSandboxCPULimit(v); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
+
 	if err := s.store.SetMany(c.Request.Context(), req.Items); err != nil {
 		Fail(c, errs.Wrap(err, "failed to batch set config"))
 		return
 	}
 	auditLog(c, s.logger, "batch_set_config", "keys", strutil.MapKeys(req.Items))
+	if _, ok := req.Items[config.KeySandboxCPULimit]; ok {
+		if needsRecreate := s.applySandboxCPULimit(c.Request.Context()); needsRecreate {
+			OKMsg(c, "config batch updated（沙箱 CPU 设为不限制，需重建 bot 容器后才生效）", nil)
+			return
+		}
+	}
 	OKMsg(c, "config batch updated", nil)
 }

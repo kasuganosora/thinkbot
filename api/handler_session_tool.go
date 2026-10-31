@@ -28,7 +28,8 @@ const compactLLMTimeout = 5 * time.Minute
 //   POST /api/sessions/:sid/terminal/exec  — 执行命令
 //   GET  /api/sessions/:sid/files          — 文件列表
 //   POST /api/sessions/:sid/files/mkdir    — 创建目录
-//   POST /api/sessions/:sid/files/upload   — 上传文件
+//   POST /api/sessions/:sid/files/upload   — 上传小文件（单次 multipart，见 MaxUserUploadBytes）
+//   POST /api/sessions/:sid/files/uploads  — 分片上传：建会话 / 传段 / 合并（见 chunk_upload.go）
 //   GET  /api/sessions/:sid/status         — 会话状态
 //   POST /api/sessions/:sid/compact        — 压缩上下文
 // ============================================================================
@@ -174,31 +175,16 @@ func (s *Server) handleSessionFileMkdir(c *gin.Context) {
 // handleSessionFileUpload 上传文件到会话工作区（代理到 Bot 文件存储）。
 // POST /api/sessions/:sid/files/upload
 // 接收 multipart/form-data：字段 file（文件）、path（目标路径）。
+// 正文流式写入工作区，单文件上限为 MaxUserUploadBytes（高于工具写文件的 sandbox.MaxFileWrite）。
 func (s *Server) handleSessionFileUpload(c *gin.Context) {
 	sid := c.Param("sid")
 
-	fileHeader, err := c.FormFile("file")
+	path, name, size, err := s.consumeWorkspaceUpload(c, sid)
 	if err != nil {
-		Fail(c, errs.BadRequest("file is required: "+err.Error()))
-		return
-	}
-	path := c.PostForm("path")
-	if path == "" {
-		path = "/"
-	}
-
-	f, err := fileHeader.Open()
-	if err != nil {
-		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
-		return
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := s.botFileUpload(c, sid, path, fileHeader.Filename, f); err != nil {
 		Fail(c, err)
 		return
 	}
-	auditLog(c, s.logger, "session_file_upload", "session", sid, "path", path, "name", fileHeader.Filename, "size", fileHeader.Size)
+	auditLog(c, s.logger, "session_file_upload", "session", sid, "path", path, "name", name, "size", size)
 	OK(c, gin.H{"ok": true})
 }
 

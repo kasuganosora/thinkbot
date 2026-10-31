@@ -3,6 +3,10 @@ package stages
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/secret"
 )
 
 // OutputCleanStreamFilter 在流式增量里做与出站门控（LLMStage.Process 中
@@ -11,7 +15,10 @@ import (
 //
 //   - <think>/<thinking> 块：始终整块丢弃（与 memory.StripThinking 一致，未闭合则丢到流尾）；
 //   - replyTags=true（回复控制门控生效时，与 Process 中 RequireReplyControl && !outreach 同条件）：
-//   - <internal>…</internal>：整块丢弃，闭合标签可以在任意后续 chunk 到达；未闭合则丢到流尾；
+//   - `<internal`…：整块丢弃。开标签的 `>` 可缺，看到完整的 `<internal` 且后面不是更长的
+//     标签名就进入丢弃，不再等 `>`，也不会把半截 `<internal` 当普通文本放行；
+//     闭合认 `</internal>`、`/internal>`、`/internal`（`>` 可缺，后面若还是标签名则不算），
+//     闭合标记可以在任意后续 chunk 到达；未闭合则丢到流尾；
 //     位于 <public> 内时遇到 </public> 也视为结束（与 publicTagRe 非贪婪匹配后再
 //     StripInternalTags 的效果一致）；
 //   - <public>/</public>：去掉标签本身、保留内文；多个区块按 extractPublicReply 的规则
@@ -22,7 +29,7 @@ import (
 //   - 一旦出现过 <internal> 或 <public>，区块之间的裸文本先扣住；流结束时若
 //     最后一个 </public> 之后仍有「有实质内容」的裸文本，则按 extractPublicReply
 //     同样规则补发（用空行分隔），避免模型把答复写在标签外时丢掉；
-//   - 其余 <tag …> / </tag> 与畸形的 /public> /internal>：去掉标签文本（对应 strayTagRe）。
+//   - 其余 <tag …> / </tag> 与畸形的 /public、/internal（`>` 可缺）：去掉标签文本（对应 strayTagRe）。
 //   - 首部空白与尾部空白不放行（出站内容均 TrimSpace），中间空白在后续有正文时补发。
 //
 // 只扣住「可能是标签开头」的尾部（最长 maxStreamTagLen 字节）与尾部空白，其余立即放行。
@@ -51,6 +58,14 @@ type OutputCleanStreamFilter struct {
 	//（未闭合时新的 <public> 开标签按残留标签忽略，闭合时 closePublic 已 add），
 	// 这是防御性加固：将来若允许 public 嵌套/重入，判重不会凭空失效。
 	trail string // </public> 之后、下一标签之前的裸文本（Flush 时若实质则补发）
+	// looseInternalOpen 为真表示当前 internal 区是缺 '>' 的开标签。
+	// 流结束时若仍未闭合，trail 里残片前面的半句也不能补发（与 extract 的 trailing 闸门一致）。
+	looseInternalOpen bool
+
+	// secHold 是跨 chunk 密钥遮蔽的尾部缓冲：保留「可能是某条已登记密钥真前缀」的
+	// 尾部字节到下一次 Feed，确保跨界值在被推送前完整落进某次拼接被 Redact。
+	// 空库时恒为空，不改变既有流式行为。
+	secHold string
 }
 
 type ocMode int
@@ -65,6 +80,7 @@ const (
 
 // maxStreamTagLen 是为判定「是否为标签」最多扣住的字节数；超过仍未见 '>' 则按普通文本放行
 // （最终内容仍由门控 payload 兜底，流式只做有界延迟）。
+// `<internal` 不走这条放行：名字一凑齐就进入丢弃，缺 '>' 也不能把后面的心里话吐出去。
 const maxStreamTagLen = 64
 
 // NewOutputCleanStreamFilter 创建过滤器。replyTags 与出站门控是否剥离
@@ -82,7 +98,8 @@ func (f *OutputCleanStreamFilter) Feed(delta string) string {
 	buf := f.pending + delta
 	f.pending = ""
 	f.process(buf, &out, false)
-	return out.String()
+	// 推送前做跨 chunk 安全的密钥遮蔽：尾部疑似未闭合值的前缀扣到下一次增量。
+	return f.redactStream(out.String(), false)
 }
 
 // Flush 在流结束时调用：放行仍扣住的普通文本（最终没凑成标签的半截 "<b" 等），
@@ -95,9 +112,14 @@ func (f *OutputCleanStreamFilter) Flush() string {
 		f.pending = ""
 		f.process(buf, &out, true)
 	}
+	if f.mode == ocInternal && f.looseInternalOpen {
+		f.trail = ""
+	}
 	f.flushTrailing(&out)
+	// 流结束：把跨 chunk 缓冲拼回，一并 Redact 后全部放行。
+	text := f.redactStream(out.String(), true)
 	*f = OutputCleanStreamFilter{replyTags: f.replyTags}
-	return out.String()
+	return text
 }
 
 // flushTrailing 在流结束时把最后一个 </public> 之后扣住的实质裸文本并入公开回复。
@@ -133,24 +155,25 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 			f.mode = f.parent
 
 		case ocInternal:
-			var idx, n int
+			idx, n, hold := memory.NextLooseInternalClose(buf, final)
 			if f.parent == ocPublic {
-				idx, n = indexFoldAny(buf, "</internal>", "</public>")
-			} else {
-				idx, n = indexFoldAny(buf, "</internal>")
+				if p, pn := indexFoldAny(buf, "</public>"); p >= 0 && (idx < 0 || p < idx) {
+					idx, n, hold = p, pn, 0
+				} else if idx < 0 && !final {
+					if k := closingPrefixLen(buf, "</public>"); k > hold {
+						hold = k
+					}
+				}
 			}
 			if idx < 0 {
-				if !final {
-					if f.parent == ocPublic {
-						f.pending = buf[len(buf)-closingPrefixLen(buf, "</internal>", "</public>"):]
-					} else {
-						f.pending = buf[len(buf)-closingPrefixLen(buf, "</internal>"):]
-					}
+				if !final && hold > 0 {
+					f.pending = buf[len(buf)-hold:]
 				}
 				return
 			}
 			closing := asciiLower(buf[idx : idx+n])
 			buf = buf[idx+n:]
+			f.looseInternalOpen = false
 			if closing == "</public>" {
 				f.closePublic(out)
 			} else {
@@ -204,7 +227,11 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 				buf = buf[1:]
 				continue
 			}
+			opened := buf[:n]
 			buf = buf[n:]
+			if kind == tagInternalOpen && (len(opened) == 0 || opened[len(opened)-1] != '>') {
+				f.looseInternalOpen = true
+			}
 			f.applyTag(kind, out)
 		}
 	}
@@ -220,7 +247,7 @@ const (
 	tagPublicOpen
 	tagPublicClose
 	tagRecallOpen // <recalled_memory> / <user_profile>：连内容整块丢弃
-	tagStray      // 其余标签 / 畸形 /public> /internal>：去掉标签文本
+	tagStray      // 其余标签 / 畸形 /public /internal（'>' 可缺）：去掉标签文本
 )
 
 // nextTagStart 返回下一个可能的标签起点（'<'，门控剥离标签时还包括畸形标签的 '/'）。
@@ -234,16 +261,9 @@ func (f *OutputCleanStreamFilter) nextTagStart(s string) int {
 // classify 判定 s（以 '<' 或 '/' 开头）的标签类型与长度。
 func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) {
 	if s[0] == '/' {
-		// 畸形标签（缺 '<'）：只认 /public> 与 /internal>，避免 URL 等正文里的 '/' 被长时间扣住。
-		for _, t := range []string{"/public>", "/internal>"} {
-			if hasPrefixFold(s, t) {
-				return tagStray, len(t)
-			}
-			if !final && len(s) < len(t) && hasPrefixFold(t, s) {
-				return tagIncomplete, 0
-			}
-		}
-		return tagNone, 0
+		// 畸形闭标签（缺 '<'）：/public 与 /internal，`>` 可有可无。
+		// 只认这两个名字，避免 URL 等正文里的 '/' 被长时间扣住。
+		return classifyLooseSlash(s, final)
 	}
 
 	if !f.replyTags {
@@ -257,6 +277,14 @@ func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) 
 			return tagIncomplete, 0
 		}
 		return tagNone, 0
+	}
+
+	// `<internal` 的 `>` 可缺。必须在下面的「等 '>' / 超过 maxStreamTagLen 就放行」之前判定，
+	// 否则缺 '>' 的心里话会在 64 字节后被当成普通文本吐出。
+	if n, match, incomplete := memory.LooseInternalOpenAt(s); incomplete && !final {
+		return tagIncomplete, 0
+	} else if match {
+		return tagInternalOpen, n
 	}
 
 	// strayTagRe 形态：</? + 字母 + [a-zA-Z0-9_-]* + [^>]* + '>'
@@ -300,6 +328,41 @@ func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) 
 		return tagRecallOpen, end + 1
 	}
 	return tagStray, end + 1
+}
+
+// classifyLooseSlash 识别缺 '<' 的 /public 与 /internal。`>` 可有可无；
+// 后面若还是标签名字符（/internally、/publication）则不是残缺闭标签。
+func classifyLooseSlash(s string, final bool) (tagKind, int) {
+	for _, name := range []string{"public", "internal"} {
+		token := "/" + name
+		if len(s) < len(token) && hasPrefixFold(token, s) {
+			if !final {
+				return tagIncomplete, 0
+			}
+			return tagNone, 0
+		}
+	}
+	for _, name := range []string{"public", "internal"} {
+		token := "/" + name
+		if !hasPrefixFold(s, token) {
+			continue
+		}
+		if len(s) == len(token) {
+			if !final {
+				return tagIncomplete, 0
+			}
+			return tagStray, len(token)
+		}
+		c := s[len(token)]
+		if c == '>' {
+			return tagStray, len(token) + 1
+		}
+		if isTagNameChar(c) {
+			return tagNone, 0
+		}
+		return tagStray, len(token)
+	}
+	return tagNone, 0
 }
 
 func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
@@ -413,6 +476,48 @@ func (f *OutputCleanStreamFilter) emit(s string, out *strings.Builder) {
 	out.WriteString(visible)
 }
 
+// redactStream 对一段「即将推送」的清洗后文本做跨 chunk 安全的密钥遮蔽。
+//
+// 顺序很关键：先 Redact 把当前 buf 里完整出现的真实值全部替换成占位符，再按
+// StreamHoldLen 把尾部「疑似未闭合值前缀」扣住到下一次增量。若只扣不 Redact，
+// 完整的短值会被留到下一 chunk 才遮蔽（多延迟一步）；若只 Redact 不扣，跨界值
+// 的前半段会被当作普通文本提前推送出去（泄露）。final=true 表示流已结束，把
+// secHold 拼回一并 Redact 后全部放行。
+func (f *OutputCleanStreamFilter) redactStream(text string, final bool) string {
+	vault := secret.Default()
+	buf := f.secHold + text
+	if final {
+		f.secHold = ""
+		return vault.Redact(buf)
+	}
+	redacted := vault.Redact(buf)
+	hold := vault.StreamHoldLen(redacted)
+	if hold <= 0 {
+		f.secHold = ""
+		return redacted
+	}
+	if len(redacted) <= hold {
+		f.secHold = redacted
+		return ""
+	}
+	cut := backToRuneStart(redacted, len(redacted)-hold)
+	if cut <= 0 {
+		f.secHold = redacted
+		return ""
+	}
+	f.secHold = redacted[cut:]
+	return redacted[:cut]
+}
+
+// backToRuneStart 把字节下标 i 往回退到最近的 UTF-8 rune 起始处，避免把一个多字节
+// 字符从中间切开推送给前端（往回退只会多扣一点，对遮蔽只会更安全）。
+func backToRuneStart(s string, i int) int {
+	for i > 0 && i < len(s) && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
 // indexFoldAny 在 s 中按 ASCII 大小写不敏感查找最早出现的任一 needle，返回位置与长度。
 func indexFoldAny(s string, needles ...string) (int, int) {
 	ls := asciiLower(s)
@@ -468,4 +573,8 @@ func asciiLower(s string) string {
 
 func isASCIILetter(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isTagNameChar(c byte) bool {
+	return isASCIILetter(c) || (c >= '0' && c <= '9') || c == '_' || c == '-'
 }

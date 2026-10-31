@@ -24,7 +24,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,6 +146,67 @@ func (m *BotWorkspaceManager) SetBotMemoryOverride(botID string, mb int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.memoryOverrides[botID] = mb
+}
+
+// containerFor 返回该 bot 的容器句柄，拿不到时返回 nil（local 后端或 botID 为空）。
+//
+// 优先复用已建好的那个，以继承它的内存状态（如 OOM 抬升过的上限）；没有就按
+// 确定性命名临时构造一个——docker update 只用得到容器名，不依赖这里的内存状态。
+func (m *BotWorkspaceManager) containerFor(botID string) *botContainer {
+	if botID == "" || m.backend != "docker" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ws, ok := m.workspaces[botID]; ok && ws != nil && ws.container != nil {
+		return ws.container
+	}
+	return newBotContainer(botID, m.cfg, m.logger)
+}
+
+// ApplyCPULimit 把 CPU 上限就地应用到该 bot 的运行中容器（不重建）。
+// 传空串表示「不限制」，此时返回 ErrLimitNotClearable：docker update 无法取消
+// 已有的 --cpus，只有重建容器才能真正不限。
+// 容器不存在时返回 nil——下次创建容器时自然会用新上限。
+func (m *BotWorkspaceManager) ApplyCPULimit(ctx context.Context, botID, limit string) error {
+	c := m.containerFor(botID)
+	if c == nil {
+		return nil
+	}
+	if err := c.UpdateCPULimit(ctx, limit); err != nil {
+		return err
+	}
+	m.setBotCPULimit(botID, limit)
+	return nil
+}
+
+// setBotCPULimit 把新上限回写到 manager 配置以及该 bot 已建容器的配置，
+// 使「创建容器」和「重建容器」都沿用在线改过的值。
+// 少了这一步，在线改完的容器一旦重建就会被旧配置盖回去，表现为"改了又变回去"。
+func (m *BotWorkspaceManager) setBotCPULimit(botID, limit string) {
+	m.mu.Lock()
+	m.cfg.CPULimit = limit
+	ws := m.workspaces[botID]
+	m.mu.Unlock()
+	if ws != nil && ws.container != nil {
+		ws.container.setCPULimit(limit)
+	}
+}
+
+// ApplyMemoryLimit 把内存上限就地应用到该 bot 的运行中容器（不重建）。
+// mb <= 0 表示「不限制」，此时返回 ErrLimitNotClearable。语义同 ApplyCPULimit。
+func (m *BotWorkspaceManager) ApplyMemoryLimit(ctx context.Context, botID string, mb int64) error {
+	c := m.containerFor(botID)
+	if c == nil {
+		return nil
+	}
+	if err := c.UpdateMemoryLimit(ctx, mb); err != nil {
+		return err
+	}
+	// 回写 per-bot 覆盖：容器创建/重建时取的就是这里的值，
+	// 只在容器上改而不同步这里，重建后同样会被旧上限盖回去。
+	m.SetBotMemoryOverride(botID, mb)
+	return nil
 }
 
 // getBotMemoryLimitLocked 返回指定 bot 的内存限制字符串（用于 docker --memory）。
@@ -699,6 +762,48 @@ func (w *botWorkspace) WriteFile(ctx context.Context, path string, data []byte) 
 		return errs.Newf("bot_workspace: file size %d exceeds max write %d",
 			len(data), w.cfg.MaxFileWrite)
 	}
+	return w.writeLocalFile(path, data)
+}
+
+// WriteUserUploadStream 流式写入用户上传，跳过 MaxFileWrite，不把正文读进 []byte。
+// limit 由 API 传入（api.MaxUserUploadBytes）。工具写入仍走 WriteFile。
+// docker 持久容器把 r 直接送进 `docker exec -i … cat > path` 的 stdin，
+// 不在宿主落盘（named volume 对主进程不可见）。local 模式 io.Copy 到宿主工作区文件。
+// 超限或中途失败会删除半截文件。
+func (w *botWorkspace) WriteUserUploadStream(ctx context.Context, path string, r io.Reader, limit int64) (int64, error) {
+	if w.container != nil {
+		return w.container.writeUserStream(ctx, path, r, limit)
+	}
+	if err := w.localGuardPath(path, true); err != nil {
+		return 0, err
+	}
+	validated, err := validatePath(w.root, path)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(validated), 0o755); err != nil {
+		return 0, errs.Wrapf(err, "bot_workspace: mkdir parent dir for %q", path)
+	}
+	f, err := os.OpenFile(validated, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, errs.Wrapf(err, "bot_workspace: create %q", path)
+	}
+	n, copyErr := CopyUserUpload(f, r, limit)
+	closeErr := f.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(validated)
+		if errors.Is(copyErr, ErrUserUploadTooLarge) {
+			return n, ErrUserUploadTooLarge
+		}
+		if copyErr != nil {
+			return n, errs.Wrapf(copyErr, "bot_workspace: stream file %q", path)
+		}
+		return n, errs.Wrapf(closeErr, "bot_workspace: stream file %q", path)
+	}
+	return n, nil
+}
+
+func (w *botWorkspace) writeLocalFile(path string, data []byte) error {
 	if err := w.localGuardPath(path, true); err != nil {
 		return err
 	}

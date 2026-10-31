@@ -5,9 +5,18 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
+
+// handshakeTimeout 是单个 MCP 服务器握手的时限。
+//
+// 握手走的是 httpTransport，它的客户端超时是 120s（运行时工具调用可能确实很慢）。
+// 但握手本身必须快：一个不可达的端点（黑洞路由 —— 包被丢弃且没有 RST）会让请求
+// 一直挂到那 120s 才返回，足以耗尽 fx 的启动超时、让整个进程以 exit 1 中止。
+// 握手失败本来就是可容忍的（调用方记日志后继续），所以这里让它尽快失败。
+const handshakeTimeout = 8 * time.Second
 
 // ============================================================================
 // Manager — 管理多个 MCP 服务器的连接
@@ -316,8 +325,10 @@ func (m *Manager) connectOne(ctx context.Context, cfg ServerConfig) error {
 		return err
 	}
 
-	// MCP 握手
-	serverInfo, err := client.Initialize(ctx)
+	// MCP 握手（单独限时，见 handshakeTimeout 的说明）
+	hctx, hcancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer hcancel()
+	serverInfo, err := client.Initialize(hctx)
 	if err != nil {
 		_ = client.Close()
 		return err
