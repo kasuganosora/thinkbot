@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/strutil"
 )
@@ -241,7 +242,7 @@ func (m *Manager) Submit(ctx context.Context, req SubmitRequest) (*SubmitResult,
 	})
 
 	// 注册运行实例（先注册再启动，避免 goroutine 中 runScheduler 找不到 instance）
-	bgCtx, cancel := context.WithCancel(context.Background())
+	bgCtx, cancel := context.WithCancel(workflowBaseContext(wf))
 	done := make(chan struct{})
 	inst := &runningInstance{
 		wf:     wf,
@@ -792,7 +793,7 @@ func (m *Manager) resumeQuotaInterrupted(wf *Workflow) {
 	}
 
 	// 重新拉起调度（与崩溃恢复同一套模式：先注册再启动）。
-	bgCtx, cancel := context.WithCancel(context.Background())
+	bgCtx, cancel := context.WithCancel(workflowBaseContext(wf))
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.running[wf.ID] = &runningInstance{
@@ -900,7 +901,7 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 			wf.Status = WorkflowAnalyzing
 			_ = m.repo.Save(wf)
 
-			bgCtx, cancel := context.WithCancel(context.Background())
+			bgCtx, cancel := context.WithCancel(workflowBaseContext(wf))
 			done := make(chan struct{})
 
 			// 先注册再启动，确保 runScheduler 能找到 instance
@@ -978,7 +979,7 @@ func (m *Manager) recover(ctx context.Context) (*RecoveryResult, error) {
 		}
 
 		// 恢复调度执行
-		bgCtx, cancel := context.WithCancel(context.Background())
+		bgCtx, cancel := context.WithCancel(workflowBaseContext(wf))
 		done := make(chan struct{})
 
 		// 先注册再启动，确保 runScheduler 能找到 instance
@@ -1446,7 +1447,7 @@ func (m *Manager) restartFromNode(wf *Workflow, nodeID string) (*ControlResult, 
 	}
 
 	// 重建调度实例（与崩溃恢复同一套模式：先注册再启动，确保 runScheduler 能找到 instance）。
-	bgCtx, cancel := context.WithCancel(context.Background())
+	bgCtx, cancel := context.WithCancel(workflowBaseContext(wf))
 	done := make(chan struct{})
 
 	m.mu.Lock()
@@ -1643,4 +1644,17 @@ func (m *Manager) WaitDone(wfID string) {
 		return
 	}
 	<-inst.done
+}
+
+// workflowBaseContext 是工作流后台调度的根 context。
+//
+// 调度跑在脱离请求生命周期的 goroutine 里（必须用 Background，否则提交请求一结束
+// 整条工作流就被取消），但不能丢掉「属于哪个 bot」：节点里的工具调用要按 bot
+// 还原密钥占位符，归属丢失时只能看到全局条目，本 bot 登记的密钥会失效。
+func workflowBaseContext(wf *Workflow) context.Context {
+	ctx := context.Background()
+	if wf != nil {
+		ctx = secret.WithBot(ctx, wf.BotID)
+	}
+	return ctx
 }

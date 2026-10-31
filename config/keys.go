@@ -145,6 +145,12 @@ const (
 	// 注意：Backend 显式设为 "docker" 时本就强制要求 Docker，与本键无关。
 	KeySandboxRequireDocker = "sandbox.require_docker"
 
+	// KeySandboxCPULimit bot 沙箱容器的 CPU 上限（docker --cpus 的值，如 "1.0"、"16"）。
+	// 未配置时沿用 sandbox.DefaultConfig() 的 "1.0"。
+	// 显式设为 "0" / "-" / "unlimited" 表示不限制（docker run 不加 --cpus，容器可用满宿主核数）。
+	// 编译类任务（如 gdb / 大型 C++ 项目）在 1 核上会慢到像卡死，整机独占部署时应放开。
+	KeySandboxCPULimit = "sandbox.cpu_limit"
+
 	// KeySandboxTimeout bot 在沙箱里执行单条命令的「硬上限」秒数。
 	// 默认 0 表示自动 = 卡死阈值 × 3（见 hardTimeoutFactor），不写死固定时长；
 	// 设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：即便命令一直在输出，
@@ -169,6 +175,16 @@ const (
 	// 使浏览器流量经部署侧自有代理出口（IP 归部署侧，符合「指纹归 thinkbot、IP 归部署侧」的责任边界）。
 	// 空值表示直连（默认）。
 	KeySandboxBrowserProxy = "sandbox.browser.proxy"
+
+	// KeySandboxChannelSecret 派生 per-bot channel token 的服务器密钥。
+	// 空则回退到 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先，可不落库。
+	KeySandboxChannelSecret = "sandbox.channel.secret"
+
+	// KeySandboxChannelTransport 选择 thinkbot-channel 的传输。
+	// 空或 auto：Linux 用 unix socket（Volume B + 一次性 token 文件），Windows 用 TCP。
+	// http 与 tcp 相同：帧协议不变，token 只在 Hello 帧，宿主只拨 127.0.0.1。
+	// 环境变量 THINKBOT_CHANNEL_TRANSPORT 优先于本键。本键不是密钥。
+	KeySandboxChannelTransport = "sandbox.channel.transport"
 )
 
 // ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。
@@ -530,9 +546,10 @@ func ValidateKey(key string) error {
 // 含：JWT 签名密钥、各渠道 token/secret、数据库/代理凭据等。匹配前缀即可，
 // 因此 bot.<id>.xxx 这类按 bot 隔离的密钥也会被覆盖（如 channel token）。
 var SensitiveConfigKeys = map[string]bool{
-	"auth.jwt_secret": true,
-	"db.password":     true,
-	"db.path":         false, // 非敏感（已在死键修复中处理），仅占位说明
+	"auth.jwt_secret":        true,
+	"sandbox.channel.secret": true,
+	"db.password":            true,
+	"db.path":                false, // 非敏感（已在死键修复中处理），仅占位说明
 }
 
 // IsSensitiveKey 判断配置键是否敏感（含精确匹配与前缀匹配）。
@@ -542,7 +559,10 @@ func IsSensitiveKey(key string) bool {
 		return true
 	}
 	// 前缀匹配：任何以这些前缀开头的键都视为敏感（如各渠道 token/secret）。
-	for _, prefix := range []string{"auth.", "channel.", "db."} {
+	// provider.* 以单行 JSON 存放整包配置（含 apiKey 字段），同样禁止原文回显 ——
+	// provider 的常规读写走专用 /api/providers（其 GET 已 maskAPIKey），这里只堵
+	// 住通用的 /api/config/:key 单键读取接口，避免整包明文 JSON 从这里泄露。
+	for _, prefix := range []string{"auth.", "channel.", "db.", "provider."} {
 		if strings.HasPrefix(key, prefix) {
 			// db.path 等明确非敏感的已在上表标 false，这里需排除。
 			if key == "db.path" {

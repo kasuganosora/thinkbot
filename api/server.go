@@ -20,6 +20,7 @@ import (
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/identity"
 	"github.com/kasuganosora/thinkbot/notify"
+	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/toolperm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -59,6 +60,17 @@ type Server struct {
 
 	// bundledSkillsDirOverride 测试用：覆盖内置技能目录（空则 "skills"）。
 	bundledSkillsDirOverride string
+
+	// uploadWorkspaceHook 仅测试使用。非 nil 时用户上传写入该工作空间，
+	// 以便在没有 Docker 的情况下覆盖「跳过 MaxFileWrite」的路径。
+	uploadWorkspaceHook func(botID string) (sandbox.Workspace, bool)
+
+	// 分片上传的进程内索引。磁盘 meta.json 在重启后仍可找回未完成的上传。
+	// chunkUploadBytes / chunkUploadMaxActive 仅测试覆盖；0 表示用默认值。
+	chunkUploadOnce      sync.Once
+	chunkUploads         *chunkUploadStore
+	chunkUploadBytes     int64
+	chunkUploadMaxActive int
 
 	// vecRebuildJobs 是按 bot 的向量重建进度。进程内一份，不落库。
 	vecRebuildMu   sync.Mutex
@@ -139,6 +151,7 @@ func NewServer(
 // Start 启动 HTTP 服务器（阻塞）。
 func (s *Server) Start(ctx context.Context) error {
 	s.logger.Infow("API server starting", "addr", s.addr)
+	go s.runChunkUploadSweeper(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -203,7 +216,8 @@ func requestLogger(logger *zap.SugaredLogger) gin.HandlerFunc {
 		var bodyPreview string
 		// notify 调用跳过预读：其 handler 自带请求体上限（413），且正文是外部告警内容无需进访问日志。
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions &&
-			!isNotifyCallPath(c.Request.Method, c.Request.URL.Path) {
+			!isNotifyCallPath(c.Request.Method, c.Request.URL.Path) &&
+			!isWorkspaceFileUpload(c.Request.Method, c.Request.URL.Path) {
 			if c.Request.Body != nil {
 				raw, _ := io.ReadAll(c.Request.Body)
 				// 恢复 body 供后续 handler 读取
@@ -243,6 +257,20 @@ func requestLogger(logger *zap.SugaredLogger) gin.HandlerFunc {
 			logger.Infow("request", fields...)
 		}
 	}
+}
+
+// isWorkspaceFileUpload 报告会话/Bot 工作区文件上传。
+// 这些请求体按流式上传处理，访问日志若先把正文整包读入，就会抵消流式写入。
+// 单次 POST /files/upload 的上限是 MaxUserUploadBytes。
+// 分片 PUT .../files/uploads/:id/chunks/:index 的上限是 MaxChunkUploadBytes。
+// 建会话与完成合并的 JSON 很小，仍可进访问日志。
+func isWorkspaceFileUpload(method, path string) bool {
+	if method == http.MethodPost && strings.HasSuffix(path, "/files/upload") {
+		return true
+	}
+	return method == http.MethodPut &&
+		strings.Contains(path, "/files/uploads/") &&
+		strings.Contains(path, "/chunks/")
 }
 
 // sanitizeBody 清理请求体中的敏感字段，返回截断后的预览。

@@ -72,7 +72,7 @@
             <span class="mem-unit">MB</span>
             <span v-if="memSaved" class="mem-hint ok">✓ 已生效</span>
             <span v-else-if="memDirty" class="mem-hint dirty">未保存 · 重建容器后生效</span>
-            <span class="mem-hint tip">0 = 不限制</span>
+            <span class="mem-hint tip">0 = 不限制（需重建容器生效）</span>
           </div>
         </div>
 
@@ -114,6 +114,7 @@
         <span v-if="memSaved" class="mem-hint ok">✓ 已保存</span>
         <span v-else-if="memDirty" class="mem-hint dirty">有未保存的更改</span>
         <span v-else class="mem-hint tip">内存限制等容器配置修改后，点击此处统一保存</span>
+        <span class="mem-hint tip">CPU 上限是全局配置，在「系统配置 → 沙箱工作空间」中修改</span>
       </div>
     </div>
 
@@ -280,10 +281,18 @@ async function doSaveMemory() {
   const mb = Number(memValue.value) || 0
   memSaving.value = true
   try {
-    await botContainerApi.updateConfig(props.botId, { memoryLimitMB: mb })
+    const res = await botContainerApi.updateConfig(props.botId, { memoryLimitMB: mb })
     info.value.memoryLimitMB = mb
     memDirty.value = false
     memSaved.value = true
+    // 后端会就地 docker update：具体数值立刻生效，「不限制」docker update 取消不掉，
+    // 只能等重建。如实把这两种结果告诉用户，别都显示成"已生效"。
+    const d = res?.data ?? res
+    if (d?.needsRecreate) {
+      MessagePlugin.warning('已保存；「不限制」需重建工作容器后才生效')
+    } else if (d?.applied) {
+      MessagePlugin.success('已保存并立即生效（无需重建）')
+    }
     setTimeout(() => { memSaved.value = false }, 3000)
   } catch (e) {
     MessagePlugin.error(e?.message || '保存失败')

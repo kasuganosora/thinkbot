@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,6 +49,7 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/sandbox"
+	"github.com/kasuganosora/thinkbot/sandbox/channelclient"
 	"github.com/kasuganosora/thinkbot/skill"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/toolperm"
@@ -386,6 +389,119 @@ func (s *BotService) SandboxConfigForBot() sandbox.Config {
 	return s.sandboxConfigWithMemoryLimit(-1)
 }
 
+// sandboxCPULimitOverride 读取 sandbox.cpu_limit 并解析为 docker --cpus 的值。
+//
+// 返回 (value, configured)：
+//   - ("", false)：未配置，沿用 sandbox.DefaultConfig() 的 "1.0"；
+//   - ("", true)：显式配置为不限制（0 / - / unlimited），docker run 不加 --cpus；
+//   - (v, true)：限制为 v（直接作为 --cpus 参数）。
+//
+// 注意「不限制」必须能表达成空串，而空串同时又是"未配置"的返回值，
+// 故用第二个返回值区分，不能只看 value 是否为空。
+func (s *BotService) sandboxCPULimitOverride() (string, bool) {
+	return parseSandboxCPULimit(s.store.GetString(config.KeySandboxCPULimit, ""))
+}
+
+// parseSandboxCPULimit 把 sandbox.cpu_limit 的原始值解析为 (--cpus 值, 是否已显式配置)。
+// 抽成纯函数便于表驱动测试：空串同时是"未配置"与"不限制"的中间形态，靠第二返回值区分。
+func parseSandboxCPULimit(raw string) (string, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", false
+	}
+	if v == "0" || v == "-" || strings.EqualFold(v, "unlimited") {
+		return "", true
+	}
+	return v, true
+}
+
+// validateSandboxCPULimit 校验 sandbox.cpu_limit 的原始值：允许空（沿用默认）、
+// 0/-/unlimited（不限制）或正数字。
+//
+// 该值会被原样拼进 `docker run --cpus`，写错只会在创建/更新容器时才炸，且失败
+// 信息埋在 docker 输出里，很难归因到配置项；故在落库前就拦掉。
+func validateSandboxCPULimit(raw string) error {
+	v, configured := parseSandboxCPULimit(raw)
+	if !configured || v == "" {
+		return nil
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n <= 0 {
+		return errs.BadRequest("sandbox.cpu_limit must be a positive number (e.g. 2), or 0 / - / unlimited for no limit")
+	}
+	return nil
+}
+
+// ApplySandboxCPULimit 把当前的 sandbox.cpu_limit 就地应用到该 bot 的运行中容器
+// （不重建）。用于「系统配置里改完立刻生效」。
+//
+// 返回 (needsRecreate, err)：
+//   - needsRecreate=true：配置成了「不限制」，docker update 取消不掉已有的
+//     --cpus，只能等容器重建；
+//   - 未配置该键、或容器不存在（下次创建自然会带上）时返回 (false, nil)。
+func (s *BotService) ApplySandboxCPULimit(ctx context.Context, botID string) (bool, error) {
+	limit, configured := s.sandboxCPULimitOverride()
+	if !configured {
+		return false, nil
+	}
+	mgr, err := s.WorkspaceManagerForBot(botID)
+	if err != nil {
+		return false, err
+	}
+	if err := mgr.ApplyCPULimit(ctx, botID, limit); err != nil {
+		if errors.Is(err, sandbox.ErrLimitNotClearable) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+// ApplySandboxCPULimitAll 把 sandbox.cpu_limit 应用到所有已定义的 bot。
+// 单个 bot 失败不影响其它：配置已落库，重建容器时一样会生效。
+//
+// 运行中的 bot 用它自己的运行时 manager（容器句柄带着 OOM 抬升等状态，在线改完
+// 要回写进去）；其余 bot 共用一个临时 manager——WorkspaceManagerForBot 会新建
+// BotWorkspaceManager，其构造函数顺带触发镜像预热，N 个 bot 各建一个就是 N 次
+// 预热。docker update 只按容器名操作，不依赖 manager 的 per-bot 状态。
+func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) bool {
+	limit, configured := s.sandboxCPULimitOverride()
+	if !configured {
+		return false
+	}
+	defs, err := s.ListDefinitions()
+	if err != nil {
+		s.logger.Warnw("apply sandbox cpu limit: list bots failed", "err", err)
+		return false
+	}
+	needsRecreate := false
+	var shared *sandbox.BotWorkspaceManager
+	for _, def := range defs {
+		if def.ID == "" {
+			continue
+		}
+		mgr, running := s.RunningBotWorkspaceMgr(def.ID)
+		if !running {
+			if shared == nil {
+				shared, err = s.WorkspaceManagerForBot(def.ID)
+				if err != nil {
+					s.logger.Warnw("apply sandbox cpu limit: workspace manager unavailable", "err", err)
+					return needsRecreate
+				}
+			}
+			mgr = shared
+		}
+		if err := mgr.ApplyCPULimit(ctx, def.ID, limit); err != nil {
+			if errors.Is(err, sandbox.ErrLimitNotClearable) {
+				needsRecreate = true
+				continue
+			}
+			s.logger.Warnw("apply sandbox cpu limit failed", "bot", def.ID, "err", err)
+		}
+	}
+	return needsRecreate
+}
+
 // sandboxConfigWithMemoryLimit 构造基础 sandbox 配置并按 mb 决定内存限制。
 //   - mb > 0：限制为该 MB 数（如 "2048m"）。
 //   - mb == 0：不限制（docker run 不加 --memory）。
@@ -401,6 +517,9 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	}
 	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
 		cfg.Backend = backend
+	}
+	if cpu, configured := s.sandboxCPULimitOverride(); configured {
+		cfg.CPULimit = cpu
 	}
 	// auto 模式下是否强制要求 Docker 可用：避免 DooD 部署探测失败时静默降级 local 裸跑。
 	if s.store.GetString(config.KeySandboxRequireDocker, "") == "true" {
@@ -418,14 +537,47 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	if sec := s.store.GetInt(config.KeySandboxStuckTimeout, 300); sec > 0 {
 		cfg.StuckTimeout = time.Duration(sec) * time.Second
 	}
+	if mem, ok := sandboxMemoryLimit(mb); ok {
+		cfg.MemoryLimit = mem
+	}
+	s.applyChannelConfig(&cfg)
+	return cfg
+}
+
+// sandboxMemoryLimit 把 per-bot 的 memory_limit_mb 转成 docker --memory 的值。
+//
+//   - mb > 0：限制为 mb MB，返回 (值, true)；
+//   - mb == 0：不限制，返回 ("", true)（docker run 不加 --memory）；
+//   - mb < 0：未指定，返回 ("", false)，调用方保留 DefaultConfig 的 2G 默认。
+//
+// 「不限制」与「未指定」的返回值都是空串，靠第二个返回值区分。
+func sandboxMemoryLimit(mb int64) (string, bool) {
 	switch {
 	case mb > 0:
-		cfg.MemoryLimit = fmt.Sprintf("%dm", mb)
+		return fmt.Sprintf("%dm", mb), true
 	case mb == 0:
-		cfg.MemoryLimit = "" // 0 = 不限制
-	default: // mb < 0：保留 DefaultConfig 的 2G 默认
+		return "", true
+	default:
+		return "", false
 	}
-	return cfg
+}
+
+// applyChannelConfig 填入 channel 服务器密钥与 socket 根目录。
+// 密钥优先读 THINKBOT_CHANNEL_SECRET（可不落库），其次 sandbox.channel.secret，最后 auth.jwt_secret。
+func (s *BotService) applyChannelConfig(cfg *sandbox.Config) {
+	cfg.ChannelSecret = channelclient.SelectSecret(
+		os.Getenv(channelclient.EnvSecret),
+		s.store.GetString(config.KeySandboxChannelSecret, ""),
+		s.store.GetString("auth.jwt_secret", ""),
+	)
+	if root := os.Getenv(channelclient.EnvSockRoot); root != "" {
+		cfg.ChannelSockRoot = root
+	}
+	if transport := os.Getenv(channelclient.EnvTransport); transport != "" {
+		cfg.ChannelTransport = transport
+	} else if transport := s.store.GetString(config.KeySandboxChannelTransport, ""); transport != "" {
+		cfg.ChannelTransport = transport
+	}
 }
 
 // GetWorkspaceBaseDir 返回 bot 工作空间根目录。
@@ -2977,6 +3129,19 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	if backend := s.store.GetString(config.KeySandboxBackend, ""); backend != "" {
 		sbCfg.Backend = backend
 	}
+	// CPU 上限必须从这个 sbCfg 读取：bot.New 用它自建 BotWorkspaceManager 并据此
+	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的 "1.0"。
+	if cpu, configured := s.sandboxCPULimitOverride(); configured {
+		sbCfg.CPULimit = cpu
+	}
+	// per-bot 内存限制同理必须在这里读：服务重启后 bot 由 StartBot 自动拉起，
+	// 不会再经过 handleStartBotContainer 那条 SetBotMemoryOverride 路径，
+	// 否则容器一旦重建就回落到 DefaultConfig 的 2G（编译类任务直接 OOM）。
+	if def, derr := s.GetDefinition(id); derr == nil {
+		if mem, configured := sandboxMemoryLimit(def.MemoryLimitMB); configured {
+			sbCfg.MemoryLimit = mem
+		}
+	}
 	// 浏览器 MCP 服务开关（per-bot，docker 持久容器模式 + 浏览器镜像时启用）。
 	sbCfg.BrowserEnabled = s.store.GetBool(config.KeySandboxBrowserEnabled, false)
 	// 浏览器出口代理（IP 归部署侧）：空值直连。
@@ -2986,6 +3151,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		browserProxy = config.GlobalProxy(s.store)
 	}
 	sbCfg.BrowserProxy = browserProxy
+	s.applyChannelConfig(&sbCfg)
 
 	// 出站只读守卫：Pipeline 自动回复（ActionReply → Channel.Send）不经过工具权限，
 	// 因此「只看不发」的潜水bot 必须在出站链路拦。

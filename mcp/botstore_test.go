@@ -101,3 +101,29 @@ func TestDeriveStatus(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestIsSensitiveConfigKey(t *testing.T) {
+	sensitive := []string{
+		"Authorization", "authorization", "X-API-Key", "API_KEY", "apiKey",
+		"X-Auth-Token", "ACCESS_TOKEN", "token", "SECRET", "MY_SECRET",
+		"DB_PASSWORD", "passwd", "pwd", "CLIENT_SECRET", "credential",
+		"Proxy-Authorization", "Bearer", "Set-Cookie", "PRIVATE_KEY",
+		"myApiKey", "accessToken", "secretKey", "authToken",
+	}
+	for _, k := range sensitive {
+		if !IsSensitiveConfigKey(k) {
+			t.Errorf("expected sensitive: %q", k)
+		}
+	}
+
+	plain := []string{
+		"Content-Type", "Accept", "User-Agent", "NODE_ENV", "PATH",
+		"monkey", "author", "keyboard", "TOKENIZERS_PARALLELISM",
+		"X-Request-Id", "TIMEOUT", "LANG", "",
+	}
+	for _, k := range plain {
+		if IsSensitiveConfigKey(k) {
+			t.Errorf("expected NOT sensitive: %q", k)
+		}
+	}
+}

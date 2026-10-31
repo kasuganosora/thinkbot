@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/kasuganosora/thinkbot/agent/command"
+	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/stages"
@@ -198,6 +200,18 @@ func (s *Server) handleChatAbort(c *gin.Context) {
 	}
 }
 
+// interceptWebSecretReply 对 Web 聊天文本做密钥回复拦截，返回应继续使用的文本
+// （命中时为脱敏提示，否则原样）。会话键必须与 WebChannel.InjectWithID 构造的
+// msg.Channel 一致——secret_input 正是按它登记 pending 请求的。
+func (s *Server) interceptWebSecretReply(botID, userID, text string) string {
+	msg := core.Message{BotID: botID, Channel: "web:" + userID, Text: text}
+	if name, ok := inbound.InterceptSecretReply(&msg); ok {
+		s.logger.Infow("chat: user-provided secret redacted before persistence",
+			"bot_id", botID, "secret_name", name)
+	}
+	return msg.Text
+}
+
 // abortActor 取发起中止的操作者用户名（审计用）；未登录时记为 anonymous。
 func abortActor(c *gin.Context) string {
 	if u := currentUser(c); u != nil && u.Username != "" {
@@ -247,6 +261,9 @@ func (s *Server) handleChatAppend(c *gin.Context) {
 		break
 	}
 
+	// append 直接注入进行中的编排，不经过 Ingress：密钥回复必须在这里拦截，
+	// 否则上一轮还没结束时用户回复的密钥会以明文进 LLM 并落库。
+	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.Text)
 	accepted := s.botSvc.AppendToMessage(req.BotID, req.TraceID, req.Text)
 	if accepted {
 		if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, req.TraceID, req.SessionID); err != nil {
@@ -481,6 +498,12 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
 	}
+	// 聊天附件是 base64 JSON，不经过工作区 WriteFile，因此不受 MaxFileWrite（10MB）约束。
+	// 上限与前端 ChatWindow 一致，见 MaxChatAttachmentBytes。
+	if err := validateChatAttachments(req.Attachments); err != nil {
+		Fail(c, err)
+		return
+	}
 	user := currentUser(c)
 	if user == nil {
 		Fail(c, errs.Unauthorized("not logged in"))
@@ -512,6 +535,9 @@ func (s *Server) handleChatSend(c *gin.Context) {
 		s.handleSlashCommand(c, cmd, &req)
 		return
 	}
+	// 密钥回复拦截必须早于 SaveMessage：本函数先落库再 Inject，若只靠 Ingress
+	// 拦截，明文已经进了 chat_messages，下一轮又会作为 chat_history 喂给 LLM。
+	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.Text)
 	bus, ok := s.botSvc.EventBus().(*outbound.MemoryEventBus)
 	if !ok || bus == nil {
 		Fail(c, errs.Internal("event bus unavailable"))

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -601,6 +602,41 @@ func TestExtractText(t *testing.T) {
 	}
 }
 
+// TestStdioTransportSurvivesCallerCancel 验证连接用的 ctx 被取消后，stdio
+// 子进程仍然活着。进程寿命只到 Close()；若 CommandContext 绑在调用方 ctx 上，
+// 启动预算结束时的 cancel 会把已经连上的 MCP 子进程 SIGKILL 掉。
+func TestStdioTransportSurvivesCallerCancel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires subprocess")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tp, err := newStdioTransport(ctx, "sleep", []string{"30"}, nil, "", nil)
+	if err != nil {
+		t.Fatalf("newStdioTransport: %v", err)
+	}
+
+	cancel()
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if !tp.Healthy() {
+			_ = tp.Close()
+			t.Fatal("stdio child died after caller context cancel; lifetime must end at Close")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !tp.Healthy() {
+		_ = tp.Close()
+		t.Fatal("stdio child died after caller context cancel; lifetime must end at Close")
+	}
+
+	if err := tp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if tp.Healthy() {
+		t.Fatal("Close should stop the stdio child")
+	}
+}
+
 // TestStdioTransportHealthy 验证 stdio 传输层的健康探测：进程存活时为 true，
 // 被杀后为 false（断线自动重连依赖此信号）。
 func TestStdioTransportHealthy(t *testing.T) {
@@ -703,5 +739,58 @@ func TestManager_RemoveServer_Notifies(t *testing.T) {
 	}
 	if _, ok := mgr.GetClient("srv"); ok {
 		t.Fatal("client should be gone")
+	}
+}
+
+// TestConnectOneBoundsHandshakeOnDeadEndpoint 验证挂死的端点不会把握手无限拖住。
+//
+// 真实故障里出现过这样的端点：包被丢弃且没有 RST，连接既不成功也不失败，一路挂到
+// httpTransport 的 120s 客户端超时才返回 —— 那足以耗尽 fx 的启动超时，让整个进程
+// 以 exit 1 中止（不是「这个 MCP 连不上」，而是「服务起不来」）。握手动不了就必须
+// 在 handshakeTimeout 内放弃，交给调用方按「连接失败可容忍」处理。
+func TestConnectOneBoundsHandshakeOnDeadEndpoint(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	var conns []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	defer func() {
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	}()
+
+	m := NewManager(zap.NewNop().Sugar())
+	cfg := ServerConfig{
+		Name:      "dead-endpoint",
+		Transport: "http",
+		URL:       "http://" + ln.Addr().String(),
+	}
+
+	start := time.Now()
+	err = m.connectOne(context.Background(), cfg)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected handshake to fail against a never-responding endpoint")
+	}
+	if elapsed > handshakeTimeout+5*time.Second {
+		t.Fatalf("handshake hung for %s, want bounded by %s", elapsed, handshakeTimeout)
 	}
 }

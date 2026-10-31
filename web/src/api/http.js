@@ -128,8 +128,11 @@ export async function request(method, url, body, query, options = {}) {
  * @param {FormData} formData
  * @param {object} [query] 可选 query 参数
  */
-export async function uploadRequest(method, url, formData, query) {
+export async function uploadRequest(method, url, formData, query, onProgress) {
   const finalUrl = withQuery(url, query)
+  if (typeof onProgress === 'function') {
+    return uploadWithProgress(method, finalUrl, formData, onProgress)
+  }
   const resp = await fetch(finalUrl, {
     method,
     credentials: 'include',
@@ -149,4 +152,82 @@ export async function uploadRequest(method, url, formData, query) {
     throw err
   }
   return json.data
+}
+
+// uploadWithProgress 用 XHR 暴露上传进度。fetch 读不到请求体发送进度。
+function uploadWithProgress(method, url, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open(method, url)
+    xhr.withCredentials = true
+    const started = performance.now()
+    xhr.upload.onprogress = (event) => {
+      const seconds = Math.max((performance.now() - started) / 1000, 0.001)
+      onProgress({
+        loaded: event.loaded,
+        total: event.lengthComputable ? event.total : 0,
+        speed: event.loaded / seconds
+      })
+    }
+    xhr.onerror = () => reject(new Error('上传失败'))
+    xhr.onload = () => {
+      let json = {}
+      try { json = JSON.parse(xhr.responseText || '{}') } catch { json = {} }
+      if (xhr.status === 401) {
+        handleUnauthorized()
+        const err = new Error(json.message || '登录已失效，请重新登录')
+        err.code = 401
+        reject(err)
+        return
+      }
+      if (xhr.status < 200 || xhr.status >= 300 || json.code !== 0) {
+        const err = new Error(json.message || '上传失败')
+        err.code = json.code || xhr.status
+        reject(err)
+        return
+      }
+      resolve(json.data)
+    }
+    xhr.send(formData)
+  })
+}
+
+/**
+ * 发送一段原始字节（分片上传）。进度回调只描述这一段，不描述整个文件。
+ * @param {string} url
+ * @param {Blob|ArrayBuffer|Uint8Array} blob
+ * @param {(progress:{loaded:number,total:number}) => void} [onProgress]
+ */
+export function putBytes(url, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+    xhr.withCredentials = true
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+    xhr.upload.onprogress = (event) => {
+      if (typeof onProgress !== 'function') return
+      onProgress({
+        loaded: event.loaded,
+        total: event.lengthComputable ? event.total : (blob?.size || 0),
+      })
+    }
+    xhr.onerror = () => reject(Object.assign(new Error('上传失败'), { code: 0 }))
+    xhr.onload = () => {
+      let json = {}
+      try { json = JSON.parse(xhr.responseText || '{}') } catch { json = {} }
+      if (xhr.status === 401) {
+        handleUnauthorized()
+        reject(Object.assign(new Error(json.message || '登录已失效，请重新登录'), { code: 401 }))
+        return
+      }
+      if (xhr.status < 200 || xhr.status >= 300 || json.code !== 0) {
+        const code = json.code || xhr.status
+        const message = json.message || (xhr.status === 413 ? '上传被拒绝：单次请求过大' : '上传失败')
+        reject(Object.assign(new Error(message), { code }))
+        return
+      }
+      resolve(json.data)
+    }
+    xhr.send(blob)
+  })
 }

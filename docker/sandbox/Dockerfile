@@ -84,3 +84,19 @@ COPY desktop-session.sh /usr/local/bin/thinkbot-desktop-session
 COPY tint2rc /etc/thinkbot/tint2rc
 RUN mkdir -p /etc/thinkbot \
     && chmod +x /usr/local/bin/thinkbot-browser-launch /usr/local/bin/thinkbot-desktop /usr/local/bin/thinkbot-desktop-session
+
+# ---------- in-sandbox channel (container PID 1) ----------
+# thinkbot-channel is PID 1. Do not wrap it in a shell, supervisord, or
+# `sleep infinity`. EnsureImage places the static binary in this build context.
+# Manual build:
+#   CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o docker/sandbox/thinkbot-channel ./cmd/thinkbot-channel
+COPY thinkbot-channel /usr/local/bin/thinkbot-channel
+RUN chmod 755 /usr/local/bin/thinkbot-channel
+
+LABEL thinkbot.channel.version="1" \
+      thinkbot.channel.protocol="1"
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=3s --retries=3 \
+    CMD ["/usr/local/bin/thinkbot-channel", "health"]
+
+ENTRYPOINT ["/usr/local/bin/thinkbot-channel"]

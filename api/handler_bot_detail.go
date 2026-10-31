@@ -352,27 +352,11 @@ func (s *Server) handleBotFileMkdir(c *gin.Context) {
 // handleBotFileUpload 向 Bot 文件系统上传文件。
 // POST /api/bots/:id/files/upload
 // 接收 multipart/form-data：字段 file（文件）、path（目标路径）。
+// 正文流式写入工作区，单文件上限为 MaxUserUploadBytes，高于工具写文件的 MaxFileWrite。
+// 超过边缘单请求体上限的文件改走 /files/uploads 分片，见 chunk_upload.go。
 func (s *Server) handleBotFileUpload(c *gin.Context) {
 	botID := c.Param("id")
-
-	fileHeader, err := c.FormFile("file")
-	if err != nil {
-		Fail(c, errs.BadRequest("file is required: "+err.Error()))
-		return
-	}
-	path := c.PostForm("path")
-	if path == "" {
-		path = "/"
-	}
-
-	f, err := fileHeader.Open()
-	if err != nil {
-		Fail(c, errs.Internal("failed to open uploaded file: "+err.Error()))
-		return
-	}
-	defer func() { _ = f.Close() }()
-
-	if err := s.botFileUpload(c, botID, path, fileHeader.Filename, f); err != nil {
+	if _, _, _, err := s.consumeWorkspaceUpload(c, botID); err != nil {
 		Fail(c, err)
 		return
 	}
@@ -487,7 +471,22 @@ func (s *Server) handleUpdateBotContainerConfig(c *gin.Context) {
 		return
 	}
 
-	OK(c, gin.H{"ok": true})
+	// 落库后再就地应用到运行中的容器，免得用户还得重建一次才生效。
+	// docker update 无法取消已有上限（0 会被当成"不改"），所以「不限制」只能
+	// 等容器重建；这里把结果如实回给前端，不要假装成功。
+	applied := false
+	needsRecreate := false
+	if mgr, err := s.botSvc.WorkspaceManagerForBot(botID); err == nil {
+		if err := mgr.ApplyMemoryLimit(c.Request.Context(), botID, req.MemoryLimitMB); err == nil {
+			applied = true
+		} else if errors.Is(err, sandbox.ErrLimitNotClearable) {
+			needsRecreate = true
+		} else {
+			s.logger.Warnw("apply container memory limit failed", "bot", botID, "err", err)
+		}
+	}
+
+	OK(c, gin.H{"ok": true, "applied": applied, "needsRecreate": needsRecreate})
 }
 
 // handleGetBotContainerSnapshots 获取 Bot 容器快照列表（真实 docker 镜像）。
@@ -1068,54 +1067,8 @@ func (s *Server) botFileMkdir(c *gin.Context, botID, path, name string) error {
 }
 
 func (s *Server) botFileUpload(c *gin.Context, botID, path, name string, content io.Reader) error {
-	// 校验文件名合法性。
-	if name == "" || name == "." || name == ".." ||
-		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) {
-		return errs.BadRequest("invalid file name")
-	}
-
-	// docker 隔离模式：写入容器内。
-	if ws, ok := s.botFileWorkspace(botID); ok {
-		data, err := io.ReadAll(content)
-		if err != nil {
-			return errs.Internal("failed to read upload: " + err.Error())
-		}
-		target := filepath.ToSlash(filepath.Join(path, name))
-		if err := ws.WriteFile(c.Request.Context(), target, data); err != nil {
-			return errs.Internal("failed to write file into container: " + err.Error())
-		}
-		return nil
-	}
-
-	root, err := s.botWorkspaceRoot(botID)
-	if err != nil {
-		return errs.Internal("failed to resolve workspace root: " + err.Error())
-	}
-
-	// 目标所在目录（path 部分）与文件路径分别做安全校验。
-	dir, err := safeJoin(root, path)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return errs.Internal("failed to prepare directory: " + err.Error())
-	}
-
-	target, err := safeJoin(root, path, name)
-	if err != nil {
-		return err
-	}
-
-	dst, err := os.Create(target)
-	if err != nil {
-		return errs.Internal("failed to create file: " + err.Error())
-	}
-	defer func() { _ = dst.Close() }()
-
-	if _, err := io.Copy(dst, content); err != nil {
-		return errs.Internal("failed to write file: " + err.Error())
-	}
-	return nil
+	_, err := s.streamWorkspaceFile(c, botID, path, name, content, MaxUserUploadBytes)
+	return err
 }
 
 // realBotContainerInfo 从真实 sandbox 读取容器信息，映射为前端 BotContainerInfo。

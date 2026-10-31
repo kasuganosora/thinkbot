@@ -101,7 +101,7 @@ const grouped = computed(() => {
   return g
 })
 
-const catLabels = { chat: '对话', token: 'Token 配额', system: '系统', workflow: '工作流', memory_window: '记忆窗口', MemoryWindow: '记忆窗口', llm: 'LLM 客户端', LLM: 'LLM 客户端', compaction: '会话压缩', Compaction: '会话压缩', Engagement: '主动参与', other: '其它' }
+const catLabels = { chat: '对话', token: 'Token 配额', system: '系统', System: '系统', workflow: '工作流', memory_window: '记忆窗口', MemoryWindow: '记忆窗口', llm: 'LLM 客户端', LLM: 'LLM 客户端', compaction: '会话压缩', Compaction: '会话压缩', Engagement: '主动参与', Workspace: '沙箱工作空间', InternalLLM: '内置 LLM', other: '其它' }
 function catLabel(c) { return catLabels[c] || c }
 
 function isBool(v) { return v === 'true' || v === 'false' }

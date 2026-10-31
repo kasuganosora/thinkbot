@@ -24,7 +24,9 @@ import (
 	"github.com/kasuganosora/thinkbot/stats"
 	"github.com/kasuganosora/thinkbot/util/log"
 	"go.uber.org/fx"
+	"go.uber.org/fx/fxevent"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 )
 
@@ -106,8 +108,16 @@ func main() {
 		stats.Module,
 		api.Module,
 
-		// 优雅关闭
-		fx.NopLogger,
+		// fx 事件走 zap：日常事件压到 Debug（默认级别下被过滤，不引入框架噪音），
+		// 失败事件保持 Error 必须可见 —— fx 启动失败会直接 os.Exit(1)，此前用
+		// fx.NopLogger 会连错误一起吞掉，进程于是「无声消失」：无日志、退出码 1，
+		// 排查时完全看不到是哪个生命周期钩子失败。
+		fx.WithLogger(func(l *zap.Logger) fxevent.Logger {
+			zl := &fxevent.ZapLogger{Logger: l}
+			zl.UseLogLevel(zapcore.DebugLevel)
+			zl.UseErrorLevel(zapcore.ErrorLevel)
+			return zl
+		}),
 	)
 
 	app.Run()

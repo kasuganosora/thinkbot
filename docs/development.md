@@ -30,6 +30,8 @@ go build -ldflags="-s -w \
   -o thinkbot ./cmd
 ```
 
+沙箱镜像的 PID 1 是 `thinkbot-channel`。本机仓库里上面的 `go build ./cmd` 足够开发：启动 bot 时若源码和 `go` 都在，会现场编译 channel 再 `docker build`。生产 slim 镜像没有源码，构建阶段会先 `CGO_ENABLED=0 go build -o docker/sandbox/thinkbot-channel ./cmd/thinkbot-channel`，再给主程序加上 `-tags embedchannel`（见根 `Dockerfile` 与 loader 自部署）。
+
 辅助脚本（`scripts/`）：`redeploy.sh` 重部署（停旧实例 → 构建 → 启动 → 健康检查；脚本内 `REPO` 路径为作者本机路径，使用前请修改）、`run_thinkbot.py` 守护启动、`watch.sh` 日志观察。
 
 ## 前端

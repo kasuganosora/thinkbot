@@ -38,7 +38,8 @@
 
 ## 长期容器生命周期（botContainer）
 
-- **惰性 ensure**：首次使用时 `docker run -d`（镜像经 `resolveBotImage` 解析：`builtin`/空 → 按需自构建内置镜像，其他值原样使用），已停止则 `docker start`；幂等。
+- **惰性 ensure**：首次使用时 `docker run -d`（镜像经 `resolveBotImage` 解析：`builtin`/空 → 按需自构建内置镜像，其他值原样使用），已停止则 `docker start`；幂等。内置镜像的 ENTRYPOINT / PID 1 是 `thinkbot-channel`（Linux 默认 unix socket `/run/thinkbot/channel.sock`；Windows 或 `sandbox.channel.transport=http` 时改为 TCP，宿主只拨 `127.0.0.1`），不再把 `sleep infinity` 当作入口；自定义镜像仍用 `sleep infinity` 保持运行。
+- **Channel**：内置镜像另挂 Volume B（`/var/run/thinkbot-bots/thinkbot-channel-<botID>` → 容器内 `/run/thinkbot`）。Token 由服务器密钥和 botID 经 HKDF 派生，写成该目录里一次性的 `0600` 文件，守护进程读完即删，不放进 PID 1 的环境变量，也不写入 `/data`，也不出现在 URL 里。传输默认跟宿主 OS：Linux 用 unix socket，Windows 用 TCP（配置名 `http` 与 `tcp` 相同，仍是原来的帧协议）。TCP 时容器内监听地址经 `THINKBOT_CHANNEL_HTTP` 传入（不是密钥），Docker 把端口只发布到宿主 `127.0.0.1` 的动态端口，主进程把该地址记在运行时状态里。ensure 先 Health 再 Hello；失败则 `docker rm` 后重建一次容器，数据 volume 保留。没有 exec 回退开关。内置镜像上的上传、读写、列目录、命令和进程操作走 channel；自定义镜像仍用 docker exec。桌面 RFB 仍走 docker exec。
 - **网络自愈**：ensure 每次复核并补齐网络配置（见上文「网络策略」）。
 - **停止语义**：用户显式 `stop()` 后置 `stopped` 标志，后续 `ensure()` 拒绝自动 `docker start`，避免「停止后又被 agent exec 重启」死循环；`unstop()` 恢复。
 - **destroy**：`docker rm -f`，可选连同 named volume 一起删除。
@@ -123,7 +124,9 @@ type StreamWorkspace interface {
 | `workspace.dir` | `data/workspaces` | per-bot 工作空间根目录 |
 | `system.timezone` | `UTC` | 容器/进程 TZ（IANA 格式） |
 
-`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`，可被 per-bot override 覆盖）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`（默认 false，即联网）、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB）、`Proxy`（全局出口代理，注入容器 `HTTP_PROXY`/`HTTPS_PROXY`，通常取自 `system.proxy`）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
+`Config` 运行时字段还包括 `MemoryLimit`（默认 `2g`，可被 per-bot override 覆盖）、`CPULimit`（默认 `1.0`）、`NetworkDisabled`（默认 false，即联网）、`Timezone`（默认 `UTC`）、`MaxOutput`（默认 1MB）、`MaxFileWrite`（默认 10MB，只约束工具/代理写文件，例如 `sandbox_write_file`）、`Proxy`（全局出口代理，注入容器 `HTTP_PROXY`/`HTTPS_PROXY`，通常取自 `system.proxy`）、`PersistentContainer`（docker 后端强制启用）、`BrowserEnabled`/`BrowserProxy`（per-bot 浏览器 MCP，见 `sandbox.browser.enabled`/`sandbox.browser.proxy` 配置）。
+
+用户从 Web 上传到会话或 Bot 工作区不走 `MaxFileWrite`，也不把文件读进内存：`WriteUserUploadStream` 用 `io.Copy` 写到宿主文件，或经 `docker exec -i` 的 stdin 流进容器。单文件上限是 `api.MaxUserUploadBytes`（1000MB），与已部署网关的 `client_max_body_size 1000m` 对齐。超限会删掉半截文件并返回明确错误。超过边缘代理单请求体上限的文件先在 `{workspace}/.chunk-uploads/` 按 16MiB 收齐，拼成一个临时文件后，宿主工作区用 rename 放入目标路径，容器工作区再把这个完整文件流进去。
 
 ## 安全隔离
 

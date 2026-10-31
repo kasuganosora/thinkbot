@@ -4,14 +4,25 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/mcp"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
+
+// mcpStartupBudget 是启动时连接所有 per-bot MCP 服务器的总时限。
+//
+// 这条路径跑在 fx 的启动阶段，而 fx 启动有全局超时：一旦超过，fx 会中止启动并
+// 让进程以 exit 1 退出（不是某个 MCP 失败，而是整个服务起不来）。健康的 MCP
+// 握手通常在 1s 内完成，这个预算只用于兜住「某个端点不可达且连接挂住」的情况。
+// 它只限制连接尝试，不绑定已拉起的 stdio 子进程寿命（见 newStdioTransport）。
+// 测试可以临时改短这个变量。
+var mcpStartupBudget = 10 * time.Second
 
 // setupUserMCP 为本 bot 接入 Admin UI / 工具配置的 per-bot MCP 服务器
 // （data/mcp/{botId}/servers.json）。
@@ -30,9 +41,25 @@ func setupUserMCP(b *Bot, params BotParams) {
 		logger.Warnw("load bot mcp servers failed", "err", err)
 	}
 
-	ctx := context.Background()
+	// 启动阶段给 MCP 连接一个总预算。MCP 是第三方外部依赖，任何一个连不上
+	// 都不该拖垮 bot 启动：fx 的启动超时一到，整个进程会以 exit 1 中止。
+	// 预算到期后剩余的服务器直接跳过并记 WARN（连接失败本身不致命）。
+	ctx, cancel := context.WithTimeout(context.Background(), mcpStartupBudget)
+	defer cancel()
 	connected := 0
-	for _, e := range entries {
+	for i, e := range entries {
+		if ctx.Err() != nil {
+			skipped, changed := markStartupSkipped(entries[i:])
+			if changed {
+				if saveErr := mcp.SaveBotServers(params.ID, entries); saveErr != nil {
+					logger.Warnw("persist mcp status after startup budget skip failed", "err", saveErr)
+				}
+			}
+			logger.Warnw("mcp startup budget exhausted; skipping remaining servers",
+				"configured", len(entries), "connected", connected, "budget", mcpStartupBudget,
+				"skipped", skipped)
+			break
+		}
 		cfg := e.ToServerConfig()
 		if cfg.Name == "" {
 			continue
@@ -65,6 +92,24 @@ func setupUserMCP(b *Bot, params BotParams) {
 		"connected", connected)
 }
 
+// markStartupSkipped 把预算耗尽后没来得及连接、但状态仍写着 running 的条目改成 error，
+// 避免列表继续显示过期的「运行中」。names 是被跳过的服务器名。
+// entries 与原切片共享底层数组，调用方保存原切片即可。
+func markStartupSkipped(entries []mcp.BotServerEntry) (names []string, changed bool) {
+	for i := range entries {
+		name := strings.TrimSpace(entries[i].Name)
+		if name != "" {
+			names = append(names, name)
+		}
+		if entries[i].Status == "running" {
+			entries[i].Status = "error"
+			entries[i].UpdatedAt = mcp.NowRFC3339()
+			changed = true
+		}
+	}
+	return names, changed
+}
+
 // UserMCP 返回本 bot 的用户 MCP Manager（Admin UI / mcp_server 工具共用）。
 // 未接线时返回 nil。
 func (b *Bot) UserMCP() *mcp.Manager {
@@ -93,6 +138,7 @@ func NewMCPServerTool(botID string, mgr *mcp.Manager, logger *zap.SugaredLogger)
 				"Use action 'enable' / 'disable' to toggle an existing server. " +
 				"Tool names from an MCP server appear as `<server>__<tool>`. " +
 				"Reserved name 'browser' is not allowed. " +
+				"SECURITY: any credential-bearing env/header value (Authorization, token, key, secret, password) MUST be a {{secret:name}} placeholder referencing an already-stored secret — NEVER write the raw credential value. Use the secret_input tool first to ask the user to store the secret, then reference its placeholder. " +
 				"This is a sensitive capability — only use when the user explicitly asks to add or change MCP servers.",
 			Parameters: map[string]any{
 				"type": "object",
@@ -122,7 +168,7 @@ func NewMCPServerTool(botID string, mgr *mcp.Manager, logger *zap.SugaredLogger)
 					},
 					"env": map[string]any{
 						"type":                 "object",
-						"description":          "stdio: environment variables as key→value string map",
+						"description":          "stdio: environment variables as key→value string map. Credential-bearing keys (TOKEN/KEY/SECRET/PASSWORD) must use a {{secret:name}} placeholder, never a raw value.",
 						"additionalProperties": map[string]any{"type": "string"},
 					},
 					"cwd": map[string]any{
@@ -135,7 +181,7 @@ func NewMCPServerTool(botID string, mgr *mcp.Manager, logger *zap.SugaredLogger)
 					},
 					"headers": map[string]any{
 						"type":                 "object",
-						"description":          "http/sse: request headers as key→value string map",
+						"description":          "http/sse: request headers as key→value string map. Credential-bearing headers (Authorization/token/key/secret) must use a {{secret:name}} placeholder, never a raw value.",
 						"additionalProperties": map[string]any{"type": "string"},
 					},
 					"enabled": map[string]any{
@@ -157,8 +203,51 @@ func NewMCPServerTool(botID string, mgr *mcp.Manager, logger *zap.SugaredLogger)
 		// 搜不到这个工具（只能改回单聊或走 Web）。风险由 toolperm 规则收敛：
 		// mcp_server 命中 mcp_ 敏感前缀，企微已进入白名单模式，必须显式 allow
 		// 才放行；子代理仍被 executeMCPServerTool 硬拒。
-		Scopes: []string{"private", "group"},
+		Scopes:        []string{"private", "group"},
+		PromptSection: mcpServerPromptSection,
 	}
+}
+
+// mcpServerPromptSection 引导模型在 mcp_server 的凭据字段使用占位符，
+// 与 secret_input 的引导互补：secret_input 教「怎么拿到占位符」，这里教
+// 「写 MCP 配置时敏感字段必须用占位符」。
+var mcpServerPromptSection = &tools.ToolPromptSection{
+	Name:    "mcp_server_credentials",
+	Order:   323,
+	Enabled: true,
+	Content: `## Credentials in MCP server configuration (mcp_server tool)
+
+- When adding/updating an MCP server, any credential-bearing env var or header (Authorization, token, key, secret, password) must be written as a {{secret:name}} placeholder that references an already-stored secret.
+- NEVER paste raw credential values into env/headers — the tool will reject unregistered plaintext. Ask the user via **secret_input** to store the secret first, then reference its placeholder.
+- Non-credential fields (URLs, commands, ordinary headers) can be written normally.`,
+}
+
+// validateMCPSecretRefs 在 mcp_server 工具落盘前拦截敏感键的裸明文。
+//
+// 判定基于一个关键不变量：工具入参已经过咽喉点 Resolve，合规占位符已还原为
+// Vault 中已登记的真实值 —— 这类值 Redact 能再替换回占位符（Redact(v) != v），
+// 放行且回灌时 RedactValue 同样能遮蔽。反之 Redact(v) == v 的值是 Vault 未登记的
+// 裸明文：它也是 buildStepMessages 回灌时 RedactValue 遮蔽不了的值（即真正会
+// 泄露给 LLM 供应商的值），必须拒绝。判定不依赖「工具能否区分占位符/明文」。
+//
+// 错误文本只含键名，绝不回显值本身 —— 裸明文一旦写进错误文本会经工具错误
+// 回灌，反而制造泄露。
+func validateMCPSecretRefs(env, headers map[string]string) error {
+	check := func(scope string, m map[string]string) error {
+		for k, v := range m {
+			if v == "" || !mcp.IsSensitiveConfigKey(k) {
+				continue
+			}
+			if secret.Default().Redact(v) == v {
+				return fmt.Errorf("mcp_server: %s 中的敏感键 %q 含未登记的明文凭据；请勿直接写入明文，改用 {{secret:name}} 占位符（先用 secret_input 工具请用户提供并登记，再引用其占位符）", scope, k)
+			}
+		}
+		return nil
+	}
+	if err := check("env", env); err != nil {
+		return err
+	}
+	return check("headers", headers)
 }
 
 func executeMCPServerTool(ctx *llm.ToolExecContext, botID string, mgr *mcp.Manager, logger *zap.SugaredLogger, input any) (any, error) {
@@ -349,6 +438,13 @@ func addMCPServerForTool(ctx *llm.ToolExecContext, botID string, mgr *mcp.Manage
 	}
 	if entry.Headers == nil {
 		entry.Headers = map[string]string{}
+	}
+
+	// P1-a：落盘前拦截敏感键的裸明文。此处 entry.Env/Headers 已经过咽喉点
+	// Resolve，合规占位符已是 Vault 已登记真实值（Redact 命中 → 放行）；
+	// 未登记裸明文（Redact(v)==v，回灌遮蔽不了）在此拒绝。
+	if err := validateMCPSecretRefs(entry.Env, entry.Headers); err != nil {
+		return nil, err
 	}
 
 	entries, err := mcp.LoadBotServers(botID)
