@@ -2,6 +2,8 @@ package botsandbox
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -53,6 +55,10 @@ func TestEnsureImageTagReturnsBuildingImmediately(t *testing.T) {
 	}
 
 	close(release)
+	buildsMu.Lock()
+	b := builds[tag]
+	buildsMu.Unlock()
+	<-b.done
 }
 
 func TestBuildLineWriterSplitsLines(t *testing.T) {
@@ -87,5 +93,44 @@ func TestBuildLineWriterHandlesCRLF(t *testing.T) {
 	w.flush()
 	if len(got) != 1 || got[0] != "Successfully built abc" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestEnsureImageRetriesStaleBuild(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	for _, tc := range []struct {
+		name  string
+		err   error
+		age   time.Duration
+		retry bool
+	}{
+		{"removed", nil, 0, true},
+		{"failed", errors.New("temporary failure"), time.Minute, true},
+		{"cooldown", errors.New("temporary failure"), 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetBuildsForTest()
+			old := &imageBuild{done: make(chan struct{}), err: tc.err, finishedAt: time.Now().Add(-tc.age)}
+			close(old.done)
+			builds[tc.name] = old
+			release := make(chan struct{})
+			buildHook = func(*imageBuild, *zap.SugaredLogger) error { <-release; return nil }
+			defer func() { buildHook = nil }()
+			_, err := ensureImageTag(tc.name, zap.NewNop().Sugar())
+			current := builds[tc.name]
+			if tc.retry {
+				close(release)
+				<-current.done
+				if current == old || !errors.Is(err, ErrImageBuilding) {
+					t.Fatalf("stale build not retried: %v", err)
+				}
+			} else if current != old || err != tc.err {
+				t.Fatalf("failure cooldown not preserved: %v", err)
+			}
+		})
 	}
 }

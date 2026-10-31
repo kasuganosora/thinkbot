@@ -86,10 +86,11 @@ type entryKey struct {
 
 // Vault 是并发安全的密钥注册表。
 type Vault struct {
-	mu       sync.RWMutex
-	entries  map[entryKey]Entry
-	filePath string // 空表示纯内存（测试用）
-	loadErr  error  // 非 nil 表示加载失败，拒绝登记
+	registerMu sync.Mutex // Serialize mutation, persistence and rollback as one transaction.
+	mu         sync.RWMutex
+	entries    map[entryKey]Entry
+	filePath   string // 空表示纯内存（测试用）
+	loadErr    error  // 非 nil 表示加载失败，拒绝登记
 }
 
 // New 构造 Vault 并从 filePath 载入已有条目。文件不存在时返回空库。
@@ -202,6 +203,8 @@ func BotFromContext(ctx context.Context) string {
 // Register 以 botID 归属登记或覆盖一条密钥，并同步注册到日志脱敏层。
 // botID 为空表示全局条目。持久化失败时回滚内存，保证「返回错误 = 没登记上」。
 func (v *Vault) Register(botID, name, value, description string) error {
+	v.registerMu.Lock()
+	defer v.registerMu.Unlock()
 	if v.loadErr != nil {
 		return ErrUnavailable
 	}
