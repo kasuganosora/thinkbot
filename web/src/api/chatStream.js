@@ -21,7 +21,7 @@ export async function readChatStream(response, handlers = {}, initial = {}) {
   const failure = (message, details = {}) => new ChatStreamError(message, { traceId, sessionId, streamSeq: sequence, recoverable: true, ...details })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw failure(body.message || `HTTP ${response.status}`, { httpStatus: response.status, recoverable: response.status >= 500 })
+    throw failure(body.message || `HTTP ${response.status}`, { httpStatus: response.status, recoverable: response.status >= 500, userText: body.data?.userText })
   }
   if (!response.body) throw failure('回复连接未返回数据')
   const reader = response.body.getReader()

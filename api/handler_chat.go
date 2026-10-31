@@ -23,6 +23,7 @@ import (
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 	"github.com/kasuganosora/thinkbot/workflow"
@@ -209,7 +210,7 @@ func (s *Server) interceptWebSecretReply(botID, userID, text string) string {
 		s.logger.Infow("chat: user-provided secret redacted before persistence",
 			"bot_id", botID, "secret_name", name)
 	}
-	return msg.Text
+	return secret.Default().Redact(msg.Text)
 }
 
 // abortActor 取发起中止的操作者用户名（审计用）；未登录时记为 anonymous。
@@ -270,11 +271,11 @@ func (s *Server) handleChatAppend(c *gin.Context) {
 			s.logger.Warnw("failed to save appended user message", "err", err)
 			// The task already accepted this supplement; reporting rejection
 			// here would cause the client to execute it twice as a new request.
-			OK(c, map[string]any{"accepted": true, "persistenceError": "补充内容已投递，但未能保存到历史记录"})
+			OK(c, map[string]any{"accepted": true, "userText": req.Text, "persistenceError": "补充内容已投递，但未能保存到历史记录"})
 			return
 		}
 	}
-	OK(c, map[string]any{"accepted": accepted})
+	OK(c, map[string]any{"accepted": accepted, "userText": req.Text})
 }
 
 // handleChatActiveTasks 返回指定 bot 当前仍在后台执行的消息任务。
@@ -531,36 +532,47 @@ func (s *Server) handleChatSend(c *gin.Context) {
 			return
 		}
 	}
+	// 密钥回复拦截必须早于 SaveMessage：本函数先落库再 Inject，若只靠 Ingress
+	// 拦截，明文已经进了 chat_messages，下一轮又会作为 chat_history 喂给 LLM。
+	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.Text)
 	if cmd := command.Parse(req.Text); cmd != nil {
 		s.handleSlashCommand(c, cmd, &req)
 		return
 	}
-	// 密钥回复拦截必须早于 SaveMessage：本函数先落库再 Inject，若只靠 Ingress
-	// 拦截，明文已经进了 chat_messages，下一轮又会作为 chat_history 喂给 LLM。
-	req.Text = s.interceptWebSecretReply(req.BotID, userID, req.Text)
+
+	// Once a credential request has been consumed, even an HTTP failure must
+	// return the canonical text so the browser does not restore its raw draft.
+	failAfterNormalization := func(err error) {
+		code := errs.GetCode(err)
+		if code == 0 {
+			code = http.StatusInternalServerError
+		}
+		c.JSON(code, Response{Code: code, Message: err.Error(), Data: map[string]any{"userText": req.Text}})
+	}
+
 	bus, ok := s.botSvc.EventBus().(*outbound.MemoryEventBus)
 	if !ok || bus == nil {
-		Fail(c, errs.Internal("event bus unavailable"))
+		failAfterNormalization(errs.Internal("event bus unavailable"))
 		return
 	}
 	traceID := idgen.New("web")
 	contextLimit := s.store.GetInt(config.KeyChatContextLimit, 20)
 	history, err := s.chatHistory.LoadContext(req.BotID, userID, contextLimit, req.SessionID)
 	if err != nil {
-		Fail(c, errs.Wrap(err, "failed to load chat history"))
+		failAfterNormalization(errs.Wrap(err, "failed to load chat history"))
 		return
 	}
 	history = s.chatHistory.ApplyContextCheckpoint(traceID, req.BotID, req.SessionID, history)
 	// Commit the user row before work starts, preserving both chronological
 	// order and the next request's context even when the first reply is fast.
 	if err := s.chatHistory.SaveMessage(req.BotID, userID, "user", req.Text, traceID, req.SessionID); err != nil {
-		Fail(c, errs.Wrap(err, "failed to save chat message"))
+		failAfterNormalization(errs.Wrap(err, "failed to save chat message"))
 		return
 	}
 	s.botSvc.RememberMessageSession(req.BotID, traceID, req.SessionID)
 	turn := s.botSvc.prepareChatTurn(webCh, req.BotID, userID, req.SessionID, traceID)
 	if turn == nil {
-		Fail(c, errs.Internal("chat persistence unavailable"))
+		failAfterNormalization(errs.Internal("chat persistence unavailable"))
 		return
 	}
 	sub := bus.SubscribeWithReplay(traceID, 0)
@@ -580,10 +592,10 @@ func (s *Server) handleChatSend(c *gin.Context) {
 	if err := webCh.Inject(c.Request.Context(), traceID, userID, injectText, extraMeta); err != nil {
 		turn.fail <- err
 		s.botSvc.UnregisterMessageCancel(req.BotID, traceID)
-		Fail(c, errs.Wrap(err, "failed to send message to bot"))
+		failAfterNormalization(errs.Wrap(err, "failed to send message to bot"))
 		return
 	}
-	s.serveChatEvents(c, bus, sub, req.BotID, req.SessionID, traceID, nil, 0)
+	s.serveChatEvents(c, bus, sub, req.BotID, req.SessionID, traceID, nil, 0, req.Text)
 }
 
 // writeSSE 写入一个 SSE 事件。

@@ -57,3 +57,18 @@ func TestInterceptWebSecretReply(t *testing.T) {
 		t.Fatalf("vault value = (%q,%v), want (%q,true)", val, ok, raw)
 	}
 }
+
+func TestInterceptWebSecretReplyRedactsRegisteredRetries(t *testing.T) {
+	v, _ := secret.New("")
+	prev := secret.Default()
+	secret.SetDefault(v)
+	t.Cleanup(func() { secret.SetDefault(prev) })
+	const raw = "fictional-retried-credential"
+	if err := v.Register("bot", "service", raw, "test"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{logger: zap.NewNop().Sugar()}
+	if got := s.interceptWebSecretReply("bot", "user", raw); strings.Contains(got, raw) {
+		t.Fatal("retry after consumed request would persist plaintext")
+	}
+}

@@ -123,6 +123,43 @@ await test('chat conversation and delivery regressions', async (t) => {
       store.restoreDraft()
       assert.equal(store.composerDraft.text, 'old draft\nnew draft')
     })
+    await t.test('canonical secret reply replaces optimistic text, title and recovery payload', async () => {
+      const store = await makeStore()
+      store.sessions[0].title = '新对话'
+      const titles = []
+      sessionApi.update = async (_id, payload) => { titles.push(payload.title); return payload }
+      const run = deferred()
+      let acknowledge
+      chatApi.send = (_bot, _text, handlers) => { acknowledge = handlers.onStart; return run.promise }
+      const result = store.sendMessage('fictional-secret-123456')
+      assert.deepEqual(titles, [], 'unacknowledged input must not become a persisted title')
+      acknowledge('secret-trace', { userText: '[密钥已安全保存]' })
+      assert.equal(store.messages.find(m => m.role === 'user' && m.traceId === 'secret-trace').content, '[密钥已安全保存]')
+      run.reject(new Error('disconnected after acknowledgement'))
+      await result.completion
+      assert.equal(store.composerDraft.text, '[密钥已安全保存]')
+      assert(!JSON.stringify(titles).includes('fictional-secret'))
+    })
+    await t.test('HTTP failure after secret consumption restores canonical text', async () => {
+      const store = await makeStore()
+      chatApi.send = async () => { throw Object.assign(new Error('persistence unavailable'), {userText: '[密钥登记失败，原文已隐藏]'}) }
+      await store.sendMessage('fictional-secret-123456').completion
+      assert.equal(store.composerDraft.text, '[密钥登记失败，原文已隐藏]')
+      assert(!JSON.stringify(store.messages).includes('fictional-secret'))
+    })
+    await t.test('rejected secret append restores only server-normalized text', async () => {
+      const store = await makeStore()
+      const run = deferred()
+      chatApi.send = (_bot, _text, handlers) => { handlers.onStart('secret-append'); return run.promise }
+      chatApi.append = async () => ({ accepted: false, userText: '[密钥已安全保存]' })
+      const turn = store.sendMessage('initial')
+      const append = store.appendToCurrentReply('fictional-secret-123456')
+      assert.equal((await append.completion).status, 'rejected')
+      assert.equal(store.composerDraft.text, '[密钥已安全保存]')
+      assert(!JSON.stringify(store.messages).includes('fictional-secret'))
+      run.resolve({ text: 'done' })
+      await turn.completion
+    })
     await t.test('rejected append is recoverable and never automatically starts a new turn', async () => {
       const store = await makeStore()
       const run = deferred()
