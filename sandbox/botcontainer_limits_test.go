@@ -109,3 +109,39 @@ func TestUpdateLimitsDistinguishesMissingFromInspectionFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestFailedLiveUpdatesRetainDesiredLimitsForRecreation(t *testing.T) {
+	for _, tc := range []struct{ name, script string }{
+		{"inspect fails", "echo 'Cannot connect to the Docker daemon' >&2; exit 1"},
+		{"update fails", "if [ \"$1\" = inspect ]; then echo '1000000000 2147483648'; exit 0; fi; echo 'update rejected' >&2; exit 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			c := newBotContainer("bot", DefaultConfig(), zap.NewNop().Sugar())
+			m := &BotWorkspaceManager{backend: "docker", cfg: DefaultConfig(), logger: zap.NewNop().Sugar(),
+				workspaces: map[string]*botWorkspace{"bot": {container: c}}, memoryOverrides: map[string]int64{}}
+			if err := m.ApplyCPULimit(context.Background(), "bot", "4"); err == nil {
+				t.Fatal("failed CPU update reported success")
+			}
+			if m.cfg.CPULimit != "4" || c.cfg.CPULimit != "4" {
+				t.Fatal("recreation would use stale CPU limit")
+			}
+			if err := m.ApplyMemoryLimit(context.Background(), "bot", 4096); err == nil {
+				t.Fatal("failed memory update reported success")
+			}
+			if c.effectiveMemoryLocked() != "4096m" || m.getBotMemoryLimitLocked("bot") != "4096m" {
+				t.Fatal("recreation would use stale memory limit")
+			}
+			// Replacing the handle must keep the same desired values as reusing it.
+			fresh := newBotContainer("bot", m.cfg, zap.NewNop().Sugar())
+			fresh.SetMemoryOverride(m.getBotMemoryLimitLocked("bot"))
+			if fresh.cfg.CPULimit != "4" || fresh.effectiveMemoryLocked() != "4096m" {
+				t.Fatal("fresh handle lost desired limits")
+			}
+		})
+	}
+}
