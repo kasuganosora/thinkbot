@@ -64,9 +64,12 @@
 | `BackfillMessage` / `UserMessageSource` | 回灌消息 / 入站用户消息事件流抽象 |
 | `EntryResult` | `memory` 工具返回的单条记忆格式化结果 |
 
-## Scope 设计：群聊 vs 私聊的记忆隔离
+## 机器人归属与 Scope 分类
 
-记忆系统通过 `Scope` 区分数据归属。核心原则：**Channel scope 记录会话上下文，User scope 记录用户画像**。
+生产环境以服务器选定的 `BotID` 作为记忆共享边界：**同一机器人内跨用户、平台、群聊和私聊共享；不同机器人隔离**。`Scope` 保留记忆来源和用途，不能作为用户之间的隐私隔离开关：Channel scope 记录会话上下文，User scope 记录用户画像。
+
+写入由可信运行实例标记 `metadata.bot_id`。读取、计数、按 ID 修改、自动注入、向量检索和后台整理都必须验证这一归属。旧数据只有明确的 `bot:<id>` scope 或一致的 `metadata.bot_id` 才属于该机器人；无归属或冲突记录不自动分配、不删除。工具参数、聊天消息中的自报 BotID 和历史渠道关联不能代替可信归属。
+
 
 ### Scope 类型
 
@@ -75,7 +78,7 @@
 | `ChannelScope` | 会话/群组级 | 群聊上下文（"这个群里聊了什么"） |
 | `UserScope` | 用户级（跨会话） | 用户画像（"这个人是谁、偏好什么"） |
 | `BotScope` | Bot 级 | Bot 自身知识 |
-| `GlobalScope` | 全局 | 全局常识 |
+| `GlobalScope` | 机器人内的通用分类 | 通用常识；生产访问仍受机器人归属限制 |
 
 ### 写入策略（MemoryWriteStage）
 
@@ -92,11 +95,11 @@
 
 > **注意**：切勿将群组 ID 作为 UserID 写入。`UserID` 必须始终是**实际发言者的 ID**。
 
-### 读取策略（ContextManager）
+### 读取策略（生产召回与工具）
 
-默认检索 `[ChannelScope, UserScope]` 两个维度，合并后注入 LLM：
-- ChannelScope 提供"当前会话的上下文"
-- UserScope 提供"当前用户的跨会话画像"
+自动 Recall / MemoryStage 与 `memory` 工具查询该机器人的共享记忆，`scope_kind="all"` 指当前机器人拥有的全部记忆，不是整个数据库。分层 L0/L1/L3 召回与原始笔记遵循同一归属规则；SQL 在分页、计数和修改之前过滤归属，向量命中还要按数据库归属二次校验。缺少可信 BotID 时不读写记忆。
+
+向量索引按机器人聚合，数据库中的 user/channel 分类保持不变，因此跨会话召回不会把用户画像重分类成机器人自身知识。管理页的 scope 筛选仍用于查看来源分类。
 
 ### Channel 适配指南
 
