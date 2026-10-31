@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/secret"
 )
@@ -547,37 +546,5 @@ func TestCapDeepResultsHonorsSmallBudget(t *testing.T) {
 		if len(results) != 1 || len([]rune(results[0].Content)) > cap {
 			t.Fatalf("result exceeds %d runes", cap)
 		}
-	}
-}
-
-func TestMemorySearch_GroupDeepRecallCannotExpandIntoPrivateScopes(t *testing.T) {
-	repo := NewMemoryRepository()
-	for _, e := range []Entry{
-		{ID: "private", Scope: ChannelScope("dm"), Content: "lighthouse private appointment"},
-		{ID: "mirror", Scope: BotScope("bot"), Content: "lighthouse private mirror"},
-		{ID: "group", Scope: ChannelScope("group"), Content: "lighthouse public release"},
-	} {
-		if err := repo.Append(context.Background(), e); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, kind := range []string{"all", "bot", "channel"} {
-		t.Run(kind, func(t *testing.T) {
-			p := &recallLLM{keywords: `{"keywords":["lighthouse"]}`, refine: `{"keep":["private","mirror","group"]}`, inspect: func(params llm.GenerateParams) {
-				if strings.Contains(llm.TextFromParts(params.Messages[0].Content), "private") {
-					t.Error("private memory sent to group recall model")
-				}
-			}}
-			ctx := agenttools.ContextWithSessionContext(context.Background(), agenttools.ToolSessionContext{ChatType: "supergroup"})
-			ctx = agenttools.ContextWithMessageMeta(ctx, agenttools.MessageMeta{BotID: "bot", ChatID: "group"})
-			got, err := deepTool(repo, p, DeepRecallConfig{}).Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{"action": "search", "scope_kind": kind, "scope_id": "dm"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			entries := got.(map[string]any)["entries"].([]EntryResult)
-			if len(entries) != 1 || entries[0].ID != "group" {
-				t.Fatalf("wrong group results: %+v", entries)
-			}
-		})
 	}
 }

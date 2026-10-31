@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kasuganosora/thinkbot/agent/core"
-	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -168,14 +166,10 @@ func runDeepSearch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 			parent = ctx.Context
 		}
 	}
-	// Group recall must not send private or bot-wide mirrors to the refinement model.
-	// Restrict the new deep path to the actual group, not a model-supplied scope.
-	if session, ok := agenttools.SessionContextFromContext(parent); ok && core.NormalizeChatType(session.ChatType) == core.ChatGroup {
-		meta := agenttools.MessageMetaFromContext(parent)
-		if meta.ChatID == "" {
-			return deepClosed(deepMsgFailed), nil
-		}
-		scope = ChannelScope(meta.ChatID)
+	// Production tools are bound to a server-selected bot repository. Deep recall
+	// shares that same boundary as lexical search, including group conversations.
+	if cfg.BotID != "" {
+		scope = BotScope(cfg.BotID)
 	}
 	recall := cfg.Recall
 	n := llm.IncToolTurnBudget(parent, deepRecallBudgetName)
@@ -509,12 +503,19 @@ func gatherDeepCandidates(ctx context.Context, repo Repository, vec VecQuerier, 
 }
 
 func vecScopeKeys(scope Scope, pool []Entry) []string {
-	if scope.Kind != "" && scope.Kind != ScopeAll {
+	if scope.Kind != "" && scope.Kind != ScopeAll && scope.Kind != ScopeBot {
 		return []string{scope.Key()}
 	}
 	seen := map[string]struct{}{}
 	var keys []string
+	if scope.Kind == ScopeBot {
+		keys = append(keys, scope.Key())
+		seen[scope.Key()] = struct{}{}
+	}
 	for _, e := range pool {
+		if scope.Kind == ScopeBot && !entryVisibleToScope(e, scope) {
+			continue
+		}
 		k := e.Scope.Key()
 		if k == "" {
 			continue
@@ -534,6 +535,9 @@ func vecScopeKeys(scope Scope, pool []Entry) []string {
 func entryVisibleToScope(e Entry, scope Scope) bool {
 	if scope.Kind == "" || scope.Kind == ScopeAll {
 		return true
+	}
+	if scope.Kind == ScopeBot {
+		return (&botRepository{botID: scope.ID}).owns(e)
 	}
 	return e.Scope.Key() == scope.Key()
 }
