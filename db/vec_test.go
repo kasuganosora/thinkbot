@@ -23,10 +23,10 @@ func TestSQLiteVecLoad(t *testing.T) {
 	}
 
 	t.Run("missing", func(t *testing.T) {
-		runVecChild(t, "missing", "/tmp/sqlite-vec/does-not-exist")
+		runVecChild(t, "missing", filepath.Join(t.TempDir(), "does-not-exist"))
 	})
 	t.Run("ok", func(t *testing.T) {
-		runVecChild(t, "ok", "/tmp/sqlite-vec/vec0")
+		runVecChild(t, "ok", VecPath())
 	})
 }
 
