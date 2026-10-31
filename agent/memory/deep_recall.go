@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kasuganosora/thinkbot/agent/core"
+	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
@@ -165,6 +168,15 @@ func runDeepSearch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 			parent = ctx.Context
 		}
 	}
+	// Group recall must not send private or bot-wide mirrors to the refinement model.
+	// Restrict the new deep path to the actual group, not a model-supplied scope.
+	if session, ok := agenttools.SessionContextFromContext(parent); ok && core.NormalizeChatType(session.ChatType) == core.ChatGroup {
+		meta := agenttools.MessageMetaFromContext(parent)
+		if meta.ChatID == "" {
+			return deepClosed(deepMsgFailed), nil
+		}
+		scope = ChannelScope(meta.ChatID)
+	}
 	recall := cfg.Recall
 	n := llm.IncToolTurnBudget(parent, deepRecallBudgetName)
 	if n > recall.maxCalls() {
@@ -199,7 +211,7 @@ func runDeepSearch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 			if errors.Is(got.err, context.DeadlineExceeded) || errors.Is(got.err, context.Canceled) || tctx.Err() != nil {
 				return deepClosed(deepMsgTimeout), nil
 			}
-			return nil, got.err
+			return deepClosed(deepMsgFailed), nil
 		}
 		if got.v == nil {
 			return deepClosed(deepMsgFailed), nil
@@ -331,8 +343,8 @@ func deepComplete(ctx context.Context, cfg DeepRecallConfig, system, user string
 	}
 	params := llm.GenerateParams{
 		Model:    cfg.Model,
-		System:   system,
-		Messages: []llm.Message{llm.UserMessage(user)},
+		System:   secret.Default().Redact(system),
+		Messages: []llm.Message{llm.UserMessage(secret.Default().Redact(user))},
 	}
 	applyInternalCall(cfg.Policy, llm.PurposeMemoryRecall, &params, cfg.ModelMaxTokens)
 	res, err := cfg.Provider.DoGenerate(llm.WithStatsFeature(ctx, llm.PurposeMemoryRecall), params)
@@ -605,7 +617,7 @@ func capDeepResults(entries []Entry, maxN, maxChars int) []EntryResult {
 			break
 		}
 		if len(out) == 0 && n > maxChars {
-			r.Content = truncateRunes(r.Content, maxChars)
+			r.Content = string([]rune(r.Content)[:maxChars])
 			n = len([]rune(r.Content))
 		}
 		total += n
