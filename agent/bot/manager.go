@@ -80,6 +80,22 @@ func (m *BotManager) Unregister(id string) bool {
 	return true
 }
 
+// Detach removes exactly this instance without stopping it. Lifecycle owners
+// can unpublish under their own lock, then Stop/Close outside that lock without
+// an old cleanup removing a concurrently registered replacement.
+func (m *BotManager) Detach(instance *Bot) bool {
+	if instance == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.bots[instance.ID] != instance {
+		return false
+	}
+	delete(m.bots, instance.ID)
+	return true
+}
+
 // Get 按 ID 查找 Bot。
 func (m *BotManager) Get(id string) (*Bot, bool) {
 	m.mu.RLock()

@@ -597,8 +597,7 @@ func (m *BotWorkspaceManager) StartBot(ctx context.Context, botID string) error 
 	if !ok || bw.container == nil {
 		return nil
 	}
-	bw.container.unstop()
-	return bw.container.ensure(ctx)
+	return bw.container.start(ctx)
 }
 
 // SnapshotBot 用 docker commit 将当前容器状态保存为镜像快照，返回镜像短 ID。
