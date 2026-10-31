@@ -40,8 +40,8 @@ func secretInputToolDef() agenttools.ToolDef {
 			Description: "Request a secret credential (API token, password, key) from the user WITHOUT you ever seeing its value. " +
 				"Two-step, non-blocking: (1) call this with action='request' and a 'purpose' describing where/why the secret is needed, plus optional 'name'; " +
 				"the tool returns immediately with a placeholder like {{secret:name}} instead of blocking. " +
-				"(2) Then send the user a short message stating the purpose and asking them to reply with the secret. Warn that their next non-empty reply is treated as the secret, including questions. They can send /cancel-secret to cancel before providing a value. " +
-				"When the user replies, the system stores it securely and you get a REDACTED notice that the placeholder is ready — you never receive the raw value. " +
+				"(2) Follow the returned input_mode: for web_form, direct the user to the password card, never the chat composer. For chat_reply, the next non-empty reply is treated as a secret, including questions; /cancel-secret cancels. After a restart or if uncertain, request a new input before submitting. " +
+				"When the user replies, the system returns a REDACTED notice when the placeholder is ready. " +
 				"Then continue the task by putting the placeholder in tool arguments (e.g. an Authorization header); it is resolved to the real value only at execution time. " +
 				"action='list' returns the names/purposes of already-stored secrets (never their values). " +
 				"Rules: state the purpose clearly and honestly; NEVER ask the user to paste the secret in a way you would read back verbatim; " +
@@ -84,8 +84,8 @@ var secretInputPromptSection = &agenttools.ToolPromptSection{
 	Content: `## Secrets and credentials
 
 - When a task needs a credential the user must provide (API token, password, key), call **secret_input** with action=request and a clear **purpose** describing where/why it will be used.
-- The tool returns a placeholder such as {{secret:name}}. It does NOT block. After calling it, send the user a short message stating the purpose and asking them to reply with the secret. Explain that the next non-empty reply, including a question, will be treated as the secret. They can send /cancel-secret to cancel. Only one pending request is allowed per conversation.
-- The user's reply is handled securely by the system: the raw value is stored in a vault and NEVER enters your context. You will get a REDACTED notice when the placeholder is ready.
+- The tool returns a placeholder and an input_mode. It does NOT block. For web_form, explain the purpose and direct the user to the password card, NEVER the ordinary chat composer. For chat_reply, explain that the next non-empty reply, including a question, is treated as the secret; /cancel-secret cancels. Only one request may be pending per conversation. After a restart or if the request status is uncertain, request a new input before submitting.
+- The user's reply is handled securely by the system: the supported input path stores the raw value in the vault and returns only a redacted notice. Do not claim that ordinary chat text is a secure credential input. You will get a REDACTED notice when the placeholder is ready.
 - To use a stored secret, write its placeholder {{secret:name}} in a tool argument (URL, header, body, command, etc.). It is resolved to the real value only at execution time — you never see the real value.
 - Use action=list to see which secret names/purposes are already stored (values are never shown).
 - NEVER guess, echo, reconstruct, or ask the user to paste a secret in a way you would read verbatim. If a placeholder is not ready, wait for the user's reply.
@@ -153,18 +153,29 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		Question:    purpose,
 		Kind:        interaction.KindSecret,
 		SecretName:  name,
+		SecretForm:  strings.HasPrefix(meta.ChatID, "web:"),
 		TimeoutSecs: timeout,
 	}
-	if _, err := interaction.Default().RegisterQuestion(q); err != nil {
+	q, err = interaction.Default().RegisterQuestion(q)
+	if err != nil {
 		return nil, fmt.Errorf("secret_input: 注册请求失败: %w", err)
 	}
 
+	hint := "已登记密钥请求。请说明用途并请用户回复该密钥；可发送 /cancel-secret 取消。若服务重启或不确定请求是否仍有效，应重新发起请求，不要直接贴凭据。"
+	mode := "chat_reply"
+	if q.SecretForm {
+		mode = "web_form"
+		hint = "已显示专用密钥输入卡。请说明用途，引导用户只在卡片密码框中提交，不要在聊天正文粘贴凭据。卡片失效或服务重启后必须重新请求；收到密钥就绪提示后再继续任务。"
+	}
 	return map[string]any{
+		"question_id": questionID,
+		"input_mode":  mode,
+		"expires_at":  q.RegisteredAt + int64(q.TimeoutSecs),
 		"status":      "requested",
 		"name":        name,
 		"placeholder": secret.Placeholder(name),
 		"purpose":     purpose,
 		"expires_in":  timeout,
-		"hint":        "已登记密钥请求。请现在向用户发一条消息，说明用途并请其直接回复该密钥（不想提供时可发送 /cancel-secret 取消）；用户回复后系统安全存储，你会收到一条脱敏的「密钥已就绪」提示，届时再用占位符继续任务。不要在本回合索要或猜测明文。",
+		"hint":        hint,
 	}, nil
 }

@@ -17,25 +17,34 @@ func TestSecretInputWebRequestsMatchOnlyTheirOriginSession(t *testing.T) {
 	secret.SetDefault(v)
 	t.Cleanup(func() { secret.SetDefault(prev) })
 	const bot, chat = "secret-test-bot", "web:42"
+	requests := map[string]string{}
 	for _, sid := range []string{"s1", "s2"} {
 		ctx := agenttools.ContextWithMessageMeta(context.Background(), agenttools.MessageMeta{BotID: bot, ChatID: chat, ChannelType: "web"})
 		ctx = agenttools.ContextWithCallOrigin(ctx, agenttools.CallOrigin{BotID: bot, SessionID: sid})
-		if _, err := execSecretInput(&llm.ToolExecContext{Context: ctx}, map[string]any{"name": sid, "purpose": "fictional test"}); err != nil {
+		result, err := execSecretInput(&llm.ToolExecContext{Context: ctx}, map[string]any{"name": sid, "purpose": "fictional test"})
+		if err != nil {
 			t.Fatal(err)
 		}
+		payload := result.(map[string]any)
+		if payload["input_mode"] != "web_form" || payload["expires_at"].(int64) == 0 {
+			t.Fatal("missing form contract")
+		}
+		requests[sid] = payload["question_id"].(string)
 		t.Cleanup(func() { interaction.Default().CancelSecret(bot, interaction.SecretReplyChatID(chat, sid)) })
 	}
-	// Reverse response order: FIFO matching would put s2's value into s1.
+	// Ordinary messages cannot submit a form request.
+	msg := &core.Message{BotID: bot, Channel: chat, Text: "a clarification", Metadata: map[string]any{agenttools.ExtraKeyChatSessionID: "s1"}}
+	if _, ok := inbound.InterceptSecretReply(msg); ok {
+		t.Fatal("ordinary conversation consumed form request")
+	}
+	// Reverse form order: IDs and scoped session must both match.
 	for _, sid := range []string{"s2", "s1"} {
-		value := "fictional-credential-for-" + sid
-		msg := &core.Message{BotID: bot, Channel: chat, Text: value, Metadata: map[string]any{agenttools.ExtraKeyChatSessionID: sid}}
-		if name, ok := inbound.InterceptSecretReply(msg); !ok || name != sid {
-			t.Fatalf("wrong request: %s %v", name, ok)
-		}
-		if got, _ := v.Get(bot, sid); got != value {
-			t.Fatal("credential stored under another session's name")
+		q, err := interaction.Default().ClaimSecretForm(requests[sid], bot, interaction.SecretReplyChatID(chat, sid), false)
+		if err != nil || q.SecretName != sid {
+			t.Fatalf("wrong request: %+v %v", q, err)
 		}
 	}
+
 }
 
 func TestSecretInputWebRequiresOriginSession(t *testing.T) {

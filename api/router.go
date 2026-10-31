@@ -373,6 +373,7 @@ func (s *Server) registerRoutes() {
 		// 前端卡片上点选/输入经此接口唤醒工具。属【任意已登录用户】——提问对象
 		// 就是当前对话的用户，要求 admin 会让普通成员点了没反应。
 		authed.POST("/user-choice/:questionId/answer", s.handleAnswerUserChoice)
+		authed.POST("/chat/secrets/:questionId", s.handleSubmitChatSecret)
 
 		wfAdmin := authed.Group("/workflows")
 		wfAdmin.Use(requirePermission(auth.PermBotManage))
