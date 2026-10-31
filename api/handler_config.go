@@ -105,6 +105,15 @@ func (s *Server) handleSetConfigKey(c *gin.Context) {
 		return
 	}
 
+	// 沙箱 CPU 上限先校验再落库：非法值会被原样拼进 docker --cpus，真正的报错
+	// 要等到创建/更新容器时才出现，且埋在 docker 输出里难以归因到配置项。
+	if key == config.KeySandboxCPULimit {
+		if err := validateSandboxCPULimit(req.Value); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
+
 	if err := s.store.Set(c.Request.Context(), key, req.Value); err != nil {
 		Fail(c, errs.Wrap(err, "failed to set config"))
 		return
@@ -148,6 +157,14 @@ func (s *Server) handleBatchSetConfig(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
 		return
+	}
+
+	// 与单条设置一致：批量写入前先校验沙箱 CPU 上限，避免整批落库后才发现非法值。
+	if v, ok := req.Items[config.KeySandboxCPULimit]; ok {
+		if err := validateSandboxCPULimit(v); err != nil {
+			Fail(c, err)
+			return
+		}
 	}
 
 	if err := s.store.SetMany(c.Request.Context(), req.Items); err != nil {

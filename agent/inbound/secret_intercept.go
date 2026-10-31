@@ -1,0 +1,101 @@
+package inbound
+
+import (
+	"fmt"
+	"strings"
+	"unicode"
+
+	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/internal/interaction"
+	"github.com/kasuganosora/thinkbot/secret"
+)
+
+// ============================================================================
+// 密钥回复拦截
+//
+// secret_input 工具登记 pending 请求后，用户的下一条回复会被当成密钥：明文写进
+// 保险库，消息正文改写为脱敏提示再进 pipeline。所有「用户文本可能进入 LLM /
+// 日志 / 聊天历史」的入口都必须**先**过这里：
+//   - Ingress.Receive / TryReceive（所有渠道的常规入站）；
+//   - 企微在入站日志、引用合并、append 注入**之前**（turn.go 的 append 不经 Ingress）；
+//   - Web /api/chat/send 与 /api/chat/append 在 SaveMessage **之前**（先落库再 Inject）。
+// 拦截是幂等的：命中后 pending 请求即被消费，后续环节再调用不会二次命中。
+// ============================================================================
+
+// InterceptSecretReply 若 msg 是对本会话 pending 密钥请求的回复，则把用户原文
+// 登记进保险库（归属 msg.BotID），并把 msg.Text 改写为脱敏提示。
+//
+// 返回 (secretName, intercepted)。intercepted=false 时 msg 原样不动：
+//   - 本会话没有 pending 密钥请求；
+//   - 文本看起来明显不是密钥（looksLikeConversation），按普通消息放行，
+//     请求继续保持 pending，用户下一条才是密钥。
+func InterceptSecretReply(msg *core.Message) (string, bool) {
+	if msg == nil {
+		return "", false
+	}
+	candidate := secretCandidate(msg)
+	// 原文副本只供本函数使用，任何路径都不随 Metadata 流进 pipeline。
+	if msg.Metadata != nil {
+		delete(msg.Metadata, core.MetaSecretCandidate)
+	}
+	if msg.BotID == "" {
+		return "", false
+	}
+	reg := interaction.Default()
+	if !reg.HasPendingSecret(msg.BotID, msg.Channel) {
+		return "", false
+	}
+	if looksLikeConversation(candidate) {
+		return "", false
+	}
+	name, ok := reg.ConsumeSecret(msg.BotID, msg.Channel, candidate)
+	if !ok {
+		return "", false
+	}
+	err := secret.Default().Register(msg.BotID, name, candidate, "由用户在会话中直接提供")
+	switch {
+	case err == nil:
+		msg.Text = fmt.Sprintf("[用户已提供密钥 %s。此后在工具参数中写占位符 %s 即可引用，系统会在执行前自动还原为真实值，你看不到也不应索要明文。请继续此前因缺少该密钥而暂停的任务。]", name, secret.Placeholder(name))
+	case secret.IsTooShort(err):
+		// 过短的回复不像密钥，但它也可能是用户的简短答复。原文不能进 LLM（它
+		// 可能就是一个短口令），只告诉模型发生了什么，由模型决定是否重新发起请求。
+		msg.Text = fmt.Sprintf("[用户对密钥 %s 的回复过短（少于 %d 个字符），未登记；原文已按密钥处理、不展示给你。如仍需要该密钥，请重新调用 secret_input 并请用户再发一次。]", name, secret.MinValueLen)
+	default:
+		msg.Text = fmt.Sprintf("[密钥 %s 登记失败（保险库不可用）；原文已按密钥处理、不展示给你。请告知用户稍后重试，暂不要使用该占位符。]", name)
+	}
+	return name, true
+}
+
+// secretCandidate 取用户亲手输入的原文：渠道装饰过正文时用 MetaSecretCandidate，
+// 否则就是 msg.Text。
+func secretCandidate(msg *core.Message) string {
+	if msg.Metadata != nil {
+		if raw, ok := msg.Metadata[core.MetaSecretCandidate].(string); ok && strings.TrimSpace(raw) != "" {
+			return strings.TrimSpace(raw)
+		}
+	}
+	return strings.TrimSpace(msg.Text)
+}
+
+// looksLikeConversation 判断一条回复是不是「明显在说话，而不是在贴密钥」。
+//
+// 只放行**结构上**不可能是凭据的文本：令牌 / 口令 / API key 不会含中日韩文字，
+// 也不会以问号结尾。宁可把边界情况当密钥吞掉（模型只会看到一句「已登记」），
+// 也不让真实值以明文进 LLM——所以这里刻意只认两类强信号，不做打分。
+func looksLikeConversation(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	for _, r := range s {
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
+			return true
+		}
+	}
+	// 以问号结尾的整句（「how do I get it?」）。凭据末尾带 '?' 极少见，
+	// 且要求中间有空格（是句子而不是一个 token）。
+	if strings.HasSuffix(s, "?") || strings.HasSuffix(s, "？") {
+		return strings.ContainsAny(s, " \t")
+	}
+	return false
+}

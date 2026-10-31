@@ -401,16 +401,14 @@ func TestRegisterTools_StaticCount(t *testing.T) {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 
-	// 4 static tools + 1 hidden meta = 5 static entries
-	// But hidden meta has scope __never__ so it won't show in tool list
-	staticCount := mgr.StaticCount()
-	// web_fetch, calculate, random, uuid, datetime_calc,
-	// text_hash, text_encode, text_diff, text_stats,
-	// user_choice, __common_tools_meta = 11
+	// 静态注册项计数：web_fetch, calculate, random, uuid, datetime_calc,
+	// text_hash, text_encode, text_diff, text_stats, user_choice, secret_input,
+	// __common_tools_meta = 12
 	// （web_search 是 ToolProvider，无启用提供方时不出现；shell / list_files 等
 	// bot 工作空间工具由 sandbox 包注册，均不在此列）
-	if staticCount != 11 {
-		t.Errorf("expected 11 static tools, got %d", staticCount)
+	staticCount := mgr.StaticCount()
+	if staticCount != 12 {
+		t.Errorf("expected 12 static tools, got %d", staticCount)
 	}
 }
 

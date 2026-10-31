@@ -285,7 +285,7 @@ async function doSaveMemory() {
     info.value.memoryLimitMB = mb
     memDirty.value = false
     memSaved.value = true
-    // 后端会就地 docker update：角值立刻生效，「不限制」docker update 取消不掉，
+    // 后端会就地 docker update：具体数值立刻生效，「不限制」docker update 取消不掉，
     // 只能等重建。如实把这两种结果告诉用户，别都显示成"已生效"。
     const d = res?.data ?? res
     if (d?.needsRecreate) {

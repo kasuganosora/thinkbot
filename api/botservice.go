@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -414,6 +415,23 @@ func parseSandboxCPULimit(raw string) (string, bool) {
 	return v, true
 }
 
+// validateSandboxCPULimit 校验 sandbox.cpu_limit 的原始值：允许空（沿用默认）、
+// 0/-/unlimited（不限制）或正数字。
+//
+// 该值会被原样拼进 `docker run --cpus`，写错只会在创建/更新容器时才炸，且失败
+// 信息埋在 docker 输出里，很难归因到配置项；故在落库前就拦掉。
+func validateSandboxCPULimit(raw string) error {
+	v, configured := parseSandboxCPULimit(raw)
+	if !configured || v == "" {
+		return nil
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n <= 0 {
+		return errs.BadRequest("sandbox.cpu_limit must be a positive number (e.g. 2), or 0 / - / unlimited for no limit")
+	}
+	return nil
+}
+
 // ApplySandboxCPULimit 把当前的 sandbox.cpu_limit 就地应用到该 bot 的运行中容器
 // （不重建）。用于「系统配置里改完立刻生效」。
 //
@@ -441,20 +459,45 @@ func (s *BotService) ApplySandboxCPULimit(ctx context.Context, botID string) (bo
 
 // ApplySandboxCPULimitAll 把 sandbox.cpu_limit 应用到所有已定义的 bot。
 // 单个 bot 失败不影响其它：配置已落库，重建容器时一样会生效。
+//
+// 运行中的 bot 用它自己的运行时 manager（容器句柄带着 OOM 抬升等状态，在线改完
+// 要回写进去）；其余 bot 共用一个临时 manager——WorkspaceManagerForBot 会新建
+// BotWorkspaceManager，其构造函数顺带触发镜像预热，N 个 bot 各建一个就是 N 次
+// 预热。docker update 只按容器名操作，不依赖 manager 的 per-bot 状态。
 func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) bool {
+	limit, configured := s.sandboxCPULimitOverride()
+	if !configured {
+		return false
+	}
 	defs, err := s.ListDefinitions()
 	if err != nil {
 		s.logger.Warnw("apply sandbox cpu limit: list bots failed", "err", err)
 		return false
 	}
 	needsRecreate := false
+	var shared *sandbox.BotWorkspaceManager
 	for _, def := range defs {
-		nr, err := s.ApplySandboxCPULimit(ctx, def.ID)
-		if err != nil {
-			s.logger.Warnw("apply sandbox cpu limit failed", "bot", def.ID, "err", err)
+		if def.ID == "" {
 			continue
 		}
-		needsRecreate = needsRecreate || nr
+		mgr, running := s.RunningBotWorkspaceMgr(def.ID)
+		if !running {
+			if shared == nil {
+				shared, err = s.WorkspaceManagerForBot(def.ID)
+				if err != nil {
+					s.logger.Warnw("apply sandbox cpu limit: workspace manager unavailable", "err", err)
+					return needsRecreate
+				}
+			}
+			mgr = shared
+		}
+		if err := mgr.ApplyCPULimit(ctx, def.ID, limit); err != nil {
+			if errors.Is(err, sandbox.ErrLimitNotClearable) {
+				needsRecreate = true
+				continue
+			}
+			s.logger.Warnw("apply sandbox cpu limit failed", "bot", def.ID, "err", err)
+		}
 	}
 	return needsRecreate
 }

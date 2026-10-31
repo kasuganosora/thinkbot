@@ -1008,3 +1008,35 @@ func TestResolveModelPrice_PresetFallback(t *testing.T) {
 		t.Errorf("unknown model must stay unpriced, got %v/%v/%v", in, out, cache)
 	}
 }
+
+// TestIsSensitiveKey_PlatformPrefixes 固化配置读取接口的敏感键判定：
+// provider.* 单行 JSON 含 apiKey，必须禁止经 /api/config/:key 原文回显；
+// 同时确认普通键与明确非敏感的 db.path 不受影响。
+func TestIsSensitiveKey_PlatformPrefixes(t *testing.T) {
+	sensitive := []string{
+		"provider.provider-abc123",
+		"provider.openai",
+		"auth.jwt_secret",
+		"channel.misskey.token",
+		"db.password",
+		"sandbox.channel.secret",
+	}
+	for _, k := range sensitive {
+		if !IsSensitiveKey(k) {
+			t.Errorf("expected sensitive: %q", k)
+		}
+	}
+	plain := []string{
+		"db.path",
+		"system.timezone",
+		"api.addr",
+		"bot.model",
+		"memorywindow.max_tokens",
+		"",
+	}
+	for _, k := range plain {
+		if IsSensitiveKey(k) {
+			t.Errorf("expected NOT sensitive: %q", k)
+		}
+	}
+}
