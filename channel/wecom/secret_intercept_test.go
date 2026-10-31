@@ -52,7 +52,7 @@ func TestHandleMsgCallback_SecretReplyRedactedOnAppendPath(t *testing.T) {
 	beginLiveTurn(c, ctl, chat, "T-live")
 	t.Cleanup(func() { ctl.markLive("T-live", false) })
 
-	const raw = "RAW_SECRET_VALUE_wecom1234"
+	const raw = "虚构密码 wecom1234?"
 	c.handleMsgCallback(context.Background(), &callbackBody{
 		MsgID:    "m-secret-1",
 		ChatType: "single",
