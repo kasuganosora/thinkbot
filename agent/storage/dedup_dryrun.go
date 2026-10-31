@@ -92,7 +92,7 @@ func (r *SQLiteRepository) DryRunDedupGroups(ctx context.Context, opt DedupDryRu
 			return nil, errs.Wrap(err, "dedup dry-run: load entries")
 		}
 		for _, e := range modelsToActiveEntries(models) {
-			vec.Upsert(e.Scope.Key(), e.ID, e.Content)
+			vec.Upsert(memory.VectorScopeKey(e.Scope, e.Metadata), e.ID, e.Content)
 		}
 	}
 

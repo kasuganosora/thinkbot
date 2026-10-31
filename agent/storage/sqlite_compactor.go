@@ -306,7 +306,7 @@ func logDedupStats(logger *zap.SugaredLogger) {
 // top-k, filtered by NeighbourMinSimilarity, best first). Mirror copies are
 // excluded.
 func (c *SQLiteCompactor) vecNeighbours(ctx context.Context, scope memory.Scope, vec *memory.VecIndex, seed memory.Entry) []memory.Entry {
-	hits := vec.Search(scope.Key(), seed.Content, c.sel.topK+1)
+	hits := vec.Search(memory.VectorScopeKey(seed.Scope, seed.Metadata), seed.Content, c.sel.topK+1)
 	ids := make([]string, 0, len(hits))
 	for _, h := range hits {
 		if h.EntryID != seed.ID && !memory.IsMirrorID(h.EntryID) {
