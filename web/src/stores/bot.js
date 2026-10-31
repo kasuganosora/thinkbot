@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { botApi, chatApi, sessionApi, workflowApi } from '@/api/services'
 import { stripReplyControl } from '@/utils/markdown'
 import toolLabels from '@/i18n/toolLabels'
+import { secretRequestFromOutput } from '@/utils/secretInput'
 
 let idSeed = Date.now()
 const uid = () => `_tmp_${++idSeed}`
@@ -1381,12 +1382,14 @@ async function resumeContinuation(sessionId) {
 
   function normalizeToolOutput(output, fallback = null) {
     if (output && typeof output === 'object') {
+      const secretRequest = secretRequestFromOutput(output)
       return {
         stdout: output.stdout || '',
         stderr: output.stderr || '',
         exitCode: output.exitCode ?? null,
         truncated: output.truncated === true,
         workdir: output.workdir || output.cwd || '',
+        ...(secretRequest ? { secretRequest } : {}),
       }
     }
     if (fallback && typeof fallback === 'object') return { ...fallback }

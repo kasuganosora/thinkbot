@@ -181,6 +181,8 @@
               </template>
             </div>
             </template>
+            <SecretInputCard v-for="secretRequest in secretRequestsForMessage(msg)" :key="secretRequest.question_id"
+              :request="secretRequest" :bot-id="store.activeBotId" :session-id="String(store.activeSessionId || '')" />
             <MessageArtifacts v-if="msg.role === 'assistant' && store.activeBotId" :message="msg" :bot-id="store.activeBotId" :session-id="store.activeSessionId" />
             <div v-if="messageRunNotice(msg)" class="msg-run-notice" :class="messageRunNotice(msg).tone" role="status" data-testid="chat-message-run-notice"><t-icon name="info-circle" /><span>{{ messageRunNotice(msg).text }}</span></div>
             <div v-if="msg.persistenceError" class="msg-run-notice warning" role="status" data-testid="chat-message-persistence-notice"><t-icon name="error-circle" /><span>回复已完成，但历史记录保存失败。请复制留存，不必重复发送。</span></div>
@@ -376,6 +378,8 @@ import SessionWorkflowPanel from '@/components/SessionWorkflowPanel.vue'
 import ToolCallCard from '@/components/ToolCallCard.vue'
 import ToolCallGroup from '@/components/ToolCallGroup.vue'
 import ChoiceCard from '@/components/ChoiceCard.vue'
+import SecretInputCard from '@/components/SecretInputCard.vue'
+import { secretRequestsForMessage } from '@/utils/secretInput'
 import MessageArtifacts from '@/components/MessageArtifacts.vue'
 import CommandPalette from '@/components/CommandPalette.vue'
 import { botSkillApi } from '@/api/services'
