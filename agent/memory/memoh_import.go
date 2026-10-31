@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/kasuganosora/thinkbot/dao"
 )
 
 const memohSource = "memoh"
@@ -323,6 +325,13 @@ func parseMemohProfiles(text string) []memohProfile {
 
 func applyMemohImport(ctx context.Context, store *TieredStore, botID string, entries []memohRawEntry, profiles []memohProfile) (*MemohImportReport, error) {
 	report := &MemohImportReport{}
+	botID = strings.TrimSpace(botID)
+	if botID == "" {
+		return nil, fmt.Errorf("memoh import: bot identity is required")
+	}
+	if bound := store.BoundBotID(); bound != "" && bound != botID {
+		return nil, fmt.Errorf("memoh import: target bot differs from memory owner")
+	}
 	userOf := resolveMemohUsers(profiles)
 	botScope := BotScope(strings.TrimSpace(botID))
 
@@ -336,9 +345,14 @@ func applyMemohImport(ctx context.Context, store *TieredStore, botID string, ent
 		if strings.TrimSpace(content) == "" {
 			continue
 		}
-		id := memohEntryID("profile:" + uid)
+		sourceID := "profile:" + uid
+		id := memohEntryID(botID + "\x00" + sourceID)
 		scope := UserScope(uid)
-		if store.HasIDInTier(ctx, Tier3Profile, id) {
+		exists, lookupErr := memohAlreadyImported(ctx, store, botID, Tier3Profile, id, sourceID)
+		if lookupErr != nil {
+			return report, lookupErr
+		}
+		if exists {
 			report.Skipped++
 			continue
 		}
@@ -350,7 +364,7 @@ func applyMemohImport(ctx context.Context, store *TieredStore, botID string, ent
 				Category:   "fact",
 				Source:     memohSource,
 				Importance: 0.8,
-				Metadata:   map[string]any{"memoh_id": "profile:" + uid},
+				Metadata:   map[string]any{"memoh_id": sourceID, "bot_id": botID},
 				CreatedAt:  time.Now(),
 			},
 			Tier: Tier3Profile,
@@ -377,8 +391,12 @@ func applyMemohImport(ctx context.Context, store *TieredStore, botID string, ent
 		if uid := userOf[normalizeMemohName(e.ProfileRef)]; uid != "" && !strings.HasPrefix(e.ProfileRef, "channel_identity:") {
 			scope = UserScope(uid)
 		}
-		id := memohEntryID(e.ID)
-		if store.HasIDInTier(ctx, Tier1LongTerm, id) {
+		id := memohEntryID(botID + "\x00" + e.ID)
+		exists, lookupErr := memohAlreadyImported(ctx, store, botID, Tier1LongTerm, id, e.ID)
+		if lookupErr != nil {
+			return report, lookupErr
+		}
+		if exists {
 			report.Skipped++
 			continue
 		}
@@ -396,6 +414,7 @@ func applyMemohImport(ctx context.Context, store *TieredStore, botID string, ent
 				Importance: 0.6,
 				Metadata: map[string]any{
 					"memoh_id": e.ID,
+					"bot_id":   botID,
 					"topic":    e.Topic,
 					"channel":  e.Channel,
 				},
@@ -411,6 +430,33 @@ func applyMemohImport(ctx context.Context, store *TieredStore, botID string, ent
 		report.Imported++
 	}
 	return report, nil
+}
+
+// Older imports did not namespace IDs. Deduplicate only records with proven
+// ownership, including persisted records evicted from the bounded memory cache.
+// Unknown legacy records stay untouched; an explicit import creates a new copy.
+func memohAlreadyImported(ctx context.Context, store *TieredStore, botID string, tier MemoryTier, id, sourceID string) (bool, error) {
+	ids := []string{id, memohEntryID(sourceID)}
+	if store.db != nil {
+		var count int64
+		err := OwnedMemoryRows(store.db.WithContext(ctx).Model(&dao.TieredMemoryModel{}), botID).
+			Where("tier = ? AND id IN ?", int(tier), ids).Count(&count).Error
+		return count > 0, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	owner := &botRepository{botID: botID}
+	for key, bucket := range store.buckets {
+		if tierOf(key) != tier {
+			continue
+		}
+		for _, entry := range bucket {
+			if (entry.ID == ids[0] || entry.ID == ids[1]) && owner.owns(entry.Entry) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func resolveMemohUsers(profiles []memohProfile) map[string]string {

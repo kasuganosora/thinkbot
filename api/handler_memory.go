@@ -51,6 +51,7 @@ func (s *Server) memoryBundle(botID string) (*bot.DreamingBundle, func(), error)
 // @Produce      json
 // @Param        id     path      string  true   "Bot ID"
 // @Param        tier   query     string  false  "记忆层级 (L0/L1/L2/L3)"
+// @Param        scope  query     string  false  "来源范围 (channel:id/user:id/bot:id/global:)"
 // @Param        limit  query     int     false  "返回条数"  default(20)
 // @Success      200    {object}  Response
 // @Failure      404    {object}  Response
@@ -59,6 +60,23 @@ func (s *Server) memoryBundle(botID string) (*bot.DreamingBundle, func(), error)
 func (s *Server) handleQueryMemory(c *gin.Context) {
 	botID := c.Param("id")
 	tierStr := c.DefaultQuery("tier", "")
+	var scopes []memory.Scope
+	if raw := c.Query("scope"); raw != "" {
+		kind, id, ok := strings.Cut(raw, ":")
+		switch memory.ScopeKind(kind) {
+		case memory.ScopeChannel, memory.ScopeUser, memory.ScopeBot:
+			ok = ok && id != ""
+		case memory.ScopeGlobal:
+			ok = ok && id == ""
+		default:
+			ok = false
+		}
+		if !ok {
+			Fail(c, errs.BadRequest("invalid scope: expected channel:id, user:id, bot:id or global:"))
+			return
+		}
+		scopes = []memory.Scope{{Kind: memory.ScopeKind(kind), ID: id}}
+	}
 	limit := 20
 	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
@@ -117,7 +135,7 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 			if remaining <= 0 {
 				break
 			}
-			part, e := mgr.RetrieveByTier(ctx, t, nil, remaining)
+			part, e := mgr.RetrieveByTier(ctx, t, scopes, remaining)
 			if e != nil {
 				err = e
 				break
@@ -126,7 +144,7 @@ func (s *Server) handleQueryMemory(c *gin.Context) {
 			remaining -= len(part)
 		}
 	} else {
-		entries, err = mgr.RetrieveByTier(ctx, tier, nil, limit)
+		entries, err = mgr.RetrieveByTier(ctx, tier, scopes, limit)
 	}
 
 	if err != nil {
@@ -529,7 +547,7 @@ func (s *Server) handleImportMemohMemory(c *gin.Context) {
 // 背景：新写入已在捕获层（note_capture）/ActionNote（MemoryWriteStage）/回灌（backfill）
 // 被源头拦截，但规则生效前已落入 L0/L1 的短内容仍需一次性运维清理。
 //
-// 扫描范围是 SQLite 全量行（而不是内存存储）：TieredStore 的内存桶每 scope 有
+// 扫描范围是当前机器人明确拥有的 SQLite 全量行（而不是内存存储）：TieredStore 的内存桶每 scope 有
 // MaxEntries 上限（Tier0Working=200），内存里只是「最近的一部分」子集，
 // 只扫内存会漏掉绝大多数历史存量（实测 L0 库里 2898 行 / 内存仅 430）。
 // 删除：先清内存副本（store.Delete 同 scope 命中时会一并 persistDelete），
@@ -619,7 +637,7 @@ func (s *Server) handleCleanupTrivialMemory(c *gin.Context) {
 		ScopeID   string
 		Content   string
 	}
-	if err := s.db.WithContext(ctx).Table("tiered_memories").
+	if err := memory.OwnedMemoryRows(s.db.WithContext(ctx).Table("tiered_memories"), botID).
 		Select("id, tier, scope_kind, scope_id, content").
 		Where("tier IN ?", tierInts).
 		Find(&rows).Error; err != nil {
@@ -703,15 +721,16 @@ func (s *Server) handleCleanupTrivialMemory(c *gin.Context) {
 			if end > len(ids) {
 				end = len(ids)
 			}
-			res := s.db.WithContext(ctx).Table("tiered_memories").
+			res := memory.OwnedMemoryRows(s.db.WithContext(ctx).Table("tiered_memories"), botID).
 				Where("id IN ?", ids[start:end]).
 				Delete(&dao.TieredMemoryModel{})
 			if res.Error != nil {
-				s.logger.Errorw("cleanup-trivial: failed to delete memory rows",
-					"err", res.Error, "bot_id", botID)
-				continue
+				Fail(c, errs.Wrap(res.Error, "failed to delete memory rows; cleanup may be partial"))
+				return
 			}
-			totalDeleted += int(res.RowsAffected)
+			// store.Delete may already have removed these persisted rows. Count
+			// the targeted rows completed by both paths, not only SQL fallback hits.
+			totalDeleted += end - start
 		}
 	}
 
@@ -846,7 +865,7 @@ func (s *Server) handleCleanupDuplicateMemory(c *gin.Context) {
 		ScopeID   string
 		Content   string
 	}
-	if err := s.db.WithContext(ctx).Table("tiered_memories").
+	if err := memory.OwnedMemoryRows(s.db.WithContext(ctx).Table("tiered_memories"), botID).
 		Select("id, tier, scope_kind, scope_id, content").
 		Where("tier IN ?", tierInts).
 		Order("id ASC").
@@ -985,15 +1004,16 @@ func (s *Server) handleCleanupDuplicateMemory(c *gin.Context) {
 			if end > len(allIDs) {
 				end = len(allIDs)
 			}
-			res := s.db.WithContext(ctx).Table("tiered_memories").
+			res := memory.OwnedMemoryRows(s.db.WithContext(ctx).Table("tiered_memories"), botID).
 				Where("id IN ?", allIDs[start:end]).
 				Delete(&dao.TieredMemoryModel{})
 			if res.Error != nil {
-				s.logger.Errorw("cleanup-duplicate: failed to delete memory rows",
-					"err", res.Error, "bot_id", botID)
-				continue
+				Fail(c, errs.Wrap(res.Error, "failed to delete memory rows; cleanup may be partial"))
+				return
 			}
-			totalDeleted += int(res.RowsAffected)
+			// store.Delete may already have removed these persisted rows. Count
+			// the targeted rows completed by both paths, not only SQL fallback hits.
+			totalDeleted += end - start
 		}
 		if totalDeleted > 0 {
 			auditLog(c, s.logger, "cleanup_duplicate_memory",
