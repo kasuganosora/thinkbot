@@ -76,6 +76,16 @@ type containerStartAttempt struct {
 	cancel context.CancelFunc
 }
 
+// countBotL0Memory guards bootstrap per bot and tier. Other bots' memories or
+// this bot's derived L1/L2/L3 entries must not suppress historical L0 backfill.
+func countBotL0Memory(ctx context.Context, db *gorm.DB, botID string) (int64, error) {
+	var count int64
+	err := memory.OwnedMemoryRows(db.WithContext(ctx).Model(&dao.TieredMemoryModel{}), botID).
+		Where("tier = ?", memory.Tier0Working).
+		Count(&count).Error
+	return count, err
+}
+
 // BotService 管理 Bot 定义和运行时实例。
 type BotService struct {
 	db            *gorm.DB
@@ -3090,8 +3100,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			s.logger.Infow("memory event stream seeded", "bot_id", id, "seeded", seeded)
 		}
 		// 仅当 L0 为空时从事件流回灌（bootstrap）。
-		var l0Count int64
-		if err := s.db.Table("tiered_memories").Count(&l0Count).Error; err == nil && l0Count == 0 {
+		if l0Count, err := countBotL0Memory(context.Background(), s.db, id); err == nil && l0Count == 0 {
 			sinceID := uint64(s.store.GetInt(wmKey, 0))
 			switch {
 			case !cfg.GetMemoryBackfillEnabled(id):

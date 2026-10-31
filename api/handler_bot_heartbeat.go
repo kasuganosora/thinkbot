@@ -11,6 +11,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/heartbeat"
+	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -38,9 +39,9 @@ import (
 //  2. memory_entries：新落库记忆条目——覆盖非 Web 渠道（如 Misskey）的入站，
 //     因为 note_capture 会把入站原文写成 L0 记忆。
 //
-// memory_entries 表无 bot_id 列（作用域为 scope_kind/scope_id），因此只统计「本 bot」
-// 的作用域：bot:<botID>，以及本 bot 入站事件流（user_message_events，按 bot_id 归属）
-// 出现过的 channel / user 作用域。心跳自身、记忆压缩器、梦境、画像等内部写入不算
+// memory_entries 表通过 metadata.bot_id 或无冲突的 bot 作用域确认归属；不能仅凭
+// 本 bot 历史事件中出现过相同的 channel / user ID 推断记忆归属。未归属的旧记录
+// 不计入信号。心跳自身、记忆压缩器、梦境、画像等内部写入不算
 // 外界信号（此前它们会让心跳自我唤醒：心跳写 note → 下一轮准入看到「新记忆」）。
 // 探测出错时保守放行。
 func (s *BotService) newHeartbeatAdmissionFn(botID string) heartbeat.AdmissionFn {
@@ -85,17 +86,13 @@ var heartbeatInternalMemorySources = []string{
 }
 
 // countHeartbeatMemorySignals counts memory entries created after since in
-// botID's own scopes, excluding entries written by the heartbeat itself
+// botID's verified ownership, excluding entries written by the heartbeat itself
 // (channel "heartbeat", user "system:heartbeat", their bot-scope mirrors) and
 // by background jobs (compactor / dreaming / profilers).
 func countHeartbeatMemorySignals(ctx context.Context, db *gorm.DB, botID string, since time.Time) (int64, error) {
-	channels := db.Model(&dao.UserMessageEvent{}).Select("DISTINCT channel").Where("bot_id = ? AND channel <> ''", botID)
-	users := db.Model(&dao.UserMessageEvent{}).Select("DISTINCT user_id").Where("bot_id = ? AND user_id <> ''", botID)
 	var n int64
-	err := db.WithContext(ctx).Model(&dao.EntryModel{}).
+	err := memory.OwnedMemoryRows(db.WithContext(ctx).Model(&dao.EntryModel{}), botID).
 		Where("created_at > ?", since).
-		Where("(scope_kind = 'bot' AND scope_id = ?) OR (scope_kind = 'channel' AND scope_id IN (?)) OR (scope_kind = 'user' AND scope_id IN (?))",
-			botID, channels, users).
 		Where("source NOT IN ? AND source NOT LIKE ?", heartbeatInternalMemorySources, "heartbeat%").
 		Where("NOT (scope_kind = 'channel' AND scope_id = 'heartbeat')").
 		Where("NOT (scope_kind = 'user' AND scope_id = 'system:heartbeat')").
