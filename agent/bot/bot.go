@@ -770,6 +770,8 @@ func (b *Bot) finishMessageLifecycle(ctx context.Context, traceID string) {
 
 // OnBeforeProcess 在 Engine 处理 Envelope 之前注入 EventEmitter 和 Bot 配置。
 func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.Context {
+	// The runtime instance, not inbound message fields, owns recall and writes.
+	env.Message.BotID = b.ID
 	// 注入 EventEmitter 到 context，供 Pipeline Stage（如 ObservableStage）使用
 	ctx = outbound.ContextWithEmitter(ctx, b.emitter)
 
