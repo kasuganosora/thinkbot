@@ -173,7 +173,24 @@ func (m *BotWorkspaceManager) ApplyCPULimit(ctx context.Context, botID, limit st
 	if c == nil {
 		return nil
 	}
-	return c.UpdateCPULimit(ctx, limit)
+	if err := c.UpdateCPULimit(ctx, limit); err != nil {
+		return err
+	}
+	m.setBotCPULimit(botID, limit)
+	return nil
+}
+
+// setBotCPULimit 把新上限回写到 manager 配置以及该 bot 已建容器的配置，
+// 使「创建容器」和「重建容器」都沿用在线改过的值。
+// 少了这一步，在线改完的容器一旦重建就会被旧配置盖回去，表现为"改了又变回去"。
+func (m *BotWorkspaceManager) setBotCPULimit(botID, limit string) {
+	m.mu.Lock()
+	m.cfg.CPULimit = limit
+	ws := m.workspaces[botID]
+	m.mu.Unlock()
+	if ws != nil && ws.container != nil {
+		ws.container.setCPULimit(limit)
+	}
 }
 
 // ApplyMemoryLimit 把内存上限就地应用到该 bot 的运行中容器（不重建）。
@@ -183,7 +200,13 @@ func (m *BotWorkspaceManager) ApplyMemoryLimit(ctx context.Context, botID string
 	if c == nil {
 		return nil
 	}
-	return c.UpdateMemoryLimit(ctx, mb)
+	if err := c.UpdateMemoryLimit(ctx, mb); err != nil {
+		return err
+	}
+	// 回写 per-bot 覆盖：容器创建/重建时取的就是这里的值，
+	// 只在容器上改而不同步这里，重建后同样会被旧上限盖回去。
+	m.SetBotMemoryOverride(botID, mb)
+	return nil
 }
 
 // getBotMemoryLimitLocked 返回指定 bot 的内存限制字符串（用于 docker --memory）。
