@@ -469,14 +469,23 @@ func (s *BotService) ApplySandboxCPULimit(ctx context.Context, botID string) (bo
 // 要回写进去）；其余 bot 共用一个临时 manager——WorkspaceManagerForBot 会新建
 // BotWorkspaceManager，其构造函数顺带触发镜像预热，N 个 bot 各建一个就是 N 次
 // 预热。docker update 只按容器名操作，不依赖 manager 的 per-bot 状态。
-func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) bool {
+// SandboxLimitApplyResult distinguishes persistence from live application.
+type SandboxLimitApplyResult struct {
+	Applied       bool     `json:"applied"`
+	NeedsRecreate bool     `json:"needsRecreate"`
+	Failed        bool     `json:"failed"`
+	FailedBots    []string `json:"failedBots"`
+}
+
+func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) SandboxLimitApplyResult {
+	result := SandboxLimitApplyResult{Applied: true, FailedBots: []string{}}
 	limit := s.effectiveSandboxCPULimit()
 	defs, err := s.ListDefinitions()
 	if err != nil {
 		s.logger.Warnw("apply sandbox cpu limit: list bots failed", "err", err)
-		return false
+		result.Applied, result.Failed = false, true
+		return result
 	}
-	needsRecreate := false
 	var shared *sandbox.BotWorkspaceManager
 	for _, def := range defs {
 		if def.ID == "" {
@@ -488,20 +497,25 @@ func (s *BotService) ApplySandboxCPULimitAll(ctx context.Context) bool {
 				shared, err = s.WorkspaceManagerForBot(def.ID)
 				if err != nil {
 					s.logger.Warnw("apply sandbox cpu limit: workspace manager unavailable", "err", err)
-					return needsRecreate
+					result.Applied, result.Failed = false, true
+					result.FailedBots = append(result.FailedBots, def.ID)
+					continue
 				}
 			}
 			mgr = shared
 		}
 		if err := mgr.ApplyCPULimit(ctx, def.ID, limit); err != nil {
+			result.Applied = false
 			if errors.Is(err, sandbox.ErrLimitNotClearable) {
-				needsRecreate = true
-				continue
+				result.NeedsRecreate = true
+			} else {
+				result.Failed = true
+				result.FailedBots = append(result.FailedBots, def.ID)
+				s.logger.Warnw("apply sandbox cpu limit failed", "bot", def.ID, "err", err)
 			}
-			s.logger.Warnw("apply sandbox cpu limit failed", "bot", def.ID, "err", err)
 		}
 	}
-	return needsRecreate
+	return result
 }
 
 // sandboxConfigWithMemoryLimit 构造基础 sandbox 配置并按 mb 决定内存限制。
