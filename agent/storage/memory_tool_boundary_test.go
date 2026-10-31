@@ -90,3 +90,145 @@ func TestMemoryToolSharedSQLiteBotBoundary(t *testing.T) {
 		t.Fatalf("count after remove=%d, %v", count, err)
 	}
 }
+
+// Observe the scope passed by the tool wrapper, while still executing real SQL.
+// Shared BotScope reads must not turn exact source mutations into broad writes.
+type recordingMemoryDeletes struct {
+	*SQLiteRepository
+	deleted    map[string]memory.Scope
+	clearCalls int
+}
+
+func (r *recordingMemoryDeletes) Delete(ctx context.Context, scope memory.Scope, id string) error {
+	r.deleted[id] = scope
+	return r.SQLiteRepository.Delete(ctx, scope, id)
+}
+
+func (r *recordingMemoryDeletes) Clear(ctx context.Context, scope memory.Scope) error {
+	r.clearCalls++
+	return r.SQLiteRepository.Clear(ctx, scope)
+}
+
+func TestMemoryToolCrossSessionMutationsPreserveSourceScope(t *testing.T) {
+	for _, source := range []memory.Scope{memory.UserScope("original-user"), memory.ChannelScope("original-channel")} {
+		t.Run(source.Key(), func(t *testing.T) {
+			ctx := context.Background()
+			db := testDB(t)
+			a := &recordingMemoryDeletes{
+				SQLiteRepository: NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "A"}),
+				deleted:          make(map[string]memory.Scope),
+			}
+			b := NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "B"})
+			for _, e := range []memory.Entry{
+				{ID: "target", Scope: source, Content: "Original source memory"},
+				{ID: "neighbor", Scope: source, Content: "Neighbor memory must survive"},
+			} {
+				if err := a.Append(ctx, e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := b.Append(ctx, memory.Entry{ID: "foreign", Scope: source, Content: "Other bot memory must survive"}); err != nil {
+				t.Fatal(err)
+			}
+			tool := memory.Tools(memory.ToolConfig{Repo: a, BotID: "A"})[0].Tool
+			exec := &llm.ToolExecContext{Context: ctx}
+			for _, action := range []string{"replace", "remove"} {
+				result, err := tool.Execute(exec, map[string]any{
+					"action": action, "memory_id": "target", "content": "Updated source memory",
+					"scope_kind": "channel", "scope_id": "different-platform-conversation",
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				response := result.(map[string]any)
+				if response["success"] != true || response["scope"] != source.Key() {
+					t.Fatalf("%s response lost original scope: %+v", action, response)
+				}
+				entries, err := a.FetchEntries(ctx, []string{"target"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if action == "replace" {
+					if len(entries) != 1 || entries[0].Scope != source || entries[0].Content != "Updated source memory" || entries[0].Metadata["bot_id"] != "A" {
+						t.Fatalf("cross-session replacement changed source classification/owner: %+v", entries)
+					}
+				} else if len(entries) != 0 || a.deleted["target"] != source {
+					t.Fatalf("cross-session delete did not target original scope: entries=%+v deleted=%+v", entries, a.deleted)
+				}
+			}
+			for _, check := range []struct {
+				repo    *SQLiteRepository
+				id      string
+				content string
+			}{
+				{a.SQLiteRepository, "neighbor", "Neighbor memory must survive"},
+				{b, "foreign", "Other bot memory must survive"},
+			} {
+				entries, err := check.repo.FetchEntries(ctx, []string{check.id})
+				if err != nil || len(entries) != 1 || entries[0].Scope != source || entries[0].Content != check.content {
+					t.Fatalf("unrelated entry %s changed: %+v, %v", check.id, entries, err)
+				}
+			}
+		})
+	}
+}
+
+func TestMemoryBotWrapperClearDeletesAllOwnedSourceScopesOnly(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	raw := NewSQLiteRepository(db)
+	a := &recordingMemoryDeletes{
+		SQLiteRepository: NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "A"}),
+		deleted:          make(map[string]memory.Scope),
+	}
+	b := NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "B"})
+	expected := make(map[string]memory.Scope)
+	var foreignIDs []string
+	for i, scope := range []memory.Scope{memory.UserScope("shared-user"), memory.ChannelScope("shared-channel"), memory.GlobalScope(), memory.BotScope("A")} {
+		id := fmt.Sprintf("A-scope-%d", i)
+		expected[id] = scope
+		if err := a.Append(ctx, memory.Entry{ID: id, Scope: scope, Content: "Own memory " + id}); err != nil {
+			t.Fatal(err)
+		}
+		foreignScope := scope
+		if scope.Kind == memory.ScopeBot {
+			foreignScope = memory.BotScope("B")
+		}
+		foreignID := fmt.Sprintf("B-scope-%d", i)
+		foreignIDs = append(foreignIDs, foreignID)
+		if err := b.Append(ctx, memory.Entry{ID: foreignID, Scope: foreignScope, Content: "Foreign memory " + foreignID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyScope := memory.ChannelScope("legacy-channel")
+	expected["legacy-owned"] = legacyScope
+	for _, entry := range []memory.Entry{
+		{ID: "legacy-owned", Scope: legacyScope, Content: "Owned legacy memory", Metadata: map[string]any{"bot_id": "A"}},
+		{ID: "legacy-unowned", Scope: legacyScope, Content: "Unattributed legacy memory"},
+	} {
+		if err := raw.Append(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bound := memory.ForBotRepository(a, "A")
+	if err := bound.Clear(ctx, memory.BotScope("A")); err != nil {
+		t.Fatal(err)
+	}
+	if a.clearCalls != 0 || len(a.deleted) != len(expected) {
+		t.Fatalf("wrapper must delete each owned ID, not bulk-clear a shared view: clears=%d deleted=%+v", a.clearCalls, a.deleted)
+	}
+	for id, scope := range expected {
+		if a.deleted[id] != scope {
+			t.Fatalf("delete %s used scope %+v, want original %+v", id, a.deleted[id], scope)
+		}
+	}
+	if entries, err := bound.Retrieve(ctx, memory.Query{}); err != nil || len(entries) != 0 {
+		t.Fatalf("owned source scopes remain after clear: %+v, %v", entries, err)
+	}
+	if entries, err := b.FetchEntries(ctx, foreignIDs); err != nil || len(entries) != len(foreignIDs) {
+		t.Fatalf("clear damaged another bot's source scopes: %+v, %v", entries, err)
+	}
+	if entries, err := raw.FetchEntries(ctx, []string{"legacy-unowned"}); err != nil || len(entries) != 1 || entries[0].Scope != legacyScope {
+		t.Fatalf("clear damaged unowned legacy memory: %+v, %v", entries, err)
+	}
+}
