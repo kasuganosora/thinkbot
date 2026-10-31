@@ -2,6 +2,12 @@ package api
 
 import (
 	"errors"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kasuganosora/thinkbot/mcp"
@@ -67,7 +73,7 @@ func TestMaskMCPEntrySecrets(t *testing.T) {
 }
 
 // TestMergeMCPSecretMap 验证 update 解析：敏感键掩码串沿用旧值、新真实值覆盖、
-// 空串清空、非敏感键掩码串按字面、凭空新增掩码键报错（不能静默丢凭据）、非字符串忽略。
+// 空串清空、非敏感键及无原值的掩码报错（不能静默丢凭据）、非字符串忽略。
 func TestMergeMCPSecretMap(t *testing.T) {
 	old := map[string]string{
 		"Authorization": "Bearer real-old-token-123456",
@@ -112,15 +118,20 @@ func TestMergeMCPSecretMap(t *testing.T) {
 		}
 	})
 
-	t.Run("mask on non-sensitive key treated literally", func(t *testing.T) {
-		got, err := mergeMCPSecretMap(old, map[string]any{"NODE_ENV": mcpSecretMask})
-		if err != nil {
-			t.Fatalf("merge must succeed, got %v", err)
-		}
-		if got["NODE_ENV"] != mcpSecretMask {
-			t.Fatalf("non-sensitive key should accept the literal mask string, got %q", got["NODE_ENV"])
-		}
-	})
+	for _, key := range []string{"NODE_ENV", "MY_VALUE"} {
+		t.Run("mask cannot become ordinary value "+key, func(t *testing.T) {
+			if _, err := mergeMCPSecretMap(old, map[string]any{key: mcpSecretMask}); !errors.Is(err, ErrMCPMaskUnresolvable) {
+				t.Fatalf("renamed mask must require a new value, got %v", err)
+			}
+		})
+	}
+	for _, oldValue := range []string{"", mcpSecretMask} {
+		t.Run("mask needs a real stored value "+oldValue, func(t *testing.T) {
+			if _, err := mergeMCPSecretMap(map[string]string{"TOKEN": oldValue}, map[string]any{"TOKEN": mcpSecretMask}); !errors.Is(err, ErrMCPMaskUnresolvable) {
+				t.Fatalf("unresolvable mask accepted: %v", err)
+			}
+		})
+	}
 
 	t.Run("masked key with no old value fails instead of dropping the secret", func(t *testing.T) {
 		got, err := mergeMCPSecretMap(old, map[string]any{"NEW_TOKEN": mcpSecretMask})
@@ -222,5 +233,48 @@ func TestMCPSecretMaskRoundTrip_PreservesRealValue(t *testing.T) {
 	}
 	if gotEnv["NODE_ENV"] != "staging" {
 		t.Fatalf("non-sensitive edit must apply through round-trip, got %q", gotEnv["NODE_ENV"])
+	}
+}
+
+func TestMCPHandlersRejectUnresolvableMasksWithoutSaving(t *testing.T) {
+	t.Chdir(t.TempDir())
+	const bot = "mask-test"
+	original := []mcp.BotServerEntry{{ID: "existing", Name: "existing", Env: map[string]string{"TOKEN": "fictional-original-token"}}}
+	if err := mcp.SaveBotServers(bot, original); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{logger: zap.NewNop().Sugar()}
+	for _, tc := range []struct {
+		name, method, body string
+		handler            gin.HandlerFunc
+	}{
+		{"create env", "POST", `{"name":"new","env":{"TOKEN":"********"}}`, server.handleCreateBotMcp},
+		{"create renamed key", "POST", `{"name":"new","env":{"MY_VALUE":"********"}}`, server.handleCreateBotMcp},
+		{"create header", "POST", `{"name":"new","headers":{"Authorization":"********"}}`, server.handleCreateBotMcp},
+		{"update renamed key", "PUT", `{"name":"changed","env":{"MY_VALUE":"********"}}`, server.handleUpdateBotMcp},
+		{"import env", "POST", `{"mcpServers":{"valid":{"env":{"PORT":"3000"}},"invalid":{"env":{"TOKEN":"********"}}}}`, server.handleImportBotMcp},
+		{"import header", "POST", `{"mcpServers":{"invalid":{"headers":{"MY_VALUE":"********"}}}}`, server.handleImportBotMcp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Params = gin.Params{{Key: "id", Value: bot}, {Key: "mid", Value: "existing"}}
+			ctx.Request = httptest.NewRequest(tc.method, "/", strings.NewReader(tc.body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			tc.handler(ctx)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			got, err := mcp.LoadBotServers(bot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, original) {
+				t.Fatalf("rejected request modified stored config: %+v", got)
+			}
+			if strings.Contains(recorder.Body.String(), "fictional-original-token") {
+				t.Fatal("error leaked stored credential")
+			}
+		})
 	}
 }
