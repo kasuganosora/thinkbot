@@ -187,6 +187,10 @@ type Query struct {
 	// Text 文本关键词（模糊匹配）。
 	// 当前内存实现使用子串匹配；未来向量实现可做语义相似度搜索。
 	Text string
+	// Lexical 要求按正文子串匹配，不走向量近邻。
+	// 记忆修改按 old_text 定位时必须命中包含该正文的行；向量 top-k
+	// 会把更近但不含这段文字的条目排到前面，把真正的目标挤出 limit。
+	Lexical bool
 	// Category 分类过滤（可选）。
 	Category string
 	// Limit 最多返回条目数（默认 10）。

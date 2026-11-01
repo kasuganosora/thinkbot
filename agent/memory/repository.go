@@ -260,8 +260,10 @@ func (r *MemoryRepository) Retrieve(_ context.Context, query Query) ([]Entry, er
 			continue
 		}
 
-		// 文本关键词匹配（子串，不区分大小写）
-		if query.Text != "" && !containsIgnoreCase(entry.Content, query.Text) && !r.vec.Enabled() {
+		// 文本关键词匹配（子串，不区分大小写）。
+		// 向量开启时普通搜索保留未命中的行，交给近邻排序；Lexical 是精确正文查找，
+		// 不含关键词的行必须丢掉，不能被向量排序截掉。
+		if query.Text != "" && !containsIgnoreCase(entry.Content, query.Text) && (query.Lexical || !r.vec.Enabled()) {
 			continue
 		}
 
@@ -277,7 +279,7 @@ func (r *MemoryRepository) Retrieve(_ context.Context, query Query) ([]Entry, er
 	}
 
 	// 排序：向量近邻优先（sqlite-vec 可用时），其余仍按时间。
-	if query.Text != "" && r.vec.Enabled() && len(query.Scopes) > 0 {
+	if query.Text != "" && !query.Lexical && r.vec.Enabled() && len(query.Scopes) > 0 {
 		rank := map[string]int{}
 		for _, scope := range query.Scopes {
 			for i, hit := range r.vec.Search(scope.Key(), query.Text, limit) {

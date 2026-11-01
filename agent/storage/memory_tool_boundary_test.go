@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -230,5 +231,138 @@ func TestMemoryBotWrapperClearDeletesAllOwnedSourceScopesOnly(t *testing.T) {
 	}
 	if entries, err := raw.FetchEntries(ctx, []string{"legacy-unowned"}); err != nil || len(entries) != 1 || entries[0].Scope != legacyScope {
 		t.Fatalf("clear damaged unowned legacy memory: %+v, %v", entries, err)
+	}
+}
+
+func TestLexicalOldTextTreatsWildcardAsLiteral(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	repo := NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "A", MaxEntriesPerScope: 100})
+	for _, e := range []memory.Entry{
+		{ID: "pct", Scope: memory.UserScope("u"), Content: "score is 100% done"},
+		{ID: "digits", Scope: memory.UserScope("u"), Content: "score is 1000 done"},
+	} {
+		if err := repo.Append(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tool := memory.Tools(memory.ToolConfig{Repo: repo, BotID: "A"})[0].Tool
+	result, err := tool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"action": "replace", "scope_kind": "channel", "scope_id": "other",
+		"old_text": "100%", "content": "score is complete",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.(map[string]any)["success"] != true {
+		t.Fatalf("literal percent was not an exact substring: %+v", result)
+	}
+	got, err := repo.FetchEntries(ctx, []string{"pct", "digits"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range got {
+		if e.ID == "digits" && e.Content != "score is 1000 done" {
+			t.Fatalf("wildcard replace edited %s: %+v", e.ID, got)
+		}
+		if e.ID == "pct" && (e.Content != "score is complete" || e.Scope != memory.UserScope("u")) {
+			t.Fatalf("percent row: %+v", e)
+		}
+	}
+}
+
+// Shared bot reads page the newest rows across every owned scope. Exact edits
+// must still reach an older row the recent page no longer contains.
+func TestMemoryToolFindsOwnedEntriesOutsideBotWideRecentPage(t *testing.T) {
+	source := memory.UserScope("original-user")
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		fillers int
+		action  string
+		extra   map[string]any
+	}{
+		{name: "substring", fillers: 150, action: "replace", extra: map[string]any{"old_text": "unique archive token", "memory_id": ""}},
+		{name: "id", fillers: 1100, action: "remove", extra: map[string]any{}},
+		{name: "batch-substring", fillers: 1100, action: "batch-replace", extra: map[string]any{"old_text": "unique archive token"}},
+		{name: "batch-id", fillers: 1100, action: "batch-remove", extra: map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := testDB(t)
+			a := NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "A", MaxEntriesPerScope: 5000})
+			b := NewSQLiteRepository(db, SQLiteRepositoryConfig{BotID: "B", MaxEntriesPerScope: 5000})
+			target := memory.Entry{
+				ID: "old-target", Scope: source, Content: "unique archive token",
+				CreatedAt: base, LastAccessedAt: base,
+			}
+			if err := a.Append(ctx, target); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.fillers; i++ {
+				created := base.Add(time.Duration(i+1) * time.Second)
+				if err := a.Append(ctx, memory.Entry{
+					ID: fmt.Sprintf("new-%04d", i), Scope: memory.ChannelScope("busy"),
+					Content: fmt.Sprintf("newer filler %d", i), CreatedAt: created, LastAccessedAt: created,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := b.Append(ctx, memory.Entry{
+				ID: "foreign", Scope: source, Content: "other bot archive token",
+				CreatedAt: base.Add(time.Hour), LastAccessedAt: base.Add(time.Hour),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			tool := memory.Tools(memory.ToolConfig{Repo: a, BotID: "A"})[0].Tool
+			exec := &llm.ToolExecContext{Context: ctx}
+			args := map[string]any{
+				"scope_kind": "channel", "scope_id": "different-platform",
+				"memory_id": "old-target", "content": "updated archive token",
+			}
+			for k, v := range tc.extra {
+				args[k] = v
+			}
+			switch tc.action {
+			case "batch-replace":
+				args = map[string]any{
+					"action": "batch", "scope_kind": "channel", "scope_id": "different-platform",
+					"operations": []any{map[string]any{"action": "replace", "old_text": "unique archive token", "content": "updated archive token"}},
+				}
+			case "batch-remove":
+				args = map[string]any{
+					"action": "batch", "scope_kind": "channel", "scope_id": "different-platform",
+					"operations": []any{map[string]any{"action": "remove", "memory_id": "old-target"}},
+				}
+			default:
+				args["action"] = tc.action
+			}
+			result, err := tool.Execute(exec, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.(map[string]any)["success"] != true {
+				t.Fatalf("old owned entry was invisible to %s: %+v", tc.action, result)
+			}
+			got, err := a.FetchEntries(ctx, []string{"old-target"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch tc.action {
+			case "remove", "batch-remove":
+				if len(got) != 0 {
+					t.Fatalf("old entry survived %s: %+v", tc.action, got)
+				}
+			default:
+				if len(got) != 1 || got[0].Scope != source || got[0].Content != "updated archive token" || got[0].Metadata["bot_id"] != "A" {
+					t.Fatalf("edit lost the original scope or owner: %+v", got)
+				}
+			}
+			foreign, err := b.FetchEntries(ctx, []string{"foreign"})
+			if err != nil || len(foreign) != 1 || foreign[0].Content != "other bot archive token" {
+				t.Fatalf("other bot changed: %+v, %v", foreign, err)
+			}
+		})
 	}
 }
