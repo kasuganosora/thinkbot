@@ -302,11 +302,39 @@ func logDedupStats(logger *zap.SugaredLogger) {
 	logger.Infow("memory_dedup_stats", "calls_total", calls, "truncated_total", trunc, "truncated_ratio", ratio)
 }
 
+// scopeVectorIndex is the neighbour search compaction needs. *memory.VecIndex
+// implements it; tests can substitute a script without sqlite-vec.
+type scopeVectorIndex interface {
+	Search(scopeKey, query string, k int) []memory.Hit
+}
+
+// sharedVectorNeighbourScan is how many shared-bucket hits to read before
+// exact-scope filtering. Owned user/channel rows share one bot vector key, so
+// the nearest handful are often a different source scope (or this seed's
+// mirror) and would hide a same-scope duplicate.
+const sharedVectorNeighbourScan = 256
+
+func vectorNeighbourScanLimit(scope memory.Scope, seed memory.Entry, topK int, botBound bool) int {
+	exact := topK + 1
+	if exact < 1 {
+		exact = 1
+	}
+	if !botBound && memory.VectorScopeKey(seed.Scope, seed.Metadata) == scope.Key() {
+		return exact
+	}
+	if sharedVectorNeighbourScan > exact {
+		return sharedVectorNeighbourScan
+	}
+	return exact
+}
+
 // vecNeighbours returns the active entries most similar to seed (memory_vec
 // top-k, filtered by NeighbourMinSimilarity, best first). Mirror copies are
-// excluded.
-func (c *SQLiteCompactor) vecNeighbours(ctx context.Context, scope memory.Scope, vec *memory.VecIndex, seed memory.Entry) []memory.Entry {
-	hits := vec.Search(memory.VectorScopeKey(seed.Scope, seed.Metadata), seed.Content, c.sel.topK+1)
+// excluded. A shared bot vector bucket is scanned wider than topK so exact-scope
+// filtering still sees same-scope neighbours.
+func (c *SQLiteCompactor) vecNeighbours(ctx context.Context, scope memory.Scope, vec scopeVectorIndex, seed memory.Entry) []memory.Entry {
+	botBound := c.repo != nil && c.repo.config.BotID != ""
+	hits := vec.Search(memory.VectorScopeKey(seed.Scope, seed.Metadata), seed.Content, vectorNeighbourScanLimit(scope, seed, c.sel.topK, botBound))
 	ids := make([]string, 0, len(hits))
 	for _, h := range hits {
 		if h.EntryID != seed.ID && !memory.IsMirrorID(h.EntryID) {

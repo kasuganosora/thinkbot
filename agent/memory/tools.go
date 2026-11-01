@@ -573,11 +573,16 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 		}, nil
 	}
 
-	// 子串匹配查找
-	entries, err := repo.Retrieve(ctx, Query{
-		Scopes: []Scope{scope},
-		Limit:  100,
-	})
+	// 按 ID 时先看最近一页；页外的行由 resolveRemoveByID 按主键补查。
+	// 按正文时必须走子串查询：共享机器人读取的最近一页是全部 scope 混在一起的，
+	// 旧条目会被挤出固定的 100 条窗口。
+	var entries []Entry
+	var err error
+	if memoryID != "" {
+		entries, err = repo.Retrieve(ctx, Query{Scopes: []Scope{scope}, Limit: 100})
+	} else {
+		entries, err = lexicalEntries(ctx, repo, scope, oldText, 100)
+	}
 	if err != nil {
 		return nil, errs.Wrap(err, "memory search failed")
 	}
@@ -613,7 +618,7 @@ func handleReplace(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sc
 				"error":   removeScopeHint(scope, oldText, others),
 			}, nil
 		}
-		return noMatchResponse(scope, oldText, closestEntries(entries, oldText)), nil
+		return noMatchResponse(scope, oldText, closestEntries(recentEntriesForHint(ctx, repo, scope, entries), oldText)), nil
 	}
 	if len(matches) > 1 {
 		return map[string]any{
@@ -699,10 +704,7 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sco
 		return nil, fmt.Errorf("old_text or id/memory_id is required for 'remove' action")
 	}
 
-	entries, err := repo.Retrieve(ctx, Query{
-		Scopes: []Scope{scope},
-		Limit:  100,
-	})
+	entries, err := lexicalEntries(ctx, repo, scope, oldText, 100)
 	if err != nil {
 		return nil, errs.Wrap(err, "memory search failed")
 	}
@@ -716,7 +718,7 @@ func handleRemove(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, sco
 				"error":   removeScopeHint(scope, oldText, others),
 			}, nil
 		}
-		return noMatchResponse(scope, oldText, closestEntries(entries, oldText)), nil
+		return noMatchResponse(scope, oldText, closestEntries(recentEntriesForHint(ctx, repo, scope, entries), oldText)), nil
 	}
 	if len(matches) > 1 {
 		return map[string]any{
@@ -908,6 +910,13 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 			}
 			matches := findSubstringMatches(working, opOldText)
 			if len(matches) == 0 {
+				found, ferr := lexicalEntries(ctx, repo, scope, opOldText, 20)
+				if ferr != nil {
+					return nil, errs.Wrap(ferr, "batch: retrieval failed")
+				}
+				matches = findSubstringMatches(found, opOldText)
+			}
+			if len(matches) == 0 {
 				return batchError(scope, pos+": no entry matched '"+opOldText+"'"), nil
 			}
 			if len(matches) > 1 {
@@ -961,6 +970,13 @@ func handleBatch(ctx *llm.ToolExecContext, repo Repository, cfg ToolConfig, scop
 				return batchError(scope, pos+": old_text or id is required"), nil
 			}
 			matches := findSubstringMatches(working, opOldText)
+			if len(matches) == 0 {
+				found, ferr := lexicalEntries(ctx, repo, scope, opOldText, 20)
+				if ferr != nil {
+					return nil, errs.Wrap(ferr, "batch: retrieval failed")
+				}
+				matches = findSubstringMatches(found, opOldText)
+			}
 			if len(matches) == 0 {
 				if others := probeOtherScopesForSubstring(ctx, repo, cfg, scope, opOldText); len(others) > 0 {
 					return batchError(scope, pos+": "+removeScopeHint(scope, opOldText, others)), nil
@@ -1270,7 +1286,27 @@ func resolveRemoveByID(ctx context.Context, repo Repository, cfg ToolConfig, req
 }
 
 func findEntryByIDInScope(ctx context.Context, repo Repository, scope Scope, id string) (Entry, bool) {
-	entries, err := repo.Retrieve(ctx, Query{Scopes: []Scope{scope}, Limit: 1000})
+	if id == "" {
+		return Entry{}, false
+	}
+	// Shared bot reads page across every owned scope. A Retrieve limit of 1000
+	// is the newest page of the whole bot, so an older ID disappears even
+	// though the row is still there. Primary-key fetch is not paged.
+	if fetcher, ok := repo.(EntryFetcher); ok {
+		entries, err := fetcher.FetchEntries(ctx, []string{id})
+		if err != nil {
+			return Entry{}, false
+		}
+		for _, e := range entries {
+			if e.ID == id && entryVisibleForScope(repo, scope, e) {
+				return e, true
+			}
+		}
+		if bound, ok := repo.(interface{ BoundBotID() string }); ok && bound.BoundBotID() != "" {
+			return Entry{}, false
+		}
+	}
+	entries, err := repo.Retrieve(ctx, Query{Scopes: scopesFor(scope), Limit: 1000})
 	if err != nil {
 		return Entry{}, false
 	}
@@ -1282,10 +1318,51 @@ func findEntryByIDInScope(ctx context.Context, repo Repository, scope Scope, id 
 	return Entry{}, false
 }
 
+// entryVisibleForScope reports whether an ID fetch belongs to this request.
+// A bot-bound repository shares every owned source scope. An unbound
+// repository still requires the stored scope.
+func entryVisibleForScope(repo Repository, scope Scope, e Entry) bool {
+	if bound, ok := repo.(interface{ BoundBotID() string }); ok && bound.BoundBotID() != "" {
+		if scope.Kind == ScopeBot && scope.ID != bound.BoundBotID() {
+			return false
+		}
+		return true
+	}
+	if scope.Kind == ScopeAll {
+		return true
+	}
+	return e.Scope.Key() == scope.Key()
+}
+
+// recentEntriesForHint feeds the "closest current text" error. A lexical miss
+// has an empty result set, which would hide every nearby note.
+func recentEntriesForHint(ctx context.Context, repo Repository, scope Scope, already []Entry) []Entry {
+	if len(already) > 0 {
+		return already
+	}
+	page, err := repo.Retrieve(ctx, Query{Scopes: []Scope{scope}, Limit: 100})
+	if err != nil || len(page) == 0 {
+		return already
+	}
+	return page
+}
+
+// lexicalEntries finds rows that contain text. The recent page of a shared bot
+// is not a substitute: older notes fall off it as soon as any scope is busy.
+func lexicalEntries(ctx context.Context, repo Repository, scope Scope, text string, limit int) ([]Entry, error) {
+	q := Query{Scopes: scopesFor(scope), Limit: limit}
+	if text != "" {
+		q.Text = text
+		q.Lexical = true
+	}
+	return repo.Retrieve(ctx, q)
+}
+
 // probeOtherScopesForSubstring searches bot (and global) scopes for a substring that did
 // not match in the requested scope, so callers can guide the model to the correct scope/id.
 func probeOtherScopesForSubstring(ctx context.Context, repo Repository, cfg ToolConfig, requested Scope, substr string) []Entry {
 	var out []Entry
+	seen := map[string]bool{}
 	candidates := []Scope{}
 	if cfg.BotID != "" {
 		botScope := BotScope(cfg.BotID)
@@ -1298,11 +1375,17 @@ func probeOtherScopesForSubstring(ctx context.Context, repo Repository, cfg Tool
 		candidates = append(candidates, globalScope)
 	}
 	for _, s := range candidates {
-		entries, err := repo.Retrieve(ctx, Query{Scopes: []Scope{s}, Limit: 1000})
+		entries, err := lexicalEntries(ctx, repo, s, substr, 1000)
 		if err != nil {
 			continue
 		}
-		out = append(out, findSubstringMatches(entries, substr)...)
+		for _, e := range findSubstringMatches(entries, substr) {
+			if e.ID == "" || seen[e.ID] {
+				continue
+			}
+			seen[e.ID] = true
+			out = append(out, e)
+		}
 	}
 	return out
 }

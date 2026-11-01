@@ -538,7 +538,7 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 	}
 
 	// 文本：sqlite-vec 可用时按 scope 近邻取回，失败或未启用则子串。
-	if query.Text != "" && r.vec.Enabled() && (len(query.Scopes) > 0 || r.config.BotID != "") {
+	if query.Text != "" && !query.Lexical && r.vec.Enabled() && (len(query.Scopes) > 0 || r.config.BotID != "") {
 		ids := make([]string, 0, limit)
 		vectorScopes := query.Scopes
 		if r.config.BotID != "" {
@@ -559,7 +559,11 @@ func (r *SQLiteRepository) Retrieve(ctx context.Context, query memory.Query) ([]
 		}
 	}
 	if query.Text != "" {
-		tx = tx.Where("content LIKE ?", "%"+query.Text+"%")
+		if query.Lexical {
+			tx = tx.Where("content LIKE ? ESCAPE '\\'", likeContains(query.Text))
+		} else {
+			tx = tx.Where("content LIKE ?", "%"+query.Text+"%")
+		}
 	}
 
 	// 排序 + limit：默认倒序（最新在前），order=asc 时升序（最早在前）。
@@ -1190,6 +1194,13 @@ func modelToEntry(m dao.EntryModel) memory.Entry {
 		CreatedAt:      m.CreatedAt,
 		LastAccessedAt: m.LastAccessedAt,
 	}
+}
+
+// likeContains matches text as a literal substring. % and _ in the caller's
+// old_text must not become LIKE wildcards.
+func likeContains(text string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(text)
+	return "%" + escaped + "%"
 }
 
 func modelsToEntries(models []dao.EntryModel) []memory.Entry {
