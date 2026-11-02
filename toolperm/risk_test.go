@@ -194,6 +194,30 @@ func TestEvaluate_BroadcastDeniedInWhitelistMode(t *testing.T) {
 	}
 }
 
+// TestEvaluate_SecretInputVisibleInWhitelistMode 保护本次修复：
+// 平台一旦配过任何规则就进入白名单模式，未收录工具按敏感工具默认禁止。
+// secret_input 若被当成敏感工具，模型就看得见 mcp_server（其说明要求「配凭据前先用
+// secret_input 存密钥」）却看不见这把钥匙，只能回答「没有这个工具」。
+func TestEvaluate_SecretInputVisibleInWhitelistMode(t *testing.T) {
+	svc := newTestService(t)
+	if _, err := svc.CreateRule("bot-wl", RuleReq{
+		Tool: "mcp_server", Platform: "wecom", UserIDs: []string{"*"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 白名单模式下基础工具仍然可见
+	for _, tool := range []string{"secret_input", "user_choice", "memory"} {
+		if !svc.Evaluate("bot-wl", tool, "wecom", "u1") {
+			t.Errorf("%q must stay visible in whitelist mode", tool)
+		}
+	}
+	// 敏感工具仍被白名单默认挡住 —— 证明该平台确实处于白名单模式
+	if svc.Evaluate("bot-wl", "web_fetch", "wecom", "u1") {
+		t.Error("web_fetch should be denied by whitelist default")
+	}
+}
+
 // TestEvaluator_SystemSessionDoesNotBypassBroadcast 是本次的关键安全约束：
 // 系统会话（cron / 心跳 / 梦境巩固）豁免普通工具，但**不豁免对外发言工具**——
 // 否则定时任务能在无人监督的独立 session 里偷偷发帖，绕过整个权限配置。
@@ -319,6 +343,7 @@ func TestIsBasicTool_Classification(t *testing.T) {
 		"text_diff", "text_encode", "text_hash", "text_stats",
 		"memory", "memory_snapshot", "memory_tools",
 		"task_detail", "sandbox_health",
+		"user_choice", "secret_input",
 	}
 	for _, name := range basic {
 		if !IsBasicTool(name) {
