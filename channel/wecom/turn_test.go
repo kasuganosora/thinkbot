@@ -544,3 +544,77 @@ func TestDeliver_NilContextMustNotPanic(t *testing.T) {
 
 	waitDelivered(t, &mu, &got, 1)
 }
+
+// TestMaybeSendTurnProgress_Throttle 验证长任务进度回报的节流与封顶：
+// 首次立刻发、之后每 progressEvery 一次、最多 maxProgressNotices 条。
+//
+// 没有真实 WS 连接时 Send 必然失败（no active connection），但节流状态
+// 在**发送之前**就已经记账，所以这里断言的是记账而不是发送结果 ——
+// 真正要防的是「长任务把进度提示刷成刷屏」。
+func TestMaybeSendTurnProgress_Throttle(t *testing.T) {
+	c := newTestChannel(t, 0)
+	key := PrefixDM + "U1"
+	now := time.Now()
+
+	c.maybeSendTurnProgress(context.Background(), key, 3*time.Minute, now)
+	if got := c.progress[key].sent; got != 1 {
+		t.Fatalf("first notice must be sent immediately, sent=%d", got)
+	}
+
+	// 间隔没到：不发（正是「每分钟清理一次也不该每分钟刷一条」的保障）
+	c.maybeSendTurnProgress(context.Background(), key, 3*time.Minute, now.Add(time.Minute))
+	if got := c.progress[key].sent; got != 1 {
+		t.Fatalf("must stay throttled before progressEvery, sent=%d", got)
+	}
+
+	// 间隔到了：再发一条
+	c.maybeSendTurnProgress(context.Background(), key, 5*time.Minute, now.Add(2*time.Minute))
+	if got := c.progress[key].sent; got != 2 {
+		t.Fatalf("second notice expected after progressEvery, sent=%d", got)
+	}
+
+	// 一直推进时间，最终必须停在封顶值，不能无限发
+	for i := 3; i <= maxProgressNotices+3; i++ {
+		c.maybeSendTurnProgress(context.Background(), key, time.Duration(i)*time.Minute,
+			now.Add(time.Duration(i)*progressEvery))
+	}
+	if got := c.progress[key].sent; got != maxProgressNotices {
+		t.Fatalf("must cap at %d notices, sent=%d", maxProgressNotices, got)
+	}
+}
+
+// TestReportLongTurnProgress_ClearsFinishedTurn 验证轮次结束后状态被清掉：
+// 否则下一次长任务会沿用旧的节流计数（第一次就被判成「已封顶」，一条都不发）。
+func TestReportLongTurnProgress_ClearsFinishedTurn(t *testing.T) {
+	c := newTestChannel(t, 0)
+	key := PrefixDM + "U2"
+	c.active = map[string]*activeTurn{
+		key: {traceID: "T9", started: time.Now().Add(-10 * time.Minute)},
+	}
+	c.progress = map[string]*turnProgress{key: {sent: maxProgressNotices}}
+
+	// 没有注入 turnCtl → turnRunning 为 false（轮次已结束）
+	c.reportLongTurnProgress(context.Background())
+
+	if _, ok := c.progress[key]; ok {
+		t.Fatal("progress state of a finished turn must be dropped")
+	}
+}
+
+// TestFormatElapsed 验证给用户看的时长文案（分/秒两档）。
+func TestFormatElapsed(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{45 * time.Second, "45 秒"},
+		{2*time.Minute + 5*time.Second, "2 分 05 秒"},
+		{0, "0 秒"},
+		{-time.Second, "0 秒"},
+	}
+	for _, cs := range cases {
+		if got := formatElapsed(cs.in); got != cs.want {
+			t.Errorf("formatElapsed(%v) = %q, want %q", cs.in, got, cs.want)
+		}
+	}
+}

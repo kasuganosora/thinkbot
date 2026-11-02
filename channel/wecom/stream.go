@@ -802,6 +802,9 @@ func (c *WeComChannel) reapStreams(ctx context.Context) {
 				"channel", c.name, "chat", e.key, "stream_id", e.st.streamID,
 				"age", now.Sub(e.st.started).String(),
 				"hint", "long task exceeded stream lifetime; final reply will arrive as a separate message")
+			// 流一断，用户侧就再没有内容了（编排层还在跑）。立刻补一条进度提示，
+			// 否则要空等到下一个清理周期才知道「它没死」。
+			c.maybeSendTurnProgress(ctx, e.key, now.Sub(e.st.started), now)
 		} else {
 			traceid.L(ctx).Warnw("wecom: stream reaped after max age (no reply came)",
 				"channel", c.name, "chat", e.key, "stream_id", e.st.streamID,

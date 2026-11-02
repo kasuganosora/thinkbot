@@ -136,6 +136,11 @@ type WeComChannel struct {
 	// watchAppendMaxWaitOverride 仅供单测缩短 watchAppend 的等待上限
 	// （见 appendWatchMaxWait）；零值表示用默认值。
 	watchAppendMaxWaitOverride time.Duration
+
+	// progress 长任务进度回报的节流状态，按会话索引（见 turn.go 的
+	// reportLongTurnProgress）。与 streams / active 同构，独立一把锁。
+	progMu   sync.Mutex
+	progress map[string]*turnProgress
 }
 
 // pendingCaption 一条等待合并的裸文本消息。
@@ -173,6 +178,9 @@ func NewChannel(name, botID string, cfg Config) *WeComChannel {
 		inbox:   make(chan *callbackBody, wecomInboxSize),
 		streams: make(map[string]*wecomStream),
 		active:  make(map[string]*activeTurn),
+		// 进度回报默认开启；测试或不想打扰用户的部署可通过 cfg 关掉
+		// （见 turn.go 的 progressEnabled）。
+		progress: make(map[string]*turnProgress),
 	}
 }
 
@@ -462,6 +470,8 @@ func (c *WeComChannel) cleanupLoop(ctx context.Context) {
 			// 才配得上 10 分钟一次；收尾不是。
 			c.reapStreams(ctx) // 超时未完成的流（pipeline 静默时没人会来 finish）
 			c.reapTurns(ctx)   // 僵死轮次（pipeline 决定不回复时没人来摘）
+			// 长轮次进度回报：流到点断掉后用户侧一片安静，这里补发「还在跑」。
+			c.reportLongTurnProgress(ctx)
 		}
 	}
 }

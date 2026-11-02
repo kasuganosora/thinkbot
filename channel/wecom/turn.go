@@ -15,6 +15,7 @@ package wecom
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -349,6 +350,139 @@ func (c *WeComChannel) watchAppend(ctx context.Context, msg core.Message, traceI
 			"channel", c.name, "trace_id", msg.TraceID, "err", err)
 		c.clearTurn(msg.Channel, msg.TraceID)
 	}
+}
+
+// ============================================================================
+// 长任务进度回报
+// ============================================================================
+//
+// 企微单条流最长存活 5 分钟（defaultStreamMaxAge），到期即收尾；而编排层完全可能
+// 还要再跑十几分钟 —— 轮次没结束就没有 Send 来，用户侧从此一片安静，
+// 观感上就是「bot 卡住了」（2026-11-02 实测：16:32 开跑的轮次 16:38 流到期，
+// 之后用户看不到任何东西，实际编排层一直在调工具）。
+//
+// 因此给超过阈值的长轮次按固定间隔补发一条「还在跑」的提示，直到该轮真正结束。
+// 走普通出站（Send → markdown 一条独立消息），不去续流：流是「同一条回复的增量」，
+// 进度提示是另一条消息，语义上就该分开。
+const (
+	// progressAfter 轮次跑过这么久才开始回报进度。短轮次不该被打扰。
+	progressAfter = 2 * time.Minute
+	// progressEvery 之后每隔这么久再报一次。
+	progressEvery = 2 * time.Minute
+	// maxProgressNotices 单个轮次最多回报几次。长任务不该变成刷屏，
+	// 超过之后只靠最终回复兜底。
+	maxProgressNotices = 5
+)
+
+// turnProgress 单个会话的进度回报节流状态。
+type turnProgress struct {
+	lastSent time.Time
+	sent     int
+}
+
+// reportLongTurnProgress 由 cleanupLoop 每分钟调用：给仍在跑的长轮次补发进度，
+// 并顺手清掉已结束轮次的状态。
+//
+// ⚠️ 是否还在跑一律以 turnRunning（编排侧 IsMessageActive）为准：轮次结束没有
+// 统一回调点，只凭活跃表会往一个已经答完的会话里继续刷「还在跑」。
+func (c *WeComChannel) reportLongTurnProgress(ctx context.Context) {
+	now := time.Now()
+
+	// 先快照候选，出锁后再判活：turnRunning 自己要拿 turnMu（Mutex 不可重入）。
+	type candidate struct {
+		key     string
+		started time.Time
+	}
+	c.turnMu.Lock()
+	cands := make([]candidate, 0, len(c.active))
+	for k, t := range c.active {
+		if t == nil {
+			continue
+		}
+		cands = append(cands, candidate{key: k, started: t.started})
+	}
+	c.turnMu.Unlock()
+
+	for _, cd := range cands {
+		elapsed := now.Sub(cd.started)
+		if elapsed < progressAfter {
+			continue
+		}
+		if !c.turnRunning(cd.key) {
+			c.clearTurnProgress(cd.key)
+			continue
+		}
+		c.maybeSendTurnProgress(ctx, cd.key, elapsed, now)
+	}
+}
+
+// maybeSendTurnProgress 按「首次立即、之后每 progressEvery 一次、封顶
+// maxProgressNotices 条」的规则发进度提示。immediate=true 用于流刚断的那一刻，
+// 免得用户最多空等一个清理周期。
+func (c *WeComChannel) maybeSendTurnProgress(ctx context.Context, key string, elapsed time.Duration, now time.Time) {
+	c.progMu.Lock()
+	if c.progress == nil {
+		// 防御：与 pend/dedup 同理，直接造结构体的调用方（含单测脚手架）
+		// 不会走 NewChannel，nil map 赋值会 panic。
+		c.progress = make(map[string]*turnProgress)
+	}
+	st := c.progress[key]
+	if st == nil {
+		st = &turnProgress{}
+		c.progress[key] = st
+	}
+	if st.sent >= maxProgressNotices {
+		c.progMu.Unlock()
+		return
+	}
+	if !st.lastSent.IsZero() && now.Sub(st.lastSent) < progressEvery {
+		c.progMu.Unlock()
+		return
+	}
+	st.lastSent = now
+	st.sent++
+	seq := st.sent
+	c.progMu.Unlock()
+
+	c.sendTurnProgress(ctx, key, elapsed, seq)
+}
+
+// clearTurnProgress 丢弃某会话的进度回报状态（轮次结束或重启时）。
+func (c *WeComChannel) clearTurnProgress(key string) {
+	c.progMu.Lock()
+	delete(c.progress, key)
+	c.progMu.Unlock()
+}
+
+// sendTurnProgress 发一条「还在跑」提示。
+//
+// 走 Send 而不是直接 sendMarkdown：Send 内部带了 30 条/分钟的 per-chat 限流，
+// 与正常回复共用同一条配额，不会因为我们补进度把用户的回复挤掉。
+// 失败只记日志 —— 进度提示是装饰，绝不能影响真正的结果投递。
+func (c *WeComChannel) sendTurnProgress(ctx context.Context, key string, elapsed time.Duration, seq int) {
+	text := fmt.Sprintf("⏳ 还在处理中，已运行 %s。完成后会把结果发给你，期间不用重复发消息。",
+		formatElapsed(elapsed))
+	if err := c.Send(ctx, core.Action{Channel: key, Payload: text}); err != nil {
+		traceid.L(ctx).Warnw("wecom: long-turn progress notice failed",
+			"channel", c.name, "chat", key, "elapsed", elapsed.String(), "seq", seq, "err", err)
+		return
+	}
+	traceid.L(ctx).Infow("wecom: long-turn progress notice sent",
+		"channel", c.name, "chat", key, "elapsed", elapsed.String(), "seq", seq)
+}
+
+// formatElapsed 把时长格式化成中文短串（「2 分 05 秒」），给用户看而不是给日志看。
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	if m == 0 {
+		return fmt.Sprintf("%d 秒", s)
+	}
+	return fmt.Sprintf("%d 分 %02d 秒", m, s)
 }
 
 // reapTurns 收尾长时间未摘除的轮次（cleanupLoop 调用）。
