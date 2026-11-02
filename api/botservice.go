@@ -34,6 +34,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/outreach"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/prompt"
+	"github.com/kasuganosora/thinkbot/agent/route"
 	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/agent/storage"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
@@ -2114,6 +2115,8 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		stages.LLMConfig{
 			SystemPrompt:     "", // 由 PromptStage（Order=97）组装后经 Envelope KV "system.prompt" 注入
 			Model:            mainModel,
+			LightProvider:    bundle.Light,
+			LightModel:       lightModelFor(bundle),
 			Temperature:      temp,
 			TopP:             bundle.MainDef.TopP,
 			FrequencyPenalty: &freqPen,
@@ -3322,12 +3325,33 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	botCfg.SystemPrompt = agentCfg.EffectiveSystemPrompt(botCfg)
+	l1Provider := bundle.Main
+	l1Model := mainModel
+	if bundle.Light != nil {
+		l1Provider = bundle.Light
+		if bundle.LightDef.Model != "" {
+			l1Model = llm.ChatModel(bundle.LightDef.Model)
+		}
+	}
+	l1Router, err := route.New(route.Config{
+		Provider: l1Provider,
+		Model:    l1Model,
+		Logger:   s.logger,
+		TP:       s.tp,
+		MP:       s.mp,
+		Cancel:   s.AbortMessage,
+	})
+	if err != nil {
+		rollback()
+		return errs.Wrap(err, "bot_service: create l1 router")
+	}
 	b, err := bot.New(bot.BotParams{
 		ID:              id,
 		Name:            def.Name,
 		Config:          botCfg,
 		AgentConfig:     agentCfg,
 		Pipeline:        p,
+		Router:          l1Router,
 		Dispatcher:      dispatcher,
 		Channels:        allChannels,
 		EventBus:        s.eventBus,
@@ -4855,4 +4879,12 @@ func (s *BotService) startDailyDigest(ctx context.Context, botID string, repo *s
 		}()
 		d.Run(ctx, 15*time.Minute)
 	}()
+}
+
+// lightModelFor is the model id of the bot's light provider, when one is configured.
+func lightModelFor(bundle *bot.LLMBundle) *llm.Model {
+	if bundle == nil || bundle.Light == nil || bundle.LightDef.Model == "" {
+		return nil
+	}
+	return llm.ChatModel(bundle.LightDef.Model)
 }

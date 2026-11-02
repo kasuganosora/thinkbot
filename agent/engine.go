@@ -17,6 +17,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/inbound"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
+	"github.com/kasuganosora/thinkbot/agent/route"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -104,6 +105,7 @@ func (NoopEngineHook) OnMessageDone(context.Context, *core.Envelope, []core.Acti
 type Engine struct {
 	ingress    *inbound.Ingress
 	pipeline   *pipeline.Pipeline
+	router     *route.Router
 	dispatcher outbound.Dispatcher
 	config     EngineConfig
 	hook       EngineHook
@@ -128,6 +130,13 @@ type EngineOption func(*Engine)
 func WithHook(hook EngineHook) EngineOption {
 	return func(e *Engine) {
 		e.hook = hook
+	}
+}
+
+// WithRouter 挂上 L1 路由 pipeline。nil 时消息直接进入执行 pipeline。
+func WithRouter(r *route.Router) EngineOption {
+	return func(e *Engine) {
+		e.router = r
 	}
 }
 
@@ -332,8 +341,32 @@ func (e *Engine) processEnvelopeWithResult(ctx context.Context, workerID int, en
 
 	start := time.Now()
 
+	// L1 路由：只决定抢答、新开或取消。抢答与取消不再进入执行 pipeline，
+	// 避免和正在跑的那条回复流双写。
+	if e.router != nil && e.router.ShouldRoute(env) {
+		decision := e.router.Route(ctx, env)
+		if !decision.Continue() {
+			logger.Infow("l1 routed message away from a new execution",
+				"action", string(decision.Action),
+				"target", decision.Target,
+				"message_id", env.Message.ID)
+			e.hook.OnMessageDropped(ctx, env)
+			return nil, nil, nil
+		}
+	}
+
 	// Hook: 处理前（注入 context 增强、KV 值等）
 	ctx = e.hook.OnBeforeProcess(ctx, env)
+
+	var finishRun func()
+	if e.router != nil {
+		finishRun = e.router.BeginL2(ctx, env)
+	}
+	defer func() {
+		if finishRun != nil {
+			finishRun()
+		}
+	}()
 
 	// Pipeline 执行
 	messageID := env.Message.ID
@@ -361,7 +394,14 @@ func (e *Engine) processEnvelopeWithResult(ctx context.Context, workerID int, en
 		return nil, nil, nil
 	}
 
-	// 收集 Action 并派发
+	// 收集 Action 并派发。被抢答接管的 trace 不是回复流的主人，不能再写出站。
+	if e.router != nil && !e.router.OwnsReply(env.Message.TraceID) {
+		logger.Infow("l1 dropped outbound from a preempted trace",
+			"message_id", messageID,
+			"trace_id", env.Message.TraceID)
+		e.hook.OnMessageDropped(ctx, env)
+		return result, nil, nil
+	}
 	actions := result.Actions()
 	if len(actions) == 0 {
 		span.SetAttributes(attribute.Bool("message.no_actions", true))

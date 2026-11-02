@@ -20,6 +20,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/prompt"
+	"github.com/kasuganosora/thinkbot/agent/route"
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/cron"
 	"github.com/kasuganosora/thinkbot/mcp"
@@ -119,11 +120,13 @@ type Bot struct {
 
 // BotParams 是 Bot 构造参数。
 type BotParams struct {
-	ID               string
-	Name             string
-	Config           BotConfig
-	AgentConfig      AgentConfig // Per-bot agent 行为配置（compaction、工具过滤等）
-	Pipeline         *pipeline.Pipeline
+	ID          string
+	Name        string
+	Config      BotConfig
+	AgentConfig AgentConfig // Per-bot agent 行为配置（compaction、工具过滤等）
+	Pipeline    *pipeline.Pipeline
+	// Router 是 L1 路由 pipeline。nil 时用户消息直接进入执行 pipeline。
+	Router           *route.Router
 	Dispatcher       outbound.Dispatcher
 	Channels         []Channel
 	MemoryStore      memory.Store              // 可选：记忆写入后端（供 NoteHandler 使用）。nil 时使用内存仓储。
@@ -452,6 +455,7 @@ func New(params BotParams) (*Bot, error) {
 		botLogger,
 		params.TP,
 		agent.WithHook(bot),
+		agent.WithRouter(params.Router),
 	)
 
 	// 注入梦境巩固调度器
@@ -811,7 +815,15 @@ func (b *Bot) OnPipelineError(ctx context.Context, env *core.Envelope, err error
 
 // OnMessageDropped 在消息被 Pipeline 丢弃时发射旁路事件。
 func (b *Bot) OnMessageDropped(ctx context.Context, env *core.Envelope) {
-	b.emitter.EmitMessageDropped(ctx, env.Message.TraceID, "pipeline")
+	reason := "pipeline"
+	if env != nil {
+		if v, ok := env.Get(route.KVDropReason); ok {
+			if s, ok := v.(string); ok && s != "" {
+				reason = s
+			}
+		}
+	}
+	b.emitter.EmitMessageDropped(ctx, env.Message.TraceID, reason)
 	b.finishMessageLifecycle(ctx, env.Message.TraceID)
 }
 
