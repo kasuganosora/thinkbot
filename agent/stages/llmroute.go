@@ -17,6 +17,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/agent/route"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/secret"
@@ -91,6 +92,18 @@ func messageReplyTarget(msg *core.Message) string {
 }
 
 // resolveTools 解析工具列表：优先用 ToolResolver 动态解析，回退到静态 Tools。
+// lightMaxTokens keeps a light-tier turn on a small output budget.
+func lightMaxTokens(light bool, configured *int) *int {
+	if !light {
+		return configured
+	}
+	capTokens := route.LightMaxTokens
+	if configured != nil && *configured > 0 && *configured < capTokens {
+		capTokens = *configured
+	}
+	return &capTokens
+}
+
 func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.Tool {
 	if cfg.ToolResolver != nil {
 		tools, err := cfg.ToolResolver.ResolveForEnvelope(ctx, env)
@@ -762,6 +775,11 @@ type LLMConfig struct {
 	ToolResolver ToolResolver
 	// Model 指定使用的模型。
 	Model *llm.Model
+	// LightProvider / LightModel 是闲聊与进度查询的执行档。
+	// L1 只下传 intent=chat / model=light；这里才换成轻量模型和更窄的工具面。
+	// LightProvider 为空时仍用主力模型，但工具面会收窄。
+	LightProvider llm.Provider
+	LightModel    *llm.Model
 	// Temperature 采样温度。跟随模型（ModelDef.Temperature），不归 bot/全局管。
 	Temperature *float64
 	// TopP 核采样参数（nucleus sampling）。跟随模型（ModelDef.TopP），nil 时由 Provider 用默认。
@@ -1167,6 +1185,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 导向「从这条帖子里学到什么」，而非「如何回复」。仍可正常调用 LLM。
 	lurkMode := isLurkMode(env)
 	heartbeatMode := isHeartbeatMode(env)
+	lightTier := route.WantsLight(env) && !lurkMode && !heartbeatMode
 	if lurkMode {
 		// INFO 级：让「潜水模式激活」在默认日志下清晰可观测，而非只能靠下游 skip/captured 间接推断。
 		logger.Infow("lurk: observing read-only channel",
@@ -1196,6 +1215,12 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if replyControlActive {
 		systemPrompt = systemPrompt + "\n\n" + replyControlInstruction
 	}
+	if note := route.StatusNote(env); note != "" {
+		systemPrompt = systemPrompt + "\n\n" + note
+	}
+	if lightTier {
+		systemPrompt = systemPrompt + "\n\nYou are on the light tier. Answer briefly with the tools you have. If the task needs files, the network, a workflow, or a stronger model, call route_upgrade and do not answer."
+	}
 
 	// 解析工具列表
 	tools := resolveTools(ctx, s.config, env)
@@ -1204,6 +1229,18 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 反应/点赞同样 awareness-only：软 prompt 挡不住 function calling，必须在这里卸工具。
 	if lurkMode || core.IsReactionAck(&env.Message) {
 		tools = nil
+	}
+	execProvider := s.provider
+	execModel := s.config.Model
+	if lightTier {
+		if s.config.LightProvider != nil {
+			execProvider = s.config.LightProvider
+		}
+		if s.config.LightModel != nil {
+			execModel = s.config.LightModel
+		}
+		tools = route.NarrowTools(tools)
+		tools = append(tools, route.NewUpgradeTool(env))
 	}
 	if env.Message.Source != core.SourceHeartbeat && !isHeartbeatMode(env) {
 		// 预算吃紧时先摘记忆块：召回块是成对标签包住的（memory.StripRecallBlocks），
@@ -1223,7 +1260,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 自主上下文压缩工具（compact_context）：按轮构造，闭包捕获本轮会话信息。
 	// 复制切片再追加，避免写入 ToolResolver/静态 Tools 的共享底层数组。
-	if s.shouldOfferSelfCompact(env, tools) {
+	if !lightTier && s.shouldOfferSelfCompact(env, tools) {
 		withCompact := make([]llm.Tool, 0, len(tools)+3)
 		withCompact = append(withCompact, tools...)
 		withCompact = append(withCompact, s.newCompactContextTool(env, messages), s.newContextRemainingTool(env, messages))
@@ -1243,7 +1280,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 构建参数
 	params := llm.GenerateParams{
-		Model:            s.config.Model,
+		Model:            execModel,
 		System:           systemPrompt,
 		Messages:         messages,
 		Tools:            tools,
@@ -1251,7 +1288,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		TopP:             s.config.TopP,
 		FrequencyPenalty: s.config.FrequencyPenalty,
 		PresencePenalty:  s.config.PresencePenalty,
-		MaxTokens:        s.config.MaxTokens,
+		MaxTokens:        lightMaxTokens(lightTier, s.config.MaxTokens),
 		ReasoningEffort:  replyEffort(s.config.ReasoningEffort, s.config.Model),
 	}
 
@@ -1350,7 +1387,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		cfg.OnToolResults = llm.NewOnToolResultsCallback(rc)
 		prepareStep = llm.NewReducePrepareStepCallback(rc)
 	}
-	if s.liveCompaction() != nil {
+	if s.liveCompaction() != nil && !lightTier {
 		if compactor, ok := s.getCompactor(conversationKey(env)); ok {
 			compactHook := llm.CompactionPrepareStepWithProvider(compactor, s.provider)(ctx)
 			base := prepareStep
@@ -1426,7 +1463,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	statsCtx := llm.WithStatsSkip(workCtx)
 	// 潜水模式强制走非流式：潜水产出没有实时观众（不发帖、只落库），
 	// 流式只会让「解析 JSON → 不合规则重试」的控制流复杂化。
-	if s.config.StreamPublisher != nil && !lurkMode && !heartbeatMode {
+	if s.config.StreamPublisher != nil && !lurkMode && !heartbeatMode && !lightTier {
 		var err error
 		result, err = s.processStream(statsCtx, env, cfg, logger)
 		if err != nil {
@@ -1481,7 +1518,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	} else {
 		var err error
-		result, err = llm.OrchestrateGenerate(statsCtx, s.provider, cfg)
+		result, err = llm.OrchestrateGenerate(statsCtx, execProvider, cfg)
 		if err != nil {
 			span.RecordError(err)
 			if errors.Is(err, context.Canceled) {
@@ -1531,6 +1568,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				Cause:   err,
 			}
 		}
+	}
+
+	if lightTier && route.UpgradeRequested(env) && !route.Upgraded(env) {
+		route.MarkUpgraded(env)
+		env.ClearActions()
+		recordUsage(ctx, s.config.UsageRecorder, env, execModel, s.name, result)
+		return s.Process(ctx, env)
 	}
 
 	// ── 重复退化安检（流式 + 非流式共用）───────────────────────────────

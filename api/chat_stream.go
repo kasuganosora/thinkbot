@@ -14,6 +14,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/agent/route"
 	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/dao"
 )
@@ -195,7 +196,11 @@ func (state *chatStreamState) finish(status, message string) {
 		case "error":
 			state.text = "请求处理失败：" + message
 		case "dropped":
-			state.text = "本次请求未生成回复。"
+			if message != "" {
+				state.text = message
+			} else {
+				state.text = "本次请求未生成回复。"
+			}
 		}
 		state.parts = reconcileTextParts(state.parts, state.text)
 	}
@@ -420,7 +425,7 @@ func (turn *chatTurn) run() {
 				finish("completed", "")
 				return
 			case outbound.EventMessageDropped:
-				finish("dropped", "")
+				finish("dropped", dropNotice(event.Data["dropped_by"]))
 				return
 			case outbound.EventMessageError, outbound.EventDispatchError:
 				message, _ := event.Data["error"].(string)
@@ -452,6 +457,19 @@ func snapshotPayload(snapshot *dao.ChatMessage) map[string]any {
 		"text": snapshot.Content, "toolCalls": dto.ToolCalls, "parts": dto.Parts,
 		"streamSeq": snapshot.StreamSeq, "status": status,
 		"message": snapshot.StreamError, "streamError": snapshot.StreamError, "recoverable": false,
+	}
+}
+
+func dropNotice(reason any) string {
+	switch reason {
+	case route.DropReasonPreempt:
+		return "已并入正在进行的回复。"
+	case route.DropReasonCancel:
+		return "已停止正在进行的任务。"
+	case route.DropReasonRefuse:
+		return "进行中的任务已经很多，这条没有单独开新任务。"
+	default:
+		return ""
 	}
 }
 
