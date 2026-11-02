@@ -220,6 +220,9 @@ var userToolDesc = map[string]string{
 	"tb_write_source":   "写入容器内源码文件",
 	"tb_rollback":       "回退到上一良版本并重启",
 	"tb_restart":        "仅重启 thinkbot 子进程",
+
+	// 密钥：只登记请求并把占位符回给模型，明文进保险库、模型永远看不到值
+	"secret_input": "向用户索取密钥（返回占位符）",
 }
 
 // toolCategoryLabel 把工具注册时使用的英文 category 映射为中文分组名，
