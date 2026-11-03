@@ -38,7 +38,10 @@ func newRecordingStreamAPI() *recordingStreamAPI {
 	return r
 }
 
-func (r *recordingStreamAPI) send(_ context.Context, chatID int64, text string, replyTo int64) (int64, error) {
+func (r *recordingStreamAPI) send(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	id := r.nextID.Add(1)
 	r.mu.Lock()
 	r.sends = append(r.sends, streamSendRec{ChatID: chatID, Text: text, ReplyTo: replyTo, MsgID: id})
@@ -46,14 +49,20 @@ func (r *recordingStreamAPI) send(_ context.Context, chatID int64, text string, 
 	return id, nil
 }
 
-func (r *recordingStreamAPI) edit(_ context.Context, chatID, messageID int64, text string) error {
+func (r *recordingStreamAPI) edit(ctx context.Context, chatID, messageID int64, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	r.edits = append(r.edits, streamEditRec{ChatID: chatID, MessageID: messageID, Text: text})
 	r.mu.Unlock()
 	return nil
 }
 
-func (r *recordingStreamAPI) del(_ context.Context, chatID, messageID int64) error {
+func (r *recordingStreamAPI) del(ctx context.Context, chatID, messageID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	r.deletes = append(r.deletes, streamEditRec{ChatID: chatID, MessageID: messageID})
 	r.mu.Unlock()
@@ -433,7 +442,6 @@ func TestTruncateRunes(t *testing.T) {
 	}
 }
 
-
 // TestStream_TurnInactiveReleasesTypingAndPlaceholder: pipeline cancel / silent
 // / drop ends IsMessageActive without Send — must stop typing and replace
 // 「正在思考…」 (not wait for max age).
@@ -467,6 +475,92 @@ func TestStream_TurnInactiveReleasesTypingAndPlaceholder(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if got := rec.count(); got != n {
 		t.Fatalf("typing continued after inactive release: before=%d after=%d", n, got)
+	}
+}
+
+// TestStream_InFlightPlaceholderDeletedWhenStreamCloses: the placeholder RPC
+// can outlive the stream (watchdog / finish won the race). The bubble that
+// lands afterwards must be deleted, not left as an unowned 「正在思考…」.
+func TestStream_InFlightPlaceholderDeletedWhenStreamCloses(t *testing.T) {
+	withFastStream(t, 10*time.Millisecond, time.Second, time.Minute)
+	streamStartGrace = time.Minute // this case is the in-flight send, not the watchdog
+	api := newRecordingStreamAPI()
+	ch := newStreamTestChannel(api)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	ch.streamSend = func(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
+		once.Do(func() { close(entered) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+		return api.send(ctx, chatID, text, replyTo)
+	}
+
+	ch.openStream(context.Background(), 42, "private", "Tlate", 0)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("placeholder send did not start")
+	}
+	if ch.finishStream(context.Background(), 42, "real reply") {
+		t.Fatal("finish while the placeholder RPC is in flight must not report delivery")
+	}
+	close(release)
+
+	waitUntil(t, time.Second, func() bool {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		return len(api.deletes) >= 1
+	})
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.sends) != 1 || api.sends[0].Text != streamPlaceholder {
+		t.Fatalf("sends = %+v", api.sends)
+	}
+	if len(api.deletes) != 1 || api.deletes[0].MessageID != api.sends[0].MsgID {
+		t.Fatalf("late placeholder must be deleted, deletes=%+v sends=%+v", api.deletes, api.sends)
+	}
+	if len(api.edits) != 0 {
+		t.Fatalf("in-flight placeholder has no message id to edit yet, edits=%+v", api.edits)
+	}
+}
+
+// TestStream_HandoffKeepsPlaceholderForOwnerReply: a preempted inbound trace
+// goes inactive, but the running pipeline still owns the chat bubble. Do not
+// replace it with an error note; the owner's final Send edits it in place.
+func TestStream_HandoffKeepsPlaceholderForOwnerReply(t *testing.T) {
+	withFastStream(t, 10*time.Millisecond, time.Second, time.Minute)
+	api := newRecordingStreamAPI()
+	ch := newStreamTestChannel(api)
+	live := &fakeTypingLiveness{}
+	live.active.Store(true)
+	ch.SetMessageLiveness(live)
+
+	ch.openStream(context.Background(), 31, "private", "Tnew", 0)
+	waitUntil(t, time.Second, func() bool { return api.sendCount() >= 1 })
+
+	ch.KeepReplyStream("Tnew")
+	live.active.Store(false)
+
+	time.Sleep(80 * time.Millisecond) // past the shortened liveness grace
+	if !ch.streamActive(31) {
+		t.Fatal("handed-off stream must stay registered for the owner Send")
+	}
+	if got := api.lastEditText(); got != "" {
+		t.Fatalf("handoff must not edit the placeholder yet, got %q", got)
+	}
+	if !ch.finishStream(context.Background(), 31, "owner reply") {
+		t.Fatal("owner Send must edit the kept placeholder")
+	}
+	if got := api.lastEditText(); got != "owner reply" {
+		t.Fatalf("owner edit = %q, want %q", got, "owner reply")
+	}
+	if api.sendCount() != 1 {
+		t.Fatalf("owner reply must not be a second bubble, sends=%d", api.sendCount())
 	}
 }
 
