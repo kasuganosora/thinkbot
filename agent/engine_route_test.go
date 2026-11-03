@@ -75,6 +75,65 @@ func newRouteEngine(t *testing.T, prov llm.Provider, stage core.Stage) (*Engine,
 	return eng, eng.dispatcher.(*collectDispatcher), r
 }
 
+// startHook records when the engine registers the turn (OnBeforeProcess).
+// Channel placeholders treat "not registered" as "turn already over" after a
+// short grace, so routing must not run before this hook.
+type startHook struct {
+	NoopEngineHook
+	mu      sync.Mutex
+	calls   int
+	started bool
+}
+
+func (h *startHook) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.Context {
+	h.mu.Lock()
+	h.calls++
+	h.started = true
+	h.mu.Unlock()
+	return h.NoopEngineHook.OnBeforeProcess(ctx, env)
+}
+
+func (h *startHook) active() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.started
+}
+
+func TestEngine_L1RegistersTurnBeforeRouting(t *testing.T) {
+	hook := &startHook{}
+	prov := &routeScript{reply: func(int) (*llm.GenerateResult, error) {
+		if !hook.active() {
+			t.Errorf("L1 model ran before the turn was registered")
+		}
+		return &llm.GenerateResult{
+			FinishReason: llm.FinishReasonToolCalls,
+			ToolCalls: []llm.ToolCall{{
+				ToolCallID: "c1", ToolName: route.ToolOpen,
+				Input: map[string]any{"intent": "task", "model": "default"},
+			}},
+		}, nil
+	}}
+	stage := &countStage{}
+	eng, disp, _ := newRouteEngine(t, prov, stage)
+	eng.hook = hook
+	env := core.NewEnvelope(core.Message{
+		ID: "m-reg", BotID: "bot", Source: "telegram", Channel: "42",
+		Text: "ping", TraceID: "t-reg",
+	})
+	if _, _, err := eng.ProcessSync(context.Background(), env); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if !hook.active() || hook.calls != 1 {
+		t.Fatalf("OnBeforeProcess calls = %d started=%v", hook.calls, hook.active())
+	}
+	if stage.n != 1 {
+		t.Fatalf("execution runs = %d, want 1", stage.n)
+	}
+	if len(disp.collected()) != 1 {
+		t.Fatalf("dispatched = %d", len(disp.collected()))
+	}
+}
+
 func TestEngine_L1OpenRunsExecutionOnce(t *testing.T) {
 	prov := &routeScript{reply: func(int) (*llm.GenerateResult, error) {
 		return &llm.GenerateResult{
