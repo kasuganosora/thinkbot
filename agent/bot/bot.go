@@ -823,8 +823,30 @@ func (b *Bot) OnMessageDropped(ctx context.Context, env *core.Envelope) {
 			}
 		}
 	}
+	// Preempt does not send on this trace. Tell channels before the trace is
+	// cleared, or their placeholder watchdog will delete the bubble the owning
+	// pipeline is about to edit.
+	if reason == route.DropReasonPreempt && env != nil {
+		b.keepReplyStreams(env.Message.TraceID)
+	}
 	b.emitter.EmitMessageDropped(ctx, env.Message.TraceID, reason)
 	b.finishMessageLifecycle(ctx, env.Message.TraceID)
+}
+
+// keepReplyStreams notifies channels that traceID's placeholder now belongs to
+// another pipeline. Channels that do not keep a reply stream ignore it.
+func (b *Bot) keepReplyStreams(traceID string) {
+	if traceID == "" {
+		return
+	}
+	type keeper interface {
+		KeepReplyStream(traceID string)
+	}
+	for _, ch := range b.channels {
+		if k, ok := ch.(keeper); ok {
+			k.KeepReplyStream(traceID)
+		}
+	}
 }
 
 // OnBeforeDispatch 在 Dispatcher 派发前发射旁路事件。

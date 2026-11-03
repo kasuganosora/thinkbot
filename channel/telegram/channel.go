@@ -158,6 +158,9 @@ type TelegramChannel struct {
 	streamGen uint64
 	deltaSrc  DeltaSourceFunc
 	liveness  MessageLiveness
+	// keptReply traces whose placeholder must outlive the inbound trace
+	// (preempt: another pipeline still owns the reply). Guarded by streamMu.
+	keptReply map[string]struct{}
 	// Test hooks (nil = real API).
 	streamSend   func(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error)
 	streamEdit   func(ctx context.Context, chatID, messageID int64, text string) error

@@ -112,6 +112,40 @@ func (c *TelegramChannel) SetDeltaSource(fn DeltaSourceFunc) { c.deltaSrc = fn }
 // SetMessageLiveness injects orchestrator liveness (api layer, before Start).
 func (c *TelegramChannel) SetMessageLiveness(l MessageLiveness) { c.liveness = l }
 
+// KeepReplyStream marks an inbound trace whose bubble must survive that trace
+// going inactive. A preempted message does not send; the pipeline that kept
+// the reply edits this same placeholder on its next Send.
+func (c *TelegramChannel) KeepReplyStream(traceID string) {
+	if c == nil || traceID == "" {
+		return
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if c.keptReply == nil {
+		c.keptReply = make(map[string]struct{})
+	}
+	c.keptReply[traceID] = struct{}{}
+}
+
+func (c *TelegramChannel) replyKept(traceID string) bool {
+	if c == nil || traceID == "" {
+		return false
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	_, ok := c.keptReply[traceID]
+	return ok
+}
+
+func (c *TelegramChannel) forgetKept(traceID string) {
+	if c == nil || traceID == "" {
+		return
+	}
+	c.streamMu.Lock()
+	delete(c.keptReply, traceID)
+	c.streamMu.Unlock()
+}
+
 // streamEnabled reports whether private edit streaming is on.
 func (c *TelegramChannel) streamEnabled() bool { return c.cfg.StreamReply }
 
@@ -226,12 +260,35 @@ func (c *TelegramChannel) pushPlaceholder(chatID int64, st *tgStream) {
 		c.dropStream(chatID, st)
 		return
 	}
+
+	// The send is the slow part. Finish / supersede / the liveness watchdog can
+	// close the stream while it is in flight. Recording the id anyway leaves an
+	// unowned 「正在思考…」 because nobody still has this message to edit.
+	c.streamMu.Lock()
+	cur, ok = c.streams[chatID]
+	still := ok && cur == st
+	c.streamMu.Unlock()
 	st.mu.Lock()
-	st.messageID = msgID
-	st.pushed = true
-	st.content = streamPlaceholder
+	closed := st.closed
+	if still && !closed {
+		st.messageID = msgID
+		st.pushed = true
+		st.content = streamPlaceholder
+		st.mu.Unlock()
+		traceid.L(ctx).Debugw("telegram: stream placeholder sent",
+			"channel", c.name, "chat_id", chatID, "message_id", msgID)
+		return
+	}
 	st.mu.Unlock()
-	traceid.L(ctx).Debugw("telegram: stream placeholder sent",
+
+	delCtx, delCancel := context.WithTimeout(context.WithoutCancel(ctx), streamEditTimeout)
+	defer delCancel()
+	if err := c.doStreamDelete(delCtx, chatID, msgID); err != nil {
+		traceid.L(ctx).Warnw("telegram: late placeholder delete failed",
+			"channel", c.name, "chat_id", chatID, "message_id", msgID, "err", err)
+		return
+	}
+	traceid.L(ctx).Debugw("telegram: dropped placeholder that landed after the stream closed",
 		"channel", c.name, "chat_id", chatID, "message_id", msgID)
 }
 
@@ -269,12 +326,18 @@ func (c *TelegramChannel) closeStream(ctx context.Context, st *tgStream, text st
 	}
 	st.mu.Unlock()
 
+	// feedStream calls this with its own context, and that context is cancelled
+	// by st.cancel. Derive the edit context first. Cancelling and then editing
+	// on the same ctx makes both the edit and the fallback delete fail, so the
+	// placeholder stays on screen after the stream has already been dropped.
+	editBase := context.WithoutCancel(ctx)
 	if st.cancel != nil {
 		st.cancel()
 	}
 	if st.timer != nil {
 		st.timer.Stop()
 	}
+	c.forgetKept(st.traceID)
 
 	if text == "" {
 		text = streamErrorNote
@@ -287,7 +350,7 @@ func (c *TelegramChannel) closeStream(ctx context.Context, st *tgStream, text st
 
 	chunks := splitMessage(text, telegramMaxMessageLength)
 	first := chunks[0]
-	editCtx, cancel := context.WithTimeout(ctx, streamEditTimeout)
+	editCtx, cancel := context.WithTimeout(editBase, streamEditTimeout)
 	defer cancel()
 	if err := c.doStreamEdit(editCtx, chatID, msgID, first); err != nil {
 		traceid.L(ctx).Warnw("telegram: stream finish edit failed, deleting placeholder and falling back",
@@ -327,6 +390,7 @@ func (c *TelegramChannel) dropStream(chatID int64, st *tgStream) {
 	if st.timer != nil {
 		st.timer.Stop()
 	}
+	c.forgetKept(st.traceID)
 }
 
 // abortAllStreams finishes every open stream (Stop / shutdown).
@@ -464,6 +528,12 @@ func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tg
 			}
 			if c.turnAlive(traceID) {
 				sawActive = true
+				continue
+			}
+			if c.replyKept(traceID) {
+				// Preempt handed this bubble to a running pipeline. That
+				// pipeline's Send edits it; tearing it down here would leave
+				// the placeholder up and force a second message.
 				continue
 			}
 			if !sawActive && time.Since(start) < streamStartGrace {

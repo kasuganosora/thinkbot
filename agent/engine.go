@@ -341,6 +341,12 @@ func (e *Engine) processEnvelopeWithResult(ctx context.Context, workerID int, en
 
 	start := time.Now()
 
+	// Register the turn before L1. Private-chat placeholders watch
+	// IsMessageActive and, after a short grace, treat an unregistered trace as
+	// a finished turn. Routing can outlast that grace; the watchdog then drops
+	// the bubble, and the later execution Send has nothing left to edit.
+	ctx = e.hook.OnBeforeProcess(ctx, env)
+
 	// L1 路由：只决定抢答、新开或取消。抢答与取消不再进入执行 pipeline，
 	// 避免和正在跑的那条回复流双写。
 	if e.router != nil && e.router.ShouldRoute(env) {
@@ -354,9 +360,6 @@ func (e *Engine) processEnvelopeWithResult(ctx context.Context, workerID int, en
 			return nil, nil, nil
 		}
 	}
-
-	// Hook: 处理前（注入 context 增强、KV 值等）
-	ctx = e.hook.OnBeforeProcess(ctx, env)
 
 	var finishRun func()
 	if e.router != nil {
