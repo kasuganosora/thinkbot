@@ -269,6 +269,81 @@ func TestBuildReplyMentionPrefix(t *testing.T) {
 	}
 }
 
+// TestBuildReplyMentionPrefixDedupesEquivalentHandles 锁定回复前缀的账号去重。
+//
+// 父帖作者的本地 acct（@luna）、同一人写成 @luna@本站域名、正文里渲染出来的
+// 裸 @reikomari，以及 mentions 里的 @reikomari@远程域名，指的是同一批人。
+// 以前 seen 只按整串比较，四者会原样拼进回复，时间线上就是
+// 「@luna @reikomari @reikomari @luna」。
+func TestBuildReplyMentionPrefixDedupesEquivalentHandles(t *testing.T) {
+	c := &MastodonChannel{
+		botUsername: "bot",
+		botAcct:     "bot",
+		cfg:         Config{Server: "https://home.example"},
+	}
+	parent := &Status{
+		Account: Account{ID: "2", Username: "luna", Acct: "luna"},
+		// 正文里的 h-card 只显示裸用户名，远程账号的域名在 mentions 里。
+		Content: `<p><span class="h-card"><a href="https://remote.example/@reikomari" class="u-url mention">@<span>reikomari</span></a></span> delayed</p>`,
+		Mentions: []Mention{
+			{ID: "1329", Username: "reikomari", Acct: "reikomari@remote.example"},
+			{ID: "4560", Username: "luna", Acct: "luna@home.example"},
+		},
+	}
+
+	got := c.buildReplyMentionPrefix(parent)
+	// 本地用户保留不带域名的 acct，避免 @user@本站 指到镜像账号；
+	// 远程用户保留带域名的 acct，裸 @user 只是正文渲染，不能再算一次。
+	if got != "@luna @reikomari@remote.example " {
+		t.Errorf("= %q, want %q", got, "@luna @reikomari@remote.example ")
+	}
+
+	// 两个不同域名的同名远程账号是两个人，都不能丢。
+	twoRemotes := &Status{
+		Account: Account{ID: "9", Username: "carol", Acct: "carol@a.example"},
+		Mentions: []Mention{
+			{ID: "8", Username: "carol", Acct: "carol@b.example"},
+		},
+	}
+	got = c.buildReplyMentionPrefix(twoRemotes)
+	if got != "@carol@a.example @carol@b.example " {
+		t.Errorf("distinct remotes = %q", got)
+	}
+}
+
+// TestApplyReplyMentionPrefixStripsDuplicateLeadingMentions 模型常把父帖里
+// 已经出现过的 @ 再写一遍。拼前缀时要把这些开头的重复提及去掉，
+// 但不能删掉模型另外 @ 的、前缀里还没有的远程账号。
+func TestApplyReplyMentionPrefixStripsDuplicateLeadingMentions(t *testing.T) {
+	c := &MastodonChannel{
+		botUsername: "bot",
+		botAcct:     "bot",
+		cfg:         Config{Server: "https://home.example"},
+	}
+	parent := &Status{
+		Account: Account{ID: "2", Username: "luna", Acct: "luna"},
+		Content: `<p><span class="h-card"><a href="https://remote.example/@reikomari" class="u-url mention">@<span>reikomari</span></a></span> delayed</p>`,
+		Mentions: []Mention{
+			{ID: "1329", Username: "reikomari", Acct: "reikomari@remote.example"},
+		},
+	}
+
+	model := "@reikomari @luna@home.example 训练延期了"
+	got := c.applyReplyMentionPrefix(parent, model)
+	want := "@luna @reikomari@remote.example 训练延期了"
+	if got != want {
+		t.Errorf("= %q, want %q", got, want)
+	}
+
+	// 前缀里只有本地 @alice 时，模型写的 @alice@other.example 是另一个账号，要留下。
+	localOnly := &Status{Account: Account{ID: "3", Username: "alice", Acct: "alice"}}
+	got = c.applyReplyMentionPrefix(localOnly, "@alice@other.example 另有其人")
+	want = "@alice @alice@other.example 另有其人"
+	if got != want {
+		t.Errorf("distinct remote = %q, want %q", got, want)
+	}
+}
+
 func TestApplyPollVote(t *testing.T) {
 	// 单选：首票立即结算
 	st := &pollState{OptionN: 3}

@@ -1337,7 +1337,7 @@ func (c *MastodonChannel) Reply(ctx context.Context, statusID, text string) erro
 // 与 Misskey 的差异：Mastodon 不需要「纯 Renote 降级」——回复 boost 是合法的，
 // 不存在 CANNOT_REPLY_TO_A_PURE_RENOTE 这类限制，故没有降级分支。
 func (c *MastodonChannel) ReplyWithVisibility(ctx context.Context, statusID, text, visibility string) error {
-	text = c.truncateForStatus(strings.TrimSpace(text))
+	text = strings.TrimSpace(text)
 
 	// 回复时自动 @ 被回复者及其他被 @ 的人（排除 Bot 自身）。
 	// Mastodon 用 acct（含域），远程用户只有带域才能被正确提及。
@@ -1350,9 +1350,9 @@ func (c *MastodonChannel) ReplyWithVisibility(ctx context.Context, statusID, tex
 			return fmt.Errorf("mastodon reply: cannot resolve parent %q visibility: %v", statusID, err)
 		}
 		vis = clampVisibility(vis, parent.Visibility)
-		if prefix := c.buildReplyMentionPrefix(parent); prefix != "" {
-			text = c.truncateForStatus(prefix + text)
-		}
+		text = c.truncateForStatus(c.applyReplyMentionPrefix(parent, text))
+	} else {
+		text = c.truncateForStatus(text)
 	}
 
 	_, err := c.api.createStatusFull(ctx, text, statusID, vis, "", nil, nil)
@@ -1374,8 +1374,125 @@ func (c *MastodonChannel) lookupStatus(ctx context.Context, statusID string) (*S
 	return c.api.getStatus(ctx, statusID)
 }
 
+// replyMention 是回复前缀里的一个 @ 句柄。
+// user / domain 已折成小写，只用于比较；handle 保留来源里的原始写法。
+type replyMention struct {
+	handle string
+	user   string
+	domain string
+}
+
+// parseReplyMention 解析 @user 或 @user@domain。空句柄返回 false。
+func parseReplyMention(h string) (replyMention, bool) {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return replyMention{}, false
+	}
+	if !strings.HasPrefix(h, "@") {
+		h = "@" + h
+	}
+	body := strings.TrimPrefix(h, "@")
+	if body == "" || strings.HasPrefix(body, "@") {
+		return replyMention{}, false
+	}
+	user, domain, _ := strings.Cut(body, "@")
+	if user == "" || strings.Contains(domain, "@") {
+		return replyMention{}, false
+	}
+	return replyMention{
+		handle: "@" + body,
+		user:   strings.ToLower(user),
+		domain: strings.ToLower(domain),
+	}, true
+}
+
+// instanceDomain 是本实例的主机名（小写，无端口）。用于把 @user 和 @user@本站
+// 看成同一个本地账号。Server 为空时返回空，此时只做精确 acct 比较。
+func (c *MastodonChannel) instanceDomain() string {
+	if c == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(c.cfg.Server)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// isLocalMention 判断句柄是不是本站账号：没有域名，或者域名就是本实例。
+func isLocalMention(m replyMention, home string) bool {
+	if m.domain == "" {
+		return true
+	}
+	return home != "" && m.domain == home
+}
+
+// mentionCovered 判断 candidate 是否已经被 existing 代表，不应再写进回复。
+//
+// 三种情况算同一个人：
+//   - acct 完全相同（@user@domain）
+//   - 都是本站写法（@user 与 @user@本站域名）。带本站域名的写法会指到镜像账号，
+//     所以前缀里只留不带域名的本地 acct
+//   - candidate 是裸 @user，而 existing 已经是 @user@远程域。正文 h-card 只渲染
+//     用户名，裸名字不是第二个账号；留下它会被实例解析成本站同名用户
+//
+// 两个不同远程域的同名账号不是同一个人，都不覆盖。
+// 本地 @user 也不覆盖 @user@其他域：那是模型或父帖明确点名的另一个账号。
+func mentionCovered(existing, candidate replyMention, home string) bool {
+	if existing.user == "" || existing.user != candidate.user {
+		return false
+	}
+	if existing.domain == candidate.domain {
+		return true
+	}
+	home = strings.ToLower(strings.TrimSpace(home))
+	if isLocalMention(existing, home) && isLocalMention(candidate, home) {
+		return true
+	}
+	if candidate.domain == "" && existing.domain != "" {
+		return true
+	}
+	return false
+}
+
+func mentionCoveredByAny(existing []replyMention, candidate replyMention, home string) bool {
+	for _, ex := range existing {
+		if mentionCovered(ex, candidate, home) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripCoveredLeadingMentions 去掉正文开头已被前缀覆盖的 @ 提及。
+// 只剥连续的前缀，句子中间的提及保持原样。
+func stripCoveredLeadingMentions(text string, existing []replyMention, home string) string {
+	t := strings.TrimSpace(text)
+	for t != "" {
+		loc := mentionAnyRe.FindStringIndex(t)
+		if loc == nil || loc[0] != 0 {
+			break
+		}
+		m, ok := parseReplyMention(t[loc[0]:loc[1]])
+		if !ok || !mentionCoveredByAny(existing, m, home) {
+			break
+		}
+		t = strings.TrimSpace(t[loc[1]:])
+	}
+	return t
+}
+
 // buildReplyMentionPrefix 构造回复时的 @ 前缀。
 // 规则：至少 @ 被回复者（父帖作者）；父帖文本里其他被 @ 的人，排除 Bot 自身后一并带上。
+// 同一个账号只出现一次：本地账号用 @user，远程账号用 mentions 里的 @user@domain，
+// 正文里重复的裸 @user 不再计入。
 // 返回形如 "@alice @bob " 的前缀（含末尾空格），无则空字符串。
 //
 // Mastodon 特殊之处：@acct 已经带域（"@alice@example.social"），
@@ -1387,26 +1504,31 @@ func (c *MastodonChannel) buildReplyMentionPrefix(parent *Status) string {
 	// 一次取值，避免闭包里反复加锁；身份字段在 Start 之后不再变。
 	selfUser := c.selfUsername()
 	selfAcct := c.selfAcct()
-	seen := make(map[string]bool)
-	var handles []string
+	home := c.instanceDomain()
+	var handles []replyMention
 	add := func(h string) {
-		h = strings.TrimSpace(h)
-		if h == "" {
+		m, ok := parseReplyMention(h)
+		if !ok {
 			return
 		}
-		// 取本地用户名部分用于排除自身（acct 可能是 user@domain）
-		bare := strings.TrimPrefix(h, "@")
-		if at := strings.Index(bare, "@"); at >= 0 {
-			bare = bare[:at]
-		}
-		if (selfUser != "" && bare == selfUser) || (selfAcct != "" && strings.TrimPrefix(h, "@") == selfAcct) {
+		// 排除 Bot 自身。acct 可能是 user 或 user@domain，用户名部分相同即视为自己。
+		full := strings.TrimPrefix(m.handle, "@")
+		if (selfUser != "" && strings.EqualFold(m.user, selfUser)) || (selfAcct != "" && strings.EqualFold(full, selfAcct)) {
 			return
 		}
-		if seen[h] {
+		for i, ex := range handles {
+			if !mentionCovered(ex, m, home) {
+				continue
+			}
+			// 同一个本地账号若先记成 @user@本站，改留不带域名的 @user，
+			// 避免带本站域名的写法指到镜像账号。
+			if m.domain == "" && ex.domain != "" && isLocalMention(ex, home) {
+				handles[i].handle = m.handle
+				handles[i].domain = ""
+			}
 			return
 		}
-		seen[h] = true
-		handles = append(handles, h)
+		handles = append(handles, m)
 	}
 
 	if parent.Account.Acct != "" {
@@ -1418,7 +1540,7 @@ func (c *MastodonChannel) buildReplyMentionPrefix(parent *Status) string {
 			add("@" + m.Acct)
 		}
 	}
-	// 正文里其余裸 @ 提及（兜底）
+	// 正文里其余裸 @ 提及（兜底）。结构化 mentions 里已有的账号会被覆盖掉。
 	for _, m := range mentionAnyRe.FindAllString(htmlToText(parent.Content), -1) {
 		add(m)
 	}
@@ -1426,7 +1548,34 @@ func (c *MastodonChannel) buildReplyMentionPrefix(parent *Status) string {
 	if len(handles) == 0 {
 		return ""
 	}
-	return strings.Join(handles, " ") + " "
+	out := make([]string, len(handles))
+	for i, h := range handles {
+		out[i] = h.handle
+	}
+	return strings.Join(out, " ") + " "
+}
+
+// applyReplyMentionPrefix 把回复前缀接到模型正文前面，并去掉正文开头
+// 已经由前缀代表的 @。模型经常把父帖里的 @ 再抄一遍；只按整串比较时，
+// @user 和 @user@domain 会被当成两个人，公开回复里就出现重复提及。
+func (c *MastodonChannel) applyReplyMentionPrefix(parent *Status, text string) string {
+	prefix := c.buildReplyMentionPrefix(parent)
+	body := strings.TrimSpace(text)
+	if prefix == "" {
+		return body
+	}
+	var existing []replyMention
+	for _, raw := range strings.Fields(prefix) {
+		if m, ok := parseReplyMention(raw); ok {
+			existing = append(existing, m)
+		}
+	}
+	body = stripCoveredLeadingMentions(body, existing, c.instanceDomain())
+	prefix = strings.TrimSpace(prefix)
+	if body == "" {
+		return prefix
+	}
+	return prefix + " " + body
 }
 
 // PostTimeline 向本频道时间线发布一条顶层新帖（不回复任何已有帖子）。
@@ -1484,7 +1633,7 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 		}
 	}
 
-	text = c.truncateForStatus(strings.TrimSpace(text))
+	text = strings.TrimSpace(text)
 
 	// 回复时自动补全 @acct：联邦用户必须带域才能被正确提及并收到通知。
 	parent, perr := c.lookupStatus(ctx, statusID)
@@ -1500,19 +1649,8 @@ func (c *MastodonChannel) Send(ctx context.Context, action core.Action) error {
 		visibility = mapVisibility(parent.Visibility)
 	}
 	visibility = clampVisibility(visibility, parent.Visibility)
-	{
-		if prefix := c.buildReplyMentionPrefix(parent); prefix != "" {
-			// 去掉 LLM 文本开头可能重复写的裸 @被回复者，避免重复 mention
-			t := strings.TrimSpace(text)
-			if parent.Account.Acct != "" {
-				bare := "@" + parent.Account.Acct
-				if strings.HasPrefix(t, bare+" ") || t == bare {
-					t = strings.TrimSpace(strings.TrimPrefix(t, bare))
-				}
-			}
-			text = c.truncateForStatus(prefix + t)
-		}
-	}
+	// 前缀按账号去重，并剥掉模型开头重复抄写的 @user / @user@本站。
+	text = c.truncateForStatus(c.applyReplyMentionPrefix(parent, text))
 
 	if _, err := c.api.createStatusFull(ctx, text, statusID, visibility, cw, nil, nil); err != nil {
 		traceid.L(ctx).Warnw("mastodon send: reply failed",
