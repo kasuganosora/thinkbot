@@ -796,8 +796,8 @@ type LLMConfig struct {
 	// ContextLength 主模型上下文窗口（ModelDef.ContextLength；0=未知）。
 	// 内部调用据此把输出上限收进「输入 + 输出 ≤ 上下文」。
 	ContextLength int
-	// ReasoningEffort 深度思考程度（"" / "minimal" / "low" / "medium" / "high" / "max"）。
-	// 发送前由 llm.NormalizeReasoningEffort 映射进具体模型的词表。
+	// ReasoningEffort 深度思考程度，取 llm.CanonicalReasoningLevels 中的统一档位。
+	// 发送前由 llm.NormalizeReasoningEffort 按目标模型的词表映射。
 	ReasoningEffort string
 	// HeartbeatReasoningEffort 可选：心跳决策轮的推理强度（每次现取，Web bot 设置
 	// bot.<id>.reasoning.heartbeat）。"" = 沿用 ReasoningEffort；"provider" = 不发送；
