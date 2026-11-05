@@ -16,6 +16,13 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 		{"glm-5.1", "low", ""}, // below 5.2: parameter not supported
 		{"glm-4.7", "low", ""},
 		{"glm-5", "low", ""},
+		{"deepseek-flash", "none", "low"},
+		{"deepseek-flash", "minimal", "low"},
+		{"deepseek-flash", "low", "low"},
+		{"deepseek-flash", "medium", "high"},
+		{"deepseek-flash", "max", "max"},
+		{"deepseek-v4-pro", "medium", "high"},
+		{"vendor/deepseek-v4-pro", "none", "low"},
 		{"gpt-4o", "none", "none"}, // unknown: unchanged
 		{"glm-5.3", "", ""},
 	}
@@ -57,6 +64,9 @@ func TestInternalPolicy_AutoReasoningEffort(t *testing.T) {
 		{"bot minimal", "minimal", "gpt-5", PurposeMemoryDedup, nil, "minimal"},
 		{"bot minimal judge", "minimal", "gpt-5", PurposeLazyJudge, nil, "minimal"},
 		{"bot high unknown judge", "high", "gpt-5", PurposeLazyJudge, nil, "low"},
+		{"deepseek dedup medium → high", "medium", "deepseek-flash", PurposeMemoryDedup, nil, "high"},
+		{"deepseek judge none → low", "medium", "deepseek-flash", PurposeLazyJudge, nil, "low"},
+		{"deepseek documented family sends with bot off", "", "deepseek-flash", PurposeAutoCompact, nil, "low"},
 		{"bot provider", "provider", "gpt-4o", PurposeMemoryDedup, nil, ""},
 	}
 	for _, c := range cases {

@@ -1463,13 +1463,14 @@ func BotReasoningPurposes(task string) []string {
 
 // BotReasoningKey 返回 bot 级任务推理强度配置键：bot.<bot_id>.reasoning.<task>。
 // 值："" = 继承全局 llm.internal_reasoning.*（心跳为继承主回复设置）；
-// provider = 模型默认（不发送参数）；none / low / medium / high = 指定。
+// provider = 模型默认（不发送参数）；none / minimal / low / medium / high / max = 指定。
 func BotReasoningKey(botID, task string) string { return "bot." + botID + ".reasoning." + task }
 
 // ValidBotReasoning 判断 bot 级推理强度取值是否合法。
+// 值最终由 llm.NormalizeReasoningEffort 映射进具体模型的词表（如 low/high/max）。
 func ValidBotReasoning(v string) bool {
 	switch v {
-	case "", llm.ReasoningProvider, "none", "low", "medium", "high":
+	case "", llm.ReasoningProvider, "none", "minimal", "low", "medium", "high", "max":
 		return true
 	}
 	return false

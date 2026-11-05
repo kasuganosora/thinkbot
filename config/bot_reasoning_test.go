@@ -34,7 +34,7 @@ func TestBotInternalLLMSettingsOverrides(t *testing.T) {
 	if got := b.GetBotReasoning("b1")["heartbeat"]; got != "none" {
 		t.Fatalf("heartbeat setting: %q", got)
 	}
-	for _, v := range []string{"", "provider", "none", "low", "medium", "high"} {
+	for _, v := range []string{"", "provider", "none", "minimal", "low", "medium", "high", "max"} {
 		if !ValidBotReasoning(v) {
 			t.Fatalf("%q must be valid", v)
 		}
