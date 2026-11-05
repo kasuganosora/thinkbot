@@ -796,7 +796,8 @@ type LLMConfig struct {
 	// ContextLength 主模型上下文窗口（ModelDef.ContextLength；0=未知）。
 	// 内部调用据此把输出上限收进「输入 + 输出 ≤ 上下文」。
 	ContextLength int
-	// ReasoningEffort 深度思考程度（""=禁用, "minimal", "low", "medium", "high"）。
+	// ReasoningEffort 深度思考程度（"" / "minimal" / "low" / "medium" / "high" / "max"）。
+	// 发送前由 llm.NormalizeReasoningEffort 映射进具体模型的词表。
 	ReasoningEffort string
 	// HeartbeatReasoningEffort 可选：心跳决策轮的推理强度（每次现取，Web bot 设置
 	// bot.<id>.reasoning.heartbeat）。"" = 沿用 ReasoningEffort；"provider" = 不发送；
@@ -1029,19 +1030,22 @@ func (s *LLMStage) SetResumeDispatch(fn func(ctx context.Context, msg core.Messa
 }
 
 // reasoningEffortPtr 将非空字符串转为 *string，空字符串返回 nil。
-// replyEffort is the reply turn's reasoning effort. Values are sent as
-// configured (unchanged behaviour), except "none" (Web: 关闭) which is mapped
-// to the model vocabulary: GLM-5.3 has no none (→ low), models without
-// reasoning_effort support get nothing.
+// replyEffort resolves the reply turn's reasoning effort. Every configured
+// value is mapped into the model's vocabulary first, so a family that only
+// accepts low/high/max never receives an out-of-vocabulary value (e.g. medium)
+// and models without reasoning_effort support get nothing. Empty / provider /
+// off / default mean "do not send the parameter".
 func replyEffort(effort string, model *llm.Model) *string {
-	if strings.EqualFold(strings.TrimSpace(effort), "none") {
-		id := ""
-		if model != nil {
-			id = model.ID
-		}
-		return reasoningEffortPtr(llm.NormalizeReasoningEffort(id, "none"))
+	e := strings.ToLower(strings.TrimSpace(effort))
+	switch e {
+	case "", llm.ReasoningProvider, "off", "default":
+		return nil
 	}
-	return reasoningEffortPtr(effort)
+	id := ""
+	if model != nil {
+		id = model.ID
+	}
+	return reasoningEffortPtr(llm.NormalizeReasoningEffort(id, e))
 }
 
 // heartbeatEffort resolves the reasoning effort of a heartbeat decision turn.

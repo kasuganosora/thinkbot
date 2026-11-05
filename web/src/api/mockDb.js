@@ -40,7 +40,7 @@ function seed() {
         model: 'gpt-4o',
         temperature: 0.7,
         maxTokens: 4096,
-        reasoningEffort: 'medium', // '' | minimal | low | medium | high
+        reasoningEffort: 'medium', // '' | minimal | low | medium | high | max
         workers: 4,
         status: 'running', // stopped | running
         createdAt: nowISO(-30 * 86400_000),

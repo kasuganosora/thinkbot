@@ -23,16 +23,31 @@ func TestHeartbeatEffort(t *testing.T) {
 }
 
 func TestReplyEffort(t *testing.T) {
-	if got := replyEffort("medium", llm.ChatModel("glm-5.3")); got == nil || *got != "medium" {
-		t.Fatal("configured values are sent unchanged")
+	cases := []struct {
+		name, effort, model, want string
+	}{
+		{"medium mapped into low/high/max vocabulary", "medium", "glm-5.3", "high"},
+		{"unknown family unchanged", "medium", "gpt-4o", "medium"},
+		{"max kept", "max", "glm-5.3", "max"},
+		{"empty = not sent", "", "glm-5.3", ""},
+		{"provider = not sent", "provider", "glm-5.3", ""},
+		{"off = not sent", "off", "glm-5.3", ""},
+		{"default = not sent", "default", "glm-5.3", ""},
+		{"no-effort family = not sent", "low", "glm-4.6", ""},
+		{"none on GLM-5.3 → low", "none", "glm-5.3", "low"},
+		{"none on GLM-5.2 stays none", "none", "glm-5.2", "none"},
+		{"DeepSeek medium → high", "medium", "deepseek-flash", "high"},
+		{"DeepSeek none → low", "none", "deepseek-v4-pro", "low"},
+		{"DeepSeek with namespace", "medium", "vendor/deepseek-v4-pro", "high"},
 	}
-	if got := replyEffort("", llm.ChatModel("glm-5.3")); got != nil {
-		t.Fatal("empty = not sent")
-	}
-	if got := replyEffort("none", llm.ChatModel("glm-5.3")); got == nil || *got != "low" {
-		t.Fatalf("none on GLM-5.3 → low, got %v", got)
-	}
-	if got := replyEffort("none", llm.ChatModel("glm-5.2")); got == nil || *got != "none" {
-		t.Fatalf("none on GLM-5.2 stays none, got %v", got)
+	for _, c := range cases {
+		got := replyEffort(c.effort, llm.ChatModel(c.model))
+		gotStr := ""
+		if got != nil {
+			gotStr = *got
+		}
+		if gotStr != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, gotStr, c.want)
+		}
 	}
 }

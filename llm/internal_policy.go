@@ -29,14 +29,14 @@ import (
 //     is known to accept the parameter: the bot already sends a
 //     reasoning_effort for normal turns, the model is marked with the
 //     "reasoning" capability in the provider config, or the model belongs to a
-//     family documented to support it (GLM-5.2+). Otherwise nothing is sent,
-//     so models that reject the parameter keep working. "none" is downgraded
-//     to "low" unless the model is known to accept it (or the bot itself runs
-//     on none/minimal).
+//     family documented to support it (GLM-5.2+, DeepSeek V4). Otherwise
+//     nothing is sent, so models that reject the parameter keep working.
+//     "none" is downgraded to "low" unless the model is known to accept it
+//     (or the bot itself runs on none/minimal).
 //   - "provider" / "off" / "default": never send the parameter.
 //   - anything else (e.g. "low", "high", "none"): sent as configured.
 // Every value is finally mapped into the vocabulary of known model families
-// (GLM-5.3 accepts only low/high/max on the regular API: none/minimal → low,
+// (GLM-5.3+ and DeepSeek V4 accept only low/high/max: none/minimal → low,
 // medium → high; models below GLM-5.2 do not support the parameter).
 // ============================================================================
 
@@ -255,6 +255,7 @@ const (
 	familyNoEffort                 // documented not to support reasoning_effort (GLM < 5.2)
 	familyGLM52                    // GLM-5.2: max, xhigh, high, medium, low, minimal, none
 	familyGLM53                    // GLM-5.3+: only low, high, max on the regular API
+	familyDeepSeek                 // DeepSeek V4: only low, high, max (effort.supported_levels)
 )
 
 var glmVersionRe = regexp.MustCompile(`^glm-(\d+)(?:\.(\d+))?`)
@@ -263,6 +264,11 @@ func reasoningFamilyOf(model string) reasoningFamily {
 	m := strings.ToLower(strings.TrimSpace(model))
 	if i := strings.LastIndex(m, "/"); i >= 0 { // e.g. "z-ai/glm-5.3"
 		m = m[i+1:]
+	}
+	// DeepSeek V4 declares effort.supported_levels = [low, high, max] on its
+	// model listing, so the whole deepseek-* family shares that vocabulary.
+	if strings.HasPrefix(m, "deepseek-") {
+		return familyDeepSeek
 	}
 	sub := glmVersionRe.FindStringSubmatch(m)
 	if sub == nil {
@@ -283,7 +289,25 @@ func reasoningFamilyOf(model string) reasoningFamily {
 	}
 }
 
+// familyAcceptsNone reports whether the family documents a "no thinking" value.
+// GLM-5.2 accepts none; GLM-5.3+ and DeepSeek V4 only list low/high/max, so
+// their none is downgraded to low.
 func familyAcceptsNone(f reasoningFamily) bool { return f == familyGLM52 }
+
+// normalizeLowHighMax maps an effort into the low/high/max vocabulary shared
+// by GLM-5.3+ (regular API) and DeepSeek V4 (effort.supported_levels).
+func normalizeLowHighMax(e string) string {
+	switch e {
+	case "none", "minimal", "low":
+		return "low"
+	case "medium", "high":
+		return "high"
+	case "xhigh", "max":
+		return "max"
+	default:
+		return "low"
+	}
+}
 
 // NormalizeReasoningEffort maps effort into the vocabulary accepted by model
 // ("" = do not send). Unknown models get the value unchanged.
@@ -293,6 +317,8 @@ func familyAcceptsNone(f reasoningFamily) bool { return f == familyGLM52 }
 // (other values → HTTP 400; the Coding Plan endpoint maps none/minimal/low →
 // low and medium/high → high); GLM-5.2 accepts none..max (none/minimal skip
 // thinking, low/medium are served as high).
+// DeepSeek V4 declares effort.supported_levels = [low, high, max] on its model
+// listing, so it shares the same mapping.
 func NormalizeReasoningEffort(model, effort string) string {
 	e := strings.ToLower(strings.TrimSpace(effort))
 	if e == "" {
@@ -301,17 +327,8 @@ func NormalizeReasoningEffort(model, effort string) string {
 	switch reasoningFamilyOf(model) {
 	case familyNoEffort:
 		return ""
-	case familyGLM53:
-		switch e {
-		case "none", "minimal", "low":
-			return "low"
-		case "medium", "high":
-			return "high"
-		case "xhigh", "max":
-			return "max"
-		default:
-			return "low"
-		}
+	case familyGLM53, familyDeepSeek:
+		return normalizeLowHighMax(e)
 	}
 	return e
 }
