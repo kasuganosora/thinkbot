@@ -1,24 +1,29 @@
 // 推理强度（reasoning_effort）选项与工具函数。
 //
-// 取值语义（与后端 config.ValidBotReasoning 一致）：
+// 统一档位（超 / 高 / 中 / 低 / 极低 + 关闭），与后端 llm.CanonicalReasoningLevels
+// 一一对应。配置里只出现这几档；各供应商的实际词表由后端 NormalizeReasoningEffort
+// 按模型家族映射（如 GLM-5.3+ / DeepSeek V4 只接受 low/high/max，会把这几档
+// 就近落到对应的三档上），不支持该参数的模型一律不发送。
+//
+// 取值语义：
 //   ''        继承（主回复：模型默认，不发送参数；后台任务：继承全局设置/内置默认）
 //   provider  模型默认：不发送参数，由模型/服务商自行决定
-//   none      关闭推理
-//   minimal / low / medium / high / max  指定强度
-// 后端会按模型词表映射（如 GLM-5.3+ 与 DeepSeek V4 只接受 low/high/max：
-// none/minimal→low、medium→high、max→max），不支持该参数的模型一律不发送。
+
+export const EFFORT_LEVELS = [
+  { value: 'max', label: '超（max）' },
+  { value: 'high', label: '高（high）' },
+  { value: 'medium', label: '中（medium）' },
+  { value: 'low', label: '低（low）' },
+  { value: 'minimal', label: '极低（minimal）' },
+  { value: 'none', label: '关闭（none）' }
+]
 
 export const REPLY_EFFORT_OPTIONS = [
   { label: '模型默认（不指定）', value: '' },
-  { label: '关闭（none）', value: 'none' },
-  { label: 'minimal', value: 'minimal' },
-  { label: 'low', value: 'low' },
-  { label: 'medium', value: 'medium' },
-  { label: 'high', value: 'high' },
-  { label: 'max', value: 'max' }
+  ...EFFORT_LEVELS.map(l => ({ label: l.label, value: l.value }))
 ]
 
-export const TASK_EFFORT_VALUES = ['', 'provider', 'none', 'minimal', 'low', 'medium', 'high', 'max']
+export const TASK_EFFORT_VALUES = ['', 'provider', ...EFFORT_LEVELS.map(l => l.value)]
 
 export const REASONING_TASKS = [
   { key: 'memory_dedup', label: '记忆去重', tip: '长期记忆聚类合并。过低可能丢失细节（09-27 low 曾丢细节），默认 medium。' },
@@ -29,12 +34,7 @@ export const REASONING_TASKS = [
 
 const VALUE_LABELS = {
   provider: '模型默认（不发送）',
-  none: '关闭（none）',
-  minimal: 'minimal',
-  low: 'low',
-  medium: 'medium',
-  high: 'high',
-  max: 'max'
+  ...Object.fromEntries(EFFORT_LEVELS.map(l => [l.value, l.label]))
 }
 
 // taskEffortOptions 生成某个任务的下拉选项；首项「继承」标出实际生效的默认值。

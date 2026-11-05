@@ -34,10 +34,11 @@ import (
 //     "none" is downgraded to "low" unless the model is known to accept it
 //     (or the bot itself runs on none/minimal).
 //   - "provider" / "off" / "default": never send the parameter.
-//   - anything else (e.g. "low", "high", "none"): sent as configured.
-// Every value is finally mapped into the vocabulary of known model families
-// (GLM-5.3+ and DeepSeek V4 accept only low/high/max: none/minimal → low,
-// medium → high; models below GLM-5.2 do not support the parameter).
+//   - anything else: parsed into one of the canonical levels (see
+//     CanonicalReasoningLevels) and then mapped into the vocabulary of the
+//     target model family. Families with a reduced vocabulary (GLM-5.3+,
+//     DeepSeek V4: low/high/max only) round each level onto their own
+//     strings; models below GLM-5.2 do not support the parameter.
 // ============================================================================
 
 // Internal call purposes (also the config key suffixes).
@@ -246,16 +247,99 @@ func (p *InternalPolicy) Apply(purpose string, params *GenerateParams) string {
 	return e
 }
 
+// ---- canonical reasoning levels -------------------------------------------
+
+// reasoningLevel is the project-wide vocabulary for thinking effort. Every
+// configured value (and every provider-specific alias) is first parsed into one
+// of these levels; each model family then maps the level onto the strings its
+// API actually accepts. Adding a provider means declaring which vocabulary
+// shape it uses, not sprinkling per-provider branches through the call sites.
+type reasoningLevel int
+
+const (
+	levelOff     reasoningLevel = iota // 关闭推理
+	levelMinimal                       // 极低
+	levelLow                           // 低
+	levelMedium                        // 中
+	levelHigh                          // 高
+	levelMax                           // 超
+)
+
+// CanonicalReasoningLevels lists the unified levels, highest first (超/高/中/
+// 低/极低, plus 关闭). Config validation reads it through IsReasoningLevel and
+// the Web options mirror it, so both stay in sync with this single definition.
+var CanonicalReasoningLevels = []string{"max", "high", "medium", "low", "minimal", "none"}
+
+// IsReasoningLevel reports whether v is one of the canonical levels. Provider
+// aliases (e.g. xhigh) are accepted by parseReasoningLevel but are not valid
+// configuration values.
+func IsReasoningLevel(v string) bool {
+	s := strings.ToLower(strings.TrimSpace(v))
+	for _, lv := range CanonicalReasoningLevels {
+		if s == lv {
+			return true
+		}
+	}
+	return false
+}
+
+// parseReasoningLevel maps a configured value or a provider alias onto a
+// canonical level. Aliases for the same semantic level converge here:
+// max/xhigh → 超, high → 高, medium → 中, low → 低, minimal → 极低, none → 关闭.
+func parseReasoningLevel(v string) (reasoningLevel, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "none":
+		return levelOff, true
+	case "minimal":
+		return levelMinimal, true
+	case "low":
+		return levelLow, true
+	case "medium":
+		return levelMedium, true
+	case "high":
+		return levelHigh, true
+	case "max", "xhigh":
+		return levelMax, true
+	default:
+		return levelLow, false
+	}
+}
+
+// reasoningVocabulary maps canonical levels onto the strings a family accepts.
+type reasoningVocabulary map[reasoningLevel]string
+
+// vocabLowHighMax is the three-step vocabulary shared by GLM-5.3+ (regular
+// API) and DeepSeek V4 (effort.supported_levels): 关闭/极低/低 → low, 中/高 →
+// high, 超 → max. Neither family documents a "no thinking" value, so 关闭 also
+// lands on low.
+var vocabLowHighMax = reasoningVocabulary{
+	levelOff:     "low",
+	levelMinimal: "low",
+	levelLow:     "low",
+	levelMedium:  "high",
+	levelHigh:    "high",
+	levelMax:     "max",
+}
+
 // ---- model families -------------------------------------------------------
 
+// reasoningFamily classifies a model by the shape of the reasoning_effort
+// vocabulary it accepts, not by vendor. A new provider is mapped onto one of
+// these shapes in reasoningFamilyOf.
+//
+// Known provider vocabularies, all expressed in canonical levels:
+//
+//	GLM-5.2       none, minimal, low, medium, high, xhigh, max → familyFull
+//	GLM-5.3+ API  low, high, max                              → familyLowHighMax
+//	DeepSeek V4   low, high, max                              → familyLowHighMax
+//	OpenAI-style  minimal, low, medium, high                  → familyUnknown (unchanged)
 type reasoningFamily int
 
 const (
-	familyUnknown  reasoningFamily = iota
-	familyNoEffort                 // documented not to support reasoning_effort (GLM < 5.2)
-	familyGLM52                    // GLM-5.2: max, xhigh, high, medium, low, minimal, none
-	familyGLM53                    // GLM-5.3+: only low, high, max on the regular API
-	familyDeepSeek                 // DeepSeek V4: only low, high, max (effort.supported_levels)
+	familyUnknown    reasoningFamily = iota
+	familyNoEffort                   // 不支持 reasoning_effort (GLM < 5.2)
+	familyFull                       // 接受完整规范档位 (GLM-5.2)
+	familyLowHighMax                 // 只接受 low / high / max (GLM-5.3+, DeepSeek V4)
 )
 
 var glmVersionRe = regexp.MustCompile(`^glm-(\d+)(?:\.(\d+))?`)
@@ -265,10 +349,9 @@ func reasoningFamilyOf(model string) reasoningFamily {
 	if i := strings.LastIndex(m, "/"); i >= 0 { // e.g. "z-ai/glm-5.3"
 		m = m[i+1:]
 	}
-	// DeepSeek V4 declares effort.supported_levels = [low, high, max] on its
-	// model listing, so the whole deepseek-* family shares that vocabulary.
+	// DeepSeek V4 declares effort.supported_levels = [low, high, max].
 	if strings.HasPrefix(m, "deepseek-") {
-		return familyDeepSeek
+		return familyLowHighMax
 	}
 	sub := glmVersionRe.FindStringSubmatch(m)
 	if sub == nil {
@@ -281,36 +364,34 @@ func reasoningFamilyOf(model string) reasoningFamily {
 	}
 	switch {
 	case major > 5 || (major == 5 && minor >= 3):
-		return familyGLM53
+		return familyLowHighMax
 	case major == 5 && minor == 2:
-		return familyGLM52
+		return familyFull
 	default:
 		return familyNoEffort
 	}
 }
 
-// familyAcceptsNone reports whether the family documents a "no thinking" value.
-// GLM-5.2 accepts none; GLM-5.3+ and DeepSeek V4 only list low/high/max, so
-// their none is downgraded to low.
-func familyAcceptsNone(f reasoningFamily) bool { return f == familyGLM52 }
+// familyAcceptsNone reports whether the family documents a "no thinking"
+// value. Only the full vocabulary has none; three-step vocabularies downgrade
+// it to low.
+func familyAcceptsNone(f reasoningFamily) bool { return f == familyFull }
 
-// normalizeLowHighMax maps an effort into the low/high/max vocabulary shared
-// by GLM-5.3+ (regular API) and DeepSeek V4 (effort.supported_levels).
-func normalizeLowHighMax(e string) string {
-	switch e {
-	case "none", "minimal", "low":
-		return "low"
-	case "medium", "high":
-		return "high"
-	case "xhigh", "max":
-		return "max"
+// vocabularyOf returns the mapping a family needs, or nil when the value can
+// be sent unchanged (unknown models, or the full vocabulary).
+func vocabularyOf(f reasoningFamily) reasoningVocabulary {
+	switch f {
+	case familyLowHighMax:
+		return vocabLowHighMax
 	default:
-		return "low"
+		return nil
 	}
 }
 
 // NormalizeReasoningEffort maps effort into the vocabulary accepted by model
-// ("" = do not send). Unknown models get the value unchanged.
+// ("" = do not send). The value is first parsed into a canonical level; a
+// family with a reduced vocabulary then maps that level onto its own strings.
+// Unknown models and the full vocabulary keep the value unchanged.
 //
 // GLM (docs.z.ai "Deep Thinking", 2026-09): reasoning_effort is supported by
 // GLM-5.2 and above. GLM-5.3 accepts only low/high/max on the regular API
@@ -318,17 +399,23 @@ func normalizeLowHighMax(e string) string {
 // low and medium/high → high); GLM-5.2 accepts none..max (none/minimal skip
 // thinking, low/medium are served as high).
 // DeepSeek V4 declares effort.supported_levels = [low, high, max] on its model
-// listing, so it shares the same mapping.
+// listing, so it shares the same three-step vocabulary.
 func NormalizeReasoningEffort(model, effort string) string {
 	e := strings.ToLower(strings.TrimSpace(effort))
 	if e == "" {
 		return ""
 	}
-	switch reasoningFamilyOf(model) {
-	case familyNoEffort:
+	fam := reasoningFamilyOf(model)
+	if fam == familyNoEffort {
 		return ""
-	case familyGLM53, familyDeepSeek:
-		return normalizeLowHighMax(e)
 	}
-	return e
+	vocab := vocabularyOf(fam)
+	if vocab == nil {
+		return e
+	}
+	level, ok := parseReasoningLevel(e)
+	if !ok {
+		level = levelLow
+	}
+	return vocab[level]
 }

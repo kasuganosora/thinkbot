@@ -21,6 +21,8 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 		{"deepseek-flash", "low", "low"},
 		{"deepseek-flash", "medium", "high"},
 		{"deepseek-flash", "max", "max"},
+		{"deepseek-flash", "xhigh", "max"}, // 供应商别名收敛到「超」
+		{"glm-5.3", "xhigh", "max"},
 		{"deepseek-v4-pro", "medium", "high"},
 		{"vendor/deepseek-v4-pro", "none", "low"},
 		{"gpt-4o", "none", "none"}, // unknown: unchanged
@@ -190,5 +192,53 @@ func TestInternalPolicy_MemoryDedupBuiltinCap(t *testing.T) {
 	}, "")
 	if got := low.ReasoningEffort(PurposeMemoryDedup, "glm-5.3"); got != "low" {
 		t.Fatalf("dedup reasoning must stay configurable: %q", got)
+	}
+}
+
+func TestCanonicalReasoningLevels(t *testing.T) {
+	want := []string{"max", "high", "medium", "low", "minimal", "none"}
+	if len(CanonicalReasoningLevels) != len(want) {
+		t.Fatalf("levels: %v, want %v", CanonicalReasoningLevels, want)
+	}
+	for i, v := range want {
+		if CanonicalReasoningLevels[i] != v {
+			t.Fatalf("level %d: %q, want %q", i, CanonicalReasoningLevels[i], v)
+		}
+		if !IsReasoningLevel(v) {
+			t.Errorf("%q must be a canonical level", v)
+		}
+	}
+	for _, v := range []string{"", "provider", "xhigh", "ultra"} {
+		if IsReasoningLevel(v) {
+			t.Errorf("%q must not be a canonical level", v)
+		}
+	}
+	if !IsReasoningLevel("  MeDiUm ") {
+		t.Error("canonical levels are case-insensitive")
+	}
+}
+
+func TestParseReasoningLevelConvergesAliases(t *testing.T) {
+	cases := []struct {
+		in   string
+		want reasoningLevel
+		ok   bool
+	}{
+		{"none", levelOff, true},
+		{"minimal", levelMinimal, true},
+		{"low", levelLow, true},
+		{"medium", levelMedium, true},
+		{"high", levelHigh, true},
+		{"max", levelMax, true},
+		{"xhigh", levelMax, true}, // provider alias for 超
+		{"MAX", levelMax, true},
+		{"ultra", levelLow, false},
+		{"provider", levelLow, false},
+	}
+	for _, c := range cases {
+		got, ok := parseReasoningLevel(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("parse(%q) = (%v,%v), want (%v,%v)", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }

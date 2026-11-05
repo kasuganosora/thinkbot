@@ -42,4 +42,7 @@ func TestBotInternalLLMSettingsOverrides(t *testing.T) {
 	if ValidBotReasoning("ultra") {
 		t.Fatal("ultra must be invalid")
 	}
+	if ValidBotReasoning("xhigh") {
+		t.Fatal("provider aliases are not canonical levels")
+	}
 }
