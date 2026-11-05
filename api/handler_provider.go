@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -588,66 +589,30 @@ func (s *Server) handleImportModels(c *gin.Context) {
 		return
 	}
 
-	var parsed struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-		// 部分厂商把模型放在根数组
-		Models []struct {
-			ID string `json:"id"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	specs, err := parseRemoteModels(body)
+	if err != nil {
 		Fail(c, errs.Wrap(err, "parse provider models response"))
 		return
 	}
-
-	// 合并 data 与 models 两种常见结构
-	type remoteModel struct{ id string }
-	remote := make([]remoteModel, 0, len(parsed.Data)+len(parsed.Models))
-	for _, m := range parsed.Data {
-		if m.ID != "" {
-			remote = append(remote, remoteModel{id: m.ID})
-		}
-	}
-	for _, m := range parsed.Models {
-		if m.ID != "" {
-			remote = append(remote, remoteModel{id: m.ID})
-		}
-	}
-
-	if len(remote) == 0 {
+	if len(specs) == 0 {
 		OK(c, []ProviderModel{})
 		return
 	}
 
-	// 去重：已存在的模型 ID 跳过
+	// 去重：已存在的模型 ID 跳过。导入只新增、不覆盖，避免把用户手工修正过的规格
+	// （多模态开关、上下文等）重新导回默认值。
 	exist := make(map[string]bool, len(def.Models))
 	for _, m := range def.Models {
 		exist[m.ID] = true
 	}
 
-	added := make([]ProviderModel, 0, len(remote))
-	for _, rm := range remote {
-		if exist[rm.id] {
+	added := make([]ProviderModel, 0, len(specs))
+	for _, spec := range specs {
+		if exist[spec.id] {
 			continue
 		}
-		exist[rm.id] = true
-		// 命中官方推荐预设则直接套用推荐值，降低用户配置成本；未知模型回退到默认 0.7/4096（运行时再按预设解析）。
-		temp, topP, mt, ctx := 0.7, 0.0, 4096, 0
-		if p := config.GetModelPreset(rm.id); p != nil {
-			temp, topP, mt, ctx = p.Temperature, p.TopP, p.MaxTokens, p.ContextLength
-		}
-		model := ProviderModel{
-			ID:            rm.id,
-			Name:          rm.id,
-			Capabilities:  []string{"chat"},
-			ContextLength: ctx,
-			Multimodal:    false,
-			Temperature:   temp,
-			TopP:          topP,
-			MaxTokens:     mt,
-		}
+		exist[spec.id] = true
+		model := buildImportedModel(spec)
 		def.Models = append(def.Models, model)
 		added = append(added, model)
 	}
@@ -659,6 +624,204 @@ func (s *Server) handleImportModels(c *gin.Context) {
 
 	auditLog(c, s.logger, "import_provider_models", "provider", pid, "count", len(added))
 	OK(c, added)
+}
+
+// ============================================================================
+// 远端 /models 响应解析
+//
+// 各家 OpenAI Compatible 服务的字段命名与嵌套并不统一，实测至少三种形状：
+//   - 仅 {id}，规格一律不给（部分网关）；
+//   - {id, name, context_length, architecture.input_modalities,
+//     reasoning.supported_efforts, supported_parameters}；
+//   - {id, name, context_window, input_modalities, effort.supported_levels}。
+// 顶层容器也有 {data:[...]}、{models:[...]} 与裸数组三种。
+// 因此按 json.RawMessage 逐字段宽松解析：单个字段取值异常只影响该字段，
+// 不会让整批导入失败；缺失字段再由 config.GetModelPreset 兜底。
+// ============================================================================
+
+// remoteModelSpec 是从远端 /models 归一化出来的模型规格。
+type remoteModelSpec struct {
+	id              string
+	name            string
+	contextLength   int
+	inputModalities []string
+	reasoning       bool
+}
+
+// parseRemoteModels 解析 /models 响应体，返回按原始顺序排列的模型规格。
+func parseRemoteModels(body []byte) ([]remoteModelSpec, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+
+	var entries []json.RawMessage
+	if trimmed[0] == '[' {
+		// 裸数组
+		if err := json.Unmarshal(trimmed, &entries); err != nil {
+			return nil, err
+		}
+	} else {
+		var obj struct {
+			Data   []json.RawMessage `json:"data"`
+			Models []json.RawMessage `json:"models"`
+		}
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return nil, err
+		}
+		entries = append(entries, obj.Data...)
+		entries = append(entries, obj.Models...)
+	}
+
+	specs := make([]remoteModelSpec, 0, len(entries))
+	for _, raw := range entries {
+		if spec, ok := parseRemoteModelSpec(raw); ok {
+			specs = append(specs, spec)
+		}
+	}
+	return specs, nil
+}
+
+// parseRemoteModelSpec 解析单个模型条目；缺 id 的条目直接跳过。
+func parseRemoteModelSpec(raw json.RawMessage) (remoteModelSpec, bool) {
+	// 少数服务直接把模型 ID 作为字符串放进数组。
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil && strings.TrimSpace(asString) != "" {
+		return remoteModelSpec{id: strings.TrimSpace(asString)}, true
+	}
+
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return remoteModelSpec{}, false
+	}
+	spec := remoteModelSpec{id: remoteJSONString(m, "id")}
+	if spec.id == "" {
+		return remoteModelSpec{}, false
+	}
+	spec.name = remoteJSONString(m, "name")
+	if spec.name == "" {
+		spec.name = remoteJSONString(m, "display_name")
+	}
+	spec.contextLength = remoteJSONInt(m, "context_length")
+	if spec.contextLength <= 0 {
+		spec.contextLength = remoteJSONInt(m, "context_window")
+	}
+	spec.inputModalities = remoteJSONStrings(m, "input_modalities")
+	if len(spec.inputModalities) == 0 {
+		spec.inputModalities = remoteJSONStrings(remoteJSONObject(m, "architecture"), "input_modalities")
+	}
+	spec.reasoning = remoteSupportsReasoning(m)
+	return spec, true
+}
+
+// remoteSupportsReasoning 判断远端是否声明了推理能力。
+// 唯一的消费方是 config.resolveProviderModel 里的 Reasoning 标记
+// （hasCapability(caps, "reasoning")），别引入没有消费方的能力名。
+func remoteSupportsReasoning(m map[string]json.RawMessage) bool {
+	if r := remoteJSONObject(m, "reasoning"); r != nil {
+		if len(remoteJSONStrings(r, "supported_efforts")) > 0 || remoteJSONString(r, "default_effort") != "" {
+			return true
+		}
+	}
+	if e := remoteJSONObject(m, "effort"); e != nil {
+		if len(remoteJSONStrings(e, "supported_levels")) > 0 || remoteJSONString(e, "default_level") != "" {
+			return true
+		}
+	}
+	for _, p := range remoteJSONStrings(m, "supported_parameters") {
+		if strings.EqualFold(p, "reasoning") {
+			return true
+		}
+	}
+	return false
+}
+
+// buildImportedModel 把归一化的远端规格与项目预设合并成落库模型。
+//
+// 优先级：远端明确给出的（name / 上下文 / 模态 / 推理能力）> config.GetModelPreset
+// 官方推荐预设 > 内置兜底。唯一例外是 MaxTokens：只取预设/兜底，**不**使用远端
+// max_output_tokens —— 那是架构上限而非推荐默认输出预算，照搬会让内部调用的
+// 推理 token 失去预算约束（见 llm/internal_policy.go 的 medium 默认值由来）。
+func buildImportedModel(spec remoteModelSpec) ProviderModel {
+	temp, topP, maxTokens, ctx := 0.7, 0.0, 4096, 0
+	if p := config.GetModelPreset(spec.id); p != nil {
+		temp, topP, maxTokens, ctx = p.Temperature, p.TopP, p.MaxTokens, p.ContextLength
+	}
+	if spec.contextLength > 0 {
+		ctx = spec.contextLength
+	}
+	name := spec.name
+	if name == "" {
+		name = spec.id
+	}
+	caps := []string{"chat"}
+	if spec.reasoning {
+		caps = append(caps, "reasoning")
+	}
+	return ProviderModel{
+		ID:            spec.id,
+		Name:          name,
+		Capabilities:  caps,
+		ContextLength: ctx,
+		Multimodal:    modalitiesContainImage(spec.inputModalities),
+		Temperature:   temp,
+		TopP:          topP,
+		MaxTokens:     maxTokens,
+	}
+}
+
+func modalitiesContainImage(mods []string) bool {
+	for _, x := range mods {
+		if strings.EqualFold(strings.TrimSpace(x), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+// --- 宽松 JSON 取值辅助：单字段类型异常只让该字段取零值 ---
+
+func remoteJSONString(m map[string]json.RawMessage, key string) string {
+	var s string
+	if raw, ok := m[key]; ok {
+		_ = json.Unmarshal(raw, &s)
+	}
+	return strings.TrimSpace(s)
+}
+
+func remoteJSONInt(m map[string]json.RawMessage, key string) int {
+	raw, ok := m[key]
+	if !ok {
+		return 0
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
+	}
+	// 少数服务把数字写成字符串
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
+func remoteJSONStrings(m map[string]json.RawMessage, key string) []string {
+	var v []string
+	if raw, ok := m[key]; ok {
+		_ = json.Unmarshal(raw, &v)
+	}
+	return v
+}
+
+func remoteJSONObject(m map[string]json.RawMessage, key string) map[string]json.RawMessage {
+	var obj map[string]json.RawMessage
+	if raw, ok := m[key]; ok {
+		_ = json.Unmarshal(raw, &obj)
+	}
+	return obj
 }
 
 // --- 辅助函数 ---
