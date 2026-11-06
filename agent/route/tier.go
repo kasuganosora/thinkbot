@@ -36,6 +36,12 @@ const (
 	// LightMaxTokens caps a light-tier execution so a casual turn cannot
 	// inherit the main model's output budget.
 	LightMaxTokens = 1024
+
+	// LightReasoningEffort caps thinking on cheap turns. A reasoning light
+	// model can spend the whole LightMaxTokens budget on its own reasoning
+	// and return no content at all, so both L1 routing and light-tier replies
+	// use a low effort instead of inheriting the bot's main-model setting.
+	LightReasoningEffort = "low"
 )
 
 // lightAllow is the tool surface of a light-tier execution pipeline.

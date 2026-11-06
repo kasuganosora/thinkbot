@@ -28,7 +28,7 @@ const (
 	routeMaxTokens      = 256
 
 	// L1 只做一次三选一的路由分类，用低推理档把调用压在路由超时内。
-	routeReasoningEffort = "low"
+	routeReasoningEffort = LightReasoningEffort
 )
 
 // bindCodePattern matches an authorization code and nothing else, so those
