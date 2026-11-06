@@ -13,25 +13,37 @@ import (
 )
 
 func TestLightTierEffort(t *testing.T) {
+	glm52 := llm.ChatModel("glm-5.2")
+	glm53 := llm.ChatModel("glm-5.3")
+	deepseek := llm.ChatModel("deepseek-flash")
+	gpt := llm.ChatModel("gpt-4o")
 	cases := []struct {
-		in   string
-		want string
+		in    string
+		model *llm.Model
+		want  string
 	}{
-		{"medium", route.LightReasoningEffort},
-		{"high", route.LightReasoningEffort},
-		{"max", route.LightReasoningEffort},
-		{"low", route.LightReasoningEffort},
-		{"minimal", route.LightReasoningEffort},
-		{"  HIGH  ", route.LightReasoningEffort},
-		{"", ""},
-		{"none", "none"},
-		{"off", "off"},
-		{"default", "default"},
-		{llm.ReasoningProvider, llm.ReasoningProvider},
+		// GLM-5.2 serves low/medium as high; the floor that skips thinking is minimal.
+		{"medium", glm52, "minimal"},
+		{"high", glm52, "minimal"},
+		{"max", glm52, "minimal"},
+		{"low", glm52, "minimal"},
+		{"  HIGH  ", glm52, "minimal"},
+		{"minimal", glm52, "minimal"},
+		// Three-step vocabularies: low is the cheapest accepted value.
+		{"medium", glm53, route.LightReasoningEffort},
+		{"medium", deepseek, route.LightReasoningEffort},
+		{"low", deepseek, route.LightReasoningEffort},
+		{"minimal", deepseek, "minimal"}, // replyEffort maps this to low
+		{"medium", gpt, route.LightReasoningEffort},
+		{"", glm52, ""},
+		{"none", glm52, "none"},
+		{"off", glm52, "off"},
+		{"default", glm52, "default"},
+		{llm.ReasoningProvider, glm52, llm.ReasoningProvider},
 	}
 	for _, c := range cases {
-		if got := lightTierEffort(c.in); got != c.want {
-			t.Errorf("lightTierEffort(%q) = %q, want %q", c.in, got, c.want)
+		if got := lightTierEffort(c.in, c.model); got != c.want {
+			t.Errorf("lightTierEffort(%q, %s) = %q, want %q", c.in, c.model.ID, got, c.want)
 		}
 	}
 }
@@ -39,6 +51,7 @@ func TestLightTierEffort(t *testing.T) {
 // The bug this guards against: a "medium" bot setting was normalized through
 // the main model's low/high/max vocabulary (-> "high") and then sent to the
 // light model, which spent its whole 1024-token output budget on thinking.
+// On GLM-5.2, capping at "low" does not help: that family serves low as high.
 func TestReplyEffort_LightTierVocabulary(t *testing.T) {
 	mainModel := llm.ChatModel("deepseek-flash")
 	lightModel := llm.ChatModel("glm-5.2")
@@ -46,32 +59,50 @@ func TestReplyEffort_LightTierVocabulary(t *testing.T) {
 	if got := replyEffort("medium", mainModel); got == nil || *got != "high" {
 		t.Fatalf("main model effort = %v, want high (unchanged default-tier behavior)", got)
 	}
-	got := replyEffort(lightTierEffort("medium"), lightModel)
-	if got == nil || *got != route.LightReasoningEffort {
-		t.Fatalf("light tier effort = %v, want %q", got, route.LightReasoningEffort)
+	got := replyEffort(lightTierEffort("medium", lightModel), lightModel)
+	if got == nil || *got != "minimal" {
+		t.Fatalf("light tier effort = %v, want minimal", got)
 	}
-	if got := replyEffort(lightTierEffort("none"), lightModel); got == nil || *got != "none" {
+	if got := replyEffort(lightTierEffort("none", lightModel), lightModel); got == nil || *got != "none" {
 		t.Fatalf("explicit off must be preserved, got %v", got)
+	}
+	ds := llm.ChatModel("deepseek-flash")
+	if got := replyEffort(lightTierEffort("medium", ds), ds); got == nil || *got != "low" {
+		t.Fatalf("deepseek light effort = %v, want low", got)
 	}
 }
 
 func TestLightTierExhausted(t *testing.T) {
+	atCap := func(reason llm.FinishReason, text string, tokens int) *llm.GenerateResult {
+		return &llm.GenerateResult{
+			FinishReason: reason,
+			Text:         text,
+			Usage:        llm.Usage{OutputTokens: tokens},
+		}
+	}
 	cases := []struct {
-		name  string
-		light bool
-		res   *llm.GenerateResult
-		want  bool
+		name   string
+		light  bool
+		res    *llm.GenerateResult
+		budget int
+		want   bool
 	}{
-		{"exhausted light turn", true, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: ""}, true},
-		{"whitespace only", true, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: " \n "}, true},
-		{"partial reply is not exhaustion", true, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: "half"}, false},
-		{"clean stop with empty text", true, &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: ""}, false},
-		{"full tier not eligible", false, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: ""}, false},
-		{"nil result", true, nil, false},
+		{"exhausted light turn", true, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: ""}, 1024, true},
+		{"whitespace only", true, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: " \n "}, 1024, true},
+		{"partial reply is not exhaustion", true, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: "half"}, 1024, false},
+		{"clean stop under budget", true, &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: ""}, 1024, false},
+		{"stop at the sent budget", true, atCap(llm.FinishReasonStop, "", 1024), 1024, true},
+		{"stop over the sent budget", true, atCap(llm.FinishReasonStop, " \n", 1100), 1024, true},
+		{"tool-call DSL is not a body", true, atCap(llm.FinishReasonLength, dsmlLeakFull, 100), 1024, true},
+		{"stop with only tool-call DSL at cap", true, atCap(llm.FinishReasonStop, dsmlLeakTruncated, 1024), 1024, true},
+		{"stop with DSL under budget stays", true, atCap(llm.FinishReasonStop, dsmlLeakFull, 20), 1024, false},
+		{"full tier not eligible", false, &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: ""}, 1024, false},
+		{"nil result", true, nil, 1024, false},
+		{"unknown budget does not treat stop as exhaustion", true, atCap(llm.FinishReasonStop, "", 1024), 0, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := lightTierExhausted(c.light, c.res); got != c.want {
+			if got := lightTierExhausted(c.light, c.res, c.budget); got != c.want {
 				t.Fatalf("lightTierExhausted = %v, want %v", got, c.want)
 			}
 		})
@@ -141,8 +172,8 @@ func TestLLMStage_LightTierUsesLowEffortOnLightModel(t *testing.T) {
 	if gotModelID != "glm-5.2" {
 		t.Fatalf("light tier ran model %q, want glm-5.2", gotModelID)
 	}
-	if gotEffort == nil || *gotEffort != route.LightReasoningEffort {
-		t.Fatalf("light tier effort = %v, want %q", gotEffort, route.LightReasoningEffort)
+	if gotEffort == nil || *gotEffort != "minimal" {
+		t.Fatalf("light tier effort = %v, want minimal (glm-5.2 serves low as high)", gotEffort)
 	}
 	if gotMaxTokens == nil || *gotMaxTokens != route.LightMaxTokens {
 		t.Fatalf("light tier max tokens = %v, want %d", gotMaxTokens, route.LightMaxTokens)
@@ -204,5 +235,142 @@ func TestLLMStage_FullTierEmptyLengthStillNotifies(t *testing.T) {
 	payload, _ := actions[0].Payload.(string)
 	if payload != truncationNotice {
 		t.Fatalf("reply = %q, want %q", payload, truncationNotice)
+	}
+}
+
+// GLM-5.2 reports stop, not length, when the shared budget is used up.
+// The light cap is 1024, which is far below the main model's max tokens, so
+// the usage fallback must compare against the budget that was actually sent.
+func TestLLMStage_LightTierStopAtCapUpgrades(t *testing.T) {
+	light := &tierProvider{name: "light", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
+		return &llm.GenerateResult{
+			FinishReason: llm.FinishReasonStop,
+			Text:         "",
+			Usage:        llm.Usage{OutputTokens: route.LightMaxTokens},
+		}, nil
+	}}
+	main := &tierProvider{name: "main", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
+		return &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: "已经改好了"}, nil
+	}}
+	stage := newLightTierStage(main, light, "medium")
+
+	out, err := stage.Process(context.Background(), newLightTierEnvelope())
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if light.calls != 1 || main.calls != 1 {
+		t.Fatalf("light calls=%d main calls=%d, want 1/1", light.calls, main.calls)
+	}
+	actions := out.Actions()
+	if len(actions) != 1 {
+		t.Fatalf("actions = %#v, want one reply", actions)
+	}
+	payload, _ := actions[0].Payload.(string)
+	if payload != "已经改好了" || strings.Contains(payload, truncationNotice) {
+		t.Fatalf("reply = %q, want the full-model answer without a bare notice", payload)
+	}
+}
+
+// A light turn that does produce a partial answer at the cap still tells the
+// user the answer was cut. Comparing usage to the main-model budget misses it.
+func TestLLMStage_LightTierPartialAtCapNotifies(t *testing.T) {
+	light := &tierProvider{name: "light", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
+		return &llm.GenerateResult{
+			FinishReason: llm.FinishReasonStop,
+			Text:         "half answer",
+			Usage:        llm.Usage{OutputTokens: route.LightMaxTokens},
+		}, nil
+	}}
+	main := &tierProvider{name: "main", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
+		t.Fatal("partial light reply must not upgrade")
+		return nil, nil
+	}}
+	stage := newLightTierStage(main, light, "medium")
+
+	out, err := stage.Process(context.Background(), newLightTierEnvelope())
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	actions := out.Actions()
+	if len(actions) != 1 {
+		t.Fatalf("actions = %#v, want one reply", actions)
+	}
+	payload, _ := actions[0].Payload.(string)
+	want := "half answer\n\n" + truncationNotice
+	if payload != want {
+		t.Fatalf("reply = %q, want %q", payload, want)
+	}
+}
+
+// Tool-call DSL is not a reply. A light turn that only emitted it and hit
+// the length cap retries on the full model instead of going silent after the
+// DSL is stripped.
+func TestLLMStage_LightTierDSMLOnlyUpgrades(t *testing.T) {
+	light := &tierProvider{name: "light", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
+		return &llm.GenerateResult{FinishReason: llm.FinishReasonLength, Text: dsmlLeakFull}, nil
+	}}
+	main := &tierProvider{name: "main", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
+		return &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: "已经改好了"}, nil
+	}}
+	stage := newLightTierStage(main, light, "medium")
+
+	out, err := stage.Process(context.Background(), newLightTierEnvelope())
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if light.calls != 1 || main.calls != 1 {
+		t.Fatalf("light calls=%d main calls=%d, want 1/1", light.calls, main.calls)
+	}
+	payload, _ := out.Actions()[0].Payload.(string)
+	if payload != "已经改好了" || strings.Contains(payload, "DSML") {
+		t.Fatalf("reply = %q", payload)
+	}
+}
+
+func TestLLMStage_IntentJudgeUsesModelVocabulary(t *testing.T) {
+	var judgeEffort *string
+	var sawJudge bool
+	main := &tierProvider{name: "main", reply: func(n int, params llm.GenerateParams) (*llm.GenerateResult, error) {
+		if params.MaxTokens != nil && *params.MaxTokens == 1024 && len(params.Tools) == 0 {
+			sawJudge = true
+			judgeEffort = params.ReasoningEffort
+			return &llm.GenerateResult{
+				FinishReason: llm.FinishReasonStop,
+				Text:         `{"verdict":"NO","reason":"query"}`,
+			}, nil
+		}
+		if n == 1 {
+			return &llm.GenerateResult{
+				FinishReason: llm.FinishReasonToolCalls,
+				ToolCalls: []llm.ToolCall{{
+					ToolCallID: "c1", ToolName: "post_note", Input: map[string]any{},
+				}},
+			}, nil
+		}
+		return &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: "没有发出。"}, nil
+	}}
+	stage := NewLLMStage("llm", main, LLMConfig{
+		Model:           llm.ChatModel("glm-5.3"),
+		ReasoningEffort: "medium",
+		MaxSteps:        2,
+		Tools: []llm.Tool{{
+			Name:               "post_note",
+			RequiresUserIntent: true,
+			Parameters:         map[string]any{"type": "object", "properties": map[string]any{}},
+			Execute: func(*llm.ToolExecContext, any) (any, error) {
+				return "posted", nil
+			},
+		}},
+	}, nil, zap.NewNop().Sugar())
+	env := core.NewEnvelope(core.Message{ID: "m", BotID: "bot", Text: "hello there"})
+
+	if _, err := stage.Process(context.Background(), env); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if !sawJudge {
+		t.Fatal("intent judge was not called")
+	}
+	if judgeEffort == nil || *judgeEffort != "high" {
+		t.Fatalf("judge effort = %v, want high (glm-5.3 has no medium)", judgeEffort)
 	}
 }

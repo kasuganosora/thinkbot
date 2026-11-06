@@ -15,7 +15,7 @@ func TestL1RoutingUsesLowReasoningEffort(t *testing.T) {
 		model string
 		want  string // "" 表示不发 reasoning_effort
 	}{
-		{"glm-5.2", "low"},
+		{"glm-5.2", "minimal"}, // low is accepted but served as high
 		{"glm-5.3", "low"},
 		{"deepseek-flash", "low"},
 		{"glm-4.5", ""},

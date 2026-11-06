@@ -104,29 +104,50 @@ func lightMaxTokens(light bool, configured *int) *int {
 	return &capTokens
 }
 
-// lightTierEffort keeps a light-tier turn on the cheap reasoning level even
-// when the bot is configured for a higher effort on its main model. The
-// effort must be resolved against the model that actually runs the turn:
+// lightTierEffort keeps a light-tier turn from inheriting a heavy main-model
+// effort. The floor is chosen for the model that actually runs the turn:
 // mapping a "medium" setting through a main model with a low/high/max
 // vocabulary yields "high", and a reasoning light model can spend the whole
 // LightMaxTokens budget on that thinking, returning no content at all.
-// Explicit "do not think" settings are preserved.
-func lightTierEffort(configured string) string {
+// GLM-5.2 accepts "low" but serves it as high, so the floor there is
+// "minimal" (see llm.LowestReasoningEffort). Explicit off / none / minimal
+// settings are preserved; replyEffort still maps them into the model vocabulary.
+func lightTierEffort(configured string, model *llm.Model) string {
 	e := strings.ToLower(strings.TrimSpace(configured))
 	switch e {
-	case "", llm.ReasoningProvider, "off", "default", "none":
+	case "", llm.ReasoningProvider, "off", "default", "none", "minimal":
 		return e
 	}
-	return route.LightReasoningEffort
+	id := ""
+	if model != nil {
+		id = model.ID
+	}
+	if floor := llm.LowestReasoningEffort(id); floor != "" {
+		return floor
+	}
+	return e
 }
 
 // lightTierExhausted reports a light-tier turn that burned its small output
 // budget on reasoning and produced no reply body at all. There is no partial
 // answer to warn about, so the turn is retried on the full model instead.
-func lightTierExhausted(lightTier bool, result *llm.GenerateResult) bool {
-	return lightTier && result != nil &&
-		result.FinishReason == llm.FinishReasonLength &&
-		strings.TrimSpace(result.Text) == ""
+//
+// budget is the max output tokens actually sent on this turn (0 = unknown).
+// A body that is only tool-call DSL or inline thinking does not count: those
+// are stripped before send. Some providers (GLM-5.2) report finish_reason
+// "stop" rather than "length" when that shared budget is used up; output
+// tokens at the sent cap are the same exhaustion.
+func lightTierExhausted(lightTier bool, result *llm.GenerateResult, budget int) bool {
+	if !lightTier || result == nil {
+		return false
+	}
+	if strings.TrimSpace(CleanOutboundText(result.Text)) != "" {
+		return false
+	}
+	if result.FinishReason == llm.FinishReasonLength {
+		return true
+	}
+	return budget > 0 && result.Usage.OutputTokens >= budget
 }
 
 // truncationNotice is appended to a partially generated reply so the user is
@@ -1340,7 +1361,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 会把 1024 输出预算全花在思考上、一个字正文都不吐（见 lightTierEffort）。
 	effort := s.config.ReasoningEffort
 	if lightTier {
-		effort = lightTierEffort(effort)
+		effort = lightTierEffort(effort, execModel)
 	}
 	params := llm.GenerateParams{
 		Model:            execModel,
@@ -1395,7 +1416,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		UserRequest: env.Message.Text,
 		// 同一护栏的 LLM 快判客户端：关键词未命中时由 LLM 裁决口语化授权措辞
 		// （「发条 misskey」），沿用会话模型。参照 ApprovalHandler 的注入方式。
-		IntentJudge: llm.NewProviderIntentJudge(s.provider, s.config.Model, reasoningEffortPtr(s.config.ReasoningEffort)),
+		// 快判与主回复走同一模型，必须用该模型的词表。直接传配置值会把
+		// "medium" 发给只接受 low/high/max 的模型，请求 400 后护栏 fail-closed，
+		// 合法的写操作被误拦。
+		IntentJudge: llm.NewProviderIntentJudge(s.provider, s.config.Model, replyEffort(s.config.ReasoningEffort, s.config.Model)),
 	}
 
 	// 注入工具审批处理器（HITL 门禁）。为 nil 时 orchestrator 不做拦截。
@@ -1636,7 +1660,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// light tier 的输出预算只有 1024，推理型 light 模型可能把额度全花在
 	// 思考上、一个字正文都不吐。这不是「回复被截断」（没有半成品可 warn），
 	// 而是这一档没能回答问题 —— 自动升到主模型重跑，别把纯提示当回复发出。
-	autoUpgrade := lightTierExhausted(lightTier, result)
+	sentMax := 0
+	if params.MaxTokens != nil && *params.MaxTokens > 0 {
+		sentMax = *params.MaxTokens
+	}
+	autoUpgrade := lightTierExhausted(lightTier, result, sentMax)
 	if autoUpgrade {
 		logger.Warnw("light tier exhausted output budget without a reply, upgrading to full model",
 			"message_id", env.Message.ID,
@@ -1745,9 +1773,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 否则会被静默截断（回复写到一半断掉、毫无提示）。
 	// 正文为空时不能把提示语单独发出去：那会变成一条「答非所问」的回复。
 	// light tier 的空正文轮次已由上方自动升级重跑（见 lightTierExhausted）。
+	// 触顶判断用本轮实际发出的上限。light tier 会把上限压到 LightMaxTokens，
+	// 再拿主模型的 MaxTokens 去比，1024 的耗尽永远达不到，截断提示和升级都不会触发。
 	hitCap := result.FinishReason == llm.FinishReasonLength
-	if !hitCap && s.config.MaxTokens != nil && *s.config.MaxTokens > 0 &&
-		result.Usage.OutputTokens >= *s.config.MaxTokens {
+	if !hitCap && sentMax > 0 && result.Usage.OutputTokens >= sentMax {
 		hitCap = true
 	}
 	if hitCap && !lurkMode && !heartbeatMode {
