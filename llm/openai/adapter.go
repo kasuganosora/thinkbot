@@ -299,8 +299,9 @@ func paramsToOpenAIRequest(params *llm.GenerateParams) (*CreateResponseRequest, 
 			return nil, err
 		}
 		req.Tools = tools
-		if params.ToolChoice != nil {
-			req.ToolChoice = toJSONRawMessage(params.ToolChoice)
+		// 思考模式不接受 required 的模型要降级，否则整轮请求会被 400 打回。
+		if choice := llm.NormalizeToolChoice(params.Model.ID, params.ToolChoice); choice != nil {
+			req.ToolChoice = toJSONRawMessage(choice)
 		}
 	}
 
