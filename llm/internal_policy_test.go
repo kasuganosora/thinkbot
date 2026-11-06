@@ -195,6 +195,25 @@ func TestInternalPolicy_MemoryDedupBuiltinCap(t *testing.T) {
 	}
 }
 
+func TestLowestReasoningEffort(t *testing.T) {
+	cases := []struct{ model, want string }{
+		// GLM-5.2 accepts low but serves it as high; minimal is the floor that skips thinking.
+		{"glm-5.2", "minimal"},
+		{"z-ai/glm-5.2", "minimal"},
+		{"glm-5.3", "low"},
+		{"deepseek-flash", "low"},
+		{"vendor/deepseek-v4-pro", "low"},
+		{"gpt-4o", "low"},
+		{"glm-4.7", ""},
+		{"glm-5.1", ""},
+	}
+	for _, c := range cases {
+		if got := LowestReasoningEffort(c.model); got != c.want {
+			t.Errorf("Lowest(%q)=%q, want %q", c.model, got, c.want)
+		}
+	}
+}
+
 func TestCanonicalReasoningLevels(t *testing.T) {
 	want := []string{"max", "high", "medium", "low", "minimal", "none"}
 	if len(CanonicalReasoningLevels) != len(want) {
