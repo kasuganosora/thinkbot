@@ -388,6 +388,24 @@ func vocabularyOf(f reasoningFamily) reasoningVocabulary {
 	}
 }
 
+// LowestReasoningEffort is the smallest thinking effort this model will
+// actually apply ("" = do not send the parameter).
+//
+// GLM-5.2 accepts "low" but serves low/medium as high; none and minimal skip
+// thinking, so the floor on that vocabulary is "minimal". Families that only
+// accept low/high/max have no cheaper value than "low". Unknown models keep
+// the OpenAI-style "low". Sending "low" to GLM-5.2 does not cap thinking.
+func LowestReasoningEffort(model string) string {
+	switch reasoningFamilyOf(model) {
+	case familyNoEffort:
+		return ""
+	case familyFull:
+		return "minimal"
+	default:
+		return "low"
+	}
+}
+
 // NormalizeReasoningEffort maps effort into the vocabulary accepted by model
 // ("" = do not send). The value is first parsed into a canonical level; a
 // family with a reduced vocabulary then maps that level onto its own strings.

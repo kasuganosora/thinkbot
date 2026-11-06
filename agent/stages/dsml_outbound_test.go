@@ -100,6 +100,30 @@ func TestOutputCleanStreamFilter_DSMLParity(t *testing.T) {
 	}
 }
 
+// 流结束时仍停在 "<" / "<|" 上的普通文本必须发出。这些是 DSML 前缀的真前缀，
+// 但还不是开标签；扣住后丢掉会让流式拼接短于最终出站正文。
+func TestOutputCleanStreamFilter_TrailingAngleParity(t *testing.T) {
+	samples := []string{
+		"compare a < b, then stop <",
+		"token ends <|",
+		"a < b",
+	}
+	for _, raw := range samples {
+		want := CleanOutboundText(raw)
+		for _, replyTags := range []bool{false, true} {
+			f := NewOutputCleanStreamFilter(replyTags)
+			var got strings.Builder
+			for i := 0; i < len(raw); i++ {
+				got.WriteString(f.Feed(raw[i : i+1]))
+			}
+			got.WriteString(f.Flush())
+			if out := got.String(); out != want {
+				t.Fatalf("replyTags=%v raw %q: stream %q != outbound %q", replyTags, raw, out, want)
+			}
+		}
+	}
+}
+
 // DSML 混在 <public> 块里：标签被剥离，块内 DSML 之前的正文仍可发出。
 func TestCleanPublicBlock_DSML(t *testing.T) {
 	if got := cleanPublicBlock(dsmlLeakFull); got != "" {

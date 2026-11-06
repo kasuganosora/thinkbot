@@ -26,9 +26,6 @@ const (
 	defaultRouteTimeout = 8 * time.Second
 	routeMaxSteps       = 3
 	routeMaxTokens      = 256
-
-	// L1 只做一次三选一的路由分类，用低推理档把调用压在路由超时内。
-	routeReasoningEffort = LightReasoningEffort
 )
 
 // bindCodePattern matches an authorization code and nothing else, so those
@@ -336,15 +333,16 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 		Temperature: &temp,
 		MaxTokens:   &maxTok,
 	}
-	// L1 只做一次三选一的路由分类，不需要深度推理。推理型 light 模型在未指定
+	// L1 只做一次三选一的路由分类，不需要深度推理。推理型模型在未指定
 	// reasoning_effort 时会按默认档思考，单次调用会稳定超过 defaultRouteTimeout，
-	// 使整条消息白等超时后才走 fallback。显式压到低档，并经统一档位层映射成
-	// 目标模型接受的取值（不支持该参数的模型族返回空值 → 保持不发送）。
+	// 使整条消息白等超时后才走 fallback。发给该模型真正会压低思考的档位：
+	// GLM-5.2 接受 low 但按 high 执行，必须发 minimal；三档词表的最低档是 low；
+	// 不支持该参数的模型族返回空值，保持不发送。
 	modelID := ""
 	if s.model != nil {
 		modelID = s.model.ID
 	}
-	if effort := llm.NormalizeReasoningEffort(modelID, routeReasoningEffort); effort != "" {
+	if effort := llm.LowestReasoningEffort(modelID); effort != "" {
 		params.ReasoningEffort = &effort
 	}
 	cfg := &llm.OrchestrateConfig{
