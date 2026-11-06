@@ -132,7 +132,10 @@ func significantTrailingPublic(s string) bool {
 // 只把 <recalled_memory> 标签本身去掉、正文原样留下——那正好是跨会话召回
 // 最怕的结果（私聊记忆被复述进群聊）。
 func cleanPublicBlock(content string) string {
-	out := memory.StripRecallBlocks(strings.TrimSpace(content))
+	// 工具调用 DSL 残片必须最先整块剥掉：它的标签以全角竖线开头，strayTagRe
+	// 匹配不到，留到后面就会连参数值一起被当成公开回复发出。
+	out := memory.StripDSMLBlocks(strings.TrimSpace(content))
+	out = memory.StripRecallBlocks(out)
 	out = memory.StripInternalTags(out)
 	out = strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))
 	// 纵深防御：万一票据明文经记忆/幻觉混入出站正文，最后一道遮蔽成占位符。

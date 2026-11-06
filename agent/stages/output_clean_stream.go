@@ -13,6 +13,9 @@ import (
 // StripThinking → extractPublicReply 那条共享清洗链）同口径的标签清洗，让 Web 渠道
 // 实时推送的 delta 与其他渠道最终发出的内容一致：
 //
+//   - <｜｜DSML｜｜ ...> 工具调用 DSL：始终整块丢弃，从开标签前缀起丢到流尾
+//     （与 CleanOutboundText 的 memory.StripDSMLBlocks 同口径）；标签以全角竖线开头，
+//     不满足 isASCIILetter，必须在「等 '>' / 按 ASCII 字母判标签」之前识别；
 //   - <think>/<thinking> 块：始终整块丢弃（与 memory.StripThinking 一致，未闭合则丢到流尾）；
 //   - replyTags=true（回复控制门控生效时，与 Process 中 RequireReplyControl && !outreach 同条件）：
 //   - `<internal`…：整块丢弃。开标签的 `>` 可缺，看到完整的 `<internal` 且后面不是更长的
@@ -76,6 +79,7 @@ const (
 	ocInternal               // <internal> 区块内（丢弃）
 	ocThink                  // <think> 区块内（丢弃）
 	ocRecall                 // 召回记忆块内（丢弃，见 tagRecallOpen）
+	ocDSML                   // 工具调用 DSL 残片内（丢弃，见 tagDSMLOpen）
 )
 
 // maxStreamTagLen 是为判定「是否为标签」最多扣住的字节数；超过仍未见 '>' 则按普通文本放行
@@ -143,6 +147,14 @@ func (f *OutputCleanStreamFilter) flushTrailing(out *strings.Builder) {
 func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, final bool) {
 	for buf != "" {
 		switch f.mode {
+		case ocDSML:
+			// 模型把内部工具调用 DSL 当成普通文本吐出：从开标签前缀起，其后内容
+			// 一律丢弃到流尾。不找闭合标签——DSL 可能残缺/被截断，等闭合等于放行。
+			// 与 CleanOutboundText 的 StripDSMLBlocks 同口径，保证流式与最终
+			// 出站 payload 一致（已推送的前缀之前正文收不回来，由 result.Text
+			// 侧的剥离兜底，不额外污染落库）。
+			return
+
 		case ocThink:
 			idx, n := indexFoldAny(buf, "</think>", "</thinking>")
 			if idx < 0 {
@@ -247,6 +259,7 @@ const (
 	tagPublicOpen
 	tagPublicClose
 	tagRecallOpen // <recalled_memory> / <user_profile>：连内容整块丢弃
+	tagDSMLOpen   // <｜｜DSML｜｜ ...> 工具调用 DSL：连内容丢到流尾
 	tagStray      // 其余标签 / 畸形 /public /internal（'>' 可缺）：去掉标签文本
 )
 
@@ -260,6 +273,20 @@ func (f *OutputCleanStreamFilter) nextTagStart(s string) int {
 
 // classify 判定 s（以 '<' 或 '/' 开头）的标签类型与长度。
 func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) {
+	// DSML 开标签必须在所有 ASCII 标签逻辑之前判定：
+	//   - 它以 '<' + 全角竖线开头，既不满足 isASCIILetter，也凑不出 '>' 之前
+	//     的 ASCII 标签名，走常规分支会被判 tagNone 逐字放行；
+	//   - 与 StrayTagRe 无关，且不能受 replyTags 开关影响（无条件丢弃）。
+	// incomplete 时扣住尾部等下一个 chunk：前缀被从中间切开也要拦得住。
+	if n, match, incomplete := memory.DSMLOpenPrefixAt(s); match {
+		return tagDSMLOpen, n
+	} else if incomplete {
+		// 半个前缀（chunk 从多字节全角竖线中间切开）始终扣住。
+		// final 时同样扣住：Flush 随后重置过滤器，这段残片随 pending 一起
+		// 丢弃，绝不当普通文本吐给用户。
+		return tagIncomplete, 0
+	}
+
 	if s[0] == '/' {
 		// 畸形闭标签（缺 '<'）：/public 与 /internal，`>` 可有可无。
 		// 只认这两个名字，避免 URL 等正文里的 '/' 被长时间扣住。
@@ -401,6 +428,8 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 	case tagRecallOpen:
 		f.parent = f.mode
 		f.mode = ocRecall
+	case tagDSMLOpen:
+		f.mode = ocDSML
 	}
 }
 

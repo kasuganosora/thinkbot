@@ -104,6 +104,50 @@ func lightMaxTokens(light bool, configured *int) *int {
 	return &capTokens
 }
 
+// lightTierEffort keeps a light-tier turn on the cheap reasoning level even
+// when the bot is configured for a higher effort on its main model. The
+// effort must be resolved against the model that actually runs the turn:
+// mapping a "medium" setting through a main model with a low/high/max
+// vocabulary yields "high", and a reasoning light model can spend the whole
+// LightMaxTokens budget on that thinking, returning no content at all.
+// Explicit "do not think" settings are preserved.
+func lightTierEffort(configured string) string {
+	e := strings.ToLower(strings.TrimSpace(configured))
+	switch e {
+	case "", llm.ReasoningProvider, "off", "default", "none":
+		return e
+	}
+	return route.LightReasoningEffort
+}
+
+// lightTierExhausted reports a light-tier turn that burned its small output
+// budget on reasoning and produced no reply body at all. There is no partial
+// answer to warn about, so the turn is retried on the full model instead.
+func lightTierExhausted(lightTier bool, result *llm.GenerateResult) bool {
+	return lightTier && result != nil &&
+		result.FinishReason == llm.FinishReasonLength &&
+		strings.TrimSpace(result.Text) == ""
+}
+
+// truncationNotice is appended to a partially generated reply so the user is
+// not misled into thinking a truncated answer is complete.
+const truncationNotice = "⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。"
+
+// appendTruncationNotice keeps the notice an addition to real content. When
+// the model produced no body at all, a standalone notice would become the
+// entire reply and read as a non-answer. Light-tier turns are retried on the
+// full model (see lightTierExhausted); only a full-tier empty reply surfaces
+// the notice on its own as a last-resort explanation.
+func appendTruncationNotice(text string, lightTier bool) string {
+	if strings.TrimSpace(text) != "" {
+		return text + "\n\n" + truncationNotice
+	}
+	if lightTier {
+		return text
+	}
+	return truncationNotice
+}
+
 func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.Tool {
 	if cfg.ToolResolver != nil {
 		tools, err := cfg.ToolResolver.ResolveForEnvelope(ctx, env)
@@ -500,6 +544,11 @@ const slowTurnLogThreshold = 5 * time.Minute
 // looksLikeInternalThinking 判断清洗后的纯文本是否疑似模型未打标签的内心思考泄漏。
 // 仅用于 extractPublicReply 路径 3 的 fail-closed 兜底；命中即不出站。
 func looksLikeInternalThinking(clean string) bool {
+	// 工具调用 DSL 残片：CleanOutboundText 已整块剥离，这里作为路径 3 的
+	// fail-closed 兜底——万一有变体绕过，也不把内部协议当纯文本回复发出。
+	if memory.HasDSMLMark(clean) {
+		return true
+	}
 	if replyControlLeakRe.MatchString(clean) {
 		return true
 	}
@@ -660,15 +709,19 @@ func (s *LLMStage) publicReplyWithAudit(ctx context.Context, env *core.Envelope,
 //  1. memory.StripThinking：部分模型（DeepSeek-R1 / GLM / QwQ 等）把推理过程以
 //     <think>...</think> 内联在正文里，而非放进结构化的 Reasoning 字段。这些内容属于
 //     「心里话」，绝不能发给用户（项目原先只在记忆写入侧清洗，出站链路必须补上）。
-//  2. memory.StripInternalState：纵深防御，剥离模型从系统提示里复述出来的内部状态
+//  2. memory.StripDSMLBlocks：剥离模型把内部工具调用 DSL 当成普通文本写进 content
+//     的内容。该标签以全角竖线开头，常规残留标签正则匹配不到，必须单独整块拒收；
+//     否则会作为回复外发并落进对话历史（后续再被召回，形成自我强化）。
+//  3. memory.StripInternalState：纵深防御，剥离模型从系统提示里复述出来的内部状态
 //     （记忆用量指标等），例如把 "[2,206/2,200 chars]" 写成「当前记忆已接近容量上限
 //     （2,206/2,200 字符）」公开发到时间线。
-//  3. memory.StripContextMarkers：纵深防御，剥离入站阶段注入的上下文标记
+//  4. memory.StripContextMarkers：纵深防御，剥离入站阶段注入的上下文标记
 //     （[Reply to ...] / [Renote from ...] / [note_id: ...]）。模型偶发会原样回显到
 //     回复开头，导致对外帖子出现诡异方括号前缀。
 //
 // 回复控制门控开启时，LLMStage.Process 随后再做 parseReplyControl + extractPublicReply。
 func CleanOutboundText(text string) string {
+	text = memory.StripDSMLBlocks(text)
 	text = memory.StripThinking(text)
 	text = memory.StripInternalState(text)
 	return memory.StripContextMarkers(text)
@@ -1282,7 +1335,13 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		messages = appendReplyControlReminder(messages)
 	}
 
-	// 构建参数
+	// 构建参数。推理档位必须按「实际执行模型」归一化：light tier 跑的是
+	// LightModel，若沿用主模型词表，中档会被翻成高档，推理型 light 模型
+	// 会把 1024 输出预算全花在思考上、一个字正文都不吐（见 lightTierEffort）。
+	effort := s.config.ReasoningEffort
+	if lightTier {
+		effort = lightTierEffort(effort)
+	}
 	params := llm.GenerateParams{
 		Model:            execModel,
 		System:           systemPrompt,
@@ -1293,7 +1352,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		FrequencyPenalty: s.config.FrequencyPenalty,
 		PresencePenalty:  s.config.PresencePenalty,
 		MaxTokens:        lightMaxTokens(lightTier, s.config.MaxTokens),
-		ReasoningEffort:  replyEffort(s.config.ReasoningEffort, s.config.Model),
+		ReasoningEffort:  replyEffort(effort, execModel),
 	}
 
 	// 潜水模式：强制结构化 JSON 输出，使「是否值得记忆」成为一个与语言无关的布尔，
@@ -1574,7 +1633,17 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		}
 	}
 
-	if lightTier && route.UpgradeRequested(env) && !route.Upgraded(env) {
+	// light tier 的输出预算只有 1024，推理型 light 模型可能把额度全花在
+	// 思考上、一个字正文都不吐。这不是「回复被截断」（没有半成品可 warn），
+	// 而是这一档没能回答问题 —— 自动升到主模型重跑，别把纯提示当回复发出。
+	autoUpgrade := lightTierExhausted(lightTier, result)
+	if autoUpgrade {
+		logger.Warnw("light tier exhausted output budget without a reply, upgrading to full model",
+			"message_id", env.Message.ID,
+			"steps", len(result.Steps),
+			"tokens", result.Usage.TotalTokens)
+	}
+	if lightTier && (route.UpgradeRequested(env) || autoUpgrade) && !route.Upgraded(env) {
 		route.MarkUpgraded(env)
 		env.ClearActions()
 		recordUsage(ctx, s.config.UsageRecorder, env, execModel, s.name, result)
@@ -1674,13 +1743,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 把 finish_reason 报成 "stop" 而非 "length"，但 usage.outputTokens 已达
 	// max_tokens 上限。因此不能只看 FinishReasonLength，还要用 usage 触顶兜底，
 	// 否则会被静默截断（回复写到一半断掉、毫无提示）。
+	// 正文为空时不能把提示语单独发出去：那会变成一条「答非所问」的回复。
+	// light tier 的空正文轮次已由上方自动升级重跑（见 lightTierExhausted）。
 	hitCap := result.FinishReason == llm.FinishReasonLength
 	if !hitCap && s.config.MaxTokens != nil && *s.config.MaxTokens > 0 &&
 		result.Usage.OutputTokens >= *s.config.MaxTokens {
 		hitCap = true
 	}
 	if hitCap && !lurkMode && !heartbeatMode {
-		result.Text += "\n\n⚠️ 提示：本次回复因达到输出 token 上限被截断，任务可能未完成。"
+		result.Text = appendTruncationNotice(result.Text, lightTier)
 	}
 
 	// 若编排循环因步数守卫（撞硬上限或陷入重复循环）而停止，追加提示，
