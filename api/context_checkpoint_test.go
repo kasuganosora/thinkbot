@@ -78,9 +78,11 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 		t.Fatalf("recent window wrong: %q..%q", got[1].Content, got[4].Content)
 	}
 
-	// MessageBuilder view: system summary + verbatim recent, IDs aligned.
+	// MessageBuilder view: system summary + verbatim recent + one synthetic
+	// execution-record system message after each assistant turn. IDs stay
+	// aligned (synthetic entries are 0).
 	msgs, ids := chatHistoryToLLM(got)
-	if len(msgs) != 5 || len(ids) != 5 {
+	if len(msgs) != 7 || len(ids) != 7 {
 		t.Fatalf("llm msgs=%d ids=%d", len(msgs), len(ids))
 	}
 	if msgs[0].Role != llm.MessageRoleSystem || !strings.Contains(llm.TextFromParts(msgs[0].Content), "old stuff") ||
@@ -90,9 +92,21 @@ func TestContextCheckpoint_HistoryUsesSummaryPlusRecent(t *testing.T) {
 	if ids[0] != 0 || ids[1] != got[1].ID || llm.TextFromParts(msgs[1].Content) != "msg-6" {
 		t.Fatalf("alignment wrong: ids=%v", ids)
 	}
+	records := 0
+	for i := range msgs {
+		if strings.Contains(llm.TextFromParts(msgs[i].Content), "<execution_record>") {
+			records++
+			if msgs[i].Role != llm.MessageRoleSystem || ids[i] != 0 {
+				t.Fatalf("execution record must be a synthetic system message: i=%d role=%s id=%d", i, msgs[i].Role, ids[i])
+			}
+		}
+	}
+	if records != 2 {
+		t.Fatalf("want one execution record per assistant turn, got %d", records)
+	}
 	// Same via metadata (as the real MessageBuilder / HistoryMessageIDs see it).
 	meta := core.Message{Metadata: map[string]any{"chat_history": got}}
-	if mids := chatHistoryMessageIDs(meta); len(mids) != 5 || mids[4] != got[4].ID {
+	if mids := chatHistoryMessageIDs(meta); len(mids) != 7 || mids[5] != got[4].ID || mids[6] != 0 {
 		t.Fatalf("chatHistoryMessageIDs=%v", mids)
 	}
 

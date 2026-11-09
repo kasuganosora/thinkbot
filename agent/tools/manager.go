@@ -218,22 +218,50 @@ func (m *ToolManager) ResolveTools(ctx context.Context, sctx *ToolSessionContext
 	pp := m.policyProvider
 	m.mu.RUnlock()
 
+	all := tools
+	var filtered []llm.Tool
 	if ae != nil {
-		return ae.FilterTools(ctx, tools, sctx)
-	}
-	if pp != nil {
+		var err error
+		filtered, err = ae.FilterTools(ctx, tools, sctx)
+		if err != nil {
+			return nil, err
+		}
+	} else if pp != nil {
 		policy := pp.GetPolicy(sctx.BotID)
-		tools = policy.FilterTools(tools, sctx)
+		filtered = policy.FilterTools(tools, sctx)
+	} else {
+		filtered = tools
 	}
+	if sctx != nil && len(filtered) < len(all) {
+		sctx.HiddenTools = hiddenToolNames(all, filtered)
+	}
+	return filtered, nil
+}
 
-	return tools, nil
+// hiddenToolNames returns the names present in all but absent from filtered.
+func hiddenToolNames(all, filtered []llm.Tool) []string {
+	kept := make(map[string]bool, len(filtered))
+	for _, t := range filtered {
+		kept[t.Name] = true
+	}
+	var out []string
+	for _, t := range all {
+		if !kept[t.Name] {
+			out = append(out, t.Name)
+		}
+	}
+	return out
 }
 
 // ResolveForEnvelope 从 Envelope 构建会话上下文并解析工具。
 // 返回工具列表，如果没有任何工具返回 nil。
 func (m *ToolManager) ResolveForEnvelope(ctx context.Context, env *core.Envelope) ([]llm.Tool, error) {
 	sctx := envelopeToSessionContext(env)
-	return m.ResolveTools(ctx, sctx)
+	tools, err := m.ResolveTools(ctx, sctx)
+	if env != nil && len(sctx.HiddenTools) > 0 {
+		env.Set(core.KVHiddenTools, sctx.HiddenTools)
+	}
+	return tools, err
 }
 
 // StaticCount 返回静态注册的工具数量。

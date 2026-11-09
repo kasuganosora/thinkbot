@@ -137,6 +137,12 @@ const (
 	// 静默降级必须可解释，否则会被误判为 Bot 故障。
 	KVSuppressReplyReason = "reply.suppress_reason"
 
+	// KVHiddenTools carries the tool names that the permission layer removed
+	// from this turn's tool list ([]string). LLMStage reads it to observe
+	// attempts to reach a disabled capability through exec instead of the
+	// permission page. Observation only: it never blocks a tool call.
+	KVHiddenTools = "tools.hidden_names"
+
 	// KVCaptureSuppressedExchange 标记「本轮回复虽被门禁抑制（不说出口），
 	// 用户原文仍须捕获为 L0 对话记忆」。
 	//

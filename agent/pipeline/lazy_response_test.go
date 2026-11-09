@@ -560,6 +560,56 @@ func TestLazyResponseCascade_ConceptVetoedRealLazyConfirmed(t *testing.T) {
 	}
 }
 
+// TestLazyResponseMiddleware_ClaimReconciliation 验证确定性「声明↔证据对账」：
+// 不需要二级 LLM 裁决也能拦下「没调工具却声称编译通过」，且上一轮执行记录
+// 能作为合法证据放行真实复述。
+func TestLazyResponseMiddleware_ClaimReconciliation(t *testing.T) {
+	const claim = "改完了，接口已去掉全部参数，`go build ./...` 通过（EXIT=0）。"
+
+	run := func(prior []string) (int, LazyJudgeRecord, *core.Envelope) {
+		sink := &captureLazySink{}
+		cfg := NewLazyResponseConfig()
+		cfg.Sink = sink
+		cfg.PriorCommands = func(*core.Envelope) []string { return prior }
+		calls := 0
+		dummy := &core.StageFunc{
+			StageName: "llm",
+			Fn: func(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
+				calls++
+				text := claim
+				if calls > 1 {
+					text = "我本轮没有执行任何工具，上一轮的说法需要重新核实。"
+				}
+				gr := &llm.GenerateResult{Text: text, Steps: []llm.StepResult{{Text: text}}}
+				env.Set("llm.result", gr)
+				return env, nil
+			},
+		}
+		wrapped := LazyResponseMiddleware(cfg)(dummy)
+		result, err := wrapped.Process(context.Background(), core.NewEnvelope(core.Message{Channel: "claim-ch", ID: "1"}))
+		if err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		return calls, sink.last(), result
+	}
+
+	calls, rec, result := run(nil)
+	if calls != 2 {
+		t.Fatalf("unbacked claim must loop-back even with no LLM judge: calls=%d", calls)
+	}
+	if rec.FinalAction != "loopback" || !strings.Contains(rec.ClaimCheck, "go_build") {
+		t.Fatalf("claim_check not recorded: %+v", rec)
+	}
+	if !hasLazyWarning(getWarnings(result)) {
+		t.Fatal("claim loop-back must queue a hard warning")
+	}
+
+	calls, _, _ = run([]string{"go build ./..."})
+	if calls != 1 {
+		t.Fatalf("prior-turn evidence must not loop-back: calls=%d", calls)
+	}
+}
+
 // TestLazyJudgeSinkRecords 验证落库槽写 JSONL 且可解析回结构。
 func TestLazyJudgeSinkRecords(t *testing.T) {
 	dir := t.TempDir()

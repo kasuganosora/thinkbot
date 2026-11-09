@@ -99,6 +99,15 @@ func normalizeTier(intent, model string) (string, string) {
 			model = ModelDefault
 		}
 	}
+	// A task or a follow-up on a task must never run on the light tier. The
+	// light tool surface has no exec/file tools, yet task continuations
+	// routinely ask for concrete changes; a light turn then has no way to do
+	// the work and fills the gap with a fabricated completion report.
+	// L1 may still answer "model=light" for these intents — override it here so
+	// every path (L1 tool, SetTier, fallback) agrees.
+	if intent == IntentTask || intent == IntentFollowup {
+		model = ModelDefault
+	}
 	return intent, model
 }
 

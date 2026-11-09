@@ -251,15 +251,26 @@ func checkpointSummaryContent(cp *dao.ContextCheckpoint, lastCovered time.Time) 
 // chatHistoryToLLM converts a loaded history window into LLM messages and the
 // aligned chat_messages IDs (0 for synthetic entries). It is the single source
 // of truth for both the MessageBuilder and compact_context's boundary mapping.
+//
+// After every assistant message it appends a synthetic system note carrying
+// that turn's runtime execution record. It is a separate message (not part of
+// the assistant content) on purpose: putting it in the assistant turn would
+// teach the model to imitate the format and invent its own records. The note
+// is derived from persisted tool_calls, excludes tool output, and is capped.
+// Synthetic entries get id 0, which compactedHistoryBoundary already supports.
 func chatHistoryToLLM(msgs []dao.ChatMessage) ([]llm.Message, []uint64) {
-	out := make([]llm.Message, 0, len(msgs))
-	ids := make([]uint64, 0, len(msgs))
+	out := make([]llm.Message, 0, len(msgs)*2)
+	ids := make([]uint64, 0, len(msgs)*2)
 	for _, m := range msgs {
 		switch m.Role {
 		case dao.ChatRoleUser:
 			out = append(out, llm.UserMessage(m.Content))
 		case dao.ChatRoleAssistant:
 			out = append(out, llm.AssistantMessage(m.Content))
+			ids = append(ids, m.ID)
+			out = append(out, llm.SystemMessage(BuildExecutionRecord(m.ToolCalls)))
+			ids = append(ids, 0)
+			continue
 		case dao.ChatRoleContextSummary:
 			out = append(out, llm.ConversationSummaryMessage(m.Content))
 		case dao.ChatRoleNotify:

@@ -29,6 +29,29 @@ func TestNarrowToolsDropsHeavyTools(t *testing.T) {
 	}
 }
 
+// A task/followup must never run on the light tier, even when L1 explicitly
+// asks for it: the light tool surface has no exec/file tools and would invite
+// a fabricated completion report.
+func TestNormalizeTier_TaskCannotUseLight(t *testing.T) {
+	for _, intent := range []string{IntentTask, IntentFollowup} {
+		gotIntent, gotModel := normalizeTier(intent, ModelLight)
+		if gotIntent != intent || gotModel != ModelDefault {
+			t.Fatalf("normalizeTier(%q, light) = (%q, %q)", intent, gotIntent, gotModel)
+		}
+		env := core.NewEnvelope(core.Message{Text: "继续改"})
+		SetTier(env, intent, ModelLight)
+		if WantsLight(env) {
+			t.Fatalf("SetTier(%q, light) must not produce a light turn", intent)
+		}
+	}
+	for _, intent := range []string{IntentChat, IntentProgress} {
+		_, gotModel := normalizeTier(intent, ModelLight)
+		if gotModel != ModelLight {
+			t.Fatalf("chat/progress must still be allowed on the light tier: %q", gotModel)
+		}
+	}
+}
+
 func TestUpgradeToolRequestsFullTierOnce(t *testing.T) {
 	env := core.NewEnvelope(core.Message{Text: "run the tests"})
 	SetTier(env, IntentChat, ModelLight)

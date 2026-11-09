@@ -12,44 +12,43 @@ import (
 )
 
 // ============================================================================
-// LazyResponseMiddleware — 检测"不调工具直接编造结论"的偷懒行为（两级级联）
+// LazyResponseMiddleware — 检测"不调工具直接编造结论"的偷懒行为（两级级联 + 对账）
 //
 // 问题场景：
 //   - 用户问"有没有安装 git"，模型不执行 which git 就直接说"未安装"
 //   - 用户问"系统信息"，模型不执行命令就编造表格
+//   - 用户让模型改代码，模型一个工具没调却说"改完了，go build 通过、make proto 成功"
 //
-// 两级级联（把裁判权从僵化正则交还给模型）：
-//   - [一级] 词表粗筛（高召回，允许误报）：纯正则命中"可能在编造环境状态"
-//     的文本模式。任务从"判对"降级为"别漏"——混沌靠二级消解，不在一级硬判。
+// 三条检测路径（按代价从低到高）：
+//   - [确定性对账] 动作完成声明 ↔ 运行时证据（本轮 Steps + 上轮持久化命令）。
+//     命中即同轮 loop-back，不需要 LLM 裁决，且可离线回放测误报率。
+//   - [一级] 词表粗筛（高召回，允许误报）：环境状态断言 + 裸动作完成声明。
 //   - [二级] LLM 语义裁决（LazyJudge）：只在一级命中后才调用，读"回复原文 +
-//     用户问题 + 本轮是否真调了工具"，输出结构化裁决 {lazy, entity_asserted,
-//     confidence, reason}。语义在字符串之外，只有模型能消解"X 不存在"到底是
-//     环境断言还是概念陈述这类混沌。
+//     用户问题 + 本轮是否真调了工具"，输出结构化裁决。
 //
 // 关键设计点（沿用管线既有的 L1 提取→置信门控→晋升 哲学）：
 //   1. 一级反着调：有二级兜底后词表放宽，宁可多漏给二级也不要在一级把真偷懒放跑。
-//   2. 二级用便宜快模型：只读一条回复+规则，无会话全上下文（loop-back 低频，
-//      成本可忽略）。
+//   2. 二级用便宜快模型：只读一条回复+规则，无会话全上下文（loop-back 低频）。
 //   3. 裁决喂关键证据：用户问题 + 实际工具调用，比词表准得多。
 //   4. 不对称权限：裁决器只能"确认"或"否决"一级已召回的回复，绝不能凭空扩大
 //      罪名去触发本没命中的回复——即使裁决器抽风，爆炸半径也被一级词表限死。
 //
 // 降级路径：
-//   - 模型已调工具（纠正行为）→ 复位该 channel 警告标记，直接发送。
-//   - 一级未命中 → 直接发送（零额外开销）。
+//   - 模型已调工具且文本未命中任何检测 → 复位该 channel 警告标记，直接发送。
+//   - 一级未命中且对账通过 → 直接发送（零额外开销）。
 //   - 二级裁决 lazy=false（否决）→ 直接发送原回复。
 //   - 二级裁决器报错 → fail-open 放行原回复（不重算，避免双重发送风险）。
-//   - 二级确认 lazy=true → 注入硬警告，同轮 loop-back 重算；ClearActions 保证
-//     修正轮成为 envelope 内唯一回复（防 2026-09-16 Telegram 重复回复事故）。
-//   - cfg.Judge == nil（未配置二级）→ 一级命中也不重算（降级为只检测不拦截）。
+//   - 确定性对账命中 / 二级确认偷懒 → 注入硬警告，同轮 loop-back 重算；
+//     ClearActions 保证修正轮成为 envelope 内唯一回复（防 2026-09-16 Telegram
+//     重复回复事故）。
+//   - cfg.Judge == nil（未配置二级）→ 一级命中也不重算（降级为只检测不拦截）；
+//     确定性对账不依赖 Judge，仍然生效。
 //
-// 每次一级召回都会经 LazyJudgeSink 落库（旁路、非阻塞），攒标注语料。
+// 每次一级召回/对账命中都会经 LazyJudgeSink 落库（旁路、非阻塞）。
 // ============================================================================
 
 // lazyPatterns 匹配"可能在编造环境状态"的中文文本模式（一级，高召回）。
 // 这些模式本身合法，但在"无工具调用"前提下出现极大概率是偷懒猜测。
-// 注意：一级不再要求"环境实体共现"——那道门控会让真偷懒（用不同措辞断言）
-// 在一级漏掉；语义是否真偷懒交给二级 LLM 裁决。
 var lazyPatterns = []*regexp.Regexp{
 	// 环境状态否定断言
 	regexp.MustCompile(`(?i)(未安装|没有安装|不存在|无法找到|找不到|不可用|未检测到|无可用)`),
@@ -98,7 +97,7 @@ type LazyJudgeResult struct {
 }
 
 // LazyJudge 二级 LLM 语义裁决器（Tier 2）。把"是否偷懒"的裁判权从正则交给模型。
-// 仅在一級正则召回后才被调用；裁决器只能确认或否决，不能扩大触发面。
+// 仅在一级正则召回后才被调用；裁决器只能确认或否决，不能扩大触发面。
 type LazyJudge interface {
 	Adjudicate(ctx context.Context, req LazyJudgeRequest) (*LazyJudgeResult, error)
 }
@@ -111,6 +110,11 @@ type LazyResponseConfig struct {
 	Judge LazyJudge
 	// Sink 判定结果落库槽（旁路观测）。nil 则不落库。
 	Sink LazyJudgeSink
+	// PriorCommands returns the shell commands persisted for the previous
+	// assistant turn. It lets claim reconciliation accept truthful references
+	// to work done in an earlier turn ("already pushed" / "build passed then").
+	// Nil means no prior evidence (more conservative).
+	PriorCommands func(env *core.Envelope) []string
 }
 
 // NewLazyResponseConfig 返回默认防偷懒配置。
@@ -127,9 +131,16 @@ func (c LazyResponseConfig) IsZero() bool {
 
 // hasLazyIndicators 一级召回：文本是否"可能"在偷懒（高召回，允许误报）。
 // 仅做正则粗筛——语义是否真偷懒由二级 LLM 裁决，不在此硬判。
+//
+// 除环境状态断言外，还召回「裸动作完成声明」（改完了 / 已修复 / 已删除）；
+// 带具体命令的完成声明（go build 通过 / 已推送）交给确定性对账先处理，
+// 不在这里重复召回，避免同一句话被两级各判一次。
 func hasLazyIndicators(text string) bool {
 	if len(strings.TrimSpace(text)) < 10 {
 		return false // 太短不算偷懒
+	}
+	if changeClaimRe.MatchString(text) {
+		return true
 	}
 	for _, pat := range lazyPatterns {
 		if pat.MatchString(text) {
@@ -151,6 +162,29 @@ func hadToolCalls(result *llm.GenerateResult) bool {
 	}
 	return false
 }
+
+// environmentWarning is the original lazy-guard hard warning.
+const environmentWarning = `[SYSTEM WARNING - URGENT]
+You just provided an answer about environment/system state WITHOUT calling any tools to verify.
+This is a CRITICAL violation. You MUST NOT guess or assume environment state.
+
+Rules you MUST follow:
+1. For ANY question about what is installed, what files exist, system info, network status, or any other verifiable fact — you MUST call the appropriate tool FIRST (exec/shell for commands, read_file/list_dir for files, web_fetch for URLs, etc.)
+2. Only AFTER receiving actual tool results may you base your answer on real data.
+3. If a tool call fails, report the failure honestly — do not fabricate a result.
+4. Your previous response was likely hallucinated. The user can see you did not call any tools.`
+
+// claimWarning explains exactly which claim had no runtime evidence, so the
+// recomputed turn can either perform the action or state honestly that it did not.
+const claimWarning = `[SYSTEM WARNING - URGENT]
+Your previous response claimed that an action was completed, but the runtime execution record for this turn contains NO matching tool call.
+Stating that something was done when it was not is a CRITICAL violation.
+
+Rules you MUST follow:
+1. A statement such as "build passed", "tests passed", "generated successfully", "committed", "pushed", or "the change is done" is only allowed when THIS TURN actually ran the corresponding tool and the result succeeded.
+2. Earlier turns' self-descriptions are NOT evidence. If the work happened in an earlier turn, say so explicitly instead of implying you did it now.
+3. If you cannot or did not run the action, say honestly that it was not executed and offer to do it.
+4. The user can see the tool calls; an unbacked completion claim will be rejected.`
 
 // LazyResponseMiddleware 返回一个 Middleware，检测并抑制"不调工具就下结论"的行为。
 func LazyResponseMiddleware(cfg LazyResponseConfig) Middleware {
@@ -181,21 +215,79 @@ func LazyResponseMiddleware(cfg LazyResponseConfig) Middleware {
 				}
 
 				channel := env.Message.Channel
+				hasTools := hadToolCalls(genResult)
 
-				// 模型已调用工具（纠正了行为）→ 复位该 channel 的警告标记，
+				// loopBack 复用同一 envelope 再次重算，只重算一次、不会无限递归
+				//（next 是更内层 stage，不含本 middleware）。重跑前清空首轮
+				// Action，使修正轮成为 envelope 里唯一的回复；重算失败则还原首轮，
+				// 保证至少有一条回复出站（2026-09-16 Telegram 重复回复事故）。
+				loopBack := func(message string, lazy bool, judgeRes *LazyJudgeResult, claimCheck string) (*core.Envelope, error) {
+					state.mu.Lock()
+					alreadyWarned := state.warned[channel]
+					if !alreadyWarned {
+						state.warned[channel] = true
+					}
+					state.mu.Unlock()
+
+					if alreadyWarned {
+						recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), hasTools, lazy, judgeRes, false, "suppressed", claimCheck)
+						return result, err
+					}
+
+					warning := core.Warning{
+						Source:  "lazy_response",
+						Level:   core.WarningLevelHard,
+						Message: message,
+					}
+					core.QueueWarning(result, warning)
+					firstActions := result.Actions()
+					result.ClearActions()
+					if rerun, rerr := next.Process(ctx, result); rerr == nil {
+						core.QueueWarning(rerun, warning)
+						recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), hasTools, lazy, judgeRes, false, "loopback", claimCheck)
+						return rerun, rerr
+					}
+					for _, a := range firstActions {
+						result.AddAction(a)
+					}
+					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), hasTools, lazy, judgeRes, false, "loopback_failed", claimCheck)
+					return result, err
+				}
+
+				// ---- 确定性「声明↔证据对账」----
+				// 本轮 Steps 是主证据；上轮持久化命令作为补充证据，避免把
+				// 「上一轮已推送」这类真实复述误判为编造。有工具轮次同样对账，
+				// 覆盖「部分编造」：调了几个工具，却把没跑的步骤也说成完成。
+				ev := EvidenceFromResult(genResult)
+				if cfg.PriorCommands != nil {
+					ev.PriorCommands = cfg.PriorCommands(env)
+				}
+				if claim := CheckCompletionClaims(ClaimVisibleText(genResult.Text), ev); claim != nil {
+					return loopBack(claimWarning, true, nil, claim.Kind+":"+claim.Required)
+				}
+
+				// 对账通过且本轮确实调用了工具 → 复位该 channel 的警告标记，
 				// 允许后续再偷懒时仍被警告，避免同 channel 永久静默。
-				if hadToolCalls(genResult) {
+				// 与改造前「有工具调用就复位」的语义保持一致，不因一级词表
+				// 是否命中而改变。
+				if hasTools {
 					state.mu.Lock()
 					if state.warned[channel] {
 						state.warned[channel] = false
 					}
 					state.mu.Unlock()
-					return result, err
 				}
 
 				// ---- 一级：高召回正则召回（允许误报）----
 				if !hasLazyIndicators(genResult.Text) {
 					return result, err // 未召回 → 直接发送，零额外开销
+				}
+
+				// 本轮确实调用了工具：词表召回只作旁路，不送二级裁决、也不
+				// loop-back（工具结果就在上下文里，模型裁决性价比低且易误伤）。
+				// 不落库，避免大量正常工具轮次淹没标注语料。
+				if hasTools {
+					return result, err
 				}
 
 				// ---- 二级：LLM 语义裁决（仅一级命中才调用）----
@@ -222,70 +314,18 @@ func LazyResponseMiddleware(cfg LazyResponseConfig) Middleware {
 					if cfg.Judge == nil {
 						finalAct = "no_judge"
 					}
-					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), false, judgeRes, cfg.Judge == nil, finalAct)
+					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), hasTools, false, judgeRes, cfg.Judge == nil, finalAct, "")
 					return result, err
 				}
 
-				// 二级确认偷懒 → 同轮 loop-back 重算。
-				state.mu.Lock()
-				alreadyWarned := state.warned[channel]
-				if !alreadyWarned {
-					state.warned[channel] = true
-				}
-				state.mu.Unlock()
-
-				if alreadyWarned {
-					// 本 channel 当轮已警告过，避免重复 loop-back 刷屏。
-					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), true, judgeRes, false, "suppressed")
-					return result, err
-				}
-
-				warning := core.Warning{
-					Source: "lazy_response",
-					Level:  core.WarningLevelHard,
-					Message: `[SYSTEM WARNING - URGENT]
-You just provided an answer about environment/system state WITHOUT calling any tools to verify.
-This is a CRITICAL violation. You MUST NOT guess or assume environment state.
-
-Rules you MUST follow:
-1. For ANY question about what is installed, what files exist, system info, network status, or any other verifiable fact — you MUST call the appropriate tool FIRST (exec/shell for commands, read_file/list_dir for files, web_fetch for URLs, etc.)
-2. Only AFTER receiving actual tool results may you base your answer on real data.
-3. If a tool call fails, report the failure honestly — do not fabricate a result.
-4. Your previous response was likely hallucinated. The user can see you did not call any tools.`,
-				}
-				core.QueueWarning(result, warning)
-
-				// 同轮 loop-back：把硬警告注入 prompt 后立即重算 LLM，当轮即返回
-				// 修正后的答案。next 是更内层 stage（不含本 middleware），只会重算
-				// 一次、不会无限递归。
-				//
-				// 关键：首轮回复已被追加进 result.Actions。loop-back 复用同一
-				// envelope 再次重算，会再追加一条修正轮回复。若不清除首轮 Action，
-				// engine 会把两条都派发出站 → 同一条消息重复回复（见 2026-09-16
-				// Telegram 重复回复事故，trace 9fbd42e3…）。故重跑前清空首轮
-				// Action，使修正轮成为 envelope 里唯一的回复；重算失败则还原首轮，
-				// 保证至少有一条回复出站。
-				firstActions := result.Actions()
-				result.ClearActions()
-				if rerun, rerr := next.Process(ctx, result); rerr == nil {
-					// 把警告随修正结果一并带回，保持返回 Envelope 的警告一致性。
-					core.QueueWarning(rerun, warning)
-					recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), true, judgeRes, false, "loopback")
-					return rerun, rerr
-				}
-				// 重算失败：还原首轮回复，避免无回复出站。
-				for _, a := range firstActions {
-					result.AddAction(a)
-				}
-				recordLazy(cfg.Sink, ctx, env, channel, len(genResult.Text), true, judgeRes, false, "loopback_failed")
-				return result, err
+				return loopBack(environmentWarning, true, judgeRes, "")
 			},
 		}
 	}
 }
 
 // recordLazy 落库一条两级裁决记录（旁路、非阻塞）。
-func recordLazy(sink LazyJudgeSink, ctx context.Context, env *core.Envelope, channel string, replyLen int, lazy bool, r *LazyJudgeResult, noJudge bool, finalAction string) {
+func recordLazy(sink LazyJudgeSink, ctx context.Context, env *core.Envelope, channel string, replyLen int, hadTools, lazy bool, r *LazyJudgeResult, noJudge bool, finalAction, claimCheck string) {
 	if sink == nil {
 		return
 	}
@@ -298,6 +338,8 @@ func recordLazy(sink LazyJudgeSink, ctx context.Context, env *core.Envelope, cha
 		reason = "(no tier-2 judge configured)"
 	} else if r != nil && r.Reason != "" {
 		reason = r.Reason
+	} else if claimCheck != "" {
+		reason = "deterministic claim↔evidence mismatch: " + claimCheck
 	}
 	sink.RecordLazyJudge(ctx, LazyJudgeRecord{
 		TS:             time.Now(),
@@ -305,11 +347,12 @@ func recordLazy(sink LazyJudgeSink, ctx context.Context, env *core.Envelope, cha
 		Channel:        channel,
 		Stage1Matched:  true,
 		ReplyLen:       replyLen,
-		HadToolCalls:   false,
+		HadToolCalls:   hadTools,
 		Lazy:           lazy,
 		EntityAsserted: r != nil && r.EntityAsserted,
 		Confidence:     conf,
 		Reason:         reason,
 		FinalAction:    finalAction,
+		ClaimCheck:     claimCheck,
 	})
 }

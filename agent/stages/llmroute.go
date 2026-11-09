@@ -17,6 +17,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
+	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/route"
 	agenttools "github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
@@ -127,6 +128,68 @@ func lightTierExhausted(lightTier bool, result *llm.GenerateResult) bool {
 	return lightTier && result != nil &&
 		result.FinishReason == llm.FinishReasonLength &&
 		strings.TrimSpace(result.Text) == ""
+}
+
+// generationObservability collects the fields needed to audit a turn without
+// guessing from side effects. Previously only cumulative usage was logged, so
+// "which tier ran", "how many tools fired" and "how big was the largest single
+// step prompt" were all invisible — the exact signals required to verify the
+// anti-fabrication work.
+func generationObservability(env *core.Envelope, result *llm.GenerateResult, lightTier bool) []any {
+	if result == nil {
+		return nil
+	}
+	toolCalls, maxStepInput := 0, 0
+	for _, step := range result.Steps {
+		toolCalls += len(step.ToolCalls)
+		if step.Usage.InputTokens > maxStepInput {
+			maxStepInput = step.Usage.InputTokens
+		}
+	}
+	tier := route.ModelDefault
+	if lightTier {
+		tier = route.ModelLight
+	}
+	// l1_tier vs tier makes a ForceFullTier demotion visible in logs.
+	l1Tier := ""
+	if env != nil {
+		l1Tier = route.ModelOf(env)
+	}
+	var hidden []string
+	if env != nil {
+		if v, ok := env.Get(core.KVHiddenTools); ok {
+			hidden, _ = v.([]string)
+		}
+	}
+	bypassHits := 0
+	if len(hidden) > 0 && result != nil {
+		keys := make(map[string]bool, len(hidden))
+		for _, name := range hidden {
+			base := strings.ToLower(strings.SplitN(name, "__", 2)[0])
+			if len(base) >= 4 {
+				keys[base] = true
+			}
+		}
+		if len(keys) > 0 {
+			for _, cmd := range pipeline.EvidenceFromResult(result).Commands {
+				for key := range keys {
+					if strings.Contains(cmd, key) {
+						bypassHits++
+						break
+					}
+				}
+			}
+		}
+	}
+	return []any{
+		"tier", tier,
+		"l1_tier", l1Tier,
+		"upgraded", route.Upgraded(env),
+		"tool_calls", toolCalls,
+		"max_step_input_tokens", maxStepInput,
+		"hidden_tools", len(hidden),
+		"exec_bypass_hits", bypassHits,
+	}
 }
 
 // truncationNotice is appended to a partially generated reply so the user is
@@ -722,6 +785,7 @@ func (s *LLMStage) publicReplyWithAudit(ctx context.Context, env *core.Envelope,
 // 回复控制门控开启时，LLMStage.Process 随后再做 parseReplyControl + extractPublicReply。
 func CleanOutboundText(text string) string {
 	text = memory.StripDSMLBlocks(text)
+	text = memory.StripExecutionRecords(text)
 	text = memory.StripThinking(text)
 	text = memory.StripInternalState(text)
 	return memory.StripContextMarkers(text)
@@ -859,6 +923,12 @@ type LLMConfig struct {
 	// MessageBuilder 自定义消息构造函数。
 	// 如果为 nil，默认将 Message.Text 作为 user message。
 	MessageBuilder func(msg core.Message) []llm.Message
+	// ForceFullTier is consulted once per turn, after chat history has been
+	// attached to the message. Returning true keeps a would-be light turn on
+	// the full model/tool surface. It exists because L1 routing runs BEFORE the
+	// pipeline injects chat history, so "the previous assistant turn used tools
+	// and this is a continuation" can only be decided here.
+	ForceFullTier func(msg core.Message) bool
 	// UsageRecorder 可选的使用统计记录器。
 	// 非 nil 时，每次 LLM 调用后自动记录 bot/model/feature 维度的用量。
 	UsageRecorder llm.UsageRecorder
@@ -1243,6 +1313,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	lurkMode := isLurkMode(env)
 	heartbeatMode := isHeartbeatMode(env)
 	lightTier := route.WantsLight(env) && !lurkMode && !heartbeatMode
+	if lightTier && s.config.ForceFullTier != nil && s.config.ForceFullTier(env.Message) {
+		// A task is still in progress (the previous assistant turn used tools),
+		// or the history otherwise says this is an execution turn. L1 cannot see
+		// that history yet, so demote the tier here instead.
+		lightTier = false
+		logger.Infow("light tier suppressed by conversation state",
+			"message_id", env.Message.ID,
+			"intent", route.IntentOf(env))
+	}
 	if lurkMode {
 		// INFO 级：让「潜水模式激活」在默认日志下清晰可观测，而非只能靠下游 skip/captured 间接推断。
 		logger.Infow("lurk: observing read-only channel",
@@ -1643,7 +1722,17 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			"steps", len(result.Steps),
 			"tokens", result.Usage.TotalTokens)
 	}
-	if lightTier && (route.UpgradeRequested(env) || autoUpgrade) && !route.Upgraded(env) {
+	// A light-tier turn has no exec/file tools, so any action-completion claim
+	// it makes ("build passed", "change is done") is unbacked by construction.
+	// Retry on the full tier instead of letting that claim reach the user.
+	claimUpgrade := lightTier && !route.Upgraded(env) && pipeline.HasCompletionClaim(pipeline.ClaimVisibleText(result.Text))
+	if claimUpgrade {
+		logger.Warnw("light tier claimed a completed action without tools, upgrading to full model",
+			"message_id", env.Message.ID,
+			"steps", len(result.Steps),
+			"reply_len", len(result.Text))
+	}
+	if lightTier && (route.UpgradeRequested(env) || autoUpgrade || claimUpgrade) && !route.Upgraded(env) {
 		route.MarkUpgraded(env)
 		env.ClearActions()
 		recordUsage(ctx, s.config.UsageRecorder, env, execModel, s.name, result)
@@ -1676,12 +1765,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if len(replyLog) > 4000 {
 		replyLog = replyLog[:4000] + "...(truncated)"
 	}
-	logger.Infow("llm stage: generation complete",
+	genFields := []any{
 		"message_id", env.Message.ID,
 		"steps", len(result.Steps),
 		"tokens", result.Usage.TotalTokens,
 		"finish_reason", result.FinishReason,
-		"reply", replyLog)
+		"reply", replyLog,
+	}
+	genFields = append(genFields, generationObservability(env, result, lightTier)...)
+	logger.Infow("llm stage: generation complete", genFields...)
 
 	// 可观测：若编排层因工具审批被 defer（RequireApproval + ApprovalHandler
 	// 返回 deferred），记录信号并落锚点，供人类确认后续跑恢复。

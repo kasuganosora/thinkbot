@@ -74,12 +74,13 @@ type OutputCleanStreamFilter struct {
 type ocMode int
 
 const (
-	ocOutside  ocMode = iota // 区块之外
-	ocPublic                 // <public> 区块内
-	ocInternal               // <internal> 区块内（丢弃）
-	ocThink                  // <think> 区块内（丢弃）
-	ocRecall                 // 召回记忆块内（丢弃，见 tagRecallOpen）
-	ocDSML                   // 工具调用 DSL 残片内（丢弃，见 tagDSMLOpen）
+	ocOutside    ocMode = iota // 区块之外
+	ocPublic                   // <public> 区块内
+	ocInternal                 // <internal> 区块内（丢弃）
+	ocThink                    // <think> 区块内（丢弃）
+	ocRecall                   // 召回记忆块内（丢弃，见 tagRecallOpen）
+	ocDSML                     // 工具调用 DSL 残片内（丢弃，见 tagDSMLOpen）
+	ocExecRecord               // 跨轮执行记录块内（丢弃，见 tagExecRecordOpen）
 )
 
 // maxStreamTagLen 是为判定「是否为标签」最多扣住的字节数；超过仍未见 '>' 则按普通文本放行
@@ -221,6 +222,33 @@ func (f *OutputCleanStreamFilter) process(buf string, out *strings.Builder, fina
 				f.mode = f.parent
 			}
 
+		case ocExecRecord:
+			// 执行记录是注入到上下文的 system 消息；被模型复述时整块丢弃
+			//（与 CleanOutboundText / cleanPublicBlock 同口径）。
+			var idx, n int
+			if f.parent == ocPublic {
+				idx, n = indexFoldAny(buf, "</execution_record>", "</public>")
+			} else {
+				idx, n = indexFoldAny(buf, "</execution_record>")
+			}
+			if idx < 0 {
+				if !final {
+					if f.parent == ocPublic {
+						f.pending = buf[len(buf)-closingPrefixLen(buf, "</execution_record>", "</public>"):]
+					} else {
+						f.pending = buf[len(buf)-closingPrefixLen(buf, "</execution_record>"):]
+					}
+				}
+				return
+			}
+			closing := asciiLower(buf[idx : idx+n])
+			buf = buf[idx+n:]
+			if closing == "</public>" {
+				f.closePublic(out)
+			} else {
+				f.mode = f.parent
+			}
+
 		default: // ocOutside / ocPublic
 			i := f.nextTagStart(buf)
 			if i < 0 {
@@ -258,9 +286,10 @@ const (
 	tagInternalOpen
 	tagPublicOpen
 	tagPublicClose
-	tagRecallOpen // <recalled_memory> / <user_profile>：连内容整块丢弃
-	tagDSMLOpen   // <｜｜DSML｜｜ ...> 工具调用 DSL：连内容丢到流尾
-	tagStray      // 其余标签 / 畸形 /public /internal（'>' 可缺）：去掉标签文本
+	tagRecallOpen     // <recalled_memory> / <user_profile>：连内容整块丢弃
+	tagDSMLOpen       // <｜｜DSML｜｜ ...> 工具调用 DSL：连内容丢到流尾
+	tagExecRecordOpen // <execution_record>：连内容整块丢弃
+	tagStray          // 其余标签 / 畸形 /public /internal（'>' 可缺）：去掉标签文本
 )
 
 // nextTagStart 返回下一个可能的标签起点（'<'，门控剥离标签时还包括畸形标签的 '/'）。
@@ -284,6 +313,17 @@ func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) 
 		// 半个前缀（chunk 从多字节全角竖线中间切开）始终扣住。
 		// final 时同样扣住：Flush 随后重置过滤器，这段残片随 pending 一起
 		// 丢弃，绝不当普通文本吐给用户。
+		return tagIncomplete, 0
+	}
+
+	// 跨轮执行记录块：无条件剥离（CleanOutboundText / cleanPublicBlock 都无条件
+	// 调用 StripExecutionRecords），因此不能受 replyTags 开关影响。
+	// incomplete 时扣住尾部等下一个 chunk，避免标签被从中间切开后放行内容。
+	const execRecordOpenTag = "<execution_record>"
+	if hasPrefixFold(s, execRecordOpenTag) {
+		return tagExecRecordOpen, len(execRecordOpenTag)
+	}
+	if !final && len(s) < len(execRecordOpenTag) && hasPrefixFold(execRecordOpenTag, s) {
 		return tagIncomplete, 0
 	}
 
@@ -428,6 +468,9 @@ func (f *OutputCleanStreamFilter) applyTag(kind tagKind, out *strings.Builder) {
 	case tagRecallOpen:
 		f.parent = f.mode
 		f.mode = ocRecall
+	case tagExecRecordOpen:
+		f.parent = f.mode
+		f.mode = ocExecRecord
 	case tagDSMLOpen:
 		f.mode = ocDSML
 	}

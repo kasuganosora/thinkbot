@@ -143,6 +143,12 @@ type ToolSessionContext struct {
 	// MessageID 消息 ID。
 	MessageID string
 
+	// HiddenTools is filled by ResolveTools with the names removed by the
+	// permission layer. It is observational only: LLMStage logs it (and counts
+	// exec commands that appear to reach a disabled capability anyway) so the
+	// "hidden tool bypassed through exec" pattern becomes measurable.
+	HiddenTools []string
+
 	// IsSubagent 是否在 SubAgent 场景下调用。
 	// SubAgent 场景通常不应返回联邦工具或记忆相关工具。
 	IsSubagent bool

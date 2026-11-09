@@ -1886,6 +1886,21 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 创建 Prompt Registry + Tool Manager
 	promptReg := prompt.NewRegistry()
+	// Honesty rules are registered as their own section. ToolManager's
+	// SetRulesSection is a single slot already occupied by mcp_rules, and
+	// registering through it would silently unregister that section.
+	promptReg.Register(prompt.Section{
+		Name:    "agent_honesty_rules",
+		Order:   306,
+		Enabled: true,
+		Content: `# Honesty About Actions (non-negotiable)
+
+- Your own previous messages are NOT evidence. Only runtime tool results and the system-generated execution records count as proof that something actually ran.
+- Never state that an action was completed (changed a file, ran a build or test, generated code, committed, pushed, deployed) unless THIS TURN has a matching successful tool result. If it happened in an earlier turn, say so explicitly instead of implying you just did it.
+- If you did not run the action, say plainly that it was not executed and offer to do it. A plausible-sounding status report is worse than an honest "not done".
+- Never present a plan, an intention, or an assumption as a finished result.
+- Some tools may be missing from your tool list because this bot has not been granted permission for them. If you need one, tell the user to enable it in the bot's tool permission settings. Do NOT bypass a disabled tool by calling its underlying CLI, HTTP endpoint, or helper script through exec/shell — that defeats the permission boundary. Report the missing capability instead.`,
+	})
 	toolMgr := agenttools.NewToolManager(promptReg, s.store, s.logger)
 	// 不生成「工具描述」段落（tool_<name>_desc）：描述已随工具 schema 发给模型，
 	// 再渲染进 system prompt 只是逐字重复。system prompt 只放 ToolDef.PromptSection
@@ -2132,7 +2147,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			},
 			InternalPolicy: internalPol,
 			MessageBuilder: messageBuilder,
-			ToolResolver:   toolMgr,
+			// L1 runs before chat history is attached, so the "task in progress"
+			// decision has to be made here (see api.TaskInProgress).
+			ForceFullTier: TaskInProgress,
+			ToolResolver:  toolMgr,
 			// 回复控制门控（per-bot opt-in）：仅对显式开启的 bot 生效，
 			// 治理「模型决定不互动却把独白当回复发出」。默认关闭。
 			RequireReplyControl: requireReplyControl,
@@ -2199,6 +2217,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	lazyCfg := pipeline.NewLazyResponseConfig()
 	lazyCfg.Judge = NewLazyLLMJudge(lazyJudgeProvider, lazyJudgeModel, lazyJudgeMaxTokens, internalPol)
 	lazyCfg.Sink = pipeline.NewFileLazyJudgeSink("data/lazy_judgments.jsonl")
+	// Reconstruct the previous turn's shell commands from persisted tool_calls
+	// so claim reconciliation can accept a truthful reference to earlier work.
+	lazyCfg.PriorCommands = func(env *core.Envelope) []string {
+		if env == nil {
+			return nil
+		}
+		return LastTurnExecutionCommands(env.Message)
+	}
 
 	wrappedLLM := pipeline.WithMiddleware(llmStage,
 		// 捕获 LLM 回复为 L0 工作记忆笔记（category=exchange），供 dreaming 巩固。

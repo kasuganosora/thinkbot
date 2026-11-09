@@ -135,6 +135,7 @@ func cleanPublicBlock(content string) string {
 	// 工具调用 DSL 残片必须最先整块剥掉：它的标签以全角竖线开头，strayTagRe
 	// 匹配不到，留到后面就会连参数值一起被当成公开回复发出。
 	out := memory.StripDSMLBlocks(strings.TrimSpace(content))
+	out = memory.StripExecutionRecords(out)
 	out = memory.StripRecallBlocks(out)
 	out = memory.StripInternalTags(out)
 	out = strings.TrimSpace(strayTagRe.ReplaceAllString(out, ""))

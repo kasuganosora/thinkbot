@@ -198,6 +198,7 @@ func (r *Router) Route(ctx context.Context, env *core.Envelope) Decision {
 		if d.Action == ActionOpen {
 			SetTier(env, d.Intent, d.Model)
 		}
+		r.logDecision(env, d, "model")
 		return d
 	}
 	if err != nil {
@@ -206,21 +207,46 @@ func (r *Router) Route(ctx context.Context, env *core.Envelope) Decision {
 	return r.fallback(env)
 }
 
-func (r *Router) fallback(env *core.Envelope) Decision {
+// logDecision makes the L1 choice observable. Without it, the tier that
+// actually ran a turn can only be inferred from stream/no-stream side effects,
+// which makes tier-related regressions impossible to audit from logs.
+func (r *Router) logDecision(env *core.Envelope, d Decision, source string) {
+	effective := d.Model
+	if d.Action == ActionOpen {
+		// normalizeTier may override an L1 "light" answer for task/followup;
+		// log what actually runs, not just what the router model asked for.
+		effective = ModelOf(env)
+	}
+	r.logger.Infow("l1 route decision",
+		"trace_id", env.Message.TraceID,
+		"bot_id", env.Message.BotID,
+		"channel", env.Message.Channel,
+		"action", string(d.Action),
+		"intent", d.Intent,
+		"model", d.Model,
+		"effective_model", effective,
+		"upgraded", Upgraded(env),
+		"target", d.Target,
+		"drop_reason", d.DropReason,
+		"source", source)
+}
+
+func (r *Router) fallback(env *core.Envelope) (d Decision) {
+	defer func() { r.logDecision(env, d, "fallback") }()
 	key := ConversationKey(env)
 	text := strings.TrimSpace(env.Message.Text)
 	if id, err := r.reg.PreemptLatest(key, env.Message.TraceID, text); err == nil {
-		d := Decision{Action: ActionPreempt, Target: id, DropReason: DropReasonPreempt}
+		d = Decision{Action: ActionPreempt, Target: id, DropReason: DropReasonPreempt}
 		storeDecision(env, d)
 		return d
 	}
 	if r.reg.AllowOpen(key) {
-		d := Decision{Action: ActionOpen, Intent: IntentTask, Model: ModelDefault}
+		d = Decision{Action: ActionOpen, Intent: IntentTask, Model: ModelDefault}
 		SetTier(env, d.Intent, d.Model)
 		storeDecision(env, d)
 		return d
 	}
-	d := Decision{Action: ActionRefuse, DropReason: DropReasonRefuse}
+	d = Decision{Action: ActionRefuse, DropReason: DropReasonRefuse}
 	storeDecision(env, d)
 	return d
 }

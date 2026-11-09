@@ -343,11 +343,16 @@ func TestNotifyHTTP_BotModeHistoryRows(t *testing.T) {
 		t.Fatalf("history rows: %+v", rows)
 	}
 	msgs, ids := chatHistoryToLLM(rows)
-	if len(msgs) != 3 || len(ids) != 3 || ids[1] != rows[1].ID {
+	// 3 persisted rows + 1 synthetic execution-record system message after the
+	// assistant turn. IDs stay aligned; the synthetic entry is 0.
+	if len(msgs) != 4 || len(ids) != 4 || ids[1] != rows[1].ID || ids[2] != rows[2].ID || ids[3] != 0 {
 		t.Fatalf("llm mapping must stay aligned with rows: %d %v", len(msgs), ids)
 	}
 	if msgs[1].Role != llm.MessageRoleSystem || msgs[2].Role != llm.MessageRoleAssistant || len(msgs[2].Content) != 1 {
 		t.Fatalf("roles: %s %s", msgs[1].Role, msgs[2].Role)
+	}
+	if !strings.Contains(llm.TextFromParts(msgs[3].Content), "<execution_record>") {
+		t.Fatalf("missing execution record after assistant turn: %+v", msgs[3])
 	}
 }
 
@@ -570,7 +575,9 @@ func TestNotifyBotContextAssembly(t *testing.T) {
 		bc.Policy.ReasoningEffort(llm.PurposeNotify, "glm-x") != "low" {
 		t.Fatalf("context: %+v", bc)
 	}
-	if len(bc.History) != 3 || bc.History[1].Role != llm.MessageRoleSystem || bc.History[2].Role != llm.MessageRoleAssistant {
+	// 3 persisted rows + 1 synthetic execution-record system message.
+	if len(bc.History) != 4 || bc.History[1].Role != llm.MessageRoleSystem || bc.History[2].Role != llm.MessageRoleAssistant ||
+		!strings.Contains(llm.TextFromParts(bc.History[3].Content), "<execution_record>") {
 		t.Fatalf("owner-session history only, notes as system: %+v", bc.History)
 	}
 	bc, _ = e.s.notifyBotContext(context.Background(), notifyTestBot, tgt, n, 0)

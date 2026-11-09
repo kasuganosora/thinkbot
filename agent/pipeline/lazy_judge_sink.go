@@ -33,6 +33,10 @@ type LazyJudgeRecord struct {
 	Confidence     float64   `json:"confidence"`      // 二级裁决置信度 0..1
 	Reason         string    `json:"reason"`          // 二级裁决理由
 	FinalAction    string    `json:"final_action"`    // veto / no_judge / loopback / loopback_failed / suppressed
+	// ClaimCheck 确定性「声明↔证据对账」的结果：空串表示未触发；否则为
+	// 缺失证据的声明类型（如 go_build / git_push）。用于区分「LLM 裁决判偷懒」
+	// 与「运行时证据缺位」，后者不依赖模型裁决、可离线回放。
+	ClaimCheck string `json:"claim_check,omitempty"`
 }
 
 // LazyJudgeSink 判定结果的落库目标。接口定义在消费方（本包），实现可选注入。
