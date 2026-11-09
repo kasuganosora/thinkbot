@@ -97,7 +97,7 @@ import { ref, computed, watch, h, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
-import { botApi, providerApi } from '@/api/services'
+import { botApi, configApi, providerApi } from '@/api/services'
 import BotBasicForm from '@/components/bot/BotBasicForm.vue'
 import BotReasoning from '@/components/bot/BotReasoning.vue'
 import BotCronJobs from '@/components/bot/BotCronJobs.vue'
@@ -192,6 +192,29 @@ const avatarText = computed(() => {
 })
 function isUrl(s) { return s && (s.startsWith('http://') || s.startsWith('https://')) }
 
+// 视觉辅助模型存在 per-bot 配置槽位（bot_definitions 表没有这一列），
+// 所以读写走通用配置 API，不随 botApi.update 的 payload 一起提交。
+function visionKey(botId) { return `bot.${botId}.vision` }
+const visionOriginal = ref('')
+
+async function loadVision() {
+  const id = form.value.id
+  if (!id) return
+  let value = ''
+  try {
+    const res = await configApi.get(visionKey(id))
+    value = res?.value || ''
+  } catch (e) {
+    // 该键从未配置过时后端返回 404，等价于「不启用图片转写」。
+    value = ''
+  }
+  // 切换 Bot 时旧请求可能晚到，只回填当前 Bot 的值。
+  if (form.value.id !== id) return
+  visionOriginal.value = value
+  // 请求返回前用户可能已经选好了模型，别把他的选择覆盖掉。
+  if (!form.value.llmVision) form.value.llmVision = value
+}
+
 function loadBot() {
   const id = route.params.id || store.activeBotId
   let b = store.bots.find(x => x.id === id)
@@ -201,11 +224,12 @@ function loadBot() {
   if (b) {
     form.value = {
       id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
-      llmMain: b.llmMain || '', llmLight: b.llmLight || '',
+      llmMain: b.llmMain || '', llmLight: b.llmLight || '', llmVision: '',
       temperature: b.temperature ?? 0.7, maxTokens: b.maxTokens ?? 4096,
       workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort ?? '',
       hardMaxSteps: b.hardMaxSteps ?? 0
     }
+    loadVision()
   }
 }
 
@@ -248,6 +272,7 @@ function renameBot() {
 
 async function saveBasic() {
   const f = form.value
+  const visionChanged = (f.llmVision || '') !== visionOriginal.value
   try {
     await botApi.update(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
@@ -255,6 +280,10 @@ async function saveBasic() {
       maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort,
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
+    // 用 batchSet 而非 set：SetConfigReq.Value 带 required 校验，空串会被 400
+    // 拒绝，而「留空 = 不启用图片转写」是合法操作；批量接口没有这个限制。
+    await configApi.batchSet({ [visionKey(f.id)]: f.llmVision || '' })
+    visionOriginal.value = f.llmVision || ''
     store.updateBot(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
       temperature: f.temperature,
@@ -263,7 +292,11 @@ async function saveBasic() {
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
     bot.value.name = f.name
-    MessagePlugin.success('Bot 设置已保存')
+    MessagePlugin.success(
+      visionChanged && bot.value?.running
+        ? 'Bot 设置已保存；视觉模型需停用并重新启用 Bot 后生效'
+        : 'Bot 设置已保存'
+    )
   } catch (e) {
     MessagePlugin.error('保存失败：' + (e.message || '请稍后重试'))
   }

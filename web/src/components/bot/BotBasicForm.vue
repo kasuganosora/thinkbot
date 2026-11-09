@@ -58,6 +58,12 @@
             <t-input-number v-model="form.workers" :min="1" :max="64" style="width: 100%" data-testid="bot-workers" />
           </t-form-item>
         </div>
+        <t-form-item label="视觉辅助模型（vision）">
+          <div>
+            <t-select v-model="form.llmVision" :options="modelOptions" filterable creatable clearable placeholder="留空 = 不启用图片转写" data-testid="bot-llm-vision" />
+            <div class="field-tip">主模型不支持多模态时，由该模型把图片/音视频转写成文字再交给主模型，因此请选支持视觉的模型。留空＝不处理图片。修改后需停用并重新启用 Bot 才生效；转写输出上限与推理强度在「系统配置 → 内置 LLM」中调整。</div>
+          </div>
+        </t-form-item>
         <t-form-item label="步数限制（hardMaxSteps）">
           <div>
             <t-input-number v-model="form.hardMaxSteps" :min="0" :step="50" style="width: 200px" data-testid="bot-hardmaxsteps" placeholder="0 = 不限制" />
