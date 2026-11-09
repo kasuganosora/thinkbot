@@ -259,6 +259,21 @@ func checkpointSummaryContent(cp *dao.ContextCheckpoint, lastCovered time.Time) 
 // is derived from persisted tool_calls, excludes tool output, and is capped.
 // Synthetic entries get id 0, which compactedHistoryBoundary already supports.
 func chatHistoryToLLM(msgs []dao.ChatMessage) ([]llm.Message, []uint64) {
+	return chatHistoryToLLMWith(msgs, true)
+}
+
+// chatHistoryToLLMPlain maps the same window without execution records.
+// Consumers that only need the conversational text must use this variant:
+// notify bot-mode builds a tone reference from a small, rune-capped history
+// window, and a system-generated tool transcript is neither something the
+// owner said nor useful for tone. Replaying it there consumed roughly half of
+// that window's budget (measured on real history: ~3k of 6k runes across six
+// recent assistant turns), silently pushing genuine tone samples out.
+func chatHistoryToLLMPlain(msgs []dao.ChatMessage) ([]llm.Message, []uint64) {
+	return chatHistoryToLLMWith(msgs, false)
+}
+
+func chatHistoryToLLMWith(msgs []dao.ChatMessage, withRecords bool) ([]llm.Message, []uint64) {
 	out := make([]llm.Message, 0, len(msgs)*2)
 	ids := make([]uint64, 0, len(msgs)*2)
 	for _, m := range msgs {
@@ -268,8 +283,10 @@ func chatHistoryToLLM(msgs []dao.ChatMessage) ([]llm.Message, []uint64) {
 		case dao.ChatRoleAssistant:
 			out = append(out, llm.AssistantMessage(m.Content))
 			ids = append(ids, m.ID)
-			out = append(out, llm.SystemMessage(BuildExecutionRecord(m.ToolCalls)))
-			ids = append(ids, 0)
+			if withRecords {
+				out = append(out, llm.SystemMessage(BuildExecutionRecord(m.ToolCalls)))
+				ids = append(ids, 0)
+			}
 			continue
 		case dao.ChatRoleContextSummary:
 			out = append(out, llm.ConversationSummaryMessage(m.Content))

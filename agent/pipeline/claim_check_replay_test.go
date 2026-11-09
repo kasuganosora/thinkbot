@@ -59,10 +59,10 @@ func TestClaimCheckReplay(t *testing.T) {
 			Commands:      commandsFromReplayCalls(calls),
 			PriorCommands: prior,
 		}
-		for _, c := range calls {
-			ev.ToolNames = append(ev.ToolNames, strings.ToLower(c.Name))
-		}
-		claim := CheckCompletionClaims(r.Content, ev)
+		// Production runs reconciliation on ClaimVisibleText(genResult.Text);
+		// keep the replay on exactly the same input so the acceptance numbers
+		// describe what ships, not a slightly different text shape.
+		claim := CheckCompletionClaims(ClaimVisibleText(r.Content), ev)
 		if len(calls) > 0 {
 			withTools++
 			if claim != nil {

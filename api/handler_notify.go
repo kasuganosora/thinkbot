@@ -544,7 +544,10 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 			s.logger.Warnw("notify: load owner history failed", "bot_id", botID, "session", sid, "err", err)
 		} else {
 			rows = s.chatHistory.ApplyContextCheckpoint("notify", botID, sid, rows)
-			bc.History, _ = chatHistoryToLLM(rows)
+			// Bot mode only borrows recent owner turns for tone. Execution
+			// records are system-generated tool transcripts, not owner speech,
+			// and would eat most of trimHistory's rune budget.
+			bc.History, _ = chatHistoryToLLMPlain(rows)
 		}
 	}
 	return bc, nil

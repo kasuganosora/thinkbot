@@ -342,17 +342,26 @@ func TestNotifyHTTP_BotModeHistoryRows(t *testing.T) {
 		rows[1].TraceID != r.ID || rows[2].TraceID != r.ID {
 		t.Fatalf("history rows: %+v", rows)
 	}
-	msgs, ids := chatHistoryToLLM(rows)
-	// 3 persisted rows + 1 synthetic execution-record system message after the
-	// assistant turn. IDs stay aligned; the synthetic entry is 0.
-	if len(msgs) != 4 || len(ids) != 4 || ids[1] != rows[1].ID || ids[2] != rows[2].ID || ids[3] != 0 {
+	// Notify bot-mode must receive plain conversational text: system-generated
+	// execution records are not owner speech and would consume half of
+	// trimHistory's 6000-rune budget.
+	msgs, ids := chatHistoryToLLMPlain(rows)
+	if len(msgs) != 3 || len(ids) != 3 || ids[1] != rows[1].ID || ids[2] != rows[2].ID {
 		t.Fatalf("llm mapping must stay aligned with rows: %d %v", len(msgs), ids)
 	}
 	if msgs[1].Role != llm.MessageRoleSystem || msgs[2].Role != llm.MessageRoleAssistant || len(msgs[2].Content) != 1 {
 		t.Fatalf("roles: %s %s", msgs[1].Role, msgs[2].Role)
 	}
-	if !strings.Contains(llm.TextFromParts(msgs[3].Content), "<execution_record>") {
-		t.Fatalf("missing execution record after assistant turn: %+v", msgs[3])
+	for i := range msgs {
+		if strings.Contains(llm.TextFromParts(msgs[i].Content), "<execution_record>") {
+			t.Fatalf("notify tone history must not carry execution records: msgs[%d]=%+v", i, msgs[i])
+		}
+	}
+	// The main chat path still appends one record per assistant turn.
+	full, fullIDs := chatHistoryToLLM(rows)
+	if len(full) != 4 || len(fullIDs) != 4 || fullIDs[3] != 0 ||
+		!strings.Contains(llm.TextFromParts(full[3].Content), "<execution_record>") {
+		t.Fatalf("main path lost its execution record: %d %v", len(full), fullIDs)
 	}
 }
 
@@ -575,10 +584,16 @@ func TestNotifyBotContextAssembly(t *testing.T) {
 		bc.Policy.ReasoningEffort(llm.PurposeNotify, "glm-x") != "low" {
 		t.Fatalf("context: %+v", bc)
 	}
-	// 3 persisted rows + 1 synthetic execution-record system message.
-	if len(bc.History) != 4 || bc.History[1].Role != llm.MessageRoleSystem || bc.History[2].Role != llm.MessageRoleAssistant ||
-		!strings.Contains(llm.TextFromParts(bc.History[3].Content), "<execution_record>") {
+	// Notify bot-mode borrows 3 plain rows for tone. Execution records belong
+	// to the main chat path only: they are system-generated tool transcripts,
+	// and trimHistory would spend ~half its 6000-rune budget on them.
+	if len(bc.History) != 3 || bc.History[1].Role != llm.MessageRoleSystem || bc.History[2].Role != llm.MessageRoleAssistant {
 		t.Fatalf("owner-session history only, notes as system: %+v", bc.History)
+	}
+	for i := range bc.History {
+		if strings.Contains(llm.TextFromParts(bc.History[i].Content), "<execution_record>") {
+			t.Fatalf("notify tone history must not carry execution records: %+v", bc.History[i])
+		}
 	}
 	bc, _ = e.s.notifyBotContext(context.Background(), notifyTestBot, tgt, n, 0)
 	if len(bc.History) != 0 {

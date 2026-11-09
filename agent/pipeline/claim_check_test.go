@@ -20,7 +20,7 @@ func TestCheckCompletionClaims(t *testing.T) {
 		{
 			name: "build claim backed by this turn",
 			text: "改完了，`go build ./...` 通过（EXIT=0）。",
-			ev:   ClaimEvidence{ToolNames: []string{"exec"}, Commands: []string{"{'command': 'go build ./...'}"}},
+			ev:   ClaimEvidence{Commands: []string{"{'command': 'go build ./...'}"}},
 		},
 		{
 			name: "build claim backed by previous turn",
@@ -30,12 +30,12 @@ func TestCheckCompletionClaims(t *testing.T) {
 		{
 			name: "retrospective report is not a fabrication",
 			text: "本分支实现，已合 master、编译通过、推送远端（1edbb036f）。",
-			ev:   ClaimEvidence{ToolNames: []string{"exec"}, Commands: []string{"cat doc.md"}},
+			ev:   ClaimEvidence{Commands: []string{"cat doc.md"}},
 		},
 		{
 			name: "domain language is not a git action",
 			text: "报价轮 R1 已提交报价，文件记录已推送完成，提交状态为 done。",
-			ev:   ClaimEvidence{ToolNames: []string{"exec"}, Commands: []string{"select * from t"}},
+			ev:   ClaimEvidence{Commands: []string{"select * from t"}},
 		},
 		{
 			name: "question about a future action",
@@ -52,7 +52,7 @@ func TestCheckCompletionClaims(t *testing.T) {
 		{
 			name: "git -C variant satisfies commit claim",
 			text: "提交并推送：修复完成并已推送 ✅",
-			ev:   ClaimEvidence{ToolNames: []string{"exec"}, Commands: []string{"git -C repo commit -m fix; git -C repo push origin branch"}},
+			ev:   ClaimEvidence{Commands: []string{"git -C repo commit -m fix; git -C repo push origin branch"}},
 		},
 	}
 	for _, tc := range cases {
@@ -91,7 +91,7 @@ func TestHasCompletionClaim(t *testing.T) {
 
 func TestEvidenceFromResult(t *testing.T) {
 	ev := EvidenceFromResult(nil)
-	if len(ev.ToolNames) != 0 || len(ev.Commands) != 0 {
+	if len(ev.Commands) != 0 || len(ev.PriorCommands) != 0 {
 		t.Fatal("nil result must produce empty evidence")
 	}
 }

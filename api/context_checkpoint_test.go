@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -266,5 +267,42 @@ func TestContextCheckpointTTL_Default(t *testing.T) {
 	s := newCheckpointTestHistory(t)
 	if s.contextCheckpointTTL() != defaultContextCheckpointTTL {
 		t.Fatal("default ttl")
+	}
+}
+
+// The main chat path and notify bot-mode deliberately see different history.
+// Keep the ID alignment of both variants pinned: compact_context maps its
+// message boundary back to chat_messages.id through the main-path IDs.
+func TestChatHistoryToLLM_PlainVariant(t *testing.T) {
+	rows := []dao.ChatMessage{
+		{ID: 11, Role: dao.ChatRoleUser, Content: "hi"},
+		{ID: 12, Role: dao.ChatRoleAssistant, Content: "done",
+			ToolCalls: `[{"name":"exec","input":{"command":"go build ./..."},"status":"completed"}]`},
+		{ID: 13, Role: dao.ChatRoleNotify, Content: "note"},
+	}
+	full, fullIDs := chatHistoryToLLM(rows)
+	plain, plainIDs := chatHistoryToLLMPlain(rows)
+
+	if !reflect.DeepEqual(fullIDs, []uint64{11, 12, 0, 13}) {
+		t.Fatalf("main path IDs = %v", fullIDs)
+	}
+	if !reflect.DeepEqual(plainIDs, []uint64{11, 12, 13}) {
+		t.Fatalf("plain path IDs = %v", plainIDs)
+	}
+	if len(full) != len(fullIDs) || len(plain) != len(plainIDs) {
+		t.Fatalf("messages/IDs out of sync: full=%d/%d plain=%d/%d", len(full), len(fullIDs), len(plain), len(plainIDs))
+	}
+	if !strings.Contains(llm.TextFromParts(full[2].Content), "<execution_record>") ||
+		full[2].Role != llm.MessageRoleSystem {
+		t.Fatalf("main path lost its execution record: %+v", full[2])
+	}
+	for i := range plain {
+		if strings.Contains(llm.TextFromParts(plain[i].Content), "<execution_record>") {
+			t.Fatalf("plain history must not carry execution records: %+v", plain[i])
+		}
+	}
+	meta := core.Message{Metadata: map[string]any{"chat_history": rows}}
+	if mids := chatHistoryMessageIDs(meta); !reflect.DeepEqual(mids, fullIDs) {
+		t.Fatalf("HistoryMessageIDs must follow the main path: %v", mids)
 	}
 }

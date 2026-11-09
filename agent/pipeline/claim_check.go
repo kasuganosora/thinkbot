@@ -32,14 +32,12 @@ import (
 //     previous turn's persisted commands are accepted as evidence.
 //
 // Evidence sources:
-//   - Commands / ToolNames: this turn's Steps (llm.GenerateResult).
-//   - PriorCommands: the previous assistant turn's persisted tool calls.
+//   - Commands: this turn's exec/shell inputs (llm.GenerateResult).
+//   - PriorCommands: the previous assistant turn's persisted exec/shell inputs.
 // ============================================================================
 
 // ClaimEvidence is the runtime evidence available for one turn.
 type ClaimEvidence struct {
-	// ToolNames are the lower-cased tool names called this turn.
-	ToolNames []string
 	// Commands are the lower-cased exec/shell inputs of this turn.
 	Commands []string
 	// PriorCommands are the lower-cased exec/shell inputs of the previous
@@ -205,18 +203,10 @@ func EvidenceFromResult(result *llm.GenerateResult) ClaimEvidence {
 	if result == nil {
 		return ev
 	}
-	seen := make(map[string]bool)
 	for _, step := range result.Steps {
 		for _, call := range step.ToolCalls {
 			name := strings.ToLower(call.ToolName)
-			if name == "" {
-				continue
-			}
-			if !seen[name] {
-				seen[name] = true
-				ev.ToolNames = append(ev.ToolNames, name)
-			}
-			if !isShellTool(name) {
+			if name == "" || !isShellTool(name) {
 				continue
 			}
 			if s := strings.ToLower(fmt.Sprint(call.Input)); s != "" && s != "<nil>" {
