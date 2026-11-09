@@ -37,10 +37,11 @@ const (
 	// inherit the main model's output budget.
 	LightMaxTokens = 1024
 
-	// LightReasoningEffort caps thinking on cheap turns. A reasoning light
-	// model can spend the whole LightMaxTokens budget on its own reasoning
-	// and return no content at all, so both L1 routing and light-tier replies
-	// use a low effort instead of inheriting the bot's main-model setting.
+	// LightReasoningEffort is the canonical low level. It is the wire value
+	// only for families whose "low" really is the cheap tier (low/high/max,
+	// and unknown OpenAI-style models). GLM-5.2 accepts "low" but serves it
+	// as high, so routing and light-tier calls must use
+	// llm.LowestReasoningEffort instead of this constant.
 	LightReasoningEffort = "low"
 )
 

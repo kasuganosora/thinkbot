@@ -309,10 +309,10 @@ func (f *OutputCleanStreamFilter) classify(s string, final bool) (tagKind, int) 
 	// incomplete 时扣住尾部等下一个 chunk：前缀被从中间切开也要拦得住。
 	if n, match, incomplete := memory.DSMLOpenPrefixAt(s); match {
 		return tagDSMLOpen, n
-	} else if incomplete {
-		// 半个前缀（chunk 从多字节全角竖线中间切开）始终扣住。
-		// final 时同样扣住：Flush 随后重置过滤器，这段残片随 pending 一起
-		// 丢弃，绝不当普通文本吐给用户。
+	} else if incomplete && !final {
+		// 半个前缀（chunk 从多字节全角竖线中间切开）在流未结束时扣住，等下一块。
+		// 流已经结束时不能再扣：单独的 "<" 或 "<|" 是普通文本，StripDSMLBlocks
+		// 也不会删它们。扣住后 Flush 会把 pending 丢掉，流式结果就比最终出站短。
 		return tagIncomplete, 0
 	}
 
