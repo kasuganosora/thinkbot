@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"regexp"
 	"sort"
-	"strings"
 	"sync"
 
 	"go.uber.org/zap/zapcore"
+
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -50,31 +51,57 @@ var redactRules = []redactRule{
 	{re: regexp.MustCompile(`(?i)([?&](?:i|token|access_token|api_key|apikey|key|secret|password)=)[^&\s"'\\]+`), repl: []byte("${1}" + RedactedPlaceholder), hint: "=", foldCase: false},
 }
 
-// minRegisteredSecretLen avoids masking short, common strings by accident.
-const minRegisteredSecretLen = 12
-
 var (
-	secretsMu sync.RWMutex
-	secrets   []string // sorted longest first
+	secretsMu  sync.RWMutex
+	secrets    []string // sorted longest first
+	secretRefs = map[string]int{}
 )
 
 // RegisterSecret adds an exact secret value (e.g. a bot token loaded from
-// config) that must never appear in logs. Values shorter than 12 characters
-// are ignored to avoid masking ordinary text. Safe for concurrent use.
+// config) that must never appear in logs. Empty values are ignored; short but
+// non-empty values ARE registered (the vault accepts them now), and
+// strutil.ReplaceSecretValueBytes decides how safely they can be masked.
+//
+// The value is registered verbatim (no trimming): leading/trailing spaces can
+// be part of a password, and trimming here would desync with the vault.
+//
+// Registration is reference-counted: multiple owners (vault entries, channel
+// configs) may register the same value, and UnregisterSecret only drops the
+// masking rule once every owner has released it. Safe for concurrent use.
 func RegisterSecret(s string) {
-	s = strings.TrimSpace(s)
-	if len(s) < minRegisteredSecretLen {
+	if s == "" {
 		return
 	}
 	secretsMu.Lock()
 	defer secretsMu.Unlock()
-	for _, v := range secrets {
+	if secretRefs[s] == 0 {
+		secrets = append(secrets, s)
+		sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	}
+	secretRefs[s]++
+}
+
+// UnregisterSecret releases one RegisterSecret reference. Call it when the
+// value is no longer a credential (e.g. the vault entry was deleted or
+// overwritten), otherwise a very short value would keep masking ordinary text
+// forever. Unknown values are a no-op.
+func UnregisterSecret(s string) {
+	if s == "" {
+		return
+	}
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	if secretRefs[s] > 1 {
+		secretRefs[s]--
+		return
+	}
+	delete(secretRefs, s)
+	for i, v := range secrets {
 		if v == s {
-			return
+			secrets = append(secrets[:i], secrets[i+1:]...)
+			break
 		}
 	}
-	secrets = append(secrets, s)
-	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
 }
 
 // RedactSecrets masks known secret patterns and registered secret values in s.
@@ -92,9 +119,7 @@ func redactBytes(p []byte) []byte {
 	out := p
 	secretsMu.RLock()
 	for _, sec := range secrets {
-		if bytes.Contains(out, []byte(sec)) {
-			out = bytes.ReplaceAll(out, []byte(sec), []byte(RedactedPlaceholder))
-		}
+		out = strutil.ReplaceSecretValueBytes(out, sec, []byte(RedactedPlaceholder))
 	}
 	secretsMu.RUnlock()
 	var lower []byte

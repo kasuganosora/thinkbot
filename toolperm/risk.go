@@ -79,6 +79,16 @@ var basicTools = map[string]struct{}{
 	// 只能告诉用户「没有这个工具」）。
 	"secret_input": {},
 
+	// 删除凭据（secret_delete）：与 secret_input 的 action=list / request 是同一个
+	// 保险库能力族 —— 只按名字删除进程内部凭据库 data/secrets/vault.json 的条目，
+	// 不联网、不执行命令、不碰 bot 工作空间文件、不派生执行体、不留对外痕迹。
+	// 明文值从不回给模型；全局共享条目还需 allow_global 二次确认。
+	// 必须与 secret_input 同级：基础工具之外的一切在「平台无规则」时默认禁止、
+	// 在白名单模式下也禁止，一旦归为敏感，bot 就只会「能存不能删」，
+	// 用户要求撤销凭据时模型连这把工具都看不见（与 2026-11-02 secret_input
+	// 踩过的坑同源）。管理员若要收紧，显式写一条 tool=secret_delete 的 deny 即可。
+	"secret_delete": {},
+
 	// 文本处理（纯字符串运算，输入输出都在对话内）
 	"text_diff":   {},
 	"text_encode": {},

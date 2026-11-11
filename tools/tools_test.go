@@ -403,12 +403,12 @@ func TestRegisterTools_StaticCount(t *testing.T) {
 
 	// 静态注册项计数：web_fetch, calculate, random, uuid, datetime_calc,
 	// text_hash, text_encode, text_diff, text_stats, user_choice, secret_input,
-	// __common_tools_meta = 12
+	// secret_delete, __common_tools_meta = 13
 	// （web_search 是 ToolProvider，无启用提供方时不出现；shell / list_files 等
 	// bot 工作空间工具由 sandbox 包注册，均不在此列）
 	staticCount := mgr.StaticCount()
-	if staticCount != 12 {
-		t.Errorf("expected 12 static tools, got %d", staticCount)
+	if staticCount != 13 {
+		t.Errorf("expected 13 static tools, got %d", staticCount)
 	}
 }
 

@@ -11,13 +11,16 @@
 // 存储：明文落在 data/secrets/vault.json（0600，/data/ 已被 .gitignore 覆盖），
 // v1 不加密——主密钥自举只会把问题平移，靠文件权限 + 出站硬闸收敛。
 // 登记时同步 util/log.RegisterSecret，让日志层也遮蔽这些值。
+//
+// 登记只校验非空（短口令 / PIN / 验证码都是合法凭据）；遮蔽则由
+// util/strutil.ReplaceSecretValue 分档处理，避免 1~5 字节的值把整份日志或
+// 回复打码。低于遮蔽下限的值仍入库、仍可 Resolve，登记时会打 WARN。
 package secret
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,22 +34,19 @@ import (
 
 	"github.com/kasuganosora/thinkbot/util/errs"
 	ulog "github.com/kasuganosora/thinkbot/util/log"
+	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // DefaultPath 是默认持久化路径；/data/ 已在 .gitignore 中被忽略。
 const DefaultPath = "data/secrets/vault.json"
 
-// MinValueLen 与 util/log.RegisterSecret 的下限一致：短于 12 字符的值拒绝
-// 登记，避免把 "true" / "8080" 这类普通字符串误当密钥遮蔽。
-const MinValueLen = 12
-
 // PlaceholderPrefix 是占位符的固定命名空间，避免与通知类 {{name}} 冲突。
 const PlaceholderPrefix = "secret:"
 
 var (
-	// ErrValueTooShort 值短于 MinValueLen。调用方据此区分「用户发的不是密钥」
-	// 与「保险库本身不可用」，前者可以重新发起请求。
-	ErrValueTooShort = errs.New("secret: 密钥值过短，拒绝登记")
+	// ErrEmptyValue 值为空。登记只做非空校验：短口令、PIN、验证码同样可能是
+	// 真实凭据，长度由用户在专用输入流程里自行决定。
+	ErrEmptyValue = errs.New("secret: 密钥值不能为空")
 	// ErrInvalidName 登记名不合法。
 	ErrInvalidName = errs.New("secret: 非法密钥名")
 	// ErrUnavailable 保险库加载失败：拒绝登记，避免新值只活在内存、重启即丢，
@@ -212,9 +212,9 @@ func (v *Vault) Register(botID, name, value, description string) error {
 	if !nameRE.MatchString(name) {
 		return ErrInvalidName
 	}
-	value = strings.TrimSpace(value)
-	if len(value) < MinValueLen {
-		return ErrValueTooShort
+	// 只做非空校验：值本身（含首尾空格）原样保存，密码里的空格是有效字符。
+	if strings.TrimSpace(value) == "" {
+		return ErrEmptyValue
 	}
 	key := entryKey{botID, name}
 	v.mu.Lock()
@@ -228,8 +228,16 @@ func (v *Vault) Register(botID, name, value, description string) error {
 	}
 	v.mu.Unlock()
 
-	// 先登记日志遮蔽再落盘：即便落盘失败回滚，这个值也已经在用户消息里出现过，
-	// 日志层多遮一个值没有代价。
+	if len(value) < strutil.MinMaskableSecretLen {
+		// 短值仍可登记、可被 Resolve 还原，但出站/日志遮蔽层无法安全覆盖
+		// （见 strutil.ReplaceSecretValue）。不含值本身，只留可诊断的元数据。
+		zap.S().Warnw("secret: 值过短，出站与日志遮蔽层无法安全覆盖",
+			"bot_id", botID, "name", name)
+	}
+	// 登记与落盘同属一个事务：失败回滚并撤销本次遮蔽引用。
+	// 每个成功登记的条目对应一次 RegisterSecret 引用。引用计数必须严格配对：
+	// 判断「还有没有别的条目用同一个值」是不够的 —— 那会让同值条目留下永远
+	// 撤不掉的遮蔽规则（短值尤其明显）。
 	ulog.RegisterSecret(value)
 	if err := v.save(); err != nil {
 		v.mu.Lock()
@@ -239,7 +247,13 @@ func (v *Vault) Register(botID, name, value, description string) error {
 			delete(v.entries, key)
 		}
 		v.mu.Unlock()
+		// 本次登记没有真正落盘，只撤销它自己那一份引用；旧条目的引用保持不动。
+		ulog.UnregisterSecret(value)
 		return err
+	}
+	if hadOld {
+		// 旧条目已被替换（同值覆盖时正好与上面的 +1 抵消）。
+		ulog.UnregisterSecret(old.Value)
 	}
 	return nil
 }
@@ -348,10 +362,33 @@ func (v *Vault) Redact(text string) string {
 	}
 	v.mu.RUnlock()
 	sort.Slice(pairs, func(i, j int) bool { return len(pairs[i].val) > len(pairs[j].val) })
-	for _, p := range pairs {
-		text = strings.ReplaceAll(text, p.val, Placeholder(p.name))
+	// 不能直接把值替换成 {{secret:name}} 再处理下一对：占位符本身含 "secret"、
+	// 冒号等字符，短值（现在允许登记）会二次命中刚写进去的占位符，把它打碎。
+	// 先统一替换成不含任何凭据片段的 marker，最后单遍还原。
+	type replacement struct{ marker, placeholder string }
+	replacements := make([]replacement, 0, len(pairs))
+	// marker 前缀不能出现在原文里，否则最后的还原步骤会误改用户文本。
+	markerPrefix := "\x00S"
+	for strings.Contains(text, markerPrefix) {
+		markerPrefix += "\x00"
 	}
-	return text
+	for i, p := range pairs {
+		marker := fmt.Sprintf(markerPrefix+"%d\x00", i)
+		next := strutil.ReplaceSecretValue(text, p.val, marker)
+		if next == text {
+			continue
+		}
+		text = next
+		replacements = append(replacements, replacement{marker, Placeholder(p.name)})
+	}
+	if len(replacements) == 0 {
+		return text
+	}
+	oldnew := make([]string, 0, len(replacements)*2)
+	for _, r := range replacements {
+		oldnew = append(oldnew, r.marker, r.placeholder)
+	}
+	return strings.NewReplacer(oldnew...).Replace(text)
 }
 
 // StreamHoldLen 返回 s 尾部需要扣住、暂不推送的字节数，用于流式跨 chunk 遮蔽。
@@ -364,6 +401,8 @@ func (v *Vault) Redact(text string) string {
 // 返回值是「s 的某个后缀恰好是某条已登记真实值的真前缀」时的最大长度；否则 0。
 // 只扣住真正可能成值的前缀，普通文本零延迟放行——不做固定长度窗口，避免长密钥
 // 把整条流扣到 Flush 才吐出、破坏实时性。与 Redact 一致，不分归属。
+// 短值同样参与扣留（只带来几字节延迟，不会多放出明文）；Redact 是否真替换
+// 由边界规则决定，二者不一致时最坏只是略晚推送，不构成泄漏。
 //
 // 复杂度上界 O(值数量 × 最长值²)（自大到小命中即停）；典型 token 级密钥下远低于此。
 // 若将来需要登记文件级超长密钥且流式吞吐很高，可改为前缀索引，这里保持最简正确解。
@@ -421,9 +460,6 @@ func (v *Vault) RedactValue(x any) any {
 		return x
 	}
 }
-
-// IsTooShort 判断 Register 返回的错误是否为「值过短」。
-func IsTooShort(err error) bool { return errors.Is(err, ErrValueTooShort) }
 
 // save 原子写入持久化文件（0600）。内存库（filePath 为空）为空操作。
 func (v *Vault) save() error {

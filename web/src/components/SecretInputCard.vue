@@ -5,7 +5,7 @@
     <form v-if="state === 'ready' || state === 'submitting'" autocomplete="off" @submit.prevent="submit(false)">
       <label class="secret-label">密钥
         <input v-model="value" type="password" autocomplete="off" autocapitalize="none" :spellcheck="false"
-          :disabled="state === 'submitting'" placeholder="输入密钥（12 到 16384 字节）" data-testid="secret-input-value" />
+          :disabled="state === 'submitting'" placeholder="输入密钥（不可为空）" data-testid="secret-input-value" />
       </label>
       <p class="secret-note">请仅在此输入，不要粘贴到聊天框。请求过期或服务重启后，请重新发起密钥请求。</p>
       <div class="secret-actions">
@@ -36,10 +36,8 @@ const continuationFailed = ref(false)
 let alive = true
 let generation = 0
 let timer
-const validValue = computed(() => {
-  const encoder = new TextEncoder()
-  return encoder.encode(value.value.trim()).length >= 12 && encoder.encode(value.value).length <= 16384
-})
+// 长度不设限：短口令 / PIN / 验证码同样可能是真实凭据。
+const validValue = computed(() => value.value.trim().length > 0)
 const notice = computed(() => {
   if (state.value === 'stored') return continuationFailed.value ? '密钥已保存，但继续任务未确认。请在聊天中说明“密钥已提供，请继续”，不要再次发送原值。' : '密钥已保存，已发送安全提示继续任务。'
   if (state.value === 'cancelled') return '请求已取消。'

@@ -76,6 +76,9 @@ func (c Config) defaults() Config {
 //   - text_encode:  Base64 编解码
 //   - text_diff:    文本差异比较
 //   - text_stats:   文本统计
+//   - user_choice:  向用户提问并等待选择
+//   - secret_input: 向用户索取密钥（返回占位符）
+//   - secret_delete: 按名字删除已登记的凭据
 //
 // now 工具通过 ToolProvider 动态提供（per-bot 时区），
 // 其余工具为静态注册。
@@ -95,6 +98,7 @@ func RegisterTools(mgr *agenttools.ToolManager, cfg Config) error {
 		textStatsToolDef(),
 		userChoiceToolDef(),
 		secretInputToolDef(),
+		secretDeleteToolDef(),
 	}
 
 	if err := mgr.RegisterMany(staticDefs...); err != nil {

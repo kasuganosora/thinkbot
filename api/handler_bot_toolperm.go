@@ -222,7 +222,8 @@ var userToolDesc = map[string]string{
 	"tb_restart":        "仅重启 thinkbot 子进程",
 
 	// 密钥：只登记请求并把占位符回给模型，明文进保险库、模型永远看不到值
-	"secret_input": "向用户索取密钥（返回占位符）",
+	"secret_input":  "向用户索取密钥（返回占位符）",
+	"secret_delete": "按名称永久删除已保存的凭据",
 }
 
 // toolCategoryLabel 把工具注册时使用的英文 category 映射为中文分组名，

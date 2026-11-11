@@ -35,8 +35,10 @@ func (s *Server) handleSubmitChatSecret(c *gin.Context) {
 		Fail(c, errs.BadRequest("缺少密钥请求归属"))
 		return
 	}
-	if !req.Cancel && (len(strings.TrimSpace(req.Value)) < secret.MinValueLen || len(req.Value) > 16384) {
-		Fail(c, errs.BadRequest("密钥长度不符合要求，请使用 12 到 16384 字节的值"))
+	// 只做非空校验：短口令 / PIN / 验证码同样是合法凭据，长度交给用户决定。
+	// 请求体另有 64KB 上限（MaxBytesReader），避免超大值把保险库文件撑爆。
+	if !req.Cancel && strings.TrimSpace(req.Value) == "" {
+		Fail(c, errs.BadRequest("密钥不能为空"))
 		return
 	}
 	owner := interaction.SecretReplyChatID(webChatID(user.ID), req.SessionID)

@@ -94,10 +94,9 @@ func TestInterceptSecretReply_UnicodeAndPassphrases(t *testing.T) {
 			if _, ok := InterceptSecretReply(msg); !ok || strings.Contains(msg.Text, raw) {
 				t.Fatalf("pending reply was not protected: %q", msg.Text)
 			}
-			if len(raw) >= secret.MinValueLen {
-				if got, _ := v.Get("bot-test", "svc.token"); got != raw {
-					t.Fatal("secret not registered")
-				}
+			// 长度不再是拒绝理由：非空回复一律登记，包括短口令和 Unicode。
+			if got, _ := v.Get("bot-test", "svc.token"); got != raw {
+				t.Fatalf("secret not registered: got %q, want %q", got, raw)
 			}
 		})
 	}
@@ -116,10 +115,10 @@ func TestInterceptSecretReply_EmptyReplyKeepsRequest(t *testing.T) {
 	}
 }
 
-// TestInterceptSecretReply_ShortReplyNotLeaked 过短、登记失败的回复：
-// 原文依然不能进 LLM（它可能就是一个短口令），只给模型一条说明。
-func TestInterceptSecretReply_ShortReplyNotLeaked(t *testing.T) {
-	withTestVault(t)
+// TestInterceptSecretReply_ShortReplyRegistered 短回复现在也应登记成功：
+// 原文依然不能进 LLM（它可能就是一个短口令），模型只拿到占位符提示。
+func TestInterceptSecretReply_ShortReplyRegistered(t *testing.T) {
+	v := withTestVault(t)
 	registerSecretRequest(t, "si-test-3", "bot-test", "chat-short", "svc.pin")
 
 	const raw = "pin-0042"
@@ -127,11 +126,30 @@ func TestInterceptSecretReply_ShortReplyNotLeaked(t *testing.T) {
 	if _, ok := InterceptSecretReply(msg); !ok {
 		t.Fatal("short reply should still be consumed")
 	}
+	if got, found := v.Get("bot-test", "svc.pin"); !found || got != raw {
+		t.Fatalf("short secret not registered: %q %v", got, found)
+	}
 	if strings.Contains(msg.Text, raw) {
 		t.Fatalf("short secret leaked: %q", msg.Text)
 	}
-	if !strings.Contains(msg.Text, "过短") {
-		t.Fatalf("model should be told the reply was too short: %q", msg.Text)
+	if !strings.Contains(msg.Text, "{{secret:svc.pin}}") {
+		t.Fatalf("redacted notice missing placeholder: %q", msg.Text)
+	}
+}
+
+func TestInterceptSecretReply_PreservesSurroundingSpaces(t *testing.T) {
+	v := withTestVault(t)
+	registerSecretRequest(t, "si-spaces", "bot-test", "chat-spaces", "svc.pin")
+	const raw = "  pin 42  "
+	msg := &core.Message{BotID: "bot-test", Channel: "chat-spaces", Text: raw}
+	if _, ok := InterceptSecretReply(msg); !ok {
+		t.Fatal("reply should be consumed")
+	}
+	if got, found := v.Get("bot-test", "svc.pin"); !found || got != raw {
+		t.Fatalf("value was rewritten: %q %v, want %q", got, found, raw)
+	}
+	if strings.Contains(msg.Text, raw) {
+		t.Fatalf("plaintext leaked: %q", msg.Text)
 	}
 }
 

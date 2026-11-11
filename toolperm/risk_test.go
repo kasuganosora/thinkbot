@@ -207,7 +207,7 @@ func TestEvaluate_SecretInputVisibleInWhitelistMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 白名单模式下基础工具仍然可见
-	for _, tool := range []string{"secret_input", "user_choice", "memory"} {
+	for _, tool := range []string{"secret_input", "secret_delete", "user_choice", "memory"} {
 		if !svc.Evaluate("bot-wl", tool, "wecom", "u1") {
 			t.Errorf("%q must stay visible in whitelist mode", tool)
 		}
@@ -343,7 +343,7 @@ func TestIsBasicTool_Classification(t *testing.T) {
 		"text_diff", "text_encode", "text_hash", "text_stats",
 		"memory", "memory_snapshot", "memory_tools",
 		"task_detail", "sandbox_health",
-		"user_choice", "secret_input",
+		"user_choice", "secret_input", "secret_delete",
 	}
 	for _, name := range basic {
 		if !IsBasicTool(name) {

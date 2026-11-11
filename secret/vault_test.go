@@ -73,6 +73,55 @@ func TestRedactLongestFirst(t *testing.T) {
 	}
 }
 
+// 允许登记短值后，占位符文本 {{secret:name}} 本身可能被短值二次命中。
+// marker 单遍还原要保证替换结果是干净的占位符。
+func TestRedactShortValueDoesNotCorruptPlaceholder(t *testing.T) {
+	v := newTestVault(t)
+	if err := v.Register("", "s", "secret", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Register("", "long", "LONG_CREDENTIAL_VALUE_abcdef", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Redact("use LONG_CREDENTIAL_VALUE_abcdef now"); got != "use {{secret:long}} now" {
+		t.Fatalf("placeholder corrupted by short value: %q", got)
+	}
+}
+
+func TestRedactPreservesTextContainingMarkerPrefix(t *testing.T) {
+	v := newTestVault(t)
+	if err := v.Register("", "k", "LONG_CREDENTIAL_VALUE_abcdef", ""); err != nil {
+		t.Fatal(err)
+	}
+	in := "\x00S0\x00 and LONG_CREDENTIAL_VALUE_abcdef"
+	if got := v.Redact(in); got != "\x00S0\x00 and {{secret:k}}" {
+		t.Fatalf("marker collision corrupted the text: %q", got)
+	}
+}
+
+func TestRedactShortValueBoundaries(t *testing.T) {
+	v := newTestVault(t)
+	if err := v.Register("", "pin", "123456", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Redact("pin=123456&x=1"); got != "pin={{secret:pin}}&x=1" {
+		t.Fatalf("short credential not redacted in assignment context: %q", got)
+	}
+	if got := v.Redact("2026-123456-11"); got != "2026-123456-11" {
+		t.Fatalf("short credential corrupted a date: %q", got)
+	}
+	// 低于遮蔽下限的值仍可登记、可解析，但不做出站遮蔽（否则整段文本被打码）。
+	if err := v.Register("", "one", "1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Resolve("", "{{secret:one}}"); got != "1" {
+		t.Fatalf("short value not resolvable: %v", got)
+	}
+	if got := v.Redact("build 1 of 12"); got != "build 1 of 12" {
+		t.Fatalf("one-character value corrupted ordinary text: %q", got)
+	}
+}
+
 func TestRedactValueRecursive(t *testing.T) {
 	v := newTestVault(t)
 	if err := v.Register("", "tok", "verylongsecrettoken", ""); err != nil {
@@ -119,13 +168,29 @@ func TestPersistRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRejectShortAndBadName(t *testing.T) {
+// 登记只做非空校验：短口令 / PIN / 验证码也是合法凭据。
+func TestRegisterAcceptsShortValueRejectsEmptyAndBadName(t *testing.T) {
 	v := newTestVault(t)
-	if err := v.Register("", "x", "short", ""); err == nil {
-		t.Fatal("short value should be rejected")
+	for _, short := range []string{"1", "a", "123456", "p@ss"} {
+		if err := v.Register("", "x", short, ""); err != nil {
+			t.Fatalf("short value %q rejected: %v", short, err)
+		}
+		if got, ok := v.Get("", "x"); !ok || got != short {
+			t.Fatalf("short value %q not stored: %q %v", short, got, ok)
+		}
 	}
-	if err := v.Register("", "x", "longenoughvalue123", ""); err != nil {
-		t.Fatalf("valid name rejected: %v", err)
+	for _, empty := range []string{"", "   ", "\n\t"} {
+		if err := v.Register("", "x", empty, ""); err != ErrEmptyValue {
+			t.Fatalf("empty value %q should be rejected with ErrEmptyValue, got %v", empty, err)
+		}
+	}
+	// 非空校验之外不改写值：密码里的首尾空格是有效字符。
+	const spaced = "  pass word  "
+	if err := v.Register("", "x", spaced, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := v.Get("", "x"); got != spaced {
+		t.Fatalf("value was trimmed: %q, want %q", got, spaced)
 	}
 	if err := v.Register("", "bad name", "longenoughvalue123", ""); err == nil {
 		t.Fatal("invalid name should be rejected")
