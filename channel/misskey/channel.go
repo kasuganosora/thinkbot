@@ -1161,7 +1161,7 @@ func (c *MisskeyChannel) ReplyWithVisibility(ctx context.Context, noteID, text, 
 		// code=CANNOT_REPLY_TO_A_PURE_RENOTE / HTTP 400）。此时改为发一条独立新帖
 		// （去掉 replyID），正文已带 buildReplyMentionPrefix 构造的 @ 前缀，
 		// 仍可 @ 到原 Renote 作者，等价于「对纯 Renote 说话」，避免整条回复丢失。
-		if noteID != "" && strings.Contains(err.Error(), "CANNOT_REPLY_TO_A_PURE_RENOTE") {
+		if noteID != "" && errHasMisskeyCode(err, "CANNOT_REPLY_TO_A_PURE_RENOTE") {
 			traceid.L(ctx).Warnw("misskey: reply target is a pure renote, downgrade to standalone note",
 				"channel", c.name, "note_id", noteID)
 			if _, retryErr := c.api.createNoteFull(ctx, text, "", "", visibility, "", nil); retryErr != nil {

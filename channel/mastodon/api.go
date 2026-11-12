@@ -21,11 +21,11 @@ import (
 //
 // ⚠️ 调用约定（与 channel/misskey/api.go 同源的血泪教训）：
 // 本项目的 HTTP 客户端在 Do() 里对**任何非 2xx 都已经返回非 nil error**
-// （见 util/http/client.go 的 `if !result.IsSuccess()`），错误文本里带状态码与
-// 响应体。因此本文件**不要**再写 `if resp.StatusCode >= 400` —— 那个分支永远
-// 走不到，写在里面的修复会静默失效（Misskey 2026-08-30 的 ALREADY_REACTED
-// 幂等修复正因为写在 StatusCode 分支上而完全没生效）。
-// 需要按状态码分支时，改成判断 err 是否为 errs.HTTPError 并取其状态码。
+// （见 util/http/client.go 的 `if !result.IsSuccess()`）。状态码在 Error()
+// 里；响应体在 errs.ResponseDetail，不要再拼回 Error()（上游可能回显凭证）。
+// 因此本文件**不要**再写 `if resp.StatusCode >= 400` —— 那个分支永远走不到，
+// 写在里面的修复会静默失效。
+// 需要按状态码分支时，改成判断 err 是否为 errs 的 HTTP 错误并取其状态码。
 
 // maxPageLimit 是多数 Mastodon 列表端点（search / account statuses / following）
 // 的单页上限，超出会被服务端静默收敛或报错，故调用前统一 clamp。
@@ -62,16 +62,17 @@ var (
 	ErrNotReblogged = errors.New("mastodon: not reblogged")
 )
 
-// errHasMastodonError 判断 err 文本里是否含指定的 Mastodon error message。
+// errHasMastodonError 判断 err 是否带有指定的 Mastodon error message。
 //
-// 只能在 HTTP 客户端返回 err 的分支上用：Do() 把 4xx 直接当 error 返回，
-// 响应体只存在于 err.Error() 里（见文件头部的调用约定）。
-// 大小写不敏感，避免不同实例/版本文案大小写差异导致漏判。
+// 只能在 HTTP 客户端返回 err 的分支上用：Do() 把 4xx 直接当 error 返回。
+// 响应体不在 Error() 里，而在 errs.ResponseDetail；两类文本都要看，否则
+// 幂等哨兵包不上，errors.Is 会失败。大小写不敏感。
 func errHasMastodonError(err error, msg string) bool {
 	if err == nil || msg == "" {
 		return false
 	}
-	return strings.Contains(strings.ToLower(err.Error()), strings.ToLower(msg))
+	haystack := strings.ToLower(err.Error() + "\n" + errs.ResponseDetail(err))
+	return strings.Contains(haystack, strings.ToLower(msg))
 }
 
 // apiClient 封装了 Mastodon HTTP API 调用。

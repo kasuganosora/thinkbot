@@ -5,9 +5,16 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
+
+// upstreamSecret is a synthetic token reflected in the error body.
+// Classifiers may read it, but Error() must not.
+const upstreamSecret = "dummy-secret-token"
 
 // TestSearchBreakerClosedByDefault 初始状态必须放行。
 func TestSearchBreakerClosedByDefault(t *testing.T) {
@@ -117,7 +124,7 @@ func misskeyErrorServer(t *testing.T, code string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"message":"conflict","code":"` + code + `","kind":"client"}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"reflected ` + upstreamSecret + `","code":"` + code + `","kind":"client"}}`))
 	}))
 }
 
@@ -134,6 +141,9 @@ func TestCreateReaction_AlreadyReacted(t *testing.T) {
 	if !errors.Is(err, ErrAlreadyReacted) {
 		t.Fatalf("期望 ErrAlreadyReacted（幂等成功），实际: %v", err)
 	}
+	if strings.Contains(err.Error(), upstreamSecret) {
+		t.Fatalf("哨兵错误带出了上游响应体: %v", err)
+	}
 }
 
 // TestDeleteReaction_NotReacted 与 createReaction 对称：撤销一个不存在的反应
@@ -147,6 +157,9 @@ func TestDeleteReaction_NotReacted(t *testing.T) {
 	if !errors.Is(err, ErrNotReacted) {
 		t.Fatalf("期望 ErrNotReacted（幂等成功），实际: %v", err)
 	}
+	if strings.Contains(err.Error(), upstreamSecret) {
+		t.Fatalf("哨兵错误带出了上游响应体: %v", err)
+	}
 }
 
 // TestReaction_OtherErrorsStillSurface 非幂等错误必须照常上报，
@@ -158,9 +171,13 @@ func TestReaction_OtherErrorsStillSurface(t *testing.T) {
 	a := newAPIClient(srv.URL, "tok")
 	if err := a.createReaction(context.Background(), "note-1", "👍"); errors.Is(err, ErrAlreadyReacted) {
 		t.Fatal("非 ALREADY_REACTED 错误不应被判为幂等成功")
+	} else if err != nil && strings.Contains(err.Error(), upstreamSecret) {
+		t.Fatalf("非幂等错误带出了上游响应体: %v", err)
 	}
 	if err := a.deleteReaction(context.Background(), "note-1"); errors.Is(err, ErrNotReacted) {
 		t.Fatal("非 NOT_REACTED 错误不应被判为幂等成功")
+	} else if err != nil && strings.Contains(err.Error(), upstreamSecret) {
+		t.Fatalf("非幂等错误带出了上游响应体: %v", err)
 	}
 }
 
@@ -174,6 +191,22 @@ func TestErrHasMisskeyCode(t *testing.T) {
 	}
 	if errHasMisskeyCode(errors.New(`-> 400: {"error":{"code":"OTHER"}}`), "ALREADY_REACTED") {
 		t.Error("不应误匹配其他错误码")
+	}
+	// 响应体只在 detail 里。Error() 不含错误码时也必须能识别。
+	detailOnly := errs.HTTPErrorWithDetail(400,
+		"http POST http://stub.example/api/notes/reactions/create -> 400",
+		`{"error":{"code":"ALREADY_REACTED","message":"reflected `+upstreamSecret+`"}}`)
+	if strings.Contains(detailOnly.Error(), upstreamSecret) || strings.Contains(detailOnly.Error(), "ALREADY_REACTED") {
+		t.Fatalf("Error() 不应包含响应体: %s", detailOnly.Error())
+	}
+	if !errHasMisskeyCode(detailOnly, "ALREADY_REACTED") {
+		t.Error("应能从 ResponseDetail 识别错误码")
+	}
+	if !errHasMisskeyCode(errs.Wrap(detailOnly, "misskey createReaction"), "ALREADY_REACTED") {
+		t.Error("包装后仍应能从 ResponseDetail 识别错误码")
+	}
+	if errHasMisskeyCode(detailOnly, "NOT_REACTED") {
+		t.Error("不应从 detail 误匹配其他错误码")
 	}
 }
 
