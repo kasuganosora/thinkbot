@@ -178,7 +178,9 @@ const (
 
 	// KeySandboxBrowserHandshakeTimeout 浏览器 MCP initialize 握手时限。
 	// Go duration（如 3m、90s）或纯秒数。默认 3m。合法范围 1s–10m，非法值回退默认。
-	// 环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT 优先于本键。
+	// 读取顺序与 Store 一致：运行时覆盖 > 数据库/管理界面 > .env 文件 >
+	// 操作系统环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT > 默认值。
+	// 环境变量不会盖过数据库或 .env 里已有的值。
 	// 其它 MCP 服务器仍用 mcp 包内 8s 上限，避免不可达 HTTP 端点拖住启动。
 	KeySandboxBrowserHandshakeTimeout = "sandbox.browser.handshake_timeout"
 

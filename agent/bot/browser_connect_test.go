@@ -430,6 +430,21 @@ func TestBrowserMCPStopDuringHandshake(t *testing.T) {
 	waitGoroutines(t, before)
 }
 
+func TestMCPStdioStderrRedactsSecretPatterns(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	w := &mcpStdioStderr{log: zap.New(core).Sugar()}
+	const token = "abcdef0123456789"
+	if _, err := w.Write([]byte("token=" + token + " Bearer " + token + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if logsContain(logs, token) {
+		t.Fatal("live stderr log leaked a token-shaped secret")
+	}
+	if !logsContain(logs, "token=***") || !logsContain(logs, "Bearer ***") {
+		t.Fatal("live stderr log did not apply the same redaction as the failure tail")
+	}
+}
+
 func TestBrowserMCPStderrSecretNotLogged(t *testing.T) {
 	const secret = "proxy-password-value"
 	core, logs := observer.New(zap.InfoLevel)

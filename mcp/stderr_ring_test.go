@@ -27,7 +27,7 @@ func TestStderrRingKeepsTailAndRedacts(t *testing.T) {
 }
 
 func TestRedactStderrPatternsWithoutExplicitList(t *testing.T) {
-	got := redactStderr("token=abcdef0123456789 Bearer abcdef0123456789 http://user:abcdef0123456789@example.test", nil)
+	got := RedactStderr("token=abcdef0123456789 Bearer abcdef0123456789 http://user:abcdef0123456789@example.test", nil)
 	if strings.Contains(got, "abcdef0123456789") {
 		t.Fatalf("pattern redact missed a secret: %q", got)
 	}

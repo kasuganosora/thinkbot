@@ -1283,7 +1283,7 @@ func WorkspaceMetaSpecs() []MetaSpec {
 		{Key: KeySandboxSessionAutoUpgradeWindow, Category: "Workspace", Description: "sandbox_exec(background=auto) 判定短命令的观察窗口（毫秒，默认 2500）。窗口内正常退出则按一次性结果返回，不丢已收输出。"},
 		{Key: KeySandboxSessionAutoUpgradeMaxWait, Category: "Workspace", Description: "auto 升级遇到「零输出但进程存活」时转启动诊断前的最长等待（毫秒，默认 8000）。零输出 alive 永不升级为后台会话。"},
 		{Key: KeySandboxSessionWatchWaitMax, Category: "Workspace", Description: "sandbox_session_watch 长轮询单次最大等待（毫秒，默认 30000）。0 表示关闭等待、退化为即时快照。"},
-		{Key: KeySandboxBrowserHandshakeTimeout, Category: "Workspace", Description: "浏览器 MCP initialize 握手时限（默认 3m，范围 1s–10m）。Go duration（3m、90s）或纯秒数。启动慢于旧的 8s 时调大；非法值回退 3m。环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT 优先。其它 MCP 服务器不受影响。"},
+		{Key: KeySandboxBrowserHandshakeTimeout, Category: "Workspace", Description: "浏览器 MCP initialize 握手时限（默认 3m，范围 1s–10m）。Go duration（3m、90s）或纯秒数。非法值回退 3m。读取顺序：运行时覆盖 > 数据库/管理界面 > .env 文件 > 环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT > 默认值。环境变量不会盖过数据库或 .env。其它 MCP 服务器不受影响。"},
 	}
 }
 

@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -904,15 +905,23 @@ func TestBrowserHandshakeTimeoutConfigKey(t *testing.T) {
 	if DefaultMap()[KeySandboxBrowserHandshakeTimeout] != "3m" {
 		t.Fatalf("DefaultMap = %q, want 3m", DefaultMap()[KeySandboxBrowserHandshakeTimeout])
 	}
-	var found bool
+	var desc string
 	for _, spec := range WorkspaceMetaSpecs() {
 		if spec.Key == KeySandboxBrowserHandshakeTimeout {
-			found = true
+			desc = spec.Description
 			break
 		}
 	}
-	if !found {
+	if desc == "" {
 		t.Fatal("WorkspaceMetaSpecs missing browser handshake timeout")
+	}
+	if strings.Contains(desc, "环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT 优先") {
+		t.Fatalf("description claims the OS env var wins: %s", desc)
+	}
+	for _, part := range []string{"运行时覆盖", "数据库", ".env", "SANDBOX_BROWSER_HANDSHAKE_TIMEOUT", "默认值"} {
+		if !strings.Contains(desc, part) {
+			t.Fatalf("description missing %q: %s", part, desc)
+		}
 	}
 }
 

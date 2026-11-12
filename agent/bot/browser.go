@@ -24,6 +24,8 @@ type mcpStdioStderr struct {
 func (w *mcpStdioStderr) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
 	if line != "" && w.log != nil {
+		// 与握手失败时的 stderr 尾部使用同一套正则打码，再套上显式密文替换和长度上限。
+		line = mcp.RedactStderr(line, w.redact)
 		w.log.Infow("browser-mcp stderr", "line", sanitizeBrowserText(line, w.redact))
 	}
 	return len(p), nil

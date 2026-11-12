@@ -39,8 +39,9 @@ type ServerConfig struct {
 	// Env stdio 模式下的环境变量（"KEY=VALUE" 格式）。
 	Env []string
 
-	// Stderr stdio 模式下子进程的标准错误输出去向。nil 时丢弃（默认行为）。
-	// 建议传入回写 thinkbot 日志系统的 io.Writer，便于排障（否则子进程错误被静默丢弃）。
+	// Stderr 是 stdio 子进程标准错误的额外去向。
+	// nil 不会丢弃：输出仍进入有界环形缓冲，并复制到当前进程的 os.Stderr。
+	// 非 nil 时改为转发给该 Writer（同时进入环形缓冲），不再写到 os.Stderr。
 	Stderr io.Writer
 
 	// URL HTTP 模式下的服务器地址。
@@ -342,13 +343,15 @@ func (m *Manager) connectOne(ctx context.Context, cfg ServerConfig) error {
 	defer hcancel()
 	serverInfo, err := client.Initialize(hctx)
 	if err != nil {
+		// 先关掉子进程。os/exec 要等 stderr 拷贝结束 Wait 才返回，
+		// 这时环形缓冲里才有完整尾部；先读尾部会在进程很快退出时读到空。
+		_ = client.Close()
 		if tail := client.StderrTail(); tail != "" {
 			m.logger.Warnw("mcp handshake failed",
 				"server", cfg.Name,
 				"err", err,
 				"stderr", tail)
 		}
-		_ = client.Close()
 		return err
 	}
 

@@ -61,10 +61,12 @@ func (r *stderrRing) Tail() string {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return redactStderr(string(r.buf), r.redact)
+	return RedactStderr(string(r.buf), r.redact)
 }
 
-func redactStderr(s string, extra []string) string {
+// RedactStderr 遮盖显式密文以及 token/password/bearer/URL 用户信息这类常见写法。
+// 握手失败时的 stderr 尾部和实时 stderr 日志行都走这里。
+func RedactStderr(s string, extra []string) string {
 	secrets := append([]string(nil), extra...)
 	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
 	for _, secret := range secrets {
