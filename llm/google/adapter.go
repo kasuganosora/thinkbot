@@ -222,12 +222,12 @@ func paramsToGeminiRequest(params *llm.GenerateParams) (*GenerateContentRequest,
 	genConfig := &GenerationConfig{}
 	hasConfig := false
 
-	if params.Temperature != nil {
-		genConfig.Temperature = params.Temperature
+	if temp := llm.WireSampling(params.Temperature); temp != nil {
+		genConfig.Temperature = temp
 		hasConfig = true
 	}
-	if params.TopP != nil {
-		genConfig.TopP = params.TopP
+	if top := llm.WireSampling(params.TopP); top != nil {
+		genConfig.TopP = top
 		hasConfig = true
 	}
 	if params.MaxTokens != nil {

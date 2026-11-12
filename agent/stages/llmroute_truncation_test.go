@@ -175,8 +175,8 @@ func TestLLMStage_LightTierUsesLowEffortOnLightModel(t *testing.T) {
 	if gotEffort == nil || *gotEffort != "minimal" {
 		t.Fatalf("light tier effort = %v, want minimal (glm-5.2 serves low as high)", gotEffort)
 	}
-	if gotMaxTokens == nil || *gotMaxTokens != route.LightMaxTokens {
-		t.Fatalf("light tier max tokens = %v, want %d", gotMaxTokens, route.LightMaxTokens)
+	if gotMaxTokens != nil {
+		t.Fatalf("light tier max tokens = %v, want the field omitted when the model has no maxTokens", gotMaxTokens)
 	}
 	if main.calls != 0 {
 		t.Fatalf("main model called %d times on a healthy light turn", main.calls)
@@ -238,21 +238,23 @@ func TestLLMStage_FullTierEmptyLengthStillNotifies(t *testing.T) {
 	}
 }
 
-// GLM-5.2 reports stop, not length, when the shared budget is used up.
-// The light cap is 1024, which is far below the main model's max tokens, so
-// the usage fallback must compare against the budget that was actually sent.
+// The provider reports stop, not length, when the shared budget is used up.
+// The usage fallback must compare against the model's configured max tokens,
+// which is the budget that was actually sent.
 func TestLLMStage_LightTierStopAtCapUpgrades(t *testing.T) {
+	const budget = 64
 	light := &tierProvider{name: "light", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
 		return &llm.GenerateResult{
 			FinishReason: llm.FinishReasonStop,
 			Text:         "",
-			Usage:        llm.Usage{OutputTokens: route.LightMaxTokens},
+			Usage:        llm.Usage{OutputTokens: budget},
 		}, nil
 	}}
 	main := &tierProvider{name: "main", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
 		return &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: "已经改好了"}, nil
 	}}
 	stage := newLightTierStage(main, light, "medium")
+	stage.config.MaxTokens = intPtr(budget)
 
 	out, err := stage.Process(context.Background(), newLightTierEnvelope())
 	if err != nil {
@@ -271,14 +273,15 @@ func TestLLMStage_LightTierStopAtCapUpgrades(t *testing.T) {
 	}
 }
 
-// A light turn that does produce a partial answer at the cap still tells the
-// user the answer was cut. Comparing usage to the main-model budget misses it.
+// A light turn that does produce a partial answer at the model's output cap
+// still tells the user the answer was cut.
 func TestLLMStage_LightTierPartialAtCapNotifies(t *testing.T) {
+	const budget = 64
 	light := &tierProvider{name: "light", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
 		return &llm.GenerateResult{
 			FinishReason: llm.FinishReasonStop,
 			Text:         "half answer",
-			Usage:        llm.Usage{OutputTokens: route.LightMaxTokens},
+			Usage:        llm.Usage{OutputTokens: budget},
 		}, nil
 	}}
 	main := &tierProvider{name: "main", reply: func(int, llm.GenerateParams) (*llm.GenerateResult, error) {
@@ -286,6 +289,7 @@ func TestLLMStage_LightTierPartialAtCapNotifies(t *testing.T) {
 		return nil, nil
 	}}
 	stage := newLightTierStage(main, light, "medium")
+	stage.config.MaxTokens = intPtr(budget)
 
 	out, err := stage.Process(context.Background(), newLightTierEnvelope())
 	if err != nil {
@@ -331,7 +335,7 @@ func TestLLMStage_IntentJudgeUsesModelVocabulary(t *testing.T) {
 	var judgeEffort *string
 	var sawJudge bool
 	main := &tierProvider{name: "main", reply: func(n int, params llm.GenerateParams) (*llm.GenerateResult, error) {
-		if params.MaxTokens != nil && *params.MaxTokens == 1024 && len(params.Tools) == 0 {
+		if params.System != "" && len(params.Tools) == 0 {
 			sawJudge = true
 			judgeEffort = params.ReasoningEffort
 			return &llm.GenerateResult{

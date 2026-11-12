@@ -997,7 +997,8 @@ type WorkflowConfig struct {
 	// ScheduleIntervalMS 调度器主循环轮询间隔毫秒。
 	ScheduleIntervalMS int `json:"scheduleIntervalMs"`
 
-	// AnalyzerTemperature 需求分析器 LLM 温度。
+	// AnalyzerTemperature 已废弃。仍会从 workflow.analyzer_temperature 读出，
+	// 以免旧配置导致启动失败，但分析器和自愈不再用它覆盖模型温度。
 	AnalyzerTemperature float64 `json:"analyzerTemperature"`
 
 	// 注意：这里曾有 AnalyzerMaxTokens（workflow.analyzer_max_tokens），已移除。
@@ -1071,7 +1072,7 @@ func WorkflowMetaSpecs() []MetaSpec {
 		{Key: KeyWorkflowRetryInitialMS, Category: "Workflow", Description: "重试指数退避的初始等待毫秒（默认 500）"},
 		{Key: KeyWorkflowRetryMaxMS, Category: "Workflow", Description: "重试指数退避的最大等待毫秒（默认 10000）"},
 		{Key: KeyWorkflowScheduleInterval, Category: "Workflow", Description: "调度器主循环轮询间隔毫秒（默认 200）"},
-		{Key: KeyWorkflowAnalyzerTemp, Category: "Workflow", Description: "需求分析器 LLM 温度（默认 0.3）"},
+		{Key: KeyWorkflowAnalyzerTemp, Category: "Workflow", Description: "DEPRECATED and ignored. Analyzer sampling follows the model config; temperature -1 omits the field."},
 		{Key: KeyWorkflowAnalyzerStuckTimeout, Category: "Workflow", Description: "需求分析器（流式 LLM）卡死看门狗阈值秒数（默认 180=3 分钟）。连续无 token 超该时长判卡死终止；硬上限=该值×10（subagent.delegateHardTimeoutFactor=10）。靠看门狗判断真卡死，不写死固定超时。"},
 		{Key: KeyWorkflowAnalyzerMaxDuration, Category: "Workflow", Description: "需求分析阶段「整轮总时长上限」毫秒（默认 600000=10 分钟）。兜底防止 GLM 退化时分析器无限重试把「分析中」拖成数十分钟黑洞；超过该时长分析阶段整体失败并明确报错。"},
 		{Key: KeyWorkflowGoalMaxIterations, Category: "Workflow", Description: "目标模式（闭环循环）的全局最大迭代轮数（默认 5）。review 节点在节点级迭代仍不通过时，回退到其 Feedback 目标节点重跑并注入审查意见，形成「工作→审查→修复→审查」循环；达到该上限仍不通过则工作流失败。"},

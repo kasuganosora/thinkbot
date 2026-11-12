@@ -277,12 +277,10 @@ func (f *FormationPipeline) extractFacts(ctx context.Context, userContent, assis
 	sb.WriteString("\nimportance: 0.0~1.0, higher means more important. NEVER emit small talk, greetings or pleasantries.\n")
 	sb.WriteString("If the conversation contains nothing worth remembering, output an empty array [].")
 
-	maxTokens := DefaultGenerationMaxTokens
 	resp, err := f.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_formation"), llm.GenerateParams{
-		Model:     f.config.Model,
-		System:    f.config.SystemPrompt,
-		Messages:  []llm.Message{llm.UserMessage(sb.String())},
-		MaxTokens: &maxTokens,
+		Model:    f.config.Model,
+		System:   f.config.SystemPrompt,
+		Messages: []llm.Message{llm.UserMessage(sb.String())},
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "formation: LLM extract call")
@@ -347,12 +345,10 @@ func (f *FormationPipeline) decideActions(ctx context.Context, facts []FactItem,
 	sb.WriteString("action: ADD (brand new) | UPDATE (supersedes an existing entry, MUST include target_id) | SKIP (already known or worthless)\n")
 	sb.WriteString("IMPORTANT: emit one decision per input fact, in the exact same order as the input.")
 
-	maxTokens := DefaultGenerationMaxTokens
 	resp, err := f.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_formation"), llm.GenerateParams{
-		Model:     f.config.Model,
-		System:    f.config.SystemPrompt,
-		Messages:  []llm.Message{llm.UserMessage(sb.String())},
-		MaxTokens: &maxTokens,
+		Model:    f.config.Model,
+		System:   f.config.SystemPrompt,
+		Messages: []llm.Message{llm.UserMessage(sb.String())},
 	})
 	if err != nil {
 		return nil, errs.Wrap(err, "formation: LLM decide call")

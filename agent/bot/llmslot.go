@@ -218,12 +218,11 @@ func bindSnapshotParams(ctx context.Context, params llm.GenerateParams, model *l
 		params.Model = model
 	}
 	keep := llm.KeptParamsFrom(ctx)
-	if !keep.Temperature && def.Temperature != nil {
-		params.Temperature = def.Temperature
-	}
-	if !keep.TopP && def.TopP != nil {
-		params.TopP = def.TopP
-	}
+	// Sampling always follows the pinned model. Nil omits the field.
+	// -1 stays on the params so the encoder can drop it; it is never a
+	// caller literal. KeptParams cannot put a temperature back.
+	params.Temperature = def.Temperature
+	params.TopP = def.TopP
 	if !keep.MaxTokens && def.MaxTokens > 0 {
 		mt := def.MaxTokens
 		params.MaxTokens = &mt

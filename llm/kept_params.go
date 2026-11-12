@@ -4,8 +4,10 @@ import "context"
 
 // KeptParams 标记这次请求里哪些字段是调用方按当前快照算好的，跟随层不要再覆盖。
 //
-// 模型温度、top_p、最大输出是模型配置。轻量档上限、潜水低温、分析器全局温度、
-// 操作者封顶是在模型值之上另加的策略。前者跟随热切换；后者由调用方标成保留。
+// Temperature 和 TopP 不再被跟随层保留。采样只来自钉住的模型配置：
+// 未配置则省略，-1 由编码器省略。调用方写上的温度、重试抬温或分析器配置
+// 都不能盖过模型。MaxTokens 和 ReasoningEffort 仍可保留，因为它们是在模型
+// 上限之上按用途算过的封顶和词表映射。
 type KeptParams struct {
 	Temperature     bool
 	TopP            bool

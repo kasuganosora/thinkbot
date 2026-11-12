@@ -24,10 +24,20 @@ func TestL1OmitsTemperatureWhenModelUsesSentinel(t *testing.T) {
 	}
 }
 
-func TestL1StillSendsZeroWhenTemperatureIsConfigured(t *testing.T) {
-	body := runL1(t, llm.ChatModel("model-sol-main"))
-	if !strings.Contains(body, `"temperature":0,`) && !strings.Contains(body, `"temperature":0}`) {
-		t.Fatalf("expected temperature 0, body %s", body)
+func TestL1OmitsTemperatureWhenModelHasNone(t *testing.T) {
+	body := runL1(t, llm.ChatModel("gpt-synth"))
+	if strings.Contains(body, `"temperature"`) {
+		t.Fatalf("unconfigured model sent temperature: %s", body)
+	}
+}
+
+func TestL1SendsConfiguredTemperature(t *testing.T) {
+	temp := 0.4
+	model := llm.ChatModel("gpt-synth")
+	model.Temperature = &temp
+	body := runL1(t, model)
+	if !strings.Contains(body, `"temperature":0.4`) {
+		t.Fatalf("configured temperature missing: %s", body)
 	}
 }
 

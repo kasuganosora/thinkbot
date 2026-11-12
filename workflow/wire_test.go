@@ -19,12 +19,12 @@ func TestAnalyzerMaxTokensResolution(t *testing.T) {
 	if got := analyzerMaxTokens(&config.ModelDef{Model: "glm-5.2", MaxTokens: 128000}); got != 128000 {
 		t.Fatalf("model-driven expected 128000, got %d", got)
 	}
-	// 模型定义缺失/未填 maxTokens → 兜底
-	if got := analyzerMaxTokens(nil); got != analyzerMaxTokensFallback {
-		t.Fatalf("code fallback expected %d, got %d", analyzerMaxTokensFallback, got)
+	// 模型定义缺失/未填 maxTokens → 省略，不发明预算。
+	if got := analyzerMaxTokens(nil); got != 0 {
+		t.Fatalf("missing model max should omit the field, got %d", got)
 	}
-	if got := analyzerMaxTokens(&config.ModelDef{Model: "x"}); got != analyzerMaxTokensFallback {
-		t.Fatalf("code fallback expected %d, got %d", analyzerMaxTokensFallback, got)
+	if got := analyzerMaxTokens(&config.ModelDef{Model: "x"}); got != 0 {
+		t.Fatalf("unset model max should omit the field, got %d", got)
 	}
 }
 
@@ -38,24 +38,20 @@ func TestAnalyzerMaxTokens_NoSeparateKnob(t *testing.T) {
 	}
 }
 
-// TestAnalyzerMaxTokensFallback_FitsThinkingPlusJSON 锁定兜底预算不得退回到
-// 曾造成线上故障的 8192：该预算由「思考 + JSON 正文」共享，思考型模型
-// （GLM-4.6+ 默认开启 thinking）先吃掉大半后会把 DAG JSON 硬截断，
-// 导致 analyzer 连续解析失败、workflow 直接 failed。
-func TestAnalyzerMaxTokensFallback_FitsThinkingPlusJSON(t *testing.T) {
-	if analyzerMaxTokensFallback <= 8192 {
-		t.Fatalf("fallback %d too small: must leave room for reasoning tokens plus the DAG JSON body",
-			analyzerMaxTokensFallback)
+// TestAnalyzerMaxTokens_OmitsWhenUnknown 没有模型上限时不发送写死预算。
+func TestAnalyzerMaxTokens_OmitsWhenUnknown(t *testing.T) {
+	if got := analyzerMaxTokens(nil); got != 0 {
+		t.Fatalf("unknown model max = %d, want 0 so the request omits max_tokens", got)
 	}
 }
 
 // TestEngineConfig_ModelDrivenMaxTokens 验证 nil Store（无运营配置）时，
 // resolveEngineConfig 从 ModelDef 取 max_tokens 而非写死 8192。
 func TestEngineConfig_ModelDrivenMaxTokens(t *testing.T) {
-	// 基线：nil Store + 无 modelDef → 代码兜底
+	// 基线：nil Store + 无 modelDef → 省略输出上限
 	ec := resolveEngineConfig(nil, 0, nil)
-	if ec.AnalyzerMaxTokens != analyzerMaxTokensFallback {
-		t.Fatalf("expected code fallback %d, got %d", analyzerMaxTokensFallback, ec.AnalyzerMaxTokens)
+	if ec.AnalyzerMaxTokens != 0 {
+		t.Fatalf("expected omitted max tokens, got %d", ec.AnalyzerMaxTokens)
 	}
 
 	// 模型 glm-5.2 在 provider 配置里 maxTokens=4096 → 应取到 4096

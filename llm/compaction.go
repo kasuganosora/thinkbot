@@ -679,10 +679,6 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 	// 128k limit); the policy picks a low effort where the provider accepts it.
 	c.policy.Apply(PurposeAutoCompact, &summaryParams)
 
-	// 调用 LLM 生成摘要
-	temp := 0.3
-	summaryParams.Temperature = &temp
-
 	result, err := provider.DoGenerate(ctx, summaryParams)
 	if err != nil {
 		return params, fmt.Errorf("summarize: %w", err)
@@ -955,13 +951,11 @@ func (c *Compactor) SummarizeHead(ctx context.Context, provider Provider, model 
 	prompt := c.buildSummaryPrompt(head)
 	maxTokens := ResolveMaxOutputTokens(modelMaxTokens, c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
 	maxTokens = c.policy.MaxTokens(PurposeSummarizeHead, maxTokens, DefaultMaxOutputTokens)
-	temp := 0.3
 	params := GenerateParams{
-		Model:       ChatModel(model),
-		System:      CompactionSystemPrompt,
-		Messages:    []Message{UserMessage(prompt)},
-		MaxTokens:   &maxTokens,
-		Temperature: &temp,
+		Model:     ChatModel(model),
+		System:    CompactionSystemPrompt,
+		Messages:  []Message{UserMessage(prompt)},
+		MaxTokens: &maxTokens,
 	}
 	c.policy.Apply(PurposeSummarizeHead, &params)
 	result, err := provider.DoGenerate(ctx, params)

@@ -22,10 +22,12 @@ func WithSystemPrompt(prompt string) Option {
 	}
 }
 
-// WithTemperature 设置 LLM 温度参数（0.0 ~ 2.0）。
+// WithTemperature 设置本次调用要带上的温度。
+// 应传入模型配置值。-1 表示省略该字段，由编码器丢掉，不会按字面 -1 发送。
 func WithTemperature(temp float64) Option {
 	return func(sa *SubAgent) {
-		sa.temp = temp
+		t := temp
+		sa.temp = &t
 	}
 }
 
@@ -40,14 +42,16 @@ func WithTopP(topP float64) Option {
 // WithFrequencyPenalty 设置重复惩罚（GLM-5.x 推荐 0.1）：抑制模型反复输出相同 token。
 func WithFrequencyPenalty(pen float64) Option {
 	return func(sa *SubAgent) {
-		sa.frequencyPenalty = pen
+		p := pen
+		sa.frequencyPenalty = &p
 	}
 }
 
 // WithPresencePenalty 设置存在惩罚（GLM-5.x 推荐 0.05）：抑制已出现 token 再次出现。
 func WithPresencePenalty(pen float64) Option {
 	return func(sa *SubAgent) {
-		sa.presencePenalty = pen
+		p := pen
+		sa.presencePenalty = &p
 	}
 }
 

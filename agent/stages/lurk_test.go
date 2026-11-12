@@ -351,8 +351,8 @@ func TestLLMStage_LurkModeTruncationBoostsBudget(t *testing.T) {
 	}
 }
 
-// TestLLMStage_LurkModeRequestsJSONFormat 验证潜水请求带上 json_object 响应格式，
-// 且采样温度被压低（结构化输出不需要创造性，低温提升合规率）。
+// TestLLMStage_LurkModeRequestsJSONFormat 验证潜水请求带上 json_object 响应格式。
+// 采样温度不在这里改写：没配模型温度时字段省略，而不是压成一个写死的低温。
 func TestLLMStage_LurkModeRequestsJSONFormat(t *testing.T) {
 	p := &lurkStubProvider{texts: []string{`{"remember":false}`}}
 	runLurk(t, p, "")
@@ -363,8 +363,8 @@ func TestLLMStage_LurkModeRequestsJSONFormat(t *testing.T) {
 	if p.gotFormat.Type != llm.ResponseFormatJSONObject {
 		t.Errorf("lurk must use json_object (json_schema is accepted but NOT enforced by bigmodel), got %v", p.gotFormat.Type)
 	}
-	if len(p.gotTemps) == 0 || p.gotTemps[0] > 0.2 {
-		t.Errorf("lurk should use low temperature for format compliance, got %v", p.gotTemps)
+	if len(p.gotTemps) != 0 {
+		t.Errorf("lurk must not invent a temperature, got %v", p.gotTemps)
 	}
 }
 

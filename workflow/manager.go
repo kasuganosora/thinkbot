@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/strutil"
@@ -465,9 +466,10 @@ func (m *Manager) analyzeAndRun(ctx context.Context, wf *Workflow, maxParallel i
 			m.cleanupRunning(wf.ID)
 			return
 		}
-		m.logger.Errorw("analysis failed", "workflow_id", wf.ID, "error", err)
+		safe := llm.SafeErrorText(err)
+		m.logger.Errorw("analysis failed", "workflow_id", wf.ID, "error", safe)
 		wf.Status = WorkflowFailed
-		wf.Error = fmt.Sprintf("需求分析失败: %s", err.Error())
+		wf.Error = fmt.Sprintf("需求分析失败: %s", safe)
 		_ = m.repo.Save(wf)
 		m.metrics.Failed.Add(1)
 		m.emitWorkflowEvent(ctx, wf.ID, outbound.EventWorkflowFailed, map[string]any{

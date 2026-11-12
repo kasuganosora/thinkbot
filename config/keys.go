@@ -65,7 +65,9 @@ const (
 	KeyWorkflowRetryInitialMS   = "workflow.retry_initial_ms"
 	KeyWorkflowRetryMaxMS       = "workflow.retry_max_ms"
 	KeyWorkflowScheduleInterval = "workflow.schedule_interval_ms"
-	KeyWorkflowAnalyzerTemp     = "workflow.analyzer_temperature"
+	// KeyWorkflowAnalyzerTemp 仍会被读取，避免旧配置让启动失败。
+	// 分析请求不再使用它；采样温度跟随模型配置。
+	KeyWorkflowAnalyzerTemp = "workflow.analyzer_temperature"
 	// 注意：这里曾有 workflow.analyzer_max_tokens，已移除。
 	// 分析器的输出预算不再单独配置，统一跟随 bot 所选模型的 maxTokens
 	// （provider.<x>.models[].maxTokens → ModelDef.MaxTokens）。

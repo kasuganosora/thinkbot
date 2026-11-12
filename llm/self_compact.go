@@ -372,14 +372,12 @@ func (c *Compactor) SummarizeForSelfCompact(ctx context.Context, provider Provid
 	if maxTokens <= 0 {
 		maxTokens = ResolveMaxOutputTokens(0, c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
 	}
-	temp := 0.2
 	call := func(maxTokens int) (*GenerateResult, error) {
 		params := GenerateParams{
-			Model:       model,
-			System:      SelfCompactSystemPrompt,
-			Messages:    []Message{UserMessage(prompt)},
-			MaxTokens:   &maxTokens,
-			Temperature: &temp,
+			Model:     model,
+			System:    SelfCompactSystemPrompt,
+			Messages:  []Message{UserMessage(prompt)},
+			MaxTokens: &maxTokens,
 		}
 		if e := strings.TrimSpace(opts.ReasoningEffort); e != "" {
 			params.ReasoningEffort = &e

@@ -36,6 +36,32 @@ type Analyzer struct {
 	logger *zap.SugaredLogger
 }
 
+// analyzerRetryWait 是第 attempt 次尝试开始前的等待。首次为 0。
+// 测试把它换成 0，避免为了断言重试请求把用例拖到数十秒。
+var analyzerRetryWait = func(attempt int) time.Duration {
+	if attempt <= 1 {
+		return 0
+	}
+	backoff := time.Duration(1<<(attempt-1)) * time.Second
+	if backoff > 30*time.Second {
+		backoff = 30 * time.Second
+	}
+	return backoff
+}
+
+// modelSamplingCall 准备一次分析/自愈调用。
+// 最大输出只有在已经从模型配置得到正数时才发送并保留。
+// 温度和 top_p 留给跟随层，从钉住的模型配置解析。
+func (a *Analyzer) modelSamplingCall(ctx context.Context, maxTok int, extra ...subagent.Option) (context.Context, []subagent.Option) {
+	keep := llm.KeptParams{ReasoningEffort: true}
+	opts := append([]subagent.Option{}, extra...)
+	if maxTok > 0 {
+		keep.MaxTokens = true
+		opts = append(opts, subagent.WithMaxTokens(maxTok))
+	}
+	return llm.WithKeptParams(ctx, keep), opts
+}
+
 // liveCall 返回这一次调用应使用的 context 和模型最大输出。
 // 已钉住的快照保持不变；否则钉上当前最新快照，只对这一次调用有效。
 func (a *Analyzer) liveCall(ctx context.Context) (context.Context, int) {
@@ -338,27 +364,18 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		}
 
 		// 首次尝试不等待；后续尝试指数退避（2s, 4s, 8s, 16s，上限 30s）。
-		if attempt > 1 {
-			backoff := time.Duration(1<<(attempt-1)) * time.Second
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
+		// 重试不改温度：采样只跟随模型配置。
+		if wait := analyzerRetryWait(attempt); wait > 0 {
 			logger.Infow("backing off before analyzer retry",
-				"attempt", attempt, "max_attempts", maxAttempts, "backoff", backoff.String())
+				"attempt", attempt, "max_attempts", maxAttempts, "backoff", wait.String())
 			select {
 			case <-ctx.Done():
 				if lastErr == nil {
 					lastErr = ctx.Err()
 				}
 				return nil, lastErr
-			case <-time.After(backoff):
+			case <-time.After(wait):
 			}
-		}
-
-		// 重试时提高温度，打破 GLM 在长输入下"稳定返回空"的退化行为
-		temp := a.ec.AnalyzerTemperature
-		if attempt > 1 {
-			temp = 0.7
 		}
 
 		fireProgress(attempt, fmt.Sprintf("正在调用模型分析需求（第 %d/%d 次尝试）", attempt, maxAttempts))
@@ -381,14 +398,10 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 		if maxTok <= 0 {
 			maxTok = a.ec.AnalyzerMaxTokens
 		}
-		// 温度是工作流全局配置（重试时还会抬高），不跟模型走。
-		// 最大输出跟这一次钉住的模型走。两者都标成已确定，跟随层不再覆盖。
-		ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
-		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, effectiveTask,
-			subagent.WithTemperature(temp),
-			subagent.WithMaxTokens(maxTok),
-			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
-		)
+		// 温度和 top_p 不在这里设置，也不保留。跟随层用钉住的模型配置填上；
+		// 配置为 -1 或没有配置时，字段不会出现在请求里。
+		callCtx, callOpts := a.modelSamplingCall(ctx, maxTok, subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout))
+		raw, err := a.saMgr.DelegateStream(callCtx, analyzerSystemPrompt, effectiveTask, callOpts...)
 		if err != nil {
 			// 上下文被取消（分析被终止）：不再重试，直接返回清晰错误。
 			if errors.Is(err, context.Canceled) {

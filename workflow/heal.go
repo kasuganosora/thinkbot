@@ -166,20 +166,21 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 	}
 	healMax := modelMax
 	if a.ec.InternalPolicy != nil {
-		healMax = a.ec.InternalPolicy.MaxTokens(llm.PurposeWorkflowHeal, modelMax, analyzerMaxTokensFallback)
+		healMax = a.ec.InternalPolicy.MaxTokens(llm.PurposeWorkflowHeal, modelMax, 0)
 	}
 	var healEffort string
 	if a.ec.InternalPolicy != nil {
 		healEffort = a.ec.InternalPolicy.ReasoningEffort(llm.PurposeWorkflowHeal, modelName)
 	}
-	// 温度 0 和按用途压低的上限是策略，不是过期的模型副本。模型上限已经按当前快照算过。
-	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
-	raw, err := a.saMgr.DelegateStream(ctx, healDiagnoseSystemPrompt, task,
-		subagent.WithTemperature(0),
-		subagent.WithMaxTokens(healMax),
+	// 诊断不改温度。采样跟随模型配置；输出上限只在模型给了正数时发送。
+	if modelMax <= 0 {
+		healMax = 0
+	}
+	callCtx, callOpts := a.modelSamplingCall(ctx, healMax,
 		subagent.WithReasoningEffort(healEffort),
 		subagent.WithStuckTimeout(healDiagnoseStuckTimeout),
 	)
+	raw, err := a.saMgr.DelegateStream(callCtx, healDiagnoseSystemPrompt, task, callOpts...)
 	if err != nil {
 		return Diagnosis{}, errs.Wrap(err, "healing diagnosis LLM call failed")
 	}
@@ -231,13 +232,11 @@ func (a *Analyzer) RefineNode(ctx context.Context, wf *Workflow, failedNode *DAG
 	if maxTok <= 0 {
 		maxTok = a.ec.AnalyzerMaxTokens
 	}
-	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
-	raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, task,
-		subagent.WithTemperature(a.ec.AnalyzerTemperature),
-		subagent.WithMaxTokens(maxTok),
+	callCtx, callOpts := a.modelSamplingCall(ctx, maxTok,
 		// 细化是「轻量拆解 DAG」，不是执行代码，必须用短超时——否则"诊断一个卡死节点又卡 30 分钟"本末倒置。
 		subagent.WithStuckTimeout(3*time.Minute),
 	)
+	raw, err := a.saMgr.DelegateStream(callCtx, analyzerSystemPrompt, task, callOpts...)
 	if err != nil {
 		return nil, errs.Wrap(err, "healing refine LLM call failed")
 	}
