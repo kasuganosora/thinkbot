@@ -22,15 +22,17 @@ var ErrAlreadyReacted = errors.New("misskey: already reacted to that note")
 // 常见于撤销一个不存在的反应）。与 ErrAlreadyReacted 对称，同属幂等成功语义。
 var ErrNotReacted = errors.New("misskey: not reacting to that note")
 
-// errHasMisskeyCode 判断错误文本中是否含指定 Misskey 错误码（如 ALREADY_REACTED）。
+// errHasMisskeyCode 判断错误中是否含指定 Misskey 错误码（如 ALREADY_REACTED）。
 //
 // 必须在 HTTP 客户端返回 err 的分支上使用：本项目的 HTTP 客户端把 4xx 直接
-// 作为 error 从 Do() 返回，响应体因此只存在于 err.Error() 里，
-// 下面的 resp.StatusCode >= 400 分支实际上走不到。
-// 2026-08-30 生产验证：ALREADY_REACTED 的幂等修复正是只写在 StatusCode 分支上
-// 而完全失效（当日 2 次 400 全部上报为工具失败）。
+// 作为 error 从 Do() 返回，resp.StatusCode >= 400 分支实际上走不到。
+// 响应体不在 Error() 里，而在 errs.ResponseDetail；两类文本都要看，否则
+// 幂等哨兵包不上，errors.Is 会失败。
 func errHasMisskeyCode(err error, code string) bool {
-	return err != nil && strings.Contains(err.Error(), code)
+	if err == nil || code == "" {
+		return false
+	}
+	return strings.Contains(err.Error()+"\n"+errs.ResponseDetail(err), code)
 }
 
 // ErrSearchUnavailable 表示 notes/search 处于熔断冷却期，本次调用未真正发起请求。
@@ -283,7 +285,7 @@ func (a *apiClient) createReaction(ctx context.Context, noteID, reaction string)
 		Do()
 	if err != nil {
 		// 幂等判定必须在 err 分支：HTTP 客户端把 4xx 直接作为 err 返回，
-		// 响应体只存在于 err.Error() 中（见 errHasMisskeyCode 注释）。
+		// 错误码在 errs.ResponseDetail，不在 Error() 里（见 errHasMisskeyCode）。
 		if errHasMisskeyCode(err, "ALREADY_REACTED") {
 			return fmt.Errorf("misskey createReaction: %w", ErrAlreadyReacted)
 		}

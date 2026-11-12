@@ -12,8 +12,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
+
+// upstreamSecret is a synthetic token reflected in the error body.
+// Classifiers may read it, but Error() must not.
+const upstreamSecret = "dummy-secret-token"
 
 // mastodonErrorServer 起一个恒定返回 400 + {"error":<msg>} 的测试服务端。
 // Mastodon 的错误响应体是 `{"error":"..."}`（不是 Misskey 的嵌套 error.code）。
@@ -22,7 +29,7 @@ func mastodonErrorServer(t *testing.T, msg string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"` + msg + `"}`))
+		_, _ = w.Write([]byte(`{"error":"` + msg + `","ref":"` + upstreamSecret + `"}`))
 	}))
 }
 
@@ -67,6 +74,9 @@ func TestReactionIdempotentSentinels(t *testing.T) {
 			if !errors.Is(err, tc.wantSent) {
 				t.Fatalf("期望哨兵 %v，实际: %v", tc.wantSent, err)
 			}
+			if strings.Contains(err.Error(), upstreamSecret) {
+				t.Fatalf("哨兵错误带出了上游响应体: %v", err)
+			}
 		})
 	}
 }
@@ -79,6 +89,9 @@ func TestReactionOtherErrorNotSwallowed(t *testing.T) {
 	err := a.favourite(context.Background(), "1")
 	if err == nil {
 		t.Fatal("非幂等错误不应被吞掉")
+	}
+	if strings.Contains(err.Error(), upstreamSecret) {
+		t.Fatalf("非幂等错误带出了上游响应体: %v", err)
 	}
 	for _, sent := range []error{ErrAlreadyFavourited, ErrNotFavourited, ErrAlreadyReblogged, ErrNotReblogged} {
 		if errors.Is(err, sent) {
@@ -104,6 +117,22 @@ func TestErrHasMastodonError(t *testing.T) {
 	}
 	if errHasMastodonError(errors.New(`-> 400: {"error":"already reblogged"}`), "already favourited") {
 		t.Error("不同文案不应互相匹配")
+	}
+	// 响应体只在 detail 里，Error() 不含文案时也必须能识别，且不能靠把正文拼回 Error()。
+	detailOnly := errs.HTTPErrorWithDetail(400,
+		"http POST http://stub.example/api/v1/statuses/1/favourite -> 400",
+		`{"error":"Already Favourited","ref":"`+upstreamSecret+`"}`)
+	if strings.Contains(detailOnly.Error(), upstreamSecret) || strings.Contains(detailOnly.Error(), "Favourited") {
+		t.Fatalf("Error() 不应包含响应体: %s", detailOnly.Error())
+	}
+	if !errHasMastodonError(detailOnly, "already favourited") {
+		t.Error("应能从 ResponseDetail 识别幂等文案")
+	}
+	if !errHasMastodonError(errs.Wrap(detailOnly, "mastodon favourite"), "already favourited") {
+		t.Error("包装后仍应能从 ResponseDetail 识别幂等文案")
+	}
+	if errHasMastodonError(errs.Wrap(detailOnly, "mastodon favourite"), "not favourited") {
+		t.Error("detail 中的其他文案不应误匹配")
 	}
 }
 
