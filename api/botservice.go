@@ -3394,6 +3394,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		browserProxy = config.GlobalProxy(s.store)
 	}
 	sbCfg.BrowserProxy = browserProxy
+	// 浏览器 MCP 握手时限。空值用默认 3m；非法值记日志后回退，不挡住 bot 启动。
+	if d, err := sandbox.ParseBrowserHandshakeTimeout(s.store.GetString(config.KeySandboxBrowserHandshakeTimeout, "")); err != nil {
+		s.logger.Warnw("invalid browser mcp handshake timeout, using default",
+			"key", config.KeySandboxBrowserHandshakeTimeout,
+			"err", err,
+			"default", sandbox.DefaultBrowserHandshakeTimeout.String())
+		sbCfg.BrowserHandshakeTimeout = sandbox.DefaultBrowserHandshakeTimeout
+	} else {
+		sbCfg.BrowserHandshakeTimeout = d
+	}
 	s.applySessionConfig(&sbCfg)
 	s.applyChannelConfig(&sbCfg)
 

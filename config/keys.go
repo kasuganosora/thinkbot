@@ -176,6 +176,12 @@ const (
 	// 空值表示直连（默认）。
 	KeySandboxBrowserProxy = "sandbox.browser.proxy"
 
+	// KeySandboxBrowserHandshakeTimeout 浏览器 MCP initialize 握手时限。
+	// Go duration（如 3m、90s）或纯秒数。默认 3m。合法范围 1s–10m，非法值回退默认。
+	// 环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT 优先于本键。
+	// 其它 MCP 服务器仍用 mcp 包内 8s 上限，避免不可达 HTTP 端点拖住启动。
+	KeySandboxBrowserHandshakeTimeout = "sandbox.browser.handshake_timeout"
+
 	// KeySandboxChannelSecret 派生 per-bot channel token 的服务器密钥。
 	// 空则回退到 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先，可不落库。
 	KeySandboxChannelSecret = "sandbox.channel.secret"

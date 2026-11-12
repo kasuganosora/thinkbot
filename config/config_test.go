@@ -897,6 +897,25 @@ func TestBuilder_GetBotTimezoneLocation_Override(t *testing.T) {
 	}
 }
 
+func TestBrowserHandshakeTimeoutConfigKey(t *testing.T) {
+	if got := ConfigKeyToEnvKey(KeySandboxBrowserHandshakeTimeout); got != "SANDBOX_BROWSER_HANDSHAKE_TIMEOUT" {
+		t.Fatalf("env key = %q", got)
+	}
+	if DefaultMap()[KeySandboxBrowserHandshakeTimeout] != "3m" {
+		t.Fatalf("DefaultMap = %q, want 3m", DefaultMap()[KeySandboxBrowserHandshakeTimeout])
+	}
+	var found bool
+	for _, spec := range WorkspaceMetaSpecs() {
+		if spec.Key == KeySandboxBrowserHandshakeTimeout {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("WorkspaceMetaSpecs missing browser handshake timeout")
+	}
+}
+
 func TestDefaultEngagementConfig_UnansweredEpisodeBoundary(t *testing.T) {
 	cfg := DefaultEngagementConfig()
 	if cfg.UnansweredEpisodeBoundary != 5*time.Hour {

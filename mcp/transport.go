@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/util/errs"
@@ -39,15 +40,18 @@ type transport interface {
 // ============================================================================
 
 type stdioTransport struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
-	mu     sync.Mutex // 串行化 stdin/stdout 访问
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Reader
+	stderr  *stderrRing
+	mu      sync.Mutex // 串行化 stdin/stdout 访问
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	closing atomic.Bool
+	exitLog func(tail string, err error)
 }
 
-func newStdioTransport(ctx context.Context, command string, args, env []string, cwd string, stderr io.Writer) (*stdioTransport, error) {
+func newStdioTransport(ctx context.Context, command string, args, env []string, cwd string, stderr io.Writer, redact []string) (*stdioTransport, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, errs.Wrap(err, "mcp: stdio transport context")
 	}
@@ -75,8 +79,14 @@ func newStdioTransport(ctx context.Context, command string, args, env []string, 
 		cancel()
 		return nil, errs.Wrap(err, "mcp: create stdout pipe")
 	}
-	// stderr 为 nil 时丢弃（默认）；非 nil 时回写到调用方提供的 io.Writer（如 thinkbot 日志）。
-	cmd.Stderr = stderr
+	// 始终截住 stderr 尾部。调用方提供了 writer 时同时转发；否则保持原先
+	// 「nil = 继承父进程 stderr」的行为，并额外复制一份进环形缓冲。
+	ring := newStderrRing(stderrTailBytes, redact)
+	if stderr != nil {
+		cmd.Stderr = io.MultiWriter(ring, stderr)
+	} else {
+		cmd.Stderr = io.MultiWriter(ring, os.Stderr)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -87,14 +97,31 @@ func newStdioTransport(ctx context.Context, command string, args, env []string, 
 		cmd:    cmd,
 		stdin:  stdin,
 		stdout: bufio.NewReader(stdout),
+		stderr: ring,
 		cancel: cancel,
 	}
 	t.wg.Add(1)
 	go func() {
 		defer t.wg.Done()
-		_ = cmd.Wait()
+		err := cmd.Wait()
+		if t.closing.Load() || t.exitLog == nil {
+			return
+		}
+		tail := t.stderr.Tail()
+		if tail == "" && err == nil {
+			return
+		}
+		t.exitLog(tail, err)
 	}()
 	return t, nil
+}
+
+// StderrTail 返回子进程 stderr 的打码尾部。
+func (t *stdioTransport) StderrTail() string {
+	if t == nil || t.stderr == nil {
+		return ""
+	}
+	return t.stderr.Tail()
 }
 
 func (t *stdioTransport) RoundTrip(ctx context.Context, data []byte) ([]byte, error) {
@@ -170,6 +197,7 @@ func (t *stdioTransport) Send(ctx context.Context, data []byte) error {
 }
 
 func (t *stdioTransport) Close() error {
+	t.closing.Store(true)
 	if t.cmd != nil && t.cmd.Process != nil {
 		// 先优雅发送 SIGTERM，给子进程机会做退出清理（如发送 exit 通知）。
 		terminateProcess(t.cmd.Process)

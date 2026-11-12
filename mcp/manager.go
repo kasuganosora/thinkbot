@@ -55,9 +55,12 @@ type ServerConfig struct {
 	// Enabled 是否启用。false 时跳过此服务器。
 	Enabled bool
 
-	// HandshakeTimeout 覆盖默认握手时限。0 表示用 handshakeTimeout。
-	// 浏览器后台连接的测试把单次握手收短，生产路径保持默认值。
+	// HandshakeTimeout 覆盖默认握手时限。0 表示用 handshakeTimeout（8s）。
+	// 浏览器 MCP 在生产路径传入更长的可配置时限（默认 3m）；测试可以收短。
 	HandshakeTimeout time.Duration
+
+	// Redact 是打进 stderr 尾部日志前要遮盖的显式密文（如代理口令）。
+	Redact []string
 }
 
 // Manager 管理多个 MCP 服务器连接的生命周期。
@@ -339,6 +342,12 @@ func (m *Manager) connectOne(ctx context.Context, cfg ServerConfig) error {
 	defer hcancel()
 	serverInfo, err := client.Initialize(hctx)
 	if err != nil {
+		if tail := client.StderrTail(); tail != "" {
+			m.logger.Warnw("mcp handshake failed",
+				"server", cfg.Name,
+				"err", err,
+				"stderr", tail)
+		}
 		_ = client.Close()
 		return err
 	}
@@ -364,7 +373,18 @@ func (m *Manager) createClient(ctx context.Context, cfg ServerConfig) (*Client, 
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("mcp: server %q: stdio transport requires command", cfg.Name)
 		}
-		tp, err = newStdioTransport(ctx, cfg.Command, cfg.Args, cfg.Env, cfg.Cwd, cfg.Stderr)
+		tp, err = newStdioTransport(ctx, cfg.Command, cfg.Args, cfg.Env, cfg.Cwd, cfg.Stderr, cfg.Redact)
+		if err == nil {
+			if st, ok := tp.(*stdioTransport); ok {
+				name := cfg.Name
+				st.exitLog = func(tail string, exitErr error) {
+					m.logger.Warnw("mcp stdio child exited",
+						"server", name,
+						"err", exitErr,
+						"stderr", tail)
+				}
+			}
+		}
 	case "http":
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("mcp: server %q: http transport requires url", cfg.Name)
