@@ -178,7 +178,7 @@ Review 阶段会区分两类错误，决定重试还是失败迭代：
 | `workflow.retry_initial_ms` | `500` | 重试初始退避间隔（毫秒） |
 | `workflow.retry_max_ms` | `10000` | 重试最大退避间隔（毫秒） |
 | `workflow.schedule_interval_ms` | `200` | 调度器轮询间隔（毫秒） |
-| `workflow.analyzer_temperature` | `0.3` | 分析器 LLM temperature |
+| `workflow.analyzer_temperature` | `0.3` | 已废弃，读取但不生效。分析器温度跟随模型配置（-1 表示不发送该字段） |
 | `workflow.analyzer_stuck_timeout` | `180` | 分析器（流式 LLM）卡死看门狗阈值（秒）。连续无 token 超过该时长判卡死并终止；硬上限 = 该值 × 10（`subagent.delegateHardTimeoutFactor`，派生不写死） |
 | `workflow.analyzer_max_duration_ms` | `600000` | 分析阶段整轮总时长上限（毫秒，即 10 分钟）。兜底防止分析器无限重试把「分析中」拖成黑洞；超时则分析阶段整体失败并报错 |
 | `workflow.goal_max_iterations` | `5` | 目标模式（闭环循环）全局最大迭代轮数；达到上限仍不通过则工作流失败 |

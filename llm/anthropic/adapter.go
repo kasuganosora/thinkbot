@@ -352,8 +352,8 @@ func paramsToAnthropicRequest(params *llm.GenerateParams) (*MessageRequest, erro
 
 	req := &MessageRequest{
 		Model:       params.Model.ID,
-		Temperature: params.Temperature,
-		TopP:        params.TopP,
+		Temperature: llm.WireSampling(params.Temperature),
+		TopP:        llm.WireSampling(params.TopP),
 	}
 
 	if params.System != "" {

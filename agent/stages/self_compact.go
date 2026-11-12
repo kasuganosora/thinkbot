@@ -752,7 +752,8 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 	sumCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()
 	// 摘要预算和推理档已经按这一次钉住的模型算过，跟随层不要再改成模型满额。
-	sumCtx = llm.WithKeptParams(sumCtx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
+	// 温度和 top_p 不保留，仍由模型配置决定。
+	sumCtx = llm.WithKeptParams(sumCtx, llm.KeptParams{MaxTokens: true, ReasoningEffort: true})
 	compactor := s.summaryCompactor(compactorKey)
 	summary, err := compactor.SummarizeForSelfCompact(sumCtx, provider, model, head, llm.SelfCompactOptions{
 		Focus:                args.Focus,

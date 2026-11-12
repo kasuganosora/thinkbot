@@ -36,14 +36,12 @@ func newLLMJudgeAdapter(provider llm.Provider, modelID string, modelMaxTokens in
 
 // Chat 发送 system + user 消息，返回回复文本。
 func (a *llmJudgeAdapter) Chat(ctx context.Context, system, user string) (string, error) {
-	temp := 0.3
 	maxTok := a.policy.MaxTokens(a.purpose, a.modelMax, llm.DefaultMaxOutputTokens)
 	params := llm.GenerateParams{
-		Model:       a.model,
-		System:      system,
-		Messages:    []llm.Message{llm.UserMessage(user)},
-		Temperature: &temp,
-		MaxTokens:   &maxTok,
+		Model:     a.model,
+		System:    system,
+		Messages:  []llm.Message{llm.UserMessage(user)},
+		MaxTokens: &maxTok,
 	}
 	a.policy.Apply(a.purpose, &params)
 	result, err := a.provider.DoGenerate(llm.WithStatsFeature(ctx, "engagement"), params)

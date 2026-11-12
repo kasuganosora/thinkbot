@@ -1,12 +1,15 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/secret"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -256,10 +259,16 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 					return &waitStatusResult{StatusResult: st, Waited: "0s", TimedOut: true, Hint: taskBackgroundHint}, nil
 				}
 				res, err := waitForTerminal(ctx, mgr, result.WorkflowID, budget, onProgress)
-				if err == nil && res != nil && res.TimedOut && budget < taskBlockingMaxTimeout {
+				if err != nil {
+					return nil, err
+				}
+				if ferr := taskFailureResult(res); ferr != nil {
+					return nil, ferr
+				}
+				if res != nil && res.TimedOut && budget < taskBlockingMaxTimeout {
 					res.Hint = taskBackgroundHint
 				}
-				return res, err
+				return res, nil
 			}),
 		},
 		PromptSection: workflowToolPromptSection,
@@ -275,6 +284,25 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 //
 // 前端 SSE 层会原样展开该 payload（services.js 里`...parts.payload`），
 // 因此自定义字段能安全透传。
+// taskFailureResult turns a failed workflow into a tool error.
+// The text is status, duration, and the already-sanitized upstream error.
+// It does not include the requirement, the prompt, or the request body.
+func taskFailureResult(res *waitStatusResult) error {
+	if res == nil || res.StatusResult == nil || res.Status != WorkflowFailed {
+		return nil
+	}
+	waited := strings.TrimSpace(res.Waited)
+	if waited == "" {
+		waited = "0s"
+	}
+	detail := strings.TrimSpace(secret.Default().Redact(res.Error))
+	msg := fmt.Sprintf("task failed: status=%s waited=%s", res.Status, waited)
+	if detail != "" {
+		msg += " error=" + detail
+	}
+	return errors.New(msg)
+}
+
 func taskProgressPayload(workflowID, chunk string) map[string]any {
 	return map[string]any{
 		"stream":     "stdout",

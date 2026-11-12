@@ -267,23 +267,21 @@ func (s *MultimodalStage) transcribeAttachment(ctx context.Context, att core.Att
 		Content: parts,
 	}
 
-	temp := 0.3
-	if s.config.Temperature != nil {
-		temp = *s.config.Temperature
-	}
-	// 仅在未配置模型上限时兜底 1024（正常由 botservice 从 VisionDef.MaxTokens 注入）。
 	modelMax := 0
 	if s.config.MaxTokens != nil {
 		modelMax = *s.config.MaxTokens
 	}
-	maxTokens := s.config.InternalPolicy.MaxTokens(llm.PurposeVision, modelMax, 1024)
-
 	params := llm.GenerateParams{
 		Model:       s.config.VisionModel,
 		System:      s.config.SystemPrompt,
 		Messages:    []llm.Message{msg},
-		Temperature: &temp,
-		MaxTokens:   &maxTokens,
+		Temperature: s.config.Temperature,
+	}
+	if modelMax > 0 {
+		maxTokens := s.config.InternalPolicy.MaxTokens(llm.PurposeVision, modelMax, 0)
+		if maxTokens > 0 {
+			params.MaxTokens = &maxTokens
+		}
 	}
 	s.config.InternalPolicy.Apply(llm.PurposeVision, &params)
 

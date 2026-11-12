@@ -220,18 +220,6 @@ const lurkMaxRetries = 2
 // 原样重推必然复现 —— 必须先加预算，这是「盲重试打不死」的关键。
 const lurkTruncationBudgetFactor = 3
 
-// lurkRetryTemperature 是重试时的采样温度：比首次更低，尽量压制格式发散。
-const lurkRetryTemperature = 0.0
-
-// lurkFirstTemperature 是潜水首次调用的采样温度。结构化输出不需要创造性。
-const lurkFirstTemperature = 0.1
-
-// lurkTemperature 返回潜水首次调用的温度指针。
-func lurkTemperature() *float64 {
-	t := lurkFirstTemperature
-	return &t
-}
-
 // lurkImportanceToScore 把模型给的 1~5 整数重要度转成记忆层的 0.0~1.0 量纲。
 //
 // 必须转换，不可直接透传整数：
@@ -288,8 +276,6 @@ func (s *LLMStage) retryLurkUntilValid(
 		} else {
 			retryCfg.Params.System = baseSystem + lurkRetryNudge(result.Text)
 		}
-		temp := lurkRetryTemperature
-		retryCfg.Params.Temperature = &temp
 
 		logger.Warnw("lurk: json contract violated, retrying",
 			"message_id", env.Message.ID,

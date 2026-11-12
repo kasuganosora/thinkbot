@@ -25,7 +25,6 @@ const (
 
 	defaultRouteTimeout = 8 * time.Second
 	routeMaxSteps       = 3
-	routeMaxTokens      = 256
 )
 
 // bindCodePattern matches an authorization code and nothing else, so those
@@ -353,8 +352,6 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 	env.ClearActions()
 	key := ConversationKey(env)
 	sys, user := s.prompt(env, key)
-	maxTok := routeMaxTokens
-	temp := 0.0
 	model := s.model
 	if s.live != nil {
 		if live := s.live(ctx); live != nil {
@@ -362,16 +359,15 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 		}
 	}
 	params := llm.GenerateParams{
-		Model:     model,
-		System:    sys,
-		Messages:  []llm.Message{llm.UserMessage(user)},
-		Tools:     s.tools(env, ch, key),
-		MaxTokens: &maxTok,
+		Model:    model,
+		System:   sys,
+		Messages: []llm.Message{llm.UserMessage(user)},
+		Tools:    s.tools(env, ch, key),
 	}
-	// 路由分类默认用温度 0。模型配置恰好为 -1 时表示上游不接受 temperature，
-	// 不能再改写成 0。
-	if !model.OmitsTemperature() {
-		params.Temperature = &temp
+	// 采样跟随模型配置。没有配置就省略；-1 由编码器省略。
+	// 不再把路由分类改写成温度 0，也不再套一个写死的输出上限。
+	if model != nil {
+		params.Temperature = model.Temperature
 	}
 	// L1 只做一次三选一的路由分类，不需要深度推理。推理型模型在未指定
 	// reasoning_effort 时会按默认档思考，单次调用会稳定超过 defaultRouteTimeout，
@@ -385,8 +381,8 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 	if effort := llm.LowestReasoningEffort(modelID); effort != "" {
 		params.ReasoningEffort = &effort
 	}
-	// 温度 0 和路由用的小输出上限是策略。推理档按这一次的模型算。跟随层不要改。
-	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
+	// 推理档按这一次的模型算。采样和输出上限交给跟随层，从模型配置填。
+	ctx = llm.WithKeptParams(ctx, llm.KeptParams{ReasoningEffort: true})
 	cfg := &llm.OrchestrateConfig{
 		Params:       params,
 		MaxSteps:     routeMaxSteps,

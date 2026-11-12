@@ -64,11 +64,11 @@ func TestAnalyzer_LiveMaxTokensKeepGlobalTemperature(t *testing.T) {
 	if _, err := a.Analyze(ctx, "split this", false); err != nil {
 		t.Fatal(err)
 	}
-	if prov.max != 4096 || prov.temp != 0.3 || prov.model != "model-old" && prov.model != "model-new" {
+	if prov.max != 4096 || prov.temp != 0.1 || prov.model != "model-old" && prov.model != "model-new" {
 		t.Fatalf("max %d temp %v model %s", prov.max, prov.temp, prov.model)
 	}
-	if prov.temp != 0.3 {
-		t.Fatalf("analyzer temperature changed to %v", prov.temp)
+	if prov.temp != 0.1 {
+		t.Fatalf("analyzer replaced the model temperature with %v", prov.temp)
 	}
 	if prov.max != 4096 {
 		t.Fatalf("analyzer max tokens stayed stale: %d", prov.max)

@@ -93,19 +93,6 @@ func messageReplyTarget(msg *core.Message) string {
 	return msg.Channel
 }
 
-// resolveTools 解析工具列表：优先用 ToolResolver 动态解析，回退到静态 Tools。
-// lightMaxTokens keeps a light-tier turn on a small output budget.
-func lightMaxTokens(light bool, configured *int) *int {
-	if !light {
-		return configured
-	}
-	capTokens := route.LightMaxTokens
-	if configured != nil && *configured > 0 && *configured < capTokens {
-		capTokens = *configured
-	}
-	return &capTokens
-}
-
 // lightTierEffort keeps a light-tier turn from inheriting a heavy main-model
 // effort. The floor is chosen for the model that actually runs the turn:
 // mapping a "medium" setting through a main model with a low/high/max
@@ -233,6 +220,7 @@ func appendTruncationNotice(text string, lightTier bool) string {
 	return truncationNotice
 }
 
+// resolveTools 解析工具列表：优先用 ToolResolver 动态解析，回退到静态 Tools。
 func resolveTools(ctx context.Context, cfg LLMConfig, env *core.Envelope) []llm.Tool {
 	if cfg.ToolResolver != nil {
 		tools, err := cfg.ToolResolver.ResolveForEnvelope(ctx, env)
@@ -285,10 +273,6 @@ func isLurkMode(env *core.Envelope) bool {
 		}
 	}
 	return false
-}
-
-func samplingOmitted(v *float64) bool {
-	return v != nil && *v == llm.OmitSamplingParam
 }
 
 // isHeartbeatMode 判断当前消息是否为心跳自主唤醒决策（KVHeartbeatMode=true）。
@@ -1496,7 +1480,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		TopP:             topP,
 		FrequencyPenalty: s.config.FrequencyPenalty,
 		PresencePenalty:  s.config.PresencePenalty,
-		MaxTokens:        lightMaxTokens(lightTier, maxTok),
+		MaxTokens:        maxTok,
 		ReasoningEffort:  replyEffort(effort, execModel),
 	}
 
@@ -1506,12 +1490,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 用 json_object 而非 json_schema：实测 bigmodel 接受 json_schema 但 **不强制**
 	// required 字段（少返字段照样 200），依赖它会得到虚假的安全感 —— 字段校验一律
 	// 在 Go 侧做（parseLurkOutput）。
-	// 同时把采样温度压低：结构化输出不需要创造性，低温显著提升格式合规率。
+	// 采样温度保持模型配置，不在这里改写。
 	if lurkMode {
 		params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
-		if !samplingOmitted(temp) {
-			params.Temperature = lurkTemperature()
-		}
 	}
 
 	// 心跳自主唤醒决策模式：与潜水模式同机制——强制 JSON 结构化输出 + 低温，
@@ -1522,18 +1503,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if v, ok := env.Get(core.KVHeartbeatMode); ok {
 		if b, ok := v.(bool); ok && b {
 			params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
-			if !samplingOmitted(temp) {
-				params.Temperature = lurkTemperature()
-			}
 			if s.config.HeartbeatReasoningEffort != nil {
 				params.ReasoningEffort = heartbeatEffort(s.config.HeartbeatReasoningEffort(), params.Model, params.ReasoningEffort)
 			}
 		}
 	}
 
-	// 本回合的温度、上限和推理档已经按钉住的快照算过（含轻量档和潜水策略）。
-	// 跟随层不要再用模型默认值盖掉。
-	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
+	// 输出上限和推理档已经按钉住的快照算过。采样温度和 top_p 不保留，
+	// 跟随层始终用模型配置（-1 则省略）。
+	ctx = llm.WithKeptParams(ctx, llm.KeptParams{MaxTokens: true, ReasoningEffort: true})
 	cfg := &llm.OrchestrateConfig{
 		Params:       params,
 		MaxSteps:     s.config.MaxSteps,

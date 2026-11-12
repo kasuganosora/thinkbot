@@ -148,13 +148,11 @@ func (c *LLMConsolidator) Consolidate(ctx context.Context, l0Entries []TieredEnt
 	// 构建 prompt
 	prompt := c.buildPrompt(l0Entries, existing)
 
-	// 调用 LLM
-	maxTokens := DefaultGenerationMaxTokens
+	// 采样和输出上限跟随模型配置。这里不写死预算。
 	result, err := c.config.Provider.DoGenerate(llm.WithStatsFeature(ctx, "memory_consolidation"), llm.GenerateParams{
-		Model:     c.config.Model,
-		System:    c.config.SystemPrompt,
-		Messages:  []llm.Message{llm.UserMessage(prompt)},
-		MaxTokens: &maxTokens,
+		Model:    c.config.Model,
+		System:   c.config.SystemPrompt,
+		Messages: []llm.Message{llm.UserMessage(prompt)},
 	})
 	if err != nil {
 		span.RecordError(err)

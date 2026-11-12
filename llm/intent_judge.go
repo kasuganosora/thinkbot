@@ -39,11 +39,6 @@ type providerIntentJudge struct {
 	reasoningEffort *string
 }
 
-// intentJudgeMaxTokens 快判输出上限。会话模型多为推理模型（GLM-5.x 等），思考与正文
-// 共用 max_tokens：128 常被思考吃光、正文为空 → 解析失败 → fail-closed 误拦。
-// JSON 本身很短，给足 1024 让思考有余量，费用可忽略。
-const intentJudgeMaxTokens = 1024
-
 // NewProviderIntentJudge 用现有 Provider（沿用会话模型）构建快判客户端。
 // model 为 nil 时使用 Provider 默认模型。reasoningEffort 沿用会话配置（nil = 不指定），
 // 只传 provider 已经接受的取值，避免给不支持的接口塞新参数。
@@ -52,14 +47,10 @@ func NewProviderIntentJudge(prov Provider, model *Model, reasoningEffort *string
 }
 
 func (a *providerIntentJudge) Chat(ctx context.Context, system, user string) (string, error) {
-	temp := 0.3
-	maxTok := intentJudgeMaxTokens
 	result, err := a.prov.DoGenerate(WithStatsFeature(ctx, "intent_judge"), GenerateParams{
 		Model:           a.model,
 		System:          system,
 		Messages:        []Message{UserMessage(user)},
-		Temperature:     &temp,
-		MaxTokens:       &maxTok,
 		ReasoningEffort: a.reasoningEffort,
 	})
 	if err != nil {

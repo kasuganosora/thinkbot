@@ -54,7 +54,7 @@ type WireConfig struct {
 	// ModelDef 当前工作流使用的主模型定义（来自 LLM bundle 的 MainDef）。
 	// 分析器最大输出 token 的唯一来源：直接取模型自身的 MaxTokens，
 	// 换模型即自动跟随，不存在第二处配置。
-	// 可为空（nil ModelDef），此时走代码兜底 analyzerMaxTokensFallback。
+	// 可为空（nil ModelDef）。没有模型上限时不发明一个数字，请求里省略 max_tokens。
 	ModelDef *config.ModelDef
 
 	// BindLiveModel 在每次分析/自愈调用开始时读取当前生效模型。
@@ -235,8 +235,8 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	cfg.Logger.Infow("workflow engine: analyzer configured",
 		"max_tokens", ec.AnalyzerMaxTokens,
 		"max_tokens_source", maxTokensSource,
-		"temperature", ec.AnalyzerTemperature,
-		"note", "max_tokens follows the bot's selected model; shared by reasoning + JSON body")
+		"analyzer_temperature_ignored", ec.AnalyzerTemperature,
+		"note", "sampling follows the model config; workflow.analyzer_temperature is deprecated and ignored")
 	analyzer := NewAnalyzer(saMgr, tp, ec, cfg.Logger)
 
 	// 4. 节点执行器
@@ -268,15 +268,6 @@ func resolveEngineConfig(store *config.Store, maxParallelFallback int, modelDef 
 	return ec
 }
 
-// analyzerMaxTokensFallback 仅在「拿不到模型定义」时兜底（如未指派模型、
-// provider 配置缺失）。正常路径一律跟随 bot 所选模型的 MaxTokens。
-//
-// 该预算由「思考(reasoning) + JSON 正文」共享，而非正文独占：思考型模型
-// （GLM-4.6+ 服务端默认开启 thinking）会先产出 reasoning 再写正文，两者
-// 都从 max_tokens 里扣。取值过小的直接后果是 DAG JSON 中途被硬截断，
-// 解析报 "unexpected end of JSON input" 并耗尽全部重试。
-const analyzerMaxTokensFallback = 32768
-
 // analyzerMaxTokens 推导分析器最大输出 token。
 //
 // 单一来源：bot 所选模型的 MaxTokens（provider.<x>.models[].maxTokens
@@ -296,7 +287,8 @@ func analyzerMaxTokens(modelDef *config.ModelDef) int {
 	if modelDef != nil && modelDef.MaxTokens > 0 {
 		return modelDef.MaxTokens
 	}
-	return analyzerMaxTokensFallback
+	// 没有模型配置时省略字段，不用一个写死的预算盖过提供商自己的默认值。
+	return 0
 }
 
 func engineConfigFromWorkflowConfig(wc config.WorkflowConfig, modelDef *config.ModelDef) EngineConfig {

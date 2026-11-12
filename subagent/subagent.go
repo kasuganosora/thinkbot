@@ -59,14 +59,16 @@ type SubAgent struct {
 	provider llm.Provider
 	model    string
 	system   string
-	temp     float64
+	// temp 是模型配置里的温度。nil 表示不发送；-1 由编码器省略。
+	// 没有写死的默认值。
+	temp *float64
 	// topP 核采样参数（nucleus sampling），跟随模型（ModelDef.TopP）。
-	// nil 时由 Provider 使用默认 top_p。
+	// nil 时不发送。
 	topP *float64
-	// frequencyPenalty/presencePenalty 重复抑制（GLM-5.x 推荐 0.1/0.05），
-	// 抑制 agent 长工具链下反复输出相同 token 的退化。
-	frequencyPenalty float64
-	presencePenalty  float64
+	// frequencyPenalty/presencePenalty 仅在调用方从 bot 配置传入时发送。
+	// nil 表示请求里不带这两个字段。
+	frequencyPenalty *float64
+	presencePenalty  *float64
 	maxTokens        int
 	// reasoningEffort 非 nil 时随请求发送 reasoning_effort（内部轻任务按策略压低推理）。
 	reasoningEffort *string
@@ -193,14 +195,10 @@ func WithReduction(rc llm.ReductionConfig) Option {
 // 可通过 opts 自定义系统提示词、温度、滑动窗口等参数。
 func New(provider llm.Provider, model string, opts ...Option) *SubAgent {
 	sa := &SubAgent{
-		provider:         provider,
-		model:            model,
-		temp:             0.7,  // 默认与 BotConfig 一致
-		frequencyPenalty: 0.1,  // GLM-5.x 官方推荐重复抑制
-		presencePenalty:  0.05, // GLM-5.x 官方推荐存在惩罚
-		maxTokens:        4096,
-		ctxMgr:           NewContextManager(20), // 默认保留最近 20 条消息（10 轮）
-		chatTimeout:      defaultChatHardTimeout,
+		provider:    provider,
+		model:       model,
+		ctxMgr:      NewContextManager(20), // 默认保留最近 20 条消息（10 轮）
+		chatTimeout: defaultChatHardTimeout,
 	}
 	for _, opt := range opts {
 		opt(sa)
@@ -545,30 +543,39 @@ func (sa *SubAgent) buildOrchestrateHooks(ctx context.Context) (
 	return prepareStep, onToolResults
 }
 
+func copyFloat(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
 // buildParams 根据当前配置和消息构建 GenerateParams。
 func (sa *SubAgent) buildParams(msgs []llm.Message) llm.GenerateParams {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
 
-	temp := sa.temp
-	maxTokens := sa.maxTokens
-	freqPen := sa.frequencyPenalty
-	presPen := sa.presencePenalty
 	var effort *string
 	if sa.reasoningEffort != nil {
 		e := *sa.reasoningEffort
 		effort = &e
+	}
+	var maxPtr *int
+	if sa.maxTokens > 0 {
+		mt := sa.maxTokens
+		maxPtr = &mt
 	}
 
 	params := llm.GenerateParams{
 		Model:            llm.ChatModel(sa.model),
 		System:           sa.system,
 		Messages:         msgs,
-		Temperature:      &temp,
-		TopP:             sa.topP,
-		FrequencyPenalty: &freqPen,
-		PresencePenalty:  &presPen,
-		MaxTokens:        &maxTokens,
+		Temperature:      copyFloat(sa.temp),
+		TopP:             copyFloat(sa.topP),
+		FrequencyPenalty: copyFloat(sa.frequencyPenalty),
+		PresencePenalty:  copyFloat(sa.presencePenalty),
+		MaxTokens:        maxPtr,
 		ReasoningEffort:  effort,
 	}
 

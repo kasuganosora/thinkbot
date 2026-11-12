@@ -8,8 +8,8 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
-// The vision call must send the vision model's configured maxTokens
-// (wired from VisionDef.MaxTokens); 1024 is only the unconfigured fallback.
+// The vision call sends the vision model's configured maxTokens.
+// No configured limit means the field is omitted, not a hardcoded fallback.
 func TestMultimodal_TranscribeHonorsConfiguredMaxTokens(t *testing.T) {
 	att := core.Attachment{Type: core.AttachmentTypeImage, MimeType: "image/png", URL: "https://example.com/cat.png"}
 	for _, c := range []struct {
@@ -17,16 +17,20 @@ func TestMultimodal_TranscribeHonorsConfiguredMaxTokens(t *testing.T) {
 		want int
 	}{
 		{intPtr(32768), 32768},
-		{nil, 1024},
-		{intPtr(0), 1024},
+		{nil, 0},
+		{intPtr(0), 0},
 	} {
 		p := &mockVisionProvider{name: "vision"}
 		s := newTestMultimodalStage(t, MultimodalConfig{VisionProvider: p, VisionModel: llm.ChatModel("glm-4v"), MaxTokens: c.cfg})
 		if _, err := s.transcribeAttachment(context.Background(), att, "what is this?"); err != nil {
 			t.Fatal(err)
 		}
-		if p.lastParam == nil || p.lastParam.MaxTokens == nil || *p.lastParam.MaxTokens != c.want {
-			t.Fatalf("cfg=%v: max_tokens=%v, want %d", c.cfg, p.lastParam.MaxTokens, c.want)
+		got := 0
+		if p.lastParam != nil && p.lastParam.MaxTokens != nil {
+			got = *p.lastParam.MaxTokens
+		}
+		if got != c.want {
+			t.Fatalf("cfg=%v: max_tokens=%d, want %d", c.cfg, got, c.want)
 		}
 	}
 }

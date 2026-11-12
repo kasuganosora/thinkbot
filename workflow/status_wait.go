@@ -137,7 +137,10 @@ func waitForTerminal(
 	if st.Status.IsTerminal() {
 		// 阻塞路径已拿到终态并准备返回给 agent —— 标记交付，避免终态事件重复唤醒。
 		mgr.markDelivered(wfID)
-		return &waitStatusResult{StatusResult: st}, nil
+		return &waitStatusResult{
+			StatusResult: st,
+			Waited:       time.Since(start).Truncate(time.Second).String(),
+		}, nil
 	}
 
 	deadline := time.After(timeout)

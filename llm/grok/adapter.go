@@ -220,8 +220,8 @@ type grokStreamingToolCall struct {
 func paramsToGrokRequest(params *llm.GenerateParams) (*ChatCompletionRequest, error) {
 	req := &ChatCompletionRequest{
 		Model:       params.Model.ID,
-		Temperature: params.Temperature,
-		TopP:        params.TopP,
+		Temperature: llm.WireSampling(params.Temperature),
+		TopP:        llm.WireSampling(params.TopP),
 		MaxTokens:   params.MaxTokens,
 		Seed:        params.Seed,
 	}
