@@ -1,14 +1,21 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/kasuganosora/thinkbot/agent/prompt"
 	"github.com/kasuganosora/thinkbot/agent/tools"
@@ -610,7 +617,7 @@ func TestStdioTransportSurvivesCallerCancel(t *testing.T) {
 		t.Skip("requires subprocess")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	tp, err := newStdioTransport(ctx, "sleep", []string{"30"}, nil, "", nil)
+	tp, err := newStdioTransport(ctx, "sleep", []string{"30"}, nil, "", nil, nil)
 	if err != nil {
 		t.Fatalf("newStdioTransport: %v", err)
 	}
@@ -643,7 +650,7 @@ func TestStdioTransportHealthy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires subprocess")
 	}
-	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil, "", nil)
+	tp, err := newStdioTransport(context.Background(), "sleep", []string{"5"}, nil, "", nil, nil)
 	if err != nil {
 		t.Fatalf("newStdioTransport: %v", err)
 	}
@@ -792,5 +799,136 @@ func TestConnectOneBoundsHandshakeOnDeadEndpoint(t *testing.T) {
 	}
 	if elapsed > handshakeTimeout+5*time.Second {
 		t.Fatalf("handshake hung for %s, want bounded by %s", elapsed, handshakeTimeout)
+	}
+}
+
+// TestConnectOneHandshakeTimeoutReapsChild 用一个不回答 initialize 的假进程
+// 确认超时后子进程被收掉，stderr 尾部打了码，且不会拖到通用 8s 上限。
+func TestConnectOneHandshakeTimeoutReapsChild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires subprocess")
+	}
+	const secret = "super-secret-token"
+	dir := t.TempDir()
+	pidfile := filepath.Join(dir, "pid")
+	script := filepath.Join(dir, "slow.sh")
+	body := "#!/bin/sh\necho \"password=$SECRET\" >&2\necho $$ > \"$1\"\nexec sleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	m := NewManager(zap.New(core).Sugar())
+	var rawStderr bytes.Buffer
+	start := time.Now()
+	err := m.connectOne(context.Background(), ServerConfig{
+		Name:             "slow",
+		Transport:        "stdio",
+		Command:          "sh",
+		Args:             []string{script, pidfile},
+		Env:              []string{"SECRET=" + secret},
+		Stderr:           &rawStderr,
+		Enabled:          true,
+		HandshakeTimeout: 300 * time.Millisecond,
+		Redact:           []string{secret},
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected handshake timeout")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("handshake took %s, want the configured timeout rather than a hang", elapsed)
+	}
+	pid := readSlowPID(t, pidfile)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if syscall.Kill(pid, 0) != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d still alive after handshake timeout", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if logsContainField(logs, secret) {
+		t.Fatal("handshake log leaked stderr secret")
+	}
+	if !logsContainField(logs, "password=") {
+		t.Fatal("expected redacted stderr tail on handshake failure")
+	}
+}
+
+// TestConnectOneChildExitLogsRedactedStderr 确认子进程自己退出时也会留下打码后的 stderr 尾部。
+func TestConnectOneChildExitLogsRedactedStderr(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires subprocess")
+	}
+	const secret = "super-secret-token"
+	dir := t.TempDir()
+	script := filepath.Join(dir, "exit.sh")
+	body := "#!/bin/sh\necho \"boom password=$SECRET\" >&2\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	m := NewManager(zap.New(core).Sugar())
+	var rawStderr bytes.Buffer
+	err := m.connectOne(context.Background(), ServerConfig{
+		Name:             "exit",
+		Transport:        "stdio",
+		Command:          "sh",
+		Args:             []string{script},
+		Env:              []string{"SECRET=" + secret},
+		Stderr:           &rawStderr,
+		Enabled:          true,
+		HandshakeTimeout: time.Second,
+		Redact:           []string{secret},
+	})
+	if err == nil {
+		t.Fatal("expected handshake to fail when the child exits")
+	}
+	if logsContainField(logs, secret) {
+		t.Fatal("child-exit log leaked stderr secret")
+	}
+	if !logsContainField(logs, "boom") {
+		t.Fatal("expected stderr tail when the child exits")
+	}
+}
+
+func readSlowPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			if n, conv := strconv.Atoi(strings.TrimSpace(string(b))); conv == nil && n > 0 {
+				return n
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("pid file was not written")
+	return 0
+}
+
+func logsContainField(logs *observer.ObservedLogs, needle string) bool {
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, needle) {
+			return true
+		}
+		for _, f := range e.Context {
+			if strings.Contains(f.String, needle) || strings.Contains(toString(f.Interface), needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	default:
+		return ""
 	}
 }

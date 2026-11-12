@@ -159,6 +159,18 @@ func (c *Client) IsHealthy() bool {
 // Name 返回服务器名称。
 func (c *Client) Name() string { return c.name }
 
+// StderrTail 返回 stdio 子进程 stderr 的打码尾部。其它传输为空。
+func (c *Client) StderrTail() string {
+	if c == nil || c.transport == nil {
+		return ""
+	}
+	type tailer interface{ StderrTail() string }
+	if t, ok := c.transport.(tailer); ok {
+		return t.StderrTail()
+	}
+	return ""
+}
+
 // ============================================================================
 // JSON-RPC 内部方法
 // ============================================================================

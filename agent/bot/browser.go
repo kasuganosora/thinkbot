@@ -24,6 +24,8 @@ type mcpStdioStderr struct {
 func (w *mcpStdioStderr) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
 	if line != "" && w.log != nil {
+		// 与握手失败时的 stderr 尾部使用同一套正则打码，再套上显式密文替换和长度上限。
+		line = mcp.RedactStderr(line, w.redact)
 		w.log.Infow("browser-mcp stderr", "line", sanitizeBrowserText(line, w.redact))
 	}
 	return len(p), nil
@@ -110,8 +112,19 @@ func prepareBrowserMCP(ctx context.Context, b *Bot, params BotParams, wsMgr *san
 		Args:      dockerArgs,
 		Enabled:   true,
 		// 把 wrapper 的 stderr 回写 thinkbot 日志。先打码再落日志，避免代理口令进日志。
-		Stderr: &mcpStdioStderr{log: b.logger, redact: redact},
+		Stderr:           &mcpStdioStderr{log: b.logger, redact: redact},
+		HandshakeTimeout: browserHandshakeTimeout(params.SandboxConfig),
+		Redact:           redact,
 	}, nil
+}
+
+// browserHandshakeTimeout 取出沙箱配置里的握手时限。零值或越界回退到 3 分钟，
+// 避免漏配时落回通用 MCP 的 8s。
+func browserHandshakeTimeout(cfg sandbox.Config) time.Duration {
+	if err := sandbox.ValidateBrowserHandshakeTimeout(cfg.BrowserHandshakeTimeout); err != nil {
+		return sandbox.DefaultBrowserHandshakeTimeout
+	}
+	return cfg.BrowserHandshakeTimeout
 }
 
 // deliverBrowserCookies 在握手前回收上一轮残留 cookie，再把面板里的 cookie 写进容器。

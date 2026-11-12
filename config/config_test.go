@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -894,6 +895,33 @@ func TestBuilder_GetBotTimezoneLocation_Override(t *testing.T) {
 	locGlobal := b.GetBotTimezoneLocation("unset-bot")
 	if locGlobal.String() != "UTC" {
 		t.Errorf("unset-bot: expected UTC, got %q", locGlobal.String())
+	}
+}
+
+func TestBrowserHandshakeTimeoutConfigKey(t *testing.T) {
+	if got := ConfigKeyToEnvKey(KeySandboxBrowserHandshakeTimeout); got != "SANDBOX_BROWSER_HANDSHAKE_TIMEOUT" {
+		t.Fatalf("env key = %q", got)
+	}
+	if DefaultMap()[KeySandboxBrowserHandshakeTimeout] != "3m" {
+		t.Fatalf("DefaultMap = %q, want 3m", DefaultMap()[KeySandboxBrowserHandshakeTimeout])
+	}
+	var desc string
+	for _, spec := range WorkspaceMetaSpecs() {
+		if spec.Key == KeySandboxBrowserHandshakeTimeout {
+			desc = spec.Description
+			break
+		}
+	}
+	if desc == "" {
+		t.Fatal("WorkspaceMetaSpecs missing browser handshake timeout")
+	}
+	if strings.Contains(desc, "环境变量 SANDBOX_BROWSER_HANDSHAKE_TIMEOUT 优先") {
+		t.Fatalf("description claims the OS env var wins: %s", desc)
+	}
+	for _, part := range []string{"运行时覆盖", "数据库", ".env", "SANDBOX_BROWSER_HANDSHAKE_TIMEOUT", "默认值"} {
+		if !strings.Contains(desc, part) {
+			t.Fatalf("description missing %q: %s", part, desc)
+		}
 	}
 }
 

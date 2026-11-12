@@ -430,6 +430,21 @@ func TestBrowserMCPStopDuringHandshake(t *testing.T) {
 	waitGoroutines(t, before)
 }
 
+func TestMCPStdioStderrRedactsSecretPatterns(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	w := &mcpStdioStderr{log: zap.New(core).Sugar()}
+	const token = "abcdef0123456789"
+	if _, err := w.Write([]byte("token=" + token + " Bearer " + token + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if logsContain(logs, token) {
+		t.Fatal("live stderr log leaked a token-shaped secret")
+	}
+	if !logsContain(logs, "token=***") || !logsContain(logs, "Bearer ***") {
+		t.Fatal("live stderr log did not apply the same redaction as the failure tail")
+	}
+}
+
 func TestBrowserMCPStderrSecretNotLogged(t *testing.T) {
 	const secret = "proxy-password-value"
 	core, logs := observer.New(zap.InfoLevel)
@@ -462,6 +477,68 @@ func TestBrowserMCPStderrSecretNotLogged(t *testing.T) {
 	}
 	if !logsContain(logs, "browser-mcp stderr") {
 		t.Fatal("expected a sanitized stderr log line")
+	}
+}
+
+func TestBrowserMCPHandshakeTimeoutReapsChildAndKeepsBackoff(t *testing.T) {
+	const secret = "super-secret-token"
+	dir := t.TempDir()
+	pidfile := filepath.Join(dir, "pid")
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core).Sugar()
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := mcp.NewManager(logger)
+	mgr.AddServer(mcp.ServerConfig{
+		Name: "browser", Transport: "stdio", Command: bin,
+		Args: []string{browserMCPStdioFixtureArg},
+		Env: []string{
+			"TB_BMCP_PIDFILE=" + pidfile,
+			"TB_BMCP_HANG_UNTIL=100",
+			"TB_BMCP_STDERR=slow-start password=" + secret,
+		},
+		Enabled:          true,
+		HandshakeTimeout: 300 * time.Millisecond,
+		Redact:           []string{secret},
+		Stderr:           &mcpStdioStderr{log: logger, redact: []string{secret}},
+	})
+	tm := tools.NewToolManager(prompt.NewRegistry(), nil, zap.NewNop().Sugar())
+	before := runtime.NumGoroutine()
+	s := startBrowserMCP(browserMCPConfig{
+		Manager: mgr, Tools: tm, Logger: logger,
+		BackoffBase: 20 * time.Second, BackoffCap: 20 * time.Second,
+		WatchInterval: time.Second,
+		Redact:        []string{secret},
+	})
+	t.Cleanup(func() {
+		s.Stop()
+		_ = mgr.Close()
+		waitGoroutines(t, before)
+	})
+
+	pid := readFixturePID(t, pidfile)
+	waitBrowserState(t, s, BrowserMCPStateFailed, 3*time.Second)
+	st := s.Status()
+	if st.Attempts < 1 || st.NextRetry.Before(time.Now().Add(5*time.Second)) {
+		t.Fatalf("timeout should still schedule backoff, status=%+v", st)
+	}
+	if strings.Contains(st.LastError, secret) {
+		t.Fatalf("status leaked secret: %s", st.LastError)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d still alive after handshake timeout", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if logsContain(logs, secret) {
+		t.Fatal("logs leaked stderr secret")
+	}
+	if !logsContain(logs, "slow-start") {
+		t.Fatal("expected redacted stderr tail after handshake timeout")
 	}
 }
 
@@ -665,7 +742,7 @@ func logsContain(logs *observer.ObservedLogs, needle string) bool {
 			return true
 		}
 		for _, f := range e.Context {
-			if strings.Contains(fmt.Sprint(f.Interface), needle) {
+			if strings.Contains(f.String, needle) || strings.Contains(fmt.Sprint(f.Interface), needle) {
 				return true
 			}
 		}
