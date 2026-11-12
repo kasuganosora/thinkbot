@@ -20,11 +20,16 @@ import (
 )
 
 const userMCPStdioFixtureArg = "--user-mcp-stdio-fixture"
+const browserMCPStdioFixtureArg = "--browser-mcp-stdio-fixture"
 
 func TestMain(m *testing.M) {
 	for _, arg := range os.Args[1:] {
-		if arg == userMCPStdioFixtureArg {
+		switch arg {
+		case userMCPStdioFixtureArg:
 			runUserMCPStdioFixture()
+			return
+		case browserMCPStdioFixtureArg:
+			runBrowserMCPStdioFixture()
 			return
 		}
 	}

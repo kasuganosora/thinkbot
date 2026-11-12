@@ -108,7 +108,9 @@ type Bot struct {
 	userMCP *mcp.Manager
 
 	// 浏览器 MCP 管理器（per-bot，docker 后端 + BrowserEnabled 时创建；nil=未启用）。
+	// browserBG 在后台完成握手和断线重连；启动路径不等待它。
 	browserMCP *mcp.Manager
+	browserBG  *browserMCPSession
 	alignMu    sync.Mutex // 打开桌面时把浏览器挪到共享屏幕，避免并发重启
 	// browserCookieSaver 会话结束后回收容器内 cookie 状态文件时调用。
 	browserCookieSaver func(ctx context.Context, stateJSON []byte) error
@@ -716,16 +718,29 @@ func (b *Bot) Close() {
 			}
 			b.userMCP = nil
 		}
+		// 先停掉后台重连，避免关闭过程中又把浏览器进程拉起来。
+		// 已经连上的客户端先留着，下面还要调 close 工具落盘 cookie。
+		if b.browserBG != nil {
+			b.browserBG.Stop()
+		}
 		// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再关闭传输层、读回状态文件持久化到 DB。
 		// 必须在工作空间管理器关闭（容器销毁）之前完成。
 		// 注意：直接 Close() 会 SIGKILL 掉 docker exec 子进程，而 `docker exec -i` 默认不代理信号，
 		// wrapper 的 shutdown 钩子不会跑，cookie 将丢。故先调 close 工具触发其 saveState 再回包。
 		if b.browserMCP != nil {
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), 8*time.Second)
-			if _, cerr := b.browserMCP.CallTool(closeCtx, "browser", "close", map[string]any{}); cerr != nil {
-				b.logger.Warnw("browser graceful close failed, will force close", "err", cerr)
+			// 还没连上（或进程已经没了）时不要 CallTool：那条路径会尝试重连，
+			// 关闭过程中把浏览器又拉起来。健康连接才发 close，让 wrapper 先落盘。
+			healthy := false
+			if c, ok := b.browserMCP.GetClient(browserServerName); ok && c != nil && c.IsHealthy() {
+				healthy = true
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 8*time.Second)
+				if _, cerr := b.browserMCP.CallTool(closeCtx, browserServerName, "close", map[string]any{}); cerr != nil {
+					b.logger.Warnw("browser graceful close failed, will force close", "err", cerr)
+				}
+				closeCancel()
+			} else {
+				b.browserMCP.Disconnect(browserServerName)
 			}
-			closeCancel()
 			// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再把状态文件持久化到 DB。
 			//
 			// 竞态修复（根因）：wrapper 的 close 工具在回包前已完成 saveState 落盘，故应在
@@ -733,7 +748,8 @@ func (b *Bot) Close() {
 			// 再关闭传输层触发容器内 wrapper 的 shutdown 落盘（docker exec 连接关闭 → wrapper
 			// 收到 stdin EOF → shutdown → saveState），随后轮询读取，确保不丢 cookie。
 			// （注意：docker exec 被 SIGKILL 后立即退出，不等容器内 wrapper 结束，故不能“先关再读”。）
-			if b.browserCookieSaver != nil && b.workspaceMgr != nil {
+			// 从未连上时不做这轮轮询，避免空文件把关闭拖住；残留 cookie 由下次启动的后台回收补上。
+			if healthy && b.browserCookieSaver != nil && b.workspaceMgr != nil {
 				b.recoverBrowserCookies(context.Background())
 			}
 			if b.browserMCP != nil {
@@ -752,6 +768,14 @@ func (b *Bot) Close() {
 // Ready 返回一个 channel，该 channel 在 Bot 完成初始化（Channel 已启动、Engine 已就绪）后关闭。
 func (b *Bot) Ready() <-chan struct{} {
 	return b.engine.Ready()
+}
+
+// BrowserMCPStatus 返回浏览器 MCP 后台连接的状态。未启用时 ok 为 false。
+func (b *Bot) BrowserMCPStatus() (BrowserMCPStatus, bool) {
+	if b == nil || b.browserBG == nil {
+		return BrowserMCPStatus{}, false
+	}
+	return b.browserBG.Status(), true
 }
 
 // recoverBrowserCookies 在 bot 关闭时把浏览器会话 cookie 从容器内状态文件回收进 DB。

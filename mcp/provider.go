@@ -119,8 +119,15 @@ func RegisterTools(toolMgr *tools.ToolManager, mgr *Manager) error {
 	provider := NewProvider(mgr)
 	mgr.SetOnServerChange(provider.InvalidateCache) // 服务器开关时自动失效缓存
 	toolMgr.AddProvider(provider)
+	ensureMCPRules(toolMgr)
+	return nil
+}
 
-	// 注册提示词段落
+// ensureMCPRules 注册 MCP 工具的提示词段落。重复调用只是覆盖同一段，不会叠出两份。
+func ensureMCPRules(toolMgr *tools.ToolManager) {
+	if toolMgr == nil {
+		return
+	}
 	toolMgr.SetRulesSection(&tools.ToolPromptSection{
 		Name:  "mcp_rules",
 		Order: 305,
@@ -133,6 +140,4 @@ Some of your tools are provided by external MCP servers. Their names follow the 
 - If an MCP tool fails or its server is unavailable, do NOT retry it repeatedly. Fall back to another tool, or tell the user what could not be reached.`,
 		Enabled: true,
 	})
-
-	return nil
 }

@@ -17,13 +17,14 @@ import (
 // mcpStdioStderr 把浏览器 wrapper 的 stderr 回写到 thinkbot 日志（便于排障）。
 // wrapper 仅在此输出诊断信息（绝不打印 cookie 值），按行回写。
 type mcpStdioStderr struct {
-	log *zap.SugaredLogger
+	log    *zap.SugaredLogger
+	redact []string
 }
 
 func (w *mcpStdioStderr) Write(p []byte) (int, error) {
 	line := strings.TrimRight(string(p), "\n")
-	if line != "" {
-		w.log.Infow("browser-mcp stderr", "line", line)
+	if line != "" && w.log != nil {
+		w.log.Infow("browser-mcp stderr", "line", sanitizeBrowserText(line, w.redact))
 	}
 	return len(p), nil
 }
@@ -45,6 +46,9 @@ var _ io.Writer = (*mcpStdioStderr)(nil)
 
 // setupBrowserMCP 为本 bot 接入 per-bot 浏览器 MCP 服务。
 // 调用前须确保 wsMgr 为 docker 后端且 SandboxConfig.BrowserEnabled=true；其余前置检查在此兜底。
+//
+// 容器拉起、脚本同步和 MCP 握手都在后台进行。一次握手超时（慢启动的浏览器进程）
+// 不会让本次进程永久失去浏览器工具，也不会挡住 channel 和其它工具的就绪。
 func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManager) error {
 	if wsMgr == nil || wsMgr.Backend() != "docker" {
 		return nil
@@ -55,24 +59,42 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 	if params.ToolManager == nil {
 		return nil
 	}
+	if b.logger == nil {
+		b.logger = zap.NewNop().Sugar()
+	}
 
-	ctx := context.Background()
+	redact := browserRedactList(params.SandboxConfig.BrowserProxy)
+	browserMgr := mcp.NewManager(b.logger.With("component", "browser_mcp"))
+	b.browserMCP = browserMgr
+	b.browserCookieSaver = params.BrowserCookieSaver
+	b.browserCookieStartupRecover = params.BrowserCookieStartupRecover
+	b.browserBG = startBrowserMCP(browserMCPConfig{
+		Manager: browserMgr,
+		Tools:   params.ToolManager,
+		Logger:  b.logger.With("component", "browser_mcp"),
+		Redact:  redact,
+		Prepare: func(ctx context.Context) (mcp.ServerConfig, error) {
+			return prepareBrowserMCP(ctx, b, params, wsMgr, redact)
+		},
+	})
+	b.logger.Infow("browser mcp scheduled", "bot_id", params.ID)
+	return nil
+}
 
-	// 容器名是确定的（thinkbot-bot-<botID>），不依赖容器是否已被创建。
+// prepareBrowserMCP 在后台尝试里把容器和 cookie 准备好，再给出本次要拉起的 stdio 配置。
+// 容器还没起来、docker 暂时不可用，都作为可重试的失败返回，不在 bot 启动路径上等待。
+func prepareBrowserMCP(ctx context.Context, b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManager, redact []string) (mcp.ServerConfig, error) {
+	if err := wsMgr.StartBot(ctx, params.ID); err != nil {
+		return mcp.ServerConfig{}, errs.Wrap(err, "bot: ensure browser container")
+	}
 	containerName := wsMgr.ContainerInfo(ctx, params.ID).ContainerName
 	if containerName == "" {
-		return errs.New("bot: cannot resolve browser container name")
+		return mcp.ServerConfig{}, errs.New("bot: cannot resolve browser container name")
 	}
-
-	// 确保容器已运行：浏览器 server 经 docker exec 起进程，容器不存在则 exec 失败。
-	if err := wsMgr.StartBot(ctx, params.ID); err != nil {
-		return errs.Wrap(err, "bot: ensure browser container")
-	}
-
 	// 已存在的容器不会随内置镜像更新而重建：先把本二进制内嵌的新版 wrapper 同步进去。
 	syncBrowserMCPScript(ctx, containerName, b.logger)
+	deliverBrowserCookies(ctx, b, params, wsMgr)
 
-	browserMgr := mcp.NewManager(b.logger.With("component", "browser_mcp"))
 	// 代理透传：部署侧自有出口（IP 归部署侧），空值直连。
 	// 注意：docker exec 不继承 docker 客户端进程的 env，必须把代理以 `-e` 注入容器内。
 	dockerArgs := []string{"exec", "-i", containerName}
@@ -81,31 +103,20 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 	}
 	// 经 launch 脚本以非 root 用户运行 wrapper（见 Dockerfile / browser-launch.sh）。
 	dockerArgs = append(dockerArgs, "/usr/local/bin/thinkbot-browser-launch")
-	cfg := mcp.ServerConfig{
-		Name:      "browser",
+	return mcp.ServerConfig{
+		Name:      browserServerName,
 		Transport: "stdio",
 		Command:   "docker",
 		Args:      dockerArgs,
 		Enabled:   true,
-		// 把 wrapper 的 stderr 回写 thinkbot 日志，否则子进程错误被静默丢弃，排障困难。
-		Stderr: &mcpStdioStderr{log: b.logger},
-	}
-	browserMgr.AddServer(cfg)
+		// 把 wrapper 的 stderr 回写 thinkbot 日志。先打码再落日志，避免代理口令进日志。
+		Stderr: &mcpStdioStderr{log: b.logger, redact: redact},
+	}, nil
+}
 
-	// EnableServer 立即连接（docker exec 起进程 + MCP 握手）。失败则浏览器工具不可用，
-	// 调用方会降级处理（不致命）。
-	if err := browserMgr.EnableServer(ctx, "browser"); err != nil {
-		return errs.Wrap(err, "bot: enable browser mcp server")
-	}
-
-	// 把浏览器工具注册进本 bot 的 ToolManager（per-bot，互不串台）。
-	if err := mcp.RegisterTools(params.ToolManager, browserMgr); err != nil {
-		return errs.Wrap(err, "bot: register browser mcp tools")
-	}
-
-	b.browserMCP = browserMgr
-	b.logger.Infow("browser mcp wired", "container", containerName, "bot_id", params.ID)
-
+// deliverBrowserCookies 在握手前回收上一轮残留 cookie，再把面板里的 cookie 写进容器。
+// 浏览器进程在首次 tools/call 时才读状态文件，因此写在拉起进程之前即可。
+func deliverBrowserCookies(ctx context.Context, b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManager) {
 	// 启动期回收：在 loader 覆盖写状态文件之前，先把容器内「上一轮残留」的 cookie 合并回 DB。
 	// 非优雅关闭（SIGKILL/崩溃）时 Close() 未跑、cookie 仅落在 wrapper 周期 saveState 文件里，
 	// 若不在此回收，下方 loader 会用（可能为空）的 DB 内容覆盖该文件，导致孤儿 cookie 永久丢失。
@@ -143,8 +154,6 @@ func setupBrowserMCP(b *Bot, params BotParams, wsMgr *sandbox.BotWorkspaceManage
 			}
 		}
 	}
-
-	return nil
 }
 
 // AlignBrowserDisplay moves this bot's browser onto DISPLAY=:99 when it is
@@ -176,12 +185,17 @@ func (b *Bot) AlignBrowserDisplay(ctx context.Context) {
 	onShared := disp == ":99" || strings.HasPrefix(disp, ":99.")
 	if disp != "" && (updated || !onShared) {
 		b.logger.Infow("restarting browser onto the shared display", "from", disp, "script_updated", updated, "bot_id", b.ID)
+		if b.browserBG != nil {
+			if err := b.browserBG.Restart(ctx); err != nil {
+				b.logger.Warnw("browser restart onto shared display failed", "err", err)
+			}
+			return
+		}
 		if err := b.browserMCP.DisableServer("browser"); err != nil {
 			b.logger.Warnw("browser disable before display align failed", "err", err)
 		}
 		if err := b.browserMCP.EnableServer(ctx, "browser"); err != nil {
 			b.logger.Warnw("browser restart onto shared display failed", "err", err)
-			return
 		}
 	}
 }
