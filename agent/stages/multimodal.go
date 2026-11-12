@@ -10,6 +10,7 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -124,8 +125,32 @@ func (s *MultimodalStage) ShouldProcess(msg *core.Message) bool {
 
 // Process 处理消息。
 // 如果消息包含多模态附件且需要转写，调用辅助模型生成描述并追加到消息文本。
+func (s *MultimodalStage) liveConfig(ctx context.Context) MultimodalConfig {
+	cfg := s.config
+	snap := bot.LLMSnapshotFrom(ctx)
+	if snap == nil {
+		return cfg
+	}
+	cfg.MainMultimodal = snap.MainDef.Multimodal
+	if snap.Vision == nil {
+		cfg.VisionProvider = nil
+		return cfg
+	}
+	cfg.VisionProvider = snap.Vision
+	cfg.VisionModel = snap.VisionModel
+	if snap.VisionDef.MaxTokens > 0 {
+		mt := snap.VisionDef.MaxTokens
+		cfg.MaxTokens = &mt
+	}
+	if snap.VisionDef.Temperature != nil {
+		cfg.Temperature = snap.VisionDef.Temperature
+	}
+	return cfg
+}
+
 func (s *MultimodalStage) Process(ctx context.Context, env *core.Envelope) (*core.Envelope, error) {
-	if !s.ShouldProcess(&env.Message) {
+	cfg := s.liveConfig(ctx)
+	if cfg.MainMultimodal || cfg.VisionProvider == nil || !core.HasMultimodalAttachments(&env.Message) {
 		return env, nil
 	}
 
@@ -151,7 +176,7 @@ func (s *MultimodalStage) Process(ctx context.Context, env *core.Envelope) (*cor
 			continue
 		}
 
-		desc, err := s.transcribeAttachment(ctx, att, env.Message.Text)
+		desc, err := s.transcribeWith(ctx, cfg, att, env.Message.Text)
 		if err != nil {
 			logger.Warnw("multimodal stage: failed to transcribe attachment",
 				"message_id", env.Message.ID,
@@ -197,6 +222,12 @@ func (s *MultimodalStage) Process(ctx context.Context, env *core.Envelope) (*cor
 		"description_length", len(descriptionBlock))
 
 	return env, nil
+}
+
+func (s *MultimodalStage) transcribeWith(ctx context.Context, cfg MultimodalConfig, att core.Attachment, userText string) (string, error) {
+	clone := *s
+	clone.config = cfg
+	return clone.transcribeAttachment(ctx, att, userText)
 }
 
 // transcribeAttachment 调用辅助模型转写单个附件。

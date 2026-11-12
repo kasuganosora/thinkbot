@@ -117,12 +117,29 @@ type InternalPolicy struct {
 	botEffort string
 	// reasoningModels: model IDs marked with the "reasoning" capability.
 	reasoningModels map[string]bool
+	// modelAllows 在每次调用时读取当前快照，避免启动时抄下的能力列表过期。
+	modelAllows func(model string) bool
 }
 
 // NewInternalPolicy creates a policy. settings may be nil (built-in defaults);
 // botEffort is the reasoning_effort the bot sends for normal turns ("" = none);
 // reasoningModels are model IDs whose provider config lists the "reasoning"
 // capability.
+// SetModelAllows 用实时判断替换启动时抄下的 reasoning 能力列表。
+func (p *InternalPolicy) SetModelAllows(fn func(model string) bool) {
+	if p == nil {
+		return
+	}
+	p.modelAllows = fn
+}
+
+func (p *InternalPolicy) allows(model string) bool {
+	if p.modelAllows != nil {
+		return p.modelAllows(model)
+	}
+	return p.reasoningModels[model]
+}
+
 func NewInternalPolicy(settings func() InternalSettings, botEffort string, reasoningModels ...string) *InternalPolicy {
 	p := &InternalPolicy{settings: settings, botEffort: strings.ToLower(strings.TrimSpace(botEffort))}
 	for _, m := range reasoningModels {
@@ -212,7 +229,7 @@ func (p *InternalPolicy) autoEffort(purpose, model string) string {
 	if fam == familyNoEffort {
 		return ""
 	}
-	if !p.botSendsEffort() && !p.reasoningModels[model] && fam == familyUnknown {
+	if !p.botSendsEffort() && !p.allows(model) && fam == familyUnknown {
 		// Nothing says this provider accepts the parameter: don't send it.
 		return ""
 	}

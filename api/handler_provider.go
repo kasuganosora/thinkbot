@@ -14,6 +14,7 @@ import (
 
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
+	"github.com/kasuganosora/thinkbot/util/log"
 )
 
 // ============================================================================
@@ -138,7 +139,36 @@ type UpdateModelReq struct {
 
 // --- 存储辅助 ---
 
+// registerStoredProviderSecrets 把已保存的服务商密钥登记进日志遮蔽。
+// 进程重启后 save 路径不会再跑，所以启动时扫一遍。
+func registerStoredProviderSecrets(store *config.Store) {
+	if store == nil {
+		return
+	}
+	for _, raw := range store.GetByPrefix(providerKeyPrefix) {
+		if raw == "" {
+			continue
+		}
+		var def ProviderDef
+		if err := json.Unmarshal([]byte(raw), &def); err != nil || def.APIKey == "" {
+			continue
+		}
+		log.RegisterSecret(def.APIKey)
+	}
+}
+
 // providerConfigKey 返回 Provider 在 config store 中的键。
+func providerModelIDs(def *ProviderDef) []string {
+	if def == nil {
+		return nil
+	}
+	out := make([]string, 0, len(def.Models))
+	for _, m := range def.Models {
+		out = append(out, m.ID)
+	}
+	return out
+}
+
 func providerConfigKey(id string) string {
 	return "provider." + id
 }
@@ -254,6 +284,9 @@ func (s *Server) handleCreateProvider(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	if def.APIKey != "" {
+		log.RegisterSecret(def.APIKey)
+	}
 
 	auditLog(c, s.logger, "create_provider", "id", id, "name", req.Name)
 	OK(c, toProviderResp(def))
@@ -276,6 +309,14 @@ func (s *Server) handleUpdateProvider(c *gin.Context) {
 		return
 	}
 
+	if req.Enabled != nil && !*req.Enabled && def.Enabled && s.botSvc != nil {
+		ids := providerModelIDs(def)
+		if err := s.botSvc.RefuseProviderRemoval(pid, ids); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
+
 	// 合并更新
 	if req.Name != nil {
 		def.Name = *req.Name
@@ -287,7 +328,18 @@ func (s *Server) handleUpdateProvider(c *gin.Context) {
 		def.BaseURL = *req.BaseURL
 	}
 	if req.APIKey != nil {
-		def.APIKey = *req.APIKey // 允许传空字符串来清空 API Key
+		next := *req.APIKey
+		if next != "" && next == maskAPIKey(def.APIKey) {
+			Fail(c, errs.BadRequest("refusing the redacted credential placeholder; submit the full key or send an empty string to clear it"))
+			return
+		}
+		if def.APIKey != "" && def.APIKey != next {
+			log.UnregisterSecret(def.APIKey)
+		}
+		def.APIKey = next
+		if next != "" {
+			log.RegisterSecret(next)
+		}
 	}
 	if req.Enabled != nil {
 		def.Enabled = *req.Enabled
@@ -299,7 +351,20 @@ func (s *Server) handleUpdateProvider(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "update_provider", "id", pid)
-	OK(c, toProviderResp(def))
+	applied, msg := true, ""
+	if s.botSvc != nil {
+		applied, msg = s.botSvc.reapplyRunningBots(c.Request.Context(), pid)
+	}
+	state := "applied"
+	if !applied {
+		state = "failed"
+	}
+	OK(c, struct {
+		ProviderResp
+		RuntimeApplied bool   `json:"runtimeApplied"`
+		RuntimeState   string `json:"runtimeState"`
+		RuntimeMessage string `json:"runtimeMessage,omitempty"`
+	}{ProviderResp: toProviderResp(def), RuntimeApplied: applied, RuntimeState: state, RuntimeMessage: msg})
 }
 
 // handleDeleteProvider 删除 Provider。
@@ -308,18 +373,33 @@ func (s *Server) handleDeleteProvider(c *gin.Context) {
 	pid := c.Param("pid")
 
 	// 检查是否存在
-	if _, err := s.getProvider(pid); err != nil {
+	existing, err := s.getProvider(pid)
+	if err != nil {
 		Fail(c, err)
 		return
 	}
+	if s.botSvc != nil {
+		if err := s.botSvc.RefuseProviderRemoval(pid, providerModelIDs(existing)); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
 
+	if existing.APIKey != "" {
+		log.UnregisterSecret(existing.APIKey)
+	}
 	if err := s.store.Set(c.Request.Context(), providerConfigKey(pid), ""); err != nil {
 		Fail(c, err)
 		return
 	}
 
 	auditLog(c, s.logger, "delete_provider", "id", pid)
-	OK(c, nil)
+	applied, msg := true, ""
+	if s.botSvc != nil {
+		// 删掉配置后跑着的机器人解析不出新客户端，就保持上一套快照，并记下失败。
+		applied, msg = s.botSvc.reapplyRunningBots(c.Request.Context(), pid)
+	}
+	OK(c, gin.H{"runtimeApplied": applied, "runtimeMessage": msg})
 }
 
 // handleTestProvider 测试 Provider 连通性。
@@ -333,14 +413,7 @@ func (s *Server) handleTestProvider(c *gin.Context) {
 		return
 	}
 
-	if def.APIKey == "" {
-		OK(c, gin.H{"ok": false, "message": "未配置 API Key"})
-		return
-	}
-
-	// TODO: 实际连通性检测（调用 LLM provider 的 models list API）
-	// 当前返回简单连接成功状态
-	OK(c, gin.H{"ok": true, "latencyMs": 150, "message": "连接成功"})
+	OK(c, probeProvider(c.Request.Context(), def, nil))
 }
 
 // handleAddModel 向 Provider 添加模型。
@@ -506,6 +579,12 @@ func (s *Server) handleDeleteModel(c *gin.Context) {
 		Fail(c, err)
 		return
 	}
+	if s.botSvc != nil {
+		if err := s.botSvc.RefuseProviderRemoval(pid, []string{mid}); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
 
 	// 找到并移除目标模型
 	found := false
@@ -585,7 +664,7 @@ func (s *Server) handleImportModels(c *gin.Context) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		Fail(c, errs.BadRequest(fmt.Sprintf("provider returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))))
+		Fail(c, errs.BadRequest(fmt.Sprintf("provider model list returned HTTP %d", resp.StatusCode)))
 		return
 	}
 

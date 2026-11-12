@@ -204,6 +204,7 @@ func registerAPILifecycle(p APIParams, server *Server, botSvc *BotService, wfSvc
 
 	p.Lifecycle.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
+			registerStoredProviderSecrets(p.Store)
 			// 启动所有定义中 status=running 的 Bot
 			if err := botSvc.StartAll(ctx); err != nil {
 				p.Logger.Warnw("api: failed to start bots from DB", "err", err)

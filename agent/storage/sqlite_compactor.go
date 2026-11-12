@@ -383,6 +383,8 @@ func (c *SQLiteCompactor) compactBatch(ctx context.Context, scope memory.Scope, 
 	if len(entries) < c.config.MinClusterSize {
 		return 0, 0, 0, nil
 	}
+	// 这一批聚类共用入口时的快照。批处理中途换模型不会改这一批的上限。
+	ctx = llm.PinWork(ctx, c.config.Provider)
 
 	// 压缩是尽力而为的后台维护：聚类合并要调 GLM，可能耗时数秒到数十秒。
 	// 调用方传入的 ctx 通常来自请求链路、带较短 deadline，直接透传会导致

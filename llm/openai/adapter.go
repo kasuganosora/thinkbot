@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/kasuganosora/thinkbot/llm"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -201,7 +200,8 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 
 			case EventResponseFailed:
 				if event.Response != nil && event.Response.Error != nil {
-					send(&llm.ErrorPart{Error: fmt.Errorf("openai: %s", event.Response.Error.Message)})
+					apiErr := &APIError{Type: event.Response.Error.Code, Code: event.Response.Error.Code, Message: event.Response.Error.Message}
+					send(&llm.ErrorPart{Error: openAIErrorToLLMError(apiErr, 0, nil, "")})
 				}
 			}
 			return nil
@@ -239,7 +239,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "openai: stream failed")})
+			send(&llm.ErrorPart{Error: ClassifyStreamError(streamErr)})
 		}
 
 		send(&llm.FinishPart{
@@ -341,6 +341,10 @@ func convertUnifiedToOpenAIInput(messages []llm.Message) ([]InputItem, error) {
 				case llm.ImagePart:
 					parts = append(parts, ContentPart{Type: ContentTypeInputImage, ImageURL: pp.Image})
 					hasImage = true
+				case llm.FilePart:
+					return nil, fmt.Errorf("openai responses: file content is not sent on this path")
+				default:
+					return nil, fmt.Errorf("openai responses: unsupported content part %T", p)
 				}
 			}
 			if hasImage && len(parts) > 0 {

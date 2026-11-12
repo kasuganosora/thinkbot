@@ -18,6 +18,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/outbound"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
 	"github.com/kasuganosora/thinkbot/agent/route"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
@@ -242,6 +243,13 @@ func (e *Engine) Ready() <-chan struct{} {
 
 // Ingress 返回 Engine 使用的 Ingress 实例。
 // 外部 channel 可通过此方法获取 Ingress 来注入消息。
+func (e *Engine) DispatchActions(ctx context.Context, actions []core.Action) error {
+	if e == nil || e.dispatcher == nil || len(actions) == 0 {
+		return nil
+	}
+	return e.dispatcher.Dispatch(ctx, actions)
+}
+
 func (e *Engine) Ingress() *inbound.Ingress {
 	return e.ingress
 }
@@ -376,12 +384,12 @@ func (e *Engine) processEnvelopeWithResult(ctx context.Context, workerID int, en
 	result, err := e.pipeline.Execute(ctx, env)
 	if err != nil {
 		e.messagesErrors.Add(1)
-		span.SetStatus(codes.Error, err.Error())
+		span.SetStatus(codes.Error, llm.SafeErrorText(err))
 		span.RecordError(err)
 		logger.Errorw("pipeline execution failed",
 			"worker_id", workerID,
 			"message_id", messageID,
-			"err", err,
+			"err", llm.SafeErrorText(err),
 			"duration", time.Since(start))
 		e.hook.OnPipelineError(ctx, env, err)
 		return nil, nil, err

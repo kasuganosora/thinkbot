@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/dao"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
@@ -33,13 +34,18 @@ func (s *Server) handleListBots(c *gin.Context) {
 	// 附加运行状态
 	type botListItem struct {
 		dao.BotDefinition
-		Running bool `json:"running"`
+		Running         bool   `json:"running"`
+		EffectiveMain   string `json:"effectiveMain"`
+		EffectiveLight  string `json:"effectiveLight"`
+		EffectiveVision string `json:"effectiveVision"`
+		LLMApplyError   string `json:"llmApplyError,omitempty"`
 	}
 
 	result := make([]botListItem, len(defs))
 	for i, def := range defs {
 		result[i].BotDefinition = def
 		result[i].Running = s.botSvc.IsRunning(def.ID)
+		result[i].EffectiveMain, result[i].EffectiveLight, result[i].EffectiveVision, result[i].LLMApplyError = s.botSvc.EffectiveLLM(def.ID)
 	}
 
 	OK(c, result)
@@ -69,13 +75,22 @@ func (s *Server) handleGetBot(c *gin.Context) {
 	// 尝试获取运行时信息
 	type botDetail struct {
 		dao.BotDefinition
-		Running bool `json:"running"`
-		Info    *any `json:"info,omitempty"`
+		Running         bool   `json:"running"`
+		EffectiveMain   string `json:"effectiveMain"`
+		EffectiveLight  string `json:"effectiveLight"`
+		EffectiveVision string `json:"effectiveVision"`
+		LLMApplyError   string `json:"llmApplyError,omitempty"`
+		Info            *any   `json:"info,omitempty"`
 	}
 
+	main, light, vision, applyErr := s.botSvc.EffectiveLLM(id)
 	detail := botDetail{
-		BotDefinition: *def,
-		Running:       s.botSvc.IsRunning(id),
+		BotDefinition:   *def,
+		Running:         s.botSvc.IsRunning(id),
+		EffectiveMain:   main,
+		EffectiveLight:  light,
+		EffectiveVision: vision,
+		LLMApplyError:   applyErr,
 	}
 
 	if info, err := s.botSvc.GetBotInfo(id); err == nil && info != nil {
@@ -245,15 +260,49 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	if req.CostQuota != nil {
 		updates["cost_quota"] = *req.CostQuota
 	}
+	modelChanged := req.LLMMain != nil || req.LLMLight != nil || req.LLMVision != nil
 
-	if len(updates) == 0 {
+	if len(updates) == 0 && !modelChanged {
 		OKMsg(c, "no changes", nil)
 		return
 	}
 
-	if err := s.botSvc.UpdateDefinition(id, updates); err != nil {
-		Fail(c, err)
+	if modelChanged {
+		s.botSvc.applyMu.Lock()
+		if len(updates) > 0 {
+			if err := s.botSvc.UpdateDefinition(id, updates); err != nil {
+				s.botSvc.applyMu.Unlock()
+				Fail(c, err)
+				return
+			}
+		}
+		if req.LLMVision != nil && s.store != nil {
+			if err := s.store.Set(c.Request.Context(), config.BotLLMKey(id, "vision"), *req.LLMVision); err != nil {
+				s.botSvc.applyMu.Unlock()
+				Fail(c, err)
+				return
+			}
+		}
+		applied, err := s.botSvc.applyDesiredLocked(c.Request.Context(), id)
+		s.botSvc.applyMu.Unlock()
+		if req.CostQuota != nil {
+			if err := s.botSvc.SyncBotCostQuota(c.Request.Context(), id, *req.CostQuota); err != nil {
+				s.logger.Warnw("update bot cost quota store sync failed", "bot_id", id, "err", err)
+			}
+		}
+		auditLog(c, s.logger, "update_bot", "bot_id", id, "fields", strutil.MapKeys(updates))
+		if err != nil {
+			Fail(c, err)
+			return
+		}
+		OK(c, applied)
 		return
+	}
+	if len(updates) > 0 {
+		if err := s.botSvc.UpdateDefinition(id, updates); err != nil {
+			Fail(c, err)
+			return
+		}
 	}
 	// 成本额度：实时镜像到 config store，使运行中的 bot 立即生效（无需重启）。
 	if req.CostQuota != nil {

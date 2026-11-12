@@ -2,6 +2,7 @@ package bot
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/config"
@@ -54,6 +55,17 @@ func CreateProvider(def config.ModelDef, llmCfg config.LLMClientConfig) (llm.Pro
 		opts := []openai.Option{openai.WithAPIKey(def.APIKey)}
 		if def.BaseURL != "" {
 			opts = append(opts, openai.WithBaseURL(def.BaseURL))
+		}
+		if def.APIStyle == "responses" {
+			// 真实 Responses 协议。base 已带 /v1 时路径用 /responses，避免 /v1/v1/responses。
+			path := "/v1/responses"
+			if strings.HasSuffix(strings.ToLower(strings.TrimRight(def.BaseURL, "/")), "/v1") {
+				path = "/responses"
+			}
+			opts = append(opts, openai.WithResponsesPath(path))
+			opts = append(opts, openai.WithTimeout(timeout))
+			opts = append(opts, openai.WithRetry(retryCfg))
+			return openai.New(opts...), nil
 		}
 		if def.Provider == "bigmodel" || def.ChatPath != "" {
 			// BigModel / 智谱 GLM 等仅兼容 Chat Completions API 的供应商
@@ -134,10 +146,16 @@ func (b *LLMBundle) MainSupportsMultimodal() bool {
 
 // CreateLLMBundle 从 config Store 为指定 Bot 构建 LLM 实例集。
 //
-// 读取数据库中 bot.<botID>.main 和 bot.<botID>.light，
-// 找到对应的 llm.<llm_id> JSON 配置，创建 Provider 实例。
+// 读取数据库中 bot.<botID>.main / light / vision。定义表才是期望值；
+// 这些键应是上一次成功解析后写下的生效值。
 func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	assignment := b.GetBotLLMAssignment(botID)
+	return CreateLLMBundleFrom(b, botID, assignment.Main, assignment.Light, assignment.Vision)
+}
+
+// CreateLLMBundleFrom 按显式的模型 ID 建客户端，不先写配置键。
+func CreateLLMBundleFrom(b *config.Builder, botID, mainID, lightID, visionID string) (*LLMBundle, error) {
+	assignment := config.BotLLMAssignment{Main: mainID, Light: lightID, Vision: visionID}
 
 	if assignment.Main == "" {
 		return nil, fmt.Errorf("bot %q: no main LLM assigned", botID)
@@ -147,9 +165,9 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	llmCfg := b.GetLLMClientConfig()
 
 	// 解析主力 LLM
-	mainDef, ok := b.GetLLMModel(assignment.Main)
-	if !ok {
-		return nil, fmt.Errorf("bot %q: LLM %q not found in config", botID, assignment.Main)
+	mainDef, err := b.ResolveLLMModel(assignment.Main)
+	if err != nil {
+		return nil, fmt.Errorf("bot %q: LLM %q: %w", botID, assignment.Main, err)
 	}
 	// max_tokens 跟随「模型」本身（ModelDef.MaxTokens），由 provider 模型配置页按每模型设置。
 	// 主模型若无视觉能力，外挂的视觉模型（vision）使用其各自的 MaxTokens，互不覆盖。
@@ -164,9 +182,12 @@ func CreateLLMBundle(b *config.Builder, botID string) (*LLMBundle, error) {
 	}
 
 	// 解析低成本 LLM
-	if assignment.Light != assignment.Main {
-		lightDef, ok := b.GetLLMModel(assignment.Light)
-		if ok {
+	if assignment.Light != "" && assignment.Light != assignment.Main {
+		lightDef, err := b.ResolveLLMModel(assignment.Light)
+		if err != nil {
+			return nil, fmt.Errorf("bot %q: light LLM %q: %w", botID, assignment.Light, err)
+		}
+		if lightDef.Model != "" {
 			lightProvider, err := CreateProvider(lightDef, llmCfg)
 			if err != nil {
 				return nil, errs.Wrapf(err, "bot %q: create light LLM", botID)
@@ -189,9 +210,9 @@ func (b *LLMBundle) withVision(builder *config.Builder, botID string, assignment
 	if assignment.Vision == "" {
 		return b, nil
 	}
-	visionDef, ok := builder.GetLLMModel(assignment.Vision)
-	if !ok {
-		return b, nil
+	visionDef, err := builder.ResolveLLMModel(assignment.Vision)
+	if err != nil {
+		return nil, fmt.Errorf("bot %q: vision LLM %q: %w", botID, assignment.Vision, err)
 	}
 	// 视觉模型使用自身的 ModelDef.MaxTokens（如 Grok / OpenAI 各自上限），
 	// 不继承主模型（GLM 等）的 max_tokens。

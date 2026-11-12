@@ -30,8 +30,8 @@ type StreamHTTPError struct {
 }
 
 func (e *StreamHTTPError) Error() string {
-	msg := truncate(string(e.Body), 500)
-	return fmt.Sprintf("stream HTTP error %d on %s: %s", e.StatusCode, e.URL, msg)
+	// Body 只留给调用方在内存里分类，不能出现在 Error()、日志或事件里。
+	return fmt.Sprintf("stream HTTP error %d on %s", e.StatusCode, e.URL)
 }
 
 // streamConnResult 封装流式连接建立后的结果。

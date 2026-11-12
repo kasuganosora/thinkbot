@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -25,12 +26,12 @@ const (
 // 「已用」的口径必须只有一份：预算提示（contextBudgetNote）和「吃紧时摘记忆块」
 // （contextBudgetPercent）都从这里取。若两处各算各的，一旦某一处加了新项，
 // 就会出现「提示说已用 80% 但记忆块没摘（或反之）」这种自相矛盾。
-func (s *LLMStage) contextBudgetUsage(env *core.Envelope, systemPrompt string, messages []llm.Message) (llm.ResolvedBudget, int, bool) {
+func (s *LLMStage) contextBudgetUsage(ctx context.Context, env *core.Envelope, systemPrompt string, messages []llm.Message) (llm.ResolvedBudget, int, bool) {
 	compactor, ok := s.getCompactor(conversationKey(env))
 	if !ok || compactor == nil {
 		return llm.ResolvedBudget{}, 0, false
 	}
-	b := compactor.Budget()
+	b := compactor.BudgetFor(ctx)
 	if b.Window <= 0 || b.Trigger <= 0 {
 		return llm.ResolvedBudget{}, 0, false
 	}
@@ -40,8 +41,8 @@ func (s *LLMStage) contextBudgetUsage(env *core.Envelope, systemPrompt string, m
 
 // contextBudgetPercent 返回当前已用 token 占压缩触发线的百分比。
 // 没有压缩器（自动压缩关闭）或触发线无效时返回 (0, false)。
-func (s *LLMStage) contextBudgetPercent(env *core.Envelope, systemPrompt string, messages []llm.Message) (int, bool) {
-	b, used, ok := s.contextBudgetUsage(env, systemPrompt, messages)
+func (s *LLMStage) contextBudgetPercent(ctx context.Context, env *core.Envelope, systemPrompt string, messages []llm.Message) (int, bool) {
+	b, used, ok := s.contextBudgetUsage(ctx, env, systemPrompt, messages)
 	if !ok {
 		return 0, false
 	}
@@ -50,8 +51,8 @@ func (s *LLMStage) contextBudgetPercent(env *core.Envelope, systemPrompt string,
 
 // contextBudgetNote 把当前窗口余量写进系统提示，让模型在触发线之前主动收束。
 // 没有压缩器（自动压缩关闭）时不注入。
-func (s *LLMStage) contextBudgetNote(env *core.Envelope, systemPrompt string, messages []llm.Message) string {
-	b, used, ok := s.contextBudgetUsage(env, systemPrompt, messages)
+func (s *LLMStage) contextBudgetNote(ctx context.Context, env *core.Envelope, systemPrompt string, messages []llm.Message) string {
+	b, used, ok := s.contextBudgetUsage(ctx, env, systemPrompt, messages)
 	if !ok {
 		return ""
 	}

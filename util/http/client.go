@@ -221,7 +221,7 @@ type Request struct {
 	headers        map[string]string
 	query          url.Values
 	body           any
-	bodyBuf        []byte        // io.Reader body 缓冲后的字节，供重试时复用（避免空 body）
+	bodyBuf        []byte // io.Reader body 缓冲后的字节，供重试时复用（避免空 body）
 	ctx            context.Context
 	retryCfg       *retry.Config // per-request 重试覆盖（可选）
 	dump           bool          // 是否 dump 本请求的详细信息
@@ -466,8 +466,10 @@ func (r *Request) doOnce() (*Response, error) {
 	}
 
 	if !result.IsSuccess() {
-		return result, errs.HTTPErrorf(resp.StatusCode,
-			"http %s %s -> %d: %s", r.method, SanitizeURL(req.URL.String()), resp.StatusCode, truncate(string(body), 500))
+		// 正文只放在 detail，Error() 和重试日志看不到它。
+		return result, errs.HTTPErrorWithDetail(resp.StatusCode,
+			fmt.Sprintf("http %s %s -> %d", r.method, SanitizeURL(req.URL.String()), resp.StatusCode),
+			truncate(string(body), 500))
 	}
 
 	return result, nil
@@ -509,6 +511,9 @@ func (r *Request) doWithRetry() (*Response, error) {
 		// 重置上次记录的 Retry-After
 		lastRetryAfter = 0
 		resp, err := r.doOnce()
+		if resp != nil {
+			result = resp
+		}
 		if err != nil {
 			// 从 429 响应中提取 Retry-After
 			if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
@@ -751,14 +756,8 @@ func (r *Request) dumpResponse(resp *Response, elapsed time.Duration) {
 		}
 	}
 
-	contentType := resp.Headers.Get("Content-Type")
-	if isTextContentType(contentType) {
-		b.WriteString("--- Body ---\n")
-		b.WriteString(string(resp.Body))
-		b.WriteString("\n")
-	} else {
-		fmt.Fprintf(&b, "--- Body (binary, not dumped, content-length=%d) ---\n", len(resp.Body))
-	}
+	// 响应体可能回显密钥，dump 只记长度。
+	fmt.Fprintf(&b, "--- Body omitted, content-length=%d ---\n", len(resp.Body))
 	b.WriteString("========================================")
 	traceid.L(r.ctx).Infow("http response dump", "detail", b.String())
 }

@@ -41,7 +41,7 @@
           <BotOverview v-if="activeKey === 'overview'" :bot="bot" />
           <!-- 通用（基础与模型） -->
           <div v-else-if="activeKey === 'general'" class="pad">
-            <BotBasicForm :form="form" :emojis="emojis" :model-options="modelOptions" :running="!!bot.running" :toggling="toggling" @save="saveBasic" @remove="removeBot" @toggle-status="toggleStatus" />
+            <BotBasicForm :form="form" :emojis="emojis" :model-options="modelOptions" :running="!!bot.running" :toggling="toggling" :effective-main="effective.main" :effective-light="effective.light" :effective-vision="effective.vision" :llm-apply-error="effective.error" @save="saveBasic" @remove="removeBot" @toggle-status="toggleStatus" />
             <BotReasoning :bot-id="bot.id" />
           </div>
           <!-- 容器 -->
@@ -183,6 +183,7 @@ onMounted(() => { loadModelOptions() })
 
 const bot = ref(null)
 const form = ref({})
+const effective = ref({ main: '', light: '', vision: '', error: '' })
 const loadingBot = ref(false)
 
 const avatarText = computed(() => {
@@ -229,6 +230,12 @@ function loadBot() {
       workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort ?? '',
       hardMaxSteps: b.hardMaxSteps ?? 0
     }
+    effective.value = {
+      main: b.effectiveMain || '',
+      light: b.effectiveLight || '',
+      vision: b.effectiveVision || '',
+      error: b.llmApplyError || ''
+    }
     loadVision()
   }
 }
@@ -274,16 +281,22 @@ async function saveBasic() {
   const f = form.value
   const visionChanged = (f.llmVision || '') !== visionOriginal.value
   try {
-    await botApi.update(f.id, {
+    const saved = await botApi.update(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
-      llmMain: f.llmMain, llmLight: f.llmLight, temperature: f.temperature,
+      llmMain: f.llmMain, llmLight: f.llmLight, llmVision: f.llmVision || '',
+      temperature: f.temperature,
       maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort,
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
-    // 用 batchSet 而非 set：SetConfigReq.Value 带 required 校验，空串会被 400
-    // 拒绝，而「留空 = 不启用图片转写」是合法操作；批量接口没有这个限制。
-    await configApi.batchSet({ [visionKey(f.id)]: f.llmVision || '' })
     visionOriginal.value = f.llmVision || ''
+    if (saved) {
+      effective.value = {
+        main: saved.effectiveMain ?? effective.value.main,
+        light: saved.effectiveLight ?? effective.value.light,
+        vision: saved.effectiveVision ?? effective.value.vision,
+        error: saved.applied ? '' : (saved.message || '')
+      }
+    }
     store.updateBot(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
       temperature: f.temperature,
@@ -292,11 +305,10 @@ async function saveBasic() {
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
     bot.value.name = f.name
-    MessagePlugin.success(
-      visionChanged && bot.value?.running
-        ? 'Bot 设置已保存；视觉模型需停用并重新启用 Bot 后生效'
-        : 'Bot 设置已保存'
-    )
+    if (saved && saved.applied) MessagePlugin.success('已切换到保存的模型')
+    else if (saved && saved.pending) MessagePlugin.success(saved.message || '已保存，启动后生效')
+    else if (saved && saved.message && (visionChanged || f.llmMain || f.llmLight)) MessagePlugin.warning(saved.message)
+    else MessagePlugin.success('Bot 设置已保存')
   } catch (e) {
     MessagePlugin.error('保存失败：' + (e.message || '请稍后重试'))
   }

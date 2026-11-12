@@ -5,6 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"strings"
+
 	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/strutil"
@@ -114,6 +116,10 @@ func (s *Server) handleSetConfigKey(c *gin.Context) {
 		}
 	}
 
+	if err := guardConfigWrite(key); err != nil {
+		Fail(c, err)
+		return
+	}
 	if err := s.store.Set(c.Request.Context(), key, req.Value); err != nil {
 		Fail(c, errs.Wrap(err, "failed to set config"))
 		return
@@ -163,6 +169,12 @@ func (s *Server) handleBatchSetConfig(c *gin.Context) {
 		}
 	}
 
+	for key := range req.Items {
+		if err := guardConfigWrite(key); err != nil {
+			Fail(c, err)
+			return
+		}
+	}
 	if err := s.store.SetMany(c.Request.Context(), req.Items); err != nil {
 		Fail(c, errs.Wrap(err, "failed to batch set config"))
 		return
@@ -173,4 +185,21 @@ func (s *Server) handleBatchSetConfig(c *gin.Context) {
 		return
 	}
 	OKMsg(c, "config batch updated", nil)
+}
+
+// guardConfigWrite 拦住绕过服务商/机器人接口的写入。
+// provider.* 整包里有密钥；bot.<id>.main/light 是生效缓存，只能由成功的解析来写。
+// bot.<id>.vision 仍允许，它是期望值，保存机器人时会一起校验。
+func guardConfigWrite(key string) error {
+	if strings.HasPrefix(key, "provider.") {
+		return errs.BadRequest("provider records must be updated via /api/providers")
+	}
+	rest, ok := strings.CutPrefix(key, "bot.")
+	if !ok {
+		return nil
+	}
+	if strings.HasSuffix(rest, ".main") || strings.HasSuffix(rest, ".light") {
+		return errs.BadRequest("bot model selection must be updated via /api/bots")
+	}
+	return nil
 }

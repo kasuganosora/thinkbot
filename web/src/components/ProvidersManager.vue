@@ -31,6 +31,7 @@
           <t-switch v-model="active.enabled" data-testid="provider-enable" @change="saveProvider" />
         </div>
       </div>
+      <div v-if="runtimeStatus" class="field-tip" data-testid="provider-runtime-status">{{ runtimeStatus }}</div>
 
       <!-- 基本信息表单 -->
       <div class="detail-form">
@@ -51,6 +52,7 @@
         <div class="field">
           <label class="req">API Key</label>
           <t-input v-model="apiKeyInput" type="password" data-testid="provider-apikey" :placeholder="active.apiKey ? '已配置（留空不修改）' : 'Enter API key'" />
+          <t-button variant="text" theme="danger" data-testid="provider-clear-key" @click="clearApiKey">清除密钥</t-button>
         </div>
 
         <div class="form-actions">
@@ -184,12 +186,14 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { providerApi } from '@/api/services'
+import { providerRuntimeStatus } from './providerRuntimeStatus.js'
 
 const providers = ref([])
 const activeId = ref('')
 const apiKeyInput = ref('')
 const testing = ref(false)
 const importing = ref(false)
+const runtimeStatus = ref('')
 const modelSearch = ref('')
 
 const clientTypes = [
@@ -248,10 +252,12 @@ async function saveProvider() {
       enabled: active.value.enabled
     }
     if (apiKeyInput.value) payload.apiKey = apiKeyInput.value
-    await providerApi.update(active.value.id, payload)
+    const saved = await providerApi.update(active.value.id, payload)
     apiKeyInput.value = ''
     await load()
-    MessagePlugin.success('已保存')
+    runtimeStatus.value = providerRuntimeStatus(saved)
+    if (saved && saved.runtimeApplied === false) MessagePlugin.warning(saved.runtimeMessage || runtimeStatus.value)
+    else MessagePlugin.success('已保存')
   } catch (e) {
     MessagePlugin.error(e.message || '保存失败')
   }
@@ -271,6 +277,18 @@ function removeProvider() {
       MessagePlugin.success('已删除')
     }
   })
+}
+
+async function clearApiKey() {
+  if (!active.value) return
+  try {
+    await providerApi.update(active.value.id, { apiKey: '' })
+    apiKeyInput.value = ''
+    await load()
+    MessagePlugin.success('已清除密钥')
+  } catch (e) {
+    MessagePlugin.error(e.message || '清除失败')
+  }
 }
 
 async function testConn() {

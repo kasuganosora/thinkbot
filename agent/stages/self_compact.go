@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -717,6 +718,23 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		modelMax, ctxLen = cfg.SummaryModelMaxTokens, cfg.SummaryModelContextLength
 		botEffort = cfg.SummaryReasoningFallback
 	}
+	if snap := bot.LLMSnapshotFrom(ctx); snap != nil {
+		def := snap.MainDef
+		liveModel := snap.MainModel
+		if cfg.SummaryProvider != nil && snap.LightModel != nil {
+			def = snap.LightDef
+			liveModel = snap.LightModel
+		}
+		if liveModel != nil {
+			model = liveModel
+		}
+		if def.MaxTokens > 0 {
+			modelMax = def.MaxTokens
+		}
+		if def.ContextLength > 0 {
+			ctxLen = def.ContextLength
+		}
+	}
 	modelID := ""
 	if model != nil {
 		modelID = model.ID
@@ -733,6 +751,8 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 
 	sumCtx, cancel := context.WithTimeout(ctx, cfg.timeout())
 	defer cancel()
+	// 摘要预算和推理档已经按这一次钉住的模型算过，跟随层不要再改成模型满额。
+	sumCtx = llm.WithKeptParams(sumCtx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
 	compactor := s.summaryCompactor(compactorKey)
 	summary, err := compactor.SummarizeForSelfCompact(sumCtx, provider, model, head, llm.SelfCompactOptions{
 		Focus:                args.Focus,
@@ -749,7 +769,7 @@ func (s *LLMStage) runCompactContext(ctx *llm.ToolExecContext, cfg *SelfCompactC
 		logger.Warnw("context_compact", append(baseFields, "status", "error", "stage", "summarize", "summary_model", modelID,
 			"max_tokens", budget.first, "retry_max_tokens", budget.retry, "reasoning_effort", effort,
 			"backoff", pause.String(), "err", err)...)
-		return nil, fmt.Errorf("compact_context: summarization failed, context left unchanged: %v. Do NOT call compact_context again in this turn (it is paused for this conversation for %s); continue the task with the current context", err, pause.Round(time.Second))
+		return nil, fmt.Errorf("compact_context: summarization failed, context left unchanged: %s. Do NOT call compact_context again in this turn (it is paused for this conversation for %s); continue the task with the current context", llm.SafeErrorText(err), pause.Round(time.Second))
 	}
 	summaryMsg := llm.ConversationSummaryMessage(summary)
 	summaryTokens := llm.EstimateMessageTokens(summaryMsg)

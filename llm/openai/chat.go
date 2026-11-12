@@ -3,12 +3,12 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
-	"github.com/kasuganosora/thinkbot/util/errs"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/retry"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -83,7 +83,12 @@ func (c *Client) DoStreamChatCompletion(
 			return onChunk(chunk)
 		},
 		OnError: func(err error) {
-			traceid.L(ctx).Debugw("openai chat stream error", "err", err)
+			status := 0
+			var streamErr *httputil.StreamHTTPError
+			if errors.As(err, &streamErr) && streamErr != nil {
+				status = streamErr.StatusCode
+			}
+			traceid.L(ctx).Debugw("openai chat stream error", "status", status)
 		},
 	}
 
@@ -280,7 +285,7 @@ func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "openai: chat stream failed")})
+			send(&llm.ErrorPart{Error: ClassifyStreamError(streamErr)})
 		}
 
 		send(&llm.FinishPart{

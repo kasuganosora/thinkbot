@@ -161,6 +161,16 @@ type BotService struct {
 	// llmBundles 保存每个已启动 bot 的 LLM Bundle（provider + model），
 	// 供 /compact 等命令对聊天历史做 LLM 摘要。
 	llmBundles map[string]*bot.LLMBundle
+	// llmSlots 是运行中机器人的当前快照槽。停止时摘掉。
+	llmSlots map[string]*bot.LLMSlot
+	// applyMu 串行化同一个进程里的模型应用，避免两次保存拼出半套快照。
+	applyMu sync.Mutex
+	// lifeGen 在 StopBot 时加一。失败的启动只在代数没变时把旧实例放回表里。
+	lifeGen map[string]uint64
+	// handoff 是启动过程中暂时不在 botInstances 里、但还活着的旧实例。StopBot 要能停掉它。
+	handoff map[string]*bot.Bot
+	// publicFailures 是给渠道的固定失败说明，按 botID:traceID。
+	publicFailures map[string]string
 
 	// bindStage 授权码绑定拦截 Stage（Order=3，置于链路最前）。
 	// 命中 TB-XXXX-XXXX 授权码时消费并完成跨平台身份绑定、直接回复、中止 Pipeline，
@@ -220,6 +230,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 
 		memRepos:   make(map[string]*storage.SQLiteRepository),
 		llmBundles: make(map[string]*bot.LLMBundle),
+		llmSlots:   make(map[string]*bot.LLMSlot),
 
 		// token 预算状态：空闲 1 小时后自动清零，防止预算永久卡死导致 bot 无响应；
 		// 也可通过 ResetTokenBudgets() 手动重置。
@@ -1666,6 +1677,29 @@ func compactionConfigFromConfig(c config.CompactionConfig, contextLength, output
 	}
 }
 
+func mainIsMultimodal(ctx context.Context, slot *bot.LLMSlot, bundle *bot.LLMBundle) bool {
+	snap := bot.LLMSnapshotFrom(ctx)
+	if snap == nil && slot != nil {
+		snap = slot.Current()
+	}
+	if snap != nil {
+		return snap.MainDef.Multimodal
+	}
+	return bundle != nil && bundle.MainSupportsMultimodal()
+}
+
+func liveMainLimits(ctx context.Context, slot *bot.LLMSlot, fallback config.ModelDef) (int, int) {
+	snap := bot.LLMSnapshotFrom(ctx)
+	if snap == nil && slot != nil {
+		snap = slot.Current()
+	}
+	def := fallback
+	if snap != nil && snap.MainDef.Model != "" {
+		def = snap.MainDef
+	}
+	return def.ContextLength, def.MaxTokens
+}
+
 // StartBot 从定义创建并启动 Bot 实例。
 func (s *BotService) StartBot(ctx context.Context, id string) error {
 	def, err := s.GetDefinition(id)
@@ -1673,61 +1707,78 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return err
 	}
 
-	// 如果已在运行，先停止再重启（支持 Channel/配置热更新）
-	s.mu.Lock()
-	if inst, exists := s.botInstances[id]; exists && inst != nil {
-		s.mu.Unlock()
-		s.StopBot(id)
-		// 重新获取锁
-		s.mu.Lock()
+	// 先解析模型。解析失败时不停止正在跑的实例，也不改生效键。
+	prepared, err := s.prepareStartupLLM(def)
+	if err != nil {
+		return err
 	}
-	if _, exists := s.botInstances[id]; exists {
+	if testAfterPrepare != nil {
+		testAfterPrepare(id)
+	}
+	if prepared.material != "" && s.llmMaterial(def) != prepared.material {
+		return errs.Conflict("provider configuration changed during startup")
+	}
+
+	// 正在跑的实例先留着。新进程准备失败时它和生效键都保持原样。
+	s.mu.Lock()
+	if _, starting := s.botStarts[id]; starting {
 		s.mu.Unlock()
 		return errs.Conflict("bot is already starting, please wait")
 	}
+	if s.lifeGen == nil {
+		s.lifeGen = map[string]uint64{}
+	}
+	if s.handoff == nil {
+		s.handoff = map[string]*bot.Bot{}
+	}
+	gen := s.lifeGen[id]
+	oldBot := s.botInstances[id]
+	oldSlot := s.llmSlots[id]
+	oldCancel := s.cancelFuncs[id]
+	s.handoff[id] = oldBot
 	attempt := s.reserveBotStartLocked(ctx, id)
 	ctx = attempt.ctx
 	defer attempt.cancel()
 	published := false
+	oldStopped := false
 	s.mu.Unlock()
 
 	// A stale startup must never remove a newer attempt's placeholder.
 	rollback := func() { s.rollbackBotStart(id, attempt) }
 	defer func() {
-		if !published {
-			rollback()
+		if published {
+			return
 		}
+		rollback()
+		s.mu.Lock()
+		delete(s.handoff, id)
+		if !oldStopped && s.lifeGen[id] == gen && oldBot != nil && s.botInstances[id] == nil {
+			s.botInstances[id] = oldBot
+		}
+		if oldSlot != nil {
+			s.llmSlots[id] = oldSlot
+		} else if s.llmSlots[id] != oldSlot {
+			delete(s.llmSlots, id)
+		}
+		s.mu.Unlock()
 	}()
+	if testFailStart != nil {
+		if err := testFailStart(id); err != nil {
+			return err
+		}
+	}
 
-	// 将 Bot 定义的 LLM 分配同步到 config store
-	// （CreateLLMBundle 从 config store 读 bot.<id>.main/light，而定义存在 DB 表中）
 	syncCtx := context.Background()
-	if def.LLMMain != "" {
-		if err := s.store.Set(syncCtx, config.BotLLMKey(id, "main"), def.LLMMain); err != nil {
-			rollback()
-			return errs.Wrap(err, "bot_service: sync LLM main assignment")
-		}
-	}
-	if def.LLMLight != "" {
-		if err := s.store.Set(syncCtx, config.BotLLMKey(id, "light"), def.LLMLight); err != nil {
-			rollback()
-			return errs.Wrap(err, "bot_service: sync LLM light assignment")
-		}
-	}
-
-	// 创建 LLM Bundle
 	builder := config.NewBuilder(s.store, s.logger)
 	// 可观测性：没有有效单价的模型既不计费也不限额（成本墙静默空转）。
-	// 单价是易漏配字段，这里在启动期一次性点名，避免「额度配了却拦不住」无日志可查。
 	if missing := builder.ModelsWithoutPrice(); len(missing) > 0 {
 		s.logger.Warnw("bot_service: models without price are NOT counted against the money budget",
 			"bot_id", id, "models", missing)
 	}
-	bundle, err := bot.CreateLLMBundle(builder, id)
-	if err != nil {
-		rollback()
-		return errs.Wrap(err, "bot_service: create LLM bundle")
-	}
+	mainID, lightID, fromDesired := prepared.mainID, prepared.lightID, prepared.fromDesired
+	useVision := prepared.visionID
+	bundle := prepared.bundle
+	slot := bot.NewLLMSlot(nil)
 
 	// 创建共享 Token 配额状态 + 包裹 Provider
 	// - TokenQuotaState 由 pipeline 中间件和 QuotaRecordingProvider 共享
@@ -1797,22 +1848,28 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		return llm.NewCostRecordingProvider(p, id, costPriceFor, costPreCheck, costRecorder)
 	}
 
-	bundle.Main = llm.NewStatsRecordingProvider(
-		llm.NewQuotaRecordingProvider(wrapCost(bundle.Main), quotaRecorder),
-		s.statsRecorder, id,
-	)
-	if bundle.Light != nil {
-		bundle.Light = llm.NewStatsRecordingProvider(
-			llm.NewQuotaRecordingProvider(wrapCost(bundle.Light), quotaRecorder),
+	wrapProvider := func(p llm.Provider) llm.Provider {
+		if p == nil {
+			return nil
+		}
+		return llm.NewStatsRecordingProvider(
+			llm.NewQuotaRecordingProvider(wrapCost(p), quotaRecorder),
 			s.statsRecorder, id,
 		)
 	}
-	if bundle.Vision != nil {
-		bundle.Vision = llm.NewStatsRecordingProvider(
-			llm.NewQuotaRecordingProvider(wrapCost(bundle.Vision), quotaRecorder),
-			s.statsRecorder, id,
-		)
-	}
+	slot.SetDecorate(func(raw *bot.LLMSnapshot) *bot.LLMSnapshot {
+		if raw == nil {
+			return nil
+		}
+		out := *raw
+		out.Main = wrapProvider(out.Main)
+		out.Light = wrapProvider(out.Light)
+		out.Vision = wrapProvider(out.Vision)
+		return &out
+	})
+	slot.PublishRaw(bot.SnapshotFromBundle(bundle))
+	// 跟随层在统计外面：热切换改掉的模型、温度和输出上限会被用量记录看到。
+	bundle = bot.FollowBundle(slot, bundle)
 
 	// 创建 LLM Stage
 	mainModel := &llm.Model{ID: def.LLMMain}
@@ -1848,7 +1905,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	}
 
 	// MessageBuilder：从 Message.Metadata["chat_history"] 加载历史上下文
-	messageBuilder := func(msg core.Message) []llm.Message {
+	buildMessages := func(ctx context.Context, msg core.Message) []llm.Message {
 		// 历史（含上下文检查点生成的摘要条目，见 context_checkpoint.go）。
 		// 与 compact_context 的边界映射共用 chatHistoryToLLM，保证逐条对齐。
 		messages, _ := chatHistoryToLLM(historyFromMetadata(msg))
@@ -1872,7 +1929,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 主模型支持多模态时，把入站附件（image/audio/video）作为多模态 part 直送主模型，
 		// 让模型真正「看到」用户发来的图片等（修复此前 MultimodalStage 未装配、图片静默丢弃的 P1）。
 		// 主模型不支持多模态时不附加 part —— 改由已装配的 MultimodalStage 转写为文本，避免 400。
-		if bundle.MainSupportsMultimodal() {
+		if mainIsMultimodal(ctx, slot, bundle) {
 			if parts := inboundAttachmentsToParts(&msg); len(parts) > 0 {
 				userParts := []llm.MessagePart{llm.TextPart{Text: content}}
 				userParts = append(userParts, parts...)
@@ -1882,6 +1939,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 		messages = append(messages, llm.UserMessage(content))
 		return messages
+	}
+	messageBuilder := func(msg core.Message) []llm.Message {
+		return buildMessages(context.Background(), msg)
 	}
 
 	// 创建 Prompt Registry + Tool Manager
@@ -1953,30 +2013,36 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		MaxMemoryTokens:   mw.MaxMemoryTokens,
 		CompressThreshold: mw.CompressThreshold,
 	})
-	mainCtxLen, mainMaxTok := bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens
 	memWindow.SetConfigSource(func() memory.WindowConfig {
 		live := config.NewBuilder(s.store, s.logger).GetMemoryWindowConfig()
-		ct := live.MaxContextTokens
-		if mainCtxLen > 0 {
-			ct = mainCtxLen
-		}
-		or := live.OutputReserve
-		if mainMaxTok > 0 {
-			or = mainMaxTok
-		}
 		return memory.WindowConfig{
-			MaxContextTokens:  ct,
+			MaxContextTokens:  live.MaxContextTokens,
 			ReservedTokens:    live.ReservedTokens,
-			OutputReserve:     or,
+			OutputReserve:     live.OutputReserve,
 			MemoryBudgetRatio: live.BudgetRatio,
 			MaxMemoryTokens:   live.MaxMemoryTokens,
 			CompressThreshold: live.CompressThreshold,
 		}
 	})
+	memWindow.SetTurnLimits(func(ctx context.Context) (int, int) {
+		return liveMainLimits(ctx, slot, bundle.MainDef)
+	})
 	// 内部 LLM 调用（判定 / 压缩摘要 / 记忆去重 / 画像 / 梦境 / 自愈 / 视觉）的
 	// per-purpose reasoning_effort 与输出封顶策略：GLM-5.3 不传 reasoning_effort 时按 max 推理，
 	// 输出上限又跟随模型 128000，这些调用此前推理不受限（09-26 memory_dedup 32 次产出 242K token）。
 	internalPol := newBotInternalPolicy(s.store, s.logger, id, def.ReasoningEffort, bundle)
+	internalPol.SetModelAllows(func(model string) bool {
+		snap := slot.Current()
+		if snap == nil {
+			return false
+		}
+		for _, d := range []config.ModelDef{snap.MainDef, snap.LightDef, snap.VisionDef} {
+			if d.Model == model && d.Reasoning {
+				return true
+			}
+		}
+		return false
+	})
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
@@ -2036,6 +2102,19 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		TracerProvider: s.tp,
 		Store:          s.store,
 		ModelDef:       &bundle.MainDef,
+		BindLiveModel: func(ctx context.Context) (context.Context, string, int) {
+			snap := bot.LLMSnapshotFrom(ctx)
+			if snap == nil {
+				snap = slot.Current()
+				if snap != nil {
+					ctx = bot.WithLLMSnapshot(ctx, snap)
+				}
+			}
+			if snap == nil {
+				return ctx, "", 0
+			}
+			return ctx, snap.MainDef.Model, snap.MainDef.MaxTokens
+		},
 		InternalPolicy: internalPol,
 		EventBus:       s.eventBus,
 		// 让工作流内部 SubAgent（需求分析/节点执行/审查）继承本 bot 的工作空间工具
@@ -2065,10 +2144,15 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		subagent.WithPresencePenalty(presPen),
 		// 子 Agent 上下文压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
 		subagent.WithCompactor(func() *llm.Compactor {
-			c := llm.NewCompactor(*compactionConfigFromConfig(builder.GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens))
+			ctxLen, maxOut := liveMainLimits(context.Background(), slot, bundle.MainDef)
+			c := llm.NewCompactor(*compactionConfigFromConfig(builder.GetCompactionConfig(), ctxLen, maxOut))
 			c.SetInternalPolicy(internalPol)
 			c.SetConfigSource(func() llm.CompactionConfig {
-				return *compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens)
+				liveLen, liveMax := liveMainLimits(context.Background(), slot, bundle.MainDef)
+				return *compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig(), liveLen, liveMax)
+			})
+			c.SetLimitSource(func(ctx context.Context) (int, int) {
+				return liveMainLimits(ctx, slot, bundle.MainDef)
 			})
 			return c
 		}()),
@@ -2145,8 +2229,9 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 				}
 				return config.NewBuilder(s.store, s.logger).GetBotReasoning(id)["heartbeat"]
 			},
-			InternalPolicy: internalPol,
-			MessageBuilder: messageBuilder,
+			InternalPolicy:    internalPol,
+			MessageBuilder:    messageBuilder,
+			MessageBuilderCtx: buildMessages,
 			// L1 runs before chat history is attached, so the "task in progress"
 			// decision has to be made here (see api.TaskInProgress).
 			ForceFullTier: TaskInProgress,
@@ -2171,7 +2256,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			// （此前只有 subagent 接了压缩钩子，主 bot 漏接）。超阈值时 LLM 生成
 			// 结构化摘要替代旧消息，按会话隔离、跨轮持久。
 			// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改。
-			Compaction: compactionConfigFromConfig(builder.GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens),
+			Compaction: func() *llm.CompactionConfig {
+				liveLen, liveMax := liveMainLimits(context.Background(), slot, bundle.MainDef)
+				return compactionConfigFromConfig(builder.GetCompactionConfig(), liveLen, liveMax)
+			}(),
 			// 自主上下文压缩工具 compact_context：bot 可自行把旧上下文折叠为摘要。
 			// 有持久化历史的会话（web / telegram / 工作流续跑）写检查点，后续轮次
 			// 加载「摘要 + 边界后的消息」；原始 chat_messages 不删除（可回滚）。
@@ -2181,7 +2269,11 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		s.logger,
 	)
 	llmStage.SetCompactionSource(func() *llm.CompactionConfig {
-		return compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig(), bundle.MainDef.ContextLength, bundle.MainDef.MaxTokens)
+		liveLen, liveMax := liveMainLimits(context.Background(), slot, bundle.MainDef)
+		return compactionConfigFromConfig(config.NewBuilder(s.store, s.logger).GetCompactionConfig(), liveLen, liveMax)
+	})
+	llmStage.SetCompactionLimits(func(ctx context.Context) (int, int) {
+		return liveMainLimits(ctx, slot, bundle.MainDef)
 	})
 	llmStage.SetHardTimeoutSource(func() time.Duration {
 		return effectiveLLMHardTimeout(s.store)
@@ -2663,14 +2755,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 多模态转写 Stage（Order=30）：主模型不支持多模态且配置了 vision 辅助模型时，
 	// 把入站图片/音频/视频转写为文本追加到消息（修复 MultimodalStage 此前未装配、图片静默丢弃的 P1）。
 	// MainMultimodal 与主模型能力对齐：主模型本身支持多模态时本 Stage 跳过（图片改由 messageBuilder 直送）。
-	if bundle.HasVision() {
+	{
 		mmCfg := stages.MultimodalConfig{
 			VisionProvider: bundle.Vision,
 			VisionModel:    llm.ChatModel(bundle.VisionDef.Model),
 			MainMultimodal: bundle.MainSupportsMultimodal(),
 			InternalPolicy: internalPol,
 		}
-		// 视觉模型输出上限跟随其模型配置（ModelDef.MaxTokens）；未接线时 stage 兜底 1024。
+		// 视觉模型输出上限跟随其模型配置。阶段始终装上，热切换才能从快照读到后加的视觉模型。
 		if bundle.VisionDef.MaxTokens > 0 {
 			visionMax := bundle.VisionDef.MaxTokens
 			mmCfg.MaxTokens = &visionMax
@@ -3362,10 +3454,23 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	l1Router, err := route.New(route.Config{
 		Provider: l1Provider,
 		Model:    l1Model,
-		Logger:   s.logger,
-		TP:       s.tp,
-		MP:       s.mp,
-		Cancel:   s.AbortMessage,
+		LiveModel: func(ctx context.Context) *llm.Model {
+			snap := bot.LLMSnapshotFrom(ctx)
+			if snap == nil && slot != nil {
+				snap = slot.Current()
+			}
+			if snap == nil {
+				return nil
+			}
+			if snap.LightModel != nil {
+				return snap.LightModel
+			}
+			return snap.MainModel
+		},
+		Logger: s.logger,
+		TP:     s.tp,
+		MP:     s.mp,
+		Cancel: s.AbortMessage,
 	})
 	if err != nil {
 		rollback()
@@ -3400,6 +3505,10 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 			s.UnregisterMessageCancel(botID, traceID)
 			s.UnregisterMessageInterrupt(botID, traceID)
 			s.notifyChatTurnDone(botID, traceID)
+		},
+		LLMSlot: slot,
+		OnLLMFailure: func(traceID string, err error) {
+			s.notePublicFailure(id, traceID, err)
 		},
 		WorkspaceDir:  workspaceDir,
 		SandboxConfig: sbCfg,
@@ -3525,7 +3634,18 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 被动收听 scope（如 misskey:timeline）的每日摘要：本地零点后每 scope 每天一次。
 	s.startDailyDigest(botCtx, id, memRepo, bundle, internalPol)
 
-	// 启动 Bot（bot.Run 内部会自动注册实现 Sender 接口的 Channel）
+	// 先等旧的 getUpdates 退出，再把 offset 交给新实例。新循环启动前没有第二个请求。
+	if oldBot != nil {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 8*time.Second)
+		drainErr := oldBot.DrainPolling(drainCtx)
+		drainCancel()
+		if drainErr != nil {
+			s.resumeOldPolling(id, gen, oldBot)
+			rollback()
+			return errs.Wrap(drainErr, "bot_service: drain previous polling")
+		}
+		b.SetPollingOffset(oldBot.PollingOffset())
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -3539,83 +3659,168 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 
 	// 等待 Bot 就绪（带 30s 超时，防止永久挂起）
 	// 取消或 StopBot 都会中止本次启动；Ready 后仍须在发布锁内再次校验。
-	readyTimeout := time.NewTimer(30 * time.Second)
+	readyWait := 30 * time.Second
+	if testReadyTimeout > 0 {
+		readyWait = testReadyTimeout
+	}
+	readyTimeout := time.NewTimer(readyWait)
 	defer readyTimeout.Stop()
 	select {
 	case <-b.Ready():
 	case <-readyTimeout.C:
 		botCancel()
-		b.Stop()
-		b.Close()
+		s.stopReplacement(id, gen, b, oldBot)
 		rollback()
 		return errs.Internal("bot_service: bot startup timeout (30s)")
 	case <-ctx.Done():
 		botCancel()
-		b.Stop()
-		b.Close()
+		s.stopReplacement(id, gen, b, oldBot)
 		rollback()
 		return errs.Wrap(ctx.Err(), "bot_service: context cancelled")
 	}
 
-	err = s.publishBotStart(id, attempt, func() error {
-		if err := s.mgr.Register(b); err != nil {
-			return errs.Wrap(err, "bot_service: register bot")
-		}
-		s.channels[id] = webCh
-		s.botInstances[id] = b
-		s.memRepos[id] = memRepo
-		s.llmBundles[id] = bundle
-		s.toolManagers[id] = toolMgr
-		s.wfEngines[id] = wfMgr
+	if testBeforeCommit != nil {
+		testBeforeCommit(id)
+	}
+	s.applyMu.Lock()
+	defNow, defErr := s.GetDefinition(id)
+	visionNow := ""
+	if s.store != nil {
+		visionNow = strings.TrimSpace(s.store.GetString(config.BotLLMKey(id, "vision"), ""))
+	}
+	materialNow := ""
+	if defNow != nil {
+		materialNow = s.llmMaterial(defNow)
+	}
+	changed := defErr != nil || startupDesiredChanged(defNow, visionNow, prepared) || (prepared.material != "" && materialNow != prepared.material)
+	if changed {
+		s.applyMu.Unlock()
+		botCancel()
+		s.stopReplacement(id, gen, b, oldBot)
+		rollback()
+		return errs.Conflict("bot configuration changed during startup")
+	}
 
-		// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
-		// 走完整 Engine 管线（Recall → LLM → 工具），并在 ctx 中携带预批准，使被 defer
-		// 的工具直接采用人类决策而非再次挂起。默认路径无 ApprovalHandler，此闭包不会被调用。
-		llmStage.SetResumeDispatch(func(ctx context.Context, msg core.Message) (*core.Envelope, error) {
-			env := &core.Envelope{Message: msg}
-			res, _, err := b.Engine().ProcessSync(ctx, env)
-			return res, err
+	err = s.commitEffectivePublication(syncCtx, id, effectiveRow{id: id, main: mainID, light: lightID, vision: useVision}, fromDesired, func() error {
+		return s.publishBotStart(id, attempt, func() error {
+			if err := s.mgr.Register(b); err != nil {
+				return errs.Wrap(err, "bot_service: register bot")
+			}
+			if s.llmSlots == nil {
+				s.llmSlots = map[string]*bot.LLMSlot{}
+			}
+			s.llmSlots[id] = slot
+			s.channels[id] = webCh
+			s.botInstances[id] = b
+			s.memRepos[id] = memRepo
+			s.llmBundles[id] = bundle
+			s.toolManagers[id] = toolMgr
+			s.wfEngines[id] = wfMgr
+
+			// HITL 续跑入口：人类确认后，ResumeDeferredApproval 通过此闭包重新编排原始消息。
+			// 走完整 Engine 管线（Recall → LLM → 工具），并在 ctx 中携带预批准，使被 defer
+			// 的工具直接采用人类决策而非再次挂起。默认路径无 ApprovalHandler，此闭包不会被调用。
+			llmStage.SetResumeDispatch(func(ctx context.Context, msg core.Message) (*core.Envelope, error) {
+				env := &core.Envelope{Message: msg}
+				res, _, err := b.Engine().ProcessSync(ctx, env)
+				return res, err
+			})
+			s.cancelFuncs[id] = botCancel
+			s.closeFuncs[id] = func() {
+				wfCleanup()
+			}
+			if dreamBundle != nil {
+				s.dreamingBundles[id] = dreamBundle
+			}
+			if hbBundle != nil {
+				s.heartbeatBundles[id] = hbBundle
+			}
+			if outBundle != nil {
+				s.outreachBundles[id] = outBundle
+			}
+			if userCronScheduler != nil {
+				s.userCronSchedulers[id] = userCronScheduler
+			}
+
+			// 更新定义状态
+			if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusRunning).Error; err != nil {
+				s.logger.Warnw("failed to update bot status to running", "bot_id", id, "err", err)
+			}
+
+			return nil
 		})
-		s.cancelFuncs[id] = botCancel
-		s.closeFuncs[id] = func() {
-			wfCleanup()
-		}
-		if dreamBundle != nil {
-			s.dreamingBundles[id] = dreamBundle
-		}
-		if hbBundle != nil {
-			s.heartbeatBundles[id] = hbBundle
-		}
-		if outBundle != nil {
-			s.outreachBundles[id] = outBundle
-		}
-		if userCronScheduler != nil {
-			s.userCronSchedulers[id] = userCronScheduler
-		}
-
-		// 更新定义状态
-		if err := s.db.Model(&dao.BotDefinition{}).Where("id = ?", id).Update("status", dao.BotStatusRunning).Error; err != nil {
-			s.logger.Warnw("failed to update bot status to running", "bot_id", id, "err", err)
-		}
-
-		return nil
 	})
 	if err != nil {
+		s.applyMu.Unlock()
 		botCancel()
-		b.Stop()
-		b.Close()
+		s.stopReplacement(id, gen, b, oldBot)
 		rollback()
 		return errs.Wrap(err, "bot_service: startup publication cancelled")
 	}
 	published = true
+	s.applyMu.Unlock()
+	oldStopped = true
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if oldBot != nil {
+		oldBot.Stop()
+		oldBot.Close()
+	}
 	s.logger.Infow("bot started", "bot_id", id, "channels", len(allChannels))
 
 	return nil
 }
 
+// stopReplacement stops the candidate and, when this start was not itself stopped,
+// resumes the previous poll loop from the offset DrainPolling left behind.
+func (s *BotService) stopReplacement(id string, gen uint64, candidate, previous *bot.Bot) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if candidate != nil {
+		_ = candidate.StopAndWait(ctx)
+		if previous != nil {
+			previous.AdoptNewerOffset(candidate)
+		}
+		candidate.Close()
+	}
+	s.resumeOldPolling(id, gen, previous)
+}
+
+func (s *BotService) resumeOldPolling(id string, gen uint64, previous *bot.Bot) {
+	if previous == nil {
+		return
+	}
+	s.mu.Lock()
+	stopped := s.lifeGen[id] != gen
+	s.mu.Unlock()
+	if stopped {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	_ = previous.ResumePolling(ctx)
+}
+
+// handoverConsumers 先结束旧消费者，再启动新的。stop 返回之后才会 start。
+func (s *BotService) handoverConsumers(stop, start func()) {
+	if stop != nil {
+		stop()
+	}
+	if start != nil {
+		start()
+	}
+}
+
 // StopBot 停止运行中的 Bot。
 func (s *BotService) StopBot(id string) {
 	s.mu.Lock()
+	if s.lifeGen == nil {
+		s.lifeGen = map[string]uint64{}
+	}
+	s.lifeGen[id]++
+	held := s.handoff[id]
+	delete(s.handoff, id)
 	if attempt, ok := s.containerStarts[id]; ok {
 		delete(s.containerStarts, id)
 		attempt.cancel()
@@ -3658,6 +3863,7 @@ func (s *BotService) StopBot(id string) {
 	// 该 bot 的工作流引擎随 bot 停止而失效（其 SubAgent 管理器已由 closeFuncs 关闭），
 	// 必须摘掉，否则 WorkflowService 会复用一个已关闭的引擎。
 	delete(s.wfEngines, id)
+	delete(s.llmSlots, id)
 	pendingCancels := make([]context.CancelFunc, 0)
 	prefix := id + ":"
 	for key, cancel := range s.messageCancels {
@@ -3683,6 +3889,10 @@ func (s *BotService) StopBot(id string) {
 		}
 	}
 
+	if held != nil && held != b {
+		held.Stop()
+		held.Close()
+	}
 	if !exists || b == nil {
 		return
 	}
@@ -4490,11 +4700,56 @@ func (s *BotService) GetMemoryRepo(botID string) (*storage.SQLiteRepository, boo
 
 // GetLLMBundle 返回指定 bot 的 LLM Bundle（provider + model），
 // 供 /compact 等命令对聊天历史做 LLM 摘要。bot 未运行时返回 (nil, false)。
+// LLMForJob 钉住当前快照，供一次手动压缩或通知使用。
+// 这次任务里的调用保持这份参数；下一次任务再读最新快照。
+func (s *BotService) LLMForJob(ctx context.Context, botID string) (context.Context, *bot.LLMBundle, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.RLock()
+	b, ok := s.llmBundles[botID]
+	slot := s.llmSlots[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return ctx, nil, false
+	}
+	snap := bot.LLMSnapshotFrom(ctx)
+	if snap == nil && slot != nil {
+		snap = slot.Current()
+		if snap != nil {
+			ctx = bot.WithLLMSnapshot(ctx, snap)
+		}
+	}
+	if snap == nil {
+		return ctx, b, true
+	}
+	cp := *b
+	cp.MainDef = snap.MainDef
+	cp.LightDef = snap.LightDef
+	cp.VisionDef = snap.VisionDef
+	return ctx, &cp, true
+}
+
 func (s *BotService) GetLLMBundle(botID string) (*bot.LLMBundle, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	b, ok := s.llmBundles[botID]
-	return b, ok
+	slot := s.llmSlots[botID]
+	s.mu.RUnlock()
+	if !ok || b == nil {
+		return nil, false
+	}
+	snap := bot.LLMSnapshotFrom(context.Background())
+	if snap == nil && slot != nil {
+		snap = slot.Current()
+	}
+	if snap == nil {
+		return b, true
+	}
+	cp := *b
+	cp.MainDef = snap.MainDef
+	cp.LightDef = snap.LightDef
+	cp.VisionDef = snap.VisionDef
+	return &cp, true
 }
 
 // EventBus 返回事件总线。

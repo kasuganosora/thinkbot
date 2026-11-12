@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -97,7 +98,7 @@ func isParseEntitiesError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
+	msg := strings.ToLower(err.Error() + " " + errs.ResponseDetail(err))
 	if !strings.Contains(msg, "400") && !strings.Contains(msg, "bad request") {
 		return false
 	}

@@ -98,10 +98,17 @@ type TelegramChannel struct {
 
 	ingress *inbound.Ingress
 
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	stopped bool
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	pollWG     sync.WaitGroup
+	pollCancel context.CancelFunc
+	pollOffset int64
+	// drainWait is closed after an in-flight DrainPolling wait finishes.
+	// Resume waits on it so a second poll loop cannot start early.
+	drainWait      chan struct{}
+	handledUpdates []int64
+	stopped        bool
 
 	// recentChats 记录本 Bot 近期收到消息的会话（chatID → 标题），
 	// 供自主心跳等场景枚举「可在哪些群 / 私聊主动发言」。
@@ -242,26 +249,132 @@ func (c *TelegramChannel) Start(ctx context.Context, ingress *inbound.Ingress) e
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 	c.runCtx = runCtx
+	c.startPollLocked(runCtx)
 
-	// 启动 polling goroutine
-	c.wg.Add(1)
-	go c.pollLoop(runCtx)
+	return nil
+}
 
+// startPollLocked starts one getUpdates loop. Caller holds c.mu.
+func (c *TelegramChannel) startPollLocked(parent context.Context) {
+	if c == nil || parent == nil || c.pollCancel != nil || c.stopped {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	c.pollCancel = cancel
+	c.pollWG.Add(1)
+	go c.pollLoop(ctx)
+}
+
+// PollingOffset is the next getUpdates offset. It advances only after an update is accepted.
+func (c *TelegramChannel) PollingOffset() int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pollOffset
+}
+
+// SetPollingOffset installs the cursor a replacement poller must continue from.
+func (c *TelegramChannel) SetPollingOffset(offset int64) {
+	if c == nil || offset < 0 {
+		return
+	}
+	c.mu.Lock()
+	c.pollOffset = offset
+	c.mu.Unlock()
+}
+
+// HandledUpdateIDs returns update ids this process has accepted, oldest first.
+func (c *TelegramChannel) HandledUpdateIDs() []int64 {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]int64, len(c.handledUpdates))
+	copy(out, c.handledUpdates)
+	return out
+}
+
+// DrainPolling cancels the in-flight getUpdates and waits until that loop has exited.
+// It does not mark the channel stopped, so polling can resume with the same offset.
+func (c *TelegramChannel) DrainPolling(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	cancel := c.pollCancel
+	c.pollCancel = nil
+	c.mu.Unlock()
+	if cancel == nil {
+		return nil
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		c.pollWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		c.mu.Lock()
+		c.drainWait = done
+		c.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+// ResumePolling starts the poll loop again from the stored offset.
+// It waits out a timed-out drain before Add, so two loops cannot overlap.
+func (c *TelegramChannel) ResumePolling(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	wait := c.drainWait
+	c.mu.Unlock()
+	if wait != nil {
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.drainWait = nil
+	if c.stopped {
+		return errors.New("telegram channel: stopped")
+	}
+	parent := c.runCtx
+	if parent == nil {
+		parent = ctx
+	}
+	c.startPollLocked(parent)
 	return nil
 }
 
 // pollLoop 持续获取 Telegram 更新。
 func (c *TelegramChannel) pollLoop(ctx context.Context) {
-	defer c.wg.Done()
-
-	var offset int64
+	defer c.pollWG.Done()
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
+
+		c.mu.Lock()
+		offset := c.pollOffset
+		c.mu.Unlock()
 
 		// 使用带 timeout buffer 的 context 调用 getUpdates
 		reqCtx, reqCancel := context.WithTimeout(ctx, apiTimeoutMultiplier(c.cfg.PollTimeout))
@@ -284,11 +397,15 @@ func (c *TelegramChannel) pollLoop(ctx context.Context) {
 		}
 
 		for _, upd := range updates {
-			// 更新 offset
-			if upd.UpdateID >= offset {
-				offset = upd.UpdateID + 1
+			c.mu.Lock()
+			if upd.UpdateID >= c.pollOffset {
+				c.pollOffset = upd.UpdateID + 1
 			}
-			// 处理更新
+			if len(c.handledUpdates) == 128 {
+				c.handledUpdates = append([]int64(nil), c.handledUpdates[1:]...)
+			}
+			c.handledUpdates = append(c.handledUpdates, upd.UpdateID)
+			c.mu.Unlock()
 			c.handleUpdate(ctx, upd)
 		}
 	}
@@ -498,7 +615,7 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, upd Update) {
 			"channel", c.name, "message_id", msg.MessageID, "err", err)
 		c.stopTypingKeepalive(msg.Chat.ID)
 		// Replace placeholder with an error note, or drop an unpushed stream.
-		_ = c.finishStream(ctx, msg.Chat.ID, streamErrorNote)
+		_ = c.finishStream(ctx, msg.Chat.ID, c.failureText(coreMsg.TraceID))
 	}
 }
 
@@ -910,12 +1027,30 @@ func utf16Extract(s string, offset, length int) string {
 	return string(utf16.Decode(sub))
 }
 
+func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Stop 优雅停止 polling。
 func (c *TelegramChannel) Stop(ctx context.Context) error {
 	c.mu.Lock()
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil
+	}
+	if c.pollCancel != nil {
+		c.pollCancel()
+		c.pollCancel = nil
 	}
 	c.runCtx = nil
 	c.stopped = true
@@ -927,20 +1062,14 @@ func (c *TelegramChannel) Stop(ctx context.Context) error {
 	c.stopAllTyping()
 	c.abortAllStreams(ctx)
 
-	// 等待 goroutine 退出
-	done := make(chan struct{})
-	go func() {
-		c.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		traceid.L(ctx).Infow("telegram channel stopped", "channel", c.name)
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := waitGroup(ctx, &c.pollWG); err != nil {
+		return err
 	}
+	if err := waitGroup(ctx, &c.wg); err != nil {
+		return err
+	}
+	traceid.L(ctx).Infow("telegram channel stopped", "channel", c.name)
+	return nil
 }
 
 // Reply 向指定聊天回复消息。便捷方法，供 Pipeline Action 处理器调用。

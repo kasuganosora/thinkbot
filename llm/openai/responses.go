@@ -13,7 +13,6 @@ import (
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
-	"github.com/kasuganosora/thinkbot/util/strutil"
 )
 
 // ============================================================================
@@ -269,7 +268,7 @@ func (c *Client) DoCreateResponse(ctx context.Context, req CreateResponseRequest
 
 	req.Stream = false
 
-	resp, err := c.newRequest("POST", "/v1/responses").
+	resp, err := c.newRequest("POST", c.ResponsesPath()).
 		SetContext(ctx).
 		SetJSONBody(req).
 		Do()
@@ -290,7 +289,7 @@ func (c *Client) DoCreateResponse(ctx context.Context, req CreateResponseRequest
 
 // RetrieveResponse 获取一个已有的响应。
 func (c *Client) RetrieveResponse(ctx context.Context, responseID string) (*Response, error) {
-	resp, err := c.newRequest("GET", "/v1/responses/"+responseID).
+	resp, err := c.newRequest("GET", c.ResponsesPath()+"/"+responseID).
 		SetContext(ctx).
 		Do()
 	if err != nil {
@@ -306,7 +305,7 @@ func (c *Client) RetrieveResponse(ctx context.Context, responseID string) (*Resp
 
 // DeleteResponse 删除一个响应。
 func (c *Client) DeleteResponse(ctx context.Context, responseID string) error {
-	resp, err := c.newRequest("DELETE", "/v1/responses/"+responseID).
+	resp, err := c.newRequest("DELETE", c.ResponsesPath()+"/"+responseID).
 		SetContext(ctx).
 		Do()
 	if err != nil {
@@ -317,7 +316,7 @@ func (c *Client) DeleteResponse(ctx context.Context, responseID string) error {
 
 // CancelResponse 取消一个进行中的响应。
 func (c *Client) CancelResponse(ctx context.Context, responseID string) (*Response, error) {
-	resp, err := c.newRequest("POST", "/v1/responses/"+responseID+"/cancel").
+	resp, err := c.newRequest("POST", c.ResponsesPath()+"/"+responseID+"/cancel").
 		SetContext(ctx).
 		Do()
 	if err != nil {
@@ -409,44 +408,77 @@ func (r *Response) FirstMessageText() string {
 // 内部工具
 // ============================================================================
 
+const (
+	// MsgCredentialsRejected 是密钥被拒绝时的固定说明，不带上游正文。
+	MsgCredentialsRejected = "provider rejected the credentials"
+	// MsgAccessDenied 是 403 且不是无效密钥时的固定说明。不要写成密钥格式错误。
+	MsgAccessDenied = "provider denied access"
+)
+
 func parseAPIError(resp *httputil.Response, httpErr error) error {
 	if resp != nil && resp.StatusCode >= 400 {
-		var errResp ErrorResponse
-		if err := json.Unmarshal(resp.Body, &errResp); err == nil && errResp.Error.Message != "" {
-			return openAIErrorToLLMError(&errResp.Error, resp.StatusCode, resp.Headers)
-		}
-		// Body wasn't parseable — fall back with status code.
-		return llm.NewLLMError(
-			openaiHttpStatusToReason(resp.StatusCode),
-			"openai",
-			fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strutil.Truncate(string(resp.Body), 500)),
-			llm.WithCause(httpErr),
-		)
+		return classifyStatusBody(resp.StatusCode, resp.Body, resp.Headers)
 	}
 	if httpErr != nil {
-		return llm.NewLLMError(llm.ErrorReasonTransport, "openai", httpErr.Error(), llm.WithCause(httpErr))
+		return llm.NewLLMError(llm.ErrorReasonTransport, "openai", "provider connection failed")
 	}
 	return httpErr
 }
 
-// openAIErrorToLLMError converts an OpenAI APIError into a unified llm.LLMError.
-func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header) *llm.LLMError {
+// classifyStatusBody 只在内存里读响应体来分类。返回的错误不携带原文。
+func classifyStatusBody(statusCode int, body []byte, headers http.Header) error {
+	var errResp ErrorResponse
+	_ = json.Unmarshal(body, &errResp)
+	apiErr := errResp.Error
 	reason := openaiErrorTypeToReason(apiErr.Type, apiErr.Code, statusCode)
-	opts := []llm.LLMErrorOpt{llm.WithCause(apiErr)}
+	return openAIErrorToLLMError(&apiErr, statusCode, headers, reason)
+}
 
+func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header, reason llm.ErrorReason) *llm.LLMError {
+	if reason == "" {
+		reason = openaiErrorTypeToReason(apiErr.Type, apiErr.Code, statusCode)
+	}
+	opts := []llm.LLMErrorOpt{}
 	if delay := parseOpenAIRetryAfter(headers); delay > 0 {
 		opts = append(opts, llm.WithRetryAfter(delay))
 	}
+	return llm.NewLLMError(reason, "openai", safeProviderMessage(reason, statusCode, apiErr.Code), opts...)
+}
 
-	return llm.NewLLMError(reason, "openai", apiErr.Message, opts...)
+func safeProviderMessage(reason llm.ErrorReason, statusCode int, code string) string {
+	switch {
+	case strings.EqualFold(code, "invalid_api_key") || statusCode == http.StatusUnauthorized:
+		return MsgCredentialsRejected
+	case statusCode == http.StatusForbidden:
+		return MsgAccessDenied
+	case reason == llm.ErrorReasonAuthentication:
+		return MsgCredentialsRejected
+	case reason == llm.ErrorReasonContentPolicy:
+		return "provider rejected the content"
+	case reason == llm.ErrorReasonRateLimit:
+		return "provider rate limited the request"
+	case reason == llm.ErrorReasonQuotaExceeded:
+		return "provider quota exceeded"
+	case reason == llm.ErrorReasonNoRoute:
+		return "provider model was not found"
+	default:
+		return fmt.Sprintf("provider request failed with HTTP %d", statusCode)
+	}
 }
 
 func openaiErrorTypeToReason(errType, code string, statusCode int) llm.ErrorReason {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "invalid_api_key":
+		return llm.ErrorReasonAuthentication
+	case "model_not_found":
+		return llm.ErrorReasonNoRoute
+	case "content_filter", "content_policy_violation", "1301":
+		return llm.ErrorReasonContentPolicy
+	case "insufficient_quota":
+		return llm.ErrorReasonQuotaExceeded
+	}
 	switch errType {
 	case "invalid_request_error":
-		if code == "model_not_found" {
-			return llm.ErrorReasonNoRoute
-		}
 		return llm.ErrorReasonInvalidRequest
 	case "authentication_error":
 		return llm.ErrorReasonAuthentication
@@ -456,16 +488,22 @@ func openaiErrorTypeToReason(errType, code string, statusCode int) llm.ErrorReas
 		return llm.ErrorReasonQuotaExceeded
 	case "content_policy_violation":
 		return llm.ErrorReasonContentPolicy
-	case "server_error":
+	case "server_error", "api_error":
 		return llm.ErrorReasonProviderInternal
-	case "api_error":
-		return llm.ErrorReasonProviderInternal
-	}
-	// Fallback to status code mapping.
-	if code == "insufficient_quota" {
-		return llm.ErrorReasonQuotaExceeded
 	}
 	return openaiHttpStatusToReason(statusCode)
+}
+
+// ClassifyStreamError 把流式连接错误收成不含响应体的 LLMError。
+func ClassifyStreamError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var streamErr *httputil.StreamHTTPError
+	if errors.As(err, &streamErr) && streamErr != nil {
+		return classifyStatusBody(streamErr.StatusCode, streamErr.Body, streamErr.Headers)
+	}
+	return llm.NewLLMError(llm.ErrorReasonTransport, "openai", "provider connection failed")
 }
 
 func openaiHttpStatusToReason(statusCode int) llm.ErrorReason {

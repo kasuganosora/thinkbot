@@ -8,8 +8,10 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/route"
+	"github.com/kasuganosora/thinkbot/config"
 	"github.com/kasuganosora/thinkbot/llm"
 )
 
@@ -113,5 +115,54 @@ func TestLLMStage_LightTierNarrowsThenUpgrades(t *testing.T) {
 	actions := out.Actions()
 	if len(actions) != 1 || actions[0].Payload != "full answer" {
 		t.Fatalf("actions = %#v", actions)
+	}
+}
+
+func TestLLMStage_LightTierUsesLightSnapshotLimits(t *testing.T) {
+	var gotMax int
+	var gotTemp float64
+	var gotModel string
+	lightTemp := 0.2
+	mainTemp := 0.9
+	light := &tierProvider{
+		name: "light",
+		reply: func(_ int, params llm.GenerateParams) (*llm.GenerateResult, error) {
+			if params.MaxTokens != nil {
+				gotMax = *params.MaxTokens
+			}
+			if params.Temperature != nil {
+				gotTemp = *params.Temperature
+			}
+			if params.Model != nil {
+				gotModel = params.Model.ID
+			}
+			return &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: "short"}, nil
+		},
+	}
+	mainMax := 8000
+	stage := NewLLMStage("llm", light, LLMConfig{
+		Model:         llm.ChatModel("glm-5.2"),
+		LightProvider: light,
+		LightModel:    llm.ChatModel("glm-5.2"),
+		Temperature:   &mainTemp,
+		MaxTokens:     &mainMax,
+		MaxSteps:      1,
+		HardMaxSteps:  1,
+	}, nil, zap.NewNop().Sugar())
+	env := core.NewEnvelope(core.Message{ID: "m", BotID: "bot", Text: "hi"})
+	route.SetTier(env, route.IntentChat, route.ModelLight)
+	snap := &bot.LLMSnapshot{
+		MainModel:  llm.ChatModel("glm-5.2"),
+		MainDef:    config.ModelDef{Model: "glm-5.2", MaxTokens: 8000, Temperature: &mainTemp},
+		Light:      light,
+		LightModel: llm.ChatModel("glm-5.3"),
+		LightDef:   config.ModelDef{Model: "glm-5.3", MaxTokens: 256, Temperature: &lightTemp},
+	}
+	ctx := bot.WithLLMSnapshot(context.Background(), snap)
+	if _, err := stage.Process(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	if gotModel != "glm-5.3" || gotMax != 256 || gotTemp != 0.2 {
+		t.Fatalf("light call model %s max %d temp %v", gotModel, gotMax, gotTemp)
 	}
 }

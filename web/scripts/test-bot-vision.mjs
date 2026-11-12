@@ -15,20 +15,18 @@ test('bot form exposes a vision model selector', () => {
   assert.match(form, /v-model="form\.llmVision"/)
   assert.match(form, /data-testid="bot-llm-vision"/)
   assert.match(form, /留空 = 不启用图片转写/)
-  assert.match(form, /停用并重新启用 Bot 才生效/)
+  assert.match(form, /正在运行时，保存成功会切换到新的模型/)
 })
 
-test('vision is read from and written to the per-bot config key', () => {
+test('vision is sent with the bot update and still loaded from its config key', () => {
   assert.match(settings, /visionKey\(botId\)/)
   assert.match(settings, /`bot\.\$\{botId\}\.vision`/)
   assert.match(settings, /configApi\.get\(visionKey\(id\)\)/)
-  assert.match(settings, /configApi\.batchSet\(\{ \[visionKey\(f\.id\)\]/)
+  assert.match(settings, /llmVision: f\.llmVision \|\| ''/)
+  assert.doesNotMatch(settings, /configApi\.batchSet/)
 })
 
 test('clearing the selector stays writable', () => {
-  // PUT /api/config/:key binds Value with `required` and rejects an empty
-  // string; the batch endpoint accepts it. Clearing = disabling transcription.
-  assert.doesNotMatch(settings, /configApi\.set\(visionKey/)
   assert.match(settings, /f\.llmVision \|\| ''/)
 })
 
@@ -42,7 +40,8 @@ test('switching bots cannot let a stale config response overwrite the form', () 
   assert.match(settings, /if \(!form\.value\.llmVision\) form\.value\.llmVision = value/)
 })
 
-test('a changed vision model warns that a bot restart is required', () => {
-  assert.match(settings, /visionChanged/)
-  assert.match(settings, /停用并重新启用 Bot 后生效/)
+test('a saved model reports whether the running bot actually switched', () => {
+  assert.match(settings, /saved\.applied/)
+  assert.match(settings, /saved\.pending/)
+  assert.match(settings, /已切换到保存的模型/)
 })

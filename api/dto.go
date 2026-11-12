@@ -91,6 +91,8 @@ type UpdateBotReq struct {
 	Workers         *int     `json:"workers"`
 	ReasoningEffort *string  `json:"reasoningEffort"`
 	CostQuota       *string  `json:"costQuota"` // 金钱额度配置 JSON（period 全局统一，不在此携带）
+	// LLMVision 视觉模型 ID。nil 表示不改；空字符串表示关闭。
+	LLMVision *string `json:"llmVision"`
 }
 
 // --- 聊天 ---
