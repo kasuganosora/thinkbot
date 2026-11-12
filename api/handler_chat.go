@@ -757,7 +757,7 @@ func (s *Server) compactChatHistory(ctx context.Context, botID, sessionID, userI
 	}
 
 	summaryText := ""
-	if bundle, ok := s.botSvc.GetLLMBundle(botID); ok && len(head) > 0 {
+	if ctx, bundle, ok := s.botSvc.LLMForJob(ctx, botID); ok && bundle != nil && len(head) > 0 {
 		// 压缩预算由配置模块（compaction.*）驱动，集中可配、前端可改；
 		// 未配置时回退 llm.DefaultCompactionConfig() 的内部兜底默认值。
 		compactor := llm.NewCompactor(*compactionConfigFromConfig(

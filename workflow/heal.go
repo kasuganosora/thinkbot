@@ -155,12 +155,29 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 输出格式见 system prompt，放在 <result>...</result> 之间。`,
 		node.ID, node.Name, profile, node.Task, node.Error, node.RetryCount, wf.Requirement)
 
+	ctx, modelMax := a.liveCall(ctx)
+	modelName := a.ec.AnalyzerModel
+	if a.ec.BindLiveModel != nil {
+		var liveMax int
+		ctx, modelName, liveMax = a.ec.BindLiveModel(ctx)
+		if liveMax > 0 {
+			modelMax = liveMax
+		}
+	}
+	healMax := modelMax
+	if a.ec.InternalPolicy != nil {
+		healMax = a.ec.InternalPolicy.MaxTokens(llm.PurposeWorkflowHeal, modelMax, analyzerMaxTokensFallback)
+	}
+	var healEffort string
+	if a.ec.InternalPolicy != nil {
+		healEffort = a.ec.InternalPolicy.ReasoningEffort(llm.PurposeWorkflowHeal, modelName)
+	}
+	// 温度 0 和按用途压低的上限是策略，不是过期的模型副本。模型上限已经按当前快照算过。
+	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
 	raw, err := a.saMgr.DelegateStream(ctx, healDiagnoseSystemPrompt, task,
 		subagent.WithTemperature(0),
-		// 跟随模型配置（与 RefineNode/Analyze 同源），可由 llm.internal_max_tokens.workflow_heal 压低；
-		// reasoning_effort 按内部调用策略（默认 low）。此前写死 2000，思考模型推理即可耗尽。
-		subagent.WithMaxTokens(a.ec.InternalPolicy.MaxTokens(llm.PurposeWorkflowHeal, a.ec.AnalyzerMaxTokens, analyzerMaxTokensFallback)),
-		subagent.WithReasoningEffort(a.ec.InternalPolicy.ReasoningEffort(llm.PurposeWorkflowHeal, a.ec.AnalyzerModel)),
+		subagent.WithMaxTokens(healMax),
+		subagent.WithReasoningEffort(healEffort),
 		subagent.WithStuckTimeout(healDiagnoseStuckTimeout),
 	)
 	if err != nil {
@@ -210,9 +227,14 @@ func (a *Analyzer) RefineNode(ctx context.Context, wf *Workflow, failedNode *DAG
 {"nodes":[{"id":"a","name":"...","task":"...","dependencies":["__UP__"],"review":false,"reviewPrompt":""}, ...]}`,
 		failedNode.Name, failedNode.Task, hint, wf.Requirement)
 
+	ctx, maxTok := a.liveCall(ctx)
+	if maxTok <= 0 {
+		maxTok = a.ec.AnalyzerMaxTokens
+	}
+	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
 	raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, task,
 		subagent.WithTemperature(a.ec.AnalyzerTemperature),
-		subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
+		subagent.WithMaxTokens(maxTok),
 		// 细化是「轻量拆解 DAG」，不是执行代码，必须用短超时——否则"诊断一个卡死节点又卡 30 分钟"本末倒置。
 		subagent.WithStuckTimeout(3*time.Minute),
 	)

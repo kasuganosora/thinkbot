@@ -229,7 +229,7 @@ func (p *StatsRecordingProvider) emitLLMEvent(ctx context.Context, params Genera
 		}
 		payload["tool_calls"] = toolCalls
 		if callErr != nil {
-			payload["error"] = callErr.Error()
+			payload["error"] = SafeErrorText(callErr)
 		}
 	}
 	sink.Emit(ctx, core.Event{
@@ -299,11 +299,11 @@ func (p *StatsRecordingProvider) wrapStream(ctx context.Context, params Generate
 			}
 			wrapped <- part
 		}
-	if totalUsage.TotalTokens > 0 {
-		p.record(ctx, params, &GenerateResult{Usage: totalUsage})
-	}
-	// 可观测性：流式响应边界（流结束时补发；即使用量未上报也照常记录边界）。
-	p.emitLLMEvent(ctx, params, core.EventLLMResponse, true, &GenerateResult{Usage: totalUsage}, nil)
+		if totalUsage.TotalTokens > 0 {
+			p.record(ctx, params, &GenerateResult{Usage: totalUsage})
+		}
+		// 可观测性：流式响应边界（流结束时补发；即使用量未上报也照常记录边界）。
+		p.emitLLMEvent(ctx, params, core.EventLLMResponse, true, &GenerateResult{Usage: totalUsage}, nil)
 	}()
 
 	sr.Stream = wrapped

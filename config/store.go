@@ -249,9 +249,11 @@ func (s *Store) GetByPrefix(prefix string) map[string]string {
 		}
 	}
 
+	// 与 Get 相同：数据库里的显式配置优先于 .env 种子。
+	// 以前前缀扫描把 .env 放在数据库前面，模型解析会悄悄用过期的 env 包盖住界面保存的服务商。
 	check(s.overrides)
-	check(s.envFile)
 	check(s.dbCache)
+	check(s.envFile)
 
 	// 注意：不再直接扫描 os.Environ()。
 	// 进程环境变量经 EnvKeyToConfigKey 映射后会丢失前缀并引入下划线/点号歧义，

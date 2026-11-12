@@ -15,6 +15,7 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/memory"
 	"github.com/kasuganosora/thinkbot/agent/pipeline"
@@ -286,9 +287,14 @@ func isLurkMode(env *core.Envelope) bool {
 	return false
 }
 
+func samplingOmitted(v *float64) bool {
+	return v != nil && *v == llm.OmitSamplingParam
+}
+
 // isHeartbeatMode 判断当前消息是否为心跳自主唤醒决策（KVHeartbeatMode=true）。
 // 心跳决策是机器解析的 JSON（silent/post/note + 目标），与潜水模式同理：
 // 生成结果不得追加人类可读的截断/步数守卫提示语，否则会污染 JSON 导致解析失败。
+
 func isHeartbeatMode(env *core.Envelope) bool {
 	if v, ok := env.Get(core.KVHeartbeatMode); ok {
 		if b, ok := v.(bool); ok && b {
@@ -944,6 +950,8 @@ type LLMConfig struct {
 	// MessageBuilder 自定义消息构造函数。
 	// 如果为 nil，默认将 Message.Text 作为 user message。
 	MessageBuilder func(msg core.Message) []llm.Message
+	// MessageBuilderCtx 与 MessageBuilder 相同，但能看到这一回合钉住的快照。
+	MessageBuilderCtx func(ctx context.Context, msg core.Message) []llm.Message
 	// ForceFullTier is consulted once per turn, after chat history has been
 	// attached to the message. Returning true keeps a would-be light turn on
 	// the full model/tool surface. It exists because L1 routing runs BEFORE the
@@ -1063,9 +1071,10 @@ type LLMStage struct {
 	selfCompactFail selfCompactFailures
 
 	// 运行时配置源：非 nil 时每次编排现取，使系统配置页修改无需重启 Bot。
-	compactionSrc  func() *llm.CompactionConfig
-	toolOutputSrc  func() llm.ToolOutputConfig
-	hardTimeoutSrc func() time.Duration
+	compactionSrc   func() *llm.CompactionConfig
+	compactionLimit func(ctx context.Context) (int, int)
+	toolOutputSrc   func() llm.ToolOutputConfig
+	hardTimeoutSrc  func() time.Duration
 }
 
 // getCompactor 返回指定会话的 *llm.Compactor（惰性创建）。
@@ -1092,6 +1101,9 @@ func (s *LLMStage) getCompactor(sid string) (*llm.Compactor, bool) {
 			}
 			return *p
 		})
+	}
+	if s.compactionLimit != nil {
+		c.SetLimitSource(s.compactionLimit)
 	}
 	if sid == "" {
 		return c, true
@@ -1133,6 +1145,9 @@ func (s *LLMStage) SetToolOutputConfig(cfg llm.ToolOutputConfig) { s.config.Tool
 // SetCompactionSource / SetToolOutputSource / SetHardTimeoutSource 注入热加载配置源。
 func (s *LLMStage) SetCompactionSource(fn func() *llm.CompactionConfig) {
 	s.compactionSrc = fn
+}
+func (s *LLMStage) SetCompactionLimits(fn func(ctx context.Context) (int, int)) {
+	s.compactionLimit = fn
 }
 func (s *LLMStage) SetToolOutputSource(fn func() llm.ToolOutputConfig) {
 	s.toolOutputSrc = fn
@@ -1303,7 +1318,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 
 	// 构建消息
 	var messages []llm.Message
-	if s.config.MessageBuilder != nil {
+	if s.config.MessageBuilderCtx != nil {
+		messages = s.config.MessageBuilderCtx(ctx, env.Message)
+	} else if s.config.MessageBuilder != nil {
 		messages = s.config.MessageBuilder(env.Message)
 	} else {
 		content := env.Message.Text
@@ -1389,11 +1406,39 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 	execProvider := s.provider
 	execModel := s.config.Model
+	temp := s.config.Temperature
+	topP := s.config.TopP
+	maxTok := s.config.MaxTokens
+	if snap := bot.LLMSnapshotFrom(ctx); snap != nil && snap.MainModel != nil {
+		execModel = snap.MainModel
+		if snap.MainDef.Temperature != nil {
+			temp = snap.MainDef.Temperature
+		}
+		if snap.MainDef.TopP != nil {
+			topP = snap.MainDef.TopP
+		}
+		if snap.MainDef.MaxTokens > 0 {
+			mt := snap.MainDef.MaxTokens
+			maxTok = &mt
+		}
+	}
 	if lightTier {
 		if s.config.LightProvider != nil {
 			execProvider = s.config.LightProvider
 		}
-		if s.config.LightModel != nil {
+		if snap := bot.LLMSnapshotFrom(ctx); snap != nil && snap.LightModel != nil {
+			execModel = snap.LightModel
+			if snap.LightDef.Temperature != nil {
+				temp = snap.LightDef.Temperature
+			}
+			if snap.LightDef.TopP != nil {
+				topP = snap.LightDef.TopP
+			}
+			if snap.LightDef.MaxTokens > 0 {
+				mt := snap.LightDef.MaxTokens
+				maxTok = &mt
+			}
+		} else if s.config.LightModel != nil {
 			execModel = s.config.LightModel
 		}
 		tools = route.NarrowTools(tools)
@@ -1403,14 +1448,14 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		// 预算吃紧时先摘记忆块：召回块是成对标签包住的（memory.StripRecallBlocks），
 		// 整块摘掉即可把额度让给对话历史——对话历史丢了就补不回来，记忆下一轮还能再召回。
 		// 必须先于 contextBudgetNote：提示里的占用数字要反映摘除之后的真实用量。
-		if pct, ok := s.contextBudgetPercent(env, systemPrompt, messages); ok && pct >= contextBudgetRecallDropPct {
+		if pct, ok := s.contextBudgetPercent(ctx, env, systemPrompt, messages); ok && pct >= contextBudgetRecallDropPct {
 			if trimmed := memory.StripRecallBlocks(systemPrompt); trimmed != systemPrompt {
 				logger.Infow("context budget: dropped recalled memory block to free window",
 					"used_pct", pct, "chars_freed", len(systemPrompt)-len(trimmed))
 				systemPrompt = trimmed
 			}
 		}
-		if note := s.contextBudgetNote(env, systemPrompt, messages); note != "" {
+		if note := s.contextBudgetNote(ctx, env, systemPrompt, messages); note != "" {
 			systemPrompt = systemPrompt + "\n\n" + note
 		}
 	}
@@ -1447,11 +1492,11 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		System:           systemPrompt,
 		Messages:         messages,
 		Tools:            tools,
-		Temperature:      s.config.Temperature,
-		TopP:             s.config.TopP,
+		Temperature:      temp,
+		TopP:             topP,
 		FrequencyPenalty: s.config.FrequencyPenalty,
 		PresencePenalty:  s.config.PresencePenalty,
-		MaxTokens:        lightMaxTokens(lightTier, s.config.MaxTokens),
+		MaxTokens:        lightMaxTokens(lightTier, maxTok),
 		ReasoningEffort:  replyEffort(effort, execModel),
 	}
 
@@ -1464,7 +1509,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 同时把采样温度压低：结构化输出不需要创造性，低温显著提升格式合规率。
 	if lurkMode {
 		params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
-		params.Temperature = lurkTemperature()
+		if !samplingOmitted(temp) {
+			params.Temperature = lurkTemperature()
+		}
 	}
 
 	// 心跳自主唤醒决策模式：与潜水模式同机制——强制 JSON 结构化输出 + 低温，
@@ -1475,13 +1522,18 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if v, ok := env.Get(core.KVHeartbeatMode); ok {
 		if b, ok := v.(bool); ok && b {
 			params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
-			params.Temperature = lurkTemperature()
+			if !samplingOmitted(temp) {
+				params.Temperature = lurkTemperature()
+			}
 			if s.config.HeartbeatReasoningEffort != nil {
 				params.ReasoningEffort = heartbeatEffort(s.config.HeartbeatReasoningEffort(), params.Model, params.ReasoningEffort)
 			}
 		}
 	}
 
+	// 本回合的温度、上限和推理档已经按钉住的快照算过（含轻量档和潜水策略）。
+	// 跟随层不要再用模型默认值盖掉。
+	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
 	cfg := &llm.OrchestrateConfig{
 		Params:       params,
 		MaxSteps:     s.config.MaxSteps,
@@ -1654,7 +1706,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 					"err", err)
 				timeoutRes, notify := s.hardTimeoutResult(env, partial, hardTimeout, lurkMode, heartbeatMode)
 				if !notify {
-					recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, timeoutRes)
+					recordUsage(ctx, s.config.UsageRecorder, env, execModel, s.name, timeoutRes)
 					return env, &core.PipelineError{
 						Stage:   s.name,
 						Message: "LLM stream orchestrate exceeded hard timeout",
@@ -1706,7 +1758,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 					"err", err)
 				timeoutRes, notify := s.hardTimeoutResult(env, partial, hardTimeout, lurkMode, heartbeatMode)
 				if !notify {
-					recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, timeoutRes)
+					recordUsage(ctx, s.config.UsageRecorder, env, execModel, s.name, timeoutRes)
 					return env, &core.PipelineError{
 						Stage:   s.name,
 						Message: "LLM orchestrate exceeded hard timeout",
@@ -1845,7 +1897,7 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 
 	// 记录使用统计
-	recordUsage(ctx, s.config.UsageRecorder, env, s.config.Model, s.name, result)
+	recordUsage(ctx, s.config.UsageRecorder, env, execModel, s.name, result)
 
 	// 潜水模式：校验结构化产出，不合规则重试。必须放在下方 FinishReasonLength
 	// 提示语拼接之前 —— 那段会污染 result.Text，破坏 JSON 解析。
@@ -2436,6 +2488,10 @@ func recordUsage(ctx context.Context, recorder llm.UsageRecorder, env *core.Enve
 func isContentSafetyError(err error) bool {
 	if err == nil {
 		return false
+	}
+	var le *llm.LLMError
+	if errors.As(err, &le) && le != nil && le.Reason == llm.ErrorReasonContentPolicy {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	markers := []string{

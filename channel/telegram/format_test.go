@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 func TestSanitizeTelegramHTML(t *testing.T) {
@@ -114,6 +116,17 @@ func TestReply_HTMLBareLessThanIsEscaped(t *testing.T) {
 
 // If Telegram still rejects the formatting (here: an unbalanced supported
 // tag), the message is resent once as plain text instead of being lost.
+func TestIsParseEntitiesError_ReadsHiddenDetail(t *testing.T) {
+	err := errs.HTTPErrorWithDetail(400, "telegram sendMessage: http POST http://stub.example/sendMessage -> 400",
+		`{"ok":false,"description":"Bad Request: can't parse entities: Unsupported start tag"}`)
+	if strings.Contains(err.Error(), "can't parse") {
+		t.Fatal("parse text leaked into Error()")
+	}
+	if !isParseEntitiesError(err) {
+		t.Fatal("hidden detail should still select the plain-text fallback")
+	}
+}
+
 func TestReply_ParseErrorFallsBackToPlainText(t *testing.T) {
 	srv, got := newParseErrorServer(t, "<b>")
 	ch := newFormatTestChannel(srv)

@@ -3,12 +3,12 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
-	"github.com/kasuganosora/thinkbot/util/errs"
 	httputil "github.com/kasuganosora/thinkbot/util/http"
 	"github.com/kasuganosora/thinkbot/util/retry"
 	"github.com/kasuganosora/thinkbot/util/traceid"
@@ -83,7 +83,12 @@ func (c *Client) DoStreamChatCompletion(
 			return onChunk(chunk)
 		},
 		OnError: func(err error) {
-			traceid.L(ctx).Debugw("openai chat stream error", "err", err)
+			status := 0
+			var streamErr *httputil.StreamHTTPError
+			if errors.As(err, &streamErr) && streamErr != nil {
+				status = streamErr.StatusCode
+			}
+			traceid.L(ctx).Debugw("openai chat stream error", "status", status)
 		},
 	}
 
@@ -114,7 +119,7 @@ type chatStreamingToolCall struct {
 
 // doGenerateChat 通过 Chat Completions API 执行 DoGenerate。
 func (c *Client) doGenerateChat(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
-	req, err := paramsToChatRequest(&params)
+	req, err := c.chatRequest(params)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +134,7 @@ func (c *Client) doGenerateChat(ctx context.Context, params llm.GenerateParams) 
 
 // doStreamChat 通过 Chat Completions API 执行 DoStream。
 func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
-	req, err := paramsToChatRequest(&params)
+	req, err := c.chatRequest(params)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +285,7 @@ func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "openai: chat stream failed")})
+			send(&llm.ErrorPart{Error: ClassifyStreamError(streamErr)})
 		}
 
 		send(&llm.FinishPart{
@@ -297,16 +302,26 @@ func (c *Client) doStreamChat(ctx context.Context, params llm.GenerateParams) (*
 // Chat Completions — 类型转换
 // ============================================================================
 
-func paramsToChatRequest(params *llm.GenerateParams) (*ChatCompletionRequest, error) {
+func (c *Client) chatRequest(params llm.GenerateParams) (*ChatCompletionRequest, error) {
+	style := TokenParamAuto
+	base := ""
+	if c != nil {
+		style = c.tokenParamStyle
+		base = c.baseURL
+	}
+	return paramsToChatRequest(&params, style, base)
+}
+
+func paramsToChatRequest(params *llm.GenerateParams, style TokenParamStyle, baseURL string) (*ChatCompletionRequest, error) {
 	req := &ChatCompletionRequest{
 		Model:            params.Model.ID,
-		Temperature:      params.Temperature,
-		TopP:             params.TopP,
-		MaxTokens:        params.MaxTokens,
+		Temperature:      wireSampling(params.Temperature),
+		TopP:             wireSampling(params.TopP),
 		Seed:             params.Seed,
 		FrequencyPenalty: params.FrequencyPenalty,
 		PresencePenalty:  params.PresencePenalty,
 	}
+	applyChatTokenLimit(req, params.MaxTokens, style, baseURL)
 
 	// OpenAI does implicit prefix caching; a cache key hint helps cross-request
 	// cache hits within the same conversation/session.

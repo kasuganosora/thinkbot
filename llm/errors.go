@@ -3,6 +3,7 @@ package llm
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -59,17 +60,25 @@ type LLMError struct {
 	RetryAfterMs int          `json:"retryAfterMs,omitempty"`
 	HTTPContext  *HTTPContext `json:"httpContext,omitempty"`
 
+	// SafeDetail is a sanitized upstream classifier (code, param, type).
+	// It is safe to log. It never contains free-text messages, headers, or secrets.
+	SafeDetail string `json:"safeDetail,omitempty"`
+
 	// cause is the underlying error (for errors.Is/errors.As chain).
 	cause error
 }
 
 func (e *LLMError) Error() string {
+	msg := e.Message
+	if detail := strings.TrimSpace(e.SafeDetail); detail != "" {
+		msg += " (" + detail + ")"
+	}
 	prefix := e.ProviderName
 	if prefix == "" {
 		prefix = string(e.Reason)
-		return fmt.Sprintf("%s: %s", prefix, e.Message)
+		return fmt.Sprintf("%s: %s", prefix, msg)
 	}
-	return fmt.Sprintf("%s: %s: %s", prefix, e.Reason, e.Message)
+	return fmt.Sprintf("%s: %s: %s", prefix, e.Reason, msg)
 }
 
 // Unwrap supports errors.Is / errors.As.

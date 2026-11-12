@@ -338,8 +338,11 @@ type IncompleteDetails struct {
 }
 
 // ResponseError 响应错误。
+// Message 只在内存里解析，不能写入安全错误文本。
 type ResponseError struct {
+	Type    string `json:"type,omitempty"`
 	Code    string `json:"code,omitempty"`
+	Param   string `json:"param,omitempty"`
 	Message string `json:"message,omitempty"`
 }
 
@@ -378,16 +381,22 @@ type FunctionCallOutput struct {
 
 // StreamEvent 表示一个 Responses API 流式事件。
 type StreamEvent struct {
-	Type         string          `json:"type"`
-	Response     *Response       `json:"response,omitempty"`
-	Item         *OutputItem     `json:"item,omitempty"`
-	ItemID       string          `json:"item_id,omitempty"`
-	OutputIndex  int             `json:"output_index,omitempty"`
-	ContentIndex int             `json:"content_index,omitempty"`
-	Delta        string          `json:"delta,omitempty"`
-	Text         string          `json:"text,omitempty"`
-	Parsed       json.RawMessage `json:"parsed,omitempty"`
-	Sequence     int             `json:"sequence_number,omitempty"`
+	Type         string      `json:"type"`
+	Response     *Response   `json:"response,omitempty"`
+	Item         *OutputItem `json:"item,omitempty"`
+	ItemID       string      `json:"item_id,omitempty"`
+	OutputIndex  int         `json:"output_index,omitempty"`
+	ContentIndex int         `json:"content_index,omitempty"`
+	Delta        string      `json:"delta,omitempty"`
+	Text         string      `json:"text,omitempty"`
+	// Code, Param, and Message are the flat fields of a stream "error" event.
+	// Message is never copied into a safe error.
+	Code     string          `json:"code,omitempty"`
+	Param    string          `json:"param,omitempty"`
+	Message  string          `json:"message,omitempty"`
+	Error    *ResponseError  `json:"error,omitempty"`
+	Parsed   json.RawMessage `json:"parsed,omitempty"`
+	Sequence int             `json:"sequence_number,omitempty"`
 }
 
 // 流式事件类型常量。

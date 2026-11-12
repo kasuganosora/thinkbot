@@ -11,6 +11,13 @@ func TestLLMError_Error(t *testing.T) {
 	if e.Error() != "anthropic: rate_limit: rate limited" {
 		t.Errorf("unexpected error string: %s", e.Error())
 	}
+	e.SafeDetail = "code=unsupported_parameter param=max_tokens type=invalid_request_error"
+	if e.Error() != "anthropic: rate_limit: rate limited (code=unsupported_parameter param=max_tokens type=invalid_request_error)" {
+		t.Errorf("detail missing: %s", e.Error())
+	}
+	if e.Message != "rate limited" {
+		t.Errorf("message changed: %s", e.Message)
+	}
 
 	e2 := NewLLMError(ErrorReasonRateLimit, "", "rate limited")
 	if e2.Error() != "rate_limit: rate limited" {

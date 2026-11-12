@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/kasuganosora/thinkbot/agent/bot"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
@@ -78,16 +79,16 @@ func (s *Server) handleBotRuntimeChecks(c *gin.Context) {
 func (s *Server) buildContainerChecks(ctx context.Context, botID string) []RuntimeCheck {
 	mgr, err := s.botSvc.WorkspaceManagerForBot(botID)
 	if err != nil {
-		return []RuntimeCheck{{
+		return s.withBrowserMCP([]RuntimeCheck{{
 			Name: "容器初始化", Message: "无法解析工作空间管理器：" + err.Error(), OK: false,
-		}}
+		}}, botID)
 	}
 
 	// 触发工作空间实例化，使 ContainerInfo 能拿到真实容器名/状态。
 	if _, err := mgr.GetOrCreate(botID); err != nil {
-		return []RuntimeCheck{{
+		return s.withBrowserMCP([]RuntimeCheck{{
 			Name: "容器初始化", Message: "工作空间创建失败：" + err.Error(), OK: false,
-		}}
+		}}, botID)
 	}
 
 	info := mgr.ContainerInfo(ctx, botID)
@@ -142,7 +143,56 @@ func (s *Server) buildContainerChecks(ctx context.Context, botID string) []Runti
 		Mono: true,
 	})
 
-	return checks
+	return s.withBrowserMCP(checks, botID)
+}
+
+// withBrowserMCP 把浏览器 MCP 的后台连接状态附在运行时检查末尾。
+// 未启用（没有后台循环）时不添加，避免把「没开浏览器」显示成故障。
+func (s *Server) withBrowserMCP(checks []RuntimeCheck, botID string) []RuntimeCheck {
+	if s == nil || s.botSvc == nil {
+		return checks
+	}
+	b := s.botSvc.runningBot(botID)
+	if b == nil {
+		return checks
+	}
+	st, ok := b.BrowserMCPStatus()
+	if !ok {
+		return checks
+	}
+	return append(checks, browserMCPRuntimeCheck(st))
+}
+
+// browserMCPRuntimeCheck 把后台连接快照变成概览页已有的检查项。
+// pending / connecting 表示还在后台握手，不算故障；failed 才标异常。
+// LastError 由连接循环写入前已经脱敏，这里只原样展示。
+func browserMCPRuntimeCheck(st bot.BrowserMCPStatus) RuntimeCheck {
+	msg := "浏览器 MCP 连接失败，将自动重试。"
+	ok := false
+	switch st.State {
+	case bot.BrowserMCPStateConnected:
+		msg = "浏览器 MCP 已连接。"
+		ok = true
+	case bot.BrowserMCPStateConnecting:
+		msg = "浏览器 MCP 正在后台连接。"
+		ok = true
+	case bot.BrowserMCPStatePending:
+		msg = "浏览器 MCP 等待后台连接。"
+		ok = true
+	}
+	extra := fmt.Sprintf("state=%s attempts=%d", st.State, st.Attempts)
+	if !st.NextRetry.IsZero() {
+		extra += " next=" + st.NextRetry.UTC().Format(time.RFC3339)
+	}
+	if st.LastError != "" {
+		extra += " err=" + st.LastError
+	}
+	if len(st.Tools) > 0 {
+		extra += fmt.Sprintf(" tools=%d", len(st.Tools))
+	}
+	return RuntimeCheck{
+		Name: "浏览器 MCP", Message: msg, Extra: extra, OK: ok,
+	}
 }
 
 // buildContainerTaskCheck 根据真实状态生成「容器任务」检查项。

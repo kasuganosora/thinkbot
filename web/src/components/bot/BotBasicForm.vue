@@ -58,10 +58,11 @@
             <t-input-number v-model="form.workers" :min="1" :max="64" style="width: 100%" data-testid="bot-workers" />
           </t-form-item>
         </div>
+        <div class="field-tip" data-testid="bot-llm-status">{{ llmStatusText }}</div>
         <t-form-item label="视觉辅助模型（vision）">
           <div>
             <t-select v-model="form.llmVision" :options="modelOptions" filterable creatable clearable placeholder="留空 = 不启用图片转写" data-testid="bot-llm-vision" />
-            <div class="field-tip">主模型不支持多模态时，由该模型把图片/音视频转写成文字再交给主模型，因此请选支持视觉的模型。留空＝不处理图片。修改后需停用并重新启用 Bot 才生效；转写输出上限与推理强度在「系统配置 → 内置 LLM」中调整。</div>
+            <div class="field-tip">主模型不支持多模态时，由该模型把图片/音视频转写成文字再交给主模型，因此请选支持视觉的模型。留空＝不处理图片。正在运行时，保存成功会切换到新的模型；没通过校验则继续用上一套。转写输出上限与推理强度在「系统配置 → 内置 LLM」中调整。</div>
           </div>
         </t-form-item>
         <t-form-item label="步数限制（hardMaxSteps）">
@@ -95,17 +96,32 @@
 <script setup>
 import { computed } from 'vue'
 import { REPLY_EFFORT_OPTIONS } from '@/utils/reasoning'
+import { llmStatusText as formatLlmStatus } from './llmStatus.js'
 
 const props = defineProps({
   form: { type: Object, required: true },
   emojis: { type: Array, default: () => [] },
   modelOptions: { type: Array, default: () => [] },
   running: { type: Boolean, default: false },
-  toggling: { type: Boolean, default: false }
+  toggling: { type: Boolean, default: false },
+  effectiveMain: { type: String, default: '' },
+  effectiveLight: { type: String, default: '' },
+  effectiveVision: { type: String, default: '' },
+  llmApplyError: { type: String, default: '' }
 })
 defineEmits(['save', 'remove', 'toggle-status'])
 
 const effortOptions = REPLY_EFFORT_OPTIONS
+
+const llmStatusText = computed(() => formatLlmStatus({
+  desiredMain: props.form.llmMain || '',
+  desiredLight: props.form.llmLight || '',
+  desiredVision: props.form.llmVision || '',
+  effectiveMain: props.effectiveMain,
+  effectiveLight: props.effectiveLight,
+  effectiveVision: props.effectiveVision,
+  error: props.llmApplyError
+}))
 
 const modelMaxTokens = computed(() => {
   const m = props.modelOptions.find(o => o.value === props.form.llmMain)

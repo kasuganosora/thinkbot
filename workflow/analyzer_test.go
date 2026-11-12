@@ -48,6 +48,66 @@ const testDAGJSON = `{"nodes":[{"id":"n1","name":"任务一","task":"做 A 事",
 
 // TestAnalyzer_RetryRecoversFromEmpty 验证：GLM 前两次返回空响应后，
 // analyzer 通过重试+退避在第三次成功恢复，最终返回有效 DAG。
+func TestAnalyzer_LiveMaxTokensKeepGlobalTemperature(t *testing.T) {
+	prov := &recordParamsProvider{}
+	saMgr := subagent.NewSubAgentManager(prov, "model-old", subagent.WithTemperature(0.1), subagent.WithMaxTokens(111))
+	a := NewAnalyzer(saMgr, nil, EngineConfig{
+		AnalyzerTemperature:  0.3,
+		AnalyzerMaxTokens:    111,
+		AnalyzerStuckTimeout: 5 * time.Second,
+		BindLiveModel: func(ctx context.Context) (context.Context, string, int) {
+			return ctx, "model-new", 4096
+		},
+	}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := a.Analyze(ctx, "split this", false); err != nil {
+		t.Fatal(err)
+	}
+	if prov.max != 4096 || prov.temp != 0.3 || prov.model != "model-old" && prov.model != "model-new" {
+		t.Fatalf("max %d temp %v model %s", prov.max, prov.temp, prov.model)
+	}
+	if prov.temp != 0.3 {
+		t.Fatalf("analyzer temperature changed to %v", prov.temp)
+	}
+	if prov.max != 4096 {
+		t.Fatalf("analyzer max tokens stayed stale: %d", prov.max)
+	}
+}
+
+type recordParamsProvider struct {
+	max   int
+	temp  float64
+	model string
+}
+
+func (p *recordParamsProvider) Name() string { return "record" }
+func (p *recordParamsProvider) record(params llm.GenerateParams) {
+	if params.MaxTokens != nil {
+		p.max = *params.MaxTokens
+	}
+	if params.Temperature != nil {
+		p.temp = *params.Temperature
+	}
+	if params.Model != nil {
+		p.model = params.Model.ID
+	}
+}
+
+func (p *recordParamsProvider) DoGenerate(_ context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
+	p.record(params)
+	return &llm.GenerateResult{Text: "<result>" + testDAGJSON + "</result>"}, nil
+}
+func (p *recordParamsProvider) DoStream(_ context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
+	p.record(params)
+	ch := make(chan llm.StreamPart, 1)
+	go func() {
+		defer close(ch)
+		ch <- &llm.TextDeltaPart{Text: "<result>" + testDAGJSON + "</result>"}
+	}()
+	return &llm.StreamResult{Stream: ch}, nil
+}
+
 func TestAnalyzer_RetryRecoversFromEmpty(t *testing.T) {
 	prov := &emptyThenValidProvider{emptyRuns: 2, validJSON: "<result>" + testDAGJSON + "</result>"}
 	saMgr := subagent.NewSubAgentManager(prov, "test-model")

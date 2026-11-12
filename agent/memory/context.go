@@ -405,7 +405,7 @@ func (m *ContextManager) AssembleContextScopes(ctx context.Context, scopes []Sco
 	}
 
 	// 窗口已耗尽时不要回退到静态 MaxTokenEstimate：那会在已无预算时仍灌记忆。
-	if m.window != nil && m.window.Available() <= 0 {
+	if m.window != nil && m.window.AvailableIn(ctx) <= 0 {
 		return &AssembleResult{}, nil
 	}
 
@@ -458,7 +458,7 @@ func (m *ContextManager) AssembleContextScopes(ctx context.Context, scopes []Sco
 	// 4. 确定可用 token 预算（此处 window 预算必 > 0，上面已早退）
 	maxTokens := m.builder.config.MaxTokenEstimate
 	if m.window != nil {
-		maxTokens = m.window.Available()
+		maxTokens = m.window.AvailableIn(ctx)
 	}
 
 	// 5. 估算所有记忆的 token 数

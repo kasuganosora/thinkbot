@@ -13,6 +13,7 @@ import (
 	noop_trace "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
@@ -33,6 +34,21 @@ type Analyzer struct {
 	tracer trace.Tracer
 	ec     EngineConfig
 	logger *zap.SugaredLogger
+}
+
+// liveCall 返回这一次调用应使用的 context 和模型最大输出。
+// 已钉住的快照保持不变；否则钉上当前最新快照，只对这一次调用有效。
+func (a *Analyzer) liveCall(ctx context.Context) (context.Context, int) {
+	max := a.ec.AnalyzerMaxTokens
+	if a == nil || a.ec.BindLiveModel == nil {
+		return ctx, max
+	}
+	var liveMax int
+	ctx, _, liveMax = a.ec.BindLiveModel(ctx)
+	if liveMax > 0 {
+		max = liveMax
+	}
+	return ctx, max
 }
 
 // NewAnalyzer 创建分析器。
@@ -361,9 +377,16 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 				effectiveTask = task + "\n\n" + hint
 			}
 		}
+		ctx, maxTok := a.liveCall(ctx)
+		if maxTok <= 0 {
+			maxTok = a.ec.AnalyzerMaxTokens
+		}
+		// 温度是工作流全局配置（重试时还会抬高），不跟模型走。
+		// 最大输出跟这一次钉住的模型走。两者都标成已确定，跟随层不再覆盖。
+		ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
 		raw, err := a.saMgr.DelegateStream(ctx, analyzerSystemPrompt, effectiveTask,
 			subagent.WithTemperature(temp),
-			subagent.WithMaxTokens(a.ec.AnalyzerMaxTokens),
+			subagent.WithMaxTokens(maxTok),
 			subagent.WithStuckTimeout(a.ec.AnalyzerStuckTimeout),
 		)
 		if err != nil {

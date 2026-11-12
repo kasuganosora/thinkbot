@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/route"
 	"github.com/kasuganosora/thinkbot/agent/tools"
 	"github.com/kasuganosora/thinkbot/cron"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/mcp"
 	"github.com/kasuganosora/thinkbot/sandbox"
 	"github.com/kasuganosora/thinkbot/skill"
@@ -97,13 +99,18 @@ type Bot struct {
 	// 资源管理（Close 时释放）
 	ownRegistry bool      // Bot 是否创建了 CallbackRegistry（外部传入的不关）
 	closerOnce  sync.Once // 确保 Close 只执行一次
+	done        chan struct{}
+	doneOnce    sync.Once
+	runStarted  atomic.Bool
 
 	// 用户配置的 MCP 管理器（Admin UI / mcp_server 工具 → data/mcp/{botId}/servers.json）。
 	// 与 browserMCP 分离：浏览器是内置能力，用户 MCP 是可热挂载的外部服务器。
 	userMCP *mcp.Manager
 
 	// 浏览器 MCP 管理器（per-bot，docker 后端 + BrowserEnabled 时创建；nil=未启用）。
+	// browserBG 在后台完成握手和断线重连；启动路径不等待它。
 	browserMCP *mcp.Manager
+	browserBG  *browserMCPSession
 	alignMu    sync.Mutex // 打开桌面时把浏览器挪到共享屏幕，避免并发重启
 	// browserCookieSaver 会话结束后回收容器内 cookie 状态文件时调用。
 	browserCookieSaver func(ctx context.Context, stateJSON []byte) error
@@ -116,6 +123,8 @@ type Bot struct {
 	// 消息级取消链路（可选）：用于将每条消息的 cancel 函数注册到上层（如 API abort 接口）。
 	onMessageStart func(botID, traceID string, cancel context.CancelFunc, interruptCh chan string)
 	onMessageDone  func(botID, traceID string)
+	onLLMFailure   func(traceID string, err error)
+	llmSlot        *LLMSlot
 }
 
 // BotParams 是 Bot 构造参数。
@@ -215,6 +224,10 @@ type BotParams struct {
 	// OnMessageDone 在单条消息结束（成功/失败/丢弃/派发失败）时回调。
 	// 典型用途：上层注销 traceID -> cancelFunc，避免内存泄漏。
 	OnMessageDone func(botID, traceID string)
+	// LLMSlot 是当前模型快照。处理每条消息前钉住当时的快照。
+	LLMSlot *LLMSlot
+	// OnLLMFailure 在流水线失败时回调，供渠道取固定说明。
+	OnLLMFailure func(traceID string, err error)
 }
 
 // New 创建一个 Bot 实例。
@@ -321,8 +334,11 @@ func New(params BotParams) (*Bot, error) {
 		channels:        params.Channels,
 		logger:          botLogger,
 		ownRegistry:     ownRegistry,
+		done:            make(chan struct{}),
 		onMessageStart:  params.OnMessageStart,
 		onMessageDone:   params.OnMessageDone,
+		onLLMFailure:    params.OnLLMFailure,
+		llmSlot:         params.LLMSlot,
 		skillMgr:        params.SkillManager,
 	}
 
@@ -475,6 +491,8 @@ func New(params BotParams) (*Bot, error) {
 //  4. 阻塞直到 ctx 取消
 //  5. 优雅关闭：停止 Channel → Engine.Stop
 func (b *Bot) Run(ctx context.Context) error {
+	b.runStarted.Store(true)
+	defer b.markStopped()
 	b.logger.Infow("bot starting",
 		"name", b.Name,
 		"channels", len(b.channels))
@@ -537,7 +555,139 @@ func (b *Bot) Run(ctx context.Context) error {
 // Stop 触发 Bot 优雅关闭。
 // 停止 Engine 后，Run 方法会自动调用 Close 释放资源。
 func (b *Bot) Stop() {
+	if b == nil || b.engine == nil {
+		return
+	}
 	b.engine.Stop()
+}
+
+func (b *Bot) markStopped() {
+	if b == nil {
+		return
+	}
+	b.doneOnce.Do(func() {
+		if b.done != nil {
+			close(b.done)
+		}
+	})
+}
+
+// Wait blocks until Run returns. It does not start or stop the bot.
+func (b *Bot) Wait(ctx context.Context) error {
+	if b == nil || b.done == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-b.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// StopAndWait cancels Run and waits until its channel stop has returned.
+// A bot that never entered Run returns immediately.
+func (b *Bot) StopAndWait(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	started := b.runStarted.Load()
+	b.Stop()
+	if !started {
+		b.markStopped()
+		return nil
+	}
+	return b.Wait(ctx)
+}
+
+type pollingChannel interface {
+	DrainPolling(ctx context.Context) error
+	ResumePolling(ctx context.Context) error
+	PollingOffset() int64
+	SetPollingOffset(int64)
+}
+
+// DrainPolling waits until long-poll loops on this bot have exited.
+func (b *Bot) DrainPolling(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	var first error
+	for _, ch := range b.channels {
+		p, ok := ch.(pollingChannel)
+		if !ok {
+			continue
+		}
+		if err := p.DrainPolling(ctx); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// ResumePolling continues drained poll loops from their stored offsets.
+func (b *Bot) ResumePolling(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	var first error
+	for _, ch := range b.channels {
+		p, ok := ch.(pollingChannel)
+		if !ok {
+			continue
+		}
+		if err := p.ResumePolling(ctx); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// PollingOffset returns the cursor of the first polling channel.
+func (b *Bot) PollingOffset() int64 {
+	if b == nil {
+		return 0
+	}
+	for _, ch := range b.channels {
+		if p, ok := ch.(pollingChannel); ok {
+			return p.PollingOffset()
+		}
+	}
+	return 0
+}
+
+// AdoptNewerOffset keeps the further cursor when a failed replacement had already
+// accepted updates the previous loop had not seen.
+func (b *Bot) AdoptNewerOffset(from *Bot) {
+	if b == nil || from == nil {
+		return
+	}
+	if off := from.PollingOffset(); off > b.PollingOffset() {
+		b.SetPollingOffset(off)
+	}
+}
+
+// SetPollingOffset copies a handoff cursor onto every polling channel before Start.
+func (b *Bot) SetPollingOffset(offset int64) {
+	if b == nil {
+		return
+	}
+	for _, ch := range b.channels {
+		if p, ok := ch.(pollingChannel); ok {
+			p.SetPollingOffset(offset)
+		}
+	}
+}
+
+// RegisterSender registers an outbound sender on this bot's reply handler.
+func (b *Bot) RegisterSender(name string, sender outbound.ChannelSender) {
+	if b == nil || b.replyHandler == nil || sender == nil || name == "" {
+		return
+	}
+	b.replyHandler.Register(name, sender)
 }
 
 // Close 释放 Bot 拥有的后台资源（如 CallbackRegistry 的 cleanup goroutine）。
@@ -568,16 +718,29 @@ func (b *Bot) Close() {
 			}
 			b.userMCP = nil
 		}
+		// 先停掉后台重连，避免关闭过程中又把浏览器进程拉起来。
+		// 已经连上的客户端先留着，下面还要调 close 工具落盘 cookie。
+		if b.browserBG != nil {
+			b.browserBG.Stop()
+		}
 		// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再关闭传输层、读回状态文件持久化到 DB。
 		// 必须在工作空间管理器关闭（容器销毁）之前完成。
 		// 注意：直接 Close() 会 SIGKILL 掉 docker exec 子进程，而 `docker exec -i` 默认不代理信号，
 		// wrapper 的 shutdown 钩子不会跑，cookie 将丢。故先调 close 工具触发其 saveState 再回包。
 		if b.browserMCP != nil {
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), 8*time.Second)
-			if _, cerr := b.browserMCP.CallTool(closeCtx, "browser", "close", map[string]any{}); cerr != nil {
-				b.logger.Warnw("browser graceful close failed, will force close", "err", cerr)
+			// 还没连上（或进程已经没了）时不要 CallTool：那条路径会尝试重连，
+			// 关闭过程中把浏览器又拉起来。健康连接才发 close，让 wrapper 先落盘。
+			healthy := false
+			if c, ok := b.browserMCP.GetClient(browserServerName); ok && c != nil && c.IsHealthy() {
+				healthy = true
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 8*time.Second)
+				if _, cerr := b.browserMCP.CallTool(closeCtx, browserServerName, "close", map[string]any{}); cerr != nil {
+					b.logger.Warnw("browser graceful close failed, will force close", "err", cerr)
+				}
+				closeCancel()
+			} else {
+				b.browserMCP.Disconnect(browserServerName)
 			}
-			closeCancel()
 			// 浏览器会话回收：先让 wrapper 优雅落盘 cookie，再把状态文件持久化到 DB。
 			//
 			// 竞态修复（根因）：wrapper 的 close 工具在回包前已完成 saveState 落盘，故应在
@@ -585,7 +748,8 @@ func (b *Bot) Close() {
 			// 再关闭传输层触发容器内 wrapper 的 shutdown 落盘（docker exec 连接关闭 → wrapper
 			// 收到 stdin EOF → shutdown → saveState），随后轮询读取，确保不丢 cookie。
 			// （注意：docker exec 被 SIGKILL 后立即退出，不等容器内 wrapper 结束，故不能“先关再读”。）
-			if b.browserCookieSaver != nil && b.workspaceMgr != nil {
+			// 从未连上时不做这轮轮询，避免空文件把关闭拖住；残留 cookie 由下次启动的后台回收补上。
+			if healthy && b.browserCookieSaver != nil && b.workspaceMgr != nil {
 				b.recoverBrowserCookies(context.Background())
 			}
 			if b.browserMCP != nil {
@@ -609,6 +773,14 @@ func (b *Bot) Close() {
 // Ready 返回一个 channel，该 channel 在 Bot 完成初始化（Channel 已启动、Engine 已就绪）后关闭。
 func (b *Bot) Ready() <-chan struct{} {
 	return b.engine.Ready()
+}
+
+// BrowserMCPStatus 返回浏览器 MCP 后台连接的状态。未启用时 ok 为 false。
+func (b *Bot) BrowserMCPStatus() (BrowserMCPStatus, bool) {
+	if b == nil || b.browserBG == nil {
+		return BrowserMCPStatus{}, false
+	}
+	return b.browserBG.Status(), true
 }
 
 // recoverBrowserCookies 在 bot 关闭时把浏览器会话 cookie 从容器内状态文件回收进 DB。
@@ -809,13 +981,77 @@ func (b *Bot) OnBeforeProcess(ctx context.Context, env *core.Envelope) context.C
 	// 旁路事件：消息接收
 	b.emitter.EmitMessageReceived(ctx, env.Message)
 
+	if b.llmSlot != nil {
+		if snap := b.llmSlot.Current(); snap != nil {
+			ctx = WithLLMSnapshot(ctx, snap)
+		}
+	}
 	return ctx
 }
 
 // OnPipelineError 在 Pipeline 执行出错时发射旁路事件。
 func (b *Bot) OnPipelineError(ctx context.Context, env *core.Envelope, err error) {
-	b.emitter.EmitMessageError(ctx, env.Message.TraceID, err)
-	b.finishMessageLifecycle(ctx, env.Message.TraceID)
+	traceID := ""
+	if env != nil {
+		traceID = env.Message.TraceID
+	}
+	if b.onLLMFailure != nil {
+		b.onLLMFailure(traceID, err)
+	}
+	if !failureOwnedByChannel(b, traceID) {
+		if actions := failureReplyActions(env, err); len(actions) > 0 && b.engine != nil {
+			_ = b.engine.DispatchActions(ctx, actions)
+		}
+	}
+	b.emitter.EmitMessageError(ctx, traceID, err)
+	b.finishMessageLifecycle(ctx, traceID)
+}
+
+func failureReplyActions(env *core.Envelope, err error) []core.Action {
+	text := llm.UserFailureText(err)
+	if text == "" || env == nil || strings.TrimSpace(env.Message.Source) == "" {
+		return nil
+	}
+	for _, existing := range env.Actions() {
+		if existing.Type != core.ActionReply {
+			continue
+		}
+		if payload, ok := existing.Payload.(string); ok && strings.TrimSpace(payload) != "" {
+			return nil
+		}
+	}
+	target := env.Message.Channel
+	if env.Message.Metadata != nil {
+		if rt, ok := env.Message.Metadata["reply_target"].(string); ok && rt != "" {
+			target = rt
+		}
+	}
+	return []core.Action{{
+		Type:    core.ActionReply,
+		Channel: target,
+		UserID:  env.Message.UserID,
+		Payload: text,
+		Metadata: map[string]any{
+			"source_channel": env.Message.Source,
+			"bot_id":         env.Message.BotID,
+			"message_id":     env.Message.ID,
+		},
+	}}
+}
+
+func failureOwnedByChannel(b *Bot, traceID string) bool {
+	if b == nil || traceID == "" {
+		return false
+	}
+	type owner interface {
+		OwnsFailureDelivery(traceID string) bool
+	}
+	for _, ch := range b.channels {
+		if o, ok := ch.(owner); ok && o.OwnsFailureDelivery(traceID) {
+			return true
+		}
+	}
+	return false
 }
 
 // OnMessageDropped 在消息被 Pipeline 丢弃时发射旁路事件。

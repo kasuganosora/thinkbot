@@ -94,7 +94,7 @@ func (c *Client) DoStreamResponse(
 		sseCfg.RetryConfig = cfg.RetryConfig
 	}
 
-	r := c.newRequest("POST", "/v1/responses").
+	r := c.newRequest("POST", c.ResponsesPath()).
 		SetContext(ctx).
 		SetJSONBody(req)
 

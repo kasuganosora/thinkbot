@@ -48,6 +48,8 @@ type BotContext struct {
 	Identity string
 	// History 是主人私聊会话的近期消息（纯文本 user / assistant / system 备注，已应用上下文检查点）。
 	History []llm.Message
+	// CallCtx 钉住这次通知开始时的模型快照。为空时用 Compose 传入的 ctx。
+	CallCtx context.Context
 }
 
 // BotContextSource 为某 bot 与投递目标（主人会话）组装上下文。
@@ -181,7 +183,11 @@ func (b *LLMBot) Compose(ctx context.Context, botID string, t Target, n Notifica
 		return "", ErrBotUnavailable
 	}
 	params := BuildBotParams(bc, n, cfg)
-	res, err := bc.Provider.DoGenerate(ctx, params)
+	callCtx := ctx
+	if bc.CallCtx != nil {
+		callCtx = bc.CallCtx
+	}
+	res, err := bc.Provider.DoGenerate(callCtx, params)
 	if err != nil {
 		return "", err
 	}

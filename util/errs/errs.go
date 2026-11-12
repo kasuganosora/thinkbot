@@ -2,6 +2,7 @@ package errs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -20,6 +21,8 @@ type Error struct {
 	code    int        // HTTP 状态码（0 表示未设置）
 	stack   *stack     // 调用堆栈
 	context []ctxField // 结构化上下文字段
+	// detail 是给调用方分类用的响应片段。Error() 不包含它，避免日志带出密钥。
+	detail string
 }
 
 type ctxField struct {
@@ -36,9 +39,38 @@ func (e *Error) Error() string {
 	return e.message
 }
 
+// PublicMessage is the message without the wrapped cause.
+// Logs and user-facing text use this so a nested upstream body cannot leak.
+func (e *Error) PublicMessage() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
 // Unwrap 支持 errors.Is / errors.As。
 func (e *Error) Unwrap() error {
 	return e.cause
+}
+
+// ResponseDetail 返回不进入 Error() 的响应片段。没有时为空。
+func (e *Error) ResponseDetail() string {
+	if e == nil {
+		return ""
+	}
+	return e.detail
+}
+
+// ResponseDetail 沿错误链查找响应片段。
+func ResponseDetail(err error) string {
+	for err != nil {
+		var he *Error
+		if errors.As(err, &he) && he.detail != "" {
+			return he.detail
+		}
+		err = errors.Unwrap(err)
+	}
+	return ""
 }
 
 // --- 访问器 ---
@@ -221,6 +253,16 @@ func HTTPErrorf(code int, format string, args ...any) *Error {
 	return &Error{
 		message: fmt.Sprintf(format, args...),
 		code:    code,
+		stack:   captureStack(1, 32),
+	}
+}
+
+// HTTPErrorWithDetail 记录状态码和一段不出现在 Error() 里的响应片段。
+func HTTPErrorWithDetail(code int, message, detail string) *Error {
+	return &Error{
+		message: message,
+		code:    code,
+		detail:  detail,
 		stack:   captureStack(1, 32),
 	}
 }

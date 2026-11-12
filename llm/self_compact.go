@@ -344,7 +344,12 @@ func (c *Compactor) PreviousSummary() string {
 // ErrSelfCompactSummaryTruncated is returned when the summarizer hit its
 // output limit: a cut-off note would silently lose context, so it is rejected.
 // Returned errors wrap it (errors.Is) with the caps that were tried.
-var ErrSelfCompactSummaryTruncated = errors.New("summary was cut off by the output token limit")
+type safeSentinel string
+
+func (s safeSentinel) Error() string       { return string(s) }
+func (s safeSentinel) PublicError() string { return string(s) }
+
+var ErrSelfCompactSummaryTruncated error = safeSentinel("summary was cut off by the output token limit")
 
 // SummarizeForSelfCompact summarizes head for a model-initiated compaction.
 //

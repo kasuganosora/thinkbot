@@ -54,6 +54,10 @@ type ServerConfig struct {
 
 	// Enabled 是否启用。false 时跳过此服务器。
 	Enabled bool
+
+	// HandshakeTimeout 覆盖默认握手时限。0 表示用 handshakeTimeout。
+	// 浏览器后台连接的测试把单次握手收短，生产路径保持默认值。
+	HandshakeTimeout time.Duration
 }
 
 // Manager 管理多个 MCP 服务器连接的生命周期。
@@ -325,8 +329,13 @@ func (m *Manager) connectOne(ctx context.Context, cfg ServerConfig) error {
 		return err
 	}
 
-	// MCP 握手（单独限时，见 handshakeTimeout 的说明）
-	hctx, hcancel := context.WithTimeout(ctx, handshakeTimeout)
+	// MCP 握手（单独限时，见 handshakeTimeout 的说明）。
+	// 单次配置可以收短或放宽；0 保持包级默认，避免一个慢握手拖住调用方。
+	limit := handshakeTimeout
+	if cfg.HandshakeTimeout > 0 {
+		limit = cfg.HandshakeTimeout
+	}
+	hctx, hcancel := context.WithTimeout(ctx, limit)
 	defer hcancel()
 	serverInfo, err := client.Initialize(hctx)
 	if err != nil {
@@ -369,6 +378,29 @@ func (m *Manager) createClient(ctx context.Context, cfg ServerConfig) (*Client, 
 	}
 
 	return newClient(cfg.Name, tp, m.logger), nil
+}
+
+// Disconnect 关闭指定服务器的当前客户端，但保留配置与 Enabled。
+// 浏览器后台循环用它丢掉已死连接，随后再 EnableServer 重连。
+func (m *Manager) Disconnect(name string) {
+	if m == nil || name == "" {
+		return
+	}
+	mu := m.connectLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
+	m.mu.Lock()
+	client, ok := m.clients[name]
+	if ok {
+		delete(m.clients, name)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	_ = client.Close()
+	m.notifyServerChange()
 }
 
 // Close 关闭所有 MCP 服务器连接。

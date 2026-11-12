@@ -115,6 +115,45 @@ func (c *TelegramChannel) SetMessageLiveness(l MessageLiveness) { c.liveness = l
 // KeepReplyStream marks an inbound trace whose bubble must survive that trace
 // going inactive. A preempted message does not send; the pipeline that kept
 // the reply edits this same placeholder on its next Send.
+// OwnsFailureDelivery reports that a private stream already exists for this trace.
+// The stream, not a second channel reply, presents the one failure.
+// An empty placeholder and activity that has not been flushed yet still count.
+func (c *TelegramChannel) OwnsFailureDelivery(traceID string) bool {
+	if c == nil || traceID == "" {
+		return false
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	for _, st := range c.streams {
+		if st != nil && st.traceID == traceID {
+			return true
+		}
+	}
+	return false
+}
+
+// HasReplyActivity 表示这个 trace 的气泡里已经有正文或工具活动。
+// 失败说明不再另发一条，避免盖掉已经给用户看过的内容。
+func (c *TelegramChannel) HasReplyActivity(traceID string) bool {
+	if c == nil || traceID == "" {
+		return false
+	}
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	for _, st := range c.streams {
+		if st == nil || st.traceID != traceID {
+			continue
+		}
+		st.mu.Lock()
+		content := strings.TrimSpace(st.content)
+		st.mu.Unlock()
+		if content != "" && content != streamPlaceholder {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *TelegramChannel) KeepReplyStream(traceID string) {
 	if c == nil || traceID == "" {
 		return
@@ -339,8 +378,8 @@ func (c *TelegramChannel) closeStream(ctx context.Context, st *tgStream, text st
 	}
 	c.forgetKept(st.traceID)
 
-	if text == "" {
-		text = streamErrorNote
+	if text == "" || text == streamErrorNote {
+		text = c.failureText(st.traceID)
 	}
 
 	// Never posted → caller should sendMessage normally (fast-reply path).
@@ -409,7 +448,7 @@ func (c *TelegramChannel) abortAllStreams(ctx context.Context) {
 		text := st.content
 		st.mu.Unlock()
 		if text == "" || text == streamPlaceholder {
-			text = streamErrorNote
+			text = c.failureText(st.traceID)
 		}
 		_ = c.closeStream(ctx, st, text)
 	}
@@ -500,11 +539,19 @@ func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tg
 
 	finalText := func() string {
 		final := buf.String()
+		note := c.publicFailure(traceID)
 		if final == "" && len(activity) == 0 {
-			return streamErrorNote
+			if note != "" {
+				return note
+			}
+			return c.failureText(traceID)
 		}
 		if final == "" {
-			return compose("")
+			text := compose("")
+			if note != "" && !strings.Contains(text, note) {
+				text = strings.TrimSpace(text + "\n" + note)
+			}
+			return text
 		}
 		return compose(final)
 	}
@@ -613,10 +660,16 @@ func (c *TelegramChannel) releaseTurnUI(ctx context.Context, chatID int64, mine 
 	if !stillMine {
 		return
 	}
-	if text == "" {
-		text = streamErrorNote
+	if text == "" && mine != nil {
+		text = c.failureText(mine.traceID)
 	}
-	_ = c.closeStream(ctx, mine, text)
+	if c.closeStream(ctx, mine, text) || text == "" {
+		return
+	}
+	// The placeholder was never posted. One send is the whole failure presentation.
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamEditTimeout)
+	defer cancel()
+	_, _ = c.doStreamSend(sendCtx, chatID, text, 0)
 }
 
 func tgToolLine(name string, done, failed bool) string {
@@ -632,6 +685,27 @@ func tgToolLine(name string, done, failed bool) string {
 
 // turnAlive asks the orchestrator whether this trace is still running.
 // Unknown (no liveness injected) → true so we rely on max age / channel close.
+func (c *TelegramChannel) failureText(traceID string) string {
+	if note := c.publicFailure(traceID); note != "" {
+		return note
+	}
+	return streamErrorNote
+}
+
+func (c *TelegramChannel) publicFailure(traceID string) string {
+	type src interface {
+		PublicFailure(botID, traceID string) string
+	}
+	if c == nil || c.liveness == nil || traceID == "" {
+		return ""
+	}
+	s, ok := c.liveness.(src)
+	if !ok {
+		return ""
+	}
+	return s.PublicFailure(c.botID, traceID)
+}
+
 func (c *TelegramChannel) turnAlive(traceID string) bool {
 	if c.liveness == nil || c.botID == "" || traceID == "" {
 		return true

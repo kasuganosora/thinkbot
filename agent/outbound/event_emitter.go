@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/core"
+	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -122,13 +123,17 @@ func (e *EventEmitter) EmitMessageError(ctx context.Context, traceID string, err
 	if e.bus == nil {
 		return
 	}
+	msg := "provider request failed"
+	if err != nil {
+		msg = llm.SafeErrorText(err)
+	}
 	e.bus.Publish(ctx, Event{
 		Type:      EventMessageError,
 		TraceID:   traceID,
 		BotID:     e.botID,
 		Timestamp: time.Now(),
 		Data: map[string]any{
-			"error": err.Error(),
+			"error": msg,
 		},
 	})
 }

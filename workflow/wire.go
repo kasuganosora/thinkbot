@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -56,6 +57,12 @@ type WireConfig struct {
 	// 可为空（nil ModelDef），此时走代码兜底 analyzerMaxTokensFallback。
 	ModelDef *config.ModelDef
 
+	// BindLiveModel 在每次分析/自愈调用开始时读取当前生效模型。
+	// 调用方已经钉住快照时保持那一份（进行中的回合不换参数）。
+	// 没钉住时钉上当时的最新快照，只覆盖这一次调用，不是整条工作流一个事务。
+	// 返回模型 ID 和最大输出。分析器温度不从这里取，它是全局配置。
+	BindLiveModel func(ctx context.Context) (context.Context, string, int)
+
 	// InternalPolicy 内部调用策略（可为 nil）：workflow 自愈诊断的 reasoning_effort / 输出封顶。
 	InternalPolicy *llm.InternalPolicy
 
@@ -104,6 +111,7 @@ type EngineConfig struct {
 	ScheduleInterval    time.Duration
 	AnalyzerTemperature float64
 	AnalyzerMaxTokens   int
+	BindLiveModel       func(ctx context.Context) (context.Context, string, int)
 	// AnalyzerStuckTimeout 需求分析器流式 LLM 调用的卡死看门狗阈值。
 	// 0 表示使用 subagent 包默认（180s）。由 DelegateStream 读取，作为「判卡死」阈值；
 	// 硬上限 = 该值 ×10（subagent.delegateHardTimeoutFactor=10，派生不写死）。看门狗判断真卡死而非固定超时。
@@ -164,6 +172,7 @@ func Setup(cfg WireConfig) (*Manager, *subagent.SubAgentManager) {
 	ec := resolveEngineConfig(cfg.Store, cfg.MaxParallel, cfg.ModelDef)
 	ec.InternalPolicy = cfg.InternalPolicy
 	ec.AnalyzerModel = cfg.Model
+	ec.BindLiveModel = cfg.BindLiveModel
 
 	// 1. SubAgent 管理器
 	// 默认输出上限跟随当前模型配置（如 glm-5.2=128K）；analyzer 显式传的 cap 会覆盖此默认。

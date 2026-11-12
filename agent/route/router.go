@@ -68,6 +68,8 @@ type Config struct {
 	// Cancel stops a running execution pipeline by bot and trace.
 	// Nil means only a cancel func stored on the run is used.
 	Cancel func(botID, traceID string) bool
+	// LiveModel 返回这一回合钉住的路由模型。为空时用 Model。
+	LiveModel func(ctx context.Context) *llm.Model
 }
 
 // Router is the L1 pipeline. It routes; it does not answer and it does not
@@ -106,6 +108,7 @@ func New(cfg Config) (*Router, error) {
 		reg:      reg,
 		provider: cfg.Provider,
 		model:    cfg.Model,
+		live:     cfg.LiveModel,
 		logger:   logger,
 		cancel:   cfg.Cancel,
 	}
@@ -337,6 +340,7 @@ type l1Stage struct {
 	reg      *Registry
 	provider llm.Provider
 	model    *llm.Model
+	live     func(ctx context.Context) *llm.Model
 	logger   *zap.SugaredLogger
 	cancel   func(botID, traceID string) bool
 }
@@ -351,13 +355,23 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 	sys, user := s.prompt(env, key)
 	maxTok := routeMaxTokens
 	temp := 0.0
+	model := s.model
+	if s.live != nil {
+		if live := s.live(ctx); live != nil {
+			model = live
+		}
+	}
 	params := llm.GenerateParams{
-		Model:       s.model,
-		System:      sys,
-		Messages:    []llm.Message{llm.UserMessage(user)},
-		Tools:       s.tools(env, ch, key),
-		Temperature: &temp,
-		MaxTokens:   &maxTok,
+		Model:     model,
+		System:    sys,
+		Messages:  []llm.Message{llm.UserMessage(user)},
+		Tools:     s.tools(env, ch, key),
+		MaxTokens: &maxTok,
+	}
+	// 路由分类默认用温度 0。模型配置恰好为 -1 时表示上游不接受 temperature，
+	// 不能再改写成 0。
+	if !model.OmitsTemperature() {
+		params.Temperature = &temp
 	}
 	// L1 只做一次三选一的路由分类，不需要深度推理。推理型模型在未指定
 	// reasoning_effort 时会按默认档思考，单次调用会稳定超过 defaultRouteTimeout，
@@ -365,12 +379,14 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 	// GLM-5.2 接受 low 但按 high 执行，必须发 minimal；三档词表的最低档是 low；
 	// 不支持该参数的模型族返回空值，保持不发送。
 	modelID := ""
-	if s.model != nil {
-		modelID = s.model.ID
+	if model != nil {
+		modelID = model.ID
 	}
 	if effort := llm.LowestReasoningEffort(modelID); effort != "" {
 		params.ReasoningEffort = &effort
 	}
+	// 温度 0 和路由用的小输出上限是策略。推理档按这一次的模型算。跟随层不要改。
+	ctx = llm.WithKeptParams(ctx, llm.KeptParams{Temperature: true, TopP: true, MaxTokens: true, ReasoningEffort: true})
 	cfg := &llm.OrchestrateConfig{
 		Params:       params,
 		MaxSteps:     routeMaxSteps,
@@ -386,7 +402,7 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 		},
 	}
 	if _, err := llm.OrchestrateGenerate(ctx, s.provider, cfg); err != nil && !decided(ch) {
-		s.logger.Warnw("l1 model call failed", "err", err)
+		s.logger.Warnw("l1 model call failed", "err", llm.SafeErrorText(err))
 	}
 	env.ClearActions()
 	return env, nil

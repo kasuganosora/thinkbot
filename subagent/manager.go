@@ -375,6 +375,8 @@ func (m *SubAgentManager) Delegate(ctx context.Context, systemPrompt, task strin
 //
 // 返回完整文本；被看门狗终止时返回带 stuck/hard 区分的错误。
 func (m *SubAgentManager) DelegateStream(ctx context.Context, systemPrompt, task string, opts ...Option) (string, error) {
+	// 一次委托里的多步调用共用入口时的快照。下一次委托再读最新快照。
+	ctx = llm.PinWork(ctx, m.provider)
 	_, _, defaultOpts := m.snapshotConfig()
 	allOpts := mergeOptionLists(defaultOpts, systemPrompt, opts...)
 

@@ -231,6 +231,7 @@ export const providerApi = {
           clientType: payload.clientType || 'OpenAI Compatible',
           baseUrl: payload.baseUrl || '',
           apiKey: maskKey(payload.apiKey),
+          tokenParamStyle: payload.tokenParamStyle || 'auto',
           enabled: payload.enabled ?? false,
           models: []
         }

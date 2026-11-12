@@ -209,8 +209,9 @@ Rules:
 
 // Compactor 执行上下文压缩。
 type Compactor struct {
-	config CompactionConfig
-	cfgFn  func() CompactionConfig // 非 nil 时每次读取现取（热加载）
+	config   CompactionConfig
+	cfgFn    func() CompactionConfig              // 非 nil 时每次读取现取（热加载）
+	limitSrc func(ctx context.Context) (int, int) // 钉住的上下文长度和输出预留；无钉时由调用方决定
 
 	mu              sync.Mutex
 	previousSummary string // 上次生成的摘要（用于增量更新）
@@ -262,10 +263,36 @@ func NewCompactor(config CompactionConfig) *Compactor {
 
 // SetConfigSource 设置运行时配置源。之后 ShouldCompact 等每次调用都会现取，
 // 使系统配置页对 compaction.* 的修改无需重启 Bot。fn 为 nil 则回到构造时的快照。
+// SetLimitSource 在每次压缩时按 ctx 里钉住的快照覆盖上下文长度和输出预留。
+// 返回值 <= 0 的字段保持配置源里的值。
+func (c *Compactor) SetLimitSource(fn func(ctx context.Context) (contextLen, outputReserve int)) {
+	c.mu.Lock()
+	c.limitSrc = fn
+	c.mu.Unlock()
+}
+
 func (c *Compactor) SetConfigSource(fn func() CompactionConfig) {
 	c.mu.Lock()
 	c.cfgFn = fn
 	c.mu.Unlock()
+}
+
+func (c *Compactor) liveConfigIn(ctx context.Context) CompactionConfig {
+	cfg := c.liveConfig()
+	c.mu.Lock()
+	fn := c.limitSrc
+	c.mu.Unlock()
+	if fn == nil || ctx == nil {
+		return cfg
+	}
+	contextLen, outputReserve := fn(ctx)
+	if contextLen > 0 {
+		cfg.ContextLength = contextLen
+	}
+	if outputReserve > 0 {
+		cfg.OutputReserve = outputReserve
+	}
+	return cfg
 }
 
 func (c *Compactor) liveConfig() CompactionConfig {
@@ -382,10 +409,40 @@ func (c *Compactor) Budget() ResolvedBudget {
 	return ResolveCompactionBudget(c.liveConfig())
 }
 
+func (c *Compactor) budgetIn(ctx context.Context) ResolvedBudget {
+	return ResolveCompactionBudget(c.liveConfigIn(ctx))
+}
+
+// BudgetFor 按 ctx 里钉住的快照计算窗口。没有钉住时与 Budget 相同。
+func (c *Compactor) BudgetFor(ctx context.Context) ResolvedBudget {
+	return c.budgetIn(ctx)
+}
+
 // IsOverflow 检查参数是否超过触发线。
 func (c *Compactor) IsOverflow(params GenerateParams) bool {
+	return c.isOverflowIn(context.Background(), params)
+}
+
+func (c *Compactor) isOverflowIn(ctx context.Context, params GenerateParams) bool {
 	total := EstimateParamsTokens(params)
-	return total >= c.UsableTokens()
+	return total >= c.budgetIn(ctx).Trigger
+}
+
+func (c *Compactor) ShouldCompactIn(ctx context.Context, params GenerateParams) bool {
+	if c == nil {
+		return false
+	}
+	cfg := c.liveConfigIn(ctx)
+	if !cfg.Auto {
+		return false
+	}
+	if c.isDoomLoop() {
+		return false
+	}
+	if len(params.Messages) < cfg.MinMessagesToCompact {
+		return false
+	}
+	return c.isOverflowIn(ctx, params)
 }
 
 // IsOverflowByUsage 使用实际 API 返回的 token 用量判断是否溢出。
@@ -540,11 +597,11 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 		c.logger.Debugw("compaction: running",
 			"messages", len(pruned),
 			"est_tokens", EstimateParamsTokens(params),
-			"usable_tokens", c.UsableTokens(),
+			"usable_tokens", c.budgetIn(ctx).Trigger,
 			"had_summary", c.previousSummary != "")
 	}
 
-	if !c.IsOverflow(params) {
+	if !c.isOverflowIn(ctx, params) {
 		c.resetDoomLoop()
 		return params, nil
 	}
@@ -562,7 +619,7 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 	if err != nil {
 		return params, fmt.Errorf("compaction: %w", err)
 	}
-	if !c.IsOverflow(summaryParams) {
+	if !c.isOverflowIn(ctx, summaryParams) {
 		c.resetDoomLoop()
 	}
 	return summaryParams, nil
@@ -589,7 +646,7 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 	tailMessages := messages[splitIdx:]
 
 	// 计算保留区域的 token 预算
-	budget := c.preserveRecentBudget()
+	budget := c.preserveRecentBudgetIn(ctx)
 	tailTokens := EstimateMessagesTokens(tailMessages)
 	if tailTokens > budget {
 		// tail 太大，尝试进一步分割
@@ -716,7 +773,11 @@ func (c *Compactor) selectTailSplitByTokens(messages []Message, budget int) int 
 // preserveRecentBudget 计算保留最近消息的 token 预算。
 // 默认为可用空间的 25%，下限 2000；上限随窗口放大，但不超过 32000。
 func (c *Compactor) preserveRecentBudget() int {
-	b := c.Budget()
+	return c.preserveRecentBudgetIn(context.Background())
+}
+
+func (c *Compactor) preserveRecentBudgetIn(ctx context.Context) int {
+	b := c.budgetIn(ctx)
 	budget := b.Usable / 4
 	cap := MaxPreserveRecentTokens
 	if scaled := b.Window / 25; scaled > cap {
@@ -949,7 +1010,7 @@ func CompactionPrepareStep(compactor *Compactor) func(*GenerateParams) *Generate
 func CompactionPrepareStepWithProvider(compactor *Compactor, provider Provider) func(context.Context) func(*GenerateParams) *GenerateParams {
 	return func(ctx context.Context) func(*GenerateParams) *GenerateParams {
 		return func(params *GenerateParams) *GenerateParams {
-			if compactor == nil || !compactor.ShouldCompact(*params) {
+			if compactor == nil || !compactor.ShouldCompactIn(ctx, *params) {
 				return nil
 			}
 

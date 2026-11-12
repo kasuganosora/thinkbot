@@ -504,7 +504,7 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 	if s.botSvc == nil {
 		return nil, notify.ErrBotUnavailable
 	}
-	bundle, ok := s.botSvc.GetLLMBundle(botID)
+	ctx, bundle, ok := s.botSvc.LLMForJob(ctx, botID)
 	if !ok || bundle == nil || bundle.Main == nil {
 		return nil, notify.ErrBotUnavailable
 	}
@@ -513,6 +513,7 @@ func (s *Server) notifyBotContext(ctx context.Context, botID string, t notify.Ta
 		Model:          bundle.MainDef.Model,
 		ModelMaxTokens: bundle.MainDef.MaxTokens,
 		Temperature:    bundle.MainDef.Temperature,
+		CallCtx:        ctx,
 	}
 	var def *dao.BotDefinition
 	botEffort := ""

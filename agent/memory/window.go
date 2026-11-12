@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
@@ -27,8 +28,9 @@ import (
 //  3. ContextManager 调用 Available() 获取可用空间
 //  4. 超限时触发 Compressor 压缩
 type Window struct {
-	config WindowConfig
-	cfgFn  func() WindowConfig // 非 nil 时每次读取现取（热加载）
+	config     WindowConfig
+	cfgFn      func() WindowConfig // 非 nil 时每次读取现取（热加载）
+	turnLimits func(ctx context.Context) (contextLen, outputReserve int)
 
 	mu         sync.RWMutex
 	usedTokens int // 最新一轮 LLM 调用的完整 prompt input tokens（覆盖写，非累计）
@@ -126,15 +128,38 @@ func (w *Window) SetConfigSource(fn func() WindowConfig) {
 	w.mu.Unlock()
 }
 
+// SetTurnLimits 按 ctx 里钉住的快照覆盖上下文长度和输出预留。
+// 没有钉住时由 fn 自己决定是否读最新快照。
+func (w *Window) SetTurnLimits(fn func(ctx context.Context) (contextLen, outputReserve int)) {
+	w.mu.Lock()
+	w.turnLimits = fn
+	w.mu.Unlock()
+}
+
 func (w *Window) liveConfig() WindowConfig {
+	return w.configIn(context.Background())
+}
+
+func (w *Window) configIn(ctx context.Context) WindowConfig {
 	w.mu.RLock()
 	fn := w.cfgFn
+	limits := w.turnLimits
 	base := w.config
 	w.mu.RUnlock()
-	if fn == nil {
-		return base
+	cfg := base
+	if fn != nil {
+		cfg = fn()
 	}
-	return fn()
+	if limits != nil && ctx != nil {
+		contextLen, outputReserve := limits(ctx)
+		if contextLen > 0 {
+			cfg.MaxContextTokens = contextLen
+		}
+		if outputReserve > 0 {
+			cfg.OutputReserve = outputReserve
+		}
+	}
+	return cfg
 }
 
 // RecordUsage 记录一次 LLM 调用的 token 用量。
@@ -163,7 +188,18 @@ func (w *Window) Available() int {
 	used := w.usedTokens
 	w.mu.RUnlock()
 
-	cfg := w.liveConfig()
+	return w.availableIn(context.Background(), used)
+}
+
+func (w *Window) AvailableIn(ctx context.Context) int {
+	w.mu.RLock()
+	used := w.usedTokens
+	w.mu.RUnlock()
+	return w.availableIn(ctx, used)
+}
+
+func (w *Window) availableIn(ctx context.Context, used int) int {
+	cfg := w.configIn(ctx)
 	totalAvailable := cfg.MaxContextTokens - cfg.ReservedTokens - cfg.OutputReserve - used
 	if totalAvailable <= 0 {
 		return 0
