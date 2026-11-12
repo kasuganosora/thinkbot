@@ -13,7 +13,7 @@ import (
 )
 
 // TestSendAddsRemoteHostToMention 验证修复：outbound Send 回复远程（联邦）用户时，
-// 必须自动补全 @username@host，否则 example.com 会把 @username 解析成本实例同名用户，远程用户收不到。
+// 必须自动补全 @username@host，否则本实例会把 @username 解析成本实例同名用户，远程用户收不到。
 // 复现 2026-08-12 的 bug：bot 回复 remoteuser@remote.example 时发出的是裸 @remoteuser。
 func TestSendAddsRemoteHostToMention(t *testing.T) {
 	var gotText string

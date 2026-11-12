@@ -1376,7 +1376,7 @@ func (c *MisskeyChannel) Send(ctx context.Context, action core.Action) error {
 	text = truncateRunes(strings.TrimSpace(text), misskeyMaxNoteLength)
 
 	// 回复时自动补全 @host：联邦/远程用户必须带 host 才能被正确提及并收到通知。
-	// 若只写 @username，bot 在 example.com 上发的会指向本实例同名用户，远程用户收不到。
+	// 若只写 @username，bot 在本实例上发的会指向本实例同名用户，远程用户收不到。
 	// （outbound 走 Send 而非 ReplyWithVisibility，故此处需自行补全，不要依赖调用方。）
 	if noteID != "" {
 		if replyNote, err := c.api.getNote(ctx, noteID); err == nil && replyNote != nil {

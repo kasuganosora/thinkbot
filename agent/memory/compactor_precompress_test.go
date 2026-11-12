@@ -115,7 +115,7 @@ func TestPreprocessContent_CompressesJSONAndKeepsFragile(t *testing.T) {
 	// 从而既压缩又附加 must-keep 段（net_mutation_gain 为正才附加）。
 	line := "  \"field\": \"550e8400-e29b-41d4-a716-446655440000 long padding text that wastes tokens padding padding\",\n"
 	in := "{\n" + strings.Repeat(line, 40) +
-		"  \"path\": \"/home/example/Documents/thinkbot/agent/memory/compactor.go\",\n  \"error\": \"ERR_TIMEOUT_504\"\n}"
+		"  \"path\": \"agent/memory/compactor.go\",\n  \"error\": \"ERR_TIMEOUT_504\"\n}"
 	got := preprocessContent(in, true)
 	if strings.Contains(got, "\n  ") {
 		t.Fatalf("JSON not compacted: %q", got)

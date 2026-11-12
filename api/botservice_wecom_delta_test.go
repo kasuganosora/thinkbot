@@ -36,7 +36,7 @@ func TestToWecomDelta_ToolsOnlyCarryName(t *testing.T) {
 		Data: map[string]any{
 			"toolCallId": "c1",
 			"tool":       "sandbox_read_file",
-			"input":      map[string]any{"path": "/home/example/secret/token.txt"},
+			"input":      map[string]any{"path": "/tmp/example/token.txt"},
 		},
 	})
 	if !ok || start.Kind != wecom.DeltaToolStart || start.Text != "sandbox_read_file" || start.ID != "c1" {

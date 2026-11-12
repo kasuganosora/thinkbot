@@ -485,7 +485,7 @@ func newerID(a, b string) bool {
 // Mastodon 文档里 since_id 是开区间（id > since_id）。community（mastodon.example.com，
 // 4.3.0+community）实际是闭区间（id >= since_id），于是每次重连都会把锚点
 // 那一条再吐出来。setNotificationAnchor 对相等 id 是空操作，锚点永远停在
-// 原地，日志就一直是 count=1 anchor="119"。去重窗口过期后，同一条 mention
+// 原地，日志就一直是 count=1 anchor="N"。去重窗口过期后，同一条 mention
 // 还会被重新入队。这里只处理严格新于锚点的通知，闭区间回声直接丢掉。
 // 不能改用 min_id：上游 Mastodon 看到 min_id 会改成升序翻页，和这里的
 // 「最新在前 + max_id」循环不兼容。

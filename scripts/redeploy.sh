@@ -2,7 +2,7 @@
 # thinkbot 重部署脚本：停止旧实例 -> 构建 -> 启动 -> 健康检查
 # 用法：bash scripts/redeploy.sh
 set -u
-REPO=/home/example/Documents/thinkbot
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 cd "$REPO" || exit 1
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S%z')] $*"; }

@@ -37,7 +37,7 @@
 |---|---|---|
 | **CPU 架构** | ❌ **官方 Linux 版仅 amd64**，无 arm64 deb/rpm | ✅ amd64 + arm64 都有 |
 | 本地 Apple Silicon 调试 | 只能 `--platform=linux/amd64` 模拟跑，性能差且行为偏差 | 原生 |
-| 服务器（192.0.2.10, x86_64） | 可用 | 可用 |
+| 服务器（测试机 192.0.2.10, x86_64） | 可用 | 可用 |
 | 私有 codec（H.264/AAC） | 有 | debian chromium 版视编译而定 |
 | 安装源 | 需加 dl.google.com apt repo + GPG key（构建环境可能慢/被墙） | 官方源直接装 |
 | 许可 | 专有软件 | 开放 |
@@ -45,7 +45,7 @@
 
 **结论：主线用 debian apt 的 Chromium**。理由：① arm64 硬约束（两边架构一致，测试无偏差）；② 安装链路最短；③ thinkbot 场景（抓 Misskey、网页摘要、截图）不需要私有 codec。
 
-关于指纹/反爬：example.com 之前遇过 Cloudflare `1010`，但那是 UA 层问题（已验证带正常浏览器 UA 可解），与 Chrome vs Chromium 二进制无关——UA 由 Playwright 启动参数控制，两者都能伪装。
+关于指纹/反爬：某实例之前遇过 Cloudflare `1010`，但那是 UA 层问题（已验证带正常浏览器 UA 可解），与 Chrome vs Chromium 二进制无关——UA 由 Playwright 启动参数控制，两者都能伪装。
 
 > 若未来确认需要原版 Chrome（如真实浏览器指纹要求），留 `ARG USE_CHROME=1` 分支：`[ "$(dpkg --print-architecture)" = amd64 ]` 时装 google-chrome-stable，arm64 仍回落 chromium。**但这意味着两边环境不一致，非必要不启用。**
 
@@ -214,7 +214,7 @@ x.com / 小红书属于上表"高"档甚至更高，且难度是**四层叠加**
 11. **`--network none` 冲突**：`NetworkDisabled` 配置为真时容器无网（`botcontainer.go:271`），浏览器工具必须在注册时检查并给出明确错误，而不是让 agent 干等超时。
 12. **cookie 是账号本体级凭据**：现在有两处副本——① thinkbot DB 的 storageState（权威，须加密+掩码，见 §10.4）② 容器 volume 内的 profile 与投递文件（宿主 `/var/lib/docker/volumes/...` 明文）。规则：cookie 值永不进日志/永不给 agent 工具；`DestroyBot` 删 volume 但 **DB 里的 cookie 会留下**（重建容器可恢复登录态——这是特性，但用户要知道"删了 bot 容器不等于删了账号凭据"，删 bot 时应同步清 cookie 表）。
 13. **storageState 与 user-data-dir 的职责别搞混**：cookie 权威来源是 storageState JSON（可管理、可编辑）；user-data-dir 只承载缓存/指纹相关的 profile 数据。若两者冲突（profile 里旧 cookie vs 注入的新 cookie），以注入为准 → 封装层用 `newContext({storageState})` 而非依赖 profile 自带 cookie；否则用户在 Web 上删了 cookie，浏览器还拿 profile 里的旧值继续用。
-14. **example.com 限流**（次要场景）：Playwright 复用会话 cookie 可减少触发；沿用 `channel/misskey/api.go` 已有的重试退避经验。
+14. **某实例限流**（次要场景）：Playwright 复用会话 cookie 可减少触发；沿用 `channel/misskey/api.go` 已有的重试退避经验。
 
 ## 9. 分阶段实施
 

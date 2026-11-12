@@ -142,9 +142,10 @@ func TestParseBrowserCookieImport_FormatRouting(t *testing.T) {
 	}
 }
 
-// TestParseCookieHeader_RealDevToolsSample 用一段贴近真实 DevTools 复制内容的样本，
+// TestParseCookieHeader_LongDevToolsSample 用一段模拟 DevTools 复制内容的构造样本，
 // 验证长串、含 URL 编码与特殊字符的 cookie 不会被截断或丢弃。
-func TestParseCookieHeader_RealDevToolsSample(t *testing.T) {
+// 样本值全部为占位数据，不含任何真实账号或凭据。
+func TestParseCookieHeader_LongDevToolsSample(t *testing.T) {
 	raw := "x_host_key_access_https=0123456789abcdef0123456789abcdef01234567; " +
 		"x_zhiyan_staffname=testuser; x_zhiyan_project_id=1001; " +
 		"sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%22testuser%22%2C%22first_id%22%3A%22%22%7D; " +

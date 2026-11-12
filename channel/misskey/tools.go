@@ -47,7 +47,7 @@ When someone @mentions or replies to you, simply reply with your normal text —
 
 ## Proactively publishing a new note (only when NOT replying)
 Only call misskey_create_note when you want to start a brand-new note that is not a reply to anything. For replies, use the "reply with text" above.
-- If the note needs to @ someone: for users on THIS instance (example.com) just write @username; for remote/federated users on other instances you MUST write @username@host (e.g. @alice@example.com). The @username@host that appears in the conversation context is the correct form — copy it as-is, otherwise the other party won't receive it.
+- If the note needs to @ someone: for users on THIS instance just write @username; for remote/federated users on other instances you MUST write @username@host (e.g. @alice@example.com). The @username@host that appears in the conversation context is the correct form — copy it as-is, otherwise the other party won't receive it.
 
 ## Current note ID (for tool calls only)
 The message you receive may end with a line '[note_id: xxxxx]' — that is the ID of the CURRENT note. To add a reaction (misskey_react_to_note) or quote it, use it directly, and do NOT call misskey_search_notes to look it up — this instance's search backend (Meilisearch) is often unavailable and will fail.

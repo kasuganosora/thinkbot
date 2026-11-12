@@ -3,7 +3,7 @@
 # 输出结构化状态，供人工或自动任务判断是否需要修复/重部署。
 # 用法：bash scripts/watch.sh
 set -u
-REPO=/home/example/Documents/thinkbot
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 cd "$REPO" || exit 1
 LOG=logs/thinkbot.log
 OUT=logs/watch_8h.log
