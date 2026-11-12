@@ -20,6 +20,9 @@ type Client struct {
 	chatMode      bool   // true = 使用 Chat Completions API（/v1/chat/completions）
 	chatPath      string // Chat Completions 端点路径
 	responsesPath string // Responses API 路径，默认 /v1/responses
+	// tokenParamStyle selects the Chat Completions output-cap field.
+	// Empty means auto.
+	tokenParamStyle TokenParamStyle
 
 	// retryCfg 重试配置（可为 nil）。
 	// 非流式请求由 httputil.WithRetry 自动应用；流式（SSE）请求则由
@@ -32,19 +35,20 @@ type Client struct {
 type Option func(*config)
 
 type config struct {
-	apiKey        string
-	baseURL       string
-	organization  string
-	project       string
-	timeout       time.Duration
-	maxBodySize   int64
-	retryCfg      *retry.Config
-	httpClient    *http.Client
-	sharedClient  *httputil.Client
-	dump          bool
-	chatMode      bool
-	chatPath      string
-	responsesPath string
+	apiKey          string
+	baseURL         string
+	organization    string
+	project         string
+	timeout         time.Duration
+	maxBodySize     int64
+	retryCfg        *retry.Config
+	httpClient      *http.Client
+	sharedClient    *httputil.Client
+	dump            bool
+	chatMode        bool
+	chatPath        string
+	responsesPath   string
+	tokenParamStyle TokenParamStyle
 }
 
 // WithAPIKey 设置 API Key。
@@ -112,6 +116,15 @@ func WithResponsesPath(path string) Option {
 	return func(c *config) { c.responsesPath = path }
 }
 
+// WithTokenParamStyle selects the Chat Completions output-cap field.
+// Accepted values are auto, max_tokens, and max_completion_tokens.
+// Empty and unrecognized values mean auto: max_completion_tokens on the
+// official API host, max_tokens otherwise. Responses requests ignore it
+// and always use max_output_tokens.
+func WithTokenParamStyle(style string) Option {
+	return func(c *config) { c.tokenParamStyle = NormalizeTokenParamStyle(style) }
+}
+
 // WithChatPath 设置 Chat Completions 端点路径。
 // 默认为 "/v1/chat/completions"（标准 OpenAI 路径）。
 // 对于自定义路径的供应商，可覆盖此值。
@@ -174,13 +187,14 @@ func New(opts ...Option) *Client {
 	}
 
 	return &Client{
-		http:          httpClient,
-		apiKey:        cfg.apiKey,
-		baseURL:       cfg.baseURL,
-		chatMode:      cfg.chatMode,
-		chatPath:      cfg.chatPath,
-		responsesPath: cfg.responsesPath,
-		retryCfg:      cfg.retryCfg,
+		http:            httpClient,
+		apiKey:          cfg.apiKey,
+		baseURL:         cfg.baseURL,
+		chatMode:        cfg.chatMode,
+		chatPath:        cfg.chatPath,
+		responsesPath:   cfg.responsesPath,
+		tokenParamStyle: cfg.tokenParamStyle,
+		retryCfg:        cfg.retryCfg,
 	}
 }
 

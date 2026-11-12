@@ -169,3 +169,12 @@ func TestLLMSlot_ConcurrentPublishStaysWhole(t *testing.T) {
 		t.Fatalf("generation %d", cur.Generation)
 	}
 }
+
+func TestSnapshotCopiesOmitTemperature(t *testing.T) {
+	omit := float64(config.OmitSamplingParam)
+	bundle := &LLMBundle{MainDef: config.ModelDef{Model: "model-sol-main", Temperature: &omit}}
+	snap := SnapshotFromBundle(bundle)
+	if snap.MainModel == nil || !snap.MainModel.OmitsTemperature() {
+		t.Fatalf("model %+v", snap.MainModel)
+	}
+}

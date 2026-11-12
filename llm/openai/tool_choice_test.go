@@ -32,7 +32,7 @@ func TestParamsToChatRequest_ToolChoice(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := toolChoiceTestParams(tt.model, tt.choice)
-			req, err := paramsToChatRequest(&p)
+			req, err := paramsToChatRequest(&p, TokenParamAuto, "")
 			if err != nil {
 				t.Fatalf("paramsToChatRequest: %v", err)
 			}

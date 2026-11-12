@@ -427,11 +427,11 @@ func parseAPIError(resp *httputil.Response, httpErr error) error {
 
 // classifyStatusBody 只在内存里读响应体来分类。返回的错误不携带原文。
 func classifyStatusBody(statusCode int, body []byte, headers http.Header) error {
-	var errResp ErrorResponse
-	_ = json.Unmarshal(body, &errResp)
-	apiErr := errResp.Error
+	apiErr, detail := parseProviderError(body)
 	reason := openaiErrorTypeToReason(apiErr.Type, apiErr.Code, statusCode)
-	return openAIErrorToLLMError(&apiErr, statusCode, headers, reason)
+	err := openAIErrorToLLMError(&apiErr, statusCode, headers, reason)
+	err.SafeDetail = detail
+	return err
 }
 
 func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header, reason llm.ErrorReason) *llm.LLMError {
@@ -498,6 +498,10 @@ func openaiErrorTypeToReason(errType, code string, statusCode int) llm.ErrorReas
 func ClassifyStreamError(err error) error {
 	if err == nil {
 		return nil
+	}
+	var already *llm.LLMError
+	if errors.As(err, &already) && already != nil {
+		return already
 	}
 	var streamErr *httputil.StreamHTTPError
 	if errors.As(err, &streamErr) && streamErr != nil {

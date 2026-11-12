@@ -36,6 +36,22 @@ func TestSafeErrorText_UnregisteredPlaintextIsNotEchoed(t *testing.T) {
 	}
 }
 
+func TestSafeErrorText_LLMErrorDetailOmitsCause(t *testing.T) {
+	const secret = "dummy-token-reflected-zzzz"
+	le := NewLLMError(ErrorReasonInvalidRequest, "openai", "provider request failed with HTTP 400", WithCause(fmt.Errorf("body %s", secret)))
+	le.SafeDetail = "code=unsupported_parameter param=max_tokens type=invalid_request_error"
+	got := SafeErrorText(le)
+	if strings.Contains(got, secret) || strings.Contains(got, "body ") {
+		t.Fatalf("cause leaked: %q", got)
+	}
+	if !strings.Contains(got, "code=unsupported_parameter") || !strings.Contains(got, "param=max_tokens") || !strings.Contains(got, "type=invalid_request_error") {
+		t.Fatalf("detail missing: %q", got)
+	}
+	if got != le.Error() {
+		t.Fatalf("safe text %q error %q", got, le.Error())
+	}
+}
+
 func TestSafeErrorText_UnknownErrorDoesNotEchoBody(t *testing.T) {
 	const reflected = "dummy-token-reflected-zzzz"
 	log.RegisterSecret(reflected)

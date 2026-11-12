@@ -1700,6 +1700,18 @@ func liveMainLimits(ctx context.Context, slot *bot.LLMSlot, fallback config.Mode
 	return def.ContextLength, def.MaxTokens
 }
 
+// publishRereadError separates a failed definition read from a real config change.
+// A read failure must not be reported as "configuration changed".
+func publishRereadError(readErr error, changed bool) error {
+	if readErr != nil {
+		return errs.Wrap(readErr, "bot_service: read definition before publish")
+	}
+	if changed {
+		return errs.Conflict("bot configuration changed during startup")
+	}
+	return nil
+}
+
 // StartBot 从定义创建并启动 Bot 实例。
 func (s *BotService) StartBot(ctx context.Context, id string) error {
 	def, err := s.GetDefinition(id)
@@ -1872,7 +1884,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	bundle = bot.FollowBundle(slot, bundle)
 
 	// 创建 LLM Stage
-	mainModel := &llm.Model{ID: def.LLMMain}
+	mainModel := &llm.Model{ID: def.LLMMain, Temperature: bundle.MainDef.Temperature}
 	if def.Model != "" {
 		mainModel.DisplayName = def.Model
 	}
@@ -3449,6 +3461,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		l1Provider = bundle.Light
 		if bundle.LightDef.Model != "" {
 			l1Model = llm.ChatModel(bundle.LightDef.Model)
+			l1Model.Temperature = bundle.LightDef.Temperature
 		}
 	}
 	l1Router, err := route.New(route.Config{
@@ -3685,20 +3698,20 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	s.applyMu.Lock()
 	defNow, defErr := s.GetDefinition(id)
 	visionNow := ""
-	if s.store != nil {
+	if defErr == nil && s.store != nil {
 		visionNow = strings.TrimSpace(s.store.GetString(config.BotLLMKey(id, "vision"), ""))
 	}
 	materialNow := ""
 	if defNow != nil {
 		materialNow = s.llmMaterial(defNow)
 	}
-	changed := defErr != nil || startupDesiredChanged(defNow, visionNow, prepared) || (prepared.material != "" && materialNow != prepared.material)
-	if changed {
+	changed := defErr == nil && (startupDesiredChanged(defNow, visionNow, prepared) || (prepared.material != "" && materialNow != prepared.material))
+	if err := publishRereadError(defErr, changed); err != nil {
 		s.applyMu.Unlock()
 		botCancel()
 		s.stopReplacement(id, gen, b, oldBot)
 		rollback()
-		return errs.Conflict("bot configuration changed during startup")
+		return err
 	}
 
 	err = s.commitEffectivePublication(syncCtx, id, effectiveRow{id: id, main: mainID, light: lightID, vision: useVision}, fromDesired, func() error {

@@ -340,9 +340,22 @@ func safeApplyMessage(err error) string {
 // reapplyRunningBots 在服务商变更后为依赖它的运行中机器人重建快照。
 // 任何一个解析失败都不替换，避免一部分机器人已经换了、另一部分还停在旧客户端。
 func (s *BotService) reapplyRunningBots(ctx context.Context, providerID string) (bool, string) {
+	return s.reapplyRunningBotsFor(ctx, providerID, nil)
+}
+
+// reapplyRunningBotsFor 只重建引用了这些模型的机器人。modelIDs 为空表示该服务商下的全部模型。
+func (s *BotService) reapplyRunningBotsFor(ctx context.Context, providerID string, modelIDs []string) (bool, string) {
 	if s == nil || providerID == "" {
 		return true, ""
 	}
+	wantModel := map[string]bool{}
+	for _, id := range modelIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			wantModel[id] = true
+		}
+	}
+	filterModel := len(wantModel) > 0
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	s.mu.RLock()
@@ -352,8 +365,14 @@ func (s *BotService) reapplyRunningBots(ctx context.Context, providerID string) 
 			continue
 		}
 		cur := slot.Current()
-		if cur != nil && cur.UsesProvider(providerID) {
+		if cur != nil && cur.UsesProvider(providerID) && (!filterModel || snapshotUsesModels(cur, wantModel)) {
 			ids = append(ids, id)
+			continue
+		}
+		if filterModel {
+			if s.desiredUsesModels(id, wantModel) {
+				ids = append(ids, id)
+			}
 			continue
 		}
 		if s.desiredUsesProvider(id, providerID) {
@@ -459,6 +478,32 @@ func (s *BotService) botsReferencingModels(modelIDs []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func snapshotUsesModels(cur *bot.LLMSnapshot, want map[string]bool) bool {
+	if cur == nil {
+		return false
+	}
+	return want[cur.MainDef.Model] || want[cur.LightDef.Model] || want[cur.VisionDef.Model]
+}
+
+func (s *BotService) desiredUsesModels(botID string, want map[string]bool) bool {
+	def, err := s.GetDefinition(botID)
+	if err != nil || def == nil {
+		return false
+	}
+	if want[def.LLMMain] || want[def.LLMLight] {
+		return true
+	}
+	if s.store == nil {
+		return false
+	}
+	for _, role := range []string{"main", "light", "vision", "vision_effective"} {
+		if want[strings.TrimSpace(s.store.GetString(config.BotLLMKey(botID, role), ""))] {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *BotService) desiredUsesProvider(botID, providerID string) bool {

@@ -21,6 +21,53 @@ func TestResolveLLMModel_DuplicateEnabledIDs(t *testing.T) {
 	}
 }
 
+func TestResolveLLMModel_TemperatureOmitSentinel(t *testing.T) {
+	store := NewStore(nil)
+	store.SetTemporary("provider.synth-a", `{"enabled":true,"clientType":"OpenAI Compatible","baseUrl":"http://a.example/v1","apiKey":"dummy-token-alpha-aaaa","models":[{"id":"model-omit-temp","temperature":-1,"topP":-1},{"id":"model-default-temp"}]}`)
+	b := NewBuilder(store, testLogger())
+	omit, err := b.ResolveLLMModel("model-omit-temp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omit.Temperature == nil || *omit.Temperature != OmitSamplingParam {
+		t.Fatalf("temperature %+v", omit.Temperature)
+	}
+	if omit.TopP == nil || *omit.TopP != OmitSamplingParam {
+		t.Fatalf("topP %+v", omit.TopP)
+	}
+	plain, err := b.ResolveLLMModel("model-default-temp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Temperature == nil || *plain.Temperature != 0.7 {
+		t.Fatalf("default temperature %+v", plain.Temperature)
+	}
+	if plain.TopP != nil {
+		t.Fatalf("default topP %+v", plain.TopP)
+	}
+}
+
+func TestResolveLLMModel_TokenParamStyle(t *testing.T) {
+	store := NewStore(nil)
+	store.SetTemporary("provider.synth-a", `{"enabled":true,"clientType":"OpenAI Compatible","baseUrl":"http://a.example/v1","apiKey":"dummy-token-alpha-aaaa","tokenParamStyle":"max_completion_tokens","models":[{"id":"model-sol-main"}]}`)
+	store.SetTemporary("provider.synth-b", `{"enabled":true,"clientType":"OpenAI Compatible","baseUrl":"http://b.example/v1","apiKey":"dummy-token-beta-bbbb","models":[{"id":"model-terra-light"}]}`)
+	b := NewBuilder(store, testLogger())
+	md, err := b.ResolveLLMModel("model-sol-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.TokenParamStyle != "max_completion_tokens" {
+		t.Fatalf("style %q", md.TokenParamStyle)
+	}
+	plain, err := b.ResolveLLMModel("model-terra-light")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.TokenParamStyle != "" {
+		t.Fatalf("default style %q", plain.TokenParamStyle)
+	}
+}
+
 func TestResolveLLMModel_ResponsesStyle(t *testing.T) {
 	store := NewStore(nil)
 	store.SetTemporary("provider.synth-a", `{"enabled":true,"clientType":"OpenAI Responses","baseUrl":"http://a.example/v1","apiKey":"dummy-token-alpha-aaaa","models":[{"id":"model-sol-main"}]}`)

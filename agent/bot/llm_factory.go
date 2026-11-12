@@ -56,6 +56,9 @@ func CreateProvider(def config.ModelDef, llmCfg config.LLMClientConfig) (llm.Pro
 		if def.BaseURL != "" {
 			opts = append(opts, openai.WithBaseURL(def.BaseURL))
 		}
+		if style := strings.TrimSpace(def.TokenParamStyle); style != "" {
+			opts = append(opts, openai.WithTokenParamStyle(style))
+		}
 		if def.APIStyle == "responses" {
 			// 真实 Responses 协议。base 已带 /v1 时路径用 /responses，避免 /v1/v1/responses。
 			path := "/v1/responses"

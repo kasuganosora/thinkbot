@@ -34,10 +34,18 @@ import (
 
 func applyDB(t *testing.T) (*gorm.DB, *config.Store) {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"?mode=memory&cache=private"), &gorm.Config{})
+	// cache=shared：同一个内存库的后续连接也能看见已迁移的表。
+	// cache=private 时 database/sql 再开一条连接就是另一份空库，
+	// 启动提交里的 GetDefinition 会报 no such table，并被误当成配置变更。
+	db, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxIdleConns(2)
 	if err := db.AutoMigrate(&dao.Setting{}, &dao.BotDefinition{}); err != nil {
 		t.Fatal(err)
 	}
@@ -698,6 +706,55 @@ func TestStartBot_ReadyTimeoutResumesOldPoll(t *testing.T) {
 	}
 	runCancel()
 	_ = old.StopAndWait(context.Background())
+}
+
+func TestPublishRereadErrorDistinguishesReadFailure(t *testing.T) {
+	err := publishRereadError(fmt.Errorf("no such table: bot_definitions"), true)
+	if err == nil || strings.Contains(err.Error(), "configuration changed") || !strings.Contains(err.Error(), "read definition") {
+		t.Fatalf("read failure: %v", err)
+	}
+	err = publishRereadError(nil, true)
+	if err == nil || !strings.Contains(err.Error(), "configuration changed") {
+		t.Fatalf("config change: %v", err)
+	}
+	if err := publishRereadError(nil, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelUpdateReappliesOnlyReferencedBots(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, st := applyDB(t)
+	putProvider(t, st, "provider-synth-a", `{"id":"provider-synth-a","enabled":true,"clientType":"OpenAI Responses","baseUrl":"http://a.example/v1","apiKey":"dummy-token-alpha-aaaa","models":[{"id":"model-sol-main","temperature":0.7},{"id":"model-other","temperature":0.3}]}`)
+	svc := &BotService{db: db, store: st, logger: zap.NewNop().Sugar(), botInstances: map[string]*bot.Bot{}, llmSlots: map[string]*bot.LLMSlot{}}
+	if err := svc.CreateDefinition(&dao.BotDefinition{ID: "bot-a", Name: "a", LLMMain: "model-sol-main", Status: dao.BotStatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CreateDefinition(&dao.BotDefinition{ID: "bot-b", Name: "b", LLMMain: "model-other", Status: dao.BotStatusRunning}); err != nil {
+		t.Fatal(err)
+	}
+	tempA, tempB := 0.7, 0.3
+	slotA := bot.NewLLMSlot(&bot.LLMSnapshot{MainModel: llm.ChatModel("model-sol-main"), MainDef: config.ModelDef{ProviderID: "provider-synth-a", Model: "model-sol-main", Temperature: &tempA}})
+	slotB := bot.NewLLMSlot(&bot.LLMSnapshot{MainModel: llm.ChatModel("model-other"), MainDef: config.ModelDef{ProviderID: "provider-synth-a", Model: "model-other", Temperature: &tempB}})
+	beforeB := slotB.Current()
+	svc.llmSlots["bot-a"] = slotA
+	svc.llmSlots["bot-b"] = slotB
+	srv := &Server{store: st, botSvc: svc, logger: zap.NewNop().Sugar()}
+	r := gin.New()
+	r.PUT("/api/providers/:pid/models/:mid", srv.handleUpdateModel)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/providers/provider-synth-a/models/model-sol-main", strings.NewReader(`{"temperature":-1}`))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Body.String())
+	}
+	if !slotA.Current().MainModel.OmitsTemperature() {
+		t.Fatalf("referenced bot temperature %+v", slotA.Current().MainDef.Temperature)
+	}
+	if slotB.Current() != beforeB || slotB.Current().MainModel.OmitsTemperature() {
+		t.Fatal("unrelated model was reapplied")
+	}
 }
 
 func TestStartBot_PublishFailureResumesOldPoll(t *testing.T) {

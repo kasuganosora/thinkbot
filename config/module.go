@@ -173,6 +173,10 @@ func (b *Builder) Store() *Store { return b.store }
 
 // --- LLM 配置 ---
 
+// OmitSamplingParam 表示模型配置里的 temperature / top_p 不要写入上游请求。
+// 只能是恰好 -1。0 仍表示未设置，空温度仍默认 0.7。
+const OmitSamplingParam = -1
+
 // ModelDef 描述一个命名的 LLM 模型配置。
 // 在数据库中存储为单行 JSON：键 llm.<id>，值为此结构体的 JSON。
 // 由上层模块（如 bot）负责转换为具体的 llm.Provider 实例。
@@ -197,6 +201,12 @@ type ModelDef struct {
 	// APIStyle 选择真实上游协议：chat（Chat Completions）或 responses。
 	// 空值与 chat 相同。不会把 responses 静默改写成 chat。
 	APIStyle string `json:"api_style,omitempty"`
+
+	// TokenParamStyle 选择 Chat Completions 的输出上限字段：
+	// auto、max_tokens、max_completion_tokens。空值与 auto 相同：
+	// 官方 API 主机用 max_completion_tokens，其它地址用 max_tokens。
+	// Responses 协议不使用该字段。
+	TokenParamStyle string `json:"token_param_style,omitempty"`
 
 	// ProviderID 是 provider.* 配置键去掉前缀后的 id，供热更新定位依赖。
 	ProviderID string `json:"-"`
@@ -303,11 +313,12 @@ func (b *Builder) modelDefFromProvider(providerID, raw, modelID string) (ModelDe
 		return ModelDef{}, false
 	}
 	var prov struct {
-		Enabled    bool   `json:"enabled"`
-		ClientType string `json:"clientType"`
-		BaseURL    string `json:"baseUrl"`
-		APIKey     string `json:"apiKey"`
-		Models     []struct {
+		Enabled         bool   `json:"enabled"`
+		ClientType      string `json:"clientType"`
+		BaseURL         string `json:"baseUrl"`
+		APIKey          string `json:"apiKey"`
+		TokenParamStyle string `json:"tokenParamStyle"`
+		Models          []struct {
 			ID            string   `json:"id"`
 			Name          string   `json:"name"`
 			ContextLength int      `json:"contextLength"`
@@ -330,9 +341,12 @@ func (b *Builder) modelDefFromProvider(providerID, raw, modelID string) (ModelDe
 		if m.ID == modelID {
 			preset := lookupModelPreset(m.ID)
 
-			// 温度：provider 显式值 > 模型官方推荐预设 > 全局默认 0.7。
+			// 温度：-1 = 请求中不发送；显式正值 > 预设 > 默认 0.7。
+			// 0 仍表示未设置。其它负数由 API 拒绝，不会进到这里。
 			temp := 0.7
-			if m.Temperature > 0 {
+			if m.Temperature == OmitSamplingParam {
+				temp = OmitSamplingParam
+			} else if m.Temperature > 0 {
 				temp = m.Temperature
 			} else if preset != nil {
 				temp = preset.Temperature
@@ -347,9 +361,12 @@ func (b *Builder) modelDefFromProvider(providerID, raw, modelID string) (ModelDe
 				mt = 4096
 			}
 
-			// top_p：provider 显式值(>0) > 模型官方推荐预设 > nil（交由 Provider 默认）。
+			// top_p：-1 = 不发送；显式正值 > 预设 > nil（不发送）。0 仍表示未设置。
 			var topP *float64
-			if m.TopP > 0 {
+			if m.TopP == OmitSamplingParam {
+				omit := float64(OmitSamplingParam)
+				topP = &omit
+			} else if m.TopP > 0 {
 				topP = &m.TopP
 			} else if preset != nil {
 				topP = &preset.TopP
@@ -366,19 +383,20 @@ func (b *Builder) modelDefFromProvider(providerID, raw, modelID string) (ModelDe
 			style, chatPath := bindAPIStyle(prov.ClientType, prov.BaseURL)
 
 			return fillModelDefaults(ModelDef{
-				Provider:      mapClientType(prov.ClientType),
-				ProviderID:    providerID,
-				Model:         m.ID,
-				APIKey:        prov.APIKey,
-				BaseURL:       prov.BaseURL,
-				ChatPath:      chatPath,
-				APIStyle:      style,
-				Temperature:   &temp,
-				TopP:          topP,
-				MaxTokens:     mt,
-				ContextLength: ctx,
-				Multimodal:    m.Multimodal,
-				Reasoning:     hasCapability(m.Capabilities, "reasoning"),
+				Provider:        mapClientType(prov.ClientType),
+				ProviderID:      providerID,
+				Model:           m.ID,
+				APIKey:          prov.APIKey,
+				BaseURL:         prov.BaseURL,
+				ChatPath:        chatPath,
+				APIStyle:        style,
+				TokenParamStyle: prov.TokenParamStyle,
+				Temperature:     &temp,
+				TopP:            topP,
+				MaxTokens:       mt,
+				ContextLength:   ctx,
+				Multimodal:      m.Multimodal,
+				Reasoning:       hasCapability(m.Capabilities, "reasoning"),
 				// 计费单价（换算表）：provider 显式值 > 官方单价预设 > 0（不计入金钱额度）。
 				// 官方预设兜底很关键：provider 里漏填单价时，成本墙会因拿不到价格而
 				// 直接放行（不计费也不限额），金钱额度形同虚设。

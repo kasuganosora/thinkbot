@@ -89,22 +89,26 @@ type ChatStreamOptions struct {
 
 // ChatCompletionRequest Chat Completions 请求体。
 type ChatCompletionRequest struct {
-	Model            string              `json:"model"`
-	Messages         []ChatMessage       `json:"messages"`
-	Temperature      *float64            `json:"temperature,omitempty"`
-	MaxTokens        *int                `json:"max_tokens,omitempty"`
-	TopP             *float64            `json:"top_p,omitempty"`
-	FrequencyPenalty *float64            `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64            `json:"presence_penalty,omitempty"`
-	Stream           bool                `json:"stream,omitempty"`
-	StreamOptions    *ChatStreamOptions  `json:"stream_options,omitempty"`
-	Stop             json.RawMessage     `json:"stop,omitempty"` // string 或 []string
-	N                *int                `json:"n,omitempty"`
-	ResponseFormat   *ChatResponseFormat `json:"response_format,omitempty"`
-	Tools            []ChatTool          `json:"tools,omitempty"`
-	ToolChoice       json.RawMessage     `json:"tool_choice,omitempty"` // string 或 object
-	Seed             *int                `json:"seed,omitempty"`
-	User             string              `json:"user,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []ChatMessage `json:"messages"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	// MaxTokens is the legacy Chat Completions output cap.
+	// MaxCompletionTokens is the field the official API accepts for current models.
+	// At most one is set, and only when the limit is positive.
+	MaxTokens           *int                `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int                `json:"max_completion_tokens,omitempty"`
+	TopP                *float64            `json:"top_p,omitempty"`
+	FrequencyPenalty    *float64            `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64            `json:"presence_penalty,omitempty"`
+	Stream              bool                `json:"stream,omitempty"`
+	StreamOptions       *ChatStreamOptions  `json:"stream_options,omitempty"`
+	Stop                json.RawMessage     `json:"stop,omitempty"` // string 或 []string
+	N                   *int                `json:"n,omitempty"`
+	ResponseFormat      *ChatResponseFormat `json:"response_format,omitempty"`
+	Tools               []ChatTool          `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage     `json:"tool_choice,omitempty"` // string 或 object
+	Seed                *int                `json:"seed,omitempty"`
+	User                string              `json:"user,omitempty"`
 
 	// PromptCacheKey is a cache key hint for OpenAI's implicit prefix caching.
 	// Typically set to the session ID to improve cache hit rates across

@@ -287,9 +287,14 @@ func isLurkMode(env *core.Envelope) bool {
 	return false
 }
 
+func samplingOmitted(v *float64) bool {
+	return v != nil && *v == llm.OmitSamplingParam
+}
+
 // isHeartbeatMode 判断当前消息是否为心跳自主唤醒决策（KVHeartbeatMode=true）。
 // 心跳决策是机器解析的 JSON（silent/post/note + 目标），与潜水模式同理：
 // 生成结果不得追加人类可读的截断/步数守卫提示语，否则会污染 JSON 导致解析失败。
+
 func isHeartbeatMode(env *core.Envelope) bool {
 	if v, ok := env.Get(core.KVHeartbeatMode); ok {
 		if b, ok := v.(bool); ok && b {
@@ -1504,7 +1509,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	// 同时把采样温度压低：结构化输出不需要创造性，低温显著提升格式合规率。
 	if lurkMode {
 		params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
-		params.Temperature = lurkTemperature()
+		if !samplingOmitted(temp) {
+			params.Temperature = lurkTemperature()
+		}
 	}
 
 	// 心跳自主唤醒决策模式：与潜水模式同机制——强制 JSON 结构化输出 + 低温，
@@ -1515,7 +1522,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	if v, ok := env.Get(core.KVHeartbeatMode); ok {
 		if b, ok := v.(bool); ok && b {
 			params.ResponseFormat = &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject}
-			params.Temperature = lurkTemperature()
+			if !samplingOmitted(temp) {
+				params.Temperature = lurkTemperature()
+			}
 			if s.config.HeartbeatReasoningEffort != nil {
 				params.ReasoningEffort = heartbeatEffort(s.config.HeartbeatReasoningEffort(), params.Model, params.ReasoningEffort)
 			}

@@ -362,12 +362,16 @@ func (s *l1Stage) Process(ctx context.Context, env *core.Envelope) (*core.Envelo
 		}
 	}
 	params := llm.GenerateParams{
-		Model:       model,
-		System:      sys,
-		Messages:    []llm.Message{llm.UserMessage(user)},
-		Tools:       s.tools(env, ch, key),
-		Temperature: &temp,
-		MaxTokens:   &maxTok,
+		Model:     model,
+		System:    sys,
+		Messages:  []llm.Message{llm.UserMessage(user)},
+		Tools:     s.tools(env, ch, key),
+		MaxTokens: &maxTok,
+	}
+	// 路由分类默认用温度 0。模型配置恰好为 -1 时表示上游不接受 temperature，
+	// 不能再改写成 0。
+	if !model.OmitsTemperature() {
+		params.Temperature = &temp
 	}
 	// L1 只做一次三选一的路由分类，不需要深度推理。推理型模型在未指定
 	// reasoning_effort 时会按默认档思考，单次调用会稳定超过 defaultRouteTimeout，

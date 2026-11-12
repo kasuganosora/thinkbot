@@ -24,6 +24,12 @@ type LLMSnapshot struct {
 	VisionDef   config.ModelDef
 }
 
+func modelWithTemperature(def config.ModelDef) *llm.Model {
+	m := llm.ChatModel(def.Model)
+	m.Temperature = def.Temperature
+	return m
+}
+
 // SnapshotFromBundle 用刚建好的原始客户端做一份快照。调用方随后可以换上 follow provider。
 func SnapshotFromBundle(b *LLMBundle) *LLMSnapshot {
 	if b == nil {
@@ -32,17 +38,17 @@ func SnapshotFromBundle(b *LLMBundle) *LLMSnapshot {
 	snap := &LLMSnapshot{
 		Main:      b.Main,
 		MainDef:   b.MainDef,
-		MainModel: llm.ChatModel(b.MainDef.Model),
+		MainModel: modelWithTemperature(b.MainDef),
 	}
 	if b.Light != nil {
 		snap.Light = b.Light
 		snap.LightDef = b.LightDef
-		snap.LightModel = llm.ChatModel(b.LightDef.Model)
+		snap.LightModel = modelWithTemperature(b.LightDef)
 	}
 	if b.Vision != nil {
 		snap.Vision = b.Vision
 		snap.VisionDef = b.VisionDef
-		snap.VisionModel = llm.ChatModel(b.VisionDef.Model)
+		snap.VisionModel = modelWithTemperature(b.VisionDef)
 	}
 	return snap
 }

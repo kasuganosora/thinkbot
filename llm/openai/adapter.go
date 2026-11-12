@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/kasuganosora/thinkbot/llm"
 )
@@ -26,7 +27,7 @@ func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*ll
 		return c.doGenerateChat(ctx, params)
 	}
 
-	req, err := paramsToOpenAIRequest(&params)
+	req, err := c.responsesRequest(&params)
 	if err != nil {
 		return nil, err
 	}
@@ -35,8 +36,11 @@ func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*ll
 	if err != nil {
 		return nil, err
 	}
+	if err := responseFailure(resp); err != nil {
+		return nil, err
+	}
 
-	return openAIResponseToResult(resp), nil
+	return openAIResponseToResult(resp, c.providerKey(), params.Model.ID), nil
 }
 
 // DoStream 将统一 GenerateParams 转换为 OpenAI 流式请求并返回统一 StreamResult。
@@ -50,7 +54,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 		return c.doStreamChat(ctx, params)
 	}
 
-	req, err := paramsToOpenAIRequest(&params)
+	req, err := c.responsesRequest(&params)
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +89,35 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			responseID       string
 			responseModel    string
 			hasFunctionCall  bool
+			emittedText      = map[string]string{}
 
 			pendingToolCalls = map[int]*openAIStreamingToolCall{}
 		)
+		emitText := func(id, chunk string) {
+			if chunk == "" {
+				return
+			}
+			if !textStarted {
+				send(&llm.TextStartPart{ID: id})
+				textStarted = true
+			}
+			emittedText[id] += chunk
+			send(&llm.TextDeltaPart{ID: id, Text: chunk})
+		}
+		reconcileText := func(id, final string) {
+			if final == "" {
+				return
+			}
+			have := emittedText[id]
+			switch {
+			case have == final || strings.HasPrefix(have, final):
+				return
+			case strings.HasPrefix(final, have):
+				emitText(id, final[len(have):])
+			case have == "":
+				emitText(id, final)
+			}
+		}
 
 		flush := func() {
 			if reasoningStarted {
@@ -141,11 +171,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					send(&llm.ReasoningEndPart{ID: responseID})
 					reasoningStarted = false
 				}
-				if !textStarted {
-					send(&llm.TextStartPart{ID: event.ItemID})
-					textStarted = true
-				}
-				send(&llm.TextDeltaPart{ID: event.ItemID, Text: event.Delta})
+				emitText(event.ItemID, event.Delta)
 
 			case EventResponseReasoningDelta:
 				if !reasoningStarted {
@@ -166,7 +192,20 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 				}
 
 			case EventResponseOutputItemDone:
-				if event.Item != nil && event.Item.Type == TypeFunctionCall {
+				if event.Item == nil {
+					return nil
+				}
+				switch event.Item.Type {
+				case TypeMessage:
+					reconcileText(event.Item.ID, extractOutputText(event.Item.Content))
+				case TypeReasoning:
+					if summary := extractReasoningText(event.Item.Summary); summary != "" && !reasoningStarted {
+						send(&llm.ReasoningStartPart{ID: event.Item.ID})
+						send(&llm.ReasoningDeltaPart{ID: event.Item.ID, Text: summary})
+					}
+					send(&llm.ReasoningEndPart{ID: event.Item.ID, ProviderMetadata: reasoningItemMeta(event.Item, firstNonEmpty(responseModel, params.Model.ID), c.providerKey())})
+					reasoningStarted = false
+				case TypeFunctionCall:
 					hasFunctionCall = true
 					stc, ok := pendingToolCalls[event.OutputIndex]
 					if ok && !stc.finished {
@@ -190,19 +229,35 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 
 			case EventResponseCompleted, EventResponseIncomplete:
 				if event.Response != nil {
+					for i := range event.Response.Output {
+						item := &event.Response.Output[i]
+						if item.Type == TypeMessage {
+							reconcileText(item.ID, extractOutputText(item.Content))
+						}
+					}
 					if event.Response.Usage != nil {
 						usage = convertOpenAIUsage(event.Response.Usage)
 					}
 					if event.Response.IncompleteDetails != nil {
 						rawFinishReason = event.Response.IncompleteDetails.Reason
 					}
+					if event.Type == EventResponseIncomplete {
+						if err := responseFailure(event.Response); err != nil {
+							return err
+						}
+					}
 				}
 
 			case EventResponseFailed:
-				if event.Response != nil && event.Response.Error != nil {
-					apiErr := &APIError{Type: event.Response.Error.Code, Code: event.Response.Error.Code, Message: event.Response.Error.Message}
-					send(&llm.ErrorPart{Error: openAIErrorToLLMError(apiErr, 0, nil, "")})
+				if event.Response != nil {
+					if err := responseFailure(event.Response); err != nil {
+						return err
+					}
 				}
+				return inBandFailure(nil)
+
+			case EventResponseError:
+				return inBandFailure(streamEventError(&event))
 			}
 			return nil
 		})
@@ -263,12 +318,37 @@ type openAIStreamingToolCall struct {
 	finished bool
 }
 
+func (c *Client) providerKey() string {
+	if c == nil || strings.TrimSpace(c.baseURL) == "" {
+		return strings.TrimRight(DefaultBaseURL, "/")
+	}
+	return strings.TrimRight(c.baseURL, "/")
+}
+
+func (c *Client) responsesRequest(params *llm.GenerateParams) (*CreateResponseRequest, error) {
+	key := ""
+	if c != nil {
+		key = c.providerKey()
+	}
+	return buildResponsesRequest(key, params)
+}
+
 func paramsToOpenAIRequest(params *llm.GenerateParams) (*CreateResponseRequest, error) {
+	return buildResponsesRequest("", params)
+}
+
+func buildResponsesRequest(providerKey string, params *llm.GenerateParams) (*CreateResponseRequest, error) {
 	req := &CreateResponseRequest{
-		Model:           params.Model.ID,
-		Temperature:     params.Temperature,
-		TopP:            params.TopP,
-		MaxOutputTokens: params.MaxTokens,
+		Model:       params.Model.ID,
+		Temperature: wireSampling(params.Temperature),
+		TopP:        wireSampling(params.TopP),
+	}
+	// Responses always uses max_output_tokens. The Chat Completions token-field
+	// style does not apply here. Sync and stream both go through this function.
+	// A missing or non-positive limit omits the field.
+	if params.MaxTokens != nil && *params.MaxTokens > 0 {
+		n := *params.MaxTokens
+		req.MaxOutputTokens = &n
 	}
 
 	// Implicit prefix caching with cache key hint + store=false
@@ -277,13 +357,16 @@ func paramsToOpenAIRequest(params *llm.GenerateParams) (*CreateResponseRequest, 
 	}
 	store := false
 	req.Store = &store
+	// store=false drops server-side reasoning state, so ask for the encrypted
+	// reasoning item and send it back on the next turn.
+	req.Include = []string{"reasoning.encrypted_content"}
 
 	if params.System != "" {
 		req.Instructions = params.System
 	}
 
 	// 消息转换为 input items
-	items, err := convertUnifiedToOpenAIInput(params.Messages)
+	items, err := convertUnifiedToOpenAIInput(params.Messages, params.Model.ID, providerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +406,7 @@ func paramsToOpenAIRequest(params *llm.GenerateParams) (*CreateResponseRequest, 
 	return req, nil
 }
 
-func convertUnifiedToOpenAIInput(messages []llm.Message) ([]InputItem, error) {
+func convertUnifiedToOpenAIInput(messages []llm.Message, modelID, providerKey string) ([]InputItem, error) {
 	var items []InputItem
 	for _, msg := range messages {
 		switch msg.Role {
@@ -355,18 +438,22 @@ func convertUnifiedToOpenAIInput(messages []llm.Message) ([]InputItem, error) {
 			}
 
 		case llm.MessageRoleAssistant:
+			var produced []InputItem
+			var reasoning *InputItem
 			for _, p := range msg.Content {
 				switch pp := p.(type) {
 				case llm.TextPart:
-					items = append(items, InputText(RoleAssistant, pp.Text))
+					if strings.TrimSpace(pp.Text) == "" {
+						continue
+					}
+					produced = append(produced, InputText(RoleAssistant, pp.Text))
 				case llm.ReasoningPart:
-					items = append(items, InputItem{
-						Type:    TypeReasoning,
-						Summary: toJSONRawMessage([]SummaryItem{{Type: ContentTypeSummaryText, Text: pp.Text}}),
-					})
+					if item, ok := replayReasoningItem(pp, modelID, providerKey); ok {
+						reasoning = &item
+					}
 				case llm.ToolCallPart:
 					args, _ := json.Marshal(pp.Input)
-					items = append(items, InputItem{
+					produced = append(produced, InputItem{
 						Type:      TypeFunctionCall,
 						CallID:    pp.ToolCallID,
 						Name:      pp.ToolName,
@@ -374,6 +461,11 @@ func convertUnifiedToOpenAIInput(messages []llm.Message) ([]InputItem, error) {
 					})
 				}
 			}
+			// 推理项紧挨在它产出的第一条内容之前。没有产出时不单独占一条。
+			if reasoning != nil && len(produced) > 0 {
+				items = append(items, *reasoning)
+			}
+			items = append(items, produced...)
 
 		case llm.MessageRoleTool:
 			for _, p := range msg.Content {
@@ -440,7 +532,7 @@ func convertUnifiedToOpenAISchema(schema any) *TextConfig {
 	return &TextConfig{Format: &TextFormatConfig{Type: "json_object"}}
 }
 
-func openAIResponseToResult(resp *Response) *llm.GenerateResult {
+func openAIResponseToResult(resp *Response, provider, fallbackModel string) *llm.GenerateResult {
 	result := &llm.GenerateResult{
 		Response: llm.ResponseMetadata{
 			ID:      resp.ID,
@@ -460,6 +552,15 @@ func openAIResponseToResult(resp *Response) *llm.GenerateResult {
 			result.Text += extractOutputText(item.Content)
 		case TypeReasoning:
 			result.Reasoning += extractReasoningText(item.Summary)
+			model := resp.Model
+			if model == "" {
+				model = fallbackModel
+			}
+			if meta := reasoningItemMeta(item, model, provider); meta != nil {
+				if result.ReasoningProviderMetadata == nil || item.EncryptedContent != "" {
+					result.ReasoningProviderMetadata = meta
+				}
+			}
 		case TypeFunctionCall:
 			hasFunctionCall = true
 			var input any
@@ -564,6 +665,102 @@ func extractReasoningText(summary json.RawMessage) string {
 		}
 	}
 	return text
+}
+
+func reasoningItemMeta(item *OutputItem, model, provider string) map[string]any {
+	if item == nil || item.ID == "" || item.EncryptedContent == "" {
+		return nil
+	}
+	return map[string]any{
+		"id":                item.ID,
+		"encrypted_content": item.EncryptedContent,
+		"model":             model,
+		"provider":          provider,
+	}
+}
+
+// replayReasoningItem 只回放同一服务商、同一模型产出的、同时带 id 和
+// encrypted_content 的推理项。只有摘要或思考正文的历史不会发给 Responses。
+func replayReasoningItem(part llm.ReasoningPart, modelID, providerKey string) (InputItem, bool) {
+	id, okID := metaString(part.ProviderMetadata, "id")
+	enc, okEnc := metaString(part.ProviderMetadata, "encrypted_content")
+	if !okID || !okEnc {
+		return InputItem{}, false
+	}
+	if metaModel, ok := metaString(part.ProviderMetadata, "model"); !ok || metaModel != modelID {
+		return InputItem{}, false
+	}
+	if metaProvider, ok := metaString(part.ProviderMetadata, "provider"); !ok || metaProvider != providerKey {
+		return InputItem{}, false
+	}
+	item := InputItem{Type: TypeReasoning, ID: id, EncryptedContent: enc}
+	if part.Text != "" {
+		item.Summary = toJSONRawMessage([]SummaryItem{{Type: ContentTypeSummaryText, Text: part.Text}})
+	} else {
+		item.Summary = json.RawMessage(`[]`)
+	}
+	return item, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func metaString(meta map[string]any, key string) (string, bool) {
+	if meta == nil {
+		return "", false
+	}
+	s, ok := meta[key].(string)
+	return s, ok && s != ""
+}
+
+// responseFailure reports an in-band failed response. A normal incomplete
+// response only carries incomplete_details and is not an error.
+func responseFailure(resp *Response) error {
+	if resp == nil {
+		return nil
+	}
+	failed := resp.Status == "failed"
+	if resp.Error != nil && (resp.Error.Code != "" || resp.Error.Type != "" || resp.Error.Param != "") {
+		failed = true
+	}
+	if !failed {
+		return nil
+	}
+	var fields *ResponseError
+	if resp.Error != nil {
+		fields = resp.Error
+	}
+	return inBandFailure(fields)
+}
+
+func streamEventError(event *StreamEvent) *ResponseError {
+	if event == nil {
+		return nil
+	}
+	if event.Error != nil {
+		return event.Error
+	}
+	if event.Code == "" && event.Param == "" {
+		return nil
+	}
+	return &ResponseError{Code: event.Code, Param: event.Param}
+}
+
+func inBandFailure(e *ResponseError) error {
+	code, param, typ := "", "", ""
+	if e != nil {
+		code, param, typ = e.Code, e.Param, e.Type
+	}
+	reason := openaiErrorTypeToReason(typ, code, 400)
+	err := llm.NewLLMError(reason, "openai", "provider reported a failed response")
+	err.SafeDetail = formatSafeErrorDetail(typ, code, param)
+	return err
 }
 
 func toJSONRawMessage(v any) json.RawMessage {

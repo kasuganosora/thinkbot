@@ -41,13 +41,16 @@ import (
 // ProviderDef 存储在 config store 中的 Provider 定义（含内嵌模型列表）。
 // 键格式: provider.<id>
 type ProviderDef struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	ClientType string          `json:"clientType"`
-	BaseURL    string          `json:"baseUrl"`
-	APIKey     string          `json:"apiKey"`
-	Enabled    bool            `json:"enabled"`
-	Models     []ProviderModel `json:"models"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ClientType string `json:"clientType"`
+	BaseURL    string `json:"baseUrl"`
+	APIKey     string `json:"apiKey"`
+	Enabled    bool   `json:"enabled"`
+	// TokenParamStyle 选择 Chat Completions 输出上限字段：auto、max_tokens、max_completion_tokens。
+	// 空值与 auto 相同。Responses 协议不使用该字段。
+	TokenParamStyle string          `json:"tokenParamStyle,omitempty"`
+	Models          []ProviderModel `json:"models"`
 }
 
 // ProviderModel 描述 Provider 下属的单个模型配置。
@@ -72,34 +75,37 @@ type ProviderModel struct {
 
 // ProviderResp Provider API 响应（API Key 脱敏）。
 type ProviderResp struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	ClientType string          `json:"clientType"`
-	BaseURL    string          `json:"baseUrl"`
-	APIKey     string          `json:"apiKey"`
-	Enabled    bool            `json:"enabled"`
-	Models     []ProviderModel `json:"models"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	ClientType      string          `json:"clientType"`
+	BaseURL         string          `json:"baseUrl"`
+	APIKey          string          `json:"apiKey"`
+	Enabled         bool            `json:"enabled"`
+	TokenParamStyle string          `json:"tokenParamStyle,omitempty"`
+	Models          []ProviderModel `json:"models"`
 }
 
 // --- 请求 DTO ---
 
 // CreateProviderReq 创建 Provider 请求。
 type CreateProviderReq struct {
-	ID         string `json:"id"`
-	Name       string `json:"name" binding:"required"`
-	ClientType string `json:"clientType"`
-	BaseURL    string `json:"baseUrl"`
-	APIKey     string `json:"apiKey"`
-	Enabled    *bool  `json:"enabled"`
+	ID              string `json:"id"`
+	Name            string `json:"name" binding:"required"`
+	ClientType      string `json:"clientType"`
+	BaseURL         string `json:"baseUrl"`
+	APIKey          string `json:"apiKey"`
+	Enabled         *bool  `json:"enabled"`
+	TokenParamStyle string `json:"tokenParamStyle"`
 }
 
 // UpdateProviderReq 更新 Provider 请求（字段可选）。
 type UpdateProviderReq struct {
-	Name       *string `json:"name"`
-	ClientType *string `json:"clientType"`
-	BaseURL    *string `json:"baseUrl"`
-	APIKey     *string `json:"apiKey"`
-	Enabled    *bool   `json:"enabled"`
+	Name            *string `json:"name"`
+	ClientType      *string `json:"clientType"`
+	BaseURL         *string `json:"baseUrl"`
+	APIKey          *string `json:"apiKey"`
+	Enabled         *bool   `json:"enabled"`
+	TokenParamStyle *string `json:"tokenParamStyle"`
 }
 
 // AddModelReq 向 Provider 添加模型的请求。
@@ -214,6 +220,31 @@ func (s *Server) getAllProviders() []ProviderDef {
 	return result
 }
 
+// validateSampling accepts the do-not-send sentinel -1 and any non-negative value.
+// Other negatives are rejected.
+func validateSampling(temp, top *float64) error {
+	if temp != nil && *temp < 0 && *temp != config.OmitSamplingParam {
+		return errs.BadRequest("temperature must be >= 0 or -1")
+	}
+	if top != nil && *top < 0 && *top != config.OmitSamplingParam {
+		return errs.BadRequest("topP must be >= 0 or -1")
+	}
+	return nil
+}
+
+// canonicalTokenParamStyle accepts auto, max_tokens, and max_completion_tokens.
+// Empty means auto. The returned value is the canonical lowercase form.
+func canonicalTokenParamStyle(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return "auto", true
+	case "max_tokens", "max_completion_tokens":
+		return strings.ToLower(strings.TrimSpace(s)), true
+	default:
+		return "", false
+	}
+}
+
 // toProviderResp 将存储模型转换为响应 DTO（脱敏 API Key）。
 func toProviderResp(def *ProviderDef) ProviderResp {
 	models := def.Models
@@ -221,13 +252,14 @@ func toProviderResp(def *ProviderDef) ProviderResp {
 		models = []ProviderModel{}
 	}
 	return ProviderResp{
-		ID:         def.ID,
-		Name:       def.Name,
-		ClientType: def.ClientType,
-		BaseURL:    def.BaseURL,
-		APIKey:     maskAPIKey(def.APIKey),
-		Enabled:    def.Enabled,
-		Models:     models,
+		ID:              def.ID,
+		Name:            def.Name,
+		ClientType:      def.ClientType,
+		BaseURL:         def.BaseURL,
+		APIKey:          maskAPIKey(def.APIKey),
+		Enabled:         def.Enabled,
+		TokenParamStyle: def.TokenParamStyle,
+		Models:          models,
 	}
 }
 
@@ -270,14 +302,24 @@ func (s *Server) handleCreateProvider(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 
+	style, ok := canonicalTokenParamStyle(req.TokenParamStyle)
+	if !ok {
+		Fail(c, errs.BadRequest("tokenParamStyle must be auto, max_tokens, or max_completion_tokens"))
+		return
+	}
+	if strings.TrimSpace(req.TokenParamStyle) == "" {
+		style = ""
+	}
+
 	def := &ProviderDef{
-		ID:         id,
-		Name:       req.Name,
-		ClientType: req.ClientType,
-		BaseURL:    req.BaseURL,
-		APIKey:     req.APIKey,
-		Enabled:    enabled,
-		Models:     []ProviderModel{},
+		ID:              id,
+		Name:            req.Name,
+		ClientType:      req.ClientType,
+		BaseURL:         req.BaseURL,
+		APIKey:          req.APIKey,
+		Enabled:         enabled,
+		TokenParamStyle: style,
+		Models:          []ProviderModel{},
 	}
 
 	if err := s.saveProvider(c, def); err != nil {
@@ -343,6 +385,14 @@ func (s *Server) handleUpdateProvider(c *gin.Context) {
 	}
 	if req.Enabled != nil {
 		def.Enabled = *req.Enabled
+	}
+	if req.TokenParamStyle != nil {
+		style, ok := canonicalTokenParamStyle(*req.TokenParamStyle)
+		if !ok {
+			Fail(c, errs.BadRequest("tokenParamStyle must be auto, max_tokens, or max_completion_tokens"))
+			return
+		}
+		def.TokenParamStyle = style
 	}
 
 	if err := s.saveProvider(c, def); err != nil {
@@ -447,6 +497,11 @@ func (s *Server) handleAddModel(c *gin.Context) {
 		}
 	}
 
+	if err := validateSampling(req.Temperature, req.TopP); err != nil {
+		Fail(c, err)
+		return
+	}
+
 	// 默认值：未显式设置时存 0，交由运行时回退到官方推荐预设（config.GetModelPreset）或全局默认。
 	// 这样用户不填也能拿到推荐值，填了则尊重用户自定义（provider 显式值 > 预设 > 全局默认）。
 	caps := req.Capabilities
@@ -489,7 +544,7 @@ func (s *Server) handleAddModel(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "add_provider_model", "provider", pid, "model", id)
-	OK(c, model)
+	s.replyModelRuntime(c, pid, []string{id}, model)
 }
 
 // handleUpdateModel 更新 Provider 中的模型。
@@ -520,6 +575,11 @@ func (s *Server) handleUpdateModel(c *gin.Context) {
 	var req UpdateModelReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	if err := validateSampling(req.Temperature, req.TopP); err != nil {
+		Fail(c, err)
 		return
 	}
 
@@ -565,7 +625,7 @@ func (s *Server) handleUpdateModel(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "update_provider_model", "provider", pid, "model", mid)
-	OK(c, *m)
+	s.replyModelRuntime(c, pid, []string{mid}, *m)
 }
 
 // handleDeleteModel 从 Provider 中移除模型。
@@ -606,7 +666,23 @@ func (s *Server) handleDeleteModel(c *gin.Context) {
 	}
 
 	auditLog(c, s.logger, "delete_provider_model", "provider", pid, "model", mid)
-	OK(c, nil)
+	applied, msg := true, ""
+	if s.botSvc != nil {
+		applied, msg = s.botSvc.reapplyRunningBotsFor(c.Request.Context(), pid, []string{mid})
+	}
+	OK(c, gin.H{"runtimeApplied": applied, "runtimeMessage": msg})
+}
+
+func (s *Server) replyModelRuntime(c *gin.Context, providerID string, modelIDs []string, model ProviderModel) {
+	applied, msg := true, ""
+	if s.botSvc != nil {
+		applied, msg = s.botSvc.reapplyRunningBotsFor(c.Request.Context(), providerID, modelIDs)
+	}
+	OK(c, struct {
+		ProviderModel
+		RuntimeApplied bool   `json:"runtimeApplied"`
+		RuntimeMessage string `json:"runtimeMessage,omitempty"`
+	}{ProviderModel: model, RuntimeApplied: applied, RuntimeMessage: msg})
 }
 
 // handleImportModels 从 Provider 远端拉取可用模型并导入。

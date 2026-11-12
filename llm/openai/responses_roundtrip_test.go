@@ -58,10 +58,13 @@ func TestResponsesRoundTrip_ToolsReasoningAndImage(t *testing.T) {
 		t.Fatalf("path %s", path)
 	}
 	raw := string(body)
-	for _, want := range []string{`"type":"function"`, `"name":"lookup"`, "input_image", "function_call", "function_call_output", `"type":"reasoning"`, `"effort":"low"`} {
+	for _, want := range []string{`"type":"function"`, `"name":"lookup"`, "input_image", "function_call", "function_call_output", `"effort":"low"`} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("payload missing %s\n%s", want, raw)
 		}
+	}
+	if strings.Contains(raw, `"text":"prior"`) || strings.Contains(raw, `"type":"reasoning"`) {
+		t.Fatalf("text-only reasoning was replayed: %s", raw)
 	}
 	if res.Reasoning != "think" || len(res.ToolCalls) != 1 || res.ToolCalls[0].ToolName != "lookup" {
 		t.Fatalf("result reasoning %q calls %+v", res.Reasoning, res.ToolCalls)

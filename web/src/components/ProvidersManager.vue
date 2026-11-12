@@ -49,6 +49,11 @@
           <label>Base URL</label>
           <t-input v-model="active.baseUrl" data-testid="provider-baseurl" placeholder="https://api.example.com/v1" />
         </div>
+        <div v-if="showTokenParamStyle" class="field">
+          <label>Token limit field</label>
+          <t-select v-model="tokenParamStyle" :options="tokenParamStyles" data-testid="provider-token-param-style" />
+          <div class="field-tip" data-testid="provider-token-param-hint">Chat Completions 的输出上限。auto 在官方 API 主机上发送 max_completion_tokens，其它地址发送 max_tokens。Responses 请求始终使用 max_output_tokens。</div>
+        </div>
         <div class="field">
           <label class="req">API Key</label>
           <t-input v-model="apiKeyInput" type="password" data-testid="provider-apikey" :placeholder="active.apiKey ? '已配置（留空不修改）' : 'Enter API key'" />
@@ -103,7 +108,7 @@
             <span v-if="m.multimodal" class="badge multimodal" title="多模态">👁</span>
             <span class="badge key" title="需要密钥">🔑</span>
             <span v-if="m.contextLength" class="ctx-tag">{{ ctxLabel(m.contextLength) }}</span>
-            <span v-if="m.temperature" class="cfg-tag" title="采样温度">T {{ m.temperature }}</span>
+            <span v-if="m.temperature || m.temperature === -1" class="cfg-tag" title="采样温度">T {{ m.temperature === -1 ? 'omit' : m.temperature }}</span>
             <span v-if="m.topP" class="cfg-tag" title="核采样 TopP">P {{ m.topP }}</span>
             <span v-if="m.priceInputPer1M || m.priceOutputPer1M" class="price-tag" title="计费单价">{{ m.currency || 'CNY' }} · 入 {{ fmtPrice(m.priceInputPer1M) }} / 出 {{ fmtPrice(m.priceOutputPer1M) }}</span>
             <div class="model-card-ops">
@@ -149,10 +154,12 @@
         </div>
         <div class="dlg-row2">
           <t-form-item label="Temperature">
-            <t-input-number v-model="modelDialog.form.temperature" :min="0" :max="2" :step="0.1" :decimal-places="2" style="width: 100%" data-testid="model-form-temperature" />
+            <t-input-number v-model="modelDialog.form.temperature" :min="-1" :max="2" :step="0.1" :decimal-places="2" style="width: 100%" data-testid="model-form-temperature" />
+            <div class="field-tip">-1 表示请求中不发送 temperature。0 表示未设置，运行时默认 0.7。其它负数无效。</div>
           </t-form-item>
           <t-form-item label="Top P">
-            <t-input-number v-model="modelDialog.form.topP" :min="0" :max="1" :step="0.05" :decimal-places="2" style="width: 100%" data-testid="model-form-topp" />
+            <t-input-number v-model="modelDialog.form.topP" :min="-1" :max="1" :step="0.05" :decimal-places="2" style="width: 100%" data-testid="model-form-topp" />
+            <div class="field-tip">-1 表示不发送 top_p。0 表示未设置。</div>
           </t-form-item>
         </div>
         <t-divider align="left" class="price-divider">计费单价（token↔金钱换算，缺省 0 表示不限额）</t-divider>
@@ -202,8 +209,18 @@ const clientTypes = [
   { label: 'Anthropic', value: 'Anthropic' },
   { label: 'Gemini', value: 'Gemini' }
 ]
+const tokenParamStyles = [
+  { label: 'auto', value: 'auto' },
+  { label: 'max_tokens', value: 'max_tokens' },
+  { label: 'max_completion_tokens', value: 'max_completion_tokens' }
+]
 
 const active = computed(() => providers.value.find(p => p.id === activeId.value))
+const showTokenParamStyle = computed(() => /openai/i.test(active.value?.clientType || ''))
+const tokenParamStyle = computed({
+  get() { return active.value?.tokenParamStyle || 'auto' },
+  set(v) { if (active.value) active.value.tokenParamStyle = v }
+})
 
 const filteredModels = computed(() => {
   const list = active.value?.models || []
@@ -249,7 +266,8 @@ async function saveProvider() {
       name: active.value.name,
       clientType: active.value.clientType,
       baseUrl: active.value.baseUrl,
-      enabled: active.value.enabled
+      enabled: active.value.enabled,
+      tokenParamStyle: active.value.tokenParamStyle || 'auto'
     }
     if (apiKeyInput.value) payload.apiKey = apiKeyInput.value
     const saved = await providerApi.update(active.value.id, payload)
@@ -372,8 +390,16 @@ function applyPreset() {
   MessagePlugin.success('已填入官方推荐值')
 }
 
+function samplingAllowed(v) {
+  return v === -1 || v === 0 || (typeof v === 'number' && v > 0)
+}
+
 async function submitModel() {
   const f = modelDialog.value.form
+  if (!samplingAllowed(f.temperature) || !samplingAllowed(f.topP)) {
+    MessagePlugin.warning('温度和 Top P 只能是 -1（不发送）或非负数')
+    return
+  }
   const caps = Array.isArray(f.caps) ? f.caps : []
   const payload = {
     id: f.id,
@@ -481,6 +507,7 @@ function removeModel(m) {
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .field { margin-bottom: 16px; }
 .field label { display: block; font-size: 13px; color: var(--bp-label-secondary); margin-bottom: 6px; font-weight: 500; }
+.field-tip { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--bp-label-tertiary); }
 .field label.req::after { content: ' *'; color: var(--bp-danger); }
 .form-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
 .actions-right { display: flex; gap: 8px; }
