@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -92,7 +93,40 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			emittedText      = map[string]string{}
 
 			pendingToolCalls = map[int]*openAIStreamingToolCall{}
+			emittedToolIDs   = map[string]struct{}{}
+			toolPartsEmitted int
 		)
+		emitToolCall := func(callID, itemID, name, args string) bool {
+			key := callID
+			if key == "" {
+				key = itemID
+			}
+			if key == "" || toolIDSeen(emittedToolIDs, callID, itemID) {
+				rememberToolIDs(emittedToolIDs, callID, itemID)
+				return false
+			}
+			var input any
+			if args != "" {
+				_ = json.Unmarshal([]byte(args), &input)
+			}
+			send(&llm.ToolInputEndPart{ID: key})
+			send(&llm.StreamToolCallPart{
+				ToolCallID: key,
+				ToolName:   name,
+				Input:      input,
+			})
+			toolPartsEmitted++
+			rememberToolIDs(emittedToolIDs, callID, itemID, key)
+			return true
+		}
+		emitFunctionItem := func(item *OutputItem, stc *openAIStreamingToolCall) {
+			if item == nil || item.Type != TypeFunctionCall {
+				return
+			}
+			hasFunctionCall = true
+			callID, itemID, name, args := takeStreamToolCall(item, stc)
+			emitToolCall(callID, itemID, name, args)
+		}
 		emitText := func(id, chunk string) {
 			if chunk == "" {
 				return
@@ -159,10 +193,17 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					if callID == "" {
 						callID = event.Item.ID
 					}
-					pendingToolCalls[event.OutputIndex] = &openAIStreamingToolCall{
-						id:   callID,
-						name: event.Item.Name,
+					stc := &openAIStreamingToolCall{
+						id:     callID,
+						itemID: event.Item.ID,
+						name:   event.Item.Name,
+						args:   event.Item.Arguments,
 					}
+					if prev := pendingToolCalls[event.OutputIndex]; prev != nil && stc.args == "" {
+						stc.args = prev.args
+						stc.argsFinal = prev.argsFinal
+					}
+					pendingToolCalls[event.OutputIndex] = stc
 					send(&llm.ToolInputStartPart{ID: callID, ToolName: event.Item.Name})
 				}
 
@@ -181,14 +222,26 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 				send(&llm.ReasoningDeltaPart{ID: event.ItemID, Text: event.Delta})
 
 			case EventResponseFunctionCallArgumentsDelta:
-				if stc, ok := pendingToolCalls[event.OutputIndex]; ok {
+				if stc, ok := pendingToolCalls[event.OutputIndex]; ok && !stc.argsFinal {
 					stc.args += event.Delta
 					send(&llm.ToolInputDeltaPart{ID: stc.id, Delta: event.Delta})
 				}
 
 			case EventResponseFunctionCallArgumentsDone:
-				if stc, ok := pendingToolCalls[event.OutputIndex]; ok && !stc.finished {
-					stc.finished = true
+				// The final arguments arrive here, before output_item.done.
+				// Marking the call finished at this point drops it: both
+				// output_item.done and the end flush skip finished slots.
+				stc := pendingToolCalls[event.OutputIndex]
+				if stc == nil {
+					stc = &openAIStreamingToolCall{}
+					pendingToolCalls[event.OutputIndex] = stc
+				}
+				if event.ItemID != "" && stc.itemID == "" {
+					stc.itemID = event.ItemID
+				}
+				if event.Arguments != "" {
+					stc.args = event.Arguments
+					stc.argsFinal = true
 				}
 
 			case EventResponseOutputItemDone:
@@ -206,25 +259,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 					send(&llm.ReasoningEndPart{ID: event.Item.ID, ProviderMetadata: reasoningItemMeta(event.Item, firstNonEmpty(responseModel, params.Model.ID), c.providerKey())})
 					reasoningStarted = false
 				case TypeFunctionCall:
-					hasFunctionCall = true
-					stc, ok := pendingToolCalls[event.OutputIndex]
-					if ok && !stc.finished {
-						var input any
-						args := event.Item.Arguments
-						if args == "" {
-							args = stc.args
-						}
-						if args != "" {
-							_ = json.Unmarshal([]byte(args), &input)
-						}
-						send(&llm.ToolInputEndPart{ID: stc.id})
-						send(&llm.StreamToolCallPart{
-							ToolCallID: stc.id,
-							ToolName:   stc.name,
-							Input:      input,
-						})
-						stc.finished = true
-					}
+					emitFunctionItem(event.Item, pendingToolCalls[event.OutputIndex])
 				}
 
 			case EventResponseCompleted, EventResponseIncomplete:
@@ -233,6 +268,9 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 						item := &event.Response.Output[i]
 						if item.Type == TypeMessage {
 							reconcileText(item.ID, extractOutputText(item.Content))
+						}
+						if event.Type == EventResponseCompleted && item.Type == TypeFunctionCall {
+							emitFunctionItem(item, pendingByToolID(pendingToolCalls, item.CallID, item.ID))
 						}
 					}
 					if event.Response.Usage != nil {
@@ -264,24 +302,21 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 
 		flush()
 
-		// Flush any pending tool calls
+		// Flush tool calls that never reached output_item.done or response.completed.
 		for _, stc := range pendingToolCalls {
-			if !stc.finished {
-				var input any
-				if stc.args != "" {
-					_ = json.Unmarshal([]byte(stc.args), &input)
-				}
-				send(&llm.ToolInputEndPart{ID: stc.id})
-				send(&llm.StreamToolCallPart{
-					ToolCallID: stc.id,
-					ToolName:   stc.name,
-					Input:      input,
-				})
-				stc.finished = true
+			if stc.finished {
+				continue
 			}
+			if emitToolCall(stc.id, stc.itemID, stc.name, stc.args) {
+				hasFunctionCall = true
+			}
+			stc.finished = true
 		}
 
 		finishReason = mapOpenAIFinishReason(rawFinishReason, hasFunctionCall)
+		if finishReason == llm.FinishReasonToolCalls && toolPartsEmitted == 0 {
+			traceid.L(ctx).Warnw("openai responses stream finished with tool-calls but emitted no tool parts")
+		}
 
 		send(&llm.FinishStepPart{
 			FinishReason:    finishReason,
@@ -312,10 +347,77 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 // ============================================================================
 
 type openAIStreamingToolCall struct {
-	id       string
-	name     string
-	args     string
-	finished bool
+	id        string
+	itemID    string
+	name      string
+	args      string
+	argsFinal bool
+	finished  bool
+}
+
+// takeStreamToolCall prefers the output item's own name, arguments, and
+// call id, and falls back to the pending slot. The slot is consumed so the
+// end-of-stream flush does not emit it again.
+func takeStreamToolCall(item *OutputItem, stc *openAIStreamingToolCall) (callID, itemID, name, args string) {
+	if item != nil {
+		callID = item.CallID
+		itemID = item.ID
+		name = item.Name
+		args = item.Arguments
+	}
+	if stc != nil {
+		if callID == "" {
+			callID = stc.id
+		}
+		if itemID == "" {
+			itemID = stc.itemID
+		}
+		if name == "" {
+			name = stc.name
+		}
+		if args == "" {
+			args = stc.args
+		}
+		stc.finished = true
+	}
+	return callID, itemID, name, args
+}
+
+func pendingByToolID(pending map[int]*openAIStreamingToolCall, ids ...string) *openAIStreamingToolCall {
+	for _, stc := range pending {
+		if stc == nil {
+			continue
+		}
+		for _, id := range ids {
+			if id == "" {
+				continue
+			}
+			if stc.id == id || stc.itemID == id {
+				return stc
+			}
+		}
+	}
+	return nil
+}
+
+func toolIDSeen(seen map[string]struct{}, ids ...string) bool {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func rememberToolIDs(seen map[string]struct{}, ids ...string) {
+	for _, id := range ids {
+		if id != "" {
+			seen[id] = struct{}{}
+		}
+	}
 }
 
 func (c *Client) providerKey() string {

@@ -389,6 +389,9 @@ type StreamEvent struct {
 	ContentIndex int         `json:"content_index,omitempty"`
 	Delta        string      `json:"delta,omitempty"`
 	Text         string      `json:"text,omitempty"`
+	// Arguments is the full argument string on
+	// response.function_call_arguments.done. Incremental pieces stay in Delta.
+	Arguments string `json:"arguments,omitempty"`
 	// Code, Param, and Message are the flat fields of a stream "error" event.
 	// Message is never copied into a safe error.
 	Code     string          `json:"code,omitempty"`
