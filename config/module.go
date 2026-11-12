@@ -1185,13 +1185,22 @@ func WorkspaceMetaSpecs() []MetaSpec {
 	return []MetaSpec{
 		{Key: KeyWorkspaceDir, Category: "Workspace", Description: "Bot 工作空间根目录的物理路径（默认 data/workspaces）。每个 Bot 拥有独立子目录，文件持久化保存。"},
 		{Key: KeySandboxBackend, Category: "Workspace", Description: "沙箱后端：auto（默认，有 Docker 用容器隔离否则 local）| docker（强制容器隔离，不可用则报错）| local（强制本地进程，无隔离）。DooD 部署建议设为 docker。"},
-		{Key: KeySandboxImage, Category: "Workspace", Description: "沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用，默认 alpine:latest）。"},
+		{Key: KeySandboxImage, Category: "Workspace", Description: "沙箱 Docker 镜像（docker 模式下 per-bot 长期容器使用，默认 builtin 内置 channel 镜像；填自定义镜像则不再使用 channel 协议）。"},
 		{Key: KeySandboxRequireDocker, Category: "Workspace", Description: "auto 模式下是否强制要求 Docker 可用：true 则探测不到 Docker 直接报错而非降级 local（避免无隔离裸跑）；false（默认）则降级 local。"},
 		{Key: KeySandboxCPULimit, Category: "Workspace", Description: "Bot 沙箱容器的 CPU 上限（docker --cpus，如 1.0 / 16）。留空 = 内置 1.0；0、-、unlimited = 不限制（用满宿主核数）。编译类任务在 1 核上会慢到像卡死。"},
 		{Key: KeySandboxTimeout, Category: "Workspace", Description: "bot 在沙箱里执行单条命令的「硬上限」秒数。默认 0 表示自动 = 卡死阈值 × 3（默认即 15 分钟），不写死固定时长；设为正整数时显式覆盖该硬上限。作为卡死看门狗的最终兜底：哪怕命令一直在输出，超过它也会被强制终止。正常慢命令靠卡死看门狗放行，不会误杀。"},
 		{Key: KeySandboxStuckTimeout, Category: "Workspace", Description: "卡死看门狗阈值（秒，默认 300，即 5 分钟）。命令连续无输出超过该时长即判定卡死并终止。这是区分「编译慢」与「死锁卡死」的关键：只要命令持续有输出（哪怕慢）就不杀。"},
 		{Key: KeySandboxChannelSecret, Category: "Workspace", Description: "派生 per-bot channel token 的服务器密钥（HKDF，不按 bot 落库）。空则使用 auth.jwt_secret。环境变量 THINKBOT_CHANNEL_SECRET 优先于本键。"},
 		{Key: KeySandboxChannelTransport, Category: "Workspace", Description: "thinkbot-channel 传输：auto（默认；Linux 用 unix socket，Windows 用 TCP）| unix | tcp | http。http 与 tcp 相同，仍是帧协议，token 只放在 Hello 帧，不放 URL。宿主只连接 127.0.0.1。环境变量 THINKBOT_CHANNEL_TRANSPORT 优先。"},
+		{Key: KeySandboxSessionIdleTTL, Category: "Workspace", Description: "后台交互式会话无 poll/send 多久后由会话自身回收（秒，默认 900）。回收不依赖 agent 再次调用工具。"},
+		{Key: KeySandboxSessionMaxPerBot, Category: "Workspace", Description: "单个 bot 允许的并发后台交互式会话数（默认 4），超限返回 busy。"},
+		{Key: KeySandboxSessionMaxTotal, Category: "Workspace", Description: "全局并发后台交互式会话数（默认 32）。"},
+		{Key: KeySandboxSessionHealthWindow, Category: "Workspace", Description: "后台会话 health 判据的滑动窗口（毫秒，默认 5000）。换用其它 CLI 误报时可下调。"},
+		{Key: KeySandboxSessionStableWindow, Category: "Workspace", Description: "语义增量结算前要求的静默窗口（毫秒，默认 120）。过小会把 TUI 重绘中间态喂给模型。"},
+		{Key: KeySandboxSessionRawBuffer, Category: "Workspace", Description: "每会话 raw 环形缓冲字节数（默认 1048576）。只影响排障与前端回放，不影响语义增量。"},
+		{Key: KeySandboxSessionAutoUpgradeWindow, Category: "Workspace", Description: "sandbox_exec(background=auto) 判定短命令的观察窗口（毫秒，默认 2500）。窗口内正常退出则按一次性结果返回，不丢已收输出。"},
+		{Key: KeySandboxSessionAutoUpgradeMaxWait, Category: "Workspace", Description: "auto 升级遇到「零输出但进程存活」时转启动诊断前的最长等待（毫秒，默认 8000）。零输出 alive 永不升级为后台会话。"},
+		{Key: KeySandboxSessionWatchWaitMax, Category: "Workspace", Description: "sandbox_session_watch 长轮询单次最大等待（毫秒，默认 30000）。0 表示关闭等待、退化为即时快照。"},
 	}
 }
 
@@ -2003,12 +2012,25 @@ func DefaultMap() map[string]string {
 		// Soul
 		KeySoulReloadInterval: "5s",
 		// Workspace
-		KeyWorkspaceDir:         "data/workspaces",
-		KeySandboxBackend:       "auto",
-		KeySandboxImage:         "alpine:latest",
+		KeyWorkspaceDir:   "data/workspaces",
+		KeySandboxBackend: "auto",
+		// Keep this display default in sync with sandbox.DefaultConfig().Image:
+		// the real runtime default is "builtin" (self-built channel image).
+		KeySandboxImage:         "builtin",
 		KeySandboxRequireDocker: "true",
 		KeySandboxTimeout:       "0",
 		KeySandboxStuckTimeout:  "300",
+		// 后台交互式会话。数值必须与 sandbox.DefaultSessionConfig() 一致；
+		// 运行时以 sandboxConfigWithMemoryLimit / StartBot 两处读取为准。
+		KeySandboxSessionIdleTTL:            "900",
+		KeySandboxSessionMaxPerBot:          "4",
+		KeySandboxSessionMaxTotal:           "32",
+		KeySandboxSessionHealthWindow:       "5000",
+		KeySandboxSessionStableWindow:       "120",
+		KeySandboxSessionRawBuffer:          "1048576",
+		KeySandboxSessionAutoUpgradeWindow:  "2500",
+		KeySandboxSessionAutoUpgradeMaxWait: "8000",
+		KeySandboxSessionWatchWaitMax:       "30000",
 		// Dreaming
 		"bot.dreaming.enabled":  "false",
 		"bot.dreaming.schedule": "0 3 * * *",

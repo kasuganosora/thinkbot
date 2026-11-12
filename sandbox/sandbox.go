@@ -263,6 +263,10 @@ type Config struct {
 	// （curl、python requests、node fetch、容器内 thinkbot 等）统一走部署侧代理。
 	// 空值表示直连（默认）。通常取自全局配置 system.proxy。
 	Proxy string
+
+	// Session 后台交互式 PTY 会话的可调参数。零值字段由 fillSessionDefaults
+	// 用 DefaultSessionConfig() 兜底；不要在各调用点硬编码阈值（docs §8）。
+	Session SessionConfig
 }
 
 // DefaultConfig 返回默认配置。
@@ -280,7 +284,83 @@ func DefaultConfig() Config {
 		MaxFileWrite:    10 << 20,        // 10 MB
 		Timezone:        "UTC",
 		BrowserEnabled:  false,
+		Session:         DefaultSessionConfig(),
 	}
+}
+
+// fillSessionDefaults fills zero-valued session tunables. Kept as a separate
+// helper so both the config chain and tests can validate a partial override.
+func fillSessionDefaults(c SessionConfig) SessionConfig {
+	def := DefaultSessionConfig()
+	if c.IdleTTL <= 0 {
+		c.IdleTTL = def.IdleTTL
+	}
+	if c.TermGrace <= 0 {
+		c.TermGrace = def.TermGrace
+	}
+	if c.MaxPerBot <= 0 {
+		c.MaxPerBot = def.MaxPerBot
+	}
+	if c.MaxTotal <= 0 {
+		c.MaxTotal = def.MaxTotal
+	}
+	if c.HealthWindow <= 0 {
+		c.HealthWindow = def.HealthWindow
+	}
+	if c.StableWindow <= 0 {
+		c.StableWindow = def.StableWindow
+	}
+	if c.RawBufferBytes <= 0 {
+		c.RawBufferBytes = def.RawBufferBytes
+	}
+	if c.ScreenCols == 0 {
+		c.ScreenCols = def.ScreenCols
+	}
+	if c.ScreenRows == 0 {
+		c.ScreenRows = def.ScreenRows
+	}
+	if c.Term == "" {
+		c.Term = def.Term
+	}
+	if c.DiagTailBytes <= 0 {
+		c.DiagTailBytes = def.DiagTailBytes
+	}
+	if c.CollapseThreshold <= 0 {
+		c.CollapseThreshold = def.CollapseThreshold
+	}
+	if c.DeltaMaxLines <= 0 {
+		c.DeltaMaxLines = def.DeltaMaxLines
+	}
+	if c.ReadLoopHeartbeat <= 0 {
+		c.ReadLoopHeartbeat = def.ReadLoopHeartbeat
+	}
+	if c.RetainAfterExit <= 0 {
+		c.RetainAfterExit = def.RetainAfterExit
+	}
+	if c.PollWaitMax <= 0 {
+		c.PollWaitMax = def.PollWaitMax
+	}
+	if c.SeqRateThreshold <= 0 {
+		c.SeqRateThreshold = def.SeqRateThreshold
+	}
+	if c.ChangeRatioMin <= 0 {
+		c.ChangeRatioMin = def.ChangeRatioMin
+	}
+	if c.AutoUpgradeWindow <= 0 {
+		c.AutoUpgradeWindow = def.AutoUpgradeWindow
+	}
+	if c.AutoUpgradeMaxWait <= 0 {
+		c.AutoUpgradeMaxWait = def.AutoUpgradeMaxWait
+	}
+	if c.AutoUpgradeMaxWait < c.AutoUpgradeWindow {
+		c.AutoUpgradeMaxWait = c.AutoUpgradeWindow
+	}
+	// WatchWaitMax: 0 = not configured, negative = explicitly disabled.
+	// Only the zero value is filled, so the disabled sentinel survives.
+	if c.WatchWaitMax == 0 {
+		c.WatchWaitMax = def.WatchWaitMax
+	}
+	return c
 }
 
 // ============================================================================

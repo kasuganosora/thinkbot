@@ -740,6 +740,25 @@ type evaluator struct {
 	svc *Service
 }
 
+// AllowsTool 实现 agent/tools.ToolAccessProbe。它复用 FilterTools 完全相同的
+// 参数组装与 allow()，因此「工具列表过滤」与「单工具探测」不会得出不同结论。
+// 用于工具内部条件性开放另一能力时做同源裁决（如 sandbox_exec 的
+// background:auto 会创建后台会话，必须先确认 spawn 未被权限表禁掉）。
+func (e *evaluator) AllowsTool(_ context.Context, sctx *tools.ToolSessionContext, toolName string) bool {
+	if sctx == nil {
+		// 与 FilterTools(nil sctx) 一致：无法判定归属维度时保守放行。
+		return true
+	}
+	platform := sctx.SourceChannelType
+	if platform == "" {
+		platform = sctx.Channel
+	}
+	isSubagent := sctx.IsSubagent
+	inherited := isSubagent && sctx.InheritedFromParent
+	return e.allow(sctx.BotID, toolName, platform, sctx.ChatID,
+		e.resolveCandidates(sctx), sctx.IsSystem, isSubagent, inherited)
+}
+
 // FilterTools 按 (botID, 工具名, 平台=SourceChannelType, userID) 过滤工具，
 // 并对每个放行的工具包裹一层「调用时二次复核」的防御，确保即便工具列表过滤被绕过，
 // 实际执行前仍会用同一会话上下文复核权限。

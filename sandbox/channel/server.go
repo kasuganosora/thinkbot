@@ -233,6 +233,7 @@ type conn struct {
 	ok   bool
 	puts map[uint32]*putSession
 	exec map[uint32]*execSession
+	sess map[uint32]*sessionRunner // ReqID -> long-lived PTY session
 }
 
 type putSession struct {
@@ -257,9 +258,11 @@ func (s *Server) serveConn(nc net.Conn) {
 		bw:   bufio.NewWriter(nc),
 		puts: map[uint32]*putSession{},
 		exec: map[uint32]*execSession{},
+		sess: map[uint32]*sessionRunner{},
 	}
 	defer nc.Close()
 	defer c.abortExecs()
+	defer c.abortSessions()
 	defer c.cancelPuts()
 	for {
 		f, err := ReadFrame(c.br, DefaultMaxFrame)
@@ -320,6 +323,15 @@ func (c *conn) dispatch(f Frame) {
 		go c.runProcessSignal(f, false)
 	case MsgProcessKill:
 		go c.runProcessSignal(f, true)
+	case MsgSessionSpawn:
+		sess, err := c.beginSession(f.ReqID)
+		if err != nil {
+			c.sendError(f.ReqID, CodeBusy, err.Error())
+			return
+		}
+		go c.runSession(f, sess)
+	case MsgSessionStdin, MsgSessionSignal, MsgSessionResize, MsgSessionClose, MsgSessionTouch:
+		c.routeSession(f)
 	case MsgShutdown:
 		c.sendResult(MsgShutdownAck, f.ReqID, OkResult{OK: true})
 		if c.s.cfg.OnShutdown != nil {

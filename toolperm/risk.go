@@ -113,6 +113,15 @@ var basicTools = map[string]struct{}{
 	"task_detail":    {},
 	"sandbox_health": {},
 
+	// 后台交互式会话的只读入口：poll 只返回屏幕与增量，watch 只排序注意力，
+	// 两者都不消费 delta、不推进 cursor、不产生任何副作用。
+	// 必须归 basic：平台一旦配过任何规则就进入白名单模式，未收录工具默认禁止，
+	// 归敏感会让 bot 能 spawn 会话却读不了屏（与 11-02 secret_input 同源的坑）。
+	// 注意：名字命中 "sandbox_" 敏感前缀，还必须同时在
+	// sensitivePrefixExceptions 登记，否则前缀护栏会把这里否决掉。
+	"sandbox_session_poll":  {},
+	"sandbox_session_watch": {},
+
 	// Channel 只读查询：只是看，不留痕迹
 	"misskey_search_user":              {},
 	"misskey_list_following":           {},
@@ -254,6 +263,8 @@ var sensitivePrefixes = []string{
 // 这些工具虽然名字带敏感前缀，但确实只读、不留痕迹。
 var sensitivePrefixExceptions = map[string]struct{}{
 	"sandbox_health":                   {}, // 纯健康探测
+	"sandbox_session_poll":             {}, // 只读读屏，不消费 delta
+	"sandbox_session_watch":            {}, // 只读注意力队列，零副作用
 	"misskey_search_user":              {}, // 只读查询
 	"misskey_list_following":           {},
 	"misskey_get_user_notes":           {}, // 只读查询

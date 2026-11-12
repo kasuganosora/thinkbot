@@ -445,28 +445,50 @@ func (c *botContainer) removeContainerKeepData() error {
 // DialChannel ensures the container and returns an authenticated session.
 // Later call sites can switch file and exec traffic onto this client.
 func (c *botContainer) DialChannel(ctx context.Context) (*channelclient.Client, error) {
+	ep, token, err := c.channelDialParams(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return channelclient.DialEndpoint(ctx, ep, token, c.botID)
+}
+
+// channelDialParams is the single resolution path for ensure + derived token +
+// endpoint. Both the shared RPC client and a dedicated PTY session connection
+// must use exactly the same checks; there is no alternate dial path.
+func (c *botContainer) channelDialParams(ctx context.Context) (channelclient.Endpoint, string, error) {
 	if !c.usesChannel() {
-		return nil, errs.New("bot_container: image has no thinkbot-channel entrypoint")
+		return channelclient.Endpoint{}, "", errs.New("bot_container: image has no thinkbot-channel entrypoint")
 	}
 	if err := c.ensure(ctx); err != nil {
-		return nil, err
+		return channelclient.Endpoint{}, "", err
 	}
 	token, err := channelclient.DeriveToken(c.cfg.ChannelSecret, c.botID)
 	if err != nil {
-		return nil, errs.Wrap(err, "bot_container: channel token")
+		return channelclient.Endpoint{}, "", errs.Wrap(err, "bot_container: channel token")
 	}
 	c.mu.Lock()
 	transport, err := c.channelTransport()
 	if err != nil {
 		c.mu.Unlock()
-		return nil, err
+		return channelclient.Endpoint{}, "", err
 	}
 	ep, err := c.channelEndpointLocked(ctx, transport)
 	c.mu.Unlock()
 	if err != nil {
+		return channelclient.Endpoint{}, "", err
+	}
+	return ep, token, nil
+}
+
+// DialChannelSession opens an independent connection for one interactive PTY
+// session. The connection is owned by that session until close/exit.
+func (c *botContainer) DialChannelSession(ctx context.Context,
+	req channel.SessionSpawnRequest, cb channel.SessionCallbacks) (*channel.SessionClient, error) {
+	ep, token, err := c.channelDialParams(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return channelclient.DialEndpoint(ctx, ep, token, c.botID)
+	return channelclient.DialSessionEndpoint(ctx, ep, token, c.botID, req, cb)
 }
 
 // dockerRunArgs 是 `docker run -d` 的参数（不含 docker 本身）。

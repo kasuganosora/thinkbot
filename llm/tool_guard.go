@@ -64,11 +64,16 @@ func DefaultToolGuardConfig() ToolGuardConfig {
 		MaxConsecutiveFailures: 5,
 		PerToolMaxFailures: map[string]int{
 			"exec": 8, "sandbox_exec": 8, "run_code": 8, "shell": 8,
+			"sandbox_session_spawn": 8,
 		},
 		StreakAdvisory: 8,
 		Exempt: []string{
 			"now", "random", "uuid", "user_choice",
 			"task", "task_detail", "task_control", "tool_search",
+			// 后台会话的 poll/watch 天生就是重复调用：同参同结果 3 次
+			// 是「等待输出」的正常形态，不该被 MaxIdenticalCalls 拦掉。
+			// 两者都只读、零副作用，豁免不会放宽任何执行能力。
+			"sandbox_session_poll", "sandbox_session_watch",
 		},
 	}
 }

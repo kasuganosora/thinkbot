@@ -105,6 +105,10 @@ func (s *Server) registerRoutes() {
 			// 所有登录用户可查看 Bot 列表（用于聊天页面选择）
 			bots.GET("", s.handleListBots)
 			bots.GET("/:id", s.handleGetBot)
+			// 后台交互式会话列表是只读的：普通登录用户也要能看见「有会话在跑」，
+			// 但接管(WS)/关闭(DELETE) 仍是 PermBotManage 专属，见下方 botsAdmin。
+			// 返回体带 canManage，前端据此决定是否渲染接管入口。
+			bots.GET("/:id/pty-sessions", s.handleListPtySessions)
 
 			// admin 可管理 Bot
 			botsAdmin := bots.Group("")
@@ -205,6 +209,13 @@ func (s *Server) registerRoutes() {
 				botsAdmin.GET("/:id/terminal", s.handleBotTerminal)
 				botsAdmin.POST("/:id/terminal/exec", s.handleBotTerminalExec)
 				botsAdmin.GET("/:id/desktop", s.handleBotDesktop)
+
+				// 后台交互式 PTY 会话：接管 / 关闭（写操作，仅 BotManage）。
+				// 只读列表挂在上面的 bots 组（所有登录用户可见）。
+				// ⚠️ 不能挂 /:id/sessions —— 那是聊天会话 CRUD（见 :263）。
+				botsAdmin.POST("/:id/pty-sessions", s.handleSpawnPtySession)
+				botsAdmin.GET("/:id/pty-sessions/:sid/stream", s.handleBotPtySessionStream)
+				botsAdmin.DELETE("/:id/pty-sessions/:sid", s.handleClosePtySession)
 
 				// 心跳管理
 				botsAdmin.GET("/:id/heartbeat", s.handleGetHeartbeatConfig)

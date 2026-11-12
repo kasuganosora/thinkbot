@@ -287,21 +287,29 @@ func TestTool_BotWorkspaceToolDefs_Count(t *testing.T) {
 	defer cleanup()
 
 	defs := botWorkspaceToolDefs(mgr, "test-bot")
-	if len(defs) != 10 {
-		t.Errorf("expected 10 tools, got %d", len(defs))
+	// 10 workspace tools + 7 interactive session tools (docs §4).
+	if len(defs) != 17 {
+		t.Errorf("expected 17 tools, got %d", len(defs))
 	}
 
 	expectedNames := map[string]bool{
-		"sandbox_exec":            true,
-		"sandbox_read_file":       true,
-		"sandbox_write_file":      true,
-		"sandbox_replace_in_file": true,
-		"sandbox_delete_file":     true,
-		"sandbox_move_file":       true,
-		"sandbox_list_dir":        true,
-		"sandbox_search_content":  true,
-		"sandbox_health":          true,
-		"run_code":                true,
+		"sandbox_exec":              true,
+		"sandbox_read_file":         true,
+		"sandbox_write_file":        true,
+		"sandbox_replace_in_file":   true,
+		"sandbox_delete_file":       true,
+		"sandbox_move_file":         true,
+		"sandbox_list_dir":          true,
+		"sandbox_search_content":    true,
+		"sandbox_health":            true,
+		"run_code":                  true,
+		"sandbox_session_spawn":     true,
+		"sandbox_session_poll":      true,
+		"sandbox_session_send":      true,
+		"sandbox_session_signal":    true,
+		"sandbox_session_close":     true,
+		"sandbox_session_watch":     true,
+		"sandbox_session_close_all": true,
 	}
 	for _, tool := range defs {
 		if !expectedNames[tool.Name] {

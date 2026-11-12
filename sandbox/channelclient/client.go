@@ -6,7 +6,9 @@
 // shared Volume B directory. Windows, and sandbox.channel.transport=http, dial
 // 127.0.0.1 with the same Hello token. The token is not a URL or query value.
 // File, exec, and process RPCs are available for later call-site migration.
-// There is no PTY and no screenshot support.
+// Plain command.exec has no PTY and no screenshot support. Interactive PTY
+// sessions are a separate surface: MsgSession* frames on one dedicated
+// connection per session (DialSessionEndpoint), never on the shared rpc conn.
 package channelclient
 
 import (
@@ -16,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
@@ -173,6 +176,53 @@ func probeHealthEndpoint(ctx context.Context, ep Endpoint) error {
 		return fmt.Errorf("channel health: %w", err)
 	}
 	return nil
+}
+
+// DialSessionEndpoint opens a dedicated connection for ONE interactive PTY
+// session. It deliberately does not go through DialEndpoint/Client.rpc: a
+// long-lived session holds that mutex for its whole lifetime and would block
+// Info/Exec on the shared connection (measured 2.6s vs 283us, docs §3.6).
+// The same transport, token-target and health checks as DialEndpoint apply.
+func DialSessionEndpoint(ctx context.Context, ep Endpoint, token, botID string,
+	req channel.SessionSpawnRequest, cb channel.SessionCallbacks) (*channel.SessionClient, error) {
+	if ep.Network == "" {
+		ep.Network = channel.TransportUnix
+	}
+	if ep.Addr == "" && ep.Network == channel.TransportUnix {
+		ep.Addr = channel.DefaultSock
+	}
+	if err := channel.RejectTokenTarget(ep.Addr); err != nil {
+		return nil, err
+	}
+	if err := probeHealthEndpoint(ctx, ep); err != nil {
+		return nil, err
+	}
+	nc, err := dialRawEndpoint(ctx, ep)
+	if err != nil {
+		return nil, err
+	}
+	opt := channel.DialOptions{Token: token, BotID: botID, ClientVersion: channel.Version}
+	sc, err := channel.DialSession(ctx, nc, opt, req, cb)
+	if err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+	return sc, nil
+}
+
+func dialRawEndpoint(ctx context.Context, ep Endpoint) (net.Conn, error) {
+	var d net.Dialer
+	switch ep.Network {
+	case "", channel.TransportUnix:
+		return d.DialContext(ctx, "unix", ep.Addr)
+	case channel.TransportTCP:
+		if err := channel.RequireLoopbackDial(ep.Addr); err != nil {
+			return nil, err
+		}
+		return d.DialContext(ctx, "tcp", ep.Addr)
+	default:
+		return nil, fmt.Errorf("channel: unknown transport %q", ep.Network)
+	}
 }
 
 // Recover probes once. On failure it recreates the container (the callback must

@@ -592,8 +592,13 @@ func (b *Bot) Close() {
 				_ = b.browserMCP.Close()
 			}
 		}
-		// 关闭工作空间管理器（文件持久化，不删除）
+		// 关闭工作空间管理器（文件持久化，不删除）。
+		// 先按 botID 级联关掉后台交互式会话进程：只清 workspaces 内存表
+		// 会让已 spawn 的 CLI 变成孤儿（docs §3.7）。
 		if b.workspaceMgr != nil {
+			if reg := b.workspaceMgr.Sessions(); reg != nil {
+				reg.CloseAll(b.ID)
+			}
 			if err := b.workspaceMgr.Close(); err != nil {
 				b.logger.Warnw("workspace manager close failed", "err", err)
 			}

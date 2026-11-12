@@ -185,6 +185,29 @@ const (
 	// http 与 tcp 相同：帧协议不变，token 只在 Hello 帧，宿主只拨 127.0.0.1。
 	// 环境变量 THINKBOT_CHANNEL_TRANSPORT 优先于本键。本键不是密钥。
 	KeySandboxChannelTransport = "sandbox.channel.transport"
+
+	// —— 后台交互式 PTY 会话（docs/design-agent-interactive-pty.md §8）——
+	// 这些值必须同时落到 sandbox.Config.Session / DefaultConfig / fillDefaults，
+	// 只写 DefaultMap() 不会成为运行时值（它只用于 GET /api/config 展示）。
+
+	// KeySandboxSessionIdleTTL 后台会话无 poll/send 多久后由 readLoop 自行回收（秒，默认 900）。
+	KeySandboxSessionIdleTTL = "sandbox.session_idle_ttl"
+	// KeySandboxSessionMaxPerBot 单个 bot 允许的并发后台会话数（默认 4）。
+	KeySandboxSessionMaxPerBot = "sandbox.session_max_per_bot"
+	// KeySandboxSessionMaxTotal 全局并发后台会话数（默认 32）。
+	KeySandboxSessionMaxTotal = "sandbox.session_max_total"
+	// KeySandboxSessionHealthWindow health 判据的滑动窗口（毫秒，默认 5000）。
+	KeySandboxSessionHealthWindow = "sandbox.session_health_window"
+	// KeySandboxSessionStableWindow 语义增量结算前的静默窗口（毫秒，默认 120）。
+	KeySandboxSessionStableWindow = "sandbox.session_stable_window"
+	// KeySandboxSessionRawBuffer 每会话 raw 环形缓冲字节数（默认 1048576）。
+	KeySandboxSessionRawBuffer = "sandbox.session_raw_buffer"
+	// KeySandboxSessionAutoUpgradeWindow sandbox_exec(background=auto) 判断「短命令」的观察窗口（毫秒，默认 2500）。
+	KeySandboxSessionAutoUpgradeWindow = "sandbox.session_auto_upgrade_window"
+	// KeySandboxSessionAutoUpgradeMaxWait 零输出进程转启动诊断前的最长等待（毫秒，默认 8000）。
+	KeySandboxSessionAutoUpgradeMaxWait = "sandbox.session_auto_upgrade_max_wait"
+	// KeySandboxSessionWatchWaitMax sandbox_session_watch 长轮询单次最大等待（毫秒，默认 30000）。
+	KeySandboxSessionWatchWaitMax = "sandbox.session_watch_wait_max"
 )
 
 // ToolOutput 键：工具输出截断 + 落盘指针（借鉴 opencode 的 token 优化）。

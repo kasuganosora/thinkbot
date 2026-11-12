@@ -303,6 +303,33 @@ func Placeholder(name string) string {
 	return "{{" + PlaceholderPrefix + name + "}}"
 }
 
+// HasValues reports whether any credential is currently registered. Streaming
+// hot paths (e.g. a PTY read loop) use it as a cheap fast path before doing
+// per-chunk redaction work; the vault is empty in the vast majority of setups.
+func (v *Vault) HasValues() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return len(v.entries) > 0
+}
+
+// PlaceholderNames returns the distinct {{secret:name}} names still present in
+// s. Tool execution resolves registered placeholders before invoking a tool,
+// so a token surviving to that point is unknown or owned by another bot.
+func PlaceholderNames(s string) []string {
+	if !strings.Contains(s, "{{"+PlaceholderPrefix) {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range placeholderRE.FindAllStringSubmatch(s, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
 // Resolve 递归把 input 中 botID 可见的占位符还原为真实值。未知占位符（含别的
 // bot 名下的）原样保留；单遍替换保证真实值内若含 {{...}} 不会被二次解析。
 func (v *Vault) Resolve(botID string, input any) any {

@@ -112,6 +112,27 @@ const (
 
 	MsgShutdown    MsgType = 90
 	MsgShutdownAck MsgType = 91
+
+	// Interactive PTY sessions. A session owns ONE connection: the legacy
+	// Client.rpc mutex serialises every RPC on a shared connection, so trying
+	// to stream a long-lived session over it would block Info/Exec for its
+	// whole lifetime (measured: same-connection Info blocked 2.6s vs 283us on
+	// an independent connection, docs §3.6). ReqID identifies the session on
+	// that dedicated connection.
+	MsgSessionSpawn       MsgType = 100
+	MsgSessionSpawnResult MsgType = 101
+	MsgSessionStdin       MsgType = 102
+	MsgSessionOutput      MsgType = 103
+	MsgSessionExit        MsgType = 104
+	MsgSessionSignal      MsgType = 105
+	MsgSessionResize      MsgType = 106
+	MsgSessionDiag        MsgType = 107
+	MsgSessionClose       MsgType = 108
+	// MsgSessionTouch is sent by the host on poll/send. It refreshes the
+	// container-side idle TTL without writing a byte into the PTY: a host that
+	// went away stops touching and the daemon kills the orphaned process group
+	// by itself (docs §13 #9).
+	MsgSessionTouch MsgType = 109
 )
 
 const (
@@ -126,7 +147,8 @@ const (
 )
 
 // Capabilities is the protocol-1 surface advertised in HelloAck.
-// PTY and display capture are intentionally absent.
+// Plain command.exec still has no PTY; session.spawn is the separate,
+// dedicated-connection PTY surface.
 var Capabilities = []string{
 	"health.ping",
 	"health.info",
@@ -141,6 +163,7 @@ var Capabilities = []string{
 	"process.signal",
 	"process.kill",
 	"control.shutdown",
+	"session.spawn",
 }
 
 // Frame is one length-prefixed message. Unix and TCP use the same framing.
@@ -361,6 +384,71 @@ type ExecResult struct {
 	Error    string `json:"error,omitempty"`
 	Code     string `json:"code,omitempty"`
 }
+
+// ============================================================================
+// Interactive PTY sessions (MsgSession* frames)
+//
+// Unlike ExecRequest a session has a PTY, a live stdin stream, resize and a
+// diagnostic side channel. Screen rendering, ring buffers and health stay on
+// the host side; the container only forwards raw bytes (docs §3.7 分层).
+// ============================================================================
+
+// SessionSpawnRequest starts a PTY-backed process on a dedicated connection.
+type SessionSpawnRequest struct {
+	Command   string   `json:"command,omitempty"`
+	Argv      []string `json:"argv,omitempty"`
+	Cwd       string   `json:"cwd,omitempty"`
+	Env       []string `json:"env,omitempty"`
+	Cols      uint16   `json:"cols,omitempty"`
+	Rows      uint16   `json:"rows,omitempty"`
+	Term      string   `json:"term,omitempty"`
+	IdleTTLMs int64    `json:"idleTtlMs,omitempty"`
+}
+
+// SessionSpawnResult is MsgSessionSpawnResult. Error/Code carry failures that
+// happened before the process could start (bad request, no PTY, unsupported).
+type SessionSpawnResult struct {
+	PID   int    `json:"pid,omitempty"`
+	Error string `json:"error,omitempty"`
+	Code  string `json:"code,omitempty"`
+}
+
+// SessionData carries either stdin bytes (MsgSessionStdin) or raw PTY output
+// (MsgSessionOutput). []byte is base64-encoded by encoding/json.
+type SessionData struct {
+	Data []byte `json:"data"`
+}
+
+// SessionExit is MsgSessionExit.
+type SessionExit struct {
+	ExitCode int    `json:"exitCode"`
+	Signal   string `json:"signal,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Code     string `json:"code,omitempty"`
+}
+
+// SessionSignal carries "INT" | "TERM" | "KILL".
+type SessionSignal struct {
+	Sig string `json:"sig"`
+}
+
+// SessionResize changes the PTY window.
+type SessionResize struct {
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
+}
+
+// SessionDiag is the out-of-band diagnostic channel (never mixed into the PTY).
+type SessionDiag struct {
+	Data string `json:"data"`
+}
+
+// SessionClose asks the daemon to tear down the process group. Empty body.
+type SessionClose struct{}
+
+// SessionTouch refreshes the container-side idle TTL. It carries no data and
+// must never be written into the PTY.
+type SessionTouch struct{}
 
 // SignalRequest names a signal ("TERM", "SIGKILL", or a number).
 type SignalRequest struct {

@@ -575,8 +575,50 @@ func (s *BotService) sandboxConfigWithMemoryLimit(mb int64) sandbox.Config {
 	if mem, ok := sandboxMemoryLimit(mb); ok {
 		cfg.MemoryLimit = mem
 	}
+	s.applySessionConfig(&cfg)
 	s.applyChannelConfig(&cfg)
 	return cfg
+}
+
+// applySessionConfig 读取后台交互式 PTY 会话的可调参数。
+// 两条 sandbox.Config 构造路径都必须调用：DefaultMap() 只用于 GET /api/config
+// 展示，不写回 Store，光配 ③ 不改④⑤ 参数完全不生效（docs §8）。
+func (s *BotService) applySessionConfig(cfg *sandbox.Config) {
+	if sec := s.store.GetInt(config.KeySandboxSessionIdleTTL, 0); sec > 0 {
+		cfg.Session.IdleTTL = time.Duration(sec) * time.Second
+	}
+	if n := s.store.GetInt(config.KeySandboxSessionMaxPerBot, 0); n > 0 {
+		cfg.Session.MaxPerBot = n
+	}
+	if n := s.store.GetInt(config.KeySandboxSessionMaxTotal, 0); n > 0 {
+		cfg.Session.MaxTotal = n
+	}
+	if ms := s.store.GetInt(config.KeySandboxSessionHealthWindow, 0); ms > 0 {
+		cfg.Session.HealthWindow = time.Duration(ms) * time.Millisecond
+	}
+	if ms := s.store.GetInt(config.KeySandboxSessionStableWindow, 0); ms > 0 {
+		cfg.Session.StableWindow = time.Duration(ms) * time.Millisecond
+	}
+	if n := s.store.GetInt(config.KeySandboxSessionRawBuffer, 0); n > 0 {
+		cfg.Session.RawBufferBytes = n
+	}
+	if ms := s.store.GetInt(config.KeySandboxSessionAutoUpgradeWindow, 0); ms > 0 {
+		cfg.Session.AutoUpgradeWindow = time.Duration(ms) * time.Millisecond
+	}
+	if ms := s.store.GetInt(config.KeySandboxSessionAutoUpgradeMaxWait, 0); ms > 0 {
+		cfg.Session.AutoUpgradeMaxWait = time.Duration(ms) * time.Millisecond
+	}
+	// UI 上填 0 表示关闭等待；零值在 fillSessionDefaults 里是「未设置」，
+	// 故用一个负哨兵区分二者（配置只表达意图，运行时由 sandbox 包解析）。
+	if raw, ok := s.store.Get(config.KeySandboxSessionWatchWaitMax); ok {
+		if ms, err := strconv.Atoi(raw); err == nil && ms >= 0 {
+			if ms == 0 {
+				cfg.Session.WatchWaitMax = -1
+			} else {
+				cfg.Session.WatchWaitMax = time.Duration(ms) * time.Millisecond
+			}
+		}
+	}
 }
 
 // sandboxMemoryLimit 把 per-bot 的 memory_limit_mb 转成 docker --memory 的值。
@@ -1071,7 +1113,32 @@ func (s *BotService) AbortSession(botID, sessionID string) int {
 			n++
 		}
 	}
+	if n > 0 {
+		s.markSessionsOrphaned(botID)
+	}
 	return n
+}
+
+// markSessionsOrphaned 标记后台交互式会话「agent 回合已终止」。
+// 刻意不 kill：后台会话必须脱离 message ctx，否则每轮正常结束都会被
+// finishMessageLifecycle 的 cancel 杀掉（docs §3.7）。回收交给会话自身
+// readLoop 的进程级 idle TTL，不依赖 agent 再调一次 watch/spawn。
+func (s *BotService) markSessionsOrphaned(botID string) {
+	s.mu.RLock()
+	b := s.botInstances[botID]
+	s.mu.RUnlock()
+	if b == nil {
+		return
+	}
+	mgr := b.WorkspaceMgr()
+	if mgr == nil || mgr.Sessions() == nil {
+		return
+	}
+	if n := mgr.Sessions().MarkOrphaned(botID); n > 0 {
+		s.logger.Infow("interactive_session",
+			"event", "sessions_orphaned", "botID", botID, "count", n,
+			"action", "idle_ttl_reclaims; not killed with the message context")
+	}
 }
 
 // UnattributedRunning 返回该 bot 下「解析不出会话归属」的在跑任务条数。
@@ -1121,6 +1188,9 @@ func (s *BotService) AbortBot(botID string) int {
 		if s.AbortMessage(botID, t.TraceID) {
 			n++
 		}
+	}
+	if n > 0 {
+		s.markSessionsOrphaned(botID)
 	}
 	return n
 }
@@ -3191,7 +3261,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 全局出口代理：注入 bot 容器后，容器内请求统一走部署侧代理。
 	sbCfg.Proxy = config.GlobalProxy(s.store)
 	// 镜像与后端必须从这个 sbCfg 读取：bot.New 会用它自建 BotWorkspaceManager 并据此
-	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的 alpine:latest。
+	// docker run（见 agent/bot/bot.go），否则会回落到 DefaultConfig 的内置镜像。
 	if img := s.store.GetString(config.KeySandboxImage, ""); img != "" {
 		sbCfg.Image = img
 	}
@@ -3220,6 +3290,7 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		browserProxy = config.GlobalProxy(s.store)
 	}
 	sbCfg.BrowserProxy = browserProxy
+	s.applySessionConfig(&sbCfg)
 	s.applyChannelConfig(&sbCfg)
 
 	// 出站只读守卫：Pipeline 自动回复（ActionReply → Channel.Send）不经过工具权限，
@@ -3680,6 +3751,15 @@ func (s *BotService) StopBot(id string) {
 	for _, cancel := range pendingCancels {
 		if cancel != nil {
 			cancel()
+		}
+	}
+
+	// 确定性收口：StopBot 必须关掉该 bot 的全部后台会话进程。
+	// b.Close() → workspaceMgr.Close() 也会走到，但这里显式做一次，
+	// 避免未来重构 Close 顺序时又漏掉（docs §3.7 / §9）。
+	if b != nil {
+		if mgr := b.WorkspaceMgr(); mgr != nil && mgr.Sessions() != nil {
+			mgr.Sessions().CloseAll(id)
 		}
 	}
 

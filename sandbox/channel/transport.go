@@ -115,6 +115,11 @@ func RejectTokenTarget(addr string) error {
 	return nil
 }
 
+// RequireLoopbackDial is the exported form for callers that open a raw
+// connection themselves (a dedicated PTY session uses one connection per
+// session instead of the shared Client RPC connection).
+func RequireLoopbackDial(addr string) error { return requireLoopbackDial(addr) }
+
 func requireLoopbackDial(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

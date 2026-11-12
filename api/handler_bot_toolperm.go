@@ -193,6 +193,15 @@ var userToolDesc = map[string]string{
 	"sandbox_list_dir":        "列出目录内容",
 	"sandbox_search_content":  "在文件中搜索文本",
 	"sandbox_health":          "检查沙箱健康状态",
+	"run_code":                "在沙箱中运行脚本",
+	// 后台交互式会话（docs/design-agent-interactive-pty.md §4）
+	"sandbox_session_spawn":     "启动后台交互式会话",
+	"sandbox_session_poll":      "读取会话屏幕与增量",
+	"sandbox_session_send":      "向会话发送输入",
+	"sandbox_session_signal":    "向会话进程组发信号",
+	"sandbox_session_close":     "关闭单个后台会话",
+	"sandbox_session_watch":     "查看需要处理的会话",
+	"sandbox_session_close_all": "关闭本 bot 的全部后台会话",
 
 	// 浏览器（MCP 动态工具，名称形如 browser__<tool>）
 	"browser__navigate":      "打开指定网址",
@@ -301,6 +310,15 @@ func fallbackToolList() []agenttools.ToolInfo {
 		{Name: "sandbox_list_dir", Category: "sandbox"},
 		{Name: "sandbox_search_content", Category: "sandbox"},
 		{Name: "sandbox_health", Category: "sandbox"},
+		// run_code 曾从本清单漏掉，导致权限页选不到它；新增工具必须同步这里。
+		{Name: "run_code", Category: "sandbox"},
+		{Name: "sandbox_session_spawn", Category: "sandbox"},
+		{Name: "sandbox_session_poll", Category: "sandbox"},
+		{Name: "sandbox_session_send", Category: "sandbox"},
+		{Name: "sandbox_session_signal", Category: "sandbox"},
+		{Name: "sandbox_session_close", Category: "sandbox"},
+		{Name: "sandbox_session_watch", Category: "sandbox"},
+		{Name: "sandbox_session_close_all", Category: "sandbox"},
 
 		// 自举（self-host）：仅在 loader.enabled=true 的自托管 bot 实际注册，
 		// 这里列入兜底清单以便 bot 停止时也能在权限页预配置 allow 规则。

@@ -75,7 +75,25 @@ const (
 	toolListDir       = "sandbox_list_dir"
 	toolSearchContent = "sandbox_search_content"
 	toolHealth        = "sandbox_health"
+
+	// 后台交互式会话工具（docs §4）。刻意**不加入** readonly/analysis/edit
+	// 任何收敛档位：spawn/send/signal/close 具备执行与批准能力，而只放开
+	// poll/watch 会让节点「看得到会话却操作不了」。统一只在 ProfileFull
+	// （不过滤）下可见。这里登记名字是为了清单同步与测试校验。
+	toolSessionSpawn    = "sandbox_session_spawn"
+	toolSessionPoll     = "sandbox_session_poll"
+	toolSessionSend     = "sandbox_session_send"
+	toolSessionSignal   = "sandbox_session_signal"
+	toolSessionClose    = "sandbox_session_close"
+	toolSessionWatch    = "sandbox_session_watch"
+	toolSessionCloseAll = "sandbox_session_close_all"
 )
+
+// sessionToolNames 是会话工具全集，供档位回归测试使用。
+var sessionToolNames = []string{
+	toolSessionSpawn, toolSessionPoll, toolSessionSend,
+	toolSessionSignal, toolSessionClose, toolSessionWatch, toolSessionCloseAll,
+}
 
 // profileTools 档位 → 工具白名单。
 //

@@ -153,6 +153,26 @@ func TestProfileTools_NamesAreKnown(t *testing.T) {
 			}
 		}
 	}
+
+	// 会话工具必须只在 ProfileFull 可见；收敛档位误加会让 SubAgent / 分析
+	// 节点得到「能批准执行」的能力（docs §4 SubAgent 边界）。
+	sessionSet := make(map[string]bool, len(sessionToolNames))
+	for _, n := range sessionToolNames {
+		sessionSet[n] = true
+		if !known[n] {
+			t.Errorf("session tool %q is missing from sandbox.WorkspaceToolNames()", n)
+		}
+	}
+	for profile, names := range profileTools {
+		if names == nil {
+			continue
+		}
+		for _, n := range names {
+			if sessionSet[n] {
+				t.Errorf("profile %q unexpectedly grants interactive session tool %q", profile, n)
+			}
+		}
+	}
 }
 
 // TestProfileTools_NoOverlapWithDestructive 破坏性工具不得出现在非 full 档位。

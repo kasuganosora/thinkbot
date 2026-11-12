@@ -60,6 +60,8 @@
           <Placeholder v-else-if="activeKey === 'email'" title="邮件" desc="配置邮件收发渠道（待完善）。" />
           <!-- 终端 -->
           <div v-else-if="activeKey === 'terminal'" class="pad"><BotTerminal :bot-id="bot.id" /></div>
+          <!-- 后台交互式 PTY 会话：与聊天会话、trace 任务是两类不同的「运行中」 -->
+          <div v-else-if="activeKey === 'pty-sessions'" class="pad"><BotPtySessions :bot-id="bot.id" /></div>
           <div v-else-if="activeKey === 'desktop'" class="pad"><SandboxDesktop :bot-id="bot.id" /></div>
           <!-- 文件 -->
           <BotFiles v-else-if="activeKey === 'files'" :bot-id="bot.id" />
@@ -114,6 +116,7 @@ import BotSkills from '@/components/bot/BotSkills.vue'
 import BotHeartbeat from '@/components/bot/BotHeartbeat.vue'
 import BotOutreach from '@/components/bot/BotOutreach.vue'
 import BotTerminal from '@/components/bot/BotTerminal.vue'
+import BotPtySessions from '@/components/bot/BotPtySessions.vue'
 import SandboxDesktop from '@/components/common/SandboxDesktop.vue'
 import BotBrowser from '@/components/bot/BotBrowser.vue'
 import BotDreaming from '@/components/bot/BotDreaming.vue'
@@ -147,6 +150,7 @@ const navItems = [
   { key: 'toolperm', label: '工具权限' },
   { key: 'email', label: '邮件' },
   { key: 'terminal', label: '终端' },
+  { key: 'pty-sessions', label: '交互会话' },
   { key: 'desktop', label: '桌面' },
   { key: 'files', label: '文件' },
   { key: 'mcp', label: 'MCP' },
@@ -159,7 +163,7 @@ const navItems = [
   { key: 'browser', label: '浏览器' },
   { key: 'quota', label: '额度' }
 ]
-const activeKey = ref('overview')
+const activeKey = ref(route.query.tab === 'pty-sessions' ? 'pty-sessions' : 'overview')
 
 const emojis = ['🤖', '💻', '✍️', '🧠', '📊', '🎨', '🔍', '⚡', '🌟', '🚀']
 const modelOptions = ref([])

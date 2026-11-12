@@ -32,6 +32,12 @@
       <t-button class="sess-stop" theme="danger" variant="text" size="small" :loading="stoppingAll" data-testid="session-system-stop" title="停止该 Bot 下所有正在运行的任务" @click="onStopAll">停止</t-button>
     </div>
 
+    <!-- 后台交互式 PTY 会话：与上面的回合任务是两类对象，「停止」不会关掉它们。 -->
+    <div v-if="store.interactiveRunningCount > 0" class="sess-system-running sess-pty-running" data-testid="session-pty-running">
+      <span class="sess-running"><i class="running-dot" />后台交互会话 ×{{ store.interactiveRunningCount }}</span>
+      <t-button class="sess-stop" variant="text" size="small" title="这些会话不会随「停止」结束，需在交互会话页单独关闭" data-testid="session-pty-open" @click="goPtySessions">查看</t-button>
+    </div>
+
     <div class="session-list" data-testid="session-list" :aria-busy="store.sessionsLoading">
       <div v-if="store.sessionsError" class="list-state error-state" role="alert" data-testid="session-error-state">
         <t-icon name="error-circle" />
@@ -123,6 +129,13 @@ const stopping = ref(new Set())
 const stoppingAll = ref(false)
 const renamingId = ref(null)
 const renameDraft = ref('')
+
+function goPtySessions() {
+  const botId = store.activeBotId
+  if (!botId) return
+  router.push({ name: 'bot-settings', params: { id: botId }, query: { tab: 'pty-sessions' } })
+}
+
 const renameInputs = new Map()
 const renameSaving = ref(false)
 
@@ -340,6 +353,7 @@ function formatTime(iso) {
 .inline-stop:disabled { opacity: .6; cursor: wait; }
 .sess-stop { flex-shrink: 0; }
 .sess-system-running { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin: 0 10px 10px; padding: 6px 8px; border-radius: var(--bp-radius-sm); background: var(--bp-warning-soft); }
+.sess-pty-running { background: var(--bp-accent-soft); }
 .list-state { display: flex; flex-direction: column; align-items: center; gap: 9px; margin-top: 14px; padding: 28px 12px; text-align: center; color: var(--bp-label-secondary); font-size: 12px; line-height: 1.6; }
 .list-state > .t-icon { font-size: 25px; color: var(--bp-label-tertiary); }
 .list-state strong { font-size: 13px; color: var(--bp-label); font-weight: 550; }

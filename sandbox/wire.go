@@ -147,5 +147,6 @@ func fillDefaults(cfg Config) Config {
 	if cfg.Timezone == "" {
 		cfg.Timezone = def.Timezone
 	}
+	cfg.Session = fillSessionDefaults(cfg.Session)
 	return cfg
 }

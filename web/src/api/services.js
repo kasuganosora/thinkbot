@@ -2372,11 +2372,9 @@ export const searchProviderApi = {
 }
 
 // ============================================================================
-// Bot 终端（容器 shell）
-//   真实后端建议走 WebSocket：ws(s)://<host>/api/bots/:botId/terminal
-//     - 前端把 xterm 的 onData 输入通过 ws.send 发出
-//     - 后端 PTY 输出通过 ws.onmessage 回来后 term.write()
-//   下方 mock 仅做本地命令回显，供前端联调 UI。
+// Bot 终端（容器 shell，逐行 HTTP exec）
+//   这是「一条命令一次 HTTP」的旧终端，保留作降级路径。
+//   实时 PTY 会话走下面独立的 botPtySessionApi（WebSocket），不要在这里加 ws。
 // ============================================================================
 const _botTermState = {}
 function ensureBotTerm(botId) {
@@ -2459,5 +2457,32 @@ export const botTerminalApi = {
       return { output, cwd: ensureBotTerm(botId).cwd }
     })
     return request('POST', `/api/bots/${botId}/terminal/exec`, { cmd })
+  }
+}
+
+// ============================================================================
+// 后台交互式 PTY 会话（agent 拥有进程，人可以从外部实时接管）
+//   ⚠️ 与 sessionApi（聊天会话 CRUD）不是同一类对象；后端路由刻意用
+//      /pty-sessions 而不是 /sessions，避免和 handleListSessions 撞车。
+//   ⚠️ WebSocket 只 attach/detach：关标签页不会结束会话，必须显式 remove()。
+// ============================================================================
+export const botPtySessionApi = {
+  // 只读列表对所有登录用户开放；canManage 由服务端按角色返回（接管/关闭需 bot.manage）。
+  list(botId) {
+    if (USE_MOCK) return mockResolve(() => ({ sessions: [], canManage: false }))
+    return request('GET', `/api/bots/${encodeURIComponent(botId)}/pty-sessions`)
+  },
+  create(botId, command, cols, rows) {
+    if (USE_MOCK) return mockResolve(() => ({ sessionId: 'mock-pty' }))
+    return request('POST', `/api/bots/${encodeURIComponent(botId)}/pty-sessions`,
+      { command, cols: cols || 120, rows: rows || 40 })
+  },
+  streamUrl(botId, sessionId) {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${location.host}/api/bots/${encodeURIComponent(botId)}/pty-sessions/${encodeURIComponent(sessionId)}/stream`
+  },
+  remove(botId, sessionId) {
+    if (USE_MOCK) return mockResolve(() => ({ closed: true }))
+    return request('DELETE', `/api/bots/${encodeURIComponent(botId)}/pty-sessions/${encodeURIComponent(sessionId)}`)
   }
 }

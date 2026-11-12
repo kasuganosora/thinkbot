@@ -60,7 +60,7 @@ Every bot gets its own isolated workspace, and its files survive across sessions
 ### Command execution
 - Use exec for terminal work: builds, tests, git, package managers.
 - **NEVER use exec for file operations** (reading, writing, searching). Use the dedicated file tools instead.
-- Commands are subject to a timeout (30 seconds by default).
+- Commands are protected by a stuck watchdog (no output for 300s by default) and a hard ceiling (auto = stuck x 3); a slow command that keeps producing output is not killed.
 - If a command fails or the workspace behaves unexpectedly, run health first to diagnose.
 
 ### Search
@@ -73,6 +73,19 @@ Every bot gets its own isolated workspace, and its files survive across sessions
 - CRITICAL: NEVER invent tool results. Use only data a tool actually returned.
 - When a tool call fails, state why it failed and try a concrete alternative.
 
+### Interactive sessions (background PTY)
+- **exec** is one-shot. For a TUI, REPL, login flow, or any program that needs stdin later, use **sandbox_session_spawn** instead — it returns an opaque sessionId immediately and the process keeps running between tool calls.
+- If you are unsure whether a command is short-lived or long-running, **exec** may offer background="auto" (only when session tools are permitted). It starts a PTY session and watches briefly: quick exit gives you the normal one-shot result with no output lost; still running with visible output gives you a sessionId — then switch to the poll/send/close loop below. A process that is alive but produces NO output is never upgraded: you get a startup diagnostic, not a sessionId.
+- background="auto" is decided by the server's tool permissions. If the parameter is absent, or the call says it is not permitted, use **sandbox_session_spawn** explicitly or run synchronously instead of retrying auto.
+- Loop: **spawn -> poll -> decide -> send -> poll**. There is no "awaiting_input" gate; state=running always allows send. Never guess results with a fixed sleep, and never send two commands back to back.
+- **poll** returns the current screen plus a semantic delta. Always pass the returned **settledSeq** as your next sinceSeq — using **seq** (a raw byte counter) can silently skip content.
+- A command may open a confirmation screen, or may not. On such a screen, Enter / y means APPROVING the action (often shell execution). Read the screen before every send, and poll again afterwards.
+- **urls** are out-of-band actions (login / OAuth / device code / callback). Hand them to the user; do not type them into the terminal or just wait.
+- If the screen is empty but the process is alive, read **bootDiag** / **stderrTail** first — a startup failure can look exactly like a quiet session. Do not assume it is waiting for input.
+- **signal(INT)** ends the whole session on a raw TUI; it is not "interrupt and continue". Spawn a new session afterwards.
+- **sandbox_session_watch** is a read-only attention queue across sessions. It does not consume output or advance your cursor. Pass waitMs to long-poll: the call waits until a session needs a decision (actionable prompt, exit, orphan, daemon fault) instead of you sleeping and re-calling watch. A timeout is NOT an event — only act on attention items.
+- Stopping the chat turn does NOT stop these sessions; they are reclaimed after an idle period. Close them explicitly when done.
+
 ### Language
 - These tool descriptions are written in English, but you reply to the user in Chinese (中文) by default — if the user writes in another language, match theirs.`,
 	Enabled: true,
@@ -81,6 +94,12 @@ Every bot gets its own isolated workspace, and its files survive across sessions
 // BotWorkspaceToolProvider 将 BotWorkspaceManager 适配为动态工具提供者。
 type BotWorkspaceToolProvider struct {
 	Manager *BotWorkspaceManager
+	// ToolManager lets the provider reuse the SAME permission evaluator that
+	// filters the tool list. background=auto creates a background PTY session,
+	// which is the capability owned by sandbox_session_spawn; without this
+	// check, a rule that allows exec but denies spawn would be bypassable.
+	// Nil (e.g. tests / static registration) disables auto entirely.
+	ToolManager *tools.ToolManager
 }
 
 // Tools 实现 tools.ToolProvider 接口。
@@ -99,7 +118,24 @@ func (p *BotWorkspaceToolProvider) Tools(ctx context.Context, sctx *tools.ToolSe
 
 	// 在闭包中捕获 BotID
 	botID := sctx.BotID
-	return botWorkspaceToolDefs(p.Manager, botID), nil
+	// SubAgent inherits this dynamic provider with no scope filtering, so it
+	// would otherwise gain the ability to approve a confirmation screen or
+	// close the parent's sessions (docs §4 SubAgent 边界).
+	includeSessions := !sctx.IsSubagent
+
+	// background=auto is only exposed when sandbox_session_spawn is allowed
+	// for THIS session context. The guard is re-evaluated at call time too,
+	// so a permission rule changed after ResolveTools cannot be bypassed.
+	// sctx is a pointer the caller may reuse: snapshot the value, mirroring
+	// the defensive copy in toolperm.evaluator.FilterTools.
+	var autoGuard func() bool
+	if includeSessions && p.ToolManager != nil {
+		snap := *sctx
+		autoGuard = func() bool {
+			return p.ToolManager.AllowsTool(ctx, &snap, ToolSessionSpawn)
+		}
+	}
+	return botWorkspaceToolDefsForAuto(p.Manager, botID, includeSessions, autoGuard), nil
 }
 
 // ============================================================================
@@ -151,8 +187,23 @@ func WorkspaceToolNames() []string {
 // botWorkspaceToolDefs 返回全部 bot 工作空间工具定义。
 // botID 在闭包中捕获，确保工具执行时获取正确的 bot 工作空间。
 func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
-	return []llm.Tool{
-		buildExecTool(mgr, botID),
+	return botWorkspaceToolDefsFor(mgr, botID, true)
+}
+
+// botWorkspaceToolDefsFor 是工具名的唯一真源。会话工具组对 SubAgent 不开放
+// （见 BotWorkspaceToolProvider.Tools 的 IsSubagent 分支）。
+// 静态注册/测试路径没有 toolperm 上下文，autoGuard 必须为 nil（=不开放 auto）。
+func botWorkspaceToolDefsFor(mgr *BotWorkspaceManager, botID string, includeSessions bool) []llm.Tool {
+	return botWorkspaceToolDefsForAuto(mgr, botID, includeSessions, nil)
+}
+
+// botWorkspaceToolDefsForAuto 是动态 provider 的入口。autoGuard 为 nil 时
+// sandbox_exec 的 schema 里根本不会出现 background 参数 —— 不是「出现了但
+// 运行时报错」，而是从模型可见面上就消除绕过 toolperm 的可能。
+func botWorkspaceToolDefsForAuto(mgr *BotWorkspaceManager, botID string,
+	includeSessions bool, autoGuard func() bool) []llm.Tool {
+	defs := []llm.Tool{
+		buildExecToolWithAuto(mgr, botID, autoGuard),
 		buildReadFileTool(mgr, botID),
 		buildWriteFileTool(mgr, botID),
 		buildReplaceInFileTool(mgr, botID),
@@ -163,6 +214,10 @@ func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
 		buildHealthTool(mgr, botID),
 		buildRunCodeTool(mgr, botID),
 	}
+	if includeSessions {
+		defs = append(defs, buildSessionTools(mgr, botID)...)
+	}
+	return defs
 }
 
 // ============================================================================
@@ -170,121 +225,201 @@ func botWorkspaceToolDefs(mgr *BotWorkspaceManager, botID string) []llm.Tool {
 // ============================================================================
 
 func buildExecTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
-	return llm.Tool{
-		Name: "sandbox_exec",
-		Description: "Run a shell command in the workspace and return stdout, stderr and exitCode. " +
-			"Use it for terminal work such as builds, tests, git and package managers. " +
-			"NEVER use it for file operations (reading, writing, searching files) — use the dedicated file tools instead. " +
-			"Execution is protected by a stuck watchdog: a command that keeps producing output is never killed, however slow it is; " +
-			"it is only declared stuck and terminated after it produces no output for longer than the stuck threshold (180s by default, override with stuck_timeout). " +
-			"A hard ceiling acts as a backstop (600s by default, override with timeout) — once exceeded the command is terminated unconditionally to prevent an infinite hang. " +
-			"IMPORTANT: NEVER append `| head` / `| tail` / `| less` or similar pipes just to limit output. " +
-			"The sandbox already truncates output at MaxOutput bytes, so such a pipe is redundant, and it can hang the command forever " +
-			"when the inspected process dies (a child process keeps the write end of the pipe open). For less output, lower timeout or " +
-			"let the command limit itself (e.g. golangci-lint --out-format). " +
-			"The result also carries reliability signals: reliable (was the command complete and trustworthy), aborted (did it fail midway), " +
-			"oomKilled (was it killed by the OOM killer), warnings (why it is untrustworthy). " +
-			"CRITICAL: when reliable is false the command did NOT run to completion (OOM, timeout, or killed) — " +
-			"do not treat its output as a full result; raise the sandbox memory limit or change the approach, then retry.",
-		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"command": map[string]any{
-					"type":        "string",
-					"description": "The shell command to run.",
-				},
-				"workdir": map[string]any{
-					"type":        "string",
-					"description": "Working directory for the command, relative to the workspace root. Optional; defaults to the workspace root.",
-				},
-				"timeout": map[string]any{
-					"type":        "integer",
-					"description": "Hard ceiling in seconds. Optional; 0 (the default) means automatic = stuck threshold × 3 (15 minutes by default, controlled by the sandbox.timeout config). This is the backstop on total run time: once exceeded the command is force-terminated. A normal slow command that keeps producing output is never killed by this value — the stuck watchdog lets it through.",
-				},
-				"stuck_timeout": map[string]any{
-					"type":        "integer",
-					"description": "Stuck-watchdog threshold in seconds. Optional; defaults to 300 (5 minutes, controlled by the sandbox.stuck_timeout config). A command that produces no output for longer than this is declared stuck and terminated; as long as it keeps producing output, however slowly, it is left alone. Use it to distinguish a slow compile from a deadlock.",
-				},
-			},
-			"required": []string{"command"},
+	return buildExecToolWithAuto(mgr, botID, nil)
+}
+
+// autoGuard 由动态 provider 注入；nil 表示当前会话不允许创建后台会话，
+// 此时连 background 参数都不出现在工具 schema 里。
+func buildExecToolWithAuto(mgr *BotWorkspaceManager, botID string, autoGuard func() bool) llm.Tool {
+	props := map[string]any{
+		"command": map[string]any{
+			"type":        "string",
+			"description": "The shell command to run.",
 		},
-		Execute: llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
-			m, ok := input.(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("invalid input: expected object")
-			}
-			command, _ := m["command"].(string)
-			if command == "" {
-				return nil, fmt.Errorf("command is required")
-			}
-			// 剥离 LLM 自行追加的 `| head`/`| tail` 输出限制管道：
-			// 既冗余（sandbox 已按 MaxOutput 截断）又是命令永久挂死的常见根因。
-			stripped := false
-			command, stripped = stripOutputLimitingPipe(command)
-			workdir, _ := m["workdir"].(string)
-			if err := checkWorkspacePath("workdir", workdir); err != nil {
-				return nil, err
-			}
-
-			req := ExecRequest{
-				Command: command,
-				WorkDir: workdir,
-			}
-			if timeoutSec, ok := toInt(m["timeout"]); ok && timeoutSec > 0 {
-				req.Timeout = durationFromSeconds(timeoutSec)
-			}
-			if stuckSec, ok := toInt(m["stuck_timeout"]); ok && stuckSec > 0 {
-				req.StuckTimeout = durationFromSeconds(stuckSec)
-			}
-
-			ws, err := mgr.GetOrCreate(botID)
-			if err != nil {
-				return nil, err
-			}
-
-			// 流式输出（若后端支持且调用方提供进度回调）。
-			onChunk := func(c ExecChunk) {
-				if ctx.SendProgress != nil {
-					switch c.Stream {
-					case "stderr":
-						ctx.SendProgress(map[string]any{"stream": "stderr", "chunk": c.Data})
-					case "heartbeat":
-						// 保活心跳：不携带 chunk，前端收到仅刷新「存活」状态，不污染输出。
-						ctx.SendProgress(map[string]any{"stream": "heartbeat"})
-					default:
-						ctx.SendProgress(map[string]any{"stream": "stdout", "chunk": c.Data})
-					}
-				}
-			}
-			streamable, _ := ws.(StreamWorkspace)
-
-			var res *ExecResult
-			if streamable != nil && ctx.SendProgress != nil {
-				res, err = streamable.ExecStream(ctx, req, onChunk)
-			} else {
-				res, err = ws.Exec(ctx, req)
-			}
-			if err != nil {
-				return nil, err
-			}
-
-			// 层2（agent 门禁·强版）：验证型命令 OOM 时自动重试一次（临时提升沙箱内存）。
-			// 首次执行已在上方完成，传入首结果避免重复执行。
-			if res.OOMKilled && isVerificationCommand(command) {
-				if retryRes, rerr := mgr.RetryOOMWithElevatedMemory(ctx, botID, res, req, onChunk); rerr == nil && retryRes != nil {
-					res = retryRes
-				}
-			}
-
-			// 若剥离了 `| head`/`| tail` 管道，提示 bot 该操作已被自动处理。
-			if stripped {
-				res.Warnings = append(res.Warnings,
-					"Stripped a trailing `| head`/`| tail` output-limiting pipe from the command (the sandbox already truncates output at MaxOutput, and such pipes can hang the command).")
-			}
-
-			return execResultToToolOutput(res, ws.WorkDir()), nil
-		}),
+		"workdir": map[string]any{
+			"type":        "string",
+			"description": "Working directory for the command, relative to the workspace root. Optional; defaults to the workspace root.",
+		},
+		"timeout": map[string]any{
+			"type":        "integer",
+			"description": "Hard ceiling in seconds. Optional; 0 (the default) means automatic = stuck threshold × 3 (15 minutes by default, controlled by the sandbox.timeout config). This is the backstop on total run time: once exceeded the command is force-terminated. A normal slow command that keeps producing output is never killed by this value — the stuck watchdog lets it through.",
+		},
+		"stuck_timeout": map[string]any{
+			"type":        "integer",
+			"description": "Stuck-watchdog threshold in seconds. Optional; defaults to 300 (5 minutes, controlled by the sandbox.stuck_timeout config). A command that produces no output for longer than this is declared stuck and terminated; as long as it keeps producing output, however slowly, it is left alone. Use it to distinguish a slow compile from a deadlock.",
+		},
 	}
+	desc := "Run a shell command in the workspace and return stdout, stderr and exitCode. " +
+		"Use it for terminal work such as builds, tests, git and package managers. " +
+		"NEVER use it for file operations (reading, writing, searching files) — use the dedicated file tools instead. " +
+		"Execution is protected by a stuck watchdog: a command that keeps producing output is never killed, however slow it is; " +
+		"it is only declared stuck and terminated after it produces no output for longer than the stuck threshold (180s by default, override with stuck_timeout). " +
+		"A hard ceiling acts as a backstop (600s by default, override with timeout) — once exceeded the command is terminated unconditionally to prevent an infinite hang. " +
+		"IMPORTANT: NEVER append `| head` / `| tail` / `| less` or similar pipes just to limit output. " +
+		"The sandbox already truncates output at MaxOutput bytes, so such a pipe is redundant, and it can hang the command forever " +
+		"when the inspected process dies (a child process keeps the write end of the pipe open). For less output, lower timeout or " +
+		"let the command limit itself (e.g. golangci-lint --out-format). " +
+		"The result also carries reliability signals: reliable (was the command complete and trustworthy), aborted (did it fail midway), " +
+		"oomKilled (was it killed by the OOM killer), warnings (why it is untrustworthy). " +
+		"CRITICAL: when reliable is false the command did NOT run to completion (OOM, timeout, or killed) — " +
+		"do not treat its output as a full result; raise the sandbox memory limit or change the approach, then retry."
+	if autoGuard != nil {
+		props["background"] = map[string]any{
+			"type": "string",
+			"enum": []string{"sync", "auto"},
+			"description": "Optional. \"sync\" (default) waits for the command to finish and returns stdout/stderr/exitCode. " +
+				"\"auto\" starts the command in a PTY session and watches briefly: if it exits quickly you get the normal one-shot result " +
+				"(no output lost); if it is still running with visible output you get a sessionId to drive with sandbox_session_poll/send/close. " +
+				"A process that is alive but produces NO output is never upgraded — that is the shape of a startup failure, so you get a diagnostic instead. " +
+				"Prefer sandbox_session_spawn directly for TUIs/REPLs/logins. auto is for commands you are unsure about.",
+		}
+		desc += " For long-running or interactive programs, use sandbox_session_spawn, or set background=\"auto\" to let the sandbox decide."
+	}
+	return llm.Tool{
+		Name:        "sandbox_exec",
+		Description: desc,
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": props,
+			"required":   []string{"command"},
+		},
+		Execute: buildExecToolExecute(mgr, botID, autoGuard),
+	}
+}
+
+func buildExecToolExecute(mgr *BotWorkspaceManager, botID string, autoGuard func() bool) llm.ToolExecuteFunc {
+	return llm.ToolExecuteFunc(func(ctx *llm.ToolExecContext, input any) (any, error) {
+		m, ok := input.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("invalid input: expected object")
+		}
+		command, _ := m["command"].(string)
+		if command == "" {
+			return nil, fmt.Errorf("command is required")
+		}
+		// 剥离 LLM 自行追加的 `| head`/`| tail` 输出限制管道：
+		// 既冗余（sandbox 已按 MaxOutput 截断）又是命令永久挂死的常见根因。
+		stripped := false
+		command, stripped = stripOutputLimitingPipe(command)
+		workdir, _ := m["workdir"].(string)
+		if err := checkWorkspacePath("workdir", workdir); err != nil {
+			return nil, err
+		}
+
+		// background=auto must be rejected before ANY process is started when
+		// spawn is not permitted for this turn. Call-time re-check matters:
+		// rules may have changed since ResolveTools built the tool list.
+		if bg, _ := m["background"].(string); bg != "" && bg != "sync" {
+			if bg != "auto" {
+				return nil, fmt.Errorf("background must be \"sync\" or \"auto\", got %q", bg)
+			}
+			if autoGuard == nil || !autoGuard() {
+				return nil, fmt.Errorf("background=auto is unavailable: sandbox_session_spawn is not permitted here; use sandbox_session_spawn directly or run synchronously")
+			}
+			return runExecAutoUpgrade(ctx, mgr, botID, command, workdir)
+		}
+
+		req := ExecRequest{
+			Command: command,
+			WorkDir: workdir,
+		}
+		if timeoutSec, ok := toInt(m["timeout"]); ok && timeoutSec > 0 {
+			req.Timeout = durationFromSeconds(timeoutSec)
+		}
+		if stuckSec, ok := toInt(m["stuck_timeout"]); ok && stuckSec > 0 {
+			req.StuckTimeout = durationFromSeconds(stuckSec)
+		}
+
+		ws, err := mgr.GetOrCreate(botID)
+		if err != nil {
+			return nil, err
+		}
+
+		// 流式输出（若后端支持且调用方提供进度回调）。
+		onChunk := func(c ExecChunk) {
+			if ctx.SendProgress != nil {
+				switch c.Stream {
+				case "stderr":
+					ctx.SendProgress(map[string]any{"stream": "stderr", "chunk": c.Data})
+				case "heartbeat":
+					// 保活心跳：不携带 chunk，前端收到仅刷新「存活」状态，不污染输出。
+					ctx.SendProgress(map[string]any{"stream": "heartbeat"})
+				default:
+					ctx.SendProgress(map[string]any{"stream": "stdout", "chunk": c.Data})
+				}
+			}
+		}
+		streamable, _ := ws.(StreamWorkspace)
+
+		var res *ExecResult
+		if streamable != nil && ctx.SendProgress != nil {
+			res, err = streamable.ExecStream(ctx, req, onChunk)
+		} else {
+			res, err = ws.Exec(ctx, req)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		// 层2（agent 门禁·强版）：验证型命令 OOM 时自动重试一次（临时提升沙箱内存）。
+		// 首次执行已在上方完成，传入首结果避免重复执行。
+		if res.OOMKilled && isVerificationCommand(command) {
+			if retryRes, rerr := mgr.RetryOOMWithElevatedMemory(ctx, botID, res, req, onChunk); rerr == nil && retryRes != nil {
+				res = retryRes
+			}
+		}
+
+		// 若剥离了 `| head`/`| tail` 管道，提示 bot 该操作已被自动处理。
+		if stripped {
+			res.Warnings = append(res.Warnings,
+				"Stripped a trailing `| head`/`| tail` output-limiting pipe from the command (the sandbox already truncates output at MaxOutput, and such pipes can hang the command).")
+		}
+
+		return execResultToToolOutput(res, ws.WorkDir()), nil
+	})
+}
+
+// runExecAutoUpgrade resolves the workspace root and starts the auto-upgrade
+// observation. It deliberately uses context.WithoutCancel for Spawn: a
+// background session must outlive the message context (docs §3.7 / v3.7),
+// while the observation window itself still honours ctx cancellation.
+func runExecAutoUpgrade(ctx *llm.ToolExecContext, mgr *BotWorkspaceManager,
+	botID, command, workdir string) (any, error) {
+	reg, err := sessionRegistryOf(mgr)
+	if err != nil {
+		return nil, err
+	}
+	ws, err := mgr.GetOrCreate(botID)
+	if err != nil {
+		return nil, err
+	}
+	cwd := ws.WorkDir()
+	if workdir != "" {
+		cwd, err = validatePath(cwd, workdir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	req := SpawnRequest{Command: command, Cwd: cwd, Background: true}
+	out, err := runAutoUpgrade(ctx, reg, botID, req, mgr.cfg.Session)
+	if err != nil {
+		// Spawn failed for a backend reason (unsupported / limit / bad path).
+		// Return a well-formed, honest error rather than silently re-running
+		// the command through the sync path (that could duplicate side effects).
+		return nil, fmt.Errorf("background=auto could not start a session (%v); "+
+			"retry with background=sync or sandbox_session_spawn", err)
+	}
+	event := "auto_upgrade_sync"
+	outcome, _ := out["reason"].(string)
+	if upgraded, _ := out["upgraded"].(bool); upgraded {
+		event = "auto_upgrade_background"
+		outcome, _ = out["upgradeReason"].(string)
+	}
+	mgr.logger.Infow("interactive_session",
+		"event", event, "botID", botID,
+		"sessionId", out["sessionId"], "outcome", outcome,
+		"observedMs", out["observedMs"])
+	return out, nil
 }
 
 // ============================================================================
@@ -1122,8 +1257,10 @@ func RegisterBotWorkspaceTools(toolMgr *tools.ToolManager, mgr *BotWorkspaceMana
 		Scopes:        []string{"__never__"},
 		PromptSection: botWorkspaceToolPromptSection,
 	})
-	// 注册动态工具提供者（会话感知）
-	toolMgr.AddProvider(&BotWorkspaceToolProvider{Manager: mgr})
+	// 注册动态工具提供者（会话感知）。
+	// ToolManager 让 provider 复用 toolperm 的 evaluator 来裁决
+	// sandbox_exec(background=auto) 是否可开放（见 BotWorkspaceToolProvider）。
+	toolMgr.AddProvider(&BotWorkspaceToolProvider{Manager: mgr, ToolManager: toolMgr})
 	return nil
 }
 

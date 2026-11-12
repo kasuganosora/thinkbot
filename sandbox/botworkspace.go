@@ -37,6 +37,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/kasuganosora/thinkbot/sandbox/channel"
 	"github.com/kasuganosora/thinkbot/util/errs"
 	"github.com/kasuganosora/thinkbot/util/idgen"
 )
@@ -51,6 +52,11 @@ type BotWorkspaceManager struct {
 	mu              sync.RWMutex
 	workspaces      map[string]*botWorkspace
 	memoryOverrides map[string]int64 // botID → 内存限制(MB)，0=未设置(用默认)，<0=不限制
+
+	// sessions is the single owner of all background interactive PTY sessions.
+	// Lifecycle methods below must close it, otherwise stopping a bot leaves
+	// orphan CLI processes behind (docs §3.7 / §9).
+	sessions *SessionRegistry
 }
 
 // NewBotWorkspaceManager 创建持久化工作空间管理器。
@@ -129,14 +135,62 @@ func NewBotWorkspaceManager(baseDir string, cfg Config, logger *zap.SugaredLogge
 		logger.Info("bot_workspace: persistent per-bot container mode enabled (isolated)")
 	}
 
-	return &BotWorkspaceManager{
+	cfg.Session = fillSessionDefaults(cfg.Session)
+
+	// The routing spawner is the single entry point for every backend. A bot
+	// running a channel image must never fall back to a host PTY: that would
+	// silently break isolation (docs §3.6 / §9).
+	var mgr *BotWorkspaceManager
+	dialer := func(ctx context.Context, botID string, req channel.SessionSpawnRequest,
+		cb channel.SessionCallbacks) (*channel.SessionClient, error) {
+		return mgr.dialChannelSession(ctx, botID, req, cb)
+	}
+	spawner := &routingSessionSpawner{
+		local:   newLocalSessionSpawner(cfg.Session, logger, baseDir),
+		channel: newChannelSessionSpawner(cfg.Session, logger, dialer),
+		channelFor: func(botID string) bool {
+			return mgr.channelSessionBackend(botID)
+		},
+	}
+	sessions := NewSessionRegistry(cfg.Session, logger, spawner)
+
+	mgr = &BotWorkspaceManager{
 		baseDir:         baseDir,
 		cfg:             cfg,
 		backend:         b,
 		logger:          logger,
 		workspaces:      make(map[string]*botWorkspace),
 		memoryOverrides: make(map[string]int64),
-	}, nil
+		sessions:        sessions,
+	}
+	return mgr, nil
+}
+
+// Sessions exposes the process owner. botID is never taken from tool input;
+// callers must pass the value captured by BotWorkspaceToolProvider.
+func (m *BotWorkspaceManager) Sessions() *SessionRegistry { return m.sessions }
+
+// channelSessionBackend reports whether this bot's commands must run inside
+// its channel container. It is a pure config check: no container is created.
+func (m *BotWorkspaceManager) channelSessionBackend(botID string) bool {
+	if m.backend != "docker" || !m.cfg.PersistentContainer {
+		return false
+	}
+	return newBotContainer(botID, m.cfg, m.logger).usesChannel()
+}
+
+// dialChannelSession starts one dedicated channel connection for one session.
+func (m *BotWorkspaceManager) dialChannelSession(ctx context.Context, botID string,
+	req channel.SessionSpawnRequest, cb channel.SessionCallbacks) (*channel.SessionClient, error) {
+	ws, err := m.GetOrCreate(botID)
+	if err != nil {
+		return nil, err
+	}
+	bw, ok := ws.(*botWorkspace)
+	if !ok || bw.container == nil || !bw.container.usesChannel() {
+		return nil, ErrSessionUnsupported
+	}
+	return bw.container.DialChannelSession(ctx, req, cb)
 }
 
 // SetBotMemoryOverride 设置指定 Bot 的内存覆盖值（MB）。
@@ -408,11 +462,14 @@ func (m *BotWorkspaceManager) PruneToolOutput(botID, subdir string, maxFiles int
 	bw.pruneToolOutput(subdir, maxFiles)
 }
 
-// CloseAll 清除内存中的工作空间引用（不删除文件）。
+// CloseAll 清除内存中的工作空间引用（不删除文件），并级联关闭所有后台会话进程。
 func (m *BotWorkspaceManager) CloseAll() {
 	m.mu.Lock()
 	m.workspaces = make(map[string]*botWorkspace)
 	m.mu.Unlock()
+	if m.sessions != nil {
+		m.sessions.CloseAll("")
+	}
 }
 
 // DestroyBot 彻底销毁指定 bot 的运行时资源。
@@ -424,6 +481,9 @@ func (m *BotWorkspaceManager) DestroyBot(botID string, removeData bool) error {
 	ws := m.workspaces[botID]
 	delete(m.workspaces, botID)
 	m.mu.Unlock()
+	if m.sessions != nil {
+		m.sessions.CloseAll(botID)
+	}
 
 	// 容器模式：即使内存中无引用，也按命名规则销毁容器/卷（重启后仍可清理）。
 	if m.backend == "docker" && m.cfg.PersistentContainer {
@@ -447,6 +507,9 @@ func (m *BotWorkspaceManager) DestroyBot(botID string, removeData bool) error {
 // 注意：操作的是工作空间内存中真实的容器对象（而非每次新建），
 // 这样被用户停止后置位的 stopped 标记才能生效，避免又被 ensure() 自动拉起。
 func (m *BotWorkspaceManager) StopBot(botID string) error {
+	if m.sessions != nil {
+		m.sessions.CloseAll(botID)
+	}
 	if m.backend != "docker" || !m.cfg.PersistentContainer {
 		return nil
 	}

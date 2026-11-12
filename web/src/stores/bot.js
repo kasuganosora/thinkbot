@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { botApi, chatApi, sessionApi, workflowApi } from '@/api/services'
+import { botApi, botPtySessionApi, chatApi, sessionApi, workflowApi } from '@/api/services'
 import { stripReplyControl } from '@/utils/markdown'
 import toolLabels from '@/i18n/toolLabels'
 import { secretRequestFromOutput } from '@/utils/secretInput'
@@ -93,6 +93,9 @@ export const useBotStore = defineStore('bot', () => {
   // 解析不出会话归属的系统回合条数（heartbeat / outreach / cron）：画不进会话列表，
   // 但同样会挂住 goroutine，只能经 bot 级入口收口，所以单独计数显示。
   const unattributedRunning = ref(0)
+  // 后台交互式 PTY 会话：与上面的「回合任务」是两类不同的运行中对象。
+  // abortSession 只 cancel 回合，不会结束这些会话；它们有独立的关闭入口。
+  const interactiveSessions = ref([])
   // 秒级心跳：只在有运行任务时跑，驱动徽标上的时长走动（15s 轮询不足以让人判断挂死）
   const nowTick = ref(Date.now())
   let _runningTimer = null
@@ -114,6 +117,25 @@ export const useBotStore = defineStore('bot', () => {
       // 空闲轮询失败不打扰用户
     }
   }
+
+  /** 后台交互式会话列表（只读；关闭走独立接口，绝不复用 abortSession）。 */
+  async function refreshInteractiveSessions() {
+    const botId = activeBotId.value
+    if (!botId) {
+      interactiveSessions.value = []
+      return
+    }
+    try {
+      const res = await botPtySessionApi.list(botId)
+      if (botId !== activeBotId.value) return
+      interactiveSessions.value = Array.isArray(res?.sessions) ? res.sessions : []
+    } catch {
+      // bot 未运行 / 网络抖动：静默保留上次结果，不打扰用户
+    }
+  }
+
+  const interactiveRunningCount = computed(() =>
+    interactiveSessions.value.filter(s => s.state === 'running').length)
 
   /** 中止该 bot 下所有在跑的回合（含归属为空的系统回合）。 */
   async function abortAllRunning() {
@@ -1855,9 +1877,14 @@ async function resumeContinuation(sessionId) {
     }
     runningTasks.value = []
     unattributedRunning.value = 0
+    interactiveSessions.value = []
     if (!activeBotId.value) return
     refreshRunningTasks()
-    _runningTimer = setInterval(refreshRunningTasks, 15000)
+    refreshInteractiveSessions()
+    _runningTimer = setInterval(() => {
+      refreshRunningTasks()
+      refreshInteractiveSessions()
+    }, 15000)
   })
 
   return {
@@ -1879,6 +1906,8 @@ async function resumeContinuation(sessionId) {
     setPendingSession, openSessionById,
     // 运行中的回合（Web 侧人工兜底：看得见 + 停得掉）
     runningTasks, runningBySession, nowTick, unattributedRunning,
-    isSessionRunning, abortSession, abortAllRunning, refreshRunningTasks
+    isSessionRunning, abortSession, abortAllRunning, refreshRunningTasks,
+    // 后台交互式 PTY 会话（独立的一类「运行中」，不会被 abort 停止）
+    interactiveSessions, interactiveRunningCount, refreshInteractiveSessions
   }
 })

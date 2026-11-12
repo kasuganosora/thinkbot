@@ -192,6 +192,48 @@ type ToolAccessEvaluator interface {
 	FilterTools(ctx context.Context, tools []llm.Tool, sctx *ToolSessionContext) ([]llm.Tool, error)
 }
 
+// ToolAccessProbe 是可选接口： evaluator 若能直接回答「单个工具是否放行」，
+// 就走它，避免为一次探测构造假的 llm.Tool 并触发过滤日志。
+//
+// 用途：某些工具会在内部条件性地开放另一个工具的能力（例如 sandbox_exec
+// 的 background:auto 会创建后台会话）。这类分支必须复用同一份权限裁决，
+// 否则「禁掉 spawn、放行 exec」的规则会被绕过。
+type ToolAccessProbe interface {
+	AllowsTool(ctx context.Context, sctx *ToolSessionContext, toolName string) bool
+}
+
+// AllowsTool 报告 toolName 在当前会话上下文下是否会被放行。
+// 判定语义与 ResolveTools 完全一致（同样的 evaluator、同样的 sctx）。
+// 无策略组件时返回 true，与「nil provider 表示不过滤」保持一致。
+//
+// 注意：这是**只读探测**，不做 call-time 包装、不写 HiddenTools、不记过滤日志。
+func (m *ToolManager) AllowsTool(ctx context.Context, sctx *ToolSessionContext, toolName string) bool {
+	if toolName == "" {
+		return false
+	}
+	m.mu.RLock()
+	ae := m.accessEval
+	pp := m.policyProvider
+	m.mu.RUnlock()
+
+	if ae != nil {
+		if probe, ok := ae.(ToolAccessProbe); ok {
+			return probe.AllowsTool(ctx, sctx, toolName)
+		}
+		// fallback：用单元素列表探测。FilterTools 可能对空结果记一条过滤日志，
+		// 只在 evaluator 未实现 ToolAccessProbe 时发生（第三方/测试实现）。
+		probe := []llm.Tool{{Name: toolName}}
+		out, err := ae.FilterTools(ctx, probe, sctx)
+		return err == nil && len(out) == 1
+	}
+	if pp != nil && sctx != nil {
+		probe := []llm.Tool{{Name: toolName}}
+		out := pp.GetPolicy(sctx.BotID).FilterTools(probe, sctx)
+		return len(out) == 1
+	}
+	return true // 未接入任何策略组件：ResolveTools 也不会过滤
+}
+
 // SetAccessEvaluator 设置基于完整上下文的工具访问控制。
 // 设置后，ResolveTools 优先使用它（取代 legacy policyProvider）。
 // 传入 nil 可取消。
