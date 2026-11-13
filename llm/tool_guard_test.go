@@ -202,6 +202,46 @@ func TestToolGuard_LiveSource(t *testing.T) {
 	}
 }
 
+// 编排层剥掉 sandbox_ 前缀，模型实际调的是 session_poll / session_spawn。
+// 护栏配置写全名而不做归一化时，豁免与 per-tool 上限全部静默失效
+// （docs §14 #19），表现为后台会话一等待就被 MaxIdenticalCalls 拦掉。
+func TestToolGuard_ExemptMatchesModelVisibleSessionNames(t *testing.T) {
+	ctx := guardCtx(nil)
+	tm := guardTools(map[string]func(any) (any, error){
+		"session_poll":         func(any) (any, error) { return "same screen", nil },
+		"sandbox_session_poll": func(any) (any, error) { return "same screen", nil },
+	})
+	for i := 0; i < 6; i++ {
+		for _, name := range []string{"session_poll", "sandbox_session_poll"} {
+			r := runStep(t, ctx, tm, call(name, map[string]any{"sessionId": "sess-1", "waitMs": 8000}))
+			if r[0].IsError {
+				t.Fatalf("%s call %d was refused: %v", name, i, r[0].Result)
+			}
+		}
+	}
+	g := toolGuardFrom(ctx)
+	if got := g.maxFailures("session_spawn"); got != 8 {
+		t.Errorf("maxFailures(session_spawn) = %d, want 8 (registered name is sandbox_session_spawn)", got)
+	}
+	if got := g.maxFailures("sandbox_session_spawn"); got != 8 {
+		t.Errorf("maxFailures(sandbox_session_spawn) = %d, want 8", got)
+	}
+
+	// Normalization must not make two colliding config keys nondeterministic.
+	ctx2 := guardCtx(&ToolGuardConfig{PerToolMaxFailures: map[string]int{
+		"exec": 3, "sandbox_exec": 9,
+	}})
+	g2 := toolGuardFrom(ctx2)
+	for i := 0; i < 20; i++ {
+		if got := g2.maxFailures("exec"); got != 3 {
+			t.Fatalf("exact match lost: got %d, want 3", got)
+		}
+	}
+	if got := g2.maxFailures("sandbox_exec"); got != 9 {
+		t.Errorf("exact match lost: got %d, want 9", got)
+	}
+}
+
 func TestToolResultFailed(t *testing.T) {
 	cases := []struct {
 		p    ToolResultPart

@@ -195,10 +195,17 @@ func (s *sessionCore) Poll(sinceSeq uint64, mode string, lines int, wait time.Du
 			}
 		}
 	}
-	return s.view(sinceSeq, mode, lines), nil
+	return s.viewInternal(sinceSeq, mode, lines, true), nil
 }
 
 func (s *sessionCore) view(sinceSeq uint64, mode string, lines int) SessionView {
+	return s.viewInternal(sinceSeq, mode, lines, false)
+}
+
+// viewInternal builds an agent-facing snapshot. allowTail is true ONLY for
+// Poll: View() is called by watch / auto-upgrade on a 50ms tick, so it must
+// never pay for a raw-to-text conversion.
+func (s *sessionCore) viewInternal(sinceSeq uint64, mode string, lines int, allowTail bool) SessionView {
 	s.mu.RLock()
 	state, reason, lastSeq, exitCode, orphaned := s.state, s.reason, s.lastSeq, s.exitCode, s.orphaned
 	s.mu.RUnlock()
@@ -252,6 +259,18 @@ func (s *sessionCore) view(sinceSeq uint64, mode string, lines int) SessionView 
 		raw, _ := s.ring.Since(sinceSeq)
 		v.Delta = string(raw)
 		v.Truncated = v.Truncated || s.ring.Truncated()
+	} else if allowTail && (mode == "tail" || (delta == "" && settled > sinceSeq)) {
+		// Screen-diff deltas can be empty even while bytes keep arriving: a
+		// scrolling CLI, a clear-on-redraw frame, or CR-only progress output
+		// leaves no changed rows, and MaybeSettle still advances settledSeq.
+		// Without this the agent polls "blind" (delta="" + seq climbing),
+		// repeats the identical poll and gets cut off by the step guard.
+		// mode=tail is an explicit escape hatch for the same situation.
+		tail, truncated := s.plainTailSinceLocked(sinceSeq, settled)
+		if tail != "" {
+			v.Delta = tail
+			v.Truncated = v.Truncated || truncated
+		}
 	}
 	if state == SessionRunning && v.Seq == 0 && time.Since(s.startedAt) > 3*time.Second {
 		if v.BootDiag == "" {
@@ -269,6 +288,73 @@ func (s *sessionCore) view(sinceSeq uint64, mode string, lines int) SessionView 
 	// It runs last so mode=raw and the generated bootDiag are covered too.
 	redactSessionView(&v)
 	return v
+}
+
+// sessionTailMaxBytes caps the plain-text fallback so a chatty program cannot
+// flood the LLM context or the tool-result log. The orchestrator truncates
+// again downstream; this is the first line of defence.
+const sessionTailMaxBytes = 16 << 10
+
+// plainTailSinceLocked returns a bounded, control-byte-stripped tail of the raw
+// stream between sinceSeq and settledSeq. Caller MUST hold s.bufMu.
+//
+// Cursor discipline: only bytes up to settledSeq are exposed. The agent's next
+// sinceSeq is settledSeq, so the same bytes can never be replayed twice. The
+// ring is already ingress-masked; redactSessionView runs afterwards in view()
+// to catch secrets registered later.
+//
+// This is deliberately a LAST RESORT, not a replacement for semantic deltas:
+// when the VT screen does change, the diff is far cheaper and more precise.
+func (s *sessionCore) plainTailSinceLocked(sinceSeq, settled uint64) (string, bool) {
+	if settled <= sinceSeq {
+		return "", false
+	}
+	raw, resync := s.ring.Since(sinceSeq)
+	truncated := resync
+	if resync {
+		// Since() returned the whole retained window [Seq-len, Seq], NOT bytes
+		// after sinceSeq. Compute the equivalent cut from that window's base.
+		base := s.ring.Seq() - uint64(len(raw))
+		if settled > base {
+			if want := int(settled - base); want < len(raw) {
+				raw = raw[:want]
+			}
+		}
+	} else if want := int(settled - sinceSeq); want < len(raw) {
+		raw = raw[:want]
+	}
+	if len(raw) == 0 {
+		return "", false
+	}
+	// stripTerminalBytes has its own 2 MiB head cap; keep only a recent window
+	// so the "tail" really is the tail of this slice, not of the first 2 MiB.
+	if len(raw) > 1<<20 {
+		raw = raw[len(raw)-1<<20:]
+		truncated = true
+	}
+	text := stripTerminalBytes(raw)
+	if len(text) > sessionTailMaxBytes {
+		text = text[len(text)-sessionTailMaxBytes:]
+		// Never start mid-rune: drop leading UTF-8 continuation bytes.
+		for len(text) > 0 && text[0]&0xC0 == 0x80 {
+			text = text[1:]
+		}
+		truncated = true
+	}
+	lines := strings.Split(text, "\n")
+	maxLines := s.cfg.DeltaMaxLines
+	if maxLines <= 0 {
+		maxLines = 80
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+		truncated = true
+	}
+	body := strings.Join(lines, "\n")
+	if strings.TrimSpace(body) == "" {
+		return "", false
+	}
+	return "[output with no screen change; plain-text tail]\n" + body, truncated || s.ring.Truncated()
 }
 
 // flushMask emits any credential-prefix tail still withheld by the ingress

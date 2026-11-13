@@ -2,11 +2,14 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/kasuganosora/thinkbot/llm"
 	"go.uber.org/zap"
 )
 
@@ -498,4 +501,129 @@ func TestSessionCore_ConcurrentReadPollAndResize(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+// ----------------------------------------------------------------------------
+// Production regressions found in the 2026-11-13 logs
+// ----------------------------------------------------------------------------
+
+// A program that clears its screen (or emits CR-only progress) can advance
+// settledSeq while producing ZERO semantic delta records. Production showed
+// "delta=” screen=” seq=1610 -> 6121": the agent polled blind, repeated the
+// identical call, and the step guard killed the turn.
+func testCoreImmediateSettle() *sessionCore {
+	cfg := DefaultSessionConfig()
+	cfg.StableWindow = 0 // settle on every ingest chunk, no wall-clock wait
+	return newSessionCore(cfg, zap.NewNop().Sugar(), "sess-test", "cmd", "local", 1, 1, 80, 24)
+}
+
+func TestSessionCore_PollFallsBackToPlainTextTail(t *testing.T) {
+	c := testCoreImmediateSettle()
+	c.consume([]byte("PLAIN_OUTPUT_LINE\r\n\x1b[2J"))
+
+	v, err := c.Poll(0, "screen", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Screen != "" {
+		t.Fatalf("screen should be blank after a clear, got %q", v.Screen)
+	}
+	if v.SettledSeq == 0 || v.Seq == 0 {
+		t.Fatalf("watermarks did not advance: seq=%d settled=%d", v.Seq, v.SettledSeq)
+	}
+	if !strings.Contains(v.Delta, "PLAIN_OUTPUT_LINE") {
+		t.Fatalf("agent is blind: delta = %q", v.Delta)
+	}
+	if strings.Contains(v.Delta, "\x1b") {
+		t.Errorf("fallback leaked escape bytes: %q", v.Delta)
+	}
+	if !strings.Contains(v.Delta, "plain-text tail") {
+		t.Errorf("fallback should be labelled so it is not mistaken for a screen diff: %q", v.Delta)
+	}
+
+	// Cursor discipline: the next poll must not replay the same bytes.
+	v2, _ := c.Poll(v.SettledSeq, "screen", 0, 0)
+	if v2.Delta != "" {
+		t.Errorf("repeated cursor replayed output: %q", v2.Delta)
+	}
+	c.consume([]byte("SECOND_LINE\r\n\x1b[2J"))
+	v3, _ := c.Poll(v.SettledSeq, "screen", 0, 0)
+	if !strings.Contains(v3.Delta, "SECOND_LINE") || strings.Contains(v3.Delta, "PLAIN_OUTPUT_LINE") {
+		t.Errorf("incremental fallback is wrong: %q", v3.Delta)
+	}
+}
+
+func TestSessionCore_ModeTailIsAnExplicitEscapeHatch(t *testing.T) {
+	c := testCoreImmediateSettle()
+	c.consume([]byte("VISIBLE_LINE\r\n"))
+	v, err := c.Poll(0, "tail", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(v.Delta, "VISIBLE_LINE") || !strings.Contains(v.Delta, "plain-text tail") {
+		t.Fatalf("mode=tail must force the plain-text view, got %q", v.Delta)
+	}
+}
+
+func TestSessionCore_PlainTextTailKeepsUTF8Valid(t *testing.T) {
+	c := testCoreImmediateSettle()
+	// > sessionTailMaxBytes of multi-byte text, ending in a blank screen.
+	c.consume([]byte(strings.Repeat("中文输出行", 4000) + "\x1b[2J"))
+	v, err := c.Poll(0, "screen", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(v.Delta) {
+		t.Error("plain-text tail cut a UTF-8 rune in half")
+	}
+	if len(v.Delta) > sessionTailMaxBytes+256 {
+		t.Errorf("tail is unbounded: %d bytes", len(v.Delta))
+	}
+	if !v.Truncated {
+		t.Error("a clipped tail must be marked truncated")
+	}
+}
+
+func TestSessionRegistry_NotFoundNamesLiveSessions(t *testing.T) {
+	reg, _ := watchTestRegistry(t, DefaultSessionConfig())
+	_, err := reg.Poll("bot", sessionAgent, "codebuddy-merge", 0, "screen", 0, 0)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("sentinel broken: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sess-test") || !strings.Contains(err.Error(), "session_watch") {
+		t.Errorf("error is not self-healing: %v", err)
+	}
+	if !strings.Contains(err.Error(), "never invent a name") {
+		t.Errorf("error does not explain the contract: %v", err)
+	}
+
+	empty := NewSessionRegistry(DefaultSessionConfig(), zap.NewNop().Sugar(), nil)
+	_, err = empty.RawSince("bot", "bogus", 0)
+	if !errors.Is(err, ErrSessionNotFound) || !strings.Contains(err.Error(), "no live sessions") {
+		t.Errorf("empty-registry error = %v", err)
+	}
+}
+
+func TestSessionSendTool_DoesNotEmitUnmeasuredWarning(t *testing.T) {
+	reg, _ := watchTestRegistry(t, DefaultSessionConfig())
+	mgr := &BotWorkspaceManager{sessions: reg}
+	tool := buildSessionSendTool(mgr, "bot")
+	out, err := tool.Execute(&llm.ToolExecContext{Context: context.Background()},
+		map[string]any{"sessionId": "sess-test", "keys": "Enter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type %T", out)
+	}
+	if _, found := m["warning"]; found {
+		t.Errorf("send reports a discrepancy it never measured: %#v", m)
+	}
+	if m["written"] != 1 {
+		t.Errorf("written = %v, want 1", m["written"])
+	}
+	if hint, _ := m["hint"].(string); !strings.Contains(hint, "does NOT prove") {
+		t.Errorf("hint lost the consumption caveat: %q", hint)
+	}
 }

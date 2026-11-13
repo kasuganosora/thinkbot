@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,7 +65,7 @@ func DefaultToolGuardConfig() ToolGuardConfig {
 		MaxConsecutiveFailures: 5,
 		PerToolMaxFailures: map[string]int{
 			"exec": 8, "sandbox_exec": 8, "run_code": 8, "shell": 8,
-			"sandbox_session_spawn": 8,
+			"sandbox_session_spawn": 8, "session_spawn": 8,
 		},
 		StreakAdvisory: 8,
 		Exempt: []string{
@@ -73,7 +74,12 @@ func DefaultToolGuardConfig() ToolGuardConfig {
 			// 后台会话的 poll/watch 天生就是重复调用：同参同结果 3 次
 			// 是「等待输出」的正常形态，不该被 MaxIdenticalCalls 拦掉。
 			// 两者都只读、零副作用，豁免不会放宽任何执行能力。
+			//
+			// 注意：模型看到的是 stripSandboxPrefixes 剥掉前缀后的短名，
+			// 注册表 / toolperm 用的是全名。两种写法都必须列出，否则模型
+			// 每次等待后台输出都会撞护栏（docs §14 #19）。
 			"sandbox_session_poll", "sandbox_session_watch",
+			"session_poll", "session_watch",
 		},
 	}
 }
@@ -146,6 +152,17 @@ type toolGuard struct {
 
 type toolGuardKey struct{}
 
+// guardToolKey normalizes a tool name to the model-visible form.
+//
+// stripSandboxPrefixes removes "sandbox_" from the schema before the model sees
+// it, so ToolCall.ToolName is the SHORT name while registry / toolperm / config
+// entries often use the registered full name. Matching only the literal string
+// silently disables exemptions and per-tool limits for every sandbox tool
+// (docs §14 #19). Normalizing on both sides keeps config valid in either form.
+func guardToolKey(name string) string {
+	return strings.TrimPrefix(name, SandboxToolPrefix)
+}
+
 // withToolGuard attaches a fresh guard for one orchestration run.
 func withToolGuard(ctx context.Context, cfg *OrchestrateConfig) context.Context {
 	gc := currentToolGuardConfig(cfg)
@@ -159,7 +176,7 @@ func withToolGuard(ctx context.Context, cfg *OrchestrateConfig) context.Context 
 		blocked:  make(map[string]bool),
 	}
 	for _, n := range gc.Exempt {
-		g.exempt[n] = true
+		g.exempt[guardToolKey(n)] = true
 	}
 	return context.WithValue(ctx, toolGuardKey{}, g)
 }
@@ -204,8 +221,22 @@ func normalizeJSONString(s string) string {
 }
 
 func (g *toolGuard) maxFailures(tool string) int {
+	// Exact match first: a config may legitimately give `exec` and
+	// `sandbox_exec` different caps. Without this the normalized map scan
+	// would pick one at random (Go map iteration order is unspecified).
 	if n, ok := g.cfg.PerToolMaxFailures[tool]; ok && n > 0 {
 		return n
+	}
+	key := guardToolKey(tool)
+	keys := make([]string, 0, len(g.cfg.PerToolMaxFailures))
+	for k := range g.cfg.PerToolMaxFailures {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if n := g.cfg.PerToolMaxFailures[k]; n > 0 && guardToolKey(k) == key {
+			return n
+		}
 	}
 	return g.cfg.MaxConsecutiveFailures
 }
@@ -214,7 +245,7 @@ func (g *toolGuard) maxFailures(tool string) int {
 // signatures already admitted in this step (identical parallel calls count).
 // Returns a non-empty refusal when the call must not run.
 func (g *toolGuard) precheck(tc ToolCall, seen map[string]int) string {
-	if g == nil || g.exempt[tc.ToolName] {
+	if g == nil || g.exempt[guardToolKey(tc.ToolName)] {
 		return ""
 	}
 	g.mu.Lock()
@@ -250,7 +281,7 @@ func (g *toolGuard) record(calls []ToolCall, results []ToolResultPart, refused [
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for i, tc := range calls {
-		if i >= len(results) || refused[i] || g.exempt[tc.ToolName] {
+		if i >= len(results) || refused[i] || g.exempt[guardToolKey(tc.ToolName)] {
 			continue
 		}
 		var notes []string

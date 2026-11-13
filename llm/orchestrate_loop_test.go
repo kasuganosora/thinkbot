@@ -227,9 +227,9 @@ func TestIsUserIntentGrounded(t *testing.T) {
 		{"Follow Alice on Misskey", true}, // 英文
 		{"给这篇帖子点个赞", true},                // react
 		{"帮我查一下 misskey 上的用户", false},     // 只读查询，不含写动作动词
-		{"那你尝试下发一个misskey 验证下", true},    // 口语动词「发一个」
-		{"发条 misskey，内容你定", true},          // 口语动词「发条」
-		{"你修完后我帮你部署", false},             // 部署，非社交动作
+		{"那你尝试下发一个misskey 验证下", true},     // 口语动词「发一个」
+		{"发条 misskey，内容你定", true},         // 口语动词「发条」
+		{"你修完后我帮你部署", false},              // 部署，非社交动作
 	}
 	for _, c := range cases {
 		if got := isUserIntentGrounded(c.req); got != c.want {
@@ -283,11 +283,11 @@ func TestCollectRecentUserMsgs(t *testing.T) {
 // mockIntentJudgeClient 可编程的快判客户端桩。resps 按次序出队，
 // 耗尽后重复最后一个；记录调用次数供重试断言。
 type mockIntentJudgeClient struct {
-	resps   []string
-	err     error
-	calls   int
-	gotSys  string
-	gotUsr  string
+	resps  []string
+	err    error
+	calls  int
+	gotSys string
+	gotUsr string
 }
 
 func (m *mockIntentJudgeClient) Chat(ctx context.Context, system, user string) (string, error) {
@@ -405,5 +405,72 @@ func TestRunTool_RequiresUserIntent(t *testing.T) {
 	}
 	if !called {
 		t.Error("tool should execute when judge grounds")
+	}
+}
+
+// 线上证据：一个 cursor-agent 登录回合在第 8 步被
+// "stalled: same tool calls repeated 3 times" 腰斩，原因是模型连续 3 次
+// 用完全相同的参数 session_poll 等待后台输出。等待原语不是原地打转。
+func TestLoopController_WaitOnlyStepsDoNotStallAtThree(t *testing.T) {
+	lc := newLoopController(30, 0) // hard = -1 (无限)，与线上一致
+	poll := []ToolCall{{ToolCallID: "p", ToolName: "session_poll",
+		Input: map[string]any{"sessionId": "sess-1", "waitMs": 8000}}}
+	for i := 0; i < 8; i++ {
+		recordLoopStep(lc, i, poll, "")
+		if !lc.shouldContinue(i + 1) {
+			t.Fatalf("repeated wait-only step %d must not stop the turn (waitedOut=%v stalled=%v)",
+				i, lc.waitedOut, lc.stalled)
+		}
+	}
+	if lc.stoppedByGuard(8) {
+		t.Fatal("pure waiting must not count as a step-guard stop")
+	}
+	// 注册全名同样要被识别（部分链路不做前缀剥离）。
+	full := []ToolCall{{ToolCallID: "p", ToolName: "sandbox_session_watch", Input: map[string]any{}}}
+	recordLoopStep(lc, 8, full, "")
+	if lc.waitStreak != 9 {
+		t.Fatalf("waitStreak = %d, want 9", lc.waitStreak)
+	}
+}
+
+func TestLoopController_WaitOnlyStepsStillBounded(t *testing.T) {
+	lc := newLoopController(30, 0)
+	poll := []ToolCall{{ToolCallID: "p", ToolName: "session_poll", Input: map[string]any{}}}
+	for i := 0; i < waitRepeatLimit; i++ {
+		recordLoopStep(lc, i, poll, "")
+	}
+	if !lc.waitedOut || !lc.stoppedByGuard(waitRepeatLimit) {
+		t.Fatal("an unbounded wait loop must still be stopped")
+	}
+	if lc.shouldContinue(waitRepeatLimit) {
+		t.Error("shouldContinue must be false after waitRepeatLimit")
+	}
+	if !strings.Contains(lc.describeLoopStop(waitRepeatLimit), "background wait") {
+		t.Errorf("stop reason = %q", lc.describeLoopStop(waitRepeatLimit))
+	}
+}
+
+func TestLoopController_WaitStepsDoNotWashOutRealRepeats(t *testing.T) {
+	lc := newLoopController(30, 0)
+	exec := []ToolCall{{ToolCallID: "e", ToolName: "exec", Input: map[string]any{"command": "same"}}}
+	poll := []ToolCall{{ToolCallID: "p", ToolName: "session_poll", Input: map[string]any{}}}
+	for i, calls := range [][]ToolCall{exec, poll, exec, poll, exec} {
+		recordLoopStep(lc, i, calls, "")
+	}
+	if !lc.stalled {
+		t.Error("interleaving a poll between identical exec calls must not bypass stall detection")
+	}
+}
+
+func TestWaitOnlyToolCalls_MixedStepIsNotExempt(t *testing.T) {
+	mixed := []ToolCall{
+		{ToolName: "session_poll", Input: map[string]any{}},
+		{ToolName: "session_send", Input: map[string]any{"keys": "Enter"}},
+	}
+	if waitOnlyToolCalls(mixed) {
+		t.Error("a step containing send must not be treated as pure waiting")
+	}
+	if waitOnlyToolCalls(nil) {
+		t.Error("a step with no tool calls is not a wait step")
 	}
 }

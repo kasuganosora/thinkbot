@@ -264,7 +264,13 @@ func autoOneShotResult(reg autoUpgradeSession, botID, sid string,
 	out["background"] = false
 	out["reason"] = reason
 	out["observedMs"] = time.Since(start).Milliseconds()
+	// Kept for trace correlation ONLY. Every non-upgrade branch closes the
+	// session below, so presenting this as a live handle made the model call
+	// session_close on it in a later turn and get "session not found".
 	out["sessionId"] = sid
+	out["sessionClosed"] = true
+	out["hint"] = "background=auto did not upgrade; this sessionId is already closed. " +
+		"Do not call session_poll / session_close on it; call session_watch for the ids of live sessions."
 	if boot != "" {
 		out["bootDiag"] = boot
 	}

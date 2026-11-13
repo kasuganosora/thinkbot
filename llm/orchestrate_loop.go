@@ -42,8 +42,47 @@ const defaultRepeatLimit = 3
 // 此时对原地打转零容忍：连续 2 步相同签名即判定 stalled。
 const tightRepeatLimit = 2
 
+// waitRepeatLimit 是「连续纯等待步」的上限。session_poll / session_watch 是
+// 显式等待原语：同参重复调用不是在原地打转，而是在等后台 CLI 产出，3 次就判
+// stalled 会把正常长任务腰斩（线上实测：cursor-agent 登录回合在第 8 步被
+// "same tool calls repeated 3 times" 掐断）。但 hard 常为 -1（无限），完全豁免
+// 会让模型无限空转，因此给一个远大于默认值的独立上限。
+const waitRepeatLimit = 24
+
 // defaultHardMultiplier 是未显式设置 HardMaxSteps 时，hard 相对 soft 的倍数。
 const defaultHardMultiplier = 3
+
+// loopWaitTools 是只读、零副作用的后台会话等待原语。同时登记模型可见短名与
+// 注册全名：orchestrate 会剥掉 SandboxToolPrefix（docs §14 #19）。
+var loopWaitTools = map[string]bool{
+	"session_poll":          true,
+	"session_watch":         true,
+	"sandbox_session_poll":  true,
+	"sandbox_session_watch": true,
+}
+
+// waitOnlyToolCalls 报告这一步是否全部由等待原语组成。任何混入的执行型工具
+// 都会让这一步回到普通重复检测，避免借此绕过 stalled 判定。
+func waitOnlyToolCalls(calls []ToolCall) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, tc := range calls {
+		if !loopWaitTools[guardToolKey(tc.ToolName)] {
+			return false
+		}
+	}
+	return true
+}
+
+// recordLoopStep 是编排循环记录一步的唯一入口：纯等待步与常规步分开计数。
+func recordLoopStep(lc *loopController, step int, calls []ToolCall, text string) {
+	if waitOnlyToolCalls(calls) {
+		lc.recordWaitStep(text)
+		return
+	}
+	lc.recordStep(step, toolCallSignature(calls), text)
+}
 
 // loopController 追踪单次 orchestration 的步数预算与重复循环状态。
 // 非并发安全：每次 orchestration 独占一个实例，循环本身是串行推进的。
@@ -56,6 +95,8 @@ type loopController struct {
 	stalled     bool   // 是否已判定陷入重复循环
 	derailed    bool   // 是否已判定脱轨（边说停边调的循环）
 	derailCount int    // 连续出现「自我纠正文本 + 仍在调工具」的步数
+	waitStreak  int    // 连续「纯等待原语」步数（独立上限，不并入 repeatCount）
+	waitedOut   bool   // 纯等待步超过 waitRepeatLimit
 }
 
 // newLoopController 根据 soft(MaxSteps) 与 hard(HardMaxSteps) 构造控制器。
@@ -147,6 +188,9 @@ func (lc *loopController) shouldContinue(step int) bool {
 	if lc.derailed {
 		return false // 已检测到脱轨循环（模型边说停边调工具）
 	}
+	if lc.waitedOut {
+		return false // 一直在空等后台会话，没有任何其它动作
+	}
 	if lc.soft < 0 || lc.hard < 0 {
 		return true // 无限模式（soft=-1 或 hard=0→不限制）
 	}
@@ -164,6 +208,7 @@ func (lc *loopController) shouldContinue(step int) bool {
 // 超出软预算后收紧为 tightRepeatLimit 次即判定 stalled——已经跑了很多步，
 // 不再容忍原地打转。
 func (lc *loopController) recordStep(step int, sig, text string) {
+	lc.waitStreak = 0 // 只有连续的纯等待步才累计；任何实质动作都归零
 	if sig == "" {
 		lc.lastSig = ""
 		lc.repeatCount = 0
@@ -189,6 +234,25 @@ func (lc *loopController) recordStep(step int, sig, text string) {
 	// 与「同签名重复」检测互补——2026-08 事故中模型每一步调的 misskey 工具/参数
 	// 都不同（签名每步都变），旧检测完全失明；但模型文本反复「停止、回到任务」却
 	// 停不下来，正是脱轨循环的高精度信号。
+	if textContainsDerail(text) {
+		lc.derailCount++
+	} else {
+		lc.derailCount = 0
+	}
+	if lc.derailCount >= derailThreshold {
+		lc.derailed = true
+	}
+}
+
+// recordWaitStep 记录一步「只调 session_poll / session_watch」的等待。
+//
+// 关键：它不改写 lastSig / repeatCount。否则模型在两次相同的失败 exec 之间
+// 插一次 poll 就能洗掉重复计数；等待步应当对此完全透明。脱轨检测照常生效。
+func (lc *loopController) recordWaitStep(text string) {
+	lc.waitStreak++
+	if lc.waitStreak >= waitRepeatLimit {
+		lc.waitedOut = true
+	}
 	if textContainsDerail(text) {
 		lc.derailCount++
 	} else {
@@ -250,6 +314,9 @@ func (lc *loopController) stoppedByGuard(steps int) bool {
 	if lc.derailed {
 		return true
 	}
+	if lc.waitedOut {
+		return true
+	}
 	if lc.hard < 0 {
 		return false // 不限制：不会因步数上限停止
 	}
@@ -263,6 +330,8 @@ func (lc *loopController) describeLoopStop(steps int) string {
 		return fmt.Sprintf("stalled: same tool calls repeated %d times", lc.repeatCount)
 	case lc.derailed:
 		return fmt.Sprintf("derailed: model self-corrects but keeps calling tools (%d steps)", lc.derailCount)
+	case lc.waitedOut:
+		return fmt.Sprintf("stalled: background wait repeated %d times without any other action", lc.waitStreak)
 	case lc.soft >= 0 && steps >= lc.hard:
 		return fmt.Sprintf("reached hard cap %d", lc.hard)
 	default:

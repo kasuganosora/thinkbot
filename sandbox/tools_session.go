@@ -60,6 +60,12 @@ func sessionRegistryOf(mgr *BotWorkspaceManager) (*SessionRegistry, error) {
 	return mgr.Sessions(), nil
 }
 
+// sessionIDParamDescription is shared by every tool that takes a sessionId.
+// The model has been observed inventing mnemonic ids ("cursor-agent") when
+// resuming a session in a new chat turn; one consistent description plus the
+// actionable not-found error is the contract fix.
+const sessionIDParamDescription = "Exact opaque handle from session_spawn or session_watch. Never use a made-up / mnemonic name."
+
 func sessionString(m map[string]any, key string) string {
 	v, _ := m[key].(string)
 	return strings.TrimSpace(v)
@@ -129,6 +135,8 @@ func buildSessionSpawnTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			"Use this for TUIs, REPLs, logins and any program that needs stdin later; use exec for one-shot commands. " +
 			"The session keeps running between tool calls. There is NO awaiting_input gate: state=running always allows send. " +
 			"After spawn, call session_poll to read the screen, then decide whether to send. " +
+			"The sessionId is an opaque handle: copy it exactly into every later call, never invent a readable name for it. " +
+			"Sessions survive across chat turns; use session_watch to recover the exact ids at the start of a new turn. " +
 			"URLs in the result are out-of-band actions (login / OAuth / device code): hand them to the user instead of typing keys. " +
 			"IMPORTANT: a zero-output session may have failed to start — read bootDiag / stderrTail before assuming it is working. " +
 			"Limits: a few concurrent sessions per bot; the session is reclaimed after an idle period, and stopping a chat turn does NOT kill it. " +
@@ -227,13 +235,15 @@ func buildSessionPollTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			"(seq is a raw byte counter and using it can silently skip content). Repeating the same sinceSeq returns the same delta. " +
 			"health is diagnostic only — it never changes the session state and never triggers an automatic action. " +
 			"Read the screen before every send: a command may open a confirmation dialog, or may not. " +
+			"Use the exact sessionId returned by session_spawn or session_watch; a readable name is not a valid id. " +
+			"If delta is empty while seq keeps growing, retry with mode=tail to read the plain-text output. " +
 			"URLs are out-of-band actions to hand to the user. If state=lost, use reason and lastSeq to decide to reopen rather than keep polling.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"sessionId": map[string]any{"type": "string", "description": "Opaque session handle from spawn."},
+				"sessionId": map[string]any{"type": "string", "description": sessionIDParamDescription},
 				"sinceSeq":  map[string]any{"type": "integer", "description": "Use the settledSeq returned by the previous poll. Optional; the server keeps a per-agent cursor."},
-				"mode":      map[string]any{"type": "string", "enum": []string{"screen", "tail", "raw"}, "description": "screen (default): screen + semantic delta; raw: raw bytes for debugging."},
+				"mode":      map[string]any{"type": "string", "enum": []string{"screen", "tail", "raw"}, "description": "screen (default): screen + semantic delta; tail: force a bounded plain-text view of recent raw output; raw: raw bytes for debugging."},
 				"lines":     map[string]any{"type": "integer", "description": "Maximum screen lines (default 40)."},
 				"waitMs":    map[string]any{"type": "integer", "description": "Wait up to this long for new output, capped at 8000ms. Default 0 (non-blocking)."},
 			},
@@ -302,7 +312,7 @@ func buildSessionSendTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"sessionId": map[string]any{"type": "string"},
+				"sessionId": map[string]any{"type": "string", "description": sessionIDParamDescription},
 				"text":      map[string]any{"type": "string", "description": "Text to type. No newline is appended unless submit=true. For passwords / passphrases / PINs use a {{secret:name}} placeholder, never the literal value."},
 				"keys":      map[string]any{"type": "string", "description": "A key name, or a literal single character."},
 				"submit":    map[string]any{"type": "boolean", "description": "After writing text, send Enter separately. Default false."},
@@ -357,10 +367,15 @@ func buildSessionSendTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if err := reg.Send(botID, id, data); err != nil {
 				return nil, err
 			}
+			// Send only confirms the transport accepted the bytes; it does NOT
+			// prove the program consumed them. State that as a fact in `hint`.
+			// Previously this returned a hardcoded "warning: written != accepted"
+			// on EVERY successful send, i.e. a discrepancy that was never
+			// measured — warning fatigue, and no accepted field to compare to.
 			return map[string]any{
 				"written": len(data),
-				"warning": "written != accepted; poll the screen to confirm the program consumed the input",
-				"hint":    "poll before and after every send; confirmation screens may appear",
+				"hint": "bytes reached the session input, which does NOT prove the program consumed them; " +
+					"poll before and after every send; confirmation screens may appear",
 			}, nil
 		}),
 	}
@@ -375,7 +390,7 @@ func buildSessionSignalTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"sessionId": map[string]any{"type": "string"},
+				"sessionId": map[string]any{"type": "string", "description": sessionIDParamDescription},
 				"sig":       map[string]any{"type": "string", "enum": []string{"INT", "TERM", "KILL"}},
 			},
 			"required": []string{"sessionId", "sig"},
@@ -412,7 +427,7 @@ func buildSessionCloseTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"sessionId": map[string]any{"type": "string"},
+				"sessionId": map[string]any{"type": "string", "description": sessionIDParamDescription},
 			},
 			"required": []string{"sessionId"},
 		},

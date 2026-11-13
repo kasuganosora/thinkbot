@@ -413,7 +413,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 						return nil, rerr
 					}
 					toolsExecuted = true
-					loop.recordStep(step, toolCallSignature(ready), result.Text)
+					recordLoopStep(loop, step, ready, result.Text)
 					if cfg.OnToolResults != nil {
 						readyResults = cfg.OnToolResults(step, readyResults)
 					}
@@ -510,7 +510,7 @@ func OrchestrateGenerate(ctx context.Context, prov Provider, cfg *OrchestrateCon
 		// Update the dynamic loop controller with this step's tool-call
 		// signature so it can extend past the soft budget while progressing
 		// and stop early if the model gets stuck repeating the same calls.
-		loop.recordStep(step, toolCallSignature(result.ToolCalls), result.Text)
+		recordLoopStep(loop, step, result.ToolCalls, result.Text)
 
 		// Apply post-execution result processing (e.g., truncation).
 		if cfg.OnToolResults != nil {
@@ -815,7 +815,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 							break
 						}
 						toolsExecuted = true
-						loop.recordStep(step, toolCallSignature(ready), stepText)
+						recordLoopStep(loop, step, ready, stepText)
 						if cfg.OnToolResults != nil {
 							readyResults = cfg.OnToolResults(step, readyResults)
 						}
@@ -926,7 +926,7 @@ func OrchestrateStream(ctx context.Context, prov Provider, cfg *OrchestrateConfi
 
 			// Update the dynamic loop controller with this step's tool-call
 			// signature (same rationale as the non-streaming path).
-			loop.recordStep(step, toolCallSignature(stepToolCalls), stepText)
+			recordLoopStep(loop, step, stepToolCalls, stepText)
 
 			// Apply post-execution result processing (e.g., truncation).
 			if cfg.OnToolResults != nil {

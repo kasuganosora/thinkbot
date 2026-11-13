@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -151,12 +152,38 @@ func (r *SessionRegistry) get(botID, sessionID string) (*sessionEntry, error) {
 	e, ok := r.items[sessionID]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, ErrSessionNotFound
+		return nil, r.notFoundError(botID, sessionID)
 	}
 	if e.botID != botID {
 		return nil, ErrSessionWrongBot
 	}
 	return e, nil
+}
+
+// notFoundError makes a stale / invented sessionId self-healing.
+//
+// Sessions outlive a chat turn, and the model repeatedly tried to recall one
+// across turns with a mnemonic label ("cursor-agent", "codebuddy-merge") that
+// was never a real handle. A bare "session not found" gives it nothing to
+// recover with, so it burns a whole step before falling back to session_watch.
+// The wrapped sentinel keeps errors.Is(err, ErrSessionNotFound) working.
+func (r *SessionRegistry) notFoundError(botID, sessionID string) error {
+	live := r.List(botID)
+	if len(live) == 0 {
+		return fmt.Errorf("%w: %q; no live sessions for this bot — call session_watch to list them, or session_spawn to start one",
+			ErrSessionNotFound, sessionID)
+	}
+	const maxHint = 8
+	parts := make([]string, 0, maxHint)
+	for _, v := range live {
+		if len(parts) == maxHint {
+			parts = append(parts, "...")
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s(state=%s)", v.SessionID, v.State))
+	}
+	return fmt.Errorf("%w: %q is not a session id (never invent a name); live sessions: %s — copy one of these exact ids, or call session_watch",
+		ErrSessionNotFound, sessionID, strings.Join(parts, ", "))
 }
 
 func (r *SessionRegistry) Poll(botID, agent, sessionID string, sinceSeq uint64, mode string, lines int, wait time.Duration) (SessionView, error) {
@@ -264,7 +291,7 @@ func (r *SessionRegistry) Close(botID, sessionID string) error {
 	}
 	r.mu.Unlock()
 	if !ok {
-		return ErrSessionNotFound
+		return r.notFoundError(botID, sessionID)
 	}
 	escaped := []int{}
 	err := e.handle.Close()
