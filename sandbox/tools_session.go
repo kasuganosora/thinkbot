@@ -126,9 +126,9 @@ func buildSessionSpawnTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 	return llm.Tool{
 		Name: ToolSessionSpawn,
 		Description: "Start an interactive CLI as a BACKGROUND session and return immediately with an opaque sessionId. " +
-			"Use this for TUIs, REPLs, logins and any program that needs stdin later; use sandbox_exec for one-shot commands. " +
+			"Use this for TUIs, REPLs, logins and any program that needs stdin later; use exec for one-shot commands. " +
 			"The session keeps running between tool calls. There is NO awaiting_input gate: state=running always allows send. " +
-			"After spawn, call sandbox_session_poll to read the screen, then decide whether to send. " +
+			"After spawn, call session_poll to read the screen, then decide whether to send. " +
 			"URLs in the result are out-of-band actions (login / OAuth / device code): hand them to the user instead of typing keys. " +
 			"IMPORTANT: a zero-output session may have failed to start — read bootDiag / stderrTail before assuming it is working. " +
 			"Limits: a few concurrent sessions per bot; the session is reclaimed after an idle period, and stopping a chat turn does NOT kill it. " +
@@ -444,7 +444,7 @@ func buildSessionWatchTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			"Returns sessions that need a decision first: P0 actionable prompt / credential prompt / connection failure / suspected stuck / daemon fault, " +
 			"P1 exited or idle-prompt or orphaned, P2 quiet progress (folded). " +
 			"watch does NOT consume output, does NOT advance your cursor, and never sends or kills anything. " +
-			"Use attention[].sinceSeq with sandbox_session_poll. botID and agent are supplied by the server and cannot be set here. " +
+			"Use attention[].sinceSeq with session_poll. botID and agent are supplied by the server and cannot be set here. " +
 			"Set waitMs to long-poll: the call blocks until a session needs a decision or the wait elapses, " +
 			"instead of you sleeping and calling watch repeatedly. On timeout it returns the current queue; " +
 			"act only on attention items, never on a plain timeout.",

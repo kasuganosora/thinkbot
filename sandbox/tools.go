@@ -74,16 +74,16 @@ Every bot gets its own isolated workspace, and its files survive across sessions
 - When a tool call fails, state why it failed and try a concrete alternative.
 
 ### Interactive sessions (background PTY)
-- **exec** is one-shot. For a TUI, REPL, login flow, or any program that needs stdin later, use **sandbox_session_spawn** instead — it returns an opaque sessionId immediately and the process keeps running between tool calls.
+- **exec** is one-shot. For a TUI, REPL, login flow, or any program that needs stdin later, use **session_spawn** instead — it returns an opaque sessionId immediately and the process keeps running between tool calls.
 - If you are unsure whether a command is short-lived or long-running, **exec** may offer background="auto" (only when session tools are permitted). It starts a PTY session and watches briefly: quick exit gives you the normal one-shot result with no output lost; still running with visible output gives you a sessionId — then switch to the poll/send/close loop below. A process that is alive but produces NO output is never upgraded: you get a startup diagnostic, not a sessionId.
-- background="auto" is decided by the server's tool permissions. If the parameter is absent, or the call says it is not permitted, use **sandbox_session_spawn** explicitly or run synchronously instead of retrying auto.
+- background="auto" is decided by the server's tool permissions. If the parameter is absent, or the call says it is not permitted, use **session_spawn** explicitly or run synchronously instead of retrying auto.
 - Loop: **spawn -> poll -> decide -> send -> poll**. There is no "awaiting_input" gate; state=running always allows send. Never guess results with a fixed sleep, and never send two commands back to back.
 - **poll** returns the current screen plus a semantic delta. Always pass the returned **settledSeq** as your next sinceSeq — using **seq** (a raw byte counter) can silently skip content.
 - A command may open a confirmation screen, or may not. On such a screen, Enter / y means APPROVING the action (often shell execution). Read the screen before every send, and poll again afterwards.
 - **urls** are out-of-band actions (login / OAuth / device code / callback). Hand them to the user; do not type them into the terminal or just wait.
 - If the screen is empty but the process is alive, read **bootDiag** / **stderrTail** first — a startup failure can look exactly like a quiet session. Do not assume it is waiting for input.
 - **signal(INT)** ends the whole session on a raw TUI; it is not "interrupt and continue". Spawn a new session afterwards.
-- **sandbox_session_watch** is a read-only attention queue across sessions. It does not consume output or advance your cursor. Pass waitMs to long-poll: the call waits until a session needs a decision (actionable prompt, exit, orphan, daemon fault) instead of you sleeping and re-calling watch. A timeout is NOT an event — only act on attention items.
+- **session_watch** is a read-only attention queue across sessions. It does not consume output or advance your cursor. Pass waitMs to long-poll: the call waits until a session needs a decision (actionable prompt, exit, orphan, daemon fault) instead of you sleeping and re-calling watch. A timeout is NOT an event — only act on attention items.
 - Stopping the chat turn does NOT stop these sessions; they are reclaimed after an idle period. Close them explicitly when done.
 
 ### Language
@@ -269,11 +269,11 @@ func buildExecToolWithAuto(mgr *BotWorkspaceManager, botID string, autoGuard fun
 			"enum": []string{"sync", "auto"},
 			"description": "Optional. \"sync\" (default) waits for the command to finish and returns stdout/stderr/exitCode. " +
 				"\"auto\" starts the command in a PTY session and watches briefly: if it exits quickly you get the normal one-shot result " +
-				"(no output lost); if it is still running with visible output you get a sessionId to drive with sandbox_session_poll/send/close. " +
+				"(no output lost); if it is still running with visible output you get a sessionId to drive with session_poll/send/close. " +
 				"A process that is alive but produces NO output is never upgraded — that is the shape of a startup failure, so you get a diagnostic instead. " +
-				"Prefer sandbox_session_spawn directly for TUIs/REPLs/logins. auto is for commands you are unsure about.",
+				"Prefer session_spawn directly for TUIs/REPLs/logins. auto is for commands you are unsure about.",
 		}
-		desc += " For long-running or interactive programs, use sandbox_session_spawn, or set background=\"auto\" to let the sandbox decide."
+		desc += " For long-running or interactive programs, use session_spawn, or set background=\"auto\" to let the sandbox decide."
 	}
 	return llm.Tool{
 		Name:        "sandbox_exec",
@@ -314,7 +314,11 @@ func buildExecToolExecute(mgr *BotWorkspaceManager, botID string, autoGuard func
 				return nil, fmt.Errorf("background must be \"sync\" or \"auto\", got %q", bg)
 			}
 			if autoGuard == nil || !autoGuard() {
-				return nil, fmt.Errorf("background=auto is unavailable: sandbox_session_spawn is not permitted here; use sandbox_session_spawn directly or run synchronously")
+				// autoGuard gates the sandbox_session_spawn capability (full name is
+				// internal only). The model sees the prefix-stripped names, so the
+				// message must tell it to fall back to a synchronous exec, not to
+				// "use spawn directly" — spawn is exactly what was denied here.
+				return nil, fmt.Errorf("background=auto is unavailable: session_spawn is not permitted for this turn; retry with background=sync")
 			}
 			return runExecAutoUpgrade(ctx, mgr, botID, command, workdir)
 		}
@@ -407,7 +411,7 @@ func runExecAutoUpgrade(ctx *llm.ToolExecContext, mgr *BotWorkspaceManager,
 		// Return a well-formed, honest error rather than silently re-running
 		// the command through the sync path (that could duplicate side effects).
 		return nil, fmt.Errorf("background=auto could not start a session (%v); "+
-			"retry with background=sync or sandbox_session_spawn", err)
+			"retry with background=sync, or session_spawn if the backend supports interactive sessions", err)
 	}
 	event := "auto_upgrade_sync"
 	outcome, _ := out["reason"].(string)

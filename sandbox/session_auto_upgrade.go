@@ -141,8 +141,8 @@ func runAutoUpgrade(ctx context.Context, reg autoUpgradeSession, botID string,
 			out["observedMs"] = time.Since(start).Milliseconds()
 			out["upgradeReason"] = autoUpgradeEvidence(v)
 			out["hint"] = "Command is still running as a background session. " +
-				"Use sandbox_session_poll with sinceSeq=settledSeq to read new output, " +
-				"sandbox_session_send to interact, and sandbox_session_close when done. " +
+				"Use session_poll with sinceSeq=settledSeq to read new output, " +
+				"session_send to interact, and session_close when done. " +
 				"stdout/stderr are merged in the PTY screen."
 			return out, nil
 		}
@@ -224,7 +224,7 @@ func autoOneShotResult(reg autoUpgradeSession, botID, sid string,
 		warnings = append(warnings,
 			"background=auto did NOT upgrade: the process was alive but produced no visible output. "+
 				"This is the shape of a hidden startup failure; the session was closed. "+
-				"Check bootDiag/stderrTail, or use sandbox_session_spawn explicitly if the program is simply slow to start.")
+				"Check bootDiag/stderrTail, or use session_spawn explicitly if the program is simply slow to start.")
 	}
 	if reason == autoReasonLost {
 		warnings = append(warnings,
