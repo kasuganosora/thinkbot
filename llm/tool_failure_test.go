@@ -29,7 +29,7 @@ func TestRunTool_IntentRefusalSaysNothingHappened(t *testing.T) {
 	tc := ToolCall{ToolCallID: "c1", ToolName: "misskey_create_note", Input: map[string]any{}}
 	res := runTool(context.Background(), tc, tool, nil, &OrchestrateConfig{UserRequest: "今天天气怎么样"})
 	msg, _ := res.Result.(string)
-	if !res.IsError || !strings.HasPrefix(msg, "NOT EXECUTED") || !strings.Contains(msg, "不要告诉用户已经完成") {
+	if !res.IsError || !strings.HasPrefix(msg, "NOT EXECUTED") || !strings.Contains(msg, "Do NOT tell the user") {
 		t.Fatalf("refusal must state that nothing was executed, got %q", msg)
 	}
 }

@@ -36,7 +36,7 @@ func TestSubmitToolDescriptionMentionsGoalMode(t *testing.T) {
 	if gm["type"] != "boolean" {
 		t.Errorf("goalMode 类型应为 boolean，实际 %v", gm["type"])
 	}
-	if desc, _ := gm["description"].(string); !strings.Contains(desc, "闭环") {
+	if desc, _ := gm["description"].(string); !strings.Contains(desc, "closed-loop") {
 		t.Errorf("goalMode 参数描述应说明闭环行为，实际: %s", desc)
 	}
 }

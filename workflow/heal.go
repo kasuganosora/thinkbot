@@ -63,52 +63,53 @@ type Diagnosis struct {
 // healDiagnoseSystemPrompt 根因诊断专家的 system prompt。
 // 关键约束：强制 JSON 输出、明确四类根因的判定依据、要求它必须亲自探查真实代码规模
 // （而非轻信任务文案里的目录名），避免"凭感觉"错判颗粒度。
-const healDiagnoseSystemPrompt = `你是一个工作流失败根因诊断专家。给定一个执行失败的工作流节点，你要判断它"为什么失败"，而不是"失败了没有"。
+const healDiagnoseSystemPrompt = `You are a workflow failure root-cause diagnostician. Given a failed workflow node, your job is to determine WHY it failed, not merely whether it failed.
 
-你拥有 read / grep / glob 工具，可以：
-- 读取失败节点覆盖的代码目录/文件，确认真实文件数与行数（不要轻信任务文案，要亲自探查）；
-- 读取运行日志（默认 /tmp/thinkbot.log），按节点 id 找它的 tool call summary（total_calls / steps）、GLM 生成延迟、是否出现 context deadline exceeded / 截断。
+You have read / grep / glob tools so you can:
+- Inspect the code directories and files covered by the failed node to verify the actual file count and line count (do not trust the task wording blindly — inspect it yourself);
+- Read the runtime log (default /tmp/thinkbot.log) and look up this node's ID to find its tool call summary (total_calls / steps), LLM generation latency, and whether context deadline exceeded or output truncation occurred.
 
-请基于真实证据输出 JSON，判定以下四类根因之一：
+Base your judgment on real evidence and classify the failure into one of the following categories:
 
-1. granularity（颗粒度太大）：节点任务覆盖的代码规模过大（例如整模块组数千行），需要 100+ 次工具调用才能在硬上限内完成，但硬上限内根本跑不完。证据：真实行数巨大、total_calls 很高（如 >80）、且 GLM 延迟正常。
-   → suggested_action = "refine"，并在 refine_hint 中给出具体拆分方案（按子目录/单文件拆成 2~4 个更小节点）。
+1. granularity (scope too large): the node's task covers too much code (e.g. an entire group of modules totaling thousands of lines), requiring 100+ tool calls that cannot finish within the hard cap. Evidence: huge actual line count, high total_calls (e.g. >80), and normal LLM latency.
+   -> suggested_action = "refine", and provide a concrete splitting plan in refine_hint (split by sub-directory or individual files into 2-4 smaller nodes).
 
-2. endpoint（端点变慢/瞬断）：GLM 整体变慢或短暂不可用导致同样的真实工作量耗时翻倍。证据：日志里该节点附近大量 context deadline exceeded、同工作流其它不重节点也变慢或失败、真实代码规模其实不大。
-   → suggested_action = "backoff_retry"（不应细化，应退避后重试）。
+2. endpoint (slow or flaky model endpoint): the LLM endpoint slowed down globally or had transient outages, doubling the wall-clock time for an otherwise modest workload. Evidence: repeated context deadline exceeded near this node in the log, other lightweight nodes in the same workflow also slowed down or failed, and the actual code size is small.
+   -> suggested_action = "backoff_retry" (do NOT refine; back off and retry instead).
 
-3. context_bloat（上下文膨胀）：长任务上下文累积导致每步决策变慢、token 消耗飙升。证据：total_calls 不算极端但单次 GLM 调用耗时持续攀升、日志出现截断。
-   → suggested_action = "refine"（拆细节点可降低单节点上下文），refine_hint 给出拆分方案。
+3. context_bloat (context growth): accumulated context in a long-running task slowed down each step and inflated token usage. Evidence: total_calls is moderate, per-call LLM latency climbs steadily, or truncation appears in the log.
+   -> suggested_action = "refine" (splitting into smaller nodes shrinks per-node context), with a concrete splitting plan in refine_hint.
 
-4. quota（额度墙）：日志出现 429 / 配额耗尽类错误。
-   → suggested_action = "wait_quota"。
+4. quota (rate limit / quota wall): 429 or quota-exhaustion errors appear in the log.
+   -> suggested_action = "wait_quota".
 
-5. capability（工具档位不足）：节点被授予的工具档位不足以完成它的任务。判定依据见下方「工具档位」一节——典型证据是日志里出现工具不可用/未找到，或任务明确需要执行、写入能力而当前档位不含。
-   → suggested_action = "escalate"，并在 suggested_profile 里给出你认为需要的最低档位。
-   **不要**因为档位不足而判成 granularity：拆细节点解决不了缺工具，只会白白多跑一轮。
+5. capability (insufficient tool profile): the node's granted toolProfile lacks a capability its task requires. See "Tool Profiles" below — typical evidence is tool-unavailable / tool-not-found errors in the log, or a task that clearly requires command execution or file writes when the current profile omits them.
+   -> suggested_action = "escalate", and set suggested_profile to the narrowest profile that satisfies the task.
+   NEVER misclassify an insufficient tool profile as granularity: splitting the node will not grant missing tools and only wastes another round.
 
-6. other（不确定）：证据不足或多种原因混合无法判定。
-   → suggested_action = "escalate"。
+6. other (uncertain): insufficient evidence or mixed causes that cannot be determined reliably.
+   -> suggested_action = "escalate".
 
-## 工具档位
+## Tool Profiles
 
-节点可能被限定在以下档位之一（失败节点的当前档位见任务描述）：
+A node may be restricted to one of the following tiers (the failed node's current profile is shown in the task prompt):
 
-- readonly —— 只能列目录、读文件、搜内容
-- analysis —— readonly + 执行命令（跑测试/lint/构建），但不能写文件
-- edit     —— analysis + 新建文件、局部替换，但**不能删除或移动**
-- full     —— 全部工具
+- readonly — list dir, read file, search content only
+- analysis — readonly + run commands / code (tests / lint / build), no file writes
+- edit     — analysis (including command / code execution) + create file, replace in file, **no delete or move**
+- full     — all workspace tools
 
-判定要点：
-- 先确认任务本身需要什么能力（读？执行？写？删除？），再看当前档位是否覆盖。
-- 任务要跑测试/构建而档位是 readonly → capability
-- 任务要改文件而档位是 analysis → capability
-- 代码规模巨大但档位够用 → 那是 granularity，不是 capability
+Judgment rules:
+- First check what capabilities the task itself requires (read? execute? write? delete/move?), then check whether the current profile covers them.
+- Task needs to run tests/builds/commands while profile is readonly -> capability
+- Task needs to create/edit files while profile is analysis -> capability
+- Task needs to delete/move files while profile is edit -> capability
+- Huge code scope while the profile already grants the required tools -> granularity, NOT capability
 
-把最终 JSON 放在 <result>...</result> 之间，格式：
-{"category":"granularity|endpoint|context_bloat|quota|capability|other","confidence":0.0~1.0,"reason":"基于真实证据的一句话说明","suggested_action":"refine|backoff_retry|wait_quota|escalate","refine_hint":"仅 granularity/context_bloat 时给出","suggested_profile":"仅 capability 时给出：readonly|analysis|edit|full"}
+Wrap the final JSON strictly between <result> and </result> in this exact schema:
+{"category":"granularity|endpoint|context_bloat|quota|capability|other","confidence":0.0,"reason":"<one-sentence evidence-based explanation>","suggested_action":"refine|backoff_retry|wait_quota|escalate","refine_hint":"<only when granularity or context_bloat>","suggested_profile":"<only when capability: readonly|analysis|edit|full>"}
 
-confidence 是你对判定的把握（0~1）。证据不足时不要虚高。`
+Write "reason" and "refine_hint" in Chinese (中文). "confidence" is your certainty in [0.0, 1.0]; do not inflate it when evidence is thin.`
 
 // healDiagnoseStuckTimeout 诊断 subagent 的墙钟上限：它必须短，否则"诊断一个卡死节点又卡 30 分钟"本末倒置。
 const healDiagnoseStuckTimeout = 5 * time.Minute
@@ -136,23 +137,23 @@ func (a *Analyzer) DiagnoseNode(ctx context.Context, node *DAGNode, wf *Workflow
 		profile = ProfileFull
 	}
 
-	task := fmt.Sprintf(`失败节点诊断任务：
+	task := fmt.Sprintf(`Failed node diagnosis task:
 
-节点 id: %s
-节点名: %s
-当前工具档位: %s
-节点任务描述:
+Node ID: %s
+Node Name: %s
+Current Tool Profile: %s
+Node Task Description:
 %s
 
-失败错误: %s
-已重试次数: %d
+Failure Error: %s
+Retry Count So Far: %d
 
-原始工作流需求:
+Original Workflow Requirement:
 %s
 
-请先 read/grep/glob 探查该节点任务覆盖的真实代码规模（文件数、总行数），再读 /tmp/thinkbot.log 按节点 id 提取它的 tool call summary 与 GLM 延迟证据，然后判定根因。
-特别注意：若失败源于「当前工具档位不足以完成任务」，请判为 capability 并给出建议档位，**不要**判成 granularity。
-输出格式见 system prompt，放在 <result>...</result> 之间。`,
+First use read/grep/glob to inspect the actual code size covered by this node (file count and total lines), then inspect /tmp/thinkbot.log by node ID to extract its tool call summary and LLM latency evidence, and finally determine the root cause.
+IMPORTANT: if the failure was caused by an insufficient tool profile for the task, classify it as "capability" and provide "suggested_profile" — do NOT misclassify it as "granularity".
+Follow the output schema in your system prompt and wrap the JSON in <result>...</result>.`,
 		node.ID, node.Name, profile, node.Task, node.Error, node.RetryCount, wf.Requirement)
 
 	ctx, modelMax := a.liveCall(ctx)
@@ -205,26 +206,26 @@ func (a *Analyzer) RefineNode(ctx context.Context, wf *Workflow, failedNode *DAG
 	logger := traceid.WithLoggerFrom(ctx, a.logger)
 	logger.Infow("healing: refining failed node", "node_id", failedNode.ID, "hint", hint)
 
-	task := fmt.Sprintf(`把一个执行超时的评审节点拆成更小、可独立完成的子节点。
+	task := fmt.Sprintf(`Split a timed-out / oversized workflow node into smaller, independently completable sub-nodes.
 
-失败节点：
-- 名称: %s
-- 任务描述:
+Failed Node:
+- Name: %s
+- Task Description:
 %s
-- 诊断建议（为什么超时、怎么拆）:
-%s
-
-原始工作流需求（供你理解上下文）:
+- Diagnosis & Splitting Hint (why it timed out and how to split it):
 %s
 
-要求：
-1. 把该节点拆成 2~4 个更小、彼此有依赖关系的子节点，每个子节点任务范围足够小，能在 120 分钟硬上限内完成（按子目录/单文件拆分，不要整模块组）。
-2. 子图内部用相对 id（如 "a"、"b"、"c"），dependencies 引用子图内部相对 id。
-3. 子图第一个节点应继承原节点的上游依赖：在其 dependencies 里写哨兵 "__UP__"（不要写真实上游 id）。
-4. 子图最后一个节点的下游会自动接回原节点的下游，你无需处理——但子图内部必须形成从入口到出口的链/树。
-5. 每个子节点若需审查，设 review=true 并给简短 reviewPrompt。
+Original Workflow Requirement (for context):
+%s
 
-把最终 JSON 放在 <result>...</result> 之间，格式：
+Requirements:
+1. Split this node into 2-4 smaller sub-nodes with clear dependencies so each sub-node has a bounded scope small enough to finish well within the 120-minute hard cap (split by sub-directory or individual files, not whole module groups).
+2. Use short relative IDs inside the subgraph (e.g. "a", "b", "c"), and reference those relative IDs in internal "dependencies".
+3. Entry sub-node(s) that should inherit the failed node's upstream dependencies MUST list the sentinel "__UP__" in their "dependencies" (do NOT write actual upstream node IDs).
+4. Exit sub-node(s) are rewired to the failed node's downstream dependents automatically — you do not need to touch downstream nodes, but the subgraph itself must form a valid DAG from entry to exit.
+5. Set review=true with a concise reviewPrompt on any sub-node whose output requires quality review. Write "name", "task", "systemPrompt", and "reviewPrompt" values in Chinese (中文).
+
+Wrap the final JSON strictly between <result> and </result> in this format:
 {"nodes":[{"id":"a","name":"...","task":"...","dependencies":["__UP__"],"review":false,"reviewPrompt":""}, ...]}`,
 		failedNode.Name, failedNode.Task, hint, wf.Requirement)
 

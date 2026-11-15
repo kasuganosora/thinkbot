@@ -155,21 +155,21 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 	// ---- 解析入参 ----
 	raw, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("user_choice: 无法序列化入参: %w", err)
+		return nil, fmt.Errorf("user_choice: failed to marshal input: %w", err)
 	}
 	var in userChoiceInput
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return nil, fmt.Errorf("user_choice: 入参格式错误: %w", err)
+		return nil, fmt.Errorf("user_choice: invalid input format: %w", err)
 	}
 	if strings.TrimSpace(in.Question) == "" {
-		return nil, fmt.Errorf("user_choice: question 不能为空")
+		return nil, fmt.Errorf("user_choice: question is required")
 	}
 	if len(in.Options) < interaction.MinOptions || len(in.Options) > interaction.MaxOptions {
-		return nil, fmt.Errorf("user_choice: options 须为 %d~%d 个，实际 %d 个",
+		return nil, fmt.Errorf("user_choice: options count must be %d..%d, got %d",
 			interaction.MinOptions, interaction.MaxOptions, len(in.Options))
 	}
 	if in.Mode != string(interaction.ModeSingle) && in.Mode != string(interaction.ModeMulti) {
-		return nil, fmt.Errorf("user_choice: mode 须为 single 或 multi")
+		return nil, fmt.Errorf("user_choice: mode must be single or multi")
 	}
 	in.TimeoutSecs = capTimeoutSecs(ctx.Context, in.TimeoutSecs)
 
@@ -188,7 +188,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 			return map[string]any{
 				"status":   "unsupported",
 				"platform": meta.ChannelType,
-				"message":  "该平台投票至少需要 2 个选项。请增加选项，或改用普通文本把问题列出来让用户直接回复；不要重试本工具。",
+				"message":  "Polls on this platform require at least 2 options. Add more options or ask the question in plain text so the user can reply directly; do NOT retry this tool with fewer than 2 options.",
 			}, nil
 		}
 		// 非 web 平台：尝试使用平台原生的投票创建器
@@ -200,8 +200,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 			return map[string]any{
 				"status":   "unsupported",
 				"platform": meta.ChannelType,
-				"message": "当前平台暂不支持交互式选择卡。请改用普通文本消息把问题和候选项列出来（例如编号列表），" +
-					"让用户直接回复；不要重试本工具。",
+				"message": "Interactive choice cards are not supported on this platform. Ask the question and list the options in plain text (e.g., a numbered list) so the user can reply directly; do NOT retry this tool.",
 			}, nil
 		}
 
@@ -224,7 +223,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 		}
 		reg, err := interaction.Default().RegisterQuestion(q)
 		if err != nil {
-			return nil, fmt.Errorf("user_choice: 注册问题失败: %w", err)
+			return nil, fmt.Errorf("user_choice: failed to register question: %w", err)
 		}
 		defer interaction.Default().CleanupFinal(questionID)
 
@@ -243,7 +242,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 			return map[string]any{
 				"status":   "unsupported",
 				"platform": meta.ChannelType,
-				"message":  fmt.Sprintf("投票帖创建失败: %v。请改用纯文本提问。", err),
+				"message":  fmt.Sprintf("Failed to create native poll: %v. Ask the question in plain text instead.", err),
 			}, nil
 		}
 
@@ -256,7 +255,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 					"status":     "timeout",
 					"questionId": questionID,
 					"noteId":     noteID,
-					"message":    "等待用户投票超时。请基于已有信息给出合理的默认处理，或稍后再问；不要反复重试本工具。",
+					"message":    "Timed out waiting for the user's vote. Proceed with a sensible default based on available context or ask again later; do NOT repeatedly retry this tool.",
 				}, nil
 			}
 			if err == interaction.ErrInterrupted {
@@ -268,10 +267,10 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 					"status":     "interrupted",
 					"questionId": questionID,
 					"noteId":     noteID,
-					"message":    "等待用户选择期间，你发送了新消息，已中断本次选择。请基于你最新的消息继续，无需参考刚才的选项。",
+					"message":    "The user sent a new message while waiting for this choice, interrupting the prompt. Continue from the user's latest message instead of referencing these options.",
 				}, nil
 			}
-			return nil, fmt.Errorf("user_choice: 等待中断: %w", err)
+			return nil, fmt.Errorf("user_choice: wait interrupted: %w", err)
 		}
 		_ = snap
 
@@ -319,7 +318,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 	}
 	reg, err := interaction.Default().RegisterQuestion(q)
 	if err != nil {
-		return nil, fmt.Errorf("user_choice: 注册问题失败: %w", err)
+		return nil, fmt.Errorf("user_choice: failed to register question: %w", err)
 	}
 	defer interaction.Default().CleanupFinal(questionID)
 
@@ -385,7 +384,7 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 			return map[string]any{
 				"status":     "timeout",
 				"questionId": questionID,
-				"message":    "等待用户应答超时。请基于已有信息给出合理的默认处理，或稍后再问；不要反复重试本工具。",
+				"message":    "Timed out waiting for the user's answer. Proceed with a sensible default based on available context or ask again later; do NOT repeatedly retry this tool.",
 			}, nil
 		}
 		if err == interaction.ErrInterrupted {
@@ -396,10 +395,10 @@ func execUserChoice(ctx *llm.ToolExecContext, input any) (any, error) {
 			return map[string]any{
 				"status":     "interrupted",
 				"questionId": questionID,
-				"message":    "等待用户选择期间，你发送了新消息，已中断本次选择。请基于你最新的消息继续，无需参考刚才的选项。",
+				"message":    "The user sent a new message while waiting for this choice, interrupting the prompt. Continue from the user's latest message instead of referencing these options.",
 			}, nil
 		}
-		return nil, fmt.Errorf("user_choice: 等待中断: %w", err)
+		return nil, fmt.Errorf("user_choice: wait interrupted: %w", err)
 	}
 	_ = snap
 

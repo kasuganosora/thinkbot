@@ -658,8 +658,8 @@ func (c *TelegramChannel) handleMessageReaction(ctx context.Context, updateID in
 		emojis = append(emojis, formatReactionType(r))
 	}
 	emojiList := strings.Join(emojis, " ")
-	guidance := "只需要知道这件事即可：不要回复、不要回赞、也不要为此调用工具，除非对方同时还发了文字在找你。"
-	inject := fmt.Sprintf("[Telegram 反应] %s 对你的消息表态了 %s。%s\n[message_id: %d]", who, emojiList, guidance, mr.MessageID)
+	guidance := "For awareness only: do not reply, do not react back, and do not call any tools for this unless they also sent a text message addressing you."
+	inject := fmt.Sprintf("[Telegram 反应] %s reacted %s to your message. %s\n[message_id: %d]", who, emojiList, guidance, mr.MessageID)
 
 	chatID := fmt.Sprintf("%d", mr.Chat.ID)
 	chatType := mr.Chat.Type

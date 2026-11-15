@@ -71,15 +71,15 @@ var secretDeletePromptSection = &agenttools.ToolPromptSection{
 func execSecretDelete(ctx *llm.ToolExecContext, input any) (any, error) {
 	raw, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("secret_delete: 无法序列化入参: %w", err)
+		return nil, fmt.Errorf("secret_delete: failed to marshal input: %w", err)
 	}
 	var in secretDeleteArgs
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return nil, fmt.Errorf("secret_delete: 入参格式错误: %w", err)
+		return nil, fmt.Errorf("secret_delete: invalid input format: %w", err)
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		return nil, fmt.Errorf("secret_delete: name 不能为空")
+		return nil, fmt.Errorf("secret_delete: name is required")
 	}
 	if ctx == nil || ctx.Context == nil {
 		return nil, fmt.Errorf("secret_delete: missing conversation context")
@@ -106,17 +106,17 @@ func execSecretDelete(ctx *llm.ToolExecContext, input any) (any, error) {
 	case secret.DeleteStatusDeleted:
 		out["scope"] = result.Scope
 		if result.RevealedGlobal {
-			out["hint"] = "已删除本 bot 的凭据；同名的全局共享凭据仍然存在，该名字现在会还原成全局值。若用户希望完全移除，需再次确认后带 allow_global=true 调用。"
+			out["hint"] = "Deleted this bot's credential; a global shared credential with the same name still exists, so this name now resolves to the global value. If the user wants it removed completely, confirm with the user first and call again with allow_global=true."
 		} else if result.Scope == secret.ScopeGlobal {
-			out["hint"] = "已删除全局共享凭据，所有 bot 都不再能看到该名字。"
+			out["hint"] = "Deleted the global shared credential; no bot can access this name anymore."
 		} else {
-			out["hint"] = "凭据已永久删除，对应占位符不再可还原；如仍需使用请让用户重新提供。"
+			out["hint"] = "Credential permanently deleted; its placeholder no longer resolves. Request a new one via secret_input if still needed."
 		}
 	case secret.DeleteStatusConfirmRequired:
 		out["scope"] = secret.ScopeGlobal
-		out["hint"] = "该名字指向全局共享凭据，删除会影响所有 bot。请先向用户说明并征得确认，确认后带 allow_global=true 再调用一次。"
+		out["hint"] = "This name refers to a global shared credential and deleting it affects all bots. Explain this to the user and obtain confirmation before calling again with allow_global=true."
 	case secret.DeleteStatusNotFound:
-		out["hint"] = "没有找到该名字的凭据；可先用 secret_input 的 action=list 查看现有名字，不要猜测。"
+		out["hint"] = "No credential found with that name; call secret_input with action=list to inspect stored names instead of guessing."
 	}
 	return out, nil
 }

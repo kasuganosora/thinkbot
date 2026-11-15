@@ -46,15 +46,15 @@ func TestSplitSessionChannel(t *testing.T) {
 func TestWorkflowContinuationText(t *testing.T) {
 	done := &workflow.Workflow{ID: "wf-ok", Status: workflow.WorkflowCompleted, Requirement: "do it",
 		Nodes: []*workflow.DAGNode{{ID: "n1", Status: workflow.NodeCompleted}}}
-	if txt := workflowContinuationText(done); !strings.Contains(txt, "已执行完成") || !strings.Contains(txt, "do it") {
+	if txt := workflowContinuationText(done); !strings.Contains(txt, "has completed") || !strings.Contains(txt, "do it") {
 		t.Fatalf("completed text: %s", txt)
 	}
 	// 2026-09-28: a failed workflow was announced as "已执行完成（共 2 个节点，0 个已完成）".
 	failed := &workflow.Workflow{ID: "wf-bad", Status: workflow.WorkflowFailed, Requirement: "do it", Error: "boom",
 		Nodes: []*workflow.DAGNode{{ID: "n1", Status: workflow.NodeFailed}, {ID: "n2", Status: workflow.NodeSkipped}}}
 	txt := workflowContinuationText(failed)
-	if strings.Contains(txt, "已执行完成") || !strings.Contains(txt, "没有成功") || !strings.Contains(txt, "boom") ||
-		!strings.Contains(txt, "不要声称任务已经完成") {
+	if strings.Contains(txt, "has completed") || !strings.Contains(txt, "did NOT succeed") || !strings.Contains(txt, "boom") ||
+		!strings.Contains(txt, "do NOT claim the task is completed") {
 		t.Fatalf("failed text: %s", txt)
 	}
 }

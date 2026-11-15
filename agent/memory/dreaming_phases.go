@@ -548,7 +548,7 @@ func (d *DreamManager) clusterByTheme(ctx context.Context, candidates []*DreamCa
 
 	var sb strings.Builder
 	sb.WriteString("Assign 1-3 theme tags to each candidate memory below. Reuse the exact key you are given.\n")
-	sb.WriteString("Output JSON: [{\"key\":\"candidate key\",\"tags\":[\"标签\"]}]\n\n")
+	sb.WriteString("Output JSON: [{\"key\":\"candidate key\",\"tags\":[\"<tag>\"]}]\n\n")
 	for i, c := range candidates {
 		if i >= 50 {
 			break
@@ -1195,20 +1195,20 @@ func (d *DreamManager) scoreImportanceOnce(ctx context.Context, cands []*DreamCa
 
 	idToKey := make(map[string]string, len(cands))
 	var sb strings.Builder
-	sb.WriteString("请评估以下每条记忆对用户长期价值的「重要性」，返回 JSON 数组。\n")
-	sb.WriteString("重要性取值 0.0~1.0：\n")
-	sb.WriteString("  1.0 = 核心事实 / 稳定偏好 / 长期有用（如技术栈、工作习惯、项目约定）\n")
-	sb.WriteString("  0.0 = 闲聊寒暄 / 临时调试 / 一次性上下文 / 易逝进度汇报\n")
-	sb.WriteString("判断依据：内容具体性、是否可被未来对话复用、出现/被引用频次。\n")
-	sb.WriteString("每条候选带有短 id（如 c0）；返回时必须用该 id，不要回写内容原文。\n\n")
+	sb.WriteString("Evaluate the long-term importance of each candidate memory below for the user and return a JSON array.\n")
+	sb.WriteString("Importance range is 0.0~1.0:\n")
+	sb.WriteString("  1.0 = core facts / stable preferences / long-term value (e.g., tech stack, work habits, project conventions)\n")
+	sb.WriteString("  0.0 = small talk / temporary debugging / one-off context / ephemeral progress updates\n")
+	sb.WriteString("Criteria: specificity, reusability in future conversations, and hit/recall frequency.\n")
+	sb.WriteString("Each candidate has a short id (e.g. c0); use that exact id in your response and do NOT echo the raw content.\n\n")
 	for i, c := range cands {
 		id := fmt.Sprintf("c%d", i)
 		idToKey[id] = c.Key
-		fmt.Fprintf(&sb, "[id:%s] 类别=%s 命中=%d 主题命中=%d 召回=%d\n%s\n\n",
+		fmt.Fprintf(&sb, "[id:%s] category=%s light_hits=%d rem_hits=%d recalls=%d\n%s\n\n",
 			id, c.Category, c.LightHits, c.REMHits, c.RecallCount,
 			strutil.Truncate(c.Content, 80))
 	}
-	sb.WriteString("返回格式（只返回 JSON，不要解释）：\n")
+	sb.WriteString("Output format (return ONLY JSON, no explanation):\n")
 	sb.WriteString(`[{"id":"c0","importance":0.0}]`)
 
 	// 此前写死 maxTokens := 2048：GLM-5.3 缺省 max 推理，09-24 / 09-26 输出恰好 2048 即被截断，

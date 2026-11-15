@@ -378,7 +378,7 @@ func TestRunTool_RequiresUserIntent(t *testing.T) {
 		t.Error("tool must NOT execute when not grounded")
 	}
 	msg, _ := res.Result.(string)
-	if !strings.Contains(msg, "拦截") {
+	if !strings.Contains(msg, "blocked") {
 		t.Errorf("refusal message missing, got %q", res.Result)
 	}
 

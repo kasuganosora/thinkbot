@@ -84,19 +84,19 @@ func (p *Provider) call(ctx context.Context, method, path string, body any) ([]b
 	}
 	token, _ := p.store.Get("loader.token")
 	if token == "" {
-		return nil, fmt.Errorf("loader 运维接口未配置 token（loader.token 为空），拒绝访问")
+		return nil, fmt.Errorf("loader ops endpoint token is not configured (loader.token is empty); access denied")
 	}
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("序列化请求体失败: %w", err)
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, "http://"+addr+path, rdr)
 	if err != nil {
-		return nil, fmt.Errorf("构造请求失败: %w", err)
+		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
 	req.Header.Set("X-Loader-Token", token)
 	if body != nil {
@@ -104,12 +104,12 @@ func (p *Provider) call(ctx context.Context, method, path string, body any) ([]b
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("调用 loader 失败: %w", err)
+		return nil, fmt.Errorf("loader request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return data, fmt.Errorf("loader 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return data, fmt.Errorf("loader returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return data, nil
 }
@@ -121,8 +121,8 @@ func (p *Provider) call(ctx context.Context, method, path string, body any) ([]b
 func (p *Provider) statusTool() llm.Tool {
 	return llm.Tool{
 		Name: "tb_loader_status",
-		Description: "查询自举 loader 的运行状态：子进程 pid/版本/健康、监管重启次数、" +
-			"部署能力（git/go/node 是否就绪）、最近一次部署结果。用于部署前确认环境。",
+		Description: "Query the self-bootstrap loader status: child process PID/version/health, supervisor restart count, " +
+			"deployment readiness (whether git/go/node are ready), and last deployment result. Use before deploying to verify the environment.",
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -140,20 +140,20 @@ func (p *Provider) statusTool() llm.Tool {
 func (p *Provider) deployTool() llm.Tool {
 	return llm.Tool{
 		Name: "tb_deploy",
-		Description: "触发一次自部署：编译当前工作树（保留你刚改的源码）并用健康门控切换到新二进制。" +
-			"返回部署 id 与初始状态，部署是异步的，需用 tb_deploy_status 轮询进度与日志。" +
-			"pull=true 会先 git pull --ff-only 合入上游；ref 非空则部署指定版本（丢弃本地改动）。" +
-			"典型自举闭环：改源码 → 调本工具 → 轮询 tb_deploy_status → 若 failed 用 tb_logs 看错误 → 修复 → 再调本工具。",
+		Description: "Trigger a self-deployment: build the current working tree (preserving your local source edits) and switch to the new binary with a health gate. " +
+			"Returns the deployment id and initial status; deployment is asynchronous, so poll progress and logs with tb_deploy_status. " +
+			"pull=true runs git pull --ff-only first to merge upstream; non-empty ref deploys a specific revision (discarding local edits). " +
+			"Typical self-bootstrap loop: edit source -> call tb_deploy -> poll tb_deploy_status -> if failed, inspect errors with tb_logs -> fix -> redeploy.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"ref": map[string]any{
 					"type":        "string",
-					"description": "要部署的 git ref（分支/commit）。留空=编译当前工作树，保留本地改动。",
+					"description": "Git ref (branch/commit) to deploy. Leave empty to build the current working tree and preserve local edits.",
 				},
 				"pull": map[string]any{
 					"type":        "boolean",
-					"description": "true 时先 git pull --ff-only 合入上游（不丢弃本地未提交改动）。默认 false。",
+					"description": "When true, run git pull --ff-only first to merge upstream (without discarding uncommitted local changes). Default false.",
 				},
 			},
 		},
@@ -180,14 +180,14 @@ func (p *Provider) deployTool() llm.Tool {
 func (p *Provider) deployStatusTool() llm.Tool {
 	return llm.Tool{
 		Name: "tb_deploy_status",
-		Description: "按部署 id 查询单次自部署的进度与完整日志（含编译错误/smoke 失败原因）。" +
-			"status=ok 表示成功，failed 时 error 与 log 字段即为失败原因，用于定位后再修复。",
+		Description: "Query the progress and full logs (including build errors or smoke-test failure reasons) of a single self-deployment by deployment id. " +
+			"status=ok means succeeded; when failed, the error and log fields show the root cause so you can fix and redeploy.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"id": map[string]any{
 					"type":        "string",
-					"description": "tb_deploy 返回的部署 id",
+					"description": "Deployment id returned by tb_deploy",
 				},
 			},
 			"required": []string{"id"},
@@ -199,7 +199,7 @@ func (p *Provider) deployStatusTool() llm.Tool {
 			}
 			id, _ := args["id"].(string)
 			if id == "" {
-				return nil, fmt.Errorf("tb_deploy_status: id 必填")
+				return nil, fmt.Errorf("tb_deploy_status: id is required")
 			}
 			data, err := p.call(ctx, http.MethodGet, "/loader/deploy/"+id, nil)
 			if err != nil {
@@ -213,14 +213,14 @@ func (p *Provider) deployStatusTool() llm.Tool {
 func (p *Provider) deployHistoryTool() llm.Tool {
 	return llm.Tool{
 		Name: "tb_deploy_history",
-		Description: "列出最近若干次部署的审计摘要（id/状态/起止时间/版本/错误），按时间倒序。" +
-			"用于快速找到“上次失败的那次”部署 id，再调 tb_deploy_status/tb_logs 看详情。",
+		Description: "List audit summaries of recent deployments (id/status/start-end time/version/error) in reverse chronological order. " +
+			"Use this to quickly find the id of the last failed deployment, then inspect details via tb_deploy_status or tb_logs.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"limit": map[string]any{
 					"type":        "integer",
-					"description": "返回最近几条，默认 10",
+					"description": "Number of recent entries to return (default 10)",
 				},
 			},
 		},
@@ -244,23 +244,23 @@ func (p *Provider) deployHistoryTool() llm.Tool {
 func (p *Provider) logsTool() llm.Tool {
 	return llm.Tool{
 		Name: "tb_logs",
-		Description: "读取 thinkbot 运行日志或某次部署的构建日志。" +
-			"file=console(默认)/json 读运行日志；file=deploy 且提供 id 读该次部署的完整构建/失败日志（自举闭环排查用）。" +
-			"lines 控制返回行数（默认 200）。",
+		Description: "Read thinkbot runtime logs or build logs from a specific deployment. " +
+			"file=console (default) or json reads runtime logs; file=deploy with id reads the full build/failure log of that deployment (for self-bootstrap debugging). " +
+			"lines controls how many trailing lines to return (default 200).",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"file": map[string]any{
 					"type":        "string",
-					"description": "console=运行控制台日志（默认），json=JSON 结构化日志，deploy=某次部署日志（需 id）",
+					"description": "console=runtime console log (default), json=structured JSON log, deploy=specific deployment log (requires id)",
 				},
 				"id": map[string]any{
 					"type":        "string",
-					"description": "file=deploy 时的部署 id",
+					"description": "Deployment id when file=deploy",
 				},
 				"lines": map[string]any{
 					"type":        "integer",
-					"description": "返回最后多少行，默认 200",
+					"description": "Number of trailing lines to return (default 200)",
 				},
 			},
 		},
@@ -294,7 +294,7 @@ func (p *Provider) logsTool() llm.Tool {
 func (p *Provider) rollbackTool() llm.Tool {
 	return llm.Tool{
 		Name:        "tb_rollback",
-		Description: "回退到上一良版本快照（thinkbot.prev）并重启，用于部署后出现严重问题时紧急恢复。",
+		Description: "Roll back to the previous known-good binary snapshot (thinkbot.prev) and restart; use for emergency recovery after a broken deployment.",
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -312,8 +312,8 @@ func (p *Provider) rollbackTool() llm.Tool {
 func (p *Provider) restartTool() llm.Tool {
 	return llm.Tool{
 		Name: "tb_restart",
-		Description: "仅重启 thinkbot 子进程（不重新编译），用于配置热加载或进程卡死恢复。" +
-			"注意：会短暂中断当前服务。",
+		Description: "Restart only the thinkbot child process without rebuilding; use for config reload or hung-process recovery. " +
+			"Note: briefly interrupts the active service.",
 		Parameters: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},

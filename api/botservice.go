@@ -5168,21 +5168,22 @@ func workflowContinuationText(wf *workflow.Workflow) string {
 		}
 	}
 	text := fmt.Sprintf(
-		"系统通知：你此前通过 task 工具提交的工作流 %s 已执行完成（共 %d 个节点，%d 个已完成）。",
+		"System notice: workflow %s previously submitted via the task tool has completed (%d total nodes, %d completed). ",
 		wf.ID, len(wf.Nodes), done,
 	)
 	if wf.Status != workflow.WorkflowCompleted {
 		// 失败 / 终止的工作流不能说成「已执行完成」，否则 agent 会向用户报喜。
 		text = fmt.Sprintf(
-			"系统通知：你此前通过 task 工具提交的工作流 %s 已结束，但没有成功（状态：%s，共 %d 个节点，%d 个已完成）。",
+			"System notice: workflow %s previously submitted via the task tool has finished but did NOT succeed (status: %s, %d total nodes, %d completed). ",
 			wf.ID, wf.Status, len(wf.Nodes), done,
 		)
 		if e := strings.TrimSpace(wf.Error); e != "" {
-			text += "错误：" + truncateRunesStr(e, 300) + "。"
+			text += "Error: " + truncateRunesStr(e, 300) + ". "
 		}
 		text += fmt.Sprintf(
-			"用户最初的需求：%s。请用 task_detail 查看各节点的实际产出和失败原因，"+
-				"如实告诉用户哪些做成了、哪些没做成；不要声称任务已经完成。",
+			"Original user requirement: %s. Inspect each node's actual output and failure reason with task_detail, "+
+				"and report honestly to the user what succeeded and what failed; do NOT claim the task is completed. "+
+				"Reply in Chinese (中文) by default — if the user's original requirement is in another language, match theirs.",
 			wf.Requirement,
 		)
 	} else if wf.GoalMode {
@@ -5191,15 +5192,17 @@ func workflowContinuationText(wf *workflow.Workflow) string {
 		// 导致回复永不落库（2026-09-02 线上实证：wf-d4778e9bf34a2004f3cea7e1 续跑
 		// 跑满 15 分钟被 orchestrate hard-timeout 掐死，session 9 始终无回复）。
 		text += fmt.Sprintf(
-			"该工作流以 GoalMode 自主完成了用户需求：%s。"+
-				"请直接基于各节点的实际产出，向用户做一份简明总结汇报"+
-				"（做了什么、关键产出落在哪些文件/路径、是否还有遗留项），不要再重新执行任务。",
+			"This workflow autonomously completed the user's requirement in GoalMode: %s. "+
+				"Based directly on the actual outputs of its nodes, give the user a concise summary "+
+				"(what was done, which files/paths hold the key deliverables, and any remaining items); do NOT re-execute the task. "+
+				"Reply in Chinese (中文) by default — if the user's original requirement is in another language, match theirs.",
 			wf.Requirement,
 		)
 	} else {
 		text += fmt.Sprintf(
-			"请基于工作流各节点的实际产出，继续完成用户最初的需求：%s。"+
-				"若需求已经被工作流结果满足，请向用户做简明总结；若还需要进一步操作，请直接继续执行。",
+			"Based on the actual outputs of the workflow nodes, continue fulfilling the user's original requirement: %s. "+
+				"If the requirement is already satisfied by the workflow results, give the user a concise summary; if further steps are needed, proceed directly. "+
+				"Reply in Chinese (中文) by default — if the user's original requirement is in another language, match theirs.",
 			wf.Requirement,
 		)
 	}

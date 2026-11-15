@@ -425,9 +425,9 @@ Rules:
 - Judge ONLY from the analysis given. Do not call tools. Do not re-review the code.
 
 Reply with EXACTLY ONE line of JSON and nothing else:
-{"passed": true, "notes": "非阻断观察（可为空）"}
+{"passed": true, "notes": "<non-blocking observations, or empty>"}
 or
-{"passed": false, "feedback": "具体的、可操作的修改意见", "notes": ""}
+{"passed": false, "feedback": "<specific, actionable revision feedback>", "notes": ""}
 Write "feedback" and "notes" in Chinese (中文); keep the JSON keys exactly as shown.`
 
 	task := fmt.Sprintf("## Reviewed Task\n%s\n\n## Reviewer Analysis (tail)\n%s\n\n"+
@@ -553,11 +553,11 @@ you were merely unhappy with the quality is equally wrong.
 ## Output Format
 
 You MUST end your reply with a single JSON object on the LAST line, and nothing after it:
-{"passed": true, "outcome": "ok", "notes": "非阻断观察（可为空）"}
+{"passed": true, "outcome": "ok", "notes": "<non-blocking observations, or empty>"}
 or
-{"passed": false, "feedback": "具体的、可操作的修改意见", "outcome": "ok", "notes": "非阻断观察（可为空）"}
+{"passed": false, "feedback": "<specific, actionable revision feedback>", "outcome": "ok", "notes": "<non-blocking observations, or empty>"}
 
-Add "outcome_reason" (one short sentence, 中文) whenever outcome is NOT "ok" — explain
+Add "outcome_reason" (one short sentence in Chinese (中文)) whenever outcome is NOT "ok" — explain
 why. Omit both fields entirely if you cannot tell; they default to "ok".
 
 CRITICAL — the verdict JSON is the only part of your reply that is machine-read. If you

@@ -1517,7 +1517,7 @@ func checkUserIntentGrounded(ctx context.Context, toolName, userReq string, msgs
 
 // groundedRefusal 生成未根植写操作的拦截消息，明确告知模型原因，促其停止循环。
 func groundedRefusal(toolName string) string {
-	return fmt.Sprintf("NOT EXECUTED — nothing was posted or changed. ⚠️ 工具 %q 需要用户的显式授权：未能确认用户明确要求了这个社交写操作（发帖/关注/点赞/renote 等），该写操作已被拦截、没有执行。不要告诉用户已经完成；如实说明没有发出，并请用户明确确认要执行的动作。", toolName)
+	return fmt.Sprintf("NOT EXECUTED — nothing was posted or changed. Tool %q requires explicit user authorization: could not confirm that the user explicitly requested this social write action (post/follow/like/renote/etc.), so this write call was blocked and NOT executed. Do NOT tell the user it was completed; state honestly that nothing was sent and ask the user to explicitly confirm the action to perform.", toolName)
 }
 
 func runTool(ctx context.Context, tc ToolCall, tool *Tool, sendProgress func(StreamPart), cfg *OrchestrateConfig) ToolResultPart {

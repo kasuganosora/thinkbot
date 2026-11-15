@@ -110,7 +110,7 @@ func TestUnloadSkill_LoadUnloadReload(t *testing.T) {
 	if !contains(note, "[skill unloaded: pdf]") {
 		t.Errorf("unload note should contain marker, got %q", note)
 	}
-	if !contains(note, "重新 use_skill 加载") {
+	if !contains(note, "call use_skill again") {
 		t.Errorf("unload note should mention reloading, got %q", note)
 	}
 	if mgr.IsLoaded("pdf") {

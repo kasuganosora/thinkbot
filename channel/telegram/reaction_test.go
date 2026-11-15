@@ -68,7 +68,7 @@ func TestHandleMessageReaction_BuildsAwareness(t *testing.T) {
 	if !strings.Contains(msg.InjectContext, "❤️") || !strings.Contains(msg.InjectContext, "@luna") {
 		t.Fatalf("missing emoji/user: %q", msg.InjectContext)
 	}
-	if !strings.Contains(msg.InjectContext, "不要回复") {
+	if !strings.Contains(msg.InjectContext, "do not reply") {
 		t.Fatalf("missing guidance: %q", msg.InjectContext)
 	}
 	if msg.Metadata["event_type"] != "reaction" || msg.Metadata["ack_only"] != true {

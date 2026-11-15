@@ -96,11 +96,11 @@ var secretInputPromptSection = &agenttools.ToolPromptSection{
 func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 	raw, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("secret_input: 无法序列化入参: %w", err)
+		return nil, fmt.Errorf("secret_input: failed to marshal input: %w", err)
 	}
 	var in secretInputArgs
 	if err := json.Unmarshal(raw, &in); err != nil {
-		return nil, fmt.Errorf("secret_input: 入参格式错误: %w", err)
+		return nil, fmt.Errorf("secret_input: invalid input format: %w", err)
 	}
 	action := strings.TrimSpace(strings.ToLower(in.Action))
 	if action == "" {
@@ -122,7 +122,7 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 		}, nil
 	}
 	if action != "request" {
-		return nil, fmt.Errorf("secret_input: 未知 action %q", action)
+		return nil, fmt.Errorf("secret_input: unknown action %q", action)
 	}
 
 	chatID := interaction.SecretReplyChatID(meta.ChatID, agenttools.CallOriginFromContext(ctx.Context).SessionID)
@@ -131,7 +131,7 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 	}
 	purpose := strings.TrimSpace(in.Purpose)
 	if purpose == "" {
-		return nil, fmt.Errorf("secret_input: purpose 不能为空（需向用户说明用途）")
+		return nil, fmt.Errorf("secret_input: purpose is required (explain to the user what the credential is for)")
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
@@ -139,7 +139,7 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 	}
 	// 名字合法性由保险库 Register 再次校验；此处先拦掉会破坏占位符语法的字符。
 	if strings.ContainsAny(name, "{} \t\n") || strings.HasPrefix(name, "secret:") {
-		return nil, fmt.Errorf("secret_input: 非法 name %q", name)
+		return nil, fmt.Errorf("secret_input: invalid name %q", name)
 	}
 
 	timeout := in.TimeoutSecs
@@ -159,14 +159,14 @@ func execSecretInput(ctx *llm.ToolExecContext, input any) (any, error) {
 	}
 	q, err = interaction.Default().RegisterQuestion(q)
 	if err != nil {
-		return nil, fmt.Errorf("secret_input: 注册请求失败: %w", err)
+		return nil, fmt.Errorf("secret_input: failed to register request: %w", err)
 	}
 
-	hint := "已登记密钥请求。请说明用途并请用户回复该密钥；可发送 /cancel-secret 取消。若服务重启或不确定请求是否仍有效，应重新发起请求，不要直接贴凭据。"
+	hint := "Secret request registered. Explain the purpose and ask the user to reply with the secret; they can send /cancel-secret to cancel. If the service restarted or request validity is uncertain, issue a new request before asking them to send credentials."
 	mode := "chat_reply"
 	if q.SecretForm {
 		mode = "web_form"
-		hint = "已显示专用密钥输入卡。请说明用途，引导用户只在卡片密码框中提交，不要在聊天正文粘贴凭据。卡片失效或服务重启后必须重新请求；收到密钥就绪提示后再继续任务。"
+		hint = "Dedicated secret input card displayed. Explain the purpose and direct the user to submit ONLY via the password card, never in ordinary chat messages. If the card expires or the service restarts, request a new card; wait for the secret-ready notice before continuing."
 	}
 	return map[string]any{
 		"question_id": questionID,

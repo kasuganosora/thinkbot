@@ -34,8 +34,8 @@ import (
 // 因此 SubAgent 上下文下 workflow 工具不可见，无法递归创建工作流。
 //
 // 额外保障：workflow 引擎内部使用独立的 SubAgentManager（见 wire.go），
-// 该管理器创建的 SubAgent 通过 Delegate 一次性调用执行，
-// 不经过主 Agent 的 ToolManager，无法访问任何工具。
+// 工具解析时恒带 IsSubagent: true 并按节点 toolProfile 白名单过滤，
+// 因此 workflow 工具在子节点 SubAgent 中始终不可见。
 // ────────────────────────────────────────────────────────────────────
 
 // workflowToolPromptSection 是工作流工具的提示词段落。
@@ -79,7 +79,7 @@ Key points:
 **Rule (applies to ALL tasks, not just big ones): any task that edits, creates, or modifies files in a repository MUST be submitted with the ` + "`task`" + ` tool.** Do NOT hand-edit the repo by chaining ` + "`read_file`" + ` / ` + "`exec`" + ` / write calls yourself — let the task engine decompose and run it, so the work gets orchestration, progress tracking, and quality review.
 
 This covers work of every size, including edits that look trivial:
-- editing or adding code, config, docs, styles, or assets in a project (e.g. "给 cfblog 加无障碍支持", "修 main.go 的拼写", "升级依赖版本")
+- editing or adding code, config, docs, styles, or assets in a project (e.g. "add accessibility support to cfblog", "fix a typo in main.go", "upgrade dependency versions")
 - work that spans one file or many — size alone is NOT a reason to go direct
 - anything the user will judge by its result (code changes, generated content, ...)
 
@@ -93,21 +93,21 @@ When in doubt, submit with ` + "`task`" + `. Routing a small edit through task i
 
 Passing ` + "`goalMode: true`" + ` to ` + "`task`" + ` enables **closed-loop iteration**. In the default mode, a sub-task that fails review is only patched in place inside that node a limited number of times, and then fails for good. In goal mode, when the final deliverable fails review the engine **automatically rolls back to the upstream work nodes** and reruns them with the review feedback attached, forming a "work → review → fix → review" loop that stops only when review passes or the maximum number of rounds (default 5) is reached.
 
-**CRITICAL**: whenever the requirement contains a **convergence-style acceptance phrase** such as 「直到…为止 / 反复打磨 / 审查到没有新问题 / 全部通过才算 / 达标 / 收敛」, you MUST submit it with ` + "`task`" + ` and ` + "`goalMode: true`" + `. **NEVER handle it inline with subagent / delegate in one shot.** Such work is by definition "not done until it meets the bar", which is exactly what goal mode exists for; handling it inline loses the automatic roll-back-and-redo guarantee.
+**CRITICAL**: whenever the requirement contains a **convergence-style acceptance phrase** such as "until … / polish repeatedly / review until no new issues / not done until all pass / meet the bar / converge", you MUST submit it with ` + "`task`" + ` and ` + "`goalMode: true`" + `. **NEVER handle it inline with subagent / delegate in one shot.** Such work is by definition "not done until it meets the bar", which is exactly what goal mode exists for; handling it inline loses the automatic roll-back-and-redo guarantee.
 
-**Enable it (goalMode: true)** when the requirement carries a **convergence requirement** such as 「目标 / 直到 / 确保 / 全部 / 彻底 / 反复打磨 / 达到某标准」:
+**Enable it (goalMode: true)** when the requirement carries a **convergence requirement** such as "goal / until / ensure / all / thoroughly / polish repeatedly / reach a quality bar":
 
-- "修复所有测试直到全部通过"
-- "重构这个模块，确保 lint 和构建都没有报错"
-- "把这篇文章打磨到可以直接发布的质量"
-- "清理项目里所有 TypeScript 类型错误"
-- "逐个审查每个模块，审查到没有新问题才进行下一个，最后整体审查"
+- "fix all tests until every test passes"
+- "refactor this module and ensure both lint and build pass with zero errors"
+- "polish this article to publication-ready quality"
+- "clean up all TypeScript type errors across the project"
+- "review each module one by one until no new issues remain before moving to the next, then run an overall review"
 
 **Leave it off (default false)** for **one-shot deliverables** with no explicit pass bar:
 
-- "调研 Redis 和 Memcached 的差异并写一份对比" (producing it is finishing it; there is nothing to converge on)
-- "把这三个文件翻译成英文"
-- "统计一下代码库有多少个 Go 文件"
+- "compare Redis and Memcached and write a summary" (producing it is finishing it; there is nothing to converge on)
+- "translate these three files into English"
+- "count how many Go files are in the repository"
 
 Rule of thumb: **does the task have a "not done until it passes" acceptance condition? Yes → goal mode. Just get the work done → no goal mode.**
 
@@ -142,7 +142,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 			// 注意：DeferredLoad 会在工具未加载时隐藏 Parameters，此时模型只能看到
 			// 这段 Description。因此 goalMode 这类关键能力必须在描述里点出来，
 			// 否则模型无从得知该参数的存在。
-			Description: "Submit complex, multi-step work. For tasks with several steps, multi-file changes, dependencies, or a need for quality review, you MUST prefer this tool over calling tools step by step yourself — it analyzes the requirement, decomposes it into a DAG of sub-tasks, and executes them asynchronously in parallel, with result review and retries. **When the requirement uses acceptance-style wording such as 「直到…为止 / 反复打磨 / review 到没有新问题 / 全部通过才算 / 达标」, you MUST submit with goalMode: true, and you MUST NOT handle it inline with subagent/delegate** — goal mode automatically rolls back and redoes the work when review fails, forming a 「工作→审查→修复→审查」 loop until the bar is met. It is designed exactly for tasks with an explicit acceptance bar, such as 「修复所有 X 直到全部通过」 or 「审查每个模块直到没有新问题」. **This call is BLOCKING**: the server runs the workflow to a terminal state (completed / failed / terminated) and returns the final status and progress (if this turn is about to hit its time limit it returns early with timedOut: true; the task keeps running and its result is delivered back to this conversation automatically), so you do NOT need — and there is no — a separate status-polling call. When goalMode is enabled, the returned status carries goalIteration / goalMaxIterations so you can see which closed-loop round is running. **NEVER poll and NEVER use sleep to wait; just submit and continue once it returns.**",
+			Description: "Submit complex, multi-step work. For tasks with several steps, multi-file changes, dependencies, or a need for quality review, you MUST prefer this tool over calling tools step by step yourself — it analyzes the requirement, decomposes it into a DAG of sub-tasks, and executes them asynchronously in parallel, with result review and retries. **When the requirement uses acceptance-style wording such as \"until … / polish repeatedly / review until no new issues / not done until all pass / meet the bar\", you MUST submit with goalMode: true, and you MUST NOT handle it inline with subagent/delegate** — goal mode automatically rolls back and redoes the work when review fails, forming a \"work -> review -> fix -> review\" loop until the bar is met. It is designed exactly for tasks with an explicit acceptance bar, such as \"fix all X until every test passes\" or \"review each module until no new issues remain\". **This call is BLOCKING**: the server runs the workflow to a terminal state (completed / failed / terminated) and returns the final status and progress (if this turn is about to hit its time limit it returns early with timedOut: true; the task keeps running and its result is delivered back to this conversation automatically), so you do NOT need — and there is no — a separate status-polling call. When goalMode is enabled, the returned status carries goalIteration / goalMaxIterations so you can see which closed-loop round is running. **NEVER poll and NEVER use sleep to wait; just submit and continue once it returns.**",
 			Keywords: []string{
 				"目标模式", "goal mode", "闭环", "迭代", "反复打磨", "直到通过",
 				"直到…为止", "验收", "达标", "审查到没有", "review 到没有", "收敛",
@@ -161,7 +161,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 					},
 					"goalMode": map[string]any{
 						"type":        "boolean",
-						"description": "Goal mode / 闭环迭代 (closed-loop iteration; optional, default false). When enabled, if the final deliverable fails its quality checkpoint, execution automatically rolls back to the corresponding work node and reruns it with the review feedback attached, forming a 「工作→审查→修复→审查」 loop that continues until review passes or the maximum number of rounds is reached. Use it for work that must reach a quality bar through repeated refinement; leave it off for simple tasks.",
+						"description": "Goal mode (closed-loop iteration; optional, default false). When enabled, if the final deliverable fails its quality checkpoint, execution automatically rolls back to the corresponding work node and reruns it with the review feedback attached, forming a \"work -> review -> fix -> review\" loop that continues until review passes or the maximum number of rounds is reached. Use it for work that must reach a quality bar through repeated refinement; leave it off for simple tasks.",
 					},
 				},
 				"required": []string{"requirement"},
@@ -209,7 +209,7 @@ func submitToolDef(mgr *Manager) tools.ToolDef {
 								"session_id", origin.SessionID, "active_wf", active.ID,
 								"done", done, "total", len(active.Nodes), "status", string(active.Status))
 						}
-						return nil, fmt.Errorf("当前会话已有运行中的目标模式工作流 %s（已完成 %d/%d 子任务，状态=%s）。请勿重复提交：用 task_detail 查询进度，或用 task_control 终止它后再开新任务。如需追加要求，请等待当前工作流完成。",
+						return nil, fmt.Errorf("this session already has a running goal-mode workflow %s (%d/%d sub-tasks completed, status=%s). Do NOT submit a duplicate workflow: call task_detail to check progress, or call task_control to terminate it before starting a new one. Wait for the current workflow to finish before submitting follow-up work",
 							active.ID, done, len(active.Nodes), active.Status)
 					}
 				}

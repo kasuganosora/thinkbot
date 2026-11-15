@@ -804,8 +804,8 @@ func (c *MastodonChannel) handleFavouriteNotification(ctx context.Context, n *No
 	if displayName == "" {
 		displayName = n.Account.Username
 	}
-	guidance := "只需要知道这件事即可：不要回复、不要转发、不要回赞、也不要为此调用工具，除非对方同时还发了文字在找你。"
-	inject := fmt.Sprintf("[Mastodon 收藏] %s 收藏了你的帖子。%s", handle, guidance)
+	guidance := "For awareness only: do not reply, do not boost, do not favourite back, and do not call any tools for this unless they also sent a text message addressing you."
+	inject := fmt.Sprintf("[Mastodon 收藏] %s favourited your post. %s", handle, guidance)
 	if n.Status != nil {
 		inject += fmt.Sprintf("\n[status_id: %s]", n.Status.ID)
 	}

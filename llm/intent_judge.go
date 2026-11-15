@@ -61,16 +61,16 @@ func (a *providerIntentJudge) Chat(ctx context.Context, system, user string) (st
 
 // intentJudgeSystemPrompt 快判 system prompt。要求严格 JSON 输出，判定标准是
 // 「用户是否在显式授权/要求执行社交写操作」，查询类不算。
-const intentJudgeSystemPrompt = `你是社交平台写操作的用户意图审核员。给定用户对 AI 助手说的话，判定用户是否显式地授权或要求执行社交写操作（发帖/发动态/关注/取关/点赞/转发/私信等）。
+const intentJudgeSystemPrompt = `You are a user-intent auditor for social-platform write actions. Given what the user said to the AI assistant, decide whether the user explicitly authorized or requested executing a social write action (post/publish status/follow/unfollow/like/repost/renote/DM, etc.).
 
-判定标准：
-- YES：用户明确要求/授权执行某个写操作。如「发条 misskey」「帮我关注他」「发一个过去试试」「那就发吧」。
-- NO：用户只是查询/闲聊/讨论，或授权的是只读操作。如「帮我查下 misskey 上的用户」「misskey 是什么」「看看他最近发了什么」。
-- 语气反问但实质是授权（「那你尝试下发一个验证下？」）算 YES。
-- 仅提到平台名、未落在写动作上的，一律 NO。
+Criteria:
+- YES: The user explicitly requested or authorized executing a write action (e.g., "post a note on Misskey", "follow him for me", "send one to test", "go ahead and post it").
+- NO: The user is only querying, chatting, or discussing, or only authorized a read-only action (e.g., "look up this user on Misskey", "what is Misskey", "check what they posted recently").
+- A rhetorical question that substantively authorizes the action (e.g., "why don't you try posting one to verify?") counts as YES.
+- Merely mentioning a platform name without requesting a write action is ALWAYS NO.
 
-只输出一个 JSON 对象，不要输出任何其他内容，格式如下：
-{"verdict":"YES 或 NO","reason":"一句话理由"}`
+Output ONLY a single JSON object and nothing else, in the following format:
+{"verdict":"YES or NO","reason":"one-sentence reason"}`
 
 // intentJudgeTimeout 快判整体超时（含重试）。护栏在主链路关键路径上，必须
 // 快速失败；超时即视为未授权（fail-closed）。10s 覆盖慢 provider 及一次
@@ -107,20 +107,20 @@ type intentJudgeVerdict struct {
 // 任何错误都返回 grounded=false（fail-closed），错误以 reason 说明。
 func (j *IntentJudge) Grounded(ctx context.Context, toolName, userReq string, recentUserMsgs []string) intentJudgeVerdict {
 	var sb strings.Builder
-	sb.WriteString("用户最新一条消息：\n")
+	sb.WriteString("Latest user message:\n")
 	if userReq == "" {
-		sb.WriteString("（空）\n")
+		sb.WriteString("(empty)\n")
 	} else {
 		sb.WriteString(userReq + "\n")
 	}
 	if len(recentUserMsgs) > 0 {
-		sb.WriteString("\n用户在此之前的近期消息（供参考）：\n")
+		sb.WriteString("\nRecent prior user messages (for context):\n")
 		for i, m := range recentUserMsgs {
 			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, truncateForJudge(m)))
 		}
 	}
-	sb.WriteString("\nAI 助手即将执行的工具：" + toolName + "\n")
-	sb.WriteString("\n用户是否显式授权/要求此类写操作？只输出 JSON。")
+	sb.WriteString("\nTool the AI assistant is about to invoke: " + toolName + "\n")
+	sb.WriteString("\nDid the user explicitly authorize or request this kind of write action? Output JSON only.")
 
 	cctx, cancel := context.WithTimeout(ctx, j.timeout)
 	defer cancel()

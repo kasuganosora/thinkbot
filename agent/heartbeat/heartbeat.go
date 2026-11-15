@@ -718,34 +718,35 @@ func decisionSummary(d HeartbeatDecision, targetLabel string) string {
 func buildHeartbeatPrompt(targets []ChannelTarget) string {
 	var b strings.Builder
 	b.WriteString(heartbeatWakePrompt)
-	b.WriteString("\n\n# 你的输出格式（必须严格遵守）\n")
-	b.WriteString("你只能输出一个 JSON 对象，不要输出任何解释性文字，也不要使用 markdown 代码块。结构如下：\n")
+	b.WriteString("\n\n# Output Format (MUST follow strictly)\n")
+	b.WriteString("Output ONLY a single JSON object — no explanatory prose and no markdown code fences. Schema:\n")
 	b.WriteString("{\n  \"decision\": \"silent\" | \"post\" | \"note\",\n")
-	b.WriteString("  \"channel\": \"<目标渠道名，仅 post 时填>\",\n")
-	b.WriteString("  \"conversation_id\": \"<目标会话ID，仅 post 时填，可留空表示时间线/默认>\",\n")
-	b.WriteString("  \"content\": \"<要发的内容，post 时必填>\",\n")
-	b.WriteString("  \"reason\": \"<你为什么这样决定，便于审计>\"\n}\n")
+	b.WriteString("  \"channel\": \"<target channel name, only when decision=post>\",\n")
+	b.WriteString("  \"conversation_id\": \"<target conversation ID, only when decision=post; empty means timeline/default>\",\n")
+	b.WriteString("  \"content\": \"<content to post or note; required when decision=post>\",\n")
+	b.WriteString("  \"reason\": \"<why you made this decision, for audit logging>\"\n}\n")
 	// 禁止条款是必需的：本任务的 InjectContext 与系统提示里的其他输出协议
 	// （如出站回复的 @@REPLY_CONTROL@@{"send":…}）可能同时出现，模型会试图
 	// 同时满足两者而产出 JSON 数组 [{decision…}, {"send":false}]。
 	// 2026-08-29 实测该形态曾导致整轮决策被静默降级丢弃，故在此显式点名禁止。
-	b.WriteString("\n严格禁止（违反会导致本轮决策被丢弃、什么都不落地）：\n")
-	b.WriteString("- 不要输出 JSON 数组，例如 [{...}, {...}]——只能有上面那一个 JSON 对象。\n")
-	b.WriteString("- 不要输出 \"send\" 字段，也不要追加 @@REPLY_CONTROL@@ 控制块：是否发声由 decision 表达（silent 即不发声），与本任务无关的其他协议在此不适用。\n")
-	b.WriteString("- 不要使用 markdown 代码块包裹，不要在 JSON 前后附加任何说明文字。\n")
+	b.WriteString("\nStrictly forbidden (violating any rule discards this round's decision):\n")
+	b.WriteString("- Do NOT output a JSON array such as [{...}, {...}] — emit ONLY the single JSON object above.\n")
+	b.WriteString("- Do NOT output a \"send\" field and do NOT append a @@REPLY_CONTROL@@ block: whether to speak is expressed solely by \"decision\" (\"silent\" means stay quiet); other outbound protocols do not apply here.\n")
+	b.WriteString("- Do NOT wrap the JSON in markdown code fences or add any text before or after the JSON.\n")
 	if len(targets) == 0 {
-		b.WriteString("\n当前没有任何可主动发帖的渠道（未连接 Misskey/Telegram 或尚无可发会话），" +
-			"因此你只能输出 {\"decision\":\"silent\"} 或 {\"decision\":\"note\"}。\n")
+		b.WriteString("\nNo channels are currently available for proactive posting (no Misskey/Telegram connected or no postable conversations yet), " +
+			"so you MUST output either {\"decision\":\"silent\"} or {\"decision\":\"note\"}.\n")
 	} else {
-		b.WriteString("\n当前你可以主动发帖的渠道/会话（post 时 channel/conversation_id 必须取下列之一）：\n")
+		b.WriteString("\nAvailable channels/conversations for proactive posting (when decision=\"post\", channel/conversation_id MUST match one of these):\n")
 		for _, t := range targets {
-			fmt.Fprintf(&b, "- channel=%q, conversation_id=%q, 说明=%q\n", t.Channel, t.ConversationID, t.Label)
+			fmt.Fprintf(&b, "- channel=%q, conversation_id=%q, description=%q\n", t.Channel, t.ConversationID, t.Label)
 		}
 	}
-	b.WriteString("\n决策指引：\n")
-	b.WriteString("- silent：审视后认为此刻无需对外做任何事（最常见）。\n")
-	b.WriteString("- post：你确实想对外说点什么（如提醒主人带伞、在群里分享观察）。必须从上面列表选一个真实目标，并写好 content。\n")
-	b.WriteString("- note：只想记一条内部笔记供以后回忆，不对外发声。\n")
+	b.WriteString("\nDecision guidelines:\n")
+	b.WriteString("- silent: Nothing needs external action right now (most common).\n")
+	b.WriteString("- post: You genuinely have something worth saying externally (e.g., reminding your owner to bring an umbrella, sharing an observation in a group). Pick a real target from the list above and fill in \"content\".\n")
+	b.WriteString("- note: Record an internal note for future recall without speaking externally.\n")
+	b.WriteString("Write \"content\" and \"reason\" in Chinese (中文) by default, matching your persona.\n")
 	return b.String()
 }
 
@@ -846,13 +847,13 @@ func truncateForLog(s string, maxRunes int) string {
 }
 
 // heartbeatWakePrompt 心跳唤醒提示（作为 InjectContext 注入 LLM，不污染 L0 记忆）。
-const heartbeatWakePrompt = `这是一次系统自主心跳唤醒（heartbeat），不是用户发来的消息。
+const heartbeatWakePrompt = `This is an autonomous system heartbeat wake-up, NOT a message sent by a user.
 
-请审视你的长期记忆、待办事项、关注的人与话题，判断此刻是否有需要你主动处理的事（例如：跟进未完成的任务、回复重要的人、发布你一直想发的观察、检查某个状态）。
+Review your long-term memory, to-do items, and the people and topics you follow to decide whether anything warrants proactive action right now (e.g., following up on unfinished tasks, replying to someone important, sharing an observation you have been wanting to post, or checking a status).
 
-如果你判断当前没有值得主动处理的事，请安静结束，不要为了刷存在感而发言——直接产出静默（不回复、不主动发帖）即可。
+If nothing warrants proactive action right now, end quietly and do NOT post just to make noise — output silent (no reply, no proactive post).
 
-注意：你的任何对外输出都可能在公开渠道被发布，请自行判断其重要性。若你选择发言，请确保内容值得公开。`
+Note: any outbound post may be published on a public channel, so judge its importance carefully. If you choose to speak, make sure the content is worth posting publicly.`
 
 // ============================================================================
 // Bundle — 封装心跳子系统的完整组件

@@ -239,7 +239,7 @@ func validateMCPSecretRefs(env, headers map[string]string) error {
 				continue
 			}
 			if secret.Default().Redact(v) == v {
-				return fmt.Errorf("mcp_server: %s 中的敏感键 %q 含未登记的明文凭据；请勿直接写入明文，改用 {{secret:name}} 占位符（先用 secret_input 工具请用户提供并登记，再引用其占位符）", scope, k)
+				return fmt.Errorf("mcp_server: sensitive key %q in %s contains an unregistered plaintext credential; never write raw secrets directly — use a {{secret:name}} placeholder instead (first call secret_input so the user can provide and register it, then reference its placeholder)", k, scope)
 			}
 		}
 		return nil

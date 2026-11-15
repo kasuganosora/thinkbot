@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/kasuganosora/thinkbot/llm"
 	"github.com/kasuganosora/thinkbot/subagent"
@@ -239,7 +240,7 @@ func TestAnalyzer_RetryCarriesValidateReason(t *testing.T) {
 		t.Fatalf("expected at least 2 captured requests, got %d", len(prov.allText))
 	}
 	second := prov.allText[1]
-	if !strings.Contains(second, "未通过结构校验") || !strings.Contains(second, "cycle detected") {
+	if !strings.Contains(second, "failed structural validation") || !strings.Contains(second, "cycle detected") {
 		t.Fatalf("retry task missing validate reason:\n%s", second)
 	}
 }
@@ -267,7 +268,7 @@ func TestAnalyzer_RetryCarriesMissingTagReason(t *testing.T) {
 		t.Fatalf("expected at least 2 captured requests, got %d", len(prov.allText))
 	}
 	second := prov.allText[1]
-	if !strings.Contains(second, "缺少") || !strings.Contains(second, "<result>") {
+	if !strings.Contains(second, "missing") || !strings.Contains(second, "<result>") {
 		t.Fatalf("retry task missing missing-tag hint:\n%s", second)
 	}
 }
@@ -305,5 +306,58 @@ func TestParseDAGSpec_ResultTag(t *testing.T) {
 	last := "reasoning <result>{ \"nodes\": [] }</result> final <result>" + testDAGJSON + "</result>"
 	if inner, ok := extractResultTag(last); !ok || inner != testDAGJSON {
 		t.Fatalf("extractResultTag wrong: ok=%v inner=%q", ok, inner)
+	}
+}
+
+// TestAnalyzerSystemPrompt_NoContradictoryToolConstraint 防止分析器提示词再次出现
+// 「SubAgent 没有工具调用能力」与下方 toolProfile 授权表自相矛盾的硬约束。
+func TestAnalyzerSystemPrompt_NoContradictoryToolConstraint(t *testing.T) {
+	forbidden := []string{
+		"NO tool-calling ability",
+		"MUST NOT depend on workflow tools or any other external tool",
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(analyzerSystemPrompt, bad) {
+			t.Errorf("analyzerSystemPrompt still contains outdated contradictory constraint %q", bad)
+		}
+	}
+
+	required := []string{
+		"toolProfile",
+		"readonly",
+		"analysis",
+		"edit",
+		"full",
+		"command",
+		"task_detail",
+		"spawn",
+	}
+	for _, want := range required {
+		if !strings.Contains(analyzerSystemPrompt, want) {
+			t.Errorf("analyzerSystemPrompt missing expected capability rule %q", want)
+		}
+	}
+}
+
+// TestWorkflowPrompts_WrittenInEnglish 确保工作流提示词以英文书写，仅保留显式的
+// Chinese (中文) 输出语言指示，不夹杂中文提示词正文。
+func TestWorkflowPrompts_WrittenInEnglish(t *testing.T) {
+	prompts := map[string]string{
+		"analyzerSystemPrompt":      analyzerSystemPrompt,
+		"goalModeAnalyzerHint":      goalModeAnalyzerHint,
+		"analyzerResultTagRedoHint": analyzerResultTagRedoHint,
+		"healDiagnoseSystemPrompt":  healDiagnoseSystemPrompt,
+		"workflowToolPromptSection": workflowToolPromptSection.Content,
+		"defaultReviewSystemPrompt": buildReviewSystemPrompt(""),
+		"submitToolDescription":     submitToolDef(nil).Description,
+	}
+	for name, p := range prompts {
+		cleaned := strings.ReplaceAll(p, "Chinese (中文)", "")
+		for _, r := range cleaned {
+			if unicode.Is(unicode.Han, r) {
+				t.Errorf("%s contains non-English Han character %q; prompts must be written in English", name, r)
+				break
+			}
+		}
 	}
 }

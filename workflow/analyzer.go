@@ -112,9 +112,9 @@ const analyzerSystemPrompt = `You are a task decomposition specialist, a plannin
 
 ## Hard Constraints
 
-- Every sub-task runs in an isolated SubAgent that has NO tool-calling ability.
-- Sub-tasks MUST NOT depend on workflow tools or any other external tool.
-- Task descriptions MUST be self-contained: a SubAgent must be able to complete them with no extra resources.
+- Every sub-task runs in an isolated SubAgent equipped with workspace tools governed by its "toolProfile" ("readonly", "analysis", "edit", or "full" — see "Tool Profile" below). Note that "analysis", "edit", and "full" all grant shell command and code execution, and "edit" / "full" also grant file creation and editing. Sub-tasks CAN and SHOULD directly run commands and inspect or modify workspace files within their profile — NEVER generate a placeholder node that claims it cannot call tools, reports an inability to execute commands, or instructs the SubAgent not to use tools granted by its profile.
+- Sub-tasks CANNOT call workflow tools ("task", "task_detail", "task_control"), "spawn" sub-agents, or ask the user interactive questions mid-execution (no nested workflows or sub-agent delegation).
+- Sub-tasks do NOT inherit the user's conversation history: each node only sees its own "task", "systemPrompt", and completed upstream "dependencies" outputs, so "task" descriptions MUST be self-contained with all required context (paths, URLs, constraints, and acceptance criteria).
 
 ## Dependency Rules
 
@@ -206,19 +206,19 @@ Execution: (n1∥n2∥n3∥n4) → n5
 Each node runs in a SubAgent that **by default receives the full workspace toolset**,
 including shell execution and file deletion. Declare only what the task actually needs:
 
-| profile    | grants                                                        |
-|------------|---------------------------------------------------------------|
-| readonly   | list dir, read file, search content                            |
-| analysis   | readonly + run commands (tests / lint / build), no writes      |
-| edit       | analysis + create file, replace in file                        |
-| full       | everything, including delete and move (use only when required) |
+| profile    | grants                                                                        |
+|------------|-------------------------------------------------------------------------------|
+| readonly   | list dir, read file, search content                                           |
+| analysis   | readonly + run commands / code (tests / lint / build), no file-write tools    |
+| edit       | analysis (including command / code execution) + create file, replace in file  |
+| full       | everything, including delete and move (use only when required)                |
 
 Rules:
 
 - **Default to the narrowest tier that still lets the node finish.**
 - Analysis / review / reporting tasks that only read code → "readonly".
-- Tasks that must run tests, lint, or builds but must not modify files → "analysis".
-- Tasks that create or modify files → "edit".
+- Tasks that must run commands (tests, lint, builds, inspections) without modifying files → "analysis".
+- Tasks that create or modify files (and may also run commands) → "edit".
 - Use "full" **only** when the task genuinely needs to delete or move files.
 - If you omit this field, the node gets "full" (current behavior). Declaring a narrower
   tier is always preferred when the task allows it.
@@ -230,9 +230,9 @@ You MUST return the DAG wrapped in <result> tags, with exactly this JSON structu
   "nodes": [
     {
       "id": "n1",
-      "name": "任务名称",
-      "task": "详细任务描述...",
-      "systemPrompt": "你是一个...",
+      "name": "<short task name>",
+      "task": "<detailed task description>",
+      "systemPrompt": "<SubAgent role definition>",
       "dependencies": [],
       "review": false,
       "maxRetries": 2,
@@ -274,7 +274,7 @@ standard. You MUST follow these rules:
 
 // analyzerResultTagRedoHint 在解析失败（缺失 <result> 标签）时附加到下一轮重试的任务末尾，
 // 明确告诉模型必须严格用 <result>...</result> 包裹最终 DAG JSON，使「打回重做」真正生效。
-const analyzerResultTagRedoHint = `上一轮你的输出缺少 <result>...</result> 标签，系统无法解析。必须严格把最终 DAG JSON 放在 <result> 和 </result> 之间，例如：
+const analyzerResultTagRedoHint = `Your previous output was missing the <result>...</result> tags and could not be parsed. You MUST wrap the final DAG JSON strictly between <result> and </result>, for example:
 <result>
 { "nodes": [ ... ] }
 </result>`
@@ -432,15 +432,15 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 			} else if looksTruncated(perr) {
 				// 被 max_tokens 硬截断：明确告诉模型要缩小 DAG，否则重跑仍会被截。
 				appendAnalyzerReason(&analyzerRedoReasons,
-					"上一轮输出被 token 上限截断了（JSON 不完整，无法解析）。请减少节点数量、精简每个节点的 task/systemPrompt，确保整段 JSON 能在一次输出内完整结束。")
+					"Your previous output was truncated by the token limit (incomplete JSON, could not be parsed). Reduce the number of nodes and make each node's task/systemPrompt more concise so the entire JSON finishes within a single response.")
 			} else if strings.Contains(perr.Error(), "0 nodes") {
 				// 解析成功但节点列表为空：提示至少生成一个节点。
 				appendAnalyzerReason(&analyzerRedoReasons,
-					"上一轮输出虽然能被解析，但 nodes 数组为空（没有任何节点）。请至少生成一个节点，把需求拆成可执行的子任务列表。")
+					"Your previous output parsed as JSON, but the \"nodes\" array was empty. Generate at least one node to decompose the requirement into executable sub-tasks.")
 			} else {
 				// 其它解析错误（非法 JSON 语法）：把具体语法错误回传给模型。
-				reason := "上一轮输出在 <result> 内的 JSON 解析失败：" + jsonErrorText(raw) +
-					"。请修正为合法 JSON（键名加双引号、数组/对象括号配平、不要留尾随逗号、不要用 markdown 代码块包裹）。"
+				reason := "JSON parsing inside <result> failed in your previous output: " + jsonErrorText(raw) +
+					". Fix it into valid JSON (double-quote all keys, balance all brackets/braces, remove trailing commas, and do not wrap in markdown code fences)."
 				appendAnalyzerReason(&analyzerRedoReasons, reason)
 			}
 			// 输出被 max_tokens 硬截断时，报错只是笼统的 "unexpected end of JSON input"，
@@ -518,8 +518,8 @@ func (a *Analyzer) Analyze(ctx context.Context, requirement string, goalMode boo
 			lastErr = errs.Wrap(err, "generated DAG is invalid")
 			// 把具体的 DAG 契约违规原因回传给模型（重复 ID / 依赖未知节点 / 自依赖 / 环等），
 			// 让模型知道错在哪个节点、怎么改，而不是盲目重试。
-			reason := "上一轮生成的 DAG 未通过结构校验：" + err.Error() +
-				"。请检查：每个节点的 id 是否唯一且非空；dependencies 引用的节点 id 是否都真实存在；是否存在循环依赖（环）。"
+			reason := "The DAG from your previous output failed structural validation: " + err.Error() +
+				". Check that every node id is non-empty and unique, every node id referenced in dependencies actually exists, and there are no dependency cycles."
 			appendAnalyzerReason(&analyzerRedoReasons, reason)
 			logger.Warnw("generated DAG invalid, will retry",
 				"attempt", attempt, "max_attempts", maxAttempts, "error", err)
@@ -655,7 +655,7 @@ func buildAnalyzerRedoHint(fmtHint string, reasons []string) string {
 		if sb.Len() > 0 {
 			sb.WriteString("\n\n")
 		}
-		sb.WriteString("## 上一轮输出未通过解析/校验，请针对以下问题逐条修正后重做\n")
+		sb.WriteString("## Your previous output failed parsing or validation — fix every issue below and redo\n")
 		for _, r := range reasons {
 			sb.WriteString("- ")
 			sb.WriteString(r)

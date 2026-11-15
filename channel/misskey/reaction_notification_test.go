@@ -81,7 +81,7 @@ func TestHandleNotification_ReactionBuildsAwarenessMessage(t *testing.T) {
 	if !strings.Contains(msg.InjectContext, "[note_id: note-bot-1]") {
 		t.Fatalf("InjectContext missing note_id: %q", msg.InjectContext)
 	}
-	if !strings.Contains(msg.InjectContext, "不要回复") {
+	if !strings.Contains(msg.InjectContext, "do not reply") {
 		t.Fatalf("InjectContext missing soft guidance: %q", msg.InjectContext)
 	}
 	if msg.Channel != "user-alice" || msg.UserID != "user-alice" {

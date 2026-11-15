@@ -386,7 +386,7 @@ func (m *SkillManager) UnloadSkill(name string) (note string, ok bool) {
 
 // UnloadedNote 构造卸载完成的标记消息（进入本轮 tool_result，提示模型该技能说明书已失效）。
 func UnloadedNote(name string) string {
-	return fmt.Sprintf("[skill unloaded: %s] 该技能说明书已失效，后续如需使用需重新 use_skill 加载。", name)
+	return fmt.Sprintf("[skill unloaded: %s] This skill's instructions have been unloaded; call use_skill again if you need it later.", name)
 }
 
 // ============================================================================

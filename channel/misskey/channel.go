@@ -769,9 +769,9 @@ func (c *MisskeyChannel) handleNotification(ctx context.Context, body json.RawMe
 		}
 		parts = append(parts, fmt.Sprintf("%s %s", acct, emoji))
 	}
-	list := strings.Join(parts, "、")
-	guidance := "只需要知道这件事即可：不要回复、不要转发、不要回赞、也不要为此调用工具，除非对方同时还发了文字在找你。"
-	inject := fmt.Sprintf("[Misskey 反应] %s 对你的帖子表态了。%s\n[note_id: %s]", list, guidance, n.Note.ID)
+	list := strings.Join(parts, ", ")
+	guidance := "For awareness only: do not reply, do not renote, do not react back, and do not call any tools for this unless they also sent a text message addressing you."
+	inject := fmt.Sprintf("[Misskey 反应] %s reacted to your post. %s\n[note_id: %s]", list, guidance, n.Note.ID)
 
 	createdAt := time.Now()
 	if t, err := time.Parse(time.RFC3339, n.CreatedAt); err == nil {
