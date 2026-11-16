@@ -76,6 +76,15 @@ type CompactionConfig struct {
 	// 0 = 默认 0.75。仅在 ContextLength 已知时生效。
 	TriggerRatio float64
 
+	// TriggerCap 压缩触发线的绝对上限（token）。
+	//
+	// 声明窗口极大的模型（例如 1M）会把 窗口×TriggerRatio 抬到几十万，
+	// 而真实单步输入往往只有几万 → 压缩永不触发 → 历史一路累积、每步
+	// 全量重发，长任务越跑越慢（实测 19 步 / 单步输入峰值 110k / 触发线 786k）。
+	// >0 时触发线取 min(窗口×ratio, TriggerCap)；<=0 表示不封顶，保持旧行为。
+	// 由配置键 compaction.trigger_cap 下发，默认 0，便于灰度与回滚。
+	TriggerCap int
+
 	// ReserveRatio 为系统提示、工具定义和新回复预留的上下文比例（0–1）。
 	// 0 = 默认 0.08。必须小于 TriggerRatio。
 	ReserveRatio float64
@@ -140,6 +149,7 @@ func DefaultCompactionConfig() CompactionConfig {
 		MaxTokens:            0, // derive from model context length; fallback window if unknown
 		ReservedTokens:       0,
 		TriggerRatio:         DefaultTriggerRatio,
+		TriggerCap:           0, // 0 = 不封顶，保持旧行为；由配置显式开启
 		ReserveRatio:         DefaultReserveRatio,
 		TailTokens:           8000,
 		TailTurns:            DefaultTailTurns,
@@ -393,6 +403,11 @@ func ResolveCompactionBudget(cfg CompactionConfig) ResolvedBudget {
 			trigger = usable
 		}
 	}
+	// ⚠️ 绝对上限优先于 TailTokens 下限：cap 是运维显式设的收口线，
+	// 但触发线不能低于保留区，否则压缩后立刻又溢出、连着触发 doom loop。
+	if cfg.TriggerCap > 0 && trigger > cfg.TriggerCap {
+		trigger = cfg.TriggerCap
+	}
 	if trigger < cfg.TailTokens {
 		trigger = cfg.TailTokens
 	}
@@ -578,7 +593,14 @@ func (c *Compactor) compactMessageToolOutputs(msg Message) Message {
 	return Message{Role: msg.Role, Content: newParts, Usage: msg.Usage}
 }
 
-// Compact 执行完整的上下文压缩流程。
+// Compact 执行完整的上下文压缩流程，摘要使用主链路的 provider / model。
+func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider Provider) (GenerateParams, error) {
+	return c.compactWithSummaryModel(ctx, params, provider, nil)
+}
+
+// compactWithSummaryModel 与 Compact 相同，但允许摘要走另一个模型。
+// summaryModel != nil 时只替换摘要请求的 Model，主链路返回的 params.Model 不变 ——
+// 压缩不能悄悄把后续编排切到别的模型上。
 //
 // 流程：
 //  1. 裁剪旧工具输出（PruneToolOutputs）
@@ -586,7 +608,7 @@ func (c *Compactor) compactMessageToolOutputs(msg Message) Message {
 //  3. 用摘要 + 最近消息替代旧消息
 //
 // provider 非空时使用 LLM 生成摘要；为 nil 时仅做 pruning。
-func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider Provider) (GenerateParams, error) {
+func (c *Compactor) compactWithSummaryModel(ctx context.Context, params GenerateParams, provider Provider, summaryModel *Model) (GenerateParams, error) {
 	// doom-loop 计数只在 prune 后仍溢出时增加；prune 成功则清零。
 
 	// Step 1: 裁剪工具输出
@@ -615,7 +637,7 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 		return params, nil
 	}
 
-	summaryParams, err := c.summarizeMessages(ctx, params, provider)
+	summaryParams, err := c.summarizeMessages(ctx, params, provider, summaryModel)
 	if err != nil {
 		return params, fmt.Errorf("compaction: %w", err)
 	}
@@ -631,7 +653,7 @@ func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider
 //   - 按 turn-based 方式保留最近的对话轮次
 //   - 增量更新之前的摘要（如果有）
 //   - 使用结构化 Markdown 模板生成摘要
-func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams, provider Provider) (GenerateParams, error) {
+func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams, provider Provider, summaryModel *Model) (GenerateParams, error) {
 	messages := params.Messages
 
 	// 按 turn-based 方式确定 head/tail 分割点
@@ -668,6 +690,11 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 		Model:    params.Model,
 		System:   CompactionSystemPrompt,
 		Messages: summaryMessages,
+	}
+	// 摘要是分类/归纳型轻任务，允许走快模型（与 provider 必须配套，由调用方保证）。
+	// 只改这一次摘要请求；主链路 params 不受影响。
+	if summaryModel != nil {
+		summaryParams.Model = summaryModel
 	}
 	// Same model as the main call → same configured output limit
 	// (params.MaxTokens = ModelDef.MaxTokens); compaction.summary_max_tokens
@@ -1002,13 +1029,22 @@ func CompactionPrepareStep(compactor *Compactor) func(*GenerateParams) *Generate
 
 // CompactionPrepareStepWithProvider 返回一个带 LLM 摘要能力的 PrepareStep hook。
 func CompactionPrepareStepWithProvider(compactor *Compactor, provider Provider) func(context.Context) func(*GenerateParams) *GenerateParams {
+	return CompactionPrepareStepWithProviderAndModel(compactor, provider, nil)
+}
+
+// CompactionPrepareStepWithProviderAndModel 与上面相同，但摘要走独立的快模型。
+//
+// 压缩一旦开始频繁触发，每次摘要都是一次完整生成；用主模型（尤其是慢的推理模型）
+// 做摘要会把省下来的时间又吃回去。summaryModel 只作用于摘要请求，主链路模型不变。
+// ⚠️ provider 与 summaryModel 必须配套：调用方要么两个都给，要么都留主链路的。
+func CompactionPrepareStepWithProviderAndModel(compactor *Compactor, provider Provider, summaryModel *Model) func(context.Context) func(*GenerateParams) *GenerateParams {
 	return func(ctx context.Context) func(*GenerateParams) *GenerateParams {
 		return func(params *GenerateParams) *GenerateParams {
 			if compactor == nil || !compactor.ShouldCompactIn(ctx, *params) {
 				return nil
 			}
 
-			newParams, err := compactor.Compact(ctx, *params, provider)
+			newParams, err := compactor.compactWithSummaryModel(ctx, *params, provider, summaryModel)
 			if err != nil {
 				// 压缩失败，降级为 prune-only
 				newParams = *params

@@ -334,6 +334,12 @@ const (
 	// KeyCompactionTriggerRatio 自动压缩触发比例（相对模型上下文窗口）。默认 0.75。
 	KeyCompactionTriggerRatio = "compaction.trigger_ratio"
 
+	// KeyCompactionTriggerCap 压缩触发线的绝对上限（token）。默认 0 = 不封顶。
+	// 超长上下文模型（例如声明 1M 窗口）会把 窗口×trigger_ratio 抬到几十万，
+	// 而实际单步输入远低于此 → 压缩永不触发 → 历史一路累积、每步全量重发，
+	// 长任务越跑越慢。设为正值后触发线取 min(窗口×ratio, trigger_cap)。
+	KeyCompactionTriggerCap = "compaction.trigger_cap"
+
 	// KeyCompactionReserveRatio 为系统提示、工具定义和新回复预留的比例。默认 0.08。
 	KeyCompactionReserveRatio = "compaction.reserve_ratio"
 

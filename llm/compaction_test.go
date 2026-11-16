@@ -426,6 +426,94 @@ func TestResolveCompactionBudget_FallbackWhenWindowUnknown(t *testing.T) {
 	}
 }
 
+// TestResolveCompactionBudget_TriggerCap 复现超长窗口模型的压缩失效：
+// 1M 窗口把触发线抬到 786432，而真实单步输入峰值只有 110344 → 压缩永不触发。
+// cap 让触发线回到实际输入规模，且只影响 trigger、不动 window/reserved/usable。
+func TestResolveCompactionBudget_TriggerCap(t *testing.T) {
+	base := CompactionConfig{
+		ContextLength: 1_048_576,
+		OutputReserve: 65_536,
+		TriggerRatio:  0.75,
+		ReserveRatio:  0.08,
+		TailTokens:    8_000,
+	}
+	uncapped := ResolveCompactionBudget(base)
+	if uncapped.Trigger != 786_432 {
+		t.Fatalf("uncapped trigger = %d, want 786432", uncapped.Trigger)
+	}
+
+	capped := base
+	capped.TriggerCap = 48_000
+	b := ResolveCompactionBudget(capped)
+	if b.Trigger != 48_000 {
+		t.Fatalf("capped trigger = %d, want 48000", b.Trigger)
+	}
+	if b.Window != uncapped.Window || b.Reserved != uncapped.Reserved || b.Usable != uncapped.Usable {
+		t.Fatal("trigger cap must not change window/reserved/usable")
+	}
+
+	// cap 小于保留区时仍要保住 TailTokens 下限，否则压缩后立刻又溢出 → doom loop。
+	tiny := base
+	tiny.TriggerCap = 1_000
+	if got := ResolveCompactionBudget(tiny).Trigger; got != 8_000 {
+		t.Fatalf("trigger below tail budget = %d, want 8000", got)
+	}
+}
+
+// modelCaptureProvider 记录摘要请求实际使用的 model。
+type modelCaptureProvider struct{ lastModel *Model }
+
+func (p *modelCaptureProvider) Name() string { return "capture" }
+func (p *modelCaptureProvider) DoGenerate(_ context.Context, params GenerateParams) (*GenerateResult, error) {
+	p.lastModel = params.Model
+	return &GenerateResult{FinishReason: FinishReasonStop, Text: "summary"}, nil
+}
+func (p *modelCaptureProvider) DoStream(_ context.Context, _ GenerateParams) (*StreamResult, error) {
+	ch := make(chan StreamPart)
+	close(ch)
+	return &StreamResult{Stream: ch}, nil
+}
+
+// TestSummarizeMessages_UsesLightModelOnlyForSummary 验证摘要可以走快模型，
+// 且不会把主链路的 params.Model 一起换掉（压缩不能悄悄改编排模型）。
+func TestSummarizeMessages_UsesLightModelOnlyForSummary(t *testing.T) {
+	c := NewCompactor(CompactionConfig{
+		Auto: true, ContextLength: 1000, OutputReserve: 100,
+		TriggerRatio: 0.5, TailTokens: 10, TailTurns: 1, MinMessagesToCompact: 1,
+	})
+	mainModel := ChatModel("main-slow")
+	lightModel := ChatModel("light-fast")
+	params := GenerateParams{
+		Model: mainModel,
+		Messages: []Message{
+			UserMessage("first"), AssistantMessage("second"),
+			UserMessage("third"), AssistantMessage("fourth"),
+			UserMessage("fifth"), AssistantMessage("sixth"),
+		},
+	}
+
+	capture := &modelCaptureProvider{}
+	got, err := c.summarizeMessages(context.Background(), params, capture, lightModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capture.lastModel == nil || capture.lastModel.ID != "light-fast" {
+		t.Fatalf("summary must use the light model, got %+v", capture.lastModel)
+	}
+	if got.Model == nil || got.Model.ID != "main-slow" {
+		t.Fatalf("main params model must stay unchanged, got %+v", got.Model)
+	}
+
+	// 没配快模型时沿用主模型，保持旧行为。
+	fallback := &modelCaptureProvider{}
+	if _, err := c.summarizeMessages(context.Background(), params, fallback, nil); err != nil {
+		t.Fatal(err)
+	}
+	if fallback.lastModel == nil || fallback.lastModel.ID != "main-slow" {
+		t.Fatalf("without a light model the main model must be used, got %+v", fallback.lastModel)
+	}
+}
+
 // ============================================================================
 // Context Overflow 检测测试
 // ============================================================================

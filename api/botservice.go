@@ -1735,6 +1735,7 @@ func compactionConfigFromConfig(c config.CompactionConfig, contextLength, output
 		MaxTokens:            c.MaxTokens,
 		ReservedTokens:       c.ReservedTokens,
 		TriggerRatio:         c.TriggerRatio,
+		TriggerCap:           c.TriggerCap,
 		ReserveRatio:         c.ReserveRatio,
 		ContextLength:        contextLength,
 		OutputReserve:        outputReserve,

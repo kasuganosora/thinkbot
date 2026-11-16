@@ -1646,6 +1646,8 @@ type CompactionConfig struct {
 	ReservedTokens int
 	// TriggerRatio 自动压缩触发比例（相对模型上下文窗口）。默认 0.75。
 	TriggerRatio float64
+	// TriggerCap 压缩触发线绝对上限（token）。默认 0 = 不封顶。
+	TriggerCap int
 	// ReserveRatio 预留比例（系统提示 / 工具定义 / 新回复）。默认 0.08。
 	ReserveRatio float64
 	// TailTokens 压缩时保留的最近 token 数（不摘要化）。
@@ -1671,6 +1673,7 @@ func DefaultCompactionConfig() CompactionConfig {
 		MaxTokens:            0,
 		ReservedTokens:       0,
 		TriggerRatio:         0.75,
+		TriggerCap:           0, // 0 = 不封顶，保持旧行为
 		ReserveRatio:         0.08,
 		TailTokens:           8000,
 		TailTurns:            2,
@@ -1688,6 +1691,7 @@ func (b *Builder) GetCompactionConfig() CompactionConfig {
 		MaxTokens:            b.store.GetInt(KeyCompactionMaxTokens, d.MaxTokens),
 		ReservedTokens:       b.store.GetInt(KeyCompactionReservedTokens, d.ReservedTokens),
 		TriggerRatio:         b.store.GetFloat64(KeyCompactionTriggerRatio, d.TriggerRatio),
+		TriggerCap:           b.store.GetInt(KeyCompactionTriggerCap, d.TriggerCap),
 		ReserveRatio:         b.store.GetFloat64(KeyCompactionReserveRatio, d.ReserveRatio),
 		TailTokens:           b.store.GetInt(KeyCompactionTailTokens, d.TailTokens),
 		TailTurns:            b.store.GetInt(KeyCompactionTailTurns, d.TailTurns),
@@ -1704,6 +1708,7 @@ func CompactionMetaSpecs() []MetaSpec {
 		{Key: KeyCompactionMaxTokens, Category: "Compaction", Description: "模型上下文长度未知时的回退窗口（token，0=内置 64000）。模型 ContextLength 已知时忽略本值，触发线改为窗口 × trigger_ratio。"},
 		{Key: KeyCompactionReservedTokens, Category: "Compaction", Description: "模型上下文长度未知时的回退预留（token，0=内置 20000）。已知窗口时预留为 max(模型输出上限, 窗口 × reserve_ratio)。"},
 		{Key: KeyCompactionTriggerRatio, Category: "Compaction", Description: "自动压缩触发比例，相对模型上下文窗口（默认 0.75）。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionTriggerCap, Category: "Compaction", Description: "压缩触发线绝对上限（token，默认 0=不封顶）。超长窗口模型建议设 48000 左右，避免压缩永不触发导致长任务越跑越慢。"},
 		{Key: KeyCompactionReserveRatio, Category: "Compaction", Description: "为系统提示、工具定义和新回复预留的比例（默认 0.08，须小于 trigger_ratio）。"},
 		{Key: KeyCompactionTailTokens, Category: "Compaction", Description: "压缩时保留的最近 token 数（不被摘要化，默认 8000）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。保存后下一轮对话即生效。"},
@@ -2137,6 +2142,7 @@ func DefaultMap() map[string]string {
 		KeyCompactionMaxTokens:            "0",
 		KeyCompactionReservedTokens:       "0",
 		KeyCompactionTriggerRatio:         "0.75",
+		KeyCompactionTriggerCap:           "0",
 		KeyCompactionReserveRatio:         "0.08",
 		KeyCompactionTailTokens:           "8000",
 		KeyCompactionTailTurns:            "2",

@@ -1585,7 +1585,20 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	}
 	if s.liveCompaction() != nil && !lightTier {
 		if compactor, ok := s.getCompactor(conversationKey(env)); ok {
-			compactHook := llm.CompactionPrepareStepWithProvider(compactor, s.provider)(ctx)
+			// 摘要走 Light（快模型）：压缩一旦因 trigger_cap 开始触发，每次摘要都是
+			// 一次完整生成，用主模型会把省下来的时间又吃回去。
+			// ⚠️ provider 与 model 必须配套，缺任一个就整体退回主链路，
+			// 否则会把主模型的 id 发给另一家的客户端。
+			summaryProvider := s.provider
+			var summaryModel *llm.Model
+			if s.config.LightProvider != nil && s.config.LightModel != nil {
+				summaryProvider = s.config.LightProvider
+				summaryModel = s.config.LightModel
+				if snap := bot.LLMSnapshotFrom(ctx); snap != nil && snap.LightModel != nil {
+					summaryModel = snap.LightModel // 热切换后以快照为准
+				}
+			}
+			compactHook := llm.CompactionPrepareStepWithProviderAndModel(compactor, summaryProvider, summaryModel)(ctx)
 			base := prepareStep
 			prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {
 				if base != nil {
