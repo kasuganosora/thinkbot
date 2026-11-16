@@ -198,18 +198,19 @@ func (c *WeComChannel) beginTurn(key, traceID string) {
 	if key == "" || traceID == "" || c.turnCtl == nil {
 		return
 	}
-	// ⚠️ 新轮必须重置进度配额：progress 按会话索引，但 maxProgressNotices 是
-	// **单轮次**的语义。旧轮用满配额后，若只指望 cleanupLoop 清理，
-	// clearTurn 会先把 active 摘掉 → reportLongTurnProgress 的「轮次已结束」
-	// 分支再也扫不到这个 key → 配额跨轮残留，此后该会话每一轮都发不出
+	// ⚠️ 新轮必须原子重置进度配额（锁序固定为 turnMu -> progMu）：
+	// progress 按会话索引，但 maxProgressNotices 是**单轮次**的语义。旧轮用满配额后，
+	// 若只指望 cleanupLoop 清理，clearTurn 会先把 active 摘掉 → reportLongTurnProgress
+	// 的「轮次已结束」分支再也扫不到这个 key → 配额跨轮残留，此后该会话每一轮都发不出
 	// 「还在处理中」（流到期后用户只剩一条不动的占位符，观感就是 bot 卡死）。
-	// 放在 beginTurn 而不是别处，是因为它是所有新轮次唯一的登记入口。
-	c.clearTurnProgress(key)
 	c.turnMu.Lock()
 	if c.active == nil {
 		c.active = make(map[string]*activeTurn)
 	}
 	c.active[key] = &activeTurn{traceID: traceID, started: time.Now()}
+	c.progMu.Lock()
+	delete(c.progress, key)
+	c.progMu.Unlock()
 	c.turnMu.Unlock()
 }
 
@@ -261,6 +262,18 @@ func (c *WeComChannel) holdWorthy(key, text string) bool {
 	return !c.turnRunning(key)
 }
 
+// activeTraceID 返回当前登记在该会话上的轮次 traceID（若无则返回空串）。
+func (c *WeComChannel) activeTraceID(key string) string {
+	c.turnMu.Lock()
+	cur := c.active[key]
+	var id string
+	if cur != nil {
+		id = cur.traceID
+	}
+	c.turnMu.Unlock()
+	return id
+}
+
 // turnRunning 该会话是否真有一个**正在执行**的轮次。
 //
 // ⚠️ 不能只查活跃表：轮次结束没有统一回调点（pipeline 静默时连 Send 都没有），
@@ -280,6 +293,22 @@ func (c *WeComChannel) turnRunning(key string) bool {
 	return ctl.IsMessageActive(c.botID, cur.traceID)
 }
 
+// turnRunningTrace 判断指定 traceID 是否仍是该会话当前活跃且编排层未结束的轮次。
+func (c *WeComChannel) turnRunningTrace(key, traceID string) bool {
+	ctl := c.turnCtl
+	if ctl == nil || traceID == "" {
+		return false
+	}
+	c.turnMu.Lock()
+	cur := c.active[key]
+	same := cur != nil && cur.traceID == traceID
+	c.turnMu.Unlock()
+	if !same {
+		return false
+	}
+	return ctl.IsMessageActive(c.botID, traceID)
+}
+
 // hasActiveTurn 活跃表里是否有该会话的登记项（**不**判断是否还在跑）。
 // 只供单测与 reapTurns 之类的内部维护用；业务判定一律走 turnRunning。
 func (c *WeComChannel) hasActiveTurn(key string) bool {
@@ -297,17 +326,20 @@ func (c *WeComChannel) hasActiveTurn(key string) bool {
 // 这里删掉），配额就永久留在 map 里，下一轮一条进度都发不出。
 func (c *WeComChannel) clearTurn(key, traceID string) {
 	c.turnMu.Lock()
-	matched := false
 	if cur, ok := c.active[key]; ok && (traceID == "" || cur.traceID == traceID) {
 		delete(c.active, key)
-		matched = true
+		c.progMu.Lock()
+		delete(c.progress, key)
+		c.progMu.Unlock()
+	} else if traceID != "" {
+		// 旧轮异步收尾晚于新轮 beginTurn：不动新轮，但若 progress 里残留着旧轮自己的记录则顺手清掉。
+		c.progMu.Lock()
+		if st := c.progress[key]; st != nil && st.traceID == traceID {
+			delete(c.progress, key)
+		}
+		c.progMu.Unlock()
 	}
 	c.turnMu.Unlock()
-	// 只在真的摘掉本轮时清：旧轮的异步收尾若晚于新轮 beginTurn，
-	// traceID 对不上，绝不能把新轮刚记的进度一起抹掉。
-	if matched {
-		c.clearTurnProgress(key)
-	}
 }
 
 // watchAppend 兜底「注入成功但没被消费」的补充（append 策略专用）。
@@ -380,9 +412,9 @@ func (c *WeComChannel) watchAppend(ctx context.Context, msg core.Message, traceI
 // 观感上就是「bot 卡住了」（2026-11-02 实测：16:32 开跑的轮次 16:38 流到期，
 // 之后用户看不到任何东西，实际编排层一直在调工具）。
 //
-// 因此给超过阈值的长轮次按固定间隔补发一条「还在跑」的提示，直到该轮真正结束。
-// 走普通出站（Send → markdown 一条独立消息），不去续流：流是「同一条回复的增量」，
-// 进度提示是另一条消息，语义上就该分开。
+// 因此当流式气泡已关闭/不存在且长轮次超过阈值时，按固定间隔补发一条「还在跑」的独立提示，
+// 直到该轮真正结束。⚠️ 必须走 sendPlainMarkdown 而不是 Send：Send 会优先调用 finishStream，
+// 一旦流还开着就会把正在流式输出的回复气泡原位替换成进度文案并提前关闭流。
 const (
 	// progressAfter 轮次跑过这么久才开始回报进度。短轮次不该被打扰。
 	progressAfter = 2 * time.Minute
@@ -394,8 +426,9 @@ const (
 )
 
 // turnProgress 单个会话**当前轮次**的进度回报节流状态。
-// 按会话索引，但计数是单轮次的：换轮时由 beginTurn / clearTurn 重置。
+// 按会话索引，但计数绑定到单轮次 traceID：换轮时由 beginTurn / clearTurn / traceID 比对重置。
 type turnProgress struct {
+	traceID  string
 	lastSent time.Time
 	sent     int
 }
@@ -403,14 +436,15 @@ type turnProgress struct {
 // reportLongTurnProgress 由 cleanupLoop 每分钟调用：给仍在跑的长轮次补发进度，
 // 并顺手清掉已结束轮次的状态。
 //
-// ⚠️ 是否还在跑一律以 turnRunning（编排侧 IsMessageActive）为准：轮次结束没有
+// ⚠️ 是否还在跑一律以 turnRunningTrace（编排侧 IsMessageActive）为准：轮次结束没有
 // 统一回调点，只凭活跃表会往一个已经答完的会话里继续刷「还在跑」。
 func (c *WeComChannel) reportLongTurnProgress(ctx context.Context) {
 	now := time.Now()
 
-	// 先快照候选，出锁后再判活：turnRunning 自己要拿 turnMu（Mutex 不可重入）。
+	// 先快照候选，出锁后再判活：turnRunningTrace 自己要拿 turnMu（Mutex 不可重入）。
 	type candidate struct {
 		key     string
+		traceID string
 		started time.Time
 	}
 	c.turnMu.Lock()
@@ -419,7 +453,7 @@ func (c *WeComChannel) reportLongTurnProgress(ctx context.Context) {
 		if t == nil {
 			continue
 		}
-		cands = append(cands, candidate{key: k, started: t.started})
+		cands = append(cands, candidate{key: k, traceID: t.traceID, started: t.started})
 	}
 	c.turnMu.Unlock()
 
@@ -428,21 +462,28 @@ func (c *WeComChannel) reportLongTurnProgress(ctx context.Context) {
 		if elapsed < progressAfter {
 			continue
 		}
-		if !c.turnRunning(cd.key) {
-			c.clearTurnProgress(cd.key)
+		if !c.turnRunningTrace(cd.key, cd.traceID) {
+			c.clearTurnProgressFor(cd.key, cd.traceID)
 			continue
 		}
-		c.maybeSendTurnProgress(ctx, cd.key, elapsed, now)
+		// 流式气泡仍存活期间，客户端正在由占位秒数刷新或流式正文持续更新，
+		// 不额外插发独立消息，也不提前消耗流关闭后的进度提示配额。
+		if c.hasOpenStream(cd.key) {
+			continue
+		}
+		c.maybeSendTurnProgressFor(ctx, cd.key, cd.traceID, elapsed, now)
 	}
 }
 
 // maybeSendTurnProgress 按「首次立即、之后每 progressEvery 一次、封顶
 // maxProgressNotices 条」的规则发进度提示。
-//
-// 两个入口：cleanupLoop 每分钟的 reportLongTurnProgress，以及流到期收尾时的
-// 即时补发（reapStreams），后者免得用户最多空等一个清理周期。
-// ⚠️ 配额的生命周期由 beginTurn / clearTurn 绑定到轮次，别只依赖这里记账。
 func (c *WeComChannel) maybeSendTurnProgress(ctx context.Context, key string, elapsed time.Duration, now time.Time) {
+	c.maybeSendTurnProgressFor(ctx, key, "", elapsed, now)
+}
+
+// maybeSendTurnProgressFor 与 maybeSendTurnProgress 相同，但额外校验并绑定轮次 traceID，
+// 防止并发换轮时复用上一轮的节流计数。
+func (c *WeComChannel) maybeSendTurnProgressFor(ctx context.Context, key, traceID string, elapsed time.Duration, now time.Time) {
 	c.progMu.Lock()
 	if c.progress == nil {
 		// 防御：与 pend/dedup 同理，直接造结构体的调用方（含单测脚手架）
@@ -451,8 +492,12 @@ func (c *WeComChannel) maybeSendTurnProgress(ctx context.Context, key string, el
 	}
 	st := c.progress[key]
 	if st == nil {
-		st = &turnProgress{}
+		st = &turnProgress{traceID: traceID}
 		c.progress[key] = st
+	} else if traceID != "" && st.traceID != "" && st.traceID != traceID {
+		*st = turnProgress{traceID: traceID}
+	} else if traceID != "" && st.traceID == "" {
+		st.traceID = traceID
 	}
 	if st.sent >= maxProgressNotices {
 		c.progMu.Unlock()
@@ -477,15 +522,30 @@ func (c *WeComChannel) clearTurnProgress(key string) {
 	c.progMu.Unlock()
 }
 
-// sendTurnProgress 发一条「还在跑」提示。
+// clearTurnProgressFor 仅在会话未切换到更新轮次时清理指定轮次的进度状态。
+func (c *WeComChannel) clearTurnProgressFor(key, traceID string) {
+	c.turnMu.Lock()
+	cur := c.active[key]
+	activeChanged := cur != nil && traceID != "" && cur.traceID != traceID
+	c.progMu.Lock()
+	if !activeChanged {
+		delete(c.progress, key)
+	} else if st := c.progress[key]; st != nil && st.traceID == traceID {
+		delete(c.progress, key)
+	}
+	c.progMu.Unlock()
+	c.turnMu.Unlock()
+}
+
+// sendTurnProgress 发一条「还在跑」独立提示。
 //
-// 走 Send 而不是直接 sendMarkdown：Send 内部带了 30 条/分钟的 per-chat 限流，
-// 与正常回复共用同一条配额，不会因为我们补进度把用户的回复挤掉。
+// 走 sendPlainMarkdown（含 30 条/分钟的 per-chat 限流），绝不走 finishStream，
+// 避免在并发窗口里把仍开着的回复流覆写并提前收尾。
 // 失败只记日志 —— 进度提示是装饰，绝不能影响真正的结果投递。
 func (c *WeComChannel) sendTurnProgress(ctx context.Context, key string, elapsed time.Duration, seq int) {
 	text := fmt.Sprintf("⏳ 还在处理中，已运行 %s。完成后会把结果发给你，期间不用重复发消息。",
 		formatElapsed(elapsed))
-	if err := c.Send(ctx, core.Action{Channel: key, Payload: text}); err != nil {
+	if err := c.sendPlainMarkdown(ctx, key, text); err != nil {
 		traceid.L(ctx).Warnw("wecom: long-turn progress notice failed",
 			"channel", c.name, "chat", key, "elapsed", elapsed.String(), "seq", seq, "err", err)
 		return

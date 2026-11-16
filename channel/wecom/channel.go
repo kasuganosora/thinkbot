@@ -1258,9 +1258,39 @@ func (c *WeComChannel) Send(ctx context.Context, action core.Action) error {
 		return nil
 	}
 
-	// 30 条/分钟/会话。宁可晚两秒发出去，也不要触发限流后整条丢掉。
-	if err := c.limiter.wait(ctx, target); err != nil {
+	return c.sendMarkdownDirect(ctx, sess, target, chatID, chatType, text)
+}
+
+// sendPlainMarkdown 直接通过 aibot_send_msg 发送一条独立 markdown 消息，
+// **不**触碰当前会话可能仍在运行的流式回复气泡（供长任务进度提示等旁路通知使用）。
+func (c *WeComChannel) sendPlainMarkdown(ctx context.Context, target, text string) error {
+	if target == "" {
+		return errors.New("wecom send: empty target")
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	chatID, chatType, err := parseTarget(target)
+	if err != nil {
 		return err
+	}
+	if c.isStopped() {
+		return errors.New("wecom send: channel stopped")
+	}
+	sess := c.currentSession()
+	if sess == nil {
+		return errors.New("wecom send: no active connection (reconnecting)")
+	}
+	return c.sendMarkdownDirect(ctx, sess, target, chatID, chatType, text)
+}
+
+func (c *WeComChannel) sendMarkdownDirect(ctx context.Context, sess *wsSession, target, chatID string, chatType int, text string) error {
+	// 30 条/分钟/会话。宁可晚两秒发出去，也不要触发限流后整条丢掉。
+	if c.limiter != nil {
+		if err := c.limiter.wait(ctx, target); err != nil {
+			return err
+		}
 	}
 
 	if err := sess.sendMarkdown(ctx, chatID, chatType, truncateForMarkdown(text)); err != nil {

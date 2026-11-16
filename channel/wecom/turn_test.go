@@ -713,3 +713,74 @@ func TestLongTurnProgress_NewTurnAfterQuotaExhausted(t *testing.T) {
 		t.Fatalf("cleanupLoop must send a progress notice for the new turn, sent=%d", got)
 	}
 }
+
+// TestReportLongTurnProgress_SkipsOpenStreamAndNeverFinishesStream 防止进度提示误杀活跃流式回复：
+// 1. 流还在 5 分钟寿命内时，reportLongTurnProgress 不发提示、不扣配额、不碰流；
+// 2. 即使直接调 sendTurnProgress，也只走 sendPlainMarkdown，绝不触发 finishStream 把流关掉；
+// 3. 等 reapStreams 到期收尾时，先用流自身正文 finish，再记下第一条长任务进度提示。
+func TestReportLongTurnProgress_SkipsOpenStreamAndNeverFinishesStream(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, InterruptRestart)
+	c.cfg.StreamReply = true
+	c.streams = make(map[string]*wecomStream)
+	key := PrefixDM + "U-stream"
+
+	beginLiveTurn(c, ctl, key, "T-stream")
+	c.turnMu.Lock()
+	c.active[key].started = time.Now().Add(-3 * time.Minute)
+	c.turnMu.Unlock()
+
+	rec := &pushRec{}
+	st := newFakeStream(rec)
+	st.pushed = true
+	st.fed = true
+	st.content = "正在生成的半截正文"
+	st.started = time.Now().Add(-3 * time.Minute)
+	c.streams[key] = st
+
+	// 1) 流还开着：cleanupLoop 不得发进度，也不得消耗配额或关闭流。
+	c.reportLongTurnProgress(context.Background())
+	if st.closed {
+		t.Fatal("reportLongTurnProgress must not close an open stream")
+	}
+	if len(rec.all()) != 0 {
+		t.Fatalf("reportLongTurnProgress must not push to an open stream, got %+v", rec.all())
+	}
+	if _, ok := c.progress[key]; ok {
+		t.Fatal("progress quota must not be consumed while stream bubble is still open")
+	}
+
+	// 2) 就算并发窗口直接调到 sendTurnProgress，也绝不能走 finishStream 覆盖并关掉流。
+	c.sendTurnProgress(context.Background(), key, 3*time.Minute, 1)
+	if st.closed || len(rec.all()) != 0 {
+		t.Fatalf("sendTurnProgress must never call finishStream: closed=%v pushes=%+v", st.closed, rec.all())
+	}
+
+	// 3) 流超过 maxAge 被 reapStreams 收尾：必须保留原正文收尾，并立刻记下第一条进度提示。
+	st.started = time.Now().Add(-defaultStreamMaxAge - time.Second)
+	c.reapStreams(context.Background())
+	if !st.closed {
+		t.Fatal("expired stream must be closed by reapStreams")
+	}
+	last := rec.last()
+	if !last.finish || last.content != "正在生成的半截正文" {
+		t.Fatalf("reapStreams must finish stream with its own content, got %+v", last)
+	}
+	if got := c.progress[key]; got == nil || got.sent != 1 || got.traceID != "T-stream" {
+		t.Fatalf("reapStreams must record first progress notice for T-stream, got %+v", got)
+	}
+}
+
+func TestMaybeSendTurnProgressFor_ResetsOnTraceIDSwitch(t *testing.T) {
+	c := newTestChannel(t, 0)
+	key := PrefixDM + "U-race"
+	now := time.Now()
+
+	c.progress = map[string]*turnProgress{
+		key: {traceID: "T-old", sent: maxProgressNotices, lastSent: now},
+	}
+	c.maybeSendTurnProgressFor(context.Background(), key, "T-new", 3*time.Minute, now.Add(time.Second))
+	if got := c.progress[key]; got == nil || got.traceID != "T-new" || got.sent != 1 {
+		t.Fatalf("traceID switch must reset exhausted quota for new turn, got %+v", got)
+	}
+}

@@ -762,6 +762,15 @@ func (c *WeComChannel) dropStream(key string, st *wecomStream) {
 	}
 }
 
+// hasOpenStream 当前会话是否仍挂着未收尾的流式回复气泡。
+func (c *WeComChannel) hasOpenStream(key string) bool {
+	c.streamMu.Lock()
+	st := c.streams[key]
+	open := st != nil && !st.closed
+	c.streamMu.Unlock()
+	return open
+}
+
 // reapStreams 收尾超时未完成的流（cleanupLoop 调用）。
 //
 // ⚠️ 必须存在：pipeline 完全可能**决定不回复**（静默、被抑制、出错），
@@ -797,20 +806,23 @@ func (c *WeComChannel) reapStreams(ctx context.Context) {
 		// 收尾、12:05 才 action sent，中间隔 8 分钟）；编排层已停 = 本轮确实
 		// 不会回复了。混成一句 "no reply came" 会让「bot 没理我」的排查
 		// 每次都先撞上一条假阳性。
-		if c.turnRunning(e.key) {
+		stillRunning := c.turnRunning(e.key)
+		if stillRunning {
 			traceid.L(ctx).Warnw("wecom: stream closed at max age while turn still running",
 				"channel", c.name, "chat", e.key, "stream_id", e.st.streamID,
 				"age", now.Sub(e.st.started).String(),
 				"hint", "long task exceeded stream lifetime; final reply will arrive as a separate message")
-			// 流一断，用户侧就再没有内容了（编排层还在跑）。立刻补一条进度提示，
-			// 否则要空等到下一个清理周期才知道「它没死」。
-			c.maybeSendTurnProgress(ctx, e.key, now.Sub(e.st.started), now)
 		} else {
 			traceid.L(ctx).Warnw("wecom: stream reaped after max age (no reply came)",
 				"channel", c.name, "chat", e.key, "stream_id", e.st.streamID,
 				"age", now.Sub(e.st.started).String())
 		}
 		c.closeStream(ctx, e.st, e.st.content)
+		if stillRunning {
+			// 流一断，用户侧就再没有内容了（编排层还在跑）。先收尾流再立刻补一条独立进度提示，
+			// 否则要空等到下一个清理周期才知道「它没死」。
+			c.maybeSendTurnProgressFor(ctx, e.key, c.activeTraceID(e.key), now.Sub(e.st.started), now)
+		}
 	}
 }
 
