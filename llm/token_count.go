@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -117,8 +119,17 @@ func EstimatePartResultTokens(result any) int {
 	case []byte:
 		return EstimateTokens(string(v))
 	default:
-		// 对于复杂类型，估算比字符串表示
-		return EstimateTokens(stringifyResult(v)) / 2
+		// ⚠️ 工具输出在 TruncateOutput 阈值内会保持原始 map/slice/struct
+		// （见 tool_truncate.go 的「在阈值内，不需要截断」分支），provider 发送时
+		// 同样会把它序列化成 JSON 文本。旧实现用 stringifyResult(复杂类型)→""
+		// 再 /2，整块输出被算成 0 token：实测一轮真实长任务里同一批工具输出
+		// 估算不足千级、序列化文本接近九万，压缩触发线因此永远够不到。
+		// 必须按序列化后的文本估算，否则裁剪 / 尾部保留 / 压缩判定全部失真。
+		data, err := json.Marshal(v)
+		if err != nil {
+			return EstimateTokens(fmt.Sprintf("%v", v))
+		}
+		return EstimateTokens(string(data))
 	}
 }
 
@@ -154,7 +165,9 @@ func CountRunes(s string) int {
 	return utf8.RuneCountInString(s)
 }
 
-// stringifyResult 将 any 转为字符串表示。
+// stringifyResult 将简单类型转为字符串表示（复杂类型返回空串）。
+// ⚠️ 不要用它做 token 估算：复杂类型必须走 EstimatePartResultTokens 的 JSON 分支，
+// 否则会把大段工具输出算成 0 token（见上面的回归说明）。
 func stringifyResult(v any) string {
 	if v == nil {
 		return ""

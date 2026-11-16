@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
 // ============================================================================
@@ -255,6 +257,9 @@ func (c *Compactor) SetInternalPolicy(p *InternalPolicy) *Compactor {
 
 // SetLogger 设置压缩器日志（可选，用于观测压缩触发）。返回 receiver 便于链式调用。
 func (c *Compactor) SetLogger(l *zap.SugaredLogger) *Compactor {
+	if l == nil {
+		l = zap.NewNop().Sugar()
+	}
 	c.logger = l
 	return c
 }
@@ -283,7 +288,9 @@ func NewCompactor(config CompactionConfig) *Compactor {
 	if config.ReserveRatio <= 0 {
 		config.ReserveRatio = DefaultReserveRatio
 	}
-	return &Compactor{config: config}
+	// 默认 Nop logger：可观测性日志必须能在没显式 SetLogger 的路径上安全写入，
+	// 否则每步的 compaction: check 会在 nil logger 上 panic。
+	return &Compactor{config: config, logger: zap.NewNop().Sugar()}
 }
 
 // SetConfigSource 设置运行时配置源。之后 ShouldCompact 等每次调用都会现取，
@@ -453,9 +460,49 @@ func (c *Compactor) IsOverflow(params GenerateParams) bool {
 	return c.isOverflowIn(context.Background(), params)
 }
 
+// compactionSignal 汇总一次判定用到的全部信号，供判定与日志共用，
+// 避免「日志里看到的值」和「实际用来判定的值」不是同一份。
+type compactionSignal struct {
+	estimated     int
+	trigger       int
+	usage         *Usage
+	usageOverflow bool
+	overflow      bool
+}
+
+// latestStepUsage 取最近一条带用量的 assistant 消息。编排把单步 Usage 挂在
+// assistant 消息上（见 orchestrate.go 的 buildStepMessages），这是 provider 报告的
+// 真实规模，可在本地估算再次失真时兜底。
+func latestStepUsage(messages []Message) *Usage {
+	for i := len(messages) - 1; i >= 0; i-- {
+		u := messages[i].Usage
+		if u == nil {
+			continue
+		}
+		if u.InputTokens > 0 || u.TotalTokens > 0 {
+			return u
+		}
+	}
+	return nil
+}
+
+func (c *Compactor) compactionSignalIn(ctx context.Context, params GenerateParams) compactionSignal {
+	estimated := EstimateParamsTokens(params)
+	trigger := c.budgetIn(ctx).Trigger
+	usage := latestStepUsage(params.Messages)
+	usageOverflow := c.isOverflowByUsageIn(ctx, usage)
+	return compactionSignal{
+		estimated:     estimated,
+		trigger:       trigger,
+		usage:         usage,
+		usageOverflow: usageOverflow,
+		// 估算为主，真实 usage 并联兜底：任一超线就压缩。
+		overflow: estimated >= trigger || usageOverflow,
+	}
+}
+
 func (c *Compactor) isOverflowIn(ctx context.Context, params GenerateParams) bool {
-	total := EstimateParamsTokens(params)
-	return total >= c.budgetIn(ctx).Trigger
+	return c.compactionSignalIn(ctx, params).overflow
 }
 
 func (c *Compactor) ShouldCompactIn(ctx context.Context, params GenerateParams) bool {
@@ -463,21 +510,52 @@ func (c *Compactor) ShouldCompactIn(ctx context.Context, params GenerateParams) 
 		return false
 	}
 	cfg := c.liveConfigIn(ctx)
-	if !cfg.Auto {
-		return false
+	sig := c.compactionSignalIn(ctx, params)
+
+	skipReason := ""
+	switch {
+	case !cfg.Auto:
+		skipReason = "auto_disabled"
+	case c.isDoomLoop():
+		skipReason = "doom_loop"
+	case len(params.Messages) < cfg.MinMessagesToCompact:
+		skipReason = "too_few_messages"
 	}
-	if c.isDoomLoop() {
-		return false
+	should := skipReason == "" && sig.overflow
+
+	// 每步一条：让「压缩为什么没触发」在生产 INFO 日志里可直接读到。
+	// 旧实现只有 Debugw("compaction: running")，INFO 级别下整条判定链是黑盒。
+	if c.logger != nil {
+		fields := []any{
+			"estimated_tokens", sig.estimated,
+			"trigger", sig.trigger,
+			"messages", len(params.Messages),
+			"usage_overflow", sig.usageOverflow,
+			"should_compact", should,
+			"trace_id", traceid.FromContext(ctx),
+		}
+		if sig.usage != nil {
+			fields = append(fields,
+				"usage_input_tokens", sig.usage.InputTokens,
+				"usage_total_tokens", sig.usage.TotalTokens)
+		}
+		if skipReason != "" {
+			fields = append(fields, "skip_reason", skipReason)
+		}
+		c.logger.Infow("compaction: check", fields...)
 	}
-	if len(params.Messages) < cfg.MinMessagesToCompact {
-		return false
-	}
-	return c.isOverflowIn(ctx, params)
+	return should
 }
 
 // IsOverflowByUsage 使用实际 API 返回的 token 用量判断是否溢出。
 // 这比估算更准确，因为使用的是 provider 报告的实际 token 数。
 func (c *Compactor) IsOverflowByUsage(usage *Usage) bool {
+	return c.isOverflowByUsageIn(context.Background(), usage)
+}
+
+// isOverflowByUsageIn 与 IsOverflowByUsage 同语义，但触发线按 ctx 里钉住的
+// 模型快照解析，保证与同一次判定的 estimated_tokens 用同一个 trigger。
+func (c *Compactor) isOverflowByUsageIn(ctx context.Context, usage *Usage) bool {
 	if usage == nil {
 		return false
 	}
@@ -485,7 +563,7 @@ func (c *Compactor) IsOverflowByUsage(usage *Usage) bool {
 	if total == 0 {
 		total = usage.InputTokens + usage.OutputTokens + usage.CachedInputTokens
 	}
-	return total >= c.UsableTokens()
+	return total >= c.budgetIn(ctx).Trigger
 }
 
 // ShouldCompact 判断是否需要压缩。
