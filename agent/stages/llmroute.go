@@ -906,8 +906,13 @@ type LLMConfig struct {
 	// LightProvider / LightModel 是闲聊与进度查询的执行档。
 	// L1 只下传 intent=chat / model=light；这里才换成轻量模型和更窄的工具面。
 	// LightProvider 为空时仍用主力模型，但工具面会收窄。
-	LightProvider llm.Provider
-	LightModel    *llm.Model
+	LightProvider         llm.Provider
+	LightModel            *llm.Model
+	LightParamsConfigured bool
+	LightTemperature      *float64
+	LightTopP             *float64
+	LightMaxTokens        *int
+	LightContextLength    int
 	// Temperature 采样温度。跟随模型（ModelDef.Temperature），不归 bot/全局管。
 	Temperature *float64
 	// TopP 核采样参数（nucleus sampling）。跟随模型（ModelDef.TopP），nil 时由 Provider 用默认。
@@ -1393,37 +1398,48 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	temp := s.config.Temperature
 	topP := s.config.TopP
 	maxTok := s.config.MaxTokens
-	if snap := bot.LLMSnapshotFrom(ctx); snap != nil && snap.MainModel != nil {
+	snap := bot.LLMSnapshotFrom(ctx)
+	if snap != nil && snap.MainModel != nil {
 		execModel = snap.MainModel
-		if snap.MainDef.Temperature != nil {
-			temp = snap.MainDef.Temperature
-		}
-		if snap.MainDef.TopP != nil {
-			topP = snap.MainDef.TopP
-		}
+		temp = snap.MainDef.Temperature
+		topP = snap.MainDef.TopP
 		if snap.MainDef.MaxTokens > 0 {
 			mt := snap.MainDef.MaxTokens
 			maxTok = &mt
+		} else {
+			maxTok = nil
 		}
 	}
 	if lightTier {
-		if s.config.LightProvider != nil {
-			execProvider = s.config.LightProvider
-		}
-		if snap := bot.LLMSnapshotFrom(ctx); snap != nil && snap.LightModel != nil {
-			execModel = snap.LightModel
-			if snap.LightDef.Temperature != nil {
+		if snap != nil {
+			if snap.Light != nil && snap.LightModel != nil {
+				if s.config.LightProvider != nil {
+					execProvider = s.config.LightProvider
+				} else {
+					execProvider = snap.Light
+				}
+				execModel = snap.LightModel
 				temp = snap.LightDef.Temperature
-			}
-			if snap.LightDef.TopP != nil {
 				topP = snap.LightDef.TopP
+				if snap.LightDef.MaxTokens > 0 {
+					mt := snap.LightDef.MaxTokens
+					maxTok = &mt
+				} else {
+					maxTok = nil
+				}
 			}
-			if snap.LightDef.MaxTokens > 0 {
-				mt := snap.LightDef.MaxTokens
-				maxTok = &mt
+		} else {
+			if s.config.LightProvider != nil {
+				execProvider = s.config.LightProvider
 			}
-		} else if s.config.LightModel != nil {
-			execModel = s.config.LightModel
+			if s.config.LightModel != nil {
+				execModel = s.config.LightModel
+				if s.config.LightParamsConfigured || s.config.LightTemperature != nil || s.config.LightTopP != nil || s.config.LightMaxTokens != nil {
+					temp = s.config.LightTemperature
+					topP = s.config.LightTopP
+					maxTok = s.config.LightMaxTokens
+				}
+			}
 		}
 		tools = route.NarrowTools(tools)
 		tools = append(tools, route.NewUpgradeTool(env))
@@ -1589,16 +1605,37 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 			// 一次完整生成，用主模型会把省下来的时间又吃回去。
 			// ⚠️ provider 与 model 必须配套，缺任一个就整体退回主链路，
 			// 否则会把主模型的 id 发给另一家的客户端。
-			summaryProvider := s.provider
-			var summaryModel *llm.Model
-			if s.config.LightProvider != nil && s.config.LightModel != nil {
-				summaryProvider = s.config.LightProvider
-				summaryModel = s.config.LightModel
-				if snap := bot.LLMSnapshotFrom(ctx); snap != nil && snap.LightModel != nil {
-					summaryModel = snap.LightModel // 热切换后以快照为准
+			var summaryTarget *llm.CompactionSummaryTarget
+			if snap != nil {
+				if snap.Light != nil && snap.LightModel != nil {
+					lightProv := snap.Light
+					if s.config.LightProvider != nil {
+						lightProv = s.config.LightProvider
+					}
+					summaryTarget = &llm.CompactionSummaryTarget{
+						Provider:      lightProv,
+						Model:         snap.LightModel,
+						MaxTokens:     snap.LightDef.MaxTokens,
+						ContextLength: snap.LightDef.ContextLength,
+						Temperature:   snap.LightDef.Temperature,
+						TopP:          snap.LightDef.TopP,
+					}
+				}
+			} else if s.config.LightProvider != nil && s.config.LightModel != nil {
+				lightMax := 0
+				if s.config.LightMaxTokens != nil {
+					lightMax = *s.config.LightMaxTokens
+				}
+				summaryTarget = &llm.CompactionSummaryTarget{
+					Provider:      s.config.LightProvider,
+					Model:         s.config.LightModel,
+					MaxTokens:     lightMax,
+					ContextLength: s.config.LightContextLength,
+					Temperature:   s.config.LightTemperature,
+					TopP:          s.config.LightTopP,
 				}
 			}
-			compactHook := llm.CompactionPrepareStepWithProviderAndModel(compactor, summaryProvider, summaryModel)(ctx)
+			compactHook := llm.CompactionPrepareStepWithTarget(compactor, s.provider, summaryTarget)(ctx)
 			base := prepareStep
 			prepareStep = func(p *llm.GenerateParams) *llm.GenerateParams {
 				if base != nil {

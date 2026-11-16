@@ -166,3 +166,69 @@ func TestLLMStage_LightTierUsesLightSnapshotLimits(t *testing.T) {
 		t.Fatalf("light call model %s max %d temp %v", gotModel, gotMax, gotTemp)
 	}
 }
+
+func TestLLMStage_LightTierClearsUnsetMaxTokensAndSampling(t *testing.T) {
+	var captured llm.GenerateParams
+	prov := &tierProvider{
+		name: "shared",
+		reply: func(_ int, params llm.GenerateParams) (*llm.GenerateResult, error) {
+			captured = params
+			return &llm.GenerateResult{FinishReason: llm.FinishReasonStop, Text: "ok"}, nil
+		},
+	}
+	mainSample := 0.85
+	mainTopP := 0.92
+	mainCap := 128000
+	stage := NewLLMStage("llm", prov, LLMConfig{
+		Model:                 llm.ChatModel("main-128k"),
+		LightProvider:         prov,
+		LightModel:            llm.ChatModel("light-8k"),
+		LightParamsConfigured: true,
+		Temperature:           &mainSample,
+		TopP:                  &mainTopP,
+		MaxTokens:             &mainCap,
+		MaxSteps:              1,
+		HardMaxSteps:          1,
+	}, nil, zap.NewNop().Sugar())
+
+	// Case 1: without snapshot, LightMaxTokens/LightTemperature/LightTopP are unset (nil).
+	// Main's 128k MaxTokens and sampling must NOT leak onto the Light call.
+	env1 := core.NewEnvelope(core.Message{ID: "m1", BotID: "bot", Text: "hello"})
+	route.SetTier(env1, route.IntentChat, route.ModelLight)
+	if _, err := stage.Process(context.Background(), env1); err != nil {
+		t.Fatal(err)
+	}
+	if captured.MaxTokens != nil || captured.Temperature != nil || captured.TopP != nil {
+		t.Fatalf("fallback light tier leaked main params: max=%v temp=%v topP=%v",
+			captured.MaxTokens, captured.Temperature, captured.TopP)
+	}
+
+	// Case 2: with snapshot where LightDef has MaxTokens=0 and nil sampling, must also clear.
+	snap := &bot.LLMSnapshot{
+		MainModel:  llm.ChatModel("main-128k"),
+		MainDef:    config.ModelDef{Model: "main-128k", MaxTokens: 0}, // hot-swapped to provider default
+		Light:      prov,
+		LightModel: llm.ChatModel("light-8k"),
+		LightDef:   config.ModelDef{Model: "light-8k", MaxTokens: 0},
+	}
+	ctx := bot.WithLLMSnapshot(context.Background(), snap)
+	env2 := core.NewEnvelope(core.Message{ID: "m2", BotID: "bot", Text: "hello"})
+	route.SetTier(env2, route.IntentChat, route.ModelLight)
+	if _, err := stage.Process(ctx, env2); err != nil {
+		t.Fatal(err)
+	}
+	if captured.MaxTokens != nil || captured.Temperature != nil || captured.TopP != nil {
+		t.Fatalf("snapshot light tier leaked main params: max=%v temp=%v topP=%v",
+			captured.MaxTokens, captured.Temperature, captured.TopP)
+	}
+
+	// Case 3: hot-swapped MainDef with MaxTokens=0 clears startup s.config.MaxTokens.
+	env3 := core.NewEnvelope(core.Message{ID: "m3", BotID: "bot", Text: "complex task"})
+	if _, err := stage.Process(ctx, env3); err != nil {
+		t.Fatal(err)
+	}
+	if captured.MaxTokens != nil || captured.Temperature != nil || captured.TopP != nil {
+		t.Fatalf("hot-swapped main tier kept stale startup params: max=%v temp=%v topP=%v",
+			captured.MaxTokens, captured.Temperature, captured.TopP)
+	}
+}

@@ -1659,6 +1659,8 @@ type CompactionConfig struct {
 	// SummaryMaxTokens 自动压缩摘要输出上限的运维封顶（含推理 token）。
 	// 0 = 跟随模型配置的 maxTokens（ModelDef.MaxTokens）；>0 只能压低模型上限。
 	SummaryMaxTokens int
+	// SummaryUseLight 自动压缩摘要是否优先走 bot 配置的 Light 模型（默认 true）。
+	SummaryUseLight bool
 	// ToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。
 	ToolOutputThreshold int
 	// Auto 是否启用自动压缩。
@@ -1679,6 +1681,7 @@ func DefaultCompactionConfig() CompactionConfig {
 		TailTurns:            2,
 		MinMessagesToCompact: 6,
 		SummaryMaxTokens:     0, // 0 = follow the model's configured maxTokens
+		SummaryUseLight:      true,
 		ToolOutputThreshold:  500,
 		Auto:                 true,
 	}
@@ -1697,6 +1700,7 @@ func (b *Builder) GetCompactionConfig() CompactionConfig {
 		TailTurns:            b.store.GetInt(KeyCompactionTailTurns, d.TailTurns),
 		MinMessagesToCompact: b.store.GetInt(KeyCompactionMinMessagesToCompact, d.MinMessagesToCompact),
 		SummaryMaxTokens:     b.store.GetInt(KeyCompactionSummaryMaxTokens, d.SummaryMaxTokens),
+		SummaryUseLight:      b.store.GetBool(KeyCompactionSummaryUseLight, d.SummaryUseLight),
 		ToolOutputThreshold:  b.store.GetInt(KeyCompactionToolOutputThreshold, d.ToolOutputThreshold),
 		Auto:                 b.store.GetBool(KeyCompactionAuto, d.Auto),
 	}
@@ -1714,6 +1718,7 @@ func CompactionMetaSpecs() []MetaSpec {
 		{Key: KeyCompactionTailTurns, Category: "Compaction", Description: "压缩时保留的最近完整对话轮数（默认 2）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionMinMessagesToCompact, Category: "Compaction", Description: "触发压缩的最小消息数（默认 6，少于则不压缩）。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionSummaryMaxTokens, Category: "Compaction", Description: "自动压缩摘要的输出上限封顶（含推理 token）。0（默认）= 跟随模型配置的 maxTokens；大于 0 时只能压低模型上限。保存后下一轮对话即生效。"},
+		{Key: KeyCompactionSummaryUseLight, Category: "Compaction", Description: "自动压缩摘要是否优先使用 bot 配置的 Light（快）模型（默认 true）。关闭后摘要始终走主模型。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionToolOutputThreshold, Category: "Compaction", Description: "单个工具输出超过此 token 数（默认 500）在 pruning 阶段被裁剪为占位符。保存后下一轮对话即生效。"},
 		{Key: KeyCompactionAuto, Category: "Compaction", Description: "是否启用自动会话压缩（默认 true）。关闭后仅做工具输出裁剪、不再 LLM 摘要。保存后下一轮对话即生效。"},
 	}
@@ -2148,6 +2153,7 @@ func DefaultMap() map[string]string {
 		KeyCompactionTailTurns:            "2",
 		KeyCompactionMinMessagesToCompact: "6",
 		KeyCompactionSummaryMaxTokens:     "0",
+		KeyCompactionSummaryUseLight:      "true",
 		KeyCompactionToolOutputThreshold:  "500",
 		KeyCompactionAuto:                 "true",
 		// Notify

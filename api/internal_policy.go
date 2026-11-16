@@ -38,5 +38,10 @@ func newBotInternalPolicy(store *config.Store, logger *zap.SugaredLogger, botID,
 			return config.NewBuilder(store, logger).GetBotInternalLLMSettings(botID)
 		}
 	}
-	return llm.NewInternalPolicy(settings, botEffort, reasoningModels...)
+	pol := llm.NewInternalPolicy(settings, botEffort, reasoningModels...)
+	if bundle != nil && bundle.MainDef.Model != "" {
+		mainID := bundle.MainDef.Model
+		pol.SetBotModel(func() string { return mainID })
+	}
+	return pol
 }

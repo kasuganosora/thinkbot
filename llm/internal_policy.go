@@ -115,10 +115,24 @@ type InternalSettings struct {
 type InternalPolicy struct {
 	settings  func() InternalSettings
 	botEffort string
+	// botModel returns the bot's main model ID when known, scoping botEffort
+	// inference so a non-reasoning cross-provider Light/Vision model does not
+	// inherit reasoning_effort solely because the Main model accepts it.
+	botModel func() string
 	// reasoningModels: model IDs marked with the "reasoning" capability.
 	reasoningModels map[string]bool
 	// modelAllows 在每次调用时读取当前快照，避免启动时抄下的能力列表过期。
 	modelAllows func(model string) bool
+}
+
+// SetBotModel binds the live main-model ID resolver so botEffort only implies
+// reasoning_effort support for that main model (other unknown-family models
+// must declare the "reasoning" capability explicitly).
+func (p *InternalPolicy) SetBotModel(fn func() string) {
+	if p == nil {
+		return
+	}
+	p.botModel = fn
 }
 
 // NewInternalPolicy creates a policy. settings may be nil (built-in defaults);
@@ -224,17 +238,46 @@ func (p *InternalPolicy) botSendsEffort() bool {
 	return true
 }
 
+func (p *InternalPolicy) botSendsEffortFor(model string) bool {
+	if !p.botSendsEffort() {
+		return false
+	}
+	if p.botModel == nil {
+		return true
+	}
+	bm := strings.TrimSpace(p.botModel())
+	if bm == "" {
+		return true
+	}
+	return sameModelID(bm, model)
+}
+
+func sameModelID(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	if i := strings.LastIndexByte(a, '/'); i >= 0 {
+		a = a[i+1:]
+	}
+	if i := strings.LastIndexByte(b, '/'); i >= 0 {
+		b = b[i+1:]
+	}
+	return a != "" && strings.EqualFold(a, b)
+}
+
 func (p *InternalPolicy) autoEffort(purpose, model string) string {
 	fam := reasoningFamilyOf(model)
 	if fam == familyNoEffort {
 		return ""
 	}
-	if !p.botSendsEffort() && !p.allows(model) && fam == familyUnknown {
+	if !p.botSendsEffortFor(model) && !p.allows(model) && fam == familyUnknown {
 		// Nothing says this provider accepts the parameter: don't send it.
 		return ""
 	}
 	want := purposeDefault(purpose)
-	botCheap := p.botEffort == "none" || p.botEffort == "minimal"
+	botCheap := p.botSendsEffortFor(model) && (p.botEffort == "none" || p.botEffort == "minimal")
 	if botCheap && (want == "low" || want == "medium" || want == "high") {
 		want = p.botEffort // the bot already runs cheaper than "low"
 	}

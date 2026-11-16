@@ -1743,6 +1743,7 @@ func compactionConfigFromConfig(c config.CompactionConfig, contextLength, output
 		TailTurns:            c.TailTurns,
 		MinMessagesToCompact: c.MinMessagesToCompact,
 		SummaryMaxTokens:     c.SummaryMaxTokens,
+		DisableLightSummary:  !c.SummaryUseLight,
 		ToolOutputThreshold:  c.ToolOutputThreshold,
 		Auto:                 c.Auto,
 	}
@@ -2126,6 +2127,12 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 		return false
 	})
+	internalPol.SetBotModel(func() string {
+		if snap := slot.Current(); snap != nil && snap.MainDef.Model != "" {
+			return snap.MainDef.Model
+		}
+		return bundle.MainDef.Model
+	})
 	memCompactor := storage.NewSQLiteCompactor(storage.SQLiteCompactorConfig{
 		Provider: bundle.Main,
 		Model:    &llm.Model{ID: bundle.MainDef.Model},
@@ -2291,21 +2298,39 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	// 同一会话内跨轮持久可用，且不与其它并发会话串扰。
 	deferralStore := llm.NewDeferralStore(true).SetLogger(s.logger)
 
+	var lightMaxTok *int
+	var lightSamplingTemp, lightTopP *float64
+	var lightCtxLen int
+	if bundle.Light != nil {
+		lightSamplingTemp = bundle.LightDef.Temperature
+		lightTopP = bundle.LightDef.TopP
+		lightCtxLen = bundle.LightDef.ContextLength
+		if bundle.LightDef.MaxTokens > 0 {
+			lmt := bundle.LightDef.MaxTokens
+			lightMaxTok = &lmt
+		}
+	}
+
 	llmStage := stages.NewLLMStage(
 		"llm",
 		bundle.Main,
 		stages.LLMConfig{
-			SystemPrompt:     "", // 由 PromptStage（Order=97）组装后经 Envelope KV "system.prompt" 注入
-			Model:            mainModel,
-			LightProvider:    bundle.Light,
-			LightModel:       lightModelFor(bundle),
-			Temperature:      temp,
-			TopP:             bundle.MainDef.TopP,
-			FrequencyPenalty: &freqPen,
-			PresencePenalty:  &presPen,
-			MaxTokens:        maxTok,
-			ContextLength:    bundle.MainDef.ContextLength,
-			ReasoningEffort:  def.ReasoningEffort,
+			SystemPrompt:          "", // 由 PromptStage（Order=97）组装后经 Envelope KV "system.prompt" 注入
+			Model:                 mainModel,
+			LightProvider:         bundle.Light,
+			LightModel:            lightModelFor(bundle),
+			LightParamsConfigured: bundle.Light != nil && lightModelFor(bundle) != nil,
+			LightTemperature:      lightSamplingTemp,
+			LightTopP:             lightTopP,
+			LightMaxTokens:        lightMaxTok,
+			LightContextLength:    lightCtxLen,
+			Temperature:           temp,
+			TopP:                  bundle.MainDef.TopP,
+			FrequencyPenalty:      &freqPen,
+			PresencePenalty:       &presPen,
+			MaxTokens:             maxTok,
+			ContextLength:         bundle.MainDef.ContextLength,
+			ReasoningEffort:       def.ReasoningEffort,
 			HeartbeatReasoningEffort: func() string {
 				if s.store == nil {
 					return ""

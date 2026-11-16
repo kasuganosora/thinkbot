@@ -355,6 +355,10 @@ const (
 	// KeyCompactionSummaryMaxTokens 摘要输出上限封顶。默认 0 = 跟随模型配置的 maxTokens。
 	KeyCompactionSummaryMaxTokens = "compaction.summary_max_tokens"
 
+	// KeyCompactionSummaryUseLight 自动压缩摘要是否优先走 bot 配置的 Light（快）模型。
+	// 默认 true；设为 false 时摘要始终使用主链路模型。
+	KeyCompactionSummaryUseLight = "compaction.summary_use_light"
+
 	// KeyCompactionToolOutputThreshold 单个工具输出超过此 token 数在 pruning 阶段被裁剪。默认 500。
 	KeyCompactionToolOutputThreshold = "compaction.tool_output_threshold"
 

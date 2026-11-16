@@ -118,6 +118,10 @@ type CompactionConfig struct {
 	// 此前默认写死 4096：思考模型（推理 token 计入上限）摘要会被截断。
 	SummaryMaxTokens int
 
+	// DisableLightSummary 为 true 时禁用独立快模型（Light）摘要，强制走主链路模型。
+	// 零值 false 表示默认启用（由 compaction.summary_use_light 映射为 !SummaryUseLight）。
+	DisableLightSummary bool
+
 	// ToolOutputThreshold 单个工具输出的 token 阈值。
 	// 超过此值的工具输出在 pruning 阶段会被裁剪。
 	// 默认 500。
@@ -130,6 +134,17 @@ type CompactionConfig struct {
 	// Auto 是否启用自动压缩。
 	// 默认 true。
 	Auto bool
+}
+
+// CompactionSummaryTarget 描述自动压缩摘要使用的独立模型及其采样与窗口上限。
+// Provider 与 Model 必须配套；缺任一个或被 DisableLightSummary 禁用时回退到主链路模型。
+type CompactionSummaryTarget struct {
+	Provider      Provider
+	Model         *Model
+	MaxTokens     int
+	ContextLength int
+	Temperature   *float64
+	TopP          *float64
 }
 
 // DefaultCompactionConfig 返回默认压缩配置。
@@ -595,20 +610,22 @@ func (c *Compactor) compactMessageToolOutputs(msg Message) Message {
 
 // Compact 执行完整的上下文压缩流程，摘要使用主链路的 provider / model。
 func (c *Compactor) Compact(ctx context.Context, params GenerateParams, provider Provider) (GenerateParams, error) {
-	return c.compactWithSummaryModel(ctx, params, provider, nil)
+	return c.compactWithTarget(ctx, params, provider, nil)
 }
 
 // compactWithSummaryModel 与 Compact 相同，但允许摘要走另一个模型。
-// summaryModel != nil 时只替换摘要请求的 Model，主链路返回的 params.Model 不变 ——
-// 压缩不能悄悄把后续编排切到别的模型上。
-//
-// 流程：
-//  1. 裁剪旧工具输出（PruneToolOutputs）
-//  2. 如果仍然溢出，生成旧消息摘要
-//  3. 用摘要 + 最近消息替代旧消息
-//
-// provider 非空时使用 LLM 生成摘要；为 nil 时仅做 pruning。
 func (c *Compactor) compactWithSummaryModel(ctx context.Context, params GenerateParams, provider Provider, summaryModel *Model) (GenerateParams, error) {
+	var target *CompactionSummaryTarget
+	if summaryModel != nil {
+		target = &CompactionSummaryTarget{Provider: provider, Model: summaryModel}
+	}
+	return c.compactWithTarget(ctx, params, provider, target)
+}
+
+// compactWithTarget 与 Compact 相同，但允许摘要走独立的 target（含各自的采样/输出上限/窗口），
+// 并在快模型禁用、窗口不足或报错时自动回退到 mainProvider。
+// 主链路返回的 params.Model 不变 —— 压缩不能悄悄把后续编排切到别的模型上。
+func (c *Compactor) compactWithTarget(ctx context.Context, params GenerateParams, mainProvider Provider, target *CompactionSummaryTarget) (GenerateParams, error) {
 	// doom-loop 计数只在 prune 后仍溢出时增加；prune 成功则清零。
 
 	// Step 1: 裁剪工具输出
@@ -633,11 +650,11 @@ func (c *Compactor) compactWithSummaryModel(ctx context.Context, params Generate
 	c.mu.Unlock()
 
 	// Step 2: 需要摘要压缩
-	if provider == nil {
+	if mainProvider == nil && (target == nil || target.Provider == nil) {
 		return params, nil
 	}
 
-	summaryParams, err := c.summarizeMessages(ctx, params, provider, summaryModel)
+	summaryParams, err := c.summarizeMessagesWithTarget(ctx, params, mainProvider, target)
 	if err != nil {
 		return params, fmt.Errorf("compaction: %w", err)
 	}
@@ -647,13 +664,17 @@ func (c *Compactor) compactWithSummaryModel(ctx context.Context, params Generate
 	return summaryParams, nil
 }
 
-// summarizeMessages 使用 LLM 生成旧消息的增量摘要。
-//
-// 策略：
-//   - 按 turn-based 方式保留最近的对话轮次
-//   - 增量更新之前的摘要（如果有）
-//   - 使用结构化 Markdown 模板生成摘要
+// summarizeMessages 使用 LLM 生成旧消息的增量摘要（保留兼容签名供单测与内部调用）。
 func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams, provider Provider, summaryModel *Model) (GenerateParams, error) {
+	var target *CompactionSummaryTarget
+	if summaryModel != nil {
+		target = &CompactionSummaryTarget{Provider: provider, Model: summaryModel}
+	}
+	return c.summarizeMessagesWithTarget(ctx, params, provider, target)
+}
+
+// summarizeMessagesWithTarget 使用 LLM 生成旧消息的增量摘要，支持独立 Light 摘要目标与主模型回退。
+func (c *Compactor) summarizeMessagesWithTarget(ctx context.Context, params GenerateParams, mainProvider Provider, target *CompactionSummaryTarget) (GenerateParams, error) {
 	messages := params.Messages
 
 	// 按 turn-based 方式确定 head/tail 分割点
@@ -683,30 +704,95 @@ func (c *Compactor) summarizeMessages(ctx context.Context, params GenerateParams
 
 	// 构建摘要提示词
 	prompt := c.buildSummaryPrompt(oldMessages)
-
 	summaryMessages := []Message{UserMessage(prompt)}
 
-	summaryParams := GenerateParams{
-		Model:    params.Model,
-		System:   CompactionSystemPrompt,
-		Messages: summaryMessages,
+	cfg := c.liveConfigIn(ctx)
+	runSummary := func(prov Provider, model *Model, modelMaxTok, modelCtxLen int, modelTemp, modelTopP *float64) (*GenerateResult, int, error) {
+		sp := GenerateParams{
+			Model:       model,
+			System:      CompactionSystemPrompt,
+			Messages:    summaryMessages,
+			Temperature: modelTemp,
+			TopP:        modelTopP,
+		}
+		estInput := EstimateParamsTokens(sp)
+		mt := ResolveMaxOutputTokens(modelMaxTok, cfg.SummaryMaxTokens, DefaultMaxOutputTokens)
+		mt = c.policy.MaxTokens(PurposeAutoCompact, mt, DefaultMaxOutputTokens)
+		mt = FitOutputToContext(mt, modelCtxLen, estInput, 1024)
+		sp.MaxTokens = &mt
+		// Without an explicit effort GLM-5.3 reasons at "max" (unbounded with a
+		// 128k limit); the policy picks a low effort where the provider accepts it.
+		c.policy.Apply(PurposeAutoCompact, &sp)
+		callCtx := WithKeptParams(ctx, KeptParams{MaxTokens: true, ReasoningEffort: true})
+		res, err := prov.DoGenerate(callCtx, sp)
+		return res, mt, err
 	}
-	// 摘要是分类/归纳型轻任务，允许走快模型（与 provider 必须配套，由调用方保证）。
-	// 只改这一次摘要请求；主链路 params 不受影响。
-	if summaryModel != nil {
-		summaryParams.Model = summaryModel
-	}
-	// Same model as the main call → same configured output limit
-	// (params.MaxTokens = ModelDef.MaxTokens); compaction.summary_max_tokens
-	// may only lower it.
-	maxTokens := ResolveMaxOutputTokens(maxTokensOf(params.MaxTokens), c.liveConfig().SummaryMaxTokens, DefaultMaxOutputTokens)
-	maxTokens = c.policy.MaxTokens(PurposeAutoCompact, maxTokens, DefaultMaxOutputTokens)
-	summaryParams.MaxTokens = &maxTokens
-	// Without an explicit effort GLM-5.3 reasons at "max" (unbounded with a
-	// 128k limit); the policy picks a low effort where the provider accepts it.
-	c.policy.Apply(PurposeAutoCompact, &summaryParams)
 
-	result, err := provider.DoGenerate(ctx, summaryParams)
+	useTarget := target != nil && target.Provider != nil && target.Model != nil && !cfg.DisableLightSummary
+	canFallbackToMain := mainProvider != nil && (!useTarget || mainProvider != target.Provider || params.Model == nil || params.Model.ID != target.Model.ID)
+	if useTarget && mainProvider == target.Provider && params.Model != nil && params.Model.ID == target.Model.ID &&
+		target.MaxTokens == 0 && target.ContextLength == 0 && target.Temperature == nil && target.TopP == nil {
+		useTarget = false
+	}
+
+	if useTarget && target.ContextLength > 0 && canFallbackToMain {
+		estInput := EstimateParamsTokens(GenerateParams{
+			System:   CompactionSystemPrompt,
+			Messages: summaryMessages,
+		})
+		if estInput+outputContextMargin > target.ContextLength {
+			if c.logger != nil {
+				c.logger.Warnw("compaction: summary prompt exceeds light model context window, falling back to main model",
+					"light_model", target.Model.ID,
+					"est_input_tokens", estInput,
+					"light_context_length", target.ContextLength)
+			}
+			useTarget = false
+		}
+	}
+
+	var (
+		result    *GenerateResult
+		maxTokens int
+		err       error
+	)
+	if useTarget {
+		result, maxTokens, err = runSummary(
+			target.Provider, target.Model,
+			target.MaxTokens, target.ContextLength,
+			target.Temperature, target.TopP,
+		)
+		if err != nil && ctx.Err() == nil && canFallbackToMain {
+			if c.logger != nil {
+				c.logger.Warnw("compaction: light model summary failed, retrying with main model",
+					"light_model", target.Model.ID, "err", err)
+			}
+			result, maxTokens, err = runSummary(
+				mainProvider, params.Model,
+				maxTokensOf(params.MaxTokens), cfg.ContextLength,
+				params.Temperature, params.TopP,
+			)
+		} else if err == nil && result.FinishReason == FinishReasonLength && ctx.Err() == nil && canFallbackToMain && maxTokensOf(params.MaxTokens) > maxTokens {
+			if c.logger != nil {
+				c.logger.Warnw("compaction: light model summary hit output limit, retrying with main model",
+					"light_model", target.Model.ID, "light_max_tokens", maxTokens)
+			}
+			result, maxTokens, err = runSummary(
+				mainProvider, params.Model,
+				maxTokensOf(params.MaxTokens), cfg.ContextLength,
+				params.Temperature, params.TopP,
+			)
+		}
+	} else {
+		if mainProvider == nil {
+			return params, nil
+		}
+		result, maxTokens, err = runSummary(
+			mainProvider, params.Model,
+			maxTokensOf(params.MaxTokens), cfg.ContextLength,
+			params.Temperature, params.TopP,
+		)
+	}
 	if err != nil {
 		return params, fmt.Errorf("summarize: %w", err)
 	}
@@ -1038,13 +1124,24 @@ func CompactionPrepareStepWithProvider(compactor *Compactor, provider Provider) 
 // 做摘要会把省下来的时间又吃回去。summaryModel 只作用于摘要请求，主链路模型不变。
 // ⚠️ provider 与 summaryModel 必须配套：调用方要么两个都给，要么都留主链路的。
 func CompactionPrepareStepWithProviderAndModel(compactor *Compactor, provider Provider, summaryModel *Model) func(context.Context) func(*GenerateParams) *GenerateParams {
+	var target *CompactionSummaryTarget
+	if summaryModel != nil {
+		target = &CompactionSummaryTarget{Provider: provider, Model: summaryModel}
+	}
+	return CompactionPrepareStepWithTarget(compactor, provider, target)
+}
+
+// CompactionPrepareStepWithTarget 与 CompactionPrepareStepWithProvider 相同，
+// 但允许摘要优先走独立的快模型（target，携带自身的采样/输出上限/上下文窗口），
+// 并在快模型未就绪、被配置关闭、上下文窗口不足或调用失败时自动回退到 mainProvider。
+func CompactionPrepareStepWithTarget(compactor *Compactor, mainProvider Provider, target *CompactionSummaryTarget) func(context.Context) func(*GenerateParams) *GenerateParams {
 	return func(ctx context.Context) func(*GenerateParams) *GenerateParams {
 		return func(params *GenerateParams) *GenerateParams {
 			if compactor == nil || !compactor.ShouldCompactIn(ctx, *params) {
 				return nil
 			}
 
-			newParams, err := compactor.compactWithSummaryModel(ctx, *params, provider, summaryModel)
+			newParams, err := compactor.compactWithTarget(ctx, *params, mainProvider, target)
 			if err != nil {
 				// 压缩失败，降级为 prune-only
 				newParams = *params

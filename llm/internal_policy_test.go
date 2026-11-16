@@ -261,3 +261,25 @@ func TestParseReasoningLevelConvergesAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestInternalPolicy_SetBotModelScopesBotEffort(t *testing.T) {
+	mainModel := "custom-main-reasoner"
+	p := NewInternalPolicy(nil, "medium", "o4-mini")
+	p.SetBotModel(func() string { return mainModel })
+
+	// Main model inherits botEffort support even if family is unknown.
+	if got := p.ReasoningEffort(PurposeAutoCompact, "vendor/custom-main-reasoner"); got != "low" {
+		t.Fatalf("main model effort = %q, want low", got)
+	}
+	// Unknown-family non-reasoning light model must NOT receive reasoning_effort.
+	if got := p.ReasoningEffort(PurposeAutoCompact, "gpt-4o-mini"); got != "" {
+		t.Fatalf("unknown light model must not inherit botEffort, got %q", got)
+	}
+	// Documented family or explicit reasoning capability on light model still works.
+	if got := p.ReasoningEffort(PurposeLazyJudge, "glm-5.2"); got != "none" {
+		t.Fatalf("documented light model effort = %q, want none", got)
+	}
+	if got := p.ReasoningEffort(PurposeAutoCompact, "o4-mini"); got != "low" {
+		t.Fatalf("capability light model effort = %q, want low", got)
+	}
+}

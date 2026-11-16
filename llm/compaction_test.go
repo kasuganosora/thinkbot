@@ -811,3 +811,204 @@ func TestCompactor_DoomLoopIncrementsOnlyOnOverflow(t *testing.T) {
 		t.Errorf("overflow without provider should count one attempt, got %d", count)
 	}
 }
+
+type summaryCaptureProvider struct {
+	name  string
+	calls []GenerateParams
+	reply func(params GenerateParams) (*GenerateResult, error)
+}
+
+func (p *summaryCaptureProvider) Name() string { return p.name }
+
+func (p *summaryCaptureProvider) DoGenerate(_ context.Context, params GenerateParams) (*GenerateResult, error) {
+	p.calls = append(p.calls, params)
+	return p.reply(params)
+}
+
+func (p *summaryCaptureProvider) DoStream(context.Context, GenerateParams) (*StreamResult, error) {
+	return nil, fmt.Errorf("stream unused")
+}
+
+func TestCompactionPrepareStepWithTarget_IsolatesLightParamsAndDisableFlag(t *testing.T) {
+	lightProv := &summaryCaptureProvider{
+		name: "light",
+		reply: func(GenerateParams) (*GenerateResult, error) {
+			return &GenerateResult{Text: "## Goal\n- Light summary", FinishReason: FinishReasonStop}, nil
+		},
+	}
+	mainProv := &summaryCaptureProvider{
+		name: "main",
+		reply: func(GenerateParams) (*GenerateResult, error) {
+			return &GenerateResult{Text: "## Goal\n- Main summary", FinishReason: FinishReasonStop}, nil
+		},
+	}
+
+	liveCfg := CompactionConfig{
+		MaxTokens:            160,
+		ReservedTokens:       40,
+		TailTokens:           20,
+		TailTurns:            1,
+		MinMessagesToCompact: 2,
+		Auto:                 true,
+	}
+	compactor := NewCompactor(liveCfg)
+	compactor.SetConfigSource(func() CompactionConfig { return liveCfg })
+
+	lightSample := 0.15
+	lightTopP := 0.75
+	hook := CompactionPrepareStepWithTarget(compactor, mainProv, &CompactionSummaryTarget{
+		Provider:      lightProv,
+		Model:         ChatModel("light-summarizer"),
+		MaxTokens:     4096,
+		Temperature:   &lightSample,
+		TopP:          &lightTopP,
+		ContextLength: 64000,
+	})
+
+	mainCap := 128000
+	mainSample := 0.9
+	mainTopP := 0.95
+	makeOverflowParams := func() *GenerateParams {
+		return &GenerateParams{
+			Model:       ChatModel("main-reasoner"),
+			MaxTokens:   &mainCap,
+			Temperature: &mainSample,
+			TopP:        &mainTopP,
+			System:      strings.Repeat("s", 300),
+			Messages: []Message{
+				UserMessage(strings.Repeat("u1 ", 80)),
+				AssistantMessage(strings.Repeat("a1 ", 80)),
+				UserMessage(strings.Repeat("u2 ", 40)),
+			},
+		}
+	}
+
+	res := hook(context.Background())(makeOverflowParams())
+	if res == nil {
+		t.Fatal("expected compaction prepare step to rewrite messages")
+	}
+	if len(lightProv.calls) != 1 || len(mainProv.calls) != 0 {
+		t.Fatalf("light calls=%d main calls=%d, want 1 and 0", len(lightProv.calls), len(mainProv.calls))
+	}
+	got := lightProv.calls[0]
+	if got.Model == nil || got.Model.ID != "light-summarizer" {
+		t.Fatalf("summary model = %v, want light-summarizer", got.Model)
+	}
+	if got.MaxTokens == nil || *got.MaxTokens != 4096 {
+		t.Fatalf("light summary MaxTokens = %v, want 4096 (must not inherit main 128000)", got.MaxTokens)
+	}
+	if got.Temperature == nil || *got.Temperature != 0.15 || got.TopP == nil || *got.TopP != 0.75 {
+		t.Fatalf("light summary sampling = temp:%v topP:%v, want 0.15/0.75", got.Temperature, got.TopP)
+	}
+
+	// Toggle DisableLightSummary at runtime -> must summarize on Main with Main's parameters.
+	liveCfg.DisableLightSummary = true
+	compactor.resetDoomLoop()
+	res2 := hook(context.Background())(makeOverflowParams())
+	if res2 == nil {
+		t.Fatal("expected compaction prepare step to rewrite messages with main model")
+	}
+	if len(mainProv.calls) != 1 {
+		t.Fatalf("main calls = %d, want 1 when DisableLightSummary is true", len(mainProv.calls))
+	}
+	if mainProv.calls[0].Model == nil || mainProv.calls[0].Model.ID != "main-reasoner" {
+		t.Fatalf("main summary model = %v, want main-reasoner", mainProv.calls[0].Model)
+	}
+}
+
+func TestCompactionPrepareStepWithTarget_FallsBackToMainOnWindowOrError(t *testing.T) {
+	t.Run("input exceeds light context window", func(t *testing.T) {
+		lightProv := &summaryCaptureProvider{
+			name: "light",
+			reply: func(GenerateParams) (*GenerateResult, error) {
+				t.Fatal("light provider must not be called when prompt exceeds its ContextLength")
+				return nil, nil
+			},
+		}
+		mainProv := &summaryCaptureProvider{
+			name: "main",
+			reply: func(GenerateParams) (*GenerateResult, error) {
+				return &GenerateResult{Text: "## Goal\n- Fallback main summary", FinishReason: FinishReasonStop}, nil
+			},
+		}
+		compactor := NewCompactor(CompactionConfig{
+			MaxTokens:            160,
+			ReservedTokens:       40,
+			TailTokens:           20,
+			TailTurns:            1,
+			MinMessagesToCompact: 2,
+			Auto:                 true,
+		})
+		hook := CompactionPrepareStepWithTarget(compactor, mainProv, &CompactionSummaryTarget{
+			Provider:      lightProv,
+			Model:         ChatModel("tiny-light"),
+			ContextLength: 500, // smaller than summary prompt + margin
+		})
+		mainCap := 64000
+		p := &GenerateParams{
+			Model:     ChatModel("main-long"),
+			MaxTokens: &mainCap,
+			System:    strings.Repeat("s", 300),
+			Messages: []Message{
+				UserMessage(strings.Repeat("long history ", 100)),
+				AssistantMessage(strings.Repeat("assistant reply ", 100)),
+				UserMessage("latest turn"),
+			},
+		}
+		if res := hook(context.Background())(p); res == nil {
+			t.Fatal("expected compaction to succeed via main fallback")
+		}
+		if len(mainProv.calls) != 1 || len(lightProv.calls) != 0 {
+			t.Fatalf("main calls=%d light calls=%d, want 1 and 0", len(mainProv.calls), len(lightProv.calls))
+		}
+	})
+
+	t.Run("light provider error retries on main", func(t *testing.T) {
+		lightProv := &summaryCaptureProvider{
+			name: "light",
+			reply: func(GenerateParams) (*GenerateResult, error) {
+				return nil, fmt.Errorf("light model 400 invalid max_tokens")
+			},
+		}
+		mainProv := &summaryCaptureProvider{
+			name: "main",
+			reply: func(GenerateParams) (*GenerateResult, error) {
+				return &GenerateResult{Text: "## Goal\n- Recovered on main", FinishReason: FinishReasonStop}, nil
+			},
+		}
+		compactor := NewCompactor(CompactionConfig{
+			MaxTokens:            160,
+			ReservedTokens:       40,
+			TailTokens:           20,
+			TailTurns:            1,
+			MinMessagesToCompact: 2,
+			Auto:                 true,
+		})
+		hook := CompactionPrepareStepWithTarget(compactor, mainProv, &CompactionSummaryTarget{
+			Provider:      lightProv,
+			Model:         ChatModel("flaky-light"),
+			ContextLength: 128000,
+		})
+		mainCap := 64000
+		p := &GenerateParams{
+			Model:     ChatModel("main-model"),
+			MaxTokens: &mainCap,
+			System:    strings.Repeat("s", 300),
+			Messages: []Message{
+				UserMessage(strings.Repeat("history ", 80)),
+				AssistantMessage(strings.Repeat("reply ", 80)),
+				UserMessage("latest"),
+			},
+		}
+		res := hook(context.Background())(p)
+		if res == nil {
+			t.Fatal("expected compaction to recover on main")
+		}
+		if len(lightProv.calls) != 1 || len(mainProv.calls) != 1 {
+			t.Fatalf("light calls=%d main calls=%d, want 1 and 1", len(lightProv.calls), len(mainProv.calls))
+		}
+		if gotText := TextFromParts(res.Messages[0].Content); !strings.Contains(gotText, "Recovered on main") {
+			t.Fatalf("expected main summary in compacted messages, got %q", gotText)
+		}
+	})
+}
