@@ -178,24 +178,50 @@ func (s *sessionCore) Poll(sinceSeq uint64, mode string, lines int, wait time.Du
 	now := time.Now()
 	s.settle(now)
 	settled := s.delta.SettledSeq()
-	if sinceSeq > settled {
+	if sinceSeq > settled && mode != "raw" && mode != "tail" {
 		// Guard against an agent accidentally using seq (raw bytes) as the
 		// cursor: clamp instead of silently skipping unsettled content.
 		sinceSeq = settled
 	}
-	if wait > 0 {
-		if d, _ := s.delta.Delta(sinceSeq); d == "" {
-			deadline := time.Now().Add(wait)
-			for time.Now().Before(deadline) {
-				time.Sleep(25 * time.Millisecond)
-				s.settle(time.Now())
-				if d, _ = s.delta.Delta(sinceSeq); d != "" {
-					break
-				}
+	if wait > 0 && !s.pollReady(sinceSeq, mode) {
+		deadline := time.Now().Add(wait)
+		for time.Now().Before(deadline) {
+			time.Sleep(25 * time.Millisecond)
+			s.settle(time.Now())
+			if s.pollReady(sinceSeq, mode) {
+				break
 			}
 		}
 	}
 	return s.viewInternal(sinceSeq, mode, lines, true), nil
+}
+
+func (s *sessionCore) pollReady(sinceSeq uint64, mode string) bool {
+	s.mu.RLock()
+	running := s.state == SessionRunning
+	s.mu.RUnlock()
+	if !running {
+		return true
+	}
+	s.bufMu.Lock()
+	defer s.bufMu.Unlock()
+
+	d, settled := s.delta.Delta(sinceSeq)
+	if mode == "raw" {
+		return s.ring.Seq() > sinceSeq
+	}
+	if mode == "tail" {
+		tail, _ := s.plainTailExplicitLocked(sinceSeq, settled)
+		return tail != ""
+	}
+	if d != "" {
+		return true
+	}
+	if settled > sinceSeq {
+		tail, _ := s.plainTailSinceLocked(sinceSeq, settled)
+		return tail != ""
+	}
+	return false
 }
 
 func (s *sessionCore) view(sinceSeq uint64, mode string, lines int) SessionView {
@@ -259,13 +285,18 @@ func (s *sessionCore) viewInternal(sinceSeq uint64, mode string, lines int, allo
 		raw, _ := s.ring.Since(sinceSeq)
 		v.Delta = string(raw)
 		v.Truncated = v.Truncated || s.ring.Truncated()
-	} else if allowTail && (mode == "tail" || (delta == "" && settled > sinceSeq)) {
+	} else if allowTail && mode == "tail" {
+		tail, truncated := s.plainTailExplicitLocked(sinceSeq, settled)
+		if tail != "" {
+			v.Delta = tail
+			v.Truncated = v.Truncated || truncated
+		}
+	} else if allowTail && delta == "" && settled > sinceSeq {
 		// Screen-diff deltas can be empty even while bytes keep arriving: a
 		// scrolling CLI, a clear-on-redraw frame, or CR-only progress output
 		// leaves no changed rows, and MaybeSettle still advances settledSeq.
 		// Without this the agent polls "blind" (delta="" + seq climbing),
 		// repeats the identical poll and gets cut off by the step guard.
-		// mode=tail is an explicit escape hatch for the same situation.
 		tail, truncated := s.plainTailSinceLocked(sinceSeq, settled)
 		if tail != "" {
 			v.Delta = tail
@@ -315,14 +346,44 @@ func (s *sessionCore) plainTailSinceLocked(sinceSeq, settled uint64) (string, bo
 		// Since() returned the whole retained window [Seq-len, Seq], NOT bytes
 		// after sinceSeq. Compute the equivalent cut from that window's base.
 		base := s.ring.Seq() - uint64(len(raw))
-		if settled > base {
-			if want := int(settled - base); want < len(raw) {
-				raw = raw[:want]
-			}
+		if settled <= base {
+			return "", true
+		}
+		if want := int(settled - base); want < len(raw) {
+			raw = raw[:want]
 		}
 	} else if want := int(settled - sinceSeq); want < len(raw) {
 		raw = raw[:want]
 	}
+	return s.formatPlainTailLocked(raw, "[output with no screen change; plain-text tail]\n", truncated)
+}
+
+// plainTailExplicitLocked implements explicit mode="tail" polling. When settled
+// bytes after sinceSeq exist, it returns them first; otherwise it falls back to
+// unsettled bytes after sinceSeq (when seq > sinceSeq) or the recent retained
+// ring window (when a prior screen poll already advanced the cursor to settled)
+// without advancing SettledSeq.
+func (s *sessionCore) plainTailExplicitLocked(sinceSeq, settled uint64) (string, bool) {
+	if settled > sinceSeq {
+		if tail, trunc := s.plainTailSinceLocked(sinceSeq, settled); tail != "" {
+			return tail, trunc
+		}
+	}
+	curSeq := s.ring.Seq()
+	if curSeq == 0 {
+		return "", false
+	}
+	if curSeq > sinceSeq {
+		raw, resync := s.ring.Since(sinceSeq)
+		if tail, trunc := s.formatPlainTailLocked(raw, "[plain-text tail]\n", resync); tail != "" {
+			return tail, trunc
+		}
+	}
+	snap := s.ring.Snapshot()
+	return s.formatPlainTailLocked(snap, "[plain-text tail]\n", s.ring.Truncated())
+}
+
+func (s *sessionCore) formatPlainTailLocked(raw []byte, prefix string, truncated bool) (string, bool) {
 	if len(raw) == 0 {
 		return "", false
 	}
@@ -354,7 +415,7 @@ func (s *sessionCore) plainTailSinceLocked(sinceSeq, settled uint64) (string, bo
 	if strings.TrimSpace(body) == "" {
 		return "", false
 	}
-	return "[output with no screen change; plain-text tail]\n" + body, truncated || s.ring.Truncated()
+	return prefix + body, truncated || s.ring.Truncated()
 }
 
 // flushMask emits any credential-prefix tail still withheld by the ingress

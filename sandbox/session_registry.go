@@ -187,6 +187,10 @@ func (r *SessionRegistry) notFoundError(botID, sessionID string) error {
 }
 
 func (r *SessionRegistry) Poll(botID, agent, sessionID string, sinceSeq uint64, mode string, lines int, wait time.Duration) (SessionView, error) {
+	return r.PollWithCursor(botID, agent, sessionID, sinceSeq, sinceSeq > 0, mode, lines, wait)
+}
+
+func (r *SessionRegistry) PollWithCursor(botID, agent, sessionID string, sinceSeq uint64, explicitSince bool, mode string, lines int, wait time.Duration) (SessionView, error) {
 	e, err := r.get(botID, sessionID)
 	if err != nil {
 		return SessionView{}, err
@@ -194,12 +198,13 @@ func (r *SessionRegistry) Poll(botID, agent, sessionID string, sinceSeq uint64, 
 	if agent == "" {
 		agent = "default"
 	}
-	// sinceSeq is supplied by the agent as a hint, but the authoritative
-	// per-agent cursor lives here so a model cannot reset it by passing 0.
+	// When sinceSeq is omitted, fall back to the per-agent cursor. When the
+	// caller explicitly passes sinceSeq (including 0 to replay from the start
+	// of the retained buffer), honor it without lowering the stored cursor.
 	r.mu.RLock()
 	cur := r.cursors[sessionID][agent]
 	r.mu.RUnlock()
-	if sinceSeq == 0 && cur > 0 {
+	if !explicitSince && sinceSeq == 0 && cur > 0 {
 		sinceSeq = cur
 	}
 	view, err := e.handle.Poll(sinceSeq, mode, lines, wait)

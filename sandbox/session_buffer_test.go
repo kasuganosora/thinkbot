@@ -627,3 +627,130 @@ func TestSessionSendTool_DoesNotEmitUnmeasuredWarning(t *testing.T) {
 		t.Errorf("hint lost the consumption caveat: %q", hint)
 	}
 }
+
+func TestPlainTailSinceLocked_ResyncDoesNotLeakPastSettled(t *testing.T) {
+	cfg := DefaultSessionConfig()
+	cfg.RawBufferBytes = 16
+	cfg.StableWindow = time.Hour // keep new burst unsettled
+	c := newSessionCore(cfg, zap.NewNop().Sugar(), "sess-resync", "cmd", "local", 1, 1, 80, 24)
+
+	c.consume([]byte("settled\n"))
+	settled := uint64(8)
+	// Overflow the 16-byte ring with unsettled output so base = 34 - 16 = 18 > settled (8).
+	c.consume([]byte("UNSETTLED_SECRET_TAIL_1234"))
+
+	c.bufMu.Lock()
+	tail, truncated := c.plainTailSinceLocked(0, settled)
+	c.bufMu.Unlock()
+	if tail != "" || !truncated {
+		t.Fatalf("resync with settled <= base must not leak unsettled bytes: tail=%q truncated=%v", tail, truncated)
+	}
+}
+
+func TestSessionCore_ModeTailReturnsRecentOutputAfterScreenPollAndUnsettled(t *testing.T) {
+	// Part 1: screen poll advances SettledSeq to Seq, then immediate mode=tail still shows recent output.
+	c := testCoreImmediateSettle()
+	c.consume([]byte("STEP_ONE_OUTPUT\r\n\x1b[2J"))
+	vScreen, err := c.Poll(0, "screen", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vTail, err := c.Poll(vScreen.SettledSeq, "tail", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(vTail.Delta, "STEP_ONE_OUTPUT") {
+		t.Fatalf("mode=tail after caught-up screen poll returned empty/wrong delta: %q", vTail.Delta)
+	}
+
+	// Part 2: unsettled burst (StableWindow not elapsed) is still readable via explicit mode=tail
+	// without advancing SettledSeq.
+	cfg := DefaultSessionConfig()
+	cfg.StableWindow = time.Hour
+	c2 := newSessionCore(cfg, zap.NewNop().Sugar(), "sess-unsettled", "cmd", "local", 1, 1, 80, 24)
+	c2.consume([]byte("LIVE_UNSETTLED_PROGRESS\r"))
+	vUnsettled, err := c2.Poll(0, "tail", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(vUnsettled.Delta, "LIVE_UNSETTLED_PROGRESS") {
+		t.Fatalf("mode=tail must surface unsettled bytes while seq grows, got %q", vUnsettled.Delta)
+	}
+	if vUnsettled.SettledSeq != 0 {
+		t.Fatalf("unsettled mode=tail must not advance SettledSeq, got %d", vUnsettled.SettledSeq)
+	}
+}
+
+func TestSessionPollTool_ExplicitZeroSinceSeqReplaysFromStart(t *testing.T) {
+	cfg := DefaultSessionConfig()
+	cfg.StableWindow = 0
+	c := newSessionCore(cfg, zap.NewNop().Sugar(), "sess-cursor", "cmd", "local", 1, 1, 80, 24)
+	c.consume([]byte("FIRST_CHUNK\r\n"))
+	reg := NewSessionRegistry(cfg, zap.NewNop().Sugar(), &coreTestSpawner{&coreTestHandle{c}})
+	spawned, err := reg.Spawn(context.Background(), "bot", sessionAgent, SpawnRequest{Command: "cmd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := &BotWorkspaceManager{sessions: reg}
+	pollTool := buildSessionPollTool(mgr, "bot")
+
+	// First poll advances the per-agent cursor to SettledSeq.
+	if _, err := pollTool.Execute(&llm.ToolExecContext{Context: context.Background()},
+		map[string]any{"sessionId": spawned.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+	// Omitted sinceSeq uses the stored cursor -> empty raw delta.
+	omittedOut, err := pollTool.Execute(&llm.ToolExecContext{Context: context.Background()},
+		map[string]any{"sessionId": spawned.SessionID, "mode": "raw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := omittedOut.(map[string]any)["delta"]; got != "" {
+		t.Fatalf("omitted sinceSeq should use stored cursor, got %q", got)
+	}
+	// Explicit sinceSeq=0 replays from the beginning of the retained ring.
+	zeroOut, err := pollTool.Execute(&llm.ToolExecContext{Context: context.Background()},
+		map[string]any{"sessionId": spawned.SessionID, "sinceSeq": 0, "mode": "raw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := zeroOut.(map[string]any)["delta"].(string); !strings.Contains(got, "FIRST_CHUNK") {
+		t.Fatalf("explicit sinceSeq=0 failed to replay from start, got %q", got)
+	}
+}
+
+func TestSessionCore_PollWaitWakesOnProcessExitAndPlainTail(t *testing.T) {
+	c := testCoreImmediateSettle()
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		c.markFinished(0, "exited")
+	}()
+	start := time.Now()
+	v, err := c.Poll(0, "screen", 0, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 600*time.Millisecond {
+		t.Fatalf("Poll waited %v after session exit, want early wakeup", elapsed)
+	}
+	if v.State != SessionExited {
+		t.Fatalf("state = %s, want exited", v.State)
+	}
+
+	c2 := testCoreImmediateSettle()
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		c2.consume([]byte("SCROLL_NO_DIFF\r\n\x1b[2J"))
+	}()
+	start2 := time.Now()
+	v2, err := c2.Poll(0, "screen", 0, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start2); elapsed > 600*time.Millisecond {
+		t.Fatalf("Poll waited %v when plain-text tail was already settled", elapsed)
+	}
+	if !strings.Contains(v2.Delta, "SCROLL_NO_DIFF") {
+		t.Fatalf("expected settled plain-text tail on wakeup, got %q", v2.Delta)
+	}
+}

@@ -263,8 +263,12 @@ func buildSessionPollTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 				return nil, err
 			}
 			var since uint64
-			if v, ok := toInt(m["sinceSeq"]); ok && v > 0 {
-				since = uint64(v)
+			var explicitSince bool
+			if rawSince, exists := m["sinceSeq"]; exists && rawSince != nil {
+				if v, ok := toInt(rawSince); ok && v >= 0 {
+					since = uint64(v)
+					explicitSince = true
+				}
 			}
 			mode := sessionString(m, "mode")
 			if mode == "" {
@@ -278,7 +282,7 @@ func buildSessionPollTool(mgr *BotWorkspaceManager, botID string) llm.Tool {
 			if v, ok := toInt(m["waitMs"]); ok && v > 0 {
 				wait = time.Duration(v) * time.Millisecond
 			}
-			view, err := reg.Poll(botID, sessionAgent, id, since, mode, lines, wait)
+			view, err := reg.PollWithCursor(botID, sessionAgent, id, since, explicitSince, mode, lines, wait)
 			if err != nil {
 				return nil, err
 			}
