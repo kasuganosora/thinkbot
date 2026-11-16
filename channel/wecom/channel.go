@@ -138,7 +138,8 @@ type WeComChannel struct {
 	watchAppendMaxWaitOverride time.Duration
 
 	// progress 长任务进度回报的节流状态，按会话索引（见 turn.go 的
-	// reportLongTurnProgress）。与 streams / active 同构，独立一把锁。
+	// reportLongTurnProgress）。⚠️ 配额是单轮次的，随 beginTurn / clearTurn
+	// 重置/清除，否则会跨轮残留。与 streams / active 同构，独立一把锁。
 	progMu   sync.Mutex
 	progress map[string]*turnProgress
 }

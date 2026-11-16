@@ -618,3 +618,98 @@ func TestFormatElapsed(t *testing.T) {
 		}
 	}
 }
+
+// TestBeginTurn_ResetsProgressQuota 复现「bot 像卡住」的真路径：上一轮把进度
+// 配额用满，且没走 clearTurn（例如轮次静默结束、active 被新轮直接覆盖）。
+// 此时 reportLongTurnProgress 的「轮次已结束」清理分支扫不到任何候选，配额
+// 跨轮残留 → 新轮连第一条「还在处理中」都发不出。新轮必须无条件清零。
+func TestBeginTurn_ResetsProgressQuota(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, InterruptRestart)
+	key := PrefixDM + "U3"
+
+	// 刻意不走 clearTurn：模拟清理分支拿不到候选的残留状态。
+	c.progress = map[string]*turnProgress{key: {sent: maxProgressNotices}}
+	beginLiveTurn(c, ctl, key, "T-new")
+
+	c.maybeSendTurnProgress(context.Background(), key, 3*time.Minute, time.Now())
+	if got := c.progress[key].sent; got != 1 {
+		t.Fatalf("new turn must start with a fresh progress quota, sent=%d", got)
+	}
+}
+
+// TestClearTurn_DropsProgressQuota 验证真实的轮次结束路径会清掉配额。
+// 现有 TestReportLongTurnProgress_ClearsFinishedTurn 构造的是「active 里还
+// 留着已结束轮次」，而线上 clearTurn 会先把 active 删掉，那条清理分支根本
+// 轮不到 —— 所以必须在 clearTurn 里收口。
+func TestClearTurn_DropsProgressQuota(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, InterruptRestart)
+	key := PrefixDM + "U4"
+
+	beginLiveTurn(c, ctl, key, "T-old")
+	c.progress = map[string]*turnProgress{key: {sent: maxProgressNotices}}
+
+	c.clearTurn(key, "T-old")
+	if _, ok := c.progress[key]; ok {
+		t.Fatal("progress quota of a finished turn must be dropped")
+	}
+	if c.hasActiveTurn(key) {
+		t.Fatal("turn registration must be removed")
+	}
+}
+
+// TestClearTurn_KeepsProgressOfNewerTurn 防止上面的清理误伤新轮：旧轮的异步
+// 收尾若晚于新轮 beginTurn，traceID 对不上，绝不能抹掉新轮刚记的进度计数。
+func TestClearTurn_KeepsProgressOfNewerTurn(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, InterruptRestart)
+	key := PrefixDM + "U5"
+
+	beginLiveTurn(c, ctl, key, "T-old")
+	beginLiveTurn(c, ctl, key, "T-new")
+	c.progress = map[string]*turnProgress{key: {sent: 2}}
+
+	c.clearTurn(key, "T-old")
+
+	if got := c.progress[key].sent; got != 2 {
+		t.Fatalf("stale turn cleanup must not wipe the new turn's progress, sent=%d", got)
+	}
+	if cur := c.active[key]; cur == nil || cur.traceID != "T-new" {
+		t.Fatal("stale turn cleanup must not remove the new turn's registration")
+	}
+}
+
+// TestLongTurnProgress_NewTurnAfterQuotaExhausted 走完整时序验证修复真的生效：
+// 上一轮用满配额 → clearTurn 摘掉 active（cleanupLoop 从此扫不到候选）→
+// 新轮 beginTurn → cleanupLoop 触发 → 必须真的记下一条进度提示。
+// 只测单个函数不足以证明这条链路通了。
+func TestLongTurnProgress_NewTurnAfterQuotaExhausted(t *testing.T) {
+	ctl := newFakeTurnCtl()
+	c := newTurnTestChannel(ctl, InterruptRestart)
+	key := PrefixDM + "U6"
+
+	beginLiveTurn(c, ctl, key, "T-old")
+	c.maybeSendTurnProgress(context.Background(), key, 3*time.Minute, time.Now())
+	c.progMu.Lock()
+	c.progress[key].sent = maxProgressNotices
+	c.progMu.Unlock()
+
+	// 旧轮结束：active 被摘掉，cleanupLoop 的「轮次已结束」清理分支空转。
+	c.clearTurn(key, "T-old")
+	c.reportLongTurnProgress(context.Background())
+	if len(c.progress) != 0 {
+		t.Fatal("finished turn's quota should have been dropped by clearTurn")
+	}
+
+	// 新轮开始，把 started 往回拨以越过 progressAfter 门槛。
+	beginLiveTurn(c, ctl, key, "T-new")
+	c.turnMu.Lock()
+	c.active[key].started = time.Now().Add(-3 * time.Minute)
+	c.turnMu.Unlock()
+
+	c.reportLongTurnProgress(context.Background())
+	if got := c.progress[key].sent; got != 1 {
+		t.Fatalf("cleanupLoop must send a progress notice for the new turn, sent=%d", got)
+	}
+}

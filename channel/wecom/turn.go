@@ -198,6 +198,13 @@ func (c *WeComChannel) beginTurn(key, traceID string) {
 	if key == "" || traceID == "" || c.turnCtl == nil {
 		return
 	}
+	// ⚠️ 新轮必须重置进度配额：progress 按会话索引，但 maxProgressNotices 是
+	// **单轮次**的语义。旧轮用满配额后，若只指望 cleanupLoop 清理，
+	// clearTurn 会先把 active 摘掉 → reportLongTurnProgress 的「轮次已结束」
+	// 分支再也扫不到这个 key → 配额跨轮残留，此后该会话每一轮都发不出
+	// 「还在处理中」（流到期后用户只剩一条不动的占位符，观感就是 bot 卡死）。
+	// 放在 beginTurn 而不是别处，是因为它是所有新轮次唯一的登记入口。
+	c.clearTurnProgress(key)
 	c.turnMu.Lock()
 	if c.active == nil {
 		c.active = make(map[string]*activeTurn)
@@ -283,12 +290,24 @@ func (c *WeComChannel) hasActiveTurn(key string) bool {
 }
 
 // clearTurn 摘除轮次（只在 traceID 对得上时摘，避免误摘新轮）。
+//
+// ⚠️ 轮次结束没有统一回调点：Send 回调、resolveTurn 的打断/终止、
+// reapTurns 的僵尸回收都会走到这里。必须顺手清掉进度配额 —— 否则
+// reportLongTurnProgress 的「轮次已结束」清理分支拿不到候选（active 已被
+// 这里删掉），配额就永久留在 map 里，下一轮一条进度都发不出。
 func (c *WeComChannel) clearTurn(key, traceID string) {
 	c.turnMu.Lock()
+	matched := false
 	if cur, ok := c.active[key]; ok && (traceID == "" || cur.traceID == traceID) {
 		delete(c.active, key)
+		matched = true
 	}
 	c.turnMu.Unlock()
+	// 只在真的摘掉本轮时清：旧轮的异步收尾若晚于新轮 beginTurn，
+	// traceID 对不上，绝不能把新轮刚记的进度一起抹掉。
+	if matched {
+		c.clearTurnProgress(key)
+	}
 }
 
 // watchAppend 兜底「注入成功但没被消费」的补充（append 策略专用）。
@@ -374,7 +393,8 @@ const (
 	maxProgressNotices = 5
 )
 
-// turnProgress 单个会话的进度回报节流状态。
+// turnProgress 单个会话**当前轮次**的进度回报节流状态。
+// 按会话索引，但计数是单轮次的：换轮时由 beginTurn / clearTurn 重置。
 type turnProgress struct {
 	lastSent time.Time
 	sent     int
@@ -417,8 +437,11 @@ func (c *WeComChannel) reportLongTurnProgress(ctx context.Context) {
 }
 
 // maybeSendTurnProgress 按「首次立即、之后每 progressEvery 一次、封顶
-// maxProgressNotices 条」的规则发进度提示。immediate=true 用于流刚断的那一刻，
-// 免得用户最多空等一个清理周期。
+// maxProgressNotices 条」的规则发进度提示。
+//
+// 两个入口：cleanupLoop 每分钟的 reportLongTurnProgress，以及流到期收尾时的
+// 即时补发（reapStreams），后者免得用户最多空等一个清理周期。
+// ⚠️ 配额的生命周期由 beginTurn / clearTurn 绑定到轮次，别只依赖这里记账。
 func (c *WeComChannel) maybeSendTurnProgress(ctx context.Context, key string, elapsed time.Duration, now time.Time) {
 	c.progMu.Lock()
 	if c.progress == nil {
