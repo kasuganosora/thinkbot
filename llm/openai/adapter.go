@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/llm"
@@ -101,8 +102,10 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 			if key == "" {
 				key = itemID
 			}
-			if key == "" || toolIDSeen(emittedToolIDs, callID, itemID) {
-				rememberToolIDs(emittedToolIDs, callID, itemID)
+			if key == "" || name == "" || toolIDSeen(emittedToolIDs, callID, itemID) {
+				if name != "" {
+					rememberToolIDs(emittedToolIDs, callID, itemID)
+				}
 				return false
 			}
 			var input any
@@ -302,15 +305,24 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 
 		flush()
 
-		// Flush tool calls that never reached output_item.done or response.completed.
-		for _, stc := range pendingToolCalls {
-			if stc.finished {
-				continue
+		// Flush tool calls that never reached output_item.done or response.completed
+		// in deterministic OutputIndex order.
+		if len(pendingToolCalls) > 0 {
+			indices := make([]int, 0, len(pendingToolCalls))
+			for idx := range pendingToolCalls {
+				indices = append(indices, idx)
 			}
-			if emitToolCall(stc.id, stc.itemID, stc.name, stc.args) {
-				hasFunctionCall = true
+			sort.Ints(indices)
+			for _, idx := range indices {
+				stc := pendingToolCalls[idx]
+				if stc == nil || stc.finished {
+					continue
+				}
+				if emitToolCall(stc.id, stc.itemID, stc.name, stc.args) {
+					hasFunctionCall = true
+				}
+				stc.finished = true
 			}
-			stc.finished = true
 		}
 
 		finishReason = mapOpenAIFinishReason(rawFinishReason, hasFunctionCall)

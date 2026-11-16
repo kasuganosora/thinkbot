@@ -159,6 +159,42 @@ func TestChatStream_ToolCallUnaffected(t *testing.T) {
 	assertFinishConsistent(t, got, llm.FinishReasonToolCalls)
 }
 
+func TestResponsesStream_FlushPendingToolCallsInOutputIndexOrder(t *testing.T) {
+	events := []string{
+		`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"step_c","arguments":"{\"n\":2}"}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"step_a","arguments":"{\"n\":0}"}}`,
+		`{"type":"response.output_item.added","output_index":3,"item":{"type":"function_call","id":"fc_3","call_id":"call_3","name":"step_d","arguments":"{\"n\":3}"}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"step_b","arguments":"{\"n\":1}"}}`,
+		`{"type":"response.completed","response":{"id":"resp_order","model":"model-sol-main","status":"completed","output":[]}}`,
+	}
+	want := []wantToolCall{
+		{id: "call_0", name: "step_a", args: map[string]any{"n": float64(0)}},
+		{id: "call_1", name: "step_b", args: map[string]any{"n": float64(1)}},
+		{id: "call_2", name: "step_c", args: map[string]any{"n": float64(2)}},
+		{id: "call_3", name: "step_d", args: map[string]any{"n": float64(3)}},
+	}
+	for i := 0; i < 8; i++ {
+		got := collectToolStream(t, events, false)
+		assertToolCalls(t, got, want)
+		assertFinishConsistent(t, got, llm.FinishReasonToolCalls)
+	}
+}
+
+func TestResponsesStream_OrphanArgumentsDoneWithoutNameDropped(t *testing.T) {
+	events := []string{
+		`{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_orphan","arguments":"{\"q\":\"alpha\"}"}`,
+		`{"type":"response.completed","response":{"id":"resp_orphan","model":"model-sol-main","status":"completed","output":[{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"done"}]}]}}`,
+	}
+	got := collectToolStream(t, events, false)
+	if len(got.calls) != 0 {
+		t.Fatalf("orphan arguments.done without tool name must not emit tool call, got %+v", got.calls)
+	}
+	if got.text != "done" {
+		t.Fatalf("text = %q, want done", got.text)
+	}
+	assertFinishConsistent(t, got, llm.FinishReasonStop)
+}
+
 type wantToolCall struct {
 	id   string
 	name string
