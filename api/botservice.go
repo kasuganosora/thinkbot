@@ -116,6 +116,8 @@ type BotService struct {
 	heartbeatBundles   map[string]*heartbeat.Bundle       // botID → HeartbeatBundle
 	outreachBundles    map[string]*outreach.Bundle        // botID → OutreachBundle
 	userCronSchedulers map[string]*cron.Scheduler         // botID → 用户级 cron 调度器
+	cronStoresMu       sync.Mutex                         // 保护 cronStores 单例表（独立于 mu，允许停止态 HTTP 查询）
+	cronStores         map[string]*cron.Store             // botID → 共享 cron.Store（保证工具、HTTP API 与 Scheduler 共用同一内存快照）
 	cancelFuncs        map[string]context.CancelFunc      // botID → bot context cancel
 	closeFuncs         map[string]func()                  // botID → sub-agent managers cleanup
 	messageCancels     map[string]context.CancelFunc      // "botID:traceID" → message context cancel
@@ -217,6 +219,7 @@ func NewBotService(db *gorm.DB, store *config.Store, mgr *bot.BotManager, logger
 		heartbeatBundles:   make(map[string]*heartbeat.Bundle),
 		outreachBundles:    make(map[string]*outreach.Bundle),
 		userCronSchedulers: make(map[string]*cron.Scheduler),
+		cronStores:         make(map[string]*cron.Store),
 		cancelFuncs:        make(map[string]context.CancelFunc),
 		closeFuncs:         make(map[string]func()),
 		messageCancels:     make(map[string]context.CancelFunc),
@@ -792,6 +795,10 @@ func (s *BotService) costQuotaState(sysReader func() (pipeline.SystemCostQuotaCo
 func (s *BotService) DeleteDefinition(id string) error {
 	// 先停止运行中的实例
 	s.StopBot(id)
+
+	s.cronStoresMu.Lock()
+	delete(s.cronStores, id)
+	s.cronStoresMu.Unlock()
 
 	// 清理该 bot 的浏览器 cookie（凭据残留，删除 bot 后不应遗留）。
 	if err := s.db.Where("bot_id = ?", id).Delete(&dao.BotBrowserCookie{}).Error; err != nil {
@@ -2175,6 +2182,14 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		}
 	}
 
+	// 注册定时任务管理工具（cron / crontab）：与运行期 userCronScheduler、HTTP GetCronManager
+	// 共享同一个 *cron.Store，使 Agent 在对话中创建/修改/暂停/恢复/触发/删除的任务实时生效，
+	// 并受 toolperm 权限管理体系按平台/用户/会话管控。
+	cronMgr := cron.NewManager(s.getCronStore(id), builder.GetBotTimezoneLocation(id)).WithLogger(s.logger)
+	if err := cron.RegisterTools(toolMgr, cronMgr); err != nil {
+		s.logger.Warnw("failed to register cron tools", "err", err)
+	}
+
 	// 注册工作流工具
 	wfMgr, wfSaMgr := workflow.Setup(workflow.WireConfig{
 		Provider:       bundle.Main,
@@ -3185,16 +3200,16 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 	var userCronScheduler *cron.Scheduler
 	var userCronExecutor *UserCronExecutor
 	{
-		cronFile := fmt.Sprintf("data/cron/%s_cron.json", id)
-		cronStore := cron.NewStore(cronFile)
-		userCronExecutor = NewUserCronExecutor(id, s.logger)
+		cronStore := s.getCronStore(id)
+		userCronExecutor = NewUserCronExecutor(id, s.logger).
+			WithDeliverer(s.cronChannelDeliverer(id))
 		schedCfg := cron.DefaultSchedulerConfig()
 		schedCfg.BotID = id
 		schedCfg.Location = builder.GetBotTimezoneLocation(id)
 		schedCfg.Name = "user-cron" // 与 heartbeat / dreaming 在日志中区分
 		userCronScheduler = cron.NewScheduler(cronStore, userCronExecutor, schedCfg).
 			WithUsageRecorder(s.statsRecorder)
-		s.logger.Infow("user cron scheduler created", "bot_id", id, "cron_file", cronFile)
+		s.logger.Infow("user cron scheduler created", "bot_id", id)
 	}
 
 	// 创建自适应 Engagement 组件（Bot 自我画像 → 动态参数映射）
@@ -4765,13 +4780,34 @@ func (s *BotService) BuildDreamingBundleOnDemand(botID string) (*bot.DreamingBun
 	return dBundle, nil
 }
 
-// GetCronManager 为指定 Bot 创建 cron.Manager（从 cron store 文件加载）。
-func (s *BotService) GetCronManager(botID string) *cron.Manager {
-	builder := config.NewBuilder(s.store, s.logger)
-	loc := builder.GetBotTimezoneLocation(botID)
+// getCronStore 返回指定 Bot 共享的 *cron.Store 实例（按 botID 单例复用）。
+//
+// 必须共享同一实例：cron.Store 首次加载后缓存内存 map，若 GetCronManager、Agent cron 工具
+// 与运行期 userCronScheduler 各自 NewStore，会导致运行时增删改的任务对调度器不可见，
+// 且调度器写回执行状态时会用旧快照覆盖磁盘文件。
+func (s *BotService) getCronStore(botID string) *cron.Store {
+	s.cronStoresMu.Lock()
+	defer s.cronStoresMu.Unlock()
+	if s.cronStores == nil {
+		s.cronStores = make(map[string]*cron.Store)
+	}
+	if st, ok := s.cronStores[botID]; ok {
+		return st
+	}
 	cronFile := fmt.Sprintf("data/cron/%s_cron.json", botID)
-	store := cron.NewStore(cronFile)
-	return cron.NewManager(store, loc).WithLogger(s.logger)
+	st := cron.NewStore(cronFile)
+	s.cronStores[botID] = st
+	return st
+}
+
+// GetCronManager 为指定 Bot 创建 cron.Manager（复用该 Bot 共享的 *cron.Store）。
+func (s *BotService) GetCronManager(botID string) *cron.Manager {
+	var loc *time.Location
+	if s.store != nil {
+		builder := config.NewBuilder(s.store, s.logger)
+		loc = builder.GetBotTimezoneLocation(botID)
+	}
+	return cron.NewManager(s.getCronStore(botID), loc).WithLogger(s.logger)
 }
 
 // CreateLLMProvider 从配置创建 LLM Provider（用于 workflow 等全局子系统）。

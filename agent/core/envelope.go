@@ -188,6 +188,12 @@ const (
 	// 由 pure-renote enricher 写入。
 	KVSuppressReasonPureRenote = "target_is_pure_renote"
 
+	// KVSuppressReasonCron 是「用户级 cron 定时任务由执行器接管出站投递」硬抑制原因。
+	// SourceCron 不是已注册的真实 Channel（dispatcher 无 "cron" Sender），因此必须禁止
+	// LLMStage 产出走通用 dispatcher 的 ActionReply，也不可被私聊兜底或 REPLY_CONTROL
+	// send:true 覆盖；最终文本由 UserCronExecutor 从 llm.result 提取后按目标渠道投递。
+	KVSuppressReasonCron = "cron_manual_delivery"
+
 	// MetaEngagementProactive 标记本条出站来自 engagement 主动升级（非真人 @）。
 	// 写入 Action.Metadata，供出站成功后按人记一次「主动出击」。
 	MetaEngagementProactive = "engagement.proactive"
@@ -536,7 +542,7 @@ func IsHardSuppressReason(reason any) bool {
 		return false
 	}
 	switch s {
-	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown, KVSuppressReasonReaction, KVSuppressReasonPureRenote:
+	case KVSuppressReasonPassive, KVSuppressReasonUnanswered, KVSuppressReasonUnansweredCooldown, KVSuppressReasonReaction, KVSuppressReasonPureRenote, KVSuppressReasonCron:
 		return true
 	default:
 		return false

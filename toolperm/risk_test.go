@@ -518,3 +518,90 @@ func TestEvaluate_NoRulePlatformDeniesSensitive(t *testing.T) {
 		t.Error("platform without any rule must still allow basic tools")
 	}
 }
+
+// TestCronTool_IsSensitiveAndGovernable 验证定时任务工具（cron）已纳入权限管理体系：
+//   - 风险等级为 sensitive（不可归入 basic，否则外部群聊任意成员可创建无人值守高消耗后台任务）；
+//   - 外部平台默认禁止，配置显式 allow 规则后对指定用户/全员开放；
+//   - Web 默认全开基线下可用，配置 tool=cron 的 deny 规则后可精确禁用。
+func TestCronTool_IsSensitiveAndGovernable(t *testing.T) {
+	if got := ToolRisk("cron"); got != RiskSensitive {
+		t.Fatalf("ToolRisk(\"cron\"): got %q, want %q", got, RiskSensitive)
+	}
+	if IsBasicTool("cron") {
+		t.Fatal("cron must not be classified as a basic tool")
+	}
+	if IsBroadcastTool("cron") {
+		t.Fatal("cron must not be classified as a broadcast tool")
+	}
+
+	svc := newTestService(t)
+	if err := svc.SeedWebDefault("bot-cron"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) Web 默认全开 → 允许使用 cron
+	if !svc.Evaluate("bot-cron", "cron", "web", "admin") {
+		t.Error("expected cron to be allowed on web under default seed")
+	}
+
+	// 2) Telegram 未授权时默认禁止
+	if svc.Evaluate("bot-cron", "cron", "telegram", "u-guest") {
+		t.Error("expected cron to be denied by default on telegram")
+	}
+
+	// 3) 为 Telegram 特定管理员开启 cron 权限 → 仅该用户可用，其他人仍禁止
+	if _, err := svc.CreateRule("bot-cron", RuleReq{
+		Tool: "cron", Platform: "telegram", UserIDs: []string{"u-admin"},
+		Decision: DecisionAllow, Enabled: boolp(true), Sort: intp(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !svc.Evaluate("bot-cron", "cron", "telegram", "u-admin") {
+		t.Error("expected cron to be allowed for authorized telegram user")
+	}
+	if svc.Evaluate("bot-cron", "cron", "telegram", "u-guest") {
+		t.Error("expected cron to remain denied for unauthorized telegram user")
+	}
+
+	// 4) 在 Web 添加更高优先级的 deny 规则（sort=-1）→ 可显式收回 cron 权限
+	if _, err := svc.CreateRule("bot-cron", RuleReq{
+		Tool: "cron", Platform: "web", UserIDs: []string{"*"},
+		Decision: DecisionDeny, Enabled: boolp(true), Sort: intp(-1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if svc.Evaluate("bot-cron", "cron", "web", "admin") {
+		t.Error("expected explicit deny rule on web to block cron")
+	}
+
+	// 5) FilterTools 层按规则过滤工具列表并注入 call-time 二次复核
+	eval := svc.NewEvaluator()
+	toolList := []llm.Tool{
+		{Name: "cron"},
+		{Name: "now"},
+	}
+	tgGuest, err := eval.FilterTools(context.Background(), toolList, &agenttools.ToolSessionContext{
+		BotID:             "bot-cron",
+		SourceChannelType: "telegram",
+		UserID:            "u-guest",
+		UserIdentifiers:   []string{"u-guest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tgGuest) != 1 || tgGuest[0].Name != "now" {
+		t.Fatalf("expected guest telegram session to hide cron and keep basic tools, got %+v", tgGuest)
+	}
+	tgAdmin, err := eval.FilterTools(context.Background(), toolList, &agenttools.ToolSessionContext{
+		BotID:             "bot-cron",
+		SourceChannelType: "telegram",
+		UserID:            "u-admin",
+		UserIdentifiers:   []string{"u-admin"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tgAdmin) != 2 {
+		t.Fatalf("expected authorized telegram user to receive cron tool, got %+v", tgAdmin)
+	}
+}

@@ -383,6 +383,7 @@ func envelopeToSessionContext(env *core.Envelope) *ToolSessionContext {
 		ChatType:  env.Message.ChatType,
 		UserID:    env.Message.UserID,
 		MessageID: env.Message.ID,
+		IsSystem:  env.Message.Source == core.SourceCron || env.Message.Source == core.SourceHeartbeat,
 	}
 
 	// 收集当前用户的候选身份（权限匹配用 OR 语义）：

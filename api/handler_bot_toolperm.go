@@ -233,6 +233,10 @@ var userToolDesc = map[string]string{
 	// 密钥：只登记请求并把占位符回给模型，明文进保险库、模型永远看不到值
 	"secret_input":  "向用户索取密钥（返回占位符）",
 	"secret_delete": "按名称永久删除已保存的凭据",
+
+	// 定时任务与主动提醒（敏感能力：创建无人值守后台执行计划，受权限规则管控）
+	"cron":   "管理 Bot 自身的定时任务（crontab）",
+	"remind": "创建或取消定时提醒与关注事项",
 }
 
 // toolCategoryLabel 把工具注册时使用的英文 category 映射为中文分组名，
@@ -244,6 +248,8 @@ var toolCategoryLabel = map[string]string{
 	"sandbox":  "沙箱与文件",
 	"subagent": "子智能体",
 	"workflow": "任务与工作流",
+	"cron":     "定时任务",
+	"outreach": "主动提醒",
 	// 自举：loader 运维接口（部署/回滚/重启/读写源码），默认敏感、需权限系统显式开启
 	"selfhost": "自举与部署",
 	// 动态工具（MCP / 浏览器等）没有静态 category，由 ListAllTools 统一打标
@@ -301,6 +307,8 @@ func fallbackToolList() []agenttools.ToolInfo {
 		{Name: "task", Category: "workflow"},
 		{Name: "task_control", Category: "workflow"},
 		{Name: "task_detail", Category: "workflow"},
+		{Name: "cron", Category: "cron"},
+		{Name: "remind", Category: "outreach"},
 		{Name: "sandbox_exec", Category: "sandbox"},
 		{Name: "sandbox_read_file", Category: "sandbox"},
 		{Name: "sandbox_write_file", Category: "sandbox"},

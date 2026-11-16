@@ -802,6 +802,13 @@ func CleanOutboundText(text string) string {
 	return memory.StripContextMarkers(text)
 }
 
+// ExtractDeliverableText 把原始模型输出清洗为可安全投递到外部渠道的纯文本：
+// 剥离思考块/上下文标记、REPLY_CONTROL 控制尾块与 <internal> 私密独白，提取 <public> 公开正文并遮蔽已登记密钥。
+func ExtractDeliverableText(raw string) string {
+	clean := StripReplyControlBlock(CleanOutboundText(raw))
+	return strings.TrimSpace(extractPublicReply(clean))
+}
+
 // explicitPublicReply 仅当正文含**显式且成对**的 <public>...</public> 区块时，返回其公开
 // 内文；否则返回空串。
 //
@@ -1964,7 +1971,9 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 				"reason", reason,
 				"text_len", len(result.Text))
 			env.Set("llm.result", result)
-			env.Set(core.KVCaptureSuppressedExchange, true)
+			if reason != core.KVSuppressReasonCron {
+				env.Set(core.KVCaptureSuppressedExchange, true)
+			}
 			return env, nil
 		}
 		if isPrivateChat(env) {

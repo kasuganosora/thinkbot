@@ -44,9 +44,13 @@ type Job struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"` // 可选：任务描述
 	Prompt      string   `json:"prompt"`                // 自包含提示词（触发后发送给 bot）
-	Model       string   `json:"model,omitempty"`       // 可选：覆盖 bot 默认模型
-	Channel     string   `json:"channel,omitempty"`     // 可选：指定输出渠道（空=bot 默认）
-	Skills      []string `json:"skills,omitempty"`      // 可选：执行时激活的技能
+	Model          string   `json:"model,omitempty"`           // 可选：覆盖 bot 默认模型
+	Channel        string   `json:"channel,omitempty"`         // 可选：指定输出渠道（空=仅后台执行并记录结果）
+	ChannelType    string   `json:"channel_type,omitempty"`    // 可选：目标渠道类型（web/telegram/wecom/misskey/mastodon）
+	ConversationID string   `json:"conversation_id,omitempty"` // 可选：目标会话/聊天/回复目标 ID
+	SessionID      string   `json:"session_id,omitempty"`      // 可选：Web 会话 ID（用于在原聊天窗口落库展示结果）
+	UserID         string   `json:"user_id,omitempty"`         // 可选：创建者用户 ID（用于出站落库归属）
+	Skills         []string `json:"skills,omitempty"`          // 可选：执行时激活的技能
 
 	// Feature 统计维度标签（默认 "cron"）。
 	// 用于在 stats 模块中区分 cron 产生的 token 消耗。

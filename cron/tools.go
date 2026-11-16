@@ -63,12 +63,12 @@ Use the ` + "`cron`" + ` tool to create and manage scheduled jobs so the bot run
 - **Lookup by name is supported.** job_id also accepts a job name (case-insensitive). If several jobs share the same name the call fails — use the actual ID in that case.
 - **Cron jobs run unattended.** No user is present, so you cannot ask questions or request clarification. The final output is delivered to the target channel automatically.
 - **Anti-nesting.** A session started by a cron job MUST NOT create further cron jobs.
-- **Language.** Cron output is delivered to the user, so you must respond to the user in Chinese (中文). Write job prompts in Chinese too.
+- **Language.** Cron output is delivered to the user, so reply in Chinese (中文) by default — or match the user's language if they write in another language. Write job prompts in the same language.
 
 <example>
-user: 每天早上 9 点给我发一份 A 股收盘复盘
-assistant: [calls cron(action='create', name='A股每日复盘', schedule='0 9 * * *', prompt='汇总昨日 A 股三大指数涨跌幅、成交额与领涨领跌板块，输出 200 字以内的中文复盘。')]
-assistant: 已创建定时任务「A股每日复盘」，每天 9:00 执行。
+user: send me an A-share market close recap every morning at 9
+assistant: [calls cron(action='create', name='Daily A-share Recap', schedule='0 9 * * *', prompt='Summarize yesterday\'s A-share major index moves, turnover, and leading/lagging sectors in under 200 words.')]
+assistant: Scheduled job "Daily A-share Recap" created — it will run every day at 09:00.
 </example>`,
 	Enabled: true,
 }
@@ -213,10 +213,10 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 		Tool: llm.Tool{
 			Name:         "cron",
 			DeferredLoad: true, // 定时任务非日常任务，初始仅暴露名称+描述
-			Description: "Manage scheduled jobs. Pick the operation with the action parameter: create, list, get, " +
+			Description: "Manage the bot's own scheduled jobs (crontab). Pick the operation with the action parameter: create, list, get, " +
 				"update, remove, pause, resume, trigger (run now)." +
 				"\n\n" +
-				"Creating a job requires name, prompt and schedule. schedule accepts: a cron expression (\"0 9 * * 1-5\"), " +
+				"Creating a job requires name, prompt and schedule. schedule accepts: a standard 5-field cron/crontab expression (\"0 9 * * 1-5\"), " +
 				"a recurring interval (\"every 30m\"), a relative delay (\"2h\"/\"1d\"), or an ISO timestamp (\"2026-03-20T14:00\")." +
 				"\n\n" +
 				"IMPORTANT: a cron job runs unattended in its own session, so the prompt MUST be self-contained — it has none of the current conversation context. " +
@@ -225,7 +225,7 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 			// name/description/keywords 做子串匹配，故显式保留中文检索词。
 			Keywords: []string{
 				"定时任务", "定时", "计划任务", "周期任务", "提醒", "闹钟",
-				"每天", "每周", "每小时", "延迟执行", "cron", "schedule",
+				"每天", "每周", "每小时", "延迟执行", "cron", "crontab", "schedule",
 			},
 			Parameters: map[string]any{
 				"type": "object",
@@ -250,6 +250,10 @@ func cronToolDef(mgr *Manager) agenttools.ToolDef {
 					"schedule": map[string]any{
 						"type":        "string",
 						"description": "Required for create, optional for update. The schedule expression. Examples: \"0 9 * * 1-5\" (9:00 on weekdays), \"every 30m\" (every 30 minutes), \"2h\" (once, two hours from now), \"2026-03-20T14:00\" (at that exact moment)",
+					},
+					"channel": map[string]any{
+						"type":        "string",
+						"description": "Optional: target channel for delivering output. Omit on create to deliver back to the current conversation; pass an empty string on update to run silently in background, or pass a platform name such as \"misskey\"/\"mastodon\" to post top-level timeline notes.",
 					},
 					"model": map[string]any{
 						"type":        "string",
@@ -360,6 +364,22 @@ func cronActionCreate(mgr *Manager, m map[string]any, ctx context.Context) (any,
 		Model:    getString(m, "model"),
 		MaxRuns:  getInt(m, "max_runs"),
 	}
+	if chRaw, hasChannel := m["channel"].(string); hasChannel {
+		req.Channel = strings.TrimSpace(chRaw)
+	} else {
+		// 未显式指定 channel 时，自动继承当前对话的投递目标，使触发后的结果能回到原会话。
+		meta := agenttools.MessageMetaFromContext(ctx)
+		origin := agenttools.CallOriginFromContext(ctx)
+		req.Channel = strings.TrimSpace(meta.Source)
+		req.ChannelType = strings.TrimSpace(meta.ChannelType)
+		req.UserID = strings.TrimSpace(meta.UserID)
+		req.SessionID = strings.TrimSpace(origin.SessionID)
+		convID := strings.TrimSpace(meta.ReplyTarget)
+		if convID == "" && req.ChannelType != "web" {
+			convID = strings.TrimSpace(meta.ChatID)
+		}
+		req.ConversationID = convID
+	}
 	if v, ok := m["skills"].([]any); ok {
 		req.Skills = toStringSlice(v)
 	}
@@ -376,6 +396,7 @@ func cronActionCreate(mgr *Manager, m map[string]any, ctx context.Context) (any,
 		"success":          true,
 		"job_id":           job.ID,
 		"name":             job.Name,
+		"channel":          job.Channel,
 		"schedule":         job.Schedule,
 		"schedule_kind":    string(job.ScheduleKind),
 		"schedule_display": job.ScheduleDisplay,
@@ -422,6 +443,9 @@ func cronActionGet(mgr *Manager, m map[string]any) (any, error) {
 		"prompt":           job.Prompt,
 		"model":            job.Model,
 		"channel":          job.Channel,
+		"channel_type":     job.ChannelType,
+		"conversation_id":  job.ConversationID,
+		"session_id":       job.SessionID,
 		"skills":           job.Skills,
 		"feature":          job.Feature,
 		"schedule":         job.Schedule,
@@ -464,6 +488,9 @@ func cronActionUpdate(mgr *Manager, m map[string]any) (any, error) {
 	if v, ok := m["schedule"]; ok {
 		updates["schedule"] = v
 	}
+	if v, ok := m["channel"].(string); ok {
+		updates["channel"] = strings.TrimSpace(v)
+	}
 	if v, ok := m["model"]; ok {
 		updates["model"] = v
 	}
@@ -480,7 +507,7 @@ func cronActionUpdate(mgr *Manager, m map[string]any) (any, error) {
 	}
 
 	if len(updates) == 0 {
-		return toolErr("no fields to update. Provide at least one of: name, prompt, schedule, model, skills, max_runs, enabled"), nil
+		return toolErr("no fields to update. Provide at least one of: name, prompt, schedule, channel, model, skills, max_runs, enabled"), nil
 	}
 
 	updated, err := mgr.UpdateJob(job.ID, updates)

@@ -21,7 +21,7 @@
           <div class="ex-badge ex-lock"><t-icon name="lock-on" /></div>
           <div class="ex-body">
             <div class="ex-h">平台有规则但未命中 → 仅禁敏感工具</div>
-            <div class="ex-t">为某平台配了规则后，<b>敏感工具</b>（联网/ 命令执行 / 文件读写 / 子智能体）进入白名单模式；<b>基础工具</b>（计算、文本、记忆、只读查询）仍默认开放，Bot 不会失去基本能力。</div>
+            <div class="ex-t">为某平台配了规则后，<b>敏感工具</b>（联网 / 命令执行 / 文件读写 / 子智能体 / 定时任务）进入白名单模式；<b>基础工具</b>（计算、文本、记忆、只读查询）仍默认开放，Bot 不会失去基本能力。</div>
           </div>
         </div>
         <div class="ex-item">
@@ -715,6 +715,7 @@ const wildcardPresets = [
   { label: 'sandbox_*', value: 'sandbox_*', hint: '所有沙箱与文件工具' },
   { label: 'web_*', value: 'web_*', hint: '所有联网工具（搜索、抓取）' },
   { label: 'task*', value: 'task*', hint: '所有任务/工作流工具（task/task_control/task_detail/task_status）' },
+  { label: 'cron', value: 'cron', hint: '定时任务管理（crontab 创建/查询/修改/启停/删除）' },
   { label: 'text_*', value: 'text_*', hint: '所有文本处理工具' }
 ]
 

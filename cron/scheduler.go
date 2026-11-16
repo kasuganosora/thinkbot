@@ -633,16 +633,20 @@ func (m *Manager) WithLogger(l *zap.SugaredLogger) *Manager {
 
 // CreateJobRequest 是创建 Job 的请求参数。
 type CreateJobRequest struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"` // 可选：任务描述
-	Prompt      string   `json:"prompt"`
-	Schedule    string   `json:"schedule"`
-	Model       string   `json:"model,omitempty"`
-	Channel     string   `json:"channel,omitempty"`
-	Skills      []string `json:"skills,omitempty"`
-	Feature     string   `json:"feature,omitempty"` // 统计维度标签（默认 "cron"）
-	MaxRuns     int      `json:"max_runs,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description,omitempty"` // 可选：任务描述
+	Prompt         string   `json:"prompt"`
+	Schedule       string   `json:"schedule"`
+	Model          string   `json:"model,omitempty"`
+	Channel        string   `json:"channel,omitempty"`
+	ChannelType    string   `json:"channel_type,omitempty"`
+	ConversationID string   `json:"conversation_id,omitempty"`
+	SessionID      string   `json:"session_id,omitempty"`
+	UserID         string   `json:"user_id,omitempty"`
+	Skills         []string `json:"skills,omitempty"`
+	Feature        string   `json:"feature,omitempty"` // 统计维度标签（默认 "cron"）
+	MaxRuns        int      `json:"max_runs,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
 }
 
 // CreateJob 创建一个新 Job。
@@ -669,26 +673,30 @@ func (m *Manager) CreateJob(req CreateJobRequest) (*Job, error) {
 
 	now := time.Now()
 	job := &Job{
-		ID:              idgen.New("cron"),
-		Name:            req.Name,
-		Description:     req.Description,
-		Prompt:          req.Prompt,
-		Model:           req.Model,
-		Channel:         req.Channel,
-		Skills:          req.Skills,
-		Feature:         req.Feature,
-		Schedule:        req.Schedule,
-		ScheduleKind:    kind,
-		ScheduleDisplay: display,
-		MaxRuns:         req.MaxRuns,
-		Enabled:         true,
-		State:           StateActive,
-		NextRunAt:       nextRun,
+		ID:               idgen.New("cron"),
+		Name:             req.Name,
+		Description:      req.Description,
+		Prompt:           req.Prompt,
+		Model:            req.Model,
+		Channel:          req.Channel,
+		ChannelType:      req.ChannelType,
+		ConversationID:   req.ConversationID,
+		SessionID:        req.SessionID,
+		UserID:           req.UserID,
+		Skills:           req.Skills,
+		Feature:          req.Feature,
+		Schedule:         req.Schedule,
+		ScheduleKind:     kind,
+		ScheduleDisplay:  display,
+		MaxRuns:          req.MaxRuns,
+		Enabled:          true,
+		State:            StateActive,
+		NextRunAt:        nextRun,
 		ExpectedInterval: expectedInterval,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		Tags:            req.Tags,
-		cronExpr:        cronE,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Tags:             req.Tags,
+		cronExpr:         cronE,
 	}
 
 	if err := m.store.Save(job); err != nil {
@@ -741,7 +749,31 @@ func (m *Manager) UpdateJob(id string, updates map[string]any) (*Job, error) {
 		job.Model = model
 	}
 	if channel, ok := updates["channel"].(string); ok {
-		job.Channel = channel
+		if job.Channel != channel {
+			job.Channel = channel
+			// 切换目标渠道且未同时指定新会话参数时，清空旧会话定位，避免跨渠道串投。
+			if _, hasType := updates["channel_type"]; !hasType {
+				job.ChannelType = ""
+			}
+			if _, hasConv := updates["conversation_id"]; !hasConv {
+				job.ConversationID = ""
+			}
+			if _, hasSess := updates["session_id"]; !hasSess {
+				job.SessionID = ""
+			}
+		}
+	}
+	if chType, ok := updates["channel_type"].(string); ok {
+		job.ChannelType = chType
+	}
+	if convID, ok := updates["conversation_id"].(string); ok {
+		job.ConversationID = convID
+	}
+	if sessID, ok := updates["session_id"].(string); ok {
+		job.SessionID = sessID
+	}
+	if uid, ok := updates["user_id"].(string); ok {
+		job.UserID = uid
 	}
 	if feature, ok := updates["feature"].(string); ok {
 		job.Feature = feature

@@ -467,3 +467,114 @@ func TestCronTool_Register(t *testing.T) {
 		t.Error("tool 'cron' not registered")
 	}
 }
+
+func TestCronTool_OriginCaptureAndChannelOverride(t *testing.T) {
+	mgr := newTestManager(t)
+	tool := newCronTool(mgr)
+
+	// 1) 未传 channel 时，自动从 MessageMeta + CallOrigin 捕获会话投递信息
+	ctx := tools.ContextWithMessageMeta(context.Background(), tools.MessageMeta{
+		BotID:       "bot-1",
+		UserID:      "u-42",
+		Source:      "tg-main",
+		ChatID:      "-100123456",
+		ChannelType: "telegram",
+		ReplyTarget: "-100123456",
+	})
+	ctx = tools.ContextWithCallOrigin(ctx, tools.CallOrigin{
+		BotID:     "bot-1",
+		SessionID: "88",
+	})
+
+	raw, err := tool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"action":   "create",
+		"name":     "日报推送",
+		"prompt":   "整理今日项目进展并输出摘要",
+		"schedule": "0 18 * * 1-5",
+	})
+	if err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+	res := raw.(map[string]any)
+	if res["success"] != true {
+		t.Fatalf("expected success, got: %v", res)
+	}
+	job, ok := mgr.GetJob(res["job_id"].(string))
+	if !ok {
+		t.Fatal("created job not found")
+	}
+	if job.Channel != "tg-main" || job.ChannelType != "telegram" || job.ConversationID != "-100123456" || job.SessionID != "88" || job.UserID != "u-42" {
+		t.Fatalf("unexpected captured delivery metadata: %+v", job)
+	}
+
+	// 2) 显式传空 channel="" 时，不捕获当前会话，作为纯后台任务运行
+	rawBg, err := tool.Execute(&llm.ToolExecContext{Context: ctx}, map[string]any{
+		"action":   "create",
+		"name":     "后台巡检",
+		"prompt":   "检查工作空间磁盘占用",
+		"schedule": "every 2h",
+		"channel":  "",
+	})
+	if err != nil {
+		t.Fatalf("execute error: %v", err)
+	}
+	resBg := rawBg.(map[string]any)
+	bgJob, _ := mgr.GetJob(resBg["job_id"].(string))
+	if bgJob.Channel != "" || bgJob.ConversationID != "" {
+		t.Fatalf("expected empty channel/conversation on explicit background job, got %+v", bgJob)
+	}
+}
+
+func TestCronTool_AntiNesting(t *testing.T) {
+	mgr := newTestManager(t)
+	seed, err := mgr.CreateJob(CreateJobRequest{
+		Name: "seed", Prompt: "ok", Schedule: "every 1h",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tool := newCronTool(mgr)
+	cronCtx := WithCronSession(context.Background())
+
+	// 变更操作在 cron 会话中一律被拦截
+	for _, action := range []string{"create", "update", "remove", "pause", "resume", "trigger"} {
+		res, err := tool.Execute(&llm.ToolExecContext{Context: cronCtx}, map[string]any{
+			"action":   action,
+			"job_id":   seed.ID,
+			"name":     "nested",
+			"prompt":   "nested",
+			"schedule": "every 1h",
+		})
+		if err != nil {
+			t.Fatalf("action %s returned error: %v", action, err)
+		}
+		m := res.(map[string]any)
+		if m["success"] != false {
+			t.Errorf("expected cron session to block action=%s, got %v", action, m)
+		}
+	}
+
+	// 只读查询仍允许执行
+	listRes, err := tool.Execute(&llm.ToolExecContext{Context: cronCtx}, map[string]any{"action": "list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listRes.(map[string]any)["success"] != true {
+		t.Errorf("expected list to succeed in cron session, got %v", listRes)
+	}
+}
+
+func TestCronTool_CrontabKeyword(t *testing.T) {
+	def := cronToolDef(newTestManager(t))
+	found := false
+	for _, kw := range def.Keywords {
+		if kw == "crontab" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected 'crontab' in cron tool Keywords, got %v", def.Keywords)
+	}
+}
