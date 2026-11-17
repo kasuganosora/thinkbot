@@ -1066,6 +1066,31 @@ type LLMStage struct {
 	hardTimeoutSrc  func() time.Duration
 }
 
+// resetTurnCompaction 在新回合开始时重置该会话的 doom-loop 计数。
+//
+// compactor 按会话跨轮复用（previousSummary 增量摘要需要跨轮持久），但
+// doom-loop 计数是**单轮**保护：ShouldCompactIn 命中后直接短路，压缩流程
+// 内部的清零再也不会执行。不在这里重置，上一轮累计到阈值就会让该会话
+// 此后所有轮次永久禁用压缩，长任务历史一路膨胀、每步全量重发。
+// 同时覆盖 compact_context 工具使用的 selfCompactors（同为按会话实例）。
+// key 为空时 compactor 是一次性临时实例（不入表），无需重置。
+func (s *LLMStage) resetTurnCompaction(env *core.Envelope) {
+	key := conversationKey(env)
+	if key == "" {
+		return
+	}
+	if v, ok := s.compactors.Load(key); ok {
+		if c, ok := v.(*llm.Compactor); ok {
+			c.ResetDoomLoop()
+		}
+	}
+	if v, ok := s.selfCompactors.Load(key); ok {
+		if c, ok := v.(*llm.Compactor); ok {
+			c.ResetDoomLoop()
+		}
+	}
+}
+
 // getCompactor 返回指定会话的 *llm.Compactor（惰性创建）。
 // 返回 (compactor, true)；当 s.config.Compaction 为 nil 时返回 (nil, false)。
 // 按会话 key（conversationKey）隔离使压缩摘要状态在同一会话内跨轮持久、且不与并发会话串扰。
@@ -1229,6 +1254,10 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	defer span.End()
 
 	logger := traceid.WithLoggerFrom(ctx, s.logger)
+
+	// 新回合开始：重置该会话的 doom-loop 计数（单轮保护，不可跨轮累积）。
+	// 必须在编排启动前做，否则上一轮锁死会让本轮从第一步起就禁用压缩。
+	s.resetTurnCompaction(env)
 
 	// 单轮耗时观测：3655d0f 起墙钟硬上限默认关闭（defaultLLMHardTimeout=0，编排尽力跑完），
 	// 时间收口只剩步数守卫与单步 LLM 客户端超时。没有墙钟兜底就必须留痕——否则「这一轮

@@ -241,8 +241,8 @@ type Compactor struct {
 	limitSrc func(ctx context.Context) (int, int) // 钉住的上下文长度和输出预留；无钉时由调用方决定
 
 	mu              sync.Mutex
-	previousSummary string // 上次生成的摘要（用于增量更新）
-	compactionCount int    // 连续压缩次数（doom loop 预防）
+	previousSummary string // 上次生成的摘要（用于增量更新，跨轮持久）
+	compactionCount int    // 单轮内连续压缩次数（doom loop 预防）；新回合由 ResetDoomLoop 清零
 	logger          *zap.SugaredLogger
 	policy          *InternalPolicy // reasoning_effort / output cap of the summary calls (nil = none)
 }
@@ -532,6 +532,7 @@ func (c *Compactor) ShouldCompactIn(ctx context.Context, params GenerateParams) 
 			"messages", len(params.Messages),
 			"usage_overflow", sig.usageOverflow,
 			"should_compact", should,
+			"compaction_count", c.compactionCountSnapshot(),
 			"trace_id", traceid.FromContext(ctx),
 		}
 		if sig.usage != nil {
@@ -588,11 +589,27 @@ func (c *Compactor) isDoomLoop() bool {
 	return c.compactionCount >= DoomLoopThreshold
 }
 
-// resetDoomLoop 重置压缩计数器。
-func (c *Compactor) resetDoomLoop() {
+// ResetDoomLoop 重置单轮的 doom-loop 计数。
+//
+// ⚠️ 调用契约：compactionCount 是**单轮内**「连续压缩却压不下去」的保护计数，
+// 不是跨轮累计值。Compactor 按会话跨轮复用（见 stages.LLMStage.getCompactor），
+// 而 ShouldCompactIn 在命中 doom-loop 时会直接短路返回 false，压缩流程
+// （compactWithTarget）因此再也不会执行、其内部清零也没有机会发生：一旦某轮
+// 累计到 DoomLoopThreshold，该会话此后**所有轮次**都会永久禁用压缩，长任务的
+// 历史会一路膨胀。调用方必须在每个新回合开始时调用本方法。
+//
+// previousSummary 是跨轮持久的增量摘要锚点，不在这里重置。
+func (c *Compactor) ResetDoomLoop() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.compactionCount = 0
+}
+
+// compactionCountSnapshot 供可观测性日志读取当前计数（不修改状态）。
+func (c *Compactor) compactionCountSnapshot() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.compactionCount
 }
 
 // PruneToolOutputs 裁剪旧的工具输出。
@@ -719,7 +736,7 @@ func (c *Compactor) compactWithTarget(ctx context.Context, params GenerateParams
 	}
 
 	if !c.isOverflowIn(ctx, params) {
-		c.resetDoomLoop()
+		c.ResetDoomLoop()
 		return params, nil
 	}
 
@@ -737,7 +754,7 @@ func (c *Compactor) compactWithTarget(ctx context.Context, params GenerateParams
 		return params, fmt.Errorf("compaction: %w", err)
 	}
 	if !c.isOverflowIn(ctx, summaryParams) {
-		c.resetDoomLoop()
+		c.ResetDoomLoop()
 	}
 	return summaryParams, nil
 }

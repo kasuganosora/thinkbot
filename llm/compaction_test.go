@@ -282,7 +282,7 @@ func TestCompactor_DoomLoop(t *testing.T) {
 	}
 
 	// After reset, should work again
-	c.resetDoomLoop()
+	c.ResetDoomLoop()
 	// ShouldCompact still won't trigger because overflow check uses estimation
 	// but at least doom loop is no longer the blocker
 }
@@ -903,7 +903,7 @@ func TestCompactionPrepareStepWithTarget_IsolatesLightParamsAndDisableFlag(t *te
 
 	// Toggle DisableLightSummary at runtime -> must summarize on Main with Main's parameters.
 	liveCfg.DisableLightSummary = true
-	compactor.resetDoomLoop()
+	compactor.ResetDoomLoop()
 	res2 := hook(context.Background())(makeOverflowParams())
 	if res2 == nil {
 		t.Fatal("expected compaction prepare step to rewrite messages with main model")
