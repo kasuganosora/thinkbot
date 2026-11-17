@@ -7,21 +7,38 @@ import (
 	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
-// PublicFailureText 是给终端用户的固定说明。
-// 认证失败和拒绝访问分开写，都不包含上游正文。
-// 不是这两类时返回空字符串，调用方继续用自己的通用收尾。
+// PublicFailureText returns a fixed, sanitized end-user message for known LLM
+// error categories without echoing upstream messages, parameters, URLs, or secrets.
 func PublicFailureText(err error) string {
 	var le *LLMError
 	if !errors.As(err, &le) || le == nil {
 		return ""
 	}
-	if le.Reason != ErrorReasonAuthentication {
+	switch le.Reason {
+	case ErrorReasonAuthentication:
+		if le.Message == "provider denied access" {
+			return "模型服务拒绝了访问。"
+		}
+		return "模型服务拒绝了当前密钥。"
+	case ErrorReasonInvalidRequest:
+		return "模型服务拒绝了本次请求参数。"
+	case ErrorReasonContextOverflow:
+		return "对话内容超出了模型上下文长度上限。"
+	case ErrorReasonRateLimit:
+		return "模型服务请求过于频繁，请稍后再试。"
+	case ErrorReasonQuotaExceeded:
+		return "模型服务额度不足或账户已欠费。"
+	case ErrorReasonContentPolicy:
+		return "请求或回复触发了模型服务的内容安全限制。"
+	case ErrorReasonNoRoute:
+		return "所选模型不存在或当前不可用。"
+	case ErrorReasonProviderInternal:
+		return "模型服务当前繁忙或内部异常，请稍后再试。"
+	case ErrorReasonTransport:
+		return "连接模型服务失败，请稍后再试。"
+	default:
 		return ""
 	}
-	if le.Message == "provider denied access" {
-		return "模型服务拒绝了访问。"
-	}
-	return "模型服务拒绝了当前密钥。"
 }
 
 // UserFailureText 只描述模型调用失败。

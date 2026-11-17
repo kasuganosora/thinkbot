@@ -230,7 +230,7 @@ function loadBot() {
     form.value = {
       id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
       llmMain: b.llmMain || '', llmLight: b.llmLight || '', llmVision: '',
-      temperature: b.temperature ?? 0.7, maxTokens: b.maxTokens ?? 4096,
+      maxTokens: b.maxTokens ?? 4096,
       workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort ?? '',
       hardMaxSteps: b.hardMaxSteps ?? 0
     }
@@ -288,7 +288,6 @@ async function saveBasic() {
     const saved = await botApi.update(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
       llmMain: f.llmMain, llmLight: f.llmLight, llmVision: f.llmVision || '',
-      temperature: f.temperature,
       maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort,
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
@@ -303,12 +302,13 @@ async function saveBasic() {
     }
     store.updateBot(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
-      temperature: f.temperature,
       llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
       workers: f.workers, reasoningEffort: f.reasoningEffort,
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
-    bot.value.name = f.name
+    if (bot.value) {
+      bot.value.name = f.name
+    }
     if (saved && saved.applied) MessagePlugin.success('已切换到保存的模型')
     else if (saved && saved.pending) MessagePlugin.success(saved.message || '已保存，启动后生效')
     else if (saved && saved.message && (visionChanged || f.llmMain || f.llmLight)) MessagePlugin.warning(saved.message)
@@ -345,6 +345,8 @@ function removeBot() {
     }
   })
 }
+
+defineExpose({ form, saveBasic })
 </script>
 
 <style scoped>

@@ -77,3 +77,91 @@ func TestSafeErrorText_UnknownErrorDoesNotEchoBody(t *testing.T) {
 		t.Fatalf("json body echoed: %q", SafeErrorText(body))
 	}
 }
+
+func TestUserFailureText_DistinctCategoriesWithoutLeakingSecrets(t *testing.T) {
+	const leak = "DO_NOT_LEAK prompt=SECRET url=https://example.invalid/key token=abcd"
+	categories := []struct {
+		name   string
+		err    *LLMError
+		subStr string
+	}{
+		{
+			name:   "invalid_request",
+			err:    &LLMError{Reason: ErrorReasonInvalidRequest, Message: leak, SafeDetail: "code=invalid_argument param=temperature"},
+			subStr: "请求参数",
+		},
+		{
+			name:   "rate_limit",
+			err:    &LLMError{Reason: ErrorReasonRateLimit, Message: leak, SafeDetail: "code=1302"},
+			subStr: "频繁",
+		},
+		{
+			name:   "quota_exceeded",
+			err:    &LLMError{Reason: ErrorReasonQuotaExceeded, Message: leak, SafeDetail: "code=1113"},
+			subStr: "额度",
+		},
+		{
+			name:   "auth_key",
+			err:    &LLMError{Reason: ErrorReasonAuthentication, Message: "provider rejected the credentials"},
+			subStr: "密钥",
+		},
+		{
+			name:   "auth_denied",
+			err:    &LLMError{Reason: ErrorReasonAuthentication, Message: "provider denied access"},
+			subStr: "访问",
+		},
+		{
+			name:   "context_overflow",
+			err:    &LLMError{Reason: ErrorReasonContextOverflow, Message: leak},
+			subStr: "上下文",
+		},
+		{
+			name:   "content_policy",
+			err:    &LLMError{Reason: ErrorReasonContentPolicy, Message: leak},
+			subStr: "内容安全",
+		},
+		{
+			name:   "no_route",
+			err:    &LLMError{Reason: ErrorReasonNoRoute, Message: leak},
+			subStr: "模型",
+		},
+		{
+			name:   "provider_internal",
+			err:    &LLMError{Reason: ErrorReasonProviderInternal, Message: leak, SafeDetail: "code=1305"},
+			subStr: "繁忙",
+		},
+		{
+			name:   "transport",
+			err:    &LLMError{Reason: ErrorReasonTransport, Message: leak},
+			subStr: "连接",
+		},
+	}
+
+	seen := map[string]string{}
+	for _, tc := range categories {
+		got := UserFailureText(tc.err)
+		if got == "" {
+			t.Fatalf("%s returned empty UserFailureText", tc.name)
+		}
+		if got == "（生成中断）" || got == "模型服务暂时没有返回结果。" {
+			t.Fatalf("%s collapsed to generic fallback %q", tc.name, got)
+		}
+		if !strings.Contains(got, tc.subStr) {
+			t.Fatalf("%s = %q, want substring %q", tc.name, got, tc.subStr)
+		}
+		for _, bad := range []string{"DO_NOT_LEAK", "SECRET", "https://", "token=abcd", "invalid_argument", "temperature", "1113", "1302", "1305"} {
+			if strings.Contains(got, bad) {
+				t.Fatalf("%s leaked %q in public text %q", tc.name, bad, got)
+			}
+		}
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("%s and %s share identical public text %q", prev, tc.name, got)
+		}
+		seen[got] = tc.name
+	}
+
+	unknown := &LLMError{Reason: ErrorReasonInvalidProviderOutput, Message: leak}
+	if got := UserFailureText(unknown); got != "模型服务暂时没有返回结果。" {
+		t.Fatalf("unknown category fallback = %q", got)
+	}
+}

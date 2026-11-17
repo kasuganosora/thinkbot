@@ -1,7 +1,9 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	nethttp "net/http"
@@ -193,9 +195,6 @@ var quotaExhaustedPatterns = []string{
 	"credit balance is too low",
 	"billing hard limit",
 	"check your plan and billing",
-	// 智谱 GLM：1308 = 时间窗口用量上限
-	`"code":"1308"`,
-	`"code": "1308"`,
 	// 中文措辞
 	"使用上限",
 	"额度已用尽",
@@ -204,6 +203,13 @@ var quotaExhaustedPatterns = []string{
 	"配额已用完",
 	"超出配额",
 }
+
+// boundedQuotaCodeRe matches exact BigModel quota/billing codes (1113, 1308)
+// in JSON ("code":"1113" / "code": 1113) or SafeDetail (code=1113) with strict
+// token boundaries so codes like 11130, 01113, or subcode=1113 do not match.
+var boundedQuotaCodeRe = regexp.MustCompile(
+	`"code"\s*:\s*"(?:1113|1308)"|"code"\s*:\s*(?:1113|1308)(?:[^0-9a-z_.-]|$)|(?:^|[^0-9a-z_.-])code=(?:1113|1308)(?:[^0-9a-z_.-]|$)`,
+)
 
 // IsQuotaExhausted 判断错误是否为「上游额度耗尽」这类**在窗口重置前重试必然失败**的故障。
 //
@@ -217,7 +223,62 @@ func IsQuotaExhausted(err error) bool {
 	if httpErr.StatusCode != 429 && httpErr.StatusCode != 403 {
 		return false
 	}
+	if hasNonRetryable429Code(httpErr.Body) {
+		return true
+	}
 	return matchesQuotaText(string(httpErr.Body))
+}
+
+// hasNonRetryable429Code inspects structured JSON error.code / code for known
+// non-retryable billing or quota business codes (such as BigModel 1113 or 1308).
+// Rate-limit (1302) and overload (1305) codes are intentionally excluded.
+func hasNonRetryable429Code(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var env struct {
+		Code  json.RawMessage `json:"code"`
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &env); err != nil {
+		return false
+	}
+	code := extractJSONScalarCode(env.Code)
+	if errRaw := bytes.TrimSpace(env.Error); len(errRaw) > 0 && errRaw[0] == '{' {
+		var nested struct {
+			Code json.RawMessage `json:"code"`
+		}
+		if json.Unmarshal(errRaw, &nested) == nil {
+			if c := extractJSONScalarCode(nested.Code); c != "" {
+				code = c
+			}
+		}
+	}
+	switch strings.ToLower(code) {
+	case "1113", "1308", "insufficient_quota":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractJSONScalarCode(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(s)
+	}
+	if raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9') {
+		return string(raw)
+	}
+	return ""
 }
 
 // matchesQuotaText 在文本中匹配「额度用尽」特征（大小写不敏感）。
@@ -231,7 +292,7 @@ func matchesQuotaText(s string) bool {
 			return true
 		}
 	}
-	return false
+	return boundedQuotaCodeRe.MatchString(low)
 }
 
 // IsQuotaExhaustedLoose 在 IsQuotaExhausted 基础上增加**纯文本兜底**。

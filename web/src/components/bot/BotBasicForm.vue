@@ -42,12 +42,7 @@
             <t-select v-model="form.llmLight" :options="modelOptions" filterable creatable clearable placeholder="轻量 LLM 模型 ID" data-testid="bot-llm-light" />
           </t-form-item>
           <t-form-item label="温度（Temperature）">
-            <div class="slider-row">
-              <div class="slider-box">
-                <t-slider class="temp-slider" v-model="form.temperature" :min="0" :max="2" :step="0.1" />
-              </div>
-              <span class="slider-val">{{ form.temperature }}</span>
-            </div>
+            <div class="field-tip" data-testid="bot-temperature-guidance">生成参数跟随模型，请在模型服务配置</div>
           </t-form-item>
         </div>
         <div class="row2">
@@ -147,12 +142,5 @@ const modelMaxTokens = computed(() => {
 .emoji.active { border-color: var(--bp-success); background: var(--bp-success-soft); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .field-tip { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--bp-label-tertiary); }
-.slider-row { display: flex; align-items: center; gap: 16px; width: 100%; }
-.slider-box { flex: 1; min-width: 0; }
-.slider-box :deep(.t-slider) { width: 100%; }
-.temp-slider { width: 100%; display: block; }
-.temp-slider :deep(.t-slider__container),
-.temp-slider :deep(.t-slider__rail) { width: 100%; }
-.slider-val { width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
 .footer-actions { display: flex; gap: 12px; align-items: center; }
 </style>

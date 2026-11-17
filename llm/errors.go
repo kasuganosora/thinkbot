@@ -84,6 +84,9 @@ func (e *LLMError) Error() string {
 // Unwrap supports errors.Is / errors.As.
 func (e *LLMError) Unwrap() error { return e.cause }
 
+// IsRetryableError reports whether transport/retry layers may retry this error.
+func (e *LLMError) IsRetryableError() bool { return e != nil && e.Retryable }
+
 // RetryAfter returns the server-suggested retry delay.
 func (e *LLMError) RetryAfter() time.Duration {
 	if e.RetryAfterMs <= 0 {

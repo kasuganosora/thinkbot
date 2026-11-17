@@ -4,10 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/kasuganosora/thinkbot/llm"
@@ -410,28 +407,18 @@ func (r *Response) FirstMessageText() string {
 
 const (
 	// MsgCredentialsRejected 是密钥被拒绝时的固定说明，不带上游正文。
-	MsgCredentialsRejected = "provider rejected the credentials"
+	MsgCredentialsRejected = llm.MsgProviderCredentialsRejected
 	// MsgAccessDenied 是 403 且不是无效密钥时的固定说明。不要写成密钥格式错误。
-	MsgAccessDenied = "provider denied access"
+	MsgAccessDenied = llm.MsgProviderAccessDenied
 )
 
 func parseAPIError(resp *httputil.Response, httpErr error) error {
-	if resp != nil && resp.StatusCode >= 400 {
-		return classifyStatusBody(resp.StatusCode, resp.Body, resp.Headers)
-	}
-	if httpErr != nil {
-		return llm.NewLLMError(llm.ErrorReasonTransport, "openai", "provider connection failed")
-	}
-	return httpErr
+	return llm.ParseProviderAPIError("openai", resp, httpErr)
 }
 
 // classifyStatusBody 只在内存里读响应体来分类。返回的错误不携带原文。
 func classifyStatusBody(statusCode int, body []byte, headers http.Header) error {
-	apiErr, detail := parseProviderError(body)
-	reason := openaiErrorTypeToReason(apiErr.Type, apiErr.Code, statusCode)
-	err := openAIErrorToLLMError(&apiErr, statusCode, headers, reason)
-	err.SafeDetail = detail
-	return err
+	return llm.ClassifyProviderHTTPFailure("openai", statusCode, body, headers)
 }
 
 func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header, reason llm.ErrorReason) *llm.LLMError {
@@ -446,97 +433,24 @@ func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header
 }
 
 func safeProviderMessage(reason llm.ErrorReason, statusCode int, code string) string {
-	switch {
-	case strings.EqualFold(code, "invalid_api_key") || statusCode == http.StatusUnauthorized:
-		return MsgCredentialsRejected
-	case statusCode == http.StatusForbidden:
-		return MsgAccessDenied
-	case reason == llm.ErrorReasonAuthentication:
-		return MsgCredentialsRejected
-	case reason == llm.ErrorReasonContentPolicy:
-		return "provider rejected the content"
-	case reason == llm.ErrorReasonRateLimit:
-		return "provider rate limited the request"
-	case reason == llm.ErrorReasonQuotaExceeded:
-		return "provider quota exceeded"
-	case reason == llm.ErrorReasonNoRoute:
-		return "provider model was not found"
-	default:
-		return fmt.Sprintf("provider request failed with HTTP %d", statusCode)
-	}
+	return llm.SafeProviderMessage(reason, statusCode, code)
 }
 
 func openaiErrorTypeToReason(errType, code string, statusCode int) llm.ErrorReason {
-	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "invalid_api_key":
-		return llm.ErrorReasonAuthentication
-	case "model_not_found":
-		return llm.ErrorReasonNoRoute
-	case "content_filter", "content_policy_violation", "1301":
-		return llm.ErrorReasonContentPolicy
-	case "insufficient_quota":
-		return llm.ErrorReasonQuotaExceeded
-	}
-	switch errType {
-	case "invalid_request_error":
-		return llm.ErrorReasonInvalidRequest
-	case "authentication_error":
-		return llm.ErrorReasonAuthentication
-	case "rate_limit_exceeded", "tokens":
-		return llm.ErrorReasonRateLimit
-	case "insufficient_quota", "billing":
-		return llm.ErrorReasonQuotaExceeded
-	case "content_policy_violation":
-		return llm.ErrorReasonContentPolicy
-	case "server_error", "api_error":
-		return llm.ErrorReasonProviderInternal
-	}
-	return openaiHttpStatusToReason(statusCode)
+	return llm.ClassifyProviderErrorReason(errType, code, statusCode)
 }
 
 // ClassifyStreamError 把流式连接错误收成不含响应体的 LLMError。
 func ClassifyStreamError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var already *llm.LLMError
-	if errors.As(err, &already) && already != nil {
-		return already
-	}
-	var streamErr *httputil.StreamHTTPError
-	if errors.As(err, &streamErr) && streamErr != nil {
-		return classifyStatusBody(streamErr.StatusCode, streamErr.Body, streamErr.Headers)
-	}
-	return llm.NewLLMError(llm.ErrorReasonTransport, "openai", "provider connection failed")
+	return llm.ClassifyProviderStreamError("openai", err)
 }
 
 func openaiHttpStatusToReason(statusCode int) llm.ErrorReason {
-	switch {
-	case statusCode == 429:
-		return llm.ErrorReasonRateLimit
-	case statusCode == 401 || statusCode == 403:
-		return llm.ErrorReasonAuthentication
-	case statusCode == 402:
-		return llm.ErrorReasonQuotaExceeded
-	case statusCode >= 500:
-		return llm.ErrorReasonProviderInternal
-	case statusCode >= 400:
-		return llm.ErrorReasonInvalidRequest
-	default:
-		return llm.ErrorReasonTransport
-	}
+	return llm.ClassifyProviderHTTPStatus(statusCode)
 }
 
 func parseOpenAIRetryAfter(headers http.Header) time.Duration {
-	if headers == nil {
-		return 0
-	}
-	if raStr := strings.TrimSpace(headers.Get("Retry-After")); raStr != "" {
-		if secs, err := strconv.Atoi(raStr); err == nil {
-			return time.Duration(secs) * time.Second
-		}
-	}
-	return 0
+	return llm.ParseRetryAfterHeader(headers)
 }
 
 func validateRequest(req *CreateResponseRequest) error {

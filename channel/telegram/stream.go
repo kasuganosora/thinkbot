@@ -232,7 +232,7 @@ func (c *TelegramChannel) openStream(ctx context.Context, chatID int64, chatType
 	if old, ok := c.streams[chatID]; ok && old != nil {
 		delete(c.streams, chatID)
 		c.streamMu.Unlock()
-		c.closeStream(ctx, old, supersedeTGText(old))
+		c.closeStream(ctx, old, c.supersedeStreamText(old))
 		c.streamMu.Lock()
 	}
 
@@ -259,18 +259,30 @@ func (c *TelegramChannel) openStream(ctx context.Context, chatID int64, chatType
 	go c.feedStream(stCtx, chatID, st, traceID)
 }
 
-// supersedeTGText chooses finish text when a newer private inbound replaces an
-// older stream. Preserve fed content; otherwise leave an interrupt note.
-func supersedeTGText(old *tgStream) string {
+// supersedeStreamText preserves fed content when a newer inbound replaces an
+// older stream, or uses a recorded public failure category if the empty stream
+// had already failed before falling back to the generic interrupt note.
+func (c *TelegramChannel) supersedeStreamText(old *tgStream) string {
 	if old == nil {
 		return streamInterruptNote
 	}
 	old.mu.Lock()
-	defer old.mu.Unlock()
-	if old.fed && old.content != "" {
-		return old.content + "\n\n" + streamInterruptNote
+	fed := old.fed
+	content := old.content
+	traceID := old.traceID
+	old.mu.Unlock()
+	if fed && content != "" {
+		return content + "\n\n" + streamInterruptNote
+	}
+	if note := c.publicFailure(traceID); note != "" {
+		return note
 	}
 	return streamInterruptNote
+}
+
+func supersedeTGText(old *tgStream) string {
+	var zero *TelegramChannel
+	return zero.supersedeStreamText(old)
 }
 
 // pushPlaceholder posts 「正在思考…」 once the delay elapses (private only).
@@ -287,8 +299,13 @@ func (c *TelegramChannel) pushPlaceholder(chatID int64, st *tgStream) {
 		c.streamMu.Unlock()
 		return
 	}
+	traceID := st.traceID
 	st.mu.Unlock()
 	c.streamMu.Unlock()
+
+	if !c.turnAlive(traceID) && c.publicFailure(traceID) != "" {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.typingParent(), streamEditTimeout)
 	defer cancel()
@@ -378,7 +395,7 @@ func (c *TelegramChannel) closeStream(ctx context.Context, st *tgStream, text st
 	}
 	c.forgetKept(st.traceID)
 
-	if text == "" || text == streamErrorNote {
+	if text == "" || text == streamPlaceholder || text == streamErrorNote {
 		text = c.failureText(st.traceID)
 	}
 
@@ -583,7 +600,7 @@ func (c *TelegramChannel) feedStream(ctx context.Context, chatID int64, mine *tg
 				// the placeholder up and force a second message.
 				continue
 			}
-			if !sawActive && time.Since(start) < streamStartGrace {
+			if !sawActive && c.publicFailure(traceID) == "" && time.Since(start) < streamStartGrace {
 				continue
 			}
 			// Turn ended without Send (silent / cancel / drop / hard-timeout).

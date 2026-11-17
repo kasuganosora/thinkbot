@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 // ============================================================================
@@ -136,9 +138,12 @@ func (c *Client) PollVideo(ctx context.Context, requestID string, timeout, inter
 				return status.Video, nil
 			case VideoStatusFailed:
 				if status.Error != nil {
-					return nil, fmt.Errorf("grok: video generation failed [%s]: %s", status.Error.Code, status.Error.Message)
+					reason := llm.ClassifyProviderErrorReason("", status.Error.Code, 400)
+					le := llm.NewLLMError(reason, "grok", "provider video generation failed")
+					le.SafeDetail = llm.FormatSafeErrorDetail("", status.Error.Code, "")
+					return nil, le
 				}
-				return nil, errors.New("grok: video generation failed")
+				return nil, llm.NewLLMError(llm.ErrorReasonProviderInternal, "grok", "provider video generation failed")
 			case VideoStatusExpired:
 				return nil, errors.New("grok: video generation request expired")
 			case VideoStatusPending:

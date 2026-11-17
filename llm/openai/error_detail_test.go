@@ -110,3 +110,131 @@ func assertDetailText(t *testing.T, text, apiKey, leaked string, want ...string)
 		}
 	}
 }
+
+func TestAlternateProviderErrorEnvelopesAndRedaction(t *testing.T) {
+	const apiKey = "dummy-token-not-logged"
+	forbidden := []string{
+		"DO_NOT_LEAK",
+		"SECRET",
+		"https://example.invalid/key",
+		"token=abcd",
+		"Client specified",
+		apiKey,
+	}
+
+	cases := []struct {
+		name       string
+		body       string
+		wantDetail []string
+		wantEmpty  bool
+	}{
+		{
+			name:       "openai_structured_envelope",
+			body:       `{"error":{"code":"invalid_argument","type":"invalid_request_error","param":"temperature","message":"DO_NOT_LEAK prompt=SECRET url=https://example.invalid/key"}}`,
+			wantDetail: []string{"code=invalid_argument", "param=temperature", "type=invalid_request_error"},
+		},
+		{
+			name:       "xai_top_level_code_with_string_error",
+			body:       `{"code":"unrecognized_field","error":"DO_NOT_LEAK token=abcd"}`,
+			wantDetail: []string{"code=unrecognized_field"},
+		},
+		{
+			name:       "xai_single_token_string_error_never_copied",
+			body:       `{"code":"unrecognized_field","error":"DO_NOT_LEAK"}`,
+			wantDetail: []string{"code=unrecognized_field"},
+		},
+		{
+			name:       "xai_grpc_canonical_phrase_mapped_to_safe_token",
+			body:       `{"code":"Client specified an invalid argument","error":"DO_NOT_LEAK prompt=SECRET url=https://example.invalid/key"}`,
+			wantDetail: []string{"code=invalid_argument"},
+		},
+		{
+			name:       "grpc_details_reason_and_field_violation",
+			body:       `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"DO_NOT_LEAK prompt=SECRET","details":[{"reason":"UNSUPPORTED_PARAMETER","fieldViolations":[{"field":"temperature","description":"DO_NOT_LEAK"}]}]}}`,
+			wantDetail: []string{"code=UNSUPPORTED_PARAMETER", "param=temperature", "type=INVALID_ARGUMENT"},
+		},
+		{
+			name:      "unknown_free_text_falls_back_safely",
+			body:      `{"code":"free text DO_NOT_LEAK","error":"DO_NOT_LEAK token=abcd url=https://example.invalid/key"}`,
+			wantEmpty: true,
+		},
+		{
+			name:      "non_json_body_falls_back_safely",
+			body:      `DO_NOT_LEAK prompt=SECRET url=https://example.invalid/key`,
+			wantEmpty: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			c := New(
+				WithAPIKey(apiKey),
+				WithBaseURL(srv.URL+"/v1"),
+				WithChatMode(),
+				WithChatPath("/chat/completions"),
+				WithTimeout(2*time.Second),
+			)
+
+			// 1. DoGenerate
+			_, genErr := c.DoGenerate(context.Background(), llm.GenerateParams{
+				Model:    llm.ChatModel("model-sol-main"),
+				Messages: []llm.Message{llm.UserMessage("ping")},
+			})
+			le, ok := llm.AsLLMError(genErr)
+			if !ok || le.Reason != llm.ErrorReasonInvalidRequest {
+				t.Fatalf("expected invalid_request LLMError, got %T %v", genErr, genErr)
+			}
+
+			// 2. DoStream
+			sr, err := c.DoStream(context.Background(), llm.GenerateParams{
+				Model:    llm.ChatModel("model-sol-main"),
+				Messages: []llm.Message{llm.UserMessage("ping")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var streamErr error
+			for part := range sr.Stream {
+				if p, ok := part.(*llm.ErrorPart); ok {
+					streamErr = p.Error
+				}
+			}
+			sle, ok := llm.AsLLMError(streamErr)
+			if !ok || sle.Reason != llm.ErrorReasonInvalidRequest {
+				t.Fatalf("expected stream invalid_request LLMError, got %T %v", streamErr, streamErr)
+			}
+
+			for _, item := range []*llm.LLMError{le, sle} {
+				if tc.wantEmpty && item.SafeDetail != "" {
+					t.Fatalf("expected empty SafeDetail on free-text fallback, got %q", item.SafeDetail)
+				}
+				for _, want := range tc.wantDetail {
+					if !strings.Contains(item.SafeDetail, want) {
+						t.Fatalf("SafeDetail %q missing %q", item.SafeDetail, want)
+					}
+				}
+				surfaces := []string{
+					item.SafeDetail,
+					item.Message,
+					item.Error(),
+					llm.SafeErrorText(item),
+					llm.UserFailureText(item),
+				}
+				for _, s := range surfaces {
+					for _, bad := range forbidden {
+						if strings.Contains(s, bad) {
+							t.Fatalf("surface %q leaked %q", s, bad)
+						}
+					}
+				}
+			}
+		})
+	}
+}

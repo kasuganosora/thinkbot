@@ -1,9 +1,12 @@
 package retry
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -95,9 +98,17 @@ func HTTPShouldRetry(attempt int, err error) bool {
 		return false
 	}
 
+	var explicit interface{ IsRetryableError() bool }
+	if errors.As(err, &explicit) && explicit != nil {
+		return explicit.IsRetryableError()
+	}
+
 	// 优先识别 retry 包自带的 HTTP 状态错误
 	var httpErr *HTTPStatusError
 	if errors.As(err, &httpErr) {
+		if httpErr.StatusCode == http.StatusTooManyRequests && isNonRetryable429Body(httpErr.Body) {
+			return false
+		}
 		return httpStatusRetryable(httpErr.StatusCode)
 	}
 
@@ -105,11 +116,71 @@ func HTTPShouldRetry(attempt int, err error) bool {
 	// 若不识别，BigModel 的确定性 4xx（1301 内容过滤 / 1210 参数错误 / 1214 messages 非法）
 	// 会被误判为“非 HTTP 错误”而无限重试，单次浪费数分钟。
 	if code := errs.GetCode(err); code != 0 {
+		if code == http.StatusTooManyRequests && isNonRetryable429Body(errs.ResponseDetail(err)) {
+			return false
+		}
 		return httpStatusRetryable(code)
 	}
 
 	// 非 HTTP 错误（如网络超时）也重试
 	return true
+}
+
+var nonRetryable429CodeBoundaryRe = regexp.MustCompile(
+	`"code"\s*:\s*"(?:1113|1308)"|"code"\s*:\s*(?:1113|1308)(?:[^0-9a-z_.-]|$)|(?:^|[^0-9a-z_.-])code=(?:1113|1308)(?:[^0-9a-z_.-]|$)`,
+)
+
+// isNonRetryable429Body reports whether a 429 response body represents a
+// non-retryable billing/quota rejection (such as BigModel 1113 or 1308),
+// preserving normal retries for rate limits (1302) and overload (1305).
+func isNonRetryable429Body(raw string) bool {
+	trimmed := bytes.TrimSpace([]byte(raw))
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		var env struct {
+			Code  json.RawMessage `json:"code"`
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal(trimmed, &env) == nil {
+			code := scalarCodeString(env.Code)
+			if errRaw := bytes.TrimSpace(env.Error); len(errRaw) > 0 && errRaw[0] == '{' {
+				var nested struct {
+					Code json.RawMessage `json:"code"`
+				}
+				if json.Unmarshal(errRaw, &nested) == nil {
+					if c := scalarCodeString(nested.Code); c != "" {
+						code = c
+					}
+				}
+			}
+			switch strings.ToLower(code) {
+			case "1113", "1308", "insufficient_quota":
+				return true
+			}
+		}
+	}
+	low := strings.ToLower(raw)
+	if strings.Contains(low, "insufficient_quota") {
+		return true
+	}
+	return nonRetryable429CodeBoundaryRe.MatchString(low)
+}
+
+func scalarCodeString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(s)
+	}
+	if raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9') {
+		return string(raw)
+	}
+	return ""
 }
 
 // HTTPGetRetryDelay 从 HTTP 错误响应中提取 Retry-After 延迟。

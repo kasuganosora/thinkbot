@@ -204,3 +204,37 @@ func TestAggressiveRetryConfig(t *testing.T) {
 		t.Error("expected max >= 60s for aggressive config")
 	}
 }
+
+func TestHTTPShouldRetry_429Code11130StillRetriesWhile1113Stops(t *testing.T) {
+	retryableBodies := []string{
+		`{"error":{"code":11130,"message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code": 11130,"message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code":"11130","message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code":13080,"message":"DO_NOT_LEAK"}}`,
+		`transient 429 code=11130`,
+		`{"error":{"code":"1302","message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code":"1305","message":"DO_NOT_LEAK"}}`,
+	}
+	for _, body := range retryableBodies {
+		err := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: body}
+		if !HTTPShouldRetry(1, err) {
+			t.Fatalf("HTTPShouldRetry = false for retryable 429 body %q, want true", body)
+		}
+	}
+
+	nonRetryableBodies := []string{
+		`{"error":{"code":1113,"message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code": 1113,"message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code":"1113","message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code":1308,"message":"DO_NOT_LEAK"}}`,
+		`{"error":{"code":"1308","message":"DO_NOT_LEAK"}}`,
+		`truncated {"code":1113, "message":"DO_NOT_LEAK`,
+		`429 code=1113`,
+	}
+	for _, body := range nonRetryableBodies {
+		err := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: body}
+		if HTTPShouldRetry(1, err) {
+			t.Fatalf("HTTPShouldRetry = true for non-retryable 429 body %q, want false", body)
+		}
+	}
+}

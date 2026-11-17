@@ -1,7 +1,7 @@
 <template>
   <div class="providers" data-testid="providers-manager">
     <!-- 中间：服务商列表 -->
-    <div class="prov-list" data-testid="provider-list">
+    <div ref="provListEl" class="prov-list" data-testid="provider-list">
       <button
         v-for="p in providers"
         :key="p.id"
@@ -20,7 +20,7 @@
     </div>
 
     <!-- 右侧：详情 -->
-    <div v-if="active" class="prov-detail" data-testid="provider-detail">
+    <div v-if="active" ref="provDetailEl" class="prov-detail" data-testid="provider-detail">
       <div class="detail-head">
         <div class="head-left">
           <span class="prov-avatar lg">{{ initial(active.name) }}</span>
@@ -109,7 +109,7 @@
             <span class="badge key" title="需要密钥">🔑</span>
             <span v-if="m.contextLength" class="ctx-tag">{{ ctxLabel(m.contextLength) }}</span>
             <span v-if="m.temperature || m.temperature === -1" class="cfg-tag" title="采样温度">T {{ m.temperature === -1 ? 'omit' : m.temperature }}</span>
-            <span v-if="m.topP" class="cfg-tag" title="核采样 TopP">P {{ m.topP }}</span>
+            <span v-if="m.topP || m.topP === -1" class="cfg-tag" title="核采样 TopP">P {{ m.topP === -1 ? 'omit' : m.topP }}</span>
             <span v-if="m.priceInputPer1M || m.priceOutputPer1M" class="price-tag" title="计费单价">{{ m.currency || 'CNY' }} · 入 {{ fmtPrice(m.priceInputPer1M) }} / 出 {{ fmtPrice(m.priceOutputPer1M) }}</span>
             <div class="model-card-ops">
               <t-icon name="refresh" class="op" title="刷新" @click="$forceUpdate()" />
@@ -190,13 +190,22 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { providerApi } from '@/api/services'
+import { samplingAllowed, normalizeModelSampling } from '@/utils/sampling'
 import { providerRuntimeStatus } from './providerRuntimeStatus.js'
+import {
+  mergeProviderList,
+  applySavedProvider,
+  resolveActiveProviderId,
+  withPreservedScroll
+} from './providerListState.js'
 
 const providers = ref([])
 const activeId = ref('')
+const provListEl = ref(null)
+const provDetailEl = ref(null)
 const apiKeyInput = ref('')
 const testing = ref(false)
 const importing = ref(false)
@@ -245,22 +254,36 @@ function fmtPrice(v) {
   return Number(v).toFixed(2)
 }
 
-async function load() {
-  providers.value = await providerApi.list()
-  if (!activeId.value && providers.value.length) activeId.value = providers.value[0].id
+let loadGeneration = 0
+
+async function load(preferredId) {
+  const gen = ++loadGeneration
+  const incoming = await providerApi.list()
+  if (gen !== loadGeneration) return
+  const keepId = preferredId !== undefined ? preferredId : activeId.value
+  providers.value = mergeProviderList(providers.value, incoming)
+  activeId.value = resolveActiveProviderId(providers.value, keepId)
   apiKeyInput.value = ''
 }
-onMounted(load)
+onMounted(() => load())
+
+function scrollTargets() {
+  return [provListEl.value, provDetailEl.value]
+}
 
 async function addProvider() {
-  const p = await providerApi.create({ name: '新服务商', clientType: 'OpenAI Compatible' })
-  await load()
-  activeId.value = p.id
+  loadGeneration++
+  await withPreservedScroll(scrollTargets(), async () => {
+    const p = await providerApi.create({ name: '新服务商', clientType: 'OpenAI Compatible' })
+    await load(p.id)
+  }, { nextTickFn: nextTick })
   MessagePlugin.success('已添加服务商')
 }
 
 async function saveProvider() {
   if (!active.value) return
+  const targetId = active.value.id
+  const saveGen = ++loadGeneration
   try {
     const payload = {
       name: active.value.name,
@@ -270,12 +293,16 @@ async function saveProvider() {
       tokenParamStyle: active.value.tokenParamStyle || 'auto'
     }
     if (apiKeyInput.value) payload.apiKey = apiKeyInput.value
-    const saved = await providerApi.update(active.value.id, payload)
-    apiKeyInput.value = ''
-    await load()
-    runtimeStatus.value = providerRuntimeStatus(saved)
-    if (saved && saved.runtimeApplied === false) MessagePlugin.warning(saved.runtimeMessage || runtimeStatus.value)
-    else MessagePlugin.success('已保存')
+    await withPreservedScroll(scrollTargets(), async () => {
+      const saved = await providerApi.update(targetId, payload)
+      if (saveGen !== loadGeneration) return
+      apiKeyInput.value = ''
+      applySavedProvider(providers.value, saved)
+      await load(targetId)
+      runtimeStatus.value = providerRuntimeStatus(saved)
+      if (saved && saved.runtimeApplied === false) MessagePlugin.warning(saved.runtimeMessage || runtimeStatus.value)
+      else MessagePlugin.success('已保存')
+    }, { nextTickFn: nextTick })
   } catch (e) {
     MessagePlugin.error(e.message || '保存失败')
   }
@@ -288,10 +315,11 @@ function removeProvider() {
     body: `确认删除「${p.name}」及其下所有模型？`,
     theme: 'warning',
     onConfirm: async () => {
+      loadGeneration++
       await providerApi.remove(p.id)
       dlg.destroy()
       activeId.value = ''
-      await load()
+      await load('')
       MessagePlugin.success('已删除')
     }
   })
@@ -299,10 +327,14 @@ function removeProvider() {
 
 async function clearApiKey() {
   if (!active.value) return
+  const targetId = active.value.id
+  loadGeneration++
   try {
-    await providerApi.update(active.value.id, { apiKey: '' })
-    apiKeyInput.value = ''
-    await load()
+    await withPreservedScroll(scrollTargets(), async () => {
+      await providerApi.update(active.value.id, { apiKey: '' })
+      apiKeyInput.value = ''
+      await load(targetId)
+    }, { nextTickFn: nextTick })
     MessagePlugin.success('已清除密钥')
   } catch (e) {
     MessagePlugin.error(e.message || '清除失败')
@@ -323,11 +355,16 @@ async function testConn() {
 }
 
 async function importModels() {
+  if (!active.value) return
+  const targetId = active.value.id
+  loadGeneration++
   importing.value = true
   try {
-    const added = await providerApi.importModels(active.value.id)
-    await load()
-    MessagePlugin.success(added.length ? `导入 ${added.length} 个模型` : '没有新模型')
+    await withPreservedScroll(scrollTargets(), async () => {
+      const added = await providerApi.importModels(targetId)
+      await load(targetId)
+      MessagePlugin.success(added.length ? `导入 ${added.length} 个模型` : '没有新模型')
+    }, { nextTickFn: nextTick })
   } catch (e) {
     MessagePlugin.error(e.message || '导入失败')
   } finally {
@@ -348,7 +385,7 @@ function openAddModel() {
   modelDialog.value = { visible: true, isEdit: false, form: { id: '', name: '', caps: ['chat'], contextLength: 0, maxTokens: 0, temperature: 0, topP: 0, multimodal: false, priceInputPer1M: 0, priceOutputPer1M: 0, priceCacheReadPer1M: 0, currency: 'CNY' } }
 }
 function openEditModel(m) {
-  modelDialog.value = { visible: true, isEdit: true, form: { ...m, caps: [...(m.capabilities || [])], priceInputPer1M: m.priceInputPer1M || 0, priceOutputPer1M: m.priceOutputPer1M || 0, priceCacheReadPer1M: m.priceCacheReadPer1M || 0, currency: m.currency || 'CNY' } }
+  modelDialog.value = { visible: true, isEdit: true, form: { ...m, temperature: normalizeModelSampling(m.temperature), topP: normalizeModelSampling(m.topP), caps: [...(m.capabilities || [])], priceInputPer1M: m.priceInputPer1M || 0, priceOutputPer1M: m.priceOutputPer1M || 0, priceCacheReadPer1M: m.priceCacheReadPer1M || 0, currency: m.currency || 'CNY' } }
 }
 
 // --- 官方推荐预设：降低配置难度（自动填入 + 可自定义） ---
@@ -390,10 +427,6 @@ function applyPreset() {
   MessagePlugin.success('已填入官方推荐值')
 }
 
-function samplingAllowed(v) {
-  return v === -1 || v === 0 || (typeof v === 'number' && v > 0)
-}
-
 async function submitModel() {
   const f = modelDialog.value.form
   if (!samplingAllowed(f.temperature) || !samplingAllowed(f.topP)) {
@@ -407,42 +440,63 @@ async function submitModel() {
     capabilities: caps,
     contextLength: f.contextLength,
     maxTokens: f.maxTokens,
-    temperature: f.temperature || 0,
-    topP: f.topP || 0,
+    temperature: normalizeModelSampling(f.temperature),
+    topP: normalizeModelSampling(f.topP),
     multimodal: caps.includes('vision'),
     priceInputPer1M: f.priceInputPer1M || 0,
     priceOutputPer1M: f.priceOutputPer1M || 0,
     priceCacheReadPer1M: f.priceCacheReadPer1M || 0,
     currency: f.currency || 'CNY'
   }
+  const targetId = active.value?.id || ''
+  loadGeneration++
   try {
-    if (modelDialog.value.isEdit) {
-      await providerApi.updateModel(active.value.id, f.id, payload)
-      MessagePlugin.success('模型已更新')
-    } else {
-      if (!f.id) return MessagePlugin.warning('请填写模型 ID')
-      await providerApi.addModel(active.value.id, payload)
-      MessagePlugin.success('模型已添加')
-    }
-    modelDialog.value.visible = false
-    await load()
+    await withPreservedScroll(scrollTargets(), async () => {
+      if (modelDialog.value.isEdit) {
+        await providerApi.updateModel(targetId, f.id, payload)
+        MessagePlugin.success('模型已更新')
+      } else {
+        if (!f.id) {
+          MessagePlugin.warning('请填写模型 ID')
+          return
+        }
+        await providerApi.addModel(targetId, payload)
+        MessagePlugin.success('模型已添加')
+      }
+      modelDialog.value.visible = false
+      await load(targetId)
+    }, { nextTickFn: nextTick })
   } catch (e) {
     MessagePlugin.error(e.message || '操作失败')
   }
 }
 function removeModel(m) {
+  const targetId = active.value?.id || ''
   const dlg = DialogPlugin.confirm({
     header: '删除模型',
     body: `确认删除模型「${m.name}」？`,
     theme: 'warning',
     onConfirm: async () => {
-      await providerApi.removeModel(active.value.id, m.id)
-      dlg.destroy()
-      await load()
+      loadGeneration++
+      await withPreservedScroll(scrollTargets(), async () => {
+        await providerApi.removeModel(targetId, m.id)
+        dlg.destroy()
+        await load(targetId)
+      }, { nextTickFn: nextTick })
       MessagePlugin.success('已删除')
     }
   })
 }
+
+defineExpose({
+  providers,
+  activeId,
+  apiKeyInput,
+  load,
+  addProvider,
+  saveProvider,
+  removeProvider
+})
 </script>
 
 <style scoped>
