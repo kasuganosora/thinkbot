@@ -195,14 +195,6 @@ var quotaExhaustedPatterns = []string{
 	"credit balance is too low",
 	"billing hard limit",
 	"check your plan and billing",
-	// BigModel business codes: 1113 = insufficient balance, 1308 = window usage cap
-	`"code":"1113"`,
-	`"code": "1113"`,
-	`"code":1113`,
-	`"code": 1113`,
-	"code=1113",
-	`"code":"1308"`,
-	`"code": "1308"`,
 	// 中文措辞
 	"使用上限",
 	"额度已用尽",
@@ -211,6 +203,13 @@ var quotaExhaustedPatterns = []string{
 	"配额已用完",
 	"超出配额",
 }
+
+// boundedQuotaCodeRe matches exact BigModel quota/billing codes (1113, 1308)
+// in JSON ("code":"1113" / "code": 1113) or SafeDetail (code=1113) with strict
+// token boundaries so codes like 11130, 01113, or subcode=1113 do not match.
+var boundedQuotaCodeRe = regexp.MustCompile(
+	`"code"\s*:\s*"(?:1113|1308)"|"code"\s*:\s*(?:1113|1308)(?:[^0-9a-z_.-]|$)|(?:^|[^0-9a-z_.-])code=(?:1113|1308)(?:[^0-9a-z_.-]|$)`,
+)
 
 // IsQuotaExhausted 判断错误是否为「上游额度耗尽」这类**在窗口重置前重试必然失败**的故障。
 //
@@ -293,7 +292,7 @@ func matchesQuotaText(s string) bool {
 			return true
 		}
 	}
-	return false
+	return boundedQuotaCodeRe.MatchString(low)
 }
 
 // IsQuotaExhaustedLoose 在 IsQuotaExhausted 基础上增加**纯文本兜底**。

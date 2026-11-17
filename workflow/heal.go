@@ -343,6 +343,9 @@ func (s *Scheduler) trySelfHeal(ctx context.Context, node *DAGNode, lastErr erro
 	if isQuotaExhausted(lastErr) {
 		return false
 	}
+	if isAuthoritativeNonRetryableLLMError(lastErr) {
+		return false
+	}
 	// 仅「硬上限强杀」这类确定性失败才值得诊断根因（普通错误重试已耗尽，诊断无意义）。
 	if !isNonRetryable(lastErr) {
 		return false

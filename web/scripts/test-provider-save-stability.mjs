@@ -3,6 +3,10 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
+import { createServer } from 'vite'
+import { createSSRApp, h } from 'vue'
+import { renderToString } from '@vue/server-renderer'
 import {
   mergeProviderList,
   applySavedProvider,
@@ -199,4 +203,254 @@ test('ProvidersManager wires scroll/selection/order preservation across provider
   assert.match(providersSrc, /mergeProviderList/)
   assert.match(providersSrc, /resolveActiveProviderId/)
   assert.match(providersSrc, /withPreservedScroll/)
+})
+
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+test('ProvidersManager.load generation guard drops out-of-order stale responses across create, delete, and save', async (t) => {
+  const virtualTdesignId = '\0virtual:tdesign-vue-next'
+  const server = await createServer({
+    server: { middlewareMode: true },
+    appType: 'custom',
+    plugins: [{
+      name: 'stub-tdesign-for-ssr',
+      enforce: 'pre',
+      resolveId(id) {
+        if (id === 'tdesign-vue-next') return virtualTdesignId
+      },
+      load(id) {
+        if (id === virtualTdesignId) {
+          return 'export const MessagePlugin = { success() {}, warning() {}, error() {} }; export const DialogPlugin = { confirm() { return { destroy() {} } } };'
+        }
+      }
+    }]
+  })
+  try {
+    const req = createRequire(import.meta.url)
+    const tdesign = req('tdesign-vue-next')
+    const { providerApi } = await server.ssrLoadModule('/src/api/services.js')
+    const { default: ProvidersManager } = await server.ssrLoadModule('/src/components/ProvidersManager.vue')
+
+    const origMsg = {
+      success: tdesign.MessagePlugin.success,
+      warning: tdesign.MessagePlugin.warning,
+      error: tdesign.MessagePlugin.error
+    }
+    const origConfirm = tdesign.DialogPlugin.confirm
+    const origApi = { ...providerApi }
+
+    let lastConfirm = null
+    tdesign.MessagePlugin.success = () => {}
+    tdesign.MessagePlugin.warning = () => {}
+    tdesign.MessagePlugin.error = () => {}
+    tdesign.DialogPlugin.confirm = (opts) => {
+      const handle = { destroy() {} }
+      lastConfirm = () => opts.onConfirm()
+      return handle
+    }
+
+    async function mountExposed() {
+      let exposed = null
+      const origSetup = ProvidersManager.setup
+      ProvidersManager.setup = (props, ctx) => origSetup(props, {
+        ...ctx,
+        expose: (obj) => {
+          exposed = obj
+          if (ctx.expose) ctx.expose(obj)
+        }
+      })
+      try {
+        const app = createSSRApp(ProvidersManager)
+        for (const tag of ['t-icon', 't-switch', 't-input', 't-select', 't-button', 't-dialog', 't-form', 't-form-item', 't-checkbox-group', 't-checkbox', 't-input-number', 't-divider', 't-link']) {
+          app.component(tag, { render: () => null })
+        }
+        await renderToString(app)
+      } finally {
+        ProvidersManager.setup = origSetup
+      }
+      assert.ok(exposed && typeof exposed.load === 'function', 'ProvidersManager must expose load/state for async race testing')
+      return {
+        get providers() { return exposed.providers.value },
+        get activeId() { return exposed.activeId.value },
+        set activeId(v) { exposed.activeId.value = v },
+        load: exposed.load,
+        addProvider: exposed.addProvider,
+        saveProvider: exposed.saveProvider,
+        removeProvider: exposed.removeProvider
+      }
+    }
+
+    try {
+      await t.test('out-of-order create: stale list resolving after create must not remove new provider or jump selection', async () => {
+        const listQueue = []
+        providerApi.list = () => {
+          const d = deferred()
+          listQueue.push(d)
+          return d.promise
+        }
+        providerApi.create = async () => ({
+          id: 'prov-new',
+          name: '新服务商',
+          clientType: 'OpenAI Compatible',
+          baseUrl: '',
+          apiKey: '',
+          enabled: false,
+          models: []
+        })
+
+        const vm = await mountExposed()
+        // Initial load seeds prov-a
+        const initLoad = vm.load()
+        listQueue[0].resolve([{ id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: true, models: [] }])
+        await initLoad
+        assert.deepEqual(vm.providers.map(p => p.id), ['prov-a'])
+        assert.equal(vm.activeId, 'prov-a')
+
+        // Overlapping slow background load #1 starts BEFORE create
+        const staleLoad = vm.load('prov-a')
+        assert.equal(listQueue.length, 2)
+
+        // User creates prov-new; addProvider triggers load('prov-new') (#2) which resolves FIRST
+        const createPromise = vm.addProvider()
+        // Wait a microtask for create() -> load('prov-new') to enqueue listQueue[2]
+        await Promise.resolve()
+        await Promise.resolve()
+        assert.equal(listQueue.length, 3)
+
+        listQueue[2].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: true, models: [] },
+          { id: 'prov-new', name: '新服务商', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: false, models: [] }
+        ])
+        await createPromise
+        assert.deepEqual(vm.providers.map(p => p.id), ['prov-a', 'prov-new'])
+        assert.equal(vm.activeId, 'prov-new')
+
+        // Now stale load #1 resolves late WITHOUT prov-new
+        listQueue[1].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: true, models: [] }
+        ])
+        await staleLoad
+
+        assert.deepEqual(vm.providers.map(p => p.id), ['prov-a', 'prov-new'], 'stale list removed newly created provider')
+        assert.equal(vm.activeId, 'prov-new', 'stale list jumped selection away from created provider')
+      })
+
+      await t.test('out-of-order delete: stale list resolving after delete must not resurrect deleted provider', async () => {
+        const listQueue = []
+        providerApi.list = () => {
+          const d = deferred()
+          listQueue.push(d)
+          return d.promise
+        }
+        providerApi.remove = async () => null
+
+        const vm = await mountExposed()
+        const initLoad = vm.load()
+        listQueue[0].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: true, models: [] },
+          { id: 'prov-b', name: 'Beta', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: false, models: [] }
+        ])
+        await initLoad
+        vm.activeId = 'prov-b'
+
+        // Stale load #1 starts while prov-b still existed
+        const staleLoad = vm.load('prov-b')
+        assert.equal(listQueue.length, 2)
+
+        // User deletes prov-b; confirm triggers remove('prov-b') + load('') (#2) which resolves FIRST
+        vm.removeProvider()
+        const deletePromise = lastConfirm()
+        await Promise.resolve()
+        await Promise.resolve()
+        assert.equal(listQueue.length, 3)
+
+        listQueue[2].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: true, models: [] }
+        ])
+        await deletePromise
+        assert.deepEqual(vm.providers.map(p => p.id), ['prov-a'])
+        assert.equal(vm.activeId, 'prov-a')
+
+        // Now stale load #1 resolves late WITH deleted prov-b
+        listQueue[1].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: true, models: [] },
+          { id: 'prov-b', name: 'Beta', clientType: 'OpenAI Compatible', baseUrl: '', apiKey: '', enabled: false, models: [] }
+        ])
+        await staleLoad
+
+        assert.deepEqual(vm.providers.map(p => p.id), ['prov-a'], 'stale list resurrected deleted provider')
+        assert.equal(vm.activeId, 'prov-a', 'stale list jumped selection to deleted provider')
+      })
+
+      await t.test('out-of-order save: stale list resolving after save must not overwrite saved fields or jump selection', async () => {
+        const listQueue = []
+        providerApi.list = () => {
+          const d = deferred()
+          listQueue.push(d)
+          return d.promise
+        }
+        providerApi.update = async (id, payload) => ({
+          id,
+          ...payload,
+          apiKey: 'masked',
+          runtimeApplied: true,
+          runtimeState: 'applied'
+        })
+
+        const vm = await mountExposed()
+        const initLoad = vm.load()
+        listQueue[0].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: 'https://a.example/v1', apiKey: 'masked', enabled: true, models: [] },
+          { id: 'prov-b', name: 'Beta Old', clientType: 'OpenAI Compatible', baseUrl: 'https://b.example/v1', apiKey: 'masked', enabled: false, models: [] }
+        ])
+        await initLoad
+
+        // Stale load #1 starts while activeId is prov-a and prov-b still has 'Beta Old'
+        const staleLoad = vm.load('prov-a')
+        assert.equal(listQueue.length, 2)
+
+        // User selects prov-b, renames it to 'Beta Saved', and saves; load #2 resolves FIRST
+        vm.activeId = 'prov-b'
+        vm.providers[1].name = 'Beta Saved'
+        const savePromise = vm.saveProvider()
+        await Promise.resolve()
+        await Promise.resolve()
+        assert.equal(listQueue.length, 3)
+
+        listQueue[2].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: 'https://a.example/v1', apiKey: 'masked', enabled: true, models: [] },
+          { id: 'prov-b', name: 'Beta Saved', clientType: 'OpenAI Compatible', baseUrl: 'https://b.example/v1', apiKey: 'masked', enabled: false, models: [] }
+        ])
+        await savePromise
+        assert.equal(vm.activeId, 'prov-b')
+        assert.equal(vm.providers[1].name, 'Beta Saved')
+
+        // Stale load #1 resolves late with old 'Beta Old' and keepId='prov-a'
+        listQueue[1].resolve([
+          { id: 'prov-a', name: 'Alpha', clientType: 'OpenAI Compatible', baseUrl: 'https://a.example/v1', apiKey: 'masked', enabled: true, models: [] },
+          { id: 'prov-b', name: 'Beta Old', clientType: 'OpenAI Compatible', baseUrl: 'https://b.example/v1', apiKey: 'masked', enabled: false, models: [] }
+        ])
+        await staleLoad
+
+        assert.equal(vm.activeId, 'prov-b', 'stale list jumped selection back to prov-a')
+        assert.equal(vm.providers[1].name, 'Beta Saved', 'stale list overwrote newly saved provider name')
+      })
+    } finally {
+      Object.assign(providerApi, origApi)
+      tdesign.MessagePlugin.success = origMsg.success
+      tdesign.MessagePlugin.warning = origMsg.warning
+      tdesign.MessagePlugin.error = origMsg.error
+      tdesign.DialogPlugin.confirm = origConfirm
+    }
+  } finally {
+    await server.close()
+  }
 })

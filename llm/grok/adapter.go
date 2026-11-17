@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/kasuganosora/thinkbot/llm"
-	"github.com/kasuganosora/thinkbot/util/errs"
 )
 
 // ============================================================================
@@ -193,7 +192,7 @@ func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.
 		})
 
 		if streamErr != nil && streamErr != context.Canceled {
-			send(&llm.ErrorPart{Error: errs.Wrap(streamErr, "grok: stream failed")})
+			send(&llm.ErrorPart{Error: llm.ClassifyProviderStreamError("grok", streamErr)})
 		}
 
 		send(&llm.FinishPart{

@@ -254,9 +254,13 @@ function fmtPrice(v) {
   return Number(v).toFixed(2)
 }
 
+let loadGeneration = 0
+
 async function load(preferredId) {
-  const keepId = preferredId !== undefined ? preferredId : activeId.value
+  const gen = ++loadGeneration
   const incoming = await providerApi.list()
+  if (gen !== loadGeneration) return
+  const keepId = preferredId !== undefined ? preferredId : activeId.value
   providers.value = mergeProviderList(providers.value, incoming)
   activeId.value = resolveActiveProviderId(providers.value, keepId)
   apiKeyInput.value = ''
@@ -268,6 +272,7 @@ function scrollTargets() {
 }
 
 async function addProvider() {
+  loadGeneration++
   await withPreservedScroll(scrollTargets(), async () => {
     const p = await providerApi.create({ name: '新服务商', clientType: 'OpenAI Compatible' })
     await load(p.id)
@@ -278,6 +283,7 @@ async function addProvider() {
 async function saveProvider() {
   if (!active.value) return
   const targetId = active.value.id
+  const saveGen = ++loadGeneration
   try {
     const payload = {
       name: active.value.name,
@@ -289,6 +295,7 @@ async function saveProvider() {
     if (apiKeyInput.value) payload.apiKey = apiKeyInput.value
     await withPreservedScroll(scrollTargets(), async () => {
       const saved = await providerApi.update(targetId, payload)
+      if (saveGen !== loadGeneration) return
       apiKeyInput.value = ''
       applySavedProvider(providers.value, saved)
       await load(targetId)
@@ -308,6 +315,7 @@ function removeProvider() {
     body: `确认删除「${p.name}」及其下所有模型？`,
     theme: 'warning',
     onConfirm: async () => {
+      loadGeneration++
       await providerApi.remove(p.id)
       dlg.destroy()
       activeId.value = ''
@@ -320,6 +328,7 @@ function removeProvider() {
 async function clearApiKey() {
   if (!active.value) return
   const targetId = active.value.id
+  loadGeneration++
   try {
     await withPreservedScroll(scrollTargets(), async () => {
       await providerApi.update(active.value.id, { apiKey: '' })
@@ -348,6 +357,7 @@ async function testConn() {
 async function importModels() {
   if (!active.value) return
   const targetId = active.value.id
+  loadGeneration++
   importing.value = true
   try {
     await withPreservedScroll(scrollTargets(), async () => {
@@ -439,6 +449,7 @@ async function submitModel() {
     currency: f.currency || 'CNY'
   }
   const targetId = active.value?.id || ''
+  loadGeneration++
   try {
     await withPreservedScroll(scrollTargets(), async () => {
       if (modelDialog.value.isEdit) {
@@ -466,6 +477,7 @@ function removeModel(m) {
     body: `确认删除模型「${m.name}」？`,
     theme: 'warning',
     onConfirm: async () => {
+      loadGeneration++
       await withPreservedScroll(scrollTargets(), async () => {
         await providerApi.removeModel(targetId, m.id)
         dlg.destroy()
@@ -475,6 +487,16 @@ function removeModel(m) {
     }
   })
 }
+
+defineExpose({
+  providers,
+  activeId,
+  apiKeyInput,
+  load,
+  addProvider,
+  saveProvider,
+  removeProvider
+})
 </script>
 
 <style scoped>

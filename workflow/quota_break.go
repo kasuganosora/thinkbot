@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kasuganosora/thinkbot/agent/outbound"
+	"github.com/kasuganosora/thinkbot/llm"
 	utilhttp "github.com/kasuganosora/thinkbot/util/http"
 )
 
@@ -61,6 +62,9 @@ const (
 // 必须用 Loose 版本：错误链跨 节点重试 → SubAgent → LLM 流式重试 多层包装后
 // 已退化为纯文本，errors.As 拿不到 *StreamHTTPError（同 review_error.go 的教训）。
 func isQuotaExhausted(err error) bool {
+	if le, ok := llm.AsLLMError(err); ok && le.Reason == llm.ErrorReasonQuotaExceeded {
+		return true
+	}
 	return utilhttp.IsQuotaExhaustedLoose(err)
 }
 

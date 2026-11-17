@@ -3,6 +3,8 @@ package workflow
 import (
 	"errors"
 	"strings"
+
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 // ============================================================================
@@ -77,6 +79,9 @@ func isNonRetryable(err error) bool {
 	if isQuotaExhausted(err) {
 		return true
 	}
+	if isAuthoritativeNonRetryableLLMError(err) {
+		return true
+	}
 	// 工具缺失是**环境事实**而非随机故障：只要节点档位不变，重跑多少次
 	// 都拿不到工具。与额度耗尽同理，走快速失败，别把预算烧在注定失败的重试上。
 	//
@@ -106,4 +111,27 @@ func isNonRetryable(err error) bool {
 		}
 	}
 	return false
+}
+
+func isAuthoritativeNonRetryableLLMError(err error) bool {
+	le, ok := llm.AsLLMError(err)
+	if !ok || le == nil || le.Reason == "" {
+		return false
+	}
+	if le.Reason == llm.ErrorReasonQuotaExceeded {
+		return !le.Retryable
+	}
+	if le.Retryable {
+		return false
+	}
+	switch le.Reason {
+	case llm.ErrorReasonAuthentication,
+		llm.ErrorReasonInvalidRequest,
+		llm.ErrorReasonContextOverflow,
+		llm.ErrorReasonContentPolicy,
+		llm.ErrorReasonNoRoute:
+		return true
+	default:
+		return false
+	}
 }

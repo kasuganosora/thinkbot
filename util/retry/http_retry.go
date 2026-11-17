@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -125,6 +126,10 @@ func HTTPShouldRetry(attempt int, err error) bool {
 	return true
 }
 
+var nonRetryable429CodeBoundaryRe = regexp.MustCompile(
+	`"code"\s*:\s*"(?:1113|1308)"|"code"\s*:\s*(?:1113|1308)(?:[^0-9a-z_.-]|$)|(?:^|[^0-9a-z_.-])code=(?:1113|1308)(?:[^0-9a-z_.-]|$)`,
+)
+
 // isNonRetryable429Body reports whether a 429 response body represents a
 // non-retryable billing/quota rejection (such as BigModel 1113 or 1308),
 // preserving normal retries for rate limits (1302) and overload (1305).
@@ -154,16 +159,10 @@ func isNonRetryable429Body(raw string) bool {
 		}
 	}
 	low := strings.ToLower(raw)
-	for _, marker := range []string{
-		`"code":"1113"`, `"code": "1113"`, `"code":1113`, `"code": 1113`,
-		`"code":"1308"`, `"code": "1308"`,
-		"insufficient_quota",
-	} {
-		if strings.Contains(low, marker) {
-			return true
-		}
+	if strings.Contains(low, "insufficient_quota") {
+		return true
 	}
-	return false
+	return nonRetryable429CodeBoundaryRe.MatchString(low)
 }
 
 func scalarCodeString(raw json.RawMessage) string {

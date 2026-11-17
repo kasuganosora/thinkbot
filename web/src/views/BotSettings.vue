@@ -100,7 +100,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next'
 import { useBotStore } from '@/stores/bot'
 import { botApi, configApi, providerApi } from '@/api/services'
-import { samplingAllowed, normalizeBotTemperature } from '@/utils/sampling'
 import BotBasicForm from '@/components/bot/BotBasicForm.vue'
 import BotReasoning from '@/components/bot/BotReasoning.vue'
 import BotCronJobs from '@/components/bot/BotCronJobs.vue'
@@ -231,7 +230,7 @@ function loadBot() {
     form.value = {
       id: b.id, name: b.name, avatar: b.avatar || '🤖', desc: b.description || b.desc || '',
       llmMain: b.llmMain || '', llmLight: b.llmLight || '', llmVision: '',
-      temperature: normalizeBotTemperature(b.temperature), maxTokens: b.maxTokens ?? 4096,
+      maxTokens: b.maxTokens ?? 4096,
       workers: b.workers ?? 4, reasoningEffort: b.reasoningEffort ?? '',
       hardMaxSteps: b.hardMaxSteps ?? 0
     }
@@ -284,21 +283,14 @@ function renameBot() {
 
 async function saveBasic() {
   const f = form.value
-  if (!samplingAllowed(f.temperature)) {
-    MessagePlugin.warning('温度只能是 -1（不发送）或非负数')
-    return
-  }
   const visionChanged = (f.llmVision || '') !== visionOriginal.value
   try {
     const saved = await botApi.update(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
       llmMain: f.llmMain, llmLight: f.llmLight, llmVision: f.llmVision || '',
-      temperature: f.temperature,
       maxTokens: f.maxTokens, workers: f.workers, reasoningEffort: f.reasoningEffort,
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
-    const echoedTemp = normalizeBotTemperature(saved?.temperature, f.temperature)
-    f.temperature = echoedTemp
     visionOriginal.value = f.llmVision || ''
     if (saved) {
       effective.value = {
@@ -310,14 +302,12 @@ async function saveBasic() {
     }
     store.updateBot(f.id, {
       name: f.name, avatar: f.avatar, description: f.desc,
-      temperature: echoedTemp,
       llmMain: f.llmMain, llmLight: f.llmLight, maxTokens: f.maxTokens,
       workers: f.workers, reasoningEffort: f.reasoningEffort,
       hardMaxSteps: f.hardMaxSteps ?? 0
     })
     if (bot.value) {
       bot.value.name = f.name
-      bot.value.temperature = echoedTemp
     }
     if (saved && saved.applied) MessagePlugin.success('已切换到保存的模型')
     else if (saved && saved.pending) MessagePlugin.success(saved.message || '已保存，启动后生效')
@@ -355,6 +345,8 @@ function removeBot() {
     }
   })
 }
+
+defineExpose({ form, saveBasic })
 </script>
 
 <style scoped>

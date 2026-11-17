@@ -323,3 +323,68 @@ func TestBotCreateAtomicSingleWriteDistinguishesOmittedZeroAndMinusOne(t *testin
 		t.Fatalf("direct CreateDefinition temperature=%v, want 0.7", storedDirect.Temperature)
 	}
 }
+
+func TestBotEditSavePreservesLegacyTemperatureValues(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, st := applyDB(t)
+	svc := NewBotService(db, st, bot.NewBotManager(zap.NewNop().Sugar(), nooptrace.NewTracerProvider()), zap.NewNop().Sugar(), nooptrace.NewTracerProvider(), nil, nil, nil, nil, nil, nil, nil, nil)
+	srv := &Server{store: st, botSvc: svc, logger: zap.NewNop().Sugar()}
+	r := gin.New()
+	r.POST("/api/bots", srv.handleCreateBot)
+	r.GET("/api/bots/:id", srv.handleGetBot)
+	r.PUT("/api/bots/:id", srv.handleUpdateBot)
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	for _, legacyTemp := range []float64{0.35, 0, -1, 1.2} {
+		createBody := `{"name":"legacy-bot","temperature":` + jsonNumber(legacyTemp) + `}`
+		w := call(http.MethodPost, "/api/bots", createBody)
+		if w.Code != http.StatusOK {
+			t.Fatalf("create legacyTemp=%v failed: %d %s", legacyTemp, w.Code, w.Body.String())
+		}
+		var created struct {
+			Data dao.BotDefinition `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+
+		// Simulate BotSettings.vue saveBasic() payload (temperature omitted).
+		uiSavePayload := `{"name":"renamed-bot","avatar":"🤖","description":"edited via UI","llmMain":"","llmLight":"","llmVision":"","maxTokens":8192,"workers":6,"reasoningEffort":"medium","hardMaxSteps":20}`
+		w = call(http.MethodPut, "/api/bots/"+created.Data.ID, uiSavePayload)
+		if w.Code != http.StatusOK {
+			t.Fatalf("UI save failed for legacyTemp=%v: %d %s", legacyTemp, w.Code, w.Body.String())
+		}
+
+		var stored dao.BotDefinition
+		if err := db.First(&stored, "id = ?", created.Data.ID).Error; err != nil {
+			t.Fatalf("load stored bot: %v", err)
+		}
+		if stored.Name != "renamed-bot" || stored.MaxTokens != 8192 || stored.Workers != 6 {
+			t.Fatalf("expected non-temperature fields to update, got %+v", stored)
+		}
+		if stored.Temperature != legacyTemp {
+			t.Fatalf("editing/saving bot overwrote legacy temperature: got %v, want %v", stored.Temperature, legacyTemp)
+		}
+
+		getW := call(http.MethodGet, "/api/bots/"+created.Data.ID, "")
+		var fetched struct {
+			Data dao.BotDefinition `json:"data"`
+		}
+		if err := json.Unmarshal(getW.Body.Bytes(), &fetched); err != nil {
+			t.Fatal(err)
+		}
+		if fetched.Data.Temperature != legacyTemp {
+			t.Fatalf("GET /api/bots/:id after UI save returned temperature=%v, want %v", fetched.Data.Temperature, legacyTemp)
+		}
+	}
+}
