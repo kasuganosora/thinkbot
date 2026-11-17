@@ -446,8 +446,9 @@ func openAIErrorToLLMError(apiErr *APIError, statusCode int, headers http.Header
 }
 
 func safeProviderMessage(reason llm.ErrorReason, statusCode int, code string) string {
+	trimmedCode := strings.TrimSpace(code)
 	switch {
-	case strings.EqualFold(code, "invalid_api_key") || statusCode == http.StatusUnauthorized:
+	case strings.EqualFold(trimmedCode, "invalid_api_key") || statusCode == http.StatusUnauthorized:
 		return MsgCredentialsRejected
 	case statusCode == http.StatusForbidden:
 		return MsgAccessDenied
@@ -455,6 +456,10 @@ func safeProviderMessage(reason llm.ErrorReason, statusCode int, code string) st
 		return MsgCredentialsRejected
 	case reason == llm.ErrorReasonContentPolicy:
 		return "provider rejected the content"
+	case trimmedCode == "1113":
+		return "provider account has insufficient balance"
+	case trimmedCode == "1305":
+		return "provider model is overloaded"
 	case reason == llm.ErrorReasonRateLimit:
 		return "provider rate limited the request"
 	case reason == llm.ErrorReasonQuotaExceeded:
@@ -474,8 +479,12 @@ func openaiErrorTypeToReason(errType, code string, statusCode int) llm.ErrorReas
 		return llm.ErrorReasonNoRoute
 	case "content_filter", "content_policy_violation", "1301":
 		return llm.ErrorReasonContentPolicy
-	case "insufficient_quota":
+	case "insufficient_quota", "1113":
 		return llm.ErrorReasonQuotaExceeded
+	case "1302":
+		return llm.ErrorReasonRateLimit
+	case "1305":
+		return llm.ErrorReasonProviderInternal
 	}
 	switch errType {
 	case "invalid_request_error":

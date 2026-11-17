@@ -28,13 +28,18 @@ func TestFailureReplyActions_AuthAndGenericStaySafe(t *testing.T) {
 	if failureReplyActions(env, errString("upstream body "+reflected)) != nil {
 		t.Fatal("non-llm error produced a model reply")
 	}
-	other := failureReplyActions(env, &llm.LLMError{Reason: llm.ErrorReasonRateLimit, Message: "slow down " + reflected})
-	payload, _ := other[0].Payload.(string)
-	if len(other) != 1 || payload != "模型服务暂时没有返回结果。" || strings.Contains(payload, reflected) {
-		t.Fatalf("other llm %+v", other)
+	rateLimited := failureReplyActions(env, &llm.LLMError{Reason: llm.ErrorReasonRateLimit, Message: "slow down " + reflected})
+	payload, _ := rateLimited[0].Payload.(string)
+	if len(rateLimited) != 1 || payload != llm.UserFailureText(&llm.LLMError{Reason: llm.ErrorReasonRateLimit}) || strings.Contains(payload, reflected) {
+		t.Fatalf("rate limit llm %+v", rateLimited)
 	}
-	if other[0].Metadata["source_channel"] != "misskey" {
-		t.Fatalf("source channel %+v", other[0].Metadata)
+	if rateLimited[0].Metadata["source_channel"] != "misskey" {
+		t.Fatalf("source channel %+v", rateLimited[0].Metadata)
+	}
+	generic := failureReplyActions(env, &llm.LLMError{Reason: llm.ErrorReasonInvalidProviderOutput, Message: "bad output " + reflected})
+	genPayload, _ := generic[0].Payload.(string)
+	if len(generic) != 1 || genPayload != "模型服务暂时没有返回结果。" || strings.Contains(genPayload, reflected) {
+		t.Fatalf("generic llm %+v", generic)
 	}
 	if failureReplyActions(env, nil) != nil {
 		t.Fatal("nil error produced a reply")

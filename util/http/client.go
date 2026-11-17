@@ -488,7 +488,11 @@ func (r *Request) doWithRetry() (*Response, error) {
 	// 默认 ShouldRetry：仅对可重试 HTTP 状态码（5xx、429、网络错误）重试
 	if cfg.ShouldRetry == nil {
 		cfg.ShouldRetry = func(attempt int, err error) bool {
-			return isRetryableCode(errs.GetCode(err))
+			code := errs.GetCode(err)
+			if code == http.StatusTooManyRequests && hasNonRetryable429Code([]byte(errs.ResponseDetail(err))) {
+				return false
+			}
+			return isRetryableCode(code)
 		}
 	}
 

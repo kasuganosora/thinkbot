@@ -42,11 +42,20 @@
             <t-select v-model="form.llmLight" :options="modelOptions" filterable creatable clearable placeholder="轻量 LLM 模型 ID" data-testid="bot-llm-light" />
           </t-form-item>
           <t-form-item label="温度（Temperature）">
-            <div class="slider-row">
-              <div class="slider-box">
-                <t-slider class="temp-slider" v-model="form.temperature" :min="0" :max="2" :step="0.1" />
+            <div class="temp-input-wrap">
+              <div class="temp-input-row">
+                <t-input-number
+                  v-model="form.temperature"
+                  :min="-1"
+                  :max="2"
+                  :step="0.1"
+                  :decimal-places="2"
+                  style="width: 100%"
+                  data-testid="bot-temperature"
+                />
+                <span v-if="form.temperature === -1" class="cfg-tag" data-testid="bot-temperature-omit">omit</span>
               </div>
-              <span class="slider-val">{{ form.temperature }}</span>
+              <div class="field-tip">-1 表示请求中不发送 temperature。0 表示未设置，运行时默认 0.7。其它负数无效。</div>
             </div>
           </t-form-item>
         </div>
@@ -147,12 +156,8 @@ const modelMaxTokens = computed(() => {
 .emoji.active { border-color: var(--bp-success); background: var(--bp-success-soft); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .field-tip { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--bp-label-tertiary); }
-.slider-row { display: flex; align-items: center; gap: 16px; width: 100%; }
-.slider-box { flex: 1; min-width: 0; }
-.slider-box :deep(.t-slider) { width: 100%; }
-.temp-slider { width: 100%; display: block; }
-.temp-slider :deep(.t-slider__container),
-.temp-slider :deep(.t-slider__rail) { width: 100%; }
-.slider-val { width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+.temp-input-wrap { width: 100%; }
+.temp-input-row { display: flex; align-items: center; gap: 8px; width: 100%; }
+.cfg-tag { flex-shrink: 0; font-size: 11px; padding: 1px 8px; border-radius: 8px; background: var(--bp-accent-soft); color: var(--bp-accent); font-weight: 600; }
 .footer-actions { display: flex; gap: 12px; align-items: center; }
 </style>

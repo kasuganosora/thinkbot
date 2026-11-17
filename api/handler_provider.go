@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -203,16 +204,20 @@ func (s *Server) saveProvider(c *gin.Context, def *ProviderDef) error {
 	return s.store.Set(c.Request.Context(), providerConfigKey(def.ID), string(data))
 }
 
-// getAllProviders 读取所有 Provider 定义。
+// getAllProviders returns all provider definitions in deterministic key order.
 func (s *Server) getAllProviders() []ProviderDef {
 	raw := s.store.GetByPrefix(providerKeyPrefix)
-	result := make([]ProviderDef, 0, len(raw))
-	for _, v := range raw {
-		if v == "" {
-			continue
+	keys := make([]string, 0, len(raw))
+	for k, v := range raw {
+		if v != "" {
+			keys = append(keys, k)
 		}
+	}
+	sort.Strings(keys)
+	result := make([]ProviderDef, 0, len(keys))
+	for _, k := range keys {
 		var def ProviderDef
-		if err := json.Unmarshal([]byte(v), &def); err != nil {
+		if err := json.Unmarshal([]byte(raw[k]), &def); err != nil {
 			continue
 		}
 		result = append(result, def)

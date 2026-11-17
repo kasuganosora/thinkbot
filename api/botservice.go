@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -693,6 +694,13 @@ func (s *BotService) GetDefinition(id string) (*dao.BotDefinition, error) {
 
 // CreateDefinition 创建 Bot 定义。
 func (s *BotService) CreateDefinition(def *dao.BotDefinition) error {
+	return s.CreateBotDefinition(def, nil)
+}
+
+// CreateBotDefinition creates a BotDefinition in a single INSERT statement.
+// When explicitTemperature is non-nil, its exact value (including 0) is written
+// in that single INSERT instead of falling back to the GORM column default 0.7.
+func (s *BotService) CreateBotDefinition(def *dao.BotDefinition, explicitTemperature *float64) error {
 	if def.ID == "" {
 		return errs.BadRequest("bot id is required")
 	}
@@ -702,7 +710,49 @@ func (s *BotService) CreateDefinition(def *dao.BotDefinition) error {
 	if def.Status == "" {
 		def.Status = dao.BotStatusStopped
 	}
-	if err := s.db.Create(def).Error; err != nil {
+	if explicitTemperature == nil || *explicitTemperature != 0 {
+		if explicitTemperature != nil {
+			def.Temperature = *explicitTemperature
+		}
+		if err := s.db.Create(def).Error; err != nil {
+			return errs.Wrap(err, "bot_service: create definition")
+		}
+		return nil
+	}
+
+	now := time.Now()
+	if def.CreatedAt.IsZero() {
+		def.CreatedAt = now
+	}
+	if def.UpdatedAt.IsZero() {
+		def.UpdatedAt = now
+	}
+	stmt := &gorm.Statement{DB: s.db}
+	if err := stmt.Parse(def); err != nil {
+		return errs.Wrap(err, "bot_service: parse definition schema")
+	}
+	rv := reflect.ValueOf(def).Elem()
+	row := make(map[string]any, len(stmt.Schema.Fields))
+	for _, f := range stmt.Schema.Fields {
+		if f.DBName == "" || !f.Creatable {
+			continue
+		}
+		if f.DBName == "temperature" {
+			row[f.DBName] = 0.0
+			def.Temperature = 0.0
+			continue
+		}
+		val, isZero := f.ValueOf(stmt.Context, rv)
+		if isZero && f.HasDefaultValue {
+			if f.DefaultValueInterface != nil {
+				row[f.DBName] = f.DefaultValueInterface
+				_ = f.Set(stmt.Context, rv, f.DefaultValueInterface)
+			}
+			continue
+		}
+		row[f.DBName] = val
+	}
+	if err := s.db.Model(&dao.BotDefinition{}).Create(row).Error; err != nil {
 		return errs.Wrap(err, "bot_service: create definition")
 	}
 	return nil

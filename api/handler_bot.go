@@ -121,6 +121,11 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		return
 	}
 
+	if err := validateSampling(req.Temperature, nil); err != nil {
+		Fail(c, err)
+		return
+	}
+
 	// 决定头像：前端可能传 avatarUrl（URL）或 avatar（emoji），优先 avatarUrl
 	avatar := req.Avatar
 	if req.AvatarUrl != "" {
@@ -177,7 +182,7 @@ func (s *Server) handleCreateBot(c *gin.Context) {
 		Status:          dao.BotStatusStopped,
 	}
 
-	if err := s.botSvc.CreateDefinition(def); err != nil {
+	if err := s.botSvc.CreateBotDefinition(def, req.Temperature); err != nil {
 		Fail(c, err)
 		return
 	}
@@ -211,6 +216,11 @@ func (s *Server) handleUpdateBot(c *gin.Context) {
 	var req UpdateBotReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, errs.BadRequest("invalid request body: "+err.Error()))
+		return
+	}
+
+	if err := validateSampling(req.Temperature, nil); err != nil {
+		Fail(c, err)
 		return
 	}
 
