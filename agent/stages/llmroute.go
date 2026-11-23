@@ -1369,6 +1369,15 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 	lurkMode := isLurkMode(env)
 	heartbeatMode := isHeartbeatMode(env)
 	lightTier := route.WantsLight(env) && !lurkMode && !heartbeatMode
+	if !lurkMode && !heartbeatMode && !route.Upgraded(env) &&
+		route.ModelOf(env) == route.ModelLight && route.HasInlineMedia(env) {
+		// INFO 级：带 inline 媒体的回合被强制留在全量档。否则「L1 选了 light、
+		// 实际却跑主模型」在日志里无法解释，也难以定位纯文本模型拒收媒体 part
+		// 导致的整轮空回复（见 route.WantsLight）。
+		logger.Infow("light tier suppressed by inline media",
+			"message_id", env.Message.ID,
+			"intent", route.IntentOf(env))
+	}
 	if lightTier && s.config.ForceFullTier != nil && s.config.ForceFullTier(env.Message) {
 		// A task is still in progress (the previous assistant turn used tools),
 		// or the history otherwise says this is an execution turn. L1 cannot see

@@ -156,10 +156,31 @@ func LevelOf(env *core.Envelope) string {
 	return s
 }
 
+// HasInlineMedia reports whether this turn carries media that the message
+// builder may inject as non-text content parts (image_url / inline file).
+// Only attachments that can actually produce a part count: the builder skips
+// plain "file" attachments and anything without a usable URI.
+func HasInlineMedia(env *core.Envelope) bool {
+	if env == nil {
+		return false
+	}
+	for _, att := range core.GetAttachments(&env.Message) {
+		if core.IsMultimodalType(att.Type) && att.DataURI() != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // WantsLight reports whether this execution should use the light tier.
 // A turn that already upgraded stays on the full tier.
+// A turn carrying inline media must also stay on the full tier: the light
+// model is text-only, while the message builder decides to inject media parts
+// from the *main* model's capability. Downgrading such a turn sends image/file
+// parts to a text-only model, which rejects the whole request with a
+// deterministic 400 and leaves the user with an empty reply.
 func WantsLight(env *core.Envelope) bool {
-	return ModelOf(env) == ModelLight && !Upgraded(env)
+	return ModelOf(env) == ModelLight && !Upgraded(env) && !HasInlineMedia(env)
 }
 
 // UpgradeRequested reports that the light-tier model asked for the full tier.
