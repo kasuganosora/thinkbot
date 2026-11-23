@@ -104,6 +104,18 @@ func (c *WebChannel) InjectWithID(ctx context.Context, msgID, traceID, userID, t
 		"source_channel": c.name,
 	}
 	maps.Copy(metadata, extraMetadata)
+	// Web 聊天附件来自前端的 dataUrl DTO；必须转成 core.Attachment 约定的类型，
+	// 否则 core.GetAttachments 不识别 []api.ChatAttachment，图片会被静默丢弃。
+	if requested, normalized, converted := normalizeInjectedAttachments(metadata); converted {
+		if l := traceid.L(ctx); l != nil {
+			l.Infow("webchannel: 聊天附件已归一化",
+				"channel", c.name,
+				"trace_id", traceID,
+				"requested", requested,
+				"normalized", normalized,
+				"dropped", requested-normalized)
+		}
+	}
 	// Channel 类型，供 ToolSessionContext.SourceChannelType 使用（工具权限按平台匹配）。
 	// 放在 maps.Copy 之后，确保不被 extraMetadata 覆盖。
 	metadata["channel_type"] = "web"
@@ -122,6 +134,90 @@ func (c *WebChannel) InjectWithID(ctx context.Context, msgID, traceID, userID, t
 		Metadata:  metadata,
 	}
 	return ingress.Receive(ctx, msg)
+}
+
+// normalizeInjectedAttachments 把 Web 聊天请求的附件 DTO 转成 core.Attachment。
+//
+// ⚠️ 不要直接把 []ChatAttachment 放进 Message.Metadata：core.GetAttachments 只识别
+// []core.Attachment 或 []any(map[string]any)，具名 slice 会让图片静默丢失。
+func normalizeInjectedAttachments(metadata map[string]any) (requested, normalized int, converted bool) {
+	if metadata == nil {
+		return 0, 0, false
+	}
+	atts, ok := metadata["attachments"].([]ChatAttachment)
+	if !ok {
+		return 0, 0, false
+	}
+	coreAtts := normalizeChatAttachments(atts)
+	if len(coreAtts) == 0 {
+		delete(metadata, "attachments")
+	} else {
+		metadata["attachments"] = coreAtts
+	}
+	return len(atts), len(coreAtts), true
+}
+
+func normalizeChatAttachments(atts []ChatAttachment) []core.Attachment {
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]core.Attachment, 0, len(atts))
+	for _, a := range atts {
+		dataURL := strings.TrimSpace(a.DataUrl)
+		if dataURL == "" {
+			continue
+		}
+		mime := mimeFromDataURL(dataURL)
+		if mime == "" {
+			mime = strings.ToLower(strings.TrimSpace(a.Type))
+		}
+		typ := coreAttachmentType(mime)
+		if typ == "" {
+			typ = coreAttachmentType(a.Type)
+		}
+		if typ == "" {
+			continue
+		}
+		out = append(out, core.Attachment{
+			Type:     typ,
+			MimeType: mime,
+			URL:      dataURL,
+			Filename: a.Name,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func coreAttachmentType(mime string) string {
+	m := strings.ToLower(strings.TrimSpace(mime))
+	switch {
+	case m == core.AttachmentTypeImage || strings.HasPrefix(m, "image/"):
+		return core.AttachmentTypeImage
+	case m == core.AttachmentTypeAudio || strings.HasPrefix(m, "audio/"):
+		return core.AttachmentTypeAudio
+	case m == core.AttachmentTypeVideo || strings.HasPrefix(m, "video/"):
+		return core.AttachmentTypeVideo
+	default:
+		return ""
+	}
+}
+
+func mimeFromDataURL(dataURL string) string {
+	if !strings.HasPrefix(dataURL, "data:") {
+		return ""
+	}
+	comma := strings.IndexByte(dataURL, ',')
+	if comma <= len("data:") {
+		return ""
+	}
+	header := dataURL[len("data:"):comma]
+	if semi := strings.IndexByte(header, ';'); semi >= 0 {
+		header = header[:semi]
+	}
+	return strings.ToLower(strings.TrimSpace(header))
 }
 
 // RegisterResponse 为指定 traceID 注册一个回复等待 channel。

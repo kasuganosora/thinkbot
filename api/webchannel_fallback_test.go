@@ -8,6 +8,7 @@ import (
 	"github.com/kasuganosora/thinkbot/agent/core"
 	"github.com/kasuganosora/thinkbot/agent/stages"
 	"github.com/kasuganosora/thinkbot/dao"
+	"github.com/kasuganosora/thinkbot/llm"
 )
 
 // TestWebChannel_Send_FallbackPersistsWhenNoSubscriber 验证：当没有实时 SSE 订阅者时
@@ -127,5 +128,76 @@ func TestPaginateHistory_IncludesSystemMessages(t *testing.T) {
 	}
 	if len(page.Messages) != 3 {
 		t.Fatalf("expected 3 messages (incl 2 system-owned), got %d", len(page.Messages))
+	}
+}
+
+// TestNormalizeInjectedAttachments_FeedsDirectMultimodalParts 锁定 Web 附件 DTO
+// 到 core.Attachment / llm.ImagePart 的链路，防止图片在 metadata 里静默丢失。
+func TestNormalizeInjectedAttachments_FeedsDirectMultimodalParts(t *testing.T) {
+	const imageURL = "data:image/png;base64,AAAA"
+	const audioURL = "data:audio/mpeg;base64,BBBB"
+	const videoURL = "data:video/mp4;base64,CCCC"
+
+	metadata := map[string]any{
+		"attachments": []ChatAttachment{
+			{Name: "red.png", Type: "image/png", Size: 4, DataUrl: imageURL},
+			{Name: "beep.mp3", Type: "audio/mpeg", Size: 4, DataUrl: audioURL},
+			{Name: "clip.mp4", Type: "video/mp4", Size: 4, DataUrl: videoURL},
+			{Name: "note.txt", Type: "text/plain", Size: 4, DataUrl: "data:text/plain;base64,DDDD"},
+			{Name: "missing.png", Type: "image/png", Size: 0, DataUrl: ""},
+		},
+	}
+	requested, normalized, converted := normalizeInjectedAttachments(metadata)
+	if !converted || requested != 5 || normalized != 3 {
+		t.Fatalf("normalize result = (%d, %d, %v), want (5, 3, true)", requested, normalized, converted)
+	}
+
+	msg := core.Message{Metadata: metadata}
+	if !core.HasMultimodalAttachments(&msg) {
+		t.Fatal("normalized metadata must expose multimodal attachments")
+	}
+	atts := core.GetAttachments(&msg)
+	if len(atts) != 3 {
+		t.Fatalf("core.GetAttachments len = %d, want 3", len(atts))
+	}
+	if atts[0].Type != core.AttachmentTypeImage || atts[0].MimeType != "image/png" || atts[0].URL != imageURL || atts[0].Filename != "red.png" {
+		t.Fatalf("image attachment mismatch: %+v", atts[0])
+	}
+
+	parts := inboundAttachmentsToParts(&msg)
+	if len(parts) != 3 {
+		t.Fatalf("direct multimodal parts len = %d, want 3", len(parts))
+	}
+	imagePart, ok := parts[0].(llm.ImagePart)
+	if !ok || imagePart.Image != imageURL || imagePart.MediaType != "image/png" {
+		t.Fatalf("first part = %#v, want ImagePart with image data URL", parts[0])
+	}
+	audioPart, ok := parts[1].(llm.FilePart)
+	if !ok || audioPart.Data != audioURL || audioPart.MediaType != "audio/mpeg" || audioPart.Filename != "beep.mp3" {
+		t.Fatalf("second part = %#v, want audio FilePart", parts[1])
+	}
+	videoPart, ok := parts[2].(llm.FilePart)
+	if !ok || videoPart.Data != videoURL || videoPart.MediaType != "video/mp4" || videoPart.Filename != "clip.mp4" {
+		t.Fatalf("third part = %#v, want video FilePart", parts[2])
+	}
+}
+
+func TestNormalizeInjectedAttachments_KeepsCoreAttachments(t *testing.T) {
+	const imageURL = "data:image/png;base64,AAAA"
+	original := []core.Attachment{{
+		Type:     core.AttachmentTypeImage,
+		MimeType: "image/png",
+		URL:      imageURL,
+		Filename: "red.png",
+	}}
+	metadata := map[string]any{"attachments": original}
+
+	_, _, converted := normalizeInjectedAttachments(metadata)
+	if converted {
+		t.Fatal("already normalized core attachments must not be converted again")
+	}
+	got, ok := metadata["attachments"].([]core.Attachment)
+	if !ok || len(got) != 1 || got[0].URL != imageURL {
+		t.Fatalf("core attachments changed unexpectedly: %#v", metadata["attachments"])
 	}
 }

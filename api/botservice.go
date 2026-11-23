@@ -2065,6 +2065,17 @@ func (s *BotService) StartBot(ctx context.Context, id string) error {
 		// 主模型不支持多模态时不附加 part —— 改由已装配的 MultimodalStage 转写为文本，避免 400。
 		if mainIsMultimodal(ctx, slot, bundle) {
 			if parts := inboundAttachmentsToParts(&msg); len(parts) > 0 {
+				imageParts := 0
+				for _, p := range parts {
+					if _, ok := p.(llm.ImagePart); ok {
+						imageParts++
+					}
+				}
+				if s.logger != nil {
+					s.logger.Infow("主模型：多模态附件已直送",
+						"trace_id", msg.TraceID, "bot_id", msg.BotID, "channel", msg.Channel,
+						"parts", len(parts), "image_parts", imageParts)
+				}
 				userParts := []llm.MessagePart{llm.TextPart{Text: content}}
 				userParts = append(userParts, parts...)
 				messages = append(messages, llm.Message{Role: llm.MessageRoleUser, Content: userParts})
