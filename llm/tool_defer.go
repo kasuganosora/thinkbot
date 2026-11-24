@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"go.uber.org/zap"
 )
@@ -207,6 +208,21 @@ func (d *ToolDeferral) hasDeferredLocked() bool {
 	return false
 }
 
+// unloadedCount returns how many deferred tools are still hidden behind their
+// name + short description. A no-match reply must not claim a capability is
+// missing while such tools exist: the search may simply have missed them.
+func (d *ToolDeferral) unloadedCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for i := range d.full {
+		if d.full[i].DeferredLoad && !d.loaded[d.full[i].Name] {
+			n++
+		}
+	}
+	return n
+}
+
 // Load marks a deferred tool as loaded and applies the eviction policy.
 func (d *ToolDeferral) Load(name string) {
 	d.mu.Lock()
@@ -241,25 +257,42 @@ const maxToolSearchHits = 8
 func (d *ToolDeferral) Search(query string) []Tool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	q := strings.ToLower(strings.TrimSpace(query))
-	if q == "" {
+	terms := queryTerms(query)
+	if len(terms) == 0 {
 		return nil
 	}
-	var hits []Tool
+	type scoredTool struct {
+		tool  Tool
+		score int
+	}
+	var candidates []scoredTool
 	for i := range d.full {
 		t := d.full[i]
 		if !t.DeferredLoad || d.loaded[t.Name] {
 			continue
 		}
-		if toolMatches(t, q) {
-			hits = append(hits, t)
-			d.loadLocked(t.Name)
-			if len(hits) >= maxToolSearchHits {
-				break
-			}
+		if score := toolMatchScore(t, terms); score > 0 {
+			candidates = append(candidates, scoredTool{tool: t, score: score})
 		}
 	}
-	sort.Slice(hits, func(i, j int) bool { return hits[i].Name < hits[j].Name })
+	// Rank by the number of matched keywords: an exact capability match should
+	// outrank a tool that only happens to contain one generic word from a
+	// multi-word query. Load only the top hits so a broad query does not drag
+	// every deferred schema into the context.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		return candidates[i].tool.Name < candidates[j].tool.Name
+	})
+	hits := make([]Tool, 0, maxToolSearchHits)
+	for _, c := range candidates {
+		hits = append(hits, c.tool)
+		d.loadLocked(c.tool.Name)
+		if len(hits) >= maxToolSearchHits {
+			break
+		}
+	}
 	return hits
 }
 
@@ -296,19 +329,64 @@ func (d *ToolDeferral) matchAvailable(query string) []Tool {
 	return out
 }
 
-func toolMatches(t Tool, q string) bool {
-	if strings.Contains(strings.ToLower(t.Name), q) {
-		return true
+// queryTerms splits a free-form tool_search query into individual keywords.
+// Models routinely send several keywords in one call, e.g. "send file upload
+// attachment". Matching that whole string as one substring can only hit a tool
+// whose name/description contains the exact phrase, so every such query used
+// to be a false negative — the model then concluded the capability did not
+// exist. Split on whitespace and common separators and match terms separately.
+func queryTerms(query string) []string {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
 	}
-	if strings.Contains(strings.ToLower(t.Description), q) {
-		return true
+	raw := strings.FieldsFunc(q, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(",，、/|;；", r)
+	})
+	seen := make(map[string]bool, len(raw))
+	terms := make([]string, 0, len(raw))
+	for _, term := range raw {
+		term = strings.Trim(term, "\"'`.:-")
+		if term == "" || seen[term] {
+			continue
+		}
+		// A single ASCII letter matches almost every tool and dilutes results.
+		if len(term) == 1 && term[0] < 0x80 {
+			continue
+		}
+		seen[term] = true
+		terms = append(terms, term)
 	}
-	for _, k := range t.Keywords {
-		if strings.Contains(strings.ToLower(k), q) {
-			return true
+	return terms
+}
+
+// toolMatchScore counts how many query terms match this tool. A higher score
+// means a more relevant hit, so multi-word queries can be ranked instead of
+// being thrown away.
+func toolMatchScore(t Tool, terms []string) int {
+	if len(terms) == 0 {
+		return 0
+	}
+	name := strings.ToLower(t.Name)
+	desc := strings.ToLower(t.Description)
+	score := 0
+	for _, term := range terms {
+		if strings.Contains(name, term) || strings.Contains(desc, term) {
+			score++
+			continue
+		}
+		for _, k := range t.Keywords {
+			if strings.Contains(strings.ToLower(k), term) {
+				score++
+				break
+			}
 		}
 	}
-	return false
+	return score
+}
+
+func toolMatches(t Tool, q string) bool {
+	return toolMatchScore(t, queryTerms(q)) > 0
 }
 
 // toolAliasTerms 把模型在 tool_search 里常用的自然语言能力词，映射到「已经直接可用」
@@ -520,7 +598,7 @@ func (d *ToolDeferral) searchTool() Tool {
 			// 真正的「无匹配」：列出本轮「实际」可直接调用的工具名，而不是写死
 			// 「exec/read_file 始终可用」——那句话在工具列表里确实没有 exec 时
 			// （2026-09-26：并发轮次覆盖了共享工具列表）会误导模型反复 tool_search。
-			return noMatchReply(query, d.directToolNames()), nil
+			return noMatchReplyWithPending(query, d.directToolNames(), d.unloadedCount()), nil
 		},
 	}
 }
@@ -529,6 +607,15 @@ func (d *ToolDeferral) searchTool() Tool {
 // tools that are actually callable in this run instead of a hardcoded list,
 // and tells the model to report a missing capability plainly.
 func noMatchReply(query string, names []string) string {
+	return noMatchReplyWithPending(query, names, 0)
+}
+
+// noMatchReplyWithPending avoids a misleading "no such capability" verdict
+// while deferred tools are still unloaded. A model that searched with several
+// keywords used to be told to report the capability as missing, even though
+// the tool existed behind a lazy-loaded schema. In that case the reply now
+// points at the hidden tools instead of closing the search prematurely.
+func noMatchReplyWithPending(query string, names []string, pending int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "No tool matches %q. ", query)
 	if len(names) == 0 {
@@ -543,6 +630,12 @@ func noMatchReply(query string, names []string) string {
 			fmt.Fprintf(&b, ", … (+%d more)", len(names)-len(shown))
 		}
 		b.WriteString(". ")
+	}
+	if pending > 0 {
+		fmt.Fprintf(&b, "%d tool(s) are still unloaded: only their names and short descriptions are visible, their full input schemas are not. ", pending)
+		b.WriteString("A capability may exist among them. Retry ONCE with a single narrower keyword (an exact tool name, an operation name, or an English verb), or inspect the unloaded tool schemas through your MCP/server tooling. ")
+		b.WriteString("Do not tell the user the capability does not exist until you have checked those unloaded tools.")
+		return b.String()
 	}
 	b.WriteString("If one of them does what you need, call it by name now. Otherwise do not keep searching: tell the user plainly that no such tool is in your current tool list (do not attribute it to context or quota limits).")
 	return b.String()

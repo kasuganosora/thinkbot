@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -440,5 +441,88 @@ func TestToolDeferral_ViewToolSearchOnlyWhenUnloaded(t *testing.T) {
 		if tt.Name == "tool_search" {
 			t.Error("tool_search should NOT be injected once all deferred tools are loaded")
 		}
+	}
+}
+
+// Multi-keyword queries used to be matched as one literal substring, so a
+// search like "send file upload attachment" always returned no match even when
+// an upload tool was installed. The model then told the user the capability
+// did not exist. Every query below must find the deferred upload tool.
+func TestToolSearch_MultiWordQueryFindsDeferredTool(t *testing.T) {
+	uploadTool := func() Tool {
+		tool := deferTestTool("docs__prepareAttachmentUpload", true)
+		tool.Description = "Get a presigned URL for an attachment upload"
+		tool.Keywords = []string{"upload", "attachment", "上传", "附件"}
+		return tool
+	}
+	queries := []string{
+		"send file upload attachment",
+		"发送 文件 上传 附件",
+		"docs upload file attachment",
+		"上传 附件",
+	}
+	for _, q := range queries {
+		t.Run(q, func(t *testing.T) {
+			d := NewToolDeferral(true)
+			d.SetTools([]Tool{uploadTool(), deferTestTool("noise__calendar", true)})
+			hits := d.Search(q)
+			found := false
+			for _, h := range hits {
+				if h.Name == "docs__prepareAttachmentUpload" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("query %q must find the deferred upload tool, got %+v", q, hits)
+			}
+			if !d.IsLoaded("docs__prepareAttachmentUpload") {
+				t.Fatal("matched deferred tool must be loaded")
+			}
+		})
+	}
+}
+
+// A no-match reply must not instruct the model to declare a capability
+// missing while deferred tools are still hidden.
+func TestToolSearch_NoMatchKeepsDeferredToolsOpen(t *testing.T) {
+	d := NewToolDeferral(true)
+	d.SetTools([]Tool{
+		deferTestTool("exec", false),
+		deferTestTool("docs__prepareAttachmentUpload", true),
+	})
+	out, err := d.searchTool().Execute(&ToolExecContext{}, map[string]any{"query": "zzz-unrelated-capability"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := out.(string)
+	if !strings.Contains(reply, "still unloaded") {
+		t.Fatalf("no-match reply must mention unloaded tools, got %q", reply)
+	}
+	if strings.Contains(reply, "no such tool is in your current tool list") {
+		t.Fatalf("no-match reply must not deny the capability while tools are hidden, got %q", reply)
+	}
+
+	// Once everything is loaded, the old plain verdict is fine again.
+	d.SetStep(0)
+	d.Load("docs__prepareAttachmentUpload")
+	plain := noMatchReplyWithPending("zzz-unrelated-capability", []string{"exec"}, 0)
+	if !strings.Contains(plain, "no such tool is in your current tool list") {
+		t.Fatalf("plain no-match reply changed unexpectedly: %q", plain)
+	}
+}
+
+func TestQueryTerms_SplitsAndDeduplicates(t *testing.T) {
+	got := queryTerms("Send, file / upload 上传、附件 send")
+	want := []string{"send", "file", "upload", "上传", "附件"}
+	if len(got) != len(want) {
+		t.Fatalf("queryTerms = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("queryTerms[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(queryTerms("   ")) != 0 {
+		t.Fatal("blank query must produce no terms")
 	}
 }

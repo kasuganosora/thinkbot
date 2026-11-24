@@ -239,8 +239,15 @@ func TestToolSearch_NoMatchListsActualTools(t *testing.T) {
 			t.Errorf("no-match reply must not claim %q is available: %s", bogus, s)
 		}
 	}
-	if !strings.Contains(s, "no such tool is in your current tool list") {
-		t.Errorf("reply should tell the model to report the gap plainly: %s", s)
+	// A deferred tool is still hidden here. Claiming the capability is missing
+	// would make the model abandon a tool that simply was not found by this
+	// query (observed with multi-keyword searches), so the reply must keep the
+	// deferred surface open and allow exactly one narrower retry.
+	if !strings.Contains(s, "still unloaded") {
+		t.Errorf("no-match reply must mention hidden deferred tools: %s", s)
+	}
+	if strings.Contains(s, "no such tool is in your current tool list") {
+		t.Errorf("reply must not deny a capability while deferred tools are hidden: %s", s)
 	}
 }
 
