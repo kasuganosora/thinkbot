@@ -2218,6 +2218,25 @@ func (s *LLMStage) Process(ctx context.Context, env *core.Envelope) (*core.Envel
 		return env, nil
 	}
 
+	// 完成断言校验：本 Stage 是唯一产出 ActionReply 之处，放在所有清洗/门控
+	// 之后、发送之前，覆盖全部出站路径。默认只告警，不改写用户可见文本——
+	// 先靠真实对话统计误报率，再决定是否收紧为拦截或追加提示。
+	if finding := DetectUnbackedCompletionClaim(replyText, collectToolResults(result)); finding.Level != "" {
+		span.SetAttributes(
+			attribute.Bool("reply.unbacked_completion_claim", true),
+			attribute.String("reply.claim_level", finding.Level),
+		)
+		logger.Warnw("completion claim without tool evidence",
+			"message_id", env.Message.ID,
+			"trace_id", env.Message.TraceID,
+			"level", finding.Level,
+			"claims", finding.Claims,
+			"artifacts", finding.Artifacts,
+			"unsupported", finding.UnsupportedArtifacts,
+			"tool_results", finding.ToolResultCount)
+		env.Set("completion_claim_finding", finding)
+	}
+
 	actionMeta := map[string]any{
 		"source_channel": env.Message.Source,  // ChannelReplyHandler 路由必需
 		"trace_id":       env.Message.TraceID, // WebChannel 路由必需
