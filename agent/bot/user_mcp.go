@@ -47,6 +47,16 @@ func setupUserMCP(b *Bot, params BotParams) {
 	ctx, cancel := context.WithTimeout(context.Background(), mcpStartupBudget)
 	defer cancel()
 	connected := 0
+	statusUpdates := 0
+	// setStatus 只改内存切片，循环结束后统一落盘一次，避免每个条目一次写盘。
+	setStatus := func(i int, status string) {
+		if entries[i].Status == status {
+			return
+		}
+		entries[i].Status = status
+		entries[i].UpdatedAt = mcp.NowRFC3339()
+		statusUpdates++
+	}
 	for i, e := range entries {
 		if ctx.Err() != nil {
 			skipped, changed := markStartupSkipped(entries[i:])
@@ -64,13 +74,36 @@ func setupUserMCP(b *Bot, params BotParams) {
 		if cfg.Name == "" {
 			continue
 		}
-		if err := mgr.UpsertServer(ctx, cfg); err != nil {
-			logger.Warnw("mcp server connect failed at startup",
-				"server", cfg.Name, "err", err)
+
+		// 禁用 / 草稿条目不发起连接。既省启动预算，也避免每次启动刷一条
+		// connect failed WARN；更重要的是不让模型把「配置里还挂着名字」
+		// 误当成这个能力已经可用。
+		if !cfg.Enabled {
+			setStatus(i, mcp.DeriveStatus(e.Enabled, e.ReadyToConnect(), false, nil))
+			logger.Infow("mcp server skipped at startup",
+				"server", cfg.Name, "enabled", e.Enabled, "status", entries[i].Status)
 			continue
 		}
-		if cfg.Enabled && mgr.IsServerConnected(cfg.Name) {
+
+		connectErr := mgr.UpsertServer(ctx, cfg)
+		isConnected := connectErr == nil && mgr.IsServerConnected(cfg.Name)
+		// 启动期连接结果必须回写持久化状态，否则列表会一直显示上一次的
+		// "running"，与 Manager 里「未连接」的真实状态不一致。
+		setStatus(i, mcp.DeriveStatus(e.Enabled, e.ReadyToConnect(), isConnected, connectErr))
+		if connectErr != nil {
+			logger.Warnw("mcp server connect failed at startup",
+				"server", cfg.Name, "status", entries[i].Status, "err", connectErr)
+			continue
+		}
+		if isConnected {
 			connected++
+		}
+	}
+
+	if statusUpdates > 0 {
+		if saveErr := mcp.SaveBotServers(params.ID, entries); saveErr != nil {
+			logger.Warnw("persist mcp startup status failed",
+				"updates", statusUpdates, "err", saveErr)
 		}
 	}
 
@@ -89,7 +122,8 @@ func setupUserMCP(b *Bot, params BotParams) {
 	logger.Infow("user mcp wired",
 		"bot_id", params.ID,
 		"configured", len(entries),
-		"connected", connected)
+		"connected", connected,
+		"status_updates", statusUpdates)
 }
 
 // markStartupSkipped 把预算耗尽后没来得及连接、但状态仍写着 running 的条目改成 error，
