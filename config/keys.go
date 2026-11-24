@@ -280,6 +280,21 @@ const (
 	// KeyLLMRetryJitter 重试退避是否加入随机抖动（避免惊群）。默认 true。
 	KeyLLMRetryJitter = "llm.retry_jitter"
 
+	// KeyLLMRateLimitCooldownMS 遇到 429 后进程级冷却窗口的初始等待毫秒。
+	// 默认 8000（8 秒）。仅当上游未给出 Retry-After 时才有实际效果：服务端
+	// 建议值更大时以服务端为准。短时间内连续 429 按 2 倍递增，上限见
+	// KeyLLMRateLimitMaxCooldownMS。修改后需重启 bot 生效。
+	KeyLLMRateLimitCooldownMS = "llm.ratelimit_cooldown_ms"
+
+	// KeyLLMRateLimitMaxCooldownMS 进程级冷却窗口的上限毫秒，默认 60000（60 秒）。
+	// 同时作为自适应退避的衰减窗口基准：闲置超过 2 倍该值后回落到初始冷却。
+	KeyLLMRateLimitMaxCooldownMS = "llm.ratelimit_max_cooldown_ms"
+
+	// KeyLLMMinRequestIntervalMS 两次 LLM 请求发起之间的最小间隔毫秒，用于削掉
+	// 并发尖峰。默认 150；设为 0 关闭。只约束「起跑」，不持有流式连接的整个
+	// 生命周期，因此长任务不会饿死其它请求。修改后需重启 bot 生效。
+	KeyLLMMinRequestIntervalMS = "llm.min_request_interval_ms"
+
 	// KeyInternalReasoningPrefix 内部 LLM 调用 reasoning_effort 配置前缀：
 	// llm.internal_reasoning.default（默认 auto）与 llm.internal_reasoning.<purpose>（留空继承）。
 	KeyInternalReasoningPrefix = "llm.internal_reasoning."

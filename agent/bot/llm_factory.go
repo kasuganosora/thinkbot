@@ -2,6 +2,7 @@ package bot
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -24,6 +25,12 @@ import (
 // GLM/智谱经常在高负载时返回 429（访问量过大），若不重试会直接中断对话/工作流。
 // 退避策略为指数退避 + 解析 Retry-After 头。
 func buildRetryConfig(cfg config.LLMClientConfig) retry.Config {
+	// 进程级冷却/起跑间隔按集中配置设定（幂等，不重置正在生效的冷却）。
+	retry.ConfigureGlobalRateLimitGate(
+		time.Duration(cfg.RateLimitCooldownMS)*time.Millisecond,
+		time.Duration(cfg.RateLimitMaxCooldownMS)*time.Millisecond,
+		time.Duration(cfg.MinRequestIntervalMS)*time.Millisecond,
+	)
 	return retry.Config{
 		MaxRetries: cfg.MaxRetries,
 		Backoff: &retry.Backoff{
@@ -33,8 +40,13 @@ func buildRetryConfig(cfg config.LLMClientConfig) retry.Config {
 			Max:      time.Duration(cfg.RetryMaxMS) * time.Millisecond,
 			Jitter:   cfg.RetryJitter,
 		},
-		ShouldRetry:   retry.HTTPShouldRetry,
-		GetRetryDelay: retry.HTTPGetRetryDelay,
+		ShouldRetry: retry.HTTPShouldRetry,
+		GetRetryDelay: func(err error) time.Duration {
+			// 非流式路径的 429 可能是 *HTTPStatusError，也可能是携带状态码的
+			// errs.Error；两者都要登记冷却，否则重试仍是 2s 起步的密集撞墙。
+			rateLimited := retry.IsRateLimitError(err) || errs.GetCode(err) == http.StatusTooManyRequests
+			return retry.AdaptiveRetryDelay(retry.HTTPGetRetryDelay(err), rateLimited)
+		},
 	}
 }
 
@@ -52,7 +64,10 @@ func CreateProvider(def config.ModelDef, llmCfg config.LLMClientConfig) (llm.Pro
 	retryCfg := buildRetryConfig(llmCfg)
 	switch def.Provider {
 	case "openai", "bigmodel":
-		opts := []openai.Option{openai.WithAPIKey(def.APIKey)}
+		opts := []openai.Option{
+			openai.WithAPIKey(def.APIKey),
+			openai.WithRateLimitGate(),
+		}
 		if def.BaseURL != "" {
 			opts = append(opts, openai.WithBaseURL(def.BaseURL))
 		}

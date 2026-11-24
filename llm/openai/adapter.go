@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kasuganosora/thinkbot/llm"
+	"github.com/kasuganosora/thinkbot/util/retry"
 	"github.com/kasuganosora/thinkbot/util/traceid"
 )
 
@@ -23,6 +24,11 @@ func (c *Client) Name() string { return "openai" }
 func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*llm.GenerateResult, error) {
 	if params.Model == nil {
 		return nil, fmt.Errorf("openai: model is required")
+	}
+	if c.rateLimitGate {
+		if err := retry.GlobalRateLimitGate().BeforeRequest(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	if c.chatMode {
@@ -50,6 +56,11 @@ func (c *Client) DoGenerate(ctx context.Context, params llm.GenerateParams) (*ll
 func (c *Client) DoStream(ctx context.Context, params llm.GenerateParams) (*llm.StreamResult, error) {
 	if params.Model == nil {
 		return nil, fmt.Errorf("openai: model is required")
+	}
+	if c.rateLimitGate {
+		if err := retry.GlobalRateLimitGate().BeforeRequest(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	if c.chatMode {

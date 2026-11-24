@@ -160,6 +160,17 @@ func StreamGetRetryDelay(err error) time.Duration {
 	return 0
 }
 
+// IsRateLimitedStreamError 报告流式连接错误是否为瞬时限流（429）。
+//
+// 只按 HTTP 状态码判断，不读 body：配额耗尽（额度用尽）另有 IsQuotaExhausted
+// 负责，且那条路径本来就不该重试。供 retry.AdaptiveRetryDelay 判定是否
+// 需要拉长进程级冷却窗口；不改动 StreamGetRetryDelay 的语义（它还被
+// QuotaResetAt 用来解析服务端明确告知的重置时刻）。
+func IsRateLimitedStreamError(err error) bool {
+	var httpErr *StreamHTTPError
+	return errors.As(err, &httpErr) && httpErr != nil && httpErr.StatusCode == 429
+}
+
 // ============================================================================
 // 配额耗尽识别 —— 429 的两种语义
 // ============================================================================

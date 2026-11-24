@@ -29,6 +29,11 @@ type Client struct {
 	// doStreamChat/doStream 显式透传到 ChatStreamConfig.RetryConfig，
 	// 以便对连接建立阶段的 429/5xx 重试（首字节前重试整条流是安全的）。
 	retryCfg *retry.Config
+
+	// rateLimitGate 是否接入进程级限流协调器（由生产链路的 buildRetryConfig
+	// 通过 WithRateLimitGate 打开）。测试里手构造的 Client 不打开，避免把
+	// 全局冷却带进毫秒级的重试用例。
+	rateLimitGate bool
 }
 
 // Option 配置 Client。
@@ -49,6 +54,7 @@ type config struct {
 	chatPath        string
 	responsesPath   string
 	tokenParamStyle TokenParamStyle
+	rateLimitGate   bool
 }
 
 // WithAPIKey 设置 API Key。
@@ -132,6 +138,14 @@ func WithChatPath(path string) Option {
 	return func(c *config) { c.chatPath = path }
 }
 
+// WithRateLimitGate 接入进程级限流协调器：流式 429 的重试延迟会与全局
+// 冷却窗口取较大值，请求发起前也会等待冷却/起跑间隔。
+// 仅由生产链路（agent/bot.buildRetryConfig）开启，默认关闭以保持
+// 手构造 Client 的测试行为不变。
+func WithRateLimitGate() Option {
+	return func(c *config) { c.rateLimitGate = true }
+}
+
 // New 创建一个新的 OpenAI API Client。
 func New(opts ...Option) *Client {
 	cfg := &config{
@@ -195,6 +209,7 @@ func New(opts ...Option) *Client {
 		responsesPath:   cfg.responsesPath,
 		tokenParamStyle: cfg.tokenParamStyle,
 		retryCfg:        cfg.retryCfg,
+		rateLimitGate:   cfg.rateLimitGate,
 	}
 }
 
@@ -216,7 +231,18 @@ func (c *Client) streamRetryConfig() *retry.Config {
 	}
 	cfg := *c.retryCfg // copy
 	cfg.ShouldRetry = httputil.StreamShouldRetry
-	cfg.GetRetryDelay = httputil.StreamGetRetryDelay
+	if c.rateLimitGate {
+		// 上游 429 常不带 Retry-After；此时 StreamGetRetryDelay 返回 0，
+		// 让进程级冷却窗口补上，避免所有会话在 2s 后一起重试再撞限流。
+		cfg.GetRetryDelay = func(err error) time.Duration {
+			return retry.AdaptiveRetryDelay(
+				httputil.StreamGetRetryDelay(err),
+				httputil.IsRateLimitedStreamError(err),
+			)
+		}
+	} else {
+		cfg.GetRetryDelay = httputil.StreamGetRetryDelay
+	}
 	return &cfg
 }
 

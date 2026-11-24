@@ -1492,18 +1492,30 @@ type LLMClientConfig struct {
 
 	// RetryJitter 退避是否加随机抖动（避免惊群）。
 	RetryJitter bool
+
+	// RateLimitCooldownMS 遇到 429（且上游未给 Retry-After）时进程级冷却的初始毫秒。
+	RateLimitCooldownMS int
+
+	// RateLimitMaxCooldownMS 进程级冷却的上限毫秒，同时是衰减窗口基准。
+	RateLimitMaxCooldownMS int
+
+	// MinRequestIntervalMS 两次 LLM 请求发起之间的最小间隔毫秒（削峰），0 = 关闭。
+	MinRequestIntervalMS int
 }
 
 // DefaultLLMClientConfig 返回 LLM 客户端可靠性的默认配置值（对齐生产现状：20min 超时 / 4 重试 / 指数退避）。
 // 这是集中后的唯一来源；llm_factory.go 不再写死常量，二者应保持同步。
 func DefaultLLMClientConfig() LLMClientConfig {
 	return LLMClientConfig{
-		ClientTimeoutSeconds: 1200, // 20 分钟。非流式长生成必须给足。
-		MaxRetries:           4,
-		RetryInitialMS:       2000, // 2s
-		RetryFactor:          2.0,
-		RetryMaxMS:           30000, // 30s
-		RetryJitter:          true,
+		ClientTimeoutSeconds:   1200, // 20 分钟。非流式长生成必须给足。
+		MaxRetries:             4,
+		RetryInitialMS:         2000, // 2s
+		RetryFactor:            2.0,
+		RetryMaxMS:             30000, // 30s
+		RetryJitter:            true,
+		RateLimitCooldownMS:    8000,  // 8s：429 且无 Retry-After 时的兜底冷却
+		RateLimitMaxCooldownMS: 60000, // 60s
+		MinRequestIntervalMS:   150,   // 请求起跑最小间隔，削掉并发尖峰
 	}
 }
 
@@ -1511,12 +1523,15 @@ func DefaultLLMClientConfig() LLMClientConfig {
 func (b *Builder) GetLLMClientConfig() LLMClientConfig {
 	d := DefaultLLMClientConfig()
 	return LLMClientConfig{
-		ClientTimeoutSeconds: b.store.GetInt(KeyLLMClientTimeoutSeconds, d.ClientTimeoutSeconds),
-		MaxRetries:           b.store.GetInt(KeyLLMMaxRetries, d.MaxRetries),
-		RetryInitialMS:       b.store.GetInt(KeyLLMRetryInitialMS, d.RetryInitialMS),
-		RetryFactor:          b.store.GetFloat64(KeyLLMRetryFactor, d.RetryFactor),
-		RetryMaxMS:           b.store.GetInt(KeyLLMRetryMaxMS, d.RetryMaxMS),
-		RetryJitter:          b.store.GetBool(KeyLLMRetryJitter, d.RetryJitter),
+		ClientTimeoutSeconds:   b.store.GetInt(KeyLLMClientTimeoutSeconds, d.ClientTimeoutSeconds),
+		MaxRetries:             b.store.GetInt(KeyLLMMaxRetries, d.MaxRetries),
+		RetryInitialMS:         b.store.GetInt(KeyLLMRetryInitialMS, d.RetryInitialMS),
+		RetryFactor:            b.store.GetFloat64(KeyLLMRetryFactor, d.RetryFactor),
+		RetryMaxMS:             b.store.GetInt(KeyLLMRetryMaxMS, d.RetryMaxMS),
+		RetryJitter:            b.store.GetBool(KeyLLMRetryJitter, d.RetryJitter),
+		RateLimitCooldownMS:    b.store.GetInt(KeyLLMRateLimitCooldownMS, d.RateLimitCooldownMS),
+		RateLimitMaxCooldownMS: b.store.GetInt(KeyLLMRateLimitMaxCooldownMS, d.RateLimitMaxCooldownMS),
+		MinRequestIntervalMS:   b.store.GetInt(KeyLLMMinRequestIntervalMS, d.MinRequestIntervalMS),
 	}
 }
 
@@ -1529,6 +1544,9 @@ func LLMClientMetaSpecs() []MetaSpec {
 		{Key: KeyLLMRetryFactor, Category: "LLM", Description: "重试指数退避倍增因子（默认 2.0）。修改后需重启 bot 生效。"},
 		{Key: KeyLLMRetryMaxMS, Category: "LLM", Description: "重试指数退避最大等待毫秒（默认 30000=30 秒）。修改后需重启 bot 生效。"},
 		{Key: KeyLLMRetryJitter, Category: "LLM", Description: "重试退避是否加随机抖动以避免惊群（默认 true）。修改后需重启 bot 生效。"},
+		{Key: KeyLLMRateLimitCooldownMS, Category: "LLM", Description: "遇到 429 且上游未返回 Retry-After 时，进程级冷却窗口的初始等待毫秒（默认 8000=8 秒）。短时间内连续 429 按 2 倍递增，直到上限。所有会话共享该冷却，避免一起重试再撞限流；服务端 Retry-After 更大时以服务端为准。修改后需重启 bot 生效。"},
+		{Key: KeyLLMRateLimitMaxCooldownMS, Category: "LLM", Description: "429 进程级冷却窗口的上限毫秒（默认 60000=60 秒），同时决定闲置多久后衰减回初始值。修改后需重启 bot 生效。"},
+		{Key: KeyLLMMinRequestIntervalMS, Category: "LLM", Description: "两次 LLM 请求发起之间的最小间隔毫秒（默认 150），用于削掉并发尖峰；设为 0 关闭。只约束起跑时刻，不占用流式连接整个生命周期。修改后需重启 bot 生效。"},
 	}
 }
 
@@ -2137,12 +2155,15 @@ func DefaultMap() map[string]string {
 		KeyMemoryWindowMaxMemoryTokens:   "4096",
 		KeyMemoryWindowCompressThreshold: "0.8",
 		// LLM 客户端可靠性
-		KeyLLMClientTimeoutSeconds: "1200",
-		KeyLLMMaxRetries:           "4",
-		KeyLLMRetryInitialMS:       "2000",
-		KeyLLMRetryFactor:          "2.0",
-		KeyLLMRetryMaxMS:           "30000",
-		KeyLLMRetryJitter:          "true",
+		KeyLLMClientTimeoutSeconds:   "1200",
+		KeyLLMMaxRetries:             "4",
+		KeyLLMRetryInitialMS:         "2000",
+		KeyLLMRetryFactor:            "2.0",
+		KeyLLMRetryMaxMS:             "30000",
+		KeyLLMRetryJitter:            "true",
+		KeyLLMRateLimitCooldownMS:    "8000",
+		KeyLLMRateLimitMaxCooldownMS: "60000",
+		KeyLLMMinRequestIntervalMS:   "150",
 		// Compaction 会话压缩
 		KeyCompactionMaxTokens:            "0",
 		KeyCompactionReservedTokens:       "0",
